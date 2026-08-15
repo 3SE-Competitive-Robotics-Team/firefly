@@ -1,0 +1,24 @@
+[package]
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ['lbfgs', 'optimization', 'line-search']
+categories = ['robotics', 'science', 'algorithms', 'mathematics', 'simulation', 'embedded']
+name = "firefly-optimize"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fastrace = { workspace = true }
+firefly-error = { workspace = true }
+log = { workspace = true }
+logcall = { workspace = true }
+nalgebra = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+firefly-observability = { workspace = true }

@@ -1,0 +1,16 @@
+[package]
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ['error-handling', 'error', 'kind', 'status']
+categories = ['robotics', 'science', 'algorithms', 'mathematics', 'simulation', 'embedded']
+name = "firefly-error"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

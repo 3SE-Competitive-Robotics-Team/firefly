@@ -1,0 +1,19 @@
+[package]
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ['logging', 'tracing', 'telemetry']
+categories = ['robotics', 'science', 'algorithms', 'mathematics', 'simulation', 'embedded']
+name = "firefly-observability"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fastrace = { workspace = true, features = ["enable"] }
+log = { workspace = true }
+logforth = { workspace = true, features = ["starter-log", "append-fastrace", "diagnostic-fastrace"] }
+
+[lints]
+workspace = true

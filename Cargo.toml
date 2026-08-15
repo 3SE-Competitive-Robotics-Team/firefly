@@ -1,0 +1,41 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.dependencies]
+fastrace = { version = "0.7", default-features = false }
+log = "0.4"
+logcall = "0.2"
+logforth = { version = "0.30", default-features = false }
+nalgebra = "0.35"
+firefly-cost = { path = "crates/firefly-cost" }
+firefly-error = { path = "crates/firefly-error" }
+firefly-map = { path = "crates/firefly-map" }
+firefly-observability = { path = "crates/firefly-observability" }
+firefly-optimize = { path = "crates/firefly-optimize" }
+firefly-planner = { path = "crates/firefly-planner" }
+firefly-search = { path = "crates/firefly-search" }
+firefly-trajectory = { path = "crates/firefly-trajectory" }
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.91"
+description = "EGO 规划器 Rust 实现：MINCO 后端 + Rebound 主循环 + 集群避碰"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/3SE-Competitive-Robotics-Team/firefly"
+readme = "README.md"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = 1 }
+pedantic = { level = "deny", priority = 1 }
+cargo = { level = "warn", priority = 1 }
+# 数值代码中的受控索引转换（索引 ≤ 6、维度检查后的体素索引等），覆盖组默认
+cast_possible_truncation = { level = "allow", priority = 2 }
+cast_possible_wrap = { level = "allow", priority = 2 }
+cast_precision_loss = { level = "allow", priority = 2 }
+cast_sign_loss = { level = "allow", priority = 2 }
+# 上游传递依赖版本分叉（syn/glam/bitflags），非本仓库可控
+multiple_crate_versions = { level = "allow", priority = 2 }

@@ -1,0 +1,29 @@
+[package]
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ['motion-planning', 'trajectory', 'uav', 'swarm']
+categories = ['robotics', 'science', 'algorithms', 'mathematics', 'simulation', 'embedded']
+name = "firefly-planner"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fastrace = { workspace = true, features = ["enable"] }
+firefly-cost = { workspace = true }
+firefly-error = { workspace = true }
+firefly-map = { workspace = true }
+firefly-optimize = { workspace = true }
+firefly-search = { workspace = true }
+firefly-trajectory = { workspace = true }
+log = { workspace = true }
+logcall = { workspace = true }
+nalgebra = { workspace = true }
+
+[dev-dependencies]
+firefly-observability = { workspace = true }
+
+[lints]
+workspace = true
