@@ -1,0 +1,14 @@
+//! EGO 规划编排（应用层）。
+//!
+//! 组合领域能力：A* 前端（firefly-search）→ MINCO 后端
+//! （firefly-trajectory）→ L-BFGS 优化（firefly-optimize），
+//! 环境来自 firefly-map。配置参数取自论文 Table S6。
+
+mod config;
+pub mod init;
+pub mod objective;
+mod obstacles;
+mod planner;
+
+pub use config::PlannerConfig;
+pub use planner::{FormationSpec, PlanResult, Planner, State};

@@ -1,0 +1,22 @@
+[package]
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ['trajectory', 'penalty', 'optimization', 'cost']
+categories = ['robotics', 'science', 'algorithms', 'mathematics', 'simulation', 'embedded']
+name = "firefly-cost"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fastrace = { workspace = true }
+firefly-error = { workspace = true }
+firefly-map = { workspace = true }
+firefly-trajectory = { workspace = true }
+log = { workspace = true }
+nalgebra = { workspace = true }
+
+[lints]
+workspace = true

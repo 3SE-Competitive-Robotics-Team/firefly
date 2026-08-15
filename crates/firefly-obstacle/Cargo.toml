@@ -1,0 +1,28 @@
+[package]
+name = "firefly-obstacle"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ["obstacle", "prediction", "robotics"]
+categories = ["robotics", "simulation"]
+
+[dependencies]
+fastrace = { workspace = true }
+firefly-error = { workspace = true }
+firefly-trajectory = { workspace = true }
+log = { workspace = true }
+logcall = { workspace = true }
+nalgebra = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+firefly-cost = { workspace = true }
+firefly-map = { workspace = true }
+firefly-observability = { workspace = true }
+firefly-planner = { workspace = true }

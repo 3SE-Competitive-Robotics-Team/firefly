@@ -1,0 +1,22 @@
+[package]
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ['astar', 'pathfinding', 'grid', 'robotics']
+categories = ['robotics', 'science', 'algorithms', 'mathematics', 'simulation', 'embedded']
+name = "firefly-search"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fastrace = { workspace = true }
+firefly-error = { workspace = true }
+firefly-map = { workspace = true }
+log = { workspace = true }
+logcall = { workspace = true }
+nalgebra = { workspace = true }
+
+[lints]
+workspace = true
