@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "apps/*"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -8,6 +8,8 @@ log = "0.4"
 logcall = "0.2"
 logforth = { version = "0.30", default-features = false }
 nalgebra = "0.35"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 firefly-cost = { path = "crates/firefly-cost" }
 firefly-error = { path = "crates/firefly-error" }
 firefly-map = { path = "crates/firefly-map" }
@@ -16,6 +18,7 @@ firefly-optimize = { path = "crates/firefly-optimize" }
 firefly-planner = { path = "crates/firefly-planner" }
 firefly-search = { path = "crates/firefly-search" }
 firefly-trajectory = { path = "crates/firefly-trajectory" }
+firefly-viewer = { path = "crates/firefly-viewer" }
 
 [workspace.package]
 edition = "2024"

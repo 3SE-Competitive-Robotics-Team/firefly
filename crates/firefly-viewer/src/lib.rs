@@ -113,6 +113,17 @@ impl Viewer {
             .map_err(viewer_err)
     }
 
+    /// 无人机当前位置 → 3D 点。
+    ///
+    /// # Errors
+    ///
+    /// `Internal`：rerun 记录失败。
+    pub fn log_position(&self, entity: &str, position: [f64; 3]) -> Result<()> {
+        self.rec
+            .log(entity, &rerun::Points3D::new([position]))
+            .map_err(viewer_err)
+    }
+
     /// 障碍平面（{s, v}）→ 法线向量。
     ///
     /// # Errors
