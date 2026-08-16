@@ -28,7 +28,7 @@ fn plan_avoids_wall() {
     // 核心不变式：轨迹安全 + 绕墙 + 可行（由下方断言验证）
 
     let traj = &result.trajectory;
-    assert_eq!(traj.pieces(), planner.config().trajectory_pieces);
+    assert!(traj.pieces() >= 5 && traj.pieces() <= 24, "pieces 自适应");
 
     // 1. 边界条件
     let s0 = traj.eval(0.0);

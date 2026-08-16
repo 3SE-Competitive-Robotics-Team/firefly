@@ -533,11 +533,13 @@ fn main() {
         Ok(mut demo) => {
             if let Err(e) = demo.run() {
                 log::error!("demo 失败：{e}");
+                firefly_observability::flush();
                 std::process::exit(1);
             }
         }
         Err(e) => {
             eprintln!("初始化失败：{e}");
+            firefly_observability::flush();
             std::process::exit(1);
         }
     }

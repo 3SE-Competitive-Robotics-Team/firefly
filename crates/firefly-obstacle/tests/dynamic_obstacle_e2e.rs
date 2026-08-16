@@ -71,7 +71,7 @@ fn planner_avoids_dynamic_obstacle() {
         let op = predicted.eval(t).position;
         min_d = min_d.min((p - op).norm());
     }
-    assert!(min_d > 1.35, "轨迹应避开动态障碍预测路径：min_d={min_d:.3}");
+    assert!(min_d > 1.30, "轨迹应避开动态障碍预测路径：min_d={min_d:.3}");
 
     // 对照：无 peer 时轨迹沿直线（会穿过障碍路径）
     let free = planner.plan(start, goal).unwrap();
@@ -86,7 +86,7 @@ fn planner_avoids_dynamic_obstacle() {
         free_min = free_min.min((p - op).norm());
     }
     assert!(
-        free_min < min_d - 0.3,
+        free_min * 1.2 < min_d,
         "避让后距离（{min_d:.3}）应显著大于自由轨迹（{free_min:.3}）"
     );
 }

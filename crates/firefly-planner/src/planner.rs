@@ -20,7 +20,7 @@ use nalgebra::{Point3, Vector3};
 use crate::config::PlannerConfig;
 use crate::init::{self, InitConfig};
 use crate::objective::MincoObjective;
-use crate::obstacles::ObstacleScanner;
+use crate::obstacles::{Hit, ObstacleScanner};
 
 #[derive(Debug, Clone, Copy)]
 pub struct State {
@@ -133,8 +133,9 @@ impl Planner {
             local_goal,
         )?;
 
+        let pieces = init::pieces_for_guide(&guide, self.config.piece_length);
         let init_config = InitConfig {
-            trajectory_pieces: self.config.trajectory_pieces,
+            pieces,
             max_velocity: self.config.max_velocity,
         };
         let minco = init::init_from_path(
@@ -166,12 +167,13 @@ impl Planner {
     ) -> Result<PlanResult> {
         let scanner =
             ObstacleScanner::new(&self.map).with_samples(self.config.constraint_points_per_piece);
-        let n_points =
-            self.config.trajectory_pieces * (self.config.constraint_points_per_piece + 1);
+        let n_points = minco.pieces() * (self.config.constraint_points_per_piece + 1);
         let mut planes_by_point: Vec<Vec<Plane>> = vec![Vec::new(); n_points];
 
         let mut prev_formation_dev = f64::MAX;
-        for iteration in 0..16 {
+        let mut obs_weight = self.config.weight_obstacle;
+        let mut prev_hits = usize::MAX;
+        for iteration in 0..24 {
             let _span =
                 fastrace::local::LocalSpan::enter_with_local_parent(format!("rebound-{iteration}"));
             let traj = minco.solve()?;
@@ -218,13 +220,16 @@ impl Planner {
                 log::warn!(
                     "stuck check: safe=false, traj x[{xmin:.1},{xmax:.1}] y[{ymin:.1},{ymax:.1}] z[{zmin:.1},{zmax:.1}]"
                 );
-                // 轨迹仍被占据但无新障碍信息（被已有平面覆盖）：继续迭代无意义。
-                // 注意：地图已安全（safe）时是集群避碰在推进，不能提前退出。
-                return Err(Error::temporary(
-                    ErrorKind::Convergence,
-                    "planner stuck: trajectory unsafe with no new obstacle information",
-                )
-                .with_context("iteration", iteration));
+                // 轨迹仍被占据但无新障碍信息：已有平面未覆盖的切向穿入，
+                // 强制对所有穿入点重建平面（绕过覆盖检查），继续迭代。
+                Self::force_planes_for_stuck(
+                    &self.map,
+                    &scanner,
+                    &traj,
+                    guide,
+                    &mut planes_by_point,
+                );
+                continue;
             }
             log::debug!(
                 "rebound {iteration}: planes={} new_hits={} formation_dev={:.3}",
@@ -232,25 +237,27 @@ impl Planner {
                 hits.len(),
                 self.formation_deviation(&traj)
             );
-            for hit in &hits {
-                let plane =
-                    ObstacleScanner::build_plane(&self.map, hit.sample.position, hit.guide_point);
-                let point = &mut planes_by_point[hit.point_index];
-                if point.iter().all(|p| {
-                    (p.point() - plane.point()).norm() >= 0.1
-                        || p.normal().dot(&plane.normal()) <= 0.99
-                }) {
-                    point.push(plane);
-                }
-            }
+            debug_hits(&hits, &planes_by_point);
+            Self::add_hit_planes(&self.map, &hits, &mut planes_by_point);
 
-            let mut objective =
-                self.build_objective(start_endpoint, local_goal, &planes_by_point, peers);
-            let x0 = self.pack(&minco);
+            // 碰撞不减少时升级障碍权重（官方 wei_obs_mod 语义），方向转向推离障碍
+            if hits.len() >= prev_hits {
+                obs_weight = (obs_weight * 3.0).min(self.config.weight_obstacle * 100.0);
+            }
+            prev_hits = hits.len();
+            let mut objective = self.build_objective(
+                start_endpoint,
+                local_goal,
+                &planes_by_point,
+                peers,
+                minco.pieces(),
+                obs_weight,
+            );
+            let x0 = Self::pack(&minco);
             // 论文 v1 Alg.2 OneStepOptimize 精神：目标每轮随新障碍变化，
             // 每轮只跑少量迭代就重新检查，避免在动态目标上过度优化。
             // 队形引导是稳定目标（每轮不变），一次优化到位。
-            let iterations = if self.formation.is_some() { 300 } else { 40 };
+            let iterations = if self.formation.is_some() { 300 } else { 120 };
             let config = LbfgsConfig {
                 max_iterations: iterations,
                 ..LbfgsConfig::default()
@@ -398,6 +405,8 @@ impl Planner {
         goal: Point3<f64>,
         planes_by_point: &[Vec<Plane>],
         peers: &[firefly_cost::Peer],
+        pieces: usize,
+        weight_obstacle: f64,
     ) -> MincoObjective {
         let end = Endpoint {
             position: goal.coords,
@@ -417,7 +426,7 @@ impl Planner {
                 .with_samples(20),
             )
             .add(
-                self.config.weight_obstacle,
+                weight_obstacle,
                 ObstaclePenalty::new(
                     self.config.obstacle_clearance,
                     self.config.constraint_points_per_piece,
@@ -449,11 +458,11 @@ impl Planner {
                 .with_samples(self.config.constraint_points_per_piece),
             );
         }
-        MincoObjective::new(start, end, self.config.trajectory_pieces, cost)
+        MincoObjective::new(start, end, pieces, cost)
     }
 
-    fn pack(&self, minco: &Minco) -> nalgebra::DVector<f64> {
-        let pieces = self.config.trajectory_pieces;
+    fn pack(minco: &Minco) -> nalgebra::DVector<f64> {
+        let pieces = minco.pieces();
         let mut x = nalgebra::DVector::zeros(3 * (pieces - 1) + pieces);
         for (i, w) in minco.waypoints().enumerate() {
             x[i * 3] = w.x;
@@ -464,6 +473,38 @@ impl Planner {
             x[3 * (pieces - 1) + i] = minco.piece_duration(i).ln();
         }
         x
+    }
+
+    /// 为穿入点添加平面（跳过与已有平面几乎重合的重复项）。
+    fn add_hit_planes(map: &GridMap, hits: &[Hit], planes_by_point: &mut [Vec<Plane>]) {
+        for hit in hits {
+            let plane = ObstacleScanner::build_plane(map, hit.sample.position, hit.guide_point);
+            let point = &mut planes_by_point[hit.point_index];
+            if point.iter().all(|p| {
+                (p.point() - plane.point()).norm() >= 0.1 || p.normal().dot(&plane.normal()) <= 0.99
+            }) {
+                point.push(plane);
+            }
+        }
+    }
+
+    /// stuck 恢复：对轨迹全部穿入点强制重建平面（已有平面未覆盖的切向穿入）。
+    fn force_planes_for_stuck(
+        map: &GridMap,
+        scanner: &ObstacleScanner,
+        traj: &Trajectory,
+        guide: &[Vector3<f64>],
+        planes_by_point: &mut [Vec<Plane>],
+    ) {
+        let all = scanner.scan_collisions(traj, guide);
+        log::debug!("stuck: 强制重建 {} 个穿入点平面", all.len());
+        for hit in &all {
+            planes_by_point[hit.point_index].push(ObstacleScanner::build_plane(
+                map,
+                hit.sample.position,
+                hit.guide_point,
+            ));
+        }
     }
 
     fn pick_local_goal(&self, start: Vector3<f64>, goal: Vector3<f64>) -> Vector3<f64> {
@@ -495,6 +536,19 @@ fn segment_abs_time(traj: &Trajectory, piece: usize, duration: f64, tau: f64) ->
         t += traj.durations()[l];
     }
     t + tau * duration
+}
+
+/// 打印前几个穿入点的位置与已有平面数（调试）。
+fn debug_hits(hits: &[Hit], planes_by_point: &[Vec<Plane>]) {
+    for hit in hits.iter().take(3) {
+        let p = hit.sample.position;
+        let (px, py, pz) = (p.x, p.y, p.z);
+        log::debug!(
+            "  hit ({px:.2},{py:.2},{pz:.2}) idx={} planes={}",
+            hit.point_index,
+            planes_by_point[hit.point_index].len()
+        );
+    }
 }
 
 #[cfg(test)]

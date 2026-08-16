@@ -123,33 +123,21 @@ fn tree(cx: f64, cy: f64) -> [Obstacle; 2] {
     ]
 }
 
-/// 森林（树木错落分布，树冠间距 2m 形成蜿蜒通道）+ 四个横向穿行的动态障碍。
+/// 森林：连续墙 + 随机树 + 10 个靠中间往返的动态障碍。
 fn forest_dyn() -> Scene {
-    // 交替双树列：奇数列 y=1.5/4.5，偶数列 y=3.5/6.5——
-    // 每列都覆盖 y=4 直线（树冠 r=0.8），列内 1.4m 缝左右交替，强制 S 型绕行
-    const SPOTS: &[[f64; 2]] = &[
-        [2.5, 1.5],
-        [2.5, 4.5],
-        [5.0, 3.5],
-        [5.0, 6.5],
-        [7.5, 1.5],
-        [7.5, 4.5],
-        [10.0, 3.5],
-        [10.0, 6.5],
-        [12.5, 1.5],
-        [12.5, 4.5],
-        [15.0, 3.5],
-        [15.0, 6.5],
-        [17.5, 1.5],
-        [17.5, 4.5],
-        [20.0, 3.5],
-        [20.0, 6.5],
-        [22.5, 1.5],
-        [22.5, 4.5],
-        [25.0, 3.5],
-        [25.0, 6.5],
+    // 连续墙：地面到顶全挡（厚 0.3m，高 3m）。
+    // 中间墙挡 y=4 直线（缝两侧），两侧墙挡上下（缝中间），交替成 S 型。
+    const WALLS: &[[f64; 3]] = &[
+        // [x, 墙段中心, 墙段长]
+        [4.0, 4.0, 3.0],   // 挡中间：缝 y<2.5 或 y>5.5
+        [9.0, 1.25, 2.5],  // 挡下侧：缝 y>2.5
+        [9.0, 6.75, 2.5],  // 挡上侧：缝 y<5.5
+        [14.0, 4.0, 3.0],  // 挡中间
+        [19.0, 1.25, 2.5], // 挡下侧
+        [19.0, 6.75, 2.5], // 挡上侧
+        [24.0, 4.0, 3.0],  // 挡中间
     ];
-    // 地面草丛：树间空地散布（装饰层，飞机从上方飞过）
+    // 地面草丛（装饰层）
     const BUSHES: &[[f64; 2]] = &[
         [2.0, 3.0],
         [4.0, 2.0],
@@ -168,18 +156,56 @@ fn forest_dyn() -> Scene {
     ];
     let mut s = base();
     let mut obstacles = Vec::new();
-    for [x, y] in SPOTS {
-        obstacles.extend(tree(*x, *y));
+    for [x, yc, len] in WALLS {
+        obstacles.push(Obstacle::Box {
+            center: [*x, *yc, 1.5],
+            size: [0.3, *len, 3.0],
+        });
+    }
+    // 树：固定 seed 伪随机散布（避开墙位），树冠间留缝
+    let mut seed = 0x5eed_u64;
+    let mut placed = 0;
+    let mut guard = 0;
+    while placed < 12 && guard < 400 {
+        guard += 1;
+        let x = 5.5 + lcg(&mut seed) * 20.0;
+        let y = 0.8 + lcg(&mut seed) * 6.4;
+        if WALLS.iter().any(|[wx, ..]| (x - wx).abs() < 1.2) {
+            continue;
+        }
+        if obstacles
+            .iter()
+            .filter(|o| matches!(o, Obstacle::Sphere { .. }))
+            .any(|o| {
+                let Obstacle::Sphere { center, .. } = o else {
+                    unreachable!()
+                };
+                (x - center[0]).hypot(y - center[1]) < 1.2
+            })
+        {
+            continue;
+        }
+        obstacles.extend(tree(x, y));
+        placed += 1;
     }
     s.obstacles = obstacles;
     s.decor = BUSHES.iter().map(|[x, y]| bush(*x, *y)).collect();
-    s.motions = vec![
-        sweep(10.0, 0.5, 14.0, 7.5, 0.0),
-        sweep(16.0, 7.5, 14.0, 0.5, 3.5),
-        sweep(22.0, 0.5, 14.0, 7.5, 7.0),
-        sweep(26.0, 7.5, 14.0, 0.5, 10.5),
-    ];
+    // 10 个动态障碍：x 均匀分布，y 3.0~5.0 短往返（周期 5s，相位错开）
+    s.motions = (0..10)
+        .map(|i| {
+            let x = 3.5 + f64::from(i) * 2.5;
+            sweep(x, 3.0, 5.0, 5.0, f64::from(i) * 0.5)
+        })
+        .collect();
     s
+}
+
+/// 固定 seed 线性同余伪随机（0..1）。
+fn lcg(state: &mut u64) -> f64 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    ((*state >> 33) as f64) / (u64::MAX >> 33) as f64
 }
 
 /// 交错门 + 动态障碍在门间横穿。

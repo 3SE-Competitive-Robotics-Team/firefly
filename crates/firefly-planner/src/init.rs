@@ -7,8 +7,30 @@ use firefly_trajectory::{Endpoint, Minco, MincoBuilder, SolverOrder};
 use nalgebra::{Point3, Vector3};
 
 pub struct InitConfig {
-    pub trajectory_pieces: usize,
+    pub pieces: usize,
     pub max_velocity: f64,
+}
+
+/// 段数由引导路径拐点数决定（官方 initMJO 以拐点为 waypoint），
+/// 长度兜底防止过疏，限制 [5, 24]。
+#[must_use]
+pub fn pieces_for_guide(guide: &[Vector3<f64>], piece_length: f64) -> usize {
+    let len: f64 = guide.windows(2).map(|w| (w[1] - w[0]).norm()).sum();
+    let by_len = ((len / piece_length.max(1e-3)).ceil() as usize).min(24);
+    let corners = corner_indices(guide).len();
+    (corners + 1).clamp(5, 24).max(by_len).min(24)
+}
+
+/// 引导路径拐点索引（方向变化 > ~8°）。
+fn corner_indices(path: &[Vector3<f64>]) -> Vec<usize> {
+    (1..path.len() - 1)
+        .filter(|&i| {
+            (path[i] - path[i - 1])
+                .normalize()
+                .dot(&(path[i + 1] - path[i]).normalize())
+                < 0.99
+        })
+        .collect()
 }
 
 /// # Errors
@@ -40,7 +62,7 @@ pub fn init_from_path(
             "guide path too short",
         ));
     }
-    let pieces = config.trajectory_pieces;
+    let pieces = config.pieces;
     let waypoints = sample_waypoints(guide, pieces - 1);
     // 完整段端点：start → waypoints → goal
     let mut segments = Vec::with_capacity(pieces);
@@ -61,21 +83,24 @@ pub fn init_from_path(
         .map_err(|e| e.with_operation("planner::init"))
 }
 
-/// 沿路径按弧长均匀取 count 个中间点（不含两端）。
+/// 取 count 个中间 waypoint（不含两端）：拐点优先（官方 initMJO），
+/// 拐点不足时按弧长均匀补充。
 fn sample_waypoints(path: &[Vector3<f64>], count: usize) -> Vec<Point3<f64>> {
-    let mut arcs = Vec::with_capacity(path.len());
-    let mut acc = 0.0;
-    arcs.push(0.0);
-    for w in path.windows(2) {
-        acc += (w[1] - w[0]).norm();
-        arcs.push(acc);
+    let corners = corner_indices(path);
+    if corners.len() >= count {
+        return (0..count)
+            .map(|k| Point3::from(path[corners[k * corners.len() / count]]))
+            .collect();
     }
-    let total = acc;
-    let mut result = Vec::with_capacity(count);
+    // 拐点全部 + 均匀补充（按弧长插值）
+    let mut result: Vec<Point3<f64>> = corners.iter().map(|&i| Point3::from(path[i])).collect();
+    let arcs = arc_lengths(path);
+    let total = *arcs.last().unwrap_or(&0.0);
+    let need = count - result.len();
     let mut seg = 0usize;
-    for k in 1..=count {
-        let target = total * k as f64 / (count + 1) as f64;
-        while arcs[seg + 1] < target {
+    for k in 1..=need {
+        let target = total * k as f64 / (need + 1) as f64;
+        while seg + 1 < arcs.len() && arcs[seg + 1] < target {
             seg += 1;
         }
         let seg_len = arcs[seg + 1] - arcs[seg];
@@ -85,6 +110,18 @@ fn sample_waypoints(path: &[Vector3<f64>], count: usize) -> Vec<Point3<f64>> {
         ));
     }
     result
+}
+
+/// 路径累计弧长。
+fn arc_lengths(path: &[Vector3<f64>]) -> Vec<f64> {
+    let mut arcs = Vec::with_capacity(path.len());
+    let mut acc = 0.0;
+    arcs.push(0.0);
+    for w in path.windows(2) {
+        acc += (w[1] - w[0]).norm();
+        arcs.push(acc);
+    }
+    arcs
 }
 
 /// `按段长分配时间：T_i` ∝ 段长，总时长 = `2×路径长/v_max`。

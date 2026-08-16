@@ -93,6 +93,32 @@ impl<'a> ObstacleScanner<'a> {
         Plane::new(s, v)
     }
 
+    /// 全部穿入点（不做平面覆盖检查，stuck 时强制重建平面用）。
+    pub fn scan_collisions(&self, traj: &Trajectory, guide: &[Vector3<f64>]) -> Vec<Hit> {
+        const DETECT: usize = 40;
+        let mut hits = Vec::new();
+        for (i, ti) in traj.durations().iter().enumerate() {
+            for k in 0..DETECT {
+                let tau = k as f64 / DETECT as f64;
+                let t = segment_time(traj, i, *ti, tau);
+                let s = traj.eval(t);
+                if !self.map.is_occupied_inflated(s.position) {
+                    continue;
+                }
+                let j = (tau * self.samples_per_piece as f64).round() as usize;
+                let point_index = i * (self.samples_per_piece + 1) + j;
+                if let Some(nearest) = nearest_point(guide, s.position) {
+                    hits.push(Hit {
+                        point_index,
+                        sample: s,
+                        guide_point: nearest,
+                    });
+                }
+            }
+        }
+        hits
+    }
+
     /// 当前轨迹是否物理安全：高密度采样均不在占据体素内。
     pub fn is_safe(&self, traj: &Trajectory) -> bool {
         const DETECT: usize = 40;

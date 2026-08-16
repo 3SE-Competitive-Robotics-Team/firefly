@@ -20,7 +20,7 @@ impl Default for AstarConfig {
     fn default() -> Self {
         Self {
             heuristic_weight: 1.0,
-            max_expansions: 200_000,
+            max_expansions: 500_000,
         }
     }
 }
