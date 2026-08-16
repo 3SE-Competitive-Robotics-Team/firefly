@@ -3,20 +3,27 @@ description.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
-keywords = ['grid-map', 'occupancy', 'obstacle', 'robotics']
+keywords = ['demo', 'planner', 'ego-planner', 'simulation']
 categories = ['robotics', 'science', 'algorithms', 'mathematics', 'simulation', 'embedded']
-name = "firefly-map"
+name = "firefly-demo"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "firefly-demo"
+path = "src/main.rs"
+
 [dependencies]
-fastrace = { workspace = true }
 firefly-error = { workspace = true }
+firefly-map = { workspace = true }
+firefly-observability = { workspace = true }
+firefly-planner = { workspace = true }
+firefly-search = { workspace = true }
+firefly-trajectory = { workspace = true }
+firefly-viewer = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 
 [lints]
 workspace = true

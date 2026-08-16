@@ -5,6 +5,8 @@
 
 mod grid;
 mod plane;
+mod scene;
 
 pub use grid::{GridMap, GridMapBuilder, VoxelState};
 pub use plane::{Plane, PlaneDistance};
+pub use scene::{Obstacle, Scene};

@@ -1157,6 +1157,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "firefly-demo"
+version = "0.1.0"
+dependencies = [
+ "firefly-error",
+ "firefly-map",
+ "firefly-observability",
+ "firefly-planner",
+ "firefly-search",
+ "firefly-trajectory",
+ "firefly-viewer",
+ "log",
+ "nalgebra",
+]
+
+[[package]]
 name = "firefly-error"
 version = "0.1.0"
 
@@ -1168,6 +1183,8 @@ dependencies = [
  "firefly-error",
  "log",
  "nalgebra",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
