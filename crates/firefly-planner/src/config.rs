@@ -26,7 +26,7 @@ impl Default for PlannerConfig {
             trajectory_pieces: 5,
             constraint_points_per_piece: 5,
             planning_distance: 7.5,
-            obstacle_clearance: 0.3,
+            obstacle_clearance: 0.5,
             swarm_clearance: 0.5,
             max_velocity: 1.5,
             max_acceleration: 6.0,
@@ -51,7 +51,7 @@ mod tests {
         let c = PlannerConfig::default();
         assert_eq!(c.trajectory_pieces, 5);
         assert_eq!(c.constraint_points_per_piece, 5);
-        assert_eq!(c.obstacle_clearance, 0.3);
+        assert_eq!(c.obstacle_clearance, 0.5);
         assert_eq!(c.swarm_clearance, 0.5);
         assert_eq!(c.max_velocity, 1.5);
         assert_eq!(c.max_acceleration, 6.0);
