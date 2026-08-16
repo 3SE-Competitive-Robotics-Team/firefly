@@ -155,8 +155,12 @@ impl Planner {
     }
 
     /// Rebound 主循环（论文 v1 Alg.2）：
-    /// 1. 轨迹安全？返回（post-check 可行性）
-    /// 2. 扫描新障碍 → 生成 {s,v} → 少量迭代优化（warm start）
+    /// Rebound 主循环（对齐官方 v2 `PolyTrajOptimizer::optimize`）：
+    /// - L-BFGS 内部动态检测约束点（`ReboundDetector`），发现新穿入即提前终止
+    ///   （官方 `STOP_FOR_REBOUND`，`rebound_times ≤ 20`）；
+    /// - 优化后 fine check（官方 `finelyCheckAndSetConstraintPoints`），
+    ///   碰撞则并入新平面后 restart（`restart_nums ≤ 3`）；
+    /// - swarm 距离不满足时权重 ×2（官方 `wei_swarm_mod_ *= 2`）。
     fn rebound(
         &self,
         mut minco: Minco,
@@ -169,17 +173,28 @@ impl Planner {
             ObstacleScanner::new(&self.map).with_samples(self.config.constraint_points_per_piece);
         let n_points = minco.pieces() * (self.config.constraint_points_per_piece + 1);
         let mut planes_by_point: Vec<Vec<Plane>> = vec![Vec::new(); n_points];
-
+        let mut swarm_weight = self.config.weight_swarm;
         let mut prev_formation_dev = f64::MAX;
-        let mut obs_weight = self.config.weight_obstacle;
-        let mut prev_hits = usize::MAX;
-        for iteration in 0..24 {
+
+        let mut rebound_times = 0usize;
+        let mut restart_nums = 0usize;
+        let mut iteration = 0usize;
+
+        // 官方 planner_manager：optimize 前对初始轨迹 fine check 建约束，
+        // 避免 L-BFGS 内循环检测到初始碰撞点而频繁提前终止
+        let traj0 = minco.solve()?;
+        let (init_hits, _) = scanner.scan_all(&traj0, guide, &planes_by_point);
+        Self::add_hit_planes(&self.map, &init_hits, &mut planes_by_point);
+
+        loop {
             let _span =
                 fastrace::local::LocalSpan::enter_with_local_parent(format!("rebound-{iteration}"));
-            let traj = minco.solve()?;
+            iteration += 1;
+
             // 队形是软约束（官方靠持续重规划收敛）：单次规划中
             // 偏差不再改善即接受当前解，避免迭代耗尽
-            if self.formation.is_some() && iteration > 0 {
+            if self.formation.is_some() && iteration > 1 {
+                let traj = minco.solve()?;
                 let dev = self.formation_deviation(&traj);
                 if (prev_formation_dev - dev).abs() < 0.05 {
                     let trajectory = self.ensure_feasible(&minco)?;
@@ -189,9 +204,46 @@ impl Planner {
                         planes: planes_by_point.iter().flatten().cloned().collect(),
                     });
                 }
+                prev_formation_dev = dev;
             }
+
+            // 一次全量 L-BFGS（官方 max_iterations=200）；objective 内部检测约束点
+            let mut objective = self.build_objective(
+                start_endpoint,
+                local_goal,
+                &planes_by_point,
+                peers,
+                minco.pieces(),
+                self.config.weight_obstacle,
+                swarm_weight,
+                guide,
+            );
+            let x0 = Self::pack(&minco);
+            let report = Lbfgs::new(LbfgsConfig::default()).minimize(&mut objective, x0)?;
+            // 吸收优化中检测到的新穿入点
+            let pending = objective.take_pending();
+            Self::absorb_pending(&self.map, &pending, &mut planes_by_point);
+            // 无论是否 early exit，都从当前解继续（官方 lbfgs 就地更新 x）
+            minco = objective.rebuild(&report.final_x)?;
+            if report.early_exit {
+                // 官方 STOP_FOR_REBOUND：约束已变，重新优化
+                rebound_times += 1;
+                log::debug!(
+                    "rebound {iteration}: 内循环检测触发（planes={}）",
+                    planes_by_point.iter().map(Vec::len).sum::<usize>()
+                );
+                if rebound_times > 20 {
+                    return Err(Error::temporary(
+                        ErrorKind::Convergence,
+                        "planner exceeded rebound limit",
+                    ));
+                }
+                continue;
+            }
+
+            // fine check（官方 finelyCheckAndSetConstraintPoints）
+            let traj = minco.solve()?;
             let (hits, safe) = scanner.scan_all(&traj, guide, &planes_by_point);
-            prev_formation_dev = self.formation_deviation(&traj);
             if safe && self.swarm_safe(&traj, peers) && self.formation_safe(&traj) {
                 let trajectory = self.ensure_feasible(&minco)?;
                 debug_assert!(
@@ -204,78 +256,32 @@ impl Planner {
                     planes: planes_by_point.iter().flatten().cloned().collect(),
                 });
             }
-            if hits.is_empty() && !safe {
-                let (mut xmin, mut xmax, mut ymin, mut ymax, mut zmin, mut zmax) =
-                    (f64::MAX, f64::MIN, f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-                for k in 0..100 {
-                    let t = traj.duration() * f64::from(k) / 100.0;
-                    let p = traj.eval(t).position;
-                    xmin = xmin.min(p.x);
-                    xmax = xmax.max(p.x);
-                    ymin = ymin.min(p.y);
-                    ymax = ymax.max(p.y);
-                    zmin = zmin.min(p.z);
-                    zmax = zmax.max(p.z);
+            if !safe {
+                if !hits.is_empty() {
+                    log::debug!(
+                        "rebound {iteration}: fine check 碰撞 new_hits={} planes={}",
+                        hits.len(),
+                        planes_by_point.iter().map(Vec::len).sum::<usize>()
+                    );
+                    Self::add_hit_planes(&self.map, &hits, &mut planes_by_point);
+                    restart_nums += 1;
+                    if restart_nums > 3 {
+                        return Err(Error::temporary(
+                            ErrorKind::Convergence,
+                            "planner exceeded restart limit",
+                        ));
+                    }
+                    continue;
                 }
-                log::warn!(
-                    "stuck check: safe=false, traj x[{xmin:.1},{xmax:.1}] y[{ymin:.1},{ymax:.1}] z[{zmin:.1},{zmax:.1}]"
-                );
-                // 轨迹仍被占据但无新障碍信息：已有平面未覆盖的切向穿入，
-                // 强制对所有穿入点重建平面（绕过覆盖检查），继续迭代。
-                Self::force_planes_for_stuck(
-                    &self.map,
-                    &scanner,
-                    &traj,
-                    guide,
-                    &mut planes_by_point,
-                );
+                // 无新信息但仍不安全：切向穿入，强制重建平面
+                let traj = minco.solve()?;
+                Self::rebuild_stuck_planes(&self.map, &scanner, &traj, guide, &mut planes_by_point);
                 continue;
             }
-            log::debug!(
-                "rebound {iteration}: planes={} new_hits={} formation_dev={:.3}",
-                planes_by_point.iter().map(Vec::len).sum::<usize>(),
-                hits.len(),
-                self.formation_deviation(&traj)
-            );
-            debug_hits(&hits, &planes_by_point);
-            Self::add_hit_planes(&self.map, &hits, &mut planes_by_point);
-
-            // 碰撞不减少时升级障碍权重（官方 wei_obs_mod 语义），方向转向推离障碍
-            if hits.len() >= prev_hits {
-                obs_weight = (obs_weight * 3.0).min(self.config.weight_obstacle * 100.0);
-            }
-            prev_hits = hits.len();
-            let mut objective = self.build_objective(
-                start_endpoint,
-                local_goal,
-                &planes_by_point,
-                peers,
-                minco.pieces(),
-                obs_weight,
-            );
-            let x0 = Self::pack(&minco);
-            // 论文 v1 Alg.2 OneStepOptimize 精神：目标每轮随新障碍变化，
-            // 每轮只跑少量迭代就重新检查，避免在动态目标上过度优化。
-            // 队形引导是稳定目标（每轮不变），一次优化到位。
-            let iterations = if self.formation.is_some() { 300 } else { 120 };
-            let config = LbfgsConfig {
-                max_iterations: iterations,
-                ..LbfgsConfig::default()
-            };
-            let report = Lbfgs::new(config).minimize(&mut objective, x0)?;
-            if !report.converged {
-                log::debug!(
-                    "rebound {iteration}: lbfgs partial (grad={:.3e})",
-                    report.gradient_norm
-                );
-            }
-            minco = objective.rebuild(&report.final_x)?;
+            // safe 但 swarm 不满足：官方 wei_swarm_mod_ *= 2
+            swarm_weight = (swarm_weight * 2.0).min(self.config.weight_swarm * 64.0);
+            log::debug!("rebound {iteration}: swarm 权重 x2 → {swarm_weight:.0}");
         }
-
-        Err(Error::temporary(
-            ErrorKind::Convergence,
-            "planner exceeded rebound iterations",
-        ))
     }
 
     /// 轨迹与队形目标的最大偏差（诊断用，动态推断）。
@@ -399,15 +405,18 @@ impl Planner {
             .map(|m| m.solve().expect("nonsingular"))
     }
 
-    fn build_objective(
-        &self,
+    #[allow(clippy::too_many_arguments)]
+    fn build_objective<'a>(
+        &'a self,
         start: Endpoint,
         goal: Point3<f64>,
         planes_by_point: &[Vec<Plane>],
         peers: &[firefly_cost::Peer],
         pieces: usize,
         weight_obstacle: f64,
-    ) -> MincoObjective {
+        weight_swarm: f64,
+        guide: &'a [Vector3<f64>],
+    ) -> MincoObjective<'a> {
         let end = Endpoint {
             position: goal.coords,
             velocity: Vector3::zeros(),
@@ -429,12 +438,14 @@ impl Planner {
                 weight_obstacle,
                 ObstaclePenalty::new(
                     self.config.obstacle_clearance,
+                    self.config.obstacle_clearance_soft,
+                    self.config.weight_obstacle_soft,
                     self.config.constraint_points_per_piece,
                     planes_by_point.to_vec(),
                 ),
             )
             .add(
-                self.config.weight_swarm,
+                weight_swarm,
                 SwarmPenalty::new(self.config.swarm_clearance, 2.0, 1.0, peers.to_vec())
                     // 高密度采样：防止优化器压缩时长让采样点跳过 peer 时刻
                     .with_samples(20),
@@ -458,7 +469,12 @@ impl Planner {
                 .with_samples(self.config.constraint_points_per_piece),
             );
         }
-        MincoObjective::new(start, end, pieces, cost)
+        MincoObjective::new(start, end, pieces, cost).with_detector(
+            &self.map,
+            guide,
+            self.config.constraint_points_per_piece,
+            planes_by_point.to_vec(),
+        )
     }
 
     fn pack(minco: &Minco) -> nalgebra::DVector<f64> {
@@ -475,6 +491,30 @@ impl Planner {
         x
     }
 
+    /// 吸收 L-BFGS 内循环检测到的新穿入点（跳过与已有平面几乎重合的重复项）。
+    fn absorb_pending(map: &GridMap, pending: &[Hit], planes_by_point: &mut [Vec<Plane>]) {
+        Self::add_hit_planes(map, pending, planes_by_point);
+    }
+
+    /// stuck 恢复：对轨迹全部穿入点强制重建平面（已有平面未覆盖的切向穿入）。
+    fn rebuild_stuck_planes(
+        map: &GridMap,
+        scanner: &ObstacleScanner,
+        traj: &Trajectory,
+        guide: &[Vector3<f64>],
+        planes_by_point: &mut [Vec<Plane>],
+    ) {
+        let all = scanner.scan_collisions(traj, guide);
+        log::debug!("rebound: stuck，强制重建 {} 个平面", all.len());
+        for hit in &all {
+            planes_by_point[hit.point_index].push(ObstacleScanner::build_plane(
+                map,
+                hit.sample.position,
+                hit.guide_point,
+            ));
+        }
+    }
+
     /// 为穿入点添加平面（跳过与已有平面几乎重合的重复项）。
     fn add_hit_planes(map: &GridMap, hits: &[Hit], planes_by_point: &mut [Vec<Plane>]) {
         for hit in hits {
@@ -485,25 +525,6 @@ impl Planner {
             }) {
                 point.push(plane);
             }
-        }
-    }
-
-    /// stuck 恢复：对轨迹全部穿入点强制重建平面（已有平面未覆盖的切向穿入）。
-    fn force_planes_for_stuck(
-        map: &GridMap,
-        scanner: &ObstacleScanner,
-        traj: &Trajectory,
-        guide: &[Vector3<f64>],
-        planes_by_point: &mut [Vec<Plane>],
-    ) {
-        let all = scanner.scan_collisions(traj, guide);
-        log::debug!("stuck: 强制重建 {} 个穿入点平面", all.len());
-        for hit in &all {
-            planes_by_point[hit.point_index].push(ObstacleScanner::build_plane(
-                map,
-                hit.sample.position,
-                hit.guide_point,
-            ));
         }
     }
 
@@ -536,19 +557,6 @@ fn segment_abs_time(traj: &Trajectory, piece: usize, duration: f64, tau: f64) ->
         t += traj.durations()[l];
     }
     t + tau * duration
-}
-
-/// 打印前几个穿入点的位置与已有平面数（调试）。
-fn debug_hits(hits: &[Hit], planes_by_point: &[Vec<Plane>]) {
-    for hit in hits.iter().take(3) {
-        let p = hit.sample.position;
-        let (px, py, pz) = (p.x, p.y, p.z);
-        log::debug!(
-            "  hit ({px:.2},{py:.2},{pz:.2}) idx={} planes={}",
-            hit.point_index,
-            planes_by_point[hit.point_index].len()
-        );
-    }
 }
 
 #[cfg(test)]

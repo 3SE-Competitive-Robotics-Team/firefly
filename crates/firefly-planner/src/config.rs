@@ -9,6 +9,10 @@ pub struct PlannerConfig {
     pub constraint_points_per_piece: usize,
     pub planning_distance: f64,
     pub obstacle_clearance: f64,
+    /// 障碍软净距（官方 v2 `obstacle_clearance_soft`，平滑尾）。
+    pub obstacle_clearance_soft: f64,
+    /// 软层权重（官方 v2 `weight_obstacle_soft`）。
+    pub weight_obstacle_soft: f64,
     /// 障碍膨胀半径（补偿机体尺寸，官方 `grid_map/obstacles_inflation`）。
     pub obstacle_inflation: f64,
     pub swarm_clearance: f64,
@@ -29,7 +33,9 @@ impl Default for PlannerConfig {
             piece_length: 1.5,
             constraint_points_per_piece: 12,
             planning_distance: 7.5,
-            obstacle_clearance: 0.3,
+            obstacle_clearance: 0.1,
+            obstacle_clearance_soft: 0.5,
+            weight_obstacle_soft: 5000.0,
             obstacle_inflation: 0.2,
             swarm_clearance: 0.5,
             max_velocity: 1.5,
@@ -54,7 +60,9 @@ mod tests {
     fn defaults_match_paper_table_s6() {
         let c = PlannerConfig::default();
         assert_eq!(c.constraint_points_per_piece, 12);
-        assert_eq!(c.obstacle_clearance, 0.3);
+        assert_eq!(c.obstacle_clearance, 0.1);
+        assert_eq!(c.obstacle_clearance_soft, 0.5);
+        assert_eq!(c.weight_obstacle_soft, 5000.0);
         assert_eq!(c.obstacle_inflation, 0.2);
         assert_eq!(c.swarm_clearance, 0.5);
         assert_eq!(c.max_velocity, 1.5);

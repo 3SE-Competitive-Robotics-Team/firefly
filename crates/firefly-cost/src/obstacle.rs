@@ -13,17 +13,31 @@ use nalgebra::Vector3;
 
 use crate::{Accumulator, Penalty};
 
+/// 障碍距离惩罚（官方 v2 双层 clearance）：
+/// - 硬层 `clearance_hard`：三次方惩罚（`weight_hard × err³`）；
+/// - 软层 `clearance_soft`：平滑尾 `r²(√(1+err²/r²) − 1)`（`r = 0.05`）。
 pub struct ObstaclePenalty {
-    pub clearance: f64,
+    pub clearance_hard: f64,
+    pub clearance_soft: f64,
+    pub weight_soft: f64,
     pub samples_per_piece: usize,
     planes_by_point: Vec<Vec<Plane>>,
 }
 
 impl ObstaclePenalty {
     #[must_use]
-    pub fn new(clearance: f64, samples_per_piece: usize, planes_by_point: Vec<Vec<Plane>>) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        clearance_hard: f64,
+        clearance_soft: f64,
+        weight_soft: f64,
+        samples_per_piece: usize,
+        planes_by_point: Vec<Vec<Plane>>,
+    ) -> Self {
         Self {
-            clearance,
+            clearance_hard,
+            clearance_soft,
+            weight_soft,
             samples_per_piece,
             planes_by_point,
         }
@@ -81,17 +95,21 @@ impl ObstaclePenalty {
             .iter()
             .map(|plane| {
                 let d = plane.distance(p).value();
-                let excess = self.clearance - d;
-                // v1 论文 Eq.5：深处用二次尾部，避免梯度爆炸式过推
-                if excess <= 0.0 {
-                    0.0
-                } else if excess <= self.clearance {
-                    excess * excess * excess
-                } else {
-                    3.0 * self.clearance * excess * excess
-                        - 3.0 * self.clearance * self.clearance * excess
-                        + self.clearance * self.clearance * self.clearance
+                // 硬层：dist < clearance_hard → err³
+                let err_hard = self.clearance_hard - d;
+                let mut cost = 0.0;
+                if err_hard > 0.0 {
+                    cost += err_hard * err_hard * err_hard;
                 }
+                // 软层：dist < clearance_soft → 平滑尾 r²(√(1+err²/r²) − 1)
+                let err_soft = self.clearance_soft - d;
+                if err_soft > 0.0 {
+                    let r = 0.05;
+                    let rsqr = r * r;
+                    let term = (1.0 + err_soft * err_soft / rsqr).sqrt();
+                    cost += self.weight_soft * rsqr * (term - 1.0);
+                }
+                cost
             })
             .sum()
     }
@@ -101,15 +119,22 @@ impl ObstaclePenalty {
             .iter()
             .map(|plane| {
                 let d = plane.distance(p).value();
-                let excess = self.clearance - d;
-                let slope = if excess <= 0.0 {
-                    0.0
-                } else if excess <= self.clearance {
-                    3.0 * excess * excess
-                } else {
-                    6.0 * self.clearance * excess - 3.0 * self.clearance * self.clearance
-                };
-                -slope * plane.normal()
+                let normal = plane.normal();
+                // 硬层梯度：−3·err²·n
+                let err_hard = self.clearance_hard - d;
+                let mut grad = Vector3::zeros();
+                if err_hard > 0.0 {
+                    grad += -3.0 * err_hard * err_hard * normal;
+                }
+                // 软层梯度：−soft·err/term·n
+                let err_soft = self.clearance_soft - d;
+                if err_soft > 0.0 {
+                    let r = 0.05;
+                    let rsqr = r * r;
+                    let term = (1.0 + err_soft * err_soft / rsqr).sqrt();
+                    grad += -self.weight_soft * err_soft / term * normal;
+                }
+                grad
             })
             .sum()
     }
@@ -130,7 +155,7 @@ mod tests {
     use crate::test_minco;
 
     fn penalty(planes: Vec<Vec<Plane>>) -> ObstaclePenalty {
-        ObstaclePenalty::new(0.3, 5, planes)
+        ObstaclePenalty::new(0.1, 0.5, 5000.0, 5, planes)
     }
 
     #[test]

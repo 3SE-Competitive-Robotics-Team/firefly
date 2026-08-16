@@ -63,5 +63,9 @@ fn per_penalty_gradients_match_numerical() {
         Plane::new(Vector3::new(3.8, 0.0, 0.0), Vector3::new(-1.0, 0.0, 0.0)),
     ];
     let per_point: Vec<Vec<Plane>> = (0..3 * 6).map(|_| planes.clone()).collect();
-    check_gradient_c("obstacle", &traj, &ObstaclePenalty::new(0.3, 5, per_point));
+    check_gradient_c(
+        "obstacle",
+        &traj,
+        &ObstaclePenalty::new(0.1, 0.5, 5000.0, 5, per_point),
+    );
 }

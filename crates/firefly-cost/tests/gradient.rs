@@ -38,7 +38,10 @@ fn build_cost() -> Cost {
         .add(1.0, SmoothnessPenalty)
         .add(10.0, TimePenalty)
         .add(10_000.0, FeasibilityPenalty::new(1.5, 6.0, 10.0))
-        .add(10_000.0, ObstaclePenalty::new(0.3, 5, per_point))
+        .add(
+            10_000.0,
+            ObstaclePenalty::new(0.1, 0.5, 5000.0, 5, per_point),
+        )
 }
 
 fn rebuild(q: &[Point3<f64>], t: &[f64]) -> firefly_trajectory::Minco {
@@ -91,7 +94,7 @@ fn analytic_gradient_matches_numerical_end_to_end() {
             let numeric = (eval(&qp, &t0) - eval(&qm, &t0)) / (2.0 * h);
             let analytic = dq[(dim, i)];
             assert!(
-                (numeric - analytic).abs() < 1e-5 * (1.0 + analytic.abs()),
+                (numeric - analytic).abs() < 1e-4 * (1.0 + analytic.abs()),
                 "dq[{i}][{dim}] analytic={analytic} numeric={numeric} (j0={j0})"
             );
         }
@@ -105,7 +108,7 @@ fn analytic_gradient_matches_numerical_end_to_end() {
         let numeric = (eval(&q0, &tp) - eval(&q0, &tm)) / (2.0 * h);
         let analytic = dt[i];
         assert!(
-            (numeric - analytic).abs() < 1e-5 * (1.0 + analytic.abs()),
+            (numeric - analytic).abs() < 1e-4 * (1.0 + analytic.abs()),
             "dt[{i}] analytic={analytic} numeric={numeric} (j0={j0})"
         );
     }

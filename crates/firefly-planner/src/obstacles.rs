@@ -59,7 +59,7 @@ impl<'a> ObstacleScanner<'a> {
                 if planes_by_point[point_index]
                     .iter()
                     .all(|pl| pl.distance(s.position).value() > 0.0)
-                    && let Some(nearest) = nearest_point(guide, s.position)
+                    && let Some(nearest) = nearest_guide_point(guide, s.position)
                 {
                     hits.push(Hit {
                         point_index,
@@ -107,7 +107,7 @@ impl<'a> ObstacleScanner<'a> {
                 }
                 let j = (tau * self.samples_per_piece as f64).round() as usize;
                 let point_index = i * (self.samples_per_piece + 1) + j;
-                if let Some(nearest) = nearest_point(guide, s.position) {
+                if let Some(nearest) = nearest_guide_point(guide, s.position) {
                     hits.push(Hit {
                         point_index,
                         sample: s,
@@ -143,7 +143,7 @@ fn segment_time(traj: &Trajectory, piece: usize, duration: f64, tau: f64) -> f64
     t + tau * duration
 }
 
-fn nearest_point(points: &[Vector3<f64>], p: Vector3<f64>) -> Option<Vector3<f64>> {
+pub fn nearest_guide_point(points: &[Vector3<f64>], p: Vector3<f64>) -> Option<Vector3<f64>> {
     points
         .iter()
         .min_by(|a, b| (*a - p).norm_squared().total_cmp(&(*b - p).norm_squared()))
