@@ -270,12 +270,12 @@ impl Astar {
     }
 
     fn linear(map: &GridMap, idx: [usize; 3]) -> u32 {
-        let [dx, dy, dz] = map.dims();
+        let [_, dy, dz] = map.dims();
         ((idx[0] * dy + idx[1]) * dz + idx[2]) as u32
     }
 
     fn decode(map: &GridMap, node: Node) -> [usize; 3] {
-        let [dx, dy, dz] = map.dims();
+        let [_, dy, dz] = map.dims();
         let l = node.0 as usize;
         let z = l % dz;
         let y = (l / dz) % dy;
