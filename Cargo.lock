@@ -1277,6 +1277,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "firefly-vio-types"
+version = "0.1.0"
+dependencies = [
+ "nalgebra",
+]
+
+[[package]]
 name = "fixed"
 version = "1.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

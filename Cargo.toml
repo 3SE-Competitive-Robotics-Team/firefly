@@ -10,6 +10,7 @@ logforth = { version = "0.30", default-features = false }
 nalgebra = "0.35"
 firefly-cost = { path = "crates/firefly-cost" }
 firefly-error = { path = "crates/firefly-error" }
+firefly-vio-types = { path = "crates/firefly-vio-types" }
 firefly-map = { path = "crates/firefly-map" }
 firefly-observability = { path = "crates/firefly-observability" }
 firefly-optimize = { path = "crates/firefly-optimize" }
