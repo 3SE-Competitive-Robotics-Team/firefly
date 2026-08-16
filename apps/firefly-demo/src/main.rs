@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use fastrace::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_map::{MapFile, Shape, VoxelState};
+use firefly_map::{MapFile, VoxelState};
 use firefly_observability::init as init_observability;
 use firefly_planner::{PlanResult, Planner, PlannerConfig, State};
 use firefly_search::Astar;
@@ -316,19 +316,18 @@ impl Demo {
         }
         // 动态障碍按真实尺寸渲染（motions 实体）
         if !self.map_file.motions.is_empty() {
-            let mut centers = Vec::new();
-            let mut half_sizes = Vec::new();
+            let mut indices = Vec::new();
             for m in &self.map_file.motions {
                 let p = m.position_at(now);
-                centers.push([p[0], p[1], p[2]]);
-                let hs = match m.shape {
-                    Shape::Box { size, .. } => [size[0] / 2.0, size[1] / 2.0, size[2] / 2.0],
-                    Shape::Sphere { radius, .. } => [radius; 3],
-                };
-                half_sizes.push(hs);
+                indices.extend(human_voxels(p[0], p[1]));
             }
-            self.viewer
-                .log_boxes("motions", &centers, &half_sizes, (220, 60, 60))?;
+            self.viewer.log_voxel_grid(
+                "motions",
+                &indices,
+                [0.1, 0.1, 0.1],
+                [0.0, 0.0, 0.0],
+                (220, 60, 60),
+            )?;
         }
         Ok(())
     }
@@ -375,6 +374,35 @@ fn pos_of(demo: &Demo) -> Vector3<f64> {
         }
         None => demo.global_path[0],
     }
+}
+
+/// 人形体素（0.1m 格）：双腿 + 躯干 + 头，脚底 z=0，中心对齐 (cx, cy)。
+fn human_voxels(cx: f64, cy: f64) -> Vec<(i32, i32, i32)> {
+    let ox = (cx / 0.1).round() as i32 - 1;
+    let oy = (cy / 0.1).round() as i32 - 1;
+    let mut out = Vec::with_capacity(40);
+    // 双腿：1×1×8
+    for z in 0..=7 {
+        out.push((ox - 1, oy, z));
+        out.push((ox, oy, z));
+    }
+    // 躯干：3×2×4
+    for x in -1..=1 {
+        for y in 0..=1 {
+            for z in 8..=11 {
+                out.push((ox + x, oy + y, z));
+            }
+        }
+    }
+    // 头：2×2×2
+    for x in 0..=1 {
+        for y in 0..=1 {
+            for z in 14..=15 {
+                out.push((ox + x, oy + y, z));
+            }
+        }
+    }
+    out
 }
 
 fn path_length(points: &[Vector3<f64>]) -> f64 {

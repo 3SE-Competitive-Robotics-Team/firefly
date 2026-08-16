@@ -170,22 +170,24 @@ impl Viewer {
             .map_err(viewer_err)
     }
 
-    /// 多个 3D 盒（动态障碍按真实尺寸渲染）。
+    /// 占据体素网格（单色）→ `VoxelGridMap`。
     ///
     /// # Errors
     ///
     /// `Internal`：rerun 记录失败。
-    pub fn log_boxes(
+    pub fn log_voxel_grid(
         &self,
         entity: &str,
-        centers: &[[f64; 3]],
-        half_sizes: &[[f64; 3]],
+        indices: &[(i32, i32, i32)],
+        voxel_size: [f32; 3],
+        translation: [f32; 3],
         color: (u8, u8, u8),
     ) -> Result<()> {
         self.rec
             .log(
                 entity,
-                &rerun::Boxes3D::from_centers_and_half_sizes(centers.to_vec(), half_sizes.to_vec())
+                &rerun::VoxelGridMap::new(indices.to_vec(), voxel_size)
+                    .with_translation(translation)
                     .with_colors([rerun::Color::from_rgb(color.0, color.1, color.2)]),
             )
             .map_err(viewer_err)
