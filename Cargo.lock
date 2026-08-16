@@ -1160,6 +1160,7 @@ dependencies = [
 name = "firefly-demo"
 version = "0.1.0"
 dependencies = [
+ "fastrace",
  "firefly-error",
  "firefly-map",
  "firefly-observability",

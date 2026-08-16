@@ -15,6 +15,7 @@ name = "firefly-demo"
 path = "src/main.rs"
 
 [dependencies]
+fastrace = { workspace = true }
 firefly-error = { workspace = true }
 firefly-map = { workspace = true }
 firefly-observability = { workspace = true }

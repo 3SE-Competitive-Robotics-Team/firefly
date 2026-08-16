@@ -142,7 +142,6 @@ impl Minco {
     }
 
     #[fastrace::trace]
-    #[logcall::logcall("debug", output = "")]
     /// # Errors
     ///
     /// `Convergence`：MINCO 系统奇异（理论上 T > 0 时不会发生）。
@@ -161,7 +160,6 @@ impl Minco {
     /// `d_f_d_c`: 6M × 3，`d_f_d_t`: M。
     /// 返回 (`d_f_d_q`: 3 × (M−1), `d_f_d_t`: M)。
     #[fastrace::trace]
-    #[logcall::logcall("debug", output = "")]
     /// # Errors
     ///
     /// `Convergence`：MINCO 系统奇异（理论上 T > 0 时不会发生）。

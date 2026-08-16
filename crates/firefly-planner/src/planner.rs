@@ -52,6 +52,7 @@ pub struct Planner {
     config: PlannerConfig,
     map: GridMap,
     formation: Option<FormationSpec>,
+    astar: firefly_search::Astar,
 }
 
 impl Planner {
@@ -61,6 +62,7 @@ impl Planner {
             config,
             map,
             formation: None,
+            astar: firefly_search::Astar::default(),
         }
     }
 
@@ -99,7 +101,6 @@ impl Planner {
     ///
     /// `NotFound`：起点/终点不可达；`Convergence`：Rebound 超出迭代上限。
     #[fastrace::trace]
-    #[logcall::logcall("debug", output = "")]
     pub fn plan(&mut self, start: State, goal: Point3<f64>) -> Result<PlanResult> {
         self.plan_in_swarm(start, goal, &[])
     }
@@ -110,7 +111,6 @@ impl Planner {
     ///
     /// `NotFound`：起点/终点不可达；`Convergence`：Rebound 超出迭代上限。
     #[fastrace::trace]
-    #[logcall::logcall("debug", output = "")]
     pub fn plan_in_swarm(
         &mut self,
         start: State,
@@ -123,7 +123,12 @@ impl Planner {
             acceleration: start.acceleration,
         };
         let local_goal = self.pick_local_goal(start.position.coords, goal.coords);
-        let guide = init::search_guide(&self.map, start.position.coords, local_goal)?;
+        let guide = init::search_guide(
+            &mut self.astar,
+            &self.map,
+            start.position.coords,
+            local_goal,
+        )?;
 
         let init_config = InitConfig {
             trajectory_pieces: self.config.trajectory_pieces,

@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use fastrace::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_map::{MapFile, VoxelState};
 use firefly_observability::init as init_observability;
@@ -122,9 +123,10 @@ impl Demo {
             .filter_map(|p| map.index_of(Vector3::new(p[0], p[1], p[2])))
             .collect();
         let planner = Planner::new(config, map);
-        let astar = Astar::new(planner.map_ref());
+        let mut astar = Astar::default();
         let global_path = astar
             .search(
+                planner.map_ref(),
                 Vector3::new(start[0], start[1], start[2]),
                 Vector3::new(goal[0], goal[1], goal[2]),
             )?
@@ -320,6 +322,9 @@ impl Demo {
         log::info!("主循环启动：10Hz，重规划阈值 {REPLAN_THRESH}s");
         let mut frame = 0usize;
         while !self.finished {
+            // 每帧建立 trace 上下文（fastrace：`#[trace]` 仅在 root span 下收集）
+            let root = Span::root("firefly-demo", SpanContext::random());
+            let _guard = root.set_local_parent();
             let t0 = Instant::now();
             self.tick()?;
             if frame.is_multiple_of(10) {
@@ -416,4 +421,5 @@ fn main() {
             std::process::exit(1);
         }
     }
+    firefly_observability::flush();
 }

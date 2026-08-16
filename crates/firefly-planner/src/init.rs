@@ -15,12 +15,12 @@ pub struct InitConfig {
 ///
 /// `NotFound`/`OutOfRange`/`Convergence`：A* 搜索失败（目标不可达等）。
 pub fn search_guide(
+    astar: &mut Astar,
     map: &GridMap,
     start: Vector3<f64>,
     goal: Vector3<f64>,
 ) -> Result<Vec<Vector3<f64>>> {
-    let astar = Astar::new(map);
-    let path = astar.search(start, goal)?;
+    let path = astar.search(map, start, goal)?;
     Ok(firefly_search::simplify_path(map, path.points()))
 }
 
