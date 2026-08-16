@@ -90,6 +90,11 @@ impl Planner {
         &self.map
     }
 
+    /// 可变地图（动态障碍更新）。
+    pub fn map_mut(&mut self) -> &mut GridMap {
+        &mut self.map
+    }
+
     /// # Errors
     ///
     /// `NotFound`：起点/终点不可达；`Convergence`：Rebound 超出迭代上限。

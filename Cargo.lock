@@ -1183,8 +1183,6 @@ dependencies = [
  "firefly-error",
  "log",
  "nalgebra",
- "serde",
- "serde_json",
 ]
 
 [[package]]

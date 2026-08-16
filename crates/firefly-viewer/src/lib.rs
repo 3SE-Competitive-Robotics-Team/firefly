@@ -47,31 +47,32 @@ impl Viewer {
         Ok(Self { rec })
     }
 
-    /// 占据栅格地图 → 占据体素点云。
+    /// 占据栅格地图 → 3D 体素（`VoxelGridMap`，体素中心 = 原点 + (idx+0.5)·分辨率）。
     ///
     /// # Errors
     ///
     /// `Internal`：rerun 记录失败。
     pub fn log_map(&self, entity: &str, map: &GridMap) -> Result<()> {
-        let res = map.resolution();
+        let res = map.resolution() as f32;
         let origin = map.origin();
         let dims = map.dims();
-        let mut positions = Vec::new();
+        let mut indices = Vec::new();
         for x in 0..dims[0] {
             for y in 0..dims[1] {
                 for z in 0..dims[2] {
                     if map.state([x, y, z]) == VoxelState::Occupied {
-                        positions.push([
-                            origin.x + (x as f64 + 0.5) * res,
-                            origin.y + (y as f64 + 0.5) * res,
-                            origin.z + (z as f64 + 0.5) * res,
-                        ]);
+                        indices.push((x as i32, y as i32, z as i32));
                     }
                 }
             }
         }
         self.rec
-            .log(entity, &rerun::Points3D::new(positions))
+            .log(
+                entity,
+                &rerun::VoxelGridMap::new(indices, [res; 3])
+                    .with_translation([origin.x as f32, origin.y as f32, origin.z as f32])
+                    .with_colors([rerun::Color::from_rgb(150, 150, 150)]),
+            )
             .map_err(viewer_err)
     }
 
@@ -121,6 +122,17 @@ impl Viewer {
     pub fn log_position(&self, entity: &str, position: [f64; 3]) -> Result<()> {
         self.rec
             .log(entity, &rerun::Points3D::new([position]))
+            .map_err(viewer_err)
+    }
+
+    /// 多个 3D 点（动态障碍等）。
+    ///
+    /// # Errors
+    ///
+    /// `Internal`：rerun 记录失败。
+    pub fn log_points(&self, entity: &str, points: &[[f64; 3]]) -> Result<()> {
+        self.rec
+            .log(entity, &rerun::Points3D::new(points.to_vec()))
             .map_err(viewer_err)
     }
 

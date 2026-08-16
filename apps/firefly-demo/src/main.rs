@@ -1,6 +1,9 @@
 //! 10Hz 重规划主循环演示（仿官方 `ego_replan_fsm`）。
 //!
-//! 运行：`cargo run -p firefly-demo -- --map apps/firefly-demo/maps/wall.json`
+//! 运行：`cargo run -p firefly-demo -- --map apps/firefly-demo/maps/gate.ffmap`
+//!
+//! 地图为 `FFMap` 标准格式（见 `docs/map-format.md`），可含动态障碍：
+//! 主循环每 tick 按航点插值更新障碍占据后重规划。
 //!
 //! 主循环语义（对应官方 `execFSMCallback`）：
 //! - `EXEC_TRAJ`：轨迹按时间推进，`t_cur > replan_thresh` 触发重规划；
@@ -8,11 +11,12 @@
 //!   `planning_horizon` 处的点（官方 `getLocalTarget`），规划失败保持旧轨迹；
 //! - 到达目标（`touch_goal`）后任务完成，退出循环。
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_map::Scene;
+use firefly_map::{MapFile, VoxelState};
 use firefly_observability::init as init_observability;
 use firefly_planner::{PlanResult, Planner, PlannerConfig, State};
 use firefly_search::Astar;
@@ -30,16 +34,22 @@ const LOOP_PERIOD: Duration = Duration::from_millis(100);
 struct Args {
     map: PathBuf,
     save: Option<PathBuf>,
+    start: [f64; 3],
+    goal: [f64; 3],
 }
 
 fn parse_args() -> Result<Args> {
     let mut map = None;
     let mut save = None;
+    let mut start = [1.0, 4.0, 1.0];
+    let mut goal = [27.0, 4.0, 1.0];
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--map" => map = Some(PathBuf::from(it.next().unwrap_or_default())),
             "--save" => save = Some(PathBuf::from(it.next().unwrap_or_default())),
+            "--start" => start = parse_vec3(&mut it, "start")?,
+            "--goal" => goal = parse_vec3(&mut it, "goal")?,
             other => {
                 return Err(Error::new(
                     ErrorKind::InvalidArgument,
@@ -49,7 +59,27 @@ fn parse_args() -> Result<Args> {
         }
     }
     let map = map.ok_or_else(|| Error::new(ErrorKind::InvalidArgument, "missing --map"))?;
-    Ok(Args { map, save })
+    Ok(Args {
+        map,
+        save,
+        start,
+        goal,
+    })
+}
+
+fn parse_vec3(it: &mut impl Iterator<Item = String>, name: &str) -> Result<[f64; 3]> {
+    let mut v = [0.0; 3];
+    for c in &mut v {
+        *c = it
+            .next()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidArgument, format!("missing {name} value")))?
+            .parse()
+            .map_err(|e| {
+                Error::new(ErrorKind::InvalidArgument, format!("invalid {name} value"))
+                    .with_source(e)
+            })?;
+    }
+    Ok(v)
 }
 
 /// 执行中的局部轨迹（官方 `LocalTrajData`：轨迹 + 起始时刻）。
@@ -61,6 +91,11 @@ struct LocalTraj {
 struct Demo {
     planner: Planner,
     viewer: Viewer,
+    map_file: MapFile,
+    /// 静态占据体素（动态障碍不得清掉它们）。
+    static_occupied: HashSet<[usize; 3]>,
+    /// 上一帧动态障碍占据体素。
+    prev_dyn: Vec<[usize; 3]>,
     /// 全局路径点（官方 `global_traj`，首次规划后缓存）。
     global_path: Vec<Vector3<f64>>,
     local: Option<LocalTraj>,
@@ -73,29 +108,43 @@ struct Demo {
 }
 
 impl Demo {
-    fn new(scene: &Scene, viewer: Viewer, config: PlannerConfig) -> Result<Self> {
-        let map = scene.to_grid_map()?;
+    fn new(
+        map_file: MapFile,
+        viewer: Viewer,
+        config: PlannerConfig,
+        start: [f64; 3],
+        goal: [f64; 3],
+    ) -> Result<Self> {
+        let map = map_file.to_grid_map()?;
+        let static_occupied = map_file
+            .occupied
+            .iter()
+            .filter_map(|p| map.index_of(Vector3::new(p[0], p[1], p[2])))
+            .collect();
         let planner = Planner::new(config, map);
-        let start = Vector3::new(scene.start[0], scene.start[1], scene.start[2]);
         let astar = Astar::new(planner.map_ref());
         let global_path = astar
             .search(
-                start,
-                Vector3::new(scene.goal[0], scene.goal[1], scene.goal[2]),
+                Vector3::new(start[0], start[1], start[2]),
+                Vector3::new(goal[0], goal[1], goal[2]),
             )?
             .points()
             .to_vec();
         log::info!(
-            "全局路径 {} 点，长度 {:.1}m",
+            "全局路径 {} 点，长度 {:.1}m，动态障碍 {} 个",
             global_path.len(),
-            path_length(&global_path)
+            path_length(&global_path),
+            map_file.motions.len()
         );
         Ok(Self {
             planner,
             viewer,
+            map_file,
+            static_occupied,
+            prev_dyn: Vec::new(),
             global_path,
             local: None,
-            goal: Point3::new(scene.goal[0], scene.goal[1], scene.goal[2]),
+            goal: Point3::new(goal[0], goal[1], goal[2]),
             t_sim: 0.0,
             finished: false,
             replans: 0,
@@ -205,9 +254,30 @@ impl Demo {
         Ok(())
     }
 
+    /// 动态障碍按仿真时钟插值，增量更新占据地图。
+    fn update_motion(&mut self) {
+        if self.map_file.motions.is_empty() {
+            return;
+        }
+        let dyn_voxels = self
+            .map_file
+            .motion_voxels(self.t_sim, self.planner.map_ref());
+        let map = self.planner.map_mut();
+        for idx in &self.prev_dyn {
+            if !self.static_occupied.contains(idx) {
+                map.set_state(*idx, VoxelState::Unknown);
+            }
+        }
+        for idx in &dyn_voxels {
+            map.set_state(*idx, VoxelState::Occupied);
+        }
+        self.prev_dyn = dyn_voxels;
+    }
+
     /// 官方 `execFSMCallback`：10Hz 主循环单步。
     fn tick(&mut self) -> Result<()> {
         let now = self.t_sim;
+        self.update_motion();
         match &self.local {
             None => {
                 self.initial_plan()?;
@@ -232,6 +302,16 @@ impl Demo {
             let s = local.traj.eval(t_cur);
             let pos = [s.position.x, s.position.y, s.position.z];
             self.viewer.log_position("drone", pos)?;
+        }
+        // 动态障碍当前位置
+        if !self.map_file.motions.is_empty() {
+            let motions: Vec<[f64; 3]> = self
+                .map_file
+                .motions
+                .iter()
+                .map(|m| m.position_at(now))
+                .collect();
+            self.viewer.log_points("motions", &motions)?;
         }
         Ok(())
     }
@@ -271,8 +351,7 @@ fn pos_of(demo: &Demo) -> Vector3<f64> {
     match &demo.local {
         Some(local) => {
             let t_cur = (demo.t_sim - local.start_time).clamp(0.0, local.traj.duration());
-            let s = local.traj.eval(t_cur);
-            s.position
+            local.traj.eval(t_cur).position
         }
         None => demo.global_path[0],
     }
@@ -287,12 +366,14 @@ fn main() {
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("{e}\n用法：firefly-demo --map <scene.json> [--save out.rrd]");
+            eprintln!(
+                "{e}\n用法：firefly-demo --map <map.ffmap> [--save out.rrd] [--start x y z] [--goal x y z]"
+            );
             std::process::exit(2);
         }
     };
-    let scene = match Scene::from_json(&args.map) {
-        Ok(s) => s,
+    let map_file = match MapFile::from_file(&args.map) {
+        Ok(m) => m,
         Err(e) => {
             eprintln!("加载地图失败：{e}");
             std::process::exit(1);
@@ -309,10 +390,21 @@ fn main() {
             std::process::exit(1);
         }
     };
-    viewer
-        .log_map("map", &scene.to_grid_map().expect("地图体素化"))
-        .expect("log map");
-    match Demo::new(&scene, viewer, PlannerConfig::default()) {
+    let grid = match map_file.to_grid_map() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("地图体素化失败：{e}");
+            std::process::exit(1);
+        }
+    };
+    viewer.log_map("map", &grid).expect("log map");
+    match Demo::new(
+        map_file,
+        viewer,
+        PlannerConfig::default(),
+        args.start,
+        args.goal,
+    ) {
         Ok(mut demo) => {
             if let Err(e) = demo.run() {
                 log::error!("demo 失败：{e}");
