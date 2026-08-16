@@ -101,29 +101,29 @@ fn maze() -> Scene {
     s
 }
 
-/// 森林 + 两个横向穿行的动态障碍。
+/// 树：细树干 + 球形树冠（体素化后呈树形）。
+fn tree(cx: f64, cy: f64) -> [Obstacle; 2] {
+    [
+        Obstacle::Box {
+            center: [cx, cy, 0.75],
+            size: [0.3, 0.3, 1.5],
+        },
+        Obstacle::Sphere {
+            center: [cx, cy, 2.1],
+            radius: 0.8,
+        },
+    ]
+}
+
+/// 森林（树木）+ 四个横向穿行的动态障碍。
 fn forest_dyn() -> Scene {
     let mut s = base();
-    s.obstacles = vec![
-        cuboid(4.0, 4.0, 1.5, 0.8, 0.8, 3.0),
-        cuboid(4.0, 6.5, 1.5, 0.8, 0.8, 3.0),
-        cuboid(8.0, 2.0, 1.5, 0.8, 0.8, 3.0),
-        cuboid(8.0, 5.5, 1.5, 0.8, 0.8, 3.0),
-        cuboid(12.0, 4.0, 1.5, 0.8, 0.8, 3.0),
-        cuboid(12.0, 6.5, 1.5, 0.8, 0.8, 3.0),
-        cuboid(16.0, 2.0, 1.5, 0.8, 0.8, 3.0),
-        cuboid(16.0, 5.5, 1.5, 0.8, 0.8, 3.0),
-        cuboid(20.0, 4.0, 1.5, 0.8, 0.8, 3.0),
-        cuboid(20.0, 6.5, 1.5, 0.8, 0.8, 3.0),
-        Obstacle::Sphere {
-            center: [24.0, 3.0, 1.2],
-            radius: 0.6,
-        },
-        Obstacle::Sphere {
-            center: [24.0, 6.0, 1.2],
-            radius: 0.6,
-        },
-    ];
+    let mut obstacles = Vec::new();
+    for x in [5.0, 11.0, 17.0, 23.0] {
+        obstacles.extend(tree(x, 2.2));
+        obstacles.extend(tree(x, 5.8));
+    }
+    s.obstacles = obstacles;
     s.motions = vec![
         sweep(10.0, 0.5, 14.0, 7.5, 0.0),
         sweep(16.0, 7.5, 14.0, 0.5, 3.5),
