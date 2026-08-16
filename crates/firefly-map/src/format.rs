@@ -72,29 +72,23 @@ pub struct Motion {
 }
 
 impl Motion {
-    /// 障碍中心在 `t` 时刻的位置（相邻航点线性插值）。
+    /// 障碍中心在 `t` 时刻的位置（相邻航点线性插值，`loop_back` 按周期取模）。
     #[must_use]
     pub fn position_at(&self, t: f64) -> [f64; 3] {
         let wp = &self.waypoints;
-        if let Some(&(t0, _)) = wp.first()
-            && t <= t0
-        {
-            return wp[0].1;
-        }
-        if let Some(&(t_last, _)) = wp.last()
-            && t >= t_last
-        {
-            return if self.loop_back {
-                wp[0].1
-            } else {
-                wp[wp.len() - 1].1
-            };
-        }
+        let t_last = wp[wp.len() - 1].0;
+        // 循环运动先取模（rem_euclid 保证负时间也安全），再按段插值
         let t = if self.loop_back {
-            t % wp[wp.len() - 1].0
+            t.rem_euclid(t_last)
         } else {
             t
         };
+        if t <= wp[0].0 {
+            return wp[0].1;
+        }
+        if t >= t_last {
+            return wp[wp.len() - 1].1;
+        }
         for w in wp.windows(2) {
             let (ta, pa) = w[0];
             let (tb, pb) = w[1];
@@ -495,7 +489,10 @@ MOTION sphere 15 4 1 0.5
         assert_close(m.position_at(0.0), [1.0, 2.0, 1.0]);
         assert_close(m.position_at(2.0), [9.5, 2.0, 1.0]); // (1+18)/2
         assert_close(m.position_at(4.0), [18.0, 2.0, 1.0]);
-        assert_close(m.position_at(10.0), [1.0, 2.0, 1.0]); // loop 回起点
+        // t=10 取模到 t=2（周期 8）：(1+18)/2 处继续插值，而非瞬移回起点
+        assert_close(m.position_at(10.0), [9.5, 2.0, 1.0]);
+        // 非循环障碍：t 超过末航点停在终点
+        assert_close(map.motions[1].position_at(100.0), [15.0, 6.0, 1.0]);
     }
 
     #[test]

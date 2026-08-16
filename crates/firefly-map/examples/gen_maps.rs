@@ -124,7 +124,12 @@ fn forest_dyn() -> Scene {
             radius: 0.6,
         },
     ];
-    s.motions = vec![sweep(10.0, 0.5, 14.0, 7.5), sweep(22.0, 7.5, 14.0, 0.5)];
+    s.motions = vec![
+        sweep(10.0, 0.5, 14.0, 7.5, 0.0),
+        sweep(16.0, 7.5, 14.0, 0.5, 3.5),
+        sweep(22.0, 0.5, 14.0, 7.5, 7.0),
+        sweep(26.0, 7.5, 14.0, 0.5, 10.5),
+    ];
     s
 }
 
@@ -139,21 +144,26 @@ fn slalom_dyn() -> Scene {
         cuboid(24.0, 1.25, 1.5, 0.6, 2.5, 3.0),
         cuboid(24.0, 6.75, 1.5, 0.6, 2.5, 3.0),
     ];
-    s.motions = vec![sweep(9.0, 0.5, 10.0, 7.5), sweep(15.0, 7.5, 10.0, 0.5)];
+    s.motions = vec![
+        sweep(9.0, 0.5, 10.0, 7.5, 0.0),
+        sweep(15.0, 7.5, 10.0, 0.5, 2.5),
+        sweep(21.0, 0.5, 10.0, 7.5, 5.0),
+        sweep(27.0, 7.5, 10.0, 0.5, 7.5),
+    ];
     s
 }
 
 /// 动态障碍：沿 x 固定、y 往返横扫的盒子（周期 `period` 秒）。
-fn sweep(x: f64, y0: f64, period: f64, y1: f64) -> Motion {
+fn sweep(x: f64, y0: f64, period: f64, y1: f64, phase: f64) -> Motion {
     Motion {
         shape: Shape::Box {
             center: [x, 0.0, 1.5],
             size: [0.8, 0.8, 3.0],
         },
         waypoints: vec![
-            (0.0, [x, y0, 1.5]),
-            (period / 2.0, [x, y1, 1.5]),
-            (period, [x, y0, 1.5]),
+            (phase, [x, y0, 1.5]),
+            (phase + period / 2.0, [x, y1, 1.5]),
+            (phase + period, [x, y0, 1.5]),
         ],
         loop_back: true,
     }
