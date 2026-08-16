@@ -130,8 +130,11 @@ impl Astar {
         let goal_idx = map
             .index_of(goal)
             .ok_or_else(|| Error::new(ErrorKind::OutOfRange, "goal is outside the map"))?;
-        if map.state(goal_idx) == firefly_map::VoxelState::Occupied {
-            return Err(Error::new(ErrorKind::InvalidArgument, "goal is occupied"));
+        if map.is_inflated(goal_idx) {
+            return Err(Error::new(
+                ErrorKind::InvalidArgument,
+                "goal is occupied (inflated)",
+            ));
         }
 
         let total = map.dims()[0] * map.dims()[1] * map.dims()[2];
@@ -236,7 +239,7 @@ impl Astar {
                         continue;
                     }
                     let idx = [nx as usize, ny as usize, nz as usize];
-                    if map.state(idx) == firefly_map::VoxelState::Occupied {
+                    if map.is_inflated(idx) {
                         continue;
                     }
                     let step = f64::from(i * i + j * j + k * k).sqrt() * map.resolution();
@@ -397,6 +400,7 @@ mod tests {
                 map.set_state([5, y, z], firefly_map::VoxelState::Occupied);
             }
         }
+        map.inflate_obstacles(1.0);
         let mut astar = Astar::default();
         let r = search(&mut astar, &map, [0.5, 0.5, 0.5], [9.5, 9.5, 0.5]);
         assert_eq!(r.unwrap_err().kind(), ErrorKind::NotFound);
@@ -410,6 +414,7 @@ mod tests {
                 map.set_state([4, y, z], firefly_map::VoxelState::Occupied);
             }
         }
+        map.inflate_obstacles(1.0);
         let mut astar = Astar::default();
         let path = search(&mut astar, &map, [0.5, 4.5, 0.5], [9.5, 4.5, 0.5]).unwrap();
         // 路径不穿过墙体（x=4, y 2..8, z 0..2）

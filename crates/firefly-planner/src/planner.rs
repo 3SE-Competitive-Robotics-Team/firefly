@@ -57,7 +57,8 @@ pub struct Planner {
 
 impl Planner {
     #[must_use]
-    pub fn new(config: PlannerConfig, map: GridMap) -> Self {
+    pub fn new(config: PlannerConfig, mut map: GridMap) -> Self {
+        map.inflate_obstacles(config.obstacle_inflation);
         Self {
             config,
             map,
@@ -117,6 +118,8 @@ impl Planner {
         goal: Point3<f64>,
         peers: &[firefly_cost::Peer],
     ) -> Result<PlanResult> {
+        // 地图可能已被动态障碍更新：重算膨胀层（官方 clearAndInflateLocalMap）
+        self.map.inflate_obstacles(self.config.obstacle_inflation);
         let start_endpoint = Endpoint {
             position: start.position.coords,
             velocity: start.velocity,
@@ -471,12 +474,12 @@ impl Planner {
         }
         let dir = to_goal / dist;
         let base = start + dir * self.config.planning_distance;
-        // 局部目标被障碍占用时沿方向回退找最近自由点（A* 要求目标可达）
-        if self.map.is_occupied(base) {
+        // 局部目标被障碍占用时沿方向回退找最近自由点（A* 要求目标可达，判定用膨胀层）
+        if self.map.is_occupied_inflated(base) {
             for step in 1..=8 {
                 let candidate =
                     start + dir * (self.config.planning_distance - f64::from(step) * 0.5);
-                if !self.map.is_occupied(candidate) {
+                if !self.map.is_occupied_inflated(candidate) {
                     return candidate;
                 }
             }

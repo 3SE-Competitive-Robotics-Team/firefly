@@ -118,7 +118,7 @@ fn tree(cx: f64, cy: f64) -> [Obstacle; 2] {
         },
         Obstacle::Sphere {
             center: [cx, cy, 1.3],
-            radius: 0.9,
+            radius: 0.55,
         },
     ]
 }
@@ -206,8 +206,8 @@ fn slalom_dyn() -> Scene {
 fn sweep(x: f64, y0: f64, period: f64, y1: f64, phase: f64) -> Motion {
     Motion {
         shape: Shape::Box {
-            center: [x, 0.0, 1.5],
-            size: [0.8, 0.8, 3.0],
+            center: [x, 0.0, 0.9],
+            size: [0.5, 0.5, 1.8],
         },
         waypoints: vec![
             (phase, [x, y0, 1.5]),
