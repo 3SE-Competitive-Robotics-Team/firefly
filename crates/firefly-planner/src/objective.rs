@@ -17,86 +17,109 @@ use crate::obstacles::{Hit, nearest_guide_point};
 /// 由外层吸收新平面后重新优化。
 pub struct ReboundDetector<'a> {
     map: &'a GridMap,
-    guide: &'a [Vector3<f64>],
     samples_per_piece: usize,
     planes: Vec<Vec<Plane>>,
+    /// 段内局部 A*（官方每段重新搜绕行路径，约束方向指向它）。
+    astar: firefly_search::Astar,
 }
 
 impl<'a> ReboundDetector<'a> {
     #[must_use]
-    pub fn new(
-        map: &'a GridMap,
-        guide: &'a [Vector3<f64>],
-        samples_per_piece: usize,
-        planes: Vec<Vec<Plane>>,
-    ) -> Self {
+    pub fn new(map: &'a GridMap, samples_per_piece: usize, planes: Vec<Vec<Plane>>) -> Self {
         Self {
             map,
-            guide,
             samples_per_piece,
             planes,
+            astar: firefly_search::Astar::default(),
         }
     }
 
-    /// 官方 `allowRebound` criterion 2：约束点序列最小转向角 < 30°
-    /// （点积 < 0.87）时不触发 rebound——大变形轨迹的局部碰撞检测无意义，
-    /// 等 L-BFGS 继续优化。
+    /// 段内全点约束检测（官方 `roughlyCheckConstraintPoints` + `Assign parameters to
+    /// each segment`）：
+    /// 1. 遍历约束点（前 2/3），聚出未覆盖穿入的碰撞段；
+    /// 2. 每段做**局部 A\***（官方 `AstarSearch(in, out)`）搜绕行路径；
+    /// 3. 段内每个穿入点生成约束，方向指向局部绕行路径（官方
+    ///    `direction = (A\*路径交点 − 轨迹点).normalized()`，改变拓扑而非简单推离）。
+    ///
+    /// 返回 `None` 表示官方 `allowRebound` criterion 2 不满足（约束点序列最小
+    /// 转向角 < 30°）：大变形轨迹的局部碰撞检测无意义，等 L-BFGS 继续优化。
     #[must_use]
-    pub fn allow_rebound(&self, traj: &firefly_trajectory::Trajectory) -> bool {
+    pub fn check(&mut self, traj: &firefly_trajectory::Trajectory) -> Option<Vec<Hit>> {
+        let two_thirds = (traj.durations().len() * 2 / 3).max(1);
+        let res = self.map.resolution();
+        let n_per_piece = self.samples_per_piece + 1;
+        let total = two_thirds * n_per_piece;
+        let sample = |idx: usize| -> firefly_trajectory::Sample {
+            let i = idx / n_per_piece;
+            let j = idx % n_per_piece;
+            let tau = j as f64 / self.samples_per_piece as f64;
+            let mut t = 0.0;
+            for d in traj.durations().iter().take(i) {
+                t += d;
+            }
+            t += tau * traj.durations()[i];
+            traj.eval(t)
+        };
+        // 单次遍历同时算角度判据与穿入标记
         let mut min_product: f64 = 1.0;
         let mut prev: Option<Vector3<f64>> = None;
         let mut prev_dir: Option<Vector3<f64>> = None;
-        for i in 0..traj.durations().len() {
-            let ti = traj.durations()[i];
-            for j in 0..=self.samples_per_piece {
-                let tau = j as f64 / self.samples_per_piece as f64;
-                let mut t = 0.0;
-                for d in traj.durations().iter().take(i) {
-                    t += d;
+        let mut in_segment = false;
+        let mut segments: Vec<(usize, usize)> = Vec::new(); // 段内索引范围（含未穿入边界）
+        let mut seg_start = 0usize;
+        let mut occupied_flags = vec![false; total];
+        for (point_index, occupied) in occupied_flags.iter_mut().enumerate() {
+            let p = sample(point_index).position;
+            if let Some(q) = prev {
+                let dir = (p - q).normalize();
+                if let Some(d0) = prev_dir {
+                    min_product = min_product.min(d0.dot(&dir));
                 }
-                t += tau * ti;
-                let p = traj.eval(t).position;
-                if let Some(q) = prev {
-                    let dir = (p - q).normalize();
-                    if let Some(d0) = prev_dir {
-                        min_product = min_product.min(d0.dot(&dir));
-                    }
-                    prev_dir = Some(dir);
-                }
-                prev = Some(p);
+                prev_dir = Some(dir);
+            }
+            prev = Some(p);
+            let covered = self.planes[point_index]
+                .iter()
+                .any(|pl| (p - pl.point()).dot(&pl.normal()) < res);
+            *occupied = self.map.is_occupied_inflated(p) && !covered;
+            if *occupied && !in_segment {
+                in_segment = true;
+                seg_start = point_index;
+            } else if !*occupied && in_segment {
+                in_segment = false;
+                segments.push((seg_start, point_index));
             }
         }
-        min_product >= 0.87
-    }
+        if in_segment {
+            segments.push((seg_start, total - 1));
+        }
+        if min_product < 0.87 {
+            return None;
+        }
+        if segments.is_empty() {
+            return Some(Vec::new());
+        }
 
-    /// 检查约束点（只查前 2/3，官方 `two_thirds_id`），返回未覆盖的穿入点。
-    #[must_use]
-    pub fn check(&self, traj: &firefly_trajectory::Trajectory) -> Vec<Hit> {
         let mut hits = Vec::new();
-        let two_thirds = (traj.durations().len() * 2 / 3).max(1);
-        let res = self.map.resolution();
-        for i in 0..two_thirds {
-            let ti = traj.durations()[i];
-            for j in 0..=self.samples_per_piece {
-                let tau = j as f64 / self.samples_per_piece as f64;
-                let mut t = 0.0;
-                for d in traj.durations().iter().take(i) {
-                    t += d;
-                }
-                t += tau * ti;
-                let s = traj.eval(t);
-                if !self.map.is_occupied_inflated(s.position) {
+        for (seg_in, seg_out) in segments {
+            // 段边界：前一个自由点（in）与后一个自由点（out），官方 AstarSearch(in, out)
+            let in_idx = (0..seg_in).rev().find(|&k| !occupied_flags[k]).unwrap_or(0);
+            let out_idx = (seg_out + 1..total)
+                .find(|&k| !occupied_flags[k])
+                .unwrap_or(seg_out);
+            let (start_pt, end_pt) = (sample(out_idx).position, sample(in_idx).position);
+            let Ok(local_path) = self.astar.search(self.map, start_pt, end_pt) else {
+                continue;
+            };
+            let path_pts = local_path.points();
+            // 段内每个未覆盖穿入点：方向指向局部 A* 路径最近点（官方交点方向）
+            for (idx, &occupied) in occupied_flags[seg_in..=seg_out].iter().enumerate() {
+                if !occupied {
                     continue;
                 }
-                let point_index = i * (self.samples_per_piece + 1) + j;
-                // 官方覆盖判定：(p − s)·v < 分辨率 视为已被约束
-                let covered = self.planes[point_index]
-                    .iter()
-                    .any(|pl| (s.position - pl.point()).dot(&pl.normal()) < res);
-                if covered {
-                    continue;
-                }
-                if let Some(nearest) = nearest_guide_point(self.guide, s.position) {
+                let point_index = seg_in + idx;
+                let s = sample(point_index);
+                if let Some(nearest) = nearest_guide_point(path_pts, s.position) {
                     hits.push(Hit {
                         point_index,
                         sample: s,
@@ -105,7 +128,7 @@ impl<'a> ReboundDetector<'a> {
                 }
             }
         }
-        hits
+        Some(hits)
     }
 }
 
@@ -143,11 +166,10 @@ impl<'a> MincoObjective<'a> {
     pub fn with_detector(
         mut self,
         map: &'a GridMap,
-        guide: &'a [Vector3<f64>],
         samples_per_piece: usize,
         planes: Vec<Vec<Plane>>,
     ) -> Self {
-        self.detector = Some(ReboundDetector::new(map, guide, samples_per_piece, planes));
+        self.detector = Some(ReboundDetector::new(map, samples_per_piece, planes));
         self
     }
 
@@ -217,14 +239,12 @@ impl Objective for MincoObjective<'_> {
         };
         // 官方 allowRebound criterion 1+2：前 3 次求值不检测；轨迹大转角不检测
         if self.eval_count >= 3
-            && let Some(detector) = &self.detector
-            && detector.allow_rebound(&traj)
+            && let Some(detector) = &mut self.detector
+            && let Some(hits) = detector.check(&traj)
+            && !hits.is_empty()
         {
-            let hits = detector.check(&traj);
-            if !hits.is_empty() {
-                self.pending.extend(hits);
-                self.early_exit = true;
-            }
+            self.pending.extend(hits);
+            self.early_exit = true;
         }
         self.cost.evaluate(&traj)
     }
