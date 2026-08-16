@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use fastrace::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_map::{MapFile, VoxelState};
+use firefly_map::{MapFile, Shape, VoxelState};
 use firefly_observability::init as init_observability;
 use firefly_planner::{PlanResult, Planner, PlannerConfig, State};
 use firefly_search::Astar;
@@ -305,15 +305,21 @@ impl Demo {
             let pos = [s.position.x, s.position.y, s.position.z];
             self.viewer.log_position("drone", pos)?;
         }
-        // 动态障碍当前位置
+        // 动态障碍按真实尺寸渲染（motions 实体）
         if !self.map_file.motions.is_empty() {
-            let motions: Vec<[f64; 3]> = self
-                .map_file
-                .motions
-                .iter()
-                .map(|m| m.position_at(now))
-                .collect();
-            self.viewer.log_points("motions", &motions)?;
+            let mut centers = Vec::new();
+            let mut half_sizes = Vec::new();
+            for m in &self.map_file.motions {
+                let p = m.position_at(now);
+                centers.push([p[0], p[1], p[2]]);
+                let hs = match m.shape {
+                    Shape::Box { size, .. } => [size[0] / 2.0, size[1] / 2.0, size[2] / 2.0],
+                    Shape::Sphere { radius, .. } => [radius; 3],
+                };
+                half_sizes.push(hs);
+            }
+            self.viewer
+                .log_boxes("motions", &centers, &half_sizes, (220, 60, 60))?;
         }
         Ok(())
     }
