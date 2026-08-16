@@ -103,7 +103,9 @@ struct Demo {
     goal: Point3<f64>,
     /// 仿真时钟（秒），替代官方 `ros::Time::now()`。
     t_sim: f64,
-    /// 是否完成（官方 `touch_goal` 后到达）。
+    /// 目标是终点（`touch_goal`）：轨迹执行完毕即任务完成。
+    touch_goal: bool,
+    /// 是否完成。
     finished: bool,
     replans: usize,
 }
@@ -148,6 +150,7 @@ impl Demo {
             local: None,
             goal: Point3::new(goal[0], goal[1], goal[2]),
             t_sim: 0.0,
+            touch_goal: false,
             finished: false,
             replans: 0,
         })
@@ -236,7 +239,7 @@ impl Demo {
             start_time: now,
         });
         if touch_goal {
-            self.finished = true;
+            self.touch_goal = true;
         }
         Ok(())
     }
@@ -300,8 +303,9 @@ impl Demo {
             Some(local) => {
                 let t_cur = now - local.start_time;
                 if t_cur > local.traj.duration() {
-                    // 轨迹执行完毕：touch_goal 则任务完成，否则（异常）重规划
-                    if self.finished {
+                    // 轨迹执行完毕：目标是终点则任务完成，否则（异常）重规划
+                    if self.touch_goal {
+                        self.finished = true;
                         return Ok(());
                     }
                     log::warn!("轨迹执行完毕但未到达目标，强制重规划");
