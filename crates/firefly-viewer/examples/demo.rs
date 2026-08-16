@@ -37,9 +37,18 @@ fn main() -> firefly_error::Result<()> {
     };
 
     viewer.log_map("world/obstacles", planner.map_ref())?;
-    viewer.log_trajectory("planner/trajectory", &result.trajectory)?;
+    viewer.log_trajectory(
+        "planner/trajectory",
+        &result.trajectory,
+        (80, 160, 255),
+        (255, 200, 80),
+    )?;
     viewer.log_planes("planner/planes", &result.planes)?;
-    viewer.log_path("planner/start_goal", &[start.position.coords, goal.coords])?;
+    viewer.log_path(
+        "planner/start_goal",
+        &[start.position.coords, goal.coords],
+        (80, 200, 120),
+    )?;
 
     // 轨迹概要
     let traj = &result.trajectory;

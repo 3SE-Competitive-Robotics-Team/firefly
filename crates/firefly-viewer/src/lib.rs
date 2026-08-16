@@ -81,19 +81,34 @@ impl Viewer {
     /// # Errors
     ///
     /// `Internal`：rerun 记录失败。
-    pub fn log_path(&self, entity: &str, points: &[Vector3<f64>]) -> Result<()> {
+    pub fn log_path(
+        &self,
+        entity: &str,
+        points: &[Vector3<f64>],
+        color: (u8, u8, u8),
+    ) -> Result<()> {
         let pts: Vec<[f64; 3]> = points.iter().map(|p| [p.x, p.y, p.z]).collect();
         self.rec
-            .log(entity, &rerun::LineStrips3D::new([pts]))
+            .log(
+                entity,
+                &rerun::LineStrips3D::new([pts.clone()])
+                    .with_colors([rerun::Color::from_rgb(color.0, color.1, color.2)]),
+            )
             .map_err(viewer_err)
     }
 
-    /// 轨迹 → 采样折线（位置）+ 速度向量。
+    /// 轨迹 → 采样折线（位置）+ 速度向量（箭头位于对应采样点）。
     ///
     /// # Errors
     ///
     /// `Internal`：rerun 记录失败。
-    pub fn log_trajectory(&self, entity: &str, traj: &Trajectory) -> Result<()> {
+    pub fn log_trajectory(
+        &self,
+        entity: &str,
+        traj: &Trajectory,
+        color: (u8, u8, u8),
+        velocity_color: (u8, u8, u8),
+    ) -> Result<()> {
         const SAMPLES: usize = 100;
         let mut pts = Vec::new();
         let mut arrows: Vec<[f64; 3]> = Vec::new();
@@ -104,24 +119,43 @@ impl Viewer {
             arrows.push([s.velocity.x, s.velocity.y, s.velocity.z]);
         }
         self.rec
-            .log(entity, &rerun::LineStrips3D::new([pts]))
+            .log(
+                entity,
+                &rerun::LineStrips3D::new([pts.clone()])
+                    .with_colors([rerun::Color::from_rgb(color.0, color.1, color.2)]),
+            )
             .map_err(viewer_err)?;
         self.rec
             .log(
                 format!("{entity}/velocity").as_str(),
-                &rerun::Arrows3D::from_vectors(arrows),
+                &rerun::Arrows3D::from_vectors(arrows)
+                    .with_origins(pts.clone())
+                    .with_colors([rerun::Color::from_rgb(
+                        velocity_color.0,
+                        velocity_color.1,
+                        velocity_color.2,
+                    )]),
             )
             .map_err(viewer_err)
     }
 
-    /// 无人机当前位置 → 3D 点。
+    /// 无人机当前位置 → 机体盒（0.3×0.3×0.1m，x 轴为机头）。
     ///
     /// # Errors
     ///
     /// `Internal`：rerun 记录失败。
-    pub fn log_position(&self, entity: &str, position: [f64; 3]) -> Result<()> {
+    pub fn log_position(
+        &self,
+        entity: &str,
+        position: [f64; 3],
+        color: (u8, u8, u8),
+    ) -> Result<()> {
         self.rec
-            .log(entity, &rerun::Points3D::new([position]))
+            .log(
+                entity,
+                &rerun::Boxes3D::from_centers_and_half_sizes([position], [[0.15, 0.15, 0.05]])
+                    .with_colors([rerun::Color::from_rgb(color.0, color.1, color.2)]),
+            )
             .map_err(viewer_err)
     }
 
@@ -173,14 +207,16 @@ impl Viewer {
         let vectors: Vec<[f64; 3]> = planes
             .iter()
             .map(|p| {
-                let v = p.normal() * 0.3;
+                let v = p.normal() * 0.6;
                 [v.x, v.y, v.z]
             })
             .collect();
         self.rec
             .log(
                 entity,
-                &rerun::Arrows3D::from_vectors(vectors).with_origins(origins),
+                &rerun::Arrows3D::from_vectors(vectors)
+                    .with_origins(origins)
+                    .with_colors([rerun::Color::from_rgb(240, 200, 60)]),
             )
             .map_err(viewer_err)
     }

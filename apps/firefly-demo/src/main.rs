@@ -220,8 +220,12 @@ impl Demo {
                 return Ok(());
             }
         };
-        self.viewer
-            .log_trajectory("local_traj", &result.trajectory)?;
+        self.viewer.log_trajectory(
+            "local_traj",
+            &result.trajectory,
+            (80, 160, 255),
+            (255, 200, 80),
+        )?;
         self.viewer.log_planes("planes", &result.planes)?;
         self.local = Some(LocalTraj {
             traj: result.trajectory,
@@ -245,9 +249,14 @@ impl Demo {
             acceleration: Vector3::zeros(),
         };
         let result = self.planner.plan(start, self.goal)?;
-        self.viewer.log_path("global_path", &self.global_path)?;
         self.viewer
-            .log_trajectory("local_traj", &result.trajectory)?;
+            .log_path("global_path", &self.global_path, (80, 200, 120))?;
+        self.viewer.log_trajectory(
+            "local_traj",
+            &result.trajectory,
+            (80, 160, 255),
+            (255, 200, 80),
+        )?;
         self.viewer.log_planes("planes", &result.planes)?;
         self.local = Some(LocalTraj {
             traj: result.trajectory,
@@ -303,7 +312,7 @@ impl Demo {
             let t_cur = (now - local.start_time).clamp(0.0, local.traj.duration());
             let s = local.traj.eval(t_cur);
             let pos = [s.position.x, s.position.y, s.position.z];
-            self.viewer.log_position("drone", pos)?;
+            self.viewer.log_position("drone", pos, (255, 140, 40))?;
         }
         // 动态障碍按真实尺寸渲染（motions 实体）
         if !self.map_file.motions.is_empty() {
