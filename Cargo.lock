@@ -1277,6 +1277,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "firefly-vio-core"
+version = "0.1.0"
+dependencies = [
+ "firefly-vio-types",
+ "nalgebra",
+]
+
+[[package]]
 name = "firefly-vio-types"
 version = "0.1.0"
 dependencies = [
