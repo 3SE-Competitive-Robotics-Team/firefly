@@ -117,7 +117,6 @@ fn tree(cx: f64, cy: f64) -> [Obstacle; 2] {
 
 /// 森林（树木错落分布，树冠间距 2m 形成蜿蜒通道）+ 四个横向穿行的动态障碍。
 fn forest_dyn() -> Scene {
-    let mut s = base();
     // 树位错落：x 间隔 2m（树冠 1.6m，视觉连续），y 高低交替留蜿蜒通道
     const SPOTS: &[[f64; 2]] = &[
         [3.0, 2.0],
@@ -136,6 +135,7 @@ fn forest_dyn() -> Scene {
         [23.0, 6.2],
         [25.0, 6.0],
     ];
+    let mut s = base();
     let mut obstacles = Vec::new();
     for [x, y] in SPOTS {
         obstacles.extend(tree(*x, *y));
