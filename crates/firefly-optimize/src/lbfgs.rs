@@ -12,6 +12,11 @@ use nalgebra::DVector;
 pub trait Objective {
     fn evaluate(&mut self, x: &DVector<f64>) -> f64;
     fn gradient(&mut self, x: &DVector<f64>) -> DVector<f64>;
+    /// 目标函数是否请求提前终止（官方 earlyExitCallback：优化中动态更新约束后
+    /// 目标已变，当前搜索方向无效，终止后由外层重新优化）。
+    fn early_exit(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -20,8 +25,10 @@ pub struct LbfgsConfig {
     pub max_iterations: usize,
     /// 梯度收敛：‖g‖∞ / max(1, ‖x‖∞) < ε（LBFGS-Lite `g_epsilon`）。
     pub gradient_epsilon: f64,
-    /// 相对改进停止：`|f_prev − f| / max(1, |f|) < δ`（LBFGS-Lite `delta`）。
+    /// 相对改进停止：`|f_prev − f| / max(1, |f|) < δ`，连续 `past` 次满足即收敛
+    /// （官方 EGO-Planner v2：`past = 3, delta = 1e-2`）。
     pub delta: f64,
+    pub past: usize,
     /// Armijo 系数 c1。
     pub f_dec_coeff: f64,
     /// 弱 Wolfe 曲率系数 c2。
@@ -33,9 +40,10 @@ impl Default for LbfgsConfig {
     fn default() -> Self {
         Self {
             memory: 16,
-            max_iterations: 1000,
+            max_iterations: 200,
             gradient_epsilon: 1e-5,
-            delta: 1e-4,
+            delta: 1e-2,
+            past: 3,
             f_dec_coeff: 1e-4,
             s_curv_coeff: 0.9,
             max_line_search: 200,
@@ -49,6 +57,8 @@ pub struct LbfgsReport {
     pub final_cost: f64,
     pub gradient_norm: f64,
     pub converged: bool,
+    /// 目标函数请求提前终止（约束在优化中动态更新）。
+    pub early_exit: bool,
     pub final_x: DVector<f64>,
 }
 
@@ -76,8 +86,21 @@ impl Lbfgs {
         let mut s_history: VecDeque<DVector<f64>> = VecDeque::with_capacity(self.config.memory);
         let mut y_history: VecDeque<DVector<f64>> = VecDeque::with_capacity(self.config.memory);
         let mut rho_history: VecDeque<f64> = VecDeque::with_capacity(self.config.memory);
+        // past 收敛判据：连续 past 次相对改进小于 delta（官方 lbfgs `past/delta`）
+        let mut past_improved = 0usize;
 
         for iter in 0..self.config.max_iterations {
+            if objective.early_exit() {
+                return Ok(LbfgsReport {
+                    iterations: iter,
+                    final_cost: fx,
+                    gradient_norm: g.iter().fold(0.0f64, |m, v| m.max(v.abs())),
+                    converged: false,
+                    early_exit: true,
+                    final_x: x.clone(),
+                });
+            }
+
             // 梯度收敛：‖g‖∞ / max(1, ‖x‖∞) < ε
             let gnorm_inf = g.iter().fold(0.0f64, |m, v| m.max(v.abs()));
             let xnorm_inf = x.iter().fold(0.0f64, |m, v| m.max(v.abs()));
@@ -87,6 +110,7 @@ impl Lbfgs {
                     final_cost: fx,
                     gradient_norm: gnorm_inf,
                     converged: true,
+                    early_exit: false,
                     final_x: x.clone(),
                 });
             }
@@ -104,18 +128,25 @@ impl Lbfgs {
                     final_cost: fx,
                     gradient_norm: g.iter().fold(0.0f64, |m, v| m.max(v.abs())),
                     converged: false,
+                    early_exit: false,
                     final_x: x.clone(),
                 });
             }
 
-            // 相对改进停止：`|f_prev − f| / max(1, |f|) < δ`
+            // 相对改进停止（官方 past/delta）：连续 past 次 |Δf|/max(1,|f|) < δ
             let rate = (fx - f_next).abs() / f_next.abs().max(1.0);
-            if rate < self.config.delta && iter > 0 {
+            if rate < self.config.delta {
+                past_improved += 1;
+            } else {
+                past_improved = 0;
+            }
+            if past_improved >= self.config.past && iter > 0 {
                 return Ok(LbfgsReport {
                     iterations: iter,
                     final_cost: f_next,
                     gradient_norm: g_next.iter().fold(0.0f64, |m, v| m.max(v.abs())),
                     converged: true,
+                    early_exit: false,
                     final_x: x_next.clone(),
                 });
             }
@@ -148,6 +179,7 @@ impl Lbfgs {
             final_cost: fx,
             gradient_norm: g.iter().fold(0.0f64, |m, v| m.max(v.abs())),
             converged: false,
+            early_exit: false,
             final_x: x,
         })
     }
@@ -307,7 +339,12 @@ mod tests {
 
     #[test]
     fn converges_on_rosenbrock() {
-        let lbfgs = Lbfgs::new(LbfgsConfig::default());
+        let config = LbfgsConfig {
+            max_iterations: 1000,
+            delta: 1e-6,
+            ..LbfgsConfig::default()
+        };
+        let lbfgs = Lbfgs::new(config);
         let mut obj = Rosenbrock;
         let report = lbfgs
             .minimize(&mut obj, DVector::from_vec(vec![-1.2, 1.0]))

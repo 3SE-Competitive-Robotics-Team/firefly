@@ -5,20 +5,124 @@
 //! 梯度经 `Minco::propagate_gradient` 传播到 {q, T}。
 
 use firefly_cost::Cost;
+use firefly_map::{GridMap, Plane};
 use firefly_optimize::Objective;
 use firefly_trajectory::{Endpoint, Minco, MincoBuilder, SolverOrder};
 use nalgebra::{DMatrix, DVector, Point3, Vector3};
 
-pub struct MincoObjective {
+use crate::obstacles::{Hit, nearest_guide_point};
+
+/// L-BFGS 内循环碰撞检测（官方 `roughlyCheckConstraintPoints`）：
+/// 每轮求值检查前 2/3 约束点，发现未覆盖穿入点即请求提前终止，
+/// 由外层吸收新平面后重新优化。
+pub struct ReboundDetector<'a> {
+    map: &'a GridMap,
+    guide: &'a [Vector3<f64>],
+    samples_per_piece: usize,
+    planes: Vec<Vec<Plane>>,
+}
+
+impl<'a> ReboundDetector<'a> {
+    #[must_use]
+    pub fn new(
+        map: &'a GridMap,
+        guide: &'a [Vector3<f64>],
+        samples_per_piece: usize,
+        planes: Vec<Vec<Plane>>,
+    ) -> Self {
+        Self {
+            map,
+            guide,
+            samples_per_piece,
+            planes,
+        }
+    }
+
+    /// 官方 `allowRebound` criterion 2：约束点序列最小转向角 < 30°
+    /// （点积 < 0.87）时不触发 rebound——大变形轨迹的局部碰撞检测无意义，
+    /// 等 L-BFGS 继续优化。
+    #[must_use]
+    pub fn allow_rebound(&self, traj: &firefly_trajectory::Trajectory) -> bool {
+        let mut min_product: f64 = 1.0;
+        let mut prev: Option<Vector3<f64>> = None;
+        let mut prev_dir: Option<Vector3<f64>> = None;
+        for i in 0..traj.durations().len() {
+            let ti = traj.durations()[i];
+            for j in 0..=self.samples_per_piece {
+                let tau = j as f64 / self.samples_per_piece as f64;
+                let mut t = 0.0;
+                for d in traj.durations().iter().take(i) {
+                    t += d;
+                }
+                t += tau * ti;
+                let p = traj.eval(t).position;
+                if let Some(q) = prev {
+                    let dir = (p - q).normalize();
+                    if let Some(d0) = prev_dir {
+                        min_product = min_product.min(d0.dot(&dir));
+                    }
+                    prev_dir = Some(dir);
+                }
+                prev = Some(p);
+            }
+        }
+        min_product >= 0.87
+    }
+
+    /// 检查约束点（只查前 2/3，官方 `two_thirds_id`），返回未覆盖的穿入点。
+    #[must_use]
+    pub fn check(&self, traj: &firefly_trajectory::Trajectory) -> Vec<Hit> {
+        let mut hits = Vec::new();
+        let two_thirds = (traj.durations().len() * 2 / 3).max(1);
+        let res = self.map.resolution();
+        for i in 0..two_thirds {
+            let ti = traj.durations()[i];
+            for j in 0..=self.samples_per_piece {
+                let tau = j as f64 / self.samples_per_piece as f64;
+                let mut t = 0.0;
+                for d in traj.durations().iter().take(i) {
+                    t += d;
+                }
+                t += tau * ti;
+                let s = traj.eval(t);
+                if !self.map.is_occupied_inflated(s.position) {
+                    continue;
+                }
+                let point_index = i * (self.samples_per_piece + 1) + j;
+                // 官方覆盖判定：(p − s)·v < 分辨率 视为已被约束
+                let covered = self.planes[point_index]
+                    .iter()
+                    .any(|pl| (s.position - pl.point()).dot(&pl.normal()) < res);
+                if covered {
+                    continue;
+                }
+                if let Some(nearest) = nearest_guide_point(self.guide, s.position) {
+                    hits.push(Hit {
+                        point_index,
+                        sample: s,
+                        guide_point: nearest,
+                    });
+                }
+            }
+        }
+        hits
+    }
+}
+
+pub struct MincoObjective<'a> {
     start: Endpoint,
     end: Endpoint,
     pieces: usize,
     cost: Cost,
     // L-BFGS 对同一 x 先 evaluate 再 gradient：缓存 solve 结果省一半计算
     cache: Option<(DVector<f64>, Minco, firefly_trajectory::Trajectory)>,
+    detector: Option<ReboundDetector<'a>>,
+    eval_count: usize,
+    early_exit: bool,
+    pending: Vec<Hit>,
 }
 
-impl MincoObjective {
+impl<'a> MincoObjective<'a> {
     #[must_use]
     pub fn new(start: Endpoint, end: Endpoint, pieces: usize, cost: Cost) -> Self {
         Self {
@@ -27,7 +131,29 @@ impl MincoObjective {
             pieces,
             cost,
             cache: None,
+            detector: None,
+            eval_count: 0,
+            early_exit: false,
+            pending: Vec::new(),
         }
+    }
+
+    /// 挂载内循环碰撞检测（官方 allowRebound：迭代 ≥3 后启用）。
+    #[must_use]
+    pub fn with_detector(
+        mut self,
+        map: &'a GridMap,
+        guide: &'a [Vector3<f64>],
+        samples_per_piece: usize,
+        planes: Vec<Vec<Plane>>,
+    ) -> Self {
+        self.detector = Some(ReboundDetector::new(map, guide, samples_per_piece, planes));
+        self
+    }
+
+    /// 取走本次优化中检测到的新穿入点（外层并入平面池）。
+    pub fn take_pending(&mut self) -> Vec<Hit> {
+        std::mem::take(&mut self.pending)
     }
 
     /// 重建 minco 并求解，命中缓存时复用。
@@ -83,12 +209,28 @@ impl MincoObjective {
     }
 }
 
-impl Objective for MincoObjective {
+impl Objective for MincoObjective<'_> {
     fn evaluate(&mut self, x: &DVector<f64>) -> f64 {
-        match self.solve_cached(x) {
-            Some(traj) => self.cost.evaluate(&traj),
-            None => f64::INFINITY,
+        self.eval_count += 1;
+        let Some(traj) = self.solve_cached(x) else {
+            return f64::INFINITY;
+        };
+        // 官方 allowRebound criterion 1+2：前 3 次求值不检测；轨迹大转角不检测
+        if self.eval_count >= 3
+            && let Some(detector) = &self.detector
+            && detector.allow_rebound(&traj)
+        {
+            let hits = detector.check(&traj);
+            if !hits.is_empty() {
+                self.pending.extend(hits);
+                self.early_exit = true;
+            }
         }
+        self.cost.evaluate(&traj)
+    }
+
+    fn early_exit(&self) -> bool {
+        self.early_exit
     }
 
     fn gradient(&mut self, x: &DVector<f64>) -> DVector<f64> {
