@@ -20,7 +20,7 @@ firefly-viewer = { path = "crates/firefly-viewer" }
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.97"
 description = "EGO 规划器 Rust 实现：MINCO 后端 + Rebound 主循环 + 集群避碰"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/3SE-Competitive-Robotics-Team/firefly"
