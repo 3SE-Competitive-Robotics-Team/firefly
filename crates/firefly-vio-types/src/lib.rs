@@ -5,3 +5,4 @@
 //! - （规划中）IMU 测量、变量类型（Vec/Pose/Landmark）。
 
 pub mod quat_ops;
+pub mod var;
