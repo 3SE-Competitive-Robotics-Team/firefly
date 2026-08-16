@@ -11,22 +11,24 @@ use nalgebra::{Point3, Vector2, Vector3};
 #[test]
 #[allow(clippy::similar_names)]
 fn planner_avoids_dynamic_obstacle() {
+    firefly_observability::init();
     // 空旷地图，本机沿 x 轴飞行
-    let map = GridMapBuilder::new(0.5, [24, 12, 12]).build().unwrap();
+    // y 方向留足避让空间（地图 12×8×6m）
+    let map = GridMapBuilder::new(0.5, [24, 16, 12]).build().unwrap();
     let config = PlannerConfig::default();
     let mut planner = Planner::new(config, map);
     let start = State {
-        position: Point3::new(0.5, 0.5, 1.0),
+        position: Point3::new(0.5, 3.0, 1.0),
         velocity: Vector3::zeros(),
         acceleration: Vector3::zeros(),
     };
-    let goal = Point3::new(9.0, 0.5, 1.0);
+    let goal = Point3::new(9.0, 3.0, 1.0);
 
     // 动态障碍：横向穿过本机路径（y=0.5 附近），需要小幅 y 避让
     // 官方语义：CLEARANCE = (Cw_self + des_clearance) × 1.5 = (0.5 + 0.5) × 1.5 = 1.5
     // 障碍位于路径侧方（初始距离 ~1.2 < 1.5），需小幅避让
     let obstacle = MovingObstacle::new(
-        Vector2::new(4.5, 1.7),
+        Vector2::new(4.5, 4.2),
         Vector2::new(0.0, -0.2),
         -core::f64::consts::FRAC_PI_2,
         1.0,

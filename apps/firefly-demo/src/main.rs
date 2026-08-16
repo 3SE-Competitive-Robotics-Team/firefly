@@ -254,7 +254,14 @@ impl Demo {
             velocity: Vector3::zeros(),
             acceleration: Vector3::zeros(),
         };
-        let result = self.planner.plan(start, self.goal)?;
+        // 官方 FSM：初始规划失败不退出，保持状态下一帧重试
+        let result = match self.planner.plan(start, self.goal) {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("初始规划失败：{e}，下一帧重试");
+                return Ok(());
+            }
+        };
         self.viewer
             .log_path("global_path", &self.global_path, (80, 200, 120))?;
         self.viewer.log_trajectory(

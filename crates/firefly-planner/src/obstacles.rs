@@ -28,6 +28,11 @@ impl<'a> ObstacleScanner<'a> {
         }
     }
 
+    #[must_use]
+    pub fn map(&self) -> &'a GridMap {
+        self.map
+    }
+
     pub fn with_samples(mut self, samples: usize) -> Self {
         self.samples_per_piece = samples;
         self
@@ -42,19 +47,19 @@ impl<'a> ObstacleScanner<'a> {
         guide: &[Vector3<f64>],
         planes_by_point: &[Vec<Plane>],
     ) -> (Vec<Hit>, bool) {
-        const DETECT: usize = 40;
         let mut hits = Vec::new();
         let mut safe = true;
+        // 检查约束点粒度（官方 fine check 检查 cps 网格）：约束点之间由
+        // 内循环检测兜底，避免"无主"穿入点导致 stuck
         for (i, ti) in traj.durations().iter().enumerate() {
-            for k in 0..DETECT {
-                let tau = k as f64 / DETECT as f64;
+            for j in 0..=self.samples_per_piece {
+                let tau = j as f64 / self.samples_per_piece as f64;
                 let t = segment_time(traj, i, *ti, tau);
                 let s = traj.eval(t);
                 if !self.map.is_occupied_inflated(s.position) {
                     continue;
                 }
                 safe = false;
-                let j = (tau * self.samples_per_piece as f64).round() as usize;
                 let point_index = i * (self.samples_per_piece + 1) + j;
                 if planes_by_point[point_index]
                     .iter()
@@ -93,38 +98,11 @@ impl<'a> ObstacleScanner<'a> {
         Plane::new(s, v)
     }
 
-    /// 全部穿入点（不做平面覆盖检查，stuck 时强制重建平面用）。
-    pub fn scan_collisions(&self, traj: &Trajectory, guide: &[Vector3<f64>]) -> Vec<Hit> {
-        const DETECT: usize = 40;
-        let mut hits = Vec::new();
-        for (i, ti) in traj.durations().iter().enumerate() {
-            for k in 0..DETECT {
-                let tau = k as f64 / DETECT as f64;
-                let t = segment_time(traj, i, *ti, tau);
-                let s = traj.eval(t);
-                if !self.map.is_occupied_inflated(s.position) {
-                    continue;
-                }
-                let j = (tau * self.samples_per_piece as f64).round() as usize;
-                let point_index = i * (self.samples_per_piece + 1) + j;
-                if let Some(nearest) = nearest_guide_point(guide, s.position) {
-                    hits.push(Hit {
-                        point_index,
-                        sample: s,
-                        guide_point: nearest,
-                    });
-                }
-            }
-        }
-        hits
-    }
-
-    /// 当前轨迹是否物理安全：高密度采样均不在占据体素内。
+    /// 当前轨迹是否物理安全：约束点粒度采样均不在膨胀层内（官方 cps 检查粒度）。
     pub fn is_safe(&self, traj: &Trajectory) -> bool {
-        const DETECT: usize = 40;
         for (i, ti) in traj.durations().iter().enumerate() {
-            for k in 0..DETECT {
-                let tau = k as f64 / DETECT as f64;
+            for j in 0..=self.samples_per_piece {
+                let tau = j as f64 / self.samples_per_piece as f64;
                 let t = segment_time(traj, i, *ti, tau);
                 if self.map.is_occupied_inflated(traj.eval(t).position) {
                     return false;

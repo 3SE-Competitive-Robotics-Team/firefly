@@ -133,14 +133,17 @@ impl Lbfgs {
                 });
             }
 
-            // 相对改进停止（官方 past/delta）：连续 past 次 |Δf|/max(1,|f|) < δ
+            // 相对改进停止（官方 liblbfgs）：连续 past 次 |Δf|/max(1,|f|) < δ
+            // 且步长 < xtol×max(1,|x|)——缺步长条件会在轨迹大步移动但改进
+            // 缓慢时假收敛（障碍梯度未被推离）
             let rate = (fx - f_next).abs() / f_next.abs().max(1.0);
             if rate < self.config.delta {
                 past_improved += 1;
             } else {
                 past_improved = 0;
             }
-            if past_improved >= self.config.past && iter > 0 {
+            let xtol = 1e-16 * x_next.norm().max(1.0);
+            if past_improved >= self.config.past && step_taken < xtol && iter > 0 {
                 return Ok(LbfgsReport {
                     iterations: iter,
                     final_cost: f_next,
