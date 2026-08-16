@@ -113,6 +113,8 @@ pub struct MapFile {
     pub dims: [usize; 3],
     /// 占据体素世界坐标（米）。
     pub occupied: Vec<[f64; 3]>,
+    /// 装饰体素（不参与规划的视觉元素，如草丛）。
+    pub decor: Vec<[f64; 3]>,
     pub motions: Vec<Motion>,
 }
 
@@ -191,6 +193,12 @@ impl std::fmt::Display for MapFile {
                 writeln!(f, "{:.3} {:.3} {:.3}", p[0], p[1], p[2])?;
             }
         }
+        if !self.decor.is_empty() {
+            writeln!(f, "DECOR")?;
+            for p in &self.decor {
+                writeln!(f, "{:.3} {:.3} {:.3}", p[0], p[1], p[2])?;
+            }
+        }
         for m in &self.motions {
             match m.shape {
                 Shape::Box { center, size } => {
@@ -228,8 +236,11 @@ impl Parser {
         let mut origin = None;
         let mut dims = None;
         let mut occupied = Vec::new();
+        let mut decor = Vec::new();
         let mut motions = Vec::new();
         let mut current: Option<Motion> = None;
+        // 数据段：占据（默认）或装饰
+        let mut in_decor = false;
         let mut line_no = 0usize;
 
         for raw in text.lines() {
@@ -261,6 +272,11 @@ impl Parser {
                 }
                 "OCCUPANCY" => {
                     finish_motion(&mut motions, &mut current, line_no)?;
+                    in_decor = false;
+                }
+                "DECOR" => {
+                    finish_motion(&mut motions, &mut current, line_no)?;
+                    in_decor = true;
                 }
                 "MOTION" => {
                     finish_motion(&mut motions, &mut current, line_no)?;
@@ -276,10 +292,14 @@ impl Parser {
                     parse_waypoint(&words, line_no, &mut m.waypoints)?;
                 }
                 _ => {
-                    // OCCUPANCY 段的数据行（整行三个坐标）
+                    // 数据行（整行三个坐标），归属当前段
                     let nums =
                         parse_f64_n(&line.split_whitespace().collect::<Vec<_>>(), 3, line_no)?;
-                    occupied.push([nums[0], nums[1], nums[2]]);
+                    if in_decor {
+                        decor.push([nums[0], nums[1], nums[2]]);
+                    } else {
+                        occupied.push([nums[0], nums[1], nums[2]]);
+                    }
                 }
             }
         }
@@ -296,6 +316,7 @@ impl Parser {
             origin,
             dims,
             occupied,
+            decor,
             motions,
         })
     }

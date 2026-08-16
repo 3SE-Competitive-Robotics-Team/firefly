@@ -446,6 +446,24 @@ fn main() {
         }
     };
     viewer.log_map("map", &grid).expect("log map");
+    // 装饰层（草丛）：不参与规划，绿色体素
+    if !map_file.decor.is_empty() {
+        let indices: Vec<(i32, i32, i32)> = map_file
+            .decor
+            .iter()
+            .filter_map(|p| grid.index_of(Vector3::new(p[0], p[1], p[2])))
+            .map(|idx| (idx[0] as i32, idx[1] as i32, idx[2] as i32))
+            .collect();
+        viewer
+            .log_voxel_grid(
+                "decor",
+                &indices,
+                [0.1, 0.1, 0.1],
+                [0.0, 0.0, 0.0],
+                (90, 200, 90),
+            )
+            .expect("log decor");
+    }
     match Demo::new(
         map_file,
         viewer,

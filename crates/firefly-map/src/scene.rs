@@ -16,6 +16,8 @@ pub struct Scene {
     pub origin: [f64; 3],
     pub dims: [usize; 3],
     pub obstacles: Vec<Obstacle>,
+    /// 装饰几何（不参与规划，如草丛）。
+    pub decor: Vec<Obstacle>,
     pub start: [f64; 3],
     pub goal: [f64; 3],
     /// 动态障碍（运动航点）。
@@ -29,6 +31,7 @@ impl Default for Scene {
             origin: [0.0; 3],
             dims: [280, 80, 32],
             obstacles: Vec::new(),
+            decor: Vec::new(),
             start: [1.0, 4.0, 1.0],
             goal: [27.0, 4.0, 1.0],
             motions: Vec::new(),
@@ -70,11 +73,19 @@ impl Scene {
                 occupied.push([c.x, c.y, c.z]);
             }
         }
+        let mut decor = Vec::new();
+        for obstacle in &self.decor {
+            for idx in Self::voxels_of(*obstacle, &grid) {
+                let c = grid_voxel_center(&grid, idx);
+                decor.push([c.x, c.y, c.z]);
+            }
+        }
         Ok(MapFile {
             resolution: self.resolution,
             origin: self.origin,
             dims: self.dims,
             occupied,
+            decor,
             motions: self.motions.clone(),
         })
     }
