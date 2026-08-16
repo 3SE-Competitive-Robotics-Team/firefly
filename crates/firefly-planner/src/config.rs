@@ -4,7 +4,8 @@
 
 #[derive(Debug, Clone)]
 pub struct PlannerConfig {
-    pub trajectory_pieces: usize,
+    /// 每段路径长度（米），段数随引导路径长度自适应（官方 `polyTraj_piece_length`）。
+    pub piece_length: f64,
     pub constraint_points_per_piece: usize,
     pub planning_distance: f64,
     pub obstacle_clearance: f64,
@@ -25,8 +26,8 @@ pub struct PlannerConfig {
 impl Default for PlannerConfig {
     fn default() -> Self {
         Self {
-            trajectory_pieces: 5,
-            constraint_points_per_piece: 5,
+            piece_length: 1.5,
+            constraint_points_per_piece: 12,
             planning_distance: 7.5,
             obstacle_clearance: 0.3,
             obstacle_inflation: 0.2,
@@ -52,8 +53,7 @@ mod tests {
     #[test]
     fn defaults_match_paper_table_s6() {
         let c = PlannerConfig::default();
-        assert_eq!(c.trajectory_pieces, 5);
-        assert_eq!(c.constraint_points_per_piece, 5);
+        assert_eq!(c.constraint_points_per_piece, 12);
         assert_eq!(c.obstacle_clearance, 0.3);
         assert_eq!(c.obstacle_inflation, 0.2);
         assert_eq!(c.swarm_clearance, 0.5);
