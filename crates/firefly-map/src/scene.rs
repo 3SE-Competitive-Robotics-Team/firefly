@@ -1,205 +1,188 @@
-//! 场景通用格式（JSON）：几何障碍 + 起终点，可体素化为 `GridMap`。
+//! 场景设计器：用几何体程序化定义障碍 + 起终点，导出 `FFMap` 标准格式。
 //!
-//! 地图文件示例：
-//! ```json
-//! {
-//!   "resolution": 0.4,
-//!   "origin": [0, 0, 0],
-//!   "bounds": [24, 12, 6],
-//!   "obstacles": [
-//!     { "type": "box", "center": [4, 3, 1.5], "size": [0.8, 6, 3] },
-//!     { "type": "sphere", "center": [8, 2, 1], "radius": 0.8 }
-//!   ],
-//!   "start": [1, 1, 1],
-//!   "goal": [20, 3, 1]
-//! }
-//! ```
-
-use std::fs;
+//! 场景是*内存中的设计工具*，不是地图格式本身；地图一律以
+//! `MapFile`（`.ffmap`）落盘（见 `docs/map-format.md`）。
 
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::Vector3;
-use serde::{Deserialize, Serialize};
 
-use crate::{GridMap, GridMapBuilder, VoxelState};
+use super::format::{MapFile, Motion, Shape};
+use super::{GridMap, GridMapBuilder};
 
-/// 场景：分辨率、原点、包围盒、障碍物、起终点。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 场景：分辨率、原点、体素包围盒、几何障碍、起终点、动态障碍。
+#[derive(Debug, Clone)]
 pub struct Scene {
     pub resolution: f64,
-    #[serde(default = "zero_origin")]
     pub origin: [f64; 3],
-    /// 体素包围盒维度（[x, y, z] 格数）。
-    pub bounds: [usize; 3],
+    pub dims: [usize; 3],
     pub obstacles: Vec<Obstacle>,
     pub start: [f64; 3],
     pub goal: [f64; 3],
+    /// 动态障碍（运动航点）。
+    pub motions: Vec<Motion>,
+}
+
+impl Default for Scene {
+    fn default() -> Self {
+        Self {
+            resolution: 0.4,
+            origin: [0.0; 3],
+            dims: [50, 20, 8],
+            obstacles: Vec::new(),
+            start: [1.0, 4.0, 1.0],
+            goal: [45.0, 4.0, 1.0],
+            motions: Vec::new(),
+        }
+    }
 }
 
 /// 几何障碍物。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy)]
 pub enum Obstacle {
     Box { center: [f64; 3], size: [f64; 3] },
     Sphere { center: [f64; 3], radius: f64 },
 }
-
-fn zero_origin() -> [f64; 3] {
-    [0.0; 3]
-}
-
 impl Scene {
-    /// 从 JSON 文件加载场景。
-    ///
-    /// # Errors
-    ///
-    /// `NotFound`：文件不存在；`InvalidData`：JSON 解析失败或字段非法。
-    pub fn from_json(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let text = fs::read_to_string(path.as_ref())
-            .map_err(|e| Error::new(ErrorKind::NotFound, "scene file not found").with_source(e))?;
-        let scene: Scene = serde_json::from_str(&text).map_err(|e| {
-            Error::new(ErrorKind::InvalidArgument, "invalid scene json").with_source(e)
-        })?;
-        scene.validate()?;
-        Ok(scene)
-    }
-
-    /// 校验字段（分辨率/包围盒/起终点合法）。
+    /// 校验场景字段合法。
     fn validate(&self) -> Result<()> {
-        let ok = self.resolution > 0.0
-            && self.bounds.iter().all(|&d| d > 0)
-            && self.start.len() == 3
-            && self.goal.len() == 3;
+        let ok = self.resolution > 0.0 && self.dims.iter().all(|&d| d > 0);
         if !ok {
             return Err(Error::new(
                 ErrorKind::InvalidArgument,
-                "scene fields must be positive",
+                "scene resolution/dims must be positive",
             ));
         }
         Ok(())
     }
 
-    /// 体素化：障碍覆盖的体素标 `Occupied`，其余 `Unknown`。
+    /// 导出为标准 `FFMap` 文件。
     ///
     /// # Errors
     ///
-    /// `InvalidArgument`：分辨率非法。
-    pub fn to_grid_map(&self) -> Result<GridMap> {
-        let mut map = GridMapBuilder::new(self.resolution, self.bounds)
-            .with_origin(Vector3::new(self.origin[0], self.origin[1], self.origin[2]))
-            .build()?;
+    /// `InvalidArgument`：场景字段非法。
+    pub fn to_map_file(&self) -> Result<MapFile> {
+        self.validate()?;
+        let grid = self.to_grid_map()?;
+        let mut occupied = Vec::new();
         for obstacle in &self.obstacles {
-            for idx in self.voxels_of(obstacle) {
-                map.set_state(idx, VoxelState::Occupied);
+            for idx in Self::voxels_of(*obstacle, &grid) {
+                let c = grid_voxel_center(&grid, idx);
+                occupied.push([c.x, c.y, c.z]);
             }
         }
+        Ok(MapFile {
+            resolution: self.resolution,
+            origin: self.origin,
+            dims: self.dims,
+            occupied,
+            motions: self.motions.clone(),
+        })
+    }
+
+    /// 静态障碍栅格化。
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArgument`：场景字段非法。
+    pub fn to_grid_map(&self) -> Result<GridMap> {
+        self.validate()?;
+        let map = GridMapBuilder::new(self.resolution, self.dims)
+            .with_origin(Vector3::new(self.origin[0], self.origin[1], self.origin[2]))
+            .build()?;
         Ok(map)
     }
 
-    /// 障碍覆盖的体素索引列表。
-    fn voxels_of(&self, obstacle: &Obstacle) -> Vec<[usize; 3]> {
-        let mut out = Vec::new();
-        let (lo, hi) = match obstacle {
-            Obstacle::Box { center, size } => {
-                let c = Vector3::new(center[0], center[1], center[2]);
-                let s = Vector3::new(size[0], size[1], size[2]);
-                (c - s / 2.0, c + s / 2.0)
-            }
-            Obstacle::Sphere { center, radius } => {
-                let c = Vector3::new(center[0], center[1], center[2]);
-                (
-                    c - Vector3::new(*radius, *radius, *radius),
-                    c + Vector3::new(*radius, *radius, *radius),
-                )
-            }
-        };
-        let (i0, i1, j0, j1, k0, k1) = self.voxel_range(lo, hi);
-        for i in i0..i1 {
-            for j in j0..j1 {
-                for k in k0..k1 {
-                    let p = self.voxel_center([i, j, k]);
-                    let inside = match obstacle {
-                        Obstacle::Box { .. } => true,
-                        Obstacle::Sphere { center, radius } => {
-                            let c = Vector3::new(center[0], center[1], center[2]);
-                            (p - c).norm() <= *radius
-                        }
-                    };
-                    if inside {
-                        out.push([i, j, k]);
-                    }
-                }
-            }
+    /// 障碍覆盖的体素索引列表（静态部分）。
+    fn voxels_of(obstacle: Obstacle, map: &GridMap) -> Vec<[usize; 3]> {
+        match obstacle {
+            Obstacle::Box { center, size } => Shape::Box { center, size }
+                .voxels_at(Vector3::new(center[0], center[1], center[2]), map),
+            Obstacle::Sphere { center, radius } => Shape::Sphere { center, radius }
+                .voxels_at(Vector3::new(center[0], center[1], center[2]), map),
         }
-        out
     }
+}
 
-    /// 体素索引范围（含下界、不含上界），夹在包围盒内。
-    fn voxel_range(
-        &self,
-        lo: Vector3<f64>,
-        hi: Vector3<f64>,
-    ) -> (usize, usize, usize, usize, usize, usize) {
-        let res = self.resolution;
-        let origin = Vector3::new(self.origin[0], self.origin[1], self.origin[2]);
-        let clamp =
-            |v: f64, dim: usize| v.clamp(origin[dim], origin[dim] + self.bounds[dim] as f64 * res);
-        let i0 = ((clamp(lo.x, 0) - origin.x) / res).floor() as usize;
-        let i1 = ((clamp(hi.x, 0) - origin.x) / res).ceil() as usize;
-        let j0 = ((clamp(lo.y, 1) - origin.y) / res).floor() as usize;
-        let j1 = ((clamp(hi.y, 1) - origin.y) / res).ceil() as usize;
-        let k0 = ((clamp(lo.z, 2) - origin.z) / res).floor() as usize;
-        let k1 = ((clamp(hi.z, 2) - origin.z) / res).ceil() as usize;
-        (
-            i0,
-            i1.min(self.bounds[0]),
-            j0,
-            j1.min(self.bounds[1]),
-            k0,
-            k1.min(self.bounds[2]),
-        )
-    }
-
-    fn voxel_center(&self, idx: [usize; 3]) -> Vector3<f64> {
-        Vector3::new(
-            self.origin[0] + (idx[0] as f64 + 0.5) * self.resolution,
-            self.origin[1] + (idx[1] as f64 + 0.5) * self.resolution,
-            self.origin[2] + (idx[2] as f64 + 0.5) * self.resolution,
-        )
-    }
+/// 体素中心世界坐标。
+fn grid_voxel_center(map: &GridMap, idx: [usize; 3]) -> Vector3<f64> {
+    Vector3::new(
+        map.origin().x + (idx[0] as f64 + 0.5) * map.resolution(),
+        map.origin().y + (idx[1] as f64 + 0.5) * map.resolution(),
+        map.origin().z + (idx[2] as f64 + 0.5) * map.resolution(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::VoxelState;
+
+    fn sample_scene() -> Scene {
+        Scene {
+            resolution: 0.5,
+            dims: [10, 10, 6],
+            obstacles: vec![
+                Obstacle::Box {
+                    center: [2.0, 2.0, 1.0],
+                    size: [1.0, 4.0, 2.0],
+                },
+                Obstacle::Sphere {
+                    center: [5.0, 2.0, 1.0],
+                    radius: 0.8,
+                },
+            ],
+            start: [0.5, 0.5, 0.5],
+            goal: [7.0, 7.0, 0.5],
+            ..Scene::default()
+        }
+    }
 
     #[test]
-    fn json_roundtrip_and_voxelization() {
-        let json = r#"{
-            "resolution": 0.5,
-            "bounds": [8, 8, 4],
-            "obstacles": [
-                { "type": "box", "center": [2, 2, 1], "size": [1, 4, 2] },
-                { "type": "sphere", "center": [5, 2, 1], "radius": 0.8 }
-            ],
-            "start": [0.5, 0.5, 0.5],
-            "goal": [7, 7, 0.5]
-        }"#;
-        let scene: Scene = serde_json::from_str(json).unwrap();
-        assert_eq!(scene.obstacles.len(), 2);
-        let map = scene.to_grid_map().unwrap();
-        // box 覆盖 (2,2,1) 附近
-        assert!(map.is_occupied(Vector3::new(2.0, 2.0, 1.0)));
+    fn export_map_file_voxelizes_obstacles() {
+        let scene = sample_scene();
+        let map = scene.to_map_file().unwrap();
+        // box 中心被占据
+        let grid = map.to_grid_map().unwrap();
+        assert!(grid.is_occupied(Vector3::new(2.0, 2.0, 1.0)));
         // 起点不被占据
-        assert!(!map.is_occupied(Vector3::new(0.5, 0.5, 0.5)));
-        // sphere 中心覆盖
-        assert!(map.is_occupied(Vector3::new(5.0, 2.0, 1.0)));
+        assert!(!grid.is_occupied(Vector3::new(0.5, 0.5, 0.5)));
+        assert!(grid.is_occupied(Vector3::new(5.0, 2.0, 1.0)));
+        assert!(!map.occupied.is_empty());
+        // 不重复体素（去重？先对称断言）
+        let mut dedup = map.occupied.clone();
+        dedup.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        dedup.dedup();
+        assert_eq!(dedup.len(), map.occupied.len());
+    }
+
+    #[test]
+    fn map_file_roundtrip_preserves_scene() {
+        let scene = sample_scene();
+        let map = scene.to_map_file().unwrap();
+        let text = map.to_string();
+        let reparsed: MapFile = text.parse().unwrap();
+        assert!((reparsed.resolution - scene.resolution).abs() < 1e-9);
+        assert_eq!(reparsed.dims, scene.dims);
     }
 
     #[test]
     fn invalid_scene_rejected() {
-        let json = r#"{"resolution": 0, "bounds": [8, 8, 4], "obstacles": [], "start": [0,0,0], "goal": [1,1,1]}"#;
-        let scene: Scene = serde_json::from_str(json).unwrap();
-        assert!(scene.to_grid_map().is_err());
+        let scene = Scene {
+            resolution: 0.0,
+            ..Scene::default()
+        };
+        assert_eq!(
+            scene.to_map_file().unwrap_err().kind(),
+            ErrorKind::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn voxel_state_unknown_by_default() {
+        let scene = sample_scene();
+        let grid = scene.to_map_file().unwrap().to_grid_map().unwrap();
+        // 未被占据的位置是 Unknown，不是 Free
+        let idx = grid.index_of(Vector3::new(4.5, 4.5, 0.5)).unwrap();
+        assert_eq!(grid.state(idx), VoxelState::Unknown);
     }
 }

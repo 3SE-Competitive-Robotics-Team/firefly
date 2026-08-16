@@ -1,3 +1,4 @@
 /target
 .DS_Store
 docs/papers/
+apps/firefly-demo/maps/*.ffmap
