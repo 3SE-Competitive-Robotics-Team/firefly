@@ -126,14 +126,13 @@ impl Demo {
             .collect();
         let planner = Planner::new(config, map);
         let mut astar = Astar::default();
-        let global_path = astar
-            .search(
-                planner.map_ref(),
-                Vector3::new(start[0], start[1], start[2]),
-                Vector3::new(goal[0], goal[1], goal[2]),
-            )?
-            .points()
-            .to_vec();
+        let path = astar.search(
+            planner.map_ref(),
+            Vector3::new(start[0], start[1], start[2]),
+            Vector3::new(goal[0], goal[1], goal[2]),
+        )?;
+        // 字符串拉直：删除可直线直达的中间点（与 planner 内部 search_guide 一致）
+        let global_path = firefly_search::simplify_path(planner.map_ref(), path.points());
         log::info!(
             "全局路径 {} 点，长度 {:.1}m，动态障碍 {} 个",
             global_path.len(),
