@@ -50,7 +50,7 @@ impl<'a> ObstacleScanner<'a> {
                 let tau = k as f64 / DETECT as f64;
                 let t = segment_time(traj, i, *ti, tau);
                 let s = traj.eval(t);
-                if !self.map.is_occupied(s.position) {
+                if !self.map.is_occupied_inflated(s.position) {
                     continue;
                 }
                 safe = false;
@@ -100,7 +100,7 @@ impl<'a> ObstacleScanner<'a> {
             for k in 0..DETECT {
                 let tau = k as f64 / DETECT as f64;
                 let t = segment_time(traj, i, *ti, tau);
-                if self.map.is_occupied(traj.eval(t).position) {
+                if self.map.is_occupied_inflated(traj.eval(t).position) {
                     return false;
                 }
             }
@@ -162,6 +162,7 @@ mod tests {
                 map.set_state([5, y, z], VoxelState::Occupied);
             }
         }
+        map.inflate_obstacles(0.6);
         let scanner = ObstacleScanner::new(&map);
 
         let start = Endpoint {

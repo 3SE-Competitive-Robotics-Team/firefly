@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use fastrace::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_map::{MapFile, VoxelState};
+use firefly_map::{GridMap, MapFile, VoxelState};
 use firefly_observability::init as init_observability;
 use firefly_planner::{PlanResult, Planner, PlannerConfig, State};
 use firefly_search::Astar;
@@ -227,6 +227,10 @@ impl Demo {
             (255, 200, 80),
         )?;
         self.viewer.log_planes("planes", &result.planes)?;
+        log::info!(
+            "轨迹最小间隙 {:.3}m",
+            min_clearance(&result.trajectory, self.planner.map_ref())
+        );
         self.local = Some(LocalTraj {
             traj: result.trajectory,
             start_time: now,
@@ -403,6 +407,61 @@ fn human_voxels(cx: f64, cy: f64) -> Vec<(i32, i32, i32)> {
         }
     }
     out
+}
+
+/// 轨迹中心到最近占据体素表面的最小距离（邻域 3 格扫描，减半格为表面距）。
+fn min_clearance(traj: &Trajectory, map: &GridMap) -> f64 {
+    const SAMPLES: usize = 40;
+    let mut min = f64::INFINITY;
+    let res = map.resolution();
+    for (piece, piece_dur) in traj.durations().iter().enumerate() {
+        for k in 0..SAMPLES {
+            let tau = k as f64 / SAMPLES as f64;
+            let mut time = 0.0;
+            for dur in traj.durations().iter().take(piece) {
+                time += dur;
+            }
+            time += tau * piece_dur;
+            let point = traj.eval(time).position;
+            let Some(idx) = map.index_of(point) else {
+                continue;
+            };
+            let dims = map.dims();
+            for dx in -3i32..=3 {
+                for dy in -3i32..=3 {
+                    for dz in -3i32..=3 {
+                        let nb = [
+                            i32::try_from(idx[0]).unwrap() + dx,
+                            i32::try_from(idx[1]).unwrap() + dy,
+                            i32::try_from(idx[2]).unwrap() + dz,
+                        ];
+                        if nb.iter().any(|&v| v < 0)
+                            || nb[0] >= i32::try_from(dims[0]).unwrap()
+                            || nb[1] >= i32::try_from(dims[1]).unwrap()
+                            || nb[2] >= i32::try_from(dims[2]).unwrap()
+                        {
+                            continue;
+                        }
+                        if map.state([nb[0] as usize, nb[1] as usize, nb[2] as usize])
+                            != VoxelState::Occupied
+                        {
+                            continue;
+                        }
+                        let center = Vector3::new(
+                            map.origin().x + (f64::from(nb[0]) + 0.5) * res,
+                            map.origin().y + (f64::from(nb[1]) + 0.5) * res,
+                            map.origin().z + (f64::from(nb[2]) + 0.5) * res,
+                        );
+                        let dist = (point - center).norm() - 0.5 * res;
+                        if dist < min {
+                            min = dist;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    min
 }
 
 fn path_length(points: &[Vector3<f64>]) -> f64 {

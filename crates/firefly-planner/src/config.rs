@@ -8,6 +8,8 @@ pub struct PlannerConfig {
     pub constraint_points_per_piece: usize,
     pub planning_distance: f64,
     pub obstacle_clearance: f64,
+    /// 障碍膨胀半径（补偿机体尺寸，官方 `grid_map/obstacles_inflation`）。
+    pub obstacle_inflation: f64,
     pub swarm_clearance: f64,
     pub max_velocity: f64,
     pub max_acceleration: f64,
@@ -26,7 +28,8 @@ impl Default for PlannerConfig {
             trajectory_pieces: 5,
             constraint_points_per_piece: 5,
             planning_distance: 7.5,
-            obstacle_clearance: 0.5,
+            obstacle_clearance: 0.3,
+            obstacle_inflation: 0.2,
             swarm_clearance: 0.5,
             max_velocity: 1.5,
             max_acceleration: 6.0,
@@ -51,7 +54,8 @@ mod tests {
         let c = PlannerConfig::default();
         assert_eq!(c.trajectory_pieces, 5);
         assert_eq!(c.constraint_points_per_piece, 5);
-        assert_eq!(c.obstacle_clearance, 0.5);
+        assert_eq!(c.obstacle_clearance, 0.3);
+        assert_eq!(c.obstacle_inflation, 0.2);
         assert_eq!(c.swarm_clearance, 0.5);
         assert_eq!(c.max_velocity, 1.5);
         assert_eq!(c.max_acceleration, 6.0);
