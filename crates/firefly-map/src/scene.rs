@@ -25,12 +25,12 @@ pub struct Scene {
 impl Default for Scene {
     fn default() -> Self {
         Self {
-            resolution: 0.4,
+            resolution: 0.1,
             origin: [0.0; 3],
-            dims: [50, 20, 8],
+            dims: [280, 80, 32],
             obstacles: Vec::new(),
             start: [1.0, 4.0, 1.0],
-            goal: [45.0, 4.0, 1.0],
+            goal: [27.0, 4.0, 1.0],
             motions: Vec::new(),
         }
     }
