@@ -352,7 +352,10 @@ fn line_is_clear(map: &GridMap, a: Vector3<f64>, b: Vector3<f64>) -> bool {
     let steps = (dist / map.resolution() * 2.0).ceil() as usize;
     for k in 1..steps {
         let p = a + (b - a) * (k as f64 / steps as f64);
-        if map.is_occupied(p) {
+        // 必须用膨胀检查（与 A* 搜索、MINCO 净距一致）：仅检查原始占用会漏掉
+        // 直线"擦边穿越"膨胀层——simplify 会把穿过膨胀区的直线判为 clear，
+        // 全局路径贴柱、本地规划因净距不足卡死。
+        if map.is_occupied_inflated(p) {
             return false;
         }
     }
@@ -455,5 +458,37 @@ mod tests {
         let mut astar = Astar::default();
         let path = search(&mut astar, &map, [1.0, 4.0, 1.0], [27.0, 4.0, 1.0]).unwrap();
         assert!(path.points().len() > 100);
+    }
+}
+
+#[cfg(test)]
+mod line_clear_tests {
+    use super::line_is_clear;
+    use firefly_map::{GridMapBuilder, VoxelState};
+
+    /// 回归：simplify 的直线检查必须用**膨胀**判断——仅查原始占用会漏掉
+    /// 直线擦边穿过膨胀层（全局路径贴柱→MINCO 净距不足→卡死）。
+    #[test]
+    fn line_clipping_inflation_is_blocked() {
+        let mut map = GridMapBuilder::new(1.0, [10, 10, 10]).build().unwrap();
+        // 一条 y=1、z=1 的细障碍（原始仅 1 格厚）
+        map.set_state([5, 1, 1], VoxelState::Occupied);
+        map.inflate_obstacles(1.0); // 膨胀到 y∈[0,2]
+
+        // 直线沿 y=1.0 穿过原始占用格 → 应 blocked
+        assert!(!line_is_clear(
+            &map,
+            nalgebra::Vector3::new(0.0, 1.0, 1.0),
+            nalgebra::Vector3::new(9.0, 1.0, 1.0)
+        ));
+        // 直线沿 y=0.5 穿过**仅膨胀区**（原始无占用）→ 现在也须 blocked
+        assert!(
+            !line_is_clear(
+                &map,
+                nalgebra::Vector3::new(0.0, 0.5, 1.0),
+                nalgebra::Vector3::new(9.0, 0.5, 1.0)
+            ),
+            "擦边穿越膨胀层必须判定为不清（原用 is_occupied 漏检）"
+        );
     }
 }
