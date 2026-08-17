@@ -187,7 +187,7 @@ struct Demo {
     t_sim: f64,
     /// 本 tick 是否收到带 sim 时间戳的消息（决定 `t_sim` 是否本地回退递增）。
     sensor_this_tick: bool,
-    /// 目标是终点（`touch_goal`）：轨迹执行完毕即任务完成。
+    /// 目标是终点（`touch_goal`）：轨迹执行完毕且**物理到达**目标才任务完成。
     touch_goal: bool,
     /// 是否完成。
     finished: bool,
@@ -755,8 +755,10 @@ impl Demo {
             Some(local) => {
                 let t_cur = now - local.start_time;
                 if t_cur > local.traj.duration() {
-                    // 轨迹执行完毕：目标是终点则任务完成，否则（异常）重规划
-                    if self.touch_goal {
+                    // 轨迹执行完毕，目标为终点：仅当无人机**物理到达**目标才完成
+                    //（避免靠近目标但轨迹耗尽即提前结束）；未到达则继续逼近。
+                    let pos = self.current_position(now);
+                    if self.touch_goal && (pos - self.goal.coords).norm() < ARRIVE_DIST {
                         self.finished = true;
                         return Ok(());
                     }
