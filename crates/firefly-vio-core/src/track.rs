@@ -895,33 +895,10 @@ impl TrackKlt {
     ) {
         self.perform_detection_monocular(img0pyr, mask0, img0, pts0, ids0);
         self.perform_detection_monocular(img1pyr, mask1, img1, pts1, ids1);
-        // 立体耦合：横向基线（平行前向相机，沿 y 分开）下，同一物理点在左右
-        // 图仅水平平移一小段视差。对每个左角点取右侧最近邻（|dx|≤12、|dy|≤3），
-        // 命中则赋**同一特征 id** → 该特征同时含左右目测量 → 三角化有立体视差
-        //（否则左右独立 id → 特征单目 → 无立体深度 → 低运动时三角化全败）。
-        let mut used = vec![false; pts1.len()];
-        for i in 0..pts0.len() {
-            let (x0, y0) = (pts0[i].x, pts0[i].y);
-            let mut best: Option<usize> = None;
-            let mut best_d = 169.0f32; // 13²
-            for (j, pt) in pts1.iter().enumerate() {
-                if used[j] {
-                    continue;
-                }
-                let dx = pt.x - x0;
-                let dy = pt.y - y0;
-                if dy.abs() <= 3.0 && dx.abs() <= 12.0 {
-                    let d = dx * dx + dy * dy;
-                    if d < best_d {
-                        best_d = d;
-                        best = Some(j);
-                    }
-                }
-            }
-            if let Some(j) = best {
-                ids1[j] = ids0[i];
-                used[j] = true;
-            }
-        }
+        // NOTE: 立体左右目 id 耦合被回退。朴素最近邻(±12×±3px)会误配左右目
+        // 非同一物理点 → 立体特征测量不一致 → DLT 三角化塌陷到近相机 → 残差
+        // 爆炸（实测 445k px，比单目更糟）。需对照 open_vins 的距离预校验+
+        // KLT 立体匹配（对极搜索）做**可靠**耦合后再启用。横向基线(round11)
+        // 保留正确；当前特征为单目时域 → VIO 为有界死航位推算。
     }
 }
