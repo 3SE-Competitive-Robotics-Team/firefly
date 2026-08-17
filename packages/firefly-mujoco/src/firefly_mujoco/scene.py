@@ -2,6 +2,11 @@
 
 世界系 = demo 地图系：无人机起点 (1, 4, 1)，沿 +x 飞行到目标。
 相机（双目 + 深度）前向 +x，给 KLT 提供特征；地面棋盘纹理提供纹理特征。
+
+灯光约定：**全部用方向光**（`type="directional"`）。此前用带 `pos` 的默认
+定点光，光强随距离衰减——无人机沿 +x 飞到 27m 后地面亮度从均值 42 跌到
+10（近乎全黑）。方向光无距离衰减，全程光照均匀（实测地面均值 140~160，
+无饱和），保证整条任务路径上双目/深度画面可读。
 """
 
 SCENE_XML = r"""
@@ -15,8 +20,10 @@ SCENE_XML = r"""
   </asset>
 
   <worldbody>
-    <light name="light0" pos="5 5 8" dir="-0.5 -0.5 -1"/>
-    <light name="light1" pos="25 -5 6" dir="-0.5 0.5 -1"/>
+    <!-- 方向光（无距离衰减，全程均匀；三个方向避免地面过平） -->
+    <light name="sun_a" type="directional" dir="-0.3 -0.25 -0.92" diffuse="0.7 0.7 0.68"/>
+    <light name="sun_b" type="directional" dir="-0.15 0.6 -0.78" diffuse="0.3 0.3 0.35"/>
+    <light name="sun_c" type="directional" dir="0.75 0.1 -0.65" diffuse="0.22 0.22 0.25"/>
 
     <!-- 地面（棋盘纹理：KLT 特征来源之一） -->
     <geom name="ground" type="plane" size="35 35 0.1" material="ground"/>
