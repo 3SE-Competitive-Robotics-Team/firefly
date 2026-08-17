@@ -895,5 +895,33 @@ impl TrackKlt {
     ) {
         self.perform_detection_monocular(img0pyr, mask0, img0, pts0, ids0);
         self.perform_detection_monocular(img1pyr, mask1, img1, pts1, ids1);
+        // 立体耦合：横向基线（平行前向相机，沿 y 分开）下，同一物理点在左右
+        // 图仅水平平移一小段视差。对每个左角点取右侧最近邻（|dx|≤12、|dy|≤3），
+        // 命中则赋**同一特征 id** → 该特征同时含左右目测量 → 三角化有立体视差
+        //（否则左右独立 id → 特征单目 → 无立体深度 → 低运动时三角化全败）。
+        let mut used = vec![false; pts1.len()];
+        for i in 0..pts0.len() {
+            let (x0, y0) = (pts0[i].x, pts0[i].y);
+            let mut best: Option<usize> = None;
+            let mut best_d = 169.0f32; // 13²
+            for (j, pt) in pts1.iter().enumerate() {
+                if used[j] {
+                    continue;
+                }
+                let dx = pt.x - x0;
+                let dy = pt.y - y0;
+                if dy.abs() <= 3.0 && dx.abs() <= 12.0 {
+                    let d = dx * dx + dy * dy;
+                    if d < best_d {
+                        best_d = d;
+                        best = Some(j);
+                    }
+                }
+            }
+            if let Some(j) = best {
+                ids1[j] = ids0[i];
+                used[j] = true;
+            }
+        }
     }
 }
