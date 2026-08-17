@@ -167,6 +167,15 @@ fn run_loop(
             log_depth(viewer, &m);
         }
         // 相机（MSCKF 视觉更新 + rerun 双目可视化）
+        // 关键时序：把 state 传播钳制在「相机屏障」之前一丝（`-1e-6`）——既
+        // 绝不越过尚未配对的相机帧（否则 state 超前被判乱序跳过），又保持
+        // `state < 相机时刻`，让 feed 内部的 `propagate_and_clone` 正常推进并
+        // 增广克隆（若恰好相等会被精确相等检查跳过 → 克隆攒不满 → MSCKF 不执行）。
+        let target = match input.camera_barrier() {
+            Some(b) => now.min(b - 1e-6),
+            None => now,
+        };
+        vio.propagate_to(target);
         if let Some(cam) = input.next_camera() {
             vio.feed_measurement_camera(&cam);
             log::debug!(
@@ -181,7 +190,6 @@ fn run_loop(
                 log_cameras(viewer, &cam);
             }
         }
-        vio.propagate_to(now);
         t_sim = t_sim.max(now);
 
         // 按发布周期输出 odom

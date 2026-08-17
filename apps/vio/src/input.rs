@@ -97,6 +97,22 @@ impl SensorInput for IceoryxInput {
         self.now_t
     }
 
+    /// 相机屏障：当前持有的待配对双目帧的时间戳（左右目取较大者）。
+    ///
+    /// 驱动循环用它把状态传播目标钳制在 `min(now, barrier)` 之下，**绝不越过
+    /// 尚未配对完成的相机帧**——否则 state 每 10ms 传播到最新 IMU 时刻，
+    /// 等左右眼配对成帧时 state 已超前该帧 0.02~0.04s，被判「图像乱序」跳过，
+    /// MSCKF 视觉更新从未执行（纯航位推算 → 动态发散）。对照 `open_vins`
+    /// 测量按时间序处理：先推进到相机时刻、消费相机、再补足后续 IMU。
+    fn camera_barrier(&self) -> Option<f64> {
+        match (&self.last_left, &self.last_right) {
+            (Some(l), Some(r)) => Some(l.timestamp.max(r.timestamp)),
+            (Some(l), None) => Some(l.timestamp),
+            (None, Some(r)) => Some(r.timestamp),
+            (None, None) => None,
+        }
+    }
+
     fn last_trace(&self) -> Option<(u128, u64, bool)> {
         self.last_trace
     }
