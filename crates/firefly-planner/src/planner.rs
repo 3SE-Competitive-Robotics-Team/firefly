@@ -363,10 +363,13 @@ impl Planner {
             return Ok(None);
         }
         let trajectory = self.ensure_feasible(minco)?;
-        debug_assert!(
-            scanner.is_safe(&trajectory),
-            "rescale must not change geometry"
-        );
+        if !scanner.is_safe(&trajectory) {
+            // 时间缩放按时间采样重建，窄通道处采样点位移会造成安全误判
+            //（几何理论不变，数值上可能翻转）。不 panic：丢弃该解继续迭代，
+            // 外层循环有重启上限兜底（否则 dev 构建 debug_assert 直接杀进程）。
+            log::debug!("time-rescaled trajectory unsafe, keep iterating");
+            return Ok(None);
+        }
         Ok(Some(PlanResult {
             trajectory,
             iterations: iteration,

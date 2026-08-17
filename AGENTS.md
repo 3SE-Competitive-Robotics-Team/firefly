@@ -45,7 +45,8 @@ uv run firefly-sim
 cargo run -p vio
 
 # 3. Rust 重规划：订阅 odom 作为状态源（新鲜超时回退轨迹模拟），
-#    深度感知建图（MuJoCo 闭环下省略 --map），发布参考回传；
+#    未指定 --map 时加载 MuJoCo 默认场景静态地图（与 scene.py 同构，
+#    深度感知在线补充），发布参考回传；
 #    规划结果写入同一 viewer（与 vio 共用 sim_time 时间轴）
 cargo run -p firefly-demo
 ```

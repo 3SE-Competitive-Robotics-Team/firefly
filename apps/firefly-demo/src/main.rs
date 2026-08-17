@@ -104,6 +104,45 @@ fn empty_map_file() -> MapFile {
     }
 }
 
+/// `MuJoCo` 默认场景静态地图：与 `firefly_mujoco/scene.py` 的障碍布局
+/// 同构（box 中心 + 半尺寸），体素化后作先验，保证**全局路径**在空地图上
+/// 也会绕墙蛇形（纯深度感知在航线上才看到墙，全局路径会是直线）。
+///
+/// 布局（高 3m 无法飞越，只可横向绕；绕行窗口 ≥2.4m 净宽）：
+/// x=8 挡 y∈[2.8,5.2]（逼走上侧）；x=14 挡 y∈[-1.2,2.8]（上侧通行）；
+/// x=20 挡 y∈[5.2,8.8]（逼走下侧，回到中线）；x=11/17 为走廊内小障（装饰）。
+#[must_use]
+fn mujoco_map_file() -> MapFile {
+    let mut map = empty_map_file();
+    let boxes: [[f64; 6]; 5] = [
+        [8.0, 4.0, 1.5, 0.8, 1.2, 1.5],
+        [11.0, 6.8, 1.0, 0.4, 0.7, 1.0],
+        [14.0, 0.8, 1.5, 0.6, 2.0, 1.5],
+        [17.0, 4.0, 0.9, 0.4, 0.5, 0.9],
+        [20.0, 7.0, 1.5, 0.6, 1.8, 1.5],
+    ];
+    let res = map.resolution;
+    let o = map.origin;
+    for [cx, cy, cz, hx, hy, hz] in boxes {
+        for x in 0..map.dims[0] {
+            for y in 0..map.dims[1] {
+                for z in 0..map.dims[2] {
+                    let p = [
+                        o[0] + (x as f64 + 0.5) * res,
+                        o[1] + (y as f64 + 0.5) * res,
+                        o[2] + (z as f64 + 0.5) * res,
+                    ];
+                    if (p[0] - cx).abs() <= hx && (p[1] - cy).abs() <= hy && (p[2] - cz).abs() <= hz
+                    {
+                        map.occupied.push(p);
+                    }
+                }
+            }
+        }
+    }
+    map
+}
+
 fn parse_vec3(it: &mut impl Iterator<Item = String>, name: &str) -> Result<[f64; 3]> {
     let mut v = [0.0; 3];
     for c in &mut v {
@@ -162,6 +201,9 @@ struct Demo {
     last_odom_recv: f64,
     /// 最新 odom 携带的 trace 上下文 `(trace_id, span_id, sampled)`（续接用）。
     odom_trace: Option<(u128, u64, bool)>,
+    /// 重规划失败后的冷却截止时刻（秒）：失败不每 tick 重试，避免
+    /// A* 空转（失败不改 `start_time`，`t_cur` 持续 > 阈值会触发逐 tick 重试）。
+    replan_cooldown_until: f64,
     /// 参考状态发布器（闭环控制：MuJoCo 物理环境订阅后 PD 跟踪）。
     ref_pub: Option<Publisher<ReferenceMessage>>,
     /// 深度订阅（MuJoCo 物理环境发布；感知建图输入）。
@@ -281,6 +323,7 @@ impl Demo {
             latest_odom: None,
             last_odom_recv: f64::NEG_INFINITY,
             odom_trace: None,
+            replan_cooldown_until: f64::NEG_INFINITY,
             ref_pub,
             depth,
             gt,
@@ -432,9 +475,9 @@ impl Demo {
         self.current_state(now).position.coords
     }
 
-    /// 官方 `getLocalTarget`：从 start 沿全局路径累计弧长，取 horizon 处的点；
-    /// 路径取尽仍不足 horizon 时目标为终点，`touch_goal = true`。
-    fn local_target(&self, start: Vector3<f64>) -> (Vector3<f64>, bool) {
+    /// 官方 `getLocalTarget`：从 start 沿全局路径累计弧长，取 `arc` 处的点；
+    /// 路径取尽仍不足 `arc` 时目标为终点，`touch_goal = true`。
+    fn path_point_at_arc(&self, start: Vector3<f64>, arc: f64) -> (Vector3<f64>, bool) {
         // 定位 start 在全局路径上的最近段（官方沿 global_traj 投影）
         let mut seg = 0usize;
         let mut best = f64::INFINITY;
@@ -449,27 +492,102 @@ impl Demo {
                 seg = i;
             }
         }
-        // 从 start 沿剩余路径累计弧长到 horizon
-        let mut arc = 0.0;
+        // 从 start 沿剩余路径累计弧长到 arc
+        let mut acc = 0.0;
         let mut prev = start;
         for point in &self.global_path[seg + 1..] {
             let segment = *point - prev;
             let len = segment.norm();
-            if arc + len >= PLANNING_HORIZON {
-                let t = (PLANNING_HORIZON - arc) / len;
+            if acc + len >= arc {
+                let t = (arc - acc) / len;
                 return (prev + segment * t, false);
             }
-            arc += len;
+            acc += len;
             prev = *point;
         }
         (Vector3::new(self.goal.x, self.goal.y, self.goal.z), true)
     }
 
+    /// 局部目标：6m horizon 点，落进障碍膨胀区或贴近障碍时沿路径逐步回退
+    /// 到安全点。
+    ///
+    /// 全局路径是 A* 网格路径，其直线段可能切过膨胀体素，按弧长插值的
+    /// horizon 点会落在墙内；A* 不接受 occupied goal（会持续重规划失败、
+    /// 参考卡死），故回退找安全点（每步 0.4m，[`Self::target_clear`]）。
+    fn local_target(&self, start: Vector3<f64>) -> (Vector3<f64>, bool) {
+        let mut arc = PLANNING_HORIZON;
+        loop {
+            let (point, touch) = self.path_point_at_arc(start, arc);
+            if touch || arc <= 0.0 {
+                return (point, touch);
+            }
+            if self.target_clear(point) {
+                return (point, false);
+            }
+            arc -= 0.4;
+        }
+    }
+
+    /// 目标点安全判据：不在膨胀占据区，且 26 邻域（1 格 0.4m）无占据体素
+    /// ——给 MINCO 留足绕弯余量，避免轨迹切墙角导致优化"stuck"。
+    fn target_clear(&self, point: Vector3<f64>) -> bool {
+        let map = self.planner.map_ref();
+        if map.is_occupied_inflated(point) {
+            return false;
+        }
+        let Some(idx) = map.index_of(point) else {
+            return true;
+        };
+        let dims = map.dims();
+        for dx in -1i32..=1 {
+            for dy in -1i32..=1 {
+                for dz in -1i32..=1 {
+                    if dx == 0 && dy == 0 && dz == 0 {
+                        continue;
+                    }
+                    let nb = [
+                        i32::try_from(idx[0]).unwrap_or(i32::MAX) + dx,
+                        i32::try_from(idx[1]).unwrap_or(i32::MAX) + dy,
+                        i32::try_from(idx[2]).unwrap_or(i32::MAX) + dz,
+                    ];
+                    if nb.iter().any(|&v| v < 0)
+                        || nb[0] >= i32::try_from(dims[0]).unwrap_or(i32::MIN)
+                        || nb[1] >= i32::try_from(dims[1]).unwrap_or(i32::MIN)
+                        || nb[2] >= i32::try_from(dims[2]).unwrap_or(i32::MIN)
+                    {
+                        continue;
+                    }
+                    if map.state([nb[0] as usize, nb[1] as usize, nb[2] as usize])
+                        == VoxelState::Occupied
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
     /// 官方 `planFromLocalTraj`：从当前状态（VIO odom 或轨迹推进）重规划到局部目标。
     fn replan(&mut self, now: f64) -> Result<()> {
         let _ = self.local.as_ref().expect("replan requires local traj");
-        // 状态源：新鲜 odom（VIO）优先，否则回退轨迹推进（独立运行）
-        let start = self.current_state(now);
+        // 起点 = 上一轨迹在重规划时刻的**参考状态**（位置/速度/加速度取自
+        // `traj.eval`），保证重规划前后参考在时间上连续——若改用无人机实际
+        // 状态（GT 滞后 ~0.2m + PD 欠阻尼 overshoot），每次重规划都会把参考
+        // 拉回无人机的滞后位置，形成"进-退"振荡（实测参考周期回退 0.2~0.5m）。
+        // 无上一轨迹时（异常）回退当前状态。
+        let start = match &self.local {
+            Some(local) => {
+                let t_cur = (now - local.start_time).clamp(0.0, local.traj.duration());
+                let s = local.traj.eval(t_cur);
+                State {
+                    position: Point3::new(s.position.x, s.position.y, s.position.z),
+                    velocity: s.velocity,
+                    acceleration: s.acceleration,
+                }
+            }
+            None => self.current_state(now),
+        };
         let pos = start.position.coords;
         let (target, touch_goal) = self.local_target(pos);
         log::info!(
@@ -492,9 +610,17 @@ impl Demo {
             Ok(r) => r,
             Err(e) => {
                 log::warn!("重规划失败，保持旧轨迹：{e}");
+                self.replan_cooldown_until = now + 0.5;
                 return Ok(());
             }
         };
+        // 退化轨迹防护：时长短到下一 tick 就"过期"（切角/无信息时的异常解）
+        // 会触发逐 tick 强制重规划空转，直接丢弃。
+        if result.trajectory.duration() < 0.5 {
+            log::warn!("重规划产出退化轨迹（时长 {:.2}s），保持旧轨迹", result.trajectory.duration());
+            self.replan_cooldown_until = now + 0.5;
+            return Ok(());
+        }
         self.viewer.log_trajectory(
             "local_traj",
             &result.trajectory,
@@ -503,8 +629,13 @@ impl Demo {
         )?;
         self.viewer.log_planes("planes", &result.planes)?;
         log::info!(
-            "轨迹最小间隙 {:.3}m",
-            min_clearance(&result.trajectory, self.planner.map_ref())
+            "轨迹最小间隙 {:.3}m 时长 {:.2}s 起({:.2},{:.2}) 目标({:.2},{:.2})",
+            min_clearance(&result.trajectory, self.planner.map_ref()),
+            result.trajectory.duration(),
+            start.position.x,
+            start.position.y,
+            target.x,
+            target.y
         );
         self.local = Some(LocalTraj {
             traj: result.trajectory,
@@ -594,8 +725,10 @@ impl Demo {
                         return Ok(());
                     }
                     log::warn!("轨迹执行完毕但未到达目标，强制重规划");
-                    self.replan(now)?;
-                } else if t_cur > REPLAN_THRESH {
+                    if now >= self.replan_cooldown_until {
+                        self.replan(now)?;
+                    }
+                } else if t_cur > REPLAN_THRESH && now >= self.replan_cooldown_until {
                     self.replan(now)?;
                 }
             }
@@ -843,8 +976,8 @@ fn main() {
             }
         }
     } else {
-        log::info!("未指定 --map，空地图起步（MuJoCo 闭环深度建图填充）");
-        empty_map_file()
+        log::info!("未指定 --map，加载 MuJoCo 默认场景静态地图（深度感知补充）");
+        mujoco_map_file()
     };
     let viewer = match &args.save {
         Some(path) => Viewer::save(path),
