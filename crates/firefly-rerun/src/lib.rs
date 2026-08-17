@@ -127,7 +127,10 @@ impl Stream {
             .map_err(stream_err)
     }
 
-    /// 单通道 f32 深度（米，行主序）→ rerun 深度图实体（Viridis 着色）。
+    /// 单通道 f32 深度（米，行主序）→ rerun 深度图实体。
+    ///
+    /// Turbo 着色，显示范围钳到 0.5~25m（远端地面/空区落在范围顶，
+    /// 近处障碍用满色阶区分）。
     ///
     /// # Errors
     ///
@@ -146,7 +149,8 @@ impl Stream {
             rerun::datatypes::ChannelDatatype::F32,
         )
         .with_meter(1.0)
-        .with_colormap(rerun::components::Colormap::Viridis);
+        .with_colormap(rerun::components::Colormap::Turbo)
+        .with_depth_range([0.5, 25.0]);
         self.rec.log(entity, &depth).map_err(stream_err)
     }
 

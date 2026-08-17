@@ -35,6 +35,8 @@ class DroneEnv:
         timestep: 物理步长（秒）。
         gyro_noise: 陀螺仪白噪声标准差（rad/s）。
         accel_noise: 加速度计白噪声标准差（m/s²）。
+        depth_noise: 深度噪声比例系数（σ = depth_noise·min(z, 50) 米，
+            空区/远平面不加噪）。
     """
 
     def __init__(
@@ -42,12 +44,14 @@ class DroneEnv:
         timestep: float = 0.005,
         gyro_noise: float = 0.002,
         accel_noise: float = 0.02,
+        depth_noise: float = 0.02,
     ) -> None:
         self.model = mujoco.MjModel.from_xml_string(SCENE_XML)
         self.model.opt.timestep = timestep
         self.data = mujoco.MjData(self.model)
         self._gyro_noise = gyro_noise
         self._accel_noise = accel_noise
+        self._depth_noise = depth_noise
 
         self._drone_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_BODY, "drone"
@@ -133,11 +137,20 @@ class DroneEnv:
         return self._to_gray(rgb)
 
     def render_depth(self) -> np.ndarray:
-        """深度（H×W float32，米）。"""
+        """深度（H×W float32，米）。
+
+        离屏渲染（macOS OpenGL 无 ARB_clip_control，远距精度有限）；按
+        `depth_noise` 加比例噪声（σ = depth_noise·min(z, 50) m），仅对
+        有效命中（z < 100 m）加噪，空区/远平面保持原值。
+        """
         self._renderer.update_scene(self.data, camera="cam_depth")
         self._renderer.enable_depth_rendering()
         depth = self._renderer.render().copy()
         self._renderer.disable_depth_rendering()
+        if self._depth_noise > 0:
+            valid = depth < 100.0
+            sigma = self._depth_noise * np.minimum(depth, 50.0)
+            depth = np.where(valid, depth + np.random.normal(0.0, sigma, depth.shape), depth)
         return depth
 
     def gt_pose(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
