@@ -1,0 +1,25 @@
+[package]
+name = "firefly-pubsub"
+version = "0.1.0"
+keywords = ['pubsub', 'iceoryx2', 'trace', 'robotics']
+categories = ['robotics', 'science']
+edition = "2024"
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+fastrace = { workspace = true }
+firefly-error = { workspace = true }
+iceoryx2 = { workspace = true }
+iceoryx2-bb-posix = { workspace = true }
+jiff = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+firefly-observability = { workspace = true }
+
+[lints]
+workspace = true
