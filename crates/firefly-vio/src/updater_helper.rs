@@ -274,14 +274,13 @@ pub fn get_feature_jacobian_full(
             let p_fin_ci = r_ito_c * p_fin_ii + p_iin_c;
             let uv_norm = Vector2::new(p_fin_ci.x / p_fin_ci.z, p_fin_ci.y / p_fin_ci.z);
 
-            // 畸变像素坐标（对照 C++ 的 distort_d + pixel_from_irr）：
-            // 残差统一在**像素**空间（uvs 是原始像素；归一化坐标需先经
-            // fx/fy/cx/cy 映射回像素，否则与像素量纲不一致 → 残差 ~200px →
-            // MSCKF 矫正灾难性错误）。
+            // 残差统一在**像素**空间：uvs 是原始像素；`distort_d`/`distort_f`
+            // 本身就把归一化坐标映射回原始像素（`CamRadtan::distort_f` 末尾
+            // `pixel_from_norm(x1,y1)`，即 `fx·x+cx`），故 `uv_dist` 已是像素、
+            // 直接与 `uv_m` 相减（round4 曾误加 `uv_pred = fx·uv_dist+cx` 造成
+            // 双重缩放 → SLAM 残差 -25 万级、MSCKF 增益失真，已回退）。
             let uv_dist = cam.distort_d(uv_norm.cast());
-            let pix = cam.camera_matrix();
-            let uv_pred =
-                Vector2::new(pix[(0, 0)] * uv_dist.x + pix[(0, 2)], pix[(1, 1)] * uv_dist.y + pix[(1, 2)]);
+            let uv_pred = uv_dist;
 
             // 残差：测量 − 预测
             let uv_m = feature.uvs[cam_id][m];
@@ -297,9 +296,10 @@ pub fn get_feature_jacobian_full(
             dzn_dpfc[(0, 2)] = -p_fin_ci.x / z2;
             dzn_dpfc[(1, 1)] = 1.0 / p_fin_ci.z;
             dzn_dpfc[(1, 2)] = -p_fin_ci.y / z2;
-            // 像素尺度：d(像素)/d(归一化畸变) = diag(fx, fy)（内参线性部分）
-            let pix_scale = cam.camera_matrix().fixed_view::<2, 2>(0, 0).into_owned();
-            let dz_dpfc = pix_scale * (dz_dzn * dzn_dpfc);
+            // dz_dpfc：d(像素残差)/d(p_FinCi)。dz_dzn=∂(像素)/∂(归一化) 已含
+            // fx/fy/cx/cy（distort_f 输出像素），故不再额外乘 pix_scale
+            //（round4 误加 → 双重缩放）。
+            let dz_dpfc = dz_dzn * dzn_dpfc;
 
             let dpfc_dpfg = r_ito_c * r_gto_ii;
             // dpfc/dclone：3×6（对克隆的旋转/平移 6 维误差状态）
