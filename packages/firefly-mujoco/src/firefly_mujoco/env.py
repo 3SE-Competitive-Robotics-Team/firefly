@@ -20,8 +20,9 @@ from .scene import SCENE_XML
 
 #: PD 位置增益
 KP_POS = 20.0
-#: PD 速度增益
-KD_VEL = 10.0
+#: PD 速度增益（ζ=KD/(2√(KP·m))≈0.82，近临界阻尼：原 KD=10 时 ζ≈0.37
+#: 欠阻尼，无人机对台阶参考 overshoot ~0.5m 造成来回摆动）
+KD_VEL = 22.0
 #: 姿态角速度阻尼
 KD_ATT = 4.0
 #: 水平回正增益（使机体 z 轴对齐世界 z 轴）
