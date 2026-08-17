@@ -85,8 +85,9 @@ class DroneEnv:
         d = self.data
         bid = self._drone_id
         pos = d.body("drone").xpos.copy()
-        vel = d.cvel[bid, 0:3].copy()  # 世界系线速度
-        angvel = d.cvel[bid, 3:6].copy()  # 世界系角速度
+        # freejoint 全局线/角速度（`cvel` 对 freejoint 不可靠，实测漂移；qvel 正确）
+        vel = d.qvel[0:3].copy()
+        angvel = d.qvel[3:6].copy()
 
         force = KP_POS * (np.asarray(ref_pos, dtype=float) - pos) + KD_VEL * (
             np.asarray(ref_vel, dtype=float) - vel
