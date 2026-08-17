@@ -19,6 +19,45 @@
 - 新增标定类数值参数时，直接改对应 `*Options` 的默认值并在 doc 注释标注
   单位与来源。
 
+## 运行（MuJoCo 双语言闭环）
+
+双语言闭环三个进程，iceoryx2 IPC（`Firefly/*` 话题）通信，fastrace
+trace 跨进程续接（传感器→vio→demo→参考 单周期 trace）：
+
+```
+Python sim（MuJoCo 物理 + 传感器发布）→ vio（MSCKF 位姿估计）→ demo（重规划）
+  └──────────── 回传参考 Firefly/Reference（PD 闭环）──────────────┘
+```
+
+按顺序各开一个终端：
+
+```bash
+# 1. Python 物理环境：200Hz 物理；发布 IMU 100Hz / 双目+深度+真值 10Hz，
+#    订阅 Firefly/Reference 做 PD 闭环控制
+uv sync   # 首次：安装 firefly-mujoco / firefly-sim（根 workspace）
+uv run python -m firefly_sim
+
+# 2. Rust VIO：订阅 MuJoCo IMU/双目灰度，MSCKF 视觉更新，发布 odom 10Hz
+RUST_LOG=info cargo run -p vio -- --input iceoryx --camera on
+
+# 3. Rust 重规划：订阅 odom 作为状态源（新鲜超时回退轨迹模拟），
+#    深度感知建图（MuJoCo 闭环下省略 --map），发布参考回传
+RUST_LOG=info cargo run -p firefly-demo
+```
+
+独立运行（不依赖闭环）：
+
+```bash
+RUST_LOG=info cargo run -p vio -- --input synthetic            # 合成 IMU 自测
+RUST_LOG=info cargo run -p firefly-demo -- --map apps/firefly-demo/maps/gate.ffmap  # 静态地图
+```
+
+## 构建
+
+- Rust：`cargo build`（workspace 含 `apps/vio`、`apps/firefly-demo`，排除 `apps/firefly-sim`）。
+- Python：`uv sync`（根 workspace 统一管理 `firefly-mujoco` / `firefly-sim`，
+  依赖与脚本见各自 `pyproject.toml`）。
+
 ## 性能
 
 - 结论只认 trace 实测（ConsoleReporter span 树），不靠读代码推断。
