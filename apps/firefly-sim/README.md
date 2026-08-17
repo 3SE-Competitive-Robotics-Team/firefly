@@ -7,7 +7,7 @@ MuJoCo 物理环境主循环（Python 应用，`apps/` 下的一个进程）。
 运行（从仓库根）：
 
 ```bash
-uv run python -m firefly_sim
+uv run firefly-sim
 ```
 
-与 Rust 管线（`apps/vio --input iceoryx` + `apps/firefly-demo`）构成双语言闭环。
+与 Rust 管线（`apps/vio` + `apps/firefly-demo`）构成双语言闭环。

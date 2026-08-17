@@ -6,7 +6,7 @@
 # - crates/  Rust 库
 #
 # 根聚合依赖所有 workspace 成员：`uv sync` 一次性装好整个环境，
-# `uv run python -m firefly_sim` 可直接从根运行 Python 应用。
+# `uv run firefly-sim` 可直接从根运行 Python 应用。
 
 [project]
 name = "firefly"

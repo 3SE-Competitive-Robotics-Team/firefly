@@ -11,8 +11,8 @@
 
 ## VIO（firefly-vio*）约定
 
-- **不接真实驱动**：`apps/vio` 保持合成数据最小闭环（GT 初始化 + 合成 IMU +
-  高频传播 + odom 发布），不引入 realsense/串口驱动。
+- **不接真实驱动**：`apps/vio` 固定接入 `MuJoCo` 物理环境（iceoryx2 订阅
+  IMU + 双目灰度，跑完整 MSCKF 视觉闭环），不引入 realsense/串口驱动。
 - **不做配置文件系统**：相机内参/外参、IMU 噪声、时间偏移等标定一律硬编码
   在代码里（`VioManagerOptions::default()` / `InitOptions::default()` 即为
   事实配置源），不引入 YAML/JSON/serde 解析。
@@ -35,21 +35,20 @@ Python sim（MuJoCo 物理 + 传感器发布）→ vio（MSCKF 位姿估计）�
 # 1. Python 物理环境：200Hz 物理；发布 IMU 100Hz / 双目+深度+真值 10Hz，
 #    订阅 Firefly/Reference 做 PD 闭环控制
 uv sync   # 首次：安装 firefly-mujoco / firefly-sim（根 workspace）
-uv run python -m firefly_sim
+uv run firefly-sim
 
 # 2. Rust VIO：订阅 MuJoCo IMU/双目灰度，MSCKF 视觉更新，发布 odom 10Hz
-RUST_LOG=info cargo run -p vio -- --input iceoryx --camera on
+cargo run -p vio
 
 # 3. Rust 重规划：订阅 odom 作为状态源（新鲜超时回退轨迹模拟），
 #    深度感知建图（MuJoCo 闭环下省略 --map），发布参考回传
-RUST_LOG=info cargo run -p firefly-demo
+cargo run -p firefly-demo
 ```
 
 独立运行（不依赖闭环）：
 
 ```bash
-RUST_LOG=info cargo run -p vio -- --input synthetic            # 合成 IMU 自测
-RUST_LOG=info cargo run -p firefly-demo -- --map apps/firefly-demo/maps/gate.ffmap  # 静态地图
+cargo run -p firefly-demo -- --map apps/firefly-demo/maps/gate.ffmap  # 静态地图
 ```
 
 ## 构建
