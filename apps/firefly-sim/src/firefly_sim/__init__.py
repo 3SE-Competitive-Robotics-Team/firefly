@@ -7,5 +7,5 @@
   `Firefly/GroundTruth`（真值 odom，10Hz）；
 - Rust 侧（vio + firefly-demo）消费传感器 → 估计 → 规划 → 回传参考，闭环。
 
-运行：`uv run python -m firefly_sim`
+运行：`uv run firefly-sim`
 """

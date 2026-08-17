@@ -1,9 +1,7 @@
-//! 传感器输入源实现：合成（自测）与 iceoryx2 物理环境（`MuJoCo`）。
+//! 传感器输入源：iceoryx2 物理环境（`MuJoCo`）。
 //!
-//! 均实现 `firefly_vio_core::input::SensorInput` 端口：
-//! - [`SyntheticInput`]：按固定周期生成 IMU（漂移场景），无相机数据；
-//! - [`IceoryxInput`]：订阅 `MuJoCo` 发布的 IMU 与双目灰度话题，按时间戳
-//!   配对成 `CameraData`。
+//! 实现 `firefly_vio_core::input::SensorInput` 端口：订阅 `MuJoCo` 发布的
+//! IMU 与双目灰度话题，按时间戳配对成 `CameraData`。
 
 use std::collections::VecDeque;
 
@@ -14,61 +12,6 @@ use firefly_pubsub::trace::TraceContext;
 use firefly_vio_core::input::SensorInput;
 use firefly_vio_core::sensor::{CameraData, GrayImage, ImuData};
 use nalgebra::Vector3;
-
-/// 合成输入源：固定周期生成 IMU（角速度 + 比力），无相机数据。
-pub struct SyntheticInput {
-    /// 内部时钟（秒）。
-    t: f64,
-    /// IMU 采样周期（秒）。
-    period: f64,
-    /// 角速度（rad/s）。
-    wm: Vector3<f64>,
-    /// 比力（m/s²）。
-    am: Vector3<f64>,
-    /// 当前帧样本是否已产出。
-    consumed: bool,
-}
-
-impl SyntheticInput {
-    /// 创建合成输入源。
-    #[must_use]
-    pub fn new(period: f64, wm: Vector3<f64>, am: Vector3<f64>) -> Self {
-        Self {
-            t: 0.0,
-            period,
-            wm,
-            am,
-            consumed: true,
-        }
-    }
-}
-
-impl SensorInput for SyntheticInput {
-    fn advance(&mut self) {
-        self.t += self.period;
-        self.consumed = false;
-    }
-
-    fn now(&self) -> f64 {
-        self.t
-    }
-
-    fn next_imu(&mut self) -> Option<ImuData> {
-        if self.consumed {
-            return None;
-        }
-        self.consumed = true;
-        Some(ImuData {
-            timestamp: self.t,
-            wm: self.wm,
-            am: self.am,
-        })
-    }
-
-    fn next_camera(&mut self) -> Option<CameraData> {
-        None
-    }
-}
 
 /// iceoryx2 物理环境输入源：订阅 `MuJoCo` 发布的 IMU 与双目灰度。
 pub struct IceoryxInput {
