@@ -4,6 +4,9 @@ resolver = "3"
 
 [workspace.dependencies]
 fastrace = { version = "0.7", default-features = false }
+iceoryx2 = "0.9"
+iceoryx2-bb-posix = "0.9"
+jiff = "0.2"
 log = "0.4"
 logcall = "0.2"
 logforth = { version = "0.30", default-features = false }
@@ -16,6 +19,7 @@ firefly-map = { path = "crates/firefly-map" }
 firefly-observability = { path = "crates/firefly-observability" }
 firefly-optimize = { path = "crates/firefly-optimize" }
 firefly-planner = { path = "crates/firefly-planner" }
+firefly-pubsub = { path = "crates/firefly-pubsub" }
 firefly-search = { path = "crates/firefly-search" }
 firefly-trajectory = { path = "crates/firefly-trajectory" }
 firefly-viewer = { path = "crates/firefly-viewer" }
