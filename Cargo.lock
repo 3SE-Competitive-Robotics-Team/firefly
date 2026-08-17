@@ -1371,10 +1371,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "firefly-vio"
+version = "0.1.0"
+dependencies = [
+ "fastrace",
+ "firefly-error",
+ "firefly-vio-core",
+ "firefly-vio-init",
+ "firefly-vio-types",
+ "log",
+ "nalgebra",
+]
+
+[[package]]
 name = "firefly-vio-core"
 version = "0.1.0"
 dependencies = [
  "firefly-vio-types",
+ "nalgebra",
+]
+
+[[package]]
+name = "firefly-vio-init"
+version = "0.1.0"
+dependencies = [
+ "firefly-vio-core",
+ "firefly-vio-types",
+ "log",
  "nalgebra",
 ]
 
@@ -5604,6 +5627,22 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vio"
+version = "0.1.0"
+dependencies = [
+ "fastrace",
+ "firefly-error",
+ "firefly-observability",
+ "firefly-pubsub",
+ "firefly-vio",
+ "firefly-vio-core",
+ "firefly-vio-types",
+ "iceoryx2",
+ "log",
+ "nalgebra",
+]
 
 [[package]]
 name = "walkdir"
