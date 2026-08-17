@@ -5,11 +5,17 @@
 //! 地图为 `FFMap` 标准格式（见 `docs/map-format.md`），可含动态障碍：
 //! 主循环每 tick 按航点插值更新障碍占据后重规划。
 //!
+//! **VIO 接入**：订阅 `apps/vio` 发布的 odom/imu（iceoryx2 + trace 上下文）。
+//! - odom 新鲜（`ODOM_FRESH_TIMEOUT` 内）时作为**状态源**（replan 起点 +
+//!   无人机位置），VIO 世界系经 `frame_offset`（= `--start`，合成标定）对齐地图系；
+//! - vio 进程未启动时回退轨迹推进模拟（独立运行不受影响）；
+//! - 每条 odom/imu 消息 `continue_span` 续接 trace，跨进程 span 树可观测。
+//!
 //! 主循环语义（对应官方 `execFSMCallback`）：
 //! - `EXEC_TRAJ`：轨迹按时间推进，`t_cur > replan_thresh` 触发重规划；
-//! - `REPLAN_TRAJ`：起点取当前轨迹状态，目标取全局路径上
+//! - `REPLAN_TRAJ`：起点取当前状态（odom 或轨迹），目标取全局路径上
 //!   `planning_horizon` 处的点（官方 `getLocalTarget`），规划失败保持旧轨迹；
-//! - 到达目标（`touch_goal`）后任务完成，退出循环。
+//! - 无人机与目标距离 `< ARRIVE_DIST` 即任务完成，退出循环。
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -20,6 +26,9 @@ use firefly_error::{Error, ErrorKind, Result};
 use firefly_map::{GridMap, MapFile, VoxelState};
 use firefly_observability::init as init_observability;
 use firefly_planner::{PlanResult, Planner, PlannerConfig, State};
+use firefly_pubsub::imu::{IMU_TOPIC, ImuSubscriber};
+use firefly_pubsub::odom::OdomMessage;
+use firefly_pubsub::subscriber::OdomSubscriber;
 use firefly_search::Astar;
 use firefly_trajectory::Trajectory;
 use firefly_viewer::Viewer;
@@ -31,6 +40,10 @@ const REPLAN_THRESH: f64 = 1.0;
 const PLANNING_HORIZON: f64 = 6.0;
 /// 主循环频率（官方 `exec_timer` 0.1s）。
 const LOOP_PERIOD: Duration = Duration::from_millis(100);
+/// odom 新鲜度阈值（秒）：超过该时长未收到 odom 则回退轨迹模拟状态源。
+const ODOM_FRESH_TIMEOUT: f64 = 1.0;
+/// 到达判定距离（米）：无人机与目标距离小于该值即任务完成。
+const ARRIVE_DIST: f64 = 0.5;
 
 struct Args {
     map: PathBuf,
@@ -89,6 +102,12 @@ struct LocalTraj {
     start_time: f64,
 }
 
+/// 最新 odom 快照（VIO 世界系 → 地图系变换后的状态）。
+struct OdomSnapshot {
+    /// 地图系下的状态（已施加 `frame_offset`）。
+    state: State,
+}
+
 struct Demo {
     planner: Planner,
     viewer: Viewer,
@@ -108,6 +127,16 @@ struct Demo {
     /// 是否完成。
     finished: bool,
     replans: usize,
+    /// VIO 世界系 → 地图系变换（合成标定：vio 原点 = 任务起点 `--start`）。
+    frame_offset: Vector3<f64>,
+    /// odom 订阅（vio 进程未启动时为 `None`，回退轨迹模拟状态源）。
+    odom: Option<OdomSubscriber>,
+    /// imu 订阅（同 odom，可观测原始 IMU）。
+    imu: Option<ImuSubscriber>,
+    /// 最新 odom 快照（地图系）。
+    latest_odom: Option<OdomSnapshot>,
+    /// 收到最新 odom 时的仿真时刻（秒）。
+    last_odom_recv: f64,
 }
 
 impl Demo {
@@ -139,6 +168,29 @@ impl Demo {
             path_length(&global_path),
             map_file.motions.len()
         );
+        // 订阅 VIO 输出（vio 进程未启动/IPC 不可用时降级为 None，保持独立运行）
+        let odom = match OdomSubscriber::new() {
+            Ok(s) => {
+                log::info!("已订阅 odom 话题（VIO 状态源）");
+                Some(s)
+            }
+            Err(e) => {
+                log::warn!("odom 订阅不可用，回退轨迹模拟状态源：{e}");
+                None
+            }
+        };
+        let imu = match ImuSubscriber::new() {
+            Ok(s) => {
+                log::info!("已订阅 imu 话题 {IMU_TOPIC}");
+                Some(s)
+            }
+            Err(e) => {
+                log::warn!("imu 订阅不可用：{e}");
+                None
+            }
+        };
+        // 合成标定：VIO 世界原点 = 任务起点（AGENTS.md：标定硬编码）
+        let frame_offset = Vector3::new(start[0], start[1], start[2]);
         Ok(Self {
             planner,
             viewer,
@@ -152,7 +204,95 @@ impl Demo {
             touch_goal: false,
             finished: false,
             replans: 0,
+            frame_offset,
+            odom,
+            imu,
+            latest_odom: None,
+            last_odom_recv: f64::NEG_INFINITY,
         })
+    }
+
+    /// 排空 odom/imu 订阅：续接 trace span、记录最新状态、写日志。
+    fn poll_sensors(&mut self, now: f64) -> Result<()> {
+        if let Some(sub) = &self.odom {
+            while let Some(sample) = sub.receive()? {
+                let ctx = *sample.user_header();
+                // 跨进程 trace 续接：本 span 的父即 vio 发布端 span
+                let _span = ctx.continue_span("recv-odom");
+                let m: OdomMessage = *sample;
+                let p = Vector3::new(m.position_x, m.position_y, m.position_z) + self.frame_offset;
+                let v = Vector3::new(m.velocity_x, m.velocity_y, m.velocity_z);
+                self.latest_odom = Some(OdomSnapshot {
+                    state: State {
+                        position: Point3::from(p),
+                        velocity: v,
+                        acceleration: Vector3::zeros(),
+                    },
+                });
+                self.last_odom_recv = now;
+                log::info!(
+                    "odom recv t={:.2} p=({:.2},{:.2},{:.2}) v=({:.3},{:.3},{:.3}) trace_id={:032x}",
+                    m.timestamp,
+                    p.x,
+                    p.y,
+                    p.z,
+                    v.x,
+                    v.y,
+                    v.z,
+                    ctx.trace_id()
+                );
+            }
+        }
+        if let Some(sub) = &self.imu {
+            while let Some(sample) = sub.receive()? {
+                let ctx = *sample.user_header();
+                let _span = ctx.continue_span("recv-imu");
+                let m = *sample;
+                log::debug!(
+                    "imu recv t={:.3} w=({:.3},{:.3},{:.3}) a=({:.2},{:.2},{:.2})",
+                    m.timestamp,
+                    m.angular_velocity_x,
+                    m.angular_velocity_y,
+                    m.angular_velocity_z,
+                    m.linear_acceleration_x,
+                    m.linear_acceleration_y,
+                    m.linear_acceleration_z,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// 当前无人机状态源：新鲜 odom（VIO）优先，否则轨迹推进（独立运行）。
+    fn current_state(&self, now: f64) -> State {
+        let fresh = self
+            .latest_odom
+            .as_ref()
+            .filter(|_| now - self.last_odom_recv < ODOM_FRESH_TIMEOUT);
+        if let Some(o) = fresh {
+            return o.state;
+        }
+        match &self.local {
+            Some(local) => {
+                let t_cur = (now - local.start_time).clamp(0.0, local.traj.duration());
+                let s = local.traj.eval(t_cur);
+                State {
+                    position: Point3::new(s.position.x, s.position.y, s.position.z),
+                    velocity: s.velocity,
+                    acceleration: s.acceleration,
+                }
+            }
+            None => State {
+                position: Point3::from(self.global_path[0]),
+                velocity: Vector3::zeros(),
+                acceleration: Vector3::zeros(),
+            },
+        }
+    }
+
+    /// 当前无人机位置（与 [`Demo::current_state`] 同源）。
+    fn current_position(&self, now: f64) -> Vector3<f64> {
+        self.current_state(now).position.coords
     }
 
     /// 官方 `getLocalTarget`：从 start 沿全局路径累计弧长，取 horizon 处的点；
@@ -188,23 +328,19 @@ impl Demo {
         (Vector3::new(self.goal.x, self.goal.y, self.goal.z), true)
     }
 
-    /// 官方 `planFromLocalTraj`：从当前轨迹状态重规划到局部目标。
+    /// 官方 `planFromLocalTraj`：从当前状态（VIO odom 或轨迹推进）重规划到局部目标。
     fn replan(&mut self, now: f64) -> Result<()> {
-        let local = self.local.as_ref().expect("replan requires local traj");
-        let t_cur = (now - local.start_time).clamp(0.0, local.traj.duration());
-        let s = local.traj.eval(t_cur);
-        let start = State {
-            position: Point3::new(s.position.x, s.position.y, s.position.z),
-            velocity: s.velocity,
-            acceleration: s.acceleration,
-        };
-        let (target, touch_goal) = self.local_target(s.position);
+        let _ = self.local.as_ref().expect("replan requires local traj");
+        // 状态源：新鲜 odom（VIO）优先，否则回退轨迹推进（独立运行）
+        let start = self.current_state(now);
+        let pos = start.position.coords;
+        let (target, touch_goal) = self.local_target(pos);
         log::info!(
             "replan #{:03} t={now:.1}s 从 ({:.1},{:.1},{:.1}) 到 ({:.1},{:.1},{:.1}){}",
             self.replans,
-            s.position.x,
-            s.position.y,
-            s.position.z,
+            pos.x,
+            pos.y,
+            pos.z,
             target.x,
             target.y,
             target.z,
@@ -301,6 +437,8 @@ impl Demo {
     /// 官方 `execFSMCallback`：10Hz 主循环单步。
     fn tick(&mut self) -> Result<()> {
         let now = self.t_sim;
+        // 先消费 VIO 输出（续接 trace span、更新最新状态）
+        self.poll_sensors(now)?;
         self.update_motion();
         match &self.local {
             None => {
@@ -321,13 +459,21 @@ impl Demo {
                 }
             }
         }
-        // 当前位置（按轨迹推进，模拟里程计）
-        if let Some(local) = &self.local {
-            let t_cur = (now - local.start_time).clamp(0.0, local.traj.duration());
-            let s = local.traj.eval(t_cur);
-            let pos = [s.position.x, s.position.y, s.position.z];
-            self.viewer.log_position("drone", pos, (255, 140, 40))?;
+        // 当前无人机位置（VIO odom 优先，否则轨迹推进）
+        let pos = self.current_position(now);
+        // 到达判定：无人机与目标距离 < ARRIVE_DIST（odom 状态源下任务也能正常结束）
+        if self.local.is_some() && (pos - self.goal.coords).norm() < ARRIVE_DIST {
+            log::info!(
+                "到达目标 ({:.1},{:.1},{:.1})，任务完成（重规划 {} 次）",
+                pos.x,
+                pos.y,
+                pos.z,
+                self.replans
+            );
+            self.finished = true;
+            return Ok(());
         }
+        self.viewer.log_position("drone", [pos.x, pos.y, pos.z], (255, 140, 40))?;
         // 动态障碍按真实尺寸渲染（motions 实体）
         if !self.map_file.motions.is_empty() {
             let mut indices = Vec::new();
@@ -381,13 +527,7 @@ impl Demo {
 }
 
 fn pos_of(demo: &Demo) -> Vector3<f64> {
-    match &demo.local {
-        Some(local) => {
-            let t_cur = (demo.t_sim - local.start_time).clamp(0.0, local.traj.duration());
-            local.traj.eval(t_cur).position
-        }
-        None => demo.global_path[0],
-    }
+    demo.current_position(demo.t_sim)
 }
 
 /// 人形体素（0.1m 格）：双腿 + 躯干 + 头，脚底 z=0，中心对齐 (cx, cy)。

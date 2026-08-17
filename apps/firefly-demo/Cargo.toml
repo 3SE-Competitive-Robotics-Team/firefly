@@ -20,6 +20,7 @@ firefly-error = { workspace = true }
 firefly-map = { workspace = true }
 firefly-observability = { workspace = true }
 firefly-planner = { workspace = true }
+firefly-pubsub = { workspace = true }
 firefly-search = { workspace = true }
 firefly-trajectory = { workspace = true }
 firefly-viewer = { workspace = true }
