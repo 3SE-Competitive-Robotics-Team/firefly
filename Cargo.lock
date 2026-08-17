@@ -1399,6 +1399,7 @@ name = "firefly-vio-core"
 version = "0.1.0"
 dependencies = [
  "firefly-vio-types",
+ "log",
  "nalgebra",
 ]
 

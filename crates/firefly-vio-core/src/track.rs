@@ -331,6 +331,12 @@ impl TrackKlt {
             }
             (_, true) => { /* 非法输入，忽略（C++ exit） */ }
         }
+        // 可观测性：当前帧处理后特征库大小（诊断跟踪是否产出特征）
+        log::debug!(
+            "tracker feed t={:.3} db_size={}",
+            msg.timestamp,
+            self.base.database.size()
+        );
     }
 
     /// 对 `msg` 中所有相机做直方图预处理 + 金字塔，并将结果写入 `img_curr`/

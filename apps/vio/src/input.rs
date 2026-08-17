@@ -142,13 +142,28 @@ impl SensorInput for IceoryxInput {
         };
         let timestamp = l.timestamp.max(r.timestamp);
         let sensor_ids = vec![l.sensor_id, r.sensor_id];
+        // 全零 mask（对照 OpenVINS `VioManager.cpp` 的 `cv::Mat::zeros` 默认掩码：
+        // 0 = 全像素有效，tracker 的 `feed_new_camera` 要求 `images.len()==masks.len()`，
+        // 空 mask 会被校验拒绝 → 跟踪器从未运行 → MSCKF 无特征）。
+        let masks = vec![
+            GrayImage {
+                width: left.width,
+                height: left.height,
+                data: vec![0; left.width * left.height],
+            },
+            GrayImage {
+                width: right.width,
+                height: right.height,
+                data: vec![0; right.width * right.height],
+            },
+        ];
         self.last_left = None;
         self.last_right = None;
         Some(CameraData {
             timestamp,
             sensor_ids,
             images: vec![left, right],
-            masks: Vec::new(),
+            masks,
         })
     }
 }

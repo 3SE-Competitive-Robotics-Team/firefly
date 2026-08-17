@@ -177,7 +177,9 @@ impl VioManager {
         if timestamp <= self.state.timestamp {
             return;
         }
-        self.propagate_and_clone(timestamp);
+        // 只传播均值/协方差，**不增广克隆**——克隆仅在相机时刻由
+        // `propagate_and_clone` 增广（对照 open_vins：odom 输出路径不产生克隆）。
+        self.propagate_impl(timestamp, false);
         self.timelastupdate = timestamp;
     }
 
@@ -558,6 +560,15 @@ impl VioManager {
     /// 多段合成：`Phi_summed = Φ_i·...·Φ_0`、`Qd_summed` 按
     /// `Q ← Φ·Q·Φᵀ + Qd_i` 累积，最后 `EKFPropagation` 写回协方差并增广克隆。
     fn propagate_and_clone(&mut self, timestamp: f64) {
+        self.propagate_impl(timestamp, true);
+    }
+
+    /// 传播主体（`augment` 决定是否增广克隆）。
+    ///
+    /// 多段合成：`Phi_summed = Φ_i·...·Φ_0`、`Qd_summed` 按
+    /// `Q ← Φ·Q·Φᵀ + Qd_i` 累积，最后 `EKFPropagation` 写回协方差，
+    /// `augment` 时增广克隆（对照 `Propagator::propagate_and_clone`）。
+    fn propagate_impl(&mut self, timestamp: f64, augment: bool) {
         let t_off_new = self.time_offset();
         let time0 = self.state.timestamp + self.last_prop_time_offset;
         let time1 = timestamp + t_off_new;
@@ -644,9 +655,16 @@ impl VioManager {
             .collect();
         ekf_propagation(&mut self.state, &order, &order, &phi_summed, &qd_summed);
 
-        // 更新时间戳并增广克隆（对照 C++ 末尾）
+        // 更新时间戳，必要时增广克隆（对照 C++ 末尾）
         self.state.timestamp = timestamp;
-        augment_clone(&mut self.state, &last_w);
+        if augment {
+            augment_clone(&mut self.state, &last_w);
+            // 可观测性：克隆窗口大小（诊断边缘化是否生效）
+            log::debug!(
+                "propagate_and_clone t={timestamp:.3} clones={}",
+                self.state.clones_imu.len()
+            );
+        }
         self.last_prop_time_offset = t_off_new;
         // 状态已变化，fast-prop 缓存失效（对照 C++ 调用方的 invalidate_cache）
         self.propagator.invalidate_cache();
