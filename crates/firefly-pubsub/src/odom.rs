@@ -7,6 +7,9 @@
 
 use iceoryx2::prelude::*;
 
+/// 真值话题（MuJoCo 物理环境发布，仿真阶段感知位姿源）。
+pub const GROUND_TRUTH_TOPIC: &str = "Firefly/GroundTruth";
+
 /// 里程计消息（对照 `docs/architecture.md` 的 `topic: odom`）。
 ///
 /// 字段布局与 `firefly-vio` 的 `State` 输出对应：
