@@ -207,6 +207,8 @@ struct Demo {
     /// 重规划失败后的冷却截止时刻（秒）：失败不每 tick 重试，避免
     /// A* 空转（失败不改 `start_time`，`t_cur` 持续 > 阈值会触发逐 tick 重试）。
     replan_cooldown_until: f64,
+    /// 连续重规划失败计数：≥3 且轨迹耗尽时沿全局路径直飞回退（脱困）。
+    replan_fail_streak: usize,
     /// 参考状态发布器（闭环控制：MuJoCo 物理环境订阅后 PD 跟踪）。
     ref_pub: Option<Publisher<ReferenceMessage>>,
     /// 深度订阅（MuJoCo 物理环境发布；感知建图输入）。
@@ -222,6 +224,8 @@ struct Demo {
 }
 
 impl Demo {
+    // 长构造器（含订阅/标定/诊断），clippy too_many_lines 允许
+    #[allow(clippy::too_many_lines)]
     fn new(
         map_file: MapFile,
         viewer: Viewer,
@@ -251,6 +255,19 @@ impl Demo {
             path_length(&global_path),
             map_file.motions.len()
         );
+        // 诊断：全局路径中段（绕柱检测，compact 输出）
+        let path_str: String = global_path
+            .iter()
+            .map(|p| format!("{:.1},{:.1}", p.x, p.y))
+            .collect::<Vec<_>>()
+            .join(" ");
+        log::info!("全局路径点: {path_str}");
+        // 诊断：x=9 柱处地图占用
+        for y in [3.2f64, 4.0, 4.8] {
+            let o = planner.map_ref().is_occupied_inflated(Vector3::new(9.0, y, 1.0));
+            let raw = planner.map_ref().is_occupied(Vector3::new(9.0, y, 1.0));
+            log::info!("map@(9,{y},1) inflated={o} raw={raw}");
+        }
         // 订阅 VIO 输出（vio 进程未启动/IPC 不可用时降级为 None，保持独立运行）
         let odom = match OdomSubscriber::new() {
             Ok(s) => {
@@ -328,6 +345,7 @@ impl Demo {
             last_odom_recv: f64::NEG_INFINITY,
             odom_trace: None,
             replan_cooldown_until: f64::NEG_INFINITY,
+            replan_fail_streak: 0,
             ref_pub,
             depth,
             gt,
@@ -622,10 +640,11 @@ impl Demo {
             .planner
             .plan(start, Point3::new(target.x, target.y, target.z))
         {
-            Ok(r) => r,
+            Ok(r) => { self.replan_fail_streak = 0; r }
             Err(e) => {
                 log::warn!("重规划失败，保持旧轨迹：{e}");
                 self.replan_cooldown_until = now + 0.5;
+                self.replan_fail_streak += 1;
                 return Ok(());
             }
         };
@@ -755,16 +774,41 @@ impl Demo {
         // 发布参考状态（闭环控制：MuJoCo 物理环境订阅后 PD 跟踪执行中的轨迹）
         if let Some(local) = &self.local {
             let t_cur = (now - local.start_time).clamp(0.0, local.traj.duration());
-            let s = local.traj.eval(t_cur);
+            // 脱困回退：轨迹已耗尽且重规划连续失败（贴墙死锁）→ 沿全局路径
+            // 向下一自由点直飞（引导速度 1 m/s），物理移动解开几何死锁，
+            // 也给 VIO 提供视差（对照 EGO-Planner-v2 FSM 的失败后换路径恢复）。
+            let (px, py, pz, vx, vy, vz) = if t_cur >= local.traj.duration() - 1e-6
+                && self.replan_fail_streak >= 3
+            {
+                // 短步进沿全局路径跟随绕行（1m 步，避免直线穿障）
+                let (tp, _) = self.path_point_at_arc(pos, 1.0);
+                let dir = tp - pos;
+                let dir = if dir.norm_squared() < 1e-9 { Vector3::zeros() } else { dir.normalize() };
+                log::info!(
+                    "脱困回退: 当前位置({:.2},{:.2}) 目标({:.2},{:.2})",
+                    pos.x, pos.y, tp.x, tp.y
+                );
+                (tp.x, tp.y, tp.z, 1.0 * dir.x, 1.0 * dir.y, 1.0 * dir.z)
+            } else {
+                let s = local.traj.eval(t_cur);
+                (
+                    s.position.x,
+                    s.position.y,
+                    s.position.z,
+                    s.velocity.x,
+                    s.velocity.y,
+                    s.velocity.z,
+                )
+            };
             if let Some(pub_) = &self.ref_pub
                 && let Err(e) = pub_.publish(ReferenceMessage {
                     timestamp: now,
-                    position_x: s.position.x,
-                    position_y: s.position.y,
-                    position_z: s.position.z,
-                    velocity_x: s.velocity.x,
-                    velocity_y: s.velocity.y,
-                    velocity_z: s.velocity.z,
+                    position_x: px,
+                    position_y: py,
+                    position_z: pz,
+                    velocity_x: vx,
+                    velocity_y: vy,
+                    velocity_z: vz,
                 })
             {
                 log::warn!("参考状态发布失败: {e}");
