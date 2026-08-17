@@ -27,6 +27,7 @@ use iceoryx2_bb_posix::clock::{ClockType, Time};
 /// span 内（此时仅时间戳有效，[`TraceContext::is_traced`] 为 `false`）。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, ZeroCopySend)]
+#[type_name("FireflyTraceContext")]
 pub struct TraceContext {
     /// 结构版本（当前为 [`TraceContext::VERSION`]）。
     pub version: u8,

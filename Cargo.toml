@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/*", "apps/*"]
+exclude = ["apps/firefly-sim"]
 resolver = "3"
 
 [workspace.dependencies]
