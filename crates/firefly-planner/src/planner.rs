@@ -334,7 +334,10 @@ impl Planner {
         );
         Self::add_hit_planes(map, hits, planes_by_point);
         *restart_nums += 1;
-        if *restart_nums > 3 {
+        // 重启上限：引导路径修正（simplify 膨胀）后，贴墙翻越/窄缝场景可能
+        // 需要更多次"合并平面→重启"才把轨迹顶出膨胀层，3 次过紧导致
+        // plan 经常失败；放宽到 6 次（每次重启都会带上新平面，收敛方向确定）。
+        if *restart_nums > 6 {
             return Err(Error::temporary(
                 ErrorKind::Convergence,
                 "planner exceeded restart limit",
