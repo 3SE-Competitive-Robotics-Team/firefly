@@ -13,6 +13,7 @@
 //! firefly_sim` 的 `MuJoCo` 物理环境）。
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use fastrace::prelude::*;
@@ -21,6 +22,7 @@ use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::publish::{ODOM_TOPIC, OdomPublisher};
 use firefly_vio::options::VioManagerOptions;
 use firefly_vio::vio_manager::VioManager;
+use firefly_vio_core::cam::{CamRadtan, SharedCamera};
 use firefly_vio_core::input::SensorInput;
 use firefly_vio_core::track::{HistogramMethod, TrackKlt};
 use nalgebra::Vector3;
@@ -89,20 +91,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         log::info!("相机路径已启用（MSCKF 视觉更新）");
     }
 
-    // 估计器（默认参数；相机驱动接入后在此配置 CamRadtan/CamEqui 与 tracker）
-    let params = VioManagerOptions::default();
+    // 估计器：MuJoCo 双目相机标定（`scene.py`：320×240、fovy=60°、方形像素、
+    // 基线 0.1m）。内参 focal=(H/2)/tan(fovy/2)=207.85，无畸变；外参：
+    // 相机轴在机体 x=(0,-1,0)、y=(0,0,-1)、z=(1,0,0)，左 (-0.05,0,0)、
+    // 右 (0.05,0,0)。
+    let focal = 120.0 / (60.0_f64 / 2.0).to_radians().tan();
+    let intrinsics = [focal, focal, 160.0, 120.0, 0.0, 0.0, 0.0, 0.0];
+    let cam_left: SharedCamera = Arc::new(CamRadtan::new(320, 240, &intrinsics));
+    let cam_right: SharedCamera = Arc::new(CamRadtan::new(320, 240, &intrinsics));
+
+    let mut params = VioManagerOptions::default();
+    params.state_options.num_cameras = 2;
+    let mut tracker_calib = std::collections::HashMap::new();
+    tracker_calib.insert(0usize, cam_left.clone());
+    tracker_calib.insert(1usize, cam_right.clone());
     let tracker = TrackKlt::new(
-        std::collections::HashMap::new(),
+        tracker_calib,
         200,
         0,
-        false,
+        true,
         HistogramMethod::None,
         20,
         4,
         4,
         10,
     );
-    let mut vio = VioManager::new(params, BTreeMap::new(), tracker);
+    let mut cameras = BTreeMap::new();
+    cameras.insert(0usize, cam_left);
+    cameras.insert(1usize, cam_right);
+    let mut vio = VioManager::new(params, cameras, tracker);
+
+    // 相机外参（IMU→cam）：R_ItoC 列 = 相机轴在机体，p_IinC = IMU 原点在相机系
+    // 左相机 p_IinC=(0,-0.05,0)、右 (0,0.05,0)；四元数 JPL xyzw（实测重建校验）
+    let q_ito_c = nalgebra::Vector4::new(0.5, -0.5, 0.5, -0.5);
+    let p_left_in_c = Vector3::new(0.0, -0.05, 0.0);
+    let p_right_in_c = Vector3::new(0.0, 0.05, 0.0);
+    for (cam_id, p_iin_c) in [(0usize, p_left_in_c), (1usize, p_right_in_c)] {
+        let calib = vio
+            .state
+            .calib_imu_to_cam
+            .get_mut(&cam_id)
+            .expect("num_cameras=2 已建外参槽位");
+        calib.set_value(q_ito_c, p_iin_c);
+        calib.set_fej(q_ito_c, p_iin_c);
+    }
 
     // 真值先验：synthetic 原点 +x 漂移；iceoryx 与 MuJoCo 场景一致（起点静止）
     let mut imustate = [0.0f64; 17];
