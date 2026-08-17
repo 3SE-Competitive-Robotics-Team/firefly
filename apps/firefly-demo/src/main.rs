@@ -106,20 +106,19 @@ fn empty_map_file() -> MapFile {
 
 /// `MuJoCo` 默认场景静态地图：与 `firefly_mujoco/scene.py` 的障碍布局
 /// 同构（box 中心 + 半尺寸），体素化后作先验，保证**全局路径**在空地图上
-/// 也会绕墙蛇形（纯深度感知在航线上才看到墙，全局路径会是直线）。
+/// 也会绕柱蛇形（纯深度感知在航线上才看到障碍，全局路径会是直线）。
 ///
-/// 布局（高 3m 无法飞越，只可横向绕；绕行窗口 ≥2.4m 净宽）：
-/// x=8 挡 y∈[2.8,5.2]（逼走上侧）；x=14 挡 y∈[-1.2,2.8]（上侧通行）；
-/// x=20 挡 y∈[5.2,8.8]（逼走下侧，回到中线）；x=11/17 为走廊内小障（装饰）。
+/// 布局：中线上一串孤立高柱（约 0.8~1.2m 见方），逼小幅左右绕行；
+/// x=12/19 为走廊外小障（装饰）。
 #[must_use]
 fn mujoco_map_file() -> MapFile {
     let mut map = empty_map_file();
     let boxes: [[f64; 6]; 5] = [
-        [8.0, 4.0, 1.5, 0.8, 1.2, 1.5],
-        [11.0, 6.8, 1.0, 0.4, 0.7, 1.0],
-        [14.0, 0.8, 1.5, 0.6, 2.0, 1.5],
-        [17.0, 4.0, 0.9, 0.4, 0.5, 0.9],
-        [20.0, 7.0, 1.5, 0.6, 1.8, 1.5],
+        [9.0, 4.0, 1.5, 0.4, 0.5, 1.5],
+        [12.0, 6.5, 1.0, 0.4, 0.7, 1.0],
+        [16.0, 4.0, 1.5, 0.4, 0.6, 1.5],
+        [19.0, 1.8, 0.9, 0.4, 0.5, 0.9],
+        [22.0, 3.6, 1.5, 0.4, 0.5, 1.5],
     ];
     let res = map.resolution;
     let o = map.origin;
@@ -182,8 +181,12 @@ struct Demo {
     global_path: Vec<Vector3<f64>>,
     local: Option<LocalTraj>,
     goal: Point3<f64>,
-    /// 仿真时钟（秒），替代官方 `ros::Time::now()`。
+    /// 仿真时钟（秒）。**唯一权威 = 收到的传感器时间戳**（GT/odom 均带
+    /// `MuJoCo` sim 时钟），在本仿真内代替官方 `ros::Time::now()`；无传感器
+    /// 才按 tick 本地递增回退。所有计算/viewer 时间轴都用它，与 vio/仿真对齐。
     t_sim: f64,
+    /// 本 tick 是否收到带 sim 时间戳的消息（决定 `t_sim` 是否本地回退递增）。
+    sensor_this_tick: bool,
     /// 目标是终点（`touch_goal`）：轨迹执行完毕即任务完成。
     touch_goal: bool,
     /// 是否完成。
@@ -314,6 +317,7 @@ impl Demo {
             local: None,
             goal: Point3::new(goal[0], goal[1], goal[2]),
             t_sim: 0.0,
+            sensor_this_tick: false,
             touch_goal: false,
             finished: false,
             replans: 0,
@@ -333,8 +337,12 @@ impl Demo {
         })
     }
 
-    /// 排空 odom/imu 订阅：续接 trace span、记录最新状态、写日志。
-    fn poll_sensors(&mut self, now: f64) -> Result<()> {
+    /// 排空 odom/imu/深度/真值订阅：续接 trace span、记录最新状态。
+    ///
+    /// 收到带 sim 时间戳的消息（odom/GT）时把权威时钟 `t_sim` 单调锚定到该
+    /// 时间戳（MuJoCo sim 时钟），使 demo 与 vio/仿真同一时间轴、viewer
+    /// 回放对齐；并置 `sensor_this_tick`。
+    fn poll_sensors(&mut self) -> Result<()> {
         if let Some(sub) = &self.odom {
             while let Some(sample) = sub.receive()? {
                 let ctx = *sample.user_header();
@@ -344,6 +352,10 @@ impl Demo {
                     self.odom_trace = Some((ctx.trace_id(), ctx.span_id, ctx.sampled()));
                 }
                 let m: OdomMessage = *sample;
+                // 锚定 sim 时钟到 odom 时间戳（vio 的 odom 用 MuJoCo sim 时钟）
+                self.t_sim = self.t_sim.max(m.timestamp);
+                self.last_odom_recv = m.timestamp;
+                self.sensor_this_tick = true;
                 let p = Vector3::new(m.position_x, m.position_y, m.position_z) + self.frame_offset;
                 let v = Vector3::new(m.velocity_x, m.velocity_y, m.velocity_z);
                 self.latest_odom = Some(OdomSnapshot {
@@ -353,7 +365,7 @@ impl Demo {
                         acceleration: Vector3::zeros(),
                     },
                 });
-                self.last_odom_recv = now;
+                self.last_odom_recv = m.timestamp;
                 log::info!(
                     "odom recv t={:.2} p=({:.2},{:.2},{:.2}) v=({:.3},{:.3},{:.3}) trace_id={:032x}",
                     m.timestamp,
@@ -398,6 +410,9 @@ impl Demo {
                 let ctx = *sample.user_header();
                 let _span = ctx.continue_span("recv-gt");
                 let m = *sample;
+                // 锚定 sim 时钟到真值时间戳（MuJoCo sim 时钟，与 vio 对齐）
+                self.t_sim = self.t_sim.max(m.timestamp);
+                self.sensor_this_tick = true;
                 let p = Vector3::new(m.position_x, m.position_y, m.position_z) + self.frame_offset;
                 let v = Vector3::new(m.velocity_x, m.velocity_y, m.velocity_z);
                 self.latest_gt = Some((
@@ -704,11 +719,13 @@ impl Demo {
 
     /// 官方 `execFSMCallback`：10Hz 主循环单步。
     fn tick(&mut self) -> Result<()> {
+        // 先消费传感器（更新权威仿真时钟 `t_sim`），再取当帧 sim 时刻；
+        // 保证所有计算/viewer 时间轴落在真实仿真时间上。
+        self.poll_sensors()?;
         let now = self.t_sim;
+        self.sensor_this_tick = false;
         // 统一仿真时间轴（与 vio 的传感器/odom 同轴，跨进程对齐回放）
         self.viewer.set_time(now);
-        // 先消费 VIO 输出（续接 trace span、更新最新状态）
-        self.poll_sensors(now)?;
         // 深度 → 占据体素（感知建图）
         self.update_map_from_depth();
         self.update_motion();
@@ -849,7 +866,11 @@ impl Demo {
                 );
             }
             frame += 1;
-            self.t_sim += LOOP_PERIOD.as_secs_f64();
+            // 时钟推进：本 tick 收到带 sim 时间戳消息则由传感器锚定（已在
+            // 轮询时更新 `t_sim`）；否则本地回退递增（独立运行无传感器时）。
+            if !self.sensor_this_tick {
+                self.t_sim += LOOP_PERIOD.as_secs_f64();
+            }
             let elapsed = t0.elapsed();
             if elapsed < LOOP_PERIOD {
                 std::thread::sleep(LOOP_PERIOD.saturating_sub(elapsed));
