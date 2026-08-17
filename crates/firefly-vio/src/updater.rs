@@ -223,6 +223,15 @@ impl UpdaterMsckf {
 
             nullspace_project_inplace(&mut h_f, &mut h_x, &mut res);
 
+            // 硬残差上限：协方差 P 膨胀时 chi2（H·P·Hᵀ+R）会退化性地接受
+            // 巨大残差特征（实测 400+ px）而主动把估计推得更发散。无论 P 大小，
+            // 平均像素残差 > `max_pix_res`（默认 40px）的特征一律拒收——这是
+            // 与协方差无关的硬外点门，防止垃圾更新加剧漂移。
+            if res.norm() > 40.0 * f64::sqrt(res.len() as f64) {
+                feat.to_delete = true;
+                continue;
+            }
+
             // chi2 检验（对照 C++：S = H_x·P_marg·H_xᵀ + R，chi2 = resᵀS⁻¹res）。
             // 注意必须加测量噪声 R（sigma_pix²）：残差/雅可比在像素空间（fx 量级），
             // 缺 R 时 S 尺度错误 → 外点全部误纳/误拒。
