@@ -167,15 +167,11 @@ fn run_loop(
             log_depth(viewer, &m);
         }
         // 相机（MSCKF 视觉更新 + rerun 双目可视化）
-        // 关键时序：把 state 传播钳制在「相机屏障」之前一丝（`-1e-6`）——既
-        // 绝不越过尚未配对的相机帧（否则 state 超前被判乱序跳过），又保持
-        // `state < 相机时刻`，让 feed 内部的 `propagate_and_clone` 正常推进并
-        // 增广克隆（若恰好相等会被精确相等检查跳过 → 克隆攒不满 → MSCKF 不执行）。
-        let target = match input.camera_barrier() {
-            Some(b) => now.min(b - 1e-6),
-            None => now,
-        };
-        vio.propagate_to(target);
+        // 时序：**只由相机 feed 内的 `propagate_and_clone` 推进 state 到相机时刻**
+        //（open_vins 模型）——不单独预传播 `propagate_to`，因此 state 永远不会
+        // 越过尚未处理的相机帧（无乱序），也不会发生"propagate_to 与
+        // propagate_and_clone 两次传播重叠积分同一段 IMU"而累积速度误差
+        //（实测 y/z 指数级发散）。odom（10Hz）由相机推进的状态输出。
         if let Some(cam) = input.next_camera() {
             vio.feed_measurement_camera(&cam);
             log::debug!(
