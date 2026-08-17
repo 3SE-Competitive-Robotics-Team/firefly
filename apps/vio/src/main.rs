@@ -5,6 +5,10 @@
 //! 到 `Firefly/Odometry`。所有消息的 User Header 自动携带 fastrace trace
 //! 上下文（跨进程 span 树可观测）。
 //!
+//! 可视化：订阅的传感器（双目灰度 + 深度）与估计 odom 位姿同步写入 rerun
+//! viewer（`sensor/stereo_left|right`、`sensor/depth`、`vio/odom`，统一
+//! `sim_time` 时间轴）。已有 `rerun` viewer 则共享（多进程），否则自起。
+//!
 //! 运行：`cargo run -p vio`（配合 `uv run firefly-sim` 的 `MuJoCo` 物理环境）。
 
 use std::collections::BTreeMap;
@@ -12,8 +16,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fastrace::prelude::*;
+use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage};
 use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::publish::{ODOM_TOPIC, OdomPublisher};
+use firefly_pubsub::subscriber::Subscriber;
+use firefly_rerun::Stream;
 use firefly_vio::options::VioManagerOptions;
 use firefly_vio::vio_manager::VioManager;
 use firefly_vio_core::cam::{CamRadtan, SharedCamera};
@@ -98,7 +105,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = IceoryxInput::new()?;
     log::info!("输入源：订阅 MuJoCo 物理环境（IMU/双目灰度），imu 话题由 MuJoCo 发布");
 
-    run_loop(&mut vio, &mut input, &odom_pub)
+    // rerun 可视化：已有 viewer 则共享（多进程），否则自起；失败不影响估计
+    let viewer = match Stream::connect_or_spawn("firefly-vio") {
+        Ok(v) => {
+            log::info!("rerun viewer 就绪（传感器/odom 可视化）");
+            Some(v)
+        }
+        Err(e) => {
+            log::warn!("rerun viewer 不可用（跳过可视化，继续运行）：{e}");
+            None
+        }
+    };
+    // 深度订阅（仅用于可视化；估计器只用 IMU + 双目）
+    let depth_sub = match Subscriber::<DepthImageMessage>::with_topic(DEPTH_TOPIC) {
+        Ok(s) => {
+            log::info!("已订阅深度话题 {DEPTH_TOPIC}（rerun 可视化）");
+            Some(s)
+        }
+        Err(e) => {
+            log::warn!("深度订阅不可用（无深度可视化）：{e}");
+            None
+        }
+    };
+
+    run_loop(&mut vio, &mut input, &odom_pub, viewer.as_ref(), depth_sub.as_ref())
 }
 
 /// 驱动循环：推进输入 → 喂 IMU/相机 → 传播 → 发布 odom（10Hz）。
@@ -106,6 +136,8 @@ fn run_loop(
     vio: &mut VioManager,
     input: &mut dyn SensorInput,
     odom_pub: &OdomPublisher,
+    viewer: Option<&Stream>,
+    depth_sub: Option<&Subscriber<DepthImageMessage>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut t_sim = 0.0f64;
     let mut next_odom = 0.0f64;
@@ -128,7 +160,16 @@ fn run_loop(
         while let Some(imu) = input.next_imu() {
             vio.feed_measurement_imu(&imu);
         }
-        // 相机（MSCKF 视觉更新）
+        // 深度帧 → rerun（仅可视化；估计器不用深度）
+        if let Some(sub) = depth_sub
+            && let Some(viewer) = viewer
+            && let Ok(Some(sample)) = sub.receive()
+        {
+            let m = *sample;
+            viewer.set_time(m.timestamp);
+            log_depth(viewer, &m);
+        }
+        // 相机（MSCKF 视觉更新 + rerun 双目可视化）
         if let Some(cam) = input.next_camera() {
             vio.feed_measurement_camera(&cam);
             log::debug!(
@@ -138,6 +179,10 @@ fn run_loop(
                 cam.images.first().map_or(0, |g| g.width),
                 cam.images.first().map_or(0, |g| g.height),
             );
+            if let Some(viewer) = viewer {
+                viewer.set_time(cam.timestamp);
+                log_cameras(viewer, &cam);
+            }
         }
         vio.propagate_to(now);
         t_sim = t_sim.max(now);
@@ -172,6 +217,18 @@ fn run_loop(
                         ctx.trace_id(),
                         ctx.sampled(),
                     );
+                    // 估计位姿 → rerun（统一 sim_time 时间轴）
+                    if let Some(viewer) = viewer {
+                        viewer.set_time(t_sim);
+                        let q = s.imu.quat();
+                        if let Err(e) = viewer.log_pose("vio/odom", [
+                            s.imu.pos().x,
+                            s.imu.pos().y,
+                            s.imu.pos().z,
+                        ], [q[0], q[1], q[2], q[3]]) {
+                            log::debug!("rerun 记录 odom 位姿失败：{e}");
+                        }
+                    }
                 }
                 Err(e) => log::warn!("odom 发布失败（temporary 可重试）: {e}"),
             }
@@ -179,5 +236,31 @@ fn run_loop(
         }
 
         std::thread::sleep(Duration::from_secs_f64(IMU_PERIOD));
+    }
+}
+
+/// 双目灰度帧 → rerun（按 `sensor_id` 分左右目实体）。
+fn log_cameras(viewer: &Stream, cam: &firefly_vio_core::sensor::CameraData) {
+    for (id, img) in cam.sensor_ids.iter().zip(&cam.images) {
+        let entity = match id {
+            0 => Some("sensor/stereo_left"),
+            1 => Some("sensor/stereo_right"),
+            other => {
+                log::debug!("未知 sensor_id {other}，跳过可视化");
+                None
+            }
+        };
+        let Some(entity) = entity else { continue };
+        if let Err(e) = viewer.log_gray_image(entity, img.width as u32, img.height as u32, &img.data)
+        {
+            log::debug!("rerun 记录 {entity} 失败：{e}");
+        }
+    }
+}
+
+/// 深度帧 → rerun。
+fn log_depth(viewer: &Stream, m: &DepthImageMessage) {
+    if let Err(e) = viewer.log_depth_image("sensor/depth", m.width, m.height, &m.data) {
+        log::debug!("rerun 记录 depth 失败：{e}");
     }
 }

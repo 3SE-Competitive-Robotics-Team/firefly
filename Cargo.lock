@@ -1336,6 +1336,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "firefly-rerun"
+version = "0.1.0"
+dependencies = [
+ "firefly-error",
+ "log",
+ "rerun",
+]
+
+[[package]]
 name = "firefly-search"
 version = "0.1.0"
 dependencies = [
@@ -1365,6 +1374,7 @@ dependencies = [
  "firefly-error",
  "firefly-map",
  "firefly-planner",
+ "firefly-rerun",
  "firefly-trajectory",
  "log",
  "nalgebra",
@@ -5637,6 +5647,7 @@ dependencies = [
  "firefly-error",
  "firefly-observability",
  "firefly-pubsub",
+ "firefly-rerun",
  "firefly-vio",
  "firefly-vio-core",
  "firefly-vio-types",

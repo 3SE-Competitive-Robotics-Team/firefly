@@ -29,21 +29,30 @@ Python sim（MuJoCo 物理 + 传感器发布）→ vio（MSCKF 位姿估计）�
   └──────────── 回传参考 Firefly/Reference（PD 闭环）──────────────┘
 ```
 
-按顺序各开一个终端：
+按顺序各开一个终端（可先开 viewer，见下）：
 
 ```bash
+# 0. 可选：先开 rerun viewer（多进程共享；不开则每个进程自动起独立 viewer）
+rerun
+
 # 1. Python 物理环境：200Hz 物理；发布 IMU 100Hz / 双目+深度+真值 10Hz，
 #    订阅 Firefly/Reference 做 PD 闭环控制
 uv sync   # 首次：安装 firefly-mujoco / firefly-sim（根 workspace）
 uv run firefly-sim
 
-# 2. Rust VIO：订阅 MuJoCo IMU/双目灰度，MSCKF 视觉更新，发布 odom 10Hz
+# 2. Rust VIO：订阅 MuJoCo IMU/双目灰度，MSCKF 视觉更新，发布 odom 10Hz；
+#    传感器（双目/深度）与估计位姿写入共享 viewer
 cargo run -p vio
 
 # 3. Rust 重规划：订阅 odom 作为状态源（新鲜超时回退轨迹模拟），
-#    深度感知建图（MuJoCo 闭环下省略 --map），发布参考回传
+#    深度感知建图（MuJoCo 闭环下省略 --map），发布参考回传；
+#    规划结果写入同一 viewer（与 vio 共用 sim_time 时间轴）
 cargo run -p firefly-demo
 ```
+
+rerun 可视化约定：`sensor/stereo_left|right`、`sensor/depth` 为传感器原图，
+`vio/odom` 为估计位姿（3D 变换），规划/地图/轨迹由 demo 写入——多进程
+共用 `sim_time` 时间轴（仿真秒），回放时跨进程数据按同一时钟对齐。
 
 独立运行（不依赖闭环）：
 
