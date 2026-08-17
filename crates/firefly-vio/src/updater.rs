@@ -139,10 +139,11 @@ impl UpdaterMsckf {
         });
 
         // 4b. 反投影一致性门控：p_FinA 在每视图的归一化反投影须与测量一致
-        // （<0.1 归一化 ≈ 20px）。低视差下 DLT 深度病态会产出"贴近相机"的
+        // （<0.3 归一化 ≈ 60px）。低视差下 DLT 深度病态会产出"贴近相机"的
         // 垃圾点，其他视图投影被视差放大 → 巨大残差 + 巨大增益修正（实测单次
         // 56m）。此门与协方差 P 无关，直接从源头拒掉不一致特征。
         let clones = &state.clones_imu;
+        let n_before = feature_vec.len();
         feature_vec.retain_mut(|feat| {
             let mut worst = 0.0f64;
             for (cam_id, times) in &feat.timestamps {
@@ -174,13 +175,14 @@ impl UpdaterMsckf {
                     worst = worst.max(err);
                 }
             }
-            if worst > 0.1 {
+            if worst > 0.3 || !worst.is_finite() {
                 feat.to_delete = true;
                 false
             } else {
                 true
             }
         });
+        log::debug!("reproj 门控: {}/{} 特征存活", feature_vec.len(), n_before);
 
         // 5. 逐特征：雅可比 → 零空间投影 → chi2 检验 → 收集块
         // （对照 C++ 的 Hx_mapping/Hx_big/res_big 组装）
