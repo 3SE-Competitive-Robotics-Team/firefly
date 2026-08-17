@@ -280,8 +280,11 @@ fn mujoco_focal() -> f64 {
 /// body→camera 旋转 `R_ItoC = [[0,-1,0],[0,0,-1],[1,0,0]]`
 /// （四元数 JPL xyzw = (0.5,-0.5,0.5, 0.5)）。
 ///
-/// `p_IinC` = IMU 原点在相机系：左相机在机体 x=-基线/2（镜头后），故 IMU 在左
-/// 相机前 `+基线/2`（相机 +z 前）= (0,0,+0.05)；右相机 x=+基线/2 为 (0,0,-0.05)。
+/// `p_IinC` = IMU 原点在相机系。**基线为横向（沿机体 y 侧向分开，`scene.py`
+/// 左/右相机 pos=(0,∓0.05,0)）**：左相机在机体 (0,-0.05,0)，所以 IMU 在左
+/// 相机系 = `R_ItoC·((0,0,0)-(0,-0.05,0)) = (-0.05,0,0)`；右相机 `(0.05,0,0)`。
+/// （此前误用前后基线把 p 放 z 上——前向分开的相机射线近共线、无侧向视差，
+/// 立体无法解深度 → VIO 三角化全败。）
 ///
 /// 修正说明：此前 q 的 w 反号（-0.5），编码的是 `R_CtoI`（相机→机体），
 /// 被当作 `R_ItoC` 用 → 差一次转置 → 特征视线被镜像 → 估计发散。回归单测
@@ -290,8 +293,8 @@ fn mujoco_focal() -> f64 {
 fn mujoco_stereo_extrinsic() -> (nalgebra::Vector4<f64>, [Vector3<f64>; 2]) {
     const BASELINE: f64 = 0.1;
     let q_ito_c = nalgebra::Vector4::new(0.5, -0.5, 0.5, 0.5);
-    let p_left_in_c = Vector3::new(0.0, 0.0, BASELINE / 2.0);
-    let p_right_in_c = Vector3::new(0.0, 0.0, -BASELINE / 2.0);
+    let p_left_in_c = Vector3::new(-BASELINE / 2.0, 0.0, 0.0);
+    let p_right_in_c = Vector3::new(BASELINE / 2.0, 0.0, 0.0);
     (q_ito_c, [p_left_in_c, p_right_in_c])
 }
 
@@ -346,6 +349,48 @@ mod tests {
     /// 内参焦距沙箱：与 `scene.py` fovy=60°、H=240 一致。
     #[test]
     fn focal_is_mujoco_consistent() {
+        assert!((mujoco_focal() - 207.84609690821128).abs() < 1e-6);
+    }
+}
+#[cfg(test)]
+mod stereo_baseline_tests {
+    use super::{mujoco_stereo_extrinsic, mujoco_focal};
+    use nalgebra::{Matrix3, Vector3};
+
+    fn quat_to_rot(q: &nalgebra::Vector4<f64>) -> Matrix3<f64> {
+        let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
+        Matrix3::new(
+            1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y),
+            2.0 * (x * y + w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x),
+            2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y),
+        )
+    }
+
+    /// 回归：双目基线必须横向（相机在机体 y 向分开）——射线对特征成角才有
+    /// 立体视差。若相机沿前向(x)前后分开，两射线近共线（角度≈0），立体无法
+    /// 解深度，VIO 三角化全败（此前场景正是如此）。
+    #[test]
+    fn lateral_baseline_gives_nonparallel_rays() {
+        let (q, [p_l, p_r]) = mujoco_stereo_extrinsic();
+        let r_ito_c = quat_to_rot(&q);            // body→camera(y-down)
+        let r_c_to_b = r_ito_c.transpose();        // camera→body
+        // 相机在机体位置：p_CinB = -R_CtoB * p_IinC（IMU 在机体原点）
+        let cam_l = -r_c_to_b * p_l;
+        let cam_r = -r_c_to_b * p_r;
+        // 横向基线：lit 相机 y 坐标相差基线，x 都为 0（前向）
+        assert!((cam_l.x).abs() < 1e-9 && (cam_r.x).abs() < 1e-9, "前向基线，相机沿视线分开");
+        assert!((cam_l.y - cam_r.y).abs() > 0.05, "横向分开应 ≥ 基线 0.1m");
+
+        // 一个前方特征（机器前 10m、偏心），两相机到它的射线应有明显夹角
+        let feat = Vector3::new(10.0, 4.0, 1.0);
+        let rl = (feat - cam_l).normalize();
+        let rr = (feat - cam_r).normalize();
+        let angle: f64 = rl.dot(&rr).acos();
+        assert!(
+            angle > 0.005,
+            "立体射线夹角 {angle} rad 过小（无侧向视差），三角化病态"
+        );
+        // 焦距仍一致
         assert!((mujoco_focal() - 207.84609690821128).abs() < 1e-6);
     }
 }

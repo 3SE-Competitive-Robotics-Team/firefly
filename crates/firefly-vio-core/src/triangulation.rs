@@ -178,12 +178,16 @@ pub fn single_triangulation(
         || depth > options.max_dist
         || !p_f.norm().is_finite()
     {
+        // 每相机测量数：判断是立体（多 cam）还是纯单目时域 → 视差来源诊断
+        let per_cam: Vec<String> = feat
+            .timestamps
+            .iter()
+            .map(|(c, t)| format!("{c}:{}", t.len()))
+            .collect();
         log::debug!(
-            "triang 失败: cond={cond_a:.0}(>{}) depth={depth:.3}([{},{}]) 测量{}",
+            "triang 失败: cond={cond_a:.0}(>{}) depth={depth:.3} 相机测量[{}]",
             options.max_cond_number,
-            options.min_dist,
-            options.max_dist,
-            feat.timestamps.values().map(Vec::len).sum::<usize>()
+            per_cam.join(",")
         );
         return false;
     }
