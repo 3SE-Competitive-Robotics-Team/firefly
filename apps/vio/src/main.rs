@@ -43,10 +43,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("VIO 进程启动：订阅 MuJoCo 物理环境（iceoryx2 输入 + trace 上下文）");
 
     // 估计器：MuJoCo 双目相机标定（`scene.py`：320×240、fovy=60°、方形像素、
-    // 基线 0.1m）。内参 focal=(H/2)/tan(fovy/2)=207.85，无畸变；外参：
-    // 相机轴在机体 x=(0,-1,0)、y=(0,0,-1)、z=(1,0,0)，左 (-0.05,0,0)、
-    // 右 (0.05,0,0)。
-    let focal = 120.0 / (60.0_f64 / 2.0).to_radians().tan();
+    // 基线 0.1m）。内参 focal=(H/2)/tan(fovy/2)=207.85，无畸变；外参见
+    // [`mujoco_stereo_extrinsic`]。
+    let focal = mujoco_focal();
     let intrinsics = [focal, focal, 160.0, 120.0, 0.0, 0.0, 0.0, 0.0];
     let cam_left: SharedCamera = Arc::new(CamRadtan::new(320, 240, &intrinsics));
     let cam_right: SharedCamera = Arc::new(CamRadtan::new(320, 240, &intrinsics));
@@ -72,11 +71,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cameras.insert(1usize, cam_right);
     let mut vio = VioManager::new(params, cameras, tracker);
 
-    // 相机外参（IMU→cam）：R_ItoC 列 = 相机轴在机体，p_IinC = IMU 原点在相机系
-    // 左相机 p_IinC=(0,-0.05,0)、右 (0,0.05,0)；四元数 JPL xyzw（实测重建校验）
-    let q_ito_c = nalgebra::Vector4::new(0.5, -0.5, 0.5, -0.5);
-    let p_left_in_c = Vector3::new(0.0, -0.05, 0.0);
-    let p_right_in_c = Vector3::new(0.0, 0.05, 0.0);
+    // 相机外参（IMU→cam）：R_ItoC + p_IinC（OpenVINS JPL 约定），见
+    // [`mujoco_stereo_extrinsic`]。p_IinC = IMU 原点在相机系。
+    let (q_ito_c, [p_left_in_c, p_right_in_c]) = mujoco_stereo_extrinsic();
     for (cam_id, p_iin_c) in [(0usize, p_left_in_c), (1usize, p_right_in_c)] {
         let calib = vio
             .state
@@ -262,5 +259,89 @@ fn log_cameras(viewer: &Stream, cam: &firefly_vio_core::sensor::CameraData) {
 fn log_depth(viewer: &Stream, m: &DepthImageMessage) {
     if let Err(e) = viewer.log_depth_image("sensor/depth", m.width, m.height, &m.data) {
         log::debug!("rerun 记录 depth 失败：{e}");
+    }
+}
+
+/// `MuJoCo` 相机焦距：`(H/2) / tan(fovy/2)`（320×240、fovy=60°、方形像素）。
+#[must_use]
+fn mujoco_focal() -> f64 {
+    120.0 / (60.0_f64 / 2.0).to_radians().tan()
+}
+
+/// `MuJoCo` 双目相机外参（OpenVINS JPL 约定），返回 `(q_ito_c, [p_left, p_right])`。
+///
+/// 物理相机（`scene.py` 的 `xyaxes="0 -1 0  0 0 1"`，与 `firefly-map::DepthCamera`
+/// 投影一致实测校验）：**前向 = 机体 +x，上 = 机体 +z，右 = 机体 -y**。
+/// VIO 三角化视线取 `(nx, ny, 1)`（标准 y-down / z-forward 相机系），故
+/// body→camera 旋转 `R_ItoC = [[0,-1,0],[0,0,-1],[1,0,0]]`
+/// （四元数 JPL xyzw = (0.5,-0.5,0.5, 0.5)）。
+///
+/// p_IinC = IMU 原点在相机系：左相机在机体 x=-基线/2（镜头后），故 IMU 在左
+/// 相机前 `+基线/2`（相机 +z 前）= (0,0,+0.05)；右相机 x=+基线/2 为 (0,0,-0.05)。
+///
+/// 修正说明：此前 q 的 w 反号（-0.5），编码的是 `R_CtoI`（相机→机体），
+/// 被当作 `R_ItoC` 用 → 差一次转置 → 特征视线被镜像 → 估计发散。回归单测
+/// [`tests::extrinsic_matches_mujoco_scene_pixel_rays`] 钉死该约定。
+#[must_use]
+fn mujoco_stereo_extrinsic() -> (nalgebra::Vector4<f64>, [Vector3<f64>; 2]) {
+    const BASELINE: f64 = 0.1;
+    let q_ito_c = nalgebra::Vector4::new(0.5, -0.5, 0.5, 0.5);
+    let p_left_in_c = Vector3::new(0.0, 0.0, BASELINE / 2.0);
+    let p_right_in_c = Vector3::new(0.0, 0.0, -BASELINE / 2.0);
+    (q_ito_c, [p_left_in_c, p_right_in_c])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra::Matrix3;
+
+    /// Hamilton/JPL 四元数 `[x,y,z,w]` → 旋转矩阵（与 `open_vins` 一致）。
+    fn quat_to_rot(q: &nalgebra::Vector4<f64>) -> Matrix3<f64> {
+        let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
+        Matrix3::new(
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y - w * z),
+            2.0 * (x * z + w * y),
+            2.0 * (x * y + w * z),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z - w * x),
+            2.0 * (x * z - w * y),
+            2.0 * (y * z + w * x),
+            1.0 - 2.0 * (x * x + y * y),
+        )
+    }
+
+    /// 外参 + 针孔模型重建的视线方向，必须与 MuJoCo 场景的真实相机指向一致
+    ///（任何像素都对齐）。否则估计会把特征视线镜像 → 发散。
+    #[test]
+    fn extrinsic_matches_mujoco_scene_pixel_rays() {
+        let f = mujoco_focal();
+        let (q, _) = mujoco_stereo_extrinsic();
+        let r_ito_c = quat_to_rot(&q); // body→camera（y-down）
+        // 场景真值：R_CtoB（相机→机体），列为相机轴在机体
+        // x_right=(0,-1,0)、y_up=(0,0,1)、z_fwd=(1,0,0)
+        let r_c_to_b = Matrix3::new(0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+
+        for (u, v) in [(160.0, 120.0), (260.0, 170.0), (80.0, 30.0), (220.0, 60.0)] {
+            let nx = (u - 160.0) / f;
+            // 场景（y-up）：视线 = ((u-cx)/f, -(v-cy)/f, 1)
+            let body_gt = r_c_to_b * nalgebra::Vector3::new(nx, -(v - 120.0) / f, 1.0);
+            let body_gt = body_gt.normalize();
+            // VIO（y-down）：视线 = (nx, ny, 1)，body = R_ItoCᵀ · ray
+            let ny = (v - 120.0) / f;
+            let body_vio = (r_ito_c.transpose() * nalgebra::Vector3::new(nx, ny, 1.0)).normalize();
+            let cos = body_gt.dot(&body_vio);
+            assert!(
+                (1.0 - cos).abs() < 1e-9,
+                "外参视线镜像：像素({u},{v}) 场景 {body_gt} vs 外参 {body_vio}（cos={cos}）"
+            );
+        }
+    }
+
+    /// 内参焦距沙箱：与 `scene.py` fovy=60°、H=240 一致。
+    #[test]
+    fn focal_is_mujoco_consistent() {
+        assert!((mujoco_focal() - 207.84609690821128).abs() < 1e-6);
     }
 }
