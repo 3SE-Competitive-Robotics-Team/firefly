@@ -25,4 +25,11 @@ pub trait SensorInput {
     fn last_trace(&self) -> Option<(u128, u64, bool)> {
         None
     }
+    /// 相机屏障：当前持有待配对相机帧的时间戳。编排层应把状态传播目标钳制在
+    /// `min(now, barrier)` 之下，**绝不越过尚未配对的相机帧**（否则 state
+    /// 传播到最新 IMU 时刻、相机成帧后其时间戳偏旧，被判定乱序跳过，视觉
+    /// 更新失效）。无待配对相机时返回 `None`。
+    fn camera_barrier(&self) -> Option<f64> {
+        None
+    }
 }
