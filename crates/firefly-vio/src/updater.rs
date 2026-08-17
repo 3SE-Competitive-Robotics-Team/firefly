@@ -81,6 +81,12 @@ impl UpdaterMsckf {
         if feature_vec.is_empty() {
             return;
         }
+        // 可观测性：MSCKF 每帧输入特征数 + 克隆数（诊断视觉更新是否在执行）
+        log::debug!(
+            "MSCKF update: 输入特征 {}（克隆 {}）",
+            feature_vec.len(),
+            state.clones_imu.len()
+        );
 
         // 1. 克隆时刻集合（对照 C++ 的 clonetimes）
         let clonetimes: Vec<f64> = state.clones_imu.iter().map(|(t, _)| *t).collect();
