@@ -12,6 +12,7 @@ readme.workspace = true
 
 [dependencies]
 firefly-vio-types = { workspace = true }
+log = { workspace = true }
 nalgebra = { workspace = true }
 
 [lints]
