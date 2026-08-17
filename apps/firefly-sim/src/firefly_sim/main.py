@@ -133,13 +133,17 @@ def main() -> None:
                 msg.angular_velocity_x, msg.angular_velocity_y, msg.angular_velocity_z = gyro
                 msg.linear_acceleration_x, msg.linear_acceleration_y, msg.linear_acceleration_z = accel
                 _publish_traced(imu_pub, cycle, "publish-imu", msg, t)
-                next_imu += IMU_PERIOD
+                # 推进到 t 之后的网格点（防止 t 越过后下一步重复发布，
+                # 保证 IMU 严格 0.01s 间隔、相机严格 0.1s 间隔）
+                while next_imu <= t + 1e-12:
+                    next_imu += IMU_PERIOD
 
             # 10Hz 双目 + 深度 + 真值
             if t + 1e-12 >= next_cam:
                 _publish_camera(left_pub, right_pub, depth_pub, cycle, env, t)
                 _publish_gt(gt_pub, cycle, env, t)
-                next_cam += CAM_PERIOD
+                while next_cam <= t + 1e-12:
+                    next_cam += CAM_PERIOD
                 if got_ref and frame % 200 == 0:
                     pos, _, vel = env.gt_pose()
                     log(

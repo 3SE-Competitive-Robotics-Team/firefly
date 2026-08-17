@@ -23,18 +23,19 @@ use std::time::{Duration, Instant};
 
 use fastrace::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_map::{GridMap, MapFile, VoxelState};
+use firefly_map::{update_from_depth, DepthCamera, GridMap, MapFile, VoxelState};
 use firefly_observability::init as init_observability;
 use firefly_planner::{PlanResult, Planner, PlannerConfig, State};
+use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage};
 use firefly_pubsub::imu::{IMU_TOPIC, ImuSubscriber};
-use firefly_pubsub::odom::OdomMessage;
+use firefly_pubsub::odom::{GROUND_TRUTH_TOPIC, OdomMessage};
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::reference::{REFERENCE_TOPIC, ReferenceMessage};
-use firefly_pubsub::subscriber::OdomSubscriber;
+use firefly_pubsub::subscriber::{OdomSubscriber, Subscriber};
 use firefly_search::Astar;
 use firefly_trajectory::Trajectory;
 use firefly_viewer::Viewer;
-use nalgebra::{Point3, Vector3};
+use nalgebra::{Isometry3, Point3, Quaternion, Translation3, UnitQuaternion, Vector3};
 
 /// 官方 `fsm/thresh_replan_time`（`advanced_param.xml`）。
 const REPLAN_THRESH: f64 = 1.0;
@@ -48,7 +49,8 @@ const ODOM_FRESH_TIMEOUT: f64 = 1.0;
 const ARRIVE_DIST: f64 = 0.5;
 
 struct Args {
-    map: PathBuf,
+    /// 静态地图文件（可选：MuJoCo 闭环下省略，深度建图填充）。
+    map: Option<PathBuf>,
     save: Option<PathBuf>,
     start: [f64; 3],
     goal: [f64; 3],
@@ -78,7 +80,7 @@ fn parse_args() -> Result<Args> {
             }
         }
     }
-    let map = map.ok_or_else(|| Error::new(ErrorKind::InvalidArgument, "missing --map"))?;
+    let map = map; // Option<PathBuf>；MuJoCo 闭环下可省略
     Ok(Args {
         map,
         save,
@@ -86,6 +88,20 @@ fn parse_args() -> Result<Args> {
         goal,
         frame_offset,
     })
+}
+
+/// `MuJoCo` 闭环模式的空地图（无静态先验，由深度感知填充）。
+/// 范围覆盖 `firefly-mujoco` 场景：x∈[0,32]、y∈[-5,9]、z∈[0,5.2]。
+#[must_use]
+fn empty_map_file() -> MapFile {
+    MapFile {
+        resolution: 0.4,
+        origin: [0.0, -5.0, 0.0],
+        dims: [80, 35, 13],
+        occupied: Vec::new(),
+        decor: Vec::new(),
+        motions: Vec::new(),
+    }
 }
 
 fn parse_vec3(it: &mut impl Iterator<Item = String>, name: &str) -> Result<[f64; 3]> {
@@ -148,6 +164,16 @@ struct Demo {
     odom_trace: Option<(u128, u64, bool)>,
     /// 参考状态发布器（闭环控制：MuJoCo 物理环境订阅后 PD 跟踪）。
     ref_pub: Option<Publisher<ReferenceMessage>>,
+    /// 深度订阅（MuJoCo 物理环境发布；感知建图输入）。
+    depth: Option<Subscriber<DepthImageMessage>>,
+    /// 真值订阅（仿真阶段感知位姿源；VIO 修复后换 odom）。
+    gt: Option<Subscriber<OdomMessage>>,
+    /// 最新深度帧。
+    latest_depth: Option<DepthImageMessage>,
+    /// 最新真值（地图系）`(state, quat_xyzw)`；仿真阶段的状态源与感知位姿源。
+    latest_gt: Option<(State, [f64; 4])>,
+    /// 深度相机标定（MuJoCo 合成场景）。
+    depth_cam: DepthCamera,
 }
 
 impl Demo {
@@ -201,6 +227,28 @@ impl Demo {
                 None
             }
         };
+        // 深度订阅（感知建图输入）
+        let depth = match Subscriber::<DepthImageMessage>::with_topic(DEPTH_TOPIC) {
+            Ok(s) => {
+                log::info!("已订阅深度话题 {DEPTH_TOPIC}（感知建图）");
+                Some(s)
+            }
+            Err(e) => {
+                log::warn!("深度订阅不可用（无感知建图）：{e}");
+                None
+            }
+        };
+        // 真值订阅（仿真阶段感知位姿源；VIO 修复后换 odom）
+        let gt = match Subscriber::<OdomMessage>::with_topic(GROUND_TRUTH_TOPIC) {
+            Ok(s) => {
+                log::info!("已订阅真值话题 {GROUND_TRUTH_TOPIC}（感知位姿源）");
+                Some(s)
+            }
+            Err(e) => {
+                log::warn!("真值订阅不可用（无感知建图）：{e}");
+                None
+            }
+        };
         // VIO 世界系 → 地图系变换（MuJoCo 闭环下 vio 已在地图系，默认 0）
         let frame_offset = Vector3::new(frame_offset[0], frame_offset[1], frame_offset[2]);
         // 参考状态发布器（闭环控制回传；失败则降级为纯观测）
@@ -234,6 +282,11 @@ impl Demo {
             last_odom_recv: f64::NEG_INFINITY,
             odom_trace: None,
             ref_pub,
+            depth,
+            gt,
+            latest_depth: None,
+            latest_gt: None,
+            depth_cam: DepthCamera::mujoco_default(),
         })
     }
 
@@ -288,11 +341,67 @@ impl Demo {
                 );
             }
         }
+        // 深度 + 真值（感知建图输入；只取最新帧）
+        if let Some(sub) = &self.depth {
+            while let Some(sample) = sub.receive()? {
+                let ctx = *sample.user_header();
+                let _span = ctx.continue_span("recv-depth");
+                self.latest_depth = Some(*sample);
+                log::debug!("depth recv t={:.3}", sample.timestamp);
+            }
+        }
+        if let Some(sub) = &self.gt {
+            while let Some(sample) = sub.receive()? {
+                let ctx = *sample.user_header();
+                let _span = ctx.continue_span("recv-gt");
+                let m = *sample;
+                let p = Vector3::new(m.position_x, m.position_y, m.position_z) + self.frame_offset;
+                let v = Vector3::new(m.velocity_x, m.velocity_y, m.velocity_z);
+                self.latest_gt = Some((
+                    State {
+                        position: Point3::from(p),
+                        velocity: v,
+                        acceleration: Vector3::zeros(),
+                    },
+                    [m.quat_x, m.quat_y, m.quat_z, m.quat_w],
+                ));
+                log::debug!(
+                    "gt recv t={:.3} p=({:.2},{:.2},{:.2}) q=({:.2},{:.2},{:.2},{:.2})",
+                    m.timestamp,
+                    p.x,
+                    p.y,
+                    p.z,
+                    m.quat_x,
+                    m.quat_y,
+                    m.quat_z,
+                    m.quat_w
+                );
+            }
+        }
         Ok(())
     }
 
-    /// 当前无人机状态源：新鲜 odom（VIO）优先，否则轨迹推进（独立运行）。
+    /// 深度 → 占据体素（感知建图）：用最新真值位姿把深度帧射线写入 planner 地图。
+    ///
+    /// 仿真阶段用真值位姿（`vio` 估计发散未修复）；VIO 修复后改用 odom。
+    fn update_map_from_depth(&mut self) {
+        let (Some(depth), Some((state, quat))) = (&self.latest_depth, self.latest_gt) else {
+            return;
+        };
+        let pos = state.position.coords;
+        let q = UnitQuaternion::from_quaternion(Quaternion::new(
+            quat[3], quat[0], quat[1], quat[2],
+        ));
+        let pose = Isometry3::from_parts(Translation3::new(pos.x, pos.y, pos.z), q);
+        update_from_depth(self.planner.map_mut(), &self.depth_cam, &pose, &depth.data);
+    }
+
+    /// 当前无人机状态源：真值（仿真阶段）→ 新鲜 odom（VIO）→ 轨迹推进。
     fn current_state(&self, now: f64) -> State {
+        // 仿真阶段：真值优先（vio 估计发散未修复，修复后切回 odom）
+        if let Some((state, _)) = &self.latest_gt {
+            return *state;
+        }
         let fresh = self
             .latest_odom
             .as_ref()
@@ -467,6 +576,8 @@ impl Demo {
         let now = self.t_sim;
         // 先消费 VIO 输出（续接 trace span、更新最新状态）
         self.poll_sensors(now)?;
+        // 深度 → 占据体素（感知建图）
+        self.update_map_from_depth();
         self.update_motion();
         match &self.local {
             None => {
@@ -557,6 +668,42 @@ impl Demo {
             let _guard = root.set_local_parent();
             let t0 = Instant::now();
             self.tick()?;
+            // 每 2.5s 更新 viewer 中的感知占据体素（深度建图可视化）
+            if frame.is_multiple_of(25) {
+                let map = self.planner.map_ref();
+                let mut occupied = 0usize;
+                let (mut lo, mut hi) = (
+                    Vector3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
+                    Vector3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                );
+                let res = map.resolution();
+                let o = map.origin();
+                for x in 0..map.dims()[0] {
+                    for y in 0..map.dims()[1] {
+                        for z in 0..map.dims()[2] {
+                            if map.state([x, y, z]) == VoxelState::Occupied {
+                                occupied += 1;
+                                let p = o + Vector3::new(
+                                    (x as f64 + 0.5) * res,
+                                    (y as f64 + 0.5) * res,
+                                    (z as f64 + 0.5) * res,
+                                );
+                                lo = lo.inf(&p);
+                                hi = hi.sup(&p);
+                            }
+                        }
+                    }
+                }
+                if occupied > 0 {
+                    log::info!(
+                        "感知地图：{occupied} 个占据体素，包围盒 [{:.1},{:.1},{:.1}]~[{:.1},{:.1},{:.1}]",
+                        lo.x, lo.y, lo.z, hi.x, hi.y, hi.z
+                    );
+                } else {
+                    log::info!("感知地图：0 个占据体素");
+                }
+                self.viewer.log_map("perceived", map)?;
+            }
             if frame.is_multiple_of(10) {
                 log::info!(
                     "t={:.1}s 位置 ({:.1},{:.1},{:.1})",
@@ -680,17 +827,22 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!(
-                "{e}\n用法：firefly-demo --map <map.ffmap> [--save out.rrd] [--start x y z] [--goal x y z]"
+                "{e}\n用法：firefly-demo [--map <map.ffmap>] [--save out.rrd] [--start x y z] [--goal x y z] [--frame-offset x y z]"
             );
             std::process::exit(2);
         }
     };
-    let map_file = match MapFile::from_file(&args.map) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("加载地图失败：{e}");
-            std::process::exit(1);
+    let map_file = if let Some(p) = &args.map {
+        match MapFile::from_file(p) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("加载地图失败：{e}");
+                std::process::exit(1);
+            }
         }
+    } else {
+        log::info!("未指定 --map，空地图起步（MuJoCo 闭环深度建图填充）");
+        empty_map_file()
     };
     let viewer = match &args.save {
         Some(path) => Viewer::save("firefly-demo", path),
