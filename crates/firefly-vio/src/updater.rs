@@ -160,9 +160,12 @@ impl UpdaterMsckf {
 
             nullspace_project_inplace(&mut h_f, &mut h_x, &mut res);
 
-            // chi2 检验（对照 C++：S = H_x·P_marg·H_xᵀ，chi2 = resᵀS⁻¹res）
+            // chi2 检验（对照 C++：S = H_x·P_marg·H_xᵀ + R，chi2 = resᵀS⁻¹res）。
+            // 注意必须加测量噪声 R（sigma_pix²）：残差/雅可比在像素空间（fx 量级），
+            // 缺 R 时 S 尺度错误 → 外点全部误纳/误拒。
             let p_marg = get_marginal_covariance(state, &x_order);
-            let s = &h_x * p_marg * h_x.transpose();
+            let s = &h_x * p_marg * h_x.transpose()
+                + self.options.sigma_pix_sq * DMatrix::identity(h_x.nrows(), h_x.nrows());
             let chi2 = match s.clone().cholesky() {
                 Some(chol) => res.dot(&chol.solve(&res)),
                 None => f64::INFINITY,
@@ -224,7 +227,27 @@ impl UpdaterMsckf {
             .collect();
 
         let r = self.options.sigma_pix_sq * DMatrix::identity(res_big.len(), res_big.len());
+        // 可观测性：更新前残差量级与位置（诊断视觉矫正方向/量级）
+        let pos_before = state.imu.pos();
+        let res_norm = res_big.norm() / f64::sqrt(res_big.len() as f64);
+        log::debug!(
+            "MSCKF 应用更新: 行 {} 平均|res|={res_norm:.3}px 位置({:.2},{:.2},{:.2})",
+            res_big.len(),
+            pos_before.x,
+            pos_before.y,
+            pos_before.z
+        );
         ekf_update(state, &hx_order, &hx_big, &res_big, &r);
+        let pos_after = state.imu.pos();
+        log::debug!(
+            "MSCKF 更新后: 位置({:.2},{:.2},{:.2}) Δ=({:.3},{:.3},{:.3})",
+            pos_after.x,
+            pos_after.y,
+            pos_after.z,
+            pos_after.x - pos_before.x,
+            pos_after.y - pos_before.y,
+            pos_after.z - pos_before.z
+        );
     }
 }
 

@@ -274,12 +274,18 @@ pub fn get_feature_jacobian_full(
             let p_fin_ci = r_ito_c * p_fin_ii + p_iin_c;
             let uv_norm = Vector2::new(p_fin_ci.x / p_fin_ci.z, p_fin_ci.y / p_fin_ci.z);
 
-            // 畸变像素坐标（对照 C++ 的 distort_d）
+            // 畸变像素坐标（对照 C++ 的 distort_d + pixel_from_irr）：
+            // 残差统一在**像素**空间（uvs 是原始像素；归一化坐标需先经
+            // fx/fy/cx/cy 映射回像素，否则与像素量纲不一致 → 残差 ~200px →
+            // MSCKF 矫正灾难性错误）。
             let uv_dist = cam.distort_d(uv_norm.cast());
+            let pix = cam.camera_matrix();
+            let uv_pred =
+                Vector2::new(pix[(0, 0)] * uv_dist.x + pix[(0, 2)], pix[(1, 1)] * uv_dist.y + pix[(1, 2)]);
 
             // 残差：测量 − 预测
             let uv_m = feature.uvs[cam_id][m];
-            let r2 = Vector2::new(f64::from(uv_m.x), f64::from(uv_m.y)) - uv_dist;
+            let r2 = Vector2::new(f64::from(uv_m.x), f64::from(uv_m.y)) - uv_pred;
             res.rows_range_mut(2 * c..2 * c + 2).copy_from(&r2);
 
             // 雅可比链（对照 C++：dz_dzn·dzn_dpfc·dpfc_dpfg / dpfc_dclone）
@@ -291,6 +297,9 @@ pub fn get_feature_jacobian_full(
             dzn_dpfc[(0, 2)] = -p_fin_ci.x / z2;
             dzn_dpfc[(1, 1)] = 1.0 / p_fin_ci.z;
             dzn_dpfc[(1, 2)] = -p_fin_ci.y / z2;
+            // 像素尺度：d(像素)/d(归一化畸变) = diag(fx, fy)（内参线性部分）
+            let pix_scale = cam.camera_matrix().fixed_view::<2, 2>(0, 0).into_owned();
+            let dz_dpfc = pix_scale * (dz_dzn * dzn_dpfc);
 
             let dpfc_dpfg = r_ito_c * r_gto_ii;
             // dpfc/dclone：3×6（对克隆的旋转/平移 6 维误差状态）
@@ -302,7 +311,6 @@ pub fn get_feature_jacobian_full(
                 .view_mut((0, 3), (3, 3))
                 .copy_from(&(-dpfc_dpfg));
 
-            let dz_dpfc = dz_dzn * dzn_dpfc;
             let dz_dpfg = &dz_dpfc * dpfc_dpfg;
 
             // 特征雅可比：dz_dpfg · dpfg_dlambda

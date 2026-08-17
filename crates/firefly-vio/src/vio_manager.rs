@@ -666,6 +666,13 @@ impl VioManager {
             );
         }
         self.last_prop_time_offset = t_off_new;
+        log::debug!(
+            "prop_impl {} t={timestamp:.3} p=({:.3},{:.3},{:.3})",
+            if augment { "CLONE" } else { "odom " },
+            self.state.imu.pos().x,
+            self.state.imu.pos().y,
+            self.state.imu.pos().z
+        );
         // 状态已变化，fast-prop 缓存失效（对照 C++ 调用方的 invalidate_cache）
         self.propagator.invalidate_cache();
     }
