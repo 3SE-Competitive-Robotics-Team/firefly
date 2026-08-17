@@ -13,7 +13,7 @@ use firefly_vio_core::feat::Feature;
 use firefly_vio_core::triangulation::{
     CloneMap, ClonePose, TriangulationOptions, single_gaussnewton, single_triangulation,
 };
-use nalgebra::{DMatrix, DVector};
+use nalgebra::{DMatrix, DVector, Vector2};
 
 use crate::options::UpdaterOptions;
 use crate::state::State;
@@ -138,8 +138,69 @@ impl UpdaterMsckf {
             ok
         });
 
+        // 4b. 反投影一致性门控：p_FinA 在每视图的归一化反投影须与测量一致
+        // （<0.1 归一化 ≈ 20px）。低视差下 DLT 深度病态会产出"贴近相机"的
+        // 垃圾点，其他视图投影被视差放大 → 巨大残差 + 巨大增益修正（实测单次
+        // 56m）。此门与协方差 P 无关，直接从源头拒掉不一致特征。
+        let clones = &state.clones_imu;
+        feature_vec.retain_mut(|feat| {
+            let mut worst = 0.0f64;
+            for (cam_id, times) in &feat.timestamps {
+                let Some(calib) = state.calib_imu_to_cam.get(cam_id) else {
+                    continue;
+                };
+                let r_ito_c = calib.rot();
+                let p_iin_c = calib.pos();
+                let Some(uvs_norm) = feat.uvs_norm.get(cam_id) else {
+                    continue;
+                };
+                for (m, t) in times.iter().enumerate() {
+                    let Some((_, clone)) =
+                        clones.iter().find(|(ct, _)| ct.total_cmp(t).is_eq())
+                    else {
+                        continue;
+                    };
+                    let p_in_im = clone.rot() * (feat.p_FinG - clone.pos());
+                    let p_in_cw = r_ito_c * p_in_im + p_iin_c;
+                    if p_in_cw.z <= 0.0 {
+                        worst = f64::INFINITY;
+                        break;
+                    }
+                    let uv_n =
+                        Vector2::new(p_in_cw.x / p_in_cw.z, p_in_cw.y / p_in_cw.z);
+                    let uv_m = uvs_norm[m];
+                    let err =
+                        (Vector2::new(f64::from(uv_m.x), f64::from(uv_m.y)) - uv_n).norm();
+                    worst = worst.max(err);
+                }
+            }
+            if worst > 0.1 {
+                feat.to_delete = true;
+                false
+            } else {
+                true
+            }
+        });
+
         // 5. 逐特征：雅可比 → 零空间投影 → chi2 检验 → 收集块
         // （对照 C++ 的 Hx_mapping/Hx_big/res_big 组装）
+        // 可观测性：首个存活特征的三角化结果与测量（诊断投影/深度病态）
+        if let Some(f0) = feature_vec.first()
+            && let Some((&c0, ts0)) = f0.timestamps.iter().next()
+            && let Some(uv0) = f0.uvs_norm.get(&c0).and_then(|v| v.first())
+        {
+            log::debug!(
+                "triang 首个特征 id={} p_FinA=({:.3},{:.3},{:.3}) cam{}t0={:.2} uv_n=({:.3},{:.3})",
+                f0.featid,
+                f0.p_FinA.x,
+                f0.p_FinA.y,
+                f0.p_FinA.z,
+                c0,
+                ts0.first().copied().unwrap_or(-1.0),
+                uv0.x,
+                uv0.y
+            );
+        }
         let mut hx_mapping: std::collections::HashMap<(i32, usize), usize> =
             std::collections::HashMap::new();
         let mut next_col = 0usize;
