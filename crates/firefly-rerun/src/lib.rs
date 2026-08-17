@@ -5,6 +5,11 @@
 //! 即可往同一个 viewer 写数据（vio 的传感器/odom、demo 的规划结果等）。
 //! 未开 viewer 时 [`Stream::connect_or_spawn`] 自动起一个新 viewer。
 //!
+//! **单 recording 约定**：双语言闭环所有进程（vio/demo）固定使用同一
+//! `ApplicationId` + `RecordingId`（见 [`APP_ID`]/[`RECORDING_ID`]），
+//! rerun 按 `StoreId(kind, app, recording)` 区分应用——三者全同即合并为
+//! viewer 中的一个应用，传感器与规划结果同屏查看。
+//!
 //! 所有进程共用 `sim_time` 时间轴（仿真秒，Duration 型），保证跨进程
 //! 数据按同一时钟对齐回放。
 
@@ -19,6 +24,12 @@ const VIEWER_PORT: u16 = 9876;
 /// 探测 viewer 是否在线的超时（秒）。
 const PROBE_TIMEOUT: Duration = Duration::from_millis(150);
 
+/// 共享 ApplicationId（双语言闭环所有进程统一，别名下同）。
+const APP_ID: &str = "firefly";
+/// 共享 RecordingId：与 [`APP_ID`] 一起构成唯一的 `StoreId`，
+/// 把各进程的流合并为 viewer 中的一个 recording。
+const RECORDING_ID: &str = "firefly-sim-loop";
+
 /// 一个已连接（或已 spawn）的 rerun 记录流。
 pub struct Stream {
     rec: rerun::RecordingStream,
@@ -29,51 +40,40 @@ impl Stream {
     ///
     /// # Errors
     ///
-    /// `InvalidArgument`：应用名非法；`Internal`：无法建立记录流。
-    pub fn connect(app_id: &str) -> Result<Self> {
-        let app = rerun::ApplicationId::try_new(app_id).map_err(|e| {
-            Error::new(ErrorKind::InvalidArgument, "invalid application id").with_source(e)
-        })?;
-        let rec = rerun::RecordingStreamBuilder::new(app)
-            .connect_grpc()
-            .map_err(|e| {
+    /// `Internal`：无法建立记录流。
+    pub fn connect() -> Result<Self> {
+        Ok(Self {
+            rec: builder()?.connect_grpc().map_err(|e| {
                 Error::new(ErrorKind::Internal, "failed to connect rerun viewer").with_source(e)
-            })?;
-        Ok(Self { rec })
+            })?,
+        })
     }
 
     /// 自起一个新 rerun viewer 并连接（独立运行无 viewer 时使用）。
     ///
     /// # Errors
     ///
-    /// `InvalidArgument`：应用名非法；`Internal`：无法 spawn viewer。
-    pub fn spawn(app_id: &str) -> Result<Self> {
-        let app = rerun::ApplicationId::try_new(app_id).map_err(|e| {
-            Error::new(ErrorKind::InvalidArgument, "invalid application id").with_source(e)
-        })?;
-        let rec = rerun::RecordingStreamBuilder::new(app)
-            .spawn()
-            .map_err(|e| {
+    /// `Internal`：无法 spawn viewer。
+    pub fn spawn() -> Result<Self> {
+        Ok(Self {
+            rec: builder()?.spawn().map_err(|e| {
                 Error::new(ErrorKind::Internal, "failed to spawn rerun viewer").with_source(e)
-            })?;
-        Ok(Self { rec })
+            })?,
+        })
     }
 
     /// 保存到 rrd 文件（无 viewer 时离线记录）。
     ///
     /// # Errors
     ///
-    /// `InvalidArgument`：应用名非法；`Internal`：无法创建记录。
-    pub fn save(app_id: &str, path: impl Into<PathBuf>) -> Result<Self> {
-        let app = rerun::ApplicationId::try_new(app_id).map_err(|e| {
-            Error::new(ErrorKind::InvalidArgument, "invalid application id").with_source(e)
-        })?;
-        let rec = rerun::RecordingStreamBuilder::new(app)
-            .save(path)
-            .map_err(|e| {
-                Error::new(ErrorKind::Internal, "failed to create rerun recording").with_source(e)
-            })?;
-        Ok(Self { rec })
+    /// `Internal`：无法创建记录。
+    pub fn save(path: impl Into<PathBuf>) -> Result<Self> {
+        Ok(Self {
+            rec: builder()?.save(path).map_err(|e| {
+                Error::new(ErrorKind::Internal, "failed to create rerun recording")
+                    .with_source(e)
+            })?,
+        })
     }
 
     /// 已有 viewer 在监听则连接，否则自起一个（多进程闭环的默认入口）。
@@ -81,13 +81,13 @@ impl Stream {
     /// # Errors
     ///
     /// 同 [`Self::connect`] / [`Self::spawn`]。
-    pub fn connect_or_spawn(app_id: &str) -> Result<Self> {
+    pub fn connect_or_spawn() -> Result<Self> {
         if viewer_listening() {
             log::debug!("rerun viewer 在线（127.0.0.1:{VIEWER_PORT}），连接共享 viewer");
-            Self::connect(app_id)
+            Self::connect()
         } else {
             log::debug!("无 rerun viewer，自动 spawn");
-            Self::spawn(app_id)
+            Self::spawn()
         }
     }
 
@@ -198,6 +198,15 @@ impl Stream {
 fn viewer_listening() -> bool {
     let addr: SocketAddr = ([127, 0, 0, 1], VIEWER_PORT).into();
     TcpStream::connect_timeout(&addr, PROBE_TIMEOUT).is_ok()
+}
+
+/// 统一建流：共享 `ApplicationId` + `RecordingId`（viewer 中合并为单应用）。
+fn builder() -> Result<rerun::RecordingStreamBuilder> {
+    let app = rerun::ApplicationId::try_new(APP_ID).map_err(|e| {
+        Error::new(ErrorKind::InvalidArgument, "invalid application id").with_source(e)
+    })?;
+    Ok(rerun::RecordingStreamBuilder::new(app)
+        .recording_id(rerun::external::re_log_types::RecordingId::from(RECORDING_ID)))
 }
 
 fn stream_err(e: rerun::RecordingStreamError) -> Error {

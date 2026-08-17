@@ -105,8 +105,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = IceoryxInput::new()?;
     log::info!("输入源：订阅 MuJoCo 物理环境（IMU/双目灰度），imu 话题由 MuJoCo 发布");
 
-    // rerun 可视化：已有 viewer 则共享（多进程），否则自起；失败不影响估计
-    let viewer = match Stream::connect_or_spawn("firefly-vio") {
+    // rerun 可视化：已有 viewer 则共享（多进程同 recording），否则自起；失败不影响估计
+    let viewer = match Stream::connect_or_spawn() {
         Ok(v) => {
             log::info!("rerun viewer 就绪（传感器/odom 可视化）");
             Some(v)

@@ -847,9 +847,9 @@ fn main() {
         empty_map_file()
     };
     let viewer = match &args.save {
-        Some(path) => Viewer::save("firefly-demo", path),
-        // 已有 rerun viewer 则共享（vio 同 viewer），否则自动 spawn
-        None => Viewer::connect_or_spawn("firefly-demo"),
+        Some(path) => Viewer::save(path),
+        // 已有 rerun viewer 则共享（vio 同 viewer 同 recording），否则自动 spawn
+        None => Viewer::connect_or_spawn(),
     };
     let viewer = match viewer {
         Ok(v) => v,
