@@ -138,6 +138,7 @@ impl UpdaterMsckf {
             ok
         });
 
+        let n_triang = feature_vec.len();
         // 4b. 反投影一致性门控：p_FinA 在每视图的归一化反投影须与测量一致
         // （<0.3 归一化 ≈ 60px）。低视差下 DLT 深度病态会产出"贴近相机"的
         // 垃圾点，其他视图投影被视差放大 → 巨大残差 + 巨大增益修正（实测单次
@@ -208,6 +209,7 @@ impl UpdaterMsckf {
         let mut next_col = 0usize;
         let mut blocks: Vec<HxBlock> = Vec::new();
         let mut total_rows = 0usize;
+        let mut hard_cap_rej = 0usize;
 
         for feat in feature_vec.iter_mut() {
             // 表示选择（对照 C++：ANCHORED_INVERSE_DEPTH_SINGLE → MSCKF 逆深度）
@@ -229,6 +231,7 @@ impl UpdaterMsckf {
             // 与协方差无关的硬外点门，防止垃圾更新加剧漂移。
             if res.norm() > 40.0 * f64::sqrt(res.len() as f64) {
                 feat.to_delete = true;
+                hard_cap_rej += 1;
                 continue;
             }
 
@@ -263,6 +266,7 @@ impl UpdaterMsckf {
         }
 
         // 6. 统一组装大矩阵（行 = 各特征行和；列 = 映射覆盖范围）
+        log::debug!("MSCKF 漏斗: 三角化存活 {n_triang} 硬残差拒 {hard_cap_rej} 组装行 {total_rows}");
         if total_rows == 0 {
             return;
         }
