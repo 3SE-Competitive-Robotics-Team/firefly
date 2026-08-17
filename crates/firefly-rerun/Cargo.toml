@@ -1,9 +1,9 @@
 [package]
-name = "firefly-viewer"
+name = "firefly-rerun"
 version = "0.1.0"
-edition.workspace = true
+edition = "2024"
 rust-version.workspace = true
-description.workspace = true
+description = "Rerun 可视化连接层：多进程共享 viewer（grpc）+ 图像/深度/位姿记录"
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
@@ -12,12 +12,7 @@ categories = ["visualization", "robotics"]
 
 [dependencies]
 firefly-error = { workspace = true }
-firefly-map = { workspace = true }
-firefly-planner = { workspace = true }
-firefly-rerun = { workspace = true }
-firefly-trajectory = { workspace = true }
 log = { workspace = true }
-nalgebra = { workspace = true }
 rerun = { version = "0.36", default-features = false, features = ["sdk"] }
 
 [lints]

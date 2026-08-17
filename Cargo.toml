@@ -23,6 +23,7 @@ firefly-observability = { path = "crates/firefly-observability" }
 firefly-optimize = { path = "crates/firefly-optimize" }
 firefly-planner = { path = "crates/firefly-planner" }
 firefly-pubsub = { path = "crates/firefly-pubsub" }
+firefly-rerun = { path = "crates/firefly-rerun" }
 firefly-search = { path = "crates/firefly-search" }
 firefly-trajectory = { path = "crates/firefly-trajectory" }
 firefly-viewer = { path = "crates/firefly-viewer" }

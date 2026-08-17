@@ -1,33 +1,54 @@
 //! 规划过程可视化（rerun viewer）。
 //!
 //! 记录地图、路径、轨迹、障碍平面到 rerun viewer：
-//! `cargo run -p firefly-viewer --example demo`（需先启动 `rerun` viewer）。
+//! `cargo run -p firefly-viewer --example demo`（需先启动 `rerun` viewer，
+//! 或由 [`Viewer::connect_or_spawn`] 自动起）。
+//!
+//! 底层连接层见 `firefly-rerun`：`rerun` viewer 支持多进程共享，先起 viewer
+//! 再 [`Viewer::connect`]，vio 与 firefly-demo 即可写入同一个 viewer。
 
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_map::{GridMap, Plane, VoxelState};
+use firefly_rerun::Stream;
 use firefly_trajectory::Trajectory;
 use nalgebra::Vector3;
 
 pub struct Viewer {
-    rec: rerun::RecordingStream,
+    stream: Stream,
 }
 
 impl Viewer {
+    /// 连接已启动的 rerun viewer（多进程共享；未启动则自动 spawn）。
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArgument`：应用名非法；`Internal`：无法连接/启动 viewer。
+    pub fn connect_or_spawn(app_id: &str) -> Result<Self> {
+        Ok(Self {
+            stream: Stream::connect_or_spawn(app_id)?,
+        })
+    }
+
+    /// 连接已启动的 rerun viewer（多进程共享；需先运行 `rerun`）。
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArgument`：应用名非法；`Internal`：无法连接 viewer。
+    pub fn connect(app_id: &str) -> Result<Self> {
+        Ok(Self {
+            stream: Stream::connect(app_id)?,
+        })
+    }
+
     /// 连接已启动的 rerun viewer（或自动 spawn）。
     ///
     /// # Errors
     ///
     /// `InvalidArgument`：应用名非法；`Internal`：无法连接 viewer。
     pub fn spawn(app_id: &str) -> Result<Self> {
-        let app = rerun::ApplicationId::try_new(app_id).map_err(|e| {
-            Error::new(ErrorKind::InvalidArgument, "invalid application id").with_source(e)
-        })?;
-        let rec = rerun::RecordingStreamBuilder::new(app)
-            .spawn()
-            .map_err(|e| {
-                Error::new(ErrorKind::Internal, "failed to spawn rerun viewer").with_source(e)
-            })?;
-        Ok(Self { rec })
+        Ok(Self {
+            stream: Stream::spawn(app_id)?,
+        })
     }
 
     /// 保存到 rrd 文件（无 viewer 时离线记录）。
@@ -36,15 +57,53 @@ impl Viewer {
     ///
     /// `InvalidArgument`：应用名非法；`Internal`：无法创建记录。
     pub fn save(app_id: &str, path: impl Into<std::path::PathBuf>) -> Result<Self> {
-        let app = rerun::ApplicationId::try_new(app_id).map_err(|e| {
-            Error::new(ErrorKind::InvalidArgument, "invalid application id").with_source(e)
-        })?;
-        let rec = rerun::RecordingStreamBuilder::new(app)
-            .save(path)
-            .map_err(|e| {
-                Error::new(ErrorKind::Internal, "failed to create rerun recording").with_source(e)
-            })?;
-        Ok(Self { rec })
+        Ok(Self {
+            stream: Stream::save(app_id, path)?,
+        })
+    }
+
+    /// 设置统一仿真时间轴 `sim_time`（秒）：本线程后续 log 落于该时刻。
+    pub fn set_time(&self, seconds: f64) {
+        self.stream.set_time(seconds);
+    }
+
+    /// 8-bit 灰度图（双目灰度）→ rerun 图像实体。
+    ///
+    /// # Errors
+    ///
+    /// `Internal`：rerun 记录失败。
+    pub fn log_gray_image(
+        &self,
+        entity: &str,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Result<()> {
+        self.stream.log_gray_image(entity, width, height, data)
+    }
+
+    /// 单通道 f32 深度（米）→ rerun 深度图实体。
+    ///
+    /// # Errors
+    ///
+    /// `Internal`：rerun 记录失败。
+    pub fn log_depth_image(
+        &self,
+        entity: &str,
+        width: u32,
+        height: u32,
+        data: &[f32],
+    ) -> Result<()> {
+        self.stream.log_depth_image(entity, width, height, data)
+    }
+
+    /// 位姿（平移 + 旋转，四元数 xyzw）→ 3D 刚体变换实体。
+    ///
+    /// # Errors
+    ///
+    /// `Internal`：rerun 记录失败。
+    pub fn log_pose(&self, entity: &str, position: [f64; 3], quat_xyzw: [f64; 4]) -> Result<()> {
+        self.stream.log_pose(entity, position, quat_xyzw)
     }
 
     /// 占据栅格地图 → 3D 体素（`VoxelGridMap`，体素中心 = 原点 + (idx+0.5)·分辨率）。
@@ -66,7 +125,8 @@ impl Viewer {
                 }
             }
         }
-        self.rec
+        self.stream
+            .stream()
             .log(
                 entity,
                 &rerun::VoxelGridMap::new(indices, [res; 3])
@@ -88,7 +148,8 @@ impl Viewer {
         color: (u8, u8, u8),
     ) -> Result<()> {
         let pts: Vec<[f64; 3]> = points.iter().map(|p| [p.x, p.y, p.z]).collect();
-        self.rec
+        self.stream
+            .stream()
             .log(
                 entity,
                 &rerun::LineStrips3D::new([pts.clone()])
@@ -118,14 +179,16 @@ impl Viewer {
             pts.push([s.position.x, s.position.y, s.position.z]);
             arrows.push([s.velocity.x, s.velocity.y, s.velocity.z]);
         }
-        self.rec
+        self.stream
+            .stream()
             .log(
                 entity,
                 &rerun::LineStrips3D::new([pts.clone()])
                     .with_colors([rerun::Color::from_rgb(color.0, color.1, color.2)]),
             )
             .map_err(viewer_err)?;
-        self.rec
+        self.stream
+            .stream()
             .log(
                 format!("{entity}/velocity").as_str(),
                 &rerun::Arrows3D::from_vectors(arrows)
@@ -150,7 +213,8 @@ impl Viewer {
         position: [f64; 3],
         color: (u8, u8, u8),
     ) -> Result<()> {
-        self.rec
+        self.stream
+            .stream()
             .log(
                 entity,
                 &rerun::Boxes3D::from_centers_and_half_sizes([position], [[0.15, 0.15, 0.05]])
@@ -165,7 +229,8 @@ impl Viewer {
     ///
     /// `Internal`：rerun 记录失败。
     pub fn log_points(&self, entity: &str, points: &[[f64; 3]]) -> Result<()> {
-        self.rec
+        self.stream
+            .stream()
             .log(entity, &rerun::Points3D::new(points.to_vec()))
             .map_err(viewer_err)
     }
@@ -183,7 +248,8 @@ impl Viewer {
         translation: [f32; 3],
         color: (u8, u8, u8),
     ) -> Result<()> {
-        self.rec
+        self.stream
+            .stream()
             .log(
                 entity,
                 &rerun::VoxelGridMap::new(indices.to_vec(), voxel_size)
@@ -213,7 +279,8 @@ impl Viewer {
                 [v.x, v.y, v.z]
             })
             .collect();
-        self.rec
+        self.stream
+            .stream()
             .log(
                 entity,
                 &rerun::Arrows3D::from_vectors(vectors)
@@ -229,9 +296,7 @@ impl Viewer {
     ///
     /// `Internal`：rerun 记录失败。
     pub fn clear(&self, entity: &str) -> Result<()> {
-        self.rec
-            .log(entity, &rerun::Clear::recursive())
-            .map_err(viewer_err)
+        self.stream.clear(entity)
     }
 }
 

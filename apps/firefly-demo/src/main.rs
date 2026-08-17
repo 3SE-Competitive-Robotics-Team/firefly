@@ -574,6 +574,8 @@ impl Demo {
     /// 官方 `execFSMCallback`：10Hz 主循环单步。
     fn tick(&mut self) -> Result<()> {
         let now = self.t_sim;
+        // 统一仿真时间轴（与 vio 的传感器/odom 同轴，跨进程对齐回放）
+        self.viewer.set_time(now);
         // 先消费 VIO 输出（续接 trace span、更新最新状态）
         self.poll_sensors(now)?;
         // 深度 → 占据体素（感知建图）
@@ -846,7 +848,8 @@ fn main() {
     };
     let viewer = match &args.save {
         Some(path) => Viewer::save("firefly-demo", path),
-        None => Viewer::spawn("firefly-demo"),
+        // 已有 rerun viewer 则共享（vio 同 viewer），否则自动 spawn
+        None => Viewer::connect_or_spawn("firefly-demo"),
     };
     let viewer = match viewer {
         Ok(v) => v,
