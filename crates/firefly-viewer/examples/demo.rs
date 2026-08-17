@@ -31,9 +31,9 @@ fn main() -> firefly_error::Result<()> {
     // 有 --save 参数则离线记录，否则连接 viewer
     let save = std::env::args().any(|a| a == "--save");
     let viewer = if save {
-        Viewer::save("firefly-demo", "out.rrd")?
+        Viewer::save("out.rrd")?
     } else {
-        Viewer::spawn("firefly-demo")?
+        Viewer::spawn()?
     };
 
     viewer.log_map("world/obstacles", planner.map_ref())?;

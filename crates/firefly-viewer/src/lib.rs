@@ -22,10 +22,10 @@ impl Viewer {
     ///
     /// # Errors
     ///
-    /// `InvalidArgument`：应用名非法；`Internal`：无法连接/启动 viewer。
-    pub fn connect_or_spawn(app_id: &str) -> Result<Self> {
+    /// `Internal`：无法连接/启动 viewer。
+    pub fn connect_or_spawn() -> Result<Self> {
         Ok(Self {
-            stream: Stream::connect_or_spawn(app_id)?,
+            stream: Stream::connect_or_spawn()?,
         })
     }
 
@@ -33,10 +33,10 @@ impl Viewer {
     ///
     /// # Errors
     ///
-    /// `InvalidArgument`：应用名非法；`Internal`：无法连接 viewer。
-    pub fn connect(app_id: &str) -> Result<Self> {
+    /// `Internal`：无法连接 viewer。
+    pub fn connect() -> Result<Self> {
         Ok(Self {
-            stream: Stream::connect(app_id)?,
+            stream: Stream::connect()?,
         })
     }
 
@@ -44,10 +44,10 @@ impl Viewer {
     ///
     /// # Errors
     ///
-    /// `InvalidArgument`：应用名非法；`Internal`：无法连接 viewer。
-    pub fn spawn(app_id: &str) -> Result<Self> {
+    /// `Internal`：无法连接 viewer。
+    pub fn spawn() -> Result<Self> {
         Ok(Self {
-            stream: Stream::spawn(app_id)?,
+            stream: Stream::spawn()?,
         })
     }
 
@@ -55,10 +55,10 @@ impl Viewer {
     ///
     /// # Errors
     ///
-    /// `InvalidArgument`：应用名非法；`Internal`：无法创建记录。
-    pub fn save(app_id: &str, path: impl Into<std::path::PathBuf>) -> Result<Self> {
+    /// `Internal`：无法创建记录。
+    pub fn save(path: impl Into<std::path::PathBuf>) -> Result<Self> {
         Ok(Self {
-            stream: Stream::save(app_id, path)?,
+            stream: Stream::save(path)?,
         })
     }
 
