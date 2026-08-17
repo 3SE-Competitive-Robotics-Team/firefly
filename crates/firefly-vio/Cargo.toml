@@ -1,0 +1,23 @@
+[package]
+name = "firefly-vio"
+version = "0.1.0"
+keywords = ['vio', 'visual-inertial', 'msckf', 'robotics']
+categories = ['robotics', 'science', 'algorithms']
+edition = "2024"
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+fastrace = { workspace = true }
+firefly-error = { workspace = true }
+firefly-vio-core = { workspace = true }
+firefly-vio-init = { workspace = true }
+firefly-vio-types = { workspace = true }
+log = { workspace = true }
+nalgebra = { workspace = true }
+
+[lints]
+workspace = true

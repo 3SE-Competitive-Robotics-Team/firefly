@@ -9,6 +9,16 @@
 - 可观测性：关键函数 `#[fastrace::trace]`，日志用 log 宏，禁 println!。
 - 依赖统一在根 `[workspace.dependencies]`。
 
+## VIO（firefly-vio*）约定
+
+- **不接真实驱动**：`apps/vio` 保持合成数据最小闭环（GT 初始化 + 合成 IMU +
+  高频传播 + odom 发布），不引入 realsense/串口驱动。
+- **不做配置文件系统**：相机内参/外参、IMU 噪声、时间偏移等标定一律硬编码
+  在代码里（`VioManagerOptions::default()` / `InitOptions::default()` 即为
+  事实配置源），不引入 YAML/JSON/serde 解析。
+- 新增标定类数值参数时，直接改对应 `*Options` 的默认值并在 doc 注释标注
+  单位与来源。
+
 ## 性能
 
 - 结论只认 trace 实测（ConsoleReporter span 树），不靠读代码推断。

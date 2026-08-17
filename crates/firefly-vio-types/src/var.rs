@@ -211,6 +211,19 @@ impl PoseJpl {
         Vector3::new(self.p.fej[0], self.p.fej[1], self.p.fej[2])
     }
 
+    /// 设置位姿值（四元数 + 平移）。只更新 `value`，FEJ 需显式 `set_fej`
+    /// （对照 C++ `PoseJPL::set_value`，`initialize_with_gt` 中二者分别设置）。
+    pub fn set_value(&mut self, q: Vector4<f64>, p: Vector3<f64>) {
+        self.q.set_value(q);
+        self.p.set_value(DVector::from_column_slice(p.as_slice()));
+    }
+
+    /// 设置位姿首估计（对照 C++ `PoseJPL::set_fej`）。
+    pub fn set_fej(&mut self, q: Vector4<f64>, p: Vector3<f64>) {
+        self.q.set_fej(q);
+        self.p.set_fej(DVector::from_column_slice(p.as_slice()));
+    }
+
     #[must_use]
     pub fn rot(&self) -> nalgebra::Matrix3<f64> {
         self.q.rot()
@@ -324,6 +337,46 @@ impl ImuState {
     #[must_use]
     pub fn bias_a(&self) -> Vector3<f64> {
         Vector3::new(self.ba.value[0], self.ba.value[1], self.ba.value[2])
+    }
+
+    /// 速度首估计（FEJ；对照 `IMU::vel_fej()`）。
+    #[must_use]
+    pub fn vel_fej(&self) -> Vector3<f64> {
+        Vector3::new(self.v.fej[0], self.v.fej[1], self.v.fej[2])
+    }
+
+    /// 设置 IMU 状态值（位姿/速度/偏置）。只更新 `value`，FEJ 需显式
+    /// `set_fej`（对照 C++ `IMU::set_value`）。
+    ///
+    /// 供 GT 初始化（`VioManager::initialize_with_gt`）等场景使用。
+    pub fn set_value(
+        &mut self,
+        q: Vector4<f64>,
+        p: Vector3<f64>,
+        v: Vector3<f64>,
+        bg: Vector3<f64>,
+        ba: Vector3<f64>,
+    ) {
+        self.pose.set_value(q, p);
+        self.v.set_value(DVector::from_column_slice(v.as_slice()));
+        self.bg.set_value(DVector::from_column_slice(bg.as_slice()));
+        self.ba.set_value(DVector::from_column_slice(ba.as_slice()));
+    }
+
+    /// 设置 IMU 状态首估计（对照 C++ `IMU::set_fej`；
+    /// 供 `initialize_with_gt` 同步 FEJ 使用）。
+    pub fn set_fej(
+        &mut self,
+        q: Vector4<f64>,
+        p: Vector3<f64>,
+        v: Vector3<f64>,
+        bg: Vector3<f64>,
+        ba: Vector3<f64>,
+    ) {
+        self.pose.set_fej(q, p);
+        self.v.set_fej(DVector::from_column_slice(v.as_slice()));
+        self.bg.set_fej(DVector::from_column_slice(bg.as_slice()));
+        self.ba.set_fej(DVector::from_column_slice(ba.as_slice()));
     }
 }
 

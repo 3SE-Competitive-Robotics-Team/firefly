@@ -15,6 +15,8 @@ firefly-cost = { path = "crates/firefly-cost" }
 firefly-error = { path = "crates/firefly-error" }
 firefly-vio-core = { path = "crates/firefly-vio-core" }
 firefly-vio-types = { path = "crates/firefly-vio-types" }
+firefly-vio-init = { path = "crates/firefly-vio-init" }
+firefly-vio = { path = "crates/firefly-vio" }
 firefly-map = { path = "crates/firefly-map" }
 firefly-observability = { path = "crates/firefly-observability" }
 firefly-optimize = { path = "crates/firefly-optimize" }
