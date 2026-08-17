@@ -565,7 +565,12 @@ impl VioManager {
         let imu_data = self.propagator.imu_data_snapshot();
         let Some(prop_data) = Propagator::select_imu_readings(&imu_data, time0, time1, false)
         else {
-            log::warn!("IMU 测量不足，无法传播（time0={time0:.4} time1={time1:.4}）");
+            log::warn!(
+                "IMU 测量不足，无法传播（time0={time0:.4} time1={time1:.4} state={:.4} off={:.6} imu_n={}）",
+                self.state.timestamp,
+                self.last_prop_time_offset,
+                imu_data.len()
+            );
             return;
         };
 
