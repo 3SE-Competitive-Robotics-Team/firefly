@@ -13,6 +13,7 @@
 //! 消息设计约束（iceoryx2 `ZeroCopySend` 要求）：自包含、无堆指针、
 //! 统一内存布局、`'static`、不实现 `Drop`。
 
+pub mod imu;
 pub mod odom;
 pub mod publish;
 pub mod subscriber;

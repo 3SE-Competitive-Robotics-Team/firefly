@@ -1246,6 +1246,7 @@ dependencies = [
  "firefly-map",
  "firefly-observability",
  "firefly-planner",
+ "firefly-pubsub",
  "firefly-search",
  "firefly-trajectory",
  "firefly-viewer",
