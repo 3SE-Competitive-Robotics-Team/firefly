@@ -1,0 +1,23 @@
+[project]
+name = "firefly-sim"
+version = "0.1.0"
+description = "MuJoCo 物理环境主循环：发布传感器（IMU/双目灰度/深度/真值）、订阅参考、闭环控制"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "firefly-mujoco",
+    "iceoryx2==0.9.3",
+    "numpy>=2,<3",
+    "opentelemetry-api>=1.44,<2",
+    "opentelemetry-sdk>=1.44,<2",
+]
+
+[tool.uv.sources]
+firefly-mujoco = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9.18,<0.10.0"]
+build-backend = "uv_build"
+
+[project.scripts]
+firefly-sim = "firefly_sim.main:main"

@@ -1,0 +1,26 @@
+# firefly 双语言 monorepo 的 uv workspace 根（聚合包，不挂自己的源码）。
+#
+# 布局约定（与 Cargo workspace 对称，一个进程 = apps/ 下一个应用）：
+# - apps/    运行进程：Rust 应用（firefly-demo、vio）+ Python 应用（firefly-sim）
+# - packages/ Python 库（firefly-mujoco）
+# - crates/  Rust 库
+#
+# 根聚合依赖所有 workspace 成员：`uv sync` 一次性装好整个环境，
+# `uv run python -m firefly_sim` 可直接从根运行 Python 应用。
+
+[project]
+name = "firefly"
+version = "0.1.0"
+description = "firefly 双语言 monorepo：Rust（EGO 规划 + MSCKF VIO）+ Python（MuJoCo 物理环境）"
+requires-python = ">=3.12"
+dependencies = [
+    "firefly-mujoco",
+    "firefly-sim",
+]
+
+[tool.uv.sources]
+firefly-mujoco = { workspace = true }
+firefly-sim = { workspace = true }
+
+[tool.uv.workspace]
+members = ["packages/*", "apps/firefly-sim"]

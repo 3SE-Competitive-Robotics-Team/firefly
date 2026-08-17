@@ -6,15 +6,18 @@
 //!   时间戳（jiff 墙钟 + `CLOCK_MONOTONIC`），订阅端可续接跨进程 span 树、
 //!   计算端到端延迟（W3C Trace Context 对齐）；
 //! - [`odom`]：`OdomMessage`——`#[repr(C)]` 定长零拷贝消息（`ZeroCopySend`）；
-//! - [`publish`]：发布端封装（Node/Service/Publisher 生命周期管理 +
-//!   自动注入 trace 上下文）；
-//! - [`subscriber`]：订阅端封装（读取 User Header 中的 trace 上下文并续接）。
+//! - [`imu`]：`ImuMessage`——原始 IMU（角速度 + 比力）；
+//! - [`camera`]：`GrayImageMessage`/`DepthImageMessage`——双目灰度 + 深度图；
+//! - [`reference`]：`ReferenceMessage`——规划轨迹的参考状态（闭环控制回传）；
+//! - [`publish`]/[`subscriber`]：泛型发布/订阅端（自动注入/续接 trace 上下文）。
 //!
 //! 消息设计约束（iceoryx2 `ZeroCopySend` 要求）：自包含、无堆指针、
 //! 统一内存布局、`'static`、不实现 `Drop`。
 
+pub mod camera;
 pub mod imu;
 pub mod odom;
 pub mod publish;
+pub mod reference;
 pub mod subscriber;
 pub mod trace;

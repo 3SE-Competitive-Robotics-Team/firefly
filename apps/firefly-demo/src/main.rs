@@ -28,6 +28,8 @@ use firefly_observability::init as init_observability;
 use firefly_planner::{PlanResult, Planner, PlannerConfig, State};
 use firefly_pubsub::imu::{IMU_TOPIC, ImuSubscriber};
 use firefly_pubsub::odom::OdomMessage;
+use firefly_pubsub::publish::Publisher;
+use firefly_pubsub::reference::{REFERENCE_TOPIC, ReferenceMessage};
 use firefly_pubsub::subscriber::OdomSubscriber;
 use firefly_search::Astar;
 use firefly_trajectory::Trajectory;
@@ -50,6 +52,8 @@ struct Args {
     save: Option<PathBuf>,
     start: [f64; 3],
     goal: [f64; 3],
+    /// VIO 世界系 → 地图系平移（MuJoCo 闭环下 vio 已在地图系，默认 0）。
+    frame_offset: [f64; 3],
 }
 
 fn parse_args() -> Result<Args> {
@@ -57,6 +61,7 @@ fn parse_args() -> Result<Args> {
     let mut save = None;
     let mut start = [1.0, 4.0, 1.0];
     let mut goal = [27.0, 4.0, 1.0];
+    let mut frame_offset = [0.0, 0.0, 0.0];
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -64,6 +69,7 @@ fn parse_args() -> Result<Args> {
             "--save" => save = Some(PathBuf::from(it.next().unwrap_or_default())),
             "--start" => start = parse_vec3(&mut it, "start")?,
             "--goal" => goal = parse_vec3(&mut it, "goal")?,
+            "--frame-offset" => frame_offset = parse_vec3(&mut it, "frame-offset")?,
             other => {
                 return Err(Error::new(
                     ErrorKind::InvalidArgument,
@@ -78,6 +84,7 @@ fn parse_args() -> Result<Args> {
         save,
         start,
         goal,
+        frame_offset,
     })
 }
 
@@ -137,6 +144,10 @@ struct Demo {
     latest_odom: Option<OdomSnapshot>,
     /// 收到最新 odom 时的仿真时刻（秒）。
     last_odom_recv: f64,
+    /// 最新 odom 携带的 trace 上下文 `(trace_id, span_id, sampled)`（续接用）。
+    odom_trace: Option<(u128, u64, bool)>,
+    /// 参考状态发布器（闭环控制：MuJoCo 物理环境订阅后 PD 跟踪）。
+    ref_pub: Option<Publisher<ReferenceMessage>>,
 }
 
 impl Demo {
@@ -146,6 +157,7 @@ impl Demo {
         config: PlannerConfig,
         start: [f64; 3],
         goal: [f64; 3],
+        frame_offset: [f64; 3],
     ) -> Result<Self> {
         let map = map_file.to_grid_map()?;
         let static_occupied = map_file
@@ -189,8 +201,19 @@ impl Demo {
                 None
             }
         };
-        // 合成标定：VIO 世界原点 = 任务起点（AGENTS.md：标定硬编码）
-        let frame_offset = Vector3::new(start[0], start[1], start[2]);
+        // VIO 世界系 → 地图系变换（MuJoCo 闭环下 vio 已在地图系，默认 0）
+        let frame_offset = Vector3::new(frame_offset[0], frame_offset[1], frame_offset[2]);
+        // 参考状态发布器（闭环控制回传；失败则降级为纯观测）
+        let ref_pub = match Publisher::<ReferenceMessage>::with_topic(REFERENCE_TOPIC) {
+            Ok(p) => {
+                log::info!("已打开参考状态话题 {REFERENCE_TOPIC}（闭环控制回传）");
+                Some(p)
+            }
+            Err(e) => {
+                log::warn!("参考状态发布不可用（开环运行）：{e}");
+                None
+            }
+        };
         Ok(Self {
             planner,
             viewer,
@@ -209,6 +232,8 @@ impl Demo {
             imu,
             latest_odom: None,
             last_odom_recv: f64::NEG_INFINITY,
+            odom_trace: None,
+            ref_pub,
         })
     }
 
@@ -219,6 +244,9 @@ impl Demo {
                 let ctx = *sample.user_header();
                 // 跨进程 trace 续接：本 span 的父即 vio 发布端 span
                 let _span = ctx.continue_span("recv-odom");
+                if ctx.is_traced() {
+                    self.odom_trace = Some((ctx.trace_id(), ctx.span_id, ctx.sampled()));
+                }
                 let m: OdomMessage = *sample;
                 let p = Vector3::new(m.position_x, m.position_y, m.position_z) + self.frame_offset;
                 let v = Vector3::new(m.velocity_x, m.velocity_y, m.velocity_z);
@@ -461,6 +489,24 @@ impl Demo {
         }
         // 当前无人机位置（VIO odom 优先，否则轨迹推进）
         let pos = self.current_position(now);
+        // 发布参考状态（闭环控制：MuJoCo 物理环境订阅后 PD 跟踪执行中的轨迹）
+        if let Some(local) = &self.local {
+            let t_cur = (now - local.start_time).clamp(0.0, local.traj.duration());
+            let s = local.traj.eval(t_cur);
+            if let Some(pub_) = &self.ref_pub
+                && let Err(e) = pub_.publish(ReferenceMessage {
+                    timestamp: now,
+                    position_x: s.position.x,
+                    position_y: s.position.y,
+                    position_z: s.position.z,
+                    velocity_x: s.velocity.x,
+                    velocity_y: s.velocity.y,
+                    velocity_z: s.velocity.z,
+                })
+            {
+                log::warn!("参考状态发布失败: {e}");
+            }
+        }
         // 到达判定：无人机与目标距离 < ARRIVE_DIST（odom 状态源下任务也能正常结束）
         if self.local.is_some() && (pos - self.goal.coords).norm() < ARRIVE_DIST {
             log::info!(
@@ -496,8 +542,18 @@ impl Demo {
         log::info!("主循环启动：10Hz，重规划阈值 {REPLAN_THRESH}s");
         let mut frame = 0usize;
         while !self.finished {
-            // 每帧建立 trace 上下文（fastrace：`#[trace]` 仅在 root span 下收集）
-            let root = Span::root("firefly-demo", SpanContext::random());
+            // 每帧 trace 上下文：续接最新 odom 的 trace（跨进程同周期一条 trace），
+            // 无新鲜 odom 时自建新 root
+            let fresh_odom = self
+                .odom_trace
+                .filter(|_| self.t_sim - self.last_odom_recv < ODOM_FRESH_TIMEOUT);
+            let root = match fresh_odom {
+                Some((tid, sid, sampled)) => Span::root(
+                    "firefly-demo",
+                    SpanContext::new(TraceId(tid), SpanId(sid)).sampled(sampled),
+                ),
+                None => Span::root("firefly-demo", SpanContext::random()),
+            };
             let _guard = root.set_local_parent();
             let t0 = Instant::now();
             self.tick()?;
@@ -679,6 +735,7 @@ fn main() {
         PlannerConfig::default(),
         args.start,
         args.goal,
+        args.frame_offset,
     ) {
         Ok(mut demo) => {
             if let Err(e) = demo.run() {

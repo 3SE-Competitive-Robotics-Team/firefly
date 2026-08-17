@@ -6,6 +6,7 @@
 pub mod cam;
 pub mod feat;
 pub mod imu_model;
+pub mod input;
 pub mod noise;
 pub mod propagation;
 pub mod sensor;
