@@ -607,15 +607,27 @@ impl Planner {
         let to_goal = goal - start;
         let dist = to_goal.norm();
         if dist <= self.config.planning_distance {
+            // 目标在规划距离内：若被膨胀障碍占用（随机地图常见），沿方向回退到
+            // 最近自由点，否则 A* 直接报 "goal is occupied"——plan() 对随机地图
+            // 成功率骤降（demo 有 target_clear，planner 层 `plan` API 也要兜底）。
+            if self.map.is_occupied_inflated(goal) {
+                let dir = to_goal / dist.max(1e-9);
+                for step in 1..=24 {
+                    let candidate = goal - dir * (f64::from(step) * self.map.resolution());
+                    if !self.map.is_occupied_inflated(candidate) {
+                        return candidate;
+                    }
+                }
+            }
             return goal;
         }
         let dir = to_goal / dist;
         let base = start + dir * self.config.planning_distance;
         // 局部目标被障碍占用时沿方向回退找最近自由点（A* 要求目标可达，判定用膨胀层）
         if self.map.is_occupied_inflated(base) {
-            for step in 1..=8 {
+            for step in 1..=24 {
                 let candidate =
-                    start + dir * (self.config.planning_distance - f64::from(step) * 0.5);
+                    start + dir * (self.config.planning_distance - f64::from(step) * 0.25);
                 if !self.map.is_occupied_inflated(candidate) {
                     return candidate;
                 }
