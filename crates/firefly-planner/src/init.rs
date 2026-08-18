@@ -1,6 +1,6 @@
 //! 前端初始化：A* 引导路径 → MINCO 参数 {q, T} 与边界条件。
 
-use firefly_error::{Error, ErrorKind, Result};
+use firefly_error::Result;
 use firefly_map::GridMap;
 use firefly_search::Astar;
 use firefly_trajectory::{Endpoint, Minco, MincoBuilder, SolverOrder};
@@ -57,10 +57,19 @@ pub fn init_from_path(
     guide: &[Vector3<f64>],
 ) -> Result<Minco> {
     if guide.len() < 2 {
-        return Err(Error::new(
-            ErrorKind::InvalidArgument,
-            "guide path too short",
-        ));
+        // 近终点 / 退化引导（A* 到很近目标路径退化为 ≤1 点）：不报错，退化为
+        // start→goal 的单段直飞 MINCO。否则 demo 在终点外一小段反复
+        // "guide path too short" → 悬停卡死无法抵达（>ARRIVE_DIST 完成不了）。
+        let dist = (goal.coords - start.position).norm();
+        let t = (dist / config.max_velocity).max(1e-3);
+        let end = Endpoint {
+            position: goal.coords,
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        return MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
+            .build(&[], &[t])
+            .map_err(|e| e.with_operation("planner::init:degenerate"));
     }
     let pieces = config.pieces;
     let waypoints = sample_waypoints(guide, pieces - 1);
@@ -139,6 +148,25 @@ fn allocate_time(segments: &[f64], max_velocity: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn degenerate_near_goal_builds_trivial_minco() {
+        // 近终点：A* 引导路径退化（≤1 点）不再报错，产出单段直飞 MINCO
+        let config = InitConfig { pieces: 1, max_velocity: 2.0 };
+        let start = Endpoint {
+            position: Vector3::new(8.0, 4.0, 1.0),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let goal = Point3::new(8.6, 4.0, 1.0);
+        let guide = vec![Vector3::new(8.0, 4.0, 1.0)];
+        let m = init_from_path(&config, start, goal, &guide).expect("近终点退化不应报错");
+        assert_eq!(m.pieces(), 1);
+        assert!(m.duration() > 0.0);
+        let traj = m.solve().expect("退化 MINCO 应可解");
+        let sf = traj.eval(traj.duration());
+        assert!((sf.position - goal.coords).norm() < 1e-6, "终点应是 goal");
+    }
 
     #[test]
     fn samples_along_path_evenly() {
