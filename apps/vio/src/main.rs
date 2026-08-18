@@ -311,6 +311,7 @@ mod tests {
     use nalgebra::Matrix3;
 
     /// Hamilton/JPL 四元数 `[x,y,z,w]` → 旋转矩阵（与 `open_vins` 一致）。
+    #[allow(clippy::many_single_char_names)]
     fn quat_to_rot(q: &nalgebra::Vector4<f64>) -> Matrix3<f64> {
         let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
         Matrix3::new(
@@ -326,7 +327,7 @@ mod tests {
         )
     }
 
-    /// 外参 + 针孔模型重建的视线方向，必须与 MuJoCo 场景的真实相机指向一致
+    /// 外参 + 针孔模型重建的视线方向，必须与 `MuJoCo` 场景的真实相机指向一致
     ///（任何像素都对齐）。否则估计会把特征视线镜像 → 发散。
     #[test]
     fn extrinsic_matches_mujoco_scene_pixel_rays() {
@@ -356,7 +357,7 @@ mod tests {
     /// 内参焦距沙箱：与 `scene.py` fovy=60°、H=240 一致。
     #[test]
     fn focal_is_mujoco_consistent() {
-        assert!((mujoco_focal() - 207.84609690821128).abs() < 1e-6);
+        assert!((mujoco_focal() - 207.846_096_908_211_28).abs() < 1e-6);
     }
 }
 #[cfg(test)]
@@ -364,6 +365,7 @@ mod stereo_baseline_tests {
     use super::{mujoco_focal, mujoco_stereo_extrinsic};
     use nalgebra::{Matrix3, Vector3};
 
+    #[allow(clippy::many_single_char_names)]
     fn quat_to_rot(q: &nalgebra::Vector4<f64>) -> Matrix3<f64> {
         let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
         Matrix3::new(
@@ -407,6 +409,6 @@ mod stereo_baseline_tests {
             "立体射线夹角 {angle} rad 过小（无侧向视差），三角化病态"
         );
         // 焦距仍一致
-        assert!((mujoco_focal() - 207.84609690821128).abs() < 1e-6);
+        assert!((mujoco_focal() - 207.846_096_908_211_28).abs() < 1e-6);
     }
 }
