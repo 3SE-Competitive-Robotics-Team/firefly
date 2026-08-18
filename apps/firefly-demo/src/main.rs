@@ -753,6 +753,9 @@ impl Demo {
         self.sensor_this_tick = false;
         // 统一仿真时间轴（与 vio 的传感器/odom 同轴，跨进程对齐回放）
         self.viewer.set_time(now);
+        // 全局路径（A* 简化路由）可视化：绿色折线，便于回放核对绕障路线
+        self.viewer
+            .log_path("global_path", &self.global_path, (90, 235, 120))?;
         // 深度 → 占据体素（感知建图）
         self.update_map_from_depth();
         self.update_motion();
