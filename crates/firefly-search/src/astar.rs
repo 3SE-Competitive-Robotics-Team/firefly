@@ -516,12 +516,17 @@ mod gap_tests {
         map.inflate_obstacles(0.0);
         let mut astar = Astar::default();
         let path = astar
-            .search(&map, Vector3::new(0.5, 6.5, 0.5), Vector3::new(11.5, 6.5, 0.5))
+            .search(
+                &map,
+                Vector3::new(0.5, 6.5, 0.5),
+                Vector3::new(11.5, 6.5, 0.5),
+            )
             .expect("应找到穿门路径");
         // 路径经过 x in [5,7] 时 y 应落在门（6）附近
-        let through_gap = path.points().iter().any(|p| {
-            p.x >= 4.5 && p.x <= 7.5 && (p.y - 6.5).abs() < 1.0
-        });
+        let through_gap = path
+            .points()
+            .iter()
+            .any(|p| p.x >= 4.5 && p.x <= 7.5 && (p.y - 6.5).abs() < 1.0);
         assert!(through_gap, "A* 应穿过门缝而非绕外圈");
     }
 }

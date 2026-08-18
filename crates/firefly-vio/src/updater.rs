@@ -158,8 +158,7 @@ impl UpdaterMsckf {
                     continue;
                 };
                 for (m, t) in times.iter().enumerate() {
-                    let Some((_, clone)) =
-                        clones.iter().find(|(ct, _)| ct.total_cmp(t).is_eq())
+                    let Some((_, clone)) = clones.iter().find(|(ct, _)| ct.total_cmp(t).is_eq())
                     else {
                         continue;
                     };
@@ -169,11 +168,9 @@ impl UpdaterMsckf {
                         worst = f64::INFINITY;
                         break;
                     }
-                    let uv_n =
-                        Vector2::new(p_in_cw.x / p_in_cw.z, p_in_cw.y / p_in_cw.z);
+                    let uv_n = Vector2::new(p_in_cw.x / p_in_cw.z, p_in_cw.y / p_in_cw.z);
                     let uv_m = uvs_norm[m];
-                    let err =
-                        (Vector2::new(f64::from(uv_m.x), f64::from(uv_m.y)) - uv_n).norm();
+                    let err = (Vector2::new(f64::from(uv_m.x), f64::from(uv_m.y)) - uv_n).norm();
                     worst = worst.max(err);
                 }
             }
@@ -267,7 +264,9 @@ impl UpdaterMsckf {
         }
 
         // 6. 统一组装大矩阵（行 = 各特征行和；列 = 映射覆盖范围）
-        log::debug!("MSCKF 漏斗: 候选 {n_in} 三角化存活 {n_triang} 硬残差拒 {hard_cap_rej} 组装行 {total_rows}");
+        log::debug!(
+            "MSCKF 漏斗: 候选 {n_in} 三角化存活 {n_triang} 硬残差拒 {hard_cap_rej} 组装行 {total_rows}"
+        );
         if total_rows == 0 {
             return;
         }

@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use fastrace::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_map::{update_from_depth, DepthCamera, GridMap, MapFile, VoxelState};
+use firefly_map::{DepthCamera, GridMap, MapFile, VoxelState, update_from_depth};
 use firefly_observability::init as init_observability;
 use firefly_planner::{PlanResult, Planner, PlannerConfig, State};
 use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage};
@@ -264,7 +264,9 @@ impl Demo {
         log::info!("全局路径点: {path_str}");
         // 诊断：x=9 柱处地图占用
         for y in [3.2f64, 4.0, 4.8] {
-            let o = planner.map_ref().is_occupied_inflated(Vector3::new(9.0, y, 1.0));
+            let o = planner
+                .map_ref()
+                .is_occupied_inflated(Vector3::new(9.0, y, 1.0));
             let raw = planner.map_ref().is_occupied(Vector3::new(9.0, y, 1.0));
             log::info!("map@(9,{y},1) inflated={o} raw={raw}");
         }
@@ -465,9 +467,8 @@ impl Demo {
             return;
         };
         let pos = state.position.coords;
-        let q = UnitQuaternion::from_quaternion(Quaternion::new(
-            quat[3], quat[0], quat[1], quat[2],
-        ));
+        let q =
+            UnitQuaternion::from_quaternion(Quaternion::new(quat[3], quat[0], quat[1], quat[2]));
         let pose = Isometry3::from_parts(Translation3::new(pos.x, pos.y, pos.z), q);
         update_from_depth(self.planner.map_mut(), &self.depth_cam, &pose, &depth.data);
     }
@@ -514,10 +515,7 @@ impl Demo {
         // 退化全局路径（start≈goal，A* 仅 1 点）：直接以终点为 touch_goal，避免
         // 下方 `global_path[seg+1..]` 越界切片 panic。
         if self.global_path.len() < 2 {
-            return (
-                Vector3::new(self.goal.x, self.goal.y, self.goal.z),
-                true,
-            );
+            return (Vector3::new(self.goal.x, self.goal.y, self.goal.z), true);
         }
         // 定位 start 在全局路径上的最近段（官方沿 global_traj 投影）
         let mut seg = 0usize;
@@ -648,7 +646,10 @@ impl Demo {
             .planner
             .plan(start, Point3::new(target.x, target.y, target.z))
         {
-            Ok(r) => { self.replan_fail_streak = 0; r }
+            Ok(r) => {
+                self.replan_fail_streak = 0;
+                r
+            }
             Err(e) => {
                 log::warn!("重规划失败，保持旧轨迹：{e}");
                 self.replan_cooldown_until = now + 0.5;
@@ -659,7 +660,10 @@ impl Demo {
         // 退化轨迹防护：时长短到下一 tick 就"过期"（切角/无信息时的异常解）
         // 会触发逐 tick 强制重规划空转，直接丢弃。
         if result.trajectory.duration() < 0.5 {
-            log::warn!("重规划产出退化轨迹（时长 {:.2}s），保持旧轨迹", result.trajectory.duration());
+            log::warn!(
+                "重规划产出退化轨迹（时长 {:.2}s），保持旧轨迹",
+                result.trajectory.duration()
+            );
             self.replan_cooldown_until = now + 0.5;
             return Ok(());
         }
@@ -790,29 +794,35 @@ impl Demo {
             // 脱困回退：轨迹已耗尽且重规划连续失败（贴墙死锁）→ 沿全局路径
             // 向下一自由点直飞（引导速度 1 m/s），物理移动解开几何死锁，
             // 也给 VIO 提供视差（对照 EGO-Planner-v2 FSM 的失败后换路径恢复）。
-            let (px, py, pz, vx, vy, vz) = if t_cur >= local.traj.duration() - 1e-6
-                && self.replan_fail_streak >= 3
-            {
-                // 短步进沿全局路径跟随绕行（1m 步，避免直线穿障）
-                let (tp, _) = self.path_point_at_arc(pos, 1.0);
-                let dir = tp - pos;
-                let dir = if dir.norm_squared() < 1e-9 { Vector3::zeros() } else { dir.normalize() };
-                log::info!(
-                    "脱困回退: 当前位置({:.2},{:.2}) 目标({:.2},{:.2})",
-                    pos.x, pos.y, tp.x, tp.y
-                );
-                (tp.x, tp.y, tp.z, 1.0 * dir.x, 1.0 * dir.y, 1.0 * dir.z)
-            } else {
-                let s = local.traj.eval(t_cur);
-                (
-                    s.position.x,
-                    s.position.y,
-                    s.position.z,
-                    s.velocity.x,
-                    s.velocity.y,
-                    s.velocity.z,
-                )
-            };
+            let (px, py, pz, vx, vy, vz) =
+                if t_cur >= local.traj.duration() - 1e-6 && self.replan_fail_streak >= 3 {
+                    // 短步进沿全局路径跟随绕行（1m 步，避免直线穿障）
+                    let (tp, _) = self.path_point_at_arc(pos, 1.0);
+                    let dir = tp - pos;
+                    let dir = if dir.norm_squared() < 1e-9 {
+                        Vector3::zeros()
+                    } else {
+                        dir.normalize()
+                    };
+                    log::info!(
+                        "脱困回退: 当前位置({:.2},{:.2}) 目标({:.2},{:.2})",
+                        pos.x,
+                        pos.y,
+                        tp.x,
+                        tp.y
+                    );
+                    (tp.x, tp.y, tp.z, 1.0 * dir.x, 1.0 * dir.y, 1.0 * dir.z)
+                } else {
+                    let s = local.traj.eval(t_cur);
+                    (
+                        s.position.x,
+                        s.position.y,
+                        s.position.z,
+                        s.velocity.x,
+                        s.velocity.y,
+                        s.velocity.z,
+                    )
+                };
             if let Some(pub_) = &self.ref_pub
                 && let Err(e) = pub_.publish(ReferenceMessage {
                     timestamp: now,
@@ -839,7 +849,8 @@ impl Demo {
             self.finished = true;
             return Ok(());
         }
-        self.viewer.log_position("drone", [pos.x, pos.y, pos.z], (255, 140, 40))?;
+        self.viewer
+            .log_position("drone", [pos.x, pos.y, pos.z], (255, 140, 40))?;
         // 动态障碍按真实尺寸渲染（motions 实体）
         if !self.map_file.motions.is_empty() {
             let mut indices = Vec::new();
@@ -906,7 +917,12 @@ impl Demo {
                 if occupied > 0 {
                     log::info!(
                         "感知地图：{occupied} 个占据体素，包围盒 [{:.1},{:.1},{:.1}]~[{:.1},{:.1},{:.1}]",
-                        lo.x, lo.y, lo.z, hi.x, hi.y, hi.z
+                        lo.x,
+                        lo.y,
+                        lo.z,
+                        hi.x,
+                        hi.y,
+                        hi.z
                     );
                 } else {
                     log::info!("感知地图：0 个占据体素");

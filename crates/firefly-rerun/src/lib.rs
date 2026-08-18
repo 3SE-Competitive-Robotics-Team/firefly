@@ -70,8 +70,7 @@ impl Stream {
     pub fn save(path: impl Into<PathBuf>) -> Result<Self> {
         Ok(Self {
             rec: builder()?.save(path).map_err(|e| {
-                Error::new(ErrorKind::Internal, "failed to create rerun recording")
-                    .with_source(e)
+                Error::new(ErrorKind::Internal, "failed to create rerun recording").with_source(e)
             })?,
         })
     }
@@ -112,13 +111,7 @@ impl Stream {
     /// # Errors
     ///
     /// `Internal`：rerun 记录失败。
-    pub fn log_gray_image(
-        &self,
-        entity: &str,
-        width: u32,
-        height: u32,
-        data: &[u8],
-    ) -> Result<()> {
+    pub fn log_gray_image(&self, entity: &str, width: u32, height: u32, data: &[u8]) -> Result<()> {
         self.rec
             .log(
                 entity,
@@ -161,12 +154,7 @@ impl Stream {
     /// # Errors
     ///
     /// `Internal`：rerun 记录失败。
-    pub fn log_pose(
-        &self,
-        entity: &str,
-        position: [f64; 3],
-        quat_xyzw: [f64; 4],
-    ) -> Result<()> {
+    pub fn log_pose(&self, entity: &str, position: [f64; 3], quat_xyzw: [f64; 4]) -> Result<()> {
         let translation = rerun::components::Translation3D::from([
             position[0] as f32,
             position[1] as f32,
@@ -209,8 +197,9 @@ fn builder() -> Result<rerun::RecordingStreamBuilder> {
     let app = rerun::ApplicationId::try_new(APP_ID).map_err(|e| {
         Error::new(ErrorKind::InvalidArgument, "invalid application id").with_source(e)
     })?;
-    Ok(rerun::RecordingStreamBuilder::new(app)
-        .recording_id(rerun::external::re_log_types::RecordingId::from(RECORDING_ID)))
+    Ok(rerun::RecordingStreamBuilder::new(app).recording_id(
+        rerun::external::re_log_types::RecordingId::from(RECORDING_ID),
+    ))
 }
 
 fn stream_err(e: rerun::RecordingStreamError) -> Error {

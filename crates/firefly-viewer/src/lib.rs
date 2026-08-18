@@ -72,13 +72,7 @@ impl Viewer {
     /// # Errors
     ///
     /// `Internal`：rerun 记录失败。
-    pub fn log_gray_image(
-        &self,
-        entity: &str,
-        width: u32,
-        height: u32,
-        data: &[u8],
-    ) -> Result<()> {
+    pub fn log_gray_image(&self, entity: &str, width: u32, height: u32, data: &[u8]) -> Result<()> {
         self.stream.log_gray_image(entity, width, height, data)
     }
 
