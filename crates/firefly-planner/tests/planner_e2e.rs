@@ -281,3 +281,52 @@ fn formation_following_with_peer() {
         mid.y
     );
 }
+
+/// 任务核心场景：路径上孤立柱，规划器须绕开（保持净距）抵达局部目标。
+#[test]
+fn plan_avoids_isolated_column() {
+    // 20m × 20m，res 0.5；x=10 处±y 轴一根柱（多格高、粗）
+    let mut map = firefly_map::GridMapBuilder::new(0.5, [40, 40, 10]).build().unwrap();
+    // 柱在无人机路径中段：世界 x≈4.25, y=9.75..10.25（voxel 8 / 19..21）
+    for z in 0..4 {
+        for y in 19..21 {
+            map.set_state([8, y, z], firefly_map::VoxelState::Occupied);
+        }
+    }
+    map.inflate_obstacles(0.3);
+
+    let config = firefly_planner::PlannerConfig::default();
+    let mut planner = firefly_planner::Planner::new(config, map);
+    let start = firefly_planner::State {
+        position: nalgebra::Point3::new(0.5, 10.0, 1.0),
+        velocity: nalgebra::Vector3::zeros(),
+        acceleration: nalgebra::Vector3::zeros(),
+    };
+    let goal = nalgebra::Point3::new(19.0, 10.0, 1.0);
+    let result = planner.plan(start, goal).expect("plan succeeds");
+    let traj = &result.trajectory;
+    // 起点/终点边界
+    assert!((traj.eval(0.0).position - start.position.coords).norm() < 1e-6);
+    let sf = traj.eval(traj.duration());
+    let exp = start.position.coords
+        + (goal.coords - start.position.coords).normalize() * planner.config().planning_distance;
+    assert!((sf.position - exp).norm() < 1e-6);
+
+    // 整条轨迹净离膨胀占据柱保持 ≥ 0（放行安全：不穿过柱区）
+    for k in 0..400 {
+        let s = traj.eval(traj.duration() * f64::from(k) / 400.0);
+        assert!(
+            !planner.map_ref().is_occupied_inflated(s.position),
+            "轨迹点穿入障碍膨胀区 at t={:.2} p={:?}",
+            traj.duration() * f64::from(k) / 400.0,
+            s.position
+        );
+    }
+    // 确实有横向偏移（绕开，而非直线穿柱）
+    let mut max_dev = 0.0f64;
+    for k in 0..200 {
+        let s = traj.eval(traj.duration() * f64::from(k) / 200.0);
+        max_dev = max_dev.max((s.position.y - 10.0).abs());
+    }
+    assert!(max_dev > 0.15, "应横向绕开柱（偏移 {max_dev:.3}）");
+}
