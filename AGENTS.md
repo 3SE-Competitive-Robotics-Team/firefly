@@ -29,6 +29,12 @@ Python sim（MuJoCo 物理 + 传感器发布）→ vio（MSCKF 位姿估计）�
   └──────────── 回传参考 Firefly/Reference（PD 闭环）──────────────┘
 ```
 
+推荐一键启动（后台拉起三进程 + viewer，Ctrl-C 清理）：
+```bash
+scripts/run_firefly.sh            # 起 viewer + sim + vio + demo
+scripts/run_firefly.sh --no-viewer --save task.rrd   # 免 viewer / 捕获录制
+```
+
 按顺序各开一个终端（可先开 viewer，见下）：
 
 ```bash
