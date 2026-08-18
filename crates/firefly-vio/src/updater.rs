@@ -127,6 +127,7 @@ impl UpdaterMsckf {
 
         // 4. 三角化（失败删除）+ 高斯牛顿精化（对照 C++ 的
         // single_triangulation → single_gaussnewton 链；refine_features 默认 true）
+        let n_in = feature_vec.len();
         feature_vec.retain_mut(|feat| {
             let ok = single_triangulation(feat, &clones_cam, &self.triangulation_options);
             let ok = ok
@@ -266,7 +267,7 @@ impl UpdaterMsckf {
         }
 
         // 6. 统一组装大矩阵（行 = 各特征行和；列 = 映射覆盖范围）
-        log::debug!("MSCKF 漏斗: 三角化存活 {n_triang} 硬残差拒 {hard_cap_rej} 组装行 {total_rows}");
+        log::debug!("MSCKF 漏斗: 候选 {n_in} 三角化存活 {n_triang} 硬残差拒 {hard_cap_rej} 组装行 {total_rows}");
         if total_rows == 0 {
             return;
         }
