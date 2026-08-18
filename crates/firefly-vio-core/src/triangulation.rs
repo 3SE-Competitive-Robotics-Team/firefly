@@ -25,7 +25,9 @@ pub struct ClonePose {
 /// 三角化检查参数（对照 `FeatureInitializerOptions` 默认值）。
 #[derive(Debug, Clone, Copy)]
 pub struct TriangulationOptions {
-    /// 条件数上限（`max_cond_number = 10000`）。
+    /// 条件数上限（`max_cond_number = 100000`）。低视差单目下 DLT 条件数偏大。
+    /// 注意：曾实验放宽到 1e6 + 硬残差门，实跑三角化存活仍几乎为 0、odom 略更
+    /// 糟（拒绝主因是深度/精化检查而非 cond），故保持 1e5 较温和而非激进。
     pub max_cond_number: f64,
     /// 最小深度（`min_dist = 0.10` m）。
     pub min_dist: f64,
@@ -52,7 +54,7 @@ pub struct TriangulationOptions {
 impl Default for TriangulationOptions {
     fn default() -> Self {
         Self {
-            max_cond_number: 10_000.0,
+            max_cond_number: 100_000.0,
             min_dist: 0.10,
             max_dist: 60.0,
             refine_features: true,
