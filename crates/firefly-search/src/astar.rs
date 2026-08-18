@@ -492,3 +492,36 @@ mod line_clear_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod gap_tests {
+    use super::*;
+    use firefly_map::{GridMapBuilder, VoxelState};
+
+    /// 两堵墙留 1 格门，A* 应穿过门（而非绕墙外圈）。
+    #[test]
+    fn finds_path_through_gap() {
+        let mut map = GridMapBuilder::new(1.0, [12, 12, 12]).build().unwrap();
+        // x=5 与 x=7 两堵墙（y,z 全占），但 y=6 留出门缝（1 格宽）
+        for x in [5usize, 7] {
+            for y in 0..12 {
+                for z in 0..12 {
+                    if y == 6 {
+                        continue; // 门
+                    }
+                    map.set_state([x, y, z], VoxelState::Occupied);
+                }
+            }
+        }
+        map.inflate_obstacles(0.0);
+        let mut astar = Astar::default();
+        let path = astar
+            .search(&map, Vector3::new(0.5, 6.5, 0.5), Vector3::new(11.5, 6.5, 0.5))
+            .expect("应找到穿门路径");
+        // 路径经过 x in [5,7] 时 y 应落在门（6）附近
+        let through_gap = path.points().iter().any(|p| {
+            p.x >= 4.5 && p.x <= 7.5 && (p.y - 6.5).abs() < 1.0
+        });
+        assert!(through_gap, "A* 应穿过门缝而非绕外圈");
+    }
+}
