@@ -95,8 +95,8 @@ pub fn update_from_depth(
                 let dx = (u as f64 - cam.cx) / cam.focal;
                 let dy = -(v as f64 - cam.cy) / cam.focal;
                 let hit_cam = Vector3::new(dx * z, dy * z, -z);
-                let hit_world = body_pose
-                    * Point3::from(cam.pos_in_body + cam.rot_cam_to_body * hit_cam);
+                let hit_world =
+                    body_pose * Point3::from(cam.pos_in_body + cam.rot_cam_to_body * hit_cam);
                 mark_ray(map, cam_world.coords, hit_world.coords);
             }
             u += cam.pixel_step;
@@ -144,7 +144,9 @@ fn mark_ray(map: &mut GridMap, from: Vector3<f64>, to: Vector3<f64>) {
         }
     }
     loop {
-        let axis = (0..3).min_by(|&a, &b| t_max[a].total_cmp(&t_max[b])).unwrap();
+        let axis = (0..3)
+            .min_by(|&a, &b| t_max[a].total_cmp(&t_max[b]))
+            .unwrap();
         let t = t_max[axis];
         t_max[axis] += t_delta[axis];
         idx[axis] = idx[axis].wrapping_add_signed(step[axis] as isize);
@@ -226,10 +228,8 @@ mod tests {
             .with_origin(Vector3::new(0.0, -5.0, 0.0))
             .build()
             .unwrap();
-        let pose = Isometry3::from_parts(
-            Translation3::new(1.0, 4.0, 1.0),
-            UnitQuaternion::identity(),
-        );
+        let pose =
+            Isometry3::from_parts(Translation3::new(1.0, 4.0, 1.0), UnitQuaternion::identity());
         let mut depth = vec![0.0f32; cam.width * cam.height];
         depth[135 * cam.width + 219] = 5.59;
         update_from_depth(&mut map, &cam, &pose, &depth);

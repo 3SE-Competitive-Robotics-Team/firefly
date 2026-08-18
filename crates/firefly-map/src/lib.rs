@@ -9,7 +9,7 @@ mod grid;
 mod plane;
 mod scene;
 
-pub use depth::{update_from_depth, DepthCamera};
+pub use depth::{DepthCamera, update_from_depth};
 pub use format::{MapFile, Motion, Shape};
 pub use grid::{GridMap, GridMapBuilder, VoxelState};
 pub use plane::{Plane, PlaneDistance};

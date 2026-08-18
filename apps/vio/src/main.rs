@@ -125,7 +125,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    run_loop(&mut vio, &mut input, &odom_pub, viewer.as_ref(), depth_sub.as_ref())
+    run_loop(
+        &mut vio,
+        &mut input,
+        &odom_pub,
+        viewer.as_ref(),
+        depth_sub.as_ref(),
+    )
 }
 
 /// 驱动循环：推进输入 → 喂 IMU/相机 → 传播 → 发布 odom（10Hz）。
@@ -222,11 +228,11 @@ fn run_loop(
                     if let Some(viewer) = viewer {
                         viewer.set_time(t_sim);
                         let q = s.imu.quat();
-                        if let Err(e) = viewer.log_pose("vio/odom", [
-                            s.imu.pos().x,
-                            s.imu.pos().y,
-                            s.imu.pos().z,
-                        ], [q[0], q[1], q[2], q[3]]) {
+                        if let Err(e) = viewer.log_pose(
+                            "vio/odom",
+                            [s.imu.pos().x, s.imu.pos().y, s.imu.pos().z],
+                            [q[0], q[1], q[2], q[3]],
+                        ) {
                             log::debug!("rerun 记录 odom 位姿失败：{e}");
                         }
                     }
@@ -252,7 +258,8 @@ fn log_cameras(viewer: &Stream, cam: &firefly_vio_core::sensor::CameraData) {
             }
         };
         let Some(entity) = entity else { continue };
-        if let Err(e) = viewer.log_gray_image(entity, img.width as u32, img.height as u32, &img.data)
+        if let Err(e) =
+            viewer.log_gray_image(entity, img.width as u32, img.height as u32, &img.data)
         {
             log::debug!("rerun 记录 {entity} 失败：{e}");
         }
@@ -354,15 +361,21 @@ mod tests {
 }
 #[cfg(test)]
 mod stereo_baseline_tests {
-    use super::{mujoco_stereo_extrinsic, mujoco_focal};
+    use super::{mujoco_focal, mujoco_stereo_extrinsic};
     use nalgebra::{Matrix3, Vector3};
 
     fn quat_to_rot(q: &nalgebra::Vector4<f64>) -> Matrix3<f64> {
         let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
         Matrix3::new(
-            1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y),
-            2.0 * (x * y + w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x),
-            2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y),
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y - w * z),
+            2.0 * (x * z + w * y),
+            2.0 * (x * y + w * z),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z - w * x),
+            2.0 * (x * z - w * y),
+            2.0 * (y * z + w * x),
+            1.0 - 2.0 * (x * x + y * y),
         )
     }
 
@@ -372,13 +385,16 @@ mod stereo_baseline_tests {
     #[test]
     fn lateral_baseline_gives_nonparallel_rays() {
         let (q, [p_l, p_r]) = mujoco_stereo_extrinsic();
-        let r_ito_c = quat_to_rot(&q);            // body→camera(y-down)
-        let r_c_to_b = r_ito_c.transpose();        // camera→body
+        let r_ito_c = quat_to_rot(&q); // body→camera(y-down)
+        let r_c_to_b = r_ito_c.transpose(); // camera→body
         // 相机在机体位置：p_CinB = -R_CtoB * p_IinC（IMU 在机体原点）
         let cam_l = -r_c_to_b * p_l;
         let cam_r = -r_c_to_b * p_r;
         // 横向基线：lit 相机 y 坐标相差基线，x 都为 0（前向）
-        assert!((cam_l.x).abs() < 1e-9 && (cam_r.x).abs() < 1e-9, "前向基线，相机沿视线分开");
+        assert!(
+            (cam_l.x).abs() < 1e-9 && (cam_r.x).abs() < 1e-9,
+            "前向基线，相机沿视线分开"
+        );
         assert!((cam_l.y - cam_r.y).abs() > 0.05, "横向分开应 ≥ 基线 0.1m");
 
         // 一个前方特征（机器前 10m、偏心），两相机到它的射线应有明显夹角

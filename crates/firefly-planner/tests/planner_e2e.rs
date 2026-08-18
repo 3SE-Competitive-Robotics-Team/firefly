@@ -286,7 +286,9 @@ fn formation_following_with_peer() {
 #[test]
 fn plan_avoids_isolated_column() {
     // 20m × 20m，res 0.5；x=10 处±y 轴一根柱（多格高、粗）
-    let mut map = firefly_map::GridMapBuilder::new(0.5, [40, 40, 10]).build().unwrap();
+    let mut map = firefly_map::GridMapBuilder::new(0.5, [40, 40, 10])
+        .build()
+        .unwrap();
     // 柱在无人机路径中段：世界 x≈4.25, y=9.75..10.25（voxel 8 / 19..21）
     for z in 0..4 {
         for y in 19..21 {
@@ -336,7 +338,10 @@ fn plan_avoids_isolated_column() {
         let t = traj.duration() * f64::from(k) / 400.0;
         let s = traj.eval(t);
         assert!(s.velocity.norm() < cfg.max_velocity * 1.02, "v 越限");
-        assert!(s.acceleration.norm() < cfg.max_acceleration * 1.02, "a 越限");
+        assert!(
+            s.acceleration.norm() < cfg.max_acceleration * 1.02,
+            "a 越限"
+        );
         assert!(s.jerk.norm() < cfg.max_jerk * 1.02, "j 越限");
     }
 }
