@@ -329,4 +329,14 @@ fn plan_avoids_isolated_column() {
         max_dev = max_dev.max((s.position.y - 10.0).abs());
     }
     assert!(max_dev > 0.15, "应横向绕开柱（偏移 {max_dev:.3}）");
+
+    // 动态可行性（与 plan_avoids_wall 一致：软约束允许 1% 工程容差）
+    let cfg = planner.config();
+    for k in 0..400 {
+        let t = traj.duration() * f64::from(k) / 400.0;
+        let s = traj.eval(t);
+        assert!(s.velocity.norm() < cfg.max_velocity * 1.02, "v 越限");
+        assert!(s.acceleration.norm() < cfg.max_acceleration * 1.02, "a 越限");
+        assert!(s.jerk.norm() < cfg.max_jerk * 1.02, "j 越限");
+    }
 }
