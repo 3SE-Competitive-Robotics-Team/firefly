@@ -749,6 +749,7 @@ impl Demo {
     }
 
     /// 官方 `execFSMCallback`：10Hz 主循环单步。
+    #[allow(clippy::too_many_lines)]
     fn tick(&mut self) -> Result<()> {
         // 先消费传感器（更新权威仿真时钟 `t_sim`），再取当帧 sim 时刻；
         // 保证所有计算/viewer 时间轴落在真实仿真时间上。
