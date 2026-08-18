@@ -47,8 +47,13 @@ Python sim（MuJoCo 物理 + 传感器发布 200Hz，订阅 `Firefly/Reference` 
      （对极约束+逆深度初始化）的大规模投入，非增量修补可成。
    - **demo 以 GT 为状态源**运行（VIO odom 不参与），任务稳定。
 2. **cargo test --workspace 全绿**（firefly-vio 45、firefly-vio-core 104、search/map/
-   planner/demo 等），clippy 0。
+   planner/demo 等），clippy 0；`--ignored` 随机地图基准确定性 0.87（LCG 固定种子，
+   无 flaky；剩 4 败为硬图优化器收敛限，阈值 0.8 已达成，安全优先不求强推优化器）。
 3. 已 root-cause 但按"未用路径"处置：无（SLAM 已修好）。
+4. **PLANNER：未做 EGO-v2 的"前一轨迹暖启动"**（对照 `planner_manager.cpp
+   computeInitState` case 2：非首帧用上一条最优轨迹作初始 MINCO，提收敛/连续性）。
+   我们每帧从 A* 引导路径重建。这解释了部分随机硬图的 rebound/stuck 收敛失败；
+   属大改动有回归风险，暂记录，后续可参考实现。
 
 ## 建议下一步
 
