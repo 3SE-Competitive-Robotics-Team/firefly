@@ -511,6 +511,14 @@ impl Demo {
     /// 官方 `getLocalTarget`：从 start 沿全局路径累计弧长，取 `arc` 处的点；
     /// 路径取尽仍不足 `arc` 时目标为终点，`touch_goal = true`。
     fn path_point_at_arc(&self, start: Vector3<f64>, arc: f64) -> (Vector3<f64>, bool) {
+        // 退化全局路径（start≈goal，A* 仅 1 点）：直接以终点为 touch_goal，避免
+        // 下方 `global_path[seg+1..]` 越界切片 panic。
+        if self.global_path.len() < 2 {
+            return (
+                Vector3::new(self.goal.x, self.goal.y, self.goal.z),
+                true,
+            );
+        }
         // 定位 start 在全局路径上的最近段（官方沿 global_traj 投影）
         let mut seg = 0usize;
         let mut best = f64::INFINITY;
