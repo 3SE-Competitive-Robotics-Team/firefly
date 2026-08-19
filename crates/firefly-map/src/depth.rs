@@ -41,13 +41,13 @@ pub struct DepthCamera {
 }
 
 impl DepthCamera {
-    /// `MuJoCo` 合成场景默认标定（`scene.py`：深度相机在机体原点、`fovy=60°`、
-    /// `320×240`）。实测投影约定：
+    /// `MuJoCo` 合成场景默认标定（`scene.py`：深度相机在机体原点、`fovy=70.88°`≈
+    /// D430 87°HFOV、`320×240`）。实测投影约定：
     /// - 相机看 `+x_body`（无人机前进方向），图右 → `-y_body`，图下 → `-z_body`；
-    /// - `focal = (H/2)/tan(fovy/2) = 120/tan(30°) ≈ 207.85`。
+    /// - `focal = (H/2)/tan(fovy/2) = 120/tan(35.44°) ≈ 168.6`。
     #[must_use]
     pub fn mujoco_default() -> Self {
-        let focal = 120.0 / (60.0_f64 / 2.0).to_radians().tan();
+        let focal = 120.0 / (70.88_f64 / 2.0).to_radians().tan();
         // 相机系 x/y/z 轴在机体系：x=(0,-1,0)、y=(0,0,1)、z=(-1,0,0)
         let rot_cam_to_body = Matrix3::new(
             0.0, 0.0, -1.0, //
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn default_camera_focal_matches_fovy() {
         let cam = DepthCamera::mujoco_default();
-        assert!((cam.focal - 207.846).abs() < 1e-3);
+        assert!((cam.focal - 168.607).abs() < 1e-3);
     }
 
     #[test]
@@ -221,7 +221,8 @@ mod tests {
     #[test]
     fn update_from_depth_maps_mujoco_box() {
         // 复现 demo 场景：无人机在 (1,4,1) 恒等姿态，盒子 (8,2,0.5) 前表面
-        // 在像素 (219,135) 深度 5.59m（实测值）→ 命中世界 (6.59,2.41,0.60)
+        // 在像素 (207,132)（fovy=70.88°、focal=168.6、pixel_step=3 采到）深度
+        // 5.59m → 命中世界 (6.59,2.44,0.60)
         let cam = DepthCamera::mujoco_default();
         // 地图与 demo 一致：origin (0,-5,0)、0.4m、dims [80,35,13]
         let mut map = GridMapBuilder::new(0.4, [80, 35, 13])
@@ -231,7 +232,7 @@ mod tests {
         let pose =
             Isometry3::from_parts(Translation3::new(1.0, 4.0, 1.0), UnitQuaternion::identity());
         let mut depth = vec![0.0f32; cam.width * cam.height];
-        depth[135 * cam.width + 219] = 5.59;
+        depth[132 * cam.width + 207] = 5.59;
         update_from_depth(&mut map, &cam, &pose, &depth);
         // 命中点 (6.59,2.41,0.60) → 体素 [16,18,1]
         assert_eq!(map.state([16, 18, 1]), VoxelState::Occupied);

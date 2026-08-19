@@ -45,12 +45,13 @@ SCENE_XML = r"""
       <geom type="sphere" pos="0.25 0 0" size="0.06" rgba="0.80 0.20 0.20 1"/>
       <geom type="sphere" pos="-0.25 0 0" size="0.06" rgba="0.20 0.80 0.20 1"/>
       <!-- 双目（基线 0.1m）+ 深度相机，前向 +x，上 +z -->
-      <!-- 双目（横向基线 0.1m，沿 y 侧向分开）+ 深度相机，前向 +x，上 +z。
+      <!-- 双目（横向基线 0.05m，沿 y 侧向分开，对照 Intel RealSense D430 的结构基线
+           50mm）+ 深度相机，前向 +x，上 +z。
            注意：基线必须与视线垂直（横向），前后(y=0 沿 x)分开的相机射线
            近乎共线 → 无侧向视差 → 立体无法解深度（VIO 三角化必败）。 -->
-      <camera name="cam_left" pos="0 -0.05 0" xyaxes="0 -1 0  0 0 1" fovy="60"/>
-      <camera name="cam_right" pos="0 0.05 0" xyaxes="0 -1 0  0 0 1" fovy="60"/>
-      <camera name="cam_depth" pos="0 0 0" xyaxes="0 -1 0  0 0 1" fovy="60"/>
+      <camera name="cam_left" pos="0 -0.025 0" xyaxes="0 -1 0  0 0 1" fovy="70.88"/>
+      <camera name="cam_right" pos="0 0.025 0" xyaxes="0 -1 0  0 0 1" fovy="70.88"/>
+      <camera name="cam_depth" pos="0 0 0" xyaxes="0 -1 0  0 0 1" fovy="70.88"/>
       <site name="imu_site" pos="0 0 0"/>
     </body>
   </worldbody>
