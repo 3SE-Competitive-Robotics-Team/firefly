@@ -42,8 +42,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     firefly_observability::init();
     log::info!("VIO 进程启动：订阅 MuJoCo 物理环境（iceoryx2 输入 + trace 上下文）");
 
-    // 估计器：MuJoCo 双目相机标定（`scene.py`：320×240、fovy=60°、方形像素、
-    // 基线 0.1m）。内参 focal=(H/2)/tan(fovy/2)=207.85，无畸变；外参见
+    // 估计器：MuJoCo 双目相机标定（`scene.py`：320×240、fovy=70.88°≈D430 87°HFOV、
+    // 方形像素、基线 0.05m）。内参 focal=(H/2)/tan(fovy/2)=168.6，无畸变；外参见
     // [`mujoco_stereo_extrinsic`]。
     let focal = mujoco_focal();
     let intrinsics = [focal, focal, 160.0, 120.0, 0.0, 0.0, 0.0, 0.0];
@@ -273,10 +273,10 @@ fn log_depth(viewer: &Stream, m: &DepthImageMessage) {
     }
 }
 
-/// `MuJoCo` 相机焦距：`(H/2) / tan(fovy/2)`（320×240、fovy=60°、方形像素）。
+/// `MuJoCo` 相机焦距：`(H/2) / tan(fovy/2)`（320×240、fovy=70.88°≈D430 87°HFOV、方形像素）。
 #[must_use]
 fn mujoco_focal() -> f64 {
-    120.0 / (60.0_f64 / 2.0).to_radians().tan()
+    120.0 / (70.88_f64 / 2.0).to_radians().tan()
 }
 
 /// `MuJoCo` 双目相机外参（OpenVINS JPL 约定），返回 `(q_ito_c, [p_left, p_right])`。
@@ -288,8 +288,9 @@ fn mujoco_focal() -> f64 {
 /// （四元数 JPL xyzw = (0.5,-0.5,0.5, 0.5)）。
 ///
 /// `p_IinC` = IMU 原点在相机系。**基线为横向（沿机体 y 侧向分开，`scene.py`
-/// 左/右相机 pos=(0,∓0.05,0)）**：左相机在机体 (0,-0.05,0)，所以 IMU 在左
-/// 相机系 = `R_ItoC·((0,0,0)-(0,-0.05,0)) = (-0.05,0,0)`；右相机 `(0.05,0,0)`。
+/// 左/右相机 pos=(0,∓0.025,0)）**：左相机在机体 (0,-0.025,0)，所以 IMU 在左
+/// 相机系 = `R_ItoC·((0,0,0)-(0,-0.025,0)) = (-0.025,0,0)`；右相机 `(0.025,0,0)`。
+/// 基线 0.05m 对照 Intel `RealSense` `D430` 结构基线 50mm。
 /// （此前误用前后基线把 p 放 z 上——前向分开的相机射线近共线、无侧向视差，
 /// 立体无法解深度 → VIO 三角化全败。）
 ///
@@ -298,7 +299,7 @@ fn mujoco_focal() -> f64 {
 /// [`tests::extrinsic_matches_mujoco_scene_pixel_rays`] 钉死该约定。
 #[must_use]
 fn mujoco_stereo_extrinsic() -> (nalgebra::Vector4<f64>, [Vector3<f64>; 2]) {
-    const BASELINE: f64 = 0.1;
+    const BASELINE: f64 = 0.05;
     let q_ito_c = nalgebra::Vector4::new(0.5, -0.5, 0.5, 0.5);
     let p_left_in_c = Vector3::new(-BASELINE / 2.0, 0.0, 0.0);
     let p_right_in_c = Vector3::new(BASELINE / 2.0, 0.0, 0.0);
@@ -354,10 +355,10 @@ mod tests {
         }
     }
 
-    /// 内参焦距沙箱：与 `scene.py` fovy=60°、H=240 一致。
+    /// 内参焦距沙箱：与 `scene.py` fovy=70.88°（≈D430 87°HFOV）、H=240 一致。
     #[test]
     fn focal_is_mujoco_consistent() {
-        assert!((mujoco_focal() - 207.846_096_908_211_28).abs() < 1e-6);
+        assert!((mujoco_focal() - 168.606_993_943_65).abs() < 1e-6);
     }
 }
 #[cfg(test)]
@@ -397,10 +398,11 @@ mod stereo_baseline_tests {
             (cam_l.x).abs() < 1e-9 && (cam_r.x).abs() < 1e-9,
             "前向基线，相机沿视线分开"
         );
-        assert!((cam_l.y - cam_r.y).abs() > 0.05, "横向分开应 ≥ 基线 0.1m");
+        assert!((cam_l.y - cam_r.y).abs() > 0.04, "横向分开应 ≈ 基线 0.05m");
 
-        // 一个前方特征（机器前 10m、偏心），两相机到它的射线应有明显夹角
-        let feat = Vector3::new(10.0, 4.0, 1.0);
+        // 一个前方近特征（机前 3m、偏心），两相机到它的射线应有明显夹角
+        // （短基线 0.05m 在远距离处视差极小，故取近处特征验证"横向有视差"）
+        let feat = Vector3::new(3.0, 2.0, 0.7);
         let rl = (feat - cam_l).normalize();
         let rr = (feat - cam_r).normalize();
         let angle: f64 = rl.dot(&rr).acos();
@@ -409,6 +411,6 @@ mod stereo_baseline_tests {
             "立体射线夹角 {angle} rad 过小（无侧向视差），三角化病态"
         );
         // 焦距仍一致
-        assert!((mujoco_focal() - 207.846_096_908_211_28).abs() < 1e-6);
+        assert!((mujoco_focal() - 168.606_993_943_65).abs() < 1e-6);
     }
 }
