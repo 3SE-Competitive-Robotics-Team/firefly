@@ -57,14 +57,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracker_calib.insert(1usize, cam_right.clone());
     let tracker = TrackKlt::new(
         tracker_calib,
-        200,
+        300,
         0,
         true,
         HistogramMethod::None,
         10,
         4,
         4,
-        10,
+        5,
     );
     let mut cameras = BTreeMap::new();
     cameras.insert(0usize, cam_left);
