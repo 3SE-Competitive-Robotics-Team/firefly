@@ -293,38 +293,27 @@ fn ata_from_a(a: &[f64], rows: usize, cols: usize) -> Vec<f64> {
 /// 方向）。返回单位范数向量。
 #[must_use]
 fn smallest_eigenvector(m: &[f64], n: usize) -> Option<Vec<f64>> {
-    // 谱范数上界（Frobenius）
-    let fro = m.iter().map(|x| x * x).sum::<f64>().sqrt();
-    let delta = (fro / (4.0 * (n as f64))).max(1e-10);
-    let mut v = vec![1.0f64; n];
-    let mut norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+    // 对称实矩阵的最小特征向量：用 `SymmetricEigen` 一次性精确求出，
+    // 替代原 200 次位移逆幂迭代（每次 9×9 线性求解 + 分配）——
+    // 后者被 RANSAC 1000 次调用时是 O(1000×200×n³) 病态慢（实测单帧
+    // RANSAC 0.65s，直接导致相机帧掉到 ~1Hz、滤波器饿死）。
+    let mat = nalgebra::DMatrix::from_row_slice(n, n, m);
+    let eig = mat.symmetric_eigen();
+    let vals = eig.eigenvalues;
+    let mut imin = 0usize;
+    for i in 1..n {
+        if vals[i] < vals[imin] {
+            imin = i;
+        }
+    }
+    let col = eig.eigenvectors.column(imin);
+    let mut v: Vec<f64> = (0..n).map(|i| col[i]).collect();
+    let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if !norm.is_finite() || norm < 1e-14 {
+        return None;
+    }
     for x in &mut v {
         *x /= norm;
-    }
-    for _ in 0..200 {
-        // 求解 (M + δI) w = v
-        let mut aug = vec![0.0f64; n * n];
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..n {
-            for j in 0..n {
-                aug[i * n + j] = m[i * n + j] + if i == j { delta } else { 0.0 };
-            }
-        }
-        let w = solve_linear(&aug, n, &v)?;
-        norm = w.iter().map(|x| x * x).sum::<f64>().sqrt();
-        if norm < 1e-12 {
-            return Some(v);
-        }
-        let winv = w.iter().map(|x| x / norm).collect::<Vec<_>>();
-        let diff = winv
-            .iter()
-            .zip(&v)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f64, f64::max);
-        v = winv;
-        if diff < 1e-9 {
-            break;
-        }
     }
     Some(v)
 }
@@ -369,60 +358,6 @@ fn enforce_rank2(f: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
         }
     }
     fr
-}
-
-/// 高斯消元求解 `A x = b`（`A` 为 `n×n` 行主序）。奇异返回 `None`。
-#[must_use]
-fn solve_linear(a: &[f64], n: usize, b: &[f64]) -> Option<Vec<f64>> {
-    let mut m = vec![0.0f64; n * (n + 1)];
-    for r in 0..n {
-        for c in 0..n {
-            m[r * (n + 1) + c] = a[r * n + c];
-        }
-        m[r * (n + 1) + n] = b[r];
-    }
-    for col in 0..n {
-        let mut pivot = col;
-        let mut maxv = m[col * (n + 1) + col].abs();
-        for r in (col + 1)..n {
-            let val = m[r * (n + 1) + col].abs();
-            if val > maxv {
-                maxv = val;
-                pivot = r;
-            }
-        }
-        if maxv < 1e-14 {
-            return None;
-        }
-        if pivot != col {
-            for c in 0..=n {
-                m.swap(col * (n + 1) + c, pivot * (n + 1) + c);
-            }
-        }
-        let pv = m[col * (n + 1) + col];
-        for r in (col + 1)..n {
-            let factor = m[r * (n + 1) + col] / pv;
-            if factor == 0.0 {
-                continue;
-            }
-            for c in col..=n {
-                m[r * (n + 1) + c] -= factor * m[col * (n + 1) + c];
-            }
-        }
-    }
-    let mut x = vec![0.0f64; n];
-    for r in (0..n).rev() {
-        let mut sum = m[r * (n + 1) + n];
-        for c in (r + 1)..n {
-            sum -= m[r * (n + 1) + c] * x[c];
-        }
-        let d = m[r * (n + 1) + r];
-        if d.abs() < 1e-14 {
-            return None;
-        }
-        x[r] = sum / d;
-    }
-    Some(x)
 }
 
 fn mul3(a: &[[f64; 3]; 3], b: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {

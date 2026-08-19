@@ -844,10 +844,28 @@ impl TrackKlt {
             }
         }
 
+        // 构造"更新掩码"：把已有特征周围 2*min_px_dist 方块涂白，让 grider
+        // 不在已有特征邻近提取（对照 OpenVINS `mask0_updated`），避免高分点
+        // 扎堆到已占 close-grid 单元而被全拒、特征库饿死。
+        let (w_i, h_i) = (w as i32, h as i32);
+        let r = min_px as i32;
+        let mut mask_updated = mask0.clone();
+        for p in pts0.iter() {
+            let (x, y) = (p.x as i32, p.y as i32);
+            if x - r >= 0 && x + r < w_i && y - r >= 0 && y + r < h_i {
+                for y0 in (y - r)..=(y + r) {
+                    let row = (y0 as usize) * mask_updated.width;
+                    for x0 in (x - r)..=(x + r) {
+                        mask_updated.data[row + x0 as usize] = 255;
+                    }
+                }
+            }
+        }
+
         // 网格提取 + 去畸变/掩码过滤（对照 Grider_GRID）
         let extracted = grider::perform_griding(
             img0,
-            mask0,
+            &mask_updated,
             &valid,
             num_needed,
             grid_x,

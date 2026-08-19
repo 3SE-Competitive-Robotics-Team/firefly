@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         0,
         true,
         HistogramMethod::None,
-        20,
+        10,
         4,
         4,
         10,
