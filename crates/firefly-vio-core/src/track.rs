@@ -894,9 +894,12 @@ impl TrackKlt {
 
     /// 双目检测（对照 `TrackKLT::perform_detection_stereo`）。
     ///
-    /// OpenVINS 的双目版还做左→右 LK 投影校验 + 右图去重；本移植以
-    /// 「左右分别单目检测，双目特征共享 id 的对齐逻辑见 `feed_stereo`」
-    /// 简化（详情见完成报告偏差项）。
+    /// 左目单目检测后，对新增左特征做 **左→右 KLT 匹配**，把匹配成功的
+    /// 左右目点以**同一 feature id** 入列 —— 使特征从出生起就带双目测量
+    /// （`cams=2`）。0.05m 基线提供瞬时横向视差，打破"单目前向运动 → 前向
+    /// 特征近共线 → 三角化秩亏"的退化（此前耦合被回退，特征恒为单目 → 无
+    /// 约束 → Y/Z 漂移发散）。右图画去重由随后的 right 单目检测 close-grid
+    /// 承担（OpenVINS 同思路）。
     #[allow(clippy::too_many_arguments)]
     fn perform_detection_stereo(
         &mut self,
@@ -911,12 +914,45 @@ impl TrackKlt {
         ids0: &mut Vec<usize>,
         ids1: &mut Vec<usize>,
     ) {
+        // 1. 左目单目检测（过滤旧的 + 增补新左特征）→ pts0/ids0
+        let n_old_left = pts0.len();
         self.perform_detection_monocular(img0pyr, mask0, img0, pts0, ids0);
+
+        // 2. 新增左特征左→右 LK 匹配（对照 OpenVINS：kpts1_new=kpts0_new →
+        //    calcOpticalFlowPyrLK(left→right)，左右目同 id 双测量）
+        let new_len = pts0.len();
+        if new_len > n_old_left {
+            let left: Vec<nalgebra::Vector2<f32>> = pts0[n_old_left..]
+                .iter()
+                .map(|k| nalgebra::Vector2::new(k.x, k.y))
+                .collect();
+            let init = left.clone();
+            let (right_out, status) = lk::calc_optical_flow_pyr_lk(
+                img0pyr,
+                img1pyr,
+                &left,
+                &init,
+                &lk::TermCriteria::default_lk(),
+                true,
+                lk::MIN_EIG_THRESHOLD,
+            );
+            let (w, h) = (img1pyr[0].width as f32, img1pyr[0].height as f32);
+            for i in n_old_left..new_len {
+                let si = i - n_old_left;
+                let p = right_out[si];
+                if status[si] && p.x >= 0.0 && p.y >= 0.0 && p.x < w && p.y < h {
+                    // 双目耦合：右目点 + 同一 id → 特征同时有左右目测量
+                    pts1.push(KeyPoint {
+                        x: p.x,
+                        y: p.y,
+                        response: pts0[i].response,
+                    });
+                    ids1.push(ids0[i]);
+                }
+            }
+        }
+
+        // 3. 右目单目增补（close-grid 自动避开已耦合的右目点）
         self.perform_detection_monocular(img1pyr, mask1, img1, pts1, ids1);
-        // NOTE: 立体左右目 id 耦合被回退。朴素最近邻(±12×±3px)会误配左右目
-        // 非同一物理点 → 立体特征测量不一致 → DLT 三角化塌陷到近相机 → 残差
-        // 爆炸（实测 445k px，比单目更糟）。需对照 open_vins 的距离预校验+
-        // KLT 立体匹配（对极搜索）做**可靠**耦合后再启用。横向基线(round11)
-        // 保留正确；当前特征为单目时域 → VIO 为有界死航位推算。
     }
 }
