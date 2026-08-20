@@ -342,17 +342,37 @@ impl TrackKlt {
 
     /// 对 `msg` 中所有相机做直方图预处理 + 金字塔，并将结果写入 `img_curr`/
     /// `pyramid_curr`（对照 `TrackKLT.cpp` 第 49-76 行）。
+    ///
+    /// 两相机独立，用 rayon 并行处理（OpenCV 用 `num_opencv_threads` 做同样优化）。
     #[fastrace::trace]
     fn preprocess_into_curr(&mut self, msg: &CameraData) {
-        for (i, &sid) in msg.sensor_ids.iter().enumerate() {
-            let key = sensor_key(sid);
-            let src = &msg.images[i];
-            let processed = match self.base.histogram_method {
-                HistogramMethod::Histogram => histogram::equalize_hist(src),
-                HistogramMethod::Clahe => histogram::clahe(src, &histogram::ClaheParams::default()),
-                HistogramMethod::None => src.clone(),
-            };
-            let pyr = pyramid::build_optical_flow_pyramid(&processed, 5, lk::MIN_PYR_SIDE);
+        use rayon::prelude::*;
+
+        let hist_method = self.base.histogram_method;
+
+        // 并行：每相机独立做 直方图 + 金字塔
+        let results: Vec<_> = msg
+            .sensor_ids
+            .par_iter()
+            .enumerate()
+            .map(|(i, &sid)| {
+                let key = sensor_key(sid);
+                let src = &msg.images[i];
+                let processed = match hist_method {
+                    HistogramMethod::Histogram => histogram::equalize_hist(src),
+                    HistogramMethod::Clahe => {
+                        histogram::clahe(src, &histogram::ClaheParams::default())
+                    }
+                    HistogramMethod::None => src.clone(),
+                };
+                let pyr =
+                    pyramid::build_optical_flow_pyramid(&processed, 5, lk::MIN_PYR_SIDE);
+                (key, processed, pyr)
+            })
+            .collect();
+
+        // 串行写入 self.cams（避免 &mut self 并发冲突）
+        for (key, processed, pyr) in results {
             let state = self.cams.entry(key).or_default();
             state.img_curr = processed;
             state.pyramid_curr = pyr;
