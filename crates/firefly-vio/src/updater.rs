@@ -18,6 +18,7 @@ use nalgebra::{DMatrix, DVector, Vector2};
 use crate::options::UpdaterOptions;
 use crate::state::State;
 use crate::state_helper::{ekf_update, get_marginal_covariance};
+use firefly_vio_types::var::PoseJpl;
 use crate::updater_helper::{
     get_feature_jacobian_full, measurement_compress_inplace, nullspace_project_inplace,
 };
@@ -145,7 +146,13 @@ impl UpdaterMsckf {
         // （<0.3 归一化 ≈ 60px）。低视差下 DLT 深度病态会产出"贴近相机"的
         // 垃圾点，其他视图投影被视差放大 → 巨大残差 + 巨大增益修正（实测单次
         // 56m）。此门与协方差 P 无关，直接从源头拒掉不一致特征。
-        let clones = &state.clones_imu;
+        // 预建时间→克隆查找表，避免每个测量线性扫描 clones（O(n²)→O(n)）
+        let clone_map: std::collections::HashMap<u64, &PoseJpl> =
+            state
+                .clones_imu
+                .iter()
+                .map(|(t, c)| (t.to_bits(), c))
+                .collect();
         let n_before = feature_vec.len();
         feature_vec.retain_mut(|feat| {
             let mut worst = 0.0f64;
@@ -159,8 +166,7 @@ impl UpdaterMsckf {
                     continue;
                 };
                 for (m, t) in times.iter().enumerate() {
-                    let Some((_, clone)) = clones.iter().find(|(ct, _)| ct.total_cmp(t).is_eq())
-                    else {
+                    let Some(&clone) = clone_map.get(&t.to_bits()) else {
                         continue;
                     };
                     let p_in_im = clone.rot() * (feat.p_FinG - clone.pos());
@@ -206,7 +212,7 @@ impl UpdaterMsckf {
         let mut hx_mapping: std::collections::HashMap<(i32, usize), usize> =
             std::collections::HashMap::new();
         let mut next_col = 0usize;
-        let mut blocks: Vec<HxBlock> = Vec::new();
+        let mut blocks: Vec<HxBlock> = Vec::with_capacity(feature_vec.len());
         let mut total_rows = 0usize;
         let mut hard_cap_rej = 0usize;
 
@@ -238,8 +244,12 @@ impl UpdaterMsckf {
             // 注意必须加测量噪声 R（sigma_pix²）：残差/雅可比在像素空间（fx 量级），
             // 缺 R 时 S 尺度错误 → 外点全部误纳/误拒。
             let p_marg = get_marginal_covariance(state, &x_order);
-            let s = &h_x * p_marg * h_x.transpose()
-                + self.options.sigma_pix_sq * DMatrix::identity(h_x.nrows(), h_x.nrows());
+            let mut s = &h_x * p_marg * h_x.transpose();
+            // 直接加对角线，跳过 DMatrix::identity 分配 + 矩阵加法（数学等价）
+            let sigma_sq = self.options.sigma_pix_sq;
+            for i in 0..s.nrows() {
+                s[(i, i)] += sigma_sq;
+            }
             let chi2 = match s.clone().cholesky() {
                 Some(chol) => res.dot(&chol.solve(&res)),
                 None => f64::INFINITY,
