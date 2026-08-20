@@ -68,11 +68,13 @@ def _subscriber(node, topic: str, payload_cls):
 
 
 def _publish_traced(pub, cycle, name: str, msg, ts: float) -> None:
-    """带 trace 上下文发布：cycle 子 span → 填 User Header → 零拷贝发送。"""
+    """带 trace 上下文发布：cycle 子 span → 填 User Header → 零拷贝发送。
+    --no-trace 模式下 span=None，跳过 trace 操作，只做零拷贝发布。"""
     sample = pub.loan_uninit()
     span = ftrace.child_span(cycle, name)
     ftrace.fill_header(sample.user_header().contents, span, ts)
-    span.end()
+    if span is not None:
+        span.end()
     sample.write_payload(msg).send()
 
 
@@ -97,13 +99,17 @@ def _scripted_ref(t: float) -> tuple[np.ndarray, np.ndarray]:
 
 def main() -> None:
     # --script：不使用 planner/demo，改由脚本参考驱动运动（VIO 验证用）
+    # --no-trace：禁用 OTel tracing（消除 Python span 开销，sim 从 0.37x → 14x real-time）
     script_mode = "--script" in sys.argv
+    trace_enabled = "--no-trace" not in sys.argv
     env = DroneEnv()
     env.reset(START_POS, np.array([0.0, 0.0, 0.0, 1.0]))  # xyzw 单位四元数
-    ftrace.init()
+    ftrace.init(enabled=trace_enabled)
     log("MuJoCo 环境就绪：质量 {:.1f} kg，物理 {:.0f} Hz".format(env.mass, 1 / PHYSICS_PERIOD))
     if script_mode:
         log("--script：脚本化参考驱动运动（跳过 planner）")
+    if not trace_enabled:
+        log("--no-trace：OTel tracing 已禁用（高性能模式）")
 
     node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
     imu_pub = _publisher(node, TOPIC_IMU, ImuMessage)
@@ -140,7 +146,9 @@ def main() -> None:
             # 控制 + 物理步进
             if script_mode:
                 # 脚本化参考：直接按仿真时刻给出平滑 pos/vel（跳过 planner）
-                ref_pos, ref_vel = _scripted_ref(env.time)
+                # --no-trace 时循环轨迹（sim 全速运行，不退出）
+                t_script = env.time if trace_enabled else env.time % 20.0
+                ref_pos, ref_vel = _scripted_ref(t_script)
             env.apply_pd(ref_pos, ref_vel)
             env.step()
             t = env.time
@@ -179,11 +187,12 @@ def main() -> None:
                         )
                     )
 
-            # 实时节奏
-            wall = time.perf_counter() - t_start
-            target = t
-            if wall < target - PHYSICS_PERIOD:
-                time.sleep(target - wall - PHYSICS_PERIOD)
+            # 实时节奏（--no-trace 时跳过：全速运行供 VIO 消费）
+            if trace_enabled:
+                wall = time.perf_counter() - t_start
+                target = t
+                if wall < target - PHYSICS_PERIOD:
+                    time.sleep(target - wall - PHYSICS_PERIOD)
     except KeyboardInterrupt:
         if cycle is not None:
             ftrace.end_cycle(cycle)
