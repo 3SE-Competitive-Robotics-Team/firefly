@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import time
+import sys
 
 import iceoryx2 as iox2
 import numpy as np
@@ -75,11 +76,34 @@ def _publish_traced(pub, cycle, name: str, msg, ts: float) -> None:
     sample.write_payload(msg).send()
 
 
+def _scripted_ref(t: float) -> tuple[np.ndarray, np.ndarray]:
+    """`--script` 模式：柔和脚本化参考（前向 + 横向/高度正弦），供 VIO 验证。
+
+    planner/demo 不参与：直接给出平滑 (pos, vel)，让双目相机在无规划器的
+    情况下获得受控运动（前向为主、横向/高度变化提供 3D 视差）。
+    """
+    pos = np.array([
+        1.0 + 0.8 * t,
+        4.0 + 1.0 * np.sin(0.6 * t),
+        1.0 + 0.5 * np.sin(0.4 * t),
+    ])
+    vel = np.array([
+        0.8,
+        1.0 * 0.6 * np.cos(0.6 * t),
+        0.5 * 0.4 * np.cos(0.4 * t),
+    ])
+    return pos, vel
+
+
 def main() -> None:
+    # --script：不使用 planner/demo，改由脚本参考驱动运动（VIO 验证用）
+    script_mode = "--script" in sys.argv
     env = DroneEnv()
     env.reset(START_POS, np.array([0.0, 0.0, 0.0, 1.0]))  # xyzw 单位四元数
     ftrace.init()
     log("MuJoCo 环境就绪：质量 {:.1f} kg，物理 {:.0f} Hz".format(env.mass, 1 / PHYSICS_PERIOD))
+    if script_mode:
+        log("--script：脚本化参考驱动运动（跳过 planner）")
 
     node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
     imu_pub = _publisher(node, TOPIC_IMU, ImuMessage)
@@ -114,6 +138,9 @@ def main() -> None:
                 ))
 
             # 控制 + 物理步进
+            if script_mode:
+                # 脚本化参考：直接按仿真时刻给出平滑 pos/vel（跳过 planner）
+                ref_pos, ref_vel = _scripted_ref(env.time)
             env.apply_pd(ref_pos, ref_vel)
             env.step()
             t = env.time
@@ -144,7 +171,7 @@ def main() -> None:
                 _publish_gt(gt_pub, cycle, env, t)
                 while next_cam <= t + 1e-12:
                     next_cam += CAM_PERIOD
-                if got_ref and frame % 200 == 0:
+                if (got_ref or script_mode) and frame % 200 == 0:
                     pos, _, vel = env.gt_pose()
                     log(
                         "t={:6.2f} 无人机 ({:6.2f},{:6.2f},{:6.2f}) 参考 ({:6.2f},{:6.2f},{:6.2f})".format(
