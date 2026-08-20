@@ -342,6 +342,7 @@ impl TrackKlt {
 
     /// 对 `msg` 中所有相机做直方图预处理 + 金字塔，并将结果写入 `img_curr`/
     /// `pyramid_curr`（对照 `TrackKLT.cpp` 第 49-76 行）。
+    #[fastrace::trace]
     fn preprocess_into_curr(&mut self, msg: &CameraData) {
         for (i, &sid) in msg.sensor_ids.iter().enumerate() {
             let key = sensor_key(sid);
@@ -619,13 +620,15 @@ impl TrackKlt {
             }
         }
         // RIGHT loop（对照 TrackKLT.cpp 第 341-354 行）
+        // 用 HashSet 加速重复 id 查找（O(1) 替代 O(n) 线性扫描）
+        let good_ids_r_set: std::collections::HashSet<usize> =
+            good_ids_r.iter().copied().collect();
         for i in 0..pts_r_new.len() {
             let p = pts_r_new[i];
             if p.x < 0.0 || p.y < 0.0 || (p.x as i32) >= w_r || (p.y as i32) >= h_r {
                 continue;
             }
-            let already = good_ids_r.iter().any(|&x| x == ids_r[i]);
-            if mask_rr[i] && !already {
+            if mask_rr[i] && !good_ids_r_set.contains(&ids_r[i]) {
                 good_r.push(p);
                 good_ids_r.push(ids_r[i]);
             }
@@ -751,9 +754,10 @@ impl TrackKlt {
         }
     }
 
-    /// 单目检测（对照 `TrackKLT::perform_detection_monocular`）。
+    /// 单目检测（对照 `TrackKlt::perform_detection_monocular`）。
     // 与 C++ 1:1 移植的长流程函数，拆分会破坏对照可审计性。
     #[allow(clippy::too_many_lines)]
+    #[fastrace::trace]
     fn perform_detection_monocular(
         &mut self,
         imgpyr: &[GrayImage],
@@ -904,6 +908,7 @@ impl TrackKlt {
     /// 约束 → Y/Z 漂移发散）。右图画去重由随后的 right 单目检测 close-grid
     /// 承担（OpenVINS 同思路）。
     #[allow(clippy::too_many_arguments)]
+    #[fastrace::trace]
     fn perform_detection_stereo(
         &mut self,
         img0pyr: &[GrayImage],
