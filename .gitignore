@@ -21,3 +21,5 @@ apps/firefly-demo/maps/*.ffmap
 
 # MuJoCo 运行时日志
 MUJOCO_LOG.TXT
+
+.venv-test/

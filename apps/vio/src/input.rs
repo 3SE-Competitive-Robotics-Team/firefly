@@ -62,6 +62,7 @@ impl IceoryxInput {
 impl SensorInput for IceoryxInput {
     fn advance(&mut self) {
         // 排空 IMU
+        let mut imu_count = 0u32;
         while let Ok(Some(sample)) = self.imu_sub.receive() {
             self.capture_trace(sample.user_header());
             let m = *sample;
@@ -79,19 +80,31 @@ impl SensorInput for IceoryxInput {
                 ),
             });
             self.now_t = self.now_t.max(m.timestamp);
+            imu_count += 1;
         }
         // 拉取双目帧：**排空各侧队列并保留最新**。sim 同帧先发 left 再发 right，
         // 若每轮只读一个样本，左右目会差一帧（0.1s 滞后）而让 `next_camera` 的
         // 0.01s 配对容差永远失败 → 相机帧被丢 ~90% → 滤波器喂不进视觉。
+        let mut left_count = 0u32;
+        let mut right_count = 0u32;
         while let Ok(Some(s)) = self.left_sub.receive() {
             self.capture_trace(s.user_header());
             self.last_left = Some(*s);
             self.now_t = self.now_t.max(s.timestamp);
+            left_count += 1;
         }
         while let Ok(Some(s)) = self.right_sub.receive() {
             self.capture_trace(s.user_header());
             self.last_right = Some(*s);
             self.now_t = self.now_t.max(s.timestamp);
+            right_count += 1;
+        }
+        // 诊断：有新相机帧时打印
+        if left_count > 0 || right_count > 0 {
+            log::debug!(
+                "advance: imu={} left={} right={} now={:.3}",
+                imu_count, left_count, right_count, self.now_t
+            );
         }
     }
 
