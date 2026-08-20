@@ -313,6 +313,7 @@ impl TrackKlt {
     ///
     /// 分发逻辑：单图 → `feed_monocular`；双图且 `use_stereo` → `feed_stereo`；
     /// 否则对每张图逐个 `feed_monocular`（C++ 中配双目但 `use_stereo=false` 时并行）。
+    #[fastrace::trace]
     pub fn feed_new_camera(&mut self, msg: &CameraData) {
         let valid = !msg.sensor_ids.is_empty()
             && msg.sensor_ids.len() == msg.images.len()
@@ -358,6 +359,7 @@ impl TrackKlt {
     }
 
     /// 单目跟踪（对照 `TrackKLT::feed_monocular`）。
+    #[fastrace::trace]
     fn feed_monocular(&mut self, msg: &CameraData, msg_id: usize) {
         let key = sensor_key(msg.sensor_ids[msg_id]);
         let mask = msg.masks[msg_id].clone();
@@ -462,6 +464,7 @@ impl TrackKlt {
     // 与 C++ 1:1 移植的长流程函数，拆分会破坏对照可审计性（仓库惯例：
     // 移植代码允许带注释的 targeted allow，同 firefly-cost 的 too_many_arguments）。
     #[allow(clippy::too_many_lines)]
+    #[fastrace::trace]
     fn feed_stereo(&mut self, msg: &CameraData, idl: usize, idr: usize) {
         let keyl = sensor_key(msg.sensor_ids[idl]);
         let keyr = sensor_key(msg.sensor_ids[idr]);

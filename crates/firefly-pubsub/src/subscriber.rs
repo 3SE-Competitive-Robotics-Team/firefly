@@ -64,12 +64,17 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
                     format!("打开/创建话题 `{topic}` 失败: {e:?}"),
                 )
             })?;
-        let subscriber = service.subscriber_builder().create().map_err(|e| {
-            firefly_error::Error::new(
-                firefly_error::ErrorKind::Internal,
-                format!("创建订阅器失败: {e:?}"),
-            )
-        })?;
+        // depth=1：只保留最新帧，避免vio处理慢时left/right交叉导致配对失败
+        let subscriber = service
+            .subscriber_builder()
+            .buffer_size(1)
+            .create()
+            .map_err(|e| {
+                firefly_error::Error::new(
+                    firefly_error::ErrorKind::Internal,
+                    format!("创建订阅器失败: {e:?}"),
+                )
+            })?;
         Ok(Self {
             _node: node,
             subscriber,

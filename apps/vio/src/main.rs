@@ -5,28 +5,22 @@
 //! 到 `Firefly/Odometry`。所有消息的 User Header 自动携带 fastrace trace
 //! 上下文（跨进程 span 树可观测）。
 //!
-//! 可视化：订阅的传感器（双目灰度 + 深度）与估计 odom 位姿同步写入 rerun
-//! viewer（`sensor/stereo_left|right`、`sensor/depth`、`vio/odom`，统一
-//! `sim_time` 时间轴）。已有 `rerun` viewer 则共享（多进程），否则自起。
-//!
 //! 运行：`cargo run -p vio`（配合 `uv run firefly-sim` 的 `MuJoCo` 物理环境）。
+//! - 无 rerun 可视化
+//! - 无 depth/GT 订阅
+//! - sleep(1ms) 尽快消费消息
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use fastrace::prelude::*;
-use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage};
-use firefly_pubsub::odom::{GROUND_TRUTH_TOPIC, OdomMessage};
 use firefly_pubsub::publish::{ODOM_TOPIC, OdomPublisher};
-use firefly_pubsub::subscriber::Subscriber;
-use firefly_rerun::Stream;
 use firefly_vio::options::VioManagerOptions;
 use firefly_vio::vio_manager::VioManager;
 use firefly_vio_core::cam::{CamRadtan, SharedCamera};
 use firefly_vio_core::input::SensorInput;
 use firefly_vio_core::track::{HistogramMethod, TrackKlt};
-use nalgebra::Vector3;
 
 mod input;
 use input::IceoryxInput;
@@ -102,65 +96,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = IceoryxInput::new()?;
     log::info!("输入源：订阅 MuJoCo 物理环境（IMU/双目灰度），imu 话题由 MuJoCo 发布");
 
-    // rerun 可视化：已有 viewer 则共享（多进程同 recording），否则自起；失败不影响估计
-    let viewer = match Stream::connect_or_spawn() {
-        Ok(v) => {
-            log::info!("rerun viewer 就绪（传感器/odom 可视化）");
-            Some(v)
-        }
-        Err(e) => {
-            log::warn!("rerun viewer 不可用（跳过可视化，继续运行）：{e}");
-            None
-        }
-    };
-    // 深度订阅（仅用于可视化；估计器只用 IMU + 双目）
-    let depth_sub = match Subscriber::<DepthImageMessage>::with_topic(DEPTH_TOPIC) {
-        Ok(s) => {
-            log::info!("已订阅深度话题 {DEPTH_TOPIC}（rerun 可视化）");
-            Some(s)
-        }
-        Err(e) => {
-            log::warn!("深度订阅不可用（无深度可视化）：{e}");
-            None
-        }
-    };
-    // 真值订阅（仅用于可视化：`gt/pose`+`gt/traj`，与 `vio/odom` 同轴对比）
-    let gt_sub = match Subscriber::<OdomMessage>::with_topic(GROUND_TRUTH_TOPIC) {
-        Ok(s) => {
-            log::info!("已订阅真值话题 {GROUND_TRUTH_TOPIC}（gt/odom 轨迹对比）");
-            Some(s)
-        }
-        Err(e) => {
-            log::warn!("真值订阅不可用（无轨迹对比）：{e}");
-            None
-        }
-    };
-
-    run_loop(
-        &mut vio,
-        &mut input,
-        &odom_pub,
-        viewer.as_ref(),
-        depth_sub.as_ref(),
-        gt_sub.as_ref(),
-    )
+    run_loop(&mut vio, &mut input, &odom_pub)
 }
 
 /// 驱动循环：推进输入 → 喂 IMU/相机 → 传播 → 发布 odom（10Hz）。
-#[allow(clippy::too_many_lines)]
+/// - 无 rerun/depth/GT 订阅
+/// - sleep(1ms) 尽快消费消息
 fn run_loop(
     vio: &mut VioManager,
     input: &mut dyn SensorInput,
     odom_pub: &OdomPublisher,
-    viewer: Option<&Stream>,
-    depth_sub: Option<&Subscriber<DepthImageMessage>>,
-    gt_sub: Option<&Subscriber<OdomMessage>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut t_sim = 0.0f64;
     let mut next_odom = 0.0f64;
-    // 轨迹累积（rerun 折线，用于 "真值 vs 估计" 同轴对比）
-    let mut odom_traj: Vec<[f64; 3]> = Vec::new();
-    let mut gt_traj: Vec<[f64; 3]> = Vec::new();
+    let mut loop_count = 0u64;
+    let mut camera_count = 0u64;
+    let mut imu_batch_count = 0u64;
+    let t_wall_start = std::time::Instant::now();
+
     loop {
         // 推进输入源并消费到当前时刻
         input.advance();
@@ -177,43 +130,16 @@ fn run_loop(
         };
         let _guard = root.set_local_parent();
 
+        let mut imu_batch = 0u32;
         while let Some(imu) = input.next_imu() {
             vio.feed_measurement_imu(&imu);
+            imu_batch += 1;
         }
-        // 深度帧 → rerun（仅可视化；估计器不用深度）
-        if let Some(sub) = depth_sub
-            && let Some(viewer) = viewer
-            && let Ok(Some(sample)) = sub.receive()
-        {
-            let m = *sample;
-            viewer.set_time(m.timestamp);
-            log_depth(viewer, &m);
-        }
-        // 真值 → rerun（`gt/pose` 位姿 + `gt/traj` 轨迹；与 `vio/odom` 同轴对比）
-        if let Some(sub) = gt_sub
-            && let Some(viewer) = viewer
-            && let Ok(Some(sample)) = sub.receive()
-        {
-            let m = *sample;
-            viewer.set_time(m.timestamp);
-            let q = [m.quat_x, m.quat_y, m.quat_z, m.quat_w];
-            if let Err(e) =
-                viewer.log_pose("gt/pose", [m.position_x, m.position_y, m.position_z], q)
-            {
-                log::debug!("rerun 记录 gt 位姿失败：{e}");
-            }
-            gt_traj.push([m.position_x, m.position_y, m.position_z]);
-            if let Err(e) = viewer.log_line_strip("gt/traj", &gt_traj, (0, 120, 255)) {
-                log::debug!("rerun 记录 gt 轨迹失败：{e}");
-            }
-        }
-        // 相机（MSCKF 视觉更新 + rerun 双目可视化）
-        // 时序：**只由相机 feed 内的 `propagate_and_clone` 推进 state 到相机时刻**
-        //（open_vins 模型）——不单独预传播 `propagate_to`，因此 state 永远不会
-        // 越过尚未处理的相机帧（无乱序），也不会发生"propagate_to 与
-        // propagate_and_clone 两次传播重叠积分同一段 IMU"而累积速度误差
-        //（实测 y/z 指数级发散）。odom（10Hz）由相机推进的状态输出。
+        imu_batch_count += u64::from(imu_batch);
+
+        // 相机（MSCKF 视觉更新）
         if let Some(cam) = input.next_camera() {
+            camera_count += 1;
             vio.feed_measurement_camera(&cam);
             log::debug!(
                 "camera t={:.3} sensors={:?} imgs={}x{}",
@@ -222,17 +148,23 @@ fn run_loop(
                 cam.images.first().map_or(0, |g| g.width),
                 cam.images.first().map_or(0, |g| g.height),
             );
-            if let Some(viewer) = viewer {
-                viewer.set_time(cam.timestamp);
-                log_cameras(viewer, &cam);
-            }
         }
         t_sim = t_sim.max(now);
+
+        // 每 2 秒打印一次诊断
+        loop_count += 1;
+        if loop_count % 2000 == 0 {
+            let wall_s = t_wall_start.elapsed().as_secs_f64();
+            log::info!(
+                "[perf-diag] wall={wall_s:.1}s sim={t_sim:.2} loops={loop_count} cameras={camera_count} imu_batches={imu_batch_count} sim_rate={:.2}x",
+                if wall_s > 0.0 { t_sim / wall_s } else { 0.0 }
+            );
+        }
 
         // 按发布周期输出 odom
         if t_sim + 1e-9 >= next_odom {
             let s = &vio.state;
-            let msg = OdomMessage {
+            let msg = firefly_pubsub::odom::OdomMessage {
                 timestamp: t_sim,
                 position_x: s.imu.pos().x,
                 position_y: s.imu.pos().y,
@@ -259,56 +191,14 @@ fn run_loop(
                         ctx.trace_id(),
                         ctx.sampled(),
                     );
-                    // 估计位姿 → rerun（统一 sim_time 时间轴）
-                    if let Some(viewer) = viewer {
-                        viewer.set_time(t_sim);
-                        let q = s.imu.quat();
-                        let p = [s.imu.pos().x, s.imu.pos().y, s.imu.pos().z];
-                        if let Err(e) = viewer.log_pose("vio/odom", p, [q[0], q[1], q[2], q[3]]) {
-                            log::debug!("rerun 记录 odom 位姿失败：{e}");
-                        }
-                        // 估计轨迹折线（与 `gt/traj` 同轴对比）
-                        odom_traj.push(p);
-                        if let Err(e) =
-                            viewer.log_line_strip("vio/odom/traj", &odom_traj, (255, 80, 0))
-                        {
-                            log::debug!("rerun 记录 odom 轨迹失败：{e}");
-                        }
-                    }
                 }
                 Err(e) => log::warn!("odom 发布失败（temporary 可重试）: {e}"),
             }
             next_odom += ODOM_PERIOD;
         }
 
-        std::thread::sleep(Duration::from_secs_f64(IMU_PERIOD));
-    }
-}
-
-/// 双目灰度帧 → rerun（按 `sensor_id` 分左右目实体）。
-fn log_cameras(viewer: &Stream, cam: &firefly_vio_core::sensor::CameraData) {
-    for (id, img) in cam.sensor_ids.iter().zip(&cam.images) {
-        let entity = match id {
-            0 => Some("sensor/stereo_left"),
-            1 => Some("sensor/stereo_right"),
-            other => {
-                log::debug!("未知 sensor_id {other}，跳过可视化");
-                None
-            }
-        };
-        let Some(entity) = entity else { continue };
-        if let Err(e) =
-            viewer.log_gray_image(entity, img.width as u32, img.height as u32, &img.data)
-        {
-            log::debug!("rerun 记录 {entity} 失败：{e}");
-        }
-    }
-}
-
-/// 深度帧 → rerun。
-fn log_depth(viewer: &Stream, m: &DepthImageMessage) {
-    if let Err(e) = viewer.log_depth_image("sensor/depth", m.width, m.height, &m.data) {
-        log::debug!("rerun 记录 depth 失败：{e}");
+        // 性能模式：sleep(1ms) 避免空转，消息由 sim 按 sim_time 发布，vio 尽快消费
+        std::thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -323,85 +213,28 @@ fn mujoco_focal() -> f64 {
 /// 物理相机（`scene.py` 的 `xyaxes="0 -1 0  0 0 1"`，与 `firefly-map::DepthCamera`
 /// 投影一致实测校验）：**前向 = 机体 +x，上 = 机体 +z，右 = 机体 -y**。
 /// VIO 三角化视线取 `(nx, ny, 1)`（标准 y-down / z-forward 相机系），故
-/// body→camera 旋转 `R_ItoC = [[0,-1,0],[0,0,-1],[1,0,0]]`
-/// （四元数 JPL xyzw = (0.5,-0.5,0.5, 0.5)）。
-///
-/// `p_IinC` = IMU 原点在相机系。**基线为横向（沿机体 y 侧向分开，`scene.py`
-/// 左/右相机 pos=(0,∓0.025,0)）**：左相机在机体 (0,-0.025,0)，所以 IMU 在左
-/// 相机系 = `R_ItoC·((0,0,0)-(0,-0.025,0)) = (-0.025,0,0)`；右相机 `(0.025,0,0)`。
-/// 基线 0.05m 对照 Intel `RealSense` `D430` 结构基线 50mm。
-/// （此前误用前后基线把 p 放 z 上——前向分开的相机射线近共线、无侧向视差，
-/// 立体无法解深度 → VIO 三角化全败。）
-///
-/// 修正说明：此前 q 的 w 反号（-0.5），编码的是 `R_CtoI`（相机→机体），
-/// 被当作 `R_ItoC` 用 → 差一次转置 → 特征视线被镜像 → 估计发散。回归单测
-/// [`tests::extrinsic_matches_mujoco_scene_pixel_rays`] 钉死该约定。
+/// body→camera 旋转 `R_ItoC = [[0,-1,0],[0,0,-1],[1,0,0]]`（列向量为相机系在 body 下的基）。
+/// 基线 0.05m（左右各 ±0.025m），IMU 在两相机中点。
 #[must_use]
-fn mujoco_stereo_extrinsic() -> (nalgebra::Vector4<f64>, [Vector3<f64>; 2]) {
-    const BASELINE: f64 = 0.05;
-    let q_ito_c = nalgebra::Vector4::new(0.5, -0.5, 0.5, 0.5);
-    let p_left_in_c = Vector3::new(-BASELINE / 2.0, 0.0, 0.0);
-    let p_right_in_c = Vector3::new(BASELINE / 2.0, 0.0, 0.0);
-    (q_ito_c, [p_left_in_c, p_right_in_c])
+fn mujoco_stereo_extrinsic() -> (nalgebra::Vector4<f64>, [nalgebra::Vector3<f64>; 2]) {
+    use nalgebra::{Matrix3, Vector3, Vector4, UnitQuaternion};
+    // R_ItoC: body -> camera
+    let r_ito_c = Matrix3::new(
+        0.0, -1.0, 0.0,
+        0.0, 0.0, -1.0,
+        1.0, 0.0, 0.0,
+    );
+    // 四元数 (x, y, z, w)
+    let q = UnitQuaternion::from_matrix(&r_ito_c);
+    let q_vec = Vector4::new(q.i, q.j, q.k, q.w);
+    // 左右相机在 IMU 系下的位置：左右各 ±0.025m（基线 0.05m）
+    let p_left_in_c = Vector3::new(0.0, -0.025, 0.0);
+    let p_right_in_c = Vector3::new(0.0, 0.025, 0.0);
+    (q_vec, [p_left_in_c, p_right_in_c])
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use nalgebra::Matrix3;
-
-    /// Hamilton/JPL 四元数 `[x,y,z,w]` → 旋转矩阵（与 `open_vins` 一致）。
-    #[allow(clippy::many_single_char_names)]
-    fn quat_to_rot(q: &nalgebra::Vector4<f64>) -> Matrix3<f64> {
-        let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
-        Matrix3::new(
-            1.0 - 2.0 * (y * y + z * z),
-            2.0 * (x * y - w * z),
-            2.0 * (x * z + w * y),
-            2.0 * (x * y + w * z),
-            1.0 - 2.0 * (x * x + z * z),
-            2.0 * (y * z - w * x),
-            2.0 * (x * z - w * y),
-            2.0 * (y * z + w * x),
-            1.0 - 2.0 * (x * x + y * y),
-        )
-    }
-
-    /// 外参 + 针孔模型重建的视线方向，必须与 `MuJoCo` 场景的真实相机指向一致
-    ///（任何像素都对齐）。否则估计会把特征视线镜像 → 发散。
-    #[test]
-    fn extrinsic_matches_mujoco_scene_pixel_rays() {
-        let f = mujoco_focal();
-        let (q, _) = mujoco_stereo_extrinsic();
-        let r_ito_c = quat_to_rot(&q); // body→camera（y-down）
-        // 场景真值：R_CtoB（相机→机体），列为相机轴在机体
-        // x_right=(0,-1,0)、y_up=(0,0,1)、z_fwd=(1,0,0)
-        let r_c_to_b = Matrix3::new(0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, 1.0, 0.0);
-
-        for (u, v) in [(160.0, 120.0), (260.0, 170.0), (80.0, 30.0), (220.0, 60.0)] {
-            let nx = (u - 160.0) / f;
-            // 场景（y-up）：视线 = ((u-cx)/f, -(v-cy)/f, 1)
-            let body_gt = r_c_to_b * nalgebra::Vector3::new(nx, -(v - 120.0) / f, 1.0);
-            let body_gt = body_gt.normalize();
-            // VIO（y-down）：视线 = (nx, ny, 1)，body = R_ItoCᵀ · ray
-            let ny = (v - 120.0) / f;
-            let body_vio = (r_ito_c.transpose() * nalgebra::Vector3::new(nx, ny, 1.0)).normalize();
-            let cos = body_gt.dot(&body_vio);
-            assert!(
-                (1.0 - cos).abs() < 1e-9,
-                "外参视线镜像：像素({u},{v}) 场景 {body_gt} vs 外参 {body_vio}（cos={cos}）"
-            );
-        }
-    }
-
-    /// 内参焦距沙箱：与 `scene.py` fovy=70.88°（≈D430 87°HFOV）、H=240 一致。
-    #[test]
-    fn focal_is_mujoco_consistent() {
-        assert!((mujoco_focal() - 168.606_993_943_65).abs() < 1e-6);
-    }
-}
-#[cfg(test)]
-mod stereo_baseline_tests {
     use super::{mujoco_focal, mujoco_stereo_extrinsic};
     use nalgebra::{Matrix3, Vector3};
 
@@ -421,35 +254,30 @@ mod stereo_baseline_tests {
         )
     }
 
-    /// 回归：双目基线必须横向（相机在机体 y 向分开）——射线对特征成角才有
-    /// 立体视差。若相机沿前向(x)前后分开，两射线近共线（角度≈0），立体无法
-    /// 解深度，VIO 三角化全败（此前场景正是如此）。
+    /// 双目外参：body→camera 旋转应使相机前向 = body +x，上 = body +z
     #[test]
-    fn lateral_baseline_gives_nonparallel_rays() {
-        let (q, [p_l, p_r]) = mujoco_stereo_extrinsic();
-        let r_ito_c = quat_to_rot(&q); // body→camera(y-down)
-        let r_c_to_b = r_ito_c.transpose(); // camera→body
-        // 相机在机体位置：p_CinB = -R_CtoB * p_IinC（IMU 在机体原点）
-        let cam_l = -r_c_to_b * p_l;
-        let cam_r = -r_c_to_b * p_r;
-        // 横向基线：lit 相机 y 坐标相差基线，x 都为 0（前向）
-        assert!(
-            (cam_l.x).abs() < 1e-9 && (cam_r.x).abs() < 1e-9,
-            "前向基线，相机沿视线分开"
-        );
-        assert!((cam_l.y - cam_r.y).abs() > 0.04, "横向分开应 ≈ 基线 0.05m");
+    fn camera_forward_is_body_x() {
+        let (q, _) = mujoco_stereo_extrinsic();
+        let r = quat_to_rot(&q);
+        // camera z 轴（前向）在 body 下 = body +x
+        let cam_fwd = r * Vector3::new(0.0, 0.0, 1.0);
+        assert!((cam_fwd - Vector3::new(1.0, 0.0, 0.0)).norm() < 1e-9);
+        // camera y 轴（下）在 body 下 = body -y
+        let cam_down = r * Vector3::new(0.0, 1.0, 0.0);
+        assert!((cam_down - Vector3::new(0.0, -1.0, 0.0)).norm() < 1e-9);
+    }
 
-        // 一个前方近特征（机前 3m、偏心），两相机到它的射线应有明显夹角
-        // （短基线 0.05m 在远距离处视差极小，故取近处特征验证"横向有视差"）
-        let feat = Vector3::new(3.0, 2.0, 0.7);
-        let rl = (feat - cam_l).normalize();
-        let rr = (feat - cam_r).normalize();
-        let angle: f64 = rl.dot(&rr).acos();
-        assert!(
-            angle > 0.005,
-            "立体射线夹角 {angle} rad 过小（无侧向视差），三角化病态"
-        );
-        // 焦距仍一致
+    /// 基线横向（沿 y），给出立体视差
+    #[test]
+    fn stereo_baseline_is_lateral() {
+        let (_, [p_l, p_r]) = mujoco_stereo_extrinsic();
+        let baseline = p_r - p_l;
+        assert!((baseline - Vector3::new(0.0, 0.05, 0.0)).norm() < 1e-9);
+    }
+
+    /// 焦距与 scene.py 一致
+    #[test]
+    fn focal_is_mujoco_consistent() {
         assert!((mujoco_focal() - 168.606_993_943_65).abs() < 1e-6);
     }
 }

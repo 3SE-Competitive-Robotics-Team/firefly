@@ -11,6 +11,7 @@ repository.workspace = true
 readme.workspace = true
 
 [dependencies]
+fastrace = { workspace = true }
 firefly-vio-types = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }

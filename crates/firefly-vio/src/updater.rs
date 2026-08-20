@@ -75,6 +75,7 @@ impl UpdaterMsckf {
     /// 调用 `FeatureDatabase::cleanup` 清理）。
     // 与 C++ 1:1 移植的长流程函数，拆分会破坏对照可审计性。
     #[allow(clippy::too_many_lines)]
+    #[fastrace::trace]
     pub fn update(&mut self, state: &mut State, feature_vec: &mut Vec<Feature>) {
         // (h_x, res, x_order, row0)
         type HxBlock = (DMatrix<f64>, DVector<f64>, Vec<(i32, usize)>, usize);

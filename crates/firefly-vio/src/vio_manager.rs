@@ -184,6 +184,7 @@ impl VioManager {
     }
 
     /// IMU 输入（对照 `VioManager::feed_measurement_imu`）。
+    #[fastrace::trace]
     pub fn feed_measurement_imu(&mut self, message: &ImuData) {
         // 最老需要保留的 IMU 时刻：上次边缘化克隆时刻之前（对照 C++）
         let mut oldest_time = self.state.marg_timestep();
@@ -208,6 +209,7 @@ impl VioManager {
     ///
     /// # Panics
     /// 消息的 `sensor_ids` 为空或与 `images` 长度不一致（对照 C++ 的 assert）。
+    #[fastrace::trace]
     pub fn feed_measurement_camera(&mut self, message: &CameraData) {
         assert!(!message.sensor_ids.is_empty(), "相机消息必须含传感器 id");
         assert_eq!(
@@ -337,6 +339,7 @@ impl VioManager {
     /// SLAM 分支完整移植；ARUCO 分支裁剪——无 aruco 跟踪器）。
     // 与 C++ 1:1 移植的编排长流程，拆分会破坏对照可审计性。
     #[allow(clippy::too_many_lines)]
+    #[fastrace::trace]
     fn do_feature_propagate_update(&mut self, message: &CameraData) {
         // 乱序相机消息直接忽略（对照 C++）
         if self.state.timestamp > message.timestamp {
@@ -559,6 +562,7 @@ impl VioManager {
     ///
     /// 多段合成：`Phi_summed = Φ_i·...·Φ_0`、`Qd_summed` 按
     /// `Q ← Φ·Q·Φᵀ + Qd_i` 累积，最后 `EKFPropagation` 写回协方差并增广克隆。
+    #[fastrace::trace]
     fn propagate_and_clone(&mut self, timestamp: f64) {
         self.propagate_impl(timestamp, true);
     }
@@ -568,6 +572,7 @@ impl VioManager {
     /// 多段合成：`Phi_summed = Φ_i·...·Φ_0`、`Qd_summed` 按
     /// `Q ← Φ·Q·Φᵀ + Qd_i` 累积，最后 `EKFPropagation` 写回协方差，
     /// `augment` 时增广克隆（对照 `Propagator::propagate_and_clone`）。
+    #[fastrace::trace]
     fn propagate_impl(&mut self, timestamp: f64, augment: bool) {
         let t_off_new = self.time_offset();
         let time0 = self.state.timestamp + self.last_prop_time_offset;
