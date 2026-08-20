@@ -13,6 +13,7 @@ log = "0.4"
 logcall = "0.2"
 logforth = { version = "0.30", default-features = false }
 nalgebra = "0.35"
+rayon = "1.10"
 firefly-cost = { path = "crates/firefly-cost" }
 firefly-error = { path = "crates/firefly-error" }
 firefly-vio-core = { path = "crates/firefly-vio-core" }

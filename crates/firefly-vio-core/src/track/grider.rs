@@ -14,6 +14,7 @@ use crate::sensor::GrayImage;
 use crate::track::KeyPoint;
 use crate::track::fast;
 use crate::track::mask_on;
+use rayon::prelude::*;
 
 /// cornerSubPix 的子像素精化（对照 `OpenCV modules/imgproc/src/corner.cpp`）。
 ///
@@ -137,35 +138,44 @@ pub fn perform_griding(
     }
 
     let mut out = Vec::new();
-    for &(gx, gy) in valid_locs {
-        let x = gx * size_x as i32;
-        let y = gy * size_y as i32;
-        // 网格越界则跳过
-        if x as usize + size_x > img.width || y as usize + size_y > img.height {
-            continue;
-        }
-        // 取 ROI
-        let roi = crop_roi(img, x as usize, y as usize, size_x, size_y);
-        let kpts = fast::fast_with_score(&roi, threshold, true);
-        // 按响应降序
-        let mut sorted = kpts.0;
-        sorted.sort_by(|a, b| {
-            b.response
-                .partial_cmp(&a.response)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        for kpt in sorted.into_iter().take(features_per_grid) {
-            let mut p = kpt;
-            p.x += x as f32;
-            p.y += y as f32;
-            if p.x < 0.0 || p.y < 0.0 || p.x > img.width as f32 || p.y > img.height as f32 {
-                continue;
+    // 并行提取：每个网格独立，rayon 自动分配到多核（对照 OpenVINS `parallel_for_`）
+    let collected: Vec<Vec<KeyPoint>> = valid_locs
+        .par_iter()
+        .filter_map(|&(gx, gy)| {
+            let x = gx * size_x as i32;
+            let y = gy * size_y as i32;
+            // 网格越界则跳过
+            if x as usize + size_x > img.width || y as usize + size_y > img.height {
+                return None;
             }
-            if mask_on(mask, p.x as i32, p.y as i32) {
-                continue;
+            // 取 ROI
+            let roi = crop_roi(img, x as usize, y as usize, size_x, size_y);
+            let kpts = fast::fast_with_score(&roi, threshold, true);
+            // 按响应降序
+            let mut sorted = kpts.0;
+            sorted.sort_by(|a, b| {
+                b.response
+                    .partial_cmp(&a.response)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let mut cell_pts = Vec::new();
+            for kpt in sorted.into_iter().take(features_per_grid) {
+                let mut p = kpt;
+                p.x += x as f32;
+                p.y += y as f32;
+                if p.x < 0.0 || p.y < 0.0 || p.x > img.width as f32 || p.y > img.height as f32 {
+                    continue;
+                }
+                if mask_on(mask, p.x as i32, p.y as i32) {
+                    continue;
+                }
+                cell_pts.push(p);
             }
-            out.push(p);
-        }
+            Some(cell_pts)
+        })
+        .collect();
+    for cell in collected {
+        out.extend(cell);
     }
 
     if subpixel {
