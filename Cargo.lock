@@ -1402,6 +1402,7 @@ dependencies = [
  "firefly-vio-types",
  "log",
  "nalgebra",
+ "rayon",
 ]
 
 [[package]]
