@@ -617,14 +617,12 @@ impl VioManager {
                 &lin,
             );
 
-            // 更新均值（bg/ba 不变）
-            self.state.imu.set_value(
-                prop.q,
-                prop.p,
-                prop.v,
-                self.state.imu.bias_g(),
-                self.state.imu.bias_a(),
-            );
+            // 更新均值（bg/ba 不变）—— 同步更新 FEJ（对照
+            // `Propagator::predict_and_compute` 末尾 `set_value`+`set_fej`）
+            let bg = self.state.imu.bias_g();
+            let ba = self.state.imu.bias_a();
+            self.state.imu.set_value(prop.q, prop.p, prop.v, bg, ba);
+            self.state.imu.set_fej(prop.q, prop.p, prop.v, bg, ba);
 
             // 合成状态转移与噪声（对照 C++：Phi_summed = F·Phi_summed）
             phi_summed = &prop.f * &phi_summed;

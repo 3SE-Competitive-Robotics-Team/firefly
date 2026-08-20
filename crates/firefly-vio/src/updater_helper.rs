@@ -423,10 +423,11 @@ pub fn nullspace_project_inplace(
             givens_zero(h_f, h_x, res, m, n);
         }
     }
-    // 截取下部（对照 C++ 的 block 截取）
+    // 截取下部（对照 C++ 的 block 截取：`H_x.block(H_f.cols(),0,rows-cols,cols)`）
     let keep = h_f.nrows() - h_f.ncols();
-    *h_x = h_x.rows_range(0..keep).into_owned();
-    *res = res.rows_range(0..keep).into_owned();
+    let start = h_f.ncols();
+    *h_x = h_x.rows_range(start..start + keep).into_owned();
+    *res = res.rows_range(start..start + keep).into_owned();
     debug_assert_eq!(h_x.nrows(), res.len());
 }
 
