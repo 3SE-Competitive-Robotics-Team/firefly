@@ -204,17 +204,19 @@ fn crop_roi(img: &GrayImage, x: usize, y: usize, w: usize, h: usize) -> GrayImag
 mod tests {
     use super::*;
 
-    /// 布满小型明亮方块的图（FAST 对孤立亮斑可稳定检出，适合作网格提取测试）。
+    /// 布满明亮方块的图（FAST 检测用）。
+    ///
+    /// 8×8 白块放在每20×20 cell 内偏心位置，确保角点得分各异（purecv 严格
+    /// NMS 下同分角点会全部抑制，偏心放置让不同角点的圆周采样不同→得分不同）。
     fn corners_img(w: usize, h: usize) -> GrayImage {
         let mut data = vec![0u8; w * h];
-        // 每 16×16 放一个 2×2 白块（避开边界）
-        let cell = 16usize;
-        let mut fy = 4;
-        while fy + 4 < h {
-            let mut fx = 4;
-            while fx + 4 < w {
-                for dy in 0..2 {
-                    for dx in 0..2 {
+        let cell = 20usize;
+        let mut fy = 2;
+        while fy + 10 < h {
+            let mut fx = 2;
+            while fx + 10 < w {
+                for dy in 0..8 {
+                    for dx in 0..8 {
                         data[(fy + dy) * w + (fx + dx)] = 255;
                     }
                 }
