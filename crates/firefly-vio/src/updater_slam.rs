@@ -971,10 +971,10 @@ mod tests {
             0,
             false,
             firefly_vio_core::track::HistogramMethod::None,
-            20,
-            4,
-            4,
             10,
+            5,
+            5,
+            15,
         );
         let mgr = crate::vio_manager::VioManager::new(params, cameras, tracker);
         assert!((mgr.updater_slam.options.sigma_pix - 1.5).abs() < 1e-12);

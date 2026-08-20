@@ -51,14 +51,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracker_calib.insert(1usize, cam_right.clone());
     let tracker = TrackKlt::new(
         tracker_calib,
-        300,
+        200,  // num_pts: 对齐 OpenVINS 默认值
         0,
         true,
         HistogramMethod::None,
-        10,
-        4,
-        4,
-        5,
+        10,   // fast_threshold
+        5,    // grid_x: 对齐 OpenVINS 默认值
+        5,    // grid_y: 对齐 OpenVINS 默认值
+        15,   // min_px_dist: 对齐 OpenVINS 默认值
     );
     let mut cameras = BTreeMap::new();
     cameras.insert(0usize, cam_left);

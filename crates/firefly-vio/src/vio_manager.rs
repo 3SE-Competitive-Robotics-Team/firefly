@@ -702,10 +702,10 @@ mod tests {
             0,
             false,
             HistogramMethod::None,
-            20,
-            4,
-            4,
             10,
+            5,
+            5,
+            15,
         );
         VioManager::new(params, cameras, tracker)
     }
