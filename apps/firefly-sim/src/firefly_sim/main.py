@@ -187,12 +187,11 @@ def main() -> None:
                         )
                     )
 
-            # 实时节奏（--no-trace 时跳过：全速运行供 VIO 消费）
-            if trace_enabled:
-                wall = time.perf_counter() - t_start
-                target = t
-                if wall < target - PHYSICS_PERIOD:
-                    time.sleep(target - wall - PHYSICS_PERIOD)
+            # 实时节奏（--no-trace 时仍限速 1x：步进 0.36ms << 5ms 预算，sleep 自动限速）
+            wall = time.perf_counter() - t_start
+            target = t
+            if wall < target - PHYSICS_PERIOD:
+                time.sleep(target - wall - PHYSICS_PERIOD)
     except KeyboardInterrupt:
         if cycle is not None:
             ftrace.end_cycle(cycle)
