@@ -174,6 +174,33 @@ impl Stream {
             .map_err(stream_err)
     }
 
+    /// 折线路径（如飞行轨迹）→ rerun `LineStrips3D` 实体。
+    ///
+    /// `rgb` 区分图例（如真值=蓝、估计=橙）。同 entity 反复调用即在该
+    /// 时间戳写入整条当前折线（配合 `sim_time` 可观察轨迹增长）。
+    ///
+    /// # Errors
+    ///
+    /// `Internal`：rerun 记录失败。
+    pub fn log_line_strip(
+        &self,
+        entity: &str,
+        points: &[[f64; 3]],
+        rgb: (u8, u8, u8),
+    ) -> Result<()> {
+        let pts: Vec<[f32; 3]> = points
+            .iter()
+            .map(|p| [p[0] as f32, p[1] as f32, p[2] as f32])
+            .collect();
+        self.rec
+            .log(
+                entity,
+                &rerun::LineStrips3D::new([pts])
+                    .with_colors([rerun::Color::from_rgb(rgb.0, rgb.1, rgb.2)]),
+            )
+            .map_err(stream_err)
+    }
+
     /// 清除实体（含子树）。
     ///
     /// # Errors

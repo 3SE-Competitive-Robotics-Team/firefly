@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use fastrace::prelude::*;
 use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage};
-use firefly_pubsub::odom::OdomMessage;
+use firefly_pubsub::odom::{GROUND_TRUTH_TOPIC, OdomMessage};
 use firefly_pubsub::publish::{ODOM_TOPIC, OdomPublisher};
 use firefly_pubsub::subscriber::Subscriber;
 use firefly_rerun::Stream;
@@ -124,6 +124,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     };
+    // 真值订阅（仅用于可视化：`gt/pose`+`gt/traj`，与 `vio/odom` 同轴对比）
+    let gt_sub = match Subscriber::<OdomMessage>::with_topic(GROUND_TRUTH_TOPIC) {
+        Ok(s) => {
+            log::info!("已订阅真值话题 {GROUND_TRUTH_TOPIC}（gt/odom 轨迹对比）");
+            Some(s)
+        }
+        Err(e) => {
+            log::warn!("真值订阅不可用（无轨迹对比）：{e}");
+            None
+        }
+    };
 
     run_loop(
         &mut vio,
@@ -131,19 +142,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &odom_pub,
         viewer.as_ref(),
         depth_sub.as_ref(),
+        gt_sub.as_ref(),
     )
 }
 
 /// 驱动循环：推进输入 → 喂 IMU/相机 → 传播 → 发布 odom（10Hz）。
+#[allow(clippy::too_many_lines)]
 fn run_loop(
     vio: &mut VioManager,
     input: &mut dyn SensorInput,
     odom_pub: &OdomPublisher,
     viewer: Option<&Stream>,
     depth_sub: Option<&Subscriber<DepthImageMessage>>,
+    gt_sub: Option<&Subscriber<OdomMessage>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut t_sim = 0.0f64;
     let mut next_odom = 0.0f64;
+    // 轨迹累积（rerun 折线，用于 "真值 vs 估计" 同轴对比）
+    let mut odom_traj: Vec<[f64; 3]> = Vec::new();
+    let mut gt_traj: Vec<[f64; 3]> = Vec::new();
     loop {
         // 推进输入源并消费到当前时刻
         input.advance();
@@ -171,6 +188,24 @@ fn run_loop(
             let m = *sample;
             viewer.set_time(m.timestamp);
             log_depth(viewer, &m);
+        }
+        // 真值 → rerun（`gt/pose` 位姿 + `gt/traj` 轨迹；与 `vio/odom` 同轴对比）
+        if let Some(sub) = gt_sub
+            && let Some(viewer) = viewer
+            && let Ok(Some(sample)) = sub.receive()
+        {
+            let m = *sample;
+            viewer.set_time(m.timestamp);
+            let q = [m.quat_x, m.quat_y, m.quat_z, m.quat_w];
+            if let Err(e) =
+                viewer.log_pose("gt/pose", [m.position_x, m.position_y, m.position_z], q)
+            {
+                log::debug!("rerun 记录 gt 位姿失败：{e}");
+            }
+            gt_traj.push([m.position_x, m.position_y, m.position_z]);
+            if let Err(e) = viewer.log_line_strip("gt/traj", &gt_traj, (0, 120, 255)) {
+                log::debug!("rerun 记录 gt 轨迹失败：{e}");
+            }
         }
         // 相机（MSCKF 视觉更新 + rerun 双目可视化）
         // 时序：**只由相机 feed 内的 `propagate_and_clone` 推进 state 到相机时刻**
@@ -228,12 +263,16 @@ fn run_loop(
                     if let Some(viewer) = viewer {
                         viewer.set_time(t_sim);
                         let q = s.imu.quat();
-                        if let Err(e) = viewer.log_pose(
-                            "vio/odom",
-                            [s.imu.pos().x, s.imu.pos().y, s.imu.pos().z],
-                            [q[0], q[1], q[2], q[3]],
-                        ) {
+                        let p = [s.imu.pos().x, s.imu.pos().y, s.imu.pos().z];
+                        if let Err(e) = viewer.log_pose("vio/odom", p, [q[0], q[1], q[2], q[3]]) {
                             log::debug!("rerun 记录 odom 位姿失败：{e}");
+                        }
+                        // 估计轨迹折线（与 `gt/traj` 同轴对比）
+                        odom_traj.push(p);
+                        if let Err(e) =
+                            viewer.log_line_strip("vio/odom/traj", &odom_traj, (255, 80, 0))
+                        {
+                            log::debug!("rerun 记录 odom 轨迹失败：{e}");
                         }
                     }
                 }
