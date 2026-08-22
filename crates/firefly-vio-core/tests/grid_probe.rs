@@ -6,7 +6,40 @@
 
 use firefly_vio_core::sensor::GrayImage;
 use firefly_vio_core::track::fast::fast_with_score;
-use firefly_vio_core::track::{grider, lk, pyramid};
+use firefly_vio_core::track::{grider, pyramid};
+
+/// purecv 金字塔 LK（替代已移除的自研 lk.rs；OpenCV 语义，与 track.rs
+/// `lk_optical_flow` 同参数：2 层金字塔、15×15 窗口、initial flow）。
+fn lk_flow(
+    prev: &GrayImage,
+    next: &GrayImage,
+    prev_pts: &[nalgebra::Vector2<f32>],
+    init_pts: &[nalgebra::Vector2<f32>],
+) -> (Vec<nalgebra::Vector2<f32>>, Vec<bool>) {
+    use purecv::core::types::{Point2f, Size2i, TermCriteria, TermType};
+    let p0 = pyramid::gray_to_matrix(prev);
+    let p1 = pyramid::gray_to_matrix(next);
+    let p0f: Vec<Point2f> = prev_pts.iter().map(|p| Point2f::new(p.x, p.y)).collect();
+    let p1f: Vec<Point2f> = init_pts.iter().map(|p| Point2f::new(p.x, p.y)).collect();
+    let (out, status, _) = purecv::video::calc_optical_flow_pyramid_lk(
+        &p0,
+        &p1,
+        &p0f,
+        Some(&p1f),
+        Size2i::new(15, 15),
+        1,
+        TermCriteria::new(TermType::Both, 30, 0.01),
+        purecv::video::OPTFLOW_USE_INITIAL_FLOW,
+        1e-4,
+    )
+    .expect("purecv LK 不应失败");
+    (
+        out.into_iter()
+            .map(|p| nalgebra::Vector2::new(p.x, p.y))
+            .collect(),
+        status.into_iter().map(|s| s != 0).collect(),
+    )
+}
 
 fn dotted_image(w: usize, h: usize, level_jitter: bool) -> (GrayImage, Vec<(f32, f32)>) {
     let mut data = vec![0u8; w * h];
@@ -123,38 +156,22 @@ fn lk_tracks_known_shift() {
         draw(&mut img0, x, y);
         draw(&mut img1, x + 4.0, y + 2.0);
     }
-    let p0 = pyramid::build_optical_flow_pyramid(
-        &GrayImage {
-            width: w,
-            height: h,
-            data: img0,
-        },
-        3,
-        lk::MIN_PYR_SIDE,
-    );
-    let p1 = pyramid::build_optical_flow_pyramid(
-        &GrayImage {
-            width: w,
-            height: h,
-            data: img1,
-        },
-        3,
-        lk::MIN_PYR_SIDE,
-    );
+    let img0_g = GrayImage {
+        width: w,
+        height: h,
+        data: img0,
+    };
+    let img1_g = GrayImage {
+        width: w,
+        height: h,
+        data: img1,
+    };
     let prev: Vec<nalgebra::Vector2<f32>> = pts0
         .iter()
         .map(|&(x, y)| nalgebra::Vector2::new(x, y))
         .collect();
     let init = prev.clone();
-    let (out, status) = lk::calc_optical_flow_pyr_lk(
-        &p0,
-        &p1,
-        &prev,
-        &init,
-        &lk::TermCriteria::default_lk(),
-        true,
-        lk::MIN_EIG_THRESHOLD,
-    );
+    let (out, status) = lk_flow(&img0_g, &img1_g, &prev, &init);
     for i in 0..pts0.len() {
         assert!(status[i], "点 {i} 跟踪失败");
         let du = out[i].x - prev[i].x;
@@ -227,19 +244,9 @@ fn lk_small_shift_with_flicker_noise() {
     // 真实观测：真值 +0.15px/帧向右，跟踪却 -0.9px/帧向左
     let img0 = mk(1, (0.0, 0.0));
     let img1 = mk(2, (-0.9, -0.9));
-    let p0 = pyramid::build_optical_flow_pyramid(&img0, 5, lk::MIN_PYR_SIDE);
-    let p1 = pyramid::build_optical_flow_pyramid(&img1, 5, lk::MIN_PYR_SIDE);
     let prev = vec![nalgebra::Vector2::new(171.0f32, 117.0f32)];
     let init = prev.clone();
-    let (out, status) = lk::calc_optical_flow_pyr_lk(
-        &p0,
-        &p1,
-        &prev,
-        &init,
-        &lk::TermCriteria::default_lk(),
-        true,
-        lk::MIN_EIG_THRESHOLD,
-    );
+    let (out, status) = lk_flow(&img0, &img1, &prev, &init);
     println!(
         "小位移(-0.9,-0.9): out=({:.2},{:.2}) status={}",
         out[0].x - prev[0].x,
@@ -298,22 +305,12 @@ fn lk_systematic_error_sweep() {
             let off = trial as f64 * 1.0;
             let img0 = draw_all((off, off), trial as usize * 2 + 1);
             let img1 = draw_all((off + dx, off + dy), trial as usize * 2 + 2);
-            let p0 = pyramid::build_optical_flow_pyramid(&img0, 5, lk::MIN_PYR_SIDE);
-            let p1 = pyramid::build_optical_flow_pyramid(&img1, 5, lk::MIN_PYR_SIDE);
             let prev: Vec<nalgebra::Vector2<f32>> = base_dots
                 .iter()
                 .map(|&(x, y)| nalgebra::Vector2::new(x + off as f32, y + off as f32))
                 .collect();
             let init = prev.clone();
-            let (out, status) = lk::calc_optical_flow_pyr_lk(
-                &p0,
-                &p1,
-                &prev,
-                &init,
-                &lk::TermCriteria::default_lk(),
-                true,
-                lk::MIN_EIG_THRESHOLD,
-            );
+            let (out, status) = lk_flow(&img0, &img1, &prev, &init);
             let e: f64 = out
                 .iter()
                 .zip(prev.iter())

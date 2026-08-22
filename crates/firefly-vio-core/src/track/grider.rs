@@ -16,81 +16,6 @@ use crate::track::fast;
 use crate::track::mask_on;
 use rayon::prelude::*;
 
-/// cornerSubPix 的子像素精化（对照 `OpenCV modules/imgproc/src/corner.cpp`）。
-///
-/// 对每个角点在 5×5 窗口内迭代求亚像素极值：用相邻像素的梯度 `(Gx, Gy)` 构造
-/// 二阶梯度的矩 `A = Σ [Gx², GxGy; GxGy, Gy²]` 与梯度·强度差 `b = Σ G·ΔI`，
-/// 解 `A·δ = -b` 更新位置，直到位移 < `eps` 或到最大迭代数。默认
-/// `TermCriteria(COUNT+EPS, 20, 0.001)`（同 `Grider_GRID.h` 第 163-165 行）。
-/// 越界点跳过（同 OpenCV `cornerSubPix` 对窗口越界点的忽略）。
-fn corner_sub_pix(img: &GrayImage, pts: &mut [KeyPoint]) {
-    const ITERS: usize = 20;
-    const EPS: f64 = 0.001;
-    const HALF: i32 = 2; // win 5×5 → 半宽 2
-    for p in pts.iter_mut() {
-        // 初始取整像素
-        let mut x = f64::from(p.x);
-        let mut y = f64::from(p.y);
-        for _ in 0..ITERS {
-            let cx = x.round();
-            let cy = y.round();
-            let (ci, cj) = (cx as i32, cy as i32);
-            if ci - HALF < 0
-                || cj - HALF < 0
-                || ci + HALF >= img.width as i32
-                || cj + HALF >= img.height as i32
-            {
-                break;
-            }
-            let mut a11 = 0.0f64;
-            let mut a12 = 0.0f64;
-            let mut a22 = 0.0f64;
-            let mut b1 = 0.0f64;
-            let mut b2 = 0.0f64;
-            let center = f64::from(img.data[cj as usize * img.width + ci as usize]);
-            for j in -HALF..=HALF {
-                for i in -HALF..=HALF {
-                    let (px8, py8) = (ci + i, cj + j);
-                    if px8 - 1 < 0
-                        || py8 - 1 < 0
-                        || px8 + 1 >= img.width as i32
-                        || py8 + 1 >= img.height as i32
-                    {
-                        continue;
-                    }
-                    let gx = (f64::from(img.data[py8 as usize * img.width + (px8 + 1) as usize])
-                        - f64::from(img.data[py8 as usize * img.width + (px8 - 1) as usize]))
-                        * 0.5;
-                    let gy = (f64::from(img.data[(py8 + 1) as usize * img.width + px8 as usize])
-                        - f64::from(img.data[(py8 - 1) as usize * img.width + px8 as usize]))
-                        * 0.5;
-                    let di = center - f64::from(img.data[py8 as usize * img.width + px8 as usize]);
-                    a11 += gx * gx;
-                    a12 += gx * gy;
-                    a22 += gy * gy;
-                    b1 += gx * di;
-                    b2 += gy * di;
-                }
-            }
-            let det = a11 * a22 - a12 * a12;
-            if det.abs() < 1e-10 {
-                break;
-            }
-            let inv = 1.0 / det;
-            let dx = (a22 * b1 - a12 * b2) * inv;
-            let dy = (-a12 * b1 + a11 * b2) * inv;
-            let (dx, dy) = (dx, dy); // 已有符号与 A·x=b 一致（解 A·δ=b）
-            x += dx;
-            y += dy;
-            if dx.abs() + dy.abs() < EPS {
-                break;
-            }
-        }
-        p.x = x as f32;
-        p.y = y as f32;
-    }
-}
-
 /// 网格 FAST 特征提取（对照 `Grider_GRID::perform_griding`）。
 ///
 /// - `img`：检测图像；
@@ -111,6 +36,10 @@ fn corner_sub_pix(img: &GrayImage, pts: &mut [KeyPoint]) {
 ///     grid_y = ceil(sqrt(num_features/ratio))
 ///     grid_x = ceil(grid_y*ratio)
 /// ```
+///
+/// # Panics
+///
+/// 内部 `cornerSubPix`（purecv）失败时 panic（合法输入不应发生）。
 #[must_use]
 pub fn perform_griding(
     img: &GrayImage,
@@ -179,12 +108,34 @@ pub fn perform_griding(
     }
 
     if subpixel {
-        corner_sub_pix(img, &mut out);
+        // purecv cornerSubPix（OpenCV 语义，对照 Grider_GRID.h 的
+        // cv::cornerSubPix：win 5×5、zero_zone (-1,-1)、COUNT+EPS 20/0.001）
+        let mat = crate::track::pyramid::gray_to_matrix(img);
+        let mut corners: Vec<purecv::core::types::Point2f> = out
+            .iter()
+            .map(|p| purecv::core::types::Point2f::new(p.x, p.y))
+            .collect();
+        purecv::imgproc::feature::corner_sub_pix(
+            &mat,
+            &mut corners,
+            purecv::core::types::Size2i::new(5, 5),
+            purecv::core::types::Size2i::new(-1, -1),
+            purecv::core::types::TermCriteria::new(purecv::core::types::TermType::Both, 20, 0.001),
+        )
+        .expect("cornerSubPix 不应失败（单通道灰度）");
+        for (k, c) in out.iter_mut().zip(corners) {
+            k.x = c.x;
+            k.y = c.y;
+        }
     }
     out
 }
 
 /// 从图像中裁剪 ROI（复用现有数据，不复制）。返回视图结构。
+///
+/// # Panics
+///
+/// 内部 `corner_sub_pix`（purecv）失败时 panic（合法输入不应发生）。
 #[must_use]
 fn crop_roi(img: &GrayImage, x: usize, y: usize, w: usize, h: usize) -> GrayImage {
     // 组装 ROI 视图并转成 flat GrayImage（仅用于 FAST 检测）
@@ -313,7 +264,24 @@ mod tests {
         // 在 2×2 白块角落处取样；子像素校正应仍贴近整数像素
         let mut pts = vec![KeyPoint::new(5.0, 5.0), KeyPoint::new(21.0, 5.0)];
         // 取点直接在方块正上方平滑处，避免角点被过于约束
-        corner_sub_pix(&img, &mut pts);
+        // purecv cornerSubPix（OpenCV 语义）
+        let mat = crate::track::pyramid::gray_to_matrix(&img);
+        let mut corners: Vec<purecv::core::types::Point2f> = pts
+            .iter()
+            .map(|p| purecv::core::types::Point2f::new(p.x, p.y))
+            .collect();
+        purecv::imgproc::feature::corner_sub_pix(
+            &mat,
+            &mut corners,
+            purecv::core::types::Size2i::new(5, 5),
+            purecv::core::types::Size2i::new(-1, -1),
+            purecv::core::types::TermCriteria::new(purecv::core::types::TermType::Both, 20, 0.001),
+        )
+        .unwrap();
+        for (p, c) in pts.iter_mut().zip(corners) {
+            p.x = c.x;
+            p.y = c.y;
+        }
         for p in &pts {
             assert!(
                 (p.x - p.x.round()).abs() <= 1.0,

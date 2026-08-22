@@ -171,6 +171,16 @@ pub struct UpdaterOptions {
     pub sigma_pix: f64,
     /// 像素测量噪声方差（`sigma_pix` 平方）。
     pub sigma_pix_sq: f64,
+    /// 更新级 RMS 残差门控（px）：整次 MSCKF 更新的平均残差超过该值
+    /// 则跳过本次更新。单特征 chi2 门控用膨胀的 P 会退化性接受系统性
+    /// 大残差（运动启动时三角化病态 → 同号残差累积 → 一次更新把位置
+    /// 拉飞数米），此门与状态协方差无关，拦截整次更新的系统性偏置。
+    pub max_update_res_px: f64,
+    /// 特征深度上限（m，相机系前向）：超过即剔除。本意是拒绝"远于场景
+    /// 纹理"的病态三角化产物（现场场景最远 ~8m）；但合成走廊点云深达
+    /// 26m，阈值过紧会误杀合法远端特征（实测合成测试回归），故放宽到 30m——
+    /// 深度病态主要靠三角化 cond/反投影门控 + purecv LK 的多帧测量解决。
+    pub max_feature_depth_m: f64,
 }
 
 impl Default for UpdaterOptions {
@@ -179,6 +189,8 @@ impl Default for UpdaterOptions {
             chi2_multipler: 5.0,
             sigma_pix: 1.0,
             sigma_pix_sq: 1.0,
+            max_update_res_px: 3.0,
+            max_feature_depth_m: 30.0,
         }
     }
 }
@@ -218,7 +230,7 @@ impl Default for ZuptOptions {
 }
 
 /// 裁剪：ARUCO 相关选项（对应 updater 后续移植）不在此列出。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct VioManagerOptions {
     /// 核心状态选项。
     pub state_options: StateOptions,
@@ -236,6 +248,21 @@ pub struct VioManagerOptions {
     pub zupt_options: ZuptOptions,
 }
 
+impl Default for VioManagerOptions {
+    fn default() -> Self {
+        Self {
+            state_options: StateOptions::default(),
+            imu_noises: ImuNoise::default(),
+            init_options: firefly_vio_init::options::InitOptions::default(),
+            msckf_options: UpdaterOptions::default(),
+            slam_options: UpdaterOptions::default(),
+            // 对照 C++ `VioManagerOptions::dt_slam_delay = 2.0`
+            dt_slam_delay: 2.0,
+            zupt_options: ZuptOptions::default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +278,9 @@ mod tests {
         assert!(!s.do_calib_camera_pose);
         assert!(!s.do_calib_imu_intrinsics);
         assert_eq!(s.imu_model, ImuModel::Kalibr);
+
+        let v = VioManagerOptions::default();
+        assert!((v.dt_slam_delay - 2.0).abs() < 1e-12);
 
         let u = UpdaterOptions::default();
         assert!((u.chi2_multipler - 5.0).abs() < 1e-12);

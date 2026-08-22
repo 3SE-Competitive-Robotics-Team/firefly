@@ -6,8 +6,13 @@
 //! 上下文（跨进程 span 树可观测）。
 //!
 //! 运行：`cargo run -p vio`（配合 `uv run firefly-sim` 的 `MuJoCo` 物理环境）。
-//! - 无 rerun 可视化
-//! - 无 depth/GT 订阅
+//! - 瘦版 rerun：10Hz 位姿/轨迹（`vio/odom`+`vio/traj` 橙、真值
+//!   `gt/pose`+`gt/traj` 蓝，统一 `sim_time` 时间轴）。只记位姿不流图像——
+//!   图像流是旧版拖慢闭环的主因。无 viewer 则自起，失败不影响估计。
+//!   轨迹实体与位姿实体必须平级：rerun 父实体的 `Transform3D` 会套用整个
+//!   子树，折线挂在 `vio/odom` 下会被实时估计位姿二次变换（历史曲线被
+//!   拖着跑、起点漂移的假象）。
+//! - GT 仅用于可视化，不进估计器；无 depth 订阅
 //! - `node.wait(1ms)` 节拍尽快消费消息，Ctrl-C 优雅退出
 
 use std::collections::BTreeMap;
@@ -16,7 +21,10 @@ use std::time::Duration;
 
 use fastrace::prelude::*;
 use firefly_pubsub::node::create_node;
+use firefly_pubsub::odom::{GROUND_TRUTH_TOPIC, OdomMessage};
 use firefly_pubsub::publish::{ODOM_TOPIC, OdomPublisher};
+use firefly_pubsub::subscriber::Subscriber;
+use firefly_rerun::Stream;
 use firefly_vio::options::VioManagerOptions;
 use firefly_vio::vio_manager::VioManager;
 use firefly_vio_core::cam::{CamRadtan, SharedCamera};
@@ -30,7 +38,11 @@ use input::IceoryxInput;
 const ODOM_PERIOD: f64 = 0.1;
 /// `MuJoCo` 场景无人机起点（= demo 地图 start；GT 先验）。
 const SIM_START: [f64; 3] = [1.0, 4.0, 1.0];
+/// rerun 图例颜色：真值=蓝、估计=橙。
+const GT_COLOR: (u8, u8, u8) = (60, 120, 255);
+const ODOM_COLOR: (u8, u8, u8) = (255, 140, 0);
 
+#[allow(clippy::too_many_lines)] // 启动编排（标定/初始化/订阅/主循环），结构由进程生命周期驱动
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     firefly_observability::init();
     log::info!("VIO 进程启动：订阅 MuJoCo 物理环境（iceoryx2 输入 + trace 上下文）");
@@ -53,22 +65,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..VioManagerOptions::default()
     };
     params.state_options.num_cameras = 2;
-    // 纯 MSCKF 模式：SLAM 特征初始化/更新路径尚待 FD 验证（开启后现场发散
-    // 更快，见 AGENTS.md VIO 调试状态），修复后移除此行
+    // SLAM 关闭：SLAM 更新链路毒化状态（合成 synthetic_slam_zero_bias 可
+    // 复现：slam=1 后 0.8s 内 13m 发散；H_x/H_f 已 FD 验证、initialize/update
+    // 与 C++ 逐行一致——残留嫌疑为场景 y 可观测性弱）。修复前保持纯 MSCKF
+    //（现场 34s 误差 271m vs 开 SLAM 1035m）。
     params.state_options.max_slam_features = 0;
     let mut tracker_calib = std::collections::HashMap::new();
     tracker_calib.insert(0usize, cam_left.clone());
     tracker_calib.insert(1usize, cam_right.clone());
     let tracker = TrackKlt::new(
         tracker_calib,
-        200, // num_pts: 对齐 OpenVINS 默认值
+        150, // num_pts: OpenVINS `VioManagerOptions` 默认值
         0,
         true,
-        HistogramMethod::None,
-        10, // fast_threshold
-        5,  // grid_x: 对齐 OpenVINS 默认值
-        5,  // grid_y: 对齐 OpenVINS 默认值
-        15, // min_px_dist: 对齐 OpenVINS 默认值
+        HistogramMethod::Histogram,
+        20, // fast_threshold: OpenVINS 默认值
+        5,  // grid_x: OpenVINS 默认值
+        5,  // grid_y: OpenVINS 默认值
+        10, // min_px_dist: OpenVINS 默认值
     );
     let mut cameras = BTreeMap::new();
     cameras.insert(0usize, cam_left);
@@ -89,14 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 真值先验：与 MuJoCo 场景一致（起点静止）
-    let mut imustate = [0.0f64; 17];
-    imustate[0] = 0.0; // t
-    imustate[4] = 1.0; // qw
-    imustate[5] = SIM_START[0];
-    imustate[6] = SIM_START[1];
-    imustate[7] = SIM_START[2];
-    vio.initialize_with_gt(&imustate);
-    log::info!("已初始化：t=0 ({SIM_START:?})，静止（GT 先验）");
+    // （初始化已移至 gt_sub 创建后，见下方"真值初始化"块；此处不再设状态）
 
     // 进程共享节点：所有端口由它派生；主循环以 node.wait 驱动，Ctrl-C 优雅
     // 退出并释放全部 IPC 资源（硬杀会留孤儿共享内存 + 幽灵端口注册）
@@ -111,7 +118,85 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = IceoryxInput::new(&node)?;
     log::info!("输入源：订阅 MuJoCo 物理环境（IMU/双目灰度），imu 话题由 MuJoCo 发布");
 
-    run_loop(&mut vio, &mut input, &odom_pub, &node);
+    // 瘦版 rerun：已有 viewer 共享，否则自起；失败只降级不影响估计
+    let viewer = match Stream::connect_or_spawn() {
+        Ok(v) => {
+            log::info!("rerun viewer 就绪（gt/odom 位姿可视化）");
+            Some(v)
+        }
+        Err(e) => {
+            log::warn!("rerun viewer 不可用（跳过可视化，继续运行）：{e}");
+            None
+        }
+    };
+    // 真值订阅（仅可视化对比，估计器不读）
+    let gt_sub = match Subscriber::<OdomMessage>::with_topic(&node, GROUND_TRUTH_TOPIC) {
+        Ok(s) => {
+            log::info!("已订阅真值话题 {GROUND_TRUTH_TOPIC}（rerun 可视化）");
+            Some(s)
+        }
+        Err(e) => {
+            log::warn!("真值订阅不可用（无 GT 可视化）：{e}");
+            None
+        }
+    };
+
+    // 真值初始化：等待首条 GT（≤2s），用其位置/速度/姿态对齐真实起点。
+    // 不假设 sim 静止起飞（demo 闭环）还是 --script 轨迹（起点速度非零）——
+    // 硬编码静止先验会让 odom 与 GT 起点错位（实测 --script 起点 0.94m/s）。
+    let mut imustate = [0.0f64; 17];
+    imustate[4] = 1.0; // qw（回退：静止水平）
+    imustate[5] = SIM_START[0];
+    imustate[6] = SIM_START[1];
+    imustate[7] = SIM_START[2];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut got_gt = false;
+    while std::time::Instant::now() < deadline
+        && let Some(s) = &gt_sub
+    {
+        let Ok(Some(sample)) = s.receive() else {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            continue;
+        };
+        let m = &*sample;
+        imustate[0] = m.timestamp;
+        imustate[1] = m.quat_x;
+        imustate[2] = m.quat_y;
+        imustate[3] = m.quat_z;
+        imustate[4] = m.quat_w;
+        imustate[5] = m.position_x;
+        imustate[6] = m.position_y;
+        imustate[7] = m.position_z;
+        imustate[8] = m.velocity_x;
+        imustate[9] = m.velocity_y;
+        imustate[10] = m.velocity_z;
+        got_gt = true;
+        break;
+    }
+    if got_gt {
+        log::info!(
+            "真值初始化：t={:.2} p=({:.2},{:.2},{:.2}) v=({:.2},{:.2},{:.2})",
+            imustate[0],
+            imustate[5],
+            imustate[6],
+            imustate[7],
+            imustate[8],
+            imustate[9],
+            imustate[10]
+        );
+    } else {
+        log::info!("无真值，回退静止先验：t=0 ({SIM_START:?})");
+    }
+    vio.initialize_with_gt(&imustate);
+
+    run_loop(
+        &mut vio,
+        &mut input,
+        &odom_pub,
+        viewer.as_ref(),
+        gt_sub.as_ref(),
+        &node,
+    );
     Ok(())
 }
 
@@ -122,11 +207,15 @@ fn run_loop(
     vio: &mut VioManager,
     input: &mut dyn SensorInput,
     odom_pub: &OdomPublisher,
+    viewer: Option<&Stream>,
+    gt_sub: Option<&Subscriber<OdomMessage>>,
     node: &firefly_pubsub::node::IpcNode,
 ) {
     let mut t_sim = 0.0f64;
     let mut next_odom = 0.0f64;
     let mut loop_count = 0u64;
+    let mut est_traj: Vec<[f64; 3]> = Vec::new();
+    let mut gt_traj: Vec<[f64; 3]> = Vec::new();
     let mut camera_count = 0u64;
     let mut imu_batch_count = 0u64;
     let t_wall_start = std::time::Instant::now();
@@ -181,43 +270,21 @@ fn run_loop(
         // 按发布周期输出 odom
         if t_sim + 1e-9 >= next_odom {
             let s = &vio.state;
-            log::debug!(
-                "odom-publish state_t={:.3} sim_t={:.3} pos=({:.3},{:.3},{:.3})",
-                s.timestamp,
-                t_sim,
-                s.imu.pos().x,
-                s.imu.pos().y,
-                s.imu.pos().z,
-            );
-            let msg = firefly_pubsub::odom::OdomMessage {
-                timestamp: t_sim,
-                position_x: s.imu.pos().x,
-                position_y: s.imu.pos().y,
-                position_z: s.imu.pos().z,
-                velocity_x: s.imu.vel().x,
-                velocity_y: s.imu.vel().y,
-                velocity_z: s.imu.vel().z,
-                quat_x: s.imu.quat()[0],
-                quat_y: s.imu.quat()[1],
-                quat_z: s.imu.quat()[2],
-                quat_w: s.imu.quat()[3],
-                is_initialized: vio.initialized(),
-            };
-            match odom_pub.publish(msg) {
-                Ok(ctx) => {
-                    log::info!(
-                        "odom t={t_sim:.2} p=({:.2},{:.2},{:.2}) v=({:.3},{:.3},{:.3}) trace_id={:032x} sampled={}",
-                        s.imu.pos().x,
-                        s.imu.pos().y,
-                        s.imu.pos().z,
-                        s.imu.vel().x,
-                        s.imu.vel().y,
-                        s.imu.vel().z,
-                        ctx.trace_id(),
-                        ctx.sampled(),
-                    );
-                }
-                Err(e) => log::warn!("odom 发布失败（temporary 可重试）: {e}"),
+            publish_odom(odom_pub, t_sim, s.timestamp, &s.imu, vio.initialized());
+            // 瘦版 rerun：位姿 + 轨迹折线 @10Hz（图像流是旧版拖慢
+            // 闭环的主因，此处只记位姿，开销可忽略）
+            if let Some(viewer) = viewer {
+                let p = s.imu.pos();
+                let q = s.imu.quat();
+                log_viz(
+                    viewer,
+                    t_sim,
+                    [p.x, p.y, p.z],
+                    [q[0], q[1], q[2], q[3]],
+                    gt_sub,
+                    &mut est_traj,
+                    &mut gt_traj,
+                );
             }
             next_odom += ODOM_PERIOD;
             // 落后超过一个周期（启动追赶 / 长阻塞后恢复）时重同步到当前时刻，
@@ -232,6 +299,87 @@ fn run_loop(
             log::info!("收到终止信号，优雅退出（端口 Drop、IPC 资源释放）");
             break;
         }
+    }
+}
+
+/// 组装并发布一条 odom（10Hz），成功打 info 行。
+fn publish_odom(
+    odom_pub: &OdomPublisher,
+    t_sim: f64,
+    state_t: f64,
+    imu: &firefly_vio_types::var::ImuState,
+    is_initialized: bool,
+) {
+    log::debug!(
+        "odom-publish state_t={state_t:.3} sim_t={t_sim:.3} pos=({:.3},{:.3},{:.3})",
+        imu.pos().x,
+        imu.pos().y,
+        imu.pos().z,
+    );
+    let msg = firefly_pubsub::odom::OdomMessage {
+        timestamp: t_sim,
+        position_x: imu.pos().x,
+        position_y: imu.pos().y,
+        position_z: imu.pos().z,
+        velocity_x: imu.vel().x,
+        velocity_y: imu.vel().y,
+        velocity_z: imu.vel().z,
+        quat_x: imu.quat()[0],
+        quat_y: imu.quat()[1],
+        quat_z: imu.quat()[2],
+        quat_w: imu.quat()[3],
+        is_initialized,
+    };
+    match odom_pub.publish(msg) {
+        Ok(ctx) => {
+            log::info!(
+                "odom t={t_sim:.2} p=({:.2},{:.2},{:.2}) v=({:.3},{:.3},{:.3}) trace_id={:032x} sampled={}",
+                imu.pos().x,
+                imu.pos().y,
+                imu.pos().z,
+                imu.vel().x,
+                imu.vel().y,
+                imu.vel().z,
+                ctx.trace_id(),
+                ctx.sampled(),
+            );
+        }
+        Err(e) => log::warn!("odom 发布失败（temporary 可重试）: {e}"),
+    }
+}
+
+/// 瘦版 rerun 记录：估计位姿/轨迹折线（橙）+ 最新真值样本（蓝），
+/// 统一 `sim_time` 时间轴。仅可视化，任何失败只降级 debug 日志。
+fn log_viz(
+    viewer: &Stream,
+    t_sim: f64,
+    pos: [f64; 3],
+    quat_xyzw: [f64; 4],
+    gt_sub: Option<&Subscriber<OdomMessage>>,
+    est_traj: &mut Vec<[f64; 3]>,
+    gt_traj: &mut Vec<[f64; 3]>,
+) {
+    viewer.set_time(t_sim);
+    est_traj.push(pos);
+    let logged = viewer
+        .log_pose("vio/odom", pos, quat_xyzw)
+        .and_then(|()| viewer.log_line_strip("vio/traj", est_traj, ODOM_COLOR));
+    if let Err(e) = logged {
+        log::debug!("rerun 记录 odom 失败：{e}");
+    }
+    let Some(gt) = gt_sub else { return };
+    let Ok(Some(sample)) = gt.receive() else {
+        return;
+    };
+    let m = &*sample;
+    let gpos = [m.position_x, m.position_y, m.position_z];
+    let gquat = [m.quat_x, m.quat_y, m.quat_z, m.quat_w];
+    gt_traj.push(gpos);
+    let logged = viewer
+        .log_pose("gt/pose", gpos, gquat)
+        .and_then(|()| viewer.log_line_strip("gt/traj", gt_traj, GT_COLOR));
+    if let Err(e) = logged {
+        log::debug!("rerun 记录 gt 失败：{e}");
     }
 }
 
@@ -264,10 +412,13 @@ fn mujoco_stereo_extrinsic() -> (nalgebra::Vector4<f64>, [nalgebra::Vector3<f64>
     // Hamilton 约定，直接喂给 JPL 估计器等效于转置旋转（相机"侧装"、
     // 立体基线变纵向，视觉更新全部退化的根因）。
     let q_vec = rot_2_quat(&r_ito_c);
-    // p_IinC = -R_ItoC · p_CinI；左 = +Y_body 0.025m，右 = -Y_body 0.025m
-    // （验证：p_ciinG = p_IinG - R_GtoCi^T · p_IinC 在水平姿态下给出 ±Y_world 杆臂）
-    let p_left_in_c = Vector3::new(0.025, 0.0, 0.0);
-    let p_right_in_c = Vector3::new(-0.025, 0.0, 0.0);
+    // p_IinC = -R_ItoC · p_CinI；以 scene.py 物理安装为准：cam_left pos="0
+    // -0.025 0"、cam_right pos="0 +0.025 0"，故左目杆臂 = -0.025·(相机 x 轴在
+    // 体系方向 (0,-1,0)) ⇒ p_IinC=(-0.025,0,0)，右目对称取反。
+    // （曾左右镜像填反：立体基线符号翻转，双目特征三角化全部解出负深度被
+    // 拒——MSCKF 视觉更新从未生效，纯 IMU 开环发散。）
+    let p_left_in_c = Vector3::new(-0.025, 0.0, 0.0);
+    let p_right_in_c = Vector3::new(0.025, 0.0, 0.0);
     (q_vec, [p_left_in_c, p_right_in_c])
 }
 

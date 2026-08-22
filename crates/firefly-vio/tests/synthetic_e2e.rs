@@ -110,21 +110,30 @@ fn render_dots(uvs: &[(f32, f32)], seed: usize, amp: u8) -> GrayImage {
     // 常值亮度平台会整片互斥归零（实测纯色点阵检出 0）；噪声打破平局。
     // `amp=0` 完全无噪；seed 逐帧变化=闪烁噪声（真实传感器），固定=静态纹理
     //（图像固定的假角点会被 LK 稳定跟踪，与刚体几何矛盾）。
-    let mut data = vec![0u8; W * H];
+    // 背景：平坦 + 噪声（**无棋盘格**）。棋盘格是图像空间固定纹理（不随
+    // 相机投影），其 FAST 特征在图像里静止——相机移动而测量不变 = 特征在
+    // 无穷远，DLT 秩亏（cond 百万级、深度负/巨大）污染三角化。高斯斑
+    // （走廊 3D 点投影）是唯一合法特征源。
+    let mut data = vec![70u8; W * H];
     let noise = |i: usize| -> u8 {
         ((i.wrapping_mul(2_654_435_761)).wrapping_add(seed.wrapping_mul(40_503)) >> 24) as u8
             % amp.max(1)
     };
     for (i, &(u, v)) in uvs.iter().enumerate() {
+        // 高斯斑（σ≈1.5px）：中心单峰 → FAST NMS（严格大于 8 邻域）保留，
+        // 且连续梯度场让 LK 稳定收敛。3×3 平台斑是响应平台，NMS 全抑制
+        // （数学事实，OpenCV 同样行为）——平台斑检不出。
         let level = 150u8 + ((i as u16 * 37) % 100) as u8;
         let ui = u.round() as isize;
         let vi = v.round() as isize;
-        for dy in -1..=1 {
-            for dx in -1..=1 {
-                let x = ui + dx;
-                let y = vi + dy;
+        for dy in -3..=3i64 {
+            for dx in -3..=3i64 {
+                let x = ui + dx as isize;
+                let y = vi + dy as isize;
                 if x >= 0 && (x as usize) < W && y >= 0 && (y as usize) < H {
-                    data[y as usize * W + x as usize] = level;
+                    let g = (-(dx * dx + dy * dy) as f64 / 4.5).exp();
+                    let val = (f64::from(level) * g) as u8;
+                    data[y as usize * W + x as usize] = val;
                 }
             }
         }
@@ -165,6 +174,8 @@ struct ScenarioCfg {
     img_noise_amp: u8,
     /// true=逐帧重播种（闪烁）；false=固定纹理。
     img_noise_flicker: bool,
+    /// true=前 5s 静止后匀速（复现现场"静止→运动"，SLAM 初始化视差结构差）。
+    static_then_move: bool,
 }
 
 impl Default for ScenarioCfg {
@@ -176,6 +187,7 @@ impl Default for ScenarioCfg {
             imu_noise: 0.02,
             img_noise_amp: 7,
             img_noise_flicker: true,
+            static_then_move: false,
         }
     }
 }
@@ -188,16 +200,17 @@ fn run_scenario(inject_bias: bool, max_slam: usize) -> (f64, f64, f64, f64, Vect
     })
 }
 
+#[allow(clippy::too_many_lines)] // 端到端仿真主循环，结构由时间步驱动
 fn run_cfg(cfg: &ScenarioCfg) -> (f64, f64, f64, f64, Vector3<f64>) {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(firefly_observability::init);
     let mut mgr = build_manager_ex(cfg.max_slam, cfg.do_fej);
 
-    // GT 初始化：t=0, 单位姿态, pos=(0,0,1), vel=(1,0,0)，零偏先验
+    // GT 初始化：t=0, 单位姿态, pos=(0,0,1), vel=(1,0,0)（静止场景 vel=0），零偏先验
     let mut s0 = [0.0f64; 17];
     s0[4] = 1.0;
     s0[7] = 1.0;
-    s0[8] = 1.0;
+    s0[8] = if cfg.static_then_move { 0.0 } else { 1.0 };
     mgr.initialize_with_gt(&s0);
 
     let pts = world_points();
@@ -206,6 +219,9 @@ fn run_cfg(cfg: &ScenarioCfg) -> (f64, f64, f64, f64, Vector3<f64>) {
     let dt_cam = 0.1_f64;
     let dt_imu = 0.01_f64;
     let frames = 100_usize;
+    // "静止→运动"场景：前 `static_frames` 帧静止（复现现场 demo 参考静止期），
+    // 之后匀速——静止期 SLAM 特征初始化视差结构差，是现场发散的关键触发条件。
+    let static_frames = if cfg.static_then_move { 50 } else { 0 };
 
     let mut rng = Lcg(0xfeed_d00d);
     let mut max_err_p = 0.0f64;
@@ -234,7 +250,7 @@ fn run_cfg(cfg: &ScenarioCfg) -> (f64, f64, f64, f64, Vector3<f64>) {
                 am,
             });
         }
-        let p_body = p0 + v_gt * t_cam;
+        let p_body = p0 + v_gt * (t_cam - f64::from(static_frames) * dt_cam).max(0.0);
         let uv_l: Vec<_> = pts
             .iter()
             .filter_map(|p| project(*p, p_body, Vector3::new(0.0, -0.025, 0.0)))
@@ -261,7 +277,7 @@ fn run_cfg(cfg: &ScenarioCfg) -> (f64, f64, f64, f64, Vector3<f64>) {
         });
 
         if k % 20 == 0 {
-            let expected = p0 + v_gt * t_cam;
+            let expected = p0 + v_gt * (t_cam - f64::from(static_frames) * dt_cam).max(0.0);
             let err = (mgr.state.imu.pos() - expected).norm();
             max_err_p = max_err_p.max(err);
             let ba = mgr.state.imu.ba().vec();
@@ -283,7 +299,8 @@ fn run_cfg(cfg: &ScenarioCfg) -> (f64, f64, f64, f64, Vector3<f64>) {
         }
     }
 
-    let expected = p0 + v_gt * (f64::from(frames as u32) * dt_cam);
+    let expected =
+        p0 + v_gt * ((f64::from(frames as u32) - f64::from(static_frames)) * dt_cam).max(0.0);
     let err_p = (mgr.state.imu.pos() - expected).norm();
     let err_v = (mgr.state.imu.vel() - v_gt).norm();
     let ba_end = mgr.state.imu.ba().vec();
@@ -312,6 +329,33 @@ fn synthetic_pure_msckf_zero_bias() {
         err_p < 3.0,
         "纯 MSCKF 位置误差过大（疑似结构性发散）: {err_p:.3}m"
     );
+}
+
+/// SLAM 模式（OpenVINS 默认 `max_slam_features=25`）。已知问题：SLAM 更新
+/// 链路毒化状态（合成可复现：`slam=1` 后 0.8s 内 13m 发散；`H_x`/`H_f` 已 FD
+/// 验证正确、initialize/update 与 C++ 逐行一致——残留嫌疑为场景 y 可观测性弱）。
+/// 修复前保持 ignore；apps/vio 亦维持 `max_slam_features=0`。
+#[test]
+#[ignore = "已知问题：SLAM 更新链路毒化状态（合成可复现），见 synthetic_slam_zero_bias 注释"]
+fn synthetic_slam_zero_bias() {
+    let (err_p, err_v, _, _, _) = run_scenario(false, 25);
+    assert!(err_p < 3.0, "SLAM 零偏位置误差过大: {err_p:.3}m");
+    assert!(err_v < 0.3, "SLAM 零偏速度误差过大: {err_v:.3}m/s");
+}
+
+/// 复现现场"静止→运动"：静止 5s 后匀速。静止期 SLAM 特征初始化视差结构差，
+/// 是现场 SLAM 发散的关键触发条件（连续运动合成场景不触发）。
+/// 同 `synthetic_slam_zero_bias`：SLAM 链路毒化已知问题，修复前忽略。
+#[test]
+#[ignore = "已知问题：SLAM 更新链路毒化状态，见 synthetic_slam_zero_bias 注释"]
+fn synthetic_slam_static_then_move() {
+    let (err_p, err_v, _, _, _) = run_cfg(&ScenarioCfg {
+        max_slam: 25,
+        static_then_move: true,
+        ..ScenarioCfg::default()
+    });
+    assert!(err_p < 3.0, "静止→运动 SLAM 位置误差过大: {err_p:.3}m");
+    assert!(err_v < 0.3, "静止→运动 SLAM 速度误差过大: {err_v:.3}m/s");
 }
 
 /// 隔离实验 B：禁用 SLAM + 注入零偏 —— 视觉应能观测并学到零偏。

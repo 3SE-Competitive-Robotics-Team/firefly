@@ -1,33 +1,94 @@
 """firefly 无人机 MuJoCo 场景（MJCF）。
 
 世界系 = demo 地图系：无人机起点 (1, 4, 1)，沿 +x 飞行到目标。
-相机（双目 + 深度）前向 +x，给 KLT 提供特征；地面棋盘纹理提供纹理特征。
+相机（双目 + 深度）前向 +x，给 KLT 提供特征。
 
 灯光约定：**全部用方向光**（`type="directional"`）。此前用带 `pos` 的默认
 定点光，光强随距离衰减——无人机沿 +x 飞到 27m 后地面亮度从均值 42 跌到
 10（近乎全黑）。方向光无距离衰减，全程光照均匀（实测地面均值 140~160，
 无饱和），保证整条任务路径上双目/深度画面可读。
+
+纹理约定（近场特征密度，AGENTS.md VIO 调试状态）：
+- **非周期随机点阵**替代棋盘：棋盘是周期图案，LK 可整周期滑动而残差
+  不变——滑格错配不会被 χ² 拒绝，作为毒数据进入更新；随机纹理无周期
+  可滑。多尺度随机矩形在大中小三个距离段都提供 FAST 角点。
+- 地面 texrepeat 8（一格 8.75m，纹素 ~117px/m）；掠射角下 10m 外地面
+  纵向压缩到个位像素行是透视固有属性，近场 <8m 才是有效特征区。
+- **`--script` VIO 验证轨迹**（x∈[-2,4]、y∈[3,5] 盒内振荡）够不到中线
+  立柱（x≥9），故在盒外两侧加 6 根 3m 高柱：前飞时始终有柱在 2~8m 内
+  入画（水平半 FOV≈43°，横向 2.5m 的柱从 ~2.7m 前方起可见），且柱顶
+  （z=3m）在 5m 处仰角 ~22°，填充上半幅视野。demo 默认地图已同步。
 """
 
-SCENE_XML = r"""
+import struct
+import tempfile
+import zlib
+from pathlib import Path
+
+import numpy as np
+
+# 随机点阵纹理缓存（确定性种子；进程并发时先写临时文件再原子改名）
+_TEX_DIR = Path(tempfile.gettempdir()) / "firefly_textures"
+_DOTS_TEX = _TEX_DIR / "random_dots_1024.png"
+
+
+def _write_png(path: Path, img: np.ndarray) -> None:
+    """最小灰度 PNG 编码器（stdlib：zlib + struct，避免引入 pillow）。"""
+    h, w = img.shape
+    raw = b"".join(b"\x00" + row.tobytes() for row in img)  # 每行 filter=0
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0)  # 8bit 灰度
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(raw, 9))
+        + chunk(b"IEND", b"")
+    )
+    path.write_bytes(png)
+
+
+def _ensure_dots_texture() -> Path:
+    """生成（或复用）非周期随机纹理：1024²灰度，三档尺度随机矩形。
+
+    对照 OpenVINS Simulator 的随机纹理生成：大块定基调、中块造角点、
+    小块补高频。固定种子保证各进程/各次运行纹理一致。
+    """
+    if _DOTS_TEX.exists():
+        return _DOTS_TEX
+    rng = np.random.default_rng(7)
+    size = 1024
+    img = np.full((size, size), 128, np.uint8)
+    for n, lo, hi in [(24, 64, 256), (160, 16, 64), (900, 4, 16)]:
+        for _ in range(n):
+            y = int(rng.integers(0, size))
+            x = int(rng.integers(0, size))
+            hh = int(rng.integers(lo, hi))
+            ww = int(rng.integers(lo, hi))
+            img[y : y + hh, x : x + ww] = np.uint8(rng.integers(35, 220))
+    _TEX_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = _DOTS_TEX.with_suffix(".tmp")
+    _write_png(tmp, img)
+    tmp.replace(_DOTS_TEX)
+    return _DOTS_TEX
+
+
+_DOTS_PATH = _ensure_dots_texture()
+
+SCENE_XML = rf"""
 <mujoco model="firefly">
   <option timestep="0.005" gravity="0 0 -9.81"/>
 
   <asset>
-    <!-- 地面棋盘：texrepeat 35 → 约 2m 一格。曾用 10（7m 大格），
-         相机高度 1~1.5m 时画面内地格过大、FAST 角点整幅不足 30 个，
-         KLT 轨迹寿命骤减、VIO 无更新可用。 -->
-    <texture name="checker" type="2d" builtin="checker" width="512" height="512"
-             rgb1="0.45 0.45 0.45" rgb2="0.65 0.65 0.65"/>
-    <material name="ground" texture="checker" texrepeat="35 35"/>
-    <!-- 立柱棋盘贴面：纯色盒只有直线棱边（无角点），贴上高频棋盘后
-         每根柱面提供数十个 FAST 角点，是前向视差的主要来源 -->
-    <texture name="checker_pillar" type="2d" builtin="checker" width="512" height="512"
-             rgb1="0.85 0.55 0.15" rgb2="0.15 0.25 0.45"/>
-    <material name="pillar_a" texture="checker_pillar" texrepeat="3 3"/>
-    <texture name="checker_pillar2" type="2d" builtin="checker" width="512" height="512"
-             rgb1="0.80 0.20 0.20" rgb2="0.90 0.90 0.85"/>
-    <material name="pillar_b" texture="checker_pillar2" texrepeat="3 3"/>
+    <!-- 非周期随机点阵（运行时生成，见模块 docstring）：地面与立柱共用
+         一张纹理，靠不同 texrepeat 区分表观尺度 -->
+    <texture name="dots" type="2d" file="{_DOTS_PATH}"/>
+    <material name="ground" texture="dots" texrepeat="8 8"/>
+    <material name="pillar_a" texture="dots" texrepeat="2 2"/>
+    <material name="pillar_b" texture="dots" texrepeat="4 4"/>
   </asset>
 
   <worldbody>
@@ -36,7 +97,7 @@ SCENE_XML = r"""
     <light name="sun_b" type="directional" dir="-0.15 0.6 -0.78" diffuse="0.3 0.3 0.35"/>
     <light name="sun_c" type="directional" dir="0.75 0.1 -0.65" diffuse="0.22 0.22 0.25"/>
 
-    <!-- 地面（棋盘纹理：KLT 特征来源之一） -->
+    <!-- 地面（随机点阵：KLT 近场特征主要来源） -->
     <geom name="ground" type="plane" size="35 35 0.1" material="ground"/>
 
     <!-- 沿途障碍（视觉特征 + 物理遮挡）：中线上一串孤立高柱（0.8~1.2m
@@ -48,6 +109,18 @@ SCENE_XML = r"""
     <geom type="box" pos="16 4.0 1.5" size="0.4 0.6 1.5" material="pillar_a"/>
     <geom type="box" pos="19 1.8 0.9" size="0.4 0.5 0.9" material="pillar_b"/>
     <geom type="box" pos="22 3.6 1.5" size="0.4 0.5 1.5" material="pillar_a"/>
+
+    <!-- VIO 验证盒两侧立柱：--script 轨迹在 x∈[-2,4]、y∈[3,5] 振荡，
+         中线立柱（x≥9）全程不可见。这 6 根柱在轨迹侧翼 |y-4|=2.5m
+         （柱缘距路径极端 ≥1.15m，PD 瞬态安全），前向相机在 2~8m 内
+         持续可见，为 MSCKF 更新提供带视差的近场特征。demo 默认地图
+         与其同构。 -->
+    <geom type="box" pos="0.5 1.5 1.5" size="0.35 0.35 1.5" material="pillar_a"/>
+    <geom type="box" pos="2.0 1.5 1.5" size="0.35 0.35 1.5" material="pillar_b"/>
+    <geom type="box" pos="3.5 1.5 1.5" size="0.35 0.35 1.5" material="pillar_a"/>
+    <geom type="box" pos="0.5 6.5 1.5" size="0.35 0.35 1.5" material="pillar_b"/>
+    <geom type="box" pos="2.0 6.5 1.5" size="0.35 0.35 1.5" material="pillar_a"/>
+    <geom type="box" pos="3.5 6.5 1.5" size="0.35 0.35 1.5" material="pillar_b"/>
 
     <!-- 无人机（freejoint 六自由度） -->
     <body name="drone" pos="1 4 1">

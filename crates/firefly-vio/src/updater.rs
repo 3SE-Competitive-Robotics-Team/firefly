@@ -178,6 +178,13 @@ impl UpdaterMsckf {
                     let uv_m = uvs_norm[m];
                     let err = (Vector2::new(f64::from(uv_m.x), f64::from(uv_m.y)) - uv_n).norm();
                     worst = worst.max(err);
+                    // 深度上限门控：场景纹理最远 ~8m（立柱/地面棋盘），超过
+                    // `max_feature_depth` 的深度必为低视差病态三角化产物——
+                    // 深特征 H 增益 ~fx/z 小，同像素残差对应数米位置修正
+                    // （实测 res=1.07px 拉 2.4m、13m/39m 深度特征进场）。
+                    if p_in_cw.z > self.options.max_feature_depth_m {
+                        worst = f64::INFINITY;
+                    }
                 }
             }
             if worst > 0.3 || !worst.is_finite() {
@@ -299,6 +306,18 @@ impl UpdaterMsckf {
         // 7. 测量压缩 + EKF 更新（对照 C++ 的末尾）
         measurement_compress_inplace(&mut hx_big, &mut res_big);
         if hx_big.nrows() == 0 {
+            return;
+        }
+        // 更新级 RMS 门控：单特征 chi2 用膨胀的 P 会退化接受系统性大残差
+        // （运动启动三角化病态 → 同号残差累积，实测单行仅 1.6px 但 600 行
+        // 累积把位置拉飞 6m）。与状态协方差无关的像素级硬门，整次更新
+        // 平均残差超限即跳过。
+        let rms_res = res_big.norm() / f64::sqrt(res_big.len() as f64);
+        if rms_res > self.options.max_update_res_px {
+            log::debug!(
+                "MSCKF 跳过更新: RMS res={rms_res:.2}px > {:.1}px（系统性残差，疑似病态三角化）",
+                self.options.max_update_res_px
+            );
             return;
         }
         // hx_order 按列偏移排序（对照 C++ 的 Hx_order 顺序）

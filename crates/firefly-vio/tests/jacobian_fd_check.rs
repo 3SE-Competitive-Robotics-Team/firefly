@@ -244,3 +244,76 @@ fn msckf_jacobian_matches_finite_difference() {
         "MSCKF 测量雅可比与有限差分不一致: {worst_at}"
     );
 }
+
+/// SLAM `H_f`（landmark 列）FD 验证：扰动 landmark 位置分量，残差中心差分
+/// 对照解析 `h_f`。MSCKF 的 `H_x` 已由 `msckf_jacobian_matches_finite_difference`
+/// 验证；SLAM 更新保留 `H_f`（landmark 列），其符号/尺度错会导致小残差更新
+/// 方向错误、状态自激发散（合成 SLAM 测试实测 res 0.5px 却持续拉偏）。
+#[test]
+fn slam_h_f_matches_finite_difference() {
+    use firefly_vio::landmark::Landmark;
+    let (st, feat0) = build_state();
+
+    // 特征作为 SLAM landmark（Global3D）加入状态
+    let mut st = st;
+    let mut lm = Landmark::new(FeatRepresentation::Global3D, feat0.featid);
+    lm.set_from_xyz(&feat0.p_FinG, false);
+    lm.set_from_xyz(&feat0.p_FinG, true);
+    st.features_slam.insert(feat0.featid, lm);
+    // landmark id 从 15（imu 后）开始分配（克隆 3 个 6 维 → 15+18=33）
+    st.features_slam
+        .get_mut(&feat0.featid)
+        .unwrap()
+        .set_local_id(33);
+
+    // SLAM 路径：feat.p_FinG 从 landmark 取
+    let feat = feat0.clone();
+    let jac = firefly_vio::updater_helper::get_feature_jacobian_full(
+        &st,
+        &feat,
+        FeatRepresentation::Global3D,
+    );
+    // x_order 不含 landmark（jac 只返回 H_f，landmark 列由 UpdaterSLAM
+    // 手动追加）——本测试只验证 h_f 与 FD 的一致性。
+
+    let eps = 1e-3_f64;
+    let mut worst_rel = 0.0f64;
+    for comp in 0..3 {
+        let mut stp = st.clone();
+        let mut lmp = stp.features_slam.get_mut(&feat0.featid).unwrap().clone();
+        let mut p = lmp.get_xyz(false);
+        p[comp] += eps;
+        lmp.set_from_xyz(&p, false);
+        stp.features_slam.insert(feat0.featid, lmp);
+        let mut feat_plus = feat.clone();
+        feat_plus.p_FinG = stp.features_slam[&feat0.featid].get_xyz(false);
+        let rp = residual(&stp, &feat_plus);
+
+        let mut stm = st.clone();
+        let mut lmm = stm.features_slam.get_mut(&feat0.featid).unwrap().clone();
+        let mut p = lmm.get_xyz(false);
+        p[comp] -= eps;
+        lmm.set_from_xyz(&p, false);
+        stm.features_slam.insert(feat0.featid, lmm);
+        let mut feat_minus = feat.clone();
+        feat_minus.p_FinG = stm.features_slam[&feat0.featid].get_xyz(false);
+        let rm = residual(&stm, &feat_minus);
+
+        let fd = -(rp - rm) / (2.0 * eps);
+        for r in 0..fd.len() {
+            let a = jac.h_f[(r, comp)];
+            let f = fd[r];
+            let diff = (a - f).abs();
+            let rel = diff / a.abs().max(f.abs()).max(1e-6);
+            worst_rel = worst_rel.max(rel);
+            println!(
+                "H_f comp={comp} row{r}: 解析={a:+.4e} 数值={f:+.4e} diff={diff:.2e} rel={rel:.2e}"
+            );
+        }
+    }
+    assert!(
+        worst_rel < 0.05,
+        "SLAM H_f 与 FD 失配（最差相对误差 {worst_rel:.2e}）——landmark 列符号/尺度错误"
+    );
+    println!("SLAM H_f FD 验证通过（最差相对误差 {worst_rel:.2e}）");
+}
