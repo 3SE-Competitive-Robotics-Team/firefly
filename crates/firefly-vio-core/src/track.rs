@@ -1,13 +1,12 @@
 //! KLT 视觉前端（对照 `OpenVINS` `ov_core/src/track`：`TrackBase`/`TrackKLT`/`Grider_GRID`）。
 //!
-//! 本模块实现 OpenVINS 的 KLT 稀疏特征跟踪前端，并把所依赖的 OpenCV 算法全部
-//! 自实现（不引入 `opencv` crate）：
+//! 本模块实现 OpenVINS 的 KLT 稀疏特征跟踪前端。OpenCV 算法两条来源
+//! （均不引入 `opencv` crate）：检测/均衡自实现；LK 光流与基础矩阵 RANSAC
+//! 用 purecv（OpenCV 语义镜像；自研版因性能不达标退役，见各使用点注释）：
 //! - [`histogram`]：直方图均衡（`equalizeHist`）与 CLAHE（`createCLAHE`）；
 //! - [`pyramid`]：灰度图 ↔ purecv Matrix 转换（`gray_to_matrix`）；
 //! - [`fast`]：FAST-9 角点检测 + 非极大值抑制（`cv::FAST`）；
-//! - [`grider`]：网格自适应 FAST 提取 + `cornerSubPix`（`Grider_GRID::perform_griding`）；
-//! - [`lk`]：金字塔 LK 光流（`calcOpticalFlowPyrLK`）；
-//! - [`fundamental`]：归一化 8 点法 + RANSAC 基础矩阵（`findFundamentalMat`）。
+//! - [`grider`]：网格自适应 FAST 提取 + `cornerSubPix`（`Grider_GRID::perform_griding`）。
 //!
 //! [`TrackKlt`] 提供完整跟踪器（对照 `TrackKLT.cpp`），消费 `crate::feat` 的
 //! `FeatureDatabase`，按时间跟踪（单目）与双目一致性跟踪，并把去畸变归一化
@@ -30,7 +29,6 @@ use crate::sensor::{CameraData, GrayImage};
 use std::collections::HashMap;
 
 pub mod fast;
-pub mod fundamental;
 pub mod grider;
 pub mod histogram;
 pub mod pyramid;
