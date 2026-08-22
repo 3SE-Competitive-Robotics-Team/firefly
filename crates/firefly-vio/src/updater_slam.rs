@@ -347,18 +347,7 @@ impl UpdaterSlam {
 
         // 4. EKF 更新（对照 C++ 末尾）
         let r = self.options.sigma_pix_sq * DMatrix::identity(total_rows, total_rows);
-        let pos_before = state.imu.pos();
-        let rms = res_big.norm() / f64::sqrt(res_big.len() as f64);
         ekf_update(state, &hx_order_big, &hx_big, &res_big, &r);
-        let pos_after = state.imu.pos();
-        log::debug!(
-            "SLAM 更新: 特征{} 行{} RMS res={rms:.2}px Δ位置=({:.2},{:.2},{:.2})",
-            blocks.len(),
-            total_rows,
-            pos_after.x - pos_before.x,
-            pos_after.y - pos_before.y,
-            pos_after.z - pos_before.z
-        );
     }
 
     /// 锚点切换（对照 `UpdaterSLAM::change_anchors`）。
