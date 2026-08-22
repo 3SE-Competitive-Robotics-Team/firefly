@@ -308,18 +308,6 @@ impl UpdaterMsckf {
         if hx_big.nrows() == 0 {
             return;
         }
-        // 更新级 RMS 门控：单特征 chi2 用膨胀的 P 会退化接受系统性大残差
-        // （运动启动三角化病态 → 同号残差累积，实测单行仅 1.6px 但 600 行
-        // 累积把位置拉飞 6m）。与状态协方差无关的像素级硬门，整次更新
-        // 平均残差超限即跳过。
-        let rms_res = res_big.norm() / f64::sqrt(res_big.len() as f64);
-        if rms_res > self.options.max_update_res_px {
-            log::debug!(
-                "MSCKF 跳过更新: RMS res={rms_res:.2}px > {:.1}px（系统性残差，疑似病态三角化）",
-                self.options.max_update_res_px
-            );
-            return;
-        }
         // hx_order 按列偏移排序（对照 C++ 的 Hx_order 顺序）
         let mut hx_order: Vec<(i32, usize, usize)> = hx_mapping
             .iter()
