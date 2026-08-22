@@ -666,3 +666,110 @@ fn single_triangulation_recovers_corridor_dot_exact_inputs() {
     );
     assert!(err < 0.05, "解析输入下应恢复真值位置: {err:.4}m");
 }
+
+#[cfg(test)]
+mod pure_translation_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn clone_pose2(t: &Vector3<f64>, r: &Matrix3<f64>) -> ClonePose {
+        ClonePose { rot: *r, pos: *t }
+    }
+
+    /// 相机沿 +x 纯平移 12 帧（模拟前向飞行），特征在前方 (10, 2, 0)。
+    /// 对照 e2e：走廊点云在前方、前向运动——验证纯平移视差下三角化。
+    #[test]
+    fn triangulates_pure_translation_forward() {
+        let p_g = Vector3::new(10.0, 2.0, 3.0);
+        let mut timestamps = Vec::new();
+        let mut uvs_norm = Vec::new();
+        let mut cam_clones = Vec::new();
+        let r = Matrix3::identity();
+        for i in 0..12 {
+            let t = Vector3::new(f64::from(i) * 0.1, 0.0, 1.0);
+            let p_c = r * (p_g - t);
+            let uv = Vector2::new((p_c.x / p_c.z) as f32, (p_c.y / p_c.z) as f32);
+            timestamps.push(f64::from(i) * 0.1);
+            uvs_norm.push(uv);
+            cam_clones.push((f64::from(i) * 0.1, clone_pose2(&t, &r)));
+        }
+        let mut feat = Feature {
+            featid: 1,
+            to_delete: false,
+            timestamps: HashMap::from([(0usize, timestamps)]),
+            uvs: HashMap::new(),
+            uvs_norm: HashMap::from([(0usize, uvs_norm)]),
+            anchor_cam_id: -1,
+            anchor_clone_timestamp: 0.0,
+            p_FinA: Vector3::zeros(),
+            p_FinG: Vector3::zeros(),
+        };
+        let mut clones = HashMap::new();
+        clones.insert(0usize, cam_clones);
+        let ok = single_triangulation(&mut feat, &clones, &TriangulationOptions::default());
+        println!("纯平移前向: ok={ok} p_FinA={:?}", feat.p_FinA);
+        assert!(ok, "纯平移前向三角化失败");
+        // 锚点 = 相机 0 最后时刻（t=1.1s、位姿 (1.1,0,1)）→ p_FinA = 特征相对锚点
+        // 特征 (10,2,3) − 锚点 (1.1,0,1) = (8.9, 2, 2)
+        assert!((feat.p_FinA.x - 8.9).abs() < 1e-3, "x = {}", feat.p_FinA.x);
+        assert!((feat.p_FinA.y - 2.0).abs() < 1e-3, "y = {}", feat.p_FinA.y);
+        assert!((feat.p_FinA.z - 2.0).abs() < 1e-3, "z = {}", feat.p_FinA.z);
+    }
+}
+
+#[cfg(test)]
+mod e2e_style_tests {
+    use super::*;
+    use std::collections::HashMap;
+    /// e2e 风格：完整几何复刻（`r_ito_c` 外参 + 前向平移 12 帧 + 双目基线）。
+    /// 特征 G 系 (26, 2.5, 0.5)，相机 body 位置 (10+i*0.1, 0, 1)，姿态单位阵；
+    /// 相机系 `p_c = r_ito_c·(p_b − t_cam_body)`，克隆位姿按 `build_clones_cam` 公式。
+    #[test]
+    fn triangulates_e2e_style_far_feature() {
+        let r_ito_c = Matrix3::new(0.0, -1.0, 0.0, 0.0, 0.0, -1.0, 1.0, 0.0, 0.0);
+        let p_g = Vector3::new(26.0, 2.5, 0.5);
+        let mut clones = HashMap::new();
+        let mut feat = Feature {
+            featid: 1,
+            to_delete: false,
+            timestamps: HashMap::new(),
+            uvs: HashMap::new(),
+            uvs_norm: HashMap::new(),
+            anchor_cam_id: -1,
+            anchor_clone_timestamp: 0.0,
+            p_FinA: Vector3::zeros(),
+            p_FinG: Vector3::zeros(),
+        };
+        for cam in 0..2 {
+            let mut cam_clones = Vec::new();
+            let mut ts = Vec::new();
+            let mut uvns = Vec::new();
+            for i in 0..12 {
+                let t_body = Vector3::new(10.0 + f64::from(i) * 0.1, 0.0, 1.0);
+                // 双目偏移：p_IinC = r_ito_c·(0, ±0.025, 0)
+                let p_iin_c =
+                    r_ito_c * Vector3::new(0.0, if cam == 0 { 0.025 } else { -0.025 }, 0.0);
+                let r_gto_ci = r_ito_c;
+                let p_ciin_g = t_body - r_gto_ci.transpose() * p_iin_c;
+                cam_clones.push((
+                    f64::from(i) * 0.1,
+                    ClonePose {
+                        rot: r_gto_ci,
+                        pos: p_ciin_g,
+                    },
+                ));
+                // 投影（相机系，z 前向）
+                let p_c = r_ito_c * (p_g - t_body);
+                let uv = Vector2::new((p_c.x / p_c.z) as f32, (p_c.y / p_c.z) as f32);
+                ts.push(f64::from(i) * 0.1);
+                uvns.push(uv);
+            }
+            clones.insert(cam, cam_clones);
+            feat.timestamps.insert(cam, ts);
+            feat.uvs_norm.insert(cam, uvns);
+        }
+        let ok = single_triangulation(&mut feat, &clones, &TriangulationOptions::default());
+        println!("e2e 风格远端: ok={ok} p_FinA={:?}", feat.p_FinA);
+        assert!(ok, "e2e 风格远端三角化失败");
+    }
+}

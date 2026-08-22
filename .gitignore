@@ -19,6 +19,9 @@ wheels/
 docs/papers/
 apps/firefly-demo/maps/*.ffmap
 
+# 录制产物（rrd/rbl）与运行时日志
+/logs/
+
 # MuJoCo 运行时日志
 MUJOCO_LOG.TXT
 

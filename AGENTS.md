@@ -55,9 +55,7 @@ max_clone_size=11（1.1s 窗口）内加速度零偏可观测性弱，且合成�
 ——SLAM 初始化/Givens 路径待 FD 验证）。纯 MSCKF 含偏+真实纹理下仍
 公里级漂移，但 vio 全程存活不再崩溃/卡死（奇异三角化已优雅降级、死循环
 已修、H_x 列偏移修复后更新数学已被 FD 验证正确）。合成与现场的共同瓶颈：
-跟踪质量与零偏可观测性。下一步优先级：①FD 验证 `initialize_feature`
-（Givens 初始化）与 UpdaterSLAM 更新路径；②现场场景近场纹理增强；
-③零偏可观测性实验（增大 max_clone_size 扫描）。
+跟踪质量与零偏可观测性。
 
 ## 运行（MuJoCo 双语言闭环）
 
@@ -72,7 +70,7 @@ Python sim（MuJoCo 物理 + 传感器发布）→ vio（MSCKF 位姿估计）�
 推荐一键启动（后台拉起三进程 + viewer，Ctrl-C 清理）：
 ```bash
 scripts/run_firefly.sh            # 起 viewer + sim + vio + demo
-scripts/run_firefly.sh --no-viewer --save task.rrd   # 免 viewer / 捕获录制
+scripts/run_firefly.sh --save task.rrd   # 捕获录制（viewer 后台落盘；--no-viewer 时不产 rrd）
 ```
 
 按顺序各开一个终端（可先开 viewer，见下）：
@@ -112,6 +110,24 @@ cargo run -p firefly-demo -- --map apps/firefly-demo/maps/gate.ffmap  # 静态�
 - Rust：`cargo build`（workspace 含 `apps/vio`、`apps/firefly-demo`，排除 `apps/firefly-sim`）。
 - Python：`uv sync`（根 workspace 统一管理 `firefly-mujoco` / `firefly-sim`，
   依赖与脚本见各自 `pyproject.toml`）。
+
+## Log / Debug（rerun rrd）
+
+- **debug 数据一律进 rrd，禁止文本日志**：`firefly-vio.log` /
+  `firefly-sim.log` 这类文件是违禁品。
+- 分工：log 宏（logforth）只做进程级诊断（启动、错误、关键事件）；
+  可结构化数据（位姿、图像、标量、轨迹、中间状态）进 rrd——
+  viewer 可回放，CLI/RrdReader 可检索。
+- 写入（`firefly-rerun::Stream`）：
+  - 入口：`connect_or_spawn()` 连共享 viewer，`save(path)` 离线录制。
+  - 时间轴：`set_time(sim_time 秒)`。
+  - 封装：`log_gray_image` / `log_depth_image` / `log_pose` /
+    `log_line_strip` / `clear`；标量文本走 `stream()` 底层
+    （`rerun::Scalars` / `rerun::TextLog`）。
+  - 实体路径按 app 前缀（`sensor/*`、`vio/*`、`plan/*`），
+    遵守上文 rerun 可视化约定。
+- 读取：viewer 回放；`rerun rrd print --entity <path> -vvv` /
+  `rerun rrd stats`；Python `RrdReader`，详见 `.agents/skills/rerun`。
 
 ## 性能
 

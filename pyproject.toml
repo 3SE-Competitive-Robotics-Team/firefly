@@ -24,3 +24,8 @@ firefly-sim = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*", "apps/firefly-sim"]
+
+[dependency-groups]
+dev = [
+    "rerun-sdk>=0.36.2",
+]

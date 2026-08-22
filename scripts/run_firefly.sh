@@ -42,7 +42,7 @@ rm -rf /tmp/iceoryx2
 
 if [[ $NO_VIEWER -eq 0 ]]; then
   if [[ -n "$SAVE" ]]; then
-    echo "==> 启动 rerun viewer（保存到 $SAVE）..."
+    echo "==> 启动 rerun viewer（保存到 ${SAVE}）..."
     rerun --save "$SAVE" > firefly-rerun.log 2>&1 &
   else
     echo "==> 启动 rerun viewer ..."

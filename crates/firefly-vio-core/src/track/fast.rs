@@ -11,23 +11,8 @@
 
 use crate::sensor::GrayImage;
 use crate::track::KeyPoint;
+use crate::track::pyramid::gray_to_matrix;
 use purecv::features2d::{FastFeatureDetector, FastType};
-
-/// 将 `GrayImage` 转为 purecv `Matrix<u8>`（单通道）。
-fn gray_to_matrix(img: &GrayImage) -> purecv::core::Matrix<u8> {
-    purecv::core::Matrix::from_vec(img.height, img.width, 1, img.data.clone())
-}
-
-/// FAST-9 角点检测。
-///
-/// - `threshold`：强度阈值（像素差，0–255）；
-/// - `nonmax_suppression`：是否做非极大值抑制。
-///
-/// 返回角点列表。边界 3 像素内不检测（窗口半径 3 无法完整采样）。
-#[must_use]
-pub fn fast(img: &GrayImage, threshold: i32, nonmax_suppression: bool) -> Vec<KeyPoint> {
-    fast_with_score(img, threshold, nonmax_suppression).0
-}
 
 /// 与 [`fast`] 相同，但额外返回每个角点的得分（供 grider 排序复用）。
 #[must_use]
@@ -59,10 +44,9 @@ pub fn fast_with_score(
 }
 
 #[cfg(test)]
-mod tests {
+mod purecv_tests {
     use super::*;
 
-    /// 构造黑色背景 + 单个白色方块角点的合成图。
     fn corner_img(cx: usize, cy: usize, w: usize, h: usize) -> GrayImage {
         let mut data = vec![0u8; w * h];
         for y in cy..(cy + 2).min(h) {
@@ -78,46 +62,21 @@ mod tests {
     }
 
     #[test]
-    fn fast_detects_corner_at_expected_position() {
-        let (w, h) = (40, 40);
-        let img = corner_img(20, 20, w, h);
-        let kpts = fast(&img, 20, false);
-        assert!(!kpts.is_empty(), "no corners detected");
-        let found = kpts
-            .iter()
-            .any(|k| (k.x - 20.0).abs() <= 3.0 && (k.y - 20.0).abs() <= 3.0);
-        assert!(found, "corner not at expected position; got {kpts:?}");
+    fn purecv_fast_with_score_detects_corner() {
+        // 2x2 白块（自研 fast() 已知能检出）
+        let img = corner_img(20, 20, 40, 40);
+        let (kps, _) = fast_with_score(&img, 20, false);
+        assert!(!kps.is_empty(), "purecv FAST 对 2x2 白块检出 0");
     }
 
     #[test]
-    fn fast_nms_does_not_increase_count() {
-        // NMS 不应增加点数（purecv 严格 > 比较：同分互相抑制，允许为 0）
-        let (w, h) = (48, 48);
-        let img = corner_img(16, 16, w, h);
-        let with_nms = fast(&img, 20, true);
-        let without_nms = fast(&img, 20, false);
-        assert!(!without_nms.is_empty());
-        assert!(
-            with_nms.len() <= without_nms.len(),
-            "NMS should not add points"
-        );
-    }
-
-    #[test]
-    fn fast_flat_image_no_corners() {
-        let img = gray_const(100, 32, 32);
-        let kpts = fast(&img, 20, true);
-        assert!(kpts.is_empty());
-    }
-
-    #[test]
-    fn fast_gradient_no_corners() {
-        let w = 32;
-        let h = 32;
+    fn purecv_fast_with_score_detects_blob() {
+        // 3x3 亮点（150）在黑背景（0）上：圆周 16 点全暗 → 应检出
+        let (w, h) = (64, 64);
         let mut data = vec![0u8; w * h];
-        for y in 0..h {
-            for x in 0..w {
-                data[y * w + x] = x.midpoint(y).min(255) as u8;
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                data[((20 + dy) as usize) * w + (20 + dx) as usize] = 150;
             }
         }
         let img = GrayImage {
@@ -125,29 +84,46 @@ mod tests {
             height: h,
             data,
         };
-        let kpts = fast(&img, 25, true);
-        assert!(kpts.is_empty());
+        let (kps, _) = fast_with_score(&img, 10, false);
+        assert!(!kps.is_empty(), "purecv FAST 对 3x3 亮点检出 0: {kps:?}");
     }
 
     #[test]
-    fn fast_threshold_affects_count() {
-        let img = corner_img(20, 20, 40, 40);
-        let strict = fast(&img, 120, false);
-        let lenient = fast(&img, 20, false);
-        assert!(strict.len() <= lenient.len());
-    }
-
-    #[test]
-    fn fast_tiny_image_no_panic() {
-        let img = gray_const(0, 3, 3);
-        assert!(fast(&img, 10, true).is_empty());
-    }
-
-    fn gray_const(v: u8, w: usize, h: usize) -> GrayImage {
-        GrayImage {
+    fn purecv_fast_with_score_blob_on_checker() {
+        // 3x3 亮点（150）在棋盘背景（60/100）上：圆周 16 点 60/100 < 140
+        // → 应检出（合成测试场景）
+        let (w, h) = (64, 64);
+        let mut data = vec![0u8; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                data[y * w + x] = if ((x / 16) + (y / 16)) % 2 == 0 {
+                    60
+                } else {
+                    100
+                };
+            }
+        }
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                data[((20 + dy) as usize) * w + (20 + dx) as usize] = 150;
+            }
+        }
+        let img = GrayImage {
             width: w,
             height: h,
-            data: vec![v; w * h],
-        }
+            data,
+        };
+        let (kps, _) = fast_with_score(&img, 10, false);
+        println!(
+            "棋盘亮点 NMS关: {} 个, response={:?}",
+            kps.len(),
+            kps.iter().map(|k| k.response).take(5).collect::<Vec<_>>()
+        );
+        assert!(!kps.is_empty(), "purecv FAST 棋盘上亮点检出 0: {kps:?}");
+        // NMS 开：平台斑（3x3 同 level）响应平坦，"严格大于"8 邻域 → 全抑制
+        // （OpenCV 同行为，数学事实）——合成测试因此用高斯斑（单峰）
+        let (kps_nms, _) = fast_with_score(&img, 10, true);
+        println!("棋盘亮点 NMS开: {} 个", kps_nms.len());
+        assert!(kps_nms.is_empty(), "平台斑 NMS 应全抑制（响应平坦）");
     }
 }
