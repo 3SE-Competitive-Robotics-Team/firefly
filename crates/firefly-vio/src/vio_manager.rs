@@ -15,6 +15,7 @@ use firefly_vio_core::imu_model::ImuCalibration;
 use firefly_vio_core::propagation::{LinearizationPoint, MeanState, Propagator};
 use firefly_vio_core::sensor::{CameraData, ImuData};
 use firefly_vio_core::track::TrackKlt;
+use firefly_vio_types::var::Variable as _;
 use nalgebra::{DMatrix, Vector3};
 use std::collections::BTreeMap;
 
@@ -268,6 +269,22 @@ impl VioManager {
         self.state.imu.set_value(q, p, v, bg, ba);
         // FEJ 同步为首估计（对照 C++ 的 set_value + set_fej）
         self.state.imu.set_fej(q, p, v, bg, ba);
+
+        // IMU 协方差块重写（对照 C++ initialize_with_gt 的
+        // StateHelper::set_initial_covariance 段）：`State::new` 的 1e-6
+        // 单位阵等价于"全知"先验——σ_ba=1mm/s² 使加速度零偏不可观测，
+        // 有偏场景视觉更新无法修正状态而发散。诚实先验：基础 σ=20mm/s
+        // （覆盖 bg/ba），姿态 1.7°，位置 5cm，速度 1cm/s。
+        let id = self.state.imu.id() as usize;
+        let base = 0.02_f64 * 0.02;
+        let mut cov = base * DMatrix::<f64>::identity(15, 15);
+        for (blk, sigma) in [(0usize, 0.017f64), (3, 0.05), (6, 0.01)] {
+            for r in 0..3 {
+                cov[(blk + r, blk + r)] = sigma * sigma;
+            }
+        }
+        self.state.cov.view_mut((id, id), (15, 15)).copy_from(&cov);
+
         self.is_initialized_vio = true;
     }
 
@@ -517,18 +534,15 @@ impl VioManager {
         // MSCKF 用过的特征全部删除（对照 C++ 末尾的 to_delete 标记段）
         self.track_feats.database_mut().mark_deleted(msckf_ids);
 
-        // 14. SLAM 更新（分批 max_slam_in_update；对照 C++ while 循环）
+        // 14. SLAM 更新（分批 max_slam_in_update；对照 C++：循环内 erase 前缀、
+        // 列表递减可终止，处理后不回填）。SLAM 特征是持久路标——**不标记删除**
+        //（C++ 的 `to_delete = true` 只作用于 MSCKF 特征段）。
         let max_slam_in_update = self.state.options.max_slam_in_update;
         while !feats_slam_update.is_empty() {
             let take = max_slam_in_update.min(feats_slam_update.len());
-            let tail: Vec<Feature> = feats_slam_update.split_off(take);
-            let mut batch = std::mem::replace(&mut feats_slam_update, tail);
-            let batch_ids: Vec<usize> = batch.iter().map(|f| f.featid).collect();
+            let mut batch: Vec<Feature> = feats_slam_update.drain(..take).collect();
             self.updater_slam.update(&mut self.state, &mut batch);
             self.propagator.invalidate_cache();
-            // SLAM 用过的特征全部删除（对照 C++ 末尾 to_delete 标记段）
-            self.track_feats.database_mut().mark_deleted(batch_ids);
-            feats_slam_update.extend(batch.iter().cloned());
         }
 
         // 15. SLAM 延迟初始化（对照 C++）

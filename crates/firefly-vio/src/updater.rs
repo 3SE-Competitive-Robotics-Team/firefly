@@ -18,10 +18,10 @@ use nalgebra::{DMatrix, DVector, Vector2};
 use crate::options::UpdaterOptions;
 use crate::state::State;
 use crate::state_helper::{ekf_update, get_marginal_covariance};
-use firefly_vio_types::var::PoseJpl;
 use crate::updater_helper::{
     get_feature_jacobian_full, measurement_compress_inplace, nullspace_project_inplace,
 };
+use firefly_vio_types::var::PoseJpl;
 
 /// chi2 95% 分位数（自由度 1..=30 的精确值，`>30` 用 Wilson–Hilferty 近似）。
 const CHI2_95_TABLE: [f64; 30] = [
@@ -147,12 +147,11 @@ impl UpdaterMsckf {
         // 垃圾点，其他视图投影被视差放大 → 巨大残差 + 巨大增益修正（实测单次
         // 56m）。此门与协方差 P 无关，直接从源头拒掉不一致特征。
         // 预建时间→克隆查找表，避免每个测量线性扫描 clones（O(n²)→O(n)）
-        let clone_map: std::collections::HashMap<u64, &PoseJpl> =
-            state
-                .clones_imu
-                .iter()
-                .map(|(t, c)| (t.to_bits(), c))
-                .collect();
+        let clone_map: std::collections::HashMap<u64, &PoseJpl> = state
+            .clones_imu
+            .iter()
+            .map(|(t, c)| (t.to_bits(), c))
+            .collect();
         let n_before = feature_vec.len();
         feature_vec.retain_mut(|feat| {
             let mut worst = 0.0f64;

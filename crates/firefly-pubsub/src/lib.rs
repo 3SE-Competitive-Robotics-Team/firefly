@@ -16,6 +16,7 @@
 
 pub mod camera;
 pub mod imu;
+pub mod node;
 pub mod odom;
 pub mod publish;
 pub mod reference;

@@ -79,20 +79,24 @@ def _publish_traced(pub, cycle, name: str, msg, ts: float) -> None:
 
 
 def _scripted_ref(t: float) -> tuple[np.ndarray, np.ndarray]:
-    """`--script` 模式：柔和脚本化参考（前向 + 横向/高度正弦），供 VIO 验证。
+    """`--script` 模式：柔和脚本化参考（闭合周期轨迹），供 VIO 验证。
 
     planner/demo 不参与：直接给出平滑 (pos, vel)，让双目相机在无规划器的
-    情况下获得受控运动（前向为主、横向/高度变化提供 3D 视差）。
+    情况下获得受控运动。三轴取 T=20s 的整倍频正弦（Lissajous），位置/速度
+    在周期边界连续——`--no-trace` 的 `t % 20` 循环不会产生参考跳变
+    （此前线性前向 + 回卷导致 16m 跳变 → PD 发散 → MuJoCo QACC NaN）。
     """
+    period = 20.0
+    w1, w2, w3 = 2 * np.pi / period, 2 * 2 * np.pi / period, 3 * 2 * np.pi / period
     pos = np.array([
-        1.0 + 0.8 * t,
-        4.0 + 1.0 * np.sin(0.6 * t),
-        1.0 + 0.5 * np.sin(0.4 * t),
+        1.0 + 3.0 * np.sin(w1 * t),
+        4.0 + 1.0 * np.sin(w2 * t),
+        1.0 + 0.5 * np.sin(w3 * t),
     ])
     vel = np.array([
-        0.8,
-        1.0 * 0.6 * np.cos(0.6 * t),
-        0.5 * 0.4 * np.cos(0.4 * t),
+        3.0 * w1 * np.cos(w1 * t),
+        1.0 * w2 * np.cos(w2 * t),
+        0.5 * w3 * np.cos(w3 * t),
     ])
     return pos, vel
 
@@ -145,12 +149,16 @@ def main() -> None:
 
             # 控制 + 物理步进
             if script_mode:
-                # 脚本化参考：直接按仿真时刻给出平滑 pos/vel（跳过 planner）
-                # --no-trace 时循环轨迹（sim 全速运行，不退出）
-                t_script = env.time if trace_enabled else env.time % 20.0
-                ref_pos, ref_vel = _scripted_ref(t_script)
+                # 脚本化参考：直接按仿真时刻给出平滑 pos/vel（跳过 planner）；
+                # 轨迹严格 20s 周期，长跑直接用连续时间即可
+                ref_pos, ref_vel = _scripted_ref(env.time)
             env.apply_pd(ref_pos, ref_vel)
             env.step()
+            # 失稳守卫：MuJoCo 发散（QACC NaN/Inf）后状态永久污染且传感器
+            # 全变 NaN，下游 VIO 会被毒化——检测到即重置到起点，长跑不挂。
+            if not np.isfinite(env.data.qpos).all() or not np.isfinite(env.data.qvel).all():
+                log("物理失稳（NaN/Inf）@ t={:.2f}，重置到起点".format(env.time))
+                env.reset(START_POS, np.array([0.0, 0.0, 0.0, 1.0]))
             t = env.time
             frame += 1
 

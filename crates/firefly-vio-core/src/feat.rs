@@ -199,6 +199,11 @@ impl FeatureDatabase {
         self.features.get(&id).cloned()
     }
 
+    /// 当前库内全部特征的 `(id, 引用)` 迭代（诊断/测试用，无序）。
+    pub fn iter_features_with_id(&self) -> impl Iterator<Item = (usize, &Feature)> {
+        self.features.iter().map(|(k, v)| (*k, v))
+    }
+
     /// 追加一次测量（对照 `OpenVINS` `FeatureDatabase::update_feature`）。
     ///
     /// 若 id 已存在则向对应相机桶追加速度/归一化坐标与时间戳；

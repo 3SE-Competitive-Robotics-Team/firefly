@@ -23,3 +23,6 @@ apps/firefly-demo/maps/*.ffmap
 MUJOCO_LOG.TXT
 
 .venv-test/
+
+# 工具本地配置
+.commandcode/

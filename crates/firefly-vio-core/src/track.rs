@@ -365,8 +365,7 @@ impl TrackKlt {
                     }
                     HistogramMethod::None => src.clone(),
                 };
-                let pyr =
-                    pyramid::build_optical_flow_pyramid(&processed, 5, lk::MIN_PYR_SIDE);
+                let pyr = pyramid::build_optical_flow_pyramid(&processed, 3, lk::MIN_PYR_SIDE);
                 (key, processed, pyr)
             })
             .collect();
@@ -641,8 +640,7 @@ impl TrackKlt {
         }
         // RIGHT loop（对照 TrackKLT.cpp 第 341-354 行）
         // 用 HashSet 加速重复 id 查找（O(1) 替代 O(n) 线性扫描）
-        let good_ids_r_set: std::collections::HashSet<usize> =
-            good_ids_r.iter().copied().collect();
+        let good_ids_r_set: std::collections::HashSet<usize> = good_ids_r.iter().copied().collect();
         for i in 0..pts_r_new.len() {
             let p = pts_r_new[i];
             if p.x < 0.0 || p.y < 0.0 || (p.x as i32) >= w_r || (p.y as i32) >= h_r {
@@ -657,19 +655,6 @@ impl TrackKlt {
         // 入库
         self.insert_to_db(timestamp, sid_l, &good_l, &good_ids_l);
         self.insert_to_db(timestamp, sid_r, &good_r, &good_ids_r);
-
-        let sl = self.cams.get_mut(&keyl).unwrap();
-        sl.pts_last = good_l;
-        sl.ids_last = good_ids_l;
-        sl.img_last = img_l;
-        sl.pyramid_last = pyr_l;
-        sl.mask_last = mask_l;
-        let sr = self.cams.get_mut(&keyr).unwrap();
-        sr.pts_last = good_r;
-        sr.ids_last = good_ids_r;
-        sr.img_last = img_r;
-        sr.pyramid_last = pyr_r;
-        sr.mask_last = mask_r;
     }
 
     /// 把 `(点,id)` 对经当前相机去畸变后写入特征库（对照 `TrackKLT.cpp` 入库段）。

@@ -165,11 +165,13 @@ pub fn single_triangulation(
         }
     }
 
-    // 求解 A p = b（对照 C++ 的 colPivHouseholderQr）
-    let p_f = a
-        .lu()
-        .solve(&b)
-        .expect("三角化正规方程 A 应可解（秩不足时条件数检查会拦截）");
+    // 求解 A p = b（对照 C++ 的 colPivHouseholderQr：C++ 对奇异阵返回最小二乘
+    // 解再由条件数/深度检查拒绝，不会失败；Rust `lu().solve()` 遇奇异返回
+    // None——按三角化失败处理，交由调用方删除该特征）
+    let Some(p_f) = a.lu().solve(&b) else {
+        log::debug!("triang 失败: 正规方程奇异不可解");
+        return false;
+    };
 
     // 条件数与深度检查（对照 C++ 的 condA 检查）
     let singular_values = a.svd(true, false).singular_values;
@@ -334,6 +336,14 @@ pub fn single_gaussnewton(
     let p_fin_a = Vector3::new(alpha / rho, beta / rho, 1.0 / rho);
 
     // 基线检查（对照 C++ 的 max_baseline 段）
+    // C++：HouseholderQR(p_FinA).householderQ() 列 1..3 张成与视线方向
+    // （单位向量 ê=p_FinA/|p_FinA|）垂直的平面，基线取克隆位姿在该平面上
+    // 的投影长度——衡量对逆深度可观的侧向视差。此处用闭式等价：
+    //   |v⊥|² = |v|² − (vᵀê)²
+    // 与取正交基列 1..3 投影完全一致（避免对 3×1 输入构造紧凑 QR）。
+    // 历史缺陷：误用 xy().norm()——前飞场景克隆位移沿视线方向，xy 分量
+    // ≈0 → 基线≈0 → 全部拒绝。
+    let e_hat = p_fin_a / p_fin_a.norm();
     let mut base_line_max = 0.0f64;
     for (cam_id, times) in &feat.timestamps {
         for t in times {
@@ -343,7 +353,8 @@ pub fn single_gaussnewton(
                 .map(|(_, c)| c)
                 .expect("特征测量时刻必须存在于 clonesCAM");
             let p_ciin_a = r_gto_a * (clone.pos - p_ain_g);
-            base_line_max = base_line_max.max(p_ciin_a.xy().norm());
+            let perp_sq = p_ciin_a.norm_squared() - p_ciin_a.dot(&e_hat).powi(2);
+            base_line_max = base_line_max.max(perp_sq.max(0.0).sqrt());
         }
     }
 
@@ -569,4 +580,89 @@ mod tests {
         let ok = single_gaussnewton(&mut feat, &clones_degen, &TriangulationOptions::default());
         assert!(!ok, "零基线应被 max_baseline 拒绝");
     }
+}
+
+/// 复刻 e2e 走廊几何的解析输入三角化验证：
+/// 12 个克隆沿 +x 匀速（1.2s），双目杆臂 ±0.025，特征为已知走廊点——
+/// 输入 `uvs_norm` 由真值投影精确生成（无跟踪噪声），
+/// 若失败则 `single_triangulation` 数学存在约定缺陷。
+#[test]
+fn single_triangulation_recovers_corridor_dot_exact_inputs() {
+    // 与 e2e 一致的外参与杆臂
+    let r_ito_c = Matrix3::new(0.0, -1.0, 0.0, 0.0, 0.0, -1.0, 1.0, 0.0, 0.0);
+    let levers = [
+        (0usize, Vector3::new(-0.025, 0.0, 0.0)), // 左目（p_IinC = R·(0,+0.025)）
+        (1usize, Vector3::new(0.025, 0.0, 0.0)),
+    ];
+
+    // 12 克隆：t=0.2..1.3，位置 (t,0,1)，单位姿态
+    let mut clones_cam: HashMap<usize, CloneMap> = HashMap::new();
+    for (cam_id, lever_ic) in levers {
+        let mut cm: CloneMap = Vec::new();
+        for i in 0..12 {
+            let t = 0.2 + 0.1 * f64::from(i as u32);
+            // p_CiinG = p_IinG − R_GtoCiᵀ·p_IinC；R_GtoCi=R_ItoC（单位姿态）
+            let lever_body = r_ito_c.transpose() * lever_ic;
+            let pos = Vector3::new(t, 0.0, 1.0) - lever_body;
+            cm.push((t, ClonePose { rot: r_ito_c, pos }));
+        }
+        clones_cam.insert(cam_id, cm);
+    }
+
+    // 真值点：走廊内典型位置
+    let truth = Vector3::new(6.5, -2.5, 0.9);
+
+    // 构造测量：uvs_norm = 真值投影（y-down 相机系）
+    let mut feat = Feature {
+        featid: 999,
+        ..Feature::default()
+    };
+    for (cam_id, lever_ic) in levers {
+        let lever_body = r_ito_c.transpose() * lever_ic;
+        for i in 0..12 {
+            let t = 0.2 + 0.1 * f64::from(i as u32);
+            let v = truth - (Vector3::new(t, 0.0, 1.0) - lever_body);
+            let pc = r_ito_c * v;
+            assert!(pc.z > 0.5, "测试几何应保证正深度");
+            feat.timestamps.entry(cam_id).or_default().push(t);
+            feat.uvs_norm
+                .entry(cam_id)
+                .or_default()
+                .push(nalgebra::Vector2::new(
+                    (pc.x / pc.z) as f32,
+                    (pc.y / pc.z) as f32,
+                ));
+        }
+    }
+
+    let opts = TriangulationOptions {
+        max_cond_number: 100_000.0,
+        min_dist: 0.10,
+        max_dist: 60.0,
+        refine_features: true,
+        max_runs: 5,
+        init_lamda: 1e-3,
+        lam_mult: 10.0,
+        min_dcost: 1e-8,
+        max_baseline: 40.0,
+        max_lamda: 1e10,
+        min_dx: 1e-6,
+    };
+
+    let ok_triang = single_triangulation(&mut feat, &clones_cam, &opts);
+    println!(
+        "single_triangulation: ok={ok_triang} depth={:.3}",
+        feat.p_FinA.z
+    );
+    assert!(ok_triang, "解析输入下三角化不应失败");
+
+    let ok_gn = single_gaussnewton(&mut feat, &clones_cam, &opts);
+    assert!(ok_gn, "高斯牛顿精化不应失败");
+
+    let err = (feat.p_FinG - truth).norm();
+    println!(
+        "恢复位置=({:.4},{:.4},{:.4}) 真值={truth} 误差={err:.4}m",
+        feat.p_FinG.x, feat.p_FinG.y, feat.p_FinG.z
+    );
+    assert!(err < 0.05, "解析输入下应恢复真值位置: {err:.4}m");
 }

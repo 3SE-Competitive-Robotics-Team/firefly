@@ -221,6 +221,8 @@ struct Demo {
     latest_gt: Option<(State, [f64; 4])>,
     /// 深度相机标定（MuJoCo 合成场景）。
     depth_cam: DepthCamera,
+    /// 进程共享 iceoryx2 节点（所有端口的创建源，最后 Drop 释放 IPC 资源）。
+    _node: firefly_pubsub::node::IpcNode,
 }
 
 impl Demo {
@@ -270,8 +272,10 @@ impl Demo {
             let raw = planner.map_ref().is_occupied(Vector3::new(9.0, y, 1.0));
             log::info!("map@(9,{y},1) inflated={o} raw={raw}");
         }
+        // 进程共享节点：所有端口由它派生，进程退出时统一 Drop 释放 IPC 资源
+        let node = firefly_pubsub::node::create_node()?;
         // 订阅 VIO 输出（vio 进程未启动/IPC 不可用时降级为 None，保持独立运行）
-        let odom = match OdomSubscriber::new() {
+        let odom = match OdomSubscriber::new(&node) {
             Ok(s) => {
                 log::info!("已订阅 odom 话题（VIO 状态源）");
                 Some(s)
@@ -281,7 +285,7 @@ impl Demo {
                 None
             }
         };
-        let imu = match ImuSubscriber::new() {
+        let imu = match ImuSubscriber::new(&node) {
             Ok(s) => {
                 log::info!("已订阅 imu 话题 {IMU_TOPIC}");
                 Some(s)
@@ -292,7 +296,7 @@ impl Demo {
             }
         };
         // 深度订阅（感知建图输入）
-        let depth = match Subscriber::<DepthImageMessage>::with_topic(DEPTH_TOPIC) {
+        let depth = match Subscriber::<DepthImageMessage>::with_topic(&node, DEPTH_TOPIC) {
             Ok(s) => {
                 log::info!("已订阅深度话题 {DEPTH_TOPIC}（感知建图）");
                 Some(s)
@@ -303,7 +307,7 @@ impl Demo {
             }
         };
         // 真值订阅（仿真阶段感知位姿源；VIO 修复后换 odom）
-        let gt = match Subscriber::<OdomMessage>::with_topic(GROUND_TRUTH_TOPIC) {
+        let gt = match Subscriber::<OdomMessage>::with_topic(&node, GROUND_TRUTH_TOPIC) {
             Ok(s) => {
                 log::info!("已订阅真值话题 {GROUND_TRUTH_TOPIC}（感知位姿源）");
                 Some(s)
@@ -316,7 +320,7 @@ impl Demo {
         // VIO 世界系 → 地图系变换（MuJoCo 闭环下 vio 已在地图系，默认 0）
         let frame_offset = Vector3::new(frame_offset[0], frame_offset[1], frame_offset[2]);
         // 参考状态发布器（闭环控制回传；失败则降级为纯观测）
-        let ref_pub = match Publisher::<ReferenceMessage>::with_topic(REFERENCE_TOPIC) {
+        let ref_pub = match Publisher::<ReferenceMessage>::with_topic(&node, REFERENCE_TOPIC) {
             Ok(p) => {
                 log::info!("已打开参考状态话题 {REFERENCE_TOPIC}（闭环控制回传）");
                 Some(p)
@@ -354,6 +358,7 @@ impl Demo {
             latest_depth: None,
             latest_gt: None,
             depth_cam: DepthCamera::mujoco_default(),
+            _node: node,
         })
     }
 

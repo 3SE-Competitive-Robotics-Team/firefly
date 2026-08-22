@@ -14,6 +14,7 @@ use fastrace::prelude::*;
 use iceoryx2::port::publisher::Publisher as Iox2Publisher;
 use iceoryx2::prelude::*;
 
+use crate::node::IpcNode;
 use crate::odom::OdomMessage;
 use crate::trace::TraceContext;
 
@@ -24,25 +25,20 @@ pub const ODOM_TOPIC: &str = "Firefly/Odometry";
 ///
 /// 约束对齐 iceoryx2 0.9.3 `publish_subscribe`（`Debug + ZeroCopySend`；
 /// 0.9.999 起新增 `IceoryxSend`，升级时补上）。
+///
+/// 节点由调用方持有（进程共享单节点，见 [`crate::node`]），端口只借用其
+/// 创建服务；Drop 顺序由调用方作用域保证（节点最后释放）。
 pub struct Publisher<T: Debug + ZeroCopySend + 'static> {
-    /// 服务节点（持有服务生命周期）。
-    _node: Node<ipc::Service>,
     /// 发布器句柄。
     publisher: Iox2Publisher<ipc::Service, T, TraceContext>,
 }
 
 impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
-    /// 以自定义话题名创建发布器。
+    /// 以进程共享节点 + 自定义话题名创建发布器。
     ///
     /// # Errors
-    /// Node/Service/Publisher 创建失败（IPC 资源不可用等）。
-    pub fn with_topic(topic: &str) -> Result<Self, firefly_error::Error> {
-        let node = NodeBuilder::new().create::<ipc::Service>().map_err(|e| {
-            firefly_error::Error::new(
-                firefly_error::ErrorKind::Internal,
-                format!("创建 iceoryx2 node 失败: {e:?}"),
-            )
-        })?;
+    /// Service/Publisher 创建失败（IPC 资源不可用等）。
+    pub fn with_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
         let service = node
             .service_builder(&topic.try_into().map_err(|e| {
                 firefly_error::Error::new(
@@ -65,10 +61,7 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
                 format!("创建发布器失败: {e:?}"),
             )
         })?;
-        Ok(Self {
-            _node: node,
-            publisher,
-        })
+        Ok(Self { publisher })
     }
 
     /// 发布一条消息：**自动注入当前 fastrace 活动 span 的 trace 上下文**
@@ -111,16 +104,16 @@ impl OdomPublisher {
     ///
     /// # Errors
     /// 见 [`Publisher::with_topic`]。
-    pub fn new() -> Result<Self, firefly_error::Error> {
-        Self::with_topic(ODOM_TOPIC)
+    pub fn new(node: &IpcNode) -> Result<Self, firefly_error::Error> {
+        Self::with_topic(node, ODOM_TOPIC)
     }
 
     /// 以自定义话题名打开 odom 发布器。
     ///
     /// # Errors
     /// 见 [`Publisher::with_topic`]。
-    pub fn with_topic(topic: &str) -> Result<Self, firefly_error::Error> {
-        Ok(Self(Publisher::with_topic(topic)?))
+    pub fn with_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
+        Ok(Self(Publisher::with_topic(node, topic)?))
     }
 
     /// 发布一条 odom 消息（trace 上下文自动注入，见 [`Publisher::publish`]）。

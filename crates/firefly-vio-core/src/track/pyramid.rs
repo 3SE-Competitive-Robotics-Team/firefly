@@ -6,8 +6,8 @@
 //! 且每级随 `max_levels` 上限封顶。
 
 use crate::sensor::GrayImage;
-use purecv::core::types::BorderTypes;
 use purecv::core::Matrix;
+use purecv::core::types::BorderTypes;
 
 /// 将 `GrayImage` 转为 purecv `Matrix<u8>`（单通道）。
 fn gray_to_matrix(img: &GrayImage) -> Matrix<u8> {
@@ -32,6 +32,9 @@ fn matrix_to_gray(m: &Matrix<u8>) -> GrayImage {
 ///   最顶层仍能完整取值，对应 OpenCV 用 `winSize` 上限金字塔高度）。
 ///
 /// `min_side` 需 ≥ LK 窗口边长 + 导数边界（TrackKLT 的窗口 15×15 → 取 22）。
+///
+/// # Panics
+/// 内部 `pyr_down` 失败时 panic（合法输入不应发生，对照 purecv 契约）。
 #[must_use]
 pub fn build_optical_flow_pyramid(
     img: &GrayImage,
@@ -50,9 +53,8 @@ pub fn build_optical_flow_pyramid(
             break;
         }
         let mat = gray_to_matrix(prev);
-        let down_mat =
-            purecv::imgproc::pyramid::pyr_down(&mat, None, BorderTypes::Reflect101)
-                .expect("pyr_down should not fail for valid input");
+        let down_mat = purecv::imgproc::pyramid::pyr_down(&mat, None, BorderTypes::Reflect101)
+            .expect("pyr_down should not fail for valid input");
         let down = matrix_to_gray(&down_mat);
         if down.width < min_side || down.height < min_side {
             break;
@@ -144,8 +146,7 @@ mod tests {
         // 平坦区域 pyr_down 不应改变像素值（核和为 256，除后不变）
         let img = gray_const(80u8, 20, 20);
         let mat = gray_to_matrix(&img);
-        let down =
-            purecv::imgproc::pyramid::pyr_down(&mat, None, BorderTypes::Reflect101).unwrap();
+        let down = purecv::imgproc::pyramid::pyr_down(&mat, None, BorderTypes::Reflect101).unwrap();
         let down_gray = matrix_to_gray(&down);
         assert!(down_gray.data.iter().all(|&p| p == 80));
     }

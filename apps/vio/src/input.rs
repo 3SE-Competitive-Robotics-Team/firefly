@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 
 use firefly_pubsub::camera::{CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, GrayImageMessage};
 use firefly_pubsub::imu::ImuSubscriber;
+use firefly_pubsub::node::IpcNode;
 use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::trace::TraceContext;
 use firefly_vio_core::input::SensorInput;
@@ -38,11 +39,11 @@ impl IceoryxInput {
     ///
     /// # Errors
     /// iceoryx2 订阅创建失败。
-    pub fn new() -> Result<Self, firefly_error::Error> {
+    pub fn new(node: &IpcNode) -> Result<Self, firefly_error::Error> {
         Ok(Self {
-            imu_sub: ImuSubscriber::new()?,
-            left_sub: Subscriber::with_topic(CAMERA_LEFT_TOPIC)?,
-            right_sub: Subscriber::with_topic(CAMERA_RIGHT_TOPIC)?,
+            imu_sub: ImuSubscriber::new(node)?,
+            left_sub: Subscriber::with_topic(node, CAMERA_LEFT_TOPIC)?,
+            right_sub: Subscriber::with_topic(node, CAMERA_RIGHT_TOPIC)?,
             imu_queue: VecDeque::new(),
             last_left: None,
             last_right: None,
@@ -103,7 +104,10 @@ impl SensorInput for IceoryxInput {
         if left_count > 0 || right_count > 0 {
             log::debug!(
                 "advance: imu={} left={} right={} now={:.3}",
-                imu_count, left_count, right_count, self.now_t
+                imu_count,
+                left_count,
+                right_count,
+                self.now_t
             );
         }
     }
