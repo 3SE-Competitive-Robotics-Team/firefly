@@ -42,6 +42,7 @@ fn build_manager_ex(max_slam: usize, do_fej: bool) -> VioManager {
     params.state_options.num_cameras = 2;
     params.state_options.max_slam_features = max_slam;
     params.state_options.do_fej = do_fej;
+
     let mut tracker_calib = HashMap::new();
     tracker_calib.insert(0usize, cam_l.clone());
     tracker_calib.insert(1usize, cam_r.clone());
@@ -230,7 +231,20 @@ fn run_cfg(cfg: &ScenarioCfg) -> (f64, f64, f64, f64, Vector3<f64>) {
         let t_cam = f64::from(k as u32) * dt_cam;
         for j in 0..10 {
             let ts = t_cam - dt_cam + f64::from(j as u32) * dt_imu;
+            // 运动加速度（本体系≈世界系，姿态保持水平）：静止→运动场景在
+            // static_frames 处有 0→1m/s 的阶跃加速（IMU 缺失水平加速度是
+            // 旧测试缺陷——滤波器位置不随运动积分，与移动的视觉测量矛盾，
+            // 三角化几何病态 cond 百万级）
+            let a_motion = if cfg.static_then_move
+                && ts > f64::from(static_frames) * dt_cam
+                && ts <= (f64::from(static_frames) + 1.0) * dt_cam
+            {
+                Vector3::new(1.0 / 0.1, 0.0, 0.0) // 0.1s 内从 0 加速到 1m/s
+            } else {
+                Vector3::zeros()
+            };
             let am = Vector3::new(0.0, 0.0, 9.81)
+                + a_motion
                 + if cfg.inject_bias {
                     BIAS_A_TRUE
                 } else {

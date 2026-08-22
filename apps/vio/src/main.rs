@@ -70,6 +70,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 与 C++ 逐行一致——残留嫌疑为场景 y 可观测性弱）。修复前保持纯 MSCKF
     //（现场 34s 误差 271m vs 开 SLAM 1035m）。
     params.state_options.max_slam_features = 0;
+    // ZUPT 保持 OpenVINS 默认关闭（try_zupt=false）：默认分支在慢速运动
+    // 下有盲区（加速度 < IMU 噪声 σ 时 chi2 不超 → 误接受 → 位置冻结），
+    // 显式零运动分支（C++ 标注 untested）同样不属默认路径。
     let mut tracker_calib = std::collections::HashMap::new();
     tracker_calib.insert(0usize, cam_left.clone());
     tracker_calib.insert(1usize, cam_right.clone());
