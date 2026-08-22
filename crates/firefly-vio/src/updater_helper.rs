@@ -70,8 +70,11 @@ pub fn get_feature_jacobian_full(
                    map_hx: &mut std::collections::HashMap<(i32, usize), usize>| {
         let key = (id, size);
         map_hx.entry(key).or_insert_with(|| {
+            // 列偏移 = 之前所有变量的尺寸之和（对照 C++ 的 total_hx 累计）；
+            // 若误用变量序号，多变量 H_x 的列会互相覆盖（历史缺陷）
+            let col = x_order.iter().map(|(_, s)| s).sum::<usize>();
             x_order.push(key);
-            x_order.len() - 1
+            col
         });
     };
 
@@ -261,7 +264,6 @@ pub fn get_feature_jacobian_full(
                 .find(|(ct, _)| ct.total_cmp(t).is_eq())
                 .map(|(_, c)| c)
                 .expect("特征测量时刻必须存在对应克隆");
-
             // 当前/FEJ 线性化点
             let (r_gto_ii, p_iin_g) = if state.options.do_fej {
                 (clone.rot_fej(), clone.pos_fej())

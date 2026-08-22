@@ -14,9 +14,20 @@ SCENE_XML = r"""
   <option timestep="0.005" gravity="0 0 -9.81"/>
 
   <asset>
+    <!-- 地面棋盘：texrepeat 35 → 约 2m 一格。曾用 10（7m 大格），
+         相机高度 1~1.5m 时画面内地格过大、FAST 角点整幅不足 30 个，
+         KLT 轨迹寿命骤减、VIO 无更新可用。 -->
     <texture name="checker" type="2d" builtin="checker" width="512" height="512"
              rgb1="0.45 0.45 0.45" rgb2="0.65 0.65 0.65"/>
-    <material name="ground" texture="checker" texrepeat="10 10"/>
+    <material name="ground" texture="checker" texrepeat="35 35"/>
+    <!-- 立柱棋盘贴面：纯色盒只有直线棱边（无角点），贴上高频棋盘后
+         每根柱面提供数十个 FAST 角点，是前向视差的主要来源 -->
+    <texture name="checker_pillar" type="2d" builtin="checker" width="512" height="512"
+             rgb1="0.85 0.55 0.15" rgb2="0.15 0.25 0.45"/>
+    <material name="pillar_a" texture="checker_pillar" texrepeat="3 3"/>
+    <texture name="checker_pillar2" type="2d" builtin="checker" width="512" height="512"
+             rgb1="0.80 0.20 0.20" rgb2="0.90 0.90 0.85"/>
+    <material name="pillar_b" texture="checker_pillar2" texrepeat="3 3"/>
   </asset>
 
   <worldbody>
@@ -32,11 +43,11 @@ SCENE_XML = r"""
          见方，高 3m 无法飞越），逼无人机沿 y≈4 小幅左右蛇形绕行——绕行
          单个立柱容易、不切连续墙角，规划器稳定可解（连续墙会使 MINCO
          优化卡"stuck"，见 planner 维护项）。demo 默认地图与其同构。 -->
-    <geom type="box" pos="9  4.0 1.5" size="0.4 0.5 1.5" rgba="0.20 0.40 0.80 1"/>
-    <geom type="box" pos="12 6.5 1.0" size="0.4 0.7 1.0" rgba="0.60 0.20 0.80 1"/>
-    <geom type="box" pos="16 4.0 1.5" size="0.4 0.6 1.5" rgba="0.80 0.20 0.20 1"/>
-    <geom type="box" pos="19 1.8 0.9" size="0.4 0.5 0.9" rgba="0.90 0.70 0.20 1"/>
-    <geom type="box" pos="22 3.6 1.5" size="0.4 0.5 1.5" rgba="0.20 0.80 0.30 1"/>
+    <geom type="box" pos="9  4.0 1.5" size="0.4 0.5 1.5" material="pillar_a"/>
+    <geom type="box" pos="12 6.5 1.0" size="0.4 0.7 1.0" material="pillar_b"/>
+    <geom type="box" pos="16 4.0 1.5" size="0.4 0.6 1.5" material="pillar_a"/>
+    <geom type="box" pos="19 1.8 0.9" size="0.4 0.5 0.9" material="pillar_b"/>
+    <geom type="box" pos="22 3.6 1.5" size="0.4 0.5 1.5" material="pillar_a"/>
 
     <!-- 无人机（freejoint 六自由度） -->
     <body name="drone" pos="1 4 1">

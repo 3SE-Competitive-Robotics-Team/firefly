@@ -5,9 +5,8 @@
 
 use iceoryx2::prelude::*;
 
-use crate::publish::Publisher;
+use crate::node::IpcNode;
 use crate::subscriber::{Received, Subscriber};
-use crate::trace::TraceContext;
 
 /// imu 话题名（对照 `docs/architecture.md` 的 `topic: imu`）。
 pub const IMU_TOPIC: &str = "Firefly/Imu";
@@ -49,53 +48,33 @@ impl Default for ImuMessage {
 /// 收到的 imu 样本。
 pub type ReceivedImu = Received<ImuMessage>;
 
-/// imu 发布器（话题 `Firefly/Imu`，泛型核心的命名封装）。
-pub struct ImuPublisher(Publisher<ImuMessage>);
-
-impl ImuPublisher {
-    /// 打开 imu 话题的发布器。
-    ///
-    /// # Errors
-    /// 见 [`Publisher::with_topic`]。
-    pub fn new() -> Result<Self, firefly_error::Error> {
-        Self::with_topic(IMU_TOPIC)
-    }
-
-    /// 以自定义话题名打开 imu 发布器。
-    ///
-    /// # Errors
-    /// 见 [`Publisher::with_topic`]。
-    pub fn with_topic(topic: &str) -> Result<Self, firefly_error::Error> {
-        Ok(Self(Publisher::with_topic(topic)?))
-    }
-
-    /// 发布一条 imu 消息（trace 上下文自动注入，见 [`Publisher::publish`]）。
-    ///
-    /// # Errors
-    /// 见 [`Publisher::publish`]。
-    pub fn publish(&self, msg: ImuMessage) -> Result<TraceContext, firefly_error::Error> {
-        self.0.publish(msg)
-    }
-}
+/// IMU 订阅缓冲区深度：100 Hz IMU / 10 Hz 相机 ≈ 10 条/帧，留 2x 余量。
+/// 依赖 iceoryx2 全局配置 `subscriber-max-buffer-size = 20`
+///（`~/.config/iceoryx2/iceoryx2.toml`）。
+const IMU_BUFFER_SIZE: usize = 20;
 
 /// imu 订阅器（话题 `Firefly/Imu`，泛型核心的命名封装）。
 pub struct ImuSubscriber(Subscriber<ImuMessage>);
 
 impl ImuSubscriber {
-    /// 打开 imu 话题的订阅器。
+    /// 打开 imu 话题的订阅器（`buffer_size`=20，覆盖 10 帧 IMU 数据）。
     ///
     /// # Errors
-    /// 见 [`Subscriber::with_topic`]。
-    pub fn new() -> Result<Self, firefly_error::Error> {
-        Self::with_topic(IMU_TOPIC)
+    /// 见 [`Subscriber::with_topic_and_buffer`]。
+    pub fn new(node: &IpcNode) -> Result<Self, firefly_error::Error> {
+        Self::with_topic(node, IMU_TOPIC)
     }
 
     /// 以自定义话题名打开 imu 订阅器。
     ///
     /// # Errors
-    /// 见 [`Subscriber::with_topic`]。
-    pub fn with_topic(topic: &str) -> Result<Self, firefly_error::Error> {
-        Ok(Self(Subscriber::with_topic(topic)?))
+    /// 见 [`Subscriber::with_topic_and_buffer`]。
+    pub fn with_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
+        Ok(Self(Subscriber::with_topic_and_buffer(
+            node,
+            topic,
+            IMU_BUFFER_SIZE,
+        )?))
     }
 
     /// 接收一条 imu 消息（见 [`Subscriber::receive`]）。

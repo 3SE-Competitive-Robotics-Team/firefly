@@ -12,6 +12,7 @@
 
 use fastrace::prelude::*;
 use firefly_observability::init as init_observability;
+use firefly_pubsub::node::create_node;
 use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::publish::OdomPublisher;
 use firefly_pubsub::subscriber::OdomSubscriber;
@@ -22,8 +23,9 @@ const TOPIC: &str = "Firefly/Test/E2eTrace";
 fn trace_context_crosses_pubsub_boundary() {
     init_observability();
 
-    let publisher = OdomPublisher::with_topic(TOPIC).expect("创建发布端");
-    let subscriber = OdomSubscriber::with_topic(TOPIC).expect("创建订阅端");
+    let node = create_node().expect("创建节点");
+    let publisher = OdomPublisher::with_topic(&node, TOPIC).expect("创建发布端");
+    let subscriber = OdomSubscriber::with_topic(&node, TOPIC).expect("创建订阅端");
 
     // 发布端：root span 下发布，header 应携带当前活动 span 上下文
     let (trace_id, span_id) = {

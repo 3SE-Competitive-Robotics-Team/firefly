@@ -16,6 +16,7 @@ use std::fmt::Debug;
 use iceoryx2::port::subscriber::Subscriber as Iox2Subscriber;
 use iceoryx2::prelude::*;
 
+use crate::node::IpcNode;
 use crate::odom::OdomMessage;
 use crate::trace::TraceContext;
 
@@ -29,25 +30,28 @@ pub type ReceivedOdom = Received<OdomMessage>;
 ///
 /// 约束对齐 iceoryx2 0.9.3 `publish_subscribe`（`Debug + ZeroCopySend`；
 /// 0.9.999 起新增 `IceoryxSend`，升级时补上）。
+///
+/// 节点由调用方持有（进程共享单节点，见 [`crate::node`]），端口只借用其
+/// 创建服务；Drop 顺序由调用方作用域保证（节点最后释放）。
 pub struct Subscriber<T: Debug + ZeroCopySend + 'static> {
-    /// 服务节点（持有服务生命周期）。
-    _node: Node<ipc::Service>,
     /// 订阅器句柄。
     subscriber: Iox2Subscriber<ipc::Service, T, TraceContext>,
 }
 
 impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
-    /// 以自定义话题名打开订阅器。
+    /// 以进程共享节点 + 自定义话题名打开订阅器。
+    ///
+    /// `buffer_size` 控制 iceoryx2 内部环形缓冲区深度：
+    /// - IMU（100 Hz）建议 ≥20，避免 VIO 处理期间丢帧；
+    /// - 相机（10 Hz）建议 1，只保留最新帧避免左右目交叉。
     ///
     /// # Errors
-    /// Node/Service/Subscriber 创建失败（IPC 资源不可用等）。
-    pub fn with_topic(topic: &str) -> Result<Self, firefly_error::Error> {
-        let node = NodeBuilder::new().create::<ipc::Service>().map_err(|e| {
-            firefly_error::Error::new(
-                firefly_error::ErrorKind::Internal,
-                format!("创建 iceoryx2 node 失败: {e:?}"),
-            )
-        })?;
+    /// Service/Subscriber 创建失败（IPC 资源不可用等）。
+    pub fn with_topic_and_buffer(
+        node: &IpcNode,
+        topic: &str,
+        buffer_size: usize,
+    ) -> Result<Self, firefly_error::Error> {
         let service = node
             .service_builder(&topic.try_into().map_err(|e| {
                 firefly_error::Error::new(
@@ -64,10 +68,9 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
                     format!("打开/创建话题 `{topic}` 失败: {e:?}"),
                 )
             })?;
-        // depth=1：只保留最新帧，避免vio处理慢时left/right交叉导致配对失败
         let subscriber = service
             .subscriber_builder()
-            .buffer_size(1)
+            .buffer_size(buffer_size)
             .create()
             .map_err(|e| {
                 firefly_error::Error::new(
@@ -75,10 +78,15 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
                     format!("创建订阅器失败: {e:?}"),
                 )
             })?;
-        Ok(Self {
-            _node: node,
-            subscriber,
-        })
+        Ok(Self { subscriber })
+    }
+
+    /// 以自定义话题名打开订阅器（`buffer_size`=1，适用于相机等低频话题）。
+    ///
+    /// # Errors
+    /// Service/Subscriber 创建失败（IPC 资源不可用等）。
+    pub fn with_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
+        Self::with_topic_and_buffer(node, topic, 1)
     }
 
     /// 接收一条消息（非阻塞）：返回 `None` 表示当前无新样本。
@@ -106,16 +114,16 @@ impl OdomSubscriber {
     ///
     /// # Errors
     /// 见 [`Subscriber::with_topic`]。
-    pub fn new() -> Result<Self, firefly_error::Error> {
-        Self::with_topic(crate::publish::ODOM_TOPIC)
+    pub fn new(node: &IpcNode) -> Result<Self, firefly_error::Error> {
+        Self::with_topic(node, crate::publish::ODOM_TOPIC)
     }
 
     /// 以自定义话题名打开 odom 订阅器。
     ///
     /// # Errors
     /// 见 [`Subscriber::with_topic`]。
-    pub fn with_topic(topic: &str) -> Result<Self, firefly_error::Error> {
-        Ok(Self(Subscriber::with_topic(topic)?))
+    pub fn with_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
+        Ok(Self(Subscriber::with_topic(node, topic)?))
     }
 
     /// 接收一条 odom 消息（见 [`Subscriber::receive`]）。
