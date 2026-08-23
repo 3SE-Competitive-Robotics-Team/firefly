@@ -10,6 +10,7 @@ mod feasibility;
 mod formation;
 mod obstacle;
 mod peer;
+mod sampling;
 mod smoothness;
 mod swarm;
 mod time;

@@ -16,6 +16,7 @@
 use firefly_trajectory::Trajectory;
 use nalgebra::Vector3;
 
+use crate::sampling::{sample_index, trapezoid_weight};
 use crate::{Accumulator, Peer, Penalty};
 
 pub struct FormationPenalty {
@@ -25,6 +26,8 @@ pub struct FormationPenalty {
     pub self_id: usize,
     pub peers: Vec<Peer>,
     pub samples_per_piece: usize,
+    /// 前 2/3 截断(`two_thirds_id`);`None` = 不限。
+    two_thirds: Option<usize>,
 }
 
 impl FormationPenalty {
@@ -44,12 +47,20 @@ impl FormationPenalty {
             self_id,
             peers,
             samples_per_piece: 5,
+            two_thirds: None,
         }
     }
 
     #[must_use]
     pub fn with_samples(mut self, samples: usize) -> Self {
         self.samples_per_piece = samples;
+        self
+    }
+
+    /// 施加官方前 2/3 截断。
+    #[must_use]
+    pub fn with_two_thirds(mut self, id: usize) -> Self {
+        self.two_thirds = Some(id);
         self
     }
 
@@ -102,40 +113,64 @@ impl FormationPenalty {
 }
 
 impl Penalty for FormationPenalty {
+    // 与官方公式逐行对应(k/i/j/o/a/l/s),单字符命名保可读性
+    #[allow(clippy::many_single_char_names)]
     fn evaluate(&self, traj: &Trajectory) -> f64 {
         if self.peers.is_empty() {
             return 0.0;
         }
+        let k = self.samples_per_piece;
         let mut cost = 0.0;
         for (i, ti) in traj.durations().iter().enumerate() {
-            let weight = ti / self.samples_per_piece as f64;
-            for j in 0..=self.samples_per_piece {
-                let tau = j as f64 / self.samples_per_piece as f64;
+            let step = ti / k as f64;
+            for j in 0..=k {
+                let tau = j as f64 / k as f64;
+                if let Some(t) = self.two_thirds
+                    && {
+                        let idx = sample_index(i, j, k);
+                        idx == 0 || idx > t
+                    }
+                {
+                    continue;
+                }
                 let t_abs = absolute_time(traj, i, *ti, tau);
                 let (o, a, l, _) = self.formation_state(t_abs);
                 let s = traj.eval(t_abs);
-                cost += weight * (s.position - self.target(o, a, l)).norm_squared();
+                let omg = trapezoid_weight(j, k);
+                cost += omg * step * (s.position - self.target(o, a, l)).norm_squared();
             }
         }
         cost
     }
 
+    // 与官方公式逐行对应(k/i/j/o/a/l/s),单字符命名保可读性
+    #[allow(clippy::many_single_char_names)]
     fn accumulate(&self, traj: &Trajectory, weight: f64, acc: &mut Accumulator) {
         if self.peers.is_empty() {
             return;
         }
+        let k = self.samples_per_piece;
         for (i, ti) in traj.durations().iter().enumerate() {
-            let sample_weight = weight * ti / self.samples_per_piece as f64;
-            for j in 0..=self.samples_per_piece {
-                let tau = j as f64 / self.samples_per_piece as f64;
+            let step = ti / k as f64;
+            for j in 0..=k {
+                let tau = j as f64 / k as f64;
+                if let Some(t) = self.two_thirds
+                    && {
+                        let idx = sample_index(i, j, k);
+                        idx == 0 || idx > t
+                    }
+                {
+                    continue;
+                }
+                let omg = trapezoid_weight(j, k);
                 let t_abs = absolute_time(traj, i, *ti, tau);
                 let (o, a, l, dl_dt) = self.formation_state(t_abs);
                 let s = traj.eval(t_abs);
                 let tar = self.target(o, a, l);
-                let d_p = 2.0 * (s.position - tar);
+                let d_p = 2.0 * (s.position - tar) * (weight * omg * step);
                 let point_cost = (s.position - tar).norm_squared();
-                // 采样权重 (T/κ) 对 T 的导数
-                acc.d_f_d_t[i] += weight * point_cost / self.samples_per_piece as f64;
+                // 采样权重 (omg·T/K) 对 T 的导数:omg·f/K
+                acc.d_f_d_t[i] += weight * omg * point_cost / k as f64;
                 // 官方梯度：本段用 v − a·dl_dt（相对队形），前面段仅 −a·dl_dt
                 acc.add_absolute(
                     i,
@@ -143,7 +178,7 @@ impl Penalty for FormationPenalty {
                     *ti,
                     &s,
                     a * dl_dt,
-                    d_p * sample_weight,
+                    d_p,
                     Vector3::zeros(),
                     Vector3::zeros(),
                     Vector3::zeros(),

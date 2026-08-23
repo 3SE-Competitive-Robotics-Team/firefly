@@ -112,14 +112,7 @@ impl PlannerManager {
         goal: Vector3<f64>,
     ) -> Result<Self> {
         let mut astar = Astar::default();
-        let path = astar.search(planner.map_ref(), start, goal)?;
-        // 字符串拉直：删除可直线直达的中间点（避免直线擦边穿越膨胀层）
-        let global_path = firefly_search::simplify_path(planner.map_ref(), path.points());
-        log::info!(
-            "全局路径 {} 点，长度 {:.1}m",
-            global_path.len(),
-            path_length(&global_path)
-        );
+        let global_path = search_global_path(planner.map_ref(), &mut astar, start, goal)?;
         Ok(Self {
             planner,
             options,
@@ -133,6 +126,44 @@ impl PlannerManager {
             replan_cooldown_until: 0.0,
             replan_fail_streak: 0,
         })
+    }
+
+    /// 动态重目标（外部工具经 `Firefly/Goal` 发布新目标点）：从当前位置
+    /// 重算全局路径（A* + 简化）、重置状态机，下一 tick 即重新规划飞往新目标。
+    /// 无人机悬停等待目标时 `goal == start`（零长路径 → 原地悬停），
+    /// 收到目标后自然切换。
+    ///
+    /// # Errors
+    ///
+    /// 新目标不可达（A* 失败 / 地图外）——保持原目标不变，由调用方记录。
+    pub fn set_goal(
+        &mut self,
+        now: f64,
+        measured: Option<State>,
+        goal: Vector3<f64>,
+    ) -> Result<()> {
+        let start = self.estimated_position(now, measured);
+        let mut astar = Astar::default();
+        let global_path = search_global_path(self.planner.map_ref(), &mut astar, start, goal)?;
+        log::info!(
+            "目标更新为 ({:.1},{:.1},{:.1})：全局路径 {} 点，长度 {:.1}m",
+            goal.x,
+            goal.y,
+            goal.z,
+            global_path.len(),
+            path_length(&global_path)
+        );
+        self.global_path = global_path;
+        self.goal = Point3::from(goal);
+        // 重置状态机：丢弃旧轨迹/旧终点标记，下一 tick 初始规划飞往新目标
+        self.local = None;
+        self.last_result = None;
+        self.touch_goal = false;
+        self.finished = false;
+        self.replans = 0;
+        self.replan_cooldown_until = 0.0;
+        self.replan_fail_streak = 0;
+        Ok(())
     }
 
     /// 只读地图访问。
@@ -252,7 +283,11 @@ impl PlannerManager {
             velocity: Vector3::zeros(),
             acceleration: Vector3::zeros(),
         });
-        match self.planner.plan(start, self.goal) {
+        // 官方 GEN_NEW_TRAJ:目标即全局终点 → touch_goal = true
+        match self
+            .planner
+            .plan_with_init(start, self.goal, InitSource::ColdStart, true)
+        {
             Ok(result) => {
                 self.last_result = Some(result.clone());
                 self.local = Some(LocalTraj {
@@ -311,8 +346,14 @@ impl PlannerManager {
                     elapsed: *elapsed,
                     guide_tail: tail,
                 },
+                horizon.touch_goal,
             ),
-            None => self.planner.plan(start, horizon.target),
+            None => self.planner.plan_with_init(
+                start,
+                horizon.target,
+                InitSource::ColdStart,
+                horizon.touch_goal,
+            ),
         };
         let result = match planned {
             Ok(r) => {
@@ -321,7 +362,12 @@ impl PlannerManager {
             }
             Err(warm_err) => {
                 if warm.is_some() {
-                    match self.planner.plan(start, horizon.target) {
+                    match self.planner.plan_with_init(
+                        start,
+                        horizon.target,
+                        InitSource::ColdStart,
+                        horizon.touch_goal,
+                    ) {
                         Ok(r) => {
                             log::info!("暖启动失败（{warm_err}），冷启动成功");
                             r
@@ -507,4 +553,221 @@ impl PlannerManager {
 /// 路径累计长度。
 fn path_length(points: &[Vector3<f64>]) -> f64 {
     points.windows(2).map(|w| (w[1] - w[0]).norm()).sum()
+}
+
+/// A* 搜索 + 字符串拉直：删除可直线直达的中间点（避免直线擦边穿越膨胀层）。
+fn search_global_path(
+    map: &GridMap,
+    astar: &mut Astar,
+    start: Vector3<f64>,
+    goal: Vector3<f64>,
+) -> Result<Vec<Vector3<f64>>> {
+    let path = astar.search(map, start, goal)?;
+    Ok(firefly_search::simplify_path(map, path.points()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PlannerConfig;
+    use firefly_map::{GridMapBuilder, VoxelState};
+
+    fn state_at(p: Vector3<f64>) -> State {
+        State {
+            position: Point3::from(p),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        }
+    }
+
+    /// 沿折线从 `from`(视为在路径上)累计弧长 `arc` 的点(测试预言机,
+    /// 与实现独立——只做简单的逐段行走)。
+    fn arc_point(path: &[Vector3<f64>], from: Vector3<f64>, arc: f64) -> Vector3<f64> {
+        let mut remaining = arc;
+        let mut prev = from;
+        for p in path.iter().skip(1) {
+            let seg = *p - prev;
+            let len = seg.norm();
+            if remaining <= len {
+                return prev + seg * (remaining / len.max(1e-12));
+            }
+            remaining -= len;
+            prev = *p;
+        }
+        *path.last().unwrap()
+    }
+
+    /// 空旷地图上的管理器:起点 (1,1,1) → 终点 (10,1,1)。
+    fn open_manager() -> PlannerManager {
+        let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
+        let planner = Planner::new(PlannerConfig::default(), map);
+        PlannerManager::with_planner(
+            planner,
+            ManagerOptions::default(),
+            Vector3::new(1.0, 1.0, 1.0),
+            Vector3::new(10.0, 1.0, 1.0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn walk_global_path_arc_projection() {
+        let m = open_manager();
+        // 断言沿**实际**全局路径的弧长语义,不假设路径经过固定坐标
+        let path = m.global_path().to_vec();
+        let start = path[0];
+        let h = m.walk_global_path(start, 6.0);
+        assert!(!h.touch_goal, "6m 应未到终点");
+        let expect = arc_point(&path, start, 6.0);
+        assert!(
+            (h.target.coords - expect).norm() < 1e-6,
+            "弧长 6m 目标 = 沿路径走 6m:期望 {expect:?},实际 {:?}",
+            h.target.coords
+        );
+        // tail:起点 + 沿途 + 目标点
+        assert!(h.tail.len() >= 2);
+        assert!((*h.tail.last().unwrap() - h.target.coords).norm() < 1e-6);
+        // 弧长远超路径末端 → touch_goal,目标 = 全局终点
+        let h2 = m.walk_global_path(start, 1e9);
+        assert!(h2.touch_goal);
+        assert!((h2.target.coords - m.goal().coords).norm() < 1e-6);
+        // 起点在路径中途:从当前位置起算弧长
+        let mid = arc_point(&path, start, 3.0);
+        let h3 = m.walk_global_path(mid, 2.0);
+        let expect3 = arc_point(&path, mid, 2.0);
+        assert!(
+            (h3.target.coords - expect3).norm() < 1e-6,
+            "中途起点应按剩余路径走弧长:期望 {expect3:?},实际 {:?}",
+            h3.target.coords
+        );
+    }
+
+    #[test]
+    fn target_clear_free_and_blocked() {
+        let mut m = open_manager();
+        // 空旷 → 自由
+        assert!(m.target_clear(Vector3::new(5.0, 1.0, 1.0)));
+        // 加一堵墙(x=5.0,res 0.5 → 体素 [10,2,2])并膨胀 0.2
+        m.map_mut().set_state([10, 2, 2], VoxelState::Occupied);
+        m.map_mut().inflate_obstacles(0.2);
+        // 墙点(膨胀后 x∈[4.8,5.2])→ 不自由
+        assert!(!m.target_clear(Vector3::new(5.0, 1.0, 1.0)));
+        // 远处自由
+        assert!(m.target_clear(Vector3::new(9.0, 1.0, 1.0)));
+    }
+
+    #[test]
+    fn horizon_backs_off_blocked_target() {
+        let mut m = open_manager();
+        // 动态取弧长目标的落点,把墙放在那里(不假设坐标);
+        // 目标被堵后 horizon 应沿路径回退到安全点。
+        let path = m.global_path().to_vec();
+        let start = path[0];
+        let arc_target = m.walk_global_path(start, 6.0).target;
+        let idx = m.map().index_of(arc_target.coords).expect("目标在地图内");
+        m.map_mut()
+            .set_state([idx[0], idx[1], idx[2]], VoxelState::Occupied);
+        m.map_mut().inflate_obstacles(0.2);
+        // 场景前提:弧长目标确实被堵
+        assert!(
+            !m.target_clear(arc_target.coords),
+            "场景前提:弧长目标应被堵"
+        );
+
+        let h = m.horizon(start);
+        assert!(!h.touch_goal, "未到终点不应 touch_goal");
+        assert!(m.target_clear(h.target.coords), "回退后的目标必须安全");
+        // 回退:目标严格比 arc_target 更接近起点(沿路径),且未退过头
+        let d_arc = (arc_target.coords - start).norm();
+        let d_h = (h.target.coords - start).norm();
+        assert!(d_h < d_arc - 1e-6, "被堵目标应回退({d_h:.3} vs {d_arc:.3})");
+        assert!(d_h > d_arc - 1.5, "回退不应退过头({d_h:.3} vs {d_arc:.3})");
+    }
+
+    #[test]
+    fn tick_initial_plan_then_replan_at_threshold() {
+        let mut m = open_manager();
+        // 首帧:初始规划建立局部轨迹
+        let r0 = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        assert!(m.local().is_some(), "首帧应建立局部轨迹");
+        assert!(!r0.replanned);
+        assert_eq!(m.replans(), 0, "初始规划不计入重规划次数");
+        let ref0 = r0.reference.expect("首帧应有参考指令");
+        assert!((ref0.position - Vector3::new(1.0, 1.0, 1.0)).norm() < 1e-6);
+        assert!(!m.is_finished());
+        // t=1.5 > replan_thresh(1.0) → 触发重规划(暖启动)
+        let r1 = m.tick(1.5, None);
+        assert!(r1.replanned, "超过阈值应重规划");
+        assert_eq!(m.replans(), 1);
+        assert!(r1.reference.is_some());
+    }
+
+    #[test]
+    fn tick_arrival_finishes() {
+        let mut m = open_manager();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        // 实测位置到达目标 → 任务完成(任意轨迹阶段)
+        let r = m.tick(2.0, Some(state_at(m.goal().coords)));
+        assert!(r.finished, "到达目标应标记完成");
+        assert!(m.is_finished());
+    }
+
+    #[test]
+    fn warm_start_falls_back_to_cold_when_exhausted() {
+        let mut m = open_manager();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        // 重规划到 horizon(非终点)的局部轨迹,使"轨迹耗尽"不会误触到达判定
+        let _ = m.tick(1.5, None);
+        let dur = m.local().unwrap().traj.duration();
+        assert!(m.local().unwrap().start_time < 1.5 + 1e-9);
+        // 轨迹耗尽(now = start + duration + 0.1),未到达目标 → 强制重规划。
+        // 暖启动的 elapsed 超过旧轨迹时长 → init_warm_start 必然失败
+        // → 降级冷启动(官方 case2 → case1 策略链)仍须成功。
+        let t_end = m.local().unwrap().start_time + dur + 0.1;
+        let r = m.tick(t_end, None);
+        assert!(r.replanned, "轨迹耗尽应强制重规划");
+        assert_eq!(m.replans(), 2, "降级链应产出一次重规划");
+        assert!(m.local().is_some(), "降级后应仍有新轨迹");
+        assert!(!m.is_finished());
+    }
+
+    #[test]
+    fn escape_fly_when_traj_exhausted_and_failing() {
+        let mut m = open_manager();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        // 先重规划出 horizon 局部轨迹(终点 = 规划视界内某点,≠ 全局终点)
+        let _ = m.tick(1.5, None);
+        let dur = m.local().unwrap().traj.duration();
+        m.replan_cooldown_until = f64::INFINITY; // 阻止重规划,聚焦 reference 分支
+        // 脱困方向 = 全局路径前进方向(不假设具体坐标轴)
+        let path = m.global_path();
+        let path_dir = (path[1] - path[0]).normalize();
+
+        // 正常态:轨迹末端参考 = 轨迹终点状态(速度≈0)
+        let r1 = m.tick(m.local().unwrap().start_time + dur + 0.1, None);
+        let ref1 = r1.reference.expect("正常态应有参考");
+        assert!(
+            ref1.velocity.norm() < 0.1,
+            "末端参考速度应≈0,实际 {}",
+            ref1.velocity.norm()
+        );
+        assert!(!m.is_finished(), "末端未到达全局终点不应完成");
+
+        // 脱困态:连续失败达阈值且轨迹耗尽 → 沿全局路径向下一自由点直飞
+        m.replan_fail_streak = FAIL_STREAK_ESCAPE;
+        let r2 = m.tick(m.local().unwrap().start_time + dur + 0.2, None);
+        let ref2 = r2.reference.expect("脱困态应有参考");
+        let expect_vel = ESCAPE_SPEED * path_dir;
+        assert!(
+            (ref2.velocity - expect_vel).norm() < 1e-6,
+            "脱困应沿路径直飞(速度 {expect_vel:?}),实际 {:?}",
+            ref2.velocity
+        );
+        assert!(
+            (ref2.position - ref1.position).dot(&path_dir) > 0.5,
+            "脱困目标应沿路径前移(末端 {:?},脱困 {:?})",
+            ref1.position,
+            ref2.position
+        );
+    }
 }

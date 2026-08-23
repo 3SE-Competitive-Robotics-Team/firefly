@@ -1,7 +1,7 @@
 # firefly 双语言 monorepo 的 uv workspace 根（聚合包，不挂自己的源码）。
 #
 # 布局约定（与 Cargo workspace 对称，一个进程 = apps/ 下一个应用）：
-# - apps/    运行进程：Rust 应用（maps/planner、vio）+ Python 应用（firefly-sim）
+# - apps/    运行进程：Rust 应用（planner、vio）+ Python 应用（firefly-sim）
 # - packages/ Python 库（firefly-mujoco）
 # - crates/  Rust 库
 #

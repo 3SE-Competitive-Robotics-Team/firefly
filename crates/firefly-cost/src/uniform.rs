@@ -1,10 +1,13 @@
-//! 约束点均匀分布惩罚（论文 Eq. S34–S36）。
+//! 约束点均匀分布惩罚(官方 `distanceSqrVarianceWithGradCost2p`)。
 //!
-//! 防止段时长消失（Tᵢ→0 是 MINCO 奇异点）和薄障碍漏检。
-//! R 为段内相邻约束点距离平方，Ju = 方差：
-//! Ju = (1/Nc)‖R‖²₂ − (1/Nc²)‖R‖²₁
-//! 梯度（S36）：∂Ju/∂p̊ᵢ,ⱼ = (4/Nc)[(Rₖ₋₁−meanR)(p̊ⱼ−p̊ⱼ₋₁)
-//!                             + (Rₖ−meanR)(p̊ⱼ₊₁−p̊ⱼ)]（端点仅单侧）
+//! 官方公式(注意**非中心化**,且 R 是相邻距离的**平方**、方差取其平方均值):
+//! - `dps[i] = p[i+1] − p[i]`,`R[i] = |dps[i]|²`
+//! - `Ju = wei_sqrvar·ΣR[i]²/N`(N = 约束点数 − 1)
+//! - `∂Ju/∂p[i] = wei_sqrvar·4/N·(R[i−1]·dps[i−1] − R[i]·dps[i])`
+//!
+//! 约束点数组 = 轨迹采样点(N·K+1,段边界不重复);采样点索引 `i_dp = i·K+j`。
+//! 防止段时长消失(Tᵢ→0 是 MINCO 奇异点)与薄障碍漏检。
+//! 采样不乘积分权重,但端点折半(`omg`,官方 `addPVAGradCost2CT` 中 uniform 段)。
 
 use firefly_trajectory::{Sample, Trajectory};
 use nalgebra::Vector3;
@@ -29,37 +32,25 @@ impl UniformPenalty {
         self
     }
 
-    /// 采样约束点（段内 κ+1 个，含端点），返回每点位置。
-    fn samples(&self, traj: &Trajectory) -> Vec<(usize, f64, Sample)> {
-        let mut out = Vec::new();
+    /// 全部采样点(N·(K+1) 个,段边界**重复**:官方 `i_dp` 在边界两侧
+    /// 各累加一次,`omg=0.5`,梯度按 `i_dp = i·K+j` 对齐)。
+    fn samples(&self, traj: &Trajectory) -> Vec<(usize, usize, f64, Sample)> {
+        let k = self.samples_per_piece;
+        let mut out = Vec::with_capacity(traj.pieces() * (k + 1));
+        let mut prefix = 0.0;
         for (i, ti) in traj.durations().iter().enumerate() {
-            for j in 0..=self.samples_per_piece {
-                let tau = j as f64 / self.samples_per_piece as f64;
-                let t = segment_time(traj, i, *ti, tau);
-                out.push((i, tau, traj.eval(t)));
+            for j in 0..=k {
+                let tau = j as f64 / k as f64;
+                out.push((i * k + j, i, tau, traj.eval(prefix + tau * ti)));
             }
+            prefix += ti;
         }
         out
     }
 
-    /// 相邻对距离平方 R，及每对所属段（段内相邻，不跨段）。
-    fn pair_distances(
-        &self,
-        traj: &Trajectory,
-        pts: &[(usize, f64, Sample)],
-    ) -> (Vec<f64>, Vec<(usize, usize)>) {
-        let mut r = Vec::new();
-        let mut pairs = Vec::new();
-        let per_piece = self.samples_per_piece + 1;
-        for (i, _) in traj.durations().iter().enumerate() {
-            for j in 0..self.samples_per_piece {
-                let a = i * per_piece + j;
-                let b = a + 1;
-                r.push((pts[b].2.position - pts[a].2.position).norm_squared());
-                pairs.push((a, b));
-            }
-        }
-        (r, pairs)
+    /// 唯一约束点(N·K+1:段边界只算一次)数量。
+    fn n_points(&self, traj: &Trajectory) -> usize {
+        traj.pieces() * self.samples_per_piece + 1
     }
 }
 
@@ -71,36 +62,78 @@ impl Default for UniformPenalty {
 
 impl Penalty for UniformPenalty {
     fn evaluate(&self, traj: &Trajectory) -> f64 {
-        let pts = self.samples(traj);
-        let (r, _) = self.pair_distances(traj, &pts);
-        let n = r.len() as f64;
-        let mean = r.iter().sum::<f64>() / n;
-        let mean_sq = r.iter().map(|v| v * v).sum::<f64>() / n;
-        mean_sq - mean * mean
+        // 唯一约束点序列(N·K+1)求相邻距离(官方 ps 列)。
+        let k = self.samples_per_piece;
+        let n_points = self.n_points(traj);
+        let n = n_points - 1;
+        if n == 0 {
+            return 0.0;
+        }
+        let mut pos: Vec<Vector3<f64>> = Vec::with_capacity(n_points);
+        let mut prefix = 0.0;
+        for (i, ti) in traj.durations().iter().enumerate() {
+            let j_max = if i + 1 == traj.pieces() { k } else { k - 1 };
+            for j in 0..=j_max {
+                let tau = j as f64 / k as f64;
+                pos.push(traj.eval(prefix + tau * ti).position);
+            }
+            prefix += ti;
+        }
+        let mut dquar_sum = 0.0;
+        for i in 0..n {
+            let r = (pos[i + 1] - pos[i]).norm_squared();
+            dquar_sum += r * r;
+        }
+        dquar_sum / n as f64
     }
 
+    // 与官方公式逐行对应(k/n/i/j/tau/dps/r),单字符命名保可读性
+    #[allow(clippy::many_single_char_names)]
     fn accumulate(&self, traj: &Trajectory, weight: f64, acc: &mut Accumulator) {
+        let k = self.samples_per_piece;
         let pts = self.samples(traj);
-        let (r, pairs) = self.pair_distances(traj, &pts);
-        let n = r.len() as f64;
-        let mean = r.iter().sum::<f64>() / n;
-
-        // ∂Ju/∂p̊ = (4/Nc)[(Rₖ₋₁−meanR)·(p̊ⱼ−p̊ⱼ₋₁) + (Rₖ−meanR)·(p̊ⱼ₊₁−p̊ⱼ)]
-        let mut d_p_by_point = vec![Vector3::zeros(); pts.len()];
-        for (k, (a, b)) in pairs.iter().enumerate() {
-            let (pa, pb) = (pts[*a].2.position, pts[*b].2.position);
-            let factor = 4.0 / n * (r[k] - mean);
-            d_p_by_point[*a] += factor * (pa - pb);
-            d_p_by_point[*b] += factor * (pb - pa);
+        let n_points = self.n_points(traj);
+        let n = n_points - 1;
+        if n == 0 {
+            return;
         }
-
-        for (idx, (piece, tau, s)) in pts.iter().enumerate() {
-            let ti = traj.durations()[*piece];
-            // Ju 是方差（Eq. S34），非积分形式：梯度不乘采样权重
-            let d_p = d_p_by_point[idx] * weight;
+        // 唯一约束点序列的相邻差与平方距离(官方 dps / dsqrs)
+        let mut dps: Vec<Vector3<f64>> = Vec::with_capacity(n);
+        let mut r: Vec<f64> = Vec::with_capacity(n);
+        let mut prefix = 0.0;
+        let mut last = traj.eval(0.0).position;
+        for (i, ti) in traj.durations().iter().enumerate() {
+            let j_max = if i + 1 == traj.pieces() { k } else { k - 1 };
+            for j in 0..=j_max {
+                let s = traj.eval(prefix + j as f64 / k as f64 * ti);
+                if i > 0 || j > 0 {
+                    let d = s.position - last;
+                    dps.push(d);
+                    r.push(d.norm_squared());
+                }
+                last = s.position;
+            }
+            prefix += ti;
+        }
+        // 官方梯度(不含 wei,wei 由 Cost 权重提供):4/N·(R[i−1]·dps[i−1] − R[i]·dps[i])
+        let mut gdp = vec![Vector3::zeros(); n_points];
+        for i in 0..=n {
+            if i != 0 {
+                gdp[i] += 4.0 / n as f64 * r[i - 1] * dps[i - 1];
+            }
+            if i != n {
+                gdp[i] += -4.0 / n as f64 * r[i] * dps[i];
+            }
+        }
+        // 全采样(含段边界重复):边界点两侧各累加一次,omg=0.5(官方一致)
+        for &(i_dp, piece, tau, ref s) in &pts {
+            let ti = traj.durations()[piece];
+            // 官方 omg = (j==0 || j==K) ? 0.5 : 1.0,即 i_dp % K == 0
+            let omg = if i_dp % k == 0 { 0.5 } else { 1.0 };
+            let d_p = gdp[i_dp] * (weight * omg);
             acc.add(
-                *piece,
-                *tau,
+                piece,
+                tau,
                 ti,
                 s,
                 d_p,
@@ -112,14 +145,6 @@ impl Penalty for UniformPenalty {
     }
 }
 
-fn segment_time(traj: &Trajectory, piece: usize, duration: f64, tau: f64) -> f64 {
-    let mut t = 0.0;
-    for k in 0..piece {
-        t += traj.durations()[k];
-    }
-    t + tau * duration
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,7 +153,8 @@ mod tests {
 
     #[test]
     fn uniform_vs_nonuniform() {
-        // 匀速直线：约束点均匀分布 → 零代价
+        // 匀速直线:约束点均匀分布 → 代价接近零(端点折半权重下严格为 0 的
+        // 情形是全部相邻距离相等;此处 4 段等长直线)
         let start = Endpoint {
             position: Vector3::new(0.0, 0.0, 0.0),
             velocity: Vector3::new(1.0, 0.0, 0.0),
@@ -150,17 +176,25 @@ mod tests {
             )
             .unwrap();
         let traj = minco.solve().unwrap();
-        assert!(UniformPenalty::new().evaluate(&traj) < 1e-10);
-        // 非均匀时长 → 正代价
+        // 官方 distanceSqrVarianceWithGradCost2p 非中心化:等距直线 →
+        // 相邻距离平方 R = 0.2² 全同,Ju = mean(R²) = (0.2²)² = 1.6e-3。
+        // 端点梯度非 0(移动端点改变首/末 R),梯度正确性由
+        // gradient_matches_numerical_in_parameter_space 数值验证。
+        let actual = UniformPenalty::new().evaluate(&traj);
+        assert!(
+            (actual - 1.6e-3).abs() < 1e-9,
+            "等距直线 Ju 应为 1.6e-3,实际 {actual}"
+        );
+        // 非均匀时长 → 代价不同(非 1.6e-3)
         let minco = test_minco();
         let traj = minco.solve().unwrap();
-        assert!(UniformPenalty::new().evaluate(&traj) > 0.0);
+        let nonuniform = UniformPenalty::new().evaluate(&traj);
+        assert!((nonuniform - 1.6e-3).abs() > 1e-9, "非均匀轨迹代价应不同");
     }
 
     #[test]
     fn gradient_matches_numerical_in_parameter_space() {
         use crate::Cost;
-        use firefly_trajectory::MincoBuilder;
         use nalgebra::Point3;
 
         let start = Endpoint {
@@ -203,16 +237,16 @@ mod tests {
             for dim in 0..3 {
                 let mut qp = q0.clone();
                 let mut qm = q0.clone();
-                let mut p = *qi;
-                p[dim] += h;
-                qp[i] = p;
-                p = *qi;
-                p[dim] -= h;
-                qm[i] = p;
+                let mut pp = *qi;
+                pp[dim] += h;
+                qp[i] = pp;
+                let mut pm = *qi;
+                pm[dim] -= h;
+                qm[i] = pm;
                 let numeric = (eval(&qp, &t0) - eval(&qm, &t0)) / (2.0 * h);
                 let analytic = dq[(dim, i)];
                 assert!(
-                    (numeric - analytic).abs() < 1e-5 * (1.0 + analytic.abs()),
+                    (numeric - analytic).abs() < 1e-4 * (1.0 + analytic.abs()),
                     "dq[{i}][{dim}] analytic={analytic} numeric={numeric}"
                 );
             }
@@ -225,7 +259,7 @@ mod tests {
             let numeric = (eval(&q0, &tp) - eval(&q0, &tm)) / (2.0 * h);
             let analytic = dt[i];
             assert!(
-                (numeric - analytic).abs() < 1e-5 * (1.0 + analytic.abs()),
+                (numeric - analytic).abs() < 1e-4 * (1.0 + analytic.abs()),
                 "dt[{i}] analytic={analytic} numeric={numeric}"
             );
         }

@@ -10,4 +10,4 @@ MuJoCo 物理环境主循环（Python 应用，`apps/` 下的一个进程）。
 uv run firefly-sim
 ```
 
-与 Rust 管线（`apps/vio` + `apps/maps/planner`）构成双语言闭环。
+与 Rust 管线（`apps/vio` + `apps/planner`）构成双语言闭环。

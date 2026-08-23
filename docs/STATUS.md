@@ -55,12 +55,15 @@ Python sim（MuJoCo 物理 + 传感器发布 200Hz，订阅 `Firefly/Reference` 
    case 2）：非首帧重规划用上一条最优轨迹作初始 MINCO（剩余段采样 + 全局路径
    延续），失败自动降级冷启动。任务执行 FSM 同步下沉至 `firefly-planner`
    crate（对照 `ego_replan_fsm.cpp`），apps/planner 只留 IPC/viewer 壳。
-5. **已知算法债（对照源码迭代中）**：连续重规划链上偶发 L-BFGS 发散样本
-   （单轴 1e12 级）进入下一轮约束扫描，`build_plane` 射线步进曾因此无限
-   循环（已加步数上限 + 非有限守卫防挂死）。官方无此问题——其碰撞点处理
-   是约束点数组内 in/out 自由点搜索 + A* 绕障（`finelyCheckAndSetConstraintPoints`），
-   不做射线步进；rebound 的"缩放后不安全"路径官方也不存在零计数空转。
-   根治 = 按官方机制重建约束生成，已标注 TODO(官方对齐)。
+5. **约束点生成已按官方重建（完成）**：原"build_plane 射线步进"曾因连续
+   重规划链上偶发 L-BFGS 发散样本（单轴 1e12 级）无限循环（旧代码已加
+   步数上限 + 非有限守卫防挂死）。现按官方 `finelyCheckAndSetConstraintPoints` /
+   `roughlyCheckConstraintPoints` 重建（`obstacles.rs`）：稠密采样（`computePointsToCheck`）
+   → 占据分段 → **约束点数组内 in/out 自由点搜索 + A* 绕障 + 交点平面**，
+   不再做射线步进（天然有界，末端无自由点即报错/放弃）。同时对齐：
+   L-BFGS 内循环检测激活条件（iter>3 且平滑度/piece<10）、五项代价公式
+   （K=5 梯形采样、2/3 截断、官方 CLEARANCE=Cw×1.5 等）、rebound 全局
+   迭代上限。对照清单与逐文件映射见 `docs/v2_alignment.md`。
 
 ## 建议下一步
 
