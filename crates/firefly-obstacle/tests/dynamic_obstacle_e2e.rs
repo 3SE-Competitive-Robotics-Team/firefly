@@ -24,11 +24,12 @@ fn planner_avoids_dynamic_obstacle() {
     };
     let goal = Point3::new(9.0, 3.0, 1.0);
 
-    // 动态障碍：横向穿过本机路径（y=0.5 附近），需要小幅 y 避让
-    // 官方语义：CLEARANCE = (Cw_self + des_clearance) × 1.5 = (0.5 + 0.5) × 1.5 = 1.5
-    // 障碍位于路径侧方（初始距离 ~1.2 < 1.5），需小幅避让
+    // 动态障碍：横向穿过本机路径（y=3.4 向下渐停,接近本机 y=3.0 直线），
+    // 需小幅 y 避让。官方语义：CLEARANCE = swarm_clearance × 1.5 = 0.75
+    //（v2 `swarmGradCostP`,不再叠加 peer 体积）——障碍须进入 0.75 范围
+    // 才触发避让,故让障碍起始点贴近路径。
     let obstacle = MovingObstacle::new(
-        Vector2::new(4.5, 4.2),
+        Vector2::new(4.5, 3.4),
         Vector2::new(0.0, -0.2),
         -core::f64::consts::FRAC_PI_2,
         1.0,
@@ -54,15 +55,15 @@ fn planner_avoids_dynamic_obstacle() {
         free0_min = free0_min.min((p - op).norm());
     }
     assert!(
-        free0_min < 1.35,
-        "场景前提：自由轨迹应接近预测路径（min={free0_min:.3}）"
+        free0_min < 0.75,
+        "场景前提：自由轨迹应进入官方避让范围 CLEARANCE=0.75（min={free0_min:.3}）"
     );
     let result = planner
         .plan_in_swarm(start, goal, &[peer])
         .expect("避让动态障碍");
 
     let traj = &result.trajectory;
-    // 本机轨迹与预测轨迹的最小距离应 ≥ 0.9·Cw（软约束容差）
+    // 本机轨迹与预测轨迹的最小距离应 ≥ 0.8·CLEARANCE（软约束容差）
     let mut min_d = f64::MAX;
     for k in 0..200 {
         let t = traj.duration() * f64::from(k) / 200.0;
@@ -73,7 +74,7 @@ fn planner_avoids_dynamic_obstacle() {
         let op = predicted.eval(t).position;
         min_d = min_d.min((p - op).norm());
     }
-    assert!(min_d > 1.30, "轨迹应避开动态障碍预测路径：min_d={min_d:.3}");
+    assert!(min_d > 0.6, "轨迹应避开动态障碍预测路径：min_d={min_d:.3}");
 
     // 对照：无 peer 时轨迹沿直线（会穿过障碍路径）
     let free = planner.plan(start, goal).unwrap();

@@ -28,7 +28,7 @@ flowchart TD
         TOPIC_TRAJ["topic: trajectory"]
     end
 
-    subgraph PLAN_APP["apps/maps/planner（规划进程）"]
+    subgraph PLAN_APP["apps/planner（规划进程）"]
         subgraph MAP["firefly-map"]
             GRID["GridMap 占据体素 + 膨胀层"]
             RAY["深度 raycast 更新<br/>(FFMap 格式)"]

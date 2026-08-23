@@ -25,13 +25,16 @@ pub struct PlannerConfig {
     pub weight_obstacle: f64,
     pub weight_swarm: f64,
     pub weight_formation: f64,
+    /// 约束点均匀分布权重(官方 `weight_sqrvariance`)。
+    pub weight_sqrvariance: f64,
 }
 
 impl Default for PlannerConfig {
     fn default() -> Self {
         Self {
             piece_length: 1.5,
-            constraint_points_per_piece: 12,
+            // 官方 Table S6 / advanced_param.xml:constraint_points_perPiece = 5
+            constraint_points_per_piece: 5,
             planning_distance: 7.5,
             obstacle_clearance: 0.1,
             obstacle_clearance_soft: 0.5,
@@ -47,6 +50,7 @@ impl Default for PlannerConfig {
             weight_obstacle: 10_000.0,
             weight_swarm: 10_000.0,
             weight_formation: 100.0,
+            weight_sqrvariance: 10_000.0,
         }
     }
 }
@@ -59,7 +63,7 @@ mod tests {
     #[test]
     fn defaults_match_paper_table_s6() {
         let c = PlannerConfig::default();
-        assert_eq!(c.constraint_points_per_piece, 12);
+        assert_eq!(c.constraint_points_per_piece, 5);
         assert_eq!(c.obstacle_clearance, 0.1);
         assert_eq!(c.obstacle_clearance_soft, 0.5);
         assert_eq!(c.weight_obstacle_soft, 5000.0);
@@ -74,5 +78,6 @@ mod tests {
         assert_eq!(c.weight_obstacle, 10_000.0);
         assert_eq!(c.weight_swarm, 10_000.0);
         assert_eq!(c.weight_formation, 100.0);
+        assert_eq!(c.weight_sqrvariance, 10_000.0);
     }
 }

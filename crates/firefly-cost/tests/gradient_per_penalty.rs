@@ -53,11 +53,7 @@ fn check_gradient_c(name: &str, traj: &Trajectory, penalty: &dyn Penalty) {
 fn per_penalty_gradients_match_numerical() {
     let traj = traj();
     check_gradient_c("smoothness", &traj, &SmoothnessPenalty);
-    check_gradient_c(
-        "feasibility",
-        &traj,
-        &FeasibilityPenalty::new(1.5, 6.0, 10.0),
-    );
+    check_gradient_c("feasibility", &traj, &FeasibilityPenalty::new(1.5, 6.0));
     let planes = vec![
         Plane::new(Vector3::new(0.2, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0)),
         Plane::new(Vector3::new(3.8, 0.0, 0.0), Vector3::new(-1.0, 0.0, 0.0)),

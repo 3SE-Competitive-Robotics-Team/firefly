@@ -1,24 +1,27 @@
-//! 集群避碰惩罚。
+//! 集群避碰惩罚(官方 `swarmGradCostP`)。
 //!
-//! 论文 Eq. S24–S28：本机轨迹 `u_p(t)` 与每架其他机轨迹 `k_p(τ)` 在**同一绝对时刻**
-//! 保持椭球距离 ≥ Cw。E = diag(1,1,1/c)，c>1 缩短 z 轴缓解下洗。
-//! 采样点用绝对时间（对齐其他机），前面段时长变化会移动采样点
-//! （`Accumulator::add_absolute，论文` Eq. S28）。
+//! 椭球距离 `ellip_dist2 = dz²/a² + (dx²+dy²)/b²`(a=2, b=1,缓解下洗),
+//! 避让距离 `CLEARANCE = (Cw·1.5)`(官方对轻微约束违反的补偿),
+//! 惩罚 `wei_swarm·max{(CLEARANCE²−ellip_dist2),0}³`。
+//! 仅对前 2/3 约束点施力;采样梯形权重 `omg·T/K`。
 
 use firefly_trajectory::{Sample, Trajectory};
 use nalgebra::Vector3;
 
+use crate::sampling::{sample_index, trapezoid_weight};
 use crate::{Accumulator, Peer, Penalty};
 
 pub struct SwarmPenalty {
-    /// 本机集群安全距离 `Cw`（与对方 `des_clearance` 之和构成避让距离）。
+    /// 本机集群安全距离 `Cw`(官方 `swarm_clearance`)。
     pub self_clearance: f64,
-    /// 椭球 z 轴系数（官方 a = 2.0：z 距离贡献 1/a²，防下洗更严）。
+    /// 椭球 z 轴系数(官方 a = 2.0:z 距离贡献 1/a²,防下洗更严)。
     pub ellipsoid_a: f64,
-    /// 椭球 xy 轴系数（官方 b = 1.0）。
+    /// 椭球 xy 轴系数(官方 b = 1.0)。
     pub ellipsoid_b: f64,
     pub peers: Vec<Peer>,
     pub samples_per_piece: usize,
+    /// 前 2/3 截断(`two_thirds_id`);`None` = 不限。
+    two_thirds: Option<usize>,
 }
 
 impl SwarmPenalty {
@@ -30,6 +33,7 @@ impl SwarmPenalty {
             ellipsoid_b,
             peers,
             samples_per_piece: 5,
+            two_thirds: None,
         }
     }
 
@@ -38,43 +42,76 @@ impl SwarmPenalty {
         self.samples_per_piece = samples;
         self
     }
+
+    /// 施加官方前 2/3 截断。
+    #[must_use]
+    pub fn with_two_thirds(mut self, id: usize) -> Self {
+        self.two_thirds = Some(id);
+        self
+    }
 }
 
 impl Penalty for SwarmPenalty {
     fn evaluate(&self, traj: &Trajectory) -> f64 {
+        if self.peers.is_empty() {
+            return 0.0;
+        }
+        let k = self.samples_per_piece;
         let mut cost = 0.0;
         for (i, ti) in traj.durations().iter().enumerate() {
-            let weight = ti / self.samples_per_piece as f64;
-            for j in 0..=self.samples_per_piece {
-                let tau = j as f64 / self.samples_per_piece as f64;
+            let step = ti / k as f64;
+            for j in 0..=k {
+                let tau = j as f64 / k as f64;
+                if let Some(t) = self.two_thirds
+                    && {
+                        let idx = sample_index(i, j, k);
+                        idx == 0 || idx > t
+                    }
+                {
+                    continue;
+                }
                 let t_abs = absolute_time(traj, i, *ti, tau);
                 let s = traj.eval(t_abs);
-                cost += weight * self.point_cost(&s, t_abs);
+                let omg = trapezoid_weight(j, k);
+                cost += omg * step * self.point_cost(&s, t_abs);
             }
         }
         cost
     }
 
     fn accumulate(&self, traj: &Trajectory, weight: f64, acc: &mut Accumulator) {
+        if self.peers.is_empty() {
+            return;
+        }
+        let k = self.samples_per_piece;
         for (i, ti) in traj.durations().iter().enumerate() {
-            let sample_weight = weight * ti / self.samples_per_piece as f64;
-            for j in 0..=self.samples_per_piece {
-                let tau = j as f64 / self.samples_per_piece as f64;
+            let step = ti / k as f64;
+            for j in 0..=k {
+                let tau = j as f64 / k as f64;
+                if let Some(t) = self.two_thirds
+                    && {
+                        let idx = sample_index(i, j, k);
+                        idx == 0 || idx > t
+                    }
+                {
+                    continue;
+                }
+                let omg = trapezoid_weight(j, k);
                 let t_abs = absolute_time(traj, i, *ti, tau);
                 let s = traj.eval(t_abs);
-                // 逐 peer 累加：每个 peer 在同一绝对时刻求值，
-                // 时间移动用相对速度（本机 − peer）
+                // 逐 peer 累加:每个 peer 在同一绝对时刻求值,
+                // 时间移动用相对速度(本机 − peer)
                 for peer in &self.peers {
                     let ps = eval_at(peer, t_abs);
                     let diff = s.position - ps.position;
-                    let c = self.clearance(peer);
+                    let c = self.clearance();
                     let excess = c * c - self.d2(diff);
                     if excess <= 0.0 {
                         continue;
                     }
                     let point_cost = excess * excess * excess;
-                    let d_p = -6.0 * excess * excess * self.e_mul(diff) * sample_weight;
-                    acc.d_f_d_t[i] += weight * point_cost / self.samples_per_piece as f64;
+                    let d_p = -6.0 * excess * excess * self.e_mul(diff) * (weight * omg * step);
+                    acc.d_f_d_t[i] += weight * omg * point_cost / k as f64;
                     acc.add_absolute(
                         i,
                         tau,
@@ -93,23 +130,23 @@ impl Penalty for SwarmPenalty {
 }
 
 impl SwarmPenalty {
-    /// 椭球距离平方：`d² = dz²/a² + (dx²+dy²)/b²`（官方 `ellip_dist2`）。
+    /// 椭球距离平方:`d² = dz²/a² + (dx²+dy²)/b²`(官方 `ellip_dist2`)。
     fn d2(&self, diff: Vector3<f64>) -> f64 {
         let ia2 = 1.0 / (self.ellipsoid_a * self.ellipsoid_a);
         let ib2 = 1.0 / (self.ellipsoid_b * self.ellipsoid_b);
         diff.z * diff.z * ia2 + (diff.x * diff.x + diff.y * diff.y) * ib2
     }
 
-    /// E·diff（梯度方向因子）
+    /// E·diff(梯度方向因子)
     fn e_mul(&self, diff: Vector3<f64>) -> Vector3<f64> {
         let ia2 = 1.0 / (self.ellipsoid_a * self.ellipsoid_a);
         let ib2 = 1.0 / (self.ellipsoid_b * self.ellipsoid_b);
         Vector3::new(diff.x * ib2, diff.y * ib2, diff.z * ia2)
     }
 
-    /// 避让距离：`CLEARANCE = (Cw_self + des_clearance) × 1.5`（官方补偿轻微约束违反）。
-    fn clearance(&self, peer: &Peer) -> f64 {
-        (self.self_clearance + peer.clearance) * 1.5
+    /// 避让距离(官方:`CLEARANCE = swarm_clearance × 1.5`)。
+    fn clearance(&self) -> f64 {
+        self.self_clearance * 1.5
     }
 
     fn point_cost(&self, s: &Sample, t_abs: f64) -> f64 {
@@ -117,8 +154,8 @@ impl SwarmPenalty {
             .iter()
             .map(|peer| {
                 let ps = eval_at(peer, t_abs);
-                let c2 = self.clearance(peer);
-                let c2 = c2 * c2;
+                let c = self.clearance();
+                let c2 = c * c;
                 let excess = c2 - self.d2(s.position - ps.position);
                 if excess <= 0.0 {
                     0.0
@@ -130,7 +167,7 @@ impl SwarmPenalty {
     }
 }
 
-/// 在绝对时刻求值 peer 轨迹；超出轨迹时长时外推匀速（官方行为）。
+/// 在绝对时刻求值 peer 轨迹;超出轨迹时长时外推匀速(官方行为)。
 fn eval_at(peer: &Peer, t_abs: f64) -> firefly_trajectory::Sample {
     let duration = peer.traj.duration();
     if t_abs < duration {
@@ -165,7 +202,7 @@ mod tests {
     fn single_peer() -> (firefly_trajectory::Minco, firefly_trajectory::Trajectory) {
         let minco = test_minco();
         let traj = minco.solve().unwrap();
-        // 幽灵机：静止在轨迹中点附近（会触发避碰）
+        // 幽灵机:静止在轨迹中点附近(会触发避碰)
         let peer = firefly_trajectory::MincoBuilder::new(
             firefly_trajectory::SolverOrder::MinimumJerk,
             firefly_trajectory::Endpoint {
@@ -210,7 +247,7 @@ mod tests {
         .unwrap();
         let p = SwarmPenalty::new(0.5, 2.0, 1.0, vec![Peer::new(0, 0.0, far, 0.5)]);
         assert_eq!(p.evaluate(&traj), 0.0);
-        // 近处 peer（同一轨迹，距离恒 0）→ 正代价
+        // 近处 peer(同一轨迹,距离恒 0)→ 正代价
         let p = SwarmPenalty::new(0.5, 2.0, 1.0, vec![Peer::new(0, 0.0, traj.clone(), 0.5)]);
         assert!(p.evaluate(&traj) > 0.0);
     }
@@ -218,18 +255,19 @@ mod tests {
     #[test]
     #[allow(clippy::many_single_char_names)]
     fn gradient_matches_numerical() {
-        let (minco, peer) = single_peer();
+        let (_, peer) = single_peer();
+        let minco = test_minco();
         let traj = minco.solve().unwrap();
         let p = SwarmPenalty::new(0.5, 2.0, 1.0, vec![Peer::new(0, 0.0, peer.clone(), 0.5)]);
 
-        // 点梯度验证（手写 ∂excess³/∂p = −6·excess²·E(p−p_k)）
+        // 点梯度验证(手写 ∂excess³/∂p = −6·excess²·E(p−p_k))
         let h = 1e-6;
         let s = traj.eval(1.0);
         let (ia2, ib2) = (
             1.0 / (p.ellipsoid_a * p.ellipsoid_a),
             1.0 / (p.ellipsoid_b * p.ellipsoid_b),
         );
-        let cw = (0.5 + 0.5) * 1.5; // CLEARANCE = (Cw_self + des_clearance) × 1.5
+        let cw = 0.5 * 1.5; // CLEARANCE = Cw × 1.5
         for dim in 0..3 {
             let f = |x: f64| {
                 let mut s2 = s;
