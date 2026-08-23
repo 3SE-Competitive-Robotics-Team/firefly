@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fastrace::prelude::*;
+use firefly_pubsub::event::{CAMERA_PAIR_TOPIC, TopicListener};
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::odom::{GROUND_TRUTH_TOPIC, OdomMessage};
 use firefly_pubsub::publish::{ODOM_TOPIC, OdomPublisher};
@@ -30,6 +31,8 @@ use firefly_vio::vio_manager::VioManager;
 use firefly_vio_core::cam::{CamRadtan, SharedCamera};
 use firefly_vio_core::input::SensorInput;
 use firefly_vio_core::track::{HistogramMethod, TrackKlt};
+use iceoryx2::prelude::*;
+use iceoryx2::waitset::WaitSetRunResult;
 
 mod input;
 use input::IceoryxInput;
@@ -205,13 +208,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         viewer.as_ref(),
         gt_sub.as_ref(),
         &node,
-    );
+    )?;
     Ok(())
 }
 
-/// 驱动循环：推进输入 → 喂 IMU/相机 → 传播 → 发布 odom（10Hz）。
-/// 以 `node.wait(1ms)` 节拍：收到 SIGINT/SIGTERM 返回 Err → 优雅退出，
-/// 所有端口 Drop、IPC 资源释放。
+/// IMU 断流警戒阈值（正常 100Hz，超过视为断流）。
+const IMU_STALL: Duration = Duration::from_millis(200);
+/// 兜底心跳周期：无事件时也周期醒来（断流警戒/诊断打印/odom 节拍兜底）。
+const HEARTBEAT: Duration = Duration::from_millis(100);
+/// 诊断打印间隔（墙钟秒）。
+const DIAG_PERIOD: f64 = 10.0;
+
+/// 驱动循环（事件驱动）：WaitSet 监听 IMU/相机对事件即到即醒（数据率 ≈ 唤醒
+/// 率，不再固定节拍轮询），100ms 心跳兜底做断流警戒与诊断；SIGINT/SIGTERM 由
+/// `WaitSet` 捕获返回 → 优雅退出，所有端口 Drop、IPC 资源释放。
 // 输入分发 + 前端健康度统计的编排长流程（与 C++ run_loop 对照结构一致）。
 #[allow(clippy::too_many_lines)]
 fn run_loop(
@@ -221,24 +231,65 @@ fn run_loop(
     viewer: Option<&Stream>,
     gt_sub: Option<&Subscriber<OdomMessage>>,
     node: &firefly_pubsub::node::IpcNode,
-) {
+) -> Result<(), firefly_error::Error> {
     let mut t_sim = 0.0f64;
     let mut next_odom = 0.0f64;
-    let mut loop_count = 0u64;
+    let mut wake_count = 0u64;
     let mut est_traj: Vec<[f64; 3]> = Vec::new();
     let mut gt_traj: Vec<[f64; 3]> = Vec::new();
     let mut camera_count = 0u64;
     let mut imu_batch_count = 0u64;
     let t_wall_start = std::time::Instant::now();
+    let mut next_diag_wall = DIAG_PERIOD;
 
-    loop {
+    // 事件唤醒端：IMU + 相机对（notify 来自 sim；odom 由 OdomPublisher 自动通知）
+    let imu_events = TopicListener::with_topic(node, firefly_pubsub::imu::IMU_TOPIC)?;
+    let cam_events = TopicListener::with_topic(node, CAMERA_PAIR_TOPIC)?;
+    let waitset = WaitSetBuilder::new()
+        .create::<ipc::Service>()
+        .map_err(|e| {
+            firefly_error::Error::new(
+                firefly_error::ErrorKind::Internal,
+                format!("创建 WaitSet 失败: {e:?}"),
+            )
+        })?;
+    let _imu_guard = waitset.attach_notification(&imu_events).map_err(|e| {
+        firefly_error::Error::new(
+            firefly_error::ErrorKind::Internal,
+            format!("挂载 IMU 事件监听失败: {e:?}"),
+        )
+    })?;
+    let _cam_guard = waitset.attach_notification(&cam_events).map_err(|e| {
+        firefly_error::Error::new(
+            firefly_error::ErrorKind::Internal,
+            format!("挂载相机对事件监听失败: {e:?}"),
+        )
+    })?;
+    let tick_guard = waitset.attach_interval(HEARTBEAT).map_err(|e| {
+        firefly_error::Error::new(
+            firefly_error::ErrorKind::Internal,
+            format!("挂载心跳定时器失败: {e:?}"),
+        )
+    })?;
+
+    // IMU 新鲜度跟踪（断流警戒：告警一次，数据恢复后复位）
+    let mut last_imu_wall = Option::<std::time::Instant>::None;
+    let mut stall_warned = false;
+
+    let on_event = |attachment_id: WaitSetAttachmentId<ipc::Service>| {
+        let heartbeat = attachment_id.has_event_from(&tick_guard);
+        // 官方纪律：唤醒后必须排空监听端，否则 fd 持续可读 → busy-loop
+        let _ = imu_events.drain();
+        let _ = cam_events.drain();
+        wake_count += 1;
+
         // 推进输入源并消费到当前时刻
         input.advance();
         let now = input.now();
 
         // 帧 trace：续接最近收到的传感器 trace（每周期一条，跨进程同 trace）；
         // 无上游 trace（sim --no-trace / 独立运行）时用未采样 root，不产生
-        // span 记录——否则 ConsoleReporter 每迭代打印一棵树（~800Hz 洪泛）
+        // span 记录——否则 ConsoleReporter 每次唤醒打印一棵树
         let root = match input.last_trace() {
             Some((tid, sid, sampled)) => Span::root(
                 "vio",
@@ -252,6 +303,10 @@ fn run_loop(
         while let Some(imu) = input.next_imu() {
             vio.feed_measurement_imu(&imu);
             imu_batch += 1;
+        }
+        if imu_batch > 0 {
+            last_imu_wall = Some(std::time::Instant::now());
+            stall_warned = false;
         }
         imu_batch_count += u64::from(imu_batch);
 
@@ -307,14 +362,18 @@ fn run_loop(
         }
         t_sim = t_sim.max(now);
 
-        // 每 2 秒打印一次诊断
-        loop_count += 1;
-        if loop_count.is_multiple_of(2000) {
-            let wall_s = t_wall_start.elapsed().as_secs_f64();
+        // 心跳分支：诊断打印 + IMU 断流警戒
+        let wall_s = t_wall_start.elapsed().as_secs_f64();
+        if heartbeat && wall_s >= next_diag_wall {
+            next_diag_wall = wall_s + DIAG_PERIOD;
             log::info!(
-                "[perf-diag] wall={wall_s:.1}s sim={t_sim:.2} loops={loop_count} cameras={camera_count} imu_batches={imu_batch_count} sim_rate={:.2}x",
+                "[perf-diag] wall={wall_s:.1}s sim={t_sim:.2} wakes={wake_count} cameras={camera_count} imu_batches={imu_batch_count} sim_rate={:.2}x",
                 if wall_s > 0.0 { t_sim / wall_s } else { 0.0 }
             );
+        }
+        if heartbeat && !stall_warned && last_imu_wall.is_some_and(|t| t.elapsed() > IMU_STALL) {
+            stall_warned = true;
+            log::warn!("IMU 断流 >{IMU_STALL:?}：滤波器停更，等待 sim 恢复");
         }
 
         // 按发布周期输出 odom
@@ -344,16 +403,27 @@ fn run_loop(
             }
         }
 
-        // trace 只覆盖真实工作：先闭合本帧 span（时长不含下面的等待睡眠）
+        // trace 只覆盖真实工作：先闭合本帧 span（时长不含下面的等待）
         drop(guard);
         drop(root);
 
-        // 1ms 节拍（兼信号观测）：SIGINT/SIGTERM → Err → 优雅退出
-        if node.wait(Duration::from_millis(1)).is_err() {
+        CallbackProgression::Continue
+    };
+
+    // 事件主循环：SIGINT/SIGTERM 由 WaitSet 捕获并返回
+    match waitset.wait_and_process(on_event) {
+        Ok(WaitSetRunResult::Interrupt | WaitSetRunResult::TerminationRequest) => {
             log::info!("收到终止信号，优雅退出（端口 Drop、IPC 资源释放）");
-            break;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            return Err(firefly_error::Error::temporary(
+                firefly_error::ErrorKind::Internal,
+                format!("WaitSet 事件等待失败: {e:?}"),
+            ));
         }
     }
+    Ok(())
 }
 
 /// 组装并发布一条 odom（10Hz），成功打 info 行。

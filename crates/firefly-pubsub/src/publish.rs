@@ -14,6 +14,7 @@ use fastrace::prelude::*;
 use iceoryx2::port::publisher::Publisher as Iox2Publisher;
 use iceoryx2::prelude::*;
 
+use crate::event::TopicNotifier;
 use crate::node::IpcNode;
 use crate::odom::OdomMessage;
 use crate::trace::TraceContext;
@@ -31,6 +32,8 @@ pub const ODOM_TOPIC: &str = "Firefly/Odometry";
 pub struct Publisher<T: Debug + ZeroCopySend + 'static> {
     /// 发布器句柄。
     publisher: Iox2Publisher<ipc::Service, T, TraceContext>,
+    /// 事件唤醒端：`Some` 时 publish 成功后自动通知（订阅端 `WaitSet` 即到即醒）。
+    notifier: Option<TopicNotifier>,
 }
 
 impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
@@ -61,7 +64,23 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
                 format!("创建发布器失败: {e:?}"),
             )
         })?;
-        Ok(Self { publisher })
+        Ok(Self {
+            publisher,
+            notifier: None,
+        })
+    }
+
+    /// 以自定义话题名创建**带事件唤醒**的发布器：publish 成功后自动通知
+    /// 同名 event service（订阅端把 [`firefly_pubsub::event::TopicListener`]
+    /// 挂进 `WaitSet` 即到即醒；无监听者时通知静默丢弃）。
+    ///
+    /// # Errors
+    /// 见 [`Publisher::with_topic`] 与 [`TopicNotifier::with_topic`]。
+    pub fn with_topic_notify(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
+        let notifier = TopicNotifier::with_topic(node, topic)?;
+        let mut this = Self::with_topic(node, topic)?;
+        this.notifier = Some(notifier);
+        Ok(this)
     }
 
     /// 发布一条消息：**自动注入当前 fastrace 活动 span 的 trace 上下文**
@@ -87,16 +106,27 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
         })?;
         *sample.user_header_mut() = ctx;
         let sample = sample.write_payload(msg);
-        sample.send().map(|_| ctx).map_err(|e| {
-            firefly_error::Error::temporary(
-                firefly_error::ErrorKind::ResourceExhausted,
-                format!("发送样本失败: {e:?}"),
-            )
-        })
+        sample
+            .send()
+            .map(|_| {
+                // 数据路径优先：唤醒失败不阻断发布（见 TopicNotifier::notify_sent_sample）
+                if let Some(notifier) = &self.notifier {
+                    notifier.notify_sent_sample();
+                }
+                ctx
+            })
+            .map_err(|e| {
+                firefly_error::Error::temporary(
+                    firefly_error::ErrorKind::ResourceExhausted,
+                    format!("发送样本失败: {e:?}"),
+                )
+            })
     }
 }
 
 /// 里程计发布器（话题 `Firefly/Odometry`，泛型核心的命名封装）。
+///
+/// 带事件唤醒：publish 后自动 notify，订阅端可挂 `WaitSet` 即到即醒。
 pub struct OdomPublisher(Publisher<OdomMessage>);
 
 impl OdomPublisher {
@@ -111,9 +141,9 @@ impl OdomPublisher {
     /// 以自定义话题名打开 odom 发布器。
     ///
     /// # Errors
-    /// 见 [`Publisher::with_topic`]。
+    /// 见 [`Publisher::with_topic_notify`]。
     pub fn with_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
-        Ok(Self(Publisher::with_topic(node, topic)?))
+        Ok(Self(Publisher::with_topic_notify(node, topic)?))
     }
 
     /// 发布一条 odom 消息（trace 上下文自动注入，见 [`Publisher::publish`]）。

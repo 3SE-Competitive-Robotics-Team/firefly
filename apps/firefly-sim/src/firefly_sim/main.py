@@ -34,9 +34,14 @@ from . import trace as ftrace
 TOPIC_IMU = "Firefly/Imu"
 TOPIC_CAM_LEFT = "Firefly/CameraLeft"
 TOPIC_CAM_RIGHT = "Firefly/CameraRight"
+#: 相机对事件（左右目成对发布完成后单次通知；与 Rust event::CAMERA_PAIR_TOPIC 一致）
+TOPIC_CAM_PAIR = "Firefly/CameraPair"
 TOPIC_DEPTH = "Firefly/Depth"
 TOPIC_GT = "Firefly/GroundTruth"
 TOPIC_REF = "Firefly/Reference"
+
+#: 事件 id：「该话题有新样本」（与 Rust event::EVENT_ID_SENT_SAMPLE 一致）
+EVENT_ID_SENT_SAMPLE = 0
 
 #: 发布周期（秒）
 IMU_PERIOD = 0.01  # 100Hz
@@ -65,6 +70,26 @@ def _subscriber(node, topic: str, payload_cls):
         .open_or_create()
     )
     return service.subscriber_builder().create()
+
+
+def _notifier(node, topic: str):
+    """话题同名 event service 的通知端（订阅端 WaitSet 即到即醒）。"""
+    service = node.service_builder(iox2.ServiceName.new(topic)).event().open_or_create()
+    return service.notifier_builder().create()
+
+
+_notify_failed = False
+
+
+def _notify(notifier) -> None:
+    """唤醒订阅端。失败不阻断物理循环（订阅端退化为兜底节拍轮询）。"""
+    global _notify_failed
+    try:
+        notifier.notify_with_custom_event_id(iox2.EventId.new(EVENT_ID_SENT_SAMPLE))
+    except Exception as exc:  # noqa: BLE001 - 通知绝不能拖垮仿真主循环
+        if not _notify_failed:
+            _notify_failed = True
+            log(f"事件通知失败（后续静默）: {exc}")
 
 
 def _publish_traced(pub, cycle, name: str, msg, ts: float) -> None:
@@ -122,7 +147,9 @@ def main() -> None:
     depth_pub = _publisher(node, TOPIC_DEPTH, DepthImageMessage)
     gt_pub = _publisher(node, TOPIC_GT, OdomMessage)
     ref_sub = _subscriber(node, TOPIC_REF, ReferenceMessage)
-    log("iceoryx2 已就绪：发布 IMU/双目/深度/真值，订阅参考")
+    imu_notify = _notifier(node, TOPIC_IMU)
+    cam_notify = _notifier(node, TOPIC_CAM_PAIR)
+    log("iceoryx2 已就绪：发布 IMU/双目/深度/真值（带事件唤醒），订阅参考")
 
     # 参考状态（demo 未发布时悬停在起点）
     ref_pos = START_POS
@@ -176,6 +203,7 @@ def main() -> None:
                 msg.angular_velocity_x, msg.angular_velocity_y, msg.angular_velocity_z = gyro
                 msg.linear_acceleration_x, msg.linear_acceleration_y, msg.linear_acceleration_z = accel
                 _publish_traced(imu_pub, cycle, "publish-imu", msg, t)
+                _notify(imu_notify)
                 # 推进到 t 之后的网格点（防止 t 越过后下一步重复发布，
                 # 保证 IMU 严格 0.01s 间隔、相机严格 0.1s 间隔）
                 while next_imu <= t + 1e-12:
@@ -184,6 +212,7 @@ def main() -> None:
             # 10Hz 双目 + 深度 + 真值
             if t + 1e-12 >= next_cam:
                 _publish_camera(left_pub, right_pub, depth_pub, cycle, env, t)
+                _notify(cam_notify)  # 左右目成对发布完成后单次唤醒
                 _publish_gt(gt_pub, cycle, env, t)
                 while next_cam <= t + 1e-12:
                     next_cam += CAM_PERIOD
