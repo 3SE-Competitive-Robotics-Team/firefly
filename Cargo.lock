@@ -1238,24 +1238,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "firefly-demo"
-version = "0.1.0"
-dependencies = [
- "fastrace",
- "firefly-error",
- "firefly-map",
- "firefly-observability",
- "firefly-planner",
- "firefly-pubsub",
- "firefly-search",
- "firefly-trajectory",
- "firefly-viewer",
- "iceoryx2",
- "log",
- "nalgebra",
-]
-
-[[package]]
 name = "firefly-error"
 version = "0.1.0"
 
@@ -3221,6 +3203,24 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
+name = "planner"
+version = "0.1.0"
+dependencies = [
+ "fastrace",
+ "firefly-error",
+ "firefly-map",
+ "firefly-observability",
+ "firefly-planner",
+ "firefly-pubsub",
+ "firefly-search",
+ "firefly-trajectory",
+ "firefly-viewer",
+ "iceoryx2",
+ "log",
+ "nalgebra",
+]
 
 [[package]]
 name = "ply-rs-bw"

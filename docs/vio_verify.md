@@ -7,11 +7,11 @@
 ## 为什么不需要 planner
 
 MuJoCo 的 `firefly-sim` 靠 PD 跟踪 `Firefly/Reference` 参考来飞，**没有参考就悬停**。
-`firefly-demo`（planner）只是"恰好发布这个参考"的那个进程——我们在调试 VIO 时
+`planner`（planner）只是"恰好发布这个参考"的那个进程——我们在调试 VIO 时
 并不关心它的规划结果。`--script` 让 sim 自己按 `_scripted_ref(t)` 生成平滑参考
 （前向 0.8 m/s + 横向/高度正弦，提供 3D 视差），从而把 planner 从验证里剔除，
 只留"相机运动 → MSCKF → odom"。想要任务轨迹（绕障）再按
-AGENTS.md「运行」一节起完整闭环（含 demo）。
+AGENTS.md「运行」一节起完整闭环（含 planner）。
 
 ## 启动（三个终端，按序）
 

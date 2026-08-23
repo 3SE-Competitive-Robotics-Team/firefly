@@ -6,9 +6,11 @@
 
 mod config;
 pub mod init;
+pub mod manager;
 pub mod objective;
 mod obstacles;
 mod planner;
 
 pub use config::PlannerConfig;
-pub use planner::{FormationSpec, PlanResult, Planner, State};
+pub use manager::{LocalTraj, ManagerOptions, PlannerManager, Reference, TickReport};
+pub use planner::{FormationSpec, InitSource, PlanResult, Planner, State};

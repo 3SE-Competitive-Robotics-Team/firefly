@@ -134,6 +134,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let viewer = match Stream::connect_or_spawn() {
         Ok(v) => {
             log::info!("rerun viewer 就绪（gt/odom 位姿可视化）");
+            if let Err(e) = v.send_default_blueprint() {
+                log::warn!("默认布局发送失败（沿用 viewer 当前布局）：{e}");
+            }
             Some(v)
         }
         Err(e) => {
@@ -342,15 +345,17 @@ fn run_loop(
                     0.0
                 };
                 // BarChart: x=track_length, y=count
+                let _ = viewer.stream().log(
+                    "vio/debug/track_length",
+                    &rerun::BarChart::new(hist.clone()),
+                );
+                let _ = viewer.stream().log(
+                    "vio/debug/db_size",
+                    &rerun::Scalars::new([db.size() as f64]),
+                );
                 let _ = viewer
                     .stream()
-                    .log("debug/track_length", &rerun::BarChart::new(hist.clone()));
-                let _ = viewer
-                    .stream()
-                    .log("debug/db_size", &rerun::Scalars::new([db.size() as f64]));
-                let _ = viewer
-                    .stream()
-                    .log("debug/track_avg_len", &rerun::Scalars::new([avg_len]));
+                    .log("vio/debug/track_avg_len", &rerun::Scalars::new([avg_len]));
                 log::debug!(
                     "frontend health t={:.2} db={} avg_len={:.1} hist={:?}",
                     t_sim,

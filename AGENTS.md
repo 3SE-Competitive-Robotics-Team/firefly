@@ -18,10 +18,10 @@
 ## 运行（MuJoCo 双语言闭环）
 
 双语言闭环三个进程，iceoryx2 IPC（`Firefly/*` 话题）通信，fastrace
-trace 跨进程续接（传感器→vio→demo→参考 单周期 trace）：
+trace 跨进程续接（传感器→vio→planner→参考 单周期 trace）：
 
 ```
-Python sim（MuJoCo 物理 + 传感器发布）→ vio（MSCKF 位姿估计）→ demo（重规划）
+Python sim（MuJoCo 物理 + 传感器发布）→ vio（MSCKF 位姿估计）→ planner（重规划）
 ```
 
 按顺序各开一个终端（可先开 viewer，见下）：
@@ -43,22 +43,24 @@ cargo run -p vio
 #    未指定 --map 时加载 MuJoCo 默认场景静态地图（与 scene.py 同构，
 #    深度感知在线补充），发布参考回传；
 #    规划结果写入同一 viewer（与 vio 共用 sim_time 时间轴）
-cargo run -p firefly-demo
+cargo run -p planner
 ```
 
 rerun 可视化约定：`sensor/stereo_left|right`、`sensor/depth` 为传感器原图，
-`vio/odom` 为估计位姿（3D 变换），规划/地图/轨迹由 demo 写入——多进程
-共用 `sim_time` 时间轴（仿真秒），回放时跨进程数据按同一时钟对齐。
+`vio/odom` 为估计位姿（3D 变换），规划/地图/轨迹由 planner 写入
+（`plan/*` 前缀）——多进程共用 `sim_time` 时间轴（仿真秒），回放时跨进程
+数据按同一时钟对齐。默认布局（场景 3D + 前端健康度面板）由进程启动时
+自动发送，无需手工配置。
 
 独立运行（不依赖闭环）：
 
 ```bash
-cargo run -p firefly-demo -- --map apps/firefly-demo/maps/gate.ffmap  # 静态地图
+cargo run -p planner -- --map apps/planner/maps/gate.ffmap  # 静态地图
 ```
 
 ## 构建
 
-- Rust：`cargo build`（workspace 含 `apps/vio`、`apps/firefly-demo`，排除 `apps/firefly-sim`）。
+- Rust：`cargo build`（workspace 含 `apps/vio`、`apps/planner`，排除 `apps/firefly-sim`）。
 - Python：`uv sync`（根 workspace 统一管理 `firefly-mujoco` / `firefly-sim`，
   依赖与脚本见各自 `pyproject.toml`）。
 
@@ -88,4 +90,3 @@ cargo run -p firefly-demo -- --map apps/firefly-demo/maps/gate.ffmap  # 静态�
 
 - `cargo test`
 - `cargo test --release -p firefly-planner --test random_map_benchmark -- --ignored`
-- `RUST_LOG=info cargo run -p firefly-planner --example demo`

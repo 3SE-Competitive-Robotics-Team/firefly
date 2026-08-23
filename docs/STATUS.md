@@ -7,14 +7,14 @@
 
 Python sim（MuJoCo 物理 + 传感器发布 200Hz，订阅 `Firefly/Reference` PD 闭环）
 → Rust vio（MSCKF 位姿估计，iceoryx2 订阅 IMU/双目）
-→ Rust firefly-demo（重规划 10Hz，`Firefly/Odometry` 状态源 + 回传参考）
+→ Rust planner（重规划 10Hz，`Firefly/Odometry` 状态源 + 回传参考）
 多进程共享 `Firefly/*` 话题 / fastrace 跨进程 trace / rerun `sim_time` 时间轴。
 
 ## 已完成并验证（全部有回归单测 / 实跑数值证据）
 
 ### 任务/导航层
 - **simplify_path 膨胀检查**（`firefly-search` `line_is_clear` 改 `is_occupied_inflated`）：
-  全局路径不再直线擦边穿越膨胀层 → **demo 任务此前贴柱卡死，现可完整走到目标**。
+  全局路径不再直线擦边穿越膨胀层 → **planner 任务此前贴柱卡死，现可完整走到目标**。
   回归单测 `line_clipping_inflation_is_blocked`（旧代码 FAIL/新代码 PASS）。
 - **touch_goal 物理到达判定**：轨迹耗尽仅当真实位置距目标 < ARRIVE_DIST 才完成，
   避免提前结束。
@@ -45,23 +45,28 @@ Python sim（MuJoCo 物理 + 传感器发布 200Hz，订阅 `Firefly/Reference` 
      （最近邻/SAD，均加单测）实跑均产生垃圾立体特征回归。
    - 结论：当前"斜视低纹理棋盘 + 0.1m 小基线 + 强机动"场景下需要专业立体匹配
      （对极约束+逆深度初始化）的大规模投入，非增量修补可成。
-   - **demo 以 GT 为状态源**运行（VIO odom 不参与），任务稳定。
+   - **planner 以 odom 为状态源**（`--script` 场景 34s ATE_RMSE 0.6m，
+     见 `logs/bench/summary_*.json`；新鲜度超时回退轨迹推进）。
 2. **cargo test --workspace 全绿**（firefly-vio 45、firefly-vio-core 104、search/map/
-   planner/demo 等），clippy 0；`--ignored` 随机地图基准确定性 0.87（LCG 固定种子，
+   planner 等），clippy 0；`--ignored` 随机地图基准确定性 0.87（LCG 固定种子，
    无 flaky；剩 4 败为硬图优化器收敛限，阈值 0.8 已达成，安全优先不求强推优化器）。
 3. 已 root-cause 但按"未用路径"处置：无（SLAM 已修好）。
-4. **PLANNER：未做 EGO-v2 的"前一轨迹暖启动"**（对照 `planner_manager.cpp
-   computeInitState` case 2：非首帧用上一条最优轨迹作初始 MINCO，提收敛/连续性）。
-   我们每帧从 A* 引导路径重建——对**连续重规划（demo）**收敛/连续性有帮助，应实现。
-   **注意**：随机地图基准是每场景冷启动（各一次 plan），与该暖启动无关；
-   其余 4 败是冷启动硬图优化器收敛限（非暖启动可解），达标(0.8)后安全优先不引入
-   随机初始化（会破坏确定性/稳定）。暖启动实现留作后续，有回归风险暂记录。
+4. **PLANNER 暖启动已实现**（对照 `planner_manager.cpp computeInitState`
+   case 2）：非首帧重规划用上一条最优轨迹作初始 MINCO（剩余段采样 + 全局路径
+   延续），失败自动降级冷启动。任务执行 FSM 同步下沉至 `firefly-planner`
+   crate（对照 `ego_replan_fsm.cpp`），apps/planner 只留 IPC/viewer 壳。
+5. **已知算法债（对照源码迭代中）**：连续重规划链上偶发 L-BFGS 发散样本
+   （单轴 1e12 级）进入下一轮约束扫描，`build_plane` 射线步进曾因此无限
+   循环（已加步数上限 + 非有限守卫防挂死）。官方无此问题——其碰撞点处理
+   是约束点数组内 in/out 自由点搜索 + A* 绕障（`finelyCheckAndSetConstraintPoints`），
+   不做射线步进；rebound 的"缩放后不安全"路径官方也不存在零计数空转。
+   根治 = 按官方机制重建约束生成，已标注 TODO(官方对齐)。
 
 ## 建议下一步
 
 - A. 若要让 VIO 真正进入闭环：增大立体基线（0.1→0.3m）+ 专业立体匹配 + 逆深度
   初始化（对照 open_vins `FeatureInitializer`/`TrackKLT`），工作量大且场景需调。
-- B. 若 VIO 作已知限制：把 demo 当作 GT 状态源的可运行基线，转向新功能/其它模块。
+- B. 若 VIO 作已知限制：planner 以 odom 为状态源的可运行基线（现状），转向新功能/其它模块。
 - C. 换场景增可观测性（提高纹理 / 大基线 / 减机动）再评估 VIO。
 
 ## 验证
@@ -71,5 +76,5 @@ cargo test                # 全 workspace 单测
 cargo clippy --workspace  # 0 警告
 uv run firefly-sim &      # 0. viewer: rerun
 cargo run -p vio &
-cargo run -p firefly-demo # 任务跑通（GT 状态源）
+cargo run -p planner # 任务跑通（odom 状态源）
 ```

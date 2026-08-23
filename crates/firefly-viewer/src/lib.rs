@@ -1,11 +1,10 @@
 //! 规划过程可视化（rerun viewer）。
 //!
-//! 记录地图、路径、轨迹、障碍平面到 rerun viewer：
-//! `cargo run -p firefly-viewer --example demo`（需先启动 `rerun` viewer，
-//! 或由 [`Viewer::connect_or_spawn`] 自动起）。
+//! 记录地图、路径、轨迹、障碍平面、位姿到 rerun viewer（由 planner/vio
+//! 进程写入，[`Viewer::connect_or_spawn`] 自动起或连接共享 viewer）。
 //!
 //! 底层连接层见 `firefly-rerun`：`rerun` viewer 支持多进程共享，先起 viewer
-//! 再 [`Viewer::connect`]，vio 与 firefly-demo 即可写入同一个 viewer。
+//! 再 [`Viewer::connect`]，vio 与 planner 即可写入同一个 viewer。
 
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_map::{GridMap, Plane, VoxelState};
@@ -65,6 +64,16 @@ impl Viewer {
     /// 设置统一仿真时间轴 `sim_time`（秒）：本线程后续 log 落于该时刻。
     pub fn set_time(&self, seconds: f64) {
         self.stream.set_time(seconds);
+    }
+
+    /// 发送默认 viewer 布局（场景 3D + VIO 前端健康度），见
+    /// [`Stream::send_default_blueprint`](firefly_rerun::Stream::send_default_blueprint)。
+    ///
+    /// # Errors
+    ///
+    /// `Internal`：rerun 记录失败。
+    pub fn send_default_blueprint(&self) -> Result<()> {
+        self.stream.send_default_blueprint()
     }
 
     /// 8-bit 灰度图（双目灰度）→ rerun 图像实体。

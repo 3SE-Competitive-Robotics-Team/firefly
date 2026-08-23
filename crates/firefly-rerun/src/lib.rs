@@ -106,6 +106,42 @@ impl Stream {
         );
     }
 
+    /// 发送默认 viewer 布局：左侧场景 3D（全部空间实体），右侧 VIO 前端
+    /// 健康度（标量曲线 + 跟踪长度直方图）。
+    ///
+    /// 幂等：重复发送以最后一次为准。多进程共享同一 recording 时任一进程
+    /// 发送一次即可生效。
+    ///
+    /// # Errors
+    ///
+    /// `Internal`：rerun 记录失败。
+    pub fn send_default_blueprint(&self) -> Result<()> {
+        use rerun::blueprint::{
+            BarChartView, BlueprintOpts, Horizontal, Spatial3DView, TimeSeriesView, Vertical,
+        };
+        // 场景视图排除标量实体（它们只属于时间序列视图）
+        let scene = Spatial3DView::new("场景")
+            .with_origin("/")
+            .with_contents(["+ /**", "- vio/debug/**"]);
+        let scalars = TimeSeriesView::new("前端标量")
+            .with_origin("/vio/debug")
+            .with_contents(["+ /vio/debug/**", "- /vio/debug/track_length"]);
+        let histogram = BarChartView::new("跟踪长度分布").with_origin("/vio/debug/track_length");
+        let layout = Horizontal::new([
+            scene.into(),
+            Vertical::new([scalars.into(), histogram.into()]).into(),
+        ]);
+        self.rec
+            .send_blueprint_opts(&BlueprintOpts {
+                blueprint: rerun::blueprint::Blueprint::new(layout),
+                activation: rerun::blueprint::BlueprintActivation {
+                    make_active: true,
+                    make_default: true,
+                },
+            })
+            .map_err(stream_err)
+    }
+
     /// 8-bit 灰度图（如双目灰度）→ rerun 图像实体。
     ///
     /// # Errors
