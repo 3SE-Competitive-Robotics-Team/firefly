@@ -26,6 +26,7 @@ firefly-vio-types = { workspace = true }
 iceoryx2 = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }
+rerun = { workspace = true }
 
 [lints]
 workspace = true

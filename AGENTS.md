@@ -25,38 +25,6 @@
   进程后 `rm -rf /tmp/iceoryx2/services /tmp/iceoryx2/nodes
   /private/tmp/iox2*.shm_state`（macOS；须在进程全死后执行）。
 
-## VIO 调试状态（2026-08）
-
-已修复：sim 轨迹回卷跳变致物理发散（改闭合周期轨迹 + NaN 守卫）、外参
-四元数 Hamilton/JPL 约定混用（相机"侧装"、立体基线纵向化→视觉更新全灭，
-改用项目 `rot_2_quat`）、SLAM 批量更新死循环（while 内 extend 回填，改为
-drain 消费）、IMU 噪声 Q 与 sim 实际注入失配（差 ~1e4 倍致滤波器过信
-IMU）、GT 初始化未重写 IMU 协方差块（σ_ba=1mm/s² 零偏不可观测，对照
-C++ initialize_with_gt 补 σ=0.02 先验）、场景纹理贫乏（地面棋盘 7m→2m、
-立柱贴棋盘材质）、**H_x 列偏移致命缺陷**——`get_feature_jacobian_full`
-的 `add_var` 误用变量序号当列偏移，多变量 H_x 列互相覆盖，所有 MSCKF/SLAM
-更新自移植以来一直在用坏雅可比（FD 数值验证暴露：修复前最大失配 346，
-修复后相对误差 3.5e-4）。合成端到端测试
-（`firefly-vio/tests/synthetic_e2e.rs`）零偏下收敛到毫米级；
-`jacobian_fd_check.rs` 为雅可比有限差分回归测试（勿删）。
-
-已知遗留（`synthetic_pure_msckf_with_bias`，#[ignore]）：注入加速度计
-零偏后仍发散（列偏移修复后从 ~40m 改善到 ~5.9m），ba 学不到。根因分析：
-max_clone_size=11（1.1s 窗口）内加速度零偏可观测性弱，且合成测试曾以
-单目模式运行（TrackKlt 第 4 参应为 true）掩盖了立体约束。下一步：①检查
-`single_gaussnewton` 基线计算（C++ 用 QR 零空间投影 Q.block(0,1,3,2)，
-我们用 xy().norm() 近似——已修复，改用闭式垂直平面投影）；②验证 SLAM
-特征初始化（Givens 段）与 UpdaterSLAM 更新；③考虑增大 max_clone_size
-或依赖 SLAM 特征提供长基线约束使 ba 可观。前端 LK/FAST/NMS 已用
-`grid_probe.rs` 回归锚点验证健康。
-
-现场（MuJoCo 闭环）现状：apps/vio 暂禁用 SLAM 特征
-（`max_slam_features=0`，消融实验确认 SLAM 更新链路开启后现场发散更快
-——SLAM 初始化/Givens 路径待 FD 验证）。纯 MSCKF 含偏+真实纹理下仍
-公里级漂移，但 vio 全程存活不再崩溃/卡死（奇异三角化已优雅降级、死循环
-已修、H_x 列偏移修复后更新数学已被 FD 验证正确）。合成与现场的共同瓶颈：
-跟踪质量与零偏可观测性。
-
 ## 运行（MuJoCo 双语言闭环）
 
 双语言闭环三个进程，iceoryx2 IPC（`Firefly/*` 话题）通信，fastrace

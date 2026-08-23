@@ -283,6 +283,15 @@ impl VioManager {
                 cov[(blk + r, blk + r)] = sigma * sigma;
             }
         }
+        // bg/ba 先验 σ 由参数控制（默认 0.02；MuJoCo 无偏置场景应用层调小）：
+        // 视觉会把 KLT 亚像素偏置误学成 bg/ba，σ 大 → bg 学到 -0.03 rad/s
+        // → roll 线性漂 → 重力投影错 → 位置二次发散。
+        let bias_sigma = self.params.init_bias_sigma;
+        for blk in [9usize, 12] {
+            for r in 0..3 {
+                cov[(blk + r, blk + r)] = bias_sigma * bias_sigma;
+            }
+        }
         self.state.cov.view_mut((id, id), (15, 15)).copy_from(&cov);
 
         self.is_initialized_vio = true;

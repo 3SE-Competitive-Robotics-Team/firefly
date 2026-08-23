@@ -15,6 +15,7 @@ logforth = { version = "0.30", default-features = false }
 nalgebra = "0.35"
 purecv = { version = "0.7", default-features = false, features = ["simd", "parallel"] }
 rayon = "1.12"
+rerun = { version = "0.36", default-features = false, features = ["sdk"] }
 firefly-cost = { path = "crates/firefly-cost" }
 firefly-error = { path = "crates/firefly-error" }
 firefly-vio-core = { path = "crates/firefly-vio-core" }

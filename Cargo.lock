@@ -5711,6 +5711,7 @@ dependencies = [
  "iceoryx2",
  "log",
  "nalgebra",
+ "rerun",
 ]
 
 [[package]]

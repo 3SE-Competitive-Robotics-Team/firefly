@@ -347,7 +347,7 @@ impl UpdaterSlam {
 
         // 4. EKF 更新（对照 C++ 末尾）
         let r = self.options.sigma_pix_sq * DMatrix::identity(total_rows, total_rows);
-        ekf_update(state, &hx_order_big, &hx_big, &res_big, &r);
+        ekf_update(state, &hx_order_big, &hx_big, &res_big, &r, f64::INFINITY);
     }
 
     /// 锚点切换（对照 `UpdaterSLAM::change_anchors`）。

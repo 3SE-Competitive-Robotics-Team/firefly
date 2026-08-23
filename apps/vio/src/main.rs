@@ -61,7 +61,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 会使 Q 偏小 ~1e4 倍——滤波器过度信任 IMU，视觉更新无法修正状态，
     // 静态悬停也恒加速漂移（实测 20s 内速度漂到 3m/s）。
     let mut params = VioManagerOptions {
-        imu_noises: firefly_vio_core::noise::ImuNoise::new(2.83e-2, 2.0e-3, 2.83e-1, 3.0e-3),
+        imu_noises: firefly_vio_core::noise::ImuNoise::new(2.83e-2, 1.9e-5, 2.83e-1, 3.0e-3),
+        // MuJoCo 仿真无真实 IMU 偏置：收紧 bg/ba 初始先验（1e-6 量级等效
+        // 冻结学习），防止视觉把 KLT 亚像素偏置误学成偏置（实测 34s 2704m
+        // vs 271m）。真机接入时改回默认 0.02。
+        init_bias_sigma: 1e-6,
         ..VioManagerOptions::default()
     };
     params.state_options.num_cameras = 2;
@@ -78,10 +82,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracker_calib.insert(1usize, cam_right.clone());
     let tracker = TrackKlt::new(
         tracker_calib,
-        150, // num_pts: OpenVINS `VioManagerOptions` 默认值
+        300, // num_pts: 每相机目标特征数（原 150 → 每相机 75，db ~78 偏少，
+        // 更新供应不足；翻倍补点提升每帧 lost/锚特征数）
         0,
         true,
-        HistogramMethod::Histogram,
+        HistogramMethod::None, // 全局直方图均衡实测引入亚像素偏置（残差
+        // -1px → -0.4px），改用原始灰度
         20, // fast_threshold: OpenVINS 默认值
         5,  // grid_x: OpenVINS 默认值
         5,  // grid_y: OpenVINS 默认值
@@ -206,6 +212,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// 驱动循环：推进输入 → 喂 IMU/相机 → 传播 → 发布 odom（10Hz）。
 /// 以 `node.wait(1ms)` 节拍：收到 SIGINT/SIGTERM 返回 Err → 优雅退出，
 /// 所有端口 Drop、IPC 资源释放。
+// 输入分发 + 前端健康度统计的编排长流程（与 C++ run_loop 对照结构一致）。
+#[allow(clippy::too_many_lines)]
 fn run_loop(
     vio: &mut VioManager,
     input: &mut dyn SensorInput,
@@ -246,7 +254,7 @@ fn run_loop(
         }
         imu_batch_count += u64::from(imu_batch);
 
-        // 相机（MSCKF 视觉更新）
+        // 相机（MSCKF 视觉更新）+ 前端健康度 rerun
         if let Some(cam) = input.next_camera() {
             camera_count += 1;
             vio.feed_measurement_camera(&cam);
@@ -257,6 +265,44 @@ fn run_loop(
                 cam.images.first().map_or(0, |g| g.width),
                 cam.images.first().map_or(0, |g| g.height),
             );
+            // Hunt: keep 11, log track_length histogram + triangulation cond (no RMS gate)
+            // open_vins same 11 works with ~15 frames vs firefly ~8 (purecv f32 vs opencv u8)
+            if let Some(viewer) = viewer {
+                viewer.set_time(t_sim);
+                let db = vio.track_feats.database();
+                let mut hist = vec![0i64; 21];
+                let mut total_len = 0usize;
+                let mut n_feat = 0usize;
+                for f in db.iter_features() {
+                    let len: usize = f.timestamps.values().map(Vec::len).sum();
+                    let bucket = len.min(hist.len() - 1);
+                    hist[bucket] += 1;
+                    total_len += len;
+                    n_feat += 1;
+                }
+                let avg_len = if n_feat > 0 {
+                    total_len as f64 / n_feat as f64
+                } else {
+                    0.0
+                };
+                // BarChart: x=track_length, y=count
+                let _ = viewer
+                    .stream()
+                    .log("debug/track_length", &rerun::BarChart::new(hist.clone()));
+                let _ = viewer
+                    .stream()
+                    .log("debug/db_size", &rerun::Scalars::new([db.size() as f64]));
+                let _ = viewer
+                    .stream()
+                    .log("debug/track_avg_len", &rerun::Scalars::new([avg_len]));
+                log::debug!(
+                    "frontend health t={:.2} db={} avg_len={:.1} hist={:?}",
+                    t_sim,
+                    db.size(),
+                    avg_len,
+                    hist
+                );
+            }
         }
         t_sim = t_sim.max(now);
 

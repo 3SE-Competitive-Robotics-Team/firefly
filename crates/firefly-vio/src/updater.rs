@@ -78,8 +78,8 @@ impl UpdaterMsckf {
     #[allow(clippy::too_many_lines)]
     #[fastrace::trace]
     pub fn update(&mut self, state: &mut State, feature_vec: &mut Vec<Feature>) {
-        // (h_x, res, x_order, row0)
-        type HxBlock = (DMatrix<f64>, DVector<f64>, Vec<(i32, usize)>, usize);
+        // (h_x, res, x_order, row0, depth_m)
+        type HxBlock = (DMatrix<f64>, DVector<f64>, Vec<(i32, usize)>, usize, f64);
         if feature_vec.is_empty() {
             return;
         }
@@ -153,6 +153,9 @@ impl UpdaterMsckf {
             .map(|(t, c)| (t.to_bits(), c))
             .collect();
         let n_before = feature_vec.len();
+        let mut rej_z = 0usize;
+        let mut rej_depth = 0usize;
+        let mut rej_err = 0usize;
         feature_vec.retain_mut(|feat| {
             let mut worst = 0.0f64;
             for (cam_id, times) in &feat.timestamps {
@@ -172,6 +175,7 @@ impl UpdaterMsckf {
                     let p_in_cw = r_ito_c * p_in_im + p_iin_c;
                     if p_in_cw.z <= 0.0 {
                         worst = f64::INFINITY;
+                        rej_z += 1;
                         break;
                     }
                     let uv_n = Vector2::new(p_in_cw.x / p_in_cw.z, p_in_cw.y / p_in_cw.z);
@@ -184,17 +188,25 @@ impl UpdaterMsckf {
                     // （实测 res=1.07px 拉 2.4m、13m/39m 深度特征进场）。
                     if p_in_cw.z > self.options.max_feature_depth_m {
                         worst = f64::INFINITY;
+                        rej_depth += 1;
                     }
                 }
             }
             if worst > 0.3 || !worst.is_finite() {
+                if worst.is_finite() && worst > 0.3 {
+                    rej_err += 1;
+                }
                 feat.to_delete = true;
                 false
             } else {
                 true
             }
         });
-        log::debug!("reproj 门控: {}/{} 特征存活", feature_vec.len(), n_before);
+        log::debug!(
+            "reproj 门控: {}/{} 特征存活（拒因 z<=0:{rej_z} depth>{rej_depth:.0} err>{rej_err}）",
+            feature_vec.len(),
+            n_before
+        );
 
         // 5. 逐特征：雅可比 → 零空间投影 → chi2 检验 → 收集块
         // （对照 C++ 的 Hx_mapping/Hx_big/res_big 组装）
@@ -249,12 +261,16 @@ impl UpdaterMsckf {
             // chi2 检验（对照 C++：S = H_x·P_marg·H_xᵀ + R，chi2 = resᵀS⁻¹res）。
             // 注意必须加测量噪声 R（sigma_pix²）：残差/雅可比在像素空间（fx 量级），
             // 缺 R 时 S 尺度错误 → 外点全部误纳/误拒。
+            // 深度自适应：远特征深度误差大，σ_eff 随深度放大（见
+            // `UpdaterOptions::depth_noise_scale_m`），在 chi2 与后续增益中降权。
             let p_marg = get_marginal_covariance(state, &x_order);
             let mut s = &h_x * p_marg * h_x.transpose();
             // 直接加对角线，跳过 DMatrix::identity 分配 + 矩阵加法（数学等价）
-            let sigma_sq = self.options.sigma_pix_sq;
+            let depth = feat.p_FinA.z.max(0.1);
+            let sigma_eff_sq = self.options.sigma_pix_sq
+                * (1.0 + depth / self.options.depth_noise_scale_m).powi(2);
             for i in 0..s.nrows() {
-                s[(i, i)] += sigma_sq;
+                s[(i, i)] += sigma_eff_sq;
             }
             let chi2 = match s.clone().cholesky() {
                 Some(chol) => res.dot(&chol.solve(&res)),
@@ -277,19 +293,32 @@ impl UpdaterMsckf {
 
             let row0 = total_rows;
             total_rows += h_x.nrows();
-            blocks.push((h_x, res, x_order, row0));
+            blocks.push((h_x, res, x_order, row0, depth));
         }
 
         // 6. 统一组装大矩阵（行 = 各特征行和；列 = 映射覆盖范围）
         log::debug!(
             "MSCKF 漏斗: 候选 {n_in} 三角化存活 {n_triang} 硬残差拒 {hard_cap_rej} 组装行 {total_rows}"
         );
+        // 可观测性：进更新特征的深度分布（诊断近/远特征占比与姿态可观性）
+        if !blocks.is_empty() {
+            let depths: Vec<String> = blocks
+                .iter()
+                .map(|(_, _, _, _, d)| format!("{d:.1}"))
+                .take(12)
+                .collect();
+            log::debug!(
+                "MSCKF 更新特征深度: {} 个 [{}]",
+                blocks.len(),
+                depths.join(",")
+            );
+        }
         if total_rows == 0 {
             return;
         }
         let mut hx_big = DMatrix::zeros(total_rows, next_col);
         let mut res_big = DVector::zeros(total_rows);
-        for (h_x, res, x_order, row0) in &blocks {
+        for (h_x, res, x_order, row0, _depth) in &blocks {
             let rows = h_x.nrows();
             let mut src_col = 0usize;
             for (var_id, var_size) in x_order {
@@ -301,6 +330,20 @@ impl UpdaterMsckf {
                 src_col += var_size;
             }
             res_big.rows_range_mut(*row0..*row0 + rows).copy_from(res);
+        }
+
+        // 深度自适应测量噪声：按特征 σ_eff 行归一化 H/res（远特征降权），
+        // 之后 R = σ²I（单位阵）。归一化必须在压缩前做——Givens 行旋转会
+        // 混合各特征行，先归一化才能保持各特征噪声独立（OpenVINS 固定 σ
+        // 时归一化系数恒 1，退化为原实现）。
+        for (h_x, _, _, row0, depth) in &blocks {
+            let sigma = self.options.sigma_pix * (1.0 + depth / self.options.depth_noise_scale_m);
+            let rows = h_x.nrows();
+            for i in 0..rows {
+                let inv = 1.0 / sigma;
+                hx_big.row_mut(row0 + i).apply(|v| *v *= inv);
+                res_big[row0 + i] *= inv;
+            }
         }
 
         // 7. 测量压缩 + EKF 更新（对照 C++ 的末尾）
@@ -330,16 +373,23 @@ impl UpdaterMsckf {
             pos_before.y,
             pos_before.z
         );
-        ekf_update(state, &hx_order, &hx_big, &res_big, &r);
-        let pos_after = state.imu.pos();
+        ekf_update(
+            state,
+            &hx_order,
+            &hx_big,
+            &res_big,
+            &r,
+            self.options.max_state_correction_m,
+        );
+        let dp = state.imu.pos() - pos_before;
         log::debug!(
             "MSCKF 更新后: 位置({:.2},{:.2},{:.2}) Δ=({:.3},{:.3},{:.3})",
-            pos_after.x,
-            pos_after.y,
-            pos_after.z,
-            pos_after.x - pos_before.x,
-            pos_after.y - pos_before.y,
-            pos_after.z - pos_before.z
+            state.imu.pos().x,
+            state.imu.pos().y,
+            state.imu.pos().z,
+            dp.x,
+            dp.y,
+            dp.z
         );
     }
 }

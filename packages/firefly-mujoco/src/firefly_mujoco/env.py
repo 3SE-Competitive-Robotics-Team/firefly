@@ -159,7 +159,10 @@ class DroneEnv:
         d = self.data
         pos = d.body("drone").xpos.copy()
         quat_wxyz = d.body("drone").xquat.copy()
-        vel = d.cvel[self._drone_id, 0:3].copy()
+        # freejoint 的线速度：`cvel` 对 freejoint 不可靠（实测恒 0，误导 GT
+        # 初始化速度先验，vio 以 v=0 起飞 → 初始速度误差 ~0.7 m/s 种下漂移）；
+        # qvel[0:3] 即 freejoint 世界系线速度（与 apply_pd 同源，正确）。
+        vel = d.qvel[0:3].copy()
         return pos, quat_wxyz[[1, 2, 3, 0]], vel
 
     @staticmethod
