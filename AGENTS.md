@@ -11,19 +11,9 @@
 
 ## VIO（firefly-vio*）约定
 
-- **不接真实驱动**：`apps/vio` 固定接入 `MuJoCo` 物理环境（iceoryx2 订阅
-  IMU + 双目灰度，跑完整 MSCKF 视觉闭环），不引入 realsense/串口驱动。
-- **不做配置文件系统**：相机内参/外参、IMU 噪声、时间偏移等标定一律硬编码
-  在代码里（`VioManagerOptions::default()` / `InitOptions::default()` 即为
-  事实配置源），不引入 YAML/JSON/serde 解析。
-- 新增标定类数值参数时，直接改对应 `*Options` 的默认值并在 doc 注释标注
-  单位与来源。
-- **进程必须优雅退出**（Ctrl-C → `node.wait` 返回 Err → 端口 Drop）：
-  硬杀（pkill -9/SIGKILL）会留下孤儿内核 shm 对象与幽灵端口注册——
-  后续订阅端会连上死端口的残留连接收不到任何数据，且幽灵占满
-  `max_publishers` 槽位后新发布器直接创建失败。排障清理：杀干净所有
-  进程后 `rm -rf /tmp/iceoryx2/services /tmp/iceoryx2/nodes
-  /private/tmp/iox2*.shm_state`（macOS；须在进程全死后执行）。
+- **不做配置文件系统**：相机内参/外参、IMU 噪声、时间偏移等标定一律硬编码在代码里（`VioManagerOptions::default()` / `InitOptions::default()` 即为事实配置源），不引入 YAML/JSON/serde 解析。
+- 新增标定类数值参数时，直接改对应 `*Options` 的默认值并在 doc 注释标注单位与来源。
+- **进程必须优雅退出**（Ctrl-C → `node.wait` 返回 Err → 端口 Drop）：硬杀（pkill -9/SIGKILL）会留下孤儿内核 shm 对象与幽灵端口注册——后续订阅端会连上死端口的残留连接收不到任何数据，且幽灵占满 `max_publishers` 槽位后新发布器直接创建失败。排障清理：杀干净所有进程后 `rm -rf /tmp/iceoryx2/services /tmp/iceoryx2/nodes/private/tmp/iox2*.shm_state`（macOS；须在进程全死后执行）。
 
 ## 运行（MuJoCo 双语言闭环）
 
@@ -32,13 +22,6 @@ trace 跨进程续接（传感器→vio→demo→参考 单周期 trace）：
 
 ```
 Python sim（MuJoCo 物理 + 传感器发布）→ vio（MSCKF 位姿估计）→ demo（重规划）
-  └──────────── 回传参考 Firefly/Reference（PD 闭环）──────────────┘
-```
-
-推荐一键启动（后台拉起三进程 + viewer，Ctrl-C 清理）：
-```bash
-scripts/run_firefly.sh            # 起 viewer + sim + vio + demo
-scripts/run_firefly.sh --save task.rrd   # 捕获录制（viewer 后台落盘；--no-viewer 时不产 rrd）
 ```
 
 按顺序各开一个终端（可先开 viewer，见下）：
@@ -81,11 +64,8 @@ cargo run -p firefly-demo -- --map apps/firefly-demo/maps/gate.ffmap  # 静态�
 
 ## Log / Debug（rerun rrd）
 
-- **debug 数据一律进 rrd，禁止文本日志**：`firefly-vio.log` /
-  `firefly-sim.log` 这类文件是违禁品。
-- 分工：log 宏（logforth）只做进程级诊断（启动、错误、关键事件）；
-  可结构化数据（位姿、图像、标量、轨迹、中间状态）进 rrd——
-  viewer 可回放，CLI/RrdReader 可检索。
+- **debug 数据一律进 rrd，禁止文本日志**
+- 分工：log 宏（logforth）只做进程级诊断（启动、错误、关键事件）；可结构化数据（位姿、图像、标量、轨迹、中间状态）进 rrd, viewer 可回放，CLI/RrdReader 可检索。
 - 写入（`firefly-rerun::Stream`）：
   - 入口：`connect_or_spawn()` 连共享 viewer，`save(path)` 离线录制。
   - 时间轴：`set_time(sim_time 秒)`。
