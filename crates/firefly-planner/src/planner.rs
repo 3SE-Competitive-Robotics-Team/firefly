@@ -29,7 +29,22 @@ pub struct State {
     pub acceleration: Vector3<f64>,
 }
 
-#[derive(Debug)]
+/// 初始解来源（对照官方 `computeInitState` 的两个 case）。
+#[derive(Debug, Clone, Copy)]
+pub enum InitSource<'a> {
+    /// case 1：A* 引导路径重建（首帧 / 暖启动失败降级）。
+    ColdStart,
+    /// case 2：从上一条最优轨迹暖启动。`elapsed` 为已执行时长；
+    /// `guide_tail` 为全局路径上从当前投影到局部目标的延续段
+    /// （旧轨迹耗尽后的走向）。
+    WarmStart {
+        prev: &'a Trajectory,
+        elapsed: f64,
+        guide_tail: &'a [Vector3<f64>],
+    },
+}
+
+#[derive(Debug, Clone)]
 pub struct PlanResult {
     pub trajectory: Trajectory,
     pub iterations: usize,
@@ -56,6 +71,9 @@ pub struct Planner {
 }
 
 impl Planner {
+    /// Rebound 全局迭代上限（rebound/restart/缩放重试共享预算）。
+    const REBOUND_MAX_ITERATIONS: usize = 40;
+
     #[must_use]
     pub fn new(config: PlannerConfig, mut map: GridMap) -> Self {
         map.inflate_obstacles(config.obstacle_inflation);
@@ -106,6 +124,22 @@ impl Planner {
         self.plan_in_swarm(start, goal, &[])
     }
 
+    /// 带初始解来源的规划（连续重规划用暖启动，官方 `planFromLocalTraj`
+    /// 策略链：case2 暖启动 → 失败降级 case1 冷启动）。
+    ///
+    /// # Errors
+    ///
+    /// `NotFound`：起点/终点不可达；`Convergence`：Rebound 超出迭代上限。
+    #[fastrace::trace]
+    pub fn plan_with_init(
+        &mut self,
+        start: State,
+        goal: Point3<f64>,
+        source: InitSource<'_>,
+    ) -> Result<PlanResult> {
+        self.plan_in_swarm_init(start, goal, &[], source)
+    }
+
     /// 集群规划：本机轨迹避让其他机轨迹（论文 decentralized framework：
     /// 接收其他机轨迹作为约束，只规划自己）。
     /// # Errors
@@ -117,6 +151,17 @@ impl Planner {
         start: State,
         goal: Point3<f64>,
         peers: &[firefly_cost::Peer],
+    ) -> Result<PlanResult> {
+        self.plan_in_swarm_init(start, goal, peers, InitSource::ColdStart)
+    }
+
+    /// 集群规划（带初始解来源，见 [`InitSource`]）。
+    fn plan_in_swarm_init(
+        &mut self,
+        start: State,
+        goal: Point3<f64>,
+        peers: &[firefly_cost::Peer],
+        source: InitSource<'_>,
     ) -> Result<PlanResult> {
         // 地图可能已被动态障碍更新：重算膨胀层（官方 clearAndInflateLocalMap）
         self.map.inflate_obstacles(self.config.obstacle_inflation);
@@ -133,17 +178,58 @@ impl Planner {
             local_goal,
         )?;
 
-        let pieces = init::pieces_for_guide(&guide, self.config.piece_length);
-        let init_config = InitConfig {
-            pieces,
-            max_velocity: self.config.max_velocity,
+        let minco = match source {
+            InitSource::ColdStart => {
+                let pieces = init::pieces_for_guide(&guide, self.config.piece_length);
+                let init_config = InitConfig {
+                    piece_length: self.config.piece_length,
+                    pieces,
+                    max_velocity: self.config.max_velocity,
+                };
+                init::init_from_path(
+                    &init_config,
+                    start_endpoint,
+                    Point3::from(local_goal),
+                    &guide,
+                )?
+            }
+            InitSource::WarmStart {
+                prev,
+                elapsed,
+                guide_tail,
+            } => {
+                let init_config = InitConfig {
+                    piece_length: self.config.piece_length,
+                    pieces: 0, // 暖启动段数按官方 case2 由距离决定，不使用
+                    max_velocity: self.config.max_velocity,
+                };
+                match init::init_warm_start(
+                    &init_config,
+                    start_endpoint,
+                    Point3::from(local_goal),
+                    prev,
+                    elapsed,
+                    guide_tail,
+                ) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        log::debug!("暖启动不可用（{e}），降级冷启动");
+                        let pieces = init::pieces_for_guide(&guide, self.config.piece_length);
+                        let cfg = InitConfig {
+                            piece_length: self.config.piece_length,
+                            pieces,
+                            max_velocity: self.config.max_velocity,
+                        };
+                        init::init_from_path(
+                            &cfg,
+                            start_endpoint,
+                            Point3::from(local_goal),
+                            &guide,
+                        )?
+                    }
+                }
+            }
         };
-        let minco = init::init_from_path(
-            &init_config,
-            start_endpoint,
-            Point3::from(local_goal),
-            &guide,
-        )?;
 
         self.rebound(
             minco,
@@ -160,7 +246,10 @@ impl Planner {
     ///   （官方 `STOP_FOR_REBOUND`，`rebound_times ≤ 20`）；
     /// - 优化后 fine check（官方 `finelyCheckAndSetConstraintPoints`），
     ///   碰撞则并入新平面后 restart（`restart_nums ≤ 3`）；
-    /// - swarm 距离不满足时权重 ×2（官方 `wei_swarm_mod_ *= 2`）。
+    /// - swarm 距离不满足时权重 ×2（官方 `wei_swarm_mod_ *= 2`）；
+    /// - 全局迭代上限 [`Self::REBOUND_MAX_ITERATIONS`] 兜底所有分支。
+    // 主循环编排（初始化/L-BFGS/fine check/restart 多阶段），clippy too_many_lines 允许
+    #[allow(clippy::too_many_lines)]
     fn rebound(
         &self,
         mut minco: Minco,
@@ -182,9 +271,20 @@ impl Planner {
         Self::initial_constraints(&scanner, &mut minco, guide, &mut planes_by_point)?;
 
         loop {
+            iteration += 1;
+            // 全局迭代上限：所有内部分支（rebound/restart/时间缩放失败重试）
+            // 共享此预算。没有它，"解安全但时间缩放后不可行"的确定性失败
+            // 会零计数空转（try_finish 返回 None 不推进任何计数器）。
+            // TODO(官方对齐)：官方以 in/out 自由点搜索 + A* 绕障重建约束，
+            // 不存在该空转路径；上限是过渡防护，根治需按官方重建约束生成。
+            if iteration > Self::REBOUND_MAX_ITERATIONS {
+                return Err(Error::temporary(
+                    ErrorKind::Convergence,
+                    format!("planner exceeded rebound iteration limit ({iteration})"),
+                ));
+            }
             let _span =
                 fastrace::local::LocalSpan::enter_with_local_parent(format!("rebound-{iteration}"));
-            iteration += 1;
 
             // 队形是软约束（官方靠持续重规划收敛）：单次规划中
             // 偏差不再改善即接受当前解，避免迭代耗尽
@@ -690,6 +790,7 @@ mod tests {
         // 真实初始化流程：MINCO 拟合引导路径（官方 initMJO），
         // 拐角切角会浅穿入膨胀层——rebound 修正的就是这类浅穿入
         let init_config = crate::init::InitConfig {
+            piece_length: planner.config.piece_length,
             pieces: crate::init::pieces_for_guide(&guide, planner.config.piece_length),
             max_velocity: planner.config.max_velocity,
         };

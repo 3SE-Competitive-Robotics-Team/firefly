@@ -3,15 +3,15 @@ description.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
-keywords = ['demo', 'planner', 'ego-planner', 'simulation']
+keywords = ['planner', 'ego-planner', 'navigation', 'robotics', 'simulation']
 categories = ['robotics', 'science', 'algorithms', 'mathematics', 'simulation', 'embedded']
-name = "firefly-demo"
+name = "planner"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "firefly-demo"
+name = "planner"
 path = "src/main.rs"
 
 [dependencies]

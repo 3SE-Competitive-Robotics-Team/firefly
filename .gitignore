@@ -17,7 +17,7 @@ wheels/
 
 # 文档与地图资源
 docs/papers/
-apps/firefly-demo/maps/*.ffmap
+apps/planner/maps/*.ffmap
 
 # 录制产物（rrd/rbl）与运行时日志
 /logs/
@@ -29,3 +29,4 @@ MUJOCO_LOG.TXT
 
 # 工具本地配置
 .commandcode/
+.freebuff/

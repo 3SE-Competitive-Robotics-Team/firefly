@@ -5,7 +5,7 @@
 - 发布传感器到 iceoryx2：`Firefly/Imu`（100Hz）、`Firefly/CameraLeft` /
   `Firefly/CameraRight`（双目灰度，10Hz）、`Firefly/Depth`（10Hz）、
   `Firefly/GroundTruth`（真值 odom，10Hz）；
-- Rust 侧（vio + firefly-demo）消费传感器 → 估计 → 规划 → 回传参考，闭环。
+- Rust 侧（vio + planner）消费传感器 → 估计 → 规划 → 回传参考，闭环。
 
 运行：`uv run firefly-sim`
 """

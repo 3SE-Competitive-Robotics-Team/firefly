@@ -3,12 +3,14 @@
 use firefly_error::Result;
 use firefly_map::GridMap;
 use firefly_search::Astar;
-use firefly_trajectory::{Endpoint, Minco, MincoBuilder, SolverOrder};
+use firefly_trajectory::{Endpoint, Minco, MincoBuilder, SolverOrder, Trajectory};
 use nalgebra::{Point3, Vector3};
 
 pub struct InitConfig {
     pub pieces: usize,
     pub max_velocity: f64,
+    /// 每段路径长度（米，官方 `polyTraj_piece_length`；暖启动段数按它计算）。
+    pub piece_length: f64,
 }
 
 /// 段数由引导路径拐点数决定（官方 initMJO 以拐点为 waypoint），
@@ -92,6 +94,76 @@ pub fn init_from_path(
         .map_err(|e| e.with_operation("planner::init"))
 }
 
+/// 暖启动初始解（官方 `computeInitState` case 2）：以上一条最优轨迹的剩余段
+/// 为主干，耗尽后沿引导路径延续段（`guide_tail`）走到局部目标。
+///
+/// 文档化偏离：官方按时间参数采样（其全局轨迹带时间轴），我们的全局路径是
+/// A* 空间折线——改为把"剩余旧轨迹细采样 + 引导延续段"拼成复合折线，按弧长
+/// 取 waypoint，段时长沿用 [`allocate_time`]（保持时间正性与初始可行性）。
+///
+/// # Errors
+///
+/// 旧轨迹已耗尽（`elapsed ≥ duration`）或复合路径退化时返回
+/// `InvalidArgument`——调用方应降级冷启动（官方 case2 → case1 策略链）。
+pub fn init_warm_start(
+    config: &InitConfig,
+    start: Endpoint,
+    goal: Point3<f64>,
+    prev: &Trajectory,
+    elapsed: f64,
+    guide_tail: &[Vector3<f64>],
+) -> Result<Minco> {
+    let remaining = prev.duration() - elapsed;
+    if remaining <= 0.05 {
+        return Err(firefly_error::Error::new(
+            firefly_error::ErrorKind::InvalidArgument,
+            format!("旧轨迹剩余 {remaining:.3}s，暖启动退化为冷启动"),
+        ));
+    }
+    // 复合折线：剩余旧轨迹按固定步长采样（首点即当前参考位置附近）
+    let mut route: Vec<Vector3<f64>> = Vec::new();
+    let steps = ((remaining / 0.05).ceil() as usize).clamp(8, 80);
+    for k in 1..=steps {
+        let t = elapsed + remaining * f64::from(k as u32) / f64::from(steps as u32);
+        let s = prev.eval(t.min(prev.duration()));
+        route.push(s.position);
+    }
+    // 拼接引导延续段：跳过与旧轨迹末端重叠的开头点
+    if let Some(last) = route.last() {
+        let mut skip = 0usize;
+        while skip < guide_tail.len() && (guide_tail[skip] - *last).norm() < 0.15 {
+            skip += 1;
+        }
+        route.extend_from_slice(&guide_tail[skip..]);
+    }
+    if route.len() < 2 {
+        return Err(firefly_error::Error::new(
+            firefly_error::ErrorKind::InvalidArgument,
+            "暖启动复合路径退化",
+        ));
+    }
+    // 官方 case2 段数 = ceil(直线距离/piece_length)，下限 2
+    let dist = (goal.coords - start.position).norm();
+    let pieces = ((dist / config.piece_length.max(1e-3)).ceil() as usize).clamp(2, 24);
+    let waypoints = sample_waypoints(&route, pieces - 1);
+    let mut segments = Vec::with_capacity(pieces);
+    let mut cursor = start.position;
+    for q in &waypoints {
+        segments.push((q.coords - cursor).norm());
+        cursor = q.coords;
+    }
+    segments.push((goal.coords - cursor).norm());
+    let durations = allocate_time(&segments, config.max_velocity);
+    let end = Endpoint {
+        position: goal.coords,
+        velocity: Vector3::zeros(),
+        acceleration: Vector3::zeros(),
+    };
+    MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
+        .build(&waypoints, &durations)
+        .map_err(|e| e.with_operation("planner::init:warm_start"))
+}
+
 /// 取 count 个中间 waypoint（不含两端）：拐点优先（官方 initMJO），
 /// 拐点不足时按弧长均匀补充。
 fn sample_waypoints(path: &[Vector3<f64>], count: usize) -> Vec<Point3<f64>> {
@@ -155,6 +227,7 @@ mod tests {
         let config = InitConfig {
             pieces: 1,
             max_velocity: 2.0,
+            piece_length: 1.5,
         };
         let start = Endpoint {
             position: Vector3::new(8.0, 4.0, 1.0),

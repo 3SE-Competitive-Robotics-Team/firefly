@@ -79,21 +79,42 @@ impl<'a> ObstacleScanner<'a> {
 
     /// 生成 {s, v} 平面：v 指向引导路径（出障碍方向），
     /// s 为该方向上的障碍表面点（v1 论文 Fig. 3a）。
+    ///
+    /// TODO(官方对齐)：官方 `finelyCheckAndSetConstraintPoints` 不做射线步进
+    /// ——碰撞点在约束点数组内**向前/向后找最近自由点**（天然有界），末端
+    /// 无自由点则报错放弃规划；绕障走向由 in/out 点间 A* 路径给出。当前
+    /// 射线步进是过渡实现，发散样本曾致无限步进（已加非有限守卫与步数上限）。
     pub fn build_plane(map: &GridMap, point: Vector3<f64>, guide_point: Vector3<f64>) -> Plane {
         let dir = guide_point - point;
         let norm = dir.norm();
-        if norm < 1e-9 {
+        // 非有限坐标（上游数值异常）不得进入射线步进：index_of 对 NaN 的
+        // 两个边界比较同为 false，会落到 [0,0,0]，若该体素占据则死循环
+        if norm <= 1e-9
+            || !point.iter().all(|v| v.is_finite())
+            || !guide_point.iter().all(|v| v.is_finite())
+        {
             return Plane::new(point, Vector3::new(1.0, 0.0, 0.0));
         }
         let v = dir / norm;
         let r = map.resolution();
         let mut t = 0.0;
+        // 行进上限：命中点→引导点距离的两倍加一格余量。正常情形自由体素
+        // 必在此范围内；超限说明方向数据异常，退回引导点兜底。
+        let max_t = norm * 2.0 + r;
+        let mut steps = 0usize;
         let s = loop {
             let p = point + v * t;
-            if !map.is_occupied(p) {
-                break p;
+            // 步数上限：正常表面点距命中点 < 数米；发散轨迹样本（上游数值
+            // 异常）会让 t 走到天文数字——直接放弃步进，退回引导点兜底
+            if !map.is_occupied(p) || t > max_t || steps > 20_000 {
+                break if t > max_t || steps > 20_000 {
+                    guide_point
+                } else {
+                    p
+                };
             }
             t += r * 0.25;
+            steps += 1;
         };
         Plane::new(s, v)
     }

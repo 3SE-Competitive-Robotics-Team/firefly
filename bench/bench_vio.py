@@ -80,8 +80,8 @@ def cleanup_iceoryx() -> None:
         subprocess.run(["rm", "-rf", p], capture_output=True)
     # also clean stale shm files (macOS)
     subprocess.run(["bash", "-lc", "rm -rf /private/tmp/iox2*.shm_state 2>/dev/null; true"], capture_output=True)
-    # kill previous sim/vio/demo (graceful SIGTERM)
-    for pat in ["firefly-sim", "target/release/vio", "target/debug/vio", "target/debug/firefly-demo"]:
+    # kill previous sim/vio/planner (graceful SIGTERM)
+    for pat in ["firefly-sim", "target/release/vio", "target/debug/vio", "target/release/planner", "target/debug/planner"]:
         subprocess.run(["pkill", "-f", pat], capture_output=True)
     time.sleep(1)
 
