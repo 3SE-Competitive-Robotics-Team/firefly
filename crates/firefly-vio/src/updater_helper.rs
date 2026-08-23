@@ -264,12 +264,13 @@ pub fn get_feature_jacobian_full(
                 .find(|(ct, _)| ct.total_cmp(t).is_eq())
                 .map(|(_, c)| c)
                 .expect("特征测量时刻必须存在对应克隆");
-            // 当前/FEJ 线性化点
-            let (r_gto_ii, p_iin_g) = if state.options.do_fej {
-                (clone.rot_fej(), clone.pos_fej())
-            } else {
-                (clone.rot(), clone.pos())
-            };
+            // 残差与投影用**当前**位姿（对照 C++：res 在 FEJ 覆盖段之前用
+            // `clone_Ii->Rot()/pos()` 当前值计算）；FEJ 只影响雅可比线性化
+            // 点（历史缺陷：曾用 fej 算残差——克隆 fej 随更新变陈旧，残差
+            // 恒带"陈旧度"偏置 → EKF 每帧把状态往 fej 方向拖 → 姿态/速度
+            // 线性漂移、位置二次发散；do_fej=false 时 12s 误差 100m+ → 1.2m）。
+            let r_gto_ii = clone.rot();
+            let p_iin_g = clone.pos();
 
             // 投影到相机系并归一化
             let p_fin_ii = r_gto_ii * (p_fin_g - p_iin_g);
@@ -289,26 +290,36 @@ pub fn get_feature_jacobian_full(
             let r2 = Vector2::new(f64::from(uv_m.x), f64::from(uv_m.y)) - uv_pred;
             res.rows_range_mut(2 * c..2 * c + 2).copy_from(&r2);
 
-            // 雅可比链（对照 C++：dz_dzn·dzn_dpfc·dpfc_dpfg / dpfc_dclone）
-            let (dz_dzn, _) = cam.compute_distort_jacobian(uv_norm.cast());
+            // 雅可比链（对照 C++：dz_dzn/dzn_dpfc/dpfc_dpfg/dpfc_dclone 在
+            // FEJ 覆盖段之后计算，即 do_fej 时用 `Rot_fej()/pos_fej()` 与
+            // `p_FinG_fej`（GLOBAL_3D 的 p_FinG_fej = 当前三角化 p_FinG））。
+            let (r_gto_ii_j, p_iin_g_j, p_fin_g_j) = if state.options.do_fej {
+                (clone.rot_fej(), clone.pos_fej(), p_fin_g)
+            } else {
+                (r_gto_ii, p_iin_g, p_fin_g)
+            };
+            let p_fin_ii_j = r_gto_ii_j * (p_fin_g_j - p_iin_g_j);
+            let p_fin_ci_j = r_ito_c * p_fin_ii_j + p_iin_c;
+            let uv_norm_j = Vector2::new(p_fin_ci_j.x / p_fin_ci_j.z, p_fin_ci_j.y / p_fin_ci_j.z);
+            let (dz_dzn, _) = cam.compute_distort_jacobian(uv_norm_j.cast());
             // dzn/dpfc：2×3（对 p_FinCi 的 x/y/z 求导）
             let mut dzn_dpfc = DMatrix::zeros(2, 3);
-            let z2 = p_fin_ci.z * p_fin_ci.z;
-            dzn_dpfc[(0, 0)] = 1.0 / p_fin_ci.z;
-            dzn_dpfc[(0, 2)] = -p_fin_ci.x / z2;
-            dzn_dpfc[(1, 1)] = 1.0 / p_fin_ci.z;
-            dzn_dpfc[(1, 2)] = -p_fin_ci.y / z2;
+            let z2 = p_fin_ci_j.z * p_fin_ci_j.z;
+            dzn_dpfc[(0, 0)] = 1.0 / p_fin_ci_j.z;
+            dzn_dpfc[(0, 2)] = -p_fin_ci_j.x / z2;
+            dzn_dpfc[(1, 1)] = 1.0 / p_fin_ci_j.z;
+            dzn_dpfc[(1, 2)] = -p_fin_ci_j.y / z2;
             // dz_dpfc：d(像素残差)/d(p_FinCi)。dz_dzn=∂(像素)/∂(归一化) 已含
             // fx/fy/cx/cy（distort_f 输出像素），故不再额外乘 pix_scale
             //（round4 误加 → 双重缩放）。
             let dz_dpfc = dz_dzn * dzn_dpfc;
 
-            let dpfc_dpfg = r_ito_c * r_gto_ii;
+            let dpfc_dpfg = r_ito_c * r_gto_ii_j;
             // dpfc/dclone：3×6（对克隆的旋转/平移 6 维误差状态）
             let mut dpfc_dclone = DMatrix::<f64>::zeros(3, 6);
             dpfc_dclone
                 .view_mut((0, 0), (3, 3))
-                .copy_from(&(r_ito_c * skew_x(&p_fin_ii)));
+                .copy_from(&(r_ito_c * skew_x(&p_fin_ii_j)));
             dpfc_dclone
                 .view_mut((0, 3), (3, 3))
                 .copy_from(&(-dpfc_dpfg));

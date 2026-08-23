@@ -290,7 +290,7 @@ impl UpdaterZeroVelocity {
         ekf_propagation(state, &bias_order, &bias_order, &phi_bias, &q_bias);
 
         // ZUPT 更新（对照 C++：EKFUpdate + timestamp 推进）
-        ekf_update(state, &hx_order, &h, &res, &r);
+        ekf_update(state, &hx_order, &h, &res, &r, f64::INFINITY);
         state.timestamp = timestamp;
 
         self.last_zupt_state_timestamp = timestamp;

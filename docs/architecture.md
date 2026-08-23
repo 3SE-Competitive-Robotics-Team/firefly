@@ -64,3 +64,37 @@ flowchart TD
     FC -->|PWM/控制| HW
     HW -->|机载状态| FC
 ```
+
+## VIO 单帧算法流程
+
+```mermaid
+flowchart TD
+    subgraph FRONTEND["KLT 双目前端（feed_stereo · 每帧循环）"]
+        PRE["读入当前帧<br/>img_curr_l / img_curr_r"]
+        DETECT["补点检测（跑在上一帧 img_last 上）：<br/>左目网格 FAST 提取 → 新点左→右 KLT 同 id 配对"]
+        EXTRAP["运动外推：LK 初值 = 上帧位置 + 最近两帧位移"]
+        TLK["时间 LK：img_last → img_curr<br/>(4 层金字塔 + 21×21 窗口)"]
+        RANSAC["基础矩阵 RANSAC 剔除误匹配"]
+        PAIR["按 id 合并左右结果：<br/>双目成对 / 左单目 / 右单目"]
+        DB["测量入库（去畸变归一化坐标）"]
+        ADVANCE["Move forward in time：<br/>pts/img/mask/ids_last ← 当前帧<br/>（曾漏写此段 → 跟踪器永远停在首帧）"]
+        PRE --> DETECT --> EXTRAP --> TLK --> RANSAC --> PAIR --> DB --> ADVANCE
+    end
+
+    subgraph MSCKF["MSCKF 估计（VioManager · 每相机时刻）"]
+        PROPAG["IMU 传播至图像时刻 + 克隆增广"]
+        COLLECT["收集候选：<br/>丢失特征 + 滑出克隆窗口的特征"]
+        RGATE["重投影门控：<br/>z>0、深度 ≤ 上限、残差阈值"]
+        TRIANG["多帧 DLT 三角化求解特征 3D 位置<br/>cond 数 / 深度上下限门控"]
+        JRES["逐特征：残差 + 雅可比（FEJ 线性化点）<br/>零空间投影 → chi² 检验<br/>深度自适应噪声行归一化"]
+        COMPRESS["Givens 测量压缩降维"]
+        UPDATE["EKF 更新（位置/速度修正限幅）<br/>删除已用特征 + 边缘化最旧克隆"]
+        PROPAG --> COLLECT --> RGATE --> TRIANG --> JRES --> COMPRESS --> UPDATE
+    end
+
+    DB -.->|"跟踪中断的特征成为下一帧候选"| COLLECT
+    ADVANCE ==>|"推进 last 状态 · 进入下一帧循环"| PRE
+
+    classDef critical fill:#fff3cd,stroke:#b8860b,color:#000;
+    class ADVANCE critical;
+```
