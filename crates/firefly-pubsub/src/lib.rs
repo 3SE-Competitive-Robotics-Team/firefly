@@ -9,6 +9,7 @@
 //! - [`imu`]：`ImuMessage`——原始 IMU（角速度 + 比力）；
 //! - [`camera`]：`GrayImageMessage`/`DepthImageMessage`——双目灰度 + 深度图；
 //! - [`reference`]：`ReferenceMessage`——规划轨迹的参考状态（闭环控制回传）；
+//! - [`goal`]：`GoalMessage`——外部工具发布的飞行目标（动态重目标入口）；
 //! - [`publish`]/[`subscriber`]：泛型发布/订阅端（自动注入/续接 trace 上下文）；
 //! - [`event`]：事件唤醒层——每话题配对同名 event service，发布后 notify、
 //!   订阅端 `Listener` 挂 `WaitSet` 即到即醒（对照 iceoryx2 官方 event 示例）。
@@ -18,6 +19,7 @@
 
 pub mod camera;
 pub mod event;
+pub mod goal;
 pub mod imu;
 pub mod node;
 pub mod odom;

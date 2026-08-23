@@ -120,13 +120,13 @@ impl Stream {
             BarChartView, BlueprintOpts, Horizontal, Spatial3DView, TimeSeriesView, Vertical,
         };
         // 场景视图排除标量实体（它们只属于时间序列视图）
-        let scene = Spatial3DView::new("场景")
+        let scene = Spatial3DView::new("Scene")
             .with_origin("/")
             .with_contents(["+ /**", "- vio/debug/**"]);
-        let scalars = TimeSeriesView::new("前端标量")
+        let scalars = TimeSeriesView::new("VIO Scalars")
             .with_origin("/vio/debug")
             .with_contents(["+ /vio/debug/**", "- /vio/debug/track_length"]);
-        let histogram = BarChartView::new("跟踪长度分布").with_origin("/vio/debug/track_length");
+        let histogram = BarChartView::new("Track Length").with_origin("/vio/debug/track_length");
         let layout = Horizontal::new([
             scene.into(),
             Vertical::new([scalars.into(), histogram.into()]).into(),
