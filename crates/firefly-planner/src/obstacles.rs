@@ -511,10 +511,12 @@ fn intersection_on_path(
                 break;
             }
         } else {
-            astar_id -= 1;
-            if astar_id == usize::MAX {
+            // 先判 0 再减,避免 usize 下溢(官方 C++ 有符号 int 无此问题,
+            // Rust debug 下 0-1 直接 panic)。
+            if astar_id == 0 {
                 break;
             }
+            astar_id -= 1;
         }
         let new_val = (a_star_path[astar_id] - point).dot(&ctrl);
         if new_val * init_val <= 0.0 && (new_val.abs() > 0.0 || init_val.abs() > 0.0) {
@@ -699,6 +701,25 @@ mod tests {
         if all_covered {
             assert!(!new_obs, "全覆盖点不应触发 Rebound");
         }
+    }
+
+    #[test]
+    fn intersection_on_path_walks_back_to_0_without_underflow() {
+        // 所有 A* 点都在 `point` 沿 ctrl 的"后方"(投影 < 0),搜索会一路
+        // 回退到索引 0 仍无符号翻转 → 返回 None;此前 0-1 在 debug 下
+        // usize 下溢 panic("attempt to subtract with overflow")。
+        let path = vec![
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(2.0, 0.0, 0.0),
+            Vector3::new(4.0, 0.0, 0.0),
+            Vector3::new(6.0, 0.0, 0.0),
+            Vector3::new(8.0, 0.0, 0.0),
+        ];
+        let p_minus = Vector3::new(0.0, 0.0, 0.0);
+        let p_plus = Vector3::new(2.0, 0.0, 0.0);
+        let point = Vector3::new(10.0, 0.0, 0.0);
+        let r = intersection_on_path(&path, &p_minus, &p_plus, point);
+        assert!(r.is_none(), "无符号翻转应返回 None 而非 panic");
     }
 
     #[test]

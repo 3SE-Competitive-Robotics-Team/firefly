@@ -7,6 +7,10 @@
 //! 运行：`cargo run -p planner`（配合 `uv run firefly-sim` + `cargo run -p vio`），
 //! 或 `cargo run -p planner -- --map apps/planner/maps/gate.ffmap` 独立运行。
 //!
+//! 动态目标：订阅 `Firefly/Goal`（`uv run firefly-goal X Y Z` 发布），
+//! 收到目标即重算全局路径并飞往该点；到达后悬停保持、进程保持运行等待
+//! 新目标（`--goal` 仅为初始目标，可省略——缺省悬停在 `--start`）。
+//!
 //! rerun 实体约定（`sim_time` 时间轴）：`plan/global_path`、`plan/local_traj`
 //! （+`velocity`）、`plan/planes`、`plan/drone`（位姿）、`plan/perceived`
 //! （感知占据地图）、`plan/motions`（动态障碍）、`plan/map`+`plan/decor`
@@ -24,6 +28,7 @@ use firefly_map::{DepthCamera, MapFile, VoxelState, update_from_depth};
 use firefly_observability::init as init_observability;
 use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager};
 use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage};
+use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::publish::Publisher;
@@ -47,7 +52,7 @@ struct Args {
     map: Option<PathBuf>,
     save: Option<PathBuf>,
     start: [f64; 3],
-    goal: [f64; 3],
+    goal: Option<[f64; 3]>,
     frame_offset: [f64; 3],
 }
 
@@ -57,7 +62,8 @@ fn parse_args() -> Result<Args> {
         map: None,
         save: None,
         start: [1.0, 4.0, 1.0],
-        goal: [7.0, 4.8, 1.0],
+        // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
+        goal: None,
         frame_offset: [0.0, 0.0, 0.0],
     };
     while let Some(arg) = it.next() {
@@ -73,7 +79,7 @@ fn parse_args() -> Result<Args> {
                 })?));
             }
             "--start" => args.start = parse_vec3(&mut it, "--start")?,
-            "--goal" => args.goal = parse_vec3(&mut it, "--goal")?,
+            "--goal" => args.goal = Some(parse_vec3(&mut it, "--goal")?),
             "--frame-offset" => args.frame_offset = parse_vec3(&mut it, "--frame-offset")?,
             other => {
                 return Err(Error::new(
@@ -106,6 +112,9 @@ struct App {
     sensor_this_tick: bool,
     odom: Option<OdomSubscriber>,
     depth: Option<Subscriber<DepthImageMessage>>,
+    goal_sub: Option<Subscriber<GoalMessage>>,
+    /// 收到的最近目标（本 tick 处理一次，处理完清空；快速连续发布取最新）。
+    pending_goal: Option<GoalMessage>,
     latest_odom: Option<OdomSnapshot>,
     last_odom_recv: f64,
     /// 最新 odom 携带的 trace 上下文 `(trace_id, span_id, sampled)`（续接用）。
@@ -128,7 +137,7 @@ impl App {
         viewer: Viewer,
         config: PlannerConfig,
         start: [f64; 3],
-        goal: [f64; 3],
+        goal: Option<[f64; 3]>,
         frame_offset: [f64; 3],
     ) -> Result<Self> {
         let grid = map_file.to_grid_map()?;
@@ -138,6 +147,8 @@ impl App {
             .filter_map(|p| grid.index_of(Vector3::new(p[0], p[1], p[2])))
             .collect();
         let planner = firefly_planner::Planner::new(config, grid);
+        // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
+        let goal = goal.unwrap_or(start);
         let manager = PlannerManager::with_planner(
             planner,
             ManagerOptions::default(),
@@ -171,6 +182,16 @@ impl App {
                 None
             }
         };
+        let goal_sub = match Subscriber::<GoalMessage>::with_topic(&node, GOAL_TOPIC) {
+            Ok(s) => {
+                log::info!("已订阅目标话题 {GOAL_TOPIC}（`uv run firefly-goal X Y Z` 发布）");
+                Some(s)
+            }
+            Err(e) => {
+                log::warn!("目标订阅不可用：{e}");
+                None
+            }
+        };
         log::info!("状态源：odom（新鲜度 {ODOM_FRESH_TIMEOUT}s）；真值不参与规划链路");
         Ok(Self {
             manager,
@@ -182,6 +203,8 @@ impl App {
             sensor_this_tick: false,
             odom,
             depth,
+            goal_sub,
+            pending_goal: None,
             latest_odom: None,
             last_odom_recv: f64::NEG_INFINITY,
             odom_trace: None,
@@ -224,6 +247,18 @@ impl App {
                 let ctx = *sample.user_header();
                 let _span = ctx.continue_span("recv-depth");
                 self.latest_depth = Some(*sample);
+            }
+        }
+        if let Some(sub) = &self.goal_sub {
+            while let Some(sample) = sub.receive()? {
+                // 目标不参与 sim 时钟锚定（CLI 墙钟）；最新一条生效
+                self.pending_goal = Some(*sample);
+                log::info!(
+                    "收到新目标 ({:.2},{:.2},{:.2})",
+                    sample.position_x,
+                    sample.position_y,
+                    sample.position_z
+                );
             }
         }
         Ok(())
@@ -281,10 +316,35 @@ impl App {
         self.update_motion();
 
         let measured = self.measured(now);
+        // 动态目标：收到新目标即重目标（重算全局路径 + 重置状态机），
+        // 下一 tick 重新规划飞往新目标
+        if let Some(goal) = self.pending_goal.take() {
+            let target =
+                Vector3::new(goal.position_x, goal.position_y, goal.position_z) + self.frame_offset;
+            match self.manager.set_goal(now, measured, target) {
+                Ok(()) => log::info!(
+                    "目标更新 ({:.1},{:.1},{:.1})，重新规划中",
+                    target.x,
+                    target.y,
+                    target.z
+                ),
+                Err(e) => log::warn!("目标 ({target:?}) 不可达，忽略：{e}"),
+            }
+        }
         let report = self.manager.tick(now, measured);
 
-        // 参考指令发布（闭环控制：MuJoCo 订阅后 PD 跟踪）
-        if let Some(reference) = report.reference
+        // 参考指令发布（闭环控制：MuJoCo 订阅后 PD 跟踪）。到达后悬停保持：
+        // 以目标点为参考（速度 0），进程保持运行等待新目标
+        let reference = if self.manager.is_finished() {
+            let goal = self.manager.goal().coords;
+            Some(firefly_planner::Reference {
+                position: goal,
+                velocity: Vector3::zeros(),
+            })
+        } else {
+            report.reference
+        };
+        if let Some(reference) = reference
             && let Some(pub_) = &self.ref_pub
             && let Err(e) = pub_.publish(ReferenceMessage {
                 timestamp: now,
@@ -376,9 +436,8 @@ impl App {
             if !attachment_id.has_event_from(&tick_guard) {
                 return CallbackProgression::Continue;
             }
-            if self.finished {
-                return CallbackProgression::Stop;
-            }
+            // 动态目标工作流：到达后保持运行（悬停 + 等待新目标），
+            // 不因 finished 退出进程（仅 SIGINT/SIGTERM 优雅退出）
             // 每帧 trace 上下文：续接新鲜 odom 的 trace（跨进程同周期一条
             // trace），无新鲜 odom 时自建未采样 root（不产生 span 记录）
             let root = match self
@@ -415,9 +474,6 @@ impl App {
             if !self.sensor_this_tick {
                 self.t_sim += LOOP_PERIOD.as_secs_f64();
             }
-            if self.finished {
-                return CallbackProgression::Stop;
-            }
             CallbackProgression::Continue
         };
 
@@ -434,7 +490,7 @@ impl App {
             }
         }
         log::info!(
-            "任务完成：{} 次重规划，总耗时 {:.1}s",
+            "进程退出：本会话 {} 次重规划，仿真时长 {:.1}s（悬停保持中，等待新目标可继续）",
             self.manager.replans(),
             self.t_sim
         );
@@ -448,7 +504,7 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!(
-                "{e}\n用法：planner [--map <map.ffmap>] [--save out.rrd] [--start x y z] [--goal x y z] [--frame-offset x y z]"
+                "{e}\n用法：planner [--map <map.ffmap>] [--save out.rrd] [--start x y z] [--goal x y z] [--frame-offset x y z]\n\n--goal 可省略（悬停等待 `uv run firefly-goal X Y Z` 动态目标）"
             );
             std::process::exit(2);
         }

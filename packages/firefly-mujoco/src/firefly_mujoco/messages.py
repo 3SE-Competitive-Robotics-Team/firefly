@@ -102,6 +102,21 @@ class ReferenceMessage(ctypes.Structure):
         return "FireflyReferenceMessage"
 
 
+class GoalMessage(ctypes.Structure):
+    """飞行目标：与 Rust `GoalMessage`（`FireflyGoalMessage`）一致。"""
+
+    _fields_ = [
+        ("timestamp", ctypes.c_double),
+        ("position_x", ctypes.c_double),
+        ("position_y", ctypes.c_double),
+        ("position_z", ctypes.c_double),
+    ]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflyGoalMessage"
+
+
 class OdomMessage(ctypes.Structure):
     """里程计：与 Rust `OdomMessage`（`FireflyOdomMessage`）一致。"""
 

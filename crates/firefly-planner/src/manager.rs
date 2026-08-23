@@ -142,6 +142,11 @@ impl PlannerManager {
         measured: Option<State>,
         goal: Vector3<f64>,
     ) -> Result<()> {
+        // 同目标幂等：CLI 为防一次性投递竞态会连发数条，重复目标不重置
+        // 状态机（避免中途丢弃当前轨迹导致规划抖动）。
+        if (goal - self.goal.coords).norm() < 1e-6 {
+            return Ok(());
+        }
         let start = self.estimated_position(now, measured);
         let mut astar = Astar::default();
         let global_path = search_global_path(self.planner.map_ref(), &mut astar, start, goal)?;
@@ -768,6 +773,47 @@ mod tests {
             "脱困目标应沿路径前移(末端 {:?},脱困 {:?})",
             ref1.position,
             ref2.position
+        );
+    }
+
+    #[test]
+    fn set_goal_rebuilds_path_and_dedups_same_target() {
+        let mut m = open_manager();
+        // 先正常规划出局部轨迹(飞行中状态)
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        let _ = m.tick(1.5, None);
+        assert!(m.local().is_some(), "前置:应有局部轨迹");
+
+        // 动态重目标:新目标重建全局路径、重置状态机(目标取地图内部点)
+        let new_goal = Vector3::new(15.0, 1.0, 1.0);
+        m.set_goal(2.0, None, new_goal).unwrap();
+        assert!((m.goal().coords - new_goal).norm() < 1e-9, "目标应更新");
+        assert_eq!(m.global_path().last().unwrap(), &new_goal);
+        assert!(m.local().is_none(), "重目标应丢弃旧轨迹");
+        assert!(!m.is_finished());
+        // 重目标后下一 tick 应重新规划出新轨迹(初始规划不计 replans,
+        // 语义见 tick_initial_plan_then_replan_at_threshold)
+        let _ = m.tick(2.1, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        let local = m.local().expect("重目标后应重新规划出新轨迹");
+        assert!(
+            (local.start_time - 2.1).abs() < 1e-9,
+            "新轨迹应在重目标后的 tick 生成(start_time={})",
+            local.start_time
+        );
+
+        // 同目标幂等:CLI 连发防竞态,重复目标不得重置状态机/清空轨迹
+        let replans_after_retarget = m.replans();
+        let local_after_retarget = m.local().is_some();
+        m.set_goal(2.2, None, new_goal).unwrap();
+        assert_eq!(
+            m.local().is_some(),
+            local_after_retarget,
+            "同目标重复 set_goal 不应丢弃当前轨迹"
+        );
+        assert_eq!(
+            m.replans(),
+            replans_after_retarget,
+            "同目标重复 set_goal 不应触发重规划计数"
         );
     }
 }
