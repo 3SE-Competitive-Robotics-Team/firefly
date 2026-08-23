@@ -8,8 +8,8 @@
 //! 特征表示仅实现 `GLOBAL_3D`（`StateOptions` 默认）；逆深度/锚定表示
 //! 标注 TODO（SLAM 移植时补充）。
 
-// Givens/雅可比数学中的单字符符号（c/s 为 cos/sin、m/n 为行列、a/b 为消零
-// 元素）对照 Eigen/Golub 源码约定；线性代数代码保留原符号更可审计。
+// 雅可比组装中的单字符符号（m/n 为行列、a/b 为消零元素）对照 Eigen/Golub
+// 源码约定；线性代数代码保留原符号更可审计。
 #![allow(
     clippy::many_single_char_names,
     clippy::similar_names,
@@ -19,6 +19,7 @@
 use firefly_vio_core::feat::Feature;
 use firefly_vio_types::quat_ops::skew_x;
 use firefly_vio_types::var::Variable;
+use nalgebra::linalg::givens::GivensRotation;
 use nalgebra::{DMatrix, DVector, Matrix3, Vector2};
 
 use crate::state::State;
@@ -384,41 +385,15 @@ pub(crate) fn givens_zero(
     n: usize,
 ) {
     let (a, b) = (h[(m - 1, n)], h[(m, n)]);
-    let (c, s) = make_givens(a, b);
-    // 行变换：[r1; r2] ← Gᵀ·[r1; r2]，G = [c, s; -s, c]
-    // （Eigen makeGivens + applyOnTheLeft(adjoint) 语义）
-    for col in n..h.ncols() {
-        let (x, y) = (h[(m - 1, col)], h[(m, col)]);
-        h[(m - 1, col)] = c * x - s * y;
-        h[(m, col)] = s * x + c * y;
-    }
-    for col in 0..h_x.ncols() {
-        let (x, y) = (h_x[(m - 1, col)], h_x[(m, col)]);
-        h_x[(m - 1, col)] = c * x - s * y;
-        h_x[(m, col)] = s * x + c * y;
-    }
-    let (x, y) = (res[m - 1], res[m]);
-    res[m - 1] = c * x - s * y;
-    res[m] = s * x + c * y;
-}
-
-/// 计算 Givens 旋转 `[c, s; -s, c]` 使 `s·a + c·b = 0`
-/// （数值稳定版本，对照 Eigen `JacobiRotation::makeGivens` 的语义）。
-#[must_use]
-pub(crate) fn make_givens(a: f64, b: f64) -> (f64, f64) {
-    if b == 0.0 {
-        (1.0, 0.0)
-    } else if b.abs() > a.abs() {
-        let t = -a / b;
-        let s = 1.0 / (1.0 + t * t).sqrt();
-        let c = s * t;
-        (c, s)
-    } else {
-        let t = -b / a;
-        let c = 1.0 / (1.0 + t * t).sqrt();
-        let s = c * t;
-        (c, s)
-    }
+    // 消零目标元已为零：恒等旋转，跳过（Eigen makeGivens + applyOnTheLeft
+    // (adjoint) 的语义，由 nalgebra GivensRotation 等价提供）
+    let Some((g, _)) = GivensRotation::cancel_y(&Vector2::new(a, b)) else {
+        return;
+    };
+    let cols = h.ncols();
+    g.rotate(&mut h.view_range_mut(m - 1..m + 1, n..cols));
+    g.rotate(&mut h_x.rows_range_mut(m - 1..m + 1));
+    g.rotate(&mut res.rows_range_mut(m - 1..m + 1));
 }
 
 /// 零空间投影：Givens 上三角化 `H_f` 并截取下部行（对照
@@ -592,15 +567,12 @@ pub fn measurement_compress_inplace(h_x: &mut DMatrix<f64>, res: &mut DVector<f6
     for n in 0..h_x.ncols() {
         for m in (n + 1..h_x.nrows()).rev() {
             let (a, b) = (h_x[(m - 1, n)], h_x[(m, n)]);
-            let (c, s) = make_givens(a, b);
-            for col in n..h_x.ncols() {
-                let (x, y) = (h_x[(m - 1, col)], h_x[(m, col)]);
-                h_x[(m - 1, col)] = c * x - s * y;
-                h_x[(m, col)] = s * x + c * y;
-            }
-            let (x, y) = (res[m - 1], res[m]);
-            res[m - 1] = c * x - s * y;
-            res[m] = s * x + c * y;
+            let Some((g, _)) = GivensRotation::cancel_y(&Vector2::new(a, b)) else {
+                continue;
+            };
+            let cols = h_x.ncols();
+            g.rotate(&mut h_x.view_range_mut(m - 1..m + 1, n..cols));
+            g.rotate(&mut res.rows_range_mut(m - 1..m + 1));
         }
     }
     let keep = h_x.nrows().min(h_x.ncols());
