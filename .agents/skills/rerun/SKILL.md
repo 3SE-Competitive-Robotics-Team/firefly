@@ -52,8 +52,9 @@ description: Rerun 基础认知与 .rrd 录制文件的阅读方法。当需要�
 
 数据已就位：vio 进程写 `vio/odom` + `vio/traj`（橙）与 `gt/pose` + `gt/traj`（蓝），统一 `sim_time`。
 
-1. 录制：`scripts/run_firefly.sh --save logs/run1.rrd`（viewer 后台运行并落盘；
-   **`--no-viewer` 时无人写盘，不产 rrd**）。
+1. 录制：先 `rerun --save logs/run1.rrd` 起带落盘的共享 viewer，
+   再按 AGENTS.md「运行」一节拉起 sim/vio/demo（各进程自动连上该
+   viewer，数据随跑随写入同一 recording）。
 2. 看：`rerun logs/run1.rrd`；数值快查 `rerun rrd print --entity gt/pose --entity vio/odom -vvv`。
 3. 读出原始数据：`uv run python .agents/skills/rerun/scripts/read_poses.py logs/run1.rrd`
    （rerun-sdk 是根项目 dev 依赖，`uv add --dev rerun-sdk` 后 uv run 直接可用，
