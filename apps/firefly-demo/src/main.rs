@@ -19,7 +19,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use fastrace::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
@@ -35,6 +35,8 @@ use firefly_pubsub::subscriber::{OdomSubscriber, Subscriber};
 use firefly_search::Astar;
 use firefly_trajectory::Trajectory;
 use firefly_viewer::Viewer;
+use iceoryx2::prelude::*;
+use iceoryx2::waitset::WaitSetRunResult;
 use nalgebra::{Isometry3, Point3, Quaternion, Translation3, UnitQuaternion, Vector3};
 
 /// 官方 `fsm/thresh_replan_time`（`advanced_param.xml`）。
@@ -883,12 +885,30 @@ impl Demo {
         Ok(())
     }
 
+    // 主循环编排（trace 续接 + 感知地图可视化 + 节拍驱动），clippy too_many_lines 允许
+    #[allow(clippy::too_many_lines)]
     fn run(&mut self) -> Result<()> {
         log::info!("主循环启动：10Hz，重规划阈值 {REPLAN_THRESH}s");
         let mut frame = 0usize;
-        while !self.finished {
+        // WaitSet 节拍驱动：interval(10Hz) 替代 sleep-to-period；SIGINT/SIGTERM
+        // 由 WaitSet 捕获 → 优雅退出（此前 Ctrl-C 硬杀会留下孤儿 IPC 资源）
+        let waitset = WaitSetBuilder::new()
+            .create::<ipc::Service>()
+            .map_err(|e| Error::new(ErrorKind::Internal, format!("创建 WaitSet 失败: {e:?}")))?;
+        let tick_guard = waitset
+            .attach_interval(LOOP_PERIOD)
+            .map_err(|e| Error::new(ErrorKind::Internal, format!("挂载节拍定时器失败: {e:?}")))?;
+        let mut tick_error: Option<Error> = None;
+
+        let on_tick = |attachment_id: WaitSetAttachmentId<ipc::Service>| {
+            if !attachment_id.has_event_from(&tick_guard) {
+                return CallbackProgression::Continue;
+            }
+            if self.finished {
+                return CallbackProgression::Stop;
+            }
             // 每帧 trace 上下文：续接最新 odom 的 trace（跨进程同周期一条 trace），
-            // 无新鲜 odom 时自建新 root
+            // 无新鲜 odom 时自建未采样 root（不产生 span 记录）
             let fresh_odom = self
                 .odom_trace
                 .filter(|_| self.t_sim - self.last_odom_recv < ODOM_FRESH_TIMEOUT);
@@ -900,8 +920,12 @@ impl Demo {
                 None => Span::root("firefly-demo", SpanContext::random().sampled(false)),
             };
             let guard = root.set_local_parent();
-            let t0 = Instant::now();
-            self.tick()?;
+            if let Err(e) = self.tick() {
+                tick_error = Some(e);
+                drop(guard);
+                drop(root);
+                return CallbackProgression::Stop;
+            }
             // 每 2.5s 更新 viewer 中的感知占据体素（深度建图可视化）
             if frame.is_multiple_of(25) {
                 let map = self.planner.map_ref();
@@ -941,7 +965,12 @@ impl Demo {
                 } else {
                     log::info!("感知地图：0 个占据体素");
                 }
-                self.viewer.log_map("perceived", map)?;
+                if let Err(e) = self.viewer.log_map("perceived", map) {
+                    tick_error = Some(e);
+                    drop(guard);
+                    drop(root);
+                    return CallbackProgression::Stop;
+                }
             }
             if frame.is_multiple_of(10) {
                 log::info!(
@@ -958,13 +987,29 @@ impl Demo {
             if !self.sensor_this_tick {
                 self.t_sim += LOOP_PERIOD.as_secs_f64();
             }
-            let elapsed = t0.elapsed();
-            // trace 只覆盖 tick 工作：闭合后再睡到下一拍（睡眠不计入 span 时长）
+            // trace 只覆盖 tick 工作：闭合后等下一拍（interval 唤醒，无忙等）
             drop(guard);
             drop(root);
-            if elapsed < LOOP_PERIOD {
-                std::thread::sleep(LOOP_PERIOD.saturating_sub(elapsed));
+            if self.finished {
+                return CallbackProgression::Stop;
             }
+            CallbackProgression::Continue
+        };
+
+        match waitset.wait_and_process(on_tick) {
+            Ok(WaitSetRunResult::Interrupt | WaitSetRunResult::TerminationRequest) => {
+                log::info!("收到终止信号，优雅退出");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                return Err(Error::new(
+                    ErrorKind::Internal,
+                    format!("WaitSet 事件等待失败: {e:?}"),
+                ));
+            }
+        }
+        if let Some(e) = tick_error {
+            return Err(e);
         }
         log::info!(
             "任务完成：{} 次重规划，总耗时 {:.1}s",
