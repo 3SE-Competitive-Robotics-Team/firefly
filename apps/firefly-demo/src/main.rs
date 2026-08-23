@@ -897,9 +897,9 @@ impl Demo {
                     "firefly-demo",
                     SpanContext::new(TraceId(tid), SpanId(sid)).sampled(sampled),
                 ),
-                None => Span::root("firefly-demo", SpanContext::random()),
+                None => Span::root("firefly-demo", SpanContext::random().sampled(false)),
             };
-            let _guard = root.set_local_parent();
+            let guard = root.set_local_parent();
             let t0 = Instant::now();
             self.tick()?;
             // 每 2.5s 更新 viewer 中的感知占据体素（深度建图可视化）
@@ -959,6 +959,9 @@ impl Demo {
                 self.t_sim += LOOP_PERIOD.as_secs_f64();
             }
             let elapsed = t0.elapsed();
+            // trace 只覆盖 tick 工作：闭合后再睡到下一拍（睡眠不计入 span 时长）
+            drop(guard);
+            drop(root);
             if elapsed < LOOP_PERIOD {
                 std::thread::sleep(LOOP_PERIOD.saturating_sub(elapsed));
             }

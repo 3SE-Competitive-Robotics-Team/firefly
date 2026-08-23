@@ -236,16 +236,17 @@ fn run_loop(
         input.advance();
         let now = input.now();
 
-        // 帧 trace：续接最近收到的传感器 trace（每周期一条，跨进程同 trace），
-        // 无 trace 上下文时自建新 root
+        // 帧 trace：续接最近收到的传感器 trace（每周期一条，跨进程同 trace）；
+        // 无上游 trace（sim --no-trace / 独立运行）时用未采样 root，不产生
+        // span 记录——否则 ConsoleReporter 每迭代打印一棵树（~800Hz 洪泛）
         let root = match input.last_trace() {
             Some((tid, sid, sampled)) => Span::root(
                 "vio",
                 SpanContext::new(TraceId(tid), SpanId(sid)).sampled(sampled),
             ),
-            None => Span::root("vio", SpanContext::random()),
+            None => Span::root("vio", SpanContext::random().sampled(false)),
         };
-        let _guard = root.set_local_parent();
+        let guard = root.set_local_parent();
 
         let mut imu_batch = 0u32;
         while let Some(imu) = input.next_imu() {
@@ -342,6 +343,10 @@ fn run_loop(
                 next_odom = t_sim;
             }
         }
+
+        // trace 只覆盖真实工作：先闭合本帧 span（时长不含下面的等待睡眠）
+        drop(guard);
+        drop(root);
 
         // 1ms 节拍（兼信号观测）：SIGINT/SIGTERM → Err → 优雅退出
         if node.wait(Duration::from_millis(1)).is_err() {
