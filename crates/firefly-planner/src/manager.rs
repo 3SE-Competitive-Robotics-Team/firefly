@@ -9,7 +9,7 @@
 use firefly_error::Result;
 use firefly_map::GridMap;
 use firefly_search::Astar;
-use firefly_trajectory::Trajectory;
+use firefly_trajectory::{Endpoint, MincoBuilder, SolverOrder, Trajectory};
 use nalgebra::{Point3, Vector3};
 
 use crate::obstacles::{ObstacleScanner, PointsToCheck};
@@ -18,8 +18,13 @@ use crate::planner::{InitSource, PlanResult, Planner, State};
 /// 重规划触发阈值（秒，官方 `fsm/thresh_replan_time`）。
 pub const DEFAULT_REPLAN_THRESH: f64 = 1.0;
 /// 急停时限（秒，官方 `fsm/emergency_time`）：碰撞监控命中后重规划失败、
-/// 且剩余碰撞时间小于该值时置急停标志。
+/// 且剩余碰撞时间小于该值时进入急停。
 pub const DEFAULT_EMERGENCY_TIME: f64 = 1.0;
+/// 急停恢复速度阈值（m/s）：fail-safe 允许且测量速度低于该值才从急停
+/// 恢复重规划（官方 `EMERGENCY_STOP` case 的 0.1）。
+pub const DEFAULT_EMERGENCY_RECOVER_SPEED: f64 = 0.1;
+/// 停车轨迹单段时长（秒，官方 `EmergencyStop` 的两段各 1.0）。
+const STOP_PIECE_DURATION: f64 = 1.0;
 /// 规划视界（米，官方 `manager/planning_horizon`）。
 pub const DEFAULT_PLANNING_HORIZON: f64 = 6.0;
 /// 到达判定距离（米）。
@@ -51,6 +56,8 @@ pub struct ManagerOptions {
     pub arrive_dist: f64,
     /// 急停时限（秒，见 [`DEFAULT_EMERGENCY_TIME`]）。
     pub emergency_time: f64,
+    /// 急停恢复速度阈值（m/s，见 [`DEFAULT_EMERGENCY_RECOVER_SPEED`]）。
+    pub emergency_recover_speed: f64,
 }
 
 impl Default for ManagerOptions {
@@ -60,6 +67,7 @@ impl Default for ManagerOptions {
             planning_horizon: DEFAULT_PLANNING_HORIZON,
             arrive_dist: DEFAULT_ARRIVE_DIST,
             emergency_time: DEFAULT_EMERGENCY_TIME,
+            emergency_recover_speed: DEFAULT_EMERGENCY_RECOVER_SPEED,
         }
     }
 }
@@ -104,9 +112,9 @@ pub struct TickReport {
     /// 执行期碰撞监控命中：当前轨迹前方存在障碍，本 tick 已绕过
     /// `replan_thresh` 与冷却期立即重规划。
     pub collision: bool,
-    /// 急停请求：监控命中后立即重规划失败、且碰撞时刻在急停时限内
-    /// （官方 `EMERGENCY_STOP` 的触发判据）。管理器不做停机控制——
-    /// 处置（悬停/锁桨等）由应用层决定。
+    /// 当前处于急停态（官方 `EMERGENCY_STOP`）：参考输出为停车轨迹上的
+    /// 原地定点；恢复条件满足前持续为真。管理器不做锁桨等底层处置——
+    /// 那由应用层按本标志决定。
     pub emergency_stop: bool,
     /// 地面高度测量（对照官方 `measureGroundHeight`）：当前轨迹前方
     /// [`GROUND_LOOKAHEAD_DIST`] 米处采样点正下方的地面 z 坐标（地图系，
@@ -126,6 +134,9 @@ struct Horizon {
 
 /// 任务执行管理器：持有 [`Planner`] 与执行态，驱动"初始规划 → 周期重规划 →
 /// 参考 → 到达"全流程。
+/// fail-safe 开关与急停态是独立开关（急停中可关 fail-safe 禁自动恢复），
+/// 非状态机枚举。
+#[allow(clippy::struct_excessive_bools)]
 pub struct PlannerManager {
     planner: Planner,
     options: ManagerOptions,
@@ -148,6 +159,12 @@ pub struct PlannerManager {
     last_yaw_dot: f64,
     /// 上次 yaw 更新时刻（管理器时钟，秒）：限幅剖面按帧间 `dt` 推进。
     last_yaw_time: Option<f64>,
+    /// fail-safe 开关（官方 `enable_fail_safe_`，初值 true）：急停自动恢复的
+    /// 前提；深度丢失触发入口将其关闭后不自动恢复。
+    failsafe_enabled: bool,
+    /// 急停态（官方 `EMERGENCY_STOP` 态）：进入时生成一次停车轨迹并入库为
+    /// 可执行轨迹，参考输出变为原地定点悬停；恢复判据见 [`Self::tick`]。
+    emergency: bool,
 }
 
 impl PlannerManager {
@@ -179,6 +196,8 @@ impl PlannerManager {
             last_yaw: 0.0,
             last_yaw_dot: 0.0,
             last_yaw_time: None,
+            failsafe_enabled: true,
+            emergency: false,
         })
     }
 
@@ -222,6 +241,7 @@ impl PlannerManager {
         self.replans = 0;
         self.replan_cooldown_until = 0.0;
         self.replan_fail_streak = 0;
+        self.emergency = false;
         Ok(())
     }
 
@@ -282,59 +302,34 @@ impl PlannerManager {
     /// 规划失败不报错——冷却重试语义在管理器内（官方 FSM 语义）。
     /// 含执行期碰撞监控（见 [`Self::next_collision`]）：命中即绕过
     /// `replan_thresh` 与冷却期立即重规划。
+    ///
+    /// 急停态（官方 case EMERGENCY_STOP）只做恢复判定：fail-safe 允许且
+    /// 测量速度低于 [`ManagerOptions::emergency_recover_speed`] 时从当前
+    /// 位姿沿全局轨迹完整重规划退出；无测量观测时不恢复（速度无法核实）。
+    /// 常规重规划/碰撞监控仅在非急停态生效（对照官方仅 `EXEC_TRAJ` case
+    /// 处理重规划的结构）。
     #[must_use]
     pub fn tick(&mut self, now: f64, measured: Option<State>) -> TickReport {
         let mut report = TickReport::default();
-        match self.local {
-            None => self.initial_plan(now, measured),
-            Some(ref local) => {
-                let t_cur = now - local.start_time;
-                if t_cur > local.traj.duration() {
-                    // 轨迹执行完毕：仅当物理到达目标才完成任务（防提前结束）
-                    let pos = self.estimated_position(now, measured);
-                    if self.touch_goal && (pos - self.goal.coords).norm() < self.options.arrive_dist
-                    {
-                        self.finished = true;
-                        report.finished = true;
-                        return report;
-                    }
-                    log::warn!("轨迹执行完毕但未到达目标，强制重规划");
-                    if now >= self.replan_cooldown_until {
-                        report.replanned = self.replan(now);
-                    }
-                } else {
-                    // 执行期碰撞监控（官方 checkCollisionCallback，每 tick 一次
-                    // 等价其 20Hz 定时器）：先刷新膨胀层让本周期写入的感知/
-                    // 动态障碍生效，再沿未来检查点扫描
-                    self.refresh_inflation();
-                    if let Some(hit_t) = self.next_collision(now) {
-                        // 官方发现碰撞路径：立即 planFromLocalTraj，不受阈值与
-                        // 冷却期约束；失败且碰撞迫近急停时限 → 置急停标志
-                        log::warn!(
-                            "碰撞监控：当前轨迹 {:.2}s 后进入障碍，立即重规划",
-                            hit_t - t_cur
-                        );
-                        report.collision = true;
-                        report.replanned = self.replan(now);
-                        if !report.replanned && hit_t - t_cur < self.options.emergency_time {
-                            log::warn!("重规划失败且碰撞迫近（{:.2}s），置急停标志", hit_t - t_cur);
-                            report.emergency_stop = true;
-                        }
-                    } else if t_cur > self.options.replan_thresh
-                        && now >= self.replan_cooldown_until
-                    {
-                        report.replanned = self.replan(now);
-                    }
-                }
+        if self.emergency {
+            // 官方 case EMERGENCY_STOP：停车轨迹已在进入时生成一次，本态只判恢复
+            if self.failsafe_enabled
+                && let Some(start) =
+                    measured.filter(|s| s.velocity.norm() < self.options.emergency_recover_speed)
+                && self.recover_from_global_traj(now, start)
+            {
+                report.replanned = true;
             }
+        } else {
+            self.tick_normal(now, measured, &mut report);
         }
         // 地面高度测量（官方 checkCollisionCallback 入口的顺带测量：
         // 无可执行轨迹时内部自返回 None）
         report.ground_height = self.measure_ground_height(now);
         // 参考指令：跟踪当前轨迹；耗尽且连续失败时沿全局路径脱困直飞
         report.reference = self.reference(now, measured);
-        // 到达判定（任意轨迹阶段，物理位置为准）
-        if self.local.is_some() {
+        // 到达判定（任意轨迹阶段，物理位置为准；急停悬停不算完成任务）
+        if self.local.is_some() && !self.emergency {
             let pos = self.estimated_position(now, measured);
             if (pos - self.goal.coords).norm() < self.options.arrive_dist {
                 log::info!(
@@ -348,7 +343,56 @@ impl PlannerManager {
                 report.finished = true;
             }
         }
+        report.emergency_stop = self.emergency;
         report
+    }
+
+    /// 非急停态的常规执行分支：初始规划 / 碰撞监控与立即重规划 /
+    /// 阈值周期重规划 / 轨迹耗尽强制重规划。
+    fn tick_normal(&mut self, now: f64, measured: Option<State>, report: &mut TickReport) {
+        match self.local {
+            None => self.initial_plan(now, measured),
+            Some(ref local) => {
+                let t_cur = now - local.start_time;
+                if t_cur > local.traj.duration() {
+                    // 轨迹执行完毕：仅当物理到达目标才完成任务（防提前结束）
+                    let pos = self.estimated_position(now, measured);
+                    if self.touch_goal && (pos - self.goal.coords).norm() < self.options.arrive_dist
+                    {
+                        self.finished = true;
+                        report.finished = true;
+                        return;
+                    }
+                    log::warn!("轨迹执行完毕但未到达目标，强制重规划");
+                    if now >= self.replan_cooldown_until {
+                        report.replanned = self.replan(now);
+                    }
+                } else {
+                    // 执行期碰撞监控（官方 checkCollisionCallback，每 tick 一次
+                    // 等价其 20Hz 定时器）：先刷新膨胀层让本周期写入的感知/
+                    // 动态障碍生效，再沿未来检查点扫描
+                    self.refresh_inflation();
+                    if let Some(hit_t) = self.next_collision(now) {
+                        // 官方发现碰撞路径：立即 planFromLocalTraj，不受阈值与
+                        // 冷却期约束；失败且碰撞迫近急停时限 → 进入急停
+                        log::warn!(
+                            "碰撞监控：当前轨迹 {:.2}s 后进入障碍，立即重规划",
+                            hit_t - t_cur
+                        );
+                        report.collision = true;
+                        report.replanned = self.replan(now);
+                        if !report.replanned && hit_t - t_cur < self.options.emergency_time {
+                            log::warn!("重规划失败且碰撞迫近（{:.2}s），进入急停", hit_t - t_cur);
+                            self.enter_emergency_stop(now, measured);
+                        }
+                    } else if t_cur > self.options.replan_thresh
+                        && now >= self.replan_cooldown_until
+                    {
+                        report.replanned = self.replan(now);
+                    }
+                }
+            }
+        }
     }
 
     /// 位置估计：实测优先（odom），否则沿当前轨迹参考推进。
@@ -499,6 +543,19 @@ impl PlannerManager {
     /// （稠密采样退化）视同规划失败——无监控覆盖的轨迹不得进入执行。
     /// 返回是否入库成功。
     fn adopt_plan(&mut self, result: PlanResult, now: f64, touch_goal: bool) -> bool {
+        if !self.set_local_traj(result.trajectory.clone(), now, touch_goal) {
+            // 无监控覆盖的轨迹不入执行，视同本次重规划失败（官方
+            // setLocalTrajFromOpt 失败时同样不更新局部轨迹）
+            return false;
+        }
+        self.last_result = Some(result);
+        true
+    }
+
+    /// 官方 `setLocalTrajFromOpt`：轨迹连同带时间戳检查点一并入库。检查点
+    /// 生成失败（稠密采样退化）视同入库失败——无监控覆盖的轨迹不得进入
+    /// 执行。返回是否入库成功。
+    fn set_local_traj(&mut self, traj: Trajectory, now: f64, touch_goal: bool) -> bool {
         let (samples, max_vel) = {
             let cfg = self.planner.config();
             (cfg.constraint_points_per_piece, cfg.max_velocity)
@@ -506,14 +563,12 @@ impl PlannerManager {
         let scanner = ObstacleScanner::new(self.planner.map_ref())
             .with_samples(samples)
             .with_max_vel(max_vel);
-        let Some(points_to_check) = scanner.compute_points_to_check(&result.trajectory, touch_goal)
-        else {
+        let Some(points_to_check) = scanner.compute_points_to_check(&traj, touch_goal) else {
             log::warn!("检查点生成失败（采样退化），丢弃本次轨迹");
             return false;
         };
-        self.last_result = Some(result.clone());
         self.local = Some(LocalTraj {
-            traj: result.trajectory,
+            traj,
             start_time: now,
             points_to_check,
         });
@@ -674,6 +729,99 @@ impl PlannerManager {
         }
     }
 
+    /// 深度丢失急停入口（官方 checkCollisionCallback 的 `getOdomDepthTimeout`
+    /// 分支）：先关闭 fail-safe 再进入急停——此后不自动恢复，恢复须由
+    /// 外部处置后重新走碰撞监控/重规划流程。
+    pub fn trigger_emergency_stop_disable_failsafe(&mut self, now: f64, measured: Option<State>) {
+        self.failsafe_enabled = false;
+        self.enter_emergency_stop(now, measured);
+    }
+
+    /// 进入急停（官方 `changeFSMExecState(EMERGENCY_STOP)` + 首轮
+    /// `callEmergencyStop(odom_pos_)`）：按当前位置生成停车轨迹并入库为
+    /// 可执行轨迹，参考输出变为原地定点悬停。幂等：已在急停中不再重复
+    /// 生成（对照 `flag_escape_emergency_` 的防重复调用语义）。
+    /// 停车轨迹入库失败（采样退化）仍置急停态，保持旧轨迹悬停等待恢复。
+    fn enter_emergency_stop(&mut self, now: f64, measured: Option<State>) {
+        if self.emergency {
+            return;
+        }
+        let stop_pos = self.estimated_position(now, measured);
+        match emergency_stop_traj(stop_pos) {
+            Ok(traj) => {
+                // 官方 EmergencyStop 经 setLocalTrajFromOpt(stopMJO, false)：
+                // 停车轨迹同样生成检查点入库，touch_goal 取 false
+                if !self.set_local_traj(traj, now, false) {
+                    log::warn!("急停轨迹检查点生成失败，保持原轨迹");
+                }
+            }
+            Err(e) => log::warn!("急停轨迹构造失败：{e}"),
+        }
+        self.emergency = true;
+        log::warn!(
+            "进入急停 @ ({:.2},{:.2},{:.2})，fail-safe {}",
+            stop_pos.x,
+            stop_pos.y,
+            stop_pos.z,
+            if self.failsafe_enabled {
+                "允许"
+            } else {
+                "禁止"
+            }
+        );
+    }
+
+    /// 急停恢复（对照官方 `EMERGENCY_STOP` → `GEN_NEW_TRAJ` / `planFromGlobalTraj`）:
+    /// 从当前测量位姿沿全局轨迹完整重规划（冷启动），成功即退出急停；
+    /// 失败保持急停，下一 tick 重试（官方同态重入语义）。返回是否退出。
+    #[must_use]
+    fn recover_from_global_traj(&mut self, now: f64, start: State) -> bool {
+        let horizon = self.horizon(start.position.coords);
+        match self.planner.plan_with_init(
+            start,
+            horizon.target,
+            InitSource::ColdStart,
+            horizon.touch_goal,
+        ) {
+            Ok(result) => {
+                // 同 replan 的退化防护：异常短轨迹会触发逐 tick 空转
+                if result.trajectory.duration() < 0.5 {
+                    log::warn!(
+                        "急停恢复产出退化轨迹（时长 {:.2}s），保持急停",
+                        result.trajectory.duration()
+                    );
+                    return false;
+                }
+                if !self.adopt_plan(result, now, horizon.touch_goal) {
+                    log::warn!("急停恢复轨迹入库失败，保持急停");
+                    return false;
+                }
+                self.replans += 1;
+                self.replan_fail_streak = 0;
+                self.emergency = false;
+                log::info!(
+                    "急停恢复：从 ({:.2},{:.2},{:.2}) 重规划至 ({:.2},{:.2},{:.2}){}",
+                    start.position.coords.x,
+                    start.position.coords.y,
+                    start.position.coords.z,
+                    horizon.target.coords.x,
+                    horizon.target.coords.y,
+                    horizon.target.coords.z,
+                    if horizon.touch_goal {
+                        " [touch_goal]"
+                    } else {
+                        ""
+                    }
+                );
+                true
+            }
+            Err(e) => {
+                log::warn!("急停恢复重规划失败：{e}，保持急停");
+                false
+            }
+        }
+    }
+
     /// 局部目标选取（官方 `getLocalTarget`）：全局路径上距当前位置
     /// `planning_horizon` 弧长处；落进障碍膨胀区或贴障时沿路径逐步回退
     /// （每步 0.4m）到安全点。同时产出暖启动延续段。
@@ -785,11 +933,15 @@ impl PlannerManager {
 
     /// 参考指令生成：正常态取轨迹在 `now` 的参考状态（时间连续）；轨迹耗尽
     /// 且连续重规划失败（贴墙死锁）→ 沿全局路径向下一自由点直飞脱困
-    /// （物理移动解开几何死锁，也给 VIO 提供视差）。
+    /// （物理移动解开几何死锁，也给 VIO 提供视差）。急停态不走脱困分支：
+    /// 停车轨迹耗尽后按末端定点输出悬停参考。
     fn reference(&mut self, now: f64, measured: Option<State>) -> Option<Reference> {
         let local = self.local.as_ref()?;
         let t_cur = (now - local.start_time).clamp(0.0, local.traj.duration());
-        if t_cur >= local.traj.duration() - 1e-6 && self.replan_fail_streak >= FAIL_STREAK_ESCAPE {
+        if !self.emergency
+            && t_cur >= local.traj.duration() - 1e-6
+            && self.replan_fail_streak >= FAIL_STREAK_ESCAPE
+        {
             let pos = self.estimated_position(now, measured);
             let escape = self.walk_global_path(pos, 1.0);
             let dir = escape.target.coords - pos;
@@ -831,6 +983,22 @@ impl PlannerManager {
             yaw_dot,
         })
     }
+}
+
+/// 官方 `EGOPlannerManager::EmergencyStop`：head/tail 边界状态全同
+/// `[stop_pos, 0, 0]`、中间点即 `stop_pos` 本身、两段各 [`STOP_PIECE_DURATION`]——
+/// 全部约束相等 ⇒ 多项式恒为常值，参考跟踪自然刹车悬停。
+fn emergency_stop_traj(stop_pos: Vector3<f64>) -> Result<Trajectory> {
+    let endpoint = Endpoint {
+        position: stop_pos,
+        velocity: Vector3::zeros(),
+        acceleration: Vector3::zeros(),
+    };
+    let minco = MincoBuilder::new(SolverOrder::MinimumJerk, endpoint, endpoint).build(
+        &[nalgebra::Point3::from(stop_pos)],
+        &[STOP_PIECE_DURATION, STOP_PIECE_DURATION],
+    )?;
+    minco.solve()
 }
 
 /// 官方 `poly_traj::Trajectory::locatePieceIdx` 的段号部分：`t` 所在段
@@ -1341,5 +1509,86 @@ mod tests {
         let m = open_manager();
         // 无可执行轨迹（官方 pts_chk < 3 的前置条件）不测量
         assert!(m.measure_ground_height(0.0).is_none());
+    }
+
+    #[test]
+    fn emergency_stop_generates_stationary_reference() {
+        let mut m = open_manager();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        let stop_pos = Vector3::new(2.0, 1.0, 1.0);
+        m.enter_emergency_stop(0.5, Some(state_at(stop_pos)));
+        assert!(m.emergency, "进入后应处于急停态");
+        // 停车轨迹：两段各 STOP_PIECE_DURATION，全程定点零速零加速度
+        // （官方 EmergencyStop 的边界状态全同约束 ⇒ 恒为常值多项式）
+        let local = m.local().expect("急停应入库停车轨迹");
+        assert!((local.traj.duration() - 2.0 * STOP_PIECE_DURATION).abs() < 1e-9);
+        for t in [0.0, 0.7, 1.3, 2.0] {
+            let s = local.traj.eval(t);
+            assert!((s.position - stop_pos).norm() < 1e-9, "t={t} 应停在原点");
+            assert!(s.velocity.norm() < 1e-9, "t={t} 参考速度应为零");
+            assert!(s.acceleration.norm() < 1e-9, "t={t} 参考加速度应为零");
+        }
+        // 急停中的 tick：报告急停态，参考为原地悬停
+        let r = m.tick(1.0, None);
+        assert!(r.emergency_stop, "急停中报告应急停标志");
+        let reference = r.reference.expect("急停态应有悬停参考");
+        assert!((reference.position - stop_pos).norm() < 1e-6);
+        assert!(reference.velocity.norm() < 1e-9);
+    }
+
+    #[test]
+    fn emergency_stop_survives_trajectory_exhaustion() {
+        let mut m = open_manager();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        let stop_pos = Vector3::new(2.0, 1.0, 1.0);
+        m.enter_emergency_stop(0.5, Some(state_at(stop_pos)));
+        let replans_before = m.replans();
+        // 远超停车轨迹时长（2s）：不得触发常规强制重规划或脱困直飞
+        // （对照官方：重规划仅在 EXEC_TRAJ case 生效）
+        let r = m.tick(10.0, None);
+        assert!(m.emergency, "轨迹耗尽不得退出急停");
+        assert!(!r.replanned, "急停中轨迹耗尽不得常规重规划");
+        assert_eq!(m.replans(), replans_before);
+        let reference = r.reference.expect("耗尽后仍应有悬停参考");
+        assert!((reference.position - stop_pos).norm() < 1e-6);
+        assert!(reference.velocity.norm() < 1e-9);
+    }
+
+    #[test]
+    fn emergency_recovers_when_failsafe_enabled_and_slow() {
+        let mut m = open_manager();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        let stop_pos = Vector3::new(2.0, 1.0, 1.0);
+        m.enter_emergency_stop(0.5, Some(state_at(stop_pos)));
+        // 超阈值速度：即使 fail-safe 允许也不恢复（官方 vel < 0.1 判据）
+        let mut fast = state_at(stop_pos);
+        fast.velocity = Vector3::new(1.0, 0.0, 0.0);
+        let r_fast = m.tick(0.8, Some(fast));
+        assert!(m.emergency, "超阈值速度不应恢复");
+        assert!(!r_fast.replanned);
+        // 低速观测 + fail-safe 允许（默认）→ 从当前位姿完整重规划并退出
+        let r = m.tick(1.0, Some(state_at(stop_pos)));
+        assert!(!m.emergency, "低速且 fail-safe 允许应退出急停");
+        assert!(r.replanned, "恢复应产出新轨迹");
+        assert!(!r.emergency_stop);
+        let local = m.local().expect("恢复后应有新轨迹");
+        assert!(
+            (local.start_time - 1.0).abs() < 1e-9,
+            "新轨迹应在恢复 tick 入库"
+        );
+    }
+
+    #[test]
+    fn emergency_without_failsafe_never_recovers() {
+        let mut m = open_manager();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        let stop_pos = Vector3::new(2.0, 1.0, 1.0);
+        m.trigger_emergency_stop_disable_failsafe(0.5, Some(state_at(stop_pos)));
+        assert!(m.emergency, "深度丢失入口应进入急停");
+        // fail-safe 已关闭：即使完全静止也不自动恢复（官方语义）
+        let r = m.tick(1.0, Some(state_at(stop_pos)));
+        assert!(m.emergency, "fail-safe 关闭不得自动恢复");
+        assert!(r.emergency_stop);
+        assert!(!r.replanned);
     }
 }
