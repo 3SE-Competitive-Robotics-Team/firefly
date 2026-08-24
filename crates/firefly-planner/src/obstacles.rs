@@ -128,7 +128,14 @@ impl<'a> ObstacleScanner<'a> {
             t_seg_start.push(acc);
         }
         let total = acc;
-        let t_step = res / self.max_vel;
+        // 采样步长取「分辨率/最大速度」与「最短段时长/K/1.5」的较小者
+        // （官方 `computePointsToCheck` 的 min 上限）：后者保证每桶至少
+        // 1.5 次采样，短段轨迹（如急停定点段）不会跳桶导致覆盖失败。
+        let t_step = (res / self.max_vel).min(
+            durations.iter().copied().fold(f64::INFINITY, f64::min)
+                / self.samples_per_piece as f64
+                / 1.5,
+        );
         let k = self.samples_per_piece;
 
         let mut pts: PointsToCheck = vec![Vec::new(); id_cps_end];
