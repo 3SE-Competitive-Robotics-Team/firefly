@@ -2,36 +2,52 @@
 
 ```mermaid
 flowchart TD
-    subgraph HW["机载硬件"]
+    subgraph SIM_SRC["仿真源：firefly-sim（MuJoCo 200Hz 物理）"]
+        SIMP["发布 IMU / 双目 / 深度 / 真值<br/>订阅 Reference 做 PD 闭环"]
+    end
+
+    subgraph HW_SRC["实机源（同一端口，待接入）"]
         CAM["Intel RealSense D430<br/>双目灰度 + 深度"]
         IMU_SENSOR["PX4 FCU 板载 IMU<br/>加速度计 + 陀螺仪"]
         FC["PX4 飞控"]
+        DRV["realsense-rust / 串口驱动<br/>发布同一组 Firefly/* 话题"]
+        CAM --> DRV
+        IMU_SENSOR --> DRV
     end
+
+    subgraph PUBSUB["firefly-pubsub（iceoryx2 zero-copy，双路共用话题层）"]
+        TOPIC_SENS["Firefly/Imu · CameraLeft/Right"]
+        TOPIC_DEPTH["Firefly/Depth"]
+        TOPIC_ODOM["Firefly/Odometry<br/>位置/速度/姿态"]
+        TOPIC_REF["Firefly/Reference"]
+    end
+
+    SIMP -->|发布| TOPIC_SENS
+    SIMP -->|发布| TOPIC_DEPTH
+    DRV -->|发布| TOPIC_SENS
+    DRV -->|发布| TOPIC_DEPTH
 
     subgraph VIO_APP["apps/vio（VIO 进程）"]
-        DRV["realsense-rust / 串口驱动<br/>图像采集 + IMU 读取"]
-        subgraph VIO["firefly-vio（编排层）"]
+        INPUT["IceoryxInput<br/>SensorInput 端口适配 · IMU/双目时间戳配对"]
+        subgraph VIO["firefly-vio*（对照 OpenVINS 分层）"]
+            TYPES["firefly-vio-types<br/>JPL 四元数 / SO(3) / SE(3) 纯类型"]
+            CORE["firefly-vio-core<br/>传感器数据 · IMU 标定 · KLT 前端 · 传播/更新数学"]
             INIT["firefly-vio-init<br/>静态/动态初始化 + 外参时延标定"]
-            PROP["firefly-vio-state<br/>IMU 传播 + 协方差"]
-            FEAT["firefly-vio-feat<br/>KLT 光流 + 特征管理"]
-            UPD["firefly-vio-update<br/>视觉残差 + 雅可比（MSCKF）"]
-            MSCKF["MSCKF 估计器<br/>滑动窗口状态输出"]
-            INIT --> PROP --> MSCKF
-            FEAT --> UPD --> MSCKF
+            MSCKF["firefly-vio<br/>MSCKF 编排：State 滑动窗口<br/>UpdaterMSCKF · VioManager"]
+            TYPES --> CORE
+            CORE --> INIT
+            CORE --> MSCKF
+            INIT --> MSCKF
         end
-        DRV --> VIO
+        INPUT --> VIO
     end
 
-    subgraph PUBSUB["firefly-pubsub（iceoryx2 zero-copy）"]
-        TOPIC_ODOM["topic: odom<br/>位置/速度/姿态"]
-        TOPIC_IMU["topic: imu"]
-        TOPIC_TRAJ["topic: trajectory"]
-    end
+    TOPIC_SENS -->|订阅| INPUT
 
     subgraph PLAN_APP["apps/planner（规划进程）"]
         subgraph MAP["firefly-map"]
             GRID["GridMap 占据体素 + 膨胀层"]
-            RAY["深度 raycast 更新<br/>(FFMap 格式)"]
+            RAY["深度 raycast 在线更新"]
         end
         subgraph PLAN["firefly-planner"]
             ASTAR["firefly-search<br/>A* 引导（膨胀层 26 邻域）"]
@@ -52,17 +68,13 @@ flowchart TD
         PEER["其他机轨迹<br/>iceoryx2 广播"]
     end
 
-    CAM -->|双目灰度| DRV
-    IMU_SENSOR -->|IMU 数据| DRV
     MSCKF -->|Odom| TOPIC_ODOM
-    CAM -->|深度图| TOPIC_IMU
     TOPIC_ODOM -->|订阅| FSM
-    TOPIC_IMU -->|订阅| RAY
+    TOPIC_DEPTH -->|订阅| RAY
     PEER -->|peer 轨迹| COST
-    FSM -->|MINCO 轨迹| TOPIC_TRAJ
-    TOPIC_TRAJ -->|PositionCommand| FC
-    FC -->|PWM/控制| HW
-    HW -->|机载状态| FC
+    FSM -->|MINCO 轨迹| TOPIC_REF
+    TOPIC_REF -->|订阅·PD 跟踪| SIMP
+    TOPIC_REF -.->|实机：下发飞控| FC
 ```
 
 ## VIO 单帧算法流程
