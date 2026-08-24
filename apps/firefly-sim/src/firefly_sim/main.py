@@ -140,6 +140,9 @@ def main() -> None:
     if not trace_enabled:
         log("--no-trace：OTel tracing 已禁用（高性能模式）")
 
+    # 抑制 iceoryx2 内部告警噪音（如投递到历史残留幽灵监听端的
+    # `FailedToDeliverSignal`——良性，数据面仍由订阅端兜底节拍驱动）。
+    iox2.set_log_level(iox2.LogLevel.Error)
     node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
     imu_pub = _publisher(node, TOPIC_IMU, ImuMessage)
     left_pub = _publisher(node, TOPIC_CAM_LEFT, GrayImageMessage)
