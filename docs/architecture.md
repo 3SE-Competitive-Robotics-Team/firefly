@@ -46,7 +46,7 @@ flowchart TD
 
     subgraph PLAN_APP["apps/planner（规划进程）"]
         subgraph MAP["firefly-map"]
-            GRID["GridMap 占据体素 + 膨胀层"]
+            GRID["GridMap 占据体素 + 膨胀层 + 虚拟地面/天花板"]
             RAY["深度 raycast 在线更新"]
         end
         subgraph PLAN["firefly-planner"]

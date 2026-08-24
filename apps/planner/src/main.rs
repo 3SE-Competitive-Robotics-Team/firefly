@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use fastrace::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_map::{DepthCamera, MapFile, VoxelState, update_from_depth};
+use firefly_map::{DepthCamera, MapFile, VirtualWall, VoxelState, update_from_depth};
 use firefly_observability::init as init_observability;
 use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager};
 use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage};
@@ -161,7 +161,14 @@ impl App {
         goal: Option<[f64; 3]>,
         frame_offset: [f64; 3],
     ) -> Result<Self> {
-        let grid = map_file.to_grid_map()?;
+        let mut grid = map_file.to_grid_map()?;
+        // 虚拟地面/天花板（对照官方 enable_virtual_wall）：任一配置存在即单独生效
+        if config.virtual_ground.is_some() || config.virtual_ceiling.is_some() {
+            grid.set_virtual_wall(VirtualWall {
+                ground: config.virtual_ground.unwrap_or(f64::NEG_INFINITY),
+                ceil: config.virtual_ceiling.unwrap_or(f64::INFINITY),
+            });
+        }
         let static_occupied = map_file
             .occupied
             .iter()

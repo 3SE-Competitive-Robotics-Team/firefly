@@ -31,6 +31,10 @@ pub struct PlannerConfig {
     /// 多拓扑候选轨迹(官方 `manager/use_multitopology_trajs`,默认关闭;
     /// 关闭时规划路径与单候选完全一致)。
     pub use_multitopology_trajs: bool,
+    /// 虚拟地板 z（米，世界坐标；官方 `grid_map/virtual_ground`，None = 不启用）。
+    pub virtual_ground: Option<f64>,
+    /// 虚拟天花板 z（米，世界坐标；官方 `grid_map/virtual_ceil`，None = 不启用）。
+    pub virtual_ceiling: Option<f64>,
 }
 
 impl Default for PlannerConfig {
@@ -56,6 +60,8 @@ impl Default for PlannerConfig {
             weight_formation: 100.0,
             weight_sqrvariance: 10_000.0,
             use_multitopology_trajs: false,
+            virtual_ground: None,
+            virtual_ceiling: None,
         }
     }
 }
@@ -86,5 +92,8 @@ mod tests {
         assert_eq!(c.weight_sqrvariance, 10_000.0);
         // 官方 planner_manager.cpp:24 默认 false(run_in_sim.xml 同)
         assert!(!c.use_multitopology_trajs);
+        // 官方 grid_map.cpp 默认 enable_virtual_wall = false
+        assert_eq!(c.virtual_ground, None);
+        assert_eq!(c.virtual_ceiling, None);
     }
 }
