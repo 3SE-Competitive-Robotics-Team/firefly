@@ -136,11 +136,10 @@ fn swarm_head_on_avoidance() {
     let mut planner_a = Planner::new(config.clone(), map.clone());
     let mut planner_b = Planner::new(config, map);
 
-    // A：从左到右（y=1.0）；B：从右到左（y=1.5，错开打破对称——
-    // 真实飞行中轨迹不同步，共面是病态对称场景；
-    // 官方 K=5 稀疏采样下，侧向偏置过小（<0.5m）时交叉点落在采样间隙，
-    // 单次冷启动规划达不到成功门限（官方同样会失败并保留旧轨迹，
-    // 靠 20Hz 持续重规划 + 暖启动累积避让））
+    // A：从左到右（y=1.0）；B：从右到左（y=1.5，错开偏置打破病态对称——
+    // 完全共面的相向飞行是对称病态场景；逐段局部求值下冷启动即可收敛
+    // （定量对照见 swarm_warm_start_accumulates_clearance），
+    // 此测试验证 3 轮分布式迭代把间距收敛到安全门限以上）
     let start_a = State {
         position: Point3::new(1.0, 1.0, 1.0),
         velocity: Vector3::zeros(),

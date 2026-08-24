@@ -70,8 +70,8 @@ impl Penalty for SwarmPenalty {
                 {
                     continue;
                 }
-                let t_abs = absolute_time(traj, i, *ti, tau);
-                let s = traj.eval(t_abs);
+                let t_abs: f64 = traj.durations().iter().take(i).sum::<f64>() + tau * ti;
+                let s = traj.eval_piece(i, tau * ti);
                 let omg = trapezoid_weight(j, k);
                 cost += omg * step * self.point_cost(&s, t_abs);
             }
@@ -97,8 +97,8 @@ impl Penalty for SwarmPenalty {
                     continue;
                 }
                 let omg = trapezoid_weight(j, k);
-                let t_abs = absolute_time(traj, i, *ti, tau);
-                let s = traj.eval(t_abs);
+                let t_abs: f64 = traj.durations().iter().take(i).sum::<f64>() + tau * ti;
+                let s = traj.eval_piece(i, tau * ti);
                 // 逐 peer 累加:每个 peer 在同一绝对时刻求值,
                 // 时间移动用相对速度(本机 − peer)
                 for peer in &self.peers {
@@ -167,14 +167,19 @@ impl SwarmPenalty {
     }
 }
 
-/// 在绝对时刻求值 peer 轨迹;超出轨迹时长时外推匀速(官方行为)。
+/// 在绝对时刻求值 peer 轨迹。
+///
+/// 时间对齐换算(官方 `swarmGradCostP` 的 `pt_time` 公式):本机轨迹锚定绝对
+/// 时刻 0,peer 在其自身局部时钟下的时刻为 `pt_time = t_abs − peer.start_time`;
+/// 超出轨迹时长时匀速外推(官方行为),负时刻由多项式回推(官方不做下界保护)。
 fn eval_at(peer: &Peer, t_abs: f64) -> firefly_trajectory::Sample {
+    let pt = t_abs - peer.start_time;
     let duration = peer.traj.duration();
-    if t_abs < duration {
-        peer.traj.eval(t_abs)
+    if pt < duration {
+        peer.traj.eval(pt)
     } else {
         let s = peer.traj.eval(duration);
-        let exceed = t_abs - duration;
+        let exceed = pt - duration;
         firefly_trajectory::Sample {
             position: s.position + s.velocity * exceed,
             velocity: s.velocity,
@@ -183,14 +188,6 @@ fn eval_at(peer: &Peer, t_abs: f64) -> firefly_trajectory::Sample {
             snap: s.snap,
         }
     }
-}
-
-fn absolute_time(traj: &Trajectory, piece: usize, duration: f64, tau: f64) -> f64 {
-    let mut t = 0.0;
-    for k in 0..piece {
-        t += traj.durations()[k];
-    }
-    t + tau * duration
 }
 
 #[cfg(test)]
@@ -288,6 +285,30 @@ mod tests {
             assert!(
                 (numeric - analytic).abs() < 1e-6,
                 "dim={dim} numeric={numeric} analytic={analytic}"
+            );
+        }
+    }
+
+    #[test]
+    fn peer_start_time_offsets_local_clock() {
+        // start_time=δ 的 peer 在绝对时刻 t_abs 的求值,等价于 start_time=0
+        // 的同一轨迹在 t_abs−δ 处的求值(官方 swarmGradCostP 的 pt_time 公式)
+        let (_, peer) = single_peer();
+        let dur = peer.duration();
+        let delta = 0.7;
+        let delayed = Peer::new(0, delta, peer.clone(), 0.5);
+        let anchored = Peer::new(0, 0.0, peer, 0.5);
+        // 常规段 / 超时长匀速外推 / 负局部时刻(多项式回推)三种情形
+        for t_abs in [dur * 0.5, dur + 0.5, delta * 0.5] {
+            let s_delayed = eval_at(&delayed, t_abs);
+            let s_anchored = eval_at(&anchored, t_abs - delta);
+            assert!(
+                (s_delayed.position - s_anchored.position).norm() < 1e-9,
+                "position mismatch at t_abs={t_abs}"
+            );
+            assert!(
+                (s_delayed.velocity - s_anchored.velocity).norm() < 1e-9,
+                "velocity mismatch at t_abs={t_abs}"
             );
         }
     }
