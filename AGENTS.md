@@ -22,6 +22,18 @@
 - 行内注释（//）：只在代码无法自解释时解释「为什么」，不复述代码；注释掉的死代码
   直接删除。
 
+## 参考源码（本机 `~/Projects/`，实现须严格对照）
+
+项目处于早期，各模块以对照移植为主——改行为前先读对应官方源码：
+
+| 本机路径 | 对应 |
+|---|---|
+| `EGO-Planner-v2/` | 规划器官方 C++（`swarm-playground/*/src/planner/traj_opt/`） |
+| `open_vins/` | MSCKF 官方 C++（firefly-vio* 的移植基准） |
+| `iceoryx2/` | IPC 中间件源码 |
+| `logforth/`、`fastrace/` | 日志 / tracing 库源码 |
+| `purecv/` | 自研视觉库（LK 光流等，vio 前端引用） |
+
 ## 配置（configs/）
 
 - **TOML、一应用一份**：统一放仓库顶层 `configs/`（`sim.toml` / `vio.toml` / `planner.toml`），
