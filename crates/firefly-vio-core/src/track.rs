@@ -14,6 +14,13 @@
 //!
 //! 可视化（`display_active`/`display_history`）无 GUI，不移植，见 [`TrackerBase`]。
 //!
+//! ARUCO 决策：**不引入**（原 `docs/aruco-feasibility.md` 评估结论已并入本注释）。
+//! OpenCV `detectMarkers` 需数千行检测管线或 `opencv` 绑定（违反仓库纯 Rust
+//! 依赖原则），且传感器未贴标签时纯增开销；`max_aruco_features = 0` 即等价
+//! OpenVINS 无 aruco 语义。若未来需要标签陆标：优先自研轻量检测器（复用本模块
+//! FAST/金字塔/均衡 + nalgebra homography，DICT_4X4_50，约 1.5–2k 行），
+//! `UpdaterSLAM` 的 aruco sigma/chi2 分支已就绪。
+//!
 //! 说明：双目/网格代码中左右（`_l`/`_r`）变量与数学单字符名、OpenCV/OpenVINS
 //! 文档引用、镜像 C++ 的多参数签名属于固有结构，予以模块级允许。
 #![allow(
