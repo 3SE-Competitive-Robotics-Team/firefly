@@ -34,8 +34,14 @@ use firefly_vio_core::track::{HistogramMethod, TrackKlt};
 use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetRunResult;
 
+mod config;
 mod input;
+use config::VioConfig;
+
 use input::IceoryxInput;
+
+/// `configs/vio.toml` 缺省路径（相对运行目录，通常为仓库根）。
+const DEFAULT_CONFIG: &str = "configs/vio.toml";
 
 /// odom 发布周期（秒）。
 const ODOM_PERIOD: f64 = 0.1;
@@ -45,36 +51,77 @@ const SIM_START: [f64; 3] = [1.0, 4.0, 1.0];
 const GT_COLOR: (u8, u8, u8) = (60, 120, 255);
 const ODOM_COLOR: (u8, u8, u8) = (255, 140, 0);
 
+/// 解析 `--config <path>`（缺省 [`DEFAULT_CONFIG`]）。
+fn parse_config_path() -> Result<String, String> {
+    let mut it = std::env::args().skip(1);
+    let mut path = DEFAULT_CONFIG.to_owned();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--config" => {
+                path = it
+                    .next()
+                    .ok_or_else(|| "missing --config value".to_owned())?;
+            }
+            other => return Err(format!("unknown argument {other}")),
+        }
+    }
+    Ok(path)
+}
+
 #[allow(clippy::too_many_lines)] // 启动编排（标定/初始化/订阅/主循环），结构由进程生命周期驱动
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     firefly_observability::init();
-    log::info!("VIO 进程启动：订阅 MuJoCo 物理环境（iceoryx2 输入 + trace 上下文）");
+    let config_path = parse_config_path().map_err(|e| {
+        eprintln!("{e}\n用法：vio [--config configs/vio.toml]");
+        std::process::exit(2);
+    })?;
+    let cfg = VioConfig::load(&config_path)?;
+    log::info!(
+        "VIO 进程启动：订阅 MuJoCo 物理环境（iceoryx2 输入 + trace 上下文），配置 {config_path}"
+    );
 
-    // 估计器：MuJoCo 双目相机标定（`scene.py`：320×240、fovy=70.88°≈D430 87°HFOV、
-    // 方形像素、基线 0.05m）。内参 focal=(H/2)/tan(fovy/2)=168.6，无畸变；外参见
-    // [`mujoco_stereo_extrinsic`]。
-    let focal = mujoco_focal();
-    let intrinsics = [focal, focal, 160.0, 120.0, 0.0, 0.0, 0.0, 0.0];
-    let cam_left: SharedCamera = Arc::new(CamRadtan::new(320, 240, &intrinsics));
-    let cam_right: SharedCamera = Arc::new(CamRadtan::new(320, 240, &intrinsics));
+    // 相机标定（内参来自配置：MuJoCo 双目 320×240、focal≈168.6、无畸变；
+    // 真机换 D430 标定值即可，见 configs/vio.toml）。
+    let intrinsics = [
+        cfg.camera.focal,
+        cfg.camera.focal,
+        cfg.camera.width as f64 / 2.0,
+        cfg.camera.height as f64 / 2.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    ];
+    let cam_left: SharedCamera = Arc::new(CamRadtan::new(
+        cfg.camera.width,
+        cfg.camera.height,
+        &intrinsics,
+    ));
+    let cam_right: SharedCamera = Arc::new(CamRadtan::new(
+        cfg.camera.width,
+        cfg.camera.height,
+        &intrinsics,
+    ));
 
-    // IMU 噪声须与 MuJoCo 注入值匹配：σ_gyro=0.002 rad/s、σ_accel=0.02 m/s²
-    // （每采样高斯，物理 200Hz）→ 连续谱密度 σ_cont = σ_disc·√fs ≈ 0.0283 /
-    // 0.283。OpenVINS 默认（1.7e-4 / 1.9e-5）对应真实 MEMS 传感器，直接沿用
-    // 会使 Q 偏小 ~1e4 倍——滤波器过度信任 IMU，视觉更新无法修正状态，
-    // 静态悬停也恒加速漂移（实测 20s 内速度漂到 3m/s）。
+    // IMU 噪声来自配置（须与 sim 注入匹配：σ_gyro=0.002 rad/s、
+    // σ_accel=0.02 m/s² 每采样高斯 @200Hz → 连续谱密度 ≈ ×√fs）。直接沿用
+    // OpenVINS 真机默认会使 Q 偏小 ~1e4 倍——滤波器过度信任 IMU，静态悬停也
+    // 恒加速漂移（实测 20s 内速度漂到 3m/s）。
     let mut params = VioManagerOptions {
-        imu_noises: firefly_vio_core::noise::ImuNoise::new(2.83e-2, 1.9e-5, 2.83e-1, 3.0e-3),
-        // MuJoCo 仿真无真实 IMU 偏置：收紧 bg/ba 初始先验（1e-6 量级等效
-        // 冻结学习），防止视觉把 KLT 亚像素偏置误学成偏置（实测 34s 2704m
-        // vs 271m）。真机接入时改回默认 0.02。
-        init_bias_sigma: 1e-6,
+        imu_noises: firefly_vio_core::noise::ImuNoise::new(
+            cfg.imu.gyro_noise,
+            cfg.imu.gyro_walk,
+            cfg.imu.accel_noise,
+            cfg.imu.accel_walk,
+        ),
+        // MuJoCo 无真实 IMU 偏置：收紧 bg/ba 先验防视觉误学（真机改回 0.02）
+        init_bias_sigma: cfg.estimator.init_bias_sigma,
         ..VioManagerOptions::default()
     };
     params.state_options.num_cameras = 2;
+    params.triangulation_options.max_baseline = cfg.estimator.max_baseline;
     // SLAM 关闭：SLAM 更新链路毒化状态（合成 synthetic_slam_zero_bias 可
-    // 复现：slam=1 后 0.8s 内 13m 发散；H_x/H_f 已 FD 验证、initialize/update
-    // 与 C++ 逐行一致——残留嫌疑为场景 y 可观测性弱）。修复前保持纯 MSCKF
+    // 复现：slam=1 后 0.8s 内 13m 发散）。修复前保持纯 MSCKF
     //（现场 34s 误差 271m vs 开 SLAM 1035m）。
     params.state_options.max_slam_features = 0;
     // ZUPT 保持 OpenVINS 默认关闭（try_zupt=false）：默认分支在慢速运动
@@ -85,16 +132,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracker_calib.insert(1usize, cam_right.clone());
     let tracker = TrackKlt::new(
         tracker_calib,
-        300, // num_pts: 每相机目标特征数（原 150 → 每相机 75，db ~78 偏少，
-        // 更新供应不足；翻倍补点提升每帧 lost/锚特征数）
+        cfg.frontend.num_pts,
         0,
         true,
-        HistogramMethod::None, // 全局直方图均衡实测引入亚像素偏置（残差
-        // -1px → -0.4px），改用原始灰度
-        20, // fast_threshold: OpenVINS 默认值
-        5,  // grid_x: OpenVINS 默认值
-        5,  // grid_y: OpenVINS 默认值
-        10, // min_px_dist: OpenVINS 默认值
+        HistogramMethod::None, // 全局直方图均衡实测引入亚像素偏置（残差 -1px → -0.4px）
+        20,                    // fast_threshold: OpenVINS 默认值
+        5,                     // grid_x: OpenVINS 默认值
+        5,                     // grid_y: OpenVINS 默认值
+        10,                    // min_px_dist: OpenVINS 默认值
     );
     let mut cameras = BTreeMap::new();
     cameras.insert(0usize, cam_left);
@@ -103,7 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 相机外参（IMU→cam）：R_ItoC + p_IinC（OpenVINS JPL 约定），见
     // [`mujoco_stereo_extrinsic`]。p_IinC = IMU 原点在相机系。
-    let (q_ito_c, [p_left_in_c, p_right_in_c]) = mujoco_stereo_extrinsic();
+    let (q_ito_c, [p_left_in_c, p_right_in_c]) = mujoco_stereo_extrinsic(cfg.camera.baseline);
     for (cam_id, p_iin_c) in [(0usize, p_left_in_c), (1usize, p_right_in_c)] {
         let calib = vio
             .state
@@ -512,26 +557,21 @@ fn log_viz(
     }
 }
 
-/// `MuJoCo` 相机焦距：`(H/2) / tan(fovy/2)`（320×240、fovy=70.88°≈D430 87°HFOV、方形像素）。
-#[must_use]
-fn mujoco_focal() -> f64 {
-    120.0 / (70.88_f64 / 2.0).to_radians().tan()
-}
-
 /// `MuJoCo` 双目相机外参（OpenVINS JPL 约定），返回 `(q_ito_c, [p_left, p_right])`。
 ///
 /// 物理相机（`scene.py` 的 `xyaxes="0 -1 0  0 0 1"`，与 `firefly-map::DepthCamera`
 /// 投影一致实测校验）：**前向 = 机体 +x，上 = 机体 +z，右 = 机体 -y**。
 /// VIO 三角化视线取 `(nx, ny, 1)`（标准 y-down / z-forward 相机系），故
 /// body→camera 旋转 `R_ItoC = [[0,-1,0],[0,0,-1],[1,0,0]]`（列向量为相机系在 body 下的基）。
-/// 基线 0.05m（左右各 ±0.025m），IMU 在两相机中点。
+/// IMU 在两相机中点，基线 `baseline` 米。
 ///
 /// 平移为 **`p_IinC`（IMU 原点在相机系下的坐标）**，非体系杆臂！由期望的
-/// 体系横向安装位置 `p_CinI = (0, ±0.025, 0)` 换算：`p_IinC = -R_ItoC · p_CinI`
-/// ⇒ `(±0.025, 0, 0)`。（曾误填体系值 (0,±0.025,0)：经 R 旋到世界系变成沿视线
-/// 方向的纵向基线——立体视差恒为零，三角化全部退化，视觉更新从未生效。）
+/// 体系横向安装位置 `p_CinI = (0, ±baseline/2, 0)` 换算：
+/// `p_IinC = -R_ItoC · p_CinI` ⇒ `(±baseline/2, 0, 0)`。（曾误填体系值
+/// (0,±0.025,0)：经 R 旋到世界系变成沿视线方向的纵向基线——立体视差恒为零，
+/// 三角化全部退化，视觉更新从未生效。）
 #[must_use]
-fn mujoco_stereo_extrinsic() -> (nalgebra::Vector4<f64>, [nalgebra::Vector3<f64>; 2]) {
+fn mujoco_stereo_extrinsic(baseline: f64) -> (nalgebra::Vector4<f64>, [nalgebra::Vector3<f64>; 2]) {
     use firefly_vio_types::quat_ops::rot_2_quat;
     use nalgebra::{Matrix3, Vector3};
     // R_ItoC: body -> camera
@@ -541,19 +581,17 @@ fn mujoco_stereo_extrinsic() -> (nalgebra::Vector4<f64>, [nalgebra::Vector3<f64>
     // Hamilton 约定，直接喂给 JPL 估计器等效于转置旋转（相机"侧装"、
     // 立体基线变纵向，视觉更新全部退化的根因）。
     let q_vec = rot_2_quat(&r_ito_c);
-    // p_IinC = -R_ItoC · p_CinI；以 scene.py 物理安装为准：cam_left pos="0
-    // -0.025 0"、cam_right pos="0 +0.025 0"，故左目杆臂 = -0.025·(相机 x 轴在
-    // 体系方向 (0,-1,0)) ⇒ p_IinC=(-0.025,0,0)，右目对称取反。
-    // （曾左右镜像填反：立体基线符号翻转，双目特征三角化全部解出负深度被
-    // 拒——MSCKF 视觉更新从未生效，纯 IMU 开环发散。）
-    let p_left_in_c = Vector3::new(-0.025, 0.0, 0.0);
-    let p_right_in_c = Vector3::new(0.025, 0.0, 0.0);
+    // p_IinC = -R_ItoC · p_CinI；以 scene.py 物理安装为准：cam_left 在
+    // body -y、cam_right 在 body +y 各 baseline/2 ⇒ p_IinC=(∓baseline/2,0,0)。
+    let half = baseline / 2.0;
+    let p_left_in_c = Vector3::new(-half, 0.0, 0.0);
+    let p_right_in_c = Vector3::new(half, 0.0, 0.0);
     (q_vec, [p_left_in_c, p_right_in_c])
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{mujoco_focal, mujoco_stereo_extrinsic};
+    use super::{DEFAULT_CONFIG, mujoco_stereo_extrinsic};
     use firefly_vio_types::quat_ops::quat_2_rot;
     use nalgebra::Vector3;
 
@@ -563,7 +601,7 @@ mod tests {
     /// 取 `Rᵀ` 的列（即 R 的行）。
     #[test]
     fn camera_forward_is_body_x() {
-        let (q, _) = mujoco_stereo_extrinsic();
+        let (q, _) = mujoco_stereo_extrinsic(0.05);
         let r = quat_2_rot(&q);
         // camera z 轴（前向）在 body 下 = Rᵀ·e_z = R 第 2 行
         let cam_fwd = r.transpose() * Vector3::new(0.0, 0.0, 1.0);
@@ -578,7 +616,8 @@ mod tests {
     /// 三角化全部退化（历史缺陷回归测试）。
     #[test]
     fn stereo_baseline_is_lateral() {
-        let (q_ito_c_vec, [p_left_in_c, p_right_in_c]) = mujoco_stereo_extrinsic();
+        let baseline = 0.05;
+        let (q_ito_c_vec, [p_left_in_c, p_right_in_c]) = mujoco_stereo_extrinsic(baseline);
         let r_ito_c = quat_2_rot(&q_ito_c_vec);
         // 水平姿态（R_GtoI = I）下的两相机世界位置
         let p_ciin_g = |p_iin_c: &nalgebra::Vector3<f64>| {
@@ -588,14 +627,14 @@ mod tests {
         assert!(delta.x.abs() < 1e-9, "基线不得有前向分量: {delta}");
         assert!(delta.z.abs() < 1e-9, "基线不得有竖直分量: {delta}");
         assert!(
-            (delta.y.abs() - 0.05).abs() < 1e-9,
-            "基线长度应为 0.05m: {delta}"
+            (delta.y.abs() - baseline).abs() < 1e-9,
+            "基线长度应为 {baseline}m: {delta}"
         );
     }
 
-    /// 焦距与 scene.py 一致
+    /// 缺省配置路径约定（configs/ 统一放仓库顶层）。
     #[test]
-    fn focal_is_mujoco_consistent() {
-        assert!((mujoco_focal() - 168.606_993_943_65).abs() < 1e-6);
+    fn default_config_path() {
+        assert_eq!(DEFAULT_CONFIG, "configs/vio.toml");
     }
 }

@@ -253,6 +253,8 @@ pub struct VioManagerOptions {
     pub msckf_options: UpdaterOptions,
     /// SLAM 更新选项。
     pub slam_options: UpdaterOptions,
+    /// 三角化参数（对照 C++ `feature_initializer_options`，经管理器下发两个更新器）。
+    pub triangulation_options: firefly_vio_core::triangulation::TriangulationOptions,
     /// 初始化完成后 SLAM 特征可用前的延迟（对照 `dt_slam_delay`）。
     pub dt_slam_delay: f64,
     /// ZUPT 参数。
@@ -273,6 +275,7 @@ impl Default for VioManagerOptions {
             init_options: firefly_vio_init::options::InitOptions::default(),
             msckf_options: UpdaterOptions::default(),
             slam_options: UpdaterOptions::default(),
+            triangulation_options: firefly_vio_core::triangulation::TriangulationOptions::default(),
             // 对照 C++ `VioManagerOptions::dt_slam_delay = 2.0`
             dt_slam_delay: 2.0,
             zupt_options: ZuptOptions::default(),

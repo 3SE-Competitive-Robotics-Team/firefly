@@ -73,10 +73,12 @@ impl VioManager {
         let state = State::new(params.state_options.clone());
         let noise = params.imu_noises.clone();
         let propagator = Propagator::new(noise);
-        let updater_msckf = UpdaterMsckf::new(params.msckf_options.clone());
+        let updater_msckf =
+            UpdaterMsckf::new(params.msckf_options.clone(), params.triangulation_options);
         let updater_slam = UpdaterSlam::new(
             params.slam_options.clone(),
             params.state_options.feat_rep_slam,
+            params.triangulation_options,
         );
         let init_options = params.init_options.clone();
         let updater_zupt = if params.zupt_options.try_zupt {

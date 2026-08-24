@@ -27,6 +27,8 @@ iceoryx2 = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }
 rerun = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
 
 [lints]
 workspace = true

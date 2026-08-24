@@ -2,7 +2,8 @@
 //!
 //! 默认值取仿真场景 A–D；实飞场景（E–H）安全距离更小、速度更低。
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
 pub struct PlannerConfig {
     /// 每段路径长度（米），段数随引导路径长度自适应（官方 `polyTraj_piece_length`）。
     pub piece_length: f64,

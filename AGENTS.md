@@ -9,10 +9,18 @@
 - 可观测性：关键函数 `#[fastrace::trace]`，日志用 log 宏，禁 println!。
 - 依赖统一在根 `[workspace.dependencies]`。
 
+## 配置（configs/）
+
+- **TOML、一应用一份**：统一放仓库顶层 `configs/`（`sim.toml` / `vio.toml` / `planner.toml`），
+  启动时加载（Rust 支持 `--config` 换文件），缺文件即报错。
+- **最小化**：只写与代码默认值不同的键，缺失键回落 `*Options::default()`；
+  纯数据 Options 直接 `serde::Deserialize` + `#[serde(default)]`，Python 用标准库
+  `tomllib`；不引 YAML。
+
 ## VIO（firefly-vio*）约定
 
-- **不做配置文件系统**：相机内参/外参、IMU 噪声、时间偏移等标定一律硬编码在代码里（`VioManagerOptions::default()` / `InitOptions::default()` 即为事实配置源），不引入 YAML/JSON/serde 解析。
-- 新增标定类数值参数时，直接改对应 `*Options` 的默认值并在 doc 注释标注单位与来源。
+- 标定/噪声等数值参数：改对应 `*Options` 默认值并在 doc 注释标注单位与来源；
+  需按部署调整的键同步进 `configs/vio.toml`。
 - **进程必须优雅退出**（Ctrl-C → `node.wait` 返回 Err → 端口 Drop）：硬杀（pkill -9/SIGKILL）会留下孤儿内核 shm 对象与幽灵端口注册——后续订阅端会连上死端口的残留连接收不到任何数据，且幽灵占满 `max_publishers` 槽位后新发布器直接创建失败。排障清理：杀干净所有进程后 `rm -rf /tmp/iceoryx2/services /tmp/iceoryx2/nodes/private/tmp/iox2*.shm_state`（macOS；须在进程全死后执行）。
 
 ## 运行（MuJoCo 双语言闭环）
