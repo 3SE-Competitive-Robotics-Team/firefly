@@ -6,10 +6,10 @@
 //! - **协方差传播**：`compute_f_and_g_analytic` / `compute_f_and_g_discrete` 产出状态转移阵
 //!   `F` 与噪声雅可比 `G`，再由 `predict_and_compute` 合成离散噪声协方差 `Qd = G·Qc·Gᵀ`。
 //!
-//! > **wave 2 说明**：`State` 类型尚未移植。本模块不依赖任何 `State` 类型，一律以值/引用参数
-//! > 传入当前 `q/p/v`，并输出传播后的新状态与 `F/Qd`。`firefly-vio` 将在 wave 2 中负责把
-//! > `Propagator` 接到 `State` 上（对应 `propagate_and_clone` / `fast_state_propagate` 的编排）。
-//! > 因此 `Propagator` 只持有掩码数据缓冲与 feed/clean/select 逻辑，外加 fast-prop 缓存占位字段。
+//! 本模块不依赖 `State` 类型：一律以值/引用参数传入当前 `q/p/v`，输出传播后的
+//! 新状态与 `F/Qd`；与 `State` 的对接（对应 C++ `propagate_and_clone` /
+//! `fast_state_propagate` 的编排）由 `firefly-vio` 负责。`Propagator` 只持有
+//! 掩码数据缓冲与 feed/clean/select 逻辑。
 //!
 //! 传播在 IMU 系进行：加速度校正后需左乘 `R_GtoIᵀ` 旋转到全局，重力 `gravity`（全局）单独扣除，
 //! 与 JPL 四元数惯例（`firefly-vio-types::quat_ops`）一致。
@@ -47,8 +47,8 @@ pub struct PropagationOptions {
     pub do_calib_imu_intrinsics: bool,
     /// 是否估计重力敏感阵 `Tg`。
     pub do_calib_imu_g_sensitivity: bool,
-    /// 是否使用首估计（FEJ）做线性化。本模块由调用方在传入 `R_k/v_k/p_k` 线性化点时自行选择；
-    /// 当前仅记录标志，完整 FEJ 编排见 wave 2。
+    /// 是否使用首估计（FEJ）做线性化。本模块仅记录标志；线性化点由调用方
+    /// 经 [`LinearizationPoint`] 传入。
     pub do_fej: bool,
 }
 
@@ -110,7 +110,7 @@ impl MeanState {
 /// `F/G` 的线性化点（`R_GtoI`、`v_IinG`、`p_IinG`）。
 ///
 /// 对应 C++ `compute_F_and_G_*` 中 `R_k/v_k/p_k`：FEJ 关闭时为当前均值；
-/// FEJ 开启时由 `firefly-vio`（wave 2）传入首估计值（first estimate）。
+/// FEJ 开启时由 `firefly-vio` 传入首估计值（first estimate）。
 #[derive(Debug, Clone, Copy)]
 pub struct LinearizationPoint {
     /// 姿态旋转 `R_k`。
@@ -197,7 +197,7 @@ pub struct Propagator {
     gravity: Vector3<f64>,
     /// 历史 IMU 消息（时间戳递增）。
     imu_data: Mutex<Vec<ImuData>>,
-    /// 上次传播的 IMU-相机时间偏移（wave 2 编排时使用）。
+    /// 上次传播的 IMU-相机时间偏移。
     #[allow(dead_code)]
     last_prop_time_offset: f64,
     /// 是否已设置 `last_prop_time_offset`。
@@ -280,7 +280,7 @@ impl Propagator {
         self.cache_imu_valid = false;
     }
 
-    /// 快照当前缓存中的 IMU 测量（供 wave 2 传播编排锁定后取用）。
+    /// 快照当前缓存中的 IMU 测量（供传播编排取用）。
     ///
     /// # Panics
     ///
@@ -319,7 +319,7 @@ impl Propagator {
     ///
     /// `input` 为传播起点（均值传播与姿态积分用其当前 `q/p/v`）；
     /// `linearization` 为 `F/G` 的线性化点（`R_k/v_k/p_k`）。FEJ 关闭时二者取同一值
-    /// （`LinearizationPoint::from_state(input)`）；FEJ 开启时由 wave 2 的 `firefly-vio`
+    /// （`LinearizationPoint::from_state(input)`）；FEJ 开启时由 `firefly-vio`
     /// 传入首估计值（first estimate）。
     ///
     /// # Panics

@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn degenerate_near_goal_builds_trivial_minco() {
-        // 近终点：A* 引导路径退化（≤1 点）不再报错，产出单段直飞 MINCO
+        // 近终点：A* 引导路径退化（≤1 点）时产出单段直飞 MINCO，不报错
         let config = InitConfig {
             pieces: 1,
             max_velocity: 2.0,
