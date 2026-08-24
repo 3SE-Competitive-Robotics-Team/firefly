@@ -185,7 +185,7 @@ impl<'a> ObstacleScanner<'a> {
         };
 
         /*** 占据分段(官方 in/out + ENOUGH_INTERVAL 滞回) ***/
-        let mut segment_ids: Vec<(usize, usize)> = Vec::new();
+        let mut segment_ids: Vec<ConstraintSpan> = Vec::new();
         let mut in_id: i64 = -1;
         let mut out_id: i64 = -1;
         let mut same_occ_state_times = ENOUGH_INTERVAL + 1;
@@ -222,7 +222,10 @@ impl<'a> ObstacleScanner<'a> {
                     if in_id < 0 || out_id < 0 {
                         return CheckResult::Error;
                     }
-                    segment_ids.push((in_id as usize, out_id as usize));
+                    segment_ids.push(ConstraintSpan {
+                        start: in_id as usize,
+                        end: out_id as usize,
+                    });
                 }
             }
         }
@@ -236,12 +239,8 @@ impl<'a> ObstacleScanner<'a> {
         };
 
         /*** 逐段分配平面(官方 step1/2/3;MINIMUM_PERCENT=0 → 段长不做扩缩) ***/
-        for (i, &(first, second)) in segment_ids.iter().enumerate() {
-            let lo = first;
-            let hi = second.min(cols - 1);
-            let _ = assign_planes_for_segment(
-                astar, self.map, &paths[i], points, first, second, lo, hi, planes,
-            );
+        for (i, &span) in segment_ids.iter().enumerate() {
+            let _ = assign_planes_for_segment(self.map, &paths[i], points, span, planes);
         }
         CheckResult::Finished
     }
@@ -259,7 +258,7 @@ impl<'a> ObstacleScanner<'a> {
         let cols = points.len();
         let i_end = two_thirds_id(cols, touch_goal);
         let res = self.map.resolution();
-        let mut segment_ids: Vec<(usize, usize)> = Vec::new();
+        let mut segment_ids: Vec<ConstraintSpan> = Vec::new();
         let mut flag_new_obs_valid = false;
 
         let mut i = 1usize;
@@ -301,7 +300,10 @@ impl<'a> ObstacleScanner<'a> {
                     j += 1;
                 };
                 i = j + 1;
-                segment_ids.push((in_id, out_id));
+                segment_ids.push(ConstraintSpan {
+                    start: in_id,
+                    end: out_id,
+                });
             }
             i += 1;
         }
@@ -314,13 +316,13 @@ impl<'a> ObstacleScanner<'a> {
         let mut i = 0usize;
         let mut paths: Vec<Vec<Vector3<f64>>> = Vec::new();
         while i < segment_ids.len() {
-            let (first, second) = segment_ids[i];
-            let (in_pt, out_pt) = (points[second], points[first]);
+            let span = segment_ids[i];
+            let (in_pt, out_pt) = (points[span.end], points[span.start]);
             match astar.search(self.map, in_pt, out_pt) {
                 Ok(p) => paths.push(p.points().to_vec()),
                 Err(_) if i + 1 < segment_ids.len() => {
                     // 连下一段(官方 corner case 2)
-                    segment_ids[i].1 = segment_ids[i + 1].1;
+                    segment_ids[i].end = segment_ids[i + 1].end;
                     segment_ids.remove(i + 1);
                     continue;
                 }
@@ -338,20 +340,16 @@ impl<'a> ObstacleScanner<'a> {
 
         /*** 防重叠(官方对 segment_ids 直接做中点切分) ***/
         for i in 1..segment_ids.len() {
-            if segment_ids[i - 1].1 >= segment_ids[i].0 {
-                let middle = (segment_ids[i - 1].1 + segment_ids[i].0) as f64 / 2.0;
-                segment_ids[i - 1].1 = (middle - 0.1) as usize;
-                segment_ids[i].0 = (middle + 1.1) as usize;
+            if segment_ids[i - 1].end >= segment_ids[i].start {
+                let middle = (segment_ids[i - 1].end + segment_ids[i].start) as f64 / 2.0;
+                segment_ids[i - 1].end = (middle - 0.1) as usize;
+                segment_ids[i].start = (middle + 1.1) as usize;
             }
         }
 
         /*** 逐段分配平面 ***/
-        for (i, &(first, second)) in segment_ids.iter().enumerate() {
-            let lo = first;
-            let hi = second.min(cols - 1);
-            let _ = assign_planes_for_segment(
-                astar, self.map, &paths[i], points, first, second, lo, hi, planes,
-            );
+        for (i, &span) in segment_ids.iter().enumerate() {
+            let _ = assign_planes_for_segment(self.map, &paths[i], points, span, planes);
         }
         true
     }
@@ -362,18 +360,18 @@ impl<'a> ObstacleScanner<'a> {
         &self,
         astar: &mut Astar,
         points: &[Vector3<f64>],
-        segment_ids: &mut Vec<(usize, usize)>,
+        segment_ids: &mut Vec<ConstraintSpan>,
     ) -> Option<Vec<Vec<Vector3<f64>>>> {
         let mut paths = Vec::with_capacity(segment_ids.len());
         let mut i = 0usize;
         while i < segment_ids.len() {
-            let (first, second) = segment_ids[i];
-            // 官方:从出侧点(in=points[second])搜到入侧点(out=points[first])
-            let (in_pt, out_pt) = (points[second], points[first]);
+            let span = segment_ids[i];
+            // 官方:从出侧点(in=points[end])搜到入侧点(out=points[start])
+            let (in_pt, out_pt) = (points[span.end], points[span.start]);
             match astar.search(self.map, in_pt, out_pt) {
                 Ok(p) => paths.push(p.points().to_vec()),
                 Err(_) if i + 1 < segment_ids.len() => {
-                    segment_ids[i].1 = segment_ids[i + 1].1;
+                    segment_ids[i].end = segment_ids[i + 1].end;
                     segment_ids.remove(i + 1);
                     continue;
                 }
@@ -400,6 +398,14 @@ impl<'a> ObstacleScanner<'a> {
     }
 }
 
+/// 约束点段（官方 `segment_ids` 一项）：`start`/`end` 为 `points` 下标，
+/// 语义为闭区间 [start, end]。
+#[derive(Debug, Clone, Copy)]
+struct ConstraintSpan {
+    start: usize,
+    end: usize,
+}
+
 /// 官方"Assign data to each segment"(step 1/2/3):为段 [first, second]
 /// 内的约束点生成 {s,v} 平面。
 /// - `step 2`:段内每个中间约束点求"轨迹点直线(`ctrl_pts_law`)"与 A\* 路径的
@@ -408,18 +414,20 @@ impl<'a> ObstacleScanner<'a> {
 /// - `step 3`:从首个交点索引向段边界传播 base/direction。
 ///
 /// 返回是否生成了至少一个平面(官方 `got_intersection_id` ≥ 0)。
-#[allow(clippy::too_many_arguments)]
 fn assign_planes_for_segment(
-    astar: &mut Astar,
     map: &GridMap,
     a_star_path: &[Vector3<f64>],
     points: &[Vector3<f64>],
-    first: usize,
-    second: usize,
-    lo: usize,
-    hi: usize,
+    span: ConstraintSpan,
     planes: &mut [Vec<Plane>],
 ) -> bool {
+    let ConstraintSpan {
+        start: first,
+        end: second,
+    } = span;
+    // 段边界裁剪到 points 有效范围（官方 lo/hi）
+    let lo = first;
+    let hi = second.min(points.len() - 1);
     if a_star_path.len() < 2 {
         return false;
     }
@@ -481,7 +489,6 @@ fn assign_planes_for_segment(
             planes[j].push(Plane::new(b, d));
         }
     }
-    let _ = astar;
     true
 }
 
