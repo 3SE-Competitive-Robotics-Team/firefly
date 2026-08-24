@@ -12,10 +12,14 @@ use firefly_search::Astar;
 use firefly_trajectory::Trajectory;
 use nalgebra::{Point3, Vector3};
 
+use crate::obstacles::{ObstacleScanner, PointsToCheck};
 use crate::planner::{InitSource, PlanResult, Planner, State};
 
 /// 重规划触发阈值（秒，官方 `fsm/thresh_replan_time`）。
 pub const DEFAULT_REPLAN_THRESH: f64 = 1.0;
+/// 急停时限（秒，官方 `fsm/emergency_time`）：碰撞监控命中后重规划失败、
+/// 且剩余碰撞时间小于该值时置急停标志。
+pub const DEFAULT_EMERGENCY_TIME: f64 = 1.0;
 /// 规划视界（米，官方 `manager/planning_horizon`）。
 pub const DEFAULT_PLANNING_HORIZON: f64 = 6.0;
 /// 到达判定距离（米）。
@@ -36,6 +40,8 @@ pub struct ManagerOptions {
     pub planning_horizon: f64,
     /// 到达判定距离（米）。
     pub arrive_dist: f64,
+    /// 急停时限（秒，见 [`DEFAULT_EMERGENCY_TIME`]）。
+    pub emergency_time: f64,
 }
 
 impl Default for ManagerOptions {
@@ -44,15 +50,21 @@ impl Default for ManagerOptions {
             replan_thresh: DEFAULT_REPLAN_THRESH,
             planning_horizon: DEFAULT_PLANNING_HORIZON,
             arrive_dist: DEFAULT_ARRIVE_DIST,
+            emergency_time: DEFAULT_EMERGENCY_TIME,
         }
     }
 }
 
-/// 执行中的局部轨迹（官方 `LocalTrajData`：轨迹 + 起始时刻）。
+/// 执行中的局部轨迹（官方 `LocalTrajData`：轨迹 + 起始时刻 + 检查点）。
 #[derive(Debug)]
 pub struct LocalTraj {
     pub traj: Trajectory,
+    /// 轨迹起始时刻（管理器时钟，秒）；检查点/监控的时间原点。
     pub start_time: f64,
+    /// 带时间戳检查点（官方 `PtsChk_t`，规划成功后生成一次）：执行期
+    /// 碰撞监控的扫描源。不变量：非空（采样退化的轨迹不入执行，
+    /// 见 [`PlannerManager::adopt_plan`]）。
+    pub points_to_check: PointsToCheck,
 }
 
 /// 参考状态指令（闭环 PD 跟踪目标）。
@@ -63,14 +75,23 @@ pub struct Reference {
 }
 
 /// 一次 [`PlannerManager::tick`] 的产出。
+// 各标志相互独立（参考/重规划/到达/安全监控），非状态机编码
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Default)]
 pub struct TickReport {
     /// 参考状态（`None` = 尚无可执行轨迹）。
     pub reference: Option<Reference>,
-    /// 本 tick 产生了新轨迹（应用层据此记录可视化产物）。
+    /// 本 `tick` 产生了新轨迹（应用层据此记录可视化产物）。
     pub replanned: bool,
     /// 任务完成（物理到达目标）。
     pub finished: bool,
+    /// 执行期碰撞监控命中：当前轨迹前方存在障碍，本 tick 已绕过
+    /// `replan_thresh` 与冷却期立即重规划。
+    pub collision: bool,
+    /// 急停请求：监控命中后立即重规划失败、且碰撞时刻在急停时限内
+    /// （官方 `EMERGENCY_STOP` 的触发判据）。管理器不做停机控制——
+    /// 处置（悬停/锁桨等）由应用层决定。
+    pub emergency_stop: bool,
 }
 
 /// 规划视界目标（全局路径上按弧长截取的一段）。
@@ -220,6 +241,8 @@ impl PlannerManager {
     /// `measured`：最新里程计观测（新鲜时由应用层传入；`None` 时管理器以
     /// 轨迹参考推进作为位置估计）。返回本 tick 的参考指令与状态标志。
     /// 规划失败不报错——冷却重试语义在管理器内（官方 FSM 语义）。
+    /// 含执行期碰撞监控（见 [`Self::next_collision`]）：命中即绕过
+    /// `replan_thresh` 与冷却期立即重规划。
     #[must_use]
     pub fn tick(&mut self, now: f64, measured: Option<State>) -> TickReport {
         let mut report = TickReport::default();
@@ -238,12 +261,31 @@ impl PlannerManager {
                     }
                     log::warn!("轨迹执行完毕但未到达目标，强制重规划");
                     if now >= self.replan_cooldown_until {
-                        self.replan(now);
-                        report.replanned = true;
+                        report.replanned = self.replan(now);
                     }
-                } else if t_cur > self.options.replan_thresh && now >= self.replan_cooldown_until {
-                    self.replan(now);
-                    report.replanned = true;
+                } else {
+                    // 执行期碰撞监控（官方 checkCollisionCallback，每 tick 一次
+                    // 等价其 20Hz 定时器）：先刷新膨胀层让本周期写入的感知/
+                    // 动态障碍生效，再沿未来检查点扫描
+                    self.refresh_inflation();
+                    if let Some(hit_t) = self.next_collision(now) {
+                        // 官方发现碰撞路径：立即 planFromLocalTraj，不受阈值与
+                        // 冷却期约束；失败且碰撞迫近急停时限 → 置急停标志
+                        log::warn!(
+                            "碰撞监控：当前轨迹 {:.2}s 后进入障碍，立即重规划",
+                            hit_t - t_cur
+                        );
+                        report.collision = true;
+                        report.replanned = self.replan(now);
+                        if !report.replanned && hit_t - t_cur < self.options.emergency_time {
+                            log::warn!("重规划失败且碰撞迫近（{:.2}s），置急停标志", hit_t - t_cur);
+                            report.emergency_stop = true;
+                        }
+                    } else if t_cur > self.options.replan_thresh
+                        && now >= self.replan_cooldown_until
+                    {
+                        report.replanned = self.replan(now);
+                    }
                 }
             }
         }
@@ -295,11 +337,7 @@ impl PlannerManager {
             .plan_with_init(start, self.goal, InitSource::ColdStart, true)
         {
             Ok(result) => {
-                self.last_result = Some(result.clone());
-                self.local = Some(LocalTraj {
-                    traj: result.trajectory,
-                    start_time: now,
-                });
+                self.adopt_plan(result, now, true);
             }
             Err(e) => log::warn!("初始规划失败：{e}，下一帧重试"),
         }
@@ -308,9 +346,11 @@ impl PlannerManager {
     /// 重规划（官方 `planFromLocalTraj`）：起点取上一轨迹在重规划时刻的
     /// **参考状态**（保证前后参考时间连续——改用实测滞后位置会引发
     /// "进-退"振荡）；初始解走暖启动优先、冷启动兜底的降级链。
-    fn replan(&mut self, now: f64) {
+    /// 返回是否入库了新轨迹；碰撞监控路径不受冷却期约束直接调用，
+    /// 失败仍会设置冷却期（下一 tick 的阈值路径不空转）。
+    fn replan(&mut self, now: f64) -> bool {
         let Some(local) = &self.local else {
-            return;
+            return false;
         };
         let t_cur = (now - local.start_time).clamp(0.0, local.traj.duration());
         let s = local.traj.eval(t_cur);
@@ -382,14 +422,14 @@ impl PlannerManager {
                             log::warn!("重规划失败，保持旧轨迹：{e}");
                             self.replan_cooldown_until = now + REPLAN_COOLDOWN;
                             self.replan_fail_streak += 1;
-                            return;
+                            return false;
                         }
                     }
                 } else {
                     log::warn!("重规划失败，保持旧轨迹：{warm_err}");
                     self.replan_cooldown_until = now + REPLAN_COOLDOWN;
                     self.replan_fail_streak += 1;
-                    return;
+                    return false;
                 }
             }
         };
@@ -400,16 +440,105 @@ impl PlannerManager {
                 result.trajectory.duration()
             );
             self.replan_cooldown_until = now + REPLAN_COOLDOWN;
-            return;
+            return false;
         }
-        if horizon.touch_goal {
-            self.touch_goal = true;
+        if !self.adopt_plan(result, now, horizon.touch_goal) {
+            // 无监控覆盖的轨迹不入执行，视同本次重规划失败（官方
+            // setLocalTrajFromOpt 失败时同样不更新局部轨迹）
+            self.replan_cooldown_until = now + REPLAN_COOLDOWN;
+            self.replan_fail_streak += 1;
+            return false;
         }
+        true
+    }
+
+    /// 官方 `setLocalTrajFromOpt`：规划结果连同带时间戳检查点一并入库，
+    /// 并登记该轨迹的 `touch_goal`（碰撞监控扫描上界依据）。检查点生成失败
+    /// （稠密采样退化）视同规划失败——无监控覆盖的轨迹不得进入执行。
+    /// 返回是否入库成功。
+    fn adopt_plan(&mut self, result: PlanResult, now: f64, touch_goal: bool) -> bool {
+        let (samples, max_vel) = {
+            let cfg = self.planner.config();
+            (cfg.constraint_points_per_piece, cfg.max_velocity)
+        };
+        let scanner = ObstacleScanner::new(self.planner.map_ref())
+            .with_samples(samples)
+            .with_max_vel(max_vel);
+        let Some(points_to_check) = scanner.compute_points_to_check(&result.trajectory, touch_goal)
+        else {
+            log::warn!("检查点生成失败（采样退化），丢弃本次轨迹");
+            return false;
+        };
         self.last_result = Some(result.clone());
         self.local = Some(LocalTraj {
             traj: result.trajectory,
             start_time: now,
+            points_to_check,
         });
+        self.touch_goal = touch_goal;
+        true
+    }
+
+    /// 刷新障碍膨胀层（官方 `clearAndInflateLocalMap` 的监控侧调用）：地图
+    /// 可能在本 tick 被深度感知/动态障碍更新，碰撞判定必须基于最新膨胀层。
+    fn refresh_inflation(&mut self) {
+        let inflation = self.planner.config().obstacle_inflation;
+        self.planner.map_mut().inflate_obstacles(inflation);
+    }
+
+    /// 执行期碰撞监控（官方 `checkCollisionCallback` 轨迹检查部分）：沿当前
+    /// 轨迹检查点只扫 **未来** 采样，返回首个进入膨胀占据区的采样时刻
+    /// （相对轨迹起点，秒）；无碰撞或无可执行轨迹返回 `None`。
+    ///
+    /// 定位对照官方两级 i/j：`i_start` = `t_cur` 所在段下标（桶序的保守
+    /// 下界），再按时间戳推进到首个未来检查点——已飞过部分不回扫。
+    /// 扫描上界对照官方：`touch_goal` 查全程，否则前 3/4 桶（生成端已按
+    /// `two_thirds_id` 截断，此处再留余量）。集群间距不在本函数范围
+    /// （swarm 约束由规划内层保证）。
+    #[must_use]
+    fn next_collision(&self, now: f64) -> Option<f64> {
+        let local = self.local.as_ref()?;
+        let pts = &local.points_to_check;
+        if pts.is_empty() {
+            return None;
+        }
+        let t_cur = now - local.start_time;
+        let map = self.planner.map_ref();
+        let mut i_start = piece_index_at(&local.traj, t_cur);
+        if i_start >= pts.len() {
+            return None;
+        }
+        let mut j_start = 0usize;
+        let mut located = false;
+        while i_start < pts.len() && !located {
+            for (j, (t, _)) in pts[i_start].iter().enumerate() {
+                if *t > t_cur {
+                    j_start = j;
+                    located = true;
+                    break;
+                }
+            }
+            if !located {
+                i_start += 1;
+            }
+        }
+        if !located {
+            return None;
+        }
+        let scan_end = if self.touch_goal {
+            pts.len()
+        } else {
+            pts.len() * 3 / 4
+        };
+        for (i, bucket) in pts.iter().enumerate().take(scan_end).skip(i_start) {
+            let skip = if i == i_start { j_start } else { 0 };
+            for (t, p) in bucket.iter().skip(skip) {
+                if map.is_occupied_inflated(*p) {
+                    return Some(*t);
+                }
+            }
+        }
+        None
     }
 
     /// 局部目标选取（官方 `getLocalTarget`）：全局路径上距当前位置
@@ -553,6 +682,23 @@ impl PlannerManager {
             position: s.position,
             velocity: s.velocity,
         })
+    }
+}
+
+/// 官方 `poly_traj::Trajectory::locatePieceIdx` 的段号部分：`t` 所在段
+/// 下标（越界夹紧到首/末段；官方还会把 `t` 局部化到段内，此处只要段号）。
+fn piece_index_at(traj: &Trajectory, t: f64) -> usize {
+    let durations = traj.durations();
+    let mut idx = 0;
+    let mut remaining = t;
+    while idx < durations.len() && remaining > durations[idx] {
+        remaining -= durations[idx];
+        idx += 1;
+    }
+    if idx == durations.len() {
+        durations.len() - 1
+    } else {
+        idx
     }
 }
 
@@ -816,5 +962,73 @@ mod tests {
             replans_after_retarget,
             "同目标重复 set_goal 不应触发重规划计数"
         );
+    }
+
+    #[test]
+    fn collision_monitor_triggers_immediate_replan() {
+        let mut m = open_manager();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        assert!(m.local().is_some(), "前置:初始轨迹存在");
+        // 飞行中途向地图注入新障碍(初始直线路径前方 x≈4,res 0.5 → 体素 [8,2,2],
+        // 膨胀 1 格后 x∈[3.5,5.0),稠密采样间距 ≤0.63m 必命中)
+        m.map_mut().set_state([8, 2, 2], VoxelState::Occupied);
+        assert!(
+            !m.map().is_occupied_inflated(Vector3::new(4.2, 1.0, 1.0)),
+            "膨胀层刷新前新障碍不可见"
+        );
+        // t=0.5 < replan_thresh(1.0):只有碰撞监控能触发重规划
+        let r = m.tick(0.5, None);
+        assert!(r.collision, "监控应发现前方碰撞");
+        assert!(r.replanned, "发现碰撞应绕过 replan_thresh/冷却期立即重规划");
+        assert_eq!(m.replans(), 1);
+        assert!(!r.emergency_stop, "重规划成功不应请求急停");
+        let local = m.local().expect("碰撞重规划后应有新轨迹");
+        assert!(
+            (local.start_time - 0.5).abs() < 1e-9,
+            "新轨迹从本 tick 起飞"
+        );
+        assert!(
+            !local.points_to_check.is_empty(),
+            "入库轨迹必带检查点(监控覆盖不变量)"
+        );
+    }
+
+    #[test]
+    fn collision_monitor_ignores_already_flown_part() {
+        // 阈值拉高隔离阈值重规划,聚焦监控行为
+        let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
+        let planner = Planner::new(PlannerConfig::default(), map);
+        let options = ManagerOptions {
+            replan_thresh: 100.0,
+            ..ManagerOptions::default()
+        };
+        let mut m = PlannerManager::with_planner(
+            planner,
+            options,
+            Vector3::new(1.0, 1.0, 1.0),
+            Vector3::new(10.0, 1.0, 1.0),
+        )
+        .unwrap();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+
+        // 已飞过位置(t=0.5 时所在)注入障碍;t=2.0 时机体已远离
+        let past = m.local().unwrap().traj.eval(0.5).position;
+        let now_pos = m.local().unwrap().traj.eval(2.0).position;
+        assert!(
+            past.x < now_pos.x - 0.5,
+            "场景前提:t=2.0 应已飞过 t=0.5 位置"
+        );
+        let idx = m.map().index_of(past).expect("身后点在地图内");
+        m.map_mut().set_state(idx, VoxelState::Occupied);
+        m.map_mut().inflate_obstacles(0.2);
+        assert!(
+            m.map().is_occupied_inflated(past),
+            "场景前提:身后障碍真实存在(防空洞断言)"
+        );
+
+        let r = m.tick(2.0, None);
+        assert!(!r.collision, "已飞过部分的障碍不得误报");
+        assert!(!r.replanned, "无误报则不应重规划");
+        assert_eq!(m.replans(), 0);
     }
 }

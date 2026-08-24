@@ -20,10 +20,13 @@ use firefly_search::Astar;
 use firefly_trajectory::Trajectory;
 use nalgebra::Vector3;
 
-/// 稠密采样点(时刻,位置),官方 `PtsChk_t` 元素。
-type SamplePoint = (f64, Vector3<f64>);
-/// 按约束点桶组织的稠密采样(官方 `PtsChk_t`)。
-type PointsToCheck = Vec<Vec<SamplePoint>>;
+/// 带时间戳的稠密采样点:(相对轨迹起点的时间 秒, 位置),
+/// 官方 `PtsChk_t` 元素。
+pub type SamplePoint = (f64, Vector3<f64>);
+/// 带时间戳检查点:按约束点桶组织的稠密采样(官方 `PtsChk_t`)。
+/// 不变量:同一桶内及相邻桶间时间戳单调不减;首桶必含 t≈0 的采样;
+/// `touch_goal=false` 时按 `two_thirds_id` 截断,不覆盖末段。
+pub type PointsToCheck = Vec<Vec<SamplePoint>>;
 
 /// 官方 `ConstraintPoints::two_thirds_id`:仅前 2/3 约束点施加约束力
 /// (触达目标时检查全程)。`cols` = 约束点总数(N·K+1)。
@@ -137,6 +140,13 @@ impl<'a> ObstacleScanner<'a> {
         loop {
             if t > total {
                 if touch_goal && !pts.is_empty() {
+                    // 官方:丢弃尾部空桶;全空视为失败
+                    while pts.last().is_some_and(Vec::is_empty) {
+                        pts.pop();
+                    }
+                    if pts.is_empty() {
+                        return None;
+                    }
                     return Some(pts);
                 }
                 return None;
@@ -161,6 +171,23 @@ impl<'a> ObstacleScanner<'a> {
             t += t_step;
         }
         Some(pts)
+    }
+
+    /// 官方 `computePointsToCheck` 的 `setLocalTrajFromOpt` 调用形态:
+    /// 按 [`two_thirds_id`] 截断生成入库检查点。规划成功后调用一次挂到
+    /// 执行轨迹上,供执行期碰撞监控扫描(与规划内层共用同一采样器,
+    /// 保证监控所见即规划所验)。
+    ///
+    /// 返回 `None` = 稠密采样退化(非 `touch_goal` 时轨迹在覆盖前 2/3 桶前
+    /// 耗尽 / 全部桶为空,官方报错拒收);调用方必须视同本次规划失败。
+    #[must_use]
+    pub fn compute_points_to_check(
+        &self,
+        traj: &Trajectory,
+        touch_goal: bool,
+    ) -> Option<PointsToCheck> {
+        let cols = traj.pieces() * self.samples_per_piece + 1;
+        self.points_to_check(traj, two_thirds_id(cols, touch_goal), touch_goal)
     }
 
     /// 官方 `finelyCheckAndSetConstraintPoints`(`flag_first_init` 语义由调用方
@@ -636,6 +663,74 @@ mod tests {
         assert_eq!(two_thirds_id(26, false), 17);
         assert_eq!(two_thirds_id(26, true), 25);
         assert_eq!(two_thirds_id(16, false), 15 - 14 / 3);
+    }
+
+    #[test]
+    fn compute_points_to_check_structure_and_density() {
+        // 空旷地图只需分辨率参与采样步长
+        let map = GridMapBuilder::new(0.1, [100, 100, 20]).build().unwrap();
+        let scanner = ObstacleScanner::new(&map).with_samples(5).with_max_vel(1.5);
+        // 单段直线轨迹 0→8m/8s(纯五次多项式,峰值速度 15/8 m/s):
+        // 中段速度 > res/(2·t_step)=0.75m/s,采样不被运动门限抑制
+        let start = Endpoint {
+            position: Vector3::zeros(),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let end = Endpoint {
+            position: Vector3::new(8.0, 0.0, 0.0),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let m = MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
+            .build(&[], &[8.0])
+            .unwrap();
+        let traj = m.solve().unwrap();
+        let t_step = 0.1 / 1.5; // 官方采样步长 res / max_vel
+        let cols = traj.pieces() * 5 + 1;
+        let dur = traj.duration();
+
+        // touch_goal=true:全部 N·K 桶,覆盖首尾
+        let chk = scanner
+            .compute_points_to_check(&traj, true)
+            .expect("touch_goal 应生成成功");
+        assert_eq!(chk.len(), two_thirds_id(cols, true));
+        assert!(
+            chk.last().is_some_and(|b| !b.is_empty()),
+            "末桶非空(官方 pop 尾部空桶后不变量)"
+        );
+        let ts: Vec<f64> = chk.iter().flatten().map(|(t, _)| *t).collect();
+        assert!(ts.windows(2).all(|w| w[1] >= w[0]), "时间戳必须单调不减");
+        assert!(ts[0] < 1e-5, "首采样在 t≈0");
+        assert!(*ts.last().unwrap() <= dur);
+        assert!(
+            *ts.last().unwrap() > dur - dur / 5.0 - t_step,
+            "末桶必须覆盖最后一段({} vs {dur})",
+            ts.last().unwrap()
+        );
+        // 密度:高速窗口 [2,6]s 内相邻间隔恰为采样步长 res/max_vel
+        let mut dense_pairs = 0usize;
+        for w in ts.windows(2) {
+            if w[0] >= 2.0 && w[1] <= 6.0 {
+                assert!(
+                    (w[1] - w[0] - t_step).abs() < 1e-9,
+                    "高速区间采样步长应为 {t_step},实际 {}",
+                    w[1] - w[0]
+                );
+                dense_pairs += 1;
+            }
+        }
+        assert!(
+            dense_pairs > 20,
+            "匀速窗口应有足量采样对,实际 {dense_pairs}"
+        );
+
+        // 非 touch_goal:按 two_thirds 截断,桶数更少
+        let trunc = scanner
+            .compute_points_to_check(&traj, false)
+            .expect("非 touch_goal 应生成成功");
+        assert_eq!(trunc.len(), two_thirds_id(cols, false));
+        assert!(trunc.len() < chk.len());
     }
 
     #[test]
