@@ -25,28 +25,53 @@ def _prefix(stream: int, tag: str) -> None:
             print(f"[{tag}] {part}", flush=True)
 
 
+def _killpg_ignore(p: subprocess.Popen, sig: signal.Signals) -> None:
+    """向进程组发信号，进程组已消失则忽略。"""
+    try:
+        os.killpg(p.pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 def _kill_tree(p: subprocess.Popen) -> None:
-    """整棵进程树收尾（先 SIGTERM，宽限后 SIGKILL）。
+    """整棵进程树收尾（先 SIGTERM，宽限后 SIGKILL）。**有界、不抛错**。
 
     `cargo run` 会再 fork 出真正的二进制（cargo 是父进程）——只 terminate
     子进程本身杀不干净，二进制会作为孤儿继续跑（rerun 仍在写数据）。
     每个子进程自成一个进程组（`preexec_fn=os.setsid`），向进程组发信号
     才能连同 cargo + 二进制一起杀掉。
+
+    进程在 iceoryx2 清理时可能进入不可中断睡眠（残留 /tmp/iceoryx2 下），
+    SIGKILL 也无效——这里绝不无限等待，宽限后放弃并把控制权还给主循环，
+    保证 Ctrl+C 一定能把 launcher 收掉。
     """
     if p.poll() is not None:
         return
+    _killpg_ignore(p, signal.SIGTERM)
     try:
-        os.killpg(p.pid, signal.SIGTERM)
-    except ProcessLookupError:
+        p.wait(timeout=3)
         return
-    try:
-        p.wait(timeout=5)
     except subprocess.TimeoutExpired:
+        pass
+    _killpg_ignore(p, signal.SIGKILL)
+    try:
+        p.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        # SIGKILL 后仍未退（不可中断睡眠）：放弃等待，进日志后交给主循环继续。
+        print(f"  提示：{p.pid} 未响应 SIGKILL（可能仍在 iceoryx2 清理中），已放弃等待。", flush=True)
+
+
+def _reap(procs: list[tuple[str, subprocess.Popen]]) -> None:
+    """补一道回收：所有进程各 w 一记短等待，残余的再补 SIGKILL。有界。"""
+    import time
+
+    deadline = time.monotonic() + 4
+    for _, p in procs:
+        remain = max(0.05, deadline - time.monotonic())
         try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        p.wait(timeout=5)
+            p.wait(timeout=remain)
+        except subprocess.TimeoutExpired:
+            _killpg_ignore(p, signal.SIGKILL)
 
 
 def main() -> int:
@@ -110,11 +135,7 @@ def main() -> int:
 
     for _, p in procs:
         _kill_tree(p)
-    for _, p in procs:
-        try:
-            p.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _kill_tree(p)
+    _reap(procs)
 
     code = max((p.returncode or 0) for _, p in procs)
     print("全部进程已结束。")
