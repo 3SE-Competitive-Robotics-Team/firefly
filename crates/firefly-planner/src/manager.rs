@@ -27,7 +27,8 @@ const FAIL_STREAK_ESCAPE: usize = 3;
 const ESCAPE_SPEED: f64 = 1.0;
 
 /// 管理器行为参数。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(default)]
 pub struct ManagerOptions {
     /// 重规划触发阈值（秒）。
     pub replan_thresh: f64,

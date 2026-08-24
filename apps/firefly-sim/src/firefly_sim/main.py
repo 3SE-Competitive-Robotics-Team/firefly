@@ -43,13 +43,18 @@ TOPIC_REF = "Firefly/Reference"
 #: 事件 id：「该话题有新样本」（与 Rust event::EVENT_ID_SENT_SAMPLE 一致）
 EVENT_ID_SENT_SAMPLE = 0
 
-#: 发布周期（秒）
-IMU_PERIOD = 0.01  # 100Hz
-CAM_PERIOD = 0.1  # 10Hz（双目 + 深度 + 真值；一个周期 = 一条 trace）
-#: 物理步长（秒，200Hz）
-PHYSICS_PERIOD = 0.005
-#: 无人机起点（= demo 地图 start）
-START_POS = np.array([1.0, 4.0, 1.0])
+
+def load_config(path: str = "configs/sim.toml") -> dict:
+    """加载 TOML 配置（缺键回落代码默认值；文件缺失即退出）。"""
+    import tomllib
+
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except FileNotFoundError as exc:
+        sys.exit(f"[firefly-sim] 配置文件缺失：{path}（{exc}）")
+    except tomllib.TOMLDecodeError as exc:
+        sys.exit(f"[firefly-sim] 配置解析失败：{path}（{exc}）")
 
 
 def _publisher(node, topic: str, payload_cls):
@@ -131,10 +136,16 @@ def main() -> None:
     # --no-trace：禁用 OTel tracing（消除 Python span 开销，sim 从 0.37x → 14x real-time）
     script_mode = "--script" in sys.argv
     trace_enabled = "--no-trace" not in sys.argv
+    cfg = load_config()
+    rates = cfg.get("rates", {})
+    physics_period = 1.0 / rates.get("physics", 200.0)
+    imu_period = 1.0 / rates.get("imu", 100.0)
+    cam_period = 1.0 / rates.get("cam", 10.0)
+    start_pos = np.array(cfg.get("start", [1.0, 4.0, 1.0]))
     env = DroneEnv()
-    env.reset(START_POS, np.array([0.0, 0.0, 0.0, 1.0]))  # xyzw 单位四元数
+    env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))  # xyzw 单位四元数
     ftrace.init(enabled=trace_enabled)
-    log("MuJoCo 环境就绪：质量 {:.1f} kg，物理 {:.0f} Hz".format(env.mass, 1 / PHYSICS_PERIOD))
+    log("MuJoCo 环境就绪：质量 {:.1f} kg，物理 {:.0f} Hz".format(env.mass, 1 / physics_period))
     if script_mode:
         log("--script：脚本化参考驱动运动（跳过 planner）")
     if not trace_enabled:
@@ -155,7 +166,7 @@ def main() -> None:
     log("iceoryx2 已就绪：发布 IMU/双目/深度/真值（带事件唤醒），订阅参考")
 
     # 参考状态（demo 未发布时悬停在起点）
-    ref_pos = START_POS
+    ref_pos = start_pos
     ref_vel = np.zeros(3)
     got_ref = False
 
@@ -188,7 +199,7 @@ def main() -> None:
             # 全变 NaN，下游 VIO 会被毒化——检测到即重置到起点，长跑不挂。
             if not np.isfinite(env.data.qpos).all() or not np.isfinite(env.data.qvel).all():
                 log("物理失稳（NaN/Inf）@ t={:.2f}，重置到起点".format(env.time))
-                env.reset(START_POS, np.array([0.0, 0.0, 0.0, 1.0]))
+                env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))
             t = env.time
             frame += 1
 
@@ -210,7 +221,7 @@ def main() -> None:
                 # 推进到 t 之后的网格点（防止 t 越过后下一步重复发布，
                 # 保证 IMU 严格 0.01s 间隔、相机严格 0.1s 间隔）
                 while next_imu <= t + 1e-12:
-                    next_imu += IMU_PERIOD
+                    next_imu += imu_period
 
             # 10Hz 双目 + 深度 + 真值
             if t + 1e-12 >= next_cam:
@@ -218,7 +229,7 @@ def main() -> None:
                 _notify(cam_notify)  # 左右目成对发布完成后单次唤醒
                 _publish_gt(gt_pub, cycle, env, t)
                 while next_cam <= t + 1e-12:
-                    next_cam += CAM_PERIOD
+                    next_cam += cam_period
                 if (got_ref or script_mode) and frame % 200 == 0:
                     pos, _, vel = env.gt_pose()
                     log(
@@ -230,8 +241,8 @@ def main() -> None:
             # 实时节奏（--no-trace 时仍限速 1x：步进 0.36ms << 5ms 预算，sleep 自动限速）
             wall = time.perf_counter() - t_start
             target = t
-            if wall < target - PHYSICS_PERIOD:
-                time.sleep(target - wall - PHYSICS_PERIOD)
+            if wall < target - physics_period:
+                time.sleep(target - wall - physics_period)
     except KeyboardInterrupt:
         if cycle is not None:
             ftrace.end_cycle(cycle)

@@ -60,12 +60,12 @@ pub struct UpdaterMsckf {
 impl UpdaterMsckf {
     /// 构造（对照 `UpdaterMSCKF` 构造函数；`sigma_pix_sq` 由 sigma 刷新）。
     #[must_use]
-    pub fn new(options: UpdaterOptions) -> Self {
+    pub fn new(options: UpdaterOptions, triangulation_options: TriangulationOptions) -> Self {
         let mut options = options;
         options.sigma_pix_sq = options.sigma_pix * options.sigma_pix;
         Self {
             options,
-            triangulation_options: TriangulationOptions::default(),
+            triangulation_options,
             rep_msckf: crate::options::FeatRepresentation::Global3D,
         }
     }

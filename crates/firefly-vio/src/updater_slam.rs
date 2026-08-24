@@ -48,13 +48,17 @@ pub struct UpdaterSlam {
 impl UpdaterSlam {
     /// 构造（对照 `UpdaterSLAM` 构造函数；`sigma_pix_sq` 由 sigma 刷新）。
     #[must_use]
-    pub fn new(options: UpdaterOptions, rep_slam: FeatRepresentation) -> Self {
+    pub fn new(
+        options: UpdaterOptions,
+        rep_slam: FeatRepresentation,
+        triangulation_options: TriangulationOptions,
+    ) -> Self {
         let sigma_pix = options.sigma_pix;
         let mut options = options;
         options.sigma_pix_sq = sigma_pix * sigma_pix;
         Self {
             options,
-            triangulation_options: TriangulationOptions::default(),
+            triangulation_options,
             rep_slam,
         }
     }
@@ -739,7 +743,11 @@ mod tests {
         let cov_before = st.cov.nrows();
         assert_eq!(cov_before, 27); // 15 + 6 + 6
         let mut feats = vec![feat];
-        let mut updater = UpdaterSlam::new(UpdaterOptions::default(), FeatRepresentation::Global3D);
+        let mut updater = UpdaterSlam::new(
+            UpdaterOptions::default(),
+            FeatRepresentation::Global3D,
+            TriangulationOptions::default(),
+        );
         updater.delayed_init(&mut st, &mut feats);
         // 成功 → 特征保留（标记删除），landmark 入库
         assert_eq!(feats.len(), 1);
@@ -765,6 +773,7 @@ mod tests {
         let mut updater = UpdaterSlam::new(
             UpdaterOptions::default(),
             FeatRepresentation::AnchoredInverseDepthSingle,
+            TriangulationOptions::default(),
         );
         updater.delayed_init(&mut st, &mut feats);
         assert_eq!(feats.len(), 1, "SINGLE 特征应初始化成功");
@@ -786,6 +795,7 @@ mod tests {
         let mut updater = UpdaterSlam::new(
             UpdaterOptions::default(),
             FeatRepresentation::AnchoredInverseDepthSingle,
+            TriangulationOptions::default(),
         );
         let mut feats = vec![feat];
         updater.delayed_init(&mut st, &mut feats);
@@ -821,7 +831,11 @@ mod tests {
         feat.uvs = HashMap::from([(0usize, vec![Vector2::new(0.1f32, 0.04f32); 2])]);
         feat.uvs_norm = HashMap::from([(0usize, vec![Vector2::new(0.1, 0.04); 2])]);
         let mut feats = vec![feat];
-        let mut updater = UpdaterSlam::new(UpdaterOptions::default(), FeatRepresentation::Global3D);
+        let mut updater = UpdaterSlam::new(
+            UpdaterOptions::default(),
+            FeatRepresentation::Global3D,
+            TriangulationOptions::default(),
+        );
         updater.delayed_init(&mut st, &mut feats);
         assert!(feats.is_empty());
         assert!(st.features_slam.is_empty());
@@ -831,7 +845,11 @@ mod tests {
     #[test]
     fn slam_update_keeps_landmark_consistent() {
         let (mut st, feat) = slam_scene();
-        let mut updater = UpdaterSlam::new(UpdaterOptions::default(), FeatRepresentation::Global3D);
+        let mut updater = UpdaterSlam::new(
+            UpdaterOptions::default(),
+            FeatRepresentation::Global3D,
+            TriangulationOptions::default(),
+        );
         // 先延迟初始化
         let mut feats = vec![feat];
         updater.delayed_init(&mut st, &mut feats);
@@ -892,6 +910,7 @@ mod tests {
         let mut updater = UpdaterSlam::new(
             UpdaterOptions::default(),
             FeatRepresentation::AnchoredMsckfInverseDepth,
+            TriangulationOptions::default(),
         );
         let mut feats = vec![feat];
         updater.delayed_init(&mut st, &mut feats);
@@ -930,7 +949,11 @@ mod tests {
         // GLOBAL_3D 特征不应被重锚（change_anchors 应 no-op）
         let (mut st, feat) = slam_scene();
         st.options.max_clone_size = 2;
-        let mut updater = UpdaterSlam::new(UpdaterOptions::default(), FeatRepresentation::Global3D);
+        let mut updater = UpdaterSlam::new(
+            UpdaterOptions::default(),
+            FeatRepresentation::Global3D,
+            TriangulationOptions::default(),
+        );
         let mut feats = vec![feat];
         updater.delayed_init(&mut st, &mut feats);
         assert!(st.features_slam.contains_key(&1));
@@ -945,7 +968,11 @@ mod tests {
     #[test]
     fn slam_update_with_unknown_feature_panics() {
         let (mut st, feat) = slam_scene();
-        let mut updater = UpdaterSlam::new(UpdaterOptions::default(), FeatRepresentation::Global3D);
+        let mut updater = UpdaterSlam::new(
+            UpdaterOptions::default(),
+            FeatRepresentation::Global3D,
+            TriangulationOptions::default(),
+        );
         let mut feats = vec![feat];
         // 未初始化就直接 update → panic（对照 C++ assert）
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

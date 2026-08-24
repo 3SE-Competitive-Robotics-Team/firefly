@@ -16,6 +16,7 @@
 //! （感知占据地图）、`plan/motions`（动态障碍）、`plan/map`+`plan/decor`
 //! （静态先验，启动时一次性记录）。
 
+mod config;
 mod scene;
 
 use std::collections::HashSet;
@@ -47,10 +48,13 @@ const LOOP_PERIOD: Duration = Duration::from_millis(100);
 const ODOM_FRESH_TIMEOUT: f64 = 1.0;
 /// 感知占据地图的 viewer 更新周期（帧；10Hz 循环下约每 2.5s）。
 const PERCEIVED_PERIOD: usize = 25;
+/// `configs/planner.toml` 缺省路径（相对运行目录，通常为仓库根）。
+const DEFAULT_CONFIG: &str = "configs/planner.toml";
 
 struct Args {
     map: Option<PathBuf>,
     save: Option<PathBuf>,
+    config: PathBuf,
     start: [f64; 3],
     goal: Option<[f64; 3]>,
     frame_offset: [f64; 3],
@@ -61,6 +65,7 @@ fn parse_args() -> Result<Args> {
     let mut args = Args {
         map: None,
         save: None,
+        config: PathBuf::from(DEFAULT_CONFIG),
         start: [1.0, 4.0, 1.0],
         // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
         goal: None,
@@ -77,6 +82,11 @@ fn parse_args() -> Result<Args> {
                 args.save = Some(PathBuf::from(it.next().ok_or_else(|| {
                     Error::new(ErrorKind::InvalidArgument, "missing --save value")
                 })?));
+            }
+            "--config" => {
+                args.config = PathBuf::from(it.next().ok_or_else(|| {
+                    Error::new(ErrorKind::InvalidArgument, "missing --config value")
+                })?);
             }
             "--start" => args.start = parse_vec3(&mut it, "--start")?,
             "--goal" => args.goal = Some(parse_vec3(&mut it, "--goal")?),
@@ -100,6 +110,8 @@ struct OdomSnapshot {
 
 struct App {
     manager: PlannerManager,
+    /// 管理器行为参数（来自配置，启动日志展示）。
+    manager_options: ManagerOptions,
     viewer: Viewer,
     map_file: MapFile,
     /// 静态占据体素（动态障碍不得清掉它们）。
@@ -136,6 +148,7 @@ impl App {
         map_file: MapFile,
         viewer: Viewer,
         config: PlannerConfig,
+        manager_options: ManagerOptions,
         start: [f64; 3],
         goal: Option<[f64; 3]>,
         frame_offset: [f64; 3],
@@ -151,7 +164,7 @@ impl App {
         let goal = goal.unwrap_or(start);
         let manager = PlannerManager::with_planner(
             planner,
-            ManagerOptions::default(),
+            manager_options,
             Vector3::new(start[0], start[1], start[2]),
             Vector3::new(goal[0], goal[1], goal[2]),
         )?;
@@ -195,6 +208,7 @@ impl App {
         log::info!("状态源：odom（新鲜度 {ODOM_FRESH_TIMEOUT}s）；真值不参与规划链路");
         Ok(Self {
             manager,
+            manager_options,
             viewer,
             static_occupied,
             prev_dyn: Vec::new(),
@@ -421,8 +435,8 @@ impl App {
         )?;
         log::info!(
             "主循环启动：10Hz，重规划阈值 {:.1}s，规划视界 {:.0}m",
-            ManagerOptions::default().replan_thresh,
-            ManagerOptions::default().planning_horizon,
+            self.manager_options.replan_thresh,
+            self.manager_options.planning_horizon,
         );
         let mut frame = 0usize;
         let waitset = WaitSetBuilder::new()
@@ -503,11 +517,19 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!(
-                "{e}\n用法：planner [--map <map.ffmap>] [--save out.rrd] [--start x y z] [--goal x y z] [--frame-offset x y z]\n\n--goal 可省略（悬停等待 `uv run firefly-goal X Y Z` 动态目标）"
+                "{e}\n用法：planner [--map <map.ffmap>] [--config configs/planner.toml] [--save out.rrd] [--start x y z] [--goal x y z] [--frame-offset x y z]\n\n--goal 可省略（悬停等待 `uv run firefly-goal X Y Z` 动态目标）"
             );
             std::process::exit(2);
         }
     };
+    let toml_cfg = match config::PlannerToml::load(&args.config) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("加载配置失败：{e}");
+            std::process::exit(1);
+        }
+    };
+    log::info!("已加载配置 {}", args.config.display());
     let map_file = if let Some(p) = &args.map {
         match MapFile::from_file(p) {
             Ok(m) => m,
@@ -538,7 +560,8 @@ fn main() {
     match App::new(
         map_file,
         viewer,
-        PlannerConfig::default(),
+        toml_cfg.config,
+        toml_cfg.manager,
         args.start,
         args.goal,
         args.frame_offset,

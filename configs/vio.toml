@@ -1,0 +1,20 @@
+# VIO 配置（MuJoCo 双目部署；缺键回落代码默认值，`--config` 可换文件）
+
+[camera]
+width = 320
+height = 240
+focal = 168.607 # MuJoCo fovy=70.88° 推导；真机换标定值
+baseline = 0.05 # 米，IMU 居中
+
+[imu]
+gyro_noise = 2.83e-2 # 连续谱密度 rad/s/√Hz；须与 sim 注入匹配（真机换 MEMS 值）
+gyro_walk = 1.9e-5
+accel_noise = 2.83e-1
+accel_walk = 3.0e-3
+
+[frontend]
+num_pts = 300 # 每相机 KLT 目标特征数
+
+[estimator]
+init_bias_sigma = 1e-6 # sim 无真实偏置；真机改回 0.02
+max_baseline = 120 # 三角化深度/基线比上限（OpenVINS 默认 40）
