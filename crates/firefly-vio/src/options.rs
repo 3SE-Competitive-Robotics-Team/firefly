@@ -1,8 +1,7 @@
 //! MSCKF 滤波器选项（对照 `OpenVINS` `ov_msckf` 的
 //! `StateOptions.h`/`VioManagerOptions.h`/`UpdaterOptions.h`）。
 //!
-//! 只移植 struct + 默认值；YAML 解析属于 apps 层职责（后续接入），
-//! 这里不引入配置文件依赖。
+//! 只含 struct + 默认值；配置文件解析属 apps 层职责，这里不引入配置依赖。
 
 use firefly_vio_core::noise::ImuNoise;
 

@@ -25,9 +25,8 @@ pub struct ClonePose {
 /// 三角化检查参数（对照 `FeatureInitializerOptions` 默认值）。
 #[derive(Debug, Clone, Copy)]
 pub struct TriangulationOptions {
-    /// 条件数上限（`max_cond_number = 100000`）。低视差单目下 DLT 条件数偏大。
-    /// 注意：曾实验放宽到 1e6 + 硬残差门，实跑三角化存活仍几乎为 0、odom 略更
-    /// 糟（拒绝主因是深度/精化检查而非 cond），故保持 1e5 较温和而非激进。
+    /// 条件数上限（`max_cond_number = 100000`）。低视差单目下 DLT 条件数偏大；
+    /// 维持 1e5：放宽至 1e6 后拒绝主因转为深度/精化检查，三角化存活无改善。
     pub max_cond_number: f64,
     /// 最小深度（`min_dist = 0.10` m）。
     pub min_dist: f64,
@@ -345,8 +344,8 @@ pub fn single_gaussnewton(
     // 的投影长度——衡量对逆深度可观的侧向视差。此处用闭式等价：
     //   |v⊥|² = |v|² − (vᵀê)²
     // 与取正交基列 1..3 投影完全一致（避免对 3×1 输入构造紧凑 QR）。
-    // 历史缺陷：误用 xy().norm()——前飞场景克隆位移沿视线方向，xy 分量
-    // ≈0 → 基线≈0 → 全部拒绝。
+    // 必须取 ⊥ê 分量而非 xy().norm()：前飞场景克隆位移沿视线方向时
+    // xy 分量 ≈0，会把基线误判为 0 而全部拒绝。
     let e_hat = p_fin_a / p_fin_a.norm();
     let mut base_line_max = 0.0f64;
     for (cam_id, times) in &feat.timestamps {

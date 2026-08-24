@@ -26,7 +26,7 @@ fn planner_avoids_dynamic_obstacle() {
 
     // 动态障碍：横向穿过本机路径（y=3.4 向下渐停,接近本机 y=3.0 直线），
     // 需小幅 y 避让。官方语义：CLEARANCE = swarm_clearance × 1.5 = 0.75
-    //（v2 `swarmGradCostP`,不再叠加 peer 体积）——障碍须进入 0.75 范围
+    //（对照 v2 `swarmGradCostP`，不叠加 peer 体积）——障碍须进入 0.75 范围
     // 才触发避让,故让障碍起始点贴近路径。
     let obstacle = MovingObstacle::new(
         Vector2::new(4.5, 3.4),

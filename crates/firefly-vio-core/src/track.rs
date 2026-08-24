@@ -385,8 +385,7 @@ impl TrackKlt {
 
         let hist_method = self.base.histogram_method;
 
-        // 并行：每相机独立做直方图预处理（purecv LK 内部自建 f32 金字塔，
-        // 不再需要 u8 金字塔——pyramid_curr 已随自研 LK 移除）
+        // 并行：每相机独立做直方图预处理（purecv LK 内部自建 f32 金字塔）
         let results: Vec<_> = msg
             .sensor_ids
             .par_iter()
@@ -521,9 +520,8 @@ impl TrackKlt {
             let sr = self.cams.get(&keyr).unwrap();
             (sl.img_curr.clone(), sr.img_curr.clone())
         };
-        // 上一帧图像（时间 LK 的 img0；历史缺陷：曾误用 img_curr 当 img0，
-        // 同一帧内自匹配 → 坐标冻结（uvs_uniq=1）→ 多帧特征射线平行 →
-        // 三角化全灭（cond>1e5）→ MSCKF 更新饿死 → 纯 IMU 开环漂移）
+        // 上一帧图像（时间 LK 的 img0）：必须用 last 帧——用当前帧会同帧
+        // 自匹配，特征坐标冻结 → 射线平行 → 三角化退化 → 更新饿死
         let (img_l_last, img_r_last) = {
             let sl = self.cams.get(&keyl).unwrap();
             let sr = self.cams.get(&keyr).unwrap();
@@ -576,8 +574,8 @@ impl TrackKlt {
             &mask_l_last,
             &mask_r_last,
             // 对照 C++：补点检测在 `img_pyramid_last` 上做，新点随时间 LK
-            // 跟进当前帧（历史缺陷：曾误传 img_curr——新点在当前帧检出后
-            // 坐标又被当作上一帧位置做一次 LK，首跳即死 → db 饿死）
+            // 跟进当前帧（不得传当前帧，否则新点坐标被当作上一帧位置二次
+            // 跟踪，首跳即死 → db 饿死）
             &img_l_last,
             &img_r_last,
             &mut pts_l,
@@ -590,7 +588,6 @@ impl TrackKlt {
         let (mut pts_l_new, mut pts_r_new) = (pts_l.clone(), pts_r.clone());
         // 运动外推初值：LK 初值 = 上一帧位置 + 最近两帧位移（按特征 id 查
         // 库），减小大位移（10Hz 下近地面特征 ~31px/帧）下 LK 收敛滞后。
-        // 健康前端实测（2026-08 前端修复后）：外推开 0.8m@34s vs 关 1.3m。
         for (i, id) in ids_l.iter().enumerate() {
             if let Some(uvs) = self
                 .base
@@ -705,10 +702,9 @@ impl TrackKlt {
         // 入库
         self.insert_to_db(timestamp, sid_l, &good_l, &good_ids_l);
         self.insert_to_db(timestamp, sid_r, &good_r, &good_ids_r);
-        // Move forward in time（对照 C++ feed_stereo 末尾同名段：img/mask/
-        // pts/ids_last 全部推进到当前帧。历史缺陷——曾漏写整段，pts_last/
-        // img_last 永远停在首帧：每帧都从首帧点集跨大基线跟踪、补点永远在
-        // 首帧图上检出 → db 被 len=1 死特征淹没、MSCKF 测量系统性带偏）
+        // Move forward in time（对照 C++ feed_stereo 末尾同名段）：img/mask/
+        // pts/ids_last 必须全部推进到当前帧，漏任何一项都会让跟踪基线错乱、
+        // db 被死特征淹没
         {
             let sl = self.cams.get_mut(&keyl).unwrap();
             sl.img_last = img_l;

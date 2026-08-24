@@ -71,8 +71,8 @@ pub fn get_feature_jacobian_full(
                    map_hx: &mut std::collections::HashMap<(i32, usize), usize>| {
         let key = (id, size);
         map_hx.entry(key).or_insert_with(|| {
-            // 列偏移 = 之前所有变量的尺寸之和（对照 C++ 的 total_hx 累计）；
-            // 若误用变量序号，多变量 H_x 的列会互相覆盖（历史缺陷）
+            // 列偏移 = 此前所有变量的尺寸之和（对照 C++ 的 total_hx 累计）；
+            // 误用变量序号会使多变量 H_x 的列互相覆盖
             let col = x_order.iter().map(|(_, s)| s).sum::<usize>();
             x_order.push(key);
             col
@@ -267,9 +267,8 @@ pub fn get_feature_jacobian_full(
                 .expect("特征测量时刻必须存在对应克隆");
             // 残差与投影用**当前**位姿（对照 C++：res 在 FEJ 覆盖段之前用
             // `clone_Ii->Rot()/pos()` 当前值计算）；FEJ 只影响雅可比线性化
-            // 点（历史缺陷：曾用 fej 算残差——克隆 fej 随更新变陈旧，残差
-            // 恒带"陈旧度"偏置 → EKF 每帧把状态往 fej 方向拖 → 姿态/速度
-            // 线性漂移、位置二次发散；do_fej=false 时 12s 误差 100m+ → 1.2m）。
+            // 点——不得用 fej 算残差，否则克隆 fej 随更新变陈旧，EKF 会把
+            // 状态系统性往 fej 方向拖。
             let r_gto_ii = clone.rot();
             let p_iin_g = clone.pos();
 
@@ -281,8 +280,7 @@ pub fn get_feature_jacobian_full(
             // 残差统一在**像素**空间：uvs 是原始像素；`distort_d`/`distort_f`
             // 本身就把归一化坐标映射回原始像素（`CamRadtan::distort_f` 末尾
             // `pixel_from_norm(x1,y1)`，即 `fx·x+cx`），故 `uv_dist` 已是像素、
-            // 直接与 `uv_m` 相减（round4 曾误加 `uv_pred = fx·uv_dist+cx` 造成
-            // 双重缩放 → SLAM 残差 -25 万级、MSCKF 增益失真，已回退）。
+            // 直接与 `uv_m` 相减，不得再做投影换算（会双重缩放）。
             let uv_dist = cam.distort_d(uv_norm.cast());
             let uv_pred = uv_dist;
 
@@ -311,8 +309,7 @@ pub fn get_feature_jacobian_full(
             dzn_dpfc[(1, 1)] = 1.0 / p_fin_ci_j.z;
             dzn_dpfc[(1, 2)] = -p_fin_ci_j.y / z2;
             // dz_dpfc：d(像素残差)/d(p_FinCi)。dz_dzn=∂(像素)/∂(归一化) 已含
-            // fx/fy/cx/cy（distort_f 输出像素），故不再额外乘 pix_scale
-            //（round4 误加 → 双重缩放）。
+            // fx/fy/cx/cy（distort_f 输出像素），无需再乘 pix_scale。
             let dz_dpfc = dz_dzn * dzn_dpfc;
 
             let dpfc_dpfg = r_ito_c * r_gto_ii_j;

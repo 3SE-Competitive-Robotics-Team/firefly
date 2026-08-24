@@ -7,11 +7,10 @@
 //!
 //! 运行：`cargo run -p vio`（配合 `uv run firefly-sim` 的 `MuJoCo` 物理环境）。
 //! - 瘦版 rerun：10Hz 位姿/轨迹（`vio/odom`+`vio/traj` 橙、真值
-//!   `gt/pose`+`gt/traj` 蓝，统一 `sim_time` 时间轴）。只记位姿不流图像——
-//!   图像流是旧版拖慢闭环的主因。无 viewer 则自起，失败不影响估计。
-//!   轨迹实体与位姿实体必须平级：rerun 父实体的 `Transform3D` 会套用整个
-//!   子树，折线挂在 `vio/odom` 下会被实时估计位姿二次变换（历史曲线被
-//!   拖着跑、起点漂移的假象）。
+//!   `gt/pose`+`gt/traj` 蓝，统一 `sim_time` 时间轴），只记位姿不流图像。
+//!   无 viewer 则自起，失败不影响估计。
+//!   约束：轨迹实体必须与位姿实体平级——rerun 父实体的 `Transform3D`
+//!   会套用整个子树，折线挂在 `vio/odom` 下会被位姿二次变换。
 //! - GT 仅用于可视化，不进估计器；无 depth 订阅
 //! - `node.wait(1ms)` 节拍尽快消费消息，Ctrl-C 优雅退出
 
@@ -120,9 +119,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     params.state_options.num_cameras = 2;
     params.triangulation_options.max_baseline = cfg.estimator.max_baseline;
-    // SLAM 关闭：SLAM 更新链路毒化状态（合成 synthetic_slam_zero_bias 可
-    // 复现：slam=1 后 0.8s 内 13m 发散）。修复前保持纯 MSCKF
-    //（现场 34s 误差 271m vs 开 SLAM 1035m）。
+    // SLAM 关闭：SLAM 更新链路毒化状态（synthetic_slam_zero_bias 可复现），
+    // 保持纯 MSCKF
     params.state_options.max_slam_features = 0;
     // ZUPT 保持 OpenVINS 默认关闭（try_zupt=false）：默认分支在慢速运动
     // 下有盲区（加速度 < IMU 噪声 σ 时 chi2 不超 → 误接受 → 位置冻结），
@@ -158,9 +156,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         calib.set_value(q_ito_c, p_iin_c);
         calib.set_fej(q_ito_c, p_iin_c);
     }
-
-    // 真值先验：与 MuJoCo 场景一致（起点静止）
-    // （初始化已移至 gt_sub 创建后，见下方"真值初始化"块；此处不再设状态）
 
     // 进程共享节点：所有端口由它派生；主循环以 node.wait 驱动，Ctrl-C 优雅
     // 退出并释放全部 IPC 资源（硬杀会留孤儿共享内存 + 幽灵端口注册）
@@ -268,7 +263,7 @@ const HEARTBEAT: Duration = Duration::from_millis(100);
 const DIAG_PERIOD: f64 = 10.0;
 
 /// 驱动循环（事件驱动）：WaitSet 监听 IMU/相机对事件即到即醒（数据率 ≈ 唤醒
-/// 率，不再固定节拍轮询），100ms 心跳兜底做断流警戒与诊断；SIGINT/SIGTERM 由
+/// 率），100ms 心跳兜底做断流警戒与诊断；SIGINT/SIGTERM 由
 /// `WaitSet` 捕获返回 → 优雅退出，所有端口 Drop、IPC 资源释放。
 // 输入分发 + 前端健康度统计的编排长流程（与 C++ run_loop 对照结构一致）。
 #[allow(clippy::too_many_lines)]
@@ -430,8 +425,7 @@ fn run_loop(
         if t_sim + 1e-9 >= next_odom {
             let s = &vio.state;
             publish_odom(odom_pub, t_sim, s.timestamp, &s.imu, vio.initialized());
-            // 瘦版 rerun：位姿 + 轨迹折线 @10Hz（图像流是旧版拖慢
-            // 闭环的主因，此处只记位姿，开销可忽略）
+            // 瘦版 rerun：位姿 + 轨迹折线 @10Hz（只记位姿不流图像）
             if let Some(viewer) = viewer {
                 let p = s.imu.pos();
                 let q = s.imu.quat();
@@ -567,9 +561,9 @@ fn log_viz(
 ///
 /// 平移为 **`p_IinC`（IMU 原点在相机系下的坐标）**，非体系杆臂！由期望的
 /// 体系横向安装位置 `p_CinI = (0, ±baseline/2, 0)` 换算：
-/// `p_IinC = -R_ItoC · p_CinI` ⇒ `(±baseline/2, 0, 0)`。（曾误填体系值
-/// (0,±0.025,0)：经 R 旋到世界系变成沿视线方向的纵向基线——立体视差恒为零，
-/// 三角化全部退化，视觉更新从未生效。）
+/// `p_IinC = -R_ItoC · p_CinI` ⇒ `(±baseline/2, 0, 0)`。
+/// 注意：误填体系值会经 R 旋成沿视线方向的纵向基线——立体视差恒为零，
+/// 三角化全部退化。
 #[must_use]
 fn mujoco_stereo_extrinsic(baseline: f64) -> (nalgebra::Vector4<f64>, [nalgebra::Vector3<f64>; 2]) {
     use firefly_vio_types::quat_ops::rot_2_quat;
@@ -613,7 +607,7 @@ mod tests {
 
     /// 基线语义：经 `p_ciinG = p_IinG - R_GtoCi^T · p_IinC` 还原的世界系相机
     /// 位置差必须落在 **横向（body ±y / world ±y）**——纵向基线无立体视差，
-    /// 三角化全部退化（历史缺陷回归测试）。
+    /// 三角化全部退化。
     #[test]
     fn stereo_baseline_is_lateral() {
         let baseline = 0.05;

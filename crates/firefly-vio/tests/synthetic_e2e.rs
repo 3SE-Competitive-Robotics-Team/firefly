@@ -38,8 +38,8 @@ fn build_manager_ex(max_slam: usize, do_fej: bool) -> VioManager {
     let mut params = VioManagerOptions {
         // 假设噪声须与注入端一致：注入为均匀 ±0.02（accel）/±0.002（gyro）
         // @100Hz → 连续密度 σ_a = 0.02/√3·√100 ≈ 0.115、σ_w ≈ 0.0115。
-        // （历史缺陷：沿用现场 MuJoCo IMU 的 2.83e-2/2.83e-1，比合成注入大
-        // ~2.5×，P 平衡点被推到米级——弱几何更新踢不动状态反而被 Q 淹没）
+        // （不得沿用现场 MuJoCo IMU 的 2.83e-2/2.83e-1——比合成注入大 ~2.5×，
+        // P 平衡点被推到米级，弱几何更新踢不动状态反而被 Q 淹没）
         imu_noises: firefly_vio_core::noise::ImuNoise::new(1.15e-2, 2.0e-3, 1.15e-1, 3.0e-3),
         ..VioManagerOptions::default()
     };
@@ -344,20 +344,17 @@ fn run_cfg(cfg: &ScenarioCfg) -> (f64, f64, f64, f64, Vector3<f64>) {
     )
 }
 
-/// 隔离实验 A：禁用 SLAM + 零偏 —— 无灾难性发散（`H_x` 列偏移修复的回归锚点）。
+/// 隔离实验 A：禁用 SLAM + 零偏 —— 无灾难性发散（`H_x` 列偏移的回归锚点）。
 ///
-/// **已知局限（2026-08 前端修复后暴露，此前视觉从未真正参与——`feed_stereo`
-/// 漏写状态推进致每帧从首帧点集跨帧跟踪，"通过"实为纯 IMU 外推假阳性）**：
-/// 场景为零旋转、纯前向恒速、稀疏点阵 + 5cm 立体基线——对 `MSCKF` 近规范退化
-/// （x 向速度仅靠时间视差与微弱立体视差约束），P 平衡点米级、估计速度
-/// ±0.7m/s 随机摆动。现场 `MuJoCo` 闭环（旋转+平移+真实纹理）实测
-/// `bench_vio.py`：34s `ATE_RMSE` 0.6m / `RPE_1s` 0.1m/s，视觉链路健康。
-/// 待办：场景重设计（姿态激励 + 包围式点云）后恢复为有效回归测试。
+/// 已知局限：场景为零旋转、纯前向恒速、稀疏点阵 + 5cm 立体基线——对 `MSCKF`
+/// 近规范退化（x 向速度仅靠时间视差与微弱立体视差约束），P 平衡点米级、估计速度
+/// ±0.7m/s 随机摆动，断言力弱；视觉链路健康与否以现场 `MuJoCo` 闭环实测
+/// `bench_vio.py` 为事实源。
 #[test]
 #[ignore = "场景对 MSCKF 近退化（零旋转纯前向+稀疏点阵），需重设计；现场 bench 为事实源"]
 fn synthetic_pure_msckf_zero_bias() {
     let (err_p, _, _, _, _) = run_scenario(false, 0);
-    // H_x 列偏移修复前此场景会因坏雅可比发散到数十米；<3m 说明无结构缺陷
+    // <3m 断言排除坏雅可比类结构性发散
     assert!(
         err_p < 3.0,
         "纯 MSCKF 位置误差过大（疑似结构性发散）: {err_p:.3}m"
@@ -365,9 +362,9 @@ fn synthetic_pure_msckf_zero_bias() {
 }
 
 /// SLAM 模式（OpenVINS 默认 `max_slam_features=25`）。已知问题：SLAM 更新
-/// 链路毒化状态（合成可复现：`slam=1` 后 0.8s 内 13m 发散；`H_x`/`H_f` 已 FD
-/// 验证正确、initialize/update 与 C++ 逐行一致——残留嫌疑为场景 y 可观测性弱）。
-/// 修复前保持 ignore；apps/vio 亦维持 `max_slam_features=0`。
+/// 链路毒化状态（合成可复现；`H_x`/`H_f` 已 FD 验证正确、initialize/update 与
+/// C++ 逐行一致——残留嫌疑为场景 y 可观测性弱）。apps/vio 因此维持
+/// `max_slam_features=0`。
 #[test]
 #[ignore = "已知问题：SLAM 更新链路毒化状态（合成可复现），见 synthetic_slam_zero_bias 注释"]
 fn synthetic_slam_zero_bias() {
@@ -378,7 +375,7 @@ fn synthetic_slam_zero_bias() {
 
 /// 复现现场"静止→运动"：静止 5s 后匀速。静止期 SLAM 特征初始化视差结构差，
 /// 是现场 SLAM 发散的关键触发条件（连续运动合成场景不触发）。
-/// 同 `synthetic_slam_zero_bias`：SLAM 链路毒化已知问题，修复前忽略。
+/// 同 `synthetic_slam_zero_bias`：SLAM 链路毒化已知问题。
 #[test]
 #[ignore = "已知问题：SLAM 更新链路毒化状态，见 synthetic_slam_zero_bias 注释"]
 fn synthetic_slam_static_then_move() {

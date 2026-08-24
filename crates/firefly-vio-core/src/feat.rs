@@ -9,7 +9,7 @@
 //! 直接返回共享且不安全，需 `remove=true` 取出以免跟踪器并发改写）。Rust 借用规则
 //! 由编译期保证所有权安全，故此处省略互斥锁，采用单线程所有权模型：
 //! `remove=true` 时移出数据库并转移所有权，`remove=false` 时返回克隆快照
-//! （语义见各方法）。wave 2 若需并发，再在 crate 层包一层 `Mutex`。
+//! （语义见各方法）。若需并发，在 crate 层包一层 `Mutex` 即可。
 //!
 //! ## MSCKF updater 消费约定
 //! 移植 `MSCKF` 滑动窗口 updater 时，取用本库特征**必须使用 `remove=true` 语义**
