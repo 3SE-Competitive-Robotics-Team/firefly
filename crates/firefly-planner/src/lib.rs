@@ -13,4 +13,5 @@ mod planner;
 
 pub use config::PlannerConfig;
 pub use manager::{LocalTraj, ManagerOptions, PlannerManager, Reference, TickReport};
+pub use obstacles::{PointsToCheck, SamplePoint};
 pub use planner::{FormationSpec, InitSource, PlanResult, Planner, State};
