@@ -7,11 +7,12 @@
 mod config;
 pub mod init;
 pub mod manager;
+pub mod multitopo;
 pub mod objective;
 mod obstacles;
 mod planner;
 
 pub use config::PlannerConfig;
 pub use manager::{LocalTraj, ManagerOptions, PlannerManager, Reference, TickReport};
-pub use obstacles::{PointsToCheck, SamplePoint};
+pub use obstacles::{CollisionSpan, PointsToCheck, SamplePoint};
 pub use planner::{FormationSpec, InitSource, PlanResult, Planner, State};

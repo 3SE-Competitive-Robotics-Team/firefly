@@ -19,8 +19,18 @@ use nalgebra::{Point3, Vector3};
 
 use crate::config::PlannerConfig;
 use crate::init::{self, InitConfig};
+use crate::multitopo::distinctive_candidates;
 use crate::objective::MincoObjective;
 use crate::obstacles::{CheckResult, ObstacleScanner, constraint_sample_points, two_thirds_id};
+
+/// 单次完整优化内层（官方 `optimizeTrajectory`）的产出。
+struct InnerOutcome {
+    minco: Minco,
+    planes_by_point: Vec<Vec<Plane>>,
+    iterations: usize,
+    /// L-BFGS 输出的目标总代价（官方 `final_cost`）。
+    final_cost: f64,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct State {
@@ -261,20 +271,13 @@ impl Planner {
         )
     }
 
-    /// Rebound 主循环（对齐官方 v2 `PolyTrajOptimizer::optimize`）：
-    /// - 初始轨迹 fine check 建约束（官方 `finelyCheckAndSetConstraintPoints`
-    ///   `flag_first_init=true`:稠密采样 + in/out 分段 + A\* 绕障 + 交点平面）；
-    /// - L-BFGS 内部动态检测约束点（`ReboundDetector` → 官方
-    ///   `roughlyCheckConstraintPoints`），发现新穿入即提前终止
-    ///   （官方 `STOP_FOR_REBOUND`，`rebound_times ≤ 20`）；
-    /// - 优化后 fine check，碰撞则并入新平面后 restart（`restart_nums` 限）；
-    /// - 成功条件：swarm 距离满足 && fine check `OBS_FREE`（官方）。
-    /// - 全局迭代上限 [`Self::REBOUND_MAX_ITERATIONS`] 兜底所有分支。
-    // 主循环编排（初始化/L-BFGS/fine check/restart 多阶段），clippy too_many_lines 允许
-    #[allow(clippy::too_many_lines)]
+    /// Rebound 编排入口（对齐官方 `EGOPlannerManager::reboundReplan`）：
+    /// 初始 fine check 后，开关关/无碰撞段走单候选路径；多拓扑开启且存在
+    /// 碰撞段时生成候选集（官方 `distinctiveTrajs`），从最后一个候选到第一个
+    /// 逐个跑完整优化，取 `final_cost` 最小者（严格小于才替换）。
     fn rebound(
         &mut self,
-        mut minco: Minco,
+        minco: Minco,
         start_endpoint: Endpoint,
         local_goal: Point3<f64>,
         peers: &[firefly_cost::Peer],
@@ -282,35 +285,108 @@ impl Planner {
     ) -> Result<PlanResult> {
         let k = self.config.constraint_points_per_piece;
         let n_points = minco.pieces() * k + 1;
-        let two_thirds = two_thirds_id(n_points, touch_goal);
         let mut planes_by_point: Vec<Vec<Plane>> = vec![Vec::new(); n_points];
-        let mut prev_formation_dev = f64::MAX;
 
-        let mut rebound_times = 0usize;
-        let mut restart_nums = 0usize;
-        let mut iteration = 0usize;
-
-        // 初始约束(官方 flag_first_init=true):稠密采样 + 分段 + A\* 绕障 + 平面
+        // 初始约束(官方 flag_first_init=true):稠密采样 + 分段 + A\* 绕障 + 平面;
+        // 碰撞段供多拓扑候选生成(官方 `segments`)
         let traj0 = minco.solve()?;
         let points0 = constraint_sample_points(&traj0, k);
         let scanner0 = ObstacleScanner::new(&self.map)
             .with_samples(k)
             .with_max_vel(self.config.max_velocity);
-        match scanner0.finely_check(
+        let (check, segments) = scanner0.finely_check_with_segments(
             &mut self.astar,
             &traj0,
             &points0,
             &mut planes_by_point,
             touch_goal,
-        ) {
-            CheckResult::Error => {
-                return Err(Error::temporary(
-                    ErrorKind::Convergence,
-                    "planner: initial finely check failed",
-                ));
-            }
-            CheckResult::Free | CheckResult::Finished => {}
+        );
+        if check == CheckResult::Error {
+            return Err(Error::temporary(
+                ErrorKind::Convergence,
+                "planner: initial finely check failed",
+            ));
         }
+
+        if !self.config.use_multitopology_trajs || segments.is_empty() {
+            // 单候选路径(开关关时与单拓扑实现完全一致;无碰撞段时候选本就唯一)
+            let outcome = self.rebound_inner(
+                minco,
+                planes_by_point,
+                start_endpoint,
+                local_goal,
+                peers,
+                touch_goal,
+            )?;
+            return self.finish(&outcome.minco, &outcome.planes_by_point, outcome.iterations);
+        }
+
+        /*** 多拓扑(官方 reboundReplan STEP 2 多候选分支) ***/
+        let candidates = distinctive_candidates(&self.map, &points0, &planes_by_point, &segments);
+        log::debug!("multi-topo: {} 个候选", candidates.len());
+        let mut best: Option<(f64, InnerOutcome)> = None;
+        // 官方:从最后一个候选到第一个遍历,严格小于才替换(平局保持先评估者);
+        // 官方 min_cost 初值 999999,此处以 None 起步等价且避开哨兵值边界
+        for candidate in candidates.iter().rev() {
+            match self.rebound_inner(
+                minco.clone(),
+                candidate.planes.clone(),
+                start_endpoint,
+                local_goal,
+                peers,
+                touch_goal,
+            ) {
+                Ok(outcome) => {
+                    log::debug!("multi-topo: 候选成功 final_cost={:.3}", outcome.final_cost);
+                    if best.as_ref().is_none_or(|(c, _)| outcome.final_cost < *c) {
+                        best = Some((outcome.final_cost, outcome));
+                    }
+                }
+                Err(e) => log::debug!("multi-topo: 候选失败({e})"),
+            }
+        }
+        match best {
+            Some((cost, outcome)) => {
+                log::debug!("multi-topo: 最优 final_cost={cost:.3}");
+                self.finish(&outcome.minco, &outcome.planes_by_point, outcome.iterations)
+            }
+            None => Err(Error::temporary(
+                ErrorKind::Convergence,
+                "planner: all multi-topo candidates failed",
+            )),
+        }
+    }
+
+    /// 单次完整优化内层（对齐官方 v2 `PolyTrajOptimizer::optimizeTrajectory`）：
+    /// - L-BFGS 内部动态检测约束点（`ReboundDetector` → 官方
+    ///   `roughlyCheckConstraintPoints`），发现新穿入即提前终止
+    ///   （官方 `STOP_FOR_REBOUND`，`rebound_times ≤ 20`）；
+    /// - 优化后 fine check，碰撞则并入新平面后 restart（`restart_nums` 限）；
+    /// - 成功条件：swarm 距离满足 && fine check `OBS_FREE`（官方）。
+    /// - 全局迭代上限 [`Self::REBOUND_MAX_ITERATIONS`] 兜底所有分支。
+    /// - criterion 3 门控锁存位每次进入复位为 false（官方
+    ///   `optimizeTrajectory` Preparision 1）。
+    // 主循环编排（L-BFGS/fine check/restart 多阶段），clippy too_many_lines 允许
+    #[allow(clippy::too_many_lines)]
+    fn rebound_inner(
+        &mut self,
+        mut minco: Minco,
+        mut planes_by_point: Vec<Vec<Plane>>,
+        start_endpoint: Endpoint,
+        local_goal: Point3<f64>,
+        peers: &[firefly_cost::Peer],
+        touch_goal: bool,
+    ) -> Result<InnerOutcome> {
+        let k = self.config.constraint_points_per_piece;
+        let two_thirds = two_thirds_id(minco.pieces() * k + 1, touch_goal);
+        let multitopo = self.config.use_multitopology_trajs;
+        let mut gate_latched = false;
+        let mut prev_formation_dev = f64::MAX;
+
+        let mut rebound_times = 0usize;
+        let mut restart_nums = 0usize;
+        let mut iteration = 0usize;
+        let mut final_cost = f64::INFINITY;
 
         loop {
             iteration += 1;
@@ -332,7 +408,12 @@ impl Planner {
                 let traj = minco.solve()?;
                 let dev = self.formation_deviation(&traj);
                 if (prev_formation_dev - dev).abs() < 0.05 {
-                    return self.finish(&minco, &planes_by_point, iteration);
+                    return Ok(InnerOutcome {
+                        minco,
+                        planes_by_point,
+                        iterations: iteration,
+                        final_cost,
+                    });
                 }
                 prev_formation_dev = dev;
             }
@@ -346,6 +427,8 @@ impl Planner {
                 minco.pieces(),
                 two_thirds,
                 touch_goal,
+                multitopo,
+                gate_latched,
             );
             let x0 = Self::pack(&minco);
             // 队形目标是稳定约束（非动态障碍），一次优化到位需要更多迭代
@@ -359,6 +442,8 @@ impl Planner {
                 LbfgsConfig::default()
             };
             let report = Lbfgs::new(config).minimize(&mut objective, x0)?;
+            final_cost = report.final_cost;
+            gate_latched = objective.gate_latched();
             log::debug!(
                 "rebound {iteration}: lbfgs iter={} converged={} early_exit={} grad={:.2e}",
                 report.iterations,
@@ -388,15 +473,16 @@ impl Planner {
 
             // fine check（官方 finelyCheckAndSetConstraintPoints,flag_first_init=false）
             let traj = minco.solve()?;
-            if let Some(result) = self.try_finish(
-                &minco,
-                &traj,
-                peers,
-                &mut planes_by_point,
-                touch_goal,
-                iteration,
-            )? {
-                return Ok(result);
+            if self
+                .try_finish(&minco, &traj, peers, &mut planes_by_point, touch_goal)?
+                .is_some()
+            {
+                return Ok(InnerOutcome {
+                    minco,
+                    planes_by_point,
+                    iterations: iteration,
+                    final_cost,
+                });
             }
             // 未成功（碰撞/集群不满足）:官方 flag_still_occ → restart
             restart_nums += 1;
@@ -428,10 +514,9 @@ impl Planner {
         })
     }
 
-    /// 轨迹安全（障碍/集群/队形）时构造最终结果；否则返回 `None` 继续迭代。
+    /// 轨迹安全（障碍/集群/队形）时返回 `Some(())`；否则返回 `None` 继续迭代。
     /// 障碍检查 = 官方 fine check：稠密采样 + in/out 分段 + A\* 绕障 + 平面
     /// （碰撞时新平面已并入 `planes_by_point`，调用方 restart）。
-    #[allow(clippy::too_many_arguments)]
     fn try_finish(
         &mut self,
         minco: &Minco,
@@ -439,8 +524,7 @@ impl Planner {
         peers: &[firefly_cost::Peer],
         planes_by_point: &mut [Vec<Plane>],
         touch_goal: bool,
-        iteration: usize,
-    ) -> Result<Option<PlanResult>> {
+    ) -> Result<Option<()>> {
         if !self.swarm_safe(traj, peers) || !self.formation_safe(traj) {
             return Ok(None);
         }
@@ -460,11 +544,7 @@ impl Planner {
             log::debug!("time-rescaled trajectory unsafe, keep iterating");
             return Ok(None);
         }
-        Ok(Some(PlanResult {
-            trajectory,
-            iterations: iteration,
-            planes: planes_by_point.iter().flatten().cloned().collect(),
-        }))
+        Ok(Some(()))
     }
 
     /// 轨迹与队形目标的最大偏差（诊断用，动态推断）。
@@ -599,6 +679,8 @@ impl Planner {
         pieces: usize,
         two_thirds: usize,
         touch_goal: bool,
+        multitopo: bool,
+        gate_latched: bool,
     ) -> MincoObjective<'a> {
         let end = Endpoint {
             position: goal.coords,
@@ -662,6 +744,8 @@ impl Planner {
             self.config.max_velocity,
             touch_goal,
             planes_by_point.to_vec(),
+            multitopo,
+            gate_latched,
         )
     }
 
@@ -727,7 +811,7 @@ mod tests {
     use super::*;
     use firefly_map::{GridMapBuilder, VoxelState};
 
-    fn wall_scenario() -> (Planner, State, Point3<f64>, Vec<Vector3<f64>>) {
+    fn wall_scenario(config: PlannerConfig) -> (Planner, State, Point3<f64>, Vec<Vector3<f64>>) {
         // 0.1m 分辨率（与 demo 一致）：墙 x=4.5，高 z<1.5
         let mut map = GridMapBuilder::new(0.1, [100, 100, 100]).build().unwrap();
         for y in 0..100 {
@@ -735,7 +819,7 @@ mod tests {
                 map.set_state([45, y, z], VoxelState::Occupied);
             }
         }
-        let planner = Planner::new(PlannerConfig::default(), map);
+        let planner = Planner::new(config, map);
         let start = State {
             position: Point3::new(0.5, 0.5, 0.5),
             velocity: Vector3::zeros(),
@@ -755,7 +839,7 @@ mod tests {
     #[test]
     fn rebound_escapes_wall() {
         firefly_observability::init();
-        let (mut planner, start, goal, guide) = wall_scenario();
+        let (mut planner, start, goal, guide) = wall_scenario(PlannerConfig::default());
         let start_endpoint = Endpoint {
             position: start.position.coords,
             velocity: start.velocity,
@@ -803,6 +887,60 @@ mod tests {
         assert!(!result.planes.is_empty(), "逃逸过程必须生成平面");
 
         // 边界条件保持
+        let s0 = result.trajectory.eval(0.0);
+        assert!((s0.position - start.position.coords).norm() < 1e-6);
+        let sf = result.trajectory.eval(result.trajectory.duration());
+        assert!((sf.position - local_goal).norm() < 1e-6);
+    }
+
+    #[test]
+    fn rebound_with_multitopology_escapes_wall() {
+        // 集成冒烟：开关开 + 同一穿墙场景（初始轨迹必浅穿入 → 碰撞段非空,
+        // 多拓扑分支必然启用;候选数 >1 由 multitopo 单元测试覆盖）。
+        // 取舍:不构造双墙分叉 e2e 场景——候选数依赖运行时碰撞段分布,
+        // 场景构造不稳,此处只验证"开开关后完整规划链路成功且安全"。
+        let config = PlannerConfig {
+            use_multitopology_trajs: true,
+            ..PlannerConfig::default()
+        };
+        let (mut planner, start, goal, guide) = wall_scenario(config);
+        let start_endpoint = Endpoint {
+            position: start.position.coords,
+            velocity: start.velocity,
+            acceleration: start.acceleration,
+        };
+        let local_goal = planner.pick_local_goal(start.position.coords, goal.coords);
+
+        let init_config = crate::init::InitConfig {
+            piece_length: planner.config.piece_length,
+            pieces: crate::init::pieces_for_guide(&guide, planner.config.piece_length),
+            max_velocity: planner.config.max_velocity,
+        };
+        let wall_hitting = crate::init::init_from_path(
+            &init_config,
+            start_endpoint,
+            Point3::from(local_goal),
+            &guide,
+        )
+        .unwrap();
+
+        let result = planner
+            .rebound(
+                wall_hitting,
+                start_endpoint,
+                Point3::from(local_goal),
+                &[],
+                false,
+            )
+            .expect("多拓扑开启时 rebound 必须逃出障碍");
+        let scanner_final = ObstacleScanner::new(&planner.map)
+            .with_samples(planner.config.constraint_points_per_piece);
+        assert!(
+            scanner_final.is_safe(&result.trajectory),
+            "最终轨迹必须物理安全"
+        );
+        assert!(!result.planes.is_empty(), "逃逸过程必须生成平面");
+
         let s0 = result.trajectory.eval(0.0);
         assert!((s0.position - start.position.coords).norm() < 1e-6);
         let sf = result.trajectory.eval(result.trajectory.duration());

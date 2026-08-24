@@ -60,6 +60,9 @@ pub fn constraint_sample_points(traj: &Trajectory, k: usize) -> Vec<Vector3<f64>
     pts
 }
 
+/// 碰撞段(官方 `segments` 一项):控制点下标闭区间 [in, out]。
+pub type CollisionSpan = (usize, usize);
+
 /// 官方 `finelyCheckAndSetConstraintPoints` 返回值。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckResult {
@@ -200,22 +203,23 @@ impl<'a> ObstacleScanner<'a> {
     /// 官方 `finelyCheckAndSetConstraintPoints`(`flag_first_init` 语义由调用方
     /// 决定):稠密采样 → 占据分段(in/out)→ 每段 A\* 绕障 → 交点平面。
     ///
-    /// `points` = 当前轨迹约束点(N·K+1),`planes` = 按约束点索引组织的
-    /// {s,v} 平面池(本函数**就地追加**新平面)。返回 [`CheckResult`]。
-    pub fn finely_check(
+    /// [`Self::finely_check`] 的完整形态:同时返回碰撞段(官方
+    /// `final_segment_ids`:仅平面分配成功的段,供多拓扑候选生成使用;
+    /// 无碰撞时为空)。
+    pub fn finely_check_with_segments(
         &self,
         astar: &mut Astar,
         traj: &Trajectory,
         points: &[Vector3<f64>],
         planes: &mut [Vec<Plane>],
         touch_goal: bool,
-    ) -> CheckResult {
+    ) -> (CheckResult, Vec<CollisionSpan>) {
         const ENOUGH_INTERVAL: usize = 2;
         let cols = points.len();
         let i_end = two_thirds_id(cols, touch_goal);
         let Some(pts_check) = self.points_to_check(traj, i_end, touch_goal) else {
             log::debug!("finely check: 稠密采样退化(轨迹耗尽于前 2/3 桶前)");
-            return CheckResult::Error;
+            return (CheckResult::Error, Vec::new());
         };
 
         /*** 占据分段(官方 in/out + ENOUGH_INTERVAL 滞回) ***/
@@ -254,7 +258,7 @@ impl<'a> ObstacleScanner<'a> {
                     flag_got_start = false;
                     flag_got_end = false;
                     if in_id < 0 || out_id < 0 {
-                        return CheckResult::Error;
+                        return (CheckResult::Error, Vec::new());
                     }
                     segment_ids.push(ConstraintSpan {
                         start: in_id as usize,
@@ -264,19 +268,40 @@ impl<'a> ObstacleScanner<'a> {
             }
         }
         if segment_ids.is_empty() {
-            return CheckResult::Free;
+            return (CheckResult::Free, Vec::new());
         }
 
         /*** A\* 绕障路径(官方:in=出侧点,out=入侧点,SEARCH_ERR 连下一段) ***/
         let Some(paths) = self.a_star_paths(astar, points, &mut segment_ids) else {
-            return CheckResult::Error;
+            return (CheckResult::Error, Vec::new());
         };
 
         /*** 逐段分配平面(官方 step1/2/3;MINIMUM_PERCENT=0 → 段长不做扩缩) ***/
+        let mut final_spans = Vec::with_capacity(segment_ids.len());
         for (i, &span) in segment_ids.iter().enumerate() {
-            let _ = assign_planes_for_segment(self.map, &paths[i], points, span, planes);
+            // 官方 final_segment_ids:仅平面生成成功的段进入返回列表
+            if assign_planes_for_segment(self.map, &paths[i], points, span, planes) {
+                final_spans.push((span.start, span.end));
+            }
         }
-        CheckResult::Finished
+        (CheckResult::Finished, final_spans)
+    }
+
+    /// 官方 `finelyCheckAndSetConstraintPoints`(`flag_first_init` 语义由调用方
+    /// 决定):稠密采样 → 占据分段(in/out)→ 每段 A\* 绕障 → 交点平面。
+    ///
+    /// `points` = 当前轨迹约束点(N·K+1),`planes` = 按约束点索引组织的
+    /// {s,v} 平面池(本函数**就地追加**新平面)。返回 [`CheckResult`]。
+    pub fn finely_check(
+        &self,
+        astar: &mut Astar,
+        traj: &Trajectory,
+        points: &[Vector3<f64>],
+        planes: &mut [Vec<Plane>],
+        touch_goal: bool,
+    ) -> CheckResult {
+        self.finely_check_with_segments(astar, traj, points, planes, touch_goal)
+            .0
     }
 
     /// 官方 `roughlyCheckConstraintPoints`(L-BFGS 内循环):在约束点数组上
