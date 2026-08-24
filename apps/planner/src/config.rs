@@ -45,6 +45,9 @@ mod tests {
         .expect("shipped configs/planner.toml must parse");
         assert!((cfg.config.max_velocity - 1.5).abs() < 1e-12);
         assert!((cfg.config.weight_obstacle - 10_000.0).abs() < 1e-9);
+        // 虚拟地面/天花板（官方 launch advanced_param.xml 实际值）
+        assert_eq!(cfg.config.virtual_ground, Some(-0.1));
+        assert_eq!(cfg.config.virtual_ceiling, Some(3.0));
         assert!((cfg.manager.replan_thresh - DEFAULT_REPLAN_THRESH).abs() < 1e-12);
     }
 
@@ -54,6 +57,9 @@ mod tests {
         let cfg: PlannerToml = toml::from_str("max_velocity = 2.0").unwrap();
         assert!((cfg.config.max_velocity - 2.0).abs() < 1e-12);
         assert!((cfg.config.piece_length - 1.5).abs() < 1e-12);
+        // 缺键 = 不启用虚拟墙（官方 enable_virtual_wall 默认 false）
+        assert_eq!(cfg.config.virtual_ground, None);
+        assert_eq!(cfg.config.virtual_ceiling, None);
         assert!((cfg.manager.arrive_dist - DEFAULT_ARRIVE_DIST).abs() < 1e-12);
     }
 }

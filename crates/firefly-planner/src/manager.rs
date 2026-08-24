@@ -797,6 +797,10 @@ impl PlannerManager {
         let reso = map.resolution();
         loop {
             map.index_of(p)?; // 出界即图底：无地面（官方 `getOccupancy == -1`）
+            // 虚拟地板不是地面（官方 `ret == -1` 先于 `ret == 1`）
+            if map.virtual_wall().is_some_and(|w| p.z <= w.ground) {
+                return None;
+            }
             if map.is_occupied(p) {
                 return Some(p.z);
             }
@@ -1168,10 +1172,14 @@ mod tests {
         *path.last().unwrap()
     }
 
-    /// 空旷地图上的管理器:起点 (1,1,1) → 终点 (10,1,1)。
-    fn open_manager() -> PlannerManager {
-        let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
-        let planner = Planner::new(PlannerConfig::default(), map);
+    /// 空旷地图上的管理器:起点 (1,1,1) → 终点 (10,1,1)。可选注入虚拟墙
+    /// `(ground, ceil)`（米，世界坐标 z）。
+    fn open_manager_with_wall(virtual_wall: Option<(f64, f64)>) -> PlannerManager {
+        let mut builder = GridMapBuilder::new(0.5, [40, 24, 16]);
+        if let Some((ground, ceil)) = virtual_wall {
+            builder = builder.with_virtual_wall(ground, ceil);
+        }
+        let planner = Planner::new(PlannerConfig::default(), builder.build().unwrap());
         PlannerManager::with_planner(
             planner,
             ManagerOptions::default(),
@@ -1179,6 +1187,10 @@ mod tests {
             Vector3::new(10.0, 1.0, 1.0),
         )
         .unwrap()
+    }
+
+    fn open_manager() -> PlannerManager {
+        open_manager_with_wall(None)
     }
 
     #[test]
@@ -1611,6 +1623,38 @@ mod tests {
     fn ground_height_skipped_without_plan() {
         let m = open_manager();
         // 无可执行轨迹（官方 pts_chk < 3 的前置条件）不测量
+        assert!(m.measure_ground_height(0.0).is_none());
+    }
+
+    #[test]
+    fn ground_height_ignores_virtual_floor_below_ground() {
+        // 虚拟地板低于真实地面：扫描命中真实占据层，仍报地面高度
+        let mut m = open_manager_with_wall(Some((-0.1, f64::INFINITY)));
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        let dims = m.map().dims();
+        for i in 0..dims[0] {
+            for j in 0..dims[1] {
+                m.map_mut().set_state([i, j, 0], VoxelState::Occupied);
+            }
+        }
+        let h = m
+            .measure_ground_height(m.local().unwrap().start_time)
+            .expect("虚拟地板低于真实地面时应测得地面高度");
+        assert!((0.0..0.5).contains(&h), "实际 {h}");
+    }
+
+    #[test]
+    fn ground_height_fails_at_virtual_floor() {
+        // 虚拟地板设在扫描起点与真实地面之间：先于占据命中触墙 → 测量失败
+        let mut m = open_manager_with_wall(Some((0.7, f64::INFINITY)));
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        let dims = m.map().dims();
+        for i in 0..dims[0] {
+            for j in 0..dims[1] {
+                m.map_mut().set_state([i, j, 0], VoxelState::Occupied);
+            }
+        }
+        assert!(m.local().is_some(), "前置：轨迹已存在");
         assert!(m.measure_ground_height(0.0).is_none());
     }
 

@@ -19,6 +19,10 @@ weight_obstacle = 10000.0
 weight_swarm = 10000.0
 weight_formation = 100.0
 weight_sqrvariance = 10000.0
+# 虚拟地面/天花板（米，世界坐标 z；官方 `enable_virtual_wall` +
+# `virtual_ground`/`virtual_ceil`，launch advanced_param.xml 实际值）
+virtual_ground = -0.1
+virtual_ceiling = 3.0
 
 [manager]
 replan_thresh = 1.0 # 秒

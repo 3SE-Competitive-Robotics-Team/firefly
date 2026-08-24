@@ -10,6 +10,24 @@ pub enum VoxelState {
     Occupied,
 }
 
+/// 虚拟地面/天花板（官方 `enable_virtual_wall` + `virtual_ground`/`virtual_ceil`）。
+///
+/// 世界坐标 z 平面，命中区间视为不可飞（对照官方 `getOccupancy` 返回 -1 在下游
+/// 布尔语境的实效）。单位：米。单侧启用时另一侧用 ±∞ 哨兵。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VirtualWall {
+    /// 虚拟地板：`p.z <= ground` 不可飞。
+    pub ground: f64,
+    /// 虚拟天花板：`p.z >= ceil` 不可飞。
+    pub ceil: f64,
+}
+
+impl VirtualWall {
+    fn blocks(&self, z: f64) -> bool {
+        z >= self.ceil || z <= self.ground
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GridMap {
     origin: Vector3<f64>,
@@ -18,6 +36,8 @@ pub struct GridMap {
     voxels: Vec<VoxelState>,
     /// 膨胀层（官方 `occupancy_buffer_inflate_`）：占据体素全向膨胀后的不可达标记。
     inflate: Vec<u8>,
+    /// 虚拟地面/天花板；None = 不启用（官方 `enable_virtual_wall = false` 默认）。
+    virtual_wall: Option<VirtualWall>,
 }
 
 #[derive(Debug)]
@@ -25,6 +45,7 @@ pub struct GridMapBuilder {
     origin: Vector3<f64>,
     resolution: f64,
     dims: [usize; 3],
+    virtual_wall: Option<VirtualWall>,
 }
 
 impl GridMapBuilder {
@@ -34,12 +55,20 @@ impl GridMapBuilder {
             origin: Vector3::zeros(),
             resolution,
             dims,
+            virtual_wall: None,
         }
     }
 
     #[must_use]
     pub fn with_origin(mut self, origin: Vector3<f64>) -> Self {
         self.origin = origin;
+        self
+    }
+
+    /// 启用虚拟地面/天花板（单位：米，世界坐标 z；单侧不启用传 ±∞ 哨兵）。
+    #[must_use]
+    pub fn with_virtual_wall(mut self, ground: f64, ceil: f64) -> Self {
+        self.virtual_wall = Some(VirtualWall { ground, ceil });
         self
     }
 
@@ -61,6 +90,7 @@ impl GridMapBuilder {
             dims: self.dims,
             voxels,
             inflate: vec![0; capacity],
+            virtual_wall: self.virtual_wall,
         })
     }
 }
@@ -114,21 +144,44 @@ impl GridMap {
         self.voxels[linear] = state;
     }
 
+    /// 为已构建实例注入虚拟墙（覆盖已有配置）。
+    pub fn set_virtual_wall(&mut self, wall: VirtualWall) {
+        self.virtual_wall = Some(wall);
+    }
+
+    #[must_use]
+    pub fn virtual_wall(&self) -> Option<VirtualWall> {
+        self.virtual_wall
+    }
+
+    /// 官方 `getOccupancy(pos)`：越界或虚拟墙命中均视为占据。
     #[must_use]
     pub fn is_occupied(&self, p: Vector3<f64>) -> bool {
+        if self.virtual_wall.is_some_and(|w| w.blocks(p.z)) {
+            return true;
+        }
         self.index_of(p)
             .is_none_or(|idx| self.state(idx) == VoxelState::Occupied)
     }
 
-    /// 索引是否落在膨胀层内（官方 `getInflateOccupancy`）。
+    /// 索引是否落在膨胀层内（官方 `getInflateOccupancy`）；以体素中心 z 判虚拟墙。
     #[must_use]
     pub fn is_inflated(&self, idx: [usize; 3]) -> bool {
+        if let Some(wall) = self.virtual_wall {
+            let cz = self.origin.z + (idx[2] as f64 + 0.5) * self.resolution;
+            if wall.blocks(cz) {
+                return true;
+            }
+        }
         self.inflate[self.linear(idx)] == 1
     }
 
-    /// 位置是否落在膨胀层内（官方 `getInflateOccupancy(pos)`，越界视为占据）。
+    /// 位置是否落在膨胀层内（官方 `getInflateOccupancy(pos)`，越界或虚拟墙命中视为占据）。
     #[must_use]
     pub fn is_occupied_inflated(&self, p: Vector3<f64>) -> bool {
+        if self.virtual_wall.is_some_and(|w| w.blocks(p.z)) {
+            return true;
+        }
         self.index_of(p).is_none_or(|idx| self.is_inflated(idx))
     }
 
@@ -219,5 +272,59 @@ mod tests {
         assert!(!m.is_occupied_inflated(Vector3::new(4.5, 2.5, 2.5)));
         // 原图状态不受膨胀影响
         assert!(!m.is_occupied(Vector3::new(3.5, 2.5, 2.5)));
+    }
+
+    /// 地图 z∈[0,5)，虚拟墙 ground=1.0 / ceil=3.0：三档验证三个查询接口。
+    #[test]
+    fn virtual_wall_blocks_floor_and_ceiling() {
+        let mut m = GridMapBuilder::new(0.5, [10, 10, 10])
+            .with_virtual_wall(1.0, 3.0)
+            .build()
+            .unwrap();
+        // 障碍在 (4.25,4.25,2.25)，探针取远端角落避免落入膨胀层
+        m.set_state([8, 8, 4], VoxelState::Occupied);
+        m.inflate_obstacles(0.6);
+        let below = Vector3::new(1.0, 1.0, 0.25); // 带内自由区但 z ≤ ground
+        let above = Vector3::new(1.0, 1.0, 4.75); // 带内自由区但 z ≥ ceil
+        let inside = Vector3::new(1.0, 1.0, 2.0); // 带内自由区
+        // is_occupied
+        assert!(m.is_occupied(below));
+        assert!(m.is_occupied(above));
+        assert!(!m.is_occupied(inside));
+        // 墙不掩盖体素占据：带内真实障碍仍可查
+        assert!(m.is_occupied(Vector3::new(4.25, 4.25, 2.25)));
+        // is_occupied_inflated
+        assert!(m.is_occupied_inflated(below));
+        assert!(m.is_occupied_inflated(above));
+        assert!(!m.is_occupied_inflated(inside));
+        // is_inflated（索引查询，按体素中心 z 判墙）：z=0 层中心 0.25 ≤ ground
+        assert!(m.is_inflated([5, 5, 0]));
+        assert!(m.is_inflated([5, 5, 9])); // 中心 4.75 ≥ ceil
+        assert!(!m.is_inflated([5, 5, 4])); // 中心 2.25 在带内且非膨胀层
+    }
+
+    #[test]
+    fn no_virtual_wall_matches_plain_queries() {
+        let mut plain = GridMapBuilder::new(0.5, [10, 10, 10]).build().unwrap();
+        assert_eq!(plain.virtual_wall(), None);
+        // 障碍在 (2.5,2.5,0.25)，查询点取远端角落避免落入膨胀层
+        plain.set_state([5, 5, 0], VoxelState::Occupied);
+        plain.inflate_obstacles(0.6);
+        // 未配置时全图任意高度均不受墙影响
+        for z in [0.25, 1.0, 2.5, 4.75] {
+            let p = Vector3::new(4.25, 4.25, z);
+            assert!(!plain.is_occupied(p));
+            assert!(!plain.is_occupied_inflated(p));
+        }
+        assert!(!plain.is_inflated([5, 5, 9]));
+        // set_virtual_wall 注入后生效（单侧：只拦上方）
+        plain.set_virtual_wall(VirtualWall {
+            ground: f64::NEG_INFINITY,
+            ceil: 1.0,
+        });
+        assert_eq!(plain.virtual_wall().map(|w| w.ceil), Some(1.0));
+        assert!(plain.is_occupied(Vector3::new(4.25, 4.25, 2.5)));
+        assert!(plain.is_occupied_inflated(Vector3::new(4.25, 4.25, 2.5)));
+        assert!(!plain.is_occupied(Vector3::new(4.25, 4.25, 0.25)));
     }
 }
