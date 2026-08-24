@@ -23,6 +23,17 @@ use crate::multitopo::distinctive_candidates;
 use crate::objective::MincoObjective;
 use crate::obstacles::{CheckResult, ObstacleScanner, constraint_sample_points, two_thirds_id};
 
+/// [`Planner::try_finish`] 的判定结果。仅 [`FinishCheck::SwarmTooClose`] 在
+/// 外层触发 swarm 权重倍增（对照官方 `wei_swarm_mod_ *= 2` 的唯一触发路径），
+/// 其余失败 restart 但权重不变。
+#[derive(Debug)]
+enum FinishCheck {
+    Accept,
+    SwarmTooClose,
+    FormationDeviation,
+    Collision,
+}
+
 /// 单次完整优化内层（官方 `optimizeTrajectory`）的产出。
 struct InnerOutcome {
     minco: Minco,
@@ -78,6 +89,10 @@ pub struct Planner {
     map: GridMap,
     formation: Option<FormationSpec>,
     astar: firefly_search::Astar,
+    /// 当前/最近一次规划的 swarm 权重系数（官方 `wei_swarm_mod_` 相对
+    /// `wei_swarm_` 的倍数）：每次 rebound 复位为 1.0，仅「收敛但集群
+    /// 间距不满足」的 restart 时倍增，乘到 `SwarmPenalty` 权重上。
+    last_swarm_weight_mod: f64,
 }
 
 impl Planner {
@@ -92,7 +107,15 @@ impl Planner {
             map,
             formation: None,
             astar: firefly_search::Astar::default(),
+            last_swarm_weight_mod: 1.0,
         }
+    }
+
+    /// 最近一次规划实际使用的 swarm 权重系数（≥1.0）。无 peers 或首次
+    /// 即成功时为 1.0；>1 说明经历过「收敛但集群间距不满足」的重启倍增。
+    #[must_use]
+    pub fn last_swarm_weight_mod(&self) -> f64 {
+        self.last_swarm_weight_mod
     }
 
     /// 设置队形规格（论文 Formation expectation + 官方 formationGradCostP 动态推断）。
@@ -283,6 +306,8 @@ impl Planner {
         peers: &[firefly_cost::Peer],
         touch_goal: bool,
     ) -> Result<PlanResult> {
+        // 官方 optimizeTrajectory 开头 wei_swarm_mod_ = wei_swarm_：按次复位
+        self.last_swarm_weight_mod = 1.0;
         let k = self.config.constraint_points_per_piece;
         let n_points = minco.pieces() * k + 1;
         let mut planes_by_point: Vec<Vec<Plane>> = vec![Vec::new(); n_points];
@@ -363,6 +388,8 @@ impl Planner {
     ///   （官方 `STOP_FOR_REBOUND`，`rebound_times ≤ 20`）；
     /// - 优化后 fine check，碰撞则并入新平面后 restart（`restart_nums` 限）；
     /// - 成功条件：swarm 距离满足 && fine check `OBS_FREE`（官方）。
+    /// - restart 失败分支（官方 `flag_still_unsafe`）：仅 swarm 间距不满足时
+    ///   swarm 权重倍增（官方 `wei_swarm_mod_ *= 2`），其余权重不变。
     /// - 全局迭代上限 [`Self::REBOUND_MAX_ITERATIONS`] 兜底所有分支。
     /// - criterion 3 门控锁存位每次进入复位为 false（官方
     ///   `optimizeTrajectory` Preparision 1）。
@@ -473,20 +500,30 @@ impl Planner {
 
             // fine check（官方 finelyCheckAndSetConstraintPoints,flag_first_init=false）
             let traj = minco.solve()?;
-            if self
-                .try_finish(&minco, &traj, peers, &mut planes_by_point, touch_goal)?
-                .is_some()
-            {
-                return Ok(InnerOutcome {
-                    minco,
-                    planes_by_point,
-                    iterations: iteration,
-                    final_cost,
-                });
+            match self.try_finish(&minco, &traj, peers, &mut planes_by_point, touch_goal)? {
+                FinishCheck::Accept => {
+                    return Ok(InnerOutcome {
+                        minco,
+                        planes_by_point,
+                        iterations: iteration,
+                        final_cost,
+                    });
+                }
+                FinishCheck::SwarmTooClose => {
+                    // 官方 L112:收敛但集群太近 → restart 且权重倍增,
+                    // 对避碰项逐次指数加权直到解出安全间距
+                    self.last_swarm_weight_mod *= 2.0;
+                    log::debug!(
+                        "rebound {iteration}: swarm 间距不满足,restart 且 swarm 权重 ×{}",
+                        self.last_swarm_weight_mod
+                    );
+                }
+                failure => {
+                    log::debug!("rebound {iteration}: {failure:?},restart(swarm 权重不变)");
+                }
             }
-            // 未成功（碰撞/集群不满足）:官方 flag_still_occ → restart
             restart_nums += 1;
-            log::debug!("rebound {iteration}: fine check 碰撞/集群不满足,restart {restart_nums}");
+            log::debug!("rebound {iteration}: restart {restart_nums}");
             // 重启上限：引导路径修正(simplify 膨胀)后，贴墙翻越/窄缝场景可能
             // 需要更多次"合并平面→重启"才把轨迹顶出膨胀层，3 次过紧导致
             // plan 经常失败；放宽到 6 次(每次重启都会带上新平面,收敛方向确定)。
@@ -514,9 +551,11 @@ impl Planner {
         })
     }
 
-    /// 轨迹安全（障碍/集群/队形）时返回 `Some(())`；否则返回 `None` 继续迭代。
-    /// 障碍检查 = 官方 fine check：稠密采样 + in/out 分段 + A\* 绕障 + 平面
-    /// （碰撞时新平面已并入 `planes_by_point`，调用方 restart）。
+    /// 轨迹安全（障碍/集群/队形）时返回 [`FinishCheck::Accept`]，否则返回
+    /// 失败原因。障碍检查 = 官方 fine check：稠密采样 + in/out 分段 + A\*
+    /// 绕障 + 平面（碰撞时新平面已并入 `planes_by_point`，调用方 restart）。
+    /// 失败原因决定 restart 策略：仅 swarm 间距不满足触发权重倍增（官方
+    /// L95–113 三分支），碰撞/队形失败权重不变。
     fn try_finish(
         &mut self,
         minco: &Minco,
@@ -524,17 +563,21 @@ impl Planner {
         peers: &[firefly_cost::Peer],
         planes_by_point: &mut [Vec<Plane>],
         touch_goal: bool,
-    ) -> Result<Option<()>> {
-        if !self.swarm_safe(traj, peers) || !self.formation_safe(traj) {
-            return Ok(None);
+    ) -> Result<FinishCheck> {
+        if !self.swarm_safe(traj, peers) {
+            return Ok(FinishCheck::SwarmTooClose);
+        }
+        if !self.formation_safe(traj) {
+            return Ok(FinishCheck::FormationDeviation);
         }
         let scanner = ObstacleScanner::new(&self.map)
             .with_samples(self.config.constraint_points_per_piece)
             .with_max_vel(self.config.max_velocity);
         let points = constraint_sample_points(traj, scanner.samples_per_piece());
-        match scanner.finely_check(&mut self.astar, traj, &points, planes_by_point, touch_goal) {
-            CheckResult::Free => {}
-            CheckResult::Finished | CheckResult::Error => return Ok(None),
+        if scanner.finely_check(&mut self.astar, traj, &points, planes_by_point, touch_goal)
+            != CheckResult::Free
+        {
+            return Ok(FinishCheck::Collision);
         }
         let trajectory = self.ensure_feasible(minco)?;
         if !scanner.is_safe(&trajectory) {
@@ -542,9 +585,9 @@ impl Planner {
             //（几何理论不变，数值上可能翻转）。不 panic：丢弃该解继续迭代，
             // 外层循环有重启上限兜底（否则 dev 构建 debug_assert 直接杀进程）。
             log::debug!("time-rescaled trajectory unsafe, keep iterating");
-            return Ok(None);
+            return Ok(FinishCheck::Collision);
         }
-        Ok(Some(()))
+        Ok(FinishCheck::Accept)
     }
 
     /// 轨迹与队形目标的最大偏差（诊断用，动态推断）。
@@ -713,7 +756,9 @@ impl Planner {
                 .with_two_thirds(two_thirds),
             )
             .add(
-                self.config.weight_swarm,
+                // 官方代价与梯度同源使用 wei_swarm_mod_：收敛但间距不足的
+                // restart 逐次倍增，对避碰项指数加权直到解出安全间距
+                self.config.weight_swarm * self.last_swarm_weight_mod,
                 SwarmPenalty::new(self.config.swarm_clearance, 2.0, 1.0, peers.to_vec())
                     .with_samples(k)
                     .with_two_thirds(two_thirds),

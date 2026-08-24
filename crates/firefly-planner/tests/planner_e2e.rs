@@ -348,6 +348,7 @@ fn swarm_avoids_stationary_peer() {
 }
 
 #[test]
+#[allow(clippy::float_cmp)] // 系数只会被精确地置 1 / ×2，无舍入
 fn formation_following_with_peer() {
     // 2 机队形：peer 沿 x 直线（y=0），自己偏移 y=1 应跟随保持
     let map = GridMapBuilder::new(0.5, [24, 12, 12]).build().unwrap();
@@ -390,6 +391,9 @@ fn formation_following_with_peer() {
     planner.set_formation(spec);
 
     let result = planner.plan(start, goal).expect("plan with formation");
+    // 队形偏差导致的 restart 不得改变 swarm 权重（倍增仅由集群间距触发）；
+    // 本场景 plan() 无 swarm peers，swarm_safe 恒真。
+    assert_eq!(planner.last_swarm_weight_mod(), 1.0);
     let traj = &result.trajectory;
     let mid = traj.eval(traj.duration() / 2.0).position;
     // 自己的期望位置 = peer 同刻位置 + 偏移 y=1 → y 应从 2.0 显著靠拢 1.0
@@ -399,6 +403,87 @@ fn formation_following_with_peer() {
         "轨迹应向队形位置靠拢：mid y={}（起点 2.0，期望靠拢 1.0）",
         mid.y
     );
+}
+
+#[test]
+fn swarm_violation_doubles_weight_until_safe() {
+    // 官方 wei_swarm_mod_ 机制：多个静止 peer 沿直线轨迹两侧交错悬停
+    // （侧偏 0.35m < 成功门限 0.625），从直线初始解出发的首次优化无法
+    // 一次性满足全部间距门限；收敛后的 restart 必须倍增 swarm 权重
+    //（官方 L112）直到解出安全间距。
+    let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
+    let mut planner = Planner::new(PlannerConfig::default(), map);
+    let start = State {
+        position: Point3::new(1.0, 1.0, 1.0),
+        velocity: Vector3::zeros(),
+        acceleration: Vector3::zeros(),
+    };
+    let goal = Point3::new(10.0, 1.0, 1.0);
+
+    // 静止 peer 沿 x 交错分布在轨迹两侧（y = 1.0 ± 0.35），间距足够
+    // 倍增后的避碰项在重启预算内解出蛇形绕行
+    let hover = |x: f64, y: f64| {
+        firefly_trajectory::MincoBuilder::new(
+            firefly_trajectory::SolverOrder::MinimumJerk,
+            firefly_trajectory::Endpoint {
+                position: Vector3::new(x, y, 1.0),
+                velocity: Vector3::zeros(),
+                acceleration: Vector3::zeros(),
+            },
+            firefly_trajectory::Endpoint {
+                position: Vector3::new(x, y, 1.0),
+                velocity: Vector3::zeros(),
+                acceleration: Vector3::zeros(),
+            },
+        )
+        .build(&[], &[12.0])
+        .unwrap()
+        .solve()
+        .unwrap()
+    };
+    let peers: Vec<_> = [(3.5, 1.35), (6.5, 0.65)]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (x, y))| firefly_cost::Peer::new(i, 0.0, hover(x, y), 0.3))
+        .collect();
+
+    let result = planner
+        .plan_in_swarm(start, goal, &peers)
+        .expect("plan with near peer");
+
+    assert!(
+        planner.last_swarm_weight_mod() > 1.0,
+        "初始解必然集群间距违约，必须经历权重倍增，实际系数 {}",
+        planner.last_swarm_weight_mod()
+    );
+    // 倍增后最终解出安全间距（同一绝对时刻，对全部 peer 取最小）
+    let traj = &result.trajectory;
+    let mut min_d = f64::MAX;
+    for k in 0..400 {
+        let t = traj.duration() * f64::from(k) / 400.0;
+        let p = traj.eval(t).position;
+        for (x, y) in [(3.5, 1.35), (6.5, 0.65)] {
+            min_d = min_d.min((p - Vector3::new(x, y, 1.0)).norm());
+        }
+    }
+    assert!(min_d > 0.6, "最终轨迹距最近 peer {min_d:.3} 应达安全门限");
+}
+
+#[test]
+#[allow(clippy::float_cmp)] // 系数只会被精确地置 1 / ×2，无舍入
+fn no_peer_keeps_swarm_weight_unity() {
+    // 无 peers 时 swarm_safe 恒真（官方同：无 swarm 轨迹则
+    // flag_swarm_too_close 恒 false），倍增机制不得激活。
+    let map = GridMapBuilder::new(0.5, [20, 20, 20]).build().unwrap();
+    let mut planner = Planner::new(PlannerConfig::default(), map);
+    let start = State {
+        position: Point3::new(0.5, 0.5, 0.5),
+        velocity: Vector3::zeros(),
+        acceleration: Vector3::zeros(),
+    };
+    let goal = Point3::new(8.0, 0.5, 0.5);
+    planner.plan(start, goal).expect("open-field plan succeeds");
+    assert_eq!(planner.last_swarm_weight_mod(), 1.0);
 }
 
 /// 任务核心场景：路径上孤立柱，规划器须绕开（保持净距）抵达局部目标。
