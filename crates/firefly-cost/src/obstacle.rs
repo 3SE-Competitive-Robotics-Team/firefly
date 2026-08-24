@@ -62,7 +62,7 @@ impl Penalty for ObstaclePenalty {
             let step = ti / k as f64;
             for j in 0..=k {
                 let tau = j as f64 / k as f64;
-                let s = traj.eval(segment_time(traj, i, *ti, tau));
+                let s = traj.eval_piece(i, tau * ti);
                 let idx = sample_index(i, j, k);
                 if let Some(t) = self.two_thirds
                     && (idx == 0 || idx > t)
@@ -82,7 +82,7 @@ impl Penalty for ObstaclePenalty {
             let step = ti / k as f64;
             for j in 0..=k {
                 let tau = j as f64 / k as f64;
-                let s = traj.eval(segment_time(traj, i, *ti, tau));
+                let s = traj.eval_piece(i, tau * ti);
                 let idx = sample_index(i, j, k);
                 if let Some(t) = self.two_thirds
                     && (idx == 0 || idx > t)
@@ -159,14 +159,6 @@ impl ObstaclePenalty {
             })
             .sum()
     }
-}
-
-fn segment_time(traj: &Trajectory, piece: usize, duration: f64, tau: f64) -> f64 {
-    let mut t = 0.0;
-    for k in 0..piece {
-        t += traj.durations()[k];
-    }
-    t + tau * duration
 }
 
 #[cfg(test)]

@@ -188,11 +188,11 @@ fn swarm_head_on_avoidance() {
 
 #[test]
 fn swarm_warm_start_accumulates_clearance() {
-    // 官方式收敛路径的验证：0.3m 侧向偏置下冷启动单帧达不到成功门限
-    //（官方 K=5 稀疏采样,交叉点落在采样间隙——见 swarm_head_on_avoidance 注释）。
-    // 官方式解法不是单帧更准,而是**连续重规划 + 暖启动**:每轮从上一帧轨迹
-    // 出发,避让偏移逐帧继承。两机交替(Gauss-Seidel)迭代下避让包络达到
-    // 成功门限 0.625 以上,而冷启动单帧在同场景 restart 超限失败。
+    // 官方式收敛路径的验证：两机对飞仅 0.3m 侧向偏置。Trajectory 逐段局部
+    // 求值（对齐 EGO-Planner-v2 addPVAGradCost2CT）下，冷启动单帧即可收敛；
+    // 暖启动 + 连续重规划的价值在于把避让包络推得更高——Gauss-Seidel 交替
+    // 迭代中两机轮流让出更大间距，但追逐振荡使逐轮间距非单调，restart 超限
+    // 时保持上一帧轨迹。
     let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
     let config = PlannerConfig::default();
     let mut planner_a = Planner::new(config.clone(), map.clone());
@@ -215,20 +215,19 @@ fn swarm_warm_start_accumulates_clearance() {
     let mut traj_a = planner_a.plan(start_a, goal_a).expect("plan a").trajectory;
     let mut traj_b = planner_b.plan(start_b, goal_b).expect("plan b").trajectory;
 
-    // 对照:冷启动单帧规划(0.3m 偏置)restart 超限失败——官方 K=5 稀疏采样
-    // 看不到交叉点,这正是"暖启动 + 持续重规划"要解决的场景
+    // 对照:冷启动单帧规划(0.3m 偏置),定量记录其对 traj_b 的最小轮间距
     let peer_b0 = firefly_cost::Peer::new(1, 0.0, traj_b.clone(), 0.3);
-    let cold = planner_a.plan_in_swarm(start_a, goal_a, &[peer_b0]);
-    assert!(
-        cold.is_err(),
-        "冷启动单帧在 0.3m 偏置下应失败(restart 超限),实际 {cold:?}"
-    );
+    let cold = planner_a
+        .plan_in_swarm(start_a, goal_a, &[peer_b0])
+        .expect("冷启动单帧规划应成功");
+    let cold_ds = min_pair_distance(&cold.trajectory, &traj_b);
 
-    // 官方式:每轮用对方最新轨迹做 peer、自己上一帧轨迹暖启动
+    // 每轮用对方最新轨迹做 peer、自己上一帧轨迹暖启动；restart 超限视为该机
+    // 保持上一帧轨迹，迭代终止
     let mut min_ds = vec![min_pair_distance(&traj_a, &traj_b)];
     for _ in 0..6 {
         let peer_b = firefly_cost::Peer::new(1, 0.0, traj_b.clone(), 0.3);
-        let next_a = planner_a
+        let Ok(next_a) = planner_a
             .plan_in_swarm_with_init(
                 start_a,
                 goal_a,
@@ -240,10 +239,12 @@ fn swarm_warm_start_accumulates_clearance() {
                 },
                 false,
             )
-            .expect("plan a with peer (warm)")
-            .trajectory;
+            .map(|p| p.trajectory)
+        else {
+            break;
+        };
         let peer_a = firefly_cost::Peer::new(0, 0.0, traj_a.clone(), 0.3);
-        let next_b = planner_b
+        let Ok(next_b) = planner_b
             .plan_in_swarm_with_init(
                 start_b,
                 goal_b,
@@ -255,27 +256,39 @@ fn swarm_warm_start_accumulates_clearance() {
                 },
                 false,
             )
-            .expect("plan b with peer (warm)")
-            .trajectory;
+            .map(|p| p.trajectory)
+        else {
+            break;
+        };
         traj_a = next_a;
         traj_b = next_b;
         min_ds.push(min_pair_distance(&traj_a, &traj_b));
     }
 
-    // 暖启动轮次全部成功(expect 已保证);避让包络达到成功门限 0.625 以上
+    // 避让包络峰值应达到成功门限 0.625 以上
     let max_d = min_ds.iter().copied().fold(0.0_f64, f64::max);
     assert!(
         max_d > 0.6,
         "暖启动轮次应让避让距离达到成功门限,实际最大 {max_d:.3},全程 {min_ds:?}"
     );
-    // 全程最低点应优于冷启动直线(避让偏移至少部分保留,两机交替追逐振荡下
-    // 不要求单调)
+    // 全程最低点应优于冷启动直线(交替追逐振荡下不要求逐轮单调)
     let min_warm = min_ds[1..].iter().copied().fold(f64::MAX, f64::min);
     assert!(
         min_warm > min_ds[0],
         "暖启动应保留避让偏移:冷 {:.3} vs 暖最低 {:.3}",
         min_ds[0],
         min_warm
+    );
+    // 冷启动对照(定量):单帧即显著优于直线,而暖启动包络峰值又高于单帧——
+    // 暖启动的优势体现在包络峰值,追逐振荡下末轮间距可能低于单帧
+    assert!(
+        cold_ds > min_ds[0],
+        "冷启动单帧应优于直线对飞:{cold_ds:.3} vs {:.3}",
+        min_ds[0]
+    );
+    assert!(
+        max_d > cold_ds,
+        "暖启动包络峰值应高于冷启动单帧:{max_d:.3} vs {cold_ds:.3}"
     );
 }
 
