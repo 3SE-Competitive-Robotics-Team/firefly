@@ -37,13 +37,11 @@ impl UniformPenalty {
     fn samples(&self, traj: &Trajectory) -> Vec<(usize, usize, f64, Sample)> {
         let k = self.samples_per_piece;
         let mut out = Vec::with_capacity(traj.pieces() * (k + 1));
-        let mut prefix = 0.0;
         for (i, ti) in traj.durations().iter().enumerate() {
             for j in 0..=k {
                 let tau = j as f64 / k as f64;
-                out.push((i * k + j, i, tau, traj.eval(prefix + tau * ti)));
+                out.push((i * k + j, i, tau, traj.eval_piece(i, tau * ti)));
             }
-            prefix += ti;
         }
         out
     }
@@ -70,14 +68,12 @@ impl Penalty for UniformPenalty {
             return 0.0;
         }
         let mut pos: Vec<Vector3<f64>> = Vec::with_capacity(n_points);
-        let mut prefix = 0.0;
         for (i, ti) in traj.durations().iter().enumerate() {
             let j_max = if i + 1 == traj.pieces() { k } else { k - 1 };
             for j in 0..=j_max {
                 let tau = j as f64 / k as f64;
-                pos.push(traj.eval(prefix + tau * ti).position);
+                pos.push(traj.eval_piece(i, tau * ti).position);
             }
-            prefix += ti;
         }
         let mut dquar_sum = 0.0;
         for i in 0..n {
@@ -100,12 +96,11 @@ impl Penalty for UniformPenalty {
         // 唯一约束点序列的相邻差与平方距离(官方 dps / dsqrs)
         let mut dps: Vec<Vector3<f64>> = Vec::with_capacity(n);
         let mut r: Vec<f64> = Vec::with_capacity(n);
-        let mut prefix = 0.0;
-        let mut last = traj.eval(0.0).position;
+        let mut last = traj.eval_piece(0, 0.0).position;
         for (i, ti) in traj.durations().iter().enumerate() {
             let j_max = if i + 1 == traj.pieces() { k } else { k - 1 };
             for j in 0..=j_max {
-                let s = traj.eval(prefix + j as f64 / k as f64 * ti);
+                let s = traj.eval_piece(i, j as f64 / k as f64 * ti);
                 if i > 0 || j > 0 {
                     let d = s.position - last;
                     dps.push(d);
@@ -113,7 +108,6 @@ impl Penalty for UniformPenalty {
                 }
                 last = s.position;
             }
-            prefix += ti;
         }
         // 官方梯度(不含 wei,wei 由 Cost 权重提供):4/N·(R[i−1]·dps[i−1] − R[i]·dps[i])
         let mut gdp = vec![Vector3::zeros(); n_points];

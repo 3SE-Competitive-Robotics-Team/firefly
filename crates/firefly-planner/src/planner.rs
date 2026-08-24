@@ -611,9 +611,13 @@ impl Planner {
             .add(self.config.weight_time, TimePenalty)
             .add(
                 self.config.weight_feasibility,
-                // 官方:仅速度/加速度惩罚(K=κ=5,梯形权重,不截断)
-                FeasibilityPenalty::new(self.config.max_velocity, self.config.max_acceleration)
-                    .with_samples(k),
+                // 官方:V/A/J 三项惩罚(K=κ=5,梯形权重,不截断)
+                FeasibilityPenalty::new(
+                    self.config.max_velocity,
+                    self.config.max_acceleration,
+                    self.config.max_jerk,
+                )
+                .with_samples(k),
             )
             .add(
                 self.config.weight_obstacle,

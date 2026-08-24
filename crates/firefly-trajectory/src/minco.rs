@@ -415,6 +415,9 @@ impl Trajectory {
         self.durations.sum()
     }
 
+    /// 全局时刻采样。注意：段边界时刻（tau ∈ {0, 1}）的归属有歧义，
+    /// jerk 在 waypoint 处不连续时取到相邻段的单侧极限；
+    /// 需要固定段归属的逐段采样（如梯度累加）必须用 [`Self::eval_piece`]。
     #[must_use]
     pub fn eval(&self, time: f64) -> Sample {
         let mut t = time;
@@ -426,6 +429,16 @@ impl Trajectory {
             }
             t -= self.durations[i];
         }
+        self.eval_piece(piece, t)
+    }
+
+    /// 指定段的局部时刻采样（`t_local` ∈ [0, `piece_duration(piece)`]）。
+    /// 逐段采样必须用此方法而非 [`Self::eval`]：边界时刻经全局时间搜索
+    /// 定位分段时有归属歧义，而梯度累加按 (piece, `beta(t_local)`) 归因，
+    /// 两端约定必须一致。
+    #[must_use]
+    pub fn eval_piece(&self, piece: usize, t_local: f64) -> Sample {
+        let t = t_local;
         let mut sample = Sample {
             position: Vector3::zeros(),
             velocity: Vector3::zeros(),

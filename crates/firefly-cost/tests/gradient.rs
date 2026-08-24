@@ -37,7 +37,7 @@ fn build_cost() -> Cost {
     Cost::new()
         .add(1.0, SmoothnessPenalty)
         .add(10.0, TimePenalty)
-        .add(10_000.0, FeasibilityPenalty::new(1.5, 6.0))
+        .add(10_000.0, FeasibilityPenalty::new(1.5, 6.0, 20.0))
         .add(
             10_000.0,
             ObstaclePenalty::new(0.1, 0.5, 5000.0, 5, per_point),
