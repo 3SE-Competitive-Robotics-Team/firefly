@@ -354,7 +354,16 @@ impl PlannerManager {
             None => self.initial_plan(now, measured),
             Some(ref local) => {
                 let t_cur = now - local.start_time;
-                if t_cur > local.traj.duration() {
+                let traj_duration = local.traj.duration();
+                // 执行期膨胀层刷新（官方 clearAndInflateLocalMap 的监控侧调用）：
+                // 地图可能在本 tick 被深度感知/动态障碍更新，目标点检查与碰撞
+                // 监控都必须基于最新膨胀层
+                self.refresh_inflation();
+                // 目标落入障碍修正（官方 EXEC_TRAJ case 1，居各分支之首；先于
+                // 到达判定——防止飞抵障碍内目标附近被误判任务完成）
+                if self.modify_in_collision_final_goal(now, measured, report) {
+                    // pass（对照官方 case 1 结构）
+                } else if t_cur > traj_duration {
                     // 轨迹执行完毕：仅当物理到达目标才完成任务（防提前结束）
                     let pos = self.estimated_position(now, measured);
                     if self.touch_goal && (pos - self.goal.coords).norm() < self.options.arrive_dist
@@ -369,9 +378,7 @@ impl PlannerManager {
                     }
                 } else {
                     // 执行期碰撞监控（官方 checkCollisionCallback，每 tick 一次
-                    // 等价其 20Hz 定时器）：先刷新膨胀层让本周期写入的感知/
-                    // 动态障碍生效，再沿未来检查点扫描
-                    self.refresh_inflation();
+                    // 等价其 20Hz 定时器）：沿未来检查点扫描（膨胀层已在分支入口刷新）
                     if let Some(hit_t) = self.next_collision(now) {
                         // 官方发现碰撞路径：立即 planFromLocalTraj，不受阈值与
                         // 冷却期约束；失败且碰撞迫近急停时限 → 进入急停
@@ -393,6 +400,74 @@ impl PlannerManager {
                 }
             }
         }
+    }
+
+    /// 目标落入障碍修正（对照官方 `ego_replan_fsm::mondifyInCollisionFinalGoal`，
+    /// `EXEC_TRAJ` case 1、各分支之首）：终点位于膨胀占据区时，沿当前全局路径
+    /// 从末端向起点以分辨率步长回扫（官方时间步 `t_step = resolution /
+    /// max_vel` 在匀速上限假设下对应一个分辨率的弧长），找首个自由点；找到后
+    /// 从当前位置对该点重生成全局路径并换目标（对照官方 `planNextWaypoint`——
+    /// 不触碰 replans/冷却期/连败计数/急停态等执行态），随即本 tick 立即重规划
+    /// （官方经 `REPLAN_TRAJ` 延迟一拍；firefly 无独立状态机节拍，取碰撞命中
+    /// 路径的立即重规划作为等价执行节奏）。某点全局路径搜索失败视为该点
+    /// 不可用，继续向前回扫（对照官方 planNextWaypoint 失败继续循环）；回扫
+    /// 耗尽仅报错，目标与轨迹保持不变。返回是否完成了一次目标修正（前置
+    /// "local 存在"由 [`Self::tick_normal`] 的调用位置保证）。
+    fn modify_in_collision_final_goal(
+        &mut self,
+        now: f64,
+        measured: Option<State>,
+        report: &mut TickReport,
+    ) -> bool {
+        if !self
+            .planner
+            .map_ref()
+            .is_occupied_inflated(self.goal.coords)
+        {
+            return false;
+        }
+        let orig_goal = self.goal.coords;
+        let reso = self.planner.map_ref().resolution();
+        // 小向量（A* 简化路径），克隆避开后续 &mut 借用冲突
+        let path = self.global_path.clone();
+        let cum = cumulative_arcs(&path);
+        let mut s = cum.last().copied().unwrap_or(0.0);
+        while s > 0.0 {
+            let pt = point_at_arc(&path, &cum, s);
+            if !self.planner.map_ref().is_occupied_inflated(pt) {
+                let start = self.estimated_position(now, measured);
+                let mut astar = Astar::default();
+                match search_global_path(self.planner.map_ref(), &mut astar, start, pt) {
+                    Ok(new_path) => {
+                        log::info!(
+                            "目标 ({:.2},{:.2},{:.2}) 落入障碍，修正为 ({:.2},{:.2},{:.2})",
+                            orig_goal.x,
+                            orig_goal.y,
+                            orig_goal.z,
+                            pt.x,
+                            pt.y,
+                            pt.z
+                        );
+                        self.global_path = new_path;
+                        self.goal = Point3::from(pt);
+                        report.replanned = self.replan(now);
+                        return true;
+                    }
+                    Err(e) => log::debug!("候选修正点不可达（{e}），继续回扫"),
+                }
+            }
+            if s <= reso {
+                log::error!(
+                    "全局路径上找不到任何无碰点，保持障碍内目标 ({:.2},{:.2},{:.2})",
+                    orig_goal.x,
+                    orig_goal.y,
+                    orig_goal.z
+                );
+                break;
+            }
+            s -= reso;
+        }
+        false
     }
 
     /// 位置估计：实测优先（odom），否则沿当前轨迹参考推进。
@@ -1023,6 +1098,34 @@ fn path_length(points: &[Vector3<f64>]) -> f64 {
     points.windows(2).map(|w| (w[1] - w[0]).norm()).sum()
 }
 
+/// 折线各顶点距起点的累计弧长（与 `points` 等长）。
+fn cumulative_arcs(points: &[Vector3<f64>]) -> Vec<f64> {
+    let mut cum = Vec::with_capacity(points.len());
+    let mut acc = 0.0;
+    for w in points.windows(2) {
+        cum.push(acc);
+        acc += (w[1] - w[0]).norm();
+    }
+    cum.push(acc);
+    cum
+}
+
+/// 折线上距起点弧长 `s` 的插值点（`s` 超出总长取末端；退化段取段首）。
+fn point_at_arc(points: &[Vector3<f64>], cum: &[f64], s: f64) -> Vector3<f64> {
+    for i in 1..points.len() {
+        if cum[i] >= s {
+            let len = cum[i] - cum[i - 1];
+            let t = if len < 1e-12 {
+                0.0
+            } else {
+                (s - cum[i - 1]) / len
+            };
+            return points[i - 1] + (points[i] - points[i - 1]) * t;
+        }
+    }
+    points.last().copied().unwrap_or_default()
+}
+
 /// A* 搜索 + 字符串拉直：删除可直线直达的中间点（避免直线擦边穿越膨胀层）。
 fn search_global_path(
     map: &GridMap,
@@ -1576,6 +1679,95 @@ mod tests {
             (local.start_time - 1.0).abs() < 1e-9,
             "新轨迹应在恢复 tick 入库"
         );
+    }
+
+    #[test]
+    fn in_collision_goal_modified_to_nearest_free_point() {
+        let mut m = open_manager();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        let old_path = m.global_path().to_vec();
+        let old_goal = m.goal();
+        // 目标附近整块占据（res 0.5，goal=(10,1,1) → 体素 [20,2,2] 及邻域），
+        // 使回扫从末端起至少跨过一个步长才碰到自由点
+        for i in 18..=21 {
+            for j in 1..=3 {
+                for k in 1..=3 {
+                    m.map_mut().set_state([i, j, k], VoxelState::Occupied);
+                }
+            }
+        }
+        m.map_mut().inflate_obstacles(0.2);
+        assert!(
+            m.map().is_occupied_inflated(old_goal.coords),
+            "场景前提：目标应落在膨胀占据内"
+        );
+        // t=0.5 < replan_thresh：本 tick 只有目标修正分支能动作
+        let r = m.tick(0.5, None);
+        assert!(r.replanned, "目标修正应本 tick 立即重规划");
+        let new_goal = m.goal();
+        assert!(
+            (new_goal.coords - old_goal.coords).norm() > 1e-6,
+            "目标应被修正，实际仍为 {new_goal:?}"
+        );
+        assert!(
+            !m.map().is_occupied_inflated(new_goal.coords),
+            "修正后的目标必须无碰"
+        );
+        // 修正点 = 沿旧全局路径末端回扫的首个自由点：用测试预言机独立复算期望值
+        let reso = m.map().resolution();
+        let mut expected = None;
+        let mut s = path_length(&old_path);
+        while s > 0.0 {
+            let pt = arc_point(&old_path, old_path[0], s);
+            if !m.map().is_occupied_inflated(pt) {
+                expected = Some(pt);
+                break;
+            }
+            s -= reso;
+        }
+        let expected = expected.expect("场景前提：回扫必能找到自由点");
+        assert!(
+            (new_goal.coords - expected).norm() < 1e-6,
+            "修正点应为末端回扫首个自由点：期望 {expected:?}，实际 {new_goal:?}"
+        );
+        assert!(!r.finished);
+        assert!(!r.emergency_stop);
+    }
+
+    #[test]
+    fn free_goal_left_untouched() {
+        let mut m = open_manager();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        let goal = m.goal();
+        let path = m.global_path().to_vec();
+        // 目标自由且低于重规划阈值：目标与轨迹均不变
+        let r = m.tick(0.5, None);
+        assert!(!r.replanned);
+        assert_eq!(m.goal(), goal);
+        assert_eq!(m.global_path(), path.as_slice());
+        assert_eq!(m.replans(), 0);
+    }
+
+    #[test]
+    fn fully_blocked_global_path_keeps_goal_without_panic() {
+        let mut m = open_manager();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        let goal = m.goal();
+        let path = m.global_path().to_vec();
+        // 整条直线路径占据：路径 y=z=1，占据 y=z∈[1.0,1.5) 的体素条带即覆盖全程
+        let dims = m.map().dims();
+        for i in 0..dims[0] {
+            m.map_mut().set_state([i, 2, 2], VoxelState::Occupied);
+        }
+        m.map_mut().inflate_obstacles(0.2);
+        for p in &path {
+            assert!(m.map().is_occupied_inflated(*p), "场景前提：{p:?} 应被占据");
+        }
+        // 回扫耗尽：不 panic，目标与轨迹保持不变（后续碰撞监控/急停接管）
+        let r = m.tick(0.5, None);
+        assert_eq!(m.goal(), goal, "回扫耗尽目标不得变动");
+        assert_eq!(m.global_path(), path.as_slice());
+        assert!(!r.finished);
     }
 
     #[test]
