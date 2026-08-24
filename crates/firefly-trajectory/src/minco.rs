@@ -29,7 +29,7 @@ pub struct Endpoint {
     pub acceleration: Vector3<f64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Minco {
     order: SolverOrder,
     pieces: usize,

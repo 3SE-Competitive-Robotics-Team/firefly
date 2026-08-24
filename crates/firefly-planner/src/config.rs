@@ -28,6 +28,9 @@ pub struct PlannerConfig {
     pub weight_formation: f64,
     /// 约束点均匀分布权重(官方 `weight_sqrvariance`)。
     pub weight_sqrvariance: f64,
+    /// 多拓扑候选轨迹(官方 `manager/use_multitopology_trajs`,默认关闭;
+    /// 关闭时规划路径与单候选完全一致)。
+    pub use_multitopology_trajs: bool,
 }
 
 impl Default for PlannerConfig {
@@ -52,6 +55,7 @@ impl Default for PlannerConfig {
             weight_swarm: 10_000.0,
             weight_formation: 100.0,
             weight_sqrvariance: 10_000.0,
+            use_multitopology_trajs: false,
         }
     }
 }
@@ -80,5 +84,7 @@ mod tests {
         assert_eq!(c.weight_swarm, 10_000.0);
         assert_eq!(c.weight_formation, 100.0);
         assert_eq!(c.weight_sqrvariance, 10_000.0);
+        // 官方 planner_manager.cpp:24 默认 false(run_in_sim.xml 同)
+        assert!(!c.use_multitopology_trajs);
     }
 }

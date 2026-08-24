@@ -27,6 +27,11 @@ pub struct ReboundDetector<'a> {
     touch_goal: bool,
     planes: Vec<Vec<Plane>>,
     astar: firefly_search::Astar,
+    /// 官方 `use_multitopology_trajs`:开启时按 criterion 3 门控检测。
+    multitopo: bool,
+    /// 官方 `initial_obstacles_avoided`:初始障碍已避开的锁存位
+    /// (一旦为 true 不再回头;每次内层优化开始复位为 false)。
+    gate_latched: bool,
 }
 
 impl<'a> ReboundDetector<'a> {
@@ -38,6 +43,8 @@ impl<'a> ReboundDetector<'a> {
         max_vel: f64,
         touch_goal: bool,
         planes: Vec<Vec<Plane>>,
+        multitopo: bool,
+        gate_latched: bool,
     ) -> Self {
         Self {
             map,
@@ -46,7 +53,15 @@ impl<'a> ReboundDetector<'a> {
             touch_goal,
             planes,
             astar: firefly_search::Astar::default(),
+            multitopo,
+            gate_latched,
         }
+    }
+
+    /// 官方 allowRebound criterion 3 的锁存位(诊断/测试用)。
+    #[must_use]
+    pub fn gate_latched(&self) -> bool {
+        self.gate_latched
     }
 
     /// 官方 `roughlyCheckConstraintPoints`:检测新穿入点并在平面池中追加
@@ -57,6 +72,23 @@ impl<'a> ReboundDetector<'a> {
             .with_samples(self.samples_per_piece)
             .with_max_vel(self.max_vel);
         let points = constraint_sample_points(traj, self.samples_per_piece);
+        // 官方 allowRebound criterion 3:多拓扑下任一内部控制点仍在初始基点
+        // 错误侧((p−base)·direction < 0,只看每点第 0 个平面)时停用内循环
+        // 检测——让候选先在自己初始化的一侧收敛;判定已避开即锁存为 true。
+        if self.multitopo && !self.gate_latched {
+            let avoided = points[1..points.len() - 1]
+                .iter()
+                .enumerate()
+                .all(|(k, p)| {
+                    let i = k + 1;
+                    self.planes[i].is_empty()
+                        || (*p - self.planes[i][0].point()).dot(&self.planes[i][0].normal()) >= 0.0
+                });
+            self.gate_latched = avoided;
+            if !avoided {
+                return false;
+            }
+        }
         scanner.roughly_check(&mut self.astar, &points, &mut self.planes, self.touch_goal)
     }
 
@@ -94,7 +126,9 @@ impl<'a> MincoObjective<'a> {
         }
     }
 
-    /// 挂载内循环碰撞检测(官方 allowRebound 条件:迭代 ≥4 且轨迹足够平滑)。
+    /// 挂载内循环碰撞检测(官方 allowRebound 条件:迭代 ≥4 且轨迹足够平滑;
+    /// 多拓扑门控见 [`ReboundDetector::check`],`gate_latched` 由调用方传入
+    /// 以跨外层迭代保持锁存)。
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn with_detector(
@@ -104,6 +138,8 @@ impl<'a> MincoObjective<'a> {
         max_vel: f64,
         touch_goal: bool,
         planes: Vec<Vec<Plane>>,
+        multitopo: bool,
+        gate_latched: bool,
     ) -> Self {
         self.detector = Some(ReboundDetector::new(
             map,
@@ -111,8 +147,18 @@ impl<'a> MincoObjective<'a> {
             max_vel,
             touch_goal,
             planes,
+            multitopo,
+            gate_latched,
         ));
         self
+    }
+
+    /// 官方 criterion 3 锁存位当前值(供调用方在下一次构建时透传)。
+    #[must_use]
+    pub fn gate_latched(&self) -> bool {
+        self.detector
+            .as_ref()
+            .is_some_and(ReboundDetector::gate_latched)
     }
 
     /// 取走本轮优化后的完整平面池(含检测到的新平面)。
@@ -211,5 +257,96 @@ impl Objective for MincoObjective<'_> {
         };
         let (_, t) = self.unpack(x);
         self.pack(&dq, &dt, &t)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use firefly_map::{GridMapBuilder, VoxelState};
+
+    /// 墙地图:体素 x=14..=26 全高占据(留 y 通道供 A* 绕行),
+    /// 膨胀 1 格 → 占据区世界 x∈[3.25,7.0)。分辨率 0.25。
+    fn wall_map() -> GridMap {
+        let mut map = GridMapBuilder::new(0.25, [40, 20, 20]).build().unwrap();
+        for x in 14..=26 {
+            for y in 0..20 {
+                if (8..12).contains(&y) {
+                    continue;
+                }
+                for z in 0..20 {
+                    map.set_state([x, y, z], VoxelState::Occupied);
+                }
+            }
+        }
+        map.inflate_obstacles(0.25 * 0.99);
+        map
+    }
+
+    fn straight_traj() -> firefly_trajectory::Trajectory {
+        let start = Endpoint {
+            position: Vector3::new(1.0, 0.5, 0.5),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let end = Endpoint {
+            position: Vector3::new(9.0, 0.5, 0.5),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
+            .build(&[], &[4.0])
+            .unwrap()
+            .solve()
+            .unwrap()
+    }
+
+    #[test]
+    fn gate_blocks_rebound_while_initial_obstacle_on_wrong_side() {
+        let map = wall_map();
+        let traj = straight_traj();
+        // k=5 单段 → 6 个约束点,穿墙点无平面覆盖 → roughly_check 必触发
+        let points = constraint_sample_points(&traj, 5);
+        assert!(points.len() > 4);
+        let mut planes = vec![Vec::new(); points.len()];
+        // 内部点放一个"错误侧"平面:(p−base)·direction < 0
+        planes[2].push(Plane::new(
+            points[2] - Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(0.0, -1.0, 0.0),
+        ));
+        assert!(
+            (points[2] - planes[2][0].point()).dot(&planes[2][0].normal()) < 0.0,
+            "测试前提:该点必须在平面错误侧"
+        );
+
+        let mut det = ReboundDetector::new(&map, 5, 10.0, false, planes.clone(), true, false);
+        assert!(!det.gate_latched(), "每次内层开始锁存位复位为 false");
+        assert!(
+            !det.check(&traj),
+            "初始障碍未避开时内循环检测必须被门控停用"
+        );
+        assert!(!det.gate_latched(), "未避开时不得锁存");
+
+        // 同样的几何、开关关(单拓扑):不门控,检测照常触发
+        let mut det_single =
+            ReboundDetector::new(&map, 5, 10.0, false, planes.clone(), false, false);
+        assert!(det_single.check(&traj), "开关关时不允许被 criterion 3 拦截");
+    }
+
+    #[test]
+    fn gate_latches_once_obstacle_avoided() {
+        let map = wall_map();
+        let traj = straight_traj();
+        let points = constraint_sample_points(&traj, 5);
+        let mut planes = vec![Vec::new(); points.len()];
+        // 同一点放"正确侧"平面:(p−base)·direction ≥ 0 → 已避开
+        planes[2].push(Plane::new(
+            points[2] + Vector3::new(0.0, 1.5, 0.0),
+            Vector3::new(0.0, -1.0, 0.0),
+        ));
+        let mut det = ReboundDetector::new(&map, 5, 10.0, false, planes, true, false);
+        // 首次 check:判定已避开 → 锁存,并放行 roughly_check(穿墙点未覆盖)
+        assert!(det.check(&traj), "已避开时应放行内循环检测");
+        assert!(det.gate_latched(), "判定已避开后必须锁存为 true");
     }
 }
