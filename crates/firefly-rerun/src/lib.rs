@@ -29,6 +29,8 @@ const APP_ID: &str = "firefly";
 /// 共享 RecordingId：与 [`APP_ID`] 一起构成唯一的 `StoreId`，
 /// 把各进程的流合并为 viewer 中的一个 recording。
 const RECORDING_ID: &str = "firefly-sim-loop";
+/// 记录的显示名（rerun UI 中取代 `<unknown>` 的层级）。
+const RECORDING_NAME: &str = "firefly-sim-loop";
 
 /// 一个已连接（或已 spawn）的 rerun 记录流。
 pub struct Stream {
@@ -260,9 +262,15 @@ fn builder() -> Result<rerun::RecordingStreamBuilder> {
     let app = rerun::ApplicationId::try_new(APP_ID).map_err(|e| {
         Error::new(ErrorKind::InvalidArgument, "invalid application id").with_source(e)
     })?;
-    Ok(rerun::RecordingStreamBuilder::new(app).recording_id(
-        rerun::external::re_log_types::RecordingId::from(RECORDING_ID),
-    ))
+    // 显式设置 RecordingId 会关闭属性 chunk（见 SDK `recording_id` 文档），
+    // 需 `send_properties(true)` 重新开启，recording_name 才会发出去
+    // （否则 UI 里记录名显示 `<unknown>`）。
+    Ok(rerun::RecordingStreamBuilder::new(app)
+        .recording_id(rerun::external::re_log_types::RecordingId::from(
+            RECORDING_ID,
+        ))
+        .recording_name(RECORDING_NAME)
+        .send_properties(true))
 }
 
 fn stream_err(e: rerun::RecordingStreamError) -> Error {
