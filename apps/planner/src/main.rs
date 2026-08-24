@@ -351,9 +351,13 @@ impl App {
         // 以目标点为参考（速度 0），进程保持运行等待新目标
         let reference = if self.manager.is_finished() {
             let goal = self.manager.goal().coords;
+            // 到达悬停保持最后朝向（无轨迹可前视，不再推进 yaw 状态）
+            let (yaw, yaw_dot) = self.manager.yaw_state();
             Some(firefly_planner::Reference {
                 position: goal,
                 velocity: Vector3::zeros(),
+                yaw,
+                yaw_dot,
             })
         } else {
             report.reference
@@ -368,6 +372,8 @@ impl App {
                 velocity_x: reference.velocity.x,
                 velocity_y: reference.velocity.y,
                 velocity_z: reference.velocity.z,
+                yaw: reference.yaw,
+                yaw_dot: reference.yaw_dot,
             })
         {
             log::warn!("参考状态发布失败: {e}");

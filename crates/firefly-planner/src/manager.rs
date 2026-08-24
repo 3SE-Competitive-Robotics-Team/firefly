@@ -29,6 +29,15 @@ const REPLAN_COOLDOWN: f64 = 0.5;
 const FAIL_STREAK_ESCAPE: usize = 3;
 /// 脱困引导速度（m/s）。
 const ESCAPE_SPEED: f64 = 1.0;
+/// 前视时间（秒，官方 `traj_server/time_forward`，swarm-playground 各 launch
+/// 均取 1.0）：yaw 期望方向取参考位置再往前该时长的轨迹点。
+const TIME_FORWARD: f64 = 1.0;
+/// yaw 角速度上限（rad/s，官方 `traj_server` 的 `YAW_DOT_MAX_PER_SEC`）。
+const YAW_DOT_MAX: f64 = 2.0 * std::f64::consts::PI;
+/// yaw 角加速度上限（rad/s²，官方 `YAW_DOT_DOT_MAX_PER_SEC`）。
+const YAW_DOT_DOT_MAX: f64 = 5.0 * std::f64::consts::PI;
+/// 地面高度测量前视距离（米，官方 `measureGroundHeight` 的 `2.0/max_vel` 前方采样）。
+const GROUND_LOOKAHEAD_DIST: f64 = 2.0;
 
 /// 管理器行为参数。
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
@@ -72,6 +81,13 @@ pub struct LocalTraj {
 pub struct Reference {
     pub position: Vector3<f64>,
     pub velocity: Vector3<f64>,
+    /// 参考偏航角（rad，地图系 x 轴为零向，包装在 [-π,π]；对照官方
+    /// `traj_server::calculate_yaw` 的限幅输出）。
+    pub yaw: f64,
+    /// 参考偏航角速度（rad/s，两级限幅后的实际变化率；非官方发布值——
+    /// 官方 `position_cmd.yaw_dot` 实际携带的是未限幅期望航向，此处按字段
+    /// 语义取限幅后的角速度）。
+    pub yaw_dot: f64,
 }
 
 /// 一次 [`PlannerManager::tick`] 的产出。
@@ -92,6 +108,12 @@ pub struct TickReport {
     /// （官方 `EMERGENCY_STOP` 的触发判据）。管理器不做停机控制——
     /// 处置（悬停/锁桨等）由应用层决定。
     pub emergency_stop: bool,
+    /// 地面高度测量（对照官方 `measureGroundHeight`）：当前轨迹前方
+    /// [`GROUND_LOOKAHEAD_DIST`] 米处采样点正下方的地面 z 坐标（地图系，
+    /// 米）。不变量：返回的是首个占据体素的采样 z（按分辨率逐格下降的
+    /// 离散值），非连续表面拟合。`None` = 本 tick 未测得（无可执行轨迹、
+    /// 前方点超出当前轨迹时长、或扫描至图底仍无占据）。
+    pub ground_height: Option<f64>,
 }
 
 /// 规划视界目标（全局路径上按弧长截取的一段）。
@@ -119,6 +141,13 @@ pub struct PlannerManager {
     replan_cooldown_until: f64,
     /// 连续重规划失败计数：达阈值且轨迹耗尽时沿全局路径脱困。
     replan_fail_streak: usize,
+    /// 上一帧参考偏航角（rad，[-π,π]；官方 `traj_server` 的
+    /// `last_yaw_`，初值 0）。
+    last_yaw: f64,
+    /// 上一帧参考偏航角速度（rad/s；官方 `last_yawdot_`，初值 0）。
+    last_yaw_dot: f64,
+    /// 上次 yaw 更新时刻（管理器时钟，秒）：限幅剖面按帧间 `dt` 推进。
+    last_yaw_time: Option<f64>,
 }
 
 impl PlannerManager {
@@ -147,6 +176,9 @@ impl PlannerManager {
             replans: 0,
             replan_cooldown_until: 0.0,
             replan_fail_streak: 0,
+            last_yaw: 0.0,
+            last_yaw_dot: 0.0,
+            last_yaw_time: None,
         })
     }
 
@@ -236,6 +268,13 @@ impl PlannerManager {
         self.last_result.as_ref()
     }
 
+    /// 当前偏航状态 `(yaw, yaw_dot)`（rad / rad/s）：到达悬停等无轨迹
+    /// 阶段由应用层构造 [`Reference`] 时沿用，保持最后朝向。
+    #[must_use]
+    pub const fn yaw_state(&self) -> (f64, f64) {
+        (self.last_yaw, self.last_yaw_dot)
+    }
+
     /// 主循环单步（10Hz，官方 `execFSMCallback`）。
     ///
     /// `measured`：最新里程计观测（新鲜时由应用层传入；`None` 时管理器以
@@ -289,6 +328,9 @@ impl PlannerManager {
                 }
             }
         }
+        // 地面高度测量（官方 checkCollisionCallback 入口的顺带测量：
+        // 无可执行轨迹时内部自返回 None）
+        report.ground_height = self.measure_ground_height(now);
         // 参考指令：跟踪当前轨迹；耗尽且连续失败时沿全局路径脱困直飞
         report.reference = self.reference(now, measured);
         // 到达判定（任意轨迹阶段，物理位置为准）
@@ -541,6 +583,97 @@ impl PlannerManager {
         None
     }
 
+    /// 参考偏航计算（对照官方 `traj_server::calculate_yaw`）：期望航向取
+    /// `pos → target` 方向（轨迹分支即前视 `TIME_FORWARD` 秒的方向；模长
+    /// ≤ 0.1 m 保持上一帧 yaw），期望差做 ±π 包装后按角速度/角加速度
+    /// 两级限幅的梯形剖面推进。状态存入 `last_yaw/last_yaw_dot`；首帧或
+    /// `dt` 退化时保持当前状态不变。
+    fn update_yaw(&mut self, pos: Vector3<f64>, target: Vector3<f64>, now: f64) -> (f64, f64) {
+        let Some(t_last) = self.last_yaw_time else {
+            self.last_yaw_time = Some(now);
+            return (self.last_yaw, self.last_yaw_dot);
+        };
+        let dt = now - t_last;
+        if dt <= 1e-9 {
+            // 官方依赖 ros 定时器保证 dt > 0；此处显式防护除零
+            return (self.last_yaw, self.last_yaw_dot);
+        }
+        self.last_yaw_time = Some(now);
+
+        let dir = target - pos;
+        let yaw_temp = if dir.norm() > 0.1 {
+            dir.y.atan2(dir.x)
+        } else {
+            self.last_yaw
+        };
+
+        let mut d_yaw = yaw_temp - self.last_yaw;
+        if d_yaw >= std::f64::consts::PI {
+            d_yaw -= 2.0 * std::f64::consts::PI;
+        }
+        if d_yaw <= -std::f64::consts::PI {
+            d_yaw += 2.0 * std::f64::consts::PI;
+        }
+
+        let rate_cap = if d_yaw >= 0.0 {
+            YAW_DOT_MAX
+        } else {
+            -YAW_DOT_MAX
+        };
+        let accel_cap = if d_yaw >= 0.0 {
+            YAW_DOT_DOT_MAX
+        } else {
+            -YAW_DOT_DOT_MAX
+        };
+        let d_yaw_max = if (self.last_yaw_dot + dt * accel_cap).abs() <= rate_cap.abs() {
+            // 加速段可达：匀加速位移剖面
+            self.last_yaw_dot * dt + 0.5 * accel_cap * dt * dt
+        } else {
+            // 本帧内先匀加速到限值再匀速：梯形面积
+            let t1 = (rate_cap - self.last_yaw_dot) / accel_cap;
+            ((dt - t1) + dt) * (rate_cap - self.last_yaw_dot) / 2.0
+        };
+        if d_yaw.abs() > d_yaw_max.abs() {
+            d_yaw = d_yaw_max;
+        }
+        let yaw_dot = d_yaw / dt;
+        let mut yaw = self.last_yaw + d_yaw;
+        if yaw > std::f64::consts::PI {
+            yaw -= 2.0 * std::f64::consts::PI;
+        }
+        if yaw < -std::f64::consts::PI {
+            yaw += 2.0 * std::f64::consts::PI;
+        }
+        self.last_yaw = yaw;
+        self.last_yaw_dot = yaw_dot;
+        (yaw, yaw_dot)
+    }
+
+    /// 地面高度测量（对照官方 `ego_replan_fsm::measureGroundHeight`）：沿
+    /// 当前轨迹取前方 [`GROUND_LOOKAHEAD_DIST`] 米处（`2.0/max_vel` 秒后）
+    /// 的采样点，按地图分辨率逐格下降扫描，首个占据体素的 z 即地面高度；
+    /// 扫描出图底（官方 `getOccupancy == -1`）仍无占据则失败。无可执行
+    /// 轨迹或前方点超出轨迹时长不测量。
+    #[must_use]
+    fn measure_ground_height(&self, now: f64) -> Option<f64> {
+        let local = self.local.as_ref()?;
+        let max_vel = self.planner.config().max_velocity;
+        let traj_t = (now - local.start_time) + GROUND_LOOKAHEAD_DIST / max_vel;
+        if traj_t > local.traj.duration() {
+            return None;
+        }
+        let mut p = local.traj.eval(traj_t).position;
+        let map = self.planner.map_ref();
+        let reso = map.resolution();
+        loop {
+            map.index_of(p)?; // 出界即图底：无地面（官方 `getOccupancy == -1`）
+            if map.is_occupied(p) {
+                return Some(p.z);
+            }
+            p.z -= reso;
+        }
+    }
+
     /// 局部目标选取（官方 `getLocalTarget`）：全局路径上距当前位置
     /// `planning_horizon` 弧长处；落进障碍膨胀区或贴障时沿路径逐步回退
     /// （每步 0.4m）到安全点。同时产出暖启动延续段。
@@ -672,15 +805,30 @@ impl PlannerManager {
                 escape.target.coords.x,
                 escape.target.coords.y
             );
+            // 脱困直飞无轨迹可前视：yaw 对准脱困方向（同前视朝向运动方向的语义）
+            let (yaw, yaw_dot) = self.update_yaw(pos, escape.target.coords, now);
             return Some(Reference {
                 position: escape.target.coords,
                 velocity: ESCAPE_SPEED * dir,
+                yaw,
+                yaw_dot,
             });
         }
         let s = local.traj.eval(t_cur);
+        // 前视方向（官方 calculate_yaw：t_cur+TIME_FORWARD 未出轨迹则取该点，
+        // 否则取轨迹末端）
+        let t_look = t_cur + TIME_FORWARD;
+        let look_pos = if t_look <= local.traj.duration() {
+            local.traj.eval(t_look).position
+        } else {
+            local.traj.eval(local.traj.duration()).position
+        };
+        let (yaw, yaw_dot) = self.update_yaw(s.position, look_pos, now);
         Some(Reference {
             position: s.position,
             velocity: s.velocity,
+            yaw,
+            yaw_dot,
         })
     }
 }
@@ -1030,5 +1178,168 @@ mod tests {
         assert!(!r.collision, "已飞过部分的障碍不得误报");
         assert!(!r.replanned, "无误报则不应重规划");
         assert_eq!(m.replans(), 0);
+    }
+
+    /// 沿 +y 方向直飞的管理器（起点 (1,1,1)，终点 (1,10,1)）：航向恒为 π/2。
+    fn northbound_manager() -> PlannerManager {
+        let map = GridMapBuilder::new(0.5, [24, 40, 16]).build().unwrap();
+        let planner = Planner::new(PlannerConfig::default(), map);
+        PlannerManager::with_planner(
+            planner,
+            ManagerOptions::default(),
+            Vector3::new(1.0, 1.0, 1.0),
+            Vector3::new(1.0, 10.0, 1.0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn yaw_tracks_straight_line_heading() {
+        let mut m = northbound_manager();
+        // 首帧仅初始化 yaw 状态（官方首帧行为：last_yaw_=0 起）
+        let r0 = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        let ref0 = r0.reference.expect("首帧应有参考指令");
+        assert!(ref0.yaw.abs() < 1e-12);
+        assert!(ref0.yaw_dot.abs() < 1e-12);
+        // 第二帧（低于重规划阈值，不扰动轨迹）：前视方向沿 +y → yaw = π/2
+        let r1 = m.tick(0.5, None);
+        let ref1 = r1.reference.expect("第二帧应有参考指令");
+        assert!(
+            (ref1.yaw - std::f64::consts::FRAC_PI_2).abs() < 1e-6,
+            "直线轨迹 yaw 应为航向角 π/2，实际 {}",
+            ref1.yaw
+        );
+        // 首帧 yaw 从初值 0 出发，本帧一步内完成对准（dt=0.5 的限幅剖面
+        // 容许 π/2），角速度为实际变化率且不超限幅
+        assert!(
+            ref1.yaw_dot.abs() <= YAW_DOT_MAX + 1e-9,
+            "角速度超限幅: {}",
+            ref1.yaw_dot
+        );
+        // 第三帧已对准航向：yaw 保持 π/2，角速度归零
+        let r2 = m.tick(1.0, None);
+        let ref2 = r2.reference.expect("第三帧应有参考指令");
+        assert!((ref2.yaw - std::f64::consts::FRAC_PI_2).abs() < 1e-6);
+        assert!(ref2.yaw_dot.abs() < 1e-9, "已对准航向后角速度应≈0");
+        // 包装不变量：yaw 始终在 [-π,π]
+        assert!(ref1.yaw.abs() <= std::f64::consts::PI + 1e-12);
+    }
+
+    #[test]
+    fn yaw_wraps_across_pi_without_jumping() {
+        let mut m = open_manager();
+        // 上一帧 yaw=3.0，期望航向 -3.0：原始差 -6.0，包装后应沿 +0.283 方向
+        // 小步推进（穿过 ±π 边界），而不是反向跳转到 -3.0
+        m.last_yaw = 3.0;
+        m.last_yaw_dot = 0.0;
+        m.last_yaw_time = Some(0.0);
+        let pos = Vector3::zeros();
+        let target = Vector3::new((-3.0f64).cos() * 5.0, (-3.0f64).sin() * 5.0, 0.0);
+        let (yaw, yaw_dot) = m.update_yaw(pos, target, 0.1);
+        // dt=0.1、零初速：梯形剖面首步位移 = 0.5·(5π)·dt² = 0.0785398...
+        let expect_step = 0.5 * YAW_DOT_DOT_MAX * 0.01;
+        assert!(
+            (yaw - (3.0 + expect_step)).abs() < 1e-9,
+            "yaw 应从 3.0 沿正向小步推进到 {}，实际 {yaw}",
+            3.0 + expect_step
+        );
+        assert!((yaw_dot - expect_step / 0.1).abs() < 1e-9);
+        assert!((m.last_yaw - yaw).abs() < 1e-12, "状态应同步更新");
+    }
+
+    #[test]
+    fn yaw_rate_capped_under_large_turn() {
+        let mut m = open_manager();
+        // 大转向：期望航向与当前 yaw 相差 π，逐步积分整条限幅剖面
+        m.last_yaw = 0.0;
+        m.last_yaw_dot = 0.0;
+        m.last_yaw_time = Some(0.0);
+        let pos = Vector3::zeros();
+        let target = Vector3::new(-5.0, 0.0, 0.0); // 航向 π（与 0 反向）
+        let mut now = 0.0;
+        let mut converged = false;
+        for _ in 0..400 {
+            now += 0.02;
+            let (yaw, yaw_dot) = m.update_yaw(pos, target, now);
+            assert!(
+                yaw_dot.abs() <= YAW_DOT_MAX + 1e-9,
+                "|yaw_dot|={} 超出限幅 {}",
+                yaw_dot.abs(),
+                YAW_DOT_MAX
+            );
+            assert!(yaw.abs() <= std::f64::consts::PI + 1e-12, "包装越界: {yaw}");
+            // 到达期望航向（±π 同义）即收敛
+            if (yaw.abs() - std::f64::consts::PI).abs() < 1e-3 {
+                converged = true;
+                break;
+            }
+        }
+        assert!(converged, "限幅剖面应在有限时间内转过 π");
+    }
+
+    #[test]
+    fn yaw_holds_last_on_deadzone() {
+        let mut m = open_manager();
+        m.last_yaw = 0.7;
+        m.last_yaw_dot = -0.3;
+        m.last_yaw_time = Some(1.0);
+        // 前视方向模长 ≤ 0.1（悬停/末端）：保持 last_yaw，角速度归零
+        let pos = Vector3::new(2.0, 2.0, 1.0);
+        let target = pos + Vector3::new(0.05, 0.0, 0.0);
+        let (yaw, yaw_dot) = m.update_yaw(pos, target, 1.1);
+        assert!((yaw - 0.7).abs() < 1e-12, "死区应保持 last_yaw，实际 {yaw}");
+        assert!(yaw_dot.abs() < 1e-12);
+        let state = m.yaw_state();
+        assert!((state.0 - 0.7).abs() < 1e-12 && state.1.abs() < 1e-12);
+        // 首帧初始化：不计算方向，保持初值 (0, 0)
+        let mut m2 = open_manager();
+        let (yaw2, dot2) = m2.update_yaw(pos, target, 5.0);
+        assert!(yaw2.abs() < 1e-12 && dot2.abs() < 1e-12);
+    }
+
+    #[test]
+    fn ground_height_measures_flat_floor() {
+        let mut m = open_manager();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        // 平地：整个底层体素层（z∈[0,0.5)）填满占据
+        let dims = m.map().dims();
+        for i in 0..dims[0] {
+            for j in 0..dims[1] {
+                m.map_mut().set_state([i, j, 0], VoxelState::Occupied);
+            }
+        }
+        let h = m
+            .measure_ground_height(m.local().unwrap().start_time)
+            .expect("平地应测得地面高度");
+        assert!(
+            (0.0..0.5).contains(&h),
+            "测得高度应落在地面体素层内，实际 {h}",
+        );
+        // 首个命中不变量：命中体素占据，其上一层自由
+        let fwd = m
+            .local()
+            .unwrap()
+            .traj
+            .eval(GROUND_LOOKAHEAD_DIST / 1.5)
+            .position;
+        assert!(m.map().is_occupied(Vector3::new(fwd.x, fwd.y, h)));
+        assert!(!m.map().is_occupied(Vector3::new(fwd.x, fwd.y, h + 0.5)));
+    }
+
+    #[test]
+    fn ground_height_fails_at_map_bottom() {
+        let mut m = open_manager();
+        // 空旷地图（无地面）：逐格下降扫描至图底仍无占据 → 测量失败
+        let r = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        assert!(m.local().is_some(), "前置：轨迹已存在");
+        assert!(r.ground_height.is_none(), "图底之下无地面应返回失败");
+        assert!(m.measure_ground_height(0.0).is_none());
+    }
+
+    #[test]
+    fn ground_height_skipped_without_plan() {
+        let m = open_manager();
+        // 无可执行轨迹（官方 pts_chk < 3 的前置条件）不测量
+        assert!(m.measure_ground_height(0.0).is_none());
     }
 }
