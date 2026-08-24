@@ -95,6 +95,8 @@ class ReferenceMessage(ctypes.Structure):
         ("velocity_x", ctypes.c_double),
         ("velocity_y", ctypes.c_double),
         ("velocity_z", ctypes.c_double),
+        ("yaw", ctypes.c_double),
+        ("yaw_dot", ctypes.c_double),
     ]
 
     @staticmethod
@@ -146,7 +148,7 @@ def _self_check() -> None:
     assert ctypes.sizeof(ImuMessage) == 56
     assert ctypes.sizeof(GrayImageMessage) == 76824
     assert ctypes.sizeof(DepthImageMessage) == 307224
-    assert ctypes.sizeof(ReferenceMessage) == 56
+    assert ctypes.sizeof(ReferenceMessage) == 72
     assert ctypes.sizeof(OdomMessage) == 96
 
 
