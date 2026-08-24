@@ -2,7 +2,8 @@
 //! 接线 + rerun 可视化。
 //!
 //! 状态源 = **VIO odom**（`Firefly/Odometry`，新鲜度超时回退轨迹参考推进）；
-//! 深度感知建图的位姿同源。真值不参与状态链路（vio 进程侧仅作对比可视化）。
+//! 深度感知建图的位姿同源，深度流超时（对照官方 `grid_map/odom_depth_timeout`）
+//! 触发急停且禁用 fail-safe。真值不参与状态链路（vio 进程侧仅作对比可视化）。
 //!
 //! 运行：`cargo run -p planner`（配合 `uv run firefly-sim` + `cargo run -p vio`），
 //! 或 `cargo run -p planner -- --map apps/planner/maps/gate.ffmap` 独立运行。
@@ -46,6 +47,9 @@ use crate::scene::{human_voxels, mujoco_map_file, parse_vec3};
 const LOOP_PERIOD: Duration = Duration::from_millis(100);
 /// odom 新鲜度阈值（秒）：超过该时长未收到 odom 则回退轨迹推进估计。
 const ODOM_FRESH_TIMEOUT: f64 = 1.0;
+/// 深度/odom 丢失阈值（秒），对照官方 `grid_map/odom_depth_timeout`
+/// 默认值 1.0（`plan_env/src/grid_map.cpp`）。
+const DEPTH_TIMEOUT: f64 = 1.0;
 /// 感知占据地图的 viewer 更新周期（帧；10Hz 循环下约每 2.5s）。
 const PERCEIVED_PERIOD: usize = 25;
 /// `configs/planner.toml` 缺省路径（相对运行目录，通常为仓库根）。
@@ -132,6 +136,10 @@ struct App {
     /// 最新 odom 携带的 trace 上下文 `(trace_id, span_id, sampled)`（续接用）。
     odom_trace: Option<(u128, u64, bool)>,
     latest_depth: Option<DepthImageMessage>,
+    /// 深度流新鲜度监视（超时锁存触发急停）。
+    depth_freshness: DepthFreshness,
+    /// 深度丢失已报错标记（锁存期内不刷屏；新帧到达即复位）。
+    depth_loss_reported: bool,
     ref_pub: Option<Publisher<ReferenceMessage>>,
     depth_cam: DepthCamera,
     frame_offset: Vector3<f64>,
@@ -223,6 +231,8 @@ impl App {
             last_odom_recv: f64::NEG_INFINITY,
             odom_trace: None,
             latest_depth: None,
+            depth_freshness: DepthFreshness::new(),
+            depth_loss_reported: false,
             ref_pub,
             depth_cam: DepthCamera::mujoco_default(),
             frame_offset: Vector3::new(frame_offset[0], frame_offset[1], frame_offset[2]),
@@ -260,7 +270,13 @@ impl App {
             while let Some(sample) = sub.receive()? {
                 let ctx = *sample.user_header();
                 let _span = ctx.continue_span("recv-depth");
-                self.latest_depth = Some(*sample);
+                let m: DepthImageMessage = *sample;
+                // 帧时间戳（传感器时钟 = 仿真时钟）锚定 sim 时钟，与 odom
+                // 一致；新鲜度计时在 update_map_from_depth 实际吃进帧时推进
+                self.t_sim = self.t_sim.max(m.timestamp);
+                self.sensor_this_tick = true;
+                self.depth_loss_reported = false;
+                self.latest_depth = Some(m);
             }
         }
         if let Some(sub) = &self.goal_sub {
@@ -287,6 +303,9 @@ impl App {
     }
 
     /// 深度 → 占据体素（感知建图）：位姿源与状态源同源（VIO odom）。
+    /// 深度与位姿任一断流都会在此早退——管线饥饿由 [`Self::depth_freshness`]
+    /// 的计时基准停止推进体现（对照官方 `last_occ_update_time_` 只在实际
+    /// 更新占据栅格时推进，"odom or depth lost!" 任一丢失都算）。
     fn update_map_from_depth(&mut self) {
         let (Some(depth), Some(odom)) = (&self.latest_depth, &self.latest_odom) else {
             return;
@@ -296,6 +315,7 @@ impl App {
         let quat = UnitQuaternion::from_quaternion(Quaternion::new(q[3], q[0], q[1], q[2]));
         let pose = Isometry3::from_parts(Translation3::new(pos.x, pos.y, pos.z), quat);
         update_from_depth(self.manager.map_mut(), &self.depth_cam, &pose, &depth.data);
+        self.depth_freshness.observe(depth.timestamp);
     }
 
     /// 动态障碍按仿真时钟插值，增量更新占据地图（静态体素保护）。
@@ -330,6 +350,22 @@ impl App {
         self.update_motion();
 
         let measured = self.measured(now);
+
+        // 深度/odom 超时急停（官方 checkCollisionCallback：有可执行轨迹且
+        // 未完成才监控深度丢失，命中则关 fail-safe 进急停、永不自动恢复）。
+        // 锁存后重复命中不刷屏（监视结构锁存 + enter 幂等）。
+        if self.manager.local().is_some()
+            && !self.manager.is_finished()
+            && self.depth_freshness.timed_out(now, DEPTH_TIMEOUT)
+        {
+            if !self.depth_loss_reported {
+                log::error!("深度/里程计丢失！进入急停（fail-safe 已禁用）");
+                self.depth_loss_reported = true;
+            }
+            self.manager
+                .trigger_emergency_stop_disable_failsafe(now, measured);
+        }
+
         // 动态目标：收到新目标即重目标（重算全局路径 + 重置状态机），
         // 下一 tick 重新规划飞往新目标
         if let Some(goal) = self.pending_goal.take() {
@@ -517,6 +553,42 @@ impl App {
     }
 }
 
+/// 感知建图管线新鲜度监视：对照官方 `flag_depth_odom_timeout_` 锁存语义——
+/// 计时基准是管线**实际吃进一帧**（深度+位姿齐备并写入地图）的时间戳，
+/// 深度或位姿任一断流即饥饿，超时置位后锁存，直到管线再次吃进新帧才复位。
+struct DepthFreshness {
+    /// 最近一次实际建图消费的帧时间戳（传感器时钟）；首帧之前为 `None`。
+    last_frame_ts: Option<f64>,
+    /// 超时锁存位（官方 `flag_depth_odom_timeout_`）。
+    lost: bool,
+}
+
+impl DepthFreshness {
+    const fn new() -> Self {
+        Self {
+            last_frame_ts: None,
+            lost: false,
+        }
+    }
+
+    /// 管线实际吃进一帧：记录时间戳并清除丢失锁存。
+    fn observe(&mut self, ts: f64) {
+        self.last_frame_ts = Some(self.last_frame_ts.map_or(ts, |prev| prev.max(ts)));
+        self.lost = false;
+    }
+
+    /// 首帧之前恒 false；`now - 最新帧ts > timeout` 后置位并锁存
+    /// （后续调用持续返回 true）。
+    fn timed_out(&mut self, now: f64, timeout: f64) -> bool {
+        if let Some(ts) = self.last_frame_ts
+            && now - ts > timeout
+        {
+            self.lost = true;
+        }
+        self.lost
+    }
+}
+
 fn main() {
     init_observability();
     let args = match parse_args() {
@@ -589,4 +661,38 @@ fn main() {
         }
     }
     firefly_observability::flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 管线从未吃进帧（首帧之前）不触发。
+    #[test]
+    fn no_trigger_before_first_frame() {
+        let mut f = DepthFreshness::new();
+        assert!(!f.timed_out(100.0, DEPTH_TIMEOUT));
+    }
+
+    /// 管线再次吃进帧清除丢失锁存。
+    #[test]
+    fn new_frame_resets_latch() {
+        let mut f = DepthFreshness::new();
+        f.observe(10.0);
+        assert!(f.timed_out(11.5, DEPTH_TIMEOUT));
+        // 锁存期内持续命中
+        assert!(f.timed_out(12.0, DEPTH_TIMEOUT));
+        f.observe(11.8);
+        assert!(!f.timed_out(12.0, DEPTH_TIMEOUT));
+    }
+
+    /// 超时置位并锁存。
+    #[test]
+    fn timeout_sets_and_latches() {
+        let mut f = DepthFreshness::new();
+        f.observe(10.0);
+        assert!(!f.timed_out(11.0, DEPTH_TIMEOUT));
+        assert!(f.timed_out(11.0 + 1e-3, DEPTH_TIMEOUT));
+        assert!(f.timed_out(20.0, DEPTH_TIMEOUT));
+    }
 }
