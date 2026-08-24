@@ -403,7 +403,6 @@ impl App {
                 &indices,
                 [0.1, 0.1, 0.1],
                 [0.0, 0.0, 0.0],
-                (220, 60, 60),
             )?;
         }
         if report.finished {

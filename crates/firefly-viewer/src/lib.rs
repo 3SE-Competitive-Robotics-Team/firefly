@@ -128,13 +128,18 @@ impl Viewer {
                 }
             }
         }
+        // 注意：不给 VoxelGridMap 传 colors——rerun 0.36 的 colors 路径在
+        // 体素数超过 ~1000 时渲染性能悬崖（实测 4590 体素 30s+ 卡死，live
+        // 视图标红）；去掉 colors 用默认着色后 4590 体素 <0.5s。
         self.stream
             .stream()
             .log(
                 entity,
-                &rerun::VoxelGridMap::new(indices, [res; 3])
-                    .with_translation([origin.x as f32, origin.y as f32, origin.z as f32])
-                    .with_colors([rerun::Color::from_rgb(150, 150, 150)]),
+                &rerun::VoxelGridMap::new(indices, [res; 3]).with_translation([
+                    origin.x as f32,
+                    origin.y as f32,
+                    origin.z as f32,
+                ]),
             )
             .map_err(viewer_err)
     }
@@ -238,7 +243,10 @@ impl Viewer {
             .map_err(viewer_err)
     }
 
-    /// 占据体素网格（单色）→ `VoxelGridMap`。
+    /// 占据体素网格 → `VoxelGridMap`。
+    ///
+    /// 不传 colors：rerun 0.36 的 colors 路径在体素数超过 ~1000 时渲染
+    /// 性能悬崖（live 视图标红卡死），见 [`Self::log_map`]。
     ///
     /// # Errors
     ///
@@ -249,15 +257,13 @@ impl Viewer {
         indices: &[(i32, i32, i32)],
         voxel_size: [f32; 3],
         translation: [f32; 3],
-        color: (u8, u8, u8),
     ) -> Result<()> {
         self.stream
             .stream()
             .log(
                 entity,
                 &rerun::VoxelGridMap::new(indices.to_vec(), voxel_size)
-                    .with_translation(translation)
-                    .with_colors([rerun::Color::from_rgb(color.0, color.1, color.2)]),
+                    .with_translation(translation),
             )
             .map_err(viewer_err)
     }
