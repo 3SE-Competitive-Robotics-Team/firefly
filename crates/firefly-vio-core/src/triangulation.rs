@@ -47,7 +47,10 @@ pub struct TriangulationOptions {
     pub min_dcost: f64,
     /// 阻尼倍增系数（`lam_mult = 10`）。
     pub lam_mult: f64,
-    /// 深度/基线比上限（`max_baseline = 40`）。
+    /// 深度/基线比上限（OpenVINS 默认 40；本场景 D430 基线 0.05m + 特征
+    /// 2~6m（z=1.5 悬停时最近可见地面 ~2.6m、柱 ~3.6m），40 只允许 ≤2m——
+    /// 目的地悬停全部特征被拒 → 视觉更新死亡 → IMU 漂移。放宽到 120
+    /// （≤6m）后近柱/地面可用，视觉能拉回机动后的姿态误差。
     pub max_baseline: f64,
 }
 
@@ -64,7 +67,7 @@ impl Default for TriangulationOptions {
             min_dx: 1e-6,
             min_dcost: 1e-6,
             lam_mult: 10.0,
-            max_baseline: 40.0,
+            max_baseline: 120.0,
         }
     }
 }
