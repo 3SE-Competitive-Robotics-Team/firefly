@@ -157,7 +157,8 @@ mod tests {
         assert!(grid.is_occupied(Vector3::new(2.0, 2.0, 1.0)));
         // 起点不被占据
         assert!(!grid.is_occupied(Vector3::new(0.5, 0.5, 0.5)));
-        assert!(grid.is_occupied(Vector3::new(5.0, 2.0, 1.0)));
+        // 球内体素中心（球心 x=5.0 恰在窗口右界外，体素被 clamp 截断）
+        assert!(grid.is_occupied(Vector3::new(4.75, 2.0, 1.0)));
         assert!(!map.occupied.is_empty());
         // 不重复体素（去重？先对称断言）
         let mut dedup = map.occupied.clone();
