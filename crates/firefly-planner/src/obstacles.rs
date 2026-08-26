@@ -526,26 +526,21 @@ fn assign_planes_for_segment(
     let Some(got) = got_intersection_id else {
         return false;
     };
-    let mut prev_base: Option<Vector3<f64>> = None;
-    let mut prev_dir: Option<Vector3<f64>> = None;
-    // 向后(got+1 ..= hi)
+    // 向后(got+1 ..= hi)：官方 `base_point[j].push_back(base_point[j-1].back())`，
+    // 直接取 j-1 的平面（j=got+1 时 j-1=got 必有平面，后续 j-1 已被传播）
     for j in (got + 1)..=hi {
-        if flag_temp[j - lo] {
-            prev_base = planes[j].last().map(Plane::point);
-            prev_dir = planes[j].last().map(Plane::normal);
-        } else if let (Some(b), Some(d)) = (prev_base, prev_dir) {
-            planes[j].push(Plane::new(b, d));
+        if !flag_temp[j - lo]
+            && let Some(p) = planes[j - 1].last()
+        {
+            planes[j].push(p.clone());
         }
     }
-    // 向前(got-1 ..= lo 递减)
-    let mut next_base: Option<Vector3<f64>> = None;
-    let mut next_dir: Option<Vector3<f64>> = None;
+    // 向前(lo..got 递减)：官方 `base_point[j].push_back(base_point[j+1].back())`
     for j in (lo..got).rev() {
-        if flag_temp[j - lo] {
-            next_base = planes[j].last().map(Plane::point);
-            next_dir = planes[j].last().map(Plane::normal);
-        } else if let (Some(b), Some(d)) = (next_base, next_dir) {
-            planes[j].push(Plane::new(b, d));
+        if !flag_temp[j - lo]
+            && let Some(p) = planes[j + 1].last()
+        {
+            planes[j].push(p.clone());
         }
     }
     true
