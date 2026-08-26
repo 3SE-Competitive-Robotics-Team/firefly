@@ -310,7 +310,10 @@ mod tests {
     /// 合成地图:分辨率 0.5,`walls` 内的体素列全高占据,膨胀 1 格
     /// (`is_occupied_inflated` 只看膨胀层;半径 0 会得到全空膨胀层)。
     fn wall_map(walls: &[usize]) -> GridMap {
-        let mut map = GridMapBuilder::new(RES, [40, 6, 6]).build().unwrap();
+        let mut map = GridMapBuilder::new(RES, [40, 6, 6])
+            .with_obstacles_inflation(RES * 0.99)
+            .build()
+            .unwrap();
         for &x in walls {
             for y in 0..6 {
                 for z in 0..6 {
@@ -318,7 +321,7 @@ mod tests {
                 }
             }
         }
-        map.inflate_obstacles(RES * 0.99);
+        map.inflate_obstacles();
         map
     }
 

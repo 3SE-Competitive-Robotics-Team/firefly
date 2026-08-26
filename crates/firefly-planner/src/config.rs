@@ -14,8 +14,6 @@ pub struct PlannerConfig {
     pub obstacle_clearance_soft: f64,
     /// 软层权重（官方 v2 `weight_obstacle_soft`）。
     pub weight_obstacle_soft: f64,
-    /// 障碍膨胀半径（补偿机体尺寸，官方 `grid_map/obstacles_inflation`）。
-    pub obstacle_inflation: f64,
     pub swarm_clearance: f64,
     pub max_velocity: f64,
     pub max_acceleration: f64,
@@ -47,7 +45,6 @@ impl Default for PlannerConfig {
             obstacle_clearance: 0.1,
             obstacle_clearance_soft: 0.5,
             weight_obstacle_soft: 5000.0,
-            obstacle_inflation: 0.2,
             swarm_clearance: 0.5,
             max_velocity: 1.5,
             max_acceleration: 6.0,
@@ -78,7 +75,6 @@ mod tests {
         assert_eq!(c.obstacle_clearance, 0.1);
         assert_eq!(c.obstacle_clearance_soft, 0.5);
         assert_eq!(c.weight_obstacle_soft, 5000.0);
-        assert_eq!(c.obstacle_inflation, 0.2);
         assert_eq!(c.swarm_clearance, 0.5);
         assert_eq!(c.max_velocity, 1.5);
         assert_eq!(c.max_acceleration, 6.0);

@@ -654,8 +654,7 @@ impl PlannerManager {
     /// 刷新障碍膨胀层（官方 `clearAndInflateLocalMap` 的监控侧调用）：地图
     /// 可能在本 tick 被深度感知/动态障碍更新，碰撞判定必须基于最新膨胀层。
     fn refresh_inflation(&mut self) {
-        let inflation = self.planner.config().obstacle_inflation;
-        self.planner.map_mut().inflate_obstacles(inflation);
+        self.planner.map_mut().inflate_obstacles();
     }
 
     /// 执行期碰撞监控（官方 `checkCollisionCallback` 轨迹检查部分）：沿当前
@@ -1232,7 +1231,7 @@ mod tests {
         assert!(m.target_clear(Vector3::new(5.0, 1.0, 1.0)));
         // 加一堵墙(x=5.0,res 0.5 → 体素 [10,2,2])并膨胀 0.2
         m.map_mut().set_state([10, 2, 2], VoxelState::Occupied);
-        m.map_mut().inflate_obstacles(0.2);
+        m.map_mut().inflate_obstacles();
         // 墙点(膨胀后 x∈[4.8,5.2])→ 不自由
         assert!(!m.target_clear(Vector3::new(5.0, 1.0, 1.0)));
         // 远处自由
@@ -1250,7 +1249,7 @@ mod tests {
         let idx = m.map().index_of(arc_target.coords).expect("目标在地图内");
         m.map_mut()
             .set_state([idx[0], idx[1], idx[2]], VoxelState::Occupied);
-        m.map_mut().inflate_obstacles(0.2);
+        m.map_mut().inflate_obstacles();
         // 场景前提:弧长目标确实被堵
         assert!(
             !m.target_clear(arc_target.coords),
@@ -1451,7 +1450,7 @@ mod tests {
         );
         let idx = m.map().index_of(past).expect("身后点在地图内");
         m.map_mut().set_state(idx, VoxelState::Occupied);
-        m.map_mut().inflate_obstacles(0.2);
+        m.map_mut().inflate_obstacles();
         assert!(
             m.map().is_occupied_inflated(past),
             "场景前提:身后障碍真实存在(防空洞断言)"
@@ -1740,7 +1739,7 @@ mod tests {
                 }
             }
         }
-        m.map_mut().inflate_obstacles(0.2);
+        m.map_mut().inflate_obstacles();
         assert!(
             m.map().is_occupied_inflated(old_goal.coords),
             "场景前提：目标应落在膨胀占据内"
@@ -1803,7 +1802,7 @@ mod tests {
         for i in 0..dims[0] {
             m.map_mut().set_state([i, 2, 2], VoxelState::Occupied);
         }
-        m.map_mut().inflate_obstacles(0.2);
+        m.map_mut().inflate_obstacles();
         for p in &path {
             assert!(m.map().is_occupied_inflated(*p), "场景前提：{p:?} 应被占据");
         }

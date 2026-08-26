@@ -102,7 +102,7 @@ impl Planner {
 
     #[must_use]
     pub fn new(config: PlannerConfig, mut map: GridMap) -> Self {
-        map.inflate_obstacles(config.obstacle_inflation);
+        map.inflate_obstacles();
         Self {
             config,
             map,
@@ -219,7 +219,7 @@ impl Planner {
         touch_goal: bool,
     ) -> Result<PlanResult> {
         // 地图可能已被动态障碍更新：重算膨胀层（官方 clearAndInflateLocalMap）
-        self.map.inflate_obstacles(self.config.obstacle_inflation);
+        self.map.inflate_obstacles();
         let start_endpoint = Endpoint {
             position: start.position.coords,
             velocity: start.velocity,
