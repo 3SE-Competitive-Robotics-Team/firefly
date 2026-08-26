@@ -57,11 +57,13 @@ pub enum InitSource<'a> {
     /// case 1：A* 引导路径重建（首帧 / 暖启动失败降级）。
     ColdStart,
     /// case 2：从上一条最优轨迹暖启动。`elapsed` 为已执行时长；
-    /// `guide_tail` 为全局路径上从当前投影到局部目标的延续段
-    /// （旧轨迹耗尽后的走向）。
+    /// `glb_seg` 为全局轨迹段（`last_glb_t_of_lc_tgt → glb_t_of_lc_tgt`）的
+    /// 时长（秒），与旧轨迹剩余段拼接成组合时间轴；`guide_tail` 为该全局
+    /// 轨迹段的等时采样点列（含两端，旧轨迹耗尽后沿它走到目标）。
     WarmStart {
         prev: &'a Trajectory,
         elapsed: f64,
+        glb_seg: f64,
         guide_tail: &'a [Vector3<f64>],
     },
 }
@@ -251,6 +253,7 @@ impl Planner {
             InitSource::WarmStart {
                 prev,
                 elapsed,
+                glb_seg,
                 guide_tail,
             } => {
                 let init_config = InitConfig {
@@ -264,6 +267,7 @@ impl Planner {
                     Point3::from(local_goal),
                     prev,
                     elapsed,
+                    glb_seg,
                     guide_tail,
                 ) {
                     Ok(m) => m,
@@ -715,7 +719,7 @@ impl Planner {
             .map(|m| m.solve().expect("nonsingular"))
     }
 
-    fn trajectory_max_vel(traj: &Trajectory) -> f64 {
+    pub(crate) fn trajectory_max_vel(traj: &Trajectory) -> f64 {
         let mut m = 0.0_f64;
         for i in 0..traj.pieces() {
             let dur = traj.durations()[i];
@@ -1019,7 +1023,7 @@ impl Planner {
         if dist <= self.config.planning_distance {
             // 目标在规划距离内：若被膨胀障碍占用（随机地图常见），沿方向回退到
             // 最近自由点，否则 A* 直接报 "goal is occupied"——plan() 对随机地图
-            // 成功率骤降（demo 有 target_clear，planner 层 `plan` API 也要兜底）。
+            // 成功率骤降，须先在此回退到自由点再交给 A*。
             if self.map.is_occupied_inflated(goal) {
                 let dir = to_goal / dist.max(1e-9);
                 for step in 1..=24 {

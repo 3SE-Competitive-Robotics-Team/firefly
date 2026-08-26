@@ -234,6 +234,7 @@ fn swarm_warm_start_accumulates_clearance() {
                 InitSource::WarmStart {
                     prev: &traj_a,
                     elapsed: 0.0,
+                    glb_seg: 0.0,
                     guide_tail: &[],
                 },
                 false,
@@ -251,6 +252,7 @@ fn swarm_warm_start_accumulates_clearance() {
                 InitSource::WarmStart {
                     prev: &traj_b,
                     elapsed: 0.0,
+                    glb_seg: 0.0,
                     guide_tail: &[],
                 },
                 false,
