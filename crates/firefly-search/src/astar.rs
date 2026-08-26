@@ -1,7 +1,8 @@
 //! A* 网格搜索。
 //!
-//! 对齐官方 EGO-Planner `dyn_a_star`：26 邻域（代价 `√(dx²+dy²+dz²)` 格长）、
-//! 节点池预分配 + 世代计数复用（`rounds` 区分每次搜索，免重置）。
+//! 对齐官方 EGO-Planner `dyn_a_star`：26 邻域（代价 `√(dx²+dy²+dz²)`×resolution）、
+//! `tie_breaker` × 对角启发、端点入障沿远离对端方向外推至自由、节点池预分配 +
+//! 世代计数复用（`rounds` 区分每次搜索，免重置）。
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -115,8 +116,8 @@ impl Astar {
 
     /// # Errors
     ///
-    /// `OutOfRange`：起点/终点在地图外；`InvalidArgument`：终点被占据；
-    /// `NotFound`：无可达路径；`Convergence`：超出扩展上限。
+    /// `OutOfRange`：起点/终点在地图外或无法外推至自由；`NotFound`：无可达路径；
+    /// `Convergence`：超出扩展上限。
     #[fastrace::trace]
     pub fn search(
         &mut self,
@@ -124,17 +125,34 @@ impl Astar {
         start: Vector3<f64>,
         goal: Vector3<f64>,
     ) -> firefly_error::Result<Path> {
-        let start_idx = map
-            .index_of(start)
+        let mut start_pt = start;
+        let mut goal_pt = goal;
+        let mut start_idx = map
+            .index_of(start_pt)
             .ok_or_else(|| Error::new(ErrorKind::OutOfRange, "start is outside the map"))?;
-        let goal_idx = map
-            .index_of(goal)
+        let mut goal_idx = map
+            .index_of(goal_pt)
             .ok_or_else(|| Error::new(ErrorKind::OutOfRange, "goal is outside the map"))?;
-        if map.is_inflated(goal_idx) {
-            return Err(Error::new(
-                ErrorKind::InvalidArgument,
-                "goal is occupied (inflated)",
-            ));
+        // 端点落入膨胀区时按 resolution 沿远离对端方向外推，直到自由或越出地图
+        // （对照官方 `ConvertToIndexAndAdjustStartEndPoints`；终点分支按语义检查自身
+        // 索引，不复刻官方误查 start_idx 的笔误）。
+        while map.is_inflated(start_idx) {
+            let dir = (start_pt - goal_pt)
+                .try_normalize(0.0)
+                .ok_or_else(|| Error::new(ErrorKind::OutOfRange, "start coincides with goal"))?;
+            start_pt += dir * map.resolution();
+            start_idx = map.index_of(start_pt).ok_or_else(|| {
+                Error::new(ErrorKind::OutOfRange, "start extrapolation left the map")
+            })?;
+        }
+        while map.is_inflated(goal_idx) {
+            let dir = (goal_pt - start_pt)
+                .try_normalize(0.0)
+                .ok_or_else(|| Error::new(ErrorKind::OutOfRange, "goal coincides with start"))?;
+            goal_pt += dir * map.resolution();
+            goal_idx = map.index_of(goal_pt).ok_or_else(|| {
+                Error::new(ErrorKind::OutOfRange, "goal extrapolation left the map")
+            })?;
         }
 
         let total = map.dims()[0] * map.dims()[1] * map.dims()[2];
@@ -175,7 +193,7 @@ impl Astar {
                 continue; // 陈旧条目（节点已通过更优 g 重新入队）
             }
             if node == goal_node {
-                return Ok(self.reconstruct(map, goal_node, start, goal));
+                return Ok(self.reconstruct(map, goal_node, start_pt, goal_pt));
             }
             if expansions >= self.config.max_expansions {
                 return Err(Error::temporary(
@@ -250,12 +268,22 @@ impl Astar {
         out
     }
 
+    /// 对角启发（对照官方 `tie_breaker_ * getDiagHeu`）：三轴位移格数排序后按
+    /// √3/√2/1 分段计费（体对角/面对角/轴向步），与官方三分支写法数学等价；
+    /// 乘 `TIE_BREAKER` 轻微高估打破 f 平局、偏向直趋目标，乘 resolution 与 g
+    /// （米）保持同量纲。
     fn heuristic(map: &GridMap, a: [usize; 3], b: [usize; 3]) -> f64 {
-        let r = map.resolution();
-        let da = (a[0] as f64 - b[0] as f64) * r;
-        let db = (a[1] as f64 - b[1] as f64) * r;
-        let dc = (a[2] as f64 - b[2] as f64) * r;
-        (da * da + db * db + dc * dc).sqrt()
+        /// 官方 `tie_breaker_`。
+        const TIE_BREAKER: f64 = 1.0 + 1.0 / 10000.0;
+        let dx = a[0].abs_diff(b[0]) as f64;
+        let dy = a[1].abs_diff(b[1]) as f64;
+        let dz = a[2].abs_diff(b[2]) as f64;
+        let low = dx.min(dy).min(dz);
+        let high = dx.max(dy).max(dz);
+        let mid = dx + dy + dz - low - high;
+        TIE_BREAKER
+            * map.resolution()
+            * (3f64.sqrt() * low + 2f64.sqrt() * (mid - low) + (high - mid))
     }
 
     /// 标记节点为本代已访问（首次使用时分配缓冲）。
@@ -317,7 +345,7 @@ impl Astar {
                 )
             })
             .collect();
-        // 端点修正：体素中心替换为精确的 start/goal
+        // 端点修正：体素中心替换为精确起终点（入障时为外推后的坐标）
         if let Some(first) = points.first_mut() {
             *first = start;
         }
@@ -459,6 +487,62 @@ mod tests {
         let mut astar = Astar::default();
         let path = search(&mut astar, &map, [1.0, 4.0, 1.0], [27.0, 4.0, 1.0]).unwrap();
         assert!(path.points().len() > 100);
+    }
+
+    #[test]
+    fn heuristic_matches_official_diag_heu() {
+        // 对照官方 getDiagHeu 取值；resolution = 1.0 时米与格数同值
+        let map = empty_map();
+        let tb = 1.0 + 1.0 / 10000.0;
+        for (b, cells) in [
+            ([5usize, 0, 0], 5.0),                // 轴向
+            ([0, 0, 1], 1.0),                     // 单步
+            ([1, 1, 1], 3f64.sqrt()),             // 体对角
+            ([3, 2, 0], 2.0 * 2f64.sqrt() + 1.0), // 面对角 + 轴向
+        ] {
+            let h = Astar::heuristic(&map, [0, 0, 0], b);
+            assert!((h - tb * cells).abs() < 1e-12, "b={b:?} h={h}");
+        }
+        // 分辨率因子：h 按米计，与 g 同量纲
+        let fine = firefly_map::GridMapBuilder::new(0.5, [10, 10, 10])
+            .build()
+            .unwrap();
+        let h = Astar::heuristic(&fine, [0, 0, 0], [4, 0, 0]);
+        assert!((h - tb * 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn start_inside_inflation_is_pushed_out_to_free() {
+        let mut map = empty_map();
+        map.set_state([3, 5, 5], firefly_map::VoxelState::Occupied);
+        map.inflate_obstacles(); // 起点 [2,5,5] 落在膨胀层内
+        let mut astar = Astar::default();
+        let path = search(&mut astar, &map, [2.5, 5.5, 5.5], [9.5, 5.5, 5.5]).unwrap();
+        // 路径起点为外推后的自由体素中心（沿远离目标方向），而非原始入障坐标
+        assert_eq!(path.points().first(), Some(&Vector3::new(1.5, 5.5, 5.5)));
+        assert_eq!(path.points().last(), Some(&Vector3::new(9.5, 5.5, 5.5)));
+    }
+
+    #[test]
+    fn goal_inside_inflation_is_pushed_out_to_free() {
+        let mut map = empty_map();
+        map.set_state([6, 5, 5], firefly_map::VoxelState::Occupied);
+        map.inflate_obstacles(); // 终点 [7,5,5] 落在膨胀层内
+        let mut astar = Astar::default();
+        let path = search(&mut astar, &map, [0.5, 5.5, 5.5], [7.5, 5.5, 5.5]).unwrap();
+        // 路径终点为外推后的自由体素中心（沿远离起点方向）
+        assert_eq!(path.points().first(), Some(&Vector3::new(0.5, 5.5, 5.5)));
+        assert_eq!(path.points().last(), Some(&Vector3::new(8.5, 5.5, 5.5)));
+    }
+
+    #[test]
+    fn extrapolation_out_of_map_errors() {
+        let mut map = empty_map();
+        map.set_state([0, 0, 0], firefly_map::VoxelState::Occupied);
+        map.inflate_obstacles(); // 角落起点入障，远离目标方向直接指向图外
+        let mut astar = Astar::default();
+        let err = search(&mut astar, &map, [0.5, 0.5, 0.5], [9.5, 9.5, 9.5]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::OutOfRange);
     }
 }
 
