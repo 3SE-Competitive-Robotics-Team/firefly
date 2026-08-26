@@ -1,58 +1,60 @@
 ---
 name: bench
-description: Run VIO GT-vs-odom bench (bench/bench_vio.py) and report a clean table. Use when you need 34s accuracy, multi-turn stats, or per-turn isolated rrds.
+description: Run VIO GT-vs-odom bench as a suite over trajectory generator instances (bench/bench_suite.py) or single runs (bench/bench_vio.py). Use when you need 34s accuracy, multi-trajectory comparison, or per-turn isolated rrds.
 ---
 
-# Bench — VIO 34s GT vs Odom
+# Bench — VIO GT vs Odom 套件
 
-Bench keeps rerun enabled with per-turn isolated rrds (never single shared file). Outputs are repo-local (`logs/bench/`), never `/tmp`.
+轨迹定义单一来源：`apps/firefly-sim/src/firefly_sim/trajectories.py` 的
+`TRAJECTORIES` 注册表（当前 4 个李萨如实例）。套件自动枚举全部实例；
+新增曲线生成器实例后无需改 bench 代码。
 
 ## Run
 
 ```bash
-# single 34s turn (viewer-only, no file)
+# 套件：全部轨迹实例各 1 轮 × 34s，汇总表 + summary json
+uv run python bench/bench_suite.py
+
+# 每实例 3 轮（统计均值）
+uv run python bench/bench_suite.py --turns 3
+
+# 只跑指定实例
+uv run python bench/bench_suite.py --only lissajous_classic,lissajous_tight
+
+# 单引擎（一条轨迹一轮，viewer-only 不落盘 rrd）
 uv run python bench/bench_vio.py --duration 34
-
-# 10 turns, auto per-turn rrds in logs/bench/turn_01_34s_*.rrd ...
-uv run python bench/bench_vio.py --turns 10 --duration 34
-
-# custom output / per-turn rrds dir
-uv run python bench/bench_vio.py --turns 10 --duration 34 --save-dir logs/bench --output logs/bench/vio_bench.json
+uv run python bench/bench_vio.py --duration 34 --trajectory lissajous_wide
 ```
 
-- `--turns N` runs N isolated turns sequentially (default 1). For N>1 bench auto-creates per-turn rrds in `logs/bench/` even if `--save-dir` not set — never writes many turns into one `task.rrd`.
-- `--duration` seconds per turn (default 34).
-- `--save-dir` per-turn isolated `*.rrd` dir (default `logs/bench` when turns>1).
-- `--output` per-turn json (`logs/bench/turn_XX.json` when turns>1) + `summary_NxDs.json`.
+- `--duration` 秒/轮（默认 34）。
+- 套件每轮独立 rrd：`logs/bench/<traj>_turn_NN_*.rrd`；单轮默认 viewer-only。
+- 输出均 repo-local（`logs/bench/`），never /tmp。
 
 ## Where to look
 
-- `logs/bench/turn_*.json` — per-turn metrics
-- `logs/bench/summary_10x34s.json` — aggregated
-- `logs/bench/*.rrd` — one file per turn (4–5M each), isolated
-- `logs/bench/sim.log` / `vio.log` — last turn logs
+- `logs/bench/<traj>_turn_NN.json` — per-turn metrics
+- `logs/bench/suite_<n>x<turns>x<dur>s.json` — 套件汇总
+- `logs/bench/sim.log` / `vio.log` — 最后一轮日志
+- 汇总表 frames 列 < duration×10×0.9 时标注「物理可能发散」（QACC NaN）
 
-## Report (already printed)
+## 当前实例（峰值速度 m/s）
 
-Bench prints a clean table at end of multi-turn run:
+| 实例 | 形状特点 | peak \|v\| |
+|---|---|---|
+| lissajous_classic | 历史基线，z 频率最高 | ~1.2 |
+| lissajous_wide | 大水平范围、低动态 | ~1.3 |
+| lissajous_tight | 小振幅高频，快速运动压力测试 | ~2.1 |
+| lissajous_vertical | z 主导 | ~1.1 |
 
-```
-turn  ATE_RMSE  ATE_mean   ATE_max  ATE_final  RPE_1s  err@34s frames
-   1     762.7     496.4    2025.4     2025.4    80.5   2025.4    340
- ...
- avg      803.6     560.5               1985.5    73.7
- std      510.3                         1244.0
-```
+新实例约束：整倍频保证周期闭合连续；z 下限 > 0（防触地）；峰值速度/
+加速度在 PD 可跟踪范围内（超限会物理发散）。
 
-Columns: `ATE_RMSE/mean/max/final` (m, km-scale right now expected), `RPE_1s` (delta 1s), `err@34s` (snapshot at 34s), `frames` (10Hz).
+## Report
 
-## Read summary programmatically
-
-```bash
-uv run python -c "import json; j=json.load(open('logs/bench/summary_10x34s.json')); [print(f\"{i+1}: {m['ate_rmse']:.0f} {m['ate_final']:.0f}\") for i,m in enumerate([r['metrics'] for r in j['results']])]"
-```
+套件末尾打印汇总表（每轮一行 + 多轮时每实例 avg 行），列：
+`ATE_RMSE/mean/max/final`（m）、`RPE_1s`（m）、`frames`（10Hz）。
 
 ## Notes
 
-- Rerun viewer is kept (shared when single turn, dedicated per-turn when N>1). `bench` never writes many turns into one rrd — each turn gets `turn_XX_34s_<ts>.rrd`.
-- Bench uses numpy linear interp (no scipy), sim `--script` Lissajous (`period 20s`), 1x realtime.
+- Rerun viewer kept; turns never share one rrd — per-turn isolated files.
+- Bench uses numpy linear interp (no scipy), sim `--script [NAME]`, 1x realtime.

@@ -29,6 +29,7 @@ from firefly_mujoco import (
 )
 
 from . import trace as ftrace
+from .trajectories import Trajectory, get_trajectory
 
 #: 话题名（与 Rust `firefly-pubsub` 常量一致）
 TOPIC_IMU = "Firefly/Imu"
@@ -108,33 +109,17 @@ def _publish_traced(pub, cycle, name: str, msg, ts: float) -> None:
     sample.write_payload(msg).send()
 
 
-def _scripted_ref(t: float) -> tuple[np.ndarray, np.ndarray]:
-    """`--script` 模式：柔和脚本化参考（闭合周期轨迹），供 VIO 验证。
-
-    planner/demo 不参与：直接给出平滑 (pos, vel)，让双目相机在无规划器的
-    情况下获得受控运动。三轴取 T=20s 的整倍频正弦（Lissajous），位置/速度
-    在周期边界连续——`--no-trace` 的 `t % 20` 循环不会产生参考跳变
-    （此前线性前向 + 回卷导致 16m 跳变 → PD 发散 → MuJoCo QACC NaN）。
-    """
-    period = 20.0
-    w1, w2, w3 = 2 * np.pi / period, 2 * 2 * np.pi / period, 3 * 2 * np.pi / period
-    pos = np.array([
-        1.0 + 3.0 * np.sin(w1 * t),
-        4.0 + 1.0 * np.sin(w2 * t),
-        1.0 + 0.5 * np.sin(w3 * t),
-    ])
-    vel = np.array([
-        3.0 * w1 * np.cos(w1 * t),
-        1.0 * w2 * np.cos(w2 * t),
-        0.5 * w3 * np.cos(w3 * t),
-    ])
-    return pos, vel
-
-
 def main() -> None:
-    # --script：不使用 planner/demo，改由脚本参考驱动运动（VIO 验证用）
+    # --script [NAME]：不使用 planner，改由具名轨迹生成器驱动运动（VIO 验证用）；
+    # 省略 NAME 时用 lissajous_classic（历史基线曲线）
     # --no-trace：禁用 OTel tracing（消除 Python span 开销，sim 从 0.37x → 14x real-time）
     script_mode = "--script" in sys.argv
+    trajectory_name = "lissajous_classic"
+    if script_mode:
+        idx = sys.argv.index("--script")
+        if idx + 1 < len(sys.argv) and not sys.argv[idx + 1].startswith("-"):
+            trajectory_name = sys.argv[idx + 1]
+    trajectory: Trajectory = get_trajectory(trajectory_name)
     trace_enabled = "--no-trace" not in sys.argv
     cfg = load_config()
     rates = cfg.get("rates", {})
@@ -147,7 +132,7 @@ def main() -> None:
     ftrace.init(enabled=trace_enabled)
     log("MuJoCo 环境就绪：质量 {:.1f} kg，物理 {:.0f} Hz".format(env.mass, 1 / physics_period))
     if script_mode:
-        log("--script：脚本化参考驱动运动（跳过 planner）")
+        log(f"--script：轨迹 {trajectory.name} 驱动运动（跳过 planner）")
     if not trace_enabled:
         log("--no-trace：OTel tracing 已禁用（高性能模式）")
 
@@ -190,9 +175,9 @@ def main() -> None:
 
             # 控制 + 物理步进
             if script_mode:
-                # 脚本化参考：直接按仿真时刻给出平滑 pos/vel（跳过 planner）；
-                # 轨迹严格 20s 周期，长跑直接用连续时间即可
-                ref_pos, ref_vel = _scripted_ref(env.time)
+                # 脚本化参考：按仿真时刻给出平滑 pos/vel；实例满足周期连续
+                # 不变量（见 trajectories.py），长跑直接用连续时间即可
+                ref_pos, ref_vel = trajectory.ref(env.time)
             env.apply_pd(ref_pos, ref_vel)
             env.step()
             # 失稳守卫：MuJoCo 发散（QACC NaN/Inf）后状态永久污染且传感器
