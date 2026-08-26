@@ -48,6 +48,16 @@ pub struct Feature {
     pub p_FinA: Vector3<f64>,
     /// 三角化位置，全局坐标系（对照 `Feature::p_FinG`）。
     pub p_FinG: Vector3<f64>,
+    /// 锚点系位置的首估计（FEJ）线性化点（对照 `UpdaterHelperFeature::p_FinA_fej`）。
+    ///
+    /// 首次三角化/初始化时刻的值，此后不随估计更新；SLAM 更新的雅可比
+    /// 围绕它线性化以保持 EKF 一致性。无历史时（MSCKF 特征、新 SLAM
+    /// 特征初始化）等于当前值。
+    pub p_FinA_fej: Vector3<f64>,
+    /// 全局系位置的首估计（FEJ）线性化点（对照 `UpdaterHelperFeature::p_FinG_fej`）。
+    ///
+    /// 语义同 [`Feature::p_FinA_fej`]；`GLOBAL_3D` 表示只使用此字段。
+    pub p_FinG_fej: Vector3<f64>,
 }
 
 impl Feature {
@@ -101,6 +111,8 @@ impl Default for Feature {
             // 需三角化后才能用）；Rust 以安全零值占位，使用前须由三角化逻辑写入。
             p_FinA: Vector3::zeros(),
             p_FinG: Vector3::zeros(),
+            p_FinA_fej: Vector3::zeros(),
+            p_FinG_fej: Vector3::zeros(),
         }
     }
 }

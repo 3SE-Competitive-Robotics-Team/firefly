@@ -465,6 +465,8 @@ mod tests {
             anchor_clone_timestamp: 0.0,
             p_FinA: Vector3::zeros(),
             p_FinG: Vector3::zeros(),
+            p_FinA_fej: Vector3::zeros(),
+            p_FinG_fej: Vector3::zeros(),
         };
         feat.timestamps.insert(0, vec![1.0, 2.0]);
         feat.timestamps.insert(1, vec![1.5]);
@@ -705,6 +707,8 @@ mod pure_translation_tests {
             anchor_clone_timestamp: 0.0,
             p_FinA: Vector3::zeros(),
             p_FinG: Vector3::zeros(),
+            p_FinA_fej: Vector3::zeros(),
+            p_FinG_fej: Vector3::zeros(),
         };
         let mut clones = HashMap::new();
         clones.insert(0usize, cam_clones);
@@ -741,6 +745,8 @@ mod e2e_style_tests {
             anchor_clone_timestamp: 0.0,
             p_FinA: Vector3::zeros(),
             p_FinG: Vector3::zeros(),
+            p_FinA_fej: Vector3::zeros(),
+            p_FinG_fej: Vector3::zeros(),
         };
         for cam in 0..2 {
             let mut cam_clones = Vec::new();
