@@ -3,9 +3,6 @@
 //! 持久的 SLAM 特征：`featid` 与跟踪器一致，值为表示相关的参数向量
 //! （`GLOBAL_3D` → 全局 3D；`ANCHORED_MSCKF_INVERSE_DEPTH` → 锚点系
 //! `α, β, ρ`），`get_xyz`/`set_from_xyz` 负责坐标转换。
-//!
-//! TODO：锚定/逆深度单深度等其余表示的完整转换（当前支持
-//! `GLOBAL_3D` 与 `ANCHORED_MSCKF_INVERSE_DEPTH`）。
 
 use nalgebra::{DMatrix, DVector, Vector3};
 
