@@ -12,6 +12,12 @@
 //! 收到目标即重算全局路径并飞往该点；到达后悬停保持、进程保持运行等待
 //! 新目标（`--goal` 仅为初始目标，可省略——缺省悬停在 `--start`）。
 //!
+//! 心跳门控（对照官方 `traj_server::cmdCallback`）：每 tick 即一次执行节拍
+//! （官方 FSM 每拍发 `planning/heartbeat`）；从未收到节拍不发布参考，超过
+//! `heartbeat_timeout` 无新节拍则降级零速悬停。强制停止：订阅
+//! `Firefly/MandatoryStop`（对照官方 `mandatory_stop` topic），收到即进入
+//! 急停且不自动恢复；`planner --mandatory-stop` 发一条指令后退出。
+//!
 //! rerun 实体约定（`sim_time` 时间轴）：`plan/global_path`、`plan/local_traj`
 //! （+`velocity`）、`plan/planes`、`plan/drone`（位姿）、`plan/perceived`
 //! （感知占据地图）、`plan/motions`（动态障碍）、`plan/map`+`plan/decor`
@@ -28,7 +34,7 @@ use fastrace::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_map::{DepthCamera, MapFile, VirtualWall, VoxelState, update_from_depth};
 use firefly_observability::init as init_observability;
-use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager};
+use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager, Reference};
 use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage};
 use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
 use firefly_pubsub::node::create_node;
@@ -57,6 +63,88 @@ const FADE_TICKS: usize = 5;
 /// `configs/planner.toml` 缺省路径（相对运行目录，通常为仓库根）。
 const DEFAULT_CONFIG: &str = "configs/planner.toml";
 
+/// 强制停止话题（外部工具 → 规划进程；对照官方 `mandatory_stop` topic）。
+const MANDATORY_STOP_TOPIC: &str = "Firefly/MandatoryStop";
+
+/// 强制停止消息：无载荷，收到即停（对照官方 `std_msgs::Empty`；timestamp
+/// 仅诊断用）。
+#[repr(C)]
+#[derive(Debug, Clone, Copy, ZeroCopySend)]
+#[type_name("FireflyMandatoryStop")]
+pub struct MandatoryStopMessage {
+    /// 发送时刻（墙钟秒，仅诊断用）。
+    pub timestamp: f64,
+}
+
+impl Default for MandatoryStopMessage {
+    fn default() -> Self {
+        Self { timestamp: -1.0 }
+    }
+}
+
+/// 参考来源决策（对照官方 `traj_server::cmdCallback` 的发布前置条件）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefSource {
+    /// 从未收到执行节拍：不发布任何指令（官方 `heartbeat_time_ <= 1e-5`
+    /// 直接返回）。
+    Silent,
+    /// 节拍超时：零速悬停（官方 `publish_cmd(last_pos_, 0,0,0, last_yaw_, 0)`）。
+    Hover,
+    /// 节拍新鲜：正常跟踪当前轨迹。
+    Track,
+}
+
+/// 执行节拍监视（对照官方 `traj_server` 的 `heartbeat_time_`）：主循环每 tick
+/// 记一次节拍，参考发布前检查新鲜度。单进程仿真中生产者/消费者同循环，
+/// 超时只能由 sim 时钟跳变触发；结构上保留官方的门控语义。
+struct HeartbeatGate {
+    /// 是否已收到至少一次节拍（官方 `heartbeat_time_ > 1e-5`）。
+    armed: bool,
+    /// 最近一次节拍时刻（sim 时钟，秒）。
+    last: f64,
+}
+
+impl HeartbeatGate {
+    const fn new() -> Self {
+        Self {
+            armed: false,
+            last: 0.0,
+        }
+    }
+
+    /// 记录本拍：调用方在每拍的参考来源判定之后调用，使判定基于截至
+    /// 上一拍的节拍历史（与官方「异步心跳回调 + 独立检查」的新鲜度语义一致）。
+    fn observe(&mut self, now: f64) {
+        self.armed = true;
+        self.last = now;
+    }
+
+    /// 发布前置条件判定：未 armed → [`RefSource::Silent`]；超时 →
+    /// [`RefSource::Hover`]；否则 [`RefSource::Track`]。
+    fn decide(&self, now: f64, timeout: f64) -> RefSource {
+        if !self.armed {
+            return RefSource::Silent;
+        }
+        if now - self.last > timeout {
+            RefSource::Hover
+        } else {
+            RefSource::Track
+        }
+    }
+}
+
+/// 零速悬停参考（对照官方 `publish_cmd(last_pos_, 0,0,0, last_yaw_, 0)`）：
+/// 位置/偏航保持，速度为零（参考通道不建模加速度/加加速度，隐含为零）。
+fn hover_reference(position: Vector3<f64>, yaw_state: (f64, f64)) -> Reference {
+    Reference {
+        position,
+        velocity: Vector3::zeros(),
+        yaw: yaw_state.0,
+        // 官方超时悬停的 yaw_dot 恒为 0
+        yaw_dot: 0.0,
+    }
+}
+
 struct Args {
     map: Option<PathBuf>,
     save: Option<PathBuf>,
@@ -64,6 +152,8 @@ struct Args {
     start: [f64; 3],
     goal: Option<[f64; 3]>,
     frame_offset: [f64; 3],
+    /// 仅向 `Firefly/MandatoryStop` 发一条强制停止指令后退出。
+    mandatory_stop: bool,
 }
 
 fn parse_args() -> Result<Args> {
@@ -76,6 +166,7 @@ fn parse_args() -> Result<Args> {
         // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
         goal: None,
         frame_offset: [0.0, 0.0, 0.0],
+        mandatory_stop: false,
     };
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -97,6 +188,7 @@ fn parse_args() -> Result<Args> {
             "--start" => args.start = parse_vec3(&mut it, "--start")?,
             "--goal" => args.goal = Some(parse_vec3(&mut it, "--goal")?),
             "--frame-offset" => args.frame_offset = parse_vec3(&mut it, "--frame-offset")?,
+            "--mandatory-stop" => args.mandatory_stop = true,
             other => {
                 return Err(Error::new(
                     ErrorKind::InvalidArgument,
@@ -108,12 +200,33 @@ fn parse_args() -> Result<Args> {
     Ok(args)
 }
 
+/// 打开可选订阅器：失败降级为 `None` 并记录（辅助输入流可缺失，进程保持独立运行）。
+fn open_sub<T: std::fmt::Debug + ZeroCopySend + 'static>(
+    node: &firefly_pubsub::node::IpcNode,
+    topic: &str,
+    ok_msg: &str,
+    err_msg: &str,
+) -> Option<Subscriber<T>> {
+    match Subscriber::<T>::with_topic(node, topic) {
+        Ok(s) => {
+            log::info!("{ok_msg}（topic {topic}）");
+            Some(s)
+        }
+        Err(e) => {
+            log::warn!("{err_msg}: {e}");
+            None
+        }
+    }
+}
+
 /// 最新里程计快照（地图系状态 + 姿态四元数，深度投影用）。
 struct OdomSnapshot {
     state: firefly_planner::State,
     quat_xyzw: [f64; 4],
 }
 
+/// 各布尔标志相互独立（传感器/停止/完成），非状态机编码。
+#[allow(clippy::struct_excessive_bools)]
 struct App {
     manager: PlannerManager,
     /// 管理器行为参数（来自配置，启动日志展示）。
@@ -131,8 +244,19 @@ struct App {
     odom: Option<OdomSubscriber>,
     depth: Option<Subscriber<DepthImageMessage>>,
     goal_sub: Option<Subscriber<GoalMessage>>,
+    /// 强制停止订阅（对照官方 `mandatory_stop` topic；单进程仿真下由外部
+    /// 工具经 `planner --mandatory-stop` 注入）。
+    stop_sub: Option<Subscriber<MandatoryStopMessage>>,
     /// 收到的最近目标（本 tick 处理一次，处理完清空；快速连续发布取最新）。
     pending_goal: Option<GoalMessage>,
+    /// 强制停止待处理标记（poll 置位，step 消费后清零）。
+    pending_mandatory_stop: bool,
+    /// 执行节拍监视（心跳门控，见 [`HeartbeatGate`]）。
+    heartbeat: HeartbeatGate,
+    /// 心跳超时阈值（秒，配置 `heartbeat_timeout`）。
+    heartbeat_timeout: f64,
+    /// 最近一次发布的参考位置（官方 `traj_server` 的 `last_pos_`；超时悬停落点）。
+    last_ref_pos: Option<Vector3<f64>>,
     latest_odom: Option<OdomSnapshot>,
     last_odom_recv: f64,
     /// 最新 odom 携带的 trace 上下文 `(trace_id, span_id, sampled)`（续接用）。
@@ -166,6 +290,8 @@ impl App {
         frame_offset: [f64; 3],
     ) -> Result<Self> {
         let mut grid = map_file.to_grid_map()?;
+        // 心跳超时阈值先取（config 随后移入 Planner）
+        let heartbeat_timeout = config.heartbeat_timeout;
         // 虚拟地面/天花板（对照官方 enable_virtual_wall）：任一配置存在即单独生效
         if config.virtual_ground.is_some() || config.virtual_ceiling.is_some() {
             grid.set_virtual_wall(VirtualWall {
@@ -200,27 +326,28 @@ impl App {
                 None
             }
         };
-        let depth = match Subscriber::<DepthImageMessage>::with_topic(&node, DEPTH_TOPIC) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                log::warn!("深度订阅不可用，感知建图停用：{e}");
-                None
-            }
-        };
+        let depth = open_sub::<DepthImageMessage>(
+            &node,
+            DEPTH_TOPIC,
+            "已订阅深度话题（感知建图输入）",
+            "深度订阅不可用，感知建图停用",
+        );
+        let goal_sub = open_sub::<GoalMessage>(
+            &node,
+            GOAL_TOPIC,
+            "已订阅目标话题（`uv run firefly-goal X Y Z` 发布）",
+            "目标订阅不可用",
+        );
+        let stop_sub = open_sub::<MandatoryStopMessage>(
+            &node,
+            MANDATORY_STOP_TOPIC,
+            "已订阅强制停止话题（`planner --mandatory-stop` 发布）",
+            "强制停止订阅不可用",
+        );
         let ref_pub = match Publisher::<ReferenceMessage>::with_topic(&node, REFERENCE_TOPIC) {
             Ok(p) => Some(p),
             Err(e) => {
                 log::warn!("参考发布不可用：{e}");
-                None
-            }
-        };
-        let goal_sub = match Subscriber::<GoalMessage>::with_topic(&node, GOAL_TOPIC) {
-            Ok(s) => {
-                log::info!("已订阅目标话题 {GOAL_TOPIC}（`uv run firefly-goal X Y Z` 发布）");
-                Some(s)
-            }
-            Err(e) => {
-                log::warn!("目标订阅不可用：{e}");
                 None
             }
         };
@@ -237,7 +364,12 @@ impl App {
             odom,
             depth,
             goal_sub,
+            stop_sub,
             pending_goal: None,
+            pending_mandatory_stop: false,
+            heartbeat: HeartbeatGate::new(),
+            heartbeat_timeout,
+            last_ref_pos: None,
             latest_odom: None,
             last_odom_recv: f64::NEG_INFINITY,
             odom_trace: None,
@@ -303,7 +435,22 @@ impl App {
                 );
             }
         }
+        if let Some(sub) = &self.stop_sub {
+            while (sub.receive()?).is_some() {
+                // 无载荷消息，收到即置位（对照官方 mandatoryStopCallback）
+                self.pending_mandatory_stop = true;
+            }
+        }
         Ok(())
+    }
+
+    /// 零速悬停参考位置解析（官方超时分支的 `last_pos_` 取值）：优先最近一次
+    /// 发布的参考位置，无则取实测位置；两者皆无时返回 `None`（无落点可不发布）。
+    fn hover_fallback(&self, measured: Option<firefly_planner::State>) -> Option<Reference> {
+        let position = self
+            .last_ref_pos
+            .or_else(|| measured.map(|m| m.position.coords))?;
+        Some(hover_reference(position, self.manager.yaw_state()))
     }
 
     /// 新鲜 odom 的规划系状态（超时返回 `None`，管理器回退轨迹推进估计）。
@@ -370,6 +517,13 @@ impl App {
 
         let measured = self.measured(now);
 
+        // 强制停止（官方 mandatoryStopCallback）：置锁存标志、关 fail-safe、
+        // 进入急停——此后不自动恢复；先于其他分支处理。
+        if self.pending_mandatory_stop {
+            self.pending_mandatory_stop = false;
+            self.manager.mandatory_stop(now, measured);
+        }
+
         // 深度/odom 超时急停（官方 checkCollisionCallback：有可执行轨迹且
         // 未完成才监控深度丢失，命中则关 fail-safe 进急停、永不自动恢复）。
         // 锁存后重复命中不刷屏（监视结构锁存 + enter 幂等）。
@@ -402,24 +556,33 @@ impl App {
         }
         let report = self.manager.tick(now, measured);
 
-        // 参考指令发布（闭环控制：MuJoCo 订阅后 PD 跟踪）。到达后悬停保持：
-        // 以目标点为参考（速度 0），进程保持运行等待新目标
-        let reference = if self.manager.is_finished() {
+        // 参考来源（对照官方 traj_server::cmdCallback 的心跳门控）：从未收到
+        // 执行节拍不发布；节拍超时降级零速悬停；正常时跟踪轨迹，到达后以
+        // 目标点为悬停参考（进程保持运行等待新目标）
+        let tracked = if self.manager.is_finished() {
             let goal = self.manager.goal().coords;
             // 到达悬停保持最后朝向（无轨迹可前视，不再推进 yaw 状态）
-            let (yaw, yaw_dot) = self.manager.yaw_state();
-            Some(firefly_planner::Reference {
-                position: goal,
-                velocity: Vector3::zeros(),
-                yaw,
-                yaw_dot,
-            })
+            Some(hover_reference(goal, self.manager.yaw_state()))
         } else {
             report.reference
         };
+        let reference = match self.heartbeat.decide(now, self.heartbeat_timeout) {
+            RefSource::Silent => None,
+            RefSource::Hover => {
+                log::error!(
+                    "执行节拍超时（>{:.1}s 无新节拍），降级零速悬停",
+                    self.heartbeat_timeout
+                );
+                self.hover_fallback(measured)
+            }
+            RefSource::Track => tracked,
+        };
+        // 本 tick 节拍在判定后记录（与官方「异步心跳 + 独立检查」新鲜度语义一致）
+        self.heartbeat.observe(now);
         if let Some(reference) = reference
             && let Some(pub_) = &self.ref_pub
-            && let Err(e) = pub_.publish(ReferenceMessage {
+        {
+            match pub_.publish(ReferenceMessage {
                 timestamp: now,
                 position_x: reference.position.x,
                 position_y: reference.position.y,
@@ -429,9 +592,11 @@ impl App {
                 velocity_z: reference.velocity.z,
                 yaw: reference.yaw,
                 yaw_dot: reference.yaw_dot,
-            })
-        {
-            log::warn!("参考状态发布失败: {e}");
+            }) {
+                // 官方 last_pos_：超时悬停与跟踪共用最近指令位置
+                Ok(_) => self.last_ref_pos = Some(reference.position),
+                Err(e) => log::warn!("参考状态发布失败: {e}"),
+            }
         }
 
         // 可视化：新轨迹 / 无人机位姿 / 动态障碍
@@ -572,6 +737,21 @@ impl App {
     }
 }
 
+/// `--mandatory-stop`：向 [`MANDATORY_STOP_TOPIC`] 发一条指令后返回（对照
+/// 官方 `rostopic pub .../mandatory_stop std_msgs/Empty`）。
+///
+/// # Errors
+///
+/// 节点或发布器创建失败、消息发送失败。
+fn emit_mandatory_stop() -> Result<()> {
+    let node = create_node()?;
+    let pub_ = Publisher::<MandatoryStopMessage>::with_topic(&node, MANDATORY_STOP_TOPIC)?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(f64::NAN, |d| d.as_secs_f64());
+    pub_.publish(MandatoryStopMessage { timestamp }).map(|_| ())
+}
+
 /// 感知建图管线新鲜度监视：对照官方 `flag_depth_odom_timeout_` 锁存语义——
 /// 计时基准是管线**实际吃进一帧**（深度+位姿齐备并写入地图）的时间戳，
 /// 深度或位姿任一断流即饥饿，超时置位后锁存，直到管线再次吃进新帧才复位。
@@ -614,11 +794,21 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!(
-                "{e}\n用法：planner [--map <map.ffmap>] [--config configs/planner.toml] [--save out.rrd] [--start x y z] [--goal x y z] [--frame-offset x y z]\n\n--goal 可省略（悬停等待 `uv run firefly-goal X Y Z` 动态目标）"
+                "{e}\n用法：planner [--map <map.ffmap>] [--config configs/planner.toml] [--save out.rrd] [--start x y z] [--goal x y z] [--frame-offset x y z] [--mandatory-stop]\n\n--goal 可省略（悬停等待 `uv run firefly-goal X Y Z` 动态目标）；--mandatory-stop 向 {MANDATORY_STOP_TOPIC} 发一条强制停止指令后退出"
             );
             std::process::exit(2);
         }
     };
+    if args.mandatory_stop {
+        if let Err(e) = emit_mandatory_stop() {
+            log::error!("强制停止指令发布失败：{e}");
+            firefly_observability::flush();
+            std::process::exit(1);
+        }
+        log::info!("已发布强制停止指令到 {MANDATORY_STOP_TOPIC}");
+        firefly_observability::flush();
+        return;
+    }
     let toml_cfg = match config::PlannerToml::load(&args.config) {
         Ok(c) => c,
         Err(e) => {
@@ -713,5 +903,37 @@ mod tests {
         assert!(!f.timed_out(11.0, DEPTH_TIMEOUT));
         assert!(f.timed_out(11.0 + 1e-3, DEPTH_TIMEOUT));
         assert!(f.timed_out(20.0, DEPTH_TIMEOUT));
+    }
+
+    /// 从未收到节拍不发布参考（官方 `heartbeat_time_ ≤ 1e-5` 直接返回）；
+    /// 首拍之后转入正常跟踪。
+    #[test]
+    fn heartbeat_gate_blocks_until_first_tick() {
+        let mut g = HeartbeatGate::new();
+        assert_eq!(g.decide(0.0, 0.5), RefSource::Silent);
+        g.observe(0.1);
+        assert_eq!(g.decide(0.2, 0.5), RefSource::Track);
+    }
+
+    /// 节拍超时降级悬停，新节拍恢复跟踪（官方 0.5s 判据）。
+    #[test]
+    fn heartbeat_gate_times_out_to_hover() {
+        let mut g = HeartbeatGate::new();
+        g.observe(10.0);
+        assert_eq!(g.decide(10.4, 0.5), RefSource::Track);
+        assert_eq!(g.decide(10.6, 0.5), RefSource::Hover);
+        g.observe(10.7);
+        assert_eq!(g.decide(10.8, 0.5), RefSource::Track);
+    }
+
+    /// 零速悬停参考：位置/偏航保持，速度与角速度为零
+    /// （官方 `publish_cmd(last_pos_, 0,0,0, last_yaw_, 0)`）。
+    #[test]
+    fn hover_reference_holds_position_and_yaw() {
+        let r = hover_reference(Vector3::new(1.5, 2.5, 1.0), (0.3, -0.7));
+        assert!((r.position - Vector3::new(1.5, 2.5, 1.0)).norm() < 1e-12);
+        assert!(r.velocity.norm() < 1e-12);
+        assert!((r.yaw - 0.3).abs() < 1e-12);
+        assert!(r.yaw_dot.abs() < 1e-12);
     }
 }
