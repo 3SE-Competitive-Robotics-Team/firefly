@@ -122,9 +122,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // SLAM 关闭：SLAM 更新链路毒化状态（synthetic_slam_zero_bias 可复现），
     // 保持纯 MSCKF
     params.state_options.max_slam_features = 0;
-    // ZUPT 保持 OpenVINS 默认关闭（try_zupt=false）：默认分支在慢速运动
-    // 下有盲区（加速度 < IMU 噪声 σ 时 chi2 不超 → 误接受 → 位置冻结），
-    // 显式零运动分支（C++ 标注 untested）同样不属默认路径。
+    // 零速更新保持 OpenVINS 默认关闭（官方参数 try_zupt=false）：慢速运动下
+    // 加速度低于 IMU 噪声 σ 时 chi2 不超限 → 误接受 → 估计位置冻结；
+    // 显式零运动分支（官方标注 untested）同样不属默认路径。
     let mut tracker_calib = std::collections::HashMap::new();
     tracker_calib.insert(0usize, cam_left.clone());
     tracker_calib.insert(1usize, cam_right.clone());

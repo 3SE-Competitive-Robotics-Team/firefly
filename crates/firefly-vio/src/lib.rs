@@ -10,5 +10,5 @@ pub mod state_helper;
 pub mod updater;
 pub mod updater_helper;
 pub mod updater_slam;
-pub mod updater_zupt;
+pub mod updater_zero_velocity;
 pub mod vio_manager;

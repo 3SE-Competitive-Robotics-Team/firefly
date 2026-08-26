@@ -207,33 +207,33 @@ impl Default for UpdaterOptions {
 
 /// VIO 管理器选项（对照 `VioManagerOptions`）。
 ///
-/// ZUPT（零速更新）参数（对照 `VioManagerOptions` 的 zupt 系列字段）。
+/// 零速更新参数（对照 `VioManagerOptions` 的 zupt 系列字段）。
 #[derive(Debug, Clone)]
-pub struct ZuptOptions {
-    /// 是否尝试零速更新。
-    pub try_zupt: bool,
-    /// 超过该速度不做 ZUPT。
-    pub zupt_max_velocity: f64,
-    /// ZUPT 测量噪声乘子。
-    pub zupt_noise_multiplier: f64,
-    /// 超过该平均视差不做 ZUPT。
-    pub zupt_max_disparity: f64,
-    /// 仅在初始化阶段使用 ZUPT。
-    pub zupt_only_at_beginning: bool,
+pub struct ZeroVelocityOptions {
+    /// 是否尝试零速更新（官方参数 `try_zupt`）。
+    pub try_zero_velocity: bool,
+    /// 超过该速度不做零速更新（官方参数 `zupt_max_velocity`）。
+    pub max_velocity: f64,
+    /// 测量噪声乘子（官方参数 `zupt_noise_multiplier`）。
+    pub noise_multiplier: f64,
+    /// 超过该平均视差不做零速更新（官方参数 `zupt_max_disparity`）。
+    pub max_disparity: f64,
+    /// 仅在初始化阶段使用（官方参数 `zupt_only_at_beginning`）。
+    pub only_at_beginning: bool,
     /// 是否使用积分加速度约束（把"零速期间位移应为零"作为位置级测量；
     /// 对照 C++ 的 `integrated_accel_constraint`，默认 false——官方标注
     /// untested，由调用方决定是否开启）。
     pub integrated_accel_constraint: bool,
 }
 
-impl Default for ZuptOptions {
+impl Default for ZeroVelocityOptions {
     fn default() -> Self {
         Self {
-            try_zupt: false,
-            zupt_max_velocity: 1.0,
-            zupt_noise_multiplier: 1.0,
-            zupt_max_disparity: 1.0,
-            zupt_only_at_beginning: false,
+            try_zero_velocity: false,
+            max_velocity: 1.0,
+            noise_multiplier: 1.0,
+            max_disparity: 1.0,
+            only_at_beginning: false,
             integrated_accel_constraint: false,
         }
     }
@@ -256,8 +256,8 @@ pub struct VioManagerOptions {
     pub triangulation_options: firefly_vio_core::triangulation::TriangulationOptions,
     /// 初始化完成后 SLAM 特征可用前的延迟（对照 `dt_slam_delay`）。
     pub dt_slam_delay: f64,
-    /// ZUPT 参数。
-    pub zupt_options: ZuptOptions,
+    /// 零速更新参数。
+    pub zero_velocity_options: ZeroVelocityOptions,
     /// GT 初始化时 bg/ba 的初始先验 σ（rad/s 与 m/s²）。默认 0.02（对照
     /// C++ `initialize_with_gt` 的诚实先验：允许视觉学习偏置）。MuJoCo 仿真
     /// 无真实偏置，视觉会把 KLT 亚像素偏置误学成 bg/ba（σ=0.02 下 bg 学到
@@ -277,7 +277,7 @@ impl Default for VioManagerOptions {
             triangulation_options: firefly_vio_core::triangulation::TriangulationOptions::default(),
             // 对照 C++ `VioManagerOptions::dt_slam_delay = 2.0`
             dt_slam_delay: 2.0,
-            zupt_options: ZuptOptions::default(),
+            zero_velocity_options: ZeroVelocityOptions::default(),
             init_bias_sigma: 0.02,
         }
     }
