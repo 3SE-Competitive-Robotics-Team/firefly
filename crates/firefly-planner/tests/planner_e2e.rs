@@ -491,6 +491,7 @@ fn no_peer_keeps_swarm_weight_unity() {
 fn plan_avoids_isolated_column() {
     // 20m × 20m，res 0.5；x=10 处±y 轴一根柱（多格高、粗）
     let mut map = firefly_map::GridMapBuilder::new(0.5, [40, 40, 10])
+        .with_obstacles_inflation(0.3)
         .build()
         .unwrap();
     // 柱在无人机路径中段：世界 x≈4.25, y=9.75..10.25（voxel 8 / 19..21）
@@ -499,7 +500,7 @@ fn plan_avoids_isolated_column() {
             map.set_state([8, y, z], firefly_map::VoxelState::Occupied);
         }
     }
-    map.inflate_obstacles(0.3);
+    map.inflate_obstacles();
 
     let config = firefly_planner::PlannerConfig::default();
     let mut planner = firefly_planner::Planner::new(config, map);

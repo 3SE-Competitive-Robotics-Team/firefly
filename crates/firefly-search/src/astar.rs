@@ -368,6 +368,7 @@ mod tests {
 
     fn empty_map() -> GridMap {
         firefly_map::GridMapBuilder::new(1.0, [10, 10, 10])
+            .with_obstacles_inflation(1.0)
             .build()
             .unwrap()
     }
@@ -403,7 +404,7 @@ mod tests {
                 map.set_state([5, y, z], firefly_map::VoxelState::Occupied);
             }
         }
-        map.inflate_obstacles(1.0);
+        map.inflate_obstacles();
         let mut astar = Astar::default();
         let r = search(&mut astar, &map, [0.5, 0.5, 0.5], [9.5, 9.5, 0.5]);
         assert_eq!(r.unwrap_err().kind(), ErrorKind::NotFound);
@@ -417,7 +418,7 @@ mod tests {
                 map.set_state([4, y, z], firefly_map::VoxelState::Occupied);
             }
         }
-        map.inflate_obstacles(1.0);
+        map.inflate_obstacles();
         let mut astar = Astar::default();
         let path = search(&mut astar, &map, [0.5, 4.5, 0.5], [9.5, 4.5, 0.5]).unwrap();
         // 路径不穿过墙体（x=4, y 2..8, z 0..2）
@@ -470,10 +471,13 @@ mod line_clear_tests {
     /// 直线擦边穿过膨胀层（全局路径贴柱→MINCO 净距不足→卡死）。
     #[test]
     fn line_clipping_inflation_is_blocked() {
-        let mut map = GridMapBuilder::new(1.0, [10, 10, 10]).build().unwrap();
+        let mut map = GridMapBuilder::new(1.0, [10, 10, 10])
+            .with_obstacles_inflation(1.0)
+            .build()
+            .unwrap();
         // 一条 y=1、z=1 的细障碍（原始仅 1 格厚）
         map.set_state([5, 1, 1], VoxelState::Occupied);
-        map.inflate_obstacles(1.0); // 膨胀到 y∈[0,2]
+        map.inflate_obstacles(); // 膨胀到 y∈[0,2]
 
         // 直线沿 y=1.0 穿过原始占用格 → 应 blocked
         assert!(!line_is_clear(
@@ -501,7 +505,10 @@ mod gap_tests {
     /// 两堵墙留 1 格门，A* 应穿过门（而非绕墙外圈）。
     #[test]
     fn finds_path_through_gap() {
-        let mut map = GridMapBuilder::new(1.0, [12, 12, 12]).build().unwrap();
+        let mut map = GridMapBuilder::new(1.0, [12, 12, 12])
+            .with_obstacles_inflation(0.0)
+            .build()
+            .unwrap();
         // x=5 与 x=7 两堵墙（y,z 全占），但 y=6 留出门缝（1 格宽）
         for x in [5usize, 7] {
             for y in 0..12 {
@@ -513,7 +520,7 @@ mod gap_tests {
                 }
             }
         }
-        map.inflate_obstacles(0.0);
+        map.inflate_obstacles();
         let mut astar = Astar::default();
         let path = astar
             .search(

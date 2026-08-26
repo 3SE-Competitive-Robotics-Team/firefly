@@ -653,7 +653,7 @@ mod tests {
                 }
             }
         }
-        map.inflate_obstacles(0.2);
+        map.inflate_obstacles();
         (map, Astar::default())
     }
 
@@ -865,7 +865,7 @@ mod tests {
                 map.set_state([45, y, z], VoxelState::Unknown);
             }
         }
-        map.inflate_obstacles(0.2);
+        map.inflate_obstacles();
         let scanner = ObstacleScanner::new(&map).with_samples(5).with_max_vel(1.5);
         let start = Endpoint {
             position: Vector3::new(1.0, 2.0, 1.0),

@@ -306,7 +306,10 @@ mod tests {
     /// 墙地图:体素 x=14..=26 全高占据(留 y 通道供 A* 绕行),
     /// 膨胀 1 格 → 占据区世界 x∈[3.25,7.0)。分辨率 0.25。
     fn wall_map() -> GridMap {
-        let mut map = GridMapBuilder::new(0.25, [40, 20, 20]).build().unwrap();
+        let mut map = GridMapBuilder::new(0.25, [40, 20, 20])
+            .with_obstacles_inflation(0.25 * 0.99)
+            .build()
+            .unwrap();
         for x in 14..=26 {
             for y in 0..20 {
                 if (8..12).contains(&y) {
@@ -317,7 +320,7 @@ mod tests {
                 }
             }
         }
-        map.inflate_obstacles(0.25 * 0.99);
+        map.inflate_obstacles();
         map
     }
 
