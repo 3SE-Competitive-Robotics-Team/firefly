@@ -84,6 +84,18 @@ pub struct LocalTraj {
     pub points_to_check: PointsToCheck,
 }
 
+/// 已登记的其他机轨迹（官方 `swarm_traj` 槽位元素）。
+#[derive(Debug)]
+struct SwarmTraj {
+    traj: Trajectory,
+    /// 轨迹起始时刻（管理器时钟，秒）：预测对齐用（官方
+    /// `t_X = t + (my_start_time - other_start_time)`）。
+    start_time: f64,
+    /// 该机期望净距（米，官方 `des_clearance`）：检查阈值 =
+    /// `swarm_clearance + des_clearance`。
+    des_clearance: f64,
+}
+
 /// 参考状态指令（闭环 PD 跟踪目标）。
 #[derive(Debug, Clone, Copy)]
 pub struct Reference {
@@ -165,6 +177,16 @@ pub struct PlannerManager {
     /// 急停态（官方 `EMERGENCY_STOP` 态）：进入时生成一次停车轨迹并入库为
     /// 可执行轨迹，参考输出变为原地定点悬停；恢复判据见 [`Self::tick`]。
     emergency: bool,
+    /// 强制停止锁存（官方 `mandatory_stop_`）：一经置位不清除。
+    mandatory_stop: bool,
+    /// 其他机轨迹槽位（下标 = `agent_id`，`Some` 即有效；对照官方
+    /// `traj_.swarm_traj` 的 `drone_id == 下标` 有效标记）。
+    swarm: Vec<Option<SwarmTraj>>,
+    /// 已收齐全部前序机轨迹（官方 `have_recv_pre_agent_`）：`drone_id ≤ 0`
+    /// 恒为 true，否则由 [`Self::register_swarm_traj`] 推进。
+    have_recv_pre_agent: bool,
+    /// 顺序起飞等待已提示标记：等待前序机的 log 只发一次，不逐帧刷屏。
+    seq_wait_logged: bool,
 }
 
 impl PlannerManager {
@@ -181,6 +203,8 @@ impl PlannerManager {
     ) -> Result<Self> {
         let mut astar = Astar::default();
         let global_path = search_global_path(planner.map_ref(), &mut astar, start, goal)?;
+        // drone_id ≤ 0（单机/0 号机）无需顺序起飞等待（官方 SEQUENTIAL_START 短路）
+        let have_recv_pre_agent = planner.config().drone_id <= 0;
         Ok(Self {
             planner,
             options,
@@ -198,13 +222,19 @@ impl PlannerManager {
             last_yaw_time: None,
             failsafe_enabled: true,
             emergency: false,
+            mandatory_stop: false,
+            swarm: Vec::new(),
+            // 官方 init：have_recv_pre_agent_ = false；drone_id ≤ 0 的检查恒
+            // 短路为真，直接置 true 等价
+            have_recv_pre_agent,
+            seq_wait_logged: false,
         })
     }
 
     /// 动态重目标（外部工具经 `Firefly/Goal` 发布新目标点）：从当前位置
     /// 重算全局路径（A* + 简化）、重置状态机，下一 tick 即重新规划飞往新目标。
     /// 无人机悬停等待目标时 `goal == start`（零长路径 → 原地悬停），
-    /// 收到目标后自然切换。
+    /// 收到目标后自然切换。强制停止锁存中拒绝重目标——急停后不自动恢复。
     ///
     /// # Errors
     ///
@@ -218,6 +248,15 @@ impl PlannerManager {
         // 同目标幂等：CLI 为防一次性投递竞态会连发数条，重复目标不重置
         // 状态机（避免中途丢弃当前轨迹导致规划抖动）。
         if (goal - self.goal.coords).norm() < 1e-6 {
+            return Ok(());
+        }
+        if self.mandatory_stop {
+            log::warn!(
+                "强制停止锁存中，忽略新目标 ({:.1},{:.1},{:.1})",
+                goal.x,
+                goal.y,
+                goal.z
+            );
             return Ok(());
         }
         let start = self.estimated_position(now, measured);
@@ -254,6 +293,70 @@ impl PlannerManager {
     /// 可变地图访问（深度感知建图/动态障碍写入入口）。
     pub fn map_mut(&mut self) -> &mut GridMap {
         self.planner.map_mut()
+    }
+
+    /// 本机编号（官方 `pp_.drone_id`，来自 [`crate::PlannerConfig::drone_id`]）。
+    #[must_use]
+    pub fn drone_id(&self) -> i32 {
+        self.planner.config().drone_id
+    }
+
+    /// 顺序起飞就绪（官方 `SEQUENTIAL_START` 的进入条件）：`drone_id ≤ 0`
+    /// 恒就绪；否则须已收齐 `0..drone_id` 全部前序机轨迹。
+    #[must_use]
+    pub const fn sequential_start_ready(&self) -> bool {
+        self.have_recv_pre_agent
+    }
+
+    /// 强制停止锁存态（官方 `mandatory_stop_`）。
+    #[must_use]
+    pub const fn is_mandatory_stopped(&self) -> bool {
+        self.mandatory_stop
+    }
+
+    /// 登记其他机轨迹（单进程仿真下由外部注入；对照官方
+    /// `RecvBroadcastMINCOTrajCallback` 的存储段）：槽位按 `agent_id` 索引，
+    /// 重复登记以最新为准。同时按官方条件推进顺序起飞就绪位——
+    /// `swarm_traj.size() >= drone_id` 且 `0..drone_id` 各槽位全部有效。
+    /// 自身槽位（`agent_id == drone_id`）拒收（官方 `recv_id == 自身`直接返回）。
+    pub fn register_swarm_traj(
+        &mut self,
+        agent_id: usize,
+        traj: Trajectory,
+        start_time: f64,
+        des_clearance: f64,
+    ) {
+        if agent_id as i32 == self.drone_id() {
+            return;
+        }
+        if self.swarm.len() <= agent_id {
+            self.swarm.resize_with(agent_id + 1, || None);
+        }
+        self.swarm[agent_id] = Some(SwarmTraj {
+            traj,
+            start_time,
+            des_clearance,
+        });
+        // 官方 have_recv_pre_agent_ 推进：一次性锁存，置位后不回退
+        let need = usize::try_from(self.drone_id()).unwrap_or(usize::MAX);
+        if !self.have_recv_pre_agent
+            && need >= 1
+            && self.swarm.len() >= need
+            && (0..need).all(|i| self.swarm[i].is_some())
+        {
+            self.have_recv_pre_agent = true;
+            log::info!("已收齐前序 agent 0..{need} 轨迹，顺序起飞就绪");
+        }
+    }
+
+    /// 强制停止（官方 `mandatoryStopCallback`）：置锁存标志、关闭 fail-safe、
+    /// 进入急停——此后不自动恢复（急停后必须由外部处置，对照官方
+    /// `enable_fail_safe_ = false` 语义）。已在急停中时仅补齐标志与开关。
+    pub fn mandatory_stop(&mut self, now: f64, measured: Option<State>) {
+        self.mandatory_stop = true;
+        log::error!("收到强制停止指令");
+        self.failsafe_enabled = false;
+        self.enter_emergency_stop(now, measured);
     }
 
     #[must_use]
@@ -392,6 +495,15 @@ impl PlannerManager {
                             log::warn!("重规划失败且碰撞迫近（{:.2}s），进入急停", hit_t - t_cur);
                             self.enter_emergency_stop(now, measured);
                         }
+                    } else if let Some((peer, hit_t)) = self.next_swarm_conflict(now) {
+                        // 官方 checkCollisionCallback 的 swarm 段：预测位置距离
+                        // < swarm_clearance + des_clearance 即危险；firefly 无
+                        // 独立状态机，取碰撞命中路径的立即重规划作为 REPLAN_TRAJ
+                        // 等价执行节奏
+                        log::warn!(
+                            "swarm 检查：与 agent {peer} 预测距离过近（t={hit_t:.2}s），立即重规划"
+                        );
+                        report.replanned = self.replan(now);
                     } else if t_cur > self.options.replan_thresh
                         && now >= self.replan_cooldown_until
                     {
@@ -484,9 +596,25 @@ impl PlannerManager {
         }
     }
 
-    /// 首次规划（官方 `GEN_NEW_TRAJ`）：起点为实测位置（无观测时全局路径起点），
-    /// 失败保持无轨迹下一帧重试（官方 FSM 语义，不退出）。
+    /// 首次规划（官方 `GEN_NEW_TRAJ` / `SEQUENTIAL_START`）：起点为实测位置
+    /// （无观测时全局路径起点），失败保持无轨迹下一帧重试（官方 FSM 语义，
+    /// 不退出）。前置条件对照官方 `SEQUENTIAL_START` case：`drone_id ≥ 1`
+    /// 未收齐前序机轨迹时不规划、停在等待态。
+    ///
+    /// 帧内重试对照官方 `planFromGlobalTraj(10)`：单帧内最多 10 次尝试，第 1
+    /// 次确定性初始化、后续随机多项式初始化。firefly 无随机初始解路径
+    /// （`init.rs` 冷启动为确定性 A* 引导），同参重试产出不变，故保持单次。
     fn initial_plan(&mut self, now: f64, measured: Option<State>) {
+        if !self.sequential_start_ready() {
+            if !self.seq_wait_logged {
+                self.seq_wait_logged = true;
+                log::info!(
+                    "SEQUENTIAL_START：等待前序 agent 0..{} 轨迹，暂不初始规划",
+                    self.drone_id()
+                );
+            }
+            return;
+        }
         let start = measured.unwrap_or(State {
             position: Point3::from(self.global_path.first().copied().unwrap_or_default()),
             velocity: Vector3::zeros(),
@@ -661,51 +789,72 @@ impl PlannerManager {
     /// 轨迹检查点只扫 **未来** 采样，返回首个进入膨胀占据区的采样时刻
     /// （相对轨迹起点，秒）；无碰撞或无可执行轨迹返回 `None`。
     ///
-    /// 定位对照官方两级 i/j：`i_start` = `t_cur` 所在段下标（桶序的保守
-    /// 下界），再按时间戳推进到首个未来检查点——已飞过部分不回扫。
-    /// 扫描上界对照官方：`touch_goal` 查全程，否则前 3/4 桶（生成端已按
-    /// `two_thirds_id` 截断，此处再留余量）。集群间距不在本函数范围
-    /// （swarm 约束由规划内层保证）。
+    /// 定位与扫描上界见 [`future_scan_range`]。集群间距检查在同一定位上的
+    /// 姊妹实现 [`Self::next_swarm_conflict`]。
     #[must_use]
     fn next_collision(&self, now: f64) -> Option<f64> {
         let local = self.local.as_ref()?;
-        let pts = &local.points_to_check;
-        if pts.is_empty() {
+        if local.points_to_check.is_empty() {
             return None;
         }
         let t_cur = now - local.start_time;
+        let (i_start, j_start, scan_end) =
+            future_scan_range(&local.points_to_check, &local.traj, t_cur, self.touch_goal)?;
         let map = self.planner.map_ref();
-        let mut i_start = piece_index_at(&local.traj, t_cur);
-        if i_start >= pts.len() {
-            return None;
-        }
-        let mut j_start = 0usize;
-        let mut located = false;
-        while i_start < pts.len() && !located {
-            for (j, (t, _)) in pts[i_start].iter().enumerate() {
-                if *t > t_cur {
-                    j_start = j;
-                    located = true;
-                    break;
-                }
-            }
-            if !located {
-                i_start += 1;
-            }
-        }
-        if !located {
-            return None;
-        }
-        let scan_end = if self.touch_goal {
-            pts.len()
-        } else {
-            pts.len() * 3 / 4
-        };
-        for (i, bucket) in pts.iter().enumerate().take(scan_end).skip(i_start) {
+        for (i, bucket) in local
+            .points_to_check
+            .iter()
+            .enumerate()
+            .take(scan_end)
+            .skip(i_start)
+        {
             let skip = if i == i_start { j_start } else { 0 };
             for (t, p) in bucket.iter().skip(skip) {
                 if map.is_occupied_inflated(*p) {
                     return Some(*t);
+                }
+            }
+        }
+        None
+    }
+
+    /// FSM 层 swarm 预测检查（官方 `ego_replan_fsm.cpp` checkCollisionCallback
+    /// 的 swarm 段）：沿当前轨迹未来检查点，对每个已登记其他机轨迹取预测位置
+    /// （`t_X = t + (my_start_time - other_start_time)`，仅 `0 < t_X <
+    /// other.duration` 有效），距离 `< swarm_clearance + des_clearance`
+    /// 即冲突。返回 `(agent_id, 冲突检查点时刻（相对轨迹起点，秒））`。
+    #[must_use]
+    fn next_swarm_conflict(&self, now: f64) -> Option<(usize, f64)> {
+        if self.swarm.iter().all(Option::is_none) {
+            return None;
+        }
+        let local = self.local.as_ref()?;
+        if local.points_to_check.is_empty() {
+            return None;
+        }
+        let t_cur = now - local.start_time;
+        let (i_start, j_start, scan_end) =
+            future_scan_range(&local.points_to_check, &local.traj, t_cur, self.touch_goal)?;
+        let clearance = self.planner.config().swarm_clearance;
+        for (i, bucket) in local
+            .points_to_check
+            .iter()
+            .enumerate()
+            .take(scan_end)
+            .skip(i_start)
+        {
+            let skip = if i == i_start { j_start } else { 0 };
+            for (t, p) in bucket.iter().skip(skip) {
+                for (id, slot) in self.swarm.iter().enumerate() {
+                    let Some(peer) = slot else { continue };
+                    let t_x = *t + (local.start_time - peer.start_time);
+                    if t_x > 0.0
+                        && t_x < peer.traj.duration()
+                        && (*p - peer.traj.eval(t_x).position).norm()
+                            < clearance + peer.des_clearance
+                    {
+                        return Some((id, *t));
+                    }
                 }
             }
         }
@@ -1077,6 +1226,45 @@ fn emergency_stop_traj(stop_pos: Vector3<f64>) -> Result<Trajectory> {
         &[STOP_PIECE_DURATION, STOP_PIECE_DURATION],
     )?;
     minco.solve()
+}
+
+/// 未来检查点扫描定位（官方 `checkCollisionCallback` 的 i/j 定位与扫描上界）：
+/// 返回 `(起始桶, 起始桶内首个未来采样下标, 扫描终点桶排他上界)`；无未来
+/// 可扫采样时返回 `None`。已飞过部分不回扫；上界：`touch_goal` 查全程，
+/// 否则前 3/4 桶（生成端已按 `two_thirds_id` 截断，此处再留余量）。
+fn future_scan_range(
+    pts: &PointsToCheck,
+    traj: &Trajectory,
+    t_cur: f64,
+    touch_goal: bool,
+) -> Option<(usize, usize, usize)> {
+    let mut i_start = piece_index_at(traj, t_cur);
+    if i_start >= pts.len() {
+        return None;
+    }
+    let mut j_start = 0usize;
+    let mut located = false;
+    while i_start < pts.len() && !located {
+        for (j, (t, _)) in pts[i_start].iter().enumerate() {
+            if *t > t_cur {
+                j_start = j;
+                located = true;
+                break;
+            }
+        }
+        if !located {
+            i_start += 1;
+        }
+    }
+    if !located {
+        return None;
+    }
+    let scan_end = if touch_goal {
+        pts.len()
+    } else {
+        pts.len() * 3 / 4
+    };
+    Some((i_start, j_start, scan_end))
 }
 
 /// 官方 `poly_traj::Trajectory::locatePieceIdx` 的段号部分：`t` 所在段
@@ -1825,5 +2013,131 @@ mod tests {
         assert!(m.emergency, "fail-safe 关闭不得自动恢复");
         assert!(r.emergency_stop);
         assert!(!r.replanned);
+    }
+
+    /// 定点悬停轨迹（单段）：swarm 对端注入用。
+    fn hover_traj(pos: Vector3<f64>, duration: f64) -> Trajectory {
+        let endpoint = Endpoint {
+            position: pos,
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        MincoBuilder::new(SolverOrder::MinimumJerk, endpoint, endpoint)
+            .build(&[], &[duration])
+            .unwrap()
+            .solve()
+            .unwrap()
+    }
+
+    /// 指定 `drone_id` 的空旷管理器（其余同 `open_manager`）。
+    fn manager_with_drone_id(drone_id: i32) -> PlannerManager {
+        let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
+        let planner = Planner::new(
+            PlannerConfig {
+                drone_id,
+                ..PlannerConfig::default()
+            },
+            map,
+        );
+        PlannerManager::with_planner(
+            planner,
+            ManagerOptions::default(),
+            Vector3::new(1.0, 1.0, 1.0),
+            Vector3::new(10.0, 1.0, 1.0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn sequential_start_waits_for_predecessors() {
+        let mut m = manager_with_drone_id(2);
+        // 未收齐前序：不规划、无参考输出（官方 SEQUENTIAL_START 停留语义）
+        let r = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        assert!(!m.sequential_start_ready());
+        assert!(m.local().is_none(), "未收齐前序 agent 轨迹不得初始规划");
+        assert!(r.reference.is_none());
+        // 只收 agent 0（缺 agent 1）：仍等待
+        m.register_swarm_traj(0, hover_traj(Vector3::new(15.0, 10.0, 1.0), 30.0), 0.0, 0.5);
+        let _ = m.tick(0.1, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        assert!(!m.sequential_start_ready());
+        assert!(m.local().is_none());
+        // 收齐 agent 1：本 tick 即初始规划
+        m.register_swarm_traj(1, hover_traj(Vector3::new(18.0, 10.0, 1.0), 30.0), 0.0, 0.5);
+        let _ = m.tick(0.2, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        assert!(m.sequential_start_ready());
+        assert!(m.local().is_some(), "收齐前序后应立即规划");
+    }
+
+    #[test]
+    fn single_drone_needs_no_predecessors() {
+        let mut m = manager_with_drone_id(0);
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        assert!(m.sequential_start_ready());
+        assert!(m.local().is_some(), "drone_id=0 无需等待前序即可规划");
+    }
+
+    #[test]
+    fn mandatory_stop_disables_failsafe_recovery() {
+        let mut m = open_manager();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        let stop_pos = Vector3::new(2.0, 1.0, 1.0);
+        m.mandatory_stop(0.5, Some(state_at(stop_pos)));
+        assert!(m.is_mandatory_stopped(), "强制停止标志应锁存");
+        assert!(m.emergency, "强制停止应进入急停");
+        // fail-safe 已关闭：完全静止也不自动恢复（官方 enable_fail_safe_=false）
+        let r = m.tick(1.0, Some(state_at(stop_pos)));
+        assert!(m.emergency, "强制停止后不得自动恢复");
+        assert!(r.emergency_stop);
+        assert!(!r.replanned);
+    }
+
+    #[test]
+    fn mandatory_stop_latch_rejects_retarget() {
+        let mut m = open_manager();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        m.mandatory_stop(0.5, Some(state_at(Vector3::new(2.0, 1.0, 1.0))));
+        // 锁存中收到新目标：目标与急停态均不变（急停后不自动恢复）
+        let goal_before = m.goal();
+        m.set_goal(0.6, None, Vector3::new(15.0, 10.0, 1.0))
+            .unwrap();
+        assert_eq!(m.goal(), goal_before, "锁存中不得换目标");
+        assert!(m.emergency, "新目标不得解除急停");
+    }
+
+    #[test]
+    fn swarm_conflict_triggers_immediate_replan() {
+        let mut m = open_manager();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        assert!(m.local().is_some());
+        // 对端在航迹前方 x=4 定点悬停（初始直线轨迹必经，净距阈值 0.5m）
+        m.register_swarm_traj(1, hover_traj(Vector3::new(4.0, 1.0, 1.0), 30.0), 0.0, 0.0);
+        // t=0.5 < replan_thresh(1.0)：仅 swarm 预测检查能触发重规划
+        let r = m.tick(0.5, None);
+        assert!(r.replanned, "预测距离过近应立即重规划");
+        assert_eq!(m.replans(), 1);
+        assert!(!r.collision, "swarm 冲突不是障碍碰撞");
+    }
+
+    #[test]
+    fn far_swarm_peer_does_not_disturb() {
+        let mut m = open_manager();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        // 对端横向偏离航迹 4m：远超净距，无冲突无重规划
+        m.register_swarm_traj(1, hover_traj(Vector3::new(4.0, 5.0, 1.0), 30.0), 0.0, 0.0);
+        let r = m.tick(0.5, None);
+        assert!(!r.replanned);
+        assert_eq!(m.replans(), 0);
+        assert!(!r.collision);
+    }
+
+    #[test]
+    fn own_swarm_slot_is_rejected() {
+        let mut m = open_manager(); // drone_id = 0
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        // 自身槽位拒收（官方 recv_id == 自身直接返回）：不得触发冲突重规划
+        m.register_swarm_traj(0, hover_traj(Vector3::new(4.0, 1.0, 1.0), 30.0), 0.0, 0.0);
+        let r = m.tick(0.5, None);
+        assert!(!r.replanned, "自身槽位不得参与 swarm 检查");
+        assert_eq!(m.replans(), 0);
     }
 }
