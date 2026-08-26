@@ -192,8 +192,8 @@ mod tests {
     fn voxel_state_unknown_by_default() {
         let scene = sample_scene();
         let grid = scene.to_map_file().unwrap().to_grid_map().unwrap();
-        // 未被占据的位置是 Unknown，不是 Free
+        // log-odds 语义：初始占据为 clamp_min，对应 Free（Unknown 保留但不再作为初始/查询结果）
         let idx = grid.index_of(Vector3::new(4.5, 4.5, 0.5)).unwrap();
-        assert_eq!(grid.state(idx), VoxelState::Unknown);
+        assert_eq!(grid.state(idx), VoxelState::Free);
     }
 }

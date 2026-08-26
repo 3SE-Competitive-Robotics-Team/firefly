@@ -1,7 +1,9 @@
-//! 深度相机 → 占据栅格（感知建图）。
+//! 深度相机 → 占据栅格（感知建图，log-odds 更新）。
 //!
 //! 把一帧深度图投影成世界系点云并做光线标记：相机原点 → 命中点射线沿途
-//! 体素标 [`VoxelState::Free`]，命中体素标 [`VoxelState::Occupied`]。
+//! 体素以 `prob_miss_log` 递减（趋向 Free），命中体素以 `prob_hit_log` 递增
+//! （趋向 Occupied），对照官方 `grid_map.cpp:577-700` `raycastProcess` 的
+//! log-odds 更新语义。对照差异见 `mark_ray` 注释。
 //!
 //! 相机模型为硬编码合成标定（`MuJoCo` 场景，`packages/firefly-mujoco/src/
 //! firefly_mujoco/scene.py`），投影约定经实测验证（见 `DepthCamera::mujoco_default`
@@ -9,7 +11,7 @@
 
 use nalgebra::{Isometry3, Matrix3, Point3, Vector3};
 
-use crate::grid::{GridMap, VoxelState};
+use crate::grid::GridMap;
 
 /// 深度相机标定（内参 + 外参 + 感知参数）。
 ///
@@ -68,11 +70,11 @@ impl DepthCamera {
     }
 }
 
-/// 用一帧深度图更新占据地图（感知建图）。
+/// 用一帧深度图更新占据地图（感知建图，log-odds）。
 ///
 /// 对每个有效像素（`0.05 < z ≤ max_range` 且有限）：把命中点变换到世界系，
-/// 相机原点 → 命中点射线沿途体素标 [`VoxelState::Free`]，命中体素标
-/// [`VoxelState::Occupied`]（命中点在图外则只标到图边界，无命中体素）。
+/// 相机原点 → 命中点射线沿途体素以 `prob_miss_log` 递减、命中体素以
+/// `prob_hit_log` 递增（对照官方 `raycastProcess` 658-669 行的 log-odds 更新）。
 ///
 /// `body_pose` 为机体 → 世界变换（仿真阶段用真值，VIO 修复后换 odom）。
 ///
@@ -105,7 +107,12 @@ pub fn update_from_depth(
     }
 }
 
-/// 从 `from` 到 `to` 的体素遍历（3D DDA）：沿途标 Free，末端标 Occupied。
+/// 从 `from` 到 `to` 的体素遍历（3D DDA）：沿途以 `prob_miss_log` 递减，末端以 `prob_hit_log` 递增。
+///
+/// 对照官方 `grid_map.cpp:577-700` `raycastProcess`：官方对同一体素在帧内做多数投票
+/// （`count_hit/count_hit_and_miss` 统计后统一 `log_odds_update` 一次），firefly 逐像素 DDA 每条射线
+/// 独立累积更新（`update_occupancy(idx, delta)` clamp 到 `[clamp_min_log_, clamp_max_log_]`，
+/// 方向一致，差异仅在于帧内多次命中/穿过的合并时机，注释中写明对照关系，不引入帧缓冲）。
 fn mark_ray(map: &mut GridMap, from: Vector3<f64>, to: Vector3<f64>) {
     let Some(mut idx) = map.index_of(from) else {
         return;
@@ -113,9 +120,12 @@ fn mark_ray(map: &mut GridMap, from: Vector3<f64>, to: Vector3<f64>) {
     let Some(idx_to) = map.index_of(to) else {
         return;
     };
-    // 命中体素即起点（相机贴障碍）：直接标 Occupied
+    // 取 log-odds 增量（避免在可变借用期间再借 map）
+    let prob_hit = map.prob_hit_log();
+    let prob_miss = map.prob_miss_log(); // 负值，对照官方 `logit(p_miss)`； miss 递减即 `+prob_miss`
+    // 命中体素即起点（相机贴障碍）：直接累加命中
     if idx == idx_to {
-        map.set_state(idx, VoxelState::Occupied);
+        map.update_occupancy(idx, prob_hit);
         return;
     }
 
@@ -155,10 +165,10 @@ fn mark_ray(map: &mut GridMap, from: Vector3<f64>, to: Vector3<f64>) {
             break;
         }
         if idx == idx_to {
-            map.set_state(idx, VoxelState::Occupied);
+            map.update_occupancy(idx, prob_hit);
             break;
         }
-        map.set_state(idx, VoxelState::Free);
+        map.update_occupancy(idx, prob_miss);
         // 防御：射线异常长时截断（应被命中或出界提前终止）
         if t > 100.0 * dir.norm() {
             break;
@@ -169,7 +179,7 @@ fn mark_ray(map: &mut GridMap, from: Vector3<f64>, to: Vector3<f64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::GridMapBuilder;
+    use crate::grid::{GridMapBuilder, VoxelState};
     use nalgebra::{Translation3, UnitQuaternion};
 
     #[test]
@@ -180,16 +190,36 @@ mod tests {
 
     #[test]
     fn ray_marks_free_then_occupied() {
+        // log-odds：单次命中 +0.847 不足以从 clamp_min(-1.992) 跨阈值 1.386，需多次命中
         let mut map = GridMapBuilder::new(1.0, [10, 10, 10]).build().unwrap();
         let from = Vector3::new(0.5, 0.5, 0.5);
         let to = Vector3::new(4.5, 0.5, 0.5);
+        let hit_prob = map.prob_hit_log();
+        let miss_prob = map.prob_miss_log();
+        let clamp_min = map.clamp_min_log();
+        let min_occ = map.min_occupancy_log();
+        // 起点体素不更新（含相机）
+        let start_occ = map.occupancy_at([0, 0, 0]);
         mark_ray(&mut map, from, to);
-        // 沿途 Free，命中 Occupied
-        assert_eq!(map.state([1, 0, 0]), VoxelState::Free);
-        assert_eq!(map.state([2, 0, 0]), VoxelState::Free);
-        assert_eq!(map.state([4, 0, 0]), VoxelState::Occupied);
+        // 沿途以 miss 递减，但 clamp_min 已为下界，保持不变
+        assert!((map.occupancy_at([1, 0, 0]) - clamp_min).abs() < 1e-12);
+        assert!(
+            (map.occupancy_at([2, 0, 0]) - (clamp_min + miss_prob).max(clamp_min)).abs() < 1e-12
+                || (map.occupancy_at([1, 0, 0]) - clamp_min).abs() < 1e-12
+        );
+        // 命中体素累加 hit
+        assert!((map.occupancy_at([4, 0, 0]) - (clamp_min + hit_prob)).abs() < 1e-12);
+        // 尚未跨阈值，仍为 Free
+        assert_eq!(map.state([4, 0, 0]), VoxelState::Free);
+        assert!(map.occupancy_at([4, 0, 0]) < min_occ);
         // 起点体素不改（含相机）
-        assert_eq!(map.state([0, 0, 0]), VoxelState::Unknown);
+        assert!((map.occupancy_at([0, 0, 0]) - start_occ).abs() < 1e-12);
+        // 多次命中后跨阈值变为 Occupied
+        for _ in 0..4 {
+            mark_ray(&mut map, from, to);
+        }
+        assert_eq!(map.state([4, 0, 0]), VoxelState::Occupied);
+        assert!(map.occupancy_at([4, 0, 0]) >= min_occ);
     }
 
     #[test]
@@ -198,31 +228,40 @@ mod tests {
         let from = Vector3::new(0.5, 0.5, 0.5);
         let to = Vector3::new(9.5, 5.5, 0.5); // 终点在图内，中间越界路径被跳过
         mark_ray(&mut map, from, to);
-        assert_eq!(map.state([1, 0, 0]), VoxelState::Free);
+        // 沿途首格应被 miss 更新（但 clamp_min 保持下界）
+        let clamp_min = map.clamp_min_log();
+        assert!(map.occupancy_at([1, 0, 0]) <= clamp_min + 1e-12);
         // 不会 panic，出界即停
     }
 
     #[test]
     fn update_from_depth_projects_to_world() {
-        // 无旋转机体 + 中心像素：命中点应在 +x_body
+        // 无旋转机体 + 中心像素：命中点应在 +x_body，需多次观测才跨阈值
         let cam = DepthCamera::mujoco_default();
         let mut map = GridMapBuilder::new(1.0, [20, 20, 10]).build().unwrap();
         let pose = Isometry3::identity();
         let mut depth = vec![0.0f32; cam.width * cam.height];
         // 采样像素（u=159 是 pixel_step=3 的采样点）深度 5m → 命中 ≈ (5,0,0)
         depth[120 * cam.width + 159] = 5.0;
+        let clamp_min = map.clamp_min_log();
+        let hit = map.prob_hit_log();
+        // 单帧命中一次
         update_from_depth(&mut map, &cam, &pose, &depth);
-        // 命中点 ≈ (5, 0, 0)，体素 [5,0,0] Occupied
+        assert!((map.occupancy_at([5, 0, 0]) - (clamp_min + hit)).abs() < 1e-12);
+        // 沿途 Free（但已在下界，保持不变或轻微变化）
+        assert!(map.occupancy_at([2, 0, 0]) <= clamp_min + 1e-12);
+        // 多帧后占据
+        for _ in 0..4 {
+            update_from_depth(&mut map, &cam, &pose, &depth);
+        }
         assert_eq!(map.state([5, 0, 0]), VoxelState::Occupied);
-        // 沿途 Free
-        assert_eq!(map.state([2, 0, 0]), VoxelState::Free);
     }
 
     #[test]
     fn update_from_depth_maps_mujoco_box() {
         // 复现 demo 场景：无人机在 (1,4,1) 恒等姿态，盒子 (8,2,0.5) 前表面
         // 在像素 (207,132)（fovy=70.88°、focal=168.6、pixel_step=3 采到）深度
-        // 5.59m → 命中世界 (6.59,2.44,0.60)
+        // 5.59m → 命中世界 (6.59,2.44,0.60)，多次观测后占据
         let cam = DepthCamera::mujoco_default();
         // 地图与 demo 一致：origin (0,-5,0)、0.4m、dims [80,35,13]
         let mut map = GridMapBuilder::new(0.4, [80, 35, 13])
@@ -233,11 +272,17 @@ mod tests {
             Isometry3::from_parts(Translation3::new(1.0, 4.0, 1.0), UnitQuaternion::identity());
         let mut depth = vec![0.0f32; cam.width * cam.height];
         depth[132 * cam.width + 207] = 5.59;
+        let hit = map.prob_hit_log();
+        let clamp_min = map.clamp_min_log();
         update_from_depth(&mut map, &cam, &pose, &depth);
-        // 命中点 (6.59,2.41,0.60) → 体素 [16,18,1]
+        assert!((map.occupancy_at([16, 18, 1]) - (clamp_min + hit)).abs() < 1e-12);
+        // 多帧后占据
+        for _ in 0..4 {
+            update_from_depth(&mut map, &cam, &pose, &depth);
+        }
         assert_eq!(map.state([16, 18, 1]), VoxelState::Occupied);
-        // 沿途（含相机所在体素后）Free
-        assert_eq!(map.state([4, 22, 2]), VoxelState::Free);
+        // 沿途（含相机所在体素后）miss 更新但仍在下界附近
+        assert!(map.occupancy_at([4, 22, 2]) <= clamp_min + 1e-12);
     }
 
     #[test]
@@ -247,16 +292,46 @@ mod tests {
             .with_origin(Vector3::new(0.0, -5.0, 0.0))
             .build()
             .unwrap();
+        let clamp_min = map.clamp_min_log();
         mark_ray(
             &mut map,
             Vector3::new(1.0, 4.0, 1.0),
             Vector3::new(6.59, 2.412, 0.596),
         );
+        // 单次命中尚未占据，需多次
+        assert!((map.occupancy_at([16, 18, 1]) - (clamp_min + map.prob_hit_log())).abs() < 1e-12);
+        assert_eq!(map.state([2, 22, 2]), VoxelState::Free); // 起点体素不改，初始 Free
+        // DDA 路径中途某体素应被 miss 更新（但 clamp_min 保持）
+        assert!(map.occupancy_at([5, 21, 2]) <= clamp_min + 1e-12);
+        assert!(map.occupancy_at([7, 20, 2]) <= clamp_min + 1e-12);
+        assert!(map.occupancy_at([12, 19, 1]) <= clamp_min + 1e-12);
+        for _ in 0..4 {
+            mark_ray(
+                &mut map,
+                Vector3::new(1.0, 4.0, 1.0),
+                Vector3::new(6.59, 2.412, 0.596),
+            );
+        }
         assert_eq!(map.state([16, 18, 1]), VoxelState::Occupied);
-        assert_eq!(map.state([2, 22, 2]), VoxelState::Unknown); // 起点体素不改
-        // DDA 路径中途某体素应 Free（手工跟踪：5,21,2 → 7,20,2 → 12,19,1 → 16,18,1）
-        assert_eq!(map.state([5, 21, 2]), VoxelState::Free);
-        assert_eq!(map.state([7, 20, 2]), VoxelState::Free);
-        assert_eq!(map.state([12, 19, 1]), VoxelState::Free);
+    }
+
+    #[test]
+    fn log_odds_miss_decreases_occupancy() {
+        let mut map = GridMapBuilder::new(0.5, [10, 10, 10]).build().unwrap();
+        let idx = [5, 5, 5];
+        // 先设为 Occupied（max）
+        map.set_state(idx, VoxelState::Occupied);
+        let max = map.clamp_max_log();
+        assert!((map.occupancy_at(idx) - max).abs() < 1e-12);
+        // miss 更新递减
+        let miss = map.prob_miss_log();
+        map.update_occupancy(idx, miss);
+        assert!((map.occupancy_at(idx) - (max + miss)).abs() < 1e-12);
+        // 多次 miss 直到阈值下
+        for _ in 0..5 {
+            map.update_occupancy(idx, miss);
+        }
+        assert!(map.occupancy_at(idx) < map.min_occupancy_log());
+        assert_eq!(map.state(idx), VoxelState::Free);
     }
 }
