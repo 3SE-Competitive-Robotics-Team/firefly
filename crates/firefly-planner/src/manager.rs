@@ -1666,11 +1666,11 @@ mod tests {
         );
         let glb1 = m.global.glb_t_of_lc_tgt;
         assert!(glb1 > 0.0, "glb 应前推");
-        // 同 start 再选：命中同一目标 → last = 上一轮 glb、glb 不变
+        // 同 start 再选：命中同一目标 → last = 前次 glb、glb 不变
         let _ = m.horizon(start);
         assert!(
             (m.global.last_glb_t_of_lc_tgt - glb1).abs() < 1e-9,
-            "last = 上一轮 glb"
+            "last = 前次 glb"
         );
         assert!(
             (m.global.glb_t_of_lc_tgt - glb1).abs() < 1e-9,
