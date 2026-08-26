@@ -52,6 +52,8 @@ const ODOM_FRESH_TIMEOUT: f64 = 1.0;
 const DEPTH_TIMEOUT: f64 = 1.0;
 /// 感知占据地图的 viewer 更新周期（帧；10Hz 循环下约每 2.5s）。
 const PERCEIVED_PERIOD: usize = 25;
+/// 地图衰减周期（帧；10Hz 循环下 5 帧 = 0.5s，对照官方 `fading_timer` 2Hz）。
+const FADE_TICKS: usize = 5;
 /// `configs/planner.toml` 缺省路径（相对运行目录，通常为仓库根）。
 const DEFAULT_CONFIG: &str = "configs/planner.toml";
 
@@ -144,6 +146,8 @@ struct App {
     depth_cam: DepthCamera,
     frame_offset: Vector3<f64>,
     finished: bool,
+    /// 衰减节拍计数（10Hz 累计，满 5 帧触发 2Hz `fade`）。
+    fade_ticks: usize,
 }
 
 impl App {
@@ -244,6 +248,7 @@ impl App {
             depth_cam: DepthCamera::mujoco_default(),
             frame_offset: Vector3::new(frame_offset[0], frame_offset[1], frame_offset[2]),
             finished: false,
+            fade_ticks: 0,
         })
     }
 
@@ -354,6 +359,13 @@ impl App {
 
         // 深度感知建图 + 动态障碍写入（规划地图更新先于重规划决策）
         self.update_map_from_depth();
+        // 地图衰减（对照官方 `fadingCallback` 2Hz）：每 0.5s 调用一次固定 `fade()`，
+        // 膨胀层在 `fade` 内部增量移除（计数缓冲，对照官方 `changeInfBuf`）。
+        self.fade_ticks += 1;
+        if self.fade_ticks >= FADE_TICKS {
+            self.manager.map_mut().fade();
+            self.fade_ticks = 0;
+        }
         self.update_motion();
 
         let measured = self.measured(now);
