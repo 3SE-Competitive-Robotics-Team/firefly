@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VIO bench: GT vs odom for 34s (scripted Lissajous) — no single-rrd, no tmpfs.
+"""VIO bench 引擎：单轮 GT vs odom 评测（套件入口见 bench_suite.py）。
 
 Bench keeps rerun enabled (viewer auto-spawn or connect). For many turns,
 do NOT write all turns into a single rrd — use --save-dir to get per-run
@@ -8,10 +8,10 @@ via a dedicated viewer. Default (no --save-dir) is viewer-only, no file.
 
 Usage:
   uv run python bench/bench_vio.py --duration 34
+  uv run python bench/bench_vio.py --duration 34 --trajectory lissajous_wide
   uv run python bench/bench_vio.py --duration 34 --save-dir logs/bench
   uv run python bench/bench_vio.py --duration 10 --output logs/bench/bench_10s.json
   uv run python bench/bench_vio.py --duration 34 --turns 10
-  uv run python bench/bench_vio.py --duration 34 --turns 10 --save-dir logs/bench
 
 Replaces the former pytest e2e (apps/*/tests/test_vio_e2e.py) which was
 not a true unit test — bench is the correct harness for VIO accuracy.
@@ -173,12 +173,12 @@ def compute_metrics(
     }
 
 
-def run_bench(duration: float, save_dir: Path | None, output: Path) -> dict:
+def run_bench(duration: float, save_dir: Path | None, output: Path, trajectory: str | None = None) -> dict:
     import iceoryx2 as iox2
     from firefly_mujoco.messages import ImuMessage, OdomMessage, TraceContext
 
     vio_bin = ensure_vio_built(find_vio_bin())
-    print(f"[bench] vio_bin={vio_bin}")
+    print(f"[bench] vio_bin={vio_bin} trajectory={trajectory or 'lissajous_classic'}")
 
     cleanup_iceoryx()
 
@@ -221,8 +221,11 @@ def run_bench(duration: float, save_dir: Path | None, output: Path) -> dict:
 
     # start sim headless (--no-trace disables OTel, 1x realtime)
     env = os.environ.copy()
-    # ensure clean PYTHONPATH for uv run
-    sim_cmd = [str(UV_BIN), "run", "firefly-sim", "--script", "--no-trace"]
+    # ensure clean PYTHONPATH for uv run; --script [NAME] selects trajectory instance
+    sim_cmd = [str(UV_BIN), "run", "firefly-sim", "--script"]
+    if trajectory:
+        sim_cmd.append(trajectory)
+    sim_cmd.append("--no-trace")
     log_sim = REPO_ROOT / "logs" / "bench" / "sim.log"
     log_sim.parent.mkdir(parents=True, exist_ok=True)
     print(f"[bench] starting sim: {' '.join(sim_cmd)}")
@@ -358,7 +361,7 @@ def run_bench(duration: float, save_dir: Path | None, output: Path) -> dict:
     # pretty print
     print("\n=== VIO bench ===")
     print(f" duration {metrics['duration_s']:.1f}s  frames {metrics['num_frames']}")
-    print(f" ATE RMSE {metrics['ate_rmse']:.3f}  mean {metrics['ate_mean']:.3f}  max {metrics['ate_max']:.3f}  final {metrics['ate_final']:.3f} (km-scale right now)")
+    print(f" ATE RMSE {metrics['ate_rmse']:.3f}  mean {metrics['ate_mean']:.3f}  max {metrics['ate_max']:.3f}  final {metrics['ate_final']:.3f}")
     print(f" RPE 1s RMSE {metrics['rpe_rmse_1s']:.3f}  mean {metrics['rpe_mean_1s']:.3f}")
     print(f" err mean xyz {np.array(metrics['err_mean_xyz']).round(3)}  std {np.array(metrics['err_std_xyz']).round(3)}  rmse {np.array(metrics['err_rmse_xyz']).round(3)}")
     for k in sorted(metrics["snapshots"], key=lambda x: float(x)):
@@ -370,6 +373,7 @@ def run_bench(duration: float, save_dir: Path | None, output: Path) -> dict:
     payload = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "duration_s": metrics["duration_s"],
+        "trajectory": trajectory or "lissajous_classic",
         "vio_bin": str(vio_bin),
         "save_dir": str(save_dir) if save_dir else None,
         "metrics": metrics,
@@ -390,10 +394,11 @@ def main():
     ap.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="json output (repo-local, default logs/bench/vio_bench.json)")
     ap.add_argument("--save-dir", type=Path, default=None, help="if set, launch dedicated viewer saving per-run isolated rrd to this dir (one file per turn, never single rrd)")
     ap.add_argument("--turns", type=int, default=1, help="number of turns to run sequentially (default 1); each turn is isolated, per-turn rrd not single file")
+    ap.add_argument("--trajectory", type=str, default=None, help="trajectory instance name (see firefly_sim.trajectories.TRAJECTORIES; default lissajous_classic)")
     args = ap.parse_args()
     try:
         if args.turns <= 1:
-            run_bench(float(args.duration), args.save_dir, Path(args.output))
+            run_bench(float(args.duration), args.save_dir, Path(args.output), trajectory=args.trajectory)
         else:
             turns = int(args.turns)
             print(f"[bench] running {turns} turns x {args.duration}s (each isolated, per-run rrd)")
@@ -419,12 +424,12 @@ def main():
                     # nicer: logs/bench/turn_01.json
                     if out.name.startswith("vio_bench"):
                         out = out.parent / f"turn_{i:02d}{suffix}"
-                payload = run_bench(float(args.duration), effective_save_dir, out)
+                payload = run_bench(float(args.duration), effective_save_dir, out, trajectory=args.trajectory)
                 results.append(payload)
                 time.sleep(1)
             # summary table (repo-local, no tmpfs)
             print("\n" + "=" * 80)
-            print(f"{turns}-turn {args.duration:.0f}s bench summary (km-scale right now)")
+            print(f"{turns}-turn {args.duration:.0f}s bench summary")
             print("=" * 80)
             print(f"{'turn':>4} {'ATE_RMSE':>9} {'ATE_mean':>9} {'ATE_max':>9} {'ATE_final':>10} {'RPE_1s':>7} {'err@34s':>8} {'frames':>6}")
             for idx, payload in enumerate(results, 1):
