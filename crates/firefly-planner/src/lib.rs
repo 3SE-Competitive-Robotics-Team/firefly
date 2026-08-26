@@ -11,6 +11,7 @@ pub mod multitopo;
 pub mod objective;
 mod obstacles;
 mod planner;
+pub mod root_finder;
 
 pub use config::PlannerConfig;
 pub use manager::{LocalTraj, ManagerOptions, PlannerManager, Reference, TickReport};

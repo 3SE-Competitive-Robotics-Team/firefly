@@ -22,6 +22,7 @@ use crate::init::{self, InitConfig};
 use crate::multitopo::distinctive_candidates;
 use crate::objective::{MincoObjective, real_to_virtual};
 use crate::obstacles::{CheckResult, ObstacleScanner, constraint_sample_points, two_thirds_id};
+use crate::root_finder;
 
 /// [`Planner::try_finish`] 的判定结果。仅 [`FinishCheck::SwarmTooClose`] 在
 /// 外层触发 swarm 权重倍增（对照官方 `wei_swarm_mod_ *= 2` 的唯一触发路径），
@@ -683,21 +684,23 @@ impl Planner {
         true
     }
 
-    /// 可行性 post-check（论文：constraints are converted into objectives,
-    /// feasibility is guaranteed by postchecking）。
-    /// 时间等比缩放：re = max{|v/vm|, √|a/am|, ∛|j/jm|}，
-    /// 导数 ∝ 1/T 幂次缩放，闭式满足限制且不改变轨迹形状。
+    /// 可行性后检查（论文：constraints are converted into objectives, feasibility is guaranteed by postchecking）。
+    /// 极值计算对照官方 `poly_traj_utils.hpp:165/263` `getMaxVelRate` / `getMaxAccRate` 范式：
+    /// 归一化系数（`* T^k`）→ `polySqr` 三分量平方和 → 求导 → 导数近零则返回端点值（对照 `gcopter.hpp:77`），否则
+    /// `solvePolynomial(导数, l, r, FLT_EPSILON/T)` 求 `[0,1]` 驻点 + 端点 0/1 → 取最大 `‖·‖`。
+    /// `getMaxVelRate` / `getMaxAccRate` / `getMaxJerkRate` 均用此范式；官方 `gcopter.hpp:121`
+    /// `getMaxAccRate` 仅查端点为简化，本实现保留全程精确语义（加速度/加加速度亦求驻点），
+    /// 避免采样漏峰导致时间缩放不足。
+    /// 时间等比缩放：`re = max{|v/vm|, √|a/am|, ∛|j/jm|}`，导数 `∝ 1/T` 幂次缩放，闭式满足限制且不改变轨迹形状。
     fn ensure_feasible(&self, minco: &Minco) -> firefly_error::Result<Trajectory> {
         let traj = minco.solve()?;
-        let mut re = 1.0f64;
-        for k in 0..400 {
-            let t = traj.duration() * f64::from(k) / 400.0;
-            let s = traj.eval(t);
-            re = re
-                .max(s.velocity.norm() / self.config.max_velocity)
-                .max((s.acceleration.norm() / self.config.max_acceleration).sqrt())
-                .max((s.jerk.norm() / self.config.max_jerk).cbrt());
-        }
+        let max_vel = Self::trajectory_max_vel(&traj);
+        let max_acc = Self::trajectory_max_acc(&traj);
+        let max_jerk = Self::trajectory_max_jerk(&traj);
+        let mut re = 1.0_f64;
+        re = re.max(max_vel / self.config.max_velocity);
+        re = re.max((max_acc / self.config.max_acceleration).sqrt());
+        re = re.max((max_jerk / self.config.max_jerk).cbrt());
         if re <= 1.0 {
             return Ok(traj);
         }
@@ -710,6 +713,207 @@ impl Planner {
         MincoBuilder::new(SolverOrder::MinimumJerk, minco.start(), minco.end())
             .build(&waypoints, &durations)
             .map(|m| m.solve().expect("nonsingular"))
+    }
+
+    fn trajectory_max_vel(traj: &Trajectory) -> f64 {
+        let mut m = 0.0_f64;
+        for i in 0..traj.pieces() {
+            let dur = traj.durations()[i];
+            m = m.max(Self::piece_max_vel(traj, i, dur));
+        }
+        m
+    }
+
+    fn trajectory_max_acc(traj: &Trajectory) -> f64 {
+        let mut m = 0.0_f64;
+        for i in 0..traj.pieces() {
+            let dur = traj.durations()[i];
+            m = m.max(Self::piece_max_acc(traj, i, dur));
+        }
+        m
+    }
+
+    fn trajectory_max_jerk(traj: &Trajectory) -> f64 {
+        let mut m = 0.0_f64;
+        for i in 0..traj.pieces() {
+            let dur = traj.durations()[i];
+            m = m.max(Self::piece_max_jerk(traj, i, dur));
+        }
+        m
+    }
+
+    #[allow(clippy::many_single_char_names)]
+    /// 单段最大速度（对照 `poly_traj_utils.hpp:165`）。
+    fn piece_max_vel(traj: &Trajectory, piece: usize, dur: f64) -> f64 {
+        // 归一化速度系数：nVel = T·vel(T·u)，u ∈ [0,1]
+        // vel(Tu)=c1+2c2 Tu+3c3 T²u²+4c4 T³u³+5c5 T⁴u⁴
+        // nVel(u)=c1T+2c2T²u+3c3T³u²+4c4T⁴u³+5c5T⁵u⁴，降幂 [5c5T⁵,4c4T⁴,3c3T³,2c2T²,c1T]
+        let coeffs = traj.coefficients();
+        let base = piece * 6;
+        let mut coeff_sum: Option<Vec<f64>> = None;
+        for dim in 0..3 {
+            let c1 = coeffs[(base + 1, dim)];
+            let c2 = coeffs[(base + 2, dim)];
+            let c3 = coeffs[(base + 3, dim)];
+            let c4 = coeffs[(base + 4, dim)];
+            let c5 = coeffs[(base + 5, dim)];
+            let t = dur;
+            let t2 = t * t;
+            let t3 = t2 * t;
+            let t4 = t3 * t;
+            let t5 = t4 * t;
+            let nv = vec![
+                5.0 * c5 * t5,
+                4.0 * c4 * t4,
+                3.0 * c3 * t3,
+                2.0 * c2 * t2,
+                c1 * t,
+            ];
+            let sq = root_finder::poly_sqr(&nv);
+            if let Some(sum) = coeff_sum.as_mut() {
+                for (i, v) in sq.iter().enumerate() {
+                    sum[i] += v;
+                }
+            } else {
+                coeff_sum = Some(sq);
+            }
+        }
+        let coeff = coeff_sum.unwrap_or_default();
+        Self::max_from_squared_poly(traj, piece, dur, &coeff, |s| s.velocity.norm())
+    }
+
+    #[allow(clippy::many_single_char_names)]
+    /// 单段最大加速度（对照 `poly_traj_utils.hpp:263`，但保留全程驻点求根而非仅端点）。
+    fn piece_max_acc(traj: &Trajectory, piece: usize, dur: f64) -> f64 {
+        // nAcc = T²·acc(Tu) = 2c2T²+6c3T³u+12c4T⁴u²+20c5T⁵u³，降幂 [20c5T⁵,12c4T⁴,6c3T³,2c2T²]
+        let coeffs = traj.coefficients();
+        let base = piece * 6;
+        let mut coeff_sum: Option<Vec<f64>> = None;
+        for dim in 0..3 {
+            let c2 = coeffs[(base + 2, dim)];
+            let c3 = coeffs[(base + 3, dim)];
+            let c4 = coeffs[(base + 4, dim)];
+            let c5 = coeffs[(base + 5, dim)];
+            let t = dur;
+            let t2 = t * t;
+            let t3 = t2 * t;
+            let t4 = t3 * t;
+            let t5 = t4 * t;
+            let na = vec![20.0 * c5 * t5, 12.0 * c4 * t4, 6.0 * c3 * t3, 2.0 * c2 * t2];
+            let sq = root_finder::poly_sqr(&na);
+            if let Some(sum) = coeff_sum.as_mut() {
+                for (i, v) in sq.iter().enumerate() {
+                    sum[i] += v;
+                }
+            } else {
+                coeff_sum = Some(sq);
+            }
+        }
+        let coeff = coeff_sum.unwrap_or_default();
+        Self::max_from_squared_poly(traj, piece, dur, &coeff, |s| s.acceleration.norm())
+    }
+
+    #[allow(clippy::many_single_char_names)]
+    /// 单段最大加加速度（jerk），同范式扩展。
+    fn piece_max_jerk(traj: &Trajectory, piece: usize, dur: f64) -> f64 {
+        // nJer = T³·jer(Tu)=6c3T³+24c4T⁴u+60c5T⁵u²，降幂 [60c5T⁵,24c4T⁴,6c3T³]
+        let coeffs = traj.coefficients();
+        let base = piece * 6;
+        let mut coeff_sum: Option<Vec<f64>> = None;
+        for dim in 0..3 {
+            let c3 = coeffs[(base + 3, dim)];
+            let c4 = coeffs[(base + 4, dim)];
+            let c5 = coeffs[(base + 5, dim)];
+            let t = dur;
+            let t3 = t * t * t;
+            let t4 = t3 * t;
+            let t5 = t4 * t;
+            let nj = vec![60.0 * c5 * t5, 24.0 * c4 * t4, 6.0 * c3 * t3];
+            let sq = root_finder::poly_sqr(&nj);
+            if let Some(sum) = coeff_sum.as_mut() {
+                for (i, v) in sq.iter().enumerate() {
+                    sum[i] += v;
+                }
+            } else {
+                coeff_sum = Some(sq);
+            }
+        }
+        let coeff = coeff_sum.unwrap_or_default();
+        Self::max_from_squared_poly(traj, piece, dur, &coeff, |s| s.jerk.norm())
+    }
+
+    #[allow(
+        clippy::many_single_char_names,
+        clippy::needless_range_loop,
+        clippy::cast_lossless
+    )]
+    /// 由归一化平方和多项式 `coeff`（`‖T^k·derivative‖²`）求 `[0,1]` 内最大值。
+    fn max_from_squared_poly<F>(
+        traj: &Trajectory,
+        piece: usize,
+        dur: f64,
+        coeff: &[f64],
+        eval: F,
+    ) -> f64
+    where
+        F: Fn(firefly_trajectory::Sample) -> f64,
+    {
+        const DBL_EPSILON: f64 = f64::EPSILON;
+        if coeff.is_empty() || coeff.iter().all(|c| c.abs() < DBL_EPSILON) {
+            return eval(traj.eval_piece(piece, 0.0));
+        }
+        let n = coeff.len();
+        let mut deriv = Vec::with_capacity(n - 1);
+        for i in 0..n - 1 {
+            deriv.push(coeff[i] * (n - 1 - i) as f64);
+        }
+        let norm_sq: f64 = deriv.iter().map(|x| x * x).sum();
+        if norm_sq < DBL_EPSILON {
+            let a = eval(traj.eval_piece(piece, 0.0));
+            let b = eval(traj.eval_piece(piece, dur));
+            return a.max(b);
+        }
+        let flt_eps = f32::EPSILON as f64;
+        let tol = flt_eps / dur.max(1e-9);
+        let mut l = -0.0625_f64;
+        let mut r = 1.0625_f64;
+        for _ in 0..20 {
+            if root_finder::poly_val(&deriv, l, true).abs() < DBL_EPSILON {
+                l *= 0.5;
+            } else {
+                break;
+            }
+        }
+        for _ in 0..20 {
+            if root_finder::poly_val(&deriv, r, true).abs() < DBL_EPSILON {
+                r = 0.5 * (r + 1.0);
+            } else {
+                break;
+            }
+        }
+        let mut candidates = root_finder::solve_polynomial(&deriv, l, r, tol);
+        candidates.insert(crate::root_finder::OrderedF64(0.0));
+        candidates.insert(crate::root_finder::OrderedF64(1.0));
+        let mut max_val: f64 = 0.0;
+        let mut first = true;
+        for c in candidates {
+            let u = c.0;
+            if !(0.0..=1.0).contains(&u) {
+                continue;
+            }
+            let v = eval(traj.eval_piece(piece, u * dur));
+            if first || v > max_val {
+                max_val = v;
+                first = false;
+            }
+        }
+        if first {
+            let a = eval(traj.eval_piece(piece, 0.0));
+            let b = eval(traj.eval_piece(piece, dur));
+            a.max(b)
+        } else {
+            max_val
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -991,5 +1195,66 @@ mod tests {
         assert!((s0.position - start.position.coords).norm() < 1e-6);
         let sf = result.trajectory.eval(result.trajectory.duration());
         assert!((sf.position - local_goal).norm() < 1e-6);
+    }
+
+    #[test]
+    #[allow(clippy::similar_names)]
+    fn precise_extrema_ge_sampling() {
+        // 验证精确极值 >= 400 点采样：构造含窄峰的轨迹，采样易漏峰
+        use firefly_trajectory::{Endpoint, MincoBuilder, SolverOrder};
+        use nalgebra::Vector3;
+        let start = Endpoint {
+            position: Vector3::new(0.0, 0.0, 0.0),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let end = Endpoint {
+            position: Vector3::new(10.0, 0.0, 0.0),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let wps = vec![
+            nalgebra::Point3::new(3.0, 2.0, 0.0),
+            nalgebra::Point3::new(7.0, -2.0, 0.0),
+        ];
+        let durs = vec![1.7, 1.3, 1.0];
+        let minco = MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
+            .build(&wps, &durs)
+            .unwrap();
+        let traj = minco.solve().unwrap();
+        let mut max_v_sample = 0.0_f64;
+        let mut max_a_sample = 0.0_f64;
+        let mut max_j_sample = 0.0_f64;
+        for k in 0..400 {
+            let t = traj.duration() * f64::from(k) / 400.0;
+            let s = traj.eval(t);
+            max_v_sample = max_v_sample.max(s.velocity.norm());
+            max_a_sample = max_a_sample.max(s.acceleration.norm());
+            max_j_sample = max_j_sample.max(s.jerk.norm());
+        }
+        let max_v_precise = Planner::trajectory_max_vel(&traj);
+        let max_a_precise = Planner::trajectory_max_acc(&traj);
+        let max_j_precise = Planner::trajectory_max_jerk(&traj);
+        assert!(
+            max_v_precise + 1e-9 >= max_v_sample,
+            "精确速度 {max_v_precise:.6} 应 >= 采样 {max_v_sample:.6}"
+        );
+        assert!(
+            max_a_precise + 1e-9 >= max_a_sample,
+            "精确加速度 {max_a_precise:.6} 应 >= 采样 {max_a_sample:.6}"
+        );
+        assert!(
+            max_j_precise + 1e-9 >= max_j_sample,
+            "精确 jerk {max_j_precise:.6} 应 >= 采样 {max_j_sample:.6}"
+        );
+        let mut max_v_dense = 0.0_f64;
+        for k in 0..20000 {
+            let t = traj.duration() * f64::from(k) / 19999.0;
+            max_v_dense = max_v_dense.max(traj.eval(t).velocity.norm());
+        }
+        assert!(
+            (max_v_precise - max_v_dense).abs() < 1e-4,
+            "精确与稠密采样应一致: precise {max_v_precise:.6} dense {max_v_dense:.6}"
+        );
     }
 }
