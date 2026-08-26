@@ -94,16 +94,26 @@ pub fn init_from_path(
         .map_err(|e| e.with_operation("planner::init"))
 }
 
-/// 暖启动初始解（官方 `computeInitState` case 2）：以上一条最优轨迹的剩余段
-/// 为主干，耗尽后沿引导路径延续段（`guide_tail`）走到局部目标。
+/// 暖启动初始解（官方 `computeInitState` case 2，planner_manager.cpp:255-320）：
+/// 以上一条最优轨迹的剩余段为主干，耗尽后沿全局轨迹段
+/// （`last_glb_t_of_lc_tgt → glb_t_of_lc_tgt`，实体为 `guide_tail` 的等时采样）
+/// 接到局部目标。
 ///
-/// 文档化偏离：官方按时间参数采样（其全局轨迹带时间轴），我们的全局路径是
-/// A* 空间折线——改为把"剩余旧轨迹细采样 + 引导延续段"拼成复合折线，按弧长
-/// 取 waypoint，段时长沿用 [`allocate_time`]（保持时间正性与初始可行性）。
+/// 组合时间轴：前 `remaining = prev.duration() - elapsed` 秒取自旧轨迹
+/// （绝对时刻 `elapsed + t` 采样），其后 `glb_seg` 秒取自全局轨迹段——内点在
+/// 组合轴上均匀取（`piece_dur = t_to_lc_tgt / pieces`，`t_to_lc_tgt =
+/// remaining + glb_seg`），段时长同此均匀分布（官方 `piece_dur_vec =
+/// Constant(piece_nums, t_to_lc_tgt / piece_nums)`）。`guide_tail` 为全局轨迹
+/// 段的等时采样（含两端），按归一化时间线性插值取点；缺失（空）时以旧轨迹
+/// 末端兜底。
+///
+/// 文档化偏离：官方 case2 的 MINCO 尾状态为 `[目标, local_target_vel, 0]`
+/// （局部目标处延续全局轨迹速度）；firefly 的优化目标端状态固定零速，
+/// 此处以零速收尾（对各个局部目标的到达判定不变量一致）。
 ///
 /// # Errors
 ///
-/// 旧轨迹已耗尽（`elapsed ≥ duration`）或复合路径退化时返回
+/// 旧轨迹已耗尽（`elapsed ≥ duration`）、`glb_seg < 0` 或组合轴退化时返回
 /// `InvalidArgument`——调用方应降级冷启动（官方 case2 → case1 策略链）。
 pub fn init_warm_start(
     config: &InitConfig,
@@ -111,6 +121,7 @@ pub fn init_warm_start(
     goal: Point3<f64>,
     prev: &Trajectory,
     elapsed: f64,
+    glb_seg: f64,
     guide_tail: &[Vector3<f64>],
 ) -> Result<Minco> {
     let remaining = prev.duration() - elapsed;
@@ -120,40 +131,45 @@ pub fn init_warm_start(
             format!("旧轨迹剩余 {remaining:.3}s，暖启动退化为冷启动"),
         ));
     }
-    // 复合折线：剩余旧轨迹按固定步长采样（首点即当前参考位置附近）
-    let mut route: Vec<Vector3<f64>> = Vec::new();
-    let steps = ((remaining / 0.05).ceil() as usize).clamp(8, 80);
-    for k in 1..=steps {
-        let t = elapsed + remaining * f64::from(k as u32) / f64::from(steps as u32);
-        let s = prev.eval(t.min(prev.duration()));
-        route.push(s.position);
-    }
-    // 拼接引导延续段：跳过与旧轨迹末端重叠的开头点
-    if let Some(last) = route.last() {
-        let mut skip = 0usize;
-        while skip < guide_tail.len() && (guide_tail[skip] - *last).norm() < 0.15 {
-            skip += 1;
-        }
-        route.extend_from_slice(&guide_tail[skip..]);
-    }
-    if route.len() < 2 {
+    if glb_seg < 0.0 {
         return Err(firefly_error::Error::new(
             firefly_error::ErrorKind::InvalidArgument,
-            "暖启动复合路径退化",
+            format!("全局轨迹段时长非法（glb_seg={glb_seg:.3}）"),
         ));
     }
+    let t_to_lc_tgt = remaining + glb_seg;
     // 官方 case2 段数 = ceil(直线距离/piece_length)，下限 2
     let dist = (goal.coords - start.position).norm();
     let pieces = ((dist / config.piece_length.max(1e-3)).ceil() as usize).clamp(2, 24);
-    let waypoints = sample_waypoints(&route, pieces - 1);
-    let mut segments = Vec::with_capacity(pieces);
-    let mut cursor = start.position;
-    for q in &waypoints {
-        segments.push((q.coords - cursor).norm());
-        cursor = q.coords;
+    let piece_dur = t_to_lc_tgt / pieces as f64;
+    if piece_dur <= 0.0 {
+        return Err(firefly_error::Error::new(
+            firefly_error::ErrorKind::InvalidArgument,
+            "组合时间轴退化（t_to_lc_tgt <= 0）",
+        ));
     }
-    segments.push((goal.coords - cursor).norm());
-    let durations = allocate_time(&segments, config.max_velocity);
+    // 内点：组合时间轴上均匀取段。t < remaining 取旧轨迹；其后取全局轨迹
+    // 段（guide_tail 按归一化时间 u ∈ [0,1] 线性插值）。
+    let fallback = prev.eval(prev.duration()).position;
+    let tail_len = guide_tail.len();
+    let mut waypoints = Vec::with_capacity(pieces - 1);
+    let mut t = piece_dur;
+    for _ in 0..pieces - 1 {
+        let pos = if t < remaining {
+            prev.eval(elapsed + t).position
+        } else if tail_len == 0 {
+            fallback
+        } else {
+            let u = ((t - remaining) / glb_seg).clamp(0.0, 1.0);
+            let f = u * (tail_len - 1) as f64;
+            let k = (f.floor() as usize).min(tail_len - 2);
+            let alpha = f - k as f64;
+            guide_tail[k] * (1.0 - alpha) + guide_tail[k + 1] * alpha
+        };
+        waypoints.push(Point3::from(pos));
+        t += piece_dur;
+    }
+    let durations = vec![piece_dur; pieces];
     let end = Endpoint {
         position: goal.coords,
         velocity: Vector3::zeros(),
@@ -262,5 +278,62 @@ mod tests {
         assert_eq!(t.len(), 3);
         assert!(t.iter().all(|ti| *ti > 0.0));
         assert!(t.iter().all(|ti| ti.is_finite()));
+    }
+
+    #[test]
+    fn warm_start_splices_prev_and_global_tail_on_official_timeline() {
+        // 官方 case2 时间换算：组合时间轴（旧轨迹剩余 remaining 秒 + 全局
+        // 轨迹段 glb_seg 秒）均匀取段——早段内点来自旧轨迹、晚段来自
+        // guide_tail；段时长 = (remaining + glb_seg)/pieces。
+        let start = Endpoint {
+            position: Vector3::new(0.0, 0.0, 0.0),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let end = Endpoint {
+            position: Vector3::new(5.0, 0.0, 0.0),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        // 旧轨迹：0→5 直线单段 10s（elapsed = 4 → remaining = 6）
+        let prev = MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
+            .build(&[], &[10.0])
+            .unwrap()
+            .solve()
+            .unwrap();
+        // 全局轨迹段等时采样：x 从 5 推进到 9（归一化时间线性对应）
+        let tail: Vec<Vector3<f64>> = (0..=4)
+            .map(|k| Vector3::new(5.0 + f64::from(k), 0.0, 0.0))
+            .collect();
+        let config = InitConfig {
+            pieces: 0, // 暖启动段数由距离决定，不使用
+            max_velocity: 1.5,
+            piece_length: 1.0,
+        };
+        let goal = Point3::new(9.0, 0.0, 0.0);
+        let m =
+            init_warm_start(&config, start, goal, &prev, 4.0, 4.0, &tail).expect("暖启动应成功");
+        // 段数 = ceil(9/1) = 9；时长均匀 = (6+4)/9
+        assert_eq!(m.pieces(), 9);
+        let piece_dur = 10.0 / 9.0;
+        for i in 0..m.pieces() {
+            assert!(
+                (m.piece_duration(i) - piece_dur).abs() < 1e-9,
+                "段时长应均匀分布"
+            );
+        }
+        let traj = m.solve().unwrap();
+        assert!(
+            (traj.eval(traj.duration()).position - goal.coords).norm() < 1e-6,
+            "终点应为 goal"
+        );
+        // 内点拼接：早段（t < remaining）来自旧轨迹（x < 5），晚段来自
+        // guide_tail（x > 5）
+        let wps: Vec<Point3<f64>> = m.waypoints().collect();
+        assert_eq!(wps.len(), 8);
+        assert!(wps.first().unwrap().x < 5.0, "首内点来自旧轨迹剩余段");
+        assert!(wps.last().unwrap().x > 5.0, "末内点来自全局轨迹段");
+        let mid = traj.eval(traj.duration() / 2.0).position;
+        assert!(mid.x > 0.0 && mid.x < 9.0, "中程点应落在拼接区间内");
     }
 }

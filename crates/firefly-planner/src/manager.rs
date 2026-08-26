@@ -140,12 +140,49 @@ pub struct TickReport {
     pub ground_height: Option<f64>,
 }
 
-/// 规划视界目标（全局路径上按弧长截取的一段）。
+/// 局部目标（官方 `getLocalTarget` 输出，`planner_manager.cpp:327`：位置 +
+/// 目标速度 + 是否触及全局终点）。
 struct Horizon {
-    target: Point3<f64>,
+    /// 局部目标位置（地图系，米）：全局轨迹上距当前位置 `planning_horizon`
+    /// 的等时步进点，或全局终点。
+    target: Vector3<f64>,
+    /// 局部目标处期望速度（地图系，m/s）：距全局终点 < 刹车距离
+    /// `max_vel²/(2·max_acc)` 时取零速，否则取全局轨迹在该时刻的速度。
+    target_vel: Vector3<f64>,
+    /// 局部目标是否即全局终点（官方 `touch_goal`，影响约束采样是否覆盖
+    /// 全程/碰撞监控扫描上界）。
     touch_goal: bool,
-    /// 全局路径从当前位置投影到目标点的延续段（暖启动延续走向用）。
-    tail: Vec<Vector3<f64>>,
+}
+
+/// 全局轨迹与局部目标时间簿记（官方 `GlobalTrajData`，见
+/// `plan_container.hpp:20-31`）：MINCO 时间参数化轨迹 + 管理器时钟锚点 +
+/// 当前/上一局部目标对应的全局轨迹时间。
+struct GlobalTraj {
+    /// MINCO 时间参数化轨迹（官方 `planGlobalTrajWaypoints` 产出）：
+    /// `eval(t)` 的 t ∈ [0, `duration`]，t=0 起点、t=duration 终点。
+    traj: Trajectory,
+    /// 轨迹锚点（管理器时钟，秒，官方 `global_start_time`）：
+    /// `eval(t - start_time)` 定位到世界时刻 `t`。
+    start_time: f64,
+    /// 当前局部目标对应的全局轨迹时间（管理器时钟，秒，官方
+    /// `glb_t_of_lc_tgt`）：局部目标选取的步进游标。
+    glb_t_of_lc_tgt: f64,
+    /// 上一局部目标对应的全局轨迹时间（管理器时钟，秒，官方
+    /// `last_glb_t_of_lc_tgt`）：暖启动内点拼接的段起点。
+    last_glb_t_of_lc_tgt: f64,
+}
+
+impl GlobalTraj {
+    /// 官方 `setGlobalTraj`（`plan_container.hpp:62`）：锚定世界时并重置
+    /// 局部目标时间簿记（`glb = world_time`、`last = -1.0`）。
+    fn new(traj: Trajectory, world_time: f64) -> Self {
+        Self {
+            traj,
+            start_time: world_time,
+            glb_t_of_lc_tgt: world_time,
+            last_glb_t_of_lc_tgt: -1.0,
+        }
+    }
 }
 
 /// 任务执行管理器：持有 [`Planner`] 与执行态，驱动"初始规划 → 周期重规划 →
@@ -156,8 +193,11 @@ struct Horizon {
 pub struct PlannerManager {
     planner: Planner,
     options: ManagerOptions,
-    /// 全局路径点（官方 `global_traj`，首次构造时 A* 简化缓存）。
+    /// 全局路径点（A* 简化折线）：可视化 + 脱困/A* 兜底。规划链路（局部
+    /// 目标选取/暖启动）走 [`Self::global`] 的时间参数化多项式轨迹。
     global_path: Vec<Vector3<f64>>,
+    /// 全局多项式轨迹与局部目标时间簿记（官方 `GlobalTrajData`）。
+    global: GlobalTraj,
     goal: Point3<f64>,
     local: Option<LocalTraj>,
     /// 已入库新轨迹计数（官方 `TrajContainer::setLocalTraj` 的 `traj_id++`，
@@ -212,12 +252,18 @@ impl PlannerManager {
     ) -> Result<Self> {
         let mut astar = Astar::default();
         let global_path = search_global_path(planner.map_ref(), &mut astar, start, goal)?;
+        let max_vel = planner.config().max_velocity;
+        let global_traj = plan_global_traj_waypoints(start, &global_path, max_vel)?;
+        // 初始全局轨迹锚点取管理器时钟原点（0.0）：glb_t 簿记是相对游标，
+        // 与绝对时钟无关（官方 setGlobalTraj 以规划时刻锚定，此处等义）
+        let global = GlobalTraj::new(global_traj, 0.0);
         // drone_id ≤ 0（单机/0 号机）无需顺序起飞等待（官方 SEQUENTIAL_START 短路）
         let have_recv_pre_agent = planner.config().drone_id <= 0;
         Ok(Self {
             planner,
             options,
             global_path,
+            global,
             goal: Point3::from(goal),
             local: None,
             traj_id: 0,
@@ -242,13 +288,15 @@ impl PlannerManager {
     }
 
     /// 动态重目标（外部工具经 `Firefly/Goal` 发布新目标点）：从当前位置
-    /// 重算全局路径（A* + 简化）、重置状态机，下一 tick 即重新规划飞往新目标。
+    /// 重算全局路径（A* + 简化）并重建全局多项式轨迹、重置局部目标时间
+    /// 簿记、重置状态机，下一 tick 即重新规划飞往新目标。
     /// 无人机悬停等待目标时 `goal == start`（零长路径 → 原地悬停），
     /// 收到目标后自然切换。强制停止锁存中拒绝重目标——急停后不自动恢复。
     ///
     /// # Errors
     ///
-    /// 新目标不可达（A* 失败 / 地图外）——保持原目标不变，由调用方记录。
+    /// 新目标不可达（A* 失败 / 地图外）或全局轨迹构造失败——保持原目标
+    /// 不变，由调用方记录。
     pub fn set_goal(
         &mut self,
         now: f64,
@@ -272,6 +320,8 @@ impl PlannerManager {
         let start = self.estimated_position(now, measured);
         let mut astar = Astar::default();
         let global_path = search_global_path(self.planner.map_ref(), &mut astar, start, goal)?;
+        let max_vel = self.planner.config().max_velocity;
+        let global_traj = plan_global_traj_waypoints(start, &global_path, max_vel)?;
         log::info!(
             "目标更新为 ({:.1},{:.1},{:.1})：全局路径 {} 点，长度 {:.1}m",
             goal.x,
@@ -281,6 +331,8 @@ impl PlannerManager {
             path_length(&global_path)
         );
         self.global_path = global_path;
+        // 官方 setGlobalTraj：全局轨迹重建即重置 glb_t 簿记（glb = now，last = -1）
+        self.global = GlobalTraj::new(global_traj, now);
         self.goal = Point3::from(goal);
         // 重置状态机：丢弃旧轨迹/旧终点标记，下一 tick 初始规划飞往新目标
         self.local = None;
@@ -584,19 +636,27 @@ impl PlannerManager {
                 let mut astar = Astar::default();
                 match search_global_path(self.planner.map_ref(), &mut astar, start, pt) {
                     Ok(new_path) => {
-                        log::info!(
-                            "目标 ({:.2},{:.2},{:.2}) 落入障碍，修正为 ({:.2},{:.2},{:.2})",
-                            orig_goal.x,
-                            orig_goal.y,
-                            orig_goal.z,
-                            pt.x,
-                            pt.y,
-                            pt.z
-                        );
-                        self.global_path = new_path;
-                        self.goal = Point3::from(pt);
-                        report.replanned = self.replan(now);
-                        return true;
+                        let max_vel = self.planner.config().max_velocity;
+                        if let Ok(new_global_traj) =
+                            plan_global_traj_waypoints(start, &new_path, max_vel)
+                        {
+                            log::info!(
+                                "目标 ({:.2},{:.2},{:.2}) 落入障碍，修正为 ({:.2},{:.2},{:.2})",
+                                orig_goal.x,
+                                orig_goal.y,
+                                orig_goal.z,
+                                pt.x,
+                                pt.y,
+                                pt.z
+                            );
+                            self.global_path = new_path;
+                            // 官方 planNextWaypoint：全局轨迹重建即重置 glb_t 簿记
+                            self.global = GlobalTraj::new(new_global_traj, now);
+                            self.goal = Point3::from(pt);
+                            report.replanned = self.replan(now);
+                            return true;
+                        }
+                        log::debug!("修正点全局轨迹构造失败，继续回扫");
                     }
                     Err(e) => log::debug!("候选修正点不可达（{e}），继续回扫"),
                 }
@@ -670,6 +730,7 @@ impl PlannerManager {
     /// "进-退"振荡）；初始解走暖启动优先、冷启动兜底的降级链。
     /// 返回是否入库了新轨迹；碰撞监控路径不受冷却期约束直接调用，
     /// 失败仍会设置冷却期（下一 tick 的阈值路径不空转）。
+    #[allow(clippy::too_many_lines)]
     fn replan(&mut self, now: f64) -> bool {
         let Some(local) = &self.local else {
             return false;
@@ -682,15 +743,22 @@ impl PlannerManager {
             acceleration: s.acceleration,
         };
         let horizon = self.horizon(start.position.coords);
+        log::debug!(
+            "local_target_vel = ({:.2},{:.2},{:.2}) m/s, touch_goal = {}",
+            horizon.target_vel.x,
+            horizon.target_vel.y,
+            horizon.target_vel.z,
+            horizon.touch_goal
+        );
         log::info!(
             "replan #{:03} t={now:.1}s 从 ({:.1},{:.1},{:.1}) 到 ({:.1},{:.1},{:.1}){}",
             self.replans,
             start.position.coords.x,
             start.position.coords.y,
             start.position.coords.z,
-            horizon.target.coords.x,
-            horizon.target.coords.y,
-            horizon.target.coords.z,
+            horizon.target.x,
+            horizon.target.y,
+            horizon.target.z,
             if horizon.touch_goal {
                 " [touch_goal]"
             } else {
@@ -702,23 +770,29 @@ impl PlannerManager {
         // 官方降级链：case2 暖启动优先，失败降级 case1 冷启动
         //（克隆轨迹绕开 &mut self 与 &local.traj 的借用冲突，控制点量级小）
         let warm = match &self.local {
-            Some(l) => Some((l.traj.clone(), now - l.start_time, horizon.tail.clone())),
+            Some(l) => {
+                let elapsed = now - l.start_time;
+                // 官方 case2：全局轨迹段（last→glb）内点与其时间跨度
+                let (glb_seg, tail) = self.global_segment();
+                Some((l.traj.clone(), elapsed, glb_seg, tail))
+            }
             None => None,
         };
         let planned = match &warm {
-            Some((prev, elapsed, tail)) => self.planner.plan_with_init(
+            Some((prev, elapsed, glb_seg, tail)) => self.planner.plan_with_init(
                 start,
-                horizon.target,
+                Point3::from(horizon.target),
                 InitSource::WarmStart {
                     prev,
                     elapsed: *elapsed,
+                    glb_seg: *glb_seg,
                     guide_tail: tail,
                 },
                 horizon.touch_goal,
             ),
             None => self.planner.plan_with_init(
                 start,
-                horizon.target,
+                Point3::from(horizon.target),
                 InitSource::ColdStart,
                 horizon.touch_goal,
             ),
@@ -732,7 +806,7 @@ impl PlannerManager {
                 if warm.is_some() {
                     match self.planner.plan_with_init(
                         start,
-                        horizon.target,
+                        Point3::from(horizon.target),
                         InitSource::ColdStart,
                         horizon.touch_goal,
                     ) {
@@ -1061,7 +1135,7 @@ impl PlannerManager {
         let horizon = self.horizon(start.position.coords);
         match self.planner.plan_with_init(
             start,
-            horizon.target,
+            Point3::from(horizon.target),
             InitSource::ColdStart,
             horizon.touch_goal,
         ) {
@@ -1086,9 +1160,9 @@ impl PlannerManager {
                     start.position.coords.x,
                     start.position.coords.y,
                     start.position.coords.z,
-                    horizon.target.coords.x,
-                    horizon.target.coords.y,
-                    horizon.target.coords.z,
+                    horizon.target.x,
+                    horizon.target.y,
+                    horizon.target.z,
                     if horizon.touch_goal {
                         " [touch_goal]"
                     } else {
@@ -1104,35 +1178,90 @@ impl PlannerManager {
         }
     }
 
-    /// 局部目标选取（官方 `getLocalTarget`）：全局路径上距当前位置
-    /// `planning_horizon` 弧长处；落进障碍膨胀区或贴障时沿路径逐步回退
-    /// （每步 0.4m）到安全点。同时产出暖启动延续段。
-    fn horizon(&self, start: Vector3<f64>) -> Horizon {
-        let mut arc = self.options.planning_horizon;
-        loop {
-            let h = self.walk_global_path(start, arc);
-            if h.touch_goal || arc <= 0.0 {
-                return h;
+    /// 局部目标选取（官方 `getLocalTarget`，`planner_manager.cpp:327`）。
+    /// 从 `glb_t_of_lc_tgt` 起以 `t_step = planning_horizon/20/max_vel` 步进
+    /// 全局时间，取首个距 `start` ≥ `planning_horizon` 的点为局部目标并推进
+    /// 簿记；步进到全局终点仍未达到 → 局部目标 = 全局终点、`touch_goal =
+    /// true`、`glb_t_of_lc_tgt = start_time + duration`。目标速度：距全局终点
+    /// < 刹车距离 `max_vel²/(2·max_acc)` 取零速，否则取全局轨迹在该时刻的
+    /// 速度（官方 `local_target_vel`）。入口先将 `last_glb_t_of_lc_tgt =
+    /// glb_t_of_lc_tgt`（暖启动内点拼接的段起点）。
+    fn horizon(&mut self, start: Vector3<f64>) -> Horizon {
+        let max_vel = self.planner.config().max_velocity;
+        let max_acc = self.planner.config().max_acceleration;
+        let hor = self.options.planning_horizon;
+        let g = &mut self.global;
+        g.last_glb_t_of_lc_tgt = g.glb_t_of_lc_tgt;
+        let t_step = hor / 20.0 / max_vel.max(1e-9);
+        let t_end = g.start_time + g.traj.duration();
+        let mut t = g.glb_t_of_lc_tgt;
+        let mut target = self.goal.coords;
+        while t < t_end {
+            let pos = g
+                .traj
+                .eval((t - g.start_time).clamp(0.0, g.traj.duration()))
+                .position;
+            if (pos - start).norm() >= hor {
+                target = pos;
+                g.glb_t_of_lc_tgt = t;
+                break;
             }
-            if self.target_clear(h.target.coords) {
-                return h;
-            }
-            arc -= 0.4;
+            t += t_step;
+        }
+        // 步进越过全局终点（含首步即越过）→ 局部目标 = 全局终点（官方
+        // 末点判定 `t - start >= duration - 1e-5`：循环中途命中但落进末窗
+        // 同样覆盖为目标）
+        let touch_goal = t - g.start_time >= g.traj.duration() - 1e-5;
+        if touch_goal {
+            target = self.goal.coords;
+            g.glb_t_of_lc_tgt = t_end;
+        }
+        // 刹车距离（max_vel²/2·max_acc）内目标速度取零（官方 `local_target_vel`）
+        let end_dist = (self.goal.coords - target).norm();
+        let target_vel = if end_dist < max_vel * max_vel / (2.0 * max_acc.max(1e-9)) {
+            Vector3::zeros()
+        } else {
+            g.traj
+                .eval((t - g.start_time).clamp(0.0, g.traj.duration()))
+                .velocity
+        };
+        Horizon {
+            target,
+            target_vel,
+            touch_goal,
         }
     }
 
-    /// 从 `start` 在全局路径上的最近投影起累计弧长 `arc`：
-    /// 返回目标点、是否触及终点、以及沿途经过的路径段（暖启动 tail）。
-    fn walk_global_path(&self, start: Vector3<f64>, arc: f64) -> Horizon {
-        let goal_point = Point3::from(self.goal.coords);
-        if self.global_path.len() < 2 {
-            return Horizon {
-                target: goal_point,
-                touch_goal: true,
-                tail: Vec::new(),
-            };
+    /// 全局轨迹段内点（官方 case2 暖启动拼接用）：`last_glb_t_of_lc_tgt →
+    /// glb_t_of_lc_tgt` 时间窗内等时间步采样（含两端），并返回该窗时长
+    /// （秒，`glb - last`）。暖启动以此与当前局部轨迹剩余段拼接成组合时间
+    /// 轴。前置条件：已由 [`Self::horizon`] 更新簿记（否则返回空窗，读方
+    /// 以旧轨迹末端兜底）。
+    fn global_segment(&self) -> (f64, Vec<Vector3<f64>>) {
+        let g = &self.global;
+        let seg = g.glb_t_of_lc_tgt - g.last_glb_t_of_lc_tgt;
+        if seg <= 1e-9 || g.last_glb_t_of_lc_tgt < g.start_time {
+            return (0.0, Vec::new());
         }
-        // 定位 start 的最近段（官方沿 global_traj 投影）
+        let n = ((seg / 0.05).ceil() as usize).clamp(2, 200);
+        let samples = (0..=n)
+            .map(|k| {
+                let t = g.last_glb_t_of_lc_tgt + seg * k as f64 / n as f64;
+                g.traj.eval(t - g.start_time).position
+            })
+            .collect();
+        (seg, samples)
+    }
+
+    /// A* 折线兜底直达点（脱困直飞用）：从 `start` 在折线最近段上的投影起
+    /// 沿弧长前推 `arc` 米，返回 `(目标点, 是否触及全局终点)`。规划链路走
+    /// 全局多项式轨迹（[`Self::global`]），此折线仅作 fail-safe 兜底。
+    fn walk_polyline_forward(&self, start: Vector3<f64>, arc: f64) -> (Vector3<f64>, bool) {
+        let goal_point = self.goal.coords;
+        if self.global_path.len() < 2 {
+            return (goal_point, true);
+        }
+        // 定位 start 的最近段
         let mut seg = 0usize;
         let mut best = f64::INFINITY;
         for i in 0..self.global_path.len() - 1 {
@@ -1147,7 +1276,6 @@ impl PlannerManager {
             }
         }
         // 从投影点起沿剩余路径累计弧长
-        let mut tail: Vec<Vector3<f64>> = vec![start];
         let mut acc = 0.0;
         let mut prev = start;
         for point in &self.global_path[seg + 1..] {
@@ -1155,62 +1283,12 @@ impl PlannerManager {
             let len = segment.norm();
             if acc + len >= arc {
                 let t = (arc - acc) / len;
-                tail.push(prev + segment * t);
-                return Horizon {
-                    target: Point3::from(prev + segment * t),
-                    touch_goal: false,
-                    tail,
-                };
+                return (prev + segment * t, false);
             }
             acc += len;
-            tail.push(*point);
             prev = *point;
         }
-        Horizon {
-            target: goal_point,
-            touch_goal: true,
-            tail,
-        }
-    }
-
-    /// 目标点安全判据：不在膨胀占据区，且 26 邻域无占据体素——给 MINCO
-    /// 留足绕弯余量，避免轨迹切墙角导致优化卡死。
-    fn target_clear(&self, point: Vector3<f64>) -> bool {
-        let map = self.planner.map_ref();
-        if map.is_occupied_inflated(point) {
-            return false;
-        }
-        let Some(idx) = map.index_of(point) else {
-            return true;
-        };
-        let dims = map.dims();
-        for dx in -1i32..=1 {
-            for dy in -1i32..=1 {
-                for dz in -1i32..=1 {
-                    if dx == 0 && dy == 0 && dz == 0 {
-                        continue;
-                    }
-                    let nb = [
-                        i32::try_from(idx[0]).unwrap_or(i32::MAX) + dx,
-                        i32::try_from(idx[1]).unwrap_or(i32::MAX) + dy,
-                        i32::try_from(idx[2]).unwrap_or(i32::MAX) + dz,
-                    ];
-                    if nb.iter().any(|&v| v < 0)
-                        || nb[0] >= i32::try_from(dims[0]).unwrap_or(i32::MIN)
-                        || nb[1] >= i32::try_from(dims[1]).unwrap_or(i32::MIN)
-                        || nb[2] >= i32::try_from(dims[2]).unwrap_or(i32::MIN)
-                    {
-                        continue;
-                    }
-                    if map.state([nb[0] as usize, nb[1] as usize, nb[2] as usize])
-                        == firefly_map::VoxelState::Occupied
-                    {
-                        return false;
-                    }
-                }
-            }
-        }
-        true
+        (goal_point, true)
     }
 
     /// 参考指令生成：正常态取轨迹在 `now` 的参考状态（时间连续）；轨迹耗尽
@@ -1225,8 +1303,8 @@ impl PlannerManager {
             && self.replan_fail_streak >= FAIL_STREAK_ESCAPE
         {
             let pos = self.estimated_position(now, measured);
-            let escape = self.walk_global_path(pos, 1.0);
-            let dir = escape.target.coords - pos;
+            let (escape_target, _touch) = self.walk_polyline_forward(pos, 1.0);
+            let dir = escape_target - pos;
             let dir = if dir.norm_squared() < 1e-9 {
                 Vector3::zeros()
             } else {
@@ -1236,13 +1314,13 @@ impl PlannerManager {
                 "脱困回退: 当前位置({:.2},{:.2}) 目标({:.2},{:.2})",
                 pos.x,
                 pos.y,
-                escape.target.coords.x,
-                escape.target.coords.y
+                escape_target.x,
+                escape_target.y
             );
             // 脱困直飞无轨迹可前视：yaw 对准脱困方向（同前视朝向运动方向的语义）
-            let (yaw, yaw_dot) = self.update_yaw(pos, escape.target.coords, now);
+            let (yaw, yaw_dot) = self.update_yaw(pos, escape_target, now);
             return Some(Reference {
-                position: escape.target.coords,
+                position: escape_target,
                 velocity: ESCAPE_SPEED * dir,
                 yaw,
                 yaw_dot,
@@ -1281,6 +1359,70 @@ fn emergency_stop_traj(stop_pos: Vector3<f64>) -> Result<Trajectory> {
         &[STOP_PIECE_DURATION, STOP_PIECE_DURATION],
     )?;
     minco.solve()
+}
+
+/// 官方 `EGOPlannerManager::planGlobalTrajWaypoints`（`planner_manager.cpp:425`）：
+/// 以 A* 简化折线为 waypoint 生成时间参数化全局轨迹。首末状态完整（起点/
+/// 终点，零速零加速），内点为折线中间拐点（`path[0]` 即起点、末端即终点），
+/// 段数 = `path.len() - 1`；段时间 = 段长 `/des_vel`（`des_vel = max_vel/1.5`），
+/// 迭代 2 次：首轮最大速度超标（> `max_vel`）时 `des_vel /= 1.5` 重生成，
+/// 达标即提前退出。
+///
+/// # Errors
+///
+/// 折线退化（`len < 2`，`goal == start` 悬停）时产出单段常值轨迹不报错；
+/// MINCO 系统奇异才报错。
+fn plan_global_traj_waypoints(
+    start: Vector3<f64>,
+    path: &[Vector3<f64>],
+    max_vel: f64,
+) -> Result<Trajectory> {
+    // 退化（goal == start 悬停）：单段常值轨迹，无时间推进
+    if path.len() < 2 {
+        let endpoint = Endpoint {
+            position: start,
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let minco =
+            MincoBuilder::new(SolverOrder::MinimumJerk, endpoint, endpoint).build(&[], &[1.0])?;
+        return minco.solve();
+    }
+    // 内点 = path[1..len-1]（排除起点与终点）：段数 = path.len() - 1
+    let inner: Vec<nalgebra::Point3<f64>> = path[1..path.len() - 1]
+        .iter()
+        .map(|p| nalgebra::Point3::from(*p))
+        .collect();
+    let start_end = Endpoint {
+        position: start,
+        velocity: Vector3::zeros(),
+        acceleration: Vector3::zeros(),
+    };
+    let goal_end = Endpoint {
+        position: *path.last().expect("len >= 2"),
+        velocity: Vector3::zeros(),
+        acceleration: Vector3::zeros(),
+    };
+    let mut des_vel = max_vel / 1.5;
+    let mut traj = None;
+    for _ in 0..2 {
+        let mut durations = Vec::with_capacity(path.len() - 1);
+        let mut prev = start;
+        for wp in &path[1..] {
+            durations.push((*wp - prev).norm() / des_vel.max(1e-9));
+            prev = *wp;
+        }
+        let minco = MincoBuilder::new(SolverOrder::MinimumJerk, start_end, goal_end)
+            .build(&inner, &durations)?;
+        let t = minco.solve()?;
+        if crate::planner::Planner::trajectory_max_vel(&t) < max_vel {
+            traj = Some(t);
+            break;
+        }
+        des_vel /= 1.5;
+        traj = Some(t);
+    }
+    Ok(traj.expect("迭代 2 次必有产出"))
 }
 
 /// 未来检查点扫描定位（官方 `checkCollisionCallback` 的 i/j 定位与扫描上界）：
@@ -1436,77 +1578,226 @@ mod tests {
     }
 
     #[test]
-    fn walk_global_path_arc_projection() {
+    fn walk_polyline_forward_arc_projection() {
         let m = open_manager();
         // 断言沿**实际**全局路径的弧长语义,不假设路径经过固定坐标
         let path = m.global_path().to_vec();
         let start = path[0];
-        let h = m.walk_global_path(start, 6.0);
-        assert!(!h.touch_goal, "6m 应未到终点");
+        let (target, touch) = m.walk_polyline_forward(start, 6.0);
+        assert!(!touch, "6m 应未到终点");
         let expect = arc_point(&path, start, 6.0);
         assert!(
-            (h.target.coords - expect).norm() < 1e-6,
-            "弧长 6m 目标 = 沿路径走 6m:期望 {expect:?},实际 {:?}",
-            h.target.coords
+            (target - expect).norm() < 1e-6,
+            "弧长 6m 目标 = 沿路径走 6m:期望 {expect:?},实际 {target:?}"
         );
-        // tail:起点 + 沿途 + 目标点
-        assert!(h.tail.len() >= 2);
-        assert!((*h.tail.last().unwrap() - h.target.coords).norm() < 1e-6);
-        // 弧长远超路径末端 → touch_goal,目标 = 全局终点
-        let h2 = m.walk_global_path(start, 1e9);
-        assert!(h2.touch_goal);
-        assert!((h2.target.coords - m.goal().coords).norm() < 1e-6);
+        // 弧长远超路径末端 → 触及终点,目标 = 全局终点
+        let (target2, touch2) = m.walk_polyline_forward(start, 1e9);
+        assert!(touch2);
+        assert!((target2 - m.goal().coords).norm() < 1e-6);
         // 起点在路径中途:从当前位置起算弧长
         let mid = arc_point(&path, start, 3.0);
-        let h3 = m.walk_global_path(mid, 2.0);
+        let (target3, touch3) = m.walk_polyline_forward(mid, 2.0);
         let expect3 = arc_point(&path, mid, 2.0);
+        assert!(!touch3);
         assert!(
-            (h3.target.coords - expect3).norm() < 1e-6,
-            "中途起点应按剩余路径走弧长:期望 {expect3:?},实际 {:?}",
-            h3.target.coords
+            (target3 - expect3).norm() < 1e-6,
+            "中途起点应按剩余路径走弧长:期望 {expect3:?},实际 {target3:?}"
         );
     }
 
     #[test]
-    fn target_clear_free_and_blocked() {
-        let mut m = open_manager();
-        // 空旷 → 自由
-        assert!(m.target_clear(Vector3::new(5.0, 1.0, 1.0)));
-        // 加一堵墙(x=5.0,res 0.5 → 体素 [10,2,2])并膨胀 0.2
-        m.map_mut().set_state([10, 2, 2], VoxelState::Occupied);
-        m.map_mut().inflate_obstacles();
-        // 墙点(膨胀后 x∈[4.8,5.2])→ 不自由
-        assert!(!m.target_clear(Vector3::new(5.0, 1.0, 1.0)));
-        // 远处自由
-        assert!(m.target_clear(Vector3::new(9.0, 1.0, 1.0)));
+    fn global_traj_time_parameterization() {
+        // 全局轨迹多项式化（官方 planGlobalTrajWaypoints）：时间参数化的
+        // MINCO 轨迹，首末状态完整（零速零加速）、内点为简化路径拐点。
+        let m = open_manager();
+        let start = m.global_path()[0];
+        let goal = m.goal().coords;
+        let g = &m.global;
+        assert!(
+            (g.traj.eval(0.0).position - start).norm() < 1e-6,
+            "getPos(0) = 起点"
+        );
+        assert!(
+            (g.traj.eval(g.traj.duration()).position - goal).norm() < 1e-6,
+            "getPos(duration) = 终点"
+        );
+        assert!(g.traj.duration() > 0.0, "全局轨迹有非零时长");
+        assert!(g.traj.eval(0.0).velocity.norm() < 1e-6, "起点零速");
+        assert!(
+            g.traj.eval(g.traj.duration()).velocity.norm() < 1e-6,
+            "终点零速"
+        );
+        // des_vel 迭代保证最大速度不超 max_vel（官方达标即断/再缩放一次）
+        let max_vel = PlannerConfig::default().max_velocity;
+        assert!(
+            crate::planner::Planner::trajectory_max_vel(&g.traj) <= max_vel + 1e-6,
+            "全局轨迹最大速度 {} 超限 {max_vel}",
+            crate::planner::Planner::trajectory_max_vel(&g.traj)
+        );
+        // 内点即简化路径中间拐点：逐段时长 = 段长/des_vel，总时长 = 路径长
+        // /des_vel（首轮达标则 des_vel = max_vel/1.5；超标再缩放一半）
+        let dur = g.traj.duration();
+        let path_len = path_length(m.global_path());
+        assert!(
+            (dur - path_len / 1.0).abs() < 1e-6 || (dur - path_len / (1.0 / 1.5)).abs() < 1e-6,
+            "总时长应为路径长/des_vel(0.667 或 1.0):路径 {path_len},实际 {dur}"
+        );
     }
 
     #[test]
-    fn horizon_backs_off_blocked_target() {
+    fn glb_t_of_lc_tgt_advances_and_resets_on_retarget() {
         let mut m = open_manager();
-        // 动态取弧长目标的落点,把墙放在那里(不假设坐标);
-        // 目标被堵后 horizon 应沿路径回退到安全点。
+        // 构造/重目标后按官方 setGlobalTraj 初始化：glb = 锚点、last = -1
+        assert!(
+            (m.global.glb_t_of_lc_tgt - m.global.start_time).abs() < 1e-9,
+            "初始 glb = 锚点"
+        );
+        assert!(
+            (m.global.last_glb_t_of_lc_tgt + 1.0).abs() < 1e-9,
+            "初始 last = -1"
+        );
         let path = m.global_path().to_vec();
         let start = path[0];
-        let arc_target = m.walk_global_path(start, 6.0).target;
-        let idx = m.map().index_of(arc_target.coords).expect("目标在地图内");
-        m.map_mut()
-            .set_state([idx[0], idx[1], idx[2]], VoxelState::Occupied);
-        m.map_mut().inflate_obstacles();
-        // 场景前提:弧长目标确实被堵
+        // 首次 horizon：入口 last = 旧 glb（0），glb 前推
+        let _ = m.horizon(start);
         assert!(
-            !m.target_clear(arc_target.coords),
-            "场景前提:弧长目标应被堵"
+            (m.global.last_glb_t_of_lc_tgt).abs() < 1e-9,
+            "入口 last = 旧 glb"
         );
+        let glb1 = m.global.glb_t_of_lc_tgt;
+        assert!(glb1 > 0.0, "glb 应前推");
+        // 同 start 再选：命中同一目标 → last = 上一轮 glb、glb 不变
+        let _ = m.horizon(start);
+        assert!(
+            (m.global.last_glb_t_of_lc_tgt - glb1).abs() < 1e-9,
+            "last = 上一轮 glb"
+        );
+        assert!(
+            (m.global.glb_t_of_lc_tgt - glb1).abs() < 1e-9,
+            "同 start 命中同一目标，glb 不变"
+        );
+        // 起点前移：目标更晚 → glb 前推
+        let mid = arc_point(&path, start, 3.0);
+        let _ = m.horizon(mid);
+        assert!(m.global.glb_t_of_lc_tgt > glb1, "起点前移后 glb 应前推");
+        // 手动推进到全局终点：touch_goal → glb = 锚点 + duration
+        m.global.glb_t_of_lc_tgt = m.global.start_time + m.global.traj.duration();
+        let h = m.horizon(mid);
+        assert!(h.touch_goal, "步进越过终点应 touch_goal");
+        assert!(
+            (m.global.glb_t_of_lc_tgt - (m.global.start_time + m.global.traj.duration())).abs()
+                < 1e-9,
+            "touch 后 glb = 锚点 + duration"
+        );
+        assert!(
+            (h.target - m.goal().coords).norm() < 1e-9,
+            "touch 目标 = 全局终点"
+        );
+        // 重设目标：官方 setGlobalTraj 等效（glb = now、last = -1）
+        m.set_goal(10.0, None, Vector3::new(15.0, 1.0, 1.0))
+            .unwrap();
+        assert!(
+            (m.global.glb_t_of_lc_tgt - 10.0).abs() < 1e-9,
+            "重目标重置 glb = now"
+        );
+        assert!(
+            (m.global.last_glb_t_of_lc_tgt + 1.0).abs() < 1e-9,
+            "重目标重置 last = -1"
+        );
+    }
 
+    #[test]
+    fn horizon_time_stepping_local_target() {
+        // 官方 getLocalTarget：时间步进 + 距离判定——首个距 start ≥ 视界的
+        // 全局轨迹点为局部目标（连同 glb 时刻的轨迹速度）。
+        let mut m = open_manager();
+        let start = m.global_path()[0];
         let h = m.horizon(start);
-        assert!(!h.touch_goal, "未到终点不应 touch_goal");
-        assert!(m.target_clear(h.target.coords), "回退后的目标必须安全");
-        // 回退:目标严格比 arc_target 更接近起点(沿路径),且未退过头
-        let d_arc = (arc_target.coords - start).norm();
-        let d_h = (h.target.coords - start).norm();
-        assert!(d_h < d_arc - 1e-6, "被堵目标应回退({d_h:.3} vs {d_arc:.3})");
-        assert!(d_h > d_arc - 1.5, "回退不应退过头({d_h:.3} vs {d_arc:.3})");
+        assert!(!h.touch_goal, "9m 路径、6m 视界:不应触及终点");
+        let glb = m.global.glb_t_of_lc_tgt;
+        let on_traj = m.global.traj.eval(glb - m.global.start_time).position;
+        assert!(
+            (h.target - on_traj).norm() < 1e-9,
+            "目标 = 全局轨迹在 glb 时刻的位置"
+        );
+        let d = (h.target - start).norm();
+        assert!(
+            d >= self::DEFAULT_PLANNING_HORIZON - 1e-6,
+            "目标距起点 ≥ 视界:实际 {d:.3}"
+        );
+        assert!(
+            d < 6.5,
+            "目标应为首次越过视界的步进点(不应超远):实际 {d:.3}"
+        );
+        // 远离终点（> 刹车距离）→ 目标速度 = 全局轨迹在该时刻的速度（非零）
+        let tv = m.global.traj.eval(glb - m.global.start_time).velocity;
+        assert!(
+            (h.target_vel - tv).norm() < 1e-9,
+            "目标速度 = 全局轨迹时刻速度"
+        );
+        assert!(h.target_vel.norm() > 0.1, "远离终点目标速度非零");
+    }
+
+    #[test]
+    fn horizon_touch_goal_zeroes_velocity() {
+        // 短路径(< 视界)：步进耗尽 → touch_goal、目标 = 全局终点、
+        // 目标速度为零（触及时终点距离为 0 < 刹车距离）。
+        let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
+        let planner = Planner::new(PlannerConfig::default(), map);
+        let mut m = PlannerManager::with_planner(
+            planner,
+            ManagerOptions::default(),
+            Vector3::new(1.0, 1.0, 1.0),
+            Vector3::new(3.0, 1.0, 1.0),
+        )
+        .unwrap();
+        let start = m.global_path()[0];
+        let h = m.horizon(start);
+        assert!(h.touch_goal, "路径短于视界应触及终点");
+        assert!(
+            (h.target - m.goal().coords).norm() < 1e-9,
+            "touch 目标 = 全局终点"
+        );
+        assert!(
+            (m.global.glb_t_of_lc_tgt - (m.global.start_time + m.global.traj.duration())).abs()
+                < 1e-9,
+            "touch 后 glb = 锚点 + duration"
+        );
+        assert!(h.target_vel.norm() < 1e-9, "触及终点目标速度应为零");
+    }
+
+    #[test]
+    fn horizon_zero_vel_within_braking_distance() {
+        // 低限加速度拉大刹车距离 max_vel²/(2·max_acc)：非 touch_goal 目标
+        // 落入刹车距离内时目标速度仍取零（官方 local_target_vel 判定）。
+        let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
+        let planner = Planner::new(
+            PlannerConfig {
+                max_acceleration: 0.05,
+                ..PlannerConfig::default()
+            },
+            map,
+        );
+        let mut m = PlannerManager::with_planner(
+            planner,
+            ManagerOptions::default(),
+            Vector3::new(1.0, 1.0, 1.0),
+            Vector3::new(10.0, 1.0, 1.0),
+        )
+        .unwrap();
+        let start = m.global_path()[0];
+        let h = m.horizon(start);
+        let braking = 1.5 * 1.5 / (2.0 * 0.05); // 22.5m
+        assert!(!h.touch_goal, "9m 路径、6m 视界:非 touch");
+        assert!(
+            (m.goal().coords - h.target).norm() < braking,
+            "场景前提:目标在刹车距离内"
+        );
+        assert!(
+            h.target_vel.norm() < 1e-9,
+            "刹车距离内目标速度应为零,实际 {}",
+            h.target_vel.norm()
+        );
     }
 
     #[test]
