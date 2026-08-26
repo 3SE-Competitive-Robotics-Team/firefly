@@ -1,4 +1,10 @@
 //! 总时间惩罚：Jt = sum(T)。
+//!
+//! 对照官方 `poly_traj_optimizer.cpp:1209` `VirtualTGradCost`：
+//! `costT = sum(T)·wei_time`，梯度 `gdVT = (gdRT + wei_time)·dT/dVT`。
+//! firefly 将 `wei_time` 并入 `d_f_d_t`（此处 `+= weight`），由
+//! `firefly-planner::objective::pack` 的链式 `dt·dT/dVT` 完成，不在
+//! 映射层重复加。
 
 use firefly_trajectory::Trajectory;
 

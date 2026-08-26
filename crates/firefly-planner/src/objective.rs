@@ -1,8 +1,9 @@
 //! 时空联合优化目标。
 //!
-//! 变量 x = [q 展平 (3(M−1)), τ(M)]，τ = ln T 保证时间恒正。
+//! 变量 x = [q 展平 (3(M−1)), vt(M)]，vt 为虚拟时间，对照官方
+//! `poly_traj_optimizer.cpp:VirtualT2RealT` 的分段有理映射保证真实时间 T 恒正。
 //! 代价：firefly-cost 各项(平滑/时间/可行/障碍/集群/队形/均匀)，
-//! 梯度经 `Minco::propagate_gradient` 传播到 {q, T}。
+//! 梯度经 `Minco::propagate_gradient` 传播到 {q, T} 后经虚拟时间链式法则转回。
 //!
 //! L-BFGS 内循环碰撞检测对齐官方 `poly_traj_optimizer.cpp`:
 //! 代价回调内 `iter_num_ > 3 && smoo_cost/piece < 10` 时调用
@@ -17,6 +18,37 @@ use firefly_trajectory::{Endpoint, Minco, MincoBuilder, SolverOrder};
 use nalgebra::{DMatrix, DVector, Point3, Vector3};
 
 use crate::obstacles::{ObstacleScanner, constraint_sample_points};
+
+/// 虚拟时间 → 真实时间，对照官方 `poly_traj_optimizer.cpp:1200` `VirtualT2RealT`。
+#[inline]
+pub(crate) fn virtual_to_real(vt: f64) -> f64 {
+    if vt > 0.0 {
+        (0.5 * vt + 1.0) * vt + 1.0
+    } else {
+        1.0 / ((0.5 * vt - 1.0) * vt + 1.0)
+    }
+}
+
+/// 真实时间 → 虚拟时间，对照官方 `poly_traj_optimizer.cpp:1190` `RealT2VirtualT`。
+#[inline]
+pub(crate) fn real_to_virtual(rt: f64) -> f64 {
+    if rt > 1.0 {
+        (2.0 * rt - 1.0).sqrt() - 1.0
+    } else {
+        1.0 - (2.0 / rt - 1.0).sqrt()
+    }
+}
+
+/// dT/dVT，对照官方 `poly_traj_optimizer.cpp:1209` `VirtualTGradCost`。
+#[inline]
+pub(crate) fn d_real_d_virtual(vt: f64) -> f64 {
+    if vt > 0.0 {
+        vt + 1.0
+    } else {
+        let den = (0.5 * vt - 1.0) * vt + 1.0;
+        (1.0 - vt) / (den * den)
+    }
+}
 
 /// 内循环碰撞检测(官方 `roughlyCheckConstraintPoints`):
 /// 持有平面池,检测到新穿入点即就地追加 {s,v} 平面。
@@ -192,15 +224,16 @@ impl<'a> MincoObjective<'a> {
         for i in 0..self.pieces - 1 {
             q.push(Vector3::new(x[i * 3], x[i * 3 + 1], x[i * 3 + 2]));
         }
+        // 对照官方 `VirtualT2RealT`：无 clamp，分段有理映射本身不会溢出。
         let t = (0..self.pieces)
-            .map(|i| x[n_q + i].clamp(-8.0, 8.0).exp())
+            .map(|i| virtual_to_real(x[n_q + i]))
             .collect();
         (q, t)
     }
 
     /// # Errors
     ///
-    /// `InvalidArgument`:x 中时长非正(对数参数化下不应发生)。
+    /// `InvalidArgument`:x 中时长非正(虚拟时间映射保证恒正，不应发生)。
     pub fn rebuild(&self, x: &DVector<f64>) -> firefly_error::Result<Minco> {
         let (q, t) = self.unpack(x);
         let points: Vec<Point3<f64>> = q.iter().map(|v| Point3::from(*v)).collect();
@@ -208,7 +241,7 @@ impl<'a> MincoObjective<'a> {
     }
 
     #[must_use]
-    pub fn pack(&self, dq: &DMatrix<f64>, dt: &DVector<f64>, t: &[f64]) -> DVector<f64> {
+    pub fn pack(&self, dq: &DMatrix<f64>, dt: &DVector<f64>, vt: &[f64]) -> DVector<f64> {
         let mut g = DVector::zeros(3 * (self.pieces - 1) + self.pieces);
         for i in 0..self.pieces - 1 {
             for d in 0..3 {
@@ -216,7 +249,11 @@ impl<'a> MincoObjective<'a> {
             }
         }
         for i in 0..self.pieces {
-            g[3 * (self.pieces - 1) + i] = dt[i] * t[i];
+            // 对照官方 `VirtualTGradCost`：`gdVT = (gdRT + wei_time) * dT/dVT`。
+            // firefly 的 `TimePenalty` 已把 `wei_time` 并入 `dt`（`accumulate` 中
+            // `d_f_d_t += weight`），故此处 `dt` 已等价于 `gdRT + wei_time`，不得
+            // 重复加；`dT/dVT` 按虚拟时间分段，对照官方 `gdVT2Rt`。
+            g[3 * (self.pieces - 1) + i] = dt[i] * d_real_d_virtual(vt[i]);
         }
         g
     }
@@ -255,8 +292,9 @@ impl Objective for MincoObjective<'_> {
         let Ok((dq, dt)) = minco.propagate_gradient(&traj, &d_f_d_c, &d_f_d_t) else {
             return DVector::zeros(3 * (self.pieces - 1) + self.pieces);
         };
-        let (_, t) = self.unpack(x);
-        self.pack(&dq, &dt, &t)
+        let n_q = 3 * (self.pieces - 1);
+        let vt: Vec<f64> = (0..self.pieces).map(|i| x[n_q + i]).collect();
+        self.pack(&dq, &dt, &vt)
     }
 }
 
