@@ -20,7 +20,7 @@ use nalgebra::{Point3, Vector3};
 use crate::config::PlannerConfig;
 use crate::init::{self, InitConfig};
 use crate::multitopo::distinctive_candidates;
-use crate::objective::MincoObjective;
+use crate::objective::{MincoObjective, real_to_virtual};
 use crate::obstacles::{CheckResult, ObstacleScanner, constraint_sample_points, two_thirds_id};
 
 /// [`Planner::try_finish`] 的判定结果。仅 [`FinishCheck::SwarmTooClose`] 在
@@ -802,8 +802,9 @@ impl Planner {
             x[i * 3 + 1] = w.y;
             x[i * 3 + 2] = w.z;
         }
+        // 对照官方 `RealT2VirtualT`：初始真实时间 → 虚拟时间作为优化初值。
         for i in 0..pieces {
-            x[3 * (pieces - 1) + i] = minco.piece_duration(i).ln();
+            x[3 * (pieces - 1) + i] = real_to_virtual(minco.piece_duration(i));
         }
         x
     }

@@ -1,11 +1,42 @@
 //! 端到端集成：MINCO 梯度传播 + L-BFGS 时空联合优化。
 //!
 //! 目标：J = Js(c,T) + λt·sum(T)，Js = Σ ∫||jerk||²dt（平滑能量，闭式）。
-//! 优化变量 x = [q 展平(3(M−1)), T(M)]，验证整条链路收敛。
+//! 优化变量 x = [q 展平(3(M−1)), vt(M)]，vt 为虚拟时间（对照官方 `VirtualT2RealT` 分段有理映射），验证整条链路收敛。
 
 use firefly_optimize::{Lbfgs, LbfgsConfig, Objective};
 use firefly_trajectory::{Endpoint, MincoBuilder, SolverOrder};
 use nalgebra::{DMatrix, DVector, Vector3};
+
+/// 虚拟时间 → 真实时间，对照官方 `poly_traj_optimizer.cpp:1200` `VirtualT2RealT`。
+#[inline]
+fn virtual_to_real(vt: f64) -> f64 {
+    if vt > 0.0 {
+        (0.5 * vt + 1.0) * vt + 1.0
+    } else {
+        1.0 / ((0.5 * vt - 1.0) * vt + 1.0)
+    }
+}
+
+/// 真实时间 → 虚拟时间，对照官方 `poly_traj_optimizer.cpp:1190` `RealT2VirtualT`。
+#[inline]
+fn real_to_virtual(rt: f64) -> f64 {
+    if rt > 1.0 {
+        (2.0 * rt - 1.0).sqrt() - 1.0
+    } else {
+        1.0 - (2.0 / rt - 1.0).sqrt()
+    }
+}
+
+/// dT/dVT，对照官方 `poly_traj_optimizer.cpp:1209` `VirtualTGradCost`。
+#[inline]
+fn d_real_d_virtual(vt: f64) -> f64 {
+    if vt > 0.0 {
+        vt + 1.0
+    } else {
+        let den = (0.5 * vt - 1.0) * vt + 1.0;
+        (1.0 - vt) / (den * den)
+    }
+}
 
 struct MincoObjective {
     start: Endpoint,
@@ -32,14 +63,14 @@ impl MincoObjective {
         for i in 0..self.pieces - 1 {
             q.push(Vector3::new(x[i * 3], x[i * 3 + 1], x[i * 3 + 2]));
         }
-        // 时间用对数参数化：T = exp(τ)，保证恒正；clamp 防止线搜索越界溢出
+        // 对照官方 `VirtualT2RealT`：无 clamp，分段有理映射本身不会溢出
         let t = (0..self.pieces)
-            .map(|i| x[n_q + i].clamp(-8.0, 8.0).exp())
+            .map(|i| virtual_to_real(x[n_q + i]))
             .collect();
         (q, t)
     }
 
-    fn pack(&self, dq: &DMatrix<f64>, dt: &DVector<f64>, t: &[f64]) -> DVector<f64> {
+    fn pack(&self, dq: &DMatrix<f64>, dt: &DVector<f64>, vt: &[f64]) -> DVector<f64> {
         let mut g = DVector::zeros(self.dim * (self.pieces - 1) + self.pieces);
         for i in 0..self.pieces - 1 {
             for d in 0..self.dim {
@@ -47,8 +78,8 @@ impl MincoObjective {
             }
         }
         for i in 0..self.pieces {
-            // dJ/dτ = dJ/dT · dT/dτ = dJ/dT · T
-            g[self.dim * (self.pieces - 1) + i] = dt[i] * t[i];
+            // 对照官方 VirtualTGradCost `gdVT = (gdRT + wei_time)·dT/dVT`，wei_time 已并入 dt 不重复加
+            g[self.dim * (self.pieces - 1) + i] = dt[i] * d_real_d_virtual(vt[i]);
         }
         g
     }
@@ -147,7 +178,9 @@ impl Objective for MincoObjective {
         let (dq, dt) = minco
             .propagate_gradient(&traj, &d_f_d_c, &d_f_d_t)
             .expect("gradient propagation");
-        self.pack(&dq, &dt, &t)
+        let n_q = self.dim * (self.pieces - 1);
+        let vt: Vec<f64> = (0..self.pieces).map(|i| x[n_q + i]).collect();
+        self.pack(&dq, &dt, &vt)
     }
 }
 
@@ -175,7 +208,7 @@ fn spatial_temporal_optimization_converges() {
         x0[i * 3 + 2] = 1.0 * alpha;
     }
     for i in 0..pieces {
-        x0[3 * (pieces - 1) + i] = 0.0; // τ = ln(1) = 0
+        x0[3 * (pieces - 1) + i] = real_to_virtual(1.0);
     }
 
     let j0 = objective.evaluate(&x0);
