@@ -82,6 +82,10 @@ pub struct LocalTraj {
     /// 碰撞监控的扫描源。不变量：非空（采样退化的轨迹不入执行，
     /// 见 [`PlannerManager::adopt_plan`]）。
     pub points_to_check: PointsToCheck,
+    /// 轨迹序号（官方 `LocalTrajData::traj_id`，见 `plan_container.hpp:36`）：
+    /// 由 [`PlannerManager::adopt_plan`] 入库时写入管理器计数器当前值；
+    /// 广播时随轨迹携带，接收方据此丢弃过期包。
+    pub traj_id: u32,
 }
 
 /// 已登记的其他机轨迹（官方 `swarm_traj` 槽位元素）。
@@ -156,6 +160,11 @@ pub struct PlannerManager {
     global_path: Vec<Vector3<f64>>,
     goal: Point3<f64>,
     local: Option<LocalTraj>,
+    /// 已入库新轨迹计数（官方 `TrajContainer::setLocalTraj` 的 `traj_id++`，
+    /// 见 `plan_container.hpp:78`）：初始 0 = 尚无可执行轨迹（官方
+    /// `traj_id <= 0` 哨兵），每次 [`Self::adopt_plan`] 成功入库递增并写入
+    /// 当条 `LocalTraj::traj_id`。广播时随包携带，接收方据此丢弃过期包。
+    traj_id: u32,
     last_result: Option<PlanResult>,
     touch_goal: bool,
     finished: bool,
@@ -211,6 +220,7 @@ impl PlannerManager {
             global_path,
             goal: Point3::from(goal),
             local: None,
+            traj_id: 0,
             last_result: None,
             touch_goal: false,
             finished: false,
@@ -301,6 +311,17 @@ impl PlannerManager {
         self.planner.config().drone_id
     }
 
+    /// 对外广播的期望净距（米，官方发包时 `MINCO_msg.des_clearance =
+    /// getSwarmClearance()`，见 `ego_replan_fsm.cpp:820`）：即本机
+    /// `optimization/swarm_clearance` 参数。对端收到后存入其
+    /// `swarm_traj[本机].des_clearance`，作检查阈值
+    /// `其对端 swarm_clearance + 本机 des_clearance` 的对端项（非对称：
+    /// 各机参数可不同）。
+    #[must_use]
+    pub fn broadcast_des_clearance(&self) -> f64 {
+        self.planner.config().swarm_clearance
+    }
+
     /// 顺序起飞就绪（官方 `SEQUENTIAL_START` 的进入条件）：`drone_id ≤ 0`
     /// 恒就绪；否则须已收齐 `0..drone_id` 全部前序机轨迹。
     #[must_use]
@@ -316,7 +337,10 @@ impl PlannerManager {
 
     /// 登记其他机轨迹（单进程仿真下由外部注入；对照官方
     /// `RecvBroadcastMINCOTrajCallback` 的存储段）：槽位按 `agent_id` 索引，
-    /// 重复登记以最新为准。同时按官方条件推进顺序起飞就绪位——
+    /// 重复登记以最新为准。`des_clearance` 为对端广播的期望净距——调用方
+    /// 应以对端管理器 `broadcast_des_clearance()` 的返回值传入（各机参数
+    /// 可不同；检查阈值 = 本机 `swarm_clearance + 对端 des_clearance`，
+    /// 见官方 `planner_manager.cpp:416`）。同时按官方条件推进顺序起飞就绪位——
     /// `swarm_traj.size() >= drone_id` 且 `0..drone_id` 各槽位全部有效。
     /// 自身槽位（`agent_id == drone_id`）拒收（官方 `recv_id == 自身`直接返回）。
     pub fn register_swarm_traj(
@@ -383,6 +407,15 @@ impl PlannerManager {
     #[must_use]
     pub fn local(&self) -> Option<&LocalTraj> {
         self.local.as_ref()
+    }
+
+    /// 已入库轨迹序号（官方 `TrajContainer::setLocalTraj` 的 `traj_id++` 结果）：
+    /// 初始 `0` = 尚无可执行轨迹（官方 `traj_id <= 0` 哨兵，见
+    /// `ego_replan_fsm.cpp:307`）；此后每次成功入库新轨迹递增。广播新轨迹时
+    /// 随包携带，对端据此丢弃过期包。
+    #[must_use]
+    pub const fn traj_id(&self) -> u32 {
+        self.traj_id
     }
 
     /// 最近一次成功规划的结果（可视化平面等衍生数据源）。
@@ -744,21 +777,31 @@ impl PlannerManager {
     /// 官方 `setLocalTrajFromOpt`：规划结果连同带时间戳检查点一并入库，
     /// 并登记该轨迹的 `touch_goal`（碰撞监控扫描上界依据）。检查点生成失败
     /// （稠密采样退化）视同规划失败——无监控覆盖的轨迹不得进入执行。
-    /// 返回是否入库成功。
+    /// 返回是否入库成功。序号递增（官方 `setLocalTraj` 的 `traj_id++`，
+    /// `plan_container.hpp:78`）：仅成功入库才消耗——入库失败不占序号。
     fn adopt_plan(&mut self, result: PlanResult, now: f64, touch_goal: bool) -> bool {
-        if !self.set_local_traj(result.trajectory.clone(), now, touch_goal) {
+        if !self.set_local_traj(result.trajectory.clone(), now, touch_goal, self.traj_id + 1) {
             // 无监控覆盖的轨迹不入执行，视同本次重规划失败（官方
             // setLocalTrajFromOpt 失败时同样不更新局部轨迹）
             return false;
         }
+        self.traj_id += 1;
         self.last_result = Some(result);
         true
     }
 
     /// 官方 `setLocalTrajFromOpt`：轨迹连同带时间戳检查点一并入库。检查点
     /// 生成失败（稠密采样退化）视同入库失败——无监控覆盖的轨迹不得进入
-    /// 执行。返回是否入库成功。
-    fn set_local_traj(&mut self, traj: Trajectory, now: f64, touch_goal: bool) -> bool {
+    /// 执行。`traj_id` 为写入本条的轨迹序号：常规规划由 [`Self::adopt_plan`]
+    /// 以递增计数传入；急停轨迹不经 `adopt_plan`、以管理器当前计数器传入
+    /// （不消耗新序号）。返回是否入库成功。
+    fn set_local_traj(
+        &mut self,
+        traj: Trajectory,
+        now: f64,
+        touch_goal: bool,
+        traj_id: u32,
+    ) -> bool {
         let (samples, max_vel) = {
             let cfg = self.planner.config();
             (cfg.constraint_points_per_piece, cfg.max_velocity)
@@ -774,6 +817,7 @@ impl PlannerManager {
             traj,
             start_time: now,
             points_to_check,
+            traj_id,
         });
         self.touch_goal = touch_goal;
         true
@@ -787,12 +831,17 @@ impl PlannerManager {
 
     /// 执行期碰撞监控（官方 `checkCollisionCallback` 轨迹检查部分）：沿当前
     /// 轨迹检查点只扫 **未来** 采样，返回首个进入膨胀占据区的采样时刻
-    /// （相对轨迹起点，秒）；无碰撞或无可执行轨迹返回 `None`。
+    /// （相对轨迹起点，秒）；无碰撞或无可执行轨迹返回 `None`。入口以
+    /// `traj_id == 0`（无可执行轨迹）短路（官方 `ego_replan_fsm.cpp:307`）。
     ///
     /// 定位与扫描上界见 [`future_scan_range`]。集群间距检查在同一定位上的
     /// 姊妹实现 [`Self::next_swarm_conflict`]。
     #[must_use]
     fn next_collision(&self, now: f64) -> Option<f64> {
+        // 官方 ego_replan_fsm.cpp:307：traj_id <= 0 等价无可执行轨迹，入口短路
+        if self.traj_id == 0 {
+            return None;
+        }
         let local = self.local.as_ref()?;
         if local.points_to_check.is_empty() {
             return None;
@@ -823,8 +872,13 @@ impl PlannerManager {
     /// （`t_X = t + (my_start_time - other_start_time)`，仅 `0 < t_X <
     /// other.duration` 有效），距离 `< swarm_clearance + des_clearance`
     /// 即冲突。返回 `(agent_id, 冲突检查点时刻（相对轨迹起点，秒））`。
+    /// 入口同 [`Self::next_collision`]：`traj_id == 0` 直接短路。
     #[must_use]
     fn next_swarm_conflict(&self, now: f64) -> Option<(usize, f64)> {
+        // 官方 ego_replan_fsm.cpp:307：traj_id <= 0 等价无可执行轨迹，入口短路
+        if self.traj_id == 0 {
+            return None;
+        }
         if self.swarm.iter().all(Option::is_none) {
             return None;
         }
@@ -977,8 +1031,9 @@ impl PlannerManager {
         match emergency_stop_traj(stop_pos) {
             Ok(traj) => {
                 // 官方 EmergencyStop 经 setLocalTrajFromOpt(stopMJO, false)：
-                // 停车轨迹同样生成检查点入库，touch_goal 取 false
-                if !self.set_local_traj(traj, now, false) {
+                // 停车轨迹同样生成检查点入库，touch_goal 取 false；不经
+                // adopt_plan，序号沿用当前计数器（不新增序号）
+                if !self.set_local_traj(traj, now, false, self.traj_id) {
                     log::warn!("急停轨迹检查点生成失败，保持原轨迹");
                 }
             }
@@ -2139,5 +2194,75 @@ mod tests {
         let r = m.tick(0.5, None);
         assert!(!r.replanned, "自身槽位不得参与 swarm 检查");
         assert_eq!(m.replans(), 0);
+    }
+
+    #[test]
+    fn traj_id_increments_on_each_adopted_plan() {
+        let mut m = open_manager();
+        assert_eq!(
+            m.traj_id(),
+            0,
+            "构造后无轨迹：0 = 无轨迹哨兵（官方 traj_id <= 0）"
+        );
+        // 初始规划（官方 GEN_NEW_TRAJ 首次 setLocalTraj）→ 序号 1
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        assert_eq!(m.traj_id(), 1, "初始规划应拿到 1 号");
+        assert_eq!(m.local().unwrap().traj_id, 1, "入库轨迹应携带当前序号");
+        // 超阈值重规划 → 序号 2（每条新轨迹递增，供对端区分新旧）
+        let _ = m.tick(1.5, None);
+        assert_eq!(m.traj_id(), 2, "首次重规划应拿到 2 号");
+        assert_eq!(m.local().unwrap().traj_id, 2);
+        // 再重规划 → 序号 3（新型轨迹一定会被对端视为更新）
+        let _ = m.tick(3.0, None);
+        assert_eq!(m.traj_id(), 3, "每次成功入库持续递增");
+        assert_eq!(m.local().unwrap().traj_id, 3);
+    }
+
+    #[test]
+    fn monitors_short_circuit_without_issued_traj() {
+        // 构造后未规划（traj_id == 0）：官方 ego_replan_fsm.cpp:307 入口短路——
+        // 即便地图有障碍、对端有轨迹，碰撞/swarm 监控都不扫描
+        let mut m = open_manager();
+        assert_eq!(m.traj_id(), 0);
+        m.map_mut().set_state([8, 2, 2], VoxelState::Occupied);
+        m.map_mut().inflate_obstacles();
+        assert!(m.next_collision(0.5).is_none(), "无轨迹时碰撞监控必须短路");
+        m.register_swarm_traj(1, hover_traj(Vector3::new(4.0, 1.0, 1.0), 30.0), 0.0, 0.0);
+        assert!(
+            m.next_swarm_conflict(0.5).is_none(),
+            "无轨迹时 swarm 检查必须短路"
+        );
+    }
+
+    #[test]
+    fn broadcast_des_clearance_returns_config_swarm_clearance() {
+        // 广播期望净距 = 本机 optimization/swarm_clearance 参数（官方发包时
+        // MINCO_msg.des_clearance = getSwarmClearance()，ego_replan_fsm.cpp:820）；
+        // 不依赖是否已规划
+        let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
+        let planner = Planner::new(
+            PlannerConfig {
+                swarm_clearance: 1.2,
+                ..PlannerConfig::default()
+            },
+            map,
+        );
+        let m = PlannerManager::with_planner(
+            planner,
+            ManagerOptions::default(),
+            Vector3::new(1.0, 1.0, 1.0),
+            Vector3::new(10.0, 1.0, 1.0),
+        )
+        .unwrap();
+        assert!(
+            (m.broadcast_des_clearance() - 1.2).abs() < 1e-9,
+            "广播净距应等于配置值"
+        );
+        // 默认配置回落默认值
+        let default = PlannerConfig::default().swarm_clearance;
+        assert!(
+            (open_manager().broadcast_des_clearance() - default).abs() < 1e-9,
+            "默认配置下广播净距应等于默认 swarm_clearance"
+        );
     }
 }
