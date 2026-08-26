@@ -26,7 +26,7 @@ use crate::state_helper::{
 };
 use crate::updater::UpdaterMsckf;
 use crate::updater_slam::UpdaterSlam;
-use crate::updater_zupt::UpdaterZeroVelocity;
+use crate::updater_zero_velocity::UpdaterZeroVelocity;
 
 /// VIO 管理器（对照 `VioManager`）。
 #[derive(Debug)]
@@ -45,10 +45,10 @@ pub struct VioManager {
     pub updater_slam: UpdaterSlam,
     /// 初始化器（对照 C++ 的 `initializer`）。
     pub initializer: firefly_vio_init::inertial_init::InertialInitializer,
-    /// 零速更新器（`try_zupt` 开启时使用）。
-    pub updater_zupt: Option<UpdaterZeroVelocity>,
-    /// 自上次 ZUPT 后是否移动过（`zupt_only_at_beginning` 用）。
-    pub has_moved_since_zupt: bool,
+    /// 零速更新器（`try_zero_velocity` 开启时使用）。
+    pub updater_zero_velocity: Option<UpdaterZeroVelocity>,
+    /// 自上次零速更新后是否移动过（`only_at_beginning` 用）。
+    pub has_moved_since_zero_vel: bool,
     /// 是否已初始化。
     pub is_initialized_vio: bool,
     /// 初始化时刻。
@@ -81,14 +81,14 @@ impl VioManager {
             params.triangulation_options,
         );
         let init_options = params.init_options.clone();
-        let updater_zupt = if params.zupt_options.try_zupt {
+        let updater_zero_velocity = if params.zero_velocity_options.try_zero_velocity {
             Some(UpdaterZeroVelocity::new(
                 params.msckf_options.clone(),
                 params.imu_noises.clone(),
-                params.zupt_options.zupt_max_velocity,
-                params.zupt_options.zupt_noise_multiplier,
-                params.zupt_options.zupt_max_disparity,
-                params.zupt_options.integrated_accel_constraint,
+                params.zero_velocity_options.max_velocity,
+                params.zero_velocity_options.noise_multiplier,
+                params.zero_velocity_options.max_disparity,
+                params.zero_velocity_options.integrated_accel_constraint,
             ))
         } else {
             None
@@ -101,8 +101,8 @@ impl VioManager {
             updater_msckf,
             updater_slam,
             initializer: firefly_vio_init::inertial_init::InertialInitializer::new(init_options),
-            updater_zupt,
-            has_moved_since_zupt: false,
+            updater_zero_velocity,
+            has_moved_since_zero_vel: false,
             is_initialized_vio: false,
             startup_time: -1.0,
             timelastupdate: -1.0,
@@ -224,22 +224,24 @@ impl VioManager {
         // 特征跟踪（对照 C++：trackFEATS->feed_new_camera）
         self.track_feats.feed_new_camera(message);
 
-        // ZUPT 分支（对照 C++：初始化后尝试零速更新；成功则跳过传播/克隆）
+        // 零速更新分支（对照 C++：初始化后尝试；成功则跳过传播/克隆）
         if self.is_initialized_vio
-            && let Some(zupt) = &mut self.updater_zupt
-            && (!self.params.zupt_options.zupt_only_at_beginning || !self.has_moved_since_zupt)
+            && let Some(zero_vel) = &mut self.updater_zero_velocity
+            && (!self.params.zero_velocity_options.only_at_beginning
+                || !self.has_moved_since_zero_vel)
         {
-            let did_zupt = if self.state.timestamp.total_cmp(&message.timestamp).is_eq() {
+            let did_zero_vel_update = if self.state.timestamp.total_cmp(&message.timestamp).is_eq()
+            {
                 false
             } else {
-                zupt.try_update(
+                zero_vel.try_update(
                     &mut self.state,
                     message.timestamp,
                     self.track_feats.database_mut(),
                     &self.propagator,
                 )
             };
-            if did_zupt {
+            if did_zero_vel_update {
                 self.propagator.invalidate_cache();
                 return;
             }
@@ -310,12 +312,12 @@ impl VioManager {
     /// 尝试初始化（对照 `VioManager::try_to_initialize`）。
     ///
     /// 单线程实现：直接调用初始化器（对照 C++ 的 `use_multi_threading_subs`
-    /// 关闭时的同步路径）。`wait_for_jerk` 取决于是否启用 ZUPT（对照 C++）。
+    /// 关闭时的同步路径）。`wait_for_jerk` 取决于是否启用零速更新（对照 C++）。
     ///
     /// 成功后：设置协方差（[`crate::state_helper::set_initial_covariance`]）、
     /// 状态时间与启动时刻、清理过旧特征、恢复跟踪特征数。
     fn try_to_initialize(&mut self, _message: &CameraData) -> bool {
-        let wait_for_jerk = self.updater_zupt.is_none();
+        let wait_for_jerk = self.updater_zero_velocity.is_none();
         let Some(result) = self
             .initializer
             .initialize(self.track_feats.database_mut(), wait_for_jerk)
@@ -353,9 +355,9 @@ impl VioManager {
         self.track_feats
             .set_num_features((num_pts as f64 / num_cam as f64).floor() as usize);
 
-        // 若移动中则禁用 ZUPT（对照 C++ 的 has_moved_since_zupt）
-        if self.state.imu.vel().norm() > self.params.zupt_options.zupt_max_velocity {
-            self.has_moved_since_zupt = true;
+        // 若移动中则禁用零速更新（对照 C++ 的 has_moved_since_zupt）
+        if self.state.imu.vel().norm() > self.params.zero_velocity_options.max_velocity {
+            self.has_moved_since_zero_vel = true;
         }
 
         log::info!("[init]: successful initialization (q={q:?}, bg={bg:?}, ba={ba:?}, v={v:?})");
@@ -400,7 +402,7 @@ impl VioManager {
             return;
         }
         self.timelastupdate = message.timestamp;
-        self.has_moved_since_zupt = true;
+        self.has_moved_since_zero_vel = true;
 
         //=====================================================================
         // MSCKF 特征与 SLAM 特征收集（对照 C++ 第 362-495 行）

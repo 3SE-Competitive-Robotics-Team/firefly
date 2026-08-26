@@ -51,7 +51,7 @@ impl InertialInitializer {
 
     /// 尝试初始化（对照 `InertialInitializer::initialize`）。
     ///
-    /// `wait_for_jerk`：是否等待急动（无 ZUPT 时为 true，有 ZUPT 时 false）。
+    /// `wait_for_jerk`：是否等待急动（无零速更新时为 true，有时为 false）。
     /// 成功返回 [`InitResult`]；数据不足/未通过视差与激励检查返回 `None`。
     // 与 C++ 1:1 移植的编排流程，拆分会破坏对照可审计性。
     #[allow(clippy::too_many_lines)]

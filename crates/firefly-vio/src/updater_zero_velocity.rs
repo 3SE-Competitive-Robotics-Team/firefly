@@ -1,12 +1,15 @@
-//! 零速更新（对照 `OpenVINS` `ov_msckf/update/UpdaterZeroVelocity.cpp/.h`）。
+//! 零速更新（zero-velocity update；对照 `OpenVINS`
+//! `ov_msckf/update/UpdaterZeroVelocity.cpp/.h`）。
 //!
 //! [`UpdaterZeroVelocity::try_update`]：当 IMU 测量表明系统静止（角速度与
 //! 比力残差接近零）且图像视差足够小时，用零速约束更新状态——等效于在
 //! 相机时刻做一次"零位移"观测，抑制漂移。
 //!
-//! 裁剪（对照 C++ 默认分支）：`integrated_accel_constraint = false`、
-//! `model_time_varying_bias = true`、`override_with_disparity_check = true`、
-//! `explicitly_enforce_zero_motion = false`；其余分支标注 TODO。
+//! 对照官方四个分支开关的默认组合：`integrated_accel_constraint=false`
+//! （本实现做成构造参数，两套残差均已实现并有测试）、
+//! `model_time_varying_bias=true`、`override_with_disparity_check=true`；
+//! `explicitly_enforce_zero_motion=true` 显式零运动分支官方标注 untested，
+//! 未移植（其余两个开关的非默认路径为平凡裁剪，同样未移植）。
 
 use firefly_vio_core::feat::FeatureDatabase;
 use firefly_vio_core::noise::ImuNoise;
@@ -56,25 +59,25 @@ pub fn compute_disparity(
     Some((mean, var, disparities.len()))
 }
 
-/// 零速更新器（对照 `UpdaterZeroVelocity`）。
+/// 零速更新器（对照 `UpdaterZeroVelocity`；阈值参数对应官方 `zupt_*` 系列）。
 #[derive(Debug, Clone)]
 pub struct UpdaterZeroVelocity {
     /// 更新选项（chi2 乘子）。
     pub options: UpdaterOptions,
     /// IMU 噪声（白化残差用）。
     pub noises: ImuNoise,
-    /// 速度上限：超过即拒绝（`zupt_max_velocity`）。
-    pub zupt_max_velocity: f64,
-    /// 噪声放大乘子（`zupt_noise_multiplier`）。
-    pub zupt_noise_multiplier: f64,
-    /// 视差上限（`zupt_max_disparity`）。
-    pub zupt_max_disparity: f64,
+    /// 速度上限：超过即拒绝。
+    pub max_velocity: f64,
+    /// 噪声放大乘子。
+    pub noise_multiplier: f64,
+    /// 视差上限。
+    pub max_disparity: f64,
     /// 积分加速度约束开关（对照 C++ `integrated_accel_constraint`）。
     pub integrated_accel_constraint: bool,
-    /// 上次 ZUPT 的状态时刻（清理特征用）。
-    last_zupt_state_timestamp: f64,
-    /// 连续 ZUPT 计数（对照 `last_zupt_count`）。
-    last_zupt_count: usize,
+    /// 上次零速更新的状态时刻（清理特征用）。
+    last_zero_vel_state_timestamp: f64,
+    /// 连续零速更新计数。
+    last_zero_vel_count: usize,
     /// 上次传播时间偏移（对照 `last_prop_time_offset`）。
     last_prop_time_offset: f64,
     /// 是否已设置时间偏移。
@@ -87,20 +90,20 @@ impl UpdaterZeroVelocity {
     pub fn new(
         options: UpdaterOptions,
         noises: ImuNoise,
-        zupt_max_velocity: f64,
-        zupt_noise_multiplier: f64,
-        zupt_max_disparity: f64,
+        max_velocity: f64,
+        noise_multiplier: f64,
+        max_disparity: f64,
         integrated_accel_constraint: bool,
     ) -> Self {
         Self {
             options,
             noises,
-            zupt_max_velocity,
-            zupt_noise_multiplier,
-            zupt_max_disparity,
+            max_velocity,
+            noise_multiplier,
+            max_disparity,
             integrated_accel_constraint,
-            last_zupt_state_timestamp: 0.0,
-            last_zupt_count: 0,
+            last_zero_vel_state_timestamp: 0.0,
+            last_zero_vel_count: 0,
             last_prop_time_offset: 0.0,
             have_last_prop_time_offset: false,
         }
@@ -108,7 +111,7 @@ impl UpdaterZeroVelocity {
 
     /// 尝试零速更新（对照 `UpdaterZeroVelocity::try_update`）。
     ///
-    /// 返回 `true` 表示接受了 ZUPT（状态时间被推进到 `timestamp`，且不会
+    /// 返回 `true` 表示接受了零速更新（状态时间被推进到 `timestamp`，且不会
     /// 在该时刻增广克隆——调用方需据此跳过传播/克隆逻辑）。
     // 与 C++ 1:1 移植的长流程函数，拆分会破坏对照可审计性。
     #[allow(clippy::too_many_lines)]
@@ -121,11 +124,11 @@ impl UpdaterZeroVelocity {
     ) -> bool {
         // 无 IMU 数据或状态已到目标时刻 → 拒绝
         if prop.imu_data_len() == 0 {
-            self.last_zupt_state_timestamp = 0.0;
+            self.last_zero_vel_state_timestamp = 0.0;
             return false;
         }
         if state.timestamp.total_cmp(&timestamp).is_eq() {
-            self.last_zupt_state_timestamp = 0.0;
+            self.last_zero_vel_state_timestamp = 0.0;
             return false;
         }
         if !self.have_last_prop_time_offset {
@@ -145,13 +148,13 @@ impl UpdaterZeroVelocity {
         let imu_data = prop.imu_data_snapshot();
         let Some(imu_recent) = Propagator::select_imu_readings(&imu_data, time0, time1, true)
         else {
-            self.last_zupt_state_timestamp = 0.0;
+            self.last_zero_vel_state_timestamp = 0.0;
             return false;
         };
         self.last_prop_time_offset = t_off_new;
         if imu_recent.len() < 2 {
-            log::warn!("[ZUPT] 无足够 IMU 数据检查零速");
-            self.last_zupt_state_timestamp = 0.0;
+            log::warn!("[zero_vel] 无足够 IMU 数据检查零速");
+            self.last_zero_vel_state_timestamp = 0.0;
             return false;
         }
 
@@ -234,7 +237,7 @@ impl UpdaterZeroVelocity {
         }
 
         // 噪声放大（避免过自信）
-        let r = self.zupt_noise_multiplier * DMatrix::<f64>::identity(res.len(), res.len());
+        let r = self.noise_multiplier * DMatrix::<f64>::identity(res.len(), res.len());
 
         // bias 随时间演化（G·Qd·Gᵀ = dt·Qc）
         let mut q_bias = DMatrix::<f64>::identity(6, 6);
@@ -261,27 +264,27 @@ impl UpdaterZeroVelocity {
         let mut disparity_passed = false;
         if let Some((disp_avg, _, num_features)) = compute_disparity(db, state.timestamp, timestamp)
         {
-            disparity_passed = disp_avg < self.zupt_max_disparity && num_features > 20;
+            disparity_passed = disp_avg < self.max_disparity && num_features > 20;
         }
 
         // 拒绝条件（对照 C++：视差不过 + (chi2 超限 或 速度超限)）
         let vel = state.imu.vel().norm();
         if !disparity_passed
-            && (chi2 > self.options.chi2_multipler * chi2_check || vel > self.zupt_max_velocity)
+            && (chi2 > self.options.chi2_multipler * chi2_check || vel > self.max_velocity)
         {
-            self.last_zupt_state_timestamp = 0.0;
-            self.last_zupt_count = 0;
+            self.last_zero_vel_state_timestamp = 0.0;
+            self.last_zero_vel_count = 0;
             log::debug!(
-                "[ZUPT] 拒绝 |v|={vel:.3} chi2={chi2:.3} > {:.3}",
+                "[zero_vel] 拒绝 |v|={vel:.3} chi2={chi2:.3} > {:.3}",
                 self.options.chi2_multipler * chi2_check
             );
             return false;
         }
-        log::info!("[ZUPT] 接受 |v|={vel:.3} chi2={chi2:.3}");
+        log::info!("[zero_vel] 接受 |v|={vel:.3} chi2={chi2:.3}");
 
-        // 连续 ZUPT 后清理旧时刻特征（对照 C++：不在此刻增广克隆）
-        if self.last_zupt_count >= 2 {
-            db.cleanup_measurements_exact(self.last_zupt_state_timestamp);
+        // 连续零速更新后清理旧时刻特征（对照 C++：不在此刻增广克隆）
+        if self.last_zero_vel_count >= 2 {
+            db.cleanup_measurements_exact(self.last_zero_vel_state_timestamp);
         }
 
         // bias 传播（model_time_varying_bias）
@@ -289,12 +292,12 @@ impl UpdaterZeroVelocity {
         let bias_order = [(state.imu.bg().id(), 3), (state.imu.ba().id(), 3)];
         ekf_propagation(state, &bias_order, &bias_order, &phi_bias, &q_bias);
 
-        // ZUPT 更新（对照 C++：EKFUpdate + timestamp 推进）
+        // 零速更新执行（对照 C++：EKFUpdate + timestamp 推进）
         ekf_update(state, &hx_order, &h, &res, &r, f64::INFINITY);
         state.timestamp = timestamp;
 
-        self.last_zupt_state_timestamp = timestamp;
-        self.last_zupt_count += 1;
+        self.last_zero_vel_state_timestamp = timestamp;
+        self.last_zero_vel_count += 1;
         true
     }
 }
@@ -307,7 +310,7 @@ mod tests {
     use crate::state_helper::augment_clone;
     use firefly_vio_core::sensor::ImuData;
 
-    fn zupt() -> UpdaterZeroVelocity {
+    fn zero_vel() -> UpdaterZeroVelocity {
         UpdaterZeroVelocity::new(
             UpdaterOptions::default(),
             ImuNoise::default(),
@@ -331,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn zupt_accepts_zero_motion() {
+    fn zero_vel_accepts_zero_motion() {
         let mut s = state_with_zero_motion();
         s.timestamp = 1.0;
         augment_clone(&mut s, &Vector3::zeros());
@@ -348,16 +351,16 @@ mod tests {
             );
         }
         let mut db = FeatureDatabase::new();
-        let mut u = zupt();
+        let mut u = zero_vel();
         // 无特征 → 视差检查失败（num_features=0）→ 视差不过；
         // 但速度 0 + chi2 小 → 仍接受（视差不过时用 chi2/速度判据）
         let ok = u.try_update(&mut s, 1.2, &mut db, &prop);
-        assert!(ok, "静止 ZUPT 应接受");
+        assert!(ok, "静止零速更新应接受");
         assert!((s.timestamp - 1.2).abs() < 1e-12);
     }
 
     #[test]
-    fn zupt_integrated_accel_accepts_zero_motion() {
+    fn zero_vel_integrated_accel_accepts_zero_motion() {
         // 开启积分加速度约束：静止场景仍应接受（v − g·dt + Rᵀ·a·dt ≈ 0）
         let mut s = state_with_zero_motion();
         s.timestamp = 1.0;
@@ -383,11 +386,11 @@ mod tests {
             true,
         );
         let ok = u.try_update(&mut s, 1.2, &mut db, &prop);
-        assert!(ok, "integrated_accel 静止 ZUPT 应接受");
+        assert!(ok, "integrated_accel 静止零速更新应接受");
     }
 
     #[test]
-    fn zupt_rejects_moving() {
+    fn zero_vel_rejects_moving() {
         let mut s = state_with_zero_motion();
         s.timestamp = 1.0;
         let prop = Propagator::new(ImuNoise::default());
@@ -403,8 +406,8 @@ mod tests {
             );
         }
         let mut db = FeatureDatabase::new();
-        let mut u = zupt();
+        let mut u = zero_vel();
         let ok = u.try_update(&mut s, 1.2, &mut db, &prop);
-        assert!(!ok, "运动 ZUPT 应拒绝");
+        assert!(!ok, "运动零速更新应拒绝");
     }
 }
