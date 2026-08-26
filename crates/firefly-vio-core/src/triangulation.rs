@@ -1,6 +1,5 @@
 //! 特征三角化（对照 `OpenVINS` `ov_core/src/feat/FeatureInitializer.cpp` 的
-//! `single_triangulation`；`single_triangulation_1d`/`single_gaussnewton`
-//! 属 SLAM 特征初始化，标注 TODO 待 SLAM 移植时补充）。
+//! `single_triangulation` 与 `single_gaussnewton`）。
 //!
 //! 多视图线性三角化（DLT）：以测量最多的相机为锚点，把每条视线投影到与
 //! 锚点系垂直的平面（`Bperp = skew(b_i)`），累加正规方程 `A p = b` 求解，

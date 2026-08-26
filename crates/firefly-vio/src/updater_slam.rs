@@ -4,14 +4,11 @@
 //!   牛顿精化 → [`crate::state_helper::initialize_feature`] 增广进状态）；
 //! - [`UpdaterSlam::update`]：已有 SLAM 特征的空闲更新（`H_f` 并入大雅可比，
 //!   因为特征已在状态中 → chi2 → EKF 更新）；
-//! - [`UpdaterSlam::change_anchors`]：锚点切换（锚定表示用，TODO）。
+//! - [`UpdaterSlam::change_anchors`]：锚点切换（锚定表示重锚 + 协方差传播）。
 //!
 //! ARUCO 分支（`feat_rep_aruco`）未移植：`max_aruco_features` 为 0 时所有
 //! 特征走 SLAM 表示。单逆深度表示（`ANCHORED_INVERSE_DEPTH_SINGLE`）合并到
 //! MSCKF 逆深度（对照 C++ 的映射）。
-//!
-//! 高斯牛顿精化（`FeatureInitializer::single_gaussnewton`）标注 TODO：当前
-//! 用 `single_triangulation` 的线性解作为初值（与 `UpdaterMSCKF` 一致）。
 
 // 数学符号/新旧锚点块命名对照 C++ 源码（h_f_old/h_x_new 等），保留可审计性。
 #![allow(
@@ -354,10 +351,6 @@ impl UpdaterSlam {
         ekf_update(state, &hx_order_big, &hx_big, &res_big, &r, f64::INFINITY);
     }
 
-    /// 锚点切换（对照 `UpdaterSLAM::change_anchors`）。
-    ///
-    /// 锚定表示在锚点克隆被边缘化前重锚定。当前仅 `GLOBAL_3D`/SLAM 路径
-    /// （非相对表示）使用，锚定表示 TODO。
     /// 锚点切换（对照 `UpdaterSLAM::change_anchors`）。
     ///
     /// 当滑动窗口将边缘化最老克隆时，把锚在该克隆上的锚定 SLAM 特征重锚到

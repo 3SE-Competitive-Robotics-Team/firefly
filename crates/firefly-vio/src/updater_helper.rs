@@ -5,8 +5,7 @@
 //!   《Matrix Computations》5.2.4），消除特征位置未知量；
 //! - [`measurement_compress_inplace`]：测量压缩（同样的 Givens 上三角化）。
 //!
-//! 特征表示仅实现 `GLOBAL_3D`（`StateOptions` 默认）；逆深度/锚定表示
-//! 标注 TODO（SLAM 移植时补充）。
+//! 支持 `GLOBAL_3D` 与 `ANCHORED_MSCKF_INVERSE_DEPTH` 表示。
 
 // 雅可比组装中的单字符符号（m/n 为行列、a/b 为消零元素）对照 Eigen/Golub
 // 源码约定；线性代数代码保留原符号更可审计。
@@ -40,7 +39,7 @@ pub struct FeatureJacobian {
 /// 组装一个特征的测量残差与雅可比（对照
 /// `UpdaterHelper::get_feature_jacobian_full`）。
 ///
-/// 支持 `GLOBAL_3D` 与 `ANCHORED_MSCKF_INVERSE_DEPTH`（其余表示标注 TODO）。
+/// 支持 `GLOBAL_3D` 与 `ANCHORED_MSCKF_INVERSE_DEPTH` 表示。
 /// 残差：`z = uv_meas − distort(project(p_FinG))`；链式雅可比：
 /// `dz/dx = dz/dzn · dzn/dpfc · dpfc/dx`（投影 → 畸变 → 状态）。
 ///

@@ -6,8 +6,6 @@
 //! 3. 三角化每个特征（失败删除）；
 //! 4. 逐特征组装雅可比 → 零空间投影 → chi2 检验（拒绝外点）；
 //! 5. 合并大矩阵 → 测量压缩 → [`crate::state_helper::ekf_update`]。
-//!
-//! SLAM 特征初始化的高斯牛顿精化（`refine_features`）未移植，标注 TODO。
 
 use firefly_vio_core::feat::Feature;
 use firefly_vio_core::triangulation::{
