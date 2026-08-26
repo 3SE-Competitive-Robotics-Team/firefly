@@ -14,7 +14,16 @@ pub struct PlannerConfig {
     pub obstacle_clearance_soft: f64,
     /// 软层权重（官方 v2 `weight_obstacle_soft`）。
     pub weight_obstacle_soft: f64,
+    /// 集群安全净距（米，官方 `optimization/swarm_clearance`；swarm-playground
+    /// 各 launch 取 0.5）：FSM 层 swarm 预测检查与规划内层 swarm 惩罚共用。
     pub swarm_clearance: f64,
+    /// 本机编号（官方 `manager/drone_id`，launch 默认 0）：≤0 视为单机/0 号机，
+    /// 初始规划无需等待；≥1 必须收齐 `0..drone_id` 全部前序机轨迹才允许起飞
+    /// （官方 `SEQUENTIAL_START` 态语义）。
+    pub drone_id: i32,
+    /// 心跳超时（秒，官方 `traj_server::cmdCallback` 硬编码 0.5）：超过该时长
+    /// 未收到新执行节拍时，参考输出降级为零速悬停并停用轨迹跟踪。
+    pub heartbeat_timeout: f64,
     pub max_velocity: f64,
     pub max_acceleration: f64,
     pub max_jerk: f64,
@@ -46,6 +55,8 @@ impl Default for PlannerConfig {
             obstacle_clearance_soft: 0.5,
             weight_obstacle_soft: 5000.0,
             swarm_clearance: 0.5,
+            drone_id: 0,
+            heartbeat_timeout: 0.5,
             max_velocity: 1.5,
             max_acceleration: 6.0,
             max_jerk: 10.0,
@@ -76,6 +87,9 @@ mod tests {
         assert_eq!(c.obstacle_clearance_soft, 0.5);
         assert_eq!(c.weight_obstacle_soft, 5000.0);
         assert_eq!(c.swarm_clearance, 0.5);
+        // 官方 manager/drone_id launch 默认 0；traj_server 心跳超时硬编码 0.5s
+        assert_eq!(c.drone_id, 0);
+        assert_eq!(c.heartbeat_timeout, 0.5);
         assert_eq!(c.max_velocity, 1.5);
         assert_eq!(c.max_acceleration, 6.0);
         assert_eq!(c.max_jerk, 10.0);
