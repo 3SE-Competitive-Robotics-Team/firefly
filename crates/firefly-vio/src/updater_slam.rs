@@ -113,6 +113,14 @@ impl UpdaterSlam {
                 feat_rep
             };
 
+            // 位置与 FEJ（对照 C++ 的「Save the position and its fej value」
+            // 段，UpdaterSLAM.cpp:170-176）：新特征无历史，fej = 当前三角化值
+            if jac_rep.is_relative() {
+                feat.p_FinA_fej = feat.p_FinA;
+            } else {
+                feat.p_FinG_fej = feat.p_FinG;
+            }
+
             // 雅可比 + 残差（对照 C++ 的 get_feature_jacobian_full）
             let jac = get_feature_jacobian_full(state, feat, jac_rep);
             let mut h_f = jac.h_f;
@@ -137,17 +145,18 @@ impl UpdaterSlam {
                 h_f = h_xf.columns(h_xf.ncols() - 1, 1).into_owned();
             }
 
-            // 创建 landmark（对照 C++：先 size/UUID/anchor 再 set_from_xyz）
+            // 创建 landmark（对照 C++：先 size/UUID/anchor 再 set_from_xyz；
+            // FEJ 取上述已写入的 feat.p_*_fej，UpdaterSLAM.cpp:214-224）
             let mut landmark = Landmark::new(feat_rep, feat.featid);
             landmark.unique_camera_id = feat.anchor_cam_id;
             if jac_rep.is_relative() {
                 landmark.anchor_cam_id = feat.anchor_cam_id;
                 landmark.anchor_clone_timestamp = feat.anchor_clone_timestamp;
                 landmark.set_from_xyz(&feat.p_FinA, false);
-                landmark.set_from_xyz(&feat.p_FinA, true);
+                landmark.set_from_xyz(&feat.p_FinA_fej, true);
             } else {
                 landmark.set_from_xyz(&feat.p_FinG, false);
-                landmark.set_from_xyz(&feat.p_FinG, true);
+                landmark.set_from_xyz(&feat.p_FinG_fej, true);
             }
 
             // 测量噪声矩阵（对照 C++：sigma_pix_sq * I）
@@ -179,18 +188,22 @@ impl UpdaterSlam {
     /// SLAM 特征更新（对照 `UpdaterSLAM::update`）。
     ///
     /// 特征已在状态中，故把 `H_f` 追加到 `H_x` 组成 `H_xf`，并将 landmark
-    /// 追加到 `Hx_order`。返回后 `feature_vec` 中剩余特征全部标记 `to_delete`
-    /// （对照 C++ 末尾循环）。
+    /// 追加到 `Hx_order`。返回本次消费（进入更新流程）的特征 id，调用方须
+    /// 在特征数据库标记 `to_delete`——对照 C++ 末尾的标记段
+    /// （「Delete it so we do not reuse information」），防止同一测量被
+    /// marg/max-track 查询再次取用（MSCKF 双重消费或批次内重复入列）。
     // 与 C++ 1:1 移植的长流程，拆分会破坏对照可审计性。
     #[allow(clippy::too_many_lines)]
     // 与 C++ 的 `.at()` 断言语义一致：特征无对应 landmark 时崩溃。
     #[allow(clippy::missing_panics_doc)]
-    pub fn update(&mut self, state: &mut State, feature_vec: &mut Vec<Feature>) {
+    pub fn update(&mut self, state: &mut State, feature_vec: &mut Vec<Feature>) -> Vec<usize> {
         // (h_x_and_f, res, x_order, row0)
         type Block = (DMatrix<f64>, DVector<f64>, Vec<(i32, usize)>, usize);
         if feature_vec.is_empty() {
-            return;
+            return Vec::new();
         }
+        // 已消费（须在 DB 标记删除）的特征 id（对照 C++ 各处的 to_delete）
+        let mut consumed: Vec<usize> = Vec::new();
 
         // 0. 克隆时刻（对照 C++ 的 clonetimes）
         let clonetimes: Vec<f64> = state.clones_imu.iter().map(|(t, _)| *t).collect();
@@ -209,6 +222,7 @@ impl UpdaterSlam {
             };
             if ct_meas < 1 {
                 feat.to_delete = true;
+                consumed.push(feat.featid);
                 false
             } else if ct_meas < required {
                 // 不足但不删除（对照 C++ 的 else if：erase 不标记）
@@ -243,14 +257,16 @@ impl UpdaterSlam {
                     landmark.representation
                 };
 
-            // 从 landmark 取位置（含 FEJ）
+            // 从 landmark 取位置与 FEJ（对照 C++ UpdaterSLAM.cpp:347-355）：
+            // `get_xyz(false)` 当前值供残差，`get_xyz(true)` 首估计供雅可比线性化
             if jac_rep.is_relative() {
                 feat.anchor_cam_id = landmark.anchor_cam_id;
                 feat.anchor_clone_timestamp = landmark.anchor_clone_timestamp;
                 feat.p_FinA = landmark.get_xyz(false);
-                feat.p_FinG = landmark.get_xyz(true);
+                feat.p_FinA_fej = landmark.get_xyz(true);
             } else {
                 feat.p_FinG = landmark.get_xyz(false);
+                feat.p_FinG_fej = landmark.get_xyz(true);
             }
 
             let jac = get_feature_jacobian_full(state, feat, jac_rep);
@@ -303,6 +319,7 @@ impl UpdaterSlam {
                     }
                 }
                 feat.to_delete = true;
+                consumed.push(feat.featid);
                 false
             } else {
                 // 注册列映射 + 收集块
@@ -317,13 +334,14 @@ impl UpdaterSlam {
                 let row0 = total_rows;
                 total_rows += h_combined.nrows();
                 blocks.push((h_combined, res, x_order, row0));
+                consumed.push(feat.featid);
                 true
             }
         });
 
         // 3. 统一组装大矩阵（对照 C++ 的 block 拷贝）
         if total_rows == 0 {
-            return;
+            return consumed;
         }
         let mut hx_big = DMatrix::zeros(total_rows, next_col);
         let mut res_big = DVector::zeros(total_rows);
@@ -349,6 +367,7 @@ impl UpdaterSlam {
         // 4. EKF 更新（对照 C++ 末尾）
         let r = self.options.sigma_pix_sq * DMatrix::identity(total_rows, total_rows);
         ekf_update(state, &hx_order_big, &hx_big, &res_big, &r, f64::INFINITY);
+        consumed
     }
 
     /// 锚点切换（对照 `UpdaterSLAM::change_anchors`）。
@@ -427,7 +446,9 @@ fn perform_anchor_change(
         anchor_cam_id: landmark.anchor_cam_id,
         anchor_clone_timestamp: landmark.anchor_clone_timestamp,
         p_FinA: landmark.get_xyz(false),
+        p_FinA_fej: landmark.get_xyz(true),
         p_FinG: Vector3::zeros(),
+        p_FinG_fej: Vector3::zeros(),
     };
 
     // 旧表示雅可比（对照 C++ get_feature_jacobian_representation(old)）
@@ -511,7 +532,9 @@ fn perform_anchor_change(
         anchor_cam_id: new_cam_id as i32,
         anchor_clone_timestamp: new_anchor_timestamp,
         p_FinA: new_p_fin_a,
+        p_FinA_fej: new_p_fin_a_fej,
         p_FinG: Vector3::zeros(),
+        p_FinG_fej: Vector3::zeros(),
     };
     let (h_f_new, h_x_new) =
         crate::updater_helper::get_feature_jacobian_representation(state, &new_feat, old_rep);
@@ -725,7 +748,9 @@ mod tests {
             anchor_cam_id: -1,
             anchor_clone_timestamp: 0.0,
             p_FinA: Vector3::zeros(),
+            p_FinA_fej: Vector3::zeros(),
             p_FinG: Vector3::zeros(),
+            p_FinG_fej: Vector3::zeros(),
         };
         (st, feat)
     }
@@ -808,7 +833,9 @@ mod tests {
             anchor_cam_id: -1,
             anchor_clone_timestamp: 0.0,
             p_FinA: Vector3::zeros(),
+            p_FinA_fej: Vector3::zeros(),
             p_FinG: Vector3::zeros(),
+            p_FinG_fej: Vector3::zeros(),
         };
         let mut update_vec = vec![upd_feat];
         updater.update(&mut st, &mut update_vec);
@@ -863,7 +890,9 @@ mod tests {
             anchor_cam_id: -1,
             anchor_clone_timestamp: 0.0,
             p_FinA: Vector3::zeros(),
+            p_FinA_fej: Vector3::zeros(),
             p_FinG: Vector3::zeros(),
+            p_FinG_fej: Vector3::zeros(),
         };
         let mut update_vec = vec![upd_feat];
         updater.update(&mut st, &mut update_vec);

@@ -5,7 +5,8 @@
 //!   《Matrix Computations》5.2.4），消除特征位置未知量；
 //! - [`measurement_compress_inplace`]：测量压缩（同样的 Givens 上三角化）。
 //!
-//! 支持 `GLOBAL_3D` 与 `ANCHORED_MSCKF_INVERSE_DEPTH` 表示。
+//! 支持 `GLOBAL_3D`、`GLOBAL_FULL_INVERSE_DEPTH` 与
+//! `ANCHORED_MSCKF_INVERSE_DEPTH` 表示。
 
 // 雅可比组装中的单字符符号（m/n 为行列、a/b 为消零元素）对照 Eigen/Golub
 // 源码约定；线性代数代码保留原符号更可审计。
@@ -39,7 +40,8 @@ pub struct FeatureJacobian {
 /// 组装一个特征的测量残差与雅可比（对照
 /// `UpdaterHelper::get_feature_jacobian_full`）。
 ///
-/// 支持 `GLOBAL_3D` 与 `ANCHORED_MSCKF_INVERSE_DEPTH` 表示。
+/// 支持 `GLOBAL_3D`、`GLOBAL_FULL_INVERSE_DEPTH` 与
+/// `ANCHORED_MSCKF_INVERSE_DEPTH` 表示。
 /// 残差：`z = uv_meas − distort(project(p_FinG))`；链式雅可比：
 /// `dz/dx = dz/dzn · dzn/dpfc · dpfc/dx`（投影 → 畸变 → 状态）。
 ///
@@ -48,7 +50,8 @@ pub struct FeatureJacobian {
 /// 参数的雅可比），锚点状态的雅可比经 `dpfg_dx` 链入。
 ///
 /// FEJ：开启时克隆旋转/平移取首估计值（`Rot_fej`/`pos_fej`），特征位置
-/// 用当前三角化值（MSCKF 特征每次更新重新三角化）。
+/// 线性化点取 `p_FinG_fej`（调用方写入：SLAM 取 landmark 首估计、
+/// MSCKF 与新初始化特征为当前三角化值；锚定表示恒取当前 `p_FinG`）。
 ///
 /// # Panics
 /// 特征测量对应的克隆或相机标定缺失（调用方组装错误）。
@@ -126,8 +129,12 @@ pub fn get_feature_jacobian_full(
         }
     }
 
-    // 特征位置（全局系）：锚定表示由锚点计算（对照 C++ 的 p_FinG 段）
-    let (p_fin_g, dpfg_dlambda, dpfg_dx) = if representation.is_relative() {
+    // 特征位置（全局系）：锚定表示由锚点计算（对照 C++ 的 p_FinG 段）。
+    // FEJ 线性化点 p_fin_g_fej：锚定表示恒等于 p_fin_g（锚定特征的估计
+    // 一致性由表示雅可比内的锚点 fej 保证，对照 C++ UpdaterHelper.cpp:283-288）；
+    // 非锚定表示取调用方写入的 `feature.p_FinG_fej`（SLAM 为 landmark
+    // 首估计，MSCKF 与新初始化特征为当前三角化值）。
+    let (p_fin_g, p_fin_g_fej, dpfg_dlambda, dpfg_dx) = if representation.is_relative() {
         let (_, anchor) = anchor_clone.expect("锚点克隆已注册");
         let calib = state
             .calib_imu_to_cam
@@ -225,11 +232,52 @@ pub fn get_feature_jacobian_full(
                 out
             }
         };
-        (p_fin_g, dpfg_dlambda, dpfg_dx)
+        (p_fin_g, p_fin_g, dpfg_dlambda, dpfg_dx)
     } else {
-        let mut d = DMatrix::<f64>::zeros(3, 3);
-        d.fill_with_identity();
-        (feature.p_FinG, d, Vec::new())
+        // dpfg_dlambda：p_FinG → 表示参数。GLOBAL_3D 即参数本身（H_f = I）；
+        // GLOBAL_FULL_INVERSE_DEPTH 的逆深度 H_f 线性化点按 do_fej 取
+        // p_FinG_fej，否则当前 p_FinG（对照 C++
+        // `get_feature_jacobian_representation` 的 GLOBAL_FULL_INVERSE_DEPTH
+        // 分支，UpdaterHelper.cpp:44-47）。
+        let dpfg_dlambda: DMatrix<f64> = match representation {
+            crate::options::FeatRepresentation::Global3D => {
+                let mut out = DMatrix::<f64>::zeros(3, 3);
+                out.fill_with_identity();
+                out
+            }
+            // 全局全逆深度（θ,φ,ρ；对照 C++ 的 d_pfinG_dpinv，sin/cos 版）
+            crate::options::FeatRepresentation::GlobalFullInverseDepth => {
+                let p = if state.options.do_fej {
+                    feature.p_FinG_fej
+                } else {
+                    feature.p_FinG
+                };
+                let rho = 1.0 / p.norm();
+                let phi = (rho * p.z).acos();
+                let theta = p.y.atan2(p.x);
+                let (sin_th, cos_th) = theta.sin_cos();
+                let (sin_phi, cos_phi) = phi.sin_cos();
+                let mut d = Matrix3::zeros();
+                d[(0, 0)] = -(1.0 / rho) * sin_th * sin_phi;
+                d[(0, 1)] = (1.0 / rho) * cos_th * cos_phi;
+                d[(0, 2)] = -(1.0 / (rho * rho)) * cos_th * sin_phi;
+                d[(1, 0)] = (1.0 / rho) * cos_th * sin_phi;
+                d[(1, 1)] = (1.0 / rho) * sin_th * cos_phi;
+                d[(1, 2)] = -(1.0 / (rho * rho)) * sin_th * sin_phi;
+                d[(2, 1)] = -(1.0 / rho) * sin_phi;
+                d[(2, 2)] = -(1.0 / (rho * rho)) * cos_phi;
+                let mut out = DMatrix::<f64>::zeros(3, 3);
+                out.copy_from(&d);
+                out
+            }
+            other => {
+                log::warn!("特征表示 {other:?} 未实现，回退 GLOBAL_3D");
+                let mut out = DMatrix::<f64>::zeros(3, 3);
+                out.fill_with_identity();
+                out
+            }
+        };
+        (feature.p_FinG, feature.p_FinG_fej, dpfg_dlambda, Vec::new())
     };
 
     // 残差与雅可比（对照 C++ 的测量循环）
@@ -288,11 +336,12 @@ pub fn get_feature_jacobian_full(
             let r2 = Vector2::new(f64::from(uv_m.x), f64::from(uv_m.y)) - uv_pred;
             res.rows_range_mut(2 * c..2 * c + 2).copy_from(&r2);
 
-            // 雅可比链（对照 C++：dz_dzn/dzn_dpfc/dpfc_dpfg/dpfc_dclone 在
-            // FEJ 覆盖段之后计算，即 do_fej 时用 `Rot_fej()/pos_fej()` 与
-            // `p_FinG_fej`（GLOBAL_3D 的 p_FinG_fej = 当前三角化 p_FinG））。
+            // 雅可比链（对照 C++ 的 FEJ 覆盖段，UpdaterHelper.cpp:354-360）：
+            // do_fej 时克隆旋转/平移取首估计、特征位置取 `p_fin_g_fej`——
+            // 雅可比围绕特征首次三角化/首估计线性化点，保持 EKF 一致性；
+            // 残差 `res` 在上方当前值段已算完，不受此覆盖影响。
             let (r_gto_ii_j, p_iin_g_j, p_fin_g_j) = if state.options.do_fej {
-                (clone.rot_fej(), clone.pos_fej(), p_fin_g)
+                (clone.rot_fej(), clone.pos_fej(), p_fin_g_fej)
             } else {
                 (r_gto_ii, p_iin_g, p_fin_g)
             };
@@ -654,7 +703,9 @@ mod tests {
             anchor_cam_id: 0,
             anchor_clone_timestamp: 1.0,
             p_FinA: Vector3::new(0.5, 0.2, 3.0),
+            p_FinA_fej: Vector3::new(0.5, 0.2, 3.0),
             p_FinG: Vector3::new(0.5, 0.2, 3.0),
+            p_FinG_fej: Vector3::new(0.5, 0.2, 3.0),
         };
         let _ = &mut feat;
         (st, 1.0)
@@ -677,7 +728,9 @@ mod tests {
             anchor_cam_id: 0,
             anchor_clone_timestamp: 1.0,
             p_FinA: Vector3::new(0.5, 0.2, 3.0),
+            p_FinA_fej: Vector3::new(0.5, 0.2, 3.0),
             p_FinG: Vector3::new(0.5, 0.2, 3.0),
+            p_FinG_fej: Vector3::new(0.5, 0.2, 3.0),
         };
         // 特征全局位置与锚点系一致（单位位姿）
         feat.p_FinG = feat.p_FinA;

@@ -361,23 +361,28 @@ fn synthetic_pure_msckf_zero_bias() {
     );
 }
 
-/// SLAM 模式（OpenVINS 默认 `max_slam_features=25`）。已知问题：SLAM 更新
-/// 链路毒化状态（合成可复现；`H_x`/`H_f` 已 FD 验证正确、initialize/update 与
-/// C++ 逐行一致——残留嫌疑为场景 y 可观测性弱）。apps/vio 因此维持
+/// SLAM 模式（OpenVINS 默认 `max_slam_features=25`）。已知问题：末尾速度
+/// 估计摆荡——实测位置误差 1.0-1.4m（位置断言 <3m 通过）、速度误差
+/// 0.4-0.75 m/s（速度断言 <0.3 不通过）。场景约束（零旋转纯前向恒速 +
+/// 稀疏点阵 + 5cm 立体基线）下 x 速度/偏航弱可观，见
+/// [`synthetic_pure_msckf_zero_bias`] 的「近规范退化」注释；持久路标把
+/// KLT 运动滞后偏置（~0.5px，见 `UpdaterOptions::sigma_pix`）吸收进特征
+/// 几何，无法像 MSCKF 那样随边缘化遗忘。apps/vio 因此维持
 /// `max_slam_features=0`。
 #[test]
-#[ignore = "已知问题：SLAM 更新链路毒化状态（合成可复现），见 synthetic_slam_zero_bias 注释"]
+#[ignore = "已知问题：SLAM 模式速度断言不达标（实测 0.4-0.75 m/s），见上注释"]
 fn synthetic_slam_zero_bias() {
     let (err_p, err_v, _, _, _) = run_scenario(false, 25);
     assert!(err_p < 3.0, "SLAM 零偏位置误差过大: {err_p:.3}m");
     assert!(err_v < 0.3, "SLAM 零偏速度误差过大: {err_v:.3}m/s");
 }
 
-/// 复现现场"静止→运动"：静止 5s 后匀速。静止期 SLAM 特征初始化视差结构差，
-/// 是现场 SLAM 发散的关键触发条件（连续运动合成场景不触发）。
-/// 同 `synthetic_slam_zero_bias`：SLAM 链路毒化已知问题。
+/// 复现现场"静止→运动"：静止 5s 后匀速。静止期无视差，视觉更新暂停，
+/// 滤波器纯 IMU 先收敛，SLAM 特征在运动后才初始化——当前实测达标
+/// （位置 0.2-0.4m、速度 0.11-0.19 m/s，断言 <3m/<0.3m/s）。与
+/// [`synthetic_slam_zero_bias`] 构成 SLAM 模式回归对，暂保持 ignore。
 #[test]
-#[ignore = "已知问题：SLAM 更新链路毒化状态，见 synthetic_slam_zero_bias 注释"]
+#[ignore = "与 synthetic_slam_zero_bias 构成 SLAM 模式回归对，暂保持 ignore"]
 fn synthetic_slam_static_then_move() {
     let (err_p, err_v, _, _, _) = run_cfg(&ScenarioCfg {
         max_slam: 25,

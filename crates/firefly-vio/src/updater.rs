@@ -240,6 +240,14 @@ impl UpdaterMsckf {
                 }
                 r => r,
             };
+            // 位置与 FEJ（对照 C++ 的「Save the position and its fej value」
+            // 段，UpdaterMSCKF.cpp:186-193）：MSCKF 特征当帧边缘化、无首估计
+            // 历史，fej = 当前三角化值
+            if rep.is_relative() {
+                feat.p_FinA_fej = feat.p_FinA;
+            } else {
+                feat.p_FinG_fej = feat.p_FinG;
+            }
             let jac = get_feature_jacobian_full(state, feat, rep);
             let (mut h_f, mut h_x, mut res) = (jac.h_f, jac.h_x, jac.res);
             let x_order = jac.x_order;

@@ -548,14 +548,18 @@ impl VioManager {
         self.track_feats.database_mut().mark_deleted(msckf_ids);
 
         // 14. SLAM 更新（分批 max_slam_in_update；对照 C++：循环内 erase 前缀、
-        // 列表递减可终止，处理后不回填）。SLAM 特征是持久路标——**不标记删除**
-        //（C++ 的 `to_delete = true` 只作用于 MSCKF 特征段）。
+        // 列表递减可终止，处理后不回填）。Rust 端 update 操作的是特征克隆，
+        // 消费标记（to_delete）须按返回值写回数据库——对照 C++ 中
+        // `UpdaterSLAM::update` 直接在库内特征上置位（「Delete it so we do
+        // not reuse information」）：不标记则同一测量会被 marg/max-track
+        // 查询再次取用（MSCKF 双重消费 + 同一更新批次内重复入列）。
         let max_slam_in_update = self.state.options.max_slam_in_update;
         while !feats_slam_update.is_empty() {
             let take = max_slam_in_update.min(feats_slam_update.len());
             let mut batch: Vec<Feature> = feats_slam_update.drain(..take).collect();
-            self.updater_slam.update(&mut self.state, &mut batch);
+            let consumed = self.updater_slam.update(&mut self.state, &mut batch);
             self.propagator.invalidate_cache();
+            self.track_feats.database_mut().mark_deleted(consumed);
         }
 
         // 15. SLAM 延迟初始化（对照 C++）
