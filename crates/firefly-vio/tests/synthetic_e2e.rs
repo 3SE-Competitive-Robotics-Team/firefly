@@ -366,9 +366,8 @@ fn synthetic_pure_msckf_zero_bias() {
 /// 0.4-0.75 m/s（速度断言 <0.3 不通过）。场景约束（零旋转纯前向恒速 +
 /// 稀疏点阵 + 5cm 立体基线）下 x 速度/偏航弱可观，见
 /// [`synthetic_pure_msckf_zero_bias`] 的「近规范退化」注释；持久路标把
-/// KLT 运动滞后偏置（~0.5px，见 `UpdaterOptions::sigma_pix`）吸收进特征
-/// 几何，无法像 MSCKF 那样随边缘化遗忘。apps/vio 因此维持
-/// `max_slam_features=0`。
+/// KLT 运动滞后偏置（~0.5px）吸收进特征几何，无法像 MSCKF 那样随边缘化
+/// 遗忘。apps/vio 因此维持 `max_slam_features=0`。
 #[test]
 #[ignore = "已知问题：SLAM 模式速度断言不达标（实测 0.4-0.75 m/s），见上注释"]
 fn synthetic_slam_zero_bias() {
