@@ -152,7 +152,6 @@ impl UpdaterMsckf {
             .collect();
         let n_before = feature_vec.len();
         let mut rej_z = 0usize;
-        let mut rej_depth = 0usize;
         let mut rej_err = 0usize;
         feature_vec.retain_mut(|feat| {
             let mut worst = 0.0f64;
@@ -180,14 +179,6 @@ impl UpdaterMsckf {
                     let uv_m = uvs_norm[m];
                     let err = (Vector2::new(f64::from(uv_m.x), f64::from(uv_m.y)) - uv_n).norm();
                     worst = worst.max(err);
-                    // 深度上限门控：场景纹理最远 ~8m（立柱/地面棋盘），超过
-                    // `max_feature_depth` 的深度必为低视差病态三角化产物——
-                    // 深特征 H 增益 ~fx/z 小，同像素残差对应数米位置修正
-                    // （实测 res=1.07px 拉 2.4m、13m/39m 深度特征进场）。
-                    if p_in_cw.z > self.options.max_feature_depth_m {
-                        worst = f64::INFINITY;
-                        rej_depth += 1;
-                    }
                 }
             }
             if worst > 0.3 || !worst.is_finite() {
@@ -201,7 +192,7 @@ impl UpdaterMsckf {
             }
         });
         log::debug!(
-            "reproj 门控: {}/{} 特征存活（拒因 z<=0:{rej_z} depth>{rej_depth:.0} err>{rej_err}）",
+            "reproj 门控: {}/{} 特征存活（拒因 z<=0:{rej_z} err>{rej_err}）",
             feature_vec.len(),
             n_before
         );
@@ -230,7 +221,6 @@ impl UpdaterMsckf {
         let mut next_col = 0usize;
         let mut blocks: Vec<HxBlock> = Vec::with_capacity(feature_vec.len());
         let mut total_rows = 0usize;
-        let mut hard_cap_rej = 0usize;
 
         for feat in feature_vec.iter_mut() {
             // 表示选择（对照 C++：ANCHORED_INVERSE_DEPTH_SINGLE → MSCKF 逆深度）
@@ -254,29 +244,15 @@ impl UpdaterMsckf {
 
             nullspace_project_inplace(&mut h_f, &mut h_x, &mut res);
 
-            // 硬残差上限：协方差 P 膨胀时 chi2（H·P·Hᵀ+R）会退化性地接受
-            // 巨大残差特征（实测 400+ px）而主动把估计推得更发散。无论 P 大小，
-            // 平均像素残差 > `max_pix_res`（默认 40px）的特征一律拒收——这是
-            // 与协方差无关的硬外点门，防止垃圾更新加剧漂移。
-            if res.norm() > 40.0 * f64::sqrt(res.len() as f64) {
-                feat.to_delete = true;
-                hard_cap_rej += 1;
-                continue;
-            }
-
-            // chi2 检验（对照 C++：S = H_x·P_marg·H_xᵀ + R，chi2 = resᵀS⁻¹res）。
+            // chi2 检验（对照 C++：S = H_x·P_marg·H_xᵀ + R，
+            // S.diagonal() += sigma_pix_sq，UpdaterMSCKF.cpp:211）。
             // 注意必须加测量噪声 R（sigma_pix²）：残差/雅可比在像素空间（fx 量级），
             // 缺 R 时 S 尺度错误 → 外点全部误纳/误拒。
-            // 深度自适应：远特征深度误差大，σ_eff 随深度放大（见
-            // `UpdaterOptions::depth_noise_scale_m`），在 chi2 与后续增益中降权。
             let p_marg = get_marginal_covariance(state, &x_order);
             let mut s = &h_x * p_marg * h_x.transpose();
             // 直接加对角线，跳过 DMatrix::identity 分配 + 矩阵加法（数学等价）
-            let depth = feat.p_FinA.z.max(0.1);
-            let sigma_eff_sq = self.options.sigma_pix_sq
-                * (1.0 + depth / self.options.depth_noise_scale_m).powi(2);
             for i in 0..s.nrows() {
-                s[(i, i)] += sigma_eff_sq;
+                s[(i, i)] += self.options.sigma_pix_sq;
             }
             let chi2 = match s.clone().cholesky() {
                 Some(chol) => res.dot(&chol.solve(&res)),
@@ -299,13 +275,11 @@ impl UpdaterMsckf {
 
             let row0 = total_rows;
             total_rows += h_x.nrows();
-            blocks.push((h_x, res, x_order, row0, depth));
+            blocks.push((h_x, res, x_order, row0, feat.p_FinA.z.max(0.1)));
         }
 
         // 6. 统一组装大矩阵（行 = 各特征行和；列 = 映射覆盖范围）
-        log::debug!(
-            "MSCKF 漏斗: 候选 {n_in} 三角化存活 {n_triang} 硬残差拒 {hard_cap_rej} 组装行 {total_rows}"
-        );
+        log::debug!("MSCKF 漏斗: 候选 {n_in} 三角化存活 {n_triang} 组装行 {total_rows}");
         // 可观测性：进更新特征的深度分布（诊断近/远特征占比与姿态可观性）
         if !blocks.is_empty() {
             let depths: Vec<String> = blocks
@@ -338,20 +312,6 @@ impl UpdaterMsckf {
             res_big.rows_range_mut(*row0..*row0 + rows).copy_from(res);
         }
 
-        // 深度自适应测量噪声：按特征 σ_eff 行归一化 H/res（远特征降权），
-        // 之后 R = σ²I（单位阵）。归一化必须在压缩前做——Givens 行旋转会
-        // 混合各特征行，先归一化才能保持各特征噪声独立（OpenVINS 固定 σ
-        // 时归一化系数恒 1，退化为原实现）。
-        for (h_x, _, _, row0, depth) in &blocks {
-            let sigma = self.options.sigma_pix * (1.0 + depth / self.options.depth_noise_scale_m);
-            let rows = h_x.nrows();
-            for i in 0..rows {
-                let inv = 1.0 / sigma;
-                hx_big.row_mut(row0 + i).apply(|v| *v *= inv);
-                res_big[row0 + i] *= inv;
-            }
-        }
-
         // 7. 测量压缩 + EKF 更新（对照 C++ 的末尾）
         measurement_compress_inplace(&mut hx_big, &mut res_big);
         if hx_big.nrows() == 0 {
@@ -379,14 +339,7 @@ impl UpdaterMsckf {
             pos_before.y,
             pos_before.z
         );
-        ekf_update(
-            state,
-            &hx_order,
-            &hx_big,
-            &res_big,
-            &r,
-            self.options.max_state_correction_m,
-        );
+        ekf_update(state, &hx_order, &hx_big, &res_big, &r);
         let dp = state.imu.pos() - pos_before;
         log::debug!(
             "MSCKF 更新后: 位置({:.2},{:.2},{:.2}) Δ=({:.3},{:.3},{:.3})",

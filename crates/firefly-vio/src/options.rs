@@ -164,43 +164,20 @@ impl StateOptions {
 /// 更新器选项（对照 `UpdaterOptions`：像素噪声 sigma 与 chi2 乘子）。
 #[derive(Debug, Clone)]
 pub struct UpdaterOptions {
-    /// chi2 检验乘子。
+    /// chi2 检验乘子（对照 `UpdaterOptions.h:36` 默认 5）。
     pub chi2_multipler: f64,
-    /// 像素测量噪声 sigma（px）。实测 KLT 在近特征大位移（10Hz、0.8m 深度
-    /// 下 ~31px/帧）存在运动相关滞后偏置 ~0.5px，σ=1 时滤波器把偏置当成
-    /// 真实姿态误差，每帧误修正 ~0.25°（roll/yaw 线性漂 → 重力投影错 →
-    /// 位置二次漂）。取 3.0 让测量不确定性覆盖偏置（OpenVINS 1.5，其场景
-    /// 特征位移小偏置低；本场景保守放大）。
+    /// 像素测量噪声 sigma（px），默认 1.0（对照 `UpdaterOptions.h:38`）。
     pub sigma_pix: f64,
     /// 像素测量噪声方差（`sigma_pix` 平方）。
     pub sigma_pix_sq: f64,
-    /// 特征深度上限（m，相机系前向）：超过即剔除。现场（MuJoCo 场景）纹理
-    /// 最远 ~8m（立柱/地面棋盘），>8m 的"远特征"视差 <1.4px（f=168、基线
-    /// 0.05m），深度误差 `σ_z ∝ z²` 爆炸且位置增益弱——实测 8-25m 墙特征残差
-    /// 被 EKF 解释为姿态/速度修正，把 roll/yaw 反复抽打（正反馈发散）。
-    pub max_feature_depth_m: f64,
-    /// 深度自适应噪声的比例深度（m）：`σ_eff = sigma_pix·(1 + depth/scale)`。
-    /// 远特征（`depth ≫ scale`）视差小、深度误差大（`σ_z ∝ z²`），同样像素残差
-    /// 对应大得多的位置/速度修正——固定 σ 时 EKF 增益把墙特征残差放大成
-    /// 灾难性修正（实测 5-25m 特征单次把速度踢飞 3-28 m）。按深度放大
-    /// 测量噪声后，远特征在 chi2 与 K 中自动降权（文献惯例：VINS-Mono
-    /// `sigma_dep = 1+z`）。现场场景中距 ~5m 取 5。
-    pub depth_noise_scale_m: f64,
-    /// 单步位置修正限幅（m）：极少测量（1-3 特征）的病态更新会把残差经
-    /// 膨胀协方差放大成米级修正（实测 3 行 2.4px → 1.02m、2 行 2.6px →
-    /// 2.11m），把速度/姿态踢飞后正反馈发散。超限时整体缩放 dx（保持方向）。
-    pub max_state_correction_m: f64,
 }
 
 impl Default for UpdaterOptions {
     fn default() -> Self {
         Self {
             chi2_multipler: 5.0,
-            sigma_pix: 3.0,
-            sigma_pix_sq: 9.0,
-            max_feature_depth_m: 8.0,
-            depth_noise_scale_m: 5.0,
-            max_state_correction_m: 0.5,
+            sigma_pix: 1.0,
+            sigma_pix_sq: 1.0,
         }
     }
 }
@@ -304,10 +281,9 @@ mod tests {
 
         let u = UpdaterOptions::default();
         assert!((u.chi2_multipler - 5.0).abs() < 1e-12);
-        // σ_pix=3.0（场景适配：近特征大位移下 KLT 亚像素偏置 ~0.5px，σ=1
-        // 时滤波器把偏置当姿态误差；OpenVINS 1.5 对应其小位移场景）
-        assert!((u.sigma_pix - 3.0).abs() < 1e-12);
-        assert!((u.sigma_pix_sq - 9.0).abs() < 1e-12);
+        // σ_pix=1.0（对照 UpdaterOptions.h:38 官方默认）
+        assert!((u.sigma_pix - 1.0).abs() < 1e-12);
+        assert!((u.sigma_pix_sq - 1.0).abs() < 1e-12);
     }
 
     #[test]

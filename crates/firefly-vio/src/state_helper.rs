@@ -92,10 +92,7 @@ pub fn ekf_propagation(
 /// EKF 更新（对照 `StateHelper::EKFUpdate`）。
 ///
 /// `h_order` 为测量涉及变量的 `(id, size)` 列表，`h`/`res`/`r` 为雅可比、
-/// 残差与测量噪声（`r` 为方阵）。`max_dp` 为位置修正限幅（m）：单步位置
-/// 修正超限时整体缩放 `dx`（保持方向）。极少测量（1-3 特征）的病态更新
-/// 会把残差经膨胀协方差放大成米级修正（实测 3 行 2.4px → 1.02m、短轨迹
-/// 特征 2.5px → 2.45m）——限幅防踢飞，OpenVINS 场景特征充足无需此门。
+/// 残差与测量噪声（`r` 为方阵）。
 ///
 /// # Panics
 /// 若 `S = H·P·Hᵀ + R` 不正定（无法 Cholesky），或更新后协方差对角为负。
@@ -105,7 +102,6 @@ pub fn ekf_update(
     h: &DMatrix<f64>,
     res: &DVector<f64>,
     r: &DMatrix<f64>,
-    max_dp: f64,
 ) {
     debug_assert_eq!(h.nrows(), res.len());
     debug_assert_eq!(h.nrows(), r.nrows());
@@ -157,22 +153,8 @@ pub fn ekf_update(
         );
     }
 
-    // dx = K·res，逐变量 boxplus 更新（对照 C++ 末尾循环）；位置/速度修正
-    // 限幅（见函数文档）
-    let mut dx = &k * res;
-    if max_dp.is_finite() && max_dp > 0.0 {
-        let pid = state.imu.id() as usize + 4;
-        let p_norm = dx.rows_range(pid..pid + 3).norm();
-        let v_norm = dx.rows_range(pid + 3..pid + 6).norm();
-        // 速度限幅（m/s）：速度幅值 ~1.5 m/s（Lissajous），单步速度修正
-        // 超 2 m/s 必为病态更新（实测单次把速度踢飞 20 m/s）
-        let dv_cap = 2.0;
-        let scale = (max_dp / p_norm).min(dv_cap / v_norm).min(1.0);
-        if scale < 1.0 {
-            dx *= scale;
-            log::debug!("EKF 修正限幅: |Δp|={p_norm:.2}m |Δv|={v_norm:.2}m/s → 缩放 {scale:.2}");
-        }
-    }
+    // dx = K·res，逐变量 boxplus 更新（对照 C++ 末尾循环）
+    let dx = &k * res;
     state.update_all(&dx);
 }
 
@@ -452,7 +434,7 @@ pub fn initialize_feature(
     // 用更新系统做 EKF 更新（对照 C++：if(Hup.rows()>0) EKFUpdate）
     //==========================================================
     if h_up.nrows() > 0 {
-        ekf_update(state, h_order, &h_up, &res_up, &r_up, f64::INFINITY);
+        ekf_update(state, h_order, &h_up, &res_up, &r_up);
     }
     true
 }
@@ -605,7 +587,7 @@ mod tests {
         let res = DVector::from_element(1, 1.0);
         let r = DMatrix::from_element(1, 1, 1.0);
         let order = [(0i32, 1usize)];
-        ekf_update(&mut s, &order, &h, &res, &r, f64::INFINITY);
+        ekf_update(&mut s, &order, &h, &res, &r);
         assert!((s.cov[(0, 0)] - 0.5).abs() < 1e-9, "cov={}", s.cov[(0, 0)]);
         // imu 第 0 个误差状态（四元数 x 分量）更新：dx[0]=0.5 →
         // dq = quatnorm([0.25,0,0,1]) → q[0] = 0.25/√(1+0.0625) = 0.242535...

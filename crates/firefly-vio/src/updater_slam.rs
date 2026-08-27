@@ -311,12 +311,10 @@ impl UpdaterSlam {
             };
             let chi2_check = chi2_95(res.len());
             if chi2 > self.options.chi2_multipler * chi2_check {
-                // 拒绝（对照 C++：非 aruco → 失败计数 + 删除）
+                // 拒绝（对照 C++ UpdaterSLAM.cpp:415：非 aruco → 失败计数 + 删除；
+                // should_marg 由 VioManager 每帧按 update_fail_count > 1 统一触发）
                 if let Some(l) = state.features_slam.get_mut(&feat.featid) {
                     l.update_fail_count += 1;
-                    if l.update_fail_count > 2 {
-                        l.should_marg = true;
-                    }
                 }
                 feat.to_delete = true;
                 consumed.push(feat.featid);
@@ -366,7 +364,7 @@ impl UpdaterSlam {
 
         // 4. EKF 更新（对照 C++ 末尾）
         let r = self.options.sigma_pix_sq * DMatrix::identity(total_rows, total_rows);
-        ekf_update(state, &hx_order_big, &hx_big, &res_big, &r, f64::INFINITY);
+        ekf_update(state, &hx_order_big, &hx_big, &res_big, &r);
         consumed
     }
 
