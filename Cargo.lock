@@ -1738,6 +1738,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "gicp"
+version = "0.1.0"
+dependencies = [
+ "fastrace",
+ "firefly-error",
+ "firefly-gicp",
+ "firefly-localization",
+ "firefly-map",
+ "firefly-observability",
+ "firefly-pubsub",
+ "iceoryx2",
+ "log",
+ "nalgebra",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "gimli"
 version = "0.32.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3365,8 +3383,6 @@ version = "0.1.0"
 dependencies = [
  "fastrace",
  "firefly-error",
- "firefly-gicp",
- "firefly-localization",
  "firefly-map",
  "firefly-observability",
  "firefly-planner",

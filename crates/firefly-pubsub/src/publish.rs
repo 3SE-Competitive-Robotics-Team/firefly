@@ -22,6 +22,9 @@ use crate::trace::TraceContext;
 /// odom 话题名（对照 `docs/architecture.md` 的 `topic: odom`）。
 pub const ODOM_TOPIC: &str = "Firefly/Odometry";
 
+/// 校正后里程计话题（GICP 融合输出，planner 订阅）。
+pub const CORRECTED_ODOM_TOPIC: &str = "Firefly/CorrectedOdometry";
+
 /// 泛型零拷贝发布端（iceoryx2 ipc 服务，User Header 携带 trace 上下文）。
 ///
 /// 约束对齐 iceoryx2 0.9.3 `publish_subscribe`（`Debug + ZeroCopySend`；
@@ -129,6 +132,9 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
 /// 带事件唤醒：publish 后自动 notify，订阅端可挂 `WaitSet` 即到即醒。
 pub struct OdomPublisher(Publisher<OdomMessage>);
 
+/// 校正后里程计发布器（话题 `Firefly/CorrectedOdometry`）。
+pub struct CorrectedOdomPublisher(Publisher<OdomMessage>);
+
 impl OdomPublisher {
     /// 打开 odom 话题的发布器。
     ///
@@ -147,6 +153,32 @@ impl OdomPublisher {
     }
 
     /// 发布一条 odom 消息（trace 上下文自动注入，见 [`Publisher::publish`]）。
+    ///
+    /// # Errors
+    /// 见 [`Publisher::publish`]。
+    pub fn publish(&self, msg: OdomMessage) -> Result<TraceContext, firefly_error::Error> {
+        self.0.publish(msg)
+    }
+}
+
+impl CorrectedOdomPublisher {
+    /// 打开校正后里程计话题的发布器。
+    ///
+    /// # Errors
+    /// 见 [`Publisher::with_topic`]。
+    pub fn new(node: &IpcNode) -> Result<Self, firefly_error::Error> {
+        Self::with_topic(node, CORRECTED_ODOM_TOPIC)
+    }
+
+    /// 以自定义话题名打开发布器。
+    ///
+    /// # Errors
+    /// 见 [`Publisher::with_topic_notify`]。
+    pub fn with_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
+        Ok(Self(Publisher::with_topic_notify(node, topic)?))
+    }
+
+    /// 发布一条校正后里程计。
     ///
     /// # Errors
     /// 见 [`Publisher::publish`]。

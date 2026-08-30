@@ -10,6 +10,9 @@ use iceoryx2::prelude::*;
 /// 真值话题（MuJoCo 物理环境发布，仿真阶段感知位姿源）。
 pub const GROUND_TRUTH_TOPIC: &str = "Firefly/GroundTruth";
 
+/// 校正后里程计话题（GICP 融合进程发布，planner 订阅，低频全局矫正 VIO 漂移）。
+pub const CORRECTED_ODOM_TOPIC: &str = "Firefly/CorrectedOdometry";
+
 /// 里程计消息（对照 `docs/architecture.md` 的 `topic: odom`）。
 ///
 /// 字段布局与 `firefly-vio` 的 `State` 输出对应：

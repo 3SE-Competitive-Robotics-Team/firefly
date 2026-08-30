@@ -3,27 +3,25 @@ description.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
-keywords = ['planner', 'ego-planner', 'navigation', 'robotics', 'simulation']
-categories = ['robotics', 'science', 'algorithms', 'mathematics', 'simulation', 'embedded']
-name = "planner"
+keywords = ['gicp', 'localization', 'slam', 'robotics']
+categories = ['robotics', 'science', 'algorithms']
+name = "gicp"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "planner"
+name = "gicp"
 path = "src/main.rs"
 
 [dependencies]
 fastrace = { workspace = true }
 firefly-error = { workspace = true }
+firefly-gicp = { workspace = true }
+firefly-localization = { workspace = true }
 firefly-map = { workspace = true }
 firefly-observability = { workspace = true }
-firefly-planner = { workspace = true }
 firefly-pubsub = { workspace = true }
-firefly-search = { workspace = true }
-firefly-trajectory = { workspace = true }
-firefly-viewer = { workspace = true }
 iceoryx2 = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }

@@ -109,6 +109,9 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
 /// 里程计订阅器（话题 `Firefly/Odometry`，泛型核心的命名封装）。
 pub struct OdomSubscriber(Subscriber<OdomMessage>);
 
+/// 校正后里程计订阅器（话题 `Firefly/CorrectedOdometry`）。
+pub struct CorrectedOdomSubscriber(Subscriber<OdomMessage>);
+
 impl OdomSubscriber {
     /// 打开 odom 话题的订阅器（与发布端话题名一致）。
     ///
@@ -127,6 +130,32 @@ impl OdomSubscriber {
     }
 
     /// 接收一条 odom 消息（见 [`Subscriber::receive`]）。
+    ///
+    /// # Errors
+    /// 见 [`Subscriber::receive`]。
+    pub fn receive(&self) -> Result<Option<ReceivedOdom>, firefly_error::Error> {
+        self.0.receive()
+    }
+}
+
+impl CorrectedOdomSubscriber {
+    /// 打开校正后里程计订阅器。
+    ///
+    /// # Errors
+    /// 见 [`Subscriber::with_topic`]。
+    pub fn new(node: &IpcNode) -> Result<Self, firefly_error::Error> {
+        Self::with_topic(node, crate::publish::CORRECTED_ODOM_TOPIC)
+    }
+
+    /// 以自定义话题名打开订阅器。
+    ///
+    /// # Errors
+    /// 见 [`Subscriber::with_topic`]。
+    pub fn with_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
+        Ok(Self(Subscriber::with_topic(node, topic)?))
+    }
+
+    /// 接收一条校正后里程计（见 [`Subscriber::receive`]）。
     ///
     /// # Errors
     /// 见 [`Subscriber::receive`]。
