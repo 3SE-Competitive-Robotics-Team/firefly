@@ -1,0 +1,22 @@
+[package]
+name = "firefly-localization"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "全局重定位与 VIO 的 ESKF 松耦合融合（GICP 位姿观测，R=h⁻¹，chi2 门控）"
+keywords = ["localization", "sensor-fusion", "ekf", "gicp", "robotics"]
+categories = ["robotics", "science", "algorithms"]
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+fastrace = { workspace = true }
+firefly-error = { workspace = true }
+firefly-gicp = { path = "../firefly-gicp" }
+firefly-map = { path = "../firefly-map" }
+log = { workspace = true }
+nalgebra = { workspace = true }
+
+[lints]
+workspace = true

@@ -32,6 +32,10 @@ use std::time::Duration;
 
 use fastrace::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
+use firefly_gicp::points::point_cloud::PointCloud;
+use firefly_gicp::points::traits::{PointCloudMut, PointCloudTrait};
+use firefly_localization::filter::{FusionFilter, FusionOptions};
+use firefly_localization::reloc::{GlobalRelocalizer, RelocOptions};
 use firefly_map::{DepthCamera, MapFile, VirtualWall, VoxelState, update_from_depth};
 use firefly_observability::init as init_observability;
 use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager, Reference};
@@ -45,7 +49,7 @@ use firefly_pubsub::subscriber::{OdomSubscriber, Subscriber};
 use firefly_viewer::Viewer;
 use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetRunResult;
-use nalgebra::{Isometry3, Point3, Quaternion, Translation3, UnitQuaternion, Vector3};
+use nalgebra::{Isometry3, Matrix4, Point3, Quaternion, Translation3, UnitQuaternion, Vector3};
 
 use crate::scene::{human_voxels, mujoco_map_file, parse_vec3};
 
@@ -60,6 +64,8 @@ const DEPTH_TIMEOUT: f64 = 1.0;
 const PERCEIVED_PERIOD: usize = 25;
 /// 地图衰减周期（帧；10Hz 循环下 5 帧 = 0.5s，对照官方 `fading_timer` 2Hz）。
 const FADE_TICKS: usize = 5;
+/// 全局重定位周期（帧；10Hz 循环下 10 帧 = 1Hz，低频矫正 VIO 漂移）。
+const RELOC_PERIOD: usize = 10;
 /// `configs/planner.toml` 缺省路径（相对运行目录，通常为仓库根）。
 const DEFAULT_CONFIG: &str = "configs/planner.toml";
 
@@ -143,6 +149,41 @@ fn hover_reference(position: Vector3<f64>, yaw_state: (f64, f64)) -> Reference {
         // 官方超时悬停的 yaw_dot 恒为 0
         yaw_dot: 0.0,
     }
+}
+
+/// `OdomSnapshot` → 齐次变换 `T_world_body`。
+fn snapshot_to_matrix(snap: &OdomSnapshot) -> Matrix4<f64> {
+    let t = snap.state.position.coords;
+    let q = snap.quat_xyzw;
+    let quat = UnitQuaternion::from_quaternion(Quaternion::new(q[3], q[0], q[1], q[2]));
+    Isometry3::from_parts(Translation3::new(t.x, t.y, t.z), quat).to_homogeneous()
+}
+
+/// 深度图转机体系点云（不含世界位姿，仅 `cam.pos_in_body + R·hit_cam`）。
+fn depth_to_body_cloud(depth: &[f32], cam: &DepthCamera) -> PointCloud {
+    let mut pts = Vec::new();
+    let mut v = 0usize;
+    while v < cam.height {
+        let mut u = 0usize;
+        while u < cam.width {
+            let z = f64::from(depth[v * cam.width + u]);
+            if z > 0.05 && z <= cam.max_range && z.is_finite() {
+                let dx = (u as f64 - cam.cx) / cam.focal;
+                let dy = -(v as f64 - cam.cy) / cam.focal;
+                let hit_cam = Vector3::new(dx * z, dy * z, -z);
+                let hit_body = cam.pos_in_body + cam.rot_cam_to_body * hit_cam;
+                pts.push(hit_body);
+            }
+            u += cam.pixel_step;
+        }
+        v += cam.pixel_step;
+    }
+    let mut cloud = PointCloud::new();
+    cloud.resize(pts.len());
+    for (i, p) in pts.into_iter().enumerate() {
+        cloud.set_point(i, nalgebra::Vector4::new(p.x, p.y, p.z, 1.0));
+    }
+    cloud
 }
 
 struct Args {
@@ -272,6 +313,9 @@ struct App {
     finished: bool,
     /// 衰减节拍计数（10Hz 累计，满 5 帧触发 2Hz `fade`）。
     fade_ticks: usize,
+    fusion: FusionFilter,
+    reloc: Option<GlobalRelocalizer>,
+    reloc_ticks: usize,
 }
 
 impl App {
@@ -280,6 +324,7 @@ impl App {
     /// # Errors
     ///
     /// 地图体素化 / 全局路径搜索 / IPC 端口创建失败。
+    #[allow(clippy::too_many_lines)]
     fn new(
         map_file: MapFile,
         viewer: Viewer,
@@ -352,6 +397,17 @@ impl App {
             }
         };
         log::info!("状态源：odom（新鲜度 {ODOM_FRESH_TIMEOUT}s）；真值不参与规划链路");
+        let fusion = FusionFilter::new(FusionOptions::default());
+        let reloc = match GlobalRelocalizer::from_map_file(&map_file, RelocOptions::default()) {
+            Ok(r) => {
+                log::info!("全局重定位靶图就绪（{} 点）", r.target().num_points());
+                Some(r)
+            }
+            Err(e) => {
+                log::warn!("全局重定位靶图不可用（空地图）：{e}");
+                None
+            }
+        };
         Ok(Self {
             manager,
             manager_options,
@@ -381,6 +437,9 @@ impl App {
             frame_offset: Vector3::new(frame_offset[0], frame_offset[1], frame_offset[2]),
             finished: false,
             fade_ticks: 0,
+            fusion,
+            reloc,
+            reloc_ticks: 0,
         })
     }
 
@@ -408,6 +467,10 @@ impl App {
                     },
                     quat_xyzw: [m.quat_x, m.quat_y, m.quat_z, m.quat_w],
                 });
+                if let Some(snap) = &self.latest_odom {
+                    let t_vio = snapshot_to_matrix(snap);
+                    self.fusion.predict(&t_vio);
+                }
             }
         }
         if let Some(sub) = &self.depth {
@@ -454,14 +517,83 @@ impl App {
     }
 
     /// 新鲜 odom 的规划系状态（超时返回 `None`，管理器回退轨迹推进估计）。
+    ///
+    /// 融合层矫正：`T_global = T_drift · T_vio`，速度经漂移旋转校正。
     fn measured(&self, now: f64) -> Option<firefly_planner::State> {
         if now - self.last_odom_recv >= ODOM_FRESH_TIMEOUT {
             return None;
         }
-        self.latest_odom.as_ref().map(|o| o.state)
+        let snap = self.latest_odom.as_ref()?;
+        let t_vio = snapshot_to_matrix(snap);
+        let t_corr = self.fusion.corrected_pose(&t_vio);
+        let p = t_corr.fixed_view::<3, 1>(0, 3).into_owned();
+        // 漂移旋转校正速度
+        let drift_rot = self.fusion.drift().fixed_view::<3, 3>(0, 0).into_owned();
+        let vel_corr = drift_rot * snap.state.velocity;
+        Some(firefly_planner::State {
+            position: Point3::new(p.x, p.y, p.z),
+            velocity: vel_corr,
+            acceleration: snap.state.acceleration,
+        })
     }
 
-    /// 深度 → 占据体素（感知建图）：位姿源与状态源同源（VIO odom）。
+    /// 低频全局重定位：`depth → body点云 → GICP → ESKF`。
+    #[fastrace::trace]
+    fn try_relocalize(&mut self) {
+        let Some(reloc) = &self.reloc else { return };
+        let Some(depth) = &self.latest_depth else {
+            return;
+        };
+        let Some(snap) = &self.latest_odom else {
+            return;
+        };
+        if !self.reloc_ticks.is_multiple_of(RELOC_PERIOD) {
+            return;
+        }
+        let t_vio = snapshot_to_matrix(snap);
+        // 机体系点云（不含世界位姿，GICP 估计全局位姿）
+        let body_cloud = depth_to_body_cloud(&depth.data, &self.depth_cam);
+        if body_cloud.num_points() < 30 {
+            return;
+        }
+        // 初值 = 融合预测的全局位姿
+        let init = self.fusion.corrected_pose(&t_vio);
+        let res = reloc.relocalize(&body_cloud, &init);
+        let total = res.total_points;
+        let r = &res.result;
+        let gate = self.fusion.update(
+            &t_vio,
+            &r.t_target_source,
+            &r.h,
+            r.num_inliers,
+            total,
+            r.error,
+            r.converged,
+        );
+        match gate {
+            firefly_localization::filter::RelocGate::Accepted {
+                chi2, threshold, ..
+            } => {
+                log::info!(
+                    "GICP矫正接受 chi2 {chi2:.2}/{threshold:.2} inliers {}/{} err {:.3}",
+                    r.num_inliers,
+                    total,
+                    r.error
+                );
+            }
+            firefly_localization::filter::RelocGate::RejectedChi2 { chi2, threshold } => {
+                log::debug!("GICP chi2拒收 {chi2:.2}>{threshold:.2}");
+            }
+            firefly_localization::filter::RelocGate::RejectedPrecheck { reason } => {
+                log::debug!("GICP预检拒收: {reason}");
+            }
+            firefly_localization::filter::RelocGate::RejectedNumerical { reason } => {
+                log::warn!("GICP数值异常拒收: {reason}");
+            }
+        }
+    }
+
+    /// 深度 → 占据体素（感知建图）：位姿源与融合后状态同源（VIO 经 GICP 矫正）。
     /// 深度与位姿任一断流都会在此早退——管线饥饿由 [`Self::depth_freshness`]
     /// 的计时基准停止推进体现（对照官方 `last_occ_update_time_` 只在实际
     /// 更新占据栅格时推进，"odom or depth lost!" 任一丢失都算）。
@@ -469,10 +601,13 @@ impl App {
         let (Some(depth), Some(odom)) = (&self.latest_depth, &self.latest_odom) else {
             return;
         };
-        let pos = odom.state.position.coords;
-        let q = odom.quat_xyzw;
-        let quat = UnitQuaternion::from_quaternion(Quaternion::new(q[3], q[0], q[1], q[2]));
-        let pose = Isometry3::from_parts(Translation3::new(pos.x, pos.y, pos.z), quat);
+        // 融合后全局位姿（与 `measured()` 同源，保证地图与规划同系）
+        let t_vio = snapshot_to_matrix(odom);
+        let t_corr = self.fusion.corrected_pose(&t_vio);
+        let trans = t_corr.fixed_view::<3, 1>(0, 3).into_owned();
+        let rot = t_corr.fixed_view::<3, 3>(0, 0).into_owned();
+        let quat = UnitQuaternion::from_rotation_matrix(&nalgebra::Rotation3::from_matrix(&rot));
+        let pose = Isometry3::from_parts(Translation3::new(trans.x, trans.y, trans.z), quat);
         update_from_depth(self.manager.map_mut(), &self.depth_cam, &pose, &depth.data);
         self.depth_freshness.observe(depth.timestamp);
     }
@@ -514,6 +649,10 @@ impl App {
             self.fade_ticks = 0;
         }
         self.update_motion();
+
+        // 低频全局重定位（1Hz）：矫正 VIO 漂移后作为状态源
+        self.reloc_ticks = self.reloc_ticks.wrapping_add(1);
+        self.try_relocalize();
 
         let measured = self.measured(now);
 

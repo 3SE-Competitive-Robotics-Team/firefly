@@ -1366,6 +1366,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "firefly-localization"
+version = "0.1.0"
+dependencies = [
+ "fastrace",
+ "firefly-error",
+ "firefly-gicp",
+ "firefly-map",
+ "log",
+ "nalgebra",
+]
+
+[[package]]
 name = "firefly-map"
 version = "0.1.0"
 dependencies = [
@@ -3351,6 +3363,8 @@ version = "0.1.0"
 dependencies = [
  "fastrace",
  "firefly-error",
+ "firefly-gicp",
+ "firefly-localization",
  "firefly-map",
  "firefly-observability",
  "firefly-planner",
