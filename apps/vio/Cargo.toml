@@ -19,14 +19,12 @@ fastrace = { workspace = true }
 firefly-error = { workspace = true }
 firefly-observability = { workspace = true }
 firefly-pubsub = { workspace = true }
-firefly-rerun = { workspace = true }
 firefly-vio = { workspace = true }
 firefly-vio-core = { workspace = true }
 firefly-vio-types = { workspace = true }
 iceoryx2 = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }
-rerun = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 

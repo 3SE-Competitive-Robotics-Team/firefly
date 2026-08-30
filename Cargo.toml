@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/*", "apps/*"]
-exclude = ["apps/firefly-sim"]
+exclude = ["apps/firefly-sim", "apps/firefly-viz"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -30,12 +30,10 @@ firefly-observability = { path = "crates/firefly-observability" }
 firefly-optimize = { path = "crates/firefly-optimize" }
 firefly-planner = { path = "crates/firefly-planner" }
 firefly-pubsub = { path = "crates/firefly-pubsub" }
-firefly-rerun = { path = "crates/firefly-rerun" }
 firefly-gicp = { path = "crates/firefly-gicp" }
 firefly-localization = { path = "crates/firefly-localization" }
 firefly-search = { path = "crates/firefly-search" }
 firefly-trajectory = { path = "crates/firefly-trajectory" }
-firefly-viewer = { path = "crates/firefly-viewer" }
 
 [workspace.package]
 edition = "2024"

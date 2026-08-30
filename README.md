@@ -17,9 +17,7 @@ EGO 规划器 Rust 实现：MINCO 后端 + Rebound 主循环 + 集群避碰。
 | `firefly-vio-core` | VIO 核心数学：传感器数据、IMU 标定、传播/更新（对照 `ov_core`） |
 | `firefly-vio-init` | 静止/动态初始化器（对照 `ov_init`） |
 | `firefly-vio` | MSCKF 编排：滑动窗口状态 + 视觉更新（对照 `ov_msckf`） |
-| `firefly-pubsub` | iceoryx2 零拷贝发布订阅 + trace 上下文中间件 |
-| `firefly-rerun` | Rerun 连接层：多进程共享 viewer + 图像/深度/位姿记录 |
-| `firefly-viewer` | 规划过程可视化：地图/路径/轨迹/障碍写入 rerun |
+| `firefly-pubsub` | iceoryx2 零拷贝发布订阅 + trace 上下文中间件（含 `Firefly/Viz` 可视化消息） |
 | `firefly-error` | kind/status 错误设计 |
 | `firefly-observability` | logforth + fastrace |
 
@@ -30,6 +28,7 @@ EGO 规划器 Rust 实现：MINCO 后端 + Rebound 主循环 + 集群避碰。
 | `planner` | 规划器进程入口 |
 | `vio` | VIO 进程入口 |
 | `firefly-sim` | Python 仿真环境（独立于 workspace） |
+| `firefly-viz` | Python 可视化进程：订阅 `Firefly/Viz` 统一写 rerun viewer/rrd |
 
 ## 快速开始
 

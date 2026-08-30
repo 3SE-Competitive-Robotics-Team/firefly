@@ -45,7 +45,24 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
     /// # Errors
     /// Service/Publisher 创建失败（IPC 资源不可用等）。
     pub fn with_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
-        let service = node
+        Self::with_topic_and_buffer(node, topic, None)
+    }
+
+    /// 以进程共享节点 + 自定义话题名创建发布器，并指定服务的
+    /// `subscriber_max_buffer_size`（订阅端环形缓冲历史上限；`None` 用
+    /// iceoryx2 默认 2，适用于 odom/相机等单消费者低频话题）。
+    ///
+    /// 服务首次创建时生效（后续 open 的端口必须 ≤ 该值）；高频突发话题
+    /// （如 [`crate::viz::VIZ_TOPIC`] 多实体 10Hz）显式调大防溢出丢帧。
+    ///
+    /// # Errors
+    /// Service/Publisher 创建失败（IPC 资源不可用等）。
+    pub fn with_topic_and_buffer(
+        node: &IpcNode,
+        topic: &str,
+        subscriber_max_buffer_size: Option<usize>,
+    ) -> Result<Self, firefly_error::Error> {
+        let mut builder = node
             .service_builder(&topic.try_into().map_err(|e| {
                 firefly_error::Error::new(
                     firefly_error::ErrorKind::InvalidArgument,
@@ -53,14 +70,16 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
                 )
             })?)
             .publish_subscribe::<T>()
-            .user_header::<TraceContext>()
-            .open_or_create()
-            .map_err(|e| {
-                firefly_error::Error::new(
-                    firefly_error::ErrorKind::Internal,
-                    format!("打开/创建话题 `{topic}` 失败: {e:?}"),
-                )
-            })?;
+            .user_header::<TraceContext>();
+        if let Some(size) = subscriber_max_buffer_size {
+            builder = builder.subscriber_max_buffer_size(size);
+        }
+        let service = builder.open_or_create().map_err(|e| {
+            firefly_error::Error::new(
+                firefly_error::ErrorKind::Internal,
+                format!("打开/创建话题 `{topic}` 失败: {e:?}"),
+            )
+        })?;
         let publisher = service.publisher_builder().create().map_err(|e| {
             firefly_error::Error::new(
                 firefly_error::ErrorKind::Internal,

@@ -101,12 +101,11 @@ cargo run -p planner -- --map apps/planner/maps/gate.ffmap  # 静态地图
 
 - **debug 数据一律进 rrd，禁止文本日志**
 - 分工：log 宏（logforth）只做进程级诊断（启动、错误、关键事件）；可结构化数据（位姿、图像、标量、轨迹、中间状态）进 rrd, viewer 可回放，CLI/RrdReader 可检索。
-- 写入（`firefly-rerun::Stream`）：
-  - 入口：`connect_or_spawn()` 连共享 viewer，`save(path)` 离线录制。
-  - 时间轴：`set_time(sim_time 秒)`。
-  - 封装：`log_gray_image` / `log_depth_image` / `log_pose` /
-    `log_line_strip` / `clear`；标量文本走 `stream()` 底层
-    （`rerun::Scalars` / `rerun::TextLog`）。
+- 写入（`firefly-viz` Python 进程统一写 rerun）：
+  - Rust 计算线程零 IO：经 `Firefly/Viz` 话题发布 `VizMessage`（iceoryx2 零拷贝），
+    `firefly-viz` 订阅后写 viewer/rrd。
+  - 入口：`firefly-viz` 默认连共享 viewer（`127.0.0.1:9876`），`--save path.rrd` 离线录制。
+  - 时间轴：消息携带 `sim_time` 秒，Python 端 `set_time`。
   - 实体路径按 app 前缀（`sensor/*`、`vio/*`、`plan/*`），
     遵守上文 rerun 可视化约定。
 - 读取：viewer 回放；`rerun rrd print --entity <path> -vvv` /
