@@ -6,8 +6,10 @@
 
 #![allow(clippy::pedantic)]
 
+pub mod config;
 pub mod filter;
 pub mod reloc;
 
+pub use config::LocalizationConfig;
 pub use filter::{FusionFilter, FusionOptions, RelocGate};
 pub use reloc::{GlobalRelocalizer, RelocOptions, RelocResult};

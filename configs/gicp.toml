@@ -1,0 +1,23 @@
+# GICP 全局重定位配置（firefly-localization，缺键回落代码默认值）
+# 用法：planner --config configs/gicp.toml 或合入 configs/planner.toml 的 [reloc]/[fusion] 段
+
+[reloc]
+downsampling_resolution = 0.2 # m，体素降采样（原 0.25，0.2 更密，召回更高）
+num_neighbors = 10 # 近邻数（法向/协方差）
+max_correspondence_distance = 2.0 # m，最大对应距离（原 1.0，容忍更大初值漂移）
+max_iterations = 20
+voxel_resolution = 1.0 # m，VGICP 体素（未启用时占位）
+
+[fusion]
+process_noise_rot = 0.000001 # rad²，单步过程噪声旋转
+process_noise_pos = 0.0001 # m²，单步过程噪声平移
+fallback_noise_rot = 0.0019 # rad²，h 不可逆回退（2.5°）
+fallback_noise_pos = 0.04 # m²，h 不可逆回退（0.2m）
+chi2_multiplier = 1.0 # chi2 阈值乘子
+min_inlier_ratio = 0.3 # 最小内点率（原 0.5，放宽以通过稀疏场景）
+min_num_inliers = 30
+max_registration_error = 1000000000.0 # 最大配准残差和
+max_correction_trans = 0.5 # m，单次矫正限幅平移
+max_correction_rot = 0.08726646259971647 # rad，单次矫正限幅旋转（5°）
+auto_scale_factor = 2.0 # 连续拒收后 R 放大倍数
+auto_scale_trigger = 3 # 触发放大的连续拒收次数

@@ -1375,6 +1375,8 @@ dependencies = [
  "firefly-map",
  "log",
  "nalgebra",
+ "serde",
+ "toml",
 ]
 
 [[package]]
