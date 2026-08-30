@@ -27,7 +27,8 @@ fn chi2_95(dof: usize) -> f64 {
 }
 
 /// 融合参数。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
 pub struct FusionOptions {
     /// 单步过程噪声：旋转 `rad²`。
     pub process_noise_rot: f64,
@@ -63,7 +64,7 @@ impl Default for FusionOptions {
             fallback_noise_rot: (2.5_f64.to_radians()).powi(2),
             fallback_noise_pos: 0.2_f64.powi(2),
             chi2_multiplier: 1.0,
-            min_inlier_ratio: 0.5,
+            min_inlier_ratio: 0.3,
             min_num_inliers: 30,
             max_registration_error: 1e9,
             max_correction_trans: 0.5,

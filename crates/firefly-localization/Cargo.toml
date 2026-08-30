@@ -17,6 +17,8 @@ firefly-gicp = { path = "../firefly-gicp" }
 firefly-map = { path = "../firefly-map" }
 log = { workspace = true }
 nalgebra = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
 
 [lints]
 workspace = true

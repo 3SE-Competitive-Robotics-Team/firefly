@@ -15,7 +15,8 @@ use firefly_map::{DepthCamera, MapFile};
 use nalgebra::{Isometry3, Matrix4, Point3, Vector4};
 
 /// 重定位参数（透传 `RegistrationSetting` 子集）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
 pub struct RelocOptions {
     /// 降采样分辨率 `m`。
     pub downsampling_resolution: f64,
@@ -32,9 +33,9 @@ pub struct RelocOptions {
 impl Default for RelocOptions {
     fn default() -> Self {
         Self {
-            downsampling_resolution: 0.25,
+            downsampling_resolution: 0.2,
             num_neighbors: 10,
-            max_correspondence_distance: 1.0,
+            max_correspondence_distance: 2.0,
             max_iterations: 20,
             voxel_resolution: 1.0,
         }
