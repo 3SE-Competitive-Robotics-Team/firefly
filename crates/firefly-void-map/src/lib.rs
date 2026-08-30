@@ -1,16 +1,24 @@
-//! DIVO 自适应体素地图（P2 实现）。
+//! DIVO 自适应体素地图（P2，论文 V 节 Local Mapping 完整实现）。
 //!
-//! 技术蓝本为 FAST-LIVO2 论文第 V 节（Local Mapping）与官方实现
-//! `include/voxel_map.h` / `src/voxel_map.cpp`：
-//! 哈希+八叉根体素、叶体素局部平面（中心/法向/协方差）、视觉地图点与
-//! 参考补丁、法向量离线精化、按需光线投射、环形缓冲滑窗。
+//! 技术蓝本为 FAST-LIVO2（`~/Projects/fast_livo2/`）：
+//! - 地图结构（V-A）：[`voxel::VoxelMap`] 哈希根体素 + [`octree::OctoNode`] 八叉细分；
+//! - 几何构建与更新（V-B）：[`plane::fit_plane`] SVD 平面判据与 `Σ_nq`；
+//! - 视觉地图点与补丁（V-C/D）：[`visual_point`] + [`image_patch`] 补丁金字塔与 NCC；
+//! - 法向精化（V-E）：[`normal_refine`] 仿射扭曲 + 光度最小化；
+//! - 可见性查询与光线投射（VII-A）：[`raycast`]。
+//!
+//! 接口契约见 [`voxel::VoxelMap`]（P3 测量模型与 P4 接线使用）。
 
-use firefly_void_types::state::State;
+pub mod image_patch;
+pub mod normal_refine;
+pub mod octree;
+pub mod options;
+pub mod plane;
+pub mod raycast;
+pub mod visual_point;
+pub mod voxel;
 
-/// 体素地图占位结构（P2 完整实现）。
-pub struct VoxelMap;
-
-impl VoxelMap {
-    /// 更新地图几何（P2 实现）。
-    pub fn update(&mut self, _state: &State) {}
-}
+pub use options::{PlaneOptions, VoxelMapOptions};
+pub use plane::{VoxelPlane, fit_plane};
+pub use visual_point::{PatchObservation, VisualPoint, VisualPointView};
+pub use voxel::{VoxelKey, VoxelMap};

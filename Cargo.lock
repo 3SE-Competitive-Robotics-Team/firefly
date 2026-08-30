@@ -621,8 +621,12 @@ dependencies = [
 name = "firefly-void-map"
 version = "0.1.0"
 dependencies = [
+ "fastrace",
  "firefly-void-types",
+ "log",
+ "nalgebra",
  "purecv",
+ "rayon",
 ]
 
 [[package]]

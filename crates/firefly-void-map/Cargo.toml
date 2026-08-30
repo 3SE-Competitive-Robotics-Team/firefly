@@ -11,8 +11,12 @@ repository.workspace = true
 readme.workspace = true
 
 [dependencies]
+fastrace = { workspace = true }
 firefly-void-types = { workspace = true }
+log = { workspace = true }
+nalgebra = { workspace = true }
 purecv = { workspace = true }
+rayon = { workspace = true }
 
 [lints]
 workspace = true
