@@ -11,9 +11,11 @@ repository.workspace = true
 readme.workspace = true
 
 [dependencies]
+firefly-error = { workspace = true }
 firefly-void-esikf = { workspace = true }
 firefly-void-map = { workspace = true }
 firefly-void-types = { workspace = true }
+nalgebra = { workspace = true }
 purecv = { workspace = true }
 
 [lints]
