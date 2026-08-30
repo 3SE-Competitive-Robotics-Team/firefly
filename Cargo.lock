@@ -633,9 +633,11 @@ dependencies = [
 name = "firefly-void-measure"
 version = "0.1.0"
 dependencies = [
+ "firefly-error",
  "firefly-void-esikf",
  "firefly-void-map",
  "firefly-void-types",
+ "nalgebra",
  "purecv",
 ]
 
