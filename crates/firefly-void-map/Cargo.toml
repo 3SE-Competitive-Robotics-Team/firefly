@@ -1,0 +1,18 @@
+[package]
+name = "firefly-void-map"
+version = "0.1.0"
+keywords = ['divo', 'voxel-map', 'mapping', 'robotics']
+categories = ['robotics', 'science', 'algorithms', 'mathematics']
+edition = "2024"
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+firefly-void-types = { workspace = true }
+purecv = { workspace = true }
+
+[lints]
+workspace = true

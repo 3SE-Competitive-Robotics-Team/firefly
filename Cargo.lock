@@ -597,6 +597,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "firefly-void"
+version = "0.1.0"
+dependencies = [
+ "firefly-void-esikf",
+ "firefly-void-map",
+ "firefly-void-measure",
+ "firefly-void-types",
+]
+
+[[package]]
+name = "firefly-void-esikf"
+version = "0.1.0"
+dependencies = [
+ "fastrace",
+ "firefly-error",
+ "firefly-void-types",
+ "log",
+ "nalgebra",
+]
+
+[[package]]
+name = "firefly-void-map"
+version = "0.1.0"
+dependencies = [
+ "firefly-void-types",
+ "purecv",
+]
+
+[[package]]
+name = "firefly-void-measure"
+version = "0.1.0"
+dependencies = [
+ "firefly-void-esikf",
+ "firefly-void-map",
+ "firefly-void-types",
+ "purecv",
+]
+
+[[package]]
+name = "firefly-void-types"
+version = "0.1.0"
+dependencies = [
+ "firefly-error",
+ "nalgebra",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1900,6 +1947,16 @@ dependencies = [
  "nalgebra",
  "serde",
  "toml",
+]
+
+[[package]]
+name = "void"
+version = "0.1.0"
+dependencies = [
+ "firefly-error",
+ "firefly-pubsub",
+ "firefly-void",
+ "log",
 ]
 
 [[package]]

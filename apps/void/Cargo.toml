@@ -1,0 +1,20 @@
+[package]
+name = "void"
+version = "0.1.0"
+keywords = ['divo', 'odometry', 'app', 'robotics']
+categories = ['robotics', 'science', 'algorithms', 'mathematics']
+edition = "2024"
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+firefly-error = { workspace = true }
+firefly-pubsub = { workspace = true }
+firefly-void = { workspace = true }
+log = { workspace = true }
+
+[lints]
+workspace = true
