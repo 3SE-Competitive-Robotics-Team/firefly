@@ -1,5 +1,5 @@
 //! planner 进程：任务执行（`firefly_planner::PlannerManager` 驱动）+ IPC
-//! 接线 + rerun 可视化。
+//! 接线 + 可视化发布（经 `Firefly/Viz` 话题，`firefly-viz` 进程统一写 rerun）。
 //!
 //! 状态源 = **VIO odom**（`Firefly/Odometry`，新鲜度超时回退轨迹参考推进）；
 //! 深度感知建图的位姿同源，深度流超时（对照官方 `grid_map/odom_depth_timeout`）
@@ -18,7 +18,7 @@
 //! `Firefly/MandatoryStop`（对照官方 `mandatory_stop` topic），收到即进入
 //! 急停且不自动恢复；`planner --mandatory-stop` 发一条指令后退出。
 //!
-//! rerun 实体约定（`sim_time` 时间轴）：`plan/global_path`、`plan/local_traj`
+//! viz 实体约定（`sim_time` 时间轴）：`plan/global_path`、`plan/local_traj`
 //! （+`velocity`）、`plan/planes`、`plan/drone`（位姿）、`plan/perceived`
 //! （感知占据地图）、`plan/motions`（动态障碍）、`plan/map`+`plan/decor`
 //! （静态先验，启动时一次性记录）。
@@ -32,7 +32,9 @@ use std::time::Duration;
 
 use fastrace::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_map::{DepthCamera, MapFile, VirtualWall, VoxelState, update_from_depth};
+use firefly_map::{
+    DepthCamera, GridMap, MapFile, Plane, VirtualWall, VoxelState, update_from_depth,
+};
 use firefly_observability::init as init_observability;
 use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager, Reference};
 use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage};
@@ -42,7 +44,9 @@ use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::reference::{REFERENCE_TOPIC, ReferenceMessage};
 use firefly_pubsub::subscriber::{OdomSubscriber, Subscriber};
-use firefly_viewer::Viewer;
+use firefly_pubsub::viz::{
+    ARROWS_MAX, POINTS_MAX, VIZ_TOPIC, VOXELS_MAX, VizMessage, VizPublisher, kind,
+};
 use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetRunResult;
 use nalgebra::{Isometry3, Point3, Quaternion, Translation3, UnitQuaternion, Vector3};
@@ -147,7 +151,6 @@ fn hover_reference(position: Vector3<f64>, yaw_state: (f64, f64)) -> Reference {
 
 struct Args {
     map: Option<PathBuf>,
-    save: Option<PathBuf>,
     config: PathBuf,
     start: [f64; 3],
     goal: Option<[f64; 3]>,
@@ -160,7 +163,6 @@ fn parse_args() -> Result<Args> {
     let mut it = std::env::args().skip(1);
     let mut args = Args {
         map: None,
-        save: None,
         config: PathBuf::from(DEFAULT_CONFIG),
         start: [1.0, 4.0, 1.0],
         // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
@@ -173,11 +175,6 @@ fn parse_args() -> Result<Args> {
             "--map" => {
                 args.map = Some(PathBuf::from(it.next().ok_or_else(|| {
                     Error::new(ErrorKind::InvalidArgument, "missing --map value")
-                })?));
-            }
-            "--save" => {
-                args.save = Some(PathBuf::from(it.next().ok_or_else(|| {
-                    Error::new(ErrorKind::InvalidArgument, "missing --save value")
                 })?));
             }
             "--config" => {
@@ -231,7 +228,8 @@ struct App {
     manager: PlannerManager,
     /// 管理器行为参数（来自配置，启动日志展示）。
     manager_options: ManagerOptions,
-    viewer: Viewer,
+    /// 可视化发布端（经 `Firefly/Viz` 话题，`firefly-viz` 进程统一写 rerun）。
+    viz_pub: Option<VizPublisher>,
     map_file: MapFile,
     /// 静态占据体素（动态障碍不得清掉它们）。
     static_occupied: HashSet<[usize; 3]>,
@@ -286,7 +284,6 @@ impl App {
     #[allow(clippy::too_many_lines)]
     fn new(
         map_file: MapFile,
-        viewer: Viewer,
         config: PlannerConfig,
         manager_options: ManagerOptions,
         start: [f64; 3],
@@ -366,10 +363,22 @@ impl App {
                 None
             }
         };
+        // 可视化发布端：经 Firefly/Viz 话题发布，firefly-viz 进程统一写 rerun
+        // （计算线程零 IO；创建失败只降级日志，规划链路不受影响）
+        let viz_pub = match VizPublisher::new(&node) {
+            Ok(p) => {
+                log::info!("已打开话题 {VIZ_TOPIC}");
+                Some(p)
+            }
+            Err(e) => {
+                log::warn!("可视化发布不可用（跳过 viz 输出）：{e}");
+                None
+            }
+        };
         Ok(Self {
             manager,
             manager_options,
-            viewer,
+            viz_pub,
             static_occupied,
             prev_dyn: Vec::new(),
             map_file,
@@ -552,7 +561,6 @@ impl App {
         self.poll_sensors()?;
         let now = self.t_sim;
         self.sensor_this_tick = false;
-        self.viewer.set_time(now);
 
         // 深度感知建图 + 动态障碍写入（规划地图更新先于重规划决策）
         self.update_map_from_depth();
@@ -649,22 +657,18 @@ impl App {
             }
         }
 
-        // 可视化：新轨迹 / 无人机位姿 / 动态障碍
+        // 可视化：新轨迹 / 无人机位姿 / 动态障碍（经 Firefly/Viz 发布）
         if report.replanned
             && let Some(result) = self.manager.last_result()
         {
-            self.viewer.log_path(
+            self.log_line_strip(
                 "plan/global_path",
                 self.manager.global_path(),
                 (90, 235, 120),
-            )?;
-            self.viewer.log_trajectory(
-                "plan/local_traj",
-                &result.trajectory,
-                (80, 160, 255),
-                (255, 200, 80),
-            )?;
-            self.viewer.log_planes("plan/planes", &result.planes)?;
+                now,
+            );
+            self.log_trajectory("plan/local_traj", &result.trajectory, now);
+            self.log_planes("plan/planes", &result.planes, now);
             log::info!(
                 "replan #{} 完成，时长 {:.2}s",
                 self.manager.replans(),
@@ -672,7 +676,7 @@ impl App {
             );
         }
         if let Some(odom) = &self.latest_odom {
-            self.viewer.log_pose(
+            self.log_pose(
                 "plan/drone",
                 [
                     odom.state.position.coords.x,
@@ -680,7 +684,8 @@ impl App {
                     odom.state.position.coords.z,
                 ],
                 odom.quat_xyzw,
-            )?;
+                now,
+            );
         }
         if !self.map_file.motions.is_empty() {
             let mut indices = Vec::new();
@@ -688,12 +693,7 @@ impl App {
                 let p = m.position_at(now);
                 indices.extend(human_voxels(p[0], p[1]));
             }
-            self.viewer.log_voxel_grid(
-                "plan/motions",
-                &indices,
-                [0.1, 0.1, 0.1],
-                [0.0, 0.0, 0.0],
-            )?;
+            self.log_voxels("plan/motions", &indices, now);
         }
         if report.finished {
             self.finished = true;
@@ -704,11 +704,12 @@ impl App {
     /// `WaitSet` 节拍驱动主循环：interval(10Hz)；SIGINT/SIGTERM → 优雅退出。
     fn run(&mut self) -> Result<()> {
         // 静态产物一次性记录（全局路径为 A* 简化缓存，不随 tick 重复写）
-        self.viewer.log_path(
+        self.log_line_strip(
             "plan/global_path",
             self.manager.global_path(),
             (90, 235, 120),
-        )?;
+            self.t_sim,
+        );
         log::info!(
             "主循环启动：10Hz，重规划阈值 {:.1}s，规划视界 {:.0}m",
             self.manager_options.replan_thresh,
@@ -754,9 +755,7 @@ impl App {
             // 感知占据地图全量记录（重内容，降频）
             if frame.is_multiple_of(PERCEIVED_PERIOD) {
                 let map = self.manager.map();
-                if let Err(e) = self.viewer.log_map("plan/perceived", map) {
-                    log::debug!("感知地图记录失败：{e}");
-                }
+                self.log_map("plan/perceived", map, self.t_sim);
             }
             // 时钟推进：本 tick 收到带 sim 时间戳消息则由传感器锚定（已在
             // 轮询时更新 `t_sim`）；否则本地回退递增（独立运行无传感器时）。
@@ -784,6 +783,126 @@ impl App {
             self.t_sim
         );
         Ok(())
+    }
+
+    // --- 可视化发布（经 Firefly/Viz 话题，firefly-viz 进程统一写 rerun）---
+
+    /// 发布一条可视化消息；无发布端或发布失败时静默降级（可视化不阻断规划）。
+    fn viz_publish(&self, msg: &VizMessage) {
+        if let Some(pub_) = &self.viz_pub
+            && let Err(e) = pub_.publish(*msg)
+        {
+            log::debug!("viz 发布失败：{e}");
+        }
+    }
+
+    /// 折线 → `line_strip` 消息。点数超上限 [`POINTS_MAX`] 时截断并告警一次。
+    fn log_line_strip(&self, entity: &str, points: &[Vector3<f64>], rgb: (u8, u8, u8), t: f64) {
+        let mut msg = VizMessage::base(kind::LINE_STRIP, t, entity);
+        msg.color = [rgb.0, rgb.1, rgb.2];
+        msg.point_count = points.len().min(POINTS_MAX) as u32;
+        for (i, p) in points.iter().take(POINTS_MAX).enumerate() {
+            msg.points[i] = [p.x, p.y, p.z];
+        }
+        if points.len() > POINTS_MAX {
+            log::warn!("{entity} 点数 {} 超上限 {POINTS_MAX}，已截断", points.len());
+        }
+        self.viz_publish(&msg);
+    }
+
+    /// 轨迹 → 采样折线（位置）+ 速度箭头（位于对应采样点）。
+    fn log_trajectory(&self, entity: &str, traj: &firefly_trajectory::Trajectory, t: f64) {
+        const SAMPLES: usize = 100;
+        let mut pts = Vec::with_capacity(SAMPLES);
+        let mut arrows: Vec<[f64; 3]> = Vec::with_capacity(SAMPLES);
+        for k in 0..SAMPLES {
+            let s = traj.eval(traj.duration() * k as f64 / SAMPLES as f64);
+            pts.push(s.position);
+            arrows.push([s.velocity.x, s.velocity.y, s.velocity.z]);
+        }
+        self.log_line_strip(entity, &pts, (80, 160, 255), t);
+        // 速度箭头挂在子实体，随轨迹同时间戳更新
+        let mut msg = VizMessage::base(kind::ARROWS, t, &format!("{entity}/velocity"));
+        msg.color = [255, 200, 80];
+        msg.arrow_count = SAMPLES.min(ARROWS_MAX) as u32;
+        for (i, (p, v)) in pts.iter().zip(&arrows).take(ARROWS_MAX).enumerate() {
+            msg.arrow_origins[i] = [p.x, p.y, p.z];
+            msg.arrow_vectors[i] = *v;
+        }
+        self.viz_publish(&msg);
+    }
+
+    /// 障碍平面（{s, v}）→ 法线向量（0.6m 长，黄）。
+    fn log_planes(&self, entity: &str, planes: &[Plane], t: f64) {
+        let mut msg = VizMessage::base(kind::ARROWS, t, entity);
+        msg.color = [240, 200, 60];
+        msg.arrow_count = planes.len().min(ARROWS_MAX) as u32;
+        for (i, p) in planes.iter().take(ARROWS_MAX).enumerate() {
+            let s = p.point();
+            let v = p.normal() * 0.6;
+            msg.arrow_origins[i] = [s.x, s.y, s.z];
+            msg.arrow_vectors[i] = [v.x, v.y, v.z];
+        }
+        self.viz_publish(&msg);
+    }
+
+    /// 位姿 → pose 消息（`plan/drone` 等刚体变换实体）。
+    fn log_pose(&self, entity: &str, pos: [f64; 3], quat_xyzw: [f64; 4], t: f64) {
+        let mut msg = VizMessage::base(kind::POSE, t, entity);
+        msg.color = [255, 255, 255];
+        msg.xyz = pos;
+        msg.quat_xyzw = quat_xyzw;
+        self.viz_publish(&msg);
+    }
+
+    /// 占据体素索引 → voxels 消息（体素中心 = 原点 + (idx+0.5)·尺寸，
+    /// Python 端 `VoxelGridMap` 直接镜像）。超限截断并告警一次（锁存防刷屏）。
+    fn log_voxels(&self, entity: &str, indices: &[(i32, i32, i32)], t: f64) {
+        let mut msg = VizMessage::base(kind::VOXELS, t, entity);
+        msg.voxel_count = indices.len().min(VOXELS_MAX) as u32;
+        for (i, &(x, y, z)) in indices.iter().take(VOXELS_MAX).enumerate() {
+            msg.voxels[i] = [x, y, z];
+        }
+        msg.voxel_size = [0.1, 0.1, 0.1];
+        msg.voxel_origin = [0.0, 0.0, 0.0];
+        if indices.len() > VOXELS_MAX {
+            log::warn!(
+                "{entity} 体素数 {} 超上限 {VOXELS_MAX}，已截断",
+                indices.len()
+            );
+        }
+        self.viz_publish(&msg);
+    }
+
+    /// 占据栅格地图 → voxels 消息（收集 Occupied 索引，体素中心与
+    /// `VoxelGridMap` 语义一致）。
+    fn log_map(&self, entity: &str, map: &GridMap, t: f64) {
+        let origin = map.origin();
+        let dims = map.dims();
+        let mut indices = Vec::new();
+        for x in 0..dims[0] {
+            for y in 0..dims[1] {
+                for z in 0..dims[2] {
+                    if map.state([x, y, z]) == VoxelState::Occupied {
+                        indices.push((x as i32, y as i32, z as i32));
+                    }
+                }
+            }
+        }
+        let mut msg = VizMessage::base(kind::VOXELS, t, entity);
+        msg.voxel_count = indices.len().min(VOXELS_MAX) as u32;
+        for (i, &(x, y, z)) in indices.iter().take(VOXELS_MAX).enumerate() {
+            msg.voxels[i] = [x, y, z];
+        }
+        msg.voxel_size = [map.resolution() as f32; 3];
+        msg.voxel_origin = [origin.x as f32, origin.y as f32, origin.z as f32];
+        if indices.len() > VOXELS_MAX {
+            log::warn!(
+                "{entity} 体素数 {} 超上限 {VOXELS_MAX}，已截断",
+                indices.len()
+            );
+        }
+        self.viz_publish(&msg);
     }
 }
 
@@ -844,7 +963,7 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!(
-                "{e}\n用法：planner [--map <map.ffmap>] [--config configs/planner.toml] [--save out.rrd] [--start x y z] [--goal x y z] [--frame-offset x y z] [--mandatory-stop]\n\n--goal 可省略（悬停等待 `uv run firefly-goal X Y Z` 动态目标）；--mandatory-stop 向 {MANDATORY_STOP_TOPIC} 发一条强制停止指令后退出"
+                "{e}\n用法：planner [--map <map.ffmap>] [--config configs/planner.toml] [--start x y z] [--goal x y z] [--frame-offset x y z] [--mandatory-stop]\n\n--goal 可省略（悬停等待 `uv run firefly-goal X Y Z` 动态目标）；--mandatory-stop 向 {MANDATORY_STOP_TOPIC} 发一条强制停止指令后退出"
             );
             std::process::exit(2);
         }
@@ -879,24 +998,10 @@ fn main() {
         log::info!("未指定 --map，加载 MuJoCo 默认场景静态地图（深度感知补充）");
         mujoco_map_file()
     };
-    let viewer = match &args.save {
-        Some(path) => Viewer::save(path),
-        // 已有 rerun viewer 则共享（vio 同 viewer 同 recording），否则自动 spawn
-        None => Viewer::connect_or_spawn(),
-    };
-    let viewer = match viewer {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("启动 viewer 失败：{e}");
-            std::process::exit(1);
-        }
-    };
-    if let Err(e) = viewer.send_default_blueprint() {
-        log::warn!("默认布局发送失败（沿用 viewer 当前布局）：{e}");
-    }
+    // 可视化发布端在 App::new 内随进程共享节点创建（经 Firefly/Viz 话题，
+    // firefly-viz 进程统一写 rerun）
     match App::new(
         map_file,
-        viewer,
         toml_cfg.config,
         toml_cfg.manager,
         args.start,
@@ -904,9 +1009,9 @@ fn main() {
         args.frame_offset,
     ) {
         Ok(mut app) => {
-            // 静态先验一次性记录
+            // 静态先验一次性记录（体素索引收集在发布端完成）
             let grid = app.manager.map().clone();
-            app.viewer.log_map("plan/map", &grid).expect("log map");
+            app.log_map("plan/map", &grid, 0.0);
             if let Err(e) = app.run() {
                 log::error!("planner 失败：{e}");
                 firefly_observability::flush();

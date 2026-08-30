@@ -7,6 +7,7 @@ members = [
     "firefly",
     "firefly-mujoco",
     "firefly-sim",
+    "firefly-viz",
 ]
 
 [[package]]
@@ -59,6 +60,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "firefly-mujoco" },
     { name = "firefly-sim" },
+    { name = "firefly-viz" },
 ]
 
 [package.dev-dependencies]
@@ -70,6 +72,7 @@ dev = [
 requires-dist = [
     { name = "firefly-mujoco", editable = "packages/firefly-mujoco" },
     { name = "firefly-sim", editable = "apps/firefly-sim" },
+    { name = "firefly-viz", editable = "apps/firefly-viz" },
 ]
 
 [package.metadata.requires-dev]
@@ -119,6 +122,25 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23" },
 ]
 provides-extras = ["test"]
+
+[[package]]
+name = "firefly-viz"
+version = "0.1.0"
+source = { editable = "apps/firefly-viz" }
+dependencies = [
+    { name = "firefly-mujoco" },
+    { name = "iceoryx2" },
+    { name = "numpy" },
+    { name = "rerun-sdk" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "firefly-mujoco", editable = "packages/firefly-mujoco" },
+    { name = "iceoryx2", specifier = "==0.9.3" },
+    { name = "numpy", specifier = ">=2,<3" },
+    { name = "rerun-sdk", specifier = ">=0.36.2" },
+]
 
 [[package]]
 name = "fsspec"

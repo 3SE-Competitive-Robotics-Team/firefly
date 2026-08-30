@@ -23,7 +23,6 @@ firefly-planner = { workspace = true }
 firefly-pubsub = { workspace = true }
 firefly-search = { workspace = true }
 firefly-trajectory = { workspace = true }
-firefly-viewer = { workspace = true }
 iceoryx2 = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }

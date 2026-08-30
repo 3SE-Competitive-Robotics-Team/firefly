@@ -6,11 +6,9 @@
 //! 上下文（跨进程 span 树可观测）。
 //!
 //! 运行：`cargo run -p vio`（配合 `uv run firefly-sim` 的 `MuJoCo` 物理环境）。
-//! - 瘦版 rerun：10Hz 位姿/轨迹（`vio/odom`+`vio/traj` 橙、真值
+//! - 瘦版可视化：10Hz 位姿/轨迹（`vio/odom`+`vio/traj` 橙、真值
 //!   `gt/pose`+`gt/traj` 蓝，统一 `sim_time` 时间轴），只记位姿不流图像。
-//!   无 viewer 则自起，失败不影响估计。
-//!   约束：轨迹实体必须与位姿实体平级——rerun 父实体的 `Transform3D`
-//!   会套用整个子树，折线挂在 `vio/odom` 下会被位姿二次变换。
+//!   经 `Firefly/Viz` 话题发布，`firefly-viz` 进程统一写 rerun（计算线程零 IO）。
 //! - GT 仅用于可视化，不进估计器；无 depth 订阅
 //! - `node.wait(1ms)` 节拍尽快消费消息，Ctrl-C 优雅退出
 
@@ -24,7 +22,7 @@ use firefly_pubsub::node::create_node;
 use firefly_pubsub::odom::{GROUND_TRUTH_TOPIC, OdomMessage};
 use firefly_pubsub::publish::{ODOM_TOPIC, OdomPublisher};
 use firefly_pubsub::subscriber::Subscriber;
-use firefly_rerun::Stream;
+use firefly_pubsub::viz::{VizMessage, VizPublisher, kind};
 use firefly_vio::options::VioManagerOptions;
 use firefly_vio::vio_manager::VioManager;
 use firefly_vio_core::cam::{CamRadtan, SharedCamera};
@@ -168,28 +166,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let odom_pub = OdomPublisher::new(&node)?;
     log::info!("已打开话题 {ODOM_TOPIC}");
 
+    // 可视化发布器：经 Firefly/Viz 话题发布，firefly-viz 进程统一写 rerun
+    // （计算线程零 IO；发布失败只降级 debug 日志，不影响估计）
+    let viz_pub = VizPublisher::new(&node)?;
+    log::info!(
+        "已打开话题 {VIZ_TOPIC}",
+        VIZ_TOPIC = firefly_pubsub::viz::VIZ_TOPIC
+    );
+
     // 输入源：订阅 MuJoCo 物理环境（IMU/双目灰度），imu 话题由 MuJoCo 发布
     let mut input = IceoryxInput::new(&node)?;
     log::info!("输入源：订阅 MuJoCo 物理环境（IMU/双目灰度），imu 话题由 MuJoCo 发布");
 
-    // 瘦版 rerun：已有 viewer 共享，否则自起；失败只降级不影响估计
-    let viewer = match Stream::connect_or_spawn() {
-        Ok(v) => {
-            log::info!("rerun viewer 就绪（gt/odom 位姿可视化）");
-            if let Err(e) = v.send_default_blueprint() {
-                log::warn!("默认布局发送失败（沿用 viewer 当前布局）：{e}");
-            }
-            Some(v)
-        }
-        Err(e) => {
-            log::warn!("rerun viewer 不可用（跳过可视化，继续运行）：{e}");
-            None
-        }
-    };
     // 真值订阅（仅可视化对比，估计器不读）
     let gt_sub = match Subscriber::<OdomMessage>::with_topic(&node, GROUND_TRUTH_TOPIC) {
         Ok(s) => {
-            log::info!("已订阅真值话题 {GROUND_TRUTH_TOPIC}（rerun 可视化）");
+            log::info!("已订阅真值话题 {GROUND_TRUTH_TOPIC}（可视化对比）");
             Some(s)
         }
         Err(e) => {
@@ -250,7 +242,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut vio,
         &mut input,
         &odom_pub,
-        viewer.as_ref(),
+        &viz_pub,
         gt_sub.as_ref(),
         &node,
     )?;
@@ -273,15 +265,15 @@ fn run_loop(
     vio: &mut VioManager,
     input: &mut dyn SensorInput,
     odom_pub: &OdomPublisher,
-    viewer: Option<&Stream>,
+    viz_pub: &VizPublisher,
     gt_sub: Option<&Subscriber<OdomMessage>>,
     node: &firefly_pubsub::node::IpcNode,
 ) -> Result<(), firefly_error::Error> {
     let mut t_sim = 0.0f64;
     let mut next_odom = 0.0f64;
     let mut wake_count = 0u64;
-    let mut est_traj: Vec<[f64; 3]> = Vec::new();
-    let mut gt_traj: Vec<[f64; 3]> = Vec::new();
+    let mut est_prev: Option<[f64; 3]> = None;
+    let mut gt_prev: Option<[f64; 3]> = None;
     let mut camera_count = 0u64;
     let mut imu_batch_count = 0u64;
     let t_wall_start = std::time::Instant::now();
@@ -355,7 +347,7 @@ fn run_loop(
         }
         imu_batch_count += u64::from(imu_batch);
 
-        // 相机（MSCKF 视觉更新）+ 前端健康度 rerun
+        // 相机（MSCKF 视觉更新）+ 前端健康度经 Firefly/Viz 发布
         if let Some(cam) = input.next_camera() {
             camera_count += 1;
             vio.feed_measurement_camera(&cam);
@@ -366,10 +358,9 @@ fn run_loop(
                 cam.images.first().map_or(0, |g| g.width),
                 cam.images.first().map_or(0, |g| g.height),
             );
-            // Hunt: keep 11, log track_length histogram + triangulation cond (no RMS gate)
-            // open_vins same 11 works with ~15 frames vs firefly ~8 (purecv f32 vs opencv u8)
-            if let Some(viewer) = viewer {
-                viewer.set_time(t_sim);
+            // 前端健康度：统计保留在计算线程，结果经 Firefly/Viz 发布
+            // （bar_chart/scalars），firefly-viz 进程统一写 rerun
+            {
                 let db = vio.track_feats.database();
                 let mut hist = vec![0i64; 21];
                 let mut total_len = 0usize;
@@ -387,17 +378,26 @@ fn run_loop(
                     0.0
                 };
                 // BarChart: x=track_length, y=count
-                let _ = viewer.stream().log(
-                    "vio/debug/track_length",
-                    &rerun::BarChart::new(hist.clone()),
-                );
-                let _ = viewer.stream().log(
-                    "vio/debug/db_size",
-                    &rerun::Scalars::new([db.size() as f64]),
-                );
-                let _ = viewer
-                    .stream()
-                    .log("vio/debug/track_avg_len", &rerun::Scalars::new([avg_len]));
+                let mut hist_msg =
+                    VizMessage::base(kind::BAR_CHART, t_sim, "vio/debug/track_length");
+                for (i, &v) in hist.iter().enumerate() {
+                    hist_msg.bins[i] = v as u64;
+                }
+                hist_msg.bin_count = hist.len() as u32;
+                hist_msg.bin_start = 0;
+                hist_msg.bin_width = 1;
+                let _ = viz_pub.publish(hist_msg);
+
+                // Scalars: db_size / avg_len 单值也走 scalars 消息
+                for (entity, value) in [
+                    ("vio/debug/db_size", db.size() as f64),
+                    ("vio/debug/track_avg_len", avg_len),
+                ] {
+                    let mut msg = VizMessage::base(kind::SCALARS, t_sim, entity);
+                    msg.scalars[0] = value;
+                    msg.scalar_count = 1;
+                    let _ = viz_pub.publish(msg);
+                }
                 log::debug!(
                     "frontend health t={:.2} db={} avg_len={:.1} hist={:?}",
                     t_sim,
@@ -427,18 +427,18 @@ fn run_loop(
         if t_sim + 1e-9 >= next_odom {
             let s = &vio.state;
             publish_odom(odom_pub, t_sim, s.timestamp, &s.imu, vio.initialized());
-            // 瘦版 rerun：位姿 + 轨迹折线 @10Hz（只记位姿不流图像）
-            if let Some(viewer) = viewer {
+            // 瘦版可视化：位姿 + 轨迹折线 @10Hz（只记位姿不流图像）
+            {
                 let p = s.imu.pos();
                 let q = s.imu.quat();
                 log_viz(
-                    viewer,
+                    viz_pub,
                     t_sim,
                     [p.x, p.y, p.z],
                     [q[0], q[1], q[2], q[3]],
                     gt_sub,
-                    &mut est_traj,
-                    &mut gt_traj,
+                    &mut est_prev,
+                    &mut gt_prev,
                 );
             }
             next_odom += ODOM_PERIOD;
@@ -518,25 +518,38 @@ fn publish_odom(
     }
 }
 
-/// 瘦版 rerun 记录：估计位姿/轨迹折线（橙）+ 最新真值样本（蓝），
-/// 统一 `sim_time` 时间轴。仅可视化，任何失败只降级 debug 日志。
+/// 瘦版可视化发布：估计位姿（橙）+ 最新真值样本（蓝），统一 `sim_time`
+/// 时间轴，经 [`VIZ_TOPIC`] 由 `firefly-viz` 统一写 rerun。轨迹按官方增量段
+/// 写法——同 entity 同一时间轴每次只发「上一帧→本帧」的两点段，由 rerun
+/// 沿时间累积拼接成整条折线（存储 O(N)；每帧全量重写整条历史为 O(N²)）。
+/// 发布失败只降级 debug 日志，不影响估计。
 fn log_viz(
-    viewer: &Stream,
+    viz_pub: &VizPublisher,
     t_sim: f64,
     pos: [f64; 3],
     quat_xyzw: [f64; 4],
     gt_sub: Option<&Subscriber<OdomMessage>>,
-    est_traj: &mut Vec<[f64; 3]>,
-    gt_traj: &mut Vec<[f64; 3]>,
+    est_prev: &mut Option<[f64; 3]>,
+    gt_prev: &mut Option<[f64; 3]>,
 ) {
-    viewer.set_time(t_sim);
-    est_traj.push(pos);
-    let logged = viewer
-        .log_pose("vio/odom", pos, quat_xyzw)
-        .and_then(|()| viewer.log_line_strip("vio/traj", est_traj, ODOM_COLOR));
-    if let Err(e) = logged {
-        log::debug!("rerun 记录 odom 失败：{e}");
+    let mut pose = VizMessage::base(kind::POSE, t_sim, "vio/odom");
+    pose.color = [ODOM_COLOR.0, ODOM_COLOR.1, ODOM_COLOR.2];
+    pose.xyz = pos;
+    pose.quat_xyzw = quat_xyzw;
+    if let Err(e) = viz_pub.publish(pose) {
+        log::debug!("viz 发布 odom 位姿失败：{e}");
     }
+    if let Some(prev) = *est_prev {
+        let mut seg = VizMessage::base(kind::LINE_STRIP, t_sim, "vio/traj");
+        seg.color = [ODOM_COLOR.0, ODOM_COLOR.1, ODOM_COLOR.2];
+        seg.points[0] = prev;
+        seg.points[1] = pos;
+        seg.point_count = 2;
+        if let Err(e) = viz_pub.publish(seg) {
+            log::debug!("viz 发布 vio/traj 段失败：{e}");
+        }
+    }
+    *est_prev = Some(pos);
     let Some(gt) = gt_sub else { return };
     let Ok(Some(sample)) = gt.receive() else {
         return;
@@ -544,13 +557,24 @@ fn log_viz(
     let m = &*sample;
     let gpos = [m.position_x, m.position_y, m.position_z];
     let gquat = [m.quat_x, m.quat_y, m.quat_z, m.quat_w];
-    gt_traj.push(gpos);
-    let logged = viewer
-        .log_pose("gt/pose", gpos, gquat)
-        .and_then(|()| viewer.log_line_strip("gt/traj", gt_traj, GT_COLOR));
-    if let Err(e) = logged {
-        log::debug!("rerun 记录 gt 失败：{e}");
+    let mut gpose = VizMessage::base(kind::POSE, t_sim, "gt/pose");
+    gpose.color = [GT_COLOR.0, GT_COLOR.1, GT_COLOR.2];
+    gpose.xyz = gpos;
+    gpose.quat_xyzw = gquat;
+    if let Err(e) = viz_pub.publish(gpose) {
+        log::debug!("viz 发布 gt 位姿失败：{e}");
     }
+    if let Some(prev) = *gt_prev {
+        let mut seg = VizMessage::base(kind::LINE_STRIP, t_sim, "gt/traj");
+        seg.color = [GT_COLOR.0, GT_COLOR.1, GT_COLOR.2];
+        seg.points[0] = prev;
+        seg.points[1] = gpos;
+        seg.point_count = 2;
+        if let Err(e) = viz_pub.publish(seg) {
+            log::debug!("viz 发布 gt/traj 段失败：{e}");
+        }
+    }
+    *gt_prev = Some(gpos);
 }
 
 /// `MuJoCo` 双目相机外参（OpenVINS JPL 约定），返回 `(q_ito_c, [p_left, p_right])`。
