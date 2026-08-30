@@ -36,8 +36,8 @@ class DroneEnv:
         timestep: 物理步长（秒）。
         gyro_noise: 陀螺仪白噪声标准差（rad/s）。
         accel_noise: 加速度计白噪声标准差（m/s²）。
-        depth_noise: 深度噪声比例系数（σ = depth_noise·min(z, 50) 米，
-            空区/远平面不加噪）。
+        depth_noise: 深度噪声强度（视差域 σ_disp = 4·depth_noise px，σ_z≈z²·σ_disp/(f·B)
+            ∝z²，空区/远平面不加噪；另含 5~15% 随机丢点与 1px 边缘膨胀）。
     """
 
     def __init__(
@@ -140,18 +140,81 @@ class DroneEnv:
     def render_depth(self) -> np.ndarray:
         """深度（H×W float32，米）。
 
-        离屏渲染（macOS OpenGL 无 ARB_clip_control，远距精度有限）；按
-        `depth_noise` 加比例噪声（σ = depth_noise·min(z, 50) m），仅对
-        有效命中（z < 100 m）加噪，空区/远平面保持原值。
+        离屏渲染（macOS OpenGL 无 ARB_clip_control，远距精度有限）；噪声模型：
+
+        1. 视差域高斯（σ_z∝z²）：disp=f·B/z，σ_disp=4·depth_noise px，
+           σ_z≈z²·σ_disp/(f·B)，比线性模型远距更狠；
+        2. 边缘膨胀 1px：深度不连续处前景向背景扩 1 像素（模拟飞点/增胖）；
+        3. 随机丢点 5~15%：有效像素置 0（planner 视为无效，z≤0.05）。
+        仅对有效命中（0.05<z<100m）处理，空区/远平面保持原值。
         """
         self._renderer.update_scene(self.data, camera="cam_depth")
         self._renderer.enable_depth_rendering()
         depth = self._renderer.render().copy()
         self._renderer.disable_depth_rendering()
-        if self._depth_noise > 0:
-            valid = depth < 100.0
-            sigma = self._depth_noise * np.minimum(depth, 50.0)
-            depth = np.where(valid, depth + np.random.normal(0.0, sigma, depth.shape), depth)
+        if self._depth_noise <= 0:
+            return depth
+        valid = (depth > 0.05) & (depth < 100.0) & np.isfinite(depth)
+        if not np.any(valid):
+            return depth
+        # 1. 视差域高斯：f≈168.6 (fovy 70.88°, H=240), B=0.05m, f·B≈8.43
+        focal = 120.0 / np.tan(np.deg2rad(70.88 / 2.0))
+        baseline = 0.05
+        fb = focal * baseline
+        disp = np.zeros_like(depth, dtype=np.float64)
+        disp[valid] = fb / depth[valid].astype(np.float64)
+        sigma_disp = float(self._depth_noise) * 4.0
+        disp_noise = np.random.normal(0.0, sigma_disp, size=depth.shape)
+        disp_noisy = disp + disp_noise
+        disp_noisy = np.maximum(disp_noisy, 0.1)
+        depth_noisy = depth.astype(np.float64)
+        depth_noisy[valid] = fb / disp_noisy[valid]
+        depth = depth_noisy.astype(depth.dtype, copy=False)
+        # 2. 边缘膨胀：深度不连续 > max(0.12, 0.04·z) 判为边缘，前景向外扩 1px
+        # 有效性掩码参与判断，避免无效区干扰
+        d = depth.astype(np.float64)
+        v = valid
+        # 阈值：近距 12cm，远距 4%·z
+        thresh = np.maximum(0.12, 0.04 * np.maximum(d, 0.0))
+        # 四邻差分
+        pad_d = np.pad(d, 1, mode="edge")
+        pad_v = np.pad(v, 1, mode="constant", constant_values=False)
+        # 中心切片
+        c = pad_d[1:-1, 1:-1]
+        c_v = pad_v[1:-1, 1:-1]
+        # 邻域
+        up = pad_d[0:-2, 1:-1]
+        up_v = pad_v[0:-2, 1:-1]
+        down = pad_d[2:, 1:-1]
+        down_v = pad_v[2:, 1:-1]
+        left = pad_d[1:-1, 0:-2]
+        left_v = pad_v[1:-1, 0:-2]
+        right = pad_d[1:-1, 2:]
+        right_v = pad_v[1:-1, 2:]
+        edge = np.zeros_like(v, dtype=bool)
+        for nb, nb_v in [(up, up_v), (down, down_v), (left, left_v), (right, right_v)]:
+            edge |= c_v & nb_v & (np.abs(c - nb) > thresh)
+        if np.any(edge):
+            # 前景深度在边缘处取较小值（近处）
+            edge_depth = np.where(edge, d, np.inf)
+            pad_e = np.pad(edge_depth, 1, constant_values=np.inf)
+            # 3×3 最小值（前景向外扩）
+            min3 = np.full_like(edge_depth, np.inf)
+            h, w = edge_depth.shape
+            for di in range(3):
+                for dj in range(3):
+                    cand = pad_e[di : di + h, dj : dj + w]
+                    np.minimum(min3, cand, out=min3)
+            dilated = np.isfinite(min3)
+            # 仅在非边缘、有效且背景更远的像素上膨胀
+            fatten = (~edge) & dilated & v & (d > min3 + 1e-9)
+            depth[fatten] = min3[fatten].astype(depth.dtype, copy=False)
+            # 更新有效掩码（膨胀后仍有效）
+            valid = (depth > 0.05) & (depth < 100.0) & np.isfinite(depth)
+        # 3. 随机丢点 5~15%（仅有效像素）
+        hole_rate = float(np.random.uniform(0.05, 0.15))
+        hole = (np.random.random(depth.shape) < hole_rate) & valid
+        depth[hole] = 0.0
         return depth
 
     def gt_pose(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
