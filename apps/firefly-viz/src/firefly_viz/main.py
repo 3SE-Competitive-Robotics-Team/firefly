@@ -78,11 +78,22 @@ def _open_recording(args: argparse.Namespace) -> None:
 
 
 def _send_default_blueprint() -> None:
-    """默认布局：场景 3D 视图 + 全部空间实体（对照已删 firefly-rerun 的
-    `send_default_blueprint` 语义：origin `/` + `+ /**`）。"""
-    scene = rr.blueprint.Spatial3DView(origin="/", contents=["+ /**"])
+    """默认布局：场景 3D 视图 + 全部空间实体；sim_time 配 [最早, 游标] 可见
+    时间范围，viewer 端用 range 查询聚合全部历史增量段（增量写 + 全量显示，
+    对照 rerun 官方示例 line_strips3d_time_window）。"""
+    scene = rr.blueprint.Spatial3DView(
+        origin="/",
+        contents=["+ /**"],
+        time_ranges=[
+            rr.blueprint.VisibleTimeRange(
+                "sim_time",
+                start=rr.blueprint.TimeRangeBoundary.infinite(),
+                end=rr.blueprint.TimeRangeBoundary.cursor_relative(),
+            )
+        ],
+    )
     rr.send_blueprint(rr.blueprint.Blueprint(scene))
-    log("已发送默认布局（场景 3D）")
+    log("已发送默认布局（场景 3D，sim_time 全历史可见范围）")
 
 
 def _entity(msg: VizMessage) -> str:
