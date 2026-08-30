@@ -66,7 +66,7 @@ impl Viewer {
         self.stream.set_time(seconds);
     }
 
-    /// 发送默认 viewer 布局（场景 3D + VIO 前端健康度），见
+    /// 发送默认 viewer 布局（场景 3D），见
     /// [`Stream::send_default_blueprint`](firefly_rerun::Stream::send_default_blueprint)。
     ///
     /// # Errors
