@@ -104,3 +104,10 @@ brief 文件：`/tmp/firefly_void/brief_N.md`（只给官方源码位置与差�
 - 2026-08-31 05:10 P1 派发（cmd --yolo，session firefly-void-p1，日志 /tmp/firefly_void/p1.log）
 - 2026-08-31 05:12 第一次派发失败（--session 误用于新会话，应为 -n）；05:13 修正重派，进程 84838 确认运行（session 文件 d020632e，transcript 持续增长）
 - 2026-08-31 05:50 84838 撞 100 轮上限退出（exit 8）：骨架+workspace 编译已通过，剩 state.rs 测试类型错误；05:52 --resume 续跑（PID 86129，--max-turns 200）只修测试
+- 2026-08-31 06:05 P1 验收通过（fmt/clippy 干净、21 测试全绿）→ commit b3fd676（含 DESIGN.md）；06:08 P2 派发（体素地图，brief_2.md，同 session 续，PID 89300，--max-turns 200）
+- 2026-08-31 06:55 P2 撞累计轮数上限（exit 8）——教训：--resume 轮数预算按 session 累计，后续每阶段独立开新 session（-n）而非 --resume。现场良好：map lib clippy 0 命中、测试 9/9 已过，仅剩测试 lint 尾巴；06:57 续跑收尾（PID 93112，--max-turns 400）
+- 2026-08-31 07:10 P2 验收通过（fmt/clippy 干净、21 测试全绿、公式抽查与论文 (12) 式一致）→ commit e96a846；07:12 P3 派发（测量模型，brief_3.md，**新 session** firefly-void-p3，PID 94432，--max-turns 400）
+- 2026-08-31 08:05 P3 撞 400 轮上限（exit 8）：fmt 已过、47 测试全绿，仅剩 measure 库 11 个 clippy 错误（单字符名/相似名/复杂类型等风格项）；08:07 review_p3.md 派出小 session 专修（PID 2597，120 轮）
+- 2026-08-31 08:45 P3 终验通过（fmt OK、clippy 0、全仓 484 测试全绿、雅可比有限差分对拍 <1e-6 为真断言）→ commit 49c126a；08:50 P4 派发（管线组装+apps/void 接线+e2e，brief_4.md，新 session firefly-void-p4，PID 4459，400 轮；发布 topic 定为 Firefly/VoidOdom 避免与 vio 冲突）
+- 2026-08-31 09:40 P4 撞 400 轮上限：接线+配置+e2e 脚本全部就位、全仓编译过；e2e 调试抓到真实算法问题——首个深度平面建立时单帧更新打飞状态（跳 0.5m）。09:42 派 P4fix（新 session，PID 20461）：管线层加深度更新门控（0.1m/3° 每帧）+健康计数+e2e 复测
+- 2026-08-31 10:15 P4 终验通过（fmt OK、clippy 0、493 测试全绿、门控实现抽查符合 brief、iceoryx 残留已清理）→ commit 131f09c。e2e 75s：ATE-RMS 0.1782m、7s 爆点消除、6 次启动期门控拒绝。P4 四阶段全部入库，P5 论文派发

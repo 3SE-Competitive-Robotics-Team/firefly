@@ -30,3 +30,6 @@ MUJOCO_LOG.TXT
 # 工具本地配置
 .commandcode/
 .freebuff/
+
+# 论文编译产物
+thesis/output/
