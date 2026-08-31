@@ -277,7 +277,7 @@ pub struct UpdateGateConfig {
     pub max_pos_delta: f64,
     /// 姿态差阈值（rad/帧，深度/视觉更新共用）。
     pub max_rot_delta: f64,
-    /// 速度差阈值（m/s/帧，仅视觉更新检查）。
+    /// 速度差阈值（m/s/帧，深度与视觉更新共用）。
     pub max_vel_delta: f64,
 }
 
@@ -286,7 +286,45 @@ impl Default for UpdateGateConfig {
         Self {
             max_pos_delta: 0.1,
             max_rot_delta: 3.0f64.to_radians(),
-            max_vel_delta: 0.5,
+            // 速度差阈值 0.15m/s/帧：实测慢滑注入每帧速度增量仅
+            // 0.05~0.1m/s（连续多帧累计成 0.3m/s+ 虚假速度），0.5m/s
+            // 阈值拦不住——收紧到悬停场景正常帧间变化之上即可
+            max_vel_delta: 0.15,
+        }
+    }
+}
+
+/// 深度测量启动期加严配置（首个平面未收敛窗口期）。
+///
+/// 首个深度平面建立时体素内点少、平面参数未收敛，若单帧接受带偏置的
+/// 平面，后续帧会以小幅更新把偏置缓慢注入速度（位置漂 0.4-0.6m）。
+/// 深度测量开始（首次有有效平面点）后前 [`warmup_frames`] 帧内：
+/// - 有效点门槛提高到 [`min_inliers_warmup`]（点太少时平面不可信）；
+/// - 门控阈值乘 [`warmup_gate_scale`]（更严，拦中等跳变）。
+///
+/// 窗口结束后恢复正常判定。连续被拒 [`max_consecutive_rejects`] 帧后本帧
+/// 跳过深度更新（仅视觉+传播推进，防反复半接受状态叠加漂移），视觉更新
+/// 正常收敛一帧后复位。
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct WarmupConfig {
+    /// 深度测量开始后前 N 帧启用加严（缺省 10）。
+    pub warmup_frames: u32,
+    /// 加严期深度更新最少有效点（缺省 = 常规判定 `inliers > 0` 的 2 倍）。
+    pub min_inliers_warmup: usize,
+    /// 加严期门控阈值乘数（<1 更严，缺省 0.5）。
+    pub warmup_gate_scale: f64,
+    /// 深度更新连续被拒上限：达到后本帧跳过深度更新（缺省 5）。
+    pub max_consecutive_rejects: u32,
+}
+
+impl Default for WarmupConfig {
+    fn default() -> Self {
+        Self {
+            warmup_frames: 30,
+            min_inliers_warmup: 30,
+            warmup_gate_scale: 0.5,
+            max_consecutive_rejects: 5,
         }
     }
 }
@@ -313,6 +351,8 @@ pub struct VoidOptions {
     pub map: MapConfig,
     /// 深度/视觉更新门控（单帧跳变保护，缺省 0.1m / 3° / 0.5m·s⁻¹）。
     pub update_gate: UpdateGateConfig,
+    /// 深度测量启动期加严（首个平面未收敛窗口期，见 [`WarmupConfig`]）。
+    pub warmup: WarmupConfig,
     /// 深度相机 → 虚拟 IMU 系旋转（行主序 3×3，缺省 [`default_depth_ext`]）。
     pub depth_ext_rot: [[f64; 3]; 3],
     /// 真实机体 → 虚拟 IMU 系旋转 `R_bv`（行主序 3×3，缺省 [`default_body_ext`]）。
@@ -331,6 +371,7 @@ impl Default for VoidOptions {
             visual: VisualConfig::default(),
             map: MapConfig::default(),
             update_gate: UpdateGateConfig::default(),
+            warmup: WarmupConfig::default(),
             depth_ext_rot: default_depth_ext(),
             body_ext_rot: default_body_ext(),
         }
@@ -404,13 +445,13 @@ mod tests {
         assert!((cfg.t0[0] - 1.0).abs() < 1e-12);
     }
 
-    /// 更新门控缺省值：0.1m / 3° / 0.5m·s⁻¹（SLAM 单帧跳变保护）。
+    /// 更新门控缺省值：0.1m / 3° / 0.15m·s⁻¹（SLAM 单帧跳变保护）。
     #[test]
     fn update_gate_defaults() {
         let g = UpdateGateConfig::default();
         assert!((g.max_pos_delta - 0.1).abs() < 1e-12);
         assert!((g.max_rot_delta - 3.0f64.to_radians()).abs() < 1e-12);
-        assert!((g.max_vel_delta - 0.5).abs() < 1e-12);
+        assert!((g.max_vel_delta - 0.15).abs() < 1e-12);
         // 随仓库发布的配置可解析且显式携带门控键
         let cfg = VoidOptions::load(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -419,6 +460,16 @@ mod tests {
         .expect("shipped configs/void.toml must parse");
         assert!((cfg.update_gate.max_pos_delta - 0.1).abs() < 1e-12);
         assert!((cfg.update_gate.max_rot_delta - 3.0f64.to_radians()).abs() < 1e-12);
+    }
+
+    /// 深度测量启动期加严缺省值：30 帧 / 30 内点 / 门控 ×0.5 / 连续拒 5 次。
+    #[test]
+    fn warmup_defaults() {
+        let w = WarmupConfig::default();
+        assert_eq!(w.warmup_frames, 30);
+        assert_eq!(w.min_inliers_warmup, 30);
+        assert!((w.warmup_gate_scale - 0.5).abs() < 1e-12);
+        assert_eq!(w.max_consecutive_rejects, 5);
     }
 
     /// 默认深度外参：深度像素与左目针孔像素逐点重合（共面相机）。

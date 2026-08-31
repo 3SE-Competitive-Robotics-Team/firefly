@@ -181,6 +181,7 @@ fn run_loop(
     let mut depth_ok_frames = 0u64;
     let mut visual_ok_frames = 0u64;
     let mut rejected_total = 0u64;
+    let mut depth_rejects = 0u32;
     let mut est_prev: Option<[f64; 3]> = None;
     let t_wall_start = std::time::Instant::now();
     let mut next_diag_wall = DIAG_PERIOD;
@@ -280,6 +281,7 @@ fn run_loop(
                         visual_ok_frames += 1;
                     }
                     rejected_total = out.rejected_total as u64;
+                    depth_rejects = out.depth_rejects;
                     log::debug!(
                         "frame t={:.2} inliers={} depth_it={} visual_it={} conv=[{} {}]",
                         out.t,
@@ -289,12 +291,14 @@ fn run_loop(
                         out.depth_converged,
                         out.visual_healthy
                     );
-                    // 健康标量（深度内点数 / 视觉迭代数 / 被门控拒绝的更新数）
+                    // 健康标量（深度内点数 / 视觉迭代数 / 本帧被拒更新数 /
+                    // 深度连续拒绝计数）
                     let mut health = VizMessage::base(kind::SCALARS, out.t, "void/health");
                     health.scalars[0] = out.depth_inliers as f64;
                     health.scalars[1] = out.visual_iterations as f64;
                     health.scalars[2] = out.rejected_updates as f64;
-                    health.scalar_count = 3;
+                    health.scalars[3] = f64::from(out.depth_rejects);
+                    health.scalar_count = 4;
                     let _ = viz_pub.publish(health);
                 }
                 Err(e) => {
@@ -318,10 +322,11 @@ fn run_loop(
             log::info!(
                 "[perf-diag] wall={wall_s:.1}s sim={t_sim:.2} wakes={wake_count} frames={frame_count} \
                  depth_ok={depth_ok_frames} visual_ok={visual_ok_frames} odom={odom_count} \
-                 rejected={} \
+                 rejected={} depth_rejects={} \
                  pos=({:.3},{:.3},{:.3}) tau={tau:.3} bg=({:.4},{:.4},{:.4}) ba=({:.3},{:.3},{:.3}) \
                  sim_rate={rate:.2}x",
                 rejected_total,
+                depth_rejects,
                 p.x,
                 p.y,
                 p.z,

@@ -28,7 +28,9 @@ use nalgebra::{Isometry3, Matrix3, Rotation3, UnitQuaternion, Vector3};
 
 pub mod options;
 
-pub use options::{DepthConfig, MapConfig, PropagationNoiseConfig, VisualConfig, VoidOptions};
+pub use options::{
+    DepthConfig, MapConfig, PropagationNoiseConfig, VisualConfig, VoidOptions, WarmupConfig,
+};
 
 /// 传感器帧输入：深度帧与相机帧**同步到达**（同一时刻 10Hz 对齐，
 /// 由接线层配对）。
@@ -63,6 +65,8 @@ pub struct OdometryOutput {
     pub map_visual_points: usize,
     /// 本帧被门控拒绝的更新数（0/1/2，深度+视觉；健康统计 `rejected_updates`）。
     pub rejected_updates: usize,
+    /// 深度更新连续被拒帧数（连续拒绝保护状态；诊断统计用）。
+    pub depth_rejects: u32,
     /// 累计被门控拒绝的更新数（进程生命周期）。
     pub rejected_total: usize,
     /// 各阶段耗时（秒）。
@@ -114,6 +118,10 @@ pub struct VoidOdometry {
     frame_id: u32,
     /// 被门控拒绝的累计更新数（深度+视觉；健康统计）。
     rejected_updates: usize,
+    /// 深度测量开始后的帧数（首个有效平面点出现起计；`None` = 尚未开始）。
+    depth_epoch: Option<u32>,
+    /// 深度更新连续被拒帧数（达到上限后本帧跳过深度更新）。
+    depth_rejects: u32,
 }
 
 impl VoidOdometry {
@@ -149,6 +157,8 @@ impl VoidOdometry {
             last_frame_t: None,
             frame_id: 0,
             rejected_updates: 0,
+            depth_epoch: None,
+            depth_rejects: 0,
         }
     }
 
@@ -391,28 +401,77 @@ impl Odometry for VoidOdometry {
             );
             // 健康统计：update 前的有效点计数（传播先验下）
             let inliers = model.effective_count(&self.state);
-            let before = self.state;
-            let mut state = before;
-            let mut updater = EskfUpdater::new(model, 5, 1.5e-4);
-            let iterations = updater
-                .update(&mut state)
-                .map_err(|e| e.with_context("stage", "depth"))?;
-            // 更新门控：单帧深度更新把状态打飞时（典型：新平面刚建立，
-            // 初始点少导致平面参数不准，位置跳 0.5m）拒绝并回滚到传播
-            // 先验——被拒后由 IMU 传播维持状态，平面随后续帧成熟后
-            // 深度残差自然收敛，跳变帧不污染状态
-            let gate = &self.options.update_gate;
-            let dp = (state.pos - before.pos).norm();
-            let drot = before.rot.rotation_to(&state.rot).angle();
-            let accepted = dp < gate.max_pos_delta && drot < gate.max_rot_delta;
-            if accepted {
-                self.state = state;
-            } else {
-                self.rejected_updates += 1;
-                frame_rejected += 1;
-                log::warn!("深度更新拒绝：dp={dp:.3}m drot={drot:.3}rad（新平面未收敛/测量退化）");
+            // 深度测量 epoch：首个有效平面点出现起计（窗口期内加严）
+            if inliers > 0 {
+                self.depth_epoch = Some(self.depth_epoch.unwrap_or(0) + 1);
             }
-            (inliers, iterations, iterations < 5 && inliers > 0)
+            // 无有效测量（平面未建立/视野无平面）：不更新、不计拒绝——
+            // 深度 epoch 与连续拒绝计数都只在有测量时推进，避免启动期
+            // 首个平面建立前的空窗污染门控状态
+            if inliers == 0 {
+                (0usize, 0usize, false)
+            } else {
+                // 连续拒绝保护：连续 max_consecutive_rejects 次被门控拒后
+                // 本帧跳过深度更新（防反复半接受状态叠加漂移），视觉更新
+                // 收敛后复位。仅在视觉预热结束后启用——预热期内视觉未参与，
+                // 跳过深度 = 纯 IMU 传播更危险，门控拒绝本身已安全
+                let visual_ready = self.frame_id > self.options.visual_warmup_frames;
+                let skip = visual_ready
+                    && self.depth_rejects >= self.options.warmup.max_consecutive_rejects;
+                if skip {
+                    log::warn!(
+                        "深度更新跳过（连续拒绝 {} 次，等待视觉收敛复位）",
+                        self.depth_rejects
+                    );
+                    (inliers, 0usize, false)
+                } else {
+                    let before = self.state;
+                    let mut state = before;
+                    let mut updater = EskfUpdater::new(model, 5, 1.5e-4);
+                    let iterations = updater
+                        .update(&mut state)
+                        .map_err(|e| e.with_context("stage", "depth"))?;
+                    // 更新门控：单帧深度更新把状态打飞时（典型：新平面刚建立，
+                    // 初始点少导致平面参数不准，位置跳 0.5m）拒绝并回滚到传播
+                    // 先验——被拒后由 IMU 传播维持状态，平面随后续帧成熟后
+                    // 深度残差自然收敛，跳变帧不污染状态。速度通道拦「慢滑」：
+                    // 带偏置平面经连续多帧小幅更新缓慢注入虚假速度（漂向
+                    // ±0.2m/s，位置漂 0.4-0.6m）时单帧位置/姿态差都在阈值内，
+                    // 但速度差超出即拒绝。启动期加严：首个平面未收敛窗口内
+                    // 门控阈值乘 warmup_gate_scale，且有效点少于
+                    // min_inliers_warmup 时直接拒绝（点太少平面不可信）。
+                    let warm = self
+                        .depth_epoch
+                        .is_some_and(|e| e <= self.options.warmup.warmup_frames);
+                    let gate = &self.options.update_gate;
+                    let scale = if warm {
+                        self.options.warmup.warmup_gate_scale
+                    } else {
+                        1.0
+                    };
+                    let dp = (state.pos - before.pos).norm();
+                    let dvel = (state.vel - before.vel).norm();
+                    let drot = before.rot.rotation_to(&state.rot).angle();
+                    let inlier_ok = !warm || inliers >= self.options.warmup.min_inliers_warmup;
+                    let accepted = inlier_ok
+                        && dp < gate.max_pos_delta * scale
+                        && dvel < gate.max_vel_delta * scale
+                        && drot < gate.max_rot_delta * scale;
+                    if accepted {
+                        self.state = state;
+                        self.depth_rejects = 0;
+                    } else {
+                        self.rejected_updates += 1;
+                        frame_rejected += 1;
+                        self.depth_rejects += 1;
+                        log::warn!(
+                            "深度更新拒绝：dp={dp:.3}m dvel={dvel:.3} drot={drot:.3}rad \
+                             inliers={inliers} warm={warm}（新平面未收敛/测量退化）"
+                        );
+                    }
+                    (inliers, iterations, iterations < 5 && inliers > 0)
+                }
+            }
         };
         let depth_update = t_depth.elapsed().as_secs_f64();
 
@@ -469,6 +528,11 @@ impl Odometry for VoidOdometry {
                     && drot < gate.max_rot_delta;
                 if accepted {
                     self.state = state;
+                    // 视觉正常收敛一帧 → 复位深度连续拒绝计数（深度更新
+                    // 恢复参与）
+                    if iterations > 0 {
+                        self.depth_rejects = 0;
+                    }
                     (iterations, iterations > 0)
                 } else {
                     self.rejected_updates += 1;
@@ -540,6 +604,7 @@ impl Odometry for VoidOdometry {
             depth_converged,
             map_visual_points: map_vpts,
             rejected_updates: frame_rejected,
+            depth_rejects: self.depth_rejects,
             rejected_total: self.rejected_updates,
             timings: FrameTimings {
                 propagate,
