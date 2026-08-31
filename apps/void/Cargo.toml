@@ -10,11 +10,20 @@ license.workspace = true
 repository.workspace = true
 readme.workspace = true
 
+[[bin]]
+name = "void"
+path = "src/main.rs"
+
 [dependencies]
+fastrace = { workspace = true }
 firefly-error = { workspace = true }
+firefly-observability = { workspace = true }
 firefly-pubsub = { workspace = true }
 firefly-void = { workspace = true }
+firefly-void-types = { workspace = true }
+iceoryx2 = { workspace = true }
 log = { workspace = true }
+nalgebra = { workspace = true }
 
 [lints]
 workspace = true

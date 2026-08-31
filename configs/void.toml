@@ -1,0 +1,95 @@
+# void 配置（DIVO 里程计；缺键回落代码默认值，`--config` 可换文件）
+
+# 初始位置（全局系 = 首帧 IMU 系；与 MuJoCo 起点 SIM_START 一致）
+t0 = [1.0, 4.0, 1.0]
+
+# 曝光时间估计：仿真固定曝光，关闭（τ 恒 1；随机游走会把位置拉偏）
+estimate_exposure = false
+# 视觉预热帧数（50 帧 = 5s）：前 5s 只跑深度+建图，状态稳定后再建立
+# 视觉地图点（启动瞬态位姿的参考补丁会把偏差固化进视觉残差）
+visual_warmup_frames = 50
+# 建图预热帧数（30 帧 = 3s）：前 3s 不注册深度点（纯 IMU 传播，悬停
+# 无漂）——首帧位姿注册的平面若偏，会被深度残差固化成稳态位置偏置
+map_warmup_frames = 30
+
+# 外参（MuJoCo 场景标定，见 scene.py + firefly-map::DepthCamera）
+# 深度相机(OpenGL 系) → 虚拟针孔 IMU 系旋转（默认：深度像素与左目针孔逐点重合）
+depth_ext_rot = [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]
+# 真实机体 → 虚拟针孔系旋转 R_bv（IMU 角速度/比力经它转系后传播）
+body_ext_rot = [[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]]
+
+[imu]
+# IMU 传播噪声（连续谱密度；与 configs/vio.toml 的 sim 注入参数一致）
+gyr = 2.83e-2
+acc = 2.83e-1
+# bias 随机游走收紧：sim 无真实偏置，过大的游走让估计器把深度/视觉
+# 测量偏差吸收进 ba（实测 20s 漂到 -0.09 m/s²，位置随后被拉走）
+bias_gyr = 1.9e-6
+bias_acc = 3.0e-4
+inv_expo = 0.2
+
+[update_gate]
+# 状态更新门控（单帧跳变保护）：更新前后状态差超阈值即拒绝该次更新，
+# 保持传播先验。针对新平面初始点少时参数不准、单帧深度更新把位置打飞
+# 0.5m（6.8s→7.1s）的场景；阈值须大于正常帧间运动（悬停帧间 < 0.1m/3°）
+max_pos_delta = 0.1
+max_rot_delta = 0.05235987755982989
+max_vel_delta = 0.5
+
+[depth]
+# 深度点云下采样体素边长（m）：0.5m 网格内保留深度不确定度最小点
+# （近点 σ∝z² 小，远点会主导平面拟合产生系统偏差）；
+# 深度上限 4m（近场视差噪声小；远距 σ∝z² 无信息，且让点集中在少数字
+# 体素内，加速平面拟合）
+downsample_voxel = 0.5
+# 深度上限 6m：覆盖场景立柱（侧向平面约束 roll/pitch，悬停姿态才可观
+# ——单地面平面法向与 roll/pitch 弱耦合，姿态偏置经重力泄漏成位置漂移）
+max_range = 6.0
+# 距离不确定度系数 σ_disp/(f·B)（env.py 视差域模型：σ_z = z²·σ_disp/(f·B)）
+depth_sigma_coeff = 0.0095
+dept_err = 0.02
+beam_err = 0.01
+sigma_num = 3.0
+radius_k = 3.0
+min_cos_plane_normal = 0.9
+max_single_normal_ratio = 0.9
+
+[visual]
+# 视觉噪声（P3 默认）：深度偏差修复后视觉可正常纠偏
+img_point_cov = 20000.0
+outlier_threshold = 1000.0
+patch_size = 11
+pyramid_level = 3
+max_iterations = 5
+convergence_eps = 1e-4
+# Huber 核阈值（灰度；缺省关闭 = 纯最小二乘）
+huber_delta = 1e9
+depth_discontinuity_thresh = 0.5
+min_view_cos = 0.17
+
+[map]
+root_size = 0.5
+max_layer = 3
+# 平面拟合最少点数（默认 5：8 点拟合更稳但首次平面太晚，且侧向平面
+# 补充后 5 点足够）
+layer_init_num = [5, 5, 5, 5, 5]
+max_points_per_plane = 50
+update_size_threshold = 5
+planer_threshold = 0.01
+half_map_size = 100
+sliding_thresh = 8.0
+grid_size = 30
+patch_size = 11
+patch_pyramid_level = 3
+patch_add_frame_gap = 20
+patch_add_pixel_dist = 40.0
+normal_converge_thresh = 0.0001
+max_obs_per_point = 30
+min_obs_for_score = 5
+min_obs_for_converge = 10
+# fov 调大：P3 visible_map_points 把 translation 当相机位置（与
+# 世界→相机约定相反，非单位阵时 FoV 中心错位致全剔）——放大 FoV 让
+# 粗剔除近似失效，投影仍由 collect_visual_points 的正确位姿给出
+fov_deg = 175.0
+ray_depth_min = 0.5
+ray_depth_max = 20.0
