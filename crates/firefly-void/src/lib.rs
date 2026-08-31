@@ -223,7 +223,7 @@ impl VoidOdometry {
                     continue;
                 }
                 let dx = (x as f64 - intrinsics.cx) / intrinsics.fx;
-                let dy = (y as f64 - intrinsics.cy) / intrinsics.fy;
+                let dy = -(y as f64 - intrinsics.cy) / intrinsics.fy;
                 // OpenGL 系（深度值为相机空间 Z）→ 虚拟针孔系
                 let p_gl = Vector3::new(dx * z, dy * z, -z);
                 let p_v = firefly_void_map::voxel::transform_point(&ext, &p_gl);
@@ -325,11 +325,12 @@ impl VoidOdometry {
         x: f64,
         y: f64,
         z: f64,
+        vel: Vector3<f64>,
         rot: nalgebra::Rotation3<f64>,
     ) {
         self.state.rot = rot;
         self.state.pos = Vector3::new(x, y, z);
-        self.state.vel = Vector3::zeros();
+        self.state.vel = vel;
         self.last_frame_t = Some(t);
     }
 }
