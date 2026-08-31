@@ -102,12 +102,14 @@
       entire system is implemented in Rust with a memory-safe,
       `unsafe`-free codebase and a ROS-free, zero-copy shared-memory IPC
       layer. On a 75 s hovering experiment in a high-fidelity physics
-      simulation, VOID achieves an ATE-RMS of 0.1782 m with all updates
-      gated at the pipeline level to reject degeneracy-induced state jumps.
-      With 493 unit and integration tests and finite-difference Jacobian
-      validation at errors below 1e-6, VOID provides a reproducible,
-      test-driven reference implementation of the FAST-LIVO2 algorithm
-      family for depth-camera platforms.
+      simulation, VOID achieves an ATE-RMS below 0.15 m running the pure
+      Algorithm 1 sequence (propagate → depth update → visual update →
+      map building) on every frame with no state-level gating: robustness
+      comes from the measurement model itself. With 493 unit and
+      integration tests and finite-difference Jacobian validation at errors
+      below 1e-6, VOID provides a reproducible, test-driven reference
+      implementation of the FAST-LIVO2 algorithm family for depth-camera
+      platforms.
     ]
   ]
 ]

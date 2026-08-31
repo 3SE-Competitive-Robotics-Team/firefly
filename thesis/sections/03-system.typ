@@ -105,8 +105,6 @@ both measurement models share a single camera frame with unit extrinsic.
       #mono[ESIKF ⊞-update: ① depth ② visual]
       #v(1.5pt)
       #mono[adaptive voxel map]
-      #v(1.5pt)
-      #mono[update gate: 0.1 m / 3°]
     ]
 
     // Output boxes
@@ -158,10 +156,8 @@ timestamp are consumed by forward propagation; (ii) the depth map is
 back-projected into a structured point cloud and voxel-downsampled; (iii)
 the depth point-to-plane measurement runs a sequential ESIKF update; (iv)
 the sparse direct visual measurement runs a coarse-to-fine pyramid update
-with re-warping; (v) both updates are screened by the *pipeline update gate*
-(Section #ref(<sec:gate>)), which rejects state jumps exceeding 0.1 m or 3°;
-and (vi) the accepted state is used to register the depth cloud into the
-voxel map and to add/refine visual map points.
+with re-warping; and (v) the resulting state is used to register the depth
+cloud into the voxel map and to add/refine visual map points.
 
 #figure(
   block[
@@ -187,12 +183,7 @@ voxel map and to add/refine visual map points.
       4. Pyramid direct-visual ESIKF update → #xG#math.attach("", t: "v")  (Section #ref(<sec:visual>))
     ]
     #par[
-      5. Gate: if #math.norm(math.bold("p") + math.attach("", b: "k") + math.op("−") + math.bold("p") + math.attach("", b: "k−1")) > 0.1 m or
-      #math.norm(math.op("Log") + math.op("(") + math.bold("R") + math.attach("", b: "k") + math.op("ᵀ") + math.bold("R") + math.attach("", b: "k−1") + math.op(")")) > 3°
-      → reject update, keep propagation prior  (Section #ref(<sec:gate>))
-    ]
-    #par[
-      6. Register cloud into voxel map; update visual map points  (Section #ref(<sec:mapping>))
+      5. Register cloud into voxel map; update visual map points  (Section #ref(<sec:mapping>))
     ]
   ],
   caption: [Overview of the VOID main loop, mirroring the structure of

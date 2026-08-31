@@ -74,8 +74,10 @@ All three runs stay below the 0.3 m RMS acceptance threshold despite
 unseeded sensor noise; the per-run spread reflects the stochasticity of the
 startup transient, where the first depth plane is initialized from a small
 point set and the filter state is still degenerate. The sub-0.15 m mean RMS
-error is achieved by the sequential fusion of depth and visual measurements,
-combined with the pipeline update gate described below.
+error is achieved by the sequential fusion of depth and visual measurements
+with the FAST-LIVO2 measurement model: correct per-point depth noise, plane
+uncertainty, and per-point outlier rejection, without any state-level update
+gating.
 
 #heading(level: 2)[Update Statistics and Timing]
 
@@ -95,8 +97,7 @@ per-stage timing instrumentation.
     ),
     [Depth updates accepted], [≈ 700 per run], [point-to-plane ESIKF batches],
     [Visual updates accepted], [≈ 650 per run], [pyramid direct alignments],
-    [Gate rejections per run], [1--8], [all in the startup transient],
-    [Depth points per frame], [$O$(100)], [after 0.5 m voxel downsampling],
+    [Depth points per frame], [≤ 480], [after 0.1 m voxel downsampling],
     [Visual points per frame], [60+], [after ray-casting completion],
   ),
   caption: [Per-stage statistics of the three 75 s evaluation runs.],
@@ -118,40 +119,26 @@ design-level observations are supported by the implementation and the
 experimental evidence available so far:
 
 - *Depth noise model.* The quadratic σ_z ∝ z² model down-weights far
-  points; the 6 m depth cap and the 0.5 m voxel downsampling are the
+  points; the 6 m depth cap and the 0.1 m voxel downsampling are the
   practical consequences of this model. Without the downsampling, far,
   high-variance points dominate plane fits and produce the systematic
   position bias that motivated both the cap and the downsampling (see the
   comments in `options.rs` and the `downsample_keeps_one_point_per_voxel`
-  test).
-- *Visual warmup and map warmup.* The first 3 s of depth-map registration
-  and the first 5 s of visual map-point creation are skipped so that the
-  state stabilizes before the maps are built; this removes a startup
-  bias that would otherwise be frozen into the reference patches.
-- *Update gate with velocity channel.* The gate is the single most
-  impactful robustness measure. Beyond the position/rotation thresholds
-  that catch single-frame jumps (a 0.5 m state jump from an immature
-  plane), the velocity channel rejects updates whose per-frame velocity
-  increment exceeds 0.15 m/s. This is essential because a biased first
-  plane does not inject a large jump: it is tracked as real motion through
-  consecutive small updates, each well within the position threshold, that
-  cumulatively drag the velocity estimate (and hence the position) away by
-  up to 0.4--1 m. With the velocity channel and the stricter startup gate
-  (the first accepted plane must accumulate enough inliers), the rejected
-  updates are confined to the startup transient (1--8 per run across the
-  three runs) and no sustained drift signature remains (ATE-max below
-  0.35 m in every run). The consecutive-rejection protection additionally
-  skips the depth update after 5 consecutive rejections and lets the
-  visual update re-converge before depth measurements rejoin, preventing
-  half-accepted states from accumulating drift.
-- *Update gate generality.* The gate is a pipeline-level,
-  measurement-agnostic safeguard and therefore protects the visual update
-  against reference-patch mismatches as well as the depth update against
-  immature planes.
-
-We emphasize that these observations are drawn from the implementation
-design and the three 75 s runs; a comprehensive ablation campaign on
-multiple trajectories and sensor configurations is planned as future work.
+  test). The 0.1 m voxel follows the FAST-LIO2 point-density convention:
+  the previous 0.5 m voxel starved the map (≈ 48 points per frame, one
+  point per map voxel, planes unable to mature), which was the root cause
+  of the startup transient.
+- *Per-point outlier rejection.* Inliers are selected by the chi-square
+  test on the measurement residual against the per-point noise covariance
+  (`sigma_num` in the official `voxel_map.cpp`), which removes both far
+  outliers and depth-discontinuity pixels before the plane fit.
+- *Robustness without gating.* The pipeline contains no state-level update
+  gate, warmup, or rejection mechanism: every frame runs the pure
+  propagate → depth update → visual update → map-building sequence of
+  Algorithm 1. Robustness against immature planes and reference-patch
+  mismatches comes from the measurement model itself (per-point noise R,
+  plane uncertainty Σ, and outlier rejection) rather than from pipeline
+  patches.
 
 #heading(level: 2)[Discussion and Limitations]
 
@@ -159,9 +146,8 @@ The evaluation platform is a physics simulation with idealized sensor
 synchronization (paired depth+gray frames at 10 Hz, tolerance 20 ms) and
 fixed exposure; real depth cameras exhibit rolling-shutter artifacts,
 exposure auto-adjustment, and stronger disparity noise at boundaries, all
-of which are modeled only approximately. The update gate's thresholds are
-tuned for the hovering scenario; aggressive maneuvers require either
-motion-adaptive thresholds or a model-based rejection criterion. Finally,
-the current map never triggers the sliding window in the hover scenario,
-so the sliding-window behavior is verified only by unit tests, not by an
-end-to-end run.
+of which are modeled only approximately. The measurement noise parameters
+are tuned for this depth camera model; real cameras require recalibration
+of the depth and visual noise covariances. Finally, the current map never
+triggers the sliding window in the hover scenario, so the sliding-window
+behavior is verified only by unit tests, not by an end-to-end run.

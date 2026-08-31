@@ -86,8 +86,8 @@ impl From<&PropagationNoiseConfig> for PropagationNoise {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct DepthConfig {
-    /// 深度点云下采样体素边长（m，0.5m 网格内保留深度不确定度最大点；
-    /// 与地图根体素同尺度，控制单帧测量数 ≤ ~200）。
+    /// 深度点云下采样体素边长（m，0.1m 网格内保留深度不确定度最大点；
+    /// FAST-LIO2 常规取值；控制单帧测量数 ~2000）。
     pub downsample_voxel: f64,
     /// 深度上限（m）：超出丢弃（远距视差噪声 σ∝z² 爆炸，无信息）。
     pub max_range: f64,
@@ -104,7 +104,7 @@ impl Default for DepthConfig {
     fn default() -> Self {
         let o = DepthOptions::default();
         Self {
-            downsample_voxel: 0.5,
+            downsample_voxel: 0.1,
             // 深度上限 6m：覆盖场景立柱（侧向平面约束 roll/pitch，
             // 悬停姿态才可观）
             max_range: 6.0,
@@ -262,73 +262,6 @@ impl From<&MapConfig> for VoxelMapOptions {
     }
 }
 
-/// 状态更新门控（SLAM 单帧跳变保护）：深度/视觉 ESIKF 顺序更新前后
-/// 状态差超阈值则拒绝该次更新、保持传播先验（管线层组合判定，不侵入
-/// 测量/ESIKF 逻辑）。
-///
-/// 依据：单帧测量在新平面参数未收敛（初始点少时平面拟合不准）或视觉
-/// 参考补丁误匹配时，会产生不可信的大状态跳变；拒绝后由 IMU 传播维持
-/// 状态，等待后续测量逐步校准。阈值须大于正常帧间运动（悬停/慢速飞行
-/// 帧间位移 < 0.1m、姿态 < 3°），否则误伤正常更新。
-#[derive(Debug, Deserialize)]
-#[serde(default)]
-pub struct UpdateGateConfig {
-    /// 位置差阈值（m/帧，深度/视觉更新共用）。
-    pub max_pos_delta: f64,
-    /// 姿态差阈值（rad/帧，深度/视觉更新共用）。
-    pub max_rot_delta: f64,
-    /// 速度差阈值（m/s/帧，深度与视觉更新共用）。
-    pub max_vel_delta: f64,
-}
-
-impl Default for UpdateGateConfig {
-    fn default() -> Self {
-        Self {
-            max_pos_delta: 0.1,
-            max_rot_delta: 3.0f64.to_radians(),
-            // 速度差阈值 0.15m/s/帧：实测慢滑注入每帧速度增量仅
-            // 0.05~0.1m/s（连续多帧累计成 0.3m/s+ 虚假速度），0.5m/s
-            // 阈值拦不住——收紧到悬停场景正常帧间变化之上即可
-            max_vel_delta: 0.15,
-        }
-    }
-}
-
-/// 深度测量启动期加严配置（首个平面未收敛窗口期）。
-///
-/// 首个深度平面建立时体素内点少、平面参数未收敛，若单帧接受带偏置的
-/// 平面，后续帧会以小幅更新把偏置缓慢注入速度（位置漂 0.4-0.6m）。
-/// 深度测量开始（首次有有效平面点）后前 [`warmup_frames`] 帧内：
-/// - 有效点门槛提高到 [`min_inliers_warmup`]（点太少时平面不可信）；
-/// - 门控阈值乘 [`warmup_gate_scale`]（更严，拦中等跳变）。
-///
-/// 窗口结束后恢复正常判定。连续被拒 [`max_consecutive_rejects`] 帧后本帧
-/// 跳过深度更新（仅视觉+传播推进，防反复半接受状态叠加漂移），视觉更新
-/// 正常收敛一帧后复位。
-#[derive(Debug, Deserialize)]
-#[serde(default)]
-pub struct WarmupConfig {
-    /// 深度测量开始后前 N 帧启用加严（缺省 10）。
-    pub warmup_frames: u32,
-    /// 加严期深度更新最少有效点（缺省 = 常规判定 `inliers > 0` 的 2 倍）。
-    pub min_inliers_warmup: usize,
-    /// 加严期门控阈值乘数（<1 更严，缺省 0.5）。
-    pub warmup_gate_scale: f64,
-    /// 深度更新连续被拒上限：达到后本帧跳过深度更新（缺省 5）。
-    pub max_consecutive_rejects: u32,
-}
-
-impl Default for WarmupConfig {
-    fn default() -> Self {
-        Self {
-            warmup_frames: 30,
-            min_inliers_warmup: 30,
-            warmup_gate_scale: 0.5,
-            max_consecutive_rejects: 5,
-        }
-    }
-}
-
 /// `configs/void.toml` 顶层。
 #[derive(Debug, Deserialize)]
 #[serde(default)]
@@ -338,21 +271,10 @@ pub struct VoidOptions {
     /// 曝光时间估计开关（仿真固定曝光：关闭则 τ 恒 1，视觉残差
     /// `I_k − I_r` 无曝光自由度——实测 τ 随机游走会把位置拉偏）。
     pub estimate_exposure: bool,
-    /// 视觉预热帧数：前 N 帧只做深度更新+建图（状态稳定后再建立视觉
-    /// 地图点——启动瞬态位姿建立的参考补丁会把偏差固化进视觉残差）。
-    pub visual_warmup_frames: u32,
-    /// 建图预热帧数：前 N 帧不注册深度点/不建平面（纯 IMU 传播，悬停
-    /// 无漂）——首帧估计位姿注册的平面若有微小偏差，会被深度残差固化
-    /// 成稳态位置偏置（实测每轮随机 0.0~0.4m）。
-    pub map_warmup_frames: u32,
     pub imu: PropagationNoiseConfig,
     pub depth: DepthConfig,
     pub visual: VisualConfig,
     pub map: MapConfig,
-    /// 深度/视觉更新门控（单帧跳变保护，缺省 0.1m / 3° / 0.5m·s⁻¹）。
-    pub update_gate: UpdateGateConfig,
-    /// 深度测量启动期加严（首个平面未收敛窗口期，见 [`WarmupConfig`]）。
-    pub warmup: WarmupConfig,
     /// 深度相机 → 虚拟 IMU 系旋转（行主序 3×3，缺省 [`default_depth_ext`]）。
     pub depth_ext_rot: [[f64; 3]; 3],
     /// 真实机体 → 虚拟 IMU 系旋转 `R_bv`（行主序 3×3，缺省 [`default_body_ext`]）。
@@ -364,14 +286,10 @@ impl Default for VoidOptions {
         Self {
             t0: [1.0, 4.0, 1.0],
             estimate_exposure: false,
-            visual_warmup_frames: 50,
-            map_warmup_frames: 30,
             imu: PropagationNoiseConfig::default(),
             depth: DepthConfig::default(),
             visual: VisualConfig::default(),
             map: MapConfig::default(),
-            update_gate: UpdateGateConfig::default(),
-            warmup: WarmupConfig::default(),
             depth_ext_rot: default_depth_ext(),
             body_ext_rot: default_body_ext(),
         }
@@ -429,7 +347,7 @@ mod tests {
         assert!((cfg.t0[0] - 1.0).abs() < 1e-12);
         assert!((cfg.t0[1] - 4.0).abs() < 1e-12);
         assert!((cfg.t0[2] - 1.0).abs() < 1e-12);
-        assert!((cfg.depth.downsample_voxel - 0.5).abs() < 1e-12);
+        assert!((cfg.depth.downsample_voxel - 0.1).abs() < 1e-12);
         assert!((cfg.depth.max_range - 6.0).abs() < 1e-12);
         assert_eq!(cfg.map.max_layer, 3);
     }
@@ -443,33 +361,6 @@ mod tests {
         assert!((cfg.map.root_size - 0.5).abs() < 1e-12);
         assert!((cfg.depth.depth_sigma_coeff - 0.08 / 8.43).abs() < 1e-6);
         assert!((cfg.t0[0] - 1.0).abs() < 1e-12);
-    }
-
-    /// 更新门控缺省值：0.1m / 3° / 0.15m·s⁻¹（SLAM 单帧跳变保护）。
-    #[test]
-    fn update_gate_defaults() {
-        let g = UpdateGateConfig::default();
-        assert!((g.max_pos_delta - 0.1).abs() < 1e-12);
-        assert!((g.max_rot_delta - 3.0f64.to_radians()).abs() < 1e-12);
-        assert!((g.max_vel_delta - 0.15).abs() < 1e-12);
-        // 随仓库发布的配置可解析且显式携带门控键
-        let cfg = VoidOptions::load(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../configs/void.toml"
-        ))
-        .expect("shipped configs/void.toml must parse");
-        assert!((cfg.update_gate.max_pos_delta - 0.1).abs() < 1e-12);
-        assert!((cfg.update_gate.max_rot_delta - 3.0f64.to_radians()).abs() < 1e-12);
-    }
-
-    /// 深度测量启动期加严缺省值：30 帧 / 30 内点 / 门控 ×0.5 / 连续拒 5 次。
-    #[test]
-    fn warmup_defaults() {
-        let w = WarmupConfig::default();
-        assert_eq!(w.warmup_frames, 30);
-        assert_eq!(w.min_inliers_warmup, 30);
-        assert!((w.warmup_gate_scale - 0.5).abs() < 1e-12);
-        assert_eq!(w.max_consecutive_rejects, 5);
     }
 
     /// 默认深度外参：深度像素与左目针孔像素逐点重合（共面相机）。

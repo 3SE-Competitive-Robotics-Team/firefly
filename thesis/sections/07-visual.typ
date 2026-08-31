@@ -108,7 +108,6 @@ exposure-estimation flag is disabled, forcing τ = 1.
     #par[  a. Freeze affine warps and warped reference patches at current state]
     #par[  b. Run ESIKF iteration over per-point photometric residuals (Eq. #ref(<eq:photores>))]
     #par[  c. Re-warp with the updated state (finest level: 3 re-match rounds)]
-    #par[  d. Reject if the state jump exceeds the update gate]
   ],
   caption: [Coarse-to-fine sparse direct alignment with re-warping, mirroring
   `computeJacobianAndUpdateEKF` of FAST-LIVO2.],
