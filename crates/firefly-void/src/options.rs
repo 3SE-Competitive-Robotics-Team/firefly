@@ -96,8 +96,6 @@ pub struct DepthConfig {
     pub beam_err: f64,
     pub sigma_num: f64,
     pub radius_k: f64,
-    pub min_cos_plane_normal: f64,
-    pub max_single_normal_ratio: f64,
 }
 
 impl Default for DepthConfig {
@@ -113,8 +111,6 @@ impl Default for DepthConfig {
             beam_err: o.beam_err,
             sigma_num: o.sigma_num,
             radius_k: o.radius_k,
-            min_cos_plane_normal: o.min_cos_plane_normal,
-            max_single_normal_ratio: o.max_single_normal_ratio,
         }
     }
 }
@@ -127,8 +123,6 @@ impl From<&DepthConfig> for DepthOptions {
             beam_err: c.beam_err,
             sigma_num: c.sigma_num,
             radius_k: c.radius_k,
-            min_cos_plane_normal: c.min_cos_plane_normal,
-            max_single_normal_ratio: c.max_single_normal_ratio,
         }
     }
 }

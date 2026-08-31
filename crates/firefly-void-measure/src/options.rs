@@ -40,11 +40,6 @@ pub struct DepthOptions {
     pub sigma_num: f64,
     /// 平面-点径向判据倍数 `radius_k`（对照 `voxel_map.cpp:719`）。
     pub radius_k: f64,
-    /// 退化保护：单平面法向与相机光轴夹角余弦小于该值时丢弃
-    /// 共面点中方向相近的点（避免信息矩阵病态）。
-    pub min_cos_plane_normal: f64,
-    /// 退化保护：单一法向占比超过该值时丢弃多余共面点。
-    pub max_single_normal_ratio: f64,
 }
 
 impl Default for DepthOptions {
@@ -56,8 +51,6 @@ impl Default for DepthOptions {
             beam_err: 0.01,
             sigma_num: 3.0,
             radius_k: 3.0,
-            min_cos_plane_normal: 0.9,
-            max_single_normal_ratio: 0.9,
         }
     }
 }

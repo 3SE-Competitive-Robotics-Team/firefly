@@ -16,9 +16,6 @@
 //! `σ² = J_nq·Σ_nq·J_nqᵀ + nᵀ·Σ_pj·n + 0.001`（平面不确定度 +
 //! 点不确定度，`J_nq = [p−q, −n]`，`Σ_pj` 由 [`crate::noise::DepthNoise`]
 //! 预计算并旋转到世界系）。
-//!
-//! 退化保护：法向分布集中在少数方向（单平面近正对相机）时丢弃多余
-//! 共面点，避免信息矩阵病态。
 
 use firefly_void_esikf::update::MeasurementModel;
 use firefly_void_map::voxel::{VoxelMap, transform_point};
@@ -54,9 +51,7 @@ pub struct DepthDiag {
     pub no_plane: usize,
     /// 卡方门控拒绝。
     pub chi2_rejected: usize,
-    /// 退化保护丢弃。
-    pub degenerate_dropped: usize,
-    /// 最终有效点（退化过滤后）。
+    /// 最终有效点（卡方过滤后）。
     pub kept: usize,
 }
 
@@ -224,15 +219,12 @@ impl<'a> DepthMeasurement<'a> {
     /// 计算残差、H 与 R（对照 `voxel_map.cpp:414-458` 的 H 组装）。
     ///
     /// 固定维度契约：返回行数恒为 `points_l.len()`（与 [`dim`] 一致）。
-    /// 无效点（无对应平面/外点/退化过滤）填零信息行（`z=0, H=0, R=1e12`），
+    /// 无效点（无对应平面/外点）填零信息行（`z=0, H=0, R=1e12`），
     /// 对 KF 不贡献信息，保证与 esikf 的 `dim()`→`residual()` 调用序一致。
     #[allow(clippy::many_single_char_names)] // 单字符 `n`/`h`/`r`/`m` 为论文 (18)(19) 式记号
     fn build(&self, x: &State) -> (DVector<f64>, DMatrix<f64>, DMatrix<f64>) {
         let rot = x.rot.matrix();
-        // 相机光轴（世界系）＝当前姿态的 +z。
-        let cam_axis = rot * Vector3::z_axis().into_inner();
         let mut residuals: Vec<PlaneResidual> = Vec::new();
-        let mut normals: Vec<Vector3<f64>> = Vec::new();
         let mut diag = DepthDiag {
             total: self.points_l.len(),
             ..DepthDiag::default()
@@ -244,7 +236,6 @@ impl<'a> DepthMeasurement<'a> {
             let cov_w = rot * cov * rot.transpose();
             match self.plane_for_point(&p_w, &cov_w) {
                 PlaneQuery::Matched(n, dis, sig) => {
-                    normals.push(n);
                     residuals.push(Some((p_b, n, dis, sig)));
                 }
                 PlaneQuery::NoPlane => {
@@ -258,19 +249,14 @@ impl<'a> DepthMeasurement<'a> {
             }
         }
 
-        // 共面退化保护：法向集中在少数方向时丢弃多余点（置零信息）。
-        // normals 与 residuals 的 Some 项一一对应（下标经有效计数映射）。
-        let keep_mask = self.degenerate_filter(&normals, &residuals, &cam_axis);
-        let matched = diag.total - diag.no_plane - diag.chi2_rejected;
-        diag.kept = keep_mask.iter().filter(|&&k| k).count();
-        diag.degenerate_dropped = matched - diag.kept;
+        diag.kept = residuals.iter().filter(|r| r.is_some()).count();
         self.last_diag.set(diag);
 
         let mut zs = Vec::with_capacity(self.points_l.len());
         let mut rs = Vec::with_capacity(self.points_l.len());
         let zero_info = 1e12;
-        for (i, res) in residuals.iter().enumerate() {
-            if let (Some((_p_b, _n, dis, sig)), Some(true)) = (res, keep_mask.get(i)) {
+        for res in &residuals {
+            if let Some((_p_b, _n, dis, sig)) = res {
                 zs.push(*dis);
                 rs.push(*sig);
             } else {
@@ -286,9 +272,6 @@ impl<'a> DepthMeasurement<'a> {
         let zero_info_row = h_mat.row_mut(0).clone_owned(); // 零行
         for (i, res) in residuals.iter().enumerate() {
             let Some((p_b, n, _, _)) = res else { continue };
-            if !keep_mask.get(i).copied().unwrap_or(false) {
-                continue;
-            }
             let p_cross = firefly_void_types::so3::skew(p_b);
             let a_vec = p_cross * rot.transpose() * n;
             let mut row = zero_info_row.clone_owned();
@@ -300,64 +283,6 @@ impl<'a> DepthMeasurement<'a> {
             r_mat[(i, i)] = rs[i];
         }
         (z_vec, h_mat, r_mat)
-    }
-
-    /// 共面退化保护。
-    ///
-    /// 主法向与相机光轴夹角余弦 < `min_cos_plane_normal`（近正对，
-    /// 切向不可观）且单一法向占比超过 `max_single_normal_ratio` 时，
-    /// 按法向-光轴夹角分桶丢弃多余点（每桶保留一个），避免信息矩阵病态。
-    ///
-    /// `normals` 与 `residuals` 中的 `Some` 项一一对应（下标同源）。
-    /// 返回与 `residuals` 等长的布尔掩码（`true` 保留）。
-    fn degenerate_filter(
-        &self,
-        normals: &[Vector3<f64>],
-        residuals: &[PlaneResidual],
-        cam_axis: &Vector3<f64>,
-    ) -> Vec<bool> {
-        let mut keep = vec![false; residuals.len()];
-        // 先标记有有效平面的点
-        let mut valid_idx: Vec<usize> = Vec::new();
-        for (i, res) in residuals.iter().enumerate() {
-            if res.is_some() {
-                keep[i] = true;
-                valid_idx.push(i);
-            }
-        }
-        if valid_idx.is_empty() {
-            return keep;
-        }
-        let mean_n: Vector3<f64> = normals.iter().sum::<Vector3<f64>>() / normals.len() as f64;
-        let mean_n = mean_n.normalize();
-        let cos_angle = mean_n.dot(cam_axis).abs();
-        if cos_angle >= self.opts.min_cos_plane_normal {
-            return keep;
-        }
-        let n_bins = 8;
-        let mut bin_count = vec![0usize; n_bins];
-        for n in normals {
-            let c = n.dot(cam_axis).clamp(-1.0, 1.0).acos();
-            let bin = ((c / std::f64::consts::PI) * n_bins as f64) as usize;
-            bin_count[bin.min(n_bins - 1)] += 1;
-        }
-        let max_bin = *bin_count.iter().max().unwrap_or(&0);
-        if max_bin as f64 <= self.opts.max_single_normal_ratio * valid_idx.len() as f64 {
-            return keep;
-        }
-        let mut kept_bins = vec![false; n_bins];
-        for &i in &valid_idx {
-            let n = &residuals[i].as_ref().expect("valid_idx 仅含 Some 项").1;
-            let c = n.dot(cam_axis).clamp(-1.0, 1.0).acos();
-            let bin = ((c / std::f64::consts::PI) * n_bins as f64) as usize;
-            let bin = bin.min(n_bins - 1);
-            if kept_bins[bin] {
-                keep[i] = false;
-                continue;
-            }
-            kept_bins[bin] = true;
-        }
-        keep
     }
 }
 
@@ -497,28 +422,6 @@ mod tests {
             "tr(Σ_3m)={} 应大于 tr(Σ_1m)={}",
             c_far.trace(),
             c_near.trace()
-        );
-    }
-
-    #[test]
-    fn degenerate_filter_keeps_single_point_per_bin() {
-        // 退化保护：法向集中在单方向且与光轴夹角大时，每桶保留一个点
-        let opts = DepthOptions::default();
-        let map = map_with_plane_z1();
-        let m = DepthMeasurement::new(&map, Vec::new(), Vec::new(), identity_pose(), opts);
-        // 法向全部指向 +x（与光轴 +z 夹角 90° → cos≈0 < 0.9，触发退化）
-        let normal = Vector3::x_axis().into_inner();
-        let normals = vec![normal; 50];
-        let residuals: Vec<PlaneResidual> = (0..50)
-            .map(|_i| Some((Vector3::new(0.0, 0.0, 1.0), normal, 0.0, 0.001)))
-            .collect();
-        let cam_axis = Vector3::z_axis().into_inner();
-        let keep = m.degenerate_filter(&normals, &residuals, &cam_axis);
-        // 全部同一法向 → 只保留 1 个点（单桶）
-        assert_eq!(
-            keep.iter().filter(|&&k| k).count(),
-            1,
-            "退化时应丢弃多余共面点"
         );
     }
 }
