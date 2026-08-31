@@ -327,6 +327,16 @@ impl<'a> VisualMeasurement<'a> {
         false
     }
 
+    /// 单层有效点数（R < 1e6 的行数；有效点门控用）。
+    #[must_use]
+    pub fn effective_count(&self, x: &State) -> usize {
+        let (z, _, r) = self.level_residual(x);
+        z.iter()
+            .zip(r.diagonal().iter())
+            .filter(|&(_, sig)| *sig < 1e6)
+            .count()
+    }
+
     /// 单层残差：对每个可见点，把预扭曲参考补丁（入口状态冻结）与
     /// 当前帧以投影中心为中心的固定网格补丁比较（论文 (21)(22) 式）。
     ///
@@ -505,8 +515,14 @@ impl<'a> VisualMeasurement<'a> {
                     level,
                 )
                 .with_depth_opt(depth);
+                // 有效点门控：有效点过少时跳过本层更新（官方视觉几百上千点；
+                // 少数字点残差巨大时推量失控——实测 n_valid<20 曾单步推 21m）
+                if model.effective_count(state) < 20 {
+                    continue;
+                }
                 let mut updater =
-                    EskfUpdater::new(model, opts.max_iterations, visual_convergence());
+                    EskfUpdater::new(model, opts.max_iterations, visual_convergence())
+                        .with_error_descent_acceptance();
                 let (iters, _) = updater.update(state)?;
                 total_iterations += iters;
             }
@@ -673,11 +689,11 @@ mod tests {
         );
         let ref_pose =
             Isometry3::from_parts(Translation3::new(0.0, 0.0, 0.0), UnitQuaternion::identity());
-        // 世界系平面 z=2 上的 16 个点（法向 −z 面向相机）
+        // 世界系平面 z=2 上的 25 个点（法向 −z 面向相机；≥ 有效点门控阈值）
         let mut points = Vec::new();
-        for i in 0..16 {
-            let x = -0.1 + f64::from(i % 4) * 0.06;
-            let y = -0.1 + f64::from(i / 4) * 0.06;
+        for i in 0..25 {
+            let x = -0.1 + f64::from(i % 5) * 0.05;
+            let y = -0.1 + f64::from(i / 5) * 0.05;
             points.push(make_point(
                 &ref_img,
                 &ref_pose,
