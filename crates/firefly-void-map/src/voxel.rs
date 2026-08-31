@@ -333,6 +333,9 @@ impl VoxelMap {
     /// 收集体素内视觉点视图（`visible_map_points`/`raycast` 用）。
     ///
     /// `key` 为根体素键；把该根体素内视觉点转成 [`VisualPointView`]。
+    /// 可见性精筛对照官方 `vio.cpp:460-467`：点在相机系前向
+    /// （`dir[2] < 0 → skip`），投影入图像判定（`isInFrame`）在测量侧
+    /// 完成（`visual_update.rs` 的 `depth_discontinuous`/像素边界检查）。
     pub fn collect_visual_points(
         &self,
         key: &VoxelKey,
@@ -348,7 +351,12 @@ impl VoxelMap {
             let Some(ref_idx) = vp.ref_patch else {
                 continue;
             };
-            let Some(px) = intrinsics.project(&transform_point(cam_pose, &vp.pos)) else {
+            let p_cam = transform_point(cam_pose, &vp.pos);
+            // 相机系前向判据（对照 `vio.cpp:462` `dir[2] < 0 → skip`）。
+            if p_cam[2] <= 0.0 {
+                continue;
+            }
+            let Some(px) = intrinsics.project(&p_cam) else {
                 continue;
             };
             let obs = &vp.obs[ref_idx];
@@ -426,6 +434,19 @@ impl VoxelMap {
     #[must_use]
     pub const fn options(&self) -> &VoxelMapOptions {
         &self.opts
+    }
+
+    /// 测试辅助：直接挂一个视觉点（按点位置入根体素）。
+    #[cfg(test)]
+    pub(crate) fn push_visual_point_for_test(&mut self, vp: VisualPoint) {
+        let key = VoxelKey::from_point(&vp.pos, self.opts.root_size);
+        let id = self.visual_pool.len();
+        self.visual_pool.push(vp);
+        let root = self.roots.entry(key).or_insert_with(|| RootVoxel {
+            octo: OctoNode::new_root(key.center(self.opts.root_size), &self.opts),
+            visual_points: Vec::new(),
+        });
+        root.visual_points.push(id);
     }
 }
 

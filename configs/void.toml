@@ -13,9 +13,10 @@ depth_ext_rot = [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]
 body_ext_rot = [[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]]
 
 [imu]
-# IMU 传播噪声（连续谱密度；与 configs/vio.toml 的 sim 注入参数一致）
-gyr = 2.83e-2
-acc = 2.83e-1
+# IMU 传播噪声（方差，直接入 Q 对角，对照 avia.yaml:44-45 gyr_cov=0.3/
+# acc_cov=0.5；原值 2.83e-2/2.83e-1 偏小 ~10 倍）
+gyr = 0.3
+acc = 0.5
 # bias 随机游走收紧：sim 无真实偏置，过大的游走让估计器把深度/视觉
 # 测量偏差吸收进 ba（实测 20s 漂到 -0.09 m/s²，位置随后被拉走）
 bias_gyr = 1.9e-6
@@ -38,11 +39,12 @@ dept_err = 0.02
 beam_err = 0.01
 sigma_num = 3.0
 radius_k = 3.0
-min_cos_plane_normal = 0.9
-max_single_normal_ratio = 0.9
 
 [visual]
-# 视觉噪声（P3 默认）：深度偏差修复后视觉可正常纠偏
+# 视觉噪声（方差；P10.4 实测 img_point_cov=100（官方量级）导致
+# 视觉残差被过度信任、ba 大步进推飞（60s ba 突变 -0.57 m/s²，位置爆炸），
+# 回退 P10.3 的 20000：聚合测量模型下等效噪声须放大
+# （官方逐像素模型 HᵀH/img_point_cov，聚合均值模型信息量低）
 img_point_cov = 20000.0
 outlier_threshold = 1000.0
 patch_size = 11
@@ -74,9 +76,8 @@ normal_converge_thresh = 0.0001
 max_obs_per_point = 30
 min_obs_for_score = 5
 min_obs_for_converge = 10
-# fov 调大：P3 visible_map_points 把 translation 当相机位置（与
-# 世界→相机约定相反，非单位阵时 FoV 中心错位致全剔）——放大 FoV 让
-# 粗剔除近似失效，投影仍由 collect_visual_points 的正确位姿给出
-fov_deg = 175.0
+# fov 70.88°：真实相机 fovy（320×240、fy=230 的视场角），FoV 球
+# 粗剔除以相机世界位置为球心（对照 vio.cpp:462 投影精筛）
+fov_deg = 70.0
 ray_depth_min = 0.5
 ray_depth_max = 20.0

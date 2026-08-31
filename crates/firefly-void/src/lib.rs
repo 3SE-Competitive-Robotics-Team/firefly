@@ -422,11 +422,10 @@ impl Odometry for VoidOdometry {
             let inliers = model.effective_count(&self.state);
             let d = model.last_diag();
             log::info!(
-                "depth-diag t={frame_t:.2} total={} no_plane={} chi2={} degen_drop={} kept={}",
+                "depth-diag t={frame_t:.2} total={} no_plane={} chi2={} kept={}",
                 d.total,
                 d.no_plane,
                 d.chi2_rejected,
-                d.degenerate_dropped,
                 d.kept
             );
             if inliers == 0 {
