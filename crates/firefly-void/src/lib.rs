@@ -41,7 +41,7 @@ pub struct FrameInput<'a> {
 
 /// 单帧深度点云点数上限（均匀随机保留；官方 `LiDAR` 单帧有效点 ~500 量级，
 /// 全量单批 ESIKF 更新须维持 10Hz——R 求逆 O(n³)，n 越大越慢）。
-pub const MAX_POINTS_PER_FRAME: usize = 480;
+pub const MAX_POINTS_PER_FRAME: usize = 3000;
 
 /// 单帧处理输出（P4 健康统计 / 各阶段耗时 trace 用）。
 pub struct OdometryOutput {
