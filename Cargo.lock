@@ -600,10 +600,16 @@ dependencies = [
 name = "firefly-void"
 version = "0.1.0"
 dependencies = [
+ "fastrace",
+ "firefly-error",
  "firefly-void-esikf",
  "firefly-void-map",
  "firefly-void-measure",
  "firefly-void-types",
+ "log",
+ "nalgebra",
+ "serde",
+ "toml",
 ]
 
 [[package]]
@@ -1959,10 +1965,15 @@ dependencies = [
 name = "void"
 version = "0.1.0"
 dependencies = [
+ "fastrace",
  "firefly-error",
+ "firefly-observability",
  "firefly-pubsub",
  "firefly-void",
+ "firefly-void-types",
+ "iceoryx2",
  "log",
+ "nalgebra",
 ]
 
 [[package]]
