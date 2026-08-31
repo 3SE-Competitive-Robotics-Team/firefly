@@ -62,14 +62,17 @@ frame:
 
 $ #pv#math.attach("", b: "v") = #math.bold("R")#math.attach("", b: "glv") #pv#math.attach("", b: "gl"),  quad  #pv#math.attach("", b: "gl") = ((u − c_x)/f_x · z, (v − c_y)/f_y · z, −z)^T. $ <eq:backproj>
 
-Before the update, the cloud is voxel-downsampled on a 0.5 m grid: within
-each grid cell the point with the *smallest* depth uncertainty is kept
-(equivalently the nearest point, since σ_z ∝ z²). This reduces a 320×240
-depth frame (up to 76.8 k points) to a few hundred well-conditioned
-measurements and prevents far, noisy points from dominating the plane fits.
-Edge pixels whose depth jumps by more than 0.15 m from a 4-neighbor are
-discarded before downsampling, rejecting the 1-px foreground bleed that
-simulators and real sensors produce at depth discontinuities.
+Before the update, the cloud is voxel-downsampled on a 0.1 m grid (the
+FAST-LIO2 convention): within each grid cell the point with the *smallest*
+depth uncertainty is kept (equivalently the nearest point, since σ_z ∝ z²).
+This reduces a 320×240 depth frame (up to 76.8 k points) to at most 480
+well-conditioned measurements (a uniform random cap, fixed seed, matching
+the per-frame point count of a LiDAR scan) and prevents far, noisy points
+from dominating the plane fits. A coarser voxel (0.5 m) starves the map — roughly 48 points
+per frame, one per map voxel — so planes cannot accumulate enough inliers
+to mature. Edge pixels whose depth jumps by more than 0.15 m from a
+4-neighbor are discarded before downsampling, rejecting the 1-px foreground
+bleed that simulators and real sensors produce at depth discontinuities.
 
 #heading(level: 2)[Point-to-Plane Residual and Jacobian]
 
@@ -121,20 +124,3 @@ back-projected points; invalid points contribute zero information
 (z = 0, #math.bold("H") = 0, R = 1e12) rather than shrinking the batch. This
 keeps the sequential-update interface between the ESIKF and the measurement
 models stateless and dimension-consistent.
-
-#heading(level: 2)[Adaptive Noise and the Update Gate]
-
-<sec:gate>
-
-The pipeline-level update gate (Section #ref(<sec:system>)) is the practical
-counterpart of the depth noise model: a freshly-initialized plane with only
-the minimum 5 points can be fit with a biased normal, and the resulting
-single-frame update can jump the state by ~0.5 m before the plane matures.
-VOID therefore rejects any depth update whose position change exceeds 0.1 m
-or whose rotation change exceeds 3° in a single frame, keeping the
-propagation prior instead. The thresholds are comfortably above the
-normal per-frame motion of a hovering platform (sub-0.1 m and sub-3° at
-10 Hz) so legitimate updates are unaffected. The gate is a *composable
-pipeline layer*: it does not modify the measurement models or the ESIKF,
-and the same mechanism (with an additional velocity check of 0.5 m s⁻¹)
-protects the visual update against reference-patch mismatches.

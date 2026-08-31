@@ -84,10 +84,11 @@ The contributions of this paper are:
   three-level image patches, scores reference patches by NCC and viewpoint
   cosine, refines plane normals offline by photometric minimization, and
   prunes the map with a sliding window.
-- *A pipeline-level update gate* (Section #ref(<sec:gate>)) that rejects
-  single-frame depth/visual updates whose state change exceeds a motion
-  bound (0.1 m / 3° / 0.5 m s⁻¹), eliminating the explosion observed when a
-  freshly-initialized plane is used before its parameters have converged.
+- *A measurement-driven robustness design* (Section #ref(<sec:depth>)):
+  robustness against immature planes and patch mismatches comes from the
+  measurement model itself — per-point depth noise, plane uncertainty, and
+  per-point chi-square outlier rejection — rather than from state-level
+  pipeline gates.
 - *An industrial-grade Rust implementation* (Section #ref(<sec:system>)):
   `unsafe`-free code, ROS-free zero-copy IPC through iceoryx2
   #cite(<iceoryx2>), fastrace-based distributed tracing, and 493 unit and

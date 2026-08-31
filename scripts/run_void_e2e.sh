@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # firefly-void 三进程 e2e 闭环验证：sim（MuJoCo 物理）→ void（DIVO 里程计）。
 #
-# 用法：scripts/run_void_e2e.sh [秒数] [--runs N]
-#   [秒数]   每轮时长（缺省 60s）
-#   --runs N 重复 N 轮（缺省 1）：每轮独立起停 sim+void，轮间清理进程与
-#            iceoryx2 残留；末尾输出逐轮 ATE 明细与 mean±std。
-#            sim 噪声无种子，多轮统计反映启动期偏置注入的随机性。
+# 用法：scripts/run_void_e2e.sh [秒数] [--runs N] [--trajectory NAME]
+#   [秒数]        每轮时长（缺省 60s）
+#   --runs N      重复 N 轮（缺省 1）：每轮独立起停 sim+void，轮间清理进程与
+#                 iceoryx2 残留；末尾输出逐轮 ATE 明细与 mean±std。
+#                 sim 噪声无种子，多轮统计反映启动期偏置注入的随机性。
+#   --trajectory NAME  透传给 `firefly-sim --script NAME`（具名轨迹驱动运动，
+#                 跳过 planner；缺省不传 = 悬停闭环）。李萨如 bench 用
+#                 `--trajectory lissajous_classic`。
 #
 # 流程（每轮）：
 #   1. 清理残留（进程 + iceoryx2 shm/port_tag）
-#   2. 后台起 `uv run firefly-sim --no-trace`（物理 + 传感器发布）
+#   2. 后台起 `uv run firefly-sim --no-trace [--script NAME]`（物理 + 传感器发布）
 #   3. 后台起 `cargo run -p void`（估计，发布 Firefly/VoidOdom）
 #   4. Python recorder 同步采集 GT 与 VoidOdom（期间两进程在跑）
 #   5. 到点优雅 kill（SIGINT → 端口 Drop，无 iceoryx 幽灵残留）
@@ -25,12 +28,14 @@ mkdir -p "$WORK"
 
 cd "$ROOT"
 
-# 参数：位置参数 = 秒数；--runs N = 轮数
+# 参数：位置参数 = 秒数；--runs N = 轮数；--trajectory NAME = 轨迹脚本
 T=60
 RUNS=1
+TRAJECTORY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --runs) RUNS=${2:-1}; shift 2 ;;
+    --trajectory) TRAJECTORY=${2:-}; shift 2 ;;
     *) T=$1; shift ;;
   esac
 done
@@ -48,12 +53,18 @@ run_one_round() {
   local i=$1
   local run_dir="$WORK/run$i"
   mkdir -p "$run_dir"
-  local sim_pid void_pid rec_ec ate_ec leftover
+  local sim_pid void_pid rec_ec ate_ec leftover sim_cmd
 
   cleanup
 
-  echo "[e2e][run $i] 启动 sim（--no-trace，${T}s 闭环）"
-  nohup uv run firefly-sim --no-trace > "$run_dir/sim.log" 2>&1 &
+  if [ -n "$TRAJECTORY" ]; then
+    sim_cmd="uv run firefly-sim --no-trace --script $TRAJECTORY"
+  else
+    sim_cmd="uv run firefly-sim --no-trace"
+  fi
+
+  echo "[e2e][run $i] 启动 sim（--no-trace${TRAJECTORY:+ --script $TRAJECTORY}，${T}s 闭环）"
+  nohup $sim_cmd > "$run_dir/sim.log" 2>&1 &
   sim_pid=$!
 
   # 等待 sim 就绪（话题服务创建）
@@ -178,8 +189,7 @@ PY
   # ATE 计算（Umeyama 相似变换对齐）
   echo "=== [run $i] ATE 计算 ==="
   uv run python - "$run_dir" <<'PY'
-"""离线对齐 GT 与 VoidOdom（Umeyama 相似变换），输出 ATE 统计与门控计数。"""
-import re
+"""离线对齐 GT 与 VoidOdom（Umeyama 相似变换），输出 ATE 统计与健康统计。"""
 import sys
 
 import numpy as np
@@ -240,28 +250,6 @@ try:
 except FileNotFoundError:
     print("(无 void.log)")
 
-# 门控计数：perf-diag 的 rejected 序列（每条 10s）+ 拒绝日志行数
-rej_seq: list[int] = []
-depth_rej_seq: list[int] = []
-reject_log = 0
-try:
-    with open(f"{WORK}/void.log", "r") as f:
-        for line in f:
-            if "[perf-diag]" in line:
-                m = re.search(r"rejected=(\d+) depth_rejects=(\d+)", line)
-                if m:
-                    rej_seq.append(int(m.group(1)))
-                    depth_rej_seq.append(int(m.group(2)))
-            if "更新拒绝" in line or "深度更新跳过" in line:
-                reject_log += 1
-except FileNotFoundError:
-    pass
-rejected_total = rej_seq[-1] if rej_seq else 0
-# 拒绝集中启动期：第一个 10s 窗口的 rejected 已等于最终值（后续不增长）
-startup_local = bool(rej_seq) and rej_seq[0] == rej_seq[-1]
-print(f"[gate] rejected_total={rejected_total} depth_rejects_max={max(depth_rej_seq, default=0)} "
-      f"reject_log_lines={reject_log} startup_localized={startup_local}")
-
 if gt_span < 0.05 or odom_span < 0.05:
     err = np.linalg.norm(odom_w - gt_w, axis=1)
     ate_rms = float(np.sqrt(np.mean(err**2)))
@@ -303,8 +291,7 @@ else:
     print(f"[ate] {'PASS' if ok else 'FAIL'}（阈值 ATE-RMS < 0.3m）")
 
 with open(f"{WORK}/ate_meta.txt", "w") as f:
-    f.write(f"{ate_rms} {ate_mean} {ate_max} {1 if ok else 0} {rejected_total} "
-            f"{max(depth_rej_seq, default=0)} {1 if startup_local else 0} {reject_log}\n")
+    f.write(f"{ate_rms} {ate_mean} {ate_max} {1 if ok else 0}\n")
 sys.exit(0 if ok else 2)
 PY
   ate_ec=$?
@@ -337,7 +324,7 @@ echo "=========================================================="
 echo "=== e2e 汇总（$RUNS 轮 × ${T}s，ATE 阈值 < 0.3m）==="
 echo "=========================================================="
 uv run python - "$WORK" "$RUNS" <<'PY'
-"""汇总多轮 ATE 与门控统计：逐轮明细 + mean±std。"""
+"""汇总多轮 ATE：逐轮明细 + mean±std。"""
 import sys
 
 import numpy as np
@@ -349,20 +336,18 @@ rows = []
 for i in range(1, RUNS + 1):
     try:
         with open(f"{WORK}/run{i}/ate_meta.txt") as f:
-            rms, mean, mx, ok, rejected, drej, startup, logs = map(float, f.read().split())
+            rms, mean, mx, ok = map(float, f.read().split())
     except FileNotFoundError:
         print(f"run {i}: 缺 ate_meta.txt（该轮失败）")
-        rows.append((i, float("nan"), float("nan"), float("nan"), 0, 0, 0, 0, False))
+        rows.append((i, float("nan"), float("nan"), float("nan"), False))
         continue
-    rows.append((i, rms, mean, mx, int(rejected), int(drej), int(startup), int(logs), bool(ok)))
+    rows.append((i, rms, mean, mx, bool(ok)))
 
 print("--- 逐轮明细 ---")
-print(f"{'run':>3} {'ATE-RMS':>9} {'ATE-mean':>9} {'ATE-max':>9} {'rejected':>9} "
-      f"{'d_rej':>6} {'startup':>8} {'verdict':>6}")
+print(f"{'run':>3} {'ATE-RMS':>9} {'ATE-mean':>9} {'ATE-max':>9} {'verdict':>6}")
 all_ok = True
-for i, rms, mean, mx, rejected, drej, startup, logs, ok in rows:
-    print(f"{i:>3} {rms:>9.4f} {mean:>9.4f} {mx:>9.4f} {rejected:>9} {drej:>6} "
-          f"{'yes' if startup else 'no':>8} {'PASS' if ok else 'FAIL':>6}")
+for i, rms, mean, mx, ok in rows:
+    print(f"{i:>3} {rms:>9.4f} {mean:>9.4f} {mx:>9.4f} {'PASS' if ok else 'FAIL':>6}")
     all_ok &= ok
 
 rms = np.array([r[1] for r in rows])
@@ -377,9 +362,6 @@ else:
 mean = float(np.mean(rms))
 print(f"--- 汇总 ---")
 print(f"ATE-RMS mean±std = {mean:.4f} ± {std:.4f} m（{len(rms)} 轮）")
-gate_rejected = sum(r[4] for r in rows)
-gate_startup = sum(r[6] for r in rows)
-print(f"门控：累计 rejected={gate_rejected}，拒绝集中启动期轮数={gate_startup}/{len(rows)}")
 print(f"最终判定：{'ALL PASS' if all_ok else 'SOME RUN FAILED'}（每轮 ATE-RMS < 0.3m）")
 sys.exit(0 if all_ok else 1)
 PY

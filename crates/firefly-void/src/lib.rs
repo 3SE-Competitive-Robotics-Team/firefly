@@ -28,9 +28,7 @@ use nalgebra::{Isometry3, Matrix3, Rotation3, UnitQuaternion, Vector3};
 
 pub mod options;
 
-pub use options::{
-    DepthConfig, MapConfig, PropagationNoiseConfig, VisualConfig, VoidOptions, WarmupConfig,
-};
+pub use options::{DepthConfig, MapConfig, PropagationNoiseConfig, VisualConfig, VoidOptions};
 
 /// 传感器帧输入：深度帧与相机帧**同步到达**（同一时刻 10Hz 对齐，
 /// 由接线层配对）。
@@ -40,6 +38,10 @@ pub struct FrameInput<'a> {
     /// 深度帧（OpenGL 系原始数据，内部反投影）。
     pub depth: &'a DepthFrame<'a>,
 }
+
+/// 单帧深度点云点数上限（均匀随机保留；官方 `LiDAR` 单帧有效点 ~500 量级，
+/// 全量单批 ESIKF 更新须维持 10Hz——R 求逆 O(n³)，n 越大越慢）。
+pub const MAX_POINTS_PER_FRAME: usize = 480;
 
 /// 单帧处理输出（P4 健康统计 / 各阶段耗时 trace 用）。
 pub struct OdometryOutput {
@@ -63,12 +65,6 @@ pub struct OdometryOutput {
     pub depth_converged: bool,
     /// 地图视觉点数（viz 采样用）。
     pub map_visual_points: usize,
-    /// 本帧被门控拒绝的更新数（0/1/2，深度+视觉；健康统计 `rejected_updates`）。
-    pub rejected_updates: usize,
-    /// 深度更新连续被拒帧数（连续拒绝保护状态；诊断统计用）。
-    pub depth_rejects: u32,
-    /// 累计被门控拒绝的更新数（进程生命周期）。
-    pub rejected_total: usize,
     /// 各阶段耗时（秒）。
     pub timings: FrameTimings,
 }
@@ -116,12 +112,6 @@ pub struct VoidOdometry {
     last_frame_t: Option<f64>,
     /// 帧计数器（视觉地图点增补判据）。
     frame_id: u32,
-    /// 被门控拒绝的累计更新数（深度+视觉；健康统计）。
-    rejected_updates: usize,
-    /// 深度测量开始后的帧数（首个有效平面点出现起计；`None` = 尚未开始）。
-    depth_epoch: Option<u32>,
-    /// 深度更新连续被拒帧数（达到上限后本帧跳过深度更新）。
-    depth_rejects: u32,
 }
 
 impl VoidOdometry {
@@ -156,9 +146,6 @@ impl VoidOdometry {
             imu_queue: VecDeque::new(),
             last_frame_t: None,
             frame_id: 0,
-            rejected_updates: 0,
-            depth_epoch: None,
-            depth_rejects: 0,
         }
     }
 
@@ -184,8 +171,10 @@ impl VoidOdometry {
     /// `R_glv·Σ·R_glvᵀ`）。输出即虚拟系点云——P3 的 [`DepthMeasurement`]
     /// 以单位外参消费（点已就位，避免双重旋转）。
     ///
-    /// 下采样：`downsample_voxel`（默认 0.5m）体素网格内保留深度不确定度
-    /// 最大（`σ_z` 最大 = 距离最远）的点，控制单帧点数（320×240 → 数百）。
+    /// 下采样：`downsample_voxel`（默认 0.1m，FAST-LIO2 常规取值）体素
+    /// 网格内保留深度不确定度最小（`σ_z` 最小 = 距离最近）的点；超过
+    /// [`MAX_POINTS_PER_FRAME`] 时均匀随机保留固定数量（种子固定，逐帧
+    /// 可复现），防止极端近距离场景点数爆炸。
     #[must_use]
     fn build_downsampled_cloud(
         &self,
@@ -266,7 +255,39 @@ impl VoidOdometry {
             points.push(p);
             covs.push(cov);
         }
-        (points, covs)
+        // 输出按量化坐标键（1mm 网格）排序：HashMap 迭代顺序不稳定
+        // （RandomState 随机种子），排序保证逐帧可复现
+        let mut order: Vec<usize> = (0..points.len()).collect();
+        order.sort_unstable_by_key(|&i| {
+            [
+                (points[i][0] * 1000.0).round() as i64,
+                (points[i][1] * 1000.0).round() as i64,
+                (points[i][2] * 1000.0).round() as i64,
+            ]
+        });
+        let points: Vec<_> = order.iter().map(|&i| points[i]).collect();
+        let covs: Vec<_> = order.iter().map(|&i| covs[i]).collect();
+        // 点数上限：极端近距离场景（单帧体素点密集）可能超过上限——均匀
+        // 随机保留固定数量（LCG 种子固定 42，逐帧可复现；抽样后仍超出时
+        // 截到上限，保证单批全量更新不超 10Hz 预算）
+        if points.len() > MAX_POINTS_PER_FRAME {
+            let total = points.len();
+            let mut rng: u64 = 42;
+            let mut keep = Vec::with_capacity(MAX_POINTS_PER_FRAME);
+            for (p, cov) in points.into_iter().zip(covs) {
+                rng = rng
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                if (rng % total as u64) < MAX_POINTS_PER_FRAME as u64 {
+                    keep.push((p, cov));
+                }
+            }
+            keep.truncate(MAX_POINTS_PER_FRAME);
+            let (p, c): (Vec<_>, Vec<_>) = keep.into_iter().unzip();
+            (p, c)
+        } else {
+            (points, covs)
+        }
     }
 
     /// 地图视觉点采样（≤ `max_points`，viz `map_points` 实体用）。
@@ -333,8 +354,6 @@ impl Odometry for VoidOdometry {
         let t0 = std::time::Instant::now();
         let frame_t = frame.depth.t.max(frame.camera.t);
         self.frame_id += 1;
-        // 本帧被门控拒绝的更新数（深度+视觉，健康统计输出）
-        let mut frame_rejected = 0usize;
 
         // 1. 前向传播：消费到帧时刻为止的 IMU（梯形积分，逐段传播）
         let propagate = {
@@ -387,9 +406,8 @@ impl Odometry for VoidOdometry {
         );
         let depth_preprocess = t_pre.elapsed().as_secs_f64();
 
-        // 3. 深度测量 ESIKF 更新（迭代收敛）
-        // 点云已在虚拟针孔系：DepthMeasurement 以单位外参消费
-        // （P3 内部 `p_b = ext·p_l`、`cov_w = R·cov·Rᵀ`，虚拟系下一致）
+        // 3. 深度测量 ESIKF 更新（Algorithm 1 顺序更新第 1 步：无有效测量
+        // 即跳过——平面未建立/视野无平面属正常空窗，不产生任何状态拦截）
         let t_depth = std::time::Instant::now();
         let (depth_inliers, depth_iterations, depth_converged) = {
             let model = DepthMeasurement::new(
@@ -401,86 +419,24 @@ impl Odometry for VoidOdometry {
             );
             // 健康统计：update 前的有效点计数（传播先验下）
             let inliers = model.effective_count(&self.state);
-            // 深度测量 epoch：首个有效平面点出现起计（窗口期内加严）
-            if inliers > 0 {
-                self.depth_epoch = Some(self.depth_epoch.unwrap_or(0) + 1);
-            }
-            // 无有效测量（平面未建立/视野无平面）：不更新、不计拒绝——
-            // 深度 epoch 与连续拒绝计数都只在有测量时推进，避免启动期
-            // 首个平面建立前的空窗污染门控状态
             if inliers == 0 {
                 (0usize, 0usize, false)
             } else {
-                // 连续拒绝保护：连续 max_consecutive_rejects 次被门控拒后
-                // 本帧跳过深度更新（防反复半接受状态叠加漂移），视觉更新
-                // 收敛后复位。仅在视觉预热结束后启用——预热期内视觉未参与，
-                // 跳过深度 = 纯 IMU 传播更危险，门控拒绝本身已安全
-                let visual_ready = self.frame_id > self.options.visual_warmup_frames;
-                let skip = visual_ready
-                    && self.depth_rejects >= self.options.warmup.max_consecutive_rejects;
-                if skip {
-                    log::warn!(
-                        "深度更新跳过（连续拒绝 {} 次，等待视觉收敛复位）",
-                        self.depth_rejects
-                    );
-                    (inliers, 0usize, false)
-                } else {
-                    let before = self.state;
-                    let mut state = before;
-                    let mut updater = EskfUpdater::new(model, 5, 1.5e-4);
-                    let iterations = updater
-                        .update(&mut state)
-                        .map_err(|e| e.with_context("stage", "depth"))?;
-                    // 更新门控：单帧深度更新把状态打飞时（典型：新平面刚建立，
-                    // 初始点少导致平面参数不准，位置跳 0.5m）拒绝并回滚到传播
-                    // 先验——被拒后由 IMU 传播维持状态，平面随后续帧成熟后
-                    // 深度残差自然收敛，跳变帧不污染状态。速度通道拦「慢滑」：
-                    // 带偏置平面经连续多帧小幅更新缓慢注入虚假速度（漂向
-                    // ±0.2m/s，位置漂 0.4-0.6m）时单帧位置/姿态差都在阈值内，
-                    // 但速度差超出即拒绝。启动期加严：首个平面未收敛窗口内
-                    // 门控阈值乘 warmup_gate_scale，且有效点少于
-                    // min_inliers_warmup 时直接拒绝（点太少平面不可信）。
-                    let warm = self
-                        .depth_epoch
-                        .is_some_and(|e| e <= self.options.warmup.warmup_frames);
-                    let gate = &self.options.update_gate;
-                    let scale = if warm {
-                        self.options.warmup.warmup_gate_scale
-                    } else {
-                        1.0
-                    };
-                    let dp = (state.pos - before.pos).norm();
-                    let dvel = (state.vel - before.vel).norm();
-                    let drot = before.rot.rotation_to(&state.rot).angle();
-                    let inlier_ok = !warm || inliers >= self.options.warmup.min_inliers_warmup;
-                    let accepted = inlier_ok
-                        && dp < gate.max_pos_delta * scale
-                        && dvel < gate.max_vel_delta * scale
-                        && drot < gate.max_rot_delta * scale;
-                    if accepted {
-                        self.state = state;
-                        self.depth_rejects = 0;
-                    } else {
-                        self.rejected_updates += 1;
-                        frame_rejected += 1;
-                        self.depth_rejects += 1;
-                        log::warn!(
-                            "深度更新拒绝：dp={dp:.3}m dvel={dvel:.3} drot={drot:.3}rad \
-                             inliers={inliers} warm={warm}（新平面未收敛/测量退化）"
-                        );
-                    }
-                    (inliers, iterations, iterations < 5 && inliers > 0)
-                }
+                // 单批全量更新（官方 StateEstimation 语义：一次迭代处理全部
+                // 有效点；点数由 [`MAX_POINTS_PER_FRAME`] 控制在 10Hz 预算内）
+                let mut updater = EskfUpdater::new(model, 5, 1.5e-4);
+                let iterations = updater
+                    .update(&mut self.state)
+                    .map_err(|e| e.with_context("stage", "depth"))?;
+                (inliers, iterations, iterations < 5 && inliers > 0)
             }
         };
         let depth_update = t_depth.elapsed().as_secs_f64();
 
-        // 4. 视觉测量金字塔更新（预热期内只跑深度，状态稳定后再建视觉点）
+        // 4. 视觉测量金字塔更新（Algorithm 1 顺序更新第 2 步：无可视点即
+        // 跳过——视觉地图点未建立/视野无点时属正常空窗）
         let t_visual = std::time::Instant::now();
-        let warmup = self.frame_id <= self.options.visual_warmup_frames;
-        let (visual_iterations, visual_healthy) = if warmup {
-            (0usize, false)
-        } else {
+        let (visual_iterations, visual_healthy) = {
             // 可见视觉地图点（含光线投射补漏）
             let cam_pose = self.cam_pose();
             let mut points = self.map.visible_map_points(&cam_pose, &intrinsics, &[]);
@@ -505,52 +461,28 @@ impl Odometry for VoidOdometry {
                     frame.camera.left_gray.to_vec(),
                 );
                 let depth = Some((frame.depth.depth, frame.depth.width, frame.depth.height));
-                let before = self.state;
-                let mut state = before;
                 let iterations = VisualMeasurement::pyramid_update(
-                    &image, &points, depth, intrinsics, vis_opts, &mut state,
+                    &image,
+                    &points,
+                    depth,
+                    intrinsics,
+                    vis_opts,
+                    &mut self.state,
                 )
                 .map_err(|e| e.with_context("stage", "visual"))?;
                 // 仿真固定曝光：估计关闭时强制 τ = 1（视觉残差无曝光自由度）
                 if !self.options.estimate_exposure {
-                    state.inv_expo_time = 1.0;
+                    self.state.inv_expo_time = 1.0;
                 }
-                // 更新门控：视觉参考补丁误匹配时会产生大状态跳变
-                // （实测 22s 处位置瞬跳 0.4m + 速度爆），拒绝并回滚——
-                // 深度+IMU 仍可维持，错误视觉更新丢弃（参数与深度门控
-                // 对齐，另加速度通道；见 [`options::UpdateGateConfig`]）
-                let gate = &self.options.update_gate;
-                let dp = (state.pos - before.pos).norm();
-                let dvel = (state.vel - before.vel).norm();
-                let drot = before.rot.rotation_to(&state.rot).angle();
-                let accepted = dp < gate.max_pos_delta
-                    && dvel < gate.max_vel_delta
-                    && drot < gate.max_rot_delta;
-                if accepted {
-                    self.state = state;
-                    // 视觉正常收敛一帧 → 复位深度连续拒绝计数（深度更新
-                    // 恢复参与）
-                    if iterations > 0 {
-                        self.depth_rejects = 0;
-                    }
-                    (iterations, iterations > 0)
-                } else {
-                    self.rejected_updates += 1;
-                    frame_rejected += 1;
-                    log::warn!(
-                        "视觉更新拒绝：dp={dp:.3}m dvel={dvel:.3} drot={drot:.3}rad（参考补丁误匹配）"
-                    );
-                    (0usize, false)
-                }
+                (iterations, iterations > 0)
             }
         };
         let visual_update = t_visual.elapsed().as_secs_f64();
 
-        // 5. 地图几何 + 视觉更新（建图预热期内跳过注册：前 N 帧纯 IMU
-        // 传播——首帧位姿注册的平面若偏，会被深度残差固化成稳态偏置）
+        // 5. 地图几何 + 视觉更新（Algorithm 1 建图：注册深度点 + 更新视觉
+        // 地图点 + 滑窗检查，每帧执行，无预热跳过）
         let t_map = std::time::Instant::now();
-        let map_warmup = self.frame_id <= self.options.map_warmup_frames;
-        if !map_warmup {
+        {
             // 深度点云注册：虚拟系点云 → 世界系（更新后位姿）
             let rot = self.state.rot.matrix();
             let (points_w, covs_w): (Vec<_>, Vec<_>) = points_l
@@ -559,18 +491,16 @@ impl Odometry for VoidOdometry {
                 .map(|(p, cov)| (rot * p + self.state.pos, rot * cov * rot.transpose()))
                 .unzip();
             self.map.register_points(&points_w, &covs_w);
-            // 视觉地图点更新（预热期后开启：参考补丁需在状态稳定时建立）
-            if !warmup {
-                let image = GrayImage::new(
-                    frame.camera.width,
-                    frame.camera.height,
-                    frame.camera.left_gray.to_vec(),
-                );
-                let cam_pose = self.cam_pose();
-                let vstate = VisualState::new(self.frame_id, self.state.inv_expo_time);
-                self.map
-                    .update_visual(&cam_pose, &image, &intrinsics, &vstate);
-            }
+            // 视觉地图点更新
+            let image = GrayImage::new(
+                frame.camera.width,
+                frame.camera.height,
+                frame.camera.left_gray.to_vec(),
+            );
+            let cam_pose = self.cam_pose();
+            let vstate = VisualState::new(self.frame_id, self.state.inv_expo_time);
+            self.map
+                .update_visual(&cam_pose, &image, &intrinsics, &vstate);
             // 滑窗检查
             self.map.on_update_end(&self.state.pos);
         }
@@ -603,9 +533,6 @@ impl Odometry for VoidOdometry {
             visual_healthy,
             depth_converged,
             map_visual_points: map_vpts,
-            rejected_updates: frame_rejected,
-            depth_rejects: self.depth_rejects,
-            rejected_total: self.rejected_updates,
             timings: FrameTimings {
                 propagate,
                 depth_preprocess,
@@ -684,15 +611,15 @@ mod tests {
         let (_depth, frame) = plane_depth_frame(2.0);
         let (points, covs) = odom.build_downsampled_cloud(&frame, intrinsics);
         assert_eq!(points.len(), covs.len());
-        // 0.5m 体素 + 4m 上限：320×240 全有效 ≈ 76.8k 点 → 数十点
+        // 0.1m 体素 + 480 上限：320×240 全有效 ≈ 76.8k 点 → 上限截断
         assert!(
-            points.len() < 500,
-            "downsampled {} should be small",
+            points.len() <= MAX_POINTS_PER_FRAME,
+            "downsampled {} should not exceed cap",
             points.len()
         );
         assert!(
-            points.len() > 30,
-            "downsampled {} should be non-trivial",
+            points.len() > 200,
+            "downsampled {} should stay dense (map starvation fix)",
             points.len()
         );
         // 全部点应在 z≈2 平面附近（OpenGL → 虚拟系转换后 z 为正）
@@ -706,6 +633,23 @@ mod tests {
         }
     }
 
+    /// 上限截断确定性：同输入两次降采样结果逐点一致（LCG 种子固定 42）。
+    #[test]
+    fn downsample_cap_is_deterministic() {
+        let o = VoidOptions::default();
+        let odom = VoidOdometry::new(o);
+        let intrinsics = Intrinsics::new(168.607, 168.607, 160.0, 120.0);
+        let (_depth, frame) = plane_depth_frame(2.0);
+        let (p1, c1) = odom.build_downsampled_cloud(&frame, intrinsics);
+        let (p2, c2) = odom.build_downsampled_cloud(&frame, intrinsics);
+        assert_eq!(p1.len(), p2.len());
+        for (a, b) in p1.iter().zip(&p2) {
+            assert!((a - b).norm() < 1e-12, "点云应逐帧可复现");
+        }
+        for (a, b) in c1.iter().zip(&c2) {
+            assert!((a - b).norm() < 1e-12, "协方差应逐帧可复现");
+        }
+    }
     #[test]
     fn depth_ext_rot_maps_opengl_to_pinhole() {
         let o = VoidOptions::default();
