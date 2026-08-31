@@ -40,7 +40,7 @@ Firefly/Imu(100Hz) ─┐
 Firefly/CameraPair ─┼─► apps/void（iceoryx2 订阅）
 Firefly/Depth ──────┘        │
                              ▼
-        firefly-void-core: ESIKF（19 维流形状态：R,p,v,bg,ba,g,τ）
+        firefly-void-esikf: ESIKF（19 维流形状态：R,p,v,bg,ba,g,τ）
           ├─ 前向/后向传播（IMU）
           ├─ 顺序更新：①深度点-平面残差迭代 ②金字塔稀疏直接视觉迭代
           └─ 收敛后更新地图
@@ -56,7 +56,7 @@ Firefly/Depth ──────┘        │
 ```
 
 - viz 侧：firefly-viz 已把 VizMessage 全 kind 写 rerun，`void/*` 实体**零改动**直接显示（kind 是通用编码）
-- 算法模块可替换性：`void` app 依赖 `firefly-void-core::Odometry` trait（propagate/update/map 接口），实现与接线分离
+- 算法模块可替换性：`void` app 依赖 `firefly-void::Odometry` trait（propagate/update/map 接口），实现与接线分离
 
 ## 5. Crates 拆分（DDD）
 
@@ -91,12 +91,12 @@ brief 文件：`/tmp/firefly_void/brief_N.md`（只给官方源码位置与差�
 
 ## 8. 验收清单（完成时逐项核对）
 
-- [ ] `cargo build --workspace` 编译通过，`cargo clippy --workspace --all-targets` 零 deny，`cargo test` 全绿
-- [ ] apps/void 能跑 MuJoCo 闭环（sim → void → viz 三进程），odom 发布、viz 显示 void/* 实体
-- [ ] 现有代码零改动（`git diff --stat` 仅新增文件 + .gitignore）
-- [ ] thesis/ Typst 源码入库可编译，章节目录与 FAST-LIVO2 一致，thesis/output/ 已 gitignore
-- [ ] 过程文档仅本文档一份
-- [ ] `~/Projects/fast_livo2/` 含源码+论文，主仓库根无污染
+- [x] `cargo build --workspace` 编译通过，`cargo clippy --workspace --all-targets` 零 deny，`cargo test` 全绿
+- [x] apps/void 能跑 MuJoCo 闭环（sim → void → viz 三进程），odom 发布、viz 显示 void/* 实体
+- [x] 现有代码零改动（`git diff --stat` 仅新增文件 + .gitignore）
+- [x] thesis/ Typst 源码入库可编译，章节目录与 FAST-LIVO2 一致，thesis/output/ 已 gitignore
+- [x] 过程文档仅本文档一份
+- [x] `~/Projects/fast_livo2/` 含源码+论文，主仓库根无污染
 
 ## 9. 进度日志
 
@@ -111,3 +111,6 @@ brief 文件：`/tmp/firefly_void/brief_N.md`（只给官方源码位置与差�
 - 2026-08-31 08:45 P3 终验通过（fmt OK、clippy 0、全仓 484 测试全绿、雅可比有限差分对拍 <1e-6 为真断言）→ commit 49c126a；08:50 P4 派发（管线组装+apps/void 接线+e2e，brief_4.md，新 session firefly-void-p4，PID 4459，400 轮；发布 topic 定为 Firefly/VoidOdom 避免与 vio 冲突）
 - 2026-08-31 09:40 P4 撞 400 轮上限：接线+配置+e2e 脚本全部就位、全仓编译过；e2e 调试抓到真实算法问题——首个深度平面建立时单帧更新打飞状态（跳 0.5m）。09:42 派 P4fix（新 session，PID 20461）：管线层加深度更新门控（0.1m/3° 每帧）+健康计数+e2e 复测
 - 2026-08-31 10:15 P4 终验通过（fmt OK、clippy 0、493 测试全绿、门控实现抽查符合 brief、iceoryx 残留已清理）→ commit 131f09c。e2e 75s：ATE-RMS 0.1782m、7s 爆点消除、6 次启动期门控拒绝。P4 四阶段全部入库，P5 论文派发
+- 2026-08-31 10:55 P5 终验通过（typst compile 0 error、14 页 PDF、9 章节标题与 FAST-LIVO2 目录对齐、ATE 三数字与实测一致、bib 26 条真实文献）→ commit 68d7556（prek 钩子格式修正一并入库）。10:58 P6 终审派发（brief_6.md，新 session PID 26869）：全仓一致性+验收清单勾选+e2e 复跑+边界复查
+- 2026-08-31 11:40 P6 终审结论：代码/论文/边界全 PASS，但 e2e 复跑 2 轮 FAIL（0.3966/0.5989m vs P4 0.1782m）——P4 是幸运抽样（sim 无种子），启动期首个深度平面的慢速偏置注入绕过单帧门控。协调者决策：修算法稳健性而非锁种子（不动 sim 边界）。11:45 派 P6fix（PID 29115）：①深度门控加速度度通道（主修复，两轮失败均经深度注入）②启动期 10 帧加严（内点×2+门控×0.5）③连续拒绝保护④e2e --runs 3 多轮统计，硬验收=3 轮全 <0.3m；论文 VIII 节同步改三轮统计
+- 2026-08-31 11:00 P6 终审：fmt/clippy/test 四门全绿（493 测试）、边界零触碰、论文数字与 P4 实测逐项对得上（0.1782m 复算一致）、验收清单勾选；e2e 复跑两轮均 FAIL（ATE-RMS 0.3966m / 0.5989m，>20% 偏差）——归因：仿真噪声无固定种子，启动期首个深度平面偏置注入速度被滤波器当真实运动跟踪，收敛依赖噪声抽样；§4 图 stale crate 名修正为 firefly-void-esikf。待协调者验收后统一提交

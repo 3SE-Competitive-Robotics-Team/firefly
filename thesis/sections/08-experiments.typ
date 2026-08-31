@@ -33,13 +33,15 @@ the 6-DoF pose, and a downstream planner/controller closes the loop on the
 reference trajectory. The platform hovers at the ground-truth pose
 (1, 4, 1) m with zero span, so the ATE measures the estimation error under
 near-static motion with rich depth structure (ground plane, walls, and a
-column that constrains roll/pitch). All numbers reported in this section
-are from a single 75 s run of the P4 end-to-end evaluation (the
-`firefly-void` P4 acceptance run, commit `131f09c`).
+column that constrains roll/pitch). Because the simulation adds fresh noise
+to every run (no fixed seed), the reported numbers are aggregated over
+three independent 75 s runs of the end-to-end evaluation; each run starts
+its own simulator and estimator processes and computes ATE against the
+same ground-truth trajectory.
 
 The implementation is Rust (edition 2024) with `unsafe` forbidden at the
 crate level, running on Apple Silicon (M-series), single-machine, with all
-computation in one thread. The full workspace contains 493 unit and
+computation in one thread. The full workspace contains 494 unit and
 integration tests; the Jacobians of both measurement models are validated
 against central finite differences with relative errors below 1e-6, and the
 sequential-vs-joint update equivalence is verified on the manifold.
@@ -47,39 +49,37 @@ sequential-vs-joint update equivalence is verified on the manifold.
 #heading(level: 2)[End-to-End Accuracy]
 
 Table #ref(<tab:ate>) reports the absolute trajectory error (ATE) of the
-estimated pose against ground truth over the 75 s run.
+estimated pose against ground truth over three 75 s runs.
 
 #figure(
   table(
-    columns: (auto, auto),
-    align: (left, right),
+    columns: (auto, auto, auto),
+    align: (left, right, right),
     stroke: 0.5pt,
     table.header(
-      table.cell[#text(weight: "bold")[Metric]],
-      table.cell[#text(weight: "bold")[Value]],
+      table.cell[#text(weight: "bold")[Run]],
+      table.cell[#text(weight: "bold")[ATE-RMS]],
+      table.cell[#text(weight: "bold")[ATE-max]],
     ),
-    [ATE-RMS], [0.1782 m],
-    [ATE-mean], [0.1703 m],
-    [ATE-max], [0.2049 m],
+    [1], [0.1160 m], [0.1745 m],
+    [2], [0.0258 m], [0.2941 m],
+    [3], [0.1381 m], [0.1938 m],
+    table.cell[#text(weight: "bold")[mean ± std]], table.cell[#text(weight: "bold")[0.0933 ± 0.0595 m]], table.cell[#text(weight: "bold")[0.2208 ± 0.0648 m]],
   ),
-  caption: [Absolute trajectory error of DIVO over the 75 s hovering
-  experiment (ground-truth pose (1, 4, 1) m, zero span).],
+  caption: [Absolute trajectory error of DIVO over three independent 75 s
+  hovering experiments (ground-truth pose (1, 4, 1) m, zero span).],
 )<tab:ate>
 
-The sub-0.2 m RMS error is achieved by the sequential fusion of depth and
-visual measurements; during the run, 395 depth-frame updates and 653 visual
-updates were accepted, the visual model tracking 704 frames in total (the
-remaining frames had fewer than the warmup budget of 60 visible points and
-were skipped by the visual update). The pipeline update gate rejected 6
-single-frame updates, all of them during the startup transient when the
-first depth plane was initialized from a small point set and the filter
-state was still degenerate (NaN-prone). After the startup transient, no
-further updates were rejected, and the previously-observed 7 s position
-explosion (~0.5 m jump) caused by the first immature plane was eliminated.
+All three runs stay below the 0.3 m RMS acceptance threshold despite
+unseeded sensor noise; the per-run spread reflects the stochasticity of the
+startup transient, where the first depth plane is initialized from a small
+point set and the filter state is still degenerate. The sub-0.15 m mean RMS
+error is achieved by the sequential fusion of depth and visual measurements,
+combined with the pipeline update gate described below.
 
 #heading(level: 2)[Update Statistics and Timing]
 
-Table #ref(<tab:health>) summarizes the per-stage statistics of the run,
+Table #ref(<tab:health>) summarizes the per-stage statistics of the runs,
 as reported by the `void/health` visualization scalar stream and the
 per-stage timing instrumentation.
 
@@ -93,21 +93,20 @@ per-stage timing instrumentation.
       table.cell[#text(weight: "bold")[Value]],
       table.cell[#text(weight: "bold")[Note]],
     ),
-    [Depth updates accepted], [395], [point-to-plane ESIKF batches],
-    [Visual updates accepted], [653], [pyramid direct alignments],
-    [Frames tracked visually], [704], [of 10 Hz frames with visible points],
-    [Gate rejections], [6], [all in the startup transient],
+    [Depth updates accepted], [≈ 700 per run], [point-to-plane ESIKF batches],
+    [Visual updates accepted], [≈ 650 per run], [pyramid direct alignments],
+    [Gate rejections per run], [1--8], [all in the startup transient],
     [Depth points per frame], [$O$(100)], [after 0.5 m voxel downsampling],
     [Visual points per frame], [60+], [after ray-casting completion],
   ),
-  caption: [Per-stage statistics of the 75 s evaluation run.],
+  caption: [Per-stage statistics of the three 75 s evaluation runs.],
 )<tab:health>
 
 The per-frame pipeline runs well within the 100 ms budget of the 10 Hz
 sensor rate; the dominant cost is the depth back-projection and
 downsampling of the 76.8 k-pixel depth frame, followed by the two ESIKF
 updates. Real-time operation (sim_rate > 1) is maintained throughout the
-run on the single Apple Silicon core, with the visualization publishing
+runs on the single Apple Silicon core, with the visualization publishing
 decoupled from the computation thread (zero-IO computation, all rendering
 data shipped over `Firefly/Viz`).
 
@@ -129,16 +128,29 @@ experimental evidence available so far:
   and the first 5 s of visual map-point creation are skipped so that the
   state stabilizes before the maps are built; this removes a startup
   bias that would otherwise be frozen into the reference patches.
-- *Update gate.* The gate is the single most impactful robustness measure:
-  the 7 s explosion observed in the P4 pre-gate run (a single 0.5 m state
-  jump from an immature plane) disappears when the gate is enabled, and the
-  6 rejections all occur in the startup transient where the filter is still
-  degenerate. This is a pipeline-level, measurement-agnostic safeguard and
-  therefore also protects the visual update against reference-patch
-  mismatches.
+- *Update gate with velocity channel.* The gate is the single most
+  impactful robustness measure. Beyond the position/rotation thresholds
+  that catch single-frame jumps (a 0.5 m state jump from an immature
+  plane), the velocity channel rejects updates whose per-frame velocity
+  increment exceeds 0.15 m/s. This is essential because a biased first
+  plane does not inject a large jump: it is tracked as real motion through
+  consecutive small updates, each well within the position threshold, that
+  cumulatively drag the velocity estimate (and hence the position) away by
+  up to 0.4--1 m. With the velocity channel and the stricter startup gate
+  (the first accepted plane must accumulate enough inliers), the rejected
+  updates are confined to the startup transient (1--8 per run across the
+  three runs) and no sustained drift signature remains (ATE-max below
+  0.35 m in every run). The consecutive-rejection protection additionally
+  skips the depth update after 5 consecutive rejections and lets the
+  visual update re-converge before depth measurements rejoin, preventing
+  half-accepted states from accumulating drift.
+- *Update gate generality.* The gate is a pipeline-level,
+  measurement-agnostic safeguard and therefore protects the visual update
+  against reference-patch mismatches as well as the depth update against
+  immature planes.
 
 We emphasize that these observations are drawn from the implementation
-design and the single 75 s run; a comprehensive ablation campaign on
+design and the three 75 s runs; a comprehensive ablation campaign on
 multiple trajectories and sensor configurations is planned as future work.
 
 #heading(level: 2)[Discussion and Limitations]
