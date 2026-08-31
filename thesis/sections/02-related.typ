@@ -43,7 +43,7 @@ photometric calibration can rival feature-based methods on monocular SLAM.
 FAST-LIVO2 #cite(<lin2025fastlivo2>) extends this idea to a tightly-coupled
 LiDAR-inertial filter: reference image patches stored on visual map points
 are warped by the current pose hypothesis and compared photometrically,
-jointly estimating the inverse exposure time. DIVO inherits this direct
+jointly estimating the inverse exposure time. VOID inherits this direct
 alignment formulation and applies it to depth-camera platforms.
 
 *LiDAR-inertial odometry (LIO).* LOAM #cite(<zhang2014loam>) established the
@@ -53,7 +53,7 @@ incremental iKD-tree map, achieving state-of-the-art accuracy and efficiency.
 VoxelMap #cite(<zhou2021voxelmap>) proposed an adaptive hierarchical
 probabilistic voxel map in which each voxel fits a local plane with an
 SVD-based covariance; FAST-LIO2 with VoxelMap reduces point-to-plane
-residual noise and improves accuracy. DIVO's map is a direct port of this
+residual noise and improves accuracy. VOID's map is a direct port of this
 voxel-map design to depth input: 0.5 m root voxels, octree subdivision to
 depth 3, and plane fitting with an explicit 6-DoF uncertainty
 #math.op("Σ")#math.attach("", b: "nq").
@@ -65,8 +65,8 @@ factor-graph visual update that also colors the map. LVI-SAM
 factor graph and loop closure. FAST-LIVO2 #cite(<lin2025fastlivo2>) achieves
 tight coupling by feeding both LiDAR point-plane residuals and sparse direct
 photometric residuals into the *same* ESIKF sequential update, which is
-exactly the architecture DIVO adopts. The primary difference is the range
-sensor: FAST-LIVO2 consumes LiDAR scans, while DIVO consumes depth maps with
+exactly the architecture VOID adopts. The primary difference is the range
+sensor: FAST-LIVO2 consumes LiDAR scans, while VOID consumes depth maps with
 a disparity-domain noise model, which is the central adaptation described in
 Section #ref(<sec:depth>).
 
@@ -76,9 +76,9 @@ and surfel-based reconstruction from monocular depth has been shown to
 produce high-quality maps in real time #cite(<quenzel2020sdf>). These works
 treat depth as a source of dense geometric cues for mapping or learning, but
 do not tightly couple depth residuals into an inertial filter with
-principled depth-dependent noise — the gap DIVO fills.
+principled depth-dependent noise — the gap VOID fills.
 
-*Safety and motion planning context.* DIVO is developed inside the firefly
+*Safety and motion planning context.* VOID is developed inside the firefly
 project as the state-estimation front end of an end-to-end autonomy stack
 whose planning module follows EGO-Planner #cite(<sun2022egoplanner>) and
 FASTER #cite(<tordesillas2020factor>). The accuracy targets (sub-0.2 m ATE on

@@ -28,12 +28,12 @@ The visual measurement model follows the sparse direct alignment of
 FAST-LIVO2 (its Section VII): the reference patches stored on visual map
 points are warped by the current pose hypothesis and compared
 photometrically with the current gray image, jointly estimating the inverse
-exposure time. DIVO implements the same model with a per-point aggregated
+exposure time. VOID implements the same model with a per-point aggregated
 residual that keeps the sequential-update dimension fixed.
 
 #heading(level: 2)[Visibility Query and Ray-Casting]
 
-At each frame, DIVO collects the visual map points visible from the current
+At each frame, VOID collects the visual map points visible from the current
 camera pose. A coarse frustum test (FoV cosine) over the root voxels within
 the maximum ray depth returns candidate points; each candidate is then
 projected exactly and stored with its reference patch. To compensate for
@@ -62,7 +62,7 @@ $ #math.op("0") = τ_k I_k(#uv#math.attach("", b: "i")) − τ_r I_r(#uv#math.at
 
 where #uv#math.attach("", b: "i") is the current-frame projection and #uv#math.attach("", b: "i")^′
 the warped reference pixel. Each visible point contributes a patch of
-11×11 = 121 pixels; DIVO aggregates them into a single scalar measurement
+11×11 = 121 pixels; VOID aggregates them into a single scalar measurement
 per point (mean residual and mean Jacobian), with per-point covariance
 R = img_point_cov / n_used. This preserves the fixed-dimension interface
 while remaining statistically consistent: the aggregated measurement's

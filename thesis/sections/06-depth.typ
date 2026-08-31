@@ -130,7 +130,7 @@ The pipeline-level update gate (Section #ref(<sec:system>)) is the practical
 counterpart of the depth noise model: a freshly-initialized plane with only
 the minimum 5 points can be fit with a biased normal, and the resulting
 single-frame update can jump the state by ~0.5 m before the plane matures.
-DIVO therefore rejects any depth update whose position change exceeds 0.1 m
+VOID therefore rejects any depth update whose position change exceeds 0.1 m
 or whose rotation change exceeds 3° in a single frame, keeping the
 propagation prior instead. The thresholds are comfortably above the
 normal per-frame motion of a hovering platform (sub-0.1 m and sub-3° at
