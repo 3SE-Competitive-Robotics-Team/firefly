@@ -84,7 +84,8 @@ impl<'a> DepthMeasurement<'a> {
 
     /// 由深度图反投影构造（逐像素反投影，`depth ≤ 0.05` 的空洞丢弃）。
     ///
-    /// 反投影：`p_cam = ((u−cx)/fx, (v−cy)/fy, 1)·z`；协方差由
+    /// 反投影：`p_cam = ((u−cx)/fx, −(v−cy)/fy, 1)·z`（像素 v 向下 →
+    /// OpenGL 相机系 y 向上）；协方差由
     /// [`DepthNoise::point_covariance`] 给出（含 `σ∝z²` 与空洞邻域项）。
     #[must_use]
     pub fn from_depth_frame(
@@ -107,7 +108,7 @@ impl<'a> DepthMeasurement<'a> {
                 }
                 let p = Vector3::new(
                     (x as f64 - intrinsics.cx) / intrinsics.fx * z,
-                    (y as f64 - intrinsics.cy) / intrinsics.fy * z,
+                    -(y as f64 - intrinsics.cy) / intrinsics.fy * z,
                     z,
                 );
                 covs.push(noise.point_covariance(&p));

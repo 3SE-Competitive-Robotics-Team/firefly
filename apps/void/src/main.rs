@@ -118,7 +118,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .body_ext()
                 .unwrap_or_else(nalgebra::Rotation3::identity);
             let rot = r_wb * r_bv.inverse();
-            odom.set_initial_pose(m.timestamp, m.position_x, m.position_y, m.position_z, rot);
+            // GT 速度随位姿一起初始化：启动时轨迹已有速度，置零会留下
+            // x/y 方向不可收敛的初始速度偏差（深度平面法向正交方向无约束）
+            let vel = nalgebra::Vector3::new(m.velocity_x, m.velocity_y, m.velocity_z);
+            odom.set_initial_pose(
+                m.timestamp,
+                m.position_x,
+                m.position_y,
+                m.position_z,
+                vel,
+                rot,
+            );
             log::info!(
                 "真值初始化：t={:.2} p=({:.2},{:.2},{:.2}) q=({:.3},{:.3},{:.3},{:.3})",
                 m.timestamp,
