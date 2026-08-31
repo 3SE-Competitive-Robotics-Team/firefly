@@ -29,9 +29,9 @@ hooks = [
   },
   {
     id = "cargo-test",
-    name = "cargo test (CI: cargo test --all-targets)",
+    name = "cargo test (CI: cargo test --all-targets --release)",
     language = "system",
-    entry = "cargo test --all-targets",
+    entry = "cargo test --all-targets --release",
     pass_filenames = false,
   },
 ]
