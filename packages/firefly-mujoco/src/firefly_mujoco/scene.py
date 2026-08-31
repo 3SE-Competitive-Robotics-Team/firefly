@@ -133,9 +133,9 @@ SCENE_XML = rf"""
            50mm）+ 深度相机，前向 +x，上 +z。
            注意：基线必须与视线垂直（横向），前后(y=0 沿 x)分开的相机射线
            近乎共线 → 无侧向视差 → 立体无法解深度（VIO 三角化必败）。 -->
-      <camera name="cam_left" pos="0 -0.025 0" xyaxes="0 -1 0  0 0 1" fovy="70.88"/>
-      <camera name="cam_right" pos="0 0.025 0" xyaxes="0 -1 0  0 0 1" fovy="70.88"/>
-      <camera name="cam_depth" pos="0 0 0" xyaxes="0 -1 0  0 0 1" fovy="70.88"/>
+      <camera name="cam_left" pos="0 -0.025 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
+      <camera name="cam_right" pos="0 0.025 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
+      <camera name="cam_depth" pos="0 0 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
       <site name="imu_site" pos="0 0 0"/>
     </body>
   </worldbody>
