@@ -20,10 +20,6 @@ use crate::options::DepthOptions;
 pub struct DepthNoise {
     /// `σ_z = z²·σ_disp/(f·B)` 的系数（`DepthOptions::depth_sigma_coeff`）。
     depth_sigma_coeff: f64,
-    /// 空洞邻域不确定度：空洞率 5~15% 造成邻域深度跳变，等效
-    /// 论文 (20) 式束发散角的深度版（取 `σ = 0.02·z`，`env.py:178`
-    /// 边缘阈值 `0.04·z` 的一半）。
-    hole_coeff: f64,
     /// 方向不确定度角（rad）。
     angle_sigma: f64,
 }
@@ -37,7 +33,6 @@ impl DepthNoise {
     pub fn new(opts: &DepthOptions, angle_sigma: f64) -> Self {
         Self {
             depth_sigma_coeff: opts.depth_sigma_coeff,
-            hole_coeff: 0.02,
             angle_sigma,
         }
     }
@@ -52,13 +47,10 @@ impl DepthNoise {
 
     /// 距离标准差 `σ_z(z)`（m）。
     ///
-    /// `σ_z = z²·σ_disp/(f·B)` 加空洞邻域项 `σ_hole = hole_coeff·z`，
-    /// 两独立噪声源平方和。
+    /// `σ_z = z²·σ_disp/(f·B)`（纯视差域，对照 `env.py:166-171`）。
     #[must_use]
     pub fn range_sigma(&self, z: f64) -> f64 {
-        let disp_term = self.depth_sigma_coeff * z * z;
-        let hole_term = self.hole_coeff * z;
-        (disp_term * disp_term + hole_term * hole_term).sqrt()
+        self.depth_sigma_coeff * z * z
     }
 
     /// 深度点在深度相机系下的 3×3 协方差（论文 (19) 式 `Σ_pj`）。
@@ -100,21 +92,19 @@ mod tests {
 
     #[test]
     fn range_sigma_grows_with_z_squared() {
-        // σ_z ∝ z²（视差域主导；近距空洞项小，z 大时二次项占优）
+        // σ_z = coeff·z²（纯视差域，对照 env.py:166-171）
         let noise = DepthNoise::new(&DepthOptions::default(), 0.001);
         let s1 = noise.range_sigma(1.0);
         let s2 = noise.range_sigma(2.0);
         let s4 = noise.range_sigma(4.0);
-        // 纯 z² 时 s4/s2 = 4，空洞项使比值略低；此处断言增长趋势
         assert!(s2 > s1 * 2.0, "σ(z=2)={s2} 应显著大于 σ(z=1)={s1}");
         assert!(s4 > s2 * 2.5, "σ(z=4)={s4} 应显著大于 σ(z=2)={s2}");
-        // 数值核对：z=1 时视差项 σ_disp/(f·B) = 0.08/8.43 ≈ 0.0095 m，
-        // 空洞项 0.02 m 叠加后 σ 应略大于视差项且 < 0.03
+        // 数值核对：z=1 时 σ = σ_disp/(f·B) = 0.08/8.43 ≈ 0.0095 m
         let expect = sim_depth_noise::SIGMA_DISP_COEFF * sim_depth_noise::DEPTH_NOISE
             / (sim_depth_noise::DEPTH_FOCAL * sim_depth_noise::BASELINE);
         assert!(
-            s1 > expect && s1 < 0.03,
-            "z=1 处 σ={s1} 应介于视差项 {expect} 与 0.03 之间"
+            (s1 - expect).abs() < 1e-6,
+            "z=1 处 σ={s1} 应等于视差项 {expect}"
         );
     }
 

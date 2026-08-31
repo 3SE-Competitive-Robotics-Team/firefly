@@ -15,7 +15,7 @@
 use std::collections::VecDeque;
 
 use firefly_void_esikf::propagator::Propagator;
-use firefly_void_esikf::update::EskfUpdater;
+use firefly_void_esikf::update::{EskfUpdater, depth_convergence};
 use firefly_void_map::VoxelMap;
 use firefly_void_map::options::VoxelMapOptions;
 use firefly_void_measure::options::{DepthOptions, VisualOptions};
@@ -420,16 +420,28 @@ impl Odometry for VoidOdometry {
             );
             // 健康统计：update 前的有效点计数（传播先验下）
             let inliers = model.effective_count(&self.state);
+            let d = model.last_diag();
+            log::info!(
+                "depth-diag t={frame_t:.2} total={} no_plane={} chi2={} degen_drop={} kept={}",
+                d.total,
+                d.no_plane,
+                d.chi2_rejected,
+                d.degenerate_dropped,
+                d.kept
+            );
             if inliers == 0 {
                 (0usize, 0usize, false)
             } else {
                 // 单批全量更新（官方 StateEstimation 语义：一次迭代处理全部
                 // 有效点；点数由 [`MAX_POINTS_PER_FRAME`] 控制在 10Hz 预算内）
-                let mut updater = EskfUpdater::new(model, 5, 1.5e-4);
-                let iterations = updater
+                let mut updater = EskfUpdater::new(model, 5, depth_convergence());
+                let (iterations, converged) = updater
                     .update(&mut self.state)
                     .map_err(|e| e.with_context("stage", "depth"))?;
-                (inliers, iterations, iterations < 5 && inliers > 0)
+                log::info!(
+                    "depth-iter t={frame_t:.2} inliers={inliers} iterations={iterations} converged={converged}",
+                );
+                (inliers, iterations, converged)
             }
         };
         let depth_update = t_depth.elapsed().as_secs_f64();
@@ -484,12 +496,23 @@ impl Odometry for VoidOdometry {
         // 地图点 + 滑窗检查，每帧执行，无预热跳过）
         let t_map = std::time::Instant::now();
         {
-            // 深度点云注册：虚拟系点云 → 世界系（更新后位姿）
+            // 深度点云注册：虚拟系点云 → 世界系（更新后位姿）。点世界系
+            // 协方差 = 测量噪声 + 位姿不确定度传播（对照 `voxel_map.cpp:551-552`：
+            // `var = R·var·Rᵀ + (−⌊p_i×⌋)·P_rot·(−⌊p_i×⌋)ᵀ + P_pos`，
+            // `p_i` 为虚拟系点，与官方 `cross_mat_list_` 用机体系点一致）。
             let rot = self.state.rot.matrix();
+            let p_rot = self.state.cov.fixed_view::<3, 3>(0, 0).into_owned();
+            let p_pos = self.state.cov.fixed_view::<3, 3>(3, 3).into_owned();
             let (points_w, covs_w): (Vec<_>, Vec<_>) = points_l
                 .iter()
                 .zip(&covs_l)
-                .map(|(p, cov)| (rot * p + self.state.pos, rot * cov * rot.transpose()))
+                .map(|(p, cov)| {
+                    let p_w = rot * p + self.state.pos;
+                    let p_cross = firefly_void_types::so3::skew(p);
+                    let cov_w =
+                        rot * cov * rot.transpose() + p_cross * p_rot * p_cross.transpose() + p_pos;
+                    (p_w, cov_w)
+                })
                 .unzip();
             self.map.register_points(&points_w, &covs_w);
             // 视觉地图点更新

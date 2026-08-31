@@ -19,7 +19,7 @@
 //! - 像素误差门控 `outlier_threshold·patch_size_total`（`vio.cpp:763`）；
 //! - Huber 核（可配，`δ = ∞` 时关闭）。
 
-use firefly_void_esikf::update::{EskfUpdater, MeasurementModel};
+use firefly_void_esikf::update::{EskfUpdater, MeasurementModel, visual_convergence};
 use firefly_void_map::visual_point::VisualPointView;
 use firefly_void_map::voxel::transform_point;
 use firefly_void_types::state::{DIM_STATE, State};
@@ -506,8 +506,9 @@ impl<'a> VisualMeasurement<'a> {
                 )
                 .with_depth_opt(depth);
                 let mut updater =
-                    EskfUpdater::new(model, opts.max_iterations, opts.convergence_eps);
-                total_iterations += updater.update(state)?;
+                    EskfUpdater::new(model, opts.max_iterations, visual_convergence());
+                let (iters, _) = updater.update(state)?;
+                total_iterations += iters;
             }
         }
         Ok(total_iterations)

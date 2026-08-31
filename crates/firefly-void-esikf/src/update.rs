@@ -56,20 +56,37 @@ pub struct EskfUpdater<M> {
     model: M,
     /// 最大迭代次数（对照 `max_iterations`，`voxel_map.cpp:372` 默认 5）。
     max_iterations: usize,
-    /// 收敛阈值 ε（Algorithm 1 第 10 行；官方激光点-平面 0.01° + 1.5e-4 m）。
-    convergence_eps: f64,
+    /// 旋转增量收敛阈值（rad，官方 `voxel_map.cpp:477` 深度 / `vio.cpp:1675` 视觉）。
+    rot_eps: f64,
+    /// 平移增量收敛阈值（m，官方同上）。
+    pos_eps: f64,
     /// 发散保护：残差范数相对先验残差范数的放大倍数上限。
     divergence_factor: f64,
 }
 
+/// 官方深度更新收敛阈值（`voxel_map.cpp:477`）：
+/// `rot_add.norm()*57.3<0.01 && t_add.norm()*100<0.015`。
+#[must_use]
+pub const fn depth_convergence() -> (f64, f64) {
+    (0.01 / 57.3, 0.015 / 100.0) // 1.745e-4 rad, 1.5e-4 m
+}
+
+/// 官方视觉更新收敛阈值（`vio.cpp:1675`）：
+/// `rot_add.norm()*57.3<0.001 && t_add.norm()*100<0.001`。
+#[must_use]
+pub const fn visual_convergence() -> (f64, f64) {
+    (0.001 / 57.3, 0.001 / 100.0) // 1.745e-5 rad, 1.5e-5 m
+}
+
 impl<M: MeasurementModel> EskfUpdater<M> {
-    /// 构造：`max_iterations` 与 `convergence_eps` 由调用方给定。
+    /// 构造：`max_iterations` 与收敛阈值 `(rot_eps, pos_eps)` 由调用方给定。
     #[must_use]
-    pub fn new(model: M, max_iterations: usize, convergence_eps: f64) -> Self {
+    pub fn new(model: M, max_iterations: usize, convergence: (f64, f64)) -> Self {
         Self {
             model,
             max_iterations,
-            convergence_eps,
+            rot_eps: convergence.0,
+            pos_eps: convergence.1,
             divergence_factor: 1e6,
         }
     }
@@ -84,18 +101,19 @@ impl<M: MeasurementModel> EskfUpdater<M> {
     /// 顺序更新：`state` 为传播先验（含协方差），就地更新到后验。
     ///
     /// 迭代 `x^{κ+1} = x^κ ⊞ (−Kz^κ − (I − KH)(x^κ ⊟ x̂))` 直至收敛或
-    /// 达到迭代上限；返回实际迭代次数。协方差更新 `P = (I − KH)P̂`
-    /// 用最后一次迭代的 K/H（对照 `voxel_map.cpp:489` 与 `vio.cpp:800`）。
+    /// 达到迭代上限；返回 `(迭代次数, 是否收敛)`。协方差更新
+    /// `P = (I − KH)P̂` 用最后一次迭代的 K/H（对照 `voxel_map.cpp:489`
+    /// 与 `vio.cpp:800`）。
     ///
     /// # Errors
     /// - 测量维度与残差/雅可比不一致（`InvalidArgument`）；
     /// - 协方差或测量噪声不可逆（`Internal`）；
     /// - 残差 NaN 或迭代发散（`Convergence`）。
     #[fastrace::trace]
-    pub fn update(&mut self, state: &mut State) -> Result<usize, Error> {
+    pub fn update(&mut self, state: &mut State) -> Result<(usize, bool), Error> {
         let dim = self.model.dim();
         if dim == 0 {
-            return Ok(0);
+            return Ok((0, false));
         }
         let prior = *state;
         let (z0, h0, r0) = self.model.residual(&prior);
@@ -153,7 +171,12 @@ impl<M: MeasurementModel> EskfUpdater<M> {
             last_k = k.clone();
             last_h = h.clone();
             let step = next.boxminus(&x);
-            if step.norm() < self.convergence_eps {
+            // 收敛判据对照 `voxel_map.cpp:477`：只查旋转+平移 6 维
+            // （`rot_add.norm()*57.3<0.01 && t_add.norm()*100<0.015`）。
+            // 速度/零偏等其余分量由测量持续纠正，不参与收敛判定。
+            let rot_n = step.fixed_rows::<3>(0).norm();
+            let pos_n = step.fixed_rows::<3>(3).norm();
+            if rot_n < self.rot_eps && pos_n < self.pos_eps {
                 x = next;
                 converged_at = Some(iter + 1);
                 break;
@@ -163,7 +186,18 @@ impl<M: MeasurementModel> EskfUpdater<M> {
 
         x.cov = Self::cov_update(&prior.cov, &last_k, &last_h);
         *state = x;
-        Ok(converged_at.unwrap_or(self.max_iterations))
+        let n = converged_at.unwrap_or(self.max_iterations);
+        if converged_at.is_none() {
+            let last_step = state.boxminus(&prior);
+            log::info!(
+                "esikf-noconv step_norm={:.3e} rot={:.3e} pos={:.3e} vel={:.3e}",
+                last_step.norm(),
+                last_step.fixed_rows::<3>(0).norm(),
+                last_step.fixed_rows::<3>(3).norm(),
+                last_step.fixed_rows::<3>(7).norm()
+            );
+        }
+        Ok((n, converged_at.is_some()))
     }
 
     /// 协方差更新 `P = (I − KH)P`。
@@ -261,8 +295,9 @@ mod tests {
         let truth = Vector3::new(1.0, -2.0, 0.5);
         let mut state = State::default(); // 先验位置 = 0，协方差 p=0.01
         let r = 1e-3;
-        let mut updater = EskfUpdater::new(IdentityMeasurement { z_obs: truth, r }, 10, 1e-8);
-        let iters = updater.update(&mut state).unwrap();
+        let mut updater =
+            EskfUpdater::new(IdentityMeasurement { z_obs: truth, r }, 10, (1e-8, 1e-8));
+        let (iters, _) = updater.update(&mut state).unwrap();
         assert!(iters >= 1);
         let p = 0.01;
         let k = p / (p + r);
@@ -293,8 +328,8 @@ mod tests {
         }
         let mut state = State::default();
         let cov_before = state.cov;
-        let mut updater = EskfUpdater::new(Empty, 5, 1e-4);
-        let iters = updater.update(&mut state).unwrap();
+        let mut updater = EskfUpdater::new(Empty, 5, (1e-4, 1e-4));
+        let (iters, _) = updater.update(&mut state).unwrap();
         assert_eq!(iters, 0);
         assert_eq!(state.cov, cov_before);
     }
@@ -316,7 +351,7 @@ mod tests {
             }
         }
         let mut state = State::default();
-        let mut updater = EskfUpdater::new(Bad, 5, 1e-4);
+        let mut updater = EskfUpdater::new(Bad, 5, (1e-4, 1e-4));
         let err = updater.update(&mut state).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidArgument);
     }
@@ -372,10 +407,10 @@ mod tests {
             inv_expo_time: 1.0,
             cov: StateCovariance::identity() * 0.01,
         };
-        let mut upd1 = EskfUpdater::new(FullIdentity { truth, r: 0.01 }, 20, 1e-8);
-        upd1.update(&mut s_seq).unwrap();
-        let mut upd2 = EskfUpdater::new(FullIdentity { truth, r: 0.02 }, 20, 1e-8);
-        upd2.update(&mut s_seq).unwrap();
+        let mut upd1 = EskfUpdater::new(FullIdentity { truth, r: 0.01 }, 20, (1e-8, 1e-8));
+        let _ = upd1.update(&mut s_seq).unwrap();
+        let mut upd2 = EskfUpdater::new(FullIdentity { truth, r: 0.02 }, 20, (1e-8, 1e-8));
+        let _ = upd2.update(&mut s_seq).unwrap();
 
         let mut s_joint = State {
             rot: Rotation3::identity(),
@@ -394,9 +429,9 @@ mod tests {
                 r2: 0.02,
             },
             20,
-            1e-8,
+            (1e-8, 1e-8),
         );
-        upd_j.update(&mut s_joint).unwrap();
+        let _ = upd_j.update(&mut s_joint).unwrap();
 
         let err = s_seq.boxminus(&s_joint).norm();
         assert!(err < 1e-6, "sequential vs joint err={err}");
@@ -411,9 +446,9 @@ mod tests {
                 r: 0.1,
             },
             5,
-            1e-6,
+            (1e-6, 1e-6),
         );
-        updater.update(&mut state).unwrap();
+        let _ = updater.update(&mut state).unwrap();
         assert!(state.cov[(3, 3)] < 0.01);
         // 旋转方差不被位置观测改变（H 不触及该块）
         assert!((state.cov[(0, 0)] - 0.01).abs() < 1e-9);

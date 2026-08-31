@@ -25,6 +25,7 @@ use firefly_void_map::voxel::{VoxelMap, transform_point};
 use firefly_void_types::state::{DIM_STATE, State};
 use firefly_void_types::visual::Intrinsics;
 use nalgebra::{DMatrix, DVector, Isometry3, Matrix3, Vector3};
+use std::cell::Cell;
 
 use crate::noise::DepthNoise;
 use crate::options::DepthOptions;
@@ -33,6 +34,31 @@ use crate::outlier::{GateVerdict, chi2_gate};
 /// 单点平面测量中间量 `(p_b, n, dis, σ_l²)`：IMU 系点、平面法向、
 /// 残差距离与噪声方差。
 type PlaneResidual = Option<(Vector3<f64>, Vector3<f64>, f64, f64)>;
+
+/// 单点平面查询结果（探针：区分拒绝原因）。
+enum PlaneQuery {
+    /// 匹配成功（通过径向判据 + 卡方门控）。
+    Matched(Vector3<f64>, f64, f64),
+    /// 无可用平面（无体素 / 体素无平面 / 径向判据不过）。
+    NoPlane,
+    /// 有平面候选但全部被卡方门控拒绝。
+    Chi2Rejected,
+}
+
+/// 深度测量逐帧诊断（探针，不参与算法决策）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DepthDiag {
+    /// 点云总点数。
+    pub total: usize,
+    /// 无对应平面（无体素 / 无平面 / 径向判据不过）。
+    pub no_plane: usize,
+    /// 卡方门控拒绝。
+    pub chi2_rejected: usize,
+    /// 退化保护丢弃。
+    pub degenerate_dropped: usize,
+    /// 最终有效点（退化过滤后）。
+    pub kept: usize,
+}
 
 /// 单点平面残差（论文 (18) 式：`dis_to_plane = nᵀ(p_w − q)`）。
 #[must_use]
@@ -57,6 +83,8 @@ pub struct DepthMeasurement<'a> {
     /// 深度相机→IMU 外参。
     ext: Isometry3<f64>,
     opts: DepthOptions,
+    /// 最近一次 `residual`/`effective_count` 的逐点拒绝统计（探针）。
+    last_diag: Cell<DepthDiag>,
 }
 
 impl<'a> DepthMeasurement<'a> {
@@ -79,6 +107,7 @@ impl<'a> DepthMeasurement<'a> {
             covs,
             ext,
             opts,
+            last_diag: Cell::new(DepthDiag::default()),
         }
     }
 
@@ -128,24 +157,29 @@ impl<'a> DepthMeasurement<'a> {
             .count()
     }
 
+    /// 最近一次 `residual`/`effective_count` 的逐点拒绝统计（探针）。
+    #[must_use]
+    pub fn last_diag(&self) -> DepthDiag {
+        self.last_diag.get()
+    }
+
     /// 查体素平面并计算单点残差/噪声（对照 `build_single_residual`，
     /// `voxel_map.cpp:713-786`：径向判据 `radius_k` + 卡方门控）。
     ///
     /// `cov_w` 为点在世界系的协方差（`R·C·Rᵀ`）。
     ///
-    /// 返回 `(n, dis, σ_l²)`。
-    fn plane_for_point(
-        &self,
-        p_world: &Vector3<f64>,
-        cov_w: &Matrix3<f64>,
-    ) -> Option<(Vector3<f64>, f64, f64)> {
-        let root = self.map.root_at(p_world)?;
+    /// 返回匹配结果（含拒绝原因，探针）。
+    fn plane_for_point(&self, p_world: &Vector3<f64>, cov_w: &Matrix3<f64>) -> PlaneQuery {
+        let Some(root) = self.map.root_at(p_world) else {
+            return PlaneQuery::NoPlane;
+        };
         let mut planes = Vec::new();
         root.collect_planes(&mut planes);
         // 取概率最高（残差/噪声最小）的平面（对照官方对八叉子节点的
         // `this_prob` 择优）。
         let mut best: Option<(Vector3<f64>, f64, f64)> = None;
         let mut best_prob = f64::NEG_INFINITY;
+        let mut any_candidate = false;
         for plane in planes {
             if !plane.is_plane {
                 continue;
@@ -157,6 +191,7 @@ impl<'a> DepthMeasurement<'a> {
             if range_dis > self.opts.radius_k * plane.radius {
                 continue;
             }
+            any_candidate = true;
             // 噪声：J_nq·Σ_nq·J_nqᵀ + nᵀ·Σ_pj·n（对照 voxel_map.cpp:447-449）
             let j_nq = nalgebra::RowVector6::new(
                 p_world[0] - plane.center[0],
@@ -179,7 +214,11 @@ impl<'a> DepthMeasurement<'a> {
                 best = Some((plane.normal, dis, sigma_l));
             }
         }
-        best
+        match best {
+            Some((n, dis, sig)) => PlaneQuery::Matched(n, dis, sig),
+            None if any_candidate => PlaneQuery::Chi2Rejected,
+            None => PlaneQuery::NoPlane,
+        }
     }
 
     /// 计算残差、H 与 R（对照 `voxel_map.cpp:414-458` 的 H 组装）。
@@ -194,23 +233,38 @@ impl<'a> DepthMeasurement<'a> {
         let cam_axis = rot * Vector3::z_axis().into_inner();
         let mut residuals: Vec<PlaneResidual> = Vec::new();
         let mut normals: Vec<Vector3<f64>> = Vec::new();
+        let mut diag = DepthDiag {
+            total: self.points_l.len(),
+            ..DepthDiag::default()
+        };
 
         for (p_l, cov) in self.points_l.iter().zip(&self.covs) {
             let p_b = transform_point(&self.ext, p_l);
             let p_w = rot * p_b + x.pos;
             let cov_w = rot * cov * rot.transpose();
             match self.plane_for_point(&p_w, &cov_w) {
-                Some((n, dis, sig)) => {
+                PlaneQuery::Matched(n, dis, sig) => {
                     normals.push(n);
                     residuals.push(Some((p_b, n, dis, sig)));
                 }
-                None => residuals.push(None),
+                PlaneQuery::NoPlane => {
+                    diag.no_plane += 1;
+                    residuals.push(None);
+                }
+                PlaneQuery::Chi2Rejected => {
+                    diag.chi2_rejected += 1;
+                    residuals.push(None);
+                }
             }
         }
 
         // 共面退化保护：法向集中在少数方向时丢弃多余点（置零信息）。
         // normals 与 residuals 的 Some 项一一对应（下标经有效计数映射）。
         let keep_mask = self.degenerate_filter(&normals, &residuals, &cam_axis);
+        let matched = diag.total - diag.no_plane - diag.chi2_rejected;
+        diag.kept = keep_mask.iter().filter(|&&k| k).count();
+        diag.degenerate_dropped = matched - diag.kept;
+        self.last_diag.set(diag);
 
         let mut zs = Vec::with_capacity(self.points_l.len());
         let mut rs = Vec::with_capacity(self.points_l.len());

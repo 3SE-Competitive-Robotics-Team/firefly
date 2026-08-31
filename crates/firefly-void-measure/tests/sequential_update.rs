@@ -4,7 +4,7 @@
 //! 绕 y 转 2°、平移 2cm；先深度更新再视觉更新（论文 Algorithm 1 的
 //! 顺序更新顺序），迭代数轮后状态收敛。
 
-use firefly_void_esikf::update::EskfUpdater;
+use firefly_void_esikf::update::{EskfUpdater, depth_convergence, visual_convergence};
 use firefly_void_map::VoxelMap;
 use firefly_void_map::options::VoxelMapOptions;
 use firefly_void_measure::{DepthMeasurement, DepthOptions, VisualMeasurement, VisualOptions};
@@ -165,9 +165,10 @@ fn sequential_depth_then_visual_converges() {
                 DepthOptions::default(),
             ),
             5,
-            1e-4,
+            depth_convergence(),
         );
-        iters_total += d_updater.update(&mut x).unwrap();
+        let (iters, _) = d_updater.update(&mut x).unwrap();
+        iters_total += iters;
 
         let warps = VisualMeasurement::compute_warps(&vis_pts, &x, &intrinsics);
         let warp_patches = VisualMeasurement::compute_warp_patches(&vis_pts, &warps, 11, 0);
@@ -184,8 +185,9 @@ fn sequential_depth_then_visual_converges() {
             },
             0,
         );
-        let mut v_updater = EskfUpdater::new(vis_model, 10, 1e-6);
-        iters_total += v_updater.update(&mut x).unwrap();
+        let mut v_updater = EskfUpdater::new(vis_model, 10, visual_convergence());
+        let (iters, _) = v_updater.update(&mut x).unwrap();
+        iters_total += iters;
     }
     assert!(iters_total > 0);
     let rot_err = UnitQuaternion::from_rotation_matrix(&x.rot).angle_to(&truth.rotation);
