@@ -62,6 +62,9 @@ pub struct EskfUpdater<M> {
     pos_eps: f64,
     /// 发散保护：残差范数相对先验残差范数的放大倍数上限。
     divergence_factor: f64,
+    /// 误差下降判据（对照官方视觉更新 `vio.cpp:1643-1672`：残差不降则
+    /// 回退到上一接受状态并终止；深度更新官方无此判据，保持关闭）。
+    accept_on_error_descent: bool,
 }
 
 /// 官方深度更新收敛阈值（`voxel_map.cpp:477`）：
@@ -88,6 +91,7 @@ impl<M: MeasurementModel> EskfUpdater<M> {
             rot_eps: convergence.0,
             pos_eps: convergence.1,
             divergence_factor: 1e6,
+            accept_on_error_descent: false,
         }
     }
 
@@ -95,6 +99,13 @@ impl<M: MeasurementModel> EskfUpdater<M> {
     #[must_use]
     pub fn with_divergence_factor(mut self, factor: f64) -> Self {
         self.divergence_factor = factor;
+        self
+    }
+
+    /// 开启误差下降判据（对照官方视觉更新 `vio.cpp:1643`）。
+    #[must_use]
+    pub fn with_error_descent_acceptance(mut self) -> Self {
+        self.accept_on_error_descent = true;
         self
     }
 
@@ -129,6 +140,10 @@ impl<M: MeasurementModel> EskfUpdater<M> {
         let mut last_k = DMatrix::zeros(DIM_STATE, dim);
         let mut last_h = DMatrix::zeros(dim, DIM_STATE);
         let mut converged_at = None;
+        // 误差下降判据（对照官方视觉 `vio.cpp:1643-1672`）：上一接受
+        // 迭代的残差与状态；残差上升时回退到上一接受状态并终止。
+        let mut last_error = f64::INFINITY;
+        let mut last_accepted = prior;
 
         for iter in 0..self.max_iterations {
             let (z, h, r) = self.model.residual(&x);
@@ -138,11 +153,21 @@ impl<M: MeasurementModel> EskfUpdater<M> {
                     Error::new(ErrorKind::Convergence, "残差含 NaN").with_context("iter", iter)
                 );
             }
-            if prior_residual_norm > 0.0 && z.norm() > self.divergence_factor * prior_residual_norm
+            let cur_norm = z.norm();
+            if self.accept_on_error_descent && cur_norm > last_error {
+                // 残差上升：回退到上一接受状态并终止（官方 `vio.cpp:1666-1669`）
+                x = last_accepted;
+                break;
+            }
+            if prior_residual_norm > 0.0 && cur_norm > self.divergence_factor * prior_residual_norm
             {
                 return Err(Error::new(ErrorKind::Convergence, "残差发散")
                     .with_context("prior_norm", prior_residual_norm)
-                    .with_context("cur_norm", z.norm()));
+                    .with_context("cur_norm", cur_norm));
+            }
+            if self.accept_on_error_descent {
+                last_error = cur_norm;
+                last_accepted = x;
             }
 
             // 论文 (11) 式：K = (HᵀR⁻¹H + P⁻¹)⁻¹ HᵀR⁻¹
