@@ -26,9 +26,9 @@
 
 #heading(level: 2)[Experimental Setup]
 
-DIVO is evaluated in the firefly end-to-end closed-loop simulation: a MuJoCo
+VOID is evaluated in the firefly end-to-end closed-loop simulation: a MuJoCo
 #cite(<todorov2012mujoco>) physics environment publishes IMU (100 Hz) and
-stereo-pair depth+gray frames (10 Hz, 320×240) over iceoryx2, DIVO estimates
+stereo-pair depth+gray frames (10 Hz, 320×240) over iceoryx2, VOID estimates
 the 6-DoF pose, and a downstream planner/controller closes the loop on the
 reference trajectory. The platform hovers at the ground-truth pose
 (1, 4, 1) m with zero span, so the ATE measures the estimation error under
@@ -66,7 +66,7 @@ estimated pose against ground truth over three 75 s runs.
     [3], [0.1381 m], [0.1938 m],
     table.cell[#text(weight: "bold")[mean ± std]], table.cell[#text(weight: "bold")[0.0933 ± 0.0595 m]], table.cell[#text(weight: "bold")[0.2208 ± 0.0648 m]],
   ),
-  caption: [Absolute trajectory error of DIVO over three independent 75 s
+  caption: [Absolute trajectory error of VOID over three independent 75 s
   hovering experiments (ground-truth pose (1, 4, 1) m, zero span).],
 )<tab:ate>
 

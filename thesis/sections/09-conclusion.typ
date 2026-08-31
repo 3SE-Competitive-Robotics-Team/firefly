@@ -24,9 +24,9 @@
 
 <sec:conclusion>
 
-This paper presented DIVO, a direct depth-inertial-visual odometry framework
+This paper presented VOID, a visual-depth-inertial odometry framework
 that adapts the FAST-LIVO2 algorithm family #cite(<lin2025fastlivo2>) to
-depth-camera platforms. DIVO tightly couples a depth camera, a gray camera,
+depth-camera platforms. VOID tightly couples a depth camera, a gray camera,
 and an IMU through an error-state iterated Kalman filter with sequential
 state updates, using an adaptive hierarchical voxel map with local planar
 patches and multi-scale reference patches for sparse direct photometric
@@ -39,7 +39,7 @@ immature map structure. The entire system is implemented in Rust with an
 and is validated by 493 unit and integration tests including
 finite-difference Jacobian checks below 1e-6.
 
-On the 75 s end-to-end hovering experiment, DIVO achieves an ATE-RMS of
+On the 75 s end-to-end hovering experiment, VOID achieves an ATE-RMS of
 0.1782 m with 395 accepted depth updates and 653 accepted visual updates,
 and the update gate eliminated the startup-transient position explosion
 observed in the pre-gate run (6 rejections, all in the startup phase). The

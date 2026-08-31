@@ -26,7 +26,7 @@
 
 #heading(level: 2)[Manifold State and Box-Plus / Box-Minus]
 
-The DIVO state lives on the manifold
+The VOID state lives on the manifold
 
 $ #xG = [#Rwi,\ #pwi,\ #vwi,\ #bg,\ #ba,\ #gvec,\ τ]^T ∈ M ≜ "SO"(3) × ℝ^16, $
 

@@ -24,7 +24,7 @@
 
 <sec:system>
 
-DIVO is the odometry-and-mapping front end of the firefly autonomy stack. It
+VOID is the odometry-and-mapping front end of the firefly autonomy stack. It
 runs as a standalone process (`void`) that subscribes to three sensor topics
 published by a MuJoCo #cite(<todorov2012mujoco>) physics simulation over the
 iceoryx2 #cite(<iceoryx2>) zero-copy shared-memory transport, and publishes
@@ -52,7 +52,7 @@ configuration.
 
 The depth camera and the left gray camera are rigidly attached to the same
 body, so their extrinsic transform is near-identity and remains
-configurable. Internally, DIVO operates in a *virtual pinhole camera frame*:
+configurable. Internally, VOID operates in a *virtual pinhole camera frame*:
 depth pixels and left-gray pixels coincide exactly after a fixed rotation
 that maps the OpenGL-style depth convention (forward #math.op("−z")) to the
 pinhole convention (forward #math.op("+z")). IMU angular velocities and
@@ -99,7 +99,7 @@ both measurement models share a single camera frame with unit extrinsic.
       fill: rgb("#f2f6ff"), stroke: border, radius: 3pt, inset: (x: 6pt, y: 3pt),
     )[
       #align(center)[
-        #text(weight: "bold", size: 8.4pt)[DIVO core (firefly-void)]
+        #text(weight: "bold", size: 8.4pt)[VOID core (firefly-void)]
       ]
       #v(2pt)
       #mono[ESIKF ⊞-update: ① depth ② visual]
@@ -145,7 +145,7 @@ both measurement models share a single camera frame with unit extrinsic.
       ],
     )
   },
-  caption: [System data flow of DIVO. Three sensor streams enter the core
+  caption: [System data flow of VOID. Three sensor streams enter the core
   pipeline through iceoryx2 subscriptions; the core runs IMU propagation,
   sequential depth/visual ESIKF updates, and the local map update, then
   publishes odometry at 10 Hz and visualization entities under the `void`
@@ -165,7 +165,7 @@ voxel map and to add/refine visual map points.
 
 #figure(
   block[
-    #text(weight: "bold")[Algorithm 1: DIVO main loop (`process_frame`)]
+    #text(weight: "bold")[Algorithm 1: VOID main loop (`process_frame`)]
     #v(4pt)
     #set text(size: 8.8pt)
     #set par(leading: 0.35em)
@@ -195,6 +195,6 @@ voxel map and to add/refine visual map points.
       6. Register cloud into voxel map; update visual map points  (Section #ref(<sec:mapping>))
     ]
   ],
-  caption: [Overview of the DIVO main loop, mirroring the structure of
+  caption: [Overview of the VOID main loop, mirroring the structure of
   FAST-LIVO2's `stateEstimationAndMapping`.],
 )<alg:overview>

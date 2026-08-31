@@ -1,5 +1,5 @@
 #set document(
-  title: "DIVO: Direct Depth-Inertial-Visual Odometry — An Adaptive Voxel-based Tightly-coupled State Estimation and Mapping Framework",
+  title: "VOID: Visual-Depth Inertial Odometry — An Adaptive Voxel-based Tightly-coupled State Estimation and Mapping Framework",
   author: "Firefly Project",
   date: datetime(year: 2026, month: 1, day: 1),
 )
@@ -61,7 +61,7 @@
 // ---------------------------------------------------------------------------
 
 #align(center)[
-  #text(size: 16pt, weight: "bold")[DIVO: Direct Depth-Inertial-Visual Odometry]
+  #text(size: 16pt, weight: "bold")[VOID: Visual-Depth Inertial Odometry]
   #v(2pt)
   #text(size: 13pt)[An Adaptive Voxel-based Tightly-coupled State Estimation and Mapping Framework]
 ]
@@ -83,11 +83,12 @@
   )[
     #text(weight: "bold", size: 10pt)[Abstract]  #v(4pt)
     #par[
-      This paper presents *DIVO*, a direct *depth*-inertial-visual odometry
+      This paper presents *VOID* (Visual-Depth Inertial Odometry), an
+      adaptive voxel-based tightly-coupled state estimation and mapping
       framework that tightly couples a depth camera, a stereo-pair gray
       camera, and an inertial measurement unit (IMU) through an
       error-state iterated Kalman filter (ESIKF) with sequential state
-      updates. DIVO follows the architecture of FAST-LIVO2
+      updates. VOID follows the architecture of FAST-LIVO2
       #cite(<lin2025fastlivo2>) and adapts its LiDAR-based measurement
       models to commodity depth sensors: the beam-divergence uncertainty of
       LiDAR points is replaced by a disparity-domain noise model
@@ -101,10 +102,10 @@
       entire system is implemented in Rust with a memory-safe,
       `unsafe`-free codebase and a ROS-free, zero-copy shared-memory IPC
       layer. On a 75 s hovering experiment in a high-fidelity physics
-      simulation, DIVO achieves an ATE-RMS of 0.1782 m with all updates
+      simulation, VOID achieves an ATE-RMS of 0.1782 m with all updates
       gated at the pipeline level to reject degeneracy-induced state jumps.
       With 493 unit and integration tests and finite-difference Jacobian
-      validation at errors below 1e-6, DIVO provides a reproducible,
+      validation at errors below 1e-6, VOID provides a reproducible,
       test-driven reference implementation of the FAST-LIVO2 algorithm
       family for depth-camera platforms.
     ]

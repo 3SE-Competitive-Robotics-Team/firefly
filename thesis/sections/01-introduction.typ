@@ -59,7 +59,7 @@ three fundamental ways:
    increasingly prefer zero-copy, lock-free shared-memory transport with
    strict memory-safety guarantees.
 
-This paper presents *DIVO* (Direct Depth-Inertial-Visual Odometry), the
+This paper presents *VOID* (Visual-Depth Inertial Odometry), the
 fifth-stage deliverable of the firefly-void module of the firefly project
 #cite(<fireflydesign>): a complete, from-scratch Rust implementation of the
 FAST-LIVO2 algorithm family adapted to depth-camera input, structured

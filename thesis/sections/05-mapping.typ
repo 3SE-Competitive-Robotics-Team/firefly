@@ -24,7 +24,7 @@
 
 <sec:mapping>
 
-The DIVO map is an adaptive hierarchical probabilistic voxel map, a direct
+The VOID map is an adaptive hierarchical probabilistic voxel map, a direct
 port of the VoxelMap design #cite(<zhou2021voxelmap>) used by FAST-LIVO2
 #cite(<lin2025fastlivo2>), adapted to depth-camera point clouds.
 
@@ -83,7 +83,7 @@ score as FAST-LIVO2 Eq. (12).
 #heading(level: 2)[Normal Refinement]
 
 Because the normal of a plane derived from a depth cloud is only as accurate
-as the depth noise allows, DIVO refines the visual-map-point normal by
+as the depth noise allows, VOID refines the visual-map-point normal by
 photometric minimization across its observations (Section V-E of
 FAST-LIVO2). The reference patch is warped into the target observation by
 the affine warp of Eq. #ref(<eq:affine>), and the photometric residual
