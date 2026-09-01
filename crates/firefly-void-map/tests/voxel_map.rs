@@ -48,7 +48,7 @@ fn map_with_plane(n_points: usize) -> (VoxelMap, Vec<Vector3<f64>>) {
         pts.push(p);
     }
     let covs = vec![cov; n_points];
-    map.register_points(&pts, &covs);
+    map.register_points(&pts, &covs, &Vector3::zeros());
     (map, pts)
 }
 
@@ -64,7 +64,7 @@ fn sliding_window_capacity_bounded() {
             .map(|i| Vector3::new(kf * 2.0, f64::from(i % 5) * 0.1, 0.0))
             .collect();
         let covs = vec![cov; 20];
-        map.register_points(&pts, &covs);
+        map.register_points(&pts, &covs, &Vector3::zeros());
         map.on_update_end(&Vector3::new(kf * 2.0, 0.0, 0.0));
     }
     // 半宽 4（根体素）：沿 x 最多保留 ~9 个根体素 + y 方向几个
@@ -244,8 +244,8 @@ fn raycast_returns_correct_visible_set() {
             )
         })
         .collect();
-    map.register_points(&near_pts, &vec![cov; 400]);
-    map.register_points(&far_pts, &vec![cov; 400]);
+    map.register_points(&near_pts, &vec![cov; 400], &Vector3::zeros());
+    map.register_points(&far_pts, &vec![cov; 400], &Vector3::zeros());
     let pose = identity_pose();
     let state = VisualState::new(0, 1.0);
     map.update_visual(&pose, &img, &intrinsics, &state);

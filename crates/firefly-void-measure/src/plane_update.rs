@@ -317,7 +317,7 @@ mod tests {
             pts.push(Vector3::new(x, y, 1.0));
         }
         let covs = vec![cov; 400];
-        map.register_points(&pts, &covs);
+        map.register_points(&pts, &covs, &Vector3::zeros());
         map
     }
 

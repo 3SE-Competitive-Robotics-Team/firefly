@@ -517,7 +517,11 @@ impl Odometry for VoidOdometry {
                     (p_w, cov_w)
                 })
                 .unzip();
-            self.map.register_points(&points_w, &covs_w);
+            // P10.11 法向一致性修复：注册时传入相机世界系位置，平面法向
+            // 对齐到指向相机（消除 SVD 符号歧义导致的相邻体素法向相反、
+            // 深度修正互相抵消）
+            self.map
+                .register_points(&points_w, &covs_w, &self.state.pos);
             // 视觉地图点更新
             let image = GrayImage::new(
                 frame.camera.width,

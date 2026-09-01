@@ -189,7 +189,7 @@ mod tests {
             let y = -0.2 + f64::from(i / 20) * 0.02;
             pts.push(Vector3::new(x, y, 1.0));
         }
-        map.register_points(&pts, &vec![cov; 400]);
+        map.register_points(&pts, &vec![cov; 400], &Vector3::zeros());
         // 真值位姿：绕 y 转 10° + 平移
         let truth = Isometry3::from_parts(
             nalgebra::Translation3::new(0.05, 0.0, 0.0),

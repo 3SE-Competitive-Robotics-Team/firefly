@@ -113,7 +113,7 @@ fn sequential_depth_then_visual_converges() {
         let y = -0.2 + f64::from(i / 20) * 0.02;
         pts.push(Vector3::new(x, y, 1.0));
     }
-    map.register_points(&pts, &vec![cov; 400]);
+    map.register_points(&pts, &vec![cov; 400], &Vector3::zeros());
 
     // 参考帧（世界系 = 相机系，单位阵位姿）
     let ref_img = smooth_image(320, 240);
