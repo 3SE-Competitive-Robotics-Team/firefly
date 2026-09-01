@@ -58,13 +58,11 @@ impl Default for DepthOptions {
 /// 视觉测量参数。
 #[derive(Debug, Clone, Copy)]
 pub struct VisualOptions {
-    /// 逐点聚合测量的等效像素噪声方差。
+    /// 逐像素测量噪声方差。
     ///
     /// 官方 `img_point_cov`（`config/avia.yaml:32`）为逐像素标量协方差
-    /// （`HᵀH/img_point_cov`，`vio.cpp:1660-1661`）；本实现把补丁逐像素
-    /// 残差聚合成单测量（均值），信息量低于逐像素模型（均值平方 ≤
-    /// 平方均值），等效噪声取 `img_point_cov·patch_n`（11×11 补丁
-    /// ≈ 1.2e4，此处取 2e4 留余量）。
+    /// （`HᵀH/img_point_cov`，`vio.cpp:1660-1661`）；本实现逐像素建模
+    /// （`level_residual` 每像素一行、`R = img_point_cov`），与官方一致。
     pub img_point_cov: f64,
     /// 外点像素误差阈值（`outlier_threshold`，`config/avia.yaml:31`）。
     pub outlier_threshold: f64,
@@ -82,12 +80,19 @@ pub struct VisualOptions {
     pub depth_discontinuity_thresh: f64,
     /// 参考/当前视角余弦下限（论文 VII-A：视角 > 80° 丢弃）。
     pub min_view_cos: f64,
+    /// 是否估计曝光（对照官方 `exposure_estimate_en`，`config/avia.yaml:37`）。
+    ///
+    /// 关闭时残差雅可比的曝光列（第 7 列，`vio.cpp:1628` 只在 en 时写）
+    /// 置零——固定曝光（仿真）下 τ 无自由度，迭代内推 τ 会破坏已对齐
+    /// 的光度残差（实测 GN 一步残差即升、状态零步回退）。
+    pub estimate_exposure: bool,
 }
 
 impl Default for VisualOptions {
     fn default() -> Self {
         Self {
-            img_point_cov: 20_000.0,
+            // 官方 avia.yaml:32 逐像素噪声方差
+            img_point_cov: 100.0,
             outlier_threshold: 1000.0,
             patch_size: 11,
             pyramid_level: 3,
@@ -95,7 +100,8 @@ impl Default for VisualOptions {
             convergence_eps: 1e-4,
             huber_delta: f64::INFINITY,
             depth_discontinuity_thresh: 0.5,
-            min_view_cos: 0.17, // 80°（论文 VII-A 末段）
+            min_view_cos: 0.17,      // 80°（论文 VII-A 末段）
+            estimate_exposure: true, // 官方默认开启（config/avia.yaml:37）
         }
     }
 }

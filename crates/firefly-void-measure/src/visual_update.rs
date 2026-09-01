@@ -19,7 +19,7 @@
 //! - 像素误差门控 `outlier_threshold·patch_size_total`（`vio.cpp:763`）；
 //! - Huber 核（可配，`δ = ∞` 时关闭）。
 
-use firefly_void_esikf::update::{EskfUpdater, MeasurementModel, visual_convergence};
+use firefly_void_esikf::update::{EskfUpdater, InfoMatrix, MeasurementModel, visual_convergence};
 use firefly_void_map::visual_point::VisualPointView;
 use firefly_void_map::voxel::transform_point;
 use firefly_void_types::state::{DIM_STATE, State};
@@ -29,7 +29,6 @@ use nalgebra::{
 };
 
 use crate::options::VisualOptions;
-use crate::outlier::huber_weight;
 
 /// 相机内参矩阵 `K`。
 #[must_use]
@@ -230,12 +229,26 @@ impl<'a> VisualMeasurement<'a> {
 
     /// 扭曲参考补丁（`warp_patch`，对照 `vio.cpp:292-315` `warpAffine`）。
     ///
-    /// 当前系补丁网格偏移 `du`（全分辨率像素，相对投影中心）经
-    /// `A_ref_cur = A⁻¹` 映射到参考系，再除以金字塔层 `scale` 得到参考
-    /// 补丁层内索引：`idx = A⁻¹·du/scale + half`（官方 `A_ref_cur =
-    /// A_cur_ref.inverse()`，`vio.cpp:296`）。参考补丁金字塔的 `level`
-    /// 层以 `scale = 1<<level` 步长采样（`extract_patch_pyramid`）。
-    /// 返回逐点扭曲补丁，与 [`points`] 等长。
+    /// 官方对参考原图在 `px_ref + A_ref_cur·(px_patch·(1<<search)·(1<<level))`
+    /// 采样（`vio.cpp:308-311`），`updateState` 当前补丁在 `scale=(1<<(level+search))`
+    /// 网格上采样（`vio.cpp:1566`）——warp 网格含 `(1<<search)·(1<<level)` 两级
+    /// scale，与当前补丁重采样 scale 相消，等价于**在金字塔 level 层内做
+    /// `A_ref_cur·off` 亚像素偏移**。本实现以参考补丁金字塔 level 层为源
+    /// （层内索引 `(x,y)` 对应参考图 `start − half·scale + (x,y)·scale`，像素为
+    /// 亚像素权重 `subpix=(px−start)/scale` 的四角插值，`extract_patch_pyramid`，
+    /// `image_patch.rs:86-104`）：
+    ///
+    /// `local = subpix + half + A_ref_cur·off`
+    ///
+    /// 与官方逐像素一致（两级 scale 相消；`subpix` 为金字塔采样权重，对应官方
+    /// `getImagePatch` 的 `w_ref_*`，`vio.cpp:210-211`）。`search_level` 在本实现
+    /// 无意义：官方搜索层选择「参考图金字塔中哪一层匹配」，本实现参考补丁
+    /// 金字塔即该匹配层，当前层网格由 `scale` 直接对应（`pyramid_update` 逐层
+    /// 从粗到细，与官方 `updateState` 的 `level` 循环等价）。
+    ///
+    /// 早期实现用 `A_ref_cur·off/scale + half`（off 少乘 scale 又除 scale），
+    /// `scale>1` 时参考补丁错位 `(scale−1)·off` 像素（实测 level1/2 错位
+    /// 34/65 灰度），视觉残差在错误位置采样、一迭代即回退。
     #[must_use]
     pub fn compute_warp_patches(
         points: &[VisualPointView],
@@ -243,25 +256,31 @@ impl<'a> VisualMeasurement<'a> {
         patch_size: usize,
         level: usize,
     ) -> Vec<Vec<f64>> {
-        let scale = 1u32 << level;
-        let inv_scale = 1.0 / f64::from(scale);
         let half = (patch_size as i64) / 2;
+        let scale = 1usize << level;
         points
             .iter()
             .zip(warps)
             .map(|(point, a)| {
                 // 官方 A_ref_cur = A_cur_ref⁻¹（vio.cpp:296）
                 let a_inv = a.try_inverse().unwrap_or_else(Matrix2::identity);
+                let px = point.px;
+                // 金字塔采样亚像素权重（官方 getImagePatch，vio.cpp:210-211）
+                let start_u = (px[0] / scale as f64).floor() * scale as f64;
+                let start_v = (px[1] / scale as f64).floor() * scale as f64;
+                let subpix_u = (px[0] - start_u) / scale as f64;
+                let subpix_v = (px[1] - start_v) / scale as f64;
                 let ref_data = &point.ref_patch.levels[level.min(point.ref_patch.levels.len() - 1)];
                 let mut out = Vec::with_capacity(patch_size * patch_size);
                 for py in 0..patch_size {
                     for px_i in 0..patch_size {
                         let du = px_i as f64 - half as f64;
                         let dv = py as f64 - half as f64;
+                        // 层内索引 = subpix + half + A_ref_cur·off（两级 scale 相消）
                         let u_ref =
-                            (a_inv[(0, 0)] * du + a_inv[(0, 1)] * dv) * inv_scale + half as f64;
+                            half as f64 + subpix_u + a_inv[(0, 0)] * du + a_inv[(0, 1)] * dv;
                         let v_ref =
-                            (a_inv[(1, 0)] * du + a_inv[(1, 1)] * dv) * inv_scale + half as f64;
+                            half as f64 + subpix_v + a_inv[(1, 0)] * du + a_inv[(1, 1)] * dv;
                         let value = sample_patch_bilinear(ref_data, patch_size, u_ref, v_ref);
                         out.push(value);
                     }
@@ -327,7 +346,7 @@ impl<'a> VisualMeasurement<'a> {
         false
     }
 
-    /// 单层有效点数（R < 1e6 的行数；有效点门控用）。
+    /// 单层有效测量数（R < 1e6 的逐像素行数；有效点门控用）。
     #[must_use]
     pub fn effective_count(&self, x: &State) -> usize {
         let (z, _, r) = self.level_residual(x);
@@ -340,30 +359,36 @@ impl<'a> VisualMeasurement<'a> {
     /// 单层残差：对每个可见点，把预扭曲参考补丁（入口状态冻结）与
     /// 当前帧以投影中心为中心的固定网格补丁比较（论文 (21)(22) 式）。
     ///
-    /// 逐像素残差按点聚合为单测量（均值）：`z = mean_i r_i`、
-    /// `H = mean_i J_i`、`R = img_point_cov / n_used`。官方是逐像素建模
-    /// （`vio.cpp:1623` 的 `z(i·patch_total + …)`），但用标量协方差
-    /// `HᵀH/img_point_cov`（`vio.cpp:1660-1661`）避免全像素 `R` 求逆；
-    /// 本实现以逐点聚合等价实现（测量数 = 点数，`R` 对角）。
+    /// 逐像素建模（对照官方 `vio.cpp:1623`：`z(i·patch_total + …)` 逐像素
+    /// 残差行），`R = img_point_cov` 标量协方差（官方 `config/avia.yaml:32`）。
+    /// 官方用 `HᵀH/img_point_cov` 聚合（`vio.cpp:1660-1661`），与逐像素
+    /// `R = img_point_cov·I` 的 ESIKF 信息矩阵等价。
     ///
-    /// 固定维度契约：返回行数恒为 `points.len()`（与 [`dim`] 一致）。
-    /// 无效点（越界/深度不连续/视角/误差门控）填零信息
-    /// （`z=0, H=0, R=1e12`）。
+    /// 早期实现把逐像素残差按点聚合为均值（`z = mean r_i`、`H = mean J_i`），
+    /// 雅可比正负抵消导致信息矩阵近零、GN 步长≈0——视觉更新形同虚设
+    /// （esikf 一迭代残差即升、0 步回退）。
+    ///
+    /// 固定维度契约：返回行数恒为 `points.len() × patch_n`（与 [`dim`] 一致，
+    /// 对照官方 `H_DIM`，`vio.cpp:1530`）。无效像素（越界/深度不连续/视角/
+    /// 误差门控）填零信息（`z=0, H=0, R=1e12`）。
     #[allow(clippy::many_single_char_names)] // 单字符 `z`/`h`/`r`/`k` 为论文 (21)(22) 式记号
     fn level_residual(&self, x: &State) -> (DVector<f64>, DMatrix<f64>, DMatrix<f64>) {
-        let scale = 1u32 << self.level;
         let patch_size = self.patch_size();
         let half = (patch_size as i64) / 2;
         let patch_n = patch_size * patch_size;
         let n_points = self.points.len();
+        let m = n_points * patch_n;
         let cam_pose = Self::cam_pose_from_state(x);
         let r_cw = cam_pose.rotation.to_rotation_matrix().into_inner();
         let p_cw = cam_pose.translation.vector;
         let zero_info = 1e12;
 
-        let mut zs = vec![0.0; n_points];
-        let mut rs = vec![zero_info; n_points];
-        let mut h = DMatrix::zeros(n_points, DIM_STATE);
+        // 固定维度 m = 点数 × patch_n（对照官方 `H_DIM = total_points *
+        // patch_size_total`，vio.cpp:1530；无效像素 z/H 置零，官方
+        // `z.setZero()` + 越界像素不写，`vio.cpp:1532`）。
+        let mut zs = vec![0.0; m];
+        let mut rs = vec![zero_info; m];
+        let mut h = DMatrix::zeros(m, DIM_STATE);
 
         for (i, point) in self.points.iter().enumerate() {
             // 预扭曲参考补丁（入口状态冻结的 warp_patch）
@@ -392,88 +417,176 @@ impl<'a> VisualMeasurement<'a> {
             let j_dpi = projection_jacobian(&p_cam, &self.intrinsics);
             let p_hat = firefly_void_types::so3::skew(&p_cam);
 
-            // 逐像素残差（先收集到临时缓冲，patch 误差门控后统一聚合）。
-            // 当前补丁在固定网格（投影中心 + 偏移）采样，金字塔层缩放；
-            // 参考补丁为入口状态冻结的 warp_patch（`vio.cpp:1580-1621`）。
-            let mut z_buf: Vec<f64> = Vec::with_capacity(patch_n);
-            let mut h_buf: Vec<DMatrix<f64>> = Vec::with_capacity(patch_n);
-            let mut patch_error = 0.0;
+            // 当前补丁以投影中心为锚点、scale 步长采样（官方 getImagePatch
+            // 网格，vio.cpp:203-222；锚点含亚像素 = px，步长 scale = 1<<level）。
+            // 与参考 warp 网格 `px_ref + A_ref_cur·off·scale` 对齐（残差逐像素
+            // 比较同一网格坐标）。
+            let scale = 1usize << self.level;
+            let row0 = i * patch_n;
 
+            let mut patch_error = 0.0;
+            let mut n_pix = 0usize;
             for py in 0..patch_size {
                 for px_i in 0..patch_size {
                     let du = px_i as f64 - half as f64;
                     let dv = py as f64 - half as f64;
-                    // 当前补丁以投影中心为锚点、scale 步长采样（与参考
-                    // 补丁金字塔的 `scale = 1<<level` 一致，全分辨率坐标）
-                    let u_l = px[0] + du * f64::from(scale);
-                    let v_l = px[1] + dv * f64::from(scale);
+                    // 官方 getImagePatch 网格（vio.cpp:203-222）：锚点 = 投影
+                    // 中心（含亚像素），步长 scale
+                    let u_l = px[0] + du * scale as f64;
+                    let v_l = px[1] + dv * scale as f64;
                     let Some(cur_value) = bilinear_sample(self.image, u_l, v_l) else {
                         continue;
                     };
                     let ref_value = warp_ref[py * patch_size + px_i];
-                    // 残差：τ_k·I_k − τ_r·I_r（论文 (22) 式）
+                    // 残差：τ_k·I_k − τ_r·I_r（论文 (22) 式，逐像素行）
                     let res = x.inv_expo_time * cur_value - point.ref_inv_expo * ref_value;
+                    let row = row0 + py * patch_size + px_i;
+                    zs[row] = res;
+                    rs[row] = self.opts.img_point_cov;
                     patch_error += res * res;
+                    n_pix += 1;
 
-                    // 图像梯度（当前层）：τ·∇I·scale（行向量；像素对
-                    // 状态的导数经 scale 步长放大，对照 vio.cpp:1613 的
-                    // `Jimg * inv_scale` 相反方向——本实现以全分辨率
-                    // 采样、参考补丁层内已含 scale）
-                    let grad =
-                        image_gradient(self.image, u_l, v_l) * (x.inv_expo_time * f64::from(scale));
+                    // 图像梯度（当前层）：官方 Jimg 含 `inv_scale`（vio.cpp:1613），
+                    // 残差对状态导数用 `∇I/scale·scale = ∇I`（全分辨率步长采样时
+                    // scale 步长采样使梯度为 `∇I·scale`，除以 scale 抵消）
+                    let grad = image_gradient(self.image, u_l, v_l) * x.inv_expo_time;
                     let j_img = nalgebra::RowVector2::new(grad[0], grad[1]);
                     // 旋转块 JdR = J_img·J_dpi·⌊p_cam×⌋（1×3），
                     // 平移块 Jdt = −J_img·J_dpi·R_cw（1×3）
                     let j_drot = j_img * j_dpi * p_hat;
                     let j_dp = -j_img * j_dpi * r_cw;
-                    let j_dtau = cur_value; // ∂h/∂τ_k = I_k(u)
+                    // 曝光列（对照官方 `exposure_estimate_en` 分支，vio.cpp:1628）
+                    let j_dtau = if self.opts.estimate_exposure {
+                        cur_value // ∂h/∂τ_k = I_k(u)
+                    } else {
+                        0.0 // 固定曝光：τ 无自由度，避免迭代内推 τ 破坏残差
+                    };
 
-                    let mut h_row = DMatrix::zeros(1, DIM_STATE);
                     // 旋转块 3 列、平移块 3 列（j_drot/j_dp 为 1×3 行向量）
-                    for k in 0..3 {
-                        h_row[(0, k)] = j_drot[k];
-                        h_row[(0, 3 + k)] = j_dp[k];
-                    }
-                    h_row[(0, 6)] = j_dtau;
-                    z_buf.push(res);
-                    h_buf.push(h_row);
+                    h[(row, 0)] = j_drot[0];
+                    h[(row, 1)] = j_drot[1];
+                    h[(row, 2)] = j_drot[2];
+                    h[(row, 3)] = j_dp[0];
+                    h[(row, 4)] = j_dp[1];
+                    h[(row, 5)] = j_dp[2];
+                    h[(row, 6)] = j_dtau;
                 }
             }
-            // 误差门控（对照 vio.cpp:763）：整点平均误差超阈值丢弃
-            if patch_error > self.opts.outlier_threshold * patch_n as f64 {
-                continue;
-            }
-            let n_used = z_buf.len();
-            if n_used == 0 {
-                continue;
-            }
-            // 聚合：均值残差/均值雅可比；Huber 权重折入 R（IRLS）
-            let w_scale = if self.opts.huber_delta.is_finite() {
-                z_buf
-                    .iter()
-                    .map(|z| huber_weight(*z, self.opts.huber_delta))
-                    .fold(0.0, f64::max)
-                    .max(1e-3)
-            } else {
-                1.0
-            };
-            let inv_n = 1.0 / n_used as f64;
-            zs[i] = z_buf.iter().sum::<f64>() * inv_n;
-            rs[i] = self.opts.img_point_cov / (n_used as f64 * w_scale);
-            let mut h_mean = DMatrix::<f64>::zeros(1, DIM_STATE);
-            for row in &h_buf {
-                for j in 0..DIM_STATE {
-                    h_mean[(0, j)] += row[(0, j)];
+            // 误差门控（对照 vio.cpp:763）：整点平均误差超阈值时整点置零信息
+            if n_pix > 0 && patch_error > self.opts.outlier_threshold * patch_n as f64 {
+                for row in row0..row0 + patch_n {
+                    zs[row] = 0.0;
+                    rs[row] = zero_info;
+                    h.row_mut(row).fill(0.0);
                 }
-            }
-            for j in 0..DIM_STATE {
-                h[(i, j)] = h_mean[(0, j)] * inv_n;
             }
         }
 
         let z_vec = DVector::from_column_slice(&zs);
         let r_mat = DMatrix::from_diagonal(&DVector::from_column_slice(&rs));
         (z_vec, h, r_mat)
+    }
+
+    /// 单层聚合信息量 `(S, b, e) = (HᵀR⁻¹H, HᵀR⁻¹z, zᵀR⁻¹z)`。
+    ///
+    /// 与 [`level_residual`] 同一测量模型，但直接在循环里把逐像素雅可比
+    /// 累加进 19×19 信息矩阵，不构造 `m×19` 残差矩阵（视觉逐像素 67k 行
+    /// 下避免单帧 ~2s 的分配/乘法开销；对照官方 `H_T_H = H_sub_T·H_sub`、
+    /// `HTz = H_sub_T·z`，`vio.cpp:1660-1662`）。
+    #[allow(clippy::many_single_char_names)] // 单字符 `s`/`b`/`e` 为信息量记号
+    fn level_information(&self, x: &State) -> (InfoMatrix, DVector<f64>, f64) {
+        let patch_size = self.patch_size();
+        let half = (patch_size as i64) / 2;
+        let patch_n = patch_size * patch_size;
+        let cam_pose = Self::cam_pose_from_state(x);
+        let r_cw = cam_pose.rotation.to_rotation_matrix().into_inner();
+        let p_cw = cam_pose.translation.vector;
+        let r_inv = 1.0 / self.opts.img_point_cov;
+
+        let mut s = InfoMatrix::zeros();
+        let mut b = DVector::zeros(DIM_STATE);
+        let mut e = 0.0;
+
+        for (i, point) in self.points.iter().enumerate() {
+            let warp_ref = &self.warp_patches[i];
+            if warp_ref.len() != patch_n {
+                continue;
+            }
+            let p_cam = r_cw * point.pos + p_cw;
+            if p_cam[2] <= 0.0 {
+                continue;
+            }
+            let view_cur = (-p_cam).normalize();
+            let normal_cur = r_cw * point.normal;
+            if view_cur.dot(&normal_cur) < self.opts.min_view_cos {
+                continue;
+            }
+            let Some(px) = self.intrinsics.project(&p_cam) else {
+                continue;
+            };
+            if self.depth_discontinuous(&p_cam, &px) {
+                continue;
+            }
+
+            let j_dpi = projection_jacobian(&p_cam, &self.intrinsics);
+            let p_hat = firefly_void_types::so3::skew(&p_cam);
+
+            let scale = 1usize << self.level;
+
+            let mut patch_error = 0.0;
+            let mut n_pix = 0usize;
+            // 先算整点 patch_error 判门控，门控通过再累加信息（对照
+            // `vio.cpp:763`：先算 patch_error 再决定是否用该点）
+            let mut pixel_res: Vec<f64> = Vec::with_capacity(patch_n);
+            let mut pixel_j: Vec<[f64; 7]> = Vec::with_capacity(patch_n);
+            for py in 0..patch_size {
+                for px_i in 0..patch_size {
+                    let du = px_i as f64 - half as f64;
+                    let dv = py as f64 - half as f64;
+                    let u_l = px[0] + du * scale as f64;
+                    let v_l = px[1] + dv * scale as f64;
+                    let Some(cur_value) = bilinear_sample(self.image, u_l, v_l) else {
+                        continue;
+                    };
+                    let ref_value = warp_ref[py * patch_size + px_i];
+                    let res = x.inv_expo_time * cur_value - point.ref_inv_expo * ref_value;
+                    patch_error += res * res;
+                    n_pix += 1;
+
+                    let grad = image_gradient(self.image, u_l, v_l) * x.inv_expo_time;
+                    let j_img = nalgebra::RowVector2::new(grad[0], grad[1]);
+                    let j_drot = j_img * j_dpi * p_hat;
+                    let j_dp = -j_img * j_dpi * r_cw;
+                    let j_dtau = if self.opts.estimate_exposure {
+                        cur_value
+                    } else {
+                        0.0
+                    };
+                    pixel_res.push(res);
+                    pixel_j.push([
+                        j_drot[0], j_drot[1], j_drot[2], j_dp[0], j_dp[1], j_dp[2], j_dtau,
+                    ]);
+                }
+            }
+            if n_pix > 0 && patch_error > self.opts.outlier_threshold * patch_n as f64 {
+                continue;
+            }
+            for (k, res) in pixel_res.iter().enumerate() {
+                let hj = &pixel_j[k];
+                // S += hᵀ·r_inv·h（7 维 → 19×19 累加）
+                for a in 0..7 {
+                    for bb in 0..7 {
+                        s[(a, bb)] += hj[a] * hj[bb] * r_inv;
+                    }
+                }
+                for a in 0..7 {
+                    b[a] += hj[a] * res * r_inv;
+                }
+                e += res * res * r_inv;
+            }
+        }
+
+        (s, b, e)
     }
 
     /// 以当前状态为初值，运行整条金字塔（粗 → 细）的顺序更新。
@@ -515,9 +628,12 @@ impl<'a> VisualMeasurement<'a> {
                     level,
                 )
                 .with_depth_opt(depth);
-                // 有效点门控：有效点过少时跳过本层更新（官方视觉几百上千点；
-                // 少数字点残差巨大时推量失控——实测 n_valid<20 曾单步推 21m）
-                if model.effective_count(state) < 20 {
+                // 有效点门控：无有效测量才跳过本层（对照官方
+                // `computeJacobianAndUpdateEKF` 的 `total_points == 0` 早退，
+                // `vio.cpp:786`）。不再预跑 effective_count（逐像素模型下
+                // 每层构建 67k 行矩阵的开销是重复的——esikf update 内部
+                // 的零信息行自动忽略）。
+                if model.points.is_empty() {
                     continue;
                 }
                 let mut updater =
@@ -542,8 +658,12 @@ impl MeasurementModel for VisualMeasurement<'_> {
         self.level_residual(x)
     }
 
+    fn information(&self, x: &State) -> (InfoMatrix, DVector<f64>, f64) {
+        self.level_information(x)
+    }
+
     fn dim(&self) -> usize {
-        self.points.len()
+        self.points.len() * self.patch_size() * self.patch_size()
     }
 }
 
@@ -725,15 +845,14 @@ mod tests {
                 0,
             );
             let (z0, _, r0) = m0.residual(&truth_state);
-            let valid: Vec<f64> = z0
-                .iter()
-                .zip(r0.diagonal().iter())
-                .filter(|&(_, sig)| *sig < 1e6)
-                .map(|(z, _)| *z)
-                .collect();
+            // 真值位姿下残差应≈0（允许补丁金字塔亚像素插值边界二阶差，
+            // 最大 ~4 灰度，远低于 outlier 门控 31.6 灰度 RMS）
             assert!(
-                valid.iter().all(|z| z.abs() < 1.0),
-                "真值位姿下残差应≈0: {valid:?}"
+                z0.iter()
+                    .zip(r0.diagonal().iter())
+                    .filter(|&(_, sig)| *sig < 1e6)
+                    .all(|(z, _)| z.abs() < 5.0),
+                "真值位姿下残差应≈0"
             );
         }
         let mut x = State {
@@ -938,14 +1057,18 @@ mod tests {
         )
         .with_depth(&depth, 320, 240);
         let (z, _, r) = m.residual(&State::default());
-        // 固定维度 = 点数；遮挡 4 点（i%5==0）应置零信息
-        assert_eq!(z.len(), 16, "固定维度 = 点数");
+        // 固定维度 = 点数 × patch_n；遮挡 4 点（i%5==0）应置零信息
+        assert_eq!(z.len(), 16 * 11 * 11, "固定维度 = 点数 × patch_n");
         let valid = z
             .iter()
             .zip(r.diagonal().iter())
             .filter(|&(_, sig)| *sig < 1e6)
             .count();
         assert!(valid > 0, "应有有效测量");
-        assert!(valid <= 12, "遮挡外点应被剔除，实际有效 {valid} 点");
+        // 12 个未遮挡点 × 121 像素，全部有效
+        assert!(
+            valid <= 12 * 11 * 11,
+            "遮挡外点应被剔除，实际有效 {valid} 像素"
+        );
     }
 }
