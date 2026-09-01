@@ -387,7 +387,8 @@ impl Odometry for VoidOdometry {
 
         // 2. 深度点云反投影 + 下采样
         let depth_opts = DepthOptions::from(&self.options.depth);
-        let vis_opts = VisualOptions::from(&self.options.visual);
+        let mut vis_opts = VisualOptions::from(&self.options.visual);
+        vis_opts.estimate_exposure = self.options.estimate_exposure;
         // 相机内参：MuJoCo fovy=70.88°、320×240 → f≈168.607（scene.py/env.py）
         let intrinsics = Intrinsics::new(168.607, 168.607, 160.0, 120.0);
         let t_pre = std::time::Instant::now();

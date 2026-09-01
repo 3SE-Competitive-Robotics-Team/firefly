@@ -171,6 +171,8 @@ impl From<&VisualConfig> for VisualOptions {
             huber_delta: c.huber_delta,
             depth_discontinuity_thresh: c.depth_discontinuity_thresh,
             min_view_cos: c.min_view_cos,
+            // 由调用方（lib.rs）按顶层 estimate_exposure 覆盖
+            estimate_exposure: true,
         }
     }
 }
