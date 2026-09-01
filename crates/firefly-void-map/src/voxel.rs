@@ -103,10 +103,20 @@ impl VoxelMap {
     /// 逐点入根体素 → 八叉树插入（新体素 SVD 判平面，非平面细分至最大层丢弃，
     /// 成熟平面固定并丢弃新点）。`covs` 为各点世界系协方差。
     ///
+    /// `camera_pos` 为注册帧的相机世界系位置（P10.11：平面法向对齐到
+    /// 指向相机——同一物理面跨体素的 SVD 法向符号随机（±n 等价），
+    /// 相邻体素符号相反时同方向位姿误差给出相反残差、修正互相抵消；
+    /// 对齐到观测方向使同一物理面法向一致）。
+    ///
     /// # Panics
     /// `points_g.len() != covs.len()` 时 panic。
     #[fastrace::trace]
-    pub fn register_points(&mut self, points_g: &[Vector3<f64>], covs: &[Matrix3<f64>]) {
+    pub fn register_points(
+        &mut self,
+        points_g: &[Vector3<f64>],
+        covs: &[Matrix3<f64>],
+        camera_pos: &Vector3<f64>,
+    ) {
         assert_eq!(points_g.len(), covs.len(), "点与协方差数量必须一致");
         for (p, cov) in points_g.iter().zip(covs) {
             let key = VoxelKey::from_point(p, self.opts.root_size);
@@ -114,7 +124,7 @@ impl VoxelMap {
                 octo: OctoNode::new_root(key.center(self.opts.root_size), &self.opts),
                 visual_points: Vec::new(),
             });
-            root.octo.insert(*p, *cov, &self.opts);
+            root.octo.insert(*p, *cov, &self.opts, camera_pos);
         }
     }
 

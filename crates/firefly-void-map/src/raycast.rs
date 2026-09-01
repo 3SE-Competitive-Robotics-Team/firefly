@@ -169,7 +169,7 @@ mod tests {
     /// 走 [`VoxelMap::register_points`] 建根体素后经测试辅助方法挂视觉点。
     fn insert_visual_point(map: &mut VoxelMap, pos: Vector3<f64>) {
         // 先注册一个几何点以创建根体素
-        map.register_points(&[pos], &[Matrix3::identity() * 1e-8]);
+        map.register_points(&[pos], &[Matrix3::identity() * 1e-8], &Vector3::zeros());
         let mut vp = VisualPoint::new(
             pos,
             Matrix3::identity() * 1e-4,

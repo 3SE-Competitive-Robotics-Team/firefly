@@ -14,6 +14,31 @@ use nalgebra::{Matrix3, Vector3};
 use crate::options::{PlaneOptions, VoxelMapOptions};
 use crate::plane::{VoxelPlane, fit_plane};
 
+/// P10.11：平面法向对齐到「指向相机」——消除 SVD 特征向量符号歧义。
+///
+/// SVD 拟合的法向 ±n 等价，同一物理面被多个根体素覆盖时相邻体素可能
+/// 拟合出相反法向；残差/H 阵带符号，同方向位姿误差在相反法向平面给出
+/// 相反残差，聚合修正互相抵消甚至反向（实测同一 y 平面 3 个 +y、2 个
+/// -y，深度修正方向错乱）。对齐到观测方向（`n·(center−cam) > 0`）使
+/// 同一物理面跨体素法向一致。
+pub fn align_normal_to_camera(plane: &mut VoxelPlane, camera_pos: &Vector3<f64>) {
+    let to_cam = camera_pos - plane.center;
+    if to_cam.norm() > 1e-12 && plane.normal.dot(&to_cam) < 0.0 {
+        plane.normal = -plane.normal;
+        plane.d = -plane.d;
+        // plane_var 的块序 [n, q]：法向块行/列翻转（n 符号翻转的雅可比传播）
+        // 简化处理：法向翻转后 Σ_nq 的 [0:3,0:3] 块不变（对称），
+        // [0:3,3:6] 与 [3:6,0:3] 交叉块翻转（n 与 q 的耦合符号）
+        for i in 0..3 {
+            for j in 3..6 {
+                let v = plane.plane_var[(i, j)];
+                plane.plane_var[(i, j)] = -v;
+                plane.plane_var[(j, i)] = -v;
+            }
+        }
+    }
+}
+
 /// 八叉树节点。
 #[derive(Debug, Clone)]
 pub struct OctoNode {
@@ -87,26 +112,38 @@ impl OctoNode {
     }
 
     /// 插入一个点（几何更新，对照 `voxel_map.cpp:219` `UpdateOctoTree`）。
-    pub fn insert(&mut self, p: Vector3<f64>, cov: Matrix3<f64>, opts: &VoxelMapOptions) {
+    ///
+    /// `camera_pos`：注册帧相机世界系位置（P10.11 法向对齐，见
+    /// [`crate::voxel::VoxelMap::register_points`]）。
+    pub fn insert(
+        &mut self,
+        p: Vector3<f64>,
+        cov: Matrix3<f64>,
+        opts: &VoxelMapOptions,
+        camera_pos: &Vector3<f64>,
+    ) {
         if !self.init {
             self.new_points += 1;
             self.temp_points.push(p);
             self.temp_covs.push(cov);
             let threshold = opts.layer_init_num[self.layer.min(4)];
             if self.temp_points.len() > threshold {
-                self.init_octo_tree(opts);
+                self.init_octo_tree(opts, camera_pos);
             }
             return;
         }
 
         if self.plane.is_some() {
-            // 成熟平面：丢弃新点；未成熟：累积并按阈值重拟合
+            // 成熟平面：丢弃新点；未成熟：累积并按阈值重拟合（对照
+            // `voxel_map.cpp:229-246` 官方语义。P10.11 曾试滑动窗口
+            // refit——悬停回归：成熟平面持续跟随估计漂移，深度把位置推
+            // 向被拖平面，悬停 y 漂 2m、姿态漂 11°；已回退）
             if self.update_enable {
                 self.new_points += 1;
                 self.temp_points.push(p);
                 self.temp_covs.push(cov);
                 if self.new_points > opts.update_size_threshold {
-                    self.refit_plane(opts);
+                    self.refit_plane(opts, camera_pos);
                     self.new_points = 0;
                 }
                 if self.temp_points.len() >= opts.max_points_per_plane {
@@ -133,22 +170,28 @@ impl OctoNode {
                 self.leaves[leaf] = Some(Box::new(child));
             }
             if let Some(child) = &mut self.leaves[leaf] {
-                child.insert(p, cov, opts);
+                child.insert(p, cov, opts, camera_pos);
             }
         } else {
             // 最大层仍不判平面：按 update_enable 丢弃或累积
-            self.insert_at_max_layer(p, cov, opts);
+            self.insert_at_max_layer(p, cov, opts, camera_pos);
         }
     }
 
     /// 最大层节点的累积/丢弃逻辑（与成熟平面一致）。
-    fn insert_at_max_layer(&mut self, p: Vector3<f64>, cov: Matrix3<f64>, opts: &VoxelMapOptions) {
+    fn insert_at_max_layer(
+        &mut self,
+        p: Vector3<f64>,
+        cov: Matrix3<f64>,
+        opts: &VoxelMapOptions,
+        camera_pos: &Vector3<f64>,
+    ) {
         if self.update_enable {
             self.new_points += 1;
             self.temp_points.push(p);
             self.temp_covs.push(cov);
             if self.new_points > opts.update_size_threshold {
-                self.refit_plane(opts);
+                self.refit_plane(opts, camera_pos);
                 self.new_points = 0;
             }
             if self.temp_points.len() >= opts.max_points_per_plane {
@@ -161,11 +204,13 @@ impl OctoNode {
     }
 
     /// 首次达到阈值时的初始化（拟合平面或细分）。
-    fn init_octo_tree(&mut self, opts: &VoxelMapOptions) {
+    fn init_octo_tree(&mut self, opts: &VoxelMapOptions, camera_pos: &Vector3<f64>) {
         let threshold = opts.layer_init_num[self.layer.min(4)];
         if self.temp_points.len() > threshold {
             let plane_opts = PlaneOptions::from(opts);
-            if let Some(plane) = fit_plane(&self.temp_points, &self.temp_covs, &plane_opts) {
+            if let Some(mut plane) = fit_plane(&self.temp_points, &self.temp_covs, &plane_opts) {
+                // P10.11：法向对齐到指向相机（消除 SVD 符号歧义）
+                align_normal_to_camera(&mut plane, camera_pos);
                 self.plane = Some(plane);
                 if self.plane.as_ref().is_some_and(|pl| pl.is_mature) {
                     self.update_enable = false;
@@ -173,7 +218,7 @@ impl OctoNode {
                     self.temp_covs.clear();
                 }
             } else {
-                self.cut_octo_tree(opts);
+                self.cut_octo_tree(opts, camera_pos);
             }
             self.init = true;
             self.new_points = 0;
@@ -181,7 +226,7 @@ impl OctoNode {
     }
 
     /// 细分：把临时点分入子节点并递归初始化。
-    fn cut_octo_tree(&mut self, opts: &VoxelMapOptions) {
+    fn cut_octo_tree(&mut self, opts: &VoxelMapOptions, camera_pos: &Vector3<f64>) {
         if self.layer >= self.max_layer {
             return;
         }
@@ -200,15 +245,17 @@ impl OctoNode {
                 self.leaves[leaf] = Some(Box::new(child));
             }
             if let Some(child) = &mut self.leaves[leaf] {
-                child.insert(p, cov, opts);
+                child.insert(p, cov, opts, camera_pos);
             }
         }
     }
 
     /// 重拟合平面（增量更新，对照 `voxel_map.cpp:237`）。
-    fn refit_plane(&mut self, opts: &VoxelMapOptions) {
+    fn refit_plane(&mut self, opts: &VoxelMapOptions, camera_pos: &Vector3<f64>) {
         let plane_opts = PlaneOptions::from(opts);
-        if let Some(plane) = fit_plane(&self.temp_points, &self.temp_covs, &plane_opts) {
+        if let Some(mut plane) = fit_plane(&self.temp_points, &self.temp_covs, &plane_opts) {
+            // P10.11：法向对齐到指向相机（消除 SVD 符号歧义）
+            align_normal_to_camera(&mut plane, camera_pos);
             self.plane = Some(plane);
             if self.plane.as_ref().is_some_and(|pl| pl.is_mature) {
                 self.update_enable = false;
@@ -335,7 +382,7 @@ mod tests {
             pts.swap(i, j);
         }
         for p in pts {
-            node.insert(p, cov, &opts);
+            node.insert(p, cov, &opts, &Vector3::zeros());
         }
         // 深度不超过 max_layer
         assert!(node.depth() <= opts.max_layer);
