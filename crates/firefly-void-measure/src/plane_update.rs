@@ -130,8 +130,10 @@ impl<'a> DepthMeasurement<'a> {
                 if z <= 0.05 || !z.is_finite() {
                     continue;
                 }
+                // u 轴镜像：深度图与左目灰度水平翻转（同 lib.rs
+                // build_downsampled_cloud，见其 dx 镜像注释）
                 let p = Vector3::new(
-                    (x as f64 - intrinsics.cx) / intrinsics.fx * z,
+                    -(x as f64 - intrinsics.cx) / intrinsics.fx * z,
                     -(y as f64 - intrinsics.cy) / intrinsics.fy * z,
                     z,
                 );

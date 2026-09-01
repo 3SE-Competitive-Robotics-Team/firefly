@@ -222,7 +222,10 @@ impl VoidOdometry {
                 if edge {
                     continue;
                 }
-                let dx = (x as f64 - intrinsics.cx) / intrinsics.fx;
+                // 深度图 u 轴与左目灰度图水平镜像（MuJoCo 深度渲染实测；
+                // 逐像素重投影验证：深度像素 (u,v) 的内容在左目 (W-1-u, v)），
+                // dx 取负镜像后与视觉同系
+                let dx = -(x as f64 - intrinsics.cx) / intrinsics.fx;
                 let dy = -(y as f64 - intrinsics.cy) / intrinsics.fy;
                 // OpenGL 系（深度值为相机空间 Z）→ 虚拟针孔系
                 let p_gl = Vector3::new(dx * z, dy * z, -z);

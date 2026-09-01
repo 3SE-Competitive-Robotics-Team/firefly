@@ -7,10 +7,13 @@ t0 = [1.0, 4.0, 1.0]
 estimate_exposure = false
 
 # 外参（MuJoCo 场景标定，见 scene.py + firefly-map::DepthCamera）
-# 深度相机(OpenGL 系) → 虚拟针孔 IMU 系旋转（默认：深度像素与左目针孔逐点重合）
+# 深度相机(OpenGL 系) → 虚拟针孔 IMU 系旋转（深度像素与左目针孔逐点重合：
+# 同刚体同 xyaxes 下倾 20°，仅 y/z 轴翻转）
 depth_ext_rot = [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]
-# 真实机体 → 虚拟针孔系旋转 R_bv（IMU 角速度/比力经它转系后传播；含 20° 下倾）
-body_ext_rot = [[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]]
+# 真实机体 → 虚拟针孔系旋转 R_bv = R_gl_to_pinhole·R_ctbᵀ（R_ctb 由 scene.py 相机
+# xyaxes 定：x=图右、y=图下、z=光轴=x×y，含 20° 下倾；IMU 角速度/比力经它转系后
+# 传播。深度反投影链 R_wv·R_g2p = R_wb·R_ctb 与 MuJoCo 相机位姿逐点一致）
+body_ext_rot = [[0.0, -1.0, 0.0], [-0.342, 0.0, -0.9397], [0.9397, 0.0, -0.342]]
 
 [imu]
 # IMU 传播噪声（方差，直接入 Q 对角，对照 avia.yaml:44-45 gyr_cov=0.3/
