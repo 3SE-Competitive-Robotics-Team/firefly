@@ -78,6 +78,39 @@ def _ensure_dots_texture() -> Path:
 
 _DOTS_PATH = _ensure_dots_texture()
 
+# 前方错落箱子：5 列 × 5 行网格（x∈[5,9]、y∈[2,6]），层数近矮远高，最高
+# 1.7m——给下倾 20° 前视相机提供多高度垂直侧面（横向法向平面），深度测量
+# 可约束 x/y 切向（深度只约束法向，地面朝上只约束 z）。层高三档：
+# 单层 0.6m、双层 1.1m、三层 1.7m（第二/三层底面与下层重叠成阶梯）。
+_BOX_COLS = (5.0, 6.0, 7.0, 8.0, 9.0)
+_BOX_ROWS = (2.0, 3.0, 4.0, 5.0, 6.0)
+_BOX_LAYERS = (
+    (1, 1, 1, 1, 1),  # x=5 近处全单层
+    (1, 1, 2, 1, 1),  # x=6
+    (1, 2, 1, 2, 1),  # x=7
+    (2, 1, 3, 1, 2),  # x=8 中心三层
+    (1, 3, 2, 2, 2),  # x=9 远处最高
+)
+# 每层 (z 中心, 半高)：单层 0.3/0.3、二层 0.7/0.4、三层 1.2/0.5
+_BOX_LAYER_GEOM = ((0.3, 0.3), (0.7, 0.4), (1.2, 0.5))
+
+
+def _boxes_xml() -> str:
+    """前方错落箱子：按 _BOX_LAYERS 层数 × _BOX_LAYER_GEOM 尺寸生成，
+    网格点交替 pillar_a/pillar_b 材质。"""
+    out = []
+    for ci, x in enumerate(_BOX_COLS):
+        for ri, y in enumerate(_BOX_ROWS):
+            n = _BOX_LAYERS[ci][ri]
+            mat = "pillar_a" if (ci + ri) % 2 == 0 else "pillar_b"
+            for z, half in _BOX_LAYER_GEOM[:n]:
+                out.append(
+                    f'    <geom type="box" pos="{x} {y} {z}" '
+                    f'size="0.25 0.25 {half}" material="{mat}"/>'
+                )
+    return "\n".join(out)
+
+
 SCENE_XML = rf"""
 <mujoco model="firefly">
   <option timestep="0.005" gravity="0 0 -9.81"/>
@@ -121,6 +154,12 @@ SCENE_XML = rf"""
     <geom type="box" pos="0.5 6.5 1.5" size="0.35 0.35 1.5" material="pillar_b"/>
     <geom type="box" pos="2.0 6.5 1.5" size="0.35 0.35 1.5" material="pillar_a"/>
     <geom type="box" pos="3.5 6.5 1.5" size="0.35 0.35 1.5" material="pillar_b"/>
+
+    <!-- 前方错落箱子（P10.6 实验）：轨迹前方 x∈[5,9] 的 25 箱高低天际线，
+         给下倾 20° 前视相机多高度垂直侧面 → 深度横向法向约束补 x/y。
+         净距：箱子区 x≥5，轨迹最远 x=4（净距 ≥1m）；最高 1.7m 与轨迹
+         z≤1.5 错开。demo 默认地图未同步（本实验专用）。 -->
+{_boxes_xml()}
 
     <!-- 无人机（freejoint 六自由度） -->
     <body name="drone" pos="1 4 1">

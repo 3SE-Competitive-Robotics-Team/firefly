@@ -16,7 +16,10 @@
 #   3. 后台起 `cargo run -p void`（估计，发布 Firefly/VoidOdom）
 #   4. Python recorder 同步采集 GT 与 VoidOdom（期间两进程在跑）
 #   5. 到点优雅 kill（SIGINT → 端口 Drop，无 iceoryx 幽灵残留）
-#   6. 离线对齐（Umeyama 相似变换）算 ATE，输出 RMS/mean/max 与健康统计
+#   6. 离线对齐（首点对齐：odom 首点平移到 GT 首点，保留绝对漂移）算 ATE，
+#      输出 RMS/mean/max 与健康统计。Umeyama 相似变换会吸收全局平移/旋转/
+#      尺度（"形状误差"），把整体偏移虚低——机器人比赛要绝对定位精度，
+#      口径改为首点对齐（仅移除初始位置偏置，保留漂移与尺度）。
 #
 # 退出码：0 = 全部轮 PASS（ATE-RMS < 0.3m）；1 = 任一轮失败。
 
@@ -234,9 +237,8 @@ odom_w = np.stack([
     np.interp(gt_tw, odom_t, odom[:, 2]),
 ], axis=1)
 
-# 轨迹退化判断（悬停/短轨迹）：GT 与估计都近静止时 Umeyama 的尺度
-# 无定义（aa≈0 → scale=0 → ATE 恒 0）。此时估计与 GT 同起点（t0 初始化，
-# 全局系一致），直接算逐点绝对误差。
+# 轨迹退化判断（悬停/短轨迹）：GT 与估计都近静止时对齐无意义，且
+# 估计与 GT 同起点（t0 初始化，全局系一致），直接算逐点绝对误差。
 gt_span = float(np.ptp(gt_w, axis=0).max())
 odom_span = float(np.ptp(odom_w, axis=0).max())
 
@@ -262,9 +264,24 @@ if gt_span < 0.05 or odom_span < 0.05:
     ok = ate_rms < 0.3
     print(f"[ate] {'PASS' if ok else 'FAIL'}（阈值 ATE-RMS < 0.3m）")
 else:
-    # Umeyama 相似变换：s·R·odom + t ≈ gt（吸收初始姿态/尺度误差）
+    # 首点对齐：odom 整体平移使首点与 GT 首点重合（仅移除初始位置偏置，
+    # 保留绝对漂移/旋转/尺度误差）。另算 Umeyama 相似变换作对照——
+    # 后者吸收全局平移/旋转/尺度，是"形状误差"，通常明显低于首点对齐。
     A = odom_w.T  # 3×N
     B = gt_w.T  # 3×N
+
+    # 首点对齐（平移对齐）
+    aligned = A - A[:, :1] + B[:, :1]
+    err = np.linalg.norm(aligned - B, axis=0)
+    ate_rms = float(np.sqrt(np.mean(err**2)))
+    ate_mean = float(np.mean(err))
+    ate_max = float(np.max(err))
+    print(f"[ate] 首点对齐：")
+    print(f"[ate] ATE-RMS  = {ate_rms:.4f} m")
+    print(f"[ate] ATE-mean = {ate_mean:.4f} m")
+    print(f"[ate] ATE-max  = {ate_max:.4f} m")
+
+    # Umeyama 对照（相似变换：s·R·odom + t ≈ gt）
     mu_a = A.mean(axis=1, keepdims=True)
     mu_b = B.mean(axis=1, keepdims=True)
     aa = A - mu_a
@@ -277,15 +294,10 @@ else:
         r = vt.T @ u.T
     scale = np.trace(np.diag(s) @ r) / np.sum(aa * aa)
     t_vec = mu_b - scale * r @ mu_a
-    aligned = scale * r @ A + t_vec
-    err = np.linalg.norm(aligned - B, axis=0)
-    ate_rms = float(np.sqrt(np.mean(err**2)))
-    ate_mean = float(np.mean(err))
-    ate_max = float(np.max(err))
-    print(f"[ate] Umeyama 对齐（s={scale:.4f}）：")
-    print(f"[ate] ATE-RMS  = {ate_rms:.4f} m")
-    print(f"[ate] ATE-mean = {ate_mean:.4f} m")
-    print(f"[ate] ATE-max  = {ate_max:.4f} m")
+    aligned_u = scale * r @ A + t_vec
+    err_u = np.linalg.norm(aligned_u - B, axis=0)
+    print(f"[ate] 对照 Umeyama 对齐（s={scale:.4f}）：")
+    print(f"[ate] Umeyama-RMS = {float(np.sqrt(np.mean(err_u**2))):.4f} m")
 
     ok = ate_rms < 0.3
     print(f"[ate] {'PASS' if ok else 'FAIL'}（阈值 ATE-RMS < 0.3m）")
