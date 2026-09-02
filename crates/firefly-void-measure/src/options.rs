@@ -55,6 +55,32 @@ impl Default for DepthOptions {
     }
 }
 
+/// 先验平面测量参数（P11.2：静态先验面批次）。
+///
+/// 与 [`DepthOptions`] 同构的门控参数 + 先验平面噪声放大：
+/// 先验面来自离线建图/解析几何，其 `Σ_nq` 不可信时用 [`var_scale`]
+/// 放大（诚实给大 σ，避免把在线估计拉偏——对照参考实现
+/// `plan_weight_tan` 切向弱约束语义，`map_location.cpp:1750-1752`）。
+#[derive(Debug, Clone, Copy)]
+pub struct PriorOptions {
+    /// 外点门控倍数 `sigma_num`（对照 `voxel_map.cpp:737`）。
+    pub sigma_num: f64,
+    /// 平面-点径向判据倍数 `radius_k`（对照 `voxel_map.cpp:719`）。
+    pub radius_k: f64,
+    /// 先验平面 `Σ_nq` 放大系数（各向同性乘子，默认 1.0 = 装载值原样）。
+    pub var_scale: f64,
+}
+
+impl Default for PriorOptions {
+    fn default() -> Self {
+        Self {
+            sigma_num: 3.0,
+            radius_k: 3.0,
+            var_scale: 1.0,
+        }
+    }
+}
+
 /// 视觉测量参数。
 #[derive(Debug, Clone, Copy)]
 pub struct VisualOptions {

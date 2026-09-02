@@ -26,21 +26,11 @@ use std::cell::Cell;
 
 use crate::noise::DepthNoise;
 use crate::options::DepthOptions;
-use crate::outlier::{GateVerdict, chi2_gate};
+use crate::planar::{PlaneQuery, match_plane};
 
 /// 单点平面测量中间量 `(p_b, n, dis, σ_l²)`：IMU 系点、平面法向、
 /// 残差距离与噪声方差。
 type PlaneResidual = Option<(Vector3<f64>, Vector3<f64>, f64, f64)>;
-
-/// 单点平面查询结果（探针：区分拒绝原因）。
-enum PlaneQuery {
-    /// 匹配成功（通过径向判据 + 卡方门控）。
-    Matched(Vector3<f64>, f64, f64),
-    /// 无可用平面（无体素 / 体素无平面 / 径向判据不过）。
-    NoPlane,
-    /// 有平面候选但全部被卡方门控拒绝。
-    Chi2Rejected,
-}
 
 /// 深度测量逐帧诊断（探针，不参与算法决策）。
 #[derive(Debug, Clone, Copy, Default)]
@@ -165,57 +155,22 @@ impl<'a> DepthMeasurement<'a> {
     ///
     /// `cov_w` 为点在世界系的协方差（`R·C·Rᵀ`）。
     ///
-    /// 返回匹配结果（含拒绝原因，探针）。
+    /// 返回匹配结果（含拒绝原因，探针）。候选平面取自在线体素图的
+    /// 根体素八叉树，判据本体在 [`match_plane`]（与先验测量共用）。
     fn plane_for_point(&self, p_world: &Vector3<f64>, cov_w: &Matrix3<f64>) -> PlaneQuery {
         let Some(root) = self.map.root_at(p_world) else {
             return PlaneQuery::NoPlane;
         };
         let mut planes = Vec::new();
         root.collect_planes(&mut planes);
-        // 取概率最高（残差/噪声最小）的平面（对照官方对八叉子节点的
-        // `this_prob` 择优）。
-        let mut best: Option<(Vector3<f64>, f64, f64)> = None;
-        let mut best_prob = f64::NEG_INFINITY;
-        let mut any_candidate = false;
-        for plane in planes {
-            if !plane.is_plane {
-                continue;
-            }
-            let dis = point_plane_residual(&plane.normal, p_world, &plane.center);
-            // 径向判据（对照 voxel_map.cpp:726-730）
-            let dis_to_center = (plane.center - p_world).norm_squared();
-            let range_dis = (dis_to_center - dis * dis).max(0.0).sqrt();
-            if range_dis > self.opts.radius_k * plane.radius {
-                continue;
-            }
-            any_candidate = true;
-            // 噪声：J_nq·Σ_nq·J_nqᵀ + nᵀ·Σ_pj·n（对照 voxel_map.cpp:447-449）
-            let j_nq = nalgebra::RowVector6::new(
-                p_world[0] - plane.center[0],
-                p_world[1] - plane.center[1],
-                p_world[2] - plane.center[2],
-                -plane.normal[0],
-                -plane.normal[1],
-                -plane.normal[2],
-            );
-            let sigma_l = j_nq * plane.plane_var * j_nq.transpose();
-            let sigma_l = sigma_l[(0, 0)] + plane.normal.dot(&(cov_w * plane.normal));
-            let sigma_l = sigma_l + 0.001;
-            // 卡方门控（对照 voxel_map.cpp:737）
-            if chi2_gate(dis, sigma_l, self.opts.sigma_num) == GateVerdict::Outlier {
-                continue;
-            }
-            let prob = (-0.5 * dis * dis / sigma_l).exp() / sigma_l.sqrt();
-            if prob > best_prob {
-                best_prob = prob;
-                best = Some((plane.normal, dis, sigma_l));
-            }
-        }
-        match best {
-            Some((n, dis, sig)) => PlaneQuery::Matched(n, dis, sig),
-            None if any_candidate => PlaneQuery::Chi2Rejected,
-            None => PlaneQuery::NoPlane,
-        }
+        match_plane(
+            &planes,
+            p_world,
+            cov_w,
+            self.opts.radius_k,
+            self.opts.sigma_num,
+            1.0, // 在线地图 Σ_nq 已含真实传播，不放大
+        )
     }
 
     /// 计算残差、H 与 R（对照 `voxel_map.cpp:414-458` 的 H 组装）。

@@ -18,8 +18,9 @@ use firefly_void_esikf::propagator::Propagator;
 use firefly_void_esikf::update::{EskfUpdater, depth_convergence};
 use firefly_void_map::VoxelMap;
 use firefly_void_map::options::VoxelMapOptions;
-use firefly_void_measure::options::{DepthOptions, VisualOptions};
+use firefly_void_measure::options::{DepthOptions, PriorOptions, VisualOptions};
 use firefly_void_measure::plane_update::DepthMeasurement;
+use firefly_void_measure::prior_update::PriorPlaneMeasurement;
 use firefly_void_measure::visual_update::VisualMeasurement;
 use firefly_void_types::sensor::{CameraFrame, DepthFrame, ImuSample};
 use firefly_void_types::state::{DIM_STATE, State};
@@ -28,7 +29,9 @@ use nalgebra::{Isometry3, Matrix3, Rotation3, UnitQuaternion, Vector3};
 
 pub mod options;
 
-pub use options::{DepthConfig, MapConfig, PropagationNoiseConfig, VisualConfig, VoidOptions};
+pub use options::{
+    DepthConfig, MapConfig, PriorConfig, PropagationNoiseConfig, VisualConfig, VoidOptions,
+};
 
 /// 传感器帧输入：深度帧与相机帧**同步到达**（同一时刻 10Hz 对齐，
 /// 由接线层配对）。
@@ -63,6 +66,12 @@ pub struct OdometryOutput {
     pub visual_healthy: bool,
     /// 深度更新收敛与否。
     pub depth_converged: bool,
+    /// 先验面批次有效点（本次更新 kept；0 = 关闭/无匹配）。
+    pub prior_inliers: usize,
+    /// 先验面批次迭代收敛迭代数（0 = 无有效测量）。
+    pub prior_iterations: usize,
+    /// 先验面批次有效点残差绝对均值（m；探针，see `docs/void-motion-drift.md`）。
+    pub prior_residual_mean: f64,
     /// 地图视觉点数（viz 采样用）。
     pub map_visual_points: usize,
     /// 各阶段耗时（秒）。
@@ -78,6 +87,8 @@ pub struct FrameTimings {
     pub depth_preprocess: f64,
     /// 深度测量 ESIKF 更新。
     pub depth_update: f64,
+    /// 先验面 ESIKF 更新。
+    pub prior_update: f64,
     /// 视觉测量金字塔更新。
     pub visual_update: f64,
     /// 地图几何/视觉更新。
@@ -99,10 +110,12 @@ pub trait Odometry {
     fn state(&self) -> &State;
 }
 
-/// DIVO 完整管线：ESIKF + 体素地图 + 两个测量模型。
+/// DIVO 完整管线：ESIKF + 体素地图 + 两个测量模型 + 可选先验面批次。
 pub struct VoidOdometry {
     esikf: Propagator,
     map: VoxelMap,
+    /// 静态先验平面容器（`PriorConfig::enable` 时装载；`None` = 批次关闭）。
+    prior_map: Option<firefly_void_map::PriorPlaneMap>,
     options: VoidOptions,
     /// 当前状态（含协方差）。
     state: State,
@@ -138,9 +151,33 @@ impl VoidOdometry {
             esikf.disable_exposure_est();
         }
         let map = VoxelMap::new((&options.map).into());
+        // 先验面装载（P11.2）：enable 且文件存在才启用；文件缺失/解析失败
+        // 记 warn 并禁用该批次（先验是增强特性，禁用后行为 = 原管线，
+        // 与 main.rs 真值订阅不可用回退的先例一致）
+        let prior_map = if options.prior.enable {
+            let path = options.prior.map_path.trim();
+            if path.is_empty() {
+                log::warn!("prior.enable=true 但 map_path 为空，先验批次禁用");
+                None
+            } else {
+                match firefly_void_map::PriorPlaneMap::load_text(path) {
+                    Ok(map) => {
+                        log::info!("先验平面图已装载：{}（{} 面）", path, map.len());
+                        Some(map)
+                    }
+                    Err(e) => {
+                        log::warn!("先验平面图装载失败 {path}：{e}——先验批次禁用");
+                        None
+                    }
+                }
+            }
+        } else {
+            None
+        };
         Self {
             esikf,
             map,
+            prior_map,
             options,
             state,
             imu_queue: VecDeque::new(),
@@ -449,6 +486,54 @@ impl Odometry for VoidOdometry {
         };
         let depth_update = t_depth.elapsed().as_secs_f64();
 
+        // 3.5 先验面更新（P11.2，LIOP 式紧耦合先验批次）：深度更新后、
+        // 视觉更新前，把同一帧深度点对**静态先验平面集**做点面残差更新
+        // ——先验面世界系固定、不随在线地图跟漂，是自举图的绝对锚。
+        // 关闭（prior_map=None）时为零信息批次（dim=0 早退），无任何
+        // 状态拦截；对照参考实现 `Estimate()` 每帧持续执行先验匹配
+        // （map_location.cpp:1043）。
+        let t_prior = std::time::Instant::now();
+        let (prior_inliers, prior_iterations, prior_residual_mean) = {
+            if let Some(prior_map) = &self.prior_map {
+                let model = PriorPlaneMeasurement::new(
+                    prior_map,
+                    points_l.clone(),
+                    covs_l.clone(),
+                    nalgebra::Isometry3::identity(),
+                    PriorOptions::from(&self.options.prior),
+                );
+                // 诊断：update 前有效点（传播先验下）
+                let inliers = model.effective_count(&self.state);
+                let d = model.last_diag();
+                log::debug!(
+                    "prior-diag t={frame_t:.2} total={} no_plane={} chi2={} kept={} resid_mean={:.4}",
+                    d.total,
+                    d.no_plane,
+                    d.chi2_rejected,
+                    d.kept,
+                    d.residual_mean
+                );
+                if inliers == 0 {
+                    (0usize, 0usize, d.residual_mean)
+                } else {
+                    // 单批 ESIKF 更新（与深度批次同收敛判据）；update 前
+                    // 的残差均值 d.residual_mean 作为漂移信号探针（先验面
+                    // 固定：估计若偏离世界锚，残差均值即漂移量级）
+                    let mut updater = EskfUpdater::new(model, 5, depth_convergence());
+                    let (iterations, _converged) = updater
+                        .update(&mut self.state)
+                        .map_err(|e| e.with_context("stage", "prior"))?;
+                    log::debug!(
+                        "prior-iter t={frame_t:.2} inliers={inliers} iterations={iterations}",
+                    );
+                    (inliers, iterations, d.residual_mean)
+                }
+            } else {
+                (0usize, 0usize, 0.0)
+            }
+        };
+        let prior_update = t_prior.elapsed().as_secs_f64();
+
         // 4. 视觉测量金字塔更新（Algorithm 1 顺序更新第 2 步：无可视点即
         // 跳过——视觉地图点未建立/视野无点时属正常空窗）
         let t_visual = std::time::Instant::now();
@@ -563,11 +648,15 @@ impl Odometry for VoidOdometry {
             visual_iterations,
             visual_healthy,
             depth_converged,
+            prior_inliers,
+            prior_iterations,
+            prior_residual_mean,
             map_visual_points: map_vpts,
             timings: FrameTimings {
                 propagate,
                 depth_preprocess,
                 depth_update,
+                prior_update,
                 visual_update,
                 map_update,
             },

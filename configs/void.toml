@@ -59,6 +59,18 @@ huber_delta = 1e9
 depth_discontinuity_thresh = 0.5
 min_view_cos = 0.17
 
+# 静态先验面（P11.2：LIOP 式紧耦合先验批次；先验面世界系固定，
+# 不随在线地图跟漂——给自举图绝对锚。默认关闭 = 原管线行为）
+[prior]
+enable = true
+# 先验平面图文件（文本格式：cx cy cz nx ny nz d var_scale radius npts）
+# 由 scripts/export_prior_planes.py 从 scene.py 已知几何导出
+map_path = "configs/prior/void_scene.planes"
+# 门控/径向倍数（与 depth 段同构）；var_scale：Σ_nq 各向同性放大
+sigma_num = 3.0
+radius_k = 3.0
+var_scale = 1.0
+
 [map]
 root_size = 0.5
 max_layer = 3
