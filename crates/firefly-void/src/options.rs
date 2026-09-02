@@ -18,7 +18,7 @@ use std::path::Path;
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_void_esikf::propagator::PropagationNoise;
 use firefly_void_map::options::VoxelMapOptions;
-use firefly_void_measure::options::{DepthOptions, VisualOptions};
+use firefly_void_measure::options::{DepthOptions, PriorOptions, VisualOptions};
 use nalgebra::{Matrix3, Rotation3};
 use serde::Deserialize;
 
@@ -258,6 +258,50 @@ impl From<&MapConfig> for VoxelMapOptions {
     }
 }
 
+/// 静态先验面配置（P11.2：LIOP 式紧耦合先验批次）。
+///
+/// 开启后 `process_frame` 在深度更新（步骤 3）与视觉更新（步骤 4）之间
+/// 插入先验面更新批次；先验面世界系固定、不随在线地图漂移，是自举图
+/// 的绝对锚（`docs/void-motion-drift.md`）。
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct PriorConfig {
+    /// 先验面批次开关（默认关闭：不改动原行为；开启且文件缺失即报错）。
+    pub enable: bool,
+    /// 先验平面图文件路径（`PriorPlaneMap` 文本格式，见 map crate）。
+    pub map_path: String,
+    pub sigma_num: f64,
+    pub radius_k: f64,
+    /// 先验平面 `Σ_nq` 放大系数（各向同性；诚实给大 σ 防拉偏在线估计）。
+    pub var_scale: f64,
+    /// 先验测量批次最大点数（均匀保留；控制 ESIKF 批次预算）。
+    pub max_points: usize,
+}
+
+impl Default for PriorConfig {
+    fn default() -> Self {
+        let o = PriorOptions::default();
+        Self {
+            enable: false,
+            map_path: String::new(),
+            sigma_num: o.sigma_num,
+            radius_k: o.radius_k,
+            var_scale: 1.0,
+            max_points: 1500,
+        }
+    }
+}
+
+impl From<&PriorConfig> for PriorOptions {
+    fn from(c: &PriorConfig) -> Self {
+        Self {
+            sigma_num: c.sigma_num,
+            radius_k: c.radius_k,
+            var_scale: c.var_scale,
+        }
+    }
+}
+
 /// `configs/void.toml` 顶层。
 #[derive(Debug, Deserialize)]
 #[serde(default)]
@@ -271,6 +315,7 @@ pub struct VoidOptions {
     pub depth: DepthConfig,
     pub visual: VisualConfig,
     pub map: MapConfig,
+    pub prior: PriorConfig,
     /// 深度相机 → 虚拟 IMU 系旋转（行主序 3×3，缺省 [`default_depth_ext`]）。
     pub depth_ext_rot: [[f64; 3]; 3],
     /// 真实机体 → 虚拟 IMU 系旋转 `R_bv`（行主序 3×3，缺省 [`default_body_ext`]）。
@@ -286,6 +331,7 @@ impl Default for VoidOptions {
             depth: DepthConfig::default(),
             visual: VisualConfig::default(),
             map: MapConfig::default(),
+            prior: PriorConfig::default(),
             depth_ext_rot: default_depth_ext(),
             body_ext_rot: default_body_ext(),
         }

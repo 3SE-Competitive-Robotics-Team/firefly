@@ -15,12 +15,15 @@
 pub mod noise;
 pub mod options;
 pub mod outlier;
+pub mod planar;
 pub mod plane_update;
+pub mod prior_update;
 pub mod relocalize;
 pub mod visual_update;
 
 pub use noise::DepthNoise;
-pub use options::{DepthOptions, RelocalizeOptions, VisualOptions};
+pub use options::{DepthOptions, PriorOptions, RelocalizeOptions, VisualOptions};
 pub use plane_update::{DepthMeasurement, point_plane_residual};
+pub use prior_update::{PriorDiag, PriorPlaneMeasurement};
 pub use relocalize::relocalize_guess;
 pub use visual_update::VisualMeasurement;

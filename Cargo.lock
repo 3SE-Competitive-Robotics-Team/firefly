@@ -628,6 +628,7 @@ name = "firefly-void-map"
 version = "0.1.0"
 dependencies = [
  "fastrace",
+ "firefly-error",
  "firefly-void-types",
  "log",
  "nalgebra",

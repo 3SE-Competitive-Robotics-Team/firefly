@@ -14,11 +14,13 @@ pub mod normal_refine;
 pub mod octree;
 pub mod options;
 pub mod plane;
+pub mod prior_map;
 pub mod raycast;
 pub mod visual_point;
 pub mod voxel;
 
 pub use options::{PlaneOptions, VoxelMapOptions};
 pub use plane::{VoxelPlane, fit_plane};
+pub use prior_map::PriorPlaneMap;
 pub use visual_point::{PatchObservation, VisualPoint, VisualPointView};
 pub use voxel::{VoxelKey, VoxelMap};
