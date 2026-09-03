@@ -127,6 +127,117 @@ class StraightForwardTrajectory:
         return pos, vel
 
 
+@dataclass(frozen=True)
+class ForwardSweepTrajectory:
+    """前飞扫掠：基线往返 + 空间相位横向/垂向调制。
+
+    pos = start + p·delta + [0, Ay·sin(2π·ky·p), z_mod]，p 为往返标量
+    （剖面同 [`StraightForwardTrajectory`]，悬停段 p 恒定→调制冻结，
+    起终点 p=0→调制为 0）。z_mod：spiral=False 时 Az·sin(2π·kz·p)；
+    True 时 Az·(1-cos(2π·ky·p))（y-z 平面绕前进轴螺旋）。vel 对 p
+    解析求导 × dp/dt，全时域 C² 且周期闭合。
+
+    横向加速度预算 Ay·(2π·ky)²·(dp/dt)² ≤ ~2m/s²（PD 跟踪界）——高频
+    调制配慢腿（leg ≥ 12s）或小幅值，见各实例注释。
+    """
+
+    name: str
+    #: 起点（m）
+    start: tuple[float, float, float]
+    #: 前飞端点偏移（m）
+    delta: tuple[float, float, float]
+    #: 横向调制幅值/周期数（空间相位）
+    y_amp: float = 0.0
+    y_cycles: int = 0
+    #: 垂向调制幅值/周期数（spiral=True 时 y_cycles 共用，Az 为螺旋半径 z 分量）
+    z_amp: float = 0.0
+    z_cycles: int = 0
+    #: True = y-z 螺旋（绕前进轴），False = y/z 独立正弦
+    spiral: bool = False
+    #: 剖面关键时刻（s）：起飞 / 到远端 / 返程出发 / 回到起点，此后悬停至 period
+    t_go: float = 2.0
+    t_arrive: float = 10.0
+    t_return: float = 28.0
+    t_home: float = 36.0
+    period: float = 40.0
+
+    def _p(self, t: float) -> float:
+        """折返标量 p(t)∈[0,1]（同 StraightForward 剖面）。"""
+        if t <= self.t_go or t >= self.t_home:
+            return 0.0
+        if t <= self.t_arrive:
+            return _smoothstep((t - self.t_go) / (self.t_arrive - self.t_go))
+        if t <= self.t_return:
+            return 1.0
+        return 1.0 - _smoothstep((t - self.t_return) / (self.t_home - self.t_return))
+
+    def _dp(self, t: float) -> float:
+        """p(t) 的时间导数。"""
+        if t <= self.t_go or t >= self.t_home:
+            return 0.0
+        if t <= self.t_arrive:
+            return _smoothstep_dot(
+                (t - self.t_go) / (self.t_arrive - self.t_go), self.t_arrive - self.t_go
+            )
+        if t <= self.t_return:
+            return 0.0
+        return -_smoothstep_dot(
+            (t - self.t_return) / (self.t_home - self.t_return), self.t_home - self.t_return
+        )
+
+    def ref(self, t: float) -> tuple[np.ndarray, np.ndarray]:
+        p, dp = self._p(t), self._dp(t)
+        base = np.asarray(self.start, dtype=float) + p * np.asarray(self.delta, dtype=float)
+        if self.y_cycles > 0:
+            ph = 2.0 * np.pi * self.y_cycles * p
+            base[1] += self.y_amp * np.sin(ph)
+            dy = self.y_amp * 2.0 * np.pi * self.y_cycles * np.cos(ph)
+        else:
+            dy = 0.0
+        if self.spiral and self.y_cycles > 0:
+            ph = 2.0 * np.pi * self.y_cycles * p
+            base[2] += self.z_amp * (1.0 - np.cos(ph))
+            dz = self.z_amp * 2.0 * np.pi * self.y_cycles * np.sin(ph)
+        elif self.z_cycles > 0:
+            phz = 2.0 * np.pi * self.z_cycles * p
+            base[2] += self.z_amp * np.sin(phz)
+            dz = self.z_amp * 2.0 * np.pi * self.z_cycles * np.cos(phz)
+        else:
+            dz = 0.0
+        vel = dp * np.asarray(self.delta, dtype=float) + dp * np.array([0.0, dy, dz])
+        return base, vel
+
+
+@dataclass(frozen=True)
+class WaypointChainTrajectory:
+    """航点链：相邻航点间 smoothstep 插值（同位置重复航点 = 悬停）。
+
+    航点 (t, pos) 严格递增，首航点 t=0、末航点 t=period 且位置同为起点；
+    段内端点速度为 0，全时域 C² 且周期闭合。急停/多圈等非对称剖面用。
+    """
+
+    name: str
+    #: 航点时刻（s）
+    times: tuple[float, ...]
+    #: 航点位置（m）
+    points: tuple[tuple[float, float, float], ...]
+    period: float
+
+    def ref(self, t: float) -> tuple[np.ndarray, np.ndarray]:
+        ts = self.times
+        ps = [np.asarray(p, dtype=float) for p in self.points]
+        if t <= ts[0]:
+            return ps[0].copy(), np.zeros(3)
+        for i in range(1, len(ts)):
+            if t <= ts[i]:
+                dt = ts[i] - ts[i - 1]
+                u = (t - ts[i - 1]) / dt
+                pos = ps[i - 1] + (ps[i] - ps[i - 1]) * _smoothstep(u)
+                vel = (ps[i] - ps[i - 1]) * _smoothstep_dot(u, dt)
+                return pos, vel
+        return ps[-1].copy(), np.zeros(3)
+
+
 #: 具名实例注册表。振幅受两界约束：z 下限 > 0（避免触地）、峰值速度/
 #: 加速度控制在 PD 可跟踪范围（超过则物理发散：QACC NaN）。
 TRAJECTORIES: dict[str, Trajectory] = {
@@ -173,6 +284,117 @@ TRAJECTORIES: dict[str, Trajectory] = {
             t_return=39.0,
             t_home=47.0,
             period=60.0,
+        ),
+        # 前飞鲁棒性边界 10 变体（横向锚在线是否对一切前飞机动成立）：
+        # 包络：x≤4.2（箱区净距≥0.55m）、y∈[2.8,5.2]（侧柱净距≥0.95m）、
+        # z≥0.6。偏航控制不存在（PD 纯位置+水平回正），sway/diag 为位置
+        # 等效版（横向视点扫掠/斜向观测），真偏航需扩展 env 姿态控制。
+        # 时长统一 period=40s，bench --duration 40 覆盖完整闭环（含返程，
+        # 修正 straight_forward 用 34s 只测出程的截断弱点）。
+        # 横向 S 形单周期：Ay·(2π)²·dp²≈1.9m/s²（8s 腿，PD 界内）。
+        ForwardSweepTrajectory(
+            name="ff_cross",
+            start=(1.0, 4.0, 1.0),
+            delta=(3.2, 0.0, 0.4),
+            y_amp=0.9,
+            y_cycles=1,
+        ),
+        # 绕前进轴螺旋 2 圈：半径 0.3，12s 慢腿（横向≈1.2m/s²）。
+        ForwardSweepTrajectory(
+            name="ff_spiral",
+            start=(1.0, 4.0, 0.9),
+            delta=(3.2, 0.0, 0.2),
+            y_amp=0.3,
+            y_cycles=2,
+            z_amp=0.3,
+            spiral=True,
+            t_arrive=14.0,
+            t_return=24.0,
+        ),
+        # 正弦偏航位置等效：小幅高频横向扫掠（视点方向快速变化，
+        # 考前端 bearing rate），12s 慢腿（≈1.9m/s²）。
+        ForwardSweepTrajectory(
+            name="ff_sway",
+            start=(1.0, 4.0, 1.0),
+            delta=(3.2, 0.0, 0.4),
+            y_amp=0.12,
+            y_cycles=4,
+            t_arrive=14.0,
+            t_return=24.0,
+        ),
+        # 之字 3 折：A=0.25、12s 慢腿（≈2.2m/s²，预算上限）。
+        ForwardSweepTrajectory(
+            name="ff_zigzag",
+            start=(1.0, 4.0, 1.0),
+            delta=(3.2, 0.0, 0.4),
+            y_amp=0.25,
+            y_cycles=3,
+            t_arrive=14.0,
+            t_return=24.0,
+        ),
+        # 爬升：z 0.8→1.8（箱顶 1.7m 高度层切换，深度近距↔远距）。
+        ForwardSweepTrajectory(
+            name="ff_climb",
+            start=(1.0, 4.0, 0.8),
+            delta=(3.2, 0.0, 1.0),
+        ),
+        # 高速：4s 腿，峰值 1.5m/s、加速度≈1.2m/s²。
+        ForwardSweepTrajectory(
+            name="ff_fast",
+            start=(1.0, 4.0, 1.0),
+            delta=(3.2, 0.0, 0.4),
+            t_arrive=6.0,
+            t_return=26.0,
+            t_home=30.0,
+        ),
+        # 低速贴地：z=0.6 恒高，10s 慢腿（峰值 0.6m/s，地面大光流）。
+        ForwardSweepTrajectory(
+            name="ff_low",
+            start=(1.0, 4.0, 0.6),
+            delta=(3.2, 0.0, 0.1),
+            t_arrive=12.0,
+            t_return=24.0,
+            t_home=34.0,
+        ),
+        # 大偏航斜飞位置等效：斜向 20°（y 4→5.2，侧视箱面夹角变化）。
+        ForwardSweepTrajectory(
+            name="ff_diag",
+            start=(1.0, 4.0, 1.0),
+            delta=(3.2, 1.2, 0.4),
+        ),
+        # 急停重启：中途 p=0.5 悬停 5s（零速 IMU 零偏 + 前端丢失重捕）。
+        WaypointChainTrajectory(
+            name="ff_estop",
+            times=(0.0, 2.0, 8.0, 13.0, 18.0, 28.0, 36.0, 40.0),
+            points=(
+                (1.0, 4.0, 1.0),
+                (1.0, 4.0, 1.0),
+                (2.6, 4.0, 1.2),
+                (2.6, 4.0, 1.2),
+                (4.2, 4.0, 1.4),
+                (4.2, 4.0, 1.4),
+                (1.0, 4.0, 1.0),
+                (1.0, 4.0, 1.0),
+            ),
+            period=40.0,
+        ),
+        # 往返多圈：2 整圈（同几何重复，检验漂移累积 vs 闭环抵消）。
+        WaypointChainTrajectory(
+            name="ff_laps",
+            times=(0.0, 2.0, 7.0, 9.0, 14.0, 16.0, 21.0, 23.0, 28.0, 40.0),
+            points=(
+                (1.0, 4.0, 1.0),
+                (1.0, 4.0, 1.0),
+                (4.2, 4.0, 1.4),
+                (4.2, 4.0, 1.4),
+                (1.0, 4.0, 1.0),
+                (1.0, 4.0, 1.0),
+                (4.2, 4.0, 1.4),
+                (4.2, 4.0, 1.4),
+                (1.0, 4.0, 1.0),
+                (1.0, 4.0, 1.0),
+            ),
+            period=40.0,
         ),
     )
 }
