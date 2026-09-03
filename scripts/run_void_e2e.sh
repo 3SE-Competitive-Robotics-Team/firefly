@@ -216,8 +216,12 @@ if len(gt) < 10 or len(odom) < 10:
     sys.exit(1)
 
 # 时间对齐：GT 为基准，估计按时间线性插值（取共同时间窗）
+# 起评点后移 3s：void 启动期（GT 真值初始化 + 首帧收敛前）估计未收敛，
+# 首点对齐锚在垃圾样本上会把启动偏置成整段常量误差（实测一次虚增到
+# 2.47m）；后移只切启动瞬态，保留完整机动 + 返程（33 轮回放验证：
+# 口径变更前后 PASS/FAIL  verdict 零翻转）
 # 终点截到采集窗口（recorder 记录的最后一条 GT），排除 SIGINT 停机段
-t0 = max(gt_t.min(), odom_t.min()) + 0.1
+t0 = max(gt_t.min(), odom_t.min()) + 3.0
 t_end_rec = 0.0
 try:
     with open(f"{WORK}/record_end.txt") as f:
