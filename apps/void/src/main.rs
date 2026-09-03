@@ -190,10 +190,11 @@ fn run_loop(
     let mut odom_count = 0u64;
     let mut depth_ok_frames = 0u64;
     let mut visual_ok_frames = 0u64;
-    // 先验批次诊断累计（P11.2；kept>0 帧数 + 残差均值累计）
+    // 先验批次诊断累计（P11.2；kept>0 帧数 + 残差均值/σ² 均值累计）
     let mut prior_active_frames = 0u64;
     let mut prior_kept_sum = 0u64;
     let mut prior_resid_sum = 0.0f64;
+    let mut prior_sigma_sum = 0.0f64;
     let mut est_prev: Option<[f64; 3]> = None;
     let t_wall_start = std::time::Instant::now();
     let mut next_diag_wall = DIAG_PERIOD;
@@ -296,6 +297,7 @@ fn run_loop(
                         prior_active_frames += 1;
                         prior_kept_sum += out.prior_inliers as u64;
                         prior_resid_sum += out.prior_residual_mean;
+                        prior_sigma_sum += out.prior_sigma_mean;
                     }
                     log::debug!(
                         "frame t={:.2} inliers={} prior_kept={} prior_resid={:.4} depth_it={} visual_it={} conv=[{} {}]",
@@ -334,20 +336,21 @@ fn run_loop(
             let bg = s.bias_g;
             let ba = s.bias_a;
             let rate = if wall_s > 0.0 { t_sim / wall_s } else { 0.0 };
-            // 先验批次平均 kept/残差（kept 才是物理有效指标，见
+            // 先验批次平均 kept/残差/σ²（kept 才是物理有效指标，见
             // docs/void-motion-drift.md：depth_ok 是误导性指标）
-            let (prior_avg_kept, prior_avg_resid) = if prior_active_frames > 0 {
+            let (prior_avg_kept, prior_avg_resid, prior_avg_sigma) = if prior_active_frames > 0 {
                 (
                     prior_kept_sum as f64 / prior_active_frames as f64,
                     prior_resid_sum / prior_active_frames as f64,
+                    prior_sigma_sum / prior_active_frames as f64,
                 )
             } else {
-                (0.0, 0.0)
+                (0.0, 0.0, 0.0)
             };
             log::info!(
                 "[perf-diag] wall={wall_s:.1}s sim={t_sim:.2} wakes={wake_count} frames={frame_count} \
                  depth_ok={depth_ok_frames} visual_ok={visual_ok_frames} odom={odom_count} \
-                 prior_kept_avg={prior_avg_kept:.0} prior_resid_avg={prior_avg_resid:.4} \
+                 prior_kept_avg={prior_avg_kept:.0} prior_resid_avg={prior_avg_resid:.4} prior_sigma_avg={prior_avg_sigma:.5} \
                  pos=({:.3},{:.3},{:.3}) tau={tau:.3} bg=({:.4},{:.4},{:.4}) ba=({:.3},{:.3},{:.3}) \
                  sim_rate={rate:.2}x",
                 p.x,

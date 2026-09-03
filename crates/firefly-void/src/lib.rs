@@ -72,6 +72,9 @@ pub struct OdometryOutput {
     pub prior_iterations: usize,
     /// 先验面批次有效点残差绝对均值（m；探针，see `docs/void-motion-drift.md`）。
     pub prior_residual_mean: f64,
+    /// 先验面批次有效行噪声方差 `σ²` 均值（m²；探针，R 对角平均——
+    /// 与 [`prior_residual_mean`] 对比判断先验权重是否压得过低）。
+    pub prior_sigma_mean: f64,
     /// 地图视觉点数（viz 采样用）。
     pub map_visual_points: usize,
     /// 各阶段耗时（秒）。
@@ -149,6 +152,11 @@ impl VoidOdometry {
         // 仿真固定曝光：禁用 τ 估计（τ 恒 1；随机游走实测会把位置拉偏）
         if !options.estimate_exposure {
             esikf.disable_exposure_est();
+        }
+        // 零偏估计开关（实验对照：ba 吸收测量偏差的验证，见
+        // `configs/void.toml` 的 estimate_bias 注释）
+        if !options.estimate_bias {
+            esikf.disable_bias_est();
         }
         let map = VoxelMap::new((&options.map).into());
         // 先验面装载（P11.2）：enable 且文件存在才启用；文件缺失/解析失败
@@ -493,7 +501,7 @@ impl Odometry for VoidOdometry {
         // 状态拦截；对照参考实现 `Estimate()` 每帧持续执行先验匹配
         // （map_location.cpp:1043）。
         let t_prior = std::time::Instant::now();
-        let (prior_inliers, prior_iterations, prior_residual_mean) = {
+        let (prior_inliers, prior_iterations, prior_residual_mean, prior_sigma_mean) = {
             if let Some(prior_map) = &self.prior_map {
                 let model = PriorPlaneMeasurement::new(
                     prior_map,
@@ -506,15 +514,16 @@ impl Odometry for VoidOdometry {
                 let inliers = model.effective_count(&self.state);
                 let d = model.last_diag();
                 log::debug!(
-                    "prior-diag t={frame_t:.2} total={} no_plane={} chi2={} kept={} resid_mean={:.4}",
+                    "prior-diag t={frame_t:.2} total={} no_plane={} chi2={} kept={} resid_mean={:.4} sigma_mean={:.5}",
                     d.total,
                     d.no_plane,
                     d.chi2_rejected,
                     d.kept,
-                    d.residual_mean
+                    d.residual_mean,
+                    d.sigma_mean
                 );
                 if inliers == 0 {
-                    (0usize, 0usize, d.residual_mean)
+                    (0usize, 0usize, d.residual_mean, d.sigma_mean)
                 } else {
                     // 单批 ESIKF 更新（与深度批次同收敛判据）；update 前
                     // 的残差均值 d.residual_mean 作为漂移信号探针（先验面
@@ -526,10 +535,10 @@ impl Odometry for VoidOdometry {
                     log::debug!(
                         "prior-iter t={frame_t:.2} inliers={inliers} iterations={iterations}",
                     );
-                    (inliers, iterations, d.residual_mean)
+                    (inliers, iterations, d.residual_mean, d.sigma_mean)
                 }
             } else {
-                (0usize, 0usize, 0.0)
+                (0usize, 0usize, 0.0, 0.0)
             }
         };
         let prior_update = t_prior.elapsed().as_secs_f64();
@@ -651,6 +660,7 @@ impl Odometry for VoidOdometry {
             prior_inliers,
             prior_iterations,
             prior_residual_mean,
+            prior_sigma_mean,
             map_visual_points: map_vpts,
             timings: FrameTimings {
                 propagate,

@@ -274,8 +274,6 @@ pub struct PriorConfig {
     pub radius_k: f64,
     /// 先验平面 `Σ_nq` 放大系数（各向同性；诚实给大 σ 防拉偏在线估计）。
     pub var_scale: f64,
-    /// 先验测量批次最大点数（均匀保留；控制 ESIKF 批次预算）。
-    pub max_points: usize,
 }
 
 impl Default for PriorConfig {
@@ -287,7 +285,6 @@ impl Default for PriorConfig {
             sigma_num: o.sigma_num,
             radius_k: o.radius_k,
             var_scale: 1.0,
-            max_points: 1500,
         }
     }
 }
@@ -311,6 +308,12 @@ pub struct VoidOptions {
     /// 曝光时间估计开关（仿真固定曝光：关闭则 τ 恒 1，视觉残差
     /// `I_k − I_r` 无曝光自由度——实测 τ 随机游走会把位置拉偏）。
     pub estimate_exposure: bool,
+    /// 零偏估计开关（对照 `Propagator::disable_bias_est`：关闭则 `F_x`
+    /// 不置 `b_g`/`b_a` 耦合块，`b_a`/`b_g` 恒 0）。P12 实验对照：
+    /// sim 无真实偏置，机动加速度会经重力方向耦合激励 `b_a`，对照
+    /// 检查零偏是否吸收测量偏差（实测关掉后 4m+ 离群不消失——
+    /// `b_a` 漂移非离群主因，见 `logs/p12_review`）。
+    pub estimate_bias: bool,
     pub imu: PropagationNoiseConfig,
     pub depth: DepthConfig,
     pub visual: VisualConfig,
@@ -327,6 +330,7 @@ impl Default for VoidOptions {
         Self {
             t0: [1.0, 4.0, 1.0],
             estimate_exposure: false,
+            estimate_bias: true,
             imu: PropagationNoiseConfig::default(),
             depth: DepthConfig::default(),
             visual: VisualConfig::default(),

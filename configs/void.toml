@@ -6,6 +6,12 @@ t0 = [1.0, 4.0, 1.0]
 # 曝光时间估计：仿真固定曝光，关闭（τ 恒 1；随机游走会把位置拉偏）
 estimate_exposure = false
 
+# 零偏估计：ba/bg 是否进 ESIKF 估计（P12 review 实验对照开关）。
+# sim 无真实偏置；false = 传播 F_x 不置 bias 耦合块（官方 disable_bias_est），
+# ba/bg 恒 0。实测（logs/p12_review）：关掉后 4m+ 离群不消失——ba 漂移
+# 非离群主因，默认保持 true（与官方估计器行为一致）。
+estimate_bias = true
+
 # 外参（MuJoCo 场景标定，见 scene.py + firefly-map::DepthCamera）
 # 深度相机(OpenGL 系) → 虚拟针孔 IMU 系旋转（深度像素与左目针孔逐点重合：
 # 同刚体同 xyaxes 下倾 20°，仅 y/z 轴翻转）
