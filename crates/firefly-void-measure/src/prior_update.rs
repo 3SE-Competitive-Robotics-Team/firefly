@@ -44,6 +44,10 @@ pub struct PriorDiag {
     /// 意义，`depth_ok`/`converged` 是误导性指标，见
     /// `docs/void-motion-drift.md`）。
     pub residual_mean: f64,
+    /// 有效点噪声方差 `σ²` 均值（m²；`kept` 有效行 R 对角的算术平均——
+    /// 门控/`var_scale` 调参的实据：σ² 远大于残差量级说明平面噪声给大，
+    /// 更新增益被压得过低）。
+    pub sigma_mean: f64,
 }
 
 /// 先验平面点-面测量模型。
@@ -163,14 +167,14 @@ impl<'a> PriorPlaneMeasurement<'a> {
         }
 
         diag.kept = residuals.iter().filter(|r| r.is_some()).count();
-        // 残差均值（有效行；kept=0 时为 0）
-        let mean: f64 = residuals
-            .iter()
-            .filter_map(|r| r.as_ref())
-            .map(|(_, _, dis, _)| dis.abs())
-            .sum::<f64>()
-            / diag.kept.max(1) as f64;
-        diag.residual_mean = mean;
+        // 残差均值与有效行 σ² 均值（kept=0 时为 0；σ² 直接取自 R 对角
+        // 值——有效行噪声方差，门控/var_scale 调参实据）
+        let kept: Vec<&(Vector3<f64>, Vector3<f64>, f64, f64)> =
+            residuals.iter().filter_map(|r| r.as_ref()).collect();
+        diag.residual_mean =
+            kept.iter().map(|(_, _, dis, _)| dis.abs()).sum::<f64>() / diag.kept.max(1) as f64;
+        diag.sigma_mean =
+            kept.iter().map(|(_, _, _, sig)| sig).sum::<f64>() / diag.kept.max(1) as f64;
         self.last_diag.set(diag);
 
         let mut zs = Vec::with_capacity(self.points_l.len());
@@ -190,6 +194,9 @@ impl<'a> PriorPlaneMeasurement<'a> {
         let z_vec = DVector::from_iterator(n_rows, zs);
         let mut h_mat = DMatrix::zeros(n_rows, DIM_STATE);
         let r_mat = DMatrix::from_diagonal(&DVector::from_iterator(n_rows, rs));
+        // `DMatrix::zeros` 每行恒为零向量（零信息行模板，供下方有效行拷贝
+        // 后写非零块）。保持取行 0 作模板——该行在有效行循环里总是被
+        // 覆盖；勿改成动态取有效行，行模板必须与 H 行结构一致。
         let zero_info_row = h_mat.row_mut(0).clone_owned(); // 零行
         for (i, res) in residuals.iter().enumerate() {
             let Some((p_b, n, _, _)) = res else { continue };
@@ -485,5 +492,12 @@ mod tests {
         assert_eq!(d.no_plane, 0);
         assert_eq!(d.chi2_rejected, 0);
         assert!(d.residual_mean < 1e-6);
+        // σ² = J_nq·Σ_nq·J_nqᵀ + nᵀ·Σ_pj·n + 0.001 ≈ 0.001（点贴面、
+        // 平面 Σ_nq 极小）；残差/σ 比值应远小于门控（1e-3 / 3e-2 量级）
+        assert!(
+            (d.sigma_mean - 0.001).abs() < 1e-3,
+            "贴面点 σ² ≈ 0.001：{}",
+            d.sigma_mean
+        );
     }
 }

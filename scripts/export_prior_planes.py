@@ -5,19 +5,28 @@
 先验地图是 LIO-SAM 离线建的全局点云 kdtree；本脚本从仿真场景的**解析几何**
 （最精确口径）导出等价先验：每个 box geom 的可见外露面 = 一个平面。
 
+法向朝向约定（review H-3）：**法向必须朝外/朝相机侧**。点面残差带符号
+`dis = n·(p_w − q)`，法向反了会镜像残差符号——对固定先验面，符号错会导致
+ESIKF 沿错误方向拉状态。导出时统一保证法向朝外（box 面朝箱外），剔除背面。
+
 坐标：scene.py 的 geom 都在 worldbody（MuJoCo 世界系）；VOID 状态 pos/rot
 与深度点 `p_w = R·p_l + p` 同在世界系 → 平面坐标直接可用，无需外参对齐。
+
+可见性粗筛（P12 review）：相机装在无人机上、前向 +x 且下倾 20°，在轨迹区
+（李萨如 x∈[-2,4]、y∈[3,5]、z∈[0.5,1.5]）活动，看向前方箱区。因此：
+- **+x 背面**（法向朝 +x 的外露面，如箱区后侧面）与相机视线相反，深度
+  点永远投影不到——常态零命中，但大漂移时（>0.5m）点可能被投到背墙、
+  产生把状态往错误方向拉的伪约束，剔除；
+- **-z 底面**与地面（z=0 大平面）共面冗余，深度相机看不到底面，剔除；
+- 保留：地面、±y 侧面（相机侧向可见）、-x 前侧面、+z 顶面（相机下倾
+  20° 能看到部分顶面）。顶面法向朝上不违反"朝相机侧"约定——匹配由
+  点到面几何距离驱动，顶面在点上方时法向向上正是朝点/相机一侧。
 
 输出格式（`PriorPlaneMap::parse_text` 兼容）：
 `cx cy cz nx ny nz d var_scale radius npts`
 - var_scale：Σ_nq ≈ var_scale·I₆（各向同性近似）；解析几何给 1e-6（m²，
   法向/中心不确定度远小于在线拟合——但 configs/void.toml `var_scale` 可放大）
 - radius：面内接半径 = 面半高宽的对角一半（保守取 √(h²+w²)/2，覆盖整个面）
-- 分组去重：5×5 箱体阶梯中，被上层遮挡的下层顶面/被相邻箱遮挡的侧面会
-  被深度相机看到吗？——相机在箱区 x≥5 之外（轨迹 x≤4），只能看到朝 −x 面
-  与顶面（下倾 20° 看得到部分顶面）。但仍导出全部外露面：匹配有径向判据
-  + 卡方门控，被遮挡的背面点本来就不会投影到它（点在真实表面，匹配到
-  几何上最近的可视面），冗余面不产生错误约束。
 
 用法：uv run python scripts/export_prior_planes.py [--out configs/prior/void_scene.planes]
 """
@@ -50,13 +59,23 @@ def parse_box_geoms(xml: str) -> list[tuple[float, float, float, float, float, f
 
 
 def box_faces(center: np.ndarray, half: np.ndarray) -> list[dict]:
-    """box 六个外露面（世界系）。每面: center(面心), normal(朝外), radius。"""
+    """box 六个外露面（世界系）。每面: center(面心), normal(朝外), radius。
+
+    返回前做可见性粗筛（见模块 docstring）：
+    - **-z 底面**对任何 box 都剔除（相机前向 +x 下倾 20°，看不到任何底面）；
+    - **+x 面**仅对**轨迹前方**的 box（中心 x > 4，如箱区/中线柱）剔除——
+      相机从 x<4 朝 +x 看，那是永远不可见的后侧面；侧柱（x≤4，轨迹侧翼）
+      的 +x 面是朝相机的可见前脸，必须保留。
+    """
     faces = []
     # 六面：±x, ±y, ±z；面心 = center ± 法向·半宽，面内尺寸取另两半宽
     for axis in range(3):
         for sign in (+1.0, -1.0):
             normal = np.zeros(3)
             normal[axis] = sign
+            # 底面（-z）恒剔除；前方箱体（center_x > 4）的 +x 背面剔除
+            if normal[2] < 0.0 or (normal[0] > 0.0 and center[0] > 4.0):
+                continue
             face_center = center + normal * half[axis]
             # 面内两轴的半宽 → 面内接圆半径（保守：半对角）
             other = [i for i in range(3) if i != axis]
@@ -90,7 +109,7 @@ def main() -> None:
             "radius": 20.0,
         }
     )
-    # box geom（中线立柱 + 侧柱 + 前方箱子）
+    # box geom（中线立柱 + 侧柱 + 前方箱子）；box_faces 已做背面粗筛
     for center, half in parse_box_geoms(SCENE_XML):
         planes.extend(box_faces(center, half))
 
