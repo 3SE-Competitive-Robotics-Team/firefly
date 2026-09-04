@@ -29,7 +29,7 @@ from firefly_mujoco import (
 )
 
 from . import trace as ftrace
-from .trajectories import Trajectory, get_trajectory
+from .trajectories import Trajectory, get_trajectory, trajectory_yaw
 
 #: 话题名（与 Rust `firefly-pubsub` 常量一致）
 TOPIC_IMU = "Firefly/Imu"
@@ -114,7 +114,7 @@ def main() -> None:
     # 省略 NAME 时用 lissajous_classic（历史基线曲线）
     # --no-trace：禁用 OTel tracing（消除 Python span 开销，sim 从 0.37x → 14x real-time）
     script_mode = "--script" in sys.argv
-    trajectory_name = "lissajous_classic"
+    trajectory_name = "outback_base"
     if script_mode:
         idx = sys.argv.index("--script")
         if idx + 1 < len(sys.argv) and not sys.argv[idx + 1].startswith("-"):
@@ -126,7 +126,7 @@ def main() -> None:
     physics_period = 1.0 / rates.get("physics", 200.0)
     imu_period = 1.0 / rates.get("imu", 100.0)
     cam_period = 1.0 / rates.get("cam", 10.0)
-    start_pos = np.array(cfg.get("start", [1.0, 4.0, 1.0]))
+    start_pos = np.array(cfg.get("start", [1.0, 10.0, 1.0]))
     env = DroneEnv()
     env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))  # xyzw 单位四元数
     ftrace.init(enabled=trace_enabled)
@@ -150,9 +150,11 @@ def main() -> None:
     cam_notify = _notifier(node, TOPIC_CAM_PAIR)
     log("iceoryx2 已就绪：发布 IMU/双目/深度/真值（带事件唤醒），订阅参考")
 
-    # 参考状态（demo 未发布时悬停在起点）
+    # 参考状态（demo 未发布时悬停在起点，面朝 +x）
     ref_pos = start_pos
     ref_vel = np.zeros(3)
+    ref_yaw = 0.0
+    ref_yaw_rate = 0.0
     got_ref = False
 
     cycle = None
@@ -175,10 +177,11 @@ def main() -> None:
 
             # 控制 + 物理步进
             if script_mode:
-                # 脚本化参考：按仿真时刻给出平滑 pos/vel；实例满足周期连续
+                # 脚本化参考：按仿真时刻给出平滑 pos/vel/yaw；实例满足周期连续
                 # 不变量（见 trajectories.py），长跑直接用连续时间即可
                 ref_pos, ref_vel = trajectory.ref(env.time)
-            env.apply_pd(ref_pos, ref_vel)
+                ref_yaw, ref_yaw_rate = trajectory_yaw(trajectory, env.time)
+            env.apply_pd(ref_pos, ref_vel, ref_yaw, ref_yaw_rate)
             env.step()
             # 失稳守卫：MuJoCo 发散（QACC NaN/Inf）后状态永久污染且传感器
             # 全变 NaN，下游 VIO 会被毒化——检测到即重置到起点，长跑不挂。

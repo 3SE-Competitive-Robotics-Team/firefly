@@ -303,7 +303,7 @@ impl From<&PriorConfig> for PriorOptions {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct VoidOptions {
-    /// 初始位置（全局系，m；缺省与 `MuJoCo` 起点 `SIM_START=[1.0,4.0,1.0]` 一致）。
+    /// 初始位置（全局系，m；缺省与 `MuJoCo` 起点 `SIM_START=[1.0,10.0,1.0]` 一致）。
     pub t0: [f64; 3],
     /// 曝光时间估计开关（仿真固定曝光：关闭则 τ 恒 1，视觉残差
     /// `I_k − I_r` 无曝光自由度——实测 τ 随机游走会把位置拉偏）。
@@ -328,7 +328,7 @@ pub struct VoidOptions {
 impl Default for VoidOptions {
     fn default() -> Self {
         Self {
-            t0: [1.0, 4.0, 1.0],
+            t0: [1.0, 10.0, 1.0],
             estimate_exposure: false,
             estimate_bias: true,
             imu: PropagationNoiseConfig::default(),
@@ -391,7 +391,7 @@ mod tests {
         ))
         .expect("shipped configs/void.toml must parse");
         assert!((cfg.t0[0] - 1.0).abs() < 1e-12);
-        assert!((cfg.t0[1] - 4.0).abs() < 1e-12);
+        assert!((cfg.t0[1] - 10.0).abs() < 1e-12);
         assert!((cfg.t0[2] - 1.0).abs() < 1e-12);
         assert!((cfg.depth.downsample_voxel - 0.1).abs() < 1e-12);
         assert!((cfg.depth.max_range - 6.0).abs() < 1e-12);
