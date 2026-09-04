@@ -301,6 +301,9 @@ impl App {
             firefly_localization::filter::RelocGate::RejectedChi2 { chi2, threshold } => {
                 log::debug!("GICP chi2拒收 {chi2:.2}>{threshold:.2}");
             }
+            firefly_localization::filter::RelocGate::RejectedInnovation { trans, rot_deg } => {
+                log::debug!("GICP新息拒收 trans {trans:.2}m rot {rot_deg:.2}°（疑似别名误锁）");
+            }
             firefly_localization::filter::RelocGate::RejectedPrecheck { reason } => {
                 log::debug!("GICP预检拒收: {reason}");
             }

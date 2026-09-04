@@ -19,5 +19,7 @@ min_num_inliers = 30
 max_registration_error = 1000000000.0 # 最大配准残差和
 max_correction_trans = 0.5 # m，单次矫正限幅平移
 max_correction_rot = 0.08726646259971647 # rad，单次矫正限幅旋转（5°）
+max_innovation_trans = 0.3 # m，新息限幅（局部跟踪档：超限视为别名误锁拒收）
+max_innovation_rot = 0.08726646259971647 # rad，新息限幅旋转（5°）
 auto_scale_factor = 2.0 # 连续拒收后 R 放大倍数
 auto_scale_trigger = 3 # 触发放大的连续拒收次数
