@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # firefly-void 三进程 e2e 闭环验证：sim（MuJoCo 物理）→ void（DIVO 里程计）。
 #
-# 用法：scripts/run_void_e2e.sh [秒数] [--runs N] [--trajectory NAME]
+# 用法：scripts/run_void_e2e.sh [秒数] [--runs N] [--trajectory NAME] [--gicp-map PATH]
 #   [秒数]        每轮时长（缺省 60s）
 #   --runs N      重复 N 轮（缺省 1）：每轮独立起停 sim+void，轮间清理进程与
 #                 iceoryx2 残留；末尾输出逐轮 ATE 明细与 mean±std。
@@ -9,6 +9,9 @@
 #   --trajectory NAME  透传给 `firefly-sim --script NAME`（具名轨迹驱动运动，
 #                 跳过 planner；缺省不传 = 悬停闭环）。李萨如 bench 用
 #                 `--trajectory lissajous_classic`。
+#   --gicp-map PATH    联合测试：同步起 `gicp` 进程（`--map PATH --odom-topic
+#                 Firefly/VoidOdom`），recorder 多采 `Firefly/CorrectedOdometry`，
+#                 ATE 输出 void/corrected 双通道对照。
 #
 # 流程（每轮）：
 #   1. 清理残留（进程 + iceoryx2 shm/port_tag）
@@ -31,14 +34,17 @@ mkdir -p "$WORK"
 
 cd "$ROOT"
 
-# 参数：位置参数 = 秒数；--runs N = 轮数；--trajectory NAME = 轨迹脚本
+# 参数：位置参数 = 秒数；--runs N = 轮数；--trajectory NAME = 轨迹脚本；
+# --gicp-map PATH = 联合 gicp（空 = 不起）
 T=60
 RUNS=1
 TRAJECTORY=""
+GICP_MAP=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --runs) RUNS=${2:-1}; shift 2 ;;
     --trajectory) TRAJECTORY=${2:-}; shift 2 ;;
+    --gicp-map) GICP_MAP=${2:-}; shift 2 ;;
     *) T=$1; shift ;;
   esac
 done
@@ -48,6 +54,7 @@ done
 cleanup() {
   pkill -9 -f "firefly-sim --no-trace" 2>/dev/null
   pkill -9 -f "target/release/void" 2>/dev/null
+  pkill -9 -f "target/release/gicp" 2>/dev/null
   sleep 1
   rm -rf /tmp/iceoryx2/services /tmp/iceoryx2/nodes/private/tmp/iox2*.shm_state 2>/dev/null
 }
@@ -86,10 +93,18 @@ run_one_round() {
   nohup env RUST_LOG=info cargo run --release -p void > "$run_dir/void.log" 2>&1 &
   void_pid=$!
 
+  # 联合 gicp：等 void 出数（odom+depth 流动）再起，初值有人给
+  if [ -n "$GICP_MAP" ]; then
+    echo "[e2e][run $i] 启动 gicp（--map $GICP_MAP --odom-topic Firefly/VoidOdom）"
+    sleep 4
+    nohup env RUST_LOG=info cargo run --release -p gicp -- --map "$GICP_MAP" --odom-topic Firefly/VoidOdom > "$run_dir/gicp.log" 2>&1 &
+    gicp_pid=$!
+  fi
+
   # recorder：前台同步采集 T 秒（sim/void 在后台跑）
   echo "[e2e][run $i] 采集 ${T}s（recorder 前台，sim/void 后台）"
   uv run python - "$T" "$run_dir" <<'PY'
-"""订阅 Firefly/GroundTruth 与 Firefly/VoidOdom，记录轨迹到文件。"""
+"""订阅 Firefly/GroundTruth 与 Firefly/VoidOdom（+联合时的 CorrectedOdometry），记录轨迹到文件。"""
 import sys
 import time
 
@@ -104,6 +119,7 @@ WORK = sys.argv[2]
 #: 与 Rust apps/void::VOID_ODOM_TOPIC 一致（本地常量，不扩 pubsub）
 VOID_ODOM_TOPIC = "Firefly/VoidOdom"
 GT_TOPIC = "Firefly/GroundTruth"
+CORR_TOPIC = "Firefly/CorrectedOdometry"
 
 
 def subscriber(node, topic: str):
@@ -120,8 +136,10 @@ def main() -> None:
     node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
     gt_sub = subscriber(node, GT_TOPIC)
     odom_sub = subscriber(node, VOID_ODOM_TOPIC)
+    corr_sub = subscriber(node, CORR_TOPIC)
     gt: list[tuple[float, np.ndarray]] = []
     odom: list[tuple[float, np.ndarray]] = []
+    corr: list[tuple[float, np.ndarray]] = []
     t0 = time.perf_counter()
     while time.perf_counter() - t0 < T:
         while (s := gt_sub.receive()) is not None:
@@ -130,13 +148,18 @@ def main() -> None:
         while (s := odom_sub.receive()) is not None:
             m = s.payload().contents
             odom.append((m.timestamp, np.array([m.position_x, m.position_y, m.position_z])))
+        while (s := corr_sub.receive()) is not None:
+            m = s.payload().contents
+            corr.append((m.timestamp, np.array([m.position_x, m.position_y, m.position_z])))
         time.sleep(0.005)
-    print(f"[recorder] gt={len(gt)} odom={len(odom)} 样本")
+    print(f"[recorder] gt={len(gt)} odom={len(odom)} corr={len(corr)} 样本")
     # 按时间戳去重（保留最后一条）+ 排序
     gt_dict = {t: p for t, p in gt}
     odom_dict = {t: p for t, p in odom}
+    corr_dict = {t: p for t, p in corr}
     gt = sorted(gt_dict.items())
     odom = sorted(odom_dict.items())
+    corr = sorted(corr_dict.items())
     with open(f"{WORK}/gt.npy", "wb") as f:
         np.save(f, np.array([p for _, p in gt]))
     with open(f"{WORK}/gt_t.npy", "wb") as f:
@@ -145,6 +168,10 @@ def main() -> None:
         np.save(f, np.array([p for _, p in odom]))
     with open(f"{WORK}/odom_t.npy", "wb") as f:
         np.save(f, np.array([t for t, _ in odom]))
+    with open(f"{WORK}/corr.npy", "wb") as f:
+        np.save(f, np.array([p for _, p in corr]) if corr else np.zeros((0, 3)))
+    with open(f"{WORK}/corr_t.npy", "wb") as f:
+        np.save(f, np.array([t for t, _ in corr]) if corr else np.zeros((0,)))
     # 采集窗口终点：最后一条 GT 的时间戳（此后 sim 可能仍运行到被 SIGINT
     # 终止，但 recorder 已停止采集——ATE 只应覆盖采集窗口，避免停机段
     # 传感器中断造成的虚假误差进统计）
@@ -160,12 +187,14 @@ PY
   # 优雅终止（SIGINT → WaitSet / Python KeyboardInterrupt 捕获 → 端口 Drop）
   # 注意：SIM_PID 是 `uv run` 包装进程，SIGINT 不转发给 Python——用
   # pkill -f 匹配实际进程（void 的 WaitSet 捕获 SIGINT 优雅退出）
-  echo "[e2e][run $i] 停止 sim/void（SIGINT 优雅退出）"
+  echo "[e2e][run $i] 停止 sim/void/gicp（SIGINT 优雅退出）"
   pkill -INT -f "firefly-sim --no-trace" 2>/dev/null
   pkill -INT -f "target/release/void" 2>/dev/null
+  pkill -INT -f "target/release/gicp" 2>/dev/null
   for _ in $(seq 1 50); do
     if ! pgrep -f "firefly-sim --no-trace" >/dev/null 2>&1 \
-      && ! pgrep -f "target/release/void" >/dev/null 2>&1; then
+      && ! pgrep -f "target/release/void" >/dev/null 2>&1 \
+      && ! pgrep -f "target/release/gicp" >/dev/null 2>&1; then
       break
     fi
     sleep 0.2
@@ -173,19 +202,25 @@ PY
   # 兜底：仍未退出的（极慢帧处理）再给 3s
   for _ in $(seq 1 15); do
     if ! pgrep -f "firefly-sim --no-trace" >/dev/null 2>&1 \
-      && ! pgrep -f "target/release/void" >/dev/null 2>&1; then
+      && ! pgrep -f "target/release/void" >/dev/null 2>&1 \
+      && ! pgrep -f "target/release/gicp" >/dev/null 2>&1; then
       break
     fi
     sleep 0.2
   done
   pkill -9 -f "firefly-sim --no-trace" 2>/dev/null
   pkill -9 -f "target/release/void" 2>/dev/null
+  pkill -9 -f "target/release/gicp" 2>/dev/null
   # 等 iceoryx 端口释放（SIGINT 后 Drop 需短暂时间）
   sleep 1
 
   # void 日志健康检查
   echo "=== [run $i] void 日志尾部 ==="
   tail -8 "$run_dir/void.log"
+  if [ -n "$GICP_MAP" ]; then
+    echo "=== [run $i] gicp 日志尾部 ==="
+    tail -8 "$run_dir/gicp.log"
+  fi
   echo "=== [run $i] sim 日志尾部 ==="
   tail -5 "$run_dir/sim.log"
 
@@ -312,6 +347,56 @@ sys.exit(0 if ok else 2)
 PY
   ate_ec=$?
 
+  # 联合 gicp 时：corr 通道同口径（首点对齐）对照，追加进 ate_meta 同一行
+  # （前 4 列不动：rms mean max ok；后 2 列：corr_rms corr_ok）
+  if [ -n "$GICP_MAP" ]; then
+    echo "=== [run $i] corr 通道 ATE ==="
+    uv run python - "$run_dir" <<'PY'
+"""corr 通道首点对齐 ATE（与 void 同口径）；样本不足则记 nan/0。"""
+import sys
+
+import numpy as np
+
+WORK = sys.argv[1]
+
+corr_rms, corr_ok = float("nan"), 0
+try:
+    gt = np.load(f"{WORK}/gt.npy")
+    gt_t = np.load(f"{WORK}/gt_t.npy")
+    corr = np.load(f"{WORK}/corr.npy")
+    corr_t = np.load(f"{WORK}/corr_t.npy")
+except FileNotFoundError as e:
+    print(f"[ate-corr] 轨迹文件缺失：{e}")
+else:
+    print(f"[ate-corr] Corr {len(corr)} 样本")
+    if len(gt) >= 10 and len(corr) >= 10:
+        t0 = max(gt_t.min(), corr_t.min()) + 3.0
+        t1 = min(gt_t.max(), corr_t.max()) - 0.1
+        if t1 > t0:
+            mask = (gt_t >= t0) & (gt_t <= t1)
+            gt_w = gt[mask]
+            gt_tw = gt_t[mask]
+            corr_w = np.stack(
+                [np.interp(gt_tw, corr_t, corr[:, k]) for k in range(3)], axis=1
+            )
+            aligned = corr_w - corr_w[0] + gt_w[0]
+            err = np.linalg.norm(aligned - gt_w, axis=1)
+            corr_rms = float(np.sqrt(np.mean(err**2)))
+            corr_ok = 1 if corr_rms < 0.3 else 0
+            print(f"[ate-corr] ATE-RMS  = {corr_rms:.4f} m")
+            print(f"[ate-corr] {'PASS' if corr_ok else 'FAIL'}（阈值 < 0.3m）")
+        else:
+            print("[ate-corr] 无共同时间窗")
+    else:
+        print("[ate-corr] 样本不足（gicp 未出数？看 gicp.log）")
+
+with open(f"{WORK}/ate_meta.txt") as f:
+    base = f.read().strip()
+with open(f"{WORK}/ate_meta.txt", "w") as f:
+    f.write(f"{base} {corr_rms} {corr_ok}\n")
+PY
+  fi
+
   # iceoryx 残留检查（幽灵端口 = 进程死后 node 目录里残留的 port_tag；
   # 服务注册文件是持久缓存，非幽灵）
   echo "=== [run $i] iceoryx 残留检查 ==="
@@ -352,18 +437,29 @@ rows = []
 for i in range(1, RUNS + 1):
     try:
         with open(f"{WORK}/run{i}/ate_meta.txt") as f:
-            rms, mean, mx, ok = map(float, f.read().split())
+            parts = list(map(float, f.read().split()))
     except FileNotFoundError:
         print(f"run {i}: 缺 ate_meta.txt（该轮失败）")
-        rows.append((i, float("nan"), float("nan"), float("nan"), False))
+        rows.append((i, float("nan"), float("nan"), float("nan"), False, None, None))
         continue
-    rows.append((i, rms, mean, mx, bool(ok)))
+    rms, mean, mx, ok = parts[0], parts[1], parts[2], bool(parts[3])
+    corr = (parts[4], bool(parts[5])) if len(parts) >= 6 else (None, None)
+    rows.append((i, rms, mean, mx, ok, corr[0], corr[1]))
 
 print("--- 逐轮明细 ---")
-print(f"{'run':>3} {'ATE-RMS':>9} {'ATE-mean':>9} {'ATE-max':>9} {'verdict':>6}")
+has_corr = any(r[5] is not None and np.isfinite(r[5]) for r in rows)
+if has_corr:
+    print(f"{'run':>3} {'VOID-RMS':>9} {'VOID-mean':>9} {'VOID-max':>9} {'void':>6} {'CORR-RMS':>9} {'corr':>6}")
+else:
+    print(f"{'run':>3} {'ATE-RMS':>9} {'ATE-mean':>9} {'ATE-max':>9} {'verdict':>6}")
 all_ok = True
-for i, rms, mean, mx, ok in rows:
-    print(f"{i:>3} {rms:>9.4f} {mean:>9.4f} {mx:>9.4f} {'PASS' if ok else 'FAIL':>6}")
+for i, rms, mean, mx, ok, corr_rms, corr_ok in rows:
+    if has_corr:
+        cs = f"{corr_rms:>9.4f}" if corr_rms is not None and np.isfinite(corr_rms) else f"{'n/a':>9}"
+        co = ("PASS" if corr_ok else "FAIL") if corr_ok is not None else "n/a"
+        print(f"{i:>3} {rms:>9.4f} {mean:>9.4f} {mx:>9.4f} {'PASS' if ok else 'FAIL':>6} {cs} {co:>6}")
+    else:
+        print(f"{i:>3} {rms:>9.4f} {mean:>9.4f} {mx:>9.4f} {'PASS' if ok else 'FAIL':>6}")
     all_ok &= ok
 
 rms = np.array([r[1] for r in rows])

@@ -120,6 +120,10 @@ impl GlobalRelocalizer {
     }
 
     /// 深度图转点云（复用 `firefly-map/src/depth.rs:99` 投影）。
+    ///
+    /// 含边缘跳变剔除（对标 `firefly-void` 点云下采样：深度不连续处前景
+    /// 像素被背景深度覆盖，系统偏大——边缘点会把配准往外推；仿真边缘
+    /// 膨胀 1px，阈值 0.15m）。
     #[must_use]
     pub fn depth_to_cloud(
         depth: &[f32],
@@ -133,12 +137,27 @@ impl GlobalRelocalizer {
             while u < cam.width {
                 let z = f64::from(depth[v * cam.width + u]);
                 if z > 0.05 && z <= cam.max_range && z.is_finite() {
-                    let dx = (u as f64 - cam.cx) / cam.focal;
-                    let dy = -(v as f64 - cam.cy) / cam.focal;
-                    let hit_cam = nalgebra::Vector3::new(dx * z, dy * z, -z);
-                    let hit_world =
-                        body_pose * Point3::from(cam.pos_in_body + cam.rot_cam_to_body * hit_cam);
-                    pts.push(hit_world.coords);
+                    // 四邻域深度跳变 → 边缘膨胀点，丢弃
+                    let mut edge = false;
+                    for (du, dv) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                        let (nx, ny) = (u as i64 + du, v as i64 + dv);
+                        if nx < 0 || ny < 0 || nx >= cam.width as i64 || ny >= cam.height as i64 {
+                            continue;
+                        }
+                        let nz = f64::from(depth[ny as usize * cam.width + nx as usize]);
+                        if nz > 0.05 && nz.is_finite() && (z - nz).abs() > 0.15 {
+                            edge = true;
+                            break;
+                        }
+                    }
+                    if !edge {
+                        let dx = (u as f64 - cam.cx) / cam.focal;
+                        let dy = -(v as f64 - cam.cy) / cam.focal;
+                        let hit_cam = nalgebra::Vector3::new(dx * z, dy * z, -z);
+                        let hit_world = body_pose
+                            * Point3::from(cam.pos_in_body + cam.rot_cam_to_body * hit_cam);
+                        pts.push(hit_world.coords);
+                    }
                 }
                 u += cam.pixel_step;
             }
