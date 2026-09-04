@@ -7,9 +7,11 @@
 - 围墙：四边，高 3m、厚 0.4m（视觉远景 + 安全边界）。
 - 南北箱带：y∈{2.5,4.5} / {15.5,17.5}，x 每 3.5m 一列（8 列），
   层高按 (列+行)%3 轮换（单层 0.6m、双层 1.1m、三层 1.7m），0.5m 见方。
-- 中线矮箱：y=8.5，x∈{10,14,18,22,26}，单层 0.6m（飞行走廊 y=10/y=7
-  两侧各 1.5m 净空 + 垂直 0.6m 净空，PD 瞬态安全）。
-- 飞行净空区：走廊 y∈[6,11]、掉头圆（(30,8.5)/(4,8.5)，r=1.5）内无箱子。
+- 走廊侧轨：y=7.5/12.5（中线 y=10 两侧 2.5m，深度量程内横向锚），
+  x 每 3.1m 一根（±0.5m 确定性抖动破重复结构），2/3 层轮换。
+- 中线矮箱：y=8.5，x∈{10,14,18,22,26}，单层 0.6m。
+- 东端箱：(32,8.5)/(32,11.5)，三层 1.7m（掉头旋转全向特征）。
+- 飞行净空：走廊 y=10 线 ±2m、掉头点 B=(30,10)/S=(1,10) 半径 2m 内无箱。
 
 灯光约定：**全部用方向光**（`type="directional"`，无距离衰减，全程均匀）。
 
@@ -86,6 +88,16 @@ _BOX_ROWS = (2.5, 4.5, 15.5, 17.5)
 # 中线矮箱（m）
 _MID_ROW = (10.0, 14.0, 18.0, 22.0, 26.0)
 _MID_Y = 8.5
+# 走廊侧轨：y=7.5/12.5（中线 y=10 两侧 2.5m，深度量程内横向锚），x 每
+# 3.1m 一根（±0.5m 确定性抖动破重复结构），层高 2/3 轮换（顶面超巡航，
+# 下倾相机可见侧面）。掉头点 B=(30,10)/S=(1,10) 原地旋转，2m 内无箱。
+_RAIL_X0 = 3.0
+_RAIL_DX = 3.1
+_RAIL_N = 10
+_RAIL_YS = (7.5, 12.5)
+_RAIL_JITTER = (0.3, -0.4, 0.5, -0.2, 0.4, -0.5, 0.2, -0.3, 0.5, -0.1)
+# 东端箱（掉头点前方结构，掉头旋转时提供全向特征）
+_END_BOXES = ((32.0, 8.5), (32.0, 11.5))
 # 每层 (z 中心, 半高)：单层 0.3/0.3、二层 0.7/0.4、三层 1.2/0.5
 _BOX_LAYER_GEOM = ((0.3, 0.3), (0.7, 0.4), (1.2, 0.5))
 
@@ -96,7 +108,8 @@ def _layer_count(ci: int, ri: int) -> int:
 
 
 def _boxes_xml() -> str:
-    """箱带（多层）+ 中线矮箱（单层），交替 pillar_a/pillar_b 材质。"""
+    """箱带（多层）+ 中线矮箱（单层）+ 走廊侧轨（2/3 层）+ 东端箱，
+    交替 pillar_a/pillar_b 材质。"""
     out = []
     for ci, x in enumerate(_BOX_COLS):
         for ri, y in enumerate(_BOX_ROWS):
@@ -113,6 +126,27 @@ def _boxes_xml() -> str:
         out.append(
             f'    <geom type="box" pos="{x} {_MID_Y} {z}" '
             f'size="0.25 0.25 {half}" material="{mat}"/>'
+        )
+    for i in range(_RAIL_N):
+        x = _RAIL_X0 + i * _RAIL_DX + _RAIL_JITTER[i]
+        n = 2 + (i % 2)  # 2/3 层轮换（顶 1.1/1.7m）
+        for j, y in enumerate(_RAIL_YS):
+            mat = "pillar_a" if (i + j) % 2 == 0 else "pillar_b"
+            for z, half in _BOX_LAYER_GEOM[:n]:
+                out.append(
+                    f'    <geom type="box" pos="{x:.1f} {y} {z}" '
+                    f'size="0.25 0.25 {half}" material="{mat}"/>'
+                )
+    for x, y in _END_BOXES:
+        z, half = _BOX_LAYER_GEOM[1]  # 双层 1.1m
+        out.append(
+            f'    <geom type="box" pos="{x} {y} {z}" '
+            f'size="0.25 0.25 {half}" material="pillar_a"/>'
+        )
+        z2, half2 = _BOX_LAYER_GEOM[2]  # 三层顶 1.7m
+        out.append(
+            f'    <geom type="box" pos="{x} {y} {z2}" '
+            f'size="0.25 0.25 {half2}" material="pillar_b"/>'
         )
     return "\n".join(out)
 
