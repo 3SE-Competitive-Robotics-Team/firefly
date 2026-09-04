@@ -50,6 +50,11 @@ pub struct FusionOptions {
     pub max_correction_trans: f64,
     /// 单次矫正限幅：旋转 `rad`。
     pub max_correction_rot: f64,
+    /// 新息限幅：平移 `m`（局部跟踪档：单次漂移应为厘米级，超过即视为
+    /// 别名误锁（如邻箱 1m 跳变），拒收；绑架恢复走全局搜索支路）。
+    pub max_innovation_trans: f64,
+    /// 新息限幅：旋转 `rad`。
+    pub max_innovation_rot: f64,
     /// 连续拒收后 `R` 的放大倍数。
     pub auto_scale_factor: f64,
     /// 触发放大的连续拒收次数。
@@ -69,6 +74,8 @@ impl Default for FusionOptions {
             max_registration_error: 1e9,
             max_correction_trans: 0.5,
             max_correction_rot: 5.0_f64.to_radians(),
+            max_innovation_trans: 0.3,
+            max_innovation_rot: 5.0_f64.to_radians(),
             auto_scale_factor: 2.0,
             auto_scale_trigger: 3,
         }
@@ -88,6 +95,8 @@ pub enum RelocGate {
     RejectedPrecheck { reason: &'static str },
     /// `chi2` 拒绝。
     RejectedChi2 { chi2: f64, threshold: f64 },
+    /// 新息超限（局部跟踪档：平移/旋转跳变过大，疑似别名误锁）。
+    RejectedInnovation { trans: f64, rot_deg: f64 },
     /// 数值异常（`S` 不可逆等）。
     RejectedNumerical { reason: &'static str },
 }
@@ -219,6 +228,19 @@ impl FusionFilter {
         };
         let t_err = t_pred_inv * *t_gicp;
         let z = se3_log(&t_err);
+
+        // 2b. 新息限幅（局部跟踪档）：别名误锁的跳变（~1m）直接拒收，
+        // 不进 chi2（R 失配时 chi2 恒小，拦不住）
+        let innov_rot = z.fixed_rows::<3>(0).norm();
+        let innov_trans = z.fixed_rows::<3>(3).norm();
+        if innov_trans > self.options.max_innovation_trans
+            || innov_rot > self.options.max_innovation_rot
+        {
+            return RelocGate::RejectedInnovation {
+                trans: innov_trans,
+                rot_deg: innov_rot.to_degrees(),
+            };
+        }
 
         // 3. 观测噪声 R = h⁻¹，失败回退对角阵；连续拒收时放大
         let r = match h.try_inverse() {
@@ -380,14 +402,30 @@ mod tests {
     }
 
     #[test]
-    fn chi2_rejects_large_error() {
+    fn innovation_rejects_large_jump() {
         let mut f = FusionFilter::with_default();
         let t_vio = Matrix4::identity();
         f.predict(&t_vio);
-        // 人为让 t_gicp 远离预测 5m
+        // 5m 跳变（别名误锁形态）：新息门先于 chi2 拒收
         let t_gicp = pose(Vector3::new(5.0, 0.0, 0.0), 0.0);
-        let h = Matrix6::identity() * 1000.0; // 小 R，S≈P，chi2 很大
+        let h = Matrix6::identity() * 1000.0;
         let g = f.update(&t_vio, &t_gicp, &h, 80, 100, 0.1, true);
+        assert!(matches!(g, RelocGate::RejectedInnovation { .. }));
+    }
+
+    #[test]
+    fn chi2_rejects_confident_but_wrong() {
+        let mut f = FusionFilter::with_default();
+        let t_vio = Matrix4::identity();
+        // 先接受一次高置信真值，把 P 收敛到 R 量级（chi2 能算数的条件）
+        f.predict(&t_vio);
+        let h_tight = Matrix6::identity() * 1000.0;
+        let g0 = f.update(&t_vio, &Matrix4::identity(), &h_tight, 80, 100, 0.1, true);
+        assert!(matches!(g0, RelocGate::Accepted { .. }));
+        // 0.2m 偏差（新息门内）+ 高置信：chi2 = z²/S ≈ 20 > 12.6，拒收
+        f.predict(&t_vio);
+        let t_gicp = pose(Vector3::new(0.2, 0.0, 0.0), 0.0);
+        let g = f.update(&t_vio, &t_gicp, &h_tight, 80, 100, 0.1, true);
         assert!(matches!(g, RelocGate::RejectedChi2 { .. }));
         assert_eq!(f.consecutive_rejects(), 1);
     }
@@ -416,11 +454,16 @@ mod tests {
     fn auto_scale_on_consecutive_chi2() {
         let mut f = FusionFilter::with_default();
         let t_vio = Matrix4::identity();
-        let t_gicp = pose(Vector3::new(5.0, 0.0, 0.0), 0.0);
-        let h = Matrix6::identity() * 1000.0;
+        // 收敛 P（同 chi2_rejects_confident_but_wrong 前置）
+        f.predict(&t_vio);
+        let h_tight = Matrix6::identity() * 1000.0;
+        let g0 = f.update(&t_vio, &Matrix4::identity(), &h_tight, 80, 100, 0.1, true);
+        assert!(matches!(g0, RelocGate::Accepted { .. }));
+        // 新息门内 + 高置信 + 0.2m 偏差 → 连续 chi2 拒收 → 放大 R
+        let t_gicp = pose(Vector3::new(0.2, 0.0, 0.0), 0.0);
         for _ in 0..3 {
             f.predict(&t_vio);
-            let _ = f.update(&t_vio, &t_gicp, &h, 80, 100, 0.1, true);
+            let _ = f.update(&t_vio, &t_gicp, &h_tight, 80, 100, 0.1, true);
         }
         assert!(f.r_scale > 1.0);
         // 一次通过后复位
