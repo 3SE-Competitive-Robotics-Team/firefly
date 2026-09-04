@@ -22,6 +22,9 @@ apps/planner/maps/*.ffmap
 # 录制产物（rrd/rbl）与运行时日志
 /logs/
 
+# 神经网络权重（大二进制，离线下载进 models/，不进 git）
+/models/
+
 # MuJoCo 运行时日志
 MUJOCO_LOG.TXT
 
