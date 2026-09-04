@@ -23,6 +23,10 @@ KP_POS = 20.0
 #: PD 速度增益（ζ=KD/(2√(KP·m))≈0.82，近临界阻尼：原 KD=10 时 ζ≈0.37
 #: 欠阻尼，无人机对台阶参考 overshoot ~0.5m 造成来回摆动）
 KD_VEL = 22.0
+#: 偏航 PD 增益（绕世界 z 轴；转动惯量 Izz≈0.2，KP=6/KD=2.5 近临界阻尼）
+KP_YAW = 6.0
+#: 偏航角速度阻尼
+KD_YAW = 2.5
 #: 姿态角速度阻尼
 KD_ATT = 4.0
 #: 水平回正增益（使机体 z 轴对齐世界 z 轴）
@@ -85,14 +89,26 @@ class DroneEnv:
 
     # ---- 控制 ----
 
-    def apply_pd(self, ref_pos: np.ndarray, ref_vel: np.ndarray) -> None:
-        """PD 位置跟踪 + 重力补偿 + 姿态阻尼/水平回正，写入 `xfrc_applied`。"""
+    def apply_pd(
+        self,
+        ref_pos: np.ndarray,
+        ref_vel: np.ndarray,
+        ref_yaw: float = 0.0,
+        ref_yaw_rate: float = 0.0,
+    ) -> None:
+        """PD 位置跟踪 + 重力补偿 + 姿态阻尼/水平回正 + 偏航跟踪，写入 `xfrc_applied`。
+
+        偏航：机体 x 轴相对世界 x 轴的转角（`atan2(R[1,0], R[0,0])`），扭矩绕
+        世界 z 轴（小倾角下体 z 角速度 ≈ 世界 yaw 率，PD 可用）。
+        """
         d = self.data
         bid = self._drone_id
         pos = d.body("drone").xpos.copy()
-        # freejoint 全局线/角速度（`cvel` 对 freejoint 不可靠，实测漂移；qvel 正确）
+        # freejoint 速度：线速度世界系，角速度为机体系（实测：yaw=90° 时加
+        # 世界系 x 扭矩，qvel 角速度读数为机体 y 轴——与 R 列向量一致）；
+        # 用到世界系时须经 R 转系（`cvel` 对 freejoint 不可靠，漂移）
         vel = d.qvel[0:3].copy()
-        angvel = d.qvel[3:6].copy()
+        angvel_body = d.qvel[3:6].copy()
 
         force = KP_POS * (np.asarray(ref_pos, dtype=float) - pos) + KD_VEL * (
             np.asarray(ref_vel, dtype=float) - vel
@@ -103,7 +119,15 @@ class DroneEnv:
         R = d.body("drone").xmat.reshape(3, 3)
         z_body = R[:, 2]
         level_torque = KP_LEVEL * np.cross(z_body, np.array([0.0, 0.0, 1.0]))
-        torque = level_torque - KD_ATT * angvel
+        # 姿态阻尼必须在世界系（机体角速度经 R 转系；偏航旋转时直接用机体系
+        # 会把阻尼方向转起来反充能量，持续偏航即翻滚发散）；偏航轴交偏航 PD
+        w_world = R @ angvel_body
+        torque = level_torque - KD_ATT * np.array([w_world[0], w_world[1], 0.0])
+
+        # 偏航跟踪（误差折叠到 [-π, π]；偏航率用世界系 z 分量）
+        yaw = float(np.arctan2(R[1, 0], R[0, 0]))
+        yaw_err = (float(ref_yaw) - yaw + np.pi) % (2.0 * np.pi) - np.pi
+        torque[2] += KP_YAW * yaw_err + KD_YAW * (float(ref_yaw_rate) - w_world[2])
 
         d.xfrc_applied[bid, 0:3] = force
         d.xfrc_applied[bid, 3:6] = torque

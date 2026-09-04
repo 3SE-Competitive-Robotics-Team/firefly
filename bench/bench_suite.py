@@ -8,7 +8,7 @@
 Usage:
   uv run python bench/bench_suite.py                                    # 全部实例各 1 轮
   uv run python bench/bench_suite.py --turns 3                          # 每实例 3 轮
-  uv run python bench/bench_suite.py --only lissajous_classic,lissajous_tight
+  uv run python bench/bench_suite.py --only outback_base,outback_fast
   uv run python bench/bench_suite.py --duration 40
 
 Outputs (repo-local, never /tmp):

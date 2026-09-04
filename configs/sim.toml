@@ -1,6 +1,6 @@
 # firefly-sim 配置（缺键回落代码默认值）
 
-start = [1.0, 4.0, 1.0] # 起飞点（= demo 地图 start）
+start = [1.0, 10.0, 1.0] # 起飞点（西底线中点 = demo 地图 start）
 
 [rates]
 physics = 200.0 # Hz

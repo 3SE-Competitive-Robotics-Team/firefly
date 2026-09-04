@@ -12,15 +12,12 @@ ESIKF 沿错误方向拉状态。导出时统一保证法向朝外（box 面朝�
 坐标：scene.py 的 geom 都在 worldbody（MuJoCo 世界系）；VOID 状态 pos/rot
 与深度点 `p_w = R·p_l + p` 同在世界系 → 平面坐标直接可用，无需外参对齐。
 
-可见性粗筛（P12 review）：相机装在无人机上、前向 +x 且下倾 20°，在轨迹区
-（李萨如 x∈[-2,4]、y∈[3,5]、z∈[0.5,1.5]）活动，看向前方箱区。因此：
-- **+x 背面**（法向朝 +x 的外露面，如箱区后侧面）与相机视线相反，深度
-  点永远投影不到——常态零命中，但大漂移时（>0.5m）点可能被投到背墙、
-  产生把状态往错误方向拉的伪约束，剔除；
-- **-z 底面**与地面（z=0 大平面）共面冗余，深度相机看不到底面，剔除；
-- 保留：地面、±y 侧面（相机侧向可见）、-x 前侧面、+z 顶面（相机下倾
-  20° 能看到部分顶面）。顶面法向朝上不违反"朝相机侧"约定——匹配由
-  点到面几何距离驱动，顶面在点上方时法向向上正是朝点/相机一侧。
+可见性粗筛（双向飞行：去程面朝 +x、返程面朝 -x，下倾 20°）：
+- **-z 底面**恒剔除（深度相机看不到任何底面）；
+- **场外面**（面心 x∉[0,34]、y∉[0,20]、z<0，如围墙外侧面）剔除——无人机
+  不出场，那些面永远不可见，大漂移时误关联会把状态往错误方向拉；
+- 保留：地面、场内 ±x/±y 侧面、+z 顶面（下倾 20° 能看到部分顶面）。
+  顶面法向朝上不违反"朝相机侧"约定——匹配由点到面几何距离驱动。
 
 输出格式（`PriorPlaneMap::parse_text` 兼容）：
 `cx cy cz nx ny nz d var_scale radius npts`
@@ -46,7 +43,10 @@ from firefly_mujoco.scene import SCENE_XML  # noqa: E402
 
 
 def parse_box_geoms(xml: str) -> list[tuple[float, float, float, float, float, float]]:
-    """解析 `<geom type="box" pos="x y z" size="hx hy hz"/>`，返回 (center, half)。"""
+    """解析 `<geom type="box" pos="x y z" size="hx hy hz"/>`，返回 (center, half)。
+
+    跳过无人机体小盒（三轴半宽全 < 0.2m，随动非静态，不能做先验）。
+    """
     out = []
     for m in re.finditer(
         r'<geom type="box"\s+pos="([-\d.]+) ([-\d.]+) ([-\d.]+)"\s+size="([-\d.]+) ([-\d.]+) ([-\d.]+)"',
@@ -54,6 +54,8 @@ def parse_box_geoms(xml: str) -> list[tuple[float, float, float, float, float, f
     ):
         center = np.array([float(m.group(i)) for i in range(1, 4)])
         half = np.array([float(m.group(i)) for i in range(4, 7)])
+        if bool(np.all(half < 0.2)):
+            continue
         out.append((center, half))
     return out
 
@@ -61,11 +63,10 @@ def parse_box_geoms(xml: str) -> list[tuple[float, float, float, float, float, f
 def box_faces(center: np.ndarray, half: np.ndarray) -> list[dict]:
     """box 六个外露面（世界系）。每面: center(面心), normal(朝外), radius。
 
-    返回前做可见性粗筛（见模块 docstring）：
-    - **-z 底面**对任何 box 都剔除（相机前向 +x 下倾 20°，看不到任何底面）；
-    - **+x 面**仅对**轨迹前方**的 box（中心 x > 4，如箱区/中线柱）剔除——
-      相机从 x<4 朝 +x 看，那是永远不可见的后侧面；侧柱（x≤4，轨迹侧翼）
-      的 +x 面是朝相机的可见前脸，必须保留。
+    返回前做可见性粗筛（见模块 docstring）：-z 底面恒剔除；面心落在
+    场外（x∉[0,34]、y∉[0,20]、z<0，如围墙外侧面）的面剔除——无人机不
+    出场，那些面永远不可见，大漂移时误关联会把状态往错误方向拉。
+    双向飞行（去程面朝 +x、返程面朝 -x），场内 ±x 面全部保留。
     """
     faces = []
     # 六面：±x, ±y, ±z；面心 = center ± 法向·半宽，面内尺寸取另两半宽
@@ -73,10 +74,12 @@ def box_faces(center: np.ndarray, half: np.ndarray) -> list[dict]:
         for sign in (+1.0, -1.0):
             normal = np.zeros(3)
             normal[axis] = sign
-            # 底面（-z）恒剔除；前方箱体（center_x > 4）的 +x 背面剔除
-            if normal[2] < 0.0 or (normal[0] > 0.0 and center[0] > 4.0):
-                continue
             face_center = center + normal * half[axis]
+            if normal[2] < 0.0:
+                continue  # 底面
+            x, y, z = (float(face_center[i]) for i in range(3))
+            if not (0.0 <= x <= 34.0 and 0.0 <= y <= 20.0 and z >= 0.0):
+                continue  # 场外面
             # 面内两轴的半宽 → 面内接圆半径（保守：半对角）
             other = [i for i in range(3) if i != axis]
             radius = float(np.hypot(half[other[0]], half[other[1]]))
@@ -101,12 +104,12 @@ def main() -> None:
     args = ap.parse_args()
 
     planes = []
-    # 地面：plane geom（世界 z=0 无限大；给保守大半径覆盖轨迹全程）
+    # 地面：plane geom（世界 z=0 无限大；面心取场地中心，半径覆盖全场对角）
     planes.append(
         {
-            "center": np.array([0.0, 0.0, 0.0]),
+            "center": np.array([17.0, 10.0, 0.0]),
             "normal": np.array([0.0, 0.0, 1.0]),
-            "radius": 20.0,
+            "radius": 25.0,
         }
     )
     # box geom（中线立柱 + 侧柱 + 前方箱子）；box_faces 已做背面粗筛

@@ -7,8 +7,8 @@
 #                 iceoryx2 残留；末尾输出逐轮 ATE 明细与 mean±std。
 #                 sim 噪声无种子，多轮统计反映启动期偏置注入的随机性。
 #   --trajectory NAME  透传给 `firefly-sim --script NAME`（具名轨迹驱动运动，
-#                 跳过 planner；缺省不传 = 悬停闭环）。李萨如 bench 用
-#                 `--trajectory lissajous_classic`。
+#                 跳过 planner；缺省不传 = 悬停闭环）。往返掉头 bench 用
+#                 `--trajectory outback_base`。
 #   --gicp-map PATH    联合测试：同步起 `gicp` 进程（`--map PATH --odom-topic
 #                 Firefly/VoidOdom`），recorder 多采 `Firefly/CorrectedOdometry`，
 #                 ATE 输出 void/corrected 双通道对照。
