@@ -373,11 +373,15 @@ fn run_loop(
         if t_sim + 1e-9 >= next_odom {
             odom_count += 1;
             let s = odom.state();
-            publish_odom(odom_pub, t_sim, s);
-            // 可视化：位姿 + 轨迹折线 + 地图点采样 @10Hz
+            publish_odom(odom_pub, t_sim, s, odom);
+            // 可视化：位姿 + 轨迹折线 + 地图点采样 @10Hz（位姿用机体系，
+            // 与 odom 发布一致）
             {
                 let p = s.pos;
-                let q = nalgebra::UnitQuaternion::from_rotation_matrix(&s.rot);
+                let r_bv = odom
+                    .body_ext()
+                    .unwrap_or_else(nalgebra::Rotation3::identity);
+                let q = nalgebra::UnitQuaternion::from_rotation_matrix(&(s.rot * r_bv));
                 log_viz(
                     viz_pub,
                     t_sim,
@@ -419,12 +423,20 @@ fn run_loop(
 }
 
 /// 组装并发布一条 void odom（10Hz，`Firefly/VoidOdom`）。
+///
+/// 姿态转换到机体系：滤波器状态 `rot` 为虚拟针孔系（`R_wv`，见
+/// `firefly-void/src/options.rs`），发布 `R_wb = R_wv·R_bv`；位置/速度
+/// 已是世界系（与 `GroundTruth` 同框），直接发布。
 fn publish_odom(
     odom_pub: &Publisher<OdomMessage>,
     t_sim: f64,
     state: &firefly_void_types::state::State,
+    odom: &VoidOdometry,
 ) {
-    let q = nalgebra::UnitQuaternion::from_rotation_matrix(&state.rot);
+    let r_bv = odom
+        .body_ext()
+        .unwrap_or_else(nalgebra::Rotation3::identity);
+    let q = nalgebra::UnitQuaternion::from_rotation_matrix(&(state.rot * r_bv));
     let msg = OdomMessage {
         timestamp: t_sim,
         position_x: state.pos.x,

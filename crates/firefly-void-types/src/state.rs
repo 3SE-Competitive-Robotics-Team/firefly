@@ -27,7 +27,8 @@ pub type ErrorState = nalgebra::SVector<f64, DIM_STATE>;
 /// `rot_end, pos_end, vel_end, bias_g, bias_a, gravity, inv_expo_time`。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct State {
-    /// `^G R_I`：IMU 姿态（世界系 → 机体系旋转矩阵）。
+    /// `^G R_I`：IMU 姿态（世界系 → IMU 系旋转矩阵；本实现中 IMU 系为
+    /// 虚拟针孔系，见 `firefly-void/src/options.rs`，发布时转回机体系）。
     pub rot: Rotation3<f64>,
     /// `^G p_I`：IMU 位置（世界系，单位 m）。
     pub pos: Vector3<f64>,
