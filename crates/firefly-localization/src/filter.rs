@@ -55,6 +55,15 @@ pub struct FusionOptions {
     pub max_innovation_trans: f64,
     /// 新息限幅：旋转 `rad`。
     pub max_innovation_rot: f64,
+    /// 观测噪声下限：旋转 `rad²`（`R=h⁻¹` 失配时防过自信；离线标定：
+    /// 好修正旋转噪声中位 ~1°，下限取 `(1°)²≈3e-4`）。
+    pub r_floor_rot: f64,
+    /// 观测噪声下限：平移 `m²`（好修正噪声中位 ~0.07m，下限取 `5e-3`）。
+    pub r_floor_pos: f64,
+    /// `P` 初值：旋转 `rad²`（VOID 姿态初值误差 ~1~2°，取 `(3°)²`）。
+    pub p_init_rot: f64,
+    /// `P` 初值：平移 `m²`（真值初始化后漂移从零起，取 `(0.1m)²`）。
+    pub p_init_pos: f64,
     /// 连续拒收后 `R` 的放大倍数。
     pub auto_scale_factor: f64,
     /// 触发放大的连续拒收次数。
@@ -68,7 +77,7 @@ impl Default for FusionOptions {
             process_noise_pos: 1e-4,
             fallback_noise_rot: (2.5_f64.to_radians()).powi(2),
             fallback_noise_pos: 0.2_f64.powi(2),
-            chi2_multiplier: 1.0,
+            chi2_multiplier: 0.5,
             min_inlier_ratio: 0.3,
             min_num_inliers: 30,
             max_registration_error: 1e9,
@@ -76,6 +85,10 @@ impl Default for FusionOptions {
             max_correction_rot: 5.0_f64.to_radians(),
             max_innovation_trans: 0.3,
             max_innovation_rot: 5.0_f64.to_radians(),
+            r_floor_rot: 3.0e-4,
+            r_floor_pos: 5.0e-3,
+            p_init_rot: 2.7e-3,
+            p_init_pos: 1.0e-2,
             auto_scale_factor: 2.0,
             auto_scale_trigger: 3,
         }
@@ -118,8 +131,13 @@ impl FusionFilter {
     /// 新建，`P` 初值 `0.1·I`。
     #[must_use]
     pub fn new(options: FusionOptions) -> Self {
-        let mut p = Matrix6::identity();
-        p *= 0.1;
+        let mut p = Matrix6::zeros();
+        for i in 0..3 {
+            p[(i, i)] = options.p_init_rot;
+        }
+        for i in 3..6 {
+            p[(i, i)] = options.p_init_pos;
+        }
         Self {
             t_drift: Matrix4::identity(),
             p,
@@ -243,7 +261,7 @@ impl FusionFilter {
         }
 
         // 3. 观测噪声 R = h⁻¹，失败回退对角阵；连续拒收时放大
-        let r = match h.try_inverse() {
+        let mut r = match h.try_inverse() {
             Some(inv) => {
                 let mut r = inv;
                 // 保持对称
@@ -274,6 +292,19 @@ impl FusionFilter {
                 r
             }
         };
+
+        // R 下限（离线标定修正噪声）：防 h⁻¹ 过自信导致 chi2 恒小、
+        // 有偏修正照单全收
+        for i in 0..3 {
+            if r[(i, i)] < self.options.r_floor_rot {
+                r[(i, i)] = self.options.r_floor_rot;
+            }
+        }
+        for i in 3..6 {
+            if r[(i, i)] < self.options.r_floor_pos {
+                r[(i, i)] = self.options.r_floor_pos;
+            }
+        }
 
         let s = self.p + r;
         let s_inv = match s.try_inverse() {
@@ -360,7 +391,14 @@ impl FusionFilter {
     /// 重置为初值。
     pub fn reset(&mut self) {
         self.t_drift = Matrix4::identity();
-        self.p = Matrix6::identity() * 0.1;
+        let mut p = Matrix6::zeros();
+        for i in 0..3 {
+            p[(i, i)] = self.options.p_init_rot;
+        }
+        for i in 3..6 {
+            p[(i, i)] = self.options.p_init_pos;
+        }
+        self.p = p;
         self.last_vio = None;
         self.consecutive_rejects = 0;
         self.r_scale = 1.0;
@@ -422,9 +460,9 @@ mod tests {
         let h_tight = Matrix6::identity() * 1000.0;
         let g0 = f.update(&t_vio, &Matrix4::identity(), &h_tight, 80, 100, 0.1, true);
         assert!(matches!(g0, RelocGate::Accepted { .. }));
-        // 0.2m 偏差（新息门内）+ 高置信：chi2 = z²/S ≈ 20 > 12.6，拒收
+        // 0.25m 偏差（新息门内）+ 高置信：chi2 ≈ 7.5 > 6.3，拒收
         f.predict(&t_vio);
-        let t_gicp = pose(Vector3::new(0.2, 0.0, 0.0), 0.0);
+        let t_gicp = pose(Vector3::new(0.25, 0.0, 0.0), 0.0);
         let g = f.update(&t_vio, &t_gicp, &h_tight, 80, 100, 0.1, true);
         assert!(matches!(g, RelocGate::RejectedChi2 { .. }));
         assert_eq!(f.consecutive_rejects(), 1);
@@ -459,8 +497,8 @@ mod tests {
         let h_tight = Matrix6::identity() * 1000.0;
         let g0 = f.update(&t_vio, &Matrix4::identity(), &h_tight, 80, 100, 0.1, true);
         assert!(matches!(g0, RelocGate::Accepted { .. }));
-        // 新息门内 + 高置信 + 0.2m 偏差 → 连续 chi2 拒收 → 放大 R
-        let t_gicp = pose(Vector3::new(0.2, 0.0, 0.0), 0.0);
+        // 新息门内 + 高置信 + 0.25m 偏差 → 连续 chi2 拒收 → 放大 R
+        let t_gicp = pose(Vector3::new(0.25, 0.0, 0.0), 0.0);
         for _ in 0..3 {
             f.predict(&t_vio);
             let _ = f.update(&t_vio, &t_gicp, &h_tight, 80, 100, 0.1, true);
@@ -485,17 +523,17 @@ mod tests {
         let mut f = FusionFilter::new(opts);
         let t_vio = Matrix4::identity();
         f.predict(&t_vio);
-        // 大误差但 R 很大使 chi2 通过
-        let t_gicp = pose(Vector3::new(1.0, 0.0, 0.0), 10.0);
-        let h = Matrix6::identity() * 0.1; // 大 R
-        // 膨胀 P 使 K≈1，delta≈z（1m/10°）超限幅
-        for _ in 0..10 {
-            f.predict(&t_vio);
-        }
+        // 新息门内（0.25m/4°）+ 高置信（R 被下限托住）：delta≈K·z 超限幅，
+        // 旋转与平移分别截断（非真空断言：限幅是温和钳制非零修正）
+        let t_gicp = pose(Vector3::new(0.25, 0.0, 0.0), 4.0);
+        let h = Matrix6::identity() * 1.0e6; // R→下限，K≈0.7/0.9
         let g = f.update(&t_vio, &t_gicp, &h, 80, 100, 0.1, true);
         if let RelocGate::Accepted { delta, .. } = g {
             assert!(delta.fixed_rows::<3>(3).norm() <= 0.11);
             assert!(delta.fixed_rows::<3>(0).norm() <= 0.02);
+            assert!(delta.fixed_rows::<3>(3).norm() > 0.05);
+        } else {
+            panic!("expected accept, got {g:?}");
         }
     }
 }
