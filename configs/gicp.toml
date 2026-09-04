@@ -2,7 +2,7 @@
 # 用法：planner --config configs/gicp.toml 或合入 configs/planner.toml 的 [reloc]/[fusion] 段
 
 [reloc]
-downsampling_resolution = 0.2 # m，体素降采样（原 0.25，0.2 更密，召回更高）
+downsampling_resolution = 0.1 # m，靶图体素降采样（0.2 量化薄壁结构引入厘米级偏差；0.1 靶约 3 万点，1Hz 配准仍充裕）
 num_neighbors = 10 # 近邻数（法向/协方差）
 max_correspondence_distance = 2.0 # m，最大对应距离（原 1.0，容忍更大初值漂移）
 max_iterations = 20

@@ -58,7 +58,7 @@ mod tests {
             "/../../configs/gicp.toml"
         ))
         .expect("configs/gicp.toml must parse");
-        assert!((cfg.reloc.downsampling_resolution - 0.2).abs() < 1e-12);
+        assert!((cfg.reloc.downsampling_resolution - 0.1).abs() < 1e-12);
         assert!((cfg.fusion.min_inlier_ratio - 0.3).abs() < 1e-12);
     }
 }

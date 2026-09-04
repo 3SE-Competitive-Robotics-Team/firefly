@@ -102,6 +102,43 @@ fn odom_to_matrix(msg: &OdomMessage) -> Matrix4<f64> {
     Isometry3::from_parts(Translation3::new(t.x, t.y, t.z), q).to_homogeneous()
 }
 
+/// 历史 odom 在目标时刻插值（位置 lerp + 姿态 slerp；时刻越界返回空，
+/// 该 tick 跳过——不以外推污染配准）。
+fn interp_odom(
+    hist: &std::collections::VecDeque<(f64, OdomMessage)>,
+    t: f64,
+) -> Option<Matrix4<f64>> {
+    if hist.len() < 2 {
+        return None;
+    }
+    let mut prev = &hist[0];
+    for cur in hist.iter().skip(1) {
+        if cur.0 >= t {
+            let span = cur.0 - prev.0;
+            if span <= 1e-9 {
+                return Some(odom_to_matrix(&cur.1));
+            }
+            let a = ((t - prev.0) / span).clamp(0.0, 1.0);
+            let (p0, p1) = (&prev.1, &cur.1);
+            let pos = Vector3::new(
+                p0.position_x + a * (p1.position_x - p0.position_x),
+                p0.position_y + a * (p1.position_y - p0.position_y),
+                p0.position_z + a * (p1.position_z - p0.position_z),
+            );
+            let q0 = UnitQuaternion::from_quaternion(Quaternion::new(
+                p0.quat_w, p0.quat_x, p0.quat_y, p0.quat_z,
+            ));
+            let q1 = UnitQuaternion::from_quaternion(Quaternion::new(
+                p1.quat_w, p1.quat_x, p1.quat_y, p1.quat_z,
+            ));
+            let q = q0.slerp(&q1, a);
+            return Some(Isometry3::from_parts(Translation3::from(pos), q).to_homogeneous());
+        }
+        prev = cur;
+    }
+    None
+}
+
 fn matrix_to_odom(t_corr: &Matrix4<f64>, src: &OdomMessage, drift: &Matrix4<f64>) -> OdomMessage {
     let p = t_corr.fixed_view::<3, 1>(0, 3).into_owned();
     let r = t_corr.fixed_view::<3, 3>(0, 0).into_owned();
@@ -176,6 +213,9 @@ struct App {
     corrected_pub: Option<CorrectedOdomPublisher>,
     latest_odom: Option<OdomMessage>,
     latest_depth: Option<DepthImageMessage>,
+    /// odom 环形历史（时间戳，消息）：按深度帧时间戳插值位姿，消除
+    /// 最新配对 ~0.1s 失配（1.5m/s 下 15cm 系统性错位）。
+    odom_hist: std::collections::VecDeque<(f64, OdomMessage)>,
     last_odom_recv: f64,
     depth_cam: DepthCamera,
     t_sim: f64,
@@ -229,6 +269,7 @@ impl App {
             corrected_pub,
             latest_odom: None,
             latest_depth: None,
+            odom_hist: std::collections::VecDeque::with_capacity(64),
             last_odom_recv: f64::NEG_INFINITY,
             depth_cam: DepthCamera::mujoco_default(),
             t_sim: 0.0,
@@ -245,6 +286,10 @@ impl App {
                 let t_vio = odom_to_matrix(&m);
                 self.fusion.predict(&t_vio);
                 self.latest_odom = Some(m);
+                self.odom_hist.push_back((m.timestamp, m));
+                while self.odom_hist.len() > 64 {
+                    self.odom_hist.pop_front();
+                }
             }
         }
         if let Some(sub) = &self.depth {
@@ -263,13 +308,16 @@ impl App {
         let Some(depth) = &self.latest_depth else {
             return;
         };
-        let Some(odom) = &self.latest_odom else {
+        let Some(_odom) = &self.latest_odom else {
             return;
         };
         if !self.reloc_ticks.is_multiple_of(RELOC_PERIOD) {
             return;
         }
-        let t_vio = odom_to_matrix(odom);
+        // 初值与量测同源时刻：按深度时间戳插值 odom（最新配对失配可达 0.1s）
+        let Some(t_vio) = interp_odom(&self.odom_hist, depth.timestamp) else {
+            return;
+        };
         let body_cloud = depth_to_body_cloud(&depth.data, &self.depth_cam);
         if body_cloud.num_points() < 30 {
             return;
