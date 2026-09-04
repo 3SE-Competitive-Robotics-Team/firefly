@@ -45,16 +45,21 @@ pub struct DepthCamera {
 impl DepthCamera {
     /// `MuJoCo` 合成场景默认标定（`scene.py`：深度相机在机体原点、`fovy=70.88°`≈
     /// D430 87°HFOV、`320×240`）。实测投影约定：
-    /// - 相机看 `+x_body`（无人机前进方向），图右 → `-y_body`，图下 → `-z_body`；
-    /// - `focal = (H/2)/tan(fovy/2) = 120/tan(35.44°) ≈ 168.6`。
+    /// - 相机看 `+x_body`（无人机前进方向）并**下倾 20°**（`scene.py` 相机
+    ///   `xyaxes` 第二向量 `(0.342, 0, 0.9397)`，`sin20°=0.342`），图右 →
+    ///   `-y_body`，图下 → 机体下方；
+    /// - `focal = (H/2)/tan(fovy/2) = 120/tan(35.44°) ≈ 168.6`；
+    /// - `rot_cam_to_body` 列 = 相机轴在机体系：`x=(0,-1,0)`、
+    ///   `y=(0.342,0,0.9397)`、`z=x×y=(-0.9397,0,0.342)`。
     #[must_use]
     pub fn mujoco_default() -> Self {
         let focal = 120.0 / (70.88_f64 / 2.0).to_radians().tan();
-        // 相机系 x/y/z 轴在机体系：x=(0,-1,0)、y=(0,0,1)、z=(-1,0,0)
+        // 相机系 x/y/z 轴在机体系：x=(0,-1,0)、y=(0.342,0,0.9397)（下倾 20°）、
+        // z=x×y=(-0.9397,0,0.342)
         let rot_cam_to_body = Matrix3::new(
-            0.0, 0.0, -1.0, //
+            0.0, 0.3420, -0.9397, //
             -1.0, 0.0, 0.0, //
-            0.0, 1.0, 0.0,
+            0.0, 0.9397, 0.3420,
         );
         Self {
             focal,
@@ -236,13 +241,14 @@ mod tests {
 
     #[test]
     fn update_from_depth_projects_to_world() {
-        // 无旋转机体 + 中心像素：命中点应在 +x_body，需多次观测才跨阈值
+        // 无旋转机体 + 采样像素 (u=159, v=54)（pixel_step=3 网格点）：
+        // 下倾 20° 相机射线在深度 5m 处命中机体系 ≈ (5.37, 0.03, 0.13)，
+        // 需多次观测才跨阈值
         let cam = DepthCamera::mujoco_default();
         let mut map = GridMapBuilder::new(1.0, [20, 20, 10]).build().unwrap();
         let pose = Isometry3::identity();
         let mut depth = vec![0.0f32; cam.width * cam.height];
-        // 采样像素（u=159 是 pixel_step=3 的采样点）深度 5m → 命中 ≈ (5,0,0)
-        depth[120 * cam.width + 159] = 5.0;
+        depth[54 * cam.width + 159] = 5.0;
         let clamp_min = map.clamp_min_log();
         let hit = map.prob_hit_log();
         // 单帧命中一次
@@ -259,9 +265,9 @@ mod tests {
 
     #[test]
     fn update_from_depth_maps_mujoco_box() {
-        // 复现 demo 场景：无人机在 (1,4,1) 恒等姿态，盒子 (8,2,0.5) 前表面
-        // 在像素 (207,132)（fovy=70.88°、focal=168.6、pixel_step=3 采到）深度
-        // 5.59m → 命中世界 (6.59,2.44,0.60)，多次观测后占据
+        // 复现 demo 场景：无人机在 (1,4,1) 恒等姿态；下倾 20° 相机射线经
+        // 像素 (207,69)（pixel_step=3 网格点）深度 6.471m → 命中箱 (8,2)
+        // 前表面世界 (7.75,2.20,0.63)，体素 [19,17,1]，多次观测后占据
         let cam = DepthCamera::mujoco_default();
         // 地图与 demo 一致：origin (0,-5,0)、0.4m、dims [80,35,13]
         let mut map = GridMapBuilder::new(0.4, [80, 35, 13])
@@ -271,18 +277,19 @@ mod tests {
         let pose =
             Isometry3::from_parts(Translation3::new(1.0, 4.0, 1.0), UnitQuaternion::identity());
         let mut depth = vec![0.0f32; cam.width * cam.height];
-        depth[132 * cam.width + 207] = 5.59;
+        depth[69 * cam.width + 207] = 6.471;
         let hit = map.prob_hit_log();
         let clamp_min = map.clamp_min_log();
         update_from_depth(&mut map, &cam, &pose, &depth);
-        assert!((map.occupancy_at([16, 18, 1]) - (clamp_min + hit)).abs() < 1e-12);
+        assert!((map.occupancy_at([19, 17, 1]) - (clamp_min + hit)).abs() < 1e-12);
         // 多帧后占据
         for _ in 0..4 {
             update_from_depth(&mut map, &cam, &pose, &depth);
         }
-        assert_eq!(map.state([16, 18, 1]), VoxelState::Occupied);
-        // 沿途（含相机所在体素后）miss 更新但仍在下界附近
-        assert!(map.occupancy_at([4, 22, 2]) <= clamp_min + 1e-12);
+        assert_eq!(map.state([19, 17, 1]), VoxelState::Occupied);
+        // 沿途旁侧体素未被射线穿过，保持下界（射线经 y≈3.5，体素 [7,22,2]
+        // y∈[3.8,4.2) 在射线旁）
+        assert!(map.occupancy_at([7, 22, 2]) <= clamp_min + 1e-12);
     }
 
     #[test]

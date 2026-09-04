@@ -38,6 +38,7 @@ const ODOM_FRESH_TIMEOUT: f64 = 1.0;
 struct Args {
     map: Option<PathBuf>,
     config: PathBuf,
+    odom_topic: String,
 }
 
 fn parse_args() -> Result<Args> {
@@ -45,6 +46,7 @@ fn parse_args() -> Result<Args> {
     let mut args = Args {
         map: None,
         config: PathBuf::from(DEFAULT_CONFIG),
+        odom_topic: firefly_pubsub::publish::ODOM_TOPIC.to_string(),
     };
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -52,6 +54,11 @@ fn parse_args() -> Result<Args> {
                 args.map = Some(PathBuf::from(it.next().ok_or_else(|| {
                     Error::new(ErrorKind::InvalidArgument, "missing --map value")
                 })?));
+            }
+            "--odom-topic" => {
+                args.odom_topic = it.next().ok_or_else(|| {
+                    Error::new(ErrorKind::InvalidArgument, "missing --odom-topic value")
+                })?;
             }
             "--config" => {
                 args.config = PathBuf::from(it.next().ok_or_else(|| {
@@ -177,7 +184,7 @@ struct App {
 
 impl App {
     #[allow(clippy::needless_pass_by_value)]
-    fn new(map_file: MapFile, cfg: LocalizationConfig) -> Result<Self> {
+    fn new(map_file: MapFile, cfg: LocalizationConfig, odom_topic: &str) -> Result<Self> {
         let fusion = FusionFilter::new(cfg.fusion);
         let reloc = match GlobalRelocalizer::from_map_file(&map_file, cfg.reloc) {
             Ok(r) => {
@@ -190,9 +197,9 @@ impl App {
             }
         };
         let node = create_node()?;
-        let odom_sub = match OdomSubscriber::new(&node) {
+        let odom_sub = match OdomSubscriber::with_topic(&node, odom_topic) {
             Ok(s) => {
-                log::info!("已订阅 odom 话题（VIO 状态源）");
+                log::info!("已订阅 odom 话题（{odom_topic}，VIO/VOID 状态源）");
                 Some(s)
             }
             Err(e) => {
@@ -372,7 +379,9 @@ fn main() {
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("{e}\n用法：gicp [--map <map.ffmap>] [--config configs/gicp.toml]");
+            eprintln!(
+                "{e}\n用法：gicp [--map <map.ffmap>] [--config configs/gicp.toml] [--odom-topic Firefly/Odometry]"
+            );
             std::process::exit(2);
         }
     };
@@ -403,7 +412,7 @@ fn main() {
             mujoco_map_file()
         }
     };
-    let mut app = match App::new(map_file, cfg) {
+    let mut app = match App::new(map_file, cfg, &args.odom_topic) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("初始化失败：{e}");
