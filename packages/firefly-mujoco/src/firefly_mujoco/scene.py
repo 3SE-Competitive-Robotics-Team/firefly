@@ -5,13 +5,10 @@
 
 布局（单位 m）：
 - 围墙：四边，高 3m、厚 0.4m（视觉远景 + 安全边界）。
-- 南北箱带：y∈{2.5,4.5} / {15.5,17.5}，x 每 3.5m 一列（8 列），
-  层高按 (列+行)%3 轮换（单层 0.6m、双层 1.1m、三层 1.7m），0.5m 见方。
-- 走廊侧轨：y=7.5/12.5（中线 y=10 两侧 2.5m，深度量程内横向锚），
-  x 每 3.1m 一根（±0.5m 确定性抖动破重复结构），2/3 层轮换。
-- 中线矮箱：y=8.5，x∈{10,14,18,22,26}，单层 0.6m。
-- 东端箱：(32,8.5)/(32,11.5)，三层 1.7m（掉头旋转全向特征）。
-- 飞行净空：走廊 y=10 线 ±2m、掉头点 B=(30,10)/S=(1,10) 半径 2m 内无箱。
+- 乡镇建筑：主街（y=10，A→B 航线）两侧抖动网格撒点，高低错落
+  （单层 0.6m、双层 1.1m、三层 1.7m 加权随机），半宽 0.2/0.25/0.3m
+  随机，55% 落点（留空=广场），偶尔 L 形双栋；南北不对称。
+- 飞行净空：主街半宽 2.5m、掉头点 B=(30,10)/S=(1,10) 半径 3m 内无箱。
 
 灯光约定：**全部用方向光**（`type="directional"`，无距离衰减，全程均匀）。
 
@@ -82,72 +79,78 @@ _DOTS_PATH = _ensure_dots_texture()
 # 场地尺寸（m）
 FIELD_X = 34.0
 FIELD_Y = 20.0
-# 箱带列/行（m）
-_BOX_COLS = (6.0, 9.5, 13.0, 16.5, 20.0, 23.5, 27.0, 30.0)
-_BOX_ROWS = (2.5, 4.5, 15.5, 17.5)
-# 中线矮箱（m）
-_MID_ROW = (10.0, 14.0, 18.0, 22.0, 26.0)
-_MID_Y = 8.5
-# 走廊侧轨：y=7.5/12.5（中线 y=10 两侧 2.5m，深度量程内横向锚），x 每
-# 3.1m 一根（±0.5m 确定性抖动破重复结构），层高 2/3 轮换（顶面超巡航，
-# 下倾相机可见侧面）。掉头点 B=(30,10)/S=(1,10) 原地旋转，2m 内无箱。
-_RAIL_X0 = 3.0
-_RAIL_DX = 3.1
-_RAIL_N = 10
-_RAIL_YS = (7.5, 12.5)
-_RAIL_JITTER = (0.3, -0.4, 0.5, -0.2, 0.4, -0.5, 0.2, -0.3, 0.5, -0.1)
-# 东端箱（掉头点前方结构，掉头旋转时提供全向特征）
-_END_BOXES = ((32.0, 8.5), (32.0, 11.5))
+# 主街：y=10（A→B 航线），半宽 2.5m 内不摆箱；掉头点 S=(1,10)/B=(30,10)
+# 半径 3m 内不摆箱；围墙内收 0.8m。
+STREET_Y = 10.0
+STREET_HALF = 2.5
+TURN_CLEAR = 3.0
+WALL_MARGIN = 0.8
+# 层高档（m）：0.6/1.1/1.7，高低错落
+_TOPS = (0.6, 1.1, 1.7)
+# 乡镇随机种子（确定性：各进程/各次运行同一布局）
+_TOWN_SEED = 20260905
+
+
+def _town_boxes() -> list[tuple[float, float, float, float]]:
+    """乡镇建筑：[(x, y, 层数 1/2/3, 半宽)]。
+
+    主街两侧抖动网格撒点（~2.8m 步距，55% 落点率，留空=广场），每点
+    1 栋（偶尔 L 形双栋），半宽 0.2/0.25/0.3 随机，层高加权随机。
+    南北不对称（不镜像），天然破走廊对称。
+    """
+    rng = np.random.default_rng(_TOWN_SEED)
+    out: list[tuple[float, float, float, float]] = []
+    gx = np.arange(2.0, FIELD_X - 1.0, 2.8)
+    gy = np.arange(2.0, FIELD_Y - 1.0, 2.8)
+    for bx in gx:
+        for by in gy:
+            x = float(bx + rng.uniform(-0.7, 0.7))
+            y = float(by + rng.uniform(-0.7, 0.7))
+            if abs(y - STREET_Y) < STREET_HALF:
+                continue  # 主街净空
+            if np.hypot(x - 1.0, y - STREET_Y) < TURN_CLEAR:
+                continue  # 西掉头净空
+            if np.hypot(x - 30.0, y - STREET_Y) < TURN_CLEAR:
+                continue  # 东掉头净空
+            if not (WALL_MARGIN < x < FIELD_X - WALL_MARGIN):
+                continue
+            if not (WALL_MARGIN < y < FIELD_Y - WALL_MARGIN):
+                continue
+            if rng.random() > 0.55:
+                continue  # 留空广场
+            n = int(rng.choice([1, 2, 3], p=[0.35, 0.35, 0.30]))
+            hw = float(rng.choice([0.2, 0.25, 0.3]))
+            out.append((x, y, n, hw))
+            if rng.random() < 0.2:  # L 形第二栋
+                x2 = x + hw * 2.0 + 0.3
+                y2 = y + float(rng.uniform(-0.5, 0.5))
+                if (
+                    abs(y2 - STREET_Y) >= STREET_HALF
+                    and np.hypot(x2 - 1.0, y2 - STREET_Y) >= TURN_CLEAR
+                    and np.hypot(x2 - 30.0, y2 - STREET_Y) >= TURN_CLEAR
+                    and WALL_MARGIN < x2 < FIELD_X - WALL_MARGIN
+                    and WALL_MARGIN < y2 < FIELD_Y - WALL_MARGIN
+                ):
+                    n2 = int(rng.choice([1, 2, 3], p=[0.35, 0.35, 0.30]))
+                    out.append((x2, y2, n2, hw))
+    return out
+
+
+_TOWN = _town_boxes()
 # 每层 (z 中心, 半高)：单层 0.3/0.3、二层 0.7/0.4、三层 1.2/0.5
 _BOX_LAYER_GEOM = ((0.3, 0.3), (0.7, 0.4), (1.2, 0.5))
 
 
-def _layer_count(ci: int, ri: int) -> int:
-    """箱带层数：(列+行)%3 轮换 1/2/3 层（近矮远高错落）。"""
-    return (ci + ri) % 3 + 1
-
-
 def _boxes_xml() -> str:
-    """箱带（多层）+ 中线矮箱（单层）+ 走廊侧轨（2/3 层）+ 东端箱，
-    交替 pillar_a/pillar_b 材质。"""
+    """乡镇建筑：按 `_town_boxes` 逐层出 geom，交替 pillar_a/pillar_b 材质。"""
     out = []
-    for ci, x in enumerate(_BOX_COLS):
-        for ri, y in enumerate(_BOX_ROWS):
-            n = _layer_count(ci, ri)
-            mat = "pillar_a" if (ci + ri) % 2 == 0 else "pillar_b"
-            for z, half in _BOX_LAYER_GEOM[:n]:
-                out.append(
-                    f'    <geom type="box" pos="{x} {y} {z}" '
-                    f'size="0.25 0.25 {half}" material="{mat}"/>'
-                )
-    for x in _MID_ROW:
-        mat = "pillar_a" if int(x) % 2 == 0 else "pillar_b"
-        z, half = _BOX_LAYER_GEOM[0]
-        out.append(
-            f'    <geom type="box" pos="{x} {_MID_Y} {z}" '
-            f'size="0.25 0.25 {half}" material="{mat}"/>'
-        )
-    for i in range(_RAIL_N):
-        x = _RAIL_X0 + i * _RAIL_DX + _RAIL_JITTER[i]
-        n = 2 + (i % 2)  # 2/3 层轮换（顶 1.1/1.7m）
-        for j, y in enumerate(_RAIL_YS):
-            mat = "pillar_a" if (i + j) % 2 == 0 else "pillar_b"
-            for z, half in _BOX_LAYER_GEOM[:n]:
-                out.append(
-                    f'    <geom type="box" pos="{x:.1f} {y} {z}" '
-                    f'size="0.25 0.25 {half}" material="{mat}"/>'
-                )
-    for x, y in _END_BOXES:
-        z, half = _BOX_LAYER_GEOM[1]  # 双层 1.1m
-        out.append(
-            f'    <geom type="box" pos="{x} {y} {z}" '
-            f'size="0.25 0.25 {half}" material="pillar_a"/>'
-        )
-        z2, half2 = _BOX_LAYER_GEOM[2]  # 三层顶 1.7m
-        out.append(
-            f'    <geom type="box" pos="{x} {y} {z2}" '
-            f'size="0.25 0.25 {half2}" material="pillar_b"/>'
-        )
+    for i, (x, y, n, hw) in enumerate(_TOWN):
+        mat = "pillar_a" if i % 2 == 0 else "pillar_b"
+        for z, half in _BOX_LAYER_GEOM[:n]:
+            out.append(
+                f'    <geom type="box" pos="{x:.2f} {y:.2f} {z}" '
+                f'size="{hw} {hw} {half}" material="{mat}"/>'
+            )
     return "\n".join(out)
 
 
