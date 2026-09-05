@@ -407,10 +407,3 @@ def get_trajectory(name: str) -> Trajectory:
     except KeyError:
         available = ", ".join(sorted(TRAJECTORIES))
         raise ValueError(f"未知轨迹实例 {name!r}（可用：{available}）") from None
-
-
-def trajectory_yaw(traj, t):
-    fn = getattr(traj, "yaw", None)
-    if fn is None:
-        return 0.0, 0.0
-    return fn(t)
