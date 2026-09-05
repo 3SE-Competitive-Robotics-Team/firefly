@@ -88,7 +88,7 @@ WALL_MARGIN = 0.8
 # 层高种子随机（南北不同种子，不对称），高低错落。
 _ARRAY_SOUTH = (4.0, 30.0, 2.0, 7.0)
 _ARRAY_NORTH = (4.0, 30.0, 13.0, 18.0)
-_ARRAY_STEP = 1.3
+_ARRAY_STEP = 1.0
 _ARRAY_SEED_SOUTH = 11
 _ARRAY_SEED_NORTH = 77
 # 层高档（m）：0.6/1.1/1.7
