@@ -547,6 +547,16 @@ impl VioManager {
                 .collect();
             let recent = self.voxel_map.recent_voxels(&queries, self.state.timestamp);
             let selected = self.voxel_map.select(&recent);
+            log::debug!(
+                "体素选点 t={:.2} 候选={} 查询={} 可见体素={} 选中={} 索引={}点/{}体素",
+                self.state.timestamp,
+                feats_slam_update.len(),
+                queries.len(),
+                recent.len(),
+                selected.len(),
+                self.voxel_map.num_points(),
+                self.voxel_map.num_voxels()
+            );
             if selected.is_empty() {
                 log::warn!("体素选空（索引冷启动？），回落全量 SLAM 更新");
             } else {
