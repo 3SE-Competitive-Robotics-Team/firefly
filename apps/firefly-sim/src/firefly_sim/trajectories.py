@@ -18,6 +18,9 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 
+#: 去程横向蛇形幅值（m）：0 = 直线（正常任务）；>0 = 偏航可观性对照实验。
+WEAVE_AMP = 0.0
+
 
 @runtime_checkable
 class Trajectory(Protocol):
@@ -85,14 +88,23 @@ class UTurnTrajectory:
     period: float
 
     def _pos(self, t: float) -> tuple[np.ndarray, np.ndarray]:
-        """位置/速度分段：悬停-直线-悬停转-直线-悬停转-悬停。"""
+        """位置/速度分段：悬停-直线-悬停转-直线-悬停转-悬停。
+
+        诊断开关 `WEAVE_AMP`：去程叠加横向正弦（偏航可观性对照实验，
+        正常任务设 0）。
+        """
         s = np.array([float(self.start[0]), float(self.start[1]), self.cruise_z])
         b = np.array([self.x_far, float(self.start[1]), self.cruise_z])
         z = np.zeros(3)
         if t < self.t_go:
             return s.copy(), z
         if t < self.t_arrive:
-            return self._straight(t, self.t_go, self.t_arrive, s, b)
+            pos, vel = self._straight(t, self.t_go, self.t_arrive, s, b)
+            if WEAVE_AMP > 0.0:
+                phase = 2.0 * np.pi * 3.0 * (pos[0] - s[0]) / (b[0] - s[0])
+                pos[1] += WEAVE_AMP * np.sin(phase)
+                vel[1] += WEAVE_AMP * (2.0 * np.pi * 3.0 / (b[0] - s[0])) * np.cos(phase) * vel[0]
+            return pos, vel
         if t < self.t_turned:
             return b.copy(), z
         if t < self.t_back:

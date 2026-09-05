@@ -11,7 +11,7 @@
 //!   `void/map_points` 采样点、`void/health` 深度内点/视觉迭代标量），
 //!   统一 `sim_time` 时间轴，经 `Firefly/Viz` 话题由 `firefly-viz` 进程
 //!   统一写 rerun（计算线程零 IO）。
-//! - 初始位姿：`configs/void.toml` 的 `t0`（缺省 `[1.0,4.0,1.0]`，与
+//! - 初始位姿：`configs/void.toml` 的 `t0`（缺省 `[1.0,10.0,1.0]`，与
 //!   `SIM_START` 一致），启动时写入状态。
 //! - `node.wait(1ms)` 节拍尽快消费消息，Ctrl-C 优雅退出（端口 Drop，
 //!   iceoryx2 无幽灵服务残留）。
