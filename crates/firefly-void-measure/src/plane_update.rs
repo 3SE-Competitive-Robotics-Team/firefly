@@ -20,11 +20,9 @@
 use firefly_void_esikf::update::MeasurementModel;
 use firefly_void_map::voxel::{VoxelMap, transform_point};
 use firefly_void_types::state::{DIM_STATE, State};
-use firefly_void_types::visual::Intrinsics;
 use nalgebra::{DMatrix, DVector, Isometry3, Matrix3, Vector3};
 use std::cell::Cell;
 
-use crate::noise::DepthNoise;
 use crate::options::DepthOptions;
 use crate::planar::{PlaneQuery, match_plane};
 
@@ -94,43 +92,6 @@ impl<'a> DepthMeasurement<'a> {
             opts,
             last_diag: Cell::new(DepthDiag::default()),
         }
-    }
-
-    /// 由深度图反投影构造（逐像素反投影，`depth ≤ 0.05` 的空洞丢弃）。
-    ///
-    /// 反投影：`p_cam = ((u−cx)/fx, −(v−cy)/fy, 1)·z`（像素 v 向下 →
-    /// OpenGL 相机系 y 向上）；协方差由
-    /// [`DepthNoise::point_covariance`] 给出（含 `σ∝z²` 与空洞邻域项）。
-    #[must_use]
-    pub fn from_depth_frame(
-        map: &'a VoxelMap,
-        depth: &[f64],
-        width: usize,
-        height: usize,
-        intrinsics: Intrinsics,
-        ext: Isometry3<f64>,
-        opts: DepthOptions,
-    ) -> Self {
-        let noise = DepthNoise::from_intrinsics(&opts, intrinsics.fx, intrinsics.fy);
-        let mut points_l = Vec::new();
-        let mut covs = Vec::new();
-        for y in 0..height {
-            for x in 0..width {
-                let z = depth[y * width + x];
-                if z <= 0.05 || !z.is_finite() {
-                    continue;
-                }
-                // 针孔反投影（与 Intrinsics::unproject 同约定，无镜像）
-                let p = Vector3::new(
-                    (x as f64 - intrinsics.cx) / intrinsics.fx * z,
-                    -(y as f64 - intrinsics.cy) / intrinsics.fy * z,
-                    z,
-                );
-                covs.push(noise.point_covariance(&p));
-                points_l.push(p);
-            }
-        }
-        Self::new(map, points_l, covs, ext, opts)
     }
 
     /// 有效点数（上次 `residual` 计算后的有效平面点数）。
@@ -255,6 +216,7 @@ impl MeasurementModel for DepthMeasurement<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::noise::DepthNoise;
     use firefly_void_map::VoxelMap;
     use firefly_void_map::options::VoxelMapOptions;
     use firefly_void_types::state::ErrorState;
