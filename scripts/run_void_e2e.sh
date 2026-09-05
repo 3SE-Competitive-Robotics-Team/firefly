@@ -86,10 +86,7 @@ run_one_round() {
     sleep 0.2
   done
 
-  echo "[e2e][run $i] 启动 void"
-  # 等 sim 跑 3s（PD 启动瞬态结束）再起 void：瞬态中纯 IMU 传播
-  # + 测量未建立会累积初始漂移（实测 0-2s 偏差 ~0.2m 直接进 ATE）
-  sleep 3
+  echo "[e2e][run $i] 启动 void（与 sim 同时起；启动互锁代替 sleep 等待）"
   nohup env RUST_LOG=info cargo run --release -p void > "$run_dir/void.log" 2>&1 &
   void_pid=$!
 

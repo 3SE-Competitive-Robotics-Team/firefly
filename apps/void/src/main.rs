@@ -43,6 +43,20 @@ pub const VOID_ODOM_TOPIC: &str = "Firefly/VoidOdom";
 
 /// odom 发布周期（秒）。
 const ODOM_PERIOD: f64 = 0.1;
+/// GT 等待 failsafe（秒）：GT 是硬依赖（初始位姿+速度），无 GT 无法启动；
+/// 超时报错退出（sim 侧 15s 无 ready 超时先触发，双保险）。
+const GT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// 就绪判据：最少处理帧数（10Hz 下 2s 数据，地图攒够平面）。
+const READY_MIN_FRAMES: u64 = 20;
+/// 就绪判据：近窗帧数（视觉健康率统计窗）。
+const READY_WINDOW: usize = 20;
+/// 就绪判据：近窗视觉健康率下限。
+const READY_VIS_RATIO: f64 = 0.8;
+/// 就绪判据：P-trace 上限（状态协方差迹，滤波收敛程度）。
+/// 标定（悬停实测 ready-probe：初值 0.09，4 帧后 ~0.002 并钉死；
+/// 取 0.01，5 倍余量——只拦未收敛，不卡正常启动；帧数门（20 帧）
+/// 才是主约束，约 2s 数据）。
+const READY_PTRACE_MAX: f64 = 0.01;
 /// rerun 图例颜色：void=橙（与 vio 估计一致）、地图点=绿。
 const ODOM_COLOR: (u8, u8, u8) = (255, 140, 0);
 const MAP_COLOR: (u8, u8, u8) = (80, 220, 120);
@@ -98,11 +112,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     };
-    // 启动姿态初始化：等待首条 GT（≤2s），用真值姿态对齐世界系。
+    // 启动姿态初始化：等待首条 GT，用真值姿态对齐世界系。
     // 仅靠水平先验 + t0 时，悬停无人机的微小初始倾斜会被深度/视觉残差
     // 吸收进 bias（bg 漂到 0.007 rad/s），位置随后被拉偏（实测随机 0.2~1.6m）。
+    // GT 是硬依赖：无超时妥协，等不到就报错退出（sim 侧 15s 无 ready
+    // 超时先触发；这里 30s 是双保险，防 sim 已死 void 空转）。
     if let Some(gt) = &gt_sub {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + GT_WAIT_TIMEOUT;
+        let mut got = false;
         while std::time::Instant::now() < deadline {
             let Ok(Some(sample)) = gt.receive() else {
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -140,7 +157,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 m.quat_z,
                 m.quat_w
             );
+            got = true;
             break;
+        }
+        if !got {
+            return Err("GT 等待超时（30s 无真值输入，sim 可能未启动）".into());
         }
     }
 
@@ -198,6 +219,11 @@ fn run_loop(
     let mut est_prev: Option<[f64; 3]> = None;
     let t_wall_start = std::time::Instant::now();
     let mut next_diag_wall = DIAG_PERIOD;
+    // 就绪状态机（启动互锁）：GT 初始化完成后仍需地图成熟 + 滤波收敛，
+    // 条件满足前 odom 的 is_initialized=false，sim 原地悬停等待，
+    // 不以定时器猜收敛。
+    let mut ready = false;
+    let mut vis_window: std::collections::VecDeque<bool> = std::collections::VecDeque::new();
 
     // 事件唤醒端：IMU + 相机对（notify 来自 sim；VoidOdom 由发布器自动通知）
     let imu_events = TopicListener::with_topic(node, firefly_pubsub::imu::IMU_TOPIC)?;
@@ -293,6 +319,10 @@ fn run_loop(
                     if out.visual_healthy {
                         visual_ok_frames += 1;
                     }
+                    vis_window.push_back(out.visual_healthy);
+                    while vis_window.len() > READY_WINDOW {
+                        vis_window.pop_front();
+                    }
                     if out.prior_inliers > 0 {
                         prior_active_frames += 1;
                         prior_kept_sum += out.prior_inliers as u64;
@@ -373,7 +403,28 @@ fn run_loop(
         if t_sim + 1e-9 >= next_odom {
             odom_count += 1;
             let s = odom.state();
-            publish_odom(odom_pub, t_sim, s, odom);
+            // 就绪判定（条件门，非定时）：帧数 + 近窗视觉健康率 + P-trace。
+            // 标定探针（debug 常驻）：未定阈值前先看实测分布。
+            let ptrace = s.cov.trace();
+            let vis_ratio = if vis_window.is_empty() {
+                0.0
+            } else {
+                vis_window.iter().filter(|&&v| v).count() as f64 / vis_window.len() as f64
+            };
+            log::debug!(
+                "ready-probe frames={frame_count} ptrace={ptrace:.4} vis_ratio={vis_ratio:.2} ready={ready}"
+            );
+            if !ready
+                && frame_count >= READY_MIN_FRAMES
+                && vis_ratio >= READY_VIS_RATIO
+                && ptrace < READY_PTRACE_MAX
+            {
+                ready = true;
+                log::info!(
+                    "估计器就绪（frames={frame_count} ptrace={ptrace:.4} vis_ratio={vis_ratio:.2}）：sim 可启动任务时钟"
+                );
+            }
+            publish_odom(odom_pub, t_sim, s, odom, ready);
             // 可视化：位姿 + 轨迹折线 + 地图点采样 @10Hz（位姿用机体系，
             // 与 odom 发布一致）
             {
@@ -432,6 +483,7 @@ fn publish_odom(
     t_sim: f64,
     state: &firefly_void_types::state::State,
     odom: &VoidOdometry,
+    initialized: bool,
 ) {
     let r_bv = odom
         .body_ext()
@@ -449,7 +501,9 @@ fn publish_odom(
         quat_y: q.j,
         quat_z: q.k,
         quat_w: q.w,
-        is_initialized: true,
+        // 就绪门：收敛前为 false，sim 侧据此悬停等待（电平触发，非边沿，
+        // 晚订阅者在 100ms 内必收到 true，不存在竞态）。
+        is_initialized: initialized,
     };
     match odom_pub.publish(msg) {
         Ok(ctx) => {

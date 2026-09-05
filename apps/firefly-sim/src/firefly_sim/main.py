@@ -40,6 +40,11 @@ TOPIC_CAM_PAIR = "Firefly/CameraPair"
 TOPIC_DEPTH = "Firefly/Depth"
 TOPIC_GT = "Firefly/GroundTruth"
 TOPIC_REF = "Firefly/Reference"
+#: VOID 里程计（启动互锁：任务时钟等它首个 is_initialized=true 才走）
+TOPIC_VOIDODOM = "Firefly/VoidOdom"
+#: 任务启动超时（秒）：上电后无 ready 则报错退出（fail loudly），
+#: 不静默起飞。VOOD/C++ 侧 GT 等待 30s 是双保险，这里先触发。
+MISSION_TIMEOUT = 15.0
 
 #: 事件 id：「该话题有新样本」（与 Rust event::EVENT_ID_SENT_SAMPLE 一致）
 EVENT_ID_SENT_SAMPLE = 0
@@ -146,6 +151,9 @@ def main() -> None:
     depth_pub = _publisher(node, TOPIC_DEPTH, DepthImageMessage)
     gt_pub = _publisher(node, TOPIC_GT, OdomMessage)
     ref_sub = _subscriber(node, TOPIC_REF, ReferenceMessage)
+    # 启动互锁订阅（--script 模式）：VOID 就绪电平（is_initialized），
+    # 任务时钟据此启动；电平（非边沿）语义——晚订阅 100ms 内必收到。
+    void_sub = _subscriber(node, TOPIC_VOIDODOM, OdomMessage)
     imu_notify = _notifier(node, TOPIC_IMU)
     cam_notify = _notifier(node, TOPIC_CAM_PAIR)
     log("iceoryx2 已就绪：发布 IMU/双目/深度/真值（带事件唤醒），订阅参考")
@@ -154,6 +162,11 @@ def main() -> None:
     ref_pos = start_pos
     ref_vel = np.zeros(3)
     got_ref = False
+    # 任务时钟（--script 模式）：None = 等 VOID 就绪中，原地悬停；
+    # 收到首个 is_initialized=true  latch 为当前仿真时刻，此后轨迹
+    # 时间 = sim 时间 - 任务起点（t_go 等起飞等待相对任务起点，不含
+    # 启动不定耗时——三个旧定时器退役的落点）。
+    mission_t0 = None
 
     cycle = None
     next_imu = 0.0
@@ -175,9 +188,26 @@ def main() -> None:
 
             # 控制 + 物理步进
             if script_mode:
-                # 脚本化参考：按仿真时刻给出平滑 pos/vel；实例满足周期连续
-                # 不变量（见 trajectories.py），长跑直接用连续时间即可
-                ref_pos, ref_vel = trajectory.ref(env.time)
+                # 启动互锁：先排空 VOID 状态，有 ready 就 latch 任务起点；
+                # 超时无 ready 则报错退出（fail loudly）。
+                if mission_t0 is None:
+                    while (sample := void_sub.receive()) is not None:
+                        if sample.payload().contents.is_initialized:
+                            mission_t0 = env.time
+                            log(f"VOID 就绪，任务时钟启动 t0={mission_t0:.2f}")
+                            break
+                    if mission_t0 is None and env.time > MISSION_TIMEOUT:
+                        sys.exit(
+                            "[firefly-sim] 任务启动超时：15s 未收到 VOID ready "
+                            "（void 是否存活？iceoryx2 是否残留幽灵服务？）"
+                        )
+                if mission_t0 is None:
+                    # 未就绪：原地悬停（位置=起点，速度=0）
+                    ref_pos, ref_vel = start_pos, np.zeros(3)
+                else:
+                    # 脚本化参考：按任务时刻给出平滑 pos/vel；实例满足周期连续
+                    # 不变量（见 trajectories.py），长跑直接用连续时间即可
+                    ref_pos, ref_vel = trajectory.ref(env.time - mission_t0)
             env.apply_pd(ref_pos, ref_vel)
             env.step()
             # 失稳守卫：MuJoCo 发散（QACC NaN/Inf）后状态永久污染且传感器
