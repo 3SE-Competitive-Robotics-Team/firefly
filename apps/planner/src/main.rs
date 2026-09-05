@@ -164,7 +164,7 @@ fn parse_args() -> Result<Args> {
     let mut args = Args {
         map: None,
         config: PathBuf::from(DEFAULT_CONFIG),
-        start: [1.0, 10.0, 1.0],
+        start: [1.0, 4.0, 1.0],
         // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
         goal: None,
         frame_offset: [0.0, 0.0, 0.0],

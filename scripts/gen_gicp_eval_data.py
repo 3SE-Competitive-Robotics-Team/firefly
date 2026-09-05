@@ -3,9 +3,8 @@
 
 - 先验云：解析 MuJoCo SCENE_XML（box 外表面 + 地面），0.08m 采样，
   与 export_prior_planes.py 同几何源。
-- 轨迹帧：logs/bench/void_gicp/<traj>/run1 GT（新场地联合 bench 数据，
-  先跑出 e2e 数据再生成），每 2s 取一位姿（位置真值 + 水平姿态），
-  MuJoCo 直接摆位渲染深度（含默认噪声，诚实口径）。
+- 轨迹帧：logs/bench/ff_fix/<traj>/run1 GT，每 2s 取一位姿（位置真值 +
+  水平姿态），MuJoCo 直接摆位渲染深度（含默认噪声，诚实口径）。
 - 输出 logs/bench/gicp_eval/：prior_cloud.bin（u64 条数 + f32 xyz），
   frames/<traj>_<idx>.bin（u64 W, u64 H + f32 depth + f64 xyz）。
 
@@ -29,9 +28,17 @@ from firefly_mujoco.scene import SCENE_XML  # noqa: E402
 
 OUT = REPO_ROOT / "logs" / "bench" / "gicp_eval"
 TRAJS = [
-    "outback_base",
-    "outback_fast",
-    "outback_low",
+    "straight_forward",
+    "ff_cross",
+    "ff_zigzag",
+    "ff_sway",
+    "ff_spiral",
+    "ff_climb",
+    "ff_fast",
+    "ff_low",
+    "ff_diag",
+    "ff_estop",
+    "ff_laps",
 ]
 
 
@@ -90,7 +97,7 @@ def main() -> None:
     env = DroneEnv()  # 默认噪声（depth_noise=0.02）：诚实口径
     n_frames = 0
     for traj in TRAJS:
-        run = REPO_ROOT / "logs" / "bench" / "void_gicp" / traj / "run1"
+        run = REPO_ROOT / "logs" / "bench" / "ff_fix" / traj / "run1"
         gt = np.load(run / "gt.npy")
         gtt = np.load(run / "gt_t.npy")
         t = gtt[0]

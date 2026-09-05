@@ -1,20 +1,23 @@
-"""firefly 无人机 MuJoCo 场景（MJCF）：矩形围墙场 + 错落箱阵。
+"""firefly 无人机 MuJoCo 场景（MJCF）。
 
-世界系：x∈[0,34]（长边）、y∈[0,20]（短边），篮球场（28×15）放大版。
-无人机起点 (1,10,1)（西底线中点内 1m），沿 +x 飞往东底线后掉头返回。
+世界系 = demo 地图系：无人机起点 (1, 4, 1)，沿 +x 飞行到目标。
+相机（双目 + 深度）前向 +x，给 KLT 提供特征。
 
-布局（单位 m）：
-- 围墙：四边，高 3m、厚 0.4m（视觉远景 + 安全边界）。
-- 箱阵列（老场景同款）：主街（y=10）南北两块，1.3m 网格 0.5m 见方盒，
-  层高种子随机（单层 0.6m、双层 1.1m、三层 1.7m），南北不同种子。
-- 飞行净空：主街半宽 2.5m、掉头点 B=(30,10)/S=(1,10) 半径 3m 内无箱。
+灯光约定：**全部用方向光**（`type="directional"`）。此前用带 `pos` 的默认
+定点光，光强随距离衰减——无人机沿 +x 飞到 27m 后地面亮度从均值 42 跌到
+10（近乎全黑）。方向光无距离衰减，全程光照均匀（实测地面均值 140~160，
+无饱和），保证整条任务路径上双目/深度画面可读。
 
-灯光约定：**全部用方向光**（`type="directional"`，无距离衰减，全程均匀）。
-
-纹理约定（近场特征密度）：
-- **非周期随机点阵**：周期棋盘会让 LK 整周期滑动而残差不变（毒数据），
-  随机纹理无此问题。多尺度随机矩形在大中小距离段都提供 FAST 角点。
-- 地面 4m/格；立柱/箱体靠不同 texrepeat 区分表观尺度。
+纹理约定（近场特征密度，AGENTS.md VIO 调试状态）：
+- **非周期随机点阵**替代棋盘：棋盘是周期图案，LK 可整周期滑动而残差
+  不变——滑格错配不会被 χ² 拒绝，作为毒数据进入更新；随机纹理无周期
+  可滑。多尺度随机矩形在大中小三个距离段都提供 FAST 角点。
+- 地面 texrepeat 8（一格 8.75m，纹素 ~117px/m）；掠射角下 10m 外地面
+  纵向压缩到个位像素行是透视固有属性，近场 <8m 才是有效特征区。
+- **`--script` VIO 验证轨迹**（x∈[-2,4]、y∈[3,5] 盒内振荡）够不到中线
+  立柱（x≥9），故在盒外两侧加 6 根 3m 高柱：前飞时始终有柱在 2~8m 内
+  入画（水平半 FOV≈43°，横向 2.5m 的柱从 ~2.7m 前方起可见），且柱顶
+  （z=3m）在 5m 处仰角 ~22°，填充上半幅视野。demo 默认地图已同步。
 """
 
 import struct
@@ -75,85 +78,37 @@ def _ensure_dots_texture() -> Path:
 
 _DOTS_PATH = _ensure_dots_texture()
 
-# 场地尺寸（m）
-FIELD_X = 34.0
-FIELD_Y = 20.0
-# 主街：y=10（A→B 航线），半宽 2.5m 内不摆箱；掉头点 S=(1,10)/B=(30,10)
-# 半径 3m 内不摆箱；围墙内收 0.8m。
-STREET_Y = 10.0
-STREET_HALF = 2.5
-TURN_CLEAR = 3.0
-WALL_MARGIN = 0.8
-# 箱阵列（老场景同款）：南北两块，1.3m 网格，0.5m 见方盒；
-# 层高种子随机（南北不同种子，不对称），高低错落。
-_ARRAY_SOUTH = (4.0, 30.0, 2.0, 7.0)
-_ARRAY_NORTH = (4.0, 30.0, 13.0, 18.0)
-_ARRAY_STEP = 1.0
-_ARRAY_SEED_SOUTH = 11
-_ARRAY_SEED_NORTH = 77
-# 层高档（m）：0.6/1.1/1.7
-_TOPS = (0.6, 1.1, 1.7)
-
-
-def _array_boxes() -> list[tuple[float, float, int]]:
-    """箱阵列：[(x, y, 层数 1/2/3)]。
-
-    南北两块，主街/掉头点/围墙净空（见上），块内 1.3m 网格 + ±0.3m
-    抖动，层高种子随机（0.4/0.35/0.25），落点率 85%。
-    """
-    out: list[tuple[float, float, int]] = []
-    for x0, x1, y0, y1, seed in (
-        (*_ARRAY_SOUTH, _ARRAY_SEED_SOUTH),
-        (*_ARRAY_NORTH, _ARRAY_SEED_NORTH),
-    ):
-        rng = np.random.default_rng(seed)
-        gx = np.arange(x0, x1, _ARRAY_STEP)
-        gy = np.arange(y0, y1, _ARRAY_STEP)
-        for bx in gx:
-            for by in gy:
-                x = float(bx + rng.uniform(-0.3, 0.3))
-                y = float(by + rng.uniform(-0.3, 0.3))
-                if abs(y - STREET_Y) < STREET_HALF:
-                    continue
-                if np.hypot(x - 1.0, y - STREET_Y) < TURN_CLEAR:
-                    continue
-                if np.hypot(x - 30.0, y - STREET_Y) < TURN_CLEAR:
-                    continue
-                if rng.random() > 0.85:
-                    continue
-                n = int(rng.choice([1, 2, 3], p=[0.4, 0.35, 0.25]))
-                out.append((x, y, n))
-    return out
-
-
-_ARRAY = _array_boxes()
+# 前方错落箱子：5 列 × 5 行网格（x∈[5,9]、y∈[2,6]），层数近矮远高，最高
+# 1.7m——给下倾 20° 前视相机提供多高度垂直侧面（横向法向平面），深度测量
+# 可约束 x/y 切向（深度只约束法向，地面朝上只约束 z）。层高三档：
+# 单层 0.6m、双层 1.1m、三层 1.7m（第二/三层底面与下层重叠成阶梯）。
+_BOX_COLS = (5.0, 6.0, 7.0, 8.0, 9.0)
+_BOX_ROWS = (2.0, 3.0, 4.0, 5.0, 6.0)
+_BOX_LAYERS = (
+    (1, 1, 1, 1, 1),  # x=5 近处全单层
+    (1, 1, 2, 1, 1),  # x=6
+    (1, 2, 1, 2, 1),  # x=7
+    (2, 1, 3, 1, 2),  # x=8 中心三层
+    (1, 3, 2, 2, 2),  # x=9 远处最高
+)
 # 每层 (z 中心, 半高)：单层 0.3/0.3、二层 0.7/0.4、三层 1.2/0.5
 _BOX_LAYER_GEOM = ((0.3, 0.3), (0.7, 0.4), (1.2, 0.5))
 
 
 def _boxes_xml() -> str:
-    """箱阵列：按 `_array_boxes` 逐层出 geom，交替 pillar_a/pillar_b 材质。"""
+    """前方错落箱子：按 _BOX_LAYERS 层数 × _BOX_LAYER_GEOM 尺寸生成，
+    网格点交替 pillar_a/pillar_b 材质。"""
     out = []
-    for i, (x, y, n) in enumerate(_ARRAY):
-        mat = "pillar_a" if i % 2 == 0 else "pillar_b"
-        for z, half in _BOX_LAYER_GEOM[:n]:
-            out.append(
-                f'    <geom type="box" pos="{x:.2f} {y:.2f} {z}" '
-                f'size="0.25 0.25 {half}" material="{mat}"/>'
-            )
+    for ci, x in enumerate(_BOX_COLS):
+        for ri, y in enumerate(_BOX_ROWS):
+            n = _BOX_LAYERS[ci][ri]
+            mat = "pillar_a" if (ci + ri) % 2 == 0 else "pillar_b"
+            for z, half in _BOX_LAYER_GEOM[:n]:
+                out.append(
+                    f'    <geom type="box" pos="{x} {y} {z}" '
+                    f'size="0.25 0.25 {half}" material="{mat}"/>'
+                )
     return "\n".join(out)
-
-
-def _walls_xml() -> str:
-    """四周围墙：高 3m、厚 0.4m（东西墙沿 y、南北墙沿 x）。"""
-    return "\n".join(
-        [
-            '    <geom type="box" pos="0 10 1.5" size="0.2 10.0 1.5" material="pillar_a"/>',
-            '    <geom type="box" pos="34 10 1.5" size="0.2 10.0 1.5" material="pillar_a"/>',
-            '    <geom type="box" pos="17 0 1.5" size="17.0 0.2 1.5" material="pillar_b"/>',
-            '    <geom type="box" pos="17 20 1.5" size="17.0 0.2 1.5" material="pillar_b"/>',
-        ]
-    )
 
 
 SCENE_XML = rf"""
@@ -161,10 +116,10 @@ SCENE_XML = rf"""
   <option timestep="0.005" gravity="0 0 -9.81"/>
 
   <asset>
-    <!-- 非周期随机点阵（运行时生成，见模块 docstring）：地面与箱体共用
+    <!-- 非周期随机点阵（运行时生成，见模块 docstring）：地面与立柱共用
          一张纹理，靠不同 texrepeat 区分表观尺度 -->
     <texture name="dots" type="2d" file="{_DOTS_PATH}"/>
-    <material name="ground" texture="dots" texrepeat="10 6"/>
+    <material name="ground" texture="dots" texrepeat="8 8"/>
     <material name="pillar_a" texture="dots" texrepeat="2 2"/>
     <material name="pillar_b" texture="dots" texrepeat="4 4"/>
   </asset>
@@ -175,22 +130,48 @@ SCENE_XML = rf"""
     <light name="sun_b" type="directional" dir="-0.15 0.6 -0.78" diffuse="0.3 0.3 0.35"/>
     <light name="sun_c" type="directional" dir="0.75 0.1 -0.65" diffuse="0.22 0.22 0.25"/>
 
-    <!-- 地面（随机点阵：KLT 近场特征主要来源；覆盖全场+外延） -->
-    <geom name="ground" type="plane" pos="17 10 0" size="20 12 0.1" material="ground"/>
+    <!-- 地面（随机点阵：KLT 近场特征主要来源） -->
+    <geom name="ground" type="plane" size="35 35 0.1" material="ground"/>
 
-{_walls_xml()}
+    <!-- 沿途障碍（视觉特征 + 物理遮挡）：中线上一串孤立高柱（0.8~1.2m
+         见方，高 3m 无法飞越），逼无人机沿 y≈4 小幅左右蛇形绕行——绕行
+         单个立柱容易、不切连续墙角，规划器稳定可解（连续墙会使 MINCO
+         优化卡"stuck"，见 planner 维护项）。demo 默认地图与其同构。 -->
+    <geom type="box" pos="9  4.0 1.5" size="0.4 0.5 1.5" material="pillar_a"/>
+    <geom type="box" pos="12 6.5 1.0" size="0.4 0.7 1.0" material="pillar_b"/>
+    <geom type="box" pos="16 4.0 1.5" size="0.4 0.6 1.5" material="pillar_a"/>
+    <geom type="box" pos="19 1.8 0.9" size="0.4 0.5 0.9" material="pillar_b"/>
+    <geom type="box" pos="22 3.6 1.5" size="0.4 0.5 1.5" material="pillar_a"/>
 
+    <!-- VIO 验证盒两侧立柱：--script 轨迹在 x∈[-2,4]、y∈[3,5] 振荡，
+         中线立柱（x≥9）全程不可见。这 6 根柱在轨迹侧翼 |y-4|=2.5m
+         （柱缘距路径极端 ≥1.15m，PD 瞬态安全），前向相机在 2~8m 内
+         持续可见，为 MSCKF 更新提供带视差的近场特征。demo 默认地图
+         与其同构。 -->
+    <geom type="box" pos="0.5 1.5 1.5" size="0.35 0.35 1.5" material="pillar_a"/>
+    <geom type="box" pos="2.0 1.5 1.5" size="0.35 0.35 1.5" material="pillar_b"/>
+    <geom type="box" pos="3.5 1.5 1.5" size="0.35 0.35 1.5" material="pillar_a"/>
+    <geom type="box" pos="0.5 6.5 1.5" size="0.35 0.35 1.5" material="pillar_b"/>
+    <geom type="box" pos="2.0 6.5 1.5" size="0.35 0.35 1.5" material="pillar_a"/>
+    <geom type="box" pos="3.5 6.5 1.5" size="0.35 0.35 1.5" material="pillar_b"/>
+
+    <!-- 前方错落箱子（P10.6 实验）：轨迹前方 x∈[5,9] 的 25 箱高低天际线，
+         给下倾 20° 前视相机多高度垂直侧面 → 深度横向法向约束补 x/y。
+         净距：箱子区 x≥5，轨迹最远 x=4（净距 ≥1m）；最高 1.7m 与轨迹
+         z≤1.5 错开。demo 默认地图未同步（本实验专用）。 -->
 {_boxes_xml()}
 
     <!-- 无人机（freejoint 六自由度） -->
-    <body name="drone" pos="1 10 1">
+    <body name="drone" pos="1 4 1">
       <freejoint/>
       <geom type="box" size="0.15 0.15 0.04" rgba="0.90 0.70 0.20 1"/>
       <geom type="sphere" pos="0.25 0 0" size="0.06" rgba="0.80 0.20 0.20 1"/>
       <geom type="sphere" pos="-0.25 0 0" size="0.06" rgba="0.20 0.80 0.20 1"/>
-      <!-- 双目（横向基线 0.05m，沿 y 侧向分开；基线须与视线垂直，
-           前后分开的相机射线近乎共线 → 无侧向视差 → 立体失效）+ 深度相机，
-           前向 +x，上 +z -->
+      <!-- 双目（基线 0.1m）+ 深度相机，前向 +x，上 +z -->
+      <!-- 双目（横向基线 0.05m，沿 y 侧向分开，对照 Intel RealSense D430 的结构基线
+           50mm）+ 深度相机，前向 +x，上 +z。
+           注意：基线必须与视线垂直（横向），前后(y=0 沿 x)分开的相机射线
+           近乎共线 → 无侧向视差 → 立体无法解深度（VIO 三角化必败）。 -->
       <camera name="cam_left" pos="0 -0.025 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
       <camera name="cam_right" pos="0 0.025 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
       <camera name="cam_depth" pos="0 0 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
