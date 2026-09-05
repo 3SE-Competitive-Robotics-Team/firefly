@@ -43,7 +43,7 @@ const DEFAULT_CONFIG: &str = "configs/vio.toml";
 /// odom 发布周期（秒）。
 const ODOM_PERIOD: f64 = 0.1;
 /// `MuJoCo` 场景无人机起点（= demo 地图 start；GT 先验）。
-const SIM_START: [f64; 3] = [1.0, 10.0, 1.0];
+const SIM_START: [f64; 3] = [1.0, 4.0, 1.0];
 /// rerun 图例颜色：真值=蓝、估计=橙。
 const GT_COLOR: (u8, u8, u8) = (60, 120, 255);
 const ODOM_COLOR: (u8, u8, u8) = (255, 140, 0);

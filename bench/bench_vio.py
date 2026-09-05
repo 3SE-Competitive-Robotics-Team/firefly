@@ -8,7 +8,7 @@ via a dedicated viewer. Default (no --save-dir) is viewer-only, no file.
 
 Usage:
   uv run python bench/bench_vio.py --duration 34
-  uv run python bench/bench_vio.py --duration 34 --trajectory outback_base
+  uv run python bench/bench_vio.py --duration 34 --trajectory lissajous_wide
   uv run python bench/bench_vio.py --duration 34 --save-dir logs/bench
   uv run python bench/bench_vio.py --duration 10 --output logs/bench/bench_10s.json
   uv run python bench/bench_vio.py --duration 34 --turns 10
@@ -178,7 +178,7 @@ def run_bench(duration: float, save_dir: Path | None, output: Path, trajectory: 
     from firefly_mujoco.messages import ImuMessage, OdomMessage, TraceContext
 
     vio_bin = ensure_vio_built(find_vio_bin())
-    print(f"[bench] vio_bin={vio_bin} trajectory={trajectory or 'outback_base'}")
+    print(f"[bench] vio_bin={vio_bin} trajectory={trajectory or 'lissajous_classic'}")
 
     cleanup_iceoryx()
 
@@ -373,7 +373,7 @@ def run_bench(duration: float, save_dir: Path | None, output: Path, trajectory: 
     payload = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "duration_s": metrics["duration_s"],
-        "trajectory": trajectory or "outback_base",
+        "trajectory": trajectory or "lissajous_classic",
         "vio_bin": str(vio_bin),
         "save_dir": str(save_dir) if save_dir else None,
         "metrics": metrics,
@@ -394,7 +394,7 @@ def main():
     ap.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="json output (repo-local, default logs/bench/vio_bench.json)")
     ap.add_argument("--save-dir", type=Path, default=None, help="if set, launch dedicated viewer saving per-run isolated rrd to this dir (one file per turn, never single rrd)")
     ap.add_argument("--turns", type=int, default=1, help="number of turns to run sequentially (default 1); each turn is isolated, per-turn rrd not single file")
-    ap.add_argument("--trajectory", type=str, default=None, help="trajectory instance name (see firefly_sim.trajectories.TRAJECTORIES; default outback_base)")
+    ap.add_argument("--trajectory", type=str, default=None, help="trajectory instance name (see firefly_sim.trajectories.TRAJECTORIES; default lissajous_classic)")
     args = ap.parse_args()
     try:
         if args.turns <= 1:
