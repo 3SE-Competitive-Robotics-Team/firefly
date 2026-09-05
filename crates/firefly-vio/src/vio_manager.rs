@@ -16,6 +16,7 @@ use firefly_vio_core::propagation::{LinearizationPoint, MeanState, Propagator};
 use firefly_vio_core::sensor::{CameraData, ImuData};
 use firefly_vio_core::track::TrackKlt;
 use firefly_vio_types::var::Variable as _;
+use firefly_voxel_svio::VoxelMap;
 use nalgebra::{DMatrix, Vector3};
 use std::collections::BTreeMap;
 
@@ -43,6 +44,9 @@ pub struct VioManager {
     pub updater_msckf: UpdaterMsckf,
     /// SLAM 特征更新器。
     pub updater_slam: UpdaterSlam,
+    /// 体素地图（`voxel_options.enabled` 时与 `state.features_slam` 同步，
+    /// 为 SLAM 更新做可见体素选点；关闭时全程空置）。
+    pub voxel_map: VoxelMap,
     /// 初始化器（对照 C++ 的 `initializer`）。
     pub initializer: firefly_vio_init::inertial_init::InertialInitializer,
     /// 零速更新器（`try_zero_velocity` 开启时使用）。
@@ -81,6 +85,7 @@ impl VioManager {
             params.triangulation_options,
         );
         let init_options = params.init_options.clone();
+        let voxel_map = VoxelMap::new(params.voxel_options.clone());
         let updater_zero_velocity = if params.zero_velocity_options.try_zero_velocity {
             Some(UpdaterZeroVelocity::new(
                 params.msckf_options.clone(),
@@ -100,6 +105,7 @@ impl VioManager {
             track_feats: tracker,
             updater_msckf,
             updater_slam,
+            voxel_map,
             initializer: firefly_vio_init::inertial_init::InertialInitializer::new(init_options),
             updater_zero_velocity,
             has_moved_since_zero_vel: false,
@@ -510,7 +516,13 @@ impl VioManager {
         }
 
         // 10. 边缘化所有标记 should_marg 的 SLAM 特征（对照 C++）
-        marginalize_slam(&mut self.state);
+        let marged = marginalize_slam(&mut self.state);
+        // 体素索引同步移除（选点开启时）。
+        if self.params.voxel_options.enabled {
+            for id in marged {
+                let _ = self.voxel_map.remove_point(id);
+            }
+        }
 
         // 11. 分离为新特征（延迟初始化）与老特征（SLAM 更新）（对照 C++）
         let mut feats_slam_delayed: Vec<Feature> = Vec::new();
@@ -523,6 +535,25 @@ impl VioManager {
             }
         }
 
+        // 11b. 体素选点（对照 Voxel-SVIO `featureUpdate`；仅开启时）：以待更新
+        // 路标的全局位置查可见体素，每体素限量取点。位置取 `get_xyz(false)`，
+        // 默认 `GLOBAL_3D` 下即全局系。选空时回落全量（索引冷启动保护），
+        // 落选特征保留在库中延后更新（不标记删除）。
+        if self.params.voxel_options.enabled && !feats_slam_update.is_empty() {
+            let queries: Vec<Vector3<f64>> = feats_slam_update
+                .iter()
+                .filter_map(|f| self.state.features_slam.get(&f.featid))
+                .map(|l| l.get_xyz(false))
+                .collect();
+            let recent = self.voxel_map.recent_voxels(&queries, self.state.timestamp);
+            let selected = self.voxel_map.select(&recent);
+            if selected.is_empty() {
+                log::warn!("体素选空（索引冷启动？），回落全量 SLAM 更新");
+            } else {
+                let keep: std::collections::HashSet<usize> = selected.into_iter().collect();
+                feats_slam_update.retain(|f| keep.contains(&f.featid));
+            }
+        }
         // 12. MSCKF 更新用的特征 = lost + marg + maxtracks 剩余（对照 C++）
         let mut featsup_msckf = feats_lost;
         featsup_msckf.append(&mut feats_marg);
@@ -562,12 +593,30 @@ impl VioManager {
             self.track_feats.database_mut().mark_deleted(consumed);
         }
 
+        // 14b. 体素位置同步（EKF 更新后路标移动；跨体素自动搬家）。
+        if self.params.voxel_options.enabled {
+            for (id, lm) in &self.state.features_slam {
+                if self.voxel_map.contains(*id) {
+                    let _ = self.voxel_map.update_point(*id, &lm.get_xyz(false));
+                }
+            }
+        }
+
         // 15. SLAM 延迟初始化（对照 C++）
         let delayed_ids: Vec<usize> = feats_slam_delayed.iter().map(|f| f.featid).collect();
         if !feats_slam_delayed.is_empty() {
             self.updater_slam
                 .delayed_init(&mut self.state, &mut feats_slam_delayed);
             self.propagator.invalidate_cache();
+            // 体素收录新路标（初始化成功 = 已入库 `state.features_slam`）。
+            if self.params.voxel_options.enabled {
+                for id in &delayed_ids {
+                    if let Some(lm) = self.state.features_slam.get(id) {
+                        let p = lm.get_xyz(false);
+                        self.voxel_map.add_point(*id, &p);
+                    }
+                }
+            }
             self.track_feats.database_mut().mark_deleted(delayed_ids);
         }
 
@@ -819,6 +868,36 @@ mod tests {
         let s = StateOptions::default();
         assert_eq!(s.max_clone_size, 11);
         assert_eq!(s.max_msckf_in_update, 1000);
+    }
+
+    #[test]
+    fn voxel_selection_defaults_off_and_wires() {
+        // 默认关闭：行为与改动前一致，体素索引全程空置。
+        let mgr = test_manager();
+        assert!(!mgr.params.voxel_options.enabled);
+        assert_eq!(mgr.voxel_map.num_points(), 0);
+        // 开启后索引可用：收录 → 可见查询 → 每体素限量选点。
+        let mut params = VioManagerOptions::default();
+        params.voxel_options.enabled = true;
+        let cameras = BTreeMap::new();
+        let tracker = TrackKlt::new(
+            HashMap::new(),
+            200,
+            0,
+            false,
+            HistogramMethod::None,
+            10,
+            5,
+            5,
+            15,
+        );
+        let mut mgr = VioManager::new(params, cameras, tracker);
+        assert!(mgr.voxel_map.add_point(1, &Vector3::new(0.05, 0.0, 3.0)));
+        assert!(mgr.voxel_map.add_point(2, &Vector3::new(5.0, 0.0, 3.0)));
+        let recent = mgr
+            .voxel_map
+            .recent_voxels(&[Vector3::new(0.05, 0.0, 3.0)], 1.0);
+        assert_eq!(mgr.voxel_map.select(&recent), vec![1]);
     }
 
     #[test]

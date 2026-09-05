@@ -241,6 +241,8 @@ pub struct VioManagerOptions {
     /// -0.03 rad/s → roll 以 1.9°/s 漂 → 位置二次发散；实测 34s 2704m vs
     /// 冻结 271m）。应用层可设小值（如 1e-6）声明"无偏置"场景。
     pub init_bias_sigma: f64,
+    /// 体素选点参数（`firefly-voxel-svio`；默认关闭，保持现有行为）。
+    pub voxel_options: firefly_voxel_svio::VoxelOptions,
 }
 
 impl Default for VioManagerOptions {
@@ -256,6 +258,7 @@ impl Default for VioManagerOptions {
             dt_slam_delay: 2.0,
             zero_velocity_options: ZeroVelocityOptions::default(),
             init_bias_sigma: 0.02,
+            voxel_options: firefly_voxel_svio::VoxelOptions::default(),
         }
     }
 }

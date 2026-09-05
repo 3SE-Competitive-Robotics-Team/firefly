@@ -443,23 +443,25 @@ pub fn initialize_feature(
 /// `StateHelper::marginalize_slam`）。
 ///
 /// 无 aruco：所有 `should_marg` 特征均移除。从 `features_slam` 移除后调用
-/// [`marginalize`] 删除其协方差块并重排其后变量 id。
+/// [`marginalize`] 删除其协方差块并重排其后变量 id。返回被移除的特征 id
+///（调用方同步外部索引，如体素地图）。
 #[allow(clippy::implicit_hasher)] // 键为 usize，默认 hasher 足够
-pub fn marginalize_slam(state: &mut State) {
+pub fn marginalize_slam(state: &mut State) -> Vec<usize> {
     let marg: Vec<usize> = state
         .features_slam
         .iter()
         .filter(|(_, l)| l.should_marg)
         .map(|(id, _)| *id)
         .collect();
-    for featid in marg {
-        if let Some(mut lm) = state.features_slam.remove(&featid) {
+    for featid in &marg {
+        if let Some(mut lm) = state.features_slam.remove(featid) {
             let id = lm.id();
             let size = lm.size();
             lm.set_local_id(-1);
             marginalize(state, id, size);
         }
     }
+    marg
 }
 
 /// 计算 `x_order` 第 `i` 个变量的起始列（`H_R` 的列布局辅助）。

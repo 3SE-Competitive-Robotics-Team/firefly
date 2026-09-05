@@ -81,7 +81,7 @@ def cleanup_iceoryx() -> None:
     # also clean stale shm files (macOS)
     subprocess.run(["bash", "-lc", "rm -rf /private/tmp/iox2*.shm_state 2>/dev/null; true"], capture_output=True)
     # kill previous sim/vio/planner (graceful SIGTERM)
-    for pat in ["firefly-sim", "target/release/vio", "target/debug/vio", "target/release/planner", "target/debug/planner"]:
+    for pat in ["firefly-sim", "target/release/vio", "target/debug/vio", "target/release/planner", "target/debug/planner", "target/release/void", "target/debug/void"]:
         subprocess.run(["pkill", "-f", pat], capture_output=True)
     time.sleep(1)
 
@@ -241,6 +241,28 @@ def run_bench(duration: float, save_dir: Path | None, output: Path, trajectory: 
         print(open(log_sim).read()[-4000:], file=sys.stderr)
         raise RuntimeError("sim died on start")
 
+    # void 里程计（WITH_VOID=1 时）：--script 任务时钟等它的 ready 电平，
+    # 必须在 sim 15s 启动超时前就绪，故紧随 sim 启动。
+    void_proc = None
+    if os.environ.get("WITH_VOID"):
+        void_bin = REPO_ROOT / "target" / "release" / "void"
+        if not void_bin.exists():
+            void_bin = REPO_ROOT / "target" / "debug" / "void"
+        log_void = REPO_ROOT / "logs" / "bench" / "void.log"
+        print(f"[bench] starting void: {void_bin}")
+        void_proc = subprocess.Popen(
+            [str(void_bin)],
+            cwd=REPO_ROOT,
+            env={**os.environ, "RUST_LOG": os.environ.get("RUST_LOG", "warn")},
+            stdout=open(log_void, "w"),
+            stderr=subprocess.STDOUT,
+        )
+        time.sleep(3)
+        if void_proc.poll() is not None:
+            print(open(log_void).read()[-4000:], file=sys.stderr)
+            sim_proc.terminate()
+            raise RuntimeError("void died on start")
+
     # wait for IMU topic to appear
     node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
     t0 = time.time()
@@ -265,13 +287,17 @@ def run_bench(duration: float, save_dir: Path | None, output: Path, trajectory: 
         print(open(log_sim).read()[-4000:], file=sys.stderr)
         raise RuntimeError("sim died after wait")
 
-    # start vio — keep rerun enabled (connect_or_spawn will reuse viewer or spawn)
+    # VIO_CONFIG env overrides --config (A/B experiment configs, e.g. logs/bench/voxel.toml)
     env_vio = os.environ.copy()
     env_vio["RUST_LOG"] = os.environ.get("RUST_LOG", "warn")
     log_vio = REPO_ROOT / "logs" / "bench" / "vio.log"
-    print(f"[bench] starting vio: {vio_bin}")
+    vio_cmd = [str(vio_bin)]
+    vio_config = os.environ.get("VIO_CONFIG")
+    if vio_config:
+        vio_cmd += ["--config", vio_config]
+    print(f"[bench] starting vio: {' '.join(vio_cmd)}")
     vio_proc = subprocess.Popen(
-        [str(vio_bin)],
+        vio_cmd,
         env=env_vio,
         stdout=open(log_vio, "w"),
         stderr=subprocess.STDOUT,
@@ -320,7 +346,9 @@ def run_bench(duration: float, save_dir: Path | None, output: Path, trajectory: 
     # sim_time duration + grace for odom lag (2s)
     asyncio.run(collect(duration + 4))
 
-    for p in [vio_proc, sim_proc]:
+    for p in [vio_proc, sim_proc, void_proc]:
+        if p is None:
+            continue
         try:
             p.terminate()
             p.wait(timeout=5)

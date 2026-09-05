@@ -361,13 +361,13 @@ fn synthetic_pure_msckf_zero_bias() {
     );
 }
 
-/// SLAM 模式（OpenVINS 默认 `max_slam_features=25`）。已知问题：末尾速度
-/// 估计摆荡——实测位置误差 1.0-1.4m（位置断言 <3m 通过）、速度误差
+/// SLAM 模式（OpenVINS 默认 `max_slam_features=25`，apps/vio 现同样默认开启）。
+/// 已知问题：末尾速度估计摆荡——实测位置误差 1.0-1.4m（位置断言 <3m 通过）、
 /// 0.4-0.75 m/s（速度断言 <0.3 不通过）。场景约束（零旋转纯前向恒速 +
 /// 稀疏点阵 + 5cm 立体基线）下 x 速度/偏航弱可观，见
 /// [`synthetic_pure_msckf_zero_bias`] 的「近规范退化」注释；持久路标把
 /// KLT 运动滞后偏置（~0.5px）吸收进特征几何，无法像 MSCKF 那样随边缘化
-/// 遗忘。apps/vio 因此维持 `max_slam_features=0`。
+/// 遗忘（现场 10 轨迹 bench 仍开 SLAM：均值 -8%，方差大，体素选点 opt-in）。
 #[test]
 #[ignore = "已知问题：SLAM 模式速度断言不达标（实测 0.4-0.75 m/s），见上注释"]
 fn synthetic_slam_zero_bias() {

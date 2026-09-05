@@ -117,11 +117,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     params.state_options.num_cameras = 2;
     params.triangulation_options.max_baseline = cfg.estimator.max_baseline;
-    // SLAM 关闭：毒化修复后 bench 实测仍无净收益（logs/bench 李萨如 4 曲线
-    // ×3 轮，2026-08-27）——仅 tight 曲线 ATE 改善（2.6→1.5m），classic/wide
-    // 劣化且各曲线 RPE 均上升；持久路标吸收 KLT 滞后偏置、无法经边缘化遗忘
-    // （机理见 tests/synthetic_e2e.rs 的 synthetic_slam_zero_bias 注释）
-    params.state_options.max_slam_features = 0;
+    // SLAM 默认开（OpenVINS 默认 25）：10 轨迹 bench 相对纯 MSCKF 均值 -8%
+    //（8/10 路线占优；logs/bench suite_*_10x1x34s）。KLT 滞后偏置被持久路标
+    // 吸收的机制仍在（单轮方差大），体素选点作 opt-in 优化（`[slam]` 开启）。
+    params.state_options.max_slam_features = cfg.slam.max_slam_features;
+    params.voxel_options.enabled = cfg.slam.voxel_selection;
+    params.voxel_options.voxel_size = cfg.slam.voxel_size;
+    params.voxel_options.max_points_per_voxel = cfg.slam.max_points_per_voxel;
+    params.voxel_options.min_point_distance = cfg.slam.min_point_distance;
     // 零速更新保持 OpenVINS 默认关闭（官方参数 try_zupt=false）：慢速运动下
     // 加速度低于 IMU 噪声 σ 时 chi2 不超限 → 误接受 → 估计位置冻结；
     // 显式零运动分支（官方标注 untested）同样不属默认路径。
