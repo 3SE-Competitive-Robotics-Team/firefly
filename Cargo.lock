@@ -563,6 +563,7 @@ dependencies = [
  "firefly-vio-core",
  "firefly-vio-init",
  "firefly-vio-types",
+ "firefly-voxel-svio",
  "log",
  "nalgebra",
 ]
@@ -654,6 +655,17 @@ version = "0.1.0"
 dependencies = [
  "firefly-error",
  "nalgebra",
+]
+
+[[package]]
+name = "firefly-voxel-svio"
+version = "0.1.0"
+dependencies = [
+ "fastrace",
+ "firefly-error",
+ "log",
+ "nalgebra",
+ "serde",
 ]
 
 [[package]]
@@ -1955,6 +1967,7 @@ dependencies = [
  "firefly-vio",
  "firefly-vio-core",
  "firefly-vio-types",
+ "firefly-voxel-svio",
  "iceoryx2",
  "log",
  "nalgebra",

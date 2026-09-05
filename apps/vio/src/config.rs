@@ -88,6 +88,36 @@ impl Default for Estimator {
     }
 }
 
+/// SLAM 路标与体素选点（默认关闭，保持现有纯 MSCKF 行为）。
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct Slam {
+    /// 最大 SLAM 路标数（0 = 关闭 SLAM 分支）。
+    pub max_slam_features: usize,
+    /// 体素选点总开关（对照 Voxel-SVIO；开启要求 `max_slam_features > 0`）。
+    pub voxel_selection: bool,
+    /// 体素边长（米）。
+    pub voxel_size: f64,
+    /// 每体素上限点数。
+    pub max_points_per_voxel: usize,
+    /// 体素内最小点间距（米）。
+    pub min_point_distance: f64,
+}
+
+impl Default for Slam {
+    fn default() -> Self {
+        let voxel = firefly_voxel_svio::VoxelOptions::default();
+        Self {
+            // OpenVINS 默认 25；10 轨迹 bench 均值 -8%（logs/bench suite_*_10x1x34s）
+            max_slam_features: 25,
+            voxel_selection: false,
+            voxel_size: voxel.voxel_size,
+            max_points_per_voxel: voxel.max_points_per_voxel,
+            min_point_distance: voxel.min_point_distance,
+        }
+    }
+}
+
 /// `configs/vio.toml` 顶层。
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
@@ -96,6 +126,7 @@ pub struct VioConfig {
     pub imu: Imu,
     pub frontend: Frontend,
     pub estimator: Estimator,
+    pub slam: Slam,
 }
 
 impl VioConfig {
@@ -140,5 +171,20 @@ mod tests {
         assert_eq!(cfg.camera.width, 320);
         assert!((cfg.estimator.max_baseline - 60.0).abs() < 1e-9);
         assert!((cfg.estimator.init_bias_sigma - 1e-6).abs() < 1e-15);
+        assert_eq!(cfg.slam.max_slam_features, 25);
+        assert!(!cfg.slam.voxel_selection);
+    }
+
+    /// `[slam]` 开启 SLAM + 体素选点（A/B 实验配置）。
+    #[test]
+    fn slam_section_enables_voxel_selection() {
+        let cfg: VioConfig = toml::from_str(
+            "[slam]\nmax_slam_features = 25\nvoxel_selection = true\nvoxel_size = 0.2",
+        )
+        .unwrap();
+        assert_eq!(cfg.slam.max_slam_features, 25);
+        assert!(cfg.slam.voxel_selection);
+        assert!((cfg.slam.voxel_size - 0.2).abs() < 1e-12);
+        assert_eq!(cfg.slam.max_points_per_voxel, 5);
     }
 }

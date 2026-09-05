@@ -17,6 +17,7 @@ EGO 规划器 Rust 实现：MINCO 后端 + Rebound 主循环 + 集群避碰。
 | `firefly-vio-core` | VIO 核心数学：传感器数据、IMU 标定、传播/更新（对照 `ov_core`） |
 | `firefly-vio-init` | 静止/动态初始化器（对照 `ov_init`） |
 | `firefly-vio` | MSCKF 编排：滑动窗口状态 + 视觉更新（对照 `ov_msckf`） |
+| `firefly-voxel-svio` | 体素选点：可见体素索引 + 每体素限量 feeding（对照 Voxel-SVIO） |
 | `firefly-pubsub` | iceoryx2 零拷贝发布订阅 + trace 上下文中间件（含 `Firefly/Viz` 可视化消息） |
 | `firefly-error` | kind/status 错误设计 |
 | `firefly-observability` | logforth + fastrace |

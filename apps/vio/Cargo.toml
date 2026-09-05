@@ -22,6 +22,7 @@ firefly-pubsub = { workspace = true }
 firefly-vio = { workspace = true }
 firefly-vio-core = { workspace = true }
 firefly-vio-types = { workspace = true }
+firefly-voxel-svio = { workspace = true }
 iceoryx2 = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }

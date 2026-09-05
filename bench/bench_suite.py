@@ -40,6 +40,7 @@ def main() -> None:
     ap.add_argument("--duration", type=float, default=34.0, help="sim duration seconds per turn (default 34)")
     ap.add_argument("--turns", type=int, default=1, help="turns per trajectory (default 1)")
     ap.add_argument("--only", type=str, default=None, help="comma-separated instance names; default all")
+    ap.add_argument("--tag", type=str, default=None, help="filename tag prefix for outputs (A/B groups, e.g. baseline/slam/voxel)")
     args = ap.parse_args()
 
     names = sorted(TRAJECTORIES)
@@ -51,14 +52,15 @@ def main() -> None:
         names = requested
 
     save_dir = REPO_ROOT / "logs" / "bench"
-    print(f"[suite] {len(names)} trajectories x {args.turns} turn(s) x {args.duration:.0f}s: {names}")
+    tag = f"{args.tag}_" if args.tag else ""
+    print(f"[suite] {len(names)} trajectories x {args.turns} turn(s) x {args.duration:.0f}s: {names} tag={args.tag or '-'}")
 
     results: list[dict] = []
     try:
         for name in names:
             for turn in range(1, args.turns + 1):
                 print(f"\n{'=' * 20} {name} turn {turn}/{args.turns} {'=' * 20}")
-                out = save_dir / f"{name}_turn_{turn:02d}.json"
+                out = save_dir / f"{tag}{name}_turn_{turn:02d}.json"
                 payload = run_bench(float(args.duration), save_dir, out, trajectory=name)
                 payload["turn"] = turn
                 results.append(payload)
@@ -96,7 +98,7 @@ def main() -> None:
             )
     print("=" * 96)
 
-    summary_path = save_dir / f"suite_{len(names)}x{args.turns}x{int(args.duration)}s.json"
+    summary_path = save_dir / f"suite_{tag}{len(names)}x{args.turns}x{int(args.duration)}s.json"
     with open(summary_path, "w") as f:
         json.dump(
             {
