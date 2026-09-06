@@ -30,9 +30,9 @@ fn chi2_95(dof: usize) -> f64 {
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct FusionOptions {
-    /// 单步过程噪声：旋转 `rad²`。
+    /// 单步过程噪声：旋转 `rad²`（每 odom 步，100Hz 下按秒 ≈1e-5）。
     pub process_noise_rot: f64,
-    /// 单步过程噪声：平移 `m²`。
+    /// 单步过程噪声：平移 `m²`（每 odom 步，100Hz 下按秒 ≈1e-3）。
     pub process_noise_pos: f64,
     /// 观测噪声回退：旋转 `rad²`（`h` 不可逆时）。
     pub fallback_noise_rot: f64,
@@ -73,8 +73,8 @@ pub struct FusionOptions {
 impl Default for FusionOptions {
     fn default() -> Self {
         Self {
-            process_noise_rot: 1e-6,
-            process_noise_pos: 1e-4,
+            process_noise_rot: 1e-7,
+            process_noise_pos: 1e-5,
             fallback_noise_rot: (2.5_f64.to_radians()).powi(2),
             fallback_noise_pos: 0.2_f64.powi(2),
             chi2_multiplier: 0.5,

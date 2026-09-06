@@ -1,7 +1,7 @@
 //! VIO 进程：MSCKF 估计器（`firefly-vio`）+ iceoryx2 zero-copy 发布。
 //!
 //! 固定接入 `MuJoCo` 物理环境（Python `firefly-sim`）经 iceoryx2 发布的
-//! IMU + 双目灰度（跑完整 MSCKF 视觉更新），输出 odom（估计位姿，10Hz）
+//! IMU + 双目灰度（跑完整 MSCKF 视觉更新），输出 odom（估计位姿，100Hz）
 //! 到 `Firefly/Odometry`。所有消息的 User Header 自动携带 fastrace trace
 //! 上下文（跨进程 span 树可观测）。
 //!
@@ -40,8 +40,10 @@ use input::IceoryxInput;
 /// `configs/vio.toml` 缺省路径（相对运行目录，通常为仓库根）。
 const DEFAULT_CONFIG: &str = "configs/vio.toml";
 
-/// odom 发布周期（秒）。
-const ODOM_PERIOD: f64 = 0.1;
+/// odom 发布周期（秒）：100Hz（IMU propagation 速率，视觉仍 10Hz 修正）。
+const ODOM_PERIOD: f64 = 0.01;
+/// 可视化发布周期（秒）：10Hz（位姿/轨迹，防 Viz 话题洪泛）。
+const VIZ_PERIOD: f64 = 0.1;
 /// `MuJoCo` 场景无人机起点（= demo 地图 start；GT 先验）。
 const SIM_START: [f64; 3] = [1.0, 4.0, 1.0];
 /// rerun 图例颜色：真值=蓝、估计=橙。
@@ -274,6 +276,7 @@ fn run_loop(
 ) -> Result<(), firefly_error::Error> {
     let mut t_sim = 0.0f64;
     let mut next_odom = 0.0f64;
+    let mut next_viz = 0.0f64;
     let mut wake_count = 0u64;
     let mut est_prev: Option<[f64; 3]> = None;
     let mut gt_prev: Option<[f64; 3]> = None;
@@ -426,29 +429,35 @@ fn run_loop(
             log::warn!("IMU 断流 >{IMU_STALL:?}：滤波器停更，等待 sim 恢复");
         }
 
-        // 按发布周期输出 odom
+        // 按发布周期输出 odom（100Hz，经 IMU propagation；视觉仍 10Hz 修正）
         if t_sim + 1e-9 >= next_odom {
             let s = &vio.state;
             publish_odom(odom_pub, t_sim, s.timestamp, &s.imu, vio.initialized());
-            // 瘦版可视化：位姿 + 轨迹折线 @10Hz（只记位姿不流图像）
-            {
-                let p = s.imu.pos();
-                let q = s.imu.quat();
-                log_viz(
-                    viz_pub,
-                    t_sim,
-                    [p.x, p.y, p.z],
-                    [q[0], q[1], q[2], q[3]],
-                    gt_sub,
-                    &mut est_prev,
-                    &mut gt_prev,
-                );
-            }
             next_odom += ODOM_PERIOD;
             // 落后超过一个周期（启动追赶 / 长阻塞后恢复）时重同步到当前时刻，
-            // 避免按 10Hz 节奏洪泛补发积压的 odom
+            // 避免按 100Hz 节奏洪泛补发积压的 odom
             if next_odom + ODOM_PERIOD < t_sim {
                 next_odom = t_sim;
+            }
+        }
+
+        // 瘦版可视化：位姿 + 轨迹折线 @10Hz（只记位姿不流图像）
+        if t_sim + 1e-9 >= next_viz {
+            let s = &vio.state;
+            let p = s.imu.pos();
+            let q = s.imu.quat();
+            log_viz(
+                viz_pub,
+                t_sim,
+                [p.x, p.y, p.z],
+                [q[0], q[1], q[2], q[3]],
+                gt_sub,
+                &mut est_prev,
+                &mut gt_prev,
+            );
+            next_viz += VIZ_PERIOD;
+            if next_viz + VIZ_PERIOD < t_sim {
+                next_viz = t_sim;
             }
         }
 
@@ -475,7 +484,7 @@ fn run_loop(
     Ok(())
 }
 
-/// 组装并发布一条 odom（10Hz），成功打 info 行。
+/// 组装并发布一条 odom（100Hz，成功打 debug 行；100Hz info 会刷屏）。
 fn publish_odom(
     odom_pub: &OdomPublisher,
     t_sim: f64,
@@ -505,7 +514,7 @@ fn publish_odom(
     };
     match odom_pub.publish(msg) {
         Ok(ctx) => {
-            log::info!(
+            log::debug!(
                 "odom t={t_sim:.2} p=({:.2},{:.2},{:.2}) v=({:.3},{:.3},{:.3}) trace_id={:032x} sampled={}",
                 imu.pos().x,
                 imu.pos().y,
