@@ -5,8 +5,8 @@
 | # | 进程 | App | 订阅 | 发布 | 频率 |
 |---|---|---|---|---|---|
 | 1 | `firefly-sim` | `apps/firefly-sim` | `Firefly/Reference` | `Firefly/Imu` 100Hz / `Firefly/CameraLeft,Right` 10Hz / `Firefly/Depth` 10Hz / `Firefly/GroundTruth` 10Hz | 200Hz 物理 |
-| 2 | `vio` | `apps/vio` (MSCKF) | `Imu` + 双目灰度 | `Firefly/Odometry` (估计位姿) + `Firefly/Viz` | 10Hz |
-| 3 | `gicp` | `apps/gicp` (GICP 全局重定位 + FusionFilter) | `Odometry` + `Depth` | `Firefly/CorrectedOdometry` | 1Hz 重定位 / 10Hz 融合 |
+| 2 | `vio` | `apps/vio` (MSCKF) | `Imu` + 双目灰度 | `Firefly/Odometry` (估计位姿，100Hz propagation) + `Firefly/Viz` (10Hz) | 10Hz 视觉修正 / 100Hz 输出 |
+| 3 | `gicp` | `apps/gicp` (GICP 全局重定位 + FusionFilter) | `Odometry` (100Hz) + `Depth` | `Firefly/CorrectedOdometry` | 1Hz 重定位 / 100Hz 融合 |
 | 4 | `planner` | `apps/planner` (EGO-Planner v2: A* + MINCO) | `Odometry`/`CorrectedOdometry` + `Depth` + `Firefly/Goal` | `Firefly/Reference` + `Firefly/Viz` | 10Hz |
 | 5 | `firefly-viz` | `apps/firefly-viz` | `Firefly/Viz` | （写 rerun viewer / rrd） | 消费 10Hz 可视化 |
 
@@ -25,7 +25,7 @@ uv sync
 cargo install rerun-cli   # 或 uv tool install rerun-sdk
 ```
 
-地图文件：`apps/planner/maps/*.ffmap`（见 `docs/map-format.md`）  
+地图文件：`apps/planner/maps/*.ffmap`（见 `docs/map-format.md`）
 配置：`configs/*.toml`（`sim.toml` / `vio.toml` / `gicp.toml` / `planner.toml`），缺键回落代码默认值。
 
 ## 1. 构建验证
