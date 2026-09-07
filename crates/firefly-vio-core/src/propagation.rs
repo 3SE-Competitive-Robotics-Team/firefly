@@ -197,12 +197,6 @@ pub struct Propagator {
     gravity: Vector3<f64>,
     /// 历史 IMU 消息（时间戳递增）。
     imu_data: Mutex<Vec<ImuData>>,
-    /// 上次传播的 IMU-相机时间偏移。
-    #[allow(dead_code)]
-    last_prop_time_offset: f64,
-    /// 是否已设置 `last_prop_time_offset`。
-    #[allow(dead_code)]
-    have_last_prop_time_offset: bool,
     /// fast-prop 缓存是否有效（对应 `cache_imu_valid`）。
     cache_imu_valid: bool,
     /// fast-prop 缓存的起始时间。
@@ -210,7 +204,6 @@ pub struct Propagator {
     /// fast-prop 缓存的 IMU 值 `[q4, p3, v3, bg3, ba3]`。
     cache_state_est: [f64; 16],
     /// fast-prop 缓存的 IMU 协方差。
-    #[allow(dead_code)]
     cache_state_covariance: DMatrix<f64>,
     /// fast-prop 缓存的时间偏移。
     cache_t_off: f64,
@@ -236,8 +229,6 @@ impl Propagator {
             noise,
             gravity: Vector3::new(0.0, 0.0, gravity_mag),
             imu_data: Mutex::new(Vec::new()),
-            last_prop_time_offset: 0.0,
-            have_last_prop_time_offset: false,
             cache_imu_valid: false,
             cache_state_time: 0.0,
             cache_state_est: [0.0; 16],

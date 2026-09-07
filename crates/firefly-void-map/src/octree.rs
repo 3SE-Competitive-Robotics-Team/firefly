@@ -135,9 +135,8 @@ impl OctoNode {
 
         if self.plane.is_some() {
             // 成熟平面：丢弃新点；未成熟：累积并按阈值重拟合（对照
-            // `voxel_map.cpp:229-246` 官方语义。P10.11 曾试滑动窗口
-            // refit——悬停回归：成熟平面持续跟随估计漂移，深度把位置推
-            // 向被拖平面，悬停 y 漂 2m、姿态漂 11°；已回退）
+            // `voxel_map.cpp:229-246` 官方语义。禁止滑动窗口 refit——成熟平面
+            // 会持续跟随估计漂移，深度把位置推向被拖平面）。
             if self.update_enable {
                 self.new_points += 1;
                 self.temp_points.push(p);

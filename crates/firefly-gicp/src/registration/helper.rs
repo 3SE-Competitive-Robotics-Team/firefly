@@ -11,10 +11,7 @@ use crate::registration::registration::Registration;
 use crate::registration::registration_result::RegistrationResult;
 use crate::registration::termination_criteria::TerminationCriteria;
 use crate::util::downsampling::voxelgrid_sampling;
-use crate::util::normal_estimation::{
-    estimate_covariances_with_tree, estimate_normals_covariances_with_tree,
-    estimate_normals_with_tree,
-};
+use crate::util::normal_estimation::estimate_normals_covariances_with_tree;
 
 /// 预处理点云：降采样 + 建树 + 法向/协方差估计（对照 `preprocess_points`）。
 #[fastrace::trace]
@@ -185,13 +182,6 @@ where
         return align_vgicp(&voxelmap, &source, init_t, setting);
     }
     align(&target, &source, &target_tree, init_t, setting)
-}
-
-// 防止未使用警告
-#[allow(dead_code)]
-fn _use_estimators() {
-    let _ = estimate_normals_with_tree::<PointCloud, KdTree<PointCloud>>;
-    let _ = estimate_covariances_with_tree::<PointCloud, KdTree<PointCloud>>;
 }
 
 #[cfg(test)]

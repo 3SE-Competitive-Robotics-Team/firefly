@@ -372,54 +372,7 @@ fn run_loop(
                 cam.images.first().map_or(0, |g| g.width),
                 cam.images.first().map_or(0, |g| g.height),
             );
-            // 前端健康度：统计保留在计算线程，结果经 Firefly/Viz 发布
-            // （bar_chart/scalars），firefly-viz 进程统一写 rerun
-            {
-                let db = vio.track_feats.database();
-                let mut hist = vec![0i64; 21];
-                let mut total_len = 0usize;
-                let mut n_feat = 0usize;
-                for f in db.iter_features() {
-                    let len: usize = f.timestamps.values().map(Vec::len).sum();
-                    let bucket = len.min(hist.len() - 1);
-                    hist[bucket] += 1;
-                    total_len += len;
-                    n_feat += 1;
-                }
-                let avg_len = if n_feat > 0 {
-                    total_len as f64 / n_feat as f64
-                } else {
-                    0.0
-                };
-                // BarChart: x=track_length, y=count
-                let mut hist_msg =
-                    VizMessage::base(kind::BAR_CHART, t_sim, "vio/debug/track_length");
-                for (i, &v) in hist.iter().enumerate() {
-                    hist_msg.bins[i] = v as u64;
-                }
-                hist_msg.bin_count = hist.len() as u32;
-                hist_msg.bin_start = 0;
-                hist_msg.bin_width = 1;
-                let _ = viz_pub.publish(hist_msg);
-
-                // Scalars: db_size / avg_len 单值也走 scalars 消息
-                for (entity, value) in [
-                    ("vio/debug/db_size", db.size() as f64),
-                    ("vio/debug/track_avg_len", avg_len),
-                ] {
-                    let mut msg = VizMessage::base(kind::SCALARS, t_sim, entity);
-                    msg.scalars[0] = value;
-                    msg.scalar_count = 1;
-                    let _ = viz_pub.publish(msg);
-                }
-                log::debug!(
-                    "frontend health t={:.2} db={} avg_len={:.1} hist={:?}",
-                    t_sim,
-                    db.size(),
-                    avg_len,
-                    hist
-                );
-            }
+            publish_frontend_health(viz_pub, t_sim, vio);
         }
         t_sim = t_sim.max(now);
 
@@ -549,6 +502,54 @@ fn publish_odom(
         }
         Err(e) => log::warn!("odom 发布失败（temporary 可重试）: {e}"),
     }
+}
+
+/// 前端健康度：统计保留在计算线程，结果经 Firefly/Viz 发布
+/// （bar_chart/scalars），firefly-viz 进程统一写 rerun。
+fn publish_frontend_health(viz_pub: &VizPublisher, t_sim: f64, vio: &VioManager) {
+    let db = vio.track_feats.database();
+    let mut hist = vec![0i64; 21];
+    let mut total_len = 0usize;
+    let mut n_feat = 0usize;
+    for f in db.iter_features() {
+        let len: usize = f.timestamps.values().map(Vec::len).sum();
+        let bucket = len.min(hist.len() - 1);
+        hist[bucket] += 1;
+        total_len += len;
+        n_feat += 1;
+    }
+    let avg_len = if n_feat > 0 {
+        total_len as f64 / n_feat as f64
+    } else {
+        0.0
+    };
+    // BarChart: x=track_length, y=count
+    let mut hist_msg = VizMessage::base(kind::BAR_CHART, t_sim, "vio/debug/track_length");
+    for (i, &v) in hist.iter().enumerate() {
+        hist_msg.bins[i] = v as u64;
+    }
+    hist_msg.bin_count = hist.len() as u32;
+    hist_msg.bin_start = 0;
+    hist_msg.bin_width = 1;
+    let _ = viz_pub.publish(hist_msg);
+
+    // Scalars: db_size / avg_len 单值也走 scalars 消息
+    for (entity, value) in [
+        ("vio/debug/db_size", db.size() as f64),
+        ("vio/debug/track_avg_len", avg_len),
+    ] {
+        let mut msg = VizMessage::base(kind::SCALARS, t_sim, entity);
+        msg.scalars[0] = value;
+        msg.scalar_count = 1;
+        let _ = viz_pub.publish(msg);
+    }
+    log::debug!(
+        "frontend health t={:.2} db={} avg_len={:.1} hist={:?}",
+        t_sim,
+        db.size(),
+        avg_len,
+        hist
+    );
 }
 
 /// 瘦版可视化发布：估计位姿（橙）+ 最新真值样本（蓝），统一 `sim_time`

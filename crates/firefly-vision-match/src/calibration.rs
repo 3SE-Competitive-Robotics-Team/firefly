@@ -41,7 +41,7 @@ pub fn cam_pose_to_body(t_cam: &Matrix4<f64>) -> Matrix4<f64> {
 }
 
 /// 机体位姿 → 左目位姿（建库反投影/`PnP` 初值用：`T_global_cam = T_global_body · T_cam_body`，
-/// 直接右乘——逐像素实测与 `MuJoCo` 真链反投影完全一致，求逆版整体错位）。
+/// 直接右乘——必须右乘：求逆版整体错位）。
 #[must_use]
 pub fn body_pose_to_cam(t_body: &Matrix4<f64>) -> Matrix4<f64> {
     let t_cb = {
@@ -75,8 +75,8 @@ mod tests {
     #[test]
     fn body_cam_extrinsics_match_mujoco_truth() {
         use nalgebra::Matrix4;
-        // MuJoCo 真值（恒等位姿下实测）：`T_body @ T_cb == T_wcam` 误差为 0，
-        // 求逆版误差 2.67——`body_pose_to_cam` 必须直接右乘。
+        // 外参真值断言（`scene.py cam_left`）：`T_body @ T_cb` 必须等于下式，
+        // 求逆版整体错位——`body_pose_to_cam` 必须直接右乘。
         let t_body = Isometry3::from_parts(
             nalgebra::Translation3::new(1.0, 4.0, 1.0),
             nalgebra::UnitQuaternion::identity(),

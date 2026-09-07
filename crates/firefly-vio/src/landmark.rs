@@ -4,7 +4,7 @@
 //! （`GLOBAL_3D` → 全局 3D；`ANCHORED_MSCKF_INVERSE_DEPTH` → 锚点系
 //! `α, β, ρ`），`get_xyz`/`set_from_xyz` 负责坐标转换。
 
-use nalgebra::{DMatrix, DVector, Vector3};
+use nalgebra::{DVector, Vector3};
 
 use crate::options::FeatRepresentation;
 
@@ -165,10 +165,6 @@ impl Landmark {
         self.value += dx;
     }
 }
-
-/// 二维投影辅助（未使用，占位保持与 C++ Landmark 的几何语义对应）。
-#[allow(dead_code)]
-type JacobianPlaceholder = DMatrix<f64>;
 
 #[cfg(test)]
 mod tests {

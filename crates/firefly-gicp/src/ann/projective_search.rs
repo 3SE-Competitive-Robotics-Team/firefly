@@ -34,10 +34,6 @@ impl EquirectangularProjection {
 pub struct BorderClamp;
 
 impl BorderClamp {
-    #[allow(dead_code)]
-    fn clamp(&self, x: i32, _width: i32) -> i32 {
-        x
-    }
     fn in_bounds(&self, x: i32, width: i32) -> bool {
         x >= 0 && x < width
     }

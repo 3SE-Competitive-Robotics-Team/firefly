@@ -216,7 +216,7 @@ impl Default for ZeroVelocityOptions {
     }
 }
 
-/// 裁剪：ARUCO 相关选项（对应 updater 后续移植）不在此列出。
+/// 裁剪：ARUCO 相关选项（无对应 updater）不在此列出。
 #[derive(Debug, Clone)]
 pub struct VioManagerOptions {
     /// 核心状态选项。
