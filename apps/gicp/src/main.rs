@@ -22,8 +22,9 @@ use firefly_map::{DepthCamera, MapFile};
 use firefly_observability::init as init_observability;
 use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage};
 use firefly_pubsub::node::create_node;
+use firefly_pubsub::odom::CORRECTED_ODOM_TOPIC;
 use firefly_pubsub::odom::OdomMessage;
-use firefly_pubsub::publish::{CORRECTED_ODOM_TOPIC, CorrectedOdomPublisher};
+use firefly_pubsub::publish::CorrectedOdomPublisher;
 use firefly_pubsub::subscriber::{OdomSubscriber, Subscriber};
 use firefly_pubsub::vision::{POSE_OBS_TOPIC, PoseObservation};
 use iceoryx2::prelude::*;
@@ -53,7 +54,7 @@ fn parse_args() -> Result<Args> {
     let mut args = Args {
         map: None,
         config: PathBuf::from(DEFAULT_CONFIG),
-        odom_topic: firefly_pubsub::publish::ODOM_TOPIC.to_string(),
+        odom_topic: firefly_pubsub::odom::ODOM_TOPIC.to_string(),
     };
     while let Some(arg) = it.next() {
         match arg.as_str() {

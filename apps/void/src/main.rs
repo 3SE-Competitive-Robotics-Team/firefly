@@ -587,6 +587,6 @@ mod tests {
     #[test]
     fn void_odom_topic_is_distinct() {
         assert_eq!(VOID_ODOM_TOPIC, "Firefly/VoidOdom");
-        assert_ne!(VOID_ODOM_TOPIC, firefly_pubsub::publish::ODOM_TOPIC);
+        assert_ne!(VOID_ODOM_TOPIC, firefly_pubsub::odom::ODOM_TOPIC);
     }
 }
