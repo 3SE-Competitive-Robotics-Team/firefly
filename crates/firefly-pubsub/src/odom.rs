@@ -7,9 +7,11 @@
 
 use iceoryx2::prelude::*;
 
-/// 话题常量归一：`ODOM_TOPIC` / `CORRECTED_ODOM_TOPIC` 唯一定义在
-/// [`crate::publish`]，此处 re-export 供 `odom` 消息消费端同路径引用。
-pub use crate::publish::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC};
+/// 里程计话题（对照 `docs/architecture.md` 的 `topic: odom`）。
+pub const ODOM_TOPIC: &str = "Firefly/Odometry";
+
+/// 校正后里程计话题（GICP 融合进程发布，planner 订阅，低频全局矫正 VIO 漂移）。
+pub const CORRECTED_ODOM_TOPIC: &str = "Firefly/CorrectedOdometry";
 
 /// 真值话题（MuJoCo 物理环境发布，仿真阶段感知位姿源）。
 pub const GROUND_TRUTH_TOPIC: &str = "Firefly/GroundTruth";

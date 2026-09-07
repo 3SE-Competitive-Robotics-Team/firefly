@@ -14,7 +14,8 @@ use firefly_localization::convert::odom_to_matrix;
 use firefly_pubsub::event::TopicListener;
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::odom::OdomMessage;
-use firefly_pubsub::publish::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC, Publisher};
+use firefly_pubsub::odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC};
+use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::{CorrectedOdomSubscriber, Subscriber};
 use firefly_pubsub::vision::{
     DESC_DIM, FEATURE_TOPIC, FeatureMessage, MAX_FEATURES as NUM_POINTS, OBS_SOURCE_VISUAL,

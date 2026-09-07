@@ -16,14 +16,8 @@ use iceoryx2::prelude::*;
 
 use crate::event::TopicNotifier;
 use crate::node::IpcNode;
-use crate::odom::OdomMessage;
+use crate::odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC, OdomMessage};
 use crate::trace::TraceContext;
-
-/// odom 话题名（对照 `docs/architecture.md` 的 `topic: odom`）。
-pub const ODOM_TOPIC: &str = "Firefly/Odometry";
-
-/// 校正后里程计话题（GICP 融合输出，planner 订阅）。
-pub const CORRECTED_ODOM_TOPIC: &str = "Firefly/CorrectedOdometry";
 
 /// 泛型零拷贝发布端（iceoryx2 ipc 服务，User Header 携带 trace 上下文）。
 ///

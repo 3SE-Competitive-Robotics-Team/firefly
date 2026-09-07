@@ -17,7 +17,7 @@ use iceoryx2::port::subscriber::Subscriber as Iox2Subscriber;
 use iceoryx2::prelude::*;
 
 use crate::node::IpcNode;
-use crate::odom::OdomMessage;
+use crate::odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC, OdomMessage};
 use crate::trace::TraceContext;
 
 /// 收到的零拷贝样本（`*sample` 解引用取 payload，`sample.user_header()` 取上下文）。
@@ -118,7 +118,7 @@ impl OdomSubscriber {
     /// # Errors
     /// 见 [`Subscriber::with_topic`]。
     pub fn new(node: &IpcNode) -> Result<Self, firefly_error::Error> {
-        Self::with_topic(node, crate::publish::ODOM_TOPIC)
+        Self::with_topic(node, ODOM_TOPIC)
     }
 
     /// 以自定义话题名打开 odom 订阅器。
@@ -144,7 +144,7 @@ impl CorrectedOdomSubscriber {
     /// # Errors
     /// 见 [`Subscriber::with_topic`]。
     pub fn new(node: &IpcNode) -> Result<Self, firefly_error::Error> {
-        Self::with_topic(node, crate::publish::CORRECTED_ODOM_TOPIC)
+        Self::with_topic(node, CORRECTED_ODOM_TOPIC)
     }
 
     /// 以自定义话题名打开订阅器。

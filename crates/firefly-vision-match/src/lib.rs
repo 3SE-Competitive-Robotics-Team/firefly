@@ -31,6 +31,18 @@ pub struct VisualPose {
     pub mean_reproj_px: f64,
 }
 
+/// `+Z`（`OpenCV`/`purecv`）↔ `-Z`（本仓相机系）桥：`M=diag(1,-1,-1)`。
+/// 两系像素一致，漏掉即约 180° 系统误差——三处共用（求解右乘、重投影左乘、
+/// 测试期望），单一事实来源。
+fn axis_flip() -> Matrix4<f64> {
+    Matrix4::new(
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, -1.0, 0.0, 0.0, //
+        0.0, 0.0, -1.0, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    )
+}
+
 /// 由 2D（当前图像素）-3D（库图全局）对应解全局位姿。
 ///
 /// `prior` 为 VIO 先验位姿（作初值用，无则传 `None`）；对应数 `< 6` 时返回
@@ -170,15 +182,8 @@ pub fn solve_visual_pose(
     ];
     let iso_cam_from_world = vecs_to_isometry(rot, trans);
     // purecv/OpenCV 惯例：(rvec, tvec) 为 world→camera（X_cam = R·X_world + t，
-    // +Z 朝向），全局位姿需先求逆；再右乘 M=diag(1,-1,-1) 桥到我们的 -Z 朝
-    // 向相机系（像素两系一致，漏掉即约 180° 系统误差）。
-    let t_global = iso_cam_from_world.inverse().to_homogeneous()
-        * nalgebra::Matrix4::new(
-            1.0, 0.0, 0.0, 0.0, //
-            0.0, -1.0, 0.0, 0.0, //
-            0.0, 0.0, -1.0, 0.0, //
-            0.0, 0.0, 0.0, 1.0,
-        );
+    // +Z 朝向），全局位姿需先求逆再右乘桥。
+    let t_global = iso_cam_from_world.inverse().to_homogeneous() * axis_flip();
     let mean_reproj_px = mean_reprojection(points_2d, points_3d, &inliers, intrinsics, &t_global);
     Ok(Some(VisualPose {
         t_global,
@@ -275,13 +280,8 @@ fn mean_reprojection(
     if inliers.is_empty() {
         return f64::INFINITY;
     }
-    // -Z→+Z 桥（左乘：`X_ocv = M·X_ours`，`M=diag(1,-1,-1)`，与 `solve` 段同桥）。
-    let flip = Matrix4::new(
-        1.0, 0.0, 0.0, 0.0, //
-        0.0, -1.0, 0.0, 0.0, //
-        0.0, 0.0, -1.0, 0.0, //
-        0.0, 0.0, 0.0, 1.0,
-    );
+    // -Z→+Z 桥（左乘：`X_ocv = M·X_ours`，与 `solve` 段同桥）。
+    let flip = axis_flip();
     let t_cam = flip * t_global.try_inverse().unwrap_or(Matrix4::identity());
     let mut sum = 0.0;
     let mut count = 0usize;
@@ -342,13 +342,8 @@ mod tests {
             .unwrap()
             .expect("synthetic should solve");
         // 测试投影用 +Z（OpenCV）惯例：`t_gt` 即 world→camera；`pose.t_global` 是
-        // -Z 惯例的 camera→world（= t_gt⁻¹ · M，M=diag(1,-1,-1) 桥），同物理位姿。
-        let flip = Matrix4::new(
-            1.0, 0.0, 0.0, 0.0, //
-            0.0, -1.0, 0.0, 0.0, //
-            0.0, 0.0, -1.0, 0.0, //
-            0.0, 0.0, 0.0, 1.0,
-        );
+        // -Z 惯例的 camera→world（= t_gt⁻¹ · 桥），同物理位姿。
+        let flip = axis_flip();
         let t_expected = t_gt.try_inverse().unwrap() * flip;
         let dt =
             (pose.t_global.fixed_view::<3, 1>(0, 3) - t_expected.fixed_view::<3, 1>(0, 3)).norm();
