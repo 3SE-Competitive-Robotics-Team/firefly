@@ -1,0 +1,30 @@
+[package]
+name = "aliked"
+version = "0.1.0"
+keywords = ['aliked', 'visual-localization', 'onnx', 'robotics']
+categories = ['robotics', 'science', 'algorithms']
+edition = "2024"
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "aliked"
+path = "src/main.rs"
+
+[dependencies]
+firefly-error = { workspace = true }
+firefly-observability = { workspace = true }
+firefly-pubsub = { workspace = true }
+firefly-vision-map = { workspace = true }
+firefly-vision-match = { workspace = true }
+iceoryx2 = { workspace = true }
+log = { workspace = true }
+nalgebra = { workspace = true }
+ndarray = { workspace = true }
+ort = { workspace = true }
+
+[lints]
+workspace = true

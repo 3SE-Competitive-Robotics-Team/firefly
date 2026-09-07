@@ -377,6 +377,43 @@ impl FusionFilter {
         }
     }
 
+    /// 由 `PoseObservation`（`Firefly/PoseObservation` 话题，几何/视觉源通用）
+    /// 更新：位姿由 `pos/quat` 组装，信息矩阵为协方差的逆；门控与注入复用
+    /// [`FusionFilter::update`]，来源仅用于诊断（日志不区分，行为一致）。
+    #[fastrace::trace]
+    pub fn update_with_observation(
+        &mut self,
+        t_vio: &Matrix4<f64>,
+        obs: &firefly_pubsub::vision::PoseObservation,
+    ) -> RelocGate {
+        let q = nalgebra::Quaternion::new(obs.quat_w, obs.quat_x, obs.quat_y, obs.quat_z);
+        let t_obs = nalgebra::Isometry3::from_parts(
+            nalgebra::Translation3::new(obs.position_x, obs.position_y, obs.position_z),
+            nalgebra::UnitQuaternion::from_quaternion(q),
+        )
+        .to_homogeneous();
+        let r = Matrix6::from_row_slice(&obs.covariance);
+        let h = r.try_inverse().unwrap_or_else(|| {
+            let mut fb = Matrix6::zeros();
+            for i in 0..3 {
+                fb[(i, i)] = self.options.fallback_noise_rot;
+            }
+            for i in 3..6 {
+                fb[(i, i)] = self.options.fallback_noise_pos;
+            }
+            fb.try_inverse().unwrap_or(Matrix6::identity())
+        });
+        self.update(
+            t_vio,
+            &t_obs,
+            &h,
+            obs.num_inliers as usize,
+            obs.total_points as usize,
+            obs.error,
+            obs.converged,
+        )
+    }
+
     /// 由 `VIO` 位姿得矫正后全局位姿。
     #[must_use]
     pub fn corrected_pose(&self, t_vio: &Matrix4<f64>) -> Matrix4<f64> {
@@ -485,6 +522,41 @@ mod tests {
         let t_corr = f.corrected_pose(&t_vio);
         // 矫正后应向 0.3m 靠拢（非 100% 因 K<1）
         let trans = t_corr.fixed_view::<3, 1>(0, 3).into_owned();
+        assert!(trans.x > 0.05 && trans.x < 0.3);
+    }
+
+    #[test]
+    fn observation_update_matches_direct() {
+        use firefly_pubsub::vision::{OBS_SOURCE_VISUAL, PoseObservation};
+        let t_vio = Matrix4::identity();
+        let mut cov = [0.0f64; 36];
+        for i in 0..6 {
+            cov[i * 6 + i] = 0.04;
+        }
+        let obs = PoseObservation {
+            timestamp: 0.0,
+            source: OBS_SOURCE_VISUAL,
+            position_x: 0.3,
+            position_y: 0.0,
+            position_z: 0.0,
+            quat_x: 0.0,
+            quat_y: 0.0,
+            quat_z: 0.0,
+            quat_w: 1.0,
+            covariance: cov,
+            num_inliers: 80,
+            total_points: 100,
+            error: 0.1,
+            converged: true,
+        };
+        let mut f = FusionFilter::with_default();
+        f.predict(&t_vio);
+        let g = f.update_with_observation(&t_vio, &obs);
+        assert!(matches!(g, RelocGate::Accepted { .. }));
+        let trans = f
+            .corrected_pose(&t_vio)
+            .fixed_view::<3, 1>(0, 3)
+            .into_owned();
         assert!(trans.x > 0.05 && trans.x < 0.3);
     }
 

@@ -40,10 +40,13 @@ TOPIC_CAM_PAIR = "Firefly/CameraPair"
 TOPIC_DEPTH = "Firefly/Depth"
 TOPIC_GT = "Firefly/GroundTruth"
 TOPIC_REF = "Firefly/Reference"
-#: VOID 里程计（启动互锁：任务时钟等它首个 is_initialized=true 才走）
+#: 状态源里程计（启动互锁：任务时钟等它首个 is_initialized=true 才走；
+#: 状态源由 --odom-topic 选择：vio（`Firefly/Odometry`）或 void
+#: （`Firefly/VoidOdom`，DIVO 里程计 A/B 对比用）。
+TOPIC_ODOM = "Firefly/Odometry"
 TOPIC_VOIDODOM = "Firefly/VoidOdom"
 #: 任务启动超时（秒）：上电后无 ready 则报错退出（fail loudly），
-#: 不静默起飞。VOOD/C++ 侧 GT 等待 30s 是双保险，这里先触发。
+#: 不静默起飞。估计器侧 GT 等待 30s 是双保险，这里先触发。
 MISSION_TIMEOUT = 15.0
 
 #: 事件 id：「该话题有新样本」（与 Rust event::EVENT_ID_SENT_SAMPLE 一致）
@@ -124,6 +127,14 @@ def main() -> None:
         idx = sys.argv.index("--script")
         if idx + 1 < len(sys.argv) and not sys.argv[idx + 1].startswith("-"):
             trajectory_name = sys.argv[idx + 1]
+    # 状态源选择（启动互锁监听的话题）：缺省 vio；--odom-topic 可切 void。
+    odom_topic = TOPIC_ODOM
+    if "--odom-topic" in sys.argv:
+        idx = sys.argv.index("--odom-topic")
+        if idx + 1 < len(sys.argv) and not sys.argv[idx + 1].startswith("-"):
+            odom_topic = sys.argv[idx + 1]
+    if odom_topic not in (TOPIC_ODOM, TOPIC_VOIDODOM):
+        sys.exit(f"[firefly-sim] --odom-topic 非法：{odom_topic}（仅支持 {TOPIC_ODOM} / {TOPIC_VOIDODOM}）")
     trajectory: Trajectory = get_trajectory(trajectory_name)
     trace_enabled = "--no-trace" not in sys.argv
     cfg = load_config()
@@ -151,9 +162,9 @@ def main() -> None:
     depth_pub = _publisher(node, TOPIC_DEPTH, DepthImageMessage)
     gt_pub = _publisher(node, TOPIC_GT, OdomMessage)
     ref_sub = _subscriber(node, TOPIC_REF, ReferenceMessage)
-    # 启动互锁订阅（--script 模式）：VOID 就绪电平（is_initialized），
+    # 启动互锁订阅（--script 模式）：状态源 ready 电平（is_initialized），
     # 任务时钟据此启动；电平（非边沿）语义——晚订阅 100ms 内必收到。
-    void_sub = _subscriber(node, TOPIC_VOIDODOM, OdomMessage)
+    odom_sub = _subscriber(node, odom_topic, OdomMessage)
     imu_notify = _notifier(node, TOPIC_IMU)
     cam_notify = _notifier(node, TOPIC_CAM_PAIR)
     log("iceoryx2 已就绪：发布 IMU/双目/深度/真值（带事件唤醒），订阅参考")
@@ -188,18 +199,18 @@ def main() -> None:
 
             # 控制 + 物理步进
             if script_mode:
-                # 启动互锁：先排空 VOID 状态，有 ready 就 latch 任务起点；
+                # 启动互锁：先排空状态源 odom，有 ready 就 latch 任务起点；
                 # 超时无 ready 则报错退出（fail loudly）。
                 if mission_t0 is None:
-                    while (sample := void_sub.receive()) is not None:
+                    while (sample := odom_sub.receive()) is not None:
                         if sample.payload().contents.is_initialized:
                             mission_t0 = env.time
-                            log(f"VOID 就绪，任务时钟启动 t0={mission_t0:.2f}")
+                            log(f"状态源就绪（{odom_topic}），任务时钟启动 t0={mission_t0:.2f}")
                             break
                     if mission_t0 is None and env.time > MISSION_TIMEOUT:
                         sys.exit(
-                            "[firefly-sim] 任务启动超时：15s 未收到 VOID ready "
-                            "（void 是否存活？iceoryx2 是否残留幽灵服务？）"
+                            f"[firefly-sim] 任务启动超时：{MISSION_TIMEOUT:.0f}s 未收到状态源 ready "
+                            f"（{odom_topic} 是否存活？iceoryx2 是否残留幽灵服务？）"
                         )
                 if mission_t0 is None:
                     # 未就绪：原地悬停（位置=起点，速度=0）

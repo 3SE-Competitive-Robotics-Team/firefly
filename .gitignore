@@ -18,6 +18,7 @@ wheels/
 # 文档与地图资源
 docs/papers/
 apps/planner/maps/*.ffmap
+apps/planner/maps/*.ffvmap
 
 # 录制产物（rrd/rbl）与运行时日志
 /logs/

@@ -41,17 +41,31 @@ sys.path.insert(0, str(REPO_ROOT / "apps" / "firefly-sim" / "src"))
 
 VIO_BIN_RELEASE = REPO_ROOT / "target" / "release" / "vio"
 VIO_BIN_DEBUG = REPO_ROOT / "target" / "debug" / "vio"
+GICP_BIN_RELEASE = REPO_ROOT / "target" / "release" / "gicp"
+GICP_BIN_DEBUG = REPO_ROOT / "target" / "debug" / "gicp"
+ALIKED_BIN_RELEASE = REPO_ROOT / "target" / "release" / "aliked"
+ALIKED_BIN_DEBUG = REPO_ROOT / "target" / "debug" / "aliked"
+LIGHTGLUE_BIN_RELEASE = REPO_ROOT / "target" / "release" / "lightglue"
+LIGHTGLUE_BIN_DEBUG = REPO_ROOT / "target" / "debug" / "lightglue"
+PLANNER_BIN_RELEASE = REPO_ROOT / "target" / "release" / "planner"
+PLANNER_BIN_DEBUG = REPO_ROOT / "target" / "debug" / "planner"
+#: 视觉库图（`lightglue --map` 必需；相对仓库根，与离线建库产物一致）
+VISION_MAP = REPO_ROOT / "apps" / "planner" / "maps" / "straight_forward.ffvmap"
 UV_BIN = Path("/Users/flamingo/.local/bin/uv")
 if not UV_BIN.exists():
     UV_BIN = Path("uv")  # fallback to PATH
 
 
+def find_bin(name: str) -> Path:
+    """release 优先、debug 回退的二进制定位（5 进程常态）。"""
+    release = REPO_ROOT / "target" / "release" / name
+    if release.exists():
+        return release
+    return REPO_ROOT / "target" / "debug" / name
+
+
 def find_vio_bin() -> Path:
-    if VIO_BIN_RELEASE.exists():
-        return VIO_BIN_RELEASE
-    if VIO_BIN_DEBUG.exists():
-        return VIO_BIN_DEBUG
-    return VIO_BIN_RELEASE
+    return find_bin("vio")
 
 
 def ensure_vio_built(vio_bin: Path) -> Path:
@@ -80,10 +94,82 @@ def cleanup_iceoryx() -> None:
         subprocess.run(["rm", "-rf", p], capture_output=True)
     # also clean stale shm files (macOS)
     subprocess.run(["bash", "-lc", "rm -rf /private/tmp/iox2*.shm_state 2>/dev/null; true"], capture_output=True)
-    # kill previous sim/vio/planner (graceful SIGTERM)
-    for pat in ["firefly-sim", "target/release/vio", "target/debug/vio", "target/release/planner", "target/debug/planner", "target/release/void", "target/debug/void"]:
+    # kill previous fleet (graceful SIGTERM)：5 进程常态 + void 对比 + planner
+    for pat in [
+        "firefly-sim",
+        "target/release/vio", "target/debug/vio",
+        "target/release/gicp", "target/debug/gicp",
+        "target/release/aliked", "target/debug/aliked",
+        "target/release/lightglue", "target/debug/lightglue",
+        "target/release/planner", "target/debug/planner",
+        "target/release/void", "target/debug/void",
+    ]:
         subprocess.run(["pkill", "-f", pat], capture_output=True)
     time.sleep(1)
+
+
+def start_service(cmd: list[str], log_path: Path, name: str, wait_s: float = 3.0) -> "subprocess.Popen":
+    """启动一个常态服务：死即报错（fail loudly），日志落 `logs/bench/`。
+
+    日志级别：`RUST_LOG` 环境透传，缺省 `info`（融合接受/就绪门为 info，
+    bench 后可据此统计；`warn` 下视觉观测计数无从查起）。
+    """
+    print(f"[bench] starting {name}: {' '.join(cmd)}")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=REPO_ROOT,
+        env={**os.environ, "RUST_LOG": os.environ.get("RUST_LOG", "info")},
+        stdout=open(log_path, "w"),
+        stderr=subprocess.STDOUT,
+    )
+    time.sleep(wait_s)
+    if proc.poll() is not None:
+        print(open(log_path).read()[-4000:], file=sys.stderr)
+        raise RuntimeError(f"{name} died on start")
+    return proc
+
+
+def start_fleet(log_dir: Path) -> dict[str, "subprocess.Popen"]:
+    """常态 5 进程（vio/gicp/aliked/lightglue/planner）逐个起、逐个验活。
+
+    ORT 模型加载慢（aliked/lightglue 约 10s），各自给足等待；返回进程表，
+    调用方负责 terminate。vision 缺库图时 lightglue 起不来——直接报错，
+    不静默降级（5 进程是常态，缺一即 bench 无效）。
+    """
+    fleet: dict[str, "subprocess.Popen"] = {}
+    fleet["vio"] = start_service([str(find_bin("vio"))], log_dir / "vio.log", "vio")
+    fleet["gicp"] = start_service([str(find_bin("gicp"))], log_dir / "gicp.log", "gicp")
+    fleet["aliked"] = start_service(
+        [str(find_bin("aliked"))], log_dir / "aliked.log", "aliked", wait_s=12.0
+    )
+    if not VISION_MAP.is_file():
+        raise RuntimeError(f"视觉库图缺失：{VISION_MAP}（先跑离线建库，见 docs/how_to_run.md）")
+    fleet["lightglue"] = start_service(
+        [str(find_bin("lightglue")), "--map", str(VISION_MAP)],
+        log_dir / "lightglue.log",
+        "lightglue",
+        wait_s=12.0,
+    )
+    fleet["planner"] = start_service(
+        [str(find_bin("planner"))], log_dir / "planner.log", "planner"
+    )
+    return fleet
+
+
+def stop_fleet(fleet: dict[str, "subprocess.Popen"]) -> None:
+    """优雅停止常态舰队（SIGTERM → 超时 KILL）。"""
+    for name, p in fleet.items():
+        if p is None:
+            continue
+        try:
+            p.terminate()
+            p.wait(timeout=5)
+        except Exception:
+            try:
+                p.kill()
+                p.wait(timeout=2)
+            except Exception:
+                print(f"[bench] WARN: {name} 未能停止", file=sys.stderr)
 
 
 def interp_linear(x: np.ndarray, xp: np.ndarray, fp: np.ndarray) -> np.ndarray:
@@ -173,14 +259,34 @@ def compute_metrics(
     }
 
 
-def run_bench(duration: float, save_dir: Path | None, output: Path, trajectory: str | None = None) -> dict:
+def run_bench(
+    duration: float,
+    save_dir: Path | None,
+    output: Path,
+    trajectory: str | None = None,
+    *,
+    with_fleet: bool = True,
+    with_planner: bool = False,
+) -> dict:
+    """单轮 bench：sim + vio 精度（GT vs odom）+ 可选常态舰队。
+
+    - `with_fleet=True`（缺省）：同时起 gicp/aliked/lightglue（planner 除外，
+      见下），并采集 `Firefly/CorrectedOdometry`，输出 `corrected` 一套对照
+      指标（同一 GT 时间轴，`ATE_corr_*`）——视觉/GICP 融合是否改善精度，
+      一轮即见分晓。
+    - `with_planner=True`：再起 planner（闭环参考；`--script` 模式下 sim
+      忽略外部参考，仅验证 planner 存活与话题接线，不参与精度）。
+    - `WITH_VOID=1`：沿用旧语义，额外起 void（A/B 对比，不影响互锁话题选择）。
+    """
     import iceoryx2 as iox2
     from firefly_mujoco.messages import ImuMessage, OdomMessage, TraceContext
 
     vio_bin = ensure_vio_built(find_vio_bin())
-    print(f"[bench] vio_bin={vio_bin} trajectory={trajectory or 'lissajous_classic'}")
+    print(f"[bench] vio_bin={vio_bin} trajectory={trajectory or 'lissajous_classic'} fleet={with_fleet}")
 
     cleanup_iceoryx()
+    log_dir = REPO_ROOT / "logs" / "bench"
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     # Rerun handling: per-run isolated rrd, never single shared file.
     # - If save_dir is given, each turn saves to its own timestamped file there.
@@ -243,25 +349,13 @@ def run_bench(duration: float, save_dir: Path | None, output: Path, trajectory: 
 
     # void 里程计（WITH_VOID=1 时）：--script 任务时钟等它的 ready 电平，
     # 必须在 sim 15s 启动超时前就绪，故紧随 sim 启动。
+    # 注意：sim 互锁缺省监听 Firefly/Odometry（vio），WITH_VOID 场景需
+    # sim 侧 --odom-topic Firefly/VoidOdom 才 latch 到 void（见 main.py）。
     void_proc = None
     if os.environ.get("WITH_VOID"):
-        void_bin = REPO_ROOT / "target" / "release" / "void"
-        if not void_bin.exists():
-            void_bin = REPO_ROOT / "target" / "debug" / "void"
+        void_bin = find_bin("void")
         log_void = REPO_ROOT / "logs" / "bench" / "void.log"
-        print(f"[bench] starting void: {void_bin}")
-        void_proc = subprocess.Popen(
-            [str(void_bin)],
-            cwd=REPO_ROOT,
-            env={**os.environ, "RUST_LOG": os.environ.get("RUST_LOG", "warn")},
-            stdout=open(log_void, "w"),
-            stderr=subprocess.STDOUT,
-        )
-        time.sleep(3)
-        if void_proc.poll() is not None:
-            print(open(log_void).read()[-4000:], file=sys.stderr)
-            sim_proc.terminate()
-            raise RuntimeError("void died on start")
+        void_proc = start_service([str(void_bin)], log_void, "void")
 
     # wait for IMU topic to appear
     node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
@@ -288,27 +382,35 @@ def run_bench(duration: float, save_dir: Path | None, output: Path, trajectory: 
         raise RuntimeError("sim died after wait")
 
     # VIO_CONFIG env overrides --config (A/B experiment configs, e.g. logs/bench/voxel.toml)
-    env_vio = os.environ.copy()
-    env_vio["RUST_LOG"] = os.environ.get("RUST_LOG", "warn")
-    log_vio = REPO_ROOT / "logs" / "bench" / "vio.log"
     vio_cmd = [str(vio_bin)]
     vio_config = os.environ.get("VIO_CONFIG")
     if vio_config:
         vio_cmd += ["--config", vio_config]
-    print(f"[bench] starting vio: {' '.join(vio_cmd)}")
-    vio_proc = subprocess.Popen(
-        vio_cmd,
-        env=env_vio,
-        stdout=open(log_vio, "w"),
-        stderr=subprocess.STDOUT,
-    )
-    time.sleep(3)
-    if vio_proc.poll() is not None:
-        print(open(log_vio).read()[-4000:], file=sys.stderr)
-        sim_proc.terminate()
-        raise RuntimeError("vio died on start")
+    vio_proc = start_service(vio_cmd, log_dir / "vio.log", "vio")
+    log_vio = REPO_ROOT / "logs" / "bench" / "vio.log"
 
-    # subscribers AFTER vio creates Odometry topic
+    # 常态舰队（5 进程其余三位 + 可选 planner）：vio 之后起，sim 互锁 latch
+    # 的是 vio ready，舰队只消费不阻塞启动。
+    fleet: dict[str, "subprocess.Popen"] = {}
+    if with_fleet:
+        fleet["gicp"] = start_service([str(find_bin("gicp"))], log_dir / "gicp.log", "gicp")
+        fleet["aliked"] = start_service(
+            [str(find_bin("aliked"))], log_dir / "aliked.log", "aliked", wait_s=12.0
+        )
+        if not VISION_MAP.is_file():
+            raise RuntimeError(f"视觉库图缺失：{VISION_MAP}（先跑离线建库，见 docs/how_to_run.md）")
+        fleet["lightglue"] = start_service(
+            [str(find_bin("lightglue")), "--map", str(VISION_MAP)],
+            log_dir / "lightglue.log",
+            "lightglue",
+            wait_s=12.0,
+        )
+        if with_planner:
+            fleet["planner"] = start_service(
+                [str(find_bin("planner"))], log_dir / "planner.log", "planner"
+            )
+
+    # subscribers AFTER vio creates Odometry topic（fleet 就绪后建，双采集）
     node2 = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
     gt_sub = (
         node2.service_builder(iox2.ServiceName.new("Firefly/GroundTruth"))
@@ -326,9 +428,20 @@ def run_bench(duration: float, save_dir: Path | None, output: Path, trajectory: 
         .subscriber_builder()
         .create()
     )
+    corrected_sub = None
+    if with_fleet:
+        corrected_sub = (
+            node2.service_builder(iox2.ServiceName.new("Firefly/CorrectedOdometry"))
+            .publish_subscribe(OdomMessage)
+            .user_header(TraceContext)
+            .open_or_create()
+            .subscriber_builder()
+            .create()
+        )
     print(f"[bench] collecting {duration}s (sim_time 0..{duration}) ...")
     gt_list: list[tuple[float, np.ndarray]] = []
     odom_list: list[tuple[float, np.ndarray]] = []
+    corrected_list: list[tuple[float, np.ndarray]] = []
 
     async def collect(timeout: float):
         t_wall0 = time.time()
@@ -341,11 +454,18 @@ def run_bench(duration: float, save_dir: Path | None, output: Path, trajectory: 
                 pos = np.array([m.position_x, m.position_y, m.position_z], dtype=float)
                 if bool(m.is_initialized) and np.all(np.isfinite(pos)):
                     odom_list.append((float(m.timestamp), pos))
+            if corrected_sub is not None:
+                while (s := corrected_sub.receive()) is not None:
+                    m = s.payload().contents
+                    pos = np.array([m.position_x, m.position_y, m.position_z], dtype=float)
+                    if bool(m.is_initialized) and np.all(np.isfinite(pos)):
+                        corrected_list.append((float(m.timestamp), pos))
             await asyncio.sleep(0.02)
 
     # sim_time duration + grace for odom lag (2s)
     asyncio.run(collect(duration + 4))
 
+    stop_fleet(fleet)
     for p in [vio_proc, sim_proc, void_proc]:
         if p is None:
             continue
@@ -373,7 +493,7 @@ def run_bench(duration: float, save_dir: Path | None, output: Path, trajectory: 
             subprocess.run(["pkill", "-9", "-f", pat], capture_output=True)
         time.sleep(0.5)
 
-    print(f"[bench] collected GT {len(gt_list)} odom {len(odom_list)}")
+    print(f"[bench] collected GT {len(gt_list)} odom {len(odom_list)} corrected {len(corrected_list)}")
     if len(gt_list) < 10 or len(odom_list) < 10:
         print(open(log_vio).read()[-4000:], file=sys.stderr)
         raise RuntimeError(f"not enough data GT={len(gt_list)} odom={len(odom_list)}")
@@ -385,12 +505,27 @@ def run_bench(duration: float, save_dir: Path | None, output: Path, trajectory: 
     print(f"[bench] GT t [{gt_times[0]:.2f},{gt_times[-1]:.2f}] odom t [{odom_times[0]:.2f},{odom_times[-1]:.2f}]")
 
     metrics = compute_metrics(gt_times, gt_pos, odom_times, odom_pos, duration)
+    # 融合对照：同一 GT 时间轴上的 corrected 精度（fleet 缺席/无样本时为 None）
+    corrected_metrics: dict | None = None
+    if len(corrected_list) >= 10:
+        corr_times = np.array([t for t, _ in corrected_list])
+        corr_pos = np.vstack([p for _, p in corrected_list])
+        try:
+            corrected_metrics = compute_metrics(gt_times, gt_pos, corr_times, corr_pos, duration)
+        except ValueError as e:
+            print(f"[bench] WARN: corrected metrics skipped ({e})", file=sys.stderr)
 
     # pretty print
     print("\n=== VIO bench ===")
     print(f" duration {metrics['duration_s']:.1f}s  frames {metrics['num_frames']}")
     print(f" ATE RMSE {metrics['ate_rmse']:.3f}  mean {metrics['ate_mean']:.3f}  max {metrics['ate_max']:.3f}  final {metrics['ate_final']:.3f}")
     print(f" RPE 1s RMSE {metrics['rpe_rmse_1s']:.3f}  mean {metrics['rpe_mean_1s']:.3f}")
+    if corrected_metrics is not None:
+        print(
+            f" CORR RMSE {corrected_metrics['ate_rmse']:.3f}  mean {corrected_metrics['ate_mean']:.3f} "
+            f" max {corrected_metrics['ate_max']:.3f}  final {corrected_metrics['ate_final']:.3f} "
+            f"(ΔRMSE {metrics['ate_rmse'] - corrected_metrics['ate_rmse']:+.3f})"
+        )
     print(f" err mean xyz {np.array(metrics['err_mean_xyz']).round(3)}  std {np.array(metrics['err_std_xyz']).round(3)}  rmse {np.array(metrics['err_rmse_xyz']).round(3)}")
     for k in sorted(metrics["snapshots"], key=lambda x: float(x)):
         s = metrics["snapshots"][k]
@@ -405,6 +540,8 @@ def run_bench(duration: float, save_dir: Path | None, output: Path, trajectory: 
         "vio_bin": str(vio_bin),
         "save_dir": str(save_dir) if save_dir else None,
         "metrics": metrics,
+        "corrected_metrics": corrected_metrics,
+        "fleet": with_fleet,
         "logs": {"sim": str(log_sim), "vio": str(log_vio), "rrd": str(save_dir) if save_dir else None},
     }
     with open(output, "w") as f:
@@ -423,10 +560,19 @@ def main():
     ap.add_argument("--save-dir", type=Path, default=None, help="if set, launch dedicated viewer saving per-run isolated rrd to this dir (one file per turn, never single rrd)")
     ap.add_argument("--turns", type=int, default=1, help="number of turns to run sequentially (default 1); each turn is isolated, per-turn rrd not single file")
     ap.add_argument("--trajectory", type=str, default=None, help="trajectory instance name (see firefly_sim.trajectories.TRAJECTORIES; default lissajous_classic)")
+    ap.add_argument("--no-fleet", action="store_true", help="只起 sim+vio（旧语义；缺省起常态舰队 gicp/aliked/lightglue 并采 corrected 对照）")
+    ap.add_argument("--with-planner", action="store_true", help="再起 planner（仅验证存活与接线；--script 模式下 sim 忽略外部参考）")
     args = ap.parse_args()
     try:
         if args.turns <= 1:
-            run_bench(float(args.duration), args.save_dir, Path(args.output), trajectory=args.trajectory)
+            run_bench(
+                float(args.duration),
+                args.save_dir,
+                Path(args.output),
+                trajectory=args.trajectory,
+                with_fleet=not args.no_fleet,
+                with_planner=args.with_planner,
+            )
         else:
             turns = int(args.turns)
             print(f"[bench] running {turns} turns x {args.duration}s (each isolated, per-run rrd)")
@@ -452,7 +598,14 @@ def main():
                     # nicer: logs/bench/turn_01.json
                     if out.name.startswith("vio_bench"):
                         out = out.parent / f"turn_{i:02d}{suffix}"
-                payload = run_bench(float(args.duration), effective_save_dir, out, trajectory=args.trajectory)
+                payload = run_bench(
+                    float(args.duration),
+                    effective_save_dir,
+                    out,
+                    trajectory=args.trajectory,
+                    with_fleet=not args.no_fleet,
+                    with_planner=args.with_planner,
+                )
                 results.append(payload)
                 time.sleep(1)
             # summary table (repo-local, no tmpfs)
@@ -465,6 +618,12 @@ def main():
                 snap = m["snapshots"].get("34") or m["snapshots"].get(str(int(args.duration))) or {}
                 err34 = snap.get("norm", m["ate_final"])
                 print(f"{idx:4d} {m['ate_rmse']:9.1f} {m['ate_mean']:9.1f} {m['ate_max']:9.1f} {m['ate_final']:10.1f} {m['rpe_rmse_1s']:7.1f} {err34:8.1f} {m['num_frames']:6d}")
+                cm = payload.get("corrected_metrics")
+                if cm is not None:
+                    print(
+                        f"  corr{cm['ate_rmse']:9.1f} {cm['ate_mean']:9.1f} {cm['ate_max']:9.1f} "
+                        f"{cm['ate_final']:10.1f} (ΔRMSE {m['ate_rmse'] - cm['ate_rmse']:+.3f})"
+                    )
             # aggregated stats
             ates = np.array([r["metrics"]["ate_rmse"] for r in results])
             finals = np.array([r["metrics"]["ate_final"] for r in results])

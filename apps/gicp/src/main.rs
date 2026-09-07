@@ -15,6 +15,7 @@ use firefly_error::{Error, ErrorKind, Result};
 use firefly_gicp::points::point_cloud::PointCloud;
 use firefly_gicp::points::traits::{PointCloudMut, PointCloudTrait};
 use firefly_localization::config::LocalizationConfig;
+use firefly_localization::convert::{matrix_to_odom, odom_to_matrix};
 use firefly_localization::filter::FusionFilter;
 use firefly_localization::reloc::GlobalRelocalizer;
 use firefly_map::{DepthCamera, MapFile};
@@ -24,6 +25,7 @@ use firefly_pubsub::node::create_node;
 use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::publish::{CORRECTED_ODOM_TOPIC, CorrectedOdomPublisher};
 use firefly_pubsub::subscriber::{OdomSubscriber, Subscriber};
+use firefly_pubsub::vision::{POSE_OBS_TOPIC, PoseObservation};
 use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetRunResult;
 use nalgebra::{Isometry3, Matrix4, Quaternion, Translation3, UnitQuaternion, Vector3, Vector4};
@@ -33,6 +35,11 @@ const RELOC_PERIOD: usize = 10;
 const DEFAULT_CONFIG: &str = "configs/gicp.toml";
 const DEFAULT_MAP_HINT: &str = "未指定 --map，加载 MuJoCo 默认场景静态地图";
 const ODOM_FRESH_TIMEOUT: f64 = 1.0;
+/// 视觉观测待融合队列上限（条）：观测先到、odom 后到时暂存，按 `timestamp`
+/// 排序，odom 追上即融合；溢出时丢最旧（对端断流的背压语义，非延时等待）。
+const PENDING_VISUAL_CAP: usize = 8;
+/// 待融合观测超期（秒）：相对 `t_sim` 过期即丢弃（对端断流时不无限囤积）。
+const PENDING_VISUAL_TIMEOUT: f64 = 2.0;
 
 /// 命令行参数。
 struct Args {
@@ -94,14 +101,6 @@ fn open_sub<T: std::fmt::Debug + ZeroCopySend + 'static>(
     }
 }
 
-fn odom_to_matrix(msg: &OdomMessage) -> Matrix4<f64> {
-    let t = Vector3::new(msg.position_x, msg.position_y, msg.position_z);
-    let q = UnitQuaternion::from_quaternion(Quaternion::new(
-        msg.quat_w, msg.quat_x, msg.quat_y, msg.quat_z,
-    ));
-    Isometry3::from_parts(Translation3::new(t.x, t.y, t.z), q).to_homogeneous()
-}
-
 /// 历史 odom 在目标时刻插值（位置 lerp + 姿态 slerp；时刻越界返回空，
 /// 该 tick 跳过——不以外推污染配准）。
 fn interp_odom(
@@ -137,30 +136,6 @@ fn interp_odom(
         prev = cur;
     }
     None
-}
-
-fn matrix_to_odom(t_corr: &Matrix4<f64>, src: &OdomMessage, drift: &Matrix4<f64>) -> OdomMessage {
-    let p = t_corr.fixed_view::<3, 1>(0, 3).into_owned();
-    let r = t_corr.fixed_view::<3, 3>(0, 0).into_owned();
-    let quat = UnitQuaternion::from_rotation_matrix(&nalgebra::Rotation3::from_matrix(&r));
-    let q = quat.quaternion();
-    let drift_rot = drift.fixed_view::<3, 3>(0, 0).into_owned();
-    let v = Vector3::new(src.velocity_x, src.velocity_y, src.velocity_z);
-    let v_corr = drift_rot * v;
-    OdomMessage {
-        timestamp: src.timestamp,
-        position_x: p.x,
-        position_y: p.y,
-        position_z: p.z,
-        velocity_x: v_corr.x,
-        velocity_y: v_corr.y,
-        velocity_z: v_corr.z,
-        quat_x: q.i,
-        quat_y: q.j,
-        quat_z: q.k,
-        quat_w: q.w,
-        is_initialized: src.is_initialized,
-    }
 }
 
 fn depth_to_body_cloud(depth: &[f32], cam: &DepthCamera) -> PointCloud {
@@ -213,9 +188,14 @@ struct App {
     corrected_pub: Option<CorrectedOdomPublisher>,
     latest_odom: Option<OdomMessage>,
     latest_depth: Option<DepthImageMessage>,
-    /// odom 环形历史（时间戳，消息）：按深度帧时间戳插值位姿，消除
-    /// 最新配对 ~0.1s 失配（1.5m/s 下 15cm 系统性错位）。
+    /// 视觉位姿观测订阅（`lightglue` 进程发布，同一 `FusionFilter` 融合）。
+    visual_obs: Option<Subscriber<PoseObservation>>,
+    /// odom 环形历史（时间戳，消息）：按观测时间戳插值位姿，消除
+    /// 最新配对 ~0.1s 失配（1.5m/s 下 15cm 系统性错位）；256 深容忍低速 odom。
     odom_hist: std::collections::VecDeque<(f64, OdomMessage)>,
+    /// 待融合视觉观测（按 `timestamp` 排序）：观测先到、odom 后到时暂存，
+    /// odom 追上即融合——事件驱动的订阅关系，无延时等待。
+    pending_visual: std::collections::VecDeque<PoseObservation>,
     last_odom_recv: f64,
     depth_cam: DepthCamera,
     t_sim: f64,
@@ -253,6 +233,12 @@ impl App {
             "已订阅深度话题（感知输入）",
             "深度订阅不可用，GICP 停用",
         );
+        let visual_obs = open_sub::<PoseObservation>(
+            &node,
+            POSE_OBS_TOPIC,
+            "已订阅视觉位姿观测（lightglue 输入）",
+            "视觉观测订阅不可用，仅 GICP 融合",
+        );
         let corrected_pub = match CorrectedOdomPublisher::new(&node) {
             Ok(p) => Some(p),
             Err(e) => {
@@ -266,10 +252,12 @@ impl App {
             reloc_ticks: 0,
             viewer_odom: odom_sub,
             depth,
+            visual_obs,
             corrected_pub,
             latest_odom: None,
             latest_depth: None,
-            odom_hist: std::collections::VecDeque::with_capacity(64),
+            odom_hist: std::collections::VecDeque::with_capacity(256),
+            pending_visual: std::collections::VecDeque::with_capacity(PENDING_VISUAL_CAP),
             last_odom_recv: f64::NEG_INFINITY,
             depth_cam: DepthCamera::mujoco_default(),
             t_sim: 0.0,
@@ -279,6 +267,7 @@ impl App {
 
     fn poll_sensors(&mut self) -> Result<()> {
         if let Some(sub) = &self.viewer_odom {
+            let mut odom_arrived = false;
             while let Some(sample) = sub.receive()? {
                 let m: OdomMessage = *sample;
                 self.t_sim = self.t_sim.max(m.timestamp);
@@ -287,9 +276,15 @@ impl App {
                 self.fusion.predict(&t_vio);
                 self.latest_odom = Some(m);
                 self.odom_hist.push_back((m.timestamp, m));
-                while self.odom_hist.len() > 64 {
+                while self.odom_hist.len() > 256 {
                     self.odom_hist.pop_front();
                 }
+                odom_arrived = true;
+            }
+            // odom 到达即追一次待融合队列：观测先到、odom 后到的竞态在此闭合，
+            // 无需延时等待——唤醒源仍是数据到达本身。
+            if odom_arrived {
+                self.drain_pending_visual();
             }
         }
         if let Some(sub) = &self.depth {
@@ -299,7 +294,85 @@ impl App {
                 self.latest_depth = Some(m);
             }
         }
+        if self.visual_obs.is_some() {
+            let mut arrived = Vec::new();
+            if let Some(sub) = &self.visual_obs {
+                while let Some(sample) = sub.receive()? {
+                    let obs: PoseObservation = *sample;
+                    self.t_sim = self.t_sim.max(obs.timestamp);
+                    arrived.push(obs);
+                }
+            }
+            for obs in arrived {
+                self.enqueue_visual(obs);
+            }
+            self.drain_pending_visual();
+        }
         Ok(())
+    }
+
+    /// 观测入队：按 `timestamp` 有序插入，溢出丢最旧（值语义：`Copy` 类型，
+    /// 384B 过栈拷贝的代价远小于一次 `PnP`/融合，见 `fuse_visual` 同惯例）。
+    #[allow(clippy::large_types_passed_by_value)]
+    fn enqueue_visual(&mut self, obs: PoseObservation) {
+        let pos = self
+            .pending_visual
+            .iter()
+            .position(|o| o.timestamp > obs.timestamp)
+            .unwrap_or(self.pending_visual.len());
+        self.pending_visual.insert(pos, obs);
+        while self.pending_visual.len() > PENDING_VISUAL_CAP {
+            self.pending_visual.pop_front();
+        }
+    }
+
+    /// 排空待融合队列：`ts` 落入 `odom_hist` 内插范围即融合；超期即丢弃；
+    /// 队首仍超前（odom 未追上）即停——等下次 odom 到达再排，不丢弃。
+    fn drain_pending_visual(&mut self) {
+        while let Some(ts) = self.pending_visual.front().map(|o| o.timestamp) {
+            if self.t_sim - ts > PENDING_VISUAL_TIMEOUT {
+                self.pending_visual.pop_front();
+                continue;
+            }
+            if interp_odom(&self.odom_hist, ts).is_none() {
+                break;
+            }
+            let obs = self.pending_visual.pop_front().expect("front checked");
+            self.fuse_visual(&obs);
+        }
+    }
+
+    /// 视觉观测融合：按观测时刻插值 odom 作预测位姿，同一 `FusionFilter` 更新。
+    #[fastrace::trace]
+    fn fuse_visual(&mut self, obs: &PoseObservation) {
+        let Some(t_vio) = interp_odom(&self.odom_hist, obs.timestamp) else {
+            log::debug!("视觉观测无 odom 内插（ts={:.2}），跳过", obs.timestamp);
+            return;
+        };
+        match self.fusion.update_with_observation(&t_vio, obs) {
+            firefly_localization::filter::RelocGate::Accepted {
+                chi2, threshold, ..
+            } => {
+                log::info!(
+                    "视觉矫正接受 chi2 {chi2:.2}/{threshold:.2} inliers {}/{} err {:.3}",
+                    obs.num_inliers,
+                    obs.total_points,
+                    obs.error
+                );
+            }
+            firefly_localization::filter::RelocGate::RejectedChi2 { chi2, threshold } => {
+                log::debug!("视觉 chi2 拒收 {chi2:.2}>{threshold:.2}");
+            }
+            firefly_localization::filter::RelocGate::RejectedInnovation { trans, rot_deg } => {
+                log::debug!("视觉新息拒收 trans {trans:.2}m rot {rot_deg:.2}°");
+            }
+            firefly_localization::filter::RelocGate::RejectedPrecheck { reason } => {
+                log::debug!("视觉预检拒收: {reason}");
+            }
+            firefly_localization::filter::RelocGate::RejectedNumerical { reason } => {
+                log::warn!("视觉数值异常拒收: {reason}");
+            }
+        }
     }
 
     #[fastrace::trace]

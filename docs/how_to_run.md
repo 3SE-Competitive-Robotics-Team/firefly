@@ -1,14 +1,16 @@
 # How to Run
 
-目前一共 5 个进程：
+目前一共 7 个进程（视觉全局定位已接入 `gicp` 内同一 `FusionFilter` 融合）：
 
 | # | 进程 | App | 订阅 | 发布 | 频率 |
 |---|---|---|---|---|---|
 | 1 | `firefly-sim` | `apps/firefly-sim` | `Firefly/Reference` | `Firefly/Imu` 100Hz / `Firefly/CameraLeft,Right` 10Hz / `Firefly/Depth` 10Hz / `Firefly/GroundTruth` 10Hz | 200Hz 物理 |
 | 2 | `vio` | `apps/vio` (MSCKF) | `Imu` + 双目灰度 | `Firefly/Odometry` (估计位姿，100Hz propagation) + `Firefly/Viz` (10Hz) | 10Hz 视觉修正 / 100Hz 输出 |
-| 3 | `gicp` | `apps/gicp` (GICP 全局重定位 + FusionFilter) | `Odometry` (100Hz) + `Depth` | `Firefly/CorrectedOdometry` | 1Hz 重定位 / 100Hz 融合 |
+| 3 | `gicp` | `apps/gicp` (GICP 全局重定位 + FusionFilter) | `Odometry` (100Hz) + `Depth` + `Firefly/PoseObservation`（视觉观测） | `Firefly/CorrectedOdometry` | 1Hz 重定位 / 100Hz 融合 |
 | 4 | `planner` | `apps/planner` (EGO-Planner v2: A* + MINCO) | `Odometry`/`CorrectedOdometry` + `Depth` + `Firefly/Goal` | `Firefly/Reference` + `Firefly/Viz` | 10Hz |
 | 5 | `firefly-viz` | `apps/firefly-viz` | `Firefly/Viz` | （写 rerun viewer / rrd） | 消费 10Hz 可视化 |
+| 6 | `aliked` | `apps/aliked` (ALIKED-N16 特征提取，`ort`) | `Firefly/CameraLeft`（左目灰度） | `Firefly/Features`（特征话题） | 1Hz 节流推理 |
+| 7 | `lightglue` | `apps/lightglue` (LightGlue 匹配 + PnP，`ort`) | `Firefly/Features` + `Firefly/Odometry`（查询先验）+ 库图 `--map` | `Firefly/PoseObservation`（视觉观测 → `gicp` 融合） | 特征到即查 |
 
 数据流：`sim → vio → gicp → planner → sim`（PD 闭环跟踪）。`sim_time` 为全链路统一时钟，`fastrace` 跨进程续接同一 `trace_id`。Rust 计算线程零 IO：可视化数据经 `Firefly/Viz` 话题零拷贝发布，由 `firefly-viz` 进程统一写 rerun。
 
@@ -21,7 +23,7 @@ cargo --version && python3 --version
 # 安装 Python 环境（根 workspace 聚合 firefly-mujoco + firefly-sim）
 uv sync
 
-# 安装 rerun viewer（可选，但强烈建议先开，4 进程共享同一 viewer）
+# 安装 rerun viewer（可选，但强烈建议先开，7 进程共享同一 viewer）
 cargo install rerun-cli   # 或 uv tool install rerun-sdk
 ```
 
@@ -60,8 +62,15 @@ cargo run -p vio
 # 终端 4 — GICP：订阅 odom+深度，以静态先验为靶图做配准，发布校正后里程计
 cargo run -p gicp -- --map apps/planner/maps/gate.ffmap
 # 不指定 --map 时尝试加载 gate.ffmap，不存在则用空地图（GICP 自动禁用，仅透传融合）
+# 视觉观测（lightglue → Firefly/PoseObservation）自动融合，无需额外参数
 
-# 终端 5 — 规划器：订阅 odom(优先 CorrectedOdometry) + 深度，发布 Reference + 可视化消息
+# 终端 5 — 视觉全局定位（需先备好库图与权重，见下）
+cargo run -p aliked [--model models/aliked-n16-k512.onnx]   # 左目特征 → Firefly/Features（1Hz）
+cargo run -p lightglue -- --map apps/planner/maps/straight_forward.ffvmap  # 匹配+PnP → Firefly/PoseObservation
+# 离线建库：cargo run -p aliked -- --build-map logs/bench/vision_eval/frames --out apps/planner/maps/straight_forward.ffvmap
+# 离线评测：cargo test --release -p lightglue --test vision_traj_eval -- --nocapture
+
+# 终端 6 — 规划器：订阅 odom(优先 CorrectedOdometry) + 深度，发布 Reference + 可视化消息
 cargo run -p planner -- --map apps/planner/maps/gate.ffmap
 # 独立运行不接 sim：cargo run -p planner -- --map apps/planner/maps/gate.ffmap
 ```
@@ -135,7 +144,7 @@ cargo run -p planner -- --config configs/planner.toml --map apps/planner/maps/ma
 
 ## 7. 最小验证清单
 
-1. `rerun` + `uv run firefly-viz` 已开 → 5 个进程按 `sim → vio → gicp → planner` 顺序启动，日志均出现 `已订阅 ...` / `已打开话题`；`firefly-viz` 出现 `已订阅 Firefly/Viz`。
+1. `rerun` + `uv run firefly-viz` 已开 → 7 个进程按 `sim → vio → gicp → planner`（+ `aliked → lightglue → gicp` 视觉支路）顺序启动，日志均出现 `已订阅 ...` / `已打开话题`；`firefly-viz` 出现 `已订阅 Firefly/Viz`。
 2. `uv run firefly-goal 20 4 1.5` → `planner` 日志 `收到新目标` + `目标更新 ... 重新规划中`，`rerun` 中 `plan/local_traj` 出现。
 3. `sim` 日志 `收到参考 t=... pos=(...)` 且无人机开始移动。
 4. `Ctrl+C` 后 `全部进程已结束` / `优雅退出`，`cargo run` 进程组无残留（`ps aux | grep firefly` 为空）。

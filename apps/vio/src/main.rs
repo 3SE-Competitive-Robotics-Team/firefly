@@ -46,6 +46,10 @@ const ODOM_PERIOD: f64 = 0.01;
 const VIZ_PERIOD: f64 = 0.1;
 /// `MuJoCo` 场景无人机起点（= demo 地图 start；GT 先验）。
 const SIM_START: [f64; 3] = [1.0, 4.0, 1.0];
+/// 就绪判据：连续发布 `READY_MIN_COUNT` 条 `is_initialized=true` 的 odom 后
+/// 锁存 ready（`vio` 的 `initialized()` 在 GT 对齐后即为真，电平触发满足
+/// sim 互锁；计数门滤掉单帧毛刺）。
+const READY_MIN_COUNT: u32 = 10;
 /// rerun 图例颜色：真值=蓝、估计=橙。
 const GT_COLOR: (u8, u8, u8) = (60, 120, 255);
 const ODOM_COLOR: (u8, u8, u8) = (255, 140, 0);
@@ -284,6 +288,10 @@ fn run_loop(
     let mut imu_batch_count = 0u64;
     let t_wall_start = std::time::Instant::now();
     let mut next_diag_wall = DIAG_PERIOD;
+    // 就绪状态机：`initialized()` 为真连续计数，满门锁存并单次通报；
+    // sim 侧 `--script` 互锁据此电平启动任务时钟。
+    let mut ready_count = 0u32;
+    let mut ready_reported = false;
 
     // 事件唤醒端：IMU + 相机对（notify 来自 sim；odom 由 OdomPublisher 自动通知）
     let imu_events = TopicListener::with_topic(node, firefly_pubsub::imu::IMU_TOPIC)?;
@@ -432,7 +440,20 @@ fn run_loop(
         // 按发布周期输出 odom（100Hz，经 IMU propagation；视觉仍 10Hz 修正）
         if t_sim + 1e-9 >= next_odom {
             let s = &vio.state;
-            publish_odom(odom_pub, t_sim, s.timestamp, &s.imu, vio.initialized());
+            let init = vio.initialized();
+            publish_odom(odom_pub, t_sim, s.timestamp, &s.imu, init);
+            // 就绪计数：为真连续累加，断一次清零；满门锁存并单次通报
+            if init {
+                ready_count += 1;
+                if !ready_reported && ready_count >= READY_MIN_COUNT {
+                    ready_reported = true;
+                    log::info!(
+                        "VIO 就绪（initialized 连续 {ready_count} 帧）：sim --script 互锁可启动任务时钟"
+                    );
+                }
+            } else {
+                ready_count = 0;
+            }
             next_odom += ODOM_PERIOD;
             // 落后超过一个周期（启动追赶 / 长阻塞后恢复）时重同步到当前时刻，
             // 避免按 100Hz 节奏洪泛补发积压的 odom
