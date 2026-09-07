@@ -311,6 +311,15 @@ fn print_report(rep: &Report) {
 
 #[test]
 fn gicp_traj_eval() {
+    let frames_dir = data_dir().join("frames");
+    let prior_path = data_dir().join("prior_cloud.bin");
+    if !frames_dir.is_dir() || !prior_path.is_file() {
+        println!(
+            "skip: 无离线评测数据 {}（先跑 scripts/gen_gicp_eval_data.py）",
+            data_dir().display()
+        );
+        return;
+    }
     let opts = RelocOptions {
         downsampling_resolution: 0.2,
         num_neighbors: 10,
@@ -453,8 +462,14 @@ fn replay_frame(
 #[test]
 fn gicp_replay_live() {
     let replay = data_dir().join("..").join("replay");
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&replay)
-        .unwrap()
+    let Ok(entries) = std::fs::read_dir(&replay) else {
+        println!(
+            "skip: 无线上回放数据 {}（先跑 scripts/record_live_gicp.py）",
+            replay.display()
+        );
+        return;
+    };
+    let mut dirs: Vec<PathBuf> = entries
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.is_dir())
         .collect();
