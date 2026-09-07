@@ -14,6 +14,8 @@ log = "0.4"
 logcall = "0.2"
 logforth = { version = "0.30", default-features = false }
 nalgebra = "0.35"
+ndarray = "0.17"
+ort = { version = "=2.0.0-rc.13" }
 purecv = { version = "0.7", default-features = false, features = ["simd", "parallel"] }
 rayon = "1.12"
 rerun = { version = "0.36", default-features = false, features = ["sdk"] }
@@ -40,6 +42,8 @@ firefly-void-esikf = { path = "crates/firefly-void-esikf" }
 firefly-void-map = { path = "crates/firefly-void-map" }
 firefly-void-measure = { path = "crates/firefly-void-measure" }
 firefly-void = { path = "crates/firefly-void" }
+firefly-vision-map = { path = "crates/firefly-vision-map" }
+firefly-vision-match = { path = "crates/firefly-vision-match" }
 
 [workspace.package]
 edition = "2024"

@@ -41,6 +41,8 @@ def main() -> None:
     ap.add_argument("--turns", type=int, default=1, help="turns per trajectory (default 1)")
     ap.add_argument("--only", type=str, default=None, help="comma-separated instance names; default all")
     ap.add_argument("--tag", type=str, default=None, help="filename tag prefix for outputs (A/B groups, e.g. baseline/slam/voxel)")
+    ap.add_argument("--no-fleet", action="store_true", help="只起 sim+vio（旧语义；缺省起常态舰队并采 corrected 对照）")
+    ap.add_argument("--with-planner", action="store_true", help="再起 planner（仅验证存活与接线）")
     args = ap.parse_args()
 
     names = sorted(TRAJECTORIES)
@@ -61,7 +63,14 @@ def main() -> None:
             for turn in range(1, args.turns + 1):
                 print(f"\n{'=' * 20} {name} turn {turn}/{args.turns} {'=' * 20}")
                 out = save_dir / f"{tag}{name}_turn_{turn:02d}.json"
-                payload = run_bench(float(args.duration), save_dir, out, trajectory=name)
+                payload = run_bench(
+                    float(args.duration),
+                    save_dir,
+                    out,
+                    trajectory=name,
+                    with_fleet=not args.no_fleet,
+                    with_planner=args.with_planner,
+                )
                 payload["turn"] = turn
                 results.append(payload)
                 time.sleep(1)
@@ -89,6 +98,13 @@ def main() -> None:
                 f"{name:<22} {r['turn']:>4} {m['ate_rmse']:9.3f} {m['ate_mean']:9.3f} "
                 f"{m['ate_max']:8.3f} {m['ate_final']:10.3f} {m['rpe_rmse_1s']:7.3f} {m['num_frames']:7d}{warn}"
             )
+            cm = r.get("corrected_metrics")
+            if cm is not None:
+                print(
+                    f"{'  corr':<22} {'':>4} {cm['ate_rmse']:9.3f} {cm['ate_mean']:9.3f} "
+                    f"{cm['ate_max']:8.3f} {cm['ate_final']:10.3f} "
+                    f"(ΔRMSE {m['ate_rmse'] - cm['ate_rmse']:+.3f})"
+                )
         if len(turns) > 1:
             ate = np.array([r["metrics"]["ate_rmse"] for r in turns])
             fin = np.array([r["metrics"]["ate_final"] for r in turns])

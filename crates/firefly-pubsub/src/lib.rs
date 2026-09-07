@@ -12,6 +12,8 @@
 //! - [`goal`]：`GoalMessage`——外部工具发布的飞行目标（动态重目标入口）；
 //! - [`viz`]：`VizMessage`——统一可视化消息（Rust 计算线程零 IO，经
 //!   `Firefly/Viz` 话题由 `firefly-viz` Python 进程统一写 rerun）；
+//! - [`vision`]：`FeatureMessage`/`PoseObservation`——视觉定位消息
+//!   （特征与位姿观测分离，融合核保持传感器无关）；
 //! - [`publish`]/[`subscriber`]：泛型发布/订阅端（自动注入/续接 trace 上下文）；
 //! - [`event`]：事件唤醒层——每话题配对同名 event service，发布后 notify、
 //!   订阅端 `Listener` 挂 `WaitSet` 即到即醒（对照 iceoryx2 官方 event 示例）。
@@ -29,4 +31,5 @@ pub mod publish;
 pub mod reference;
 pub mod subscriber;
 pub mod trace;
+pub mod vision;
 pub mod viz;

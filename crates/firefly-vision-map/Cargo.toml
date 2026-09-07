@@ -1,0 +1,17 @@
+[package]
+name = "firefly-vision-map"
+version = "0.1.0"
+keywords = ["visual-localization", "robotics"]
+categories = ["robotics", "science"]
+edition = "2024"
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+firefly-error = { workspace = true }
+
+[lints]
+workspace = true
