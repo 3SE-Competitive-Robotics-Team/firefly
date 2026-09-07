@@ -13,7 +13,6 @@
     clippy::nursery,
     clippy::all
 )]
-#![allow(dead_code)]
 
 use std::collections::BTreeSet;
 use std::f64::consts::PI;
@@ -296,20 +295,6 @@ fn solve_quart(a: f64, b: f64, c: f64, d: f64, e: f64) -> BTreeSet<OrderedF64> {
     solve_quart_monic(b / a, c / a, d / a, e / a)
 }
 
-/// 官方 `numSignVar` (398)
-fn num_sign_var(x: f64, sturm_seqs: &[Vec<f64>]) -> i32 {
-    let mut sign_var = 0;
-    let mut lasty = poly_eval(&sturm_seqs[0], x);
-    for i in 1..sturm_seqs.len() {
-        let y = poly_eval(&sturm_seqs[i], x);
-        if lasty == 0.0 || lasty * y < 0.0 {
-            sign_var += 1;
-        }
-        lasty = y;
-    }
-    sign_var
-}
-
 /// 官方 `polyDeri` (418)
 fn poly_deri(coeffs: &[f64]) -> Vec<f64> {
     let horder = coeffs.len() - 1;
@@ -379,107 +364,6 @@ fn shrink_interval(coeffs: &[f64], lbound: f64, ubound: f64, tol: f64) -> f64 {
     let func = |x: f64| poly_eval(coeffs, x);
     let dfunc = |x: f64| poly_eval(&dcoeffs, x);
     safe_newton(&func, &dfunc, lbound, ubound, tol, 128)
-}
-
-/// 官方 `recurIsolate` (523)
-fn recur_isolate(
-    l: f64,
-    r: f64,
-    fl: f64,
-    fr: f64,
-    lnv: i32,
-    rnv: i32,
-    tol: f64,
-    sturm_seqs: &[Vec<f64>],
-    rts: &mut BTreeSet<OrderedF64>,
-) {
-    let nrts = lnv - rnv;
-    if nrts == 0 {
-        return;
-    }
-    if nrts == 1 {
-        if fl * fr < 0.0 {
-            rts.insert(OrderedF64(shrink_interval(&sturm_seqs[0], l, r, tol)));
-            return;
-        }
-        for _ in 0..128 {
-            if fl * fr < 0.0 {
-                rts.insert(OrderedF64(shrink_interval(&sturm_seqs[1], l, r, tol)));
-                return;
-            }
-            let m = (l + r) / 2.0;
-            let fm = poly_eval(&sturm_seqs[0], m);
-            if fm == 0.0 || (r - l).abs() < tol {
-                rts.insert(OrderedF64(m));
-                return;
-            }
-            let mnv = num_sign_var(m, sturm_seqs);
-            if lnv == mnv {
-                // 区间左半无根，收缩左界
-                // 为简化实现，直接递归右半（官方原地更新 l/fl，此处等价）
-                recur_isolate(m, r, fm, fr, mnv, rnv, tol, sturm_seqs, rts);
-                return;
-            }
-            recur_isolate(l, m, fl, fm, lnv, mnv, tol, sturm_seqs, rts);
-            return;
-        }
-        rts.insert(OrderedF64((l + r) / 2.0));
-        return;
-    }
-    // nrts > 1
-    let mut cl = l;
-    let mut cr = r;
-    let mut cfl = fl;
-    let mut cfr = fr;
-    let mut clnv = lnv;
-    let mut crnv = rnv;
-    for _ in 0..128 {
-        let m = (cl + cr) / 2.0;
-        let mnv = num_sign_var(m, sturm_seqs);
-        if (cr - cl).abs() < tol {
-            rts.insert(OrderedF64(m));
-            return;
-        }
-        let fm = poly_eval(&sturm_seqs[0], m);
-        if fm == 0.0 {
-            // 命中根，微小偏移避免卡住（官方 bias 逻辑简化：四分位点重试）
-            let biased_m = (cr - cl) / 4.0 + cl;
-            let biased_fm = poly_eval(&sturm_seqs[0], biased_m);
-            let biased_mnv = num_sign_var(biased_m, sturm_seqs);
-            if clnv != biased_mnv && crnv != biased_mnv {
-                recur_isolate(
-                    cl, biased_m, cfl, biased_fm, clnv, biased_mnv, tol, sturm_seqs, rts,
-                );
-                recur_isolate(
-                    biased_m, cr, biased_fm, cfr, biased_mnv, crnv, tol, sturm_seqs, rts,
-                );
-                return;
-            } else if clnv == biased_mnv {
-                cl = biased_m;
-                cfl = biased_fm;
-                clnv = biased_mnv;
-            } else {
-                cr = biased_m;
-                cfr = biased_fm;
-                crnv = biased_mnv;
-            }
-            continue;
-        }
-        if clnv != mnv && crnv != mnv {
-            recur_isolate(cl, m, cfl, fm, clnv, mnv, tol, sturm_seqs, rts);
-            recur_isolate(m, cr, fm, cfr, mnv, crnv, tol, sturm_seqs, rts);
-            return;
-        } else if clnv == mnv {
-            cl = m;
-            cfl = fm;
-            clnv = mnv;
-        } else {
-            cr = m;
-            cfr = fm;
-            crnv = mnv;
-        }
-    }
-    rts.insert(OrderedF64((cl + cr) / 2.0));
 }
 
 /// 官方 `isolateRealRoots` (646)：区间隔离求根（Sturm 定理）

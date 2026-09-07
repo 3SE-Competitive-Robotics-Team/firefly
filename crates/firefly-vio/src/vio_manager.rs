@@ -8,7 +8,7 @@
 //! - [`VioManager::try_to_initialize`]：静态/动态初始化（`firefly-vio-init`）。
 //!
 //! 裁剪（对照 C++ 超出范围的部分）：ARUCO 跟踪器（`max_aruco_features=0`）、
-//! 降采样、统计文件与可视化——后续按需移植。
+//! 降采样、统计文件与可视化。
 
 use firefly_vio_core::feat::Feature;
 use firefly_vio_core::imu_model::ImuCalibration;

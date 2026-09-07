@@ -441,7 +441,6 @@ impl Odometry for VoidOdometry {
         let t_pre = std::time::Instant::now();
         let (points_l, covs_l) = self.build_downsampled_cloud(frame.depth, intrinsics);
         let px_total = frame.depth.width * frame.depth.height;
-        // 临时诊断：有效像素统计 + 采样 key 分布
         let valid_px = frame
             .depth
             .depth

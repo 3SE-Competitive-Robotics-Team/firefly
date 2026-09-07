@@ -173,6 +173,7 @@ impl GlobalRelocalizer {
 
     /// 对齐：`source` 为当前帧局部点云（已在机体系或已用初值粗对齐的全局系均可），
     /// `init` 为 `VIO` 给的 `T_target_source` 初值。
+    #[must_use]
     #[fastrace::trace]
     pub fn relocalize(&self, source: &PointCloud, init: &Matrix4<f64>) -> RelocResult {
         if source.num_points() == 0 {

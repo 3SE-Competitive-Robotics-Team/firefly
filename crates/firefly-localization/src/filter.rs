@@ -197,7 +197,7 @@ impl FusionFilter {
     /// `t_vio` 为当前 `VIO` 位姿（与 `predict` 同帧），`t_gicp` 为 `GICP` 给出的
     /// 全局位姿 `T_target_source`（`target=全局地图`），`h` 为信息矩阵，
     /// `num_inliers/total_points/error/converged` 来自 `RegistrationResult`。
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     #[fastrace::trace]
     pub fn update(
         &mut self,
@@ -236,13 +236,10 @@ impl FusionFilter {
 
         // 2. 预测位姿与残差
         let t_pred = self.t_drift * *t_vio;
-        let t_pred_inv = match t_pred.try_inverse() {
-            Some(v) => v,
-            None => {
-                return RelocGate::RejectedNumerical {
-                    reason: "pred not invertible",
-                };
-            }
+        let Some(t_pred_inv) = t_pred.try_inverse() else {
+            return RelocGate::RejectedNumerical {
+                reason: "pred not invertible",
+            };
         };
         let t_err = t_pred_inv * *t_gicp;
         let z = se3_log(&t_err);
@@ -261,36 +258,33 @@ impl FusionFilter {
         }
 
         // 3. 观测噪声 R = h⁻¹，失败回退对角阵；连续拒收时放大
-        let mut r = match h.try_inverse() {
-            Some(inv) => {
-                let mut r = inv;
-                // 保持对称
-                r = (r + r.transpose()) * 0.5;
-                // 数值防护：对角线截断为正
-                for i in 0..6 {
-                    if r[(i, i)] < 1e-9 {
-                        r[(i, i)] = 1e-9;
-                    }
-                    if !r[(i, i)].is_finite() {
-                        r[(i, i)] = if i < 3 {
-                            self.options.fallback_noise_rot
-                        } else {
-                            self.options.fallback_noise_pos
-                        };
-                    }
+        let mut r = if let Some(inv) = h.try_inverse() {
+            let mut r = inv;
+            // 保持对称
+            r = (r + r.transpose()) * 0.5;
+            // 数值防护：对角线截断为正
+            for i in 0..6 {
+                if r[(i, i)] < 1e-9 {
+                    r[(i, i)] = 1e-9;
                 }
-                r * self.r_scale
+                if !r[(i, i)].is_finite() {
+                    r[(i, i)] = if i < 3 {
+                        self.options.fallback_noise_rot
+                    } else {
+                        self.options.fallback_noise_pos
+                    };
+                }
             }
-            None => {
-                let mut r = Matrix6::zeros();
-                for i in 0..3 {
-                    r[(i, i)] = self.options.fallback_noise_rot * self.r_scale;
-                }
-                for i in 3..6 {
-                    r[(i, i)] = self.options.fallback_noise_pos * self.r_scale;
-                }
-                r
+            r * self.r_scale
+        } else {
+            let mut r = Matrix6::zeros();
+            for i in 0..3 {
+                r[(i, i)] = self.options.fallback_noise_rot * self.r_scale;
             }
+            for i in 3..6 {
+                r[(i, i)] = self.options.fallback_noise_pos * self.r_scale;
+            }
+            r
         };
 
         // R 下限（离线标定修正噪声）：防 h⁻¹ 过自信导致 chi2 恒小、
@@ -307,13 +301,10 @@ impl FusionFilter {
         }
 
         let s = self.p + r;
-        let s_inv = match s.try_inverse() {
-            Some(v) => v,
-            None => {
-                return RelocGate::RejectedNumerical {
-                    reason: "S not invertible",
-                };
-            }
+        let Some(s_inv) = s.try_inverse() else {
+            return RelocGate::RejectedNumerical {
+                reason: "S not invertible",
+            };
         };
         let chi2 = z.dot(&(s_inv * z));
         let threshold = chi2_95(6) * self.options.chi2_multiplier;
@@ -380,6 +371,10 @@ impl FusionFilter {
     /// 由 `PoseObservation`（`Firefly/PoseObservation` 话题，几何/视觉源通用）
     /// 更新：位姿由 `pos/quat` 组装，信息矩阵为协方差的逆；门控与注入复用
     /// [`FusionFilter::update`]，来源仅用于诊断（日志不区分，行为一致）。
+    ///
+    /// # Panics
+    ///
+    /// 观测协方差与其回退对角阵均不可逆时（回退阵对角为正，实践中不发生）。
     #[fastrace::trace]
     pub fn update_with_observation(
         &mut self,
@@ -401,7 +396,9 @@ impl FusionFilter {
             for i in 3..6 {
                 fb[(i, i)] = self.options.fallback_noise_pos;
             }
-            fb.try_inverse().unwrap_or(Matrix6::identity())
+            // 对角阵求逆必成功（`fallback_noise_*` 为正）；`expect` 仅作不变量断言。
+            fb.try_inverse()
+                .expect("fallback 对角信息阵必须可逆（fallback_noise_* 为正）")
         });
         self.update(
             t_vio,
