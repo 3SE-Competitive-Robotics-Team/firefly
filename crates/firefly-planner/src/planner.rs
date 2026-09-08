@@ -31,7 +31,6 @@ use crate::root_finder;
 enum FinishCheck {
     Accept,
     SwarmTooClose,
-    FormationDeviation,
     Collision,
 }
 
@@ -413,12 +412,10 @@ impl Planner {
         let two_thirds = two_thirds_id(minco.pieces() * k + 1, touch_goal);
         let multitopo = self.config.use_multitopology_trajs;
         let mut gate_latched = false;
-        let mut prev_formation_dev = f64::MAX;
 
         let mut rebound_times = 0usize;
         let mut restart_nums = 0usize;
         let mut iteration = 0usize;
-        let mut final_cost = f64::INFINITY;
 
         loop {
             iteration += 1;
@@ -433,22 +430,6 @@ impl Planner {
             }
             let _span =
                 fastrace::local::LocalSpan::enter_with_local_parent(format!("rebound-{iteration}"));
-
-            // 队形是软约束（官方靠持续重规划收敛）：单次规划中
-            // 偏差不再改善即接受当前解，避免迭代耗尽
-            if self.formation.is_some() && iteration > 1 {
-                let traj = minco.solve()?;
-                let dev = self.formation_deviation(&traj);
-                if (prev_formation_dev - dev).abs() < 0.05 {
-                    return Ok(InnerOutcome {
-                        minco,
-                        planes_by_point,
-                        iterations: iteration,
-                        final_cost,
-                    });
-                }
-                prev_formation_dev = dev;
-            }
 
             // 一次全量 L-BFGS（官方 max_iterations=200）；objective 内部检测约束点
             let mut objective = self.build_objective(
@@ -474,7 +455,6 @@ impl Planner {
                 LbfgsConfig::default()
             };
             let report = Lbfgs::new(config).minimize(&mut objective, x0)?;
-            final_cost = report.final_cost;
             gate_latched = objective.gate_latched();
             log::debug!(
                 "rebound {iteration}: lbfgs iter={} converged={} early_exit={} grad={:.2e}",
@@ -511,7 +491,7 @@ impl Planner {
                         minco,
                         planes_by_point,
                         iterations: iteration,
-                        final_cost,
+                        final_cost: report.final_cost,
                     });
                 }
                 FinishCheck::SwarmTooClose => {
@@ -523,16 +503,13 @@ impl Planner {
                         self.last_swarm_weight_mod
                     );
                 }
-                failure => {
+                failure @ FinishCheck::Collision => {
                     log::debug!("rebound {iteration}: {failure:?},restart(swarm 权重不变)");
                 }
             }
             restart_nums += 1;
-            log::debug!("rebound {iteration}: restart {restart_nums}");
-            // 重启上限：引导路径修正(simplify 膨胀)后，贴墙翻越/窄缝场景可能
-            // 需要更多次"合并平面→重启"才把轨迹顶出膨胀层，3 次过紧导致
-            // plan 经常失败；放宽到 6 次(每次重启都会带上新平面,收敛方向确定)。
-            if restart_nums > 6 {
+            // 官方上限 `restart_nums < 3`（`poly_traj_optimizer.cpp` 外层循环条件）。
+            if restart_nums >= 3 {
                 return Err(Error::temporary(
                     ErrorKind::Convergence,
                     "planner exceeded restart limit",
@@ -556,11 +533,15 @@ impl Planner {
         })
     }
 
-    /// 轨迹安全（障碍/集群/队形）时返回 [`FinishCheck::Accept`]，否则返回
-    /// 失败原因。障碍检查 = 官方 fine check：稠密采样 + in/out 分段 + A\*
+    /// 轨迹安全（障碍/集群）时返回 [`FinishCheck::Accept`]，否则返回
+    /// 失败原因。障碍检查 = 官方 fine check：稠密采样 + in/out 分段 + A*
     /// 绕障 + 平面（碰撞时新平面已并入 `planes_by_point`，调用方 restart）。
     /// 失败原因决定 restart 策略：仅 swarm 间距不满足触发权重倍增（官方
-    /// L95–113 三分支），碰撞/队形失败权重不变。
+    /// L95–113 三分支），碰撞失败权重不变。
+    ///
+    /// 注：队形是代价项（`formationGradCostP`，`formation_ws` 专有），
+    /// 非官方成功门——`try_finish` 只查 swarm + 障碍，不查队形达成；
+    /// 队形靠代价优化与持续重规划收敛。
     fn try_finish(
         &mut self,
         minco: &Minco,
@@ -571,9 +552,6 @@ impl Planner {
     ) -> Result<FinishCheck> {
         if !self.swarm_safe(traj, peers) {
             return Ok(FinishCheck::SwarmTooClose);
-        }
-        if !self.formation_safe(traj) {
-            return Ok(FinishCheck::FormationDeviation);
         }
         let scanner = ObstacleScanner::new(&self.map)
             .with_samples(self.config.constraint_points_per_piece)
@@ -595,69 +573,15 @@ impl Planner {
         Ok(FinishCheck::Accept)
     }
 
-    /// 轨迹与队形目标的最大偏差（诊断用，动态推断）。
-    fn formation_deviation(&self, traj: &Trajectory) -> f64 {
-        let Some(f) = &self.formation else {
-            return 0.0;
-        };
-        let penalty = FormationPenalty::new(
-            f.line_start,
-            f.line_end,
-            f.offsets.clone(),
-            f.self_id,
-            f.peers.clone(),
-        );
-        let kappa = self.config.constraint_points_per_piece;
-        let mut max_dev: f64 = 0.0;
-        for (i, ti) in traj.durations().iter().enumerate() {
-            for j in 0..=kappa {
-                let tau = j as f64 / kappa as f64;
-                let t_abs = segment_abs_time(traj, i, *ti, tau);
-                let (o, a, l, _) = penalty.formation_state(t_abs);
-                let tar = penalty.target(o, a, l);
-                max_dev = max_dev.max((traj.eval(t_abs).position - tar).norm());
-            }
-        }
-        max_dev
-    }
-
-    /// 队形达成：所有约束点与动态目标的最大偏差 < 阈值（软约束容差）。
-    fn formation_safe(&self, traj: &Trajectory) -> bool {
-        const THRESHOLD: f64 = 0.8;
-        let Some(f) = &self.formation else {
-            return true;
-        };
-        // 软约束容差：x 方向时间形状差异（轨迹与 peer 不同构）是正常的，
-        // 队形保持的核心是相对位置；官方依赖持续重规划收敛。
-        let penalty = FormationPenalty::new(
-            f.line_start,
-            f.line_end,
-            f.offsets.clone(),
-            f.self_id,
-            f.peers.clone(),
-        );
-        let kappa = self.config.constraint_points_per_piece;
-        for (i, ti) in traj.durations().iter().enumerate() {
-            for j in 0..=kappa {
-                let tau = j as f64 / kappa as f64;
-                let t_abs = segment_abs_time(traj, i, *ti, tau);
-                let (o, a, l, _) = penalty.formation_state(t_abs);
-                let tar = penalty.target(o, a, l);
-                if (traj.eval(t_abs).position - tar).norm() > THRESHOLD {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
     /// 集群安全：所有约束点对每架 peer 的椭球距离 ≥ Cw（同一绝对时刻）。
     fn swarm_safe(&self, traj: &Trajectory, peers: &[firefly_cost::Peer]) -> bool {
         const KAPPA: usize = 20;
         if peers.is_empty() {
             return true;
         }
-        // 官方 swarm_too_close：min_dist² < ((Cw_self + des_clearance) × 1.25)²
+        // 官方成功门:min_ellip_dist2 > (swarm_clearance × 1.25)²
+        // （`poly_traj_optimizer.cpp:88`；多机时对端期望净距由调用方并入
+        // `peer.clearance`，见 `Peer` 文档——此处单机场景恒走本分支）。
         for (i, ti) in traj.durations().iter().enumerate() {
             for j in 0..=KAPPA {
                 let tau = j as f64 / KAPPA as f64;
@@ -678,6 +602,8 @@ impl Planner {
                     let diff = p - pp;
                     let d2 = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z / 4.0;
                     // 官方成功门:min_ellip_dist2 > (swarm_clearance × 1.25)²
+                    // （单机场景无对端期望净距；多机时对端 `des_clearance`
+                    // 由调用方并入 `peer.clearance`，见 `Peer` 文档）。
                     let c = self.config.swarm_clearance * 1.25;
                     if d2 < c * c {
                         return false;
@@ -1049,15 +975,6 @@ impl Planner {
         }
         base
     }
-}
-
-/// 采样点的绝对时间（段前缀和 + τ·Tᵢ）。
-fn segment_abs_time(traj: &Trajectory, piece: usize, duration: f64, tau: f64) -> f64 {
-    let mut t = 0.0;
-    for l in 0..piece {
-        t += traj.durations()[l];
-    }
-    t + tau * duration
 }
 
 #[cfg(test)]

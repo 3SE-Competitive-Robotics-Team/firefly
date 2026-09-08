@@ -30,10 +30,6 @@ pub const DEFAULT_PLANNING_HORIZON: f64 = 6.0;
 /// 到达判定距离（米）。
 pub const DEFAULT_ARRIVE_DIST: f64 = 0.5;
 const REPLAN_COOLDOWN: f64 = 0.5;
-/// 连续重规划失败达到该次数且轨迹耗尽时，沿全局路径脱困直飞。
-const FAIL_STREAK_ESCAPE: usize = 3;
-/// 脱困引导速度（m/s）。
-const ESCAPE_SPEED: f64 = 1.0;
 /// 前视时间（秒，官方 `traj_server/time_forward`，swarm-playground 各 launch
 /// 均取 1.0）：yaw 期望方向取参考位置再往前该时长的轨迹点。
 const TIME_FORWARD: f64 = 1.0;
@@ -211,8 +207,6 @@ pub struct PlannerManager {
     replans: usize,
     /// 重规划失败后的冷却截止时刻：失败不逐 tick 重试空转。
     replan_cooldown_until: f64,
-    /// 连续重规划失败计数：达阈值且轨迹耗尽时沿全局路径脱困。
-    replan_fail_streak: usize,
     /// 上一帧参考偏航角（rad，[-π,π]；官方 `traj_server` 的
     /// `last_yaw_`，初值 0）。
     last_yaw: f64,
@@ -272,7 +266,6 @@ impl PlannerManager {
             finished: false,
             replans: 0,
             replan_cooldown_until: 0.0,
-            replan_fail_streak: 0,
             last_yaw: 0.0,
             last_yaw_dot: 0.0,
             last_yaw_time: None,
@@ -341,7 +334,6 @@ impl PlannerManager {
         self.finished = false;
         self.replans = 0;
         self.replan_cooldown_until = 0.0;
-        self.replan_fail_streak = 0;
         self.emergency = false;
         Ok(())
     }
@@ -438,6 +430,11 @@ impl PlannerManager {
     #[must_use]
     pub fn global_path(&self) -> &[Vector3<f64>] {
         &self.global_path
+    }
+
+    /// 可变规划器（队形/集群配置注入，测试与应用层装配用）。
+    pub fn planner_mut(&mut self) -> &mut Planner {
+        &mut self.planner
     }
 
     #[must_use]
@@ -592,6 +589,11 @@ impl PlannerManager {
                     } else if t_cur > self.options.replan_thresh
                         && now >= self.replan_cooldown_until
                     {
+                        report.replanned = self.replan(now);
+                    } else if !self.touch_goal && self.close_to_traj_end(t_cur) {
+                        // 官方 EXEC_TRAJ case 3 后半：非触 goal 且距轨迹末端
+                        // 不足急停时限 → 周期重规划（长尾耗尽前续上，
+                        // 否则末端急停/顿挫）。
                         report.replanned = self.replan(now);
                     }
                 }
@@ -798,10 +800,7 @@ impl PlannerManager {
             ),
         };
         let result = match planned {
-            Ok(r) => {
-                self.replan_fail_streak = 0;
-                r
-            }
+            Ok(r) => r,
             Err(warm_err) => {
                 if warm.is_some() {
                     match self.planner.plan_with_init(
@@ -817,14 +816,12 @@ impl PlannerManager {
                         Err(e) => {
                             log::warn!("重规划失败，保持旧轨迹：{e}");
                             self.replan_cooldown_until = now + REPLAN_COOLDOWN;
-                            self.replan_fail_streak += 1;
                             return false;
                         }
                     }
                 } else {
                     log::warn!("重规划失败，保持旧轨迹：{warm_err}");
                     self.replan_cooldown_until = now + REPLAN_COOLDOWN;
-                    self.replan_fail_streak += 1;
                     return false;
                 }
             }
@@ -842,7 +839,6 @@ impl PlannerManager {
             // 无监控覆盖的轨迹不入执行，视同本次重规划失败（官方
             // setLocalTrajFromOpt 失败时同样不更新局部轨迹）
             self.replan_cooldown_until = now + REPLAN_COOLDOWN;
-            self.replan_fail_streak += 1;
             return false;
         }
         true
@@ -910,7 +906,23 @@ impl PlannerManager {
     ///
     /// 定位与扫描上界见 [`future_scan_range`]。集群间距检查在同一定位上的
     /// 姊妹实现 [`Self::next_swarm_conflict`]。
+    ///
+    /// 官方 `EXEC_TRAJ` `close_to_current_traj_end`：检查点末端时刻距当前
+    /// 不足急停时限（`pts_chk.back.back.t − t_cur < emergency_time`）。
     #[must_use]
+    fn close_to_traj_end(&self, t_cur: f64) -> bool {
+        let Some(local) = self.local.as_ref() else {
+            return false;
+        };
+        let Some(last_bucket) = local.points_to_check.last() else {
+            return false;
+        };
+        let Some(&(t_end, _)) = last_bucket.last() else {
+            return false;
+        };
+        t_end - t_cur < self.options.emergency_time
+    }
+
     fn next_collision(&self, now: f64) -> Option<f64> {
         // 官方 ego_replan_fsm.cpp:307：traj_id <= 0 等价无可执行轨迹，入口短路
         if self.traj_id == 0 {
@@ -1153,7 +1165,6 @@ impl PlannerManager {
                     return false;
                 }
                 self.replans += 1;
-                self.replan_fail_streak = 0;
                 self.emergency = false;
                 log::info!(
                     "急停恢复：从 ({:.2},{:.2},{:.2}) 重规划至 ({:.2},{:.2},{:.2}){}",
@@ -1253,79 +1264,11 @@ impl PlannerManager {
         (seg, samples)
     }
 
-    /// A* 折线兜底直达点（脱困直飞用）：从 `start` 在折线最近段上的投影起
-    /// 沿弧长前推 `arc` 米，返回 `(目标点, 是否触及全局终点)`。规划链路走
-    /// 全局多项式轨迹（[`Self::global`]），此折线仅作 fail-safe 兜底。
-    fn walk_polyline_forward(&self, start: Vector3<f64>, arc: f64) -> (Vector3<f64>, bool) {
-        let goal_point = self.goal.coords;
-        if self.global_path.len() < 2 {
-            return (goal_point, true);
-        }
-        // 定位 start 的最近段
-        let mut seg = 0usize;
-        let mut best = f64::INFINITY;
-        for i in 0..self.global_path.len() - 1 {
-            let a = self.global_path[i];
-            let b = self.global_path[i + 1];
-            let ab = b - a;
-            let t = ((start - a).dot(&ab) / ab.norm_squared()).clamp(0.0, 1.0);
-            let d = (start - (a + ab * t)).norm_squared();
-            if d < best {
-                best = d;
-                seg = i;
-            }
-        }
-        // 从投影点起沿剩余路径累计弧长
-        let mut acc = 0.0;
-        let mut prev = start;
-        for point in &self.global_path[seg + 1..] {
-            let segment = *point - prev;
-            let len = segment.norm();
-            if acc + len >= arc {
-                let t = (arc - acc) / len;
-                return (prev + segment * t, false);
-            }
-            acc += len;
-            prev = *point;
-        }
-        (goal_point, true)
-    }
-
-    /// 参考指令生成：正常态取轨迹在 `now` 的参考状态（时间连续）；轨迹耗尽
-    /// 且连续重规划失败（贴墙死锁）→ 沿全局路径向下一自由点直飞脱困
-    /// （物理移动解开几何死锁，也给 VIO 提供视差）。急停态不走脱困分支：
-    /// 停车轨迹耗尽后按末端定点输出悬停参考。
-    fn reference(&mut self, now: f64, measured: Option<State>) -> Option<Reference> {
+    /// 参考指令生成：正常态取轨迹在 `now` 的参考状态（时间连续）。
+    /// 急停态按停车轨迹末端定点输出悬停参考。
+    fn reference(&mut self, now: f64, _measured: Option<State>) -> Option<Reference> {
         let local = self.local.as_ref()?;
         let t_cur = (now - local.start_time).clamp(0.0, local.traj.duration());
-        if !self.emergency
-            && t_cur >= local.traj.duration() - 1e-6
-            && self.replan_fail_streak >= FAIL_STREAK_ESCAPE
-        {
-            let pos = self.estimated_position(now, measured);
-            let (escape_target, _touch) = self.walk_polyline_forward(pos, 1.0);
-            let dir = escape_target - pos;
-            let dir = if dir.norm_squared() < 1e-9 {
-                Vector3::zeros()
-            } else {
-                dir.normalize()
-            };
-            log::info!(
-                "脱困回退: 当前位置({:.2},{:.2}) 目标({:.2},{:.2})",
-                pos.x,
-                pos.y,
-                escape_target.x,
-                escape_target.y
-            );
-            // 脱困直飞无轨迹可前视：yaw 对准脱困方向（同前视朝向运动方向的语义）
-            let (yaw, yaw_dot) = self.update_yaw(pos, escape_target, now);
-            return Some(Reference {
-                position: escape_target,
-                velocity: ESCAPE_SPEED * dir,
-                yaw,
-                yaw_dot,
-            });
-        }
         let s = local.traj.eval(t_cur);
         // 前视方向（官方 calculate_yaw：t_cur+TIME_FORWARD 未出轨迹则取该点，
         // 否则取轨迹末端）
@@ -1578,34 +1521,6 @@ mod tests {
     }
 
     #[test]
-    fn walk_polyline_forward_arc_projection() {
-        let m = open_manager();
-        // 断言沿**实际**全局路径的弧长语义,不假设路径经过固定坐标
-        let path = m.global_path().to_vec();
-        let start = path[0];
-        let (target, touch) = m.walk_polyline_forward(start, 6.0);
-        assert!(!touch, "6m 应未到终点");
-        let expect = arc_point(&path, start, 6.0);
-        assert!(
-            (target - expect).norm() < 1e-6,
-            "弧长 6m 目标 = 沿路径走 6m:期望 {expect:?},实际 {target:?}"
-        );
-        // 弧长远超路径末端 → 触及终点,目标 = 全局终点
-        let (target2, touch2) = m.walk_polyline_forward(start, 1e9);
-        assert!(touch2);
-        assert!((target2 - m.goal().coords).norm() < 1e-6);
-        // 起点在路径中途:从当前位置起算弧长
-        let mid = arc_point(&path, start, 3.0);
-        let (target3, touch3) = m.walk_polyline_forward(mid, 2.0);
-        let expect3 = arc_point(&path, mid, 2.0);
-        assert!(!touch3);
-        assert!(
-            (target3 - expect3).norm() < 1e-6,
-            "中途起点应按剩余路径走弧长:期望 {expect3:?},实际 {target3:?}"
-        );
-    }
-
-    #[test]
     fn global_traj_time_parameterization() {
         // 全局轨迹多项式化（官方 planGlobalTrajWaypoints）：时间参数化的
         // MINCO 轨迹，首末状态完整（零速零加速）、内点为简化路径拐点。
@@ -1845,46 +1760,6 @@ mod tests {
         assert_eq!(m.replans(), 2, "降级链应产出一次重规划");
         assert!(m.local().is_some(), "降级后应仍有新轨迹");
         assert!(!m.is_finished());
-    }
-
-    #[test]
-    fn escape_fly_when_traj_exhausted_and_failing() {
-        let mut m = open_manager();
-        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
-        // 先重规划出 horizon 局部轨迹(终点 = 规划视界内某点,≠ 全局终点)
-        let _ = m.tick(1.5, None);
-        let dur = m.local().unwrap().traj.duration();
-        m.replan_cooldown_until = f64::INFINITY; // 阻止重规划,聚焦 reference 分支
-        // 脱困方向 = 全局路径前进方向(不假设具体坐标轴)
-        let path = m.global_path();
-        let path_dir = (path[1] - path[0]).normalize();
-
-        // 正常态:轨迹末端参考 = 轨迹终点状态(速度≈0)
-        let r1 = m.tick(m.local().unwrap().start_time + dur + 0.1, None);
-        let ref1 = r1.reference.expect("正常态应有参考");
-        assert!(
-            ref1.velocity.norm() < 0.1,
-            "末端参考速度应≈0,实际 {}",
-            ref1.velocity.norm()
-        );
-        assert!(!m.is_finished(), "末端未到达全局终点不应完成");
-
-        // 脱困态:连续失败达阈值且轨迹耗尽 → 沿全局路径向下一自由点直飞
-        m.replan_fail_streak = FAIL_STREAK_ESCAPE;
-        let r2 = m.tick(m.local().unwrap().start_time + dur + 0.2, None);
-        let ref2 = r2.reference.expect("脱困态应有参考");
-        let expect_vel = ESCAPE_SPEED * path_dir;
-        assert!(
-            (ref2.velocity - expect_vel).norm() < 1e-6,
-            "脱困应沿路径直飞(速度 {expect_vel:?}),实际 {:?}",
-            ref2.velocity
-        );
-        assert!(
-            (ref2.position - ref1.position).dot(&path_dir) > 0.5,
-            "脱困目标应沿路径前移(末端 {:?},脱困 {:?})",
-            ref1.position,
-            ref2.position
-        );
     }
 
     #[test]
