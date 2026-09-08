@@ -276,11 +276,13 @@ impl<'a> ObstacleScanner<'a> {
             return (CheckResult::Error, Vec::new());
         };
 
-        /*** 逐段分配平面(官方 step1/2/3;MINIMUM_PERCENT=0 → 段长不做扩缩) ***/
+        /*** 逐段分配平面(官方 step1/2/3 + bounds/adjusted 防重叠切分；
+        MINIMUM_PERCENT=0 → 段长不做扩缩) ***/
         let mut final_spans = Vec::with_capacity(segment_ids.len());
         for (i, &span) in segment_ids.iter().enumerate() {
+            let alloc = adjusted_span(&segment_ids, i, points.len());
             // 官方 final_segment_ids:仅平面生成成功的段进入返回列表
-            if assign_planes_for_segment(self.map, &paths[i], points, span, planes) {
+            if assign_planes_for_segment(self.map, &paths[i], points, span, alloc, planes) {
                 final_spans.push((span.start, span.end));
             }
         }
@@ -288,7 +290,7 @@ impl<'a> ObstacleScanner<'a> {
     }
 
     /// 官方 `finelyCheckAndSetConstraintPoints`(`flag_first_init` 语义由调用方
-    /// 决定):稠密采样 → 占据分段(in/out)→ 每段 A\* 绕障 → 交点平面。
+    /// 决定):稠密采样 → 占据分段(in/out)→ 每段 A* 绕障 → 交点平面。
     ///
     /// `points` = 当前轨迹约束点(N·K+1),`planes` = 按约束点索引组织的
     /// {s,v} 平面池(本函数**就地追加**新平面)。返回 [`CheckResult`]。
@@ -346,7 +348,9 @@ impl<'a> ObstacleScanner<'a> {
                         break 0;
                     }
                 };
-                /*** 向后找最近自由点(官方 out_id;无则 STOP_FOR_ERROR) ***/
+                /*** 向后找最近自由点(官方 out_id;末端无自由点即 STOP_FOR_ERROR，
+                直接失败——官方 `force_stop_type_ = STOP_FOR_ERROR` 后外层
+                按失败处理，不空转) ***/
                 let mut j = i + 1;
                 let out_id = loop {
                     if j >= cols {
@@ -397,18 +401,11 @@ impl<'a> ObstacleScanner<'a> {
             return false;
         }
 
-        /*** 防重叠(官方对 segment_ids 直接做中点切分) ***/
-        for i in 1..segment_ids.len() {
-            if segment_ids[i - 1].end >= segment_ids[i].start {
-                let middle = (segment_ids[i - 1].end + segment_ids[i].start) as f64 / 2.0;
-                segment_ids[i - 1].end = (middle - 0.1) as usize;
-                segment_ids[i].start = (middle + 1.1) as usize;
-            }
-        }
-
-        /*** 逐段分配平面 ***/
+        /*** 逐段分配平面(官方 step1/2/3 + bounds/adjusted 防重叠切分；
+        MINIMUM_PERCENT=0 → 段长不做扩缩) ***/
         for (i, &span) in segment_ids.iter().enumerate() {
-            let _ = assign_planes_for_segment(self.map, &paths[i], points, span, planes);
+            let alloc = adjusted_span(&segment_ids, i, points.len());
+            let _ = assign_planes_for_segment(self.map, &paths[i], points, span, alloc, planes);
         }
         true
     }
@@ -465,9 +462,44 @@ struct ConstraintSpan {
     end: usize,
 }
 
+/// 官方 bounds + 防重叠切分（`poly_traj_optimizer.cpp` calculate bounds +
+/// Avoid overlap）：按相邻段中点算界（首段低界 1、末段高界 `cols-2`，
+/// 中点 `-1.0` 取整为低界、`+1.0` 取整为高界），再对相邻 adjusted
+/// 做中点切分（`middle∓0.1/1.1` 取整）。`MINIMUM_PERCENT=0` 故不扩缩，
+/// 仅返回切分后的分配界。
+fn adjusted_span(spans: &[ConstraintSpan], i: usize, cols: usize) -> (usize, usize) {
+    let (mut lo, hi) = span_bounds(spans, i, cols);
+    // 与前一段的 adjusted 防重叠：中点切分（官方 Avoid overlap 段）。
+    if i > 0 {
+        let prev_hi = span_bounds(spans, i - 1, cols).1;
+        if prev_hi >= lo {
+            let middle = (prev_hi + lo) as f64 / 2.0;
+            lo = (middle + 1.1) as usize;
+        }
+    }
+    (lo.min(hi), hi)
+}
+
+/// 单段 bounds（不含邻段切分）。
+fn span_bounds(spans: &[ConstraintSpan], i: usize, cols: usize) -> (usize, usize) {
+    let n = spans.len();
+    let lo = if i == 0 {
+        1usize
+    } else {
+        f64::midpoint((spans[i].start + spans[i - 1].end) as f64, 1.0) as usize
+    };
+    let hi = if i + 1 >= n {
+        cols.saturating_sub(2)
+    } else {
+        f64::midpoint((spans[i].end + spans[i + 1].start) as f64, -1.0) as usize
+    };
+    (lo.min(hi), hi)
+}
+
 /// 官方"Assign data to each segment"(step 1/2/3):为段 [first, second]
-/// 内的约束点生成 {s,v} 平面。
-/// - `step 2`:段内每个中间约束点求"轨迹点直线(`ctrl_pts_law`)"与 A\* 路径的
+/// 内的约束点生成 {s,v} 平面。`alloc` 为防重叠切分后的分配界，
+/// step 1 清 `flag_temp` 与 step 3 传播均走到分配界（官方语义）。
+/// - `step 2`:段内每个中间约束点求"轨迹点直线(`ctrl_pts_law`)"与 A* 路径的
 ///   交点,再从交点向轨迹点按分辨率步进找障碍表面边界;
 ///   段长 == 1 时用中点(官方 corner case);
 /// - `step 3`:从首个交点索引向段边界传播 base/direction。
@@ -478,32 +510,40 @@ fn assign_planes_for_segment(
     a_star_path: &[Vector3<f64>],
     points: &[Vector3<f64>],
     span: ConstraintSpan,
+    alloc: (usize, usize),
     planes: &mut [Vec<Plane>],
 ) -> bool {
     let ConstraintSpan {
         start: first,
         end: second,
     } = span;
-    // 段边界裁剪到 points 有效范围（官方 lo/hi）
-    let lo = first;
-    let hi = second.min(points.len() - 1);
+    // 分配界：防重叠切分后的 step 1 清零界与 step 3 传播界（官方 adjusted）；
+    // 交点扫描仍按原始段 [first, second]（官方 step 2 与分配界无关）。
+    let max_idx = points.len().saturating_sub(1);
+    let lo = alloc.0.min(max_idx);
+    let hi = alloc.1.min(max_idx).max(lo);
     if a_star_path.len() < 2 {
         return false;
     }
     let mut flag_temp = vec![false; hi.saturating_sub(lo) + 1];
     let mut got_intersection_id: Option<usize> = None;
 
-    // step 2:中间约束点求交点
+    // step 2:中间约束点求交点（官方按原始段 [first, second] 扫描）
     if second - first == 1 {
-        // 官方 corner case:段长 1,用中点
+        // 官方 corner case：基点取段首轨迹点，方向取交点−中点
+        // （`base=init_points[first]`，`dir=(intersection−middle).normalized()`；
+        // 基点仍按表面步进落在障碍表面——交点通常在自由空间）。
         let middle = (points[second] + points[first]) / 2.0;
-        if let Some((intersection, point)) =
+        if let Some((intersection, _)) =
             intersection_on_path(a_star_path, &points[first], &points[second], middle)
-            && (intersection - point).norm() > 0.01
+            && (intersection - middle).norm() > 0.01
         {
-            flag_temp[first - lo] = true;
-            let (base, dir) = surface_pair(map, intersection, point);
-            planes[first].push(Plane::new(base, dir));
+            let dir = (intersection - middle).normalize();
+            let idx = first
+                .saturating_sub(lo)
+                .min(flag_temp.len().saturating_sub(1));
+            flag_temp[idx] = true;
+            planes[first].push(Plane::new(points[first], dir));
             got_intersection_id = Some(first);
         }
     } else {

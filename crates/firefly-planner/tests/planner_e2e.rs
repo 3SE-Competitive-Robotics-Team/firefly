@@ -352,10 +352,11 @@ fn swarm_avoids_stationary_peer() {
 #[test]
 #[allow(clippy::float_cmp)] // 系数只会被精确地置 1 / ×2，无舍入
 fn formation_following_with_peer() {
-    // 2 机队形：peer 沿 x 直线（y=0），自己偏移 y=1 应跟随保持
-    let map = GridMapBuilder::new(0.5, [24, 12, 12]).build().unwrap();
-    let config = PlannerConfig::default();
-    let mut planner = Planner::new(config, map);
+    // 2 机队形：peer 沿 x 直线（y=0），自己偏移 y=1 应跟随保持。
+    // 官方语义：队形是软约束，靠持续重规划收敛——单次 plan() 不达标即
+    // 报错（restart 上限内无达标解），此处用 PlannerManager 按 10Hz
+    // tick 驱动多轮重规划，验证队形偏差逐轮收敛。
+    use firefly_planner::{ManagerOptions, PlannerManager};
     let start = State {
         position: Point3::new(0.5, 2.0, 1.0),
         velocity: Vector3::zeros(),
@@ -390,21 +391,70 @@ fn formation_following_with_peer() {
         self_id: 1,
         peers: vec![firefly_cost::Peer::new(0, 0.0, peer_traj, 1.0)],
     };
-    planner.set_formation(spec);
-
-    let result = planner.plan(start, goal).expect("plan with formation");
-    // 队形偏差导致的 restart 不得改变 swarm 权重（倍增仅由集群间距触发）；
-    // 本场景 plan() 无 swarm peers，swarm_safe 恒真。
-    assert_eq!(planner.last_swarm_weight_mod(), 1.0);
-    let traj = &result.trajectory;
-    let mid = traj.eval(traj.duration() / 2.0).position;
-    // 自己的期望位置 = peer 同刻位置 + 偏移 y=1 → y 应从 2.0 显著靠拢 1.0
-    // 官方语义：队形靠持续重规划收敛，单次规划显著靠拢即可
-    assert!(
-        (mid.y - 1.0).abs() < 0.8_f64,
-        "轨迹应向队形位置靠拢：mid y={}（起点 2.0，期望靠拢 1.0）",
-        mid.y
+    // 注：formation 功能仅存在于 formation_ws，main_ws（对照基准）无此项；
+    // try_finish 不查队形达成（代价项靠优化与持续重规划收敛），单次 plan()
+    // 须成功——此前自创 formation_safe 成功门 + 提前接受在此互相掩盖，
+    // 本断言锁定清理后的真实语义。
+    let mut planner_direct = Planner::new(
+        PlannerConfig::default(),
+        GridMapBuilder::new(0.5, [24, 12, 12]).build().unwrap(),
     );
+    planner_direct.set_formation(spec.clone());
+    let direct = planner_direct.plan(start, goal);
+    assert!(
+        direct.is_ok(),
+        "单次 plan() 在空图队形场景应成功：{:?}",
+        direct.err()
+    );
+    let mut manager = PlannerManager::with_planner(
+        Planner::new(
+            PlannerConfig::default(),
+            GridMapBuilder::new(0.5, [24, 12, 12]).build().unwrap(),
+        ),
+        ManagerOptions::default(),
+        start.position.coords,
+        goal.coords,
+    )
+    .unwrap();
+    manager.planner_mut().set_formation(spec);
+    // 首轮 tick：初始规划（单次 plan 语义，队形软约束下可能直接失败；
+    // 此处只要求管理器存活，收敛由后续持续重规划验证）
+    let _ = manager.tick(0.0, Some(start));
+    // 持续重规划：每轮从当前估计位置出发暖启动，队形偏差应逐轮收敛
+    let mut last_dev = f64::MAX;
+    let mut converged = false;
+    for k in 1..=10 {
+        let now = f64::from(k) * 0.5;
+        let measured = manager
+            .local()
+            .map(|local| {
+                let t = (now - local.start_time).clamp(0.0, local.traj.duration());
+                let s = local.traj.eval(t);
+                State {
+                    position: Point3::from(s.position),
+                    velocity: s.velocity,
+                    acceleration: s.acceleration,
+                }
+            })
+            .or(Some(start));
+        let _ = manager.tick(now, measured);
+        let Some(local) = manager.local() else {
+            continue;
+        };
+        let mid = local.traj.eval(local.traj.duration() / 2.0).position;
+        let dev = (mid.y - 1.0).abs();
+        last_dev = dev;
+        if dev < 0.8 {
+            converged = true;
+            break;
+        }
+    }
+    assert!(
+        converged,
+        "队形应经持续重规划收敛：末轮 mid y 偏差 {last_dev:.3}（起点 2.0，期望靠拢 1.0）"
+    );
+    // 队形偏差导致的 restart 不得改变 swarm 权重（倍增仅由集群间距触发）。
+    assert_eq!(manager.planner_mut().last_swarm_weight_mod(), 1.0);
 }
 
 #[test]

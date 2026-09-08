@@ -11,7 +11,7 @@
 //! 沿数组 in/out 自由点搜索 + A\* 绕障 + 交点平面,命中即提前终止
 //! (官方 `STOP_FOR_REBOUND`),由外层吸收新平面后重新优化。
 
-use firefly_cost::{Cost, Penalty, SmoothnessPenalty};
+use firefly_cost::Cost;
 use firefly_map::{GridMap, Plane};
 use firefly_optimize::Objective;
 use firefly_trajectory::{Endpoint, Minco, MincoBuilder, SolverOrder};
@@ -158,7 +158,7 @@ impl<'a> MincoObjective<'a> {
         }
     }
 
-    /// 挂载内循环碰撞检测(官方 allowRebound 条件:迭代 ≥4 且轨迹足够平滑;
+    /// 挂载内循环碰撞检测(官方 `allowRebound` 三判据；
     /// 多拓扑门控见 [`ReboundDetector::check`],`gate_latched` 由调用方传入
     /// 以跨外层迭代保持锁存)。
     #[must_use]
@@ -259,18 +259,65 @@ impl<'a> MincoObjective<'a> {
     }
 }
 
+/// 官方 `allowRebound` criterion 2：中间控制点折线方向点积下限（30°）。
+///
+/// 官方以优化变量当前值判定（`cps_.points` = 起点 + 中间点 + 终点）；
+/// 头尾各去 1 点（官方 `i in 3..cols-3` 按含头尾的点序列计，忽略首尾段），
+/// 相邻段单位方向点积最小值 ≥ 0.87 即折线已捋直。
+fn inner_points_straight_enough(
+    start: &Endpoint,
+    waypoints: &[Vector3<f64>],
+    end: &Endpoint,
+) -> bool {
+    let n_inner = waypoints.len();
+    if n_inner == 0 {
+        return true;
+    }
+    let mut min_product = 1.0f64;
+    for k in 1..=n_inner {
+        let prev = if k == 1 {
+            start.position
+        } else {
+            waypoints[k - 2]
+        };
+        let curr = waypoints[k - 1];
+        let next = if k == n_inner {
+            end.position
+        } else {
+            waypoints[k]
+        };
+        let d_prev = curr - prev;
+        let d_next = next - curr;
+        if d_prev.norm() < 1e-9 || d_next.norm() < 1e-9 {
+            continue;
+        }
+        let product = d_prev.normalize().dot(&d_next.normalize());
+        if product < min_product {
+            min_product = product;
+        }
+    }
+    min_product >= 0.87
+}
+
 impl Objective for MincoObjective<'_> {
     fn evaluate(&mut self, x: &DVector<f64>) -> f64 {
         self.eval_count += 1;
         let Some(traj) = self.solve_cached(x) else {
             return f64::INFINITY;
         };
-        // 官方 allowRebound 条件:iter_num_ > 3 && smoo_cost/piece_num < 10.0
-        if self.eval_count > 3
-            && let Some(detector) = &mut self.detector
-        {
-            let smoo = SmoothnessPenalty.evaluate(&traj);
-            if (smoo / traj.pieces() as f64) < 10.0 && detector.check(&traj) {
+        // 官方 `allowRebound` 三判据（`poly_traj_optimizer.cpp`）：
+        // criterion 1：`iter_num_ >= 3`（`iter_num_` 在回调内先用后增，
+        // 故第 4 次回调时值为 3——此处 `eval_count > 3` 等价）；
+        // criterion 2：中间控制点折线方向点积 ≥ 0.87（30°，头尾各去 1 点，
+        // 官方 `i in 3..cols-3` 按含头尾的点序列计）；
+        // criterion 3：多拓扑门控见 [`ReboundDetector::check`]。
+        if self.eval_count > 3 {
+            let (q, _) = self.unpack(x);
+            let straight = inner_points_straight_enough(&self.start, &q, &self.end);
+            if straight
+                && let Some(detector) = &mut self.detector
+                && detector.check(&traj)
+            {
                 self.early_exit = true;
             }
         }
