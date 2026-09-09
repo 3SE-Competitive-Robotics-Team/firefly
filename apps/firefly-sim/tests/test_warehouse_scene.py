@@ -1,9 +1,31 @@
-"""仓库场景回归：视觉 mesh 只渲染不碰撞，出生点无接触、悬停保持。"""
+"""仓库场景回归（需 `models/warehouse/structure.obj` 资产，见 scene.py）。
+
+CI 无资产（`models/` 已 ignore）时按 `pytest.importorskip` 语义跳过——
+资产缺失是环境问题，不是回归失败（`scene._select_scene_xml` 同样回退
+`boxes` 并警告，对照该函数注释）。
+"""
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import mujoco
 import numpy as np
+import pytest
+
+_ASSET = (
+    Path(__file__).resolve().parent.parent.parent.parent.parent
+    / "models"
+    / "warehouse"
+    / "structure.obj"
+)
+warehouse = pytest.mark.skipif(
+    not _ASSET.is_file(),
+    reason=f"仓库资产缺失（{_ASSET}），回退 boxes 场景（见 scene._select_scene_xml）",
+)
+
+pytestmark = warehouse
 
 from firefly_mujoco.env import DroneEnv
 from firefly_mujoco.scene import SCENE_XML
@@ -26,6 +48,10 @@ def test_spawn_is_contact_free():
     assert d.ncon == 0
 
 
+@pytest.mark.skipif(
+    os.environ.get("MUJOCO_GL") == "disable",
+    reason="无 GL 上下文（CI 无头）时跳过渲染器依赖用例",
+)
 def test_hover_holds_two_seconds():
     env = DroneEnv()
     env.reset(np.array([2.0, 0.0, 1.0]), np.array([0.0, 0.0, 0.0, 1.0]))
