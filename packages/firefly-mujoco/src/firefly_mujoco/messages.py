@@ -142,6 +142,44 @@ class OdomMessage(ctypes.Structure):
         return "FireflyOdomMessage"
 
 
+#: 统一日志话题（与 Rust `firefly_pubsub::log::LOG_TOPIC` 一致）
+LOG_TOPIC = "Firefly/Log"
+
+#: 日志级别（与 Rust `firefly_pubsub::log::level` 一致）
+LOG_LEVEL_ERROR = 1
+LOG_LEVEL_WARN = 2
+LOG_LEVEL_INFO = 3
+LOG_LEVEL_DEBUG = 4
+LOG_LEVEL_TRACE = 5
+
+#: 定长上限（与 Rust `log.rs` 常量一致）
+LOG_TAG_MAX = 64
+LOG_TEXT_MAX = 512
+
+
+class LogMessage(ctypes.Structure):
+    """结构化日志：与 Rust `LogMessage`（`FireflyLogMessage`）一致。"""
+
+    _pack_ = 8
+    _fields_ = [
+        ("log_level", ctypes.c_uint8),
+        ("tag_len", ctypes.c_uint8),
+        ("reserved", ctypes.c_uint8 * 2),
+        ("text_len", ctypes.c_uint32),
+        ("tag", ctypes.c_uint8 * LOG_TAG_MAX),
+        ("text", ctypes.c_uint8 * LOG_TEXT_MAX),
+        ("sim_time", ctypes.c_double),
+        ("wall_secs", ctypes.c_int64),
+        ("wall_nanos", ctypes.c_uint32),
+        ("trace_id_hi", ctypes.c_uint64),
+        ("trace_id_lo", ctypes.c_uint64),
+    ]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflyLogMessage"
+
+
 def _self_check() -> None:
     """布局自检：与 Rust 侧测试一致（改布局时同步更新两侧断言）。"""
     assert ctypes.sizeof(TraceContext) == 56, ctypes.sizeof(TraceContext)
@@ -150,6 +188,7 @@ def _self_check() -> None:
     assert ctypes.sizeof(DepthImageMessage) == 307224
     assert ctypes.sizeof(ReferenceMessage) == 72
     assert ctypes.sizeof(OdomMessage) == 96
+    assert ctypes.sizeof(LogMessage) == 624, ctypes.sizeof(LogMessage)
 
 
 _self_check()

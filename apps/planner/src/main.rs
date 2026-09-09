@@ -164,7 +164,7 @@ fn parse_args() -> Result<Args> {
     let mut args = Args {
         map: None,
         config: PathBuf::from(DEFAULT_CONFIG),
-        start: [1.0, 4.0, 1.0],
+        start: [2.0, 0.0, 1.0],
         // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
         goal: None,
         frame_offset: [0.0, 0.0, 0.0],
@@ -230,6 +230,9 @@ struct App {
     manager_options: ManagerOptions,
     /// 可视化发布端（经 `Firefly/Viz` 话题，`firefly-viz` 进程统一写 rerun）。
     viz_pub: Option<VizPublisher>,
+    /// 日志聚合句柄（主循环作用域持有，每 tick 传给 `pump_log_ipc`；
+    /// 发布端只活在创建线程，无跨线程触碰，见 `firefly-observability`）。
+    log_ipc: firefly_observability::LogIpc,
     map_file: MapFile,
     /// 静态占据体素（动态障碍不得清掉它们）。
     static_occupied: HashSet<[usize; 3]>,
@@ -316,6 +319,7 @@ impl App {
         )?;
         // 进程共享节点：所有端口由它派生，进程退出时统一 Drop 释放 IPC 资源
         let node = create_node()?;
+        let log_ipc = firefly_observability::init_ipc(&node, "planner");
         // 订阅 VIO 输出（vio 进程未启动时降级为 None，保持独立运行）
         let odom = match OdomSubscriber::new(&node) {
             Ok(s) => {
@@ -379,6 +383,7 @@ impl App {
             manager,
             manager_options,
             viz_pub,
+            log_ipc,
             static_occupied,
             prev_dyn: Vec::new(),
             map_file,
@@ -561,6 +566,8 @@ impl App {
         self.poll_sensors()?;
         let now = self.t_sim;
         self.sensor_this_tick = false;
+        firefly_observability::set_sim_time(now);
+        firefly_observability::pump_log_ipc(&self.log_ipc);
 
         // 深度感知建图 + 动态障碍写入（规划地图更新先于重规划决策）
         self.update_map_from_depth();
@@ -1014,9 +1021,11 @@ fn main() {
             app.log_map("plan/map", &grid, 0.0);
             if let Err(e) = app.run() {
                 log::error!("planner 失败：{e}");
+                firefly_observability::pump_log_ipc(&app.log_ipc);
                 firefly_observability::flush();
                 std::process::exit(1);
             }
+            firefly_observability::pump_log_ipc(&app.log_ipc);
         }
         Err(e) => {
             eprintln!("初始化失败：{e}");

@@ -79,11 +79,16 @@ fn parse_args() -> Result<(String, Option<PathBuf>, Option<PathBuf>), String> {
 }
 
 /// 加载 ONNX 会话（文件缺失即报错，不静默）。
+///
+/// 线程约束：ORT 缺省占满全核（实测 aliked 常驻 200%+，饿死 vio 的 IMU
+/// 消费致断流）；在线推理节流 1Hz，锁 1 intra-op 线程不影响输出。
 fn load_session(model: &str) -> Result<Session, Box<dyn std::error::Error>> {
     if !std::path::Path::new(model).is_file() {
         return Err(format!("权重缺失：{model}（见 models/，离线导出，不进 git）").into());
     }
-    let session = Session::builder()?.commit_from_file(model)?;
+    let session = Session::builder()?
+        .with_intra_threads(1)?
+        .commit_from_file(model)?;
     log::info!("aliked 会话就绪：{model}");
     Ok(session)
 }
@@ -107,6 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// 主循环：相机对事件唤醒 → 取最新左目帧 → 节流 1Hz 推理 → 发布特征。
 fn run_loop(session: &mut Session) -> Result<(), firefly_error::Error> {
     let node = create_node()?;
+    let log_ipc = firefly_observability::init_ipc(&node, "aliked");
     let left_sub = Subscriber::<GrayImageMessage>::with_topic(&node, CAMERA_LEFT_TOPIC)?;
     log::info!("已订阅左目话题 {CAMERA_LEFT_TOPIC}");
     let feat_pub = Publisher::<FeatureMessage>::with_topic_notify(&node, FEATURE_TOPIC)?;
@@ -150,6 +156,10 @@ fn run_loop(session: &mut Session) -> Result<(), firefly_error::Error> {
             return CallbackProgression::Continue;
         }
         next_feat = frame.timestamp + FEATURE_PERIOD;
+        // 相机帧时间戳即 sim 时钟（传感器时钟 = 仿真时钟）；推理前后各 pump
+        // 一次（推理阻塞数百 ms，积压日志及时排空，不等下一帧）。
+        firefly_observability::set_sim_time(frame.timestamp);
+        firefly_observability::pump_log_ipc(&log_ipc);
         match infer_frame(session, &frame) {
             Ok(msg) => {
                 if let Err(e) = feat_pub.publish(msg) {
@@ -158,6 +168,7 @@ fn run_loop(session: &mut Session) -> Result<(), firefly_error::Error> {
             }
             Err(e) => log::warn!("特征推理失败: {e}"),
         }
+        firefly_observability::pump_log_ipc(&log_ipc);
         CallbackProgression::Continue
     };
     match waitset.wait_and_process(on_event) {
@@ -166,6 +177,7 @@ fn run_loop(session: &mut Session) -> Result<(), firefly_error::Error> {
             | iceoryx2::waitset::WaitSetRunResult::TerminationRequest,
         ) => {
             log::info!("收到终止信号，优雅退出");
+            firefly_observability::pump_log_ipc(&log_ipc);
         }
         Ok(_) => {}
         Err(e) => {
@@ -175,6 +187,7 @@ fn run_loop(session: &mut Session) -> Result<(), firefly_error::Error> {
             ));
         }
     }
+    firefly_observability::pump_log_ipc(&log_ipc);
     Ok(())
 }
 

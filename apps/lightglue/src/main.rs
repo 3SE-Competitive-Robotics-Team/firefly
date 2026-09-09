@@ -66,12 +66,15 @@ fn parse_args() -> Result<(String, String), String> {
     Ok((model, map))
 }
 
-/// 加载 ONNX 会话（文件缺失即报错，不静默）。
+/// 加载 ONNX 会话（文件缺失即报错，不静默；同 aliked 锁 1 intra-op 线程，
+/// 防 ORT 抢占 vio/sim 的 CPU 预算）。
 fn load_session(model: &str) -> Result<Session, Box<dyn std::error::Error>> {
     if !std::path::Path::new(model).is_file() {
         return Err(format!("权重缺失：{model}（见 models/，离线导出，不进 git）").into());
     }
-    let session = Session::builder()?.commit_from_file(model)?;
+    let session = Session::builder()?
+        .with_intra_threads(1)?
+        .commit_from_file(model)?;
     log::info!("lightglue 会话就绪：{model}");
     Ok(session)
 }
@@ -136,6 +139,7 @@ fn smoke_inference(session: &mut Session) -> Result<(), Box<dyn std::error::Erro
 #[allow(clippy::too_many_lines)] // 订阅装配 + WaitSet 编排 + 先验回退，结构由进程接线驱动
 fn run_loop(session: &mut Session, map: &VisionMap) -> Result<(), firefly_error::Error> {
     let node = create_node()?;
+    let log_ipc = firefly_observability::init_ipc(&node, "lightglue");
     let feat_sub = Subscriber::<FeatureMessage>::with_topic(&node, FEATURE_TOPIC)?;
     log::info!("已订阅特征话题 {FEATURE_TOPIC}");
     let odom_sub = Subscriber::<OdomMessage>::with_topic(&node, ODOM_TOPIC)?;
@@ -207,14 +211,20 @@ fn run_loop(session: &mut Session, map: &VisionMap) -> Result<(), firefly_error:
         if feat.timestamp - odom.timestamp > ODOM_FRESH_TIMEOUT {
             return CallbackProgression::Continue;
         }
+        // 特征时间戳即 sim 时钟；查询前后各 pump 一次（匹配阻塞下积压排空）。
+        firefly_observability::set_sim_time(feat.timestamp);
+        firefly_observability::pump_log_ipc(&log_ipc);
         match query_once(session, map, &feat, &odom) {
             Ok(Some(obs)) => {
                 if let Err(e) = obs_pub.publish(obs) {
                     log::warn!("位姿观测发布失败: {e}");
                 } else {
                     log::info!(
-                        "视觉观测 t={:.2} inliers {}/{} err {:.2}px",
+                        "视觉观测 t={:.2} pos=({:.2},{:.2},{:.2}) inliers {}/{} err {:.2}px",
                         obs.timestamp,
+                        obs.position_x,
+                        obs.position_y,
+                        obs.position_z,
                         obs.num_inliers,
                         obs.total_points,
                         obs.error
@@ -224,6 +234,7 @@ fn run_loop(session: &mut Session, map: &VisionMap) -> Result<(), firefly_error:
             Ok(None) => log::debug!("视觉查询无有效位姿（拒收）"),
             Err(e) => log::warn!("视觉查询失败: {e}"),
         }
+        firefly_observability::pump_log_ipc(&log_ipc);
         // 单查询/唤醒：特征 1Hz 节流，连续帧不堆积（corrected 缓存保留，
         // 其 100Hz 发布节拍保证新鲜度判定有效）
         latest_odom = None;
@@ -235,6 +246,7 @@ fn run_loop(session: &mut Session, map: &VisionMap) -> Result<(), firefly_error:
             | iceoryx2::waitset::WaitSetRunResult::TerminationRequest,
         ) => {
             log::info!("收到终止信号，优雅退出");
+            firefly_observability::pump_log_ipc(&log_ipc);
         }
         Ok(_) => {}
         Err(e) => {
@@ -244,6 +256,7 @@ fn run_loop(session: &mut Session, map: &VisionMap) -> Result<(), firefly_error:
             ));
         }
     }
+    firefly_observability::pump_log_ipc(&log_ipc);
     Ok(())
 }
 

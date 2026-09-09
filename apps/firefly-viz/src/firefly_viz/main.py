@@ -5,19 +5,27 @@
 默认连共享 rerun viewer（`127.0.0.1:9876`，需先 `rerun` 起 viewer）；
 `--serve` 由本进程起内置 viewer；`--save path.rrd` 离线录制（与 --serve
 互斥）。无任何选项时自动 `rerun.spawn()` 起 viewer 并连接。
+
+线程模型：收/落盘分离（channel IPC + 落盘批处理）——
+- 收线程（主线程）：排空 `Firefly/Viz` + `Firefly/Log` 订阅，把消息
+  `put_nowait` 进有界队列（满即丢，日志语义，见 `QUEUE_MAX`），不做 rerun IO；
+- 落盘线程：`get` 阻塞消费，按（时间戳，序号）排序后批量 `rr.log`，
+  每批最多 `BATCH_MAX` 条或 `FLUSH_PERIOD` 超时刷一次。
 """
 
 from __future__ import annotations
 
 import argparse
+import queue
 import sys
+import threading
 import time
 
 import iceoryx2 as iox2
 import numpy as np
 import rerun as rr
 
-from firefly_mujoco import TraceContext
+from firefly_mujoco import LogMessage, TraceContext
 
 from .messages import (
     VIZ_KIND_ARROWS,
@@ -30,8 +38,9 @@ from .messages import (
     VizMessage,
 )
 
-#: 话题名（与 Rust `firefly_pubsub::viz::VIZ_TOPIC` 一致）
+#: 话题名（与 Rust `firefly_pubsub::{viz::VIZ_TOPIC, log::LOG_TOPIC}` 一致）
 TOPIC_VIZ = "Firefly/Viz"
+TOPIC_LOG = "Firefly/Log"
 
 #: 共享 ApplicationId / RecordingId（多进程共享同一 recording，对照已删
 #: firefly-rerun 的 APP_ID/RECORDING_ID：各进程流合并为 viewer 单应用）
@@ -40,6 +49,18 @@ RECORDING_ID = "firefly-sim-loop"
 
 #: 订阅缓冲区深度：多实体（vio 4 条 + planner 5+ 条）10Hz 突发，防溢出丢帧
 VIZ_BUFFER_SIZE = 256
+#: 日志订阅缓冲：`Firefly/Log` 低频（各进程数条/秒），2 足够
+#:（服务默认 `subscriber_max_buffer_size` 即 2，不显式调大）。
+
+#: 收/落盘队列上限：日志低频，1024 足够突发；满即丢（日志语义）。
+QUEUE_MAX = 1024
+#: 落盘批上限（条）：单批排序后写入，防长尾延迟。
+BATCH_MAX = 256
+#: 落盘刷盘周期（秒）：超时即刷，不足一批也写。
+FLUSH_PERIOD = 0.2
+
+#: 日志级别映射（Rust `firefly_pubsub::log::level` → rerun `TextLogLevel`）
+_LEVELS = {1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE"}
 
 
 def log(msg: str) -> None:
@@ -157,17 +178,123 @@ def _bin_abscissa(msg: VizMessage) -> list[float]:
     return [msg.bin_start + k * msg.bin_width for k in range(n)]
 
 
-def _subscribe(node) -> iox2.Subscriber:
-    service = (
-        node.service_builder(iox2.ServiceName.new(TOPIC_VIZ))
-        .publish_subscribe(VizMessage)
+def _log_text(msg: LogMessage) -> None:
+    """结构化日志 → rerun `TextLog`（实体 `logs/<tag>`，持久可检索）。
+
+    时间轴规则（问答决议）：`sim_time >= 0` 落 `sim_time` 轴（与位姿同轴
+    对齐）；`< 0`（发布端尚无 sim 时钟，如 ORT 模型加载期）落墙钟轴
+    （`wall_secs + wall_nanos`，显式未对齐、可检索）。
+    """
+    n_tag = min(msg.tag_len, len(msg.tag))
+    tag = bytes(msg.tag[:n_tag]).decode("utf-8", errors="replace") or "unknown"
+    n_text = min(msg.text_len, len(msg.text))
+    text = bytes(msg.text[:n_text]).decode("utf-8", errors="replace")
+    level = _LEVELS.get(msg.log_level, "INFO")
+    if msg.sim_time >= 0:
+        rr.set_time("sim_time", duration=float(msg.sim_time))
+    else:
+        # 墙钟回落轴：`set_time(timeline, timestamp=...)` 取 unix 秒
+        #（纳秒值会被 rerun 误判为毫秒，见 `to_nanos_since_epoch` 校验）。
+        rr.set_time("wall_time", timestamp=float(msg.wall_secs) + float(msg.wall_nanos) * 1e-9)
+    rr.log(f"logs/{tag}", rr.TextLog(text, level=level))
+
+
+def _subscribe(node, topic: str, payload_cls, buffer_size: int = VIZ_BUFFER_SIZE):
+    builder = (
+        node.service_builder(iox2.ServiceName.new(topic))
+        .publish_subscribe(payload_cls)
         .user_header(TraceContext)
-        # 服务级环形缓冲历史上限：与 Rust 发布端一致（先启动方创建服务，
+    )
+    if topic == TOPIC_VIZ:
+        # 高频突发话题：与 Rust 发布端一致（先启动方创建服务，
         # 谁创建都要给出 256 上限，订阅端 buffer_size 才能匹配）
-        .subscriber_max_buffer_size(VIZ_BUFFER_SIZE)
+        builder = builder.subscriber_max_buffer_size(VIZ_BUFFER_SIZE)
+    service = builder.open_or_create()
+    return service.subscriber_builder().buffer_size(buffer_size).create()
+
+
+#: 同话题发布端上限（与 Rust `firefly_pubsub::log::LOG_MAX_PUBLISHERS` 一致；
+#: 本进程先创建服务定上限，Rust 发布端只 open，见 `_precreate_log_service`）。
+LOG_MAX_PUBLISHERS = 10
+
+
+def _precreate_log_service(node) -> None:
+    """预创建 `Firefly/Log` 服务（`max_publishers=10` 定上限）。
+
+    本进程常驻、先于全部 Rust 发布端启动（runbook 顺序），故上限恒成立。
+    预创建后立即关闭临时订阅端（服务定义保留，发布端随后可 open）。
+    """
+    service = (
+        node.service_builder(iox2.ServiceName.new(TOPIC_LOG))
+        .publish_subscribe(LogMessage)
+        .user_header(TraceContext)
+        .max_publishers(LOG_MAX_PUBLISHERS)
         .open_or_create()
     )
-    return service.subscriber_builder().buffer_size(VIZ_BUFFER_SIZE).create()
+    # 返回值必须存活：Python 绑定里 builder 链式调用返回新对象（`is` 为 False，
+    # 见探针），`service` 局部变量持有服务句柄；订阅端建在服务上（不弃置）。
+    return service.subscriber_builder().buffer_size(2).create()
+
+
+def _writer_loop(inbox: queue.Queue) -> None:
+    """落盘线程：阻塞消费 → 按（时间戳，序号）排序 → 批量 `rr.log`。
+
+    第一元素的序号保证同时间戳多实体间的稳定顺序（`itertools.count`
+    单调递增，跨实体可比）；`FLUSH_PERIOD` 超时即刷，不足一批也写。
+    单条写入异常只记 stderr（落盘线程常驻，不因一条坏消息退出——
+    否则其后全部日志/可视化静默丢失）。
+    """
+    import itertools
+    import traceback
+
+    seq = itertools.count()
+    buf: list = []
+    deadline = time.monotonic() + FLUSH_PERIOD
+    while True:
+        timeout = max(0.0, deadline - time.monotonic())
+        try:
+            item = inbox.get(timeout=timeout)
+            if item is None:  # 退出哨兵：排空残余后返回
+                break
+            kind, ts, payload = item
+            buf.append((ts, next(seq), kind, payload))
+            if len(buf) >= BATCH_MAX:
+                _flush_sorted(buf)
+                buf.clear()
+                deadline = time.monotonic() + FLUSH_PERIOD
+        except queue.Empty:
+            pass
+        except Exception:  # noqa: BLE001 - 落盘线程永不退出
+            print("[firefly-viz] writer 入队异常（跳过）：", flush=True)
+            traceback.print_exc()
+        if time.monotonic() >= deadline and buf:
+            _flush_sorted(buf)
+            buf.clear()
+            deadline = time.monotonic() + FLUSH_PERIOD
+    for ts, _, kind, payload in sorted(buf):
+        try:
+            if kind == "viz":
+                msg, trace_id = payload
+                _handle(msg, trace_id)
+            else:
+                _log_text(payload)
+        except Exception:  # noqa: BLE001 - 退出排空尽力而为
+            traceback.print_exc()
+
+
+def _flush_sorted(buf: list) -> None:
+    import traceback
+
+    for _, _, kind, payload in sorted(buf):
+        try:
+            if kind == "viz":
+                msg, trace_id = payload
+                _handle(msg, trace_id)
+            else:
+                _log_text(payload)
+        except Exception:  # noqa: BLE001 - 单条坏消息不杀落盘线程
+            print("[firefly-viz] writer 落盘异常（跳过本条）：", flush=True)
+            traceback.print_exc()
 
 
 def main() -> None:
@@ -178,18 +305,53 @@ def main() -> None:
     _open_recording(args)
     _send_default_blueprint()
     node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
-    sub = _subscribe(node)
-    log(f"iceoryx2 已订阅 {TOPIC_VIZ}（Rust 计算线程零 IO，统一写 rerun）")
+    viz_sub = _subscribe(node, TOPIC_VIZ, VizMessage)
+    # `Firefly/Log` 服务必须由本进程先创建（`max_publishers=10`，7 进程同话题
+    # 发布；iceoryx2 `open_or_create` 语义：先创建方定上限，后续 open 必须 ≤
+    # 该值——Rust 发布端只 `open` 不创建，见 `LogPublisher::new`）。
+    # 预创建返回的订阅端即本进程的 Log 订阅端（服务句柄由其持有，不另建）。
+    log_sub = _precreate_log_service(node)
+    log(f"iceoryx2 已订阅 {TOPIC_VIZ} + {TOPIC_LOG}（Rust 计算线程零 IO，统一写 rerun）")
+    inbox: queue.Queue = queue.Queue(maxsize=QUEUE_MAX)
+    writer = threading.Thread(target=_writer_loop, args=(inbox,), name="firefly-viz-writer", daemon=True)
+    writer.start()
+    dropped = 0
     try:
         while True:
-            while (sample := sub.receive()) is not None:
+            # 收线程：只排空订阅、进队，不做 rerun IO（落盘由 writer 线程批处理）
+            while (sample := viz_sub.receive()) is not None:
                 header = sample.user_header().contents
                 trace_id = f"{header.trace_id_hi:016x}{header.trace_id_lo:016x}"
-                _handle(sample.payload().contents, trace_id)
+                if _enqueue(
+                    inbox,
+                    ("viz", float(sample.payload().contents.timestamp), (sample.payload().contents, trace_id)),
+                ):
+                    dropped += 1
+            while (sample := log_sub.receive()) is not None:
+                msg = sample.payload().contents
+                ts = float(msg.sim_time) if msg.sim_time >= 0 else float(msg.wall_secs) + float(msg.wall_nanos) * 1e-9
+                if _enqueue(inbox, ("log", ts, msg)):
+                    dropped += 1
             # 拉模型：无新样本时让出 CPU（事件通知缺席时也不 busy-loop）
             time.sleep(0.001)
     except KeyboardInterrupt:
-        log("退出")
+        pass
+    finally:
+        inbox.put(None)
+        writer.join(timeout=5.0)
+        if dropped:
+            log(f"退出（队列满丢弃 {dropped} 条）")
+        else:
+            log("退出")
+
+
+def _enqueue(inbox: queue.Queue, item) -> bool:
+    """进队；队列满返回 `True`（调用方计数），落盘永不阻塞接收线程。"""
+    try:
+        inbox.put_nowait(item)
+    except queue.Full:
+        return True
+    return False
 
 
 if __name__ == "__main__":
