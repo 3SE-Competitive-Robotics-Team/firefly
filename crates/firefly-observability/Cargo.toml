@@ -12,6 +12,9 @@ rust-version.workspace = true
 
 [dependencies]
 fastrace = { workspace = true, features = ["enable"] }
+firefly-error = { workspace = true }
+firefly-pubsub = { workspace = true }
+jiff = { workspace = true }
 log = { workspace = true }
 logforth = { workspace = true, features = ["starter-log", "append-fastrace", "diagnostic-fastrace"] }
 

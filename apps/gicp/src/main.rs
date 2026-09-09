@@ -200,6 +200,8 @@ struct App {
     last_odom_recv: f64,
     depth_cam: DepthCamera,
     t_sim: f64,
+    /// 日志聚合句柄（主循环作用域持有，每 tick 传给 `pump_log_ipc`）。
+    log_ipc: firefly_observability::LogIpc,
     _node: firefly_pubsub::node::IpcNode,
 }
 
@@ -218,6 +220,7 @@ impl App {
             }
         };
         let node = create_node()?;
+        let log_ipc = firefly_observability::init_ipc(&node, "gicp");
         let odom_sub = match OdomSubscriber::with_topic(&node, odom_topic) {
             Ok(s) => {
                 log::info!("已订阅 odom 话题（{odom_topic}，VIO/VOID 状态源）");
@@ -262,6 +265,7 @@ impl App {
             last_odom_recv: f64::NEG_INFINITY,
             depth_cam: DepthCamera::mujoco_default(),
             t_sim: 0.0,
+            log_ipc,
             _node: node,
         })
     }
@@ -453,6 +457,8 @@ impl App {
 
     fn step(&mut self) -> Result<()> {
         self.poll_sensors()?;
+        firefly_observability::set_sim_time(self.t_sim);
+        firefly_observability::pump_log_ipc(&self.log_ipc);
         self.reloc_ticks = self.reloc_ticks.wrapping_add(1);
         self.try_relocalize();
         self.publish_corrected()?;
@@ -547,8 +553,10 @@ fn main() {
     };
     if let Err(e) = app.run() {
         log::error!("gicp 失败：{e}");
+        firefly_observability::pump_log_ipc(&app.log_ipc);
         firefly_observability::flush();
         std::process::exit(1);
     }
+    firefly_observability::pump_log_ipc(&app.log_ipc);
     firefly_observability::flush();
 }

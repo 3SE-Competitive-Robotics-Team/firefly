@@ -7,6 +7,8 @@
 //!   计算端到端延迟（W3C Trace Context 对齐）；
 //! - [`odom`]：`OdomMessage`——`#[repr(C)]` 定长零拷贝消息（`ZeroCopySend`）；
 //! - [`imu`]：`ImuMessage`——原始 IMU（角速度 + 比力）；
+//! - [`log`]: `LogMessage`——结构化日志（各进程经 `Firefly/Log` 向
+//!   `firefly-viz` 聚合，统一写 rerun `TextLog`，持久可检索）；
 //! - [`camera`]：`GrayImageMessage`/`DepthImageMessage`——双目灰度 + 深度图；
 //! - [`reference`]：`ReferenceMessage`——规划轨迹的参考状态（闭环控制回传）；
 //! - [`goal`]：`GoalMessage`——外部工具发布的飞行目标（动态重目标入口）；
@@ -25,6 +27,7 @@ pub mod camera;
 pub mod event;
 pub mod goal;
 pub mod imu;
+pub mod log;
 pub mod node;
 pub mod odom;
 pub mod publish;

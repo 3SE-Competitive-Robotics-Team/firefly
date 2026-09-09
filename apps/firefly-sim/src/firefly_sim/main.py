@@ -17,12 +17,17 @@ import iceoryx2 as iox2
 import numpy as np
 
 from firefly_mujoco import (
+    LOG_LEVEL_ERROR,
+    LOG_LEVEL_INFO,
+    LOG_LEVEL_WARN,
+    LOG_TOPIC,
     DroneEnv,
     GrayImageMessage,
     DepthImageMessage,
     IMAGE_HEIGHT,
     IMAGE_WIDTH,
     ImuMessage,
+    LogMessage,
     OdomMessage,
     ReferenceMessage,
     TraceContext,
@@ -167,6 +172,7 @@ def main() -> None:
     odom_sub = _subscriber(node, odom_topic, OdomMessage)
     imu_notify = _notifier(node, TOPIC_IMU)
     cam_notify = _notifier(node, TOPIC_CAM_PAIR)
+    _init_log_ipc(node)
     log("iceoryx2 已就绪：发布 IMU/双目/深度/真值（带事件唤醒），订阅参考")
 
     # 参考状态（demo 未发布时悬停在起点）
@@ -224,7 +230,7 @@ def main() -> None:
             # 失稳守卫：MuJoCo 发散（QACC NaN/Inf）后状态永久污染且传感器
             # 全变 NaN，下游 VIO 会被毒化——检测到即重置到起点，长跑不挂。
             if not np.isfinite(env.data.qpos).all() or not np.isfinite(env.data.qvel).all():
-                log("物理失稳（NaN/Inf）@ t={:.2f}，重置到起点".format(env.time))
+                log("物理失稳（NaN/Inf）@ t={:.2f}，重置到起点".format(env.time), LOG_LEVEL_ERROR, env.time)
                 env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))
             t = env.time
             frame += 1
@@ -261,7 +267,9 @@ def main() -> None:
                     log(
                         "t={:6.2f} 无人机 ({:6.2f},{:6.2f},{:6.2f}) 参考 ({:6.2f},{:6.2f},{:6.2f})".format(
                             t, pos[0], pos[1], pos[2], ref_pos[0], ref_pos[1], ref_pos[2]
-                        )
+                        ),
+                        LOG_LEVEL_INFO,
+                        t,
                     )
 
             # 实时节奏（--no-trace 时仍限速 1x：步进 0.36ms << 5ms 预算，sleep 自动限速）
@@ -312,5 +320,68 @@ def _publish_gt(gt_pub, cycle, env: DroneEnv, t: float) -> None:
     _publish_traced(gt_pub, cycle, "publish-gt", msg, t)
 
 
-def log(msg: str) -> None:
+def log(msg: str, level: int = LOG_LEVEL_INFO, sim_time: float = -1.0) -> None:
+    """双 sink 日志：stderr 打印 + `Firefly/Log` 聚合（rrd 持久可检索）。
+
+    存量调用点保持 `log(text)` 不变（INFO + 无 sim 时钟）；主循环内逐步
+    传入 `sim_time`（与位姿同轴对齐，可检索）。
+    """
     print(f"[firefly-sim] {msg}", flush=True)
+    publish_log(level, msg, sim_time)
+
+
+#: 日志聚合发布端（`Firefly/Log` → `firefly-viz`；stderr 双 sink 保留，
+#: 见 `firefly_observability::IpcAppend` 的双 sink 语义）。
+_log_pub = None
+
+
+def _init_log_ipc(node) -> None:
+    """挂载日志聚合（建端失败降级纯 stderr，不阻断物理循环）。
+
+    sim_time 由调用方每帧传入（`publish_log` 参数），此处只建端。
+    `max_publishers` 与 Rust `LOG_MAX_PUBLISHERS` 一致（10）：本进程常与
+    viz 同早启动，谁先创建服务谁定上限——必须显式调大，默认 2 只够
+    sim+viz，Rust 发布端随后 open 即 `DoesNotSupportRequestedAmountOfPublishers`。
+    """
+    global _log_pub
+    try:
+        service = (
+            node.service_builder(iox2.ServiceName.new(LOG_TOPIC))
+            .publish_subscribe(LogMessage)
+            .user_header(TraceContext)
+            .max_publishers(10)
+            .open_or_create()
+        )
+        _log_pub = service.publisher_builder().create()
+        log("日志聚合已挂载（tag=sim，Firefly/Log → firefly-viz）")
+    except Exception as exc:  # noqa: BLE001 - 聚合缺席不阻断仿真
+        log(f"日志聚合挂载失败（降级纯 stderr）：{exc}")
+
+
+def publish_log(level: int, text: str, sim_time: float = -1.0) -> None:
+    """结构化日志发布（stderr + IPC 双 sink；调用点保持 `log()` 不变）。
+
+    `sim_time < 0` 表示尚无 sim 时钟（聚合端回落墙钟轴，可检索）。
+    发布失败静默丢弃：可视化不阻断物理循环。
+    """
+    if _log_pub is None:
+        return
+    try:
+        import time as _time
+
+        wall = _time.time()
+        sample = _log_pub.loan_uninit()
+        msg = LogMessage()
+        msg.log_level = level
+        tag = b"sim"
+        msg.tag[: len(tag)] = tag
+        msg.tag_len = len(tag)
+        raw = text.encode("utf-8")[:512]
+        msg.text[: len(raw)] = raw
+        msg.text_len = len(raw)
+        msg.sim_time = sim_time
+        msg.wall_secs = int(wall)
+        msg.wall_nanos = int((wall % 1.0) * 1e9)
+        sample.write_payload(msg).send()
+    except Exception:  # noqa: BLE001 - 日志路径永不抛异常
+        pass

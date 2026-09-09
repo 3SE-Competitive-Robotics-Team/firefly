@@ -99,6 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 进程共享节点：所有端口由它派生；主循环以 node.wait 驱动，Ctrl-C 优雅
     // 退出并释放全部 IPC 资源（硬杀会留孤儿共享内存 + 幽灵端口注册）
     let node = create_node()?;
+    let log_ipc = firefly_observability::init_ipc(&node, "void");
     log::info!("iceoryx2 节点已创建（进程共享，信号处理 = HandleTerminationRequests）");
 
     // 真值订阅（仅启动初始化，估计器运行时不读）
@@ -181,7 +182,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = IceoryxInput::new(&node)?;
     log::info!("输入源：订阅 MuJoCo 物理环境（IMU/左目灰度/深度）");
 
-    run_loop(&mut odom, &mut input, &odom_pub, &viz_pub, &node)?;
+    run_loop(&mut odom, &mut input, &odom_pub, &viz_pub, &node, &log_ipc)?;
+    firefly_observability::pump_log_ipc(&log_ipc);
     Ok(())
 }
 
@@ -203,6 +205,7 @@ fn run_loop(
     odom_pub: &Publisher<OdomMessage>,
     viz_pub: &VizPublisher,
     node: &firefly_pubsub::node::IpcNode,
+    log_ipc: &firefly_observability::LogIpc,
 ) -> Result<(), firefly_error::Error> {
     let mut t_sim = 0.0f64;
     let mut next_odom = 0.0f64;
@@ -355,6 +358,8 @@ fn run_loop(
             }
             t_sim = t_sim.max(now);
         }
+        firefly_observability::set_sim_time(t_sim);
+        firefly_observability::pump_log_ipc(log_ipc);
 
         // 心跳分支：诊断打印 + IMU 断流警戒
         let wall_s = t_wall_start.elapsed().as_secs_f64();

@@ -45,8 +45,8 @@ const DEFAULT_CONFIG: &str = "configs/vio.toml";
 const ODOM_PERIOD: f64 = 0.01;
 /// 可视化发布周期（秒）：10Hz（位姿/轨迹，防 Viz 话题洪泛）。
 const VIZ_PERIOD: f64 = 0.1;
-/// `MuJoCo` 场景无人机起点（= demo 地图 start；GT 先验）。
-const SIM_START: [f64; 3] = [1.0, 4.0, 1.0];
+/// `MuJoCo` 场景无人机起点（warehouse 走廊西端；GT 先验）。
+const SIM_START: [f64; 3] = [2.0, 0.0, 1.0];
 /// 就绪判据：连续发布 `READY_MIN_COUNT` 条 `is_initialized=true` 的 odom 后
 /// 锁存 ready（`vio` 的 `initialized()` 在 GT 对齐后即为真，电平触发满足
 /// sim 互锁；计数门滤掉单帧毛刺）。
@@ -170,6 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 进程共享节点：所有端口由它派生；主循环以 node.wait 驱动，Ctrl-C 优雅
     // 退出并释放全部 IPC 资源（硬杀会留孤儿共享内存 + 幽灵端口注册）
     let node = create_node()?;
+    let log_ipc = firefly_observability::init_ipc(&node, "vio");
     log::info!("iceoryx2 节点已创建（进程共享，信号处理 = HandleTerminationRequests）");
 
     // odom 发布器（Trace 上下文由中间件在 publish 时自动注入）
@@ -200,37 +201,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // 真值初始化：等待首条 GT（≤2s），用其位置/速度/姿态对齐真实起点。
-    // 不假设 sim 静止起飞（demo 闭环）还是 --script 轨迹（起点速度非零）——
-    // 硬编码静止先验会让 odom 与 GT 起点错位（实测 --script 起点 0.94m/s）。
+    // 真值初始化：排空 GT 取最新一条（buffer=1 下 receive 即最新），用其
+    // 位置/速度/姿态对齐真实起点。不假设 sim 静止起飞（demo 闭环）还是
+    // --script 轨迹（起点速度非零）——硬编码静止先验会让 odom 与 GT 起点
+    // 错位（实测 --script 起点 0.94m/s）。等待放宽到 120s：runbook 要求
+    // sim 最后起（等 ORT 模型加载约数十秒），2s 截断会让 vio 把 (2,0,1)
+    // 的 stale 先验带进已飞走的链路（实测 3m+ 起始错位，VIO 永不收敛）。
     let mut imustate = [0.0f64; 17];
     imustate[4] = 1.0; // qw（回退：静止水平）
     imustate[5] = SIM_START[0];
     imustate[6] = SIM_START[1];
     imustate[7] = SIM_START[2];
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(2);
     let mut got_gt = false;
     while std::time::Instant::now() < deadline
         && let Some(s) = &gt_sub
     {
-        let Ok(Some(sample)) = s.receive() else {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            continue;
-        };
-        let m = &*sample;
-        imustate[0] = m.timestamp;
-        imustate[1] = m.quat_x;
-        imustate[2] = m.quat_y;
-        imustate[3] = m.quat_z;
-        imustate[4] = m.quat_w;
-        imustate[5] = m.position_x;
-        imustate[6] = m.position_y;
-        imustate[7] = m.position_z;
-        imustate[8] = m.velocity_x;
-        imustate[9] = m.velocity_y;
-        imustate[10] = m.velocity_z;
-        got_gt = true;
-        break;
+        // 排空到最新（发布端 10Hz 常发，buffer=1 下最后一条即当前真值）
+        let mut latest = None;
+        while let Ok(Some(sample)) = s.receive() {
+            latest = Some(sample);
+        }
+        if let Some(sample) = latest {
+            let m = &*sample;
+            imustate[0] = m.timestamp;
+            imustate[1] = m.quat_x;
+            imustate[2] = m.quat_y;
+            imustate[3] = m.quat_z;
+            imustate[4] = m.quat_w;
+            imustate[5] = m.position_x;
+            imustate[6] = m.position_y;
+            imustate[7] = m.position_z;
+            imustate[8] = m.velocity_x;
+            imustate[9] = m.velocity_y;
+            imustate[10] = m.velocity_z;
+            got_gt = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
     if got_gt {
         log::info!(
@@ -255,7 +263,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &viz_pub,
         gt_sub.as_ref(),
         &node,
+        &log_ipc,
     )?;
+    firefly_observability::pump_log_ipc(&log_ipc);
     Ok(())
 }
 
@@ -278,6 +288,7 @@ fn run_loop(
     viz_pub: &VizPublisher,
     gt_sub: Option<&Subscriber<OdomMessage>>,
     node: &firefly_pubsub::node::IpcNode,
+    log_ipc: &firefly_observability::LogIpc,
 ) -> Result<(), firefly_error::Error> {
     let mut t_sim = 0.0f64;
     let mut next_odom = 0.0f64;
@@ -376,6 +387,8 @@ fn run_loop(
             publish_frontend_health(viz_pub, t_sim, vio);
         }
         t_sim = t_sim.max(now);
+        firefly_observability::set_sim_time(t_sim);
+        firefly_observability::pump_log_ipc(log_ipc);
 
         // 心跳分支：诊断打印 + IMU 断流警戒
         let wall_s = t_wall_start.elapsed().as_secs_f64();
@@ -614,10 +627,13 @@ fn log_viz(
 
 /// `MuJoCo` 双目相机外参（OpenVINS JPL 约定），返回 `(q_ito_c, [p_left, p_right])`。
 ///
-/// 物理相机（`scene.py` 的 `xyaxes="0 -1 0  0 0 1"`，与 `firefly-map::DepthCamera`
-/// 投影一致实测校验）：**前向 = 机体 +x，上 = 机体 +z，右 = 机体 -y**。
+/// 物理相机（`scene.py` 的 `xyaxes="0 -1 0  0.3420 0 0.9397"`：下倾 20°，
+/// 与 [`firefly_map::DepthCamera`] 投影一致实测校验）：`cam_x`（右）= 机体 `-y`，
+/// `OpenVINS` 系（`x` 右 / `y` 下 / `z` 前）为 `MuJoCo` 系绕 `x` 转 180°（`y`、`z` 取反）：
+/// 行 = `[Mx, -My, -Mz]` = `[(0,-1,0), (-0.342,0,-0.9397), (0.9397,0,-0.342)]`
+///（视轴 = `+z`，即前下 20°；`depth` 中心斜距 2.89m = 1/sin20° 实测吻合）。
 /// VIO 三角化视线取 `(nx, ny, 1)`（标准 y-down / z-forward 相机系），故
-/// body→camera 旋转 `R_ItoC = [[0,-1,0],[0,0,-1],[1,0,0]]`（列向量为相机系在 body 下的基）。
+/// body→camera 旋转行 = `[x, y, z]`（行为相机轴在 body 下的坐标）。
 /// IMU 在两相机中点，基线 `baseline` 米。
 ///
 /// 平移为 **`p_IinC`（IMU 原点在相机系下的坐标）**，非体系杆臂！由期望的
@@ -629,8 +645,12 @@ fn log_viz(
 fn mujoco_stereo_extrinsic(baseline: f64) -> (nalgebra::Vector4<f64>, [nalgebra::Vector3<f64>; 2]) {
     use firefly_vio_types::quat_ops::rot_2_quat;
     use nalgebra::{Matrix3, Vector3};
-    // R_ItoC: body -> camera
-    let r_ito_c = Matrix3::new(0.0, -1.0, 0.0, 0.0, 0.0, -1.0, 1.0, 0.0, 0.0);
+    // R_ItoC: body -> camera（行 = 相机轴在 body 下；下倾 20° 版，见上）
+    let r_ito_c = Matrix3::new(
+        0.0, -1.0, 0.0, //
+        -0.3420, 0.0, -0.9397, //
+        0.9397, 0.0, -0.3420,
+    );
     // JPL 四元数 (x, y, z, w)。必须用项目的 rot_2_quat（Trawny Eq.74，与
     // `PoseJpl::rot` 的 quat_2_rot 互逆）——nalgebra 的 UnitQuaternion 是
     // Hamilton 约定，直接喂给 JPL 估计器等效于转置旋转（相机"侧装"、
@@ -650,7 +670,7 @@ mod tests {
     use firefly_vio_types::quat_ops::quat_2_rot;
     use nalgebra::Vector3;
 
-    /// 双目外参：body→camera 旋转应使相机前向 = body +x，上 = body +z。
+    /// 双目外参：视轴（+z，即相机前向）= body 前下 20°，图像下 = body 前上。
     ///
     /// `quat_2_rot` 给出 body→cam（`v_cam = R·v_body`），故相机轴在体系下
     /// 取 `Rᵀ` 的列（即 R 的行）。
@@ -658,12 +678,12 @@ mod tests {
     fn camera_forward_is_body_x() {
         let (q, _) = mujoco_stereo_extrinsic(0.05);
         let r = quat_2_rot(&q);
-        // camera z 轴（前向）在 body 下 = Rᵀ·e_z = R 第 2 行
+        // 视轴 +z 在 body 下 = 前下 20°（`depth` 中心斜距 1/sin20° 实测）
         let cam_fwd = r.transpose() * Vector3::new(0.0, 0.0, 1.0);
-        assert!((cam_fwd - Vector3::new(1.0, 0.0, 0.0)).norm() < 1e-9);
-        // camera y 轴（图像向下）在 body 下 = Rᵀ·e_y = body -z
+        assert!((cam_fwd - Vector3::new(0.9397, 0.0, -0.3420)).norm() < 1e-4);
+        // 图像下 +y 在 body 下 = 前上 (-0.342, 0, -0.9397)
         let cam_down = r.transpose() * Vector3::new(0.0, 1.0, 0.0);
-        assert!((cam_down - Vector3::new(0.0, 0.0, -1.0)).norm() < 1e-9);
+        assert!((cam_down - Vector3::new(-0.3420, 0.0, -0.9397)).norm() < 1e-4);
     }
 
     /// 基线语义：经 `p_ciinG = p_IinG - R_GtoCi^T · p_IinC` 还原的世界系相机
