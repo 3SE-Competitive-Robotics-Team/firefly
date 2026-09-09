@@ -97,16 +97,23 @@ cargo run -p planner -- --map apps/planner/maps/gate.ffmap  # 静态地图
 - Python：`uv sync`（根 workspace 统一管理 `firefly-mujoco` / `firefly-sim`，
   依赖与脚本见各自 `pyproject.toml`）。
 
-## Log / Debug（rerun rrd）
+## Log / Debug（rerun rrd，有且只有这一种记录方式）
 
-- **debug 数据一律进 rrd，禁止文本日志**
+- **数据记录有且只有一种方式：进 rrd（`logs/` 下），禁止文本日志与 tmpfs**——
+  正式链路的录制产物一律落 `logs/`（如 `logs/wh_agg.rrd`），永远不写 `/tmp`
+ （tmpfs 重启即丢、路径不可复现、排查轮子每次重造）。`firefly-vio.log` /
+  `firefly-sim.log` 这类文本日志不允许存在；终端 stderr 只做进程级诊断的
+  双 sink 之一，不做记录载体。
 - 分工：log 宏（logforth）只做进程级诊断（启动、错误、关键事件）；可结构化数据（位姿、图像、标量、轨迹、中间状态）进 rrd, viewer 可回放，CLI/RrdReader 可检索。
 - 写入（`firefly-viz` Python 进程统一写 rerun）：
   - Rust 计算线程零 IO：经 `Firefly/Viz` 话题发布 `VizMessage`（iceoryx2 零拷贝），
     `firefly-viz` 订阅后写 viewer/rrd。
-  - 入口：`firefly-viz` 默认连共享 viewer（`127.0.0.1:9876`），`--save path.rrd` 离线录制。
+  - 结构化日志同样聚合：各进程 `log!` 经 `Firefly/Log` 话题进 `firefly-viz`，
+    落 `logs/<tag>` 的 `TextLog` 实体（`sim_time` 轴；`sim_time<0` 回落 `wall_time`
+    轴）——日志本身也是 rrd 里可检索的实体，不是另一套系统。
+  - 入口：`firefly-viz` 默认连共享 viewer（`127.0.0.1:9876`），`--save logs/<name>.rrd` 离线录制。
   - 时间轴：消息携带 `sim_time` 秒，Python 端 `set_time`。
-  - 实体路径按 app 前缀（`sensor/*`、`vio/*`、`plan/*`），
+  - 实体路径按 app 前缀（`sensor/*`、`vio/*`、`plan/*`、`logs/*`），
     遵守上文 rerun 可视化约定。
 - 读取：viewer 回放；`rerun rrd print --entity <path> -vvv` /
   `rerun rrd stats`；Python `RrdReader`，详见 `.agents/skills/rerun`。
