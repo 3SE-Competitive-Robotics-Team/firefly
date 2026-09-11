@@ -165,6 +165,25 @@ pub enum RelocGate {
     RejectedNumerical { reason: &'static str },
 }
 
+/// 单次融合观测（几何/视觉源通用数据包：位姿＋信息＋质量门控字段）。
+/// 画像（信任）不进包——按入口选择（`update` 几何画像，
+/// `update_with_observation` 视觉画像，见各自文档）。
+#[derive(Debug, Clone, Copy)]
+pub struct Observation {
+    /// 全局位姿观测 `T_target_source`（`target=全局地图`）。
+    pub t_global: Matrix4<f64>,
+    /// 信息矩阵（观测噪声 `R` 的逆；`R = h⁻¹`）。
+    pub h: Matrix6<f64>,
+    /// 内点数。
+    pub num_inliers: usize,
+    /// 总点数（内点率分母；未知传 0 跳过比率门）。
+    pub total_points: usize,
+    /// 配准残差和。
+    pub error: f64,
+    /// 是否收敛。
+    pub converged: bool,
+}
+
 /// 融合滤波器：维护 `T_drift` 与 `P`。
 #[derive(Debug, Clone)]
 pub struct FusionFilter {
@@ -257,70 +276,46 @@ impl FusionFilter {
     /// 走 [`FusionFilter::update_with_observation`]，画像按入口选择，调用方
     /// 不得混用）。
     ///
-    /// `t_vio` 为当前 `VIO` 位姿（与 `predict` 同帧），`t_gicp` 为 `GICP` 给出的
-    /// 全局位姿 `T_target_source`（`target=全局地图`），`h` 为信息矩阵，
-    /// `num_inliers/total_points/error/converged` 来自 `RegistrationResult`。
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    /// `t_vio` 为当前 `VIO` 位姿（与 `predict` 同帧），`obs` 为观测包
+    /// （`num_inliers/total_points/error/converged` 来自 `RegistrationResult`）。
+    #[allow(clippy::too_many_lines)]
     #[fastrace::trace]
-    pub fn update(
-        &mut self,
-        t_vio: &Matrix4<f64>,
-        t_gicp: &Matrix4<f64>,
-        h: &Matrix6<f64>,
-        num_inliers: usize,
-        total_points: usize,
-        error: f64,
-        converged: bool,
-    ) -> RelocGate {
+    pub fn update(&mut self, t_vio: &Matrix4<f64>, obs: &Observation) -> RelocGate {
         let profile = self.options.gicp;
-        self.update_inner(
-            t_vio,
-            t_gicp,
-            h,
-            num_inliers,
-            total_points,
-            error,
-            converged,
-            &profile,
-        )
+        self.update_inner(t_vio, obs, &profile)
     }
 
-    /// 内核：与 [`FusionFilter::update`] 同参数，另取 `profile` 定新息门。
-    /// 入口即来源（`update` 传几何画像，`update_with_observation` 传视觉画像），
-    /// 画像选择集中在此两处，不向调用方扩散。
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    /// 内核：观测包＋画像。入口即来源（`update` 传几何画像，
+    /// `update_with_observation` 传视觉画像），画像选择集中在此两处，
+    /// 不向调用方扩散。
+    #[allow(clippy::too_many_lines)]
     #[fastrace::trace]
     fn update_inner(
         &mut self,
         t_vio: &Matrix4<f64>,
-        t_gicp: &Matrix4<f64>,
-        h: &Matrix6<f64>,
-        num_inliers: usize,
-        total_points: usize,
-        error: f64,
-        converged: bool,
+        obs: &Observation,
         profile: &GateProfile,
     ) -> RelocGate {
         // 1. 配准层门控
-        if !converged {
+        if !obs.converged {
             return RelocGate::RejectedPrecheck {
                 reason: "not converged",
             };
         }
-        if num_inliers < self.options.min_num_inliers {
+        if obs.num_inliers < self.options.min_num_inliers {
             return RelocGate::RejectedPrecheck {
                 reason: "too few inliers",
             };
         }
-        if total_points > 0 {
-            let ratio = num_inliers as f64 / total_points as f64;
+        if obs.total_points > 0 {
+            let ratio = obs.num_inliers as f64 / obs.total_points as f64;
             if ratio < self.options.min_inlier_ratio {
                 return RelocGate::RejectedPrecheck {
                     reason: "low inlier ratio",
                 };
             }
         }
-        if !error.is_finite() || error > self.options.max_registration_error {
+        if !obs.error.is_finite() || obs.error > self.options.max_registration_error {
             return RelocGate::RejectedPrecheck {
                 reason: "large error",
             };
@@ -333,7 +328,7 @@ impl FusionFilter {
                 reason: "pred not invertible",
             };
         };
-        let t_err = t_pred_inv * *t_gicp;
+        let t_err = t_pred_inv * obs.t_global;
         let z = se3_log(&t_err);
 
         // 2b. 新息限幅（按入口画像）：超过画像门限的跳变直接拒收，
@@ -348,7 +343,7 @@ impl FusionFilter {
         }
 
         // 3. 观测噪声 R = h⁻¹，失败回退对角阵；连续拒收时放大
-        let mut r = if let Some(inv) = h.try_inverse() {
+        let mut r = if let Some(inv) = obs.h.try_inverse() {
             let mut r = inv;
             // 保持对称
             r = (r + r.transpose()) * 0.5;
@@ -447,9 +442,11 @@ impl FusionFilter {
         self.last_vio = Some(*t_vio);
 
         log::debug!(
-            "GICP fused chi2 {chi2:.2}/{threshold:.2} delta rot {:.3}° trans {:.3}m inliers {num_inliers}/{total_points}",
+            "GICP fused chi2 {chi2:.2}/{threshold:.2} delta rot {:.3}° trans {:.3}m inliers {}/{}",
             rot_norm.to_degrees(),
-            trans_norm
+            trans_norm,
+            obs.num_inliers,
+            obs.total_points,
         );
         RelocGate::Accepted {
             chi2,
@@ -493,12 +490,14 @@ impl FusionFilter {
         let profile = self.options.visual;
         self.update_inner(
             t_vio,
-            &t_obs,
-            &h,
-            obs.num_inliers as usize,
-            obs.total_points as usize,
-            obs.error,
-            obs.converged,
+            &Observation {
+                t_global: t_obs,
+                h,
+                num_inliers: obs.num_inliers as usize,
+                total_points: obs.total_points as usize,
+                error: obs.error,
+                converged: obs.converged,
+            },
             &profile,
         )
     }
@@ -541,6 +540,18 @@ mod tests {
         a[2] = yaw_deg.to_radians();
         a.fixed_rows_mut::<3>(3).copy_from(&trans);
         se3_exp(&a)
+    }
+
+    /// 测试观测包（`num/total/err/conv` 取融合典型值，调用方按需覆写字段）。
+    fn obs(t_global: &Matrix4<f64>, h: &Matrix6<f64>) -> Observation {
+        Observation {
+            t_global: *t_global,
+            h: *h,
+            num_inliers: 80,
+            total_points: 100,
+            error: 0.1,
+            converged: true,
+        }
     }
 
     #[test]
@@ -625,7 +636,13 @@ mod tests {
         let t_vio = Matrix4::identity();
         f.predict(&t_vio);
         let h = Matrix6::identity() * 100.0;
-        let g = f.update(&t_vio, &Matrix4::identity(), &h, 5, 100, 0.1, true);
+        let g = f.update(
+            &t_vio,
+            &Observation {
+                num_inliers: 5,
+                ..obs(&Matrix4::identity(), &h)
+            },
+        );
         assert!(matches!(g, RelocGate::RejectedPrecheck { .. }));
     }
 
@@ -637,7 +654,7 @@ mod tests {
         // 5m 跳变（别名误锁形态）：新息门先于 chi2 拒收
         let t_gicp = pose(Vector3::new(5.0, 0.0, 0.0), 0.0);
         let h = Matrix6::identity() * 1000.0;
-        let g = f.update(&t_vio, &t_gicp, &h, 80, 100, 0.1, true);
+        let g = f.update(&t_vio, &obs(&t_gicp, &h));
         assert!(matches!(g, RelocGate::RejectedInnovation { .. }));
     }
 
@@ -657,12 +674,12 @@ mod tests {
         // 先接受一次高置信真值，把 P 收敛到 R 量级（chi2 能算数的条件）
         f.predict(&t_vio);
         let h_tight = Matrix6::identity() * 1000.0;
-        let g0 = f.update(&t_vio, &Matrix4::identity(), &h_tight, 80, 100, 0.1, true);
+        let g0 = f.update(&t_vio, &obs(&Matrix4::identity(), &h_tight));
         assert!(matches!(g0, RelocGate::Accepted { .. }));
         // 0.25m 偏差（新息门内）+ 高置信：S≈2.6e-3，chi2≈24 > 12.6，拒收
         f.predict(&t_vio);
         let t_gicp = pose(Vector3::new(0.25, 0.0, 0.0), 0.0);
-        let g = f.update(&t_vio, &t_gicp, &h_tight, 80, 100, 0.1, true);
+        let g = f.update(&t_vio, &obs(&t_gicp, &h_tight));
         assert!(matches!(g, RelocGate::RejectedChi2 { .. }));
         assert_eq!(f.consecutive_rejects(), 1);
     }
@@ -679,7 +696,7 @@ mod tests {
         for i in 0..6 {
             h[(i, i)] = 25.0;
         }
-        let g = f.update(&t_vio, &t_gicp, &h, 80, 100, 0.1, true);
+        let g = f.update(&t_vio, &obs(&t_gicp, &h));
         assert!(matches!(g, RelocGate::Accepted { .. }));
         let t_corr = f.corrected_pose(&t_vio);
         // 矫正后应向 0.3m 靠拢（非 100% 因 K<1）
@@ -771,7 +788,7 @@ mod tests {
         // R=0.04（与视觉镜像测试同等置信）：chi2≈5 可过，新息 0.5 > 0.3 拒收
         let t_gicp = pose(Vector3::new(0.5, 0.0, 0.0), 0.0);
         let h = Matrix6::identity() * 25.0;
-        let g = f.update(&t_vio, &t_gicp, &h, 80, 100, 0.1, true);
+        let g = f.update(&t_vio, &obs(&t_gicp, &h));
         assert!(matches!(g, RelocGate::RejectedInnovation { .. }));
         assert_eq!(f.consecutive_rejects(), 0);
     }
@@ -783,20 +800,20 @@ mod tests {
         // 收敛 P（同 chi2_rejects_confident_but_wrong 前置）
         f.predict(&t_vio);
         let h_tight = Matrix6::identity() * 1000.0;
-        let g0 = f.update(&t_vio, &Matrix4::identity(), &h_tight, 80, 100, 0.1, true);
+        let g0 = f.update(&t_vio, &obs(&Matrix4::identity(), &h_tight));
         assert!(matches!(g0, RelocGate::Accepted { .. }));
         // 新息门内 + 高置信 + 0.25m 偏差 → 连续 chi2 拒收 → 放大 R
         let t_gicp = pose(Vector3::new(0.25, 0.0, 0.0), 0.0);
         for _ in 0..3 {
             f.predict(&t_vio);
-            let _ = f.update(&t_vio, &t_gicp, &h_tight, 80, 100, 0.1, true);
+            let _ = f.update(&t_vio, &obs(&t_gicp, &h_tight));
         }
         assert!(f.r_scale > 1.0);
         // 一次通过后复位
         let t_gicp_ok = Matrix4::identity();
         let h_ok = Matrix6::identity() * 10.0;
         f.predict(&t_vio);
-        let _ = f.update(&t_vio, &t_gicp_ok, &h_ok, 80, 100, 0.1, true);
+        let _ = f.update(&t_vio, &obs(&t_gicp_ok, &h_ok));
         assert_eq!(f.r_scale, 1.0);
         assert_eq!(f.consecutive_rejects(), 0);
     }
@@ -819,7 +836,7 @@ mod tests {
         // 旋转与平移分别截断（非真空断言：限幅是温和钳制非零修正）
         let t_gicp = pose(Vector3::new(0.25, 0.0, 0.0), 4.0);
         let h = Matrix6::identity() * 1.0e6; // R→下限，K≈0.7/0.9
-        let g = f.update(&t_vio, &t_gicp, &h, 80, 100, 0.1, true);
+        let g = f.update(&t_vio, &obs(&t_gicp, &h));
         if let RelocGate::Accepted { delta, .. } = g {
             assert!(delta.fixed_rows::<3>(3).norm() <= 0.11);
             assert!(delta.fixed_rows::<3>(0).norm() <= 0.02);
