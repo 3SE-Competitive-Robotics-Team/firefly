@@ -16,7 +16,7 @@ use firefly_gicp::points::point_cloud::PointCloud;
 use firefly_gicp::points::traits::{PointCloudMut, PointCloudTrait};
 use firefly_localization::config::LocalizationConfig;
 use firefly_localization::convert::{matrix_to_odom, odom_to_matrix};
-use firefly_localization::filter::{FusionFilter, RelocGate};
+use firefly_localization::filter::{FusionFilter, Observation, RelocGate};
 use firefly_localization::reloc::GlobalRelocalizer;
 use firefly_map::{DepthCamera, MapFile};
 use firefly_observability::init as init_observability;
@@ -460,12 +460,14 @@ impl App {
         let r = &res.result;
         let gate = self.fusion.update(
             &t_vio,
-            &r.t_target_source,
-            &r.h,
-            r.num_inliers,
-            total,
-            r.error,
-            r.converged,
+            &Observation {
+                t_global: r.t_target_source,
+                h: r.h,
+                num_inliers: r.num_inliers,
+                total_points: total,
+                error: r.error,
+                converged: r.converged,
+            },
         );
         self.publish_gate_viz(&gate, self.innov_limit_gicp);
         match gate {
