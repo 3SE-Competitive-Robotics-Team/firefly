@@ -29,6 +29,7 @@ fn chi2_95(dof: usize) -> f64 {
 /// 单源门控画像：同一信任等级的观测共用一套门限（对照 VINS-Fusion
 /// `findConnection` 的外生验证定信任：特征验证过的边走宽门，几何混叠
 /// 风险高的边走紧门；画像只描述信任，不携带状态，可 `Copy` 按值传递）。
+/// 新息门定接受，修正限幅定单步注入量（防跳变 backstop，非接受门）。
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(default)]
 pub struct GateProfile {
@@ -36,26 +37,36 @@ pub struct GateProfile {
     pub max_innovation_trans: f64,
     /// 新息限幅：旋转 `rad`。
     pub max_innovation_rot: f64,
+    /// 单次修正限幅：平移 `m`（接受后注入名义量的钳制，防单步跳变）。
+    pub max_correction_trans: f64,
+    /// 单次修正限幅：旋转 `rad`。
+    pub max_correction_rot: f64,
 }
 
 impl GateProfile {
     /// 紧门（几何配准路径：走廊等弱约束方向混叠风险高，厘米级漂移外
-    /// 即视为误锁；对照旧单门限行为，缺配置回落即此）。
+    /// 即视为误锁，单步注入钳制在厘米级；对照旧单门限行为，缺配置回落即此）。
     #[must_use]
     pub fn tight() -> Self {
         Self {
             max_innovation_trans: 0.3,
             max_innovation_rot: 5.0_f64.to_radians(),
+            max_correction_trans: 0.5,
+            max_correction_rot: 5.0_f64.to_radians(),
         }
     }
 
     /// 松门（特征验证路径：真正的验证（RANSAC 内点、重投影误差、先验
-    /// 几何门）在观测产生侧已完成，此处只做 VINS `20m/30°` 荒谬性 sanity）。
+    /// 几何门）在观测产生侧已完成，此处只做 VINS `20m/30°` 荒谬性 sanity；
+    /// 接受即全量应用后验（对照 pose graph 对验证边的完整吸收），限幅只拦
+    /// 荒谬值，避免钳制与 P 收缩互锁（残差修不完→下次 chi2 拒→ perpetual）。
     #[must_use]
     pub fn loose() -> Self {
         Self {
             max_innovation_trans: 20.0,
             max_innovation_rot: 30.0_f64.to_radians(),
+            max_correction_trans: 20.0,
+            max_correction_rot: 30.0_f64.to_radians(),
         }
     }
 }
@@ -96,10 +107,6 @@ pub struct FusionOptions {
     pub min_num_inliers: usize,
     /// 最大配准残差（`RegistrationResult::error` 为误差和，`>1e9` 视为发散）。
     pub max_registration_error: f64,
-    /// 单次矫正限幅：平移 `m`。
-    pub max_correction_trans: f64,
-    /// 单次矫正限幅：旋转 `rad`。
-    pub max_correction_rot: f64,
     /// 观测噪声下限：旋转 `rad²`（`R=h⁻¹` 失配时防过自信；离线标定：
     /// 好修正旋转噪声中位 ~1°，下限取 `(1°)²≈3e-4`）。
     pub r_floor_rot: f64,
@@ -129,8 +136,6 @@ impl Default for FusionOptions {
             max_registration_error: 1e9,
             gicp: GateProfile::tight(),
             visual: GateProfile::tight(),
-            max_correction_trans: 0.5,
-            max_correction_rot: 5.0_f64.to_radians(),
             r_floor_rot: 3.0e-4,
             r_floor_pos: 5.0e-3,
             p_init_rot: 2.7e-3,
@@ -416,15 +421,15 @@ impl FusionFilter {
         let k = self.p * s_inv;
         let mut delta = k * z;
 
-        // 限幅：旋转与平移分别截断
+        // 限幅（按入口画像）：旋转与平移分别截断，只防单步跳变，不做接受门
         let rot_norm = delta.fixed_rows::<3>(0).norm();
-        if rot_norm > self.options.max_correction_rot && rot_norm > 1e-12 {
-            let scale = self.options.max_correction_rot / rot_norm;
+        if rot_norm > profile.max_correction_rot && rot_norm > 1e-12 {
+            let scale = profile.max_correction_rot / rot_norm;
             delta.fixed_rows_mut::<3>(0).scale_mut(scale);
         }
         let trans_norm = delta.fixed_rows::<3>(3).norm();
-        if trans_norm > self.options.max_correction_trans && trans_norm > 1e-12 {
-            let scale = self.options.max_correction_trans / trans_norm;
+        if trans_norm > profile.max_correction_trans && trans_norm > 1e-12 {
+            let scale = profile.max_correction_trans / trans_norm;
             delta.fixed_rows_mut::<3>(3).scale_mut(scale);
         }
 
@@ -565,8 +570,8 @@ mod tests {
     }
 
     /// 实测 replay：20m 出程后远端悬停（VIO 短 2.3m），特征验证过的视觉
-    /// 观测必须被接受（自锁回归：P 经里程扩散覆盖漂移，chi2≈6.2 < 12.6；
-    /// 单次钳制 0.5m，生漂移注入 0.5m）。
+    /// 观测必须被接受且全量应用（自锁回归：P 经里程扩散覆盖漂移，chi2≈6.2
+    /// < 12.6；松画像不限幅，K·z≈2.19m 一次注入，残差清零防 perpetual）。
     #[test]
     fn replay_far_end_hover_accepts() {
         use firefly_pubsub::vision::{OBS_SOURCE_VISUAL, PoseObservation};
@@ -609,8 +614,8 @@ mod tests {
             .corrected_pose(&t_vio)
             .fixed_view::<3, 1>(0, 3)
             .into_owned();
-        // 全量修正 2.19m 被钳制到 0.5m：矫正后 x ∈ (20.4, 20.51)
-        assert!(trans.x > 20.4 && trans.x < 20.51);
+        // K·z≈2.19m 全量注入：矫正后 x ∈ (22.1, 22.31)
+        assert!(trans.x > 22.1 && trans.x < 22.31);
     }
 
     #[test]
@@ -797,9 +802,13 @@ mod tests {
 
     #[test]
     fn correction_clamped() {
-        let opts = FusionOptions {
+        let gicp = GateProfile {
             max_correction_trans: 0.1,
             max_correction_rot: 1.0_f64.to_radians(),
+            ..GateProfile::tight()
+        };
+        let opts = FusionOptions {
+            gicp,
             ..Default::default()
         };
         let mut f = FusionFilter::new(opts);

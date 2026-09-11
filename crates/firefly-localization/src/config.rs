@@ -64,5 +64,7 @@ mod tests {
         assert!((cfg.fusion.gicp.max_innovation_trans - 0.3).abs() < 1e-12);
         assert!((cfg.fusion.visual.max_innovation_trans - 20.0).abs() < 1e-12);
         assert!((cfg.fusion.process_noise_pos_per_m - 0.04).abs() < 1e-12);
+        assert!((cfg.fusion.gicp.max_correction_trans - 0.5).abs() < 1e-12);
+        assert!((cfg.fusion.visual.max_correction_trans - 20.0).abs() < 1e-12);
     }
 }
