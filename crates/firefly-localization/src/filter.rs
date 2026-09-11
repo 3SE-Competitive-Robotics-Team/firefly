@@ -45,7 +45,7 @@ pub struct GateProfile {
 
 impl GateProfile {
     /// 紧门（几何配准路径：走廊等弱约束方向混叠风险高，厘米级漂移外
-    /// 即视为误锁，单步注入钳制在厘米级；对照旧单门限行为，缺配置回落即此）。
+    /// 即视为误锁，单步注入钳制在厘米级；缺省配置回落即此档）。
     #[must_use]
     pub fn tight() -> Self {
         Self {
@@ -226,7 +226,8 @@ impl FusionFilter {
     /// 由 `VIO` 位姿预测：仅膨胀 `P`，不改 `T_drift`。平移扩散 = 时间项 +
     /// 里程项（本步行驶距离 × `process_noise_pos_per_m`），后者覆盖随里程
     /// 成比例的系统性漂移（纯时间项在长距离飞行后会让 `P` 相对真实误差过小，
-    /// `chi2` 恒拒真值）。
+    /// `chi2` 恒拒真值）；旋转保持纯时间项（陀螺游走是时间过程，与尺度类
+    /// 平移偏差物理不同）。
     #[fastrace::trace]
     pub fn predict(&mut self, t_vio: &Matrix4<f64>) {
         let dist = if let Some(last) = &self.last_vio {
