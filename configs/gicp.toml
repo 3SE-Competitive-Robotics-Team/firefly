@@ -13,7 +13,7 @@ process_noise_rot = 0.0000001 # rad²，单步过程噪声旋转（odom 100Hz：
 process_noise_pos = 0.00001 # m²，单步过程噪声平移（odom 100Hz：按秒等效 1e-3）
 fallback_noise_rot = 0.0019 # rad²，h 不可逆回退（2.5°）
 fallback_noise_pos = 0.04 # m²，h 不可逆回退（0.2m）
-chi2_multiplier = 0.5 # chi2 阈值乘子（R 下限标定后 12.6 过松，0.5 使 chi2 成为第二层活门）
+chi2_multiplier = 1.0 # chi2 阈值乘子（取 1 即 chi2_95(6)=12.6 原教旨名义 5% 误拒率）
 min_inlier_ratio = 0.3 # 最小内点率（原 0.5，放宽以通过稀疏场景）
 min_num_inliers = 30
 max_registration_error = 1000000000.0 # 最大配准残差和

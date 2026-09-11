@@ -38,7 +38,8 @@ pub struct FusionOptions {
     pub fallback_noise_rot: f64,
     /// 观测噪声回退：平移 `m²`。
     pub fallback_noise_pos: f64,
-    /// `chi2` 阈值乘子（对照 `UpdaterOptions::chi2_multipler`）。
+    /// `chi2` 阈值乘子（对照 `UpdaterOptions::chi2_multipler`；取 1 即
+    /// `chi2_95` 原教旨名义 5% 误拒率，乘子下调等价于收紧置信度）。
     pub chi2_multiplier: f64,
     /// 最小内点率。
     pub min_inlier_ratio: f64,
@@ -77,7 +78,7 @@ impl Default for FusionOptions {
             process_noise_pos: 1e-5,
             fallback_noise_rot: (2.5_f64.to_radians()).powi(2),
             fallback_noise_pos: 0.2_f64.powi(2),
-            chi2_multiplier: 0.5,
+            chi2_multiplier: 1.0,
             min_inlier_ratio: 0.3,
             min_num_inliers: 30,
             max_registration_error: 1e9,
@@ -485,16 +486,25 @@ mod tests {
         assert!(matches!(g, RelocGate::RejectedInnovation { .. }));
     }
 
+    /// 低 R 下限的测试配置：`R=h⁻¹` 不被下限托住，`chi2` 在新息门内可达。
+    fn low_floor_opts() -> FusionOptions {
+        FusionOptions {
+            r_floor_pos: 1e-4,
+            r_floor_rot: 1e-5,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn chi2_rejects_confident_but_wrong() {
-        let mut f = FusionFilter::with_default();
+        let mut f = FusionFilter::new(low_floor_opts());
         let t_vio = Matrix4::identity();
         // 先接受一次高置信真值，把 P 收敛到 R 量级（chi2 能算数的条件）
         f.predict(&t_vio);
         let h_tight = Matrix6::identity() * 1000.0;
         let g0 = f.update(&t_vio, &Matrix4::identity(), &h_tight, 80, 100, 0.1, true);
         assert!(matches!(g0, RelocGate::Accepted { .. }));
-        // 0.25m 偏差（新息门内）+ 高置信：chi2 ≈ 7.5 > 6.3，拒收
+        // 0.25m 偏差（新息门内）+ 高置信：S≈2.6e-3，chi2≈24 > 12.6，拒收
         f.predict(&t_vio);
         let t_gicp = pose(Vector3::new(0.25, 0.0, 0.0), 0.0);
         let g = f.update(&t_vio, &t_gicp, &h_tight, 80, 100, 0.1, true);
@@ -559,7 +569,7 @@ mod tests {
 
     #[test]
     fn auto_scale_on_consecutive_chi2() {
-        let mut f = FusionFilter::with_default();
+        let mut f = FusionFilter::new(low_floor_opts());
         let t_vio = Matrix4::identity();
         // 收敛 P（同 chi2_rejects_confident_but_wrong 前置）
         f.predict(&t_vio);
