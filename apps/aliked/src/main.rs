@@ -32,6 +32,9 @@ const WIDTH: usize = 320;
 const HEIGHT: usize = 240;
 /// 特征发布节流（秒）：ORT CPU 单帧约数百毫秒，视觉定位 1Hz 足够。
 const FEATURE_PERIOD: f64 = 1.0;
+/// 时钟回拨重整阈值（秒）：帧时间戳比节流门限早超此值即视为传感器时钟重启
+///（`sim` 重启后任务时钟归零），重整节流门限而非永久静默（否则重启后无特征）。
+const CLOCK_REWIND_MARGIN: f64 = 2.0;
 /// 心跳周期（无事件时兜底）。
 const HEARTBEAT: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -153,7 +156,16 @@ fn run_loop(session: &mut Session) -> Result<(), firefly_error::Error> {
             return CallbackProgression::Continue;
         };
         if frame.timestamp + 1e-9 < next_feat {
-            return CallbackProgression::Continue;
+            // 时钟回拨（传感器重启）vs 正常节流：回拨则重整门限，否则跳过
+            if next_feat - frame.timestamp > CLOCK_REWIND_MARGIN {
+                log::info!(
+                    "传感器时钟回拨（{:.2} → {:.2}），特征节流重整",
+                    next_feat - FEATURE_PERIOD,
+                    frame.timestamp
+                );
+            } else {
+                return CallbackProgression::Continue;
+            }
         }
         next_feat = frame.timestamp + FEATURE_PERIOD;
         // 相机帧时间戳即 sim 时钟（传感器时钟 = 仿真时钟）；推理前后各 pump
@@ -162,6 +174,11 @@ fn run_loop(session: &mut Session) -> Result<(), firefly_error::Error> {
         firefly_observability::pump_log_ipc(&log_ipc);
         match infer_frame(session, &frame) {
             Ok(msg) => {
+                log::debug!(
+                    "特征发布 t={:.2}（{} 点，含低分）",
+                    msg.timestamp,
+                    NUM_POINTS
+                );
                 if let Err(e) = feat_pub.publish(msg) {
                     log::warn!("特征发布失败: {e}");
                 }

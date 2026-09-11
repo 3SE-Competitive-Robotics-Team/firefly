@@ -206,9 +206,19 @@ fn run_loop(session: &mut Session, map: &VisionMap) -> Result<(), firefly_error:
             .or(latest_odom)
             .filter(|m| m.is_initialized);
         let (Some(feat), Some(odom)) = (latest_feat, prior) else {
+            log::debug!(
+                "视觉触发跳过（feat={} prior={}）",
+                latest_feat.is_some(),
+                prior.is_some()
+            );
             return CallbackProgression::Continue;
         };
         if feat.timestamp - odom.timestamp > ODOM_FRESH_TIMEOUT {
+            log::debug!(
+                "视觉触发跳过（先验过期 feat_t={:.2} odom_t={:.2}）",
+                feat.timestamp,
+                odom.timestamp
+            );
             return CallbackProgression::Continue;
         }
         // 特征时间戳即 sim 时钟；查询前后各 pump 一次（匹配阻塞下积压排空）。
@@ -320,6 +330,13 @@ fn query_once(
         t_body_prior[(2, 3)],
     ];
     let candidates = map.query_neighbors(prior_pos, QUERY_RADIUS, QUERY_TOPK);
+    log::debug!(
+        "视觉查询 t={:.2} prior=({:.1},{:.1},{:.1}) candidates={candidates:?}",
+        feat.timestamp,
+        prior_pos[0],
+        prior_pos[1],
+        prior_pos[2]
+    );
     if candidates.is_empty() {
         return Ok(None);
     }
@@ -340,6 +357,11 @@ fn query_once(
         pairs_3d.extend(p3);
     }
     let total = pairs_2d.len();
+    log::debug!(
+        "视觉查询 t={:.2} 匹配对应 {} 组（TOPK={QUERY_TOPK}）",
+        feat.timestamp,
+        total
+    );
     let intrinsics = CameraIntrinsics {
         focal: MUJOCO_FOCAL,
         cx: 160.0,
