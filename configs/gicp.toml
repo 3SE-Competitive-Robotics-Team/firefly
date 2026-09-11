@@ -18,16 +18,18 @@ chi2_multiplier = 1.0 # chi2 阈值乘子（取 1 即 chi2_95(6)=12.6 原教旨�
 min_inlier_ratio = 0.3 # 最小内点率（原 0.5，放宽以通过稀疏场景）
 min_num_inliers = 30
 max_registration_error = 1000000000.0 # 最大配准残差和
-max_correction_trans = 0.5 # m，单次矫正限幅平移
-max_correction_rot = 0.08726646259971647 # rad，单次矫正限幅旋转（5°）
-# [fusion.gicp] 几何路径画像（紧门）：GICP 走廊混叠风险高，厘米级漂移外即视为误锁
+# [fusion.gicp] 几何路径画像（紧门）：GICP 走廊混叠风险高，厘米级漂移外即视为误锁，单步注入钳制防跳变
 [fusion.gicp]
 max_innovation_trans = 0.3 # m，新息限幅平移（局部跟踪档）
 max_innovation_rot = 0.08726646259971647 # rad，新息限幅旋转（5°）
-# [fusion.visual] 特征验证路径画像（VINS 尺度 sanity）：验证在观测产生侧已完成，此处只拦荒谬值
+max_correction_trans = 0.5 # m，单次修正限幅平移
+max_correction_rot = 0.08726646259971647 # rad，单次修正限幅旋转（5°）
+# [fusion.visual] 特征验证路径画像（VINS 尺度 sanity）：验证在观测产生侧已完成，接受即全量应用后验，限幅只拦荒谬值
 [fusion.visual]
 max_innovation_trans = 20.0 # m（对照 VINS-Fusion findConnection 的 20m）
 max_innovation_rot = 0.5235987755982988 # rad（30°，对照 VINS-Fusion 的 30°）
+max_correction_trans = 20.0 # m（全量应用，钳制+P 收缩互锁会导致残差 perpetual）
+max_correction_rot = 0.5235987755982988 # rad（30°）
 r_floor_rot = 0.0003 # rad²，R 下限旋转（好修正噪声~1°，防 h⁻¹ 过自信）
 r_floor_pos = 0.005 # m²，R 下限平移（好修正噪声~0.07m）
 p_init_rot = 0.0027 # rad²，P 初值旋转（3°）
