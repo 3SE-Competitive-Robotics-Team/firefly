@@ -16,7 +16,7 @@ use firefly_gicp::points::point_cloud::PointCloud;
 use firefly_gicp::points::traits::{PointCloudMut, PointCloudTrait};
 use firefly_localization::config::LocalizationConfig;
 use firefly_localization::convert::{matrix_to_odom, odom_to_matrix};
-use firefly_localization::filter::FusionFilter;
+use firefly_localization::filter::{FusionFilter, RelocGate};
 use firefly_localization::reloc::GlobalRelocalizer;
 use firefly_map::{DepthCamera, MapFile};
 use firefly_observability::init as init_observability;
@@ -27,12 +27,18 @@ use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::publish::CorrectedOdomPublisher;
 use firefly_pubsub::subscriber::{OdomSubscriber, Subscriber};
 use firefly_pubsub::vision::{POSE_OBS_TOPIC, PoseObservation};
+use firefly_pubsub::viz::{VizMessage, VizPublisher, kind};
 use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetRunResult;
 use nalgebra::{Isometry3, Matrix4, Quaternion, Translation3, UnitQuaternion, Vector3, Vector4};
 
 const LOOP_PERIOD: Duration = Duration::from_millis(100);
 const RELOC_PERIOD: usize = 10;
+/// 矫正后位姿可视化节拍（10Hz 主循环每 tick 发一次位姿+轨迹段，与
+/// `vio/odom`/`gt/pose` 同频率，rrd 里可逐点对比三条轨迹）。
+const VIZ_PERIOD: usize = 1;
+/// 矫正后位姿图例颜色（绿，与 vio 橙 / 真值蓝区分）。
+const CORRECTED_COLOR: (u8, u8, u8) = (60, 200, 80);
 const DEFAULT_CONFIG: &str = "configs/gicp.toml";
 const DEFAULT_MAP_HINT: &str = "未指定 --map，加载 MuJoCo 默认场景静态地图";
 const ODOM_FRESH_TIMEOUT: f64 = 1.0;
@@ -180,6 +186,27 @@ fn mujoco_map_file() -> MapFile {
     }
 }
 
+/// 门控判决映射为诊断四元组 `[metric, limit, applied_trans_m, accepted]`。
+///
+/// `metric/limit` 为本次实际判决的门（接受与 `chi2` 拒收时为 `chi2`/阈值，
+/// 新息拒收时为新息平移量/门限），`applied_trans_m` 为本次注入名义量的平移
+/// 修正量（拒收为 0），`accepted` 取 1/0。预检/数值拒收无判决数值，返回空
+///（调用方只走 `log`，不发标量）。
+fn gate_diag(gate: &RelocGate, max_innovation_trans: f64) -> Option<[f64; 4]> {
+    match gate {
+        RelocGate::Accepted {
+            chi2,
+            threshold,
+            delta,
+        } => Some([*chi2, *threshold, delta.fixed_rows::<3>(3).norm(), 1.0]),
+        RelocGate::RejectedChi2 { chi2, threshold } => Some([*chi2, *threshold, 0.0, 0.0]),
+        RelocGate::RejectedInnovation { trans, .. } => {
+            Some([*trans, max_innovation_trans, 0.0, 0.0])
+        }
+        RelocGate::RejectedPrecheck { .. } | RelocGate::RejectedNumerical { .. } => None,
+    }
+}
+
 struct App {
     fusion: FusionFilter,
     reloc: Option<GlobalRelocalizer>,
@@ -187,6 +214,8 @@ struct App {
     viewer_odom: Option<OdomSubscriber>,
     depth: Option<Subscriber<DepthImageMessage>>,
     corrected_pub: Option<CorrectedOdomPublisher>,
+    viz_pub: Option<VizPublisher>,
+    corr_prev: Option<[f64; 3]>,
     latest_odom: Option<OdomMessage>,
     latest_depth: Option<DepthImageMessage>,
     /// 视觉位姿观测订阅（`lightglue` 进程发布，同一 `FusionFilter` 融合）。
@@ -199,6 +228,10 @@ struct App {
     pending_visual: std::collections::VecDeque<PoseObservation>,
     last_odom_recv: f64,
     depth_cam: DepthCamera,
+    /// 新息门限快照（`cfg.fusion.{gicp,visual}.max_innovation_trans`，门控
+    /// 诊断标量的 `limit` 分量与滤波器用同一值，按路径传入）。
+    innov_limit_gicp: f64,
+    innov_limit_visual: f64,
     t_sim: f64,
     /// 日志聚合句柄（主循环作用域持有，每 tick 传给 `pump_log_ipc`）。
     log_ipc: firefly_observability::LogIpc,
@@ -208,6 +241,8 @@ struct App {
 impl App {
     #[allow(clippy::needless_pass_by_value)]
     fn new(map_file: MapFile, cfg: LocalizationConfig, odom_topic: &str) -> Result<Self> {
+        let innov_limit_gicp = cfg.fusion.gicp.max_innovation_trans;
+        let innov_limit_visual = cfg.fusion.visual.max_innovation_trans;
         let fusion = FusionFilter::new(cfg.fusion);
         let reloc = match GlobalRelocalizer::from_map_file(&map_file, cfg.reloc) {
             Ok(r) => {
@@ -250,6 +285,19 @@ impl App {
                 None
             }
         };
+        let viz_pub = match VizPublisher::new(&node) {
+            Ok(p) => {
+                log::info!(
+                    "已打开话题 {}（矫正后位姿可视化）",
+                    firefly_pubsub::viz::VIZ_TOPIC
+                );
+                Some(p)
+            }
+            Err(e) => {
+                log::warn!("可视化发布不可用：{e}");
+                None
+            }
+        };
         Ok(Self {
             fusion,
             reloc,
@@ -258,12 +306,16 @@ impl App {
             depth,
             visual_obs,
             corrected_pub,
+            viz_pub,
+            corr_prev: None,
             latest_odom: None,
             latest_depth: None,
             odom_hist: std::collections::VecDeque::with_capacity(256),
             pending_visual: std::collections::VecDeque::with_capacity(PENDING_VISUAL_CAP),
             last_odom_recv: f64::NEG_INFINITY,
             depth_cam: DepthCamera::mujoco_default(),
+            innov_limit_gicp,
+            innov_limit_visual,
             t_sim: 0.0,
             log_ipc,
             _node: node,
@@ -354,8 +406,10 @@ impl App {
             log::debug!("视觉观测无 odom 内插（ts={:.2}），跳过", obs.timestamp);
             return;
         };
-        match self.fusion.update_with_observation(&t_vio, obs) {
-            firefly_localization::filter::RelocGate::Accepted {
+        let gate = self.fusion.update_with_observation(&t_vio, obs);
+        self.publish_gate_viz(&gate, self.innov_limit_visual);
+        match gate {
+            RelocGate::Accepted {
                 chi2, threshold, ..
             } => {
                 log::info!(
@@ -365,16 +419,16 @@ impl App {
                     obs.error
                 );
             }
-            firefly_localization::filter::RelocGate::RejectedChi2 { chi2, threshold } => {
+            RelocGate::RejectedChi2 { chi2, threshold } => {
                 log::debug!("视觉 chi2 拒收 {chi2:.2}>{threshold:.2}");
             }
-            firefly_localization::filter::RelocGate::RejectedInnovation { trans, rot_deg } => {
+            RelocGate::RejectedInnovation { trans, rot_deg } => {
                 log::debug!("视觉新息拒收 trans {trans:.2}m rot {rot_deg:.2}°");
             }
-            firefly_localization::filter::RelocGate::RejectedPrecheck { reason } => {
+            RelocGate::RejectedPrecheck { reason } => {
                 log::debug!("视觉预检拒收: {reason}");
             }
-            firefly_localization::filter::RelocGate::RejectedNumerical { reason } => {
+            RelocGate::RejectedNumerical { reason } => {
                 log::warn!("视觉数值异常拒收: {reason}");
             }
         }
@@ -413,8 +467,9 @@ impl App {
             r.error,
             r.converged,
         );
+        self.publish_gate_viz(&gate, self.innov_limit_gicp);
         match gate {
-            firefly_localization::filter::RelocGate::Accepted {
+            RelocGate::Accepted {
                 chi2, threshold, ..
             } => {
                 log::info!(
@@ -424,22 +479,22 @@ impl App {
                     r.error
                 );
             }
-            firefly_localization::filter::RelocGate::RejectedChi2 { chi2, threshold } => {
+            RelocGate::RejectedChi2 { chi2, threshold } => {
                 log::debug!("GICP chi2拒收 {chi2:.2}>{threshold:.2}");
             }
-            firefly_localization::filter::RelocGate::RejectedInnovation { trans, rot_deg } => {
+            RelocGate::RejectedInnovation { trans, rot_deg } => {
                 log::debug!("GICP新息拒收 trans {trans:.2}m rot {rot_deg:.2}°（疑似别名误锁）");
             }
-            firefly_localization::filter::RelocGate::RejectedPrecheck { reason } => {
+            RelocGate::RejectedPrecheck { reason } => {
                 log::debug!("GICP预检拒收: {reason}");
             }
-            firefly_localization::filter::RelocGate::RejectedNumerical { reason } => {
+            RelocGate::RejectedNumerical { reason } => {
                 log::warn!("GICP数值异常拒收: {reason}");
             }
         }
     }
 
-    fn publish_corrected(&self) -> Result<()> {
+    fn publish_corrected(&mut self) -> Result<()> {
         let Some(pub_) = &self.corrected_pub else {
             return Ok(());
         };
@@ -452,7 +507,74 @@ impl App {
         let t_vio = odom_to_matrix(odom);
         let t_corr = self.fusion.corrected_pose(&t_vio);
         let msg = matrix_to_odom(&t_corr, odom, self.fusion.drift());
-        pub_.publish(msg).map(|_| ())
+        pub_.publish(msg).map(|_| ())?;
+        self.log_corrected_viz(&msg);
+        Ok(())
+    }
+
+    /// 门控诊断可视化（每次融合尝试即发，事件驱动，无尝试不发）。
+    ///
+    /// `corr/debug/gate` 四元组见 [`gate_diag`]，`corr/debug/drift` 三元组为
+    /// 判决时刻累计漂移 `T_drift` 的平移分量 `[dx, dy, dz]`。发布失败只降级，
+    /// 不影响融合。
+    fn publish_gate_viz(&self, gate: &RelocGate, innov_limit: f64) {
+        let Some([metric, limit, applied, accepted]) = gate_diag(gate, innov_limit) else {
+            return;
+        };
+        let Some(viz) = &self.viz_pub else {
+            return;
+        };
+        let mut g = VizMessage::base(kind::SCALARS, self.t_sim, "corr/debug/gate");
+        g.scalars[0] = metric;
+        g.scalars[1] = limit;
+        g.scalars[2] = applied;
+        g.scalars[3] = accepted;
+        g.scalar_count = 4;
+        if let Err(e) = viz.publish(g) {
+            log::debug!("viz 发布 corr/debug/gate 失败：{e}");
+            return;
+        }
+        let d = self.fusion.drift();
+        let mut drift = VizMessage::base(kind::SCALARS, self.t_sim, "corr/debug/drift");
+        drift.scalars[0] = d[(0, 3)];
+        drift.scalars[1] = d[(1, 3)];
+        drift.scalars[2] = d[(2, 3)];
+        drift.scalar_count = 3;
+        if let Err(e) = viz.publish(drift) {
+            log::debug!("viz 发布 corr/debug/drift 失败：{e}");
+        }
+    }
+
+    /// 矫正后位姿可视化（`corr/odom` 位姿 + `corr/traj` 增量轨迹段，绿，
+    /// 与 vio `log_viz` 同增量段写法；发布失败只降级，不影响融合）。
+    fn log_corrected_viz(&mut self, msg: &OdomMessage) {
+        if !self.reloc_ticks.is_multiple_of(VIZ_PERIOD) {
+            return;
+        }
+        let Some(viz) = &self.viz_pub else {
+            return;
+        };
+        let pos = [msg.position_x, msg.position_y, msg.position_z];
+        let quat = [msg.quat_x, msg.quat_y, msg.quat_z, msg.quat_w];
+        let mut pose = VizMessage::base(kind::POSE, self.t_sim, "corr/odom");
+        pose.color = [CORRECTED_COLOR.0, CORRECTED_COLOR.1, CORRECTED_COLOR.2];
+        pose.xyz = pos;
+        pose.quat_xyzw = quat;
+        if let Err(e) = viz.publish(pose) {
+            log::debug!("viz 发布 corr 位姿失败：{e}");
+            return;
+        }
+        if let Some(prev) = self.corr_prev {
+            let mut seg = VizMessage::base(kind::LINE_STRIP, self.t_sim, "corr/traj");
+            seg.color = [CORRECTED_COLOR.0, CORRECTED_COLOR.1, CORRECTED_COLOR.2];
+            seg.points[0] = prev;
+            seg.points[1] = pos;
+            seg.point_count = 2;
+            if let Err(e) = viz.publish(seg) {
+                log::debug!("viz 发布 corr/traj 段失败：{e}");
+            }
+        }
+        self.corr_prev = Some(pos);
     }
 
     fn step(&mut self) -> Result<()> {
@@ -559,4 +681,51 @@ fn main() {
     }
     firefly_observability::pump_log_ipc(&app.log_ipc);
     firefly_observability::flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RelocGate, gate_diag};
+    use nalgebra::Vector6;
+
+    /// 接受：`chi2`/阈值透传，平移修正量取 `delta` 平移分量模，标志为 1。
+    #[test]
+    fn accepted_maps_chi2_and_applied() {
+        let mut delta = Vector6::zeros();
+        delta[3] = 0.06;
+        delta[4] = 0.08;
+        let gate = RelocGate::Accepted {
+            chi2: 1.5,
+            threshold: 6.3,
+            delta,
+        };
+        let d = gate_diag(&gate, 0.3).expect("accepted 必须有诊断值");
+        assert!((d[0] - 1.5).abs() < 1e-12);
+        assert!((d[1] - 6.3).abs() < 1e-12);
+        assert!((d[2] - 0.1).abs() < 1e-12);
+        assert!((d[3] - 1.0).abs() < 1e-12);
+    }
+
+    /// 新息拒收：`metric` 为新息平移量，`limit` 为传入的门限，修正量为 0。
+    #[test]
+    fn innovation_reject_maps_trans_and_limit() {
+        let gate = RelocGate::RejectedInnovation {
+            trans: 1.6,
+            rot_deg: 2.0,
+        };
+        let d = gate_diag(&gate, 0.3).expect("innovation 拒收必须有诊断值");
+        assert!((d[0] - 1.6).abs() < 1e-12);
+        assert!((d[1] - 0.3).abs() < 1e-12);
+        assert!(d[2].abs() < 1e-12);
+        assert!(d[3].abs() < 1e-12);
+    }
+
+    /// 预检拒收无判决数值：返回空，调用方不发标量。
+    #[test]
+    fn precheck_maps_none() {
+        let gate = RelocGate::RejectedPrecheck {
+            reason: "not converged",
+        };
+        assert!(gate_diag(&gate, 0.3).is_none());
+    }
 }
