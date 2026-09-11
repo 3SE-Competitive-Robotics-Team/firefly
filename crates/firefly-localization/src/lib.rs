@@ -15,5 +15,5 @@ pub mod reloc;
 
 pub use config::LocalizationConfig;
 pub use convert::{matrix_to_odom, odom_to_matrix};
-pub use filter::{FusionFilter, FusionOptions, RelocGate};
+pub use filter::{FusionFilter, FusionOptions, GateProfile, RelocGate};
 pub use reloc::{GlobalRelocalizer, RelocOptions, RelocResult};

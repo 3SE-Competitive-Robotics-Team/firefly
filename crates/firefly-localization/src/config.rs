@@ -60,5 +60,8 @@ mod tests {
         .expect("configs/gicp.toml must parse");
         assert!((cfg.reloc.downsampling_resolution - 0.1).abs() < 1e-12);
         assert!((cfg.fusion.min_inlier_ratio - 0.3).abs() < 1e-12);
+        // 双画像接线：几何紧门 / 视觉松门（VINS 尺度）
+        assert!((cfg.fusion.gicp.max_innovation_trans - 0.3).abs() < 1e-12);
+        assert!((cfg.fusion.visual.max_innovation_trans - 20.0).abs() < 1e-12);
     }
 }
