@@ -63,5 +63,6 @@ mod tests {
         // 双画像接线：几何紧门 / 视觉松门（VINS 尺度）
         assert!((cfg.fusion.gicp.max_innovation_trans - 0.3).abs() < 1e-12);
         assert!((cfg.fusion.visual.max_innovation_trans - 20.0).abs() < 1e-12);
+        assert!((cfg.fusion.process_noise_pos_per_m - 0.04).abs() < 1e-12);
     }
 }
