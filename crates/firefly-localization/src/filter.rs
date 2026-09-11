@@ -77,8 +77,12 @@ pub struct FusionOptions {
     pub visual: GateProfile,
     /// 单步过程噪声：旋转 `rad²`（每 odom 步，100Hz 下按秒 ≈1e-5）。
     pub process_noise_rot: f64,
-    /// 单步过程噪声：平移 `m²`（每 odom 步，100Hz 下按秒 ≈1e-3）。
+    /// 单步过程噪声：平移 `m²`（每 odom 步，100Hz 下按秒 ≈1e-3；覆盖悬停
+    /// 随机游走）。
     pub process_noise_pos: f64,
+    /// 里程过程噪声：平移 `m²/m`（每行驶 1 米膨胀的方差；漂移随里程成比例
+    /// 累积（尺度类系统性偏差），P 按行驶距离膨胀，悬停时此项为零）。
+    pub process_noise_pos_per_m: f64,
     /// 观测噪声回退：旋转 `rad²`（`h` 不可逆时）。
     pub fallback_noise_rot: f64,
     /// 观测噪声回退：平移 `m²`。
@@ -116,6 +120,7 @@ impl Default for FusionOptions {
         Self {
             process_noise_rot: 1e-7,
             process_noise_pos: 1e-5,
+            process_noise_pos_per_m: 0.04,
             fallback_noise_rot: (2.5_f64.to_radians()).powi(2),
             fallback_noise_pos: 0.2_f64.powi(2),
             chi2_multiplier: 1.0,
@@ -213,19 +218,28 @@ impl FusionFilter {
         self.consecutive_rejects
     }
 
-    /// 由 `VIO` 位姿预测：仅膨胀 `P`，不改 `T_drift`。
+    /// 由 `VIO` 位姿预测：仅膨胀 `P`，不改 `T_drift`。平移扩散 = 时间项 +
+    /// 里程项（本步行驶距离 × `process_noise_pos_per_m`），后者覆盖随里程
+    /// 成比例的系统性漂移（纯时间项在长距离飞行后会让 `P` 相对真实误差过小，
+    /// `chi2` 恒拒真值）。
     #[fastrace::trace]
     pub fn predict(&mut self, t_vio: &Matrix4<f64>) {
-        if self.last_vio.is_none() {
+        let dist = if let Some(last) = &self.last_vio {
+            let d = t_vio.fixed_view::<3, 1>(0, 3) - last.fixed_view::<3, 1>(0, 3);
+            let dist = d.norm();
+            // 数值防护：非有限位移不膨胀（坏 odom 不污染协方差）
+            if dist.is_finite() { dist } else { 0.0 }
+        } else {
             self.last_vio = Some(*t_vio);
             return;
-        }
+        };
         let mut q = Matrix6::zeros();
         for i in 0..3 {
             q[(i, i)] = self.options.process_noise_rot;
         }
         for i in 3..6 {
-            q[(i, i)] = self.options.process_noise_pos;
+            q[(i, i)] =
+                self.options.process_noise_pos + self.options.process_noise_pos_per_m * dist;
         }
         self.p += q;
         // 数值防护：保持对称
@@ -533,6 +547,70 @@ mod tests {
         let p1 = *f.covariance();
         assert!(p1[(0, 0)] > p0[(0, 0)]);
         assert!(p1[(3, 3)] > p0[(3, 3)]);
+    }
+
+    #[test]
+    fn predict_grows_with_distance() {
+        let opts = FusionOptions {
+            process_noise_pos: 0.0,
+            process_noise_pos_per_m: 0.04,
+            ..Default::default()
+        };
+        let mut f = FusionFilter::new(opts);
+        f.predict(&Matrix4::identity());
+        f.predict(&pose(Vector3::new(10.0, 0.0, 0.0), 0.0));
+        // P_trans = p_init(0.01) + 0.04×10m
+        let p = f.covariance()[(3, 3)];
+        assert!((p - 0.41).abs() < 1e-9);
+    }
+
+    /// 实测 replay：20m 出程后远端悬停（VIO 短 2.3m），特征验证过的视觉
+    /// 观测必须被接受（自锁回归：P 经里程扩散覆盖漂移，chi2≈6.2 < 12.6；
+    /// 单次钳制 0.5m，生漂移注入 0.5m）。
+    #[test]
+    fn replay_far_end_hover_accepts() {
+        use firefly_pubsub::vision::{OBS_SOURCE_VISUAL, PoseObservation};
+        let opts = FusionOptions {
+            visual: GateProfile::loose(),
+            process_noise_pos: 0.0,
+            process_noise_pos_per_m: 0.04,
+            ..Default::default()
+        };
+        let mut f = FusionFilter::new(opts);
+        f.predict(&Matrix4::identity());
+        for k in 1..=200 {
+            f.predict(&pose(Vector3::new(0.1 * f64::from(k), 0.0, 0.0), 0.0));
+        }
+        let mut cov = [0.0f64; 36];
+        for i in 0..6 {
+            cov[i * 6 + i] = 0.04;
+        }
+        let obs = PoseObservation {
+            timestamp: 0.0,
+            source: OBS_SOURCE_VISUAL,
+            position_x: 22.3,
+            position_y: 0.0,
+            position_z: 0.0,
+            quat_x: 0.0,
+            quat_y: 0.0,
+            quat_z: 0.0,
+            quat_w: 1.0,
+            covariance: cov,
+            num_inliers: 500,
+            total_points: 600,
+            error: 0.1,
+            converged: true,
+        };
+        // 预测位姿 = 未修正的 VIO 末端（x=20），观测 x=22.3，新息 2.3m
+        let t_vio = pose(Vector3::new(20.0, 0.0, 0.0), 0.0);
+        let g = f.update_with_observation(&t_vio, &obs);
+        assert!(matches!(g, RelocGate::Accepted { .. }));
+        let trans = f
+            .corrected_pose(&t_vio)
+            .fixed_view::<3, 1>(0, 3)
+            .into_owned();
+        // 全量修正 2.19m 被钳制到 0.5m：矫正后 x ∈ (20.4, 20.51)
+        assert!(trans.x > 20.4 && trans.x < 20.51);
     }
 
     #[test]
