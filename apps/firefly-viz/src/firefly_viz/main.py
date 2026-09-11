@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import faulthandler
 import queue
 import sys
 import threading
@@ -115,6 +117,21 @@ def _send_default_blueprint() -> None:
     )
     rr.send_blueprint(rr.blueprint.Blueprint(scene))
     log("已发送默认布局（场景 3D，sim_time 全历史可见范围）")
+
+
+def detach_copy(msg):
+    """零拷贝 loan 的私有化深拷贝：进跨线程队列前必须调用。
+
+    `sample.payload().contents` 只是 loan 内存的别名包装——发布端复用 loan
+    发下一帧（覆盖）或进程退出（解除映射）后，队列里滞留的别名读到撕裂
+    数据（rrd 里 `vio/deb` 类垃圾实体即此来源），乃至释放后使用直接
+    `SIGSEGV`（writer 线程滞后秒级，窗口极大）。拷贝一次（`VizMessage`
+    约 217KB，百 Hz 下约数 MB/s）买断生命周期；背压丢弃只影响新鲜度。
+    """
+    cls = type(msg)
+    dst = cls()
+    ctypes.memmove(ctypes.addressof(dst), ctypes.addressof(msg), ctypes.sizeof(cls))
+    return dst
 
 
 def _entity(msg: VizMessage) -> str:
@@ -298,6 +315,8 @@ def _flush_sorted(buf: list) -> None:
 
 
 def main() -> None:
+    # native 段错误时打 Python 栈（`rerun` 底层是 Rust，裸 `SIGSEGV` 否则无信息）。
+    faulthandler.enable()
     args = _parse_args()
     if args.save and args.serve:
         sys.exit("[firefly-viz] --save 与 --serve 互斥，只能二选一")
@@ -322,13 +341,12 @@ def main() -> None:
             while (sample := viz_sub.receive()) is not None:
                 header = sample.user_header().contents
                 trace_id = f"{header.trace_id_hi:016x}{header.trace_id_lo:016x}"
-                if _enqueue(
-                    inbox,
-                    ("viz", float(sample.payload().contents.timestamp), (sample.payload().contents, trace_id)),
-                ):
+                # 深拷贝后进队（见 `detach_copy`：别名滞留即撕裂读/`SIGSEGV`）。
+                msg = detach_copy(sample.payload().contents)
+                if _enqueue(inbox, ("viz", float(msg.timestamp), (msg, trace_id))):
                     dropped += 1
             while (sample := log_sub.receive()) is not None:
-                msg = sample.payload().contents
+                msg = detach_copy(sample.payload().contents)
                 ts = float(msg.sim_time) if msg.sim_time >= 0 else float(msg.wall_secs) + float(msg.wall_nanos) * 1e-9
                 if _enqueue(inbox, ("log", ts, msg)):
                     dropped += 1
