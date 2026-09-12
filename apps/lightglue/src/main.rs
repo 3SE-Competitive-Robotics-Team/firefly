@@ -222,9 +222,18 @@ fn run_loop(session: &mut Session, map: &VisionMap) -> Result<(), firefly_error:
             return CallbackProgression::Continue;
         }
         // 特征时间戳即 sim 时钟；查询前后各 pump 一次（匹配阻塞下积压排空）。
+        // 查询耗时即管线滞后主项（ORT 推理，rrd 侧只能看到特征时间戳，
+        // 到达滞后由 gicp 融合/超期日志体现）。
         firefly_observability::set_sim_time(feat.timestamp);
         firefly_observability::pump_log_ipc(&log_ipc);
-        match query_once(session, map, &feat, &odom) {
+        let t_query = std::time::Instant::now();
+        let query_outcome = query_once(session, map, &feat, &odom);
+        log::debug!(
+            "视觉查询耗时 {:.2}s（特征 t={:.2}）",
+            t_query.elapsed().as_secs_f64(),
+            feat.timestamp
+        );
+        match query_outcome {
             Ok(Some(obs)) => {
                 if let Err(e) = obs_pub.publish(obs) {
                     log::warn!("位姿观测发布失败: {e}");
