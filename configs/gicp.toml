@@ -12,6 +12,7 @@ voxel_resolution = 1.0 # m，VGICP 体素（未启用时占位）
 process_noise_rot = 0.0000001 # rad²，单步过程噪声旋转（odom 100Hz：按秒等效 1e-5，与 10Hz 时 1e-6 同量级）
 process_noise_pos = 0.00001 # m²，单步过程噪声平移（odom 100Hz：按秒等效 1e-3）
 process_noise_pos_per_m = 0.04 # m²/m，里程过程噪声平移（覆盖 ~5%/m 系统性漂移@1σ；20m 后 P_std≈0.9m）
+p_min_pos = 0.25 # m²，P 平移下限（防 Joseph 收缩后真值 perpetual 拒收；覆盖 z≤1.8m 残差）
 fallback_noise_rot = 0.0019 # rad²，h 不可逆回退（2.5°）
 fallback_noise_pos = 0.04 # m²，h 不可逆回退（0.2m）
 chi2_multiplier = 1.0 # chi2 阈值乘子（取 1 即 chi2_95(6)=12.6 原教旨名义 5% 误拒率）
