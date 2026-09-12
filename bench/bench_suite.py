@@ -43,6 +43,8 @@ def main() -> None:
     ap.add_argument("--tag", type=str, default=None, help="filename tag prefix for outputs (A/B groups, e.g. baseline/slam/voxel)")
     ap.add_argument("--no-fleet", action="store_true", help="只起 sim+vio（旧语义；缺省起常态舰队并采 corrected 对照）")
     ap.add_argument("--with-planner", action="store_true", help="再起 planner（仅验证存活与接线）")
+    ap.add_argument("--gicp-map", type=Path, default=None, help="gicp 静态地图（缺省按轨迹查表）")
+    ap.add_argument("--vision-map", type=Path, default=None, help="lightglue 视觉库图（缺省按轨迹查表）")
     args = ap.parse_args()
 
     names = sorted(TRAJECTORIES)
@@ -70,6 +72,8 @@ def main() -> None:
                     trajectory=name,
                     with_fleet=not args.no_fleet,
                     with_planner=args.with_planner,
+                    gicp_map=args.gicp_map,
+                    vision_map=args.vision_map,
                 )
                 payload["turn"] = turn
                 results.append(payload)

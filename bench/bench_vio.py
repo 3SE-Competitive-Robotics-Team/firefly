@@ -50,7 +50,28 @@ LIGHTGLUE_BIN_DEBUG = REPO_ROOT / "target" / "debug" / "lightglue"
 PLANNER_BIN_RELEASE = REPO_ROOT / "target" / "release" / "planner"
 PLANNER_BIN_DEBUG = REPO_ROOT / "target" / "debug" / "planner"
 #: 视觉库图（`lightglue --map` 必需；相对仓库根，与离线建库产物一致）
+#: boxes 旧场景缺省；`wh_*` 轨迹由下表覆盖。
 VISION_MAP = REPO_ROOT / "apps" / "planner" / "maps" / "straight_forward.ffvmap"
+#: 轨迹→地图（gicp 静态图，lightglue 视觉库图）：场景与轨迹同源，
+#: 检索/重定位才有意义；未列出的轨迹沿用旧行为（gicp 无图降级、视觉用上值）。
+TRAJECTORY_MAPS: dict[str, tuple[Path | None, Path]] = {
+    "wh_corridor": (
+        REPO_ROOT / "apps" / "planner" / "maps" / "warehouse.ffmap",
+        REPO_ROOT / "apps" / "planner" / "maps" / "wh_corridor.ffvmap",
+    ),
+}
+
+
+def resolve_maps(
+    trajectory: str | None,
+    gicp_map: Path | str | None,
+    vision_map: Path | str | None,
+) -> tuple[Path | None, Path]:
+    """地图决议：显式参数 > 轨迹查表 > 旧缺省（gicp 无图降级/visual 用 boxes 库图）。"""
+    g, v = TRAJECTORY_MAPS.get(trajectory or "", (None, VISION_MAP))
+    g = Path(gicp_map) if gicp_map else g
+    v = Path(vision_map) if vision_map else v
+    return g, v
 UV_BIN = Path("/Users/flamingo/.local/bin/uv")
 if not UV_BIN.exists():
     UV_BIN = Path("uv")  # fallback to PATH
@@ -88,24 +109,54 @@ def ensure_vio_built(vio_bin: Path) -> Path:
     return VIO_BIN_RELEASE
 
 
+#: 清理匹配的进程模式（舰队＋sim＋可视化；`pkill -f` 全命令行匹配，
+#: bench 自身命令行不含这些子串，误杀不了自己）。
+CLEANUP_PATTERNS = [
+    "firefly-sim",
+    "firefly-viz",
+    "target/release/vio", "target/debug/vio",
+    "target/release/gicp", "target/debug/gicp",
+    "target/release/aliked", "target/debug/aliked",
+    "target/release/lightglue", "target/debug/lightglue",
+    "target/release/planner", "target/debug/planner",
+    "target/release/void", "target/debug/void",
+]
+
+
+def _live_pids() -> set[str]:
+    """当前存活的目标进程 PID 集合（显式列出，不数数——空列表才是干净）。"""
+    pids: set[str] = set()
+    for pat in CLEANUP_PATTERNS:
+        r = subprocess.run(["pgrep", "-f", pat], capture_output=True, text=True)
+        pids.update(r.stdout.split())
+    return pids
+
+
 def cleanup_iceoryx() -> None:
+    """全栈清理：SIGTERM → 轮询至零（幽灵发布端会污染话题/占槽位，
+    `sleep 1` 碰运气不够，ORT 进程退出常需数秒）→ 超时 SIGKILL → 再轮询 →
+    确认零残留后删 shm（删非空服务的 shm 等于制造幽灵，必须后删）。"""
+    for pat in CLEANUP_PATTERNS:
+        subprocess.run(["pkill", "-f", pat], capture_output=True)
+    for _ in range(30):
+        if not _live_pids():
+            break
+        time.sleep(1)
+    else:
+        for pid in _live_pids():
+            subprocess.run(["kill", "-9", pid], capture_output=True)
+        for _ in range(10):
+            if not _live_pids():
+                break
+            time.sleep(1)
+    survivors = _live_pids()
+    if survivors:
+        raise RuntimeError(f"iceoryx2 清理失败，残留进程：{sorted(survivors)}")
     # remove only iceoryx2 shm/services, not /tmp whole tree — and use repo-local cleanup
     for p in ["/tmp/iceoryx2", "/tmp/iceoryx2/services", "/tmp/iceoryx2/nodes"]:
         subprocess.run(["rm", "-rf", p], capture_output=True)
     # also clean stale shm files (macOS)
     subprocess.run(["bash", "-lc", "rm -rf /private/tmp/iox2*.shm_state 2>/dev/null; true"], capture_output=True)
-    # kill previous fleet (graceful SIGTERM)：5 进程常态 + void 对比 + planner
-    for pat in [
-        "firefly-sim",
-        "target/release/vio", "target/debug/vio",
-        "target/release/gicp", "target/debug/gicp",
-        "target/release/aliked", "target/debug/aliked",
-        "target/release/lightglue", "target/debug/lightglue",
-        "target/release/planner", "target/debug/planner",
-        "target/release/void", "target/debug/void",
-    ]:
-        subprocess.run(["pkill", "-f", pat], capture_output=True)
-    time.sleep(1)
 
 
 def start_service(cmd: list[str], log_path: Path, name: str, wait_s: float = 3.0) -> "subprocess.Popen":
@@ -129,30 +180,42 @@ def start_service(cmd: list[str], log_path: Path, name: str, wait_s: float = 3.0
     return proc
 
 
-def start_fleet(log_dir: Path) -> dict[str, "subprocess.Popen"]:
-    """常态 5 进程（vio/gicp/aliked/lightglue/planner）逐个起、逐个验活。
+def start_fleet(
+    log_dir: Path,
+    gicp_map: Path | None = None,
+    vision_map: Path | None = None,
+    with_planner: bool = True,
+) -> dict[str, "subprocess.Popen"]:
+    """常态舰队（gicp/aliked/lightglue/planner）逐个起、逐个验活（vio 除外）。
 
     ORT 模型加载慢（aliked/lightglue 约 10s），各自给足等待；返回进程表，
     调用方负责 terminate。vision 缺库图时 lightglue 起不来——直接报错，
-    不静默降级（5 进程是常态，缺一即 bench 无效）。
+    不静默降级（5 进程是常态，缺一即 bench 无效）。`gicp_map` 为空时不传
+    `--map`（沿用旧行为：旧场景缺省图或空图降级）。
     """
+    vision_map = vision_map or VISION_MAP
+    # 注意：vio 不在这里起（调用方 `run_bench` 自有 vio，全局唯一状态源；
+    # 双 vio 会向同一话题交错发布，采集混叠）。
     fleet: dict[str, "subprocess.Popen"] = {}
-    fleet["vio"] = start_service([str(find_bin("vio"))], log_dir / "vio.log", "vio")
-    fleet["gicp"] = start_service([str(find_bin("gicp"))], log_dir / "gicp.log", "gicp")
+    gicp_cmd = [str(find_bin("gicp"))]
+    if gicp_map is not None:
+        gicp_cmd += ["--map", str(gicp_map)]
+    fleet["gicp"] = start_service(gicp_cmd, log_dir / "gicp.log", "gicp")
     fleet["aliked"] = start_service(
         [str(find_bin("aliked"))], log_dir / "aliked.log", "aliked", wait_s=12.0
     )
-    if not VISION_MAP.is_file():
-        raise RuntimeError(f"视觉库图缺失：{VISION_MAP}（先跑离线建库，见 docs/how_to_run.md）")
+    if not vision_map.is_file():
+        raise RuntimeError(f"视觉库图缺失：{vision_map}（先跑离线建库，见 docs/how_to_run.md）")
     fleet["lightglue"] = start_service(
-        [str(find_bin("lightglue")), "--map", str(VISION_MAP)],
+        [str(find_bin("lightglue")), "--map", str(vision_map)],
         log_dir / "lightglue.log",
         "lightglue",
         wait_s=12.0,
     )
-    fleet["planner"] = start_service(
-        [str(find_bin("planner"))], log_dir / "planner.log", "planner"
-    )
+    if with_planner:
+        fleet["planner"] = start_service(
+            [str(find_bin("planner"))], log_dir / "planner.log", "planner"
+        )
     return fleet
 
 
@@ -267,6 +330,8 @@ def run_bench(
     *,
     with_fleet: bool = True,
     with_planner: bool = False,
+    gicp_map: Path | str | None = None,
+    vision_map: Path | str | None = None,
 ) -> dict:
     """单轮 bench：sim + vio 精度（GT vs odom）+ 可选常态舰队。
 
@@ -282,18 +347,20 @@ def run_bench(
     from firefly_mujoco.messages import ImuMessage, OdomMessage, TraceContext
 
     vio_bin = ensure_vio_built(find_vio_bin())
+    gicp_map_resolved, vision_map_resolved = resolve_maps(trajectory, gicp_map, vision_map)
     print(f"[bench] vio_bin={vio_bin} trajectory={trajectory or 'lissajous_classic'} fleet={with_fleet}")
+    print(f"[bench] maps: gicp={gicp_map_resolved} vision={vision_map_resolved}")
 
     cleanup_iceoryx()
     log_dir = REPO_ROOT / "logs" / "bench"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Rerun handling: per-run isolated rrd, never single shared file.
-    # - If save_dir is given, each turn saves to its own timestamped file there.
-    # - If save_dir is None and this is a single turn, reuse shared viewer (no file).
-    # - If save_dir is None but turns>1 (caller handles), bench caller will have
-    #   already set a per-turn save_dir; this function just honors what is passed.
-    viewer_proc = None
+    # 可视化统一写入：per-turn 独立 rrd，一律经 `firefly-viz`（`Firefly/Viz` +
+    # `Firefly/Log` 的唯一消费者；裸 `rerun --save` 收不到数据，落空文件）。
+    # firefly-viz 必须最先启动（先创建 `Firefly/Log` 服务定上限，见 runbook）。
+    # - save_dir 有值：每轮落各自时间戳文件（永不单文件）。
+    # - save_dir 为空（单轮）：不自起 viz（外部共享 viewer 模式，无文件）。
+    viz_proc = None
     rrd_path = None
     if save_dir is not None:
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -303,29 +370,44 @@ def run_bench(
         # Use output stem to make rrd name traceable to turn
         turn_hint = output.stem  # e.g. turn_01
         rrd_path = save_dir / f"{turn_hint}_{int(duration)}s_{ts}.rrd"
-        print(f"[bench] per-run rrd -> {rrd_path} (dedicated viewer, isolated per turn)")
-        # Kill any stale viewer that would otherwise capture data into single stream
-        # (bench turns must not share a viewer that writes to one file)
-        for pat in ["rerun", "Rerun"]:
-            subprocess.run(["pkill", "-f", pat], capture_output=True)
-        # ensure port freed
-        time.sleep(1.5)
-        # also clean iceoryx2 viewer shm
-        subprocess.run(["bash", "-lc", "rm -rf /tmp/iceoryx2 2>/dev/null; true"], capture_output=True)
-        viewer_proc = subprocess.Popen(
-            ["rerun", "--save", str(rrd_path)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        print(f"[bench] per-run rrd -> {rrd_path} (dedicated firefly-viz, isolated per turn)")
+        # 本轮清理已在入口 `cleanup_iceoryx` 做完（轮询至零＋删 shm），此处不重复
+        # 杀/删（删 shm 只允许在零残留后做一次）。
+        viz_log = log_dir / "viz.log"
+        viz_proc = subprocess.Popen(
+            [str(UV_BIN), "run", "firefly-viz", "--save", str(rrd_path)],
+            cwd=REPO_ROOT,
+            stdout=open(viz_log, "w"),
+            stderr=subprocess.STDOUT,
         )
-        time.sleep(3)  # let viewer bind 9876
-        if viewer_proc.poll() is not None:
-            print(f"[bench] viewer failed to start, continuing with existing/shared viewer", file=sys.stderr)
-            viewer_proc = None
+        time.sleep(4)  # viz 建服务 + 订阅就绪（Rust 发布端只 open，先起方定上限）
+        if viz_proc.poll() is not None:
+            print(open(viz_log).read()[-2000:], file=sys.stderr)
+            print("[bench] firefly-viz failed to start, continuing without rrd", file=sys.stderr)
+            viz_proc = None
             rrd_path = None
     else:
-        print("[bench] rerun viewer: shared (no file) — single-turn mode")
+        print("[bench] no firefly-viz (no file) — single-turn mode without rrd")
 
-    # start sim headless (--no-trace disables OTel, 1x realtime)
+    # 启动顺序（采集窗口从任务 0 开始的关键）：viz → vio → fleet → sim。
+    # sim 最后起：任务时钟在 vio ready 后才走，fleet（尤其 ORT 的 ~24s 加载）
+    # 在任务开始前全部就绪——旧顺序（sim 最先）下采集从任务 ~35s 才开始，
+    # 去程永远测不到。各进程无输入时空转等待（vio GT 等待 120s 内，sim 未起
+    # 即无数据），顺序反转无死锁。
+    # VIO_CONFIG env overrides --config (A/B experiment configs, e.g. logs/bench/voxel.toml)
+    vio_cmd = [str(vio_bin)]
+    vio_config = os.environ.get("VIO_CONFIG")
+    if vio_config:
+        vio_cmd += ["--config", vio_config]
+    vio_proc = start_service(vio_cmd, log_dir / "vio.log", "vio")
+    log_vio = REPO_ROOT / "logs" / "bench" / "vio.log"
+
+    # 常态舰队（vio 之后、sim 之前起：只消费不阻塞，sim 互锁 latch 的是 vio ready）。
+    fleet: dict[str, "subprocess.Popen"] = {}
+    if with_fleet:
+        fleet = start_fleet(log_dir, gicp_map_resolved, vision_map_resolved, with_planner)
+
+    # sim 最后起（headless，--no-trace 关 OTel，1x realtime）。
     env = os.environ.copy()
     # ensure clean PYTHONPATH for uv run; --script [NAME] selects trajectory instance
     sim_cmd = [str(UV_BIN), "run", "firefly-sim", "--script"]
@@ -380,35 +462,6 @@ def run_bench(
     if sim_proc.poll() is not None:
         print(open(log_sim).read()[-4000:], file=sys.stderr)
         raise RuntimeError("sim died after wait")
-
-    # VIO_CONFIG env overrides --config (A/B experiment configs, e.g. logs/bench/voxel.toml)
-    vio_cmd = [str(vio_bin)]
-    vio_config = os.environ.get("VIO_CONFIG")
-    if vio_config:
-        vio_cmd += ["--config", vio_config]
-    vio_proc = start_service(vio_cmd, log_dir / "vio.log", "vio")
-    log_vio = REPO_ROOT / "logs" / "bench" / "vio.log"
-
-    # 常态舰队（5 进程其余三位 + 可选 planner）：vio 之后起，sim 互锁 latch
-    # 的是 vio ready，舰队只消费不阻塞启动。
-    fleet: dict[str, "subprocess.Popen"] = {}
-    if with_fleet:
-        fleet["gicp"] = start_service([str(find_bin("gicp"))], log_dir / "gicp.log", "gicp")
-        fleet["aliked"] = start_service(
-            [str(find_bin("aliked"))], log_dir / "aliked.log", "aliked", wait_s=12.0
-        )
-        if not VISION_MAP.is_file():
-            raise RuntimeError(f"视觉库图缺失：{VISION_MAP}（先跑离线建库，见 docs/how_to_run.md）")
-        fleet["lightglue"] = start_service(
-            [str(find_bin("lightglue")), "--map", str(VISION_MAP)],
-            log_dir / "lightglue.log",
-            "lightglue",
-            wait_s=12.0,
-        )
-        if with_planner:
-            fleet["planner"] = start_service(
-                [str(find_bin("planner"))], log_dir / "planner.log", "planner"
-            )
 
     # subscribers AFTER vio creates Odometry topic（fleet 就绪后建，双采集）
     node2 = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
@@ -478,18 +531,18 @@ def run_bench(
                 p.wait(timeout=2)
             except Exception:
                 pass
-    if viewer_proc is not None:
+    if viz_proc is not None:
         try:
-            viewer_proc.terminate()
-            viewer_proc.wait(timeout=5)
+            viz_proc.terminate()
+            viz_proc.wait(timeout=5)
         except Exception:
             try:
-                viewer_proc.kill()
-                viewer_proc.wait(timeout=2)
+                viz_proc.kill()
+                viz_proc.wait(timeout=2)
             except Exception:
                 pass
-        # force kill any remaining rerun (avoid single-rrd mixing)
-        for pat in ["rerun", "Rerun"]:
+        # force kill any remaining viz/viewer (avoid single-rrd mixing)
+        for pat in ["firefly-viz", "rerun", "Rerun"]:
             subprocess.run(["pkill", "-9", "-f", pat], capture_output=True)
         time.sleep(0.5)
 
@@ -542,7 +595,13 @@ def run_bench(
         "metrics": metrics,
         "corrected_metrics": corrected_metrics,
         "fleet": with_fleet,
-        "logs": {"sim": str(log_sim), "vio": str(log_vio), "rrd": str(save_dir) if save_dir else None},
+        "gicp_map": str(gicp_map_resolved) if gicp_map_resolved else None,
+        "vision_map": str(vision_map_resolved),
+        "logs": {
+            "sim": str(log_sim),
+            "vio": str(log_vio),
+            "rrd": str(rrd_path) if rrd_path else None,
+        },
     }
     with open(output, "w") as f:
         json.dump(payload, f, indent=2)
@@ -562,6 +621,8 @@ def main():
     ap.add_argument("--trajectory", type=str, default=None, help="trajectory instance name (see firefly_sim.trajectories.TRAJECTORIES; default lissajous_classic)")
     ap.add_argument("--no-fleet", action="store_true", help="只起 sim+vio（旧语义；缺省起常态舰队 gicp/aliked/lightglue 并采 corrected 对照）")
     ap.add_argument("--with-planner", action="store_true", help="再起 planner（仅验证存活与接线；--script 模式下 sim 忽略外部参考）")
+    ap.add_argument("--gicp-map", type=Path, default=None, help="gicp 静态地图（缺省按轨迹查表；boxes 旧行为=不传，降级）")
+    ap.add_argument("--vision-map", type=Path, default=None, help="lightglue 视觉库图（缺省按轨迹查表；旧缺省 straight_forward 库图）")
     args = ap.parse_args()
     try:
         if args.turns <= 1:
@@ -572,6 +633,8 @@ def main():
                 trajectory=args.trajectory,
                 with_fleet=not args.no_fleet,
                 with_planner=args.with_planner,
+                gicp_map=args.gicp_map,
+                vision_map=args.vision_map,
             )
         else:
             turns = int(args.turns)
@@ -605,6 +668,8 @@ def main():
                     trajectory=args.trajectory,
                     with_fleet=not args.no_fleet,
                     with_planner=args.with_planner,
+                    gicp_map=args.gicp_map,
+                    vision_map=args.vision_map,
                 )
                 results.append(payload)
                 time.sleep(1)
