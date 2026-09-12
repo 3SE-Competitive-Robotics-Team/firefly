@@ -39,6 +39,11 @@ pub struct Subscriber<T: Debug + ZeroCopySend + 'static> {
 }
 
 impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
+    /// 由已建好的订阅器句柄封装（服务级上限需自定义时调用方自建服务，见 `imu`）。
+    pub(crate) fn from_inner(subscriber: Iox2Subscriber<ipc::Service, T, TraceContext>) -> Self {
+        Self { subscriber }
+    }
+
     /// 以进程共享节点 + 自定义话题名打开订阅器。
     ///
     /// `buffer_size` 控制 iceoryx2 内部环形缓冲区深度：
