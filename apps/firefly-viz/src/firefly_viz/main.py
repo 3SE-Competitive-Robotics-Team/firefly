@@ -18,10 +18,12 @@ from __future__ import annotations
 import argparse
 import ctypes
 import faulthandler
+import os
 import queue
 import sys
 import threading
 import time
+from pathlib import Path
 
 import iceoryx2 as iox2
 import numpy as np
@@ -115,8 +117,51 @@ def _send_default_blueprint() -> None:
             )
         ],
     )
-    rr.send_blueprint(rr.blueprint.Blueprint(scene))
-    log("已发送默认布局（场景 3D，sim_time 全历史可见范围）")
+    # 时间面板锁定 `sim_time`（全链路统一时钟；不限则 viewer 默认落到
+    # `log_time`，轨迹实体不可见）+ 游标跟随最新（回放直接看到整条轨迹）。
+    time_panel = rr.blueprint.TimePanel(
+        timeline="sim_time",
+        play_state=rr.blueprint.components.PlayState.Following,
+    )
+    rr.send_blueprint(rr.blueprint.Blueprint(scene, time_panel))
+    log("已发送默认布局（场景 3D，sim_time 全历史可见范围，时间面板锁定 sim_time）")
+
+
+#: 静态场景 mesh 实体（世界系，与仿真同原点同单位，见下）。
+ENTITY_WAREHOUSE_MESH = "world/warehouse"
+
+
+def _repo_root() -> Path:
+    """仓库根（`firefly_mujoco` 包位置反推，与启动 CWD 无关）。
+
+    `__init__.py` 的五级父目录：包 → `src` → 包发行目录 → `packages` → 根。
+    """
+    import firefly_mujoco
+
+    return Path(firefly_mujoco.__file__).resolve().parent.parent.parent.parent.parent
+
+
+def _log_static_mesh() -> None:
+    """静态场景 mesh（`world/warehouse`，`Asset3D` 一次性，无时间轴）。
+
+    场景选择与 `sim` 同源（`FIREFLY_SCENE`，缺省 `warehouse`）；只有对应场景
+    的 mesh 文件存在才记（boxes 等程序化场景无 mesh 文件，自然跳过——
+    绝不在错误的场景上叠别家的房子）。坐标系：`structure.obj` 即世界系
+    （米，与仿真同原点，x∈[0,46]、y∈[-8,8]、z∈[0,5]），直接落盘不做变换。
+    """
+    if os.environ.get("FIREFLY_SCENE", "warehouse") != "warehouse":
+        log("非 warehouse 场景，不记静态 mesh")
+        return
+    mesh_path = Path(
+        os.environ.get(
+            "FIREFLY_MESH", str(_repo_root() / "models" / "warehouse" / "structure.obj")
+        )
+    )
+    if not mesh_path.is_file():
+        log(f"静态 mesh 缺失（{mesh_path}），跳过")
+        return
+    rr.log(ENTITY_WAREHOUSE_MESH, rr.Asset3D(path=mesh_path), static=True)
+    log(f"已记静态场景 mesh（{ENTITY_WAREHOUSE_MESH}，{mesh_path.stat().st_size // 1024}KB）")
 
 
 def detach_copy(msg):
@@ -323,6 +368,7 @@ def main() -> None:
     iox2.set_log_level(iox2.LogLevel.Error)
     _open_recording(args)
     _send_default_blueprint()
+    _log_static_mesh()
     node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
     viz_sub = _subscribe(node, TOPIC_VIZ, VizMessage)
     # `Firefly/Log` 服务必须由本进程先创建（`max_publishers=10`，7 进程同话题
