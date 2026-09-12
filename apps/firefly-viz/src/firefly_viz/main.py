@@ -287,6 +287,12 @@ def _log_text(msg: LogMessage) -> None:
     rr.log(f"logs/{tag}", rr.TextLog(text, level=level))
 
 
+#: 可视化话题发布端上限（发布端 = vio + gicp + planner 三家；iceoryx2 缺省
+#: 上限仅 2，第三家 `open` 必 `ExceedsMaxSupportedPublishers` 静默降级——
+#: 本进程先创建服务定上限，Rust 发布端只 open，见 `_subscribe`）。
+VIZ_MAX_PUBLISHERS = 8
+
+
 def _subscribe(node, topic: str, payload_cls, buffer_size: int = VIZ_BUFFER_SIZE):
     builder = (
         node.service_builder(iox2.ServiceName.new(topic))
@@ -295,8 +301,23 @@ def _subscribe(node, topic: str, payload_cls, buffer_size: int = VIZ_BUFFER_SIZE
     )
     if topic == TOPIC_VIZ:
         # 高频突发话题：与 Rust 发布端一致（先启动方创建服务，
-        # 谁创建都要给出 256 上限，订阅端 buffer_size 才能匹配）
+        # 谁创建都要给出 256 上限，订阅端 buffer_size 才能匹配）；
+        # 发布端上限同步声明（见 `VIZ_MAX_PUBLISHERS`）。
         builder = builder.subscriber_max_buffer_size(VIZ_BUFFER_SIZE)
+        try:
+            service = builder.max_publishers(VIZ_MAX_PUBLISHERS).open_or_create()
+        except Exception:
+            # 服务已被他方先建（上限非预期）：重建 builder 降级加入，不炸启动
+            #（上限不足时后到的发布端会降级，见各进程 `可视化发布不可用` warn）。
+            log("Firefly/Viz 服务已存在，降级加入（发布端上限非预期）")
+            service = (
+                node.service_builder(iox2.ServiceName.new(topic))
+                .publish_subscribe(payload_cls)
+                .user_header(TraceContext)
+                .subscriber_max_buffer_size(VIZ_BUFFER_SIZE)
+                .open_or_create()
+            )
+        return service.subscriber_builder().buffer_size(buffer_size).create()
     service = builder.open_or_create()
     return service.subscriber_builder().buffer_size(buffer_size).create()
 
