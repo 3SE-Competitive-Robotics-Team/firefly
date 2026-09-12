@@ -45,8 +45,11 @@ const ODOM_FRESH_TIMEOUT: f64 = 1.0;
 /// 视觉观测待融合队列上限（条）：观测先到、odom 后到时暂存，按 `timestamp`
 /// 排序，odom 追上即融合；溢出时丢最旧（对端断流的背压语义，非延时等待）。
 const PENDING_VISUAL_CAP: usize = 8;
-/// 待融合观测超期（秒）：相对 `t_sim` 过期即丢弃（对端断流时不无限囤积）。
-const PENDING_VISUAL_TIMEOUT: f64 = 2.0;
+/// 待融合观测超期（秒）：相对 `t_sim` 过期即丢弃（对端断流时不无限囤积；
+/// 取 5s 覆盖 ORT CPU 推理 p99 滞后，过期丢弃打 info（稀少，丢一条少一次修正）。
+const PENDING_VISUAL_TIMEOUT: f64 = 5.0;
+/// odom 内插窗口（条）：100Hz 下约 6s，与超期对齐（窗口外无法内插，留了也白留）。
+const ODOM_HIST_CAP: usize = 600;
 
 /// 命令行参数。
 struct Args {
@@ -221,7 +224,8 @@ struct App {
     /// 视觉位姿观测订阅（`lightglue` 进程发布，同一 `FusionFilter` 融合）。
     visual_obs: Option<Subscriber<PoseObservation>>,
     /// odom 环形历史（时间戳，消息）：按观测时间戳插值位姿，消除
-    /// 最新配对 ~0.1s 失配（1.5m/s 下 15cm 系统性错位）；256 深容忍低速 odom。
+    /// 最新配对 ~0.1s 失配（1.5m/s 下 15cm 系统性错位）；`ODOM_HIST_CAP` 深
+    /// 容忍低速 odom 与视觉滞后内插。
     odom_hist: std::collections::VecDeque<(f64, OdomMessage)>,
     /// 待融合视觉观测（按 `timestamp` 排序）：观测先到、odom 后到时暂存，
     /// odom 追上即融合——事件驱动的订阅关系，无延时等待。
@@ -310,7 +314,7 @@ impl App {
             corr_prev: None,
             latest_odom: None,
             latest_depth: None,
-            odom_hist: std::collections::VecDeque::with_capacity(256),
+            odom_hist: std::collections::VecDeque::with_capacity(ODOM_HIST_CAP),
             pending_visual: std::collections::VecDeque::with_capacity(PENDING_VISUAL_CAP),
             last_odom_recv: f64::NEG_INFINITY,
             depth_cam: DepthCamera::mujoco_default(),
@@ -333,7 +337,7 @@ impl App {
                 self.fusion.predict(&t_vio);
                 self.latest_odom = Some(m);
                 self.odom_hist.push_back((m.timestamp, m));
-                while self.odom_hist.len() > 256 {
+                while self.odom_hist.len() > ODOM_HIST_CAP {
                     self.odom_hist.pop_front();
                 }
                 odom_arrived = true;
@@ -389,12 +393,21 @@ impl App {
         while let Some(ts) = self.pending_visual.front().map(|o| o.timestamp) {
             if self.t_sim - ts > PENDING_VISUAL_TIMEOUT {
                 self.pending_visual.pop_front();
+                log::info!(
+                    "视觉观测超期丢弃（ts={ts:.2}，滞后 {:.2}s，少一次修正）",
+                    self.t_sim - ts
+                );
                 continue;
             }
             if interp_odom(&self.odom_hist, ts).is_none() {
                 break;
             }
             let obs = self.pending_visual.pop_front().expect("front checked");
+            log::debug!(
+                "视觉融合（ts={:.2}，管线滞后 {:.2}s）",
+                obs.timestamp,
+                self.t_sim - obs.timestamp
+            );
             self.fuse_visual(&obs);
         }
     }
