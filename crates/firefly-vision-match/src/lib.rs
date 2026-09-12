@@ -4,7 +4,7 @@
 pub mod calibration;
 
 use firefly_error::{Error, ErrorKind};
-use nalgebra::{Isometry3, Matrix4, Matrix6, Translation3, Unit, UnitQuaternion, Vector3};
+use nalgebra::{Isometry3, Matrix3, Matrix4, Matrix6, Translation3, Unit, UnitQuaternion, Vector3};
 use purecv::prelude::{Matrix, Point2f, Point3f, SolvePnPMethod, solve_pnp_ransac};
 
 /// 相机内参（针孔、无畸变；与仿真/标定一致）。
@@ -48,19 +48,6 @@ fn axis_flip() -> Matrix4<f64> {
 /// `prior` 为 VIO 先验位姿（作初值用，无则传 `None`）；对应数 `< 6` 时返回
 /// `InvalidArgument`（`purecv` 下限）；`RANSAC` 无足够内点时返回 `Ok(None)`
 /// （调用方按拒收处理，与 `FusionFilter` 门控语义一致）。
-/// 由位姿矩阵取旋转向量（`purecv` 初值用）。
-fn matrix_to_rvec(t: &Matrix4<f64>) -> [f64; 3] {
-    let iso = Isometry3::from_parts(
-        Translation3::new(t[(0, 3)], t[(1, 3)], t[(2, 3)]),
-        UnitQuaternion::from_matrix(&t.fixed_view::<3, 3>(0, 0).into_owned()),
-    );
-    let (axis, angle) = iso
-        .rotation
-        .axis_angle()
-        .map_or_else(|| (Vector3::x(), 0.0), |(a, an)| (a.into_inner(), an));
-    [axis.x * angle, axis.y * angle, axis.z * angle]
-}
-
 /// 旋转向量 + 平移组装位姿矩阵。
 fn vecs_to_isometry(rvec: [f64; 3], tvec: [f64; 3]) -> Isometry3<f64> {
     let axis = Vector3::new(rvec[0], rvec[1], rvec[2]);
@@ -96,16 +83,27 @@ fn reproj_error(
     Some((du * du + dv * dv).sqrt())
 }
 
+/// 先验几何门：PnP 解与先验差 `PRIOR_MAX_TRANS` / `PRIOR_MAX_ROT` 以上即拒收。
+/// 平移阈值取库图查询半径（解落在检索球外即自相矛盾）；旋转阈值远大于
+/// `VIO` 短时漂移、远小于 `PnP` 翻转二义性的 `~90°+`。
+pub const PRIOR_MAX_TRANS: f64 = 3.0;
+/// 先验几何门旋转阈值（弧度，15°）。
+pub const PRIOR_MAX_ROT: f64 = 15.0 * std::f64::consts::PI / 180.0;
+
 /// 由 2D（当前图像素）-3D（库图全局）对应解全局位姿。
 ///
-/// `prior` 为 VIO 先验位姿：当前用于调用方的库图短名单与最终精化初值
-/// （`purecv` 的 `ransac` 尚不支持初值，精化段见 [`refine_with_inliers`]）。
+/// `prior` 为 VIO 先验位姿（相机系，与返回的 `t_global` 同系）：RANSAC 解算后
+/// 与先验做几何一致性校验（对照 VINS-Fusion `KeyFrame::findConnection` 尾段
+/// `abs(relative_yaw) < 30° && relative_t.norm() < 20m` 才接受 loop 边——本链
+/// 是连续跟踪，先验可信度高于检环，故阈值更紧）。无先验（`None`）时不校验。
 /// 对应数 `< 6` 时拒绝。
 ///
 /// # Errors
 ///
 /// 对应数不一致/不足（`< 6`）时返回 `InvalidArgument`；`purecv` 内部失败时
-/// 返回 `Internal`。`RANSAC` 无足够内点属正常拒收，返回 `Ok(None)`（调用方
+/// 返回 `Internal`。
+///
+/// `RANSAC` 无足够内点、先验几何门未通过属正常拒收，返回 `Ok(None)`（调用方
 /// 按拒收处理，与 `FusionFilter` 门控语义一致）。
 pub fn solve_visual_pose(
     points_2d: &[[f32; 2]],
@@ -135,62 +133,98 @@ pub fn solve_visual_pose(
         .collect();
     let image: Vec<Point2f> = points_2d.iter().map(|p| Point2f::new(p[0], p[1])).collect();
     let cam = camera_matrix(intrinsics);
-    let mut rvec = Matrix::new(3, 1, 1);
-    let mut tvec = Matrix::new(3, 1, 1);
-    // `purecv` 的 `ransac` 尚不支持初值（`NotImplemented`）：初值仅在最终
-    // 精化段使用（见下）；此处先验先填入矩阵备用。
-    if let Some(t) = prior {
-        for (idx, val) in matrix_to_rvec(&t).iter().enumerate() {
-            rvec.set(idx, 0, 0, *val);
-        }
-        for (idx, val) in [t[(0, 3)], t[(1, 3)], t[(2, 3)]].iter().enumerate() {
-            tvec.set(idx, 0, 0, *val);
+    // 主路：全集 RANSAC＋精化。无先验不校验、有先验过门即发布（原行为）。
+    if let Some((t_global, inliers)) = ransac_pose(&object, &image, &cam)? {
+        let prior_ok = prior
+            .as_ref()
+            .is_none_or(|t_prior| passes_prior_gate(&t_global, t_prior));
+        if prior_ok {
+            let mean_reproj_px =
+                mean_reprojection(points_2d, points_3d, &inliers, intrinsics, &t_global);
+            return Ok(Some(VisualPose {
+                t_global,
+                num_inliers: inliers.len(),
+                total: points_2d.len(),
+                mean_reproj_px,
+            }));
         }
     }
-    let mut inliers: Vec<i32> = Vec::new();
-    let ok = solve_pnp_ransac(
-        &object,
-        &image,
-        &cam,
-        None,
-        &mut rvec,
-        &mut tvec,
-        false,
-        100,
-        8.0,
-        0.99,
-        Some(&mut inliers),
-        SolvePnPMethod::Iterative,
-    )
-    .map_err(|e| Error::new(ErrorKind::Internal, format!("PnP 求解失败: {e:?}")))?;
-    if !ok || inliers.is_empty() {
+    // 恢复路：主路未发布（门拒收或 RANSAC 无共识）且先验存在 → 先验子集重解：
+    // 先验投影误差宽松筛选（`PRIOR_SUBSET_PX`）后子集上再跑 RANSAC＋精化。
+    // 走廊混叠下全集共识常锁翻转解；子集提高真值占比后 RANSAC 有机会命中
+    // 真值 basin。失败即回落 `None`（fail-closed，原行为）。严格增量：主路
+    // 能过则绝不走到这里，已发布行为零变化。
+    let Some(t_prior) = prior else {
+        return Ok(None);
+    };
+    // 先验（camera→world，`-Z`）→ OCV（world→camera，`+Z`）（与
+    // `mean_reprojection` 内桥同式：`ocv = flip · prior⁻¹`，注意不可交换
+    // 左右乘顺序）。
+    let flip = axis_flip();
+    let Some(prior_inv) = t_prior.try_inverse() else {
+        return Ok(None);
+    };
+    let ocv_prior = flip * prior_inv;
+    let r_p = ocv_prior.fixed_view::<3, 3>(0, 0).into_owned();
+    let t_p = ocv_prior.fixed_view::<3, 1>(0, 3).into_owned();
+    // 子集数组与内点索引同系（`mean_reprojection` 按索引取点，错系即错数）。
+    let mut sub_3d: Vec<[f64; 3]> = Vec::new();
+    let mut sub_2d: Vec<[f32; 2]> = Vec::new();
+    for (p3, p2) in points_3d.iter().zip(points_2d.iter()) {
+        let Some((u, v)) = project_ocv(&r_p, &t_p, p3, intrinsics) else {
+            continue;
+        };
+        let du = u - f64::from(p2[0]);
+        let dv = v - f64::from(p2[1]);
+        if (du * du + dv * dv).sqrt() <= PRIOR_SUBSET_PX {
+            sub_3d.push(*p3);
+            sub_2d.push(*p2);
+        }
+    }
+    log::debug!("先验子集重解（子集 {}/{})", sub_3d.len(), points_2d.len());
+    // 子集与全集相同 → 确定性 RANSAC 重跑结果相同，跳过。
+    if sub_3d.len() == points_2d.len() || sub_3d.len() < SUBSET_MIN_PAIRS {
         return Ok(None);
     }
-    if let Some((r_ref, t_ref)) = refine_with_inliers(&object, &image, &cam, &inliers) {
-        rvec = r_ref;
-        tvec = t_ref;
+    let sub_obj: Vec<Point3f> = sub_3d
+        .iter()
+        .map(|p| Point3f::new(p[0] as f32, p[1] as f32, p[2] as f32))
+        .collect();
+    let sub_img: Vec<Point2f> = sub_2d.iter().map(|p| Point2f::new(p[0], p[1])).collect();
+    let Some((t_global_b, inliers_b)) = ransac_pose(&sub_obj, &sub_img, &cam)? else {
+        return Ok(None);
+    };
+    if !passes_prior_gate(&t_global_b, &t_prior) {
+        return Ok(None);
     }
-    let rot = [
-        rvec.at(0, 0, 0).copied().unwrap_or(0.0),
-        rvec.at(1, 0, 0).copied().unwrap_or(0.0),
-        rvec.at(2, 0, 0).copied().unwrap_or(0.0),
-    ];
-    let trans = [
-        tvec.at(0, 0, 0).copied().unwrap_or(0.0),
-        tvec.at(1, 0, 0).copied().unwrap_or(0.0),
-        tvec.at(2, 0, 0).copied().unwrap_or(0.0),
-    ];
-    let iso_cam_from_world = vecs_to_isometry(rot, trans);
-    // purecv/OpenCV 惯例：(rvec, tvec) 为 world→camera（X_cam = R·X_world + t，
-    // +Z 朝向），全局位姿需先求逆再右乘桥。
-    let t_global = iso_cam_from_world.inverse().to_homogeneous() * axis_flip();
-    let mean_reproj_px = mean_reprojection(points_2d, points_3d, &inliers, intrinsics, &t_global);
+    let mean_reproj_px = mean_reprojection(&sub_2d, &sub_3d, &inliers_b, intrinsics, &t_global_b);
+    log::debug!(
+        "先验子集恢复发布（内点 {}/{})",
+        inliers_b.len(),
+        points_2d.len()
+    );
     Ok(Some(VisualPose {
-        t_global,
-        num_inliers: inliers.len(),
+        t_global: t_global_b,
+        num_inliers: inliers_b.len(),
         total: points_2d.len(),
         mean_reproj_px,
     }))
+}
+
+/// 先验几何门：解与先验的平移差与旋转差是否在限内（两系同为 camera→world）。
+fn passes_prior_gate(t_global: &Matrix4<f64>, t_prior: &Matrix4<f64>) -> bool {
+    let dt = (t_global.fixed_view::<3, 1>(0, 3) - t_prior.fixed_view::<3, 1>(0, 3)).norm();
+    let r_rel = t_global.fixed_view::<3, 3>(0, 0).into_owned().transpose()
+        * t_prior.fixed_view::<3, 3>(0, 0).into_owned();
+    let cos_a = ((r_rel.trace() - 1.0) / 2.0).clamp(-1.0, 1.0);
+    let angle = cos_a.acos();
+    let pass = dt <= PRIOR_MAX_TRANS && angle <= PRIOR_MAX_ROT;
+    log::debug!(
+        "先验几何门 dt={dt:.2}m rot={:.1}°（限 3.0m/15°）{}",
+        angle.to_degrees(),
+        if pass { "通过" } else { "拒收" }
+    );
+    pass
 }
 
 /// 由内参组装 `3×3` 相机矩阵。
@@ -250,8 +284,93 @@ fn refine_with_inliers(
     Some((rvec_ref, tvec_ref))
 }
 
+/// 先验播种精化调参（与 `RANSAC` 同口径，见 `solve_pnp_ransac` 调用处）。
+/// `Huber` 拐点：真值内点亚像素、混叠外点数十像素以上，`2px` 分得开。
+/// 先验子集筛选半径（像素）：覆盖米级先验误差在 5m+ 深度的投影（`~35px`）
+/// 并留裕量；混叠外点在此半径外，被子集排除后 `RANSAC` 有机会命中真值。
+/// 子集与全集相同时跳过重试（`RANSAC` 确定性种子，重跑结果相同）。
+const PRIOR_SUBSET_PX: f64 = 64.0;
+/// 子集最小对应数（低于此数 `RANSAC` 无共识 odds，直接回落）。
+const SUBSET_MIN_PAIRS: usize = 12;
+
+/// OCV 针孔投影（`+Z` 朝向，无畸变，与 `purecv` 同假设）：返回像素与相机系坐标。
+fn project_ocv(
+    r: &Matrix3<f64>,
+    t: &Vector3<f64>,
+    p: &[f64; 3],
+    intr: CameraIntrinsics,
+) -> Option<(f64, f64)> {
+    let c = r * Vector3::new(p[0], p[1], p[2]) + t;
+    // 非有限与近零深度都不可投影（`NaN <= x` 为假，须显式判非有限）。
+    if !c.z.is_finite() || c.z <= 1e-9 {
+        return None;
+    }
+    Some((
+        intr.focal * c.x / c.z + intr.cx,
+        intr.focal * c.y / c.z + intr.cy,
+    ))
+}
+
+/// RANSAC＋精化＋成位姿（无门）：`RANSAC` 共识 → 全量内点精化 →
+/// `t_global`（camera→world，`-Z`）。无共识返回空；调用方做门与发布。
+/// （`purecv` 的 `RANSAC` 定种子，同输入同输出，子集与全集相同时禁止重试。）
+/// （返回类型复杂是领域常态，本文件 `match_frame` 处同惯例。）
+#[allow(clippy::type_complexity)]
+fn ransac_pose(
+    object: &[Point3f],
+    image: &[Point2f],
+    cam: &Matrix<f64>,
+) -> Result<Option<(Matrix4<f64>, Vec<i32>)>, Error> {
+    let mut rvec = Matrix::new(3, 1, 1);
+    let mut tvec = Matrix::new(3, 1, 1);
+    let mut inliers: Vec<i32> = Vec::new();
+    let ok = solve_pnp_ransac(
+        object,
+        image,
+        cam,
+        None,
+        &mut rvec,
+        &mut tvec,
+        false,
+        100,
+        8.0,
+        0.99,
+        Some(&mut inliers),
+        SolvePnPMethod::Iterative,
+    )
+    .map_err(|e| Error::new(ErrorKind::Internal, format!("PnP 求解失败: {e:?}")))?;
+    if !ok || inliers.is_empty() {
+        log::debug!(
+            "PnP 无共识（ok={ok} 内点 {}/{} 对应）",
+            inliers.len(),
+            object.len()
+        );
+        return Ok(None);
+    }
+    if let Some((r_ref, t_ref)) = refine_with_inliers(object, image, cam, &inliers) {
+        rvec = r_ref;
+        tvec = t_ref;
+    }
+    let rot = [
+        rvec.at(0, 0, 0).copied().unwrap_or(0.0),
+        rvec.at(1, 0, 0).copied().unwrap_or(0.0),
+        rvec.at(2, 0, 0).copied().unwrap_or(0.0),
+    ];
+    let trans = [
+        tvec.at(0, 0, 0).copied().unwrap_or(0.0),
+        tvec.at(1, 0, 0).copied().unwrap_or(0.0),
+        tvec.at(2, 0, 0).copied().unwrap_or(0.0),
+    ];
+    let iso_cam_from_world = vecs_to_isometry(rot, trans);
+    // purecv/OpenCV 惯例：(rvec, tvec) 为 world→camera（X_cam = R·X_world + t，
+    // +Z 朝向），全局位姿需先求逆再右乘桥。
+    Ok(Some((
+        iso_cam_from_world.inverse().to_homogeneous() * axis_flip(),
+        inliers,
+    )))
+}
+
 /// 协方差（对角 6×6，`[rot, trans]`）：由内点数与平均重投影误差经验映射，
-/// 后续用离线数据标定（与 `FusionFilter` 的 `r_floor` 思路一致）。
 #[must_use]
 pub fn pose_covariance(pose: &VisualPose) -> Matrix6<f64> {
     let n = pose.num_inliers.max(1) as f64;
@@ -404,5 +523,178 @@ mod tests {
             (t_body.fixed_view::<3, 3>(0, 0) - t_body_truth.fixed_view::<3, 3>(0, 0)).norm();
         assert!(dt < 0.1, "trans err {dt}");
         assert!(r_err < 0.05, "rot err {r_err}");
+    }
+
+    /// 先验几何门：近先验解通过，公里级野值拒收（无先验时不校验）。
+    ///
+    /// 直接构造门输入（`t_global`/`t_prior` 同为 camera→world）：几何门是纯矩阵
+    /// 比较，与 `PnP` 求解器无关——合成投影的符号/桥约定由上两个测试覆盖。
+    #[test]
+    fn prior_gate_rejects_wild_pose() {
+        let near = Isometry3::from_parts(
+            Translation3::new(20.1, 0.05, 1.02),
+            UnitQuaternion::from_euler_angles(0.01, 0.02, 0.03),
+        )
+        .to_homogeneous();
+        let prior = Isometry3::from_parts(
+            Translation3::new(20.0, 0.0, 1.0),
+            UnitQuaternion::identity(),
+        )
+        .to_homogeneous();
+        assert!(passes_prior_gate(&near, &prior));
+        let far = Isometry3::from_parts(
+            Translation3::new(40000.0, 0.0, 1.0),
+            UnitQuaternion::identity(),
+        )
+        .to_homogeneous();
+        assert!(!passes_prior_gate(&far, &prior));
+        let flipped = Isometry3::from_parts(
+            Translation3::new(20.0, 0.0, 1.0),
+            UnitQuaternion::from_euler_angles(0.0, std::f64::consts::PI, 0.0),
+        )
+        .to_homogeneous();
+        assert!(!passes_prior_gate(&flipped, &prior));
+        assert!(passes_prior_gate(&near, &near));
+    }
+
+    /// 合成位姿真值（OCV 系）与投影：`project_ocv` 自洽性由收敛测试覆盖。
+    fn synth_scene(
+        n: usize,
+        planar: bool,
+        r_gt: Matrix3<f64>,
+        t_gt: Vector3<f64>,
+    ) -> (Vec<[f64; 3]>, Vec<[f32; 2]>) {
+        let intr = CameraIntrinsics {
+            focal: 168.0,
+            cx: 160.0,
+            cy: 120.0,
+        };
+        let mut rng = 777u64;
+        let mut rand = move || {
+            rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (rng >> 33) as f64 / f64::from(u32::MAX)
+        };
+        let mut obj = Vec::new();
+        let mut img = Vec::new();
+        while obj.len() < n {
+            let p = if planar {
+                [rand() * 12.0 - 6.0, rand() * 4.0 - 2.0, 8.0]
+            } else {
+                [rand() * 6.0 - 3.0, rand() * 4.0 - 2.0, rand() * 5.0 + 4.0]
+            };
+            let Some((u, v)) = project_ocv(&r_gt, &t_gt, &p, intr) else {
+                continue;
+            };
+            if !(0.0..320.0).contains(&u) || !(0.0..240.0).contains(&v) {
+                continue;
+            }
+            obj.push(p);
+            img.push([u as f32, v as f32]);
+        }
+        (obj, img)
+    }
+
+    /// 端到端翻转共识恢复：20 真值对混入 60 翻转一致对（`RANSAC` 全集共识
+    /// 锁翻转解）＋真值附近先验 → 先验子集（真值占比反转）重解发布真值。
+    /// 无论全集直解命中哪边，最终必为真值 basin（翻转 `~180°` 过不了先验门）。
+    #[test]
+    fn solve_recovers_flip_consensus() {
+        let intr = CameraIntrinsics {
+            focal: 168.0,
+            cx: 160.0,
+            cy: 120.0,
+        };
+        let r_gt = Matrix3::identity();
+        let t_gt = Vector3::zeros();
+        let (mut obj, mut img) = synth_scene(20, true, r_gt, t_gt);
+        // 翻转一致对：绕光轴 180° 的位姿下自洽（与真值差 180°，先验门必拒）。
+        let r_flip = UnitQuaternion::from_euler_angles(0.0, 0.0, std::f64::consts::PI)
+            .to_rotation_matrix()
+            .into_inner();
+        let mut rng = 4242u64;
+        let mut rand = move || {
+            rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (rng >> 33) as f64 / f64::from(u32::MAX)
+        };
+        while obj.len() < 80 {
+            let p = [rand() * 12.0 - 6.0, rand() * 4.0 - 2.0, 8.0];
+            let Some((u, v)) = project_ocv(&r_flip, &t_gt, &p, intr) else {
+                continue;
+            };
+            if !(0.0..320.0).contains(&u) || !(0.0..240.0).contains(&v) {
+                continue;
+            }
+            obj.push(p);
+            img.push([u as f32, v as f32]);
+        }
+        let dq = UnitQuaternion::from_euler_angles(0.0, 0.14, 0.0);
+        let r_pert = dq.to_rotation_matrix().into_inner();
+        let t_pert = Vector3::new(0.5, 0.0, 0.0);
+        let mut ocv = Matrix4::identity();
+        ocv.fixed_view_mut::<3, 3>(0, 0).copy_from(&r_pert);
+        ocv.fixed_view_mut::<3, 1>(0, 3).copy_from(&t_pert);
+        let t_prior = ocv.try_inverse().expect("synthetic ocv invertible") * axis_flip();
+        let pose = solve_visual_pose(
+            &img.iter().map(|p| [p[0], p[1]]).collect::<Vec<_>>(),
+            &obj,
+            intr,
+            Some(t_prior),
+        )
+        .unwrap()
+        .expect("subset recovery should publish truth");
+        let dt = pose.t_global.fixed_view::<3, 1>(0, 3).norm();
+        assert!(dt < 0.5, "trans err {dt}");
+        let m = axis_flip().fixed_view::<3, 3>(0, 0).into_owned();
+        let cos_a = ((pose
+            .t_global
+            .fixed_view::<3, 3>(0, 0)
+            .into_owned()
+            .transpose()
+            * m)
+            .trace()
+            - 1.0)
+            / 2.0;
+        assert!(cos_a.clamp(-1.0, 1.0).acos() < 0.17, "rot off basin");
+    }
+
+    /// 端到端翻转恢复：平面点集（走廊墙面形态）＋真值附近先验 → 发布真值
+    /// basin（无论 `RANSAC` 直解命中与否；翻转解 `~180°` 过不了先验门）。
+    #[test]
+    fn solve_recovers_prior_basin_on_plane() {
+        let intr = CameraIntrinsics {
+            focal: 168.0,
+            cx: 160.0,
+            cy: 120.0,
+        };
+        let r_gt = Matrix3::identity();
+        let t_gt = Vector3::zeros();
+        let (obj, img_f32) = synth_scene(80, true, r_gt, t_gt);
+        // 先验（camera→world，`-Z`）：真值扰动 0.5m/8° 后过桥。
+        let dq = UnitQuaternion::from_euler_angles(0.0, 0.14, 0.0);
+        let r_pert = dq.to_rotation_matrix().into_inner();
+        let t_pert = Vector3::new(0.5, 0.0, 0.0);
+        let mut ocv = Matrix4::identity();
+        ocv.fixed_view_mut::<3, 3>(0, 0).copy_from(&r_pert);
+        ocv.fixed_view_mut::<3, 1>(0, 3).copy_from(&t_pert);
+        let t_prior = ocv.try_inverse().expect("synthetic ocv invertible") * axis_flip();
+        let p2: Vec<[f32; 2]> = img_f32;
+        let p3: Vec<[f64; 3]> = obj;
+        let pose = solve_visual_pose(&p2, &p3, intr, Some(t_prior))
+            .unwrap()
+            .expect("planar scene with near prior should publish");
+        // 期望真值 basin（`ocv⁻¹·flip` 的平移为零、旋转为桥本身）。
+        let dt = pose.t_global.fixed_view::<3, 1>(0, 3).norm();
+        assert!(dt < 0.5, "trans err {dt}");
+        let m = axis_flip().fixed_view::<3, 3>(0, 0).into_owned();
+        let cos_a = ((pose
+            .t_global
+            .fixed_view::<3, 3>(0, 0)
+            .into_owned()
+            .transpose()
+            * m)
+            .trace()
+            - 1.0)
+            / 2.0;
+        assert!(cos_a.clamp(-1.0, 1.0).acos() < 0.17, "rot off basin");
     }
 }

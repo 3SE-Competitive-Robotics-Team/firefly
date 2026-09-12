@@ -695,6 +695,7 @@ name = "firefly-vision-match"
 version = "0.1.0"
 dependencies = [
  "firefly-error",
+ "log",
  "nalgebra",
  "purecv",
 ]
