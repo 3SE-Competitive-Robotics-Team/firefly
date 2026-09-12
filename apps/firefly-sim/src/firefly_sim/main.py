@@ -71,13 +71,20 @@ def load_config(path: str = "configs/sim.toml") -> dict:
         sys.exit(f"[firefly-sim] 配置解析失败：{path}（{exc}）")
 
 
-def _publisher(node, topic: str, payload_cls):
-    service = (
+#: IMU 服务订阅端上限（与 Rust `imu.rs: IMU_SERVICE_MAX` 同值；先创建方定上限，
+#: 后续 open 不得超限——bench 流程 sim 先起，手动流程 vio 先起，两边必须一致）。
+IMU_SERVICE_MAX = 128
+
+
+def _publisher(node, topic: str, payload_cls, subscriber_max: int | None = None):
+    builder = (
         node.service_builder(iox2.ServiceName.new(topic))
         .publish_subscribe(payload_cls)
         .user_header(TraceContext)
-        .open_or_create()
     )
+    if subscriber_max is not None:
+        builder = builder.subscriber_max_buffer_size(subscriber_max)
+    service = builder.open_or_create()
     return service.publisher_builder().create()
 
 
@@ -89,6 +96,19 @@ def _subscriber(node, topic: str, payload_cls):
         .open_or_create()
     )
     return service.subscriber_builder().create()
+
+
+def advance_grid(next_t: float, t: float, period: float) -> tuple[float, int]:
+    """推进网格时刻，返回（新时刻，跳过的格点数）。
+
+    跳过发生在物理步进跟不上发布节拍时（进程被抢占数百 ms）：跳过的采样/帧
+    永久丢失（物理不可倒带），由调用方计数告警。正常节拍下返回跳过 0。
+    """
+    skipped = 0
+    while next_t <= t + 1e-12:
+        next_t += period
+        skipped += 1
+    return next_t, skipped - 1
 
 
 def _notifier(node, topic: str):
@@ -161,7 +181,7 @@ def main() -> None:
     # `FailedToDeliverSignal`——良性，数据面仍由订阅端兜底节拍驱动）。
     iox2.set_log_level(iox2.LogLevel.Error)
     node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
-    imu_pub = _publisher(node, TOPIC_IMU, ImuMessage)
+    imu_pub = _publisher(node, TOPIC_IMU, ImuMessage, IMU_SERVICE_MAX)
     left_pub = _publisher(node, TOPIC_CAM_LEFT, GrayImageMessage)
     right_pub = _publisher(node, TOPIC_CAM_RIGHT, GrayImageMessage)
     depth_pub = _publisher(node, TOPIC_DEPTH, DepthImageMessage)
@@ -252,16 +272,31 @@ def main() -> None:
                 _notify(imu_notify)
                 # 推进到 t 之后的网格点（防止 t 越过后下一步重复发布，
                 # 保证 IMU 严格 0.01s 间隔、相机严格 0.1s 间隔）
-                while next_imu <= t + 1e-12:
-                    next_imu += imu_period
+                next_imu, skipped = advance_grid(next_imu, t, imu_period)
+                if skipped >= 1:
+                    # 物理不可倒带：跳过的采样永久丢失（VIO 断流告警的对端证据）。
+                    log(
+                        "IMU 追赶跳过 {} 采样（{:.2f}s 数据丢失）".format(
+                            skipped, skipped * imu_period
+                        ),
+                        LOG_LEVEL_WARN,
+                        t,
+                    )
 
             # 10Hz 双目 + 深度 + 真值
             if t + 1e-12 >= next_cam:
                 _publish_camera(left_pub, right_pub, depth_pub, cycle, env, t)
                 _notify(cam_notify)  # 左右目成对发布完成后单次唤醒
                 _publish_gt(gt_pub, cycle, env, t)
-                while next_cam <= t + 1e-12:
-                    next_cam += cam_period
+                next_cam, skipped = advance_grid(next_cam, t, cam_period)
+                if skipped >= 1:
+                    log(
+                        "相机追赶跳过 {} 帧（{:.2f}s 图像丢失）".format(
+                            skipped, skipped * cam_period
+                        ),
+                        LOG_LEVEL_WARN,
+                        t,
+                    )
                 if (got_ref or script_mode) and frame % 200 == 0:
                     pos, _, vel = env.gt_pose()
                     log(
