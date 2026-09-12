@@ -160,8 +160,34 @@ def _log_static_mesh() -> None:
     if not mesh_path.is_file():
         log(f"静态 mesh 缺失（{mesh_path}），跳过")
         return
-    rr.log(ENTITY_WAREHOUSE_MESH, rr.Asset3D(path=mesh_path), static=True)
-    log(f"已记静态场景 mesh（{ENTITY_WAREHOUSE_MESH}，{mesh_path.stat().st_size // 1024}KB）")
+    blob = _textured_glb(mesh_path)
+    if blob is not None:
+        rr.log(
+            ENTITY_WAREHOUSE_MESH,
+            rr.Asset3D(contents=blob, media_type="model/gltf-binary"),
+            static=True,
+        )
+        log(f"已记静态场景 mesh（{ENTITY_WAREHOUSE_MESH}，贴图 {len(blob) // 1024}KB）")
+    else:
+        rr.log(ENTITY_WAREHOUSE_MESH, rr.Asset3D(path=mesh_path), static=True)
+        log(f"已记静态场景 mesh（{ENTITY_WAREHOUSE_MESH}，无贴图 {mesh_path.stat().st_size // 1024}KB）")
+
+
+def _textured_glb(mesh_path: Path) -> bytes | None:
+    """`obj＋mtl＋png` 拼成内嵌贴图的 `glb`（内存中完成，不写临时文件）。
+
+    任一步失败返回空（调用方回落纯 `obj` 白模——有形总比没有强）。
+    """
+    try:
+        import trimesh
+        from trimesh.exchange.gltf import export_glb
+
+        scene = trimesh.load(mesh_path, force="scene")
+        blob = export_glb(scene)
+        return bytes(blob) if not isinstance(blob, bytes) else blob
+    except Exception as e:  # noqa: BLE001 - 诊断链路永不炸主流程
+        log(f"贴图拼装失败（回落白模）：{e}")
+        return None
 
 
 def detach_copy(msg):

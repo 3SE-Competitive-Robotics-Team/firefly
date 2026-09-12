@@ -9,6 +9,7 @@ dependencies = [
     "iceoryx2==0.9.3",
     "numpy>=2,<3",
     "rerun-sdk>=0.36.2",
+    "trimesh>=5",
 ]
 
 [tool.uv.sources]
