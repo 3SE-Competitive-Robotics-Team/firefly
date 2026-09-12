@@ -272,7 +272,20 @@ TRAJECTORIES: dict[str, Trajectory] = {
             freq=(1, 2, 2),
             period=18.0,
         ),
-        # 直线前飞（P14 实验）：验证 P13 预测——横向约束全程在线（x∈[1,4.2]
+        # 仓库走廊前飞（当前场地 warehouse：x∈[0,46]、y∈[-4,4] 净空，见
+        # scene.py `_WAREHOUSE_COLLIDERS`）：起点取 sim.toml 的 (2,0,1)，
+        # 沿 +x 飞 20m 后折返；库图 wh_corridor.ffvmap 覆盖 x=2..40 全程。
+        StraightForwardTrajectory(
+            name="wh_corridor",
+            start=(2.0, 0.0, 1.0),
+            delta=(20.0, 0.0, 0.0),
+            t_go=3.0,
+            t_arrive=15.0,
+            t_return=33.0,
+            t_home=45.0,
+            period=60.0,
+        ),
+        # 直线前飞（P14 实验，boxes 旧场景）：验证 P13 预测——横向约束全程在线（x∈[1,4.2]
         # 巡航时箱前脸距 0.6~4.8m < 深度量程 6m）时定位不再漂。远端停在箱阵
         # 前 x=4.2（净距 0.55m），y 恒 4 避开三根中线立柱（x=9/12/16）。
         StraightForwardTrajectory(
