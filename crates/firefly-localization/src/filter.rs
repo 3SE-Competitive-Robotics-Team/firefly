@@ -116,6 +116,11 @@ pub struct FusionOptions {
     pub p_init_rot: f64,
     /// `P` 初值：平移 `m²`（真值初始化后漂移从零起，取 `(0.1m)²`）。
     pub p_init_pos: f64,
+    /// `P` 下限：平移 `m²`（每次预测后钳制；`Joseph` 收缩会让 `P` 相对残余
+    /// 系统性误差过小 → 后续真值 `chi2` 恒拒（`perpetual` 自锁，实测复现）。
+    /// 下限覆盖米级残差（`0.25` 在 `z≤1.8m` 时 `chi2` 可过）；绑架级跳变仍由
+    /// `chi2`（`>1.8m`）＋各路径新息门拦截。旋转暂不设限（转角漂移小）。
+    pub p_min_pos: f64,
     /// 连续拒收后 `R` 的放大倍数。
     pub auto_scale_factor: f64,
     /// 触发放大的连续拒收次数。
@@ -140,6 +145,7 @@ impl Default for FusionOptions {
             r_floor_pos: 5.0e-3,
             p_init_rot: 2.7e-3,
             p_init_pos: 1.0e-2,
+            p_min_pos: 0.25,
             auto_scale_factor: 2.0,
             auto_scale_trigger: 3,
         }
@@ -269,6 +275,12 @@ impl FusionFilter {
         self.p += q;
         // 数值防护：保持对称
         self.p = (self.p + self.p.transpose()) * 0.5;
+        // 下限钳制（见 `p_min_pos`）：`Joseph` 收缩不对抗残余系统性误差。
+        for i in 3..6 {
+            if self.p[(i, i)] < self.options.p_min_pos {
+                self.p[(i, i)] = self.options.p_min_pos;
+            }
+        }
         self.last_vio = Some(*t_vio);
     }
 
@@ -555,6 +567,22 @@ mod tests {
     }
 
     #[test]
+    fn predict_enforces_p_floor() {
+        // 高置信更新把 P 压到 R 量级后，一次预测即托回下限（防 perpetual）。
+        let mut f = FusionFilter::with_default();
+        let t_vio = Matrix4::identity();
+        f.predict(&t_vio);
+        let h_tight = Matrix6::identity() * 1000.0;
+        let g = f.update(&t_vio, &obs(&Matrix4::identity(), &h_tight));
+        assert!(matches!(g, RelocGate::Accepted { .. }));
+        assert!(f.covariance()[(3, 3)] < 0.25);
+        f.predict(&t_vio);
+        assert!((f.covariance()[(3, 3)] - 0.25).abs() < 1e-9);
+        // 旋转不限下限（转角漂移小，保持收敛）。
+        assert!(f.covariance()[(0, 0)] < 0.01);
+    }
+
+    #[test]
     fn predict_grows_covariance() {
         let mut f = FusionFilter::with_default();
         let t0 = Matrix4::identity();
@@ -658,11 +686,13 @@ mod tests {
         assert!(matches!(g, RelocGate::RejectedInnovation { .. }));
     }
 
-    /// 低 R 下限的测试配置：`R=h⁻¹` 不被下限托住，`chi2` 在新息门内可达。
+    /// 低 R 下限的测试配置：`R=h⁻¹` 不被下限托住、`P` 下限关闭，`chi2`
+    /// 在新息门内可达（隔离 `chi2` 机制本身；`p_min` 行为另由专测覆盖）。
     fn low_floor_opts() -> FusionOptions {
         FusionOptions {
             r_floor_pos: 1e-4,
             r_floor_rot: 1e-5,
+            p_min_pos: 0.0,
             ..Default::default()
         }
     }
