@@ -136,6 +136,7 @@ dependencies = [
     { name = "iceoryx2" },
     { name = "numpy" },
     { name = "rerun-sdk" },
+    { name = "trimesh" },
 ]
 
 [package.metadata]
@@ -144,6 +145,7 @@ requires-dist = [
     { name = "iceoryx2", specifier = "==0.9.3" },
     { name = "numpy", specifier = ">=2,<3" },
     { name = "rerun-sdk", specifier = ">=0.36.2" },
+    { name = "trimesh", specifier = ">=5" },
 ]
 
 [[package]]
