@@ -76,9 +76,9 @@ pub fn dynamics(
         return;
     }
 
-    // 期望姿态：+roll 左倾、+pitch 前倾（绕 +Y 正转把机体 +Z 压向前）。
+    // 期望姿态：`W` 前倾、`D` 右倾（`+roll` 绕 `+X` 把推力压向 `+Y`→右）。
     let tilt = ctl.tilt_max_deg.to_radians();
-    let roll = -input.roll * tilt;
+    let roll = input.roll * tilt;
     let pitch = input.pitch * tilt;
     quad.yaw -= input.yaw * ctl.yaw_rate_max * dt;
     let q_des = Quat::from_rotation_z(quad.yaw)
