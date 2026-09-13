@@ -31,6 +31,7 @@ from firefly_mujoco import (
     OdomMessage,
     ReferenceMessage,
     TraceContext,
+    load_scene_name,
 )
 
 from . import trace as ftrace
@@ -173,7 +174,7 @@ def main() -> None:
     imu_period = 1.0 / rates.get("imu", 100.0)
     cam_period = 1.0 / rates.get("cam", 10.0)
     start_pos = np.array(cfg.get("start", [1.0, 4.0, 1.0]))
-    env = DroneEnv()
+    env = DroneEnv(scene=load_scene_name())
     env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))  # xyzw 单位四元数
     ftrace.init(enabled=trace_enabled)
     log("MuJoCo 环境就绪：质量 {:.1f} kg，物理 {:.0f} Hz".format(env.mass, 1 / physics_period))

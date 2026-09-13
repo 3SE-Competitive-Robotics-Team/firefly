@@ -25,11 +25,12 @@ from .messages import (
     ReferenceMessage,
     TraceContext,
 )
-from .scene import SCENE_XML
+from .scene import build_scene, load_scene_name
 
 __all__ = [
     "DroneEnv",
-    "SCENE_XML",
+    "build_scene",
+    "load_scene_name",
     "IMAGE_WIDTH",
     "IMAGE_HEIGHT",
     "IMAGE_SIZE",
