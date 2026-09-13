@@ -95,19 +95,32 @@ class DroneEnv:
         ref_vel: np.ndarray,
         ref_yaw: float = 0.0,
         ref_yaw_rate: float = 0.0,
+        est_pos: np.ndarray | None = None,
+        est_vel: np.ndarray | None = None,
     ) -> None:
         """PD 位置跟踪 + 重力补偿 + 姿态阻尼/水平回正 + 偏航跟踪，写入 `xfrc_applied`。
 
         偏航：机体 x 轴相对世界 x 轴的转角（`atan2(R[1,0], R[0,0])`），扭矩绕
         世界 z 轴（小倾角下体 z 角速度 ≈ 世界 yaw 率，PD 可用）。
+
+        位置/速度反馈取自状态估计（`est_pos`/`est_vel`，世界系）：飞控
+        只看得到估计，反馈必须取估计。`None` 回落真值（`--script` 模式、
+        估计未到、单元测试）。姿态项（偏航角、水平回正、阻尼转系）取真值：
+        估计姿态是 JPL 约定，与机体→世界旋转的换算未经验证，不得混入控制。
         """
         d = self.data
         bid = self._drone_id
-        pos = d.body("drone").xpos.copy()
+        if est_pos is None:
+            pos = d.body("drone").xpos.copy()
+        else:
+            pos = np.asarray(est_pos, dtype=float)
         # freejoint 速度：线速度世界系，角速度为机体系（实测：yaw=90° 时加
         # 世界系 x 扭矩，qvel 角速度读数为机体 y 轴——与 R 列向量一致）；
         # 用到世界系时须经 R 转系（`cvel` 对 freejoint 不可靠，漂移）
-        vel = d.qvel[0:3].copy()
+        if est_vel is None:
+            vel = d.qvel[0:3].copy()
+        else:
+            vel = np.asarray(est_vel, dtype=float)
         angvel_body = d.qvel[3:6].copy()
 
         force = KP_POS * (np.asarray(ref_pos, dtype=float) - pos) + KD_VEL * (

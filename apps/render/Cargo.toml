@@ -1,0 +1,27 @@
+[package]
+name = "render"
+version = "0.1.0"
+keywords = ['visualization', 'simulation', 'rendering']
+categories = ['graphics', 'simulation', 'game-engines']
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "render"
+path = "src/main.rs"
+
+[dependencies]
+bevy = { workspace = true }
+fastrace = { workspace = true }
+firefly-error = { workspace = true }
+firefly-observability = { workspace = true }
+firefly-pubsub = { workspace = true }
+log = { workspace = true }
+rand = { workspace = true }
+
+[lints]
+workspace = true

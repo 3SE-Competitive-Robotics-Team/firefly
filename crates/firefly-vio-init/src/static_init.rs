@@ -196,7 +196,7 @@ mod tests {
                     .wrapping_add(1_442_695_040_888_963_407);
                 (x >> 33) as f64 / (1u64 << 31) as f64 * 2.0 - 1.0
             };
-            0.5 * (draw() + draw())
+            f64::midpoint(draw(), draw())
         };
         (0..=(duration * HZ) as usize)
             .map(|k| {

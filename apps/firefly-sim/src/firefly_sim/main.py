@@ -50,6 +50,8 @@ TOPIC_REF = "Firefly/Reference"
 #: （`Firefly/VoidOdom`，DIVO 里程计 A/B 对比用）。
 TOPIC_ODOM = "Firefly/Odometry"
 TOPIC_VOIDODOM = "Firefly/VoidOdom"
+#: 校正后里程计（GICP 融合输出；与 Rust `odom::CORRECTED_ODOM_TOPIC` 一致）
+TOPIC_CORR = "Firefly/CorrectedOdometry"
 #: 任务启动超时（秒）：上电后无 ready 则报错退出（fail loudly），
 #: 不静默起飞。估计器侧 GT 等待 30s 是双保险，这里先触发。
 MISSION_TIMEOUT = 15.0
@@ -162,6 +164,9 @@ def main() -> None:
         sys.exit(f"[firefly-sim] --odom-topic 非法：{odom_topic}（仅支持 {TOPIC_ODOM} / {TOPIC_VOIDODOM}）")
     trajectory: Trajectory = get_trajectory(trajectory_name)
     trace_enabled = "--no-trace" not in sys.argv
+    # --no-camera：双目/深度改由 Bevy 渲染进程发布（本进程仍发 IMU/真值；
+    # 相机节拍照推进，维持 trace 周期与真值节奏）。
+    no_camera = "--no-camera" in sys.argv
     cfg = load_config()
     rates = cfg.get("rates", {})
     physics_period = 1.0 / rates.get("physics", 200.0)
@@ -176,6 +181,8 @@ def main() -> None:
         log(f"--script：轨迹 {trajectory.name} 驱动运动（跳过 planner）")
     if not trace_enabled:
         log("--no-trace：OTel tracing 已禁用（高性能模式）")
+    if no_camera:
+        log("--no-camera：双目/深度由 Bevy 发布（`cargo run -p render` 须同开）")
 
     # 抑制 iceoryx2 内部告警噪音（如投递到历史残留幽灵监听端的
     # `FailedToDeliverSignal`——良性，数据面仍由订阅端兜底节拍驱动）。
@@ -190,6 +197,8 @@ def main() -> None:
     # 启动互锁订阅（--script 模式）：状态源 ready 电平（is_initialized），
     # 任务时钟据此启动；电平（非边沿）语义——晚订阅 100ms 内必收到。
     odom_sub = _subscriber(node, odom_topic, OdomMessage)
+    # 校正后里程计订阅：PD 反馈在原始与校正估计中取消息新的（与 planner 同规则）。
+    corr_sub = _subscriber(node, TOPIC_CORR, OdomMessage)
     imu_notify = _notifier(node, TOPIC_IMU)
     cam_notify = _notifier(node, TOPIC_CAM_PAIR)
     _init_log_ipc(node)
@@ -204,6 +213,10 @@ def main() -> None:
     # 时间 = sim 时间 - 任务起点（t_go 等起飞等待相对任务起点，不含
     # 启动不定耗时——三个旧定时器退役的落点）。
     mission_t0 = None
+    # 最新估计槽：(stamp, pos, vel)，每拍排空后留最新
+    est_odom = None
+    est_corr = None
+    est_warned = False
 
     cycle = None
     next_imu = 0.0
@@ -222,6 +235,32 @@ def main() -> None:
                     m.timestamp, m.position_x, m.position_y, m.position_z,
                     ftrace.header_trace_id(sample.user_header().contents),
                 ))
+
+            # 排空里程计话题（--script 模式不使用）
+            if not script_mode:
+                while (sample := odom_sub.receive()) is not None:
+                    m = sample.payload().contents
+                    est_odom = (
+                        m.timestamp,
+                        np.array([m.position_x, m.position_y, m.position_z]),
+                        np.array([m.velocity_x, m.velocity_y, m.velocity_z]),
+                    )
+                while (sample := corr_sub.receive()) is not None:
+                    m = sample.payload().contents
+                    est_corr = (
+                        m.timestamp,
+                        np.array([m.position_x, m.position_y, m.position_z]),
+                        np.array([m.velocity_x, m.velocity_y, m.velocity_z]),
+                    )
+                # 取消息新的估计；都没收到过回落真值
+                slots = [s for s in (est_odom, est_corr) if s is not None]
+                if slots:
+                    _, est_pos, est_vel = max(slots, key=lambda s: s[0])
+                else:
+                    est_pos = est_vel = None
+                    if not est_warned:
+                        est_warned = True
+                        log("状态估计尚未到达，PD 暂回落真值（起飞前正常）", LOG_LEVEL_WARN)
 
             # 控制 + 物理步进
             if script_mode:
@@ -245,7 +284,11 @@ def main() -> None:
                     # 脚本化参考：按任务时刻给出平滑 pos/vel；实例满足周期连续
                     # 不变量（见 trajectories.py），长跑直接用连续时间即可
                     ref_pos, ref_vel = trajectory.ref(env.time - mission_t0)
-            env.apply_pd(ref_pos, ref_vel)
+                # --script 模式：真值跟踪（运动由外部轨迹指定）
+                env.apply_pd(ref_pos, ref_vel)
+            else:
+                # 闭环模式：PD 反馈取估计
+                env.apply_pd(ref_pos, ref_vel, est_pos=est_pos, est_vel=est_vel)
             env.step()
             # 失稳守卫：MuJoCo 发散（QACC NaN/Inf）后状态永久污染且传感器
             # 全变 NaN，下游 VIO 会被毒化——检测到即重置到起点，长跑不挂。
@@ -283,10 +326,12 @@ def main() -> None:
                         t,
                     )
 
-            # 10Hz 双目 + 深度 + 真值
+            # 10Hz 双目 + 深度 + 真值（--no-camera 时 Bevy 拥有相机发布权：
+            # 跳过渲染与成对唤醒，真值照发——render 的位姿源，节拍照推进）。
             if t + 1e-12 >= next_cam:
-                _publish_camera(left_pub, right_pub, depth_pub, cycle, env, t)
-                _notify(cam_notify)  # 左右目成对发布完成后单次唤醒
+                if not no_camera:
+                    _publish_camera(left_pub, right_pub, depth_pub, cycle, env, t)
+                    _notify(cam_notify)  # 左右目成对发布完成后单次唤醒
                 _publish_gt(gt_pub, cycle, env, t)
                 next_cam, skipped = advance_grid(next_cam, t, cam_period)
                 if skipped >= 1:

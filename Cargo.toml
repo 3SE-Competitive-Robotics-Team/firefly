@@ -4,6 +4,7 @@ exclude = ["apps/firefly-sim", "apps/firefly-viz"]
 resolver = "3"
 
 [workspace.dependencies]
+bevy = "0.19"
 clap = { version = "4.5", features = ["derive"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 fastrace = { version = "0.7", default-features = false }
@@ -17,6 +18,7 @@ nalgebra = "0.35"
 ndarray = "0.17"
 ort = { version = "=2.0.0-rc.13" }
 purecv = { version = "0.7", default-features = false, features = ["simd", "parallel"] }
+rand = "0.10"
 rayon = "1.12"
 rerun = { version = "0.36", default-features = false, features = ["sdk"] }
 serde = { version = "1", features = ["derive"] }

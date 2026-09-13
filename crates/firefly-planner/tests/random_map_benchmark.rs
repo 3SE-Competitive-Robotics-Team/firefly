@@ -79,8 +79,8 @@ fn random_map(rng: &mut Lcg) -> RandomMap {
         let r_voxels = (radius / 0.5).ceil() as usize;
         for ix in 0..DIM_X {
             for iy in 0..DIM_Y {
-                let x = (ix as f64 + 0.5) * 0.5;
-                let y = (iy as f64 + 0.5) * 0.5;
+                let x = f64::midpoint(ix as f64, 0.5);
+                let y = f64::midpoint(iy as f64, 0.5);
                 let d2 = (x - cx).powi(2) + (y - cy).powi(2);
                 if d2 <= (r_voxels as f64 * 0.5).powi(2) {
                     let nz = (height / 0.5).ceil() as usize;
