@@ -18,7 +18,7 @@ RMUC 场地 `STEP→glTF` 资产管线（Blender 精修的上游，Blender 只�
 4. `collide`（已实现）：`field_raw.npz` → 实心体素 → 贪心 AABB 盒 →
    `<scene>_collision.json`（供 `MuJoCo` 生成 box geom；凹结构不跨空腔）。
 
-Blender 精修（PBR/红蓝 emissive/点阵贴花）与最终 `field.glb` 导出不在本包，
+Blender 精修（CAD 颜色→PBR 灰黑体 + 红蓝绿 emissive）与最终 `field.glb` 导出不在本包，
 由 `scripts/` 下的 headless Blender 脚本承担。
 
 ## XCAF 读取约束
