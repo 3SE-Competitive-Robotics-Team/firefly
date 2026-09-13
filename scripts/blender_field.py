@@ -1,19 +1,23 @@
-"""RMUC 场地 mesh（`field_raw.npz`）→ `field.glb`：CAD 逐面颜色量化成 PBR 材质、
-红蓝灯饰 emissive、焊接 + 减面。
+"""RMUC 场地 mesh（`field_raw.npz`）→ `field.glb`：逐面 CAD 颜色 → PBR 材质。
 
 headless 调用：
 ```sh
 /Applications/Blender.app/Contents/MacOS/Blender --background --python scripts/blender_field.py -- \
-  models/rmuc2026/derived/raw/field_raw.npz models/rmuc2026/field.glb 100000
+  models/rmuc2026/derived/raw/field_raw.npz models/rmuc2026/field.glb
 ```
+
+几何：**不做减面、不做焊接**。CAD 逐 solid 三角化时顶点只在单个 BRep 面内共享
+——弯曲面（圆柱/倒角）靠共享顶点平滑着色，面与面之间不共顶点而保留锐边，壳与壳
+不粘连。建面前剔除零面积退化三角（渲染不产生像素，只会污染法线），其余拓扑原样
+进入 glb。
+
+材质：CAD 逐面色（无颜色记默认灰）；低饱和（灰/白）面压进灰黑区间 [`BODY_LO`,
+`BODY_HI`] 避免日光曝光泛白，饱和色（标线/红蓝绿灯饰）原样保留并按 [`is_emissive`]
+标自发光。调色板取全部去重色，不做量化丢色。
 
 坐标：npz 已是 `MuJoCo` 世界系（米，Z 上、地面 z=0）。Blender 内部同为 Z 上，
 导出必须 `export_yup=False`，否则 glTF 规范的 Y 上转换会让场地相对 `apps/render`
 的 Z 上 rig 立起来。
-
-材质：CAD 的灰/白体面（低饱和）统一压进灰黑区间 [`BODY_LO`, `BODY_HI`]，避免
-大片 off-white 在日光曝光下发白；饱和色（标线/红蓝绿灯饰）保留，红/蓝/绿按
-`is_emissive` 设自发光。减面用 Decimate(Collapse)，保材质索引。
 """
 
 from __future__ import annotations
@@ -30,10 +34,8 @@ BODY_HI = 0.16
 SAT_THRESHOLD = 0.15
 #: 未着色面（CAD 无 Surf 色）的体色。
 DEFAULT_RGB = (0.12, 0.12, 0.12)
-#: 调色板项数。
-PALETTE_SIZE = 24
-#: 焊接阈值（米；顶点本就共点，只并精确重复）。
-WELD_DIST = 1e-5
+#: 退化三角面积下限（m²）：低于此值不产生像素，建面前剔除。
+MIN_AREA = 1e-12
 #: 材质粗糙度（低饱和体面带一点光泽，暗面也有高光层次）。
 ROUGHNESS = 0.5
 #: emissive 强度（配合 Bevy bloom）。
@@ -64,27 +66,18 @@ def remap_body(colors: np.ndarray) -> np.ndarray:
     return out
 
 
-def build_palette(colors: np.ndarray) -> np.ndarray:
-    """体色 → 调色板（Top-N 频次 + 默认灰）。"""
-    uniq, counts = np.unique(colors, axis=0, return_counts=True)
+def build_palette(colors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """体色 → `(调色板, 逐面下标)`：去重色按面数降序，不量化。
+
+    `np.unique` 的精确索引避免最近邻距离搜索（同一体色必落到同一材质）。
+    """
+    uniq, inverse, counts = np.unique(
+        colors, axis=0, return_inverse=True, return_counts=True
+    )
     order = np.argsort(-counts)
-    chosen = [np.array(DEFAULT_RGB, dtype=np.float64)]
-    for idx in order:
-        if len(chosen) >= PALETTE_SIZE:
-            break
-        chosen.append(uniq[idx])
-    return np.vstack(chosen)
-
-
-def map_to_palette(colors: np.ndarray, palette: np.ndarray) -> np.ndarray:
-    """逐面体色 → 最近调色板下标（默认灰为 0）。"""
-    out = np.empty(len(colors), dtype=np.int32)
-    block = 200_000
-    for start in range(0, len(colors), block):
-        chunk = colors[start : start + block]
-        d = ((chunk[:, None, :] - palette[None, :, :]) ** 2).sum(axis=2)
-        out[start : start + block] = np.argmin(d, axis=1)
-    return out
+    rank = np.empty(len(uniq), dtype=np.int32)
+    rank[order] = np.arange(len(uniq), dtype=np.int32)
+    return uniq[order], rank[inverse]
 
 
 def add_materials(mesh, palette: np.ndarray) -> None:
@@ -105,23 +98,39 @@ def add_materials(mesh, palette: np.ndarray) -> None:
 
 
 def main() -> None:
-    import bmesh
     import bpy
 
     argv = sys.argv[sys.argv.index("--") + 1 :]
     npz_path, out_path = Path(argv[0]), Path(argv[1])
-    target = int(argv[2]) if len(argv) > 2 else 100_000
 
     data = np.load(npz_path)
     vertices = data["vertices"].astype(np.float64)
     faces = data["faces"].astype(np.int32)
-    colors = data["face_colors"].astype(np.float64)
-    print(f"[blender_field] in: {len(vertices)} verts / {len(faces)} tris", flush=True)
+    face_colors = data["face_colors"].astype(np.float64)
+    n_in = len(faces)
 
-    body = remap_body(colors)
-    palette = build_palette(body)
-    face_palette = map_to_palette(body, palette)
-    n_emissive = sum(1 for i in range(len(palette)) if is_emissive(tuple(palette[i])))
+    # 剔除退化三角：重复顶点或零面积（渲染无像素，且污染顶点法线）。
+    tri = vertices[faces]
+    area = 0.5 * np.linalg.norm(
+        np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1
+    )
+    degenerate = (
+        (faces[:, 0] == faces[:, 1])
+        | (faces[:, 1] == faces[:, 2])
+        | (faces[:, 0] == faces[:, 2])
+        | (area < MIN_AREA)
+    )
+    faces = faces[~degenerate]
+    face_colors = face_colors[~degenerate]
+    print(
+        f"[blender_field] in: {len(vertices)} verts / {n_in} tris"
+        f"（退化剔除 {int(degenerate.sum())}）",
+        flush=True,
+    )
+
+    body = remap_body(face_colors)
+    palette, face_palette = build_palette(body)
+    n_emissive = sum(1 for rgb in palette if is_emissive(tuple(rgb)))
     print(f"[blender_field] palette {len(palette)}（emissive {n_emissive}）", flush=True)
 
     bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -135,7 +144,12 @@ def main() -> None:
     mesh.polygons.foreach_set("loop_start", np.arange(0, n_loops, 3, dtype=np.int32))
     if "loop_total" in mesh.polygons[0].bl_rna.properties:
         mesh.polygons.foreach_set("loop_total", np.full(len(faces), 3, dtype=np.int32))
+    # 逐面平滑：弯曲面的顶点在 BRep 面内共享 → 平滑；面间不共享 → 锐边自然保留。
+    mesh.polygons.foreach_set("use_smooth", np.ones(len(faces), dtype=bool))
     mesh.update()
+
+    if mesh.validate(verbose=False):
+        raise RuntimeError("mesh.validate 修正了非法几何——上游三角化不合约，请查")
 
     add_materials(mesh, palette)
     mesh.polygons.foreach_set("material_index", face_palette)
@@ -145,20 +159,6 @@ def main() -> None:
     bpy.context.collection.objects.link(obj)
     bpy.context.view_layer.objects.active = obj
     obj.select_set(True)
-
-    bm = bmesh.new()
-    bm.from_mesh(mesh)
-    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=WELD_DIST)
-    bm.to_mesh(mesh)
-    bm.free()
-    print(f"[blender_field] welded: {len(mesh.vertices)} verts / {len(mesh.polygons)} tris", flush=True)
-
-    if target > 0 and len(mesh.polygons) > target:
-        mod = obj.modifiers.new("decimate", "DECIMATE")
-        mod.decimate_type = "COLLAPSE"
-        mod.ratio = target / len(mesh.polygons)
-        bpy.ops.object.modifier_apply(modifier=mod.name)
-    print(f"[blender_field] decimated: {len(mesh.polygons)} tris", flush=True)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     bpy.ops.export_scene.gltf(
