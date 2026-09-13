@@ -12,6 +12,7 @@ use bevy::camera::{Camera, Projection, RenderTarget};
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::image::Image;
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::render::view::Msaa;
@@ -146,8 +147,11 @@ pub fn spawn_rig(mut commands: Commands, mut images: ResMut<Assets<Image>>, pose
         }
     }
 
+    // 主视角：bloom 让场地红蓝 emissive 灯饰出光感（`Bloom` 自动带上 `Hdr`）。
+    // 传感器相机不加 bloom：VIO 前端吃原图，泛光会糊掉角点。
     commands.spawn((
         Camera3d::default(),
+        Bloom::default(),
         IsDefaultUiCamera,
         Transform::from_translation(pose.pos + Vec3::new(-6.0, 0.0, 3.0))
             .looking_at(pose.pos, Vec3::Z),

@@ -24,6 +24,7 @@
 mod capture;
 mod link;
 mod rig;
+mod scene;
 mod sensors;
 mod trace_bridge;
 mod ui;
@@ -36,13 +37,17 @@ use bevy::window::{Window, WindowPlugin};
 use capture::{CaptureHub, CapturePlugin};
 use link::{PendingFrames, drain_captures, open_ports, poll_pose};
 use rig::{PoseState, follow_main, spawn_rig};
+use scene::SceneSpec;
 use ui::setup_panel;
 
-/// 仓库资产目录（编译期绝对路径，与运行 `CWD` 无关）。
-const WAREHOUSE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models/warehouse");
-/// 无人机起点（`MuJoCo` 系，单位米，对照 `configs/sim.toml`）。
-const DRONE_START: Vec3 = Vec3::new(2.0, 0.0, 1.0);
+/// 全局环境光亮度（cd/m²，`Bevy` 缺省 80）：场地照明偏亮，方向光之外补底，
+/// 避免背光面死黑。与三方向光联调，总照度须使传感器灰度均值落在 120~170/255
+/// （改一改二，以发布图像人工比对）。
+const AMBIENT_BRIGHTNESS: f32 = 200.0;
 
+/// 无人机起点由场景注册表提供（`models/<dir>` 与起点见 [`scene`]；对照
+/// `configs/sim.toml`）。asset root 恒为 `models/`，视觉恒为
+/// `models/<dir>/<visual>`——换场地只加注册行 + 目录。
 fn main() {
     firefly_observability::init();
     // `Bevy` 内部日志走 `tracing`（`LogPlugin` 已禁用，不再安装 subscriber）：
@@ -52,6 +57,14 @@ fn main() {
     if let Err(e) = trace_bridge::init() {
         log::warn!("tracing 转发安装失败（Bevy 侧日志将静默）: {e}");
     }
+    let spec = scene::selected();
+    log::info!(
+        "场景 {}：asset root {}，视觉 {}，起点 {:?}",
+        spec.dir,
+        scene::MODELS_DIR,
+        spec.asset_path(),
+        spec.start
+    );
     let ports = open_ports().unwrap_or_else(|e| {
         log::error!("IPC 端口打开失败：{e:?}");
         std::process::exit(1);
@@ -62,7 +75,7 @@ fn main() {
                 .build()
                 .disable::<LogPlugin>()
                 .set(AssetPlugin {
-                    file_path: WAREHOUSE_DIR.to_owned(),
+                    file_path: scene::MODELS_DIR.to_owned(),
                     ..default()
                 })
                 .set(WindowPlugin {
@@ -74,8 +87,14 @@ fn main() {
                     ..default()
                 }),
         )
+        .insert_resource(spec)
+        .insert_resource(GlobalAmbientLight {
+            color: Color::WHITE,
+            brightness: AMBIENT_BRIGHTNESS,
+            ..default()
+        })
         .insert_resource(PoseState {
-            pos: DRONE_START,
+            pos: Vec3::from(spec.start),
             ..default()
         })
         .insert_resource(CaptureHub::default())
@@ -89,23 +108,26 @@ fn main() {
         .run();
 }
 
-/// 场景装配：仓库 mesh + 三方向光（照度正比于 MJCF diffuse）+ 无人机占位体。
+/// 场景装配：注册表选中场景的视觉 glb + 环境光 + 三方向光（照度正比于
+/// MJCF diffuse）+ 无人机占位体。红蓝灯饰自发光由 glb 的 emissive 材质承载
+/// （Blender 阶段写入），Bevy 侧配 bloom 出光感。
 // 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 fn setup_scene(
     mut commands: Commands,
     assets: Res<AssetServer>,
+    scene: Res<SceneSpec>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     commands.spawn(WorldAssetRoot(assets.load(
-        bevy::gltf::GltfAssetLabel::Scene(0).from_asset("structure.glb"),
+        bevy::gltf::GltfAssetLabel::Scene(0).from_asset(scene.asset_path()),
     )));
 
     // 照度锚定直射日光（`DirectionalLight` 文档：直射日光 32000~100000 lux；
     // `MuJoCo` 的 diffuse 无物理单位，只取三灯比值 0.7:0.3:0.22）。
     // 地面灰度均值须落在 120~170/255（对照 `MuJoCo` 实测 140~160），
-    // 否则 VIO 无特征可跟——改照度后以发布图像的均值验收。
+    // 否则 VIO 无特征可跟——改照度后以发布图像均值人工比对。
     for (index, (dir, lux)) in [
         (Vec3::new(-0.3, -0.25, -0.92), 50000.0),
         (Vec3::new(-0.15, 0.6, -0.78), 21000.0),
@@ -124,15 +146,16 @@ fn setup_scene(
         ));
     }
 
+    let start = Vec3::from(scene.start);
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(0.3, 0.3, 0.08))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.9, 0.7, 0.2),
             ..default()
         })),
-        Transform::from_translation(DRONE_START),
+        Transform::from_translation(start),
     ));
-    log::info!("warehouse render ready");
+    log::info!("场景 {} render ready", scene.dir);
 }
 
 /// 退出时刷 trace（`Ctrl-C` → `AppExit`，端口随后按 `Drop` 纪律释放）。
