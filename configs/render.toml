@@ -1,0 +1,7 @@
+# apps/render 视觉配置（只管光照；场景在 configs/scene.toml，与 sim/viz 共用）。
+# 改动这里即可调亮度，不必重编译。若过暗/过亮，优先调 ambient。
+[light]
+# 全局环境光（cd/m²，Bevy 缺省 80）：补底防背光面死黑。
+ambient = 50.0
+# 三方向光照度（lux，方向固定，比值对照 MuJoCo diffuse 0.7:0.3:0.22）。
+directional = [35000.0, 15000.0, 11000.0]
