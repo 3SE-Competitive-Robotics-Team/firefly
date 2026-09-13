@@ -1,0 +1,20 @@
+[project]
+name = "firefly-cad"
+version = "0.1.0"
+description = "RMUC 场地 STEP→glTF 资产管线：普查 / 三角化 / 分组（Blender 精修的上游）"
+authors = [
+    { name = "XiaoPengYouCode", email = "120481176+XiaoPengYouCode@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    # cadquery-ocp-novtk 而非全量 cadquery-ocp：管线全 headless，
+    # 不需要 VTK 可视化；OCP 模块名仍为 `OCP`，API 与 OCCT C++ 一一对应。
+    "cadquery-ocp-novtk>=8.0.1.0.0",
+]
+
+[project.scripts]
+firefly-cad-census = "firefly_cad.census:main"
+
+[build-system]
+requires = ["uv_build>=0.9.18,<0.10.0"]
+build-backend = "uv_build"
