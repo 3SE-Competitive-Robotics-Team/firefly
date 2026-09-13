@@ -40,3 +40,8 @@ uv run --with pytest pytest packages/firefly-cad/tests/ -q -p no:cacheprovider
 
 每次转换在 `CONVERSION.md` 追加一条：工具版本、偏差参数、匿名件→功能分组映射、
 红蓝灯饰清单、减面前后面数。`models/` 已 ignore，记录随本包进 git。
+
+## 验证
+
+接入后以人工实测为最终结论（出生点无接触、悬停、发布图像的亮度与特征密度），
+不写自动验收脚本。
