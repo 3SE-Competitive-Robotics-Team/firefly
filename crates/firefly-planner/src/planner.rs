@@ -816,7 +816,7 @@ impl Planner {
         }
         for _ in 0..20 {
             if root_finder::poly_val(&deriv, r, true).abs() < DBL_EPSILON {
-                r = 0.5 * (r + 1.0);
+                r = f64::midpoint(r, 1.0);
             } else {
                 break;
             }

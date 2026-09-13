@@ -134,11 +134,11 @@ mod tests {
     fn from_intrinsics_pixel_angle() {
         // f=300：1/2 像素角 ≈ arctan(1/600) ≈ 0.00167 rad
         let noise = DepthNoise::from_intrinsics(&DepthOptions::default(), 300.0, 300.0);
-        let expect: f64 = 0.5 * ((0.5_f64 / 300.0).atan() + (0.5_f64 / 300.0).atan());
+        let expect: f64 = f64::midpoint((0.5_f64 / 300.0).atan(), (0.5_f64 / 300.0).atan());
         let p = Vector3::new(0.0, 0.0, 1.0);
         let c = noise.point_covariance(&p);
         // 正前方点的切向方差 ≈ r²·σ_ω²
-        let tangential = 0.5 * (c[(0, 0)] + c[(1, 1)]);
+        let tangential = f64::midpoint(c[(0, 0)], c[(1, 1)]);
         assert!(
             (tangential.sqrt() - expect).abs() < 1e-3,
             "切向 σ 应≈像素角"

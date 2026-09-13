@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 _ASSET = (
-    Path(__file__).resolve().parent.parent.parent.parent.parent
+    Path(__file__).resolve().parent.parent.parent.parent
     / "models"
     / "warehouse"
     / "structure.obj"
