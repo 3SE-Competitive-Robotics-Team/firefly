@@ -1,9 +1,10 @@
-# How to Run（warehouse 全链路，7 进程）
+# How to Run（全链路，7 进程）
 
-当前场地：**warehouse**（`packages/firefly-mujoco/src/firefly_mujoco/scene.py`
-缺省，`models/warehouse/structure.obj` 存在即生效，无需设 `FIREFLY_SCENE`）。
-46m × 16m 室内仓库，无人机沿走廊 `+x` 飞，起点 `(2, 0, 1)`（见 `configs/sim.toml`）。
-`boxes` / `gate.ffmap` 系旧场景残留，仅回归对照用。
+当前场景由 `configs/scene.toml` 的 `scene` 决定，`sim` / `render` / `viz` 共用
+同一份（单一来源防漂移）：缺省 **`rmuc2026`**（RMUC 场地，`models/rmuc2026/`），
+可切 `warehouse`（46m × 16m 室内仓库，`models/warehouse/`）或 `boxes`（旧回归）。
+切到某场景前 `models/<scene>/` 要有对应资产（缺资产自动回退 `boxes`）。
+无人机起点见 `configs/sim.toml`。
 
 7 个进程（`sim → vio → gicp → planner → sim` 主链 + `aliked → lightglue → gicp` 视觉支路），
 `release` 构建是默认形态（`debug` 重负载下 IMU 断流，只做开发调试）。

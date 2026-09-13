@@ -31,7 +31,7 @@ Blender 精修（PBR/红蓝 emissive/点阵贴花）与最终 `field.glb` 导出
 ## 资产接入约定（换场地 = 新目录 + 注册一行）
 
 - 视觉：`models/<scene>/<visual>.glb`，Bevy asset root = `models/`，
-  `FIREFLY_SCENE` 选场景。
+  场景由 `configs/scene.toml` 的 `scene` 选定（sim/render/viz 共用）。
 - 物理：`models/<scene>/<scene>_collision.json`，盒集合 `[cx,cy,cz,hx,hy,hz]`（米，
   `MuJoCo` 系）。`MuJoCo` mesh 几何取凸包，凹结构不可用单 mesh，故用盒集合。
 - 场景注册表 Rust（`apps/render`）与 Python（`firefly_mujoco/scene.py`）同构。

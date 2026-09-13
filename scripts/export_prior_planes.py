@@ -42,7 +42,7 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "packages" / "firefly-mujoco" / "src"))
 
-from firefly_mujoco.scene import SCENE_XML  # noqa: E402
+from firefly_mujoco.scene import build_scene  # noqa: E402
 
 
 def parse_box_geoms(xml: str) -> list[tuple[float, float, float, float, float, float]]:
@@ -110,7 +110,7 @@ def main() -> None:
         }
     )
     # box geom（中线立柱 + 侧柱 + 前方箱子）；box_faces 已做背面粗筛
-    for center, half in parse_box_geoms(SCENE_XML):
+    for center, half in parse_box_geoms(build_scene("boxes")):
         planes.extend(box_faces(center, half))
 
     var_scale = 1e-6  # 解析几何：法向/中心不确定度 ~1e-6 m²

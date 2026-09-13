@@ -5967,6 +5967,8 @@ dependencies = [
  "firefly-pubsub",
  "log",
  "rand",
+ "serde",
+ "toml",
 ]
 
 [[package]]

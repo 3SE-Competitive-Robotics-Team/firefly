@@ -1,6 +1,6 @@
 """firefly 无人机 MuJoCo 场景（MJCF）。
 
-场景选择：`FIREFLY_SCENE` 环境变量（缺省 `warehouse`）。
+场景选择：`configs/scene.toml` 的 `scene`（见 [`load_scene_name`]，缺省 `warehouse`）。
 
 - `warehouse`：Sketchfab "Warehouse FBX Model Free"（Nicholas-3D，
   CC-BY-4.0，见 `models/warehouse/license.txt`）：46m × 16m 室内仓库，
@@ -29,7 +29,6 @@
 """
 
 import json
-import os
 import struct
 import tempfile
 import zlib
@@ -347,10 +346,10 @@ def _boxes_scene_xml() -> str:
 """
 
 
-#: 当前场景 XML（模块导入时按 `FIREFLY_SCENE` 确定；`warehouse` 缺资产
-#: 文件时回退 `boxes` 并警告——`models/` 已 ignore，CI 无资产）。
-def _select_scene_xml() -> str:
-    name = os.environ.get("FIREFLY_SCENE", "warehouse")
+#: 当前场景 XML（模块导入时按 `configs/scene.toml` 确定；缺资产时回退 `boxes`
+#: 并警告——`models/` 已 ignore，CI 无资产）。
+def build_scene(name: str = "rmuc2026") -> str:
+    """按场景名生成 MJCF；未知或缺资产回退 `boxes` 并打印告警。"""
     if name == "warehouse":
         if (_WAREHOUSE_DIR / "structure.obj").is_file():
             return _warehouse_scene_xml()
@@ -358,10 +357,26 @@ def _select_scene_xml() -> str:
     elif name == "rmuc2026":
         if (_RMUC_DIR / "rmuc2026_collision.json").is_file():
             return _rmuc_scene_xml()
-        print("[scene] RMUC 碰撞资产缺失（models/rmuc2026/rmuc2026_collision.json），回退 boxes 场景")
+        print(
+            "[scene] RMUC 碰撞资产缺失（models/rmuc2026/rmuc2026_collision.json），回退 boxes 场景"
+        )
     elif name != "boxes":
         print(f"[scene] 未知场景 {name}，回退 boxes 场景")
     return _boxes_scene_xml()
 
 
-SCENE_XML = _select_scene_xml()
+def config_path() -> Path:
+    """仓库 `configs/scene.toml`（世界观单一来源，对照 AGENTS 配置约定）。"""
+    return (
+        Path(__file__).resolve().parent.parent.parent.parent.parent
+        / "configs"
+        / "scene.toml"
+    )
+
+
+def load_scene_name(path: Path | None = None) -> str:
+    """读 `configs/scene.toml` 的 `scene`；缺文件即报错。"""
+    import tomllib
+
+    with open(path or config_path(), "rb") as f:
+        return str(tomllib.load(f)["scene"])

@@ -16,7 +16,7 @@ import numpy as np
 import mujoco
 
 from .messages import IMAGE_HEIGHT, IMAGE_WIDTH
-from .scene import SCENE_XML
+from .scene import build_scene
 
 #: PD 位置增益
 KP_POS = 20.0
@@ -42,6 +42,7 @@ class DroneEnv:
         accel_noise: 加速度计白噪声标准差（m/s²）。
         depth_noise: 深度噪声强度（视差域 σ_disp = 4·depth_noise px，σ_z≈z²·σ_disp/(f·B)
             ∝z²，空区/远平面不加噪；另含 5~15% 随机丢点与 1px 边缘膨胀）。
+        scene: 场景名（`warehouse` / `boxes` / `rmuc2026`，见 `scene.build_scene`）。
     """
 
     def __init__(
@@ -50,8 +51,9 @@ class DroneEnv:
         gyro_noise: float = 0.002,
         accel_noise: float = 0.02,
         depth_noise: float = 0.02,
+        scene: str = "rmuc2026",
     ) -> None:
-        self.model = mujoco.MjModel.from_xml_string(SCENE_XML)
+        self.model = mujoco.MjModel.from_xml_string(build_scene(scene))
         self.model.opt.timestep = timestep
         self.data = mujoco.MjData(self.model)
         self._gyro_noise = gyro_noise

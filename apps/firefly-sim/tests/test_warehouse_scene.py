@@ -28,17 +28,19 @@ warehouse = pytest.mark.skipif(
 pytestmark = warehouse
 
 from firefly_mujoco.env import DroneEnv
-from firefly_mujoco.scene import SCENE_XML
+from firefly_mujoco.scene import build_scene
+
+WAREHOUSE_XML = build_scene("warehouse")
 
 
 def test_visual_mesh_does_not_collide():
-    m = mujoco.MjModel.from_xml_string(SCENE_XML)
+    m = mujoco.MjModel.from_xml_string(WAREHOUSE_XML)
     assert m.geom_contype[0] == 0
     assert m.geom_conaffinity[0] == 0
 
 
 def test_spawn_is_contact_free():
-    m = mujoco.MjModel.from_xml_string(SCENE_XML)
+    m = mujoco.MjModel.from_xml_string(WAREHOUSE_XML)
     d = mujoco.MjData(m)
     d.qpos[:3] = [2, 0, 1]
     d.qpos[3:] = [1, 0, 0, 0]
@@ -53,7 +55,7 @@ def test_spawn_is_contact_free():
     reason="无 GL 上下文（CI 无头）时跳过渲染器依赖用例",
 )
 def test_hover_holds_two_seconds():
-    env = DroneEnv()
+    env = DroneEnv(scene="warehouse")
     env.reset(np.array([2.0, 0.0, 1.0]), np.array([0.0, 0.0, 0.0, 1.0]))
     ref = np.array([2.0, 0.0, 1.0])
     for _ in range(400):

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """GICP 离线评测数据生成：先验点云 + 轨迹深度帧。
 
-- 先验云：解析 MuJoCo SCENE_XML（box 外表面 + 地面），0.08m 采样，
+- 先验云：解析 MuJoCo boxes 场景（box 外表面 + 地面），0.08m 采样，
   与 export_prior_planes.py 同几何源。
 - 轨迹帧：logs/bench/ff_fix/<traj>/run1 GT，每 2s 取一位姿（位置真值 +
   水平姿态），MuJoCo 直接摆位渲染深度（含默认噪声，诚实口径）。
@@ -24,7 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "packages" / "firefly-mujoco" / "src"))
 
 from firefly_mujoco import DroneEnv  # noqa: E402
-from firefly_mujoco.scene import SCENE_XML  # noqa: E402
+from firefly_mujoco.scene import build_scene  # noqa: E402
 
 OUT = REPO_ROOT / "logs" / "bench" / "gicp_eval"
 TRAJS = [
@@ -79,7 +79,7 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "frames").mkdir(exist_ok=True)
 
-    boxes = parse_boxes(SCENE_XML)
+    boxes = parse_boxes(build_scene("boxes"))
     print(f"[gen] boxes={len(boxes)}")
     cloud = [sample_box(c, h, 0.08) for c, h in boxes]
     gx, gy = np.meshgrid(
@@ -94,7 +94,7 @@ def main() -> None:
         f.write(prior.astype("<f4").tobytes())
     print(f"[gen] prior points={len(prior)}")
 
-    env = DroneEnv()  # 默认噪声（depth_noise=0.02）：诚实口径
+    env = DroneEnv(scene="boxes")  # 默认噪声（depth_noise=0.02）：诚实口径
     n_frames = 0
     for traj in TRAJS:
         run = REPO_ROOT / "logs" / "bench" / "ff_fix" / traj / "run1"

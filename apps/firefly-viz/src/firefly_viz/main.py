@@ -29,7 +29,7 @@ import iceoryx2 as iox2
 import numpy as np
 import rerun as rr
 
-from firefly_mujoco import LogMessage, TraceContext
+from firefly_mujoco import LogMessage, TraceContext, load_scene_name
 
 from .messages import (
     VIZ_KIND_ARROWS,
@@ -144,12 +144,12 @@ def _repo_root() -> Path:
 def _log_static_mesh() -> None:
     """静态场景 mesh（`world/warehouse`，`Asset3D` 一次性，无时间轴）。
 
-    场景选择与 `sim` 同源（`FIREFLY_SCENE`，缺省 `warehouse`）；只有对应场景
+    场景选择与 `sim` 同源（`configs/scene.toml`）；只有对应场景
     的 mesh 文件存在才记（boxes 等程序化场景无 mesh 文件，自然跳过——
     绝不在错误的场景上叠别家的房子）。坐标系：`structure.obj` 即世界系
     （米，与仿真同原点，x∈[0,46]、y∈[-8,8]、z∈[0,5]），直接落盘不做变换。
     """
-    if os.environ.get("FIREFLY_SCENE", "warehouse") != "warehouse":
+    if load_scene_name() != "warehouse":
         log("非 warehouse 场景，不记静态 mesh")
         return
     mesh_path = Path(

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """生成 MuJoCo 默认场景的 ffmap（gicp 在线靶图用）。
 
-与 export_prior_planes.py 同几何源（SCENE_XML 解析）：25 箱阵 + 中线柱 +
+与 export_prior_planes.py 同几何源（boxes 场景解析）：25 箱阵 + 中线柱 +
 侧翼柱 + 地面，外表面 0.1m 采样。输出 apps/planner/maps/sim_scene.ffmap
 （gitignored，见 .gitignore）。
 
@@ -19,14 +19,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "packages" / "firefly-mujoco" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from firefly_mujoco.scene import SCENE_XML  # noqa: E402
+from firefly_mujoco.scene import build_scene  # noqa: E402
 from gen_gicp_eval_data import parse_boxes, sample_box  # noqa: E402
 
 OUT = REPO_ROOT / "apps" / "planner" / "maps" / "sim_scene.ffmap"
 
 
 def main() -> None:
-    boxes = parse_boxes(SCENE_XML)
+    boxes = parse_boxes(build_scene("boxes"))
     pts = [sample_box(c, h, 0.1) for c, h in boxes]
     gx, gy = np.meshgrid(np.arange(0.0, 13.01, 0.2), np.arange(-1.0, 9.01, 0.2))
     pts.append(np.stack([gx.ravel(), gy.ravel(), np.zeros_like(gx.ravel())], axis=1))

@@ -20,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "packages" / "firefly-mujoco" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "apps" / "firefly-sim" / "src"))
 
-from firefly_mujoco import DroneEnv  # noqa: E402
+from firefly_mujoco import DroneEnv, load_scene_name  # noqa: E402
 from firefly_sim.trajectories import TRAJECTORIES  # noqa: E402
 
 OUT = REPO_ROOT / "logs" / "visamp"
@@ -36,7 +36,7 @@ def main() -> None:
     out = OUT / args.traj
     out.mkdir(parents=True, exist_ok=True)
 
-    env = DroneEnv(depth_noise=0.0)
+    env = DroneEnv(depth_noise=0.0, scene=load_scene_name())
     level = np.array([0.0, 0.0, 0.0, 1.0])
     n = 0
     t = 0.0
