@@ -27,17 +27,18 @@ from pathlib import Path
 
 import numpy as np
 
-#: 低饱和面（灰/白体）压到的灰黑区间（线性 sRGB 0~1）。
-BODY_LO = 0.05
-BODY_HI = 0.16
+#: 低饱和面（灰/白体）压到的灰黑区间（线性 sRGB 0~1）：压到近黑，
+#: 靠低粗糙度的高光给形体（黑亮），避免日光曝光下大片发灰。
+BODY_LO = 0.01
+BODY_HI = 0.05
 #: 饱和度阈值（max-min 小于此值按灰/白体处理）。
 SAT_THRESHOLD = 0.15
-#: 未着色面（CAD 无 Surf 色）的体色。
-DEFAULT_RGB = (0.12, 0.12, 0.12)
+#: 未着色面（CAD 无 Surf 色，装配匿名副本）的体色：同样压到近黑。
+DEFAULT_RGB = (0.025, 0.025, 0.025)
 #: 退化三角面积下限（m²）：低于此值不产生像素，建面前剔除。
 MIN_AREA = 1e-12
-#: 材质粗糙度（低饱和体面带一点光泽，暗面也有高光层次）。
-ROUGHNESS = 0.5
+#: 材质粗糙度（近黑体靠高光层次读形体；越低越亮）。
+ROUGHNESS = 0.3
 #: emissive 强度（配合 Bevy bloom）。
 EMISSION_STRENGTH = 8.0
 

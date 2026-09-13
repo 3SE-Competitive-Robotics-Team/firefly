@@ -17,7 +17,7 @@
 
 输出 `derived/raw/field_raw.npz`：`vertices`(N,3 f32, 米) / `faces`(M,3 i32) /
 `face_colors`(M,3 f32) / `part`(M, i32, 产品 tag)；`_manifest.json` 记包围盒、
-变换参数与逐件统计。下游（分组/减面/碰撞）只认这一份契约。
+变换参数与逐件统计。下游（碰撞/导出）只认这一份契约。
 """
 
 from __future__ import annotations
