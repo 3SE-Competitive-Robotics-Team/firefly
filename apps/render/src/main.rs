@@ -22,6 +22,7 @@
 //! force='scene').export('models/warehouse/structure.glb')"`。
 
 mod capture;
+mod config;
 mod link;
 mod rig;
 mod scene;
@@ -35,15 +36,11 @@ use bevy::prelude::*;
 use bevy::window::{Window, WindowPlugin};
 
 use capture::{CaptureHub, CapturePlugin};
+use config::RenderConfig;
 use link::{PendingFrames, drain_captures, open_ports, poll_pose};
 use rig::{PoseState, follow_main, spawn_rig};
 use scene::SceneSpec;
 use ui::setup_panel;
-
-/// 全局环境光亮度（cd/m²，`Bevy` 缺省 80）：场地照明偏亮，方向光之外补底，
-/// 避免背光面死黑。与三方向光联调，总照度须使传感器灰度均值落在 120~170/255
-/// （改一改二，以发布图像人工比对）。
-const AMBIENT_BRIGHTNESS: f32 = 200.0;
 
 /// 无人机起点由场景注册表提供（`models/<dir>` 与起点见 [`scene`]；对照
 /// `configs/sim.toml`）。asset root 恒为 `models/`，视觉恒为
@@ -58,6 +55,7 @@ fn main() {
         log::warn!("tracing 转发安装失败（Bevy 侧日志将静默）: {e}");
     }
     let spec = scene::selected();
+    let render_config = config::load();
     log::info!(
         "场景 {}：asset root {}，视觉 {}，起点 {:?}",
         spec.dir,
@@ -88,9 +86,10 @@ fn main() {
                 }),
         )
         .insert_resource(spec)
+        .insert_resource(render_config)
         .insert_resource(GlobalAmbientLight {
             color: Color::WHITE,
-            brightness: AMBIENT_BRIGHTNESS,
+            brightness: render_config.light.ambient,
             ..default()
         })
         .insert_resource(PoseState {
@@ -117,6 +116,7 @@ fn setup_scene(
     mut commands: Commands,
     assets: Res<AssetServer>,
     scene: Res<SceneSpec>,
+    render_config: Res<RenderConfig>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -125,20 +125,21 @@ fn setup_scene(
     )));
 
     // 照度锚定直射日光（`DirectionalLight` 文档：直射日光 32000~100000 lux；
-    // `MuJoCo` 的 diffuse 无物理单位，只取三灯比值 0.7:0.3:0.22）。
+    // `MuJoCo` 的 diffuse 无物理单位，只取三灯比值 0.7:0.3:0.22）。方向固定，
+    // 照度由 `configs/render.toml` 的 `light.directional` 调。
     // 地面灰度均值须落在 120~170/255（对照 `MuJoCo` 实测 140~160），
     // 否则 VIO 无特征可跟——改照度后以发布图像均值人工比对。
-    for (index, (dir, lux)) in [
-        (Vec3::new(-0.3, -0.25, -0.92), 50000.0),
-        (Vec3::new(-0.15, 0.6, -0.78), 21000.0),
-        (Vec3::new(0.75, 0.1, -0.65), 16000.0),
+    for (index, dir) in [
+        Vec3::new(-0.3, -0.25, -0.92),
+        Vec3::new(-0.15, 0.6, -0.78),
+        Vec3::new(0.75, 0.1, -0.65),
     ]
     .iter()
     .enumerate()
     {
         commands.spawn((
             DirectionalLight {
-                illuminance: *lux,
+                illuminance: render_config.light.directional[index],
                 shadow_maps_enabled: index == 0,
                 ..default()
             },
