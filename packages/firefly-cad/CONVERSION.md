@@ -22,10 +22,10 @@ RMUC 场地 STEP→glTF 的转换记录（工具版本、参数、映射；`mode
 - 焊接（阈值 1e-5 m）：2,601,664 顶点 / 5,013,804 三角。
 - 减面：Blender `Decimate(Collapse)`，目标 100k → 实测 **385,024 三角**
   （体素实心/分件多导致折叠下限偏高，待优化）。
-- 材质：面颜色直方图 Top-23 + 默认灰 `(0.30,0.30,0.30)` = 24 材质；
-  高饱和红/蓝（`is_emissive`）设 emission，强度 8。
-- VIO 特征层：平台顶 `z=0.51` 铺非周期随机点阵 1024²（seed 7，UV repeat 10×5），
-  repeat 烘进 UV（不依赖 `KHR_texture_transform`）。
+- 材质：低饱和（灰/白）面统一压进灰黑区间 `[0.05, 0.16]`（避免大片 off-white
+  在日光曝光下发白），饱和色（标线/红蓝绿灯饰）原样保留；频次 Top-N 取 24 项，
+  红/蓝/绿灯饰（8 项）设 emission，强度 8。**不加合成点阵/贴图平面**——特征
+  来自场地自身的板缝、标线与灯饰。
 - 坐标：Blender 导出 `export_yup=False`，场地系 Z 上，与 `apps/render` rig 一致。
 - 碰撞：`field_raw.npz` → 实心体素 0.15m → 贪心 AABB **1061 盒** →
   `rmuc2026_collision.json`；MuJoCo 侧只放这 1061 个透明 box（无视觉 mesh）。
