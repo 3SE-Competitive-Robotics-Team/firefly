@@ -8,7 +8,7 @@
 //! （由构造保证，rrd 里 `Bevy` 图与 `MuJoCo` 图逐像素对照是仲裁依据）。
 
 use bevy::asset::RenderAssetUsages;
-use bevy::camera::{Camera, Projection, RenderTarget};
+use bevy::camera::{Camera, Exposure, Projection, RenderTarget};
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::image::Image;
@@ -18,6 +18,8 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, T
 use bevy::render::view::Msaa;
 use bevy::ui::IsDefaultUiCamera;
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_WIDTH};
+
+use crate::config::RenderConfig;
 
 /// 垂直视场（度，对照 MJCF `fovy="70.88"`）。
 pub const FOV_Y_DEG: f32 = 70.88;
@@ -117,7 +119,12 @@ pub fn sensor_target() -> Image {
 /// 装配 rig：三传感器相机（左/右/深度）+ 主视角跟随相机。
 // 系统参数按值传递（`SystemParam` 契约，见 `main.rs` 同类标注）。
 #[allow(clippy::needless_pass_by_value)]
-pub fn spawn_rig(mut commands: Commands, mut images: ResMut<Assets<Image>>, pose: Res<PoseState>) {
+pub fn spawn_rig(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    pose: Res<PoseState>,
+    config: Res<RenderConfig>,
+) {
     let left = images.add(sensor_target());
     let right = images.add(sensor_target());
     let depth_color = images.add(sensor_target());
@@ -126,6 +133,11 @@ pub fn spawn_rig(mut commands: Commands, mut images: ResMut<Assets<Image>>, pose
         right: right.clone(),
     });
 
+    // 传感器与主视角同一曝光（对照 `configs/render.toml` 的 `view.ev100`）：
+    // 曝光与光照量级不匹配会整幅惨白。
+    let exposure = Exposure {
+        ev100: config.view.ev100,
+    };
     let eyes = [
         (Eye::Left, LEFT_OFFSET, left),
         (Eye::Right, RIGHT_OFFSET, right),
@@ -139,6 +151,7 @@ pub fn spawn_rig(mut commands: Commands, mut images: ResMut<Assets<Image>>, pose
             Msaa::Off,
             sensor_projection(),
             Tonemapping::None,
+            exposure,
             eye,
             eye_transform(pose.pos, pose.quat, offset),
         ));
@@ -151,7 +164,11 @@ pub fn spawn_rig(mut commands: Commands, mut images: ResMut<Assets<Image>>, pose
     // 传感器相机不加 bloom：VIO 前端吃原图，泛光会糊掉角点。
     commands.spawn((
         Camera3d::default(),
-        Bloom::default(),
+        exposure,
+        Bloom {
+            intensity: config.view.bloom_intensity,
+            ..default()
+        },
         IsDefaultUiCamera,
         Transform::from_translation(pose.pos + Vec3::new(-6.0, 0.0, 3.0))
             .looking_at(pose.pos, Vec3::Z),

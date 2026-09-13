@@ -1,7 +1,14 @@
-# apps/render 视觉配置（只管光照；场景在 configs/scene.toml，与 sim/viz 共用）。
-# 改动这里即可调亮度，不必重编译。若过暗/过亮，优先调 ambient。
+# apps/render 视觉配置（只管光照/相机；场景在 configs/scene.toml，与 sim/viz 共用）。
+# 改动这里即可调画面，不必重编译。若画面惨白，先查 ev100 与 directional 是否同量级。
 [light]
-# 全局环境光（cd/m²，Bevy 缺省 80）：补底防背光面死黑。
-ambient = 50.0
+# 全局环境光（cd/m²，Bevy 缺省 80）：补底防背光面死黑；过高会发灰、不通透。
+ambient = 30.0
 # 三方向光照度（lux，方向固定，比值对照 MuJoCo diffuse 0.7:0.3:0.22）。
-directional = [35000.0, 15000.0, 11000.0]
+directional = [32000.0, 14000.0, 10000.0]
+
+[view]
+# 相机曝光 EV100（越大越暗）：必须与 directional 的量级匹配。
+# 参照：日光 15 / 阴天 12 / 室内 7；Bevy 缺省（室内量级）9.7。
+ev100 = 15.0
+# 主视角 bloom 强度（0 关闭）；过高发灰、不通透。
+bloom_intensity = 0.08
