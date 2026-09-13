@@ -35,11 +35,18 @@ impl SceneSpec {
 pub const DEFAULT_SCENE: &str = "warehouse";
 
 /// 已注册场地（视觉 glb + 起点；碰撞描述在 `MuJoCo` 侧注册表）。
-const SCENES: &[SceneSpec] = &[SceneSpec {
-    dir: "warehouse",
-    visual: "structure.glb",
-    start: [2.0, 0.0, 1.0],
-}];
+const SCENES: &[SceneSpec] = &[
+    SceneSpec {
+        dir: "warehouse",
+        visual: "structure.glb",
+        start: [2.0, 0.0, 1.0],
+    },
+    SceneSpec {
+        dir: "rmuc2026",
+        visual: "field.glb",
+        start: [2.0, 0.0, 1.0],
+    },
+];
 
 /// 按 `FIREFLY_SCENE` 选场景；未注册回退 [`DEFAULT_SCENE`]。
 #[must_use]

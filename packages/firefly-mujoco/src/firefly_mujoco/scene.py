@@ -28,6 +28,7 @@
   用运行时生成的随机点阵（见下）。
 """
 
+import json
 import os
 import struct
 import tempfile
@@ -215,6 +216,60 @@ def _warehouse_scene_xml() -> str:
 """
 
 
+#: RMUC2026 资产目录（相对仓库根；models/ 已 ignore，不进 git）。
+_RMUC_DIR = (
+    Path(__file__).resolve().parent.parent.parent.parent.parent
+    / "models"
+    / "rmuc2026"
+)
+
+
+def _rmuc_collision_xml() -> str:
+    """低质量聚合碰撞盒 MJCF（视觉归 Bevy，此处只放透明碰撞体）。
+
+    盒集合来自 `firefly-cad-collide`（实心体素 + 贪心 AABB，保留凹结构，
+    对照 `models/rmuc2026/rmuc2026_collision.json`）。
+    """
+    report = json.loads((_RMUC_DIR / "rmuc2026_collision.json").read_text(encoding="utf-8"))
+    return "\n".join(
+        f'    <geom type="box" pos="{cx} {cy} {cz}" size="{hx} {hy} {hz}" rgba="0 0 0 0"/>'
+        for cx, cy, cz, hx, hy, hz in report["boxes"]
+    )
+
+
+def _rmuc_scene_xml() -> str:
+    """RMUC2026 场地：Bevy 负责视觉（`field.glb`），MuJoCo 只加载聚合碰撞盒。"""
+    return rf"""<mujoco model="firefly-rmuc2026">
+  <option timestep="0.005" gravity="0 0 -9.81"/>
+
+  <worldbody>
+    <light name="sun_a" type="directional" dir="-0.3 -0.25 -0.92" diffuse="0.7 0.7 0.68"/>
+    <light name="sun_b" type="directional" dir="-0.15 0.6 -0.78" diffuse="0.3 0.3 0.35"/>
+    <light name="sun_c" type="directional" dir="0.75 0.1 -0.65" diffuse="0.22 0.22 0.25"/>
+
+    <!-- 视觉：Bevy 载 models/rmuc2026/field.glb；物理只有下面的透明碰撞盒 -->
+{_rmuc_collision_xml()}
+
+    <body name="drone" pos="2 0 1">
+      <freejoint/>
+      <geom type="box" size="0.15 0.15 0.04" rgba="0.90 0.70 0.20 1"/>
+      <geom type="sphere" pos="0.25 0 0" size="0.06" rgba="0.80 0.20 0.20 1"/>
+      <geom type="sphere" pos="-0.25 0 0" size="0.06" rgba="0.20 0.80 0.20 1"/>
+      <camera name="cam_left" pos="0 -0.025 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
+      <camera name="cam_right" pos="0 0.025 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
+      <camera name="cam_depth" pos="0 0 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
+      <site name="imu_site" pos="0 0 0"/>
+    </body>
+  </worldbody>
+
+  <sensor>
+    <gyro name="gyro" site="imu_site"/>
+    <accelerometer name="accel" site="imu_site"/>
+  </sensor>
+</mujoco>
+"""
+
+
 def _boxes_scene_xml() -> str:
     """旧手捏箱子阵列场景（ffmap 时代残留，仅回归对照）。"""
     return rf"""<mujoco model="firefly">
@@ -300,6 +355,10 @@ def _select_scene_xml() -> str:
         if (_WAREHOUSE_DIR / "structure.obj").is_file():
             return _warehouse_scene_xml()
         print("[scene] 仓库资产缺失（models/warehouse/structure.obj），回退 boxes 场景")
+    elif name == "rmuc2026":
+        if (_RMUC_DIR / "rmuc2026_collision.json").is_file():
+            return _rmuc_scene_xml()
+        print("[scene] RMUC 碰撞资产缺失（models/rmuc2026/rmuc2026_collision.json），回退 boxes 场景")
     elif name != "boxes":
         print(f"[scene] 未知场景 {name}，回退 boxes 场景")
     return _boxes_scene_xml()
