@@ -20,6 +20,7 @@ use bevy::ui::IsDefaultUiCamera;
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_WIDTH};
 
 use crate::config::RenderConfig;
+use crate::freecam::FreeCam;
 
 /// 垂直视场（度，对照 MJCF `fovy="70.88"`）。
 pub const FOV_Y_DEG: f32 = 70.88;
@@ -191,13 +192,15 @@ pub fn apply_pose_to_eyes(pose: &PoseState, eyes: &mut Query<(&Eye, &mut Transfo
 }
 
 /// 主视角跟随（机体后上方追踪，`MuJoCo` 系：后为 -x，上为 +z）。
+/// 自由浏览模式下让位给 `freecam::freecam_move`。
 // 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 pub fn follow_main(
     pose: Res<PoseState>,
+    free: Res<FreeCam>,
     mut main: Single<&mut Transform, (With<Camera>, Without<Eye>)>,
 ) {
-    if !pose.has_pose {
+    if free.enabled || !pose.has_pose {
         return;
     }
     let back = pose.quat * Vec3::new(-6.0, 0.0, 3.0);
