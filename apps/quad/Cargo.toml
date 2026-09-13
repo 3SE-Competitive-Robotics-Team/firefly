@@ -1,0 +1,24 @@
+[package]
+name = "quad"
+version = "0.1.0"
+keywords = ['simulation', 'drone', 'game']
+categories = ['simulation', 'game-engines']
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "quad"
+path = "src/main.rs"
+
+[dependencies]
+bevy = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+
+[lints]
+workspace = true
