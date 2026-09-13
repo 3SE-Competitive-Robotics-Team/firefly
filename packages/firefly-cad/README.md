@@ -32,8 +32,12 @@ Blender 精修（PBR/红蓝 emissive/点阵贴花）与最终 `field.glb` 导出
 # 普查（out 缺省为 <stp 同目录>/derived/census）
 uv run --package firefly-cad firefly-cad-census models/rmuc2026/RMUC2026_2.0.0.stp
 
-# 测试（合成小 STEP 往返，不依赖 1.2G 真文件；pytest 约定对照 CI）
-uv run --with pytest pytest packages/firefly-cad/tests/ -q -p no:cacheprovider
+# 碰撞聚合（三角网格 → 实心体素 → 贪心 AABB 盒；供 MuJoCo 生成 box geom）
+uv run --package firefly-cad firefly-cad-collide \
+  --out models/rmuc2026/rmuc2026_collision.json --res 0.15 models/rmuc2026/derived/raw/*.obj
+
+# 测试（合成小 STEP / 合成网格，不依赖 1.2G 真件；pytest 约定对照 CI）
+uv run --package firefly-cad --with pytest pytest packages/firefly-cad/tests/ -q -p no:cacheprovider
 ```
 
 ## 记录
