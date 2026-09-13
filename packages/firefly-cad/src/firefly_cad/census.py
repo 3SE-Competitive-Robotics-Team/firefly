@@ -40,18 +40,6 @@ def _count(shape, shape_type: int) -> int:
     return n
 
 
-def _label_name(label) -> str | None:
-    from OCP.TDataStd import TDataStd_Name
-
-    attr = TDataStd_Name()
-    if label.FindAttribute(TDataStd_Name.GetID_s(), attr):
-        try:
-            return str(attr.Get().ToExtString())
-        except Exception:  # noqa: BLE001 -- 名字缺失只影响展示，不断整轮普查
-            return None
-    return None
-
-
 def _shape_color(color_tool, shape):
     """按 Gen→Surf→Curv 顺序取色（STEP 往返会把 Gen 烘成 Surf，实测结论）。"""
     from OCP.Quantity import Quantity_Color
@@ -92,6 +80,15 @@ def read_census(stp_path: Path, progress_every: int = 100) -> dict:
         "OCP.STEPCAFControl", fromlist=["STEPCAFControl_Reader"]
     ).STEPCAFControl_Reader
     reader = reader_cls()
+    # 产品名全为匿名 BREP_N，装配名对分组无用：关 NameMode 绕开 XCAF 逐子形状
+    # 命名的平方级路径（实测该模式使 1.2G 装配的 Transfer 卡死 >1h，关闭后 ~37s）。
+    # 颜色必须保留（分组与红蓝灯饰识别的依据）。
+    reader.SetColorMode(True)
+    reader.SetNameMode(False)
+    reader.SetLayerMode(False)
+    reader.SetPropsMode(False)
+    reader.SetGDTMode(False)
+    reader.SetSHUOMode(False)
     status = reader.ReadFile(str(stp_path))
     log.info("STEP 读取状态: %s", status)
     doc = TDocStd_Document(TCollection_ExtendedString("census"))
@@ -158,7 +155,7 @@ def read_census(stp_path: Path, progress_every: int = 100) -> dict:
             products.append(
                 {
                     "tag": tag,
-                    "name": _label_name(label) or f"tag_{tag}",
+                    "name": f"tag_{tag}",
                     "is_assembly": is_assembly,
                     "is_top_level": tag in free_tags,
                     "n_components": int(shape_cls.NbComponents_s(label))

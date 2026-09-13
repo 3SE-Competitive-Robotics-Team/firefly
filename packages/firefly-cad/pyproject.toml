@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 firefly-cad-census = "firefly_cad.census:main"
+firefly-cad-tessellate = "firefly_cad.tessellate:main"
 firefly-cad-collide = "firefly_cad.collide:main"
 
 [build-system]
