@@ -90,13 +90,13 @@ pub fn dynamics(
         * Quat::from_rotation_x(roll);
 
     // 姿态误差（机体系）→ 角速度指令；`Q/E` 作为机体 Z 角速度前馈（绕机体轴偏航）。
-    let q_err = transform.rotation.inverse() * q_des;
-    let (axis, angle) = q_err.to_axis_angle();
-    let e = if angle.is_finite() {
-        axis * angle
-    } else {
-        Vec3::ZERO
-    };
+    // `q` 与 `-q` 表示同一旋转：`w<0` 时 `to_axis_angle` 返回接近 2π 的大角度
+    //（航向在 ±π 回绕时触发），故先折叠到最近路径。
+    let mut q_err = transform.rotation.inverse() * q_des;
+    if q_err.w < 0.0 {
+        q_err = -q_err;
+    }
+    let e = q_err.to_scaled_axis();
     let rate_des = e * ctl.attitude_kp + Vec3::Z * (-input.yaw * ctl.yaw_rate_max);
     let rate_error = rate_des - quad.ang_vel;
     quad.ang_vel += rate_error * ctl.rate_kp * dt;
