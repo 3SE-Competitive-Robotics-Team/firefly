@@ -1,6 +1,6 @@
 # firefly-cad
 
-RMUC 场地 `STEP→glTF` 资产管线（Blender 精修的上游，Blender 只做美术与减面，
+RMUC 场地 `STEP→glTF` 资产管线（Blender 精修的上游，Blender 只做材质与导出，
 场地约定见 `models/rmuc2026/README.md`）。
 
 ## 阶段（一步一包，可独立复现）
@@ -13,19 +13,20 @@ RMUC 场地 `STEP→glTF` 资产管线（Blender 精修的上游，Blender 只�
    label 递归）。输出 `derived/raw/field_raw.npz`（`vertices` 米已归一化 /
    `faces` / `face_colors` 逐面 sRGB，无颜色记 -1 / `part` 产品 tag）与
    `_manifest.json`。这是下游唯一契约。
-3. `group`：读 `groups.json`（人工可编辑：匿名 tag → 功能组）与 `field_raw.npz`
-   归档；减面交 Blender `Decimate`（headless，见 `scripts/`）。
-4. `collide`（已实现）：`field_raw.npz` → 实心体素 → 贪心 AABB 盒 →
+3. `collide`（已实现）：`field_raw.npz` → 实心体素 → 贪心 AABB 盒 →
    `<scene>_collision.json`（供 `MuJoCo` 生成 box geom；凹结构不跨空腔）。
+4. `export`（`scripts/blender_field.py`）：`field_raw.npz` → 逐面 CAD 颜色 →
+   PBR 材质 → `field.glb`。**不减面、不焊接**——逐 solid 三角化拓扑原样保留
+   （弯曲面平滑、面间锐边、壳不粘连），只剔除零面积退化三角。
 
-Blender 精修（CAD 颜色→PBR 灰黑体 + 红蓝绿 emissive）与最终 `field.glb` 导出不在本包，
-由 `scripts/` 下的 headless Blender 脚本承担。
+视觉导出用 headless Blender（CAD 颜色→PBR 灰黑体 + 红蓝绿 emissive），
+不进本包源码。
 
 ## XCAF 读取约束
 
 `STEPCAFControl_Reader` 必须关 `NameMode`：产品名全匿名，而 `NameMode` 会触发
 逐子形状命名的平方级路径——实测 1.2G 装配的 `Transfer` 卡死 >1h，关闭后 ~37s
-（`ReadFile` 约 21s）。颜色必须保留（分组与红蓝灯饰识别的依据），
+（`ReadFile` 约 21s）。颜色必须保留（灯饰识别与材质分色的依据），
 其余 `Layer/Props/GDT/SHUO` 全关。
 
 ## 资产接入约定（换场地 = 新目录 + 注册一行）
@@ -56,8 +57,8 @@ uv run --package firefly-cad --with pytest pytest packages/firefly-cad/tests/ -q
 
 ## 记录
 
-每次转换在 `CONVERSION.md` 追加一条：工具版本、偏差参数、匿名件→功能分组映射、
-红蓝灯饰清单、减面前后面数。`models/` 已 ignore，记录随本包进 git。
+每次转换在 `CONVERSION.md` 追加一条：工具版本、偏差参数、红蓝灯饰清单、
+三角数与材质数。`models/` 已 ignore，记录随本包进 git。
 
 ## 验证
 

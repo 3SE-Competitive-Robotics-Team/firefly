@@ -20,7 +20,7 @@ pub struct Quad {
     pub velocity: Vec3,
     /// 机体系角速度（rad/s）。
     pub ang_vel: Vec3,
-    /// 累积偏航（rad）。
+    /// 当前航向（rad，世界 Z；由机体姿态导出，供倾斜参考与相机）。
     pub yaw: f32,
 }
 
@@ -76,16 +76,20 @@ pub fn dynamics(
         return;
     }
 
-    // 期望姿态：`W` 前倾、`D` 右倾（`+roll` 绕 `+X` 把推力压向 `+Y`→右）。
+    // 当前航向（世界 Z；机体 X 轴在水平面的投影），供倾斜参考与相机使用。
+    let fwd = transform.rotation * Vec3::X;
+    quad.yaw = fwd.y.atan2(fwd.x);
+
+    // 期望姿态：当前航向下叠加期望倾斜。偏航不写进姿态——它是机体 Z 的角速度，
+    // 随倾斜一起转（真机绕机体轴偏航），故用下面的角速度前馈。
     let tilt = ctl.tilt_max_deg.to_radians();
     let roll = input.roll * tilt;
     let pitch = input.pitch * tilt;
-    quad.yaw -= input.yaw * ctl.yaw_rate_max * dt;
     let q_des = Quat::from_rotation_z(quad.yaw)
         * Quat::from_rotation_y(pitch)
         * Quat::from_rotation_x(roll);
 
-    // 姿态误差（机体系）→ 角速度指令 → 角加速度。
+    // 姿态误差（机体系）→ 角速度指令；`Q/E` 作为机体 Z 角速度前馈（绕机体轴偏航）。
     let q_err = transform.rotation.inverse() * q_des;
     let (axis, angle) = q_err.to_axis_angle();
     let e = if angle.is_finite() {
@@ -93,7 +97,7 @@ pub fn dynamics(
     } else {
         Vec3::ZERO
     };
-    let rate_des = e * ctl.attitude_kp;
+    let rate_des = e * ctl.attitude_kp + Vec3::Z * (-input.yaw * ctl.yaw_rate_max);
     let rate_error = rate_des - quad.ang_vel;
     quad.ang_vel += rate_error * ctl.rate_kp * dt;
     quad.ang_vel *= 1.0 - (body.angular_drag * dt).min(0.5);
