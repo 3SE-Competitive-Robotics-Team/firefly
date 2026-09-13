@@ -14,6 +14,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::text::FontSize;
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_SIZE, IMAGE_WIDTH};
 
 /// 面板宽度（像素）。
@@ -26,6 +27,16 @@ const THUMB_HEIGHT: f32 = 141.0;
 const DEPTH_WIDTH: f32 = 384.0;
 /// 深度图高度（像素）。
 const DEPTH_HEIGHT: f32 = 288.0;
+
+/// 左上角模式提示（`freecam` 按模式更新）。
+#[derive(Component)]
+pub struct ModeLabel;
+
+/// 跟随模式提示（ASCII：Bevy 缺省字体无 CJK 字形，中文会触发 ICU4X 报错且不显示）。
+pub const FOLLOW_HINT: &str = "Follow drone   |   F: free look";
+/// 自由浏览模式提示。
+pub const FREE_HINT: &str =
+    "Free look   |   WASD: move   mouse: look   Q/E: up-down   Shift: boost   F/Esc: exit";
 
 /// 调试显示图（CPU 写入的 `RGBA8` 图，`ImageNode` 直接引用同句柄）。
 #[derive(Resource)]
@@ -72,6 +83,22 @@ pub fn setup_panel(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     ];
     let depth = views.depth.clone();
     commands.insert_resource(views);
+
+    commands.spawn((
+        Text::new(FOLLOW_HINT),
+        TextFont {
+            font_size: FontSize::Px(16.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.92, 0.92, 0.92)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(12.0),
+            top: Val::Px(10.0),
+            ..default()
+        },
+        ModeLabel,
+    ));
 
     commands
         .spawn((

@@ -23,6 +23,7 @@
 
 mod capture;
 mod config;
+mod freecam;
 mod link;
 mod rig;
 mod scene;
@@ -37,6 +38,7 @@ use bevy::window::{Window, WindowPlugin};
 
 use capture::{CaptureHub, CapturePlugin};
 use config::RenderConfig;
+use freecam::{FreeCam, freecam_move, toggle_freecam, update_mode_label};
 use link::{PendingFrames, drain_captures, open_ports, poll_pose};
 use rig::{PoseState, follow_main, spawn_rig};
 use scene::SceneSpec;
@@ -98,11 +100,16 @@ fn main() {
         })
         .insert_resource(CaptureHub::default())
         .insert_resource(PendingFrames::default())
+        .insert_resource(FreeCam::default())
         .insert_non_send(ports)
         .add_plugins(CapturePlugin)
         .add_systems(Startup, (setup_scene, spawn_rig, setup_panel))
         .add_systems(PreUpdate, poll_pose)
         .add_systems(Update, follow_main)
+        .add_systems(
+            Update,
+            (toggle_freecam, freecam_move, update_mode_label).chain(),
+        )
         .add_systems(Last, (drain_captures, flush_on_exit))
         .run();
 }
