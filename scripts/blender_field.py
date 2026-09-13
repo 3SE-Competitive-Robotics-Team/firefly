@@ -31,6 +31,67 @@ PALETTE_SIZE = 24
 WELD_DIST = 1e-5
 #: emissive 强度（配合 Bevy bloom）。
 EMISSION_STRENGTH = 8.0
+#: VIO 特征层：非周期随机点阵平面（对照 `firefly_mujoco/scene.py` 的生成约定）。
+#: 场地平台顶约 0.5m，点阵平面铺在平台上一点。
+FLOOR_Z = 0.51
+FLOOR_HALF = (14.5, 7.8)
+DOTS_REPEAT = (10, 5)
+DOTS_SEED = 7
+
+
+def dots_texture(size: int = 1024, seed: int = DOTS_SEED) -> np.ndarray:
+    """非周期随机点阵（灰度 0~255，三档尺度随机矩形，固定种子）。"""
+    rng = np.random.default_rng(seed)
+    img = np.full((size, size), 128, np.uint8)
+    for n, lo, hi in ((24, 64, 256), (160, 16, 64), (900, 4, 16)):
+        for _ in range(n):
+            y = int(rng.integers(0, size))
+            x = int(rng.integers(0, size))
+            hh = int(rng.integers(lo, hi))
+            ww = int(rng.integers(lo, hi))
+            img[y : y + hh, x : x + ww] = np.uint8(rng.integers(35, 220))
+    return img
+
+
+def add_dots_plane() -> None:
+    """在平台顶叠一张非周期随机点阵平面（VIO 特征来源）。
+
+    glTF 不支持程序化节点，故生成真实图像 + UV（Mapping 缩放做 repeat）。
+    """
+    import bpy
+
+    size = 1024
+    gray = dots_texture(size)
+    image = bpy.data.images.new("dots", width=size, height=size, alpha=False)
+    rgba = np.empty((size, size, 4), dtype=np.float32)
+    rgba[..., :3] = (gray[..., None] / 255.0)
+    rgba[..., 3] = 1.0
+    image.pixels.foreach_set(rgba.ravel())
+    image.pack()
+
+    bpy.ops.mesh.primitive_plane_add(size=2.0, location=(0.0, 0.0, FLOOR_Z))
+    plane = bpy.context.active_object
+    plane.name = "feature_ground"
+    plane.scale = (FLOOR_HALF[0], FLOOR_HALF[1], 1.0)
+    # repeat 烘进 UV（不依赖 glTF 的 KHR_texture_transform，Bevy 兼容性更稳）。
+    uv_layer = plane.data.uv_layers.active
+    for loop_uv in uv_layer.data:
+        loop_uv.uv = (loop_uv.uv[0] * DOTS_REPEAT[0], loop_uv.uv[1] * DOTS_REPEAT[1])
+
+    mat = bpy.data.materials.new(name="feature_ground")
+    mat.use_nodes = True
+    tree = mat.node_tree
+    nodes, links = tree.nodes, tree.links
+    bsdf = nodes.get("Principled BSDF")
+    bsdf.inputs["Roughness"].default_value = 0.9
+    tex = nodes.new("ShaderNodeTexImage")
+    tex.image = image
+    tex.interpolation = "Linear"
+    tex.extension = "REPEAT"
+    coord = nodes.new("ShaderNodeTexCoord")
+    links.new(coord.outputs["UV"], tex.inputs["Vector"])
+    links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+    plane.data.materials.append(mat)
 
 
 def is_emissive(rgb: tuple[float, float, float]) -> bool:
@@ -139,6 +200,8 @@ def main() -> None:
         mod.ratio = target / len(mesh.polygons)
         bpy.ops.object.modifier_apply(modifier=mod.name)
     print(f"[blender_field] decimated: {len(mesh.polygons)} tris", flush=True)
+
+    add_dots_plane()
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     bpy.ops.export_scene.gltf(
