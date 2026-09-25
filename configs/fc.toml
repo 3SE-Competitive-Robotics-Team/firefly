@@ -1,0 +1,15 @@
+# firefly-fc 配置（缺键回落代码默认值：`apps/fc/src/config.rs` + `firefly-flight`）
+# 机体/执行器参数（质量、惯量、旋翼几何、单电机推力上限）不在这里：由被控对象经
+# `Firefly/Airframe` 发布，飞控运行时装配——改机体不动飞控。
+
+# 控制环频率（Hz）：指令按此频率发布，被控对象每步取最新样本
+rate_hz = 1000.0
+
+[control]
+# 外环（位置）增益按**反馈质量**取：位置/速度来自 VIO（10Hz，bench baseline 实测
+# 34s ATE≈1.2m、初始化时速度瞬态可达 0.5m/s），crate 默认 6/5 是给真值反馈的
+# demo 机的，照搬会把估计瞬态当真实运动追（实测：压推力俯冲→触地翻滚→估计发散）。
+# 现值与 bench 冻结的 sim 侧夹具同口径（ω≈1.5 rad/s、ζ≈0.82），跟踪误差同量级。
+pos_kp = 2.2
+vel_kp = 2.4
+# 内环（姿态/角速度）跑在 1kHz，保持 crate 默认的带宽（attitude_kp=10、rate_kp=20）。

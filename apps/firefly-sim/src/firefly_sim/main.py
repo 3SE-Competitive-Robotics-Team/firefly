@@ -6,6 +6,12 @@
 每个相机帧周期（10Hz）开一条新 OTel trace：周期内发布的 IMU/双目/深度/
 真值共享同一 `trace_id`，Rust 侧续接后形成 传感器→vio→demo→参考 的闭环
 单周期 trace；下一相机帧开新 trace（可区分每次输入）。
+
+本进程是**被控对象**：发布传感器与被控对象状态（`Firefly/PlantState`，每个物理步）、
+机体/执行器描述（`Firefly/Airframe`，1Hz 电平），订阅飞控指令（`Firefly/Control`，
+取最新）施加 4 电机推力；无有效指令时悬停兜底（失效保护）。控制律唯一实现在
+`firefly-flight`（飞控进程 `apps/fc`）；`--script` 模式例外：那是 VIO 验证的轨迹
+跟踪夹具（真值反馈，`DroneEnv.apply_pd`），不带飞控。
 """
 
 from __future__ import annotations
@@ -17,10 +23,15 @@ import iceoryx2 as iox2
 import numpy as np
 
 from firefly_mujoco import (
+    AIRFRAME_TOPIC,
+    CONTROL_TOPIC,
     LOG_LEVEL_ERROR,
     LOG_LEVEL_INFO,
     LOG_LEVEL_WARN,
     LOG_TOPIC,
+    PLANT_STATE_TOPIC,
+    AirframeMessage,
+    ControlMessage,
     DroneEnv,
     GrayImageMessage,
     DepthImageMessage,
@@ -29,6 +40,7 @@ from firefly_mujoco import (
     ImuMessage,
     LogMessage,
     OdomMessage,
+    PlantStateMessage,
     ReferenceMessage,
     TraceContext,
     load_scene_name,
@@ -51,8 +63,6 @@ TOPIC_REF = "Firefly/Reference"
 #: （`Firefly/VoidOdom`，DIVO 里程计 A/B 对比用）。
 TOPIC_ODOM = "Firefly/Odometry"
 TOPIC_VOIDODOM = "Firefly/VoidOdom"
-#: 校正后里程计（GICP 融合输出；与 Rust `odom::CORRECTED_ODOM_TOPIC` 一致）
-TOPIC_CORR = "Firefly/CorrectedOdometry"
 #: 任务启动超时（秒）：上电后无 ready 则报错退出（fail loudly），
 #: 不静默起飞。估计器侧 GT 等待 30s 是双保险，这里先触发。
 MISSION_TIMEOUT = 15.0
@@ -78,6 +88,19 @@ def load_config(path: str = "configs/sim.toml") -> dict:
 #: 后续 open 不得超限——bench 流程 sim 先起，手动流程 vio 先起，两边必须一致）。
 IMU_SERVICE_MAX = 128
 
+#: 被控对象状态服务订阅端上限（与 Rust `plant.rs: PLANT_STATE_SERVICE_MAX` 同值；
+#: sim 先起时由本进程创建服务，飞控订阅不得超限）。
+PLANT_STATE_SERVICE_MAX = 8
+#: 机体描述服务订阅端上限（与 Rust `plant.rs: AIRFRAME_SERVICE_MAX` 同值）。
+AIRFRAME_SERVICE_MAX = 4
+#: 飞控指令服务订阅端上限（与 Rust `control.rs: CONTROL_SERVICE_MAX` 同值）。
+CONTROL_SERVICE_MAX = 32
+
+#: 机体描述发布周期（秒）：1Hz 持续电平（iceoryx2 无 latch，靠重发保证晚订阅必收）。
+AIRFRAME_PERIOD = 1.0
+#: 飞控指令陈旧阈值（仿真秒）：超过即悬停兜底（失效保护，不是跟踪律）。
+CONTROL_STALE = 0.05
+
 
 def _publisher(node, topic: str, payload_cls, subscriber_max: int | None = None):
     builder = (
@@ -91,13 +114,15 @@ def _publisher(node, topic: str, payload_cls, subscriber_max: int | None = None)
     return service.publisher_builder().create()
 
 
-def _subscriber(node, topic: str, payload_cls):
-    service = (
+def _subscriber(node, topic: str, payload_cls, subscriber_max: int | None = None):
+    builder = (
         node.service_builder(iox2.ServiceName.new(topic))
         .publish_subscribe(payload_cls)
         .user_header(TraceContext)
-        .open_or_create()
     )
+    if subscriber_max is not None:
+        builder = builder.subscriber_max_buffer_size(subscriber_max)
+    service = builder.open_or_create()
     return service.subscriber_builder().create()
 
 
@@ -145,6 +170,36 @@ def _publish_traced(pub, cycle, name: str, msg, ts: float) -> None:
     sample.write_payload(msg).send()
 
 
+def _publish_plant_state(pub, env: DroneEnv, t: float) -> None:
+    """发布被控对象状态（真值，每个物理步；无 span——高频状态不进 trace 树）。"""
+    pos, vel, quat_xyzw, angvel = env.state()
+    msg = PlantStateMessage()
+    msg.timestamp = t
+    msg.position_x, msg.position_y, msg.position_z = pos
+    msg.velocity_x, msg.velocity_y, msg.velocity_z = vel
+    msg.quat_x, msg.quat_y, msg.quat_z, msg.quat_w = quat_xyzw
+    msg.angular_velocity_x, msg.angular_velocity_y, msg.angular_velocity_z = angvel
+    _publish_traced(pub, None, "publish-plant-state", msg, t)
+
+
+def _publish_airframe(pub, env: DroneEnv, t: float) -> None:
+    """发布机体/执行器描述（质量/惯量/旋翼几何/电机上限；飞控参数的唯一来源）。"""
+    af = env.airframe()
+    msg = AirframeMessage()
+    msg.timestamp = t
+    msg.mass = af["mass"]
+    msg.inertia_x, msg.inertia_y, msg.inertia_z = af["inertia"]
+    msg.linear_drag = af["linear_drag"]
+    msg.angular_drag = af["angular_drag"]
+    for i, pos in enumerate(af["rotor_positions"]):
+        msg.rotor_positions[i][0], msg.rotor_positions[i][1], msg.rotor_positions[i][2] = pos
+    for i, spin in enumerate(af["rotor_spins"]):
+        msg.rotor_spins[i] = spin
+    msg.max_thrust_per_motor = af["max_thrust_per_motor"]
+    msg.torque_coefficient = af["torque_coefficient"]
+    _publish_traced(pub, None, "publish-airframe", msg, t)
+
+
 def main() -> None:
     # --script [NAME]：不使用 planner，改由具名轨迹生成器驱动运动（VIO 验证用）；
     # 省略 NAME 时用 lissajous_classic（历史基线曲线）
@@ -177,7 +232,18 @@ def main() -> None:
     env = DroneEnv(scene=load_scene_name())
     env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))  # xyzw 单位四元数
     ftrace.init(enabled=trace_enabled)
-    log("MuJoCo 环境就绪：质量 {:.1f} kg，物理 {:.0f} Hz".format(env.mass, 1 / physics_period))
+    airframe = env.airframe()
+    log(
+        "MuJoCo 环境就绪：质量 {:.3f} kg，惯量 [{:.2e} {:.2e} {:.2e}] kg·m²，"
+        "单电机上限 {:.2f} N，物理 {:.0f} Hz".format(
+            airframe["mass"],
+            airframe["inertia"][0],
+            airframe["inertia"][1],
+            airframe["inertia"][2],
+            airframe["max_thrust_per_motor"],
+            1 / physics_period,
+        )
+    )
     if script_mode:
         log(f"--script：轨迹 {trajectory.name} 驱动运动（跳过 planner）")
     if not trace_enabled:
@@ -194,16 +260,20 @@ def main() -> None:
     right_pub = _publisher(node, TOPIC_CAM_RIGHT, GrayImageMessage)
     depth_pub = _publisher(node, TOPIC_DEPTH, DepthImageMessage)
     gt_pub = _publisher(node, TOPIC_GT, OdomMessage)
+    # 被控对象状态/机体描述（→ 飞控）：状态每个物理步、机体描述 1Hz 电平
+    plant_pub = _publisher(node, PLANT_STATE_TOPIC, PlantStateMessage, PLANT_STATE_SERVICE_MAX)
+    airframe_pub = _publisher(node, AIRFRAME_TOPIC, AirframeMessage, AIRFRAME_SERVICE_MAX)
     ref_sub = _subscriber(node, TOPIC_REF, ReferenceMessage)
     # 启动互锁订阅（--script 模式）：状态源 ready 电平（is_initialized），
     # 任务时钟据此启动；电平（非边沿）语义——晚订阅 100ms 内必收到。
     odom_sub = _subscriber(node, odom_topic, OdomMessage)
-    # 校正后里程计订阅：PD 反馈在原始与校正估计中取消息新的（与 planner 同规则）。
-    corr_sub = _subscriber(node, TOPIC_CORR, OdomMessage)
+    # 飞控指令订阅（闭环模式）：位置/速度反馈由飞控消费，本进程只做被控对象。
+    # 服务订阅端上限须与 Rust 侧同值：先创建方定上限，否则飞控发布端声明 32 会被拒。
+    control_sub = _subscriber(node, CONTROL_TOPIC, ControlMessage, CONTROL_SERVICE_MAX)
     imu_notify = _notifier(node, TOPIC_IMU)
     cam_notify = _notifier(node, TOPIC_CAM_PAIR)
     _init_log_ipc(node)
-    log("iceoryx2 已就绪：发布 IMU/双目/深度/真值（带事件唤醒），订阅参考")
+    log("iceoryx2 已就绪：发布 IMU/双目/深度/真值/状态/机体，订阅参考与飞控指令")
 
     # 参考状态（demo 未发布时悬停在起点）
     ref_pos = start_pos
@@ -216,14 +286,15 @@ def main() -> None:
     # 时间 = sim 时间 - 任务起点（t_go 等起飞等待相对任务起点，不含
     # 启动不定耗时——三个旧定时器退役的落点）。
     mission_t0 = None
-    # 最新估计槽：(stamp, pos, vel)，每拍排空后留最新
-    est_odom = None
-    est_corr = None
-    est_warned = False
+    # 最新飞控指令：(state_time, 4 电机推力)；None = 未收到
+    latest_control = None
+    # 悬停兜底是否已激活（飞控未就绪/停发；告警一次，恢复时告知）
+    hold_active = False
 
     cycle = None
     next_imu = 0.0
     next_cam = 0.0
+    next_airframe = 0.0
     frame = 0
     t_start = time.perf_counter()
     try:
@@ -241,31 +312,11 @@ def main() -> None:
                     ftrace.header_trace_id(sample.user_header().contents),
                 ))
 
-            # 排空里程计话题（--script 模式不使用）
+            # 飞控指令（闭环模式）：排空取最新（反馈由飞控消费，本进程只做被控对象）
             if not script_mode:
-                while (sample := odom_sub.receive()) is not None:
+                while (sample := control_sub.receive()) is not None:
                     m = sample.payload().contents
-                    est_odom = (
-                        m.timestamp,
-                        np.array([m.position_x, m.position_y, m.position_z]),
-                        np.array([m.velocity_x, m.velocity_y, m.velocity_z]),
-                    )
-                while (sample := corr_sub.receive()) is not None:
-                    m = sample.payload().contents
-                    est_corr = (
-                        m.timestamp,
-                        np.array([m.position_x, m.position_y, m.position_z]),
-                        np.array([m.velocity_x, m.velocity_y, m.velocity_z]),
-                    )
-                # 取消息新的估计；都没收到过回落真值
-                slots = [s for s in (est_odom, est_corr) if s is not None]
-                if slots:
-                    _, est_pos, est_vel = max(slots, key=lambda s: s[0])
-                else:
-                    est_pos = est_vel = None
-                    if not est_warned:
-                        est_warned = True
-                        log("状态估计尚未到达，PD 暂回落真值（起飞前正常）", LOG_LEVEL_WARN)
+                    latest_control = (m.state_time, np.array(m.thrust, dtype=float))
 
             # 控制 + 物理步进
             if script_mode:
@@ -291,12 +342,25 @@ def main() -> None:
                     ref_pos, ref_vel = trajectory.ref(env.time - mission_t0)
                 # --script 模式：真值跟踪（运动由外部轨迹指定）
                 env.apply_pd(ref_pos, ref_vel, ref_yaw=ref_yaw, ref_yaw_rate=ref_yaw_dot)
+            elif (
+                latest_control is not None
+                and env.time - latest_control[0] <= CONTROL_STALE
+            ):
+                # 闭环模式：施加飞控下发的 4 电机推力（被控对象按机体几何合成 wrench）
+                if hold_active:
+                    hold_active = False
+                    log("飞控指令恢复，退出悬停兜底")
+                env.apply_motor_thrusts(latest_control[1])
             else:
-                # 闭环模式：PD 反馈取估计
-                env.apply_pd(
-                    ref_pos, ref_vel, ref_yaw=ref_yaw, ref_yaw_rate=ref_yaw_dot,
-                    est_pos=est_pos, est_vel=est_vel,
-                )
+                # 无有效指令（飞控未启动/停发）：悬停兜底——失效保护，不是跟踪律
+                if not hold_active:
+                    hold_active = True
+                    log(
+                        "无有效飞控指令（飞控未启动或已停发），悬停兜底",
+                        LOG_LEVEL_WARN,
+                        env.time,
+                    )
+                env.apply_hover_hold()
             env.step()
             # 失稳守卫：MuJoCo 发散（QACC NaN/Inf）后状态永久污染且传感器
             # 全变 NaN，下游 VIO 会被毒化——检测到即重置到起点，长跑不挂。
@@ -305,6 +369,13 @@ def main() -> None:
                 env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))
             t = env.time
             frame += 1
+
+            # 被控对象状态（每个物理步）与机体描述（1Hz 电平）→ 飞控
+            if not script_mode:
+                _publish_plant_state(plant_pub, env, t)
+                if t + 1e-12 >= next_airframe:
+                    _publish_airframe(airframe_pub, env, t)
+                    next_airframe = t + AIRFRAME_PERIOD
 
             # 新相机帧 → 新周期 trace（周期内所有发布共享同一 trace_id）
             if t + 1e-12 >= next_cam:

@@ -1,7 +1,9 @@
-//! 飞控：角度模式（飞行手柄）与位置模式（飞控外环），共用姿态内环与推力限幅。
+//! 飞控：角度模式（飞行手柄）与位置模式（飞控外环），共用姿态内环。
 //!
-//! 推力恒沿机体 `+Z`：两个模式都只决定"推力大小 + 期望姿态"，水平加速因此只能来自
-//! 倾斜，姿态动力学决定响应快慢——这是四旋翼所有动态耦合的来源。
+//! 推力恒沿机体 `+Z`：两个模式都只决定“推力大小 + 期望姿态”，水平加速因此只能来自
+//! 倾斜，姿态动力学决定响应快慢——这是四旋翼所有动态耦合的来源。本模块只给出
+//! **期望**力/力矩，**不限幅**：可达集与饱和由 [`crate::Airframe::allocate`] 的分配与
+//! 逐电机限幅决定（全栈唯一的饱和点）。
 
 use glam::{Mat3, Quat, Vec3};
 
@@ -33,6 +35,8 @@ pub struct PositionSetpoint {
     pub velocity: Vec3,
     /// 期望航向（rad，世界 Z；水平面内机体 `+X` 的方向）。
     pub yaw: f32,
+    /// 期望航向角速度（rad/s，姿态内环前馈）。
+    pub yaw_rate: f32,
 }
 
 /// 角度模式：`cmd` 的期望倾斜/偏航角速度 + 升降速度 → 世界系力/力矩。
@@ -56,15 +60,15 @@ pub fn angle_mode(
     let up_z = (state.attitude * Vec3::Z).z.clamp(0.3, 1.0);
     let vz_des = cmd.throttle * ctl.climb_rate_max;
     let a_vert = G + ctl.vz_kp * (vz_des - state.velocity.z);
-    let thrust = (params.mass * a_vert / up_z).clamp(0.0, params.max_thrust);
+    let thrust = (params.mass * a_vert / up_z).max(0.0);
 
     Wrench {
-        force: state.attitude * (Vec3::Z * thrust) + drag_force(state, params),
+        force: state.attitude * (Vec3::Z * thrust),
         torque,
     }
 }
 
-/// 位置模式：位置/速度/偏航参考 → 期望推力矢量与姿态 → 姿态内环（含倾角与推力限幅）。
+/// 位置模式：位置/速度/偏航参考 → 期望推力矢量与姿态 → 姿态内环。
 #[must_use]
 pub fn position_mode(
     state: &QuadState,
@@ -79,12 +83,12 @@ pub fn position_mode(
 
     // 可用的只有机体 z 方向的推力：大小取所需合力，方向取期望力方向（限幅在倾角锥内）。
     // 实际力始终沿**当前**机体 z，方向差由姿态内环转过来——倾斜-平移耦合即在此。
-    let thrust = f_des.length().clamp(0.0, params.max_thrust);
+    let thrust = f_des.length().max(0.0);
     let q_des = attitude_from_thrust_dir(thrust_direction(f_des, ctl.tilt_max_deg), setpoint.yaw);
-    let torque = attitude_torque(state, q_des, 0.0, params, ctl);
+    let torque = attitude_torque(state, q_des, setpoint.yaw_rate, params, ctl);
 
     Wrench {
-        force: state.attitude * (Vec3::Z * thrust) + drag_force(state, params),
+        force: state.attitude * (Vec3::Z * thrust),
         torque,
     }
 }
@@ -110,8 +114,7 @@ fn attitude_from_thrust_dir(b3: Vec3, yaw: f32) -> Quat {
 
 /// 姿态内环（两个模式共用）：姿态误差 → 机体角速度指令 → 角加速度 → 世界系力矩。
 ///
-/// `yaw_rate_ff`：机体 z 角速度前馈（角度模式的偏航摇杆）。角阻尼按
-/// `I·(-angular_drag·ω)` 施加，与惯量无关。
+/// `yaw_rate_ff`：机体 z 角速度前馈（角度模式的偏航摇杆 / 位置模式的参考偏航角速度）。
 fn attitude_torque(
     state: &QuadState,
     q_des: Quat,
@@ -127,12 +130,6 @@ fn attitude_torque(
     }
     let rate_des = q_err.to_scaled_axis() * ctl.attitude_kp + Vec3::Z * yaw_rate_ff;
     let ang_accel = (rate_des - state.ang_vel) * ctl.rate_kp;
-    let torque_body =
-        Vec3::from(params.inertia) * (ang_accel - state.ang_vel * params.angular_drag);
+    let torque_body = Vec3::from(params.inertia) * ang_accel;
     state.attitude * torque_body
-}
-
-/// 平移阻尼（世界系力，`-k·v`）。
-fn drag_force(state: &QuadState, params: &QuadParams) -> Vec3 {
-    -state.velocity * params.linear_drag
 }

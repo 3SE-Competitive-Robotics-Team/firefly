@@ -11,6 +11,9 @@
 //!   `firefly-viz` 聚合，统一写 rerun `TextLog`，持久可检索）；
 //! - [`camera`]：`GrayImageMessage`/`DepthImageMessage`——双目灰度 + 深度图；
 //! - [`reference`]：`ReferenceMessage`——规划轨迹的参考状态（闭环控制回传）；
+//! - [`plant`]：`PlantStateMessage`/`AirframeMessage`——被控对象状态与机体描述
+//!   （质量/惯量/旋翼几何/电机上限的唯一来源，飞控订阅后装配参数）；
+//! - [`control`]：`ControlMessage`——4 电机推力指令（飞控 → 被控对象，1kHz）；
 //! - [`goal`]：`GoalMessage`——外部工具发布的飞行目标（动态重目标入口）；
 //! - [`viz`]：`VizMessage`——统一可视化消息（Rust 计算线程零 IO，经
 //!   `Firefly/Viz` 话题由 `firefly-viz` Python 进程统一写 rerun）；
@@ -24,12 +27,14 @@
 //! 统一内存布局、`'static`、不实现 `Drop`。
 
 pub mod camera;
+pub mod control;
 pub mod event;
 pub mod goal;
 pub mod imu;
 pub mod log;
 pub mod node;
 pub mod odom;
+pub mod plant;
 pub mod publish;
 pub mod reference;
 pub mod subscriber;

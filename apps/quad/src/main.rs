@@ -114,15 +114,21 @@ fn setup_hud(mut commands: Commands) {
     ));
 }
 
-/// HUD：速度 / 高度（仅变化时写，避免每帧触发 UI 变更检测）。
+/// HUD：速度 / 高度 / 4 电机推力（仅变化时写，避免每帧触发 UI 变更检测）。
 // 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 fn update_hud(drone: Single<(&Quad, &Transform)>, mut text: Single<&mut Text, With<Hud>>) {
     let (quad, transform) = drone.into_inner();
+    let sat = if quad.saturated { " SAT" } else { "" };
     let want = format!(
-        "speed {:.1} m/s   alt {:.1} m\nWASD tilt   Space/Shift up-down   Q/E yaw   R reset",
+        "speed {:.1} m/s   alt {:.1} m\nmotors [{:.2} {:.2} {:.2} {:.2}] N{sat}\n\
+         WASD tilt   Space/Shift up-down   Q/E yaw   R reset",
         quad.state.velocity.length(),
-        transform.translation.z
+        transform.translation.z,
+        quad.motors[0],
+        quad.motors[1],
+        quad.motors[2],
+        quad.motors[3],
     );
     if text.as_str() != want {
         text.0.clear();

@@ -1,11 +1,14 @@
 """firefly-mujoco：无人机 MuJoCo 物理环境库。
 
-提供 [`DroneEnv`](firefly_mujoco.env.DroneEnv)（物理步进 + IMU/双目灰度/
-深度提取 + PD 控制）与跨语言消息契约 [`messages`](firefly_mujoco.messages)。
+提供 [`DroneEnv`](firefly_mujoco.env.DroneEnv)（被控对象：物理步进 +
+IMU/双目灰度/深度提取 + 施加旋翼推力）与跨语言消息契约
+[`messages`](firefly_mujoco.messages)。控制律不在本库（唯一实现在 `firefly-flight`）。
 """
 
 from .env import DroneEnv
 from .messages import (
+    AIRFRAME_TOPIC,
+    CONTROL_TOPIC,
     LOG_LEVEL_DEBUG,
     LOG_LEVEL_ERROR,
     LOG_LEVEL_INFO,
@@ -14,6 +17,9 @@ from .messages import (
     LOG_TEXT_MAX,
     LOG_TAG_MAX,
     LOG_TOPIC,
+    PLANT_STATE_TOPIC,
+    AirframeMessage,
+    ControlMessage,
     DepthImageMessage,
     GrayImageMessage,
     IMAGE_HEIGHT,
@@ -22,6 +28,7 @@ from .messages import (
     ImuMessage,
     LogMessage,
     OdomMessage,
+    PlantStateMessage,
     ReferenceMessage,
     TraceContext,
 )
@@ -40,8 +47,14 @@ __all__ = [
     "DepthImageMessage",
     "ReferenceMessage",
     "OdomMessage",
+    "PlantStateMessage",
+    "AirframeMessage",
+    "ControlMessage",
     "LogMessage",
     "LOG_TOPIC",
+    "PLANT_STATE_TOPIC",
+    "AIRFRAME_TOPIC",
+    "CONTROL_TOPIC",
     "LOG_LEVEL_ERROR",
     "LOG_LEVEL_WARN",
     "LOG_LEVEL_INFO",
