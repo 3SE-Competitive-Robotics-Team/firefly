@@ -1,0 +1,34 @@
+[package]
+name = "fc"
+version = "0.1.0"
+keywords = ['simulation', 'drone', 'flight-controller']
+categories = ['simulation', 'embedded']
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "fc"
+path = "src/main.rs"
+
+[dependencies]
+fastrace = { workspace = true }
+firefly-error = { workspace = true }
+firefly-flight = { workspace = true }
+firefly-observability = { workspace = true }
+firefly-pubsub = { workspace = true }
+glam = { workspace = true }
+iceoryx2-bb-posix = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+firefly-vio-types = { workspace = true }
+nalgebra = { workspace = true }
+
+[lints]
+workspace = true

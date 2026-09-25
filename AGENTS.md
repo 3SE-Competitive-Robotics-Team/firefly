@@ -53,11 +53,12 @@
 
 ## 运行（MuJoCo 双语言闭环）
 
-双语言闭环三个进程，iceoryx2 IPC（`Firefly/*` 话题）通信，fastrace
-trace 跨进程续接（传感器→vio→planner→参考 单周期 trace）：
+双语言闭环四个进程（可先开 viewer，见下），iceoryx2 IPC（`Firefly/*` 话题）通信，fastrace
+trace 跨进程续接（传感器→vio→飞控→参考 单周期 trace）：
 
 ```
-Python sim（MuJoCo 物理 + 传感器发布）→ vio（MSCKF 位姿估计）→ planner（重规划）
+Python sim（MuJoCo 物理 + 传感器发布，被控对象）→ vio（MSCKF 位姿估计）
+→ fc（1kHz 飞控，4 电机推力）→ sim（施加；planner 在时其参考进 fc）
 ```
 
 按顺序各开一个终端（可先开 viewer，见下）：
@@ -67,8 +68,9 @@ Python sim（MuJoCo 物理 + 传感器发布）→ vio（MSCKF 位姿估计）�
 rerun &
 uv run firefly-viz
 
-# 1. Python 物理环境：200Hz 物理；发布 IMU 100Hz / 双目+深度+真值 10Hz，
-#    订阅 Firefly/Reference 做 PD 闭环控制
+# 1. Python 物理环境（被控对象）：200Hz 物理；发布 IMU 100Hz / 双目+深度+真值 10Hz
+#    / 真值状态 PlantState 200Hz / 机体描述 Airframe 1Hz；订阅 Firefly/Control 施加推力
+#    （无有效指令时自行悬停兜底）。--script 是 VIO bench 的轨迹夹具（真值反馈），不走飞控。
 uv sync   # 首次：安装 firefly-mujoco / firefly-sim（根 workspace）
 uv run firefly-sim
 
@@ -76,10 +78,12 @@ uv run firefly-sim
 #    估计位姿与前端健康度写入共享 viewer
 cargo run --release -p vio
 
-# 3. Rust 重规划：订阅 odom 作为状态源（新鲜超时回退轨迹模拟），
-#    未指定 --map 时加载 MuJoCo 默认场景静态地图（与 scene.py 同构，
-#    深度感知在线补充），发布参考回传；
-#    规划结果写入同一 viewer（与 vio 共用 sim_time 时间轴）
+# 3. Rust 飞控（最后起）：1kHz 控制环，订阅 PlantState/Airframe/odom/IMU/参考，
+#    发布 Firefly/Control（4 电机推力）+ 控制量进共享 viewer（fc/debug/*）
+cargo run --release -p fc
+
+# 4.（可选）Rust 重规划：订阅 odom 作为状态源（新鲜超时回退轨迹模拟），
+#    未指定 --map 时加载 MuJoCo 默认场景静态地图，发布参考回传到飞控
 cargo run --release -p planner
 ```
 

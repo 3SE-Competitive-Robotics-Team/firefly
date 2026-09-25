@@ -155,6 +155,51 @@ def _warehouse_colliders_xml() -> str:
     )
 
 
+#: 机体（微型机）：质量 219g，外观对齐 `models/drone/drone.glb`（0.16×0.118×0.043 m
+#: 包围盒）。旋翼 site 与 `firefly-flight` 默认 X 布局同构（半轴距 45mm、对角 127mm）——
+#: 这里的几何是飞控分配与合成的唯一来源，经 `Firefly/Airframe` 发布，飞控不另抄一份。
+_DRONE_MASS = 0.219
+#: 单个电机质量（kg）：其余重量归机身盒（质量分布直接决定转动惯量）
+_MOTOR_MASS = 0.021
+#: X 布局半轴距（m）：旋翼位于 (±ARM, ±ARM, 0)
+_ARM = 0.045
+#: 机身盒半径（m，半尺寸）
+_DRONE_BODY_SIZE = "0.055 0.042 0.021"
+#: 电机球半径（m）
+_MOTOR_RADIUS = 0.007
+
+#: 4 旋翼 `(sx, sy, spin)`（顺序与 `firefly-flight` 默认一致）：0 前右、1 后左（旋向 +1），
+#: 2 前左、3 后右（旋向 −1）；site 名与顺序即飞控分配的几何来源，旋向供环境侧合成用。
+ROTORS = ((1, -1, 1.0), (-1, 1, 1.0), (1, 1, -1.0), (-1, -1, -1.0))
+
+
+def _drone_xml(pos: str) -> str:
+    """无人机 body（freejoint 六自由度 + 4 旋翼 site + 双目/深度相机）。
+
+    质量/惯量由这里的几何与 `mass` 决定（飞控经 `Firefly/Airframe` 收到实测值）。
+    变动几何即变动被控对象，无第二处需要同步。
+    """
+    frame_mass = _DRONE_MASS - len(ROTORS) * _MOTOR_MASS
+    rotors = "".join(
+        f'\n      <site name="rotor{i}" pos="{sx * _ARM:g} {sy * _ARM:g} 0"/>'
+        f'\n      <geom type="sphere" pos="{sx * _ARM:g} {sy * _ARM:g} 0"'
+        f' size="{_MOTOR_RADIUS:g}" mass="{_MOTOR_MASS:g}" rgba="0.25 0.25 0.28 1"/>'
+        for i, (sx, sy, _) in enumerate(ROTORS)
+    )
+    return rf"""    <body name="drone" pos="{pos}">
+      <freejoint/>
+      <geom type="box" size="{_DRONE_BODY_SIZE}" mass="{frame_mass:g}" rgba="0.90 0.70 0.20 1"/>{rotors}
+      <!-- 双目（横向基线 0.05m，沿 y 侧向分开，对照 Intel RealSense D430 的结构基线
+           50mm）+ 深度相机，前向 +x，上 +z。
+           注意：基线必须与视线垂直（横向），前后(y=0 沿 x)分开的相机射线
+           近乎共线 → 无侧向视差 → 立体无法解深度（VIO 三角化必败）。 -->
+      <camera name="cam_left" pos="0 -0.025 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
+      <camera name="cam_right" pos="0 0.025 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
+      <camera name="cam_depth" pos="0 0 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
+      <site name="imu_site" pos="0 0 0"/>
+    </body>"""
+
+
 def _warehouse_scene_xml() -> str:
     """仓库场景：视觉 mesh + 碰撞盒 + 方向光（与旧场景同灯光约定）。"""
     meshdir = _WAREHOUSE_DIR.as_posix()
@@ -195,16 +240,7 @@ def _warehouse_scene_xml() -> str:
  {_warehouse_colliders_xml()}
 
     <!-- 无人机（freejoint 六自由度） -->
-    <body name="drone" pos="2 0 1">
-      <freejoint/>
-      <geom type="box" size="0.15 0.15 0.04" rgba="0.90 0.70 0.20 1"/>
-      <geom type="sphere" pos="0.25 0 0" size="0.06" rgba="0.80 0.20 0.20 1"/>
-      <geom type="sphere" pos="-0.25 0 0" size="0.06" rgba="0.20 0.80 0.20 1"/>
-      <camera name="cam_left" pos="0 -0.025 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
-      <camera name="cam_right" pos="0 0.025 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
-      <camera name="cam_depth" pos="0 0 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
-      <site name="imu_site" pos="0 0 0"/>
-    </body>
+{_drone_xml("2 0 1")}
   </worldbody>
 
   <sensor>
@@ -249,16 +285,8 @@ def _rmuc_scene_xml() -> str:
     <!-- 视觉：Bevy 载 models/rmuc2026/field.glb；物理只有下面的透明碰撞盒 -->
 {_rmuc_collision_xml()}
 
-    <body name="drone" pos="2 0 1">
-      <freejoint/>
-      <geom type="box" size="0.15 0.15 0.04" rgba="0.90 0.70 0.20 1"/>
-      <geom type="sphere" pos="0.25 0 0" size="0.06" rgba="0.80 0.20 0.20 1"/>
-      <geom type="sphere" pos="-0.25 0 0" size="0.06" rgba="0.20 0.80 0.20 1"/>
-      <camera name="cam_left" pos="0 -0.025 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
-      <camera name="cam_right" pos="0 0.025 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
-      <camera name="cam_depth" pos="0 0 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
-      <site name="imu_site" pos="0 0 0"/>
-    </body>
+    <!-- 无人机（freejoint 六自由度） -->
+{_drone_xml("2 0 1")}
   </worldbody>
 
   <sensor>
@@ -321,21 +349,7 @@ def _boxes_scene_xml() -> str:
 {_boxes_xml()}
 
     <!-- 无人机（freejoint 六自由度） -->
-    <body name="drone" pos="1 4 1">
-      <freejoint/>
-      <geom type="box" size="0.15 0.15 0.04" rgba="0.90 0.70 0.20 1"/>
-      <geom type="sphere" pos="0.25 0 0" size="0.06" rgba="0.80 0.20 0.20 1"/>
-      <geom type="sphere" pos="-0.25 0 0" size="0.06" rgba="0.20 0.80 0.20 1"/>
-      <!-- 双目（基线 0.1m）+ 深度相机，前向 +x，上 +z -->
-      <!-- 双目（横向基线 0.05m，沿 y 侧向分开，对照 Intel RealSense D430 的结构基线
-           50mm）+ 深度相机，前向 +x，上 +z。
-           注意：基线必须与视线垂直（横向），前后(y=0 沿 x)分开的相机射线
-           近乎共线 → 无侧向视差 → 立体无法解深度（VIO 三角化必败）。 -->
-      <camera name="cam_left" pos="0 -0.025 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
-      <camera name="cam_right" pos="0 0.025 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
-      <camera name="cam_depth" pos="0 0 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
-      <site name="imu_site" pos="0 0 0"/>
-    </body>
+{_drone_xml("1 4 1")}
   </worldbody>
 
   <sensor>

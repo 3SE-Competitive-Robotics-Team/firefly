@@ -5,8 +5,10 @@
 - 加速度计：体坐标系比力（m/s²，悬停读 +9.81，自由落体读 0），即真实 IMU 语义。
 - 深度：米制 f32，离屏渲染（macOS OpenGL 无 ARB_clip_control，远距精度有限）。
 
-控制：`xfrc_applied` 施加体坐标系/世界系力 + 扭矩（PD 位置跟踪 + 姿态阻尼/
-水平回正），世界系与 demo 地图系一致。
+本模块是**被控对象**（plant）：物理步进、传感器、施加旋翼推力。控制律不在这里
+（唯一实现在 `firefly-flight`）：飞控进程经 `Firefly/Control` 给出 4 电机推力，
+本环境按机体几何合成刚体等效 wrench 写进 `xfrc_applied`。`apply_pd` 仅供
+`--script`（VIO 验证的轨迹跟踪夹具）使用。
 """
 
 from __future__ import annotations
@@ -16,21 +18,27 @@ import numpy as np
 import mujoco
 
 from .messages import IMAGE_HEIGHT, IMAGE_WIDTH
-from .scene import build_scene
+from .scene import ROTORS, build_scene
 
-#: PD 位置增益
-KP_POS = 20.0
-#: PD 速度增益（ζ=KD/(2√(KP·m))≈0.82，近临界阻尼：原 KD=10 时 ζ≈0.37
-#: 欠阻尼，无人机对台阶参考 overshoot ~0.5m 造成来回摆动）
-KD_VEL = 22.0
-#: 偏航 PD 增益（绕世界 z 轴；转动惯量 Izz≈0.2，KP=6/KD=2.5 近临界阻尼）
-KP_YAW = 6.0
-#: 偏航角速度阻尼
-KD_YAW = 2.5
-#: 姿态角速度阻尼
-KD_ATT = 4.0
-#: 水平回正增益（使机体 z 轴对齐世界 z 轴）
-KP_LEVEL = 30.0
+#: 旋向（与 `scene.ROTORS` 同序：0 前右、1 后左为 +1）
+ROTOR_SPINS = np.array([spin for *_, spin in ROTORS], dtype=float)
+#: 反扭矩系数 c_τ（m）：偏航力矩 = c_τ·推力（与 `firefly-flight` 默认同值）
+TORQUE_COEFFICIENT = 0.016
+#: 推重比（单电机推力上限 = TWR·重量/4；与 `firefly-flight` 默认同值）
+THRUST_TO_WEIGHT = 3.0
+
+#: 脚本跟踪夹具（`--script`）PD：**加速度域**增益（位置 1/s²、速度 1/s，姿态 1/s²、
+#: 1/s），与质量/惯量无关。数值是旧力域增益按被测对象（9kg 机体，Ixx≈0.06/Izz≈0.22）
+#: 归一的等效值——闭环带宽/阻尼与原口径一致：位置 ω≈1.5 rad/s、ζ≈0.82，
+#: 回正 ω≈11.6 rad/s、ζ≈0.77，偏航 ω≈5.2 rad/s、ζ≈1.07。
+KP_POS = 2.22
+KD_VEL = 2.44
+#: 水平回正（角加速度域）
+KP_LEVEL = 134.0
+KD_ATT = 17.8
+#: 偏航跟踪（角加速度域）
+KP_YAW = 26.8
+KD_YAW = 11.2
 
 
 class DroneEnv:
@@ -71,6 +79,14 @@ class DroneEnv:
         self._renderer = mujoco.Renderer(
             self.model, height=IMAGE_HEIGHT, width=IMAGE_WIDTH
         )
+        self._rotor_positions = np.array(
+            [
+                self.model.site_pos[
+                    mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, f"rotor{i}")
+                ]
+                for i in range(4)
+            ]
+        )
         mujoco.mj_forward(self.model, self.data)
 
     @property
@@ -83,6 +99,61 @@ class DroneEnv:
         """无人机质量（kg）。"""
         return float(self.model.body_mass[self._drone_id])
 
+    def inertia_body(self) -> np.ndarray:
+        """转动惯量在**机体系**的对角元（kg·m²）。
+
+        `mjModel.body_inertia` 是主轴系下的角元，主轴相对机体系可能旋转
+        （MuJoCo 按惯量大小重排，此处是绕 y 的 90°）——用 `body_iquat`
+        转回机体系。非对称布局会留下非对角元，此处直接报错（契约只承载
+        对角元，要么改回对称布局，要么扩展契约）。
+        """
+        principal = np.asarray(self.model.body_inertia[self._drone_id], dtype=float)
+        w, x, y, z = (float(v) for v in self.model.body_iquat[self._drone_id])
+        rot = np.array(
+            [
+                [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+            ]
+        )
+        full = rot @ np.diag(principal) @ rot.T
+        off_diag = float(np.abs(full - np.diag(np.diag(full))).max())
+        if off_diag > 1e-9:
+            raise ValueError(
+                f"机体惯量在机体系非对角（最大 {off_diag:.3e} kg·m²）："
+                "Airframe 消息只承载对角元——改回对称布局，或扩展消息契约"
+            )
+        return np.diag(full).copy()
+
+    def state(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """真值状态 `(pos, vel_world, quat_xyzw, angvel_body)`（飞控的 PlantState）。"""
+        d = self.data
+        quat_wxyz = d.body("drone").xquat
+        return (
+            d.body("drone").xpos.copy(),
+            d.qvel[0:3].copy(),
+            np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]]),
+            d.qvel[3:6].copy(),
+        )
+
+    def airframe(self) -> dict:
+        """机体/执行器描述（`Firefly/Airframe` 的唯一内容来源）。
+
+        质量/惯量/旋翼位置读自 `mjModel`（改几何即改被控对象，无第二处同步）；
+        阻尼为 0（MuJoCo 无气动模型）；单电机推力上限由推重比与实测重量导出。
+        """
+        weight = self.mass * 9.81
+        return {
+            "mass": self.mass,
+            "inertia": self.inertia_body(),
+            "linear_drag": 0.0,
+            "angular_drag": 0.0,
+            "rotor_positions": self._rotor_positions.copy(),
+            "rotor_spins": ROTOR_SPINS.copy(),
+            "max_thrust_per_motor": THRUST_TO_WEIGHT * weight / 4.0,
+            "torque_coefficient": TORQUE_COEFFICIENT,
+        }
+
     def reset(self, pos: np.ndarray, quat_xyzw: np.ndarray) -> None:
         """重置位姿（`quat_xyzw`：MuJoCo wxyz 顺序，此处接收 xyzw 并转 wxyz）。"""
         self.data.qpos[:] = np.concatenate([pos, quat_xyzw[[3, 0, 1, 2]]])
@@ -90,6 +161,32 @@ class DroneEnv:
         mujoco.mj_forward(self.model, self.data)
 
     # ---- 控制 ----
+
+    def apply_motor_thrusts(self, thrusts: np.ndarray) -> None:
+        """4 电机推力（N）→ 刚体等效 wrench → `xfrc_applied`。
+
+        力 `R·(ΣTᵢ·ẑ)`，力矩 `R·(Σ rᵢ×(Tᵢ·ẑ) + Σ sᵢ·c_τ·Tᵢ·ẑ)`——与
+        `firefly-flight::Airframe::realize` 同一套式子（plant 侧独立实现：几何取自
+        model 的 rotor site，旋向/系数取自本模块常量）。
+        """
+        R = self.data.body("drone").xmat.reshape(3, 3)
+        T = np.asarray(thrusts, dtype=float)
+        lever = self._rotor_positions
+        force_body = np.array([0.0, 0.0, float(T.sum())])
+        torque_body = np.cross(lever, np.column_stack([np.zeros(4), np.zeros(4), T])).sum(0)
+        torque_body[2] += float((ROTOR_SPINS * T).sum()) * TORQUE_COEFFICIENT
+        self.data.xfrc_applied[self._drone_id, 0:3] = R @ force_body
+        self.data.xfrc_applied[self._drone_id, 3:6] = R @ torque_body
+
+    def apply_hover_hold(self) -> None:
+        """飞控缺席/指令陈旧时的兜底：等推力抵消重力（含倾斜补偿）。
+
+        这是**失效保护**（不主动动作、不掉高），不是跟踪律——跟踪律唯一家是
+        `firefly-flight`。
+        """
+        up_z = float(np.clip(self.data.body("drone").xmat.reshape(3, 3)[2, 2], 0.3, 1.0))
+        total = self.mass * 9.81 / up_z
+        self.apply_motor_thrusts(np.full(4, total / 4.0))
 
     def apply_pd(
         self,
@@ -100,15 +197,18 @@ class DroneEnv:
         est_pos: np.ndarray | None = None,
         est_vel: np.ndarray | None = None,
     ) -> None:
-        """PD 位置跟踪 + 重力补偿 + 姿态阻尼/水平回正 + 偏航跟踪，写入 `xfrc_applied`。
+        """轨迹跟踪夹具（`--script` 专用）：PD + 重力补偿 + 姿态回正/阻尼 + 偏航跟踪。
+
+        不是飞控路径：正式控制由 `apps/fc` 经 `Firefly/Control` 给出。本夹具以真值
+        姿态/角速度闭环、直接写 wrench（不经电机分配与限幅），用于 VIO 验证时
+        沿指定轨迹飞行。
 
         偏航：机体 x 轴相对世界 x 轴的转角（`atan2(R[1,0], R[0,0])`），扭矩绕
         世界 z 轴（小倾角下体 z 角速度 ≈ 世界 yaw 率，PD 可用）。
 
-        位置/速度反馈取自状态估计（`est_pos`/`est_vel`，世界系）：飞控
-        只看得到估计，反馈必须取估计。`None` 回落真值（`--script` 模式、
-        估计未到、单元测试）。姿态项（偏航角、水平回正、阻尼转系）取真值：
-        估计姿态是 JPL 约定，与机体→世界旋转的换算未经验证，不得混入控制。
+        位置/速度反馈可取外部估计（`est_pos`/`est_vel`，世界系）：飞控只看得到
+        估计；`None` 回落真值。姿态项取真值（估计姿态是 JPL 约定，与机体→世界
+        旋转的换算未经验证，不得混入控制）。
         """
         d = self.data
         bid = self._drone_id
@@ -124,25 +224,30 @@ class DroneEnv:
         else:
             vel = np.asarray(est_vel, dtype=float)
         angvel_body = d.qvel[3:6].copy()
+        inertia = self.inertia_body()
 
-        force = KP_POS * (np.asarray(ref_pos, dtype=float) - pos) + KD_VEL * (
+        # 加速度域 PD → 力（与质量无关：改机体不需要重调增益）
+        a_des = KP_POS * (np.asarray(ref_pos, dtype=float) - pos) + KD_VEL * (
             np.asarray(ref_vel, dtype=float) - vel
         )
-        force[2] += self.mass * 9.81  # 重力补偿
+        force = self.mass * (a_des + np.array([0.0, 0.0, 9.81]))
 
-        # 水平回正：body z 轴 → world z 轴
+        # 水平回正：body z 轴 → world z 轴（误差向量即小角旋转向量，乘惯量得力矩）
         R = d.body("drone").xmat.reshape(3, 3)
         z_body = R[:, 2]
-        level_torque = KP_LEVEL * np.cross(z_body, np.array([0.0, 0.0, 1.0]))
+        level_err = np.cross(z_body, np.array([0.0, 0.0, 1.0]))
         # 姿态阻尼必须在世界系（机体角速度经 R 转系；偏航旋转时直接用机体系
         # 会把阻尼方向转起来反充能量，持续偏航即翻滚发散）；偏航轴交偏航 PD
         w_world = R @ angvel_body
-        torque = level_torque - KD_ATT * np.array([w_world[0], w_world[1], 0.0])
+        rate_err = -np.array([w_world[0], w_world[1], 0.0])
 
         # 偏航跟踪（误差折叠到 [-π, π]；偏航率用世界系 z 分量）
         yaw = float(np.arctan2(R[1, 0], R[0, 0]))
         yaw_err = (float(ref_yaw) - yaw + np.pi) % (2.0 * np.pi) - np.pi
-        torque[2] += KP_YAW * yaw_err + KD_YAW * (float(ref_yaw_rate) - w_world[2])
+        rate_err[2] = float(ref_yaw_rate) - w_world[2]
+        gains = np.array([KP_LEVEL, KP_LEVEL, KP_YAW])
+        rate_gains = np.array([KD_ATT, KD_ATT, KD_YAW])
+        torque = inertia * (gains * level_err + rate_gains * rate_err)
 
         d.xfrc_applied[bid, 0:3] = force
         d.xfrc_applied[bid, 3:6] = torque

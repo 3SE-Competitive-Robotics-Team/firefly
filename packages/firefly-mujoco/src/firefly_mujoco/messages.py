@@ -142,6 +142,87 @@ class OdomMessage(ctypes.Structure):
         return "FireflyOdomMessage"
 
 
+class PlantStateMessage(ctypes.Structure):
+    """被控对象状态（真值，200Hz）：与 Rust `PlantStateMessage`（`FireflyPlantStateMessage`）一致。
+
+    姿态为**机体→世界** Hamilton 四元数 `[x, y, z, w]`（与 `firefly-flight` 的
+    `QuadState::attitude` 同约定）；角速度为机体系。注意与 `OdomMessage` 的
+    JPL `q_GtoI` 不同约定，不得混用。
+    """
+
+    _fields_ = [
+        ("timestamp", ctypes.c_double),
+        ("position_x", ctypes.c_double),
+        ("position_y", ctypes.c_double),
+        ("position_z", ctypes.c_double),
+        ("velocity_x", ctypes.c_double),
+        ("velocity_y", ctypes.c_double),
+        ("velocity_z", ctypes.c_double),
+        ("quat_x", ctypes.c_double),
+        ("quat_y", ctypes.c_double),
+        ("quat_z", ctypes.c_double),
+        ("quat_w", ctypes.c_double),
+        ("angular_velocity_x", ctypes.c_double),
+        ("angular_velocity_y", ctypes.c_double),
+        ("angular_velocity_z", ctypes.c_double),
+    ]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflyPlantStateMessage"
+
+
+class AirframeMessage(ctypes.Structure):
+    """机体/执行器描述（1Hz 电平）：与 Rust `AirframeMessage`（`FireflyAirframeMessage`）一致。
+
+    质量/惯量/阻尼是被控对象属性，旋翼位置/旋向/单电机推力上限/反扭矩系数是执行器
+    属性——两者都从被控对象发布，飞控不另抄一份。
+    """
+
+    _fields_ = [
+        ("timestamp", ctypes.c_double),
+        ("mass", ctypes.c_double),
+        ("inertia_x", ctypes.c_double),
+        ("inertia_y", ctypes.c_double),
+        ("inertia_z", ctypes.c_double),
+        ("linear_drag", ctypes.c_double),
+        ("angular_drag", ctypes.c_double),
+        ("rotor_positions", (ctypes.c_double * 3) * 4),
+        ("rotor_spins", ctypes.c_double * 4),
+        ("max_thrust_per_motor", ctypes.c_double),
+        ("torque_coefficient", ctypes.c_double),
+    ]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflyAirframeMessage"
+
+
+class ControlMessage(ctypes.Structure):
+    """飞控指令（1kHz，plant 取最新）：与 Rust `ControlMessage`（`FireflyControlMessage`）一致。
+
+    `state_time` 是飞控用于本指令的状态采样时刻（plant 据此判陈旧）；`thrust` 是
+    4 电机推力（N，与 `scene.ROTORS` 同序），plant 按机体几何合成 wrench。
+    """
+
+    _fields_ = [
+        ("state_time", ctypes.c_double),
+        ("thrust", ctypes.c_double * 4),
+        ("tick", ctypes.c_uint64),
+    ]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflyControlMessage"
+
+
+#: 被控对象状态话题（sim → 飞控，200Hz）
+PLANT_STATE_TOPIC = "Firefly/PlantState"
+#: 机体/执行器描述话题（sim → 飞控，1Hz 电平）
+AIRFRAME_TOPIC = "Firefly/Airframe"
+#: 飞控指令话题（飞控 → sim，1kHz）
+CONTROL_TOPIC = "Firefly/Control"
+
 #: 统一日志话题（与 Rust `firefly_pubsub::log::LOG_TOPIC` 一致）
 LOG_TOPIC = "Firefly/Log"
 
@@ -189,6 +270,9 @@ def _self_check() -> None:
     assert ctypes.sizeof(ReferenceMessage) == 72
     assert ctypes.sizeof(OdomMessage) == 96
     assert ctypes.sizeof(LogMessage) == 624, ctypes.sizeof(LogMessage)
+    assert ctypes.sizeof(PlantStateMessage) == 112, ctypes.sizeof(PlantStateMessage)
+    assert ctypes.sizeof(AirframeMessage) == 200, ctypes.sizeof(AirframeMessage)
+    assert ctypes.sizeof(ControlMessage) == 48, ctypes.sizeof(ControlMessage)
 
 
 _self_check()

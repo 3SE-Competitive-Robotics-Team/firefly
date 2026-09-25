@@ -1,8 +1,8 @@
 //! 飞行 demo 的 Bevy 接线：键盘 → [`AngleCommand`] → `firefly-flight` 的角度模式
-//! + 六自由度积分 → 写回 `Transform`。
+//! → 旋翼分配（限幅）→ 六自由度积分 → 写回 `Transform`。
 //!
-//! 模型与飞控本体（推力沿机体 z、姿态内环、惯量、限幅）在 `firefly-flight`，
-//! 本模块只做输入与 ECS 搬运。
+//! 模型与飞控本体（推力沿机体 z、4 旋翼分配、姿态内环、惯量、饱和）在
+//! `firefly-flight`，本模块只做输入与 ECS 搬运。
 
 use bevy::prelude::*;
 use firefly_flight::{AngleCommand, QuadState, angle_mode, integrate};
@@ -14,6 +14,10 @@ use crate::config::QuadConfig;
 pub struct Quad {
     /// 六自由度状态。
     pub state: QuadState,
+    /// 最近一次分配的 4 电机推力（N，HUD 显示）。
+    pub motors: [f32; 4],
+    /// 最近一次分配是否触限。
+    pub saturated: bool,
 }
 
 /// 每帧控制输入（归一化 -1..1）。
@@ -45,7 +49,7 @@ pub fn read_input(keys: Res<ButtonInput<KeyCode>>, mut input: ResMut<QuadInput>)
     input.reset = keys.just_pressed(KeyCode::KeyR);
 }
 
-/// 定步长积分（`FixedUpdate`）：角度模式 → 世界系力/力矩 → 六自由度积分。
+/// 定步长积分（`FixedUpdate`）：角度模式 → 期望力/力矩 → 旋翼分配 → 实际力/力矩 → 积分。
 // 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 pub fn dynamics(
@@ -69,8 +73,11 @@ pub fn dynamics(
             yaw: input.yaw,
             throttle: input.throttle,
         };
-        let wrench = angle_mode(&quad.state, &cmd, &cfg.drone, &cfg.control);
-        integrate(&mut quad.state, &wrench, &cfg.drone, dt);
+        let desired = angle_mode(&quad.state, &cmd, &cfg.drone, &cfg.control);
+        let alloc = cfg.airframe.allocate(quad.state.attitude, &desired);
+        quad.motors = alloc.motors;
+        quad.saturated = alloc.saturated;
+        integrate(&mut quad.state, &alloc.realized, &cfg.drone, dt);
     }
 
     transform.translation = quad.state.position;

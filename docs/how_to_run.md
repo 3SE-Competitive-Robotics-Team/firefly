@@ -1,4 +1,4 @@
-# How to Run（全链路，7 进程）
+# How to Run（全链路，8 进程）
 
 当前场景由 `configs/scene.toml` 的 `scene` 决定，`sim` / `render` / `viz` 共用
 同一份（单一来源防漂移）：缺省 **`rmuc2026`**（RMUC 场地，`models/rmuc2026/`），
@@ -6,7 +6,7 @@
 切到某场景前 `models/<scene>/` 要有对应资产（缺资产自动回退 `boxes`）。
 无人机起点见 `configs/sim.toml`。
 
-7 个进程（`sim → vio → gicp → planner → sim` 主链 + `aliked → lightglue → gicp` 视觉支路），
+8 个进程（`sim → vio → gicp → planner → fc → sim` 主链 + `aliked → lightglue → gicp` 视觉支路），
 `release` 构建是默认形态（`debug` 重负载下 IMU 断流，只做开发调试）。
 
 | # | 进程 | App | 订阅 | 发布 | 频率 |
@@ -17,15 +17,23 @@
 | 4 | `aliked` | `apps/aliked` (ALIKED-N16 特征提取，`ort`) | `Firefly/CameraLeft`（左目灰度） | `Firefly/Features`（带事件唤醒） | 1Hz 节流推理 |
 | 5 | `lightglue` | `apps/lightglue` (LightGlue 匹配 + PnP，`ort`) | `Firefly/Features` + `Firefly/CorrectedOdometry`（先验，优先矫正值）+ 库图 `--map` | `Firefly/PoseObservation`（→ `gicp` 融合） | 特征到即查 |
 | 6 | `planner` | `apps/planner` (EGO-Planner v2: A* + MINCO) | `Odometry`/`CorrectedOdometry` + `Depth` + `Firefly/Goal` | `Firefly/Reference` + `Firefly/Viz` | 10Hz |
-| 7 | `firefly-sim` | `apps/firefly-sim` | `Firefly/Reference` | `Firefly/Imu` 100Hz / `Firefly/CameraLeft,Right` 10Hz / `Firefly/Depth` 10Hz / `Firefly/GroundTruth` 10Hz | 200Hz 物理 |
+| 7 | `firefly-sim` | `apps/firefly-sim` | `Firefly/Reference`（仅日志/互锁）+ `Firefly/Control` | `Firefly/Imu` 100Hz / `Firefly/CameraLeft,Right` 10Hz / `Firefly/Depth` 10Hz / `Firefly/GroundTruth` 10Hz / `Firefly/PlantState` 200Hz / `Firefly/Airframe` 1Hz | 200Hz 物理 |
+| 8 | `fc` | `apps/fc` (飞控，`firefly-flight`) | `Firefly/PlantState` + `Firefly/Airframe` + `Firefly/Odometry`/`CorrectedOdometry` + `Firefly/Imu` + `Firefly/Reference` | `Firefly/Control` 1kHz / `Firefly/Viz` 10Hz | 1kHz 控制环 |
 
-数据流：`sim → vio → gicp → planner → sim`（PD 闭环跟踪）；视觉支路
+数据流：`sim → vio → gicp → planner → fc → sim`（飞控闭环跟踪）；视觉支路
 `aliked → lightglue → gicp` 与 GICP 共用同一 `FusionFilter`（对照 VINS-Fusion
 `loop_fusion` 检环 + 位姿边，见 `crates/firefly-vision-match/src/lib.rs`）。
 `sim_time` 为全链路统一时钟，`fastrace` 跨进程续接同一 `trace_id`。
 Rust 计算线程零 IO：可视化数据经 `Firefly/Viz` 话题零拷贝发布，由
 `firefly-viz` 进程统一写 rerun。原始双目/深度图像走 IPC 话题直达
 vio/aliked/gicp/planner，**不进** rrd（vio 只发位姿/轨迹/健康度瘦版可视化）。
+
+控制链：`firefly-sim` 是**被控对象**（发传感器 + 真值状态 `Firefly/PlantState`
+与机体描述 `Firefly/Airframe`，收 `Firefly/Control` 的 4 电机推力，按机体几何
+合成 `xfrc_applied`）；控制律唯一实现在 `firefly-flight`，由 `apps/fc` 以
+1kHz 跑（`cargo run --release -p fc`）。无有效指令时被控对象自行悬停兜底
+（失效保护，不是第二套跟踪律）。`--script` 模式例外：那是 VIO bench 的轨迹
+跟踪夹具（真值反馈，`DroneEnv.apply_pd`），不带飞控。
 
 ## 0. 前置依赖
 
@@ -117,13 +125,21 @@ uv run firefly-viz --save logs/wh_run.rrd   # 离线录制，交付物（见 §4
 ./target/release/planner --map apps/planner/maps/warehouse.ffmap
 # 无 --goal 时悬停在 --start（缺省 2 0 1），等待 Firefly/Goal（见 §3）
 
-# 终端 7 — 物理环境（最后起）：发布传感器，订阅 Reference 做 PD 闭环
-uv run firefly-sim --no-trace --script wh_corridor
-# 可选：uv run firefly-sim --no-trace                          # 无脚本：悬停在起点等 planner 参考（§3 导航用）
-# 可选：uv run firefly-sim --no-trace --script wh_corridor     # 轨迹模式：脚本参考驱动（planner 参考被忽略，只验证接线）
+# 终端 7 — 物理环境（被控对象）：发布传感器/状态/机体，订阅飞控指令
+uv run firefly-sim --no-trace --no-camera                     # 闭环：等飞控（终端 8）；无有效指令时悬停兜底
+# 可选：uv run firefly-sim --no-trace --script wh_corridor     # bench：脚本轨迹夹具（真值反馈，不开终端 8）
 # 可选：... --odom-topic Firefly/VoidOdom                      # void 状态源（DIVO A/B 对比用）
-# 等待日志：状态源就绪（Firefly/Odometry），任务时钟启动
+# 等待日志（仅 --script）：状态源就绪（Firefly/Odometry），任务时钟启动
+
+# 终端 8 — 飞控（最后起）：1kHz 控制环，订阅 PlantState/Airframe/Odometry/Imu/Reference
+cargo run --release -p fc
+# 可选：cargo run --release -p fc -- --config configs/fc.toml
+# 等待日志：飞控进程启动（RUST_LOG=info 才打 stderr；聚合日志在 rrd 的 logs/fc 实体）
 ```
+
+`--script` 模式不走飞控（不发布 `Firefly/PlantState`/`Airframe`、不订阅
+`Firefly/Control`）：脚本轨迹由 `DroneEnv.apply_pd`（真值反馈夹具）跟踪，
+是 VIO bench 的激励源，`fc` 不必起。
 
 `--script` 可选轨迹（`apps/firefly-sim/src/firefly_sim/trajectories.py: TRAJECTORIES`，
 省略 NAME 时为 `lissajous_classic`）：

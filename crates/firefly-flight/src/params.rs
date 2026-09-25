@@ -2,9 +2,12 @@
 
 use serde::Deserialize;
 
-/// 机体参数。
+/// 机体参数（刚体本身；旋翼布局与推力上限见 [`crate::Airframe`]）。
 ///
-/// 默认值按 250g 级 2.5~3 寸圈圈机量级取（轴距 ~120mm，推重比 ≈ 3）。
+/// 默认值按 219g 级 2.5~3 寸微型机取（对角 ~127mm）。质量/惯量与 sim 侧 `MuJoCo`
+/// 几何同源（见 `packages/firefly-mujoco`；sim 以 `mjModel` 实测值为准并运行时发布）。
+/// `linear_drag`/`angular_drag` 是**被控对象的气动阻尼**，由 [`crate::integrate`] 施加；
+/// 无气动模型的对象（如 `MuJoCo`）在 [`crate::Airframe`] 消息里发布 0。
 #[derive(Deserialize, Clone, Copy, Debug)]
 pub struct QuadParams {
     /// 质量（kg）。
@@ -13,35 +16,28 @@ pub struct QuadParams {
     /// 惯量对角元（kg·m²，机体系 xyz）。
     #[serde(default = "d_inertia")]
     pub inertia: [f32; 3],
-    /// 四电机总推力上限（N）。
-    #[serde(default = "d_max_thrust")]
-    pub max_thrust: f32,
     /// 平移阻尼（N·s/m）：按 `-k·v` 计入世界系力。
     #[serde(default = "d_linear_drag")]
     pub linear_drag: f32,
-    /// 角速度阻尼率（1/s）：按 `I·(-k·ω_body)` 计入力矩，与惯量无关。
+    /// 角速度阻尼率（1/s）：按 `-I·k·ω_body` 计入力矩。
     #[serde(default = "d_angular_drag")]
     pub angular_drag: f32,
 }
 
 fn d_mass() -> f32 {
-    0.25
+    0.219
 }
 
 fn d_inertia() -> [f32; 3] {
-    [0.0015, 0.0015, 0.0026]
-}
-
-fn d_max_thrust() -> f32 {
-    7.5
+    [2.7e-4, 3.3e-4, 5.6e-4]
 }
 
 fn d_linear_drag() -> f32 {
-    0.20
+    0.15
 }
 
 fn d_angular_drag() -> f32 {
-    0.02
+    0.05
 }
 
 impl Default for QuadParams {
@@ -49,7 +45,6 @@ impl Default for QuadParams {
         Self {
             mass: d_mass(),
             inertia: d_inertia(),
-            max_thrust: d_max_thrust(),
             linear_drag: d_linear_drag(),
             angular_drag: d_angular_drag(),
         }
