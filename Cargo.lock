@@ -2960,6 +2960,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "firefly-render"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+]
+
+[[package]]
 name = "firefly-search"
 version = "0.1.0"
 dependencies = [
@@ -5750,6 +5757,7 @@ name = "quad"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "firefly-render",
  "log",
  "serde",
  "toml",
@@ -5975,6 +5983,7 @@ dependencies = [
  "firefly-error",
  "firefly-observability",
  "firefly-pubsub",
+ "firefly-render",
  "log",
  "rand",
  "serde",

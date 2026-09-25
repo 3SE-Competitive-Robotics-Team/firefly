@@ -1,14 +1,15 @@
 //! 自由浏览相机：`F` 在「跟随无人机」与「自由飞行」间切换。
 //!
 //! 自由模式：`WASD` 相对视角平移、鼠标控制偏航/俯仰、`Q/E` 升降、`Shift` 加速，
-//! `F` 或 `Esc` 退出并释放光标。只作用于主视角相机（`With<Camera>, Without<Eye>`），
-//! 传感器 rig 相机不动；退出后自动回到跟随（`rig::follow_main` 在自由模式下让位）。
+//! `F` 或 `Esc` 退出并释放光标。只作用于主视角相机（`With<FollowCamera>`），
+//! 传感器 rig 相机不动；退出后自动回到跟随（`follow_camera` 的自由模式让位见
+//! `main.rs` 的运行条件）。
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+use firefly_render::camera::FollowCamera;
 
-use crate::rig::Eye;
 use crate::ui::{FOLLOW_HINT, FREE_HINT, ModeLabel};
 
 /// 俯仰限幅（约 ±86°，防翻转）。
@@ -50,7 +51,7 @@ pub fn toggle_freecam(
     keys: Res<ButtonInput<KeyCode>>,
     mut free: ResMut<FreeCam>,
     mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
-    cam: Single<&Transform, (With<Camera>, Without<Eye>)>,
+    cam: Single<&Transform, With<FollowCamera>>,
 ) {
     let toggled = keys.just_pressed(KeyCode::KeyF);
     let escaped = keys.just_pressed(KeyCode::Escape);
@@ -85,7 +86,7 @@ pub fn freecam_move(
     mouse: Res<AccumulatedMouseMotion>,
     keys: Res<ButtonInput<KeyCode>>,
     mut free: ResMut<FreeCam>,
-    mut cam: Single<&mut Transform, (With<Camera>, Without<Eye>)>,
+    mut cam: Single<&mut Transform, With<FollowCamera>>,
 ) {
     if !free.enabled {
         return;

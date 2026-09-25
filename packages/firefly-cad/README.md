@@ -17,7 +17,8 @@ RMUC 场地 `STEP→glTF` 资产管线（Blender 精修的上游，Blender 只�
    `<scene>_collision.json`（供 `MuJoCo` 生成 box geom；凹结构不跨空腔）。
 4. `export`（`scripts/blender_field.py`）：`field_raw.npz` → 逐面 CAD 颜色 →
    PBR 材质 → `field.glb`。**不减面、不焊接**——逐 solid 三角化拓扑原样保留
-   （弯曲面平滑、面间锐边、壳不粘连），只剔除零面积退化三角。
+   （弯曲面平滑、面间锐边、壳不粘连），只剔除零面积退化三角；近黑体带程序化
+   微表面纹理（世界空间 UV 噪声 → Base Color / Roughness）。
 
 视觉导出用 headless Blender（CAD 颜色→PBR 灰黑体 + 红蓝绿 emissive），
 不进本包源码。

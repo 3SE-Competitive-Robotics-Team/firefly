@@ -32,15 +32,22 @@ mod trace_bridge;
 mod ui;
 
 use bevy::asset::AssetPlugin;
+use bevy::camera::visibility::RenderLayers;
+use bevy::light::CascadeShadowConfigBuilder;
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use bevy::window::{Window, WindowPlugin};
+use bevy::winit::WinitSettings;
 
 use capture::{CaptureHub, CapturePlugin};
 use config::RenderConfig;
+use firefly_render::camera::{FollowTarget, follow_camera};
+use firefly_render::drone::spawn_drone_visual;
+use firefly_render::lighting::DIRECTIONS;
+use firefly_render::scene::{MODELS_DIR, spawn_scene};
 use freecam::{FreeCam, freecam_move, toggle_freecam, update_mode_label};
 use link::{PendingFrames, drain_captures, open_ports, poll_pose};
-use rig::{PoseState, follow_main, spawn_rig};
+use rig::{DRONE_LAYER, PoseState, SENSOR_LIGHT_LAYER, VIEWER_LIGHT_LAYER, spawn_rig};
 use scene::SceneSpec;
 use ui::setup_panel;
 
@@ -61,7 +68,7 @@ fn main() {
     log::info!(
         "场景 {}：asset root {}，视觉 {}，起点 {:?}",
         spec.dir,
-        scene::MODELS_DIR,
+        MODELS_DIR,
         spec.asset_path(),
         spec.start
     );
@@ -75,7 +82,7 @@ fn main() {
                 .build()
                 .disable::<LogPlugin>()
                 .set(AssetPlugin {
-                    file_path: scene::MODELS_DIR.to_owned(),
+                    file_path: MODELS_DIR.to_owned(),
                     ..default()
                 })
                 .set(WindowPlugin {
@@ -89,6 +96,9 @@ fn main() {
         )
         .insert_resource(spec)
         .insert_resource(render_config)
+        // 传感器渲染是计算链路的一环，不是可挂起的桌面窗口：失焦时也必须持续
+        // 出图（Bevy 缺省失焦降到 1Hz，VIO 会拿到断流的图像而失稳）。
+        .insert_resource(WinitSettings::continuous())
         .insert_resource(GlobalAmbientLight {
             color: Color::WHITE,
             brightness: render_config.light.ambient,
@@ -105,7 +115,15 @@ fn main() {
         .add_plugins(CapturePlugin)
         .add_systems(Startup, (setup_scene, spawn_rig, setup_panel))
         .add_systems(PreUpdate, poll_pose)
-        .add_systems(Update, follow_main)
+        .add_systems(
+            Update,
+            (
+                follow_camera.run_if(freecam_off),
+                follow_drone,
+                tag_drone_layers,
+                log_render_rate,
+            ),
+        )
         .add_systems(
             Update,
             (toggle_freecam, freecam_move, update_mode_label).chain(),
@@ -127,44 +145,175 @@ fn setup_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    commands.spawn(WorldAssetRoot(assets.load(
-        bevy::gltf::GltfAssetLabel::Scene(0).from_asset(scene.asset_path()),
-    )));
+    spawn_scene(&mut commands, &assets, &scene.asset_path());
+
+    // 阴影按**视角**逐份渲染（`bevy_pbr` 的 `ViewLightEntities` 过滤），成本 ≈ 视角数
+    // × 阴影灯数 × 级联数；级联数与覆盖距离按场地尺度由 `configs/render.toml` 收紧
+    //（Bevy 默认 4 级联 / 150m 是大世界取值，直接用在 30m 场地会吃掉出图帧预算）。
+    let shadow = &render_config.light.shadow;
 
     // 照度锚定直射日光（`DirectionalLight` 文档：直射日光 32000~100000 lux；
     // `MuJoCo` 的 diffuse 无物理单位，只取三灯比值 0.7:0.3:0.22）。方向固定，
     // 照度由 `configs/render.toml` 的 `light.directional` 调。
     // 地面灰度均值须落在 120~170/255（对照 `MuJoCo` 实测 140~160），
     // 否则 VIO 无特征可跟——改照度后以发布图像均值人工比对。
-    for (index, dir) in [
-        Vec3::new(-0.3, -0.25, -0.92),
-        Vec3::new(-0.15, 0.6, -0.78),
-        Vec3::new(0.75, 0.1, -0.65),
-    ]
-    .iter()
-    .enumerate()
-    {
+    // 方向光拆成两套（同方向同照度，按视角层过滤）：传感器那套不投阴影，主视角
+    // 那套按配置投阴影。这样传感器图无阴影（暗区丢 KLT 特征），主视角有阴影，且
+    // 两侧照度各自独立、不互相叠加。
+    for (index, dir) in DIRECTIONS.iter().enumerate() {
+        let rotation = Quat::from_rotation_arc(Vec3::NEG_Z, dir.normalize());
+        let illuminance = render_config.light.directional[index];
         commands.spawn((
             DirectionalLight {
-                illuminance: render_config.light.directional[index],
-                shadow_maps_enabled: index == 0,
+                illuminance,
+                shadow_maps_enabled: false,
                 ..default()
             },
-            Transform::from_rotation(Quat::from_rotation_arc(Vec3::NEG_Z, dir.normalize())),
+            RenderLayers::layer(SENSOR_LIGHT_LAYER),
+            Transform::from_rotation(rotation),
+        ));
+        commands.spawn((
+            DirectionalLight {
+                illuminance,
+                shadow_maps_enabled: shadow.enabled && index < shadow.cast_lights,
+                ..default()
+            },
+            CascadeShadowConfigBuilder {
+                num_cascades: shadow.num_cascades,
+                maximum_distance: shadow.maximum_distance,
+                first_cascade_far_bound: shadow.first_cascade_far_bound,
+                ..default()
+            }
+            .build(),
+            RenderLayers::layer(VIEWER_LIGHT_LAYER),
+            Transform::from_rotation(rotation),
         ));
     }
 
+    // 顶棚灯阵：rows × cols 盏点光源均匀铺在场地上方，营造场馆照明。点光源
+    // 不投阴影——一盏点光阴影 = 6 面 cubemap，数十盏会直接压垮渲染。
+    let grid = &render_config.light.grid;
+    let color = Color::srgb(grid.color[0], grid.color[1], grid.color[2]);
+    for row in 0..grid.rows {
+        for col in 0..grid.cols {
+            commands.spawn((
+                PointLight {
+                    color,
+                    intensity: grid.intensity,
+                    range: grid.range,
+                    ..default()
+                },
+                Transform::from_xyz(
+                    grid_axis(col, grid.cols, grid.span[0]),
+                    grid_axis(row, grid.rows, grid.span[1]),
+                    grid.height,
+                ),
+            ));
+        }
+    }
+    log::info!(
+        "顶棚灯阵 {}×{} = {} 盏（高 {:.1}m，单灯 {:.0}lm，半径 {:.1}m）",
+        grid.rows,
+        grid.cols,
+        grid.rows * grid.cols,
+        grid.height,
+        grid.intensity,
+        grid.range
+    );
+
     let start = Vec3::from(scene.start);
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(0.3, 0.3, 0.08))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.9, 0.7, 0.2),
-            ..default()
-        })),
-        Transform::from_translation(start),
-    ));
+
+    // 机体可视化（`firefly-render` 统一挂 `drone.glb` + 前向标记）：`follow_drone`
+    // 每帧贴真值位姿。只进主视角（`DRONE_LAYER`）：传感器相机位于机体内，机体模型
+    // 必须对它们不可见，否则自遮挡传感器图（glTF 子实体层由 `tag_drone_layers` 补）。
+    commands
+        .spawn((
+            DroneVisual,
+            FollowTarget,
+            RenderLayers::layer(DRONE_LAYER),
+            Transform::from_translation(start),
+            Visibility::default(),
+        ))
+        .with_children(|body| {
+            spawn_drone_visual(body, &assets, &mut meshes, &mut materials);
+        });
+
     log::info!("场景 {} render ready", scene.dir);
 }
+
+/// 机体可视化根（`follow_drone` 每帧贴真值位姿；对照 `apps/quad` 的机体根）。
+#[derive(Component)]
+struct DroneVisual;
+
+/// 机体模型贴到真值位姿（机体→世界，Hamilton；与传感器相机同源 `PoseState`）。
+// 系统参数按值传递（`SystemParam` 契约）。
+#[allow(clippy::needless_pass_by_value)]
+fn follow_drone(pose: Res<PoseState>, mut drone: Query<&mut Transform, With<DroneVisual>>) {
+    if !pose.has_pose {
+        return;
+    }
+    for mut transform in &mut drone {
+        transform.translation = pose.pos;
+        transform.rotation = pose.quat;
+    }
+}
+
+/// 机体模型（`drone.glb`）子树打到 `DRONE_LAYER`：glTF 场景子实体不继承父层，
+/// 缺一步它们会留在默认层被传感器相机看到。
+// 系统参数按值传递（`SystemParam` 契约）。
+#[allow(clippy::needless_pass_by_value)]
+fn tag_drone_layers(
+    roots: Query<Entity, With<DroneVisual>>,
+    children: Query<&Children>,
+    tagged: Query<(), With<RenderLayers>>,
+    mut commands: Commands,
+) {
+    for root in &roots {
+        let mut stack = vec![root];
+        while let Some(entity) = stack.pop() {
+            if tagged.get(entity).is_err() {
+                commands
+                    .entity(entity)
+                    .insert(RenderLayers::layer(DRONE_LAYER));
+            }
+            if let Ok(kids) = children.get(entity) {
+                stack.extend(kids.iter());
+            }
+        }
+    }
+}
+
+/// 灯阵单轴布点（中心为原点，`count` 盏均布在 `span` 上；单盏居中）。
+fn grid_axis(index: u32, count: u32, span: f32) -> f32 {
+    if count <= 1 {
+        0.0
+    } else {
+        -span / 2.0 + span * index as f32 / (count - 1) as f32
+    }
+}
+
+/// 自由浏览模式下第三人称追踪让位给 `freecam::freecam_move`。
+// 系统参数按值传递（`SystemParam` 契约）。
+#[allow(clippy::needless_pass_by_value)]
+fn freecam_off(free: Res<FreeCam>) -> bool {
+    !free.enabled
+}
+
+/// 出图节奏诊断：每 [`RATE_LOG_PERIOD`] 秒报一次应用帧率（传感器图像的供给侧）。
+/// 帧率跌破相机节拍（10Hz）时 VIO 拿到的图像会稀疏，链路按此判据排查。
+// 系统参数按值传递（`SystemParam` 契约）。
+#[allow(clippy::needless_pass_by_value)]
+fn log_render_rate(time: Res<Time>, mut acc: Local<(f32, u32)>) {
+    acc.0 += time.delta_secs();
+    acc.1 += 1;
+    if acc.0 >= RATE_LOG_PERIOD {
+        log::info!("render 出图 {:.1} Hz", f64::from(acc.1) / f64::from(acc.0));
+        *acc = (0.0, 0);
+    }
+}
+
+/// 出图节奏诊断周期（秒）。
+const RATE_LOG_PERIOD: f32 = 5.0;
 
 /// 退出时刷 trace（`Ctrl-C` → `AppExit`，端口随后按 `Drop` 纪律释放）。
 // 系统参数按值传递（`SystemParam` 契约）。

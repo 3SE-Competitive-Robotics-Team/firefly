@@ -207,6 +207,8 @@ def main() -> None:
 
     # 参考状态（demo 未发布时悬停在起点）
     ref_pos = start_pos
+    ref_yaw = 0.0
+    ref_yaw_dot = 0.0
     ref_vel = np.zeros(3)
     got_ref = False
     # 任务时钟（--script 模式）：None = 等 VOID 就绪中，原地悬停；
@@ -231,6 +233,8 @@ def main() -> None:
                 m = sample.payload().contents
                 ref_pos = np.array([m.position_x, m.position_y, m.position_z])
                 ref_vel = np.array([m.velocity_x, m.velocity_y, m.velocity_z])
+                ref_yaw = float(m.yaw)
+                ref_yaw_dot = float(m.yaw_dot)
                 got_ref = True
                 log("收到参考 t={:.3f} pos=({:.2},{:.2},{:.2}) trace={:032x}".format(
                     m.timestamp, m.position_x, m.position_y, m.position_z,
@@ -286,10 +290,13 @@ def main() -> None:
                     # 不变量（见 trajectories.py），长跑直接用连续时间即可
                     ref_pos, ref_vel = trajectory.ref(env.time - mission_t0)
                 # --script 模式：真值跟踪（运动由外部轨迹指定）
-                env.apply_pd(ref_pos, ref_vel)
+                env.apply_pd(ref_pos, ref_vel, ref_yaw=ref_yaw, ref_yaw_rate=ref_yaw_dot)
             else:
                 # 闭环模式：PD 反馈取估计
-                env.apply_pd(ref_pos, ref_vel, est_pos=est_pos, est_vel=est_vel)
+                env.apply_pd(
+                    ref_pos, ref_vel, ref_yaw=ref_yaw, ref_yaw_rate=ref_yaw_dot,
+                    est_pos=est_pos, est_vel=est_vel,
+                )
             env.step()
             # 失稳守卫：MuJoCo 发散（QACC NaN/Inf）后状态永久污染且传感器
             # 全变 NaN，下游 VIO 会被毒化——检测到即重置到起点，长跑不挂。

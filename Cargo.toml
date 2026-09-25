@@ -46,6 +46,7 @@ firefly-void-measure = { path = "crates/firefly-void-measure" }
 firefly-void = { path = "crates/firefly-void" }
 firefly-vision-map = { path = "crates/firefly-vision-map" }
 firefly-vision-match = { path = "crates/firefly-vision-match" }
+firefly-render = { path = "crates/firefly-render" }
 
 [workspace.package]
 edition = "2024"

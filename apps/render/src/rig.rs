@@ -8,19 +8,22 @@
 //! （由构造保证，rrd 里 `Bevy` 图与 `MuJoCo` 图逐像素对照是仲裁依据）。
 
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{Camera, Exposure, Projection, RenderTarget};
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::image::Image;
+use bevy::pbr::ScreenSpaceAmbientOcclusion;
+use bevy::pbr::ScreenSpaceReflections;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::render::view::Msaa;
 use bevy::ui::IsDefaultUiCamera;
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_WIDTH};
+use firefly_render::camera::FollowCamera;
 
 use crate::config::RenderConfig;
-use crate::freecam::FreeCam;
 
 /// 垂直视场（度，对照 MJCF `fovy="70.88"`）。
 pub const FOV_Y_DEG: f32 = 70.88;
@@ -37,6 +40,16 @@ pub const SENSOR_NEAR: f32 = 0.05;
 /// 传感器远平面（米，仅文档口径：`Bevy` 用无限远反向 Z，远裁剪由
 /// [`crate::sensors`] 的有效掩码承担，对照 `env.py` 的 `depth < 100`）。
 pub const SENSOR_FAR: f32 = 100.0;
+
+/// 场地 mesh 层：主视角与传感器相机都渲染。
+pub const WORLD_LAYER: usize = 0;
+/// 主视角专用灯光层：投阴影的方向光放这里——阴影按视角逐份渲染，传感器相机不在
+/// 这层，既不进阴影图也不花阴影 pass（阴影开销 = 视角数 × 灯数 × 级联数）。
+pub const VIEWER_LIGHT_LAYER: usize = 1;
+/// 仅主视角渲染的机体层：传感器相机位于机体内，必须排除机体模型，否则自遮挡。
+pub const DRONE_LAYER: usize = 2;
+/// 传感器专用灯光层（无阴影）：与主视角灯光集分开，两侧照度可独立标定。
+pub const SENSOR_LIGHT_LAYER: usize = 3;
 
 /// rig 相机标记（主世界→渲染世界的透传标记，见 [`crate::capture`]）。
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
@@ -134,11 +147,31 @@ pub fn spawn_rig(
         right: right.clone(),
     });
 
-    // 传感器与主视角同一曝光（对照 `configs/render.toml` 的 `view.ev100`）：
-    // 曝光与光照量级不匹配会整幅惨白。
+    // 环境光贴图（IBL）：半球渐变天空，给近黑高光面暗部补光 + 柔和反射。
+    // 四个视角（双目/深度/主视角）共用同一张，保证发布图像与目视一致。
+    let env = EnvironmentMapLight {
+        intensity: config.env.intensity,
+        ..EnvironmentMapLight::hemispherical_gradient(
+            &mut images,
+            Color::srgb(config.env.top[0], config.env.top[1], config.env.top[2]),
+            Color::srgb(config.env.mid[0], config.env.mid[1], config.env.mid[2]),
+            Color::srgb(
+                config.env.bottom[0],
+                config.env.bottom[1],
+                config.env.bottom[2],
+            ),
+        )
+    };
+
+    // 传感器与主视角曝光分开：传感器要特征（灰度均值 120~170），主视角要观感
+    //（`configs/render.toml` 的 `sensor_ev100` / `ev100`）。
+    let sensor_exposure = Exposure {
+        ev100: config.view.sensor_ev100,
+    };
     let exposure = Exposure {
         ev100: config.view.ev100,
     };
+    let sensor_layers = RenderLayers::from_layers(&[WORLD_LAYER, SENSOR_LIGHT_LAYER]);
     let eyes = [
         (Eye::Left, LEFT_OFFSET, left),
         (Eye::Right, RIGHT_OFFSET, right),
@@ -152,7 +185,9 @@ pub fn spawn_rig(
             Msaa::Off,
             sensor_projection(),
             Tonemapping::None,
-            exposure,
+            sensor_exposure,
+            sensor_layers.clone(),
+            env.clone(),
             eye,
             eye_transform(pose.pos, pose.quat, offset),
         ));
@@ -162,17 +197,35 @@ pub fn spawn_rig(
     }
 
     // 主视角：bloom 让场地红蓝 emissive 灯饰出光感（`Bloom` 自动带上 `Hdr`）。
-    // 传感器相机不加 bloom：VIO 前端吃原图，泛光会糊掉角点。
+    // 传感器相机不加 bloom；SSAO 同样只加主视角——它给棱角/接触处加环境光遮蔽，
+    // 画面更立体，但无 TAA 时偏噪，进 VIO 图像反而污染轨迹。
     commands.spawn((
         Camera3d::default(),
         exposure,
+        env,
+        Msaa::Off,
+        ScreenSpaceAmbientOcclusion::default(),
+        // 屏幕空间反射：给地板/面板一层场景反射（"光感"），只加主视角——传感器图
+        // 要干净的地物特征，镜面反射是视角相关的伪特征，会污染 KLT。
+        ScreenSpaceReflections::default(),
+        RenderLayers::from_layers(&[WORLD_LAYER, VIEWER_LIGHT_LAYER, DRONE_LAYER]),
         Bloom {
             intensity: config.view.bloom_intensity,
             ..default()
         },
         IsDefaultUiCamera,
-        Transform::from_translation(pose.pos + Vec3::new(-6.0, 0.0, 3.0))
-            .looking_at(pose.pos, Vec3::Z),
+        // 第三人称追踪（与 `apps/quad` 同一实现 `firefly-render`）；自由浏览模式下
+        // 让位给 `freecam::freecam_move`（见 `main.rs` 的运行条件）。
+        FollowCamera,
+        Transform::from_translation(
+            pose.pos
+                + Vec3::new(
+                    -firefly_render::camera::BACK,
+                    0.0,
+                    firefly_render::camera::UP,
+                ),
+        )
+        .looking_at(pose.pos, Vec3::Z),
     ));
 }
 
@@ -189,21 +242,4 @@ pub fn apply_pose_to_eyes(pose: &PoseState, eyes: &mut Query<(&Eye, &mut Transfo
         };
         *transform = eye_transform(pose.pos, pose.quat, offset);
     }
-}
-
-/// 主视角跟随（机体后上方追踪，`MuJoCo` 系：后为 -x，上为 +z）。
-/// 自由浏览模式下让位给 `freecam::freecam_move`。
-// 系统参数按值传递（`SystemParam` 契约）。
-#[allow(clippy::needless_pass_by_value)]
-pub fn follow_main(
-    pose: Res<PoseState>,
-    free: Res<FreeCam>,
-    mut main: Single<&mut Transform, (With<Camera>, Without<Eye>)>,
-) {
-    if free.enabled || !pose.has_pose {
-        return;
-    }
-    let back = pose.quat * Vec3::new(-6.0, 0.0, 3.0);
-    main.translation = pose.pos + back;
-    main.look_at(pose.pos, Vec3::Z);
 }
