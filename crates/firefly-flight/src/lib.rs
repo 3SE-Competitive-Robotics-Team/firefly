@@ -11,7 +11,7 @@
 //! 参考 → angle_mode/position_mode → 期望 Wrench（不限幅）
 //!      → Airframe::allocate → 4 电机推力（逐电机限幅，唯一的饱和点）
 //!      → Airframe::realize → 实际 Wrench（世界系）
-//!      → integrate（或 MuJoCo 的 xfrc_applied）
+//!      → integrate（自积分）或 MJCF 的 site gear（被控对象侧同构实现）
 //! ```
 //!
 //! 参数分两层：[`QuadParams`] 是刚体（质量/惯量/气动阻尼，由被控对象发布），

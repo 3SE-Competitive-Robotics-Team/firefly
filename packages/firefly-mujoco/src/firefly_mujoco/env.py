@@ -7,7 +7,8 @@
 
 本模块是**被控对象**（plant）：物理步进、传感器、施加旋翼推力。控制律不在这里
 （唯一实现在 `firefly-flight`）：飞控进程经 `Firefly/Control` 给出 4 电机推力，
-本环境按机体几何合成刚体等效 wrench 写进 `xfrc_applied`。`apply_pd` 仅供
+本环境写入模型执行器的 `ctrl`，由 `MuJoCo` 按 site 上的 gear（力 + 反扭矩）合成
+刚体 wrench——对照 `mujoco_menagerie/skydio_x2/x2.xml` 的旋翼建法。`apply_pd` 仅供
 `--script`（VIO 验证的轨迹跟踪夹具）使用。
 """
 
@@ -19,13 +20,6 @@ import mujoco
 
 from .messages import IMAGE_HEIGHT, IMAGE_WIDTH
 from .scene import ROTORS, build_scene
-
-#: 旋向（与 `scene.ROTORS` 同序：0 前右、1 后左为 +1）
-ROTOR_SPINS = np.array([spin for *_, spin in ROTORS], dtype=float)
-#: 反扭矩系数 c_τ（m）：偏航力矩 = c_τ·推力（与 `firefly-flight` 默认同值）
-TORQUE_COEFFICIENT = 0.016
-#: 推重比（单电机推力上限 = TWR·重量/4；与 `firefly-flight` 默认同值）
-THRUST_TO_WEIGHT = 3.0
 
 #: 脚本跟踪夹具（`--script`）PD：**加速度域**增益（位置 1/s²、速度 1/s，姿态 1/s²、
 #: 1/s），与质量/惯量无关。数值是旧力域增益按被测对象（9kg 机体，Ixx≈0.06/Izz≈0.22）
@@ -84,9 +78,29 @@ class DroneEnv:
                 self.model.site_pos[
                     mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, f"rotor{i}")
                 ]
-                for i in range(4)
+                for i in range(len(ROTORS))
             ]
         )
+        # 旋翼执行器：actuator 必须挂在同名 site 上（顺序即 rotor0..3 = 飞控电机编号），
+        # 上限/旋向/反扭矩系数全部从模型读回（MJCF 是唯一来源，见 scene._rotor_actuators_xml）
+        self._rotor_ids: list[int] = []
+        for i in range(len(ROTORS)):
+            aid = int(
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, f"rotor{i}")
+            )
+            if aid < 0:
+                raise ValueError(f"模型缺少旋翼执行器 rotor{i}（见 scene._rotor_actuators_xml）")
+            site_id = int(self.model.actuator_trnid[aid, 0])
+            want = int(mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, f"rotor{i}"))
+            if site_id != want:
+                raise ValueError(f"执行器 rotor{i} 未挂在同名 site 上（会与飞控的电机编号错位）")
+            self._rotor_ids.append(aid)
+        self._max_thrust_per_motor = float(
+            self.model.actuator_ctrlrange[self._rotor_ids[0], 1]
+        )
+        gears = self.model.actuator_gear[self._rotor_ids]
+        self._rotor_spins = np.sign(gears[:, 5])
+        self._torque_coefficient = float(np.abs(gears[0, 5]))
         mujoco.mj_forward(self.model, self.data)
 
     @property
@@ -139,19 +153,19 @@ class DroneEnv:
     def airframe(self) -> dict:
         """机体/执行器描述（`Firefly/Airframe` 的唯一内容来源）。
 
-        质量/惯量/旋翼位置读自 `mjModel`（改几何即改被控对象，无第二处同步）；
-        阻尼为 0（MuJoCo 无气动模型）；单电机推力上限由推重比与实测重量导出。
+        质量/惯量/旋翼位置读自 `mjModel`，旋向/反扭矩系数/单电机上限读自 actuator 的
+        gear 与 ctrlrange——改 MJCF 即改被控对象，无第二处同步；阻尼为 0
+        （`MuJoCo` 侧无气动模型）。
         """
-        weight = self.mass * 9.81
         return {
             "mass": self.mass,
             "inertia": self.inertia_body(),
             "linear_drag": 0.0,
             "angular_drag": 0.0,
             "rotor_positions": self._rotor_positions.copy(),
-            "rotor_spins": ROTOR_SPINS.copy(),
-            "max_thrust_per_motor": THRUST_TO_WEIGHT * weight / 4.0,
-            "torque_coefficient": TORQUE_COEFFICIENT,
+            "rotor_spins": self._rotor_spins.copy(),
+            "max_thrust_per_motor": self._max_thrust_per_motor,
+            "torque_coefficient": self._torque_coefficient,
         }
 
     def reset(self, pos: np.ndarray, quat_xyzw: np.ndarray) -> None:
@@ -163,20 +177,16 @@ class DroneEnv:
     # ---- 控制 ----
 
     def apply_motor_thrusts(self, thrusts: np.ndarray) -> None:
-        """4 电机推力（N）→ 刚体等效 wrench → `xfrc_applied`。
+        """4 电机推力（N，顺序 = rotor0..3）→ 模型执行器的 `ctrl`。
 
-        力 `R·(ΣTᵢ·ẑ)`，力矩 `R·(Σ rᵢ×(Tᵢ·ẑ) + Σ sᵢ·c_τ·Tᵢ·ẑ)`——与
-        `firefly-flight::Airframe::realize` 同一套式子（plant 侧独立实现：几何取自
-        model 的 rotor site，旋向/系数取自本模块常量）。
+        旋翼的力/力矩由 `MuJoCo` 按 site 上的 gear 合成（力随机体 z，反扭矩随机体
+        z 按旋向），单电机上限由 `ctrlrange` 在引擎侧夹（`autolimits`）——与飞控
+        `Airframe` 消息里的上限同源（都读自模型）。
         """
-        R = self.data.body("drone").xmat.reshape(3, 3)
-        T = np.asarray(thrusts, dtype=float)
-        lever = self._rotor_positions
-        force_body = np.array([0.0, 0.0, float(T.sum())])
-        torque_body = np.cross(lever, np.column_stack([np.zeros(4), np.zeros(4), T])).sum(0)
-        torque_body[2] += float((ROTOR_SPINS * T).sum()) * TORQUE_COEFFICIENT
-        self.data.xfrc_applied[self._drone_id, 0:3] = R @ force_body
-        self.data.xfrc_applied[self._drone_id, 3:6] = R @ torque_body
+        t = np.asarray(thrusts, dtype=float)
+        if t.shape != (len(self._rotor_ids),):
+            raise ValueError(f"电机推力形状应为 ({len(self._rotor_ids)},)，收到 {t.shape}")
+        self.data.ctrl[self._rotor_ids] = t
 
     def apply_hover_hold(self) -> None:
         """飞控缺席/指令陈旧时的兜底：等推力抵消重力（含倾斜补偿）。
