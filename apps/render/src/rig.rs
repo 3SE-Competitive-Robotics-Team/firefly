@@ -13,15 +13,14 @@ use bevy::camera::{Camera, Exposure, Projection, RenderTarget};
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::image::Image;
-use bevy::pbr::ScreenSpaceAmbientOcclusion;
-use bevy::pbr::ScreenSpaceReflections;
-use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::render::view::Msaa;
 use bevy::ui::IsDefaultUiCamera;
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_WIDTH};
+use firefly_pubsub::trace::TraceContext;
 use firefly_render::camera::FollowCamera;
+use firefly_render::lighting::viewer_camera;
 
 use crate::config::RenderConfig;
 
@@ -43,12 +42,12 @@ pub const SENSOR_FAR: f32 = 100.0;
 
 /// 场地 mesh 层：主视角与传感器相机都渲染。
 pub const WORLD_LAYER: usize = 0;
-/// 主视角专用灯光层：投阴影的方向光放这里——阴影按视角逐份渲染，传感器相机不在
-/// 这层，既不进阴影图也不花阴影 pass（阴影开销 = 视角数 × 灯数 × 级联数）。
+/// 主视角专用灯光层：`firefly-render` 共享的主视角灯光放这里，与传感器灯光分开，
+/// 传感器相机不在这层、不吃这一套（两侧照度可独立标定）。
 pub const VIEWER_LIGHT_LAYER: usize = 1;
 /// 仅主视角渲染的机体层：传感器相机位于机体内，必须排除机体模型，否则自遮挡。
 pub const DRONE_LAYER: usize = 2;
-/// 传感器专用灯光层（无阴影）：与主视角灯光集分开，两侧照度可独立标定。
+/// 传感器专用灯光层（不投影）：与主视角灯光集分开，按 VIO 灰度均值独立标定。
 pub const SENSOR_LIGHT_LAYER: usize = 3;
 
 /// rig 相机标记（主世界→渲染世界的透传标记，见 [`crate::capture`]）。
@@ -71,6 +70,8 @@ pub struct PoseState {
     pub quat: Quat,
     /// 真值时间戳（秒，`sim_time`）。
     pub stamp: f64,
+    /// 最近一条真值的 trace 上下文（出图发布时续接）。
+    pub trace: TraceContext,
     /// 是否收到过真值。
     pub has_pose: bool,
 }
@@ -141,14 +142,13 @@ pub fn spawn_rig(
 ) {
     let left = images.add(sensor_target());
     let right = images.add(sensor_target());
-    let depth_color = images.add(sensor_target());
     commands.insert_resource(SensorTargets {
         left: left.clone(),
         right: right.clone(),
     });
 
     // 环境光贴图（IBL）：半球渐变天空，给近黑高光面暗部补光 + 柔和反射。
-    // 四个视角（双目/深度/主视角）共用同一张，保证发布图像与目视一致。
+    // 只作用于传感器彩色相机（主视角观感由 `firefly-render` 共享效果决定，不吃 IBL）。
     let env = EnvironmentMapLight {
         intensity: config.env.intensity,
         ..EnvironmentMapLight::hemispherical_gradient(
@@ -163,23 +163,24 @@ pub fn spawn_rig(
         )
     };
 
-    // 传感器与主视角曝光分开：传感器要特征（灰度均值 120~170），主视角要观感
-    //（`configs/render.toml` 的 `sensor_ev100` / `ev100`）。
+    // 传感器曝光按 VIO 灰度均值单独标定（`configs/render.toml` 的 `sensor_ev100`）；
+    // 主视角曝光由 `firefly-render` 的共享 `viewer_camera` 管。
     let sensor_exposure = Exposure {
         ev100: config.view.sensor_ev100,
     };
-    let exposure = Exposure {
-        ev100: config.view.ev100,
-    };
     let sensor_layers = RenderLayers::from_layers(&[WORLD_LAYER, SENSOR_LIGHT_LAYER]);
-    let eyes = [
+
+    // 双目彩色相机：各出 RGB（回读左/右目颜色目标）。
+    // 出图窗口由 `link::poll_pose` 激活：非出图帧不渲染传感器（省 GPU）。
+    for (eye, offset, target) in [
         (Eye::Left, LEFT_OFFSET, left),
         (Eye::Right, RIGHT_OFFSET, right),
-        (Eye::Depth, DEPTH_OFFSET, depth_color),
-    ];
-    for (eye, offset, target) in eyes {
-        let mut entity = commands.spawn((
-            Camera::default(),
+    ] {
+        commands.spawn((
+            Camera {
+                is_active: false,
+                ..default()
+            },
             RenderTarget::from(target),
             Camera3d::default(),
             Msaa::Off,
@@ -191,28 +192,34 @@ pub fn spawn_rig(
             eye,
             eye_transform(pose.pos, pose.quat, offset),
         ));
-        if eye == Eye::Depth {
-            entity.insert(DepthPrepass);
-        }
     }
 
-    // 主视角：bloom 让场地红蓝 emissive 灯饰出光感（`Bloom` 自动带上 `Hdr`）。
-    // 传感器相机不加 bloom；SSAO 同样只加主视角——它给棱角/接触处加环境光遮蔽，
-    // 画面更立体，但无 TAA 时偏噪，进 VIO 图像反而污染轨迹。
+    // 深度相机：只跑深度预通道。`RenderTarget::None` 无颜色输出，Bevy 会移除
+    // `ViewTarget`，彩色主 pass 不执行（省掉一整遍 5M 三角面）；深度经
+    // `ViewDepthTexture` 回读。
     commands.spawn((
-        Camera3d::default(),
-        exposure,
-        env,
-        Msaa::Off,
-        ScreenSpaceAmbientOcclusion::default(),
-        // 屏幕空间反射：给地板/面板一层场景反射（"光感"），只加主视角——传感器图
-        // 要干净的地物特征，镜面反射是视角相关的伪特征，会污染 KLT。
-        ScreenSpaceReflections::default(),
-        RenderLayers::from_layers(&[WORLD_LAYER, VIEWER_LIGHT_LAYER, DRONE_LAYER]),
-        Bloom {
-            intensity: config.view.bloom_intensity,
+        Camera {
+            is_active: false,
             ..default()
         },
+        RenderTarget::None {
+            size: UVec2::new(IMAGE_WIDTH as u32, IMAGE_HEIGHT as u32),
+        },
+        Camera3d::default(),
+        Msaa::Off,
+        sensor_projection(),
+        sensor_layers,
+        Eye::Depth,
+        eye_transform(pose.pos, pose.quat, DEPTH_OFFSET),
+        DepthPrepass,
+    ));
+
+    // 主视角：照明/曝光/bloom 与 `apps/quad` 同源（`firefly-render` 共享效果），
+    // 两边不再各自定制。无阴影、无 SSAO/SSR、无 IBL。
+    commands.spawn((
+        Camera3d::default(),
+        viewer_camera(),
+        RenderLayers::from_layers(&[WORLD_LAYER, VIEWER_LIGHT_LAYER, DRONE_LAYER]),
         IsDefaultUiCamera,
         // 第三人称追踪（与 `apps/quad` 同一实现 `firefly-render`）；自由浏览模式下
         // 让位给 `freecam::freecam_move`（见 `main.rs` 的运行条件）。

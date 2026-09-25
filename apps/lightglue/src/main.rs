@@ -8,7 +8,7 @@
 //! 位姿作初值、`pose_graph` 以位姿边做联合优化），只是描述子换成 ALIKED，
 //! 且观测与 GICP 共用误差态 EKF 而非位姿图。
 //!
-//! 运行：`cargo run -p lightglue -- --map <map.ffvmap> [-- --model ...]`。
+//! 运行：`cargo run --release -p lightglue -- --map <map.ffvmap> [-- --model ...]`。
 
 use firefly_localization::convert::odom_to_matrix;
 use firefly_pubsub::event::TopicListener;

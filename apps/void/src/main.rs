@@ -6,7 +6,7 @@
 //! 分离，支持 A/B 对比）。所有消息 User Header 自动携带 fastrace trace
 //! 上下文（跨进程 span 树可观测，照抄 vio 的 `TraceContext` 用法）。
 //!
-//! 运行：`cargo run -p void`（配合 `uv run firefly-sim` 的 `MuJoCo` 物理环境）。
+//! 运行：`cargo run --release -p void`（配合 `uv run firefly-sim` 的 `MuJoCo` 物理环境）。
 //! - 可视化：10Hz 位姿/轨迹/地图点（`void/odom`+`void/traj` 橙、
 //!   `void/map_points` 采样点、`void/health` 深度内点/视觉迭代标量），
 //!   统一 `sim_time` 时间轴，经 `Firefly/Viz` 话题由 `firefly-viz` 进程

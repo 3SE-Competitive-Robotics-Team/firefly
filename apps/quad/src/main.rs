@@ -4,23 +4,20 @@
 //! 指定的场地里飞。第三人称追踪相机与场景/光照/机体可视化复用 `firefly-render`
 //!（与 `apps/render` 同一套基建）。这是后续「在真实动态下调试 VIO/感知」的可玩基座。
 //!
-//! 运行：`cargo run -p quad`
+//! 运行：`cargo run --release -p quad`
 
 mod config;
 mod quad;
 
 use bevy::asset::AssetPlugin;
-use bevy::camera::Exposure;
-use bevy::post_process::bloom::Bloom;
+use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 use bevy::text::FontSize;
 use bevy::window::{Window, WindowPlugin};
 
 use config::QuadConfig;
 use firefly_render::camera::{FollowCamera, FollowTarget, follow_camera};
-use firefly_render::lighting::{
-    BLOOM, EV100, ILLUMINANCE, ambient_light, spawn_directional_lights,
-};
+use firefly_render::lighting::{spawn_viewer_lighting, viewer_camera};
 use firefly_render::scene::{MODELS_DIR, spawn_scene};
 use quad::{Quad, QuadInput};
 
@@ -60,16 +57,11 @@ fn main() {
 // 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 fn setup_scene(mut commands: Commands, cfg: Res<QuadConfig>, assets: Res<AssetServer>) {
-    commands.insert_resource(ambient_light());
-    spawn_directional_lights(&mut commands, ILLUMINANCE);
+    spawn_viewer_lighting(&mut commands, &RenderLayers::default());
     spawn_scene(&mut commands, &assets, &cfg.field);
     commands.spawn((
         Camera3d::default(),
-        Exposure { ev100: EV100 },
-        Bloom {
-            intensity: BLOOM,
-            ..default()
-        },
+        viewer_camera(),
         FollowCamera,
         Transform::from_xyz(-2.0, 0.0, 2.0).looking_at(Vec3::ZERO, Vec3::Z),
     ));

@@ -5,8 +5,9 @@
 //! 深度感知建图的位姿同源，深度流超时（对照官方 `grid_map/odom_depth_timeout`）
 //! 触发急停且禁用 fail-safe。真值不参与状态链路（vio 进程侧仅作对比可视化）。
 //!
-//! 运行：`cargo run -p planner`（配合 `uv run firefly-sim` + `cargo run -p vio`），
-//! 或 `cargo run -p planner -- --map apps/planner/maps/gate.ffmap` 独立运行。
+//! 运行：`cargo run --release -p planner`（配合 `uv run firefly-sim` +
+//! `cargo run --release -p vio`），或
+//! `cargo run --release -p planner -- --map apps/planner/maps/gate.ffmap` 独立运行。
 //!
 //! 动态目标：订阅 `Firefly/Goal`（`uv run firefly-goal X Y Z` 发布），
 //! 收到目标即重算全局路径并飞往该点；到达后悬停保持、进程保持运行等待

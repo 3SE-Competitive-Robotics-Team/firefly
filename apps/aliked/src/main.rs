@@ -9,7 +9,7 @@
 //!
 //! 权重在 `models/`（已 ignore，不进 git）。
 //!
-//! 运行：`cargo run -p aliked [--model models/aliked-n16-k512.onnx]`。
+//! 运行：`cargo run --release -p aliked [--model models/aliked-n16-k512.onnx]`。
 
 use firefly_pubsub::camera::{CAMERA_LEFT_TOPIC, GrayImageMessage};
 use firefly_pubsub::event::{CAMERA_PAIR_TOPIC, TopicListener};

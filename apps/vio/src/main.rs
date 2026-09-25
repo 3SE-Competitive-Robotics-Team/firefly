@@ -5,7 +5,7 @@
 //! 到 `Firefly/Odometry`。所有消息的 User Header 自动携带 fastrace trace
 //! 上下文（跨进程 span 树可观测）。
 //!
-//! 运行：`cargo run -p vio`（配合 `uv run firefly-sim` 的 `MuJoCo` 物理环境）。
+//! 运行：`cargo run --release -p vio`（配合 `uv run firefly-sim` 的 `MuJoCo` 物理环境）。
 //! - 瘦版可视化：10Hz 位姿/轨迹（`vio/odom`+`vio/traj` 橙、真值
 //!   `gt/pose`+`gt/traj` 蓝，统一 `sim_time` 时间轴），只记位姿不流图像。
 //!   经 `Firefly/Viz` 话题发布，`firefly-viz` 进程统一写 rerun（计算线程零 IO）。

@@ -35,7 +35,7 @@ EGO 规划器 Rust 实现：MINCO 后端 + Rebound 主循环 + 集群避碰。
 
 ```bash
 cargo test
-RUST_LOG=info cargo run -p firefly-planner --example demo
+RUST_LOG=info cargo run --release -p firefly-planner --example demo
 cargo test --release -p firefly-planner --test random_map_benchmark -- --ignored
 ```
 
