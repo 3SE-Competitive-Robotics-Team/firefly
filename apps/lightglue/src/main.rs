@@ -41,6 +41,9 @@ const QUERY_RADIUS: f64 = 3.0;
 const QUERY_TOPK: usize = 3;
 /// 匹配分数阈值（图内建 0.1 过滤，此处再收紧）。
 const SCORE_THRESHOLD: f32 = 0.2;
+/// 候选帧航向门限（度）：先验机头方向与库图帧机头方向的夹角超过此值的帧剔除。
+/// 同一位置可能采了多个朝向的关键帧，只按距离选会挑到背/侧视帧而匹配失败。
+const MAX_HEADING_DEG: f64 = 60.0;
 /// odom 先验新鲜度（秒），超时跳过本次查询。
 const ODOM_FRESH_TIMEOUT: f64 = 1.0;
 
@@ -325,6 +328,42 @@ fn match_frame(
     Ok((pairs_2d, pairs_3d))
 }
 
+/// 候选库图帧：先验邻域内 + 航向接近，按距离升序取 `QUERY_TOPK`。
+///
+/// 航向 = 机体系 `+x` 在世界系的方向；同位置多朝向的关键帧只按距离会挑到背/侧视帧。
+fn candidates_by_heading(
+    map: &VisionMap,
+    t_body_prior: &nalgebra::Matrix4<f64>,
+    prior_pos: [f64; 3],
+) -> Vec<usize> {
+    let prior_rot = t_body_prior.fixed_view::<3, 3>(0, 0).into_owned();
+    let prior_fwd = prior_rot * nalgebra::Vector3::new(1.0, 0.0, 0.0);
+    let cos_limit = MAX_HEADING_DEG.to_radians().cos();
+    let mut scored: Vec<(usize, f64)> = Vec::new();
+    for (i, frame) in map.frames.iter().enumerate() {
+        let dx = frame.position[0] - prior_pos[0];
+        let dy = frame.position[1] - prior_pos[1];
+        let dz = frame.position[2] - prior_pos[2];
+        let d2 = dx * dx + dy * dy + dz * dz;
+        if d2 > QUERY_RADIUS * QUERY_RADIUS {
+            continue;
+        }
+        let q = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
+            frame.quat_xyzw[3],
+            frame.quat_xyzw[0],
+            frame.quat_xyzw[1],
+            frame.quat_xyzw[2],
+        ));
+        if (q * nalgebra::Vector3::new(1.0, 0.0, 0.0)).dot(&prior_fwd) < cos_limit {
+            continue;
+        }
+        scored.push((i, d2));
+    }
+    scored.sort_by(|a, b| a.1.total_cmp(&b.1));
+    scored.truncate(QUERY_TOPK);
+    scored.into_iter().map(|(i, _)| i).collect()
+}
+
 /// 单次查询：先验邻域多帧匹配拼对应 → `PnP` → 机体位姿观测。
 fn query_once(
     session: &mut Session,
@@ -338,7 +377,7 @@ fn query_once(
         t_body_prior[(1, 3)],
         t_body_prior[(2, 3)],
     ];
-    let candidates = map.query_neighbors(prior_pos, QUERY_RADIUS, QUERY_TOPK);
+    let candidates = candidates_by_heading(map, &t_body_prior, prior_pos);
     log::debug!(
         "视觉查询 t={:.2} prior=({:.1},{:.1},{:.1}) candidates={candidates:?}",
         feat.timestamp,

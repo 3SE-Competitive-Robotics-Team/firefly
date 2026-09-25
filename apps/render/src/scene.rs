@@ -1,16 +1,15 @@
 //! 场景注册表：`configs/scene.toml` 的 `scene` → `models/<dir>/` 视觉资产 + 出生点。
 //!
 //! 统一接入约定（见 `packages/firefly-cad/README.md`）：`Bevy` asset root 恒为
-//! [`MODELS_DIR`]，视觉恒为 `models/<dir>/<visual>`；换场地改 `configs/scene.toml`
-//! 一行 + 注册表一项，不改加载代码。未注册名称回退 [`DEFAULT_SCENE`] 并告警。
+//! [`firefly_render::scene::MODELS_DIR`]，视觉恒为 `models/<dir>/<visual>`；换场地改
+//! `configs/scene.toml` 一行 + 注册表一项，不改加载代码。未注册名称回退
+//! [`DEFAULT_SCENE`] 并告警。
 //!
 //! 世界观配置与 `sim` / `viz` 共用同一份 `configs/scene.toml`（单一来源防漂移）。
 
 use bevy::prelude::*;
 use serde::Deserialize;
 
-/// 场地资产根（编译期绝对路径，与运行 `CWD` 无关）。
-pub const MODELS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models");
 /// 世界观配置（与 `sim` / `viz` 共用）。
 const SCENE_CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/scene.toml");
 

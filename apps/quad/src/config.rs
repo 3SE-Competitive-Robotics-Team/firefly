@@ -14,8 +14,6 @@ pub struct QuadConfig {
     pub drone: DroneConfig,
     #[serde(default)]
     pub control: ControlConfig,
-    #[serde(default)]
-    pub camera: CameraConfig,
 }
 
 /// 机体（250g 级圈圈机量级）。
@@ -24,9 +22,6 @@ pub struct DroneConfig {
     /// 质量（kg）。
     #[serde(default = "d_mass")]
     pub mass: f32,
-    /// 半轴距（米）。
-    #[serde(default = "d_arm")]
-    pub arm: f32,
     /// 四电机总推力上限（N）。
     #[serde(default = "d_max_thrust")]
     pub max_thrust: f32,
@@ -40,9 +35,6 @@ pub struct DroneConfig {
 
 fn d_mass() -> f32 {
     0.25
-}
-fn d_arm() -> f32 {
-    0.06
 }
 fn d_max_thrust() -> f32 {
     7.5
@@ -58,7 +50,6 @@ impl Default for DroneConfig {
     fn default() -> Self {
         Self {
             mass: d_mass(),
-            arm: d_arm(),
             max_thrust: d_max_thrust(),
             linear_drag: d_linear_drag(),
             angular_drag: d_angular_drag(),
@@ -111,43 +102,6 @@ impl Default for ControlConfig {
             attitude_kp: d_att_kp(),
             rate_kp: d_rate_kp(),
             vz_kp: d_vz_kp(),
-        }
-    }
-}
-
-/// 第三人称追踪相机。
-#[derive(Deserialize, Clone, Copy, Debug)]
-pub struct CameraConfig {
-    #[serde(default = "d_back")]
-    pub back: f32,
-    #[serde(default = "d_up")]
-    pub up: f32,
-    #[serde(default = "d_look")]
-    pub look_ahead: f32,
-    #[serde(default = "d_smooth")]
-    pub smooth: f32,
-}
-
-fn d_back() -> f32 {
-    1.1
-}
-fn d_up() -> f32 {
-    0.45
-}
-fn d_look() -> f32 {
-    0.8
-}
-fn d_smooth() -> f32 {
-    6.0
-}
-
-impl Default for CameraConfig {
-    fn default() -> Self {
-        Self {
-            back: d_back(),
-            up: d_up(),
-            look_ahead: d_look(),
-            smooth: d_smooth(),
         }
     }
 }

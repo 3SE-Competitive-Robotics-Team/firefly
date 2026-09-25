@@ -8,7 +8,6 @@ start = [0.0, -2.0, 1.2]
 
 [drone]
 mass = 0.25          # kg
-arm = 0.06           # 电机到质心的半轴距（米）
 max_thrust = 7.5     # N：四电机总推力上限（推重比 ≈ 3.1）
 linear_drag = 0.20   # N·s/m：机体平移阻尼系数
 angular_drag = 0.02  # N·m·s/rad：机体角速度阻尼
@@ -20,9 +19,3 @@ climb_rate_max = 3.0  # m/s：升降速度指令上限
 attitude_kp = 9.0     # 姿态误差 → 机体角速度指令（1/s）
 rate_kp = 6.0         # 角速度误差 → 角加速度（1/s）
 vz_kp = 4.0           # 高度速度误差 → 垂直加速度增益（1/s）
-
-[camera]
-back = 1.1       # 追踪距离（米，机体后方）
-up = 0.45        # 追踪高度（米）
-look_ahead = 0.8 # 视点前移（米，看向机体前方）
-smooth = 6.0     # 追踪平滑（越大越跟手）
