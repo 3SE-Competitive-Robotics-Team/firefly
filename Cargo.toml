@@ -8,6 +8,7 @@ bevy = "0.19"
 clap = { version = "4.5", features = ["derive"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 fastrace = { version = "0.7", default-features = false }
+glam = "0.32"
 iceoryx2 = "0.9"
 iceoryx2-bb-posix = "0.9"
 jiff = "0.2"
@@ -25,6 +26,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 firefly-cost = { path = "crates/firefly-cost" }
 firefly-error = { path = "crates/firefly-error" }
+firefly-flight = { path = "crates/firefly-flight" }
 firefly-vio-core = { path = "crates/firefly-vio-core" }
 firefly-vio-types = { path = "crates/firefly-vio-types" }
 firefly-vio-init = { path = "crates/firefly-vio-init" }

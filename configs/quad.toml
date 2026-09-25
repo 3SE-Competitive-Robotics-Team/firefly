@@ -1,5 +1,6 @@
 # 微无人机飞行 demo（apps/quad）：独立 6-DOF 四旋翼，不接 IPC / VIO。
-# 动力学参数按 250g 级 2.5~3 寸圈圈机量级取（轴距 ~120mm）。
+# 机体（质量/惯量/推力上限/阻尼）与飞控模型在 `crates/firefly-flight`——与闭环评估
+# 共用同一实现；参数按 250g 级 2.5~3 寸圈圈机量级取（轴距 ~120mm）。
 
 # 场地（相对 models/；与 configs/scene.toml 同约定）
 field = "rmuc2026/field.glb"
@@ -9,8 +10,8 @@ start = [0.0, -2.0, 1.2]
 [drone]
 mass = 0.25          # kg
 max_thrust = 7.5     # N：四电机总推力上限（推重比 ≈ 3.1）
-linear_drag = 0.20   # N·s/m：机体平移阻尼系数
-angular_drag = 0.02  # N·m·s/rad：机体角速度阻尼
+linear_drag = 0.20   # N·s/m：按 -k·v 计入世界系力
+angular_drag = 0.02  # 1/s：角速度阻尼率，按 I·(-k·ω) 计入力矩
 
 [control]
 tilt_max_deg = 32.0   # 角度模式最大俯仰/横滚（度）

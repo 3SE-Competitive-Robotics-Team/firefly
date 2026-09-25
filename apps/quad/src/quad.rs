@@ -1,27 +1,19 @@
-//! 四旋翼动力学（6-DOF 刚体 + 角度模式姿态控制）。
+//! 飞行 demo 的 Bevy 接线：键盘 → [`AngleCommand`] → `firefly-flight` 的角度模式
+//! + 六自由度积分 → 写回 `Transform`。
 //!
-//! 机体轴：`+X` 前、`+Y` 左、`+Z` 上。姿态由 `Transform.rotation`（机体→世界）表示，
-//! 角速度存机体系。推力沿机体 `+Z`，重力沿世界 `-Z`。
-//!
-//! 控制为角度模式：`WASD` 给期望俯仰/横滚（松手回正），`Space/Shift` 给升降速度，
-//! `Q/E` 给偏航角速度。姿态误差 → 机体角速度指令 → 角加速度，简单比例控制。
+//! 模型与飞控本体（推力沿机体 z、姿态内环、惯量、限幅）在 `firefly-flight`，
+//! 本模块只做输入与 ECS 搬运。
 
 use bevy::prelude::*;
+use firefly_flight::{AngleCommand, QuadState, angle_mode, integrate};
 
 use crate::config::QuadConfig;
 
-/// 重力加速度（m/s²）。
-const G: f32 = 9.81;
-
-/// 6-DOF 四旋翼状态（挂机体根实体上）。
+/// 机体状态（挂机体根实体；位置/姿态同步到 `Transform`）。
 #[derive(Component, Default)]
 pub struct Quad {
-    /// 世界系速度（m/s）。
-    pub velocity: Vec3,
-    /// 机体系角速度（rad/s）。
-    pub ang_vel: Vec3,
-    /// 当前航向（rad，世界 Z；由机体姿态导出，供倾斜参考与相机）。
-    pub yaw: f32,
+    /// 六自由度状态。
+    pub state: QuadState,
 }
 
 /// 每帧控制输入（归一化 -1..1）。
@@ -53,7 +45,7 @@ pub fn read_input(keys: Res<ButtonInput<KeyCode>>, mut input: ResMut<QuadInput>)
     input.reset = keys.just_pressed(KeyCode::KeyR);
 }
 
-/// 定步长积分（`FixedUpdate`）。
+/// 定步长积分（`FixedUpdate`）：角度模式 → 世界系力/力矩 → 六自由度积分。
 // 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 pub fn dynamics(
@@ -63,64 +55,24 @@ pub fn dynamics(
     drone: Single<(&mut Quad, &mut Transform)>,
 ) {
     let (mut quad, mut transform) = drone.into_inner();
-    let body = &cfg.drone;
-    let ctl = &cfg.control;
     let dt = time.delta_secs().min(1.0 / 120.0);
 
     if input.reset {
-        quad.velocity = Vec3::ZERO;
-        quad.ang_vel = Vec3::ZERO;
-        quad.yaw = 0.0;
-        transform.translation = Vec3::from(cfg.start);
-        transform.rotation = Quat::IDENTITY;
-        return;
+        quad.state = QuadState {
+            position: Vec3::from(cfg.start),
+            ..default()
+        };
+    } else {
+        let cmd = AngleCommand {
+            pitch: input.pitch,
+            roll: input.roll,
+            yaw: input.yaw,
+            throttle: input.throttle,
+        };
+        let wrench = angle_mode(&quad.state, &cmd, &cfg.drone, &cfg.control);
+        integrate(&mut quad.state, &wrench, &cfg.drone, dt);
     }
 
-    // 当前航向（世界 Z；机体 X 轴在水平面的投影），供倾斜参考与相机使用。
-    let fwd = transform.rotation * Vec3::X;
-    quad.yaw = fwd.y.atan2(fwd.x);
-
-    // 期望姿态：当前航向下叠加期望倾斜。偏航不写进姿态——它是机体 Z 的角速度，
-    // 随倾斜一起转（真机绕机体轴偏航），故用下面的角速度前馈。
-    let tilt = ctl.tilt_max_deg.to_radians();
-    let roll = input.roll * tilt;
-    let pitch = input.pitch * tilt;
-    let q_des = Quat::from_rotation_z(quad.yaw)
-        * Quat::from_rotation_y(pitch)
-        * Quat::from_rotation_x(roll);
-
-    // 姿态误差（机体系）→ 角速度指令；`Q/E` 作为机体 Z 角速度前馈（绕机体轴偏航）。
-    // `q` 与 `-q` 表示同一旋转：`w<0` 时 `to_axis_angle` 返回接近 2π 的大角度
-    //（航向在 ±π 回绕时触发），故先折叠到最近路径。
-    let mut q_err = transform.rotation.inverse() * q_des;
-    if q_err.w < 0.0 {
-        q_err = -q_err;
-    }
-    let e = q_err.to_scaled_axis();
-    let rate_des = e * ctl.attitude_kp + Vec3::Z * (-input.yaw * ctl.yaw_rate_max);
-    let rate_error = rate_des - quad.ang_vel;
-    quad.ang_vel += rate_error * ctl.rate_kp * dt;
-    quad.ang_vel *= 1.0 - (body.angular_drag * dt).min(0.5);
-
-    // 推力：垂直速度控制 + 倾斜补偿（保持高度）。
-    let up_z = (transform.rotation * Vec3::Z).z.clamp(0.3, 1.0);
-    let vz_des = input.throttle * ctl.climb_rate_max;
-    let a_vert = G + ctl.vz_kp * (vz_des - quad.velocity.z);
-    let thrust = (body.mass * a_vert / up_z).clamp(0.0, body.max_thrust);
-    let force = transform.rotation * Vec3::new(0.0, 0.0, thrust);
-    let accel = force / body.mass + Vec3::new(0.0, 0.0, -G)
-        - quad.velocity * (body.linear_drag / body.mass);
-    quad.velocity += accel * dt;
-    transform.translation += quad.velocity * dt;
-
-    // 姿态积分：q_dot = 0.5 · q ⊗ ω_body。
-    let wq = Quat::from_xyzw(quad.ang_vel.x, quad.ang_vel.y, quad.ang_vel.z, 0.0);
-    let dq = (transform.rotation * wq) * (0.5 * dt);
-    transform.rotation = Quat::from_xyzw(
-        transform.rotation.x + dq.x,
-        transform.rotation.y + dq.y,
-        transform.rotation.z + dq.z,
-        transform.rotation.w + dq.w,
-    )
-    .normalize();
+    transform.translation = quad.state.position;
+    transform.rotation = quad.state.attitude;
 }
