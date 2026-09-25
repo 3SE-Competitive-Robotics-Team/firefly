@@ -70,13 +70,13 @@ uv run firefly-sim
 
 # 2. Rust VIO：订阅 MuJoCo IMU/双目灰度，MSCKF 视觉更新，发布 odom 10Hz；
 #    传感器（双目/深度）与估计位姿写入共享 viewer
-cargo run -p vio
+cargo run --release -p vio
 
 # 3. Rust 重规划：订阅 odom 作为状态源（新鲜超时回退轨迹模拟），
 #    未指定 --map 时加载 MuJoCo 默认场景静态地图（与 scene.py 同构，
 #    深度感知在线补充），发布参考回传；
 #    规划结果写入同一 viewer（与 vio 共用 sim_time 时间轴）
-cargo run -p planner
+cargo run --release -p planner
 ```
 
 rerun 可视化约定：`sensor/stereo_left|right`、`sensor/depth` 为传感器原图，
@@ -88,12 +88,14 @@ rerun 可视化约定：`sensor/stereo_left|right`、`sensor/depth` 为传感器
 独立运行（不依赖闭环）：
 
 ```bash
-cargo run -p planner -- --map apps/planner/maps/gate.ffmap  # 静态地图
+cargo run --release -p planner -- --map apps/planner/maps/gate.ffmap  # 静态地图
 ```
 
 ## 构建
 
 - Rust：`cargo build`（workspace 含 `apps/vio`、`apps/planner`，排除 `apps/firefly-sim`）。
+- **运行进程一律加 `--release`**：debug 构建有约 6× 运行时惩罚，VIO/planner/render
+  这类数值与逐像素代码尤其明显；`cargo test` 仍用 debug 迭代。
 - Python：`uv sync`（根 workspace 统一管理 `firefly-mujoco` / `firefly-sim`，
   依赖与脚本见各自 `pyproject.toml`）。
 

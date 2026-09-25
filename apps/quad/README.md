@@ -9,7 +9,7 @@
 ```sh
 # 模型不入 git，先拉一次（Poly Pizza，CC-BY-4.0）
 uv run python scripts/fetch_drone_model.py
-cargo run -p quad
+cargo run --release -p quad
 ```
 
 ## 操作

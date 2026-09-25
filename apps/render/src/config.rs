@@ -1,7 +1,10 @@
-//! `apps/render` 视觉配置（`configs/render.toml`）：只管光照，与场景无关联。
+//! `apps/render` **传感器相机**视觉配置（`configs/render.toml`）。
 //!
-//! 光照是目视调参项——场景切换不动它，改亮度不必重编译。方向固定（三盏，比值
-//! 对照 `MuJoCo` diffuse 0.7:0.3:0.22），此处只调照度/环境光。
+//! 主视角照明/曝光/bloom 已收敛到 `firefly-render` 的共享效果
+//!（[`spawn_viewer_lighting`](firefly_render::lighting::spawn_viewer_lighting) /
+//! [`viewer_camera`](firefly_render::lighting::viewer_camera)），本配置只管传感器
+//! rig 的照明（三方向光 + 顶棚点光灯阵 + IBL）与曝光——它按 VIO 灰度均值单独
+//! 标定，与主视角观感解耦。
 
 use bevy::prelude::*;
 use serde::Deserialize;
@@ -9,19 +12,15 @@ use serde::Deserialize;
 /// 配置路径（编译期绝对路径，与运行 `CWD` 无关）。
 const RENDER_CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/render.toml");
 
-/// 三方向光缺省照度（lux；直射日光量级，方向比值同 `MuJoCo`）。
-pub const DEFAULT_DIRECTIONAL: [f32; 3] = firefly_render::lighting::ILLUMINANCE;
-/// 全局环境光缺省（cd/m²，`Bevy` 缺省 80）。
-pub const DEFAULT_AMBIENT: f32 = firefly_render::lighting::AMBIENT;
-/// 相机曝光缺省（EV100；越大越暗。缺省贴合正午阳光，与三方向光照度同量级）。
-pub const DEFAULT_EV100: f32 = firefly_render::lighting::EV100;
-/// 传感器相机曝光缺省（EV100）：独立于主视角，专供 KLT 前端。
+/// 传感器相机三方向光缺省照度（lux）：主视角照明由 `firefly-render` 的
+/// [`spawn_viewer_lighting`](firefly_render::lighting::spawn_viewer_lighting) 共享，
+/// 此处仅传感器 rig 用，按 VIO 灰度均值单独标定（见 `configs/render.toml`）。
+pub const DEFAULT_SENSOR_DIRECTIONAL: [f32; 3] = firefly_render::lighting::ILLUMINANCE;
+/// 传感器相机曝光缺省（EV100）：专供 KLT 前端。
 ///
 /// 传感器图像须落在灰度均值 120~170/255（`main.rs` 的 VIO 特征密度约束），
-/// 主视角则可按场馆观感压暗；两者共用曝光会让传感器图在暗场景下无特征可跟。
+/// 主视角观感由 `firefly-render` 的共享曝光管。
 pub const DEFAULT_SENSOR_EV100: f32 = 11.0;
-/// 主视角 bloom 强度缺省（0 关闭）。
-pub const DEFAULT_BLOOM: f32 = firefly_render::lighting::BLOOM;
 /// 环境光贴图缺省颜色/强度（sRGB 0~1；强度缩放后单位 cd/m²）。
 pub const DEFAULT_ENV_TOP: [f32; 3] = [0.62, 0.68, 0.78];
 pub const DEFAULT_ENV_MID: [f32; 3] = [0.35, 0.38, 0.44];
@@ -35,74 +34,6 @@ pub const DEFAULT_GRID_INTENSITY: f32 = 300_000.0;
 pub const DEFAULT_GRID_RANGE: f32 = 12.0;
 pub const DEFAULT_GRID_SPAN: [f32; 2] = [28.0, 14.0];
 pub const DEFAULT_GRID_COLOR: [f32; 3] = [1.0, 0.97, 0.92];
-
-/// 方向光阴影缺省（`CascadeShadowConfig`）：级联数与覆盖距离按场景尺度取。
-///
-/// 阴影按**视角**逐份渲染（`bevy_pbr` 的 `ViewLightEntities` 过滤），成本 ≈ 视角数
-/// × 阴影灯数 × 级联数；Bevy 默认 4 级联 / `maximum_distance=150`（对齐
-/// Unity/Unreal 的大世界），在 30m 级场地里远超需要。**必须**按实际可见距离收紧，
-/// 否则阴影 pass 会吃掉出图帧预算（传感器链路要求相机稳定 10Hz）。
-pub const DEFAULT_SHADOW_ENABLED: bool = true;
-/// 投阴影的方向光盏数（其余只照明）。
-pub const DEFAULT_SHADOW_CAST_LIGHTS: usize = 1;
-/// 级联数（1 = 单级，最省）。
-pub const DEFAULT_SHADOW_NUM_CASCADES: usize = 1;
-/// 阴影最大距离（米）。
-pub const DEFAULT_SHADOW_MAX_DISTANCE: f32 = 20.0;
-/// 第一级联远界（米；`num_cascades = 1` 时忽略）。
-pub const DEFAULT_SHADOW_FIRST_CASCADE_FAR_BOUND: f32 = 10.0;
-
-/// 方向光阴影配置。
-#[derive(Deserialize, Clone, Copy, Debug)]
-pub struct ShadowConfig {
-    /// 是否启用方向光阴影。
-    #[serde(default = "default_shadow_enabled")]
-    pub enabled: bool,
-    /// 前 N 盏方向光投阴影（`0` = 全不投，等同 `enabled = false`）。
-    #[serde(default = "default_shadow_cast_lights")]
-    pub cast_lights: usize,
-    /// 级联数（1 = 单级，最省）。
-    #[serde(default = "default_shadow_num_cascades")]
-    pub num_cascades: usize,
-    /// 阴影最大距离（米）：超过此距离不接收阴影。
-    #[serde(default = "default_shadow_max_distance")]
-    pub maximum_distance: f32,
-    /// 第一级联远界（米；`num_cascades = 1` 时忽略）。
-    #[serde(default = "default_shadow_first_cascade_far_bound")]
-    pub first_cascade_far_bound: f32,
-}
-
-fn default_shadow_enabled() -> bool {
-    DEFAULT_SHADOW_ENABLED
-}
-
-fn default_shadow_cast_lights() -> usize {
-    DEFAULT_SHADOW_CAST_LIGHTS
-}
-
-fn default_shadow_num_cascades() -> usize {
-    DEFAULT_SHADOW_NUM_CASCADES
-}
-
-fn default_shadow_max_distance() -> f32 {
-    DEFAULT_SHADOW_MAX_DISTANCE
-}
-
-fn default_shadow_first_cascade_far_bound() -> f32 {
-    DEFAULT_SHADOW_FIRST_CASCADE_FAR_BOUND
-}
-
-impl Default for ShadowConfig {
-    fn default() -> Self {
-        Self {
-            enabled: DEFAULT_SHADOW_ENABLED,
-            cast_lights: DEFAULT_SHADOW_CAST_LIGHTS,
-            num_cascades: DEFAULT_SHADOW_NUM_CASCADES,
-            maximum_distance: DEFAULT_SHADOW_MAX_DISTANCE,
-            first_cascade_far_bound: DEFAULT_SHADOW_FIRST_CASCADE_FAR_BOUND,
-        }
-    }
-}
 
 /// 顶棚点光源灯阵配置（场地顶部均匀布灯，营造场馆照明）。
 ///
@@ -176,79 +107,50 @@ impl Default for GridLightConfig {
     }
 }
 
-/// 光照配置。
+/// 传感器相机照明配置（主视角照明由 `firefly-render` 共享，不在此配置）。
 #[derive(Deserialize, Clone, Copy, Debug)]
 pub struct LightConfig {
-    /// 全局环境光（cd/m²）。
-    #[serde(default = "default_ambient")]
-    pub ambient: f32,
-    /// 三方向光照度（lux）。
-    #[serde(default = "default_directional")]
+    /// 传感器相机三方向光照度（lux）。
+    #[serde(default = "default_sensor_directional")]
     pub directional: [f32; 3],
-    /// 顶棚点光源灯阵。
+    /// 顶棚点光源灯阵（只作用于传感器相机）。
     #[serde(default)]
     pub grid: GridLightConfig,
-    /// 方向光阴影。
-    #[serde(default)]
-    pub shadow: ShadowConfig,
 }
 
-fn default_ambient() -> f32 {
-    DEFAULT_AMBIENT
-}
-
-fn default_directional() -> [f32; 3] {
-    DEFAULT_DIRECTIONAL
+fn default_sensor_directional() -> [f32; 3] {
+    DEFAULT_SENSOR_DIRECTIONAL
 }
 
 impl Default for LightConfig {
     fn default() -> Self {
         Self {
-            ambient: DEFAULT_AMBIENT,
-            directional: DEFAULT_DIRECTIONAL,
+            directional: DEFAULT_SENSOR_DIRECTIONAL,
             grid: GridLightConfig::default(),
-            shadow: ShadowConfig::default(),
         }
     }
 }
 
-/// 相机/后处理配置。
+/// 传感器相机曝光配置。
 ///
-/// 曝光必须与光照量级匹配：灯光按 lux 锚定日光时 `ev100≈15`，否则整幅惨白
-///（缺省 `Exposure::BLENDER = 9.7` 是室内量级）。传感器相机用独立
-/// `sensor_ev100`（VIO 特征密度约束见 [`DEFAULT_SENSOR_EV100`]），主视角用
-/// `ev100`：两者目标不同（前者要特征，后者要观感），共用会互相迁就。
+/// 传感器图像须落在灰度均值 120~170/255（VIO 特征密度约束，见
+/// [`DEFAULT_SENSOR_EV100`]），与主视角观感解耦：主视角曝光由 `firefly-render`
+/// 的共享效果管，两边目标不同（前者要特征，后者要观感）。
 #[derive(Deserialize, Clone, Copy, Debug)]
 pub struct ViewConfig {
-    /// 主视角相机曝光 EV100（越大越暗）。
-    #[serde(default = "default_ev100")]
-    pub ev100: f32,
     /// 传感器相机曝光 EV100（越大越暗）。
     #[serde(default = "default_sensor_ev100")]
     pub sensor_ev100: f32,
-    /// 主视角 bloom 强度（0 关闭；传感器相机不加）。
-    #[serde(default = "default_bloom")]
-    pub bloom_intensity: f32,
-}
-
-fn default_ev100() -> f32 {
-    DEFAULT_EV100
 }
 
 fn default_sensor_ev100() -> f32 {
     DEFAULT_SENSOR_EV100
 }
 
-fn default_bloom() -> f32 {
-    DEFAULT_BLOOM
-}
-
 impl Default for ViewConfig {
     fn default() -> Self {
         Self {
-            ev100: DEFAULT_EV100,
             sensor_ev100: DEFAULT_SENSOR_EV100,
-            bloom_intensity: DEFAULT_BLOOM,
         }
     }
 }
@@ -302,16 +204,16 @@ impl Default for EnvConfig {
     }
 }
 
-/// `configs/render.toml` 顶层。
+/// `configs/render.toml` 顶层（传感器相机专用）。
 #[derive(Resource, Deserialize, Clone, Copy, Debug, Default)]
 pub struct RenderConfig {
-    /// 光照。
+    /// 传感器相机照明。
     #[serde(default)]
     pub light: LightConfig,
-    /// 相机/后处理。
+    /// 传感器相机曝光。
     #[serde(default)]
     pub view: ViewConfig,
-    /// 环境光贴图。
+    /// 传感器相机环境光贴图。
     #[serde(default)]
     pub env: EnvConfig,
 }

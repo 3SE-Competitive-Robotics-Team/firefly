@@ -6,13 +6,17 @@
 //! `Firefly/CameraRight`、`Firefly/Depth` 并通知 `Firefly/CameraPair`。
 //! `VIO`/`planner` 零改动（话题、布局、`trace` 头与 `MuJoCo` 时代一致）。
 //!
+//! 出图链路按需驱动：传感器相机只在固定 10Hz 出图窗口激活渲染（非窗口帧不空转）；
+//! 回读后的逐像素处理（灰度/深度/噪声/调试显示）在工作线程，主线程只做发布
+//!（iceoryx2 端口主线程独占）——供图不再被逐像素计算或帧率抖动拖住。
+//!
 //! 日志后端：`Bevy` 自带 `LogPlugin` 禁用，改用 `firefly-observability`
 //!（`logforth` + `fastrace`，跨进程 trace 续接与 `rrd` 日志聚合的载体）。
 //!
 //! 运行（仓库根，先起 `sim` 再起本进程）：
 //! ```sh
 //! uv run firefly-sim -- --no-camera
-//! cargo run -p render
+//! cargo run --release -p render
 //! ```
 //!
 //! `structure.glb` 由同目录 `structure.obj` 转换而来（`models/` 不进
@@ -25,6 +29,7 @@ mod capture;
 mod config;
 mod freecam;
 mod link;
+mod process;
 mod rig;
 mod scene;
 mod sensors;
@@ -33,7 +38,6 @@ mod ui;
 
 use bevy::asset::AssetPlugin;
 use bevy::camera::visibility::RenderLayers;
-use bevy::light::CascadeShadowConfigBuilder;
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use bevy::window::{Window, WindowPlugin};
@@ -43,10 +47,13 @@ use capture::{CaptureHub, CapturePlugin};
 use config::RenderConfig;
 use firefly_render::camera::{FollowTarget, follow_camera};
 use firefly_render::drone::spawn_drone_visual;
-use firefly_render::lighting::DIRECTIONS;
+use firefly_render::lighting::{DIRECTIONS, spawn_viewer_lighting};
 use firefly_render::scene::{MODELS_DIR, spawn_scene};
 use freecam::{FreeCam, freecam_move, toggle_freecam, update_mode_label};
-use link::{PendingFrames, drain_captures, open_ports, poll_pose};
+use link::{
+    CapturePipeline, CaptureStats, PendingFrames, SensorCapture, drain_captures, open_ports,
+    poll_pose, publish_processed,
+};
 use rig::{DRONE_LAYER, PoseState, SENSOR_LIGHT_LAYER, VIEWER_LIGHT_LAYER, spawn_rig};
 use scene::SceneSpec;
 use ui::setup_panel;
@@ -99,17 +106,15 @@ fn main() {
         // 传感器渲染是计算链路的一环，不是可挂起的桌面窗口：失焦时也必须持续
         // 出图（Bevy 缺省失焦降到 1Hz，VIO 会拿到断流的图像而失稳）。
         .insert_resource(WinitSettings::continuous())
-        .insert_resource(GlobalAmbientLight {
-            color: Color::WHITE,
-            brightness: render_config.light.ambient,
-            ..default()
-        })
         .insert_resource(PoseState {
             pos: Vec3::from(spec.start),
             ..default()
         })
         .insert_resource(CaptureHub::default())
         .insert_resource(PendingFrames::default())
+        .insert_resource(SensorCapture::default())
+        .insert_resource(CapturePipeline::spawn())
+        .insert_resource(CaptureStats::default())
         .insert_resource(FreeCam::default())
         .insert_non_send(ports)
         .add_plugins(CapturePlugin)
@@ -128,13 +133,16 @@ fn main() {
             Update,
             (toggle_freecam, freecam_move, update_mode_label).chain(),
         )
-        .add_systems(Last, (drain_captures, flush_on_exit))
+        .add_systems(
+            Last,
+            (drain_captures, publish_processed, flush_on_exit).chain(),
+        )
         .run();
 }
 
-/// 场景装配：注册表选中场景的视觉 glb + 环境光 + 三方向光（照度正比于
-/// MJCF diffuse）+ 无人机占位体。红蓝灯饰自发光由 glb 的 emissive 材质承载
-/// （Blender 阶段写入），Bevy 侧配 bloom 出光感。
+/// 场景装配：注册表选中场景的视觉 glb、传感器相机照明、主视角共享照明与无人机
+/// 占位体。红蓝灯饰自发光由 glb 的 emissive 材质承载（Blender 阶段写入），
+/// 主视角配 bloom 出光感（bloom 随共享效果）。
 // 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 fn setup_scene(
@@ -147,51 +155,31 @@ fn setup_scene(
 ) {
     spawn_scene(&mut commands, &assets, &scene.asset_path());
 
-    // 阴影按**视角**逐份渲染（`bevy_pbr` 的 `ViewLightEntities` 过滤），成本 ≈ 视角数
-    // × 阴影灯数 × 级联数；级联数与覆盖距离按场地尺度由 `configs/render.toml` 收紧
-    //（Bevy 默认 4 级联 / 150m 是大世界取值，直接用在 30m 场地会吃掉出图帧预算）。
-    let shadow = &render_config.light.shadow;
-
-    // 照度锚定直射日光（`DirectionalLight` 文档：直射日光 32000~100000 lux；
-    // `MuJoCo` 的 diffuse 无物理单位，只取三灯比值 0.7:0.3:0.22）。方向固定，
-    // 照度由 `configs/render.toml` 的 `light.directional` 调。
-    // 地面灰度均值须落在 120~170/255（对照 `MuJoCo` 实测 140~160），
-    // 否则 VIO 无特征可跟——改照度后以发布图像均值人工比对。
-    // 方向光拆成两套（同方向同照度，按视角层过滤）：传感器那套不投阴影，主视角
-    // 那套按配置投阴影。这样传感器图无阴影（暗区丢 KLT 特征），主视角有阴影，且
-    // 两侧照度各自独立、不互相叠加。
+    // 传感器相机专用方向光（不投影）：照度锚定直射日光量级（`DirectionalLight`
+    // 文档：直射日光 32000~100000 lux），地面灰度均值须落在 120~170/255（对照
+    // `MuJoCo` 实测 140~160），否则 VIO 无特征可跟——改照度后以发布图像均值人工
+    // 比对。方向固定，照度由 `configs/render.toml` 的 `light.directional` 调；
+    // 单独成层，主视角不吃这一套（互不叠加）。
     for (index, dir) in DIRECTIONS.iter().enumerate() {
-        let rotation = Quat::from_rotation_arc(Vec3::NEG_Z, dir.normalize());
-        let illuminance = render_config.light.directional[index];
         commands.spawn((
             DirectionalLight {
-                illuminance,
+                illuminance: render_config.light.directional[index],
                 shadow_maps_enabled: false,
                 ..default()
             },
             RenderLayers::layer(SENSOR_LIGHT_LAYER),
-            Transform::from_rotation(rotation),
-        ));
-        commands.spawn((
-            DirectionalLight {
-                illuminance,
-                shadow_maps_enabled: shadow.enabled && index < shadow.cast_lights,
-                ..default()
-            },
-            CascadeShadowConfigBuilder {
-                num_cascades: shadow.num_cascades,
-                maximum_distance: shadow.maximum_distance,
-                first_cascade_far_bound: shadow.first_cascade_far_bound,
-                ..default()
-            }
-            .build(),
-            RenderLayers::layer(VIEWER_LIGHT_LAYER),
-            Transform::from_rotation(rotation),
+            Transform::from_rotation(Quat::from_rotation_arc(Vec3::NEG_Z, dir.normalize())),
         ));
     }
 
+    // 主视角照明：与 `apps/quad` 同一套（环境光 + 三方向光 + 曝光 + bloom），
+    // 收敛在 `firefly-render::lighting`，两边不再各自定制。灯光收进
+    // `VIEWER_LIGHT_LAYER`，与传感器灯光分开、不互相叠加。
+    spawn_viewer_lighting(&mut commands, &RenderLayers::layer(VIEWER_LIGHT_LAYER));
+
     // 顶棚灯阵：rows × cols 盏点光源均匀铺在场地上方，营造场馆照明。点光源
-    // 不投阴影——一盏点光阴影 = 6 面 cubemap，数十盏会直接压垮渲染。
+    // 不投阴影——一盏点光阴影 = 6 面 cubemap，数十盏会直接压垮渲染。只作用于
+    // 传感器相机（主视角观感由共享效果决定）。
     let grid = &render_config.light.grid;
     let color = Color::srgb(grid.color[0], grid.color[1], grid.color[2]);
     for row in 0..grid.rows {
@@ -203,6 +191,7 @@ fn setup_scene(
                     range: grid.range,
                     ..default()
                 },
+                RenderLayers::layer(SENSOR_LIGHT_LAYER),
                 Transform::from_xyz(
                     grid_axis(col, grid.cols, grid.span[0]),
                     grid_axis(row, grid.rows, grid.span[1]),
@@ -299,16 +288,22 @@ fn freecam_off(free: Res<FreeCam>) -> bool {
     !free.enabled
 }
 
-/// 出图节奏诊断：每 [`RATE_LOG_PERIOD`] 秒报一次应用帧率（传感器图像的供给侧）。
-/// 帧率跌破相机节拍（10Hz）时 VIO 拿到的图像会稀疏，链路按此判据排查。
+/// 出图节奏诊断：每 [`RATE_LOG_PERIOD`] 秒报一次应用帧率与**真实供图速率**。
+/// 供图目标 10Hz（传感器节拍）；帧率是供给侧余量，供图才是 VIO 拿到的输入。
 // 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
-fn log_render_rate(time: Res<Time>, mut acc: Local<(f32, u32)>) {
+fn log_render_rate(time: Res<Time>, mut acc: Local<(f32, u32)>, mut stats: ResMut<CaptureStats>) {
     acc.0 += time.delta_secs();
     acc.1 += 1;
     if acc.0 >= RATE_LOG_PERIOD {
-        log::info!("render 出图 {:.1} Hz", f64::from(acc.1) / f64::from(acc.0));
+        let frames = f64::from(acc.1) / f64::from(acc.0);
+        let captures = f64::from(stats.published) / f64::from(acc.0);
+        log::info!(
+            "render 帧率 {frames:.1} Hz，供图 {captures:.1} Hz（本周期 {} 拍）",
+            stats.published
+        );
         *acc = (0.0, 0);
+        stats.published = 0;
     }
 }
 

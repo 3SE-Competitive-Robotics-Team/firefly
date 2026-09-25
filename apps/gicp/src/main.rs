@@ -4,8 +4,9 @@
 //! `MapFile` 为靶图做 `GICP`，经 `FusionFilter`（`R=h⁻¹` + `chi2`）融合后
 //! 发布 `Firefly/CorrectedOdometry` 供 `planner` 订阅（回退到原始 odom）。
 //!
-//! 运行：`cargo run -p gicp`（配合 `uv run firefly-sim` + `cargo run -p vio` + `cargo run -p planner`）
-//! 或 `cargo run -p gicp -- --map apps/planner/maps/gate.ffmap`。
+//! 运行：`cargo run --release -p gicp`（配合 `uv run firefly-sim` +
+//! `cargo run --release -p vio` + `cargo run --release -p planner`）
+//! 或 `cargo run --release -p gicp -- --map apps/planner/maps/gate.ffmap`。
 
 use std::path::PathBuf;
 use std::time::Duration;
