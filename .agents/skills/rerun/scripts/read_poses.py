@@ -7,16 +7,16 @@
 输出：每个实体先打一行统计，再逐行输出
     <sim_time_ns> x y z qx qy qz qw
 
-坑（实测 2026-08）：
-- chunk.entity_path 带前导 "/"，须 lstrip 再比较
+读取约束：
+- chunk.entity_path 带前导 "/"，比较前须 lstrip
 - sim_time 列是 duration[ns]，须 cast(int64) 才能 to_pylist
 - Transform3D:translation/quaternion 是 list<fixed_size_list<3|4>>，每行取 [0]
-- 无 footer 的 rrd（viewer --save 被 SIGTERM 结束）回退线性扫描，store() 不可用
+- 无 footer 的 rrd（viewer --save 被硬杀）须回退线性扫描，store() 不可用
 """
 import sys
 
 import pyarrow as pa
-from rerun.experimental import RrdReader
+from rerun.chunk import RrdReader
 
 DEFAULT_ENTITIES = ("gt/pose", "vio/odom")
 
