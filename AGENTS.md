@@ -63,8 +63,9 @@ Python sim（MuJoCo 物理 + 传感器发布）→ vio（MSCKF 位姿估计）�
 按顺序各开一个终端（可先开 viewer，见下）：
 
 ```bash
-# 0. 可选：先开 rerun viewer（多进程共享；不开则每个进程自动起独立 viewer）
-rerun
+# 0. 可视化：先起共享 viewer，再起统一写入进程（Rust 进程只发 IPC，不落盘、不开窗）
+rerun &
+uv run firefly-viz
 
 # 1. Python 物理环境：200Hz 物理；发布 IMU 100Hz / 双目+深度+真值 10Hz，
 #    订阅 Firefly/Reference 做 PD 闭环控制
@@ -72,7 +73,7 @@ uv sync   # 首次：安装 firefly-mujoco / firefly-sim（根 workspace）
 uv run firefly-sim
 
 # 2. Rust VIO：订阅 MuJoCo IMU/双目灰度，MSCKF 视觉更新，发布 odom 10Hz；
-#    传感器（双目/深度）与估计位姿写入共享 viewer
+#    估计位姿与前端健康度写入共享 viewer
 cargo run --release -p vio
 
 # 3. Rust 重规划：订阅 odom 作为状态源（新鲜超时回退轨迹模拟），
@@ -82,11 +83,12 @@ cargo run --release -p vio
 cargo run --release -p planner
 ```
 
-rerun 可视化约定：`sensor/stereo_left|right`、`sensor/depth` 为传感器原图，
-`vio/odom` 为估计位姿（3D 变换），规划/地图/轨迹由 planner 写入
-（`plan/*` 前缀）——多进程共用 `sim_time` 时间轴（仿真秒），回放时跨进程
-数据按同一时钟对齐。默认布局（场景 3D + 前端健康度面板）由进程启动时
-自动发送，无需手工配置。
+rerun 可视化约定：vio 写 `vio/odom` + `vio/traj`（估计位姿/轨迹）、
+`gt/pose` + `gt/traj`（真值对照）与 `vio/debug/*`（前端健康度），规划/地图/轨迹
+由 planner 写入（`plan/*` 前缀）——多进程共用 `sim_time` 时间轴（仿真秒），回放时
+跨进程数据按同一时钟对齐。传感器原图（双目/深度）不进 rrd，只在 `render` 进程
+自带的调试面板里。默认布局（场景 3D + 前端健康度面板）由进程启动时自动发送，
+无需手工配置。
 
 独立运行（不依赖闭环）：
 
@@ -118,7 +120,7 @@ cargo run --release -p planner -- --map apps/planner/maps/gate.ffmap  # 静态�
     轴）——日志本身也是 rrd 里可检索的实体，不是另一套系统。
   - 入口：`firefly-viz` 默认连共享 viewer（`127.0.0.1:9876`），`--save logs/<name>.rrd` 离线录制。
   - 时间轴：消息携带 `sim_time` 秒，Python 端 `set_time`。
-  - 实体路径按 app 前缀（`sensor/*`、`vio/*`、`plan/*`、`logs/*`），
+  - 实体路径按 app 前缀（`vio/*`、`gt/*`、`plan/*`、`logs/*`），
     遵守上文 rerun 可视化约定。
 - 读取：viewer 回放；`rerun rrd print --entity <path> -vvv` /
   `rerun rrd stats`；Python `RrdReader`，详见 `.agents/skills/rerun`。

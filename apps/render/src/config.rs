@@ -9,7 +9,7 @@ const RENDER_CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/
 
 /// 场景三方向光缺省照度（lux）。
 pub const DEFAULT_DIRECTIONAL: [f32; 3] = firefly_render::lighting::ILLUMINANCE;
-/// 传感器相机曝光缺省（EV100）：标定口径见 `configs/render.toml`。
+/// 传感器相机曝光缺省（EV100）。
 pub const DEFAULT_SENSOR_EV100: f32 = 11.0;
 /// 环境光贴图缺省颜色/强度（sRGB 0~1；强度缩放后单位 cd/m²）。
 pub const DEFAULT_ENV_TOP: [f32; 3] = [0.62, 0.68, 0.78];

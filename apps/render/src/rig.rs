@@ -157,7 +157,6 @@ pub fn spawn_rig(
         )
     };
 
-    // 传感器曝光：按发布图像灰度均值标定（`configs/render.toml` 的 `sensor_ev100`）。
     let sensor_exposure = Exposure {
         ev100: config.view.sensor_ev100,
     };
