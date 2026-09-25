@@ -29,8 +29,8 @@ Rust 计算线程零 IO：可视化数据经 `Firefly/Viz` 话题零拷贝发布
 vio/aliked/gicp/planner，**不进** rrd（vio 只发位姿/轨迹/健康度瘦版可视化）。
 
 控制链：`firefly-sim` 是**被控对象**（发传感器 + 真值状态 `Firefly/PlantState`
-与机体描述 `Firefly/Airframe`，收 `Firefly/Control` 的 4 电机推力，按机体几何
-合成 `xfrc_applied`）；控制律唯一实现在 `firefly-flight`，由 `apps/fc` 以
+与机体描述 `Firefly/Airframe`，收 `Firefly/Control` 的 4 电机推力，写进 MJCF 旋翼
+执行器的 `ctrl`，由引擎按 site gear 合成 wrench）；控制律唯一实现在 `firefly-flight`，由 `apps/fc` 以
 1kHz 跑（`cargo run --release -p fc`）。无有效指令时被控对象自行悬停兜底
 （失效保护，不是第二套跟踪律）。`--script` 模式例外：那是 VIO bench 的轨迹
 跟踪夹具（真值反馈，`DroneEnv.apply_pd`），不带飞控。

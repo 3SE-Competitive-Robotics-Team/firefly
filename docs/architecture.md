@@ -3,7 +3,7 @@
 ```mermaid
 flowchart TD
     subgraph SIM_SRC["仿真源：firefly-sim（MuJoCo 200Hz 物理，被控对象）"]
-        SIMP["发布 IMU / 双目 / 深度 / 真值<br/>发布状态 PlantState + 机体 Airframe<br/>订阅飞控指令 Control（按机体几何合成 wrench）"]
+        SIMP["发布 IMU / 双目 / 深度 / 真值<br/>发布状态 PlantState + 机体 Airframe<br/>订阅飞控指令 Control（写执行器 ctrl，引擎合成 wrench）"]
     end
 
     subgraph FC_APP["apps/fc（飞控进程，1kHz）"]
@@ -98,7 +98,9 @@ flowchart TD
   → position_mode/angle_mode（期望力/力矩，不限幅）
   → Airframe::allocate（逐电机限幅，全栈唯一饱和点）→ 4 电机推力
   → Firefly/Control（1kHz，被控对象每步取最新）
-  → 被控对象按机体几何合成 wrench（Firefly/Airframe 给的唯一一份几何）
+  → 被控对象写 4 个旋翼执行器的 `ctrl`，由 MuJoCo 按 site 上的 gear 合成 wrench
+    （几何/旋向/反扭矩系数/单电机上限全部读自 MJCF，见 `scene._drone_xml`/
+    `_rotor_actuators_xml`；对照 `mujoco_menagerie/skydio_x2`）
 ```
 
 - **参数归属**：质量/惯量/气动阻尼/旋翼位置/旋向/单电机推力上限/反扭矩系数

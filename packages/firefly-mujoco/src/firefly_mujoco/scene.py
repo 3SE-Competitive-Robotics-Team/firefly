@@ -169,8 +169,15 @@ _DRONE_BODY_SIZE = "0.055 0.042 0.021"
 _MOTOR_RADIUS = 0.007
 
 #: 4 旋翼 `(sx, sy, spin)`（顺序与 `firefly-flight` 默认一致）：0 前右、1 后左（旋向 +1），
-#: 2 前左、3 后右（旋向 −1）；site 名与顺序即飞控分配的几何来源，旋向供环境侧合成用。
+#: 2 前左、3 后右（旋向 −1）；site 名与顺序即飞控分配的几何来源。
 ROTORS = ((1, -1, 1.0), (-1, 1, 1.0), (1, 1, -1.0), (-1, -1, -1.0))
+
+#: 反扭矩系数 `c_τ`（m）：偏航力矩 = `c_τ · 推力`，进 actuator 的 gear 得到旋翼级模型
+#:（对照 `mujoco_menagerie/skydio_x2/x2.xml` 的 `gear="0 0 1 0 0 ±0.0201"`；
+#: 小型桨典型 0.01~0.02 m，待桨数据替换）。
+ROTOR_TORQUE_COEFFICIENT = 0.016
+#: 推重比：单电机推力上限 = TWR·重量/4（写进 `ctrlrange`，飞控从模型读回）
+ROTOR_THRUST_TO_WEIGHT = 3.0
 
 
 def _drone_xml(pos: str) -> str:
@@ -198,6 +205,26 @@ def _drone_xml(pos: str) -> str:
       <camera name="cam_depth" pos="0 0 0" xyaxes="0 -1 0  0.3420 0.0000 0.9397" fovy="70.88"/>
       <site name="imu_site" pos="0 0 0"/>
     </body>"""
+
+
+def _rotor_actuators_xml() -> str:
+    """4 旋翼 actuator：site 上的 6 维 wrench（推力 + 反扭矩），旋向由 gear 符号编码。
+
+    对照 `mujoco_menagerie/skydio_x2/x2.xml`：`motor site=... gear="0 0 1 0 0 ±c_τ"`——
+    旋翼力/力矩由**引擎**合成（不再由 Python 写 `xfrc_applied`），单电机推力上限
+    写在 `ctrlrange`（`autolimits` 负责夹）并经 `Firefly/Airframe` 发布给飞控。
+    执行器滞后（`dyntype="filter"`）与气动（`fluidshape`）官方两个四旋翼模型都没建模，
+    属标定项，未开启。
+    """
+    max_thrust = ROTOR_THRUST_TO_WEIGHT * _DRONE_MASS * 9.81 / len(ROTORS)
+    actuators = "\n".join(
+        f'    <motor name="rotor{i}" site="rotor{i}" gear="0 0 1 0 0 {spin * ROTOR_TORQUE_COEFFICIENT:g}"'
+        f' ctrlrange="0 {max_thrust:.4f}"/>'
+        for i, (*_, spin) in enumerate(ROTORS)
+    )
+    return f"""  <actuator>
+{actuators}
+  </actuator>"""
 
 
 def _warehouse_scene_xml() -> str:
@@ -242,6 +269,8 @@ def _warehouse_scene_xml() -> str:
     <!-- 无人机（freejoint 六自由度） -->
 {_drone_xml("2 0 1")}
   </worldbody>
+
+{_rotor_actuators_xml()}
 
   <sensor>
     <gyro name="gyro" site="imu_site"/>
@@ -288,6 +317,8 @@ def _rmuc_scene_xml() -> str:
     <!-- 无人机（freejoint 六自由度） -->
 {_drone_xml("2 0 1")}
   </worldbody>
+
+{_rotor_actuators_xml()}
 
   <sensor>
     <gyro name="gyro" site="imu_site"/>
@@ -351,6 +382,8 @@ def _boxes_scene_xml() -> str:
     <!-- 无人机（freejoint 六自由度） -->
 {_drone_xml("1 4 1")}
   </worldbody>
+
+{_rotor_actuators_xml()}
 
   <sensor>
     <gyro name="gyro" site="imu_site"/>
