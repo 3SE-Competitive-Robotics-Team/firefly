@@ -7,6 +7,9 @@
 - DDD 拆 crate（firefly-*），依赖自上而下，领域层不依赖应用层。
 - 错误用 firefly-error：kind/status 分类，模块边界 .with_context。
 - 可观测性：关键函数 `#[fastrace::trace]`，日志用 log 宏，禁 println!。
+- 场景光照唯一一份（`firefly-render::lighting`），所有相机共用；视角差异只写相机
+  配置（曝光/色调映射），禁止给单个相机加专属可聚簇光源（`PointLight`/`SpotLight`）
+  ——Bevy GPU 聚簇在多视图同帧渲染时不按 `RenderLayers` 隔离，会渗进别的视角。
 - 依赖统一在根 `[workspace.dependencies]`。
 
 ## 注释规范

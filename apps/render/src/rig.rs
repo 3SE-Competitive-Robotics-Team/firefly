@@ -20,7 +20,6 @@ use bevy::ui::IsDefaultUiCamera;
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_WIDTH};
 use firefly_pubsub::trace::TraceContext;
 use firefly_render::camera::FollowCamera;
-use firefly_render::lighting::viewer_camera;
 
 use crate::config::RenderConfig;
 
@@ -40,15 +39,10 @@ pub const SENSOR_NEAR: f32 = 0.05;
 /// [`crate::sensors`] 的有效掩码承担，对照 `env.py` 的 `depth < 100`）。
 pub const SENSOR_FAR: f32 = 100.0;
 
-/// 场地 mesh 层：主视角与传感器相机都渲染。
+/// 场地 mesh 层：所有相机都渲染。
 pub const WORLD_LAYER: usize = 0;
-/// 主视角专用灯光层：`firefly-render` 共享的主视角灯光放这里，与传感器灯光分开，
-/// 传感器相机不在这层、不吃这一套（两侧照度可独立标定）。
-pub const VIEWER_LIGHT_LAYER: usize = 1;
 /// 仅主视角渲染的机体层：传感器相机位于机体内，必须排除机体模型，否则自遮挡。
-pub const DRONE_LAYER: usize = 2;
-/// 传感器专用灯光层（不投影）：与主视角灯光集分开，按 VIO 灰度均值独立标定。
-pub const SENSOR_LIGHT_LAYER: usize = 3;
+pub const DRONE_LAYER: usize = 1;
 
 /// rig 相机标记（主世界→渲染世界的透传标记，见 [`crate::capture`]）。
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
@@ -147,8 +141,8 @@ pub fn spawn_rig(
         right: right.clone(),
     });
 
-    // 环境光贴图（IBL）：半球渐变天空，给近黑高光面暗部补光 + 柔和反射。
-    // 只作用于传感器彩色相机（主视角观感由 `firefly-render` 共享效果决定，不吃 IBL）。
+    // 环境光贴图（IBL）：半球渐变天空，给近黑高光面暗部补光 + 柔和反射（场景级，
+    // 所有相机共用）。
     let env = EnvironmentMapLight {
         intensity: config.env.intensity,
         ..EnvironmentMapLight::hemispherical_gradient(
@@ -163,12 +157,11 @@ pub fn spawn_rig(
         )
     };
 
-    // 传感器曝光按 VIO 灰度均值单独标定（`configs/render.toml` 的 `sensor_ev100`）；
-    // 主视角曝光由 `firefly-render` 的共享 `viewer_camera` 管。
+    // 传感器曝光：按发布图像灰度均值标定（`configs/render.toml` 的 `sensor_ev100`）。
     let sensor_exposure = Exposure {
         ev100: config.view.sensor_ev100,
     };
-    let sensor_layers = RenderLayers::from_layers(&[WORLD_LAYER, SENSOR_LIGHT_LAYER]);
+    let sensor_layers = RenderLayers::layer(WORLD_LAYER);
 
     // 双目彩色相机：各出 RGB（回读左/右目颜色目标）。
     // 出图窗口由 `link::poll_pose` 激活：非出图帧不渲染传感器（省 GPU）。
@@ -214,12 +207,17 @@ pub fn spawn_rig(
         DepthPrepass,
     ));
 
-    // 主视角：照明/曝光/bloom 与 `apps/quad` 同源（`firefly-render` 共享效果），
-    // 两边不再各自定制。无阴影、无 SSAO/SSR、无 IBL。
+    // 主视角：相机配置缺省与传感器一致（曝光 `viewer_ev100` 缺省 = `sensor_ev100`），
+    // 只多机体层——它是这条链路的 debug 窗口，与发布图像同源观感。
     commands.spawn((
         Camera3d::default(),
-        viewer_camera(),
-        RenderLayers::from_layers(&[WORLD_LAYER, VIEWER_LIGHT_LAYER, DRONE_LAYER]),
+        Msaa::Off,
+        Tonemapping::None,
+        Exposure {
+            ev100: config.view.viewer_ev100(),
+        },
+        RenderLayers::from_layers(&[WORLD_LAYER, DRONE_LAYER]),
+        env,
         IsDefaultUiCamera,
         // 第三人称追踪（与 `apps/quad` 同一实现 `firefly-render`）；自由浏览模式下
         // 让位给 `freecam::freecam_move`（见 `main.rs` 的运行条件）。

@@ -10,14 +10,13 @@ mod config;
 mod quad;
 
 use bevy::asset::AssetPlugin;
-use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 use bevy::text::FontSize;
 use bevy::window::{Window, WindowPlugin};
 
 use config::QuadConfig;
 use firefly_render::camera::{FollowCamera, FollowTarget, follow_camera};
-use firefly_render::lighting::{spawn_viewer_lighting, viewer_camera};
+use firefly_render::lighting::{ILLUMINANCE, spawn_scene_lighting, viewer_camera};
 use firefly_render::scene::{MODELS_DIR, spawn_scene};
 use quad::{Quad, QuadInput};
 
@@ -57,7 +56,7 @@ fn main() {
 // 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 fn setup_scene(mut commands: Commands, cfg: Res<QuadConfig>, assets: Res<AssetServer>) {
-    spawn_viewer_lighting(&mut commands, &RenderLayers::default());
+    spawn_scene_lighting(&mut commands, ILLUMINANCE);
     spawn_scene(&mut commands, &assets, &cfg.field);
     commands.spawn((
         Camera3d::default(),
