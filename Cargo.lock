@@ -2854,6 +2854,14 @@ name = "firefly-error"
 version = "0.1.0"
 
 [[package]]
+name = "firefly-flight"
+version = "0.1.0"
+dependencies = [
+ "glam 0.32.1",
+ "serde",
+]
+
+[[package]]
 name = "firefly-gicp"
 version = "0.1.0"
 dependencies = [
@@ -5757,6 +5765,7 @@ name = "quad"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "firefly-flight",
  "firefly-render",
  "log",
  "serde",
