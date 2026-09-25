@@ -47,14 +47,14 @@ use capture::{CaptureHub, CapturePlugin};
 use config::RenderConfig;
 use firefly_render::camera::{FollowTarget, follow_camera};
 use firefly_render::drone::spawn_drone_visual;
-use firefly_render::lighting::{DIRECTIONS, spawn_viewer_lighting};
+use firefly_render::lighting::spawn_scene_lighting;
 use firefly_render::scene::{MODELS_DIR, spawn_scene};
 use freecam::{FreeCam, freecam_move, toggle_freecam, update_mode_label};
 use link::{
     CapturePipeline, CaptureStats, PendingFrames, SensorCapture, drain_captures, open_ports,
     poll_pose, publish_processed,
 };
-use rig::{DRONE_LAYER, PoseState, SENSOR_LIGHT_LAYER, VIEWER_LIGHT_LAYER, spawn_rig};
+use rig::{DRONE_LAYER, PoseState, spawn_rig};
 use scene::SceneSpec;
 use ui::setup_panel;
 
@@ -140,9 +140,8 @@ fn main() {
         .run();
 }
 
-/// 场景装配：注册表选中场景的视觉 glb、传感器相机照明、主视角共享照明与无人机
-/// 占位体。红蓝灯饰自发光由 glb 的 emissive 材质承载（Blender 阶段写入），
-/// 主视角配 bloom 出光感（bloom 随共享效果）。
+/// 场景装配：选中场景的视觉 glb + 场景光照（唯一一份，见
+/// `firefly_render::lighting`）+ 机体占位体；自发光由 glb 的 emissive 材质承载。
 // 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 fn setup_scene(
@@ -155,60 +154,8 @@ fn setup_scene(
 ) {
     spawn_scene(&mut commands, &assets, &scene.asset_path());
 
-    // 传感器相机专用方向光（不投影）：照度锚定直射日光量级（`DirectionalLight`
-    // 文档：直射日光 32000~100000 lux），地面灰度均值须落在 120~170/255（对照
-    // `MuJoCo` 实测 140~160），否则 VIO 无特征可跟——改照度后以发布图像均值人工
-    // 比对。方向固定，照度由 `configs/render.toml` 的 `light.directional` 调；
-    // 单独成层，主视角不吃这一套（互不叠加）。
-    for (index, dir) in DIRECTIONS.iter().enumerate() {
-        commands.spawn((
-            DirectionalLight {
-                illuminance: render_config.light.directional[index],
-                shadow_maps_enabled: false,
-                ..default()
-            },
-            RenderLayers::layer(SENSOR_LIGHT_LAYER),
-            Transform::from_rotation(Quat::from_rotation_arc(Vec3::NEG_Z, dir.normalize())),
-        ));
-    }
-
-    // 主视角照明：与 `apps/quad` 同一套（环境光 + 三方向光 + 曝光 + bloom），
-    // 收敛在 `firefly-render::lighting`，两边不再各自定制。灯光收进
-    // `VIEWER_LIGHT_LAYER`，与传感器灯光分开、不互相叠加。
-    spawn_viewer_lighting(&mut commands, &RenderLayers::layer(VIEWER_LIGHT_LAYER));
-
-    // 顶棚灯阵：rows × cols 盏点光源均匀铺在场地上方，营造场馆照明。点光源
-    // 不投阴影——一盏点光阴影 = 6 面 cubemap，数十盏会直接压垮渲染。只作用于
-    // 传感器相机（主视角观感由共享效果决定）。
-    let grid = &render_config.light.grid;
-    let color = Color::srgb(grid.color[0], grid.color[1], grid.color[2]);
-    for row in 0..grid.rows {
-        for col in 0..grid.cols {
-            commands.spawn((
-                PointLight {
-                    color,
-                    intensity: grid.intensity,
-                    range: grid.range,
-                    ..default()
-                },
-                RenderLayers::layer(SENSOR_LIGHT_LAYER),
-                Transform::from_xyz(
-                    grid_axis(col, grid.cols, grid.span[0]),
-                    grid_axis(row, grid.rows, grid.span[1]),
-                    grid.height,
-                ),
-            ));
-        }
-    }
-    log::info!(
-        "顶棚灯阵 {}×{} = {} 盏（高 {:.1}m，单灯 {:.0}lm，半径 {:.1}m）",
-        grid.rows,
-        grid.cols,
-        grid.rows * grid.cols,
-        grid.height,
-        grid.intensity,
-        grid.range
-    );
+    // 场景光照：唯一一份，所有相机共用（约束见 `firefly_render::lighting`）。
+    spawn_scene_lighting(&mut commands, render_config.light.directional);
 
     let start = Vec3::from(scene.start);
 
@@ -269,15 +216,6 @@ fn tag_drone_layers(
                 stack.extend(kids.iter());
             }
         }
-    }
-}
-
-/// 灯阵单轴布点（中心为原点，`count` 盏均布在 `span` 上；单盏居中）。
-fn grid_axis(index: u32, count: u32, span: f32) -> f32 {
-    if count <= 1 {
-        0.0
-    } else {
-        -span / 2.0 + span * index as f32 / (count - 1) as f32
     }
 }
 
