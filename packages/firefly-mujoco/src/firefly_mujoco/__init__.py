@@ -8,6 +8,13 @@ IMU/双目灰度/深度提取 + 施加旋翼推力）与跨语言消息契约
 from .env import DroneEnv
 from .messages import (
     AIRFRAME_TOPIC,
+    COMMAND_KIND_ARM,
+    COMMAND_KIND_DISARM,
+    COMMAND_KIND_HOLD,
+    COMMAND_KIND_LAND,
+    COMMAND_KIND_TAKEOFF,
+    COMMAND_KIND_TRACK,
+    COMMAND_TOPIC,
     CONTROL_TOPIC,
     LOG_LEVEL_DEBUG,
     LOG_LEVEL_ERROR,
@@ -19,6 +26,7 @@ from .messages import (
     LOG_TOPIC,
     PLANT_STATE_TOPIC,
     AirframeMessage,
+    CommandMessage,
     ControlMessage,
     DepthImageMessage,
     GrayImageMessage,
@@ -32,12 +40,15 @@ from .messages import (
     ReferenceMessage,
     TraceContext,
 )
-from .scene import build_scene, load_scene_name
+from .scene import PAD_CLEARANCE, PADS, build_scene, drone_pad, load_scene_name
 
 __all__ = [
     "DroneEnv",
     "build_scene",
     "load_scene_name",
+    "drone_pad",
+    "PADS",
+    "PAD_CLEARANCE",
     "IMAGE_WIDTH",
     "IMAGE_HEIGHT",
     "IMAGE_SIZE",
@@ -50,11 +61,19 @@ __all__ = [
     "PlantStateMessage",
     "AirframeMessage",
     "ControlMessage",
+    "CommandMessage",
     "LogMessage",
     "LOG_TOPIC",
     "PLANT_STATE_TOPIC",
     "AIRFRAME_TOPIC",
     "CONTROL_TOPIC",
+    "COMMAND_TOPIC",
+    "COMMAND_KIND_ARM",
+    "COMMAND_KIND_DISARM",
+    "COMMAND_KIND_TAKEOFF",
+    "COMMAND_KIND_HOLD",
+    "COMMAND_KIND_TRACK",
+    "COMMAND_KIND_LAND",
     "LOG_LEVEL_ERROR",
     "LOG_LEVEL_WARN",
     "LOG_LEVEL_INFO",

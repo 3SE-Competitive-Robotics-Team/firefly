@@ -23,16 +23,21 @@
 //! - [`angle_mode`]：角度模式（飞行手柄）——期望俯仰/横滚/偏航角速度 + 升降速度；
 //! - [`position_mode`]：位置模式（飞控外环）——位置/速度/偏航参考 → 期望推力矢量
 //!   与期望姿态 → 姿态内环。
+//!
+//! [`FlightFsm`] 是飞控的模式与安全层：解锁、起飞、位置保持/跟踪、降落、失效保护，
+//! 输出每 tick 该飞的参考与电机使能——它不产生推力，推力仍走上面的控制链。
 
 mod airframe;
 mod control;
 mod estimator;
+mod fsm;
 mod params;
 mod state;
 
 pub use airframe::{Airframe, Allocation, Rotor};
 pub use control::{AngleCommand, PositionSetpoint, angle_mode, position_mode};
 pub use estimator::AttitudeEstimator;
+pub use fsm::{Command, Event, FlightFsm, FlightState, FsmParams, Health, Output, Reject};
 pub use params::{ControlParams, QuadParams};
 pub use state::{QuadState, Wrench, integrate, yaw_of};
 

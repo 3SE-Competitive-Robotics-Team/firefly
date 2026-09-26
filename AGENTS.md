@@ -61,6 +61,16 @@ Python sim（MuJoCo 物理 + 传感器发布，被控对象）→ vio（MSCKF �
 → fc（1kHz 飞控，4 电机推力）→ sim（施加；planner 在时其参考进 fc）
 ```
 
+上电停在停机坪（`firefly_mujoco.scene.PADS`：场景场地表面 + `PAD_CLEARANCE`），
+**不会自己起飞**：解锁/起飞/降落
+由地面站指令 `Firefly/Command`（`uv run firefly-cmd arm | takeoff [alt] | hold | track |
+land | disarm`）驱动，模式与失效保护在 `firefly-flight::FlightFsm`（对照 `PX4`
+`nav_state` + ArduPilot 模式机，细节见 `docs/how_to_run.md` §3.1）。
+
+**锁步**：fc 每个 tick 都发 `Firefly/Control`（上锁时零推力），被控对象按指令新鲜度
+（墙钟 50ms）决定物理是否推进——无有效指令则世界停转（状态/传感器仍发冻结内容），
+`fc` 不起就不动；被控对象不自行供力。
+
 按顺序各开一个终端（可先开 viewer，见下）：
 
 ```bash
@@ -70,7 +80,7 @@ uv run firefly-viz
 
 # 1. Python 物理环境（被控对象）：200Hz 物理；发布 IMU 100Hz / 双目+深度+真值 10Hz
 #    / 真值状态 PlantState 200Hz / 机体描述 Airframe 1Hz；订阅 Firefly/Control 施加推力
-#    （无有效指令时自行悬停兜底）。--script 是 VIO bench 的轨迹夹具（真值反馈），不走飞控。
+#    （锁步：无有效指令则物理不推进）。--script 是 VIO bench 的轨迹夹具（真值反馈），不走飞控。
 uv sync   # 首次：安装 firefly-mujoco / firefly-sim（根 workspace）
 uv run firefly-sim
 
@@ -78,18 +88,22 @@ uv run firefly-sim
 #    估计位姿与前端健康度写入共享 viewer
 cargo run --release -p vio
 
-# 3. Rust 飞控（最后起）：1kHz 控制环，订阅 PlantState/Airframe/odom/IMU/参考，
+# 3. Rust 飞控（最后起）：1kHz 控制环，订阅 PlantState/Airframe/odom/IMU/参考/Command，
 #    发布 Firefly/Control（4 电机推力）+ 控制量进共享 viewer（fc/debug/*）
 cargo run --release -p fc
 
 # 4.（可选）Rust 重规划：订阅 odom 作为状态源（新鲜超时回退轨迹模拟），
 #    未指定 --map 时加载 MuJoCo 默认场景静态地图，发布参考回传到飞控
 cargo run --release -p planner
+
+# 5.（可选）地面站指令：解锁 → 起飞（一次性 CLI；被拒原因在 fc 日志与 rrd logs/fc）
+uv run firefly-cmd arm && uv run firefly-cmd takeoff 1.0
 ```
 
 rerun 可视化约定：vio 写 `vio/odom` + `vio/traj`（估计位姿/轨迹）、
-`gt/pose` + `gt/traj`（真值对照）与 `vio/debug/*`（前端健康度），规划/地图/轨迹
-由 planner 写入（`plan/*` 前缀）——多进程共用 `sim_time` 时间轴（仿真秒），回放时
+`gt/pose` + `gt/traj`（真值对照）与 `vio/debug/*`（前端健康度），飞控写
+`fc/debug/*`（`state` 模式编码 / `altitude` 相对起飞点高度 / 推力与姿态误差），
+规划/地图/轨迹由 planner 写入（`plan/*` 前缀）——多进程共用 `sim_time` 时间轴（仿真秒），回放时
 跨进程数据按同一时钟对齐。传感器原图（双目/深度）不进 rrd，只在 `render` 进程
 自带的调试面板里。默认布局（场景 3D + 前端健康度面板）由进程启动时自动发送，
 无需手工配置。

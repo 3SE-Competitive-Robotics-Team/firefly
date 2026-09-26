@@ -216,12 +216,43 @@ class ControlMessage(ctypes.Structure):
         return "FireflyControlMessage"
 
 
+class CommandMessage(ctypes.Structure):
+    """地面站指令（事件语义，非周期流）：与 Rust `CommandMessage`（`FireflyCommandMessage`）一致。
+
+    `altitude` 仅 `COMMAND_KIND_TAKEOFF` 用（相对起飞点，m；`<= 0` 或非有限值表示
+    「用飞控配置的默认起飞高度」），其余种类忽略。`sequence` 由发布端保证严格递增
+    （如 `time.time_ns()`）：飞控只执行序号更大的指令，故一次性 CLI 重复投递的
+    同一条指令必须共用同一序号，才只生效一次。
+    """
+
+    _fields_ = [
+        ("timestamp", ctypes.c_double),
+        ("kind", ctypes.c_uint8),
+        ("altitude", ctypes.c_double),
+        ("sequence", ctypes.c_uint64),
+    ]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflyCommandMessage"
+
+
 #: 被控对象状态话题（sim → 飞控，200Hz）
 PLANT_STATE_TOPIC = "Firefly/PlantState"
 #: 机体/执行器描述话题（sim → 飞控，1Hz 电平）
 AIRFRAME_TOPIC = "Firefly/Airframe"
 #: 飞控指令话题（飞控 → sim，1kHz）
 CONTROL_TOPIC = "Firefly/Control"
+#: 地面站指令话题（外部工具 → 飞控，事件语义）
+COMMAND_TOPIC = "Firefly/Command"
+
+#: 地面站指令种类（与 Rust `firefly_pubsub::command::KIND_*` 一致）
+COMMAND_KIND_ARM = 1
+COMMAND_KIND_DISARM = 2
+COMMAND_KIND_TAKEOFF = 3
+COMMAND_KIND_HOLD = 4
+COMMAND_KIND_TRACK = 5
+COMMAND_KIND_LAND = 6
 
 #: 统一日志话题（与 Rust `firefly_pubsub::log::LOG_TOPIC` 一致）
 LOG_TOPIC = "Firefly/Log"
@@ -273,6 +304,7 @@ def _self_check() -> None:
     assert ctypes.sizeof(PlantStateMessage) == 112, ctypes.sizeof(PlantStateMessage)
     assert ctypes.sizeof(AirframeMessage) == 200, ctypes.sizeof(AirframeMessage)
     assert ctypes.sizeof(ControlMessage) == 48, ctypes.sizeof(ControlMessage)
+    assert ctypes.sizeof(CommandMessage) == 32, ctypes.sizeof(CommandMessage)
 
 
 _self_check()

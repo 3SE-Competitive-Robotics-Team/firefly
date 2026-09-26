@@ -1,6 +1,8 @@
 # firefly-sim 配置（缺键回落代码默认值）
 
-start = [2.0, 0.0, 1.0] # 起飞点（warehouse 走廊西端，沿 +x 飞）
+# 停机坪不在这里：由场景定义（`firefly_mujoco.scene.PADS` —— 场地表面高度 +
+# `PAD_CLEARANCE`），上电停在地面，起飞由飞控的 `Firefly/Command` 触发
+# （`firefly-cmd takeoff`），清单不起飞。需要临时改起点时才在此加 `start = [x, y, z]`。需要临时改起点时才在此加 `start = [x, y, z]`。
 
 [rates]
 physics = 200.0 # Hz

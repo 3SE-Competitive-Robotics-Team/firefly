@@ -3,7 +3,7 @@
 //! 只承载**飞控侧**参数（控制环频率、增益）：质量/惯量/旋翼几何/电机推力上限
 //! 是被控对象属性，由被控对象经 `Firefly/Airframe` 发布，见 `main.rs`。
 
-use firefly_flight::ControlParams;
+use firefly_flight::{ControlParams, FsmParams};
 use serde::Deserialize;
 
 /// 顶层配置。
@@ -15,6 +15,9 @@ pub struct FcConfig {
     /// 飞控参数（姿态/位置增益、倾角与角速度限幅）。
     #[serde(default)]
     pub control: ControlParams,
+    /// 飞行状态机参数（起降高度/速率、参考失联超时、落地判据）。
+    #[serde(default)]
+    pub fsm: FsmParams,
 }
 
 fn d_rate_hz() -> f64 {

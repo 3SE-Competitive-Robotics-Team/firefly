@@ -13,3 +13,6 @@ rate_hz = 1000.0
 pos_kp = 2.2
 vel_kp = 2.4
 # 内环（姿态/角速度）跑在 1kHz，保持 crate 默认的带宽（attitude_kp=10、rate_kp=20）。
+
+# [fsm]：飞行状态机参数（起飞高度/爬升率、降落率、落地判据、参考失联超时）
+# 全用 crate 默认值（`firefly-flight::FsmParams`），需要时才在此覆盖。

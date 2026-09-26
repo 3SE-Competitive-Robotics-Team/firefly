@@ -9,9 +9,13 @@
 
 本进程是**被控对象**：发布传感器与被控对象状态（`Firefly/PlantState`，每个物理步）、
 机体/执行器描述（`Firefly/Airframe`，1Hz 电平），订阅飞控指令（`Firefly/Control`，
-取最新）施加 4 电机推力；无有效指令时悬停兜底（失效保护）。控制律唯一实现在
-`firefly-flight`（飞控进程 `apps/fc`）；`--script` 模式例外：那是 VIO 验证的轨迹
-跟踪夹具（真值反馈，`DroneEnv.apply_pd`），不带飞控。
+取最新）施加 4 电机推力。控制律唯一实现在 `firefly-flight`（飞控进程 `apps/fc`）；
+`--script` 模式例外：那是 VIO 验证的轨迹跟踪夹具（真值反馈，`DroneEnv.apply_pd`），
+不带飞控。
+
+锁步：无有效飞控指令时物理不推进（状态/传感器仍按节拍发布冻结内容），被控对象
+不自行供力——对照 ArduPilot SITL（仿真与飞控同进程）与 PX4 lockstep。因此本进程
+需要 `apps/fc` 在跑才会动；起飞/上锁等模式全在飞控侧（`Firefly/Command`）。
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ from firefly_mujoco import (
     PlantStateMessage,
     ReferenceMessage,
     TraceContext,
+    drone_pad,
     load_scene_name,
 )
 
@@ -98,7 +103,8 @@ CONTROL_SERVICE_MAX = 32
 
 #: 机体描述发布周期（秒）：1Hz 持续电平（iceoryx2 无 latch，靠重发保证晚订阅必收）。
 AIRFRAME_PERIOD = 1.0
-#: 飞控指令陈旧阈值（仿真秒）：超过即悬停兜底（失效保护，不是跟踪律）。
+#: 飞控指令陈旧阈值（墙钟秒）：锁步下 sim 时间由指令推进，陈旧只能按墙钟判——
+#: 超过即物理不推进（等飞控），被控对象不自行供力。
 CONTROL_STALE = 0.05
 
 
@@ -228,8 +234,10 @@ def main() -> None:
     physics_period = 1.0 / rates.get("physics", 200.0)
     imu_period = 1.0 / rates.get("imu", 100.0)
     cam_period = 1.0 / rates.get("cam", 10.0)
-    start_pos = np.array(cfg.get("start", [1.0, 4.0, 1.0]))
-    env = DroneEnv(scene=load_scene_name())
+    # 停机坪：缺配置时按场景定义（`firefly_mujoco.scene.PADS`）——上电停在地面
+    scene_name = load_scene_name()
+    start_pos = np.array(cfg.get("start", drone_pad(scene_name)))
+    env = DroneEnv(scene=scene_name)
     env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))  # xyzw 单位四元数
     ftrace.init(enabled=trace_enabled)
     airframe = env.airframe()
@@ -288,8 +296,10 @@ def main() -> None:
     mission_t0 = None
     # 最新飞控指令：(state_time, 4 电机推力)；None = 未收到
     latest_control = None
-    # 悬停兜底是否已激活（飞控未就绪/停发；告警一次，恢复时告知）
-    hold_active = False
+    # 飞控指令的墙钟到达时刻（锁步下 sim 时间由指令推进，指令陈旧只能按墙钟判）
+    control_rx_wall = None
+    # 物理是否处于暂停（无有效飞控指令；告警一次，恢复时告知）
+    physics_paused = False
 
     cycle = None
     next_imu = 0.0
@@ -317,6 +327,7 @@ def main() -> None:
                 while (sample := control_sub.receive()) is not None:
                     m = sample.payload().contents
                     latest_control = (m.state_time, np.array(m.thrust, dtype=float))
+                    control_rx_wall = time.monotonic()
 
             # 控制 + 物理步进
             if script_mode:
@@ -342,26 +353,33 @@ def main() -> None:
                     ref_pos, ref_vel = trajectory.ref(env.time - mission_t0)
                 # --script 模式：真值跟踪（运动由外部轨迹指定）
                 env.apply_pd(ref_pos, ref_vel, ref_yaw=ref_yaw, ref_yaw_rate=ref_yaw_dot)
+                env.step()
             elif (
                 latest_control is not None
-                and env.time - latest_control[0] <= CONTROL_STALE
+                and control_rx_wall is not None
+                and time.monotonic() - control_rx_wall <= CONTROL_STALE
             ):
                 # 闭环模式：施加飞控下发的 4 电机推力（被控对象按机体几何合成 wrench）
-                if hold_active:
-                    hold_active = False
-                    log("飞控指令恢复，退出悬停兜底")
+                if physics_paused:
+                    physics_paused = False
+                    log("飞控指令恢复，物理继续推进")
                 env.apply_motor_thrusts(latest_control[1])
+                env.step()
             else:
-                # 无有效指令（飞控未启动/停发）：悬停兜底——失效保护，不是跟踪律
-                if not hold_active:
-                    hold_active = True
+                # 无有效指令（飞控未启动/停发）：物理不推进——锁步语义，对照
+                # ArduPilot SITL（仿真与飞控同进程）与 PX4 lockstep（物理由飞控
+                # 传感器节拍驱动）：两家都没有被控对象侧兜底。状态/传感器仍按节拍
+                # 发布冻结内容，飞控一起就能续上；本循环的暂停时长不计入实时节奏
+                # （t_start 后移），恢复后不追赶。
+                if not physics_paused:
+                    physics_paused = True
                     log(
-                        "无有效飞控指令（飞控未启动或已停发），悬停兜底",
-                        LOG_LEVEL_WARN,
+                        "无有效飞控指令（飞控未启动或已停发），物理不推进",
+                        LOG_LEVEL_ERROR,
                         env.time,
                     )
-                env.apply_hover_hold()
-            env.step()
+                t_start += physics_period
+                time.sleep(physics_period)
             # 失稳守卫：MuJoCo 发散（QACC NaN/Inf）后状态永久污染且传感器
             # 全变 NaN，下游 VIO 会被毒化——检测到即重置到起点，长跑不挂。
             if not np.isfinite(env.data.qpos).all() or not np.isfinite(env.data.qvel).all():

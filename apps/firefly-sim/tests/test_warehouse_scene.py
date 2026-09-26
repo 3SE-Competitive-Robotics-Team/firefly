@@ -28,7 +28,7 @@ warehouse = pytest.mark.skipif(
 pytestmark = warehouse
 
 from firefly_mujoco.env import DroneEnv
-from firefly_mujoco.scene import build_scene
+from firefly_mujoco.scene import build_scene, drone_pad
 
 WAREHOUSE_XML = build_scene("warehouse")
 
@@ -40,14 +40,16 @@ def test_visual_mesh_does_not_collide():
 
 
 def test_spawn_is_contact_free():
+    """模型默认停机坪位姿无穿模（上电不弹跳、不陷入地面）。"""
     m = mujoco.MjModel.from_xml_string(WAREHOUSE_XML)
     d = mujoco.MjData(m)
-    d.qpos[:3] = [2, 0, 1]
-    d.qpos[3:] = [1, 0, 0, 0]
-    d.qvel[:] = 0
     mujoco.mj_forward(m, d)
     mujoco.mj_collision(m, d)
     assert d.ncon == 0
+    # 停机坪高度贴近静止高度（场地表面 + 机体盒半高之上几个 mm）：落地距离小
+    x, y, z = drone_pad("warehouse")
+    assert (d.qpos[:3] == [x, y, z]).all(), d.qpos[:3]
+    assert z - 0.021 <= 0.02, z
 
 
 @pytest.mark.skipif(
