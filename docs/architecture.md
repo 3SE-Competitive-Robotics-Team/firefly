@@ -94,7 +94,9 @@ flowchart TD
 旋翼反扭矩，水平加速必须靠倾斜——四旋翼与“世界系全驱动扳手”模型的根本区别。
 
 ```
-参考（Firefly/Reference）
+Firefly/Command（地面站：解锁/模式/起降）
+  → FlightFsm（模式与安全层：DISARMED/ARMED_GROUNDED/TAKEOFF/HOLD/TRACK/LAND）
+  → 本模式该飞的参考（TRACK = Firefly/Reference，其余自生）
   → position_mode/angle_mode（期望力/力矩，不限幅）
   → Airframe::allocate（逐电机限幅，全栈唯一饱和点）→ 4 电机推力
   → Firefly/Control（1kHz，被控对象每步取最新）
@@ -103,14 +105,19 @@ flowchart TD
     `_rotor_actuators_xml`；对照 `mujoco_menagerie/skydio_x2`）
 ```
 
+- **模式与安全层**（`firefly-flight::FlightFsm`）：指令语义 = “谁在控制”，目标点属
+  规划侧（`Firefly/Goal` → planner → `Firefly/Reference`），参考流只在 `TRACK` 下被
+  消费且其存活性是失效保护条件；起降判据/失联超时对照 `PX4`/ArduPilot
+  （见 `docs/how_to_run.md` §3.1）。
 - **参数归属**：质量/惯量/气动阻尼/旋翼位置/旋向/单电机推力上限/反扭矩系数
   由被控对象经 `Firefly/Airframe` 发布（1Hz 电平，改几何不动飞控）；
-  增益/倾角限幅在 `configs/fc.toml`（缺键回落 `firefly-flight` 默认值）。
+  增益/倾角限幅与 `[fsm]` 参数在 `configs/fc.toml`（缺键回落 `firefly-flight` 默认值）。
 - **反馈分工**：内环姿态由飞控自估（陀螺积分 + 加速度计水平修正，航向取
   `Firefly/Odometry` 的姿态，JPL `q_GtoI` 的换算见 `apps/fc/src/vio.rs` 与其单测）；
-  位置/速度取 VIO 估计，未到达时回落 `PlantState` 真值（起飞前正常）。
-- **节拍**：控制律无积分项，dt 不进控制；被控对象状态陈旧（>50ms）时飞控
-  **不发指令**，由被控对象悬停兜底（失效保护，不是第二套跟踪律）。
+  位置/速度取 VIO 估计，未到达时回落 `PlantState` 真值（解锁前正常）。
+- **节拍与锁步**：控制律无积分项，dt 不进控制；飞控每 tick 都发指令（上锁时零
+  推力），被控对象按指令新鲜度（墙钟 50ms）决定物理是否推进——飞控停发即世界停转
+  （状态/传感器仍发冻结内容）；被控对象状态陈旧时飞控也停发，不用陈旧状态算控制。
 - **待观测**：侧向漂移的量化只在闭环实测（`fc/debug/*` 进 rrd：推力/倾角/
   姿态误差/tick 率/晚到/饱和）。当前闭环仍受 VIO 估计限制：悬停时估计自漂
   ~0.4m/s（`--script` 路径同现象，与飞控无关），被控对象会跟随估计漂移；

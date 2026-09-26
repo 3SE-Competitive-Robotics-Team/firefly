@@ -22,6 +22,7 @@ build-backend = "uv_build"
 [project.scripts]
 firefly-sim = "firefly_sim.main:main"
 firefly-goal = "firefly_sim.goal:main"
+firefly-cmd = "firefly_sim.cmd:main"
 
 [project.optional-dependencies]
 test = [

@@ -15,6 +15,8 @@
 //!   （质量/惯量/旋翼几何/电机上限的唯一来源，飞控订阅后装配参数）；
 //! - [`control`]：`ControlMessage`——4 电机推力指令（飞控 → 被控对象，1kHz）；
 //! - [`goal`]：`GoalMessage`——外部工具发布的飞行目标（动态重目标入口）；
+//! - [`command`]：`CommandMessage`——外部工具发布的地面站指令（解锁/起飞/保持/
+//!   跟踪/降落/上锁，按序号去重）；
 //! - [`viz`]：`VizMessage`——统一可视化消息（Rust 计算线程零 IO，经
 //!   `Firefly/Viz` 话题由 `firefly-viz` Python 进程统一写 rerun）；
 //! - [`vision`]：`FeatureMessage`/`PoseObservation`——视觉定位消息
@@ -27,6 +29,7 @@
 //! 统一内存布局、`'static`、不实现 `Drop`。
 
 pub mod camera;
+pub mod command;
 pub mod control;
 pub mod event;
 pub mod goal;

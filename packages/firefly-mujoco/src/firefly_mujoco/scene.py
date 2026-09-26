@@ -6,11 +6,11 @@
   CC-BY-4.0，见 `models/warehouse/license.txt`）：46m × 16m 室内仓库，
   视觉 mesh（`models/warehouse/structure.obj`，WetConcrete 贴图）+
   碰撞盒近似（两侧货架墙/两端墙/顶/地面，见 `_WAREHOUSE_COLLIDERS`）。
-  无人机沿走廊 +x 飞行（起点 (2, 0, 1)，终点 (40, 0, 1)）。
+  无人机在停机坪 (2, 0) 上电，起飞后沿走廊 +x 飞行（任务高度 1m，终点 (40, 0, 1)）。
 - `boxes`：旧手捏箱子阵列（25 箱 + 中线柱 + 侧翼柱），ffmap 时代残留，
   仅供回归对照。
 
-世界系 = 无人机起点系：`warehouse` 下起点 (2, 0, 1)，沿 +x 飞行。
+世界系 = 停机坪系：`warehouse` 下停机坪 (2, 0)，起飞后沿 +x 飞。
 相机（双目 + 深度）前向 +x，给 KLT 提供特征。
 
 灯光约定：**全部用方向光**（`type="directional"`）。此前用带 `pos` 的默认
@@ -179,6 +179,25 @@ ROTOR_TORQUE_COEFFICIENT = 0.016
 #: 推重比：单电机推力上限 = TWR·重量/4（写进 `ctrlrange`，飞控从模型读回）
 ROTOR_THRUST_TO_WEIGHT = 3.0
 
+#: 停机坪离地余量（m）：机体盒半高 0.021 加余量——上电停在地面且无穿模。
+#: 各场景的场地表面高度见 [`PADS`]。
+PAD_CLEARANCE = 0.03
+
+#: 各场景停机坪 `(x, y, 场地表面高度)`（世界系，米）：表面高度取自聚合碰撞盒
+#: （warehouse/boxes 地面 z=0；RMUC 场地主台阶顶 0.375），机体原点高度加
+#: [`PAD_CLEARANCE`]——改停机坪只改这里，场景 MJCF 与 sim 默认起点同源。
+PADS = {
+    "warehouse": (2.0, 0.0, 0.0),
+    "boxes": (1.0, 4.0, 0.0),
+    "rmuc2026": (-13.0, 0.0, 0.375),
+}
+
+
+def drone_pad(scene: str) -> tuple[float, float, float]:
+    """停机坪位置（世界系，米）：场景表面高度 + [`PAD_CLEARANCE`]。"""
+    x, y, surface = PADS.get(scene, PADS["warehouse"])
+    return (x, y, surface + PAD_CLEARANCE)
+
 
 def _drone_xml(pos: str) -> str:
     """无人机 body（freejoint 六自由度 + 4 旋翼 site + 双目/深度相机）。
@@ -266,8 +285,8 @@ def _warehouse_scene_xml() -> str:
     <geom name="feature_ground" type="plane" pos="23 0 0.005" size="23.2 8.1 0.1" material="ground_dots" contype="0" conaffinity="0"/>
  {_warehouse_colliders_xml()}
 
-    <!-- 无人机（freejoint 六自由度） -->
-{_drone_xml("2 0 1")}
+    <!-- 无人机（freejoint 六自由度，停机坪上电） -->
+{_drone_xml("%g %g %g" % drone_pad("warehouse"))}
   </worldbody>
 
 {_rotor_actuators_xml()}
@@ -314,8 +333,8 @@ def _rmuc_scene_xml() -> str:
     <!-- 视觉：Bevy 载 models/rmuc2026/field.glb；物理只有下面的透明碰撞盒 -->
 {_rmuc_collision_xml()}
 
-    <!-- 无人机（freejoint 六自由度） -->
-{_drone_xml("2 0 1")}
+    <!-- 无人机（freejoint 六自由度，停机坪上电） -->
+{_drone_xml("%g %g %g" % drone_pad("rmuc2026"))}
   </worldbody>
 
 {_rotor_actuators_xml()}
@@ -379,8 +398,8 @@ def _boxes_scene_xml() -> str:
          z≤1.5 错开。demo 默认地图未同步（本实验专用）。 -->
 {_boxes_xml()}
 
-    <!-- 无人机（freejoint 六自由度） -->
-{_drone_xml("1 4 1")}
+    <!-- 无人机（freejoint 六自由度，停机坪上电） -->
+{_drone_xml("%g %g %g" % drone_pad("boxes"))}
   </worldbody>
 
 {_rotor_actuators_xml()}

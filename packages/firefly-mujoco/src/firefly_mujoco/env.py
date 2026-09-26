@@ -188,16 +188,6 @@ class DroneEnv:
             raise ValueError(f"电机推力形状应为 ({len(self._rotor_ids)},)，收到 {t.shape}")
         self.data.ctrl[self._rotor_ids] = t
 
-    def apply_hover_hold(self) -> None:
-        """飞控缺席/指令陈旧时的兜底：等推力抵消重力（含倾斜补偿）。
-
-        这是**失效保护**（不主动动作、不掉高），不是跟踪律——跟踪律唯一家是
-        `firefly-flight`。
-        """
-        up_z = float(np.clip(self.data.body("drone").xmat.reshape(3, 3)[2, 2], 0.3, 1.0))
-        total = self.mass * 9.81 / up_z
-        self.apply_motor_thrusts(np.full(4, total / 4.0))
-
     def apply_pd(
         self,
         ref_pos: np.ndarray,
