@@ -18,7 +18,12 @@ path = "src/main.rs"
 firefly-error = { workspace = true }
 firefly-pubsub = { workspace = true }
 iceoryx2 = { workspace = true }
-usage = { workspace = true }
+# `completions`：`ffctl completion <shell>` 与 `parse()` 的补全回调（见 usage-rs 文档）
+usage = { workspace = true, features = ["completions"] }
+
+[dev-dependencies]
+# `test`：`usage::test::command!` 跑真二进制的 CLI 契约测试（tests/cli.rs）
+usage = { workspace = true, features = ["test"] }
 
 [lints]
 workspace = true

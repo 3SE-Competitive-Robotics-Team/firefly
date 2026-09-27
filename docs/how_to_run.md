@@ -228,6 +228,9 @@ DISARMED ──arm──> ARMED_GROUNDED ──takeoff──> TAKEOFF ──到�
 参数在 `configs/fc.toml` 的 `[fsm]` 段（起飞高度/爬升率、降落率、落地判据、
 参考失联超时）；缺键回落 crate 默认值。
 
+CLI 自用命令：`ffctl completion <shell>`（bash/elvish/fish/nu/powershell/zsh）装 shell
+补全；`ffctl __usage_spec__` 导出可移植 KDL 规格（manpage/文档都从它生成）。
+
 ## 3.2 发目标点 — 机器人导航
 
 先按 §2 起全链路（终端 7 用无脚本模式），并让无人机先在空中：

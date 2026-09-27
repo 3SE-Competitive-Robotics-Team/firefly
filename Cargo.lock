@@ -6963,6 +6963,16 @@ checksum = "3ba4af226b5e8186231f5fc83dc913522fab3b5accc7fc3811e940794d522407"
 dependencies = [
  "usage-argv",
  "usage-derive",
+ "usage-test",
+]
+
+[[package]]
+name = "usage-test"
+version = "6.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af670ae025049d131b1d16600e80fd6794cd83e69a3c84cb6605cdb8176f4957"
+dependencies = [
+ "usage-argv",
 ]
 
 [[package]]
