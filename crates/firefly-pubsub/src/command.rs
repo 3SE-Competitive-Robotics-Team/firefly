@@ -1,13 +1,11 @@
 //! 地面站指令消息（外部工具 → 飞控，事件语义，非周期流）。
 //!
-//! 指令语义 = **"谁在控制"**（对照 `MAVLink` `COMMAND_LONG` 的解锁/模式类子集）：
+//! 指令语义 = **“谁在控制”**（对照 `MAVLink` `COMMAND_LONG` 的解锁/模式类子集）：
 //! 目标点与轨迹属规划侧（`Firefly/Goal` → planner → `Firefly/Reference`），飞控只在
 //! `Track` 下消费参考流。飞控订阅本话题，按 [`CommandMessage::sequence`] 去重——
-//! 一次性 CLI 为打通信道会重复投递同一条指令（见 `firefly-goal` 的连接竞态说明），
-//! 去重保证只执行一次。
+//! 一次性 CLI（`apps/ffctl`）在无订阅端时会重试投递同一条指令，去重保证只执行一次。
 //!
-//! `#[repr(C)]` 定长零拷贝，与 Python 侧 `firefly_mujoco.messages.CommandMessage`
-//! 布局/类型名严格一致。
+//! `#[repr(C)]` 定长零拷贝：发布端 `apps/ffctl`、订阅端 `apps/fc`（都在 Rust 侧）。
 
 use iceoryx2::prelude::*;
 

@@ -35,7 +35,7 @@ vio/aliked/gicp/planner，**不进** rrd（vio 只发位姿/轨迹/健康度瘦�
 1kHz 跑（`cargo run --release -p fc`）。
 
 **上电停在停机坪**（`firefly_mujoco.scene.PADS`：场景场地表面 + `PAD_CLEARANCE`），不会自己起飞：
-解锁/起飞/降落由地面站指令 `Firefly/Command`（`uv run firefly-cmd`，见 §3.1）驱动，
+解锁/起飞/降落由地面站指令 `Firefly/Command`（`./target/release/ffctl fc`，见 §3.1）驱动，
 模式与失效保护全在飞控的 `FlightFsm` 里。**锁步**：飞控每 tick 都发指令（上锁时
 零推力），被控对象按指令新鲜度（墙钟 50ms）决定物理是否推进——无有效指令则世界
 停转（状态/传感器仍发冻结内容），飞控一起就续上；被控对象不自行供力（对照
@@ -77,11 +77,11 @@ export RUST_LOG=info
 ## 1. 构建验证（release）
 
 ```bash
-cargo build --release -p vio -p gicp -p aliked -p lightglue -p planner
+cargo build --release -p vio -p gicp -p aliked -p lightglue -p planner -p ffctl
 cargo test
 uv run python -c "from firefly_sim.trajectories import TRAJECTORIES; print(sorted(TRAJECTORIES))"
 uv run firefly-viz --help      # 检查可视化进程可导入（argparse 生效）
-uv run firefly-cmd             # 打印用法（无参数；退出码 2）
+./target/release/ffctl --help      # 打印用法（含全部子命令）
 ```
 
 注意：`firefly-sim` 没有 `--help`（`sys.argv` 只认 `--script/--no-trace/--odom-topic`，
@@ -147,14 +147,16 @@ cargo run --release -p fc
 # 等待日志：飞控进程启动（RUST_LOG=info 才打 stderr；聚合日志在 rrd 的 logs/fc 实体）
 
 # 终端 9 — 地面站指令（一次性 CLI，不是常驻进程）：解锁 → 起飞
-uv run firefly-cmd arm            # 解锁（要求：估计就绪 + 机体描述 + 被控对象/IMU 新鲜 + 在地面）
-uv run firefly-cmd takeoff 1.0    # 自动起飞到相对起飞点 1.0 m，到位后自动进 HOLD
-uv run firefly-cmd land           # 自动降落，落地后自动上锁（DISARMED）
-# 其它：hold（原地保持）/ track（交给 planner 的参考流）/ disarm（仅地面）
+# 编译：cargo build --release -p ffctl（或 cargo run --release -p ffctl -- <verb> …）
+./target/release/ffctl fc arm            # 解锁（要求：估计就绪 + 机体描述 + 被控对象/IMU 新鲜 + 在地面）
+./target/release/ffctl fc takeoff 1.0    # 自动起飞到相对起飞点 1.0 m，到位后自动进 HOLD
+./target/release/ffctl fc land           # 自动降落，落地后自动上锁（DISARMED）
+# 其它：hold（原地保持）/ track（交给 planner 的参考流）/ disarm（仅地面）/ goal X Y Z（规划目标）
 ```
 
-指令无应答通道：被拒的原因在 `fc` 的 stderr 日志（一行中文原因）与 rrd 的
-`logs/fc`（`TextLog`）里；当前模式看 `fc/debug/state`（编码见 §3.1）。
+指令无应答通道：投递成功与否看 stdout（无订阅端时直接报错退出，不会静默丢弃）；
+被拒的原因在 `fc` 的 stderr 日志（一行中文原因）与 rrd 的 `logs/fc`（`TextLog`）里，
+当前模式看 `fc/debug/state`（编码见 §3.1）。
 
 `--script` 模式不走飞控（不发布 `Firefly/PlantState`/`Airframe`、不订阅
 `Firefly/Control`）：脚本轨迹由 `DroneEnv.apply_pd`（真值反馈夹具）跟踪，
@@ -187,7 +189,7 @@ cargo test --release -p lightglue --test vision_traj_eval -- --nocapture
 
 ## 3. 指令与目标 — 起飞状态机 / 规划导航
 
-### 3.1 飞行状态机（`Firefly/Command` → `firefly-cmd`）
+### 3.1 飞行状态机（`Firefly/Command` → `ffctl fc`）
 
 上电停在停机坪，模式与安全全在飞控的 `FlightFsm`（`crates/firefly-flight/src/fsm.rs`，
 对照 `PX4` `nav_state` + ArduPilot 模式机）：
@@ -231,19 +233,19 @@ DISARMED ──arm──> ARMED_GROUNDED ──takeoff──> TAKEOFF ──到�
 先按 §2 起全链路（终端 7 用无脚本模式），并让无人机先在空中：
 
 ```bash
-uv run firefly-cmd arm && uv run firefly-cmd takeoff 1.0   # 解锁 + 起飞到 1.0 m（自动 HOLD）
-uv run firefly-cmd track                                    # 交给 planner 的参考流（参考新鲜才接受）
+./target/release/ffctl fc arm && ./target/release/ffctl fc takeoff 1.0   # 解锁 + 起飞到 1.0 m（自动 HOLD）
+./target/release/ffctl fc track                                        # 交给 planner 的参考流（参考新鲜才接受）
 ```
 
 规划器悬停在 `--start`（缺省 `2 0 1`，与缺省起飞高度一致），等待 `Firefly/Goal`：
 
 ```bash
-# 语法：uv run firefly-goal X Y Z（warehouse 地图系，米；走廊 y∈[-4,4] 净空）
-uv run firefly-goal 30 0 1        # 走廊直线可达点
-uv run firefly-goal 22 0 1.5      # 走廊中段高点
+# 语法：./target/release/ffctl planner goal X Y Z（warehouse 地图系，米；走廊 y∈[-4,4] 净空）
+./target/release/ffctl planner goal 30 0 1        # 走廊直线可达点
+./target/release/ffctl planner goal 22 0 1.5      # 走廊中段高点
 
 # 动态重目标：飞行中可连续发送，最新一条生效（10Hz 轮询，1s 内重算全局路径）
-uv run firefly-goal 35 0 1
+./target/release/ffctl planner goal 35 0 1
 ```
 
 坐标需落在 `warehouse.ffmap` 范围内（`ORIGIN + DIMS*RESOLUTION`：
@@ -328,10 +330,10 @@ bench 经 IPC 直采 GT/odom 算 ATE/RPE 打 stdout + `logs/bench/*.json`（含 
 ## 8. 最小验证清单
 
 1. `uv run firefly-viz --save logs/wh_run.rrd` 最先起 → 其余 6 进程按 `vio → gicp → aliked → lightglue → planner → sim` 顺序启动。各进程日志均出现 `日志聚合已挂载（tag=...）` + `已订阅 ...` / `已打开话题`；`firefly-viz` 出现 `已订阅 Firefly/Viz + Firefly/Log`。（Rust 日志需 `RUST_LOG=info`，缺省只打 error。）
-2. 起 `fc` 后 `uv run firefly-cmd arm` → `fc` 日志 `指令 Arm → ARMED_GROUNDED`（被拒则一行中文原因）；`fc/debug/state` 由 0 变 1。
-3. `uv run firefly-cmd takeoff 1.0` → 日志 `模式 ARMED_GROUNDED → TAKEOFF`，看真值位姿升到 1.0 m 附近后 `模式 TAKEOFF → HOLD`（`fc/debug/altitude` ≈ 1.0）。
-4. `uv run firefly-goal 30 0 1` + `uv run firefly-cmd track` → `planner` 日志 `收到新目标`，`sim` 日志 `收到参考` 且无人机开始移动。
-5. `uv run firefly-cmd land` → `模式 ... → LAND`，落地后 `LAND → DISARMED`（`fc/debug/state` 回 0，推力归零）。
+2. 起 `fc` 后 `./target/release/ffctl fc arm`（先 `cargo build --release -p ffctl`）→ `fc` 日志 `指令 Arm → ARMED_GROUNDED`（被拒则一行中文原因）；`fc/debug/state` 由 0 变 1。
+3. `./target/release/ffctl fc takeoff 1.0` → 日志 `模式 ARMED_GROUNDED → TAKEOFF`，看真值位姿升到 1.0 m 附近后 `模式 TAKEOFF → HOLD`（`fc/debug/altitude` ≈ 1.0）。
+4. `./target/release/ffctl planner goal 30 0 1` + `./target/release/ffctl fc track` → `planner` 日志 `收到新目标`，`sim` 日志 `收到参考` 且无人机开始移动。
+5. `./target/release/ffctl fc land` → `模式 ... → LAND`，落地后 `LAND → DISARMED`（`fc/debug/state` 回 0，推力归零）。
 6. `Ctrl+C` 后 `全部进程已结束` / `优雅退出`，进程组无残留（`ps aux | grep firefly` 为空）。
 
 ## 9. 故障速查
@@ -340,7 +342,7 @@ bench 经 IPC 直采 GT/odom 算 ATE/RPE 打 stdout + `logs/bench/*.json`（含 
 |---|---|---|
 | 被控对象物理不动（`sim` 日志停在 `无有效飞控指令`） | 锁步：`fc` 未起或已停发指令 | 起 `fc`（不做地面站动作时它也会发零推力指令）；对照 §3.1 |
 | `指令 Arm 被拒：状态估计未就绪` | VIO 未 `is_initialized`（或未起） | 先起 `vio`；静止在停机坪上应当也能初始化 |
-| `指令 Track 被拒：参考流未就绪` | planner 未起或参考流断（planner 10Hz） | 先起 `planner`（或 `firefly-goal` 触发重规划），再 `track` |
+| `指令 Track 被拒：参考流未就绪` | planner 未起或参考流断（planner 10Hz） | 先起 `planner`（或 `ffctl planner goal` 触发重规划），再 `track` |
 | 无人机拒绝起飞且日志说不在停机坪地面 | 真值/估计高度超出 0.06m 或垂速>0.15m/s | 等停稳（被控对象停在地面）；检查 `configs/sim.toml` 的 `start` |
 | `planner` 日志 `目标 (...) 不可达` | 目标点在占据体素内或超出地图 | 换 warehouse 范围内空地点，如 `30 0 1` |
 | `GICP矫正接受` 迟迟不出现 | 空地图或点云 `<30` 点，或 `chi2` 拒收 | 检查 `--map` 路径（warehouse 链用 `warehouse.ffmap`），近处对墙增加特征 |

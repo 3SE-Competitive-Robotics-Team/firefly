@@ -131,6 +131,18 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
     /// # Errors
     /// 借出样本失败或发送失败（如发布端超时）。
     pub fn publish(&self, msg: T) -> Result<TraceContext, firefly_error::Error> {
+        self.publish_counted(msg).map(|(_, ctx)| ctx)
+    }
+
+    /// 同 [`publish`](Self::publish)，但额外返回**本次收到该样本的订阅端数**。
+    ///
+    /// 一次性 CLI（`apps/ffctl`）靠它确认“有没有人在听”：iceoryx2 的 `send` 在无订阅端时
+    /// 不报错（样本直接丢弃），单看 `Result` 无法区分“投递成功”与“没人订阅”；
+    /// 每次 `send` 内部会刷新连接（iceoryx2 0.9.3 `send_sample`），故计数即最新连接态。
+    ///
+    /// # Errors
+    /// 借出样本失败或发送失败（如发布端超时）。
+    pub fn publish_counted(&self, msg: T) -> Result<(usize, TraceContext), firefly_error::Error> {
         // Trace 上下文中间件：注入当前活动 span（无 span 时仅带时间戳）
         let ctx = match SpanContext::current_local_parent() {
             Some(sc) => TraceContext::from_span_context(sc),
@@ -146,12 +158,12 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
         let sample = sample.write_payload(msg);
         sample
             .send()
-            .map(|_| {
+            .map(|receivers| {
                 // 数据路径优先：唤醒失败不阻断发布（见 TopicNotifier::notify_sent_sample）
                 if let Some(notifier) = &self.notifier {
                     notifier.notify_sent_sample();
                 }
-                ctx
+                (receivers, ctx)
             })
             .map_err(|e| {
                 firefly_error::Error::temporary(

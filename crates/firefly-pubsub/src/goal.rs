@@ -1,9 +1,9 @@
 //! 飞行目标消息（外部工具 → 规划进程）。
 //!
-//! CLI（`uv run firefly-goal X Y Z`）或其它工具把目标点发布到 `Firefly/Goal`，
+//! CLI（`ffctl goal X Y Z`）或其它工具把目标点发布到 `Firefly/Goal`，
 //! 规划进程订阅后经 `PlannerManager::set_goal` 动态重目标（重算全局路径 +
-//! 重新规划），无人机即飞往该点。`#[repr(C)]` 定长零拷贝，与 Python 侧
-//! `firefly_mujoco.messages.GoalMessage` 布局/类型名严格一致。
+//! 重新规划），无人机即飞往该点。`#[repr(C)]` 定长零拷贝：发布端 `apps/ffctl`、
+//! 订阅端 `apps/planner`（都在 Rust 侧）。
 
 use iceoryx2::prelude::*;
 

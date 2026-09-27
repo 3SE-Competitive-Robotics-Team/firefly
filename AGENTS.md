@@ -63,8 +63,9 @@ Python sim（MuJoCo 物理 + 传感器发布，被控对象）→ vio（MSCKF �
 
 上电停在停机坪（`firefly_mujoco.scene.PADS`：场景场地表面 + `PAD_CLEARANCE`），
 **不会自己起飞**：解锁/起飞/降落
-由地面站指令 `Firefly/Command`（`uv run firefly-cmd arm | takeoff [alt] | hold | track |
-land | disarm`）驱动，模式与失效保护在 `firefly-flight::FlightFsm`（对照 `PX4`
+由地面站指令 `Firefly/Command`（`./target/release/ffctl fc arm | takeoff [alt] | hold |
+track | land | disarm`；`cargo build --release -p ffctl`）驱动，模式与失效保护在
+`firefly-flight::FlightFsm`（对照 `PX4`
 `nav_state` + ArduPilot 模式机，细节见 `docs/how_to_run.md` §3.1）。
 
 **锁步**：fc 每个 tick 都发 `Firefly/Control`（上锁时零推力），被控对象按指令新鲜度
@@ -97,7 +98,7 @@ cargo run --release -p fc
 cargo run --release -p planner
 
 # 5.（可选）地面站指令：解锁 → 起飞（一次性 CLI；被拒原因在 fc 日志与 rrd logs/fc）
-uv run firefly-cmd arm && uv run firefly-cmd takeoff 1.0
+./target/release/ffctl fc arm && ./target/release/ffctl fc takeoff 1.0
 ```
 
 rerun 可视化约定：vio 写 `vio/odom` + `vio/traj`（估计位姿/轨迹）、

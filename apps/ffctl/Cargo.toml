@@ -1,0 +1,24 @@
+[package]
+name = "ffctl"
+version = "0.1.0"
+keywords = ['cli', 'drone', 'ground-station']
+categories = ['command-line-utilities']
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "ffctl"
+path = "src/main.rs"
+
+[dependencies]
+firefly-error = { workspace = true }
+firefly-pubsub = { workspace = true }
+iceoryx2 = { workspace = true }
+usage = { workspace = true }
+
+[lints]
+workspace = true

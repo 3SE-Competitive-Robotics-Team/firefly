@@ -9,7 +9,7 @@
 //! `cargo run --release -p vio`），或
 //! `cargo run --release -p planner -- --map apps/planner/maps/gate.ffmap` 独立运行。
 //!
-//! 动态目标：订阅 `Firefly/Goal`（`uv run firefly-goal X Y Z` 发布），
+//! 动态目标：订阅 `Firefly/Goal`（`ffctl goal X Y Z` 发布），
 //! 收到目标即重算全局路径并飞往该点；到达后悬停保持、进程保持运行等待
 //! 新目标（`--goal` 仅为初始目标，可省略——缺省悬停在 `--start`）。
 //!
@@ -341,7 +341,7 @@ impl App {
         let goal_sub = open_sub::<GoalMessage>(
             &node,
             GOAL_TOPIC,
-            "已订阅目标话题（`uv run firefly-goal X Y Z` 发布）",
+            "已订阅目标话题（`ffctl goal X Y Z` 发布）",
             "目标订阅不可用",
         );
         let stop_sub = open_sub::<MandatoryStopMessage>(
@@ -971,7 +971,7 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!(
-                "{e}\n用法：planner [--map <map.ffmap>] [--config configs/planner.toml] [--start x y z] [--goal x y z] [--frame-offset x y z] [--mandatory-stop]\n\n--goal 可省略（悬停等待 `uv run firefly-goal X Y Z` 动态目标）；--mandatory-stop 向 {MANDATORY_STOP_TOPIC} 发一条强制停止指令后退出"
+                "{e}\n用法：planner [--map <map.ffmap>] [--config configs/planner.toml] [--start x y z] [--goal x y z] [--frame-offset x y z] [--mandatory-stop]\n\n--goal 可省略（悬停等待 `ffctl goal X Y Z` 动态目标）；--mandatory-stop 向 {MANDATORY_STOP_TOPIC} 发一条强制停止指令后退出"
             );
             std::process::exit(2);
         }
