@@ -1,12 +1,7 @@
 //! 数值验证 MSCKF 测量雅可比（有限差分对照解析 `H_x`）。
 //!
-//! 目的：排查"含零偏发散"疑似翻译缺陷——H 的符号/约定与
-//! `Variable::update` boxplus 约定不一致时，小残差下修正≈0 被掩盖，
-//! 大残差（有零偏）下错误修正被放大成发散。
-//!
-//! 方法：`do_fej=false` 时 res 与 H 都用当前值——对每个状态分量做中心
-//! 差分（扰动走 `Variable::update` 同款 boxplus），数值导数必须与解析
-//! 雅可比逐项吻合。
+//! `do_fej=false` 的解析雅可比通过 boxplus 中心差分验证；
+//! FEJ 的锚定表示通过同锚点自观测不变性验证。
 
 use std::sync::Arc;
 
@@ -24,6 +19,13 @@ fn r_ito_c() -> Matrix3<f64> {
 
 /// 单相机 + 3 个克隆位姿的状态；特征在正前方 5m。
 fn build_state() -> (State, Feature) {
+    build_state_with_options(StateOptions {
+        do_fej: false,
+        ..StateOptions::default()
+    })
+}
+
+fn build_state_with_options(opts: StateOptions) -> (State, Feature) {
     let intrinsics = [
         168.606_993_943_65,
         168.606_993_943_65,
@@ -35,12 +37,11 @@ fn build_state() -> (State, Feature) {
         0.0,
     ];
     let cam0: SharedCamera = Arc::new(CamRadtan::new(320, 240, &intrinsics));
-    let opts = StateOptions {
-        do_fej: false,
-        num_cameras: 1,
-        ..StateOptions::default()
-    };
     let mut st = State::new(opts);
+    st.cam_intrinsics
+        .get_mut(&0)
+        .unwrap()
+        .set_value(DVector::from_column_slice(&intrinsics));
     st.cameras.insert(0usize, cam0);
 
     // 外参：与 apps/vio 一致（p_IinC = R_ItoC·(−t_cam_body)）
@@ -316,4 +317,90 @@ fn slam_h_f_matches_finite_difference() {
         "SLAM H_f 与 FD 失配（最差相对误差 {worst_rel:.2e}）——landmark 列符号/尺度错误"
     );
     println!("SLAM H_f FD 验证通过（最差相对误差 {worst_rel:.2e}）");
+}
+
+#[test]
+fn camera_calibration_jacobians_match_finite_difference() {
+    use firefly_vio::updater_helper::get_feature_jacobian_full;
+    use firefly_vio_core::cam::CamEqui;
+    for fisheye in [false, true] {
+        let (mut state, feat) = build_state_with_options(StateOptions {
+            do_fej: false,
+            do_calib_camera_pose: true,
+            do_calib_camera_intrinsics: true,
+            ..StateOptions::default()
+        });
+        let intrinsics = [168.6, 170.2, 160.0, 120.0, 0.01, -0.003, 0.001, -0.001];
+        let camera: SharedCamera = if fisheye {
+            Arc::new(CamEqui::new(320, 240, &intrinsics))
+        } else {
+            Arc::new(CamRadtan::new(320, 240, &intrinsics))
+        };
+        state.cameras.insert(0, camera);
+        state
+            .cam_intrinsics
+            .get_mut(&0)
+            .unwrap()
+            .set_value(DVector::from_column_slice(&intrinsics));
+        let jac = get_feature_jacobian_full(&state, &feat, FeatRepresentation::Global3D);
+        let ids = [
+            state.calib_imu_to_cam[&0].id(),
+            state.cam_intrinsics[&0].id(),
+        ];
+        let mut column = 0;
+        for &(id, size) in &jac.x_order {
+            if ids.contains(&id) {
+                for component in 0..size {
+                    let mut dx = DVector::zeros(state.cov.nrows());
+                    let eps = 1e-3;
+                    dx[id as usize + component] = eps;
+                    let mut plus = state.clone();
+                    plus.update_all(&dx);
+                    let mut minus = state.clone();
+                    minus.update_all(&(-dx));
+                    let fd = -(residual(&plus, &feat) - residual(&minus, &feat)) / (2.0 * eps);
+                    let error = (&fd - jac.h_x.column(column + component)).amax();
+                    assert!(
+                        error < 0.02,
+                        "fisheye={fisheye}, id={id}, component={component}, error={error}"
+                    );
+                }
+            }
+            column += size;
+        }
+    }
+}
+
+#[test]
+fn anchored_self_observation_is_independent_of_anchor_pose() {
+    use firefly_vio::updater_helper::get_feature_jacobian_full;
+    for representation in [
+        FeatRepresentation::Anchored3D,
+        FeatRepresentation::AnchoredFullInverseDepth,
+        FeatRepresentation::AnchoredMsckfInverseDepth,
+        FeatRepresentation::AnchoredInverseDepthSingle,
+    ] {
+        for fej in [false, true] {
+            let (mut state, mut feat) = build_state();
+            state.options.do_fej = fej;
+            state.clones_imu[0].1.update(&DVector::from_column_slice(&[
+                0.15, -0.2, 0.1, 0.3, -0.1, 0.2,
+            ]));
+            let anchor = &state.clones_imu[0].1;
+            let calib = &state.calib_imu_to_cam[&0];
+            feat.anchor_cam_id = 0;
+            feat.anchor_clone_timestamp = 1.0;
+            feat.p_FinA = calib.rot() * anchor.rot() * (feat.p_FinG - anchor.pos()) + calib.pos();
+            feat.timestamps.get_mut(&0).unwrap().truncate(1);
+            feat.uvs.get_mut(&0).unwrap().truncate(1);
+            feat.uvs_norm.get_mut(&0).unwrap().truncate(1);
+            let jac = get_feature_jacobian_full(&state, &feat, representation);
+            assert!(
+                jac.h_x.norm() < 1e-9,
+                "{representation:?}, fej={fej}, H={}",
+                jac.h_x
+            );
+            assert!(jac.h_f.iter().all(|x| x.is_finite()));
+        }
+    }
 }

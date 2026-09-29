@@ -79,7 +79,7 @@ sim.main()
         first_position = None
         samples = 0
         controls = 0
-        saw_uninitialized = False
+        previous_timestamp = None
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             check_alive()
@@ -89,7 +89,9 @@ sim.main()
                 if msg.is_initialized and first_ready is None:
                     first_ready = msg.timestamp
                     first_position = np.array([msg.position_x, msg.position_y, msg.position_z])
-                saw_uninitialized |= not msg.is_initialized
+                if previous_timestamp is not None:
+                    assert msg.timestamp > previous_timestamp, "里程计状态时间必须严格递增"
+                previous_timestamp = msg.timestamp
             while (sample := control.receive()) is not None:
                 msg = sample.payload().contents
                 controls += 1
@@ -100,7 +102,6 @@ sim.main()
         if first_ready is None:
             diagnostics = "\n".join(f"{name}:\n" + "\n".join(tail) for name, _, tail in processes)
             raise AssertionError("无真值启动未就绪\n" + diagnostics)
-        assert saw_uninitialized, "应观测到等待初始化阶段"
         assert first_ready >= 1.0, "不得跳过静止观测窗口"
         assert np.linalg.norm(first_position) < 0.1, f"初始位置应为局部原点: {first_position}"
         assert controls >= 100, "无 PlantState 时也必须持续发布零推力"

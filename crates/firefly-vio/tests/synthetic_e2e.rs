@@ -36,11 +36,13 @@ fn build_manager_ex(max_slam: usize, do_fej: bool) -> VioManager {
     let cam_l: SharedCamera = Arc::new(CamRadtan::new(W, H, &intrinsics));
     let cam_r: SharedCamera = Arc::new(CamRadtan::new(W, H, &intrinsics));
     let mut params = VioManagerOptions {
-        // 假设噪声须与注入端一致：注入为均匀 ±0.02（accel）/±0.002（gyro）
-        // @100Hz → 连续密度 σ_a = 0.02/√3·√100 ≈ 0.115、σ_w ≈ 0.0115。
-        // （不得沿用现场 MuJoCo IMU 的 2.83e-2/2.83e-1——比合成注入大 ~2.5×，
-        // P 平衡点被推到米级，弱几何更新踢不动状态反而被 Q 淹没）
-        imu_noises: firefly_vio_core::noise::ImuNoise::new(1.15e-2, 2.0e-3, 1.15e-1, 3.0e-3),
+        // 均匀白噪声 ±0.02 m/s²、±0.002 rad/s，100 Hz：密度=幅度/√(3fs)。
+        imu_noises: firefly_vio_core::noise::ImuNoise::new(
+            0.002 / 300.0_f64.sqrt(),
+            2.0e-3,
+            0.02 / 300.0_f64.sqrt(),
+            3.0e-3,
+        ),
         ..VioManagerOptions::default()
     };
     params.state_options.num_cameras = 2;

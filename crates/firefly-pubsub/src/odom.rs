@@ -25,7 +25,7 @@ pub const GROUND_TRUTH_TOPIC: &str = "Firefly/GroundTruth";
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
 #[type_name("FireflyOdomMessage")]
 pub struct OdomMessage {
-    /// 相机时钟时间戳（秒）。
+    /// 状态有效时刻（IMU/仿真时钟，秒），必须与位姿和速度对应。
     pub timestamp: f64,
     /// 位置 `p_IinG`。
     pub position_x: f64,

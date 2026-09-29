@@ -264,6 +264,11 @@ pub struct TrackKlt {
 }
 
 impl TrackKlt {
+    /// 同步在线内参标定后的相机快照；已有观测保留采集时的归一化坐标。
+    pub fn set_camera_calibration(&mut self, id: usize, camera: crate::cam::SharedCamera) {
+        self.base.camera_calib.insert(id, camera);
+    }
+
     /// 构造 KLT 跟踪器（对照 `TrackKLT` 构造函数）。
     #[must_use]
     #[allow(clippy::too_many_arguments)]

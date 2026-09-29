@@ -27,6 +27,11 @@
 | 5 | `lightglue` | `apps/lightglue` (LightGlue 匹配 + PnP，`ort`) | `Firefly/Features` + `Firefly/CorrectedOdometry`（先验，优先矫正值）+ 库图 `--map` | `Firefly/PoseObservation`（→ `gicp` 融合） | 特征到即查 |
 | 6 | `planner` | `apps/planner` (EGO-Planner v2: A* + MINCO) | `Odometry`/`CorrectedOdometry` + `Depth` + `Firefly/Goal` | `Firefly/Reference` + `Firefly/Viz` | 10Hz |
 | 7 | `firefly-sim` | `apps/firefly-sim` | `Firefly/Reference`（仅日志/互锁）+ `Firefly/Control` | `Firefly/Imu` 100Hz / `Firefly/CameraLeft,Right` 10Hz / `Firefly/Depth` 10Hz / `Firefly/GroundTruth` 10Hz / `Firefly/PlantState` 200Hz / `Firefly/Airframe` 1Hz | 200Hz 物理 |
+
+VIO 初始化完成后，在 IMU 已覆盖的时刻输出预测里程计；状态时间戳使用 IMU
+时钟秒，位置与速度均为重力对齐局部世界系。相机更新与高频预测使用独立状态，
+IMU 断流时不生成带新时间戳的输出。`configs/vio.toml` 白噪声参数为连续时间
+密度：`σ_density = σ_sample / √fs`；修改仿真采样率或每采样噪声时须同步换算。
 | 8 | `fc` | `apps/fc` (飞控，`firefly-flight`) | `Firefly/PlantState` + `Firefly/Airframe` + `Firefly/Odometry`/`CorrectedOdometry` + `Firefly/Imu` + `Firefly/Reference` + `Firefly/Command` | `Firefly/Control` 1kHz / `Firefly/Viz` 10Hz | 1kHz 控制环 |
 
 数据流：`sim → vio → gicp → planner → fc → sim`（飞控闭环跟踪）；视觉支路

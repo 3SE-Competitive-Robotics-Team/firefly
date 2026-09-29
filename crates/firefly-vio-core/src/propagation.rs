@@ -284,6 +284,19 @@ impl Propagator {
             .clone()
     }
 
+    /// 最新 IMU 测量时刻（秒）；空缓冲返回 `None`。
+    ///
+    /// # Panics
+    /// IMU 缓冲锁被毒化时 panic。
+    #[must_use]
+    pub fn latest_imu_timestamp(&self) -> Option<f64> {
+        self.imu_data
+            .lock()
+            .expect("imu_data mutex poisoned")
+            .last()
+            .map(|imu| imu.timestamp)
+    }
+
     /// 当前缓存 IMU 测量数量。
     ///
     /// # Panics
@@ -546,7 +559,7 @@ impl Propagator {
     /// 高频 fast 传播（对照 `Propagator::fast_state_propagate`）。
     ///
     /// 用离散零阶 F/G 与缓存的状态/协方差逐段传播（**不更新 `State`**），
-    /// 输出局部系速度与角速度（控制环高频位姿）。首次调用（或缓存失效）
+    /// `timestamp` 为 IMU 时钟秒；输出局部系速度与角速度。首次调用（或缓存失效）
     /// 时用 `initial` 重建缓存；`initial` 缺失且缓存无效返回 `None`。
     ///
     /// 注意与 `predict_and_compute` 的噪声离散化差异：此处随机游走
@@ -577,9 +590,17 @@ impl Propagator {
 
         // 选取测量（warn=false，对照 C++）
         let time0 = self.cache_state_time + self.cache_t_off;
-        let time1 = timestamp + self.cache_t_off;
+        let time1 = timestamp;
         let prop_data = {
             let imu = self.imu_data.lock().expect("imu_data 锁");
+            // 输出时间必须由已有 IMU 覆盖，禁止把外推结果标成新测量状态。
+            if !time1.is_finite()
+                || time1 <= time0
+                || imu.first()?.timestamp > time0
+                || imu.last()?.timestamp < time1
+            {
+                return None;
+            }
             Self::select_imu_readings(&imu, time0, time1, false)?
         };
         if prop_data.len() < 2 {

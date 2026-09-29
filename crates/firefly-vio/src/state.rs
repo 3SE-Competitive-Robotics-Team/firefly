@@ -273,6 +273,9 @@ impl State {
 
     /// 用误差增量 `dx` 更新所有变量（对照 `EKFUpdate` 末尾的逐变量
     /// `update` 循环：四元数 boxplus / 向量加法）。
+    ///
+    /// # Panics
+    /// `dx` 未覆盖活动变量，或开启内参标定的相机缺少投影模型。
     pub fn update_all(&mut self, dx: &DVector<f64>) {
         let update_var = |id: i32, size: usize, v: &mut dyn Variable| {
             if id < 0 {
@@ -311,6 +314,10 @@ impl State {
             }
             if let Some(intrin) = self.cam_intrinsics.get_mut(&i) {
                 update_var(intrin.id(), 8, intrin);
+                if self.options.do_calib_camera_intrinsics {
+                    let camera = self.cameras.get_mut(&i).expect("标定相机必须有投影模型");
+                    *camera = camera.with_calibration(intrin.vec().as_slice());
+                }
             }
         }
         for (_, clone) in &mut self.clones_imu {

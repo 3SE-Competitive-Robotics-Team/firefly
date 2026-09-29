@@ -60,7 +60,7 @@ pub struct VioManager {
     /// 上次更新时间（相机时钟系）。
     pub timelastupdate: f64,
     /// 上次传播的时间偏移（`Propagator::last_prop_time_offset`）。
-    last_prop_time_offset: f64,
+    last_prop_time_offset: Option<f64>,
 }
 
 impl VioManager {
@@ -68,6 +68,9 @@ impl VioManager {
     ///
     /// `cameras`：相机 id → 畸变模型对象（由应用层从标定加载）；
     /// `tracker`：已配置的 KLT 跟踪器。
+    ///
+    /// # Panics
+    /// 相机 id 不在 `0..num_cameras` 内。
     #[must_use]
     pub fn new(
         params: VioManagerOptions,
@@ -112,12 +115,20 @@ impl VioManager {
             is_initialized_vio: false,
             startup_time: -1.0,
             timelastupdate: -1.0,
-            last_prop_time_offset: 0.0,
+            last_prop_time_offset: None,
         };
         mgr.state.cameras = cameras;
 
         // 同步相机标定到初始化器选项（对照 C++ 的 init_options.camera_*）
         for (id, cam) in &mgr.state.cameras {
+            let intrinsics = mgr
+                .state
+                .cam_intrinsics
+                .get_mut(id)
+                .expect("相机 id 必须属于状态");
+            let value = nalgebra::DVector::from_column_slice(&cam.value());
+            intrinsics.set_value(value.clone());
+            intrinsics.set_fej(value);
             mgr.params
                 .init_options
                 .camera_intrinsics
@@ -144,7 +155,7 @@ impl VioManager {
         self.is_initialized_vio && (self.timelastupdate - (-1.0)).abs() > f64::EPSILON
     }
 
-    /// 高频位姿预测（对照 `Propagator::fast_state_propagate`）。
+    /// 高频位姿预测，目标时间为 IMU 时钟秒（对照 `Propagator::fast_state_propagate`）。
     ///
     /// 不修改 `State`；首次调用（或缓存被传播/更新失效后）从当前状态组装
     /// 缓存。返回局部系速度/角速度与 12×12 协方差，供控制环使用。
@@ -227,6 +238,11 @@ impl VioManager {
             "sensor_ids 与 images 长度必须一致"
         );
 
+        if self.state.options.do_calib_camera_intrinsics {
+            for (&id, camera) in &self.state.cameras {
+                self.track_feats.set_camera_calibration(id, camera.clone());
+            }
+        }
         // 特征跟踪（对照 C++：trackFEATS->feed_new_camera）
         self.track_feats.feed_new_camera(message);
 
@@ -309,7 +325,7 @@ impl VioManager {
     }
 
     /// 相机-IMU 时间偏移（对照 `_calib_dt_CAMtoIMU->value()(0)`）。
-    fn time_offset(&self) -> f64 {
+    pub fn time_offset(&self) -> f64 {
         self.state
             .calib_dt_cam_to_imu
             .as_ref()
@@ -670,7 +686,7 @@ impl VioManager {
     #[fastrace::trace]
     fn propagate_impl(&mut self, timestamp: f64, augment: bool) {
         let t_off_new = self.time_offset();
-        let time0 = self.state.timestamp + self.last_prop_time_offset;
+        let time0 = self.state.timestamp + self.last_prop_time_offset.unwrap_or(t_off_new);
         let time1 = timestamp + t_off_new;
 
         let imu_data = self.propagator.imu_data_snapshot();
@@ -679,7 +695,7 @@ impl VioManager {
             log::warn!(
                 "IMU 测量不足，无法传播（time0={time0:.4} time1={time1:.4} state={:.4} off={:.6} imu_n={}）",
                 self.state.timestamp,
-                self.last_prop_time_offset,
+                self.last_prop_time_offset.unwrap_or(t_off_new),
                 imu_data.len()
             );
             return;
@@ -763,7 +779,7 @@ impl VioManager {
                 self.state.clones_imu.len()
             );
         }
-        self.last_prop_time_offset = t_off_new;
+        self.last_prop_time_offset = Some(t_off_new);
         log::debug!(
             "prop_impl {} t={timestamp:.3} p=({:.3},{:.3},{:.3})",
             if augment { "CLONE" } else { "odom " },
@@ -803,6 +819,33 @@ mod tests {
             15,
         );
         VioManager::new(params, cameras, tracker)
+    }
+
+    #[test]
+    fn camera_intrinsics_initialize_and_update_projection() {
+        use firefly_vio_core::cam::{CamRadtan, SharedCamera};
+        use std::sync::Arc;
+        let value = [170.0, 172.0, 160.0, 120.0, 0.01, 0.0, 0.0, 0.0];
+        let camera: SharedCamera = Arc::new(CamRadtan::new(320, 240, &value));
+        let mut params = VioManagerOptions::default();
+        params.state_options.do_calib_camera_intrinsics = true;
+        let tracker = TrackKlt::new(
+            HashMap::from([(0, camera.clone())]),
+            100,
+            0,
+            false,
+            HistogramMethod::None,
+            10,
+            5,
+            5,
+            15,
+        );
+        let mut mgr = VioManager::new(params, BTreeMap::from([(0, camera)]), tracker);
+        assert_eq!(mgr.state.cam_intrinsics[&0].vec().as_slice(), &value);
+        let mut dx = nalgebra::DVector::zeros(mgr.state.cov.nrows());
+        dx[mgr.state.cam_intrinsics[&0].id() as usize] = 2.0;
+        mgr.state.update_all(&dx);
+        assert!((mgr.state.cameras[&0].value()[0] - 172.0).abs() < 1e-12);
     }
 
     #[test]

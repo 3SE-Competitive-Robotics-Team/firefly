@@ -5,8 +5,7 @@
 //!   《Matrix Computations》5.2.4），消除特征位置未知量；
 //! - [`measurement_compress_inplace`]：测量压缩（同样的 Givens 上三角化）。
 //!
-//! 支持 `GLOBAL_3D`、`GLOBAL_FULL_INVERSE_DEPTH` 与
-//! `ANCHORED_MSCKF_INVERSE_DEPTH` 表示。
+//! 支持全局与锚定的三维、逆深度表示。
 
 // 雅可比组装中的单字符符号（m/n 为行列、a/b 为消零元素）对照 Eigen/Golub
 // 源码约定；线性代数代码保留原符号更可审计。
@@ -40,8 +39,7 @@ pub struct FeatureJacobian {
 /// 组装一个特征的测量残差与雅可比（对照
 /// `UpdaterHelper::get_feature_jacobian_full`）。
 ///
-/// 支持 `GLOBAL_3D`、`GLOBAL_FULL_INVERSE_DEPTH` 与
-/// `ANCHORED_MSCKF_INVERSE_DEPTH` 表示。
+/// 支持全局与锚定的三维、逆深度表示。
 /// 残差：`z = uv_meas − distort(project(p_FinG))`；链式雅可比：
 /// `dz/dx = dz/dzn · dzn/dpfc · dpfc/dx`（投影 → 畸变 → 状态）。
 ///
@@ -129,156 +127,18 @@ pub fn get_feature_jacobian_full(
         }
     }
 
-    // 特征位置（全局系）：锚定表示由锚点计算（对照 C++ 的 p_FinG 段）。
-    // FEJ 线性化点 p_fin_g_fej：锚定表示恒等于 p_fin_g（锚定特征的估计
-    // 一致性由表示雅可比内的锚点 fej 保证，对照 C++ UpdaterHelper.cpp:283-288）；
-    // 非锚定表示取调用方写入的 `feature.p_FinG_fej`（SLAM 为 landmark
-    // 首估计，MSCKF 与新初始化特征为当前三角化值）。
-    let (p_fin_g, p_fin_g_fej, dpfg_dlambda, dpfg_dx) = if representation.is_relative() {
+    // 残差使用当前全局位置；锚定表示的 FEJ 由表示雅可比统一处理。
+    let (p_fin_g, p_fin_g_fej) = if representation.is_relative() {
         let (_, anchor) = anchor_clone.expect("锚点克隆已注册");
-        let calib = state
-            .calib_imu_to_cam
-            .get(&(feature.anchor_cam_id as usize))
-            .expect("锚点相机必须有外参");
-        let r_ito_c_a = calib.rot();
-        let p_iin_c_a = calib.pos();
-        let r_gto_i_a = anchor.rot();
-        let p_iin_g_a = anchor.pos();
-        let r_c_to_g = r_gto_i_a.transpose() * r_ito_c_a.transpose();
-        let p_fin_g = r_c_to_g * (feature.p_FinA - p_iin_c_a) + p_iin_g_a;
-
-        // dpfg_dx：对锚点克隆/外参（对照 C++ 的 H_anc/H_calib；所有锚定表示共享）
-        let mut dpfg_dx = vec![(anchor.id(), 6, {
-            let mut h_anc = DMatrix::<f64>::zeros(3, 6);
-            h_anc.view_mut((0, 0), (3, 3)).copy_from(
-                &(-r_gto_i_a.transpose()
-                    * skew_x(&(r_ito_c_a.transpose() * (feature.p_FinA - p_iin_c_a)))),
-            );
-            h_anc.view_mut((0, 3), (3, 3)).fill_diagonal(1.0);
-            h_anc
-        })];
-        if state.options.do_calib_camera_pose {
-            let mut h_calib = DMatrix::<f64>::zeros(3, 6);
-            h_calib
-                .view_mut((0, 0), (3, 3))
-                .copy_from(&(-r_c_to_g * skew_x(&(feature.p_FinA - p_iin_c_a))));
-            h_calib.view_mut((0, 3), (3, 3)).copy_from(&(-r_c_to_g));
-            let calib = state
-                .calib_imu_to_cam
-                .get(&(feature.anchor_cam_id as usize))
-                .expect("锚点相机必须有外参");
-            dpfg_dx.push((calib.id(), 6, h_calib));
-        }
-
-        // dpfg_dlambda：按表示取 p_FinA→p_FinG 的链式雅可比（对照 C++
-        // `get_feature_jacobian_representation` 的 H_f 构造）
-        let p = feature.p_FinA;
-        // 各分支统一为 DMatrix（3×3 或 Single 的 3×1，与 h_f 列数一致）
-        let dpfg_dlambda: DMatrix<f64> = match representation {
-            // ANCHORED_3D：p_FinA 即参数（对照 C++ H_f = R_CtoG）
-            crate::options::FeatRepresentation::Anchored3D => {
-                let mut out = DMatrix::<f64>::zeros(3, 3);
-                out.copy_from(&r_c_to_g);
-                out
-            }
-            // 锚定全逆深度（θ,φ,ρ；对照 C++ d_pfinA_dpinv 的 sin/cos 版）
-            crate::options::FeatRepresentation::AnchoredFullInverseDepth => {
-                let rho = 1.0 / p.norm();
-                let phi = (rho * p.z).acos();
-                let theta = p.y.atan2(p.x);
-                let (sin_th, cos_th) = theta.sin_cos();
-                let (sin_phi, cos_phi) = phi.sin_cos();
-                let mut d = Matrix3::zeros();
-                d[(0, 0)] = -(1.0 / rho) * sin_th * sin_phi;
-                d[(0, 1)] = (1.0 / rho) * cos_th * cos_phi;
-                d[(0, 2)] = -(1.0 / (rho * rho)) * cos_th * sin_phi;
-                d[(1, 0)] = (1.0 / rho) * cos_th * sin_phi;
-                d[(1, 1)] = (1.0 / rho) * sin_th * cos_phi;
-                d[(1, 2)] = -(1.0 / (rho * rho)) * sin_th * sin_phi;
-                d[(2, 1)] = -(1.0 / rho) * sin_phi;
-                d[(2, 2)] = -(1.0 / (rho * rho)) * cos_phi;
-                let mut out = DMatrix::<f64>::zeros(3, 3);
-                out.copy_from(&(r_c_to_g * d));
-                out
-            }
-            // MSCKF 逆深度（α,β,ρ；对照 C++ d_pfinA_dpinv）
-            crate::options::FeatRepresentation::AnchoredMsckfInverseDepth => {
-                let alpha = p.x / p.z;
-                let beta = p.y / p.z;
-                let rho = 1.0 / p.z;
-                let mut d = Matrix3::zeros();
-                d[(0, 0)] = 1.0 / rho;
-                d[(0, 2)] = -(1.0 / (rho * rho)) * alpha;
-                d[(1, 1)] = 1.0 / rho;
-                d[(1, 2)] = -(1.0 / (rho * rho)) * beta;
-                d[(2, 2)] = -(1.0 / (rho * rho));
-                let mut out = DMatrix::<f64>::zeros(3, 3);
-                out.copy_from(&(r_c_to_g * d));
-                out
-            }
-            // 单逆深度（ρ；对照 C++ d_pfinA_drho = −(1/ρ²)·bearing，3×1）
-            crate::options::FeatRepresentation::AnchoredInverseDepthSingle => {
-                let rho = 1.0 / p.z;
-                let bearing = rho * p;
-                let d = -(1.0 / (rho * rho)) * bearing;
-                let mut out = DMatrix::<f64>::zeros(3, 1);
-                out.column_mut(0).copy_from(&(r_c_to_g * d));
-                out
-            }
-            other => {
-                log::warn!("特征表示 {other:?} 未实现，回退 GLOBAL_3D");
-                let mut out = DMatrix::<f64>::zeros(3, 3);
-                out.fill_with_identity();
-                out
-            }
-        };
-        (p_fin_g, p_fin_g, dpfg_dlambda, dpfg_dx)
+        let calib = &state.calib_imu_to_cam[&(feature.anchor_cam_id as usize)];
+        let p = anchor.rot().transpose() * calib.rot().transpose() * (feature.p_FinA - calib.pos())
+            + anchor.pos();
+        (p, p)
     } else {
-        // dpfg_dlambda：p_FinG → 表示参数。GLOBAL_3D 即参数本身（H_f = I）；
-        // GLOBAL_FULL_INVERSE_DEPTH 的逆深度 H_f 线性化点按 do_fej 取
-        // p_FinG_fej，否则当前 p_FinG（对照 C++
-        // `get_feature_jacobian_representation` 的 GLOBAL_FULL_INVERSE_DEPTH
-        // 分支，UpdaterHelper.cpp:44-47）。
-        let dpfg_dlambda: DMatrix<f64> = match representation {
-            crate::options::FeatRepresentation::Global3D => {
-                let mut out = DMatrix::<f64>::zeros(3, 3);
-                out.fill_with_identity();
-                out
-            }
-            // 全局全逆深度（θ,φ,ρ；对照 C++ 的 d_pfinG_dpinv，sin/cos 版）
-            crate::options::FeatRepresentation::GlobalFullInverseDepth => {
-                let p = if state.options.do_fej {
-                    feature.p_FinG_fej
-                } else {
-                    feature.p_FinG
-                };
-                let rho = 1.0 / p.norm();
-                let phi = (rho * p.z).acos();
-                let theta = p.y.atan2(p.x);
-                let (sin_th, cos_th) = theta.sin_cos();
-                let (sin_phi, cos_phi) = phi.sin_cos();
-                let mut d = Matrix3::zeros();
-                d[(0, 0)] = -(1.0 / rho) * sin_th * sin_phi;
-                d[(0, 1)] = (1.0 / rho) * cos_th * cos_phi;
-                d[(0, 2)] = -(1.0 / (rho * rho)) * cos_th * sin_phi;
-                d[(1, 0)] = (1.0 / rho) * cos_th * sin_phi;
-                d[(1, 1)] = (1.0 / rho) * sin_th * cos_phi;
-                d[(1, 2)] = -(1.0 / (rho * rho)) * sin_th * sin_phi;
-                d[(2, 1)] = -(1.0 / rho) * sin_phi;
-                d[(2, 2)] = -(1.0 / (rho * rho)) * cos_phi;
-                let mut out = DMatrix::<f64>::zeros(3, 3);
-                out.copy_from(&d);
-                out
-            }
-            other => {
-                log::warn!("特征表示 {other:?} 未实现，回退 GLOBAL_3D");
-                let mut out = DMatrix::<f64>::zeros(3, 3);
-                out.fill_with_identity();
-                out
-            }
-        };
-        (feature.p_FinG, feature.p_FinG_fej, dpfg_dlambda, Vec::new())
+        (feature.p_FinG, feature.p_FinG_fej)
     };
+    let (dpfg_dlambda, dpfg_dx) =
+        get_feature_jacobian_representation(state, feature, representation);
 
     // 残差与雅可比（对照 C++ 的测量循环）
     let jacobsize =
@@ -347,8 +207,7 @@ pub fn get_feature_jacobian_full(
             };
             let p_fin_ii_j = r_gto_ii_j * (p_fin_g_j - p_iin_g_j);
             let p_fin_ci_j = r_ito_c * p_fin_ii_j + p_iin_c;
-            let uv_norm_j = Vector2::new(p_fin_ci_j.x / p_fin_ci_j.z, p_fin_ci_j.y / p_fin_ci_j.z);
-            let (dz_dzn, _) = cam.compute_distort_jacobian(uv_norm_j.cast());
+            let (dz_dzn, dz_dzeta) = cam.compute_distort_jacobian(uv_norm);
             // dzn/dpfc：2×3（对 p_FinCi 的 x/y/z 求导）
             let mut dzn_dpfc = DMatrix::zeros(2, 3);
             let z2 = p_fin_ci_j.z * p_fin_ci_j.z;
@@ -392,7 +251,7 @@ pub fn get_feature_jacobian_full(
 
             // 相机外参雅可比（标定开启时）
             if state.options.do_calib_camera_pose {
-                let mut dpfc_dcalib = Matrix3::zeros();
+                let mut dpfc_dcalib = DMatrix::<f64>::zeros(3, 6);
                 dpfc_dcalib
                     .view_mut((0, 0), (3, 3))
                     .copy_from(&skew_x(&(p_fin_ci - p_iin_c)));
@@ -405,6 +264,11 @@ pub fn get_feature_jacobian_full(
                 h_x.view_mut((2 * c, col), (2, 6)).copy_from(&cur);
             }
 
+            if state.options.do_calib_camera_intrinsics {
+                let intrin = &state.cam_intrinsics[cam_id];
+                let col = map_hx[&(intrin.id(), 8)];
+                h_x.view_mut((2 * c, col), (2, 8)).copy_from(&dz_dzeta);
+            }
             c += 1;
         }
     }
@@ -491,8 +355,33 @@ pub fn get_feature_jacobian_representation(
         return (h_f, Vec::new());
     }
 
+    if representation == crate::options::FeatRepresentation::GlobalFullInverseDepth {
+        let p = if state.options.do_fej {
+            feature.p_FinG_fej
+        } else {
+            feature.p_FinG
+        };
+        let rho = 1.0 / p.norm();
+        let phi = (rho * p.z).acos();
+        let theta = p.y.atan2(p.x);
+        let (sin_th, cos_th) = theta.sin_cos();
+        let (sin_phi, cos_phi) = phi.sin_cos();
+        let mut d = Matrix3::zeros();
+        d[(0, 0)] = -(1.0 / rho) * sin_th * sin_phi;
+        d[(0, 1)] = (1.0 / rho) * cos_th * cos_phi;
+        d[(0, 2)] = -(1.0 / (rho * rho)) * cos_th * sin_phi;
+        d[(1, 0)] = (1.0 / rho) * cos_th * sin_phi;
+        d[(1, 1)] = (1.0 / rho) * sin_th * cos_phi;
+        d[(1, 2)] = -(1.0 / (rho * rho)) * sin_th * sin_phi;
+        d[(2, 1)] = -(1.0 / rho) * sin_phi;
+        d[(2, 2)] = -(1.0 / (rho * rho)) * cos_phi;
+        let mut out = DMatrix::<f64>::zeros(3, 3);
+        out.copy_from(&d);
+        return (out, Vec::new());
+    }
+
     // 锚定表示：锚点克隆 + 外参（对照 C++ 的 H_anc/H_calib 构造）
-    let (anchor_t, anchor) = state
+    let (_, anchor) = state
         .clones_imu
         .iter()
         .find(|(ct, _)| ct.total_cmp(&feature.anchor_clone_timestamp).is_eq())
@@ -532,8 +421,6 @@ pub fn get_feature_jacobian_representation(
         .copy_from(&(-r_gto_i.transpose() * skew_x(&(r_ito_c.transpose() * (p_fin_a - p_iin_c)))));
     h_anc.view_mut((0, 3), (3, 3)).fill_diagonal(1.0);
     let mut h_x = vec![(anchor.id(), 6, h_anc)];
-    let mut x_order = vec![(anchor_t, 6usize)];
-    let _ = &mut x_order;
     // 外参块（标定开启时；对照 C++ H_calib）
     if state.options.do_calib_camera_pose {
         let mut h_calib = DMatrix::<f64>::zeros(3, 6);

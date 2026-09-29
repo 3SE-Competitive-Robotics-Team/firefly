@@ -34,6 +34,7 @@ use iceoryx2::waitset::WaitSetRunResult;
 
 mod config;
 mod input;
+mod odometry;
 use config::VioConfig;
 
 use input::IceoryxInput;
@@ -101,10 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &intrinsics,
     ));
 
-    // IMU 噪声来自配置（须与 sim 注入匹配：σ_gyro=0.002 rad/s、
-    // σ_accel=0.02 m/s² 每采样高斯 @200Hz → 连续谱密度 ≈ ×√fs）。直接沿用
-    // OpenVINS 真机默认会使 Q 偏小 ~1e4 倍——滤波器过度信任 IMU，静态悬停也
-    // 恒加速漂移（实测 20s 内速度漂到 3m/s）。
+    // IMU 连续时间噪声密度由部署配置提供。
     let mut params = VioManagerOptions {
         imu_noises: firefly_vio_core::noise::ImuNoise::new(
             cfg.imu.gyro_noise,
@@ -339,37 +337,33 @@ fn run_loop(
             log::warn!("IMU 断流 >{IMU_STALL:?}：滤波器停更，等待 sim 恢复");
         }
 
-        // 按发布周期输出 odom（100Hz，经 IMU propagation；视觉仍 10Hz 修正）
+        // 同一预测同时供里程计与可视化使用，时间戳属于预测状态。
+        let output = if t_sim + 1e-9 >= next_odom || t_sim + 1e-9 >= next_viz {
+            odometry::sample(vio, t_sim)
+        } else {
+            None
+        };
         if t_sim + 1e-9 >= next_odom {
-            let s = &vio.state;
-            let init = vio.initialized();
-            publish_odom(odom_pub, t_sim, s.timestamp, &s.imu, init);
-            next_odom += ODOM_PERIOD;
-            // 落后超过一个周期（启动追赶 / 长阻塞后恢复）时重同步到当前时刻，
-            // 避免按 100Hz 节奏洪泛补发积压的 odom
-            if next_odom + ODOM_PERIOD < t_sim {
-                next_odom = t_sim;
+            if let Some(msg) = output {
+                publish_odom(odom_pub, msg);
             }
+            next_odom = t_sim + ODOM_PERIOD;
         }
 
         // 瘦版可视化：位姿 + 轨迹折线 @10Hz（只记位姿不流图像）
         if t_sim + 1e-9 >= next_viz {
-            let s = &vio.state;
-            let p = s.imu.pos();
-            let q = s.imu.quat();
-            log_viz(
-                viz_pub,
-                t_sim,
-                [p.x, p.y, p.z],
-                [q[0], q[1], q[2], q[3]],
-                gt_sub,
-                &mut est_prev,
-                &mut gt_prev,
-            );
-            next_viz += VIZ_PERIOD;
-            if next_viz + VIZ_PERIOD < t_sim {
-                next_viz = t_sim;
+            if let Some(msg) = output {
+                log_viz(
+                    viz_pub,
+                    msg.timestamp,
+                    [msg.position_x, msg.position_y, msg.position_z],
+                    [msg.quat_x, msg.quat_y, msg.quat_z, msg.quat_w],
+                    gt_sub,
+                    &mut est_prev,
+                    &mut gt_prev,
+                );
             }
+            next_viz = t_sim + VIZ_PERIOD;
         }
 
         // trace 只覆盖真实工作：先闭合本帧 span（时长不含下面的等待）
@@ -395,48 +389,18 @@ fn run_loop(
     Ok(())
 }
 
-/// 组装并发布一条 odom（100Hz，成功打 debug 行；100Hz info 会刷屏）。
-fn publish_odom(
-    odom_pub: &OdomPublisher,
-    t_sim: f64,
-    state_t: f64,
-    imu: &firefly_vio_types::var::ImuState,
-    is_initialized: bool,
-) {
-    log::debug!(
-        "odom-publish state_t={state_t:.3} sim_t={t_sim:.3} pos=({:.3},{:.3},{:.3})",
-        imu.pos().x,
-        imu.pos().y,
-        imu.pos().z,
-    );
-    let msg = firefly_pubsub::odom::OdomMessage {
-        timestamp: t_sim,
-        position_x: imu.pos().x,
-        position_y: imu.pos().y,
-        position_z: imu.pos().z,
-        velocity_x: imu.vel().x,
-        velocity_y: imu.vel().y,
-        velocity_z: imu.vel().z,
-        quat_x: imu.quat()[0],
-        quat_y: imu.quat()[1],
-        quat_z: imu.quat()[2],
-        quat_w: imu.quat()[3],
-        is_initialized,
-    };
+/// 发布已在目标时刻预测的里程计。
+fn publish_odom(odom_pub: &OdomPublisher, msg: OdomMessage) {
     match odom_pub.publish(msg) {
-        Ok(ctx) => {
-            log::debug!(
-                "odom t={t_sim:.2} p=({:.2},{:.2},{:.2}) v=({:.3},{:.3},{:.3}) trace_id={:032x} sampled={}",
-                imu.pos().x,
-                imu.pos().y,
-                imu.pos().z,
-                imu.vel().x,
-                imu.vel().y,
-                imu.vel().z,
-                ctx.trace_id(),
-                ctx.sampled(),
-            );
-        }
+        Ok(ctx) => log::debug!(
+            "odom t={:.3} p=({:.3},{:.3},{:.3}) trace_id={:032x} sampled={}",
+            msg.timestamp,
+            msg.position_x,
+            msg.position_y,
+            msg.position_z,
+            ctx.trace_id(),
+            ctx.sampled(),
+        ),
         Err(e) => log::warn!("odom 发布失败（temporary 可重试）: {e}"),
     }
 }
@@ -528,7 +492,7 @@ fn log_viz(
     let m = &*sample;
     let gpos = [m.position_x, m.position_y, m.position_z];
     let gquat = [m.quat_x, m.quat_y, m.quat_z, m.quat_w];
-    let mut gpose = VizMessage::base(kind::POSE, t_sim, "gt/pose");
+    let mut gpose = VizMessage::base(kind::POSE, m.timestamp, "gt/pose");
     gpose.color = [GT_COLOR.0, GT_COLOR.1, GT_COLOR.2];
     gpose.xyz = gpos;
     gpose.quat_xyzw = gquat;
@@ -536,7 +500,7 @@ fn log_viz(
         log::debug!("viz 发布 gt 位姿失败：{e}");
     }
     if let Some(prev) = *gt_prev {
-        let mut seg = VizMessage::base(kind::LINE_STRIP, t_sim, "gt/traj");
+        let mut seg = VizMessage::base(kind::LINE_STRIP, m.timestamp, "gt/traj");
         seg.color = [GT_COLOR.0, GT_COLOR.1, GT_COLOR.2];
         seg.points[0] = prev;
         seg.points[1] = gpos;

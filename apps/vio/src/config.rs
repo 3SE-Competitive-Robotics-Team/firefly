@@ -35,8 +35,10 @@ impl Default for Camera {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct Imu {
+    /// 陀螺白噪声密度，rad/s/√Hz；MuJoCo 每采样 σ=0.002、100 Hz。
     pub gyro_noise: f64,
     pub gyro_walk: f64,
+    /// 加速度白噪声密度，m/s²/√Hz；MuJoCo 每采样 σ=0.02、100 Hz。
     pub accel_noise: f64,
     pub accel_walk: f64,
 }
@@ -44,11 +46,11 @@ pub struct Imu {
 impl Default for Imu {
     fn default() -> Self {
         // MuJoCo 注入：σ_gyro=0.002 rad/s、σ_accel=0.02 m/s² 每采样高斯
-        // @200Hz → 连续谱密度 σ_cont = σ_disc·√fs
+        // @100Hz → 连续谱密度 σ_cont = σ_disc/√fs
         Self {
-            gyro_noise: 2.83e-2,
+            gyro_noise: 2.0e-4,
             gyro_walk: 1.9e-5,
-            accel_noise: 2.83e-1,
+            accel_noise: 2.0e-3,
             accel_walk: 3.0e-3,
         }
     }
@@ -159,6 +161,21 @@ mod tests {
         assert!((cfg.camera.baseline - 0.05).abs() < 1e-9);
         assert_eq!(cfg.frontend.num_pts, 300);
         assert!((cfg.estimator.max_baseline - 120.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn imu_density_matches_simulator_sample_variance() {
+        let config = VioConfig::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../configs/vio.toml"
+        ))
+        .unwrap();
+        let sim: toml::Value = toml::from_str(include_str!("../../../configs/sim.toml")).unwrap();
+        let rate = sim["rates"]["imu"].as_float().unwrap();
+        for imu in [config.imu, super::Imu::default()] {
+            assert!((imu.gyro_noise.powi(2) * rate - 0.002_f64.powi(2)).abs() < 1e-15);
+            assert!((imu.accel_noise.powi(2) * rate - 0.02_f64.powi(2)).abs() < 1e-15);
+        }
     }
 
     /// 缺键回落默认值（最小化配置合法）。

@@ -68,6 +68,12 @@
 
 ## VIO（firefly-vio*）约定
 
+- IMU 白噪声配置为连续时间密度；每采样标准差换算为 `σ_density = σ_sample / √fs`。
+  MuJoCo 默认 IMU 100 Hz，对应 gyro `2e-4 rad/s/√Hz`、accel `2e-3 m/s²/√Hz`。
+- 高频输出通过独立 IMU 预测缓存生成，不推进相机滤波状态或增广克隆。
+  里程计时间戳必须对应状态的 IMU 时刻，速度转换到局部世界系；测量未覆盖时不发布。
+- 在线内参更新必须同步投影模型与下一帧跟踪器；锚定表示的 FEJ 由统一表示雅可比处理。
+
 - 标定/噪声等数值参数：改对应 `*Options` 默认值并在 doc 注释标注单位与来源；
   需按部署调整的键同步进 `configs/vio.toml`。
 - **进程必须优雅退出**（Ctrl-C → `node.wait` 返回 Err → 端口 Drop）：硬杀（pkill -9/SIGKILL）会留下孤儿内核 shm 对象与幽灵端口注册——后续订阅端会连上死端口的残留连接收不到任何数据，且幽灵占满 `max_publishers` 槽位后新发布器直接创建失败。排障清理：杀干净所有进程后 `rm -rf /tmp/iceoryx2/services /tmp/iceoryx2/nodes/private/tmp/iox2*.shm_state`（macOS；须在进程全死后执行）。

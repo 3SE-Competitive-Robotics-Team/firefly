@@ -51,6 +51,9 @@ pub trait CameraModel: std::fmt::Debug + Send + Sync {
     /// 当 `calib.len() != 8` 时 panic（与 C++ 的 `assert` 一致）。
     fn set_value(&mut self, calib: &[f64]);
 
+    /// 保留模型类型与图像尺寸，构造具有指定内参的独立快照。
+    fn with_calibration(&self, calib: &[f64]) -> SharedCamera;
+
     /// 给定原始像素坐标 `uv_dist`，去畸变为归一化坐标（`float` 接口）。
     ///
     /// 见 `CamBase::undistort_f`。
@@ -204,6 +207,12 @@ impl CamRadtan {
 }
 
 impl CameraModel for CamRadtan {
+    fn with_calibration(&self, calib: &[f64]) -> SharedCamera {
+        let mut camera = *self;
+        camera.set_value(calib);
+        Arc::new(camera)
+    }
+
     fn set_value(&mut self, calib: &[f64]) {
         self.intrinsics = Intrinsics::from_slice(calib);
     }
@@ -348,6 +357,12 @@ impl CamEqui {
 }
 
 impl CameraModel for CamEqui {
+    fn with_calibration(&self, calib: &[f64]) -> SharedCamera {
+        let mut camera = *self;
+        camera.set_value(calib);
+        Arc::new(camera)
+    }
+
     fn set_value(&mut self, calib: &[f64]) {
         self.intrinsics = Intrinsics::from_slice(calib);
     }
