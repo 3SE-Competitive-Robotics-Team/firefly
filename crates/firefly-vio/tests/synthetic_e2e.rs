@@ -68,7 +68,7 @@ fn build_manager_ex(max_slam: usize, do_fej: bool) -> VioManager {
     cameras.insert(1usize, cam_r);
     let mut mgr = VioManager::new(params, cameras, tracker);
 
-    // 与 scene.py 几何一致：左目在机体 −Y；p_IinC = R_ItoC·(0 − t_cam_body)
+    // 与 render::rig 几何一致：左目在机体 −Y；p_IinC = R_ItoC·(0 − t_cam_body)
     let r = r_ito_c();
     let q = rot_2_quat(&r);
     let p_left_in_c = r * Vector3::new(0.0, 0.025, 0.0);
@@ -351,7 +351,7 @@ fn run_cfg(cfg: &ScenarioCfg) -> (f64, f64, f64, f64, Vector3<f64>) {
 /// 已知局限：场景为零旋转、纯前向恒速、稀疏点阵 + 5cm 立体基线——对 `MSCKF`
 /// 近规范退化（x 向速度仅靠时间视差与微弱立体视差约束），P 平衡点米级、估计速度
 /// ±0.7m/s 随机摆动，断言力弱；视觉链路健康与否以现场 `MuJoCo` 闭环实测
-/// `bench_vio.py` 为事实源。
+/// 实际场景的运行录制为依据。
 #[test]
 #[ignore = "场景对 MSCKF 近退化（零旋转纯前向+稀疏点阵），需重设计；现场 bench 为事实源"]
 fn synthetic_pure_msckf_zero_bias() {

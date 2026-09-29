@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "VIO 进程启动：订阅 MuJoCo 物理环境（iceoryx2 输入 + trace 上下文），配置 {config_path}"
     );
 
-    // 相机标定（内参来自配置：MuJoCo 双目 320×240、focal≈168.6、无畸变；
+    // 相机标定（内参来自配置：RMUC render 双目 320×240、focal≈168.6、无畸变；
     // 真机换 D430 标定值即可，见 configs/vio.toml）。
     let intrinsics = [
         cfg.camera.focal,
@@ -175,9 +175,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         VIZ_TOPIC = firefly_pubsub::viz::VIZ_TOPIC
     );
 
-    // 输入源：订阅 MuJoCo 物理环境（IMU/双目灰度），imu 话题由 MuJoCo 发布
+    // 输入源：订阅 sim 的 IMU 与 render 的双目灰度
     let mut input = IceoryxInput::new(&node)?;
-    log::info!("输入源：订阅 MuJoCo 物理环境（IMU/双目灰度），imu 话题由 MuJoCo 发布");
+    log::info!("输入源：订阅 sim 的 IMU 与 render 的双目灰度");
 
     // 真值订阅（仅可视化对比，估计器不读）
     let gt_sub = match Subscriber::<OdomMessage>::with_topic(&node, GROUND_TRUTH_TOPIC) {
@@ -512,10 +512,10 @@ fn log_viz(
     *gt_prev = Some(gpos);
 }
 
-/// `MuJoCo` 双目相机外参（OpenVINS JPL 约定），返回 `(q_ito_c, [p_left, p_right])`。
+/// RMUC render 双目相机外参（OpenVINS JPL 约定），返回 `(q_ito_c, [p_left, p_right])`。
 ///
-/// 物理相机（`scene.py` 的 `xyaxes="0 -1 0  0.3420 0 0.9397"`：下倾 20°，
-/// 与 [`firefly_map::DepthCamera`] 投影一致实测校验）：`cam_x`（右）= 机体 `-y`，
+/// render 相机（`apps/render/src/rig.rs`：下倾 20°，
+/// 与 [`firefly_map::DepthCamera`] 投影一致）：`cam_x`（右）= 机体 `-y`，
 /// `OpenVINS` 系（`x` 右 / `y` 下 / `z` 前）为 `MuJoCo` 系绕 `x` 转 180°（`y`、`z` 取反）：
 /// 行 = `[Mx, -My, -Mz]` = `[(0,-1,0), (-0.342,0,-0.9397), (0.9397,0,-0.342)]`
 ///（视轴 = `+z`，即前下 20°；`depth` 中心斜距 2.89m = 1/sin20° 实测吻合）。
@@ -543,7 +543,7 @@ fn mujoco_stereo_extrinsic(baseline: f64) -> (nalgebra::Vector4<f64>, [nalgebra:
     // Hamilton 约定，直接喂给 JPL 估计器等效于转置旋转（相机"侧装"、
     // 立体基线变纵向，视觉更新全部退化的根因）。
     let q_vec = rot_2_quat(&r_ito_c);
-    // p_IinC = -R_ItoC · p_CinI；以 scene.py 物理安装为准：cam_left 在
+    // p_IinC = -R_ItoC · p_CinI；以 render::rig 安装位置为准：cam_left 在
     // body -y、cam_right 在 body +y 各 baseline/2 ⇒ p_IinC=(∓baseline/2,0,0)。
     let half = baseline / 2.0;
     let p_left_in_c = Vector3::new(-half, 0.0, 0.0);

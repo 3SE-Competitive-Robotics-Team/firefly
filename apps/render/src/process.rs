@@ -5,7 +5,6 @@
 //! 不再被逐像素循环占住（对照 `link` 的流水：主世界装配 → 本线程算 →
 //! 主世界发布）。
 //!
-//! 口径对照 `packages/firefly-mujoco/src/firefly_mujoco/env.py`（`DroneEnv`）：
 //! 灰度用 BT.601 加权；深度噪声三步（视差域高斯、边缘膨胀 1px、随机丢点），
 //! 仅作用于有效命中（`0.05 < z < 100` 米），其余保持无效标记 `0.0`。
 
@@ -74,7 +73,7 @@ pub fn run_worker(jobs: &Receiver<CaptureJob>, results: &SyncSender<ProcessedCap
     }
 }
 
-/// 单拍像素管线（对照 `firefly_mujoco.env.DroneEnv` 的灰度/深度口径）。
+/// 单拍像素管线。
 fn process(job: CaptureJob, rng: &mut StdRng) -> ProcessedCapture {
     let mut left_gray = vec![0u8; IMAGE_SIZE];
     let mut right_gray = vec![0u8; IMAGE_SIZE];

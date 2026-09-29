@@ -4,13 +4,14 @@
 地图定位、轨迹规划、四旋翼飞控、MuJoCo 仿真与 Rerun 可视化。
 
 当前部署以仿真研究与算法验证为主。VIO 从静止传感器观测初始化，
-飞控使用 IMU 与里程计反馈。真值仅用于评测与可视化对照，不能提供估计器初始
+飞控使用 IMU 与里程计反馈。真值用于仿真传感器生成、评测与可视化对照，不能提供估计器初始
 位置、速度、姿态或飞控反馈。启动时保持机体静止，等待估计就绪后再解锁。
 
 ## 系统链路
 
 ```text
-MuJoCo sim ── IMU / 双目 ────────→ vio
+MuJoCo sim ── IMU ──────────────→ vio
+     └── 仿真位姿 → render ── 双目 ─→ │
      ↑                              │ 里程计
      └──── 四电机推力 ─── fc ←───────┘
                            ↑
@@ -49,22 +50,26 @@ VIO 在相机时刻更新滤波器，使用 IMU 预测输出 100 Hz 里程计；
 | `apps/` | Rust 进程 `vio`、`fc`、`planner`、`gicp`、`aliked`、`lightglue`、`render`、`quad`、`ffctl`；Python 进程 `firefly-sim`、`firefly-viz` |
 | `packages/` | Python 库 `firefly-mujoco` 与 CAD 资产处理 `firefly-cad` |
 | `configs/` | 每应用一份 TOML，缺键回落代码默认值，缺文件报错 |
-| `bench/`、`docs/` | 轨迹评测与运行/架构说明 |
+| `bench/`、`docs/` | 评测指标、启动检查与运行/架构说明 |
 
 ## 最小闭环
 
 要求 Rust 1.97+、Python 3.12+、uv，以及对应平台的图形运行依赖。
+仅支持 RMUC2026，必须提供 `models/rmuc2026/field.glb` 与
+`models/rmuc2026/rmuc2026_collision.json`；缺资产直接报错。
+MuJoCo 负责物理与 IMU，Bevy `render` 负责双目与深度。
 从仓库根安装与构建：
 
 ```bash
 uv sync
-cargo build --release -p vio -p fc -p ffctl
+cargo build --release -p render -p vio -p fc -p ffctl
 ```
 
 分别在终端启动（可视化先启动以接收结构化日志）：
 
 ```bash
 uv run firefly-viz --save logs/run.rrd
+cargo run --release -p render
 cargo run --release -p vio
 cargo run --release -p fc
 uv run firefly-sim
@@ -79,9 +84,6 @@ IMU 窗口与双目视差检查。观察就绪日志或里程计的
 ./target/release/ffctl fc takeoff 1.0
 ./target/release/ffctl fc land
 ```
-
-`sim --script` 是估计器评测的运动夹具，其内部真值反馈仅生成被测运动，不能作为
-无人机闭环成功的证据。
 
 **坐标约定**：原始里程计在重力对齐的局部系运行，初始位置为零，航向属于规范
 自由度。静态场景地图、视觉库图、全局目标需要独立测得的地图对齐关系；不能将
@@ -101,14 +103,14 @@ cargo test --release -p firefly-planner --test random_map_benchmark -- --ignored
 uv run --with pytest pytest apps/firefly-sim/tests/ bench/tests/ -q
 ```
 
-发布构建的无真值启动检查（需 Linux EGL、没有其他闭环进程运行）：
+发布构建的传感器启动检查（需 RMUC 资产与图形会话、没有其他闭环进程）：
 
 ```bash
 uv run --no-dev python bench/check_sensor_startup.py
 ```
 
-检查会屏蔽仿真的 GroundTruth / PlantState 发布，运行真实传感器、估计器与飞控
-进程，录制到 `logs/*_sensor_startup_*.rrd`，并通过 SIGINT 退出。
+检查屏蔽 PlantState 发布，保留供 render 合成图像的 GroundTruth，运行 RMUC
+传感器、估计器与飞控进程，录制到 `logs/*_sensor_startup_*.rrd`，并通过 SIGINT 退出。
 它验证静止初始化和未解锁零推力，不代表飞行精度验收。
 
 测试包含传感器独立初始化、真值与控制隔离、雅可比/梯度检查及规划/飞控测试。

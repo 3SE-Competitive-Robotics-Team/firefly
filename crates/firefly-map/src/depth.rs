@@ -5,9 +5,8 @@
 //! （趋向 Occupied），对照官方 `grid_map.cpp:577-700` `raycastProcess` 的
 //! log-odds 更新语义。对照差异见 `mark_ray` 注释。
 //!
-//! 相机模型为硬编码合成标定（`MuJoCo` 场景，`packages/firefly-mujoco/src/
-//! firefly_mujoco/scene.py`），投影约定经实测验证（见 `DepthCamera::mujoco_default`
-//! 文档）。
+//! 相机模型与 RMUC render 标定一致（`apps/render/src/rig.rs`），
+//! 投影约定见 `DepthCamera::mujoco_default`。
 
 use nalgebra::{Isometry3, Matrix3, Point3, Vector3};
 
@@ -15,14 +14,14 @@ use crate::grid::GridMap;
 
 /// 深度相机标定（内参 + 外参 + 感知参数）。
 ///
-/// 投影模型（`MuJoCo` 深度相机实测，`verify_cam*.py` 实证）：
+/// 投影模型（render 深度预通道）：
 /// - 像素 (u, v)（左上原点，v 向下）→ 相机系射线 `(dx, dy, -1)`，
 ///   `dx=(u-cx)/focal`、`dy=-(v-cy)/focal`；
 /// - 深度值为**相机空间 Z**（视线方向的垂直距离，非欧氏距离）；
 /// - 相机系命中点 `(dx·z, dy·z, -z)`，经 [`Self::rot_cam_to_body`] 转到机体系。
 #[derive(Debug, Clone)]
 pub struct DepthCamera {
-    /// 像素焦距（`fx=fy`，`MuJoCo` 方形像素）。
+    /// 像素焦距（`fx=fy`，方形像素）。
     pub focal: f64,
     /// 主点横坐标（像素）。
     pub cx: f64,
@@ -43,11 +42,8 @@ pub struct DepthCamera {
 }
 
 impl DepthCamera {
-    /// `MuJoCo` 合成场景默认标定（`scene.py`：深度相机在机体原点、`fovy=70.88°`≈
-    /// D430 87°HFOV、`320×240`）。实测投影约定：
-    /// - 相机看 `+x_body`（无人机前进方向）并**下倾 20°**（`scene.py` 相机
-    ///   `xyaxes` 第二向量 `(0.342, 0, 0.9397)`，`sin20°=0.342`），图右 →
-    ///   `-y_body`，图下 → 机体下方；
+    /// RMUC render 默认标定：深度相机在机体原点，垂直视场 70.88°，320×240。
+    /// - 相机看 `+x_body` 并下倾 20°；图右对应 `-y_body`，图下指向机体下方；
     /// - `focal = (H/2)/tan(fovy/2) = 120/tan(35.44°) ≈ 168.6`；
     /// - `rot_cam_to_body` 列 = 相机轴在机体系：`x=(0,-1,0)`、
     ///   `y=(0.342,0,0.9397)`、`z=x×y=(-0.9397,0,0.342)`。

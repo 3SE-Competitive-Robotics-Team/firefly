@@ -1,11 +1,8 @@
-//! 传感器 rig：位姿表示 + `MuJoCo` 相机几何的 `Bevy` 复刻。
+//! RMUC 传感器 rig：机体位姿与双目/深度相机几何。
 //!
-//! 相机几何对照 MJCF（`scene.py` 双目/深度三相机）：基线沿机体 y 相距
-//! 0.05 米（左 `-0.025` / 右 `+0.025`，深度居中），前向 +x、下倾 20°，
-//! 垂直视场 70.88°，分辨率 320×240。
-//!
-//! 真值四元数按 Hamilton 机体→世界系解读：与 `MuJoCo` 自身相机一致
-//! （由构造保证，rrd 里 `Bevy` 图与 `MuJoCo` 图逐像素对照是仲裁依据）。
+//! 基线沿机体 y 轴相距 0.05 米，深度居中，前向 +x、下倾 20°，
+//! 垂直视场 70.88°，分辨率 320×240。标定须与 VIO 和视觉定位模块保持一致。
+//! 仿真位姿四元数按 Hamilton 机体→世界系解读。
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
@@ -23,20 +20,20 @@ use firefly_render::camera::FollowCamera;
 
 use crate::config::RenderConfig;
 
-/// 垂直视场（度，对照 MJCF `fovy="70.88"`）。
+/// 垂直视场（度）。
 pub const FOV_Y_DEG: f32 = 70.88;
-/// 相机下倾角（度，对照 MJCF `xyaxes` 的 `0.3420/0.9397 = sin/cos 20°`）。
+/// 相机下倾角（度）。
 pub const DOWNTILT_DEG: f32 = 20.0;
-/// 左目在机体系偏移（米，对照 MJCF `cam_left pos="0 -0.025 0"`）。
+/// 左目在机体系偏移（米）。
 pub const LEFT_OFFSET: Vec3 = Vec3::new(0.0, -0.025, 0.0);
-/// 右目在机体系偏移（米，对照 MJCF `cam_right pos="0 0.025 0"`）。
+/// 右目在机体系偏移（米）。
 pub const RIGHT_OFFSET: Vec3 = Vec3::new(0.0, 0.025, 0.0);
-/// 深度相机在机体系偏移（米，对照 MJCF `cam_depth pos="0 0 0"`）。
+/// 深度相机在机体系偏移（米）。
 pub const DEPTH_OFFSET: Vec3 = Vec3::ZERO;
-/// 传感器近平面（米，对照 `MuJoCo` 默认近裁剪，深度有效下限同源）。
+/// 传感器近平面（米，与深度有效下限一致）。
 pub const SENSOR_NEAR: f32 = 0.05;
 /// 传感器远平面（米，仅文档口径：`Bevy` 用无限远反向 Z，远裁剪由
-/// [`crate::sensors`] 的有效掩码承担，对照 `env.py` 的 `depth < 100`）。
+/// [`crate::sensors`] 的有效掩码承担）。
 pub const SENSOR_FAR: f32 = 100.0;
 
 /// 场地 mesh 层：所有相机都渲染。

@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """场景视觉素材库采集：自己拉起 `sim` + `render`，在不同方位拍照，落关键帧素材。
 
-用途：为视觉全局定位（`aliked --build-map` → `lightglue`）采集**本场景**的带位姿
-关键帧。库图必须与场景同源——MuJoCo 侧（`collect_vision_frames.py`）只对
-warehouse/boxes 有效，rmuc2026 的 MuJoCo 场景无视觉 mesh，故本脚本从在线
-`render` 取图。
+用途：为 RMUC 离线视觉库图采集带位姿关键帧，从 render 取图，真值只作标签与采样判据。
+需要外部飞控与估计器；仿真启动后须完成独立地图对齐、解锁起飞并启用 track 模式。
+本工具自行启动 sim / render，因此运行前不能有其他 sim / render 进程。
 
 流程：
-1. 起 `render` + `sim`（`--no-camera`）；运动由外部飞控进程负责。
+1. 起 `render` + `sim`；运动由外部飞控进程负责。
 2. 按 `--x-range/--y-range/--step` 生成栅格航点（撞地形盒的自动跳过），逐个用
-   `Firefly/Reference` 驱动真机；稳定后落一帧「左目灰度 + 深度 + 真值位姿」。
+   `Firefly/Reference` 发布地图系参考；稳定后落一帧「左目灰度 + 深度 + 真值位姿」。
 3. 可选 `--build`：调 `aliked --build-map` 直接产出 `ffvmap` 库图。
 4. 优雅退出（SIGINT）并清理。
 
@@ -57,15 +56,13 @@ CLEARANCE = 0.15
 
 
 def collision_boxes(scene: str) -> np.ndarray:
-    """场景碰撞盒 `[cx,cy,cz,hx,hy,hz]`（缺文件返回空）。"""
+    """场景碰撞盒 `[cx,cy,cz,hx,hy,hz]`（缺文件报错）。"""
     path = REPO_ROOT / "models" / scene / f"{scene}_collision.json"
-    if not path.is_file():
-        return np.empty((0, 6))
     return np.asarray(json.loads(path.read_text())["boxes"], dtype=float)
 
 
 def grid_waypoints(args: argparse.Namespace, scene: str) -> list[tuple[float, float, float]]:
-    """栅格航点，剔除撞地形盒的点（无碰撞文件时不剔除）。"""
+    """栅格航点，剔除撞地形盒的点。"""
     boxes = collision_boxes(scene)
     xs = np.arange(args.x_range[0], args.x_range[1] + 1e-9, args.step)
     ys = np.arange(args.y_range[0], args.y_range[1] + 1e-9, args.step)
@@ -110,15 +107,9 @@ def main() -> None:
     frames_dir.mkdir(parents=True, exist_ok=True)
     print(f"[collect] 场景 {scene}：{len(waypoints)} 个航点，z={args.z}")
 
-    # 清残留 + 起进程（render 最先，sim 最后；不删 iceoryx2 直到全部退出）。
-    subprocess.run(["pkill", "-INT", "-f", "target/release/render"], capture_output=True)
-    subprocess.run(["pkill", "-INT", "-f", "firefly-sim"], capture_output=True)
-    subprocess.run(["pkill", "-INT", "-f", "target/release/(vio|aliked|lightglue|gicp|planner)"], capture_output=True)
-    time.sleep(3)
-    subprocess.run(
-        ["bash", "-lc", "rm -rf /tmp/iceoryx2/services /tmp/iceoryx2/nodes/private/tmp/iox2*.shm_state"],
-        capture_output=True,
-    )
+    mesh = REPO_ROOT / "models/rmuc2026/field.glb"
+    if not mesh.is_file():
+        raise FileNotFoundError(f"RMUC 视觉资产缺失：{mesh}")
     render = subprocess.Popen(
         [str(REPO_ROOT / "target" / "release" / "render")],
         cwd=REPO_ROOT,
@@ -127,7 +118,7 @@ def main() -> None:
     )
     time.sleep(6)
     sim = subprocess.Popen(
-        ["uv", "run", "firefly-sim", "--no-trace", "--no-camera"],
+        ["uv", "run", "firefly-sim", "--no-trace"],
         cwd=REPO_ROOT,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

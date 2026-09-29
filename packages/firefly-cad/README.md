@@ -30,13 +30,12 @@ RMUC 场地 `STEP→glTF` 资产管线（Blender 精修的上游，Blender 只�
 （`ReadFile` 约 21s）。颜色必须保留（灯饰识别与材质分色的依据），
 其余 `Layer/Props/GDT/SHUO` 全关。
 
-## 资产接入约定（换场地 = 新目录 + 注册一行）
+## RMUC 资产约定
 
-- 视觉：`models/<scene>/<visual>.glb`，Bevy asset root = `models/`，
-  场景由 `configs/scene.toml` 的 `scene` 选定（sim/render/viz 共用）。
-- 物理：`models/<scene>/<scene>_collision.json`，盒集合 `[cx,cy,cz,hx,hy,hz]`（米，
-  `MuJoCo` 系）。`MuJoCo` mesh 几何取凸包，凹结构不可用单 mesh，故用盒集合。
-- 场景注册表 Rust（`apps/render`）与 Python（`firefly_mujoco/scene.py`）同构。
+- 视觉：`models/rmuc2026/field.glb`，Bevy asset root 为 `models/`。
+- 物理：`models/rmuc2026/rmuc2026_collision.json`，盒集合
+  `[cx,cy,cz,hx,hy,hz]`，世界系米。凹结构使用盒集合保留空腔。
+- `configs/scene.toml` 仅接受 `rmuc2026`；资产缺失即报错。
 
 ## 运行
 

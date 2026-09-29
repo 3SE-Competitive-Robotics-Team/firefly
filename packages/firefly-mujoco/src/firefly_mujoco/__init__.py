@@ -1,7 +1,7 @@
 """firefly-mujoco：无人机 MuJoCo 物理环境库。
 
 提供 [`DroneEnv`](firefly_mujoco.env.DroneEnv)（被控对象：物理步进 +
-IMU/双目灰度/深度提取 + 施加旋翼推力）与跨语言消息契约
+IMU 提取 + 施加旋翼推力）与跨语言消息契约
 [`messages`](firefly_mujoco.messages)。控制律不在本库（唯一实现在 `firefly-flight`）。
 """
 
@@ -32,14 +32,14 @@ from .messages import (
     ReferenceMessage,
     TraceContext,
 )
-from .scene import PAD_CLEARANCE, PADS, build_scene, drone_pad, load_scene_name
+from .scene import PAD_CLEARANCE, PAD, build_scene, drone_pad, load_scene_name
 
 __all__ = [
     "DroneEnv",
     "build_scene",
     "load_scene_name",
     "drone_pad",
-    "PADS",
+    "PAD",
     "PAD_CLEARANCE",
     "IMAGE_WIDTH",
     "IMAGE_HEIGHT",

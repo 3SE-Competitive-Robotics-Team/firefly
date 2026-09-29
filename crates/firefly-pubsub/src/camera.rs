@@ -6,7 +6,7 @@
 //! **User Header**（见 [`crate::trace`]）。
 //!
 //! 图像分辨率统一（[`IMAGE_WIDTH`] × [`IMAGE_HEIGHT`]），由合成/物理环境
-//! （`MuJoCo`）渲染后发布；订阅端转换成领域层 `GrayImage`/`CameraData`。
+//! （Bevy `render`）渲染后发布；订阅端转换成领域层 `GrayImage`/`CameraData`。
 
 use iceoryx2::prelude::*;
 

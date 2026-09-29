@@ -1,6 +1,6 @@
 //! `configs/vio.toml` 加载：缺键回落默认值，文件缺失/解析失败报错。
 //!
-//! 默认值 = 随仓库发布的 `MuJoCo` 双目部署（与 `configs/vio.toml` 一致）。
+//! 默认值 = 随仓库发布的 RMUC render 双目部署（与 `configs/vio.toml` 一致）。
 
 use std::path::Path;
 

@@ -1,7 +1,8 @@
-"""发布构建的无真值启动检查；运行记录仅写 logs/ 下的 rrd。
+"""发布构建的传感器启动检查；运行记录仅写 logs/ 下的 rrd。
 
 从仓库根运行：uv run --no-dev python bench/check_sensor_startup.py
-需要预先 cargo build --release -p vio -p fc，且没有其他闭环进程运行。
+需要 RMUC 资产、图形会话与 release 构建的 vio / fc / render，且没有其他闭环进程。
+GroundTruth 仅供 render 合成图像；屏蔽 PlantState，算法只使用 IMU 与图像。
 """
 from __future__ import annotations
 
@@ -24,13 +25,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> None:
-    for name in ("vio", "fc"):
+    from firefly_mujoco import build_scene, load_scene_name
+    load_scene_name()
+    build_scene()
+    mesh = ROOT / "models/rmuc2026/field.glb"
+    if not mesh.is_file():
+        raise FileNotFoundError(f"RMUC 视觉资产缺失：{mesh}")
+    for name in ("vio", "fc", "render"):
         if not (ROOT / "target" / "release" / name).is_file():
             raise RuntimeError(f"missing release binary: {name}")
     output = ROOT / "logs" / f"vio_sensor_startup_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.rrd"
     output.parent.mkdir(exist_ok=True)
     env = os.environ.copy()
-    env.update(MUJOCO_GL="egl", RUST_LOG="info")
+    env.update(RUST_LOG="info")
     processes: list[tuple[str, subprocess.Popen, deque[str]]] = []
 
     def start(name: str, command: list[str]) -> None:
@@ -52,6 +59,7 @@ def main() -> None:
         start("viz", [sys.executable, "-m", "firefly_viz.main", "--save", str(output)])
         time.sleep(2)
         check_alive()
+        start("render", [str(ROOT / "target/release/render")])
         start("vio", [str(ROOT / "target/release/vio")])
         start("fc", [str(ROOT / "target/release/fc")])
         iox2.set_log_level(iox2.LogLevel.Error)
@@ -63,13 +71,11 @@ def main() -> None:
             return builder.open_or_create().subscriber_builder().create()
         odom = subscribe("Firefly/Odometry", OdomMessage)
         control = subscribe("Firefly/Control", ControlMessage, 32)
-        # 在夹具中屏蔽两种真值发布；算法进程使用与正常启动相同的二进制和配置。
+        # GroundTruth 供 render 摆放传感器；PlantState 不参与启动。
         simulation = """
 import importlib
 import sys
 sim = importlib.import_module('firefly_sim.main')
-sim.load_scene_name = lambda: 'boxes'
-sim._publish_gt = lambda *args: None
 sim._publish_plant_state = lambda *args: None
 sys.argv = ['firefly-sim', '--no-trace']
 sim.main()
@@ -101,7 +107,7 @@ sim.main()
             time.sleep(0.01)
         if first_ready is None:
             diagnostics = "\n".join(f"{name}:\n" + "\n".join(tail) for name, _, tail in processes)
-            raise AssertionError("无真值启动未就绪\n" + diagnostics)
+            raise AssertionError("传感器启动未就绪\n" + diagnostics)
         assert first_ready >= 1.0, "不得跳过静止观测窗口"
         assert np.linalg.norm(first_position) < 0.1, f"初始位置应为局部原点: {first_position}"
         assert controls >= 100, "无 PlantState 时也必须持续发布零推力"

@@ -1,6 +1,5 @@
 //! 传感器像素数学：灰度转换 + 深度线性化 + 深度噪声 + 调试显示映射。
 //!
-//! 口径对照 `packages/firefly-mujoco/src/firefly_mujoco/env.py`（`DroneEnv`）：
 //! 灰度用 BT.601 加权；深度噪声三步（视差域高斯、边缘膨胀 1px、随机丢点），
 //! 仅作用于有效命中（`0.05 < z < 100` 米），其余保持无效标记 `0.0`。
 //!
@@ -12,18 +11,18 @@
 use rand::RngExt;
 use rand::rngs::StdRng;
 
-/// 深度噪声强度（对照 `DroneEnv(depth_noise=0.02)` 默认值，无单位）。
+/// 深度噪声强度（无单位）。
 pub const DEPTH_NOISE: f32 = 0.02;
-/// 双目基线（米，对照 MJCF `cam_left/right` 沿 y 相距 0.05）。
+/// 双目基线（米，沿机体 y 轴分开）。
 pub const STEREO_BASELINE: f32 = 0.05;
-/// 深度有效下限（米，对照 `env.py` 有效掩码 `depth > 0.05`）。
+/// 深度有效下限（米）。
 pub const DEPTH_MIN: f32 = 0.05;
-/// 深度有效上限（米，对照 `env.py` 有效掩码 `depth < 100.0`）。
+/// 深度有效上限（米）。
 pub const DEPTH_MAX: f32 = 100.0;
 /// 调试图深度显示上限（米，超出显示为最远色）。
 pub const DISPLAY_DEPTH_RANGE: f32 = 20.0;
 
-/// RGB（sRGB 字节序）→ 灰度（BT.601 加权，对照 `DroneEnv::_to_gray`）。
+/// RGB（sRGB 字节序）→ 灰度（BT.601 加权）。
 ///
 /// `rgb.len() == 4 * gray.len()`（RGBA 行主序转单通道行主序）。
 pub fn rgb_to_gray(rgb: &[u8], gray: &mut [u8]) {
@@ -37,7 +36,7 @@ pub fn rgb_to_gray(rgb: &[u8], gray: &mut [u8]) {
 /// NDC 深度（小端 f32 字节）→ 米制视距（行主序）。
 ///
 /// `dist = near / d`；`d <= 0`（清空值）或解码越界一律记无效 `0.0`，
-/// 与 `env.py` 的无效语义一致（planner 以 `z <= 0.05` 判无效）。
+/// planner 以 `z <= 0.05` 判无效。
 pub fn linearize_depth(raw: &[u8], out: &mut [f32], near: f32) {
     debug_assert_eq!(raw.len(), 4 * out.len());
     for (dst, src) in out.iter_mut().zip(raw.as_chunks::<4>().0) {
@@ -55,7 +54,7 @@ pub fn linearize_depth(raw: &[u8], out: &mut [f32], near: f32) {
     }
 }
 
-/// 深度噪声（原地，对照 `DroneEnv::render_depth` 三步；`fov_y` 为弧度）。
+/// 深度噪声（原地；`fov_y` 为弧度）。
 ///
 /// 1. 视差域高斯：`disp = f·B/z`，`σ_disp = 4·DEPTH_NOISE` 像素，`σ_z ∝ z²`；
 /// 2. 边缘膨胀：四邻深度差超 `max(0.12, 0.04·z)` 判边缘，前景向外扩 1 像素；
@@ -214,7 +213,7 @@ mod tests {
     fn depth_linearize_matches_projection() {
         let near = 0.05f32;
         let proj = Mat4::perspective_infinite_reverse_rh(70.88f32.to_radians(), 4.0 / 3.0, near);
-        // 恰为近平面时按有效掩码（`z > 0.05`，对照 `env.py`）判无效，故从内侧取值。
+        // 恰为近平面时按有效掩码（`z > 0.05`）判无效，故从内侧取值。
         for z in [0.06, 1.0, 10.0, 99.0] {
             let clip = proj * bevy::math::Vec4::new(0.0, 0.0, -z, 1.0);
             let ndc = clip.z / clip.w;

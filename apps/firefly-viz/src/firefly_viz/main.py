@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import ctypes
 import faulthandler
-import os
 import queue
 import sys
 import threading
@@ -128,7 +127,7 @@ def _send_default_blueprint() -> None:
 
 
 #: 静态场景 mesh 实体（世界系，与仿真同原点同单位，见下）。
-ENTITY_WAREHOUSE_MESH = "world/warehouse"
+ENTITY_SCENE_MESH = "world/rmuc2026"
 
 
 def _repo_root() -> Path:
@@ -142,52 +141,13 @@ def _repo_root() -> Path:
 
 
 def _log_static_mesh() -> None:
-    """静态场景 mesh（`world/warehouse`，`Asset3D` 一次性，无时间轴）。
-
-    场景选择与 `sim` 同源（`configs/scene.toml`）；只有对应场景
-    的 mesh 文件存在才记（boxes 等程序化场景无 mesh 文件，自然跳过——
-    绝不在错误的场景上叠别家的房子）。坐标系：`structure.obj` 即世界系
-    （米，与仿真同原点，x∈[0,46]、y∈[-8,8]、z∈[0,5]），直接落盘不做变换。
-    """
-    if load_scene_name() != "warehouse":
-        log("非 warehouse 场景，不记静态 mesh")
-        return
-    mesh_path = Path(
-        os.environ.get(
-            "FIREFLY_MESH", str(_repo_root() / "models" / "warehouse" / "structure.obj")
-        )
-    )
+    """记录 RMUC 视觉资产，世界系米，与物理场景共用原点。"""
+    load_scene_name()
+    mesh_path = _repo_root() / "models" / "rmuc2026" / "field.glb"
     if not mesh_path.is_file():
-        log(f"静态 mesh 缺失（{mesh_path}），跳过")
-        return
-    blob = _textured_glb(mesh_path)
-    if blob is not None:
-        rr.log(
-            ENTITY_WAREHOUSE_MESH,
-            rr.Asset3D(contents=blob, media_type="model/gltf-binary"),
-            static=True,
-        )
-        log(f"已记静态场景 mesh（{ENTITY_WAREHOUSE_MESH}，贴图 {len(blob) // 1024}KB）")
-    else:
-        rr.log(ENTITY_WAREHOUSE_MESH, rr.Asset3D(path=mesh_path), static=True)
-        log(f"已记静态场景 mesh（{ENTITY_WAREHOUSE_MESH}，无贴图 {mesh_path.stat().st_size // 1024}KB）")
-
-
-def _textured_glb(mesh_path: Path) -> bytes | None:
-    """`obj＋mtl＋png` 拼成内嵌贴图的 `glb`（内存中完成，不写临时文件）。
-
-    任一步失败返回空（调用方回落纯 `obj` 白模——有形总比没有强）。
-    """
-    try:
-        import trimesh
-        from trimesh.exchange.gltf import export_glb
-
-        scene = trimesh.load(mesh_path, force="scene")
-        blob = export_glb(scene)
-        return bytes(blob) if not isinstance(blob, bytes) else blob
-    except Exception as e:  # noqa: BLE001 - 诊断链路永不炸主流程
-        log(f"贴图拼装失败（回落白模）：{e}")
-        return None
+        raise FileNotFoundError(f"RMUC 视觉资产缺失：{mesh_path}")
+    rr.log(ENTITY_SCENE_MESH, rr.Asset3D(path=mesh_path), static=True)
+    log(f"已记 RMUC 场景：{mesh_path}")
 
 
 def detach_copy(msg):

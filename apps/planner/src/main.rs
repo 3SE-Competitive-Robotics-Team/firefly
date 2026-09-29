@@ -7,7 +7,7 @@
 //!
 //! 运行：`cargo run --release -p planner`（配合 `uv run firefly-sim` +
 //! `cargo run --release -p vio`），或
-//! `cargo run --release -p planner -- --map apps/planner/maps/gate.ffmap` 独立运行。
+//! `cargo run --release -p planner -- --map apps/planner/maps/rmuc2026.ffmap` 独立运行。
 //!
 //! 动态目标：订阅 `Firefly/Goal`（`ffctl goal X Y Z` 发布），
 //! 收到目标即重算全局路径并飞往该点；到达后悬停保持、进程保持运行等待
@@ -52,7 +52,7 @@ use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetRunResult;
 use nalgebra::{Isometry3, Point3, Quaternion, Translation3, UnitQuaternion, Vector3};
 
-use crate::scene::{human_voxels, mujoco_map_file, parse_vec3};
+use crate::scene::{human_voxels, parse_vec3};
 
 /// 主循环频率（官方 `exec_timer` 0.1s）。
 const LOOP_PERIOD: Duration = Duration::from_millis(100);
@@ -165,7 +165,7 @@ fn parse_args() -> Result<Args> {
     let mut args = Args {
         map: None,
         config: PathBuf::from(DEFAULT_CONFIG),
-        start: [2.0, 0.0, 1.0],
+        start: [-13.0, 0.0, 1.405],
         // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
         goal: None,
         frame_offset: [0.0, 0.0, 0.0],
@@ -994,18 +994,14 @@ fn main() {
         }
     };
     log::info!("已加载配置 {}", args.config.display());
-    let map_file = if let Some(p) = &args.map {
-        match MapFile::from_file(p) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("加载地图失败：{e}");
-                std::process::exit(1);
-            }
-        }
-    } else {
-        log::info!("未指定 --map，加载 MuJoCo 默认场景静态地图（深度感知补充）");
-        mujoco_map_file()
-    };
+    let map_path = args
+        .map
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("apps/planner/maps/rmuc2026.ffmap"));
+    let map_file = MapFile::from_file(&map_path).unwrap_or_else(|e| {
+        log::error!("加载 RMUC 地图失败 {}：{e}", map_path.display());
+        std::process::exit(1);
+    });
     // 可视化发布端在 App::new 内随进程共享节点创建（经 Firefly/Viz 话题，
     // firefly-viz 进程统一写 rerun）
     match App::new(

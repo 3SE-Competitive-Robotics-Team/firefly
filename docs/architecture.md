@@ -6,7 +6,7 @@
 ```mermaid
 flowchart TD
     subgraph SIM_SRC["仿真源：firefly-sim（MuJoCo 200Hz 物理，被控对象）"]
-        SIMP["发布 IMU / 双目 / 深度 / 真值<br/>发布状态 PlantState + 机体 Airframe<br/>订阅飞控指令 Control（写执行器 ctrl，引擎合成 wrench）"]
+        SIMP["发布 IMU / 仿真位姿<br/>发布状态 PlantState + 机体 Airframe<br/>订阅飞控指令 Control（写执行器 ctrl，引擎合成 wrench）"]
     end
 
     subgraph FC_APP["apps/fc（飞控进程，1kHz）"]
@@ -26,13 +26,18 @@ flowchart TD
         TOPIC_DEPTH["Firefly/Depth"]
         TOPIC_ODOM["Firefly/Odometry<br/>位置/速度/姿态"]
         TOPIC_REF["Firefly/Reference"]
-        TOPIC_PLANT["Firefly/PlantState 200Hz<br/>Firefly/Airframe 1Hz"]
+        TOPIC_PLANT["Firefly/PlantState 200Hz：仅评测"]
+        TOPIC_AIRFRAME["Firefly/Airframe 1Hz：机体参数"]
         TOPIC_CTRL["Firefly/Control 1kHz<br/>4 电机推力"]
     end
 
-    SIMP -->|发布| TOPIC_SENS
-    SIMP -->|发布| TOPIC_DEPTH
+    RENDER["apps/render：RMUC Bevy 双目与深度"]
+    SIMP -->|仿真位姿，仅生成图像| RENDER
+    SIMP -->|IMU| TOPIC_SENS
+    RENDER -->|双目| TOPIC_SENS
+    RENDER -->|深度| TOPIC_DEPTH
     SIMP -->|发布| TOPIC_PLANT
+    SIMP -->|发布| TOPIC_AIRFRAME
     DRV -->|发布| TOPIC_SENS
     DRV -->|发布| TOPIC_DEPTH
 
@@ -83,11 +88,10 @@ flowchart TD
     PEER -->|peer 轨迹| COST
     FSM -->|MINCO 轨迹| TOPIC_REF
     TOPIC_REF -->|订阅| FLIGHT
-    TOPIC_PLANT -.->|仅评测，不参与控制| FLIGHT
+    TOPIC_AIRFRAME -->|订阅| FLIGHT
     TOPIC_ODOM -->|订阅| FLIGHT
     FLIGHT -->|控制指令| TOPIC_CTRL
     TOPIC_CTRL -->|订阅·取最新| SIMP
-    TOPIC_REF -.->|仅日志/互锁| SIMP
     DRV -.->|实机：同一话题层| FLIGHT
 ```
 
@@ -123,7 +127,7 @@ Firefly/Command（地面站：解锁/模式/起降）
   推力），被控对象按指令新鲜度（墙钟 50ms）决定物理是否推进——飞控停发即世界停转
   （仿真时间暂停）；飞控在等待初始化期间持续发零推力，允许物理与传感器时间推进。
 - **初始化与坐标系**：VIO 使用静止 IMU 与视觉视差检查完成初始化。局部位置原点为零，航向无绝对观测。静态地图和规划目标必须先与局部
-  里程计建立独立定位关系；真值只进入评测与可视化。
+  里程计建立独立定位关系；真值仅供仿真传感器生成、评测与可视化。
 - **验证范围**：传感器初始化与控制隔离有自动回归；当前版本的漂移、延迟和
   闭环成功率须通过对应录制与评测确认。
 

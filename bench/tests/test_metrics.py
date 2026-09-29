@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from bench_vio import compute_metrics
+from metrics import compute_metrics
 
 
 def trajectory():

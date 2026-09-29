@@ -1,5 +1,5 @@
 //! 传感器标定常量（真值，对照 `firefly-map::DepthCamera::mujoco_default` 与
-//! `firefly-mujoco/scene.py` 的 `cam_left`）。
+//! `apps/render/src/rig.rs` 的左目安装位置）。
 //!
 //! 左目与深度相机同朝向（下倾 20°），仅差 2.5cm 横向基线；`PnP` 解的是左目
 //! 位姿，经 [`cam_pose_to_body`] 转到机体系（VIO/融合状态系）再参与融合。
@@ -8,7 +8,7 @@ use nalgebra::{Isometry3, Matrix3, Matrix4, Vector3};
 
 /// 像素焦距（`fx=fy`，`120/tan(70.88°/2)`，与离线建库同公式）。
 pub const MUJOCO_FOCAL: f64 = 168.606_993_943_649_97;
-/// 左目在机体系的位置（米，`scene.py cam_left pos`）。
+/// 左目在机体系的位置（米，`render::rig::LEFT_OFFSET`）。
 pub const LEFT_POS_IN_BODY: [f64; 3] = [0.0, -0.025, 0.0];
 
 /// 相机 → 机体旋转（列 = 相机轴在机体系坐标，与 `DepthCamera` 一致）。
@@ -75,7 +75,7 @@ mod tests {
     #[test]
     fn body_cam_extrinsics_match_mujoco_truth() {
         use nalgebra::Matrix4;
-        // 外参真值断言（`scene.py cam_left`）：`T_body @ T_cb` 必须等于下式，
+        // 外参真值断言（`render::rig::LEFT_OFFSET`）：`T_body @ T_cb` 必须等于下式，
         // 求逆版整体错位——`body_pose_to_cam` 必须直接右乘。
         let t_body = Isometry3::from_parts(
             nalgebra::Translation3::new(1.0, 4.0, 1.0),

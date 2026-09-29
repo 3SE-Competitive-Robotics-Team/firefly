@@ -1,7 +1,7 @@
 [project]
 name = "firefly-mujoco"
 version = "0.1.0"
-description = "MuJoCo 物理环境库：无人机场景 + 传感器提取（IMU/双目灰度/深度渲染）"
+description = "MuJoCo 物理环境库：RMUC 无人机场景 + IMU 提取"
 authors = [
     { name = "XiaoPengYouCode", email = "120481176+XiaoPengYouCode@users.noreply.github.com" }
 ]

@@ -14,7 +14,7 @@ use firefly_vio_core::input::SensorInput;
 use firefly_vio_core::sensor::{CameraData, GrayImage, ImuData};
 use nalgebra::Vector3;
 
-/// iceoryx2 物理环境输入源：订阅 `MuJoCo` 发布的 IMU 与双目灰度。
+/// iceoryx2 物理环境输入源：订阅 sim 发布的 IMU 与 render 发布的双目灰度。
 pub struct IceoryxInput {
     /// IMU 订阅（`Firefly/Imu`）。
     imu_sub: ImuSubscriber,

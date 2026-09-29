@@ -1,10 +1,10 @@
 # firefly-sim 配置（缺键回落代码默认值）
 
-# 停机坪不在这里：由场景定义（`firefly_mujoco.scene.PADS` —— 场地表面高度 +
+# 停机坪不在这里：由场景定义（`firefly_mujoco.scene.PAD` —— 场地表面高度 +
 # `PAD_CLEARANCE`），上电停在地面，起飞由飞控的 `Firefly/Command` 触发
 # （`ffctl takeoff`），清单不起飞。需要临时改起点时才在此加 `start = [x, y, z]`。
 
 [rates]
 physics = 200.0 # Hz
 imu = 100.0 # Hz
-cam = 10.0 # Hz（双目 + 深度 + 真值）
+cam = 10.0 # Hz（仿真位姿；render 据此生成双目与深度）

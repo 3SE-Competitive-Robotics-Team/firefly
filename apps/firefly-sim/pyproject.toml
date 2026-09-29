@@ -1,7 +1,7 @@
 [project]
 name = "firefly-sim"
 version = "0.1.0"
-description = "MuJoCo 物理环境主循环：发布传感器（IMU/双目灰度/深度/真值）、订阅参考、闭环控制"
+description = "MuJoCo 物理环境主循环：RMUC 物理与 IMU、订阅电机推力"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

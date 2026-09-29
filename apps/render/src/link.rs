@@ -70,7 +70,7 @@ pub fn open_ports() -> Result<IpcPorts, firefly_error::Error> {
     let right_pub = Publisher::with_topic(&node, CAMERA_RIGHT_TOPIC)?;
     let depth_pub = Publisher::with_topic(&node, DEPTH_TOPIC)?;
     let pair_notify = TopicNotifier::with_topic(&node, CAMERA_PAIR_TOPIC)?;
-    log::info!("IPC 就绪：订阅真值，发布双目/深度（`--no-camera` 的 sim 配合）");
+    log::info!("IPC 就绪：订阅真值，发布双目/深度（配合 RMUC sim）");
     Ok(IpcPorts {
         pose_sub,
         left_pub,

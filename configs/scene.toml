@@ -1,3 +1,2 @@
-# 世界观配置（sim / render / viz 共用）：三侧必须同场景，单一来源防漂移。
-# scene 取值：rmuc2026（RMUC 场地，默认）/ warehouse（Sketchfab 仓库）/ boxes（旧回归）。
+# sim / render / viz 共用；仅支持 RMUC2026，资产缺失时报错。
 scene = "rmuc2026"

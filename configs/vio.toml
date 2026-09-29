@@ -1,4 +1,4 @@
-# VIO 配置（MuJoCo 双目部署；缺键回落代码默认值，`--config` 可换文件）
+# VIO 配置（RMUC render 双目部署；缺键回落代码默认值，`--config` 可换文件）
 
 [camera]
 width = 320

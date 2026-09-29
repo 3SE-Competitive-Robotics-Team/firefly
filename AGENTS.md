@@ -54,8 +54,9 @@
 
 ## 真值、初始化与坐标系
 
-- `Firefly/GroundTruth` 和 `Firefly/PlantState` 仅供评测、可视化对照；禁止进入
-  估计器初始化、在线状态修正、飞控反馈、解锁判据与失效回退。
+- `Firefly/GroundTruth` 供 render 合成传感器图像，GroundTruth 与 PlantState
+  均可供评测、可视化对照；禁止进入估计器初始化、在线状态修正、飞控反馈、
+  解锁判据与失效回退。
 - VIO 从静止 IMU 与图像视差初始化。测量不足或
   运动检查不通过时保持未就绪。飞控必须等待有效 IMU、已初始化且新鲜的里程计。
 - 原始里程计使用重力对齐的局部坐标系：初始位置为零、航向为规范自由度。
@@ -63,8 +64,8 @@
   真值生成该变换再反馈到算法。
 - 轨迹评测允许固定尺度的航向和平移对齐，必须在结果中注明；原始数据保留，
   对齐结果不得回流估计或控制。
-- 仿真内部状态用于物理推进、传感器生成、渲染；`--script` 的真值反馈属于
-  运动生成夹具。它们不构成无人机可访问的状态源，也不证明真实反馈闭环成功。
+- 仿真内部状态用于物理推进、传感器生成、渲染；render 订阅 GroundTruth
+  只为生成图像。这不构成估计器与飞控可访问的状态源。
 
 ## VIO（firefly-vio*）约定
 
@@ -80,53 +81,34 @@
 
 ## 运行（MuJoCo 双语言闭环）
 
-最小闭环为 sim / vio / fc，另起 firefly-viz 记录（可先开 viewer，见下），iceoryx2 IPC（`Firefly/*` 话题）通信，fastrace
-trace 上下文随 IPC 消息跨进程传递：
+仅支持 RMUC2026（`configs/scene.toml`）。缺少 `models/rmuc2026/field.glb`
+或 `rmuc2026_collision.json` 必须报错，不得回退场景。最小闭环为
+sim / render / vio / fc，另起 firefly-viz 统一记录，iceoryx2 IPC 传递数据与 trace。
 
+```text
+sim（MuJoCo 物理） ── IMU ──→ vio ── odom ──→ fc ── 四电机推力 ──→ sim
+     └── 仿真位姿 ──→ render ── 双目 ──→ vio
 ```
-Python sim（MuJoCo 物理 + 传感器发布，被控对象）→ vio（MSCKF 位姿估计）
-→ fc（1kHz 飞控，4 电机推力）→ sim（施加；planner 在时其参考进 fc）
-```
 
-上电停在停机坪（`firefly_mujoco.scene.PADS`：场景场地表面 + `PAD_CLEARANCE`），
-**不会自己起飞**：解锁/起飞/降落
-由地面站指令 `Firefly/Command`（`./target/release/ffctl fc arm | takeoff [alt] | hold |
-track | land | disarm`；`cargo build --release -p ffctl`）驱动，模式与失效保护在
-`firefly-flight::FlightFsm`（对照 `PX4`
-`nav_state` + ArduPilot 模式机，细节见 `docs/how_to_run.md` §3.1）。
+停机坪由 `firefly_mujoco.scene.PAD` 与 `PAD_CLEARANCE` 定义。
+上电不会自己起飞，等待静止初始化完成后通过 `ffctl fc` 解锁与起飞。
+fc 每个 tick 发布 Control（上锁时零推力）；控制指令超过墙钟 50ms 未更新时，
+sim 暂停物理和传感器时间。完整步骤见 `docs/how_to_run.md`。
 
-**锁步**：fc 每个 tick 都发 `Firefly/Control`（上锁时零推力），被控对象按指令新鲜度
-（墙钟 50ms）决定物理是否推进——无有效指令则物理与传感器时间暂停，
-`fc` 不起就不动；被控对象不自行供力。
-
-按顺序各开一个终端（可先开 viewer，见下）：
+各开一个终端，先启动记录进程：
 
 ```bash
-# 0. 可视化：先起共享 viewer，再起统一写入进程（Rust 进程只发 IPC，不落盘、不开窗）
-rerun &
-uv run firefly-viz
-
-# 1. Python 物理环境（被控对象）：200Hz 物理；发布 IMU 100Hz / 双目+深度+真值 10Hz
-#    / 真值状态 PlantState 200Hz / 机体描述 Airframe 1Hz；订阅 Firefly/Control 施加推力
-#    （锁步：无有效指令则物理不推进）。--script 是 VIO bench 的轨迹夹具（真值反馈），不走飞控。
-uv sync   # 首次：安装 firefly-mujoco / firefly-sim（根 workspace）
+uv run firefly-viz --save logs/rmuc_run.rrd
 uv run firefly-sim
-
-# 2. Rust VIO：订阅 MuJoCo IMU/双目灰度，MSCKF 视觉更新，发布 odom 100Hz（视觉更新 10Hz）；
-#    估计位姿与前端健康度写入共享 viewer
+cargo run --release -p render
 cargo run --release -p vio
-
-# 3. Rust 飞控：1kHz 控制环，订阅 Airframe/odom/IMU/参考/Command；PlantState 仅供评测，
-#    发布 Firefly/Control（4 电机推力）+ 控制量进共享 viewer（fc/debug/*）
 cargo run --release -p fc
-
-# 4.（可选，需先完成局部里程计与地图对齐）Rust 重规划：
-#    订阅里程计，发布参考回传到飞控
-cargo run --release -p planner
-
-# 5. 等静止初始化完成后：解锁 → 起飞（被拒原因在 fc 日志与 rrd logs/fc）
-./target/release/ffctl fc arm && ./target/release/ffctl fc takeoff 1.0
 ```
+
+sim 发布 IMU 100Hz、仿真位姿 10Hz、PlantState 200Hz、Airframe 1Hz；
+render 提供双目与深度。VIO 视觉更新 10Hz、预测里程计 100Hz；飞控 1kHz。
+planner / gicp 默认读取 `apps/planner/maps/rmuc2026.ffmap`，缺文件报错。
+地图系算法必须使用经过独立定位对齐的状态。
 
 rerun 可视化约定：vio 写 `vio/odom` + `vio/traj`（估计位姿/轨迹）、
 `gt/pose` + `gt/traj`（真值对照）与 `vio/debug/*`（前端健康度），飞控写
@@ -152,7 +134,7 @@ cargo run --release -p planner -- --map <实际存在的地图.ffmap>
 ## Log / Debug（rerun rrd，有且只有这一种记录方式）
 
 - **数据记录有且只有一种方式：进 rrd（`logs/` 下），禁止文本日志与 tmpfs**——
-  正式链路的录制产物一律落 `logs/`（如 `logs/wh_agg.rrd`），永远不写 `/tmp`
+  正式链路的录制产物一律落 `logs/`（如 `logs/rmuc_run.rrd`），永远不写 `/tmp`
  （tmpfs 重启即丢、路径不可复现、排查轮子每次重造）。`firefly-vio.log` /
   `firefly-sim.log` 这类文本日志不允许存在；终端 stderr 只做进程级诊断的
   双 sink 之一，不做记录载体。
@@ -181,6 +163,6 @@ cargo run --release -p planner -- --map <实际存在的地图.ffmap>
 
 - `cargo test`
 - `cargo test --release -p firefly-planner --test random_map_benchmark -- --ignored`
-- 无真值进程启动：先 release 构建 vio / fc，确保没有其他闭环进程；运行
+- 传感器进程启动：准备 RMUC 资产，先 release 构建 vio / fc / render，确保没有其他闭环进程；运行
   `uv run --no-dev python bench/check_sensor_startup.py`。
-  此检查需 Linux EGL，录制只进 `logs/*.rrd`，所有子进程通过 SIGINT 退出。
+  检查屏蔽 PlantState、保留 render 生成图像所需的 GroundTruth；需图形会话，录制只进 `logs/*.rrd`，所有子进程通过 SIGINT 退出。

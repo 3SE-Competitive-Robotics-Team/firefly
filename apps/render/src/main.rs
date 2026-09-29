@@ -1,29 +1,12 @@
-//! `Bevy` 视觉渲染进程：位姿订阅 + 双目/深度渲染 + 发布 + 调试显示。
+//! RMUC 视觉进程：订阅仿真位姿，渲染双目与深度，发布 IPC 并显示调试面板。
 //!
-//! 分工：物理（`MuJoCo` 步进、`IMU`/真值发布、`PD` 控制）仍在 `firefly-sim`；
-//! 本进程是无状态渲染 worker——订阅 `Firefly/GroundTruth` 摆传感器 rig，
-//! 离屏渲染左/右 `RGB` 与深度预通道，回读后发布 `Firefly/CameraLeft`、
-//! `Firefly/CameraRight`、`Firefly/Depth` 并通知 `Firefly/CameraPair`。
-//! `VIO`/`planner` 零改动（话题、布局、`trace` 头与 `MuJoCo` 时代一致）。
+//! sim 负责 `MuJoCo` 物理和 IMU；本进程从 `Firefly/GroundTruth` 摆放传感器，
+//! 发布 `Firefly/CameraLeft`、`Firefly/CameraRight`、`Firefly/Depth`，
+//! 通过 `Firefly/CameraPair` 唤醒订阅端。真值只用于生成仿真测量。
+//! 视觉资产必须存在于 `models/rmuc2026/field.glb`。
 //!
-//! 出图链路按需驱动：传感器相机只在固定 10Hz 出图窗口激活渲染（非窗口帧不空转）；
-//! 回读后的逐像素处理（灰度/深度/噪声/调试显示）在工作线程，主线程只做发布
-//!（iceoryx2 端口主线程独占）——供图不再被逐像素计算或帧率抖动拖住。
-//!
-//! 日志后端：`Bevy` 自带 `LogPlugin` 禁用，改用 `firefly-observability`
-//!（`logforth` + `fastrace`，跨进程 trace 续接与 `rrd` 日志聚合的载体）。
-//!
-//! 运行（仓库根，先起 `sim` 再起本进程）：
-//! ```sh
-//! uv run firefly-sim -- --no-camera
-//! cargo run --release -p render
-//! ```
-//!
-//! `structure.glb` 由同目录 `structure.obj` 转换而来（`models/` 不进
-//! git，缺失时重转）：
-//! `uv run --group dev python -c "import trimesh;
-//! trimesh.load('models/warehouse/structure.obj',
-//! force='scene').export('models/warehouse/structure.glb')"`。
+//! 传感器相机按 10Hz 窗口激活，逐像素处理在工作线程完成，IPC 端口由主线程持有。
+//! 日志经 `firefly-observability` 汇入统一 rrd 记录。
 
 mod capture;
 mod config;
@@ -58,9 +41,7 @@ use rig::{DRONE_LAYER, PoseState, spawn_rig};
 use scene::SceneSpec;
 use ui::setup_panel;
 
-/// 无人机起点由场景注册表提供（`models/<dir>` 与起点见 [`scene`]；对照
-/// `configs/sim.toml`）。asset root 恒为 `models/`，视觉恒为
-/// `models/<dir>/<visual>`——换场地只加注册行 + 目录。
+/// 以 RMUC 资产和初始摆位启动 Bevy；仿真位姿到达后更新机体与传感器。
 fn main() {
     firefly_observability::init();
     // `Bevy` 内部日志走 `tracing`（`LogPlugin` 已禁用，不再安装 subscriber）：

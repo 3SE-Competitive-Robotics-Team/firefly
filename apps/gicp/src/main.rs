@@ -6,7 +6,7 @@
 //!
 //! 运行：`cargo run --release -p gicp`（配合 `uv run firefly-sim` +
 //! `cargo run --release -p vio` + `cargo run --release -p planner`）
-//! 或 `cargo run --release -p gicp -- --map apps/planner/maps/gate.ffmap`。
+//! 或 `cargo run --release -p gicp -- --map apps/planner/maps/rmuc2026.ffmap`。
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -41,7 +41,6 @@ const VIZ_PERIOD: usize = 1;
 /// 矫正后位姿图例颜色（绿，与 vio 橙 / 真值蓝区分）。
 const CORRECTED_COLOR: (u8, u8, u8) = (60, 200, 80);
 const DEFAULT_CONFIG: &str = "configs/gicp.toml";
-const DEFAULT_MAP_HINT: &str = "未指定 --map，加载 MuJoCo 默认场景静态地图";
 const ODOM_FRESH_TIMEOUT: f64 = 1.0;
 /// 视觉观测待融合队列上限（条）：观测先到、odom 后到时暂存，按 `timestamp`
 /// 排序，odom 追上即融合；溢出时丢最旧（对端断流的背压语义，非延时等待）。
@@ -175,21 +174,6 @@ fn depth_to_body_cloud(depth: &[f32], cam: &DepthCamera) -> PointCloud {
         cloud.set_point(i, Vector4::new(p.x, p.y, p.z, 1.0));
     }
     cloud
-}
-
-fn mujoco_map_file() -> MapFile {
-    // 复用 planner 的默认地图逻辑：与 MuJoCo scene.py 同构
-    // 简化：空地图时 reloc 会 warn 并禁用；真实部署需 --map 指定 ffmap
-    // 此处直接返回空，触发 from_map_file 的空检查
-    let occupied = Vec::new();
-    MapFile {
-        resolution: 0.4,
-        origin: [0.0, -5.0, 0.0],
-        dims: [80, 35, 13],
-        occupied,
-        decor: Vec::new(),
-        motions: Vec::new(),
-    }
 }
 
 /// 门控判决映射为诊断四元组 `[metric, limit, applied_trans_m, accepted]`。
@@ -664,25 +648,14 @@ fn main() {
         }
     };
     log::info!("已加载配置 {}", args.config.display());
-    let map_file = if let Some(p) = &args.map {
-        match MapFile::from_file(p) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("加载地图失败：{e}");
-                std::process::exit(1);
-            }
-        }
-    } else {
-        log::info!("{DEFAULT_MAP_HINT}");
-        // 尝试加载 MuJoCo 默认场景的静态地图（与 planner 同构）
-        // 若文件不存在则用空地图占位（GICP 将自动禁用）
-        let default_path = PathBuf::from("apps/planner/maps/gate.ffmap");
-        if default_path.exists() {
-            MapFile::from_file(&default_path).unwrap_or_else(|_| mujoco_map_file())
-        } else {
-            mujoco_map_file()
-        }
-    };
+    let map_path = args
+        .map
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("apps/planner/maps/rmuc2026.ffmap"));
+    let map_file = MapFile::from_file(&map_path).unwrap_or_else(|e| {
+        log::error!("加载 RMUC 地图失败 {}：{e}", map_path.display());
+        std::process::exit(1);
+    });
     let mut app = match App::new(map_file, cfg, &args.odom_topic) {
         Ok(a) => a,
         Err(e) => {

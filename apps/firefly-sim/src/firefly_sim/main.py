@@ -1,25 +1,11 @@
-"""firefly-sim 主循环（CLI 入口，见 `firefly_sim.__init__` 文档）。
+"""RMUC 物理主循环：接收飞控电机推力，发布 IMU、仿真位姿与机体描述。
 
-运行方式：`uv run firefly-sim`（pyproject `[project.scripts]` 定义），
-或 `uv run python -m firefly_sim`。
-
-每个相机帧周期（10Hz）开一条新 OTel trace：周期内发布的 IMU/双目/深度/
-真值共享同一 `trace_id`，Rust 侧续接后形成 传感器→vio→demo→参考 的闭环
-单周期 trace；下一相机帧开新 trace（可区分每次输入）。
-
-本进程是**被控对象**：发布传感器与被控对象状态（`Firefly/PlantState`，每个物理步）、
-机体/执行器描述（`Firefly/Airframe`，1Hz 电平），订阅飞控指令（`Firefly/Control`，
-取最新）施加 4 电机推力。控制律唯一实现在 `firefly-flight`（飞控进程 `apps/fc`）；
-`--script` 模式例外：那是 VIO 验证的轨迹跟踪夹具（真值反馈，`DroneEnv.apply_pd`），
-不带飞控。
-
-锁步：无有效飞控指令时物理不推进（状态/传感器仍按节拍发布冻结内容），被控对象
-不自行供力——对照 ArduPilot SITL（仿真与飞控同进程）与 PX4 lockstep。因此本进程
-需要 `apps/fc` 在跑才会动；起飞/上锁等模式全在飞控侧（`Firefly/Command`）。
+图像与深度由 render 发布。无新鲜飞控指令时暂停物理与传感器时间。
 """
 
 from __future__ import annotations
 
+import argparse
 import time
 import sys
 
@@ -37,37 +23,20 @@ from firefly_mujoco import (
     AirframeMessage,
     ControlMessage,
     DroneEnv,
-    GrayImageMessage,
-    DepthImageMessage,
-    IMAGE_HEIGHT,
-    IMAGE_WIDTH,
     ImuMessage,
     LogMessage,
     OdomMessage,
     PlantStateMessage,
-    ReferenceMessage,
     TraceContext,
     drone_pad,
     load_scene_name,
 )
 
 from . import trace as ftrace
-from .trajectories import Trajectory, get_trajectory
 
 #: 话题名（与 Rust `firefly-pubsub` 常量一致）
 TOPIC_IMU = "Firefly/Imu"
-TOPIC_CAM_LEFT = "Firefly/CameraLeft"
-TOPIC_CAM_RIGHT = "Firefly/CameraRight"
-#: 相机对事件（左右目成对发布完成后单次通知；与 Rust event::CAMERA_PAIR_TOPIC 一致）
-TOPIC_CAM_PAIR = "Firefly/CameraPair"
-TOPIC_DEPTH = "Firefly/Depth"
 TOPIC_GT = "Firefly/GroundTruth"
-TOPIC_REF = "Firefly/Reference"
-#: VIO 状态源里程计：任务时钟等待首个 is_initialized=true。
-TOPIC_ODOM = "Firefly/Odometry"
-#: 任务启动超时（秒）：上电后无 ready 则报错退出。
-MISSION_TIMEOUT = 15.0
-
 #: 事件 id：「该话题有新样本」（与 Rust event::EVENT_ID_SENT_SAMPLE 一致）
 EVENT_ID_SENT_SAMPLE = 0
 
@@ -86,11 +55,11 @@ def load_config(path: str = "configs/sim.toml") -> dict:
 
 
 #: IMU 服务订阅端上限（与 Rust `imu.rs: IMU_SERVICE_MAX` 同值；先创建方定上限，
-#: 后续 open 不得超限——bench 流程 sim 先起，手动流程 vio 先起，两边必须一致）。
+#: 后续 open 不得超限——sim / vio 启动顺序任意，两边必须一致）。
 IMU_SERVICE_MAX = 128
 
 #: 被控对象状态服务订阅端上限（与 Rust `plant.rs: PLANT_STATE_SERVICE_MAX` 同值；
-#: sim 先起时由本进程创建服务，飞控订阅不得超限）。
+#: sim 先起时由本进程创建服务，评测订阅不得超限）。
 PLANT_STATE_SERVICE_MAX = 8
 #: 机体描述服务订阅端上限（与 Rust `plant.rs: AIRFRAME_SERVICE_MAX` 同值）。
 AIRFRAME_SERVICE_MAX = 4
@@ -203,29 +172,20 @@ def _publish_airframe(pub, env: DroneEnv, t: float) -> None:
 
 
 def main() -> None:
-    # --script [NAME]：不使用 planner，改由具名轨迹生成器驱动运动（VIO 验证用）；
-    # 省略 NAME 时用 lissajous_classic（历史基线曲线）
-    # --no-trace：禁用 OTel tracing（消除 Python span 开销，sim 从 0.37x → 14x real-time）
-    script_mode = "--script" in sys.argv
-    trajectory_name = "lissajous_classic"
-    if script_mode:
-        idx = sys.argv.index("--script")
-        if idx + 1 < len(sys.argv) and not sys.argv[idx + 1].startswith("-"):
-            trajectory_name = sys.argv[idx + 1]
-    trajectory: Trajectory = get_trajectory(trajectory_name)
-    trace_enabled = "--no-trace" not in sys.argv
-    # --no-camera：双目/深度改由 Bevy 渲染进程发布（本进程仍发 IMU/真值；
-    # 相机节拍照推进，维持 trace 周期与真值节奏）。
-    no_camera = "--no-camera" in sys.argv
-    cfg = load_config()
+    parser = argparse.ArgumentParser(description="RMUC MuJoCo 物理进程；图像由 render 提供")
+    parser.add_argument("--no-trace", action="store_true")
+    parser.add_argument("--config", default="configs/sim.toml")
+    args = parser.parse_args()
+    trace_enabled = not args.no_trace
+    cfg = load_config(args.config)
     rates = cfg.get("rates", {})
     physics_period = 1.0 / rates.get("physics", 200.0)
     imu_period = 1.0 / rates.get("imu", 100.0)
     cam_period = 1.0 / rates.get("cam", 10.0)
-    # 停机坪：缺配置时按场景定义（`firefly_mujoco.scene.PADS`）——上电停在地面
-    scene_name = load_scene_name()
-    start_pos = np.array(cfg.get("start", drone_pad(scene_name)))
-    env = DroneEnv(scene=scene_name)
+    # 停机坪：缺配置时按场景定义（`firefly_mujoco.scene.PAD`）——上电停在地面
+    load_scene_name()
+    start_pos = np.array(cfg.get("start", drone_pad()))
+    env = DroneEnv(timestep=physics_period)
     env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))  # xyzw 单位四元数
     ftrace.init(enabled=trace_enabled)
     airframe = env.airframe()
@@ -240,45 +200,24 @@ def main() -> None:
             1 / physics_period,
         )
     )
-    if script_mode:
-        log(f"--script：轨迹 {trajectory.name} 驱动运动（跳过 planner）")
-    if not trace_enabled:
-        log("--no-trace：OTel tracing 已禁用（高性能模式）")
-    if no_camera:
-        log("--no-camera：双目/深度由 Bevy 发布（`cargo run -p render` 须同开）")
+    log("RMUC 双目与深度由 render 进程发布")
 
     # 抑制 iceoryx2 内部告警噪音（如投递到历史残留幽灵监听端的
     # `FailedToDeliverSignal`——良性，数据面仍由订阅端兜底节拍驱动）。
     iox2.set_log_level(iox2.LogLevel.Error)
     node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
     imu_pub = _publisher(node, TOPIC_IMU, ImuMessage, IMU_SERVICE_MAX)
-    left_pub = _publisher(node, TOPIC_CAM_LEFT, GrayImageMessage)
-    right_pub = _publisher(node, TOPIC_CAM_RIGHT, GrayImageMessage)
-    depth_pub = _publisher(node, TOPIC_DEPTH, DepthImageMessage)
     gt_pub = _publisher(node, TOPIC_GT, OdomMessage)
-    # 被控对象状态/机体描述（→ 飞控）：状态每个物理步、机体描述 1Hz 电平
+    # 被控对象状态供评测；机体描述以 1Hz 发布给飞控
     plant_pub = _publisher(node, PLANT_STATE_TOPIC, PlantStateMessage, PLANT_STATE_SERVICE_MAX)
     airframe_pub = _publisher(node, AIRFRAME_TOPIC, AirframeMessage, AIRFRAME_SERVICE_MAX)
-    ref_sub = _subscriber(node, TOPIC_REF, ReferenceMessage)
-    # 启动互锁订阅（--script 模式）：状态源 ready 电平（is_initialized），
-    # 任务时钟据此启动；电平（非边沿）语义——晚订阅 100ms 内必收到。
-    odom_sub = _subscriber(node, TOPIC_ODOM, OdomMessage)
     # 飞控指令订阅（闭环模式）：位置/速度反馈由飞控消费，本进程只做被控对象。
     # 服务订阅端上限须与 Rust 侧同值：先创建方定上限，否则飞控发布端声明 32 会被拒。
     control_sub = _subscriber(node, CONTROL_TOPIC, ControlMessage, CONTROL_SERVICE_MAX)
     imu_notify = _notifier(node, TOPIC_IMU)
-    cam_notify = _notifier(node, TOPIC_CAM_PAIR)
     _init_log_ipc(node)
-    log("iceoryx2 已就绪：发布 IMU/双目/深度/真值/状态/机体，订阅参考与飞控指令")
+    log("iceoryx2 已就绪：发布 IMU/仿真位姿/状态/机体，订阅飞控指令")
 
-    # 参考状态（demo 未发布时悬停在起点）
-    ref_pos = start_pos
-    ref_yaw = 0.0
-    ref_yaw_dot = 0.0
-    ref_vel = np.zeros(3)
-    got_ref = False
-    # 任务时钟等待 VIO 就绪；轨迹时间为当前仿真时间减去任务起点。
-    mission_t0 = None
     # 最新飞控指令：(state_time, 4 电机推力)；None = 未收到
     latest_control = None
     # 飞控指令的墙钟到达时刻（锁步下 sim 时间由指令推进，指令陈旧只能按墙钟判）
@@ -290,56 +229,15 @@ def main() -> None:
     next_imu = 0.0
     next_cam = 0.0
     next_airframe = 0.0
-    frame = 0
     t_start = time.perf_counter()
     try:
         while True:
-            # 拉取最新参考（非阻塞；其 trace 属已闭合周期，仅记录关联）
-            while (sample := ref_sub.receive()) is not None:
+            while (sample := control_sub.receive()) is not None:
                 m = sample.payload().contents
-                ref_pos = np.array([m.position_x, m.position_y, m.position_z])
-                ref_vel = np.array([m.velocity_x, m.velocity_y, m.velocity_z])
-                ref_yaw = float(m.yaw)
-                ref_yaw_dot = float(m.yaw_dot)
-                got_ref = True
-                log("收到参考 t={:.3f} pos=({:.2},{:.2},{:.2}) trace={:032x}".format(
-                    m.timestamp, m.position_x, m.position_y, m.position_z,
-                    ftrace.header_trace_id(sample.user_header().contents),
-                ))
+                latest_control = (m.state_time, np.array(m.thrust, dtype=float))
+                control_rx_wall = time.monotonic()
 
-            # 飞控指令（闭环模式）：排空取最新（反馈由飞控消费，本进程只做被控对象）
-            if not script_mode:
-                while (sample := control_sub.receive()) is not None:
-                    m = sample.payload().contents
-                    latest_control = (m.state_time, np.array(m.thrust, dtype=float))
-                    control_rx_wall = time.monotonic()
-
-            # 控制 + 物理步进
-            if script_mode:
-                # 启动互锁：先排空状态源 odom，有 ready 就 latch 任务起点；
-                # 超时无 ready 则报错退出（fail loudly）。
-                if mission_t0 is None:
-                    while (sample := odom_sub.receive()) is not None:
-                        if sample.payload().contents.is_initialized:
-                            mission_t0 = env.time
-                            log(f"状态源就绪（{TOPIC_ODOM}），任务时钟启动 t0={mission_t0:.2f}")
-                            break
-                    if mission_t0 is None and env.time > MISSION_TIMEOUT:
-                        sys.exit(
-                            f"[firefly-sim] 任务启动超时：{MISSION_TIMEOUT:.0f}s 未收到状态源 ready "
-                            f"（{TOPIC_ODOM} 是否存活？iceoryx2 是否残留幽灵服务？）"
-                        )
-                if mission_t0 is None:
-                    # 未就绪：原地悬停（位置=起点，速度=0）
-                    ref_pos, ref_vel = start_pos, np.zeros(3)
-                else:
-                    # 脚本化参考：按任务时刻给出平滑 pos/vel；实例满足周期连续
-                    # 不变量（见 trajectories.py），长跑直接用连续时间即可
-                    ref_pos, ref_vel = trajectory.ref(env.time - mission_t0)
-                # --script 模式：真值跟踪（运动由外部轨迹指定）
-                env.apply_pd(ref_pos, ref_vel, ref_yaw=ref_yaw, ref_yaw_rate=ref_yaw_dot)
-                env.step()
-            elif (
+            if (
                 latest_control is not None
                 and control_rx_wall is not None
                 and time.monotonic() - control_rx_wall <= CONTROL_STALE
@@ -371,14 +269,12 @@ def main() -> None:
                 log("物理失稳（NaN/Inf）@ t={:.2f}，重置到起点".format(env.time), LOG_LEVEL_ERROR, env.time)
                 env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))
             t = env.time
-            frame += 1
 
-            # 被控对象状态（每个物理步）与机体描述（1Hz 电平）→ 飞控
-            if not script_mode:
-                _publish_plant_state(plant_pub, env, t)
-                if t + 1e-12 >= next_airframe:
-                    _publish_airframe(airframe_pub, env, t)
-                    next_airframe = t + AIRFRAME_PERIOD
+            # 被控对象状态供评测（每个物理步），机体描述供飞控（1Hz）
+            _publish_plant_state(plant_pub, env, t)
+            if t + 1e-12 >= next_airframe:
+                _publish_airframe(airframe_pub, env, t)
+                next_airframe = t + AIRFRAME_PERIOD
 
             # 新相机帧 → 新周期 trace（周期内所有发布共享同一 trace_id）
             if t + 1e-12 >= next_cam:
@@ -408,12 +304,8 @@ def main() -> None:
                         t,
                     )
 
-            # 10Hz 双目 + 深度 + 真值（--no-camera 时 Bevy 拥有相机发布权：
-            # 跳过渲染与成对唤醒，真值照发——render 的位姿源，节拍照推进）。
+            # 仿真位姿供 render 摆放传感器及评测使用。
             if t + 1e-12 >= next_cam:
-                if not no_camera:
-                    _publish_camera(left_pub, right_pub, depth_pub, cycle, env, t)
-                    _notify(cam_notify)  # 左右目成对发布完成后单次唤醒
                 _publish_gt(gt_pub, cycle, env, t)
                 next_cam, skipped = advance_grid(next_cam, t, cam_period)
                 if skipped >= 1:
@@ -424,16 +316,6 @@ def main() -> None:
                         LOG_LEVEL_WARN,
                         t,
                     )
-                if (got_ref or script_mode) and frame % 200 == 0:
-                    pos, _, vel = env.gt_pose()
-                    log(
-                        "t={:6.2f} 无人机 ({:6.2f},{:6.2f},{:6.2f}) 参考 ({:6.2f},{:6.2f},{:6.2f})".format(
-                            t, pos[0], pos[1], pos[2], ref_pos[0], ref_pos[1], ref_pos[2]
-                        ),
-                        LOG_LEVEL_INFO,
-                        t,
-                    )
-
             # 实时节奏（--no-trace 时仍限速 1x：步进 0.36ms << 5ms 预算，sleep 自动限速）
             wall = time.perf_counter() - t_start
             target = t
@@ -443,32 +325,6 @@ def main() -> None:
         if cycle is not None:
             ftrace.end_cycle(cycle)
         log("退出")
-
-
-def _publish_camera(left_pub, right_pub, depth_pub, cycle, env: DroneEnv, t: float) -> None:
-    left = GrayImageMessage()
-    left.timestamp = t
-    left.sensor_id = 0
-    left.width = IMAGE_WIDTH
-    left.height = IMAGE_HEIGHT
-    left.data[:] = env.render_left().reshape(-1)
-    _publish_traced(left_pub, cycle, "publish-camera-left", left, t)
-
-    right = GrayImageMessage()
-    right.timestamp = t
-    right.sensor_id = 1
-    right.width = IMAGE_WIDTH
-    right.height = IMAGE_HEIGHT
-    right.data[:] = env.render_right().reshape(-1)
-    _publish_traced(right_pub, cycle, "publish-camera-right", right, t)
-
-    depth = DepthImageMessage()
-    depth.timestamp = t
-    depth.sensor_id = 0
-    depth.width = IMAGE_WIDTH
-    depth.height = IMAGE_HEIGHT
-    depth.data[:] = env.render_depth().reshape(-1)
-    _publish_traced(depth_pub, cycle, "publish-depth", depth, t)
 
 
 def _publish_gt(gt_pub, cycle, env: DroneEnv, t: float) -> None:

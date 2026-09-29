@@ -4,7 +4,7 @@
 //! - 在线：订阅左目灰度 → `models/aliked-n16-k512.onnx`（静态 320×240，K=512）→
 //!   经 `Firefly/Features` 发布特征（关键点/描述子/score）；
 //! - 离线建库：`--build-map <frames_dir> --out <map.ffvmap>`——读摆拍 bin
-//!   （`gen_vision_eval_data.py` 布局），提特征 + 深度反投影（-Z 相机系，
+//!   （`collect_vision_map.py` 布局），提特征 + 深度反投影（-Z 相机系，
 //!   与 `firefly-vision-match::calibration` 同惯例）写 `ffvmap` 库图。
 //!
 //! 权重在 `models/`（已 ignore，不进 git）。
@@ -267,7 +267,7 @@ fn infer_frame(
     Ok(msg)
 }
 
-/// 离线建库：摆拍 bin（`gen_vision_eval_data.py` 布局）→ 每帧提特征 +
+/// 离线建库：摆拍 bin（`collect_vision_map.py` 布局）→ 每帧提特征 +
 /// 深度反投影（`Xc=(dx·d, dy·d, -d)`，`dy=-(v-cy)/f` 与
 /// `firefly-map::DepthCamera::update_from_depth` 同式）→ 写 `ffvmap` 库图。
 fn build_map_offline(
