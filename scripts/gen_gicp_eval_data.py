@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """GICP 离线评测数据生成：先验点云 + 轨迹深度帧。
 
-- 先验云：解析 MuJoCo boxes 场景（box 外表面 + 地面），0.08m 采样，
-  与 export_prior_planes.py 同几何源。
+- 先验云：解析 MuJoCo boxes 场景（box 外表面 + 地面），0.08m 采样。
 - 轨迹帧：logs/bench/ff_fix/<traj>/run1 GT，每 2s 取一位姿（位置真值 +
   水平姿态），MuJoCo 直接摆位渲染深度（含默认噪声，诚实口径）。
 - 输出 logs/bench/gicp_eval/：prior_cloud.bin（u64 条数 + f32 xyz），

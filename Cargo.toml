@@ -41,12 +41,7 @@ firefly-gicp = { path = "crates/firefly-gicp" }
 firefly-localization = { path = "crates/firefly-localization" }
 firefly-search = { path = "crates/firefly-search" }
 firefly-trajectory = { path = "crates/firefly-trajectory" }
-firefly-void-types = { path = "crates/firefly-void-types" }
 firefly-voxel-svio = { path = "crates/firefly-voxel-svio" }
-firefly-void-esikf = { path = "crates/firefly-void-esikf" }
-firefly-void-map = { path = "crates/firefly-void-map" }
-firefly-void-measure = { path = "crates/firefly-void-measure" }
-firefly-void = { path = "crates/firefly-void" }
 firefly-vision-map = { path = "crates/firefly-vision-map" }
 firefly-vision-match = { path = "crates/firefly-vision-match" }
 firefly-render = { path = "crates/firefly-render" }

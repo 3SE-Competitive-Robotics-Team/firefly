@@ -20,7 +20,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# 场景子目录：悬停 = hover，轨迹 = 轨迹名（与 logs/p10_compare/void/ 对齐）
+# 场景子目录：悬停 = hover，轨迹 = 轨迹名
 SCENE="hover"
 if [ -n "$TRAJECTORY" ]; then
   SCENE="$TRAJECTORY"

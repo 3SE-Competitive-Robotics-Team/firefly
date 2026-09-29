@@ -3087,69 +3087,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "firefly-void"
-version = "0.1.0"
-dependencies = [
- "fastrace",
- "firefly-error",
- "firefly-vio-core",
- "firefly-vio-init",
- "firefly-vio-types",
- "firefly-void-esikf",
- "firefly-void-map",
- "firefly-void-measure",
- "firefly-void-types",
- "log",
- "nalgebra",
- "serde",
- "toml",
-]
-
-[[package]]
-name = "firefly-void-esikf"
-version = "0.1.0"
-dependencies = [
- "fastrace",
- "firefly-error",
- "firefly-void-types",
- "log",
- "nalgebra",
-]
-
-[[package]]
-name = "firefly-void-map"
-version = "0.1.0"
-dependencies = [
- "fastrace",
- "firefly-error",
- "firefly-void-types",
- "log",
- "nalgebra",
- "purecv",
- "rayon",
-]
-
-[[package]]
-name = "firefly-void-measure"
-version = "0.1.0"
-dependencies = [
- "firefly-error",
- "firefly-void-esikf",
- "firefly-void-map",
- "firefly-void-types",
- "nalgebra",
- "purecv",
-]
-
-[[package]]
-name = "firefly-void-types"
-version = "0.1.0"
-dependencies = [
- "firefly-error",
- "nalgebra",
-]
-
-[[package]]
 name = "firefly-voxel-svio"
 version = "0.1.0"
 dependencies = [
@@ -7054,21 +6991,6 @@ dependencies = [
  "nalgebra",
  "serde",
  "toml",
-]
-
-[[package]]
-name = "void"
-version = "0.1.0"
-dependencies = [
- "fastrace",
- "firefly-error",
- "firefly-observability",
- "firefly-pubsub",
- "firefly-void",
- "firefly-void-types",
- "iceoryx2",
- "log",
- "nalgebra",
 ]
 
 [[package]]

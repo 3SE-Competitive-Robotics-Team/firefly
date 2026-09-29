@@ -265,7 +265,7 @@ impl App {
         let log_ipc = firefly_observability::init_ipc(&node, "gicp");
         let odom_sub = match OdomSubscriber::with_topic(&node, odom_topic) {
             Ok(s) => {
-                log::info!("已订阅 odom 话题（{odom_topic}，VIO/VOID 状态源）");
+                log::info!("已订阅 odom 话题（{odom_topic}，VIO 状态源）");
                 Some(s)
             }
             Err(e) => {

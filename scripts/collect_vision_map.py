@@ -7,8 +7,7 @@ warehouse/boxes 有效，rmuc2026 的 MuJoCo 场景无视觉 mesh，故本脚本
 `render` 取图。
 
 流程：
-1. 清残留进程与 iceoryx2 → 起 `render` + `sim`（`--no-camera`；sim 用真值反馈
-   `--odom-topic Firefly/VoidOdom`，航点悬停稳定）。
+1. 起 `render` + `sim`（`--no-camera`）；运动由外部飞控进程负责。
 2. 按 `--x-range/--y-range/--step` 生成栅格航点（撞地形盒的自动跳过），逐个用
    `Firefly/Reference` 驱动真机；稳定后落一帧「左目灰度 + 深度 + 真值位姿」。
 3. 可选 `--build`：调 `aliked --build-map` 直接产出 `ffvmap` 库图。
@@ -128,7 +127,7 @@ def main() -> None:
     )
     time.sleep(6)
     sim = subprocess.Popen(
-        ["uv", "run", "firefly-sim", "--no-trace", "--no-camera", "--odom-topic", "Firefly/VoidOdom"],
+        ["uv", "run", "firefly-sim", "--no-trace", "--no-camera"],
         cwd=REPO_ROOT,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

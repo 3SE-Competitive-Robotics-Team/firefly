@@ -112,7 +112,7 @@ pub struct FusionOptions {
     pub r_floor_rot: f64,
     /// 观测噪声下限：平移 `m²`（好修正噪声中位 ~0.07m，下限取 `5e-3`）。
     pub r_floor_pos: f64,
-    /// `P` 初值：旋转 `rad²`（VOID 姿态初值误差 ~1~2°，取 `(3°)²`）。
+    /// `P` 初值：旋转不确定度，单位 `rad²`，默认 `(3°)²`。
     pub p_init_rot: f64,
     /// `P` 初值：局部平移的不确定度，单位 `m²`，默认 `(0.1m)²`。
     pub p_init_pos: f64,

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """生成 MuJoCo 默认场景的 ffmap（gicp 在线靶图用）。
 
-与 export_prior_planes.py 同几何源（boxes 场景解析）：25 箱阵 + 中线柱 +
+解析 MuJoCo boxes 场景：25 箱阵 + 中线柱 +
 侧翼柱 + 地面，外表面 0.1m 采样。输出 apps/planner/maps/sim_scene.ffmap
 （gitignored，见 .gitignore）。
 

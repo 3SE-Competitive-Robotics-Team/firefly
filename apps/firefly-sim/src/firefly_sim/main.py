@@ -63,13 +63,9 @@ TOPIC_CAM_PAIR = "Firefly/CameraPair"
 TOPIC_DEPTH = "Firefly/Depth"
 TOPIC_GT = "Firefly/GroundTruth"
 TOPIC_REF = "Firefly/Reference"
-#: 状态源里程计（启动互锁：任务时钟等它首个 is_initialized=true 才走；
-#: 状态源由 --odom-topic 选择：vio（`Firefly/Odometry`）或 void
-#: （`Firefly/VoidOdom`，DIVO 里程计 A/B 对比用）。
+#: VIO 状态源里程计：任务时钟等待首个 is_initialized=true。
 TOPIC_ODOM = "Firefly/Odometry"
-TOPIC_VOIDODOM = "Firefly/VoidOdom"
-#: 任务启动超时（秒）：上电后无 ready 则报错退出（fail loudly），
-#: 不静默起飞。估计器侧 GT 等待 30s 是双保险，这里先触发。
+#: 任务启动超时（秒）：上电后无 ready 则报错退出。
 MISSION_TIMEOUT = 15.0
 
 #: 事件 id：「该话题有新样本」（与 Rust event::EVENT_ID_SENT_SAMPLE 一致）
@@ -216,14 +212,6 @@ def main() -> None:
         idx = sys.argv.index("--script")
         if idx + 1 < len(sys.argv) and not sys.argv[idx + 1].startswith("-"):
             trajectory_name = sys.argv[idx + 1]
-    # 状态源选择（启动互锁监听的话题）：缺省 vio；--odom-topic 可切 void。
-    odom_topic = TOPIC_ODOM
-    if "--odom-topic" in sys.argv:
-        idx = sys.argv.index("--odom-topic")
-        if idx + 1 < len(sys.argv) and not sys.argv[idx + 1].startswith("-"):
-            odom_topic = sys.argv[idx + 1]
-    if odom_topic not in (TOPIC_ODOM, TOPIC_VOIDODOM):
-        sys.exit(f"[firefly-sim] --odom-topic 非法：{odom_topic}（仅支持 {TOPIC_ODOM} / {TOPIC_VOIDODOM}）")
     trajectory: Trajectory = get_trajectory(trajectory_name)
     trace_enabled = "--no-trace" not in sys.argv
     # --no-camera：双目/深度改由 Bevy 渲染进程发布（本进程仍发 IMU/真值；
@@ -274,7 +262,7 @@ def main() -> None:
     ref_sub = _subscriber(node, TOPIC_REF, ReferenceMessage)
     # 启动互锁订阅（--script 模式）：状态源 ready 电平（is_initialized），
     # 任务时钟据此启动；电平（非边沿）语义——晚订阅 100ms 内必收到。
-    odom_sub = _subscriber(node, odom_topic, OdomMessage)
+    odom_sub = _subscriber(node, TOPIC_ODOM, OdomMessage)
     # 飞控指令订阅（闭环模式）：位置/速度反馈由飞控消费，本进程只做被控对象。
     # 服务订阅端上限须与 Rust 侧同值：先创建方定上限，否则飞控发布端声明 32 会被拒。
     control_sub = _subscriber(node, CONTROL_TOPIC, ControlMessage, CONTROL_SERVICE_MAX)
@@ -289,10 +277,7 @@ def main() -> None:
     ref_yaw_dot = 0.0
     ref_vel = np.zeros(3)
     got_ref = False
-    # 任务时钟（--script 模式）：None = 等 VOID 就绪中，原地悬停；
-    # 收到首个 is_initialized=true  latch 为当前仿真时刻，此后轨迹
-    # 时间 = sim 时间 - 任务起点（t_go 等起飞等待相对任务起点，不含
-    # 启动不定耗时——三个旧定时器退役的落点）。
+    # 任务时钟等待 VIO 就绪；轨迹时间为当前仿真时间减去任务起点。
     mission_t0 = None
     # 最新飞控指令：(state_time, 4 电机推力)；None = 未收到
     latest_control = None
@@ -337,12 +322,12 @@ def main() -> None:
                     while (sample := odom_sub.receive()) is not None:
                         if sample.payload().contents.is_initialized:
                             mission_t0 = env.time
-                            log(f"状态源就绪（{odom_topic}），任务时钟启动 t0={mission_t0:.2f}")
+                            log(f"状态源就绪（{TOPIC_ODOM}），任务时钟启动 t0={mission_t0:.2f}")
                             break
                     if mission_t0 is None and env.time > MISSION_TIMEOUT:
                         sys.exit(
                             f"[firefly-sim] 任务启动超时：{MISSION_TIMEOUT:.0f}s 未收到状态源 ready "
-                            f"（{odom_topic} 是否存活？iceoryx2 是否残留幽灵服务？）"
+                            f"（{TOPIC_ODOM} 是否存活？iceoryx2 是否残留幽灵服务？）"
                         )
                 if mission_t0 is None:
                     # 未就绪：原地悬停（位置=起点，速度=0）

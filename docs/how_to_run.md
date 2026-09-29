@@ -1,12 +1,12 @@
 # How to Run
 
 最小传感器闭环见 [README](../README.md)。启动时保持静止：VIO 使用 IMU 与
-双目视差初始化，VOID 使用静止 IMU 初始化；真值不进入估计或控制。
+双目视差初始化；真值不进入估计或控制。
 原始里程计位于局部坐标系，初始位置为零、航向为规范自由度。
 
 下述地图定位和规划进程是可选组件。连接 MuJoCo 世界系静态地图、视觉库图、
 全局目标前，必须通过独立定位建立地图与局部里程计的变换；不能直接套用场景
-起点或真值对齐。当前最小闭环不启动这些可选组件，VOID 默认关闭世界先验图。
+起点或真值对齐。当前最小闭环不启动这些可选组件。
 
 当前场景由 `configs/scene.toml` 的 `scene` 决定，`sim` / `render` / `viz` 共用
 同一份（单一来源防漂移）：缺省 **`rmuc2026`**（RMUC 场地，`models/rmuc2026/`），
@@ -85,14 +85,14 @@ export RUST_LOG=info
 ## 1. 构建验证（release）
 
 ```bash
-cargo build --release -p vio -p void -p fc -p gicp -p aliked -p lightglue -p planner -p ffctl
+cargo build --release -p vio -p fc -p gicp -p aliked -p lightglue -p planner -p ffctl
 cargo test
 uv run python -c "from firefly_sim.trajectories import TRAJECTORIES; print(sorted(TRAJECTORIES))"
 uv run firefly-viz --help      # 检查可视化进程可导入（argparse 生效）
 ./target/release/ffctl --help      # 打印用法（含全部子命令）
 ```
 
-注意：`firefly-sim` 没有 `--help`（`sys.argv` 只认 `--script/--no-trace/--odom-topic`，
+注意：`firefly-sim` 没有 `--help`（`sys.argv` 只认 `--script/--no-trace/--no-camera`，
 传别的参数不会报错而是直接开跑），别拿它做导入检查。
 
 Rust 二进制的参数一律是**直接跟 flag**（`--flag value`），不要加 `cargo run` 式的
@@ -146,7 +146,6 @@ uv run firefly-viz --save logs/wh_run.rrd   # 离线录制，交付物（见 §4
 # 终端 7 — 物理环境（被控对象）：发布传感器/状态/机体，订阅飞控指令
 uv run firefly-sim --no-trace --no-camera                     # 闭环：等飞控（终端 8）的指令（锁步：无指令则物理不推进）
 # 可选：uv run firefly-sim --no-trace --script wh_corridor     # bench：脚本轨迹夹具（真值反馈，不开终端 8）
-# 可选：... --odom-topic Firefly/VoidOdom                      # void 状态源（DIVO A/B 对比用）
 # 等待日志（仅 --script）：状态源就绪（Firefly/Odometry），任务时钟启动
 
 # 终端 8 — 飞控（最后起）：1kHz 控制环，订阅 PlantState/Airframe/Odometry/Imu/Reference/Command

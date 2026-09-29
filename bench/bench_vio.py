@@ -119,7 +119,6 @@ CLEANUP_PATTERNS = [
     "target/release/aliked", "target/debug/aliked",
     "target/release/lightglue", "target/debug/lightglue",
     "target/release/planner", "target/debug/planner",
-    "target/release/void", "target/debug/void",
 ]
 
 
@@ -365,7 +364,6 @@ def run_bench(
       一轮即见分晓。
     - `with_planner=True`：再起 planner（闭环参考；`--script` 模式下 sim
       忽略外部参考，仅验证 planner 存活与话题接线，不参与精度）。
-    - `WITH_VOID=1`：沿用旧语义，额外起 void（A/B 对比，不影响互锁话题选择）。
     """
     import iceoryx2 as iox2
     from firefly_mujoco.messages import ImuMessage, OdomMessage, TraceContext
@@ -453,16 +451,6 @@ def run_bench(
         print(open(log_sim).read()[-4000:], file=sys.stderr)
         raise RuntimeError("sim died on start")
 
-    # void 里程计（WITH_VOID=1 时）：--script 任务时钟等它的 ready 电平，
-    # 必须在 sim 15s 启动超时前就绪，故紧随 sim 启动。
-    # 注意：sim 互锁缺省监听 Firefly/Odometry（vio），WITH_VOID 场景需
-    # sim 侧 --odom-topic Firefly/VoidOdom 才 latch 到 void（见 main.py）。
-    void_proc = None
-    if os.environ.get("WITH_VOID"):
-        void_bin = find_bin("void")
-        log_void = REPO_ROOT / "logs" / "bench" / "void.log"
-        void_proc = start_service([str(void_bin)], log_void, "void")
-
     # wait for IMU topic to appear
     node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
     t0 = time.time()
@@ -543,7 +531,7 @@ def run_bench(
     asyncio.run(collect(duration + 4))
 
     stop_fleet(fleet)
-    for p in [vio_proc, sim_proc, void_proc]:
+    for p in [vio_proc, sim_proc]:
         if p is None:
             continue
         try:

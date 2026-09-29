@@ -1,11 +1,10 @@
 """发布构建的无真值启动检查；运行记录仅写 logs/ 下的 rrd。
 
 从仓库根运行：uv run --no-dev python bench/check_sensor_startup.py
-需要预先 cargo build --release -p vio -p void -p fc，且没有其他闭环进程运行。
+需要预先 cargo build --release -p vio -p fc，且没有其他闭环进程运行。
 """
 from __future__ import annotations
 
-import argparse
 from collections import deque
 from datetime import datetime, timezone
 import os
@@ -25,13 +24,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--estimator", choices=("vio", "void"), default="vio")
-    estimator = parser.parse_args().estimator
-    for name in (estimator, "fc"):
+    for name in ("vio", "fc"):
         if not (ROOT / "target" / "release" / name).is_file():
             raise RuntimeError(f"missing release binary: {name}")
-    output = ROOT / "logs" / f"{estimator}_sensor_startup_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.rrd"
+    output = ROOT / "logs" / f"vio_sensor_startup_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.rrd"
     output.parent.mkdir(exist_ok=True)
     env = os.environ.copy()
     env.update(MUJOCO_GL="egl", RUST_LOG="info")
@@ -56,7 +52,7 @@ def main() -> None:
         start("viz", [sys.executable, "-m", "firefly_viz.main", "--save", str(output)])
         time.sleep(2)
         check_alive()
-        start(estimator, [str(ROOT / "target/release" / estimator)])
+        start("vio", [str(ROOT / "target/release/vio")])
         start("fc", [str(ROOT / "target/release/fc")])
         iox2.set_log_level(iox2.LogLevel.Error)
         node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
@@ -65,7 +61,7 @@ def main() -> None:
             if capacity is not None:
                 builder = builder.subscriber_max_buffer_size(capacity)
             return builder.open_or_create().subscriber_builder().create()
-        odom = subscribe("Firefly/Odometry" if estimator == "vio" else "Firefly/VoidOdom", OdomMessage)
+        odom = subscribe("Firefly/Odometry", OdomMessage)
         control = subscribe("Firefly/Control", ControlMessage, 32)
         # 在夹具中屏蔽两种真值发布；算法进程使用与正常启动相同的二进制和配置。
         simulation = """
@@ -81,7 +77,6 @@ sim.main()
         start("sim", [sys.executable, "-c", simulation])
         first_ready = None
         first_position = None
-        initial_position = None
         samples = 0
         controls = 0
         saw_uninitialized = False
@@ -91,8 +86,6 @@ sim.main()
             while (sample := odom.receive()) is not None:
                 msg = sample.payload().contents
                 samples += 1
-                if initial_position is None and (estimator == "void" or msg.is_initialized):
-                    initial_position = np.array([msg.position_x, msg.position_y, msg.position_z])
                 if msg.is_initialized and first_ready is None:
                     first_ready = msg.timestamp
                     first_position = np.array([msg.position_x, msg.position_y, msg.position_z])
@@ -109,7 +102,7 @@ sim.main()
             raise AssertionError("无真值启动未就绪\n" + diagnostics)
         assert saw_uninitialized, "应观测到等待初始化阶段"
         assert first_ready >= 1.0, "不得跳过静止观测窗口"
-        assert np.linalg.norm(initial_position) < 0.1, f"初始位置应为局部原点: {initial_position}"
+        assert np.linalg.norm(first_position) < 0.1, f"初始位置应为局部原点: {first_position}"
         assert controls >= 100, "无 PlantState 时也必须持续发布零推力"
         print(f"PASS: ready={first_ready:.3f}s, local_position={first_position}, odom={samples}, controls={controls}")
     finally:

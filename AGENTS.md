@@ -33,7 +33,6 @@
 |---|---|
 | `EGO-Planner-v2/` | 规划器官方 C++（`swarm-playground/*/src/planner/traj_opt/`） |
 | `open_vins/` | MSCKF 官方 C++（firefly-vio* 的移植基准） |
-| `FAST-LIVO2/` | DIVO 的 IMU 传播、ESIKF 更新与建图对照 |
 | `iceoryx2/` | IPC 中间件源码 |
 | `logforth/`、`fastrace/` | 日志 / tracing 库源码 |
 | `purecv/` | 自研视觉库（LK 光流等，vio 前端引用） |
@@ -46,15 +45,22 @@
   纯数据 Options 直接 `serde::Deserialize` + `#[serde(default)]`，Python 用标准库
   `tomllib`；不引 YAML。
 
+## 技术路线
+
+- 状态估计主线为 VIO + ALIKED + LightGlue + 回环。
+- 当前视觉链路是离线库图匹配、PnP 与误差态融合；在线关键帧回环和位姿图优化
+  属于后续工作，文档与验收不得将库图重定位表述为已完成的在线回环。
+- 深度感知、GICP、飞控和规划器保持独立职责。
+
 ## 真值、初始化与坐标系
 
 - `Firefly/GroundTruth` 和 `Firefly/PlantState` 仅供评测、可视化对照；禁止进入
   估计器初始化、在线状态修正、飞控反馈、解锁判据与失效回退。
-- VIO 从静止 IMU 与图像视差初始化；VOID 复用静态 IMU 初始化。测量不足或
+- VIO 从静止 IMU 与图像视差初始化。测量不足或
   运动检查不通过时保持未就绪。飞控必须等待有效 IMU、已初始化且新鲜的里程计。
 - 原始里程计使用重力对齐的局部坐标系：初始位置为零、航向为规范自由度。
   静态地图、先验平面和全局目标接入前必须有独立定位得到的坐标变换，禁止从
-  真值生成该变换再反馈到算法。VOID 默认不启用仿真世界先验图。
+  真值生成该变换再反馈到算法。
 - 轨迹评测允许固定尺度的航向和平移对齐，必须在结果中注明；原始数据保留，
   对齐结果不得回流估计或控制。
 - 仿真内部状态用于物理推进、传感器生成、渲染；`--script` 的真值反馈属于
@@ -169,6 +175,6 @@ cargo run --release -p planner -- --map <实际存在的地图.ffmap>
 
 - `cargo test`
 - `cargo test --release -p firefly-planner --test random_map_benchmark -- --ignored`
-- 无真值进程启动：先 release 构建 vio / void / fc，确保没有其他闭环进程；运行
-  `uv run --no-dev python bench/check_sensor_startup.py`（VOID 加 `--estimator void`）。
+- 无真值进程启动：先 release 构建 vio / fc，确保没有其他闭环进程；运行
+  `uv run --no-dev python bench/check_sensor_startup.py`。
   此检查需 Linux EGL，录制只进 `logs/*.rrd`，所有子进程通过 SIGINT 退出。
