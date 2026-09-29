@@ -3092,6 +3092,9 @@ version = "0.1.0"
 dependencies = [
  "fastrace",
  "firefly-error",
+ "firefly-vio-core",
+ "firefly-vio-init",
+ "firefly-vio-types",
  "firefly-void-esikf",
  "firefly-void-map",
  "firefly-void-measure",

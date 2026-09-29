@@ -225,6 +225,9 @@ pub struct VioManagerOptions {
     pub imu_noises: ImuNoise,
     /// 初始化器选项（对照 `VioManagerOptions::init_options`）。
     pub init_options: firefly_vio_init::options::InitOptions,
+    /// 静态初始化是否等待运动激励。默认 false：静止上电后即可就绪；
+    /// 对照 `OpenVINS` 初始化器的 `wait_for_jerk=false` 分支。
+    pub init_wait_for_jerk: bool,
     /// MSCKF 更新选项。
     pub msckf_options: UpdaterOptions,
     /// SLAM 更新选项。
@@ -235,11 +238,8 @@ pub struct VioManagerOptions {
     pub dt_slam_delay: f64,
     /// 零速更新参数。
     pub zero_velocity_options: ZeroVelocityOptions,
-    /// GT 初始化时 bg/ba 的初始先验 σ（rad/s 与 m/s²）。默认 0.02（对照
-    /// C++ `initialize_with_gt` 的诚实先验：允许视觉学习偏置）。MuJoCo 仿真
-    /// 无真实偏置，视觉会把 KLT 亚像素偏置误学成 bg/ba（σ=0.02 下 bg 学到
-    /// -0.03 rad/s → roll 以 1.9°/s 漂 → 位置二次发散；实测 34s 2704m vs
-    /// 冻结 271m）。应用层可设小值（如 1e-6）声明"无偏置"场景。
+    /// 合成算法评测夹具的 bg/ba 初始先验 σ（rad/s 与 m/s²）。
+    /// 默认 0.02，对照 `OpenVINS` `initialize_with_gt`；传感器初始化使用其独立协方差。
     pub init_bias_sigma: f64,
     /// 体素选点参数（`firefly-voxel-svio`；默认关闭，保持现有行为）。
     pub voxel_options: firefly_voxel_svio::VoxelOptions,
@@ -251,6 +251,7 @@ impl Default for VioManagerOptions {
             state_options: StateOptions::default(),
             imu_noises: ImuNoise::default(),
             init_options: firefly_vio_init::options::InitOptions::default(),
+            init_wait_for_jerk: false,
             msckf_options: UpdaterOptions::default(),
             slam_options: UpdaterOptions::default(),
             triangulation_options: firefly_vio_core::triangulation::TriangulationOptions::default(),

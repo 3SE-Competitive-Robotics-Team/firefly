@@ -249,8 +249,10 @@ def interp_linear(x: np.ndarray, xp: np.ndarray, fp: np.ndarray) -> np.ndarray:
 
 
 def compute_metrics(
-    gt_times: np.ndarray, gt_pos: np.ndarray, odom_times: np.ndarray, odom_pos: np.ndarray, duration: float
+    gt_times: np.ndarray, gt_pos: np.ndarray, odom_times: np.ndarray, odom_pos: np.ndarray, duration: float,
+    *, alignment: str = "yaw_translation",
 ) -> dict:
+    """时间插值后评测；航向/平移只作用于副本，尺度固定，不反馈到算法。"""
     if len(gt_times) < 10 or len(odom_times) < 10:
         raise ValueError(f"not enough samples GT={len(gt_times)} odom={len(odom_times)}")
     # duration is relative to first GT sample (sim_time drifts ~8s wall offset)
@@ -267,6 +269,24 @@ def compute_metrics(
     if len(gt_times) < 10:
         raise ValueError("no overlapping time after trim")
     odom_aligned = interp_linear(gt_times, odom_times, odom_pos)
+    raw_err = odom_aligned - gt_pos
+    if alignment == "yaw_translation":
+        est_center = odom_aligned.mean(axis=0)
+        gt_center = gt_pos.mean(axis=0)
+        est_delta = odom_aligned - est_center
+        gt_delta = gt_pos - gt_center
+        dot = np.sum(est_delta[:, 0] * gt_delta[:, 0] + est_delta[:, 1] * gt_delta[:, 1])
+        cross = np.sum(est_delta[:, 0] * gt_delta[:, 1] - est_delta[:, 1] * gt_delta[:, 0])
+        yaw = float(np.arctan2(cross, dot))
+        c, sn = np.cos(yaw), np.sin(yaw)
+        rotation = np.array([[c, -sn, 0.0], [sn, c, 0.0], [0.0, 0.0, 1.0]])
+        translation = gt_center - rotation @ est_center
+        odom_aligned = odom_aligned @ rotation.T + translation
+    elif alignment == "none":
+        rotation = np.eye(3)
+        translation = np.zeros(3)
+    else:
+        raise ValueError(f"unknown evaluation alignment: {alignment}")
     err = odom_aligned - gt_pos
     norm = np.linalg.norm(err, axis=1)
     ate_rmse = float(np.sqrt(np.mean(norm**2)))
@@ -307,6 +327,10 @@ def compute_metrics(
             "norm": float(norm[-1]),
         }
     return {
+        "alignment": alignment,
+        "alignment_rotation": rotation.tolist(),
+        "alignment_translation": translation.tolist(),
+        "raw_ate_rmse": float(np.sqrt(np.mean(np.sum(raw_err**2, axis=1)))),
         "duration_s": float(duration),
         "num_frames": int(len(gt_times)),
         "ate_rmse": ate_rmse,
@@ -570,6 +594,7 @@ def run_bench(
 
     # pretty print
     print("\n=== VIO bench ===")
+    print(f" alignment {metrics['alignment']} (fixed scale); raw ATE RMSE {metrics['raw_ate_rmse']:.3f}")
     print(f" duration {metrics['duration_s']:.1f}s  frames {metrics['num_frames']}")
     print(f" ATE RMSE {metrics['ate_rmse']:.3f}  mean {metrics['ate_mean']:.3f}  max {metrics['ate_max']:.3f}  final {metrics['ate_final']:.3f}")
     print(f" RPE 1s RMSE {metrics['rpe_rmse_1s']:.3f}  mean {metrics['rpe_mean_1s']:.3f}")

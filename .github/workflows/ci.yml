@@ -42,5 +42,5 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
-      - name: Test trajectories
-        run: uv run --with pytest pytest apps/firefly-sim/tests/ -q -p no:cacheprovider
+      - name: Test simulation and evaluation
+        run: uv run --with pytest pytest apps/firefly-sim/tests/ bench/tests/ -q -p no:cacheprovider

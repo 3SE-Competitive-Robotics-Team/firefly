@@ -140,7 +140,7 @@ class DroneEnv:
         return np.diag(full).copy()
 
     def state(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """真值状态 `(pos, vel_world, quat_xyzw, angvel_body)`（飞控的 PlantState）。"""
+        """真值状态 `(pos, vel_world, quat_xyzw, angvel_body)`（仅供评测的 PlantState）。"""
         d = self.data
         quat_wxyz = d.body("drone").xquat
         return (

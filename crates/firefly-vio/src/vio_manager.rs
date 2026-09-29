@@ -4,7 +4,7 @@
 //! - [`VioManager::feed_measurement_imu`]：喂给传播器与初始化器缓冲；
 //! - [`VioManager::feed_measurement_camera`]：跟踪 → 初始化/传播+增广 →
 //!   MSCKF/SLAM 更新；
-//! - [`VioManager::initialize_with_gt`]：真值初始化（调试/仿真用）；
+//! - [`VioManager::initialize_with_gt`]：真值初始化（仅供合成算法评测夹具）；
 //! - [`VioManager::try_to_initialize`]：静态/动态初始化（`firefly-vio-init`）。
 //!
 //! 裁剪（对照 C++ 超出范围的部分）：ARUCO 跟踪器（`max_aruco_features=0`）、
@@ -264,7 +264,8 @@ impl VioManager {
         self.do_feature_propagate_update(message);
     }
 
-    /// 真值初始化（对照 `VioManager::initialize_with_gt`）。
+    /// 合成算法评测夹具初始化（对照 `VioManager::initialize_with_gt`）。
+    /// 应用运行入口必须使用传感器初始化，禁止调用此接口。
     ///
     /// `imustate` 为 `[time, q_GtoI(4), p_IinG(3), v_IinG(3), bg(3), ba(3)]`
     /// （共 17 维，MSCKF 状态序）。
@@ -318,12 +319,21 @@ impl VioManager {
     /// 尝试初始化（对照 `VioManager::try_to_initialize`）。
     ///
     /// 单线程实现：直接调用初始化器（对照 C++ 的 `use_multi_threading_subs`
-    /// 关闭时的同步路径）。`wait_for_jerk` 取决于是否启用零速更新（对照 C++）。
+    /// 关闭时的同步路径）。静止上电允许不等待急动，运动初始化由选项控制。
     ///
     /// 成功后：设置协方差（[`crate::state_helper::set_initial_covariance`]）、
-    /// 状态时间与启动时刻、清理过旧特征、恢复跟踪特征数。
+    /// 状态时间与启动时刻、清理过旧特征，保持应用配置的跟踪特征数。
     fn try_to_initialize(&mut self, _message: &CameraData) -> bool {
-        let wait_for_jerk = self.updater_zero_velocity.is_none();
+        self.params.init_options.camera_intrinsics = self.state.cameras.clone();
+        for (id, calib) in &self.state.calib_imu_to_cam {
+            let mut ext = nalgebra::SVector::<f64, 7>::zeros();
+            ext.fixed_rows_mut::<4>(0).copy_from(&calib.quat());
+            ext.fixed_rows_mut::<3>(4).copy_from(&calib.pos());
+            self.params.init_options.camera_extrinsics.insert(*id, ext);
+        }
+        self.params.init_options.calib_camimu_dt = self.time_offset();
+        self.initializer.configure(self.params.init_options.clone());
+        let wait_for_jerk = self.params.init_wait_for_jerk && self.updater_zero_velocity.is_none();
         let Some(result) = self
             .initializer
             .initialize(self.track_feats.database_mut(), wait_for_jerk)
@@ -352,15 +362,10 @@ impl VioManager {
         self.state.timestamp = result.timestamp;
         self.startup_time = result.timestamp;
 
-        // 清理过旧特征并恢复跟踪特征数（对照 C++）
+        // 清理初始化时刻之前的观测，跟踪特征数由应用配置。
         self.track_feats
             .database_mut()
             .cleanup_measurements(self.state.timestamp);
-        let num_pts = self.params.init_options.init_max_features;
-        let num_cam = self.params.state_options.num_cameras.max(1);
-        self.track_feats
-            .set_num_features((num_pts as f64 / num_cam as f64).floor() as usize);
-
         // 若移动中则禁用零速更新（对照 C++ 的 has_moved_since_zupt）
         if self.state.imu.vel().norm() > self.params.zero_velocity_options.max_velocity {
             self.has_moved_since_zero_vel = true;

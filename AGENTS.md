@@ -33,6 +33,7 @@
 |---|---|
 | `EGO-Planner-v2/` | 规划器官方 C++（`swarm-playground/*/src/planner/traj_opt/`） |
 | `open_vins/` | MSCKF 官方 C++（firefly-vio* 的移植基准） |
+| `FAST-LIVO2/` | DIVO 的 IMU 传播、ESIKF 更新与建图对照 |
 | `iceoryx2/` | IPC 中间件源码 |
 | `logforth/`、`fastrace/` | 日志 / tracing 库源码 |
 | `purecv/` | 自研视觉库（LK 光流等，vio 前端引用） |
@@ -45,6 +46,20 @@
   纯数据 Options 直接 `serde::Deserialize` + `#[serde(default)]`，Python 用标准库
   `tomllib`；不引 YAML。
 
+## 真值、初始化与坐标系
+
+- `Firefly/GroundTruth` 和 `Firefly/PlantState` 仅供评测、可视化对照；禁止进入
+  估计器初始化、在线状态修正、飞控反馈、解锁判据与失效回退。
+- VIO 从静止 IMU 与图像视差初始化；VOID 复用静态 IMU 初始化。测量不足或
+  运动检查不通过时保持未就绪。飞控必须等待有效 IMU、已初始化且新鲜的里程计。
+- 原始里程计使用重力对齐的局部坐标系：初始位置为零、航向为规范自由度。
+  静态地图、先验平面和全局目标接入前必须有独立定位得到的坐标变换，禁止从
+  真值生成该变换再反馈到算法。VOID 默认不启用仿真世界先验图。
+- 轨迹评测允许固定尺度的航向和平移对齐，必须在结果中注明；原始数据保留，
+  对齐结果不得回流估计或控制。
+- 仿真内部状态用于物理推进、传感器生成、渲染；`--script` 的真值反馈属于
+  运动生成夹具。它们不构成无人机可访问的状态源，也不证明真实反馈闭环成功。
+
 ## VIO（firefly-vio*）约定
 
 - 标定/噪声等数值参数：改对应 `*Options` 默认值并在 doc 注释标注单位与来源；
@@ -53,8 +68,8 @@
 
 ## 运行（MuJoCo 双语言闭环）
 
-双语言闭环四个进程（可先开 viewer，见下），iceoryx2 IPC（`Firefly/*` 话题）通信，fastrace
-trace 跨进程续接（传感器→vio→飞控→参考 单周期 trace）：
+最小闭环为 sim / vio / fc，另起 firefly-viz 记录（可先开 viewer，见下），iceoryx2 IPC（`Firefly/*` 话题）通信，fastrace
+trace 上下文随 IPC 消息跨进程传递：
 
 ```
 Python sim（MuJoCo 物理 + 传感器发布，被控对象）→ vio（MSCKF 位姿估计）
@@ -69,7 +84,7 @@ track | land | disarm`；`cargo build --release -p ffctl`）驱动，模式与�
 `nav_state` + ArduPilot 模式机，细节见 `docs/how_to_run.md` §3.1）。
 
 **锁步**：fc 每个 tick 都发 `Firefly/Control`（上锁时零推力），被控对象按指令新鲜度
-（墙钟 50ms）决定物理是否推进——无有效指令则世界停转（状态/传感器仍发冻结内容），
+（墙钟 50ms）决定物理是否推进——无有效指令则物理与传感器时间暂停，
 `fc` 不起就不动；被控对象不自行供力。
 
 按顺序各开一个终端（可先开 viewer，见下）：
@@ -85,19 +100,19 @@ uv run firefly-viz
 uv sync   # 首次：安装 firefly-mujoco / firefly-sim（根 workspace）
 uv run firefly-sim
 
-# 2. Rust VIO：订阅 MuJoCo IMU/双目灰度，MSCKF 视觉更新，发布 odom 10Hz；
+# 2. Rust VIO：订阅 MuJoCo IMU/双目灰度，MSCKF 视觉更新，发布 odom 100Hz（视觉更新 10Hz）；
 #    估计位姿与前端健康度写入共享 viewer
 cargo run --release -p vio
 
-# 3. Rust 飞控（最后起）：1kHz 控制环，订阅 PlantState/Airframe/odom/IMU/参考/Command，
+# 3. Rust 飞控：1kHz 控制环，订阅 Airframe/odom/IMU/参考/Command；PlantState 仅供评测，
 #    发布 Firefly/Control（4 电机推力）+ 控制量进共享 viewer（fc/debug/*）
 cargo run --release -p fc
 
-# 4.（可选）Rust 重规划：订阅 odom 作为状态源（新鲜超时回退轨迹模拟），
-#    未指定 --map 时加载 MuJoCo 默认场景静态地图，发布参考回传到飞控
+# 4.（可选，需先完成局部里程计与地图对齐）Rust 重规划：
+#    订阅里程计，发布参考回传到飞控
 cargo run --release -p planner
 
-# 5.（可选）地面站指令：解锁 → 起飞（一次性 CLI；被拒原因在 fc 日志与 rrd logs/fc）
+# 5. 等静止初始化完成后：解锁 → 起飞（被拒原因在 fc 日志与 rrd logs/fc）
 ./target/release/ffctl fc arm && ./target/release/ffctl fc takeoff 1.0
 ```
 
@@ -112,15 +127,14 @@ rerun 可视化约定：vio 写 `vio/odom` + `vio/traj`（估计位姿/轨迹）
 独立运行（不依赖闭环）：
 
 ```bash
-cargo run --release -p planner -- --map apps/planner/maps/gate.ffmap  # 静态地图
+cargo run --release -p planner -- --map <实际存在的地图.ffmap>
 ```
 
 ## 构建
 
-- Rust：`cargo build`（workspace 含 `apps/vio`、`apps/planner`，排除 `apps/firefly-sim`）。
-- **运行进程一律加 `--release`**：debug 构建有约 6× 运行时惩罚，VIO/planner/render
-  这类数值与逐像素代码尤其明显；`cargo test` 仍用 debug 迭代。
-- Python：`uv sync`（根 workspace 统一管理 `firefly-mujoco` / `firefly-sim`，
+- Rust：`cargo build`（workspace 自动纳入 `crates/*` 与 Rust `apps/*`，排除 Python 应用 `firefly-sim` / `firefly-viz`）。
+- **运行进程一律加 `--release`**：数值与逐像素代码必须使用优化构建，具体开销以当前版本 trace 实测为准；`cargo test` 仍用 debug 迭代。
+- Python：`uv sync`（根 uv workspace 管理 `packages/*` 与 `firefly-sim` / `firefly-viz`，
   依赖与脚本见各自 `pyproject.toml`）。
 
 ## Log / Debug（rerun rrd，有且只有这一种记录方式）
@@ -155,3 +169,6 @@ cargo run --release -p planner -- --map apps/planner/maps/gate.ffmap  # 静态�
 
 - `cargo test`
 - `cargo test --release -p firefly-planner --test random_map_benchmark -- --ignored`
+- 无真值进程启动：先 release 构建 vio / void / fc，确保没有其他闭环进程；运行
+  `uv run --no-dev python bench/check_sensor_startup.py`（VOID 加 `--estimator void`）。
+  此检查需 Linux EGL，录制只进 `logs/*.rrd`，所有子进程通过 SIGINT 退出。

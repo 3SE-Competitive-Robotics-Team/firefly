@@ -29,46 +29,56 @@ fn per_frame_latency_budget() {
     let opts = VoidOptions::default();
     let mut odo = VoidOdometry::new(opts);
 
-    // 初始化（一条 IMU 让时间轴就位）
-    odo.process_imu(&ImuSample {
-        t: 0.0,
-        omega: Vector3::zeros(),
-        acc: Vector3::new(0.0, 0.0, 9.81),
-    });
+    for i in 0..=120 {
+        odo.process_imu(&ImuSample {
+            t: f64::from(i) * 0.01,
+            omega: Vector3::zeros(),
+            acc: Vector3::new(0.0, 0.0, 9.81),
+        });
+    }
 
     let (h, w) = (240usize, 320usize);
     let depth = synth_depth(h, w, 3.0);
     let gray = vec![128u8; h * w];
 
-    let camera = CameraFrame {
-        t: 0.0,
+    let mut camera = CameraFrame {
+        t: 1.2,
         left_gray: &gray,
         width: w,
         height: h,
     };
-    let depth_frame = DepthFrame {
-        t: 0.0,
+    let mut depth_frame = DepthFrame {
+        t: 1.2,
         depth: &depth,
         width: w,
         height: h,
     };
-    let make_frame = || FrameInput {
-        camera: &camera,
-        depth: &depth_frame,
-    };
-
-    // 预热一帧（建图）
-    odo.process_frame(&make_frame()).unwrap();
+    let out = odo
+        .process_frame(&FrameInput {
+            camera: &camera,
+            depth: &depth_frame,
+        })
+        .unwrap();
+    assert!(out.is_some(), "完整静止窗口后必须运行建图");
 
     // 计时 10 帧
     let t0 = Instant::now();
     for k in 1..=10usize {
         odo.process_imu(&ImuSample {
-            t: 0.1 + k as f64 * 0.01,
+            t: 1.2 + k as f64 * 0.01,
             omega: Vector3::zeros(),
             acc: Vector3::new(0.0, 0.0, 9.81),
         });
-        odo.process_frame(&make_frame()).unwrap();
+        camera.t = 1.2 + k as f64 * 0.01;
+        depth_frame.t = camera.t;
+        assert!(
+            odo.process_frame(&FrameInput {
+                camera: &camera,
+                depth: &depth_frame
+            })
+            .unwrap()
+            .is_some()
+        );
     }
     let per_frame = t0.elapsed().as_secs_f64() / 10.0;
     // 实测基线（M 系列，release）：3000 点全量 ESIKF ~4.9s/帧——主循环
@@ -76,10 +86,6 @@ fn per_frame_latency_budget() {
     assert!(
         per_frame < 5.5,
         "单帧 {:.1}ms 超基线（5.5s）",
-        per_frame * 1000.0
-    );
-    println!(
-        "per-frame: {:.1} ms（含深度+视觉+建图）",
         per_frame * 1000.0
     );
 }

@@ -52,8 +52,8 @@ pub enum Reject {
     EstimatorNotReady,
     /// 未收到机体/执行器描述。
     NoAirframe,
-    /// 被控对象状态陈旧。
-    PlantStale,
+    /// 里程计陈旧。
+    OdometryStale,
     /// IMU 陈旧。
     ImuStale,
     /// 不在起飞点地面（解锁要求停在地面）。
@@ -73,7 +73,7 @@ impl Reject {
             Self::WrongState => "当前状态不允许",
             Self::EstimatorNotReady => "状态估计未就绪",
             Self::NoAirframe => "未收到机体描述",
-            Self::PlantStale => "被控对象状态陈旧",
+            Self::OdometryStale => "里程计陈旧",
             Self::ImuStale => "IMU 陈旧",
             Self::NotOnGround => "不在起飞点地面",
             Self::ReferenceNotReady => "参考流未就绪",
@@ -142,8 +142,8 @@ pub struct Health {
     pub estimator_ready: bool,
     /// 已收到机体/执行器描述（`Firefly/Airframe`）。
     pub airframe_ready: bool,
-    /// 被控对象状态新鲜（`Firefly/PlantState`）。
-    pub plant_alive: bool,
+    /// 里程计新鲜（`Firefly/Odometry`）。
+    pub odometry_alive: bool,
     /// IMU 新鲜。
     pub imu_alive: bool,
 }
@@ -504,8 +504,8 @@ impl FlightFsm {
         if !health.airframe_ready {
             return Err(Reject::NoAirframe);
         }
-        if !health.plant_alive {
-            return Err(Reject::PlantStale);
+        if !health.odometry_alive {
+            return Err(Reject::OdometryStale);
         }
         if !health.imu_alive {
             return Err(Reject::ImuStale);
@@ -633,7 +633,7 @@ mod tests {
         Health {
             estimator_ready: true,
             airframe_ready: true,
-            plant_alive: true,
+            odometry_alive: true,
             imu_alive: true,
         }
     }
@@ -709,10 +709,10 @@ mod tests {
             ),
             (
                 Health {
-                    plant_alive: false,
+                    odometry_alive: false,
                     ..ok_health()
                 },
-                Reject::PlantStale,
+                Reject::OdometryStale,
             ),
             (
                 Health {

@@ -1,4 +1,12 @@
-# How to Run（全链路，8 进程）
+# How to Run
+
+最小传感器闭环见 [README](../README.md)。启动时保持静止：VIO 使用 IMU 与
+双目视差初始化，VOID 使用静止 IMU 初始化；真值不进入估计或控制。
+原始里程计位于局部坐标系，初始位置为零、航向为规范自由度。
+
+下述地图定位和规划进程是可选组件。连接 MuJoCo 世界系静态地图、视觉库图、
+全局目标前，必须通过独立定位建立地图与局部里程计的变换；不能直接套用场景
+起点或真值对齐。当前最小闭环不启动这些可选组件，VOID 默认关闭世界先验图。
 
 当前场景由 `configs/scene.toml` 的 `scene` 决定，`sim` / `render` / `viz` 共用
 同一份（单一来源防漂移）：缺省 **`rmuc2026`**（RMUC 场地，`models/rmuc2026/`），
@@ -13,7 +21,7 @@
 | # | 进程 | App | 订阅 | 发布 | 频率 |
 |---|---|---|---|---|---|
 | 1 | `firefly-viz` | `apps/firefly-viz` | `Firefly/Viz` + `Firefly/Log` | （写 viewer / rrd） | 消费落盘 |
-| 2 | `vio` | `apps/vio` (MSCKF) | `Imu` + 双目灰度 + 真值（仅初始化对齐） | `Firefly/Odometry`（100Hz propagation）+ `Firefly/Viz` (10Hz) | 10Hz 视觉修正 / 100Hz 输出 |
+| 2 | `vio` | `apps/vio` (MSCKF) | `Imu` + 双目灰度 + 真值（仅可视化对照） | `Firefly/Odometry`（100Hz 发布）+ `Firefly/Viz` (10Hz) | 10Hz 视觉修正 / 100Hz 输出 |
 | 3 | `gicp` | `apps/gicp` (GICP 全局重定位 + FusionFilter) | `Odometry` (100Hz) + `Depth` + `Firefly/PoseObservation` | `Firefly/CorrectedOdometry` | 1Hz 重定位 / 100Hz 融合 |
 | 4 | `aliked` | `apps/aliked` (ALIKED-N16 特征提取，`ort`) | `Firefly/CameraLeft`（左目灰度） | `Firefly/Features`（带事件唤醒） | 1Hz 节流推理 |
 | 5 | `lightglue` | `apps/lightglue` (LightGlue 匹配 + PnP，`ort`) | `Firefly/Features` + `Firefly/CorrectedOdometry`（先验，优先矫正值）+ 库图 `--map` | `Firefly/PoseObservation`（→ `gicp` 融合） | 特征到即查 |
@@ -38,7 +46,7 @@ vio/aliked/gicp/planner，**不进** rrd（vio 只发位姿/轨迹/健康度瘦�
 解锁/起飞/降落由地面站指令 `Firefly/Command`（`./target/release/ffctl fc`，见 §3.1）驱动，
 模式与失效保护全在飞控的 `FlightFsm` 里。**锁步**：飞控每 tick 都发指令（上锁时
 零推力），被控对象按指令新鲜度（墙钟 50ms）决定物理是否推进——无有效指令则世界
-停转（状态/传感器仍发冻结内容），飞控一起就续上；被控对象不自行供力（对照
+停转（传感器时间暂停），飞控一起就续上；被控对象不自行供力（对照
 ArduPilot SITL 同进程 / PX4 lockstep，两家都没有被控对象侧兜底）。
 `--script` 模式例外：那是 VIO bench 的轨迹跟踪夹具（真值反馈，`DroneEnv.apply_pd`），
 不带飞控、不受锁步约束。
@@ -77,7 +85,7 @@ export RUST_LOG=info
 ## 1. 构建验证（release）
 
 ```bash
-cargo build --release -p vio -p gicp -p aliked -p lightglue -p planner -p ffctl
+cargo build --release -p vio -p void -p fc -p gicp -p aliked -p lightglue -p planner -p ffctl
 cargo test
 uv run python -c "from firefly_sim.trajectories import TRAJECTORIES; print(sorted(TRAJECTORIES))"
 uv run firefly-viz --help      # 检查可视化进程可导入（argparse 生效）
@@ -148,7 +156,7 @@ cargo run --release -p fc
 
 # 终端 9 — 地面站指令（一次性 CLI，不是常驻进程）：解锁 → 起飞
 # 编译：cargo build --release -p ffctl（或 cargo run --release -p ffctl -- <verb> …）
-./target/release/ffctl fc arm            # 解锁（要求：估计就绪 + 机体描述 + 被控对象/IMU 新鲜 + 在地面）
+./target/release/ffctl fc arm            # 解锁（要求：估计就绪 + 机体描述 + 里程计/IMU 新鲜 + 在地面）
 ./target/release/ffctl fc takeoff 1.0    # 自动起飞到相对起飞点 1.0 m，到位后自动进 HOLD
 ./target/release/ffctl fc land           # 自动降落，落地后自动上锁（DISARMED）
 # 其它：hold（原地保持）/ track（交给 planner 的参考流）/ disarm（仅地面）/ goal X Y Z（规划目标）
@@ -275,10 +283,10 @@ x∈[-2,48]、y∈[-9,9]、z∈[0,5.2]）。不可达目标会被 `PlannerManage
 
 rrd 实体（`sim_time` 时间轴；`logs/*` 在发布端尚无 sim 时钟时回落 `wall_time` 轴）：
 
-* `vio/odom` (橙) / `gt/pose` (蓝) — VIO 估计 vs 真值位姿；`vio/traj` / `gt/traj` — 轨迹线
-* `corr/odom` (绿) / `corr/traj` — GICP+视觉融合后位姿与轨迹（与 vio/gt 同 10Hz，可逐点对比）；`corr/debug/gate`（`[metric,limit,applied,accepted]` 本次判决门与注入量）/ `corr/debug/drift`（`[dx,dy,dz]` 判决时刻累计漂移）— 每次融合尝试即发的诊断标量
+* `vio/odom` (橙) / `gt/pose` (蓝) — 局部里程计与场景世界真值；`vio/traj` / `gt/traj` — 原始轨迹。空间坐标不同，直接叠图的距离不能当作漂移
+* `corr/odom` (绿) / `corr/traj` — GICP+视觉融合后位姿与轨迹（地图系，比较前须核对空间坐标系）；`corr/debug/gate`（`[metric,limit,applied,accepted]` 本次判决门与注入量）/ `corr/debug/drift`（`[dx,dy,dz]` 判决时刻累计漂移）— 每次融合尝试即发的诊断标量
 * `vio/debug/track_length` / `db_size` / `track_avg_len` — 前端健康度
-* `fc/debug/*` — 飞控：`state`（模式整数：0 `DISARMED`、1 `ARMED_GROUNDED`、2 `TAKEOFF`、3 `HOLD`、4 `TRACK`、5 `LAND`，对照 `FlightState::code`）/ `altitude`（相对起飞点高度，m）/ `thrust_total` / `motors` / `tilt_deg` / `attitude_err_deg` / `tick_rate` / `late_max_ms` / `saturated`
+* `fc/debug/*` — 飞控：`state`（模式整数：0 `DISARMED`、1 `ARMED_GROUNDED`、2 `TAKEOFF`、3 `HOLD`、4 `TRACK`、5 `LAND`，对照 `FlightState::code`）/ `altitude`（相对起飞点高度，m）/ `thrust_total` / `motors` / `tilt_deg` / `tilt_err_deg` / `tick_rate` / `late_max_ms` / `saturated`
 * `plan/map`（启动一次性）+ `plan/perceived`（深度感知在线占据）+ `plan/global_path`（绿）、`plan/local_traj`（蓝+黄速度）、`plan/planes`、`plan/drone`；`plan/motions` 仅动态地图有 MOTION 段时出现
 * `logs/<tag>` (`sim`/`vio`/`gicp`/`aliked`/`lightglue`/`planner`/`fc`) — 全进程日志聚合为 `TextLog`，可检索（模式转移、指令被拒原因、失效保护都在这里）
 
@@ -312,7 +320,7 @@ uv run python bench/bench_suite.py --duration 34 --turns 1 --tag fleet5
 # 多轮统计：--turns 3（约 45 分钟）
 ```
 
-bench 经 IPC 直采 GT/odom 算 ATE/RPE 打 stdout + `logs/bench/*.json`（含 `metrics` +
+bench 经 IPC 直采 GT/odom，时间插值后用固定尺度的航向和平移对齐算 ATE/RPE（结果含 `alignment`、变换与 `raw_ate_rmse`） 打 stdout + `logs/bench/*.json`（含 `metrics` +
 `corrected_metrics` + `ΔRMSE`）。注意两条纪律：① json 是中间量，结论只认 §4 的 rrd；
 ② bench 不起 `firefly-viz`，其 per-turn rrd 为空，要录像用 §2 的 7 终端 + `--save`。
 另：仿真噪声（IMU/深度 `np.random`）与任务时钟 latch 时刻（vio 就绪快慢）都未播种，
@@ -334,7 +342,7 @@ bench 经 IPC 直采 GT/odom 算 ATE/RPE 打 stdout + `logs/bench/*.json`（含 
 
 1. `uv run firefly-viz --save logs/wh_run.rrd` 最先起 → 其余 6 进程按 `vio → gicp → aliked → lightglue → planner → sim` 顺序启动。各进程日志均出现 `日志聚合已挂载（tag=...）` + `已订阅 ...` / `已打开话题`；`firefly-viz` 出现 `已订阅 Firefly/Viz + Firefly/Log`。（Rust 日志需 `RUST_LOG=info`，缺省只打 error。）
 2. 起 `fc` 后 `./target/release/ffctl fc arm`（先 `cargo build --release -p ffctl`）→ `fc` 日志 `指令 Arm → ARMED_GROUNDED`（被拒则一行中文原因）；`fc/debug/state` 由 0 变 1。
-3. `./target/release/ffctl fc takeoff 1.0` → 日志 `模式 ARMED_GROUNDED → TAKEOFF`，看真值位姿升到 1.0 m 附近后 `模式 TAKEOFF → HOLD`（`fc/debug/altitude` ≈ 1.0）。
+3. `./target/release/ffctl fc takeoff 1.0` → 日志 `模式 ARMED_GROUNDED → TAKEOFF`，看相对起飞点的真值高度增加约 1.0 m后 `模式 TAKEOFF → HOLD`（`fc/debug/altitude` ≈ 1.0）。
 4. `./target/release/ffctl planner goal 30 0 1` + `./target/release/ffctl fc track` → `planner` 日志 `收到新目标`，`sim` 日志 `收到参考` 且无人机开始移动。
 5. `./target/release/ffctl fc land` → `模式 ... → LAND`，落地后 `LAND → DISARMED`（`fc/debug/state` 回 0，推力归零）。
 6. `Ctrl+C` 后 `全部进程已结束` / `优雅退出`，进程组无残留（`ps aux | grep firefly` 为空）。
@@ -346,7 +354,7 @@ bench 经 IPC 直采 GT/odom 算 ATE/RPE 打 stdout + `logs/bench/*.json`（含 
 | 被控对象物理不动（`sim` 日志停在 `无有效飞控指令`） | 锁步：`fc` 未起或已停发指令 | 起 `fc`（不做地面站动作时它也会发零推力指令）；对照 §3.1 |
 | `指令 Arm 被拒：状态估计未就绪` | VIO 未 `is_initialized`（或未起） | 先起 `vio`；静止在停机坪上应当也能初始化 |
 | `指令 Track 被拒：参考流未就绪` | planner 未起或参考流断（planner 10Hz） | 先起 `planner`（或 `ffctl planner goal` 触发重规划），再 `track` |
-| 无人机拒绝起飞且日志说不在停机坪地面 | 真值/估计高度超出 0.06m 或垂速>0.15m/s | 等停稳（被控对象停在地面）；检查 `configs/sim.toml` 的 `start` |
+| 无人机拒绝起飞且日志说不在停机坪地面 | 估计高度超出 0.06m 或垂速>0.15m/s | 等停稳（被控对象停在地面）；检查 `configs/sim.toml` 的 `start` |
 | `planner` 日志 `目标 (...) 不可达` | 目标点在占据体素内或超出地图 | 换 warehouse 范围内空地点，如 `30 0 1` |
 | `GICP矫正接受` 迟迟不出现 | 空地图或点云 `<30` 点，或 `chi2` 拒收 | 检查 `--map` 路径（warehouse 链用 `warehouse.ffmap`），近处对墙增加特征 |
 | `odom 订阅不可用` | `vio` 未启动或 iceoryx2 幽灵端口 | 重启全栈并清理 `/tmp/iceoryx2` |

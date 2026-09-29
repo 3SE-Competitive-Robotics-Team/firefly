@@ -45,12 +45,6 @@ const DEFAULT_CONFIG: &str = "configs/vio.toml";
 const ODOM_PERIOD: f64 = 0.01;
 /// 可视化发布周期（秒）：10Hz（位姿/轨迹，防 Viz 话题洪泛）。
 const VIZ_PERIOD: f64 = 0.1;
-/// `MuJoCo` 场景无人机起点（warehouse 走廊西端；GT 先验）。
-const SIM_START: [f64; 3] = [2.0, 0.0, 1.0];
-/// 就绪判据：连续发布 `READY_MIN_COUNT` 条 `is_initialized=true` 的 odom 后
-/// 锁存 ready（`vio` 的 `initialized()` 在 GT 对齐后即为真，电平触发满足
-/// sim 互锁；计数门滤掉单帧毛刺）。
-const READY_MIN_COUNT: u32 = 10;
 /// rerun 图例颜色：真值=蓝、估计=橙。
 const GT_COLOR: (u8, u8, u8) = (60, 120, 255);
 const ODOM_COLOR: (u8, u8, u8) = (255, 140, 0);
@@ -118,8 +112,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cfg.imu.accel_noise,
             cfg.imu.accel_walk,
         ),
-        // MuJoCo 无真实 IMU 偏置：收紧 bg/ba 先验防视觉误学（真机改回 0.02）
-        init_bias_sigma: cfg.estimator.init_bias_sigma,
         ..VioManagerOptions::default()
     };
     params.state_options.num_cameras = 2;
@@ -201,60 +193,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // 真值初始化：排空 GT 取最新一条（buffer=1 下 receive 即最新），用其
-    // 位置/速度/姿态对齐真实起点。不假设 sim 静止起飞（demo 闭环）还是
-    // --script 轨迹（起点速度非零）——硬编码静止先验会让 odom 与 GT 起点
-    // 错位（实测 --script 起点 0.94m/s）。等待放宽到 120s：runbook 要求
-    // sim 最后起（等 ORT 模型加载约数十秒），2s 截断会让 vio 把 (2,0,1)
-    // 的 stale 先验带进已飞走的链路（实测 3m+ 起始错位，VIO 永不收敛）。
-    let mut imustate = [0.0f64; 17];
-    imustate[4] = 1.0; // qw（回退：静止水平）
-    imustate[5] = SIM_START[0];
-    imustate[6] = SIM_START[1];
-    imustate[7] = SIM_START[2];
-    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(2);
-    let mut got_gt = false;
-    while std::time::Instant::now() < deadline
-        && let Some(s) = &gt_sub
-    {
-        // 排空到最新（发布端 10Hz 常发，buffer=1 下最后一条即当前真值）
-        let mut latest = None;
-        while let Ok(Some(sample)) = s.receive() {
-            latest = Some(sample);
-        }
-        if let Some(sample) = latest {
-            let m = &*sample;
-            imustate[0] = m.timestamp;
-            imustate[1] = m.quat_x;
-            imustate[2] = m.quat_y;
-            imustate[3] = m.quat_z;
-            imustate[4] = m.quat_w;
-            imustate[5] = m.position_x;
-            imustate[6] = m.position_y;
-            imustate[7] = m.position_z;
-            imustate[8] = m.velocity_x;
-            imustate[9] = m.velocity_y;
-            imustate[10] = m.velocity_z;
-            got_gt = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    if got_gt {
-        log::info!(
-            "真值初始化：t={:.2} p=({:.2},{:.2},{:.2}) v=({:.2},{:.2},{:.2})",
-            imustate[0],
-            imustate[5],
-            imustate[6],
-            imustate[7],
-            imustate[8],
-            imustate[9],
-            imustate[10]
-        );
-    } else {
-        log::info!("无真值，回退静止先验：t=0 ({SIM_START:?})");
-    }
-    vio.initialize_with_gt(&imustate);
+    log::info!("等待静止 IMU 与双目观测初始化（局部原点，真值仅供评测）");
 
     run_loop(
         &mut vio,
@@ -300,10 +239,6 @@ fn run_loop(
     let mut imu_batch_count = 0u64;
     let t_wall_start = std::time::Instant::now();
     let mut next_diag_wall = DIAG_PERIOD;
-    // 就绪状态机：`initialized()` 为真连续计数，满门锁存并单次通报；
-    // sim 侧 `--script` 互锁据此电平启动任务时钟。
-    let mut ready_count = 0u32;
-    let mut ready_reported = false;
 
     // 事件唤醒端：IMU + 相机对（notify 来自 sim；odom 由 OdomPublisher 自动通知）
     let imu_events = TopicListener::with_topic(node, firefly_pubsub::imu::IMU_TOPIC)?;
@@ -409,18 +344,6 @@ fn run_loop(
             let s = &vio.state;
             let init = vio.initialized();
             publish_odom(odom_pub, t_sim, s.timestamp, &s.imu, init);
-            // 就绪计数：为真连续累加，断一次清零；满门锁存并单次通报
-            if init {
-                ready_count += 1;
-                if !ready_reported && ready_count >= READY_MIN_COUNT {
-                    ready_reported = true;
-                    log::info!(
-                        "VIO 就绪（initialized 连续 {ready_count} 帧）：sim --script 互锁可启动任务时钟"
-                    );
-                }
-            } else {
-                ready_count = 0;
-            }
             next_odom += ODOM_PERIOD;
             // 落后超过一个周期（启动追赶 / 长阻塞后恢复）时重同步到当前时刻，
             // 避免按 100Hz 节奏洪泛补发积压的 odom

@@ -30,7 +30,7 @@ const AIRFRAME_SERVICE_MAX: usize = 4;
 /// 四元数 `[x,y,z,w]`（与 [`firefly_flight::QuadState`] 同约定），角速度机体系。
 ///
 /// ⚠️ 与 [`crate::odom::OdomMessage`] 的 JPL `q_GtoI`（估计姿态）**不同约定**：
-/// 本消息供飞控内环使用（真值），估计姿态须经约定转换后才能进控制。
+/// 本消息仅供评测与可视化，禁止用于控制、初始化或健康判据。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
 #[type_name("FireflyPlantStateMessage")]

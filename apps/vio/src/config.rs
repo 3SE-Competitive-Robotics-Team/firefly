@@ -72,8 +72,6 @@ impl Default for Frontend {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct Estimator {
-    /// GT 初始化 bg/ba 先验 σ（sim 无偏置用 1e-6，真机 0.02）。
-    pub init_bias_sigma: f64,
     /// 三角化深度/基线比上限。
     pub max_baseline: f64,
 }
@@ -81,7 +79,6 @@ pub struct Estimator {
 impl Default for Estimator {
     fn default() -> Self {
         Self {
-            init_bias_sigma: 1e-6,
             max_baseline: firefly_vio_core::triangulation::TriangulationOptions::default()
                 .max_baseline,
         }
@@ -170,7 +167,6 @@ mod tests {
         let cfg: VioConfig = toml::from_str("[estimator]\nmax_baseline = 60.0").unwrap();
         assert_eq!(cfg.camera.width, 320);
         assert!((cfg.estimator.max_baseline - 60.0).abs() < 1e-9);
-        assert!((cfg.estimator.init_bias_sigma - 1e-6).abs() < 1e-15);
         assert_eq!(cfg.slam.max_slam_features, 25);
         assert!(!cfg.slam.voxel_selection);
     }

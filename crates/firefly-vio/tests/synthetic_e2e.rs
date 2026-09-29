@@ -408,3 +408,53 @@ fn synthetic_pure_msckf_with_bias() {
         ba.x
     );
 }
+
+/// 静止双目与带陀螺零偏的 IMU 独立完成启动；无外部状态注入。
+#[test]
+fn sensor_only_stationary_startup() {
+    let mut mgr = build_manager_ex(0, true);
+    let pts = world_points();
+    let position = Vector3::new(0.0, 0.0, 1.0);
+    let images: Vec<_> = [-0.025, 0.025]
+        .into_iter()
+        .enumerate()
+        .map(|(i, y)| {
+            let uv: Vec<_> = pts
+                .iter()
+                .filter_map(|p| project(*p, position, Vector3::new(0.0, y, 0.0)))
+                .collect();
+            render_dots(&uv, i + 1, 7)
+        })
+        .collect();
+    for k in 0..=250 {
+        let time = 10.0 + f64::from(k) * 0.01;
+        mgr.feed_measurement_imu(&ImuData {
+            timestamp: time,
+            wm: BIAS_G_TRUE,
+            am: Vector3::new(0.0, 0.0, 9.81),
+        });
+        if k % 10 == 0 {
+            mgr.feed_measurement_camera(&CameraData {
+                timestamp: time,
+                sensor_ids: vec![0, 1],
+                images: images.clone(),
+                masks: vec![
+                    GrayImage {
+                        width: W,
+                        height: H,
+                        data: vec![0; W * H]
+                    };
+                    2
+                ],
+            });
+        }
+        if k < 100 {
+            assert!(!mgr.initialized(), "完整静止窗口之前不得就绪");
+        }
+    }
+    assert!(mgr.initialized(), "传感器观测应能独立初始化");
+    assert!((mgr.state.imu.bias_g() - BIAS_G_TRUE).norm() < 1e-5);
+    assert!(mgr.state.imu.pos().norm() < 0.01);
+    assert!(mgr.state.imu.vel().norm() < 0.01);
+    assert!(mgr.state.cov.iter().all(|v| v.is_finite()));
+}

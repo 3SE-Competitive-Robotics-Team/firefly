@@ -1,7 +1,7 @@
 //! 飞控进程：1kHz 控制环（`firefly-flight`）+ iceoryx2。
 //!
 //! 输入：
-//! - `Firefly/PlantState`（被控对象真值状态，200Hz）——位置/速度回落源 + 姿态校验；
+//! - `Firefly/PlantState`（真值，200Hz）——仅供倾斜误差评测。
 //! - `Firefly/Airframe`（质量/惯量/旋翼几何/电机上限，1Hz 电平）——飞控参数的唯一来源；
 //! - `Firefly/Odometry` / `Firefly/CorrectedOdometry`——位置/速度/航向反馈（取消息新的）；
 //! - `Firefly/Imu`（陀螺 + 加计，100Hz）——姿态估计（内环）；
@@ -15,12 +15,10 @@
 //! 本进程只负责把估计状态与健康电平喂进去、把输出接给位置模式。
 //!
 //! 反馈来源分工：**内环姿态由飞控自估**（陀螺积分 + 加速度计水平修正，航向取 VIO，
-//! 上电用加计定滚转/俯仰）；位置/速度取 VIO 估计（飞控只看得到估计），估计未到达时
-//! 回落被控对象真值（解锁前正常）。被控对象状态另作姿态误差校验（进 rrd）。
+//! 上电用加计定滚转/俯仰）；位置/速度来自里程计。缺少有效 IMU、初始化未完成
+//! 或里程计陈旧时发送零推力；真值不参与控制与健康判据。
 //!
-//! 节拍：控制律无积分项，dt 不进控制，因而 tick 只需节拍正确、不需要硬实时时钟；
-//! 落后节拍计数并进日志（唯一证据来源）。被控对象状态陈旧（>50ms 未更新）时
-//! **不发指令**——被控对象侧同样不推进物理，绝不用陈旧状态算控制。
+//! 控制节拍使用墙钟，诊断时间取自 IMU。未就绪时持续发零推力，使被控对象能产生初始化测量。
 //!
 //! 本进程不建逐 tick span（1kHz）：时延证据用 tick 统计进 rrd，
 //! 跨进程时延用 Control 消息头里的发送时间戳（sim 侧测）。
@@ -57,8 +55,8 @@ const DEFAULT_CONFIG: &str = "configs/fc.toml";
 /// 节拍余量：睡眠到此为止、余下自旋（1kHz 下约 15% 单核，换 µs 级 tick 精度；
 /// 纯 sleep 在 macOS 上会落到 ~1.2ms 周期）。
 const SPIN_MARGIN: Duration = Duration::from_micros(150);
-/// 被控对象状态陈旧阈值（墙钟）：超过即停发指令（被控对象侧同样不推进物理）。
-const STALE_LIMIT: Duration = Duration::from_millis(50);
+/// 里程计陈旧阈值（墙钟秒）：覆盖 10Hz 视觉更新间隔，禁止使用失联估计驱动电机。
+const ODOM_STALE_LIMIT: Duration = Duration::from_millis(500);
 /// IMU 陈旧阈值（墙钟）：100Hz 下 5 个周期；陈旧则不得解锁。
 const IMU_STALE_LIMIT: Duration = Duration::from_millis(50);
 /// 参考流新鲜窗口（墙钟）：planner 以 10Hz 发布，5 帧未到即视为流断（断开后由
@@ -100,8 +98,10 @@ struct Estimate {
     position: Vec3,
     /// 估计速度（m/s）。
     velocity: Vec3,
-    /// JPL 机体→世界四元数 `[x, y, z, w]`（航向修正用）。
+    /// JPL 世界→机体四元数 `[x, y, z, w]`（航向修正用）。
     quat: [f64; 4],
+    /// 最近有效估计到达的墙钟时刻。
+    received_at: Instant,
     /// 估计器已初始化（解锁前置条件之一）。
     initialized: bool,
 }
@@ -109,12 +109,14 @@ struct Estimate {
 /// 运行期输入快照（每 tick 排空到最新）。
 #[derive(Default)]
 struct Inputs {
-    /// 被控对象状态与到达墙钟时刻（判陈旧）。
+    /// 真值评测样本；控制与健康判据不得读取。
     plant: Option<(PlantStateMessage, Instant)>,
     /// 机体/执行器（装配成 `firefly-flight` 的参数）。
     vehicle: Option<(QuadParams, Airframe)>,
     /// 位置/速度/航向反馈。
     estimate: Option<Estimate>,
+    /// 最新 IMU 传感器时间（秒），作为控制与诊断时间轴。
+    imu_time: f64,
     /// 最新 IMU（陀螺、加计，机体系）与到达墙钟时刻（判陈旧）。
     imu: Option<(Vec3, Vec3, Instant)>,
     /// 参考（位置/速度/偏航/偏航角速度）与到达墙钟时刻（判新鲜）。
@@ -167,6 +169,21 @@ impl Ports {
         }
         while let Some(sample) = self.imu.receive()? {
             let m = *sample;
+            if ![
+                m.timestamp,
+                m.angular_velocity_x,
+                m.angular_velocity_y,
+                m.angular_velocity_z,
+                m.linear_acceleration_x,
+                m.linear_acceleration_y,
+                m.linear_acceleration_z,
+            ]
+            .iter()
+            .all(|x| x.is_finite())
+            {
+                continue;
+            }
+            inputs.imu_time = m.timestamp;
             inputs.imu = Some((
                 Vec3::new(
                     m.angular_velocity_x as f32,
@@ -203,7 +220,16 @@ impl Ports {
                 ),
                 quat: [m.quat_x, m.quat_y, m.quat_z, m.quat_w],
                 initialized: m.is_initialized,
+                received_at: Instant::now(),
             };
+            if !candidate.time.is_finite()
+                || !candidate.position.is_finite()
+                || !candidate.velocity.is_finite()
+                || !candidate.quat.iter().all(|q| q.is_finite())
+                || candidate.quat.iter().map(|q| q * q).sum::<f64>() < 1e-12
+            {
+                continue;
+            }
             if newest.is_none_or(|cur| candidate.time > cur.time) {
                 newest = Some(candidate);
             }
@@ -253,11 +279,13 @@ fn airframe_to_params(msg: &AirframeMessage) -> (QuadParams, Airframe) {
 }
 
 /// 健康电平：解锁前置条件与失效保护的输入（飞控自己算，不由被控对象喂）。
-fn health_of(inputs: &Inputs, plant_at: Instant) -> Health {
+fn health_of(inputs: &Inputs) -> Health {
     Health {
         estimator_ready: inputs.estimate.is_some_and(|e| e.initialized),
         airframe_ready: inputs.vehicle.is_some(),
-        plant_alive: plant_at.elapsed() <= STALE_LIMIT,
+        odometry_alive: inputs
+            .estimate
+            .is_some_and(|e| e.received_at.elapsed() <= ODOM_STALE_LIMIT),
         imu_alive: inputs
             .imu
             .is_some_and(|(_, _, at)| at.elapsed() <= IMU_STALE_LIMIT),
@@ -330,21 +358,8 @@ struct Controller {
     last_command_seq: u64,
     /// 相对起飞点高度（m；最近一 tick 的估计高度，进日志与 rrd）。
     altitude: f32,
-    /// 一次性告警标记。
-    warned: Warned,
     /// 上次可视化时刻（仿真时间）。
     last_viz: f64,
-}
-
-/// 一次性告警标记（每类只发一条，条件恢复时复位）。
-#[derive(Default)]
-struct Warned {
-    /// 位置反馈回落真值（估计未到达）。
-    truth_fallback: bool,
-    /// 被控对象状态陈旧。
-    plant_stale: bool,
-    /// 机体描述缺席。
-    no_airframe: bool,
 }
 
 impl Controller {
@@ -356,16 +371,44 @@ impl Controller {
             fsm: FlightFsm::new(fsm),
             last_command_seq: 0,
             altitude: 0.0,
-            warned: Warned::default(),
             last_viz: f64::NEG_INFINITY,
         }
     }
 
-    /// 一步：姿态估计 → 位置/速度反馈 → 指令 → 状态机 → 位置模式 → 分配 → 发布指令。
-    ///
-    /// **每个** tick 都发指令（缺参数/上锁时发零推力）：被控对象按指令新鲜度决定
-    /// 物理是否推进，飞控停发即世界停转——飞控绝不能是要被控对象等的乙方。
-    /// 无被控对象状态（未启动或陈旧）时不发：状态算不出控制，被控对象侧也本就停着。
+    /// 仅从传感器与里程计计算电机推力；未就绪或数据陈旧时返回零推力。
+    fn motor_output(&mut self, inputs: &Inputs, dt: f32, ctl: &ControlParams) -> ([f32; 4], bool) {
+        let (attitude, ang_vel) = self.attitude_and_rates(inputs, dt);
+        let (position, velocity) = inputs
+            .estimate
+            .map_or((Vec3::ZERO, Vec3::ZERO), |est| (est.position, est.velocity));
+        let state = QuadState {
+            position,
+            velocity,
+            attitude,
+            ang_vel,
+        };
+        let health = health_of(inputs);
+        self.apply_command(inputs.command, health, &state);
+        let reference = fresh_reference(inputs);
+        let out = self.fsm.update(dt, &state, reference.as_ref(), health);
+        report_event(out.event);
+        self.altitude = self.fsm.altitude_above_origin(&state);
+        if !out.motors_enabled
+            || !health.estimator_ready
+            || !health.odometry_alive
+            || !health.imu_alive
+        {
+            return ([0.0; 4], false);
+        }
+        let Some((quad, airframe)) = inputs.vehicle else {
+            return ([0.0; 4], false);
+        };
+        let desired = position_mode(&state, &out.setpoint, &quad, ctl);
+        let allocation = airframe.allocate(attitude, &desired);
+        (allocation.motors, allocation.saturated)
+    }
+
+    /// 每 tick 发布控制；启动等待期的零推力允许仿真推进并产生初始化测量。
     fn step(
         &mut self,
         ports: &Ports,
@@ -375,72 +418,30 @@ impl Controller {
         tick: u64,
         stats: &mut Stats,
     ) -> Result<(), firefly_error::Error> {
-        let Some((plant, received_at)) = inputs.plant else {
-            return Ok(());
-        };
-        if received_at.elapsed() > STALE_LIMIT {
-            if !self.warned.plant_stale {
-                self.warned.plant_stale = true;
-                log::error!("被控对象状态陈旧：停发指令（物理不推进），等被控对象恢复");
-            }
-            return Ok(());
-        }
-        self.warned.plant_stale = false;
-
-        // 机体描述（质量/惯量/旋翼几何/电机上限）是参数的唯一来源，缺它就不能算推力
-        if inputs.vehicle.is_none() {
-            if !self.warned.no_airframe {
-                self.warned.no_airframe = true;
-                log::warn!("尚未收到机体描述（Firefly/Airframe），暂发零推力");
-            }
-        } else {
-            self.warned.no_airframe = false;
-        }
-
-        let plant_attitude = Quat::from_xyzw(
-            plant.quat_x as f32,
-            plant.quat_y as f32,
-            plant.quat_z as f32,
-            plant.quat_w as f32,
-        )
-        .normalize();
-        let (attitude, ang_vel) = self.attitude_and_rates(inputs, &plant, plant_attitude, dt);
-        let (position, velocity) = self.feedback(inputs, &plant);
-        let quad_state = QuadState {
-            position,
-            velocity,
-            attitude,
-            ang_vel,
-        };
-
-        // ---- 模式与安全层：指令 → 健康电平 → 本 tick 该飞的参考 ----
-        let health = health_of(inputs, received_at);
-        self.apply_command(inputs.command, health, &quad_state);
-        let reference = fresh_reference(inputs);
-        let out = self.fsm.update(dt, &quad_state, reference.as_ref(), health);
-        report_event(out.event);
-        self.altitude = self.fsm.altitude_above_origin(&quad_state);
-
-        // ---- 控制：位置模式 → 期望 wrench → 4 电机分配（唯一饱和点） ----
-        // 上锁发零推力，但**每条 tick 都发**：被控对象按指令新鲜度决定物理是否推进。
-        let motors = match (inputs.vehicle, out.motors_enabled) {
-            (Some((quad, airframe)), true) => {
-                let desired = position_mode(&quad_state, &out.setpoint, &quad, ctl);
-                let allocation = airframe.allocate(attitude, &desired);
-                if allocation.saturated {
-                    stats.saturated += 1;
-                }
-                allocation.motors
-            }
-            _ => [0.0; 4],
-        };
+        let (motors, saturated) = self.motor_output(inputs, dt, ctl);
+        stats.saturated += u64::from(saturated);
         ports.control.publish(ControlMessage {
-            state_time: plant.timestamp,
+            state_time: inputs.imu_time,
             thrust: motors.map(f64::from),
             tick,
         })?;
         stats.published += 1;
-        self.publish_viz(ports, plant.timestamp, attitude, plant_attitude, &motors);
+        let truth = inputs.plant.map(|(plant, _)| {
+            Quat::from_xyzw(
+                plant.quat_x as f32,
+                plant.quat_y as f32,
+                plant.quat_z as f32,
+                plant.quat_w as f32,
+            )
+            .normalize()
+        });
+        self.publish_viz(
+            ports,
+            inputs.imu_time,
+            self.estimator.attitude(),
+            truth,
+            &motors,
+        );
         Ok(())
     }
 
@@ -465,25 +466,14 @@ impl Controller {
         }
     }
 
-    /// 姿态（内环）与机体系角速度：飞控自估优先（陀螺积分 + 加计修正 + VIO 航向），
-    /// 无 IMU 时回落被控对象真值（无传感器的最小可用路径）。
-    fn attitude_and_rates(
-        &mut self,
-        inputs: &Inputs,
-        plant: &PlantStateMessage,
-        plant_attitude: Quat,
-        dt: f32,
-    ) -> (Quat, Vec3) {
-        let Some((gyro, accel, _)) = inputs.imu else {
-            return (
-                plant_attitude,
-                Vec3::new(
-                    plant.angular_velocity_x as f32,
-                    plant.angular_velocity_y as f32,
-                    plant.angular_velocity_z as f32,
-                ),
-            );
+    /// 姿态与角速度仅由 IMU 和里程计估计；无 IMU 时保持未就绪状态。
+    fn attitude_and_rates(&mut self, inputs: &Inputs, dt: f32) -> (Quat, Vec3) {
+        let Some((gyro, accel, at)) = inputs.imu else {
+            return (self.estimator.attitude(), Vec3::ZERO);
         };
+        if at.elapsed() > IMU_STALE_LIMIT {
+            return (self.estimator.attitude(), Vec3::ZERO);
+        }
         if !self.attitude_ready {
             self.estimator = AttitudeEstimator::from_accel(accel);
             self.attitude_ready = true;
@@ -497,7 +487,13 @@ impl Controller {
             );
         }
         self.estimator.update(gyro, accel, dt);
-        if let Some(est) = inputs.estimate {
+        if let Some(est) = inputs
+            .estimate
+            .filter(|e| e.initialized && e.received_at.elapsed() <= ODOM_STALE_LIMIT)
+        {
+            if self.last_yaw_fix.is_none() {
+                self.estimator.reset(vio::body_to_world_from_odom(est.quat));
+            }
             let yaw_src = yaw_of(vio::body_to_world_from_odom(est.quat));
             let dt_fix = self
                 .last_yaw_fix
@@ -508,36 +504,13 @@ impl Controller {
         (self.estimator.attitude(), gyro)
     }
 
-    /// 位置/速度反馈：VIO 估计优先，未到达回落被控对象真值（解锁前正常，告警一次）。
-    fn feedback(&mut self, inputs: &Inputs, plant: &PlantStateMessage) -> (Vec3, Vec3) {
-        if let Some(est) = inputs.estimate {
-            return (est.position, est.velocity);
-        }
-        if !self.warned.truth_fallback {
-            self.warned.truth_fallback = true;
-            log::warn!("状态估计尚未到达，位置反馈暂回落被控对象真值（起飞前正常）");
-        }
-        (
-            Vec3::new(
-                plant.position_x as f32,
-                plant.position_y as f32,
-                plant.position_z as f32,
-            ),
-            Vec3::new(
-                plant.velocity_x as f32,
-                plant.velocity_y as f32,
-                plant.velocity_z as f32,
-            ),
-        )
-    }
-
     /// 控制量 + 模式 + 姿态校验进 rrd（10Hz）。
     fn publish_viz(
         &mut self,
         ports: &Ports,
         sim_time: f64,
         attitude: Quat,
-        plant_attitude: Quat,
+        plant_attitude: Option<Quat>,
         motors: &[f32; 4],
     ) {
         if sim_time - self.last_viz < VIZ_PERIOD {
@@ -546,10 +519,6 @@ impl Controller {
         self.last_viz = sim_time;
         let total: f32 = motors.iter().sum();
         let tilt = (attitude * Vec3::Z).z.clamp(-1.0, 1.0).acos().to_degrees();
-        let att_err = (attitude.inverse() * plant_attitude)
-            .to_scaled_axis()
-            .length()
-            .to_degrees();
         publish_scalars(
             ports.viz_ref(),
             sim_time,
@@ -568,12 +537,18 @@ impl Controller {
             "fc/debug/motors",
             &motors.map(f64::from),
         );
-        publish_scalars(
-            ports.viz_ref(),
-            sim_time,
-            "fc/debug/attitude_err_deg",
-            &[f64::from(att_err)],
-        );
+        if let Some(truth) = plant_attitude {
+            // 重力在机体系中的方向不依赖局部航向，可直接与真值比较。
+            let error = (attitude.inverse() * Vec3::Z)
+                .angle_between(truth.inverse() * Vec3::Z)
+                .to_degrees();
+            publish_scalars(
+                ports.viz_ref(),
+                sim_time,
+                "fc/debug/tilt_err_deg",
+                &[f64::from(error)],
+            );
+        }
         // 模式编码见 `firefly_flight::FlightState::code`
         publish_scalars(
             ports.viz_ref(),
@@ -670,7 +645,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     while RUNNING.load(Ordering::Relaxed) {
         stats.imu += u64::from(ports.drain(&mut inputs)?);
-        sim_time = inputs.plant.map_or(sim_time, |(p, _)| p.timestamp);
+        sim_time = inputs.imu_time;
         controller.step(&ports, &inputs, dt, &cfg.control, tick, &mut stats)?;
         firefly_observability::pump_log_ipc(&log_ipc);
         stats.ticks += 1;
@@ -698,7 +673,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if controller.attitude_ready {
                     "自估"
                 } else {
-                    "真值回落"
+                    "等待 IMU"
                 },
             );
             publish_scalars(&ports.viz, sim_time, "fc/debug/tick_rate", &[rate]);
@@ -725,4 +700,93 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         controller.fsm.state().name()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sensor_inputs() -> Inputs {
+        Inputs {
+            vehicle: Some((QuadParams::default(), Airframe::default())),
+            estimate: Some(Estimate {
+                time: 1.0,
+                position: Vec3::ZERO,
+                velocity: Vec3::ZERO,
+                quat: [0.0, 0.0, 0.0, 1.0],
+                initialized: true,
+                received_at: Instant::now(),
+            }),
+            imu: Some((Vec3::ZERO, Vec3::Z * firefly_flight::G, Instant::now())),
+            ..Inputs::default()
+        }
+    }
+
+    #[test]
+    fn truth_cannot_initialize_or_arm_controller() {
+        let inputs = Inputs {
+            plant: Some((PlantStateMessage::default(), Instant::now())),
+            vehicle: Some((QuadParams::default(), Airframe::default())),
+            command: Some(CommandMessage {
+                kind: command_kind::ARM,
+                sequence: 1,
+                ..CommandMessage::default()
+            }),
+            ..Inputs::default()
+        };
+        let mut controller = Controller::new(FsmParams::default());
+        let (motors, _) = controller.motor_output(&inputs, 0.001, &ControlParams::default());
+        assert_eq!(motors.map(f32::to_bits), [0; 4]);
+        assert!(!controller.attitude_ready);
+        assert_eq!(
+            controller.fsm.state(),
+            firefly_flight::FlightState::Disarmed
+        );
+    }
+
+    #[test]
+    fn changing_truth_cannot_change_motor_output() {
+        let mut inputs = sensor_inputs();
+        let mut a = Controller::new(FsmParams::default());
+        let mut b = Controller::new(FsmParams::default());
+        let ctl = ControlParams::default();
+        for _ in 0..1000 {
+            a.motor_output(&inputs, 0.001, &ctl);
+            b.motor_output(&inputs, 0.001, &ctl);
+        }
+        for (kind, sequence) in [(command_kind::ARM, 1), (command_kind::TAKEOFF, 2)] {
+            inputs.command = Some(CommandMessage {
+                kind,
+                sequence,
+                altitude: 1.0,
+                ..CommandMessage::default()
+            });
+            inputs.plant = None;
+            let (left, _) = a.motor_output(&inputs, 0.001, &ctl);
+            inputs.plant = Some((
+                PlantStateMessage {
+                    position_x: 1000.0,
+                    velocity_z: -100.0,
+                    quat_w: f64::NAN,
+                    ..PlantStateMessage::default()
+                },
+                Instant::now(),
+            ));
+            let (right, _) = b.motor_output(&inputs, 0.001, &ctl);
+            assert_eq!(left.map(f32::to_bits), right.map(f32::to_bits));
+        }
+        assert_eq!(a.fsm.state(), firefly_flight::FlightState::Takeoff);
+        assert!(
+            a.motor_output(&inputs, 0.001, &ctl)
+                .0
+                .iter()
+                .any(|m| *m > 0.0)
+        );
+        inputs.estimate.as_mut().unwrap().received_at =
+            Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            a.motor_output(&inputs, 0.001, &ctl).0.map(f32::to_bits),
+            [0; 4]
+        );
+    }
 }

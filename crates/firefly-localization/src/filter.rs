@@ -114,7 +114,7 @@ pub struct FusionOptions {
     pub r_floor_pos: f64,
     /// `P` 初值：旋转 `rad²`（VOID 姿态初值误差 ~1~2°，取 `(3°)²`）。
     pub p_init_rot: f64,
-    /// `P` 初值：平移 `m²`（真值初始化后漂移从零起，取 `(0.1m)²`）。
+    /// `P` 初值：局部平移的不确定度，单位 `m²`，默认 `(0.1m)²`。
     pub p_init_pos: f64,
     /// `P` 下限：平移 `m²`（每次预测后钳制；`Joseph` 收缩会让 `P` 相对残余
     /// 系统性误差过小 → 后续真值 `chi2` 恒拒（`perpetual` 自锁，实测复现）。

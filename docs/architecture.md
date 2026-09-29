@@ -80,7 +80,7 @@ flowchart TD
     PEER -->|peer 轨迹| COST
     FSM -->|MINCO 轨迹| TOPIC_REF
     TOPIC_REF -->|订阅| FLIGHT
-    TOPIC_PLANT -->|订阅| FLIGHT
+    TOPIC_PLANT -.->|仅评测，不参与控制| FLIGHT
     TOPIC_ODOM -->|订阅| FLIGHT
     FLIGHT -->|控制指令| TOPIC_CTRL
     TOPIC_CTRL -->|订阅·取最新| SIMP
@@ -114,14 +114,16 @@ Firefly/Command（地面站：解锁/模式/起降）
   增益/倾角限幅与 `[fsm]` 参数在 `configs/fc.toml`（缺键回落 `firefly-flight` 默认值）。
 - **反馈分工**：内环姿态由飞控自估（陀螺积分 + 加速度计水平修正，航向取
   `Firefly/Odometry` 的姿态，JPL `q_GtoI` 的换算见 `apps/fc/src/vio.rs` 与其单测）；
-  位置/速度取 VIO 估计，未到达时回落 `PlantState` 真值（解锁前正常）。
+  位置/速度只取里程计；无有效 IMU、初始化未完成或里程计陈旧时输出零推力。
+  `PlantState` 仅用于倾斜误差评测，不参与解锁或控制。
 - **节拍与锁步**：控制律无积分项，dt 不进控制；飞控每 tick 都发指令（上锁时零
   推力），被控对象按指令新鲜度（墙钟 50ms）决定物理是否推进——飞控停发即世界停转
-  （状态/传感器仍发冻结内容）；被控对象状态陈旧时飞控也停发，不用陈旧状态算控制。
-- **待观测**：侧向漂移的量化只在闭环实测（`fc/debug/*` 进 rrd：推力/倾角/
-  姿态误差/tick 率/晚到/饱和）。当前闭环仍受 VIO 估计限制：悬停时估计自漂
-  ~0.4m/s（`--script` 路径同现象，与飞控无关），被控对象会跟随估计漂移；
-  用真值反馈的 FC 闭环已实测悬停稳态（推力恒 = mg、倾角 <0.1°、tick 1kHz）。
+  （仿真时间暂停）；飞控在等待初始化期间持续发零推力，允许物理与传感器时间推进。
+- **初始化与坐标系**：VIO 使用静止 IMU 与视觉视差检查；VOID 复用静态 IMU
+  初始化。局部位置原点为零，航向无绝对观测。静态地图和规划目标必须先与局部
+  里程计建立独立定位关系；真值只进入评测与可视化。世界系先验面默认关闭。
+- **验证范围**：传感器初始化与控制隔离有自动回归；当前版本的漂移、延迟和
+  闭环成功率须通过对应录制与评测确认。
 
 ## VIO 单帧算法流程
 
@@ -135,7 +137,7 @@ flowchart TD
         RANSAC["基础矩阵 RANSAC 剔除误匹配"]
         PAIR["按 id 合并左右结果：<br/>双目成对 / 左单目 / 右单目"]
         DB["测量入库（去畸变归一化坐标）"]
-        ADVANCE["Move forward in time：<br/>pts/img/mask/ids_last ← 当前帧<br/>（曾漏写此段 → 跟踪器永远停在首帧）"]
+        ADVANCE["Move forward in time：<br/>pts/img/mask/ids_last ← 当前帧"]
         PRE --> DETECT --> EXTRAP --> TLK --> RANSAC --> PAIR --> DB --> ADVANCE
     end
 

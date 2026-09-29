@@ -16,5 +16,4 @@ accel_walk = 3.0e-3
 num_pts = 300 # 每相机 KLT 目标特征数
 
 [estimator]
-init_bias_sigma = 1e-6 # sim 无真实偏置；真机改回 0.02
 max_baseline = 120 # 三角化深度/基线比上限（OpenVINS 默认 40）

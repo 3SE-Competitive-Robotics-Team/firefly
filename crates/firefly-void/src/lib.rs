@@ -50,7 +50,7 @@ pub const MAX_POINTS_PER_FRAME: usize = 3000;
 pub struct OdometryOutput {
     /// 帧时刻（仿真秒）。
     pub t: f64,
-    /// 当前估计位姿（全局系 = 首帧 IMU 系）。
+    /// 当前估计位姿（重力对齐的局部系，初始位置为零）。
     pub pose: Isometry3<f64>,
     /// 当前估计速度（全局系，m/s）。
     pub velocity: Vector3<f64>,
@@ -103,11 +103,14 @@ pub trait Odometry {
     /// 馈入一次 IMU 测量（内部缓存，帧到达时统一传播）。
     fn process_imu(&mut self, imu: &ImuSample);
 
-    /// 馈入一帧深度+图像测量（传播后执行深度/视觉顺序更新）。
+    /// 馈入一帧深度+图像测量；静止初始化尚未完成时返回 `Ok(None)`。
     ///
     /// # Errors
     /// 深度/视觉测量构造或更新失败（`InvalidArgument`/`Convergence`）。
-    fn process_frame(&mut self, frame: &FrameInput<'_>) -> firefly_error::Result<OdometryOutput>;
+    fn process_frame(
+        &mut self,
+        frame: &FrameInput<'_>,
+    ) -> firefly_error::Result<Option<OdometryOutput>>;
 
     /// 当前估计状态。
     fn state(&self) -> &State;
@@ -115,6 +118,8 @@ pub trait Odometry {
 
 /// DIVO 完整管线：ESIKF + 体素地图 + 两个测量模型 + 可选先验面批次。
 pub struct VoidOdometry {
+    initializer: firefly_vio_init::static_init::StaticInitializer,
+    initialized: bool,
     esikf: Propagator,
     map: VoxelMap,
     /// 静态先验平面容器（`PriorConfig::enable` 时装载；`None` = 批次关闭）。
@@ -134,17 +139,7 @@ impl VoidOdometry {
     /// 构造管线。
     #[must_use]
     pub fn new(options: VoidOptions) -> Self {
-        // 初始位置（全局系 = 首帧 IMU 系，`configs/void.toml` 的 t0）；
-        // 重力初值（`MuJoCo` 世界系 `0 0 -9.81`，scene.py；重力估计开启时
-        // 首帧前向传播即可收敛）
-        let body_ext = options.body_ext_isometry();
-        let r_wb0 = Rotation3::identity(); // 仿真初始水平（scene.py 单位四元数）
-        // 初始姿态 `R_wv(0) = R_wb·R_bvᵀ`（世界 → 虚拟针孔系；imu 角速度/
-        // 比力经 `R_bv` 转到虚拟系后进入传播）
-        let rot0 = r_wb0 * body_ext.rotation.inverse().to_rotation_matrix();
         let state = State {
-            pos: Vector3::new(options.t0[0], options.t0[1], options.t0[2]),
-            rot: rot0,
             gravity: Vector3::new(0.0, 0.0, -9.81),
             ..State::default()
         };
@@ -159,9 +154,7 @@ impl VoidOdometry {
             esikf.disable_bias_est();
         }
         let map = VoxelMap::new((&options.map).into());
-        // 先验面装载（P11.2）：enable 且文件存在才启用；文件缺失/解析失败
-        // 记 warn 并禁用该批次（先验是增强特性，禁用后行为 = 原管线，
-        // 与 main.rs 真值订阅不可用回退的先例一致）
+        // 先验地图必须处于传感器初始化确定的局部坐标系。
         let prior_map = if options.prior.enable {
             let path = options.prior.map_path.trim();
             if path.is_empty() {
@@ -183,6 +176,10 @@ impl VoidOdometry {
             None
         };
         Self {
+            initializer: firefly_vio_init::static_init::StaticInitializer::new(
+                firefly_vio_init::options::InitOptions::default(),
+            ),
+            initialized: false,
             esikf,
             map,
             prior_map,
@@ -355,35 +352,83 @@ impl VoidOdometry {
         (self.map.root_count(), self.map.visual_point_count())
     }
 
-    /// 真实机体 → 虚拟系旋转 `R_bv`（供接线层做 GT 姿态初始化）。
+    /// 真实机体 → 虚拟系旋转 `R_bv`（供接线层将姿态转回机体系）。
     #[must_use]
     pub fn body_ext(&self) -> Option<nalgebra::Rotation3<f64>> {
         let e = self.options.body_ext_isometry();
         Some(e.rotation.to_rotation_matrix())
     }
 
-    /// 用真值覆盖初始位姿（仅启动时调用一次；此后估计器独立运行）。
-    ///
-    /// `rot` 为世界系 → 虚拟系的姿态（`R_wb·R_bvᵀ`）。位置与速度同时
-    /// 归零（悬停起步）。
-    pub fn set_initial_pose(
-        &mut self,
-        t: f64,
-        x: f64,
-        y: f64,
-        z: f64,
-        vel: Vector3<f64>,
-        rot: nalgebra::Rotation3<f64>,
-    ) {
-        self.state.rot = rot;
-        self.state.pos = Vector3::new(x, y, z);
-        self.state.vel = vel;
-        self.last_frame_t = Some(t);
+    /// 静止 IMU 初始化是否完成；位置原点与航向属于局部里程计系。
+    #[must_use]
+    pub const fn initialized(&self) -> bool {
+        self.initialized
+    }
+
+    /// 重力与零偏由静止 IMU 窗口给出；局部位置和初速为零。
+    /// 对照 `OpenVINS` `StaticInitializer`，将状态转换到 DIVO 的虚拟 IMU 系。
+    #[fastrace::trace]
+    fn try_initialize(&mut self, frame_t: f64) -> bool {
+        if self.initialized {
+            return true;
+        }
+        let Some(result) = self.initializer.initialize(false) else {
+            return false;
+        };
+        if result.timestamp > frame_t {
+            return false;
+        }
+        let s = result.imu_state;
+        let r_bv = self
+            .options
+            .body_ext_isometry()
+            .rotation
+            .to_rotation_matrix();
+        let r_gb = firefly_vio_types::quat_ops::quat_2_rot(&nalgebra::Vector4::new(
+            s[0], s[1], s[2], s[3],
+        ));
+        self.state.rot = Rotation3::from_matrix_unchecked(r_gb.transpose()) * r_bv.inverse();
+        self.state.bias_g = r_bv * Vector3::new(s[10], s[11], s[12]);
+        self.state.bias_a = r_bv * Vector3::new(s[13], s[14], s[15]);
+        for (dst, src) in [(0, 0), (3, 3), (7, 6), (10, 9), (13, 12)] {
+            self.state
+                .cov
+                .fixed_view_mut::<3, 3>(dst, dst)
+                .copy_from(&result.covariance.fixed_view::<3, 3>(src, src));
+        }
+        self.last_frame_t = Some(result.timestamp);
+        self.imu_queue.retain(|imu| imu.t >= result.timestamp);
+        self.initializer.imu_data.clear();
+        self.initialized = true;
+        log::info!("VOID 静止 IMU 初始化完成，局部位置原点为零");
+        true
     }
 }
 
 impl Odometry for VoidOdometry {
     fn process_imu(&mut self, imu: &ImuSample) {
+        if !imu.t.is_finite()
+            || !imu
+                .omega
+                .iter()
+                .chain(imu.acc.iter())
+                .all(|x| x.is_finite())
+            || self.imu_queue.back().is_some_and(|last| imu.t <= last.t)
+        {
+            return;
+        }
+        if !self.initialized {
+            let oldest = imu.t - self.initializer.params.init_window_time - 0.1;
+            self.initializer.feed_imu(
+                &firefly_vio_core::sensor::ImuData {
+                    timestamp: imu.t,
+                    wm: imu.omega,
+                    am: imu.acc,
+                },
+                oldest,
+            );
+            self.imu_queue.retain(|sample| sample.t >= oldest);
+        }
         // 真实机体 → 虚拟针孔系：`ω_v = R_bv·ω_b`、`a_v = R_bv·a_b`
         // （P3 视觉模型与深度测量都在虚拟系，IMU 传播必须同系）
         let r_bv = self.options.body_ext_isometry().rotation;
@@ -398,9 +443,15 @@ impl Odometry for VoidOdometry {
 
     // 帧处理编排（传播→深度→视觉→建图四阶段），结构由管线顺序驱动
     #[allow(clippy::too_many_lines)]
-    fn process_frame(&mut self, frame: &FrameInput<'_>) -> firefly_error::Result<OdometryOutput> {
+    fn process_frame(
+        &mut self,
+        frame: &FrameInput<'_>,
+    ) -> firefly_error::Result<Option<OdometryOutput>> {
         let t0 = std::time::Instant::now();
         let frame_t = frame.depth.t.max(frame.camera.t);
+        if !self.try_initialize(frame_t) {
+            return Ok(None);
+        }
         self.frame_id += 1;
 
         // 1. 前向传播：消费到帧时刻为止的 IMU（梯形积分，逐段传播）
@@ -645,7 +696,7 @@ impl Odometry for VoidOdometry {
             self.state.pos[2],
         );
 
-        Ok(OdometryOutput {
+        Ok(Some(OdometryOutput {
             t: frame_t,
             pose,
             velocity: self.state.vel,
@@ -668,7 +719,7 @@ impl Odometry for VoidOdometry {
                 visual_update,
                 map_update,
             },
-        })
+        }))
     }
 
     fn state(&self) -> &State {
@@ -790,25 +841,45 @@ mod tests {
         assert!((p2 - Vector3::new(0.1, -0.2, 1.0)).norm() < 1e-12);
     }
 
-    /// 悬停一致性：水平姿态（`R_wb=I`）下，比力 `a_b=(0,0,9.81)` 经 `R_bv`
-    /// 转到虚拟系、再经 `R_wv(0)=R_bvᵀ` 回到世界系，与重力抵消 → 零加速度。
     #[test]
-    fn hover_gravity_consistency() {
-        let o = VoidOptions::default();
-        let odom = VoidOdometry::new(o);
-        // 初始姿态 R_wv(0) = R_bvᵀ（世界水平）
-        let r_wv = odom.state.rot;
-        let rot_bv = odom.options.body_ext_isometry().rotation;
-        // 悬停比力（真实机体系 +z，抵消重力）
-        let acc_b = Vector3::new(0.0, 0.0, 9.81);
-        let acc_v = rot_bv * acc_b;
-        let acc_world = r_wv * acc_v + odom.state.gravity;
-        assert!(
-            acc_world.norm() < 1e-9,
-            "悬停加速度应为零：{acc_world}（r_wv={r_wv} rot_bv={rot_bv}）"
-        );
-        // 外参一致性：R_wv(0) = R_bvᵀ ⇒ R_wv · R_bv = I
-        let chain = r_wv * rot_bv.to_rotation_matrix();
-        assert!((chain.matrix() - nalgebra::Matrix3::identity()).norm() < 1e-9);
+    fn sensor_only_initialization_estimates_tilt_and_bias() {
+        let mut odom = VoidOdometry::new(VoidOptions::default());
+        let body_rot = Rotation3::from_euler_angles(0.2, -0.3, 0.0);
+        let acc = body_rot.inverse() * Vector3::new(0.0, 0.0, 9.81);
+        let bias = Vector3::new(0.004, -0.002, 0.001);
+        assert!(!odom.try_initialize(0.0));
+        for i in 0..=120 {
+            odom.process_imu(&ImuSample {
+                t: f64::from(i) * 0.01,
+                omega: bias,
+                acc,
+            });
+            if i < 100 {
+                assert!(!odom.try_initialize(f64::from(i) * 0.01));
+            }
+        }
+        assert!(odom.try_initialize(1.2));
+        assert!(odom.initialized());
+        let r_bv = odom.options.body_ext_isometry().rotation;
+        let accel_world = odom.state.rot * (r_bv * acc - odom.state.bias_a) + odom.state.gravity;
+        assert!(accel_world.norm() < 1e-9);
+        assert!((odom.state.bias_g - r_bv * bias).norm() < 1e-9);
+        assert!(odom.state.pos.norm() < 1e-12);
+        assert!(odom.state.vel.norm() < 1e-12);
+    }
+
+    #[test]
+    fn moving_imu_cannot_initialize() {
+        let mut odom = VoidOdometry::new(VoidOptions::default());
+        for i in 0..=120 {
+            odom.process_imu(&ImuSample {
+                t: f64::from(i) * 0.01,
+                omega: Vector3::zeros(),
+                acc: Vector3::new(if i % 2 == 0 { 3.0 } else { -3.0 }, 0.0, 9.81),
+            });
+        }
+        assert!(!odom.try_initialize(1.2));
+        assert!(!odom.initialized());
+        assert_eq!(odom.map_stats(), (0, 0));
     }
 }

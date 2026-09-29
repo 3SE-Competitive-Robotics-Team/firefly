@@ -41,6 +41,13 @@ impl InertialInitializer {
         }
     }
 
+    /// 同步标定与初始化选项，保留已接收的 IMU 窗口。
+    pub fn configure(&mut self, params: InitOptions) {
+        self.init_static.params = params.clone();
+        self.init_dynamic.params = params.clone();
+        self.params = params;
+    }
+
     /// 喂入 IMU 测量并按 `oldest_time` 清理（对照 `InertialInitializer::feed_imu`）。
     pub fn feed_imu(&mut self, message: &ImuData, oldest_time: f64) {
         self.imu_data.push(*message);
@@ -51,7 +58,7 @@ impl InertialInitializer {
 
     /// 尝试初始化（对照 `InertialInitializer::initialize`）。
     ///
-    /// `wait_for_jerk`：是否等待急动（无零速更新时为 true，有时为 false）。
+    /// `wait_for_jerk`：是否等待静止窗口后的急动；静止上电初始化可设 false。
     /// 成功返回 [`InitResult`]；数据不足/未通过视差与激励检查返回 `None`。
     // 与 C++ 1:1 移植的编排流程，拆分会破坏对照可审计性。
     #[allow(clippy::too_many_lines)]

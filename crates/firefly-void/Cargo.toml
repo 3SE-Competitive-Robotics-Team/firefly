@@ -13,6 +13,9 @@ readme.workspace = true
 [dependencies]
 fastrace = { workspace = true }
 firefly-error = { workspace = true }
+firefly-vio-init = { workspace = true }
+firefly-vio-core = { workspace = true }
+firefly-vio-types = { workspace = true }
 firefly-void-esikf = { workspace = true }
 firefly-void-map = { workspace = true }
 firefly-void-measure = { workspace = true }

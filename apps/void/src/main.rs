@@ -11,8 +11,7 @@
 //!   `void/map_points` 采样点、`void/health` 深度内点/视觉迭代标量），
 //!   统一 `sim_time` 时间轴，经 `Firefly/Viz` 话题由 `firefly-viz` 进程
 //!   统一写 rerun（计算线程零 IO）。
-//! - 初始位姿：`configs/void.toml` 的 `t0`（缺省 `[1.0,10.0,1.0]`，与
-//!   `SIM_START` 一致），启动时写入状态。
+//! - 初始位姿与零偏由静止 IMU 窗口估计，位置原点与航向为局部约定。
 //! - `node.wait(1ms)` 节拍尽快消费消息，Ctrl-C 优雅退出（端口 Drop，
 //!   iceoryx2 无幽灵服务残留）。
 
@@ -21,9 +20,8 @@ use std::time::Duration;
 use fastrace::prelude::*;
 use firefly_pubsub::event::{CAMERA_PAIR_TOPIC, TopicListener};
 use firefly_pubsub::node::create_node;
-use firefly_pubsub::odom::{GROUND_TRUTH_TOPIC, OdomMessage};
+use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::publish::Publisher;
-use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::viz::{POINTS_MAX, VizMessage, VizPublisher, kind};
 use firefly_void::options::VoidOptions;
 use firefly_void::{FrameInput, Odometry, VoidOdometry};
@@ -43,9 +41,6 @@ pub const VOID_ODOM_TOPIC: &str = "Firefly/VoidOdom";
 
 /// odom 发布周期（秒）。
 const ODOM_PERIOD: f64 = 0.1;
-/// GT 等待 failsafe（秒）：GT 是硬依赖（初始位姿+速度），无 GT 无法启动；
-/// 超时报错退出（sim 侧 15s 无 ready 超时先触发，双保险）。
-const GT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// 就绪判据：最少处理帧数（10Hz 下 2s 数据，地图攒够平面）。
 const READY_MIN_FRAMES: u64 = 20;
 /// 就绪判据：近窗帧数（视觉健康率统计窗）。
@@ -86,14 +81,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(2);
     })?;
     let cfg = VoidOptions::load(&config_path)?;
-    log::info!(
-        "void 进程启动：DIVO 里程计（深度-惯性-视觉），配置 {config_path}，起点 ({:.2},{:.2},{:.2})",
-        cfg.t0[0],
-        cfg.t0[1],
-        cfg.t0[2]
-    );
+    log::info!("void 进程启动：配置 {config_path}，等待静止 IMU 初始化");
 
-    // 里程计管线（初始位姿来自配置 t0）
+    // 局部里程计管线。
     let mut odom = VoidOdometry::new(cfg);
 
     // 进程共享节点：所有端口由它派生；主循环以 node.wait 驱动，Ctrl-C 优雅
@@ -101,70 +91,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "void");
     log::info!("iceoryx2 节点已创建（进程共享，信号处理 = HandleTerminationRequests）");
-
-    // 真值订阅（仅启动初始化，估计器运行时不读）
-    let gt_sub = match Subscriber::<OdomMessage>::with_topic(&node, GROUND_TRUTH_TOPIC) {
-        Ok(s) => {
-            log::info!("已订阅真值话题 {GROUND_TRUTH_TOPIC}（启动姿态初始化）");
-            Some(s)
-        }
-        Err(e) => {
-            log::warn!("真值订阅不可用（回退水平姿态先验）：{e}");
-            None
-        }
-    };
-    // 启动姿态初始化：等待首条 GT，用真值姿态对齐世界系。
-    // 仅靠水平先验 + t0 时，悬停无人机的微小初始倾斜会被深度/视觉残差
-    // 吸收进 bias（bg 漂到 0.007 rad/s），位置随后被拉偏（实测随机 0.2~1.6m）。
-    // GT 是硬依赖：无超时妥协，等不到就报错退出（sim 侧 15s 无 ready
-    // 超时先触发；这里 30s 是双保险，防 sim 已死 void 空转）。
-    if let Some(gt) = &gt_sub {
-        let deadline = std::time::Instant::now() + GT_WAIT_TIMEOUT;
-        let mut got = false;
-        while std::time::Instant::now() < deadline {
-            let Ok(Some(sample)) = gt.receive() else {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                continue;
-            };
-            let m = &*sample;
-            let q = nalgebra::UnitQuaternion::new_normalize(nalgebra::Quaternion::new(
-                m.quat_w, m.quat_x, m.quat_y, m.quat_z,
-            ));
-            // 世界系 → 虚拟针孔系：R_wv = R_wb·R_bvᵀ（body_ext 返回 R_bv）
-            let r_wb = q.to_rotation_matrix();
-            let r_bv = odom
-                .body_ext()
-                .unwrap_or_else(nalgebra::Rotation3::identity);
-            let rot = r_wb * r_bv.inverse();
-            // GT 速度随位姿一起初始化：启动时轨迹已有速度，置零会留下
-            // x/y 方向不可收敛的初始速度偏差（深度平面法向正交方向无约束）
-            let vel = nalgebra::Vector3::new(m.velocity_x, m.velocity_y, m.velocity_z);
-            odom.set_initial_pose(
-                m.timestamp,
-                m.position_x,
-                m.position_y,
-                m.position_z,
-                vel,
-                rot,
-            );
-            log::info!(
-                "真值初始化：t={:.2} p=({:.2},{:.2},{:.2}) q=({:.3},{:.3},{:.3},{:.3})",
-                m.timestamp,
-                m.position_x,
-                m.position_y,
-                m.position_z,
-                m.quat_x,
-                m.quat_y,
-                m.quat_z,
-                m.quat_w
-            );
-            got = true;
-            break;
-        }
-        if !got {
-            return Err("GT 等待超时（30s 无真值输入，sim 可能未启动）".into());
-        }
-    }
 
     // void odom 发布器（带事件唤醒；Trace 上下文由中间件在 publish 时自动注入）
     let odom_pub: Publisher<OdomMessage> = Publisher::with_topic_notify(&node, VOID_ODOM_TOPIC)?;
@@ -222,8 +148,8 @@ fn run_loop(
     let mut est_prev: Option<[f64; 3]> = None;
     let t_wall_start = std::time::Instant::now();
     let mut next_diag_wall = DIAG_PERIOD;
-    // 就绪状态机（启动互锁）：GT 初始化完成后仍需地图成熟 + 滤波收敛，
-    // 条件满足前 odom 的 is_initialized=false，sim 原地悬停等待，
+    // 就绪状态机（启动互锁）：传感器初始化完成后仍需地图成熟 + 滤波收敛，
+    // 条件满足前 odom 的 is_initialized=false，外部调用者须等待就绪，
     // 不以定时器猜收敛。
     let mut ready = false;
     let mut vis_window: std::collections::VecDeque<bool> = std::collections::VecDeque::new();
@@ -297,7 +223,6 @@ fn run_loop(
 
         // 深度+相机帧配对：同步到达时跑完整一帧（传播→深度→视觉→建图）
         if let Some((cam, dep)) = input.next_frame() {
-            frame_count += 1;
             let camera = CameraFrame {
                 t: cam.t,
                 left_gray: &cam.left_gray,
@@ -315,7 +240,8 @@ fn run_loop(
                 depth: &depth,
             };
             match odom.process_frame(&frame) {
-                Ok(out) => {
+                Ok(Some(out)) => {
+                    frame_count += 1;
                     if out.depth_converged {
                         depth_ok_frames += 1;
                     }
@@ -351,6 +277,7 @@ fn run_loop(
                     health.scalar_count = 3;
                     let _ = viz_pub.publish(health);
                 }
+                Ok(None) => {}
                 Err(e) => {
                     // 单帧失败不退出（发散/NaN 由 esikf 拦截），恢复下一帧
                     log::warn!("帧处理失败 t={:.2}: {e}", cam.t);
@@ -420,6 +347,7 @@ fn run_loop(
                 "ready-probe frames={frame_count} ptrace={ptrace:.4} vis_ratio={vis_ratio:.2} ready={ready}"
             );
             if !ready
+                && odom.initialized()
                 && frame_count >= READY_MIN_FRAMES
                 && vis_ratio >= READY_VIS_RATIO
                 && ptrace < READY_PTRACE_MAX
@@ -482,7 +410,7 @@ fn run_loop(
 ///
 /// 姿态转换到机体系：滤波器状态 `rot` 为虚拟针孔系（`R_wv`，见
 /// `firefly-void/src/options.rs`），发布 `R_wb = R_wv·R_bv`；位置/速度
-/// 已是世界系（与 `GroundTruth` 同框），直接发布。
+/// 输出重力对齐的局部里程计系；与真值的坐标对齐由评测负责。
 fn publish_odom(
     odom_pub: &Publisher<OdomMessage>,
     t_sim: f64,

@@ -52,7 +52,20 @@ impl StaticInitializer {
     /// 数据不足 / 未通过静止与急动检测，需要继续等待）。
     pub fn initialize(&mut self, wait_for_jerk: bool) -> Option<InitResult> {
         // 至少 2 条测量，且覆盖完整初始化窗口
-        if self.imu_data.len() < 2 {
+        if self.imu_data.len() < 2
+            || self.imu_data.iter().any(|sample| {
+                !sample.timestamp.is_finite()
+                    || !sample
+                        .am
+                        .iter()
+                        .chain(sample.wm.iter())
+                        .all(|x| x.is_finite())
+            })
+            || self
+                .imu_data
+                .windows(2)
+                .any(|pair| pair[1].timestamp <= pair[0].timestamp)
+        {
             return None;
         }
         let newesttime = self.imu_data[self.imu_data.len() - 1].timestamp;
@@ -121,6 +134,9 @@ impl StaticInitializer {
         }
 
         // z 轴对齐 -g（z_in_G=[0,0,1] 约定），gram_schmidt 得 R_GtoI
+        if a_avg_2to1.norm() < 1e-6 {
+            return None;
+        }
         let z_axis = a_avg_2to1 / a_avg_2to1.norm();
         let ro = gram_schmidt(&z_axis);
         let q_GtoI = rot_2_quat(&ro);
