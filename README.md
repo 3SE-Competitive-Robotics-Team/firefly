@@ -63,6 +63,16 @@ uv run --all-packages --extra test python scripts/prepare_rmuc.py /path/to/RMUC2
 明确标记，完整命令在未全部通过时返回非零。只处理资产可加 `--assets-only`。
 详细契约见 [CAD 管线](packages/firefly-cad/README.md)。
 
+已有场地和 release 二进制时，自动任务验收可单独执行：
+
+```bash
+uv run --all-packages --extra test python scripts/accept_rmuc.py
+```
+
+执行初始化、起飞、悬停、往返航点与两种进程失联注入；评分使用记录读回的
+定位/跟踪误差、逐物理步碰撞计数及退出状态。每次在 `logs/acceptance/<运行ID>/`
+生成 RRD、JSON 与 HTML 报告；任何未完成或失败均返回非零，详见 [验收契约](docs/testing.md)。
+
 ## 最小闭环
 
 要求 Rust 1.97+、Python 3.12+、uv，以及对应平台的图形运行依赖。

@@ -95,6 +95,10 @@
 - GLB、碰撞盒与 FFMap 必须来自同一归一化几何，并通过内容 hash 和坐标/占据验收。
 - 离线视觉采集使用 `render --offline` 与 `Firefly/Offline/*`；禁止将摆拍标签发布到在线状态话题。
 - 资产通过、传感器启动、飞行、在线定位必须分别报告；失败或缺权重不得记为通过。
+- 自动任务入口为 `scripts/accept_rmuc.py`，阈值在 `configs/acceptance.toml` 与
+  `tests/system/mission.py::Options`；运行前固定，禁止按失败结果放宽。
+- 验收原始证据只进 RRD，JSON/HTML 只保存汇总、配置与内容指纹；局部 VIO 可作
+  固定尺度航向/平移对齐，地图定位和跟踪评分禁止事后对齐。
 
 ## 运行（MuJoCo 双语言闭环）
 

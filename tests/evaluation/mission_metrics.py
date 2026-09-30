@@ -1,0 +1,145 @@
+"""从验收 RRD 读回原始证据；地图误差不对齐，局部 VIO 只作固定尺度对齐。"""
+import numpy as np
+import pyarrow as pa
+from rerun.chunk import RrdReader
+
+from metrics import compute_metrics, interp_linear
+
+
+def read_evidence(path):
+    reader = RrdReader(path)
+    rows = {}
+    for store in reader.recordings():
+        for chunk in reader.stream(store=store):
+            entity = chunk.entity_path.lstrip("/")
+            if not entity.startswith("acceptance/") or chunk.is_static:
+                continue
+            batch = chunk.to_record_batch()
+            if "sim_time" not in batch.schema.names:
+                continue
+            times = batch.column("sim_time").cast(pa.int64()).to_pylist()
+            if "Transform3D:translation" in batch.schema.names:
+                positions = batch.column("Transform3D:translation").to_pylist()
+                quats = batch.column("Transform3D:quaternion").to_pylist()
+                values = [None if p is None or q is None else [*p[0], *q[0]] for p, q in zip(positions, quats)]
+            elif "Scalars:scalars" in batch.schema.names:
+                values = batch.column("Scalars:scalars").to_pylist()
+            else:
+                continue
+            rows.setdefault(entity.removeprefix("acceptance/"), []).extend(
+                (t / 1e9, *v) for t, v in zip(times, values) if t is not None and v is not None)
+    result = {}
+    for entity, values in rows.items():
+        data = np.array(sorted(values), dtype=float)
+        if not np.isfinite(data).all():
+            raise ValueError(f"non-finite recorded evidence: {entity}")
+        # 重复时间戳只允许内容完全相同；重复不增加覆盖率。
+        unique = []
+        for row in data:
+            if unique and row[0] == unique[-1][0]:
+                if not np.array_equal(row, unique[-1]):
+                    raise ValueError(f"conflicting evidence at one timestamp: {entity}")
+            else:
+                unique.append(row)
+        result[entity] = np.asarray(unique)
+    return result
+
+
+def position_error(truth, estimate, start, end):
+    if len(truth) < 2 or len(estimate) < 2:
+        raise ValueError("insufficient position evidence")
+    times = truth[:, 0]
+    mask = (times >= max(start, estimate[0, 0])) & (times <= min(end, estimate[-1, 0]))
+    samples = truth[mask]
+    if len(samples) < 10:
+        raise ValueError("insufficient overlapping position evidence")
+    if np.max(np.diff(samples[:, 0])) > 0.5:
+        raise ValueError("truth evidence has a gap longer than 0.5s")
+    intervals = np.diff(estimate[:, 0])
+    window = (estimate[:-1, 0] <= end) & (estimate[1:, 0] >= start)
+    if not window.any() or max(intervals[window]) > 0.5:
+        raise ValueError("position evidence has a gap longer than 0.5s")
+    span = min(end, times[-1]) - max(start, times[0])
+    coverage = (samples[-1, 0] - samples[0, 0]) / max(span, 1e-9)
+    if coverage < 0.9:
+        raise ValueError(f"position evidence coverage too low: {coverage:.3f}")
+    actual = interp_linear(samples[:, 0], estimate[:, 0], estimate[:, 1:4])
+    norm = np.linalg.norm(actual - samples[:, 1:4], axis=1)
+    return {"samples": len(samples), "start_sim_s": float(samples[0, 0]), "end_sim_s": float(samples[-1, 0]),
+            "coverage": float(coverage), "rmse_m": float(np.sqrt(np.mean(norm**2))),
+            "max_m": float(norm.max()), "p95_m": float(np.quantile(norm, .95))}
+
+
+def yaw_error(truth, estimate):
+    def yaw(rows):
+        x, y, z, w = rows[:, 4:8].T
+        return np.unwrap(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y*y + z*z)))
+    times = estimate[:, 0]
+    mask = (times >= truth[0, 0]) & (times <= truth[-1, 0])
+    delta = yaw(estimate)[mask] - np.interp(times[mask], truth[:, 0], yaw(truth))
+    if not len(delta):
+        raise ValueError("no overlapping yaw evidence")
+    wrapped = np.arctan2(np.sin(delta), np.cos(delta))
+    return float(np.rad2deg(np.sqrt(np.mean(wrapped**2))))
+
+
+def score(case, options):
+    data = read_evidence(case["recording"])
+    stages = case["stages"]
+    def check(name, action):
+        try:
+            passed, details = action()
+            stages[name] = {"status": "passed" if passed else "failed", "metrics": details}
+        except (ValueError, KeyError, IndexError) as error:
+            stages[name] = {"status": "failed", "reason": str(error)}
+    def collision():
+        physics = data["physics"]
+        if len(physics) < 10:
+            raise ValueError("missing physics coverage")
+        counts = physics[-1, 1:]
+        live = case.get("last_physics_counters")
+        if live is None or counts[0] < live[0]:
+            raise ValueError("recording missing final observed physics counters")
+        if np.any(np.diff(physics[:, 1]) <= 0):
+            raise ValueError("physics counter not strictly increasing")
+        return counts[2] == 0 and counts[3] == 0, {
+            "physics_steps": int(counts[0]), "contact_steps": int(counts[1]),
+            "unexpected_contact_steps": int(counts[2]), "reset_attempts": int(counts[3]),
+            "observed_until_sim_s": float(physics[-1, 0]),
+            "mission_landing_completed": stages.get("landing", {}).get("status") == "passed",
+        }
+    check("collision", collision)
+    def vio():
+        gt, odom = data["gt"], data["odom"]
+        overlapping = gt[(gt[:, 0] >= odom[0, 0]) & (gt[:, 0] <= odom[-1, 0])]
+        if len(overlapping) < 10 or len(odom) < 10:
+            raise ValueError("insufficient VIO overlap")
+        if max(np.diff(overlapping[:, 0]).max(), np.diff(odom[:, 0]).max()) > 0.5:
+            raise ValueError("VIO scoring evidence has a gap longer than 0.5s")
+        result = compute_metrics(gt[:, 0], gt[:, 1:4], odom[:, 0], odom[:, 1:4], float(gt[-1, 0] - gt[0, 0]))
+        return (result["ate_rmse"] <= options.vio_ate_rmse_m
+                and result["rpe_rmse_1s"] is not None and result["rpe_rmse_1s"] <= options.vio_rpe_rmse_m), result
+    check("vio_accuracy", vio)
+    if case["case"] != "estimator_loss":
+        def corrected():
+            gt, estimate = data["gt"], data["corrected"]
+            result = position_error(gt, estimate, estimate[0, 0], estimate[-1, 0])
+            result.update(alignment="none", yaw_rmse_deg=yaw_error(gt, estimate))
+            return result["rmse_m"] <= options.map_ate_rmse_m and result["yaw_rmse_deg"] <= options.map_yaw_rmse_deg, result
+        check("map_accuracy", corrected)
+    if case["case"] == "nominal":
+        def tracking():
+            phase = stages["tracking"]
+            if "start_sim_s" not in phase:
+                raise ValueError("tracking phase not executed")
+            result = position_error(data["gt"], data["reference"], phase["start_sim_s"], phase["end_sim_s"])
+            result["alignment"] = "none"
+            return result["rmse_m"] <= options.tracking_rmse_m and result["max_m"] <= options.tracking_max_m, result
+        if stages["tracking"]["status"] == "blocked":
+            stages["tracking_error"] = {"status": "blocked", "reason": "tracking phase not executed"}
+        else:
+            check("tracking_error", tracking)
+    case["evidence_entities"] = {entity: {"samples": len(rows), "first_sim_s": float(rows[0, 0]),
+                                        "last_sim_s": float(rows[-1, 0])} for entity, rows in data.items()}
+    case["status"] = "passed" if all(value["status"] == "passed" for value in stages.values()) else "failed"
+    return case

@@ -16,6 +16,7 @@ import signal
 import subprocess
 import sys
 import tomllib
+import uuid
 
 from firefly_cad.pipeline import Options, build, save_json
 from collect_vision_map import capture_assets, reusable_capture
@@ -92,14 +93,9 @@ def main():
                 "status": "not_run", "weights_available": aliked.is_file() and lightglue.is_file(),
                 "reason": "This entry does not implement online relocalization acceptance",
             }
-            env["FIREFLY_RUN_SENSOR_STARTUP"] = "1"
-            env.pop("FIREFLY_RUN_FLIGHT", None)
-            system_test = [sys.executable, "-m", "pytest", "tests/system/test_sensor_startup.py", "-q", "-p", "no:cacheprovider"]
-            if run("sensor_startup", system_test, env):
-                env["FIREFLY_RUN_FLIGHT"] = "1"
-                run("flight", system_test, env)
-            else:
-                report["stages"]["flight"] = {"status": "blocked", "reason": "sensor startup failed"}
+            acceptance = ROOT / "logs/acceptance" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8])
+            run("mission_acceptance", [sys.executable, str(ROOT / "scripts/accept_rmuc.py"), "--output-dir", str(acceptance)])
+            report["stages"]["mission_acceptance"]["report"] = str(acceptance / "report.json")
         report["status"] = "passed" if all(s["status"] == "passed" for s in report["stages"].values()) else "incomplete"
     except BaseException as error:
         report["status"] = "failed"

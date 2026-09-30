@@ -1,0 +1,2 @@
+# 自动任务验收；缺键使用 tests/system/mission.py 的 Options 默认值。
+# 阈值在运行前写入报告，仿真种子只控制传感器噪声，不控制 OS/GPU 调度。

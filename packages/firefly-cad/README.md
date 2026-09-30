@@ -11,7 +11,7 @@ RMUC STEP 资产构建。源文件只读，统一归一化为米、Z 向上、XY
 # 几何资产：三角化 → 碰撞 → Blender GLB → FFMap → 独立读回验收
 uv run --package firefly-cad firefly-cad-build /path/to/RMUC2026_V2.0.0.stp
 
-# 构建、物理接触检查、release 进程、离线图像采集、可用权重下建库、启动与飞行检查
+# 构建、物理接触检查、release 进程、离线图像采集、可用权重下建库、自动任务验收
 uv run --all-packages --extra test python scripts/prepare_rmuc.py /path/to/RMUC2026_V2.0.0.stp
 ```
 
@@ -24,6 +24,8 @@ uv run --all-packages --extra test python scripts/prepare_rmuc.py /path/to/RMUC2
 支持 Bevy 的 GPU、Rust 构建环境；ALIKED/LightGlue 权重仍须单独提供。
 若阶段失败或权重缺失，报告保留 failed/blocked/not_run，完整命令返回非零。
 建库完成不等于在线重定位或在线回环验收通过。
+资产构建后的任务、碰撞和故障验收由 `scripts/accept_rmuc.py` 执行，独立报告
+保留在 `logs/acceptance/<运行ID>/`，准备报告引用其 JSON 路径。
 当前入口没有在线重定位验收，该项固定为 `not_run`，因此完整报告不能标为全部通过；
 补齐权重可运行特征建库，但仍须独立验证在线定位。
 

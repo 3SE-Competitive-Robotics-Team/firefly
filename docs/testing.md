@@ -75,3 +75,45 @@ CI 的 Rust job 执行全部普通测试；Python job 执行 `tests/`、`apps/`�
 静止测量与局部原点验收。额外设置 `FIREFLY_RUN_FLIGHT=1` 后执行起飞 1m、
 持续两秒稳定悬停和降落：水平偏移 <0.5m，高度误差 <0.15m，悬停速度 <0.2m/s。
 真值仅用于评测，飞控仍只消费传感器估计。失败保留 RRD，不放宽门槛。
+
+## 自动任务验收
+
+```bash
+cargo build --release -j 2 -p vio -p render -p fc -p ffctl -p gicp -p planner
+uv run --all-packages --extra test python scripts/accept_rmuc.py
+```
+
+配置为 `configs/acceptance.toml`（`--config` 可覆盖），缺键采用
+`tests/system/mission.py::Options`。`--case nominal|reference_loss|estimator_loss`
+可单独复现。要求独占本仓库闭环进程与图形会话；检测到其他进程时拒绝运行，
+不终止其他任务。命令默认不重建二进制；完整场地准备入口会先 release 构建再调用它。
+
+| 验收项 | 固定契约 |
+|---|---|
+| 初始化 | 真实 IMU/图像，屏蔽 PlantState；静止窗口至少 1s，局部原点误差 <0.1m，上锁电机为零 |
+| 起飞 / 悬停 | 起飞 1m；高度误差 <0.15m，水平偏移 <0.5m，速度 <0.2m/s，连续保持 3s |
+| 路径跟踪 | 真实 GICP 与 planner，地图系航点 `(-11,0,2)` → `(-13,0,1.405)`；逐点到达误差 <0.35m、速度 <0.3m/s 持续 1s |
+| 跟踪评分 | 同时刻 GT 与实际 Reference，禁止对齐；RMSE ≤0.35m，最大误差 ≤0.8m |
+| 局部定位 | 固定尺度航向/平移对齐；VIO ATE RMSE ≤0.2m，1s 位置增量 RPE RMSE ≤0.15m |
+| 地图定位 | 禁止对齐；位置 RMSE ≤0.25m，航向 RMSE ≤15° |
+| 碰撞 | MuJoCo 每物理步累计；只豁免停机坪半径 0.5m、高差 0.06m、速度 <0.5m/s 且法线竖直余弦 ≥0.9 的接触；其他接触必须为零 |
+| 参考失联 | SIGINT 停止 planner；2.5s 墙钟内进入 Hold，在失联点 0.5m 内连续保持 2s |
+| 估计失联 | SIGINT 停止 VIO；0.8s 内禁止继续使用陈旧状态输出推力；另行检查无碰撞终止，电机归零不等于安全降落 |
+| 退出 | 只向本次子进程发 SIGINT，15s 内退出；不得遗留进程或用 SIGKILL 掩盖退出失败 |
+
+`tests/system/mission_sim.py` 只加评测观测：固定 IMU 噪声种子、读取接触、拒绝
+静默物理重置。控制律、传感器生成与物理步进仍调用生产实现；噪声种子不控制
+OS/GPU 调度。地面真值仅用于验收判定，不生成目标坐标或估计器修正。
+
+数据映射：`acceptance/{gt,odom,corrected,reference}` 为各自原坐标系的
+`Transform3D`，`*_velocity` 与 `motors/physics/penetration` 为 `Scalars`，
+均为 `sim_time` 上的实时原始观测，经 Firefly/Viz 聚合；阶段、指令和故障注入
+写入 `logs/acceptance` 的 `TextLog`。位置评分只读取这些 RRD，不向控制链反馈。
+接触计数以 200Hz 物理步统计并以 20Hz 发布累计值，位姿评分约 10Hz；记录缺失、
+回退时钟或超过 0.5s 的评分数据断流不能计为通过。
+
+每次报告目录 `logs/acceptance/<UTC时间-随机ID>/` 包含每用例 RRD、`report.json`
+与 `report.html`。JSON 保留 Git 提交及脏状态、源码/二进制/资产/RRD SHA-256、
+完整配置、运行依赖版本、阶段时间窗、实际指标与退出码。HTML 为可读汇总。
+中途失败后的依赖阶段标为 blocked；碰撞通过只覆盖报告中实际观测到的时间，
+不能代替尚未完成的整段任务。该入口不验证 ALIKED/LightGlue 在线重定位或回环。
