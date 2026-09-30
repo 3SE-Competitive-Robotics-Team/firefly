@@ -63,7 +63,7 @@ pub fn dynamics(
 
     if input.reset {
         quad.state = QuadState {
-            position: Vec3::from(cfg.start),
+            position: cfg.start.into(),
             ..default()
         };
     } else {
@@ -80,6 +80,6 @@ pub fn dynamics(
         integrate(&mut quad.state, &alloc.realized, &cfg.drone, dt);
     }
 
-    transform.translation = quad.state.position;
-    transform.rotation = quad.state.attitude;
+    transform.translation = Vec3::from_array(quad.state.position.to_array());
+    transform.rotation = Quat::from_array(quad.state.attitude.to_array());
 }

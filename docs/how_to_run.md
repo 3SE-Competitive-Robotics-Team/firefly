@@ -100,8 +100,12 @@ cargo run --release -p gicp
 
 当前视觉链路是特征提取 → 库图匹配 → PnP 位姿观测 → 定位融合 →
 `Firefly/CorrectedOdometry`。在线关键帧回环与位姿图优化尚未实现。
-完成地图对齐后，可运行 planner 接收对齐后的里程计并发布飞控参考；
-通过 `ffctl fc track` 进入跟踪模式。话题和参数以各应用 `--help` 为准。
+完成地图对齐后，可运行 planner 接收 `Firefly/CorrectedOdometry` 并发布飞控参考；
+通过 `ffctl fc track` 进入跟踪模式，`ffctl planner goal X Y Z` 发布地图系目标。
+planner 不订阅原始局部 VIO，不提供平移偏置捷径。未收到有效初始化状态时不发布
+参考；状态失联 500ms、变为未初始化或出现非法数值时停止发布并锁存，恢复定位后
+须重启 planner。飞控按自己的参考流超时策略处置，不会收到伪造的位置反馈。
+深度帧按同源状态历史插值，每帧只融合一次；历史不覆盖时跳过该帧。
 
 `scripts/collect_vision_map.py` 从 render 采集 RMUC 左图、深度和离线位姿标签，
 再交给 `aliked --build-map`。该工具要求外部飞控、估计器和独立地图对齐，

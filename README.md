@@ -90,6 +90,11 @@ IMU 窗口与双目视差检查。观察就绪日志或里程计的
 局部里程计直接当成 MuJoCo 世界坐标。
 评测可对轨迹进行固定尺度的航向与平移对齐，变换只作用于评测数据。
 
+规划器只接收 `Firefly/CorrectedOdometry`，要求上游已完成独立地图对齐。
+等待首个有效状态期间不发布参考；状态失联 500ms 或变为无效后停止发布并锁存，
+恢复定位后须重启 planner。不会以轨迹参考代替实测位置。
+
+流程审查与当前限制见 [可靠性说明](docs/reliability.md)。
 更多进程、配置与资源说明见 [运行文档](docs/how_to_run.md) 和
 [架构说明](docs/architecture.md)。
 
@@ -120,5 +125,5 @@ uv run --no-dev python bench/check_sensor_startup.py
 ## 参考实现
 
 - [OpenVINS](https://github.com/rpng/open_vins)：MSCKF 与惯性初始化。
-- [EGO-Planner-v2](https://github.com/ZJU-FAST-Lab/ego-planner-swarm)：重规划与集群规划。
+- [EGO-Planner-v2](https://github.com/ZJU-FAST-Lab/EGO-Planner-v2)：重规划与集群规划。
 - [purecv](https://github.com/webarkit/purecv)：视觉前端。

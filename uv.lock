@@ -113,8 +113,8 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "rerun-sdk", specifier = ">=0.36.2" },
-    { name = "scipy", specifier = ">=1.15" },
+    { name = "rerun-sdk", specifier = ">=0.38.1,<0.39" },
+    { name = "scipy", specifier = ">=1.18.1" },
     { name = "trimesh", specifier = ">=5.1.0" },
 ]
 
@@ -131,7 +131,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "cadquery-ocp-novtk", specifier = ">=8.0.1.0.0" },
-    { name = "scipy", specifier = ">=1.15" },
+    { name = "scipy", specifier = ">=1.18.1" },
     { name = "trimesh", specifier = ">=5.1.0" },
 ]
 
@@ -146,8 +146,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mujoco", specifier = ">=3.11,<4" },
-    { name = "numpy", specifier = ">=2,<3" },
+    { name = "mujoco", specifier = ">=3.14,<4" },
+    { name = "numpy", specifier = ">=2.5.3,<3" },
 ]
 
 [[package]]
@@ -171,12 +171,12 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "firefly-mujoco", editable = "packages/firefly-mujoco" },
-    { name = "iceoryx2", specifier = "==0.9.3" },
-    { name = "numpy", specifier = ">=2,<3" },
-    { name = "opentelemetry-api", specifier = ">=1.44,<2" },
-    { name = "opentelemetry-sdk", specifier = ">=1.44,<2" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" },
-    { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23" },
+    { name = "iceoryx2", specifier = "==0.10.0" },
+    { name = "numpy", specifier = ">=2.5.3,<3" },
+    { name = "opentelemetry-api", specifier = ">=1.45,<2" },
+    { name = "opentelemetry-sdk", specifier = ">=1.45,<2" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=9.1.1" },
+    { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=1.4" },
 ]
 provides-extras = ["test"]
 
@@ -194,9 +194,17 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "firefly-mujoco", editable = "packages/firefly-mujoco" },
-    { name = "iceoryx2", specifier = "==0.9.3" },
-    { name = "numpy", specifier = ">=2,<3" },
-    { name = "rerun-sdk", specifier = ">=0.36.2" },
+    { name = "iceoryx2", specifier = "==0.10.0" },
+    { name = "numpy", specifier = ">=2.5.3,<3" },
+    { name = "rerun-sdk", specifier = ">=0.38.1,<0.39" },
+]
+
+[[package]]
+name = "flatbuffers"
+version = "25.12.19"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e8/2d/d2a548598be01649e2d46231d151a6c56d10b964d94043a335ae56ea2d92/flatbuffers-25.12.19-py2.py3-none-any.whl", hash = "sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4", size = 26661, upload-time = "2025-12-19T23:16:13.622Z" },
 ]
 
 [[package]]
@@ -226,16 +234,19 @@ wheels = [
 
 [[package]]
 name = "iceoryx2"
-version = "0.9.3"
+version = "0.10.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/96/ec/0dac053c0b7b30dbf03c7dde35aa18f96c44c5108eb99e7ac4411a0cf522/iceoryx2-0.9.3.tar.gz", hash = "sha256:9397a27700f897b7c54596ae11beb75f81c9e3ac8f36753a63ff0d938b194d75", size = 884049, upload-time = "2026-07-08T13:31:27.723Z" }
+dependencies = [
+    { name = "flatbuffers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/08/84/ebdc6feb7b785934d02ba0fb85097c087e1507eba9dad5e030b61407ec63/iceoryx2-0.10.0.tar.gz", hash = "sha256:62db7f0935ade10b18de17600952e579e9458704c337113428a91becac9bc454", size = 963533, upload-time = "2026-09-18T17:09:52.53Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/56/7e/c426608a8c7ce3872148fdfa79298b200d5db4e5f0f74c6195f764086f87/iceoryx2-0.9.3-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:052360c1e808326f8d51e859dfa10afb8f92f1d4f2b08761bc65a70d8daa9c40", size = 1260448, upload-time = "2026-07-08T13:31:13.833Z" },
-    { url = "https://files.pythonhosted.org/packages/57/3a/45a5e694ee5196e5186976d8081a66ec647ada22c2685d9dd9a4fb80748e/iceoryx2-0.9.3-cp314-cp314t-manylinux_2_34_x86_64.whl", hash = "sha256:eeaf2fff57d1f37c8a1817be34439b8f41f85851fe059ab09510652197a85392", size = 1522644, upload-time = "2026-07-08T13:31:16.461Z" },
-    { url = "https://files.pythonhosted.org/packages/97/c6/a6d2fea57874fb8f95194c7ad59bc4aaaa8cda33026ef941103ec4b098e4/iceoryx2-0.9.3-cp314-cp314t-win_amd64.whl", hash = "sha256:6452c755886a77a134dc19f1ff34e0bf5ed911c8d8cc1a73b3961258083b6770", size = 1369908, upload-time = "2026-07-08T13:31:18.744Z" },
-    { url = "https://files.pythonhosted.org/packages/c8/c5/f92b03d8d16ca11c56bec29d617a122b1d8b70cd411e258e794b2eac6c99/iceoryx2-0.9.3-cp38-abi3-macosx_11_0_arm64.whl", hash = "sha256:d8ba2ba50061eeb8c7a2ff7bca39232bf46578b37c4eaedfcd05edc8ecf3c7a2", size = 1275041, upload-time = "2026-07-08T13:31:21.331Z" },
-    { url = "https://files.pythonhosted.org/packages/d6/48/7efea208b1a16c28cba798d8d6d296eb7efaa2690ed3e5de818d6ff69fdf/iceoryx2-0.9.3-cp38-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:146f285b62ea8fe94ec10474e41e36367bb165fadc50c8b9a4abf514875f231d", size = 1526176, upload-time = "2026-07-08T13:31:23.52Z" },
-    { url = "https://files.pythonhosted.org/packages/75/fb/b95a9769713ddb045c1da1183be3a3c0b92dfad80d13424ca929ec98c70f/iceoryx2-0.9.3-cp38-abi3-win_amd64.whl", hash = "sha256:f5e7e827dc802b630e728baba19da2b9c9092cf70b7d152222c921db39d2298a", size = 1374690, upload-time = "2026-07-08T13:31:25.885Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/2d/8ad4a73d4ddbc96ac0c25267deacea273c77cbf1155048ac35302f946f8b/iceoryx2-0.10.0-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:ec38f5efff603e99cc69945260d8a59c4c4fb4f635af3fd92f37b0e389890e98", size = 1331311, upload-time = "2026-09-18T17:09:42.659Z" },
+    { url = "https://files.pythonhosted.org/packages/da/26/adad4491fd3db3683a8e02ea13335c9dd859a90df31a8eb9931dd8e17ca0/iceoryx2-0.10.0-cp314-cp314t-manylinux_2_34_x86_64.whl", hash = "sha256:2ced280282eadcea8ffa9a19620ea5c91b3979f3de4dbe7c60476c9cf511a4f7", size = 1582075, upload-time = "2026-09-18T17:09:44.332Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/f3/414b690103feffc4319de5b56345d00807f8523fe1bb6f13a14e7bd83756/iceoryx2-0.10.0-cp314-cp314t-win_amd64.whl", hash = "sha256:c8804b4c1ace3336a8b7e7b21689d768531e909e60bad83ff5ac593774404ca9", size = 1430782, upload-time = "2026-09-18T17:09:46.221Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/c1/18f070a0ad2d37209831f6195c9837e13921504a611579b223ff579c1e81/iceoryx2-0.10.0-cp38-abi3-macosx_11_0_arm64.whl", hash = "sha256:562c90a26a7a7700ce4cfb8bbeb1998ceae179a18b01a8be1b99cee17d158365", size = 1345344, upload-time = "2026-09-18T17:09:47.825Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/57/886de693897ef720760876b891b77c188637586e621b92bef7dda6b80510/iceoryx2-0.10.0-cp38-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:45b1750565cb6f45faf13da60ae194b0e70e8a53c9b6d9abce9df3022035b144", size = 1589016, upload-time = "2026-09-18T17:09:49.418Z" },
+    { url = "https://files.pythonhosted.org/packages/94/7f/9acc30c018b57bb7167a6cac9a4d7501b70d44ceb8752e2865d6cdf2ff16/iceoryx2-0.10.0-cp38-abi3-win_amd64.whl", hash = "sha256:310508803231ec2bed5c2b0ff11f5f988247622a7c787554411bcd87a814aa6a", size = 1446667, upload-time = "2026-09-18T17:09:51.104Z" },
 ]
 
 [[package]]

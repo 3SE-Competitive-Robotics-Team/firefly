@@ -108,14 +108,13 @@ impl TopicListener {
     /// # Errors
     /// 底层 event 监听失败。
     pub fn drain(&self) -> Result<usize, firefly_error::Error> {
-        let mut count = 0usize;
-        self.listener.try_wait_all(|_| count += 1).map_err(|e| {
+        let count = self.listener.try_wait(|_| {}).map_err(|e| {
             firefly_error::Error::temporary(
                 firefly_error::ErrorKind::Internal,
                 format!("排空事件通知失败: {e:?}"),
             )
         })?;
-        Ok(count)
+        Ok(usize::try_from(count).unwrap_or(usize::MAX))
     }
 }
 

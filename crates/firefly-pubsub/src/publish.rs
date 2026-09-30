@@ -21,7 +21,7 @@ use crate::trace::TraceContext;
 
 /// 泛型零拷贝发布端（iceoryx2 ipc 服务，User Header 携带 trace 上下文）。
 ///
-/// 约束对齐 iceoryx2 0.9.3 `publish_subscribe`（`Debug + ZeroCopySend`；
+/// 约束对齐 iceoryx2 0.10 `publish_subscribe`（`Debug + ZeroCopySend`；
 /// 0.9.999 起新增 `IceoryxSend`，升级时补上）。
 ///
 /// 节点由调用方持有（进程共享单节点，见 [`crate::node`]），端口只借用其
@@ -138,7 +138,7 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
     ///
     /// 一次性 CLI（`apps/ffctl`）靠它确认“有没有人在听”：iceoryx2 的 `send` 在无订阅端时
     /// 不报错（样本直接丢弃），单看 `Result` 无法区分“投递成功”与“没人订阅”；
-    /// 每次 `send` 内部会刷新连接（iceoryx2 0.9.3 `send_sample`），故计数即最新连接态。
+    /// 每次 `send` 内部会刷新连接（iceoryx2 0.10 `send_sample`），故计数即最新连接态。
     ///
     /// # Errors
     /// 借出样本失败或发送失败（如发布端超时）。

@@ -28,7 +28,7 @@ pub type ReceivedOdom = Received<OdomMessage>;
 
 /// 泛型零拷贝订阅器（iceoryx2 ipc 服务，User Header 携带 trace 上下文）。
 ///
-/// 约束对齐 iceoryx2 0.9.3 `publish_subscribe`（`Debug + ZeroCopySend`；
+/// 约束对齐 iceoryx2 0.10 `publish_subscribe`（`Debug + ZeroCopySend`；
 /// 0.9.999 起新增 `IceoryxSend`，升级时补上）。
 ///
 /// 节点由调用方持有（进程共享单节点，见 [`crate::node`]），端口只借用其

@@ -6,17 +6,17 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "firefly-mujoco",
-    "iceoryx2==0.9.3",
-    "numpy>=2,<3",
-    "opentelemetry-api>=1.44,<2",
-    "opentelemetry-sdk>=1.44,<2",
+    "iceoryx2==0.10.0",
+    "numpy>=2.5.3,<3",
+    "opentelemetry-api>=1.45,<2",
+    "opentelemetry-sdk>=1.45,<2",
 ]
 
 [tool.uv.sources]
 firefly-mujoco = { workspace = true }
 
 [build-system]
-requires = ["uv_build>=0.9.18,<0.10.0"]
+requires = ["uv_build>=0.12.21,<0.13"]
 build-backend = "uv_build"
 
 [project.scripts]
@@ -24,6 +24,6 @@ firefly-sim = "firefly_sim.main:main"
 
 [project.optional-dependencies]
 test = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4",
 ]

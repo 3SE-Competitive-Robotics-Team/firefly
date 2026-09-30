@@ -1,17 +1,18 @@
 //! planner 进程：任务执行（`firefly_planner::PlannerManager` 驱动）+ IPC
 //! 接线 + 可视化发布（经 `Firefly/Viz` 话题，`firefly-viz` 进程统一写 rerun）。
 //!
-//! 状态源 = **VIO odom**（`Firefly/Odometry`，新鲜度超时回退轨迹参考推进）；
+//! 状态源固定为已对齐地图系的 `Firefly/CorrectedOdometry`；500ms 墙钟失联
+//! 或有效状态变坏时停止发布参考并锁存，恢复定位后须重启本进程。
 //! 深度感知建图的位姿同源，深度流超时（对照官方 `grid_map/odom_depth_timeout`）
 //! 触发急停且禁用 fail-safe。真值不参与状态链路（vio 进程侧仅作对比可视化）。
 //!
 //! 运行：`cargo run --release -p planner`（配合 `uv run firefly-sim` +
 //! `cargo run --release -p vio`），或
-//! `cargo run --release -p planner -- --map apps/planner/maps/rmuc2026.ffmap` 独立运行。
+//! `cargo run --release -p planner -- --map apps/planner/maps/rmuc2026.ffmap`。
 //!
-//! 动态目标：订阅 `Firefly/Goal`（`ffctl goal X Y Z` 发布），
+//! 动态目标：订阅 `Firefly/Goal`（`ffctl planner goal X Y Z` 发布），
 //! 收到目标即重算全局路径并飞往该点；到达后悬停保持、进程保持运行等待
-//! 新目标（`--goal` 仅为初始目标，可省略——缺省悬停在 `--start`）。
+//! 新目标（`--goal` 仅为初始目标，可省略——缺省悬停在首次实测位置）。
 //!
 //! 心跳门控（对照官方 `traj_server::cmdCallback`）：每 tick 即一次执行节拍
 //! （官方 FSM 每拍发 `planning/heartbeat`）；从未收到节拍不发布参考，超过
@@ -26,10 +27,11 @@
 
 mod config;
 mod scene;
+mod state_input;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fastrace::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
@@ -44,20 +46,19 @@ use firefly_pubsub::node::create_node;
 use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::reference::{REFERENCE_TOPIC, ReferenceMessage};
-use firefly_pubsub::subscriber::{OdomSubscriber, Subscriber};
+use firefly_pubsub::subscriber::{CorrectedOdomSubscriber, Subscriber};
 use firefly_pubsub::viz::{
     ARROWS_MAX, POINTS_MAX, VIZ_TOPIC, VOXELS_MAX, VizMessage, VizPublisher, kind,
 };
 use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetRunResult;
-use nalgebra::{Isometry3, Point3, Quaternion, Translation3, UnitQuaternion, Vector3};
+use nalgebra::Vector3;
 
 use crate::scene::{human_voxels, parse_vec3};
+use crate::state_input::StateInput;
 
 /// 主循环频率（官方 `exec_timer` 0.1s）。
 const LOOP_PERIOD: Duration = Duration::from_millis(100);
-/// odom 新鲜度阈值（秒）：超过该时长未收到 odom 则回退轨迹推进估计。
-const ODOM_FRESH_TIMEOUT: f64 = 1.0;
 /// 深度/odom 丢失阈值（秒），对照官方 `grid_map/odom_depth_timeout`
 /// 默认值 1.0（`plan_env/src/grid_map.cpp`）。
 const DEPTH_TIMEOUT: f64 = 1.0;
@@ -155,7 +156,6 @@ struct Args {
     config: PathBuf,
     start: [f64; 3],
     goal: Option<[f64; 3]>,
-    frame_offset: [f64; 3],
     /// 仅向 `Firefly/MandatoryStop` 发一条强制停止指令后退出。
     mandatory_stop: bool,
 }
@@ -168,7 +168,6 @@ fn parse_args() -> Result<Args> {
         start: [-13.0, 0.0, 1.405],
         // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
         goal: None,
-        frame_offset: [0.0, 0.0, 0.0],
         mandatory_stop: false,
     };
     while let Some(arg) = it.next() {
@@ -185,7 +184,6 @@ fn parse_args() -> Result<Args> {
             }
             "--start" => args.start = parse_vec3(&mut it, "--start")?,
             "--goal" => args.goal = Some(parse_vec3(&mut it, "--goal")?),
-            "--frame-offset" => args.frame_offset = parse_vec3(&mut it, "--frame-offset")?,
             "--mandatory-stop" => args.mandatory_stop = true,
             other => {
                 return Err(Error::new(
@@ -198,7 +196,7 @@ fn parse_args() -> Result<Args> {
     Ok(args)
 }
 
-/// 打开可选订阅器：失败降级为 `None` 并记录（辅助输入流可缺失，进程保持独立运行）。
+/// 打开可选订阅器：失败降级为 `None` 并记录（辅助输入流可缺失，状态门控仍生效）。
 fn open_sub<T: std::fmt::Debug + ZeroCopySend + 'static>(
     node: &firefly_pubsub::node::IpcNode,
     topic: &str,
@@ -217,12 +215,6 @@ fn open_sub<T: std::fmt::Debug + ZeroCopySend + 'static>(
     }
 }
 
-/// 最新里程计快照（地图系状态 + 姿态四元数，深度投影用）。
-struct OdomSnapshot {
-    state: firefly_planner::State,
-    quat_xyzw: [f64; 4],
-}
-
 /// 各布尔标志相互独立（传感器/停止/完成），非状态机编码。
 #[allow(clippy::struct_excessive_bools)]
 struct App {
@@ -239,11 +231,14 @@ struct App {
     static_occupied: HashSet<[usize; 3]>,
     /// 上一帧动态障碍占据体素。
     prev_dyn: Vec<[usize; 3]>,
-    /// 仿真时钟（秒）。**唯一权威 = 收到的 odom 时间戳**；无消息时按 tick
-    /// 本地递增回退。所有计算/viewer 时间轴都用它，与 vio/仿真对齐。
+    /// 状态时钟（秒），只由通过校验的地图系里程计推进。
     t_sim: f64,
-    sensor_this_tick: bool,
-    odom: Option<OdomSubscriber>,
+    wall_origin: Instant,
+    odom: CorrectedOdomSubscriber,
+    state_input: StateInput,
+    received_state: bool,
+    state_loss_reported: bool,
+    initial_goal: Option<[f64; 3]>,
     depth: Option<Subscriber<DepthImageMessage>>,
     goal_sub: Option<Subscriber<GoalMessage>>,
     /// 强制停止订阅（对照官方 `mandatory_stop` topic；单进程仿真下由外部
@@ -259,24 +254,19 @@ struct App {
     heartbeat_timeout: f64,
     /// 最近一次发布的参考位置（官方 `traj_server` 的 `last_pos_`；超时悬停落点）。
     last_ref_pos: Option<Vector3<f64>>,
-    latest_odom: Option<OdomSnapshot>,
-    last_odom_recv: f64,
     /// 最新 odom 携带的 trace 上下文 `(trace_id, span_id, sampled)`（续接用）。
     odom_trace: Option<(u128, u64, bool)>,
     latest_depth: Option<DepthImageMessage>,
+    last_depth_timestamp: f64,
     /// 深度流新鲜度监视（超时锁存触发急停）。
     depth_freshness: DepthFreshness,
     /// 深度丢失已报错标记（锁存期内不刷屏；新帧到达即复位）。
     depth_loss_reported: bool,
     ref_pub: Option<Publisher<ReferenceMessage>>,
     depth_cam: DepthCamera,
-    frame_offset: Vector3<f64>,
     finished: bool,
     /// 衰减节拍计数（10Hz 累计，满 5 帧触发 2Hz `fade`）。
     fade_ticks: usize,
-    corrected_odom: Option<firefly_pubsub::subscriber::CorrectedOdomSubscriber>,
-    latest_corrected: Option<OdomSnapshot>,
-    last_corrected_recv: f64,
 }
 
 impl App {
@@ -292,7 +282,6 @@ impl App {
         manager_options: ManagerOptions,
         start: [f64; 3],
         goal: Option<[f64; 3]>,
-        frame_offset: [f64; 3],
     ) -> Result<Self> {
         let mut grid = map_file.to_grid_map()?;
         // 心跳超时阈值先取（config 随后移入 Planner）
@@ -311,7 +300,8 @@ impl App {
             .collect();
         let planner = firefly_planner::Planner::new(config, grid);
         // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
-        let goal = goal.unwrap_or(start);
+        let initial_goal = goal;
+        let goal = start;
         let manager = PlannerManager::with_planner(
             planner,
             manager_options,
@@ -321,17 +311,9 @@ impl App {
         // 进程共享节点：所有端口由它派生，进程退出时统一 Drop 释放 IPC 资源
         let node = create_node()?;
         let log_ipc = firefly_observability::init_ipc(&node, "planner");
-        // 订阅 VIO 输出（vio 进程未启动时降级为 None，保持独立运行）
-        let odom = match OdomSubscriber::new(&node) {
-            Ok(s) => {
-                log::info!("已订阅 odom 话题（VIO 状态源）");
-                Some(s)
-            }
-            Err(e) => {
-                log::warn!("odom 订阅不可用，回退轨迹推进估计：{e}");
-                None
-            }
-        };
+        // 地图系输入是必需端口；局部 VIO 不能替代它。
+        let odom = CorrectedOdomSubscriber::new(&node)
+            .map_err(|e| e.with_context("operation", "创建规划器地图系里程计订阅"))?;
         let depth = open_sub::<DepthImageMessage>(
             &node,
             DEPTH_TOPIC,
@@ -341,7 +323,7 @@ impl App {
         let goal_sub = open_sub::<GoalMessage>(
             &node,
             GOAL_TOPIC,
-            "已订阅目标话题（`ffctl goal X Y Z` 发布）",
+            "已订阅目标话题（`ffctl planner goal X Y Z` 发布）",
             "目标订阅不可用",
         );
         let stop_sub = open_sub::<MandatoryStopMessage>(
@@ -357,17 +339,7 @@ impl App {
                 None
             }
         };
-        log::info!("状态源：odom（新鲜度 {ODOM_FRESH_TIMEOUT}s）；真值不参与规划链路");
-        let corrected_odom = match firefly_pubsub::subscriber::CorrectedOdomSubscriber::new(&node) {
-            Ok(s) => {
-                log::info!("已订阅校正后里程计话题（GICP 融合输出，优先使用）");
-                Some(s)
-            }
-            Err(e) => {
-                log::warn!("校正后里程计订阅不可用，回退原始 odom：{e}");
-                None
-            }
-        };
+        log::info!("状态源：Firefly/CorrectedOdometry；等待地图系有效状态，失联后停止发布并锁存");
         // 可视化发布端：经 Firefly/Viz 话题发布，firefly-viz 进程统一写 rerun
         // （计算线程零 IO；创建失败只降级日志，规划链路不受影响）
         let viz_pub = match VizPublisher::new(&node) {
@@ -389,7 +361,11 @@ impl App {
             prev_dyn: Vec::new(),
             map_file,
             t_sim: 0.0,
-            sensor_this_tick: false,
+            wall_origin: Instant::now(),
+            state_input: StateInput::default(),
+            received_state: false,
+            state_loss_reported: false,
+            initial_goal,
             odom,
             depth,
             goal_sub,
@@ -399,69 +375,30 @@ impl App {
             heartbeat: HeartbeatGate::new(),
             heartbeat_timeout,
             last_ref_pos: None,
-            latest_odom: None,
-            last_odom_recv: f64::NEG_INFINITY,
             odom_trace: None,
             latest_depth: None,
+            last_depth_timestamp: f64::NEG_INFINITY,
             depth_freshness: DepthFreshness::new(),
             depth_loss_reported: false,
             ref_pub,
             depth_cam: DepthCamera::mujoco_default(),
-            frame_offset: Vector3::new(frame_offset[0], frame_offset[1], frame_offset[2]),
             finished: false,
             fade_ticks: 0,
-            corrected_odom,
-            latest_corrected: None,
-            last_corrected_recv: f64::NEG_INFINITY,
         })
     }
 
     /// 排空 odom/深度订阅：续接 trace span、锚定 sim 时钟、记录最新快照。
+    #[fastrace::trace]
     fn poll_sensors(&mut self) -> Result<()> {
-        if let Some(sub) = &self.odom {
-            while let Some(sample) = sub.receive()? {
-                let ctx = *sample.user_header();
-                // 跨进程 trace 续接：本 span 的父即 vio 发布端 span
-                let _span = ctx.continue_span("recv-odom");
-                if ctx.is_traced() {
-                    self.odom_trace = Some((ctx.trace_id(), ctx.span_id, ctx.sampled()));
-                }
-                let m: OdomMessage = *sample;
-                // 锚定 sim 时钟到 odom 时间戳（vio 的 odom 用 MuJoCo sim 时钟）
-                self.t_sim = self.t_sim.max(m.timestamp);
-                self.last_odom_recv = m.timestamp;
-                self.sensor_this_tick = true;
-                let p = Vector3::new(m.position_x, m.position_y, m.position_z) + self.frame_offset;
-                self.latest_odom = Some(OdomSnapshot {
-                    state: firefly_planner::State {
-                        position: Point3::from(p),
-                        velocity: Vector3::new(m.velocity_x, m.velocity_y, m.velocity_z),
-                        acceleration: Vector3::zeros(),
-                    },
-                    quat_xyzw: [m.quat_x, m.quat_y, m.quat_z, m.quat_w],
-                });
-            }
-        }
-        if let Some(sub) = &self.corrected_odom {
-            while let Some(sample) = sub.receive()? {
-                let ctx = *sample.user_header();
-                let _span = ctx.continue_span("recv-corrected");
-                if ctx.is_traced() {
-                    self.odom_trace = Some((ctx.trace_id(), ctx.span_id, ctx.sampled()));
-                }
-                let m: OdomMessage = *sample;
-                self.t_sim = self.t_sim.max(m.timestamp);
-                self.last_corrected_recv = m.timestamp;
-                self.sensor_this_tick = true;
-                let p = Vector3::new(m.position_x, m.position_y, m.position_z) + self.frame_offset;
-                self.latest_corrected = Some(OdomSnapshot {
-                    state: firefly_planner::State {
-                        position: Point3::from(p),
-                        velocity: Vector3::new(m.velocity_x, m.velocity_y, m.velocity_z),
-                        acceleration: Vector3::zeros(),
-                    },
-                    quat_xyzw: [m.quat_x, m.quat_y, m.quat_z, m.quat_w],
-                });
+        while let Some(sample) = self.odom.receive()? {
+            let ctx = *sample.user_header();
+            let _span = ctx.continue_span("recv-map-odom");
+            let message: OdomMessage = *sample;
+            if self.state_input.observe(&message, Instant::now()) {
+                self.t_sim = message.timestamp;
+                self.odom_trace = ctx
+                    .is_traced()
+                    .then(|| (ctx.trace_id(), ctx.span_id, ctx.sampled()));
             }
         }
         if let Some(sub) = &self.depth {
@@ -469,12 +406,13 @@ impl App {
                 let ctx = *sample.user_header();
                 let _span = ctx.continue_span("recv-depth");
                 let m: DepthImageMessage = *sample;
-                // 帧时间戳（传感器时钟 = 仿真时钟）锚定 sim 时钟，与 odom
-                // 一致；新鲜度计时在 update_map_from_depth 实际吃进帧时推进
-                self.t_sim = self.t_sim.max(m.timestamp);
-                self.sensor_this_tick = true;
-                self.depth_loss_reported = false;
-                self.latest_depth = Some(m);
+                if m.timestamp.is_finite()
+                    && m.timestamp >= 0.0
+                    && m.timestamp > self.last_depth_timestamp
+                {
+                    self.last_depth_timestamp = m.timestamp;
+                    self.latest_depth = Some(m);
+                }
             }
         }
         if let Some(sub) = &self.goal_sub {
@@ -507,39 +445,25 @@ impl App {
         Some(hover_reference(position, self.manager.yaw_state()))
     }
 
-    /// 新鲜 odom 的规划系状态（校正后优先，回退原始；超时返回 `None`）。
-    fn measured(&self, now: f64) -> Option<firefly_planner::State> {
-        if now - self.last_corrected_recv < ODOM_FRESH_TIMEOUT
-            && let Some(snap) = &self.latest_corrected
+    /// 深度帧只融合一次，位姿必须来自同一地图系状态源的时间插值。
+    #[fastrace::trace]
+    fn update_map_from_depth(&mut self, wall_time: f64) {
+        if self
+            .latest_depth
+            .as_ref()
+            .is_some_and(|depth| depth.timestamp > self.t_sim)
         {
-            return Some(snap.state);
+            return;
         }
-        if now - self.last_odom_recv >= ODOM_FRESH_TIMEOUT {
-            return None;
-        }
-        self.latest_odom.as_ref().map(|o| o.state)
-    }
-
-    /// 深度 → 占据体素（感知建图）：位姿源与融合后状态同源（VIO 经 GICP 矫正）。
-    /// 深度与位姿任一断流都会在此早退——管线饥饿由 [`Self::depth_freshness`]
-    /// 的计时基准停止推进体现（对照官方 `last_occ_update_time_` 只在实际
-    /// 更新占据栅格时推进，"odom or depth lost!" 任一丢失都算）。
-    fn update_map_from_depth(&mut self) {
-        let (Some(depth), Some(odom)) = (&self.latest_depth, &self.latest_odom) else {
+        let Some(depth) = self.latest_depth.take() else {
             return;
         };
-        // 位姿源与状态源同源：优先校正后位姿，保证地图与规划同系
-        let snap = if self.last_corrected_recv > self.last_odom_recv {
-            self.latest_corrected.as_ref().unwrap_or(odom)
-        } else {
-            odom
+        let Some(pose) = self.state_input.pose_at(depth.timestamp) else {
+            return;
         };
-        let pos = snap.state.position.coords;
-        let q = snap.quat_xyzw;
-        let quat = UnitQuaternion::from_quaternion(Quaternion::new(q[3], q[0], q[1], q[2]));
-        let pose = Isometry3::from_parts(Translation3::new(pos.x, pos.y, pos.z), quat);
         update_from_depth(self.manager.map_mut(), &self.depth_cam, &pose, &depth.data);
-        self.depth_freshness.observe(depth.timestamp);
+        self.depth_freshness.observe(wall_time);
+        self.depth_loss_reported = false;
     }
 
     /// 动态障碍按仿真时钟插值，增量更新占据地图（静态体素保护）。
@@ -561,17 +485,36 @@ impl App {
     }
 
     /// 主循环单步：传感器 → 感知/动态地图 → 管理器 tick → 参考发布 + 可视化。
+    #[fastrace::trace]
     #[allow(clippy::too_many_lines)]
     fn step(&mut self) -> Result<()> {
         // 先消费传感器（更新权威仿真时钟），再取当帧 sim 时刻
         self.poll_sensors()?;
         let now = self.t_sim;
-        self.sensor_this_tick = false;
         firefly_observability::set_sim_time(now);
         firefly_observability::pump_log_ipc(&self.log_ipc);
 
+        let Some(snapshot) = self.state_input.current(Instant::now()) else {
+            if self.state_input.stopped() && !self.state_loss_reported {
+                log::error!("地图系里程计失联或无效，停止发布规划参考；恢复定位后须重启 planner");
+                self.state_loss_reported = true;
+            }
+            return Ok(());
+        };
+        let measured = Some(snapshot.state);
+        if !self.received_state {
+            self.manager
+                .set_goal(now, measured, snapshot.state.position.coords)?;
+            if let Some(goal) = self.initial_goal {
+                self.manager.set_goal(now, measured, Vector3::from(goal))?;
+            }
+            self.received_state = true;
+            log::info!("地图系状态就绪，规划从实测位置开始");
+        }
+        let wall_time = self.wall_origin.elapsed().as_secs_f64();
+
         // 深度感知建图 + 动态障碍写入（规划地图更新先于重规划决策）
-        self.update_map_from_depth();
+        self.update_map_from_depth(wall_time);
         // 地图衰减（对照官方 `fadingCallback` 2Hz）：每 0.5s 调用一次固定 `fade()`，
         // 膨胀层在 `fade` 内部增量移除（计数缓冲，对照官方 `changeInfBuf`）。
         self.fade_ticks += 1;
@@ -580,8 +523,6 @@ impl App {
             self.fade_ticks = 0;
         }
         self.update_motion();
-
-        let measured = self.measured(now);
 
         // 强制停止（官方 mandatoryStopCallback）：置锁存标志、关 fail-safe、
         // 进入急停——此后不自动恢复；先于其他分支处理。
@@ -595,7 +536,7 @@ impl App {
         // 锁存后重复命中不刷屏（监视结构锁存 + enter 幂等）。
         if self.manager.local().is_some()
             && !self.manager.is_finished()
-            && self.depth_freshness.timed_out(now, DEPTH_TIMEOUT)
+            && self.depth_freshness.timed_out(wall_time, DEPTH_TIMEOUT)
         {
             if !self.depth_loss_reported {
                 log::error!("深度/里程计丢失！进入急停（fail-safe 已禁用）");
@@ -608,8 +549,7 @@ impl App {
         // 动态目标：收到新目标即重目标（重算全局路径 + 重置状态机），
         // 下一 tick 重新规划飞往新目标
         if let Some(goal) = self.pending_goal.take() {
-            let target =
-                Vector3::new(goal.position_x, goal.position_y, goal.position_z) + self.frame_offset;
+            let target = Vector3::new(goal.position_x, goal.position_y, goal.position_z);
             match self.manager.set_goal(now, measured, target) {
                 Ok(()) => log::info!(
                     "目标更新 ({:.1},{:.1},{:.1})，重新规划中",
@@ -632,7 +572,7 @@ impl App {
         } else {
             report.reference
         };
-        let reference = match self.heartbeat.decide(now, self.heartbeat_timeout) {
+        let reference = match self.heartbeat.decide(wall_time, self.heartbeat_timeout) {
             RefSource::Silent => None,
             RefSource::Hover => {
                 log::error!(
@@ -644,8 +584,9 @@ impl App {
             RefSource::Track => tracked,
         };
         // 本 tick 节拍在判定后记录（与官方「异步心跳 + 独立检查」新鲜度语义一致）
-        self.heartbeat.observe(now);
+        self.heartbeat.observe(wall_time);
         if let Some(reference) = reference
+            && self.state_input.current(Instant::now()).is_some()
             && let Some(pub_) = &self.ref_pub
         {
             match pub_.publish(ReferenceMessage {
@@ -683,18 +624,13 @@ impl App {
                 result.trajectory.duration()
             );
         }
-        if let Some(odom) = &self.latest_odom {
-            self.log_pose(
-                "plan/drone",
-                [
-                    odom.state.position.coords.x,
-                    odom.state.position.coords.y,
-                    odom.state.position.coords.z,
-                ],
-                odom.quat_xyzw,
-                now,
-            );
-        }
+        let q = snapshot.orientation.quaternion();
+        self.log_pose(
+            "plan/drone",
+            snapshot.state.position.coords.into(),
+            [q.i, q.j, q.k, q.w],
+            now,
+        );
         if !self.map_file.motions.is_empty() {
             let mut indices = Vec::new();
             for m in &self.map_file.motions {
@@ -738,10 +674,7 @@ impl App {
             // 不因 finished 退出进程（仅 SIGINT/SIGTERM 优雅退出）
             // 每帧 trace 上下文：续接新鲜 odom 的 trace（跨进程同周期一条
             // trace），无新鲜 odom 时自建未采样 root（不产生 span 记录）
-            let root = match self
-                .odom_trace
-                .filter(|_| self.t_sim - self.last_odom_recv < ODOM_FRESH_TIMEOUT)
-            {
+            let root = match self.odom_trace.filter(|_| !self.state_input.stopped()) {
                 Some((tid, sid, sampled)) => Span::root(
                     "planner",
                     SpanContext::new(TraceId(tid), SpanId(sid)).sampled(sampled),
@@ -764,11 +697,6 @@ impl App {
             if frame.is_multiple_of(PERCEIVED_PERIOD) {
                 let map = self.manager.map();
                 self.log_map("plan/perceived", map, self.t_sim);
-            }
-            // 时钟推进：本 tick 收到带 sim 时间戳消息则由传感器锚定（已在
-            // 轮询时更新 `t_sim`）；否则本地回退递增（独立运行无传感器时）。
-            if !self.sensor_this_tick {
-                self.t_sim += LOOP_PERIOD.as_secs_f64();
             }
             CallbackProgression::Continue
         };
@@ -930,10 +858,10 @@ fn emit_mandatory_stop() -> Result<()> {
 }
 
 /// 感知建图管线新鲜度监视：对照官方 `flag_depth_odom_timeout_` 锁存语义——
-/// 计时基准是管线**实际吃进一帧**（深度+位姿齐备并写入地图）的时间戳，
+/// 计时基准是管线**实际吃进一帧**（深度+位姿齐备并写入地图）的墙钟时刻，
 /// 深度或位姿任一断流即饥饿，超时置位后锁存，直到管线再次吃进新帧才复位。
 struct DepthFreshness {
-    /// 最近一次实际建图消费的帧时间戳（传感器时钟）；首帧之前为 `None`。
+    /// 最近一次实际建图消费的墙钟秒数（相对进程启动）；首帧之前为 `None`。
     last_frame_ts: Option<f64>,
     /// 超时锁存位（官方 `flag_depth_odom_timeout_`）。
     lost: bool,
@@ -971,7 +899,7 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!(
-                "{e}\n用法：planner [--map <map.ffmap>] [--config configs/planner.toml] [--start x y z] [--goal x y z] [--frame-offset x y z] [--mandatory-stop]\n\n--goal 可省略（悬停等待 `ffctl goal X Y Z` 动态目标）；--mandatory-stop 向 {MANDATORY_STOP_TOPIC} 发一条强制停止指令后退出"
+                "{e}\n用法：planner [--map <map.ffmap>] [--config configs/planner.toml] [--start x y z] [--goal x y z] [--mandatory-stop]\n\n--goal 可省略（悬停等待 `ffctl planner goal X Y Z` 动态目标）；--mandatory-stop 向 {MANDATORY_STOP_TOPIC} 发一条强制停止指令后退出"
             );
             std::process::exit(2);
         }
@@ -1010,7 +938,6 @@ fn main() {
         toml_cfg.manager,
         args.start,
         args.goal,
-        args.frame_offset,
     ) {
         Ok(mut app) => {
             // 静态先验一次性记录（体素索引收集在发布端完成）

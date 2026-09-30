@@ -108,7 +108,9 @@ cargo run --release -p fc
 sim 发布 IMU 100Hz、仿真位姿 10Hz、PlantState 200Hz、Airframe 1Hz；
 render 提供双目与深度。VIO 视觉更新 10Hz、预测里程计 100Hz；飞控 1kHz。
 planner / gicp 默认读取 `apps/planner/maps/rmuc2026.ffmap`，缺文件报错。
-地图系算法必须使用经过独立定位对齐的状态。
+地图系算法必须使用经过独立定位对齐的状态。planner 只订阅 CorrectedOdometry；
+未就绪不发布参考，500ms 墙钟失联或无效状态触发停止发布并锁存，须重启恢复。
+重复/乱序样本不得续期，禁止用参考轨迹代替状态或自动切回局部 VIO。
 
 rerun 可视化约定：vio 写 `vio/odom` + `vio/traj`（估计位姿/轨迹）、
 `gt/pose` + `gt/traj`（真值对照）与 `vio/debug/*`（前端健康度），飞控写
@@ -118,7 +120,7 @@ rerun 可视化约定：vio 写 `vio/odom` + `vio/traj`（估计位姿/轨迹）
 自带的调试面板里。默认布局（场景 3D + 前端健康度面板）由进程启动时自动发送，
 无需手工配置。
 
-独立运行（不依赖闭环）：
+单独启动规划器（仍须提供有效地图系里程计）：
 
 ```bash
 cargo run --release -p planner -- --map <实际存在的地图.ffmap>
@@ -166,3 +168,6 @@ cargo run --release -p planner -- --map <实际存在的地图.ffmap>
 - 传感器进程启动：准备 RMUC 资产，先 release 构建 vio / fc / render，确保没有其他闭环进程；运行
   `uv run --no-dev python bench/check_sensor_startup.py`。
   检查屏蔽 PlantState、保留 render 生成图像所需的 GroundTruth；需图形会话，录制只进 `logs/*.rrd`，所有子进程通过 SIGINT 退出。
+
+- 双语言 IPC 契约：`uv sync --all-packages --extra test` 后，执行
+  `FIREFLY_TEST_PYTHON="$PWD/.venv/bin/python" cargo test -p firefly-pubsub --test python_interop -- --ignored`。

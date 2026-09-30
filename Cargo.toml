@@ -4,27 +4,25 @@ exclude = ["apps/firefly-sim", "apps/firefly-viz"]
 resolver = "3"
 
 [workspace.dependencies]
-bevy = "0.19"
-clap = { version = "4.5", features = ["derive"] }
-criterion = { version = "0.8", features = ["html_reports"] }
-fastrace = { version = "0.7", default-features = false }
-glam = "0.32"
-iceoryx2 = "0.9"
-iceoryx2-bb-posix = "0.9"
-jiff = "0.2"
-log = "0.4"
-logcall = "0.2"
-logforth = { version = "0.30", default-features = false }
-nalgebra = "0.35"
-ndarray = "0.17"
+bevy = "0.19.1"
+criterion = { version = "0.8.2", features = ["html_reports"] }
+fastrace = { version = "0.7.19", default-features = false }
+glam = "0.33.11"
+iceoryx2 = "0.10.0"
+iceoryx2-bb-posix = "0.10.0"
+jiff = "0.2.37"
+log = "0.4.34"
+logcall = "0.2.1"
+logforth = { version = "0.30.1", default-features = false }
+nalgebra = "0.35.0"
+ndarray = "0.17.2"
 ort = { version = "=2.0.0-rc.13" }
-purecv = { version = "0.7", default-features = false, features = ["simd", "parallel"] }
-rand = "0.10"
-rayon = "1.12"
-rerun = { version = "0.36", default-features = false, features = ["sdk"] }
-serde = { version = "1", features = ["derive"] }
-toml = "0.9"
-usage = { package = "usage-rs", version = "6" }
+purecv = { version = "=0.7.1", default-features = false, features = ["simd", "parallel"] }
+rand = "0.10.3"
+rayon = "1.12.0"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.6"
+usage = { package = "usage-rs", version = "6.12.0" }
 firefly-cost = { path = "crates/firefly-cost" }
 firefly-error = { path = "crates/firefly-error" }
 firefly-flight = { path = "crates/firefly-flight" }

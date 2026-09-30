@@ -12,7 +12,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - name: Install Bevy/winit Linux deps
         run: |
@@ -23,7 +23,7 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
 
       - name: Format
         run: cargo fmt --all --check
@@ -34,13 +34,20 @@ jobs:
       - name: Test
         run: cargo test --all-targets
 
+      - uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Rust/Python IPC compatibility
+        run: |
+          uv sync --package firefly-sim --no-dev
+          FIREFLY_TEST_PYTHON="$GITHUB_WORKSPACE/.venv/bin/python" cargo test -p firefly-pubsub --test python_interop -- --ignored
+
   python:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.2.0
 
       - name: Test simulation and evaluation
-        run: uv run --with pytest pytest apps/firefly-sim/tests/ bench/tests/ -q -p no:cacheprovider
+        run: uv run --all-packages --extra test pytest apps/firefly-sim/tests/ bench/tests/ packages/firefly-cad/tests/ -q -p no:cacheprovider

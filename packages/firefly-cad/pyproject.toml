@@ -12,7 +12,7 @@ dependencies = [
     "cadquery-ocp-novtk>=8.0.1.0.0",
     # 碰撞聚合：trimesh 体素化（fill 实心）+ scipy（trimesh 体素稀疏编码后端）。
     "trimesh>=5.1.0",
-    "scipy>=1.15",
+    "scipy>=1.18.1",
 ]
 
 [project.scripts]
@@ -21,5 +21,5 @@ firefly-cad-tessellate = "firefly_cad.tessellate:main"
 firefly-cad-collide = "firefly_cad.collide:main"
 
 [build-system]
-requires = ["uv_build>=0.9.18,<0.10.0"]
+requires = ["uv_build>=0.12.21,<0.13"]
 build-backend = "uv_build"
