@@ -19,6 +19,7 @@ dependencies = [
 firefly-cad-census = "firefly_cad.census:main"
 firefly-cad-tessellate = "firefly_cad.tessellate:main"
 firefly-cad-collide = "firefly_cad.collide:main"
+firefly-cad-build = "firefly_cad.pipeline:main"
 
 [build-system]
 requires = ["uv_build>=0.12.21,<0.13"]

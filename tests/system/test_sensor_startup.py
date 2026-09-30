@@ -76,6 +76,7 @@ def test_sensor_startup() -> None:
                 builder = builder.subscriber_max_buffer_size(capacity)
             return builder.open_or_create().subscriber_builder().create()
         odom = subscribe("Firefly/Odometry", OdomMessage)
+        ground_truth = subscribe("Firefly/GroundTruth", OdomMessage)
         control = subscribe("Firefly/Control", ControlMessage, 32)
         # GroundTruth 供 render 摆放传感器；PlantState 不参与启动。
         simulation = """
@@ -92,7 +93,7 @@ sim.main()
         samples = 0
         controls = 0
         previous_timestamp = None
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
             check_alive()
             while (sample := odom.receive()) is not None:
@@ -117,6 +118,8 @@ sim.main()
         assert first_ready >= 1.0, "不得跳过静止观测窗口"
         assert np.linalg.norm(first_position) < 0.1, f"初始位置应为局部原点: {first_position}"
         assert controls >= 100, "无 PlantState 时也必须持续发布零推力"
+        if os.environ.get("FIREFLY_RUN_FLIGHT") == "1":
+            _verify_flight(ground_truth, check_alive)
         print(f"PASS: ready={first_ready:.3f}s, local_position={first_position}, odom={samples}, controls={controls}")
     finally:
         # 只停止本次创建的进程；SIGINT 触发端口 Drop 与录制 flush。
@@ -132,3 +135,58 @@ sim.main()
         if failures:
             raise RuntimeError("; ".join(failures))
 
+
+def _verify_flight(ground_truth, check_alive):
+    """真值只用于起飞/悬停/降落验收；指令不携带真值反馈。"""
+    def command(*args):
+        subprocess.run([str(ROOT / "target/release/ffctl"), "fc", *args], cwd=ROOT, check=True)
+
+    def latest():
+        value = None
+        while (sample := ground_truth.receive()) is not None:
+            msg = sample.payload().contents
+            value = (msg.timestamp, np.array([msg.position_x, msg.position_y, msg.position_z]),
+                     np.array([msg.velocity_x, msg.velocity_y, msg.velocity_z]))
+        return value
+
+    initial = latest()
+    assert initial is not None, "flight evaluation requires ground truth samples"
+    _, origin, _ = initial
+    command("arm")
+    time.sleep(0.2)
+    command("takeoff", "1.0")
+    settled_at = None
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        check_alive()
+        state = latest()
+        if state is not None:
+            stamp, position, velocity = state
+            assert np.isfinite(position).all()
+            assert np.linalg.norm(position[:2] - origin[:2]) < 0.5, "lateral drift during hover"
+            assert -0.1 < position[2] - origin[2] < 1.5, "unsafe altitude excursion"
+            stable = abs(position[2] - origin[2] - 1.) < 0.15 and np.linalg.norm(velocity) < 0.2
+            settled_at = (settled_at if settled_at is not None else stamp) if stable else None
+            if settled_at is not None and stamp - settled_at >= 2.:
+                break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("takeoff did not reach two seconds of stable hover")
+    command("land")
+    settled_at = None
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        check_alive()
+        state = latest()
+        if state is not None:
+            stamp, position, velocity = state
+            assert np.isfinite(position).all() and np.isfinite(velocity).all()
+            assert np.linalg.norm(position[:2] - origin[:2]) < 0.5, "lateral drift during landing"
+            assert -0.1 < position[2] - origin[2] < 1.5, "unsafe landing altitude"
+            stable = abs(position[2] - origin[2]) < 0.08 and np.linalg.norm(velocity) < 0.1
+            settled_at = (settled_at if settled_at is not None else stamp) if stable else None
+            if settled_at is not None and stamp - settled_at >= 1.:
+                command("disarm")
+                return
+        time.sleep(0.01)
+    raise AssertionError("landing did not settle at the pad")

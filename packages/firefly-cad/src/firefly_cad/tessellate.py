@@ -95,7 +95,7 @@ def _face_color(color_tool, face) -> np.ndarray:
 def _append_shape_mesh(shape, color_tool, matrix, tag, acc) -> None:
     """把 `shape` 的面三角化（套 `matrix`）追加进累加器。"""
     from OCP.BRep import BRep_Tool
-    from OCP.TopAbs import TopAbs_FACE
+    from OCP.TopAbs import TopAbs_FACE, TopAbs_REVERSED
     from OCP.TopExp import TopExp_Explorer
     from OCP.TopLoc import TopLoc_Location
     from OCP.TopoDS import TopoDS
@@ -121,6 +121,9 @@ def _append_shape_mesh(shape, color_tool, matrix, tag, acc) -> None:
             for i in range(1, nt + 1):
                 n1, n2, n3 = tri.Triangle(i).Get()
                 tris[i - 1] = (n1 - 1, n2 - 1, n3 - 1)
+            # OCCT 三角化沿曲面正向；必须组合面朝向与装配变换的手性。
+            if (face.Orientation() == TopAbs_REVERSED) != (np.linalg.det(face_matrix[:3, :3]) < 0):
+                tris = tris[:, [0, 2, 1]]
             color = _face_color(color_tool, face)
             if color[0] < 0.0:
                 color = shape_color

@@ -63,14 +63,21 @@ pub struct IpcPorts {
 ///
 /// # Errors
 /// 节点/端口创建失败（IPC 资源不可用，见 `firefly-pubsub` 各构造器）。
-pub fn open_ports() -> Result<IpcPorts, firefly_error::Error> {
+pub fn open_ports(offline: bool) -> Result<IpcPorts, firefly_error::Error> {
     let node = create_node()?;
-    let pose_sub = Subscriber::with_topic(&node, GROUND_TRUTH_TOPIC)?;
-    let left_pub = Publisher::with_topic(&node, CAMERA_LEFT_TOPIC)?;
-    let right_pub = Publisher::with_topic(&node, CAMERA_RIGHT_TOPIC)?;
-    let depth_pub = Publisher::with_topic(&node, DEPTH_TOPIC)?;
-    let pair_notify = TopicNotifier::with_topic(&node, CAMERA_PAIR_TOPIC)?;
-    log::info!("IPC 就绪：订阅真值，发布双目/深度（配合 RMUC sim）");
+    let topic = |name: &str| {
+        if offline {
+            name.replacen("Firefly/", "Firefly/Offline/", 1)
+        } else {
+            name.to_owned()
+        }
+    };
+    let pose_sub = Subscriber::with_topic(&node, &topic(GROUND_TRUTH_TOPIC))?;
+    let left_pub = Publisher::with_topic(&node, &topic(CAMERA_LEFT_TOPIC))?;
+    let right_pub = Publisher::with_topic(&node, &topic(CAMERA_RIGHT_TOPIC))?;
+    let depth_pub = Publisher::with_topic(&node, &topic(DEPTH_TOPIC))?;
+    let pair_notify = TopicNotifier::with_topic(&node, &topic(CAMERA_PAIR_TOPIC))?;
+    log::info!("IPC 就绪：订阅位姿，发布双目/深度，offline={offline}");
     Ok(IpcPorts {
         pose_sub,
         left_pub,
@@ -189,6 +196,7 @@ pub fn poll_pose(
     }
     if let Some((msg, header)) = newest
         && msg.is_initialized
+        && !hub.has_pending()
     {
         pose.pos = Vec3::new(
             msg.position_x as f32,

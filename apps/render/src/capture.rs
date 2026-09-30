@@ -92,7 +92,7 @@ pub struct CaptureHub {
 /// 回读通道内核。
 #[derive(Debug, Default)]
 pub struct HubInner {
-    /// 待执行的最新请求（新位姿覆盖旧请求，渲染永远追最新）。
+    /// 待执行请求；主世界保持对应相机姿态，直到渲染世界确认拷贝。
     pub request: Mutex<Option<CaptureRequest>>,
     /// 已完成的回复队列。
     pub done: Mutex<VecDeque<CapturedFrame>>,
@@ -133,6 +133,16 @@ impl CaptureHub {
     pub fn taken_seq(&self) -> u64 {
         self.inner.taken_seq.load(Ordering::SeqCst)
     }
+}
+
+/// 与相机变换在同一 `ExtractSchedule` 取得的请求快照。
+/// 渲染线程不得直接消费共享槽中新一轮主世界写入的请求。
+#[derive(Resource, Default)]
+struct ExtractedRequest(Option<CaptureRequest>);
+
+#[allow(clippy::needless_pass_by_value)]
+fn extract_request(hub: Extract<Res<CaptureHub>>, mut request: ResMut<ExtractedRequest>) {
+    request.0 = *hub.inner.request.lock().expect("hub poisoned");
 }
 
 /// 单组回读暂存（三份纹理各一块；回调内 `unmap` 后归还）。
@@ -187,11 +197,12 @@ fn extract_eyes(query: Extract<Query<(RenderEntity, &Eye)>>, mut commands: Comma
 
 /// 拷贝传感器纹理 → 空闲暂存组（`Render` 之后同队列提交，顺序保证新于渲染）。
 ///
-/// 请求在无空闲组或纹理未就绪时**放回**而非丢弃：主世界据此保持相机激活、
+/// 请求在无空闲组或纹理未就绪时保留在共享槽：主世界据此保持相机激活、
 /// 下帧重试（相机按需激活，见 `link::poll_pose`）。
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 fn copy_sensors(
     hub: Res<CaptureHub>,
+    mut extracted: ResMut<ExtractedRequest>,
     images: Res<RenderAssets<GpuImage>>,
     depth_cams: Query<(Entity, &Eye, &ViewDepthTexture)>,
     buffers: Res<CaptureBuffers>,
@@ -211,17 +222,15 @@ fn copy_sensors(
     else {
         return;
     };
-    let Some(req) = hub.inner.request.lock().expect("hub poisoned").take() else {
+    let Some(req) = extracted.0.take() else {
         return;
     };
     let Some(left) = images.get(req.left) else {
         log::debug!("左目 GPU 纹理尚未就绪，下帧重试");
-        requeue(&hub, req);
         return;
     };
     let Some(right) = images.get(req.right) else {
         log::debug!("右目 GPU 纹理尚未就绪，下帧重试");
-        requeue(&hub, req);
         return;
     };
     let mut depth_tex = None;
@@ -233,14 +242,12 @@ fn copy_sensors(
     }
     let Some(depth_tex) = depth_tex else {
         log::debug!("深度预通道纹理尚未就绪，下帧重试");
-        requeue(&hub, req);
         return;
     };
 
     // 请求被真正消费（拷贝已编码）：主世界以 `taken_seq` 判据收起相机。
     set.pending.store(3, Ordering::SeqCst);
     hub.inner.inflight_sets.fetch_add(1, Ordering::SeqCst);
-    hub.inner.taken_seq.store(req.seq, Ordering::SeqCst);
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("sensor-capture"),
     });
@@ -248,6 +255,8 @@ fn copy_sensors(
     encode_copy(&mut encoder, &right.texture, &set.right);
     encode_copy(&mut encoder, depth_tex, &set.depth);
     queue.submit(std::iter::once(encoder.finish()));
+    *hub.inner.request.lock().expect("hub poisoned") = None;
+    hub.inner.taken_seq.store(req.seq, Ordering::SeqCst);
     // 映射必须在提交之后：提交校验要求被引用的缓冲处于 Idle，预映射
     // 即 `BufferStillMapped` 校验错误（默认错误策略直接退出进程）。
     map_for_readback(
@@ -274,11 +283,6 @@ fn copy_sensors(
         SensorKind::Depth,
         req,
     );
-}
-
-/// 把未消费的请求放回待执行槽（下帧重试）。
-fn requeue(hub: &CaptureHub, req: CaptureRequest) {
-    *hub.inner.request.lock().expect("hub poisoned") = Some(req);
 }
 
 /// 单份纹理拷贝编码（只编码不映射，映射见 `map_for_readback`）。
@@ -357,8 +361,40 @@ impl Plugin for CapturePlugin {
         // `RenderStartup`，设备丢失重建时亦会自动重建）。
         render_app
             .insert_resource(hub)
+            .init_resource::<ExtractedRequest>()
             .init_gpu_resource::<CaptureBuffers>()
-            .add_systems(bevy::render::ExtractSchedule, extract_eyes)
+            .add_systems(
+                bevy::render::ExtractSchedule,
+                (extract_eyes, extract_request),
+            )
             .add_systems(Render, copy_sensors.in_set(RenderSystems::Cleanup));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracted_frame_keeps_its_timestamp_across_main_world_updates() {
+        let hub = CaptureHub::default();
+        let request = CaptureRequest {
+            seq: 1,
+            stamp: 1.0,
+            trace: TraceContext::empty(),
+            left: Handle::<Image>::default().id(),
+            right: Handle::<Image>::default().id(),
+        };
+        hub.request(request);
+        let mut frame = ExtractedRequest(*hub.inner.request.lock().unwrap());
+        hub.request(CaptureRequest {
+            seq: 2,
+            stamp: 2.0,
+            ..request
+        });
+        let captured = frame.0.take().unwrap();
+        assert_eq!(captured.seq, 1);
+        assert!((captured.stamp - 1.0).abs() < f64::EPSILON);
+        assert_eq!(hub.inner.request.lock().unwrap().unwrap().seq, 2);
     }
 }

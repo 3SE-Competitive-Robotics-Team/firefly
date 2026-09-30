@@ -48,13 +48,30 @@ Bernstein 凸包递归覆盖曲线；测试以独立采样检验输出，另有�
 `tests/system/test_sensor_startup.py` 默认显式 skip，须设置
 `FIREFLY_RUN_SENSOR_STARTUP=1`。启用后缺资产、缺 release 二进制或启动失败均报错。
 它需要 RMUC 资产、图形会话及空闲 IPC 环境，录制只写 `logs/*.rrd`，子进程经
-SIGINT 退出；只验证传感器初始化和上锁零推力，不等于实际飞行验收。
+SIGINT 退出；未启用 `FIREFLY_RUN_FLIGHT` 时只验证传感器初始化和上锁零推力。
 
 ```bash
 cargo test --workspace
 cargo test -p firefly-planner --test planner_contracts
-uv run --all-packages --extra test pytest tests/evaluation/ tests/system/ -q -p no:cacheprovider
+uv run --all-packages --extra test pytest -q -p no:cacheprovider
 ```
 
-CI 的 Rust job 执行全部普通测试；Python job 执行评测测试并报告系统测试的 skip。
+CI 的 Rust job 执行全部普通测试；Python job 执行 `tests/`、`apps/`、`packages/`
+内的普通测试并报告系统测试的 skip。测试发现范围不包含生成资产与 Blender 的隔离依赖。
 手动系统验收命令见 `how_to_run.md`。
+
+## CAD 与真实资产
+
+`packages/firefly-cad/tests` 验证解析长方体外法线、负坐标格心、空腔分离、
+碰撞体积、失配资产拒绝，以及输入/产物变化后的缓存失效。
+离线采集测试验证同帧配对、二进制格式、逐帧内容校验与不覆盖失败产物的重试。
+`FIREFLY_RUN_RMUC_ASSETS=1` 启用 `tests/system/test_rmuc_assets.py`，检查真实
+资产 hash、出生点穿透与无推力静置。
+
+`cargo test --release -p firefly-planner --test rmuc_asset -- --ignored`
+读取实际导出地图，执行停机坪前方爬升任务并验收完整轨迹契约。
+
+启动测试为大型场地加载与 GPU 管线初始化留 90s 墙钟预算；算法仍必须通过
+静止测量与局部原点验收。额外设置 `FIREFLY_RUN_FLIGHT=1` 后执行起飞 1m、
+持续两秒稳定悬停和降落：水平偏移 <0.5m，高度误差 <0.15m，悬停速度 <0.2m/s。
+真值仅用于评测，飞控仍只消费传感器估计。失败保留 RRD，不放宽门槛。

@@ -14,7 +14,8 @@ CC-BY-4.0，使用需保留署名。
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.request import urlretrieve
+from urllib.request import Request, urlopen
+import shutil
 
 import numpy as np
 import trimesh
@@ -32,7 +33,11 @@ def main() -> None:
     RAW.parent.mkdir(parents=True, exist_ok=True)
     if not RAW.is_file():
         print(f"下载 {URL}")
-        urlretrieve(URL, RAW)
+        request = Request(URL, headers={"User-Agent": "Mozilla/5.0"})
+        partial = RAW.with_suffix(".download")
+        with urlopen(request, timeout=30) as response, partial.open("wb") as stream:
+            shutil.copyfileobj(response, stream)
+        partial.replace(RAW)
     scene = trimesh.load(RAW, force="scene")
     mesh = scene.to_geometry()
     mesh.apply_translation(-mesh.bounds.mean(axis=0))

@@ -52,6 +52,17 @@ VIO 在相机时刻更新滤波器，使用 IMU 预测输出 100 Hz 里程计；
 | `configs/` | 每应用一份 TOML，缺键回落代码默认值，缺文件报错 |
 | `tests/`、`docs/` | 评测指标、启动检查与运行/架构说明 |
 
+## 场地资产管线
+
+```bash
+uv run --all-packages --extra test python scripts/prepare_rmuc.py /path/to/RMUC2026_V2.0.0.stp
+```
+
+该入口生成视觉/碰撞/规划地图、执行几何与物理验收，再进行离线采集和系统测试。
+阶段状态写入 `models/rmuc2026/preparation_report.json`；缺权重、失败和未执行阶段
+明确标记，完整命令在未全部通过时返回非零。只处理资产可加 `--assets-only`。
+详细契约见 [CAD 管线](packages/firefly-cad/README.md)。
+
 ## 最小闭环
 
 要求 Rust 1.97+、Python 3.12+、uv，以及对应平台的图形运行依赖。

@@ -37,3 +37,11 @@ def test_tessellate_sample(tmp_path: Path) -> None:
     # 逐面颜色保留：至少各有红/蓝面子集。
     assert ((colors[:, 0] > 0.5) & (colors[:, 1] < 0.1)).any()
     assert ((colors[:, 2] > 0.5) & (colors[:, 0] < 0.1)).any()
+
+    # 每个解析长方体的面法线都应朝外；独立用重心与叉积判定。
+    triangles = vertices[faces]
+    for tag in np.unique(data["part"]):
+        solid = triangles[data["part"] == tag]
+        center = (solid.min(axis=(0, 1)) + solid.max(axis=(0, 1))) / 2
+        normals = np.cross(solid[:, 1] - solid[:, 0], solid[:, 2] - solid[:, 0])
+        assert np.all(np.sum(normals * (solid.mean(axis=1) - center), axis=1) > 0)

@@ -5,6 +5,9 @@
 
 ## 1. 资产与构建
 
+可先运行 `uv run --all-packages --extra test python scripts/prepare_rmuc.py <场地.stp>`。
+只生成并验收几何可加 `--assets-only`；完整入口按阶段报告结果，不保证飞行必然通过。
+
 必须准备以下本地资产（`models/` 不进 Git）：
 
 | 文件 | 使用方 |
@@ -90,7 +93,8 @@ RMUC 静态地图和视觉库图在场地坐标系；`configs/gicp.toml [origin]
 | `models/aliked-n16-k512.onnx` | ALIKED 特征提取权重，可用 `--model` 指定 |
 | `models/lightglue-aliked-k512.onnx` | LightGlue 匹配权重，可用 `--model` 指定 |
 
-`.ffmap` 必须由对应 RMUC 资产生成并核验坐标；缺失时 planner / gicp 启动失败。
+`firefly-cad-build` 从碰撞体的相同体素格导出 `.ffmap` 并核验坐标；
+缺失时 planner / gicp 启动失败。
 `--map` 可指定其他路径，但内容必须对应当前 RMUC 场地。
 
 ```bash
@@ -109,9 +113,10 @@ planner 不订阅原始局部 VIO，不提供平移偏置捷径。未收到有�
 飞控反馈与 Hold 锚点保持在 odom 系，仅将地图目标转换到 odom；详情见 [坐标契约](frames.md)。
 深度帧按同源状态历史插值，每帧只融合一次；历史不覆盖时跳过该帧。
 
-`scripts/collect_vision_map.py` 从 render 采集 RMUC 左图、深度和离线位姿标签，
-再交给 `aliked --build-map`。该工具要求外部飞控、估计器和有效地图对齐，
-自行启动 sim / render；不应用于验证传感器闭环是否成立。
+`scripts/collect_vision_map.py` 独立启动 `render --offline`，在隔离的
+`Firefly/Offline/*` 话题设置已知相机位姿，严格按同一时间戳配对左图、深度与标签。
+它不启动 sim、估计器或飞控；采集资产供 `aliked --build-map` 使用，
+不能作为传感器闭环成立的证据。未得到可用同步帧不得写入库图。
 
 ## 4. 诊断与验证
 

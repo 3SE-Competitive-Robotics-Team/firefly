@@ -7,6 +7,7 @@
 //!
 //! 传感器相机按 10Hz 窗口激活，逐像素处理在工作线程完成，IPC 端口由主线程持有。
 //! 日志经 `firefly-observability` 汇入统一 rrd 记录。
+//! `--offline` 使用独立 `Firefly/Offline/*` 数据话题供离线库图渲染。
 
 mod capture;
 mod config;
@@ -60,7 +61,8 @@ fn main() {
         spec.asset_path(),
         spec.start
     );
-    let ports = open_ports().unwrap_or_else(|e| {
+    let offline = std::env::args().any(|arg| arg == "--offline");
+    let ports = open_ports(offline).unwrap_or_else(|e| {
         log::error!("IPC 端口打开失败：{e:?}");
         std::process::exit(1);
     });
@@ -108,6 +110,7 @@ fn main() {
                 follow_drone,
                 tag_drone_layers,
                 log_render_rate,
+                stop_on_signal,
             ),
         )
         .add_systems(
@@ -235,5 +238,13 @@ const RATE_LOG_PERIOD: f32 = 5.0;
 fn flush_on_exit(exits: MessageReader<AppExit>) {
     if !exits.is_empty() {
         firefly_observability::flush();
+    }
+}
+
+/// 将 IPC 节点的终止请求交给 Bevy 正常退出，释放发布端口与 GPU 资源。
+#[allow(clippy::needless_pass_by_value)]
+fn stop_on_signal(ports: NonSend<link::IpcPorts>, mut exits: MessageWriter<AppExit>) {
+    if ports.node.wait(std::time::Duration::ZERO).is_err() {
+        exits.write(AppExit::Success);
     }
 }

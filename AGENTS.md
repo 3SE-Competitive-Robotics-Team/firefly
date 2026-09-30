@@ -88,6 +88,14 @@
   需按部署调整的键同步进 `configs/vio.toml`。
 - **进程必须优雅退出**（Ctrl-C → `node.wait` 返回 Err → 端口 Drop）：硬杀（pkill -9/SIGKILL）会留下孤儿内核 shm 对象与幽灵端口注册——后续订阅端会连上死端口的残留连接收不到任何数据，且幽灵占满 `max_publishers` 槽位后新发布器直接创建失败。排障清理：杀干净所有进程后 `rm -rf /tmp/iceoryx2/services /tmp/iceoryx2/nodes/private/tmp/iox2*.shm_state`（macOS；须在进程全死后执行）。
 
+## 场地资产
+
+- 统一入口：`uv run --all-packages --extra test python scripts/prepare_rmuc.py <场地.stp>`；
+  几何构建器为 `firefly-cad-build`，数值配置在 `configs/cad.toml`。
+- GLB、碰撞盒与 FFMap 必须来自同一归一化几何，并通过内容 hash 和坐标/占据验收。
+- 离线视觉采集使用 `render --offline` 与 `Firefly/Offline/*`；禁止将摆拍标签发布到在线状态话题。
+- 资产通过、传感器启动、飞行、在线定位必须分别报告；失败或缺权重不得记为通过。
+
 ## 运行（MuJoCo 双语言闭环）
 
 仅支持 RMUC2026（`configs/scene.toml`）。缺少 `models/rmuc2026/field.glb`
