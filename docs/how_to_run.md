@@ -121,21 +121,21 @@ planner 不订阅原始局部 VIO，不提供平移偏置捷径。未收到有�
 常用实体：`vio/odom`、`vio/traj`、`vio/debug/*`、`gt/pose`、`gt/traj`、
 `fc/debug/*`、`plan/*`、`world/rmuc2026`、`logs/<app>`。
 原始 VIO 与真值的空间对齐只在评测中进行，固定尺度，结果不得回流算法。
-通用指标在 `bench/metrics.py`。
+通用指标在 `tests/evaluation/metrics.py`。
 
 ```bash
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-cargo test --release -p firefly-planner --test random_map_benchmark -- --ignored
-uv run --with pytest pytest apps/firefly-sim/tests/ bench/tests/ -q
+cargo test -p firefly-planner --test planner_contracts
+uv run --all-packages --extra test pytest apps/firefly-sim/tests/ tests/evaluation/ tests/system/ -q -p no:cacheprovider
 ```
 
 准备真实 RMUC 资产并构建 release 版 vio / fc / render 后，在没有其他闭环进程
 运行的图形会话中执行：
 
 ```bash
-uv run --no-dev python bench/check_sensor_startup.py
+FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/system/test_sensor_startup.py -q
 ```
 
 检查屏蔽 PlantState，保留供 render 合成图像的 GroundTruth，验证静止初始化、

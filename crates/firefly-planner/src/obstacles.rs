@@ -438,19 +438,10 @@ impl<'a> ObstacleScanner<'a> {
         Some(paths)
     }
 
-    /// 全程稠密安全检查(官方成功判据的保守版本,供 post-check 用):
-    /// 以 `res/max_vel` 时间步扫描整条轨迹(不限于前 2/3)。
+    /// 全程后检查：用 Bernstein 凸包递归覆盖曲线；无法确认自由时拒绝。
     #[must_use]
     pub fn is_safe(&self, traj: &Trajectory) -> bool {
-        let t_step = self.map.resolution() / self.max_vel;
-        let mut t = 0.0;
-        while t <= traj.duration() {
-            if self.map.is_occupied_inflated(traj.eval(t).position) {
-                return false;
-            }
-            t += t_step;
-        }
-        true
+        crate::collision::trajectory_is_free(self.map, traj)
     }
 }
 

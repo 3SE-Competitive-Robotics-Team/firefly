@@ -24,19 +24,23 @@ use crate::objective::{MincoObjective, real_to_virtual};
 use crate::obstacles::{CheckResult, ObstacleScanner, constraint_sample_points, two_thirds_id};
 use crate::root_finder;
 
+#[cfg(test)]
+#[path = "planner_regression_tests.rs"]
+mod regression_tests;
+
 /// [`Planner::try_finish`] 的判定结果。仅 [`FinishCheck::SwarmTooClose`] 在
 /// 外层触发 swarm 权重倍增（对照官方 `wei_swarm_mod_ *= 2` 的唯一触发路径），
 /// 其余失败 restart 但权重不变。
 #[derive(Debug)]
 enum FinishCheck {
-    Accept,
+    Accept(Trajectory),
     SwarmTooClose,
     Collision,
 }
 
 /// 单次完整优化内层（官方 `optimizeTrajectory`）的产出。
 struct InnerOutcome {
-    minco: Minco,
+    trajectory: Trajectory,
     planes_by_point: Vec<Vec<Plane>>,
     iterations: usize,
     /// L-BFGS 输出的目标总代价（官方 `final_cost`）。
@@ -159,6 +163,7 @@ impl Planner {
         self.plan_in_swarm(start, goal, &[])
     }
 
+    /// 显式局部终点 PVA，不截断目标；终点速度由调用方的全局轨迹提供。
     /// 带初始解来源的规划（连续重规划用暖启动，官方 `planFromLocalTraj`
     /// 策略链：case2 暖启动 → 失败降级 case1 冷启动）。
     /// `touch_goal` = 局部目标是否即全局终点(官方 `setIfTouchGoal`,影响
@@ -171,7 +176,7 @@ impl Planner {
     pub fn plan_with_init(
         &mut self,
         start: State,
-        goal: Point3<f64>,
+        goal: Endpoint,
         source: InitSource<'_>,
         touch_goal: bool,
     ) -> Result<PlanResult> {
@@ -190,6 +195,11 @@ impl Planner {
         goal: Point3<f64>,
         peers: &[firefly_cost::Peer],
     ) -> Result<PlanResult> {
+        let goal = Endpoint {
+            position: self.pick_local_goal(start.position.coords, goal.coords),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
         self.plan_in_swarm_init(start, goal, peers, InitSource::ColdStart, false)
     }
 
@@ -202,7 +212,7 @@ impl Planner {
     pub fn plan_in_swarm_with_init(
         &mut self,
         start: State,
-        goal: Point3<f64>,
+        goal: Endpoint,
         peers: &[firefly_cost::Peer],
         source: InitSource<'_>,
         touch_goal: bool,
@@ -214,7 +224,7 @@ impl Planner {
     fn plan_in_swarm_init(
         &mut self,
         start: State,
-        goal: Point3<f64>,
+        goal: Endpoint,
         peers: &[firefly_cost::Peer],
         source: InitSource<'_>,
         touch_goal: bool,
@@ -226,12 +236,12 @@ impl Planner {
             velocity: start.velocity,
             acceleration: start.acceleration,
         };
-        let local_goal = self.pick_local_goal(start.position.coords, goal.coords);
+        let local_goal = goal;
         let guide = init::search_guide(
             &mut self.astar,
             &self.map,
             start.position.coords,
-            local_goal,
+            local_goal.position,
         )?;
 
         let minco = match source {
@@ -242,12 +252,7 @@ impl Planner {
                     pieces,
                     max_velocity: self.config.max_velocity,
                 };
-                init::init_from_path(
-                    &init_config,
-                    start_endpoint,
-                    Point3::from(local_goal),
-                    &guide,
-                )?
+                init::init_from_path(&init_config, start_endpoint, local_goal, &guide)?
             }
             InitSource::WarmStart {
                 prev,
@@ -263,7 +268,7 @@ impl Planner {
                 match init::init_warm_start(
                     &init_config,
                     start_endpoint,
-                    Point3::from(local_goal),
+                    local_goal,
                     prev,
                     elapsed,
                     glb_seg,
@@ -278,24 +283,13 @@ impl Planner {
                             pieces,
                             max_velocity: self.config.max_velocity,
                         };
-                        init::init_from_path(
-                            &cfg,
-                            start_endpoint,
-                            Point3::from(local_goal),
-                            &guide,
-                        )?
+                        init::init_from_path(&cfg, start_endpoint, local_goal, &guide)?
                     }
                 }
             }
         };
 
-        self.rebound(
-            minco,
-            start_endpoint,
-            Point3::from(local_goal),
-            peers,
-            touch_goal,
-        )
+        self.rebound(minco, start_endpoint, local_goal, peers, touch_goal)
     }
 
     /// Rebound 编排入口（对齐官方 `EGOPlannerManager::reboundReplan`）：
@@ -306,7 +300,7 @@ impl Planner {
         &mut self,
         minco: Minco,
         start_endpoint: Endpoint,
-        local_goal: Point3<f64>,
+        local_goal: Endpoint,
         peers: &[firefly_cost::Peer],
         touch_goal: bool,
     ) -> Result<PlanResult> {
@@ -347,7 +341,7 @@ impl Planner {
                 peers,
                 touch_goal,
             )?;
-            return self.finish(&outcome.minco, &outcome.planes_by_point, outcome.iterations);
+            return Ok(Self::finish(outcome));
         }
 
         /*** 多拓扑(官方 reboundReplan STEP 2 多候选分支) ***/
@@ -377,7 +371,7 @@ impl Planner {
         match best {
             Some((cost, outcome)) => {
                 log::debug!("multi-topo: 最优 final_cost={cost:.3}");
-                self.finish(&outcome.minco, &outcome.planes_by_point, outcome.iterations)
+                Ok(Self::finish(outcome))
             }
             None => Err(Error::temporary(
                 ErrorKind::Convergence,
@@ -404,7 +398,7 @@ impl Planner {
         mut minco: Minco,
         mut planes_by_point: Vec<Vec<Plane>>,
         start_endpoint: Endpoint,
-        local_goal: Point3<f64>,
+        local_goal: Endpoint,
         peers: &[firefly_cost::Peer],
         touch_goal: bool,
     ) -> Result<InnerOutcome> {
@@ -486,9 +480,9 @@ impl Planner {
             // fine check（官方 finelyCheckAndSetConstraintPoints,flag_first_init=false）
             let traj = minco.solve()?;
             match self.try_finish(&minco, &traj, peers, &mut planes_by_point, touch_goal)? {
-                FinishCheck::Accept => {
+                FinishCheck::Accept(trajectory) => {
                     return Ok(InnerOutcome {
-                        minco,
+                        trajectory,
                         planes_by_point,
                         iterations: iteration,
                         final_cost: report.final_cost,
@@ -519,18 +513,12 @@ impl Planner {
     }
 
     /// 组装最终 PlanResult（轨迹 + 迭代数 + 平面）。
-    fn finish(
-        &self,
-        minco: &Minco,
-        planes_by_point: &[Vec<Plane>],
-        iteration: usize,
-    ) -> Result<PlanResult> {
-        let trajectory = self.ensure_feasible(minco)?;
-        Ok(PlanResult {
-            trajectory,
-            iterations: iteration,
-            planes: planes_by_point.iter().flatten().cloned().collect(),
-        })
+    fn finish(outcome: InnerOutcome) -> PlanResult {
+        PlanResult {
+            trajectory: outcome.trajectory,
+            iterations: outcome.iterations,
+            planes: outcome.planes_by_point.into_iter().flatten().collect(),
+        }
     }
 
     /// 轨迹安全（障碍/集群）时返回 [`FinishCheck::Accept`]，否则返回
@@ -550,9 +538,6 @@ impl Planner {
         planes_by_point: &mut [Vec<Plane>],
         touch_goal: bool,
     ) -> Result<FinishCheck> {
-        if !self.swarm_safe(traj, peers) {
-            return Ok(FinishCheck::SwarmTooClose);
-        }
         let scanner = ObstacleScanner::new(&self.map)
             .with_samples(self.config.constraint_points_per_piece)
             .with_max_vel(self.config.max_velocity);
@@ -564,13 +549,13 @@ impl Planner {
         }
         let trajectory = self.ensure_feasible(minco)?;
         if !scanner.is_safe(&trajectory) {
-            // 时间缩放按时间采样重建，窄通道处采样点位移会造成安全误判
-            //（几何理论不变，数值上可能翻转）。不 panic：丢弃该解继续迭代，
-            // 外层循环有重启上限兜底（否则 dev 构建 debug_assert 直接杀进程）。
-            log::debug!("time-rescaled trajectory unsafe, keep iterating");
+            log::debug!("reallocated trajectory is not collision-free");
             return Ok(FinishCheck::Collision);
         }
-        Ok(FinishCheck::Accept)
+        if !self.swarm_safe(&trajectory, peers) {
+            return Ok(FinishCheck::SwarmTooClose);
+        }
+        Ok(FinishCheck::Accept(trajectory))
     }
 
     /// 集群安全：所有约束点对每架 peer 的椭球距离 ≥ Cw（同一绝对时刻）。
@@ -579,9 +564,6 @@ impl Planner {
         if peers.is_empty() {
             return true;
         }
-        // 官方成功门:min_ellip_dist2 > (swarm_clearance × 1.25)²
-        // （`poly_traj_optimizer.cpp:88`；多机时对端期望净距由调用方并入
-        // `peer.clearance`，见 `Peer` 文档——此处单机场景恒走本分支）。
         for (i, ti) in traj.durations().iter().enumerate() {
             for j in 0..=KAPPA {
                 let tau = j as f64 / KAPPA as f64;
@@ -592,19 +574,10 @@ impl Planner {
                 t_abs += tau * ti;
                 let p = traj.eval(t_abs).position;
                 for peer in peers {
-                    let duration = peer.traj.duration();
-                    let pp = if t_abs < duration {
-                        peer.traj.eval(t_abs).position
-                    } else {
-                        let s = peer.traj.eval(duration);
-                        s.position + s.velocity * (t_abs - duration)
-                    };
+                    let pp = peer.sample_at(t_abs).position;
                     let diff = p - pp;
                     let d2 = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z / 4.0;
-                    // 官方成功门:min_ellip_dist2 > (swarm_clearance × 1.25)²
-                    // （单机场景无对端期望净距；多机时对端 `des_clearance`
-                    // 由调用方并入 `peer.clearance`，见 `Peer` 文档）。
-                    let c = self.config.swarm_clearance * 1.25;
+                    let c = (self.config.swarm_clearance + peer.clearance) * 1.25;
                     if d2 < c * c {
                         return false;
                     }
@@ -621,28 +594,66 @@ impl Planner {
     /// `getMaxVelRate` / `getMaxAccRate` / `getMaxJerkRate` 均用此范式；官方 `gcopter.hpp:121`
     /// `getMaxAccRate` 仅查端点为简化，本实现保留全程精确语义（加速度/加加速度亦求驻点），
     /// 避免采样漏峰导致时间缩放不足。
-    /// 时间等比缩放：`re = max{|v/vm|, √|a/am|, ∛|j/jm|}`，导数 `∝ 1/T` 幂次缩放，闭式满足限制且不改变轨迹形状。
+    /// 保持端点 PVA，迭代分配时间并重新求解；每轮检查实际轨迹的全程极值。
+    /// 时间比仅用于提出候选，不保证导数单调下降。预算耗尽必须拒绝输出。
+    #[fastrace::trace]
     fn ensure_feasible(&self, minco: &Minco) -> firefly_error::Result<Trajectory> {
-        let traj = minco.solve()?;
-        let max_vel = Self::trajectory_max_vel(&traj);
-        let max_acc = Self::trajectory_max_acc(&traj);
-        let max_jerk = Self::trajectory_max_jerk(&traj);
-        let mut re = 1.0_f64;
-        re = re.max(max_vel / self.config.max_velocity);
-        re = re.max((max_acc / self.config.max_acceleration).sqrt());
-        re = re.max((max_jerk / self.config.max_jerk).cbrt());
-        if re <= 1.0 {
-            return Ok(traj);
+        let limits = [
+            self.config.max_velocity,
+            self.config.max_acceleration,
+            self.config.max_jerk,
+        ];
+        if limits.iter().any(|v| !v.is_finite() || *v <= 0.) {
+            return Err(Error::new(
+                ErrorKind::InvalidArgument,
+                "invalid dynamical limits",
+            ));
         }
-        let scale = re * 1.05;
-        log::info!("time rescale x{scale:.3} for dynamical feasibility");
-        let durations: Vec<f64> = (0..minco.pieces())
-            .map(|i| minco.piece_duration(i) * scale)
+        for endpoint in [minco.start(), minco.end()] {
+            if endpoint.velocity.norm() > limits[0] || endpoint.acceleration.norm() > limits[1] {
+                return Err(Error::new(
+                    ErrorKind::InvalidArgument,
+                    "boundary state exceeds dynamical limits",
+                ));
+            }
+        }
+        let waypoints: Vec<_> = minco.waypoints().collect();
+        let mut durations: Vec<_> = (0..minco.pieces())
+            .map(|i| minco.piece_duration(i))
             .collect();
-        let waypoints: Vec<nalgebra::Point3<f64>> = minco.waypoints().collect();
-        MincoBuilder::new(SolverOrder::MinimumJerk, minco.start(), minco.end())
-            .build(&waypoints, &durations)
-            .map(|m| m.solve().expect("nonsingular"))
+        let mut candidate = minco.clone();
+        for _ in 0..12 {
+            let traj = candidate.solve()?;
+            if !traj.coefficients().iter().all(|v| v.is_finite()) {
+                return Err(Error::new(ErrorKind::Convergence, "non-finite trajectory"));
+            }
+            let maxima = [
+                Self::trajectory_max_vel(&traj),
+                Self::trajectory_max_acc(&traj),
+                Self::trajectory_max_jerk(&traj),
+            ];
+            if maxima
+                .iter()
+                .zip(limits)
+                .all(|(value, limit)| *value <= limit * (1. + 1e-9))
+            {
+                return Ok(traj);
+            }
+            let scale = (maxima[0] / limits[0])
+                .max((maxima[1] / limits[1]).sqrt())
+                .max((maxima[2] / limits[2]).cbrt())
+                .max(1.0)
+                * 1.05;
+            for duration in &mut durations {
+                *duration *= scale;
+            }
+            candidate = MincoBuilder::new(SolverOrder::MinimumJerk, minco.start(), minco.end())
+                .build(&waypoints, &durations)?;
+        }
+        Err(Error::temporary(
+            ErrorKind::Convergence,
+            "time allocation cannot satisfy dynamical limits",
+        ))
     }
 
     pub(crate) fn trajectory_max_vel(traj: &Trajectory) -> f64 {
@@ -850,7 +861,7 @@ impl Planner {
     fn build_objective<'a>(
         &'a self,
         start: Endpoint,
-        goal: Point3<f64>,
+        end: Endpoint,
         planes_by_point: &[Vec<Plane>],
         peers: &[firefly_cost::Peer],
         pieces: usize,
@@ -859,11 +870,6 @@ impl Planner {
         multitopo: bool,
         gate_latched: bool,
     ) -> MincoObjective<'a> {
-        let end = Endpoint {
-            position: goal.coords,
-            velocity: Vector3::zeros(),
-            acceleration: Vector3::zeros(),
-        };
         let k = self.config.constraint_points_per_piece;
         let mut cost = Cost::new()
             .add(self.config.weight_smoothness, SmoothnessPenalty)
@@ -879,10 +885,11 @@ impl Planner {
                 .with_samples(k),
             )
             .add(
-                self.config.weight_obstacle,
+                1.0,
                 ObstaclePenalty::new(
                     self.config.obstacle_clearance,
                     self.config.obstacle_clearance_soft,
+                    self.config.weight_obstacle,
                     self.config.weight_obstacle_soft,
                     k,
                     planes_by_point.to_vec(),
@@ -1009,14 +1016,17 @@ mod tests {
 
     #[test]
     fn rebound_escapes_wall() {
-        firefly_observability::init();
         let (mut planner, start, goal, guide) = wall_scenario(PlannerConfig::default());
         let start_endpoint = Endpoint {
             position: start.position.coords,
             velocity: start.velocity,
             acceleration: start.acceleration,
         };
-        let local_goal = planner.pick_local_goal(start.position.coords, goal.coords);
+        let local_goal = Endpoint {
+            position: planner.pick_local_goal(start.position.coords, goal.coords),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
 
         // 真实初始化流程：MINCO 拟合引导路径（官方 initMJO），
         // 拐角切角会浅穿入膨胀层——rebound 修正的就是这类浅穿入
@@ -1025,13 +1035,8 @@ mod tests {
             pieces: crate::init::pieces_for_guide(&guide, planner.config.piece_length),
             max_velocity: planner.config.max_velocity,
         };
-        let wall_hitting = crate::init::init_from_path(
-            &init_config,
-            start_endpoint,
-            Point3::from(local_goal),
-            &guide,
-        )
-        .unwrap();
+        let wall_hitting =
+            crate::init::init_from_path(&init_config, start_endpoint, local_goal, &guide).unwrap();
 
         // 初始轨迹必须真的浅穿入（测试前提：拐角切角进入膨胀层）
         let scanner = ObstacleScanner::new(&planner.map)
@@ -1043,7 +1048,7 @@ mod tests {
             .rebound(
                 wall_hitting,
                 start_endpoint,
-                Point3::from(local_goal),
+                local_goal,
                 &[],
                 false, // 非 touch_goal:障碍墙场景,完整约束采样
             )
@@ -1061,7 +1066,7 @@ mod tests {
         let s0 = result.trajectory.eval(0.0);
         assert!((s0.position - start.position.coords).norm() < 1e-6);
         let sf = result.trajectory.eval(result.trajectory.duration());
-        assert!((sf.position - local_goal).norm() < 1e-6);
+        assert!((sf.position - local_goal.position).norm() < 1e-6);
     }
 
     #[test]
@@ -1080,29 +1085,22 @@ mod tests {
             velocity: start.velocity,
             acceleration: start.acceleration,
         };
-        let local_goal = planner.pick_local_goal(start.position.coords, goal.coords);
+        let local_goal = Endpoint {
+            position: planner.pick_local_goal(start.position.coords, goal.coords),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
 
         let init_config = crate::init::InitConfig {
             piece_length: planner.config.piece_length,
             pieces: crate::init::pieces_for_guide(&guide, planner.config.piece_length),
             max_velocity: planner.config.max_velocity,
         };
-        let wall_hitting = crate::init::init_from_path(
-            &init_config,
-            start_endpoint,
-            Point3::from(local_goal),
-            &guide,
-        )
-        .unwrap();
+        let wall_hitting =
+            crate::init::init_from_path(&init_config, start_endpoint, local_goal, &guide).unwrap();
 
         let result = planner
-            .rebound(
-                wall_hitting,
-                start_endpoint,
-                Point3::from(local_goal),
-                &[],
-                false,
-            )
+            .rebound(wall_hitting, start_endpoint, local_goal, &[], false)
             .expect("多拓扑开启时 rebound 必须逃出障碍");
         let scanner_final = ObstacleScanner::new(&planner.map)
             .with_samples(planner.config.constraint_points_per_piece);
@@ -1115,7 +1113,7 @@ mod tests {
         let s0 = result.trajectory.eval(0.0);
         assert!((s0.position - start.position.coords).norm() < 1e-6);
         let sf = result.trajectory.eval(result.trajectory.duration());
-        assert!((sf.position - local_goal).norm() < 1e-6);
+        assert!((sf.position - local_goal.position).norm() < 1e-6);
     }
 
     #[test]

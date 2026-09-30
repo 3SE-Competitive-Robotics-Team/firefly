@@ -6,7 +6,7 @@
 //! 梯度经 `Minco::propagate_gradient` 传播到 {q, T} 后经虚拟时间链式法则转回。
 //!
 //! L-BFGS 内循环碰撞检测对齐官方 `poly_traj_optimizer.cpp`:
-//! 代价回调内 `iter_num_ > 3 && smoo_cost/piece < 10` 时调用
+//! 代价回调内 `iter_num_ >= 3 且采样约束点方向足够平顺` 时调用
 //! `roughlyCheckConstraintPoints`——在约束点数组上检测未覆盖穿入点、
 //! 沿数组 in/out 自由点搜索 + A\* 绕障 + 交点平面,命中即提前终止
 //! (官方 `STOP_FOR_REBOUND`),由外层吸收新平面后重新优化。
@@ -104,6 +104,9 @@ impl<'a> ReboundDetector<'a> {
             .with_samples(self.samples_per_piece)
             .with_max_vel(self.max_vel);
         let points = constraint_sample_points(traj, self.samples_per_piece);
+        if !constraint_points_straight_enough(&points) {
+            return false;
+        }
         // 官方 allowRebound criterion 3:多拓扑下任一内部控制点仍在初始基点
         // 错误侧((p−base)·direction < 0,只看每点第 0 个平面)时停用内循环
         // 检测——让候选先在自己初始化的一侧收敛;判定已避开即锁存为 true。
@@ -259,44 +262,19 @@ impl<'a> MincoObjective<'a> {
     }
 }
 
-/// 官方 `allowRebound` criterion 2：中间控制点折线方向点积下限（30°）。
-///
-/// 官方以优化变量当前值判定（`cps_.points` = 起点 + 中间点 + 终点）；
-/// 头尾各去 1 点（官方 `i in 3..cols-3` 按含头尾的点序列计，忽略首尾段），
-/// 相邻段单位方向点积最小值 ≥ 0.87 即折线已捋直。
-fn inner_points_straight_enough(
-    start: &Endpoint,
-    waypoints: &[Vector3<f64>],
-    end: &Endpoint,
-) -> bool {
-    let n_inner = waypoints.len();
-    if n_inner == 0 {
+/// 官方 allowRebound criterion 2：采样约束点的内部相邻方向余弦 ≥ 0.87。
+/// 首尾各三个点不参与判定；MINCO 路点不代表轨迹上的采样方向。
+fn constraint_points_straight_enough(points: &[Vector3<f64>]) -> bool {
+    if points.len() < 7 {
         return true;
     }
-    let mut min_product = 1.0f64;
-    for k in 1..=n_inner {
-        let prev = if k == 1 {
-            start.position
-        } else {
-            waypoints[k - 2]
-        };
-        let curr = waypoints[k - 1];
-        let next = if k == n_inner {
-            end.position
-        } else {
-            waypoints[k]
-        };
-        let d_prev = curr - prev;
-        let d_next = next - curr;
-        if d_prev.norm() < 1e-9 || d_next.norm() < 1e-9 {
-            continue;
-        }
-        let product = d_prev.normalize().dot(&d_next.normalize());
-        if product < min_product {
-            min_product = product;
-        }
-    }
-    min_product >= 0.87
+    (3..=points.len() - 4).all(|i| {
+        let before = points[i] - points[i - 1];
+        let after = points[i + 1] - points[i];
+        let product = before.normalize().dot(&after.normalize());
+        // 零长段无方向，官方 min_product 不因 NaN 更新。
+        product.is_nan() || product >= 0.87
+    })
 }
 
 impl Objective for MincoObjective<'_> {
@@ -305,21 +283,11 @@ impl Objective for MincoObjective<'_> {
         let Some(traj) = self.solve_cached(x) else {
             return f64::INFINITY;
         };
-        // 官方 `allowRebound` 三判据（`poly_traj_optimizer.cpp`）：
-        // criterion 1：`iter_num_ >= 3`（`iter_num_` 在回调内先用后增，
-        // 故第 4 次回调时值为 3——此处 `eval_count > 3` 等价）；
-        // criterion 2：中间控制点折线方向点积 ≥ 0.87（30°，头尾各去 1 点，
-        // 官方 `i in 3..cols-3` 按含头尾的点序列计）；
-        // criterion 3：多拓扑门控见 [`ReboundDetector::check`]。
-        if self.eval_count > 3 {
-            let (q, _) = self.unpack(x);
-            let straight = inner_points_straight_enough(&self.start, &q, &self.end);
-            if straight
-                && let Some(detector) = &mut self.detector
-                && detector.check(&traj)
-            {
-                self.early_exit = true;
-            }
+        if self.eval_count > 3
+            && let Some(detector) = &mut self.detector
+            && detector.check(&traj)
+        {
+            self.early_exit = true;
         }
         self.cost.evaluate(&traj)
     }
@@ -349,6 +317,36 @@ impl Objective for MincoObjective<'_> {
 mod tests {
     use super::*;
     use firefly_map::{GridMapBuilder, VoxelState};
+
+    #[test]
+    fn rebound_gate_uses_trajectory_samples_and_excludes_end_regions() {
+        let start = Endpoint {
+            position: Vector3::zeros(),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let waypoint = Vector3::new(2., 0., 0.);
+        let angle = 35f64.to_radians();
+        let end = Endpoint {
+            position: waypoint + Vector3::new(2. * angle.cos(), 2. * angle.sin(), 0.),
+            ..start
+        };
+        let trajectory = MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
+            .build(&[Point3::from(waypoint)], &[2., 2.])
+            .unwrap()
+            .solve()
+            .unwrap();
+        let mut points = constraint_sample_points(&trajectory, 5);
+        assert!(constraint_points_straight_enough(&points));
+        points[0] = Vector3::new(-100., 100., 0.);
+        assert!(constraint_points_straight_enough(&points));
+        points[5] = Vector3::new(-100., 100., 0.);
+        assert!(!constraint_points_straight_enough(&points));
+        assert!(constraint_points_straight_enough(&vec![
+            Vector3::zeros();
+            11
+        ]));
+    }
 
     /// 墙地图:体素 x=14..=26 全高占据(留 y 通道供 A* 绕行),
     /// 膨胀 1 格 → 占据区世界 x∈[3.25,7.0)。分辨率 0.25。

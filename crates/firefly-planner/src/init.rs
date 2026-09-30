@@ -55,20 +55,15 @@ pub fn search_guide(
 pub fn init_from_path(
     config: &InitConfig,
     start: Endpoint,
-    goal: Point3<f64>,
+    end: Endpoint,
     guide: &[Vector3<f64>],
 ) -> Result<Minco> {
     if guide.len() < 2 {
         // 近终点 / 退化引导（A* 到很近目标路径退化为 ≤1 点）：不报错，退化为
         // start→goal 的单段直飞 MINCO。否则 demo 在终点外一小段反复
         // "guide path too short" → 悬停卡死无法抵达（>ARRIVE_DIST 完成不了）。
-        let dist = (goal.coords - start.position).norm();
+        let dist = (end.position - start.position).norm();
         let t = (dist / config.max_velocity).max(1e-3);
-        let end = Endpoint {
-            position: goal.coords,
-            velocity: Vector3::zeros(),
-            acceleration: Vector3::zeros(),
-        };
         return MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
             .build(&[], &[t])
             .map_err(|e| e.with_operation("planner::init:degenerate"));
@@ -82,13 +77,8 @@ pub fn init_from_path(
         segments.push((q.coords - prev).norm());
         prev = q.coords;
     }
-    segments.push((goal.coords - prev).norm());
+    segments.push((end.position - prev).norm());
     let durations = allocate_time(&segments, config.max_velocity);
-    let end = Endpoint {
-        position: goal.coords,
-        velocity: Vector3::zeros(),
-        acceleration: Vector3::zeros(),
-    };
     MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
         .build(&waypoints, &durations)
         .map_err(|e| e.with_operation("planner::init"))
@@ -107,10 +97,6 @@ pub fn init_from_path(
 /// 段的等时采样（含两端），按归一化时间线性插值取点；缺失（空）时以旧轨迹
 /// 末端兜底。
 ///
-/// 文档化偏离：官方 case2 的 MINCO 尾状态为 `[目标, local_target_vel, 0]`
-/// （局部目标处延续全局轨迹速度）；firefly 的优化目标端状态固定零速，
-/// 此处以零速收尾（对各个局部目标的到达判定不变量一致）。
-///
 /// # Errors
 ///
 /// 旧轨迹已耗尽（`elapsed ≥ duration`）、`glb_seg < 0` 或组合轴退化时返回
@@ -118,7 +104,7 @@ pub fn init_from_path(
 pub fn init_warm_start(
     config: &InitConfig,
     start: Endpoint,
-    goal: Point3<f64>,
+    end: Endpoint,
     prev: &Trajectory,
     elapsed: f64,
     glb_seg: f64,
@@ -139,7 +125,7 @@ pub fn init_warm_start(
     }
     let t_to_lc_tgt = remaining + glb_seg;
     // 官方 case2 段数 = ceil(直线距离/piece_length)，下限 2
-    let dist = (goal.coords - start.position).norm();
+    let dist = (end.position - start.position).norm();
     let pieces = ((dist / config.piece_length.max(1e-3)).ceil() as usize).clamp(2, 24);
     let piece_dur = t_to_lc_tgt / pieces as f64;
     if piece_dur <= 0.0 {
@@ -170,11 +156,6 @@ pub fn init_warm_start(
         t += piece_dur;
     }
     let durations = vec![piece_dur; pieces];
-    let end = Endpoint {
-        position: goal.coords,
-        velocity: Vector3::zeros(),
-        acceleration: Vector3::zeros(),
-    };
     MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
         .build(&waypoints, &durations)
         .map_err(|e| e.with_operation("planner::init:warm_start"))
@@ -252,7 +233,17 @@ mod tests {
         };
         let goal = Point3::new(8.6, 4.0, 1.0);
         let guide = vec![Vector3::new(8.0, 4.0, 1.0)];
-        let m = init_from_path(&config, start, goal, &guide).expect("近终点退化不应报错");
+        let m = init_from_path(
+            &config,
+            start,
+            Endpoint {
+                position: goal.coords,
+                velocity: Vector3::zeros(),
+                acceleration: Vector3::zeros(),
+            },
+            &guide,
+        )
+        .expect("近终点退化不应报错");
         assert_eq!(m.pieces(), 1);
         assert!(m.duration() > 0.0);
         let traj = m.solve().expect("退化 MINCO 应可解");
@@ -311,8 +302,20 @@ mod tests {
             piece_length: 1.0,
         };
         let goal = Point3::new(9.0, 0.0, 0.0);
-        let m =
-            init_warm_start(&config, start, goal, &prev, 4.0, 4.0, &tail).expect("暖启动应成功");
+        let m = init_warm_start(
+            &config,
+            start,
+            Endpoint {
+                position: goal.coords,
+                velocity: Vector3::zeros(),
+                acceleration: Vector3::zeros(),
+            },
+            &prev,
+            4.0,
+            4.0,
+            &tail,
+        )
+        .expect("暖启动应成功");
         // 段数 = ceil(9/1) = 9；时长均匀 = (6+4)/9
         assert_eq!(m.pieces(), 9);
         let piece_dur = 10.0 / 9.0;

@@ -23,8 +23,5 @@ serde = { workspace = true }
 logcall = { workspace = true }
 nalgebra = { workspace = true }
 
-[dev-dependencies]
-firefly-observability = { workspace = true }
-
 [lints]
 workspace = true

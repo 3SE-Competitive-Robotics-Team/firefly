@@ -172,10 +172,15 @@ cargo run --release -p planner -- --map <实际存在的地图.ffmap>
 
 ## 验证
 
+- 数学测试必须同时包含独立公式/解析值、梯度差分和最终输出契约；
+  不能只让代价与梯度互相验证。参考源码版本与容差含义见 `docs/testing.md`。
+- 确定性任务要求成功；随机安全属性允许显式有界拒绝，但不将拒绝计作任务成功。
+  禁止用整体成功率阈值掩盖指定任务失败，不用机器相关耗时作为正确性门槛。
+
 - `cargo test`
-- `cargo test --release -p firefly-planner --test random_map_benchmark -- --ignored`
+- `cargo test -p firefly-planner --test planner_contracts`
 - 传感器进程启动：准备 RMUC 资产，先 release 构建 vio / fc / render，确保没有其他闭环进程；运行
-  `uv run --no-dev python bench/check_sensor_startup.py`。
+  `FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/system/test_sensor_startup.py -q`。
   检查屏蔽 PlantState、保留 render 生成图像所需的 GroundTruth；需图形会话，录制只进 `logs/*.rrd`，所有子进程通过 SIGINT 退出。
 
 - 双语言 IPC 契约：`uv sync --all-packages --extra test` 后，执行

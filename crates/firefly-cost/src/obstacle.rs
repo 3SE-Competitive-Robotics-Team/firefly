@@ -19,6 +19,7 @@ use crate::{Accumulator, Penalty};
 pub struct ObstaclePenalty {
     pub clearance_hard: f64,
     pub clearance_soft: f64,
+    pub weight_hard: f64,
     pub weight_soft: f64,
     pub samples_per_piece: usize,
     planes_by_point: Vec<Vec<Plane>>,
@@ -32,6 +33,7 @@ impl ObstaclePenalty {
     pub fn new(
         clearance_hard: f64,
         clearance_soft: f64,
+        weight_hard: f64,
         weight_soft: f64,
         samples_per_piece: usize,
         planes_by_point: Vec<Vec<Plane>>,
@@ -39,6 +41,7 @@ impl ObstaclePenalty {
         Self {
             clearance_hard,
             clearance_soft,
+            weight_hard,
             weight_soft,
             samples_per_piece,
             planes_by_point,
@@ -120,7 +123,7 @@ impl ObstaclePenalty {
                 let err_hard = self.clearance_hard - d;
                 let mut cost = 0.0;
                 if err_hard > 0.0 {
-                    cost += err_hard * err_hard * err_hard;
+                    cost += self.weight_hard * err_hard * err_hard * err_hard;
                 }
                 // 软层:dist < clearance_soft → 平滑尾 r²(√(1+err²/r²) − 1)
                 let err_soft = self.clearance_soft - d;
@@ -145,7 +148,7 @@ impl ObstaclePenalty {
                 let err_hard = self.clearance_hard - d;
                 let mut grad = Vector3::zeros();
                 if err_hard > 0.0 {
-                    grad += -3.0 * err_hard * err_hard * normal;
+                    grad += -self.weight_hard * 3.0 * err_hard * err_hard * normal;
                 }
                 // 软层梯度:−soft·err/term·n
                 let err_soft = self.clearance_soft - d;
@@ -168,7 +171,7 @@ mod tests {
     use crate::test_minco;
 
     fn penalty(planes: Vec<Vec<Plane>>) -> ObstaclePenalty {
-        ObstaclePenalty::new(0.1, 0.5, 5000.0, 5, planes)
+        ObstaclePenalty::new(0.1, 0.5, 1.0, 5000.0, 5, planes)
     }
 
     #[test]

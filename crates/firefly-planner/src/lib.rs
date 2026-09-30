@@ -4,6 +4,7 @@
 //! （firefly-trajectory）→ L-BFGS 优化（firefly-optimize），
 //! 环境来自 firefly-map。配置参数取自论文 Table S6。
 
+mod collision;
 mod config;
 pub mod init;
 pub mod manager;

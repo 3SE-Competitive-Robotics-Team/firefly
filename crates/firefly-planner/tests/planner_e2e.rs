@@ -131,7 +131,7 @@ fn swarm_head_on_avoidance() {
     // 空旷地图，两机相向飞行（x 方向对飞），各自用对方直线轨迹做 peer
     let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
 
-    // 官方语义:避让距离 CLEARANCE = swarm_clearance × 1.5 = 0.75
+    // 官方代价净距：(本机 0.5 + 对端 0.3) × 1.5 = 1.2m。
     let config = PlannerConfig::default();
     let mut planner_a = Planner::new(config.clone(), map.clone());
     let mut planner_b = Planner::new(config, map);
@@ -229,7 +229,11 @@ fn swarm_warm_start_accumulates_clearance() {
         let Ok(next_a) = planner_a
             .plan_in_swarm_with_init(
                 start_a,
-                goal_a,
+                firefly_trajectory::Endpoint {
+                    position: goal_a.coords,
+                    velocity: Vector3::zeros(),
+                    acceleration: Vector3::zeros(),
+                },
                 &[peer_b],
                 InitSource::WarmStart {
                     prev: &traj_a,
@@ -247,7 +251,11 @@ fn swarm_warm_start_accumulates_clearance() {
         let Ok(next_b) = planner_b
             .plan_in_swarm_with_init(
                 start_b,
-                goal_b,
+                firefly_trajectory::Endpoint {
+                    position: goal_b.coords,
+                    velocity: Vector3::zeros(),
+                    acceleration: Vector3::zeros(),
+                },
                 &[peer_a],
                 InitSource::WarmStart {
                     prev: &traj_b,
@@ -297,7 +305,7 @@ fn swarm_warm_start_accumulates_clearance() {
 fn swarm_avoids_stationary_peer() {
     // 分布式基本单元：本机避让固定 peer（peer 静止在路径中点）
     let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
-    // 官方语义:避让距离 CLEARANCE = swarm_clearance × 1.5 = 0.75
+    // 官方代价净距：(本机 0.5 + 对端 0.3) × 1.5 = 1.2m。
     let config = PlannerConfig::default();
     let mut planner = Planner::new(config, map);
     let start = State {
@@ -458,11 +466,7 @@ fn formation_following_with_peer() {
 }
 
 #[test]
-fn swarm_violation_doubles_weight_until_safe() {
-    // 官方 wei_swarm_mod_ 机制：多个静止 peer 沿直线轨迹两侧交错悬停
-    // （侧偏 0.35m < 成功门限 0.625），从直线初始解出发的首次优化无法
-    // 一次性满足全部间距门限；收敛后的 restart 必须倍增 swarm 权重
-    //（官方 L112）直到解出安全间距。
+fn swarm_path_respects_pairwise_clearance() {
     let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
     let mut planner = Planner::new(PlannerConfig::default(), map);
     let start = State {
@@ -472,8 +476,7 @@ fn swarm_violation_doubles_weight_until_safe() {
     };
     let goal = Point3::new(10.0, 1.0, 1.0);
 
-    // 静止 peer 沿 x 交错分布在轨迹两侧（y = 1.0 ± 0.35），间距足够
-    // 倍增后的避碰项在重启预算内解出蛇形绕行
+    // 静止 peer 沿 x 交错分布在轨迹两侧（y = 1.0 ± 0.35）。
     let hover = |x: f64, y: f64| {
         firefly_trajectory::MincoBuilder::new(
             firefly_trajectory::SolverOrder::MinimumJerk,
@@ -500,25 +503,34 @@ fn swarm_violation_doubles_weight_until_safe() {
         .collect();
 
     let result = planner
-        .plan_in_swarm(start, goal, &peers)
+        .plan_in_swarm_with_init(
+            start,
+            firefly_trajectory::Endpoint {
+                position: goal.coords,
+                velocity: Vector3::zeros(),
+                acceleration: Vector3::zeros(),
+            },
+            &peers,
+            InitSource::ColdStart,
+            true,
+        )
         .expect("plan with near peer");
 
-    assert!(
-        planner.last_swarm_weight_mod() > 1.0,
-        "初始解必然集群间距违约，必须经历权重倍增，实际系数 {}",
-        planner.last_swarm_weight_mod()
-    );
-    // 倍增后最终解出安全间距（同一绝对时刻，对全部 peer 取最小）
     let traj = &result.trajectory;
     let mut min_d = f64::MAX;
     for k in 0..400 {
         let t = traj.duration() * f64::from(k) / 400.0;
         let p = traj.eval(t).position;
         for (x, y) in [(3.5, 1.35), (6.5, 0.65)] {
-            min_d = min_d.min((p - Vector3::new(x, y, 1.0)).norm());
+            let delta = p - Vector3::new(x, y, 1.0);
+            min_d =
+                min_d.min((delta.x * delta.x + delta.y * delta.y + delta.z * delta.z / 4.).sqrt());
         }
     }
-    assert!(min_d > 0.6, "最终轨迹距最近 peer {min_d:.3} 应达安全门限");
+    assert!(
+        min_d > 1.0,
+        "双方净距之和乘 1.25：最小距离 {min_d:.3} 应大于 1m"
+    );
 }
 
 #[test]

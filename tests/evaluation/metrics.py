@@ -21,11 +21,20 @@ def compute_metrics(
     *, alignment: str = "yaw_translation",
 ) -> dict:
     """时间插值后评测；航向/平移只作用于副本，尺度固定，不反馈到算法。"""
+    for name, times, positions in [("GT", gt_times, gt_pos), ("odom", odom_times, odom_pos)]:
+        if times.ndim != 1 or positions.shape != (len(times), 3):
+            raise ValueError(f"invalid {name} array shape")
+        if not np.all(np.isfinite(times)) or not np.all(np.isfinite(positions)):
+            raise ValueError(f"non-finite {name} samples")
+        if np.any(np.diff(times) <= 0):
+            raise ValueError(f"{name} timestamps must strictly increase")
+    if not np.isfinite(duration) or duration <= 0:
+        raise ValueError("duration must be positive and finite")
     if len(gt_times) < 10 or len(odom_times) < 10:
         raise ValueError(f"not enough samples GT={len(gt_times)} odom={len(odom_times)}")
     # duration is relative to the first GT sample.
     t0 = float(gt_times[0])
-    mask = gt_times <= t0 + duration + 0.05
+    mask = gt_times <= t0 + duration
     gt_times = gt_times[mask]
     gt_pos = gt_pos[mask]
     if len(gt_times) < 10:
@@ -61,13 +70,17 @@ def compute_metrics(
     ate_mean = float(np.mean(norm))
     ate_max = float(np.max(norm))
     ate_final = float(norm[-1])
-    # RPE delta 1s (10 frames @10Hz)
-    rpe_rmse = 0.0
-    rpe_mean = 0.0
-    delta = 10
-    if len(gt_pos) > delta:
-        gt_rel = gt_pos[delta:] - gt_pos[:-delta]
-        od_rel = odom_aligned[delta:] - odom_aligned[:-delta]
+    # 按测量时间配对 t 与 t+1s，不假设采样频率；不足 1 秒不报告零误差。
+    eligible = gt_times + 1.0 <= gt_times[-1] + 1e-12
+    rpe_count = int(np.count_nonzero(eligible))
+    rpe_rmse = None
+    rpe_mean = None
+    if rpe_count:
+        future = np.minimum(gt_times[eligible] + 1.0, gt_times[-1])
+        gt_rel = interp_linear(future, gt_times, gt_pos) - gt_pos[eligible]
+        # 从原始里程计时间轴插值，避免两次重采样引入额外误差。
+        od_future = interp_linear(future, odom_times, odom_pos) @ rotation.T + translation
+        od_rel = od_future - odom_aligned[eligible]
         rpe = np.linalg.norm(gt_rel - od_rel, axis=1)
         rpe_rmse = float(np.sqrt(np.mean(rpe**2)))
         rpe_mean = float(np.mean(rpe))
@@ -105,6 +118,8 @@ def compute_metrics(
         "ate_mean": ate_mean,
         "ate_max": ate_max,
         "ate_final": ate_final,
+        "rpe_num_pairs_1s": rpe_count,
+        "evaluated_duration_s": float(gt_times[-1] - gt_times[0]),
         "rpe_rmse_1s": rpe_rmse,
         "rpe_mean_1s": rpe_mean,
         "snapshots": snapshots,

@@ -71,6 +71,6 @@ fn per_penalty_gradients_match_numerical() {
     check_gradient_c(
         "obstacle",
         &traj,
-        &ObstaclePenalty::new(0.1, 0.5, 5000.0, 5, per_point),
+        &ObstaclePenalty::new(0.1, 0.5, 1.0, 5000.0, 5, per_point),
     );
 }

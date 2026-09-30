@@ -1,6 +1,6 @@
 """发布构建的传感器启动检查；运行记录仅写 logs/ 下的 rrd。
 
-从仓库根运行：uv run --no-dev python bench/check_sensor_startup.py
+从仓库根运行：FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/system/test_sensor_startup.py -q
 需要 RMUC 资产、图形会话与 release 构建的 vio / fc / render，且没有其他闭环进程。
 GroundTruth 仅供 render 合成图像；屏蔽 PlantState，算法只使用 IMU 与图像。
 """
@@ -18,13 +18,19 @@ import time
 
 import iceoryx2 as iox2
 import numpy as np
+import pytest
 
 from firefly_mujoco import ControlMessage, OdomMessage, TraceContext
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("FIREFLY_RUN_SENSOR_STARTUP") != "1",
+    reason="requires explicit FIREFLY_RUN_SENSOR_STARTUP=1, RMUC assets and graphics session",
+)
 
 
-def main() -> None:
+def test_sensor_startup() -> None:
     from firefly_mujoco import build_scene, load_scene_name
     load_scene_name()
     build_scene()
@@ -126,6 +132,3 @@ sim.main()
         if failures:
             raise RuntimeError("; ".join(failures))
 
-
-if __name__ == "__main__":
-    main()

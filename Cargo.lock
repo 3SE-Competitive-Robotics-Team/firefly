@@ -2984,7 +2984,6 @@ dependencies = [
  "firefly-cost",
  "firefly-error",
  "firefly-map",
- "firefly-observability",
  "firefly-optimize",
  "firefly-search",
  "firefly-trajectory",

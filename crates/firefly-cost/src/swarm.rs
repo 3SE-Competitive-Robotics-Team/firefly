@@ -1,7 +1,7 @@
 //! 集群避碰惩罚(官方 `swarmGradCostP`)。
 //!
 //! 椭球距离 `ellip_dist2 = dz²/a² + (dx²+dy²)/b²`(a=2, b=1,缓解下洗),
-//! 避让距离 `CLEARANCE = (Cw·1.5)`(官方对轻微约束违反的补偿),
+//! 避让距离 `CLEARANCE = ((Cw + peer.clearance)·1.5)`(官方对轻微约束违反的补偿),
 //! 惩罚 `wei_swarm·max{(CLEARANCE²−ellip_dist2),0}³`。
 //! 仅对前 2/3 约束点施力;采样梯形权重 `omg·T/K`。
 
@@ -102,9 +102,9 @@ impl Penalty for SwarmPenalty {
                 // 逐 peer 累加:每个 peer 在同一绝对时刻求值,
                 // 时间移动用相对速度(本机 − peer)
                 for peer in &self.peers {
-                    let ps = eval_at(peer, t_abs);
+                    let ps = peer.sample_at(t_abs);
                     let diff = s.position - ps.position;
-                    let c = self.clearance();
+                    let c = self.clearance(peer);
                     let excess = c * c - self.d2(diff);
                     if excess <= 0.0 {
                         continue;
@@ -144,17 +144,17 @@ impl SwarmPenalty {
         Vector3::new(diff.x * ib2, diff.y * ib2, diff.z * ia2)
     }
 
-    /// 避让距离(官方:`CLEARANCE = swarm_clearance × 1.5`)。
-    fn clearance(&self) -> f64 {
-        self.self_clearance * 1.5
+    /// 避让距离(官方:`CLEARANCE = (swarm_clearance + des_clearance) × 1.5`)。
+    fn clearance(&self, peer: &Peer) -> f64 {
+        (self.self_clearance + peer.clearance) * 1.5
     }
 
     fn point_cost(&self, s: &Sample, t_abs: f64) -> f64 {
         self.peers
             .iter()
             .map(|peer| {
-                let ps = eval_at(peer, t_abs);
-                let c = self.clearance();
+                let ps = peer.sample_at(t_abs);
+                let c = self.clearance(peer);
                 let c2 = c * c;
                 let excess = c2 - self.d2(s.position - ps.position);
                 if excess <= 0.0 {
@@ -164,29 +164,6 @@ impl SwarmPenalty {
                 }
             })
             .sum()
-    }
-}
-
-/// 在绝对时刻求值 peer 轨迹。
-///
-/// 时间对齐换算(官方 `swarmGradCostP` 的 `pt_time` 公式):本机轨迹锚定绝对
-/// 时刻 0,peer 在其自身局部时钟下的时刻为 `pt_time = t_abs − peer.start_time`;
-/// 超出轨迹时长时匀速外推(官方行为),负时刻由多项式回推(官方不做下界保护)。
-fn eval_at(peer: &Peer, t_abs: f64) -> firefly_trajectory::Sample {
-    let pt = t_abs - peer.start_time;
-    let duration = peer.traj.duration();
-    if pt < duration {
-        peer.traj.eval(pt)
-    } else {
-        let s = peer.traj.eval(duration);
-        let exceed = pt - duration;
-        firefly_trajectory::Sample {
-            position: s.position + s.velocity * exceed,
-            velocity: s.velocity,
-            acceleration: s.acceleration,
-            jerk: s.jerk,
-            snap: s.snap,
-        }
     }
 }
 
@@ -264,7 +241,7 @@ mod tests {
             1.0 / (p.ellipsoid_a * p.ellipsoid_a),
             1.0 / (p.ellipsoid_b * p.ellipsoid_b),
         );
-        let cw = 0.5 * 1.5; // CLEARANCE = Cw × 1.5
+        let cw = (0.5 + 0.5) * 1.5;
         for dim in 0..3 {
             let f = |x: f64| {
                 let mut s2 = s;
@@ -300,8 +277,8 @@ mod tests {
         let anchored = Peer::new(0, 0.0, peer, 0.5);
         // 常规段 / 超时长匀速外推 / 负局部时刻(多项式回推)三种情形
         for t_abs in [dur * 0.5, dur + 0.5, delta * 0.5] {
-            let s_delayed = eval_at(&delayed, t_abs);
-            let s_anchored = eval_at(&anchored, t_abs - delta);
+            let s_delayed = delayed.sample_at(t_abs);
+            let s_anchored = anchored.sample_at(t_abs - delta);
             assert!(
                 (s_delayed.position - s_anchored.position).norm() < 1e-9,
                 "position mismatch at t_abs={t_abs}"

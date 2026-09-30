@@ -149,6 +149,15 @@ struct Horizon {
     /// 全程/碰撞监控扫描上界）。
     touch_goal: bool,
 }
+impl Horizon {
+    fn endpoint(&self) -> Endpoint {
+        Endpoint {
+            position: self.target,
+            velocity: self.target_vel,
+            acceleration: Vector3::zeros(),
+        }
+    }
+}
 
 /// 全局轨迹与局部目标时间簿记（官方 `GlobalTrajData`，见
 /// `plan_container.hpp:20-31`）：MINCO 时间参数化轨迹 + 管理器时钟锚点 +
@@ -715,16 +724,37 @@ impl PlannerManager {
             velocity: Vector3::zeros(),
             acceleration: Vector3::zeros(),
         });
-        // 官方 GEN_NEW_TRAJ:目标即全局终点 → touch_goal = true
-        match self
-            .planner
-            .plan_with_init(start, self.goal, InitSource::ColdStart, true)
-        {
+        let horizon = self.horizon(start.position.coords);
+        let peers = self.peers_at(now);
+        match self.planner.plan_in_swarm_with_init(
+            start,
+            horizon.endpoint(),
+            &peers,
+            InitSource::ColdStart,
+            horizon.touch_goal,
+        ) {
             Ok(result) => {
-                self.adopt_plan(result, now, true);
+                self.adopt_plan(result, now, horizon.touch_goal);
             }
             Err(e) => log::warn!("初始规划失败：{e}，下一帧重试"),
         }
+    }
+
+    fn peers_at(&self, now: f64) -> Vec<firefly_cost::Peer> {
+        self.swarm
+            .iter()
+            .enumerate()
+            .filter_map(|(id, entry)| {
+                entry.as_ref().map(|peer| {
+                    firefly_cost::Peer::new(
+                        id,
+                        peer.start_time - now,
+                        peer.traj.clone(),
+                        peer.des_clearance,
+                    )
+                })
+            })
+            .collect()
     }
 
     /// 重规划（官方 `planFromLocalTraj`）：起点取上一轨迹在重规划时刻的
@@ -745,6 +775,7 @@ impl PlannerManager {
             acceleration: s.acceleration,
         };
         let horizon = self.horizon(start.position.coords);
+        let peers = self.peers_at(now);
         log::debug!(
             "local_target_vel = ({:.2},{:.2},{:.2}) m/s, touch_goal = {}",
             horizon.target_vel.x,
@@ -781,9 +812,10 @@ impl PlannerManager {
             None => None,
         };
         let planned = match &warm {
-            Some((prev, elapsed, glb_seg, tail)) => self.planner.plan_with_init(
+            Some((prev, elapsed, glb_seg, tail)) => self.planner.plan_in_swarm_with_init(
                 start,
-                Point3::from(horizon.target),
+                horizon.endpoint(),
+                &peers,
                 InitSource::WarmStart {
                     prev,
                     elapsed: *elapsed,
@@ -792,9 +824,10 @@ impl PlannerManager {
                 },
                 horizon.touch_goal,
             ),
-            None => self.planner.plan_with_init(
+            None => self.planner.plan_in_swarm_with_init(
                 start,
-                Point3::from(horizon.target),
+                horizon.endpoint(),
+                &peers,
                 InitSource::ColdStart,
                 horizon.touch_goal,
             ),
@@ -803,9 +836,10 @@ impl PlannerManager {
             Ok(r) => r,
             Err(warm_err) => {
                 if warm.is_some() {
-                    match self.planner.plan_with_init(
+                    match self.planner.plan_in_swarm_with_init(
                         start,
-                        Point3::from(horizon.target),
+                        horizon.endpoint(),
+                        &peers,
                         InitSource::ColdStart,
                         horizon.touch_goal,
                     ) {
@@ -1145,9 +1179,11 @@ impl PlannerManager {
     #[must_use]
     fn recover_from_global_traj(&mut self, now: f64, start: State) -> bool {
         let horizon = self.horizon(start.position.coords);
-        match self.planner.plan_with_init(
+        let peers = self.peers_at(now);
+        match self.planner.plan_in_swarm_with_init(
             start,
-            Point3::from(horizon.target),
+            horizon.endpoint(),
+            &peers,
             InitSource::ColdStart,
             horizon.touch_goal,
         ) {
@@ -1521,6 +1557,31 @@ mod tests {
     }
 
     #[test]
+    fn initial_local_goal_preserves_global_velocity() {
+        let mut manager = open_manager();
+        let start = state_at(Vector3::new(1., 1., 1.));
+        let target = manager.horizon(start.position.coords);
+        assert!(!target.touch_goal && target.target_vel.norm() > 0.1);
+        manager.initial_plan(100., Some(start));
+        let local = manager.local().expect("initial moving local goal");
+        let end = local.traj.eval(local.traj.duration());
+        assert!((end.position - target.target).norm() < 1e-6);
+        assert!((end.velocity - target.target_vel).norm() < 1e-6);
+        assert!(!manager.touch_goal);
+    }
+
+    #[test]
+    fn registered_peers_are_rebased_to_planning_epoch() {
+        let mut manager = open_manager();
+        manager.register_swarm_traj(1, hover_traj(Vector3::new(4., 3., 2.), 10.), 98., 0.37);
+        let peers = manager.peers_at(100.);
+        assert_eq!(peers.len(), 1);
+        assert!((peers[0].start_time + 2.).abs() < 1e-12);
+        assert!((peers[0].clearance - 0.37).abs() < 1e-12);
+        assert!((peers[0].sample_at(0.5).position - Vector3::new(4., 3., 2.)).norm() < 1e-12);
+    }
+
+    #[test]
     fn global_traj_time_parameterization() {
         // 全局轨迹多项式化（官方 planGlobalTrajWaypoints）：时间参数化的
         // MINCO 轨迹，首末状态完整（零速零加速）、内点为简化路径拐点。
@@ -1808,11 +1869,12 @@ mod tests {
         let mut m = open_manager();
         let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
         assert!(m.local().is_some(), "前置:初始轨迹存在");
-        // 飞行中途向地图注入新障碍(初始直线路径前方 x≈4,res 0.5 → 体素 [8,2,2],
-        // 膨胀 1 格后 x∈[3.5,5.0),稠密采样间距 ≤0.63m 必命中)
-        m.map_mut().set_state([8, 2, 2], VoxelState::Occupied);
+        let local = m.local().unwrap();
+        let obstacle = local.traj.eval(local.traj.duration() * 0.45).position;
+        let voxel = m.map().index_of(obstacle).unwrap();
+        m.map_mut().set_state(voxel, VoxelState::Occupied);
         assert!(
-            !m.map().is_occupied_inflated(Vector3::new(4.2, 1.0, 1.0)),
+            !m.map().is_occupied_inflated(obstacle),
             "膨胀层刷新前新障碍不可见"
         );
         // t=0.5 < replan_thresh(1.0):只有碰撞监控能触发重规划
@@ -2330,8 +2392,15 @@ mod tests {
         let mut m = open_manager();
         let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
         assert!(m.local().is_some());
-        // 对端在航迹前方 x=4 定点悬停（初始直线轨迹必经，净距阈值 0.5m）
-        m.register_swarm_traj(1, hover_traj(Vector3::new(4.0, 1.0, 1.0), 30.0), 0.0, 0.0);
+        let local = m.local().unwrap();
+        // 非零侧偏打破静态对称，避免在避碰代价驻点上测试求解器收敛。
+        let position =
+            local.traj.eval(local.traj.duration() * 0.45).position + Vector3::new(0., 0.2, 0.);
+        m.register_swarm_traj(1, hover_traj(position, 30.), 0., 0.);
+        assert!(
+            m.next_swarm_conflict(0.5).is_some(),
+            "测试对端必须位于监控覆盖范围内"
+        );
         // t=0.5 < replan_thresh(1.0)：仅 swarm 预测检查能触发重规划
         let r = m.tick(0.5, None);
         assert!(r.replanned, "预测距离过近应立即重规划");

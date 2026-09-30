@@ -50,7 +50,7 @@ VIO 在相机时刻更新滤波器，使用 IMU 预测输出 100 Hz 里程计；
 | `apps/` | Rust 进程 `vio`、`fc`、`planner`、`gicp`、`aliked`、`lightglue`、`render`、`quad`、`ffctl`；Python 进程 `firefly-sim`、`firefly-viz` |
 | `packages/` | Python 库 `firefly-mujoco` 与 CAD 资产处理 `firefly-cad` |
 | `configs/` | 每应用一份 TOML，缺键回落代码默认值，缺文件报错 |
-| `bench/`、`docs/` | 评测指标、启动检查与运行/架构说明 |
+| `tests/`、`docs/` | 评测指标、启动检查与运行/架构说明 |
 
 ## 最小闭环
 
@@ -105,19 +105,21 @@ IMU 窗口与双目视差检查。观察就绪日志或里程计的
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-cargo test --release -p firefly-planner --test random_map_benchmark -- --ignored
-uv run --with pytest pytest apps/firefly-sim/tests/ bench/tests/ -q
+cargo test -p firefly-planner --test planner_contracts
+uv run --all-packages --extra test pytest apps/firefly-sim/tests/ tests/evaluation/ tests/system/ -q -p no:cacheprovider
 ```
 
 发布构建的传感器启动检查（需 RMUC 资产与图形会话、没有其他闭环进程）：
 
 ```bash
-uv run --no-dev python bench/check_sensor_startup.py
+FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/system/test_sensor_startup.py -q
 ```
 
 检查屏蔽 PlantState 发布，保留供 render 合成图像的 GroundTruth，运行 RMUC
 传感器、估计器与飞控进程，录制到 `logs/*_sensor_startup_*.rrd`，并通过 SIGINT 退出。
 它验证静止初始化和未解锁零推力，不代表飞行精度验收。
+
+测试设计与验收边界见 [测试契约](docs/testing.md)。
 
 测试包含传感器独立初始化、真值与控制隔离、雅可比/梯度检查及规划/飞控测试。
 `synthetic_e2e` 中标记 `ignore` 的场景不属于通过保证；运行与精度结论以对应版本的

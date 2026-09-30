@@ -714,9 +714,6 @@ impl GridMap {
     /// 每个占据体素 `+GRID_MAP_OBS_FLAG`（自身）并周围 `inf_grid` 格内 `+1`，多障碍叠加计数。
     pub fn inflate_obstacles(&mut self) {
         self.inflate.iter_mut().for_each(|v| *v = 0);
-        if self.inf_grid <= 0 {
-            return;
-        }
         let threshold = self.min_occupancy_log;
         let occupied: Vec<[i64; 3]> = (0..self.occupancy.len())
             .filter(|&a| self.occupancy[a] >= threshold)
@@ -844,6 +841,21 @@ mod tests {
         assert!(!m.is_occupied_inflated(Vector3::new(-50.0, 0.0, 0.5)));
         // 窗外但 z ≥ ceil → 墙命中
         assert!(m.is_occupied(Vector3::new(100.0, 0.0, 2.5)));
+    }
+
+    #[test]
+    fn zero_inflation_preserves_occupied_cells() {
+        let mut map = GridMapBuilder::new(1.0, [10, 10, 10])
+            .with_obstacles_inflation(0.0)
+            .build()
+            .unwrap();
+        map.set_state([5, 5, 5], VoxelState::Occupied);
+        map.inflate_obstacles();
+        assert!(map.is_occupied_inflated(Vector3::new(5.5, 5.5, 5.5)));
+        assert!(!map.is_occupied_inflated(Vector3::new(4.5, 5.5, 5.5)));
+        map.set_state([5, 5, 5], VoxelState::Free);
+        map.inflate_obstacles();
+        assert!(!map.is_occupied_inflated(Vector3::new(5.5, 5.5, 5.5)));
     }
 
     #[test]
