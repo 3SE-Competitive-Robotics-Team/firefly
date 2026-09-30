@@ -11,6 +11,7 @@ repository.workspace = true
 readme.workspace = true
 
 [dependencies]
+firefly-base.workspace = true
 firefly-error = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }

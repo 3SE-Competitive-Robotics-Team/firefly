@@ -15,8 +15,8 @@ name = "lightglue"
 path = "src/main.rs"
 
 [dependencies]
+firefly-base.workspace = true
 firefly-error = { workspace = true }
-firefly-localization = { workspace = true }
 firefly-observability = { workspace = true }
 firefly-pubsub = { workspace = true }
 firefly-vision-map = { workspace = true }

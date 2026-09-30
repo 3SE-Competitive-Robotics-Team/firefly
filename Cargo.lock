@@ -2827,6 +2827,7 @@ name = "fc"
 version = "0.1.0"
 dependencies = [
  "fastrace",
+ "firefly-base",
  "firefly-error",
  "firefly-flight",
  "firefly-observability",
@@ -2866,6 +2867,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
+name = "firefly-base"
+version = "0.1.0"
+dependencies = [
+ "fastrace",
+ "firefly-error",
+ "nalgebra",
+]
+
+[[package]]
 name = "firefly-cost"
 version = "0.1.0"
 dependencies = [
@@ -2895,6 +2905,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "fastrace",
+ "firefly-base",
  "nalgebra",
  "rayon",
 ]
@@ -2904,6 +2915,7 @@ name = "firefly-localization"
 version = "0.1.0"
 dependencies = [
  "fastrace",
+ "firefly-base",
  "firefly-error",
  "firefly-gicp",
  "firefly-map",
@@ -2987,6 +2999,7 @@ name = "firefly-pubsub"
 version = "0.1.0"
 dependencies = [
  "fastrace",
+ "firefly-base",
  "firefly-error",
  "firefly-observability",
  "iceoryx2",
@@ -3080,6 +3093,7 @@ dependencies = [
 name = "firefly-vision-match"
 version = "0.1.0"
 dependencies = [
+ "firefly-base",
  "firefly-error",
  "log",
  "nalgebra",
@@ -3319,6 +3333,7 @@ name = "gicp"
 version = "0.1.0"
 dependencies = [
  "fastrace",
+ "firefly-base",
  "firefly-error",
  "firefly-gicp",
  "firefly-localization",
@@ -4381,8 +4396,8 @@ dependencies = [
 name = "lightglue"
 version = "0.1.0"
 dependencies = [
+ "firefly-base",
  "firefly-error",
- "firefly-localization",
  "firefly-observability",
  "firefly-pubsub",
  "firefly-vision-map",
@@ -5564,6 +5579,7 @@ name = "planner"
 version = "0.1.0"
 dependencies = [
  "fastrace",
+ "firefly-base",
  "firefly-error",
  "firefly-map",
  "firefly-observability",

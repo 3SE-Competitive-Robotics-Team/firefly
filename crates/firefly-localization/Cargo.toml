@@ -11,6 +11,7 @@ repository.workspace = true
 readme.workspace = true
 
 [dependencies]
+firefly-base.workspace = true
 fastrace = { workspace = true }
 firefly-error = { workspace = true }
 firefly-gicp = { path = "../firefly-gicp" }

@@ -15,6 +15,7 @@ name = "gicp"
 path = "src/main.rs"
 
 [dependencies]
+firefly-base.workspace = true
 fastrace = { workspace = true }
 firefly-error = { workspace = true }
 firefly-gicp = { workspace = true }

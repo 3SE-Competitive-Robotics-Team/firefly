@@ -32,6 +32,7 @@
 | 本机路径 | 对应 |
 |---|---|
 | `EGO-Planner-v2/` | 规划器官方 C++（`swarm-playground/*/src/planner/traj_opt/`） |
+| `VINS-Fusion/` | 全局漂移与位姿图参考（`loop_fusion/src/pose_graph.cpp`） |
 | `open_vins/` | MSCKF 官方 C++（firefly-vio* 的移植基准） |
 | `iceoryx2/` | IPC 中间件源码 |
 | `logforth/`、`fastrace/` | 日志 / tracing 库源码 |
@@ -60,12 +61,20 @@
 - VIO 从静止 IMU 与图像视差初始化。测量不足或
   运动检查不通过时保持未就绪。飞控必须等待有效 IMU、已初始化且新鲜的里程计。
 - 原始里程计使用重力对齐的局部坐标系：初始位置为零、航向为规范自由度。
-  静态地图、先验平面和全局目标接入前必须有独立定位得到的坐标变换，禁止从
-  真值生成该变换再反馈到算法。
+  静态地图、先验平面和全局目标接入前必须有独立定位或显式固定启动先验得到的
+  坐标变换；固定启动先验在 `configs/gicp.toml [origin]` 配置，禁止读取在线真值生成变换。
 - 轨迹评测允许固定尺度的航向和平移对齐，必须在结果中注明；原始数据保留，
   对齐结果不得回流估计或控制。
 - 仿真内部状态用于物理推进、传感器生成、渲染；render 订阅 GroundTruth
   只为生成图像。这不构成估计器与飞控可访问的状态源。
+
+## 坐标基础层
+
+- 跨模块坐标变换统一使用 `firefly-base::{FrameId, RigidTransform, FrameTree}`，
+  方向固定为 `T_target_source`；组合检查中间坐标系，点/自由向量/协方差不得混用。
+- 坐标树是同一时刻的几何快照，时间同步与新鲜度由消费端负责。
+- 飞控反馈和 Hold 锚点始终在 odom 系；map 系规划参考通过坐标树转换，禁止切换反馈源。
+- 融合右误差、伴随换基与协方差重置约定见 `docs/frames.md`。算法内部矩阵不携带隐式跨系语义。
 
 ## VIO（firefly-vio*）约定
 
@@ -108,7 +117,7 @@ cargo run --release -p fc
 sim 发布 IMU 100Hz、仿真位姿 10Hz、PlantState 200Hz、Airframe 1Hz；
 render 提供双目与深度。VIO 视觉更新 10Hz、预测里程计 100Hz；飞控 1kHz。
 planner / gicp 默认读取 `apps/planner/maps/rmuc2026.ffmap`，缺文件报错。
-地图系算法必须使用经过独立定位对齐的状态。planner 只订阅 CorrectedOdometry；
+地图系算法必须使用经过固定启动先验或独立定位对齐的状态。planner 只订阅 CorrectedOdometry；
 未就绪不发布参考，500ms 墙钟失联或无效状态触发停止发布并锁存，须重启恢复。
 重复/乱序样本不得续期，禁止用参考轨迹代替状态或自动切回局部 VIO。
 

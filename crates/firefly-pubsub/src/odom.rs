@@ -63,6 +63,25 @@ impl Default for OdomMessage {
     }
 }
 
+impl OdomMessage {
+    /// 将消息解释为 parent←body。原始里程计 parent=ODOM，校正里程计 parent=MAP。
+    /// JPL 世界→机体的 xyzw 分量等于 Hamilton 机体→世界的 xyzw 分量。
+    ///
+    /// # Errors
+    /// 位姿非有限或四元数不是单位四元数。
+    pub fn body_pose(
+        &self,
+        parent: firefly_base::FrameId,
+    ) -> firefly_error::Result<firefly_base::RigidTransform> {
+        firefly_base::RigidTransform::from_parts(
+            parent,
+            firefly_base::FrameId::BODY,
+            [self.position_x, self.position_y, self.position_z],
+            [self.quat_x, self.quat_y, self.quat_z, self.quat_w],
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

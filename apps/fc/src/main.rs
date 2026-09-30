@@ -3,7 +3,8 @@
 //! 输入：
 //! - `Firefly/PlantState`（真值，200Hz）——仅供倾斜误差评测。
 //! - `Firefly/Airframe`（质量/惯量/旋翼几何/电机上限，1Hz 电平）——飞控参数的唯一来源；
-//! - `Firefly/Odometry` / `Firefly/CorrectedOdometry`——位置/速度/航向反馈（取消息新的）；
+//! - `Firefly/Odometry`——连续 odom 系位置/速度/航向反馈；
+//! - `Firefly/CorrectedOdometry`——同时间戳配对建立 map←odom，转换地图参考；
 //! - `Firefly/Imu`（陀螺 + 加计，100Hz）——姿态估计（内环）；
 //! - `Firefly/Reference`（规划参考：位置/速度/偏航/偏航角速度）；
 //! - `Firefly/Command`（地面站指令：解锁/上锁/起飞/保持/跟踪/降落）。
@@ -26,6 +27,7 @@
 //! 运行：`cargo run --release -p fc`（配合 `uv run firefly-sim`）。
 
 mod config;
+mod frames;
 mod vio;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -89,11 +91,9 @@ fn parse_config_path() -> Result<String, String> {
     Ok(path)
 }
 
-/// 位置/速度/航向反馈快照（`Firefly/Odometry` / `Firefly/CorrectedOdometry` 取消息新的）。
+/// 连续 odom 系位置/速度/航向反馈快照，仅来自 `Firefly/Odometry`。
 #[derive(Clone, Copy)]
 struct Estimate {
-    /// 估计器时间戳（仿真秒；仅用于取最新样本）。
-    time: f64,
     /// 估计位置（m）。
     position: Vec3,
     /// 估计速度（m/s）。
@@ -115,6 +115,7 @@ struct Inputs {
     vehicle: Option<(QuadParams, Airframe)>,
     /// 位置/速度/航向反馈。
     estimate: Option<Estimate>,
+    frames: frames::ControlFrames,
     /// 最新 IMU 传感器时间（秒），作为控制与诊断时间轴。
     imu_time: f64,
     /// 最新 IMU（陀螺、加计，机体系）与到达墙钟时刻（判陈旧）。
@@ -199,48 +200,46 @@ impl Ports {
             ));
             imu_count += 1;
         }
-        // 位置/速度/姿态反馈取原始与校正估计中消息更新的那个（与 planner 同规则）
-        let mut newest: Option<Estimate> = None;
-        for sample in [self.odom.receive()?, self.corrected.receive()?]
-            .into_iter()
-            .flatten()
-        {
+        while let Some(sample) = self.odom.receive()? {
             let m = *sample;
-            let candidate = Estimate {
-                time: m.timestamp,
-                position: Vec3::new(
-                    m.position_x as f32,
-                    m.position_y as f32,
-                    m.position_z as f32,
-                ),
-                velocity: Vec3::new(
-                    m.velocity_x as f32,
-                    m.velocity_y as f32,
-                    m.velocity_z as f32,
-                ),
-                quat: [m.quat_x, m.quat_y, m.quat_z, m.quat_w],
-                initialized: m.is_initialized,
-                received_at: Instant::now(),
-            };
-            if !candidate.time.is_finite()
-                || !candidate.position.is_finite()
-                || !candidate.velocity.is_finite()
-                || !candidate.quat.iter().all(|q| q.is_finite())
-                || candidate.quat.iter().map(|q| q * q).sum::<f64>() < 1e-12
-            {
+            let received_at = Instant::now();
+            if !inputs.frames.observe_odom(&m, received_at) {
                 continue;
             }
-            if newest.is_none_or(|cur| candidate.time > cur.time) {
-                newest = Some(candidate);
+            let position = Vec3::new(
+                m.position_x as f32,
+                m.position_y as f32,
+                m.position_z as f32,
+            );
+            let velocity = Vec3::new(
+                m.velocity_x as f32,
+                m.velocity_y as f32,
+                m.velocity_z as f32,
+            );
+            if !position.is_finite() || !velocity.is_finite() {
+                continue;
             }
+            inputs.estimate = Some(Estimate {
+                position,
+                velocity,
+                quat: [m.quat_x, m.quat_y, m.quat_z, m.quat_w],
+                initialized: m.is_initialized,
+                received_at,
+            });
         }
-        if let Some(candidate) = newest
-            && inputs.estimate.is_none_or(|cur| candidate.time > cur.time)
-        {
-            inputs.estimate = Some(candidate);
+        while let Some(sample) = self.corrected.receive()? {
+            inputs.frames.observe_corrected(*sample, Instant::now());
         }
         while let Some(sample) = self.reference.receive()? {
-            inputs.reference = Some((*sample, Instant::now()));
+            let m = *sample;
+            if valid_reference(&m)
+                && m.timestamp >= 0.0
+                && inputs
+                    .reference
+                    .is_none_or(|(old, _)| m.timestamp > old.timestamp)
+            {
+                inputs.reference = Some((m, Instant::now()));
+            }
         }
         // 只留序号最大的指令：一次性 CLI 为打通信道会重复投递同一条，积压也折叠成最新
         while let Some(sample) = self.command.receive()? {
@@ -253,6 +252,22 @@ impl Ports {
         }
         Ok(imu_count)
     }
+}
+
+fn valid_reference(m: &ReferenceMessage) -> bool {
+    [
+        m.timestamp,
+        m.position_x,
+        m.position_y,
+        m.position_z,
+        m.velocity_x,
+        m.velocity_y,
+        m.velocity_z,
+        m.yaw,
+        m.yaw_dot,
+    ]
+    .iter()
+    .all(|v| v.is_finite())
 }
 
 /// `AirframeMessage` → `firefly-flight` 参数（被控对象是唯一来源）。
@@ -299,20 +314,9 @@ fn fresh_reference(inputs: &Inputs) -> Option<PositionSetpoint> {
     if at.elapsed() > REFERENCE_STALE_LIMIT {
         return None;
     }
-    Some(PositionSetpoint {
-        position: Vec3::new(
-            msg.position_x as f32,
-            msg.position_y as f32,
-            msg.position_z as f32,
-        ),
-        velocity: Vec3::new(
-            msg.velocity_x as f32,
-            msg.velocity_y as f32,
-            msg.velocity_z as f32,
-        ),
-        yaw: msg.yaw as f32,
-        yaw_rate: msg.yaw_dot as f32,
-    })
+    inputs
+        .frames
+        .reference(&msg, Instant::now(), ODOM_STALE_LIMIT)
 }
 
 /// 线上指令 → 状态机指令（`None` = 未知编码，忽略）。
@@ -710,7 +714,6 @@ mod tests {
         Inputs {
             vehicle: Some((QuadParams::default(), Airframe::default())),
             estimate: Some(Estimate {
-                time: 1.0,
                 position: Vec3::ZERO,
                 velocity: Vec3::ZERO,
                 quat: [0.0, 0.0, 0.0, 1.0],

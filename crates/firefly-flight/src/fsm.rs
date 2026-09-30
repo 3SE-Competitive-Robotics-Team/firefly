@@ -460,7 +460,8 @@ impl FlightFsm {
                 self.ramp_toward(goal, self.params.land_descent_rate * dt, false);
                 self.ramp_setpoint()
             }
-            FlightState::Hold | FlightState::ArmedGrounded => {
+            FlightState::Hold => self.ramp_setpoint(),
+            FlightState::ArmedGrounded => {
                 self.ramp_z = state.position.z;
                 self.target.z = state.position.z;
                 self.ramp_setpoint()
@@ -628,6 +629,32 @@ mod tests {
     use crate::G;
 
     const DT: f32 = 0.005;
+
+    #[test]
+    fn hold_restores_height_after_vertical_displacement() {
+        let mut fsm = FlightFsm::new(FsmParams::default());
+        let mut state = QuadState::default();
+        fsm.update(0.001, &state, None, ok_health());
+        fsm.command(Command::Arm, ok_health(), &state).unwrap();
+        fsm.command(Command::Takeoff { altitude: 1.0 }, ok_health(), &state)
+            .unwrap();
+        state.position.z = 1.0;
+        fsm.update(0.001, &state, None, ok_health());
+        assert_eq!(fsm.state(), FlightState::Hold);
+        for height in [0.7, 1.3, 0.9] {
+            state.position.z = height;
+            let out = fsm.update(0.001, &state, None, ok_health());
+            assert!((out.setpoint.position.z - 1.0).abs() < 1e-6);
+            let params = crate::QuadParams::default();
+            let wrench = crate::position_mode(
+                &state,
+                &out.setpoint,
+                &params,
+                &crate::ControlParams::default(),
+            );
+            assert!((wrench.force.z - params.mass * crate::G) * (1.0 - height) > 0.0);
+        }
+    }
 
     fn ok_health() -> Health {
         Health {

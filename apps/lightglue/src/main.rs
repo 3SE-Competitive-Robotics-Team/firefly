@@ -10,11 +10,9 @@
 //!
 //! 运行：`cargo run --release -p lightglue -- --map <map.ffvmap> [-- --model ...]`。
 
-use firefly_localization::convert::odom_to_matrix;
 use firefly_pubsub::event::TopicListener;
 use firefly_pubsub::node::create_node;
-use firefly_pubsub::odom::OdomMessage;
-use firefly_pubsub::odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC};
+use firefly_pubsub::odom::{CORRECTED_ODOM_TOPIC, OdomMessage};
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::{CorrectedOdomSubscriber, Subscriber};
 use firefly_pubsub::vision::{
@@ -136,27 +134,15 @@ fn smoke_inference(session: &mut Session) -> Result<(), Box<dyn std::error::Erro
 
 /// 主循环：特征事件唤醒 → 取最新特征 + 先验 odom → 查库匹配 + `PnP` → 发观测。
 ///
-/// 先验来源：优先矫正后里程计（`Firefly/CorrectedOdometry`，`gicp` 融合输出，
-/// 含漂移修正，查询半径罩得住），无则回退原始 `Firefly/Odometry`（对照
-/// `VINS-Fusion pose_graph.cpp` 用 `w_r_vio/w_t_vio` 矫正后位姿做查询与可视化）。
-#[allow(clippy::too_many_lines)] // 订阅装配 + WaitSet 编排 + 先验回退，结构由进程接线驱动
+/// 查询先验固定为地图系校正里程计，局部里程计不能直接查询地图位置。
+#[allow(clippy::too_many_lines)]
 fn run_loop(session: &mut Session, map: &VisionMap) -> Result<(), firefly_error::Error> {
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "lightglue");
     let feat_sub = Subscriber::<FeatureMessage>::with_topic(&node, FEATURE_TOPIC)?;
     log::info!("已订阅特征话题 {FEATURE_TOPIC}");
-    let odom_sub = Subscriber::<OdomMessage>::with_topic(&node, ODOM_TOPIC)?;
-    log::info!("已订阅 odom 话题 {ODOM_TOPIC}（查询先验回退）");
-    let corrected_sub = match CorrectedOdomSubscriber::new(&node) {
-        Ok(s) => {
-            log::info!("已订阅矫正后里程计 {CORRECTED_ODOM_TOPIC}（查询先验）");
-            Some(s)
-        }
-        Err(e) => {
-            log::warn!("矫正后里程计订阅不可用，回退原始 odom：{e}");
-            None
-        }
-    };
+    let corrected_sub = CorrectedOdomSubscriber::new(&node)?;
+    log::info!("已订阅地图系里程计 {CORRECTED_ODOM_TOPIC}（查询先验）");
     let obs_pub = Publisher::<PoseObservation>::with_topic(&node, POSE_OBS_TOPIC)?;
     log::info!("已打开位姿观测话题 {POSE_OBS_TOPIC}");
 
@@ -186,28 +172,18 @@ fn run_loop(session: &mut Session, map: &VisionMap) -> Result<(), firefly_error:
 
     // 特征发布端带 notify（`aliked` 为 `with_topic_notify`）：特征到即醒；
     // 心跳仅兜底无事件时的 odom 缓存更新与断流自愈。
-    let mut latest_odom: Option<OdomMessage> = None;
     let mut latest_corrected: Option<OdomMessage> = None;
     let on_event = |attachment_id: WaitSetAttachmentId<ipc::Service>| {
         let _ = attachment_id.has_event_from(&tick_guard);
         let _ = feat_events.drain();
-        while let Ok(Some(sample)) = odom_sub.receive() {
-            latest_odom = Some(*sample);
-        }
-        if let Some(sub) = &corrected_sub {
-            while let Ok(Some(sample)) = sub.receive() {
-                latest_corrected = Some(*sample);
-            }
+        while let Ok(Some(sample)) = corrected_sub.receive() {
+            latest_corrected = Some(*sample);
         }
         let mut latest_feat: Option<FeatureMessage> = None;
         while let Ok(Some(sample)) = feat_sub.receive() {
             latest_feat = Some(*sample);
         }
-        // 先验优先级：矫正后（新鲜）> 原始 odom。
-        let prior = latest_corrected
-            .filter(|m| m.is_initialized)
-            .or(latest_odom)
-            .filter(|m| m.is_initialized);
+        let prior = latest_corrected.filter(|m| m.is_initialized);
         let (Some(feat), Some(odom)) = (latest_feat, prior) else {
             log::debug!(
                 "视觉触发跳过（feat={} prior={}）",
@@ -257,9 +233,6 @@ fn run_loop(session: &mut Session, map: &VisionMap) -> Result<(), firefly_error:
             Err(e) => log::warn!("视觉查询失败: {e}"),
         }
         firefly_observability::pump_log_ipc(&log_ipc);
-        // 单查询/唤醒：特征 1Hz 节流，连续帧不堆积（corrected 缓存保留，
-        // 其 100Hz 发布节拍保证新鲜度判定有效）
-        latest_odom = None;
         CallbackProgression::Continue
     };
     match waitset.wait_and_process(on_event) {
@@ -371,7 +344,7 @@ fn query_once(
     feat: &FeatureMessage,
     odom: &OdomMessage,
 ) -> Result<Option<PoseObservation>, Box<dyn std::error::Error>> {
-    let t_body_prior = odom_to_matrix(odom);
+    let t_body_prior = odom.body_pose(firefly_base::FrameId::MAP)?.matrix();
     let prior_pos = [
         t_body_prior[(0, 3)],
         t_body_prior[(1, 3)],
@@ -422,7 +395,8 @@ fn query_once(
         return Ok(None);
     };
     let t_body = cam_pose_to_body(&pose.t_global);
-    let cov = pose_covariance(&pose);
+    let cov = firefly_vision_match::calibration::body_from_left_camera()
+        .tangent_covariance(&pose_covariance(&pose));
     let mut covariance = [0f64; 36];
     for r in 0..6 {
         for c in 0..6 {

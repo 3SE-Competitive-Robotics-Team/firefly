@@ -370,7 +370,7 @@ fn ransac_pose(
     )))
 }
 
-/// 协方差（对角 6×6，`[rot, trans]`）：由内点数与平均重投影误差经验映射，
+/// 相机位姿右扰动协方差（对角 6×6，`[rot, trans]`），由内点数与重投影误差经验映射。
 #[must_use]
 pub fn pose_covariance(pose: &VisualPose) -> Matrix6<f64> {
     let n = pose.num_inliers.max(1) as f64;

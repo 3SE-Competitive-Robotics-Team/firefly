@@ -1,10 +1,11 @@
 //! 误差态 EKF：`VIO→全局` 漂移 `SE(3)` 的预测-更新。
 //!
-//! 状态 `x ∈ se(3)` 为 `T_drift = T_global · T_vio⁻¹` 的对数，名义量 `T_drift` 常驻，
-//! 误差态零均值。预测仅膨胀 `P`，更新以 `GICP` 全局位姿为观测，`R = h⁻¹`，
-//! `chi2` 门控后 `Joseph` 更新，连续拒收时自动放大 `R`。
+//! 名义量 `D = T_map_odom`，右误差定义为 `D_true = D Exp(e_odom)`。
+//! 观测 `D_obs = T_map_body T_odom_body⁻¹`，残差 `Log(D⁻¹ D_obs)`。
+//! body 右扰动协方差经 `Ad(T_odom_body)` 换基；Joseph 更新后按右雅可比重置。
 
-use firefly_gicp::util::lie::{se3_exp, se3_log};
+use firefly_base::se3::{right_jacobian, se3_exp, se3_log};
+use firefly_base::{FrameId, RigidTransform};
 use nalgebra::{Matrix4, Matrix6, Vector6};
 
 /// `chi2 95%` 分位数（与 `firefly-vio/src/updater.rs:24` 同表）。
@@ -31,7 +32,7 @@ fn chi2_95(dof: usize) -> f64 {
 /// 风险高的边走紧门；画像只描述信任，不携带状态，可 `Copy` 按值传递）。
 /// 新息门定接受，修正限幅定单步注入量（防跳变 backstop，非接受门）。
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct GateProfile {
     /// 新息限幅：平移 `m`（超过视为误锁拒收）。
     pub max_innovation_trans: f64,
@@ -80,7 +81,7 @@ impl Default for GateProfile {
 
 /// 融合参数。
 #[derive(Debug, Clone, serde::Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FusionOptions {
     /// 几何配准路径画像（GICP：紧门）。
     pub gicp: GateProfile,
@@ -178,7 +179,7 @@ pub enum RelocGate {
 pub struct Observation {
     /// 全局位姿观测 `T_target_source`（`target=全局地图`）。
     pub t_global: Matrix4<f64>,
-    /// 信息矩阵（观测噪声 `R` 的逆；`R = h⁻¹`）。
+    /// body 右扰动信息矩阵，顺序 `[rot, trans]`；观测噪声 `R = h⁻¹`。
     pub h: Matrix6<f64>,
     /// 内点数。
     pub num_inliers: usize,
@@ -193,10 +194,12 @@ pub struct Observation {
 /// 融合滤波器：维护 `T_drift` 与 `P`。
 #[derive(Debug, Clone)]
 pub struct FusionFilter {
-    /// `T_drift = T_global · T_vio⁻¹`（初值 `I`，全局系与 `VIO` 起点对齐）。
+    /// `T_drift = T_map_body · T_odom_body⁻¹`；初始值由部署先验指定。
     t_drift: Matrix4<f64>,
-    /// 协方差 `6×6`（顺序 `[rot, trans]`，与 `se3` 一致）。
+    initial_drift: Matrix4<f64>,
+    /// odom 系右误差协方差 `6×6`，顺序 `[rot, trans]`。
     p: Matrix6<f64>,
+    /// 仅由 predict 推进；延迟观测更新不得回拨里程基准。
     last_vio: Option<Matrix4<f64>>,
     options: FusionOptions,
     consecutive_rejects: usize,
@@ -204,7 +207,7 @@ pub struct FusionFilter {
 }
 
 impl FusionFilter {
-    /// 新建，`P` 初值 `0.1·I`。
+    /// 新建：单位 map←odom，协方差由 `p_init_rot/pos` 指定。
     #[must_use]
     pub fn new(options: FusionOptions) -> Self {
         let mut p = Matrix6::zeros();
@@ -216,6 +219,7 @@ impl FusionFilter {
         }
         Self {
             t_drift: Matrix4::identity(),
+            initial_drift: Matrix4::identity(),
             p,
             last_vio: None,
             options,
@@ -333,15 +337,28 @@ impl FusionFilter {
             };
         }
 
-        // 2. 预测位姿与残差
-        let t_pred = self.t_drift * *t_vio;
-        let Some(t_pred_inv) = t_pred.try_inverse() else {
+        let Ok(vio) = RigidTransform::from_matrix(FrameId::ODOM, FrameId::BODY, t_vio) else {
             return RelocGate::RejectedNumerical {
-                reason: "pred not invertible",
+                reason: "invalid odometry pose",
             };
         };
-        let t_err = t_pred_inv * obs.t_global;
-        let z = se3_log(&t_err);
+        let Ok(observed) = RigidTransform::from_matrix(FrameId::MAP, FrameId::BODY, &obs.t_global)
+        else {
+            return RelocGate::RejectedNumerical {
+                reason: "invalid observation pose",
+            };
+        };
+        let Ok(drift) = RigidTransform::from_matrix(FrameId::MAP, FrameId::ODOM, &self.t_drift)
+        else {
+            return RelocGate::RejectedNumerical {
+                reason: "invalid map alignment",
+            };
+        };
+        let observed_drift = observed
+            .compose(&vio.inverse())
+            .expect("map-body-odom chain");
+        let error = drift.inverse().matrix() * observed_drift.matrix();
+        let z = se3_log(&error);
 
         // 2b. 新息限幅（按入口画像）：超过画像门限的跳变直接拒收，
         // 不进 chi2（R 失配时 chi2 恒小，拦不住）
@@ -354,34 +371,32 @@ impl FusionFilter {
             };
         }
 
-        // 3. 观测噪声 R = h⁻¹，失败回退对角阵；连续拒收时放大
-        let mut r = if let Some(inv) = obs.h.try_inverse() {
-            let mut r = inv;
-            // 保持对称
-            r = (r + r.transpose()) * 0.5;
-            // 数值防护：对角线截断为正
-            for i in 0..6 {
-                if r[(i, i)] < 1e-9 {
-                    r[(i, i)] = 1e-9;
-                }
-                if !r[(i, i)].is_finite() {
-                    r[(i, i)] = if i < 3 {
-                        self.options.fallback_noise_rot
-                    } else {
-                        self.options.fallback_noise_pos
-                    };
-                }
-            }
-            r * self.r_scale
+        // 信息矩阵描述观测位姿的 body 右扰动；必须为有限对称半正定矩阵。
+        if !obs.h.iter().all(|x| x.is_finite())
+            || (obs.h - obs.h.transpose()).norm() > 1e-6 * obs.h.norm().max(1.0)
+        {
+            return RelocGate::RejectedNumerical {
+                reason: "invalid observation information",
+            };
+        }
+        let info = (obs.h + obs.h.transpose()) * 0.5;
+        if info.symmetric_eigen().eigenvalues.min() < -1e-9 {
+            return RelocGate::RejectedNumerical {
+                reason: "indefinite observation information",
+            };
+        }
+        let mut r = if let Some(chol) = info.cholesky() {
+            chol.inverse() * self.r_scale
         } else {
-            let mut r = Matrix6::zeros();
-            for i in 0..3 {
-                r[(i, i)] = self.options.fallback_noise_rot * self.r_scale;
+            let mut fallback = Matrix6::zeros();
+            for i in 0..6 {
+                fallback[(i, i)] = if i < 3 {
+                    self.options.fallback_noise_rot
+                } else {
+                    self.options.fallback_noise_pos
+                };
             }
-            for i in 3..6 {
-                r[(i, i)] = self.options.fallback_noise_pos * self.r_scale;
-            }
-            r
+            fallback * self.r_scale
         };
 
         // R 下限（离线标定修正噪声）：防 h⁻¹ 过自信导致 chi2 恒小、
@@ -397,13 +412,20 @@ impl FusionFilter {
             }
         }
 
+        r = vio.tangent_covariance(&r);
         let s = self.p + r;
-        let Some(s_inv) = s.try_inverse() else {
+        let Some(s_chol) = s.cholesky() else {
             return RelocGate::RejectedNumerical {
                 reason: "S not invertible",
             };
         };
+        let s_inv = s_chol.inverse();
         let chi2 = z.dot(&(s_inv * z));
+        if !chi2.is_finite() {
+            return RelocGate::RejectedNumerical {
+                reason: "non-finite innovation",
+            };
+        }
         let threshold = chi2_95(6) * self.options.chi2_multiplier;
 
         if chi2 > threshold {
@@ -426,7 +448,7 @@ impl FusionFilter {
         self.consecutive_rejects = 0;
         self.r_scale = 1.0;
 
-        let k = self.p * s_inv;
+        let mut k = self.p * s_inv;
         let mut delta = k * z;
 
         // 限幅（按入口画像）：旋转与平移分别截断，只防单步跳变，不做接受门
@@ -434,24 +456,25 @@ impl FusionFilter {
         if rot_norm > profile.max_correction_rot && rot_norm > 1e-12 {
             let scale = profile.max_correction_rot / rot_norm;
             delta.fixed_rows_mut::<3>(0).scale_mut(scale);
+            k.fixed_rows_mut::<3>(0).scale_mut(scale);
         }
         let trans_norm = delta.fixed_rows::<3>(3).norm();
         if trans_norm > profile.max_correction_trans && trans_norm > 1e-12 {
             let scale = profile.max_correction_trans / trans_norm;
             delta.fixed_rows_mut::<3>(3).scale_mut(scale);
+            k.fixed_rows_mut::<3>(3).scale_mut(scale);
         }
 
         let d_t = se3_exp(&delta);
-        self.t_drift = d_t * self.t_drift;
+        self.t_drift *= d_t;
 
         // Joseph: P = (I-K) P (I-K)ᵀ + K R Kᵀ
         let i = Matrix6::identity();
         let ik = i - k;
-        self.p = ik * self.p * ik.transpose() + k * r * k.transpose();
+        let posterior = ik * self.p * ik.transpose() + k * r * k.transpose();
+        let reset = right_jacobian(&delta);
+        self.p = reset * posterior * reset.transpose();
         self.p = (self.p + self.p.transpose()) * 0.5;
-
-        // 同步 last_vio 为当前，避免下次 predict 重复膨胀
-        self.last_vio = Some(*t_vio);
 
         log::debug!(
             "GICP fused chi2 {chi2:.2}/{threshold:.2} delta rot {:.3}° trans {:.3}m inliers {}/{}",
@@ -520,14 +543,24 @@ impl FusionFilter {
         self.t_drift * *t_vio
     }
 
-    /// 直接以矫正后位姿覆盖（用于测试/重置）。
-    pub fn set_drift(&mut self, t_drift: Matrix4<f64>) {
-        self.t_drift = t_drift;
+    /// 设置已知启动先验 map←odom；不会读取仿真真值。
+    /// # Errors
+    /// 输入坐标系不是 map←odom。
+    pub fn set_alignment(&mut self, transform: RigidTransform) -> firefly_error::Result<()> {
+        if transform.target() != FrameId::MAP || transform.source() != FrameId::ODOM {
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                "expected map<-odom alignment",
+            ));
+        }
+        self.initial_drift = transform.matrix();
+        self.reset();
+        Ok(())
     }
 
     /// 重置为初值。
     pub fn reset(&mut self) {
-        self.t_drift = Matrix4::identity();
+        self.t_drift = self.initial_drift;
         let mut p = Matrix6::zeros();
         for i in 0..3 {
             p[(i, i)] = self.options.p_init_rot;
@@ -563,6 +596,71 @@ mod tests {
             total_points: 100,
             error: 0.1,
             converged: true,
+        }
+    }
+
+    #[test]
+    fn world_translation_is_corrected_independently_of_body_heading() {
+        for heading in [0.0, 90.0, -90.0, 170.0] {
+            let mut f = FusionFilter::with_default();
+            let vio = pose(Vector3::zeros(), heading);
+            f.predict(&vio);
+            let mut observed = vio;
+            observed[(0, 3)] = 0.1;
+            let gate = f.update(&vio, &obs(&observed, &(Matrix6::identity() * 1000.0)));
+            assert!(matches!(gate, RelocGate::Accepted { .. }));
+            let corrected = f.corrected_pose(&vio);
+            assert!(corrected[(0, 3)] > 0.05);
+            assert!(corrected[(1, 3)].abs() < 1e-10);
+            assert!(
+                (corrected.fixed_view::<3, 1>(0, 3) - observed.fixed_view::<3, 1>(0, 3)).norm()
+                    < 0.05
+            );
+        }
+    }
+
+    #[test]
+    fn changing_map_coordinates_preserves_filter_result() {
+        let mut a = FusionFilter::with_default();
+        let mut b = FusionFilter::with_default();
+        let shift = RigidTransform::from_matrix(
+            FrameId::MAP,
+            FrameId::ODOM,
+            &se3_exp(&Vector6::new(0.1, -0.2, 0.3, 5.0, -3.0, 2.0)),
+        )
+        .unwrap();
+        b.set_alignment(shift).unwrap();
+        let vio = pose(Vector3::new(1.0, 0.3, 0.2), 60.0);
+        a.predict(&vio);
+        b.predict(&vio);
+        let observed = se3_exp(&Vector6::new(0.001, -0.002, 0.003, 0.02, -0.01, 0.03)) * vio;
+        let info = Matrix6::from_diagonal(&Vector6::new(100.0, 200.0, 300.0, 400.0, 500.0, 600.0));
+        assert!(matches!(
+            a.update(&vio, &obs(&observed, &info)),
+            RelocGate::Accepted { .. }
+        ));
+        assert!(matches!(
+            b.update(&vio, &obs(&(shift.matrix() * observed), &info)),
+            RelocGate::Accepted { .. }
+        ));
+        assert!((b.corrected_pose(&vio) - shift.matrix() * a.corrected_pose(&vio)).norm() < 1e-10);
+        assert!((a.covariance() - b.covariance()).norm() < 1e-10);
+        assert!(a.covariance().cholesky().is_some());
+    }
+
+    #[test]
+    fn invalid_information_does_not_change_nominal_or_covariance() {
+        let mut f = FusionFilter::with_default();
+        let p = *f.covariance();
+        for bad in [f64::NAN, -1.0] {
+            let mut h = Matrix6::identity();
+            h[(0, 0)] = bad;
+            assert!(matches!(
+                f.update(&Matrix4::identity(), &obs(&Matrix4::identity(), &h)),
+                RelocGate::RejectedNumerical { .. }
+            ));
+            assert!((f.covariance() - p).norm() < 1e-12);
+            assert!((f.drift() - Matrix4::identity()).norm() < 1e-12);
         }
     }
 

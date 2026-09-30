@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use firefly_planner::State;
 use firefly_pubsub::odom::OdomMessage;
-use nalgebra::{Isometry3, Point3, Quaternion, Translation3, UnitQuaternion, Vector3};
+use nalgebra::{Isometry3, Point3, Translation3, UnitQuaternion, Vector3};
 
 /// 100Hz 里程计允许 500ms 墙钟中断；消息重复不能延长这个期限。
 const MAX_AGE: Duration = Duration::from_millis(500);
@@ -42,10 +42,7 @@ impl Snapshot {
         if !m.is_initialized || m.timestamp < 0.0 || !values.iter().all(|v| v.is_finite()) {
             return None;
         }
-        let q = Quaternion::new(m.quat_w, m.quat_x, m.quat_y, m.quat_z);
-        if (q.norm() - 1.0).abs() > 0.01 {
-            return None;
-        }
+        let pose = m.body_pose(firefly_base::FrameId::MAP).ok()?;
         Some(Self {
             timestamp: m.timestamp,
             state: State {
@@ -53,7 +50,7 @@ impl Snapshot {
                 velocity: Vector3::new(m.velocity_x, m.velocity_y, m.velocity_z),
                 acceleration: Vector3::zeros(),
             },
-            orientation: UnitQuaternion::new_normalize(q),
+            orientation: pose.isometry().rotation,
         })
     }
 

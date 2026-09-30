@@ -1,71 +1,68 @@
-//! 位姿表示转换（`OdomMessage` ↔ 齐次矩阵，各融合消费端共用）。
-
+//! 里程计跨坐标转换：位姿复合，物理速度旋转换基。
+use firefly_base::{FrameId, RigidTransform};
+use firefly_error::{Error, ErrorKind, Result};
 use firefly_pubsub::odom::OdomMessage;
-use nalgebra::{Isometry3, Matrix4, Quaternion, Translation3, UnitQuaternion, Vector3};
+use nalgebra::Vector3;
 
-/// `OdomMessage` → 全局位姿齐次矩阵。
-#[must_use]
-pub fn odom_to_matrix(msg: &OdomMessage) -> Matrix4<f64> {
-    let t = Vector3::new(msg.position_x, msg.position_y, msg.position_z);
-    let q = UnitQuaternion::from_quaternion(Quaternion::new(
-        msg.quat_w, msg.quat_x, msg.quat_y, msg.quat_z,
-    ));
-    Isometry3::from_parts(Translation3::new(t.x, t.y, t.z), q).to_homogeneous()
-}
-
-/// 矫正后位姿 → `OdomMessage`（速度经漂移旋转修正，时间戳/初始化位沿用源消息）。
-#[must_use]
-pub fn matrix_to_odom(
-    t_corr: &Matrix4<f64>,
-    src: &OdomMessage,
-    drift: &Matrix4<f64>,
-) -> OdomMessage {
-    let p = t_corr.fixed_view::<3, 1>(0, 3).into_owned();
-    let r = t_corr.fixed_view::<3, 3>(0, 0).into_owned();
-    let quat = UnitQuaternion::from_rotation_matrix(&nalgebra::Rotation3::from_matrix(&r));
-    let q = quat.quaternion();
-    let drift_rot = drift.fixed_view::<3, 3>(0, 0).into_owned();
-    let v = Vector3::new(src.velocity_x, src.velocity_y, src.velocity_z);
-    let v_corr = drift_rot * v;
-    OdomMessage {
-        timestamp: src.timestamp,
+/// 将连续 odom 系状态转换到地图系；时间和初始化标志沿用原始状态。
+/// 速度为同一物理速度换基，不包含估计坐标变换跳变的导数。
+/// # Errors
+/// 位姿、速度无效，或给定变换不是 map←odom。
+pub fn corrected_odom(src: &OdomMessage, alignment: &RigidTransform) -> Result<OdomMessage> {
+    if alignment.target() != FrameId::MAP || alignment.source() != FrameId::ODOM {
+        return Err(Error::new(
+            ErrorKind::InvalidArgument,
+            "expected map<-odom alignment",
+        ));
+    }
+    let pose = alignment.compose(&src.body_pose(FrameId::ODOM)?)?;
+    let velocity = alignment.vector(Vector3::new(src.velocity_x, src.velocity_y, src.velocity_z));
+    if !velocity.iter().all(|v| v.is_finite()) {
+        return Err(Error::new(
+            ErrorKind::InvalidArgument,
+            "non-finite odometry velocity",
+        ));
+    }
+    let p = pose.isometry().translation.vector;
+    let q = pose.isometry().rotation.quaternion();
+    Ok(OdomMessage {
         position_x: p.x,
         position_y: p.y,
         position_z: p.z,
-        velocity_x: v_corr.x,
-        velocity_y: v_corr.y,
-        velocity_z: v_corr.z,
+        velocity_x: velocity.x,
+        velocity_y: velocity.y,
+        velocity_z: velocity.z,
         quat_x: q.i,
         quat_y: q.j,
         quat_z: q.k,
         quat_w: q.w,
-        is_initialized: src.is_initialized,
-    }
+        ..*src
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn roundtrip() {
-        let msg = OdomMessage {
-            timestamp: 1.0,
-            position_x: 1.0,
-            position_y: 2.0,
-            position_z: 3.0,
-            velocity_x: 0.1,
-            velocity_y: 0.0,
-            velocity_z: 0.0,
-            quat_x: 0.0,
-            quat_y: 0.0,
-            quat_z: 0.0,
-            quat_w: 1.0,
+    fn alignment_rotates_velocity_without_translating_it() {
+        let h = std::f64::consts::FRAC_PI_4;
+        let alignment = RigidTransform::from_parts(
+            FrameId::MAP,
+            FrameId::ODOM,
+            [10., 0., 0.],
+            [0., 0., h.sin(), h.cos()],
+        )
+        .unwrap();
+        let source = OdomMessage {
+            timestamp: 1.,
+            position_x: 2.,
+            velocity_x: 1.,
             is_initialized: true,
+            ..Default::default()
         };
-        let back = matrix_to_odom(&odom_to_matrix(&msg), &msg, &Matrix4::identity());
-        assert!((back.position_x - 1.0).abs() < 1e-9);
-        assert!((back.quat_w - 1.0).abs() < 1e-9);
-        assert!(back.is_initialized);
+        let out = corrected_odom(&source, &alignment).unwrap();
+        assert!((out.position_x - 10.).abs() < 1e-12 && (out.position_y - 2.).abs() < 1e-12);
+        assert!(out.velocity_x.abs() < 1e-12 && (out.velocity_y - 1.).abs() < 1e-12);
+        assert!((out.timestamp - source.timestamp).abs() < 1e-12 && out.is_initialized);
     }
 }

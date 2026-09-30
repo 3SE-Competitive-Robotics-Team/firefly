@@ -11,6 +11,7 @@ keywords = ["gicp", "icp", "point-cloud", "kdtree", "robotics"]
 categories = ["science", "mathematics", "robotics", "simulation"]
 
 [dependencies]
+firefly-base.workspace = true
 fastrace = { workspace = true }
 nalgebra = { workspace = true }
 rayon = { workspace = true }

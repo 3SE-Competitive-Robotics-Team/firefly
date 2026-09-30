@@ -12,11 +12,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use fastrace::prelude::*;
+use firefly_base::{FrameId, RigidTransform};
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_gicp::points::point_cloud::PointCloud;
 use firefly_gicp::points::traits::{PointCloudMut, PointCloudTrait};
 use firefly_localization::config::LocalizationConfig;
-use firefly_localization::convert::{matrix_to_odom, odom_to_matrix};
+use firefly_localization::convert::corrected_odom;
 use firefly_localization::filter::{FusionFilter, Observation, RelocGate};
 use firefly_localization::reloc::GlobalRelocalizer;
 use firefly_map::{DepthCamera, MapFile};
@@ -127,7 +128,11 @@ fn interp_odom(
         if cur.0 >= t {
             let span = cur.0 - prev.0;
             if span <= 1e-9 {
-                return Some(odom_to_matrix(&cur.1));
+                return cur
+                    .1
+                    .body_pose(FrameId::ODOM)
+                    .ok()
+                    .map(|pose| pose.matrix());
             }
             let a = ((t - prev.0) / span).clamp(0.0, 1.0);
             let (p0, p1) = (&prev.1, &cur.1);
@@ -234,7 +239,10 @@ impl App {
     fn new(map_file: MapFile, cfg: LocalizationConfig, odom_topic: &str) -> Result<Self> {
         let innov_limit_gicp = cfg.fusion.gicp.max_innovation_trans;
         let innov_limit_visual = cfg.fusion.visual.max_innovation_trans;
-        let fusion = FusionFilter::new(cfg.fusion);
+        let mut fusion = FusionFilter::new(cfg.fusion);
+        fusion
+            .set_alignment(cfg.origin.transform()?)
+            .map_err(|e| e.with_context("operation", "initialize map<-odom prior"))?;
         let reloc = match GlobalRelocalizer::from_map_file(&map_file, cfg.reloc) {
             Ok(r) => {
                 log::info!("全局重定位靶图就绪（{} 点）", r.target().num_points());
@@ -318,9 +326,15 @@ impl App {
             let mut odom_arrived = false;
             while let Some(sample) = sub.receive()? {
                 let m: OdomMessage = *sample;
+                if !m.timestamp.is_finite() || m.timestamp < 0.0 {
+                    continue;
+                }
+                let Ok(pose) = m.body_pose(FrameId::ODOM) else {
+                    continue;
+                };
                 self.t_sim = self.t_sim.max(m.timestamp);
                 self.last_odom_recv = m.timestamp;
-                let t_vio = odom_to_matrix(&m);
+                let t_vio = pose.matrix();
                 self.fusion.predict(&t_vio);
                 self.latest_odom = Some(m);
                 self.odom_hist.push_back((m.timestamp, m));
@@ -506,9 +520,9 @@ impl App {
         if self.t_sim - self.last_odom_recv >= ODOM_FRESH_TIMEOUT {
             return Ok(());
         }
-        let t_vio = odom_to_matrix(odom);
-        let t_corr = self.fusion.corrected_pose(&t_vio);
-        let msg = matrix_to_odom(&t_corr, odom, self.fusion.drift());
+        let alignment =
+            RigidTransform::from_matrix(FrameId::MAP, FrameId::ODOM, self.fusion.drift())?;
+        let msg = corrected_odom(odom, &alignment)?;
         pub_.publish(msg).map(|_| ())?;
         self.log_corrected_viz(&msg);
         Ok(())

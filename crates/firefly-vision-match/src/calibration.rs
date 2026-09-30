@@ -4,7 +4,8 @@
 //! 左目与深度相机同朝向（下倾 20°），仅差 2.5cm 横向基线；`PnP` 解的是左目
 //! 位姿，经 [`cam_pose_to_body`] 转到机体系（VIO/融合状态系）再参与融合。
 
-use nalgebra::{Isometry3, Matrix3, Matrix4, Vector3};
+use firefly_base::{FrameId, RigidTransform};
+use nalgebra::{Matrix3, Matrix4};
 
 /// 像素焦距（`fx=fy`，`120/tan(70.88°/2)`，与离线建库同公式）。
 pub const MUJOCO_FOCAL: f64 = 168.606_993_943_649_97;
@@ -21,49 +22,51 @@ pub fn rot_cam_to_body() -> Matrix3<f64> {
     )
 }
 
-/// 左目位姿 → 机体位姿（`T_global_body = T_global_cam · T_body_cam`，
-/// 其中 `T_body_cam` 为 body→cam，由 cam→body 外参求逆得到）。
+/// 标定外参 `body←left_camera`；相机轴为右、上、后（光轴 -Z）。
+/// # Panics
+/// 编译时标定常量不是有限刚体变换。
 #[must_use]
-pub fn cam_pose_to_body(t_cam: &Matrix4<f64>) -> Matrix4<f64> {
-    let r = rot_cam_to_body();
-    let p = Vector3::new(
-        LEFT_POS_IN_BODY[0],
-        LEFT_POS_IN_BODY[1],
-        LEFT_POS_IN_BODY[2],
-    );
-    let t_cb = Isometry3::from_parts(
-        nalgebra::Translation3::from(p),
-        nalgebra::UnitQuaternion::from_matrix(&r),
+pub fn body_from_left_camera() -> RigidTransform {
+    let rotation = nalgebra::UnitQuaternion::from_matrix(&rot_cam_to_body());
+    let q = rotation.quaternion();
+    RigidTransform::from_parts(
+        FrameId::BODY,
+        FrameId::LEFT_CAMERA,
+        LEFT_POS_IN_BODY,
+        [q.i, q.j, q.k, q.w],
     )
-    .to_homogeneous();
-    let t_bc = t_cb.try_inverse().unwrap_or(Matrix4::identity());
-    t_cam * t_bc
+    .expect("finite unit camera calibration")
 }
 
-/// 机体位姿 → 左目位姿（建库反投影/`PnP` 初值用：`T_global_cam = T_global_body · T_cam_body`，
-/// 直接右乘——必须右乘：求逆版整体错位）。
+/// `T_map_body = T_map_camera T_body_camera⁻¹`。
+/// # Panics
+/// 输入不是有效 SE(3) 位姿。
+#[must_use]
+pub fn cam_pose_to_body(t_cam: &Matrix4<f64>) -> Matrix4<f64> {
+    RigidTransform::from_matrix(FrameId::MAP, FrameId::LEFT_CAMERA, t_cam)
+        .expect("valid camera pose")
+        .compose(&body_from_left_camera().inverse())
+        .expect("map-camera-body chain")
+        .matrix()
+}
+
+/// `T_map_camera = T_map_body T_body_camera`。
+/// # Panics
+/// 输入不是有效 SE(3) 位姿。
 #[must_use]
 pub fn body_pose_to_cam(t_body: &Matrix4<f64>) -> Matrix4<f64> {
-    let t_cb = {
-        let r = rot_cam_to_body();
-        let p = Vector3::new(
-            LEFT_POS_IN_BODY[0],
-            LEFT_POS_IN_BODY[1],
-            LEFT_POS_IN_BODY[2],
-        );
-        Isometry3::from_parts(
-            nalgebra::Translation3::from(p),
-            nalgebra::UnitQuaternion::from_matrix(&r),
-        )
-        .to_homogeneous()
-    };
-    t_body * t_cb
+    RigidTransform::from_matrix(FrameId::MAP, FrameId::BODY, t_body)
+        .expect("valid body pose")
+        .compose(&body_from_left_camera())
+        .expect("map-body-camera chain")
+        .matrix()
 }
 
 /// 深度验证：`rot_cam_to_body` 列向量即相机轴（与 `DepthCamera` 文档一致）。
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nalgebra::Isometry3;
 
     #[test]
     fn cam_axes_match_depth_camera() {

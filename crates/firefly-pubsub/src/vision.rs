@@ -57,7 +57,7 @@ pub struct PoseObservation {
     pub quat_y: f64,
     pub quat_z: f64,
     pub quat_w: f64,
-    /// 观测协方差 `R`（6×6 行主序，`[rot, trans]`，与 `FusionFilter` 一致）。
+    /// 机体位姿右扰动协方差 `R`（6×6 行主序，`[rot, trans]`，表达在 body 系）。
     pub covariance: [f64; 36],
     /// 内点数（门控用）。
     pub num_inliers: u32,

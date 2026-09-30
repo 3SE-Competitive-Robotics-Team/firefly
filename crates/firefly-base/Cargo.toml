@@ -1,0 +1,19 @@
+[package]
+name = "firefly-base"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Coordinate frames, rigid transforms and SE(3) geometry"
+keywords = ["robotics", "geometry", "coordinates"]
+categories = ["science", "algorithms"]
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+nalgebra.workspace = true
+firefly-error.workspace = true
+fastrace.workspace = true
+
+[lints]
+workspace = true

@@ -12,10 +12,36 @@ use crate::reloc::RelocOptions;
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct LocalizationConfig {
+    /// 固定启动先验 map←odom；属于部署配置，不来自在线真值。
+    pub origin: InitialAlignment,
     /// 重定位参数。
     pub reloc: RelocOptions,
     /// 融合参数。
     pub fusion: FusionOptions,
+}
+
+/// 已知启动坐标：局部 VIO 原点在地图中的位置与航向。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct InitialAlignment {
+    /// 米，地图系。
+    pub position: [f64; 3],
+    /// 弧度，map←odom 绕 +Z 的旋转。
+    pub yaw: f64,
+}
+impl InitialAlignment {
+    /// 构造固定启动先验。
+    /// # Errors
+    /// 参数非有限。
+    pub fn transform(&self) -> Result<firefly_base::RigidTransform> {
+        let half = self.yaw * 0.5;
+        firefly_base::RigidTransform::from_parts(
+            firefly_base::FrameId::MAP,
+            firefly_base::FrameId::ODOM,
+            self.position,
+            [0., 0., half.sin(), half.cos()],
+        )
+    }
 }
 
 impl LocalizationConfig {
@@ -35,6 +61,28 @@ impl LocalizationConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_origin_and_reset_preserve_known_alignment() {
+        let cfg: LocalizationConfig =
+            toml::from_str("[origin]\nposition = [-13.0, 0.0, 0.405]\nyaw = 1.5707963267948966")
+                .unwrap();
+        let alignment = cfg.origin.transform().unwrap();
+        let mut fusion = crate::FusionFilter::with_default();
+        fusion.set_alignment(alignment).unwrap();
+        fusion.reset();
+        let p = fusion.corrected_pose(&nalgebra::Matrix4::identity());
+        assert!((p[(0, 3)] + 13.0).abs() < 1e-12);
+        assert!((p[(2, 3)] - 0.405).abs() < 1e-12);
+        assert!((p[(1, 0)] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn misplaced_fusion_options_are_rejected() {
+        assert!(
+            toml::from_str::<LocalizationConfig>("[fusion.visual]\nr_floor_pos = 0.1").is_err()
+        );
+    }
 
     #[test]
     fn defaults_roundtrip() {
