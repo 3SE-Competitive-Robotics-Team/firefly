@@ -2,6 +2,7 @@
 //! （对照 VINS-Fusion `findConnection` 的 `PnP` 段；求解器用 `purecv`）。
 
 pub mod calibration;
+mod refine;
 
 use firefly_error::{Error, ErrorKind};
 use nalgebra::{Isometry3, Matrix3, Matrix4, Matrix6, Translation3, Unit, UnitQuaternion, Vector3};
@@ -126,6 +127,11 @@ pub fn solve_visual_pose(
             ErrorKind::InvalidArgument,
             format!("对应数 {} < 6，不解算", points_2d.len()),
         ));
+    }
+    if let Some(t) = prior.as_ref() {
+        if let Some(pose) = refine::from_prior(points_2d, points_3d, intrinsics, t) {
+            return Ok(Some(pose));
+        }
     }
     let object: Vec<Point3f> = points_3d
         .iter()
@@ -362,6 +368,30 @@ fn ransac_pose(
         tvec.at(2, 0, 0).copied().unwrap_or(0.0),
     ];
     let iso_cam_from_world = vecs_to_isometry(rot, trans);
+    let ocv = iso_cam_from_world.to_homogeneous();
+    let k = CameraIntrinsics {
+        focal: *cam.at(0, 0, 0).unwrap(),
+        cx: *cam.at(0, 2, 0).unwrap(),
+        cy: *cam.at(1, 2, 0).unwrap(),
+    };
+    inliers = object
+        .iter()
+        .zip(image)
+        .enumerate()
+        .filter_map(|(i, (p, uv))| {
+            reproj_error(
+                [uv.x, uv.y],
+                [f64::from(p.x), f64::from(p.y), f64::from(p.z)],
+                k,
+                &ocv,
+            )
+            .filter(|e| e.is_finite() && *e <= 8.)
+            .map(|_| i as i32)
+        })
+        .collect();
+    if inliers.len() < 6 {
+        return Ok(None);
+    }
     // purecv/OpenCV 惯例：(rvec, tvec) 为 world→camera（X_cam = R·X_world + t，
     // +Z 朝向），全局位姿需先求逆再右乘桥。
     Ok(Some((

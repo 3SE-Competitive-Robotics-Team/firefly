@@ -47,6 +47,16 @@ def test_binary_frame_contract(tmp_path):
     assert struct.unpack("<3d4dd", data[-64:]) == (1., 2., 3., 0., 0., 0., 1., 5.)
 
 
+def test_refined_region_preserves_global_coverage_without_duplicate_poses():
+    boxes = np.array([[0., 0., -2., 1., 1., 0.1]])
+    config = {"step": 2., "heights": [1.], "yaws": [0.], "x_range": [-2., 2.], "y_range": [-2., 2.],
+              "regions": [{"step": 1., "x_range": [-1., 1.], "y_range": [-1., 1.]}]}
+    poses = list(capture.configured_poses(boxes, config))
+    positions = {tuple(p) for p, _ in poses}
+    assert len(positions) == len(poses) == 17
+    assert (-2., -2., 1.) in positions and (1., 0., 1.) in positions
+
+
 def test_capture_cache_rejects_missing_modified_or_unlisted_frames(tmp_path):
     frame = tmp_path / "frame_00000.bin"
     frame.write_bytes(b"pixels and depth")

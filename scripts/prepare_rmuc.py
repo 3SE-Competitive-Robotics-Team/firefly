@@ -85,13 +85,13 @@ def main():
                 report["stages"]["capture"].update({"manifest": str(manifest), "requested": capture["requested"], "accepted": sum(row["accepted"] for row in capture["frames"])})
             aliked, lightglue = [ROOT / "models" / x for x in ["aliked-n16-k512.onnx", "lightglue-aliked-k512.onnx"]]
             if aliked.is_file() and report["stages"]["capture"]["status"] == "passed":
-                run("vision_map", [str(ROOT / "target/release/aliked"), "--build-map", str(frames), "--out", str(ROOT / "apps/planner/maps/rmuc2026.ffvmap")])
+                run("vision_map", [sys.executable, str(ROOT / "scripts/build_vision_map.py"), str(frames)])
             else:
                 report["stages"]["vision_map"] = {"status": "blocked", "reason": "ALIKED weights or synchronized captures unavailable"}
             # 建库与在线定位是不同验收项；权重存在也不能替代在线重定位测试。
             report["stages"]["visual_localization"] = {
                 "status": "not_run", "weights_available": aliked.is_file() and lightglue.is_file(),
-                "reason": "This entry does not implement online relocalization acceptance",
+                "reason": "See mission_acceptance map_alignment stage; online pose graph is not implemented",
             }
             acceptance = ROOT / "logs/acceptance" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8])
             run("mission_acceptance", [sys.executable, str(ROOT / "scripts/accept_rmuc.py"), "--output-dir", str(acceptance)])

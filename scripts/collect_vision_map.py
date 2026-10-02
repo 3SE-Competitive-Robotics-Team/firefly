@@ -15,6 +15,7 @@ import signal
 import struct
 import subprocess
 import time
+import tomllib
 
 import iceoryx2 as iox2
 import numpy as np
@@ -35,7 +36,7 @@ def capture_assets():
     """渲染内容、坐标与采集行为的输入指纹。"""
     return {name: digest(ROOT / name) for name in [
         "models/rmuc2026/field.glb", "models/rmuc2026/rmuc2026_collision.json",
-        "configs/render.toml", "configs/scene.toml", "target/release/render",
+        "configs/render.toml", "configs/scene.toml", "configs/vision_map.toml", "target/release/render",
         "scripts/collect_vision_map.py",
     ]}
 
@@ -72,6 +73,19 @@ def grid_poses(boxes, step, heights, yaws, x_range=None, y_range=None):
                 for yaw in yaws:
                     angle = np.deg2rad(yaw) / 2
                     yield position.tolist(), [0., 0., float(np.sin(angle)), float(np.cos(angle))]
+
+
+def configured_poses(boxes, configuration):
+    """全场网格与作业区补密共享高度/朝向，重叠位姿只采集一次。"""
+    base = {"step": 5., "heights": [1.2, 2.2], "yaws": [0., 90., 180., 270.], **configuration}
+    regions = base.pop("regions", [])
+    seen = set()
+    for grid in [base, *(base | region for region in regions)]:
+        for position, quaternion in grid_poses(boxes, **grid):
+            key = tuple(position + quaternion)
+            if key not in seen:
+                seen.add(key)
+                yield position, quaternion
 
 
 def paired_frame(left, depth, stamp):
@@ -173,9 +187,9 @@ def collect(poses, directory, timeout):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--frames-dir", type=Path, default=ROOT / "models/rmuc2026/derived/vision_frames")
-    parser.add_argument("--step", type=float, default=5.)
-    parser.add_argument("--heights", type=float, nargs="+", default=[1.2, 2.2])
-    parser.add_argument("--yaws", type=float, nargs="+", default=[0., 90., 180., 270.])
+    parser.add_argument("--step", type=float)
+    parser.add_argument("--heights", type=float, nargs="+")
+    parser.add_argument("--yaws", type=float, nargs="+")
     parser.add_argument("--x-range", type=float, nargs=2)
     parser.add_argument("--y-range", type=float, nargs=2)
     parser.add_argument("--timeout", type=float, default=15.)
@@ -188,7 +202,11 @@ def main():
         raise FileNotFoundError(f"ALIKED model missing: {args.model}")
     collision = ROOT / "models/rmuc2026/rmuc2026_collision.json"
     boxes = np.asarray(json.loads(collision.read_text())["boxes"])
-    poses = list(grid_poses(boxes, args.step, args.heights, args.yaws, args.x_range, args.y_range))
+    with (ROOT / "configs/vision_map.toml").open("rb") as stream:
+        configuration = tomllib.load(stream)
+    configuration.update({key: getattr(args, key) for key in ["step", "heights", "yaws", "x_range", "y_range"]
+                          if getattr(args, key) is not None})
+    poses = list(configured_poses(boxes, configuration))
     if not poses:
         raise ValueError("capture grid has no free poses")
     collect(poses, args.frames_dir, args.timeout)

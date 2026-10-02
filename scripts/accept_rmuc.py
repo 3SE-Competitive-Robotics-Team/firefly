@@ -62,7 +62,7 @@ def save_report(directory, report):
                 "<style>body{font:16px system-ui;max-width:1200px;margin:40px auto;padding:0 24px;color:#202a34}table{border-collapse:collapse;width:100%}td,th{border:1px solid #d2d8de;padding:10px;text-align:left;vertical-align:top}pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font-size:13px}.passed{color:#176a37}.failed{color:#b02020}.blocked{color:#8a6000}h2{margin-top:36px}</style>"
                 f"<h1>RMUC 自动任务验收：{escape(report['status'])}</h1><p>运行 ID：{escape(report['run_id'])}</p>"
                 "<p>真实 sim / render / VIO / FC；路径任务另启 localization / planner。真值仅供评分。局部 VIO 误差允许固定尺度航向和平移对齐，地图定位与路径跟踪不对齐。正常起降接触与碰撞分开统计。</p>"
-                "<p>本报告不包含 ALIKED / LightGlue 在线重定位与回环验收。操作系统与 GPU 调度不是确定性的，单次通过不代表可靠性概率。</p>"
+                "<p>库图重定位必须有已接受的视觉观测；本报告不包含在线回环验收。操作系统与 GPU 调度不是确定性的，单次通过不代表可靠性概率。</p>"
                 "<p><a href='report.json'>完整机器报告（配置、源码、二进制、资产及 RRD 的 SHA-256）</a></p>"
                 + "<table><tr><th>汇总项</th><th>结果</th></tr>" + "".join(
                     f"<tr><td>{escape(label)}</td><td class='{value['status']}'>{value['status']}</td></tr>" for label, value in summary.items()) + "</table>"
@@ -74,7 +74,7 @@ def save_report(directory, report):
 def provenance():
     files = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT).decode().split("\0")
     source = {name: digest(ROOT / name) for name in files if name and (ROOT / name).is_file()}
-    binaries = {name: digest(ROOT / "target/release" / name) for name in ["vio", "render", "fc", "ffctl", "localization", "planner"]}
+    binaries = {name: digest(ROOT / "target/release" / name) for name in ["vio", "render", "fc", "ffctl", "localization", "planner", "aliked", "lightglue"]}
     manifest_path = ROOT / "models/rmuc2026/asset_manifest.json"
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("status") != "passed":
@@ -82,7 +82,17 @@ def provenance():
     for path, expected in manifest["artifacts"].items():
         if digest(Path(path)) != expected:
             raise ValueError(f"asset content changed: {path}")
-    return {"git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+    visual_manifest = ROOT / "apps/planner/maps/rmuc2026.manifest.json"
+    visual = json.loads(visual_manifest.read_text())
+    if digest(ROOT / "apps/planner/maps/rmuc2026.ffvmap") != visual["map_sha256"]:
+        raise ValueError("visual map content changed")
+    for name, expected in visual["models"]["artifacts"].items():
+        if digest(ROOT / "models" / name) != expected:
+            raise ValueError(f"visual model content changed: {name}")
+    for name, expected in visual["assets"].items():
+        if digest(ROOT / name) != expected:
+            raise ValueError(f"visual map inputs changed: {name}")
+    return {"visual_map": visual, "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
             "git_status": subprocess.check_output(["git", "status", "--short"], cwd=ROOT, text=True),
             "source_sha256": source, "binary_sha256": binaries,
             "configs": {str(p.relative_to(ROOT)): p.read_text() for p in (ROOT / "configs").glob("*.toml")},
@@ -121,7 +131,7 @@ def main(argv=None):
         parser.error("acceptance evidence must be stored under repository logs/")
     directory.mkdir(parents=True)
     report = {"schema_version": 1, "run_id": run_id, "status": "running", "cases": [],
-              "scope": "RMUC fixed-pad mission; VIO + visual localization + planner; no learned relocalization/loop closure"}
+              "scope": "RMUC fixed-pad mission; VIO + ALIKED-N16 + LightGlue + localization + planner; no online loop closure"}
     lock = (ROOT / "logs/acceptance.lock").open("w")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -75,6 +75,7 @@ class Mission:
         self.sequence_errors = 0
         self.recorder = None
         self.origin = None
+        self.visual_updates = 0
 
     def start(self, name, command):
         env = {**os.environ, "RUST_LOG": "info", "FIREFLY_MISSION_SEED": str(self.options.seed), "PYTHONDONTWRITEBYTECODE": "1"}
@@ -132,6 +133,9 @@ class Mission:
                     entity = bytes(msg.entity[:msg.entity_len]).decode(errors="replace")
                     if entity == "fc/debug/state":
                         self.mode = int(msg.scalars[0])
+                    elif entity == "corr/debug/gate" and msg.scalar_count == 4 and msg.scalars[3] == 1:
+                        self.visual_updates += 1
+                        self.recorder.scalars("acceptance/visual_update", msg.timestamp, list(msg.scalars[:4]))
                     elif entity == "acceptance/physics":
                         self.physics = list(msg.scalars)
                         self.physics_time = msg.timestamp
@@ -243,11 +247,13 @@ class Mission:
         return {"stable_seconds": self.options.hover_seconds}
 
     def map_ready(self):
-        self.start("localization", [str(ROOT / "target/release/localization")])
+        self.start("aliked", [str(ROOT / "target/release/aliked")])
+        self.start("lightglue", [str(ROOT / "target/release/lightglue"), "--map", str(ROOT / "apps/planner/maps/rmuc2026.ffvmap")])
         self.wait(lambda: "corrected" in self.latest and self.latest["corrected"][4], wall=30.)
+        self.wait(lambda: self.visual_updates >= 2, wall=60.)
         self.start("planner", [str(ROOT / "target/release/planner"), "--goal", *map(str, self.options.waypoints[0])])
         self.wait(lambda: "reference" in self.latest, wall=30.)
-        return {"source": "VIO + visual localization with configured fixed startup prior", "visual_relocalization": "not_run"}
+        return {"source": "VIO + ALIKED-N16 + LightGlue + PnP + localization", "accepted_visual_updates": self.visual_updates, "online_loop_closure": "not_implemented"}
 
     def tracking(self):
         self.command("fc", "track")
@@ -307,7 +313,7 @@ class Mission:
         failures = []
         results = {}
         # 先停止物理，保留日志写入器直到所有计算进程都退出。
-        order = ["sim", "planner", "localization", "fc", "vio", "render"]
+        order = ["sim", "planner", "lightglue", "aliked", "localization", "fc", "vio", "render"]
         for name in order:
             if name not in self.processes:
                 continue
@@ -348,7 +354,7 @@ class Mission:
             self.start("viz", [sys.executable, "-m", "firefly_viz.main", "--save", str(self.recording)])
             time.sleep(2.)
             self.connect()
-            for name in ["render", "vio", "fc"]:
+            for name in ["render", "vio", "fc", "localization"]:
                 self.start(name, [str(ROOT / f"target/release/{name}")])
             self.start("sim", [sys.executable, str(ROOT / "tests/system/mission_sim.py")])
             for name, action in phases:

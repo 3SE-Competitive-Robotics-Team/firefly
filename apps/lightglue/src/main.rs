@@ -264,11 +264,11 @@ fn match_frame(
     feat: &FeatureMessage,
     k0: &[f32],
     d0: &[f32],
-) -> Result<(Vec<[f32; 2]>, Vec<[f64; 3]>), Box<dyn std::error::Error>> {
+) -> Result<Vec<(usize, [f64; 3], f32)>, Box<dyn std::error::Error>> {
     let frame = &map.frames[frame_idx];
     let n_map = frame.points.len().min(NUM_POINTS);
     if n_map < 6 {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(Vec::new());
     }
     // 库侧 0 填充（后过滤填充匹配）。
     let mut k1 = vec![0f32; NUM_POINTS * 2];
@@ -288,17 +288,15 @@ fn match_frame(
     ])?;
     let (_, matches) = outputs["matches0"].try_extract_tensor::<i64>()?;
     let (_, scores) = outputs["scores0"].try_extract_tensor::<f32>()?;
-    let mut pairs_2d = Vec::new();
-    let mut pairs_3d = Vec::new();
-    for qi in 0..NUM_POINTS {
+    let mut pairs = Vec::new();
+    for qi in 0..(feat.count as usize).min(NUM_POINTS) {
         let mi = matches[qi];
         if mi < 0 || mi as usize >= n_map || scores[qi] < SCORE_THRESHOLD {
             continue;
         }
-        pairs_2d.push(feat.keypoints[qi]);
-        pairs_3d.push(frame.points[mi as usize].position);
+        pairs.push((qi, frame.points[mi as usize].position, scores[qi]));
     }
-    Ok((pairs_2d, pairs_3d))
+    Ok(pairs)
 }
 
 /// 候选库图帧：先验邻域内 + 航向接近，按距离升序取 `QUERY_TOPK`。
@@ -370,12 +368,25 @@ fn query_once(
         k0[2 * i + 1] = feat.keypoints[i][1];
         d0[i * DESC_DIM..(i + 1) * DESC_DIM].copy_from_slice(&feat.descriptors[i]);
     }
+    // 同一像素只保留最高分的地图对应，避免跨库帧重复计算信息量。
+    let mut best = vec![None::<([f64; 3], f32)>; NUM_POINTS];
+    for &frame_idx in &candidates {
+        for (qi, point, score) in match_frame(session, map, frame_idx, feat, &k0, &d0)? {
+            if best[qi].is_none_or(|(_, previous)| score > previous) {
+                best[qi] = Some((point, score));
+            }
+        }
+    }
     let mut pairs_2d = Vec::new();
     let mut pairs_3d = Vec::new();
-    for &frame_idx in &candidates {
-        let (p2, p3) = match_frame(session, map, frame_idx, feat, &k0, &d0)?;
-        pairs_2d.extend(p2);
-        pairs_3d.extend(p3);
+    for (qi, matched) in best.into_iter().enumerate() {
+        if let Some((point, _)) = matched {
+            pairs_2d.push(feat.keypoints[qi]);
+            pairs_3d.push(point);
+        }
+    }
+    if pairs_2d.len() < 6 {
+        return Ok(None);
     }
     let total = pairs_2d.len();
     log::debug!(
@@ -427,6 +438,59 @@ fn query_once(
 #[cfg(test)]
 mod tests {
     use super::DEFAULT_MODEL;
+
+    /// 已知库帧提供独立地图位姿，匹配和 PnP 必须恢复它。
+    #[test]
+    #[ignore = "requires exported models and RMUC visual map"]
+    fn real_map_matching_and_pose_contract() {
+        use super::*;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let map =
+            firefly_vision_map::load_map(&root.join("apps/planner/maps/rmuc2026.ffvmap")).unwrap();
+        let mut session = load_session(&test_model_path().expect("model required")).unwrap();
+        let frame = map
+            .frames
+            .iter()
+            .find(|f| f.points.len() >= 100)
+            .expect("populated map frame");
+        let n = frame.points.len().min(NUM_POINTS);
+        let mut features = FeatureMessage {
+            timestamp: 1.,
+            count: n as u32,
+            keypoints: [[0.; 2]; NUM_POINTS],
+            descriptors: [[0.; DESC_DIM]; NUM_POINTS],
+            scores: [0.; NUM_POINTS],
+        };
+        for (i, p) in frame.points.iter().take(n).enumerate() {
+            features.keypoints[i] = p.uv;
+            features.descriptors[i] = p.descriptor;
+            features.scores[i] = p.score;
+        }
+        let q = frame.quat_xyzw;
+        let prior = OdomMessage {
+            timestamp: 1.,
+            is_initialized: true,
+            position_x: frame.position[0] + 0.1,
+            position_y: frame.position[1],
+            position_z: frame.position[2],
+            quat_x: q[0],
+            quat_y: q[1],
+            quat_z: q[2],
+            quat_w: q[3],
+            ..Default::default()
+        };
+        let observation = query_once(&mut session, &map, &features, &prior)
+            .unwrap()
+            .expect("verified pose");
+        let error = nalgebra::Vector3::new(
+            observation.position_x - frame.position[0],
+            observation.position_y - frame.position[1],
+            observation.position_z - frame.position[2],
+        );
+        assert!(error.norm() < 0.05, "map pose error {error}");
+        assert!(observation.num_inliers >= 30);
+        assert!(observation.error < 1.);
+    }
 
     /// 测试用权重路径：先 CWD相对，再相对 `CARGO_MANIFEST_DIR` 回仓库根；
     /// 都缺失时跳过（`models/` 已 ignore，CI 无权重）。

@@ -19,6 +19,7 @@ wheels/
 docs/papers/
 apps/planner/maps/*.ffmap
 apps/planner/maps/*.ffvmap
+apps/planner/maps/*.manifest.json
 
 # 录制产物（rrd/rbl）与运行时日志
 /logs/

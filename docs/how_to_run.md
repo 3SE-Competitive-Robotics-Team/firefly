@@ -93,6 +93,24 @@ RMUC 静态地图和视觉库图在场地坐标系；`configs/localization.toml 
 | `models/aliked-n16-k512.onnx` | ALIKED 特征提取权重，可用 `--model` 指定 |
 | `models/lightglue-aliked-k512.onnx` | LightGlue 匹配权重，可用 `--model` 指定 |
 
+官方预训练模型的可复现导出（CPU，独立环境，不影响运行环境）：
+
+```bash
+uv venv models/vision-export/.venv --python 3.12
+uv pip install --python models/vision-export/.venv/bin/python torch==2.14.1 torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cpu
+uv pip install --python models/vision-export/.venv/bin/python onnxscript==0.7.2 onnx==1.23.1 onnxruntime==1.30.0 kornia==0.8.3 opencv-python==5.0.0.93 matplotlib==3.11.2
+models/vision-export/.venv/bin/python scripts/export_vision_models.py
+uv run --all-packages python scripts/build_vision_map.py <通过内容校验的采集目录>
+```
+
+使用官方 ALIKED-N16（128 维）与匹配的 LightGlue 权重，320×240、512 点。
+T16 为 64 维，无法直接使用官方 ALIKED LightGlue 权重。导出保留全部匹配层，
+关闭依赖输入数据的动态裁剪和提前退出；不将未训练的截断网络作为轻量模型。
+导出器校验可变形卷积与 torchvision 的一致性、ONNX 与 PyTorch 输出一致性，
+`models/vision_models.json` 保存源码版本、权重及模型 hash、数值检查结果。
+视觉地图旁的 `.manifest.json` 关联模型、构建器、采集清单和场地指纹。
+模型与地图是本地产物，不进入 Git；上游源码及权重的许可见固定版本的 LightGlue 仓库。
+
 `firefly-cad-build` 从碰撞体的相同体素格导出 `.ffmap` 并核验坐标；
 缺失时 planner 启动失败。
 `--map` 可指定其他路径，但内容必须对应当前 RMUC 场地。
@@ -111,12 +129,13 @@ planner 不订阅原始局部 VIO，不提供平移偏置捷径。未收到有�
 参考；状态失联 500ms、变为未初始化或出现非法数值时停止发布并锁存，恢复定位后
 须重启 planner。飞控按自己的参考流超时策略处置，不会收到伪造的位置反馈。
 飞控反馈与 Hold 锚点保持在 odom 系，仅将地图目标转换到 odom；详情见 [坐标契约](frames.md)。
-深度帧按同源状态历史插值，每帧只融合一次；历史不覆盖时跳过该帧。
 
 `scripts/collect_vision_map.py` 独立启动 `render --offline`，在隔离的
 `Firefly/Offline/*` 话题设置已知相机位姿，严格按同一时间戳配对左图、深度与标签。
 它不启动 sim、估计器或飞控；采集资产供 `aliked --build-map` 使用，
 不能作为传感器闭环成立的证据。未得到可用同步帧不得写入库图。
+采集网格读取 `configs/vision_map.toml`：全场粗网格与固定启动作业区的 1m 网格合并，
+重叠位姿去重。采集配置、逐帧位姿和内容指纹保存在清单中；更换作业区应配置相应覆盖。
 
 ## 4. 诊断与验证
 

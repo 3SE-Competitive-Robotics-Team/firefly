@@ -79,7 +79,7 @@ CI 的 Rust job 执行全部普通测试；Python job 执行 `tests/`、`apps/`�
 ## 自动任务验收
 
 ```bash
-cargo build --release -j 2 -p vio -p render -p fc -p ffctl -p localization -p planner
+cargo build --release -j 2 -p vio -p render -p fc -p ffctl -p localization -p planner -p aliked -p lightglue
 uv run --all-packages --extra test python scripts/accept_rmuc.py
 ```
 
@@ -95,7 +95,7 @@ uv run --all-packages --extra test python scripts/accept_rmuc.py
 | 路径跟踪 | 真实视觉定位与 planner，地图系航点 `(-11,0,2)` → `(-13,0,1.405)`；逐点到达误差 <0.35m、速度 <0.3m/s 持续 1s |
 | 跟踪评分 | 同时刻 GT 与实际 Reference，禁止对齐；RMSE ≤0.35m，最大误差 ≤0.8m |
 | 局部定位 | 固定尺度航向/平移对齐；VIO ATE RMSE ≤0.2m，1s 位置增量 RPE RMSE ≤0.15m |
-| 地图定位 | 禁止对齐；位置 RMSE ≤0.25m，航向 RMSE ≤15° |
+| 地图定位 | 至少两次已接受的视觉融合；禁止对齐；位置 RMSE ≤0.25m，航向 RMSE ≤15° |
 | 碰撞 | MuJoCo 每物理步累计；只豁免停机坪半径 0.5m、高差 0.06m、速度 <0.5m/s 且法线竖直余弦 ≥0.9 的接触；其他接触必须为零 |
 | 参考失联 | SIGINT 停止 planner；2.5s 墙钟内进入 Hold，在失联点 0.5m 内连续保持 2s |
 | 估计失联 | SIGINT 停止 VIO；0.8s 内禁止继续使用陈旧状态输出推力；另行检查无碰撞终止，电机归零不等于安全降落 |
