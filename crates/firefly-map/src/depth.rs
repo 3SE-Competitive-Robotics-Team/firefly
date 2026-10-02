@@ -77,7 +77,7 @@ impl DepthCamera {
 /// 相机原点 → 命中点射线沿途体素以 `prob_miss_log` 递减、命中体素以
 /// `prob_hit_log` 递增（对照官方 `raycastProcess` 658-669 行的 log-odds 更新）。
 ///
-/// `body_pose` 为机体 → 世界变换（仿真阶段用真值，VIO 修复后换 odom）。
+/// `body_pose` 为深度测量时刻的机体 → 地图变换，由地图系里程计插值得到。
 ///
 /// 注意：`Isometry * Vector3` 只旋转不平移（Vector 视为方向量），平移须用
 /// `Isometry * Point3`。
@@ -182,6 +182,24 @@ mod tests {
     use super::*;
     use crate::grid::{GridMapBuilder, VoxelState};
     use nalgebra::{Translation3, UnitQuaternion};
+
+    #[test]
+    fn missing_depth_does_not_clear_occupied_voxels() {
+        let cam = DepthCamera::mujoco_default();
+        let mut map = GridMapBuilder::new(1.0, [10, 10, 10]).build().unwrap();
+        map.set_state([5, 5, 5], VoxelState::Occupied);
+        let before = map.occupancy_at([5, 5, 5]);
+        let pose = Isometry3::translation(0.5, 5.5, 5.5);
+        for invalid in [0.0, f32::NAN, f32::INFINITY] {
+            update_from_depth(
+                &mut map,
+                &cam,
+                &pose,
+                &vec![invalid; cam.width * cam.height],
+            );
+            assert_eq!(map.occupancy_at([5, 5, 5]), before);
+        }
+    }
 
     #[test]
     fn default_camera_focal_matches_fovy() {

@@ -28,6 +28,8 @@ cargo build --release -p render -p vio -p fc -p ffctl
 
 运行要求 Python 3.12+、Rust 1.97+、uv，以及能运行 Bevy 的 GPU 和图形会话。
 参数位于 `configs/`，缺键使用代码默认值，缺配置文件报错。
+深度图在 Bevy 回读后施加双目退化模型；参数、量程、复现方式与占据地图关系见
+[深度传感器模型](depth_sensor.md)。
 
 ## 2. 最小闭环与记录
 

@@ -15,12 +15,13 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 
 import iceoryx2 as iox2
 import numpy as np
 import pytest
 
-from firefly_mujoco import ControlMessage, OdomMessage, TraceContext
+from firefly_mujoco import ControlMessage, DepthImageMessage, OdomMessage, TraceContext
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -78,6 +79,11 @@ def test_sensor_startup() -> None:
         odom = subscribe("Firefly/Odometry", OdomMessage)
         ground_truth = subscribe("Firefly/GroundTruth", OdomMessage)
         control = subscribe("Firefly/Control", ControlMessage, 32)
+        depth = subscribe("Firefly/Depth", DepthImageMessage)
+        with (ROOT / "configs/render.toml").open("rb") as stream:
+            depth_options = tomllib.load(stream).get("depth_noise", {})
+        depth_min = depth_options.get("min_depth_m", 0.2)
+        depth_max = depth_options.get("max_depth_m", 8.0)
         # GroundTruth 供 render 摆放传感器；PlantState 不参与启动。
         simulation = """
 import importlib
@@ -92,6 +98,8 @@ sim.main()
         first_position = None
         samples = 0
         controls = 0
+        valid_depth_frames = 0
+        previous_depth_timestamp = None
         previous_timestamp = None
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
@@ -109,7 +117,17 @@ sim.main()
                 msg = sample.payload().contents
                 controls += 1
                 assert all(value == 0.0 for value in msg.thrust), "未解锁时不得输出推力"
-            if first_ready is not None and samples >= 20 and controls >= 100:
+            while (sample := depth.receive()) is not None:
+                msg = sample.payload().contents
+                values = np.ctypeslib.as_array(msg.data)
+                assert (msg.width, msg.height) == (320, 240)
+                assert np.isfinite(values).all()
+                assert np.all((values == 0.) | ((values >= depth_min) & (values <= depth_max)))
+                if previous_depth_timestamp is not None:
+                    assert msg.timestamp > previous_depth_timestamp
+                previous_depth_timestamp = msg.timestamp
+                valid_depth_frames += int(np.any(values > 0.))
+            if first_ready is not None and samples >= 20 and controls >= 100 and valid_depth_frames >= 3:
                 break
             time.sleep(0.01)
         if first_ready is None:
@@ -118,6 +136,7 @@ sim.main()
         assert first_ready >= 1.0, "不得跳过静止观测窗口"
         assert np.linalg.norm(first_position) < 0.1, f"初始位置应为局部原点: {first_position}"
         assert controls >= 100, "无 PlantState 时也必须持续发布零推力"
+        assert valid_depth_frames >= 3, "必须从发布端收到至少三帧有效深度测量"
         if os.environ.get("FIREFLY_RUN_FLIGHT") == "1":
             _verify_flight(ground_truth, check_alive)
         print(f"PASS: ready={first_ready:.3f}s, local_position={first_position}, odom={samples}, controls={controls}")

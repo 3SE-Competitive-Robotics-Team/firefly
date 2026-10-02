@@ -1,4 +1,4 @@
-//! `apps/render` 视觉配置（`configs/render.toml`）：场景光照的覆盖值与各相机曝光。
+//! `apps/render` 视觉配置（`configs/render.toml`）：场景光照、相机曝光与深度退化。
 //! 场景光照本体（唯一一份、所有相机共用）在 [`firefly_render::lighting`]。
 
 use bevy::prelude::*;
@@ -118,7 +118,7 @@ impl Default for EnvConfig {
     }
 }
 
-/// `configs/render.toml` 顶层：场景光照的覆盖值与相机曝光。
+/// `configs/render.toml` 顶层：场景光照、相机曝光与深度退化。
 #[derive(Resource, Deserialize, Clone, Copy, Debug, Default)]
 pub struct RenderConfig {
     /// 场景照明。
@@ -130,6 +130,9 @@ pub struct RenderConfig {
     /// 场景环境光贴图。
     #[serde(default)]
     pub env: EnvConfig,
+    /// 深度传感器退化模型。
+    #[serde(default)]
+    pub depth_noise: crate::depth_noise::DepthNoiseOptions,
 }
 
 /// 读 `configs/render.toml`；缺文件/解析失败即报错退出。
@@ -139,8 +142,13 @@ pub fn load() -> RenderConfig {
         log::error!("读取 configs/render.toml 失败：{e}");
         std::process::exit(1);
     });
-    toml::from_str(&text).unwrap_or_else(|e| {
+    let config: RenderConfig = toml::from_str(&text).unwrap_or_else(|e| {
         log::error!("解析 configs/render.toml 失败：{e}");
         std::process::exit(1);
-    })
+    });
+    config.depth_noise.validate().unwrap_or_else(|e| {
+        log::error!("深度噪声配置无效：{e}");
+        std::process::exit(1);
+    });
+    config
 }

@@ -143,12 +143,12 @@ pub struct CapturePipeline {
 impl CapturePipeline {
     /// 起工作线程（进程生命周期内常驻，退出时通道关闭自动结束）。
     #[must_use]
-    pub fn spawn() -> Self {
+    pub fn spawn(options: crate::depth_noise::DepthNoiseOptions) -> Self {
         let (tx, job_rx) = std::sync::mpsc::sync_channel::<CaptureJob>(1);
         let (res_tx, rx) = std::sync::mpsc::sync_channel::<ProcessedCapture>(1);
         std::thread::Builder::new()
             .name("sensor-process".to_owned())
-            .spawn(move || run_worker(&job_rx, &res_tx))
+            .spawn(move || run_worker(&job_rx, &res_tx, options))
             .expect("sensor-process 线程创建失败");
         Self {
             tx: Mutex::new(tx),

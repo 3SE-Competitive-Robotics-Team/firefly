@@ -1,5 +1,6 @@
 # apps/render 视觉配置：场景光照（所有视角共用一份）+ 相机曝光。
 # 场景在 configs/scene.toml。
+# 深度退化参数可用 [depth_noise] 覆盖；默认值、单位和物理边界见 docs/depth_sensor.md。
 [light]
 # 场景三方向光照度（lux）：与相机曝光一起决定画面亮度。
 directional = [18000.0, 12000.0, 8000.0]

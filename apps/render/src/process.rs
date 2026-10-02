@@ -5,15 +5,13 @@
 //! 不再被逐像素循环占住（对照 `link` 的流水：主世界装配 → 本线程算 →
 //! 主世界发布）。
 //!
-//! 灰度用 BT.601 加权；深度噪声三步（视差域高斯、边缘膨胀 1px、随机丢点），
-//! 仅作用于有效命中（`0.05 < z < 100` 米），其余保持无效标记 `0.0`。
+//! 深度退化由 `depth_noise` 配置，在线与离线采集使用相同模型。
 
 use std::sync::mpsc::{Receiver, SyncSender};
 
+use crate::depth_noise::{self, DepthNoiseOptions};
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_SIZE, IMAGE_WIDTH};
 use firefly_pubsub::trace::TraceContext;
-use rand::SeedableRng;
-use rand::rngs::StdRng;
 
 use crate::rig::{FOV_Y_DEG, SENSOR_NEAR};
 use crate::sensors;
@@ -63,10 +61,23 @@ pub struct ProcessedCapture {
 }
 
 /// 工作线程主循环：阻塞收任务，算完阻塞回结果；通道关闭即退出。
-pub fn run_worker(jobs: &Receiver<CaptureJob>, results: &SyncSender<ProcessedCapture>) {
-    let mut rng = StdRng::from_rng(&mut rand::rng());
+pub fn run_worker(
+    jobs: &Receiver<CaptureJob>,
+    results: &SyncSender<ProcessedCapture>,
+    options: DepthNoiseOptions,
+) {
     while let Ok(job) = jobs.recv() {
-        let out = process(job, &mut rng);
+        let out = {
+            let root = job.trace.continue_span("render-pixels").unwrap_or_else(|| {
+                fastrace::Span::root(
+                    "render-pixels",
+                    fastrace::prelude::SpanContext::random().sampled(false),
+                )
+            });
+            let _guard = root.set_local_parent();
+            process(job, &options)
+        };
+        fastrace::flush();
         if results.send(out).is_err() {
             break;
         }
@@ -74,7 +85,7 @@ pub fn run_worker(jobs: &Receiver<CaptureJob>, results: &SyncSender<ProcessedCap
 }
 
 /// 单拍像素管线。
-fn process(job: CaptureJob, rng: &mut StdRng) -> ProcessedCapture {
+fn process(job: CaptureJob, options: &DepthNoiseOptions) -> ProcessedCapture {
     let mut left_gray = vec![0u8; IMAGE_SIZE];
     let mut right_gray = vec![0u8; IMAGE_SIZE];
     sensors::rgb_to_gray(&job.left_rgb, &mut left_gray);
@@ -82,12 +93,13 @@ fn process(job: CaptureJob, rng: &mut StdRng) -> ProcessedCapture {
 
     let mut depth = vec![0.0f32; IMAGE_SIZE];
     sensors::linearize_depth(&job.depth_raw, &mut depth, SENSOR_NEAR);
-    sensors::add_depth_noise(
+    depth_noise::apply(
         &mut depth,
         IMAGE_WIDTH,
         IMAGE_HEIGHT,
-        FOV_Y_DEG.to_radians(),
-        rng,
+        (IMAGE_HEIGHT as f32 / 2.0) / (FOV_Y_DEG.to_radians() / 2.0).tan(),
+        job.stamp,
+        options,
     );
 
     let mut left_gray_rgba = vec![0u8; 4 * IMAGE_SIZE];
@@ -119,7 +131,7 @@ mod tests {
     /// 单拍管线产出各缓冲尺寸正确；全清空深度保持无效 `0.0`（显示全黑）。
     #[test]
     fn process_produces_expected_buffers() {
-        let mut rng = StdRng::seed_from_u64(7);
+        let options = DepthNoiseOptions::default();
         let job = CaptureJob {
             seq: 3,
             stamp: 1.5,
@@ -128,7 +140,7 @@ mod tests {
             right_rgb: vec![64u8; 4 * IMAGE_SIZE],
             depth_raw: vec![0u8; 4 * IMAGE_SIZE],
         };
-        let out = process(job, &mut rng);
+        let out = process(job, &options);
         assert_eq!(out.seq, 3);
         assert!((out.stamp - 1.5).abs() < 1e-9);
         assert_eq!(out.left_gray.len(), IMAGE_SIZE);

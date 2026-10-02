@@ -1,20 +1,10 @@
-//! 传感器像素数学：灰度转换 + 深度线性化 + 深度噪声 + 调试显示映射。
-//!
-//! 灰度用 BT.601 加权；深度噪声三步（视差域高斯、边缘膨胀 1px、随机丢点），
-//! 仅作用于有效命中（`0.05 < z < 100` 米），其余保持无效标记 `0.0`。
+//! 传感器像素数学：灰度转换、深度线性化与调试显示映射。
 //!
 //! 深度线性化依据：`Bevy` 相机投影恒为无限远反向 Z
 //! （`PerspectiveProjection::get_clip_from_view` 用
 //! `perspective_infinite_reverse_rh`），深度预通道纹理存 NDC `d ∈ [0, 1]`，
-//! `d = 0` 为清空值（无几何体，判无效），`dist = near / d` 精确还原视距。
+//! `d = 0` 为清空值（无几何体，判无效），`dist = near / d` 精确还原光轴 Z 深度。
 
-use rand::RngExt;
-use rand::rngs::StdRng;
-
-/// 深度噪声强度（无单位）。
-pub const DEPTH_NOISE: f32 = 0.02;
-/// 双目基线（米，沿机体 y 轴分开）。
-pub const STEREO_BASELINE: f32 = 0.05;
 /// 深度有效下限（米）。
 pub const DEPTH_MIN: f32 = 0.05;
 /// 深度有效上限（米）。
@@ -33,7 +23,7 @@ pub fn rgb_to_gray(rgb: &[u8], gray: &mut [u8]) {
     }
 }
 
-/// NDC 深度（小端 f32 字节）→ 米制视距（行主序）。
+/// NDC 深度（小端 f32 字节）→ 米制光轴 Z 深度（行主序）。
 ///
 /// `dist = near / d`；`d <= 0`（清空值）或解码越界一律记无效 `0.0`，
 /// planner 以 `z <= 0.05` 判无效。
@@ -51,113 +41,6 @@ pub fn linearize_depth(raw: &[u8], out: &mut [f32], near: f32) {
         } else {
             0.0
         };
-    }
-}
-
-/// 深度噪声（原地；`fov_y` 为弧度）。
-///
-/// 1. 视差域高斯：`disp = f·B/z`，`σ_disp = 4·DEPTH_NOISE` 像素，`σ_z ∝ z²`；
-/// 2. 边缘膨胀：四邻深度差超 `max(0.12, 0.04·z)` 判边缘，前景向外扩 1 像素；
-/// 3. 随机丢点：每帧均匀抽 `5~15%` 有把效像素置 `0.0`。
-pub fn add_depth_noise(
-    depth: &mut [f32],
-    width: usize,
-    height: usize,
-    fov_y: f32,
-    rng: &mut StdRng,
-) {
-    debug_assert_eq!(depth.len(), width * height);
-    let focal = (height as f32 / 2.0) / (fov_y / 2.0).tan();
-    let fb = focal * STEREO_BASELINE;
-    let sigma_disp = DEPTH_NOISE * 4.0;
-
-    // 1. 视差域高斯（仅有效命中）。
-    for z in depth.iter_mut() {
-        if *z > DEPTH_MIN && *z < DEPTH_MAX {
-            let disp = fb / *z;
-            let noisy = (disp + gaussian(rng) * sigma_disp).max(0.1);
-            *z = fb / noisy;
-        }
-    }
-
-    // 2. 边缘膨胀 1px（四邻差分，阈值近距 12cm、远距 4%·z）。
-    let edge = edge_mask(depth, width, height);
-    if edge.iter().any(|e| *e) {
-        dilate_foreground(depth, &edge, width, height);
-    }
-
-    // 3. 随机丢点（仅有效像素）。
-    let hole_rate: f32 = rng.random_range(0.05..0.15);
-    for z in depth.iter_mut() {
-        if *z > DEPTH_MIN && *z < DEPTH_MAX && rng.random::<f32>() < hole_rate {
-            *z = 0.0;
-        }
-    }
-}
-
-/// 标准高斯采样（Box-Muller，避免为单分布引入 `rand_distr` 依赖）。
-fn gaussian(rng: &mut StdRng) -> f32 {
-    let u1 = rng.random::<f32>().max(f32::EPSILON);
-    let u2 = rng.random::<f32>();
-    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
-}
-
-/// 边缘掩码：有效像素四邻存在深度差超阈值的邻居。
-fn edge_mask(depth: &[f32], width: usize, height: usize) -> Vec<bool> {
-    let mut edge = vec![false; depth.len()];
-    for y in 0..height {
-        for x in 0..width {
-            let i = y * width + x;
-            let z = depth[i];
-            if z <= DEPTH_MIN || z >= DEPTH_MAX {
-                continue;
-            }
-            let thresh = 0.12f32.max(0.04 * z);
-            let neighbors = [
-                x.checked_sub(1).map(|nx| y * width + nx),
-                (x + 1 < width).then(|| y * width + x + 1),
-                y.checked_sub(1).map(|ny| ny * width + x),
-                (y + 1 < height).then(|| (y + 1) * width + x),
-            ];
-            for n in neighbors.into_iter().flatten() {
-                let nz = depth[n];
-                if nz > DEPTH_MIN && nz < DEPTH_MAX && (z - nz).abs() > thresh {
-                    edge[i] = true;
-                    break;
-                }
-            }
-        }
-    }
-    edge
-}
-
-/// 前景膨胀：非边缘有效像素若 3×3 邻域内有更近的前景，取前景深度。
-fn dilate_foreground(depth: &mut [f32], edge: &[bool], width: usize, height: usize) {
-    let src = depth.to_vec();
-    for y in 0..height {
-        for x in 0..width {
-            let i = y * width + x;
-            if edge[i] || src[i] <= DEPTH_MIN || src[i] >= DEPTH_MAX {
-                continue;
-            }
-            let mut nearest = f32::INFINITY;
-            for dy in -1i32..=1 {
-                for dx in -1i32..=1 {
-                    let nx = x as i32 + dx;
-                    let ny = y as i32 + dy;
-                    if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
-                        continue;
-                    }
-                    let nz = src[ny as usize * width + nx as usize];
-                    if nz > DEPTH_MIN && nz < DEPTH_MAX && edge[ny as usize * width + nx as usize] {
-                        nearest = nearest.min(nz);
-                    }
-                }
-            }
-            if nearest.is_finite() && src[i] > nearest + 1e-9 {
-                depth[i] = nearest;
-            }
-        }
     }
 }
 
@@ -192,7 +75,6 @@ pub fn depth_to_display(depth: &[f32], rgba: &mut [u8], max_range: f32) {
 mod tests {
     use super::*;
     use bevy::math::Mat4;
-    use rand::SeedableRng;
 
     /// BT.601 三原色与白场定点值。
     #[test]
@@ -234,24 +116,5 @@ mod tests {
             .collect();
         linearize_depth(&raw, &mut out, 0.05);
         assert_eq!(out, [0.0, 0.0, 0.0]);
-    }
-
-    /// 噪声只改有效区形状不变：无效像素保持 `0.0`，有效值仍为正有限。
-    #[allow(clippy::float_cmp)]
-    #[test]
-    fn depth_noise_preserves_invalid() {
-        let mut rng = StdRng::seed_from_u64(7);
-        let mut depth = vec![0.0f32; 32 * 32];
-        for y in 8..24 {
-            for x in 8..24 {
-                depth[y * 32 + x] = 5.0;
-            }
-        }
-        add_depth_noise(&mut depth, 32, 32, 70.88f32.to_radians(), &mut rng);
-        assert_eq!(depth[0], 0.0);
-        assert_eq!(depth[31 * 32 + 31], 0.0);
-        let inner: Vec<f32> = depth[8 * 32 + 8..24 * 32].to_vec();
-        assert!(inner.iter().all(|z| *z >= 0.0 && z.is_finite()));
-        assert!(inner.iter().any(|z| *z > 0.0));
     }
 }

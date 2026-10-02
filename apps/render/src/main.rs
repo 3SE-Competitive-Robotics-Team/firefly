@@ -11,6 +11,7 @@
 
 mod capture;
 mod config;
+mod depth_noise;
 mod freecam;
 mod link;
 mod process;
@@ -96,7 +97,7 @@ fn main() {
         .insert_resource(CaptureHub::default())
         .insert_resource(PendingFrames::default())
         .insert_resource(SensorCapture::default())
-        .insert_resource(CapturePipeline::spawn())
+        .insert_resource(CapturePipeline::spawn(render_config.depth_noise))
         .insert_resource(CaptureStats::default())
         .insert_resource(FreeCam::default())
         .insert_non_send(ports)
