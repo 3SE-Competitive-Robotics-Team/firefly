@@ -1,0 +1,2 @@
+# 在线回环参数缺省见 apps/lightglue/src/online.rs::Options。
+# 原始 odom、左目特征和深度必须在同一传感器时钟配对。

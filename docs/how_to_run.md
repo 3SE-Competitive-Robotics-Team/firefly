@@ -121,8 +121,12 @@ cargo run --release -p aliked
 cargo run --release -p lightglue -- --map apps/planner/maps/rmuc2026.ffvmap
 ```
 
-当前视觉链路是特征提取 → 库图匹配 → PnP 位姿观测 → 定位融合 →
-`Firefly/CorrectedOdometry`。在线关键帧回环与位姿图优化尚未实现。
+视觉进程同时执行库图 PnP 定位和在线 RGB-D 关键帧回环；`localization` 默认
+采用四自由度位姿图发布 `Firefly/CorrectedOdometry`。在线采集需要同步的
+`Firefly/Depth`、`Firefly/Odometry` 和 `Firefly/Features`，配置在
+`configs/lightglue.toml`（支持 `--config`）。回环阈值、容量和验收边界见
+[在线回环](loop_closure.md)。如需 ESKF 对照，设置 `localization.toml` 顶层
+`backend = "eskf"`，并在 `lightglue.toml` 设置 `enabled = false` 关闭在线回环。
 完成地图对齐后，可运行 planner 接收 `Firefly/CorrectedOdometry` 并发布飞控参考；
 通过 `ffctl fc track` 进入跟踪模式，`ffctl planner goal X Y Z` 发布地图系目标。
 planner 不订阅原始局部 VIO，不提供平移偏置捷径。未收到有效初始化状态时不发布

@@ -1,4 +1,5 @@
-# 固定启动先验与视觉位姿融合；数值缺省见 firefly-localization。
+# 固定启动先验与四自由度位姿图；数值缺省见 firefly-localization。
+# backend 默认为 pose_graph；fusion 段仅供 backend = "eskf" 的对照运行。
 [origin]
 position = [-13.0, 0.0, 0.405] # m，RMUC 停机坪机体原点
 

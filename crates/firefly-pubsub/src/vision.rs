@@ -37,7 +37,7 @@ pub struct FeatureMessage {
     pub scores: [f32; MAX_FEATURES],
 }
 
-/// 位姿观测：全局系位姿 + 协方差 + 质量门控字段，直接喂 `FusionFilter`。
+/// 位姿观测：全局系位姿 + 协方差 + 质量门控字段，由定位后端接收。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
 #[type_name("FireflyPoseObservation")]
@@ -67,6 +67,25 @@ pub struct PoseObservation {
     pub converged: bool,
 }
 
+/// 在线回环相对约束，端点携带原始 VIO 测量以容忍接收端历史窗口有限。
+pub const KEYFRAME_TOPIC: &str = "Firefly/OnlineKeyframe";
+
+/// 经过几何与连续确认的回环约束。
+pub const LOOP_TOPIC: &str = "Firefly/LoopConstraint";
+#[repr(C)]
+#[derive(Debug, Clone, Copy, ZeroCopySend)]
+#[type_name("FireflyLoopConstraint")]
+pub struct LoopConstraint {
+    pub from: crate::odom::OdomMessage,
+    pub to: crate::odom::OdomMessage,
+    /// `T_old_body_new_body`，米与 xyzw；只包含视觉几何测量。
+    pub translation: [f64; 3],
+    pub quaternion: [f64; 4],
+    pub inliers: u32,
+    pub confirmations: u32,
+    pub reprojection_error: f64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,6 +95,7 @@ mod tests {
         // 8 + 4 + 4096 + 262144 + 2048 = 268300，尾部按 f64 补齐 +4。
         assert_eq!(std::mem::size_of::<FeatureMessage>(), 268_304);
         assert_eq!(std::mem::size_of::<PoseObservation>(), 384);
+        assert_eq!(std::mem::size_of::<LoopConstraint>(), 264);
         assert_eq!(MAX_FEATURES, 512);
         assert_eq!(DESC_DIM, 128);
     }

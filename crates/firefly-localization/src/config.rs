@@ -15,6 +15,9 @@ pub struct LocalizationConfig {
     pub origin: Option<InitialAlignment>,
     /// 融合参数。
     pub fusion: FusionOptions,
+    /// 默认统一位姿图；ESKF 用于无回环的对照运行，两者不叠加校正。
+    pub backend: Backend,
+    pub graph: crate::graph::GraphOptions,
 }
 
 /// 静止启动时机体在地图中的位置与航向；odom 航向规范由测量确定。
@@ -83,6 +86,15 @@ impl LocalizationConfig {
         toml::from_str(&raw)
             .map_err(|e| Error::new(ErrorKind::InvalidArgument, "invalid config").with_source(e))
     }
+}
+
+/// 地图定位后端，进程启动时固定。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Backend {
+    #[default]
+    PoseGraph,
+    Eskf,
 }
 
 #[cfg(test)]

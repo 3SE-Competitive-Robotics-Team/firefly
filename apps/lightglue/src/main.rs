@@ -1,14 +1,9 @@
-//! `lightglue` 进程：视觉全局定位（`ort` ONNX Runtime 推理）。
-//!
-//! 订阅当前帧特征（`Firefly/Features`）+ 矫正后里程计（先验，
-//! `Firefly/CorrectedOdometry`，无则回退 `Firefly/Odometry`）→ 库图空间短名单 →
-//! `models/lightglue-aliked-k512.onnx` 图-图匹配 → `PnP` 解全局位姿 →
-//! 经 `Firefly/PoseObservation` 发布视觉观测（`localization` 内同一 `FusionFilter` 融合）。
-//! 对照 VINS-Fusion `loop_fusion` 的检环 + 位姿边（`findConnection` 用 VIO
-//! 位姿作初值、`pose_graph` 以位姿边做联合优化），只是描述子换成 ALIKED，
-//! 视觉观测由独立 localization 进程进行误差态融合。
-//!
-//! 运行：`cargo run --release -p lightglue -- --map <map.ffvmap> [-- --model ...]`。
+//! ALIKED 特征匹配：离线地图定位与在线 RGB-D 关键帧回环。
+//! `PoseObservation` 表达地图绝对位姿；`LoopConstraint` 表达历史机体到当前机体。
+//! 原始 VIO 与深度由独立线程配对，地图先验仅用于离线库图查询。
+
+mod online;
+mod sensors;
 
 use firefly_pubsub::event::TopicListener;
 use firefly_pubsub::node::create_node;
@@ -46,16 +41,20 @@ const MAX_HEADING_DEG: f64 = 60.0;
 const ODOM_FRESH_TIMEOUT: f64 = 1.0;
 
 /// 解析 `--model/--map`（缺省见 [`DEFAULT_MODEL`]，地图必填）。
-fn parse_args() -> Result<(String, String), String> {
+fn parse_args() -> Result<(String, String, String), String> {
     let mut it = std::env::args().skip(1);
     let mut model = DEFAULT_MODEL.to_owned();
     let mut map: Option<String> = None;
+    let mut config = "configs/lightglue.toml".to_owned();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--model" => {
                 model = it
                     .next()
                     .ok_or_else(|| "missing --model value".to_owned())?;
+            }
+            "--config" => {
+                config = it.next().ok_or("missing --config value")?;
             }
             "--map" => {
                 map = Some(it.next().ok_or_else(|| "missing --map value".to_owned())?);
@@ -64,7 +63,7 @@ fn parse_args() -> Result<(String, String), String> {
         }
     }
     let map = map.ok_or_else(|| "missing --map <map.ffvmap>".to_owned())?;
-    Ok((model, map))
+    Ok((model, map, config))
 }
 
 /// 加载 ONNX 会话（文件缺失即报错，不静默；同 aliked 锁 1 intra-op 线程，
@@ -82,7 +81,7 @@ fn load_session(model: &str) -> Result<Session, Box<dyn std::error::Error>> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     firefly_observability::init();
-    let (model, map_path) = parse_args().map_err(|e| {
+    let (model, map_path, config) = parse_args().map_err(|e| {
         eprintln!(
             "{e}\n用法：lightglue --map <map.ffvmap> [--model models/lightglue-aliked-k512.onnx]"
         );
@@ -99,7 +98,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut session = load_session(&model)?;
     smoke_inference(&mut session)?;
-    run_loop(&mut session, &map)?;
+    let options: online::Options = toml::from_str(&std::fs::read_to_string(config)?)?;
+    options.validate()?;
+    run_loop(&mut session, &map, options)?;
     Ok(())
 }
 
@@ -136,9 +137,22 @@ fn smoke_inference(session: &mut Session) -> Result<(), Box<dyn std::error::Erro
 ///
 /// 查询先验固定为地图系校正里程计，局部里程计不能直接查询地图位置。
 #[allow(clippy::too_many_lines)]
-fn run_loop(session: &mut Session, map: &VisionMap) -> Result<(), firefly_error::Error> {
+fn run_loop(
+    session: &mut Session,
+    map: &VisionMap,
+    options: online::Options,
+) -> Result<(), firefly_error::Error> {
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "lightglue");
+    let sensors = sensors::Sensors::start()?;
+    let mut online = online::Online::new(options);
+    let loop_pub = Publisher::<firefly_pubsub::vision::LoopConstraint>::with_topic(
+        &node,
+        firefly_pubsub::vision::LOOP_TOPIC,
+    )?;
+    let keyframe_pub =
+        Publisher::<OdomMessage>::with_topic(&node, firefly_pubsub::vision::KEYFRAME_TOPIC)?;
+    let viz = firefly_pubsub::viz::VizPublisher::new(&node)?;
     let feat_sub = Subscriber::<FeatureMessage>::with_topic(&node, FEATURE_TOPIC)?;
     log::info!("已订阅特征话题 {FEATURE_TOPIC}");
     let corrected_sub = CorrectedOdomSubscriber::new(&node)?;
@@ -174,6 +188,14 @@ fn run_loop(session: &mut Session, map: &VisionMap) -> Result<(), firefly_error:
     // 心跳仅兜底无事件时的 odom 缓存更新与断流自愈。
     let mut latest_corrected: Option<OdomMessage> = None;
     let on_event = |attachment_id: WaitSetAttachmentId<ipc::Service>| {
+        let root = fastrace::Span::root(
+            "lightglue",
+            fastrace::prelude::SpanContext::random().sampled(false),
+        );
+        let trace_guard = root.set_local_parent();
+        if sensors.is_stopped() {
+            return CallbackProgression::Stop;
+        }
         let _ = attachment_id.has_event_from(&tick_guard);
         let _ = feat_events.drain();
         while let Ok(Some(sample)) = corrected_sub.receive() {
@@ -182,6 +204,43 @@ fn run_loop(session: &mut Session, map: &VisionMap) -> Result<(), firefly_error:
         let mut latest_feat: Option<FeatureMessage> = None;
         while let Ok(Some(sample)) = feat_sub.receive() {
             latest_feat = Some(*sample);
+        }
+        if let Some(feat) = &latest_feat {
+            firefly_observability::set_sim_time(feat.timestamp);
+            if let Some((odom, depth)) = sensors.sample(feat.timestamp) {
+                let previous_count = online.diagnostics[0];
+                match online.process(session, feat, odom, &depth, || sensors.is_stopped()) {
+                    Ok(Some(edge)) => {
+                        if let Err(e) = loop_pub.publish(edge) {
+                            log::warn!("回环发布失败: {e}");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        online.miss();
+                        log::warn!("回环验证失败: {e}");
+                    }
+                }
+                if online.diagnostics[0] > previous_count
+                    && let Err(e) = keyframe_pub.publish(odom)
+                {
+                    log::warn!("关键帧发布失败: {e}");
+                }
+                let mut msg = firefly_pubsub::viz::VizMessage::base(
+                    firefly_pubsub::viz::kind::SCALARS,
+                    feat.timestamp,
+                    "loop/debug/frontend",
+                );
+                msg.scalars[..4].copy_from_slice(&online.diagnostics);
+                msg.scalar_count = 4;
+                let _ = viz.publish(msg);
+            } else {
+                online.miss();
+                log::debug!("回环缺少同步深度/原始里程计 t={:.3}", feat.timestamp);
+            }
+        }
+        if sensors.is_stopped() {
+            return CallbackProgression::Stop;
         }
         let prior = latest_corrected.filter(|m| m.is_initialized);
         let (Some(feat), Some(odom)) = (latest_feat, prior) else {
@@ -206,7 +265,7 @@ fn run_loop(session: &mut Session, map: &VisionMap) -> Result<(), firefly_error:
         firefly_observability::set_sim_time(feat.timestamp);
         firefly_observability::pump_log_ipc(&log_ipc);
         let t_query = std::time::Instant::now();
-        let query_outcome = query_once(session, map, &feat, &odom);
+        let query_outcome = query_once(session, map, &feat, &odom, || sensors.is_stopped());
         log::debug!(
             "视觉查询耗时 {:.2}s（特征 t={:.2}）",
             t_query.elapsed().as_secs_f64(),
@@ -233,6 +292,9 @@ fn run_loop(session: &mut Session, map: &VisionMap) -> Result<(), firefly_error:
             Err(e) => log::warn!("视觉查询失败: {e}"),
         }
         firefly_observability::pump_log_ipc(&log_ipc);
+        drop(trace_guard);
+        drop(root);
+        fastrace::flush();
         CallbackProgression::Continue
     };
     match waitset.wait_and_process(on_event) {
@@ -257,23 +319,21 @@ fn run_loop(session: &mut Session, map: &VisionMap) -> Result<(), firefly_error:
 
 /// 单帧匹配：query 特征 vs 库图一帧 → 2D-3D 对应（丢弃填充/低分匹配）。
 #[allow(clippy::type_complexity)]
-fn match_frame(
+fn match_points(
     session: &mut Session,
-    map: &VisionMap,
-    frame_idx: usize,
+    points: &[firefly_vision_map::VisionMapPoint],
     feat: &FeatureMessage,
     k0: &[f32],
     d0: &[f32],
 ) -> Result<Vec<(usize, [f64; 3], f32)>, Box<dyn std::error::Error>> {
-    let frame = &map.frames[frame_idx];
-    let n_map = frame.points.len().min(NUM_POINTS);
+    let n_map = points.len().min(NUM_POINTS);
     if n_map < 6 {
         return Ok(Vec::new());
     }
     // 库侧 0 填充（后过滤填充匹配）。
     let mut k1 = vec![0f32; NUM_POINTS * 2];
     let mut d1 = vec![0f32; NUM_POINTS * DESC_DIM];
-    for (i, p) in frame.points.iter().take(n_map).enumerate() {
+    for (i, p) in points.iter().take(n_map).enumerate() {
         k1[2 * i] = p.uv[0];
         k1[2 * i + 1] = p.uv[1];
         d1[i * DESC_DIM..(i + 1) * DESC_DIM].copy_from_slice(&p.descriptor);
@@ -294,7 +354,7 @@ fn match_frame(
         if mi < 0 || mi as usize >= n_map || scores[qi] < SCORE_THRESHOLD {
             continue;
         }
-        pairs.push((qi, frame.points[mi as usize].position, scores[qi]));
+        pairs.push((qi, points[mi as usize].position, scores[qi]));
     }
     Ok(pairs)
 }
@@ -341,6 +401,7 @@ fn query_once(
     map: &VisionMap,
     feat: &FeatureMessage,
     odom: &OdomMessage,
+    cancelled: impl Fn() -> bool,
 ) -> Result<Option<PoseObservation>, Box<dyn std::error::Error>> {
     let t_body_prior = odom.body_pose(firefly_base::FrameId::MAP)?.matrix();
     let prior_pos = [
@@ -371,7 +432,12 @@ fn query_once(
     // 同一像素只保留最高分的地图对应，避免跨库帧重复计算信息量。
     let mut best = vec![None::<([f64; 3], f32)>; NUM_POINTS];
     for &frame_idx in &candidates {
-        for (qi, point, score) in match_frame(session, map, frame_idx, feat, &k0, &d0)? {
+        if cancelled() {
+            return Ok(None);
+        }
+        for (qi, point, score) in
+            match_points(session, &map.frames[frame_idx].points, feat, &k0, &d0)?
+        {
             if best[qi].is_none_or(|(_, previous)| score > previous) {
                 best[qi] = Some((point, score));
             }
@@ -480,7 +546,7 @@ mod tests {
             quat_w: q[3],
             ..Default::default()
         };
-        let observation = query_once(&mut session, &map, &features, &prior)
+        let observation = query_once(&mut session, &map, &features, &prior, || false)
             .unwrap()
             .expect("verified pose");
         let error = nalgebra::Vector3::new(

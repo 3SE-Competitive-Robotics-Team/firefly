@@ -32,10 +32,14 @@ VIO 在相机时刻更新滤波器，使用 IMU 预测输出 100 Hz 里程计；
 采用 **VIO + ALIKED + LightGlue + 回环**：VIO 提供局部运动估计，ALIKED
 提取图像特征，LightGlue 匹配候选关键帧，几何验证产生回环约束。
 
-当前代码已实现 ALIKED → LightGlue → 库图 PnP → `Firefly/PoseObservation`
-→ 定位融合 → `Firefly/CorrectedOdometry`，融合位于 `localization` 进程。
-在线关键帧库、地点检索、回环边管理与位姿图优化仍需实现。
-深度感知负责近场障碍，视觉定位融合与规划器保持独立职责。
+离线库图 PnP 通过 `Firefly/PoseObservation` 提供地图锚点；在线关键帧通过
+外观检索、RGB-D 几何验证和连续三帧确认产生 `Firefly/LoopConstraint`。
+`localization` 默认联合优化 VIO 相对边、地图锚点和回环边，发布
+`Firefly/CorrectedOdometry`；飞控仍使用连续的原始 odom 反馈。
+
+左目路标使用跨相机注册深度，深度另用于近场障碍感知。职责、阈值、参考源码和
+验收边界见 [在线回环](docs/loop_closure.md)。在线回环的模型集成测试与实际飞行
+回环验收分别报告，不以库图定位成功代替重访验证。
 
 ## 目录与职责
 

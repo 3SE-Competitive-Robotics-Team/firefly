@@ -4,6 +4,7 @@
 pub mod calibration;
 pub mod depth;
 mod refine;
+pub mod rgbd;
 
 use firefly_error::{Error, ErrorKind};
 use nalgebra::{Isometry3, Matrix3, Matrix4, Matrix6, Translation3, Unit, UnitQuaternion, Vector3};

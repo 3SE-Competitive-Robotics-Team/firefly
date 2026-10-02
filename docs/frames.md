@@ -85,10 +85,11 @@ CorrectedOdometry，不能在校正流缺失时用原始局部位置查询地图
 的 `optimize4DoF` 用航向差建立漂移旋转，`optimize6DoF` 使用
 `R_drift = R_optimized R_vioᵀ`，两者均以
 `t_drift = p_optimized - R_drift p_vio` 建立坐标变换。
-`loop_fusion` 通过位姿图优化获得校正位姿；本项目的误差态 EKF 是独立的融合实现，
+默认四自由度位姿图的残差、鲁棒核与输出关系见 [在线回环](loop_closure.md)。
+`loop_fusion` 通过位姿图优化获得校正位姿；本项目的可选误差态 EKF 是独立的融合实现，
 不能将其残差、增益或 Joseph 更新称为上述源码的直接移植。
 
-## 融合误差约定
+## 可选 ESKF 后端的融合误差约定
 
 令 `D=T_map_odom`、`V=T_odom_body`、观测 `Y=T_map_body`。
 统一使用 odom 系右扰动：

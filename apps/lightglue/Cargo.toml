@@ -27,5 +27,12 @@ nalgebra = { workspace = true }
 ndarray = { workspace = true }
 ort = { workspace = true }
 
+fastrace.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+firefly-localization.workspace = true
+
 [lints]
 workspace = true

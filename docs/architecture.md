@@ -1,7 +1,8 @@
 # firefly 自主无人机系统架构
 
-状态估计路线：VIO + ALIKED + LightGlue + 回环。当前视觉观测来自离线库图匹配
-与 PnP，并由定位融合器接入；在线关键帧图、回环约束管理与位姿图优化仍需实现。
+状态估计路线：VIO + ALIKED + LightGlue + 回环。离线库图 PnP 产生地图锚点，
+在线 RGB-D 关键帧匹配产生经过连续确认的回环边，`localization` 通过四自由度图
+统一优化并发布地图里程计。实现与验收范围见 [在线回环](loop_closure.md)。
 
 ```mermaid
 flowchart TD
@@ -83,7 +84,17 @@ flowchart TD
     end
 
     MSCKF -->|Odom| TOPIC_ODOM
-    TOPIC_ODOM -->|订阅| FSM
+    VISUAL["aliked / lightglue<br/>库图 PnP + 在线 RGB-D 回环"]
+    LOC["localization<br/>VIO 边 + 地图锚点 + 回环边"]
+    TOPIC_MAP_ODOM["Firefly/CorrectedOdometry"]
+    TOPIC_SENS --> VISUAL
+    TOPIC_DEPTH --> VISUAL
+    TOPIC_ODOM --> VISUAL
+    TOPIC_ODOM --> LOC
+    VISUAL -->|地图观测 / 关键帧 / 回环约束| LOC
+    LOC --> TOPIC_MAP_ODOM
+    TOPIC_MAP_ODOM -->|地图查询先验| VISUAL
+    TOPIC_MAP_ODOM -->|订阅| FSM
     TOPIC_DEPTH -->|订阅| RAY
     PEER -->|peer 轨迹| COST
     FSM -->|MINCO 轨迹| TOPIC_REF

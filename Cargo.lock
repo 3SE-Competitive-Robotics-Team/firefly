@@ -4249,8 +4249,10 @@ dependencies = [
 name = "lightglue"
 version = "0.1.0"
 dependencies = [
+ "fastrace",
  "firefly-base",
  "firefly-error",
+ "firefly-localization",
  "firefly-observability",
  "firefly-pubsub",
  "firefly-vision-map",
@@ -4260,6 +4262,8 @@ dependencies = [
  "nalgebra",
  "ndarray",
  "ort",
+ "serde",
+ "toml 1.1.6+spec-1.1.0",
 ]
 
 [[package]]

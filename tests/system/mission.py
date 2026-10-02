@@ -255,7 +255,7 @@ class Mission:
         self.wait(lambda: self.visual_updates >= 2, wall=60.)
         self.start("planner", [str(ROOT / "target/release/planner"), "--goal", *map(str, self.options.waypoints[0])])
         self.wait(lambda: "reference" in self.latest, wall=30.)
-        return {"source": "VIO + ALIKED-N16 + LightGlue + PnP + localization", "accepted_visual_updates": self.visual_updates, "online_loop_closure": "not_implemented"}
+        return {"source": "VIO + ALIKED-N16 + LightGlue + PnP + localization", "accepted_visual_updates": self.visual_updates, "online_loop_closure": "not_scored_in_this_mission"}
 
     def tracking(self):
         self.command("fc", "track")

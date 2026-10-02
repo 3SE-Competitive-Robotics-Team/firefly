@@ -117,3 +117,35 @@ OS/GPU 调度。地面真值仅用于验收判定，不生成目标坐标或估�
 完整配置、运行依赖版本、阶段时间窗、实际指标与退出码。HTML 为可读汇总。
 中途失败后的依赖阶段标为 blocked；碰撞通过只覆盖报告中实际观测到的时间，
 不能代替尚未完成的整段任务。该入口验证 ALIKED/LightGlue 库图重定位，不验证在线回环。
+
+## 深度注册与在线回环
+
+公式、固定参数、参考源码版本和实现边界见 [在线回环](loop_closure.md)。
+普通测试包含：
+
+- 深度基线解析位移与导数、倾斜平面、z-buffer、空洞、深度边缘和非法标定。
+- RGB-D 已知刚体运动、25% 外点、共线拒绝、平移导数。
+- 图的四自由度残差解析值、雅可比中心差分（`1e-6` 步长，`1e-6` 误差）、
+  鲁棒目标梯度（`1e-5` 误差）、位置/航向闭合与原始 odom 不变。
+- 未覆盖时间不外推、乱序拒绝、初始化丢失锁存、连续确认与错误深度拒绝。
+
+```bash
+cargo test -p firefly-vision-match -p firefly-localization -p lightglue -p localization
+```
+
+真实资产测试显式启用，`FIREFLY_LOOP_CAPTURES` 指向视觉地图清单中
+`capture_manifest` 所在目录，模型和地图需先按标准 pipeline 构建：
+
+```bash
+FIREFLY_LOOP_CAPTURES=models/rmuc2026/derived/vision/170f31928eb82cd9 \
+  cargo test --release -p lightglue -- --ignored
+```
+
+`real_model_revisit_contract` 必须生成经过三次确认的回环，注入 0.4m 漂移后，图优化
+输出误差小于 0.2m，并拒绝低质量回环。它重访同一采集图，不代表跨视角飞行成功。
+`real_model_insufficient_overlap_rejection_contract` 固定使用 `[-13,-1,1.2]` 与
+`[-12,-1,1.2]`、同航向的两帧 RMUC 库图，检查不足 30 对应时明确拒绝；该拒绝
+不计为定位或回环任务成功。不能把场景中的一米位置差直接等价为足够视觉重叠。
+
+普通 `accept_rmuc.py` 验证真实进程闭环、地图定位和故障处置；报告使用
+`not_scored_in_this_mission` 标注在线回环，不能用单测或库图更新次数代替长路线重访验收。

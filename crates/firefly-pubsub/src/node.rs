@@ -1,8 +1,9 @@
 //! 进程级共享 iceoryx2 节点。
 //!
 //! 对照 iceoryx2 官方示例（`examples/rust/publish_subscribe`）：每个进程创建
-//! **一个** [`IpcNode`]，所有话题的发布/订阅端口都由它派生。节点同时承担
-//! 生命周期管理——主循环以 [`Node::wait`] 驱动（收到 `SIGINT`/`SIGTERM`
+//! 主线程共享的 [`IpcNode`]，话题端口由其派生。独立传感器接收线程持有自己的
+//! 节点与端口，退出标志与主线程同步；节点不得跨越所属线程的生命周期。
+//! 节点以 [`Node::wait`] 驱动（收到 `SIGINT`/`SIGTERM`
 //! 返回 Err），退出时所有端口正常 Drop，iceoryx2 释放全部 IPC 资源。
 //!
 //! ⚠️ 硬杀进程（SIGKILL / pkill -9）会跳过 Drop，在内核里留下孤儿共享内存
