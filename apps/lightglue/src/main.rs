@@ -3,10 +3,10 @@
 //! 订阅当前帧特征（`Firefly/Features`）+ 矫正后里程计（先验，
 //! `Firefly/CorrectedOdometry`，无则回退 `Firefly/Odometry`）→ 库图空间短名单 →
 //! `models/lightglue-aliked-k512.onnx` 图-图匹配 → `PnP` 解全局位姿 →
-//! 经 `Firefly/PoseObservation` 发布视觉观测（`gicp` 内同一 `FusionFilter` 融合）。
+//! 经 `Firefly/PoseObservation` 发布视觉观测（`localization` 内同一 `FusionFilter` 融合）。
 //! 对照 VINS-Fusion `loop_fusion` 的检环 + 位姿边（`findConnection` 用 VIO
 //! 位姿作初值、`pose_graph` 以位姿边做联合优化），只是描述子换成 ALIKED，
-//! 且观测与 GICP 共用误差态 EKF 而非位姿图。
+//! 视觉观测由独立 localization 进程进行误差态融合。
 //!
 //! 运行：`cargo run --release -p lightglue -- --map <map.ffvmap> [-- --model ...]`。
 
@@ -202,7 +202,7 @@ fn run_loop(session: &mut Session, map: &VisionMap) -> Result<(), firefly_error:
         }
         // 特征时间戳即 sim 时钟；查询前后各 pump 一次（匹配阻塞下积压排空）。
         // 查询耗时即管线滞后主项（ORT 推理，rrd 侧只能看到特征时间戳，
-        // 到达滞后由 gicp 融合/超期日志体现）。
+        // 到达滞后由 localization 融合/超期日志体现）。
         firefly_observability::set_sim_time(feat.timestamp);
         firefly_observability::pump_log_ipc(&log_ipc);
         let t_query = std::time::Instant::now();

@@ -1,6 +1,6 @@
 //! 视觉定位消息（iceoryx2 zero-copy）。
 //!
-//! `aliked` 进程发布特征，`lightglue`/`gicp` 进程发布位姿观测，`fusion`
+//! `aliked` 进程发布特征，`lightglue` 进程发布位姿观测，`localization`
 //! 进程统一融合。对照 VINS-Fusion 的 `keyframe_pose`/`keyframe_point` 分工：
 //! 特征与观测分离，融合核保持传感器无关。
 
@@ -9,7 +9,7 @@ use iceoryx2::prelude::*;
 /// 特征话题（`aliked` 进程发布，`lightglue` 进程订阅）。
 pub const FEATURE_TOPIC: &str = "Firefly/Features";
 
-/// 位姿观测话题（`lightglue` 视觉观测 + `gicp` 几何观测发布，`fusion` 订阅）。
+/// 位姿观测话题（`lightglue` 视觉观测发布，`localization` 订阅）。
 pub const POSE_OBS_TOPIC: &str = "Firefly/PoseObservation";
 
 /// 单帧最大特征点数（与 `aliked-n16-k512.onnx` 导出约定一致）。
@@ -17,8 +17,6 @@ pub const MAX_FEATURES: usize = 512;
 /// ALIKED-N16 描述子维度（与导出约定一致）。
 pub const DESC_DIM: usize = 128;
 
-/// 观测来源（`PoseObservation::source`）。
-pub const OBS_SOURCE_GICP: u32 = 0;
 /// 观测来源：视觉全局定位（`aliked` + `lightglue` + `PnP`）。
 pub const OBS_SOURCE_VISUAL: u32 = 1;
 

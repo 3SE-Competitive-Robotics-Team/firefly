@@ -36,7 +36,6 @@ firefly-observability = { path = "crates/firefly-observability" }
 firefly-optimize = { path = "crates/firefly-optimize" }
 firefly-planner = { path = "crates/firefly-planner" }
 firefly-pubsub = { path = "crates/firefly-pubsub" }
-firefly-gicp = { path = "crates/firefly-gicp" }
 firefly-localization = { path = "crates/firefly-localization" }
 firefly-search = { path = "crates/firefly-search" }
 firefly-trajectory = { path = "crates/firefly-trajectory" }

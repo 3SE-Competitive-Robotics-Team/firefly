@@ -1,0 +1,9 @@
+# 固定启动先验与视觉位姿融合；数值缺省见 firefly-localization。
+[origin]
+position = [-13.0, 0.0, 0.405] # m，RMUC 停机坪机体原点
+
+[fusion.visual]
+max_innovation_trans = 20.0 # m，VINS-Fusion 特征验证后的门限
+max_innovation_rot = 0.5235987755982988 # rad
+max_correction_trans = 20.0 # m
+max_correction_rot = 0.5235987755982988 # rad

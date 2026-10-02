@@ -247,7 +247,7 @@ def _log_text(msg: LogMessage) -> None:
     rr.log(f"logs/{tag}", rr.TextLog(text, level=level))
 
 
-#: 可视化话题发布端上限（发布端 = vio + gicp + planner 三家；iceoryx2 缺省
+#: 可视化话题发布端上限（发布端 = vio + localization + planner 三家；iceoryx2 缺省
 #: 上限仅 2，第三家 `open` 必 `ExceedsMaxSupportedPublishers` 静默降级——
 #: 本进程先创建服务定上限，Rust 发布端只 open，见 `_subscribe`）。
 VIZ_MAX_PUBLISHERS = 8

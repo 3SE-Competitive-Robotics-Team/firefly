@@ -45,8 +45,7 @@ pub struct GateProfile {
 }
 
 impl GateProfile {
-    /// 紧门（几何配准路径：走廊等弱约束方向混叠风险高，厘米级漂移外
-    /// 即视为误锁，单步注入钳制在厘米级；缺省配置回落即此档）。
+    /// 保守门限：限制新息与单步注入；缺省配置使用此档。
     #[must_use]
     pub fn tight() -> Self {
         Self {
@@ -83,9 +82,7 @@ impl Default for GateProfile {
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FusionOptions {
-    /// 几何配准路径画像（GICP：紧门）。
-    pub gicp: GateProfile,
-    /// 特征验证路径画像（视觉观测：松门）。
+    /// 视觉观测门控；部署配置可使用经过特征验证后的宽门限。
     pub visual: GateProfile,
     /// 单步过程噪声：旋转 `rad²`（每 odom 步，100Hz 下按秒 ≈1e-5）。
     pub process_noise_rot: f64,
@@ -106,7 +103,7 @@ pub struct FusionOptions {
     pub min_inlier_ratio: f64,
     /// 最小内点数。
     pub min_num_inliers: usize,
-    /// 最大配准残差（`RegistrationResult::error` 为误差和，`>1e9` 视为发散）。
+    /// 最大观测误差；视觉观测为平均重投影误差，单位像素。
     pub max_registration_error: f64,
     /// 观测噪声下限：旋转 `rad²`（`R=h⁻¹` 失配时防过自信；离线标定：
     /// 好修正旋转噪声中位 ~1°，下限取 `(1°)²≈3e-4`）。
@@ -140,7 +137,6 @@ impl Default for FusionOptions {
             min_inlier_ratio: 0.3,
             min_num_inliers: 30,
             max_registration_error: 1e9,
-            gicp: GateProfile::tight(),
             visual: GateProfile::tight(),
             r_floor_rot: 3.0e-4,
             r_floor_pos: 5.0e-3,
@@ -162,7 +158,7 @@ pub enum RelocGate {
         threshold: f64,
         delta: Vector6<f64>,
     },
-    /// 配准层拒绝（收敛/内点/误差）。
+    /// 观测质量拒绝（收敛/内点/误差）。
     RejectedPrecheck { reason: &'static str },
     /// `chi2` 拒绝。
     RejectedChi2 { chi2: f64, threshold: f64 },
@@ -172,9 +168,8 @@ pub enum RelocGate {
     RejectedNumerical { reason: &'static str },
 }
 
-/// 单次融合观测（几何/视觉源通用数据包：位姿＋信息＋质量门控字段）。
-/// 画像（信任）不进包——按入口选择（`update` 几何画像，
-/// `update_with_observation` 视觉画像，见各自文档）。
+/// 单次视觉位姿观测：地图位姿、body 右扰动信息与质量字段。
+/// 两个更新入口共用 `FusionOptions::visual` 门控。
 #[derive(Debug, Clone, Copy)]
 pub struct Observation {
     /// 全局位姿观测 `T_target_source`（`target=全局地图`）。
@@ -185,7 +180,7 @@ pub struct Observation {
     pub num_inliers: usize,
     /// 总点数（内点率分母；未知传 0 跳过比率门）。
     pub total_points: usize,
-    /// 配准残差和。
+    /// 平均重投影误差，单位像素。
     pub error: f64,
     /// 是否收敛。
     pub converged: bool,
@@ -288,22 +283,15 @@ impl FusionFilter {
         self.last_vio = Some(*t_vio);
     }
 
-    /// 由 `GICP` 观测更新（几何配准路径：用 `options.gicp` 紧画像；视觉观测
-    /// 走 [`FusionFilter::update_with_observation`]，画像按入口选择，调用方
-    /// 不得混用）。
-    ///
-    /// `t_vio` 为当前 `VIO` 位姿（与 `predict` 同帧），`obs` 为观测包
-    /// （`num_inliers/total_points/error/converged` 来自 `RegistrationResult`）。
+    /// 由 body 右扰动信息矩阵与地图位姿更新，使用视觉门控。
     #[allow(clippy::too_many_lines)]
     #[fastrace::trace]
     pub fn update(&mut self, t_vio: &Matrix4<f64>, obs: &Observation) -> RelocGate {
-        let profile = self.options.gicp;
+        let profile = self.options.visual;
         self.update_inner(t_vio, obs, &profile)
     }
 
-    /// 内核：观测包＋画像。入口即来源（`update` 传几何画像，
-    /// `update_with_observation` 传视觉画像），画像选择集中在此两处，
-    /// 不向调用方扩散。
+    /// 观测质量、误差态更新与协方差重置共用的内核。
     #[allow(clippy::too_many_lines)]
     #[fastrace::trace]
     fn update_inner(
@@ -312,7 +300,6 @@ impl FusionFilter {
         obs: &Observation,
         profile: &GateProfile,
     ) -> RelocGate {
-        // 1. 配准层门控
         if !obs.converged {
             return RelocGate::RejectedPrecheck {
                 reason: "not converged",
@@ -438,7 +425,7 @@ impl FusionFilter {
                 }
             }
             log::debug!(
-                "GICP chi2 reject {chi2:.2} > {threshold:.2} (reject #{})",
+                "视觉定位 chi2 reject {chi2:.2} > {threshold:.2} (reject #{})",
                 self.consecutive_rejects
             );
             return RelocGate::RejectedChi2 { chi2, threshold };
@@ -477,7 +464,7 @@ impl FusionFilter {
         self.p = (self.p + self.p.transpose()) * 0.5;
 
         log::debug!(
-            "GICP fused chi2 {chi2:.2}/{threshold:.2} delta rot {:.3}° trans {:.3}m inliers {}/{}",
+            "视觉定位 fused chi2 {chi2:.2}/{threshold:.2} delta rot {:.3}° trans {:.3}m inliers {}/{}",
             rot_norm.to_degrees(),
             trans_norm,
             obs.num_inliers,
@@ -490,9 +477,8 @@ impl FusionFilter {
         }
     }
 
-    /// 由 `PoseObservation`（`Firefly/PoseObservation` 话题，几何/视觉源通用）
-    /// 更新：位姿由 `pos/quat` 组装，信息矩阵为协方差的逆；门控与注入复用
-    /// 内核，但取 `options.visual` 松画像（特征验证已在观测产生侧完成）。
+    /// 由 `Firefly/PoseObservation` 更新：位姿由 `pos/quat` 组装，
+    /// 信息矩阵为 body 右扰动协方差的逆；使用视觉门控与统一更新内核。
     ///
     /// # Panics
     ///
@@ -778,9 +764,9 @@ mod tests {
         let t_vio = Matrix4::identity();
         f.predict(&t_vio);
         // 5m 跳变（别名误锁形态）：新息门先于 chi2 拒收
-        let t_gicp = pose(Vector3::new(5.0, 0.0, 0.0), 0.0);
+        let t_observed = pose(Vector3::new(5.0, 0.0, 0.0), 0.0);
         let h = Matrix6::identity() * 1000.0;
-        let g = f.update(&t_vio, &obs(&t_gicp, &h));
+        let g = f.update(&t_vio, &obs(&t_observed, &h));
         assert!(matches!(g, RelocGate::RejectedInnovation { .. }));
     }
 
@@ -806,8 +792,8 @@ mod tests {
         assert!(matches!(g0, RelocGate::Accepted { .. }));
         // 0.25m 偏差（新息门内）+ 高置信：S≈2.6e-3，chi2≈24 > 12.6，拒收
         f.predict(&t_vio);
-        let t_gicp = pose(Vector3::new(0.25, 0.0, 0.0), 0.0);
-        let g = f.update(&t_vio, &obs(&t_gicp, &h_tight));
+        let t_observed = pose(Vector3::new(0.25, 0.0, 0.0), 0.0);
+        let g = f.update(&t_vio, &obs(&t_observed, &h_tight));
         assert!(matches!(g, RelocGate::RejectedChi2 { .. }));
         assert_eq!(f.consecutive_rejects(), 1);
     }
@@ -817,14 +803,14 @@ mod tests {
         let mut f = FusionFilter::with_default();
         let t_vio = Matrix4::identity();
         f.predict(&t_vio);
-        // VIO 漂 0.3m，GICP 给出真值（0.3m 观测）
-        let t_gicp = pose(Vector3::new(0.3, 0.0, 0.0), 0.0);
+        // VIO 漂 0.3m，视觉定位 给出真值（0.3m 观测）
+        let t_observed = pose(Vector3::new(0.3, 0.0, 0.0), 0.0);
         let mut h = Matrix6::identity();
         // 构造信息使 R≈0.04（与 fallback 一致），保证 chi2 通过
         for i in 0..6 {
             h[(i, i)] = 25.0;
         }
-        let g = f.update(&t_vio, &obs(&t_gicp, &h));
+        let g = f.update(&t_vio, &obs(&t_observed, &h));
         assert!(matches!(g, RelocGate::Accepted { .. }));
         let t_corr = f.corrected_pose(&t_vio);
         // 矫正后应向 0.3m 靠拢（非 100% 因 K<1）
@@ -909,14 +895,14 @@ mod tests {
     }
 
     #[test]
-    fn gicp_tight_gate_rejects_half_meter() {
+    fn default_tight_gate_rejects_half_meter() {
         let mut f = FusionFilter::with_default();
         let t_vio = Matrix4::identity();
         f.predict(&t_vio);
         // R=0.04（与视觉镜像测试同等置信）：chi2≈5 可过，新息 0.5 > 0.3 拒收
-        let t_gicp = pose(Vector3::new(0.5, 0.0, 0.0), 0.0);
+        let t_observed = pose(Vector3::new(0.5, 0.0, 0.0), 0.0);
         let h = Matrix6::identity() * 25.0;
-        let g = f.update(&t_vio, &obs(&t_gicp, &h));
+        let g = f.update(&t_vio, &obs(&t_observed, &h));
         assert!(matches!(g, RelocGate::RejectedInnovation { .. }));
         assert_eq!(f.consecutive_rejects(), 0);
     }
@@ -931,30 +917,30 @@ mod tests {
         let g0 = f.update(&t_vio, &obs(&Matrix4::identity(), &h_tight));
         assert!(matches!(g0, RelocGate::Accepted { .. }));
         // 新息门内 + 高置信 + 0.25m 偏差 → 连续 chi2 拒收 → 放大 R
-        let t_gicp = pose(Vector3::new(0.25, 0.0, 0.0), 0.0);
+        let t_observed = pose(Vector3::new(0.25, 0.0, 0.0), 0.0);
         for _ in 0..3 {
             f.predict(&t_vio);
-            let _ = f.update(&t_vio, &obs(&t_gicp, &h_tight));
+            let _ = f.update(&t_vio, &obs(&t_observed, &h_tight));
         }
         assert!(f.r_scale > 1.0);
         // 一次通过后复位
-        let t_gicp_ok = Matrix4::identity();
+        let t_observed_ok = Matrix4::identity();
         let h_ok = Matrix6::identity() * 10.0;
         f.predict(&t_vio);
-        let _ = f.update(&t_vio, &obs(&t_gicp_ok, &h_ok));
+        let _ = f.update(&t_vio, &obs(&t_observed_ok, &h_ok));
         assert_eq!(f.r_scale, 1.0);
         assert_eq!(f.consecutive_rejects(), 0);
     }
 
     #[test]
     fn correction_clamped() {
-        let gicp = GateProfile {
+        let visual = GateProfile {
             max_correction_trans: 0.1,
             max_correction_rot: 1.0_f64.to_radians(),
             ..GateProfile::tight()
         };
         let opts = FusionOptions {
-            gicp,
+            visual,
             ..Default::default()
         };
         let mut f = FusionFilter::new(opts);
@@ -962,9 +948,9 @@ mod tests {
         f.predict(&t_vio);
         // 新息门内（0.25m/4°）+ 高置信（R 被下限托住）：delta≈K·z 超限幅，
         // 旋转与平移分别截断（非真空断言：限幅是温和钳制非零修正）
-        let t_gicp = pose(Vector3::new(0.25, 0.0, 0.0), 4.0);
+        let t_observed = pose(Vector3::new(0.25, 0.0, 0.0), 4.0);
         let h = Matrix6::identity() * 1.0e6; // R→下限，K≈0.7/0.9
-        let g = f.update(&t_vio, &obs(&t_gicp, &h));
+        let g = f.update(&t_vio, &obs(&t_observed, &h));
         if let RelocGate::Accepted { delta, .. } = g {
             assert!(delta.fixed_rows::<3>(3).norm() <= 0.11);
             assert!(delta.fixed_rows::<3>(0).norm() <= 0.02);

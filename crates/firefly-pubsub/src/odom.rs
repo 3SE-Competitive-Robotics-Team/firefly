@@ -10,7 +10,7 @@ use iceoryx2::prelude::*;
 /// 里程计话题（对照 `docs/architecture.md` 的 `topic: odom`）。
 pub const ODOM_TOPIC: &str = "Firefly/Odometry";
 
-/// 校正后里程计话题（GICP 融合进程发布，planner 订阅，低频全局矫正 VIO 漂移）。
+/// 校正后里程计话题（localization 进程发布，planner 订阅，低频全局矫正 VIO 漂移）。
 pub const CORRECTED_ODOM_TOPIC: &str = "Firefly/CorrectedOdometry";
 
 /// 真值话题（MuJoCo 物理环境发布，仿真阶段感知位姿源）。

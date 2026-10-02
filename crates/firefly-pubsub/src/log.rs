@@ -31,7 +31,7 @@ pub mod level {
     pub const TRACE: u8 = 5;
 }
 
-/// 进程标签字节上限（64，如 `vio`/`planner`/`gicp`/`aliked`/`lightglue`）。
+/// 进程标签字节上限（64，如 `vio`/`planner`/`localization`/`aliked`/`lightglue`）。
 pub const TAG_MAX: usize = 64;
 /// 日志文本字节上限（512，超长截断）。
 pub const TEXT_MAX: usize = 512;

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
 description = "全局重定位与 VIO 的 ESKF 松耦合融合（几何/视觉位姿观测，R=h⁻¹，chi2 门控）"
-keywords = ["localization", "sensor-fusion", "ekf", "gicp", "robotics"]
+keywords = ["localization", "sensor-fusion", "ekf", "robotics"]
 categories = ["robotics", "science", "algorithms"]
 license.workspace = true
 repository.workspace = true
@@ -14,8 +14,6 @@ readme.workspace = true
 firefly-base.workspace = true
 fastrace = { workspace = true }
 firefly-error = { workspace = true }
-firefly-gicp = { path = "../firefly-gicp" }
-firefly-map = { path = "../firefly-map" }
 firefly-pubsub = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }

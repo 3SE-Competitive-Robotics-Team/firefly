@@ -80,7 +80,7 @@ cargo run --release -p fc
 ## 3. 视觉定位与规划
 
 VIO 输出重力对齐的局部坐标：初始位置为零，航向为规范自由度。
-RMUC 静态地图和视觉库图在场地坐标系；`configs/gicp.toml [origin]` 配置固定启动位置与航向，
+RMUC 静态地图和视觉库图在场地坐标系；`configs/localization.toml [origin]` 配置固定启动位置与航向，
 由定位进程建立 map←odom 变换。改变启动点必须同步配置。
 不能直接把原始里程计当成场地坐标，也不能用真值提供在线对齐。
 
@@ -88,19 +88,19 @@ RMUC 静态地图和视觉库图在场地坐标系；`configs/gicp.toml [origin]
 
 | 文件 | 用途 |
 |---|---|
-| `apps/planner/maps/rmuc2026.ffmap` | planner 与 gicp 的默认静态地图 |
+| `apps/planner/maps/rmuc2026.ffmap` | planner 的默认静态地图 |
 | `apps/planner/maps/rmuc2026.ffvmap` | LightGlue 视觉库图 |
 | `models/aliked-n16-k512.onnx` | ALIKED 特征提取权重，可用 `--model` 指定 |
 | `models/lightglue-aliked-k512.onnx` | LightGlue 匹配权重，可用 `--model` 指定 |
 
 `firefly-cad-build` 从碰撞体的相同体素格导出 `.ffmap` 并核验坐标；
-缺失时 planner / gicp 启动失败。
+缺失时 planner 启动失败。
 `--map` 可指定其他路径，但内容必须对应当前 RMUC 场地。
 
 ```bash
 cargo run --release -p aliked
 cargo run --release -p lightglue -- --map apps/planner/maps/rmuc2026.ffvmap
-cargo run --release -p gicp
+cargo run --release -p localization
 ```
 
 当前视觉链路是特征提取 → 库图匹配 → PnP 位姿观测 → 定位融合 →

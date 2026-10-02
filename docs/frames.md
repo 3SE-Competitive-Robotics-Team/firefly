@@ -57,7 +57,7 @@ v_odom_ref = R_odom_map v_map_ref
 
 ## 固定启动条件
 
-`configs/gicp.toml` 的 `[origin]` 显式声明局部 VIO 原点在地图中的 `position` 和
+`configs/localization.toml` 的 `[origin]` 显式声明局部 VIO 原点在地图中的 `position` 和
 `yaw`。RMUC 默认位置为 `[-13,0,0.405]` 米、航向零；这些是固定部署的已知先验，
 不是从在线 GroundTruth 取出的估计器初值。改变启动位置或初始航向必须同步配置。
 
@@ -95,7 +95,7 @@ P_posterior = (I-K) P (I-K)ᵀ + K R_odom Kᵀ
 P_new = Jr(delta) P_posterior Jr(delta)ᵀ
 ```
 
-GICP 的 `J=[R skew(p), -R]` 与右乘增量对应，Hessian 的逆是 body 右扰动协方差。
+视觉 PnP 的位姿协方差必须表达为 body 右扰动，顺序为 `[rot, trans]`。
 视觉位姿的经验相机协方差先经 `Ad(T_body_camera)` 转到 body，再进入相同融合入口。
 若修正被限幅，增益的相应行同步缩放后参与协方差更新。
 

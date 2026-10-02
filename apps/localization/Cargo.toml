@@ -3,24 +3,22 @@ description.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
-keywords = ['gicp', 'localization', 'slam', 'robotics']
+keywords = ['localization', 'slam', 'robotics']
 categories = ['robotics', 'science', 'algorithms']
-name = "gicp"
+name = "localization"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "gicp"
+name = "localization"
 path = "src/main.rs"
 
 [dependencies]
 firefly-base.workspace = true
 fastrace = { workspace = true }
 firefly-error = { workspace = true }
-firefly-gicp = { workspace = true }
 firefly-localization = { workspace = true }
-firefly-map = { workspace = true }
 firefly-observability = { workspace = true }
 firefly-pubsub = { workspace = true }
 iceoryx2 = { workspace = true }

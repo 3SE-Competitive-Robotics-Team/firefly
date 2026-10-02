@@ -33,9 +33,9 @@ VIO 在相机时刻更新滤波器，使用 IMU 预测输出 100 Hz 里程计；
 提取图像特征，LightGlue 匹配候选关键帧，几何验证产生回环约束。
 
 当前代码已实现 ALIKED → LightGlue → 库图 PnP → `Firefly/PoseObservation`
-→ 定位融合 → `Firefly/CorrectedOdometry`，融合位于 `gicp` 进程。
+→ 定位融合 → `Firefly/CorrectedOdometry`，融合位于 `localization` 进程。
 在线关键帧库、地点检索、回环边管理与位姿图优化仍需实现。
-深度感知、GICP 定位及规划器作为独立组件保留。
+深度感知负责近场障碍，视觉定位融合与规划器保持独立职责。
 
 ## 目录与职责
 
@@ -44,10 +44,10 @@ VIO 在相机时刻更新滤波器，使用 IMU 预测输出 100 Hz 里程计；
 | `crates/firefly-vio*` | 对照 OpenVINS：类型、KLT 前端、IMU 传播、静态/动态初始化、MSCKF/SLAM 更新 |
 | `crates/firefly-voxel-svio` | VIO 路标的体素索引与选点 |
 | `crates/firefly-{map,search,trajectory,optimize,cost,obstacle,planner}` | 占据地图、A*、MINCO、L-BFGS、代价、动态障碍与重规划 |
-| `crates/firefly-{gicp,localization,vision-map,vision-match}` | 点云配准、定位融合、视觉库图与匹配 |
+| `crates/firefly-{localization,vision-map,vision-match}` | 定位融合、视觉库图与匹配 |
 | `crates/firefly-flight` | 飞行模式、安全条件、姿态/位置控制与电机分配 |
 | `crates/firefly-{pubsub,error,observability,render}` | IPC 消息、错误、日志/trace、共享 Bevy 场景与光照 |
-| `apps/` | Rust 进程 `vio`、`fc`、`planner`、`gicp`、`aliked`、`lightglue`、`render`、`quad`、`ffctl`；Python 进程 `firefly-sim`、`firefly-viz` |
+| `apps/` | Rust 进程 `vio`、`fc`、`planner`、`localization`、`aliked`、`lightglue`、`render`、`quad`、`ffctl`；Python 进程 `firefly-sim`、`firefly-viz` |
 | `packages/` | Python 库 `firefly-mujoco` 与 CAD 资产处理 `firefly-cad` |
 | `configs/` | 每应用一份 TOML，缺键回落代码默认值，缺文件报错 |
 | `tests/`、`docs/` | 评测指标、启动检查与运行/架构说明 |
@@ -107,7 +107,7 @@ IMU 窗口与双目视差检查。观察就绪日志或里程计的
 ```
 
 **坐标约定**：原始里程计在重力对齐的局部系运行，初始位置为零，航向属于规范
-自由度。地图对齐由 `configs/gicp.toml [origin]` 的固定启动先验建立，并由定位修正；不能将
+自由度。地图对齐由 `configs/localization.toml [origin]` 的固定启动先验建立，并由定位修正；不能将
 局部里程计直接当成 MuJoCo 世界坐标。
 评测可对轨迹进行固定尺度的航向与平移对齐，变换只作用于评测数据。
 

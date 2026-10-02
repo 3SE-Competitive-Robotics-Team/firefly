@@ -243,11 +243,11 @@ class Mission:
         return {"stable_seconds": self.options.hover_seconds}
 
     def map_ready(self):
-        self.start("gicp", [str(ROOT / "target/release/gicp")])
+        self.start("localization", [str(ROOT / "target/release/localization")])
         self.wait(lambda: "corrected" in self.latest and self.latest["corrected"][4], wall=30.)
         self.start("planner", [str(ROOT / "target/release/planner"), "--goal", *map(str, self.options.waypoints[0])])
         self.wait(lambda: "reference" in self.latest, wall=30.)
-        return {"source": "VIO + GICP with configured fixed startup prior", "visual_relocalization": "not_run"}
+        return {"source": "VIO + visual localization with configured fixed startup prior", "visual_relocalization": "not_run"}
 
     def tracking(self):
         self.command("fc", "track")
@@ -307,7 +307,7 @@ class Mission:
         failures = []
         results = {}
         # 先停止物理，保留日志写入器直到所有计算进程都退出。
-        order = ["sim", "planner", "gicp", "fc", "vio", "render"]
+        order = ["sim", "planner", "localization", "fc", "vio", "render"]
         for name in order:
             if name not in self.processes:
                 continue

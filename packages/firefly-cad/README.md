@@ -36,7 +36,7 @@ uv run --all-packages --extra test python scripts/prepare_rmuc.py /path/to/RMUC2
 | `models/rmuc2026/derived/raw/field_raw.npz` | 归一化顶点、三角形、逐面颜色、零件 tag |
 | `models/rmuc2026/field.glb` | Bevy / Rerun；CAD 颜色与程序化材质，不减面、不焊接 |
 | `models/rmuc2026/rmuc2026_collision.json` | MuJoCo；米制 `[cx,cy,cz,hx,hy,hz]` 碰撞盒 |
-| `apps/planner/maps/rmuc2026.ffmap` | planner / GICP；与物理碰撞同一体素格，未额外膨胀 |
+| `apps/planner/maps/rmuc2026.ffmap` | planner；与物理碰撞同一体素格，未额外膨胀 |
 | `models/rmuc2026/asset_manifest.json` | 源 SHA-256、转换参数、依赖版本、坐标变换、产物 hash 与几何验收 |
 | `models/rmuc2026/preparation_report.json` | 完整入口各阶段的实际验收状态 |
 

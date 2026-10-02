@@ -1,4 +1,4 @@
-//! `configs/gicp.toml` 加载（纯数据 `Options`，缺键回落 `Default`）。
+//! `configs/localization.toml` 加载（纯数据 `Options`，缺键回落 `Default`）。
 
 use std::path::Path;
 
@@ -6,16 +6,13 @@ use firefly_error::{Error, ErrorKind, Result};
 use serde::Deserialize;
 
 use crate::filter::FusionOptions;
-use crate::reloc::RelocOptions;
 
-/// 顶层：`[reloc]` + `[fusion]`。
+/// 地图启动先验与视觉融合配置。
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LocalizationConfig {
     /// 固定启动先验 map←odom；属于部署配置，不来自在线真值。
     pub origin: InitialAlignment,
-    /// 重定位参数。
-    pub reloc: RelocOptions,
     /// 融合参数。
     pub fusion: FusionOptions,
 }
@@ -87,8 +84,6 @@ mod tests {
     #[test]
     fn defaults_roundtrip() {
         let cfg = LocalizationConfig::default();
-        assert!((cfg.reloc.downsampling_resolution - 0.2).abs() < 1e-12);
-        assert!((cfg.reloc.max_correspondence_distance - 2.0).abs() < 1e-12);
         assert!((cfg.fusion.min_inlier_ratio - 0.3).abs() < 1e-12);
     }
 
@@ -96,7 +91,6 @@ mod tests {
     fn partial_toml_falls_back() {
         let cfg: LocalizationConfig = toml::from_str("fusion.min_inlier_ratio = 0.4").unwrap();
         assert!((cfg.fusion.min_inlier_ratio - 0.4).abs() < 1e-12);
-        assert!((cfg.reloc.downsampling_resolution - 0.2).abs() < 1e-12);
     }
 
     /// 部分子表缺键回落紧画像（保守：缺配置不断言零值，不静默放行）。
@@ -107,23 +101,18 @@ mod tests {
         assert!((cfg.fusion.visual.max_innovation_trans - 20.0).abs() < 1e-12);
         assert!((cfg.fusion.visual.max_innovation_rot - 5.0_f64.to_radians()).abs() < 1e-12);
         assert!((cfg.fusion.visual.max_correction_trans - 0.5).abs() < 1e-12);
-        assert!((cfg.fusion.gicp.max_innovation_trans - 0.3).abs() < 1e-12);
     }
 
     #[test]
     fn shipped_config_parses() {
         let cfg = LocalizationConfig::load(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../configs/gicp.toml"
+            "/../../configs/localization.toml"
         ))
-        .expect("configs/gicp.toml must parse");
-        assert!((cfg.reloc.downsampling_resolution - 0.1).abs() < 1e-12);
+        .expect("configs/localization.toml must parse");
         assert!((cfg.fusion.min_inlier_ratio - 0.3).abs() < 1e-12);
-        // 双画像接线：几何紧门 / 视觉松门（VINS 尺度）
-        assert!((cfg.fusion.gicp.max_innovation_trans - 0.3).abs() < 1e-12);
         assert!((cfg.fusion.visual.max_innovation_trans - 20.0).abs() < 1e-12);
         assert!((cfg.fusion.process_noise_pos_per_m - 0.04).abs() < 1e-12);
-        assert!((cfg.fusion.gicp.max_correction_trans - 0.5).abs() < 1e-12);
         assert!((cfg.fusion.visual.max_correction_trans - 20.0).abs() < 1e-12);
         assert!((cfg.fusion.p_min_pos - 0.25).abs() < 1e-12);
     }

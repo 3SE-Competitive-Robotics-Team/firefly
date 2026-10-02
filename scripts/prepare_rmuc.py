@@ -61,7 +61,7 @@ def main():
         run("physics", [sys.executable, "-m", "pytest", "tests/system/test_rmuc_assets.py", "-q", "-p", "no:cacheprovider"], env)
         if args.assets_only:
             report["scope"] = "assets_only"
-        elif run("release_build", ["cargo", "build", "--release", "-j", "2", "-p", "render", "-p", "vio", "-p", "fc", "-p", "ffctl", "-p", "gicp", "-p", "planner", "-p", "aliked", "-p", "lightglue"]):
+        elif run("release_build", ["cargo", "build", "--release", "-j", "2", "-p", "render", "-p", "vio", "-p", "fc", "-p", "ffctl", "-p", "localization", "-p", "planner", "-p", "aliked", "-p", "lightglue"]):
             run("drone_visual", [sys.executable, str(ROOT / "scripts/fetch_drone_model.py")])
             run("planning", ["cargo", "test", "--release", "-p", "firefly-planner", "--test", "rmuc_asset", "--", "--ignored"])
             assets = capture_assets()

@@ -1,12 +1,4 @@
-//! GICP 全局重定位进程：低频矫正 VIO 漂移。
-//!
-//! 订阅 `Firefly/Odometry`（VIO）+ `Firefly/Depth`（深度），以静态先验
-//! `MapFile` 为靶图做 `GICP`，经 `FusionFilter`（`R=h⁻¹` + `chi2`）融合后
-//! 发布 `Firefly/CorrectedOdometry` 供 `planner` 订阅（回退到原始 odom）。
-//!
-//! 运行：`cargo run --release -p gicp`（配合 `uv run firefly-sim` +
-//! `cargo run --release -p vio` + `cargo run --release -p planner`）
-//! 或 `cargo run --release -p gicp -- --map apps/planner/maps/rmuc2026.ffmap`。
+//! 视觉定位融合：VIO 时间配对、map←odom 修正与地图里程计发布。
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -14,15 +6,10 @@ use std::time::Duration;
 use fastrace::prelude::*;
 use firefly_base::{FrameId, RigidTransform};
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_gicp::points::point_cloud::PointCloud;
-use firefly_gicp::points::traits::{PointCloudMut, PointCloudTrait};
 use firefly_localization::config::LocalizationConfig;
 use firefly_localization::convert::corrected_odom;
-use firefly_localization::filter::{FusionFilter, Observation, RelocGate};
-use firefly_localization::reloc::GlobalRelocalizer;
-use firefly_map::{DepthCamera, MapFile};
+use firefly_localization::filter::{FusionFilter, RelocGate};
 use firefly_observability::init as init_observability;
-use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage};
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::odom::CORRECTED_ODOM_TOPIC;
 use firefly_pubsub::odom::OdomMessage;
@@ -32,16 +19,15 @@ use firefly_pubsub::vision::{POSE_OBS_TOPIC, PoseObservation};
 use firefly_pubsub::viz::{VizMessage, VizPublisher, kind};
 use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetRunResult;
-use nalgebra::{Isometry3, Matrix4, Quaternion, Translation3, UnitQuaternion, Vector3, Vector4};
+use nalgebra::{Isometry3, Matrix4, Quaternion, Translation3, UnitQuaternion, Vector3};
 
-const LOOP_PERIOD: Duration = Duration::from_millis(100);
-const RELOC_PERIOD: usize = 10;
+const LOOP_PERIOD: Duration = Duration::from_millis(10);
 /// 矫正后位姿可视化节拍（10Hz 主循环每 tick 发一次位姿+轨迹段，与
 /// `vio/odom`/`gt/pose` 同频率，rrd 里可逐点对比三条轨迹）。
 const VIZ_PERIOD: usize = 1;
 /// 矫正后位姿图例颜色（绿，与 vio 橙 / 真值蓝区分）。
 const CORRECTED_COLOR: (u8, u8, u8) = (60, 200, 80);
-const DEFAULT_CONFIG: &str = "configs/gicp.toml";
+const DEFAULT_CONFIG: &str = "configs/localization.toml";
 const ODOM_FRESH_TIMEOUT: f64 = 1.0;
 /// 视觉观测待融合队列上限（条）：观测先到、odom 后到时暂存，按 `timestamp`
 /// 排序，odom 追上即融合；溢出时丢最旧（对端断流的背压语义，非延时等待）。
@@ -56,7 +42,6 @@ const ODOM_HIST_CAP: usize = 1000;
 
 /// 命令行参数。
 struct Args {
-    map: Option<PathBuf>,
     config: PathBuf,
     odom_topic: String,
 }
@@ -64,17 +49,11 @@ struct Args {
 fn parse_args() -> Result<Args> {
     let mut it = std::env::args().skip(1);
     let mut args = Args {
-        map: None,
         config: PathBuf::from(DEFAULT_CONFIG),
         odom_topic: firefly_pubsub::odom::ODOM_TOPIC.to_string(),
     };
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--map" => {
-                args.map = Some(PathBuf::from(it.next().ok_or_else(|| {
-                    Error::new(ErrorKind::InvalidArgument, "missing --map value")
-                })?));
-            }
             "--odom-topic" => {
                 args.odom_topic = it.next().ok_or_else(|| {
                     Error::new(ErrorKind::InvalidArgument, "missing --odom-topic value")
@@ -96,31 +75,13 @@ fn parse_args() -> Result<Args> {
     Ok(args)
 }
 
-fn open_sub<T: std::fmt::Debug + ZeroCopySend + 'static>(
-    node: &firefly_pubsub::node::IpcNode,
-    topic: &str,
-    ok_msg: &str,
-    err_msg: &str,
-) -> Option<Subscriber<T>> {
-    match Subscriber::<T>::with_topic(node, topic) {
-        Ok(s) => {
-            log::info!("{ok_msg}（topic {topic}）");
-            Some(s)
-        }
-        Err(e) => {
-            log::warn!("{err_msg}: {e}");
-            None
-        }
-    }
-}
-
 /// 历史 odom 在目标时刻插值（位置 lerp + 姿态 slerp；时刻越界返回空，
 /// 该 tick 跳过——不以外推污染配准）。
 fn interp_odom(
     hist: &std::collections::VecDeque<(f64, OdomMessage)>,
     t: f64,
 ) -> Option<Matrix4<f64>> {
-    if hist.len() < 2 {
+    if !t.is_finite() || hist.len() < 2 || t < hist.front()?.0 || t > hist.back()?.0 {
         return None;
     }
     let mut prev = &hist[0];
@@ -155,32 +116,6 @@ fn interp_odom(
     None
 }
 
-fn depth_to_body_cloud(depth: &[f32], cam: &DepthCamera) -> PointCloud {
-    let mut pts = Vec::new();
-    let mut v = 0usize;
-    while v < cam.height {
-        let mut u = 0usize;
-        while u < cam.width {
-            let z = f64::from(depth[v * cam.width + u]);
-            if z > 0.05 && z <= cam.max_range && z.is_finite() {
-                let dx = (u as f64 - cam.cx) / cam.focal;
-                let dy = -(v as f64 - cam.cy) / cam.focal;
-                let hit_cam = Vector3::new(dx * z, dy * z, -z);
-                let hit_body = cam.pos_in_body + cam.rot_cam_to_body * hit_cam;
-                pts.push(hit_body);
-            }
-            u += cam.pixel_step;
-        }
-        v += cam.pixel_step;
-    }
-    let mut cloud = PointCloud::new();
-    cloud.resize(pts.len());
-    for (i, p) in pts.into_iter().enumerate() {
-        cloud.set_point(i, Vector4::new(p.x, p.y, p.z, 1.0));
-    }
-    cloud
-}
-
 /// 门控判决映射为诊断四元组 `[metric, limit, applied_trans_m, accepted]`。
 ///
 /// `metric/limit` 为本次实际判决的门（接受与 `chi2` 拒收时为 `chi2`/阈值，
@@ -204,15 +139,12 @@ fn gate_diag(gate: &RelocGate, max_innovation_trans: f64) -> Option<[f64; 4]> {
 
 struct App {
     fusion: FusionFilter,
-    reloc: Option<GlobalRelocalizer>,
     reloc_ticks: usize,
     viewer_odom: Option<OdomSubscriber>,
-    depth: Option<Subscriber<DepthImageMessage>>,
     corrected_pub: Option<CorrectedOdomPublisher>,
     viz_pub: Option<VizPublisher>,
     corr_prev: Option<[f64; 3]>,
     latest_odom: Option<OdomMessage>,
-    latest_depth: Option<DepthImageMessage>,
     /// 视觉位姿观测订阅（`lightglue` 进程发布，同一 `FusionFilter` 融合）。
     visual_obs: Option<Subscriber<PoseObservation>>,
     /// odom 环形历史（时间戳，消息）：按观测时间戳插值位姿，消除
@@ -222,11 +154,11 @@ struct App {
     /// 待融合视觉观测（按 `timestamp` 排序）：观测先到、odom 后到时暂存，
     /// odom 追上即融合——事件驱动的订阅关系，无延时等待。
     pending_visual: std::collections::VecDeque<PoseObservation>,
-    last_odom_recv: f64,
-    depth_cam: DepthCamera,
-    /// 新息门限快照（`cfg.fusion.{gicp,visual}.max_innovation_trans`，门控
+    last_odom_recv: std::time::Instant,
+    last_published: f64,
+    last_visual: f64,
+    /// 新息门限快照（`cfg.fusion.visual.max_innovation_trans`，门控
     /// 诊断标量的 `limit` 分量与滤波器用同一值，按路径传入）。
-    innov_limit_gicp: f64,
     innov_limit_visual: f64,
     t_sim: f64,
     /// 日志聚合句柄（主循环作用域持有，每 tick 传给 `pump_log_ipc`）。
@@ -236,54 +168,17 @@ struct App {
 
 impl App {
     #[allow(clippy::needless_pass_by_value)]
-    fn new(map_file: MapFile, cfg: LocalizationConfig, odom_topic: &str) -> Result<Self> {
-        let innov_limit_gicp = cfg.fusion.gicp.max_innovation_trans;
+    fn new(cfg: LocalizationConfig, odom_topic: &str) -> Result<Self> {
         let innov_limit_visual = cfg.fusion.visual.max_innovation_trans;
         let mut fusion = FusionFilter::new(cfg.fusion);
         fusion
             .set_alignment(cfg.origin.transform()?)
             .map_err(|e| e.with_context("operation", "initialize map<-odom prior"))?;
-        let reloc = match GlobalRelocalizer::from_map_file(&map_file, cfg.reloc) {
-            Ok(r) => {
-                log::info!("全局重定位靶图就绪（{} 点）", r.target().num_points());
-                Some(r)
-            }
-            Err(e) => {
-                log::warn!("全局重定位靶图不可用（空地图）：{e}");
-                None
-            }
-        };
         let node = create_node()?;
-        let log_ipc = firefly_observability::init_ipc(&node, "gicp");
-        let odom_sub = match OdomSubscriber::with_topic(&node, odom_topic) {
-            Ok(s) => {
-                log::info!("已订阅 odom 话题（{odom_topic}，VIO 状态源）");
-                Some(s)
-            }
-            Err(e) => {
-                log::warn!("odom 订阅不可用：{e}");
-                None
-            }
-        };
-        let depth = open_sub::<DepthImageMessage>(
-            &node,
-            DEPTH_TOPIC,
-            "已订阅深度话题（感知输入）",
-            "深度订阅不可用，GICP 停用",
-        );
-        let visual_obs = open_sub::<PoseObservation>(
-            &node,
-            POSE_OBS_TOPIC,
-            "已订阅视觉位姿观测（lightglue 输入）",
-            "视觉观测订阅不可用，仅 GICP 融合",
-        );
-        let corrected_pub = match CorrectedOdomPublisher::new(&node) {
-            Ok(p) => Some(p),
-            Err(e) => {
-                log::warn!("校正后里程计发布不可用：{e}");
-                None
-            }
-        };
+        let log_ipc = firefly_observability::init_ipc(&node, "localization");
+        let odom_sub = Some(OdomSubscriber::with_topic(&node, odom_topic)?);
+        let visual_obs = Some(Subscriber::with_topic(&node, POSE_OBS_TOPIC)?);
+        let corrected_pub = Some(CorrectedOdomPublisher::new(&node)?);
         let viz_pub = match VizPublisher::new(&node) {
             Ok(p) => {
                 log::info!(
@@ -299,21 +194,18 @@ impl App {
         };
         Ok(Self {
             fusion,
-            reloc,
             reloc_ticks: 0,
             viewer_odom: odom_sub,
-            depth,
             visual_obs,
             corrected_pub,
             viz_pub,
             corr_prev: None,
             latest_odom: None,
-            latest_depth: None,
             odom_hist: std::collections::VecDeque::with_capacity(ODOM_HIST_CAP),
             pending_visual: std::collections::VecDeque::with_capacity(PENDING_VISUAL_CAP),
-            last_odom_recv: f64::NEG_INFINITY,
-            depth_cam: DepthCamera::mujoco_default(),
-            innov_limit_gicp,
+            last_odom_recv: std::time::Instant::now(),
+            last_published: f64::NEG_INFINITY,
+            last_visual: f64::NEG_INFINITY,
             innov_limit_visual,
             t_sim: 0.0,
             log_ipc,
@@ -326,14 +218,21 @@ impl App {
             let mut odom_arrived = false;
             while let Some(sample) = sub.receive()? {
                 let m: OdomMessage = *sample;
-                if !m.timestamp.is_finite() || m.timestamp < 0.0 {
+                if !m.is_initialized
+                    || !m.timestamp.is_finite()
+                    || m.timestamp < 0.0
+                    || self
+                        .latest_odom
+                        .as_ref()
+                        .is_some_and(|last| m.timestamp <= last.timestamp)
+                {
                     continue;
                 }
                 let Ok(pose) = m.body_pose(FrameId::ODOM) else {
                     continue;
                 };
                 self.t_sim = self.t_sim.max(m.timestamp);
-                self.last_odom_recv = m.timestamp;
+                self.last_odom_recv = std::time::Instant::now();
                 let t_vio = pose.matrix();
                 self.fusion.predict(&t_vio);
                 self.latest_odom = Some(m);
@@ -349,19 +248,11 @@ impl App {
                 self.drain_pending_visual();
             }
         }
-        if let Some(sub) = &self.depth {
-            while let Some(sample) = sub.receive()? {
-                let m: DepthImageMessage = *sample;
-                self.t_sim = self.t_sim.max(m.timestamp);
-                self.latest_depth = Some(m);
-            }
-        }
         if self.visual_obs.is_some() {
             let mut arrived = Vec::new();
             if let Some(sub) = &self.visual_obs {
                 while let Some(sample) = sub.receive()? {
                     let obs: PoseObservation = *sample;
-                    self.t_sim = self.t_sim.max(obs.timestamp);
                     arrived.push(obs);
                 }
             }
@@ -377,6 +268,17 @@ impl App {
     /// 384B 过栈拷贝的代价远小于一次 `PnP`/融合，见 `fuse_visual` 同惯例）。
     #[allow(clippy::large_types_passed_by_value)]
     fn enqueue_visual(&mut self, obs: PoseObservation) {
+        if !obs.timestamp.is_finite()
+            || obs.timestamp < 0.
+            || obs.timestamp <= self.last_visual
+            || obs.source != firefly_pubsub::vision::OBS_SOURCE_VISUAL
+            || self
+                .pending_visual
+                .iter()
+                .any(|o| o.timestamp == obs.timestamp)
+        {
+            return;
+        }
         let pos = self
             .pending_visual
             .iter()
@@ -392,7 +294,10 @@ impl App {
     /// 队首仍超前（odom 未追上）即停——等下次 odom 到达再排，不丢弃。
     fn drain_pending_visual(&mut self) {
         while let Some(ts) = self.pending_visual.front().map(|o| o.timestamp) {
-            if self.t_sim - ts > PENDING_VISUAL_TIMEOUT {
+            if ts <= self.last_visual
+                || self.odom_hist.front().is_some_and(|o| ts < o.0)
+                || self.t_sim - ts > PENDING_VISUAL_TIMEOUT
+            {
                 self.pending_visual.pop_front();
                 log::info!(
                     "视觉观测超期丢弃（ts={ts:.2}，滞后 {:.2}s，少一次修正）",
@@ -409,6 +314,7 @@ impl App {
                 obs.timestamp,
                 self.t_sim - obs.timestamp
             );
+            self.last_visual = ts;
             self.fuse_visual(&obs);
         }
     }
@@ -448,68 +354,6 @@ impl App {
         }
     }
 
-    #[fastrace::trace]
-    fn try_relocalize(&mut self) {
-        let Some(reloc) = &self.reloc else { return };
-        let Some(depth) = &self.latest_depth else {
-            return;
-        };
-        let Some(_odom) = &self.latest_odom else {
-            return;
-        };
-        if !self.reloc_ticks.is_multiple_of(RELOC_PERIOD) {
-            return;
-        }
-        // 初值与量测同源时刻：按深度时间戳插值 odom（最新配对失配可达 0.1s）
-        let Some(t_vio) = interp_odom(&self.odom_hist, depth.timestamp) else {
-            return;
-        };
-        let body_cloud = depth_to_body_cloud(&depth.data, &self.depth_cam);
-        if body_cloud.num_points() < 30 {
-            return;
-        }
-        let init = self.fusion.corrected_pose(&t_vio);
-        let res = reloc.relocalize(&body_cloud, &init);
-        let total = res.total_points;
-        let r = &res.result;
-        let gate = self.fusion.update(
-            &t_vio,
-            &Observation {
-                t_global: r.t_target_source,
-                h: r.h,
-                num_inliers: r.num_inliers,
-                total_points: total,
-                error: r.error,
-                converged: r.converged,
-            },
-        );
-        self.publish_gate_viz(&gate, self.innov_limit_gicp);
-        match gate {
-            RelocGate::Accepted {
-                chi2, threshold, ..
-            } => {
-                log::info!(
-                    "GICP矫正接受 chi2 {chi2:.2}/{threshold:.2} inliers {}/{} err {:.3}",
-                    r.num_inliers,
-                    total,
-                    r.error
-                );
-            }
-            RelocGate::RejectedChi2 { chi2, threshold } => {
-                log::debug!("GICP chi2拒收 {chi2:.2}>{threshold:.2}");
-            }
-            RelocGate::RejectedInnovation { trans, rot_deg } => {
-                log::debug!("GICP新息拒收 trans {trans:.2}m rot {rot_deg:.2}°（疑似别名误锁）");
-            }
-            RelocGate::RejectedPrecheck { reason } => {
-                log::debug!("GICP预检拒收: {reason}");
-            }
-            RelocGate::RejectedNumerical { reason } => {
-                log::warn!("GICP数值异常拒收: {reason}");
-            }
-        }
-    }
-
     fn publish_corrected(&mut self) -> Result<()> {
         let Some(pub_) = &self.corrected_pub else {
             return Ok(());
@@ -517,13 +361,16 @@ impl App {
         let Some(odom) = &self.latest_odom else {
             return Ok(());
         };
-        if self.t_sim - self.last_odom_recv >= ODOM_FRESH_TIMEOUT {
+        if self.last_odom_recv.elapsed().as_secs_f64() >= ODOM_FRESH_TIMEOUT
+            || odom.timestamp <= self.last_published
+        {
             return Ok(());
         }
         let alignment =
             RigidTransform::from_matrix(FrameId::MAP, FrameId::ODOM, self.fusion.drift())?;
         let msg = corrected_odom(odom, &alignment)?;
         pub_.publish(msg).map(|_| ())?;
+        self.last_published = msg.timestamp;
         self.log_corrected_viz(&msg);
         Ok(())
     }
@@ -598,14 +445,13 @@ impl App {
         firefly_observability::set_sim_time(self.t_sim);
         firefly_observability::pump_log_ipc(&self.log_ipc);
         self.reloc_ticks = self.reloc_ticks.wrapping_add(1);
-        self.try_relocalize();
         self.publish_corrected()?;
         Ok(())
     }
 
     fn run(&mut self) -> Result<()> {
         log::info!(
-            "gicp 进程启动：订阅 VIO odom + 深度，1Hz GICP 融合，发布 {CORRECTED_ODOM_TOPIC}"
+            "localization 进程启动：订阅 VIO odom + 视觉位姿观测，发布 {CORRECTED_ODOM_TOPIC}"
         );
         let waitset = iceoryx2::waitset::WaitSetBuilder::new()
             .create::<iceoryx2::prelude::ipc::Service>()
@@ -617,7 +463,7 @@ impl App {
             if !attachment_id.has_event_from(&tick_guard) {
                 return CallbackProgression::Continue;
             }
-            let root = Span::root("gicp", SpanContext::random().sampled(false));
+            let root = Span::root("localization", SpanContext::random().sampled(false));
             let guard = root.set_local_parent();
             let step = self.step();
             drop(guard);
@@ -649,7 +495,7 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!(
-                "{e}\n用法：gicp [--map <map.ffmap>] [--config configs/gicp.toml] [--odom-topic Firefly/Odometry]"
+                "{e}\n用法：localization [--config configs/localization.toml] [--odom-topic Firefly/Odometry]"
             );
             std::process::exit(2);
         }
@@ -662,15 +508,7 @@ fn main() {
         }
     };
     log::info!("已加载配置 {}", args.config.display());
-    let map_path = args
-        .map
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("apps/planner/maps/rmuc2026.ffmap"));
-    let map_file = MapFile::from_file(&map_path).unwrap_or_else(|e| {
-        log::error!("加载 RMUC 地图失败 {}：{e}", map_path.display());
-        std::process::exit(1);
-    });
-    let mut app = match App::new(map_file, cfg, &args.odom_topic) {
+    let mut app = match App::new(cfg, &args.odom_topic) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("初始化失败：{e}");
@@ -679,7 +517,7 @@ fn main() {
         }
     };
     if let Err(e) = app.run() {
-        log::error!("gicp 失败：{e}");
+        log::error!("localization 失败：{e}");
         firefly_observability::pump_log_ipc(&app.log_ipc);
         firefly_observability::flush();
         std::process::exit(1);
@@ -692,6 +530,32 @@ fn main() {
 mod tests {
     use super::{RelocGate, gate_diag};
     use nalgebra::Vector6;
+
+    #[test]
+    fn interpolation_has_closed_bounds_and_analytic_pose() {
+        use super::*;
+        let a = OdomMessage {
+            timestamp: 1.,
+            quat_w: 1.,
+            ..Default::default()
+        };
+        let b = OdomMessage {
+            timestamp: 3.,
+            position_x: 4.,
+            quat_w: 0.,
+            quat_z: 1.,
+            ..a
+        };
+        let history = [(1., a), (3., b)].into();
+        assert!(interp_odom(&history, 0.999).is_none());
+        assert!(interp_odom(&history, 3.001).is_none());
+        assert!(interp_odom(&history, f64::NAN).is_none());
+        let mid = interp_odom(&history, 2.).unwrap();
+        assert!((mid[(0, 3)] - 2.).abs() < 1e-12);
+        assert!((mid[(1, 0)] - 1.).abs() < 1e-12);
+        assert!(interp_odom(&history, 1.).unwrap()[(0, 3)].abs() < 1e-12);
+        assert!((interp_odom(&history, 3.).unwrap()[(0, 3)] - 4.).abs() < 1e-12);
+    }
 
     /// 接受：`chi2`/阈值透传，平移修正量取 `delta` 平移分量模，标志为 1。
     #[test]

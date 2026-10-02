@@ -79,7 +79,7 @@ CI 的 Rust job 执行全部普通测试；Python job 执行 `tests/`、`apps/`�
 ## 自动任务验收
 
 ```bash
-cargo build --release -j 2 -p vio -p render -p fc -p ffctl -p gicp -p planner
+cargo build --release -j 2 -p vio -p render -p fc -p ffctl -p localization -p planner
 uv run --all-packages --extra test python scripts/accept_rmuc.py
 ```
 
@@ -92,7 +92,7 @@ uv run --all-packages --extra test python scripts/accept_rmuc.py
 |---|---|
 | 初始化 | 真实 IMU/图像，屏蔽 PlantState；静止窗口至少 1s，局部原点误差 <0.1m，上锁电机为零 |
 | 起飞 / 悬停 | 起飞 1m；高度误差 <0.15m，水平偏移 <0.5m，速度 <0.2m/s，连续保持 3s |
-| 路径跟踪 | 真实 GICP 与 planner，地图系航点 `(-11,0,2)` → `(-13,0,1.405)`；逐点到达误差 <0.35m、速度 <0.3m/s 持续 1s |
+| 路径跟踪 | 真实视觉定位与 planner，地图系航点 `(-11,0,2)` → `(-13,0,1.405)`；逐点到达误差 <0.35m、速度 <0.3m/s 持续 1s |
 | 跟踪评分 | 同时刻 GT 与实际 Reference，禁止对齐；RMSE ≤0.35m，最大误差 ≤0.8m |
 | 局部定位 | 固定尺度航向/平移对齐；VIO ATE RMSE ≤0.2m，1s 位置增量 RPE RMSE ≤0.15m |
 | 地图定位 | 禁止对齐；位置 RMSE ≤0.25m，航向 RMSE ≤15° |
