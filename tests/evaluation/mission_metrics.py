@@ -139,6 +139,24 @@ def score(case, options):
             stages["tracking_error"] = {"status": "blocked", "reason": "tracking phase not executed"}
         else:
             check("tracking_error", tracking)
+    truth = data.get("gt", np.empty((0, 8)))
+    frontend = data.get("loop_frontend", np.empty((0, 5)))
+    backend = data.get("loop_backend", np.empty((0, 4)))
+    max_candidates = int(frontend[:, 2].max()) if len(frontend) else None
+    accepted_loops = int(backend[:, 1].max()) if len(backend) else 0 if len(frontend) else None
+    case["mission_summary"] = {
+        "waypoint_arrivals": case.get("waypoint_arrivals", []),
+        "waypoints_required": len(options.waypoints) if case["case"] == "nominal" else 0,
+        "all_waypoints_reached": len(case.get("waypoint_arrivals", [])) == len(options.waypoints) if case["case"] == "nominal" else None,
+        "max_horizontal_distance_from_start_m": float(np.linalg.norm(truth[:, 1:3] - truth[0, 1:3], axis=1).max()) if len(truth) else None,
+        "horizontal_path_length_m": float(np.linalg.norm(np.diff(truth[:, 1:3], axis=0), axis=1).sum()) if len(truth) else None,
+        "last_horizontal_distance_from_start_m": float(np.linalg.norm(truth[-1, 1:3] - truth[0, 1:3])) if len(truth) else None,
+        "online_keyframes": int(frontend[:, 1].max()) if len(frontend) else None,
+        "maximum_loop_candidates": max_candidates,
+        "accepted_online_loops": accepted_loops,
+        "loop_evidence": "accepted" if accepted_loops else "no_accepted_constraint_observed" if len(frontend) else "missing",
+        "measurement_source": "RRD; ground truth only for route scoring; no post-hoc map alignment",
+    }
     case["evidence_entities"] = {entity: {"samples": len(rows), "first_sim_s": float(rows[0, 0]),
                                         "last_sim_s": float(rows[-1, 0])} for entity, rows in data.items()}
     case["status"] = "passed" if all(value["status"] == "passed" for value in stages.values()) else "failed"

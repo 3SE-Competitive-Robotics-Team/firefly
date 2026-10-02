@@ -88,6 +88,17 @@ uv run --all-packages --extra test python scripts/accept_rmuc.py
 可单独复现。要求独占本仓库闭环进程与图形会话；检测到其他进程时拒绝运行，
 不终止其他任务。命令默认不重建二进制；完整场地准备入口会先 release 构建再调用它。
 
+10m 去程并返回的四次独立进程验收：
+
+```bash
+uv run --all-packages --extra test python scripts/accept_rmuc.py --case nominal --config configs/acceptance_10m.toml --repeat 4
+```
+
+该配置使用地图高度 2.2m、航点 `(-3,0,2.2)` → `(-13,0,2.2)`，每段预算
+90s 仿真时间；到达与误差阈值采用相同默认值。未通过去程到达判定时不会进入返航。
+各次使用相同噪声种子，不能视为独立随机样本；RRD 分别保存在 `attempt_NN/`。
+单次任务失败仍继续下一次，进程未退出或用户中断则停止。
+
 | 验收项 | 固定契约 |
 |---|---|
 | 初始化 | 真实 IMU/图像，屏蔽 PlantState；静止窗口至少 1s，局部原点误差 <0.1m，上锁电机为零 |
@@ -147,5 +158,6 @@ FIREFLY_LOOP_CAPTURES=models/rmuc2026/derived/vision/170f31928eb82cd9 \
 `[-12,-1,1.2]`、同航向的两帧 RMUC 库图，检查不足 30 对应时明确拒绝；该拒绝
 不计为定位或回环任务成功。不能把场景中的一米位置差直接等价为足够视觉重叠。
 
-普通 `accept_rmuc.py` 验证真实进程闭环、地图定位和故障处置；报告使用
-`not_scored_in_this_mission` 标注在线回环，不能用单测或库图更新次数代替长路线重访验收。
+`accept_rmuc.py` 验证真实进程闭环、地图定位和故障处置；报告单独汇总在线
+关键帧、候选与已接受回环约束。未完成返航重访时，零回环不能证明回环能力通过或失败；
+不能用单测或库图更新次数代替长路线重访验收。

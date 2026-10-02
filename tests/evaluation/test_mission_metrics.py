@@ -86,3 +86,62 @@ def test_preflight_failure_returns_nonzero_and_keeps_report(tmp_path, monkeypatc
     report = json.loads(reports[0].read_text())
     assert report["status"] == "failed" and report["cases"] == []
     assert report["error"] and reports[0].with_suffix(".html").is_file()
+
+
+def test_repeated_failures_keep_four_distinct_recordings(tmp_path, monkeypatch):
+    import importlib.util
+    import json
+    path = Path(__file__).resolve().parents[2] / "scripts/accept_rmuc.py"
+    spec = importlib.util.spec_from_file_location("acceptance_cli_repeat", path)
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    monkeypatch.setattr(cli, "active_processes", lambda: [])
+    monkeypatch.setattr(cli, "provenance", lambda: {})
+    monkeypatch.setattr(cli, "score", lambda case, options: case)
+
+    class FailedMission:
+        def __init__(self, directory, name, options):
+            self.recording = directory / f"{name}.rrd"
+            self.name = name
+
+        def run(self):
+            self.recording.write_bytes(b"unit test evidence placeholder")
+            return {"case": self.name, "status": "failed", "recording": str(self.recording),
+                    "remaining_pids": [], "stages": {"tracking": {"status": "failed"}}}
+
+    monkeypatch.setattr(cli, "Mission", FailedMission)
+    config = tmp_path / "acceptance.toml"
+    config.write_text("")
+    assert cli.main(["--config", str(config), "--case", "nominal", "--repeat", "4"]) == 1
+    report_path, = (tmp_path / "logs/acceptance").glob("*/report.json")
+    report = json.loads(report_path.read_text())
+    assert report["status"] == "failed"
+    assert [case["attempt"] for case in report["cases"]] == [1, 2, 3, 4]
+    assert len({case["recording"] for case in report["cases"]}) == 4
+    html = report_path.with_suffix(".html").read_text()
+    for attempt in range(1, 5):
+        relative = f"attempt_{attempt:02d}/nominal.rrd"
+        assert (report_path.parent / relative).is_file()
+        assert f"href='{relative}'" in html
+
+
+def test_roundtrip_distance_summary_does_not_override_failed_acceptance(monkeypatch):
+    import mission_metrics
+    truth = np.array([[0., -13., 0., 2.2, 0., 0., 0., 1.],
+                      [10., -3., 0., 2.2, 0., 0., 0., 1.],
+                      [20., -13., 0., 2.2, 0., 0., 0., 1.]])
+    monkeypatch.setattr(mission_metrics, "read_evidence", lambda path: {
+        "gt": truth, "loop_frontend": np.array([[20., 12., 3., 0., 0.]])})
+    case = {"case": "nominal", "recording": "unused", "waypoint_arrivals": [{}, {}],
+            "stages": {"tracking": {"status": "blocked"}}}
+    mission_metrics.score(case, Options())
+    summary = case["mission_summary"]
+    assert summary["max_horizontal_distance_from_start_m"] == pytest.approx(10.)
+    assert summary["horizontal_path_length_m"] == pytest.approx(20.)
+    assert summary["last_horizontal_distance_from_start_m"] == pytest.approx(0.)
+    assert summary["all_waypoints_reached"]
+    assert summary["online_keyframes"] == 12
+    assert summary["maximum_loop_candidates"] == 3
+    assert summary["loop_evidence"] == "no_accepted_constraint_observed"
+    assert case["status"] == "failed"

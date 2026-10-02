@@ -137,6 +137,9 @@ class Mission:
                     elif entity == "corr/debug/gate" and msg.scalar_count == 4 and msg.scalars[3] == 1:
                         self.visual_updates += 1
                         self.recorder.scalars("acceptance/visual_update", msg.timestamp, list(msg.scalars[:4]))
+                    elif entity in {"loop/debug/frontend", "corr/debug/loops"}:
+                        suffix = "loop_frontend" if entity == "loop/debug/frontend" else "loop_backend"
+                        self.recorder.scalars("acceptance/" + suffix, msg.timestamp, list(msg.scalars[:msg.scalar_count]))
                     elif entity == "acceptance/physics":
                         self.physics = list(msg.scalars)
                         self.physics_time = msg.timestamp
@@ -260,7 +263,7 @@ class Mission:
     def tracking(self):
         self.command("fc", "track")
         self.wait(lambda: self.mode == 4, wall=5.)
-        arrivals = []
+        arrivals = self.result.setdefault("waypoint_arrivals", [])
         for waypoint in self.options.waypoints:
             self.command("planner", "goal", *waypoint)
             goal = np.asarray(waypoint)
@@ -268,6 +271,7 @@ class Mission:
                       and np.linalg.norm(self.latest["gt"][2]) < self.options.goal_speed_mps,
                       stable=1., sim=self.options.waypoint_sim_s)
             arrivals.append({"goal_map_m": list(waypoint), "arrived_sim_s": self.t})
+            self.recorder.event(f"waypoint reached {list(waypoint)}", self.t)
         self.command("fc", "hold")
         return {"arrivals": arrivals}
 
