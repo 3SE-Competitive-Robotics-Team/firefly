@@ -444,7 +444,7 @@ impl App {
             }
             match result {
                 Ok(()) => log::info!("地图锚点接受 t={:.3}", obs.timestamp),
-                Err(e) => log::debug!("地图锚点拒收: {e}"),
+                Err(e) => log::info!("地图锚点拒收 t={:.3}: {e}", obs.timestamp),
             }
             return;
         }

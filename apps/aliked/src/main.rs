@@ -267,6 +267,8 @@ fn build_map_offline(
     frames_dir: &Path,
     out: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let node = create_node()?;
+    let log_ipc = firefly_observability::init_ipc(&node, "aliked-build");
     let mut bins: Vec<PathBuf> = std::fs::read_dir(frames_dir)?
         .collect::<std::io::Result<Vec<_>>>()?
         .into_iter()
@@ -279,6 +281,7 @@ fn build_map_offline(
     }
     let mut map = VisionMap::new();
     for (idx, path) in bins.iter().enumerate() {
+        firefly_observability::pump_log_ipc(&log_ipc);
         let buf = std::fs::read(path)?;
         if buf.len() != 16 + 320 * 240 * 5 + 64 {
             return Err(format!("invalid capture size: {}", path.display()).into());
@@ -293,12 +296,7 @@ fn build_map_offline(
         let pos_off = depth_off + 4 * width * height;
         let rd = |at: usize| f64::from_le_bytes(buf[at..at + 8].try_into().unwrap());
         let pos = [rd(pos_off), rd(pos_off + 8), rd(pos_off + 16)];
-        let quat = [
-            rd(pos_off + 24),
-            rd(pos_off + 32),
-            rd(pos_off + 40),
-            rd(pos_off + 48),
-        ];
+        let quat = [24, 32, 40, 48].map(|offset| rd(pos_off + offset));
         let t = rd(pos_off + 56);
         let (kpts, descs, scores) = run_model(session, &buf[img_off..depth_off], width, height)?;
         let t_body = Isometry3::from_parts(
@@ -337,6 +335,10 @@ fn build_map_offline(
             });
         }
         let n_pts = points.len();
+        if !landmark_coverage(&points) {
+            log::info!("拒绝低覆盖库帧 {}: {n_pts} landmarks", path.display());
+            continue;
+        }
         map.frames.push(VisionKeyFrame {
             id: idx as u64,
             timestamp: t,
@@ -349,6 +351,9 @@ fn build_map_offline(
             path.file_name().unwrap_or_default().to_string_lossy()
         );
     }
+    if map.frames.is_empty() {
+        return Err("no visual map frame meets landmark count and spatial coverage".into());
+    }
     firefly_vision_map::save_map(&map, out)?;
     log::info!(
         "库图已写 {}（{} 帧，{} 点）",
@@ -356,7 +361,21 @@ fn build_map_offline(
         map.frames.len(),
         map.num_points()
     );
+    firefly_observability::pump_log_ipc(&log_ipc);
     Ok(())
+}
+
+/// 至少 64 个有效路标，覆盖 4×4 网格中的至少 6 格。
+fn landmark_coverage(points: &[VisionMapPoint]) -> bool {
+    let mut occupied = [false; 16];
+    for point in points {
+        let x = (point.uv[0] / 80.) as usize;
+        let y = (point.uv[1] / 60.) as usize;
+        if x < 4 && y < 4 {
+            occupied[y * 4 + x] = true;
+        }
+    }
+    points.len() >= 64 && occupied.iter().filter(|filled| **filled).count() >= 6
 }
 
 /// 冒烟推理：零图单帧，校验输出形状（K=512、描述子 128 维）。

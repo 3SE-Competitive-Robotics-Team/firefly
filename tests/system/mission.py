@@ -75,7 +75,7 @@ class Mission:
         self.last_motors = [0.] * 4
         self.sequence_errors = 0
         self.recorder = None
-        self.origin = None
+        self.control_origin = None
         self.visual_updates = 0
 
     def start(self, name, command):
@@ -152,6 +152,7 @@ class Mission:
                     self.zero_controls = self.zero_controls + 1 if max(values) == 0 else 0
                     self.nonzero_controls += int(max(values) > 0)
                     stamp = msg.state_time
+                    self.t = max(self.t, stamp)
                     if stamp - self.last_logged.get(name, -1.) >= 0.05 - 1e-9:
                         self.recorder.scalars("acceptance/motors", stamp, values)
                         self.last_logged[name] = stamp
@@ -169,10 +170,8 @@ class Mission:
                 initialized = getattr(msg, "is_initialized", True)
                 self.latest[name] = (stamp, np.array(pos), np.array(vel), quat, initialized, time.monotonic())
                 self.counts[name] = self.counts.get(name, 0) + 1
-                if name == "gt":
-                    self.t = stamp
-                    if self.origin is None:
-                        self.origin = np.array(pos)
+                if name == "odom":
+                    self.t = max(self.t, stamp)
                 if stamp - self.last_logged.get(name, -1.) >= 0.099 - 1e-9:
                     self.recorder.pose("acceptance/" + name, stamp, pos, quat)
                     self.recorder.scalars("acceptance/" + name + "_velocity", stamp, vel)
@@ -226,12 +225,13 @@ class Mission:
     def initialized(self):
         def ready():
             odom = self.latest.get("odom")
-            return (odom is not None and odom[4] and self.counts["odom"] >= 20
-                    and self.zero_controls >= 100 and self.physics is not None)
+            return (odom is not None and self.estimated_near("odom", odom[1], float("inf"), float("inf")) and self.counts["odom"] >= 20
+                    and self.zero_controls >= 100)
         self.wait(ready)
         odom = self.latest["odom"]
         if odom[0] < 1.0 or np.linalg.norm(odom[1]) > 0.1 or self.nonzero_controls:
             raise MissionFailure("initialization window, local origin or disarmed motor contract failed")
+        self.control_origin = odom[1].copy()
         return {"ready_sim_s": odom[0], "local_origin_m": odom[1].tolist(), "zero_controls": self.zero_controls}
 
     def takeoff(self):
@@ -241,11 +241,20 @@ class Mission:
         self.wait(lambda: self.mode == 3 and self.hover_ok(), sim=20.)
         return {"target_relative_height_m": self.options.altitude_m}
 
+    def estimated_near(self, source, goal, tolerance, speed):
+        state = self.latest.get(source)
+        return (state is not None and state[4] and time.monotonic()-state[5] <= 0.5
+                and 0.0 <= self.t-state[0] <= 0.3
+                and np.linalg.norm(state[1]-goal) < tolerance
+                and np.linalg.norm(state[2]) < speed)
+
     def hover_ok(self):
-        _, pos, vel, *_ = self.latest["gt"]
-        return (abs(pos[2] - self.origin[2] - self.options.altitude_m) < self.options.hover_height_error_m
-                and np.linalg.norm(pos[:2] - self.origin[:2]) < self.options.hover_xy_error_m
-                and np.linalg.norm(vel) < self.options.hover_speed_mps)
+        state = self.latest.get("odom")
+        if state is None or self.control_origin is None:
+            return False
+        return (self.estimated_near("odom", state[1], float("inf"), self.options.hover_speed_mps)
+                and abs(state[1][2]-self.control_origin[2]-self.options.altitude_m) < self.options.hover_height_error_m
+                and np.linalg.norm(state[1][:2]-self.control_origin[:2]) < self.options.hover_xy_error_m)
 
     def hover(self):
         self.wait(self.hover_ok, stable=self.options.hover_seconds, sim=15.)
@@ -258,7 +267,7 @@ class Mission:
         self.wait(lambda: self.visual_updates >= 2, wall=60.)
         self.start("planner", [str(ROOT / "target/release/planner"), "--goal", *map(str, self.options.waypoints[0])])
         self.wait(lambda: "reference" in self.latest, wall=30.)
-        return {"source": "VIO + ALIKED-N16 + LightGlue + PnP + localization", "accepted_visual_updates": self.visual_updates, "online_loop_closure": "not_scored_in_this_mission"}
+        return {"source": "VIO + ALIKED-N16 + LightGlue + PnP + localization", "accepted_visual_updates": self.visual_updates, "online_loop_closure": "diagnostics_only"}
 
     def tracking(self):
         self.command("fc", "track")
@@ -267,24 +276,22 @@ class Mission:
         for waypoint in self.options.waypoints:
             self.command("planner", "goal", *waypoint)
             goal = np.asarray(waypoint)
-            self.wait(lambda: np.linalg.norm(self.latest["gt"][1] - goal) < self.options.goal_tolerance_m
-                      and np.linalg.norm(self.latest["gt"][2]) < self.options.goal_speed_mps,
+            self.wait(lambda: self.estimated_near("corrected", goal, self.options.goal_tolerance_m, self.options.goal_speed_mps),
                       stable=1., sim=self.options.waypoint_sim_s)
-            arrivals.append({"goal_map_m": list(waypoint), "arrived_sim_s": self.t})
+            arrivals.append({"goal_map_m": list(waypoint), "arrived_sim_s": self.t, "decision_source": "corrected"})
             self.recorder.event(f"waypoint reached {list(waypoint)}", self.t)
         self.command("fc", "hold")
         return {"arrivals": arrivals}
 
     def landing(self):
         self.command("fc", "land")
-        self.wait(lambda: self.mode == 0 and abs(self.latest["gt"][1][2] - self.origin[2]) < 0.08
-                  and np.linalg.norm(self.latest["gt"][2]) < 0.1, stable=1., sim=20.)
-        return {"landed_map_m": self.latest["gt"][1].tolist()}
+        self.wait(lambda: self.mode == 0, stable=1., sim=20.)
+        return {"completion_source": "fc_disarmed", "physical_touchdown": "independently_scored"}
 
     def reference_loss(self):
         self.command("fc", "track")
         self.wait(lambda: self.mode == 4, wall=5.)
-        origin = self.latest["gt"][1].copy()
+        origin = self.latest["odom"][1].copy()
         self.fault_origin = origin
         start = time.monotonic()
         self.recorder.event("fault inject: stop planner with SIGINT", self.t)
@@ -294,10 +301,10 @@ class Mission:
         if latency > self.options.reference_loss_wall_s:
             raise MissionFailure(f"reference loss response too slow: {latency}s")
         return {"hold_latency_wall_s": latency, "max_allowed_latency_wall_s": self.options.reference_loss_wall_s,
-                "fault_origin_map_m": origin.tolist(), "hold_position_map_m": self.latest["gt"][1].tolist()}
+                "fault_origin_odom_m": origin.tolist(), "hold_position_odom_m": self.latest["odom"][1].tolist()}
 
     def failure_hold(self):
-        self.wait(lambda: self.mode == 3 and np.linalg.norm(self.latest["gt"][1] - self.fault_origin) < 0.5,
+        self.wait(lambda: self.mode == 3 and self.estimated_near("odom", self.fault_origin, 0.5, float("inf")),
                   stable=2., sim=5.)
         return {"hold_radius_m": 0.5, "stable_seconds": 2.0}
 

@@ -29,6 +29,8 @@ pub struct DepthNoiseOptions {
     pub patch_size_px: usize,
     /// 高斯场时间格点间隔，秒；0.4s 为仿真设定，不复用历史深度。
     pub correlation_time_s: f64,
+    /// 相关场中随时间变化的方差比例；2% 保留静态缺陷形状，仅边界轻微闪动。
+    pub temporal_fraction: f32,
     /// 平面基础丢点概率；默认 3% 为仿真设定。
     pub hole_probability: f32,
     /// 量程上限处额外丢点概率，按 (z/max)^2 插值；默认 20% 为仿真设定。
@@ -58,6 +60,7 @@ impl Default for DepthNoiseOptions {
             lateral_sigma_px: 0.5,
             patch_size_px: 8,
             correlation_time_s: 0.4,
+            temporal_fraction: 0.02,
             hole_probability: 0.03,
             far_hole_probability: 0.2,
             edge_hole_probability: 0.65,
@@ -85,6 +88,7 @@ impl DepthNoiseOptions {
         ];
         let probabilities = [
             self.correlated_fraction,
+            self.temporal_fraction,
             self.hole_probability,
             self.far_hole_probability,
             self.edge_hole_probability,
@@ -149,8 +153,13 @@ impl Field {
         };
         let mut left = StdRng::seed_from_u64(seed(epoch));
         let mut right = StdRng::seed_from_u64(seed(epoch.wrapping_add(1)));
+        let mut fixed = StdRng::seed_from_u64(seed(u64::MAX));
         let values = (0..cols * rows)
-            .map(|_| ((1.0 - a) * gaussian(&mut left) + a * gaussian(&mut right)) / norm)
+            .map(|_| {
+                let dynamic = ((1.0 - a) * gaussian(&mut left) + a * gaussian(&mut right)) / norm;
+                (1.0 - options.temporal_fraction).sqrt() * gaussian(&mut fixed)
+                    + options.temporal_fraction.sqrt() * dynamic
+            })
             .collect();
         Self {
             values,
@@ -279,6 +288,7 @@ pub fn apply(
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 
@@ -367,7 +377,7 @@ mod tests {
                 / holes as f32
         };
         assert!(overlap(&next) > 0.9);
-        assert!(overlap(&future) < 0.4);
+        assert!(overlap(&future) > 0.75);
         assert_eq!(image, make(1.0));
     }
 

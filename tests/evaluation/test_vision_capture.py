@@ -95,3 +95,17 @@ def test_capture_retry_preserves_incomplete_attempt(tmp_path, monkeypatch):
     (first / "capture_manifest.json").write_text(json.dumps(manifest))
     assert capture_directory(tmp_path, assets) == first
     assert capture_directory(tmp_path, {"renderer": "version2"}) != first
+
+
+def test_visibility_rejects_outward_views_and_parallel_rays():
+    wall = np.array([[3., 0., 1., .1, 5., 5.]])
+    assert capture.visible_fraction(wall, [0., 0., 1.], 0.) == 1.
+    assert capture.visible_fraction(wall, [0., 0., 1.], 180.) == 0.
+
+
+def test_runtime_compatibility_ignores_capture_selection_but_not_calibration(monkeypatch):
+    assets = {"schema": 2, "files": {"field": "hash"}, "sensor": {"focal": 100}, "selection": {"step": 2}}
+    monkeypatch.setattr(capture, "capture_assets", lambda: assets)
+    capture.verify_map_compatibility(assets | {"selection": {"step": 1}})
+    with pytest.raises(ValueError, match="contract"):
+        capture.verify_map_compatibility(assets | {"sensor": {"focal": 200}})

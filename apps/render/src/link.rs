@@ -143,12 +143,12 @@ pub struct CapturePipeline {
 impl CapturePipeline {
     /// 起工作线程（进程生命周期内常驻，退出时通道关闭自动结束）。
     #[must_use]
-    pub fn spawn(options: crate::depth_noise::DepthNoiseOptions) -> Self {
+    pub fn spawn(options: crate::depth_noise::DepthNoiseOptions, offline: bool) -> Self {
         let (tx, job_rx) = std::sync::mpsc::sync_channel::<CaptureJob>(1);
         let (res_tx, rx) = std::sync::mpsc::sync_channel::<ProcessedCapture>(1);
         std::thread::Builder::new()
             .name("sensor-process".to_owned())
-            .spawn(move || run_worker(&job_rx, &res_tx, options))
+            .spawn(move || run_worker(&job_rx, &res_tx, options, offline))
             .expect("sensor-process 线程创建失败");
         Self {
             tx: Mutex::new(tx),
@@ -174,6 +174,8 @@ impl CapturePipeline {
 pub fn poll_pose(
     ports: NonSend<IpcPorts>,
     mut pose: ResMut<PoseState>,
+    mut viewer: ResMut<crate::viewer_pose::ViewerPose>,
+    time: Res<Time>,
     hub: Res<CaptureHub>,
     targets: Option<Res<crate::rig::SensorTargets>>,
     mut capture: ResMut<SensorCapture>,
@@ -193,6 +195,28 @@ pub fn poll_pose(
                 break;
             }
         }
+    }
+    if let Some((msg, _)) = newest
+        && msg.is_initialized
+    {
+        viewer.observe(
+            Transform {
+                translation: Vec3::new(
+                    msg.position_x as f32,
+                    msg.position_y as f32,
+                    msg.position_z as f32,
+                ),
+                rotation: Quat::from_xyzw(
+                    msg.quat_x as f32,
+                    msg.quat_y as f32,
+                    msg.quat_z as f32,
+                    msg.quat_w as f32,
+                ),
+                ..default()
+            },
+            msg.timestamp,
+            time.elapsed_secs_f64(),
+        );
     }
     if let Some((msg, header)) = newest
         && msg.is_initialized

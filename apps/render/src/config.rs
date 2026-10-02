@@ -2,7 +2,7 @@
 //! 场景光照本体（唯一一份、所有相机共用）在 [`firefly_render::lighting`]。
 
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// 配置路径（编译期绝对路径，与运行 `CWD` 无关）。
 const RENDER_CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/render.toml");
@@ -18,7 +18,7 @@ pub const DEFAULT_ENV_BOTTOM: [f32; 3] = [0.09, 0.09, 0.10];
 pub const DEFAULT_ENV_INTENSITY: f32 = 1500.0;
 
 /// 场景照明配置。
-#[derive(Deserialize, Clone, Copy, Debug)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug)]
 pub struct LightConfig {
     /// 场景三方向光照度（lux）。
     #[serde(default = "default_directional")]
@@ -38,7 +38,7 @@ impl Default for LightConfig {
 }
 
 /// 相机曝光配置（传感器 rig 与主视角各一份，主视角缺省同值）。
-#[derive(Deserialize, Clone, Copy, Debug)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug)]
 pub struct ViewConfig {
     /// 传感器相机曝光 EV100（越大越暗）。
     #[serde(default = "default_sensor_ev100")]
@@ -75,7 +75,7 @@ impl Default for ViewConfig {
 /// 只靠方向光会「黑底 + 一点高光」，IBL 同时给暗部补光（漫反射）与柔和反射
 /// （镜面），是黑亮面读得出形体的关键。颜色为 sRGB 0~1，`intensity` 缩放后
 /// 单位 cd/m²。
-#[derive(Deserialize, Clone, Copy, Debug)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug)]
 pub struct EnvConfig {
     /// 顶色（sRGB 0~1）。
     #[serde(default = "default_env_top")]
@@ -151,4 +151,55 @@ pub fn load() -> RenderConfig {
         std::process::exit(1);
     });
     config
+}
+
+/// 离线资产兼容契约；算法版本与生产二进制另外记录为 provenance。
+#[derive(Serialize)]
+pub struct AssetContract {
+    schema: u32,
+    depth_labels: &'static str,
+    width: usize,
+    height: usize,
+    fov_y_deg: f32,
+    downtilt_deg: f32,
+    left_offset: [f32; 3],
+    depth_offset: [f32; 3],
+    near: f32,
+    sensor_ev100: f32,
+    light: LightConfig,
+    env: EnvConfig,
+}
+
+impl RenderConfig {
+    pub fn asset_contract(&self) -> AssetContract {
+        AssetContract {
+            schema: 1,
+            depth_labels: "ideal_geometry_z",
+            width: firefly_pubsub::camera::IMAGE_WIDTH,
+            height: firefly_pubsub::camera::IMAGE_HEIGHT,
+            fov_y_deg: crate::rig::FOV_Y_DEG,
+            downtilt_deg: crate::rig::DOWNTILT_DEG,
+            left_offset: crate::rig::LEFT_OFFSET.to_array(),
+            depth_offset: crate::rig::DEPTH_OFFSET.to_array(),
+            near: crate::rig::SENSOR_NEAR,
+            sensor_ev100: self.view.sensor_ev100,
+            light: self.light,
+            env: self.env,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn asset_contract_excludes_online_noise_and_viewer_but_tracks_sensor_exposure() {
+        let mut config = RenderConfig::default();
+        let original = toml::to_string(&config.asset_contract()).unwrap();
+        config.depth_noise.temporal_fraction = 0.5;
+        config.view.ev100 = Some(14.);
+        assert_eq!(original, toml::to_string(&config.asset_contract()).unwrap());
+        config.view.sensor_ev100 += 1.;
+        assert_ne!(original, toml::to_string(&config.asset_contract()).unwrap());
+    }
 }

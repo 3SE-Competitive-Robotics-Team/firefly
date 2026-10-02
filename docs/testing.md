@@ -95,7 +95,7 @@ uv run --all-packages --extra test python scripts/accept_rmuc.py --case nominal 
 ```
 
 该配置使用地图高度 2.2m、航点 `(-3,0,2.2)` → `(-13,0,2.2)`，每段预算
-90s 仿真时间；到达与误差阈值采用相同默认值。未通过去程到达判定时不会进入返航。
+90s 仿真时间；到达与误差阈值采用相同默认值。未通过估计状态的去程到达判定时不会进入返航。
 各次使用相同噪声种子，不能视为独立随机样本；RRD 分别保存在 `attempt_NN/`。
 单次任务失败仍继续下一次，进程未退出或用户中断则停止。
 
@@ -114,7 +114,11 @@ uv run --all-packages --extra test python scripts/accept_rmuc.py --case nominal 
 
 `tests/system/mission_sim.py` 只加评测观测：固定 IMU 噪声种子、读取接触、拒绝
 静默物理重置。控制律、传感器生成与物理步进仍调用生产实现；噪声种子不控制
-OS/GPU 调度。地面真值仅用于验收判定，不生成目标坐标或估计器修正。
+OS/GPU 调度。正常起飞、悬停、到达和返航由新鲜估计状态驱动，降落结束依据 FC 上锁。
+真值在 RRD 读回后独立评分悬停、航点和着陆；估计到达不等于真实到达。评测器的
+碰撞/越界终止仅是实验保护，不是实机任务逻辑。schema 2 报告区分
+`estimated_waypoints_completed` 与 `all_waypoints_reached`，与真值驱动流程的历史结果
+不可直接比较任务完成率。
 
 数据映射：`acceptance/{gt,odom,corrected,reference}` 为各自原坐标系的
 `Transform3D`，`*_velocity` 与 `motors/physics/penetration` 为 `Scalars`，
@@ -161,3 +165,27 @@ FIREFLY_LOOP_CAPTURES=models/rmuc2026/derived/vision/170f31928eb82cd9 \
 `accept_rmuc.py` 验证真实进程闭环、地图定位和故障处置；报告单独汇总在线
 关键帧、候选与已接受回环约束。未完成返航重访时，零回环不能证明回环能力通过或失败；
 不能用单测或库图更新次数代替长路线重访验收。
+
+
+## 冻结视觉资产的独立视角验收
+
+采集帧先检查纹理与有效深度，建库再要求每帧至少 64 个有效路标且覆盖至少 6/16
+图像分区。几何标签不施加在线深度噪声。训练帧自匹配只验证接口，不证明定位泛化。
+
+`lightglue::validation::held_out_map_localization_contract` 使用独立采集的查询库：
+查询只提供二维特征与描述子，查询位姿仅作已知的离线测试标签。每个查询位置必须距
+所有训练位置超过 0.1m；先验叠加 `[0.3,-0.2,0.1]m` 偏差，不作事后对齐。
+要求每个指定查询均得到至少 30 内点、内点率 ≥0.3、重投影 ≤3px，位置误差 ≤0.25m、
+旋转误差 ≤15°。拒绝或缺失的查询均不能计为通过。
+
+先启动 `firefly-viz --save logs/map_validation.rrd`，再执行：
+
+```bash
+RUST_LOG=info FIREFLY_QUERY_MAP=<独立查询.ffvmap> FIREFLY_QUERY_COUNT=20 \
+  FIREFLY_MAP_VALIDATION_REPORT="$PWD/logs/map_validation.json" \
+  cargo test --release -p lightglue held_out_map_localization_contract -- --ignored --nocapture
+```
+
+该用例只评测库图定位，不替代在线状态融合、飞行或回环验收。大型地图使用缓冲 I/O，
+内容与 FFVMAP v2 格式保持一致。库图清单保存模型与生成来源的 hash；兼容性只检查
+场地、标定和成像外观。`build_vision_map.py` 在契约一致时复用库，在替换前归档原资产。

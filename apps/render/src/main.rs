@@ -20,6 +20,7 @@ mod scene;
 mod sensors;
 mod trace_bridge;
 mod ui;
+mod viewer_pose;
 
 use bevy::asset::AssetPlugin;
 use bevy::camera::visibility::RenderLayers;
@@ -55,6 +56,23 @@ fn main() {
     }
     let spec = scene::selected();
     let render_config = config::load();
+    let args: Vec<_> = std::env::args().collect();
+    if let Some(index) = args.iter().position(|arg| arg == "--export-asset-contract") {
+        let outcome = args
+            .get(index + 1)
+            .ok_or("missing asset contract path".to_owned())
+            .and_then(|path| {
+                toml::to_string_pretty(&render_config.asset_contract())
+                    .map_err(|error| error.to_string())
+                    .and_then(|text| std::fs::write(path, text).map_err(|error| error.to_string()))
+            });
+        if let Err(error) = outcome {
+            log::error!("资产契约导出失败: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     log::info!(
         "场景 {}：asset root {}，视觉 {}，起点 {:?}",
         spec.dir,
@@ -67,6 +85,7 @@ fn main() {
         log::error!("IPC 端口打开失败：{e:?}");
         std::process::exit(1);
     });
+    let log_ipc = firefly_observability::init_ipc(&ports.node, "render");
     App::new()
         .add_plugins(
             DefaultPlugins
@@ -97,17 +116,19 @@ fn main() {
         .insert_resource(CaptureHub::default())
         .insert_resource(PendingFrames::default())
         .insert_resource(SensorCapture::default())
-        .insert_resource(CapturePipeline::spawn(render_config.depth_noise))
+        .insert_resource(CapturePipeline::spawn(render_config.depth_noise, offline))
         .insert_resource(CaptureStats::default())
         .insert_resource(FreeCam::default())
+        .insert_resource(viewer_pose::ViewerPose::default())
         .insert_non_send(ports)
+        .insert_non_send(log_ipc)
         .add_plugins(CapturePlugin)
         .add_systems(Startup, (setup_scene, spawn_rig, setup_panel))
         .add_systems(PreUpdate, poll_pose)
         .add_systems(
             Update,
             (
-                follow_camera.run_if(freecam_off),
+                follow_camera.run_if(freecam_off).after(follow_drone),
                 follow_drone,
                 tag_drone_layers,
                 log_render_rate,
@@ -120,9 +141,14 @@ fn main() {
         )
         .add_systems(
             Last,
-            (drain_captures, publish_processed, flush_on_exit).chain(),
+            (drain_captures, publish_processed, pump_logs, flush_on_exit).chain(),
         )
         .run();
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn pump_logs(logs: NonSend<firefly_observability::LogIpc>) {
+    firefly_observability::pump_log_ipc(&logs);
 }
 
 /// 场景装配：选中场景的视觉 glb + 场景光照（唯一一份，见
@@ -162,20 +188,22 @@ fn setup_scene(
     log::info!("场景 {} render ready", scene.dir);
 }
 
-/// 机体可视化根（`follow_drone` 每帧贴真值位姿；对照 `apps/quad` 的机体根）。
+/// 机体可视化根；仅用于主视图的延迟位姿插值。
 #[derive(Component)]
 struct DroneVisual;
 
-/// 机体模型贴到真值位姿（机体→世界，Hamilton；与传感器相机同源 `PoseState`）。
+/// 机体显示在相邻真值样本间插值；显示延迟不进入传感器 rig。
 // 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
-fn follow_drone(pose: Res<PoseState>, mut drone: Query<&mut Transform, With<DroneVisual>>) {
-    if !pose.has_pose {
-        return;
-    }
-    for mut transform in &mut drone {
-        transform.translation = pose.pos;
-        transform.rotation = pose.quat;
+fn follow_drone(
+    pose: Res<viewer_pose::ViewerPose>,
+    time: Res<Time>,
+    mut drone: Query<&mut Transform, With<DroneVisual>>,
+) {
+    if let Some(display) = pose.sample(time.elapsed_secs_f64()) {
+        for mut transform in &mut drone {
+            *transform = display;
+        }
     }
 }
 

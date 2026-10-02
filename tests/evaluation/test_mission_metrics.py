@@ -140,8 +140,31 @@ def test_roundtrip_distance_summary_does_not_override_failed_acceptance(monkeypa
     assert summary["max_horizontal_distance_from_start_m"] == pytest.approx(10.)
     assert summary["horizontal_path_length_m"] == pytest.approx(20.)
     assert summary["last_horizontal_distance_from_start_m"] == pytest.approx(0.)
-    assert summary["all_waypoints_reached"]
+    assert summary["estimated_waypoints_completed"]
+    assert not summary["all_waypoints_reached"]
     assert summary["online_keyframes"] == 12
     assert summary["maximum_loop_candidates"] == 3
     assert summary["loop_evidence"] == "no_accepted_constraint_observed"
     assert case["status"] == "failed"
+
+
+def test_estimated_arrival_does_not_require_truth_and_false_arrival_fails_scoring():
+    import time
+    from mission import Mission
+    from mission_metrics import settled_truth
+    mission = Mission.__new__(Mission)
+    mission.t = 3.
+    goal = np.array([1., 0., 2.])
+    mission.latest = {"corrected": (3., goal.copy(), np.zeros(3), None, True, time.monotonic())}
+    assert mission.estimated_near("corrected", goal, .35, .3)
+    gt = poses()
+    gt[:, 1:4] = goal + [1., 0., 0.]
+    velocity = np.column_stack([gt[:, 0], np.zeros((len(gt), 3))])
+    passed, result = settled_truth({"gt": gt, "gt_velocity": velocity}, 3., 1., goal, .35, .3)
+    assert not passed and result["max_position_error_m"] == pytest.approx(1.)
+    gt[:, 1:4] = goal
+    assert settled_truth({"gt": gt, "gt_velocity": velocity}, 3., 1., goal, .35, .3)[0]
+    with pytest.raises(ValueError, match="incomplete"):
+        settled_truth({"gt": gt[:-5], "gt_velocity": velocity}, 3., 1., goal, .35, .3)
+    mission.t = 3.5
+    assert not mission.estimated_near("corrected", goal, .35, .3)

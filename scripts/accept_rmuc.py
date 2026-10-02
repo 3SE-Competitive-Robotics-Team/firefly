@@ -17,11 +17,13 @@ import tomllib
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests/system"))
 sys.path.insert(0, str(ROOT / "tests/evaluation"))
 from mission import Mission, Options
 from mission_metrics import score
 from mission_sim import CONTACT_POLICY
+from collect_vision_map import verify_map_compatibility
 
 log = logging.getLogger("acceptance")
 
@@ -33,9 +35,10 @@ def digest(path):
 
 def save_report(directory, report):
     categories = {
-        "初始化": ["initialization"], "起飞": ["takeoff"], "悬停": ["hover"],
-        "路径跟踪": ["tracking", "tracking_error"], "定位误差": ["vio_accuracy", "map_accuracy"],
-        "碰撞": ["collision"], "失联安全响应": ["reference_loss", "failure_hold", "estimator_fallback", "degraded_support", "failure_terminal"],
+        "初始化": ["initialization"], "起飞": ["takeoff"], "悬停": ["hover", "hover_accuracy"],
+        "降落": ["landing", "landing_accuracy"],
+        "路径跟踪": ["tracking", "tracking_error", "waypoint_accuracy"], "定位误差": ["vio_accuracy", "map_accuracy"],
+        "碰撞": ["collision"], "失联安全响应": ["reference_loss", "failure_hold", "failure_hold_accuracy", "estimator_fallback", "degraded_support", "failure_terminal"],
         "进程退出": ["shutdown"],
     }
     summary = {}
@@ -91,9 +94,7 @@ def provenance():
     for name, expected in visual["models"]["artifacts"].items():
         if digest(ROOT / "models" / name) != expected:
             raise ValueError(f"visual model content changed: {name}")
-    for name, expected in visual["assets"].items():
-        if digest(ROOT / name) != expected:
-            raise ValueError(f"visual map inputs changed: {name}")
+    verify_map_compatibility(visual["assets"])
     return {"visual_map": visual, "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
             "git_status": subprocess.check_output(["git", "status", "--short"], cwd=ROOT, text=True),
             "source_sha256": source, "binary_sha256": binaries,
@@ -135,7 +136,7 @@ def main(argv=None):
     if not directory.is_relative_to(ROOT / "logs"):
         parser.error("acceptance evidence must be stored under repository logs/")
     directory.mkdir(parents=True)
-    report = {"schema_version": 1, "run_id": run_id, "status": "running", "cases": [],
+    report = {"schema_version": 2, "mission_decisions": "fresh estimated state; independent ground-truth scoring", "run_id": run_id, "status": "running", "cases": [],
               "repeat": args.repeat, "scope": "RMUC fixed-pad mission; VIO + ALIKED-N16 + LightGlue + localization + planner; online loop diagnostics reported separately"}
     lock = (ROOT / "logs/acceptance.lock").open("w")
     try:

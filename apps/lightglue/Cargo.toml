@@ -33,6 +33,7 @@ toml.workspace = true
 
 [dev-dependencies]
 firefly-localization.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

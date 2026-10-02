@@ -67,6 +67,9 @@ uv run --all-packages --extra test python scripts/prepare_rmuc.py /path/to/RMUC2
 明确标记，完整命令在未全部通过时返回非零。只处理资产可加 `--assets-only`。
 详细契约见 [CAD 管线](packages/firefly-cad/README.md)。
 
+视觉库按场地、标定和成像外观契约冻结；在线深度噪声调整与普通重编译不触发重建。
+资产质量与在线飞行必须分别验收，当前证据见 [视觉资产验收](docs/visual_asset_acceptance.md)。
+
 已有场地和 release 二进制时，自动任务验收可单独执行：
 
 ```bash

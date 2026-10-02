@@ -91,7 +91,7 @@ def main():
             # 建库与在线定位是不同验收项；权重存在也不能替代在线重定位测试。
             report["stages"]["visual_localization"] = {
                 "status": "not_run", "weights_available": aliked.is_file() and lightglue.is_file(),
-                "reason": "See mission_acceptance map_alignment stage; online pose graph is not implemented",
+                "reason": "See mission_acceptance map_alignment and online loop diagnostics",
             }
             acceptance = ROOT / "logs/acceptance" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8])
             run("mission_acceptance", [sys.executable, str(ROOT / "scripts/accept_rmuc.py"), "--output-dir", str(acceptance)])

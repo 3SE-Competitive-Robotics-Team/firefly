@@ -83,6 +83,28 @@ def yaw_error(truth, estimate):
     return float(np.rad2deg(np.sqrt(np.mean(wrapped**2))))
 
 
+def settled_truth(data, end, seconds, goal, tolerance, speed):
+    """独立评分连续真值窗口；不允许短窗口、断流或端点外推掩盖到达误差。"""
+    start = end - seconds
+    samples = {}
+    for key in ["gt", "gt_velocity"]:
+        rows = data[key]
+        window = rows[(rows[:, 0] >= start - 1e-6) & (rows[:, 0] <= end + 1e-6)]
+        if (len(window) < 2 or window[0, 0] > start + .11
+                or window[-1, 0] < end - .11 or np.diff(window[:, 0]).max() > .2):
+            raise ValueError(f"incomplete settled truth window: {key}")
+        samples[key] = window
+    errors = np.abs(samples["gt"][:, 1:4] - goal)
+    distances = np.linalg.norm(errors, axis=1)
+    velocities = np.linalg.norm(samples["gt_velocity"][:, 1:4], axis=1)
+    passed = (np.all(distances < tolerance) if np.isscalar(tolerance)
+              else (np.all(np.linalg.norm(errors[:, :2], axis=1) < tolerance[0])
+                    and np.all(errors[:, 2] < tolerance[2]))) and np.all(velocities < speed)
+    return bool(passed), {"alignment": "none", "window_seconds": seconds,
+                         "max_position_error_m": float(distances.max()),
+                         "max_speed_mps": float(velocities.max())}
+
+
 def score(case, options):
     data = read_evidence(case["recording"])
     stages = case["stages"]
@@ -120,6 +142,26 @@ def score(case, options):
         return (result["ate_rmse"] <= options.vio_ate_rmse_m
                 and result["rpe_rmse_1s"] is not None and result["rpe_rmse_1s"] <= options.vio_rpe_rmse_m), result
     check("vio_accuracy", vio)
+    for name, seconds, speed in [("hover", options.hover_seconds, options.hover_speed_mps),
+                                  ("landing", 1., .1)]:
+        phase = stages.get(name, {})
+        if phase.get("status") == "passed":
+            goal = data["gt"][0, 1:4].copy()
+            if name == "hover":
+                goal[2] += options.altitude_m
+                tolerance = np.array([options.hover_xy_error_m] * 2 + [options.hover_height_error_m])
+            else:
+                tolerance = np.array([options.hover_xy_error_m] * 2 + [.08])
+            check(name + "_accuracy", lambda: settled_truth(data, phase["end_sim_s"], seconds, goal, tolerance, speed))
+    if stages.get("failure_hold", {}).get("status") == "passed":
+        def hold_accuracy():
+            truth = data["gt"]
+            start = stages["reference_loss"]["start_sim_s"]
+            if not truth[0, 0] <= start <= truth[-1, 0]:
+                raise ValueError("missing fault origin truth")
+            goal = interp_linear(np.array([start]), truth[:, 0], truth[:, 1:4])[0]
+            return settled_truth(data, stages["failure_hold"]["end_sim_s"], 2., goal, .5, float("inf"))
+        check("failure_hold_accuracy", hold_accuracy)
     if case["case"] != "estimator_loss":
         def corrected():
             gt, estimate = data["gt"], data["corrected"]
@@ -128,6 +170,14 @@ def score(case, options):
             return result["rmse_m"] <= options.map_ate_rmse_m and result["yaw_rmse_deg"] <= options.map_yaw_rmse_deg, result
         check("map_accuracy", corrected)
     if case["case"] == "nominal":
+        def arrivals():
+            results = []
+            for arrival in case.get("waypoint_arrivals", []):
+                passed, detail = settled_truth(data, arrival["arrived_sim_s"], 1.,
+                    np.asarray(arrival["goal_map_m"]), options.goal_tolerance_m, options.goal_speed_mps)
+                results.append({"passed": passed, **detail})
+            return len(results) == len(options.waypoints) and all(r["passed"] for r in results), {"arrivals": results}
+        check("waypoint_accuracy", arrivals)
         def tracking():
             phase = stages["tracking"]
             if "start_sim_s" not in phase:
@@ -147,7 +197,8 @@ def score(case, options):
     case["mission_summary"] = {
         "waypoint_arrivals": case.get("waypoint_arrivals", []),
         "waypoints_required": len(options.waypoints) if case["case"] == "nominal" else 0,
-        "all_waypoints_reached": len(case.get("waypoint_arrivals", [])) == len(options.waypoints) if case["case"] == "nominal" else None,
+        "estimated_waypoints_completed": len(case.get("waypoint_arrivals", [])) == len(options.waypoints) if case["case"] == "nominal" else None,
+        "all_waypoints_reached": stages.get("waypoint_accuracy", {}).get("status") == "passed" if case["case"] == "nominal" else None,
         "max_horizontal_distance_from_start_m": float(np.linalg.norm(truth[:, 1:3] - truth[0, 1:3], axis=1).max()) if len(truth) else None,
         "horizontal_path_length_m": float(np.linalg.norm(np.diff(truth[:, 1:3], axis=0), axis=1).sum()) if len(truth) else None,
         "last_horizontal_distance_from_start_m": float(np.linalg.norm(truth[-1, 1:3] - truth[0, 1:3])) if len(truth) else None,

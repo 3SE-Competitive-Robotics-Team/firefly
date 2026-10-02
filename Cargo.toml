@@ -4,6 +4,7 @@ exclude = ["apps/firefly-sim", "apps/firefly-viz"]
 resolver = "3"
 
 [workspace.dependencies]
+serde_json = "1"
 firefly-base = { path = "crates/firefly-base" }
 bevy = "0.19.1"
 criterion = { version = "0.8.2", features = ["html_reports"] }

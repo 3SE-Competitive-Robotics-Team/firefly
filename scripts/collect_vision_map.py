@@ -33,12 +33,23 @@ def digest(path):
 
 
 def capture_assets():
-    """渲染内容、坐标与采集行为的输入指纹。"""
-    return {name: digest(ROOT / name) for name in [
-        "models/rmuc2026/field.glb", "models/rmuc2026/rmuc2026_collision.json",
-        "configs/render.toml", "configs/scene.toml", "configs/vision_map.toml", "target/release/render",
-        "scripts/collect_vision_map.py",
-    ]}
+    """场地/传感器兼容条件与采集选择；二进制只作为生成来源保存。"""
+    contract = ROOT / "models/rmuc2026/derived/render_contract.toml"
+    contract.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run([str(ROOT / "target/release/render"), "--export-asset-contract", str(contract)], check=True, cwd=ROOT)
+    with contract.open("rb") as stream:
+        sensor = tomllib.load(stream)
+    with (ROOT / "configs/vision_map.toml").open("rb") as stream:
+        selection = tomllib.load(stream)
+    return {"schema": 2, "files": {name: digest(ROOT / name) for name in [
+        "models/rmuc2026/field.glb", "models/rmuc2026/rmuc2026_collision.json", "configs/scene.toml",
+    ]}, "sensor": sensor, "selection": selection}
+
+
+def verify_map_compatibility(assets):
+    current = capture_assets()
+    if assets.get("schema") != 2 or any(assets.get(key) != current[key] for key in ["files", "sensor"]):
+        raise ValueError("visual map geometry/calibration/appearance contract differs from runtime")
 
 
 def reusable_capture(directory, assets):
@@ -56,7 +67,31 @@ def reusable_capture(directory, assets):
         return False
 
 
-def grid_poses(boxes, step, heights, yaws, x_range=None, y_range=None):
+def visible_fraction(boxes, position, yaw):
+    """相机标定射线与静态碰撞盒的粗可见性；真实纹理质量由渲染帧再检查。"""
+    focal = 120. / np.tan(np.deg2rad(70.88/2))
+    u,v = np.meshgrid(np.linspace(32,288,7), np.linspace(24,216,5))
+    dx,dy = (u.ravel()-160)/focal, -(v.ravel()-120)/focal
+    tilt,angle = np.deg2rad(20.),np.deg2rad(yaw)
+    rays = np.stack([np.cos(tilt)+np.sin(tilt)*dy,-dx,-np.sin(tilt)+np.cos(tilt)*dy],axis=1)
+    rotation = np.array([[np.cos(angle),-np.sin(angle),0],[np.sin(angle),np.cos(angle),0],[0,0,1.]])
+    rays = rays@rotation.T
+    low,high = boxes[:,:3]-boxes[:,3:],boxes[:,:3]+boxes[:,3:]
+    near = np.full((len(rays),len(boxes)),-np.inf)
+    far = np.full_like(near,np.inf)
+    for axis in range(3):
+        direction = rays[:,axis,None]
+        parallel = np.abs(direction)<1e-12
+        safe = np.where(parallel,1.,direction)
+        a,b = (low[:,axis]-position[axis])/safe,(high[:,axis]-position[axis])/safe
+        near=np.maximum(near,np.where(parallel,-np.inf,np.minimum(a,b)))
+        far=np.minimum(far,np.where(parallel,np.inf,np.maximum(a,b)))
+        far=np.where(parallel & ((position[axis]<low[:,axis]) | (position[axis]>high[:,axis])), -np.inf, far)
+    hit=np.any((far>=np.maximum(near,0.2)) & (near<=12.) & (far>0.2),axis=1)
+    return float(hit.mean())
+
+
+def grid_poses(boxes, step, heights, yaws, x_range=None, y_range=None, min_visible_fraction=0.):
     """避开碰撞盒外扩 0.15m 的离散机体原点；姿态绕世界 Z 轴。"""
     if not np.isfinite(step) or step <= 0 or not np.isfinite([*heights, *yaws]).all():
         raise ValueError("invalid capture grid")
@@ -71,6 +106,8 @@ def grid_poses(boxes, step, heights, yaws, x_range=None, y_range=None):
                 if np.any(np.all(np.abs(boxes[:, :3] - position) <= boxes[:, 3:] + 0.15, axis=1)):
                     continue
                 for yaw in yaws:
+                    if min_visible_fraction and visible_fraction(boxes, position, yaw) < min_visible_fraction:
+                        continue
                     angle = np.deg2rad(yaw) / 2
                     yield position.tolist(), [0., 0., float(np.sin(angle)), float(np.cos(angle))]
 
@@ -97,7 +134,8 @@ def paired_frame(left, depth, stamp):
     image = np.ctypeslib.as_array(left.data).copy().reshape(H, W)
     distance = np.ctypeslib.as_array(depth.data).copy().reshape(H, W)
     fraction = float(np.mean(np.isfinite(distance) & (distance > 0.2) & (distance < 20.)))
-    quality = {"gray_std": float(image.std()), "valid_depth_fraction": fraction}
+    cells = sum(float(image[y:y+60,x:x+80].std())>=8. for y in range(0,H,60) for x in range(0,W,80))
+    quality = {"gray_std": float(image.std()), "valid_depth_fraction": fraction, "textured_cells": cells}
     return image, distance, quality
 
 
@@ -125,11 +163,15 @@ def collect(poses, directory, timeout):
     left_sub = port(node, "CameraLeft", GrayImageMessage)
     depth_sub = port(node, "Depth", DepthImageMessage)
     assets = capture_assets()
+    producer = {"renderer_sha256": digest(ROOT / "target/release/render"),
+                "collector_sha256": digest(Path(__file__)),
+                "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()}
     child = subprocess.Popen([str(ROOT / "target/release/render"), "--offline"], cwd=ROOT)
     results = []
     stamp = 0.
     start_stamp = 0.
     complete = False
+    renderer_ready = False
     try:
         for index, (position, quaternion) in enumerate(poses):
             deadline = time.monotonic() + (max(timeout, 180.) if index == 0 else timeout)
@@ -137,6 +179,7 @@ def collect(poses, directory, timeout):
             next_send = 0.
             accepted = False
             quality = {}
+            rejected_frames = 0
             # 同一位姿保持至配对成功；递增时间戳允许着色器/资产就绪后继续出图。
             while time.monotonic() < deadline:
                 if child.poll() is not None:
@@ -161,11 +204,15 @@ def collect(poses, directory, timeout):
                 if common:
                     frame_stamp = common[-1]
                     image, depth, quality = paired_frame(lefts.pop(frame_stamp), depths.pop(frame_stamp), frame_stamp)
-                    if quality["gray_std"] >= 2 and quality["valid_depth_fraction"] >= 0.05:
+                    if quality["gray_std"] >= 10 and quality["valid_depth_fraction"] >= 0.20 and quality["textured_cells"] >= 6:
                         path = directory / f"frame_{index:05d}.bin"
                         write_frame(path, image, depth, position, quaternion, frame_stamp)
                         quality.update(sha256=digest(path), timestamp=frame_stamp)
                         accepted = True
+                        renderer_ready = True
+                        break
+                    rejected_frames += 1
+                    if renderer_ready and rejected_frames >= 3:
                         break
                 time.sleep(0.01)
             results.append({"index": index, "position": position, "quat_xyzw": quaternion,
@@ -178,7 +225,7 @@ def collect(poses, directory, timeout):
         if child.poll() is None:
             child.send_signal(signal.SIGINT)
             child.wait(timeout=30)
-        (directory / "capture_manifest.json").write_text(json.dumps({"status": "complete" if complete else "incomplete", "assets": assets, "requested": len(poses), "frames": results}, indent=2) + "\n")
+        (directory / "capture_manifest.json").write_text(json.dumps({"status": "complete" if complete else "incomplete", "assets": assets, "producer": producer, "requested": len(poses), "frames": results}, indent=2) + "\n")
     if not any(row["accepted"] for row in results):
         raise RuntimeError("no usable synchronized frames")
     return results

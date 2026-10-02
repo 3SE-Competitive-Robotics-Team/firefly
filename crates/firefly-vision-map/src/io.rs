@@ -4,7 +4,7 @@
 //! `id u64 ts f64 pos 3f64 quat 4f64 n u64`，
 //! 每点 `xyz 3f64 uv 2f32 desc 128f32 score f32`。
 
-use std::io::{Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 use firefly_error::{Error, ErrorKind};
@@ -45,12 +45,13 @@ fn read_f64(r: &mut impl Read) -> Result<f64, Error> {
 ///
 /// IO 失败。
 pub fn save_map(map: &VisionMap, path: &Path) -> Result<(), Error> {
-    let mut f = std::fs::File::create(path).map_err(|e| {
+    let file = std::fs::File::create(path).map_err(|e| {
         Error::new(
             ErrorKind::InvalidArgument,
             format!("视觉地图创建失败 {}: {e}", path.display()),
         )
     })?;
+    let mut f = BufWriter::new(file);
     let fail =
         |e: std::io::Error| Error::new(ErrorKind::Internal, format!("视觉地图写入失败: {e}"));
     f.write_all(MAGIC).map_err(&fail)?;
@@ -81,7 +82,7 @@ pub fn save_map(map: &VisionMap, path: &Path) -> Result<(), Error> {
             f.write_all(&p.score.to_le_bytes()).map_err(&fail)?;
         }
     }
-    Ok(())
+    f.flush().map_err(fail)
 }
 
 /// 由文件加载地图（魔数/版本校验）。
@@ -90,12 +91,13 @@ pub fn save_map(map: &VisionMap, path: &Path) -> Result<(), Error> {
 ///
 /// 文件缺失、魔数或版本不匹配、内容截断。
 pub fn load_map(path: &Path) -> Result<VisionMap, Error> {
-    let mut f = std::fs::File::open(path).map_err(|e| {
+    let file = std::fs::File::open(path).map_err(|e| {
         Error::new(
             ErrorKind::InvalidArgument,
             format!("视觉地图打开失败 {}: {e}", path.display()),
         )
     })?;
+    let mut f = BufReader::new(file);
     if read_exact::<8>(&mut f)? != *MAGIC {
         return Err(Error::new(
             ErrorKind::InvalidArgument,

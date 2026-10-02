@@ -5,7 +5,7 @@
 //! 不再被逐像素循环占住（对照 `link` 的流水：主世界装配 → 本线程算 →
 //! 主世界发布）。
 //!
-//! 深度退化由 `depth_noise` 配置，在线与离线采集使用相同模型。
+//! 深度退化由 `depth_noise` 配置，在线测量施加噪声；离线地图路标使用理想几何深度标签。
 
 use std::sync::mpsc::{Receiver, SyncSender};
 
@@ -50,7 +50,7 @@ pub struct ProcessedCapture {
     pub left_gray: Vec<u8>,
     /// 右目灰度（发布）。
     pub right_gray: Vec<u8>,
-    /// 深度（米，行主序，已加噪声；发布）。
+    /// 深度（米，行主序；在线含退化，离线为几何标签）。
     pub depth: Vec<f32>,
     /// 左目灰度显示图（`RGBA8`）。
     pub left_gray_rgba: Vec<u8>,
@@ -65,6 +65,7 @@ pub fn run_worker(
     jobs: &Receiver<CaptureJob>,
     results: &SyncSender<ProcessedCapture>,
     options: DepthNoiseOptions,
+    offline: bool,
 ) {
     while let Ok(job) = jobs.recv() {
         let out = {
@@ -75,7 +76,7 @@ pub fn run_worker(
                 )
             });
             let _guard = root.set_local_parent();
-            process(job, &options)
+            process(job, &options, offline)
         };
         fastrace::flush();
         if results.send(out).is_err() {
@@ -85,7 +86,7 @@ pub fn run_worker(
 }
 
 /// 单拍像素管线。
-fn process(job: CaptureJob, options: &DepthNoiseOptions) -> ProcessedCapture {
+fn process(job: CaptureJob, options: &DepthNoiseOptions, offline: bool) -> ProcessedCapture {
     let mut left_gray = vec![0u8; IMAGE_SIZE];
     let mut right_gray = vec![0u8; IMAGE_SIZE];
     sensors::rgb_to_gray(&job.left_rgb, &mut left_gray);
@@ -93,14 +94,16 @@ fn process(job: CaptureJob, options: &DepthNoiseOptions) -> ProcessedCapture {
 
     let mut depth = vec![0.0f32; IMAGE_SIZE];
     sensors::linearize_depth(&job.depth_raw, &mut depth, SENSOR_NEAR);
-    depth_noise::apply(
-        &mut depth,
-        IMAGE_WIDTH,
-        IMAGE_HEIGHT,
-        (IMAGE_HEIGHT as f32 / 2.0) / (FOV_Y_DEG.to_radians() / 2.0).tan(),
-        job.stamp,
-        options,
-    );
+    if !offline {
+        depth_noise::apply(
+            &mut depth,
+            IMAGE_WIDTH,
+            IMAGE_HEIGHT,
+            (IMAGE_HEIGHT as f32 / 2.0) / (FOV_Y_DEG.to_radians() / 2.0).tan(),
+            job.stamp,
+            options,
+        );
+    }
 
     let mut left_gray_rgba = vec![0u8; 4 * IMAGE_SIZE];
     sensors::gray_to_display(&left_gray, &mut left_gray_rgba);
@@ -128,6 +131,28 @@ fn process(job: CaptureJob, options: &DepthNoiseOptions) -> ProcessedCapture {
 mod tests {
     use super::*;
 
+    #[test]
+    fn offline_depth_is_geometry_independent_of_sensor_range_and_noise() {
+        let options = DepthNoiseOptions {
+            max_depth_m: 4.,
+            ..Default::default()
+        };
+        let job = || CaptureJob {
+            seq: 1,
+            stamp: 1.,
+            trace: TraceContext::empty(),
+            left_rgb: vec![128; 4 * IMAGE_SIZE],
+            right_rgb: vec![128; 4 * IMAGE_SIZE],
+            depth_raw: (0..IMAGE_SIZE)
+                .flat_map(|_| (SENSOR_NEAR / 10.).to_le_bytes())
+                .collect(),
+        };
+        let ideal = process(job(), &options, true);
+        assert!(ideal.depth.iter().all(|z| (*z - 10.).abs() < 1e-5));
+        let measured = process(job(), &options, false);
+        assert!(measured.depth.iter().all(|z| *z == 0.));
+    }
+
     /// 单拍管线产出各缓冲尺寸正确；全清空深度保持无效 `0.0`（显示全黑）。
     #[test]
     fn process_produces_expected_buffers() {
@@ -140,7 +165,7 @@ mod tests {
             right_rgb: vec![64u8; 4 * IMAGE_SIZE],
             depth_raw: vec![0u8; 4 * IMAGE_SIZE],
         };
-        let out = process(job, &options);
+        let out = process(job, &options, false);
         assert_eq!(out.seq, 3);
         assert!((out.stamp - 1.5).abs() < 1e-9);
         assert_eq!(out.left_gray.len(), IMAGE_SIZE);

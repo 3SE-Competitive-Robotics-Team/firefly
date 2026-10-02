@@ -4,6 +4,8 @@
 
 mod online;
 mod sensors;
+#[cfg(test)]
+mod validation;
 
 use firefly_pubsub::event::TopicListener;
 use firefly_pubsub::node::create_node;
@@ -404,11 +406,7 @@ fn query_once(
     cancelled: impl Fn() -> bool,
 ) -> Result<Option<PoseObservation>, Box<dyn std::error::Error>> {
     let t_body_prior = odom.body_pose(firefly_base::FrameId::MAP)?.matrix();
-    let prior_pos = [
-        t_body_prior[(0, 3)],
-        t_body_prior[(1, 3)],
-        t_body_prior[(2, 3)],
-    ];
+    let prior_pos = [0, 1, 2].map(|axis| t_body_prior[(axis, 3)]);
     let candidates = candidates_by_heading(map, &t_body_prior, prior_pos);
     log::debug!(
         "视觉查询 t={:.2} prior=({:.1},{:.1},{:.1}) candidates={candidates:?}",
@@ -418,6 +416,7 @@ fn query_once(
         prior_pos[2]
     );
     if candidates.is_empty() {
+        log::info!("视觉查询拒绝 t={:.2}: no_candidates", feat.timestamp);
         return Ok(None);
     }
     // 多帧拼对应：单帧共面时 PnP 有翻转二义性，多视角点集破退化。
@@ -452,14 +451,15 @@ fn query_once(
         }
     }
     if pairs_2d.len() < 6 {
+        log::info!(
+            "视觉查询拒绝 t={:.2}: correspondences={} candidates={}",
+            feat.timestamp,
+            pairs_2d.len(),
+            candidates.len()
+        );
         return Ok(None);
     }
     let total = pairs_2d.len();
-    log::debug!(
-        "视觉查询 t={:.2} 匹配对应 {} 组（TOPK={QUERY_TOPK}）",
-        feat.timestamp,
-        total
-    );
     let intrinsics = CameraIntrinsics {
         focal: MUJOCO_FOCAL,
         cx: 160.0,
@@ -469,6 +469,12 @@ fn query_once(
     let Some(pose) = solve_visual_pose(&pairs_2d, &pairs_3d, intrinsics, Some(t_cam_prior))
         .map_err(|e| format!("PnP: {e}"))?
     else {
+        log::info!(
+            "视觉查询拒绝 t={:.2}: pnp_failed correspondences={} candidates={}",
+            feat.timestamp,
+            total,
+            candidates.len()
+        );
         return Ok(None);
     };
     let t_body = cam_pose_to_body(&pose.t_global);
