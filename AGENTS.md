@@ -37,7 +37,7 @@
 | `open_vins/` | MSCKF 官方 C++（firefly-vio* 的移植基准） |
 | `iceoryx2/` | IPC 中间件源码 |
 | `logforth/`、`fastrace/` | 日志 / tracing 库源码 |
-| `purecv/` | 自研视觉库（LK 光流等，vio 前端引用） |
+| Cargo registry `purecv-0.7.1/` | 图像金字塔、导数与 FAST；LK 数值核在 `firefly-vio-core/src/track/lk.rs` |
 
 ## 配置（configs/）
 
@@ -140,8 +140,10 @@ cargo run --release -p fc
 sim 发布 IMU 100Hz、仿真位姿 10Hz、PlantState 200Hz、Airframe 1Hz；
 render 提供双目与深度。VIO 视觉更新 10Hz、预测里程计 100Hz；飞控 1kHz。
 planner 默认读取 `apps/planner/maps/rmuc2026.ffmap`，缺文件报错。
-地图系算法必须使用经过固定启动先验或独立定位对齐的状态。planner 只订阅 CorrectedOdometry；
-未就绪不发布参考，500ms 墙钟失联或无效状态触发停止发布并锁存，须重启恢复。
+地图系算法必须使用经过固定启动先验或独立定位对齐的状态。planner 订阅 CorrectedOdometry 和 LocalizationStatus；
+未就绪不发布参考，500ms 墙钟失联、无效状态或定位质量退化触发停止发布并锁存，须重启恢复。
+定位质量默认要求独立视觉测量年龄 ≤3s、融合后同刻位置分歧 ≤0.5m；参数在 localization 的 quality 配置。
+FFMap 场地占据是不可被深度空闲射线、衰减或动态移除擦除的先验。
 重复/乱序样本不得续期，禁止用参考轨迹代替状态或自动切回局部 VIO。
 
 rerun 可视化约定：vio 写 `vio/odom` + `vio/traj`（估计位姿/轨迹）、

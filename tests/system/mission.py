@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 import logging
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -62,6 +63,8 @@ class Mission:
         self.recording = directory / f"{case}.rrd"
         self.result = {"case": case, "status": "running", "recording": str(self.recording), "stages": {}}
         self.processes = {}
+        self.diagnostics = queue.Queue(maxsize=8192)
+        self.diagnostic_drops = 0
         self.expected_stops = set()
         self.latest = {}
         self.last_logged = {}
@@ -85,6 +88,10 @@ class Mission:
         def drain():
             for line in process.stdout:
                 tail.append(line.rstrip())
+                try:
+                    self.diagnostics.put_nowait((name, line.rstrip()))
+                except queue.Full:
+                    self.diagnostic_drops += 1
         threading.Thread(target=drain, daemon=True).start()
         self.processes[name] = process, tail
         if self.recorder:
@@ -122,6 +129,12 @@ class Mission:
             self.subs[name] = builder.buffer_size(capacity or 2).create()
 
     def pump(self, guard=True):
+        while not self.diagnostics.empty():
+            name, line = self.diagnostics.get_nowait()
+            self.recorder.event(f"stdout/{name}: {line}", self.t)
+        if self.diagnostic_drops:
+            self.recorder.event(f"diagnostic queue overflow: {self.diagnostic_drops} lines", self.t, True)
+            self.diagnostic_drops = 0
         for name, (process, tail) in self.processes.items():
             if name not in self.expected_stops and process.poll() is not None:
                 diagnostic = " | ".join(tail)

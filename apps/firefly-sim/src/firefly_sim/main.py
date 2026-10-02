@@ -368,6 +368,7 @@ def _init_log_ipc(node) -> None:
             .publish_subscribe(LogMessage)
             .user_header(TraceContext)
             .max_publishers(10)
+            .subscriber_max_buffer_size(256)
             .open_or_create()
         )
         _log_pub = service.publisher_builder().create()

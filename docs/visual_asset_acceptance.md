@@ -51,7 +51,7 @@
 录制到的 7 次接受事件中，单次 map←odom 平移修正最大为 0.0847m。
 视觉观测到融合约延迟 1.7～2.5s。观测准确不代表延迟期间的 VIO 传播也准确。
 
-代码对照：VINS-Fusion 的 `optimize4DoF` 同样连接前四个邻居并从优化后的节点计算
+本次录制版本的代码对照：VINS-Fusion 的 `optimize4DoF` 同样连接前四个邻居并从优化后的节点计算
 漂移；本项目另加绝对地图锚点。图中固定的 VIO 边噪声与地图锚点噪声并未随实际
 估计健康度调整，地图锚点使用 Huber 鲁棒核。这些权重可能压低对大幅 VIO 漂移的
 校正，不能把“观测已接受”解释为“定位误差受控”。这属于需独立验证的建模问题，
@@ -63,3 +63,5 @@
 
 完整报告：`logs/acceptance/20261002T143643Z-75c25d8e/report.html`，原始证据同目录
 `nominal.rrd`；定位诊断汇总：`logs/online_localization_review.json`。
+
+数值实现修正与新路线复测见 [VIO 与跟踪审查](vio_tracking_review.md)。

@@ -99,6 +99,8 @@ fn main() {
                     primary_window: Some(Window {
                         resolution: (1280, 720).into(),
                         title: "firefly render".to_owned(),
+                        // 传感器节拍不得等待桌面合成器的垂直同步。
+                        present_mode: bevy::window::PresentMode::AutoNoVsync,
                         ..default()
                     }),
                     ..default()

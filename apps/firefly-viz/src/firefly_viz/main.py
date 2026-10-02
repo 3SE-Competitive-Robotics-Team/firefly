@@ -52,8 +52,8 @@ RECORDING_ID = "firefly-sim-loop"
 
 #: 订阅缓冲区深度：多实体（vio 4 条 + planner 5+ 条）10Hz 突发，防溢出丢帧
 VIZ_BUFFER_SIZE = 256
-#: 日志订阅缓冲：`Firefly/Log` 低频（各进程数条/秒），2 足够
-#:（服务默认 `subscriber_max_buffer_size` 即 2，不显式调大）。
+#: 突发日志与 trace 诊断队列，与 Rust LOG_BUFFER_SIZE 一致。
+LOG_BUFFER_SIZE = 256
 
 #: 收/落盘队列上限：日志低频，1024 足够突发；满即丢（日志语义）。
 QUEUE_MAX = 1024
@@ -298,11 +298,12 @@ def _precreate_log_service(node) -> None:
         .publish_subscribe(LogMessage)
         .user_header(TraceContext)
         .max_publishers(LOG_MAX_PUBLISHERS)
+        .subscriber_max_buffer_size(LOG_BUFFER_SIZE)
         .open_or_create()
     )
     # 返回值必须存活：Python 绑定里 builder 链式调用返回新对象（`is` 为 False，
     # 见探针），`service` 局部变量持有服务句柄；订阅端建在服务上（不弃置）。
-    return service.subscriber_builder().buffer_size(2).create()
+    return service.subscriber_builder().buffer_size(LOG_BUFFER_SIZE).create()
 
 
 def _writer_loop(inbox: queue.Queue) -> None:

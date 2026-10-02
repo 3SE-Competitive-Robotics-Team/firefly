@@ -16,6 +16,8 @@ use iceoryx2::prelude::*;
 
 /// 统一日志话题（各进程发布端 → `firefly-viz` 聚合端）。
 pub const LOG_TOPIC: &str = "Firefly/Log";
+/// 突发事件与 trace 诊断的订阅队列上限；Python 聚合端使用同值。
+pub const LOG_BUFFER_SIZE: usize = 256;
 
 /// 日志级别（`log::Level` 的数值镜像，聚合端映射到 rerun `TextLogLevel`）。
 pub mod level {
@@ -157,7 +159,7 @@ impl LogPublisher {
             crate::publish::Publisher::with_topic_buffer_publishers(
                 node,
                 LOG_TOPIC,
-                None,
+                Some(LOG_BUFFER_SIZE),
                 Some(LOG_MAX_PUBLISHERS),
             )?,
         ))

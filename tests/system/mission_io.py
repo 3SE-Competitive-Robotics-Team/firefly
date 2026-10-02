@@ -31,7 +31,7 @@ def service(node, topic, cls, capacity=None, publishers=None):
 class Recorder:
     def __init__(self, node):
         self.viz = service(node, "Firefly/Viz", VizMessage, 256, 8).publisher_builder().create()
-        self.logs = service(node, "Firefly/Log", LogMessage, publishers=10).publisher_builder().create()
+        self.logs = service(node, "Firefly/Log", LogMessage, capacity=256, publishers=10).publisher_builder().create()
 
     def message(self, kind, entity, stamp):
         msg = VizMessage()

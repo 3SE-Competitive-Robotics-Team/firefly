@@ -129,10 +129,11 @@ cargo run --release -p lightglue -- --map apps/planner/maps/rmuc2026.ffvmap
 `configs/lightglue.toml`（支持 `--config`）。回环阈值、容量和验收边界见
 [在线回环](loop_closure.md)。如需 ESKF 对照，设置 `localization.toml` 顶层
 `backend = "eskf"`，并在 `lightglue.toml` 设置 `enabled = false` 关闭在线回环。
-完成地图对齐后，可运行 planner 接收 `Firefly/CorrectedOdometry` 并发布飞控参考；
+完成地图对齐和视觉质量检查后，可运行 planner 接收 `Firefly/CorrectedOdometry` 与
+`Firefly/LocalizationStatus` 并发布飞控参考；
 通过 `ffctl fc track` 进入跟踪模式，`ffctl planner goal X Y Z` 发布地图系目标。
 planner 不订阅原始局部 VIO，不提供平移偏置捷径。未收到有效初始化状态时不发布
-参考；状态失联 500ms、变为未初始化或出现非法数值时停止发布并锁存，恢复定位后
+参考；状态/质量流失联 500ms、定位质量退化、变为未初始化或出现非法数值时停止发布并锁存，恢复定位后
 须重启 planner。飞控按自己的参考流超时策略处置，不会收到伪造的位置反馈。
 飞控反馈与 Hold 锚点保持在 odom 系，仅将地图目标转换到 odom；详情见 [坐标契约](frames.md)。
 
