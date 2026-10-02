@@ -102,11 +102,12 @@ impl Airframe {
         4.0 * self.max_thrust_per_motor
     }
 
-    /// 期望世界系力/力矩 → 4 电机推力（N，逐电机限幅）。
+    /// 期望世界系力/力矩 → 4 电机推力（N），优先保持集合推力和滚转/俯仰。
     ///
     /// 分配取期望力的**机体 z 分量**为集合推力（水平力由姿态倾斜产生，旋翼给不出
-    /// 侧向力），期望力矩取机体三轴；解出 4 电机推力后逐电机限幅到
-    /// `[0, max_thrust_per_motor]`，再回代 [`realize`](Self::realize) 得到实际落点。
+    /// 侧向力），期望力矩取机体三轴；4 电机推力约束为
+    /// `[0, max_thrust_per_motor]`；饱和先缩减偏航差动，再缩减滚转/俯仰差动。
+    /// 共同缩放零和差动保持集合推力；再回代 [`realize`](Self::realize) 得到实际落点。
     #[must_use]
     pub fn allocate(&self, attitude: Quat, desired: &Wrench) -> Allocation {
         let body_force = attitude.inverse() * desired.force;
@@ -133,13 +134,23 @@ impl Airframe {
         };
 
         let max = self.max_thrust_per_motor;
-        let mut motors = [0.0f32; 4];
-        let mut saturated = false;
-        for (i, t) in raw.iter().enumerate() {
-            let clamped = t.clamp(0.0, max);
-            saturated |= (clamped - t).abs() > 1e-6;
-            motors[i] = clamped;
+        let collective = body_force.z.clamp(0., self.max_thrust());
+        let baseline = [collective / 4.; 4];
+        let roll_pitch = solve4(&a, &[collective, body_torque.x, body_torque.y, 0.])
+            .expect("allocation matrix already validated");
+        let delta = std::array::from_fn(|i| roll_pitch[i] - baseline[i]);
+        let scale = feasible_scale(&baseline, &delta, max);
+        let mut motors = std::array::from_fn(|i| baseline[i] + scale * delta[i]);
+        let yaw =
+            solve4(&a, &[0., 0., 0., body_torque.z]).expect("allocation matrix already validated");
+        let yaw_scale = feasible_scale(&motors, &yaw, max);
+        for i in 0..4 {
+            motors[i] = (motors[i] + yaw_scale * yaw[i]).clamp(0., max);
         }
+        let saturated = motors
+            .iter()
+            .zip(raw)
+            .any(|(actual, requested)| (actual - requested).abs() > 1e-6);
         Allocation {
             motors,
             realized: self.realize(attitude, &motors),
@@ -173,7 +184,21 @@ impl Airframe {
     }
 }
 
-/// 4×4 线性方程求解（列主元高斯消元，无外部依赖）；奇异返回 `None`。
+/// 可行步长区间与 [0,1] 的交集；各电机沿共同步长缩放，保持增量零和。
+fn feasible_scale(base: &[f32; 4], delta: &[f32; 4], maximum: f32) -> f32 {
+    let mut scale = 1_f32;
+    for i in 0..4 {
+        if delta[i] > 0. {
+            scale = scale.min((maximum - base[i]) / delta[i]);
+        }
+        if delta[i] < 0. {
+            scale = scale.min(-base[i] / delta[i]);
+        }
+    }
+    scale.clamp(0., 1.)
+}
+
+/// 4×4 线性方程求解（列主元高斯消元）；奇异返回 `None`。
 fn solve4(a: &[[f32; 4]; 4], b: &[f32; 4]) -> Option<[f32; 4]> {
     let mut m = *a;
     let mut x = *b;
@@ -217,7 +242,48 @@ mod tests {
         Quat::from_rotation_z(0.7) * Quat::from_rotation_x(0.2)
     }
 
-    /// 分配与合成互为逆运算：期望在能力范围内时，实际落点 ≈ 期望。
+    #[test]
+    fn saturated_yaw_preserves_collective_and_roll_pitch() {
+        let air = Airframe::default();
+        for yaw in [-1_f32, 1.] {
+            let desired = Wrench {
+                force: Vec3::Z,
+                torque: Vec3::new(0.002, -0.001, yaw),
+            };
+            let output = air.allocate(Quat::IDENTITY, &desired);
+            assert!(output.saturated);
+            assert!((output.realized.force.z - 1.).abs() < 1e-5);
+            assert!((output.realized.torque.x - 0.002).abs() < 1e-5);
+            assert!((output.realized.torque.y + 0.001).abs() < 1e-5);
+            assert!(output.realized.torque.z * yaw >= 0.);
+            assert!(
+                output
+                    .motors
+                    .iter()
+                    .all(|t| *t >= 0. && *t <= air.max_thrust_per_motor)
+            );
+        }
+    }
+
+    #[test]
+    fn collective_derivative_stays_one_under_yaw_saturation() {
+        let air = Airframe::default();
+        let force = |z| {
+            air.allocate(
+                Quat::IDENTITY,
+                &Wrench {
+                    force: Vec3::Z * z,
+                    torque: Vec3::Z,
+                },
+            )
+            .realized
+            .force
+            .z
+        };
+        let derivative = (force(1.001) - force(0.999)) / 0.002;
+        assert!((derivative - 1.).abs() < 1e-3);
+    }
+
     #[test]
     fn allocate_then_realize_round_trips() {
         let air = Airframe::default();

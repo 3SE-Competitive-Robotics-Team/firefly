@@ -438,13 +438,21 @@ impl FlightFsm {
                     <= self.params.takeoff_complete_climb_frac * self.params.takeoff_climb_rate;
                 if reached && slow {
                     self.enter_hold(state);
+                    // 完成容差只决定模式切换，不能替代指令高度。
+                    self.target.z = target_z;
+                    self.ramp_z = target_z;
                 }
             }
             FlightState::Track => {
                 if reference.is_none() {
+                    if self.reference_lost == 0. {
+                        self.target = state.position;
+                        self.ramp_z = state.position.z;
+                        self.target_yaw = crate::state::yaw_of(state.attitude);
+                    }
                     self.reference_lost += dt;
                     if self.reference_lost >= self.params.reference_timeout {
-                        self.enter_hold(state);
+                        self.state = FlightState::Hold;
                         return Event::FailsafeReferenceLost;
                     }
                 } else {
@@ -806,6 +814,19 @@ mod tests {
     }
 
     #[test]
+    fn takeoff_tolerance_preserves_commanded_hold_altitude() {
+        let mut rig = Rig::new();
+        rig.cmd(Command::Arm).unwrap();
+        let origin = rig.state.position.z;
+        rig.cmd(Command::Takeoff { altitude: 1.795 }).unwrap();
+        rig.state.position.z = origin + 1.795 * 0.91;
+        rig.state.velocity = Vec3::ZERO;
+        let out = rig.fsm.update(DT, &rig.state, None, ok_health());
+        assert_eq!(rig.fsm.state(), FlightState::Hold);
+        assert!((out.setpoint.position.z - origin - 1.795).abs() < 1e-6);
+    }
+
+    #[test]
     fn arm_then_takeoff_reaches_altitude_and_holds() {
         let mut rig = Rig::new();
         rig.cmd(Command::Arm).unwrap();
@@ -932,10 +953,14 @@ mod tests {
             out.setpoint.yaw
         );
 
-        // 参考消失：超时前仍在 Track，超时后回落 Hold 且保持点 = 当前位置
+        rig.state.position = Vec3::new(10., 6., 1.8);
         let lost_at = rig.state.position;
+        let first = rig.fsm.update(DT, &rig.state, None, ok_health());
+        assert_eq!(first.setpoint.position, lost_at);
+        assert_eq!(first.setpoint.velocity, Vec3::ZERO);
+        rig.state.position += Vec3::new(0.1, 0.2, -0.1);
         let mut event = Event::None;
-        let mut ticks = 0;
+        let mut ticks = 1;
         while ticks < 1000 {
             ticks += 1;
             event = rig.fsm.step(DT, &rig.state, None, ok_health());
