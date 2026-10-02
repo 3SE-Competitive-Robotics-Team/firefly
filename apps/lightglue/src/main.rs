@@ -69,13 +69,14 @@ fn parse_args() -> Result<(String, String, String), String> {
     Ok((model, map, config))
 }
 
-/// 加载 ONNX 会话；两条算子线程，限制 CPU 并行度以保留控制线程预算。
+/// 加载 ONNX 会话；四条算子线程，空闲时休眠以保留控制线程预算。
 fn load_session(model: &str) -> Result<Session, Box<dyn std::error::Error>> {
     if !std::path::Path::new(model).is_file() {
         return Err(format!("权重缺失：{model}（见 models/，离线导出，不进 git）").into());
     }
     let session = Session::builder()?
-        .with_intra_threads(2)?
+        .with_intra_threads(4)?
+        .with_intra_op_spinning(false)?
         .commit_from_file(model)?;
     log::info!("lightglue 会话就绪：{model}");
     Ok(session)

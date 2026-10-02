@@ -61,8 +61,18 @@ fn held_out_map_localization_contract() {
             quat_w: q[3],
             ..Default::default()
         };
+        let span = fastrace::Span::root(
+            "map_validation_query",
+            fastrace::prelude::SpanContext::random(),
+        );
+        let parent = span.set_local_parent();
+        let started = std::time::Instant::now();
         let observation = query_once(&mut session, &map, &features, &prior, || false).unwrap();
-        let result = if let Some(pose) = observation {
+        let query_wall_s = started.elapsed().as_secs_f64();
+        drop(parent);
+        drop(span);
+        fastrace::flush();
+        let mut result = if let Some(pose) = observation {
             let error = (nalgebra::Vector3::new(pose.position_x, pose.position_y, pose.position_z)
                 - nalgebra::Vector3::from(frame.position))
             .norm();
@@ -84,6 +94,7 @@ fn held_out_map_localization_contract() {
         } else {
             serde_json::json!({"id": frame.id, "passed": false, "reason": "no_pose"})
         };
+        result["query_wall_s"] = serde_json::json!(query_wall_s);
         log::info!("held-out map validation: {result}");
         firefly_observability::pump_log_ipc(&log_ipc);
         results.push(result);
