@@ -35,7 +35,7 @@ def save_report(directory, report):
     categories = {
         "初始化": ["initialization"], "起飞": ["takeoff"], "悬停": ["hover"],
         "路径跟踪": ["tracking", "tracking_error"], "定位误差": ["vio_accuracy", "map_accuracy"],
-        "碰撞": ["collision"], "失联安全响应": ["reference_loss", "failure_hold", "estimator_inhibit", "failure_terminal"],
+        "碰撞": ["collision"], "失联安全响应": ["reference_loss", "failure_hold", "estimator_fallback", "degraded_support", "failure_terminal"],
         "进程退出": ["shutdown"],
     }
     summary = {}

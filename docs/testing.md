@@ -98,7 +98,7 @@ uv run --all-packages --extra test python scripts/accept_rmuc.py
 | 地图定位 | 至少两次已接受的视觉融合；禁止对齐；位置 RMSE ≤0.25m，航向 RMSE ≤15° |
 | 碰撞 | MuJoCo 每物理步累计；只豁免停机坪半径 0.5m、高差 0.06m、速度 <0.5m/s 且法线竖直余弦 ≥0.9 的接触；其他接触必须为零 |
 | 参考失联 | SIGINT 停止 planner；2.5s 墙钟内进入 Hold，在失联点 0.5m 内连续保持 2s |
-| 估计失联 | SIGINT 停止 VIO；0.8s 内禁止继续使用陈旧状态输出推力；另行检查无碰撞终止，电机归零不等于安全降落 |
+| 估计失联 | SIGINT 停止 VIO；0.8s 内进入姿态降级（编码 6），连续 3s 保持非零推力且无碰撞；安全落地明确标为 not_supported，不计作任务成功 |
 | 退出 | 只向本次子进程发 SIGINT，15s 内退出；不得遗留进程或用 SIGKILL 掩盖退出失败 |
 
 `tests/system/mission_sim.py` 只加评测观测：固定 IMU 噪声种子、读取接触、拒绝
@@ -116,4 +116,4 @@ OS/GPU 调度。地面真值仅用于验收判定，不生成目标坐标或估�
 与 `report.html`。JSON 保留 Git 提交及脏状态、源码/二进制/资产/RRD SHA-256、
 完整配置、运行依赖版本、阶段时间窗、实际指标与退出码。HTML 为可读汇总。
 中途失败后的依赖阶段标为 blocked；碰撞通过只覆盖报告中实际观测到的时间，
-不能代替尚未完成的整段任务。该入口不验证 ALIKED/LightGlue 在线重定位或回环。
+不能代替尚未完成的整段任务。该入口验证 ALIKED/LightGlue 库图重定位，不验证在线回环。

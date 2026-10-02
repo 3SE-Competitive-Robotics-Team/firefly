@@ -97,6 +97,8 @@ pub enum FlightState {
     Track,
     /// 自动降落：按下降率降到起飞点地面，落地后自动上锁。
     Land,
+    /// 位置估计失效：仅用 IMU 稳定姿态与标称悬停推力；不保证保高或定点。
+    AttitudeFallback,
 }
 
 impl FlightState {
@@ -116,6 +118,7 @@ impl FlightState {
             Self::Hold => "HOLD",
             Self::Track => "TRACK",
             Self::Land => "LAND",
+            Self::AttitudeFallback => "ATTITUDE_FALLBACK",
         }
     }
 
@@ -129,6 +132,7 @@ impl FlightState {
             Self::Hold => 3,
             Self::Track => 4,
             Self::Land => 5,
+            Self::AttitudeFallback => 6,
         }
     }
 }
@@ -263,7 +267,7 @@ pub enum Event {
         /// 转移后状态。
         to: FlightState,
     },
-    /// 失效保护触发了降落（估计失效）。
+    /// 估计失效：空中进入姿态降级，地面上锁。
     FailsafeEstimatorLost,
     /// 参考流失联，回落位置保持。
     FailsafeReferenceLost,
@@ -348,6 +352,22 @@ impl FlightFsm {
         state: &QuadState,
     ) -> Result<Event, Reject> {
         let from = self.state;
+        if !matches!(cmd, Command::Arm) && self.state.motors_enabled() {
+            if !health.estimator_ready {
+                return Err(Reject::EstimatorNotReady);
+            }
+            if !health.odometry_alive {
+                return Err(Reject::OdometryStale);
+            }
+            if !health.imu_alive {
+                return Err(Reject::ImuStale);
+            }
+        }
+        if self.state == FlightState::AttitudeFallback
+            && !matches!(cmd, Command::Hold | Command::Land | Command::Disarm)
+        {
+            return Err(Reject::WrongState);
+        }
         match cmd {
             Command::Arm => self.arm(health, state),
             Command::Disarm => self.disarm(state),
@@ -392,9 +412,24 @@ impl FlightFsm {
         health: Health,
     ) -> Event {
         let prev = self.state;
+        // 在依赖位置的自动转移之前处理失效，陈旧高度不能触发落地上锁。
+        if self.state.motors_enabled() && (!health.estimator_ready || !health.odometry_alive) {
+            if self.state == FlightState::ArmedGrounded {
+                self.state = FlightState::Disarmed;
+                return Event::FailsafeEstimatorLost;
+            }
+            if self.state != FlightState::AttitudeFallback {
+                self.target_yaw = crate::state::yaw_of(state.attitude);
+                self.state = FlightState::AttitudeFallback;
+                return Event::FailsafeEstimatorLost;
+            }
+        }
         match self.state {
             // 无定时转移：只等指令
-            FlightState::Disarmed | FlightState::ArmedGrounded | FlightState::Hold => {}
+            FlightState::Disarmed
+            | FlightState::ArmedGrounded
+            | FlightState::Hold
+            | FlightState::AttitudeFallback => {}
             FlightState::Takeoff => {
                 let target_z = self.origin_z.unwrap_or(0.0) + self.takeoff_target;
                 let reached = (state.position.z - target_z).abs()
@@ -427,13 +462,6 @@ impl FlightFsm {
                 }
             }
         }
-        // 估计失效 → 降落（唯一终端安全动作；对照 `PX4` 的 Hold→RTL→Land 升级链，
-        // 我们暂无返航/地理围栏，直接落 Land）
-        if self.state.motors_enabled() && !health.estimator_ready {
-            self.state = FlightState::Land;
-            self.enter_land(state);
-            return Event::FailsafeEstimatorLost;
-        }
         event_of(prev, self.state)
     }
 
@@ -461,6 +489,10 @@ impl FlightFsm {
                 self.ramp_setpoint()
             }
             FlightState::Hold => self.ramp_setpoint(),
+            FlightState::AttitudeFallback => PositionSetpoint {
+                yaw: self.target_yaw,
+                ..Default::default()
+            },
             FlightState::ArmedGrounded => {
                 self.ramp_z = state.position.z;
                 self.target.z = state.position.z;
@@ -565,8 +597,7 @@ impl FlightFsm {
 
     /// 对所有已解锁状态开放：中止当前段 → 原地保持。
     ///
-    /// 失效保护强制进入的 [`FlightState::Land`] 在条件未消失时会被下一 tick 重新拉回，
-    /// 所以 `Hold` 只能中止被指令触发的降落。
+    /// 失效降级只能在有效里程计恢复后由显式指令退出。
     fn hold(&mut self, state: &QuadState) -> Result<(), Reject> {
         if !self.state.motors_enabled() {
             return Err(Reject::NotArmed);
@@ -579,7 +610,9 @@ impl FlightFsm {
         match self.state {
             FlightState::Hold | FlightState::Track => {}
             FlightState::Disarmed | FlightState::ArmedGrounded => return Err(Reject::NotArmed),
-            FlightState::Takeoff | FlightState::Land => return Err(Reject::WrongState),
+            FlightState::Takeoff | FlightState::Land | FlightState::AttitudeFallback => {
+                return Err(Reject::WrongState);
+            }
         }
         // 参考流必须在（否则一进 Track 就立刻失联回落，等于没接管）
         if !self.reference_fresh {
@@ -927,30 +960,36 @@ mod tests {
         assert!(out.setpoint.velocity.length() < 1e-6);
     }
 
-    /// 估计失效 → 强制降落（唯一终端安全动作），落地后自动上锁。
+    /// 失联降级锁存，恢复消息不能自动接管；无有效位置时不推断落地。
     #[test]
-    fn estimator_loss_forces_land() {
+    fn estimator_loss_latches_attitude_fallback_until_explicit_recovery() {
         let mut rig = Rig::new();
         rig.cmd(Command::Arm).unwrap();
         rig.cmd(Command::Takeoff { altitude: 1.0 }).unwrap();
         rig.ticks(1000);
-        assert_eq!(rig.fsm.state(), FlightState::Hold);
-
         let bad = Health {
-            estimator_ready: false,
+            odometry_alive: false,
             ..ok_health()
         };
-        rig.fsm.update(DT, &rig.state, None, bad);
-        assert_eq!(rig.fsm.state(), FlightState::Land);
-        // 下降段：高度单调降低，且在落地判据满足前不降落完成
-        let mut last = rig.state.position.z;
-        for _ in 0..100 {
-            let out = rig.fsm.update(DT, &rig.state, None, bad);
-            rig.state.position = out.setpoint.position;
-            assert!(rig.state.position.z <= last + 1e-9);
-            last = rig.state.position.z;
+        assert!(matches!(
+            rig.fsm.update(DT, &rig.state, None, bad).event,
+            Event::FailsafeEstimatorLost
+        ));
+        assert_eq!(rig.fsm.state(), FlightState::AttitudeFallback);
+        rig.state.position = Vec3::ZERO;
+        for _ in 0..1000 {
+            assert!(rig.fsm.update(DT, &rig.state, None, bad).motors_enabled);
         }
-        assert!(rig.state.position.z > 0.02, "不应一步落地");
+        assert_eq!(
+            rig.fsm.command(Command::Land, bad, &rig.state),
+            Err(Reject::OdometryStale)
+        );
+        rig.fsm.update(DT, &rig.state, None, ok_health());
+        assert_eq!(rig.fsm.state(), FlightState::AttitudeFallback);
+        rig.fsm
+            .command(Command::Hold, ok_health(), &rig.state)
+            .unwrap();
+        assert_eq!(rig.fsm.state(), FlightState::Hold);
     }
 
     /// Hold 期间参考出现也不改变状态（外部控制须显式 Track 接管）。
@@ -1039,8 +1078,7 @@ mod tests {
         rig.ticks(200);
         assert!((rig.state.position.z - held.z).abs() < 1e-6);
 
-        // 降落同样可中止，但失效保护强制进入的降落不可被绕过：
-        // 条件未消失时下一 tick 就会被拉回 Land
+        // 有效估计支持中止降落；估计失效必须锁存姿态降级。
         rig.cmd(Command::Land).unwrap();
         assert_eq!(rig.fsm.state(), FlightState::Land);
         let bad = Health {
@@ -1048,11 +1086,11 @@ mod tests {
             ..ok_health()
         };
         rig.fsm.update(DT, &rig.state, None, bad);
-        assert_eq!(rig.fsm.state(), FlightState::Land);
+        assert_eq!(rig.fsm.state(), FlightState::AttitudeFallback);
         rig.cmd(Command::Hold).unwrap();
         assert_eq!(rig.fsm.state(), FlightState::Hold);
         rig.fsm.update(DT, &rig.state, None, bad);
-        assert_eq!(rig.fsm.state(), FlightState::Land);
+        assert_eq!(rig.fsm.state(), FlightState::AttitudeFallback);
     }
 
     /// 上锁状态电机不出力；解锁后出力（输出契约）。

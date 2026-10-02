@@ -37,7 +37,7 @@ class Options:
     map_ate_rmse_m: float = 0.25
     map_yaw_rmse_deg: float = 15.0
     reference_loss_wall_s: float = 2.5
-    estimator_inhibit_wall_s: float = 0.8
+    estimator_fallback_wall_s: float = 0.8
     stage_wall_s: float = 90.0
     waypoint_sim_s: float = 25.0
     # 地图系米；飞往台阶上空，再返回起飞点上方。
@@ -72,6 +72,7 @@ class Mission:
         self.physics_time = None
         self.zero_controls = 0
         self.nonzero_controls = 0
+        self.last_motors = [0.] * 4
         self.sequence_errors = 0
         self.recorder = None
         self.origin = None
@@ -142,6 +143,7 @@ class Mission:
                     continue
                 if name == "control":
                     values = list(msg.thrust)
+                    self.last_motors = values
                     if not np.isfinite(values).all() or min(values) < 0:
                         raise MissionFailure("invalid motor output")
                     self.zero_controls = self.zero_controls + 1 if max(values) == 0 else 0
@@ -295,19 +297,19 @@ class Mission:
                   stable=2., sim=5.)
         return {"hold_radius_m": 0.5, "stable_seconds": 2.0}
 
-    def estimator_inhibit(self):
+    def estimator_fallback(self):
         self.recorder.event("fault inject: stop VIO with SIGINT", self.t)
         start = time.monotonic()
         self.stop("vio")
-        self.wait(lambda: self.zero_controls >= 10, wall=max(0.01, self.options.estimator_inhibit_wall_s - (time.monotonic() - start)))
+        self.wait(lambda: self.mode == 6 and min(self.last_motors) > 0., wall=max(0.01, self.options.estimator_fallback_wall_s - (time.monotonic() - start)))
         latency = time.monotonic() - start
-        if latency > self.options.estimator_inhibit_wall_s:
-            raise MissionFailure(f"estimator inhibition too slow: {latency}s")
-        return {"zero_thrust_latency_wall_s": latency, "flight_mode": self.mode}
+        if latency > self.options.estimator_fallback_wall_s:
+            raise MissionFailure(f"estimator fallback too slow: {latency}s")
+        return {"attitude_fallback_latency_wall_s": latency, "flight_mode": self.mode}
 
-    def estimator_terminal(self):
-        self.wait(lambda: self.mode == 0 and abs(self.latest["gt"][1][2] - self.origin[2]) < 0.08
-                  and np.linalg.norm(self.latest["gt"][2]) < 0.1, stable=1., wall=8., sim=6.)
+    def degraded_support(self):
+        self.wait(lambda: self.mode == 6 and min(self.last_motors) > 0., stable=3., sim=5.)
+        return {"observed_seconds": 3., "capability": "IMU attitude support with nominal hover thrust; no position or altitude guarantee"}
 
     def shutdown(self):
         failures = []
@@ -348,7 +350,7 @@ class Mission:
         elif self.case == "reference_loss":
             phases.extend([("reference_loss", self.reference_loss), ("failure_hold", self.failure_hold), ("landing", self.landing)])
         else:
-            phases.extend([("estimator_inhibit", self.estimator_inhibit), ("failure_terminal", self.estimator_terminal)])
+            phases.extend([("estimator_fallback", self.estimator_fallback), ("degraded_support", self.degraded_support)])
         self.result["stages"] = {name: {"status": "blocked", "reason": "preceding phase not completed"} for name, _ in phases}
         try:
             self.start("viz", [sys.executable, "-m", "firefly_viz.main", "--save", str(self.recording)])
@@ -367,5 +369,7 @@ class Mission:
                 self.recorder.event(str(error), self.t, True)
         finally:
             self.shutdown()
+        if self.case == "estimator_loss":
+            self.result["stages"]["failure_terminal"] = {"status": "not_supported", "reason": "No independent position/altitude estimate: IMU attitude support cannot guarantee hover or safe landing"}
         self.result["status"] = "passed" if all(s["status"] == "passed" for s in self.result["stages"].values()) else "failed"
         return self.result

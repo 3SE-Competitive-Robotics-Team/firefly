@@ -35,7 +35,7 @@ mod params;
 mod state;
 
 pub use airframe::{Airframe, Allocation, Rotor};
-pub use control::{AngleCommand, PositionSetpoint, angle_mode, position_mode};
+pub use control::{AngleCommand, PositionSetpoint, angle_mode, attitude_support, position_mode};
 pub use estimator::AttitudeEstimator;
 pub use fsm::{Command, Event, FlightFsm, FlightState, FsmParams, Health, Output, Reject};
 pub use params::{ControlParams, QuadParams};

@@ -39,6 +39,30 @@ pub struct PositionSetpoint {
     pub yaw_rate: f32,
 }
 
+/// 无位置/速度反馈的姿态稳定与标称悬停推力，不保证保高或定点。
+/// 新鲜 IMU 是调用前置条件；倾斜补偿限制在 60°，由分配器执行推力上限。
+#[must_use]
+pub fn attitude_support(
+    attitude: Quat,
+    ang_vel: Vec3,
+    yaw: f32,
+    params: &QuadParams,
+    ctl: &ControlParams,
+) -> Wrench {
+    let state = QuadState {
+        attitude,
+        ang_vel,
+        ..Default::default()
+    };
+    let torque = attitude_torque(&state, Quat::from_rotation_z(yaw), 0., params, ctl);
+    let up = attitude * Vec3::Z;
+    let thrust = params.mass * G / up.z.clamp(0.5, 1.);
+    Wrench {
+        force: up * thrust,
+        torque,
+    }
+}
+
 /// 角度模式：`cmd` 的期望倾斜/偏航角速度 + 升降速度 → 世界系力/力矩。
 #[must_use]
 pub fn angle_mode(
@@ -132,4 +156,39 @@ fn attitude_torque(
     let ang_accel = (rate_des - state.ang_vel) * ctl.rate_kp;
     let torque_body = Vec3::from(params.inertia) * ang_accel;
     state.attitude * torque_body
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    #[test]
+    fn support_has_analytic_vertical_force_and_restoring_torque() {
+        let p = QuadParams::default();
+        let ctl = ControlParams::default();
+        let expected = p.mass * G;
+        for theta in [-0.4_f32, 0., 0.4] {
+            let q = Quat::from_rotation_y(theta);
+            let out = attitude_support(q, Vec3::ZERO, 0., &p, &ctl);
+            assert!((out.force.z - expected).abs() < 1e-5);
+            assert!((out.force.x - expected * theta.tan()).abs() < 1e-5);
+            assert!(out.torque.y * theta <= 0.);
+            let epsilon = 1e-3;
+            let a = attitude_support(
+                Quat::from_rotation_y(theta + epsilon),
+                Vec3::ZERO,
+                0.,
+                &p,
+                &ctl,
+            );
+            let b = attitude_support(
+                Quat::from_rotation_y(theta - epsilon),
+                Vec3::ZERO,
+                0.,
+                &p,
+                &ctl,
+            );
+            let derivative = (a.force.x - b.force.x) / (2. * epsilon);
+            assert!((derivative - expected / theta.cos().powi(2)).abs() < 0.002);
+        }
+    }
 }

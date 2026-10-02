@@ -28,7 +28,7 @@ pub struct InitialAlignment {
 }
 impl InitialAlignment {
     /// 用静止局部机体位姿计算 map←odom，保留 IMU 确定的重力方向。
-    /// 对照 VINS-Fusion pose_graph.cpp：yaw 差与 p_map − R_map_odom p_odom。
+    /// 对照 VINS-Fusion `pose_graph.cpp`：yaw 差与 `p_map − R_map_odom p_odom`。
     /// # Errors
     /// 未初始化、非有限、移动中或已离开局部启动原点。
     pub fn at_start(

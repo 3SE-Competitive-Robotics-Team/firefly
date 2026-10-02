@@ -439,9 +439,10 @@ fn query_once(
 mod tests {
     use super::DEFAULT_MODEL;
 
-    /// 已知库帧提供独立地图位姿，匹配和 PnP 必须恢复它。
+    /// 已知库帧提供独立地图位姿，匹配和 `PnP` 必须恢复它。
     #[test]
     #[ignore = "requires exported models and RMUC visual map"]
+    #[allow(clippy::large_stack_arrays)]
     fn real_map_matching_and_pose_contract() {
         use super::*;
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

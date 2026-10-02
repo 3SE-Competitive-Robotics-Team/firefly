@@ -1,4 +1,5 @@
-//! 先验播种的鲁棒重投影精化；左扰动作用于 OpenCV camera←map。
+//! 先验播种的鲁棒重投影精化；左扰动作用于 `OpenCV` camera←map。
+#![allow(clippy::many_single_char_names)]
 use crate::{CameraIntrinsics, VisualPose, axis_flip, passes_prior_gate};
 use firefly_base::se3::se3_exp;
 use nalgebra::{

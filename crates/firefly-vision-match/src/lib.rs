@@ -128,10 +128,10 @@ pub fn solve_visual_pose(
             format!("对应数 {} < 6，不解算", points_2d.len()),
         ));
     }
-    if let Some(t) = prior.as_ref() {
-        if let Some(pose) = refine::from_prior(points_2d, points_3d, intrinsics, t) {
-            return Ok(Some(pose));
-        }
+    if let Some(t) = prior.as_ref()
+        && let Some(pose) = refine::from_prior(points_2d, points_3d, intrinsics, t)
+    {
+        return Ok(Some(pose));
     }
     let object: Vec<Point3f> = points_3d
         .iter()

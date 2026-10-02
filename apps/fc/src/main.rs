@@ -17,7 +17,7 @@
 //!
 //! 反馈来源分工：**内环姿态由飞控自估**（陀螺积分 + 加速度计水平修正，航向取 VIO，
 //! 上电用加计定滚转/俯仰）；位置/速度来自里程计。缺少有效 IMU、初始化未完成
-//! 或里程计陈旧时发送零推力；真值不参与控制与健康判据。
+//! 或地面里程计陈旧时发送零推力；空中里程计失联进入仅姿态稳定。真值不参与控制与健康判据。
 //!
 //! 控制节拍使用墙钟，诊断时间取自 IMU。未就绪时持续发零推力，使被控对象能产生初始化测量。
 //!
@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 use fastrace::prelude::*;
 use firefly_flight::{
     Airframe, AttitudeEstimator, Command, ControlParams, Event, FlightFsm, FsmParams, Health,
-    PositionSetpoint, QuadParams, QuadState, position_mode, yaw_of,
+    PositionSetpoint, QuadParams, QuadState, attitude_support, position_mode, yaw_of,
 };
 use firefly_pubsub::command::{COMMAND_TOPIC, CommandMessage, kind as command_kind};
 use firefly_pubsub::control::{ControlMessage, ControlPublisher};
@@ -57,7 +57,7 @@ const DEFAULT_CONFIG: &str = "configs/fc.toml";
 /// 节拍余量：睡眠到此为止、余下自旋（1kHz 下约 15% 单核，换 µs 级 tick 精度；
 /// 纯 sleep 在 macOS 上会落到 ~1.2ms 周期）。
 const SPIN_MARGIN: Duration = Duration::from_micros(150);
-/// 里程计陈旧阈值（墙钟秒）：覆盖 10Hz 视觉更新间隔，禁止使用失联估计驱动电机。
+/// 里程计陈旧阈值（墙钟秒）：覆盖 10Hz 视觉更新间隔，触发姿态降级。
 const ODOM_STALE_LIMIT: Duration = Duration::from_millis(500);
 /// IMU 陈旧阈值（墙钟）：100Hz 下 5 个周期；陈旧则不得解锁。
 const IMU_STALE_LIMIT: Duration = Duration::from_millis(50);
@@ -94,6 +94,8 @@ fn parse_config_path() -> Result<String, String> {
 /// 连续 odom 系位置/速度/航向反馈快照，仅来自 `Firefly/Odometry`。
 #[derive(Clone, Copy)]
 struct Estimate {
+    /// 状态的测量时间（秒）。
+    timestamp: f64,
     /// 估计位置（m）。
     position: Vec3,
     /// 估计速度（m/s）。
@@ -120,6 +122,8 @@ struct Inputs {
     imu_time: f64,
     /// 最新 IMU（陀螺、加计，机体系）与到达墙钟时刻（判陈旧）。
     imu: Option<(Vec3, Vec3, Instant)>,
+    /// 本 tick 排空的有效 IMU 样本，按测量时刻消费一次。
+    imu_samples: Vec<(f64, Vec3, Vec3)>,
     /// 参考（位置/速度/偏航/偏航角速度）与到达墙钟时刻（判新鲜）。
     reference: Option<(ReferenceMessage, Instant)>,
     /// 最新地面站指令（序号最大的那条）。
@@ -160,8 +164,10 @@ impl Ports {
     }
 
     /// 排空所有输入（非阻塞），保留最新；返回本次排空到的 IMU 样本数。
+    #[allow(clippy::too_many_lines)]
     fn drain(&self, inputs: &mut Inputs) -> Result<u32, firefly_error::Error> {
         let mut imu_count = 0u32;
+        inputs.imu_samples.clear();
         while let Some(sample) = self.plant.receive()? {
             inputs.plant = Some((*sample, Instant::now()));
         }
@@ -184,6 +190,9 @@ impl Ports {
             {
                 continue;
             }
+            if m.timestamp < 0. || (inputs.imu.is_some() && m.timestamp <= inputs.imu_time) {
+                continue;
+            }
             inputs.imu_time = m.timestamp;
             inputs.imu = Some((
                 Vec3::new(
@@ -198,11 +207,22 @@ impl Ports {
                 ),
                 Instant::now(),
             ));
+            let (gyro, accel, _) = inputs.imu.unwrap();
+            inputs.imu_samples.push((m.timestamp, gyro, accel));
             imu_count += 1;
         }
         while let Some(sample) = self.odom.receive()? {
             let m = *sample;
             let received_at = Instant::now();
+            if !m.is_initialized
+                && m.timestamp.is_finite()
+                && let Some(estimate) = inputs
+                    .estimate
+                    .as_mut()
+                    .filter(|e| m.timestamp > e.timestamp)
+            {
+                estimate.initialized = false;
+            }
             if !inputs.frames.observe_odom(&m, received_at) {
                 continue;
             }
@@ -220,6 +240,7 @@ impl Ports {
                 continue;
             }
             inputs.estimate = Some(Estimate {
+                timestamp: m.timestamp,
                 position,
                 velocity,
                 quat: [m.quat_x, m.quat_y, m.quat_z, m.quat_w],
@@ -340,7 +361,7 @@ fn report_event(event: Event) {
         Event::None => {}
         Event::Transition { from, to } => log::info!("模式 {} → {}", from.name(), to.name()),
         Event::FailsafeEstimatorLost => {
-            log::error!("失效保护：状态估计丢失 → 自动降落");
+            log::error!("失效保护：状态估计丢失：空中仅姿态稳定，地面上锁；无法保证保高或定点");
         }
         Event::FailsafeReferenceLost => {
             log::warn!("失效保护：参考流失联 → 位置保持");
@@ -355,7 +376,8 @@ struct Controller {
     /// 姿态估计是否已启动。
     attitude_ready: bool,
     /// 上次航向修正时刻（估算修正 dt）。
-    last_yaw_fix: Option<Instant>,
+    last_yaw_fix: Option<f64>,
+    last_imu_time: Option<f64>,
     /// 飞行状态机（模式与安全层）。
     fsm: FlightFsm,
     /// 已执行的最大指令序号（重复投递去重）。
@@ -372,6 +394,7 @@ impl Controller {
             estimator: AttitudeEstimator::default(),
             attitude_ready: false,
             last_yaw_fix: None,
+            last_imu_time: None,
             fsm: FlightFsm::new(fsm),
             last_command_seq: 0,
             altitude: 0.0,
@@ -379,7 +402,7 @@ impl Controller {
         }
     }
 
-    /// 仅从传感器与里程计计算电机推力；未就绪或数据陈旧时返回零推力。
+    /// 空中失联只用 IMU 维持姿态支持；禁止陈旧位置进入控制律。
     fn motor_output(&mut self, inputs: &Inputs, dt: f32, ctl: &ControlParams) -> ([f32; 4], bool) {
         let (attitude, ang_vel) = self.attitude_and_rates(inputs, dt);
         let (position, velocity) = inputs
@@ -397,17 +420,20 @@ impl Controller {
         let out = self.fsm.update(dt, &state, reference.as_ref(), health);
         report_event(out.event);
         self.altitude = self.fsm.altitude_above_origin(&state);
-        if !out.motors_enabled
-            || !health.estimator_ready
-            || !health.odometry_alive
-            || !health.imu_alive
-        {
+        if !out.motors_enabled || !health.imu_alive || !self.attitude_ready {
             return ([0.0; 4], false);
         }
         let Some((quad, airframe)) = inputs.vehicle else {
             return ([0.0; 4], false);
         };
-        let desired = position_mode(&state, &out.setpoint, &quad, ctl);
+        let desired = if self.fsm.state() == firefly_flight::FlightState::AttitudeFallback {
+            attitude_support(attitude, ang_vel, out.setpoint.yaw, &quad, ctl)
+        } else {
+            if !health.estimator_ready || !health.odometry_alive {
+                return ([0.; 4], false);
+            }
+            position_mode(&state, &out.setpoint, &quad, ctl)
+        };
         let allocation = airframe.allocate(attitude, &desired);
         (allocation.motors, allocation.saturated)
     }
@@ -471,7 +497,7 @@ impl Controller {
     }
 
     /// 姿态与角速度仅由 IMU 和里程计估计；无 IMU 时保持未就绪状态。
-    fn attitude_and_rates(&mut self, inputs: &Inputs, dt: f32) -> (Quat, Vec3) {
+    fn attitude_and_rates(&mut self, inputs: &Inputs, _dt: f32) -> (Quat, Vec3) {
         let Some((gyro, accel, at)) = inputs.imu else {
             return (self.estimator.attitude(), Vec3::ZERO);
         };
@@ -490,22 +516,43 @@ impl Controller {
                     .to_degrees()
             );
         }
-        self.estimator.update(gyro, accel, dt);
+        if inputs.imu_samples.is_empty() {
+            self.consume_imu(inputs.imu_time, gyro, accel);
+        } else {
+            for &(time, gyro, accel) in &inputs.imu_samples {
+                self.consume_imu(time, gyro, accel);
+            }
+        }
         if let Some(est) = inputs
             .estimate
             .filter(|e| e.initialized && e.received_at.elapsed() <= ODOM_STALE_LIMIT)
         {
             if self.last_yaw_fix.is_none() {
                 self.estimator.reset(vio::body_to_world_from_odom(est.quat));
+                self.last_yaw_fix = Some(est.timestamp);
+            } else if let Some(previous) = self.last_yaw_fix.filter(|t| est.timestamp > *t) {
+                let yaw_src = yaw_of(vio::body_to_world_from_odom(est.quat));
+                self.estimator
+                    .correct_yaw(yaw_src, (est.timestamp - previous).min(0.5) as f32);
+                self.last_yaw_fix = Some(est.timestamp);
             }
-            let yaw_src = yaw_of(vio::body_to_world_from_odom(est.quat));
-            let dt_fix = self
-                .last_yaw_fix
-                .map_or(dt, |t| t.elapsed().as_secs_f32().clamp(dt, 0.5));
-            self.estimator.correct_yaw(yaw_src, dt_fix);
-            self.last_yaw_fix = Some(Instant::now());
         }
         (self.estimator.attitude(), gyro)
+    }
+
+    /// 测量时钟闭合：重复/乱序数据不积分，暂停传感器时间不推进姿态。
+    fn consume_imu(&mut self, timestamp: f64, gyro: Vec3, accel: Vec3) {
+        if !timestamp.is_finite() {
+            return;
+        }
+        if let Some(previous) = self.last_imu_time {
+            if timestamp <= previous {
+                return;
+            }
+            self.estimator
+                .update(gyro, accel, (timestamp - previous) as f32);
+        }
+        self.last_imu_time = Some(timestamp);
     }
 
     /// 控制量 + 模式 + 姿态校验进 rrd（10Hz）。
@@ -710,10 +757,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn imu_integrates_measurement_time_once_even_when_control_ticks_repeat() {
+        let mut controller = Controller::new(FsmParams::default());
+        for i in 0..=100 {
+            let time = f64::from(i) * 0.01;
+            controller.consume_imu(time, Vec3::Z, Vec3::Z * firefly_flight::G);
+            for _ in 0..20 {
+                controller.consume_imu(time, Vec3::Z, Vec3::Z * firefly_flight::G);
+            }
+        }
+        assert!((controller.estimator.yaw() - 1.).abs() < 1e-5);
+        controller.consume_imu(0.5, Vec3::Z * 100., Vec3::ZERO);
+        assert!((controller.estimator.yaw() - 1.).abs() < 1e-5);
+    }
+
+    #[test]
+    fn stale_grounded_estimator_cannot_start_hover_thrust() {
+        let mut controller = Controller::new(FsmParams::default());
+        let mut inputs = sensor_inputs();
+        inputs.command = Some(CommandMessage {
+            kind: command_kind::ARM,
+            sequence: 1,
+            ..Default::default()
+        });
+        controller.motor_output(&inputs, 0.001, &ControlParams::default());
+        inputs.estimate.as_mut().unwrap().initialized = false;
+        assert_eq!(
+            controller
+                .motor_output(&inputs, 0.001, &ControlParams::default())
+                .0
+                .map(f32::to_bits),
+            [0; 4]
+        );
+        assert_eq!(
+            controller.fsm.state(),
+            firefly_flight::FlightState::Disarmed
+        );
+    }
+
     fn sensor_inputs() -> Inputs {
         Inputs {
             vehicle: Some((QuadParams::default(), Airframe::default())),
             estimate: Some(Estimate {
+                timestamp: 0.,
                 position: Vec3::ZERO,
                 velocity: Vec3::ZERO,
                 quat: [0.0, 0.0, 0.0, 1.0],
@@ -787,9 +874,13 @@ mod tests {
         );
         inputs.estimate.as_mut().unwrap().received_at =
             Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
-        assert_eq!(
-            a.motor_output(&inputs, 0.001, &ctl).0.map(f32::to_bits),
-            [0; 4]
-        );
+        let (fallback, _) = a.motor_output(&inputs, 0.001, &ctl);
+        assert!(fallback.iter().all(|m| m.is_finite() && *m > 0.));
+        assert_eq!(a.fsm.state(), firefly_flight::FlightState::AttitudeFallback);
+        let estimate = inputs.estimate.as_mut().unwrap();
+        estimate.position = Vec3::splat(10000.);
+        estimate.velocity = Vec3::splat(-1000.);
+        let (same, _) = a.motor_output(&inputs, 0.001, &ctl);
+        assert_eq!(fallback.map(f32::to_bits), same.map(f32::to_bits));
     }
 }

@@ -298,7 +298,7 @@ impl App {
             || self
                 .pending_visual
                 .iter()
-                .any(|o| o.timestamp == obs.timestamp)
+                .any(|o| o.timestamp.to_bits() == obs.timestamp.to_bits())
         {
             return;
         }
