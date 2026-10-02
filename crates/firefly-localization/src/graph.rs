@@ -11,7 +11,9 @@ use std::collections::BTreeMap;
 pub struct GraphOptions {
     pub max_nodes: usize,
     pub iterations: usize,
+    /// 相邻里程计增量的扩散密度，m/√s；协方差随时间间隔线性累计。
     pub odom_position_sigma: f64,
+    /// 航向增量扩散密度，rad/√s。
     pub odom_yaw_sigma: f64,
     pub map_position_sigma: f64,
     pub map_yaw_sigma: f64,
@@ -175,6 +177,12 @@ impl PoseGraph {
         );
         Ok(())
     }
+    /// 同一时刻的原始位姿由首个注册节点固定；异步观测复用此快照。
+    #[must_use]
+    pub fn raw_pose(&self, timestamp: f64) -> Option<RigidTransform> {
+        self.nodes.get(&timestamp.to_bits()).map(|node| node.raw)
+    }
+
     /// 独立地图观测只插入一次；同一观测不经第二滤波器重复融合。
     /// # Errors
     /// 节点缺失、重复锚点、非法地图位姿或几何新息超限。
@@ -263,9 +271,10 @@ impl PoseGraph {
             [obs.position_x, obs.position_y, obs.position_z],
             [obs.quat_x, obs.quat_y, obs.quat_z, obs.quat_w],
         )?;
+        let supplied = RigidTransform::from_matrix(FrameId::ODOM, FrameId::BODY, raw)?;
         self.insert(
             obs.timestamp,
-            RigidTransform::from_matrix(FrameId::ODOM, FrameId::BODY, raw)?,
+            self.raw_pose(obs.timestamp).unwrap_or(supplied),
         )?;
         self.anchor(obs.timestamp, map)
     }
@@ -286,6 +295,8 @@ impl PoseGraph {
         }
         let a = edge.from.body_pose(FrameId::ODOM)?;
         let b = edge.to.body_pose(FrameId::ODOM)?;
+        let a = self.raw_pose(edge.from.timestamp).unwrap_or(a);
+        let b = self.raw_pose(edge.to.timestamp).unwrap_or(b);
         let relative = RigidTransform::from_parts(
             FrameId(1024),
             FrameId::BODY,
@@ -348,19 +359,20 @@ impl PoseGraph {
             .collect();
         let sig = |p, y| Vector4::new(p, p, p, y);
         let mut edges = Vec::new();
+        // 相邻增量构成 Markov 链；跨越多个节点的同源差分不得再当独立证据。
         for j in 1..keys.len() {
-            for i in j.saturating_sub(4)..j {
-                edges.push(Edge {
-                    i,
-                    j,
-                    measurement: relative(&raw[i], &raw[j]),
-                    sigma: sig(
-                        self.options.odom_position_sigma,
-                        self.options.odom_yaw_sigma,
-                    ),
-                    robust: false,
-                });
-            }
+            let i = j - 1;
+            let scale = (f64::from_bits(keys[j]) - f64::from_bits(keys[i])).sqrt();
+            edges.push(Edge {
+                i,
+                j,
+                measurement: relative(&raw[i], &raw[j]),
+                sigma: sig(
+                    self.options.odom_position_sigma * scale,
+                    self.options.odom_yaw_sigma * scale,
+                ),
+                robust: false,
+            });
         }
         for (&(a, b), &measurement) in &self.loops {
             if let (Ok(i), Ok(j)) = (keys.binary_search(&a), keys.binary_search(&b)) {
@@ -565,6 +577,41 @@ fn pcg(a: &Blocks, b: &[Vector4<f64>]) -> Option<Vec<Vector4<f64>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn asynchronous_loop_endpoints_reuse_registered_odometry() {
+        use firefly_pubsub::{odom::OdomMessage, vision::LoopConstraint};
+        let mut graph = PoseGraph::new(GraphOptions::default(), origin()).unwrap();
+        let raw = |x| {
+            RigidTransform::from_parts(FrameId::ODOM, FrameId::BODY, [x, 0., 0.], [0., 0., 0., 1.])
+                .unwrap()
+        };
+        graph.insert(0., raw(0.)).unwrap();
+        graph.insert(20., raw(1.)).unwrap();
+        assert!(graph.insert(20., raw(1.001)).is_err());
+        let edge = LoopConstraint {
+            from: OdomMessage {
+                timestamp: 0.,
+                position_x: 0.001,
+                is_initialized: true,
+                ..Default::default()
+            },
+            to: OdomMessage {
+                timestamp: 20.,
+                position_x: 1.001,
+                is_initialized: true,
+                ..Default::default()
+            },
+            translation: [1., 0., 0.],
+            quaternion: [0., 0., 0., 1.],
+            inliers: 40,
+            confirmations: 3,
+            reprojection_error: 0.1,
+        };
+        graph.observe_loop(&edge).unwrap();
+        assert_eq!(graph.loop_count(), 1);
+        assert!((graph.raw_pose(20.).unwrap().matrix() - raw(1.).matrix()).norm() < 1e-12);
+        assert!((graph.alignment().matrix() - origin().matrix()).norm() < 1e-12);
+    }
     fn pose(x: f64, y: f64, yaw: f64) -> RigidTransform {
         let q = UnitQuaternion::from_euler_angles(0.03, -0.04, yaw);
         let q = q.quaternion();
@@ -579,6 +626,35 @@ mod tests {
     fn origin() -> RigidTransform {
         RigidTransform::from_parts(FrameId::MAP, FrameId::ODOM, [0.; 3], [0., 0., 0., 1.]).unwrap()
     }
+    #[test]
+    fn odometry_partition_preserves_absolute_anchor_information() {
+        for segments in [1, 2, 4, 10] {
+            let initial =
+                RigidTransform::from_parts(FrameId::MAP, FrameId::ODOM, [0.; 3], [0., 0., 0., 1.])
+                    .unwrap();
+            let mut graph = PoseGraph::new(GraphOptions::default(), initial).unwrap();
+            for i in 0..=segments {
+                let t = i as f64 / segments as f64;
+                graph.insert(t, pose(t, 0., 0.)).unwrap();
+            }
+            let observation = RigidTransform::from_parts(
+                FrameId::MAP,
+                FrameId::BODY,
+                [1.1, 0., 0.],
+                [0., 0., 0., 1.],
+            )
+            .unwrap();
+            graph.anchor(1., observation).unwrap();
+            let corrected = graph.alignment().compose(&pose(1., 0., 0.)).unwrap();
+            // 一秒累计里程计方差与地图观测方差均为 0.01m²，解析均值为 1.05m。
+            assert!(
+                (corrected.isometry().translation.x - 1.05).abs() < 1e-6,
+                "segments={segments} position={}",
+                corrected.isometry().translation.x
+            );
+        }
+    }
+
     #[test]
     fn residual_analytic_value_and_jacobians() {
         let mut g = PoseGraph::new(GraphOptions::default(), origin()).unwrap();

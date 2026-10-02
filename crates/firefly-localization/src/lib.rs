@@ -12,6 +12,7 @@ pub mod config;
 pub mod convert;
 pub mod filter;
 pub mod graph;
+pub mod quality;
 
 pub use config::LocalizationConfig;
 pub use convert::corrected_odom;

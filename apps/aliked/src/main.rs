@@ -30,8 +30,8 @@ const DEFAULT_MODEL: &str = "models/aliked-n16-k512.onnx";
 /// 导出约定：静态分辨率（见导出脚本）。
 const WIDTH: usize = 320;
 const HEIGHT: usize = 240;
-/// 特征发布节流（秒）：ORT CPU 单帧约数百毫秒，视觉定位 1Hz 足够。
-const FEATURE_PERIOD: f64 = 1.0;
+/// 特征处理最小间隔（传感器秒）；只处理最新帧，推理慢时丢帧而不积压。
+const FEATURE_PERIOD: f64 = 0.2;
 /// 时钟回拨重整阈值（秒）：帧时间戳比节流门限早超此值即视为传感器时钟重启
 ///（`sim` 重启后任务时钟归零），重整节流门限而非永久静默（否则重启后无特征）。
 const CLOCK_REWIND_MARGIN: f64 = 2.0;
@@ -76,8 +76,7 @@ fn parse_args() -> Result<(String, Option<PathBuf>, Option<PathBuf>), String> {
 
 /// 加载 ONNX 会话（文件缺失即报错，不静默）。
 ///
-/// 线程约束：ORT 缺省占满全核（实测 aliked 常驻 200%+，饿死 vio 的 IMU
-/// 消费致断流）；在线推理节流 1Hz，锁 1 intra-op 线程不影响输出。
+/// 使用一条算子线程，保留其他实时进程的 CPU 预算。
 fn load_session(model: &str) -> Result<Session, Box<dyn std::error::Error>> {
     if !std::path::Path::new(model).is_file() {
         return Err(format!("权重缺失：{model}（见 models/，离线导出，不进 git）").into());
@@ -105,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 主循环：相机对事件唤醒 → 取最新左目帧 → 节流 1Hz 推理 → 发布特征。
+/// 主循环：相机对事件唤醒 → 取最新左目帧 → 最多 5Hz 推理 → 发布特征。
 fn run_loop(session: &mut Session) -> Result<(), firefly_error::Error> {
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "aliked");
@@ -165,6 +164,8 @@ fn run_loop(session: &mut Session) -> Result<(), firefly_error::Error> {
         // 一次（推理阻塞数百 ms，积压日志及时排空，不等下一帧）。
         firefly_observability::set_sim_time(frame.timestamp);
         firefly_observability::pump_log_ipc(&log_ipc);
+        let root = fastrace::Span::root("aliked", fastrace::prelude::SpanContext::random());
+        let trace_guard = root.set_local_parent();
         match infer_frame(session, &frame) {
             Ok(msg) => {
                 log::debug!(
@@ -179,6 +180,9 @@ fn run_loop(session: &mut Session) -> Result<(), firefly_error::Error> {
             Err(e) => log::warn!("特征推理失败: {e}"),
         }
         firefly_observability::pump_log_ipc(&log_ipc);
+        drop(trace_guard);
+        drop(root);
+        fastrace::flush();
         CallbackProgression::Continue
     };
     match waitset.wait_and_process(on_event) {

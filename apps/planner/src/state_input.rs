@@ -254,3 +254,84 @@ mod tests {
         assert!(input.pose_at(1.05).is_none());
     }
 }
+
+/// 视觉地图质量门控；获得可用状态后，退化或中断锁存停止。
+#[derive(Default)]
+pub struct QualityInput {
+    latest: Option<(firefly_pubsub::odom::LocalizationStatus, Instant)>,
+    ready_once: bool,
+    stopped: bool,
+}
+impl QualityInput {
+    pub fn observe(&mut self, status: firefly_pubsub::odom::LocalizationStatus, now: Instant) {
+        if !status.timestamp.is_finite() || status.timestamp < 0. {
+            return;
+        }
+        if self
+            .latest
+            .is_some_and(|(previous, _)| status.timestamp <= previous.timestamp)
+        {
+            return;
+        }
+        self.stopped |= self.ready_once
+            && (!status.tracking_ready
+                || self
+                    .latest
+                    .is_some_and(|(_, received)| now.duration_since(received) >= MAX_AGE));
+        self.ready_once |= status.tracking_ready;
+        self.latest = Some((status, now));
+    }
+    pub fn ready(&mut self, timestamp: f64, now: Instant) -> bool {
+        let current = self.latest.is_some_and(|(s, received)| {
+            s.tracking_ready
+                && now.duration_since(received) < MAX_AGE
+                && (timestamp - s.timestamp).abs() <= 0.2
+        });
+        self.stopped |= self.ready_once && !current;
+        current && !self.stopped
+    }
+    pub fn stopped(&self) -> bool {
+        self.stopped
+    }
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::*;
+    use firefly_pubsub::odom::LocalizationStatus;
+    #[test]
+    fn degradation_latches_and_duplicates_do_not_refresh() {
+        let now = Instant::now();
+        let status = LocalizationStatus {
+            timestamp: 1.,
+            visual_timestamp: 1.,
+            position_disagreement: 0.1,
+            tracking_ready: true,
+        };
+        let mut gate = QualityInput::default();
+        assert!(!gate.ready(1., now));
+        gate.observe(status, now);
+        assert!(gate.ready(1., now));
+        gate.observe(status, now + Duration::from_millis(400));
+        assert!(!gate.ready(1., now + Duration::from_millis(501)));
+        gate.observe(
+            LocalizationStatus {
+                timestamp: 2.,
+                ..status
+            },
+            now + Duration::from_millis(502),
+        );
+        assert!(!gate.ready(2., now + Duration::from_millis(502)));
+        let mut gate = QualityInput::default();
+        gate.observe(status, now);
+        gate.observe(
+            LocalizationStatus {
+                timestamp: 1.1,
+                tracking_ready: false,
+                ..status
+            },
+            now,
+        );
+        assert!(gate.stopped());
+    }
+}

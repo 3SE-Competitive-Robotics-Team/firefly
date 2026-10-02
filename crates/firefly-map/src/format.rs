@@ -8,7 +8,7 @@ use std::fs;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::Vector3;
 
-use crate::grid::{GridMap, GridMapBuilder, VoxelState};
+use crate::grid::{GridMap, GridMapBuilder};
 
 /// 动态障碍形状。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -147,7 +147,7 @@ impl MapFile {
                     Error::new(ErrorKind::InvalidArgument, "occupied voxel outside map")
                         .with_context("occupied voxel", format!("{p:?}"))
                 })?;
-            map.set_state(idx, VoxelState::Occupied);
+            map.set_prior_occupied(idx);
         }
         Ok(map)
     }

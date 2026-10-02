@@ -3,10 +3,12 @@
 //! 把一帧深度图投影成世界系点云并做光线标记：相机原点 → 命中点射线沿途
 //! 体素以 `prob_miss_log` 递减（趋向 Free），命中体素以 `prob_hit_log` 递增
 //! （趋向 Occupied），对照官方 `grid_map.cpp:577-700` `raycastProcess` 的
-//! log-odds 更新语义。对照差异见 `mark_ray` 注释。
+//! 帧内多数投票与单次 log-odds 更新语义。
 //!
 //! 相机模型与 RMUC render 标定一致（`apps/render/src/rig.rs`），
 //! 投影约定见 `DepthCamera::mujoco_default`。
+
+use std::collections::BTreeMap;
 
 use nalgebra::{Isometry3, Matrix3, Point3, Vector3};
 
@@ -87,6 +89,9 @@ pub fn update_from_depth(
     body_pose: &Isometry3<f64>,
     depth: &[f32],
 ) {
+    assert_eq!(depth.len(), cam.width * cam.height);
+    assert!(cam.pixel_step > 0);
+    let mut votes = BTreeMap::new();
     let cam_world = body_pose * Point3::from(cam.pos_in_body);
     let mut v = 0usize;
     while v < cam.height {
@@ -100,33 +105,50 @@ pub fn update_from_depth(
                 let hit_cam = Vector3::new(dx * z, dy * z, -z);
                 let hit_world =
                     body_pose * Point3::from(cam.pos_in_body + cam.rot_cam_to_body * hit_cam);
-                mark_ray(map, cam_world.coords, hit_world.coords);
+                vote_ray(map, cam_world.coords, hit_world.coords, &mut votes);
             }
             u += cam.pixel_step;
         }
         v += cam.pixel_step;
     }
+    apply_votes(map, votes);
 }
 
-/// 从 `from` 到 `to` 的体素遍历（3D DDA）：沿途以 `prob_miss_log` 递减，末端以 `prob_hit_log` 递增。
-///
-/// 对照官方 `grid_map.cpp:577-700` `raycastProcess`：官方对同一体素在帧内做多数投票
-/// （`count_hit/count_hit_and_miss` 统计后统一 `log_odds_update` 一次），firefly 逐像素 DDA 每条射线
-/// 独立累积更新（`update_occupancy(idx, delta)` clamp 到 `[clamp_min_log_, clamp_max_log_]`，
-/// 方向一致，差异仅在于帧内多次命中/穿过的合并时机，注释中写明对照关系，不引入帧缓冲）。
+/// 帧内多数投票，每体素每帧最多一次 log-odds 更新；相等时取命中。
+/// 对照 EGO-Planner-v2 `raycastProcess` 的 count_hit/count_hit_and_miss。
+fn apply_votes(map: &mut GridMap, votes: BTreeMap<[usize; 3], (u32, u32)>) {
+    for (idx, (hits, misses)) in votes {
+        let delta = if hits >= misses {
+            map.prob_hit_log()
+        } else {
+            map.prob_miss_log()
+        };
+        map.update_occupancy(idx, delta);
+    }
+}
+
+#[cfg(test)]
 fn mark_ray(map: &mut GridMap, from: Vector3<f64>, to: Vector3<f64>) {
+    let mut votes = BTreeMap::new();
+    vote_ray(map, from, to, &mut votes);
+    apply_votes(map, votes);
+}
+
+/// 有限线段的 3D DDA；起点体素不作为空闲证据。
+fn vote_ray(
+    map: &GridMap,
+    from: Vector3<f64>,
+    to: Vector3<f64>,
+    votes: &mut BTreeMap<[usize; 3], (u32, u32)>,
+) {
     let Some(mut idx) = map.index_of(from) else {
         return;
     };
     let Some(idx_to) = map.index_of(to) else {
         return;
     };
-    // 取 log-odds 增量（避免在可变借用期间再借 map）
-    let prob_hit = map.prob_hit_log();
-    let prob_miss = map.prob_miss_log(); // 负值，对照官方 `logit(p_miss)`； miss 递减即 `+prob_miss`
-    // 命中体素即起点（相机贴障碍）：直接累加命中
     if idx == idx_to {
-        map.update_occupancy(idx, prob_hit);
+        votes.entry(idx).or_default().0 += 1;
         return;
     }
 
@@ -166,10 +188,10 @@ fn mark_ray(map: &mut GridMap, from: Vector3<f64>, to: Vector3<f64>) {
             break;
         }
         if idx == idx_to {
-            map.update_occupancy(idx, prob_hit);
+            votes.entry(idx).or_default().0 += 1;
             break;
         }
-        map.update_occupancy(idx, prob_miss);
+        votes.entry(idx).or_default().1 += 1;
         // 防御：射线异常长时截断（应被命中或出界提前终止）
         if t > 100.0 * dir.norm() {
             break;
@@ -182,6 +204,50 @@ mod tests {
     use super::*;
     use crate::grid::{GridMapBuilder, VoxelState};
     use nalgebra::{Translation3, UnitQuaternion};
+
+    #[test]
+    fn prior_survives_depth_free_rays_fading_and_dynamic_removal() {
+        let mut map = GridMapBuilder::new(1., [10, 10, 10]).build().unwrap();
+        map.set_prior_occupied([4, 5, 5]);
+        map.inflate_obstacles();
+        for _ in 0..3000 {
+            mark_ray(
+                &mut map,
+                Vector3::new(0.5, 5.5, 5.5),
+                Vector3::new(8.5, 5.5, 5.5),
+            );
+            map.fade();
+        }
+        map.set_state([4, 5, 5], VoxelState::Free);
+        map.inflate_obstacles();
+        assert_eq!(map.state([4, 5, 5]), VoxelState::Occupied);
+        assert!(map.is_occupied(Vector3::new(4.5, 5.5, 5.5)));
+        assert!((map.occupancy_at([4, 5, 5]) - map.clamp_max_log()).abs() < 1e-12);
+        map.move_ring_buffer(Vector3::new(12.5, 5.5, 5.5));
+        map.move_ring_buffer(Vector3::new(5.5, 5.5, 5.5));
+        assert!(map.is_occupied(Vector3::new(4.5, 5.5, 5.5)));
+    }
+
+    #[test]
+    fn repeated_pixels_contribute_only_one_frame_update() {
+        let mut map = GridMapBuilder::new(1., [10, 10, 10]).build().unwrap();
+        let mut votes = BTreeMap::new();
+        for _ in 0..100 {
+            vote_ray(
+                &map,
+                Vector3::new(0.5, 5.5, 5.5),
+                Vector3::new(4.5, 5.5, 5.5),
+                &mut votes,
+            );
+        }
+        apply_votes(&mut map, votes);
+        let expected = map.clamp_min_log() + map.prob_hit_log();
+        assert!((map.occupancy_at([4, 5, 5]) - expected).abs() < 1e-12);
+        assert_eq!(map.state([4, 5, 5]), VoxelState::Free);
+        let votes = BTreeMap::from([([4, 5, 5], (2, 3))]);
+        apply_votes(&mut map, votes);
+        assert!((map.occupancy_at([4, 5, 5]) - (expected + map.prob_miss_log())).abs() < 1e-12);
+    }
 
     #[test]
     fn missing_depth_does_not_clear_occupied_voxels() {

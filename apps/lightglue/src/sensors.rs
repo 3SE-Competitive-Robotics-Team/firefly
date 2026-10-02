@@ -48,11 +48,10 @@ impl History {
             self.odom.pop_front();
         }
     }
-    fn sample(&self, t: f64) -> Option<(OdomMessage, RegisteredDepth)> {
+    fn odom_at(&self, t: f64) -> Option<OdomMessage> {
         if self.reset || !t.is_finite() {
             return None;
         }
-        let (_, depth) = self.depth.iter().find(|(s, _)| (s - t).abs() < 1e-6)?;
         let mut previous = self.odom.front()?;
         for next in &self.odom {
             if next.timestamp >= t && previous.timestamp <= t {
@@ -84,13 +83,50 @@ impl History {
                     quat_w: q.w,
                     ..*previous
                 };
-                let registered =
-                    register_depth(depth, pinhole(), pinhole(), &left_from_depth()).ok()?;
-                return Some((m, registered));
+                return Some(m);
             }
             previous = next;
         }
         None
+    }
+    fn sample(&self, t: f64) -> Option<(OdomMessage, RegisteredDepth)> {
+        let odom = self.odom_at(t)?;
+        let (_, depth) = self.depth.iter().find(|(s, _)| (s - t).abs() < 1e-6)?;
+        Some((
+            odom,
+            register_depth(depth, pinhole(), pinhole(), &left_from_depth()).ok()?,
+        ))
+    }
+    /// T_map_body(t) = T_map_body(s) T_odom_body(s)^-1 T_odom_body(t)。
+    fn map_prior(&self, t: f64, corrected: OdomMessage) -> Option<OdomMessage> {
+        use firefly_base::FrameId;
+        if !corrected.is_initialized {
+            return None;
+        }
+        let current = self
+            .odom_at(corrected.timestamp)?
+            .body_pose(FrameId::ODOM)
+            .ok()?;
+        let frame = self.odom_at(t)?.body_pose(FrameId::ODOM).ok()?;
+        let alignment = corrected
+            .body_pose(FrameId::MAP)
+            .ok()?
+            .compose(&current.inverse())
+            .ok()?;
+        let pose = alignment.compose(&frame).ok()?;
+        let p = pose.isometry().translation.vector;
+        let q = pose.isometry().rotation;
+        Some(OdomMessage {
+            timestamp: t,
+            position_x: p.x,
+            position_y: p.y,
+            position_z: p.z,
+            quat_x: q.i,
+            quat_y: q.j,
+            quat_z: q.k,
+            quat_w: q.w,
+            ..corrected
+        })
     }
 }
 pub struct Sensors {
@@ -160,6 +196,9 @@ impl Sensors {
             thread: Some(thread),
         })
     }
+    pub fn map_prior(&self, t: f64, corrected: OdomMessage) -> Option<OdomMessage> {
+        self.history.lock().ok()?.map_prior(t, corrected)
+    }
     pub fn is_stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
     }
@@ -178,6 +217,39 @@ impl Drop for Sensors {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn image_prior_uses_historical_motion_including_turns() {
+        let mut h = History::default();
+        for i in 0..=20 {
+            let t = 1. + i as f64 * 0.05;
+            let half_yaw = (t - 1.) * std::f64::consts::FRAC_PI_4;
+            h.push_odom(OdomMessage {
+                timestamp: t,
+                position_x: t - 1.,
+                quat_z: half_yaw.sin(),
+                quat_w: half_yaw.cos(),
+                is_initialized: true,
+                ..Default::default()
+            });
+        }
+        let corrected = OdomMessage {
+            timestamp: 2.,
+            position_x: 10.,
+            position_y: 21.,
+            quat_z: 1.,
+            quat_w: 0.,
+            is_initialized: true,
+            ..Default::default()
+        };
+        let frame = h.map_prior(1., corrected).unwrap();
+        assert!((frame.position_x - 10.).abs() < 1e-12);
+        assert!((frame.position_y - 20.).abs() < 1e-12);
+        assert!((frame.quat_z.abs() - 0.5_f64.sqrt()).abs() < 1e-12);
+        assert!((frame.quat_w.abs() - 0.5_f64.sqrt()).abs() < 1e-12);
+        assert_eq!(frame.timestamp, 1.);
+        assert!(h.map_prior(0.99, corrected).is_none());
+        assert!(h.map_prior(2.01, corrected).is_none());
+    }
     #[test]
     fn interpolation_requires_coverage_and_rejects_reset() {
         let mut h = History::default();

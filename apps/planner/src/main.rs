@@ -29,7 +29,6 @@ mod config;
 mod scene;
 mod state_input;
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -228,7 +227,6 @@ struct App {
     log_ipc: firefly_observability::LogIpc,
     map_file: MapFile,
     /// 静态占据体素（动态障碍不得清掉它们）。
-    static_occupied: HashSet<[usize; 3]>,
     /// 上一帧动态障碍占据体素。
     prev_dyn: Vec<[usize; 3]>,
     /// 状态时钟（秒），只由通过校验的地图系里程计推进。
@@ -236,6 +234,8 @@ struct App {
     wall_origin: Instant,
     odom: CorrectedOdomSubscriber,
     state_input: StateInput,
+    quality_sub: Subscriber<firefly_pubsub::odom::LocalizationStatus>,
+    quality_input: state_input::QualityInput,
     received_state: bool,
     state_loss_reported: bool,
     initial_goal: Option<[f64; 3]>,
@@ -293,11 +293,6 @@ impl App {
                 ceil: config.virtual_ceiling.unwrap_or(f64::INFINITY),
             });
         }
-        let static_occupied = map_file
-            .occupied
-            .iter()
-            .filter_map(|p| grid.index_of(Vector3::new(p[0], p[1], p[2])))
-            .collect();
         let planner = firefly_planner::Planner::new(config, grid);
         // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
         let initial_goal = goal;
@@ -314,6 +309,8 @@ impl App {
         // 地图系输入是必需端口；局部 VIO 不能替代它。
         let odom = CorrectedOdomSubscriber::new(&node)
             .map_err(|e| e.with_context("operation", "创建规划器地图系里程计订阅"))?;
+        let quality_sub =
+            Subscriber::with_topic(&node, firefly_pubsub::odom::LOCALIZATION_STATUS_TOPIC)?;
         let depth = open_sub::<DepthImageMessage>(
             &node,
             DEPTH_TOPIC,
@@ -357,12 +354,13 @@ impl App {
             manager_options,
             viz_pub,
             log_ipc,
-            static_occupied,
             prev_dyn: Vec::new(),
             map_file,
             t_sim: 0.0,
             wall_origin: Instant::now(),
             state_input: StateInput::default(),
+            quality_sub,
+            quality_input: state_input::QualityInput::default(),
             received_state: false,
             state_loss_reported: false,
             initial_goal,
@@ -400,6 +398,9 @@ impl App {
                     .is_traced()
                     .then(|| (ctx.trace_id(), ctx.span_id, ctx.sampled()));
             }
+        }
+        while let Some(sample) = self.quality_sub.receive()? {
+            self.quality_input.observe(*sample, Instant::now());
         }
         if let Some(sub) = &self.depth {
             while let Some(sample) = sub.receive()? {
@@ -474,9 +475,7 @@ impl App {
         let dyn_voxels = self.map_file.motion_voxels(self.t_sim, self.manager.map());
         let map = self.manager.map_mut();
         for idx in &self.prev_dyn {
-            if !self.static_occupied.contains(idx) {
-                map.set_state(*idx, VoxelState::Unknown);
-            }
+            map.set_state(*idx, VoxelState::Unknown);
         }
         for idx in &dyn_voxels {
             map.set_state(*idx, VoxelState::Occupied);
@@ -501,6 +500,13 @@ impl App {
             }
             return Ok(());
         };
+        if !self.quality_input.ready(snapshot.timestamp, Instant::now()) {
+            if self.quality_input.stopped() && !self.state_loss_reported {
+                log::error!("地图定位质量退化，停止发布规划参考；恢复后须重启 planner");
+                self.state_loss_reported = true;
+            }
+            return Ok(());
+        }
         let measured = Some(snapshot.state);
         if !self.received_state {
             self.manager

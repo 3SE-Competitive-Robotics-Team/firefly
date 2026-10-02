@@ -6,6 +6,7 @@ mod online;
 mod sensors;
 #[cfg(test)]
 mod validation;
+mod worker;
 
 use firefly_pubsub::event::TopicListener;
 use firefly_pubsub::node::create_node;
@@ -68,14 +69,13 @@ fn parse_args() -> Result<(String, String, String), String> {
     Ok((model, map, config))
 }
 
-/// 加载 ONNX 会话（文件缺失即报错，不静默；同 aliked 锁 1 intra-op 线程，
-/// 防 ORT 抢占 vio/sim 的 CPU 预算）。
+/// 加载 ONNX 会话；两条算子线程，限制 CPU 并行度以保留控制线程预算。
 fn load_session(model: &str) -> Result<Session, Box<dyn std::error::Error>> {
     if !std::path::Path::new(model).is_file() {
         return Err(format!("权重缺失：{model}（见 models/，离线导出，不进 git）").into());
     }
     let session = Session::builder()?
-        .with_intra_threads(1)?
+        .with_intra_threads(2)?
         .commit_from_file(model)?;
     log::info!("lightglue 会话就绪：{model}");
     Ok(session)
@@ -102,7 +102,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     smoke_inference(&mut session)?;
     let options: online::Options = toml::from_str(&std::fs::read_to_string(config)?)?;
     options.validate()?;
-    run_loop(&mut session, &map, options)?;
+    let loop_session = Session::builder()?
+        .with_intra_threads(1)?
+        .commit_from_file(&model)?;
+    run_loop(&mut session, &map, options, loop_session)?;
     Ok(())
 }
 
@@ -143,11 +146,12 @@ fn run_loop(
     session: &mut Session,
     map: &VisionMap,
     options: online::Options,
+    loop_session: Session,
 ) -> Result<(), firefly_error::Error> {
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "lightglue");
     let sensors = sensors::Sensors::start()?;
-    let mut online = online::Online::new(options);
+    let online = worker::Worker::start(loop_session, options)?;
     let loop_pub = Publisher::<firefly_pubsub::vision::LoopConstraint>::with_topic(
         &node,
         firefly_pubsub::vision::LOOP_TOPIC,
@@ -190,10 +194,7 @@ fn run_loop(
     // 心跳仅兜底无事件时的 odom 缓存更新与断流自愈。
     let mut latest_corrected: Option<OdomMessage> = None;
     let on_event = |attachment_id: WaitSetAttachmentId<ipc::Service>| {
-        let root = fastrace::Span::root(
-            "lightglue",
-            fastrace::prelude::SpanContext::random().sampled(false),
-        );
+        let root = fastrace::Span::root("lightglue", fastrace::prelude::SpanContext::random());
         let trace_guard = root.set_local_parent();
         if sensors.is_stopped() {
             return CallbackProgression::Stop;
@@ -207,93 +208,86 @@ fn run_loop(
         while let Ok(Some(sample)) = feat_sub.receive() {
             latest_feat = Some(*sample);
         }
-        if let Some(feat) = &latest_feat {
-            firefly_observability::set_sim_time(feat.timestamp);
-            if let Some((odom, depth)) = sensors.sample(feat.timestamp) {
-                let previous_count = online.diagnostics[0];
-                match online.process(session, feat, odom, &depth, || sensors.is_stopped()) {
-                    Ok(Some(edge)) => {
-                        if let Err(e) = loop_pub.publish(edge) {
-                            log::warn!("回环发布失败: {e}");
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        online.miss();
-                        log::warn!("回环验证失败: {e}");
-                    }
-                }
-                if online.diagnostics[0] > previous_count
-                    && let Err(e) = keyframe_pub.publish(odom)
-                {
-                    log::warn!("关键帧发布失败: {e}");
-                }
-                let mut msg = firefly_pubsub::viz::VizMessage::base(
-                    firefly_pubsub::viz::kind::SCALARS,
-                    feat.timestamp,
-                    "loop/debug/frontend",
-                );
-                msg.scalars[..4].copy_from_slice(&online.diagnostics);
-                msg.scalar_count = 4;
-                let _ = viz.publish(msg);
-            } else {
-                online.miss();
-                log::debug!("回环缺少同步深度/原始里程计 t={:.3}", feat.timestamp);
-            }
-        }
         if sensors.is_stopped() {
             return CallbackProgression::Stop;
         }
-        let prior = latest_corrected.filter(|m| m.is_initialized);
-        let (Some(feat), Some(odom)) = (latest_feat, prior) else {
-            log::debug!(
-                "视觉触发跳过（feat={} prior={}）",
-                latest_feat.is_some(),
-                prior.is_some()
-            );
-            return CallbackProgression::Continue;
-        };
-        if feat.timestamp - odom.timestamp > ODOM_FRESH_TIMEOUT {
-            log::debug!(
-                "视觉触发跳过（先验过期 feat_t={:.2} odom_t={:.2}）",
-                feat.timestamp,
-                odom.timestamp
-            );
-            return CallbackProgression::Continue;
+        if let Some(feat) = latest_feat {
+            if let Some((odom, depth)) = sensors.sample(feat.timestamp) {
+                online.submit(feat, odom, depth);
+            }
         }
-        // 特征时间戳即 sim 时钟；查询前后各 pump 一次（匹配阻塞下积压排空）。
-        // 查询耗时即管线滞后主项（ORT 推理，rrd 侧只能看到特征时间戳，
-        // 到达滞后由 localization 融合/超期日志体现）。
-        firefly_observability::set_sim_time(feat.timestamp);
-        firefly_observability::pump_log_ipc(&log_ipc);
-        let t_query = std::time::Instant::now();
-        let query_outcome = query_once(session, map, &feat, &odom, || sensors.is_stopped());
-        log::debug!(
-            "视觉查询耗时 {:.2}s（特征 t={:.2}）",
-            t_query.elapsed().as_secs_f64(),
-            feat.timestamp
-        );
-        match query_outcome {
-            Ok(Some(obs)) => {
-                if let Err(e) = obs_pub.publish(obs) {
-                    log::warn!("位姿观测发布失败: {e}");
-                } else {
-                    log::info!(
-                        "视觉观测 t={:.2} pos=({:.2},{:.2},{:.2}) inliers {}/{} err {:.2}px",
-                        obs.timestamp,
-                        obs.position_x,
-                        obs.position_y,
-                        obs.position_z,
-                        obs.num_inliers,
-                        obs.total_points,
-                        obs.error
-                    );
+        let prior = latest_corrected.filter(|m| m.is_initialized).and_then(|m| {
+            let feat = latest_feat.as_ref()?;
+            if feat.timestamp - m.timestamp > ODOM_FRESH_TIMEOUT {
+                return None;
+            }
+            sensors.map_prior(feat.timestamp, m)
+        });
+        if let (Some(feat), Some(odom)) = (latest_feat, prior)
+            && feat.timestamp - odom.timestamp <= ODOM_FRESH_TIMEOUT
+        {
+            // 特征时间戳即 sim 时钟；查询前后各 pump 一次（匹配阻塞下积压排空）。
+            // 查询耗时即管线滞后主项（ORT 推理，rrd 侧只能看到特征时间戳，
+            // 到达滞后由 localization 融合/超期日志体现）。
+            firefly_observability::set_sim_time(feat.timestamp);
+            firefly_observability::pump_log_ipc(&log_ipc);
+            let t_query = std::time::Instant::now();
+            let query_outcome = query_once(session, map, &feat, &odom, || sensors.is_stopped());
+            let mut timing = firefly_pubsub::viz::VizMessage::base(
+                firefly_pubsub::viz::kind::SCALARS,
+                feat.timestamp,
+                "vision/debug/map_query_wall_s",
+            );
+            timing.scalars[0] = t_query.elapsed().as_secs_f64();
+            timing.scalar_count = 1;
+            let _ = viz.publish(timing);
+            log::debug!(
+                "视觉查询耗时 {:.2}s（特征 t={:.2}）",
+                t_query.elapsed().as_secs_f64(),
+                feat.timestamp
+            );
+            match query_outcome {
+                Ok(Some(obs)) => {
+                    if let Err(e) = obs_pub.publish(obs) {
+                        log::warn!("位姿观测发布失败: {e}");
+                    } else {
+                        log::info!(
+                            "视觉观测 t={:.2} pos=({:.2},{:.2},{:.2}) inliers {}/{} err {:.2}px",
+                            obs.timestamp,
+                            obs.position_x,
+                            obs.position_y,
+                            obs.position_z,
+                            obs.num_inliers,
+                            obs.total_points,
+                            obs.error
+                        );
+                    }
+                }
+                Ok(None) => log::debug!("视觉查询无有效位姿（拒收）"),
+                Err(e) => log::warn!("视觉查询失败: {e}"),
+            }
+            firefly_observability::pump_log_ipc(&log_ipc);
+        }
+        for result in online.results() {
+            if let Some(edge) = result.edge {
+                if let Err(e) = loop_pub.publish(edge) {
+                    log::warn!("回环发布失败: {e}");
                 }
             }
-            Ok(None) => log::debug!("视觉查询无有效位姿（拒收）"),
-            Err(e) => log::warn!("视觉查询失败: {e}"),
+            if let Some(odom) = result.keyframe {
+                if let Err(e) = keyframe_pub.publish(odom) {
+                    log::warn!("关键帧发布失败: {e}");
+                }
+            }
+            let mut msg = firefly_pubsub::viz::VizMessage::base(
+                firefly_pubsub::viz::kind::SCALARS,
+                result.timestamp,
+                "loop/debug/frontend",
+            );
+            msg.scalars[..4].copy_from_slice(&result.diagnostics);
+            msg.scalar_count = 4;
+            let _ = viz.publish(msg);
         }
-        firefly_observability::pump_log_ipc(&log_ipc);
         drop(trace_guard);
         drop(root);
         fastrace::flush();
@@ -321,6 +315,7 @@ fn run_loop(
 
 /// 单帧匹配：query 特征 vs 库图一帧 → 2D-3D 对应（丢弃填充/低分匹配）。
 #[allow(clippy::type_complexity)]
+#[fastrace::trace]
 fn match_points(
     session: &mut Session,
     points: &[firefly_vision_map::VisionMapPoint],
@@ -398,6 +393,7 @@ fn candidates_by_heading(
 }
 
 /// 单次查询：先验邻域多帧匹配拼对应 → `PnP` → 机体位姿观测。
+#[fastrace::trace]
 fn query_once(
     session: &mut Session,
     map: &VisionMap,
@@ -430,7 +426,7 @@ fn query_once(
     }
     // 同一像素只保留最高分的地图对应，避免跨库帧重复计算信息量。
     let mut best = vec![None::<([f64; 3], f32)>; NUM_POINTS];
-    for &frame_idx in &candidates {
+    for (candidate_index, &frame_idx) in candidates.iter().enumerate() {
         if cancelled() {
             return Ok(None);
         }
@@ -441,21 +437,61 @@ fn query_once(
                 best[qi] = Some((point, score));
             }
         }
+        if candidate_index + 1 < candidates.len() && has_spatial_support(&best) {
+            if let Some(obs) = observation_from_matches(feat, &best, &t_body_prior)? {
+                if obs.num_inliers >= 30
+                    && f64::from(obs.num_inliers) >= 0.3 * f64::from(obs.total_points)
+                    && obs.error <= 3.
+                {
+                    return Ok(Some(obs));
+                }
+            }
+        }
     }
+    observation_from_matches(feat, &best, &t_body_prior)
+}
+
+/// 提前结束候选搜索须有非平面支撑；退化点集继续融合其他视角。
+fn has_spatial_support(matches: &[Option<([f64; 3], f32)>]) -> bool {
+    let points: Vec<_> = matches
+        .iter()
+        .flatten()
+        .map(|(p, _)| nalgebra::Vector3::from(*p))
+        .collect();
+    if points.len() < 30 {
+        return false;
+    }
+    let mean = points.iter().sum::<nalgebra::Vector3<f64>>() / points.len() as f64;
+    let covariance = points
+        .iter()
+        .fold(nalgebra::Matrix3::zeros(), |sum, point| {
+            let d = point - mean;
+            sum + d * d.transpose()
+        })
+        / points.len() as f64;
+    let eigen = covariance.symmetric_eigen().eigenvalues;
+    eigen.min() > 0.01 * eigen.max() && eigen.min() > 0.0025
+}
+
+#[fastrace::trace]
+fn observation_from_matches(
+    feat: &FeatureMessage,
+    best: &[Option<([f64; 3], f32)>],
+    t_body_prior: &nalgebra::Matrix4<f64>,
+) -> Result<Option<PoseObservation>, Box<dyn std::error::Error>> {
     let mut pairs_2d = Vec::new();
     let mut pairs_3d = Vec::new();
-    for (qi, matched) in best.into_iter().enumerate() {
+    for (qi, matched) in best.iter().enumerate() {
         if let Some((point, _)) = matched {
             pairs_2d.push(feat.keypoints[qi]);
-            pairs_3d.push(point);
+            pairs_3d.push(*point);
         }
     }
     if pairs_2d.len() < 6 {
         log::info!(
-            "视觉查询拒绝 t={:.2}: correspondences={} candidates={}",
+            "视觉查询拒绝 t={:.2}: correspondences={}",
             feat.timestamp,
-            pairs_2d.len(),
-            candidates.len()
+            pairs_2d.len()
         );
         return Ok(None);
     }
@@ -465,15 +501,14 @@ fn query_once(
         cx: 160.0,
         cy: 120.0,
     };
-    let t_cam_prior = body_pose_to_cam(&t_body_prior);
+    let t_cam_prior = body_pose_to_cam(t_body_prior);
     let Some(pose) = solve_visual_pose(&pairs_2d, &pairs_3d, intrinsics, Some(t_cam_prior))
         .map_err(|e| format!("PnP: {e}"))?
     else {
         log::info!(
-            "视觉查询拒绝 t={:.2}: pnp_failed correspondences={} candidates={}",
+            "视觉查询拒绝 t={:.2}: pnp_failed correspondences={}",
             feat.timestamp,
-            total,
-            candidates.len()
+            total
         );
         return Ok(None);
     };
@@ -591,5 +626,33 @@ mod tests {
         };
         let mut session = super::load_session(&path).unwrap();
         super::smoke_inference(&mut session).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod early_exit_tests {
+    use super::*;
+    #[test]
+    fn early_exit_requires_nonplanar_spatial_support() {
+        let grid: Vec<_> = (0..64)
+            .map(|i| {
+                Some((
+                    [((i % 4) as f64), ((i / 4 % 4) as f64), ((i / 16) as f64)],
+                    1.,
+                ))
+            })
+            .collect();
+        assert!(has_spatial_support(&grid));
+        let flat: Vec<_> = grid
+            .iter()
+            .map(|p| p.map(|(v, s)| ([v[0], v[1], 0.], s)))
+            .collect();
+        assert!(!has_spatial_support(&flat));
+        assert!(!has_spatial_support(&grid[..29]));
+        let small: Vec<_> = grid
+            .iter()
+            .map(|p| p.map(|(v, s)| (v.map(|a| a * 0.001), s)))
+            .collect();
+        assert!(!has_spatial_support(&small));
     }
 }

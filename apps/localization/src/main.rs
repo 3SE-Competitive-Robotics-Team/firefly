@@ -10,11 +10,13 @@ use firefly_localization::config::{Backend, LocalizationConfig};
 use firefly_localization::convert::corrected_odom;
 use firefly_localization::filter::{FusionFilter, RelocGate};
 use firefly_localization::graph::{GraphOptions, PoseGraph};
+use firefly_localization::quality::{Quality, QualityOptions};
 use firefly_observability::init as init_observability;
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::odom::CORRECTED_ODOM_TOPIC;
-use firefly_pubsub::odom::OdomMessage;
+use firefly_pubsub::odom::{LOCALIZATION_STATUS_TOPIC, LocalizationStatus, OdomMessage};
 use firefly_pubsub::publish::CorrectedOdomPublisher;
+use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::{OdomSubscriber, Subscriber};
 use firefly_pubsub::vision::{LOOP_TOPIC, LoopConstraint, POSE_OBS_TOPIC, PoseObservation};
 use firefly_pubsub::viz::{VizMessage, VizPublisher, kind};
@@ -34,8 +36,7 @@ const ODOM_FRESH_TIMEOUT: f64 = 1.0;
 /// 排序，odom 追上即融合；溢出时丢最旧（对端断流的背压语义，非延时等待）。
 const PENDING_VISUAL_CAP: usize = 8;
 /// 待融合观测超期（秒）：相对 `t_sim` 过期即丢弃（对端断流时不无限囤积；
-/// 取 10s 覆盖 ORT CPU 推理长尾滞后（实测 5.7s），过期丢弃打 info（稀少，
-/// 丢一条少一次修正）。过期观测经内插仍自洽（慢漂移假设），滞后误差远小于漂移本身。
+/// 超期观测不能外推配对；任务可用性另由 QualityOptions 的更短时限判断。
 const PENDING_VISUAL_TIMEOUT: f64 = 10.0;
 /// odom 内插窗口（条）：100Hz 下约 10s，与超期对齐（窗口外无法内插，留了也白留；
 /// 62KB，可忽略）。
@@ -140,6 +141,9 @@ fn gate_diag(gate: &RelocGate, max_innovation_trans: f64) -> Option<[f64; 4]> {
 
 struct App {
     fusion: FusionFilter,
+    quality: Quality,
+    quality_options: QualityOptions,
+    quality_pub: Publisher<LocalizationStatus>,
     graph: Option<PoseGraph>,
     graph_options: Option<GraphOptions>,
     loops: Subscriber<LoopConstraint>,
@@ -180,6 +184,12 @@ impl App {
         if cfg.backend == Backend::PoseGraph {
             cfg.graph.validate()?;
         }
+        if !cfg.quality.valid() {
+            return Err(Error::new(
+                ErrorKind::InvalidArgument,
+                "invalid localization quality options",
+            ));
+        }
         let innov_limit_visual = cfg.fusion.visual.max_innovation_trans;
         let fusion = FusionFilter::new(cfg.fusion);
         let node = create_node()?;
@@ -202,8 +212,12 @@ impl App {
                 None
             }
         };
+        let quality_pub = Publisher::with_topic(&node, LOCALIZATION_STATUS_TOPIC)?;
         Ok(Self {
             fusion,
+            quality: Quality::default(),
+            quality_options: cfg.quality,
+            quality_pub,
             graph: None,
             graph_options: (cfg.backend == Backend::PoseGraph).then_some(cfg.graph),
             loops,
@@ -322,9 +336,12 @@ impl App {
                 continue;
             }
             if let Some(graph) = &mut self.graph {
-                let result = sample
-                    .body_pose(FrameId::ODOM)
-                    .and_then(|pose| graph.insert(sample.timestamp, pose));
+                let result = sample.body_pose(FrameId::ODOM).and_then(|pose| {
+                    graph.insert(
+                        sample.timestamp,
+                        graph.raw_pose(sample.timestamp).unwrap_or(pose),
+                    )
+                });
                 if let Err(e) = result {
                     log::warn!("在线关键帧拒收: {e}");
                 }
@@ -426,8 +443,19 @@ impl App {
             return;
         };
         if let Some(graph) = &mut self.graph {
+            let t_vio = graph
+                .raw_pose(obs.timestamp)
+                .map_or(t_vio, |pose| pose.matrix());
             let before = graph.alignment().matrix();
             let result = graph.observe_map(obs, &t_vio);
+            if result.is_ok() {
+                let predicted = graph.alignment().matrix() * t_vio;
+                let observed = Vector3::new(obs.position_x, obs.position_y, obs.position_z);
+                self.quality.observe(
+                    obs.timestamp,
+                    (predicted.fixed_view::<3, 1>(0, 3) - observed).norm(),
+                );
+            }
             let applied = (graph.alignment().matrix().fixed_view::<3, 1>(0, 3)
                 - before.fixed_view::<3, 1>(0, 3))
             .norm();
@@ -449,6 +477,15 @@ impl App {
             return;
         }
         let gate = self.fusion.update_with_observation(&t_vio, obs);
+        if matches!(gate, RelocGate::Accepted { .. }) {
+            let predicted = self.fusion.drift() * t_vio;
+            self.quality.observe(
+                obs.timestamp,
+                (predicted.fixed_view::<3, 1>(0, 3)
+                    - Vector3::new(obs.position_x, obs.position_y, obs.position_z))
+                .norm(),
+            );
+        }
         self.publish_gate_viz(&gate, self.innov_limit_visual);
         match gate {
             RelocGate::Accepted {
@@ -496,6 +533,19 @@ impl App {
             None => RigidTransform::from_matrix(FrameId::MAP, FrameId::ODOM, self.fusion.drift())?,
         };
         let msg = corrected_odom(odom, &alignment)?;
+        let status = self.quality.status(msg.timestamp, &self.quality_options);
+        self.quality_pub.publish(status)?;
+        if let Some(viz) = &self.viz_pub {
+            let mut metric =
+                VizMessage::base(kind::SCALARS, msg.timestamp, "corr/debug/tracking_quality");
+            metric.scalars[..3].copy_from_slice(&[
+                msg.timestamp - status.visual_timestamp,
+                status.position_disagreement,
+                f64::from(status.tracking_ready),
+            ]);
+            metric.scalar_count = 3;
+            let _ = viz.publish(metric);
+        }
         pub_.publish(msg).map(|_| ())?;
         self.last_published = msg.timestamp;
         self.log_corrected_viz(&msg);

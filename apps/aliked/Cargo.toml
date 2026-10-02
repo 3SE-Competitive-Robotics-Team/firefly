@@ -15,6 +15,7 @@ name = "aliked"
 path = "src/main.rs"
 
 [dependencies]
+fastrace.workspace = true
 firefly-error = { workspace = true }
 firefly-observability = { workspace = true }
 firefly-pubsub = { workspace = true }

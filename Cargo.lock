@@ -120,6 +120,7 @@ dependencies = [
 name = "aliked"
 version = "0.1.0"
 dependencies = [
+ "fastrace",
  "firefly-error",
  "firefly-observability",
  "firefly-pubsub",

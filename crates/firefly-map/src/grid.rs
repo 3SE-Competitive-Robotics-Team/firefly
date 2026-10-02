@@ -28,6 +28,8 @@
 //! - 官方另有 `GridMapBigmap` 全局地图变体（`grid_map_bigmap.h/cpp`），
 //!   swarm-playground 中无任何引用，不对齐。
 
+use std::collections::HashSet;
+
 use firefly_error::{Error, ErrorKind};
 use nalgebra::Vector3;
 
@@ -95,6 +97,8 @@ pub struct GridMap {
     center_last: [i64; 3],
     /// log-odds 占据概率（对照官方 `occupancy_buffer_`），初始为 `clamp_min_log_`。
     occupancy: Vec<f64>,
+    /// 世界锚定的场地先验；传感器空闲射线、衰减与动态障碍移除不能清除。
+    prior: HashSet<[i64; 3]>,
     /// 膨胀计数缓冲（对照官方 `occupancy_buffer_inflate_`）：障碍体素自身 `±GRID_MAP_OBS_FLAG`，周围 `inf_grid` 格内 `±1`；`>0` 即膨胀。
     inflate: Vec<u16>,
     /// 虚拟地面/天花板；None = 不启用（官方 `enable_virtual_wall = false` 默认）。
@@ -287,6 +291,7 @@ impl GridMapBuilder {
             inf_ring_origin: [0; 3],
             center_last: [dims_i64[0] / 2, dims_i64[1] / 2, dims_i64[2] / 2],
             occupancy: vec![clamp_min_log; capacity],
+            prior: HashSet::new(),
             inflate: vec![0; inf_capacity],
             virtual_wall: self.virtual_wall,
             prob_hit_log,
@@ -464,9 +469,20 @@ impl GridMap {
         }
     }
 
+    /// 登记不可由在线观测清除的场地占据体素。
+    pub fn set_prior_occupied(&mut self, idx: [usize; 3]) {
+        self.prior.insert(self.global_index(idx));
+        self.set_state(idx, VoxelState::Occupied);
+    }
+
     /// 兼容接口：`Occupied` → `clamp_max_log_`，`Free`/`Unknown` → `clamp_min_log_`。
     pub fn set_state(&mut self, idx: [usize; 3], state: VoxelState) {
-        let a = self.occ_addr(self.global_index(idx));
+        let g = self.global_index(idx);
+        let a = self.occ_addr(g);
+        if self.prior.contains(&g) {
+            self.occupancy[a] = self.clamp_max_log;
+            return;
+        }
         match state {
             VoxelState::Occupied => self.occupancy[a] = self.clamp_max_log,
             VoxelState::Free | VoxelState::Unknown => self.occupancy[a] = self.clamp_min_log,
@@ -481,6 +497,9 @@ impl GridMap {
     /// 全局索引版 log-odds 增量更新（crate 内光线步进用）。
     pub(crate) fn update_occupancy_global(&mut self, g: [i64; 3], delta: f64) {
         let a = self.occ_addr(g);
+        if self.prior.contains(&g) {
+            return;
+        }
         let v = self.occupancy[a] + delta;
         self.occupancy[a] = v.clamp(self.clamp_min_log, self.clamp_max_log);
     }
@@ -680,6 +699,15 @@ impl GridMap {
         self.up = new_up;
         self.inf_low = new_inf_low;
         self.inf_up = new_inf_up;
+        if !self.prior.is_empty() {
+            for g in &self.prior {
+                if self.window_index(*g).is_some() {
+                    let a = self.occ_addr(*g);
+                    self.occupancy[a] = self.clamp_max_log;
+                }
+            }
+            self.inflate_obstacles();
+        }
     }
 
     /// 清除移出窗口的体素条带（对照官方 `clearBuffer(casein, bound)`，
@@ -743,6 +771,9 @@ impl GridMap {
         // 先更新占据并收集跨阈值的全局索引
         let mut crossed: Vec<[i64; 3]> = Vec::new();
         for a in 0..self.occupancy.len() {
+            if self.prior.contains(&self.addr_global(a)) {
+                continue;
+            }
             let occ = self.occupancy[a];
             if occ > low_thres {
                 let was_occupied = occ >= self.min_occupancy_log;
