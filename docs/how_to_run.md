@@ -48,6 +48,7 @@ cargo run --release -p vio
 
 # 飞控：未解锁时持续发零推力，允许仿真推进并产生初始化测量
 cargo run --release -p fc
+cargo run --release -p localization
 ```
 
 实时查看时先启动 `rerun`，将第一条命令换为 `uv run firefly-viz`，
@@ -118,7 +119,6 @@ T16 为 64 维，无法直接使用官方 ALIKED LightGlue 权重。导出保留
 ```bash
 cargo run --release -p aliked
 cargo run --release -p lightglue -- --map apps/planner/maps/rmuc2026.ffvmap
-cargo run --release -p localization
 ```
 
 当前视觉链路是特征提取 → 库图匹配 → PnP 位姿观测 → 定位融合 →

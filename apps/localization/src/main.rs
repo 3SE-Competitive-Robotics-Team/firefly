@@ -139,6 +139,9 @@ fn gate_diag(gate: &RelocGate, max_innovation_trans: f64) -> Option<[f64; 4]> {
 
 struct App {
     fusion: FusionFilter,
+    origin: firefly_localization::config::InitialAlignment,
+    alignment_ready: bool,
+    estimator_reset: bool,
     reloc_ticks: usize,
     viewer_odom: Option<OdomSubscriber>,
     corrected_pub: Option<CorrectedOdomPublisher>,
@@ -170,10 +173,7 @@ impl App {
     #[allow(clippy::needless_pass_by_value)]
     fn new(cfg: LocalizationConfig, odom_topic: &str) -> Result<Self> {
         let innov_limit_visual = cfg.fusion.visual.max_innovation_trans;
-        let mut fusion = FusionFilter::new(cfg.fusion);
-        fusion
-            .set_alignment(cfg.origin.transform()?)
-            .map_err(|e| e.with_context("operation", "initialize map<-odom prior"))?;
+        let fusion = FusionFilter::new(cfg.fusion);
         let node = create_node()?;
         let log_ipc = firefly_observability::init_ipc(&node, "localization");
         let odom_sub = Some(OdomSubscriber::with_topic(&node, odom_topic)?);
@@ -194,6 +194,14 @@ impl App {
         };
         Ok(Self {
             fusion,
+            origin: cfg.origin.ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidArgument,
+                    "explicit fixed startup [origin] is required",
+                )
+            })?,
+            alignment_ready: false,
+            estimator_reset: false,
             reloc_ticks: 0,
             viewer_odom: odom_sub,
             visual_obs,
@@ -218,6 +226,13 @@ impl App {
             let mut odom_arrived = false;
             while let Some(sample) = sub.receive()? {
                 let m: OdomMessage = *sample;
+                if self.alignment_ready && !m.is_initialized {
+                    self.estimator_reset = true;
+                    log::error!("VIO 初始化状态丢失，地图输出锁存停止；须在固定启动点重启");
+                }
+                if self.estimator_reset {
+                    continue;
+                }
                 if !m.is_initialized
                     || !m.timestamp.is_finite()
                     || m.timestamp < 0.0
@@ -231,6 +246,14 @@ impl App {
                 let Ok(pose) = m.body_pose(FrameId::ODOM) else {
                     continue;
                 };
+                if !self.alignment_ready {
+                    let Ok(alignment) = self.origin.at_start(&m) else {
+                        continue;
+                    };
+                    self.fusion.set_alignment(alignment)?;
+                    self.alignment_ready = true;
+                    log::info!("固定启动位姿与静止 VIO 对齐，地图里程计就绪");
+                }
                 self.t_sim = self.t_sim.max(m.timestamp);
                 self.last_odom_recv = std::time::Instant::now();
                 let t_vio = pose.matrix();
@@ -355,6 +378,9 @@ impl App {
     }
 
     fn publish_corrected(&mut self) -> Result<()> {
+        if !self.alignment_ready || self.estimator_reset {
+            return Ok(());
+        }
         let Some(pub_) = &self.corrected_pub else {
             return Ok(());
         };

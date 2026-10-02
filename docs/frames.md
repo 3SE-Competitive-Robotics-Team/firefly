@@ -57,11 +57,22 @@ v_odom_ref = R_odom_map v_map_ref
 
 ## 固定启动条件
 
-`configs/localization.toml` 的 `[origin]` 显式声明局部 VIO 原点在地图中的 `position` 和
+`configs/localization.toml` 的 `[origin]` 显式声明静止启动机体在地图中的 `position` 和
 `yaw`。RMUC 默认位置为 `[-13,0,0.405]` 米、航向零；这些是固定部署的已知先验，
 不是从在线 GroundTruth 取出的估计器初值。改变启动位置或初始航向必须同步配置。
 
-原始 VIO 仍用传感器初始化，位置在局部系归零。地图查询只消费经过上述变换的
+原始 VIO 仍用传感器初始化，位置在局部系归零。定位进程必须在解锁前启动，
+以首个已初始化、速度 ≤0.1m/s、距离局部原点 ≤0.1m 的样本锁存：
+
+```text
+yaw_map_odom = yaw_map_body_start − yaw_odom_body_start
+p_map_odom = p_map_body_start − R_map_odom p_odom_body_start
+```
+
+只消除航向规范自由度，保留重力对齐的滚转与俯仰。未完成锁存不发布地图里程计；
+VIO 初始化状态失效后锁存停止，不能将重启后的局部坐标直接沿用到当前地图。
+固定启动先验要求机体处于配置的启动点和朝向，不能用于空中启动定位进程。
+地图查询只消费经过上述变换的
 CorrectedOdometry，不能在校正流缺失时用原始局部位置查询地图。该配置不提供任意
 位置冷启动或绑架重定位能力。
 
