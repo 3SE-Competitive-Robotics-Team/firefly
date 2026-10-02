@@ -2,6 +2,7 @@
 //! （对照 VINS-Fusion `findConnection` 的 `PnP` 段；求解器用 `purecv`）。
 
 pub mod calibration;
+pub mod depth;
 mod refine;
 
 use firefly_error::{Error, ErrorKind};

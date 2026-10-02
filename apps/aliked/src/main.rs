@@ -18,10 +18,10 @@ use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::vision::{DESC_DIM, FEATURE_TOPIC, FeatureMessage, MAX_FEATURES as NUM_POINTS};
 use firefly_vision_map::{VisionKeyFrame, VisionMap, VisionMapPoint};
-use firefly_vision_match::calibration::{MUJOCO_FOCAL, body_pose_to_cam};
+use firefly_vision_match::calibration::{body_pose_to_cam, left_from_depth, pinhole};
 use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetAttachmentId;
-use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector4};
+use nalgebra::{Isometry3, Translation3, UnitQuaternion};
 use ort::session::Session;
 use std::path::{Path, PathBuf};
 
@@ -37,13 +37,6 @@ const FEATURE_PERIOD: f64 = 1.0;
 const CLOCK_REWIND_MARGIN: f64 = 2.0;
 /// 心跳周期（无事件时兜底）。
 const HEARTBEAT: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// 相机主点（与导出约定一致）。
-const CX: f64 = 160.0;
-const CY: f64 = 120.0;
-/// 深度反投影有效区间（米；摆拍深度背景值为上千，需截断）。
-const MIN_DEPTH: f64 = 0.2;
-const MAX_DEPTH: f64 = 20.0;
 
 /// 解析命令行参数：`--model`（在线/离线通用）、`--build-map <dir>` +
 /// `--out <map.ffvmap>`（离线建库，两者必须同时出现）。
@@ -268,8 +261,7 @@ fn infer_frame(
 }
 
 /// 离线建库：摆拍 bin（`collect_vision_map.py` 布局）→ 每帧提特征 +
-/// 深度反投影（`Xc=(dx·d, dy·d, -d)`，`dy=-(v-cy)/f` 与
-/// `firefly-map::DepthCamera::update_from_depth` 同式）→ 写 `ffvmap` 库图。
+/// 深度向左目重投影、遮挡筛选与连续表面采样 → 地图路标 → 写 `ffvmap`。
 fn build_map_offline(
     session: &mut Session,
     frames_dir: &Path,
@@ -288,14 +280,17 @@ fn build_map_offline(
     let mut map = VisionMap::new();
     for (idx, path) in bins.iter().enumerate() {
         let buf = std::fs::read(path)?;
+        if buf.len() != 16 + 320 * 240 * 5 + 64 {
+            return Err(format!("invalid capture size: {}", path.display()).into());
+        }
         let width = u64::from_le_bytes(buf[0..8].try_into()?) as usize;
         let height = u64::from_le_bytes(buf[8..16].try_into()?) as usize;
+        if width != 320 || height != 240 {
+            return Err("capture calibration requires 320x240".into());
+        }
         let img_off = 16;
         let depth_off = img_off + width * height;
         let pos_off = depth_off + 4 * width * height;
-        if buf.len() < pos_off + 64 {
-            return Err(format!("帧文件截断: {}", path.display()).into());
-        }
         let rd = |at: usize| f64::from_le_bytes(buf[at..at + 8].try_into().unwrap());
         let pos = [rd(pos_off), rd(pos_off + 8), rd(pos_off + 16)];
         let quat = [
@@ -314,24 +309,26 @@ fn build_map_offline(
         )
         .to_homogeneous();
         let t_cam = body_pose_to_cam(&t_body);
+        let depths: Vec<_> = buf[depth_off..pos_off]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        let registered = firefly_vision_match::depth::register_depth(
+            &depths,
+            pinhole(),
+            pinhole(),
+            &left_from_depth(),
+        )?;
         let mut points = Vec::new();
         for i in 0..NUM_POINTS {
-            let u = kpts[2 * i] as usize;
-            let v = kpts[2 * i + 1] as usize;
-            if u >= width || v >= height {
+            let Some(point) =
+                registered.point_at([f64::from(kpts[2 * i]), f64::from(kpts[2 * i + 1])])
+            else {
                 continue;
-            }
-            let d = f64::from(f32::from_le_bytes(
-                buf[depth_off + 4 * (v * width + u)..depth_off + 4 * (v * width + u) + 4]
-                    .try_into()
-                    .unwrap(),
-            ));
-            if !(MIN_DEPTH..=MAX_DEPTH).contains(&d) {
-                continue;
-            }
-            let dx = (f64::from(kpts[2 * i]) - CX) / MUJOCO_FOCAL;
-            let dy = -(f64::from(kpts[2 * i + 1]) - CY) / MUJOCO_FOCAL;
-            let xw = t_cam * Vector4::new(dx * d, dy * d, -d, 1.0);
+            };
+            let xw = t_cam * point.push(1.);
             points.push(VisionMapPoint {
                 position: [xw[0], xw[1], xw[2]],
                 uv: [kpts[2 * i], kpts[2 * i + 1]],

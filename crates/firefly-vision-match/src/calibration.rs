@@ -62,6 +62,38 @@ pub fn body_pose_to_cam(t_body: &Matrix4<f64>) -> Matrix4<f64> {
         .matrix()
 }
 
+/// 左目←居中深度相机，两者具有相同安装朝向。
+/// # Panics
+/// 编译时标定常量不是有限刚体变换。
+#[must_use]
+pub fn left_from_depth() -> RigidTransform {
+    let body_left = body_from_left_camera();
+    let q = body_left.isometry().rotation.quaternion();
+    let body_depth = RigidTransform::from_parts(
+        FrameId::BODY,
+        FrameId::DEPTH_CAMERA,
+        [0.; 3],
+        [q.i, q.j, q.k, q.w],
+    )
+    .expect("depth camera calibration");
+    body_left
+        .inverse()
+        .compose(&body_depth)
+        .expect("left-body-depth chain")
+}
+
+/// RMUC 图像分辨率与针孔内参。
+#[must_use]
+pub fn pinhole() -> crate::depth::Pinhole {
+    crate::depth::Pinhole {
+        width: 320,
+        height: 240,
+        focal: MUJOCO_FOCAL,
+        cx: 160.,
+        cy: 120.,
+    }
+}
+
 /// 深度验证：`rot_cam_to_body` 列向量即相机轴（与 `DepthCamera` 文档一致）。
 #[cfg(test)]
 mod tests {
