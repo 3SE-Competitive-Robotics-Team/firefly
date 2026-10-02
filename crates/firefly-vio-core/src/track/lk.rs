@@ -90,27 +90,27 @@ fn refine(
         .then_some(q)
 }
 
+fn build_pyramid(im: &GrayImage) -> Vec<Matrix<f32>> {
+    build_optical_flow_pyramid(
+        &super::pyramid::gray_to_matrix(im),
+        Size2i::new(21, 21),
+        3,
+        false,
+        BorderTypes::Reflect101,
+        BorderTypes::Reflect101,
+    )
+    .expect("valid grayscale pyramid")
+    .levels
+}
+
 #[fastrace::trace]
 fn track_one_way(
-    prev: &GrayImage,
-    next: &GrayImage,
+    pyr0: &[Matrix<f32>],
+    pyr1: &[Matrix<f32>],
     points: &[Vector2<f32>],
     initial: &[Vector2<f32>],
 ) -> (Vec<Vector2<f32>>, Vec<bool>) {
     assert_eq!(points.len(), initial.len());
-    let build = |im: &GrayImage| {
-        build_optical_flow_pyramid(
-            &super::pyramid::gray_to_matrix(im),
-            Size2i::new(21, 21),
-            3,
-            false,
-            BorderTypes::Reflect101,
-            BorderTypes::Reflect101,
-        )
-        .expect("valid grayscale pyramid")
-        .levels
-    };
-    let (pyr0, pyr1) = (build(prev), build(next));
     let levels = pyr0.len().min(pyr1.len());
     let gradients: Vec<_> = pyr0
         .par_iter()
@@ -141,14 +141,16 @@ fn track_one_way(
 }
 
 /// 双向一致性拒绝遮挡、越界与不稳定匹配；阈值 0.5 像素。
+#[fastrace::trace]
 pub(super) fn optical_flow(
     prev: &GrayImage,
     next: &GrayImage,
     points: &[Vector2<f32>],
     initial: &[Vector2<f32>],
 ) -> (Vec<Vector2<f32>>, Vec<bool>) {
-    let (out, mut valid) = track_one_way(prev, next, points, initial);
-    let (back, reverse_valid) = track_one_way(next, prev, &out, points);
+    let (pyr0, pyr1) = (build_pyramid(prev), build_pyramid(next));
+    let (out, mut valid) = track_one_way(&pyr0, &pyr1, points, initial);
+    let (back, reverse_valid) = track_one_way(&pyr1, &pyr0, &out, points);
     for i in 0..valid.len() {
         valid[i] &= reverse_valid[i] && (back[i] - points[i]).norm() <= 0.5;
     }
@@ -158,6 +160,55 @@ pub(super) fn optical_flow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 固定图像与 300 点；trace 只覆盖跟踪，解析平移约束独立于耗时。
+    #[test]
+    #[ignore = "release profiling fixture; capture ConsoleReporter into RRD"]
+    fn profile_bidirectional_tracking() {
+        fastrace::set_reporter(
+            fastrace::collector::ConsoleReporter,
+            fastrace::collector::Config::default(),
+        );
+        let shift = Vector2::new(0.25, -0.4);
+        let make = |d: Vector2<f64>| GrayImage {
+            width: 320,
+            height: 240,
+            data: (0..76800)
+                .map(|i| {
+                    texture(2. * ((i % 320) as f64 - d.x), 2. * ((i / 320) as f64 - d.y)).round()
+                        as u8
+                })
+                .collect(),
+        };
+        let (prev, next) = (make(Vector2::zeros()), make(shift));
+        let points: Vec<_> = (0..15)
+            .flat_map(|y| {
+                (0..20).map(move |x| Vector2::new(60. + 10. * x as f32, 50. + 10. * y as f32))
+            })
+            .collect();
+        for _ in 0..10 {
+            std::hint::black_box(optical_flow(&prev, &next, &points, &points));
+        }
+        for iteration in 0..100 {
+            let span = fastrace::Span::root("lk_profile", fastrace::prelude::SpanContext::random());
+            let parent = span.set_local_parent();
+            let (out, status) = optical_flow(&prev, &next, &points, &points);
+            drop(parent);
+            let mut fingerprint = 0xcbf29ce484222325_u64;
+            for ((p, q), valid) in points.iter().zip(out).zip(status) {
+                assert!(valid);
+                assert!(((q - p).cast::<f64>() - shift).norm() < 0.08);
+                for bits in [q.x.to_bits(), q.y.to_bits(), u32::from(valid)] {
+                    fingerprint = (fingerprint ^ u64::from(bits)).wrapping_mul(0x100000001b3);
+                }
+            }
+            span.add_property(|| ("iteration", iteration.to_string()));
+            span.add_property(|| ("output_fingerprint", fingerprint.to_string()));
+            drop(span);
+            fastrace::flush();
+        }
+    }
+
     fn texture(x: f64, y: f64) -> f64 {
         120. + 35. * (0.07 * x).sin() + 30. * (0.09 * y).cos() + 20. * (0.05 * x + 0.06 * y).sin()
     }

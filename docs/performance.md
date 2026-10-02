@@ -34,3 +34,56 @@ CPU 竞争与视觉观测总延迟仍须单独测量。
 性能结论以原始 trace 为准。ConsoleReporter 输出经
 `tests/system/mission_io.py::Recorder.event` 汇入 `logs/acceptance` TextLog；
 `firefly-viz --save logs/fastwin/<tag>.rrd` 统一落盘，结束时使用 SIGINT。
+
+## 2026-10-03：双向 LK 金字塔复用
+
+对照 OpenVINS `69488123ed9362dd44b6f28e7f4680abbff1442b` 的
+`ov_core/src/track/TrackKLT.cpp`：预处理阶段构建图像金字塔，匹配阶段复用。
+本次仅在一次双向跟踪调用内复用两幅图像的金字塔；构建次数由 4 次降为 2 次。
+两个方向仍分别计算各自模板的 Scharr 导数；梯度归一化、插值、迭代、阈值和
+双向检查保持一致。没有引入跨帧缓存或更改内参同步方式。
+
+固定 320×240 量化光滑纹理、300 点、已知 `[0.25,-0.4]px` 平移。
+预热 10 次后测量 100 次，默认 Rayon 线程池；其余飞行进程未启动。
+取 `firefly_vio_core::track::lk::optical_flow` 的 trace，包含全部金字塔、导数、
+正向/反向求解和一致性检查，不含输入生成、输出断言和 trace 落盘。
+100 次基线与复用版本使用相同插桩，只改变金字塔构建的位置。
+
+| 配置 | 样本数 | 平均耗时 | 中位数 | 最大值 | RRD（`logs/fastwin/`） |
+|---|---:|---:|---:|---:|---|
+| 双向各自构建 | 100 | 5.303 ms | 5.148 ms | 8.261 ms | `r2_before_100.rrd` |
+| 双向复用 | 100 | 5.258 ms | 4.786 ms | 10.719 ms | `r2_after_100.rrd` |
+| 双向复用，复测 | 100 | 4.972 ms | 4.692 ms | 9.525 ms | `r2_after_100_repeat.rrd` |
+
+中位数下降 7.0% / 8.9%，平均值下降 0.8% / 6.2%。最大值没有改善，
+因此只报告小幅典型耗时收益，不宣称尾延迟改善或系统实时性保证。
+最初 30 次试测也保留在 `r2_before.rrd` / `r2_after.rrd`：平均
+5.105 / 4.940ms；后者额外记录金字塔子 span，正式比较采用上表一致插桩。
+
+全部 300 点有效，每点相对解析平移的误差 <0.08px；全部采样的输出坐标位模式
+及有效状态的 FNV 风格指纹均为 `11122838785378531661`，前后相同。
+指纹用于本机 A/B 诊断，不能代替解析平移断言或要求不同平台的浮点结果逐位相同。
+普通测试另覆盖单位斜坡导数、中心差分、单步位移以及正负亚像素/大位移。
+
+显式运行性能采样用例（普通 `cargo test` 跳过；没有机器相关耗时通过门槛）：
+
+```bash
+cargo test --release -p firefly-vio-core profile_bidirectional_tracking -- --ignored --nocapture
+```
+
+捕获方式同上，所有 ConsoleReporter 输出经 Recorder 进入 RRD。
+这是现有 LK 测试模块内的固定输入用例，不提供独立 bench 程序。
+
+### 固定输入指纹
+
+| 输入 | SHA-256 |
+|---|---|
+| `lightglue-aliked-k512.onnx` | `df3694994422ceb0c9df8e390c99edc4dd03778044c646c1d01722c7252994ed` |
+| `aliked-n16-k512.onnx` | `4d4264f61795909f84bddc0dcf10b5ed1252012a8b0cffdc38983f4bd90b0c7e` |
+| 独立查询 `queries.ffvmap` | `25bc496c47b6c217e0992b6077f78838f746c1192b36a6e3596164f2decfdf7c` |
+
+### 回归范围
+
+`cargo test --workspace` 全部普通测试通过；显式运行的 20 查询定位与 300 点 LK
+采样也通过。依赖真实资产或手动启用的其他 ignored 用例不包含在普通测试通过结论中。
+本轮没有重新进行 10m 往返飞行验收。

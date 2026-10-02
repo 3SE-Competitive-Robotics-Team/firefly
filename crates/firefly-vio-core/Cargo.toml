@@ -18,5 +18,8 @@ nalgebra = { workspace = true }
 purecv = { workspace = true }
 rayon = { workspace = true }
 
+[dev-dependencies]
+fastrace = { workspace = true, features = ["enable"] }
+
 [lints]
 workspace = true
