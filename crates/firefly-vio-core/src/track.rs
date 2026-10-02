@@ -1,8 +1,7 @@
 //! KLT 视觉前端（对照 `OpenVINS` `ov_core/src/track`：`TrackBase`/`TrackKLT`/`Grider_GRID`）。
 //!
-//! 本模块实现 OpenVINS 的 KLT 稀疏特征跟踪前端。OpenCV 算法两条来源
-//! （均不引入 `opencv` crate）：检测/均衡自实现；LK 光流与基础矩阵 RANSAC
-//! 用 purecv（OpenCV 语义镜像；自研版因性能不达标退役，见各使用点注释）：
+//! 本模块实现 OpenVINS 的 KLT 稀疏特征跟踪前端。LK 数值核使用归一化 Scharr
+//! 导数和双向一致性检查；金字塔、FAST 与基础矩阵 RANSAC 由 purecv 提供：
 //! - [`histogram`]：直方图均衡（`equalizeHist`）与 CLAHE（`createCLAHE`）；
 //! - [`pyramid`]：灰度图 ↔ purecv Matrix 转换（`gray_to_matrix`）；
 //! - [`fast`]：FAST-9 角点检测 + 非极大值抑制（`cv::FAST`）；
@@ -40,43 +39,8 @@ pub mod grider;
 pub mod histogram;
 pub mod pyramid;
 
-/// purecv 金字塔 LK（对照 OpenCV `calcOpticalFlowPyrLK`：内部 f32 金字塔 +
-/// Sobel 导数、`OPTFLOW_USE_INITIAL_FLOW` 初值）。替代自研 `lk.rs` 实现——
-/// 自研与 OpenCV 数值行为存在差异（现场实测 LK 存活率偏低），用 purecv
-/// 保证与上游 OpenVINS（OpenCV）一致的跟踪行为。
-///
-/// `max_level=3`（4 层金字塔）+ 21×21 窗口：近地面特征（深度 0.8m、f=168）
-/// 在 10Hz 下帧间位移 ~31px。4 层实测优于 3 层（231m vs 387m@34s）——
-/// 顶层 40×30 的窗口越界损失被大位移捕获能力弥补。
-fn lk_optical_flow(
-    prev: &GrayImage,
-    next: &GrayImage,
-    prev_pts: &[nalgebra::Vector2<f32>],
-    init_pts: &[nalgebra::Vector2<f32>],
-) -> (Vec<nalgebra::Vector2<f32>>, Vec<bool>) {
-    use purecv::core::types::{Point2f, Size2i, TermCriteria, TermType};
-    let prev_mat = pyramid::gray_to_matrix(prev);
-    let next_mat = pyramid::gray_to_matrix(next);
-    let p0: Vec<Point2f> = prev_pts.iter().map(|p| Point2f::new(p.x, p.y)).collect();
-    let p1: Vec<Point2f> = init_pts.iter().map(|p| Point2f::new(p.x, p.y)).collect();
-    let (out, status, _err) = purecv::video::calc_optical_flow_pyramid_lk(
-        &prev_mat,
-        &next_mat,
-        &p0,
-        Some(&p1),
-        Size2i::new(21, 21),
-        3,
-        TermCriteria::new(TermType::Both, 30, 0.01),
-        purecv::video::OPTFLOW_USE_INITIAL_FLOW,
-        1e-4,
-    )
-    .expect("purecv LK 不应失败（灰度单通道、同尺寸）");
-    let pts: Vec<nalgebra::Vector2<f32>> = out
-        .into_iter()
-        .map(|p| nalgebra::Vector2::new(p.x, p.y))
-        .collect();
-    (pts, status.into_iter().map(|s| s != 0).collect())
-}
+mod lk;
+use lk::optical_flow as lk_optical_flow;
 
 /// 图像预处理方法（对照 `TrackBase.h` 的 `HistogramMethod` 枚举）。
 ///
@@ -382,7 +346,7 @@ impl TrackKlt {
     }
 
     /// 对 `msg` 中所有相机做直方图预处理，将结果写入 `img_curr`
-    /// （对照 `TrackKLT.cpp` 第 49-76 行；purecv LK 自建金字塔，此处只做
+    /// （对照 `TrackKLT.cpp` 第 49-76 行；LK 内部构建金字塔，此处只做
     /// 直方图）。两相机独立，用 rayon 并行处理。
     #[fastrace::trace]
     fn preprocess_into_curr(&mut self, msg: &CameraData) {
@@ -390,7 +354,7 @@ impl TrackKlt {
 
         let hist_method = self.base.histogram_method;
 
-        // 并行：每相机独立做直方图预处理（purecv LK 内部自建 f32 金字塔）
+        // 并行：每相机独立做直方图预处理（LK 内部构建 f32 金字塔）
         let results: Vec<_> = msg
             .sensor_ids
             .par_iter()
@@ -781,7 +745,7 @@ impl TrackKlt {
             return;
         }
 
-        // LK（OPTFLOW_USE_INITIAL_FLOW → use_initial_flow=true；purecv 金字塔 LK）
+        // 金字塔 LK 使用外部初值。
         let (out, status) = lk_optical_flow(img0, img1, &pts0, &pts1);
 
         // 去畸变归一化（RANSAC 需要在规范坐标上进行，同 C++ 第 860-866 行）
@@ -1124,14 +1088,10 @@ mod lk_bias_tests {
         }
     }
 
-    /// 量化 LK 位移估计的系统性偏置：整数平移 (dx,dy) 下，输出位移应精确
-    /// 等于 (dx,dy)；均值误差 >0.2px 即为系统性偏置（EKF 会把它当姿态/速度
-    /// 误差，现场运动场景姿态线性漂的根源）。
+    /// 高反差格子纹理的粗级别鲁棒性；精确数值契约见 lk 模块的解析纹理测试。
     #[test]
-    fn lk_displacement_bias() {
+    fn lk_high_contrast_grid_translation() {
         let img0 = checkerboard(320, 240, 8);
-        // 位移 ≤15px：更大位移在 4-12px 随机格子上触发周期混淆（合成图
-        // 特性，非 LK 缺陷；真实场景无周期，见真实场景测试）
         for (dx, dy) in [
             (0i32, 0i32),
             (10, 0),
@@ -1152,27 +1112,16 @@ mod lk_bias_tests {
             let pts1 = pts0.clone();
             let (out, status) = lk_optical_flow(&img0, &img1, &pts0, &pts1);
             let mut errs = Vec::new();
-            let mut ok = 0usize;
             for (i, (p, s)) in out.iter().zip(status.iter()).enumerate() {
                 if !s {
                     continue;
                 }
-                ok += 1;
                 errs.push((p.x - pts0[i].x - dx as f32, p.y - pts0[i].y - dy as f32));
             }
             let n = errs.len() as f32;
             let mx = errs.iter().map(|e| e.0).sum::<f32>() / n;
             let my = errs.iter().map(|e| e.1).sum::<f32>() / n;
-            let mse = errs.iter().map(|e| e.0 * e.0 + e.1 * e.1).sum::<f32>() / n;
-            println!(
-                "shift=({dx},{dy}) ok={ok}/{} mean_err=({mx:.3},{my:.3})px rmse={:.3}px",
-                pts0.len(),
-                mse.sqrt()
-            );
-            // 合成图斜向位移存在 ~5-8% 方向耦合偏置（LK 数值特性：H 非对角
-            // 项 + 双线性插值；真实场景平滑纹理往返残差 0.12px 健康，见
-            // lk_real_scene_displacement_bias）。阈值 2.5px 仅拦截实现级
-            // 大错（坐标/金字塔缩放错误量级为全幅位移）。
+            // 2.5px 容差仅检查粗位移；该纹理含混叠和重复局部图案。
             assert!(
                 mx.abs() < 2.5 && my.abs() < 2.5,
                 "LK 位移系统性偏置 ({mx:.3},{my:.3})px @ shift=({dx},{dy})"

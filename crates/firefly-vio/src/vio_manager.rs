@@ -968,3 +968,6 @@ mod tests {
         assert_eq!(img.data.len(), 16);
     }
 }
+
+#[cfg(test)]
+mod analytic_contract;

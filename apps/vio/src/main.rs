@@ -317,7 +317,7 @@ fn run_loop(
                 cam.images.first().map_or(0, |g| g.width),
                 cam.images.first().map_or(0, |g| g.height),
             );
-            publish_frontend_health(viz_pub, t_sim, vio);
+            publish_frontend_health(viz_pub, now, cam.timestamp, vio);
         }
         t_sim = t_sim.max(now);
         firefly_observability::set_sim_time(t_sim);
@@ -407,7 +407,7 @@ fn publish_odom(odom_pub: &OdomPublisher, msg: OdomMessage) {
 
 /// 前端健康度：统计保留在计算线程，结果经 Firefly/Viz 发布
 /// （bar_chart/scalars），firefly-viz 进程统一写 rerun。
-fn publish_frontend_health(viz_pub: &VizPublisher, t_sim: f64, vio: &VioManager) {
+fn publish_frontend_health(viz_pub: &VizPublisher, t_sim: f64, camera_time: f64, vio: &VioManager) {
     let db = vio.track_feats.database();
     let mut hist = vec![0i64; 21];
     let mut total_len = 0usize;
@@ -424,6 +424,17 @@ fn publish_frontend_health(viz_pub: &VizPublisher, t_sim: f64, vio: &VioManager)
     } else {
         0.0
     };
+    for (entity, values) in [
+        ("vio/debug/filter_position", vio.state.imu.pos()),
+        ("vio/debug/filter_velocity", vio.state.imu.vel()),
+        ("vio/debug/accel_bias", vio.state.imu.bias_a()),
+        ("vio/debug/gyro_bias", vio.state.imu.bias_g()),
+    ] {
+        let mut msg = VizMessage::base(kind::SCALARS, vio.state.timestamp, entity);
+        msg.scalars[..3].copy_from_slice(values.as_slice());
+        msg.scalar_count = 3;
+        let _ = viz_pub.publish(msg);
+    }
     // BarChart: x=track_length, y=count
     let mut hist_msg = VizMessage::base(kind::BAR_CHART, t_sim, "vio/debug/track_length");
     for (i, &v) in hist.iter().enumerate() {
@@ -437,6 +448,7 @@ fn publish_frontend_health(viz_pub: &VizPublisher, t_sim: f64, vio: &VioManager)
     // Scalars: db_size / avg_len 单值也走 scalars 消息
     for (entity, value) in [
         ("vio/debug/db_size", db.size() as f64),
+        ("vio/debug/camera_age", t_sim - camera_time),
         ("vio/debug/track_avg_len", avg_len),
     ] {
         let mut msg = VizMessage::base(kind::SCALARS, t_sim, entity);

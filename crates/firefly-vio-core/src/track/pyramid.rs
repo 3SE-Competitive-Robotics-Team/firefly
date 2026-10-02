@@ -1,7 +1,6 @@
 //! `GrayImage` ↔ purecv `Matrix<u8>` 转换。
 //!
-//! purecv 的 LK/FAST 接收 `Matrix<u8>`；u8 金字塔已随自研 LK 移除
-//! （purecv LK 内部自建 f32 金字塔 + Sobel）。
+//! 为 FAST 和 LK 金字塔入口提供灰度矩阵。
 
 use crate::sensor::GrayImage;
 use purecv::core::Matrix;
