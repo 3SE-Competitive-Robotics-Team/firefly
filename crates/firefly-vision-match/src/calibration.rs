@@ -9,8 +9,8 @@ use nalgebra::{Matrix3, Matrix4};
 
 /// 像素焦距（`fx=fy`，`120/tan(70.88°/2)`，与离线建库同公式）。
 pub const MUJOCO_FOCAL: f64 = 168.606_993_943_649_97;
-/// 左目在机体系的位置（米，`render::rig::LEFT_OFFSET`）。
-pub const LEFT_POS_IN_BODY: [f64; 3] = [0.0, -0.025, 0.0];
+/// 左目在机体系的位置（米，`render::rig::LEFT_OFFSET`：机头最前方）。
+pub const LEFT_POS_IN_BODY: [f64; 3] = [0.06, -0.025, 0.0];
 
 /// 相机 → 机体旋转（列 = 相机轴在机体系坐标，与 `DepthCamera` 一致）。
 #[must_use]
@@ -62,7 +62,7 @@ pub fn body_pose_to_cam(t_body: &Matrix4<f64>) -> Matrix4<f64> {
         .matrix()
 }
 
-/// 左目←居中深度相机，两者具有相同安装朝向。
+/// 左目←前置深度相机，两者具有相同安装朝向（仅差 2.5cm 横向基线）。
 /// # Panics
 /// 编译时标定常量不是有限刚体变换。
 #[must_use]
@@ -72,7 +72,7 @@ pub fn left_from_depth() -> RigidTransform {
     let body_depth = RigidTransform::from_parts(
         FrameId::BODY,
         FrameId::DEPTH_CAMERA,
-        [0.; 3],
+        [0.06, 0.0, 0.0],
         [q.i, q.j, q.k, q.w],
     )
     .expect("depth camera calibration");
@@ -118,7 +118,7 @@ mod tests {
         )
         .to_homogeneous();
         let t_wcam_expected = Matrix4::new(
-            0.0, 0.3420, -0.9397, 1.0, //
+            0.0, 0.3420, -0.9397, 1.06, //
             -1.0, 0.0, 0.0, 3.975, //
             0.0, 0.9397, 0.3420, 1.0, //
             0.0, 0.0, 0.0, 1.0,

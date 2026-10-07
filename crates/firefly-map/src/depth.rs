@@ -63,7 +63,7 @@ impl DepthCamera {
             width: 320,
             height: 240,
             rot_cam_to_body,
-            pos_in_body: Vector3::zeros(),
+            pos_in_body: Vector3::new(0.06, 0.0, 0.0),
             max_range: 8.0,
             pixel_step: 3,
         }

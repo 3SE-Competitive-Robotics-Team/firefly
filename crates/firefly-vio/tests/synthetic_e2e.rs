@@ -71,8 +71,8 @@ fn build_manager_ex(max_slam: usize, do_fej: bool) -> VioManager {
     // 与 render::rig 几何一致：左目在机体 −Y；p_IinC = R_ItoC·(0 − t_cam_body)
     let r = r_ito_c();
     let q = rot_2_quat(&r);
-    let p_left_in_c = r * Vector3::new(0.0, 0.025, 0.0);
-    let p_right_in_c = r * Vector3::new(0.0, -0.025, 0.0);
+    let p_left_in_c = r * Vector3::new(0.06, 0.025, 0.0);
+    let p_right_in_c = r * Vector3::new(0.06, -0.025, 0.0);
     for (cam_id, p) in [(0usize, p_left_in_c), (1usize, p_right_in_c)] {
         let calib = mgr.state.calib_imu_to_cam.get_mut(&cam_id).unwrap();
         calib.set_value(q, p);
@@ -282,11 +282,11 @@ fn run_cfg(cfg: &ScenarioCfg) -> (f64, f64, f64, f64, Vector3<f64>) {
         let p_body = p0 + v_gt * (t_cam - f64::from(static_frames) * dt_cam).max(0.0);
         let uv_l: Vec<_> = pts
             .iter()
-            .filter_map(|p| project(*p, p_body, Vector3::new(0.0, -0.025, 0.0)))
+            .filter_map(|p| project(*p, p_body, Vector3::new(0.06, -0.025, 0.0)))
             .collect();
         let uv_r: Vec<_> = pts
             .iter()
-            .filter_map(|p| project(*p, p_body, Vector3::new(0.0, 0.025, 0.0)))
+            .filter_map(|p| project(*p, p_body, Vector3::new(0.06, 0.025, 0.0)))
             .collect();
         let zeros = || GrayImage {
             width: W,

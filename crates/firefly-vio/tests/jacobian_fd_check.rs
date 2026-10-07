@@ -101,7 +101,7 @@ fn build_state_with_options(opts: StateOptions) -> (State, Feature) {
         p_FinG: p_fg,
         ..Feature::default()
     };
-    let lever_body = Vector3::new(0.0, -0.025, 0.0); // 左目
+    let lever_body = Vector3::new(0.06, -0.025, 0.0); // 左目（机头）
     for t in [1.0f64, 2.0, 3.0] {
         let p_body = p_fg - Vector3::new(t, 0.0, 1.0);
         let pc = r * (p_body - lever_body);

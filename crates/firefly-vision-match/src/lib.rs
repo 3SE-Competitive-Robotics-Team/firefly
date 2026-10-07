@@ -522,7 +522,7 @@ mod tests {
             Isometry3::from_parts(Translation3::new(1.0, 4.0, 1.0), UnitQuaternion::identity())
                 .to_homogeneous();
         let t_cam_body = Isometry3::from_parts(
-            Translation3::new(0.0, -0.025, 0.0),
+            Translation3::new(0.06, -0.025, 0.0),
             UnitQuaternion::from_matrix(&rot_cam_to_body()),
         )
         .to_homogeneous();
@@ -553,7 +553,7 @@ mod tests {
         let dt = (t_body.fixed_view::<3, 1>(0, 3) - t_body_truth.fixed_view::<3, 1>(0, 3)).norm();
         let r_err =
             (t_body.fixed_view::<3, 3>(0, 0) - t_body_truth.fixed_view::<3, 3>(0, 0)).norm();
-        assert!(dt < 0.1, "trans err {dt}");
+        assert!(dt < 1e-3, "trans err {dt}");
         assert!(r_err < 0.05, "rot err {r_err}");
     }
 

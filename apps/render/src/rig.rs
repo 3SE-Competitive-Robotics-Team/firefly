@@ -24,12 +24,13 @@ use crate::config::RenderConfig;
 pub const FOV_Y_DEG: f32 = 70.88;
 /// 相机下倾角（度）。
 pub const DOWNTILT_DEG: f32 = 20.0;
-/// 左目在机体系偏移（米）。
-pub const LEFT_OFFSET: Vec3 = Vec3::new(0.0, -0.025, 0.0);
+/// 左目在机体系偏移（米）：机头最前方（机身半长 0.055，鼻尖前 5mm）。
+pub const LEFT_OFFSET: Vec3 = Vec3::new(0.06, -0.025, 0.0);
 /// 右目在机体系偏移（米）。
-pub const RIGHT_OFFSET: Vec3 = Vec3::new(0.0, 0.025, 0.0);
-/// 深度相机在机体系偏移（米）。
-pub const DEPTH_OFFSET: Vec3 = Vec3::ZERO;
+/// 右目在机体系偏移（米）：与左目同前脸，基线 5cm。
+pub const RIGHT_OFFSET: Vec3 = Vec3::new(0.06, 0.025, 0.0);
+/// 深度相机在机体系偏移（米）：与双目前脸齐平。
+pub const DEPTH_OFFSET: Vec3 = Vec3::new(0.06, 0.0, 0.0);
 /// 传感器近平面（米，与深度有效下限一致）。
 pub const SENSOR_NEAR: f32 = 0.05;
 /// 传感器远平面（米，仅文档口径：`Bevy` 用无限远反向 Z，远裁剪由
