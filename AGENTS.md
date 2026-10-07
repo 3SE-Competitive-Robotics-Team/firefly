@@ -37,7 +37,7 @@
 | `open_vins/` | MSCKF 官方 C++（firefly-vio* 的移植基准） |
 | `iceoryx2/` | IPC 中间件源码 |
 | `logforth/`、`fastrace/` | 日志 / tracing 库源码 |
-| Cargo registry `purecv-0.7.1/` | 图像金字塔、导数与 FAST；LK 数值核在 `firefly-vio-core/src/track/lk.rs` |
+| Cargo registry `purecv-0.7.1/` | 图像金字塔、LK、导数与 FAST（OpenCV 语义镜像；有问题给上游提） |
 
 ## 配置（configs/）
 
