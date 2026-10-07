@@ -61,6 +61,6 @@ Rust/Python 的 iceoryx2 使用同一 0.10 系列；跨语言测试覆盖消息�
 - Python：MuJoCo、评测指标、CAD 测试。
 - `python_interop`：先同步 uv 环境，再用 `FIREFLY_TEST_PYTHON` 指向该环境 Python。
 - 依赖选择稳定版本；ORT 采用上游可用的 `2.0.0-rc.13`，Bevy 使用稳定版 0.19.1。
-- purecv 固定为 0.7.1；升级必须通过 `lk_displacement_bias` 数值回归测试，不能放宽
+- purecv 指向 fork `main` 固定 commit；升级必须通过 `lk_displacement_bias` 数值回归测试，不能放宽
   位移误差阈值。该门槛约束 VIO 前端光流的正确性。
 - Python 锁文件统一为根 `uv.lock`，构建后端统一使用 uv-build 0.12 系列。

@@ -5593,9 +5593,8 @@ checksum = "1d8f70e07b9c3962945a74e59ca1c511bba65b6419468acc217c457d93f3c740"
 
 [[package]]
 name = "purecv"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2927004833be3daa64367a124d6cd75eef84be1bce4ab634f5182e635ab5e775"
+version = "0.9.0"
+source = "git+https://github.com/XiaoPengYouCode/purecv.git?rev=0486bf7#0486bf7da710aeba4bd4b9d658e18d08d524760e"
 dependencies = [
  "log",
  "num-traits",
