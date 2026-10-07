@@ -258,9 +258,7 @@ fn infer_frame(
     for i in 0..NUM_POINTS {
         msg.keypoints[i] = [kpts[2 * i], kpts[2 * i + 1]];
         msg.scores[i] = scores[i];
-        for d in 0..DESC_DIM {
-            msg.descriptors[i][d] = descs[i * DESC_DIM + d];
-        }
+        msg.descriptors[i].copy_from_slice(&descs[i * DESC_DIM..(i + 1) * DESC_DIM]);
     }
     Ok(msg)
 }
