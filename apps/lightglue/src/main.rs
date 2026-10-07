@@ -321,8 +321,8 @@ fn match_points(
     session: &mut Session,
     points: &[firefly_vision_map::VisionMapPoint],
     feat: &FeatureMessage,
-    k0: &[f32],
-    d0: &[f32],
+    k0: &Tensor<f32>,
+    d0: &Tensor<f32>,
 ) -> Result<Vec<(usize, [f64; 3], f32)>, Box<dyn std::error::Error>> {
     let n_map = points.len().min(NUM_POINTS);
     if n_map < 6 {
@@ -337,8 +337,8 @@ fn match_points(
         d1[i * DESC_DIM..(i + 1) * DESC_DIM].copy_from_slice(&p.descriptor);
     }
     let outputs = session.run(ort::inputs![
-        "k0" => Tensor::from_array(([1usize, NUM_POINTS, 2], k0.to_vec().into_boxed_slice()))?,
-        "d0" => Tensor::from_array(([1usize, NUM_POINTS, DESC_DIM], d0.to_vec().into_boxed_slice()))?,
+        "k0" => k0,
+        "d0" => d0,
         "k1" => Tensor::from_array(([1usize, NUM_POINTS, 2], k1.into_boxed_slice()))?,
         "d1" => Tensor::from_array(([1usize, NUM_POINTS, DESC_DIM], d1.into_boxed_slice()))?,
         "s0" => Tensor::from_array(([1usize, 2], vec![WIDTH, HEIGHT].into_boxed_slice()))?,
@@ -417,7 +417,7 @@ fn query_once(
         return Ok(None);
     }
     // 多帧拼对应：单帧共面时 PnP 有翻转二义性，多视角点集破退化。
-    // query 侧输入各帧复用（一次组装，多次推理）。
+    // query 侧输入各帧复用（一次组装、一次装 Tensor，多次推理时借用）。
     let mut k0 = vec![0f32; NUM_POINTS * 2];
     let mut d0 = vec![0f32; NUM_POINTS * DESC_DIM];
     for i in 0..NUM_POINTS {
@@ -425,6 +425,8 @@ fn query_once(
         k0[2 * i + 1] = feat.keypoints[i][1];
         d0[i * DESC_DIM..(i + 1) * DESC_DIM].copy_from_slice(&feat.descriptors[i]);
     }
+    let k0t = Tensor::from_array(([1usize, NUM_POINTS, 2], k0.into_boxed_slice()))?;
+    let d0t = Tensor::from_array(([1usize, NUM_POINTS, DESC_DIM], d0.into_boxed_slice()))?;
     // 同一像素只保留最高分的地图对应，避免跨库帧重复计算信息量。
     let mut best = vec![None::<([f64; 3], f32)>; NUM_POINTS];
     for (candidate_index, &frame_idx) in candidates.iter().enumerate() {
@@ -432,7 +434,7 @@ fn query_once(
             return Ok(None);
         }
         for (qi, point, score) in
-            match_points(session, &map.frames[frame_idx].points, feat, &k0, &d0)?
+            match_points(session, &map.frames[frame_idx].points, feat, &k0t, &d0t)?
         {
             if best[qi].is_none_or(|(_, previous)| score > previous) {
                 best[qi] = Some((point, score));
