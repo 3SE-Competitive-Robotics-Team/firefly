@@ -112,6 +112,11 @@ pub struct GridMap {
     pub(crate) fading_time: f64,
     /// 构造时按 `obstacles_inflation` 计算的膨胀步长（官方 `inf_grid_`，恒 ≤ 4），用于 `change_inf_buf` 增量更新。
     inf_grid: i32,
+    /// 占据/膨胀状态版本号：任何改变两者的可变方法加一。`inflate_obstacles`
+    /// 只在版本变化时重算——规划每 tick 多次尝试共享同一地图时，后续调用零开销。
+    revision: u64,
+    /// 上次完成膨胀时的版本号（与 `revision` 相等即已同步）。
+    inflated_revision: u64,
 }
 
 #[derive(Debug)]
@@ -301,11 +306,18 @@ impl GridMapBuilder {
             min_occupancy_log,
             fading_time: self.fading_time,
             inf_grid,
+            revision: 0,
+            inflated_revision: 0,
         })
     }
 }
 
 impl GridMap {
+    /// 占据/膨胀状态版本号加一。只在跨越占据阈值（`min_occupancy_log`，即
+    /// 重算膨胀会产生不同结果）时调用；纯数值衰减不计。
+    fn touch(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
     #[must_use]
     pub fn resolution(&self) -> f64 {
         self.resolution
@@ -479,13 +491,20 @@ impl GridMap {
     pub fn set_state(&mut self, idx: [usize; 3], state: VoxelState) {
         let g = self.global_index(idx);
         let a = self.occ_addr(g);
+        let was = self.occupancy[a] >= self.min_occupancy_log;
         if self.prior.contains(&g) {
             self.occupancy[a] = self.clamp_max_log;
+            if !was {
+                self.touch();
+            }
             return;
         }
         match state {
             VoxelState::Occupied => self.occupancy[a] = self.clamp_max_log,
             VoxelState::Free | VoxelState::Unknown => self.occupancy[a] = self.clamp_min_log,
+        }
+        if was != (self.occupancy[a] >= self.min_occupancy_log) {
+            self.touch();
         }
     }
 
@@ -500,8 +519,12 @@ impl GridMap {
         if self.prior.contains(&g) {
             return;
         }
+        let was = self.occupancy[a] >= self.min_occupancy_log;
         let v = self.occupancy[a] + delta;
         self.occupancy[a] = v.clamp(self.clamp_min_log, self.clamp_max_log);
+        if was != (self.occupancy[a] >= self.min_occupancy_log) {
+            self.touch();
+        }
     }
 
     /// 直接读取体素的 log-odds 值（测试/诊断用）。
@@ -546,9 +569,10 @@ impl GridMap {
         self.fading_time
     }
 
-    /// 为已构建实例注入虚拟墙（覆盖已有配置）。
+    /// 为已构建实例注入虚拟墙（覆盖已有配置，影响膨胀查询语义）。
     pub fn set_virtual_wall(&mut self, wall: VirtualWall) {
         self.virtual_wall = Some(wall);
+        self.touch();
     }
 
     #[must_use]
@@ -600,11 +624,15 @@ impl GridMap {
     /// `dir=true` 加障碍：自身 `+GRID_MAP_OBS_FLAG`，周围 `inf_grid` 格内每个 `+1`；
     /// `dir=false` 移除障碍：反向减；膨胀窗口外的邻域跳过。
     pub fn change_inf_buf(&mut self, dir: bool, idx: [usize; 3]) {
-        self.change_inf_buf_global(dir, self.global_index(idx));
+        self.change_inf_buf_global(dir, self.global_index(idx), true);
     }
 
-    /// 全局索引版膨胀增量更新（`clearBuffer`/`fade`/`inflate_obstacles` 共用）。
-    fn change_inf_buf_global(&mut self, dir: bool, g: [i64; 3]) {
+    /// 全局索引版膨胀增量更新（`clearBuffer`/`fade` 共用；`inflate_obstacles`
+    /// 重建时调用不计版本，重建结束统一同步）。
+    fn change_inf_buf_global(&mut self, dir: bool, g: [i64; 3], track: bool) {
+        if track {
+            self.touch();
+        }
         let step = self.inf_grid;
         let center = self.inf_addr(g);
         if dir {
@@ -700,11 +728,13 @@ impl GridMap {
         self.inf_low = new_inf_low;
         self.inf_up = new_inf_up;
         if !self.prior.is_empty() {
-            for g in &self.prior {
-                if self.window_index(*g).is_some() {
-                    let a = self.occ_addr(*g);
-                    self.occupancy[a] = self.clamp_max_log;
-                }
+            let restores: Vec<[usize; 3]> = self
+                .prior
+                .iter()
+                .filter_map(|g| self.window_index(*g))
+                .collect();
+            for idx in restores {
+                self.set_state(idx, VoxelState::Occupied);
             }
             self.inflate_obstacles();
         }
@@ -728,10 +758,13 @@ impl GridMap {
                 for z in z0..=z1 {
                     let g = [x, y, z];
                     let a = self.occ_addr(g);
+                    if self.occupancy[a] >= self.min_occupancy_log {
+                        self.touch();
+                    }
                     self.occupancy[a] = self.clamp_min_log;
                     let ia = self.inf_addr(g);
                     if self.inflate[ia] >= GRID_MAP_OBS_FLAG {
-                        self.change_inf_buf_global(false, g);
+                        self.change_inf_buf_global(false, g, true);
                     }
                 }
             }
@@ -740,7 +773,11 @@ impl GridMap {
 
     /// 重算膨胀层（官方 `clearAndInflateLocalMap` 的膨胀步骤，计数语义；步长为构造期确定的 `inf_grid`）。
     /// 每个占据体素 `+GRID_MAP_OBS_FLAG`（自身）并周围 `inf_grid` 格内 `+1`，多障碍叠加计数。
+    /// 版本未变时直接返回：规划每 tick 多次尝试共享同一地图，后续调用零开销。
     pub fn inflate_obstacles(&mut self) {
+        if self.inflated_revision == self.revision {
+            return;
+        }
         self.inflate.iter_mut().for_each(|v| *v = 0);
         let threshold = self.min_occupancy_log;
         let occupied: Vec<[i64; 3]> = (0..self.occupancy.len())
@@ -748,8 +785,9 @@ impl GridMap {
             .map(|a| self.addr_global(a))
             .collect();
         for g in occupied {
-            self.change_inf_buf_global(true, g);
+            self.change_inf_buf_global(true, g, false);
         }
+        self.inflated_revision = self.revision;
     }
 
     /// 地图衰减（对照官方 `grid_map.cpp:204-222` `fadingCallback`，必须 2Hz 调用）。
@@ -789,7 +827,7 @@ impl GridMap {
         }
         // 增量移除膨胀（计数缓冲）
         for g in crossed {
-            self.change_inf_buf_global(false, g);
+            self.change_inf_buf_global(false, g, true);
         }
     }
 }
@@ -797,6 +835,48 @@ impl GridMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inflate_skips_recompute_when_map_unchanged() {
+        let mut map = GridMapBuilder::new(0.5, [20, 20, 8]).build().unwrap();
+        map.set_state([5, 5, 2], VoxelState::Occupied);
+        map.inflate_obstacles();
+        let mut snap = Vec::new();
+        for z in 0..8 {
+            for y in 0..20 {
+                for x in 0..20 {
+                    snap.push(map.inflate_at([x, y, z]));
+                }
+            }
+        }
+        // 无变更再调：结果逐位一致（是否跳过由版本保证，此处验证幂等）。
+        map.inflate_obstacles();
+        let mut snap2 = Vec::new();
+        for z in 0..8 {
+            for y in 0..20 {
+                for x in 0..20 {
+                    snap2.push(map.inflate_at([x, y, z]));
+                }
+            }
+        }
+        assert_eq!(snap, snap2);
+        // 同值写入不触发版本变化（阈值未跨越）。
+        map.set_state([5, 5, 2], VoxelState::Occupied);
+        map.inflate_obstacles();
+        let mut snap3 = Vec::new();
+        for z in 0..8 {
+            for y in 0..20 {
+                for x in 0..20 {
+                    snap3.push(map.inflate_at([x, y, z]));
+                }
+            }
+        }
+        assert_eq!(snap, snap3);
+        // 真实变化重算：清除后邻域计数归零。
+        map.set_state([5, 5, 2], VoxelState::Free);
+        map.inflate_obstacles();
+        assert_eq!(map.inflate_at([5, 5, 2]), 0);
+    }
 
     #[test]
     fn builder_rejects_bad_resolution() {
