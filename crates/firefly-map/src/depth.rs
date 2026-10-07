@@ -8,11 +8,8 @@
 //! 相机模型与 RMUC render 标定一致（`apps/render/src/rig.rs`），
 //! 投影约定见 `DepthCamera::mujoco_default`。
 
-use std::collections::BTreeMap;
-
-use nalgebra::{Isometry3, Matrix3, Point3, Vector3};
-
 use crate::grid::GridMap;
+use nalgebra::{Isometry3, Matrix3, Point3, Vector3};
 
 /// 深度相机标定（内参 + 外参 + 感知参数）。
 ///
@@ -91,7 +88,9 @@ pub fn update_from_depth(
 ) {
     assert_eq!(depth.len(), cam.width * cam.height);
     assert!(cam.pixel_step > 0);
-    let mut votes = BTreeMap::new();
+    // (体素, 是否命中)：收集后按体素排序折叠，确定性顺序，每体素每帧一次更新；
+    // 单次 Vec 分配替代逐体素堆节点。
+    let mut votes: Vec<([usize; 3], bool)> = Vec::new();
     let cam_world = body_pose * Point3::from(cam.pos_in_body);
     let mut v = 0usize;
     while v < cam.height {
@@ -116,20 +115,35 @@ pub fn update_from_depth(
 
 /// 帧内多数投票，每体素每帧最多一次 log-odds 更新；相等时取命中。
 /// 对照 EGO-Planner-v2 `raycastProcess` 的 count_hit/count_hit_and_miss。
-fn apply_votes(map: &mut GridMap, votes: BTreeMap<[usize; 3], (u32, u32)>) {
-    for (idx, (hits, misses)) in votes {
-        let delta = if hits >= misses {
-            map.prob_hit_log()
-        } else {
-            map.prob_miss_log()
-        };
-        map.update_occupancy(idx, delta);
+fn apply_votes(map: &mut GridMap, votes: Vec<([usize; 3], bool)>) {
+    let mut votes = votes;
+    votes.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let mut i = 0usize;
+    while i < votes.len() {
+        let idx = votes[i].0;
+        let (mut hits, mut misses) = (0u32, 0u32);
+        while i < votes.len() && votes[i].0 == idx {
+            if votes[i].1 {
+                hits += 1;
+            } else {
+                misses += 1;
+            }
+            i += 1;
+        }
+        map.update_occupancy(
+            idx,
+            if hits >= misses {
+                map.prob_hit_log()
+            } else {
+                map.prob_miss_log()
+            },
+        );
     }
 }
 
 #[cfg(test)]
 fn mark_ray(map: &mut GridMap, from: Vector3<f64>, to: Vector3<f64>) {
-    let mut votes = BTreeMap::new();
+    let mut votes = Vec::new();
     vote_ray(map, from, to, &mut votes);
     apply_votes(map, votes);
 }
@@ -139,7 +153,7 @@ fn vote_ray(
     map: &GridMap,
     from: Vector3<f64>,
     to: Vector3<f64>,
-    votes: &mut BTreeMap<[usize; 3], (u32, u32)>,
+    votes: &mut Vec<([usize; 3], bool)>,
 ) {
     let Some(mut idx) = map.index_of(from) else {
         return;
@@ -148,7 +162,7 @@ fn vote_ray(
         return;
     };
     if idx == idx_to {
-        votes.entry(idx).or_default().0 += 1;
+        votes.push((idx, true));
         return;
     }
 
@@ -188,10 +202,10 @@ fn vote_ray(
             break;
         }
         if idx == idx_to {
-            votes.entry(idx).or_default().0 += 1;
+            votes.push((idx, true));
             break;
         }
-        votes.entry(idx).or_default().1 += 1;
+        votes.push((idx, false));
         // 防御：射线异常长时截断（应被命中或出界提前终止）
         if t > 100.0 * dir.norm() {
             break;
@@ -231,7 +245,7 @@ mod tests {
     #[test]
     fn repeated_pixels_contribute_only_one_frame_update() {
         let mut map = GridMapBuilder::new(1., [10, 10, 10]).build().unwrap();
-        let mut votes = BTreeMap::new();
+        let mut votes = Vec::new();
         for _ in 0..100 {
             vote_ray(
                 &map,
@@ -244,7 +258,13 @@ mod tests {
         let expected = map.clamp_min_log() + map.prob_hit_log();
         assert!((map.occupancy_at([4, 5, 5]) - expected).abs() < 1e-12);
         assert_eq!(map.state([4, 5, 5]), VoxelState::Free);
-        let votes = BTreeMap::from([([4, 5, 5], (2, 3))]);
+        let votes = vec![
+            ([4, 5, 5], true),
+            ([4, 5, 5], true),
+            ([4, 5, 5], false),
+            ([4, 5, 5], false),
+            ([4, 5, 5], false),
+        ];
         apply_votes(&mut map, votes);
         assert!((map.occupancy_at([4, 5, 5]) - (expected + map.prob_miss_log())).abs() < 1e-12);
     }
