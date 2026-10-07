@@ -15,7 +15,7 @@ use firefly_pubsub::camera::{CAMERA_LEFT_TOPIC, GrayImageMessage};
 use firefly_pubsub::event::{CAMERA_PAIR_TOPIC, TopicListener};
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::publish::Publisher;
-use firefly_pubsub::subscriber::Subscriber;
+use firefly_pubsub::subscriber::{Received, Subscriber};
 use firefly_pubsub::vision::{DESC_DIM, FEATURE_TOPIC, FeatureMessage, MAX_FEATURES as NUM_POINTS};
 use firefly_vision_map::{VisionKeyFrame, VisionMap, VisionMapPoint};
 use firefly_vision_match::calibration::{body_pose_to_cam, left_from_depth, pinhole};
@@ -139,12 +139,12 @@ fn run_loop(session: &mut Session) -> Result<(), firefly_error::Error> {
     let on_event = |attachment_id: WaitSetAttachmentId<ipc::Service>| {
         let _ = attachment_id.has_event_from(&tick_guard);
         let _ = cam_events.drain();
-        // 排空左目队列，只取最新帧
-        let mut latest: Option<GrayImageMessage> = None;
+        // 排空左目队列，只取最新帧；持样本句柄零拷贝（77KB 灰度不落地拷贝）。
+        let mut latest: Option<Received<GrayImageMessage>> = None;
         while let Ok(Some(sample)) = left_sub.receive() {
-            latest = Some(*sample);
+            latest = Some(sample);
         }
-        let Some(frame) = latest else {
+        let Some(frame) = latest.as_deref() else {
             return CallbackProgression::Continue;
         };
         if frame.timestamp + 1e-9 < next_feat {
@@ -166,7 +166,7 @@ fn run_loop(session: &mut Session) -> Result<(), firefly_error::Error> {
         firefly_observability::pump_log_ipc(&log_ipc);
         let root = fastrace::Span::root("aliked", fastrace::prelude::SpanContext::random());
         let trace_guard = root.set_local_parent();
-        match infer_frame(session, &frame) {
+        match infer_frame(session, frame) {
             Ok(msg) => {
                 log::debug!(
                     "特征发布 t={:.2}（{} 点，含低分）",

@@ -45,7 +45,10 @@ use firefly_pubsub::node::create_node;
 use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::reference::{REFERENCE_TOPIC, ReferenceMessage};
-use firefly_pubsub::subscriber::{CorrectedOdomSubscriber, Subscriber};
+use firefly_pubsub::subscriber::{CorrectedOdomSubscriber, Received, Subscriber};
+
+/// 深度样本句柄：零拷贝持有，tick 消费 `&data` 后释放，无 300KB 全拷贝。
+type ReceivedDepth = Received<DepthImageMessage>;
 use firefly_pubsub::viz::{
     ARROWS_MAX, POINTS_MAX, VIZ_TOPIC, VOXELS_MAX, VizMessage, VizPublisher, kind,
 };
@@ -256,7 +259,7 @@ struct App {
     last_ref_pos: Option<Vector3<f64>>,
     /// 最新 odom 携带的 trace 上下文 `(trace_id, span_id, sampled)`（续接用）。
     odom_trace: Option<(u128, u64, bool)>,
-    latest_depth: Option<DepthImageMessage>,
+    latest_depth: Option<ReceivedDepth>,
     last_depth_timestamp: f64,
     /// 深度流新鲜度监视（超时锁存触发急停）。
     depth_freshness: DepthFreshness,
@@ -406,13 +409,13 @@ impl App {
             while let Some(sample) = sub.receive()? {
                 let ctx = *sample.user_header();
                 let _span = ctx.continue_span("recv-depth");
-                let m: DepthImageMessage = *sample;
-                if m.timestamp.is_finite()
-                    && m.timestamp >= 0.0
-                    && m.timestamp > self.last_depth_timestamp
+                // 存样本句柄不拷贝 300KB payload；tick 内联消费后即释放。
+                if sample.timestamp.is_finite()
+                    && sample.timestamp >= 0.0
+                    && sample.timestamp > self.last_depth_timestamp
                 {
-                    self.last_depth_timestamp = m.timestamp;
-                    self.latest_depth = Some(m);
+                    self.last_depth_timestamp = sample.timestamp;
+                    self.latest_depth = Some(sample);
                 }
             }
         }
