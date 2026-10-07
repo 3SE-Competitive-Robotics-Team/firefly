@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use firefly_pubsub::camera::{CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, GrayImageMessage};
 use firefly_pubsub::imu::ImuSubscriber;
 use firefly_pubsub::node::IpcNode;
-use firefly_pubsub::subscriber::Subscriber;
+use firefly_pubsub::subscriber::{Received, Subscriber};
 use firefly_pubsub::trace::TraceContext;
 use firefly_vio_core::input::SensorInput;
 use firefly_vio_core::sensor::{CameraData, GrayImage, ImuData};
@@ -24,10 +24,12 @@ pub struct IceoryxInput {
     right_sub: Subscriber<GrayImageMessage>,
     /// 待消费 IMU 队列。
     imu_queue: VecDeque<ImuData>,
-    /// 最近左目帧（等待与右目配对）。
-    last_left: Option<GrayImageMessage>,
-    /// 最近右目帧（等待与左目配对）。
-    last_right: Option<GrayImageMessage>,
+    /// 最近左目帧（等待与右目配对；持样本句柄零拷贝）。
+    last_left: Option<Received<GrayImageMessage>>,
+    /// 最近右目帧（等待与左目配对；持样本句柄零拷贝）。
+    last_right: Option<Received<GrayImageMessage>>,
+    /// 复用的全零掩码（跟踪器要求与图像同尺寸；只读，逐帧复用免分配）。
+    zero_mask: Vec<u8>,
     /// 最新收到数据的时刻（秒）。
     now_t: f64,
     /// 最近收到消息携带的 trace 上下文 `(trace_id, span_id, sampled)`。
@@ -47,6 +49,7 @@ impl IceoryxInput {
             imu_queue: VecDeque::new(),
             last_left: None,
             last_right: None,
+            zero_mask: Vec::new(),
             now_t: 0.0,
             last_trace: None,
         })
@@ -90,14 +93,14 @@ impl SensorInput for IceoryxInput {
         let mut right_count = 0u32;
         while let Ok(Some(s)) = self.left_sub.receive() {
             self.capture_trace(s.user_header());
-            self.last_left = Some(*s);
             self.now_t = self.now_t.max(s.timestamp);
+            self.last_left = Some(s);
             left_count += 1;
         }
         while let Ok(Some(s)) = self.right_sub.receive() {
             self.capture_trace(s.user_header());
-            self.last_right = Some(*s);
             self.now_t = self.now_t.max(s.timestamp);
+            self.last_right = Some(s);
             right_count += 1;
         }
         // 诊断：有新相机帧时打印
@@ -148,16 +151,20 @@ impl SensorInput for IceoryxInput {
         // 全零 mask（对照 OpenVINS `VioManager.cpp` 的 `cv::Mat::zeros` 默认掩码：
         // 0 = 全像素有效，tracker 的 `feed_new_camera` 要求 `images.len()==masks.len()`，
         // 空 mask 会被校验拒绝 → 跟踪器从未运行 → MSCKF 无特征）。
+        // 复用缓存：跟踪器只读（内部克隆），缓存恒零，免每帧 2x77KB 分配。
+        let n = left.width * left.height;
+        self.zero_mask.resize(n, 0);
+        debug_assert!(self.zero_mask.iter().all(|&b| b == 0));
         let masks = vec![
             GrayImage {
                 width: left.width,
                 height: left.height,
-                data: vec![0; left.width * left.height],
+                data: self.zero_mask.clone(),
             },
             GrayImage {
                 width: right.width,
                 height: right.height,
-                data: vec![0; right.width * right.height],
+                data: self.zero_mask.clone(),
             },
         ];
         self.last_left = None;
