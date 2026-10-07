@@ -862,6 +862,7 @@ impl PlannerManager {
                         Err(e) => log::debug!("冷启动失败：{e}"),
                     }
                 }
+                let mut last_err: Option<String> = None;
                 if result.is_none() {
                     for attempt in 0..RANDOM_RESTART_TRIALS {
                         let mid =
@@ -878,7 +879,10 @@ impl PlannerManager {
                                 result = Some(r);
                                 break;
                             }
-                            Err(e) => log::debug!("随机重启第 {} 次失败：{e}", attempt + 1),
+                            Err(e) => {
+                                log::debug!("随机重启第 {} 次失败：{e}", attempt + 1);
+                                last_err = Some(e.to_string());
+                            }
                         }
                     }
                 }
@@ -887,8 +891,11 @@ impl PlannerManager {
                 } else {
                     self.consecutive_failures = self.consecutive_failures.saturating_add(1);
                     log::warn!(
-                        "重规划失败（含随机重启，保持旧轨迹；连败 {}）",
-                        self.consecutive_failures
+                        "重规划失败（含随机重启，保持旧轨迹；连败 {}，末次原因：{}）",
+                        self.consecutive_failures,
+                        last_err
+                            .as_deref()
+                            .unwrap_or("暖/冷启动失败（见 debug 日志）")
                     );
                     self.replan_cooldown_until = now + REPLAN_COOLDOWN;
                     return false;
