@@ -169,7 +169,9 @@ impl Sensors {
                                 continue;
                             }
                             history.depth.push_back((d.timestamp, d.data.to_vec()));
-                            while history.depth.len() > 120 {
+                            // 深度只与新鲜特征精确时间戳配对（特征 buffer=1 只进最新帧），
+                            // 8 帧（10Hz 下 0.8s）足够覆盖配对窗口；旧帧永远配不上，只占内存。
+                            while history.depth.len() > 8 {
                                 history.depth.pop_front();
                             }
                         }
