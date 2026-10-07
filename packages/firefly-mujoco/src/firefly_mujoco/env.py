@@ -41,6 +41,8 @@ class DroneEnv:
         accel_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "accel")
         self._gyro_adr = int(self.model.sensor_adr[gyro_id])
         self._accel_adr = int(self.model.sensor_adr[accel_id])
+        # IMU 噪声发生器：default_rng 比全局 RandomState 快约 3 倍（同分布）。
+        self._rng = np.random.default_rng()
 
         self._rotor_positions = np.array(
             [
@@ -111,9 +113,9 @@ class DroneEnv:
     def state(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """真值状态 `(pos, vel_world, quat_xyzw, angvel_body)`（仅供评测的 PlantState）。"""
         d = self.data
-        quat_wxyz = d.body("drone").xquat
+        quat_wxyz = d.xquat[self._drone_id]
         return (
-            d.body("drone").xpos.copy(),
+            d.xpos[self._drone_id].copy(),
             d.qvel[0:3].copy(),
             np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]]),
             d.qvel[3:6].copy(),
@@ -169,16 +171,16 @@ class DroneEnv:
         gyro = d.sensordata[self._gyro_adr : self._gyro_adr + 3].copy()
         accel = d.sensordata[self._accel_adr : self._accel_adr + 3].copy()
         if self._gyro_noise > 0:
-            gyro += np.random.normal(0.0, self._gyro_noise, 3)
+            gyro += self._rng.normal(0.0, self._gyro_noise, 3)
         if self._accel_noise > 0:
-            accel += np.random.normal(0.0, self._accel_noise, 3)
+            accel += self._rng.normal(0.0, self._accel_noise, 3)
         return gyro, accel
 
     def gt_pose(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """真值：`(pos, quat_xyzw, vel_world)`。"""
         d = self.data
-        pos = d.body("drone").xpos.copy()
-        quat_wxyz = d.body("drone").xquat.copy()
+        pos = d.xpos[self._drone_id].copy()
+        quat_wxyz = d.xquat[self._drone_id].copy()
         # freejoint 的 qvel[0:3] 是世界系线速度。
         vel = d.qvel[0:3].copy()
         return pos, quat_wxyz[[1, 2, 3, 0]], vel
