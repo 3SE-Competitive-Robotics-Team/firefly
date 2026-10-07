@@ -69,13 +69,13 @@ fn parse_args() -> Result<(String, String, String), String> {
     Ok((model, map, config))
 }
 
-/// 加载 ONNX 会话；四条算子线程，空闲时休眠以保留控制线程预算。
+/// 加载 ONNX 会话；六条算子线程（207ms→180ms/匹配），空闲时休眠。
 fn load_session(model: &str) -> Result<Session, Box<dyn std::error::Error>> {
     if !std::path::Path::new(model).is_file() {
         return Err(format!("权重缺失：{model}（见 models/，离线导出，不进 git）").into());
     }
     let session = Session::builder()?
-        .with_intra_threads(4)?
+        .with_intra_threads(6)?
         .with_intra_op_spinning(false)?
         .commit_from_file(model)?;
     log::info!("lightglue 会话就绪：{model}");
@@ -194,6 +194,9 @@ fn run_loop(
     // 特征发布端带 notify（`aliked` 为 `with_topic_notify`）：特征到即醒；
     // 心跳仅兜底无事件时的 odom 缓存更新与断流自愈。
     let mut latest_corrected: Option<OdomMessage> = None;
+    // 地图查询节流 1Hz：查询耗时（~200ms）超过特征周期（5Hz）必然积压，
+    // 显式降频保每次查询新鲜，吞吐与新鲜度解耦（回环 worker 不受影响）。
+    let mut last_map_query = f64::NEG_INFINITY;
     let on_event = |attachment_id: WaitSetAttachmentId<ipc::Service>| {
         let root = fastrace::Span::root("lightglue", fastrace::prelude::SpanContext::random());
         let trace_guard = root.set_local_parent();
@@ -226,7 +229,9 @@ fn run_loop(
         });
         if let (Some(feat), Some(odom)) = (latest_feat, prior)
             && feat.timestamp - odom.timestamp <= ODOM_FRESH_TIMEOUT
+            && feat.timestamp - last_map_query >= 1.0
         {
+            last_map_query = feat.timestamp;
             // 特征时间戳即 sim 时钟；查询前后各 pump 一次（匹配阻塞下积压排空）。
             // 查询耗时即管线滞后主项（ORT 推理，rrd 侧只能看到特征时间戳，
             // 到达滞后由 localization 融合/超期日志体现）。
