@@ -125,10 +125,12 @@ fn gaussian(rng: &mut StdRng) -> f32 {
 }
 
 /// 双线性/时间插值后按权重平方和归一化，保持各点方差为一。
+/// 权重范数只与 `(x % scale, y % scale)` 有关，建表一次，逐像素查表。
 struct Field {
     values: Vec<f32>,
     cols: usize,
     scale: usize,
+    norm: Vec<f32>,
 }
 
 impl Field {
@@ -161,10 +163,21 @@ impl Field {
                     + options.temporal_fraction.sqrt() * dynamic
             })
             .collect();
+        let norm = (0..scale * scale)
+            .map(|k| {
+                let (u, v) = (
+                    (k % scale) as f32 / scale as f32,
+                    (k / scale) as f32 / scale as f32,
+                );
+                let weights = [(1.0 - u) * (1.0 - v), u * (1.0 - v), (1.0 - u) * v, u * v];
+                weights.iter().map(|w| w * w).sum::<f32>().sqrt()
+            })
+            .collect();
         Self {
             values,
             cols,
             scale,
+            norm,
         }
     }
 
@@ -181,7 +194,7 @@ impl Field {
             self.values[i + self.cols + 1],
         ];
         weights.iter().zip(values).map(|(w, z)| w * z).sum::<f32>()
-            / weights.iter().map(|w| w * w).sum::<f32>().sqrt()
+            / self.norm[(y % self.scale) * self.scale + x % self.scale]
     }
 }
 
@@ -233,6 +246,8 @@ pub fn apply(
     let lateral_y = Field::new(width, height, options, stamp, 4);
     let mut rng = StdRng::seed_from_u64(options.seed ^ stamp.to_bits().rotate_left(17));
     let fb = focal_px * options.baseline_m;
+    let corr = options.correlated_fraction.sqrt();
+    let uncorr = (1.0 - options.correlated_fraction).sqrt();
     for y in 0..height {
         for x in 0..width {
             let i = y * width + x;
@@ -274,9 +289,8 @@ pub fn apply(
                 depth[i] = 0.0;
                 continue;
             }
-            let error = options.disparity_sigma_px
-                * (options.correlated_fraction.sqrt() * axial.at(x, y)
-                    + (1.0 - options.correlated_fraction).sqrt() * gaussian(&mut rng));
+            let error =
+                options.disparity_sigma_px * (corr * axial.at(x, y) + uncorr * gaussian(&mut rng));
             let measured = measured_depth(sample, fb, error, options.disparity_step_px);
             depth[i] = if options.valid(measured) {
                 measured
@@ -290,6 +304,7 @@ pub fn apply(
 #[cfg(test)]
 #[allow(clippy::float_cmp)]
 mod tests {
+
     use super::*;
 
     fn isolated() -> DepthNoiseOptions {
