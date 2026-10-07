@@ -660,20 +660,21 @@ impl TrackKlt {
         let mut good_ids_r = Vec::new();
 
         // LEFT loop（对照 TrackKLT.cpp 第 306-338 行）
+        // 右目 id → 位置预建表：O(1) 替代 O(n) 线性扫描（同 RIGHT loop 的 HashSet
+        // 做法；`or_insert` 保留首个下标，与线性扫描找到首个即停同语义）。
+        let mut r_index = std::collections::HashMap::with_capacity(ids_r.len() * 2);
+        for (n, &idr) in ids_r.iter().enumerate() {
+            r_index.entry(idr).or_insert(n);
+        }
         for i in 0..pts_l_new.len() {
             let p = pts_l_new[i];
             if p.x < 0.0 || p.y < 0.0 || (p.x as i32) > w_l || (p.y as i32) > h_l {
                 continue;
             }
-            let mut found_r = false;
-            let mut idx_r = 0usize;
-            for (n, &idr) in ids_r.iter().enumerate() {
-                if ids_l[i] == idr {
-                    found_r = true;
-                    idx_r = n;
-                    break;
-                }
-            }
+            let (found_r, idx_r) = match r_index.get(&ids_l[i]) {
+                Some(&n) => (true, n),
+                None => (false, 0),
+            };
             if mask_ll[i] && found_r && mask_rr[idx_r] {
                 let pr = pts_r_new[idx_r];
                 if pr.x < 0.0 || pr.y < 0.0 || (pr.x as i32) >= w_r || (pr.y as i32) >= h_r {
