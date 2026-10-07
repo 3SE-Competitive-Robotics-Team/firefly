@@ -88,7 +88,9 @@ fn reallocation_checks_actual_derivatives_and_preserves_boundary_state() {
     let m = MincoBuilder::new(SolverOrder::MinimumJerk, bad, end)
         .build(&[], &[1.])
         .unwrap();
-    assert!(planner.ensure_feasible(&m).is_err());
+    // 官方 warn-and-go：边界超限不断行，直接接受当次解（端点保持原值）。
+    let t = planner.ensure_feasible(&m).unwrap();
+    assert!((t.eval(0.0).velocity - bad.velocity).norm() < 1e-9);
 }
 
 #[test]

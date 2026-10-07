@@ -606,7 +606,9 @@ impl Planner {
     /// `getMaxAccRate` 仅查端点为简化，本实现保留全程精确语义（加速度/加加速度亦求驻点），
     /// 避免采样漏峰导致时间缩放不足。
     /// 保持端点 PVA，迭代分配时间并重新求解；每轮检查实际轨迹的全程极值。
-    /// 时间比仅用于提出候选，不保证导数单调下降。预算耗尽必须拒绝输出。
+    /// 时间比仅用于提出候选，不保证导数单调下降。内部超限时预算耗尽拒绝输出；
+    /// 边界本身超限时（官方 planGlobalTraj 的 warn-and-go：只告警不限行），
+    /// 拉伸改变不了固定端点，直接接受当次优化结果——重规划永不因此锁死。
     #[fastrace::trace]
     fn ensure_feasible(&self, minco: &Minco) -> firefly_error::Result<Trajectory> {
         let limits = [
@@ -621,13 +623,20 @@ impl Planner {
             ));
         }
         for endpoint in [minco.start(), minco.end()] {
-            if endpoint.velocity.norm() > limits[0] || endpoint.acceleration.norm() > limits[1] {
+            if !endpoint.velocity.iter().all(|v| v.is_finite())
+                || !endpoint.acceleration.iter().all(|v| v.is_finite())
+            {
                 return Err(Error::new(
                     ErrorKind::InvalidArgument,
-                    "boundary state exceeds dynamical limits",
+                    "non-finite boundary state",
                 ));
             }
         }
+        // 官方行为：边界超限只告警（planGlobalTraj 拉长时间两次仍超就 warn 放行）。
+        // 端点固定使拉伸循环注定不收敛，跳过拉伸直接接受当次解。
+        let boundary_violated = [minco.start(), minco.end()].iter().any(|endpoint| {
+            endpoint.velocity.norm() > limits[0] || endpoint.acceleration.norm() > limits[1]
+        });
         let waypoints: Vec<_> = minco.waypoints().collect();
         let mut durations: Vec<_> = (0..minco.pieces())
             .map(|i| minco.piece_duration(i))
@@ -637,6 +646,12 @@ impl Planner {
             let traj = candidate.solve()?;
             if !traj.coefficients().iter().all(|v| v.is_finite()) {
                 return Err(Error::new(ErrorKind::Convergence, "non-finite trajectory"));
+            }
+            if boundary_violated {
+                log::warn!(
+                    "边界超限（官方 warn-and-go）：起点/终点速度/加速度超限，跳过拉伸直接接受"
+                );
+                return Ok(traj);
             }
             let maxima = [
                 Self::trajectory_max_vel(&traj),
