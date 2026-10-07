@@ -30,6 +30,9 @@ pub const DEFAULT_PLANNING_HORIZON: f64 = 6.0;
 /// 到达判定距离（米）。
 pub const DEFAULT_ARRIVE_DIST: f64 = 0.5;
 const REPLAN_COOLDOWN: f64 = 0.5;
+/// 随机重启次数（官方 `planFromLocalTraj` `trial_times` = 1；此处取 2，失败路径
+/// 偶发，成本为 2 次 EGO 求解，多一次逃出机会）。
+const RANDOM_RESTART_TRIALS: usize = 2;
 /// 前视时间（秒，官方 `traj_server/time_forward`，swarm-playground 各 launch
 /// 均取 1.0）：yaw 期望方向取参考位置再往前该时长的轨迹点。
 const TIME_FORWARD: f64 = 1.0;
@@ -239,6 +242,11 @@ pub struct PlannerManager {
     have_recv_pre_agent: bool,
     /// 顺序起飞等待已提示标记：等待前序机的 log 只发一次，不逐帧刷屏。
     seq_wait_logged: bool,
+    /// 连续重规划失败次数（官方 `continous_failures_count_`）：随机重启幅度
+    /// 随它增长，成功一次清零。
+    consecutive_failures: u32,
+    /// 确定性 PRNG 状态（xorshift64*，固定种子保证可复现）：随机重启的中点偏移源。
+    rng_state: u64,
 }
 
 impl PlannerManager {
@@ -286,6 +294,8 @@ impl PlannerManager {
             // 短路为真，直接置 true 等价
             have_recv_pre_agent,
             seq_wait_logged: false,
+            consecutive_failures: 0,
+            rng_state: 0x9E37_79B9_7F4A_7C15,
         })
     }
 
@@ -835,6 +845,8 @@ impl PlannerManager {
         let result = match planned {
             Ok(r) => r,
             Err(warm_err) => {
+                // 官方升级链：暖启动 → 冷启动 → 随机重启 ×N（逃局部极小）。
+                let mut result = None;
                 if warm.is_some() {
                     match self.planner.plan_in_swarm_with_init(
                         start,
@@ -845,16 +857,39 @@ impl PlannerManager {
                     ) {
                         Ok(r) => {
                             log::info!("暖启动失败（{warm_err}），冷启动成功");
-                            r
+                            result = Some(r);
                         }
-                        Err(e) => {
-                            log::warn!("重规划失败，保持旧轨迹：{e}");
-                            self.replan_cooldown_until = now + REPLAN_COOLDOWN;
-                            return false;
+                        Err(e) => log::debug!("冷启动失败：{e}"),
+                    }
+                }
+                if result.is_none() {
+                    for attempt in 0..RANDOM_RESTART_TRIALS {
+                        let mid =
+                            self.random_mid(start.position.coords, horizon.endpoint().position);
+                        match self.planner.plan_in_swarm_with_init(
+                            start,
+                            horizon.endpoint(),
+                            &peers,
+                            InitSource::RandomStart { mid },
+                            horizon.touch_goal,
+                        ) {
+                            Ok(r) => {
+                                log::info!("随机重启第 {} 次成功", attempt + 1);
+                                result = Some(r);
+                                break;
+                            }
+                            Err(e) => log::debug!("随机重启第 {} 次失败：{e}", attempt + 1),
                         }
                     }
+                }
+                if let Some(r) = result {
+                    r
                 } else {
-                    log::warn!("重规划失败，保持旧轨迹：{warm_err}");
+                    self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                    log::warn!(
+                        "重规划失败（含随机重启，保持旧轨迹；连败 {}）",
+                        self.consecutive_failures
+                    );
                     self.replan_cooldown_until = now + REPLAN_COOLDOWN;
                     return false;
                 }
@@ -875,7 +910,38 @@ impl PlannerManager {
             self.replan_cooldown_until = now + REPLAN_COOLDOWN;
             return false;
         }
+        self.consecutive_failures = 0;
         true
+    }
+
+    /// 确定性均匀随机数 [0,1)（xorshift64*，固定种子保证可复现）。
+    fn next_rand(&mut self) -> f64 {
+        const M: f64 = (1u64 << 53) as f64;
+        let mut x = self.rng_state;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.rng_state = x;
+        ((x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64) / M
+    }
+
+    /// 随机重启中点（官方 `flag_randomPolyTraj` 内点公式）：起终点中点沿水平/
+    /// 垂直正交方向偏移，幅度随连败增长（0 次约 0，渐近 0.989）。起点终点过近
+    /// 时无法构造正交基，返回中点（退化为直飞种子）。
+    fn random_mid(&mut self, start: Vector3<f64>, goal: Vector3<f64>) -> Vector3<f64> {
+        const Z: Vector3<f64> = Vector3::new(0.0, 0.0, 1.0);
+        let d = goal - start;
+        let dist = d.norm();
+        let mid = (start + goal) / 2.0;
+        let h = d.cross(&Z);
+        if dist < 1e-6 || h.norm() < 1e-9 {
+            return mid;
+        }
+        let h = h.normalize();
+        let v = d.cross(&h).normalize();
+        let k = -0.978 / (f64::from(self.consecutive_failures) + 0.989) + 0.989;
+        mid + (self.next_rand() - 0.5) * dist * h * 0.8 * k
+            + (self.next_rand() - 0.5) * dist * v * 0.4 * k
     }
 
     /// 官方 `setLocalTrajFromOpt`：规划结果连同带时间戳检查点一并入库，
@@ -1798,6 +1864,38 @@ mod tests {
         assert!(r1.replanned, "超过阈值应重规划");
         assert_eq!(m.replans(), 1);
         assert!(r1.reference.is_some());
+    }
+
+    /// `random_mid` 确定性：固定种子同输入同输出；幅度随连败增长（0 次约 0）。
+    #[test]
+    fn random_mid_is_deterministic_and_grows_with_failures() {
+        let mut first = open_manager();
+        let (start, goal) = (Vector3::new(0.0, 0.0, 1.0), Vector3::new(6.0, 0.0, 1.0));
+        let mid_a = first.random_mid(start, goal);
+        let mut second = open_manager();
+        let mid_b = second.random_mid(start, goal);
+        assert!((mid_a - mid_b).norm() < 1e-12, "同种子应逐位一致");
+        // 0 连败幅度约 0（官方 (-0.978/0.989+0.989) ≈ 1e-4）
+        assert!(
+            (mid_a - Vector3::new(3.0, 0.0, 1.0)).norm() < 1e-2,
+            "0 连败应近中点"
+        );
+        first.consecutive_failures = 10;
+        let mid_c = first.random_mid(start, goal);
+        assert!(
+            (mid_c - Vector3::new(3.0, 0.0, 1.0)).norm() > 0.3,
+            "10 连败应显著偏移，实际 {}",
+            (mid_c - Vector3::new(3.0, 0.0, 1.0)).norm()
+        );
+    }
+
+    /// 成功重规划清零连败（不变量，未失败时恒为 0）。
+    #[test]
+    fn successful_replan_keeps_failures_at_zero() {
+        let mut m = open_manager();
+        let _ = m.tick(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+        let _ = m.tick(1.5, None);
+        assert_eq!(m.consecutive_failures, 0);
     }
 
     #[test]

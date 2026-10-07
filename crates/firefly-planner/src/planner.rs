@@ -69,6 +69,9 @@ pub enum InitSource<'a> {
         glb_seg: f64,
         guide_tail: &'a [Vector3<f64>],
     },
+    /// 随机多项式初始化（官方 `computeInitState` `flag_randomPolyTraj`）：
+    /// `mid` 为带随机偏移的中点（调用方按连败次数定幅度），2 段种子重采样。
+    RandomStart { mid: Vector3<f64> },
 }
 
 #[derive(Debug, Clone)]
@@ -286,6 +289,14 @@ impl Planner {
                         init::init_from_path(&cfg, start_endpoint, local_goal, &guide)?
                     }
                 }
+            }
+            InitSource::RandomStart { mid } => {
+                let cfg = InitConfig {
+                    piece_length: self.config.piece_length,
+                    pieces: 0, // 段数由距离决定（见 init_random），不使用
+                    max_velocity: self.config.max_velocity,
+                };
+                init::init_random(&cfg, start_endpoint, local_goal, mid)?
             }
         };
 
@@ -988,6 +999,31 @@ impl Planner {
 mod tests {
     use super::*;
     use firefly_map::{GridMapBuilder, VoxelState};
+
+    /// `RandomStart` 接线：空图随机中点应一次成功，端点精确。
+    #[test]
+    fn random_start_plans_through_random_mid() {
+        let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
+        let mut planner = Planner::new(PlannerConfig::default(), map);
+        let start = State {
+            position: Point3::new(1.0, 1.0, 1.0),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let goal = Endpoint {
+            position: Vector3::new(7.0, 1.0, 1.0),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let mid = Vector3::new(4.0, 2.0, 1.0);
+        let result = planner
+            .plan_in_swarm_with_init(start, goal, &[], InitSource::RandomStart { mid }, false)
+            .expect("空图随机初值应成功");
+        let t = result.trajectory.duration();
+        assert!(t > 0.0);
+        assert!((result.trajectory.eval(0.0).position - start.position.coords).norm() < 1e-9);
+        assert!((result.trajectory.eval(t).position - goal.position).norm() < 1e-6);
+    }
 
     fn wall_scenario(config: PlannerConfig) -> (Planner, State, Point3<f64>, Vec<Vector3<f64>>) {
         // 0.1m 分辨率（与 demo 一致）：墙 x=4.5，高 z<1.5

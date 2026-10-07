@@ -161,6 +161,55 @@ pub fn init_warm_start(
         .map_err(|e| e.with_operation("planner::init:warm_start"))
 }
 
+/// 随机多项式初始化（官方 `computeInitState` `flag_randomPolyTraj`）：
+/// 起终点中点沿水平/垂直正交方向随机偏移（幅度随连败次数增长），2 段 min-jerk
+/// 作种子，再按 case1 后半段同构重采样为正式段数。起点终点过近时退化为直飞。
+///
+/// # Errors
+///
+/// MINCO 系统奇异。
+pub fn init_random(
+    config: &InitConfig,
+    start: Endpoint,
+    end: Endpoint,
+    mid: Vector3<f64>,
+) -> Result<Minco> {
+    let dist = (end.position - start.position).norm();
+    if dist < 1e-6 {
+        return MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
+            .build(&[], &[1e-3])
+            .map_err(|e| e.with_operation("planner::init:random_degenerate"));
+    }
+    // 种子：起 → 随机中点 → 终，2 段各 1s（官方 init_of_init_totaldur = 2.0）。
+    let seed = MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
+        .build(&[Point3::from(mid)], &[1.0, 1.0])
+        .map_err(|e| e.with_operation("planner::init:random_seed"))?;
+    let seed_traj = seed
+        .solve()
+        .map_err(|e| e.with_operation("planner::init:random_seed"))?;
+    // 重采样：段数 = round(距离/piece_length)，下限 2；段时长均匀 ts
+    //（官方 `piece_dur_vec = Constant(piece_nums, ts)`，ts = piece_length/max_vel）。
+    let mut pieces = (dist / config.piece_length.max(1e-3)).round() as usize;
+    pieces = pieces.max(2);
+    // 采样步长 = 2.0/pieces（种子轨迹总时长 2s），段时长均匀 ts
+    //（官方 `piece_dur_vec = Constant(piece_nums, ts)`，ts = piece_length/max_vel）。
+    let ts = config.piece_length.max(1e-3) / config.max_velocity.max(1e-3);
+    let step = 2.0 / pieces as f64;
+    let mut waypoints = Vec::with_capacity(pieces.saturating_sub(1));
+    let mut t = step;
+    while t < 2.0 - step / 2.0 && waypoints.len() + 1 < pieces {
+        waypoints.push(Point3::from(seed_traj.eval(t).position));
+        t += step;
+    }
+    while waypoints.len() + 1 < pieces {
+        waypoints.push(Point3::from(end.position));
+    }
+    let durations = vec![ts; pieces];
+    MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
+        .build(&waypoints, &durations)
+        .map_err(|e| e.with_operation("planner::init:random"))
+}
+
 /// 取 count 个中间 waypoint（不含两端）：拐点优先（官方 initMJO），
 /// 拐点不足时按弧长均匀补充。
 fn sample_waypoints(path: &[Vector3<f64>], count: usize) -> Vec<Point3<f64>> {
@@ -217,6 +266,45 @@ fn allocate_time(segments: &[f64], max_velocity: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn random_init_matches_endpoints_and_mid() {
+        let config = InitConfig {
+            pieces: 0,
+            max_velocity: 1.5,
+            piece_length: 1.5,
+        };
+        let start = Endpoint {
+            position: Vector3::new(0.0, 0.0, 1.0),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let end = Endpoint {
+            position: Vector3::new(6.0, 0.0, 1.0),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let mid = Vector3::new(3.0, 1.0, 1.0);
+        let m = init_random(&config, start, end, mid).expect("随机初值应可建");
+        // 段数 = round(6/1.5) = 4
+        assert_eq!(m.pieces(), 4);
+        let traj = m.solve().expect("随机初值应可解");
+        let s0 = traj.eval(0.0);
+        let s1 = traj.eval(traj.duration());
+        assert!(
+            (s0.position - start.position).norm() < 1e-9,
+            "起点应是 start"
+        );
+        assert!((s1.position - end.position).norm() < 1e-6, "终点应是 goal");
+        // 内点约束经过随机中点附近（种子轨迹精确过点，重采样近似）
+        let mut dmin = f64::INFINITY;
+        let mut t = 0.0;
+        while t <= traj.duration() {
+            dmin = dmin.min((traj.eval(t).position - mid).norm());
+            t += 0.05;
+        }
+        assert!(dmin < 0.5, "应经过随机中点附近，实际 {dmin:.3}");
+    }
 
     #[test]
     fn degenerate_near_goal_builds_trivial_minco() {
