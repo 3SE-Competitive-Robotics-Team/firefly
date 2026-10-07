@@ -1041,6 +1041,12 @@ impl PlannerManager {
     /// 两级限幅的梯形剖面推进。状态存入 `last_yaw/last_yaw_dot`；首帧或
     /// `dt` 退化时保持当前状态不变。
     fn update_yaw(&mut self, pos: Vector3<f64>, target: Vector3<f64>, now: f64) -> (f64, f64) {
+        if self.planner.config().yaw_hold {
+            // 本项目扩展：锁定起飞朝向横飞，不跟速度方向（官方无此模式）。
+            self.last_yaw_time = Some(now);
+            self.last_yaw_dot = 0.0;
+            return (self.last_yaw, 0.0);
+        }
         let Some(t_last) = self.last_yaw_time else {
             self.last_yaw_time = Some(now);
             return (self.last_yaw, self.last_yaw_dot);
@@ -1944,6 +1950,34 @@ mod tests {
             Vector3::new(1.0, 10.0, 1.0),
         )
         .unwrap()
+    }
+
+    // yaw_hold（本项目扩展）：锁定起飞朝向横飞，不跟速度方向，角速度恒零。
+    #[test]
+    fn yaw_hold_keeps_takeoff_heading() {
+        let map = GridMapBuilder::new(0.5, [24, 40, 16]).build().unwrap();
+        let cfg = PlannerConfig {
+            yaw_hold: true,
+            ..Default::default()
+        };
+        let planner = Planner::new(cfg, map);
+        let mut m = PlannerManager::with_planner(
+            planner,
+            ManagerOptions::default(),
+            Vector3::new(1.0, 1.0, 1.0),
+            Vector3::new(1.0, 10.0, 1.0),
+        )
+        .unwrap();
+        for t in [0.0, 0.5, 1.0, 2.0] {
+            let r = m.tick(t, Some(state_at(Vector3::new(1.0, 1.0 + t, 1.0))));
+            let reference = r.reference.expect("应有参考指令");
+            assert!(
+                reference.yaw.abs() < 1e-12,
+                "hold 下偏航应锁定 0，实际 {}",
+                reference.yaw
+            );
+            assert!(reference.yaw_dot.abs() < 1e-12);
+        }
     }
 
     #[test]

@@ -42,6 +42,10 @@ pub struct PlannerConfig {
     pub virtual_ground: Option<f64>,
     /// 虚拟天花板 z（米，世界坐标；官方 `grid_map/virtual_ceil`，None = 不启用）。
     pub virtual_ceiling: Option<f64>,
+    /// 偏航保持（本项目扩展，官方只有朝速度方向）：true 时参考偏航锁定
+    /// 起飞朝向、偏航角速度恒零，多旋翼侧飞，视角稳定以利视觉定位；
+    /// false 为官方行为。
+    pub yaw_hold: bool,
 }
 
 impl Default for PlannerConfig {
@@ -70,6 +74,7 @@ impl Default for PlannerConfig {
             use_multitopology_trajs: false,
             virtual_ground: None,
             virtual_ceiling: None,
+            yaw_hold: false,
         }
     }
 }
