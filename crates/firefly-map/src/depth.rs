@@ -80,6 +80,9 @@ impl DepthCamera {
 ///
 /// 注意：`Isometry * Vector3` 只旋转不平移（Vector 视为方向量），平移须用
 /// `Isometry * Point3`。
+///
+/// # Panics
+/// 深度长度与相机尺寸不一致，或 `pixel_step` 为零。
 pub fn update_from_depth(
     map: &mut GridMap,
     cam: &DepthCamera,
@@ -114,10 +117,10 @@ pub fn update_from_depth(
 }
 
 /// 帧内多数投票，每体素每帧最多一次 log-odds 更新；相等时取命中。
-/// 对照 EGO-Planner-v2 `raycastProcess` 的 count_hit/count_hit_and_miss。
+/// 对照 EGO-Planner-v2 `raycastProcess` 的 `count_hit`/`count_hit_and_miss`。
 fn apply_votes(map: &mut GridMap, votes: Vec<([usize; 3], bool)>) {
     let mut votes = votes;
-    votes.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    votes.sort_unstable_by_key(|v| v.0);
     let mut i = 0usize;
     while i < votes.len() {
         let idx = votes[i].0;
@@ -283,7 +286,7 @@ mod tests {
                 &pose,
                 &vec![invalid; cam.width * cam.height],
             );
-            assert_eq!(map.occupancy_at([5, 5, 5]), before);
+            assert!((map.occupancy_at([5, 5, 5]) - before).abs() < 1e-12);
         }
     }
 
