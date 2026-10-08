@@ -122,6 +122,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     params.voxel_options.voxel_size = cfg.slam.voxel_size;
     params.voxel_options.max_points_per_voxel = cfg.slam.max_points_per_voxel;
     params.voxel_options.min_point_distance = cfg.slam.min_point_distance;
+    params.voxel_options.neighbor_radius = cfg.slam.neighbor_radius;
+    params.voxel_options.use_all_points = cfg.slam.use_all_points;
     // 零速更新保持 OpenVINS 默认关闭（官方参数 try_zupt=false）：慢速运动下
     // 加速度低于 IMU 噪声 σ 时 chi2 不超限 → 误接受 → 估计位置冻结；
     // 显式零运动分支（官方标注 untested）同样不属默认路径。

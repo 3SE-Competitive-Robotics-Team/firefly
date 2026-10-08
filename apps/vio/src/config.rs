@@ -101,6 +101,10 @@ pub struct Slam {
     pub max_points_per_voxel: usize,
     /// 体素内最小点间距（米）。
     pub min_point_distance: f64,
+    /// 查询邻域半径（体素格；0 = 单体素，1 = 27 邻域）。
+    pub neighbor_radius: i32,
+    /// 每体素喂入全部候选点（false = 每体素只取首点）。
+    pub use_all_points: bool,
 }
 
 impl Default for Slam {
@@ -113,6 +117,8 @@ impl Default for Slam {
             voxel_size: voxel.voxel_size,
             max_points_per_voxel: voxel.max_points_per_voxel,
             min_point_distance: voxel.min_point_distance,
+            neighbor_radius: voxel.neighbor_radius,
+            use_all_points: voxel.use_all_points,
         }
     }
 }
@@ -145,7 +151,7 @@ impl VioConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::VioConfig;
+    use super::{Slam, VioConfig};
 
     /// 随仓库发布的配置文件必须可解析且为完整部署值。
     #[test]
@@ -199,5 +205,22 @@ mod tests {
         assert!(cfg.slam.voxel_selection);
         assert!((cfg.slam.voxel_size - 0.2).abs() < 1e-12);
         assert_eq!(cfg.slam.max_points_per_voxel, 5);
+    }
+
+    /// 体素选点的邻域半径与全点开关可配置，缺省回落代码默认（对照
+    /// `VoxelOptions`：1 / false）。
+    #[test]
+    fn slam_section_carries_voxel_query_options() {
+        let cfg: VioConfig = toml::from_str(
+            "[slam]\nvoxel_selection = true\nneighbor_radius = 0\nuse_all_points = true",
+        )
+        .unwrap();
+        assert_eq!(cfg.slam.neighbor_radius, 0);
+        assert!(cfg.slam.use_all_points);
+
+        let default: Slam = toml::from_str("voxel_selection = true").unwrap();
+        let voxel = firefly_voxel_svio::VoxelOptions::default();
+        assert_eq!(default.neighbor_radius, voxel.neighbor_radius);
+        assert_eq!(default.use_all_points, voxel.use_all_points);
     }
 }

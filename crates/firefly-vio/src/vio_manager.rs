@@ -15,8 +15,9 @@ use firefly_vio_core::imu_model::ImuCalibration;
 use firefly_vio_core::propagation::{LinearizationPoint, MeanState, Propagator};
 use firefly_vio_core::sensor::{CameraData, ImuData};
 use firefly_vio_core::track::TrackKlt;
+use firefly_vio_core::triangulation::single_triangulation;
 use firefly_vio_types::var::Variable as _;
-use firefly_voxel_svio::VoxelMap;
+use firefly_voxel_svio::{VoxelKey, VoxelMap};
 use nalgebra::{DMatrix, Vector3};
 use std::collections::BTreeMap;
 
@@ -47,6 +48,9 @@ pub struct VioManager {
     /// 体素地图（`voxel_options.enabled` 时与 `state.features_slam` 同步，
     /// 为 SLAM 更新做可见体素选点；关闭时全程空置）。
     pub voxel_map: VoxelMap,
+    /// 上一帧活跃轨迹命中的可见体素（对照 `getRecentVoxel`：每帧末刷新，
+    /// 供下一帧 SLAM 选点；仅在 `voxel_options.enabled` 时维护）。
+    recent_voxels: Vec<VoxelKey>,
     /// 初始化器（对照 C++ 的 `initializer`）。
     pub initializer: firefly_vio_init::inertial_init::InertialInitializer,
     /// 零速更新器（`try_zero_velocity` 开启时使用）。
@@ -109,6 +113,7 @@ impl VioManager {
             updater_msckf,
             updater_slam,
             voxel_map,
+            recent_voxels: Vec::new(),
             initializer: firefly_vio_init::inertial_init::InertialInitializer::new(init_options),
             updater_zero_velocity,
             has_moved_since_zero_vel: false,
@@ -556,30 +561,27 @@ impl VioManager {
             }
         }
 
-        // 11b. 体素选点（对照 Voxel-SVIO `featureUpdate`；仅开启时）：以待更新
-        // 路标的全局位置查可见体素，每体素限量取点。位置取 `get_xyz(false)`，
-        // 默认 `GLOBAL_3D` 下即全局系。选空时回落全量（索引冷启动保护），
-        // 落选特征保留在库中延后更新（不标记删除）。
+        // 11b. 体素选点（对照 Voxel-SVIO `featureUpdate` 的选点段；仅开启时）：
+        // 用上一帧末刷新的可见体素（`recent_voxels`，由活跃轨迹位置命中）在候选
+        // 内筛选待更新路标，每体素至多取一点。选空时回落全量（索引/可见体素
+        // 冷启动保护），落选特征保留在库中延后更新（不标记删除）。
         if self.params.voxel_options.enabled && !feats_slam_update.is_empty() {
-            let queries: Vec<Vector3<f64>> = feats_slam_update
-                .iter()
-                .filter_map(|f| self.state.features_slam.get(&f.featid))
-                .map(|l| l.get_xyz(false))
-                .collect();
-            let recent = self.voxel_map.recent_voxels(&queries, self.state.timestamp);
-            let selected = self.voxel_map.select(&recent);
+            let candidates: std::collections::HashSet<usize> =
+                feats_slam_update.iter().map(|f| f.featid).collect();
+            let selected = self
+                .voxel_map
+                .select_constrained(&self.recent_voxels, &candidates);
             log::debug!(
-                "体素选点 t={:.2} 候选={} 查询={} 可见体素={} 选中={} 索引={}点/{}体素",
+                "体素选点 t={:.2} 候选={} 可见体素={} 选中={} 索引={}点/{}体素",
                 self.state.timestamp,
                 feats_slam_update.len(),
-                queries.len(),
-                recent.len(),
+                self.recent_voxels.len(),
                 selected.len(),
                 self.voxel_map.num_points(),
                 self.voxel_map.num_voxels()
             );
             if selected.is_empty() {
-                log::warn!("体素选空（索引冷启动？），回落全量 SLAM 更新");
+                log::warn!("体素选空（索引/可见体素冷启动？），回落全量 SLAM 更新");
             } else {
                 let keep: std::collections::HashSet<usize> = selected.into_iter().collect();
                 feats_slam_update.retain(|f| keep.contains(&f.featid));
@@ -666,6 +668,58 @@ impl VioManager {
                 .cleanup_measurements(marg_time);
         }
         marginalize_old_clone(&mut self.state);
+
+        // 18. 刷新可见体素缓存（对照 `triangulateActiveTracks` + `getRecentVoxel`：
+        // 本帧末计算，下一帧 SLAM 选点使用）。
+        self.refresh_recent_voxels();
+    }
+
+    /// 刷新可见体素缓存（对照 Voxel-SVIO `triangulateActiveTracks` +
+    /// `getRecentVoxel`）。
+    ///
+    /// 用当前帧活跃轨迹的三维位置查询体素地图；活跃轨迹指库中带当前克隆时刻
+    /// 测量、且不在 `state.features_slam` 中的特征（对照官方
+    /// `active_tracks_pos_world_new` 跳过 `map_points`）。三角化须先把测量清理
+    /// 到克隆时刻，否则锚点/测量克隆缺失会触发 `single_triangulation` 的断言。
+    /// 仅在 `voxel_options.enabled` 时维护；关闭时缓存保持为空。
+    #[fastrace::trace]
+    fn refresh_recent_voxels(&mut self) {
+        if !self.params.voxel_options.enabled {
+            return;
+        }
+        let clonetimes: Vec<f64> = self.state.clones_imu.iter().map(|(t, _)| *t).collect();
+        let clones_cam = crate::updater_slam::build_clones_cam(&self.state);
+        let timestamp = self.state.timestamp;
+        let slam_ids: std::collections::HashSet<usize> =
+            self.state.features_slam.keys().copied().collect();
+        let triangulation_options = self.params.triangulation_options;
+        let mut feats = self
+            .track_feats
+            .database_mut()
+            .features_containing(timestamp, false, true);
+        let mut queries: Vec<Vector3<f64>> = Vec::with_capacity(feats.len());
+        for feat in &mut feats {
+            if slam_ids.contains(&feat.featid) {
+                continue;
+            }
+            feat.clean_old_measurements(&clonetimes);
+            if feat.timestamps.values().map(Vec::len).sum::<usize>() < 2 {
+                continue;
+            }
+            // 仅当所有测量相机都有克隆表时才三角化（否则 `single_triangulation`
+            // 在缺克隆的相机上断言）。
+            if !feat
+                .timestamps
+                .keys()
+                .all(|cam| clones_cam.contains_key(cam))
+            {
+                continue;
+            }
+            if single_triangulation(feat, &clones_cam, &triangulation_options) {
+                queries.push(feat.p_FinG);
+            }
+        }
+        self.recent_voxels = self.voxel_map.recent_voxels(&queries, timestamp);
     }
 
     /// 传播到指定相机时刻并增广克隆（对照
@@ -802,7 +856,7 @@ mod tests {
     use crate::options::StateOptions;
     use firefly_vio_core::sensor::GrayImage;
     use firefly_vio_core::track::{HistogramMethod, TrackKlt};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     fn test_manager() -> VioManager {
         let params = VioManagerOptions::default();
@@ -955,7 +1009,8 @@ mod tests {
         let recent = mgr
             .voxel_map
             .recent_voxels(&[Vector3::new(0.05, 0.0, 3.0)], 1.0);
-        assert_eq!(mgr.voxel_map.select(&recent), vec![1]);
+        let all: HashSet<usize> = [1, 2].into_iter().collect();
+        assert_eq!(mgr.voxel_map.select_constrained(&recent, &all), vec![1]);
     }
 
     #[test]
@@ -966,6 +1021,182 @@ mod tests {
             data: vec![0u8; 16],
         };
         assert_eq!(img.data.len(), 16);
+    }
+
+    /// 体素场景：两个克隆（t=1 原点、t=2 沿 +x 平移 0.5m），相机 0 内参
+    /// `fx=fy=600`、`cx=320`、`cy=240`。供整体输入输出测试注入轨迹/路标。
+    fn voxel_manager() -> VioManager {
+        use firefly_vio_core::cam::{CamRadtan, SharedCamera};
+        use std::sync::Arc;
+        let mut params = VioManagerOptions::default();
+        params.voxel_options.enabled = true;
+        // 允许同体素多点（同格多路标场景需要）。
+        params.voxel_options.min_point_distance = 0.0;
+        let cam: SharedCamera = Arc::new(CamRadtan::new(
+            640,
+            480,
+            &[600.0, 600.0, 320.0, 240.0, 0.0, 0.0, 0.0, 0.0],
+        ));
+        let tracker = TrackKlt::new(
+            HashMap::from([(0usize, cam.clone())]),
+            200,
+            0,
+            false,
+            HistogramMethod::None,
+            10,
+            5,
+            5,
+            15,
+        );
+        let mut mgr = VioManager::new(params, BTreeMap::from([(0usize, cam)]), tracker);
+        set_clone(&mut mgr.state, 1.0, Vector3::zeros());
+        set_clone(&mut mgr.state, 2.0, Vector3::new(0.5, 0.0, 0.0));
+        mgr
+    }
+
+    /// 设置 IMU 位姿（value + FEJ 同步，FEJ 默认开启）并增广一个克隆。
+    fn set_clone(state: &mut State, t: f64, p: Vector3<f64>) {
+        let q = nalgebra::Vector4::new(0.0, 0.0, 0.0, 1.0);
+        state.timestamp = t;
+        state
+            .imu
+            .set_value(q, p, Vector3::zeros(), Vector3::zeros(), Vector3::zeros());
+        state
+            .imu
+            .set_fej(q, p, Vector3::zeros(), Vector3::zeros(), Vector3::zeros());
+        crate::state_helper::augment_clone(state, &Vector3::zeros());
+    }
+
+    /// 相机 0 在 IMU 位姿 `p_imu` 下观测世界点 `p_g` 的像素/归一化坐标
+    /// （`(u, v, u_n, v_n)`；标定外参为单位位姿，故相机系 = IMU 系平移）。
+    fn track_measurement(p_imu: Vector3<f64>, p_g: Vector3<f64>) -> (f32, f32, f32, f32) {
+        let pc = p_g - p_imu;
+        let (un, vn) = (pc.x / pc.z, pc.y / pc.z);
+        (
+            (600.0 * un + 320.0) as f32,
+            (600.0 * vn + 240.0) as f32,
+            un as f32,
+            vn as f32,
+        )
+    }
+
+    /// 在轨迹库登记一条覆盖两个克隆时刻的活跃轨迹（id 全局点 `p_g`）。
+    fn insert_active_track(mgr: &mut VioManager, id: usize, p_g: Vector3<f64>) {
+        let (u1, v1, un1, vn1) = track_measurement(Vector3::zeros(), p_g);
+        let (u2, v2, un2, vn2) = track_measurement(Vector3::new(0.5, 0.0, 0.0), p_g);
+        let db = mgr.track_feats.database_mut();
+        db.update_feature(id, 1.0, 0, u1, v1, un1, vn1);
+        db.update_feature(id, 2.0, 0, u2, v2, un2, vn2);
+    }
+
+    /// 体素选点整体输入输出（对照 Voxel-SVIO 帧末 `triangulateActiveTracks` +
+    /// `getRecentVoxel` → 下帧 `select`）：活跃轨迹三角化 → 命中体素 → 候选内选点。
+    #[test]
+    fn voxel_pipeline_marks_visible_voxel_and_selects_candidate() {
+        let mut mgr = voxel_manager();
+        let p_vis = Vector3::new(0.55, 0.25, 3.05);
+        assert!(mgr.voxel_map.add_point(100, &p_vis));
+        insert_active_track(&mut mgr, 7, p_vis);
+        mgr.refresh_recent_voxels();
+        let key = mgr.voxel_map.key_of(&p_vis);
+        assert!(
+            mgr.recent_voxels.contains(&key),
+            "可见体素 {key:?} 未命中：{:?}",
+            mgr.recent_voxels
+        );
+        let candidates: HashSet<usize> = [100].into_iter().collect();
+        assert_eq!(
+            mgr.voxel_map
+                .select_constrained(&mgr.recent_voxels, &candidates),
+            vec![100]
+        );
+    }
+
+    /// 视野外的路标不进选点（可见体素只由活跃轨迹命中决定）。
+    #[test]
+    fn voxel_pipeline_excludes_out_of_view_landmark() {
+        let mut mgr = voxel_manager();
+        let p_vis = Vector3::new(0.55, 0.25, 3.05);
+        let p_far = Vector3::new(50.05, 0.05, 3.05);
+        assert!(mgr.voxel_map.add_point(100, &p_vis));
+        assert!(mgr.voxel_map.add_point(200, &p_far));
+        insert_active_track(&mut mgr, 7, p_vis);
+        mgr.refresh_recent_voxels();
+        assert!(mgr.recent_voxels.contains(&mgr.voxel_map.key_of(&p_vis)));
+        assert!(!mgr.recent_voxels.contains(&mgr.voxel_map.key_of(&p_far)));
+        let candidates: HashSet<usize> = [100, 200].into_iter().collect();
+        assert_eq!(
+            mgr.voxel_map
+                .select_constrained(&mgr.recent_voxels, &candidates),
+            vec![100]
+        );
+    }
+
+    /// 块首点不在候选时，约束选点在体素内顺延取候选，不丢整个体素。
+    #[test]
+    fn voxel_pipeline_keeps_voxel_when_first_point_not_candidate() {
+        let mut mgr = voxel_manager();
+        let p = Vector3::new(0.55, 0.25, 3.05);
+        // 同体素两个路标：100 先收录（块首），101 后收录。
+        assert!(mgr.voxel_map.add_point(100, &p));
+        assert!(mgr.voxel_map.add_point(101, &p));
+        insert_active_track(&mut mgr, 7, p);
+        mgr.refresh_recent_voxels();
+        // 全候选 → 取块首 100。
+        let all: HashSet<usize> = [100, 101].into_iter().collect();
+        assert_eq!(
+            mgr.voxel_map.select_constrained(&mgr.recent_voxels, &all),
+            vec![100]
+        );
+        // 候选只有 101（100 本帧未跟踪）：顺延取 101，而非块首 100。
+        let candidates: HashSet<usize> = [101].into_iter().collect();
+        assert_eq!(
+            mgr.voxel_map
+                .select_constrained(&mgr.recent_voxels, &candidates),
+            vec![101]
+        );
+    }
+
+    /// 查询源是活跃轨迹（当前帧测量），不是地图点：无轨迹 → 可见体素为空。
+    #[test]
+    fn voxel_pipeline_queries_active_tracks_not_map_points() {
+        let mut mgr = voxel_manager();
+        let p = Vector3::new(0.55, 0.25, 3.05);
+        assert!(mgr.voxel_map.add_point(100, &p));
+        mgr.refresh_recent_voxels();
+        assert!(
+            mgr.recent_voxels.is_empty(),
+            "地图点不得作为查询源：{:?}",
+            mgr.recent_voxels
+        );
+    }
+
+    /// 只查询当前帧仍在跟踪的轨迹：仅在更早时刻有测量的特征不参与。
+    #[test]
+    fn voxel_pipeline_only_queries_current_frame_tracks() {
+        let mut mgr = voxel_manager();
+        let p_vis = Vector3::new(0.55, 0.25, 3.05);
+        let p_far = Vector3::new(50.05, 0.05, 3.05);
+        assert!(mgr.voxel_map.add_point(100, &p_vis));
+        assert!(mgr.voxel_map.add_point(200, &p_far));
+        insert_active_track(&mut mgr, 7, p_vis);
+        // 仅在 t=1 有测量的特征 8（指向远点）：不应被查询。
+        let (u, v, un, vn) = track_measurement(Vector3::zeros(), p_far);
+        mgr.track_feats
+            .database_mut()
+            .update_feature(8, 1.0, 0, u, v, un, vn);
+        mgr.refresh_recent_voxels();
+        assert!(mgr.recent_voxels.contains(&mgr.voxel_map.key_of(&p_vis)));
+        assert!(!mgr.recent_voxels.contains(&mgr.voxel_map.key_of(&p_far)));
+    }
+
+    /// 关闭时 `refresh_recent_voxels` 全程空转，缓存保持为空。
+    #[test]
+    fn voxel_pipeline_is_noop_when_disabled() {
+        let mut mgr = test_manager();
+        assert!(!mgr.params.voxel_options.enabled);
+        mgr.refresh_recent_voxels();
+        assert_eq!(mgr.recent_voxels, [] as [firefly_voxel_svio::VoxelKey; 0]);
     }
 }
 

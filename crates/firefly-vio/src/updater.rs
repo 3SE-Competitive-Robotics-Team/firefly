@@ -9,7 +9,7 @@
 
 use firefly_vio_core::feat::Feature;
 use firefly_vio_core::triangulation::{
-    CloneMap, ClonePose, TriangulationOptions, single_gaussnewton, single_triangulation,
+    TriangulationOptions, single_gaussnewton, single_triangulation,
 };
 use nalgebra::{DMatrix, DVector, Vector2};
 
@@ -104,26 +104,7 @@ impl UpdaterMsckf {
         });
 
         // 3. 组装各相机克隆位姿表（对照 C++ 的 clones_cam）
-        let mut clones_cam: std::collections::HashMap<usize, CloneMap> =
-            std::collections::HashMap::new();
-        for (cam_id, calib) in &state.calib_imu_to_cam {
-            let r_ito_c = calib.rot();
-            let p_iin_c = calib.pos();
-            let mut cam_clones: CloneMap = Vec::with_capacity(state.clones_imu.len());
-            for (t, clone) in &state.clones_imu {
-                // R_GtoCi = R_ItoC · R_GtoI；p_CioinG = p_IinG − R_GtoCiᵀ·p_IinC
-                let r_gto_ci = r_ito_c * clone.rot();
-                let p_ciin_g = clone.pos() - r_gto_ci.transpose() * p_iin_c;
-                cam_clones.push((
-                    *t,
-                    ClonePose {
-                        rot: r_gto_ci,
-                        pos: p_ciin_g,
-                    },
-                ));
-            }
-            clones_cam.insert(*cam_id, cam_clones);
-        }
+        let clones_cam = crate::updater_slam::build_clones_cam(state);
 
         // 4. 三角化（失败删除）+ 高斯牛顿精化（对照 C++ 的
         // single_triangulation → single_gaussnewton 链；refine_features 默认 true）
