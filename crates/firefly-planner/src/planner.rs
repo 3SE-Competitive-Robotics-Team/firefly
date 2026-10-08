@@ -1015,6 +1015,42 @@ mod tests {
     use super::*;
     use firefly_map::{GridMapBuilder, VoxelState};
 
+    /// EGO 在可行 1.1m 门缝（膨胀后）走不通：已知鲁棒性缺口（22m 返程同类），
+    /// 先钉住，调参另立项。当前行为：`restart limit` 全灭。
+    #[test]
+    #[ignore = "known robustness gap: feasible inflated slot rejected; needs EGO tuning, not a regression"]
+    fn ego_threads_feasible_slot() {
+        let mut map = firefly_map::GridMapBuilder::new(0.5, [40, 24, 16])
+            .build()
+            .unwrap();
+        for x in 10..30 {
+            for y in 0..24 {
+                for z in 0..8 {
+                    if (11..=13).contains(&y) {
+                        continue;
+                    }
+                    map.set_state([x, y, z], firefly_map::VoxelState::Occupied);
+                }
+            }
+        }
+        map.inflate_obstacles();
+        let mut planner = Planner::new(PlannerConfig::default(), map);
+        let start = State {
+            position: Point3::new(1.0, 6.0, 4.0),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let goal = firefly_trajectory::Endpoint {
+            position: Vector3::new(18.0, 6.0, 4.0),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let r = planner
+            .plan_in_swarm_with_init(start, goal, &[], InitSource::ColdStart, false)
+            .expect("1.1m 净宽门缝应可通过");
+        assert!(r.trajectory.duration() > 0.0);
+    }
+
     /// `RandomStart` 接线：空图随机中点应一次成功，端点精确。
     #[test]
     fn random_start_plans_through_random_mid() {
