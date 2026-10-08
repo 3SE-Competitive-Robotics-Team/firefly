@@ -116,12 +116,12 @@ pub struct Paths {
     lines: HashMap<String, (Vec<Vec3>, Color)>,
 }
 
-/// 折线 gizmo 的渲染层：**必须**限到主视角层，否则默认 layer 0 会被传感器
+/// 折线 gizmo 的渲染层：**必须**限到专用路径层，否则默认 layer 0 会被传感器
 /// 相机一并画进发布给 VIO/深度的图像里。
 #[allow(clippy::needless_pass_by_value)] // `SystemParam` 契约，与同 crate 其它系统一致
 pub fn setup_gizmo_layers(mut store: ResMut<GizmoConfigStore>) {
     let (config, _) = store.config_mut::<DefaultGizmoConfigGroup>();
-    config.render_layers = RenderLayers::layer(crate::rig::VOXEL_LAYER);
+    config.render_layers = RenderLayers::layer(crate::rig::PATH_LAYER);
     // 规划路径要盖在地形/体素之上看得见：默认 2px 且 `depth_bias = 0`，会被
     // 地面挡住或在体素缝里闪烁。
     config.line.width = 4.0;
