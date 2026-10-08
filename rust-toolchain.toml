@@ -1,0 +1,4 @@
+# 全仓统一工具链：最新 stable（CI 与本地一致），带上 clippy/rustfmt。
+[toolchain]
+channel = "stable"
+components = ["clippy", "rustfmt"]
