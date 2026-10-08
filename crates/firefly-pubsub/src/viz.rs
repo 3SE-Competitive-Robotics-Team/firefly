@@ -22,8 +22,12 @@ pub mod kind {
     pub const POSE: u32 = 1;
     /// 折线（轨迹增量段、全局路径）。
     pub const LINE_STRIP: u32 = 2;
-    /// 占据体素网格（静态先验地图、感知地图、动态障碍）。
+    /// 占据体素网格**全量快照**（静态先验地图；消费端以此**替换**自己的集合）。
     pub const VOXELS: u32 = 3;
+    /// 占据体素**增量新增**（感知地图、动态障碍；消费端并入集合）。
+    pub const VOXELS_ADD: u32 = 8;
+    /// 占据体素**增量删除**（滑出观察窗、衰减回未知；消费端从集合移除）。
+    pub const VOXELS_REMOVE: u32 = 9;
     /// 标量曲线（`db_size`、`track_avg_len` 等单值序列）。
     pub const SCALARS: u32 = 4;
     /// 直方图（`track_length` 桶计数）。

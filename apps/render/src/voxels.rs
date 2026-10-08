@@ -10,8 +10,8 @@
 //! `world = voxel_origin + (idx + 0.5) * voxel_size`。
 //!
 //! 性能：每层一个**合并表面网格**（只发射与空邻居相邻的面，内部面不发），
-//! 单 draw call；实时层只在内容指纹变化且距上次重建 ≥ [`REBUILD_INTERVAL`]
-//! 时按原句柄原地更新，不每帧重建、不每帧分配。
+//! 单 draw call；实时层按**增量**协议累计（新增并入、删除移出），只在集合变化
+//! 且距上次重建 ≥ [`REBUILD_INTERVAL`] 时按原句柄原地更新，不每帧重建。
 
 use std::collections::{HashMap, HashSet};
 
@@ -27,7 +27,8 @@ use crate::config::VoxelsConfig;
 use crate::link::IpcPorts;
 
 /// 实时层最小重建间隔（秒）：话题频率高于此，按此节流。
-const REBUILD_INTERVAL: f64 = 0.25;
+/// 实时层重建间隔（秒，10Hz）：增量消息按拍到达，重建比这更快没有意义。
+const REBUILD_INTERVAL: f64 = 0.1;
 /// 静态场地颜色（灰蓝，半透明：体素是数据层，要能看穿看到真实场景）。
 const FIELD_COLOR: Color = Color::srgba(0.38, 0.42, 0.52, 0.45);
 /// 实时感知颜色（青绿，半透明）。
@@ -107,9 +108,6 @@ const FACES: [Face; 6] = [
 #[derive(Component)]
 pub struct VoxelLayer;
 
-/// 实时层一帧数据：时间戳、体素数、体素尺寸、网格原点、索引。
-type LiveVoxels = (f64, u32, [f32; 3], [f32; 3], Vec<[i32; 3]>);
-
 /// 已收到的规划路径（实体名 → 点集 + 颜色），用折线 gizmo 画。
 #[derive(Resource, Default)]
 pub struct Paths {
@@ -140,9 +138,16 @@ pub fn draw_paths(paths: Res<Paths>, mut gizmos: Gizmos) {
 
 /// 实时层指纹与节流状态。
 #[derive(Resource, Default)]
-pub struct LiveStamp {
-    /// `(时间戳, 体素数)`：与上次相同则跳过重建。
-    stamp: Option<(f64, u32)>,
+pub struct LiveVoxelAccum {
+    /// 当前应显示的体素集合（增量协议累计：全量替换 / 并入 / 移除）。
+    set: HashSet<[i32; 3]>,
+    /// 体素尺寸（米）与网格原点（世界坐标，米）。
+    size: [f32; 3],
+    origin: [f32; 3],
+    /// 集合自上次重建以来是否变化。
+    dirty: bool,
+    /// 是否已重建过（首帧日志用）。
+    built: bool,
     /// 上次重建时刻（`Time::elapsed_secs_f64`）。
     last_rebuild: f64,
 }
@@ -280,7 +285,7 @@ pub fn setup_voxels(
         ));
     }
     commands.insert_resource(VoxelMeshes { live: live_mesh });
-    commands.insert_resource(LiveStamp::default());
+    commands.insert_resource(LiveVoxelAccum::default());
 }
 
 /// 消费 `Firefly/Viz` 的体素消息，按需重建实时层网格。
@@ -290,14 +295,14 @@ pub fn update_live_voxels(
     ports: NonSend<IpcPorts>,
     mut meshes: ResMut<Assets<Mesh>>,
     layer: Res<VoxelMeshes>,
-    mut stamp: ResMut<LiveStamp>,
+    mut accum: ResMut<LiveVoxelAccum>,
     mut paths: ResMut<Paths>,
 ) {
     let Some(sub) = &ports.viz_sub else {
         return;
     };
-    // 只保留最新一条感知地图消息（每帧清空队列，避免积压）。
-    let mut newest: Option<LiveVoxels> = None;
+    // 增量消息必须**按到达顺序全部应用**——丢一条就会与 planner 的图分叉，
+    // 不能像全量快照那样"只留最新"。
     loop {
         match sub.receive() {
             Ok(Some(sample)) => {
@@ -320,18 +325,36 @@ pub fn update_live_voxels(
                     }
                     continue;
                 }
-                if msg.kind != kind::VOXELS || entity != b"plan/perceived" {
+                if entity != b"plan/perceived"
+                    || !matches!(
+                        msg.kind,
+                        kind::VOXELS | kind::VOXELS_ADD | kind::VOXELS_REMOVE
+                    )
+                {
                     continue;
                 }
                 let count = msg.voxel_count.min(firefly_pubsub::viz::VOXELS_MAX as u32);
-                let indices = msg.voxels[..count as usize].to_vec();
-                newest = Some((
-                    msg.timestamp,
-                    count,
-                    msg.voxel_size,
-                    msg.voxel_origin,
-                    indices,
-                ));
+                let indices = &msg.voxels[..count as usize];
+                accum.size = msg.voxel_size;
+                accum.origin = msg.voxel_origin;
+                match msg.kind {
+                    kind::VOXELS => {
+                        accum.set.clear();
+                        accum.set.extend(indices.iter().copied());
+                        accum.dirty = true;
+                    }
+                    kind::VOXELS_ADD => {
+                        for idx in indices {
+                            accum.dirty |= accum.set.insert(*idx);
+                        }
+                    }
+                    kind::VOXELS_REMOVE => {
+                        for idx in indices {
+                            accum.dirty |= accum.set.remove(idx);
+                        }
+                    }
+                    _ => {}
+                }
             }
             Ok(None) => break,
             Err(e) => {
@@ -340,23 +363,18 @@ pub fn update_live_voxels(
             }
         }
     }
-    let Some((timestamp, count, size, origin, indices)) = newest else {
-        return;
-    };
-    let fingerprint = (timestamp, count);
-    if stamp.stamp == Some(fingerprint)
-        || time.elapsed_secs_f64() - stamp.last_rebuild < REBUILD_INTERVAL
-    {
+    if !accum.dirty || time.elapsed_secs_f64() - accum.last_rebuild < REBUILD_INTERVAL {
         return;
     }
-    if stamp.stamp.is_none() {
-        log::info!("体素视图：实时感知层首次重建（{count} 格）");
+    accum.dirty = false;
+    accum.last_rebuild = time.elapsed_secs_f64();
+    if !accum.built {
+        accum.built = true;
+        log::info!("体素视图：实时感知层首次重建（{} 格）", accum.set.len());
     }
-    stamp.stamp = Some(fingerprint);
-    stamp.last_rebuild = time.elapsed_secs_f64();
     if let Some(mut mesh) = meshes.get_mut(&layer.live) {
-        let rebuilt = surface_mesh(&indices, origin, size);
-        *mesh = rebuilt;
+        let indices: Vec<[i32; 3]> = accum.set.iter().copied().collect();
+        *mesh = surface_mesh(&indices, accum.origin, accum.size);
     }
 }
 

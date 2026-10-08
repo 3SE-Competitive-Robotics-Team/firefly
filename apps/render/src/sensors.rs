@@ -9,8 +9,9 @@
 pub const DEPTH_MIN: f32 = 0.05;
 /// 深度有效上限（米）。
 pub const DEPTH_MAX: f32 = 100.0;
-/// 调试图深度显示上限（米，超出显示为最远色）。
-pub const DISPLAY_DEPTH_RANGE: f32 = 20.0;
+/// 调试图深度显示上限（米，超出显示为最远色）。取场地实际视距：范围取满
+/// 10–20m 时，0.3–5m 的实际回波只落在 turbo 表的红–黄段，远处蓝色永不出现。
+pub const DISPLAY_DEPTH_RANGE: f32 = 6.0;
 
 /// RGB（sRGB 字节序）→ 灰度（BT.601 加权）。
 ///

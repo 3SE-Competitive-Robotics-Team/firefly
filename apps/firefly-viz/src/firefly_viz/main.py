@@ -38,6 +38,8 @@ from .messages import (
     VIZ_KIND_POSE,
     VIZ_KIND_SCALARS,
     VIZ_KIND_VOXELS,
+    VIZ_KIND_VOXELS_ADD,
+    VIZ_KIND_VOXELS_REMOVE,
     VizMessage,
 )
 
@@ -165,6 +167,38 @@ def detach_copy(msg):
     return dst
 
 
+#: 体素实体累计集合（增量协议：`VOXELS` 全量替换 / `_ADD` 并入 / `_REMOVE` 移除）。
+#: rrd 按时间索引，增量必须在这里先攒成全量再写，回放才与实时视图一致。
+_VOXEL_SETS: dict[str, set[tuple[int, int, int]]] = {}
+#: 体素实体布局（尺寸、原点），随消息刷新。
+_VOXEL_LAYOUT: dict[str, tuple[list[float], list[float]]] = {}
+
+
+def _log_voxels(entity: str, msg: VizMessage, kind: int) -> None:
+    """按增量协议维护体素实体集合并写 rerun。"""
+    n = msg.voxel_count
+    incoming = {(msg.voxels[i][0], msg.voxels[i][1], msg.voxels[i][2]) for i in range(n)}
+    if kind == VIZ_KIND_VOXELS:
+        voxels = _VOXEL_SETS[entity] = incoming
+    else:
+        voxels = _VOXEL_SETS.setdefault(entity, set())
+        if kind == VIZ_KIND_VOXELS_ADD:
+            voxels.update(incoming)
+        else:
+            voxels.difference_update(incoming)
+    _VOXEL_LAYOUT[entity] = (
+        [msg.voxel_size[0], msg.voxel_size[1], msg.voxel_size[2]],
+        [msg.voxel_origin[0], msg.voxel_origin[1], msg.voxel_origin[2]],
+    )
+    size, translation = _VOXEL_LAYOUT[entity]
+    if not voxels:
+        rr.log(entity, rr.Clear(recursive=True))
+        return
+    # 不传 colors：rerun 0.36 的 colors 路径在体素数超 ~1000 时渲染性能悬崖
+    # （实测 4590 体素 30s+ 卡死）；去掉 colors 用默认着色 <0.5s
+    rr.log(entity, rr.VoxelGridMap(sorted(voxels), size, translation=translation))
+
+
 def _entity(msg: VizMessage) -> str:
     n = min(msg.entity_len, len(msg.entity))
     return bytes(msg.entity[:n]).decode("utf-8", errors="replace")
@@ -188,19 +222,8 @@ def _handle(msg: VizMessage, trace_id: str) -> None:
         n = msg.point_count
         pts = [[msg.points[i][0], msg.points[i][1], msg.points[i][2]] for i in range(n)]
         rr.log(entity, rr.LineStrips3D(strips=[pts], colors=[[*msg.color, 255]]))
-    elif kind == VIZ_KIND_VOXELS:
-        n = msg.voxel_count
-        indices = [[msg.voxels[i][0], msg.voxels[i][1], msg.voxels[i][2]] for i in range(n)]
-        # 不传 colors：rerun 0.36 的 colors 路径在体素数超 ~1000 时渲染性能
-        # 悬崖（实测 4590 体素 30s+ 卡死）；去掉 colors 用默认着色 <0.5s
-        rr.log(
-            entity,
-            rr.VoxelGridMap(
-                indices,
-                [msg.voxel_size[0], msg.voxel_size[1], msg.voxel_size[2]],
-                translation=[msg.voxel_origin[0], msg.voxel_origin[1], msg.voxel_origin[2]],
-            ),
-        )
+    elif kind in (VIZ_KIND_VOXELS, VIZ_KIND_VOXELS_ADD, VIZ_KIND_VOXELS_REMOVE):
+        _log_voxels(entity, msg, kind)
     elif kind == VIZ_KIND_SCALARS:
         n = msg.scalar_count
         rr.log(entity, rr.Scalars([msg.scalars[i] for i in range(n)]))

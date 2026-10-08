@@ -29,6 +29,7 @@ mod config;
 mod scene;
 mod state_input;
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -67,8 +68,9 @@ const REFERENCE_PERIOD: Duration = Duration::from_millis(20);
 /// 深度/odom 丢失阈值（秒），对照官方 `grid_map/odom_depth_timeout`
 /// 默认值 1.0（`plan_env/src/grid_map.cpp`）。
 const DEPTH_TIMEOUT: f64 = 1.0;
-/// 感知占据地图的 viewer 更新周期（帧；10Hz 循环下约每 2.5s）。
-const PERCEIVED_PERIOD: usize = 25;
+/// 体素层全量重同步周期（帧；10Hz 循环下 50 帧 = 5s）。增量协议下每拍只发
+/// 变化量，周期性补发全量快照，任一增量消息丢失后消费端可自愈。
+const VOXEL_RESYNC_TICKS: usize = 50;
 /// 地图衰减周期（帧；10Hz 循环下 5 帧 = 0.5s，对照官方 `fading_timer` 2Hz）。
 const FADE_TICKS: usize = 5;
 /// 实时感知体素的显示半径（米）：以机体为中心的立方窗口。
@@ -243,6 +245,8 @@ struct App {
     prev_dyn: Vec<[usize; 3]>,
     /// 当前机体位置（地图系，米）：感知地图只发它附近的局部窗口。
     perceived_center: Vector3<f64>,
+    /// 各体素实体**上次发布的集合**：与当前集合做差得到增量（新增/删除）。
+    voxel_state: HashMap<String, HashSet<[i32; 3]>>,
     /// 状态时钟（秒），只由通过校验的地图系里程计推进。
     t_sim: f64,
     wall_origin: Instant,
@@ -371,6 +375,7 @@ impl App {
             log_ipc,
             prev_dyn: Vec::new(),
             perceived_center: Vector3::zeros(),
+            voxel_state: HashMap::new(),
             map_file,
             t_sim: 0.0,
             wall_origin: Instant::now(),
@@ -757,16 +762,17 @@ impl App {
                 }
             }
             frame += 1;
-            // 感知占据地图全量记录（重内容，降频）
-            if frame.is_multiple_of(PERCEIVED_PERIOD) {
-                let map = self.manager.map();
-                self.log_map(
-                    "plan/perceived",
-                    map,
-                    Some(self.perceived_center),
-                    self.t_sim,
-                );
-            }
+            // 感知占据地图：每拍只发变化量，周期性全量重同步
+            let (indices, size, origin) =
+                Self::occupied_indices(self.manager.map(), Some(self.perceived_center));
+            self.publish_voxel_delta(
+                "plan/perceived",
+                &indices,
+                size,
+                origin,
+                self.t_sim,
+                frame.is_multiple_of(VOXEL_RESYNC_TICKS),
+            );
             CallbackProgression::Continue
         };
 
@@ -862,14 +868,95 @@ impl App {
 
     /// 占据体素索引 → voxels 消息（体素中心 = 原点 + (idx+0.5)·尺寸，
     /// Python 端 `VoxelGridMap` 直接镜像）。超限截断并告警一次（锁存防刷屏）。
-    fn log_voxels(&self, entity: &str, indices: &[(i32, i32, i32)], t: f64) {
-        let mut msg = VizMessage::base(kind::VOXELS, t, entity);
+    fn log_voxels(&mut self, entity: &str, indices: &[(i32, i32, i32)], t: f64) {
+        let idx: Vec<[i32; 3]> = indices.iter().map(|&(x, y, z)| [x, y, z]).collect();
+        self.publish_voxel_delta(entity, &idx, [0.1, 0.1, 0.1], [0.0, 0.0, 0.0], t, false);
+    }
+
+    /// 局部窗口内的占据体素索引（`center` 为空则全量栅格），附带网格尺寸与原点。
+    ///
+    /// 局部窗口：以 `center` 为中心取 `local_update_range` 内的格子。全量栅格
+    /// （数万格）会超 `VOXELS_MAX` 被按遍历顺序截断，画出来是固定切片、看不出
+    /// 更新；只发窗口内的格子既不截断、又随飞机移动。
+    fn occupied_indices(
+        map: &GridMap,
+        center: Option<Vector3<f64>>,
+    ) -> (Vec<[i32; 3]>, [f32; 3], [f32; 3]) {
+        let origin = map.origin();
+        let dims = map.dims();
+        let size = [map.resolution() as f32; 3];
+        let at = [origin.x as f32, origin.y as f32, origin.z as f32];
+        let (lo, hi) = match center {
+            Some(c) => match Self::window_bounds(map, c) {
+                Some(bounds) => bounds,
+                None => return (Vec::new(), size, at),
+            },
+            None => ([0, 0, 0], [dims[0] - 1, dims[1] - 1, dims[2] - 1]),
+        };
+        let mut indices = Vec::new();
+        for x in lo[0]..=hi[0] {
+            for y in lo[1]..=hi[1] {
+                for z in lo[2]..=hi[2] {
+                    if map.state([x, y, z]) == VoxelState::Occupied {
+                        indices.push([x as i32, y as i32, z as i32]);
+                    }
+                }
+            }
+        }
+        (indices, size, at)
+    }
+
+    /// 体素层按**增量**发布：与上次发布的集合做差，只发新增/删除。首次发布、
+    /// `force_full` 或差集超单条消息上限时发全量快照——消费端以此替换集合，
+    /// 截断不会让两边分叉。
+    fn publish_voxel_delta(
+        &mut self,
+        entity: &str,
+        indices: &[[i32; 3]],
+        size: [f32; 3],
+        origin: [f32; 3],
+        t: f64,
+        force_full: bool,
+    ) {
+        let current: HashSet<[i32; 3]> = indices.iter().copied().collect();
+        match self.voxel_state.get(entity) {
+            None => self.publish_voxels(kind::VOXELS, entity, indices, size, origin, t),
+            Some(prev) => {
+                let added: Vec<[i32; 3]> = current.difference(prev).copied().collect();
+                let removed: Vec<[i32; 3]> = prev.difference(&current).copied().collect();
+                if force_full || added.len() > VOXELS_MAX || removed.len() > VOXELS_MAX {
+                    self.publish_voxels(kind::VOXELS, entity, indices, size, origin, t);
+                } else {
+                    if !added.is_empty() {
+                        self.publish_voxels(kind::VOXELS_ADD, entity, &added, size, origin, t);
+                    }
+                    if !removed.is_empty() {
+                        self.publish_voxels(kind::VOXELS_REMOVE, entity, &removed, size, origin, t);
+                    }
+                }
+            }
+        }
+        self.voxel_state.insert(entity.to_string(), current);
+    }
+
+    /// 发布一条体素消息；`indices` 超上限按遍历顺序截断并告警（消费端由周期性
+    /// 全量重同步纠正）。
+    fn publish_voxels(
+        &self,
+        kind: u32,
+        entity: &str,
+        indices: &[[i32; 3]],
+        size: [f32; 3],
+        origin: [f32; 3],
+        t: f64,
+    ) {
+        let mut msg = VizMessage::base(kind, t, entity);
         msg.voxel_count = indices.len().min(VOXELS_MAX) as u32;
-        for (i, &(x, y, z)) in indices.iter().take(VOXELS_MAX).enumerate() {
+        for (i, &[x, y, z]) in indices.iter().take(VOXELS_MAX).enumerate() {
             msg.voxels[i] = [x, y, z];
         }
-        msg.voxel_size = [0.1, 0.1, 0.1];
-        msg.voxel_origin = [0.0, 0.0, 0.0];
+        msg.voxel_size = size;
+        msg.voxel_origin = origin;
         if indices.len() > VOXELS_MAX {
             log::warn!(
                 "{entity} 体素数 {} 超上限 {VOXELS_MAX}，已截断",
@@ -904,47 +991,6 @@ impl App {
             hi[axis] = max;
         }
         Some((lo, hi))
-    }
-
-    /// 占据栅格地图 → voxels 消息（收集 Occupied 索引，体素中心与
-    /// `VoxelGridMap` 语义一致）。
-    fn log_map(&self, entity: &str, map: &GridMap, center: Option<Vector3<f64>>, t: f64) {
-        let origin = map.origin();
-        let dims = map.dims();
-        // 局部窗口：以 `center` 为中心取 `local_update_range` 内的格子。全量栅格
-        // （数万格）会超 `VOXELS_MAX` 被按遍历顺序截断，画出来是固定切片、看不出
-        // 更新；只发窗口内的几千格既不截断，又会随飞机移动。
-        let (lo, hi) = match center {
-            Some(c) => match Self::window_bounds(map, c) {
-                Some(bounds) => bounds,
-                None => return,
-            },
-            None => ([0, 0, 0], [dims[0] - 1, dims[1] - 1, dims[2] - 1]),
-        };
-        let mut indices = Vec::new();
-        for x in lo[0]..=hi[0] {
-            for y in lo[1]..=hi[1] {
-                for z in lo[2]..=hi[2] {
-                    if map.state([x, y, z]) == VoxelState::Occupied {
-                        indices.push((x as i32, y as i32, z as i32));
-                    }
-                }
-            }
-        }
-        let mut msg = VizMessage::base(kind::VOXELS, t, entity);
-        msg.voxel_count = indices.len().min(VOXELS_MAX) as u32;
-        for (i, &(x, y, z)) in indices.iter().take(VOXELS_MAX).enumerate() {
-            msg.voxels[i] = [x, y, z];
-        }
-        msg.voxel_size = [map.resolution() as f32; 3];
-        msg.voxel_origin = [origin.x as f32, origin.y as f32, origin.z as f32];
-        if indices.len() > VOXELS_MAX {
-            log::warn!(
-                "{entity} 体素数 {} 超上限 {VOXELS_MAX}，已截断",
-                indices.len()
-            );
-        }
-        self.viz_publish(&msg);
     }
 }
 
@@ -1048,7 +1094,8 @@ fn main() {
         Ok(mut app) => {
             // 静态先验一次性记录（体素索引收集在发布端完成）
             let grid = app.manager.map().clone();
-            app.log_map("plan/map", &grid, None, 0.0);
+            let (indices, size, origin) = App::occupied_indices(&grid, None);
+            app.publish_voxel_delta("plan/map", &indices, size, origin, 0.0, true);
             if let Err(e) = app.run() {
                 log::error!("planner 失败：{e}");
                 firefly_observability::pump_log_ipc(&app.log_ipc);
