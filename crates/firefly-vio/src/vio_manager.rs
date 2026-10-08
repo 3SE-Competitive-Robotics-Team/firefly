@@ -657,9 +657,14 @@ impl VioManager {
         // 清理与边缘化（对照 C++ 552-596）
         //=====================================================================
 
-        // 16. 清理（对照 C++ 末尾：cleanup + 边缘化旧克隆）
+        // 16. 刷新可见体素缓存（对照 `triangulateActiveTracks` + `getRecentVoxel`）：
+        // 必须在库清理前取本帧活跃轨迹，清理会删掉本轮被 MSCKF/SLAM 消费的特征。
+        // 结果供下一帧 SLAM 选点。
+        self.refresh_recent_voxels();
+
+        // 17. 清理（对照 C++ 末尾：cleanup + 边缘化旧克隆）
         self.track_feats.database_mut().cleanup();
-        // 17. 锚点切换（锚定表示用；当前 GLOBAL_3D 为 no-op）
+        // 18. 锚点切换（锚定表示用；当前 GLOBAL_3D 为 no-op）
         self.updater_slam.change_anchors(&mut self.state);
         if self.state.clones_imu.len() > self.state.options.max_clone_size {
             let marg_time = self.state.marg_timestep();
@@ -668,10 +673,6 @@ impl VioManager {
                 .cleanup_measurements(marg_time);
         }
         marginalize_old_clone(&mut self.state);
-
-        // 18. 刷新可见体素缓存（对照 `triangulateActiveTracks` + `getRecentVoxel`：
-        // 本帧末计算，下一帧 SLAM 选点使用）。
-        self.refresh_recent_voxels();
     }
 
     /// 刷新可见体素缓存（对照 Voxel-SVIO `triangulateActiveTracks` +
@@ -679,9 +680,10 @@ impl VioManager {
     ///
     /// 用当前帧活跃轨迹的三维位置查询体素地图；活跃轨迹指库中带当前克隆时刻
     /// 测量、且不在 `state.features_slam` 中的特征（对照官方
-    /// `active_tracks_pos_world_new` 跳过 `map_points`）。三角化须先把测量清理
-    /// 到克隆时刻，否则锚点/测量克隆缺失会触发 `single_triangulation` 的断言。
-    /// 仅在 `voxel_options.enabled` 时维护；关闭时缓存保持为空。
+    /// `active_tracks_pos_world_new` 跳过 `map_points`）。查询在本帧清理前执行，
+    /// 因此须纳入本轮已标记删除但尚未清理的特征。三角化须先把测量清理到克隆
+    /// 时刻，否则锚点/测量克隆缺失会触发 `single_triangulation` 的断言。仅在
+    /// `voxel_options.enabled` 时维护；关闭时缓存保持为空。
     #[fastrace::trace]
     fn refresh_recent_voxels(&mut self) {
         if !self.params.voxel_options.enabled {
@@ -696,7 +698,7 @@ impl VioManager {
         let mut feats = self
             .track_feats
             .database_mut()
-            .features_containing(timestamp, false, true);
+            .features_containing(timestamp, false, false);
         let mut queries: Vec<Vector3<f64>> = Vec::with_capacity(feats.len());
         for feat in &mut feats {
             if slam_ids.contains(&feat.featid) {

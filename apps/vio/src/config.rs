@@ -167,6 +167,7 @@ mod tests {
         assert!((cfg.camera.baseline - 0.05).abs() < 1e-9);
         assert_eq!(cfg.frontend.num_pts, 300);
         assert!((cfg.estimator.max_baseline - 120.0).abs() < 1e-9);
+        assert!(cfg.slam.voxel_selection, "部署配置须启用体素选点");
     }
 
     #[test]

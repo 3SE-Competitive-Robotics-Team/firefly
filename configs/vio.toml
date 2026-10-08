@@ -17,3 +17,6 @@ num_pts = 300 # 每相机 KLT 目标特征数
 
 [estimator]
 max_baseline = 120 # 三角化深度/基线比上限（OpenVINS 默认 40）
+
+[slam]
+voxel_selection = true # 体素选点（Voxel-SVIO）：每帧只喂相机可见体素内的路标
