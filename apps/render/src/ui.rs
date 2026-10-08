@@ -1,11 +1,12 @@
 //! 调试面板：右侧固定栏展示左/右 RGB、左/右灰度、深度。
 //!
-//! 布局（窗口 1280×720）：主 3D 视图占**左侧**区域，面板占右侧，两者并列
-//! 不重叠（视口由 [`layout_viewports`] 每帧按窗口尺寸与 DPI 重算）：
+//! 布局（窗口 1280×720，视口由 [`layout_viewports`] 每帧按窗口尺寸与 DPI 重算）：
 //! ```text
-//! 3D 场景（追踪无人机）  | 左目 RGB  | 右目 RGB
-//!                        | 左目灰度  | 右目灰度
-//!                        | 深度（通栏）
+//! ┌───────────────┬───────────────┐
+//! │ 真实 3D（跟随）│ 体素 3D（仅数据层）│
+//! ├───────────────┴───────────────┤
+//! │ 左 RGB 右 RGB 左灰度 右灰度 深度 │
+//! └───────────────────────────────┘
 //! ```
 //!
 //! 显示与发布同源（`link` 每节拍写入同一像素，显示侧只做 RGBA 展开），
@@ -20,16 +21,12 @@ use bevy::text::FontSize;
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_SIZE, IMAGE_WIDTH};
 use firefly_render::camera::FollowCamera;
 
-/// 面板宽度（像素）。
-const PANEL_WIDTH: f32 = 400.0;
+/// 底部面板高度（像素）。
+const PANEL_HEIGHT: f32 = 170.0;
 /// 缩略图尺寸（像素，`320×240` 等比缩小）。
 const THUMB_WIDTH: f32 = 188.0;
 /// 缩略图高度（像素）。
 const THUMB_HEIGHT: f32 = 141.0;
-/// 深度图尺寸（像素，通栏）。
-const DEPTH_WIDTH: f32 = 384.0;
-/// 深度图高度（像素）。
-const DEPTH_HEIGHT: f32 = 288.0;
 
 /// 左上角模式提示（`freecam` 按模式更新）。
 #[derive(Component)]
@@ -71,27 +68,38 @@ fn display_image() -> Image {
     )
 }
 
-/// 把主 3D 视图限制在左侧区域，右侧留给调试面板。
+/// 摆两个 3D 视口：左侧真实场景、右侧体素视图，各占半宽，底部空出面板高度。
 ///
 /// `Camera::viewport` 用物理像素，面板用逻辑像素定位，因此按窗口 `scale_factor`
 /// 换算；窗口缩放或 DPI 变化时重算，尺寸未变则不写回（避免每帧触碰 `Camera`）。
 #[allow(clippy::needless_pass_by_value)] // `SystemParam` 契约，与同 crate 其它系统一致
-pub fn layout_viewports(windows: Query<&Window>, cameras: Query<&mut Camera, With<FollowCamera>>) {
+pub fn layout_viewports(
+    windows: Query<&Window>,
+    cameras: Query<(&mut Camera, Has<FollowCamera>, Has<crate::rig::VoxelView>)>,
+) {
     let Ok(window) = windows.single() else {
         return;
     };
     let size = window.physical_size();
-    let panel = (PANEL_WIDTH * window.scale_factor()).round() as u32;
-    let wanted = UVec2::new(size.x.saturating_sub(panel).max(1), size.y.max(1));
-    for mut camera in cameras {
+    let panel = (PANEL_HEIGHT * window.scale_factor()).round() as u32;
+    let height = size.y.saturating_sub(panel).max(1);
+    let half = (size.x / 2).max(1);
+    for (mut camera, is_follow, is_voxel) in cameras {
+        let (position, extent) = if is_follow {
+            (UVec2::ZERO, UVec2::new(half, height))
+        } else if is_voxel {
+            (UVec2::new(half, 0), UVec2::new(size.x - half, height))
+        } else {
+            continue;
+        };
         if camera
             .viewport
             .as_ref()
-            .is_none_or(|v| v.physical_size != wanted)
+            .is_none_or(|v| v.physical_position != position || v.physical_size != extent)
         {
             camera.viewport = Some(Viewport {
-                physical_position: UVec2::ZERO,
-                physical_size: wanted,
+                physical_position: position,
+                physical_size: extent,
                 ..default()
             });
         }
@@ -107,11 +115,13 @@ pub fn setup_panel(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         right_gray: images.add(display_image()),
         depth: images.add(display_image()),
     };
-    let thumbs = [
-        (views.left_rgb.clone(), views.right_rgb.clone()),
-        (views.left_gray.clone(), views.right_gray.clone()),
+    let tiles = [
+        views.left_rgb.clone(),
+        views.right_rgb.clone(),
+        views.left_gray.clone(),
+        views.right_gray.clone(),
+        views.depth.clone(),
     ];
-    let depth = views.depth.clone();
     commands.insert_resource(views);
 
     commands.spawn((
@@ -134,45 +144,28 @@ pub fn setup_panel(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                right: Val::Px(0.0),
-                top: Val::Px(0.0),
-                width: Val::Px(PANEL_WIDTH),
-                height: Val::Percent(100.0),
-                flex_direction: FlexDirection::Column,
+                left: Val::Px(0.0),
+                bottom: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Px(PANEL_HEIGHT),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
                 padding: UiRect::all(Val::Px(8.0)),
-                row_gap: Val::Px(8.0),
+                column_gap: Val::Px(8.0),
                 ..default()
             },
             BackgroundColor(Color::srgb(0.05, 0.05, 0.07)),
         ))
         .with_children(|panel| {
-            for (left, right) in thumbs {
-                panel
-                    .spawn(Node {
-                        flex_direction: FlexDirection::Row,
-                        column_gap: Val::Px(8.0),
+            for handle in tiles {
+                panel.spawn((
+                    ImageNode::new(handle),
+                    Node {
+                        width: Val::Px(THUMB_WIDTH),
+                        height: Val::Px(THUMB_HEIGHT),
                         ..default()
-                    })
-                    .with_children(|row| {
-                        for handle in [left, right] {
-                            row.spawn((
-                                ImageNode::new(handle),
-                                Node {
-                                    width: Val::Px(THUMB_WIDTH),
-                                    height: Val::Px(THUMB_HEIGHT),
-                                    ..default()
-                                },
-                            ));
-                        }
-                    });
+                    },
+                ));
             }
-            panel.spawn((
-                ImageNode::new(depth),
-                Node {
-                    width: Val::Px(DEPTH_WIDTH),
-                    height: Val::Px(DEPTH_HEIGHT),
-                    ..default()
-                },
-            ));
         });
 }

@@ -61,6 +61,10 @@ pub enum Eye {
     Depth,
 }
 
+/// 体素专用 3D 视图（只渲染 [`VOXEL_LAYER`]：体素 + 规划路径，不含真实场景）。
+#[derive(Component)]
+pub struct VoxelView;
+
 /// 位姿状态（`link` 每收到新真值写入，rig 相机与主视角跟随读取）。
 #[derive(Resource, Default)]
 pub struct PoseState {
@@ -241,6 +245,20 @@ pub fn spawn_rig(
 
     // UI 单独用一个铺满窗口的相机：主相机被 `layout_viewports` 限到左侧视口后，
     // UI 的坐标空间会跟着缩到左半，面板的 `right: 0` 就落到窗口中间了。
+    // 体素专用视图：只渲染 `VOXEL_LAYER`（体素与规划路径），背景独立配色，
+    // 与真实场景并排但互不混淆。位姿由 `sync_voxel_view` 跟随主视角。
+    commands.spawn((
+        Camera3d::default(),
+        Camera {
+            clear_color: ClearColorConfig::Custom(Color::srgb(0.02, 0.02, 0.03)),
+            ..default()
+        },
+        Msaa::Off,
+        Tonemapping::None,
+        RenderLayers::layer(VOXEL_LAYER),
+        VoxelView,
+    ));
+
     commands.spawn((
         Camera2d,
         Camera {

@@ -232,6 +232,8 @@ struct App {
     /// 静态占据体素（动态障碍不得清掉它们）。
     /// 上一帧动态障碍占据体素。
     prev_dyn: Vec<[usize; 3]>,
+    /// 当前机体位置（地图系，米）：感知地图只发它附近的局部窗口。
+    perceived_center: Vector3<f64>,
     /// 状态时钟（秒），只由通过校验的地图系里程计推进。
     t_sim: f64,
     wall_origin: Instant,
@@ -359,6 +361,7 @@ impl App {
             viz_pub,
             log_ipc,
             prev_dyn: Vec::new(),
+            perceived_center: Vector3::zeros(),
             map_file,
             t_sim: 0.0,
             wall_origin: Instant::now(),
@@ -467,6 +470,7 @@ impl App {
         let Some(pose) = self.state_input.pose_at(depth.timestamp) else {
             return;
         };
+        self.perceived_center = pose.translation.vector;
         update_from_depth(self.manager.map_mut(), &self.depth_cam, &pose, &depth.data);
         self.depth_freshness.observe(wall_time);
         self.depth_loss_reported = false;
@@ -715,7 +719,12 @@ impl App {
             // 感知占据地图全量记录（重内容，降频）
             if frame.is_multiple_of(PERCEIVED_PERIOD) {
                 let map = self.manager.map();
-                self.log_map("plan/perceived", map, self.t_sim);
+                self.log_map(
+                    "plan/perceived",
+                    map,
+                    Some(self.perceived_center),
+                    self.t_sim,
+                );
             }
             CallbackProgression::Continue
         };
@@ -829,15 +838,48 @@ impl App {
         self.viz_publish(&msg);
     }
 
+    /// `center` 周围 `local_update_range` 对应的窗口索引范围（闭区间，已裁剪
+    /// 到栅格内）；越界返回 `None`。
+    fn window_bounds(map: &GridMap, center: Vector3<f64>) -> Option<([usize; 3], [usize; 3])> {
+        let range = map.local_update_range();
+        let origin = map.origin();
+        let res = map.resolution();
+        let dims = map.dims();
+        let mut lo = [0usize; 3];
+        let mut hi = [0usize; 3];
+        for axis in 0..3 {
+            let min = ((center[axis] - range[axis] - origin[axis]) / res).floor();
+            let max = ((center[axis] + range[axis] - origin[axis]) / res).ceil();
+            let min = min.max(0.0) as usize;
+            let max = (max.max(0.0) as usize).min(dims[axis].saturating_sub(1));
+            if min > max || dims[axis] == 0 {
+                return None;
+            }
+            lo[axis] = min;
+            hi[axis] = max;
+        }
+        Some((lo, hi))
+    }
+
     /// 占据栅格地图 → voxels 消息（收集 Occupied 索引，体素中心与
     /// `VoxelGridMap` 语义一致）。
-    fn log_map(&self, entity: &str, map: &GridMap, t: f64) {
+    fn log_map(&self, entity: &str, map: &GridMap, center: Option<Vector3<f64>>, t: f64) {
         let origin = map.origin();
         let dims = map.dims();
+        // 局部窗口：以 `center` 为中心取 `local_update_range` 内的格子。全量栅格
+        // （数万格）会超 `VOXELS_MAX` 被按遍历顺序截断，画出来是固定切片、看不出
+        // 更新；只发窗口内的几千格既不截断，又会随飞机移动。
+        let (lo, hi) = match center {
+            Some(c) => match Self::window_bounds(map, c) {
+                Some(bounds) => bounds,
+                None => return,
+            },
+            None => ([0, 0, 0], [dims[0] - 1, dims[1] - 1, dims[2] - 1]),
+        };
         let mut indices = Vec::new();
-        for x in 0..dims[0] {
-            for y in 0..dims[1] {
-                for z in 0..dims[2] {
+        for x in lo[0]..=hi[0] {
+            for y in lo[1]..=hi[1] {
+                for z in lo[2]..=hi[2] {
                     if map.state([x, y, z]) == VoxelState::Occupied {
                         indices.push((x as i32, y as i32, z as i32));
                     }
@@ -961,7 +1003,7 @@ fn main() {
         Ok(mut app) => {
             // 静态先验一次性记录（体素索引收集在发布端完成）
             let grid = app.manager.map().clone();
-            app.log_map("plan/map", &grid, 0.0);
+            app.log_map("plan/map", &grid, None, 0.0);
             if let Err(e) = app.run() {
                 log::error!("planner 失败：{e}");
                 firefly_observability::pump_log_ipc(&app.log_ipc);

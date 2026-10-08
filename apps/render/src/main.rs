@@ -32,7 +32,7 @@ use bevy::winit::WinitSettings;
 
 use capture::{CaptureHub, CapturePlugin};
 use config::RenderConfig;
-use firefly_render::camera::{FollowTarget, follow_camera};
+use firefly_render::camera::{FollowCamera, FollowTarget, follow_camera};
 use firefly_render::drone::spawn_drone_visual;
 use firefly_render::lighting::spawn_scene_lighting;
 use firefly_render::scene::{MODELS_DIR, spawn_scene};
@@ -41,7 +41,7 @@ use link::{
     CapturePipeline, CaptureStats, PendingFrames, SensorCapture, drain_captures, open_ports,
     poll_pose, publish_processed,
 };
-use rig::{DRONE_LAYER, PoseState, spawn_rig};
+use rig::{DRONE_LAYER, PoseState, VoxelView, spawn_rig};
 use scene::SceneSpec;
 use ui::{layout_viewports, setup_panel};
 use voxels::{Paths, draw_paths, setup_gizmo_layers, setup_voxels, update_live_voxels};
@@ -161,6 +161,7 @@ fn build_app(
             tag_drone_layers,
             log_render_rate,
             stop_on_signal,
+            sync_voxel_view.after(follow_camera),
         ),
     )
     .add_systems(
@@ -172,6 +173,18 @@ fn build_app(
         (drain_captures, publish_processed, pump_logs, flush_on_exit).chain(),
     );
     app
+}
+
+/// 体素视图跟随主视角（同一机位，便于左右对照）。
+#[allow(clippy::needless_pass_by_value)] // `SystemParam` 契约，与同 crate 其它系统一致
+fn sync_voxel_view(
+    follow: Query<&Transform, (With<FollowCamera>, Without<VoxelView>)>,
+    mut voxel: Query<&mut Transform, With<VoxelView>>,
+) {
+    let (Ok(source), Ok(mut target)) = (follow.single(), voxel.single_mut()) else {
+        return;
+    };
+    *target = *source;
 }
 
 #[allow(clippy::needless_pass_by_value)]
