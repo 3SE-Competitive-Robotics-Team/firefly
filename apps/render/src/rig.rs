@@ -225,7 +225,6 @@ pub fn spawn_rig(
         },
         RenderLayers::from_layers(&[WORLD_LAYER, DRONE_LAYER, VOXEL_LAYER]),
         env,
-        IsDefaultUiCamera,
         // 第三人称追踪（与 `apps/quad` 同一实现 `firefly-render`）；自由浏览模式下
         // 让位给 `freecam::freecam_move`（见 `main.rs` 的运行条件）。
         FollowCamera,
@@ -238,6 +237,17 @@ pub fn spawn_rig(
                 ),
         )
         .looking_at(pose.pos, Vec3::Z),
+    ));
+
+    // UI 单独用一个铺满窗口的相机：主相机被 `layout_viewports` 限到左侧视口后，
+    // UI 的坐标空间会跟着缩到左半，面板的 `right: 0` 就落到窗口中间了。
+    commands.spawn((
+        Camera2d,
+        Camera {
+            order: 1,
+            ..default()
+        },
+        IsDefaultUiCamera,
     ));
 }
 

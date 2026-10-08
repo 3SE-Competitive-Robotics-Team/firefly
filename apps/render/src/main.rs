@@ -44,7 +44,7 @@ use link::{
 use rig::{DRONE_LAYER, PoseState, spawn_rig};
 use scene::SceneSpec;
 use ui::{layout_viewports, setup_panel};
-use voxels::{setup_voxels, update_live_voxels};
+use voxels::{Paths, draw_paths, setup_gizmo_layers, setup_voxels, update_live_voxels};
 
 /// 以 RMUC 资产和初始摆位启动 Bevy；仿真位姿到达后更新机体与传感器。
 fn main() {
@@ -88,68 +88,90 @@ fn main() {
         std::process::exit(1);
     });
     let log_ipc = firefly_observability::init_ipc(&ports.node, "render");
-    App::new()
-        .add_plugins(
-            DefaultPlugins
-                .build()
-                .disable::<LogPlugin>()
-                .set(AssetPlugin {
-                    file_path: MODELS_DIR.to_owned(),
-                    ..default()
-                })
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        resolution: (1280, 720).into(),
-                        title: "firefly render".to_owned(),
-                        // 传感器节拍不得等待桌面合成器的垂直同步。
-                        present_mode: bevy::window::PresentMode::AutoNoVsync,
-                        ..default()
-                    }),
+    build_app(spec, &render_config, ports, log_ipc, offline).run();
+}
+
+/// 组装 Bevy 应用（插件、资源与系统注册）；`main` 只做参数、日志与 IPC 准备。
+fn build_app(
+    spec: SceneSpec,
+    render_config: &RenderConfig,
+    ports: link::IpcPorts,
+    log_ipc: firefly_observability::LogIpc,
+    offline: bool,
+) -> App {
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .build()
+            .disable::<LogPlugin>()
+            .set(AssetPlugin {
+                file_path: MODELS_DIR.to_owned(),
+                ..default()
+            })
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    resolution: (1280, 720).into(),
+                    title: "firefly render".to_owned(),
+                    // 传感器节拍不得等待桌面合成器的垂直同步。
+                    present_mode: bevy::window::PresentMode::AutoNoVsync,
                     ..default()
                 }),
-        )
-        .insert_resource(spec)
-        .insert_resource(render_config.clone())
-        // 传感器渲染是计算链路的一环，不是可挂起的桌面窗口：失焦时也必须持续
-        // 出图（Bevy 缺省失焦降到 1Hz，VIO 会拿到断流的图像而失稳）。
-        .insert_resource(WinitSettings::continuous())
-        .insert_resource(PoseState {
-            pos: Vec3::from(spec.start),
-            ..default()
-        })
-        .insert_resource(CaptureHub::default())
-        .insert_resource(PendingFrames::default())
-        .insert_resource(SensorCapture::default())
-        .insert_resource(CapturePipeline::spawn(render_config.depth_noise, offline))
-        .insert_resource(CaptureStats::default())
-        .insert_resource(FreeCam::default())
-        .insert_resource(viewer_pose::ViewerPose::default())
-        .insert_non_send(ports)
-        .insert_non_send(log_ipc)
-        .add_plugins(CapturePlugin)
-        .add_systems(Startup, (setup_scene, spawn_rig, setup_panel, setup_voxels))
-        .add_systems(PreUpdate, poll_pose)
-        .add_systems(
-            Update,
-            (
-                layout_viewports,
-                update_live_voxels,
-                follow_camera.run_if(freecam_off).after(follow_drone),
-                follow_drone,
-                tag_drone_layers,
-                log_render_rate,
-                stop_on_signal,
-            ),
-        )
-        .add_systems(
-            Update,
-            (toggle_freecam, freecam_move, update_mode_label).chain(),
-        )
-        .add_systems(
-            Last,
-            (drain_captures, publish_processed, pump_logs, flush_on_exit).chain(),
-        )
-        .run();
+                ..default()
+            }),
+    )
+    .insert_resource(spec)
+    .insert_resource(render_config.clone())
+    // 传感器渲染是计算链路的一环，不是可挂起的桌面窗口：失焦时也必须持续
+    // 出图（Bevy 缺省失焦降到 1Hz，VIO 会拿到断流的图像而失稳）。
+    .insert_resource(WinitSettings::continuous())
+    .insert_resource(PoseState {
+        pos: Vec3::from(spec.start),
+        ..default()
+    })
+    .insert_resource(CaptureHub::default())
+    .insert_resource(PendingFrames::default())
+    .insert_resource(SensorCapture::default())
+    .insert_resource(CapturePipeline::spawn(render_config.depth_noise, offline))
+    .insert_resource(CaptureStats::default())
+    .insert_resource(FreeCam::default())
+    .insert_resource(viewer_pose::ViewerPose::default())
+    .insert_non_send(ports)
+    .insert_non_send(log_ipc)
+    .add_plugins(CapturePlugin)
+    .insert_resource(Paths::default())
+    .add_systems(
+        Startup,
+        (
+            setup_scene,
+            spawn_rig,
+            setup_panel,
+            setup_voxels,
+            setup_gizmo_layers,
+        ),
+    )
+    .add_systems(PreUpdate, poll_pose)
+    .add_systems(
+        Update,
+        (
+            layout_viewports,
+            update_live_voxels,
+            draw_paths.after(update_live_voxels),
+            follow_camera.run_if(freecam_off).after(follow_drone),
+            follow_drone,
+            tag_drone_layers,
+            log_render_rate,
+            stop_on_signal,
+        ),
+    )
+    .add_systems(
+        Update,
+        (toggle_freecam, freecam_move, update_mode_label).chain(),
+    )
+    .add_systems(
+        Last,
+        (drain_captures, publish_processed, pump_logs, flush_on_exit).chain(),
+    );
+    app
 }
 
 #[allow(clippy::needless_pass_by_value)]

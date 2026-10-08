@@ -18,6 +18,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::text::FontSize;
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_SIZE, IMAGE_WIDTH};
+use firefly_render::camera::FollowCamera;
 
 /// 面板宽度（像素）。
 const PANEL_WIDTH: f32 = 400.0;
@@ -75,10 +76,7 @@ fn display_image() -> Image {
 /// `Camera::viewport` 用物理像素，面板用逻辑像素定位，因此按窗口 `scale_factor`
 /// 换算；窗口缩放或 DPI 变化时重算，尺寸未变则不写回（避免每帧触碰 `Camera`）。
 #[allow(clippy::needless_pass_by_value)] // `SystemParam` 契约，与同 crate 其它系统一致
-pub fn layout_viewports(
-    windows: Query<&Window>,
-    cameras: Query<&mut Camera, With<IsDefaultUiCamera>>,
-) {
+pub fn layout_viewports(windows: Query<&Window>, cameras: Query<&mut Camera, With<FollowCamera>>) {
     let Ok(window) = windows.single() else {
         return;
     };

@@ -13,7 +13,7 @@
 //! 单 draw call；实时层只在内容指纹变化且距上次重建 ≥ [`REBUILD_INTERVAL`]
 //! 时按原句柄原地更新，不每帧重建、不每帧分配。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
@@ -109,6 +109,30 @@ pub struct VoxelLayer;
 
 /// 实时层一帧数据：时间戳、体素数、体素尺寸、网格原点、索引。
 type LiveVoxels = (f64, u32, [f32; 3], [f32; 3], Vec<[i32; 3]>);
+
+/// 已收到的规划路径（实体名 → 点集 + 颜色），用折线 gizmo 画。
+#[derive(Resource, Default)]
+pub struct Paths {
+    lines: HashMap<String, (Vec<Vec3>, Color)>,
+}
+
+/// 折线 gizmo 的渲染层：**必须**限到主视角层，否则默认 layer 0 会被传感器
+/// 相机一并画进发布给 VIO/深度的图像里。
+#[allow(clippy::needless_pass_by_value)] // `SystemParam` 契约，与同 crate 其它系统一致
+pub fn setup_gizmo_layers(mut store: ResMut<GizmoConfigStore>) {
+    let (config, _) = store.config_mut::<DefaultGizmoConfigGroup>();
+    config.render_layers = RenderLayers::layer(crate::rig::VOXEL_LAYER);
+}
+
+/// 画规划路径（`plan/global_path`、`plan/local_traj`）。
+#[allow(clippy::needless_pass_by_value)] // `SystemParam` 契约，与同 crate 其它系统一致
+pub fn draw_paths(paths: Res<Paths>, mut gizmos: Gizmos) {
+    for (points, color) in paths.lines.values() {
+        if points.len() >= 2 {
+            gizmos.linestrip(points.iter().copied(), *color);
+        }
+    }
+}
 
 /// 实时层指纹与节流状态。
 #[derive(Resource, Default)]
@@ -261,6 +285,7 @@ pub fn update_live_voxels(
     mut meshes: ResMut<Assets<Mesh>>,
     layer: Res<VoxelMeshes>,
     mut stamp: ResMut<LiveStamp>,
+    mut paths: ResMut<Paths>,
 ) {
     let Some(sub) = &ports.viz_sub else {
         return;
@@ -271,11 +296,23 @@ pub fn update_live_voxels(
         match sub.receive() {
             Ok(Some(sample)) => {
                 let msg: &VizMessage = &sample;
-                if msg.kind != kind::VOXELS {
+                let entity = &msg.entity[..msg.entity_len as usize];
+                if msg.kind == kind::LINE_STRIP {
+                    // 规划路径：只收 planner 发的 `plan/*`，直接并存（点数少，无需节流）。
+                    if msg.point_count == 0 || !entity.starts_with(b"plan/") {
+                        continue;
+                    }
+                    let name = String::from_utf8_lossy(entity).into_owned();
+                    let n = (msg.point_count as usize).min(msg.points.len());
+                    let points: Vec<Vec3> = msg.points[..n]
+                        .iter()
+                        .map(|p| Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32))
+                        .collect();
+                    let color = Color::srgb_u8(msg.color[0], msg.color[1], msg.color[2]);
+                    paths.lines.insert(name, (points, color));
                     continue;
                 }
-                let entity = &msg.entity[..msg.entity_len as usize];
-                if entity != b"plan/perceived" {
+                if msg.kind != kind::VOXELS || entity != b"plan/perceived" {
                     continue;
                 }
                 let count = msg.voxel_count.min(firefly_pubsub::viz::VOXELS_MAX as u32);
