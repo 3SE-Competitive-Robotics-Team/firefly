@@ -85,11 +85,14 @@ impl ControlFrames {
             self.alignment_time = Some(msg.timestamp);
         }
     }
+    /// `dt`：参考时刻到当前时刻的**仿真秒**差（调用方由 IMU 时刻给出），用于把
+    /// 10Hz 的阶跃参考外推到当前时刻；限幅由调用方负责。
     pub fn reference(
         &self,
         msg: &ReferenceMessage,
         now: Instant,
         max_age: Duration,
+        dt: f64,
     ) -> Option<PositionSetpoint> {
         if now.duration_since(self.alignment_at?) > max_age {
             return None;
@@ -98,6 +101,15 @@ impl ControlFrames {
         let position = transform.point(Point3::new(msg.position_x, msg.position_y, msg.position_z));
         let velocity =
             transform.vector(Vector3::new(msg.velocity_x, msg.velocity_y, msg.velocity_z));
+        let acceleration = transform.vector(Vector3::new(
+            msg.acceleration_x,
+            msg.acceleration_y,
+            msg.acceleration_z,
+        ));
+        // 设定点外推到当前时刻：p += v·dt + ½a·dt²，v += a·dt（刚体变换下与先
+        // 变换后外推等价）。
+        let position = position + velocity * dt + 0.5 * acceleration * dt * dt;
+        let velocity = velocity + acceleration * dt;
         let direction = transform.vector(Vector3::new(msg.yaw.cos(), msg.yaw.sin(), 0.));
         let derivative =
             transform.vector(Vector3::new(-msg.yaw.sin(), msg.yaw.cos(), 0.)) * msg.yaw_dot;
@@ -108,6 +120,11 @@ impl ControlFrames {
         let result = PositionSetpoint {
             position: glam::Vec3::new(position.x as f32, position.y as f32, position.z as f32),
             velocity: glam::Vec3::new(velocity.x as f32, velocity.y as f32, velocity.z as f32),
+            acceleration: glam::Vec3::new(
+                acceleration.x as f32,
+                acceleration.y as f32,
+                acceleration.z as f32,
+            ),
             yaw: direction.y.atan2(direction.x) as f32,
             yaw_rate: ((direction.x * derivative.y - direction.y * derivative.x) / horizontal)
                 as f32,
@@ -166,7 +183,7 @@ mod tests {
             ..Default::default()
         };
         let r = frames
-            .reference(&reference, now, Duration::from_millis(500))
+            .reference(&reference, now, Duration::from_millis(500), 0.0)
             .unwrap();
         assert!((r.position - glam::Vec3::new(2., 0., 0.)).length() < 1e-6);
         assert!((r.velocity - glam::Vec3::X).length() < 1e-6);
@@ -176,11 +193,44 @@ mod tests {
                 .reference(
                     &reference,
                     now + Duration::from_secs(1),
-                    Duration::from_millis(500)
+                    Duration::from_millis(500),
+                    0.0
                 )
                 .is_none()
         );
     }
+    /// dt 外推：`p += v·dt + ½a·dt²`、`v += a·dt`。
+    #[test]
+    fn reference_setpoint_is_extrapolated_by_dt() {
+        let now = Instant::now();
+        let mut frames = ControlFrames::default();
+        let raw = raw(1.);
+        frames.observe_odom(&raw, now);
+        frames.observe_corrected(raw, now);
+        let reference = ReferenceMessage {
+            position_x: 1.,
+            velocity_x: 2.,
+            acceleration_x: 3.,
+            ..Default::default()
+        };
+        let dt = 0.5;
+        let r = frames
+            .reference(&reference, now, Duration::from_millis(500), dt)
+            .unwrap();
+        // 1 + 2·0.5 + ½·3·0.25 = 2.375；2 + 3·0.5 = 3.5
+        assert!((r.position.x - 2.375).abs() < 1e-6, "{:?}", r.position);
+        assert!((r.velocity.x - 3.5).abs() < 1e-6, "{:?}", r.velocity);
+        assert!(
+            (r.acceleration.x - 3.0).abs() < 1e-6,
+            "{:?}",
+            r.acceleration
+        );
+        let r0 = frames
+            .reference(&reference, now, Duration::from_millis(500), 0.0)
+            .unwrap();
+        assert!((r0.position.x - 1.0).abs() < 1e-6 && (r0.velocity.x - 2.0).abs() < 1e-6);
+    }
+
     #[test]
     fn unsynchronized_and_repeated_samples_cannot_refresh_alignment() {
         let now = Instant::now();

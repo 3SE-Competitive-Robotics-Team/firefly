@@ -95,6 +95,9 @@ class ReferenceMessage(ctypes.Structure):
         ("velocity_x", ctypes.c_double),
         ("velocity_y", ctypes.c_double),
         ("velocity_z", ctypes.c_double),
+        ("acceleration_x", ctypes.c_double),
+        ("acceleration_y", ctypes.c_double),
+        ("acceleration_z", ctypes.c_double),
         ("yaw", ctypes.c_double),
         ("yaw_dot", ctypes.c_double),
     ]

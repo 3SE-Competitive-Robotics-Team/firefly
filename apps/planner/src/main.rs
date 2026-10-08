@@ -152,6 +152,7 @@ fn hover_reference(position: Vector3<f64>, yaw_state: (f64, f64)) -> Reference {
     Reference {
         position,
         velocity: Vector3::zeros(),
+        acceleration: Vector3::zeros(),
         yaw: yaw_state.0,
         // 官方超时悬停的 yaw_dot 恒为 0
         yaw_dot: 0.0,
@@ -625,6 +626,9 @@ impl App {
                 velocity_x: reference.velocity.x,
                 velocity_y: reference.velocity.y,
                 velocity_z: reference.velocity.z,
+                acceleration_x: reference.acceleration.x,
+                acceleration_y: reference.acceleration.y,
+                acceleration_z: reference.acceleration.z,
                 yaw: reference.yaw,
                 yaw_dot: reference.yaw_dot,
             }) {

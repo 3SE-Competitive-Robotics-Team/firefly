@@ -328,6 +328,8 @@ fn health_of(inputs: &Inputs) -> Health {
     }
 }
 
+/// 参考外推上限（仿真秒）：超过就认为参考流本身有问题，不做外推。
+const REFERENCE_EXTRAPOLATE_LIMIT_S: f64 = 0.3;
 /// 参考流新鲜时转成位置模式参考；陈旧样本按不存在处理——断开时长由状态机计时
 /// （状态机只在 `Track` 下消它，其余模式自己生参考）。
 fn fresh_reference(inputs: &Inputs) -> Option<PositionSetpoint> {
@@ -335,9 +337,16 @@ fn fresh_reference(inputs: &Inputs) -> Option<PositionSetpoint> {
     if at.elapsed() > REFERENCE_STALE_LIMIT {
         return None;
     }
+    // 用 IMU 时刻（仿真钟）算外推量：参考消息带的是它被算出的仿真时刻。
+    let now_sim = if inputs.imu.is_some() {
+        inputs.imu_time
+    } else {
+        msg.timestamp
+    };
+    let dt = (now_sim - msg.timestamp).clamp(0.0, REFERENCE_EXTRAPOLATE_LIMIT_S);
     inputs
         .frames
-        .reference(&msg, Instant::now(), ODOM_STALE_LIMIT)
+        .reference(&msg, Instant::now(), ODOM_STALE_LIMIT, dt)
 }
 
 /// 线上指令 → 状态机指令（`None` = 未知编码，忽略）。

@@ -23,6 +23,10 @@ pub struct ReferenceMessage {
     pub velocity_x: f64,
     pub velocity_y: f64,
     pub velocity_z: f64,
+    /// 参考加速度 `a`（m/s²，地图系；位置环前馈，消掉 a/kp 稳态滞后）。
+    pub acceleration_x: f64,
+    pub acceleration_y: f64,
+    pub acceleration_z: f64,
     /// 参考偏航角 yaw（rad，地图系 x 轴为零向，包装在 [-π,π]）。
     pub yaw: f64,
     /// 参考偏航角速度（rad/s）。
@@ -39,6 +43,9 @@ impl Default for ReferenceMessage {
             velocity_x: 0.0,
             velocity_y: 0.0,
             velocity_z: 0.0,
+            acceleration_x: 0.0,
+            acceleration_y: 0.0,
+            acceleration_z: 0.0,
             yaw: 0.0,
             yaw_dot: 0.0,
         }
@@ -52,8 +59,8 @@ mod tests {
     #[test]
     fn reference_message_is_plain_old_data() {
         let m = ReferenceMessage::default();
-        // 9 × f64（timestamp + 位置 3 + 速度 3 + yaw 2）
-        assert_eq!(std::mem::size_of::<ReferenceMessage>(), 72);
+        // 12 × f64（timestamp + 位置 3 + 速度 3 + 加速度 3 + yaw 2）
+        assert_eq!(std::mem::size_of::<ReferenceMessage>(), 96);
         assert!((m.timestamp + 1.0).abs() < 1e-9);
     }
 }

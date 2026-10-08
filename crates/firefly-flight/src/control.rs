@@ -33,6 +33,9 @@ pub struct PositionSetpoint {
     pub position: Vec3,
     /// 期望速度（m/s）。
     pub velocity: Vec3,
+    /// 期望加速度（m/s²，世界系）：位置环**前馈**项。缺它时跟踪滞后约
+    /// `a_ref / pos_kp`（1 m/s²、kp=2.2 → 0.45m，过弯明显切内道）。
+    pub acceleration: Vec3,
     /// 期望航向（rad，世界 Z；水平面内机体 `+X` 的方向）。
     pub yaw: f32,
     /// 期望航向角速度（rad/s，姿态内环前馈）。
@@ -100,8 +103,9 @@ pub fn position_mode(
     params: &QuadParams,
     ctl: &ControlParams,
 ) -> Wrench {
-    // 位置/速度 PD → 期望加速度；加上重力补偿得到所需外力（世界系）。
-    let a_des = ctl.pos_kp * (setpoint.position - state.position)
+    // 轨迹加速度前馈 + 位置/速度 PD → 期望加速度；加上重力补偿得到所需外力。
+    let a_des = setpoint.acceleration
+        + ctl.pos_kp * (setpoint.position - state.position)
         + ctl.vel_kp * (setpoint.velocity - state.velocity);
     let f_des = (a_des + Vec3::Z * G) * params.mass;
 

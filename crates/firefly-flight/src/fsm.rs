@@ -530,6 +530,7 @@ impl FlightFsm {
         PositionSetpoint {
             position: Vec3::new(self.target.x, self.target.y, self.ramp_z),
             velocity: Vec3::ZERO,
+            acceleration: Vec3::ZERO,
             yaw: self.target_yaw,
             yaw_rate: 0.0,
         }
@@ -939,6 +940,7 @@ mod tests {
         let setpoint = PositionSetpoint {
             position: Vec3::new(3.0, 4.0, 1.02),
             velocity: Vec3::new(0.5, 0.0, 0.0),
+            acceleration: Vec3::new(0.2, 0.0, 0.0),
             yaw: 0.3,
             yaw_rate: 0.0,
         };

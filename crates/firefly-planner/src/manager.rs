@@ -104,6 +104,8 @@ struct SwarmTraj {
 pub struct Reference {
     pub position: Vector3<f64>,
     pub velocity: Vector3<f64>,
+    /// 参考加速度（m/s²，地图系）：位置环前馈项。
+    pub acceleration: Vector3<f64>,
     /// 参考偏航角（rad，地图系 x 轴为零向，包装在 [-π,π]；对照官方
     /// `traj_server::calculate_yaw` 的限幅输出）。
     pub yaw: f64,
@@ -1397,6 +1399,7 @@ impl PlannerManager {
         Some(Reference {
             position: s.position,
             velocity: s.velocity,
+            acceleration: s.acceleration,
             yaw,
             yaw_dot,
         })
