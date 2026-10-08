@@ -22,7 +22,7 @@ max_baseline = 120 # 三角化深度/基线比上限（OpenVINS 默认 40）
 # 体素选点（Voxel-SVIO）：每帧只喂相机可见体素内的路标。参数对照官方调参
 # （EuRoC/TUM-VI）：voxel_size 0.3、nb_voxels_visited 2、min_distance_points 0.0。
 # 代码默认 0.1/±1 的邻域只有 ±0.1m，在真实特征间距（~0.3m）下几乎命中不了。
-voxel_selection = true
+voxel_selection = false
 voxel_size = 0.3
 neighbor_radius = 2
 min_point_distance = 0.0
