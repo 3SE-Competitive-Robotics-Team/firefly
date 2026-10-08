@@ -1381,6 +1381,12 @@ impl PlannerManager {
         (seg, samples)
     }
 
+    /// 当前轨迹在 `now` 的参考状态：只做求值，不推进规划状态、不改动轨迹。
+    /// 供两次规划之间以高于规划节拍的频率发布参考（把参考从阶跃变成连续采样）。
+    pub fn current_reference(&mut self, now: f64) -> Option<Reference> {
+        self.reference(now, None)
+    }
+
     /// 参考指令生成：正常态取轨迹在 `now` 的参考状态（时间连续）。
     /// 急停态按停车轨迹末端定点输出悬停参考。
     fn reference(&mut self, now: f64, _measured: Option<State>) -> Option<Reference> {

@@ -61,6 +61,9 @@ use crate::state_input::StateInput;
 
 /// 主循环频率（官方 `exec_timer` 0.1s）。
 const LOOP_PERIOD: Duration = Duration::from_millis(100);
+/// 参考发布节拍（50Hz）：重规划仍按 [`LOOP_PERIOD`] 的 10Hz 决策，中间只对
+/// 当前轨迹求值后补发参考——两者解耦，不增加规划开销。
+const REFERENCE_PERIOD: Duration = Duration::from_millis(20);
 /// 深度/odom 丢失阈值（秒），对照官方 `grid_map/odom_depth_timeout`
 /// 默认值 1.0（`plan_env/src/grid_map.cpp`）。
 const DEPTH_TIMEOUT: f64 = 1.0;
@@ -502,6 +505,7 @@ impl App {
     #[fastrace::trace]
     #[allow(clippy::too_many_lines)]
     fn step(&mut self) -> Result<()> {
+        let tick_start = Instant::now();
         // 先消费传感器（更新权威仿真时钟），再取当帧 sim 时刻
         self.poll_sensors()?;
         let now = self.t_sim;
@@ -601,7 +605,8 @@ impl App {
         } else {
             report.reference
         };
-        let reference = match self.heartbeat.decide(wall_time, self.heartbeat_timeout) {
+        let source = self.heartbeat.decide(wall_time, self.heartbeat_timeout);
+        let reference = match source {
             RefSource::Silent => None,
             RefSource::Hover => {
                 log::error!(
@@ -614,28 +619,12 @@ impl App {
         };
         // 本 tick 节拍在判定后记录（与官方「异步心跳 + 独立检查」新鲜度语义一致）
         self.heartbeat.observe(wall_time);
-        if let Some(reference) = reference
-            && self.state_input.current(Instant::now()).is_some()
-            && let Some(pub_) = &self.ref_pub
-        {
-            match pub_.publish(ReferenceMessage {
-                timestamp: now,
-                position_x: reference.position.x,
-                position_y: reference.position.y,
-                position_z: reference.position.z,
-                velocity_x: reference.velocity.x,
-                velocity_y: reference.velocity.y,
-                velocity_z: reference.velocity.z,
-                acceleration_x: reference.acceleration.x,
-                acceleration_y: reference.acceleration.y,
-                acceleration_z: reference.acceleration.z,
-                yaw: reference.yaw,
-                yaw_dot: reference.yaw_dot,
-            }) {
-                // 官方 last_pos_：超时悬停与跟踪共用最近指令位置
-                Ok(_) => self.last_ref_pos = Some(reference.position),
-                Err(e) => log::warn!("参考状态发布失败: {e}"),
-            }
+        if let Some(reference) = &reference {
+            self.publish_reference(reference, now);
+        }
+        // 跟踪态：规划节拍到点前按当前轨迹补发参考（50Hz）
+        if matches!(source, RefSource::Track) && !self.manager.is_finished() {
+            self.reference_subticks(tick_start)?;
         }
 
         // 可视化：新轨迹 / 无人机位姿 / 动态障碍（经 Firefly/Viz 发布）
@@ -677,6 +666,49 @@ impl App {
         Ok(())
     }
 
+    /// 发布一条参考状态；`now` 为仿真时刻（写进消息，飞控据此外推到当前时刻）。
+    fn publish_reference(&mut self, reference: &Reference, now: f64) {
+        if self.state_input.current(Instant::now()).is_none() {
+            return;
+        }
+        let Some(pub_) = &self.ref_pub else { return };
+        match pub_.publish(ReferenceMessage {
+            timestamp: now,
+            position_x: reference.position.x,
+            position_y: reference.position.y,
+            position_z: reference.position.z,
+            velocity_x: reference.velocity.x,
+            velocity_y: reference.velocity.y,
+            velocity_z: reference.velocity.z,
+            acceleration_x: reference.acceleration.x,
+            acceleration_y: reference.acceleration.y,
+            acceleration_z: reference.acceleration.z,
+            yaw: reference.yaw,
+            yaw_dot: reference.yaw_dot,
+        }) {
+            // 官方 last_pos_：超时悬停与跟踪共用最近指令位置
+            Ok(_) => self.last_ref_pos = Some(reference.position),
+            Err(e) => log::warn!("参考状态发布失败: {e}"),
+        }
+    }
+
+    /// 规划节拍到点前的参考补充：只对**当前轨迹**求值 + 发布，不做任何规划
+    /// 决策（重规划仍是 10Hz 节拍）；参考由此从 10Hz 阶跃变为 50Hz 采样，
+    /// 飞控外推残差随之减小。
+    fn reference_subticks(&mut self, tick_start: Instant) -> Result<()> {
+        let deadline = tick_start + LOOP_PERIOD;
+        while Instant::now() + REFERENCE_PERIOD < deadline {
+            std::thread::sleep(REFERENCE_PERIOD);
+            self.poll_sensors()?;
+            firefly_observability::set_sim_time(self.t_sim);
+            let Some(reference) = self.manager.current_reference(self.t_sim) else {
+                break;
+            };
+            self.publish_reference(&reference, self.t_sim);
+        }
+        Ok(())
+    }
+
     /// `WaitSet` 节拍驱动主循环：interval(10Hz)；SIGINT/SIGTERM → 优雅退出。
     fn run(&mut self) -> Result<()> {
         // 静态产物一次性记录（全局路径为 A* 简化缓存，不随 tick 重复写）
@@ -687,7 +719,7 @@ impl App {
             self.t_sim,
         );
         log::info!(
-            "主循环启动：10Hz，重规划阈值 {:.1}s，规划视界 {:.0}m",
+            "主循环启动：规划 10Hz / 参考 50Hz，重规划阈值 {:.1}s，规划视界 {:.0}m",
             self.manager_options.replan_thresh,
             self.manager_options.planning_horizon,
         );
