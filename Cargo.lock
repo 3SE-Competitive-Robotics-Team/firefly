@@ -5843,6 +5843,7 @@ dependencies = [
  "fastrace",
  "firefly-base",
  "firefly-error",
+ "firefly-map",
  "firefly-observability",
  "firefly-pubsub",
  "firefly-render",

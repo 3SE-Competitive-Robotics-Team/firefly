@@ -21,6 +21,7 @@ mod sensors;
 mod trace_bridge;
 mod ui;
 mod viewer_pose;
+mod voxels;
 
 use bevy::asset::AssetPlugin;
 use bevy::camera::visibility::RenderLayers;
@@ -43,6 +44,7 @@ use link::{
 use rig::{DRONE_LAYER, PoseState, spawn_rig};
 use scene::SceneSpec;
 use ui::{layout_viewports, setup_panel};
+use voxels::{setup_voxels, update_live_voxels};
 
 /// 以 RMUC 资产和初始摆位启动 Bevy；仿真位姿到达后更新机体与传感器。
 fn main() {
@@ -107,7 +109,7 @@ fn main() {
                 }),
         )
         .insert_resource(spec)
-        .insert_resource(render_config)
+        .insert_resource(render_config.clone())
         // 传感器渲染是计算链路的一环，不是可挂起的桌面窗口：失焦时也必须持续
         // 出图（Bevy 缺省失焦降到 1Hz，VIO 会拿到断流的图像而失稳）。
         .insert_resource(WinitSettings::continuous())
@@ -125,12 +127,13 @@ fn main() {
         .insert_non_send(ports)
         .insert_non_send(log_ipc)
         .add_plugins(CapturePlugin)
-        .add_systems(Startup, (setup_scene, spawn_rig, setup_panel))
+        .add_systems(Startup, (setup_scene, spawn_rig, setup_panel, setup_voxels))
         .add_systems(PreUpdate, poll_pose)
         .add_systems(
             Update,
             (
                 layout_viewports,
+                update_live_voxels,
                 follow_camera.run_if(freecam_off).after(follow_drone),
                 follow_drone,
                 tag_drone_layers,

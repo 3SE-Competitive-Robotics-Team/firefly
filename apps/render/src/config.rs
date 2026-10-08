@@ -118,8 +118,24 @@ impl Default for EnvConfig {
     }
 }
 
+/// 体素显示配置。
+#[derive(Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct VoxelsConfig {
+    /// 静态场地 `.ffmap` 路径（相对仓库根；缺文件则静态层不显示）。
+    pub field_map: String,
+}
+
+impl Default for VoxelsConfig {
+    fn default() -> Self {
+        Self {
+            field_map: "apps/planner/maps/rmuc2026.ffmap".to_owned(),
+        }
+    }
+}
+
 /// `configs/render.toml` 顶层：场景光照、相机曝光与深度退化。
-#[derive(Resource, Deserialize, Clone, Copy, Debug, Default)]
+#[derive(Resource, Deserialize, Clone, Debug, Default)]
 pub struct RenderConfig {
     /// 场景照明。
     #[serde(default)]
@@ -133,6 +149,9 @@ pub struct RenderConfig {
     /// 深度传感器退化模型。
     #[serde(default)]
     pub depth_noise: crate::depth_noise::DepthNoiseOptions,
+    /// 体素显示（静态场地 + 实时感知）。
+    #[serde(default)]
+    pub voxels: VoxelsConfig,
 }
 
 /// 读 `configs/render.toml`；缺文件/解析失败即报错退出。

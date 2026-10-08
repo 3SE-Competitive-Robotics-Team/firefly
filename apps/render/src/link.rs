@@ -25,6 +25,7 @@ use firefly_pubsub::odom::{GROUND_TRUTH_TOPIC, OdomMessage};
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::trace::TraceContext;
+use firefly_pubsub::viz::VizMessage;
 
 use crate::capture::{CaptureHub, CaptureRequest, CapturedFrame, SensorKind};
 use crate::process::{CaptureJob, ProcessedCapture, run_worker};
@@ -57,6 +58,8 @@ pub struct IpcPorts {
     /// 进程共享节点（最后释放：仅持有以延续生命周期，不直接调用）。
     #[allow(dead_code)]
     pub node: IpcNode,
+    /// 可视化订阅（`Firefly/Viz` 的体素消息，实时感知地图显示用）。
+    pub viz_sub: Option<Subscriber<VizMessage>>,
 }
 
 /// 打开全部 IPC 端口。
@@ -77,6 +80,7 @@ pub fn open_ports(offline: bool) -> Result<IpcPorts, firefly_error::Error> {
     let right_pub = Publisher::with_topic(&node, &topic(CAMERA_RIGHT_TOPIC))?;
     let depth_pub = Publisher::with_topic(&node, &topic(DEPTH_TOPIC))?;
     let pair_notify = TopicNotifier::with_topic(&node, &topic(CAMERA_PAIR_TOPIC))?;
+    let viz_sub = crate::voxels::open_subscription(&node);
     log::info!("IPC 就绪：订阅位姿，发布双目/深度，offline={offline}");
     Ok(IpcPorts {
         pose_sub,
@@ -85,6 +89,7 @@ pub fn open_ports(offline: bool) -> Result<IpcPorts, firefly_error::Error> {
         depth_pub,
         pair_notify,
         node,
+        viz_sub,
     })
 }
 

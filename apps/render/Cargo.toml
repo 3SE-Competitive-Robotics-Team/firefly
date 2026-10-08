@@ -19,6 +19,7 @@ firefly-base = { workspace = true }
 bevy = { workspace = true }
 fastrace = { workspace = true }
 firefly-error = { workspace = true }
+firefly-map = { workspace = true }
 firefly-observability = { workspace = true }
 firefly-pubsub = { workspace = true }
 firefly-render = { workspace = true }

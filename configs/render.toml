@@ -19,3 +19,8 @@ top = [0.72, 0.74, 0.78]
 mid = [0.45, 0.46, 0.49]
 bottom = [0.14, 0.14, 0.15]
 intensity = 3000.0
+
+[voxels]
+# 体素视图：静态场地从本地 `.ffmap` 读（与估计无关，完整显示）；实时感知订阅
+# `Firefly/Viz` 的 `plan/perceived`（planner 正在规划的那张图，用估计位姿摆出来）。
+field_map = "apps/planner/maps/rmuc2026.ffmap"
