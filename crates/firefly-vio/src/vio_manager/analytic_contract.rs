@@ -3,7 +3,7 @@ use super::*;
 use firefly_vio_core::{
     cam::{CamRadtan, SharedCamera},
     sensor::{CameraData, ImuData},
-    track::HistogramMethod,
+    track::{HistogramMethod, KeyPoint},
 };
 use firefly_vio_types::quat_ops::rot_2_quat;
 use nalgebra::{Matrix3, UnitQuaternion};
@@ -39,9 +39,11 @@ fn analytic_stereo_manager(voxel_selection: bool) -> (VioManager, Matrix3<f64>) 
     options.state_options.num_cameras = 2;
     options.voxel_options.enabled = voxel_selection;
     if voxel_selection {
-        // 解析点云间距 0.5~1m，放大体素使活跃轨迹邻域能覆盖路标体素
-        // （真实场景特征更密，用默认 0.1m）。
-        options.voxel_options.voxel_size = 0.5;
+        // 与 configs/vio.toml 一致（官方 EuRoC/TUM-VI 调参）。解析点云间距 0.5~1m，
+        // 需 0.3m 体素 ±2 邻域才能覆盖路标体素；代码默认 0.1m/±1 命中恒为 0。
+        options.voxel_options.voxel_size = 0.3;
+        options.voxel_options.neighbor_radius = 2;
+        options.voxel_options.min_point_distance = 0.0;
     }
     let mut manager = VioManager::new(options, cameras, tracker);
     let tilt = 20_f64.to_radians();
@@ -83,15 +85,16 @@ fn trajectory_rotation(t: f64) -> UnitQuaternion<f64> {
     UnitQuaternion::from_axis_angle(&Vector3::z_axis(), 0.2 * (0.5 * t).sin())
 }
 
-/// 解析双目点云（世界系，m）。
+/// 解析双目点云：8 层沿行进方向（x 间距 2m）+ 每层 20 点在 y/z 上以 0.15m
+/// 密排，使相机可见层内相邻点落在 0.3m 体素的 ±2 邻域内（真实特征密度）。
 fn analytic_points() -> Vec<Vector3<f64>> {
     (0..160)
         .map(|i| {
-            Vector3::new(
-                3. + f64::from(i % 16),
-                -3. + f64::from(i / 16) * 0.65,
-                0.2 + f64::from(i % 7) * 0.5,
-            )
+            let layer = i / 20;
+            let rem = i % 20;
+            let y = -0.3 + f64::from(rem % 5) * 0.15;
+            let z = 0.6 + f64::from(rem / 5) * 0.15;
+            Vector3::new(3.0 + f64::from(layer) * 2.0, y, z)
         })
         .collect()
 }
@@ -130,6 +133,7 @@ fn run_accelerated_trajectory(manager: &mut VioManager, rc: &Matrix3<f64>) -> Tr
             continue;
         }
         manager.propagate_and_clone(t);
+        let mut last: [Vec<(usize, f32, f32)>; 2] = [Vec::new(), Vec::new()];
         for (id, p) in points.iter().enumerate() {
             for (cam, y) in [(0, -0.025), (1, 0.025)] {
                 let pc =
@@ -145,8 +149,20 @@ fn run_accelerated_trajectory(manager: &mut VioManager, rc: &Matrix3<f64>) -> Tr
                         (pc.x / pc.z) as f32,
                         (pc.y / pc.z) as f32,
                     );
+                    last[cam].push((id, u as f32, v as f32));
                 }
             }
+        }
+        // 体素选点的查询源是 tracker 的 last obs（对照官方），一并写入。
+        for (cam, entries) in last.iter().enumerate() {
+            let pts = entries
+                .iter()
+                .map(|(_, u, v)| KeyPoint::new(*u, *v))
+                .collect();
+            let ids = entries.iter().map(|(id, _, _)| *id).collect();
+            manager
+                .track_feats
+                .set_last_observations(cam as i32, pts, ids);
         }
         manager.do_feature_propagate_update(&CameraData {
             timestamp: t,

@@ -8,6 +8,8 @@
 
 pub mod map;
 pub mod options;
+pub mod triangulator;
 
 pub use map::{VoxelKey, VoxelMap};
 pub use options::VoxelOptions;
+pub use triangulator::{ActiveTrackTriangulator, IntersectOptions, RayObservation};

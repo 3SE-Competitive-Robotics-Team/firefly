@@ -4,7 +4,7 @@
 //! 约定：路标位置由调用方状态持有，本结构存 `featid → 体素` 索引与每体素
 //! 访问节拍；`recent_voxels` 的查询位置取调用方当前帧三角化/估计位置。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::Vector3;
@@ -232,33 +232,24 @@ impl VoxelMap {
         recent
     }
 
-    /// 可见体素内待更新特征（对照 Voxel-SVIO `featureUpdate` 选点段）。
+    /// 可见体素内的代表特征（对照 Voxel-SVIO `featureUpdate` 选点段）。
     ///
-    /// 每可见体素的贡献限定在候选集内：`use_all_points=false` 时取块内首个在
-    /// 候选中的点（块首点不在候选则顺延，不丢掉整个体素）；`true` 时取块内全部
-    /// 候选点（保序）。缺失/已空/无候选的体素贡献空。`recent` 顺序即输出顺序，
-    /// 同输入输出确定。
+    /// `use_all_points=false`（默认）时每体素只取**块首**点（官方
+    /// `voxel_block.points.front()`）；块首对应的 feature 若已从库中消失，官方
+    /// 该体素不更新任何东西，这里同样只返回块首 id，由调用方按库内存在性取舍。
+    /// `true` 时返回块内全部点（保序）。缺失/已空体素跳过；`recent` 顺序即输出
+    /// 顺序。
     #[must_use]
-    pub fn select_constrained(
-        &self,
-        recent: &[VoxelKey],
-        candidates: &HashSet<usize>,
-    ) -> Vec<usize> {
+    pub fn select(&self, recent: &[VoxelKey]) -> Vec<usize> {
         let mut out = Vec::new();
         for key in recent {
             let Some(block) = self.blocks.get(key) else {
                 continue;
             };
             if self.options.use_all_points {
-                out.extend(
-                    block
-                        .points
-                        .iter()
-                        .map(|p| p.featid)
-                        .filter(|id| candidates.contains(id)),
-                );
-            } else if let Some(hit) = block.points.iter().find(|p| candidates.contains(&p.featid)) {
-                out.push(hit.featid);
+                out.extend(block.points.iter().map(|p| p.featid));
+            } else if let Some(front) = block.points.first() {
+                out.push(front.featid);
             }
         }
         out
@@ -577,26 +568,21 @@ mod tests {
         assert_consistent(&map);
     }
 
-    /// 候选集构造助手（全候选时用于复现每体素取首点语义）。
-    fn ids(list: &[usize]) -> HashSet<usize> {
-        list.iter().copied().collect()
-    }
-
+    /// 每体素只取块首点（对照官方 `points.front()`）。
     #[test]
-    fn select_first_only_by_default() {
+    fn select_takes_block_front_point_only() {
         let mut map = VoxelMap::new(VoxelOptions {
             min_point_distance: 0.0,
             ..VoxelOptions::default()
         });
         assert!(map.add_point(1, &Vector3::new(0.01, 0.0, 0.0)));
         assert!(map.add_point(2, &Vector3::new(0.02, 0.0, 0.0)));
-        let queries = [Vector3::new(0.01, 0.0, 0.0)];
-        let recent = map.recent_voxels(&queries, 1.0);
-        assert_eq!(map.select_constrained(&recent, &ids(&[1, 2])), vec![1]);
+        let recent = map.recent_voxels(&[Vector3::new(0.01, 0.0, 0.0)], 1.0);
+        assert_eq!(map.select(&recent), vec![1]);
     }
 
     #[test]
-    fn select_all_when_configured() {
+    fn select_all_points_when_configured() {
         let mut map = VoxelMap::new(VoxelOptions {
             min_point_distance: 0.0,
             use_all_points: true,
@@ -604,25 +590,20 @@ mod tests {
         });
         assert!(map.add_point(1, &Vector3::new(0.01, 0.0, 0.0)));
         assert!(map.add_point(2, &Vector3::new(0.02, 0.0, 0.0)));
-        let queries = [Vector3::new(0.01, 0.0, 0.0)];
-        let recent = map.recent_voxels(&queries, 1.0);
-        assert_eq!(map.select_constrained(&recent, &ids(&[1, 2])), vec![1, 2]);
+        let recent = map.recent_voxels(&[Vector3::new(0.01, 0.0, 0.0)], 1.0);
+        assert_eq!(map.select(&recent), vec![1, 2]);
     }
 
     #[test]
     fn select_skips_missing_keys_and_empty_input() {
         let map = test_map();
-        let all = ids(&[1]);
-        assert_eq!(map.select_constrained(&[], &all), [] as [usize; 0]);
-        assert_eq!(
-            map.select_constrained(&[VoxelKey(999, 999, 999)], &all),
-            [] as [usize; 0]
-        );
+        assert_eq!(map.select(&[]), [] as [usize; 0]);
+        assert_eq!(map.select(&[VoxelKey(999, 999, 999)]), [] as [usize; 0]);
     }
 
+    /// 块首点被移除后，同体素的下一个点顶上（插入序）。
     #[test]
-    fn constrained_select_stays_within_candidates() {
-        // 块首点不在候选时，选点在体素内顺延取候选，不丢掉整个体素。
+    fn select_promotes_next_point_after_front_removed() {
         let mut map = VoxelMap::new(VoxelOptions {
             min_point_distance: 0.0,
             ..VoxelOptions::default()
@@ -630,51 +611,15 @@ mod tests {
         map.add_point(1, &Vector3::new(0.01, 0.0, 0.0));
         map.add_point(2, &Vector3::new(0.02, 0.0, 0.0));
         let recent = map.recent_voxels(&[Vector3::new(0.01, 0.0, 0.0)], 1.0);
-        // 候选只有 2 → 选中恒为 2（即便块首是 1）。
-        assert_eq!(map.select_constrained(&recent, &ids(&[2])), vec![2]);
-        assert_consistent(&map);
+        assert_eq!(map.select(&recent), vec![1]);
+        map.remove_point(1).expect("indexed");
+        let recent = map.recent_voxels(&[Vector3::new(0.01, 0.0, 0.0)], 2.0);
+        assert_eq!(map.select(&recent), vec![2]);
     }
 
+    /// 每可见体素恰一个代表点、无重复、顺序随 `recent`，且可复现。
     #[test]
-    fn constrained_select_skips_voxels_without_candidates() {
-        // 无候选的体素贡献空，有候选的体素照常贡献（不互相牵连）。
-        let mut map = VoxelMap::new(VoxelOptions {
-            min_point_distance: 0.0,
-            ..VoxelOptions::default()
-        });
-        map.add_point(1, &Vector3::new(0.01, 0.0, 0.0));
-        map.add_point(2, &Vector3::new(5.0, 0.0, 0.0));
-        let queries = [Vector3::new(0.01, 0.0, 0.0), Vector3::new(5.0, 0.0, 0.0)];
-        let recent = map.recent_voxels(&queries, 1.0);
-        assert_eq!(recent.len(), 2);
-        let candidates: HashSet<usize> = [2].into_iter().collect();
-        assert_eq!(map.select_constrained(&recent, &candidates), vec![2]);
-    }
-
-    #[test]
-    fn constrained_select_all_points_intersects_candidates() {
-        let mut map = VoxelMap::new(VoxelOptions {
-            min_point_distance: 0.0,
-            use_all_points: true,
-            ..VoxelOptions::default()
-        });
-        map.add_point(1, &Vector3::new(0.01, 0.0, 0.0));
-        map.add_point(2, &Vector3::new(0.02, 0.0, 0.0));
-        map.add_point(3, &Vector3::new(0.03, 0.0, 0.0));
-        let recent = map.recent_voxels(&[Vector3::new(0.01, 0.0, 0.0)], 1.0);
-        // 保序取交集。
-        let candidates: HashSet<usize> = [3, 1].into_iter().collect();
-        assert_eq!(map.select_constrained(&recent, &candidates), vec![1, 3]);
-        // 空候选恒为空（调用方回落全量的触发条件）。
-        assert_eq!(
-            map.select_constrained(&recent, &HashSet::new()),
-            [] as [usize; 0]
-        );
-    }
-
-    #[test]
-    fn constrained_select_subset_property_over_mixed_map() {
-        // 混合地图上选中恒为候选子集、恒无重复（recent 去重保证）。
+    fn select_is_one_point_per_voxel_in_recent_order() {
         let mut map = VoxelMap::new(VoxelOptions {
             min_point_distance: 0.0,
             max_points_per_voxel: 10,
@@ -696,33 +641,26 @@ mod tests {
         // 先克隆再查询：`recent_voxels` 会盖 `last_visit`，同刻重放须从头开始。
         let mut map2 = map.clone();
         let recent = map.recent_voxels(&queries, 1.0);
-        // 只取偶数候选：每体素至多贡献一个。
-        let candidates: HashSet<usize> = (1..=20usize).filter(|id| id % 2 == 0).collect();
-        let selected = map.select_constrained(&recent, &candidates);
-        assert_ne!(selected, [] as [usize; 0]);
-        assert!(selected.iter().all(|id| candidates.contains(id)));
+        let selected = map.select(&recent);
+        assert_eq!(selected.len(), recent.len(), "每体素恰一个代表点");
         let mut dedup = selected.clone();
         dedup.sort_unstable();
         dedup.dedup();
         assert_eq!(dedup.len(), selected.len(), "选中出现重复");
-        // 同输入复算结果一致（确定性）。
         let recent2 = map2.recent_voxels(&queries, 1.0);
-        assert_eq!(map2.select_constrained(&recent2, &candidates), selected);
+        assert_eq!(map2.select(&recent2), selected);
     }
 
     #[test]
     fn multiframe_pipeline_end_to_end() {
-        // 整体输入输出：三帧脚本（收录 → 可见查询 → 约束选点 → 边缘化 →
-        // 跨体素搬家 → 次帧重查），断言每步输出与最终一致性。
+        // 整体输入输出：收录 → 可见查询 → 选点 → 边缘化 → 跨体素搬家 → 次帧重查。
         let mut map = VoxelMap::new(VoxelOptions {
             min_point_distance: 0.0,
             ..VoxelOptions::default()
         });
-        // 第 1 帧：两体素收录 4 点。
         for (id, x) in [(1usize, 0.01), (2, 0.02), (3, 5.0), (4, 5.02)] {
             assert!(map.add_point(id, &Vector3::new(x, 0.0, 3.0)));
         }
-        // 可见查询（含一块地图外位置）：只命中两体素。
         let queries = [
             Vector3::new(0.01, 0.0, 3.0),
             Vector3::new(5.0, 0.0, 3.0),
@@ -730,19 +668,17 @@ mod tests {
         ];
         let recent = map.recent_voxels(&queries, 1.0);
         assert_eq!(recent.len(), 2);
-        // 全候选：每体素取首点。
-        let all: HashSet<usize> = [1, 2, 3, 4].into_iter().collect();
-        assert_eq!(map.select_constrained(&recent, &all), vec![1, 3]);
-        // 边缘化首点 1：同体素候选 2 顶上，不丢体素。
+        assert_eq!(map.select(&recent), vec![1, 3]);
+        // 边缘化块首 1：同体素下一点 2 顶上。
         map.remove_point(1).expect("indexed");
         let recent = map.recent_voxels(&queries, 2.0);
-        assert_eq!(map.select_constrained(&recent, &all), vec![2, 3]);
-        // 路标 4 跨体素搬家到第一体素附近：首点仍是 2（插入序），全点模式含 4。
+        assert_eq!(map.select(&recent), vec![2, 3]);
+        // 路标 4 跨体素搬家：块首仍是 2，全点模式含 4。
         map.update_point(4, &Vector3::new(0.03, 0.0, 3.0))
             .expect("indexed");
         assert_eq!(map.num_voxels(), 2);
         let recent = map.recent_voxels(&queries, 3.0);
-        assert_eq!(map.select_constrained(&recent, &all), vec![2, 3]);
+        assert_eq!(map.select(&recent), vec![2, 3]);
         assert_consistent(&map);
     }
 }

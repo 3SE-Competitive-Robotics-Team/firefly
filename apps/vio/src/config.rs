@@ -168,6 +168,10 @@ mod tests {
         assert_eq!(cfg.frontend.num_pts, 300);
         assert!((cfg.estimator.max_baseline - 120.0).abs() < 1e-9);
         assert!(cfg.slam.voxel_selection, "部署配置须启用体素选点");
+        // 官方 EuRoC/TUM-VI 调参：0.1m/±1 的代码默认邻域命中过少。
+        assert!((cfg.slam.voxel_size - 0.3).abs() < 1e-12);
+        assert_eq!(cfg.slam.neighbor_radius, 2);
+        assert!((cfg.slam.min_point_distance - 0.0).abs() < 1e-12);
     }
 
     #[test]

@@ -2979,6 +2979,7 @@ version = "0.1.0"
 dependencies = [
  "fastrace",
  "firefly-error",
+ "firefly-vio-types",
  "log",
  "nalgebra",
  "serde",

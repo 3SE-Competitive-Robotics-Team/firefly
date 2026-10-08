@@ -13,6 +13,7 @@ readme.workspace = true
 [dependencies]
 fastrace = { workspace = true }
 firefly-error = { workspace = true }
+firefly-vio-types = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }
 serde = { workspace = true }

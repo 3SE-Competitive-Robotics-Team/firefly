@@ -348,6 +348,23 @@ impl TrackKlt {
             .map_or(&[], |s| s.ids_last.as_slice())
     }
 
+    /// 直接写入某相机的上一帧观测点与 id（合成算法评测夹具用；正常路径由
+    /// [`TrackKlt::feed_new_camera`] 从图像填充）。`pts` 与 `ids` 长度须一致。
+    ///
+    /// # Panics
+    /// `pts` 与 `ids` 长度不一致。
+    pub fn set_last_observations(
+        &mut self,
+        cam_sensor_id: i32,
+        pts: Vec<KeyPoint>,
+        ids: Vec<usize>,
+    ) {
+        assert_eq!(pts.len(), ids.len(), "观测点与 id 数量必须一致");
+        let state = self.cams.entry(sensor_key(cam_sensor_id)).or_default();
+        state.pts_last = pts;
+        state.ids_last = ids;
+    }
+
     /// 处理新相机数据（对照 `TrackKLT::feed_new_camera`）。
     ///
     /// 分发逻辑：单图 → `feed_monocular`；双图且 `use_stereo` → `feed_stereo`；
