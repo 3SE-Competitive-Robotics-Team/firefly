@@ -41,29 +41,19 @@ pub struct DepthCamera {
 }
 
 impl DepthCamera {
-    /// RMUC render 默认标定：深度相机在机体原点，垂直视场 70.88°，320×240。
-    /// - 相机看 `+x_body` 并下倾 20°；图右对应 `-y_body`，图下指向机体下方；
-    /// - `focal = (H/2)/tan(fovy/2) = 120/tan(35.44°) ≈ 168.6`；
-    /// - `rot_cam_to_body` 列 = 相机轴在机体系：`x=(0,-1,0)`、
-    ///   `y=(0.342,0,0.9397)`、`z=x×y=(-0.9397,0,0.342)`。
+    /// RMUC render 默认标定：深度相机与双目前脸齐平，垂直视场 70.88°，320×240。
+    /// 几何（机位、朝向、下倾、视场）全部来自 [`firefly_base::rig`]，此处不再复制。
     #[must_use]
     pub fn mujoco_default() -> Self {
-        let focal = 120.0 / (70.88_f64 / 2.0).to_radians().tan();
-        // 相机系 x/y/z 轴在机体系：x=(0,-1,0)、y=(0.342,0,0.9397)（下倾 20°）、
-        // z=x×y=(-0.9397,0,0.342)
-        let rot_cam_to_body = Matrix3::new(
-            0.0, 0.3420, -0.9397, //
-            -1.0, 0.0, 0.0, //
-            0.0, 0.9397, 0.3420,
-        );
+        let focal = (240.0 / 2.0) / (firefly_base::rig::FOV_Y_DEG.to_radians() / 2.0).tan();
         Self {
             focal,
             cx: 160.0,
             cy: 120.0,
             width: 320,
             height: 240,
-            rot_cam_to_body,
-            pos_in_body: Vector3::new(0.06, 0.0, 0.0),
+            rot_cam_to_body: firefly_base::rig::cam_axes_in_body(),
+            pos_in_body: Vector3::from(firefly_base::rig::DEPTH_IN_BODY),
             max_range: 8.0,
             pixel_step: 3,
         }

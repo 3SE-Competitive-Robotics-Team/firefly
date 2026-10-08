@@ -512,9 +512,9 @@ mod tests {
     /// 解出的机体系位姿应贴合真值（含旋转）。
     #[test]
     fn tilted_camera_full_chain() {
-        use crate::calibration::{MUJOCO_FOCAL, cam_pose_to_body, rot_cam_to_body};
+        use crate::calibration::{cam_pose_to_body, focal, rot_cam_to_body};
         let intrinsics = CameraIntrinsics {
-            focal: MUJOCO_FOCAL,
+            focal: focal(),
             cx: 160.0,
             cy: 120.0,
         };
@@ -539,8 +539,8 @@ mod tests {
             let v = rand() * 240.0;
             let d = rand() * 4.0 + 1.0;
             // 真相机 -Z 朝向：Xc=(dx*d, dy*d, -d)
-            let dx = (u - 160.0) / MUJOCO_FOCAL;
-            let dy = -(v - 120.0) / MUJOCO_FOCAL;
+            let dx = (u - 160.0) / focal();
+            let dy = -(v - 120.0) / focal();
             let xc = nalgebra::Vector4::new(dx * d, dy * d, -d, 1.0);
             let xw = t_world_cam * xc;
             p2.push([u as f32, v as f32]);

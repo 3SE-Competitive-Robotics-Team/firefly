@@ -18,7 +18,7 @@ use firefly_pubsub::vision::{
     POSE_OBS_TOPIC, PoseObservation,
 };
 use firefly_vision_map::VisionMap;
-use firefly_vision_match::calibration::{MUJOCO_FOCAL, body_pose_to_cam, cam_pose_to_body};
+use firefly_vision_match::calibration::{body_pose_to_cam, cam_pose_to_body, focal};
 use firefly_vision_match::{CameraIntrinsics, pose_covariance, solve_visual_pose};
 use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetAttachmentId;
@@ -504,7 +504,7 @@ fn observation_from_matches(
     }
     let total = pairs_2d.len();
     let intrinsics = CameraIntrinsics {
-        focal: MUJOCO_FOCAL,
+        focal: focal(),
         cx: 160.0,
         cy: 120.0,
     };

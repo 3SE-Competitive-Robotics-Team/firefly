@@ -26,9 +26,9 @@ const CY: f64 = 120.0;
 const BIAS_A_TRUE: Vector3<f64> = Vector3::new(0.05, -0.03, 0.02);
 const BIAS_G_TRUE: Vector3<f64> = Vector3::new(0.001, -0.0008, 0.0006);
 
-/// 场景相机外参旋转（body→camera），与 `apps/vio/src/main.rs` 一致。
+/// 场景相机外参旋转（body→camera，CV 光学约定）；唯一来源 `firefly_base::rig`。
 fn r_ito_c() -> Matrix3<f64> {
-    Matrix3::new(0.0, -1.0, 0.0, 0.0, 0.0, -1.0, 1.0, 0.0, 0.0)
+    firefly_base::rig::rot_ito_c()
 }
 
 fn build_manager_ex(max_slam: usize, do_fej: bool) -> VioManager {
@@ -71,8 +71,8 @@ fn build_manager_ex(max_slam: usize, do_fej: bool) -> VioManager {
     // 与 render::rig 几何一致：左目在机体 −Y；p_IinC = R_ItoC·(0 − t_cam_body)
     let r = r_ito_c();
     let q = rot_2_quat(&r);
-    let p_left_in_c = r * Vector3::new(0.06, 0.025, 0.0);
-    let p_right_in_c = r * Vector3::new(0.06, -0.025, 0.0);
+    let p_left_in_c = firefly_base::rig::p_i_in_c(firefly_base::FrameId::LEFT_CAMERA);
+    let p_right_in_c = firefly_base::rig::p_i_in_c(firefly_base::FrameId::RIGHT_CAMERA);
     for (cam_id, p) in [(0usize, p_left_in_c), (1usize, p_right_in_c)] {
         let calib = mgr.state.calib_imu_to_cam.get_mut(&cam_id).unwrap();
         calib.set_value(q, p);
@@ -282,11 +282,23 @@ fn run_cfg(cfg: &ScenarioCfg) -> (f64, f64, f64, f64, Vector3<f64>) {
         let p_body = p0 + v_gt * (t_cam - f64::from(static_frames) * dt_cam).max(0.0);
         let uv_l: Vec<_> = pts
             .iter()
-            .filter_map(|p| project(*p, p_body, Vector3::new(0.06, -0.025, 0.0)))
+            .filter_map(|p| {
+                project(
+                    *p,
+                    p_body,
+                    firefly_base::rig::position_in_body(firefly_base::FrameId::LEFT_CAMERA),
+                )
+            })
             .collect();
         let uv_r: Vec<_> = pts
             .iter()
-            .filter_map(|p| project(*p, p_body, Vector3::new(0.06, 0.025, 0.0)))
+            .filter_map(|p| {
+                project(
+                    *p,
+                    p_body,
+                    firefly_base::rig::position_in_body(firefly_base::FrameId::RIGHT_CAMERA),
+                )
+            })
             .collect();
         let zeros = || GrayImage {
             width: W,
@@ -417,17 +429,21 @@ fn sensor_only_stationary_startup() {
     let mut mgr = build_manager_ex(0, true);
     let pts = world_points();
     let position = Vector3::new(0.0, 0.0, 1.0);
-    let images: Vec<_> = [-0.025, 0.025]
-        .into_iter()
-        .enumerate()
-        .map(|(i, y)| {
-            let uv: Vec<_> = pts
-                .iter()
-                .filter_map(|p| project(*p, position, Vector3::new(0.0, y, 0.0)))
-                .collect();
-            render_dots(&uv, i + 1, 7)
-        })
-        .collect();
+    let images: Vec<_> = [
+        firefly_base::FrameId::LEFT_CAMERA,
+        firefly_base::FrameId::RIGHT_CAMERA,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, camera)| {
+        let offset = firefly_base::rig::position_in_body(camera);
+        let uv: Vec<_> = pts
+            .iter()
+            .filter_map(|p| project(*p, position, offset))
+            .collect();
+        render_dots(&uv, i + 1, 7)
+    })
+    .collect();
     for k in 0..=250 {
         let time = 10.0 + f64::from(k) * 0.01;
         mgr.feed_measurement_imu(&ImuData {

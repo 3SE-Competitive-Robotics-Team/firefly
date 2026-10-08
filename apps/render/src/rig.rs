@@ -20,17 +20,22 @@ use firefly_render::camera::FollowCamera;
 
 use crate::config::RenderConfig;
 
-/// 垂直视场（度）。
-pub const FOV_Y_DEG: f32 = 70.88;
-/// 相机下倾角（度）。
-pub const DOWNTILT_DEG: f32 = 20.0;
-/// 左目在机体系偏移（米）：机头最前方（机身半长 0.055，鼻尖前 5mm）。
-pub const LEFT_OFFSET: Vec3 = Vec3::new(0.06, -0.025, 0.0);
-/// 右目在机体系偏移（米）。
-/// 右目在机体系偏移（米）：与左目同前脸，基线 5cm。
-pub const RIGHT_OFFSET: Vec3 = Vec3::new(0.06, 0.025, 0.0);
-/// 深度相机在机体系偏移（米）：与双目前脸齐平。
-pub const DEPTH_OFFSET: Vec3 = Vec3::new(0.06, 0.0, 0.0);
+/// 垂直视场（度）；来源 [`firefly_base::rig::FOV_Y_DEG`]。
+pub const FOV_Y_DEG: f32 = firefly_base::rig::FOV_Y_DEG as f32;
+/// 相机下倾角（度）；来源 [`firefly_base::rig::DOWNTILT_DEG`]。
+pub const DOWNTILT_DEG: f32 = firefly_base::rig::DOWNTILT_DEG as f32;
+
+/// 机体系位置（f64 米）→ Bevy `Vec3`。
+const fn body_vec(p: [f64; 3]) -> Vec3 {
+    Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32)
+}
+
+/// 左目在机体系偏移（米）；来源 [`firefly_base::rig::LEFT_IN_BODY`]。
+pub const LEFT_OFFSET: Vec3 = body_vec(firefly_base::rig::LEFT_IN_BODY);
+/// 右目在机体系偏移（米）；来源 [`firefly_base::rig::RIGHT_IN_BODY`]。
+pub const RIGHT_OFFSET: Vec3 = body_vec(firefly_base::rig::RIGHT_IN_BODY);
+/// 深度相机在机体系偏移（米）；来源 [`firefly_base::rig::DEPTH_IN_BODY`]。
+pub const DEPTH_OFFSET: Vec3 = body_vec(firefly_base::rig::DEPTH_IN_BODY);
 /// 传感器近平面（米，与深度有效下限一致）。
 pub const SENSOR_NEAR: f32 = 0.05;
 /// 传感器远平面（米，仅文档口径：`Bevy` 用无限远反向 Z，远裁剪由
@@ -80,16 +85,18 @@ pub struct SensorTargets {
 /// 机体位姿 + 相机 mounting 偏移 → 相机世界变换。
 #[must_use]
 pub fn eye_transform(pos: Vec3, quat: Quat, offset: Vec3) -> Transform {
-    let tilt = DOWNTILT_DEG.to_radians();
-    let x_cam = Vec3::new(0.0, -1.0, 0.0);
-    let y_cam = Vec3::new(tilt.sin(), 0.0, tilt.cos());
-    let z_cam = x_cam.cross(y_cam);
-    let mount = Quat::from_mat3(&Mat3::from_cols(x_cam, y_cam, z_cam));
     Transform {
         translation: pos + quat * offset,
-        rotation: quat * mount,
+        rotation: quat * cam_mount(),
         ..default()
     }
+}
+
+/// 相机 mounting 旋转（相机轴 → 机体系，列 = 相机轴）；来源 [`firefly_base::rig`]。
+fn cam_mount() -> Quat {
+    let a = firefly_base::rig::cam_axes_in_body();
+    let col = |c: usize| Vec3::new(a[(0, c)] as f32, a[(1, c)] as f32, a[(2, c)] as f32);
+    Quat::from_mat3(&Mat3::from_cols(col(0), col(1), col(2)))
 }
 
 /// 传感器投影（固定分辨率，纵横比不跟随窗口）。

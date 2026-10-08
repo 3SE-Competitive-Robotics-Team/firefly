@@ -7,35 +7,30 @@
 use firefly_base::{FrameId, RigidTransform};
 use nalgebra::{Matrix3, Matrix4};
 
-/// 像素焦距（`fx=fy`，`120/tan(70.88°/2)`，与离线建库同公式）。
-pub const MUJOCO_FOCAL: f64 = 168.606_993_943_649_97;
-/// 左目在机体系的位置（米，`render::rig::LEFT_OFFSET`：机头最前方）。
-pub const LEFT_POS_IN_BODY: [f64; 3] = [0.06, -0.025, 0.0];
-
-/// 相机 → 机体旋转（列 = 相机轴在机体系坐标，与 `DepthCamera` 一致）。
+/// 像素焦距（`fx=fy`）：`(H/2)/tan(FOV_Y/2)`，由 [`firefly_base::rig::FOV_Y_DEG`]
+/// 派生，不再单独维护字面量。
 #[must_use]
-pub fn rot_cam_to_body() -> Matrix3<f64> {
-    Matrix3::new(
-        0.0, 0.3420, -0.9397, //
-        -1.0, 0.0, 0.0, //
-        0.0, 0.9397, 0.3420,
-    )
+pub fn focal() -> f64 {
+    // 图像高 240 px（与 render/发布一致）。
+    (240.0 / 2.0) / (firefly_base::rig::FOV_Y_DEG.to_radians() / 2.0).tan()
 }
 
-/// 标定外参 `body←left_camera`；相机轴为右、上、后（光轴 -Z）。
+/// 左目在机体系的位置（米）；来源 [`firefly_base::rig::LEFT_IN_BODY`]。
+pub const LEFT_POS_IN_BODY: [f64; 3] = firefly_base::rig::LEFT_IN_BODY;
+
+/// 相机 → 机体旋转（列 = 相机轴在机体系）；来源 [`firefly_base::rig`]。
+#[must_use]
+pub fn rot_cam_to_body() -> Matrix3<f64> {
+    firefly_base::rig::cam_axes_in_body()
+}
+
+/// 标定外参 `body←left_camera`；来源 [`firefly_base::rig`]。
+///
 /// # Panics
 /// 编译时标定常量不是有限刚体变换。
 #[must_use]
 pub fn body_from_left_camera() -> RigidTransform {
-    let rotation = nalgebra::UnitQuaternion::from_matrix(&rot_cam_to_body());
-    let q = rotation.quaternion();
-    RigidTransform::from_parts(
-        FrameId::BODY,
-        FrameId::LEFT_CAMERA,
-        LEFT_POS_IN_BODY,
-        [q.i, q.j, q.k, q.w],
-    )
-    .expect("finite unit camera calibration")
+    firefly_base::rig::body_from_camera(FrameId::LEFT_CAMERA)
 }
 
 /// `T_map_body = T_map_camera T_body_camera⁻¹`。
@@ -62,23 +57,15 @@ pub fn body_pose_to_cam(t_body: &Matrix4<f64>) -> Matrix4<f64> {
         .matrix()
 }
 
-/// 左目←前置深度相机，两者具有相同安装朝向（仅差 2.5cm 横向基线）。
+/// 左目←前置深度相机，两者同朝向（仅差 2.5cm 横向基线）；来源 [`firefly_base::rig`]。
+///
 /// # Panics
 /// 编译时标定常量不是有限刚体变换。
 #[must_use]
 pub fn left_from_depth() -> RigidTransform {
-    let body_left = body_from_left_camera();
-    let q = body_left.isometry().rotation.quaternion();
-    let body_depth = RigidTransform::from_parts(
-        FrameId::BODY,
-        FrameId::DEPTH_CAMERA,
-        [0.06, 0.0, 0.0],
-        [q.i, q.j, q.k, q.w],
-    )
-    .expect("depth camera calibration");
-    body_left
+    firefly_base::rig::body_from_camera(FrameId::LEFT_CAMERA)
         .inverse()
-        .compose(&body_depth)
+        .compose(&firefly_base::rig::body_from_camera(FrameId::DEPTH_CAMERA))
         .expect("left-body-depth chain")
 }
 
@@ -88,7 +75,7 @@ pub fn pinhole() -> crate::depth::Pinhole {
     crate::depth::Pinhole {
         width: 320,
         height: 240,
-        focal: MUJOCO_FOCAL,
+        focal: focal(),
         cx: 160.,
         cy: 120.,
     }
@@ -129,7 +116,8 @@ mod tests {
 
     #[test]
     fn focal_matches_formula() {
-        let f = 120.0 / (70.88_f64 / 2.0).to_radians().tan();
-        assert!((f - MUJOCO_FOCAL).abs() < 1e-9);
+        // 钉住派生值：FOV_Y=70.88°、H=240 时 focal ≈ 168.60699394364997，
+        // 与离线建库/发布一致；改动 `rig::FOV_Y_DEG` 会在此处暴露。
+        assert!((focal() - 168.606_993_943_649_97).abs() < 1e-9);
     }
 }

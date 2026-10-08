@@ -14,7 +14,7 @@ use firefly_vio_types::var::{PoseJpl, Variable};
 use nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 
 fn r_ito_c() -> Matrix3<f64> {
-    Matrix3::new(0.0, -1.0, 0.0, 0.0, 0.0, -1.0, 1.0, 0.0, 0.0)
+    firefly_base::rig::rot_ito_c()
 }
 
 /// 单相机 + 3 个克隆位姿的状态；特征在正前方 5m。
@@ -47,7 +47,7 @@ fn build_state_with_options(opts: StateOptions) -> (State, Feature) {
     // 外参：与 apps/vio 一致（p_IinC = R_ItoC·(−t_cam_body)）
     let r = r_ito_c();
     let q = rot_2_quat(&r);
-    let p_left_in_c = r * Vector3::new(0.0, 0.025, 0.0);
+    let p_left_in_c = firefly_base::rig::p_i_in_c(firefly_base::FrameId::LEFT_CAMERA);
     let c0 = st.calib_imu_to_cam.get_mut(&0usize).unwrap();
     c0.set_value(q, p_left_in_c);
     c0.set_fej(q, p_left_in_c);
@@ -101,7 +101,7 @@ fn build_state_with_options(opts: StateOptions) -> (State, Feature) {
         p_FinG: p_fg,
         ..Feature::default()
     };
-    let lever_body = Vector3::new(0.06, -0.025, 0.0); // 左目（机头）
+    let lever_body = firefly_base::rig::position_in_body(firefly_base::FrameId::LEFT_CAMERA);
     for t in [1.0f64, 2.0, 3.0] {
         let p_body = p_fg - Vector3::new(t, 0.0, 1.0);
         let pc = r * (p_body - lever_body);

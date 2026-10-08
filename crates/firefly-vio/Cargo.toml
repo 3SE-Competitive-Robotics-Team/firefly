@@ -24,4 +24,5 @@ nalgebra = { workspace = true }
 workspace = true
 
 [dev-dependencies]
+firefly-base = { workspace = true }
 firefly-observability = { workspace = true }

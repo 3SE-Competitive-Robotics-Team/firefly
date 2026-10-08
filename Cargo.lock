@@ -2805,6 +2805,7 @@ name = "firefly-map"
 version = "0.1.0"
 dependencies = [
  "fastrace",
+ "firefly-base",
  "firefly-error",
  "log",
  "nalgebra",
@@ -2916,6 +2917,7 @@ name = "firefly-vio"
 version = "0.1.0"
 dependencies = [
  "fastrace",
+ "firefly-base",
  "firefly-error",
  "firefly-observability",
  "firefly-vio-core",
@@ -5839,6 +5841,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "fastrace",
+ "firefly-base",
  "firefly-error",
  "firefly-observability",
  "firefly-pubsub",
@@ -6865,6 +6868,7 @@ name = "vio"
 version = "0.1.0"
 dependencies = [
  "fastrace",
+ "firefly-base",
  "firefly-error",
  "firefly-observability",
  "firefly-pubsub",

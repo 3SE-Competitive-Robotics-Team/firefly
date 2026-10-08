@@ -148,7 +148,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 相机外参（IMU→cam）：R_ItoC + p_IinC（OpenVINS JPL 约定），见
     // [`mujoco_stereo_extrinsic`]。p_IinC = IMU 原点在相机系。
-    let (q_ito_c, [p_left_in_c, p_right_in_c]) = mujoco_stereo_extrinsic(cfg.camera.baseline);
+    // 机位几何唯一来源是 `firefly-base::rig`；配置里的基线只作一致性检查。
+    if (cfg.camera.baseline - firefly_base::rig::BASELINE).abs() > 1e-12 {
+        return Err(format!(
+            "configs/vio.toml baseline {} 与 firefly-base::rig::BASELINE {} 不一致",
+            cfg.camera.baseline,
+            firefly_base::rig::BASELINE
+        )
+        .into());
+    }
+    let (q_ito_c, [p_left_in_c, p_right_in_c]) = mujoco_stereo_extrinsic();
     for (cam_id, p_iin_c) in [(0usize, p_left_in_c), (1usize, p_right_in_c)] {
         let calib = vio
             .state
@@ -542,27 +551,26 @@ fn log_viz(
 /// `p_IinC = -R_ItoC · p_CinI` ⇒ `(±baseline/2, 0, 0)`。
 /// 注意：误填体系值会经 R 旋成沿视线方向的纵向基线——立体视差恒为零，
 /// 三角化全部退化。
+/// 双目相机-IMU 外参 `(q_ItoC, [p_IinC_left, p_IinC_right])`；机位几何全部来自
+/// [`firefly_base::rig`]（唯一来源）。
+///
+/// JPL 四元数 (x, y, z, w)：必须用项目的 [`rot_2_quat`]（Trawny Eq.74，与
+/// `PoseJpl::rot` 的 `quat_2_rot` 互逆）。nalgebra 的 `UnitQuaternion` 是
+/// Hamilton 约定，直接喂给 JPL 估计器等效于转置旋转（相机“侧装”、立体基线
+/// 变纵向，视觉更新全部退化的根因）。
 #[must_use]
-fn mujoco_stereo_extrinsic(baseline: f64) -> (nalgebra::Vector4<f64>, [nalgebra::Vector3<f64>; 2]) {
+fn mujoco_stereo_extrinsic() -> (nalgebra::Vector4<f64>, [nalgebra::Vector3<f64>; 2]) {
+    use firefly_base::{FrameId, rig};
     use firefly_vio_types::quat_ops::rot_2_quat;
-    use nalgebra::{Matrix3, Vector3};
-    // R_ItoC: body -> camera（行 = 相机轴在 body 下；下倾 20° 版，见上）
-    let r_ito_c = Matrix3::new(
-        0.0, -1.0, 0.0, //
-        -0.3420, 0.0, -0.9397, //
-        0.9397, 0.0, -0.3420,
-    );
-    // JPL 四元数 (x, y, z, w)。必须用项目的 rot_2_quat（Trawny Eq.74，与
-    // `PoseJpl::rot` 的 quat_2_rot 互逆）——nalgebra 的 UnitQuaternion 是
-    // Hamilton 约定，直接喂给 JPL 估计器等效于转置旋转（相机"侧装"、
-    // 立体基线变纵向，视觉更新全部退化的根因）。
+    let r_ito_c = rig::rot_ito_c();
     let q_vec = rot_2_quat(&r_ito_c);
-    // p_IinC = -R_ItoC · p_CinI；以 render::rig 安装位置为准：cam_left 在
-    // body -y、cam_right 在 body +y 各 baseline/2 ⇒ p_IinC=(∓baseline/2,0,0)。
-    let half = baseline / 2.0;
-    let p_left_in_c = Vector3::new(-half, 0.0, 0.0);
-    let p_right_in_c = Vector3::new(half, 0.0, 0.0);
-    (q_vec, [p_left_in_c, p_right_in_c])
+    (
+        q_vec,
+        [
+            rig::p_i_in_c(FrameId::LEFT_CAMERA),
+            rig::p_i_in_c(FrameId::RIGHT_CAMERA),
+        ],
+    )
 }
 
 #[cfg(test)]
@@ -577,7 +585,7 @@ mod tests {
     /// 取 `Rᵀ` 的列（即 R 的行）。
     #[test]
     fn camera_forward_is_body_x() {
-        let (q, _) = mujoco_stereo_extrinsic(0.05);
+        let (q, _) = mujoco_stereo_extrinsic();
         let r = quat_2_rot(&q);
         // 视轴 +z 在 body 下 = 前下 20°（`depth` 中心斜距 1/sin20° 实测）
         let cam_fwd = r.transpose() * Vector3::new(0.0, 0.0, 1.0);
@@ -587,13 +595,32 @@ mod tests {
         assert!((cam_down - Vector3::new(-0.3420, 0.0, -0.9397)).norm() < 1e-4);
     }
 
+    /// 绝对外参必须能还原 `firefly_base::rig` 的安装位置（只查基线方向会漏掉机位前移）。
+    #[test]
+    fn stereo_extrinsic_matches_rig_mounting() {
+        use firefly_base::{FrameId, rig};
+        let (q_ito_c_vec, [p_left_in_c, p_right_in_c]) = mujoco_stereo_extrinsic();
+        let r_ito_c = quat_2_rot(&q_ito_c_vec);
+        for (p_iin_c, camera) in [
+            (p_left_in_c, FrameId::LEFT_CAMERA),
+            (p_right_in_c, FrameId::RIGHT_CAMERA),
+        ] {
+            // p_CinI = −R_ItoCᵀ · p_IinC 必须回到 rig 的安装位置。
+            let restored = -r_ito_c.transpose() * p_iin_c;
+            let expect = rig::position_in_body(camera);
+            assert!(
+                (restored - expect).norm() < 1e-9,
+                "{camera:?} 安装位置应为 {expect:?}，实得 {restored:?}"
+            );
+        }
+    }
+
     /// 基线语义：经 `p_ciinG = p_IinG - R_GtoCi^T · p_IinC` 还原的世界系相机
     /// 位置差必须落在 **横向（body ±y / world ±y）**——纵向基线无立体视差，
     /// 三角化全部退化。
     #[test]
     fn stereo_baseline_is_lateral() {
-        let baseline = 0.05;
-        let (q_ito_c_vec, [p_left_in_c, p_right_in_c]) = mujoco_stereo_extrinsic(baseline);
+        let (q_ito_c_vec, [p_left_in_c, p_right_in_c]) = mujoco_stereo_extrinsic();
         let r_ito_c = quat_2_rot(&q_ito_c_vec);
         // 水平姿态（R_GtoI = I）下的两相机世界位置
         let p_ciin_g = |p_iin_c: &nalgebra::Vector3<f64>| {
@@ -602,6 +629,7 @@ mod tests {
         let delta = p_ciin_g(&p_right_in_c) - p_ciin_g(&p_left_in_c);
         assert!(delta.x.abs() < 1e-9, "基线不得有前向分量: {delta}");
         assert!(delta.z.abs() < 1e-9, "基线不得有竖直分量: {delta}");
+        let baseline = firefly_base::rig::BASELINE;
         assert!(
             (delta.y.abs() - baseline).abs() < 1e-9,
             "基线长度应为 {baseline}m: {delta}"
