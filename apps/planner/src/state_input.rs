@@ -77,6 +77,13 @@ impl StateInput {
             return false;
         }
         let Some(snapshot) = Snapshot::from_message(message) else {
+            if self.last_receive.is_some() && !self.stopped {
+                log::warn!(
+                    "收到无效地图系里程计（is_initialized={} t={:.3}），锁存停止规划",
+                    message.is_initialized,
+                    message.timestamp
+                );
+            }
             self.stopped = self.last_receive.is_some();
             return false;
         };
@@ -105,6 +112,12 @@ impl StateInput {
             .last_receive
             .is_some_and(|last| now.duration_since(last) >= MAX_AGE)
         {
+            if !self.stopped {
+                log::warn!(
+                    "地图系里程计墙钟中断 ≥{}ms，锁存停止规划",
+                    MAX_AGE.as_millis()
+                );
+            }
             self.stopped = true;
         }
     }
