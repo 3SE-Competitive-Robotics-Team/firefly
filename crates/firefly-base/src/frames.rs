@@ -97,6 +97,17 @@ impl RigidTransform {
     pub const fn source(&self) -> FrameId {
         self.source
     }
+    /// 由已合成的 `Isometry` 构造，并使用与 [`RigidTransform::from_parts`] 相同的
+    /// 校验（有限值、单位四元数、同系恒等）。
+    fn from_isometry(target: FrameId, source: FrameId, pose: Isometry3<f64>) -> Result<Self> {
+        let q = pose.rotation.quaternion();
+        Self::from_parts(
+            target,
+            source,
+            pose.translation.vector.into(),
+            [q.i, q.j, q.k, q.w],
+        )
+    }
     #[must_use]
     pub fn matrix(&self) -> Matrix4<f64> {
         self.pose.to_homogeneous()
@@ -120,23 +131,16 @@ impl RigidTransform {
         if self.source != rhs.target {
             return Err(invalid("transform composition frame mismatch"));
         }
-        let pose = self.pose * rhs.pose;
-        let q = pose.rotation.quaternion();
-        Self::from_parts(
-            self.target,
-            rhs.source,
-            pose.translation.vector.into(),
-            [q.i, q.j, q.k, q.w],
-        )
+        Self::from_isometry(self.target, rhs.source, self.pose * rhs.pose)
     }
     #[must_use]
     pub fn point(&self, p: Point3<f64>) -> Point3<f64> {
-        self.pose * p
+        self.pose.transform_point(&p)
     }
     /// 同一物理向量换基；不包含时变参考系的输运速度。
     #[must_use]
     pub fn vector(&self, v: Vector3<f64>) -> Vector3<f64> {
-        self.pose.rotation * v
+        self.pose.transform_vector(&v)
     }
     /// SE(3) 伴随矩阵，扭量顺序 `[rotation, translation]`。
     #[must_use]
@@ -192,16 +196,20 @@ impl FrameTree {
         self.parents.insert(t.source, t);
         Ok(())
     }
+    /// 累乘到根。边均由 [`FrameTree::set`] 校验过（合法刚体变换），故乘积仍合法，
+    /// 直接构造不再重复校验。
     fn to_root(&self, frame: FrameId) -> RigidTransform {
-        let mut result = RigidTransform::identity(frame);
-        while let Some(edge) = self.parents.get(&result.target) {
-            result = RigidTransform {
-                target: edge.target,
-                source: frame,
-                pose: edge.pose * result.pose,
-            };
+        let mut pose = Isometry3::identity();
+        let mut target = frame;
+        while let Some(edge) = self.parents.get(&target) {
+            pose = edge.pose * pose;
+            target = edge.target;
         }
-        result
+        RigidTransform {
+            target,
+            source: frame,
+            pose,
+        }
     }
     /// 经公共祖先查询 target←source，支持反向查询。
     /// # Errors
@@ -223,7 +231,8 @@ impl FrameTree {
                 "disconnected coordinate frames",
             ));
         }
-        a.inverse().compose(&b)
+        // T_target_source = T_root_target⁻¹ · T_root_source（`inv_mul` 即 `self⁻¹·rhs`）。
+        RigidTransform::from_isometry(target, source, a.pose.inv_mul(&b.pose))
     }
 }
 fn invalid(message: &str) -> Error {
