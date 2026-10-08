@@ -44,7 +44,8 @@ pub const SENSOR_FAR: f32 = 100.0;
 
 /// 场地 mesh 层：所有相机都渲染。
 pub const WORLD_LAYER: usize = 0;
-/// 仅主视角渲染的机体层：传感器相机位于机体内，必须排除机体模型，否则自遮挡。
+/// 机体模型层：两个 3D 视图都渲染（作为空间参照）；传感器相机位于机体内，
+/// 必须排除机体模型，否则自遮挡。
 pub const DRONE_LAYER: usize = 1;
 /// 仅体素视图渲染的数据层：传感器图像是 VIO/深度的输入，任何调试几何都必须
 /// 排除在这一层之外，否则会被当成真实场景写进发布数据。
@@ -229,7 +230,7 @@ pub fn spawn_rig(
         Exposure {
             ev100: config.view.viewer_ev100(),
         },
-        RenderLayers::from_layers(&[WORLD_LAYER, PATH_LAYER]),
+        RenderLayers::from_layers(&[WORLD_LAYER, DRONE_LAYER, PATH_LAYER]),
         env,
         // 第三人称追踪（与 `apps/quad` 同一实现 `firefly-render`）；自由浏览模式下
         // 让位给 `freecam::freecam_move`（见 `main.rs` 的运行条件）。
@@ -257,7 +258,7 @@ pub fn spawn_rig(
         },
         Msaa::Off,
         Tonemapping::None,
-        RenderLayers::from_layers(&[VOXEL_LAYER, PATH_LAYER]),
+        RenderLayers::from_layers(&[VOXEL_LAYER, DRONE_LAYER, PATH_LAYER]),
         VoxelView,
     ));
 
