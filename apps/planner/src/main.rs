@@ -68,6 +68,11 @@ const DEPTH_TIMEOUT: f64 = 1.0;
 const PERCEIVED_PERIOD: usize = 25;
 /// 地图衰减周期（帧；10Hz 循环下 5 帧 = 0.5s，对照官方 `fading_timer` 2Hz）。
 const FADE_TICKS: usize = 5;
+/// 实时感知体素的显示半径（米）：以机体为中心的立方窗口。
+///
+/// 不用 `local_update_range`——它按整段局部更新范围，窗口里连整片地板一起算，
+/// 占用格数仍超 `VOXELS_MAX`；4m @0.15m 约几千格，既不截断又跟得上机体。
+const PERCEIVED_VIEW_RADIUS_M: f64 = 4.0;
 /// `configs/planner.toml` 缺省路径（相对运行目录，通常为仓库根）。
 const DEFAULT_CONFIG: &str = "configs/planner.toml";
 
@@ -841,7 +846,11 @@ impl App {
     /// `center` 周围 `local_update_range` 对应的窗口索引范围（闭区间，已裁剪
     /// 到栅格内）；越界返回 `None`。
     fn window_bounds(map: &GridMap, center: Vector3<f64>) -> Option<([usize; 3], [usize; 3])> {
-        let range = map.local_update_range();
+        let range = Vector3::new(
+            PERCEIVED_VIEW_RADIUS_M,
+            PERCEIVED_VIEW_RADIUS_M,
+            PERCEIVED_VIEW_RADIUS_M,
+        );
         let origin = map.origin();
         let res = map.resolution();
         let dims = map.dims();
