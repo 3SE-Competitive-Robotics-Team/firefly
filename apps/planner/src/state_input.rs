@@ -261,6 +261,8 @@ pub struct QualityInput {
     latest: Option<(firefly_pubsub::odom::LocalizationStatus, Instant)>,
     ready_once: bool,
     stopped: bool,
+    /// 累计收到的状态条数（区分「没收到」与「收到但未就绪」）。
+    observed: usize,
 }
 impl QualityInput {
     pub fn observe(&mut self, status: firefly_pubsub::odom::LocalizationStatus, now: Instant) {
@@ -273,6 +275,15 @@ impl QualityInput {
         {
             return;
         }
+        if self.latest.is_none() {
+            log::info!(
+                "首个 LocalizationStatus：tracking_ready={} visual_t={:.3} disagreement={:.3}",
+                status.tracking_ready,
+                status.visual_timestamp,
+                status.position_disagreement
+            );
+        }
+        self.observed += 1;
         self.stopped |= self.ready_once
             && (!status.tracking_ready
                 || self
@@ -292,6 +303,16 @@ impl QualityInput {
     }
     pub fn stopped(&self) -> bool {
         self.stopped
+    }
+    /// 是否收到过任何状态（诊断用）。
+    #[must_use]
+    pub fn has_received(&self) -> bool {
+        self.observed > 0
+    }
+    /// 最新状态的原始 `tracking_ready` 标志（诊断用）。
+    #[must_use]
+    pub fn latest_tracking_ready(&self) -> bool {
+        self.latest.is_some_and(|(s, _)| s.tracking_ready)
     }
 }
 

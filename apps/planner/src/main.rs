@@ -240,6 +240,7 @@ struct App {
     quality_sub: Subscriber<firefly_pubsub::odom::LocalizationStatus>,
     quality_input: state_input::QualityInput,
     received_state: bool,
+    quality_diagnosed: bool,
     state_loss_reported: bool,
     initial_goal: Option<[f64; 3]>,
     depth: Option<Subscriber<DepthImageMessage>>,
@@ -364,6 +365,7 @@ impl App {
             state_input: StateInput::default(),
             quality_sub,
             quality_input: state_input::QualityInput::default(),
+            quality_diagnosed: false,
             received_state: false,
             state_loss_reported: false,
             initial_goal,
@@ -504,6 +506,14 @@ impl App {
             return Ok(());
         };
         if !self.quality_input.ready(snapshot.timestamp, Instant::now()) {
+            if !self.quality_diagnosed && self.t_sim > 5.0 {
+                self.quality_diagnosed = true;
+                log::warn!(
+                    "规划未就绪：status 收到={} 最新 tracking_ready={}",
+                    self.quality_input.has_received(),
+                    self.quality_input.latest_tracking_ready()
+                );
+            }
             if self.quality_input.stopped() && !self.state_loss_reported {
                 log::error!("地图定位质量退化，停止发布规划参考；恢复后须重启 planner");
                 self.state_loss_reported = true;
