@@ -16,6 +16,7 @@
 use std::collections::HashSet;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::visibility::RenderLayers;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use firefly_map::{MapFile, VoxelState};
@@ -244,6 +245,7 @@ pub fn setup_voxels(
             MeshMaterial3d(material),
             Transform::default(),
             Visibility::default(),
+            RenderLayers::layer(crate::rig::VOXEL_LAYER),
             VoxelLayer,
         ));
     }

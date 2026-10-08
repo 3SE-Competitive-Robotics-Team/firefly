@@ -46,6 +46,9 @@ pub const SENSOR_FAR: f32 = 100.0;
 pub const WORLD_LAYER: usize = 0;
 /// 仅主视角渲染的机体层：传感器相机位于机体内，必须排除机体模型，否则自遮挡。
 pub const DRONE_LAYER: usize = 1;
+/// 仅主视角渲染的调试层（体素可视化）：传感器图像是 VIO/深度的输入，
+/// 任何调试几何都必须排除在这一层之外，否则会被当成真实场景写进发布数据。
+pub const VOXEL_LAYER: usize = 2;
 
 /// rig 相机标记（主世界→渲染世界的透传标记，见 [`crate::capture`]）。
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
@@ -220,7 +223,7 @@ pub fn spawn_rig(
         Exposure {
             ev100: config.view.viewer_ev100(),
         },
-        RenderLayers::from_layers(&[WORLD_LAYER, DRONE_LAYER]),
+        RenderLayers::from_layers(&[WORLD_LAYER, DRONE_LAYER, VOXEL_LAYER]),
         env,
         IsDefaultUiCamera,
         // 第三人称追踪（与 `apps/quad` 同一实现 `firefly-render`）；自由浏览模式下
