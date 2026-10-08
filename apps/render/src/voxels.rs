@@ -122,6 +122,10 @@ pub struct Paths {
 pub fn setup_gizmo_layers(mut store: ResMut<GizmoConfigStore>) {
     let (config, _) = store.config_mut::<DefaultGizmoConfigGroup>();
     config.render_layers = RenderLayers::layer(crate::rig::VOXEL_LAYER);
+    // 规划路径要盖在地形/体素之上看得见：默认 2px 且 `depth_bias = 0`，会被
+    // 地面挡住或在体素缝里闪烁。
+    config.line.width = 4.0;
+    config.depth_bias = -0.01;
 }
 
 /// 画规划路径（`plan/global_path`、`plan/local_traj`）。
@@ -309,7 +313,9 @@ pub fn update_live_voxels(
                         .map(|p| Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32))
                         .collect();
                     let color = Color::srgb_u8(msg.color[0], msg.color[1], msg.color[2]);
-                    paths.lines.insert(name, (points, color));
+                    if paths.lines.insert(name.clone(), (points, color)).is_none() {
+                        log::info!("体素视图：收到规划路径 {name}");
+                    }
                     continue;
                 }
                 if msg.kind != kind::VOXELS || entity != b"plan/perceived" {
