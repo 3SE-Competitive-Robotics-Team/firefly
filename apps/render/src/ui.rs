@@ -1,6 +1,7 @@
 //! 调试面板：右侧固定栏展示左/右 RGB、左/右灰度、深度。
 //!
-//! 布局（窗口 1280×720，主 3D 视图占满窗口底层，面板浮于右侧）：
+//! 布局（窗口 1280×720）：主 3D 视图占**左侧**区域，面板占右侧，两者并列
+//! 不重叠（视口由 [`layout_viewports`] 每帧按窗口尺寸与 DPI 重算）：
 //! ```text
 //! 3D 场景（追踪无人机）  | 左目 RGB  | 右目 RGB
 //!                        | 左目灰度  | 右目灰度
@@ -11,6 +12,7 @@
 //! 所见即 VIO 所得。
 
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::{Camera, Viewport};
 use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -66,6 +68,36 @@ fn display_image() -> Image {
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     )
+}
+
+/// 把主 3D 视图限制在左侧区域，右侧留给调试面板。
+///
+/// `Camera::viewport` 用物理像素，面板用逻辑像素定位，因此按窗口 `scale_factor`
+/// 换算；窗口缩放或 DPI 变化时重算，尺寸未变则不写回（避免每帧触碰 `Camera`）。
+#[allow(clippy::needless_pass_by_value)] // `SystemParam` 契约，与同 crate 其它系统一致
+pub fn layout_viewports(
+    windows: Query<&Window>,
+    cameras: Query<&mut Camera, With<IsDefaultUiCamera>>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let size = window.physical_size();
+    let panel = (PANEL_WIDTH * window.scale_factor()).round() as u32;
+    let wanted = UVec2::new(size.x.saturating_sub(panel).max(1), size.y.max(1));
+    for mut camera in cameras {
+        if camera
+            .viewport
+            .as_ref()
+            .is_none_or(|v| v.physical_size != wanted)
+        {
+            camera.viewport = Some(Viewport {
+                physical_position: UVec2::ZERO,
+                physical_size: wanted,
+                ..default()
+            });
+        }
+    }
 }
 
 /// 装配调试面板（五行：两行 RGB/灰度缩略对 + 通栏深度）。

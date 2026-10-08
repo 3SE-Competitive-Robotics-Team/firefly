@@ -42,7 +42,7 @@ use link::{
 };
 use rig::{DRONE_LAYER, PoseState, spawn_rig};
 use scene::SceneSpec;
-use ui::setup_panel;
+use ui::{layout_viewports, setup_panel};
 
 /// 以 RMUC 资产和初始摆位启动 Bevy；仿真位姿到达后更新机体与传感器。
 fn main() {
@@ -130,6 +130,7 @@ fn main() {
         .add_systems(
             Update,
             (
+                layout_viewports,
                 follow_camera.run_if(freecam_off).after(follow_drone),
                 follow_drone,
                 tag_drone_layers,
