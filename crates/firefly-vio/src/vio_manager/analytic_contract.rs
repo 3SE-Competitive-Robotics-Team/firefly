@@ -208,6 +208,9 @@ fn accelerated_ten_meter_stereo_has_metric_scale() {
 #[test]
 fn voxel_selection_ten_meter_stereo_has_metric_scale() {
     let (mut manager, rc) = analytic_stereo_manager(true);
+    let base_cov = manager.state.cov.nrows();
+    let base_clones = manager.state.clones_imu.len();
+    let base_landmarks = manager.state.features_slam.len();
     let outcome = run_accelerated_trajectory(&mut manager, &rc);
     assert_metric_scale(&manager, outcome.peak, outcome.slam_peak, "体素选点");
     assert!(manager.voxel_map.num_points() > 0, "体素索引必须已收录路标");
@@ -215,5 +218,14 @@ fn voxel_selection_ten_meter_stereo_has_metric_scale() {
         outcome.voxel_frames >= 20,
         "可见体素缓存生效帧数不足：{}",
         outcome.voxel_frames
+    );
+    // 协方差维度必须与 SLAM 路标数严格对应：入体素图失败的路标已被回滚
+    //（对照官方 `delayedInit` 的丢弃语义，但不留已入协方差的孤儿变量）。
+    assert_eq!(
+        manager.state.cov.nrows(),
+        base_cov
+            + 6 * (manager.state.clones_imu.len() - base_clones)
+            + 3 * (manager.state.features_slam.len() - base_landmarks),
+        "协方差维度必须与克隆(PoseJpl)/SLAM 路标数严格对应（不留孤儿变量）"
     );
 }

@@ -517,43 +517,37 @@ impl VioManager {
             }
         }
 
-        // 9. 遍历现有 SLAM 特征，取回它们当前帧的跟踪（对照 C++ 循环）
-        // 仍在跟踪 → 进入更新；丢失或失败多次 → 标记边缘化
-        let current_slam_ids: Vec<usize> = self.state.features_slam.keys().copied().collect();
-        for featid in current_slam_ids {
-            // 取回特征库中的跟踪（remove=false，返回克隆；对照 C++ 的 feat2）
+        // 9. SLAM 更新集来源（对照官方 `featureUpdate` 的 voxel 循环）：开启体素
+        // 选点 → 遍历上一帧算出的可见体素，每体素取块首 map point；关闭 → 遍历
+        // 全部 SLAM 路标（官方无开关，此为 firefly 的关闭语义）。对每个被访问的
+        // 路标：feature 在库则加入更新集；feature 缺失且其 host 相机在本帧 → 标记
+        // 边缘化；`update_fail_count > 1` → 标记边缘化。标记只作用于被访问的路标，
+        // 不可见的路标不因此被丢弃（官方语义）。
+        let visited: Vec<usize> = if self.params.voxel_options.enabled {
+            self.voxel_map.select(&self.recent_voxels)
+        } else {
+            self.state.features_slam.keys().copied().collect()
+        };
+        for featid in visited {
             let feat2 = self.track_feats.database_mut().get_feature(featid, false);
             if let Some(f2) = &feat2 {
                 feats_slam.push(f2.clone());
             }
-            // 当前消息是否为该特征的首相机（对照 C++ 的 current_unique_cam）
-            let current_unique_cam = self
-                .state
-                .features_slam
-                .get(&featid)
-                .is_some_and(|l| message.sensor_ids.contains(&l.unique_camera_id));
-            // 在首相机上丢失 → 无后续跟踪，标记边缘化
-            if feat2.is_none()
-                && current_unique_cam
-                && let Some(l) = self.state.features_slam.get_mut(&featid)
-            {
-                l.should_marg = true;
+            let Some(lm) = self.state.features_slam.get_mut(&featid) else {
+                continue;
+            };
+            let host_cam_in_frame = message.sensor_ids.contains(&lm.unique_camera_id);
+            if feat2.is_none() && host_cam_in_frame {
+                lm.should_marg = true;
             }
-            // 连续更新失败 → 标记边缘化（对照 C++：update_fail_count > 1）
-            if self
-                .state
-                .features_slam
-                .get(&featid)
-                .is_some_and(|l| l.update_fail_count > 1)
-                && let Some(l) = self.state.features_slam.get_mut(&featid)
-            {
-                l.should_marg = true;
+            if lm.update_fail_count > 1 {
+                lm.should_marg = true;
             }
         }
 
-        // 10. 边缘化所有标记 should_marg 的 SLAM 特征（对照 C++）
+        // 10. 边缘化所有标记 `should_marg` 的 SLAM 特征（对照官方
+        // `marginalizeSlam`：在选点循环之后执行）。
         let marged = marginalize_slam(&mut self.state);
-        // 体素索引同步移除（选点开启时）。
         if self.params.voxel_options.enabled {
             for id in marged {
                 let _ = self.voxel_map.remove_point(id);
@@ -570,6 +564,14 @@ impl VioManager {
                 feats_slam_delayed.push(feat);
             }
         }
+        log::debug!(
+            "SLAM 选点 t={:.2} 路标={} 可见体素={} 更新={} 延迟={}",
+            self.state.timestamp,
+            self.state.features_slam.len(),
+            self.recent_voxels.len(),
+            feats_slam_update.len(),
+            feats_slam_delayed.len()
+        );
 
         // 11b. 体素选点（对照 Voxel-SVIO `featureUpdate` 的选点段；仅开启时）：
         // 对上一帧末算出的可见体素（`recent_voxels`）取每体素**块首**路标的 id，
@@ -626,15 +628,9 @@ impl VioManager {
             let consumed = self.updater_slam.update(&mut self.state, &mut batch);
             self.propagator.invalidate_cache();
             self.track_feats.database_mut().mark_deleted(consumed);
-        }
-
-        // 14b. 体素位置同步（EKF 更新后路标移动；跨体素自动搬家）。
-        if self.params.voxel_options.enabled {
-            for (id, lm) in &self.state.features_slam {
-                if self.voxel_map.contains(*id) {
-                    let _ = self.voxel_map.update_point(*id, &lm.get_xyz(false));
-                }
-            }
+            // 对照官方：每批 SLAM 更新后把所有路标迁到当前体素
+            // （`changeHostVoxel`）。
+            self.sync_voxel_positions();
         }
 
         // 15. SLAM 延迟初始化（对照 C++）
@@ -643,13 +639,22 @@ impl VioManager {
             self.updater_slam
                 .delayed_init(&mut self.state, &mut feats_slam_delayed);
             self.propagator.invalidate_cache();
-            // 体素收录新路标（初始化成功 = 已入库 `state.features_slam`）。
+            // 对照官方 `delayedInit`：新路标必须成功入体素图，否则丢弃该路标。
+            // 官方此时已把变量加入协方差却不写 `map_points`（孤儿变量），这里改为
+            // 回滚边缘化：语义等同且不留孤儿。
             if self.params.voxel_options.enabled {
                 for id in &delayed_ids {
                     if let Some(lm) = self.state.features_slam.get(id) {
                         let p = lm.get_xyz(false);
-                        self.voxel_map.add_point(*id, &p);
+                        if !self.voxel_map.add_point(*id, &p)
+                            && let Some(lm) = self.state.features_slam.get_mut(id)
+                        {
+                            lm.should_marg = true;
+                        }
                     }
+                }
+                for id in marginalize_slam(&mut self.state) {
+                    let _ = self.voxel_map.remove_point(id);
                 }
             }
             self.track_feats.database_mut().mark_deleted(delayed_ids);
@@ -659,10 +664,12 @@ impl VioManager {
         // 清理与边缘化（对照 C++ 552-596）
         //=====================================================================
 
-        // 16. 刷新可见体素缓存（对照 `triangulateActiveTracks` + `getRecentVoxel`）：
-        // 必须在库清理前取本帧活跃轨迹，清理会删掉本轮被 MSCKF/SLAM 消费的特征。
-        // 结果供下一帧 SLAM 选点。
-        self.refresh_recent_voxels();
+        // 16. 刷新可见体素缓存（对照 `triangulateActiveTracks` + `getRecentVoxel`，
+        // 官方在 delayedInit 之后、清理之前调用，且只在左目触发帧执行）：查询源是
+        // tracker 的 last obs，不读特征库，故不受本帧清理影响。
+        if message.sensor_ids.first() == Some(&0) {
+            self.refresh_recent_voxels();
+        }
 
         // 17. 清理（对照 C++ 末尾：cleanup + 边缘化旧克隆）
         self.track_feats.database_mut().cleanup();
@@ -675,6 +682,19 @@ impl VioManager {
                 .cleanup_measurements(marg_time);
         }
         marginalize_old_clone(&mut self.state);
+    }
+
+    /// 把 `state.features_slam` 中已在体素图里的路标迁到当前体素（对照官方
+    /// `changeHostVoxel`：EKF 更新后路标会移动，跨体素自动搬家）。
+    fn sync_voxel_positions(&mut self) {
+        if !self.params.voxel_options.enabled {
+            return;
+        }
+        for (id, lm) in &self.state.features_slam {
+            if self.voxel_map.contains(*id) {
+                let _ = self.voxel_map.update_point(*id, &lm.get_xyz(false));
+            }
+        }
     }
 
     /// 刷新可见体素缓存（对照 Voxel-SVIO `triangulateActiveTracks` +

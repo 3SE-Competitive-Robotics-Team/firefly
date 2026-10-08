@@ -128,19 +128,18 @@ impl ActiveTrackTriangulator {
         solved.into_iter().collect()
     }
 
-    /// 解正规方程并做条件数/深度过滤（对照官方 `count > 3` 后的求解与检查）。
+    /// 解正规方程并做条件数/深度过滤（对照官方 `count > 3` 后的 `colPivHouseholderQR`
+    /// 求解与 `cond/z/isnan` 检查）。
     fn solve_and_check(&self, lin: &LinSys, obs: &RayObservation) -> Option<Vector3<f64>> {
-        let p_g = lin.a.lu().solve(&lin.b)?;
-        if !p_g.iter().all(|v| v.is_finite()) {
-            return None;
-        }
+        let p_g = lin.a.col_piv_qr().solve(&lin.b)?;
+        let p_c = obs.rot_g_to_c * (p_g - obs.pos_c_in_g);
         let sv = lin.a.svd(false, false).singular_values;
         let cond = sv[0] / sv[sv.len() - 1];
-        if !(cond.is_finite() && cond.abs() <= self.options.max_cond_number) {
-            return None;
-        }
-        let depth = (obs.rot_g_to_c * (p_g - obs.pos_c_in_g)).z;
-        if depth < self.options.min_dist || depth > self.options.max_dist {
+        if !(cond.is_finite() && cond.abs() <= self.options.max_cond_number)
+            || p_c.z < self.options.min_dist
+            || p_c.z > self.options.max_dist
+            || !p_c.norm().is_finite()
+        {
             return None;
         }
         Some(p_g)
