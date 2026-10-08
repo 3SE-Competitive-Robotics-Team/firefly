@@ -39,6 +39,9 @@ impl Worker {
         let cancel = stop.clone();
         let thread = std::thread::Builder::new()
             .name("loop-inference".into())
+            // 推理线程要容纳 256KB 的 `Input`（特征消息按值进通道）+ ORT 推理与
+            // 匹配缓冲区；默认 2MiB 会溢出，显式给足。
+            .stack_size(16 * 1024 * 1024)
             .spawn(move || {
                 let mut online = Online::new(options);
                 while !cancel.load(Ordering::Relaxed) {
