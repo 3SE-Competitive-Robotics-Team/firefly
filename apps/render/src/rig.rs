@@ -6,7 +6,7 @@
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
-use bevy::camera::{Camera, Exposure, Projection, RenderTarget};
+use bevy::camera::{Camera, ClearColorConfig, Exposure, Projection, RenderTarget};
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::image::Image;
@@ -245,6 +245,9 @@ pub fn spawn_rig(
         Camera2d,
         Camera {
             order: 1,
+            // 满窗相机默认会清屏；它在主 3D 相机之后渲染，清屏会把 3D 视图整个
+            // 擦成背景色（实测左侧全黑）。UI 相机只画 UI，不清屏。
+            clear_color: ClearColorConfig::None,
             ..default()
         },
         IsDefaultUiCamera,
