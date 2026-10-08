@@ -9,9 +9,13 @@
 //! 体素约定与 `apps/planner::log_map`、`FFMap` 文档一致：
 //! `world = voxel_origin + (idx + 0.5) * voxel_size`。
 //!
-//! 性能：每层一个**合并表面网格**（只发射与空邻居相邻的面，内部面不发），
-//! 单 draw call；实时层按**增量**协议累计（新增并入、删除移出），只在集合变化
-//! 且距上次重建 ≥ [`REBUILD_INTERVAL`] 时按原句柄原地更新，不每帧重建。
+//! 观感对照宇树 `RViz` 配置（`unitree_slam`/`point_lio_unilidar`）：**小方块 +
+//! 整层纯色不透明 + 深色背景**，靠方块间的缝看清体素粒度；不画自由/未知空间。
+//! 静态先验只画障碍（平铺的地板层按占据格数自动识别后剔除）。
+//!
+//! 性能：每层一个**合并网格**（每体素 6 面，单 draw call）；实时层按**增量**
+//! 协议累计（新增并入、删除移出），只在集合变化且距上次重建 ≥
+//! [`REBUILD_INTERVAL`] 时按原句柄原地更新，不每帧重建。
 
 use std::collections::{HashMap, HashSet};
 
@@ -29,10 +33,13 @@ use crate::link::IpcPorts;
 /// 实时层最小重建间隔（秒）：话题频率高于此，按此节流。
 /// 实时层重建间隔（秒，10Hz）：增量消息按拍到达，重建比这更快没有意义。
 const REBUILD_INTERVAL: f64 = 0.1;
-/// 静态场地颜色（灰蓝，半透明：体素是数据层，要能看穿看到真实场景）。
-const FIELD_COLOR: Color = Color::srgba(0.38, 0.42, 0.52, 0.45);
-/// 实时感知颜色（青绿，半透明）。
-const LIVE_COLOR: Color = Color::srgba(0.10, 0.95, 0.55, 0.55);
+/// 小方块边长占比：留缝才看得清体素粒度（对照宇树 `RViz` 的 `Flat Squares`；
+/// 满格方块连成一片会糊成实体）。
+const VOXEL_SHRINK: f32 = 0.5;
+/// 静态场地（先验障碍）颜色：冷灰纯色。
+const FIELD_COLOR: Color = Color::srgb(0.34, 0.37, 0.40);
+/// 实时感知颜色：青绿纯色（青位偏离路径的亮绿，避免混淆）。
+const LIVE_COLOR: Color = Color::srgb(0.05, 0.85, 0.80);
 
 /// 立方体一个面：邻居索引偏移、四角（相对体素中心，单位为体素尺寸）、法线。
 type Face = ([i32; 3], [[f32; 3]; 4], [f32; 3]);
@@ -158,31 +165,28 @@ pub struct VoxelMeshes {
     live: Handle<Mesh>,
 }
 
-/// 由体素索引构建**表面**合并网格（只发射暴露面）。
+/// 由体素索引构建**小方块**合并网格（每个体素 6 面，不做内部面剔除）。
 ///
-/// 内部面不发：两个相邻体素之间的面看不见，去掉能把面数降低一个数量级。
+/// `shrink` 是边长占比：< 1 时方块之间留缝，能看清体素粒度（内部面剔除只在满格
+/// 相邻时成立，留缝后每个面都得发）。
 #[must_use]
-fn surface_mesh(indices: &[[i32; 3]], origin: [f32; 3], size: [f32; 3]) -> Mesh {
-    let occupied: HashSet<[i32; 3]> = indices.iter().copied().collect();
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut normals: Vec<[f32; 3]> = Vec::new();
-    let mut triangles: Vec<u32> = Vec::new();
+fn cube_mesh(indices: &[[i32; 3]], origin: [f32; 3], size: [f32; 3], shrink: f32) -> Mesh {
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(indices.len() * 24);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(indices.len() * 24);
+    let mut triangles: Vec<u32> = Vec::with_capacity(indices.len() * 36);
     for idx in indices {
         let center = [
             origin[0] + (idx[0] as f32 + 0.5) * size[0],
             origin[1] + (idx[1] as f32 + 0.5) * size[1],
             origin[2] + (idx[2] as f32 + 0.5) * size[2],
         ];
-        for (dir, corners, normal) in FACES {
-            if occupied.contains(&[idx[0] + dir[0], idx[1] + dir[1], idx[2] + dir[2]]) {
-                continue;
-            }
+        for (_, corners, normal) in FACES {
             let base = positions.len() as u32;
             for corner in corners {
                 positions.push([
-                    center[0] + corner[0] * size[0],
-                    center[1] + corner[1] * size[1],
-                    center[2] + corner[2] * size[2],
+                    center[0] + corner[0] * size[0] * shrink,
+                    center[1] + corner[1] * size[1] * shrink,
+                    center[2] + corner[2] * size[2] * shrink,
                 ]);
                 normals.push(normal);
             }
@@ -216,22 +220,34 @@ fn load_field(path: &str) -> Option<FieldVoxels> {
         }
     };
     let dims = grid.dims();
-    let mut indices = Vec::new();
+    let mut per_z = vec![0usize; dims[2]];
+    let mut occupied: Vec<[i32; 3]> = Vec::new();
     for x in 0..dims[0] {
         for y in 0..dims[1] {
-            for z in 0..dims[2] {
+            for (z, count) in per_z.iter_mut().enumerate() {
                 if grid.state([x, y, z]) == VoxelState::Occupied {
-                    indices.push([x as i32, y as i32, z as i32]);
+                    *count += 1;
+                    occupied.push([x as i32, y as i32, z as i32]);
                 }
             }
         }
     }
+    // 地板层识别：一整层几乎铺满 x-y 面积的 z 层就是平铺地板（场地实测 63–78%，
+    // 下一层只有 30%，余量一倍以上）。不剔的话地板铺满整个视图、把感知层压住。
+    let area = dims[0] * dims[1];
+    let total: usize = per_z.iter().sum();
+    let ground: Vec<usize> = (0..dims[2]).filter(|&z| per_z[z] * 2 > area).collect();
+    let indices: Vec<[i32; 3]> = occupied
+        .into_iter()
+        .filter(|idx| !ground.contains(&(idx[2] as usize)))
+        .collect();
     let origin = *grid.origin();
     let resolution = grid.resolution() as f32;
     log::info!(
-        "体素视图：静态场地 {} 格（{:.2}m 分辨率）",
+        "体素视图：静态场地 {} 格（{:.2}m 分辨率）；剔除地板层 {ground:?}（原 {} 格）",
         indices.len(),
-        resolution
+        resolution,
+        total
     );
     Some((
         indices,
@@ -251,24 +267,26 @@ pub fn setup_voxels(
     let VoxelsConfig { field_map } = &config.voxels;
     let field_indices = load_field(field_map);
     let field_mesh = match field_indices {
-        Some((indices, origin, size)) => meshes.add(surface_mesh(&indices, origin, size)),
-        None => meshes.add(surface_mesh(&[], [0.0; 3], [1.0; 3])),
+        Some((indices, origin, size)) => {
+            meshes.add(cube_mesh(&indices, origin, size, VOXEL_SHRINK))
+        }
+        None => meshes.add(cube_mesh(&[], [0.0; 3], [1.0; 3], VOXEL_SHRINK)),
     };
-    // 初始给一片退化三角形而不是空 mesh：空 mesh 会触发 Bevy `slab_allocator`
+    // 初始给一个退化方块而不是空 mesh：空 mesh 会触发 Bevy `slab_allocator`
     // 的 use-after-free 报错（实测）。
-    let live_mesh = meshes.add(surface_mesh(&[[0, 0, 0]], [0.0; 3], [f32::EPSILON; 3]));
+    let live_mesh = meshes.add(cube_mesh(&[[0, 0, 0]], [0.0; 3], [f32::EPSILON; 3], 1.0));
     let field_material = materials.add(StandardMaterial {
         base_color: FIELD_COLOR,
         unlit: true,
         cull_mode: None,
-        alpha_mode: AlphaMode::Blend,
+        alpha_mode: AlphaMode::Opaque,
         ..default()
     });
     let live_material = materials.add(StandardMaterial {
         base_color: LIVE_COLOR,
         unlit: true,
         cull_mode: None,
-        alpha_mode: AlphaMode::Blend,
+        alpha_mode: AlphaMode::Opaque,
         ..default()
     });
     for (mesh, material) in [
@@ -374,7 +392,7 @@ pub fn update_live_voxels(
     }
     if let Some(mut mesh) = meshes.get_mut(&layer.live) {
         let indices: Vec<[i32; 3]> = accum.set.iter().copied().collect();
-        *mesh = surface_mesh(&indices, accum.origin, accum.size);
+        *mesh = cube_mesh(&indices, accum.origin, accum.size, VOXEL_SHRINK);
     }
 }
 
