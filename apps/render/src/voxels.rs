@@ -28,10 +28,10 @@ use crate::link::IpcPorts;
 
 /// 实时层最小重建间隔（秒）：话题频率高于此，按此节流。
 const REBUILD_INTERVAL: f64 = 0.25;
-/// 静态场地颜色（灰蓝）。
-const FIELD_COLOR: Color = Color::srgb(0.38, 0.42, 0.52);
-/// 实时感知颜色（青绿）。
-const LIVE_COLOR: Color = Color::srgb(0.15, 0.85, 0.55);
+/// 静态场地颜色（灰蓝，半透明：体素是数据层，要能看穿看到真实场景）。
+const FIELD_COLOR: Color = Color::srgba(0.38, 0.42, 0.52, 0.45);
+/// 实时感知颜色（青绿，半透明）。
+const LIVE_COLOR: Color = Color::srgba(0.10, 0.95, 0.55, 0.55);
 
 /// 立方体一个面：邻居索引偏移、四角（相对体素中心，单位为体素尺寸）、法线。
 type Face = ([i32; 3], [[f32; 3]; 4], [f32; 3]);
@@ -256,12 +256,14 @@ pub fn setup_voxels(
         base_color: FIELD_COLOR,
         unlit: true,
         cull_mode: None,
+        alpha_mode: AlphaMode::Blend,
         ..default()
     });
     let live_material = materials.add(StandardMaterial {
         base_color: LIVE_COLOR,
         unlit: true,
         cull_mode: None,
+        alpha_mode: AlphaMode::Blend,
         ..default()
     });
     for (mesh, material) in [
@@ -361,9 +363,11 @@ pub fn update_live_voxels(
 /// 打开可视化订阅（失败降级为不显示实时层，不影响出图链路）。
 #[must_use]
 pub fn open_subscription(node: &firefly_pubsub::node::IpcNode) -> Option<Subscriber<VizMessage>> {
-    // 只保留最新一条体素消息，缓冲 1 即可；也避免超过“先建服务”那端的上限
-    // （`open_or_create` 由先到者定 `subscriber_max_buffer_size`）。
-    match Subscriber::with_topic(node, VIZ_TOPIC) {
+    // planner 一次 replan 会连着发多条不同实体（global_path/local_traj/planes…），
+    // 缓冲 1 只会留下最后一条；给一个小缓冲覆盖突发，同时不冒犯"先建服务"那端的
+    // `subscriber_max_buffer_size` 上限（要太大时会
+    // `BufferSizeExceedsMaxSupportedBufferSizeOfService`）。
+    match Subscriber::with_topic_and_buffer(node, VIZ_TOPIC, 8) {
         Ok(sub) => {
             log::info!("体素视图：已订阅 {VIZ_TOPIC}（实时感知地图）");
             Some(sub)
