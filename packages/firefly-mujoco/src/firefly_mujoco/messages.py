@@ -255,7 +255,7 @@ def _self_check() -> None:
     assert ctypes.sizeof(ImuMessage) == 56
     assert ctypes.sizeof(GrayImageMessage) == 76824
     assert ctypes.sizeof(DepthImageMessage) == 307224
-    assert ctypes.sizeof(ReferenceMessage) == 72
+    assert ctypes.sizeof(ReferenceMessage) == 96
     assert ctypes.sizeof(OdomMessage) == 96
     assert ctypes.sizeof(LogMessage) == 624, ctypes.sizeof(LogMessage)
     assert ctypes.sizeof(PlantStateMessage) == 112, ctypes.sizeof(PlantStateMessage)
