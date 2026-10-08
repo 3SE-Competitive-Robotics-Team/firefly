@@ -140,7 +140,10 @@ mod tests {
         };
         assert_eq!(map.query_neighbors([0.2, 0.0, 0.0], 2.0, 10), vec![0, 2]);
         assert_eq!(map.query_neighbors([0.2, 0.0, 0.0], 2.0, 1), vec![0]);
-        assert!(map.query_neighbors([100.0, 0.0, 0.0], 2.0, 10).is_empty());
+        assert_eq!(
+            map.query_neighbors([100.0, 0.0, 0.0], 2.0, 10),
+            [] as [usize; 0]
+        );
         assert_eq!(map.num_points(), 3);
     }
 }

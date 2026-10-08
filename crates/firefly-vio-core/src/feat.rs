@@ -1080,7 +1080,7 @@ mod tests {
         f.clean_older_measurements(2.0);
         assert_eq!(cam0_t(&f), &[3.0]);
         f.clean_older_measurements(3.0);
-        assert!(cam0_t(&f).is_empty());
+        assert_eq!(cam0_t(&f), [] as [f64; 0]);
         // 三桶等长不变量
         assert_eq!(f.uvs[&0].len(), 0);
         assert_eq!(f.uvs_norm[&0].len(), 0);

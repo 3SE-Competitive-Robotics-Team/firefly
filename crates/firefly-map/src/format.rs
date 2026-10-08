@@ -521,7 +521,7 @@ MOTION sphere 15 4 1 0.5
         let map: MapFile = SAMPLE.parse().unwrap();
         let grid = map.to_grid_map().unwrap();
         let voxels = map.motion_voxels(0.0, &grid);
-        assert!(!voxels.is_empty());
+        assert_ne!(voxels, [] as [[usize; 3]; 0]);
         // 每个体素都在界内
         for idx in voxels {
             assert!(idx.iter().zip(grid.dims()).all(|(i, d)| *i < d));

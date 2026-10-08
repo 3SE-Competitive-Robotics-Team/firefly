@@ -97,7 +97,7 @@ impl History {
             register_depth(depth, pinhole(), pinhole(), &left_from_depth()).ok()?,
         ))
     }
-    /// T_map_body(t) = T_map_body(s) T_odom_body(s)^-1 T_odom_body(t)。
+    /// `T_map_body(t) = T_map_body(s) T_odom_body(s)^-1 T_odom_body(t)`。
     fn map_prior(&self, t: f64, corrected: OdomMessage) -> Option<OdomMessage> {
         use firefly_base::FrameId;
         if !corrected.is_initialized {
@@ -223,7 +223,7 @@ mod tests {
     fn image_prior_uses_historical_motion_including_turns() {
         let mut h = History::default();
         for i in 0..=20 {
-            let t = 1. + i as f64 * 0.05;
+            let t = 1. + f64::from(i) * 0.05;
             let half_yaw = (t - 1.) * std::f64::consts::FRAC_PI_4;
             h.push_odom(OdomMessage {
                 timestamp: t,

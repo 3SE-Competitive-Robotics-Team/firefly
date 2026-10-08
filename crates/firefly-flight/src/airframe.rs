@@ -108,6 +108,11 @@ impl Airframe {
     /// 侧向力），期望力矩取机体三轴；4 电机推力约束为
     /// `[0, max_thrust_per_motor]`；饱和先缩减偏航差动，再缩减滚转/俯仰差动。
     /// 共同缩放零和差动保持集合推力；再回代 [`realize`](Self::realize) 得到实际落点。
+    ///
+    /// # Panics
+    ///
+    /// 首个 `solve4` 成功即证明分配矩阵非奇异，后续对同一矩阵的求解不会返回
+    /// `None`；若 `rotors` 布局使矩阵奇异，首个求解已提前返回而不会走到此分支。
     #[must_use]
     pub fn allocate(&self, attitude: Quat, desired: &Wrench) -> Allocation {
         let body_force = attitude.inverse() * desired.force;

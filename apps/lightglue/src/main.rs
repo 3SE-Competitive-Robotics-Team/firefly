@@ -215,10 +215,10 @@ fn run_loop(
         if sensors.is_stopped() {
             return CallbackProgression::Stop;
         }
-        if let Some(feat) = latest_feat {
-            if let Some((odom, depth)) = sensors.sample(feat.timestamp) {
-                online.submit(feat, odom, depth);
-            }
+        if let Some(feat) = latest_feat
+            && let Some((odom, depth)) = sensors.sample(feat.timestamp)
+        {
+            online.submit(&feat, odom, depth);
         }
         let prior = latest_corrected.filter(|m| m.is_initialized).and_then(|m| {
             let feat = latest_feat.as_ref()?;
@@ -275,15 +275,15 @@ fn run_loop(
             firefly_observability::pump_log_ipc(&log_ipc);
         }
         for result in online.results() {
-            if let Some(edge) = result.edge {
-                if let Err(e) = loop_pub.publish(edge) {
-                    log::warn!("回环发布失败: {e}");
-                }
+            if let Some(edge) = result.edge
+                && let Err(e) = loop_pub.publish(edge)
+            {
+                log::warn!("回环发布失败: {e}");
             }
-            if let Some(odom) = result.keyframe {
-                if let Err(e) = keyframe_pub.publish(odom) {
-                    log::warn!("关键帧发布失败: {e}");
-                }
+            if let Some(odom) = result.keyframe
+                && let Err(e) = keyframe_pub.publish(odom)
+            {
+                log::warn!("关键帧发布失败: {e}");
             }
             let mut msg = firefly_pubsub::viz::VizMessage::base(
                 firefly_pubsub::viz::kind::SCALARS,
@@ -445,15 +445,14 @@ fn query_once(
                 best[qi] = Some((point, score));
             }
         }
-        if candidate_index + 1 < candidates.len() && has_spatial_support(&best) {
-            if let Some(obs) = observation_from_matches(feat, &best, &t_body_prior)? {
-                if obs.num_inliers >= 30
-                    && f64::from(obs.num_inliers) >= 0.3 * f64::from(obs.total_points)
-                    && obs.error <= 3.
-                {
-                    return Ok(Some(obs));
-                }
-            }
+        if candidate_index + 1 < candidates.len()
+            && has_spatial_support(&best)
+            && let Some(obs) = observation_from_matches(feat, &best, &t_body_prior)?
+            && obs.num_inliers >= 30
+            && f64::from(obs.num_inliers) >= 0.3 * f64::from(obs.total_points)
+            && obs.error <= 3.
+        {
+            return Ok(Some(obs));
         }
     }
     observation_from_matches(feat, &best, &t_body_prior)
@@ -645,7 +644,7 @@ mod early_exit_tests {
         let grid: Vec<_> = (0..64)
             .map(|i| {
                 Some((
-                    [((i % 4) as f64), ((i / 4 % 4) as f64), ((i / 16) as f64)],
+                    [f64::from(i % 4), f64::from(i / 4 % 4), f64::from(i / 16)],
                     1.,
                 ))
             })

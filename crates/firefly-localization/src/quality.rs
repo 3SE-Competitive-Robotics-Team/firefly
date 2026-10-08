@@ -18,6 +18,8 @@ impl Default for QualityOptions {
     }
 }
 impl QualityOptions {
+    /// 参数是否有效（有限且为正）。
+    #[must_use]
     pub fn valid(&self) -> bool {
         [self.max_visual_age, self.max_position_disagreement]
             .iter()
@@ -39,6 +41,8 @@ impl Quality {
             self.observation = Some((timestamp, disagreement));
         }
     }
+    /// 按当前观测与参数给出定位质量状态。
+    #[must_use]
     pub fn status(
         &self,
         timestamp: f64,

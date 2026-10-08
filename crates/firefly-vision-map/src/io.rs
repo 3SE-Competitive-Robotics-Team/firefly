@@ -54,32 +54,32 @@ pub fn save_map(map: &VisionMap, path: &Path) -> Result<(), Error> {
     let mut f = BufWriter::new(file);
     let fail =
         |e: std::io::Error| Error::new(ErrorKind::Internal, format!("视觉地图写入失败: {e}"));
-    f.write_all(MAGIC).map_err(&fail)?;
-    f.write_all(&VERSION.to_le_bytes()).map_err(&fail)?;
+    f.write_all(MAGIC).map_err(fail)?;
+    f.write_all(&VERSION.to_le_bytes()).map_err(fail)?;
     f.write_all(&(map.frames.len() as u64).to_le_bytes())
-        .map_err(&fail)?;
+        .map_err(fail)?;
     for frame in &map.frames {
-        f.write_all(&frame.id.to_le_bytes()).map_err(&fail)?;
-        f.write_all(&frame.timestamp.to_le_bytes()).map_err(&fail)?;
+        f.write_all(&frame.id.to_le_bytes()).map_err(fail)?;
+        f.write_all(&frame.timestamp.to_le_bytes()).map_err(fail)?;
         for v in frame.position {
-            f.write_all(&v.to_le_bytes()).map_err(&fail)?;
+            f.write_all(&v.to_le_bytes()).map_err(fail)?;
         }
         for v in frame.quat_xyzw {
-            f.write_all(&v.to_le_bytes()).map_err(&fail)?;
+            f.write_all(&v.to_le_bytes()).map_err(fail)?;
         }
         f.write_all(&(frame.points.len() as u64).to_le_bytes())
-            .map_err(&fail)?;
+            .map_err(fail)?;
         for p in &frame.points {
             for v in p.position {
-                f.write_all(&v.to_le_bytes()).map_err(&fail)?;
+                f.write_all(&v.to_le_bytes()).map_err(fail)?;
             }
             for v in p.uv {
-                f.write_all(&v.to_le_bytes()).map_err(&fail)?;
+                f.write_all(&v.to_le_bytes()).map_err(fail)?;
             }
             for v in p.descriptor {
-                f.write_all(&v.to_le_bytes()).map_err(&fail)?;
+                f.write_all(&v.to_le_bytes()).map_err(fail)?;
             }
-            f.write_all(&p.score.to_le_bytes()).map_err(&fail)?;
+            f.write_all(&p.score.to_le_bytes()).map_err(fail)?;
         }
     }
     f.flush().map_err(fail)

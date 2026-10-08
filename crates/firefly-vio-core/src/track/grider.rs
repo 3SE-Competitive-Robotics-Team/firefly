@@ -227,7 +227,7 @@ mod tests {
             .flat_map(|gy| (0..4).map(move |gx| (gx, gy)))
             .collect::<Vec<_>>();
         let pts = perform_griding(&img, &mask, &valid, 8, 4, 4, 20, false);
-        assert!(!pts.is_empty());
+        assert_ne!(pts, [] as [KeyPoint; 0]);
         assert!(pts.len() <= 9, "got {}", pts.len());
     }
 
@@ -254,7 +254,7 @@ mod tests {
             data: vec![0u8; 32 * 32],
         };
         let pts = perform_griding(&img, &mask, &[], 16, 4, 4, 20, false);
-        assert!(pts.is_empty());
+        assert_eq!(pts, [] as [KeyPoint; 0]);
     }
 
     #[test]

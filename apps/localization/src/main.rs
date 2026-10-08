@@ -36,7 +36,7 @@ const ODOM_FRESH_TIMEOUT: f64 = 1.0;
 /// 排序，odom 追上即融合；溢出时丢最旧（对端断流的背压语义，非延时等待）。
 const PENDING_VISUAL_CAP: usize = 8;
 /// 待融合观测超期（秒）：相对 `t_sim` 过期即丢弃（对端断流时不无限囤积；
-/// 超期观测不能外推配对；任务可用性另由 QualityOptions 的更短时限判断。
+/// 超期观测不能外推配对；任务可用性另由 `QualityOptions` 的更短时限判断。
 const PENDING_VISUAL_TIMEOUT: f64 = 10.0;
 /// odom 内插窗口（条）：100Hz 下约 10s，与超期对齐（窗口外无法内插，留了也白留；
 /// 62KB，可忽略）。

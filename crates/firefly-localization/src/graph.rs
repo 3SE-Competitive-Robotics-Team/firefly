@@ -634,7 +634,7 @@ mod tests {
                     .unwrap();
             let mut graph = PoseGraph::new(GraphOptions::default(), initial).unwrap();
             for i in 0..=segments {
-                let t = i as f64 / segments as f64;
+                let t = f64::from(i) / f64::from(segments);
                 graph.insert(t, pose(t, 0., 0.)).unwrap();
             }
             let observation = RigidTransform::from_parts(

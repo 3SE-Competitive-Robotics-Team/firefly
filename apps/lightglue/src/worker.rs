@@ -99,8 +99,12 @@ impl Worker {
             thread: Some(thread),
         })
     }
-    pub fn submit(&self, feat: FeatureMessage, odom: OdomMessage, depth: RegisteredDepth) {
-        let _ = self.input.try_send(Input { feat, odom, depth });
+    pub fn submit(&self, feat: &FeatureMessage, odom: OdomMessage, depth: RegisteredDepth) {
+        let _ = self.input.try_send(Input {
+            feat: *feat,
+            odom,
+            depth,
+        });
     }
     pub fn results(&self) -> impl Iterator<Item = Output> + '_ {
         self.output.try_iter()
