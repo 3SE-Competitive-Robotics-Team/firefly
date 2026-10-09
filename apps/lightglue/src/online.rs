@@ -14,7 +14,6 @@ use firefly_vision_match::{
 };
 use nalgebra::{Matrix4, Vector3};
 use ort::session::Session;
-use ort::value::Tensor;
 
 const OLD_BODY: FrameId = FrameId(1024);
 /// 长度米、角度弧度、时间传感器秒；阈值在运行前固定。
@@ -225,6 +224,8 @@ pub struct Online {
     last_emitted: f64,
     pub diagnostics: [f64; 4],
     last_rejection: Option<String>,
+    /// 推理缓冲与 io-binding（首次 `process` 时按会话创建后复用）。
+    bindings: Option<super::MatchBindings>,
 }
 impl Online {
     pub fn new(options: Options) -> Self {
@@ -238,6 +239,7 @@ impl Online {
             last_emitted: f64::NEG_INFINITY,
             diagnostics: [0.; 4],
             last_rejection: None,
+            bindings: None,
         }
     }
     #[fastrace::trace]
@@ -292,10 +294,11 @@ impl Online {
             .collect();
         candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
         candidates.truncate(self.options.candidates);
-        let k0: Vec<_> = feat.keypoints.iter().flatten().copied().collect();
-        let d0: Vec<_> = feat.descriptors.iter().flatten().copied().collect();
-        let k0t = Tensor::from_array(([1usize, MAX_FEATURES, 2], k0.into_boxed_slice()))?;
-        let d0t = Tensor::from_array(([1usize, MAX_FEATURES, DESC_DIM], d0.into_boxed_slice()))?;
+        if self.bindings.is_none() {
+            self.bindings = Some(super::MatchBindings::new(session)?);
+        }
+        let bindings = self.bindings.as_mut().ok_or("推理绑定未建立")?;
+        super::bind_query(bindings, feat)?;
         let mut accepted: Option<(usize, Verified, Matrix4<f64>)> = None;
         let mut ambiguous = false;
         for &(index, _) in &candidates {
@@ -307,7 +310,7 @@ impl Online {
             // 不同时刻机体系具有不同标识；PnP 内部矩阵表达 old_body←current_body。
             let old_pose = RigidTransform::from_matrix(FrameId::ODOM, OLD_BODY, &old_raw.matrix())?;
             let prior = old_pose.inverse().compose(&raw)?.matrix();
-            let pairs = super::match_points(session, &old.points, feat, &k0t, &d0t)?;
+            let pairs = super::match_points(session, bindings, &old.points, feat)?;
             let found = match verify(feat, depth, &pairs, prior, self.options.depth_error) {
                 Ok(found) => found,
                 Err(reason) => {
@@ -644,15 +647,13 @@ mod tests {
                 ..p.clone()
             })
             .collect();
-        let k0: Vec<_> = feat.keypoints.iter().flatten().copied().collect();
-        let d0: Vec<_> = feat.descriptors.iter().flatten().copied().collect();
-        let k0t = Tensor::from_array(([1usize, MAX_FEATURES, 2], k0.into_boxed_slice())).unwrap();
-        let d0t =
-            Tensor::from_array(([1usize, MAX_FEATURES, DESC_DIM], d0.into_boxed_slice())).unwrap();
         let mut session =
             super::super::load_session(root.join(super::super::DEFAULT_MODEL).to_str().unwrap())
                 .unwrap();
-        let pairs = super::super::match_points(&mut session, &points, &feat, &k0t, &d0t).unwrap();
+        let mut bindings = super::super::MatchBindings::new(&session).unwrap();
+        super::super::bind_query(&mut bindings, &feat).unwrap();
+        let pairs =
+            super::super::match_points(&mut session, &mut bindings, &points, &feat).unwrap();
         let mut prior = Matrix4::identity();
         prior[(0, 3)] = 1.4;
         assert!(
