@@ -33,9 +33,24 @@ use crate::link::IpcPorts;
 /// 实时层最小重建间隔（秒）：话题频率高于此，按此节流。
 /// 实时层重建间隔（秒，10Hz）：增量消息按拍到达，重建比这更快没有意义。
 const REBUILD_INTERVAL: f64 = 0.1;
-/// 小方块边长占比：留缝才看得清体素粒度（对照宇树 `RViz` 的 `Flat Squares`；
-/// 满格方块连成一片会糊成实体）。
-const VOXEL_SHRINK: f32 = 0.5;
+/// 方块边长占格子的比例：1.0 = 满格，占据体积与实际一致（判断净空必须如此）。
+/// 缩小方块能让粒度更好看，但会让人以为占据体积比实际小，所以缩放在这里恒为 1，
+/// 粒度改由每格明度抖动体现。
+const VOXEL_FILL: f32 = 1.0;
+/// 静态层边长占比：比感知层小一点点，两层重叠格不会共面闪烁（相差 3mm，
+/// 净空判读不受影响）。
+const FIELD_FILL: f32 = 0.98;
+/// 每格明度抖动的最大幅度（±10%）：满格方块贴在一起时靠这点差异看出体素粒度。
+const VOXEL_SHADE_JITTER: f32 = 0.10;
+
+/// 体素→逐格明度系数（确定性哈希，同一格每次渲染相同）。
+fn cube_shade(idx: [i32; 3]) -> [f32; 4] {
+    let h = (idx[0].wrapping_mul(73_856_093)
+        ^ idx[1].wrapping_mul(19_349_663)
+        ^ idx[2].wrapping_mul(83_492_791)) as u32;
+    let f = 1.0 - VOXEL_SHADE_JITTER + (h % 21) as f32 * VOXEL_SHADE_JITTER / 10.0;
+    [f, f, f, 1.0]
+}
 /// 静态场地（先验障碍）颜色：冷灰纯色。
 const FIELD_COLOR: Color = Color::srgb(0.34, 0.37, 0.40);
 /// 实时感知颜色：青绿纯色（青位偏离路径的亮绿，避免混淆）。
@@ -165,14 +180,15 @@ pub struct VoxelMeshes {
     live: Handle<Mesh>,
 }
 
-/// 由体素索引构建**小方块**合并网格（每个体素 6 面，不做内部面剔除）。
+/// 由体素索引构建**方块**合并网格（每个体素 6 面，不做内部面剔除）。
 ///
-/// `shrink` 是边长占比：< 1 时方块之间留缝，能看清体素粒度（内部面剔除只在满格
-/// 相邻时成立，留缝后每个面都得发）。
+/// `fill` 是边长占格子的比例（[`VOXEL_FILL`] = 1 为满格）；每格带一点明度抖动，
+/// 满格相邻时也能看出体素粒度。
 #[must_use]
-fn cube_mesh(indices: &[[i32; 3]], origin: [f32; 3], size: [f32; 3], shrink: f32) -> Mesh {
+fn cube_mesh(indices: &[[i32; 3]], origin: [f32; 3], size: [f32; 3], fill: f32) -> Mesh {
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(indices.len() * 24);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(indices.len() * 24);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(indices.len() * 24);
     let mut triangles: Vec<u32> = Vec::with_capacity(indices.len() * 36);
     for idx in indices {
         let center = [
@@ -180,15 +196,17 @@ fn cube_mesh(indices: &[[i32; 3]], origin: [f32; 3], size: [f32; 3], shrink: f32
             origin[1] + (idx[1] as f32 + 0.5) * size[1],
             origin[2] + (idx[2] as f32 + 0.5) * size[2],
         ];
+        let shade = cube_shade(*idx);
         for (_, corners, normal) in FACES {
             let base = positions.len() as u32;
             for corner in corners {
                 positions.push([
-                    center[0] + corner[0] * size[0] * shrink,
-                    center[1] + corner[1] * size[1] * shrink,
-                    center[2] + corner[2] * size[2] * shrink,
+                    center[0] + corner[0] * size[0] * fill,
+                    center[1] + corner[1] * size[1] * fill,
+                    center[2] + corner[2] * size[2] * fill,
                 ]);
                 normals.push(normal);
+                colors.push(shade);
             }
             triangles.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
@@ -199,6 +217,7 @@ fn cube_mesh(indices: &[[i32; 3]], origin: [f32; 3], size: [f32; 3], shrink: f32
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(triangles));
     mesh
 }
@@ -267,10 +286,8 @@ pub fn setup_voxels(
     let VoxelsConfig { field_map } = &config.voxels;
     let field_indices = load_field(field_map);
     let field_mesh = match field_indices {
-        Some((indices, origin, size)) => {
-            meshes.add(cube_mesh(&indices, origin, size, VOXEL_SHRINK))
-        }
-        None => meshes.add(cube_mesh(&[], [0.0; 3], [1.0; 3], VOXEL_SHRINK)),
+        Some((indices, origin, size)) => meshes.add(cube_mesh(&indices, origin, size, FIELD_FILL)),
+        None => meshes.add(cube_mesh(&[], [0.0; 3], [1.0; 3], FIELD_FILL)),
     };
     // 初始给一个退化方块而不是空 mesh：空 mesh 会触发 Bevy `slab_allocator`
     // 的 use-after-free 报错（实测）。
@@ -392,7 +409,7 @@ pub fn update_live_voxels(
     }
     if let Some(mut mesh) = meshes.get_mut(&layer.live) {
         let indices: Vec<[i32; 3]> = accum.set.iter().copied().collect();
-        *mesh = cube_mesh(&indices, accum.origin, accum.size, VOXEL_SHRINK);
+        *mesh = cube_mesh(&indices, accum.origin, accum.size, VOXEL_FILL);
     }
 }
 
