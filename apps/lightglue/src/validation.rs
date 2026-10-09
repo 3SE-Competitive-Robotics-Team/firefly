@@ -1,6 +1,31 @@
 //! 独立渲染视角的定位验收；查询只使用二维特征，三维查询标签只参与误差评分。
 use super::*;
 
+/// 执行一次地图查询：建绑定 → 填查询侧 → 推理 → 返回（耗时秒，观测）。
+///
+/// 抽出来是为了让契约测试主体只保留断言与判定（否则超出 clippy 行数上限）。
+fn run_query(
+    session: &mut Session,
+    bindings: &mut MatchBindings,
+    map: &VisionMap,
+    features: &FeatureMessage,
+    prior: &OdomMessage,
+) -> (f64, Option<firefly_pubsub::vision::PoseObservation>) {
+    let span = fastrace::Span::root(
+        "map_validation_query",
+        fastrace::prelude::SpanContext::random(),
+    );
+    let parent = span.set_local_parent();
+    let started = std::time::Instant::now();
+    bind_query(bindings, features).unwrap();
+    let observation = query_once(session, bindings, map, features, prior, || false).unwrap();
+    let wall = started.elapsed().as_secs_f64();
+    drop(parent);
+    drop(span);
+    fastrace::flush();
+    (wall, observation)
+}
+
 #[test]
 #[ignore = "requires independent held-out captures, models and a frozen map"]
 #[allow(clippy::large_stack_arrays)]
@@ -61,17 +86,9 @@ fn held_out_map_localization_contract() {
             quat_w: q[3],
             ..Default::default()
         };
-        let span = fastrace::Span::root(
-            "map_validation_query",
-            fastrace::prelude::SpanContext::random(),
-        );
-        let parent = span.set_local_parent();
-        let started = std::time::Instant::now();
-        let observation = query_once(&mut session, &map, &features, &prior, || false).unwrap();
-        let query_wall_s = started.elapsed().as_secs_f64();
-        drop(parent);
-        drop(span);
-        fastrace::flush();
+        let mut bindings = MatchBindings::new(&session).unwrap();
+        let (query_wall_s, observation) =
+            run_query(&mut session, &mut bindings, &map, &features, &prior);
         let mut result = if let Some(pose) = observation {
             let error = (nalgebra::Vector3::new(pose.position_x, pose.position_y, pose.position_z)
                 - nalgebra::Vector3::from(frame.position))

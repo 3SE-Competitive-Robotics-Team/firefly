@@ -23,7 +23,7 @@ use firefly_vision_match::{CameraIntrinsics, pose_covariance, solve_visual_pose}
 use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetAttachmentId;
 use nalgebra::{Rotation3, UnitQuaternion};
-use ort::session::Session;
+use ort::session::{IoBinding, Session};
 use ort::value::Tensor;
 
 /// 缺省权重路径（相对运行目录，通常为仓库根）。
@@ -191,6 +191,12 @@ fn run_loop(
             )
         })?;
 
+    let mut bindings = MatchBindings::new(session).map_err(|e| {
+        firefly_error::Error::new(
+            firefly_error::ErrorKind::Internal,
+            format!("创建推理绑定失败: {e}"),
+        )
+    })?;
     // 特征发布端带 notify（`aliked` 为 `with_topic_notify`）：特征到即醒；
     // 心跳仅兜底无事件时的 odom 缓存更新与断流自愈。
     let mut latest_corrected: Option<OdomMessage> = None;
@@ -238,7 +244,9 @@ fn run_loop(
             firefly_observability::set_sim_time(feat.timestamp);
             firefly_observability::pump_log_ipc(&log_ipc);
             let t_query = std::time::Instant::now();
-            let query_outcome = query_once(session, map, &feat, &odom, || sensors.is_stopped());
+            let query_outcome = query_once(session, &mut bindings, map, &feat, &odom, || {
+                sensors.is_stopped()
+            });
             let mut timing = firefly_pubsub::viz::VizMessage::base(
                 firefly_pubsub::viz::kind::SCALARS,
                 feat.timestamp,
@@ -319,36 +327,111 @@ fn run_loop(
     Ok(())
 }
 
+/// 推理缓冲与 io-binding：**一次分配，跨查询/跨候选复用**。
+///
+/// `Session::run(inputs)` 每次调用都会把输入拷进会话缓冲、并新建输出张量；
+/// `IoBinding` 让输入在绑定时登记、输出绑定到预分配张量，之后每次 `run_binding`
+/// 复用同一批内存（对照 ort 文档：「condition tensor is only copied to the device
+/// once instead of 20 times」）。输入张量本体存在这里，用
+/// [`Tensor::try_extract_tensor_mut`] 直接写进它的内存，避免每候选一次
+/// `Vec` 分配 + `Tensor::from_array` 拷贝。
+struct MatchBindings {
+    binding: IoBinding,
+    /// 查询侧关键点 `[1, NUM_POINTS, 2]`（每查询重填）。
+    k0: Tensor<f32>,
+    /// 查询侧描述子 `[1, NUM_POINTS, DESC_DIM]`（每查询重填）。
+    d0: Tensor<f32>,
+    /// 库侧关键点 `[1, NUM_POINTS, 2]`（每候选重填）。
+    k1: Tensor<f32>,
+    /// 库侧描述子 `[1, NUM_POINTS, DESC_DIM]`（每候选重填）。
+    d1: Tensor<f32>,
+}
+
+impl MatchBindings {
+    fn new(session: &Session) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut binding = session.create_binding()?;
+        // 输出绑定到预分配张量：每次推理写回同一块内存，不再每次新建。
+        binding.bind_output(
+            "matches0",
+            Tensor::from_array(([1usize, NUM_POINTS], vec![0i64; NUM_POINTS]))?,
+        )?;
+        binding.bind_output(
+            "scores0",
+            Tensor::from_array(([1usize, NUM_POINTS], vec![0f32; NUM_POINTS]))?,
+        )?;
+        // 图像尺寸在整个会话内恒定，绑定一次即可。
+        binding.bind_input(
+            "s0",
+            &Tensor::from_array(([1usize, 2], vec![WIDTH, HEIGHT]))?,
+        )?;
+        binding.bind_input(
+            "s1",
+            &Tensor::from_array(([1usize, 2], vec![WIDTH, HEIGHT]))?,
+        )?;
+        Ok(Self {
+            binding,
+            k0: Tensor::from_array(([1usize, NUM_POINTS, 2], vec![0f32; NUM_POINTS * 2]))?,
+            d0: Tensor::from_array((
+                [1usize, NUM_POINTS, DESC_DIM],
+                vec![0f32; NUM_POINTS * DESC_DIM],
+            ))?,
+            k1: Tensor::from_array(([1usize, NUM_POINTS, 2], vec![0f32; NUM_POINTS * 2]))?,
+            d1: Tensor::from_array((
+                [1usize, NUM_POINTS, DESC_DIM],
+                vec![0f32; NUM_POINTS * DESC_DIM],
+            ))?,
+        })
+    }
+}
+
+/// 把查询侧特征写进已绑定张量并重新登记（查询侧每查询都变，必须重绑）。
+fn bind_query(
+    bindings: &mut MatchBindings,
+    feat: &FeatureMessage,
+) -> Result<(), Box<dyn std::error::Error>> {
+    {
+        let (_, k0) = bindings.k0.try_extract_tensor_mut::<f32>()?;
+        let (_, d0) = bindings.d0.try_extract_tensor_mut::<f32>()?;
+        for i in 0..NUM_POINTS {
+            k0[2 * i] = feat.keypoints[i][0];
+            k0[2 * i + 1] = feat.keypoints[i][1];
+            d0[i * DESC_DIM..(i + 1) * DESC_DIM].copy_from_slice(&feat.descriptors[i]);
+        }
+    }
+    bindings.binding.bind_input("k0", &bindings.k0)?;
+    bindings.binding.bind_input("d0", &bindings.d0)?;
+    Ok(())
+}
+
 /// 单帧匹配：query 特征 vs 库图一帧 → 2D-3D 对应（丢弃填充/低分匹配）。
 #[allow(clippy::type_complexity)]
 #[fastrace::trace]
 fn match_points(
     session: &mut Session,
+    bindings: &mut MatchBindings,
     points: &[firefly_vision_map::VisionMapPoint],
     feat: &FeatureMessage,
-    k0: &Tensor<f32>,
-    d0: &Tensor<f32>,
 ) -> Result<Vec<(usize, [f64; 3], f32)>, Box<dyn std::error::Error>> {
     let n_map = points.len().min(NUM_POINTS);
     if n_map < 6 {
         return Ok(Vec::new());
     }
-    // 库侧 0 填充（后过滤填充匹配）。
-    let mut k1 = vec![0f32; NUM_POINTS * 2];
-    let mut d1 = vec![0f32; NUM_POINTS * DESC_DIM];
-    for (i, p) in points.iter().take(n_map).enumerate() {
-        k1[2 * i] = p.uv[0];
-        k1[2 * i + 1] = p.uv[1];
-        d1[i * DESC_DIM..(i + 1) * DESC_DIM].copy_from_slice(&p.descriptor);
+    // 库侧写进已绑定的张量内存：先清零（后过滤填充匹配），再填本候选。
+    {
+        let (_, k1) = bindings.k1.try_extract_tensor_mut::<f32>()?;
+        let (_, d1) = bindings.d1.try_extract_tensor_mut::<f32>()?;
+        k1.fill(0.);
+        d1.fill(0.);
+        for (i, p) in points.iter().take(n_map).enumerate() {
+            k1[2 * i] = p.uv[0];
+            k1[2 * i + 1] = p.uv[1];
+            d1[i * DESC_DIM..(i + 1) * DESC_DIM].copy_from_slice(&p.descriptor);
+        }
     }
-    let outputs = session.run(ort::inputs![
-        "k0" => k0,
-        "d0" => d0,
-        "k1" => Tensor::from_array(([1usize, NUM_POINTS, 2], k1.into_boxed_slice()))?,
-        "d1" => Tensor::from_array(([1usize, NUM_POINTS, DESC_DIM], d1.into_boxed_slice()))?,
-        "s0" => Tensor::from_array(([1usize, 2], vec![WIDTH, HEIGHT].into_boxed_slice()))?,
-        "s1" => Tensor::from_array(([1usize, 2], vec![WIDTH, HEIGHT].into_boxed_slice()))?,
-    ])?;
+    // 数据已更新 → 重新登记（`bind_input` 的语义是绑定时登记一次，之后改动须重绑）。
+    bindings.binding.bind_input("k1", &bindings.k1)?;
+    bindings.binding.bind_input("d1", &bindings.d1)?;
+    let outputs = session.run_binding(&bindings.binding)?;
     let (_, matches) = outputs["matches0"].try_extract_tensor::<i64>()?;
     let (_, scores) = outputs["scores0"].try_extract_tensor::<f32>()?;
     let mut pairs = Vec::new();
@@ -402,6 +485,7 @@ fn candidates_by_heading(
 #[fastrace::trace]
 fn query_once(
     session: &mut Session,
+    bindings: &mut MatchBindings,
     map: &VisionMap,
     feat: &FeatureMessage,
     odom: &OdomMessage,
@@ -422,16 +506,18 @@ fn query_once(
         return Ok(None);
     }
     // 多帧拼对应：单帧共面时 PnP 有翻转二义性，多视角点集破退化。
-    // query 侧输入各帧复用（一次组装、一次装 Tensor，多次推理时借用）。
-    let mut k0 = vec![0f32; NUM_POINTS * 2];
-    let mut d0 = vec![0f32; NUM_POINTS * DESC_DIM];
-    for i in 0..NUM_POINTS {
-        k0[2 * i] = feat.keypoints[i][0];
-        k0[2 * i + 1] = feat.keypoints[i][1];
-        d0[i * DESC_DIM..(i + 1) * DESC_DIM].copy_from_slice(&feat.descriptors[i]);
+    // query 侧每查询填一次，库侧每候选填一次（都写进已绑定张量的内存）。
+    {
+        let (_, k0) = bindings.k0.try_extract_tensor_mut::<f32>()?;
+        let (_, d0) = bindings.d0.try_extract_tensor_mut::<f32>()?;
+        for i in 0..NUM_POINTS {
+            k0[2 * i] = feat.keypoints[i][0];
+            k0[2 * i + 1] = feat.keypoints[i][1];
+            d0[i * DESC_DIM..(i + 1) * DESC_DIM].copy_from_slice(&feat.descriptors[i]);
+        }
     }
-    let k0t = Tensor::from_array(([1usize, NUM_POINTS, 2], k0.into_boxed_slice()))?;
-    let d0t = Tensor::from_array(([1usize, NUM_POINTS, DESC_DIM], d0.into_boxed_slice()))?;
+    bindings.binding.bind_input("k0", &bindings.k0)?;
+    bindings.binding.bind_input("d0", &bindings.d0)?;
     // 同一像素只保留最高分的地图对应，避免跨库帧重复计算信息量。
     let mut best = vec![None::<([f64; 3], f32)>; NUM_POINTS];
     for (candidate_index, &frame_idx) in candidates.iter().enumerate() {
@@ -439,7 +525,7 @@ fn query_once(
             return Ok(None);
         }
         for (qi, point, score) in
-            match_points(session, &map.frames[frame_idx].points, feat, &k0t, &d0t)?
+            match_points(session, bindings, &map.frames[frame_idx].points, feat)?
         {
             if best[qi].is_none_or(|(_, previous)| score > previous) {
                 best[qi] = Some((point, score));
@@ -594,9 +680,13 @@ mod tests {
             quat_w: q[3],
             ..Default::default()
         };
-        let observation = query_once(&mut session, &map, &features, &prior, || false)
-            .unwrap()
-            .expect("verified pose");
+        let mut bindings = MatchBindings::new(&session).unwrap();
+        bind_query(&mut bindings, &features).unwrap();
+        let observation = query_once(&mut session, &mut bindings, &map, &features, &prior, || {
+            false
+        })
+        .unwrap()
+        .expect("verified pose");
         let error = nalgebra::Vector3::new(
             observation.position_x - frame.position[0],
             observation.position_y - frame.position[1],
