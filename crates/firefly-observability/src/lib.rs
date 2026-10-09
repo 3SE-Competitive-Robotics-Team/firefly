@@ -61,10 +61,29 @@ pub fn init() {
         })
         .apply();
 
-    fastrace::set_reporter(
-        fastrace::collector::ConsoleReporter,
-        fastrace::collector::Config::default(),
-    );
+    fastrace::set_reporter(CompactReporter, fastrace::collector::Config::default());
+}
+
+/// 紧凑 span 报告：每条 span 一行 `时长ms 名字 trace=<id>`。
+///
+/// fastrace 自带的 `ConsoleReporter` 用 `{:#?}` 打印整条 [`SpanRecord`]——每条固定
+/// 29 行，其中 identifiers 占 9 行，`properties`/`events`/`links` 多数为空。有逐帧
+/// span 的进程（aliked/lightglue）在 10Hz 级采样下每秒写数百行 stderr，格式化开销
+/// 直接落在热路径线程上（实测 75s 内 32k 行）。这里保留全部 span、时长与 trace 关联，
+/// 只压成一行；日志与指标本身不减少。
+struct CompactReporter;
+
+impl fastrace::collector::Reporter for CompactReporter {
+    fn report(&mut self, spans: Vec<fastrace::collector::SpanRecord>) {
+        for span in spans {
+            eprintln!(
+                "{:>9.3}ms  {:<44} trace={:032x}",
+                span.duration_ns as f64 / 1e6,
+                span.name,
+                span.trace_id.0
+            );
+        }
+    }
 }
 
 /// 当前 sim 时钟（秒）的位表示；`NaN` = 尚无 sim 时钟（聚合端回落墙钟轴）。
