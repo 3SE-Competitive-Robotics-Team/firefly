@@ -31,20 +31,35 @@ const DEFAULT_MODEL: &str = "models/aliked-n16-k512.onnx";
 const WIDTH: usize = 320;
 const HEIGHT: usize = 240;
 /// 特征处理最小间隔（传感器秒）；只处理最新帧，推理慢时丢帧而不积压。
-const FEATURE_PERIOD: f64 = 0.2;
+/// 默认特征推理频率（Hz）。地图查询节流 1Hz、在线回环关键帧 1s，供给侧 2Hz 已足够：
+/// 查询侧要求特征与里程计时间差 ≤ `ODOM_FRESH_TIMEOUT`（1s），2Hz 每 0.5s 一帧。
+/// 更高频率只增加重复推理——消费者按各自节流取最新帧。
+const DEFAULT_RATE_HZ: f64 = 2.0;
+/// 允许的频率范围（Hz）：低于 0.5 会顶破查询侧 1s 新鲜度门，高于 10 超过相机帧率。
+const RATE_HZ_RANGE: std::ops::RangeInclusive<f64> = 0.5..=10.0;
 /// 时钟回拨重整阈值（秒）：帧时间戳比节流门限早超此值即视为传感器时钟重启
 ///（`sim` 重启后任务时钟归零），重整节流门限而非永久静默（否则重启后无特征）。
 const CLOCK_REWIND_MARGIN: f64 = 2.0;
 /// 心跳周期（无事件时兜底）。
 const HEARTBEAT: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// 命令行参数。
+struct Args {
+    model: String,
+    build_map: Option<PathBuf>,
+    out: Option<PathBuf>,
+    /// 特征推理频率（Hz，见 [`DEFAULT_RATE_HZ`]）。
+    rate_hz: f64,
+}
+
 /// 解析命令行参数：`--model`（在线/离线通用）、`--build-map <dir>` +
-/// `--out <map.ffvmap>`（离线建库，两者必须同时出现）。
-fn parse_args() -> Result<(String, Option<PathBuf>, Option<PathBuf>), String> {
+/// `--out <map.ffvmap>`（离线建库，两者必须同时出现）、`--rate-hz`（在线推理频率）。
+fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
     let mut model = DEFAULT_MODEL.to_owned();
     let mut build_map: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;
+    let mut rate_hz = DEFAULT_RATE_HZ;
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--model" => {
@@ -63,6 +78,19 @@ fn parse_args() -> Result<(String, Option<PathBuf>, Option<PathBuf>), String> {
                     it.next().ok_or_else(|| "missing --out value".to_owned())?,
                 ));
             }
+            "--rate-hz" => {
+                let value = it
+                    .next()
+                    .ok_or_else(|| "missing --rate-hz value".to_owned())?;
+                rate_hz = value
+                    .parse::<f64>()
+                    .map_err(|e| format!("--rate-hz 不是数值（{value}）：{e}"))?;
+                if !RATE_HZ_RANGE.contains(&rate_hz) {
+                    return Err(format!(
+                        "--rate-hz 须在 {RATE_HZ_RANGE:?} 内，得到 {rate_hz}"
+                    ));
+                }
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -71,7 +99,12 @@ fn parse_args() -> Result<(String, Option<PathBuf>, Option<PathBuf>), String> {
         (None, Some(_)) => return Err("--out 需同时给 --build-map <frames_dir>".to_owned()),
         _ => {}
     }
-    Ok((model, build_map, out))
+    Ok(Args {
+        model,
+        build_map,
+        out,
+        rate_hz,
+    })
 }
 
 /// 加载 ONNX 会话（文件缺失即报错，不静默）。
@@ -91,8 +124,16 @@ fn load_session(model: &str) -> Result<Session, Box<dyn std::error::Error>> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     firefly_observability::init();
-    let (model, build_map, out) = parse_args().map_err(|e| {
-        eprintln!("{e}\n用法：aliked [--model models/aliked-n16-k512.onnx]\n       aliked --build-map <frames_dir> --out <map.ffvmap> [--model ...]");
+    let Args {
+        model,
+        build_map,
+        out,
+        rate_hz,
+    } = parse_args().map_err(|e| {
+        eprintln!(
+            "{e}\n用法：aliked [--model models/aliked-n16-k512.onnx] [--rate-hz 2.0]\n       \
+             aliked --build-map <frames_dir> --out <map.ffvmap> [--model ...]"
+        );
         std::process::exit(2);
     })?;
     let mut session = load_session(&model)?;
@@ -101,12 +142,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     smoke_inference(&mut session)?;
-    run_loop(&mut session)?;
+    run_loop(&mut session, 1.0 / rate_hz)?;
     Ok(())
 }
 
-/// 主循环：相机对事件唤醒 → 取最新左目帧 → 最多 5Hz 推理 → 发布特征。
-fn run_loop(session: &mut Session) -> Result<(), firefly_error::Error> {
+/// 主循环：相机对事件唤醒 → 取最新左目帧 → 按 `period` 节流推理 → 发布特征。
+fn run_loop(session: &mut Session, period: f64) -> Result<(), firefly_error::Error> {
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "aliked");
     let left_sub = Subscriber::<GrayImageMessage>::with_topic(&node, CAMERA_LEFT_TOPIC)?;
@@ -153,14 +194,14 @@ fn run_loop(session: &mut Session) -> Result<(), firefly_error::Error> {
             if next_feat - frame.timestamp > CLOCK_REWIND_MARGIN {
                 log::info!(
                     "传感器时钟回拨（{:.2} → {:.2}），特征节流重整",
-                    next_feat - FEATURE_PERIOD,
+                    next_feat - period,
                     frame.timestamp
                 );
             } else {
                 return CallbackProgression::Continue;
             }
         }
-        next_feat = frame.timestamp + FEATURE_PERIOD;
+        next_feat = frame.timestamp + period;
         // 相机帧时间戳即 sim 时钟（传感器时钟 = 仿真时钟）；推理前后各 pump
         // 一次（推理阻塞数百 ms，积压日志及时排空，不等下一帧）。
         firefly_observability::set_sim_time(frame.timestamp);
