@@ -247,6 +247,13 @@ struct App {
     perceived_center: Vector3<f64>,
     /// 各体素实体**上次发布的集合**：与当前集合做差得到增量（新增/删除）。
     voxel_state: HashMap<String, HashSet<[i32; 3]>>,
+    /// 体素增量发布的复用缓冲（每 tick 都要用，避免反复分配）。
+    voxel_current: HashSet<[i32; 3]>,
+    voxel_added: Vec<[i32; 3]>,
+    voxel_removed: Vec<[i32; 3]>,
+    /// 待发布的占据索引缓冲（感知窗口 / 动态障碍共用各自的 Vec）。
+    voxel_indices: Vec<[i32; 3]>,
+    motion_indices: Vec<[i32; 3]>,
     /// 状态时钟（秒），只由通过校验的地图系里程计推进。
     t_sim: f64,
     wall_origin: Instant,
@@ -376,6 +383,11 @@ impl App {
             prev_dyn: Vec::new(),
             perceived_center: Vector3::zeros(),
             voxel_state: HashMap::new(),
+            voxel_current: HashSet::new(),
+            voxel_added: Vec::new(),
+            voxel_removed: Vec::new(),
+            voxel_indices: Vec::new(),
+            motion_indices: Vec::new(),
             map_file,
             t_sim: 0.0,
             wall_origin: Instant::now(),
@@ -658,12 +670,13 @@ impl App {
             now,
         );
         if !self.map_file.motions.is_empty() {
-            let mut indices = Vec::new();
+            let mut indices = std::mem::take(&mut self.motion_indices);
             for m in &self.map_file.motions {
                 let p = m.position_at(now);
                 indices.extend(human_voxels(p[0], p[1]));
             }
             self.log_voxels("plan/motions", &indices, now);
+            self.motion_indices = indices;
         }
         if report.finished {
             self.finished = true;
@@ -763,8 +776,12 @@ impl App {
             }
             frame += 1;
             // 感知占据地图：每拍只发变化量，周期性全量重同步
-            let (indices, size, origin) =
-                Self::occupied_indices(self.manager.map(), Some(self.perceived_center));
+            let mut indices = std::mem::take(&mut self.voxel_indices);
+            let (size, origin) = Self::occupied_indices(
+                self.manager.map(),
+                Some(self.perceived_center),
+                &mut indices,
+            );
             self.publish_voxel_delta(
                 "plan/perceived",
                 &indices,
@@ -773,6 +790,7 @@ impl App {
                 self.t_sim,
                 frame.is_multiple_of(VOXEL_RESYNC_TICKS),
             );
+            self.voxel_indices = indices;
             CallbackProgression::Continue
         };
 
@@ -868,9 +886,8 @@ impl App {
 
     /// 占据体素索引 → voxels 消息（体素中心 = 原点 + (idx+0.5)·尺寸，
     /// Python 端 `VoxelGridMap` 直接镜像）。超限截断并告警一次（锁存防刷屏）。
-    fn log_voxels(&mut self, entity: &str, indices: &[(i32, i32, i32)], t: f64) {
-        let idx: Vec<[i32; 3]> = indices.iter().map(|&(x, y, z)| [x, y, z]).collect();
-        self.publish_voxel_delta(entity, &idx, [0.1, 0.1, 0.1], [0.0, 0.0, 0.0], t, false);
+    fn log_voxels(&mut self, entity: &str, indices: &[[i32; 3]], t: f64) {
+        self.publish_voxel_delta(entity, indices, [0.1, 0.1, 0.1], [0.0, 0.0, 0.0], t, false);
     }
 
     /// 局部窗口内的占据体素索引（`center` 为空则全量栅格），附带网格尺寸与原点。
@@ -881,7 +898,8 @@ impl App {
     fn occupied_indices(
         map: &GridMap,
         center: Option<Vector3<f64>>,
-    ) -> (Vec<[i32; 3]>, [f32; 3], [f32; 3]) {
+        indices: &mut Vec<[i32; 3]>,
+    ) -> ([f32; 3], [f32; 3]) {
         let origin = map.origin();
         let dims = map.dims();
         let size = [map.resolution() as f32; 3];
@@ -889,11 +907,11 @@ impl App {
         let (lo, hi) = match center {
             Some(c) => match Self::window_bounds(map, c) {
                 Some(bounds) => bounds,
-                None => return (Vec::new(), size, at),
+                None => return (size, at),
             },
             None => ([0, 0, 0], [dims[0] - 1, dims[1] - 1, dims[2] - 1]),
         };
-        let mut indices = Vec::new();
+        indices.clear();
         for x in lo[0]..=hi[0] {
             for y in lo[1]..=hi[1] {
                 for z in lo[2]..=hi[2] {
@@ -903,7 +921,7 @@ impl App {
                 }
             }
         }
-        (indices, size, at)
+        (size, at)
     }
 
     /// 体素层按**增量**发布：与上次发布的集合做差，只发新增/删除。首次发布、
@@ -918,25 +936,52 @@ impl App {
         t: f64,
         force_full: bool,
     ) {
-        let current: HashSet<[i32; 3]> = indices.iter().copied().collect();
-        match self.voxel_state.get(entity) {
-            None => self.publish_voxels(kind::VOXELS, entity, indices, size, origin, t),
-            Some(prev) => {
-                let added: Vec<[i32; 3]> = current.difference(prev).copied().collect();
-                let removed: Vec<[i32; 3]> = prev.difference(&current).copied().collect();
-                if force_full || added.len() > VOXELS_MAX || removed.len() > VOXELS_MAX {
-                    self.publish_voxels(kind::VOXELS, entity, indices, size, origin, t);
-                } else {
-                    if !added.is_empty() {
-                        self.publish_voxels(kind::VOXELS_ADD, entity, &added, size, origin, t);
-                    }
-                    if !removed.is_empty() {
-                        self.publish_voxels(kind::VOXELS_REMOVE, entity, &removed, size, origin, t);
-                    }
+        self.voxel_current.clear();
+        self.voxel_current.extend(indices.iter().copied());
+        let (first, full) = {
+            match self.voxel_state.get(entity) {
+                None => (true, true),
+                Some(prev) => {
+                    self.voxel_added.clear();
+                    self.voxel_removed.clear();
+                    self.voxel_added
+                        .extend(self.voxel_current.difference(prev).copied());
+                    self.voxel_removed
+                        .extend(prev.difference(&self.voxel_current).copied());
+                    (
+                        false,
+                        force_full
+                            || self.voxel_added.len() > VOXELS_MAX
+                            || self.voxel_removed.len() > VOXELS_MAX,
+                    )
                 }
             }
+        };
+        if first || full {
+            self.publish_voxels(kind::VOXELS, entity, indices, size, origin, t);
+        } else {
+            if !self.voxel_added.is_empty() {
+                self.publish_voxels(kind::VOXELS_ADD, entity, &self.voxel_added, size, origin, t);
+            }
+            if !self.voxel_removed.is_empty() {
+                self.publish_voxels(
+                    kind::VOXELS_REMOVE,
+                    entity,
+                    &self.voxel_removed,
+                    size,
+                    origin,
+                    t,
+                );
+            }
         }
-        self.voxel_state.insert(entity.to_string(), current);
+        // 换入新集合：复用缓冲拿到上一 tick 的集合，下轮直接清空重填（不克隆）。
+        match self.voxel_state.get_mut(entity) {
+            Some(prev) => std::mem::swap(prev, &mut self.voxel_current),
+            None => {
+                self.voxel_state
+                    .insert(entity.to_string(), std::mem::take(&mut self.voxel_current));
+            }
+        }
     }
 
     /// 发布一条体素消息；`indices` 超上限按遍历顺序截断并告警（消费端由周期性
@@ -1094,7 +1139,8 @@ fn main() {
         Ok(mut app) => {
             // 静态先验一次性记录（体素索引收集在发布端完成）
             let grid = app.manager.map().clone();
-            let (indices, size, origin) = App::occupied_indices(&grid, None);
+            let mut indices = Vec::new();
+            let (size, origin) = App::occupied_indices(&grid, None, &mut indices);
             app.publish_voxel_delta("plan/map", &indices, size, origin, 0.0, true);
             if let Err(e) = app.run() {
                 log::error!("planner 失败：{e}");
