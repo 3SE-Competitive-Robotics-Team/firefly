@@ -44,3 +44,5 @@ pub mod subscriber;
 pub mod trace;
 pub mod vision;
 pub mod viz;
+
+pub mod attitude;

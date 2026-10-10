@@ -49,8 +49,7 @@ impl Default for ImuMessage {
 /// 收到的 imu 样本。
 pub type ReceivedImu = Received<ImuMessage>;
 
-/// IMU 订阅缓冲区深度：覆盖约 1s 排空停顿（`VIO` 前端偶发数百 ms 阻塞；
-/// 旧值 20 恰等于断流告警阈值 200ms，零余量，溢出即永久丢数）。
+/// IMU 订阅缓冲区深度：100Hz 时覆盖约 1s 排空停顿；溢出会丢失测量。
 /// 服务上限见 `IMU_SERVICE_MAX`（本文件创建服务时显式声明，不依赖机器全局配置）。
 const IMU_BUFFER_SIZE: usize = 100;
 /// IMU 服务订阅端上限：须 ≥ 订阅缓冲（`iceoryx2` 建服务方定上限，后续
@@ -61,7 +60,7 @@ const IMU_SERVICE_MAX: usize = 128;
 pub struct ImuSubscriber(Subscriber<ImuMessage>);
 
 impl ImuSubscriber {
-    /// 打开 imu 话题的订阅器（`buffer_size`=20，覆盖 10 帧 IMU 数据）。
+    /// 打开 imu 话题的订阅器，缓冲 `IMU_BUFFER_SIZE` 个样本。
     ///
     /// # Errors
     /// 见 [`Subscriber::with_topic_and_buffer`]。

@@ -27,6 +27,7 @@ toml = "1.1.6"
 usage = { package = "usage-rs", version = "6.12.0" }
 firefly-cost = { path = "crates/firefly-cost" }
 firefly-error = { path = "crates/firefly-error" }
+firefly-imu = { path = "crates/firefly-imu" }
 firefly-flight = { path = "crates/firefly-flight" }
 firefly-vio-core = { path = "crates/firefly-vio-core" }
 firefly-vio-types = { path = "crates/firefly-vio-types" }

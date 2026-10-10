@@ -1,0 +1,20 @@
+[package]
+name = "firefly-imu"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Timestamped attitude ESKF, stationary initialization and correlated VIO aiding"
+keywords = ["imu", "eskf", "robotics"]
+categories = ["science::robotics"]
+
+[dependencies]
+fastrace.workspace = true
+firefly-error.workspace = true
+nalgebra.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

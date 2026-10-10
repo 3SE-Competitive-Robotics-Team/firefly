@@ -170,6 +170,15 @@ impl VioManager {
         self.is_initialized_vio && (self.timelastupdate - (-1.0)).abs() > f64::EPSILON
     }
 
+    /// 滤波状态实际积分到的 IMU 时刻；在线更新时延参数不能重贴状态时间戳。
+    #[must_use]
+    pub fn state_imu_timestamp(&self) -> f64 {
+        self.state.timestamp
+            + self
+                .last_prop_time_offset
+                .unwrap_or_else(|| self.time_offset())
+    }
+
     /// 高频位姿预测，目标时间为 IMU 时钟秒（对照 `Propagator::fast_state_propagate`）。
     ///
     /// 不修改 `State`；首次调用（或缓存被传播/更新失效后）从当前状态组装

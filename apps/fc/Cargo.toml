@@ -15,6 +15,7 @@ name = "fc"
 path = "src/main.rs"
 
 [dependencies]
+firefly-imu.workspace = true
 nalgebra.workspace = true
 firefly-base.workspace = true
 fastrace = { workspace = true }
@@ -27,9 +28,6 @@ iceoryx2-bb-posix = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
-
-[dev-dependencies]
-firefly-vio-types = { workspace = true }
 
 [lints]
 workspace = true

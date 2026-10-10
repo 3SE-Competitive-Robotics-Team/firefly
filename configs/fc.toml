@@ -14,3 +14,6 @@ vel_kp = 2.4
 
 # [fsm]：飞行状态机参数（起飞高度/爬升率、降落率、落地判据、参考失联超时）
 # 全用 crate 默认值（`firefly-flight::FsmParams`），需要时才在此覆盖。
+
+# [imu]：本地姿态 ESKF 使用 firefly_imu::Options 默认值；部署需标定噪声密度。
+# 静止窗口、NIS 门限和角速度低通参数见 docs/imu.md。

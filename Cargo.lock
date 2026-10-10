@@ -2717,9 +2717,9 @@ dependencies = [
  "firefly-base",
  "firefly-error",
  "firefly-flight",
+ "firefly-imu",
  "firefly-observability",
  "firefly-pubsub",
- "firefly-vio-types",
  "glam 0.33.11",
  "iceoryx2-bb-posix",
  "log",
@@ -2783,6 +2783,16 @@ name = "firefly-flight"
 version = "0.1.0"
 dependencies = [
  "glam 0.33.11",
+ "serde",
+]
+
+[[package]]
+name = "firefly-imu"
+version = "0.1.0"
+dependencies = [
+ "fastrace",
+ "firefly-error",
+ "nalgebra",
  "serde",
 ]
 

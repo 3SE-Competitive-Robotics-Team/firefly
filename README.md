@@ -4,7 +4,7 @@
 地图定位、轨迹规划、四旋翼飞控、MuJoCo 仿真与 Rerun 可视化。
 
 当前部署以仿真研究与算法验证为主。VIO 从静止传感器观测初始化，
-飞控使用 IMU 与里程计反馈。真值用于仿真传感器生成、评测与可视化对照，不能提供估计器初始
+飞控使用本地姿态 ESKF 与里程计反馈。真值用于仿真传感器生成、评测与可视化对照，不能提供估计器初始
 位置、速度、姿态或飞控反馈。启动时保持机体静止，等待估计就绪后再解锁。
 
 ## 系统链路
@@ -26,6 +26,10 @@ Rust 算法进程不直接写录制文件；`firefly-viz` 统一写入 Rerun。
 VIO 在相机时刻更新滤波器，使用 IMU 预测输出 100 Hz 里程计；消息时间为
 状态对应的 IMU 时钟，位置与速度均在局部世界系。初始化未完成或 IMU
 未覆盖目标时刻时不发布里程计。真值可视化保留真值消息自身的采样时间。
+
+FC 的独立 IMU 线程通过 `firefly-imu` 估计姿态和陀螺零偏，角速度反馈使用去偏低通陀螺。
+VIO 通过 `Firefly/VioAttitudeAid` 提供带联合协方差的外援；共享 IMU 的相关性用 CI 处理，
+加计校正限于上锁静止期。接口、方程与能力限制见 [本地姿态估计](docs/imu.md)。
 
 ## 视觉定位与回环路线
 
@@ -50,6 +54,7 @@ VIO 在相机时刻更新滤波器，使用 IMU 预测输出 100 Hz 里程计；
 | `crates/firefly-{map,search,trajectory,optimize,cost,obstacle,planner}` | 占据地图、A*、MINCO、L-BFGS、代价、动态障碍与重规划 |
 | `crates/firefly-{localization,vision-map,vision-match}` | 定位融合、视觉库图与匹配 |
 | `crates/firefly-flight` | 飞行模式、安全条件、姿态/位置控制与电机分配 |
+| `crates/firefly-imu` | 姿态/陀螺零偏 ESKF、静止初始化、加计 NIS 与相关 VIO 外援 |
 | `crates/firefly-{pubsub,error,observability,render}` | IPC 消息、错误、日志/trace、共享 Bevy 场景与光照 |
 | `apps/` | Rust 进程 `vio`、`fc`、`planner`、`localization`、`aliked`、`lightglue`、`render`、`quad`、`ffctl`；Python 进程 `firefly-sim`、`firefly-viz` |
 | `packages/` | Python 库 `firefly-mujoco` 与 CAD 资产处理 `firefly-cad` |

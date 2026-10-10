@@ -43,6 +43,33 @@ pub fn sample(vio: &mut VioManager, timestamp: f64) -> Option<OdomMessage> {
     })
 }
 
+/// 原始滤波状态的六维边缘分布；与预测里程计分开，禁止给旧协方差贴新时间戳。
+/// `OpenVINS` JPL 左误差的 δθ 等于 Hamilton body→odom 的右误差，bg 为机体系加性误差。
+pub fn attitude_aid(
+    vio: &VioManager,
+    session: u64,
+) -> Option<firefly_pubsub::attitude::AttitudeAidMessage> {
+    use firefly_vio_types::var::Variable;
+    if !vio.initialized() || session == 0 {
+        return None;
+    }
+    let timestamp = vio.state_imu_timestamp();
+    if !timestamp.is_finite() || timestamp > vio.propagator.latest_imu_timestamp()? {
+        return None;
+    }
+    let id = usize::try_from(vio.state.imu.id()).ok()?;
+    let indices = [id, id + 1, id + 2, id + 9, id + 10, id + 11];
+    let q = vio.state.imu.quat();
+    let bg = vio.state.imu.bias_g();
+    Some(firefly_pubsub::attitude::AttitudeAidMessage {
+        timestamp,
+        session,
+        quat_xyzw: [q[0], q[1], q[2], q[3]],
+        gyro_bias: [bg.x, bg.y, bg.z],
+        covariance: std::array::from_fn(|k| vio.state.cov[(indices[k / 6], indices[k % 6])]),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +116,46 @@ mod tests {
             });
         }
         vio
+    }
+
+    #[test]
+    fn attitude_aid_preserves_state_clock_and_covariance_cross_terms() {
+        use firefly_vio_types::var::Variable;
+        let mut vio = moving_estimator(0.02);
+        vio.propagate_to(1.1);
+        let id = vio.state.imu.id() as usize;
+        vio.state.cov[(id, id + 10)] = 2e-6;
+        vio.state.cov[(id + 10, id)] = 2e-6;
+        let aid = attitude_aid(&vio, 42).unwrap();
+        assert!((aid.timestamp - 1.12).abs() < 1e-12);
+        assert_eq!(aid.session, 42);
+        assert!((aid.covariance[4] - 2e-6).abs() < 1e-15);
+        assert!((aid.covariance[24] - 2e-6).abs() < 1e-15);
+        vio.state
+            .calib_dt_cam_to_imu
+            .as_mut()
+            .unwrap()
+            .set_value(DVector::from_element(1, 0.04));
+        assert!((attitude_aid(&vio, 42).unwrap().timestamp - 1.12).abs() < 1e-12);
+        assert!(attitude_aid(&vio, 0).is_none());
+    }
+
+    #[test]
+    fn jpl_error_is_hamilton_right_error_without_sign_or_covariance_flip() {
+        use firefly_vio_types::var::{JplQuat, Variable};
+        use nalgebra::{Quaternion, UnitQuaternion};
+        let nominal = UnitQuaternion::from_euler_angles(0.3, -0.2, 0.8);
+        let q = nominal.quaternion();
+        let mut jpl = JplQuat::default();
+        jpl.set_value(nalgebra::Vector4::new(q.i, q.j, q.k, q.w));
+        let delta = Vector3::new(1e-5, -2e-5, 3e-5);
+        jpl.update(&DVector::from_column_slice(delta.as_slice()));
+        let updated = jpl.value();
+        let hamilton = UnitQuaternion::new_normalize(Quaternion::new(
+            updated[3], updated[0], updated[1], updated[2],
+        ));
+        let expected = nominal * UnitQuaternion::from_scaled_axis(delta);
+        assert!((hamilton.inverse() * expected).angle() < 1e-12);
     }
 
     #[test]

@@ -11,6 +11,8 @@ flowchart TD
     end
 
     subgraph FC_APP["apps/fc（飞控进程，1kHz）"]
+        AHRS["firefly-imu 独立线程<br/>姿态/零偏 ESKF + 延迟 CI 外援"]
+        AHRS -->|内存姿态与角速度| FLIGHT
         FLIGHT["firefly-flight（唯一实现）<br/>姿态内环 + 位置外环<br/>Airframe::allocate → 4 电机推力（唯一饱和点）"]
     end
 
@@ -49,7 +51,7 @@ flowchart TD
             CORE["firefly-vio-core<br/>传感器数据 · IMU 标定 · KLT 前端 · 传播/更新数学"]
             INIT["firefly-vio-init<br/>静态/动态初始化 + 外参时延标定"]
             MSCKF["firefly-vio<br/>MSCKF 编排：State 滑动窗口<br/>UpdaterMSCKF · VioManager"]
-            SLAM["firefly-voxel-svio<br/>体素地图 VoxelMap · 跨帧交会 ActiveTrackTriangulator<br/>运行时开关 = [slam] voxel_selection（出货为 false）"]
+            SLAM["firefly-voxel-svio<br/>体素地图 VoxelMap · 跨帧交会 ActiveTrackTriangulator<br/>运行时开关 = [slam] voxel_selection"]
             TYPES --> CORE
             CORE --> INIT
             CORE --> MSCKF
@@ -60,6 +62,8 @@ flowchart TD
         INPUT --> VIO
     end
 
+    TOPIC_SENS -->|原始 IMU| AHRS
+    VIO -->|VioAttitudeAid| AHRS
     TOPIC_SENS -->|订阅| INPUT
 
     subgraph PLAN_APP["apps/planner（规划进程）"]
@@ -130,11 +134,11 @@ Firefly/Command（地面站：解锁/模式/起降）
 - **参数归属**：质量/惯量/气动阻尼/旋翼位置/旋向/单电机推力上限/反扭矩系数
   由被控对象经 `Firefly/Airframe` 发布（1Hz 电平，改几何不动飞控）；
   增益/倾角限幅与 `[fsm]` 参数在 `configs/fc.toml`（缺键回落 `firefly-flight` 默认值）。
-- **反馈分工**：内环姿态取 `Firefly/Odometry` 的完整姿态，并用带测量时间的
-  陀螺缓存预测到当前 IMU 时刻；初始化期才用加速度计校平，机动比力不能当作重力。
-  JPL `q_GtoI` 的换算及有界预测缓存见 `apps/fc/src/vio.rs` 与其单测；
-  位置/速度只取里程计；空中里程计失联进入仅 IMU 姿态支持，不保证位置/高度保持。
-  地面未就绪或 IMU 失联时输出零推力。
+- **反馈分工**：独立 IMU 工作线程运行 `firefly-imu` 的姿态/陀螺零偏 ESKF，
+  内存快照向内环提供姿态与去偏低通角速度。上锁静止窗口与 NIS 均通过才使用加计。
+  `Firefly/VioAttitudeAid` 提供联合边缘分布，按测量时刻 CI 融合并重放 IMU；
+  位置/速度只取原始里程计；空中里程计失联进入 IMU 姿态支持，不保证位置/高度保持。
+  协方差、会话和时间契约见 [本地姿态估计](imu.md)。
   `PlantState` 仅用于倾斜误差评测，不参与解锁或控制。
 - **节拍与锁步**：控制律无积分项，dt 不进控制；飞控每 tick 都发指令（上锁时零
   推力），被控对象按指令新鲜度（墙钟 50ms）决定物理是否推进——飞控停发即世界停转

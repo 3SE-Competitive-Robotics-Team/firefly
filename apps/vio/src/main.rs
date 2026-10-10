@@ -238,6 +238,15 @@ fn run_loop(
     node: &firefly_pubsub::node::IpcNode,
     log_ipc: &firefly_observability::LogIpc,
 ) -> Result<(), firefly_error::Error> {
+    let aid_pub = firefly_pubsub::publish::Publisher::with_topic(
+        node,
+        firefly_pubsub::attitude::ATTITUDE_AID_TOPIC,
+    )?;
+    let session = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| firefly_error::Error::new(firefly_error::ErrorKind::Internal, e.to_string()))?
+        .as_nanos() as u64;
+    let mut last_aid = f64::NEG_INFINITY;
     let mut t_sim = 0.0f64;
     let mut next_odom = 0.0f64;
     let mut next_viz = 0.0f64;
@@ -346,6 +355,15 @@ fn run_loop(
         if heartbeat && !stall_warned && last_imu_wall.is_some_and(|t| t.elapsed() > IMU_STALL) {
             stall_warned = true;
             log::warn!("IMU 断流 >{IMU_STALL:?}：滤波器停更，等待 sim 恢复");
+        }
+
+        if let Some(aid) = odometry::attitude_aid(vio, session)
+            && aid.timestamp > last_aid
+        {
+            match aid_pub.publish(aid) {
+                Ok(_) => last_aid = aid.timestamp,
+                Err(error) => log::warn!("VIO 姿态外援发布失败: {error}"),
+            }
         }
 
         // 同一预测同时供里程计与可视化使用，时间戳属于预测状态。

@@ -9,6 +9,9 @@ use serde::Deserialize;
 /// 顶层配置。
 #[derive(Deserialize, Clone, Debug)]
 pub struct FcConfig {
+    /// 独立姿态估计器的噪声、静止窗口与创新门限。
+    #[serde(default)]
+    pub imu: firefly_imu::Options,
     /// 控制环频率（Hz）。指令按此频率发布，被控对象取最新样本。
     #[serde(default = "d_rate_hz")]
     pub rate_hz: f64,

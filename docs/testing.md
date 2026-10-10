@@ -253,3 +253,8 @@ RUST_LOG=info FIREFLY_QUERY_MAP=<独立查询.ffvmap> FIREFLY_QUERY_COUNT=20 \
   参考流失效的首拍就锁定当前位置，模式超时不重置锚点。
 
 数值审查与实际飞行证据见 [VIO 与跟踪审查](vio_tracking_review.md)。
+
+## IMU 姿态估计
+
+`firefly-imu` 的解析、差分与输出契约，以及 VIO 外援的时间/协方差接口测试，
+见 [本地姿态估计](imu.md#参考与测试)。数学测试通过不代表实际 IMU 标定或飞行验收通过。
