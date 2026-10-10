@@ -1,7 +1,8 @@
 //! A* 网格搜索。
 //!
 //! 对齐官方 EGO-Planner `dyn_a_star`：26 邻域（代价 `√(dx²+dy²+dz²)`×resolution）、
-//! `tie_breaker` × 对角启发、端点入障沿远离对端方向外推至自由、节点池预分配 +
+//! 判据 = 官方 `checkOccupancy`（`getInflateOccupancy`，含膨胀）；`tie_breaker` ×
+//! 对角启发、端点入障沿远离对端方向外推至自由、节点池预分配 +
 //! 世代计数复用（`rounds` 区分每次搜索，免重置）。
 //!
 //! 可走性一律按原始占据判定（膨胀只进 EGO 优化代价，不进搜索）：与官方
@@ -11,7 +12,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use firefly_error::{Error, ErrorKind};
-use firefly_map::{GridMap, VoxelState};
+use firefly_map::GridMap;
 use nalgebra::Vector3;
 
 #[derive(Debug, Clone)]
@@ -136,11 +137,11 @@ impl Astar {
         let mut goal_idx = map
             .index_of(goal_pt)
             .ok_or_else(|| Error::new(ErrorKind::OutOfRange, "goal is outside the map"))?;
-        // 端点落入原始占据时按 resolution 沿远离对端方向外推，直到自由或越出地图
-        // （对照官方 `ConvertToIndexAndAdjustStartEndPoints` 的 `checkOccupancy`；
-        // 只查原始占据，膨胀净距由 EGO 优化代价保证，终点分支按语义检查自身
-        // 索引，不复刻官方误查 start_idx 的笔误）。
-        while map.state(start_idx) == VoxelState::Occupied {
+        // 端点落入膨胀占据时按 resolution 沿远离对端方向外推，直到自由或越出地图
+        // （对照官方 `ConvertToIndexAndAdjustStartEndPoints` 的 `checkOccupancy` =
+        // `getInflateOccupancy`，即含膨胀；终点分支按语义检查自身索引，不复刻官方
+        // 误查 `start_idx` 的笔误）。
+        while map.is_occupied_inflated(center_of(map, start_idx)) {
             let dir = (start_pt - goal_pt)
                 .try_normalize(0.0)
                 .ok_or_else(|| Error::new(ErrorKind::OutOfRange, "start coincides with goal"))?;
@@ -149,7 +150,7 @@ impl Astar {
                 Error::new(ErrorKind::OutOfRange, "start extrapolation left the map")
             })?;
         }
-        while map.state(goal_idx) == VoxelState::Occupied {
+        while map.is_occupied_inflated(center_of(map, goal_idx)) {
             let dir = (goal_pt - start_pt)
                 .try_normalize(0.0)
                 .ok_or_else(|| Error::new(ErrorKind::OutOfRange, "goal coincides with start"))?;
@@ -261,8 +262,9 @@ impl Astar {
                         continue;
                     }
                     let idx = [nx as usize, ny as usize, nz as usize];
-                    // 只查原始占据（官方 `checkOccupancy`）：膨胀净距由 EGO 代价保证。
-                    if map.state(idx) == VoxelState::Occupied {
+                    // 官方 `checkOccupancy` = `getInflateOccupancy`：A* 在**膨胀层**上搜索。
+                    // 只查原始占据会让路径穿进车体过不去的窄缝（全局搜得到、局部飞不了）。
+                    if map.is_occupied_inflated(center_of(map, idx)) {
                         continue;
                     }
                     let step = f64::from(i * i + j * j + k * k).sqrt() * map.resolution();
@@ -380,13 +382,24 @@ pub fn simplify_path(map: &GridMap, path: &[Vector3<f64>]) -> Vec<Vector3<f64>> 
     result
 }
 
+/// 索引 → 体素中心（`world = origin + (idx + 0.5) * resolution`）。
+fn center_of(map: &GridMap, idx: [usize; 3]) -> Vector3<f64> {
+    let o = map.origin();
+    let r = map.resolution();
+    Vector3::new(
+        o.x + (idx[0] as f64 + 0.5) * r,
+        o.y + (idx[1] as f64 + 0.5) * r,
+        o.z + (idx[2] as f64 + 0.5) * r,
+    )
+}
+
 fn line_is_clear(map: &GridMap, a: Vector3<f64>, b: Vector3<f64>) -> bool {
     let dist = (b - a).norm();
     let steps = (dist / map.resolution() * 2.0).ceil() as usize;
     for k in 1..steps {
         let p = a + (b - a) * (k as f64 / steps as f64);
-        // 与搜索一致只查原始占据（官方无 simplify；膨胀净距由 EGO 代价保证）。
-        if map.is_occupied(p) {
+        // 与搜索同一判据（膨胀层）：否则简化会抄近路切进车体净距。
+        if map.is_occupied_inflated(p) {
             return false;
         }
     }
@@ -493,20 +506,34 @@ mod tests {
     }
 
     #[test]
-    fn diagonal_corner_cutting_matches_official() {
-        // 官方 26 邻域不做切角检查：对角一步可擦障碍角。本用例钉住该语义
-        // （改切角规则必须同步改 EGO 净距假设，见 obstacle costs）。
+    fn path_keeps_inflated_clearance() {
+        // 官方 `checkOccupancy` = `getInflateOccupancy`：路径点不得落在膨胀层内；
+        // 26 邻域只查目标格（不查切角格），故相邻路径格必须轴差 ≤1。
         let mut map = empty_map();
         map.set_state([5, 5, 5], firefly_map::VoxelState::Occupied);
+        map.inflate_obstacles();
         let mut astar = Astar::default();
-        let path = search(&mut astar, &map, [4.5, 4.5, 4.5], [6.5, 6.5, 6.5]).unwrap();
-        let len: f64 = path.points().windows(2).map(|w| (w[1] - w[0]).norm()).sum();
-        // 直穿被占中心格不可行；3 步最优组合为 √2+√3+1（2 步只经过被占格，
-        // 4 步及以上 ≥4.15；枚举 step 类型多重集可验最小值即此）。
-        assert!(
-            (len - (2f64.sqrt() + 3f64.sqrt() + 1.0)).abs() < 1e-6,
-            "应切角最优通过，实际 {len:.6}"
-        );
+        let path = search(&mut astar, &map, [1.5, 1.5, 1.5], [9.5, 9.5, 9.5]).unwrap();
+        for p in path.points() {
+            assert!(!map.is_occupied_inflated(*p), "路径点 {p:?} 落在膨胀层内");
+        }
+        let idx: Vec<_> = path
+            .points()
+            .iter()
+            .map(|p| map.index_of(*p).expect("路径点应在地图内"))
+            .collect();
+        for w in idx.windows(2) {
+            for axis in 0..3 {
+                assert!(
+                    w[0][axis].abs_diff(w[1][axis]) <= 1,
+                    "相邻路径格轴差 >1: {:?} -> {:?}",
+                    w[0],
+                    w[1]
+                );
+            }
+        }
+        assert_eq!(path.points().first(), Some(&Vector3::new(1.5, 1.5, 1.5)));
+        assert_eq!(path.points().last(), Some(&Vector3::new(9.5, 9.5, 9.5)));
     }
 
     #[test]
@@ -569,20 +596,20 @@ mod tests {
         let mut astar = Astar::default();
         let path = search(&mut astar, &map, [2.5, 5.5, 5.5], [9.5, 5.5, 5.5]).unwrap();
         // 路径起点为外推后的自由体素中心（沿远离目标方向），而非原始入障坐标
-        assert_eq!(path.points().first(), Some(&Vector3::new(1.5, 5.5, 5.5)));
+        assert_eq!(path.points().first(), Some(&Vector3::new(2.5, 5.5, 5.5)));
         assert_eq!(path.points().last(), Some(&Vector3::new(9.5, 5.5, 5.5)));
     }
 
     #[test]
-    fn start_inside_inflation_only_is_kept() {
-        // 仅膨胀区（原始自由）：官方 checkOccupancy 放行，起点不外推
-        // （净距由 EGO 优化代价保证）。
+    fn start_inside_inflation_is_pushed_out() {
+        // 仅膨胀区（原始自由）：官方 `checkOccupancy` = `getInflateOccupancy` 同样算占用
+        // → 起点仍沿远离对端方向外推至膨胀层外。
         let mut map = empty_map();
         map.set_state([3, 5, 5], firefly_map::VoxelState::Occupied);
         map.inflate_obstacles(); // 起点 [2,5,5] 落在膨胀层内，原始自由
         let mut astar = Astar::default();
         let path = search(&mut astar, &map, [2.5, 5.5, 5.5], [9.5, 5.5, 5.5]).unwrap();
-        assert_eq!(path.points().first(), Some(&Vector3::new(2.5, 5.5, 5.5)));
+        assert_eq!(path.points().first(), Some(&Vector3::new(1.5, 5.5, 5.5)));
         assert_eq!(path.points().last(), Some(&Vector3::new(9.5, 5.5, 5.5)));
     }
 
@@ -594,7 +621,7 @@ mod tests {
         let path = search(&mut astar, &map, [0.5, 5.5, 5.5], [7.5, 5.5, 5.5]).unwrap();
         // 路径终点为外推后的自由体素中心（沿远离起点方向）
         assert_eq!(path.points().first(), Some(&Vector3::new(0.5, 5.5, 5.5)));
-        assert_eq!(path.points().last(), Some(&Vector3::new(8.5, 5.5, 5.5)));
+        assert_eq!(path.points().last(), Some(&Vector3::new(7.5, 5.5, 5.5)));
     }
 
     #[test]
@@ -616,7 +643,7 @@ mod line_clear_tests {
     /// 回归：simplify 的直线检查与搜索一致，只查原始占据（官方无 simplify；
     /// 膨胀净距由 EGO 优化代价保证，硬墙语义会导致窄处过度绕行）。
     #[test]
-    fn line_through_inflation_only_is_clear() {
+    fn line_through_inflation_is_blocked() {
         let mut map = GridMapBuilder::new(1.0, [10, 10, 10])
             .with_obstacles_inflation(1.0)
             .build()
@@ -631,14 +658,15 @@ mod line_clear_tests {
             nalgebra::Vector3::new(0.0, 1.0, 1.0),
             nalgebra::Vector3::new(9.0, 1.0, 1.0)
         ));
-        // 直线沿 y=0.5 只穿膨胀区（原始无占用）→ clear（净距归 EGO）
+        // 直线沿 y=0.5 只穿膨胀区（原始无占用）→ 同样 blocked：搜索与简化都以膨胀层
+        // 为准（官方 `checkOccupancy` = `getInflateOccupancy`）。
         assert!(
-            line_is_clear(
+            !line_is_clear(
                 &map,
                 nalgebra::Vector3::new(0.0, 0.5, 1.0),
                 nalgebra::Vector3::new(9.0, 0.5, 1.0)
             ),
-            "仅膨胀区应判为 clear"
+            "膨胀区也必须判为阻挡"
         );
     }
 }
