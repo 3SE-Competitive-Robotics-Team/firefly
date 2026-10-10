@@ -49,10 +49,13 @@ flowchart TD
             CORE["firefly-vio-core<br/>传感器数据 · IMU 标定 · KLT 前端 · 传播/更新数学"]
             INIT["firefly-vio-init<br/>静态/动态初始化 + 外参时延标定"]
             MSCKF["firefly-vio<br/>MSCKF 编排：State 滑动窗口<br/>UpdaterMSCKF · VioManager"]
+            SLAM["firefly-voxel-svio<br/>体素地图 VoxelMap · 跨帧交会 ActiveTrackTriangulator<br/>运行时开关 = [slam] voxel_selection（出货为 false）"]
             TYPES --> CORE
             CORE --> INIT
             CORE --> MSCKF
             INIT --> MSCKF
+            TYPES --> SLAM
+            SLAM --> MSCKF
         end
         INPUT --> VIO
     end
@@ -69,7 +72,7 @@ flowchart TD
             MINCO["firefly-trajectory<br/>MINCO 参数化（段长自适应 + 拐点 waypoint）"]
             OPT["LBFGS + 双层 clearance<br/>(硬 0.1m / 软 0.5m)"]
             ROUGH["roughlyCheck 内循环<br/>碰撞段局部 A* 绕行约束"]
-            COST["firefly-cost<br/>平滑/时间/可行/障碍/集群"]
+            COST["firefly-cost<br/>平滑/时间/可行/障碍"]
             ASTAR --> MINCO --> OPT
             COST --> OPT
             OPT <--> ROUGH
@@ -77,10 +80,6 @@ flowchart TD
         FSM["10Hz 重规划状态机<br/>EXEC/REPLAN/GEN + 安全检查"]
         MAP --> PLAN
         PLAN --> FSM
-    end
-
-    subgraph SWARM["集群（可选）"]
-        PEER["其他机轨迹<br/>iceoryx2 广播"]
     end
 
     MSCKF -->|Odom| TOPIC_ODOM
@@ -96,7 +95,6 @@ flowchart TD
     TOPIC_MAP_ODOM -->|地图查询先验| VISUAL
     TOPIC_MAP_ODOM -->|订阅| FSM
     TOPIC_DEPTH -->|订阅| RAY
-    PEER -->|peer 轨迹| COST
     FSM -->|MINCO 轨迹| TOPIC_REF
     TOPIC_REF -->|订阅| FLIGHT
     TOPIC_AIRFRAME -->|订阅| FLIGHT
@@ -161,13 +159,14 @@ flowchart TD
 
     subgraph MSCKF["MSCKF 估计（VioManager · 每相机时刻）"]
         PROPAG["IMU 传播至图像时刻 + 克隆增广"]
+        VOXEL["体素选点 / 地图刷新<br/>VoxelMap 增删改 + 跨帧交会缓存<br/>（[slam] voxel_selection 关闭时整段不执行）"]
         COLLECT["收集候选：<br/>丢失特征 + 滑出克隆窗口的特征"]
         RGATE["重投影门控：<br/>z>0、深度 ≤ 上限、残差阈值"]
         TRIANG["多帧 DLT 三角化求解特征 3D 位置<br/>cond 数 / 深度上下限门控"]
         JRES["逐特征：残差 + 雅可比（FEJ 线性化点）<br/>零空间投影 → chi² 检验<br/>深度自适应噪声行归一化"]
         COMPRESS["Givens 测量压缩降维"]
         UPDATE["EKF 更新（位置/速度修正限幅）<br/>删除已用特征 + 边缘化最旧克隆"]
-        PROPAG --> COLLECT --> RGATE --> TRIANG --> JRES --> COMPRESS --> UPDATE
+        PROPAG --> VOXEL --> COLLECT --> RGATE --> TRIANG --> JRES --> COMPRESS --> UPDATE
     end
 
     DB -.->|"跟踪中断的特征成为下一帧候选"| COLLECT
