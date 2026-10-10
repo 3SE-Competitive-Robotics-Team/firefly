@@ -43,7 +43,7 @@ pub const ENTITY_MAX: usize = 64;
 /// 服务 `subscriber_max_buffer_size`（订阅端环形缓冲历史上限；多实体 10Hz
 /// 突发下防溢出丢帧，订阅端 `buffer_size` 不得超过该值）。
 pub const VIZ_BUFFER_SIZE: usize = 256;
-/// 折线点数上限（512；vio 增量两点段与 A* 简化路径均远小于此，发布端超限硬断言）。
+/// 折线点数上限（512；发布端超限硬断言，调用方必须分段或按用途限采样）。
 pub const POINTS_MAX: usize = 512;
 /// 箭头数上限（256，起点 + 向量各一数组；轨迹速度箭头 100 采样点、障碍
 /// 平面法线均远小于此）。

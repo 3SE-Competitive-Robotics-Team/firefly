@@ -4,5 +4,7 @@
 //! （EGO-Planner v2 的 {s, v} 平面障碍即从引导路径生成）。
 
 mod astar;
+mod segment;
 
-pub use astar::{Astar, AstarConfig, Path, simplify_path};
+pub use astar::{Astar, AstarConfig, Path};
+pub use segment::segment_is_clear;

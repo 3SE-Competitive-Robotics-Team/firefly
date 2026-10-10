@@ -5,9 +5,10 @@
 //! 对角启发、端点入障沿远离对端方向外推至自由、节点池预分配 +
 //! 世代计数复用（`rounds` 区分每次搜索，免重置）。
 //!
-//! 可走性一律按原始占据判定（膨胀只进 EGO 优化代价，不进搜索）：与官方
-//! `checkOccupancy` 一致；把膨胀当硬墙会让全局在窄处过度绕行甚至无解。
+//! 地图索引固定在占据窗口；连续线段净距校验为本项目安全扩展，
+//! 26 邻域的对角连边也必须避开膨胀体素。
 
+use crate::segment::segment_is_clear;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -129,6 +130,12 @@ impl Astar {
         start: Vector3<f64>,
         goal: Vector3<f64>,
     ) -> firefly_error::Result<Path> {
+        if start.iter().chain(goal.iter()).any(|v| !v.is_finite()) {
+            return Err(Error::new(
+                ErrorKind::InvalidArgument,
+                "non-finite search endpoint",
+            ));
+        }
         let mut start_pt = start;
         let mut goal_pt = goal;
         let mut start_idx = map
@@ -198,7 +205,18 @@ impl Astar {
                 continue; // 陈旧条目（节点已通过更优 g 重新入队）
             }
             if node == goal_node {
-                return Ok(self.reconstruct(map, goal_node, start_pt, goal_pt));
+                let path = self.reconstruct(map, goal_node, start_pt, goal_pt);
+                if path
+                    .points()
+                    .windows(2)
+                    .all(|w| segment_is_clear(map, w[0], w[1]))
+                {
+                    return Ok(path);
+                }
+                return Err(Error::temporary(
+                    ErrorKind::NotFound,
+                    "endpoint connector touches inflated occupancy",
+                ));
             }
             if expansions >= self.config.max_expansions {
                 return Err(Error::temporary(
@@ -212,6 +230,9 @@ impl Astar {
             for (nb, step_len) in Self::neighbors(map, idx) {
                 let tentative = g + step_len;
                 let explored = self.rounds[nb.0 as usize] == round;
+                if explored && self.state[nb.0 as usize] == NodeState::Closed {
+                    continue;
+                }
                 if !explored {
                     self.touch(nb, round);
                     self.g_score[nb.0 as usize] = tentative;
@@ -264,7 +285,9 @@ impl Astar {
                     let idx = [nx as usize, ny as usize, nz as usize];
                     // 官方 `checkOccupancy` = `getInflateOccupancy`：A* 在**膨胀层**上搜索。
                     // 只查原始占据会让路径穿进车体过不去的窄缝（全局搜得到、局部飞不了）。
-                    if map.is_occupied_inflated(center_of(map, idx)) {
+                    if map.is_occupied_inflated(center_of(map, idx))
+                        || !segment_is_clear(map, center_of(map, [x, y, z]), center_of(map, idx))
+                    {
                         continue;
                     }
                     let step = f64::from(i * i + j * j + k * k).sqrt() * map.resolution();
@@ -352,34 +375,15 @@ impl Astar {
                 )
             })
             .collect();
-        // 端点修正：体素中心替换为精确起终点（入障时为外推后的坐标）
-        if let Some(first) = points.first_mut() {
-            *first = start;
+        // 保留中心连边；精确端点到所在体素中心的线段完全位于该体素内。
+        if points.first() != Some(&start) {
+            points.insert(0, start);
         }
-        if let Some(last) = points.last_mut() {
-            *last = goal_point;
+        if points.last() != Some(&goal_point) {
+            points.push(goal_point);
         }
         Path { points }
     }
-}
-
-/// 字符串拉直：删除可直线直达的中间点，使网格路径贴合直线。
-#[must_use]
-pub fn simplify_path(map: &GridMap, path: &[Vector3<f64>]) -> Vec<Vector3<f64>> {
-    if path.len() <= 2 {
-        return path.to_vec();
-    }
-    let mut result = vec![path[0]];
-    let mut i = 0usize;
-    while i < path.len() - 1 {
-        let mut j = path.len() - 1;
-        while j > i + 1 && !line_is_clear(map, path[i], path[j]) {
-            j -= 1;
-        }
-        result.push(path[j]);
-        i = j;
-    }
-    result
 }
 
 /// 索引 → 体素中心（`world = origin + (idx + 0.5) * resolution`）。
@@ -391,19 +395,6 @@ fn center_of(map: &GridMap, idx: [usize; 3]) -> Vector3<f64> {
         o.y + (idx[1] as f64 + 0.5) * r,
         o.z + (idx[2] as f64 + 0.5) * r,
     )
-}
-
-fn line_is_clear(map: &GridMap, a: Vector3<f64>, b: Vector3<f64>) -> bool {
-    let dist = (b - a).norm();
-    let steps = (dist / map.resolution() * 2.0).ceil() as usize;
-    for k in 1..steps {
-        let p = a + (b - a) * (k as f64 / steps as f64);
-        // 与搜索同一判据（膨胀层）：否则简化会抄近路切进车体净距。
-        if map.is_occupied_inflated(p) {
-            return false;
-        }
-    }
-    true
 }
 
 #[cfg(test)]
@@ -508,7 +499,7 @@ mod tests {
     #[test]
     fn path_keeps_inflated_clearance() {
         // 官方 `checkOccupancy` = `getInflateOccupancy`：路径点不得落在膨胀层内；
-        // 26 邻域只查目标格（不查切角格），故相邻路径格必须轴差 ≤1。
+        // 连边用连续体素覆盖校验；每条边用独立稠密采样核验膨胀净距。
         let mut map = empty_map();
         map.set_state([5, 5, 5], firefly_map::VoxelState::Occupied);
         map.inflate_obstacles();
@@ -522,6 +513,11 @@ mod tests {
             .iter()
             .map(|p| map.index_of(*p).expect("路径点应在地图内"))
             .collect();
+        for w in path.points().windows(2) {
+            for k in 0..=100 {
+                assert!(!map.is_occupied_inflated(w[0] + (w[1] - w[0]) * (f64::from(k) / 100.)));
+            }
+        }
         for w in idx.windows(2) {
             for axis in 0..3 {
                 assert!(
@@ -547,6 +543,39 @@ mod tests {
         let p2 = search(&mut astar, &map, [0.5, 0.5, 0.5], [9.5, 9.5, 9.5]).unwrap();
         assert!(p2.points().len() > 2);
         assert_eq!(astar.round, 2);
+    }
+
+    #[test]
+    fn corner_touch_requires_two_axis_steps() {
+        let mut map = firefly_map::GridMapBuilder::new(1., [10, 10, 10])
+            .with_obstacles_inflation(0.)
+            .build()
+            .unwrap();
+        map.set_state([5, 5, 5], firefly_map::VoxelState::Occupied);
+        map.inflate_obstacles();
+        let path = search(
+            &mut Astar::default(),
+            &map,
+            [4.5, 5.5, 5.5],
+            [5.5, 4.5, 5.5],
+        )
+        .unwrap();
+        let length: f64 = path.points().windows(2).map(|w| (w[1] - w[0]).norm()).sum();
+        assert!((length - 2.).abs() < 1e-12);
+        assert_eq!(path.points().len(), 3);
+    }
+
+    #[test]
+    fn distinct_endpoints_in_one_voxel_are_preserved() {
+        let path = search(
+            &mut Astar::default(),
+            &empty_map(),
+            [0.1, 0.2, 0.3],
+            [0.7, 0.8, 0.9],
+        )
+        .unwrap();
+        assert_eq!(path.points().first(), Some(&Vector3::new(0.1, 0.2, 0.3)));
+        assert_eq!(path.points().last(), Some(&Vector3::new(0.7, 0.8, 0.9)));
     }
 
     #[test]
@@ -593,10 +622,11 @@ mod tests {
     fn start_inside_occupied_is_pushed_out_to_free() {
         let mut map = empty_map();
         map.set_state([2, 5, 5], firefly_map::VoxelState::Occupied);
+        map.inflate_obstacles();
         let mut astar = Astar::default();
         let path = search(&mut astar, &map, [2.5, 5.5, 5.5], [9.5, 5.5, 5.5]).unwrap();
         // 路径起点为外推后的自由体素中心（沿远离目标方向），而非原始入障坐标
-        assert_eq!(path.points().first(), Some(&Vector3::new(2.5, 5.5, 5.5)));
+        assert_eq!(path.points().first(), Some(&Vector3::new(0.5, 5.5, 5.5)));
         assert_eq!(path.points().last(), Some(&Vector3::new(9.5, 5.5, 5.5)));
     }
 
@@ -617,11 +647,12 @@ mod tests {
     fn goal_inside_occupied_is_pushed_out_to_free() {
         let mut map = empty_map();
         map.set_state([7, 5, 5], firefly_map::VoxelState::Occupied);
+        map.inflate_obstacles();
         let mut astar = Astar::default();
         let path = search(&mut astar, &map, [0.5, 5.5, 5.5], [7.5, 5.5, 5.5]).unwrap();
         // 路径终点为外推后的自由体素中心（沿远离起点方向）
         assert_eq!(path.points().first(), Some(&Vector3::new(0.5, 5.5, 5.5)));
-        assert_eq!(path.points().last(), Some(&Vector3::new(7.5, 5.5, 5.5)));
+        assert_eq!(path.points().last(), Some(&Vector3::new(9.5, 5.5, 5.5)));
     }
 
     #[test]
@@ -632,42 +663,6 @@ mod tests {
         let mut astar = Astar::default();
         let err = search(&mut astar, &map, [0.5, 0.5, 0.5], [9.5, 9.5, 9.5]).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::OutOfRange);
-    }
-}
-
-#[cfg(test)]
-mod line_clear_tests {
-    use super::line_is_clear;
-    use firefly_map::{GridMapBuilder, VoxelState};
-
-    /// 回归：simplify 的直线检查与搜索一致，只查原始占据（官方无 simplify；
-    /// 膨胀净距由 EGO 优化代价保证，硬墙语义会导致窄处过度绕行）。
-    #[test]
-    fn line_through_inflation_is_blocked() {
-        let mut map = GridMapBuilder::new(1.0, [10, 10, 10])
-            .with_obstacles_inflation(1.0)
-            .build()
-            .unwrap();
-        // 一条 y=1、z=1 的细障碍（原始仅 1 格厚）
-        map.set_state([5, 1, 1], VoxelState::Occupied);
-        map.inflate_obstacles(); // 膨胀到 y∈[0,2]
-
-        // 直线沿 y=1.0 穿过原始占用格 → blocked
-        assert!(!line_is_clear(
-            &map,
-            nalgebra::Vector3::new(0.0, 1.0, 1.0),
-            nalgebra::Vector3::new(9.0, 1.0, 1.0)
-        ));
-        // 直线沿 y=0.5 只穿膨胀区（原始无占用）→ 同样 blocked：搜索与简化都以膨胀层
-        // 为准（官方 `checkOccupancy` = `getInflateOccupancy`）。
-        assert!(
-            !line_is_clear(
-                &map,
-                nalgebra::Vector3::new(0.0, 0.5, 1.0),
-                nalgebra::Vector3::new(9.0, 0.5, 1.0)
-            ),
-            "膨胀区也必须判为阻挡"
-        );
     }
 }
 

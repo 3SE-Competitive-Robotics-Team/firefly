@@ -44,8 +44,12 @@ pub fn search_guide(
     start: Vector3<f64>,
     goal: Vector3<f64>,
 ) -> Result<Vec<Vector3<f64>>> {
+    // 可直接连接时用精确端点，避免体素中心偏移给直线初值引入横向运动。
+    if firefly_search::segment_is_clear(map, start, goal) {
+        return Ok(vec![start, goal]);
+    }
     let path = astar.search(map, start, goal)?;
-    Ok(firefly_search::simplify_path(map, path.points()))
+    Ok(path.points().to_vec())
 }
 
 /// 从引导路径生成 MINCO 初始解。

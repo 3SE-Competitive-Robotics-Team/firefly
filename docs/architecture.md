@@ -68,12 +68,13 @@ flowchart TD
             RAY["深度 raycast 在线更新"]
         end
         subgraph PLAN["firefly-planner"]
-            ASTAR["firefly-search<br/>A* 引导（膨胀层 26 邻域）"]
+            GLOBAL["单任务航点全局引导<br/>多项式选取局部目标，非可执行轨迹"]
+            ASTAR["firefly-search<br/>局部 A*（膨胀层 26 邻域 + 连边净距）"]
             MINCO["firefly-trajectory<br/>MINCO 参数化（段长自适应 + 拐点 waypoint）"]
-            OPT["LBFGS + 双层 clearance<br/>(硬 0.1m / 软 0.5m)"]
+            OPT["LBFGS + 双层 clearance<br/>(部署硬 0.4m / 软 0.5m)"]
             ROUGH["roughlyCheck 内循环<br/>碰撞段局部 A* 绕行约束"]
             COST["firefly-cost<br/>平滑/时间/可行/障碍"]
-            ASTAR --> MINCO --> OPT
+            GLOBAL --> ASTAR --> MINCO --> OPT
             COST --> OPT
             OPT <--> ROUGH
         end

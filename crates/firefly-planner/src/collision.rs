@@ -1,6 +1,6 @@
 //! 最终静态碰撞验收：Bernstein 凸包覆盖整段曲线，de Casteljau 二分收紧包围盒。
 //! 包围盒涉及的全部体素自由才接受；深度/工作量耗尽或数值非法均拒绝。
-//! 地图外与虚拟墙沿用 `GridMap` 语义；浮点包围盒留相对余量，不是区间算术证明。
+//! 地图外与虚拟墙均拒绝；浮点包围盒留相对余量，不是区间算术证明。
 
 use firefly_map::GridMap;
 use firefly_trajectory::Trajectory;
@@ -48,7 +48,11 @@ fn hull_is_free(map: &GridMap, controls: &[Vector3<f64>], depth: u32, budget: &m
     }
     *budget -= 1;
     let last = controls.len() - 1;
-    if map.is_occupied_inflated(controls[0]) || map.is_occupied_inflated(controls[last]) {
+    if map.index_of(controls[0]).is_none()
+        || map.index_of(controls[last]).is_none()
+        || map.is_occupied_inflated(controls[0])
+        || map.is_occupied_inflated(controls[last])
+    {
         return false;
     }
     let mut lo = controls[0];
@@ -80,6 +84,9 @@ fn hull_is_free(map: &GridMap, controls: &[Vector3<f64>], depth: u32, budget: &m
 }
 
 fn box_is_free(map: &GridMap, lo: Vector3<f64>, hi: Vector3<f64>) -> bool {
+    if map.index_of(lo).is_none() || map.index_of(hi).is_none() {
+        return false;
+    }
     if map
         .virtual_wall()
         .is_some_and(|w| lo.z <= w.ground || hi.z >= w.ceil)
@@ -112,6 +119,16 @@ mod tests {
     use super::*;
     use firefly_map::{GridMapBuilder, VoxelState};
     use firefly_trajectory::{Endpoint, MincoBuilder, SolverOrder};
+
+    #[test]
+    fn rejects_curve_outside_map_even_with_both_endpoints_inside() {
+        let map = GridMapBuilder::new(1., [10, 10, 10]).build().unwrap();
+        // z(t)=0.5−4t+4t²，端点 0.5m，中点 −0.5m。
+        let curve = polynomial(&[1.5, 1.], &[1.5], &[0.5, -4., 4.]);
+        assert!(map.index_of(curve.eval(0.).position).is_some());
+        assert!(map.index_of(curve.eval(1.).position).is_some());
+        assert!(!trajectory_is_free(&map, &curve));
+    }
 
     fn polynomial(x: &[f64], y: &[f64], z: &[f64]) -> Trajectory {
         let endpoint = Endpoint {

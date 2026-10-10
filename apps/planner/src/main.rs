@@ -300,7 +300,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// 地图体素化 / 全局路径搜索 / IPC 端口创建失败。
+    /// 地图体素化 / 全局引导构造 / IPC 端口创建失败。
     #[allow(clippy::too_many_lines)]
     fn new(
         map_file: MapFile,
@@ -729,7 +729,7 @@ impl App {
 
     /// `WaitSet` 节拍驱动主循环：interval(10Hz)；SIGINT/SIGTERM → 优雅退出。
     fn run(&mut self) -> Result<()> {
-        // 静态产物一次性记录（全局路径为 A* 简化缓存，不随 tick 重复写）
+        // 静态产物一次性记录（全局任务航点不随 tick 重复写）
         self.log_line_strip(
             "plan/global_path",
             self.manager.global_path(),

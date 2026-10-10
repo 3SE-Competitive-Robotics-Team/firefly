@@ -8,7 +8,6 @@
 
 use firefly_error::Result;
 use firefly_map::GridMap;
-use firefly_search::Astar;
 use firefly_trajectory::{Endpoint, MincoBuilder, SolverOrder, Trajectory};
 use nalgebra::{Point3, Vector3};
 
@@ -203,8 +202,8 @@ impl GlobalTraj {
 pub struct PlannerManager {
     planner: Planner,
     options: ManagerOptions,
-    /// 全局路径点（A* 简化折线）：可视化 + 脱困/A* 兜底。规划链路（局部
-    /// 目标选取/暖启动）走 [`Self::global`] 的时间参数化多项式轨迹。
+    /// 全局任务航点（含起点）：用于可视化及障碍内终点回扫；不代表可飞行路径。
+    /// 局部目标选取/暖启动使用 [`Self::global`] 的时间参数化引导。
     global_path: Vec<Vector3<f64>>,
     /// 全局多项式轨迹与局部目标时间簿记（官方 `GlobalTrajData`）。
     global: GlobalTraj,
@@ -256,15 +255,14 @@ impl PlannerManager {
     ///
     /// # Errors
     ///
-    /// 全局路径搜索失败。
+    /// 任务航点不在地图内或全局轨迹构造失败。
     pub fn with_planner(
         planner: Planner,
         options: ManagerOptions,
         start: Vector3<f64>,
         goal: Vector3<f64>,
     ) -> Result<Self> {
-        let mut astar = Astar::default();
-        let global_path = search_global_path(planner.map_ref(), &mut astar, start, goal)?;
+        let global_path = global_waypoints(planner.map_ref(), start, goal)?;
         let max_vel = planner.config().max_velocity;
         let global_traj = plan_global_traj_waypoints(start, &global_path, max_vel)?;
         // 初始全局轨迹锚点取管理器时钟原点（0.0）：glb_t 簿记是相对游标，
@@ -302,14 +300,14 @@ impl PlannerManager {
     }
 
     /// 动态重目标（外部工具经 `Firefly/Goal` 发布新目标点）：从当前位置
-    /// 重算全局路径（A* + 简化）并重建全局多项式轨迹、重置局部目标时间
+    /// 按官方 planNextWaypoint 重建当前位置到任务航点的全局多项式轨迹、重置局部目标时间
     /// 簿记、重置状态机，下一 tick 即重新规划飞往新目标。
     /// 无人机悬停等待目标时 `goal == start`（零长路径 → 原地悬停），
     /// 收到目标后自然切换。强制停止锁存中拒绝重目标——急停后不自动恢复。
     ///
     /// # Errors
     ///
-    /// 新目标不可达（A* 失败 / 地图外）或全局轨迹构造失败——保持原目标
+    /// 新目标非法或在地图外、全局轨迹构造失败——保持原目标
     /// 不变，由调用方记录。
     pub fn set_goal(
         &mut self,
@@ -332,12 +330,11 @@ impl PlannerManager {
             return Ok(());
         }
         let start = self.estimated_position(now, measured);
-        let mut astar = Astar::default();
-        let global_path = search_global_path(self.planner.map_ref(), &mut astar, start, goal)?;
+        let global_path = global_waypoints(self.planner.map_ref(), start, goal)?;
         let max_vel = self.planner.config().max_velocity;
         let global_traj = plan_global_traj_waypoints(start, &global_path, max_vel)?;
         log::info!(
-            "目标更新为 ({:.1},{:.1},{:.1})：全局路径 {} 点，长度 {:.1}m",
+            "目标更新为 ({:.1},{:.1},{:.1})：全局引导 {} 点，长度 {:.1}m",
             goal.x,
             goal.y,
             goal.z,
@@ -532,7 +529,7 @@ impl PlannerManager {
         // 地面高度测量（官方 checkCollisionCallback 入口的顺带测量：
         // 无可执行轨迹时内部自返回 None）
         report.ground_height = self.measure_ground_height(now);
-        // 参考指令：跟踪当前轨迹；耗尽且连续失败时沿全局路径脱困直飞
+        // 参考指令仅来自已验收的局部轨迹。
         report.reference = self.reference(now, measured);
         // 到达判定（任意轨迹阶段，物理位置为准；急停悬停不算完成任务）
         if self.local.is_some() && !self.emergency {
@@ -629,7 +626,7 @@ impl PlannerManager {
     /// 从当前位置对该点重生成全局路径并换目标（对照官方 `planNextWaypoint`——
     /// 不触碰 replans/冷却期/连败计数/急停态等执行态），随即本 tick 立即重规划
     /// （官方经 `REPLAN_TRAJ` 延迟一拍；firefly 无独立状态机节拍，取碰撞命中
-    /// 路径的立即重规划作为等价执行节奏）。某点全局路径搜索失败视为该点
+    /// 路径的立即重规划作为等价执行节奏）。某点全局轨迹构造失败视为该点
     /// 不可用，继续向前回扫（对照官方 planNextWaypoint 失败继续循环）；回扫
     /// 耗尽仅报错，目标与轨迹保持不变。返回是否完成了一次目标修正（前置
     /// "local 存在"由 [`Self::tick_normal`] 的调用位置保证）。
@@ -648,7 +645,7 @@ impl PlannerManager {
         }
         let orig_goal = self.goal.coords;
         let reso = self.planner.map_ref().resolution();
-        // 小向量（A* 简化路径），克隆避开后续 &mut 借用冲突
+        // 任务航点连线，克隆避开后续 &mut 借用冲突
         let path = self.global_path.clone();
         let cum = cumulative_arcs(&path);
         let mut s = cum.last().copied().unwrap_or(0.0);
@@ -656,8 +653,7 @@ impl PlannerManager {
             let pt = point_at_arc(&path, &cum, s);
             if !self.planner.map_ref().is_occupied_inflated(pt) {
                 let start = self.estimated_position(now, measured);
-                let mut astar = Astar::default();
-                match search_global_path(self.planner.map_ref(), &mut astar, start, pt) {
+                match global_waypoints(self.planner.map_ref(), start, pt) {
                     Ok(new_path) => {
                         let max_vel = self.planner.config().max_velocity;
                         if let Ok(new_global_traj) =
@@ -1429,8 +1425,8 @@ fn emergency_stop_traj(stop_pos: Vector3<f64>) -> Result<Trajectory> {
 }
 
 /// 官方 `EGOPlannerManager::planGlobalTrajWaypoints`（`planner_manager.cpp:425`）：
-/// 以 A* 简化折线为 waypoint 生成时间参数化全局轨迹。首末状态完整（起点/
-/// 终点，零速零加速），内点为折线中间拐点（`path[0]` 即起点、末端即终点），
+/// 以任务航点生成时间参数化全局引导；不施加障碍约束。首末状态完整（起点/
+/// 终点，零速零加速），内点为任务航点（`path[0]` 即起点、末端即终点），
 /// 段数 = `path.len() - 1`；段时间 = 段长 `/des_vel`（`des_vel = max_vel/1.5`），
 /// 迭代 2 次：首轮最大速度超标（> `max_vel`）时 `des_vel /= 1.5` 重生成，
 /// 达标即提前退出。
@@ -1581,15 +1577,27 @@ fn point_at_arc(points: &[Vector3<f64>], cum: &[f64], s: f64) -> Vector3<f64> {
     points.last().copied().unwrap_or_default()
 }
 
-/// A* 搜索 + 字符串拉直：删除可直线直达的中间点（避免直线擦边穿越膨胀层）。
-fn search_global_path(
+/// 官方 `planNextWaypoint` 的单目标输入：全局引导不承担碰撞验收，
+/// 局部 A* / Rebound 与最终连续轨迹检查负责生成可执行参考。
+fn global_waypoints(
     map: &GridMap,
-    astar: &mut Astar,
     start: Vector3<f64>,
     goal: Vector3<f64>,
 ) -> Result<Vec<Vector3<f64>>> {
-    let path = astar.search(map, start, goal)?;
-    Ok(firefly_search::simplify_path(map, path.points()))
+    for (name, point) in [("start", start), ("goal", goal)] {
+        if point.iter().any(|v| !v.is_finite()) || map.index_of(point).is_none() {
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::OutOfRange,
+                "global waypoint is outside the map",
+            )
+            .with_context(name, format!("{point:?}")));
+        }
+    }
+    Ok(if start == goal {
+        vec![start]
+    } else {
+        vec![start, goal]
+    })
 }
 
 #[cfg(test)]
@@ -1645,6 +1653,100 @@ mod tests {
     }
 
     #[test]
+    fn single_waypoint_matches_analytic_quintic_and_valid_22m_horizon() {
+        let start = Vector3::new(
+            -12.747_030_258_178_711,
+            -0.012_813_190_929_591_656,
+            1.441_254_615_783_691_4,
+        );
+        let goal = Vector3::new(9., 0., 2.);
+        let map = GridMapBuilder::new(0.15, [213, 121, 48])
+            .with_origin(Vector3::new(-15.975, -9.075, -1.125))
+            .with_virtual_wall(-0.1, 3.)
+            .build()
+            .unwrap();
+        let mut manager = PlannerManager::with_planner(
+            Planner::new(PlannerConfig::default(), map),
+            ManagerOptions::default(),
+            start,
+            goal,
+        )
+        .unwrap();
+        assert_eq!(manager.global_path(), &[start, goal]);
+        let traj = &manager.global.traj;
+        let duration = traj.duration();
+        // 零端速/加速度的单段解析解 s(u)=10u³−15u⁴+6u⁵。
+        for i in 0..=100 {
+            let u = f64::from(i) / 100.;
+            let s = 10. * u.powi(3) - 15. * u.powi(4) + 6. * u.powi(5);
+            let ds = (30. * u.powi(2) - 60. * u.powi(3) + 30. * u.powi(4)) / duration;
+            let sample = traj.eval(u * duration);
+            assert!((sample.position - (start + (goal - start) * s)).norm() < 1e-9);
+            assert!((sample.velocity - (goal - start) * ds).norm() < 1e-9);
+            assert!(manager.map().index_of(sample.position).is_some());
+            assert!(sample.position.z > -0.1 && sample.position.z < 3.);
+            if i > 0 && i < 100 {
+                let dt = 1e-3;
+                let finite_difference = (traj.eval(u * duration + dt).position
+                    - traj.eval(u * duration - dt).position)
+                    / (2. * dt);
+                assert!((sample.velocity - finite_difference).norm() < 1e-7);
+            }
+        }
+        let h = manager.horizon(start);
+        assert!(manager.map().index_of(h.target).is_some());
+        assert!((h.target - start).norm() >= manager.options.planning_horizon);
+        assert!((start.z..=goal.z).contains(&h.target.z));
+        assert!(!h.touch_goal);
+    }
+
+    #[test]
+    #[ignore = "requires generated RMUC2026 assets"]
+    fn rmuc_22m_global_horizon_has_a_local_search_guide() {
+        let file = firefly_map::MapFile::from_file(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../apps/planner/maps/rmuc2026.ffmap"),
+        )
+        .unwrap();
+        let mut map = file.to_grid_map(0.4).unwrap();
+        map.set_virtual_wall(firefly_map::VirtualWall {
+            ground: -0.1,
+            ceil: 3.,
+        });
+        let start = Vector3::new(
+            -12.747_030_258_178_711,
+            -0.012_813_190_929_591_656,
+            1.441_254_615_783_691_4,
+        );
+        let goal = Vector3::new(9., 0., 2.);
+        let config = PlannerConfig {
+            obstacle_clearance: 0.4,
+            ..Default::default()
+        };
+        let mut manager = PlannerManager::with_planner(
+            Planner::new(config, map),
+            ManagerOptions::default(),
+            start,
+            goal,
+        )
+        .unwrap();
+        let h = manager.horizon(start);
+        assert!(manager.map().index_of(h.target).is_some());
+        assert!((start.z..=goal.z).contains(&h.target.z));
+        let guide = crate::init::search_guide(
+            &mut firefly_search::Astar::default(),
+            manager.map(),
+            start,
+            h.target,
+        )
+        .expect("the specified 22m mission must have a valid initial local guide");
+        assert!(guide.len() >= 2);
+        for w in guide.windows(2) {
+            assert!(firefly_search::segment_is_clear(manager.map(), w[0], w[1]));
+        }
+    }
+
+    #[test]
     fn initial_local_goal_preserves_global_velocity() {
         let mut manager = open_manager();
         let start = state_at(Vector3::new(1., 1., 1.));
@@ -1672,7 +1774,7 @@ mod tests {
     #[test]
     fn global_traj_time_parameterization() {
         // 全局轨迹多项式化（官方 planGlobalTrajWaypoints）：时间参数化的
-        // MINCO 轨迹，首末状态完整（零速零加速）、内点为简化路径拐点。
+        // MINCO 轨迹，首末状态完整（零速零加速）、内点为任务航点。
         let m = open_manager();
         let start = m.global_path()[0];
         let goal = m.goal().coords;
@@ -1698,7 +1800,7 @@ mod tests {
             "全局轨迹最大速度 {} 超限 {max_vel}",
             crate::planner::Planner::trajectory_max_vel(&g.traj)
         );
-        // 内点即简化路径中间拐点：逐段时长 = 段长/des_vel，总时长 = 路径长
+        // 内点即任务航点：逐段时长 = 段长/des_vel，总时长 = 路径长
         // /des_vel（首轮达标则 des_vel = max_vel/1.5；超标再缩放一半）
         let dur = g.traj.duration();
         let path_len = path_length(m.global_path());
