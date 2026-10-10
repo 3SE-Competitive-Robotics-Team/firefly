@@ -21,7 +21,7 @@ use firefly_pubsub::camera::{
 };
 use firefly_pubsub::event::{CAMERA_PAIR_TOPIC, TopicNotifier};
 use firefly_pubsub::node::{IpcNode, create_node};
-use firefly_pubsub::odom::{GROUND_TRUTH_TOPIC, OdomMessage};
+use firefly_pubsub::odom::{CORRECTED_ODOM_TOPIC, GROUND_TRUTH_TOPIC, OdomMessage};
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::trace::TraceContext;
@@ -55,11 +55,12 @@ pub struct IpcPorts {
     pub depth_pub: Publisher<DepthImageMessage>,
     /// 相机对事件通知（左右目成对发布后单次唤醒）。
     pub pair_notify: TopicNotifier,
-    /// 进程共享节点（最后释放：仅持有以延续生命周期，不直接调用）。
-    #[allow(dead_code)]
-    pub node: IpcNode,
     /// 可视化订阅（`Firefly/Viz` 的体素消息，实时感知地图显示用）。
     pub viz_sub: Option<Subscriber<VizMessage>>,
+    /// 地图融合定位，只用于在线调试影子与轨迹。
+    pub corrected_sub: Option<Subscriber<OdomMessage>>,
+    /// 进程共享节点，必须在全部端口之后释放。
+    pub node: IpcNode,
 }
 
 /// 打开全部 IPC 端口。
@@ -81,6 +82,11 @@ pub fn open_ports(offline: bool) -> Result<IpcPorts, firefly_error::Error> {
     let depth_pub = Publisher::with_topic(&node, &topic(DEPTH_TOPIC))?;
     let pair_notify = TopicNotifier::with_topic(&node, &topic(CAMERA_PAIR_TOPIC))?;
     let viz_sub = crate::voxels::open_subscription(&node);
+    let corrected_sub = if offline {
+        None
+    } else {
+        Some(Subscriber::with_topic(&node, CORRECTED_ODOM_TOPIC)?)
+    };
     log::info!("IPC 就绪：订阅位姿，发布双目/深度，offline={offline}");
     Ok(IpcPorts {
         pose_sub,
@@ -88,8 +94,9 @@ pub fn open_ports(offline: bool) -> Result<IpcPorts, firefly_error::Error> {
         right_pub,
         depth_pub,
         pair_notify,
-        node,
         viz_sub,
+        corrected_sub,
+        node,
     })
 }
 
@@ -180,7 +187,9 @@ pub fn poll_pose(
     ports: NonSend<IpcPorts>,
     mut pose: ResMut<PoseState>,
     mut viewer: ResMut<crate::viewer_pose::ViewerPose>,
+    mut overlay: ResMut<crate::flight_overlay::FlightOverlay>,
     time: Res<Time>,
+    wall: Res<Time<Real>>,
     hub: Res<CaptureHub>,
     targets: Option<Res<crate::rig::SensorTargets>>,
     mut capture: ResMut<SensorCapture>,
@@ -192,6 +201,9 @@ pub fn poll_pose(
     loop {
         match ports.pose_sub.receive() {
             Ok(Some(sample)) => {
+                if ports.corrected_sub.is_some() {
+                    overlay.actual.observe(&sample, wall.elapsed_secs_f64());
+                }
                 newest = Some((*sample, *sample.user_header()));
             }
             Ok(None) => break,

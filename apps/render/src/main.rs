@@ -12,6 +12,7 @@
 mod capture;
 mod config;
 mod depth_noise;
+mod flight_overlay;
 mod freecam;
 mod link;
 mod process;
@@ -135,6 +136,7 @@ fn build_app(
     .insert_resource(CaptureStats::default())
     .insert_resource(FreeCam::default())
     .insert_resource(viewer_pose::ViewerPose::default())
+    .init_resource::<flight_overlay::FlightOverlay>()
     .insert_non_send(ports)
     .insert_non_send(log_ipc)
     .add_plugins(CapturePlugin)
@@ -172,6 +174,12 @@ fn build_app(
         Last,
         (drain_captures, publish_processed, pump_logs, flush_on_exit).chain(),
     );
+    if !offline {
+        app.init_gizmo_group::<flight_overlay::FlightGizmos>()
+            .add_systems(Startup, flight_overlay::setup)
+            .add_systems(PreUpdate, flight_overlay::poll_estimate)
+            .add_systems(Update, flight_overlay::draw);
+    }
     app
 }
 
