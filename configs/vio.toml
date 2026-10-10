@@ -19,10 +19,13 @@ num_pts = 300 # 每相机 KLT 目标特征数
 max_baseline = 120 # 三角化深度/基线比上限（OpenVINS 默认 40）
 
 [slam]
-# 体素选点（Voxel-SVIO）：每帧只喂相机可见体素内的路标。参数对照官方调参
-# （EuRoC/TUM-VI）：voxel_size 0.3、nb_voxels_visited 2、min_distance_points 0.0。
-# 代码默认 0.1/±1 的邻域只有 ±0.1m，在真实特征间距（~0.3m）下几乎命中不了。
-voxel_selection = false
+# 体素地图（Voxel-SVIO）：`VoxelMap` 维护路标、`ActiveTrackTriangulator` 跨帧累积，
+# 每帧只喂相机可见体素内的点进 MSCKF 更新。开关同时启用整条体素通路
+# （`apps/vio` 里 `voxel_options.enabled` 取自 `voxel_selection`）。
+# 参数对照官方 EuRoC 配置：voxel_size/nb_voxels_visited/min_distance_points/
+# max_num_points_in_voxel/max_slam = 0.3/2/0.0/5/100。
+voxel_selection = true
 voxel_size = 0.3
 neighbor_radius = 2
 min_point_distance = 0.0
+max_slam_features = 100
