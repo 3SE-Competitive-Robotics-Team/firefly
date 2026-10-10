@@ -26,7 +26,7 @@ pub struct LocalizationStatus {
     pub tracking_ready: bool,
 }
 
-/// 真值话题（MuJoCo 物理环境发布，仿真阶段感知位姿源）。
+/// 仿真真值：仅供传感器图像生成、评测与可视化对照。
 pub const GROUND_TRUTH_TOPIC: &str = "Firefly/GroundTruth";
 
 /// 里程计消息（对照 `docs/architecture.md` 的 `topic: odom`）。

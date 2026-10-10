@@ -531,7 +531,7 @@ impl PlannerManager {
         report.ground_height = self.measure_ground_height(now);
         // 参考指令仅来自已验收的局部轨迹。
         report.reference = self.reference(now, measured);
-        // 到达判定（任意轨迹阶段，物理位置为准；急停悬停不算完成任务）
+        // 到达判定使用估计位置；急停悬停不计作任务完成。
         if self.local.is_some() && !self.emergency {
             let pos = self.estimated_position(now, measured);
             if (pos - self.goal.coords).norm() < self.options.arrive_dist {

@@ -50,10 +50,7 @@ use voxels::{Paths, draw_paths, setup_gizmo_layers, setup_voxels, update_live_vo
 /// 以 RMUC 资产和初始摆位启动 Bevy；仿真位姿到达后更新机体与传感器。
 fn main() {
     firefly_observability::init();
-    // `Bevy` 内部日志走 `tracing`（`LogPlugin` 已禁用，不再安装 subscriber）：
-    // 经 `trace_bridge` 转发到 `log` 门面，统一由 `logforth` 输出，否则
-    // `Bevy` 侧所有日志（窗口/渲染器/退出原因）静默丢失，崩溃时无现场。
-    // 必须在任何 dispatcher 抢占者之前安装，失败即报错不停服。
+    // 在 Bevy 启动前安装全局 tracing → log 转发器。
     if let Err(e) = trace_bridge::init() {
         log::warn!("tracing 转发安装失败（Bevy 侧日志将静默）: {e}");
     }

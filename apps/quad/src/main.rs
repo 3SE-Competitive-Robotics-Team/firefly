@@ -2,8 +2,7 @@
 //!
 //! 四旋翼模型与飞控（角度模式）由 `firefly-flight` 提供——与闭环评估共用同一实现；
 //! 本 app 只做输入/相机/场景接线，在 `configs/quad.toml` 指定的场地里飞。
-//! 第三人称追踪相机与场景/光照/机体可视化复用 `firefly-render`（与 `apps/render`
-//! 同一套基建）。这是后续「在真实动态下调试 VIO/感知」的可玩基座。
+//! 第三人称追踪相机、场景光照和机体可视化复用 `firefly-render`。
 //!
 //! 运行：`cargo run --release -p quad`
 

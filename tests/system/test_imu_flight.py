@@ -9,8 +9,6 @@ import hashlib
 import json
 import os
 import subprocess
-import sys
-import time
 
 import pytest
 
@@ -33,7 +31,6 @@ def test_imu_flight(case):
     phases.extend([("landing", mission.landing)] if case == "imu_landing" else [
         ("estimator_fallback", mission.estimator_fallback), ("degraded_support", mission.degraded_support),
     ])
-    mission.result["stages"] = {name: {"status": "blocked", "reason": "preceding phase not completed"} for name, _ in phases}
     files = [ROOT / f"target/release/{name}" for name in ("render", "vio", "fc", "ffctl")]
     files.extend(sorted((ROOT / "configs").glob("*.toml")))
     for folder in ("apps/fc", "apps/vio", "crates/firefly-imu", "crates/firefly-pubsub", "crates/firefly-vio"):
@@ -44,25 +41,11 @@ def test_imu_flight(case):
         "files_sha256": {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in files},
         "options": asdict(options),
     }
-    try:
-        mission.start("viz", [sys.executable, "-m", "firefly_viz.main", "--save", str(mission.recording)])
-        time.sleep(2.)
-        mission.connect()
-        for name in ("render", "vio", "fc"):
-            mission.start(name, [str(ROOT / f"target/release/{name}")])
-        mission.start("sim", [sys.executable, str(ROOT / "tests/system/mission_sim.py")])
-        for name, action in phases:
-            mission.phase(name, action)
-        if case == "imu_vio_loss":
-            mission.result["capability_limit"] = "Attitude support only; no guaranteed position hold, altitude hold or landing."
-    except BaseException as error:
-        mission.result["error"] = str(error) or type(error).__name__
-        raise
-    finally:
-        mission.shutdown()
-        mission.result["provenance"] = provenance
-        mission.result["status"] = "passed" if (
-            "error" not in mission.result and all(s["status"] == "passed" for s in mission.result["stages"].values())
-        ) else "failed"
-        (directory / "report.json").write_text(json.dumps(mission.result, ensure_ascii=False, indent=2) + "\n")
-    assert mission.result["status"] == "passed", f"see {directory / 'report.json'}"
+    result = mission.run_phases(phases, ("render", "vio", "fc"))
+    result["provenance"] = provenance
+    if case == "imu_vio_loss":
+        result["capability_limit"] = "Attitude support only; no guaranteed position hold, altitude hold or landing."
+    (directory / "report.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    if result.get("interrupted"):
+        raise KeyboardInterrupt
+    assert result["status"] == "passed", f"see {directory / 'report.json'}"

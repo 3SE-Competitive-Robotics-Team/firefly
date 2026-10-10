@@ -113,7 +113,7 @@ pub struct GridMap {
     /// 构造时按 `obstacles_inflation` 计算的膨胀步长（官方 `inf_grid_`，恒 ≤ 4），用于 `change_inf_buf` 增量更新。
     inf_grid: i32,
     /// 占据/膨胀状态版本号：任何改变两者的可变方法加一。`inflate_obstacles`
-    /// 只在版本变化时重算——规划每 tick 多次尝试共享同一地图时，后续调用零开销。
+    /// 只在版本变化时重算膨胀层。
     revision: u64,
     /// 上次完成膨胀时的版本号（与 `revision` 相等即已同步）。
     inflated_revision: u64,
@@ -773,7 +773,7 @@ impl GridMap {
 
     /// 重算膨胀层（官方 `clearAndInflateLocalMap` 的膨胀步骤，计数语义；步长为构造期确定的 `inf_grid`）。
     /// 每个占据体素 `+GRID_MAP_OBS_FLAG`（自身）并周围 `inf_grid` 格内 `+1`，多障碍叠加计数。
-    /// 版本未变时直接返回：规划每 tick 多次尝试共享同一地图，后续调用零开销。
+    /// 占据版本未变时直接返回。
     pub fn inflate_obstacles(&mut self) {
         if self.inflated_revision == self.revision {
             return;

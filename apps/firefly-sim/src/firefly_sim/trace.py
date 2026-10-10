@@ -29,7 +29,7 @@ def init(*, enabled: bool = True) -> None:
     """初始化 OTel tracer provider。
 
     Args:
-        enabled: False 时所有 span 操作退化为 no-op（零开销）。
+        enabled: False 时跳过 span 创建和导出。
     """
     global _tracer, _enabled
     _enabled = enabled

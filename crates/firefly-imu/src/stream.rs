@@ -40,7 +40,6 @@ pub struct Estimator {
     aligned: bool,
     session: Option<u64>,
     session_fault: bool,
-    last_aid: Option<f64>,
     /// 同一 IMU 区间内可有多次外援；保留最近外援时刻的后验。
     aid_checkpoint: Option<(f64, AttitudeState)>,
     gate: Gate,
@@ -61,7 +60,6 @@ impl Estimator {
             aligned: false,
             session: None,
             session_fault: false,
-            last_aid: None,
             aid_checkpoint: None,
             gate: Gate::default(),
         })
@@ -83,8 +81,10 @@ impl Estimator {
         self.gate
     }
     #[must_use]
-    pub const fn last_aid(&self) -> Option<f64> {
-        self.last_aid
+    pub fn last_aid(&self) -> Option<f64> {
+        self.aid_checkpoint
+            .as_ref()
+            .map(|(timestamp, _)| *timestamp)
     }
 
     /// 每个时间戳只消费一次；只有地面允许静止初始化与加计修正。
@@ -222,7 +222,7 @@ impl Estimator {
             ));
         }
         if !self.continuous
-            || self.last_aid.is_some_and(|t| aid.timestamp <= t)
+            || self.last_aid().is_some_and(|t| aid.timestamp <= t)
             || self
                 .history
                 .back()
@@ -262,7 +262,7 @@ impl Estimator {
         } else if !state.intersect(&aid.state)? {
             return Ok(false);
         }
-        self.aid_checkpoint = Some((aid.timestamp, state.clone()));
+        let posterior = state.clone();
         if aid.timestamp == self.history[index].sample.timestamp {
             self.history[index].state = state.clone();
         }
@@ -283,7 +283,7 @@ impl Estimator {
         }
         self.state = Some(state);
         self.session = Some(aid.session);
-        self.last_aid = Some(aid.timestamp);
+        self.aid_checkpoint = Some((aid.timestamp, posterior));
         self.aligned = true;
         Ok(true)
     }

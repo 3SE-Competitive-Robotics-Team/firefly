@@ -4,12 +4,9 @@
 piece_length = 1.5
 constraint_points_per_piece = 5
 planning_distance = 7.5
-# 车体安全半径（米）：**唯一的可行性判据**。地图膨胀、A* 搜索、细检、代价硬阈值
-# 全部用它（地图膨胀经 `MapFile::to_grid_map` 传入，不再有隐藏默认值）。低于它的
-# 通道一律不可通行——否则 A* 会搜出连续轨迹跟不上的窄缝（全局搜得到、局部飞不了）。
+# 障碍净距（米）：地图膨胀、A*、轨迹细检和障碍代价硬阈值共用。
 obstacle_clearance = 0.4
-# 舒适带（米）：代价里"离障碍多远才舒服"的**调参偏好**，与可行性无关。它提供把
-# 轨迹推离障碍的梯度——窄通道里能否"自己让开"取决于它。
+# 障碍代价的软阈值（米），提供远离障碍的梯度。
 obstacle_clearance_soft = 0.5
 weight_obstacle_soft = 5000.0 # 官方 v2 `weight_obstacle_soft`
 swarm_clearance = 0.5

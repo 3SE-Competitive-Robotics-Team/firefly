@@ -1,10 +1,7 @@
-//! tracing → log 转发：`Bevy` 内部日志走 `tracing`，`LogPlugin` 禁用后
-//! 不再安装 subscriber，所有 `Bevy` 侧日志会被静默丢弃（窗口/渲染器/
-//! 退出原因全不可见）。本转发器是唯一的全局 tracing dispatcher，把事件
-//! 原样（级别/目标/调用点/字段）送进 `log` 门面，统一由 `logforth` 输出。
+//! Bevy tracing → log 转发：作为全局 dispatcher 保留事件级别、目标、调用点
+//! 和字段，由 logforth 统一输出。Bevy 的 `LogPlugin` 必须禁用，避免重复安装。
 //!
-//! 注意方向别反：`tracing-log` 的 `LogTracer` 是 log→tracing（与
-//! `logforth` 抢占全局 logger，不能用），这里需要的是 tracing→log。
+//! 勿安装反向的 `tracing_log::LogTracer`，它会占用 logforth 所需的全局 logger。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

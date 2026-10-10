@@ -9,8 +9,8 @@ VIO 外援订阅端。控制线程通过非阻塞内存快照读取姿态与去�
 - 角速度反馈：`gyro - estimated_bias`，按测量间隔的一阶 30Hz 低通。
 - 姿态反馈：本地六误差状态 ESKF，Hamilton body→odom。
 - 位置/速度反馈：`Firefly/Odometry`。地图融合只通过坐标树转换规划参考。
-- 原始 IMU 仍为 100Hz、物理 200Hz、控制 1kHz；独立线程不合成额外 IMU。
-  算法测试包含 100Hz / 1kHz 采样，但不构成 1kHz 仿真系统性能验收。
+- IMU 100Hz、物理 200Hz；FC 按墙钟 1kHz 调度，样本间保持最近姿态与角速度。
+  ESKF 只按新测量的时间戳传播，不在控制 tick 上重复积分或外推。
 
 `configs/fc.toml [imu]` 可覆盖 `firefly_imu::Options`；缺键使用代码默认值。
 角速度 rad/s，比力 m/s²，时间秒，噪声配置为连续时间标准差密度。
@@ -88,14 +88,14 @@ VIO 模型错误的保证。旋转差超过 0.5rad 拒绝；六维差异另用�
 再按相同右端零阶保持积分到当前时刻。乱序、重复和缓存覆盖外的外援不更新状态。
 VIO 会话改变锁存未对齐，需重启 FC；IMU 间隔超过 50ms 锁存不连续，禁止补造测量。
 
-## 可观测性与证据
+## 运行诊断
 
 - `fc/imu/health`：本地可用、odom 已对齐、最后接受外援的测量年龄（秒）。
 - `fc/imu/accel_gate`：NIS、是否实际应用加计校正。
 - `fc/imu/gyro_bias`：三轴 rad/s。
 - `fc/debug/tilt_deg` 与 `fc/debug/tilt_err_deg`：估计倾角与仅供评测的真值倾角误差。
 
-所有运行记录由 `firefly-viz` 写入 `logs/*.rrd`。原始 IMU 不经本地 ESKF 改写。
+运行记录由 `firefly-viz` 写入 `logs/*.rrd`。
 
 ## 参考与测试
 

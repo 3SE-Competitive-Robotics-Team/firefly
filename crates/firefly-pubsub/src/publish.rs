@@ -21,8 +21,7 @@ use crate::trace::TraceContext;
 
 /// 泛型零拷贝发布端（iceoryx2 ipc 服务，User Header 携带 trace 上下文）。
 ///
-/// 约束对齐 iceoryx2 0.10 `publish_subscribe`（`Debug + ZeroCopySend`；
-/// 0.9.999 起新增 `IceoryxSend`，升级时补上）。
+/// 消息须满足 iceoryx2 的 `Debug + ZeroCopySend` 约束。
 ///
 /// 节点由调用方持有（进程共享单节点，见 [`crate::node`]），端口只借用其
 /// 创建服务；Drop 顺序由调用方作用域保证（节点最后释放）。

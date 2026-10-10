@@ -404,12 +404,20 @@ class Mission:
             phases.extend([("reference_loss", self.reference_loss), ("failure_hold", self.failure_hold), ("landing", self.landing)])
         else:
             phases.extend([("estimator_fallback", self.estimator_fallback), ("degraded_support", self.degraded_support)])
+        result = self.run_phases(phases, ("render", "vio", "fc", "localization"))
+        if self.case == "estimator_loss":
+            result["stages"]["failure_terminal"] = {"status": "not_supported", "reason": "No independent position/altitude estimate: IMU attitude support cannot guarantee hover or safe landing"}
+            result["status"] = "failed"
+        return result
+
+    def run_phases(self, phases, applications):
+        """依次执行验收阶段，共用 RRD 记录、进程存活检查和优雅退出。"""
         self.result["stages"] = {name: {"status": "blocked", "reason": "preceding phase not completed"} for name, _ in phases}
         try:
             self.start("viz", [sys.executable, "-m", "firefly_viz.main", "--save", str(self.recording)])
             time.sleep(2.)
             self.connect()
-            for name in ["render", "vio", "fc", "localization"]:
+            for name in applications:
                 self.start(name, [str(ROOT / f"target/release/{name}")])
             self.start("sim", [sys.executable, str(ROOT / "tests/system/mission_sim.py")])
             for name, action in phases:
@@ -422,7 +430,7 @@ class Mission:
                 self.recorder.event(str(error), self.t, True)
         finally:
             self.shutdown()
-        if self.case == "estimator_loss":
-            self.result["stages"]["failure_terminal"] = {"status": "not_supported", "reason": "No independent position/altitude estimate: IMU attitude support cannot guarantee hover or safe landing"}
-        self.result["status"] = "passed" if all(s["status"] == "passed" for s in self.result["stages"].values()) else "failed"
+        self.result["status"] = "passed" if (
+            "error" not in self.result and all(s["status"] == "passed" for s in self.result["stages"].values())
+        ) else "failed"
         return self.result

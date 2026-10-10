@@ -13,13 +13,9 @@
 //! 输出：`Firefly/Control`（4 电机推力，1kHz；被控对象每步取最新）——**每个** tick 都发，
 //! 上锁时发零推力：被控对象按指令新鲜度决定物理是否推进，飞控停发等于世界停转。
 //!
-//! 模式与安全层是 [`FlightFsm`]：它输出"本 tick 该飞的参考 + 电机是否使能"，
-//! 本进程只负责把估计状态与健康电平喂进去、把输出接给位置模式。
-//!
-//! 反馈来源分工：内环读取独立 IMU 线程的姿态 ESKF 与去偏低通角速度。
-//! 地面静止窗口初始化倾角/零偏，加计更新受静止条件和 NIS 门控；VIO 外援按
-//! 测量时刻经协方差交集融合并重放 IMU。位置/速度来自局部里程计。缺少有效 IMU、初始化未完成
-//! 或地面里程计陈旧时发送零推力；空中里程计失联进入仅姿态稳定。真值不参与控制与健康判据。
+//! [`FlightFsm`] 根据估计状态和健康条件生成参考与电机使能信号。
+//! 内环读取 IMU 线程的姿态与去偏角速度，位置/速度来自局部里程计。
+//! 真值只用于评测。姿态估计与 VIO 外援约定见 `docs/imu.md`。
 //!
 //! 控制节拍使用墙钟，诊断时间取自 IMU。未就绪时持续发零推力，使被控对象能产生初始化测量。
 //!
@@ -55,8 +51,7 @@ use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 
 /// `configs/fc.toml` 缺省路径（相对运行目录，通常为仓库根）。
 const DEFAULT_CONFIG: &str = "configs/fc.toml";
-/// 节拍余量：睡眠到此为止、余下自旋（1kHz 下约 15% 单核，换 µs 级 tick 精度；
-/// 纯 sleep 在 macOS 上会落到 ~1.2ms 周期）。
+/// 每拍最后 150µs 自旋，之前使用线程睡眠。
 const SPIN_MARGIN: Duration = Duration::from_micros(150);
 /// 里程计陈旧阈值（墙钟秒）：覆盖 10Hz 视觉更新间隔，触发姿态降级。
 const ODOM_STALE_LIMIT: Duration = Duration::from_millis(500);
@@ -92,7 +87,7 @@ fn parse_config_path() -> Result<String, String> {
     Ok(path)
 }
 
-/// 连续 odom 系位置/速度/航向反馈快照，仅来自 `Firefly/Odometry`。
+/// 连续 odom 系位置/速度反馈快照，仅来自 `Firefly/Odometry`。
 #[derive(Clone, Copy)]
 struct Estimate {
     /// 状态的测量时间（秒）。
@@ -114,12 +109,12 @@ struct Inputs {
     plant: Option<(PlantStateMessage, Instant)>,
     /// 机体/执行器（装配成 `firefly-flight` 的参数）。
     vehicle: Option<(QuadParams, Airframe)>,
-    /// 位置/速度/航向反馈。
+    /// odom 系位置/速度反馈。
     estimate: Option<Estimate>,
     frames: frames::ControlFrames,
     /// 最新 IMU 传感器时间（秒），作为控制与诊断时间轴。
     imu_time: f64,
-    /// 独立 IMU 工作线程发布的原子快照。
+    /// 独立 IMU 工作线程发布的完整快照。
     attitude: Option<imu::Snapshot>,
     /// 参考（位置/速度/偏航/偏航角速度）与到达墙钟时刻（判新鲜）。
     reference: Option<(ReferenceMessage, Instant)>,
@@ -127,7 +122,7 @@ struct Inputs {
     command: Option<CommandMessage>,
 }
 
-/// 端口集合（避免主循环参数爆炸）。
+/// 控制输入、指令输出与评测端口。
 struct Ports {
     plant: PlantStateSubscriber,
     airframe: AirframeSubscriber,
@@ -363,7 +358,7 @@ impl Controller {
 
     /// 空中失联只用 IMU 维持姿态支持；禁止陈旧位置进入控制律。
     fn motor_output(&mut self, inputs: &Inputs, dt: f32, ctl: &ControlParams) -> ([f32; 4], bool) {
-        let (attitude, ang_vel) = self.attitude_and_rates(inputs, dt);
+        let (attitude, ang_vel) = self.attitude_and_rates(inputs);
         let (position, velocity) = inputs
             .estimate
             .map_or((Vec3::ZERO, Vec3::ZERO), |est| (est.position, est.velocity));
@@ -450,7 +445,7 @@ impl Controller {
     }
 
     /// 姿态环读取本地 ESKF，角速度反馈来自去偏低通后的陀螺。
-    fn attitude_and_rates(&mut self, inputs: &Inputs, _dt: f32) -> (Quat, Vec3) {
+    fn attitude_and_rates(&mut self, inputs: &Inputs) -> (Quat, Vec3) {
         self.attitude_ready = inputs
             .attitude
             .is_some_and(|s| s.ready && s.received.elapsed() <= IMU_STALE_LIMIT);

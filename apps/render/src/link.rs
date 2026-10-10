@@ -3,7 +3,7 @@
 //! 时序（对照 `firefly-sim/main.py` 的 10Hz 相机节拍）：
 //! - `poll_pose` 排空真值更新位姿，按**固定 10Hz 节拍**（`CAPTURE_PERIOD`，
 //!   以 sim 时间为轴）发起回读，并激活传感器相机；回读被渲染世界取走后收起
-//!   相机（按需渲染，不再每帧空转）。
+//!   相机，限制传感器渲染只在有采集请求时执行。
 //! - 三份同 `seq` 回复到齐后装配成 [`CaptureJob`] 交给工作线程；工作线程算完
 //!   回 [`ProcessedCapture`]，主线程只做发布与调试显示写入（端口主线程独占）。
 //! - 发布走 [`Publisher::publish`]，自动注入续接后的 trace 上下文。
@@ -260,7 +260,7 @@ pub fn poll_pose(
         capture.active = false;
     }
 
-    // 固定 10Hz 节拍触发：以 sim 时间为轴，真值边沿抖动不再丢帧；回读双缓冲，
+    // 按仿真时间以 10Hz 触发采集；回读双缓冲，
     // 只要还有空闲组就可发起（上一拍在途不阻塞下一拍）。
     if !capture.active
         && hub.can_issue()

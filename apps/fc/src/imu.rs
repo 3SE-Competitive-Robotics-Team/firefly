@@ -161,9 +161,8 @@ fn run(
             && latest.is_some_and(|(s, _)| msg.timestamp <= s.timestamp)
         {
             pending = None;
-            match to_aid(&msg).and_then(|aid| estimator.aid(&aid)) {
-                Ok(_) => {}
-                Err(error) => log::warn!("VIO 姿态外援拒绝: {error}"),
+            if let Err(error) = to_aid(&msg).and_then(|aid| estimator.aid(&aid)) {
+                log::warn!("VIO 姿态外援拒绝: {error}");
             }
             changed = true;
         }

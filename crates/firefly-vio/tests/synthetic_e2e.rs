@@ -1,9 +1,5 @@
-//! 合成端到端验证：匀速直线飞行 + **带零偏与噪声的 IMU** + 已知 3D 点投影
-//! 的点阵图像，全链路（跟踪器 → 三角化 → MSCKF/SLAM 更新）喂入 `VioManager`。
-//!
-//! 判定设计：IMU 含常值零偏（纯积分 10s 必漂 ~2.5m），因此误差收敛到
-//! 厘米级 ⇔ 视觉更新真实生效且数学正确。同时断言 SLAM 特征已初始化，
-//! 排除"零视觉参与、纯 IMU 恰好走对"的假阳性。
+//! 合成 IMU 与点阵双目图像，检查跟踪、三角化、滤波及静止初始化的输出。
+//! 匀速场景含弱可观方向；被忽略的场景不能计作通过或替代飞行验收。
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -190,7 +186,7 @@ struct ScenarioCfg {
     img_noise_amp: u8,
     /// true=逐帧重播种（闪烁）；false=固定纹理。
     img_noise_flicker: bool,
-    /// true=前 5s 静止后匀速（复现现场"静止→运动"，SLAM 初始化视差结构差）。
+    /// true=前 5s 静止后运动。
     static_then_move: bool,
 }
 
@@ -208,7 +204,7 @@ impl Default for ScenarioCfg {
     }
 }
 
-fn run_scenario(inject_bias: bool, max_slam: usize) -> (f64, f64, f64, f64, Vector3<f64>) {
+fn run_scenario(inject_bias: bool, max_slam: usize) -> (f64, f64, Vector3<f64>) {
     run_cfg(&ScenarioCfg {
         inject_bias,
         max_slam,
@@ -216,8 +212,7 @@ fn run_scenario(inject_bias: bool, max_slam: usize) -> (f64, f64, f64, f64, Vect
     })
 }
 
-#[allow(clippy::too_many_lines)] // 端到端仿真主循环，结构由时间步驱动
-fn run_cfg(cfg: &ScenarioCfg) -> (f64, f64, f64, f64, Vector3<f64>) {
+fn run_cfg(cfg: &ScenarioCfg) -> (f64, f64, Vector3<f64>) {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(firefly_observability::init);
     let mut mgr = build_manager_ex(cfg.max_slam, cfg.do_fej);
@@ -235,21 +230,15 @@ fn run_cfg(cfg: &ScenarioCfg) -> (f64, f64, f64, f64, Vector3<f64>) {
     let dt_cam = 0.1_f64;
     let dt_imu = 0.01_f64;
     let frames = 100_usize;
-    // "静止→运动"场景：前 `static_frames` 帧静止（复现现场 demo 参考静止期），
-    // 之后匀速——静止期 SLAM 特征初始化视差结构差，是现场发散的关键触发条件。
     let static_frames = if cfg.static_then_move { 50 } else { 0 };
 
     let mut rng = Lcg(0xfeed_d00d);
-    let mut max_err_p = 0.0f64;
 
     for k in 1..=frames {
         let t_cam = f64::from(k as u32) * dt_cam;
         for j in 0..10 {
             let ts = t_cam - dt_cam + f64::from(j as u32) * dt_imu;
-            // 运动加速度（本体系≈世界系，姿态保持水平）：静止→运动场景在
-            // static_frames 处有 0→1m/s 的阶跃加速（IMU 缺失水平加速度是
-            // 旧测试缺陷——滤波器位置不随运动积分，与移动的视觉测量矛盾，
-            // 三角化几何病态 cond 百万级）
+            // 机体保持水平；运动开始时用 0.1s 将速度从 0 加至 1m/s。
             let a_motion = if cfg.static_then_move
                 && ts > f64::from(static_frames) * dt_cam
                 && ts <= (f64::from(static_frames) + 1.0) * dt_cam
@@ -316,88 +305,41 @@ fn run_cfg(cfg: &ScenarioCfg) -> (f64, f64, f64, f64, Vector3<f64>) {
             ],
             masks: vec![zeros(), zeros()],
         });
-
-        if k % 20 == 0 {
-            let expected = p0 + v_gt * (t_cam - f64::from(static_frames) * dt_cam).max(0.0);
-            let err = (mgr.state.imu.pos() - expected).norm();
-            max_err_p = max_err_p.max(err);
-            let ba = mgr.state.imu.ba().vec();
-            let bg = mgr.state.imu.bg().vec();
-            let vel = mgr.state.imu.vel();
-            println!(
-                "t={t_cam:5.1} 位置误差={err:.3}m slam特征={} vel=({:.2},{:.2},{:.2}) ba=({:.3},{:.3},{:.3}) bg=({:.4},{:.4},{:.4})",
-                mgr.state.features_slam.len(),
-                vel.x,
-                vel.y,
-                vel.z,
-                ba[0],
-                ba[1],
-                ba[2],
-                bg[0],
-                bg[1],
-                bg[2]
-            );
-        }
     }
 
     let expected =
         p0 + v_gt * ((f64::from(frames as u32) - f64::from(static_frames)) * dt_cam).max(0.0);
     let err_p = (mgr.state.imu.pos() - expected).norm();
     let err_v = (mgr.state.imu.vel() - v_gt).norm();
-    let ba_end = mgr.state.imu.ba().vec();
-    println!(
-        "最终: 位置误差={err_p:.3}m 速度误差={err_v:.3}m/s 最大中途={max_err_p:.3}m ba=({:.3},{:.3},{:.3})",
-        ba_end[0], ba_end[1], ba_end[2]
-    );
-    (
-        err_p,
-        err_v,
-        max_err_p,
-        0.0,
-        Vector3::new(ba_end[0], ba_end[1], ba_end[2]),
-    )
+    (err_p, err_v, mgr.state.imu.bias_a())
 }
 
-/// 隔离实验 A：禁用 SLAM + 零偏 —— 无灾难性发散（`H_x` 列偏移的回归锚点）。
-///
-/// 已知局限：场景为零旋转、纯前向恒速、稀疏点阵 + 5cm 立体基线——对 `MSCKF`
-/// 近规范退化（x 向速度仅靠时间视差与微弱立体视差约束），P 平衡点米级、估计速度
-/// ±0.7m/s 随机摆动，断言力弱；视觉链路健康与否以现场 `MuJoCo` 闭环实测
-/// 实际场景的运行录制为依据。
+/// 无零偏纯 MSCKF 场景：零旋转、前向恒速、稀疏点阵和 5cm 立体基线。
+/// 3m 位置阈值仅检查严重发散，不代表定位精度达标。
 #[test]
-#[ignore = "场景对 MSCKF 近退化（零旋转纯前向+稀疏点阵），需重设计；现场 bench 为事实源"]
+#[ignore = "零旋转、纯前向和稀疏点阵导致弱可观，不能作为精度验收"]
 fn synthetic_pure_msckf_zero_bias() {
-    let (err_p, _, _, _, _) = run_scenario(false, 0);
-    // <3m 断言排除坏雅可比类结构性发散
+    let (err_p, _, _) = run_scenario(false, 0);
     assert!(
         err_p < 3.0,
         "纯 MSCKF 位置误差过大（疑似结构性发散）: {err_p:.3}m"
     );
 }
 
-/// SLAM 模式（OpenVINS 默认 `max_slam_features=25`，apps/vio 现同样默认开启）。
-/// 已知问题：末尾速度估计摆荡——实测位置误差 1.0-1.4m（位置断言 <3m 通过）、
-/// 0.4-0.75 m/s（速度断言 <0.3 不通过）。场景约束（零旋转纯前向恒速 +
-/// 稀疏点阵 + 5cm 立体基线）下 x 速度/偏航弱可观，见
-/// [`synthetic_pure_msckf_zero_bias`] 的「近规范退化」注释；持久路标把
-/// KLT 运动滞后偏置（~0.5px）吸收进特征几何，无法像 MSCKF 那样随边缘化
-/// 遗忘（现场 10 轨迹 bench 仍开 SLAM：均值 -8%，方差大，体素选点 opt-in）。
+/// 25 个持久 SLAM 路标的无零偏场景，检查末端位置和速度误差。
 #[test]
-#[ignore = "已知问题：SLAM 模式速度断言不达标（实测 0.4-0.75 m/s），见上注释"]
+#[ignore = "SLAM 模式的末端速度误差未通过断言"]
 fn synthetic_slam_zero_bias() {
-    let (err_p, err_v, _, _, _) = run_scenario(false, 25);
+    let (err_p, err_v, _) = run_scenario(false, 25);
     assert!(err_p < 3.0, "SLAM 零偏位置误差过大: {err_p:.3}m");
     assert!(err_v < 0.3, "SLAM 零偏速度误差过大: {err_v:.3}m/s");
 }
 
-/// 复现现场"静止→运动"：静止 5s 后匀速。静止期无视差，视觉更新暂停，
-/// 滤波器纯 IMU 先收敛，SLAM 特征在运动后才初始化——当前实测达标
-/// （位置 0.2-0.4m、速度 0.11-0.19 m/s，断言 <3m/<0.3m/s）。与
-/// [`synthetic_slam_zero_bias`] 构成 SLAM 模式回归对，暂保持 ignore。
+/// 静止 5s 后运动，与 [`synthetic_slam_zero_bias`] 对比启动运动条件。
 #[test]
-#[ignore = "与 synthetic_slam_zero_bias 构成 SLAM 模式回归对，暂保持 ignore"]
+#[ignore = "与 synthetic_slam_zero_bias 配套的扩展场景"]
 fn synthetic_slam_static_then_move() {
-    let (err_p, err_v, _, _, _) = run_cfg(&ScenarioCfg {
+    let (err_p, err_v, _) = run_cfg(&ScenarioCfg {
         max_slam: 25,
         static_then_move: true,
         ..ScenarioCfg::default()
@@ -406,14 +348,11 @@ fn synthetic_slam_static_then_move() {
     assert!(err_v < 0.3, "静止→运动 SLAM 速度误差过大: {err_v:.3}m/s");
 }
 
-/// 隔离实验 B：禁用 SLAM + 注入零偏 —— 视觉应能观测并学到零偏。
-/// 已知未解问题：注入加速度零偏后纯 MSCKF 发散（ba 学不到、速度被更新
-/// 拽飞，无噪也复现）。零偏场景完美收敛证明 MSCKF 核心与视觉链路数学
-/// 正确；发散机制待查（怀疑方向：FEJ 线性化一致性 / 压缩投影）。
+/// 含零偏的纯 MSCKF 场景，检查位置、速度及加计零偏估计。
 #[test]
-#[ignore = "已知问题：含加速度零偏仍发散（ba 学不到、速度被更新拽飞）——同上，场景退化需重设计"]
+#[ignore = "含加速度零偏场景发散，未通过精度与零偏断言"]
 fn synthetic_pure_msckf_with_bias() {
-    let (err_p, err_v, _, _, ba) = run_scenario(true, 0);
+    let (err_p, err_v, ba) = run_scenario(true, 0);
     assert!(err_p < 0.30, "含偏纯 MSCKF 位置误差过大: {err_p:.3}m");
     assert!(err_v < 0.20, "含偏纯 MSCKF 速度误差过大: {err_v:.3}m/s");
     assert!(
