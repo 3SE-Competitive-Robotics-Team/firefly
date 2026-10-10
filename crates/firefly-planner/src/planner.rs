@@ -2,8 +2,8 @@
 //!
 //! 论文流程（Sci. Robot. 2022, Trajectory planning procedure）：
 //! 1. 局部目标选择（规划距离内）
-//! 2. A* 无碰撞引导路径（firefly-search）
-//! 3. 引导路径 → MINCO 初始 {q, T}（firefly-trajectory）
+//! 2. 多项式种子等时重采样或上一条轨迹暖启动
+//! 3. 碰撞段通过局部 A* 生成 Rebound 约束（firefly-search）
 //! 4. Rebound 循环：扫描新障碍 → 生成 {s,v} 平面 → L-BFGS 优化
 //! 5. 无新障碍时返回轨迹
 
@@ -57,7 +57,7 @@ pub struct State {
 /// 初始解来源（对照官方 `computeInitState` 的两个 case）。
 #[derive(Debug, Clone, Copy)]
 pub enum InitSource<'a> {
-    /// case 1：A* 引导路径重建（首帧 / 暖启动失败降级）。
+    /// case 1：2 秒多项式种子等时重采样（首帧 / 暖启动失败降级）。
     ColdStart,
     /// case 2：从上一条最优轨迹暖启动。`elapsed` 为已执行时长；
     /// `glb_seg` 为全局轨迹段（`last_glb_t_of_lc_tgt → glb_t_of_lc_tgt`）的
@@ -240,22 +240,14 @@ impl Planner {
             acceleration: start.acceleration,
         };
         let local_goal = goal;
-        let guide = init::search_guide(
-            &mut self.astar,
-            &self.map,
-            start.position.coords,
-            local_goal.position,
-        )?;
 
         let minco = match source {
             InitSource::ColdStart => {
-                let pieces = init::pieces_for_guide(&guide, self.config.piece_length);
                 let init_config = InitConfig {
                     piece_length: self.config.piece_length,
-                    pieces,
                     max_velocity: self.config.max_velocity,
                 };
-                init::init_from_path(&init_config, start_endpoint, local_goal, &guide)?
+                init::init_polynomial(&init_config, start_endpoint, local_goal)?
             }
             InitSource::WarmStart {
                 prev,
@@ -265,7 +257,6 @@ impl Planner {
             } => {
                 let init_config = InitConfig {
                     piece_length: self.config.piece_length,
-                    pieces: 0, // 暖启动段数按官方 case2 由距离决定，不使用
                     max_velocity: self.config.max_velocity,
                 };
                 match init::init_warm_start(
@@ -280,20 +271,17 @@ impl Planner {
                     Ok(m) => m,
                     Err(e) => {
                         log::debug!("暖启动不可用（{e}），降级冷启动");
-                        let pieces = init::pieces_for_guide(&guide, self.config.piece_length);
                         let cfg = InitConfig {
                             piece_length: self.config.piece_length,
-                            pieces,
                             max_velocity: self.config.max_velocity,
                         };
-                        init::init_from_path(&cfg, start_endpoint, local_goal, &guide)?
+                        init::init_polynomial(&cfg, start_endpoint, local_goal)?
                     }
                 }
             }
             InitSource::RandomStart { mid } => {
                 let cfg = InitConfig {
                     piece_length: self.config.piece_length,
-                    pieces: 0, // 段数由距离决定（见 init_random），不使用
                     max_velocity: self.config.max_velocity,
                 };
                 init::init_random(&cfg, start_endpoint, local_goal, mid)?
@@ -1076,7 +1064,7 @@ mod tests {
         assert!((result.trajectory.eval(t).position - goal.position).norm() < 1e-6);
     }
 
-    fn wall_scenario(config: PlannerConfig) -> (Planner, State, Point3<f64>, Vec<Vector3<f64>>) {
+    fn wall_scenario(config: PlannerConfig) -> (Planner, State, Point3<f64>) {
         // 0.1m 分辨率（与 demo 一致）：墙 x=4.5，高 z<1.5
         let mut map = GridMapBuilder::new(0.1, [100, 100, 100]).build().unwrap();
         for y in 0..100 {
@@ -1091,19 +1079,12 @@ mod tests {
             acceleration: Vector3::zeros(),
         };
         let goal = Point3::new(9.0, 0.5, 0.5);
-        // 绕墙引导路径（从墙上方跨过）
-        let guide = vec![
-            Vector3::new(0.5, 0.5, 0.5),
-            Vector3::new(4.0, 0.5, 2.0),
-            Vector3::new(5.0, 0.5, 2.0),
-            Vector3::new(8.0, 0.5, 0.5),
-        ];
-        (planner, start, goal, guide)
+        (planner, start, goal)
     }
 
     #[test]
     fn rebound_escapes_wall() {
-        let (mut planner, start, goal, guide) = wall_scenario(PlannerConfig::default());
+        let (mut planner, start, goal) = wall_scenario(PlannerConfig::default());
         let start_endpoint = Endpoint {
             position: start.position.coords,
             velocity: start.velocity,
@@ -1115,17 +1096,15 @@ mod tests {
             acceleration: Vector3::zeros(),
         };
 
-        // 真实初始化流程：MINCO 拟合引导路径（官方 initMJO），
-        // 拐角切角会浅穿入膨胀层——rebound 修正的就是这类浅穿入
+        // 官方多项式冷启动直接穿墙，Rebound 必须生成绕障约束。
         let init_config = crate::init::InitConfig {
             piece_length: planner.config.piece_length,
-            pieces: crate::init::pieces_for_guide(&guide, planner.config.piece_length),
             max_velocity: planner.config.max_velocity,
         };
         let wall_hitting =
-            crate::init::init_from_path(&init_config, start_endpoint, local_goal, &guide).unwrap();
+            crate::init::init_polynomial(&init_config, start_endpoint, local_goal).unwrap();
 
-        // 初始轨迹必须真的浅穿入（测试前提：拐角切角进入膨胀层）
+        // 必须覆盖初值碰撞时的约束生成与优化。
         let scanner = ObstacleScanner::new(&planner.map)
             .with_samples(planner.config.constraint_points_per_piece);
         let traj0 = wall_hitting.solve().unwrap();
@@ -1158,7 +1137,7 @@ mod tests {
 
     #[test]
     fn rebound_with_multitopology_escapes_wall() {
-        // 集成冒烟：开关开 + 同一穿墙场景（初始轨迹必浅穿入 → 碰撞段非空,
+        // 集成冒烟：开关开 + 同一穿墙场景（初始轨迹必穿入 → 碰撞段非空,
         // 多拓扑分支必然启用;候选数 >1 由 multitopo 单元测试覆盖）。
         // 取舍:不构造双墙分叉 e2e 场景——候选数依赖运行时碰撞段分布,
         // 场景构造不稳,此处只验证"开开关后完整规划链路成功且安全"。
@@ -1166,7 +1145,7 @@ mod tests {
             use_multitopology_trajs: true,
             ..PlannerConfig::default()
         };
-        let (mut planner, start, goal, guide) = wall_scenario(config);
+        let (mut planner, start, goal) = wall_scenario(config);
         let start_endpoint = Endpoint {
             position: start.position.coords,
             velocity: start.velocity,
@@ -1180,11 +1159,10 @@ mod tests {
 
         let init_config = crate::init::InitConfig {
             piece_length: planner.config.piece_length,
-            pieces: crate::init::pieces_for_guide(&guide, planner.config.piece_length),
             max_velocity: planner.config.max_velocity,
         };
         let wall_hitting =
-            crate::init::init_from_path(&init_config, start_endpoint, local_goal, &guide).unwrap();
+            crate::init::init_polynomial(&init_config, start_endpoint, local_goal).unwrap();
 
         let result = planner
             .rebound(wall_hitting, start_endpoint, local_goal, &[], false)

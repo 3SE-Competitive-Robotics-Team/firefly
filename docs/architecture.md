@@ -70,11 +70,12 @@ flowchart TD
         subgraph PLAN["firefly-planner"]
             GLOBAL["单任务航点全局引导<br/>多项式选取局部目标，非可执行轨迹"]
             ASTAR["firefly-search<br/>局部 A*（膨胀层 26 邻域 + 连边净距）"]
-            MINCO["firefly-trajectory<br/>MINCO 参数化（段长自适应 + 拐点 waypoint）"]
+            MINCO["firefly-trajectory<br/>MINCO 参数化（多项式等时采样 / 暖启动）"]
             OPT["LBFGS + 双层 clearance<br/>(部署硬 0.4m / 软 0.5m)"]
             ROUGH["roughlyCheck 内循环<br/>碰撞段局部 A* 绕行约束"]
             COST["firefly-cost<br/>平滑/时间/可行/障碍"]
-            GLOBAL --> ASTAR --> MINCO --> OPT
+            GLOBAL --> MINCO --> OPT
+            ASTAR --> ROUGH
             COST --> OPT
             OPT <--> ROUGH
         end
@@ -129,8 +130,9 @@ Firefly/Command（地面站：解锁/模式/起降）
 - **参数归属**：质量/惯量/气动阻尼/旋翼位置/旋向/单电机推力上限/反扭矩系数
   由被控对象经 `Firefly/Airframe` 发布（1Hz 电平，改几何不动飞控）；
   增益/倾角限幅与 `[fsm]` 参数在 `configs/fc.toml`（缺键回落 `firefly-flight` 默认值）。
-- **反馈分工**：内环姿态由飞控自估（陀螺积分 + 加速度计水平修正，航向取
-  `Firefly/Odometry` 的姿态，JPL `q_GtoI` 的换算见 `apps/fc/src/vio.rs` 与其单测）；
+- **反馈分工**：内环姿态取 `Firefly/Odometry` 的完整姿态，并用带测量时间的
+  陀螺缓存预测到当前 IMU 时刻；初始化期才用加速度计校平，机动比力不能当作重力。
+  JPL `q_GtoI` 的换算及有界预测缓存见 `apps/fc/src/vio.rs` 与其单测；
   位置/速度只取里程计；空中里程计失联进入仅 IMU 姿态支持，不保证位置/高度保持。
   地面未就绪或 IMU 失联时输出零推力。
   `PlantState` 仅用于倾斜误差评测，不参与解锁或控制。

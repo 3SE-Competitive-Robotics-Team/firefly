@@ -57,16 +57,19 @@ Bernstein 凸包递归覆盖曲线；测试以独立采样检验输出，另有�
 - 最终多项式检查：即使两端在地图内，曲线中间越界仍拒绝。
 
 连续连边检查是本项目的保守安全扩展，官方只查邻居节点。搜索仍绑定地图索引，
-没有移植官方随起终点中点移动的独立节点池。局部冷启动仍使用通过净距检查的
-直连或 A* 引导；不能把这些行为称作官方实现逐项等价。
+没有移植官方随起终点中点移动的独立节点池；不能把这些行为称作官方实现逐项等价。
+局部冷启动对照 `planner_manager.cpp::computeInitState`：2s 多项式种子、
+`max(2, round(distance/piece_length))` 段、等时重采样及统一初始段时长
+`piece_length/max_velocity`。A* 用于碰撞段的 Rebound 约束生成。
+解析五次多项式、速度公式及位置中心差分同时验证种子采样与边界条件。
 
-真实 RMUC 资产的 22m 初始局部目标与 A* 引导验收：
+真实 RMUC 资产的 22m 初始局部目标、轨迹优化与连续碰撞验收：
 
 ```bash
-cargo test --release -p firefly-planner rmuc_22m_global_horizon_has_a_local_search_guide -- --ignored
+cargo test --release -p firefly-planner rmuc_22m_initial_trajectory_is_executable -- --ignored
 ```
 
-该用例不替代轨迹优化或飞行验收。缺资产必须失败，不能跳过后记作成功。
+该用例不替代飞行验收。缺资产必须失败，不能跳过后记作成功。
 LightGlue 固定查询的采样方式、原始录制及结果见
 [性能测量](performance.md)。性能采样显式启用，不设置机器相关耗时门槛。
 
@@ -119,13 +122,23 @@ uv run --all-packages --extra test python scripts/accept_rmuc.py
 可单独复现。要求独占本仓库闭环进程与图形会话；检测到其他进程时拒绝运行，
 不终止其他任务。命令默认不重建二进制；完整场地准备入口会先 release 构建再调用它。
 
+单程任务可配置 `waypoints = [[9.0, 0.0, 2.0]]` 与 `finish_action = "hold"`：
+到达后在终点持续悬停，再停止仿真。悬停由新鲜估计状态与 FC 模式判定，RRD 中
+真值独立评分 `terminal_hold_accuracy`；不执行或声称通过降落验收。
+`finish_action` 缺省为 `land`，用于返回停机坪的任务。
+
+`--allow-map-rig-translation` 是显式的冻结视觉库复用例外：只允许左目和深度相机
+发生相同的机体内平移，其他几何、内参、相对标定与外观契约必须相同。三维路标
+保留地图坐标；采集时机体位置仍用于候选检索，位置偏移和例外状态写入报告的
+`provenance.visual_map_compatibility`。该开关不修改冻结地图或其生成清单。
+
 10m 去程并返回的四次独立进程验收：
 
 ```bash
 uv run --all-packages --extra test python scripts/accept_rmuc.py --case nominal --config configs/acceptance_10m.toml --repeat 4
 ```
 
-该配置使用地图高度 2.2m、航点 `(-3,0,2.2)` → `(-13,0,2.2)`，每段预算
+该配置使用地图高度 2.2m、航点 `(-3,6,2.2)` → `(-13,0,2.2)`，每段预算
 90s 仿真时间；到达与误差阈值采用相同默认值。未通过估计状态的去程到达判定时不会进入返航。
 各次使用相同噪声种子，不能视为独立随机样本；RRD 分别保存在 `attempt_NN/`。
 单次任务失败仍继续下一次，进程未退出或用户中断则停止。

@@ -162,6 +162,10 @@ def score(case, options):
             goal = interp_linear(np.array([start]), truth[:, 0], truth[:, 1:4])[0]
             return settled_truth(data, stages["failure_hold"]["end_sim_s"], 2., goal, .5, float("inf"))
         check("failure_hold_accuracy", hold_accuracy)
+    if stages.get("terminal_hold", {}).get("status") == "passed":
+        check("terminal_hold_accuracy", lambda: settled_truth(
+            data, stages["terminal_hold"]["end_sim_s"], options.hover_seconds,
+            np.asarray(options.waypoints[-1]), options.goal_tolerance_m, options.goal_speed_mps))
     if case["case"] != "estimator_loss":
         def corrected():
             gt, estimate = data["gt"], data["corrected"]

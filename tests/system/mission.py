@@ -41,16 +41,20 @@ class Options:
     estimator_fallback_wall_s: float = 0.8
     stage_wall_s: float = 90.0
     waypoint_sim_s: float = 25.0
+    # 单程任务可在目标点悬停结束；仅 land 验收返回停机坪后的降落。
+    finish_action: str = "land"
     # 地图系米；飞往台阶上空，再返回起飞点上方。
     waypoints: tuple = ((-11.0, 0.0, 2.0), (-13.0, 0.0, 1.405))
 
     def validate(self):
         for key, value in asdict(self).items():
-            if key not in {"seed", "waypoints"} and (not np.isfinite(value) or value <= 0):
+            if key not in {"seed", "waypoints", "finish_action"} and (not np.isfinite(value) or value <= 0):
                 raise ValueError(f"invalid acceptance threshold: {key}")
         points = np.asarray(self.waypoints)
-        if points.ndim != 2 or points.shape[1] != 3 or len(points) < 2 or not np.isfinite(points).all():
-            raise ValueError("mission requires at least two finite map waypoints")
+        if points.ndim != 2 or points.shape[1] != 3 or len(points) < 1 or not np.isfinite(points).all():
+            raise ValueError("mission requires at least one finite map waypoint")
+        if self.finish_action not in {"land", "hold"}:
+            raise ValueError("finish_action must be land or hold")
 
 
 class MissionFailure(RuntimeError):
@@ -107,10 +111,25 @@ class Mission:
 
     def command(self, *args):
         self.recorder.event(f"command ffctl {' '.join(map(str, args))}", self.t)
-        completed = subprocess.run([str(ROOT / "target/release/ffctl"), *map(str, args)], cwd=ROOT,
-                                   capture_output=True, text=True, timeout=5)
-        if completed.returncode:
-            raise MissionFailure(f"ffctl failed: {completed.stderr[-500:]}")
+        with subprocess.Popen([str(ROOT / "target/release/ffctl"), *map(str, args)], cwd=ROOT,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+            deadline = time.monotonic() + 5.
+            try:
+                while True:
+                    self.pump()
+                    if time.monotonic() >= deadline:
+                        raise MissionFailure("ffctl delivery timed out")
+                    try:
+                        _, stderr = process.communicate(timeout=.01)
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+            finally:
+                if process.poll() is None:
+                    process.send_signal(signal.SIGINT)
+                    process.communicate(timeout=5)
+            if process.returncode:
+                raise MissionFailure(f"ffctl failed: {stderr[-500:]}")
 
     def connect(self):
         iox2.set_log_level(iox2.LogLevel.Error)
@@ -301,6 +320,14 @@ class Mission:
         self.wait(lambda: self.mode == 0, stable=1., sim=20.)
         return {"completion_source": "fc_disarmed", "physical_touchdown": "independently_scored"}
 
+    def terminal_hold(self):
+        goal = np.asarray(self.options.waypoints[-1])
+        self.wait(lambda: self.mode == 3 and self.estimated_near(
+            "corrected", goal, self.options.goal_tolerance_m, self.options.goal_speed_mps),
+            stable=self.options.hover_seconds, sim=15.)
+        return {"goal_map_m": goal.tolist(), "stable_seconds": self.options.hover_seconds,
+                "completion_source": "fresh_corrected_odometry_and_fc_hold"}
+
     def reference_loss(self):
         self.command("fc", "track")
         self.wait(lambda: self.mode == 4, wall=5.)
@@ -370,7 +397,9 @@ class Mission:
         if self.case != "estimator_loss":
             phases.append(("map_alignment", self.map_ready))
         if self.case == "nominal":
-            phases.extend([("tracking", self.tracking), ("landing", self.landing)])
+            phases.extend([("tracking", self.tracking),
+                           ("landing", self.landing) if self.options.finish_action == "land"
+                           else ("terminal_hold", self.terminal_hold)])
         elif self.case == "reference_loss":
             phases.extend([("reference_loss", self.reference_loss), ("failure_hold", self.failure_hold), ("landing", self.landing)])
         else:

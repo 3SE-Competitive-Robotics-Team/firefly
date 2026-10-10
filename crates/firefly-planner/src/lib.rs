@@ -1,7 +1,7 @@
 //! EGO 规划编排（应用层）。
 //!
-//! 组合领域能力：A* 前端（firefly-search）→ MINCO 后端
-//! （firefly-trajectory）→ L-BFGS 优化（firefly-optimize），
+//! 组合领域能力：MINCO 参数化（firefly-trajectory）、碰撞段 A* 引导
+//! （firefly-search）与 L-BFGS 优化（firefly-optimize），
 //! 环境来自 firefly-map。配置参数取自论文 Table S6。
 
 mod collision;

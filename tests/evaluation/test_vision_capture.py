@@ -109,3 +109,28 @@ def test_runtime_compatibility_ignores_capture_selection_but_not_calibration(mon
     capture.verify_map_compatibility(assets | {"selection": {"step": 1}})
     with pytest.raises(ValueError, match="contract"):
         capture.verify_map_compatibility(assets | {"sensor": {"focal": 200}})
+
+
+def test_explicit_rig_translation_exception_preserves_other_contracts(monkeypatch):
+    from copy import deepcopy
+    old = {"schema": 2, "files": {"field": "hash"}, "sensor": {
+        "focal": 100, "left_offset": [0., -.025, 0.], "depth_offset": [0., 0., 0.]}}
+    current = deepcopy(old)
+    for key in ["left_offset", "depth_offset"]:
+        current["sensor"][key][0] = .06
+    monkeypatch.setattr(capture, "capture_assets", lambda: current)
+    with pytest.raises(ValueError, match="contract"):
+        capture.verify_map_compatibility(old)
+    result = capture.verify_map_compatibility(old, allow_rig_translation=True)
+    assert result["rig_translation_body_m"] == pytest.approx([.06, 0., 0.])
+    for changed in ["focal", "depth_offset", "field"]:
+        incompatible = deepcopy(current)
+        if changed == "field":
+            incompatible["files"]["field"] = "different"
+        elif changed == "focal":
+            incompatible["sensor"]["focal"] = 200
+        else:
+            incompatible["sensor"]["depth_offset"][0] = .07
+        monkeypatch.setattr(capture, "capture_assets", lambda: incompatible)
+        with pytest.raises(ValueError, match="contract"):
+            capture.verify_map_compatibility(old, allow_rig_translation=True)

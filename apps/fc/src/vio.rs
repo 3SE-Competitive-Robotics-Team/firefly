@@ -7,7 +7,46 @@
 //!
 //! 这条等价关系由 `conversion_matches_reference` 单测对照移植实现钉死：改约定先改它。
 
-use glam::Quat;
+use std::collections::VecDeque;
+
+use glam::{Quat, Vec3};
+
+/// 带时间戳的机体系陀螺缓存，用于将 VIO 姿态预测到最新 IMU 时刻。
+/// 区间采用右端采样零阶保持；只接受缓存覆盖的时刻，不向外补测量。
+#[derive(Default)]
+pub struct GyroHistory(VecDeque<(f64, Vec3)>);
+
+impl GyroHistory {
+    pub fn push(&mut self, time: f64, gyro: Vec3) {
+        if !time.is_finite() || !gyro.is_finite() || self.0.back().is_some_and(|x| time <= x.0) {
+            return;
+        }
+        self.0.push_back((time, gyro));
+        while self.0.len() > 256 {
+            self.0.pop_front();
+        }
+    }
+
+    pub fn propagate(&self, time: f64, attitude: Quat) -> Option<Quat> {
+        if !time.is_finite() || time < self.0.front()?.0 || time > self.0.back()?.0 {
+            return None;
+        }
+        let mut result = attitude;
+        let mut previous = time;
+        for (&(left, _), &(stamp, gyro)) in self.0.iter().zip(self.0.iter().skip(1)) {
+            if stamp <= time {
+                continue;
+            }
+            let dt = stamp - previous;
+            if stamp - left > super::IMU_STALE_LIMIT.as_secs_f64() + 1e-9 {
+                return None;
+            }
+            result = (result * Quat::from_scaled_axis(gyro * dt as f32)).normalize();
+            previous = stamp;
+        }
+        Some(result)
+    }
+}
 
 /// `OdomMessage` 的 JPL `q_GtoI`（`[x,y,z,w]`）→ 机体→世界 Hamilton 姿态。
 #[must_use]
@@ -22,7 +61,31 @@ mod tests {
     use glam::{Mat3, Quat};
     use nalgebra::Vector4;
 
-    use super::body_to_world_from_odom;
+    use super::{GyroHistory, body_to_world_from_odom};
+
+    #[test]
+    fn delayed_attitude_replays_body_rotation_and_rejects_uncovered_time() {
+        let mut history = GyroHistory::default();
+        for i in 0..=100 {
+            history.push(f64::from(i) * 0.01, glam::Vec3::X * 0.7);
+        }
+        let anchor = Quat::from_rotation_z(1.1) * Quat::from_rotation_y(0.3);
+        let expected = anchor * Quat::from_rotation_x(0.7 * 0.745);
+        let actual = history.propagate(0.255, anchor).unwrap();
+        assert!(actual.abs_diff_eq(expected, 2e-6));
+        // 解析导数 d(Rx(theta)y)/dtheta = [0,-sin(theta),cos(theta)]。
+        let h = 1e-3;
+        let plus = history.propagate(0.255 + h, anchor).unwrap() * glam::Vec3::Y;
+        let minus = history.propagate(0.255 - h, anchor).unwrap() * glam::Vec3::Y;
+        let derivative =
+            anchor * glam::Vec3::new(0., -(0.7_f32 * 0.745).sin(), (0.7_f32 * 0.745).cos()) * -0.7;
+        assert!(((plus - minus) / (2. * h as f32) - derivative).length() < 2e-4);
+        assert!(history.propagate(-0.01, anchor).is_none());
+        assert!(history.propagate(1.01, anchor).is_none());
+        history.push(1.2, glam::Vec3::X);
+        assert!(history.propagate(0.9, anchor).is_none());
+        assert!(history.propagate(1.19, anchor).is_none());
+    }
 
     /// 姿态换算必须与 `firefly-vio-types` 的 JPL 实现一致：
     /// `R_h(q) == quat_2_rot(q)ᵀ == R_ItoG`（机体→世界）。

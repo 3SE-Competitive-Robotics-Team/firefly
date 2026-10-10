@@ -15,8 +15,8 @@
 //! 模式与安全层是 [`FlightFsm`]：它输出"本 tick 该飞的参考 + 电机是否使能"，
 //! 本进程只负责把估计状态与健康电平喂进去、把输出接给位置模式。
 //!
-//! 反馈来源分工：**内环姿态由飞控自估**（陀螺积分 + 加速度计水平修正，航向取 VIO，
-//! 上电用加计定滚转/俯仰）；位置/速度来自里程计。缺少有效 IMU、初始化未完成
+//! 反馈来源分工：内环姿态由 VIO 完整姿态和时间对齐的陀螺预测得到，
+//! 上电用加计定滚转/俯仰；位置/速度来自里程计。缺少有效 IMU、初始化未完成
 //! 或地面里程计陈旧时发送零推力；空中里程计失联进入仅姿态稳定。真值不参与控制与健康判据。
 //!
 //! 控制节拍使用墙钟，诊断时间取自 IMU。未就绪时持续发零推力，使被控对象能产生初始化测量。
@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 use fastrace::prelude::*;
 use firefly_flight::{
     Airframe, AttitudeEstimator, Command, ControlParams, Event, FlightFsm, FsmParams, Health,
-    PositionSetpoint, QuadParams, QuadState, attitude_support, position_mode, yaw_of,
+    PositionSetpoint, QuadParams, QuadState, attitude_support, position_mode,
 };
 use firefly_pubsub::command::{COMMAND_TOPIC, CommandMessage, kind as command_kind};
 use firefly_pubsub::control::{ControlMessage, ControlPublisher};
@@ -100,7 +100,7 @@ struct Estimate {
     position: Vec3,
     /// 估计速度（m/s）。
     velocity: Vec3,
-    /// JPL 世界→机体四元数 `[x, y, z, w]`（航向修正用）。
+    /// JPL 世界→机体四元数 `[x, y, z, w]`（完整姿态校正用）。
     quat: [f64; 4],
     /// 最近有效估计到达的墙钟时刻。
     received_at: Instant,
@@ -380,12 +380,13 @@ fn report_event(event: Event) {
 
 /// 控制环的跨 tick 状态。
 struct Controller {
-    /// 姿态估计（内环）。上电用加计定滚转/俯仰，航向由 VIO 慢修。
+    /// 姿态估计（内环）。VIO 校正与测量时钟上的陀螺预测。
     estimator: AttitudeEstimator,
     /// 姿态估计是否已启动。
     attitude_ready: bool,
-    /// 上次航向修正时刻（估算修正 dt）。
-    last_yaw_fix: Option<f64>,
+    /// 上次应用的 VIO 姿态测量时刻。
+    last_attitude_fix: Option<f64>,
+    gyro_history: vio::GyroHistory,
     last_imu_time: Option<f64>,
     /// 飞行状态机（模式与安全层）。
     fsm: FlightFsm,
@@ -402,7 +403,8 @@ impl Controller {
         Self {
             estimator: AttitudeEstimator::default(),
             attitude_ready: false,
-            last_yaw_fix: None,
+            last_attitude_fix: None,
+            gyro_history: vio::GyroHistory::default(),
             last_imu_time: None,
             fsm: FlightFsm::new(fsm),
             last_command_seq: 0,
@@ -517,7 +519,7 @@ impl Controller {
             self.estimator = AttitudeEstimator::from_accel(accel);
             self.attitude_ready = true;
             log::info!(
-                "姿态估计启动：加计定滚转/俯仰（{:.1}°），航向等 VIO 修正",
+                "姿态估计启动：加计定滚转/俯仰（{:.1}°），等待 VIO 完整姿态",
                 (self.estimator.attitude() * Vec3::Z)
                     .z
                     .clamp(-1.0, 1.0)
@@ -535,16 +537,14 @@ impl Controller {
         if let Some(est) = inputs
             .estimate
             .filter(|e| e.initialized && e.received_at.elapsed() <= ODOM_STALE_LIMIT)
+            && self.last_attitude_fix.is_none_or(|t| est.timestamp > t)
+            && inputs.imu_time - est.timestamp <= ODOM_STALE_LIMIT.as_secs_f64()
+            && let Some(attitude) = self
+                .gyro_history
+                .propagate(est.timestamp, vio::body_to_world_from_odom(est.quat))
         {
-            if self.last_yaw_fix.is_none() {
-                self.estimator.reset(vio::body_to_world_from_odom(est.quat));
-                self.last_yaw_fix = Some(est.timestamp);
-            } else if let Some(previous) = self.last_yaw_fix.filter(|t| est.timestamp > *t) {
-                let yaw_src = yaw_of(vio::body_to_world_from_odom(est.quat));
-                self.estimator
-                    .correct_yaw(yaw_src, (est.timestamp - previous).min(0.5) as f32);
-                self.last_yaw_fix = Some(est.timestamp);
-            }
+            self.estimator.reset(attitude);
+            self.last_attitude_fix = Some(est.timestamp);
         }
         (self.estimator.attitude(), gyro)
     }
@@ -558,9 +558,14 @@ impl Controller {
             if timestamp <= previous {
                 return;
             }
-            self.estimator
-                .update(gyro, accel, (timestamp - previous) as f32);
+            let dt = (timestamp - previous) as f32;
+            self.estimator.predict(gyro, dt);
+            // 飞行比力包含平移加速度；仅在尚无 VIO 姿态的初始化期用加计校平。
+            if self.last_attitude_fix.is_none() {
+                self.estimator.correct_level(accel, dt);
+            }
         }
+        self.gyro_history.push(timestamp, gyro);
         self.last_imu_time = Some(timestamp);
     }
 
@@ -730,8 +735,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stats.max_late.as_secs_f64() * 1e3,
                 stats.saturated as f64 / stats.published.max(1) as f64 * 100.0,
                 stats.imu as f64 / window.as_secs_f64(),
-                if controller.attitude_ready {
-                    "自估"
+                if controller.last_attitude_fix.is_some() {
+                    "VIO + 陀螺预测"
+                } else if controller.attitude_ready {
+                    "IMU 初始化"
                 } else {
                     "等待 IMU"
                 },
@@ -765,6 +772,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maneuver_specific_force_cannot_level_valid_vio_attitude() {
+        let mut controller = Controller::new(FsmParams::default());
+        let mut inputs = sensor_inputs();
+        let attitude = Quat::from_rotation_y(0.35);
+        for i in 0..=100 {
+            let time = f64::from(i) * 0.01;
+            inputs.imu_time = time;
+            // 倾斜定姿态加速时，推力比力仍沿机体 Z；其范数位于准静态门内。
+            inputs.imu = Some((
+                Vec3::ZERO,
+                Vec3::Z * firefly_flight::G / 0.35_f32.cos(),
+                Instant::now(),
+            ));
+            if i % 10 == 0 {
+                let estimate = inputs.estimate.as_mut().unwrap();
+                estimate.timestamp = time;
+                estimate.received_at = Instant::now();
+                estimate.quat = attitude.to_array().map(f64::from);
+            }
+            let (actual, _) = controller.attitude_and_rates(&inputs, 0.001);
+            assert!(actual.abs_diff_eq(attitude, 1e-5));
+        }
+    }
 
     #[test]
     fn imu_integrates_measurement_time_once_even_when_control_ticks_repeat() {

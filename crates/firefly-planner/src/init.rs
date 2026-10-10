@@ -1,91 +1,42 @@
-//! 前端初始化：A* 引导路径 → MINCO 参数 {q, T} 与边界条件。
+//! EGO 多项式冷启动、随机种子与连续轨迹暖启动。
 
 use firefly_error::Result;
-use firefly_map::GridMap;
-use firefly_search::Astar;
 use firefly_trajectory::{Endpoint, Minco, MincoBuilder, SolverOrder, Trajectory};
 use nalgebra::{Point3, Vector3};
 
+/// 官方 `computeInitState` case 1：2s 单段多项式种子，按空间段数等时重采样。
+///
+/// # Errors
+/// 段长或速度无效，或 MINCO 边界系统不可解。
+pub fn init_polynomial(config: &InitConfig, start: Endpoint, end: Endpoint) -> Result<Minco> {
+    if !config.piece_length.is_finite()
+        || config.piece_length <= 0.0
+        || !config.max_velocity.is_finite()
+        || config.max_velocity <= 0.0
+    {
+        return Err(firefly_error::Error::new(
+            firefly_error::ErrorKind::InvalidArgument,
+            "invalid polynomial initialization limits",
+        ));
+    }
+    let seed = MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
+        .build(&[], &[2.0])?
+        .solve()?;
+    let pieces =
+        (((end.position - start.position).norm() / config.piece_length).round() as usize).max(2);
+    let points: Vec<_> = (1..pieces)
+        .map(|i| Point3::from(seed.eval(2.0 * i as f64 / pieces as f64).position))
+        .collect();
+    MincoBuilder::new(SolverOrder::MinimumJerk, start, end).build(
+        &points,
+        &vec![config.piece_length / config.max_velocity; pieces],
+    )
+}
+
 pub struct InitConfig {
-    pub pieces: usize,
     pub max_velocity: f64,
     /// 每段路径长度（米，官方 `polyTraj_piece_length`；暖启动段数按它计算）。
     pub piece_length: f64,
-}
-
-/// 段数由引导路径拐点数决定（官方 initMJO 以拐点为 waypoint），
-/// 长度兜底防止过疏，限制 [5, 24]。
-#[must_use]
-pub fn pieces_for_guide(guide: &[Vector3<f64>], piece_length: f64) -> usize {
-    let len: f64 = guide.windows(2).map(|w| (w[1] - w[0]).norm()).sum();
-    let by_len = ((len / piece_length.max(1e-3)).ceil() as usize).min(24);
-    let corners = corner_indices(guide).len();
-    (corners + 1).clamp(5, 24).max(by_len).min(24)
-}
-
-/// 引导路径拐点索引（方向变化 > ~8°）。
-fn corner_indices(path: &[Vector3<f64>]) -> Vec<usize> {
-    (1..path.len() - 1)
-        .filter(|&i| {
-            (path[i] - path[i - 1])
-                .normalize()
-                .dot(&(path[i + 1] - path[i]).normalize())
-                < 0.99
-        })
-        .collect()
-}
-
-/// # Errors
-///
-/// `NotFound`/`OutOfRange`/`Convergence`：A* 搜索失败（目标不可达等）。
-pub fn search_guide(
-    astar: &mut Astar,
-    map: &GridMap,
-    start: Vector3<f64>,
-    goal: Vector3<f64>,
-) -> Result<Vec<Vector3<f64>>> {
-    // 可直接连接时用精确端点，避免体素中心偏移给直线初值引入横向运动。
-    if firefly_search::segment_is_clear(map, start, goal) {
-        return Ok(vec![start, goal]);
-    }
-    let path = astar.search(map, start, goal)?;
-    Ok(path.points().to_vec())
-}
-
-/// 从引导路径生成 MINCO 初始解。
-/// # Errors
-///
-/// `InvalidArgument`：引导路径过短；`Convergence`：MINCO 系统奇异。
-pub fn init_from_path(
-    config: &InitConfig,
-    start: Endpoint,
-    end: Endpoint,
-    guide: &[Vector3<f64>],
-) -> Result<Minco> {
-    if guide.len() < 2 {
-        // 近终点 / 退化引导（A* 到很近目标路径退化为 ≤1 点）：不报错，退化为
-        // start→goal 的单段直飞 MINCO。否则 demo 在终点外一小段反复
-        // "guide path too short" → 悬停卡死无法抵达（>ARRIVE_DIST 完成不了）。
-        let dist = (end.position - start.position).norm();
-        let t = (dist / config.max_velocity).max(1e-3);
-        return MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
-            .build(&[], &[t])
-            .map_err(|e| e.with_operation("planner::init:degenerate"));
-    }
-    let pieces = config.pieces;
-    let waypoints = sample_waypoints(guide, pieces - 1);
-    // 完整段端点：start → waypoints → goal
-    let mut segments = Vec::with_capacity(pieces);
-    let mut prev = start.position;
-    for q in &waypoints {
-        segments.push((q.coords - prev).norm());
-        prev = q.coords;
-    }
-    segments.push((end.position - prev).norm());
-    let durations = allocate_time(&segments, config.max_velocity);
-    MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
-        .build(&waypoints, &durations)
-        .map_err(|e| e.with_operation("planner::init"))
 }
 
 /// 暖启动初始解（官方 `computeInitState` case 2，planner_manager.cpp:255-320）：
@@ -214,67 +165,62 @@ pub fn init_random(
         .map_err(|e| e.with_operation("planner::init:random"))
 }
 
-/// 取 count 个中间 waypoint（不含两端）：拐点优先（官方 initMJO），
-/// 拐点不足时按弧长均匀补充。
-fn sample_waypoints(path: &[Vector3<f64>], count: usize) -> Vec<Point3<f64>> {
-    let corners = corner_indices(path);
-    if corners.len() >= count {
-        return (0..count)
-            .map(|k| Point3::from(path[corners[k * corners.len() / count]]))
-            .collect();
-    }
-    // 拐点全部 + 均匀补充（按弧长插值）
-    let mut result: Vec<Point3<f64>> = corners.iter().map(|&i| Point3::from(path[i])).collect();
-    let arcs = arc_lengths(path);
-    let total = *arcs.last().unwrap_or(&0.0);
-    let need = count - result.len();
-    let mut seg = 0usize;
-    for k in 1..=need {
-        let target = total * k as f64 / (need + 1) as f64;
-        while seg + 1 < arcs.len() && arcs[seg + 1] < target {
-            seg += 1;
-        }
-        let seg_len = arcs[seg + 1] - arcs[seg];
-        let alpha = (target - arcs[seg]) / seg_len;
-        result.push(Point3::from(
-            path[seg] + alpha * (path[seg + 1] - path[seg]),
-        ));
-    }
-    result
-}
-
-/// 路径累计弧长。
-fn arc_lengths(path: &[Vector3<f64>]) -> Vec<f64> {
-    let mut arcs = Vec::with_capacity(path.len());
-    let mut acc = 0.0;
-    arcs.push(0.0);
-    for w in path.windows(2) {
-        acc += (w[1] - w[0]).norm();
-        arcs.push(acc);
-    }
-    arcs
-}
-
-/// `按段长分配时间：T_i` ∝ 段长，总时长 = `2×路径长/v_max`。
-/// 系数 2.0：最小 jerk 静止到静止轨迹峰值速度 ≈ 1.875×平均速度，
-/// 保证初始轨迹可行（否则可行性惩罚从初始就爆炸，优化无法收敛）。
-fn allocate_time(segments: &[f64], max_velocity: f64) -> Vec<f64> {
-    let total: f64 = segments.iter().sum();
-    let budget = 2.0 * total / max_velocity.max(1e-3);
-    segments
-        .iter()
-        .map(|l| l / total.max(1e-9) * budget)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn polynomial_seed_matches_analytic_quintic_and_uniform_times() {
+        let config = InitConfig {
+            max_velocity: 1.5,
+            piece_length: 1.5,
+        };
+        let start = Endpoint {
+            position: Vector3::new(0., 0., 1.),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let end = Endpoint {
+            position: Vector3::new(6., 0., 1.),
+            ..start
+        };
+        let m = init_polynomial(&config, start, end).unwrap();
+        assert_eq!(m.pieces(), 4);
+        for (i, p) in m.waypoints().enumerate() {
+            let u = (i + 1) as f64 / 4.;
+            let expected = 6. * (10. * u.powi(3) - 15. * u.powi(4) + 6. * u.powi(5));
+            assert!((p.x - expected).abs() < 1e-10);
+        }
+        for i in 0..4 {
+            assert!((m.piece_duration(i) - 1.).abs() < 1e-12);
+        }
+        let trajectory = m.solve().unwrap();
+        for i in 1..100 {
+            let t = 4. * f64::from(i) / 100.;
+            let u = t / 4.;
+            let expected_v = 1.5 * (30. * u.powi(2) - 60. * u.powi(3) + 30. * u.powi(4));
+            assert!((trajectory.eval(t).velocity.x - expected_v).abs() < 1e-9);
+            let dt = 1e-4;
+            let numeric =
+                (trajectory.eval(t + dt).position - trajectory.eval(t - dt).position) / (2. * dt);
+            assert!((numeric - trajectory.eval(t).velocity).norm() < 1e-7);
+        }
+        let short = init_polynomial(
+            &config,
+            start,
+            Endpoint {
+                position: start.position + Vector3::x() * 0.1,
+                ..start
+            },
+        )
+        .unwrap();
+        assert_eq!(short.pieces(), 2);
+        assert!((short.solve().unwrap().eval(short.duration()).position.x - 0.1).abs() < 1e-10);
+    }
+
+    #[test]
     fn random_init_matches_endpoints_and_mid() {
         let config = InitConfig {
-            pieces: 0,
             max_velocity: 1.5,
             piece_length: 1.5,
         };
@@ -311,59 +257,6 @@ mod tests {
     }
 
     #[test]
-    fn degenerate_near_goal_builds_trivial_minco() {
-        // 近终点：A* 引导路径退化（≤1 点）时产出单段直飞 MINCO，不报错
-        let config = InitConfig {
-            pieces: 1,
-            max_velocity: 2.0,
-            piece_length: 1.5,
-        };
-        let start = Endpoint {
-            position: Vector3::new(8.0, 4.0, 1.0),
-            velocity: Vector3::zeros(),
-            acceleration: Vector3::zeros(),
-        };
-        let goal = Point3::new(8.6, 4.0, 1.0);
-        let guide = vec![Vector3::new(8.0, 4.0, 1.0)];
-        let m = init_from_path(
-            &config,
-            start,
-            Endpoint {
-                position: goal.coords,
-                velocity: Vector3::zeros(),
-                acceleration: Vector3::zeros(),
-            },
-            &guide,
-        )
-        .expect("近终点退化不应报错");
-        assert_eq!(m.pieces(), 1);
-        assert!(m.duration() > 0.0);
-        let traj = m.solve().expect("退化 MINCO 应可解");
-        let sf = traj.eval(traj.duration());
-        assert!((sf.position - goal.coords).norm() < 1e-6, "终点应是 goal");
-    }
-
-    #[test]
-    fn samples_along_path_evenly() {
-        let path: Vec<Vector3<f64>> = (0..=10)
-            .map(|k| Vector3::new(f64::from(k), 0.0, 0.0))
-            .collect();
-        let pts = sample_waypoints(&path, 3);
-        assert_eq!(pts.len(), 3);
-        assert!((pts[0].x - 2.5).abs() < 1e-9);
-        assert!((pts[1].x - 5.0).abs() < 1e-9);
-        assert!((pts[2].x - 7.5).abs() < 1e-9);
-    }
-
-    #[test]
-    fn time_allocation_is_positive_and_finite() {
-        let t = allocate_time(&[1.0, 2.0, 3.0], 1.0);
-        assert_eq!(t.len(), 3);
-        assert!(t.iter().all(|ti| *ti > 0.0));
-        assert!(t.iter().all(|ti| ti.is_finite()));
-    }
-
-    #[test]
     fn warm_start_splices_prev_and_global_tail_on_official_timeline() {
         // 官方 case2 时间换算：组合时间轴（旧轨迹剩余 remaining 秒 + 全局
         // 轨迹段 glb_seg 秒）均匀取段——早段内点来自旧轨迹、晚段来自
@@ -389,7 +282,6 @@ mod tests {
             .map(|k| Vector3::new(5.0 + f64::from(k), 0.0, 0.0))
             .collect();
         let config = InitConfig {
-            pieces: 0, // 暖启动段数由距离决定，不使用
             max_velocity: 1.5,
             piece_length: 1.0,
         };

@@ -46,10 +46,25 @@ def capture_assets():
     ]}, "sensor": sensor, "selection": selection}
 
 
-def verify_map_compatibility(assets):
+def verify_map_compatibility(assets, *, allow_rig_translation=False):
     current = capture_assets()
-    if assets.get("schema") != 2 or any(assets.get(key) != current[key] for key in ["files", "sensor"]):
+    if assets.get("schema") != 2 or assets.get("files") != current["files"]:
         raise ValueError("visual map geometry/calibration/appearance contract differs from runtime")
+    if assets.get("sensor") == current["sensor"]:
+        return {"status": "exact_match"}
+    previous = assets.get("sensor", {})
+    sensor = current["sensor"]
+    offsets = {"left_offset", "depth_offset"}
+    same_camera = ({k: v for k, v in previous.items() if k not in offsets}
+                   == {k: v for k, v in sensor.items() if k not in offsets})
+    if allow_rig_translation and same_camera and offsets <= previous.keys() and offsets <= sensor.keys():
+        shifts = [np.asarray(sensor[k]) - np.asarray(previous[k]) for k in sorted(offsets)]
+        if all(s.shape == (3,) and np.isfinite(s).all() for s in shifts) and np.allclose(shifts[0], shifts[1], atol=1e-12, rtol=0):
+            # 冻结路标已经在地图系；共同平移不改变左右/深度相对标定。
+            # 库帧机体位置只用于候选检索，保留采集时的位置及其偏移记录。
+            return {"status": "explicit_rig_translation_exception", "rig_translation_body_m": shifts[0].tolist(),
+                    "landmarks": "unchanged_map_coordinates", "candidate_body_position_offset_m": float(np.linalg.norm(shifts[0]))}
+    raise ValueError("visual map geometry/calibration/appearance contract differs from runtime")
 
 
 def reusable_capture(directory, assets):

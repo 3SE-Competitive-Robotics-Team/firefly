@@ -1702,7 +1702,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires generated RMUC2026 assets"]
-    fn rmuc_22m_global_horizon_has_a_local_search_guide() {
+    fn rmuc_22m_initial_trajectory_is_executable() {
         let file = firefly_map::MapFile::from_file(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../apps/planner/maps/rmuc2026.ffmap"),
@@ -1711,7 +1711,7 @@ mod tests {
         let mut map = file.to_grid_map(0.4).unwrap();
         map.set_virtual_wall(firefly_map::VirtualWall {
             ground: -0.1,
-            ceil: 3.,
+            ceil: 2.6,
         });
         let start = Vector3::new(
             -12.747_030_258_178_711,
@@ -1733,17 +1733,23 @@ mod tests {
         let h = manager.horizon(start);
         assert!(manager.map().index_of(h.target).is_some());
         assert!((start.z..=goal.z).contains(&h.target.z));
-        let guide = crate::init::search_guide(
-            &mut firefly_search::Astar::default(),
+        let result = manager
+            .planner
+            .plan_with_init(
+                State {
+                    position: Point3::from(start),
+                    velocity: Vector3::zeros(),
+                    acceleration: Vector3::zeros(),
+                },
+                h.endpoint(),
+                InitSource::ColdStart,
+                h.touch_goal,
+            )
+            .expect("the specified 22m mission must produce an executable initial trajectory");
+        assert!(crate::collision::trajectory_is_free(
             manager.map(),
-            start,
-            h.target,
-        )
-        .expect("the specified 22m mission must have a valid initial local guide");
-        assert!(guide.len() >= 2);
-        for w in guide.windows(2) {
-            assert!(firefly_search::segment_is_clear(manager.map(), w[0], w[1]));
-        }
+            &result.trajectory
+        ));
     }
 
     #[test]

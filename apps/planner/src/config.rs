@@ -45,9 +45,9 @@ mod tests {
         .expect("shipped configs/planner.toml must parse");
         assert!((cfg.config.max_velocity - 1.5).abs() < 1e-12);
         assert!((cfg.config.weight_obstacle - 10_000.0).abs() < 1e-9);
-        // 虚拟地面/天花板（官方 launch advanced_param.xml 实际值）
+        // RMUC 部署边界：规划天花板低于 3m 飞行边界，预留跟踪余量。
         assert_eq!(cfg.config.virtual_ground, Some(-0.1));
-        assert_eq!(cfg.config.virtual_ceiling, Some(3.0));
+        assert_eq!(cfg.config.virtual_ceiling, Some(2.6));
         assert!((cfg.manager.replan_thresh - DEFAULT_REPLAN_THRESH).abs() < 1e-12);
     }
 

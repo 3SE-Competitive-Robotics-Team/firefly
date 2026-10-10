@@ -9,6 +9,7 @@ from html import escape
 from importlib.metadata import version
 import json
 import logging
+import os
 from pathlib import Path
 import platform
 import subprocess
@@ -35,7 +36,7 @@ def digest(path):
 
 def save_report(directory, report):
     categories = {
-        "初始化": ["initialization"], "起飞": ["takeoff"], "悬停": ["hover", "hover_accuracy"],
+        "初始化": ["initialization"], "起飞": ["takeoff"], "悬停": ["hover", "hover_accuracy", "terminal_hold", "terminal_hold_accuracy"],
         "降落": ["landing", "landing_accuracy"],
         "路径跟踪": ["tracking", "tracking_error", "waypoint_accuracy"], "定位误差": ["vio_accuracy", "map_accuracy"],
         "碰撞": ["collision"], "失联安全响应": ["reference_loss", "failure_hold", "failure_hold_accuracy", "estimator_fallback", "degraded_support", "failure_terminal"],
@@ -76,7 +77,7 @@ def save_report(directory, report):
     (directory / "report.html").write_text(document)
 
 
-def provenance():
+def provenance(*, allow_map_rig_translation=False):
     files = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT).decode().split("\0")
     source = {name: digest(ROOT / name) for name in files if name and (ROOT / name).is_file()}
     binaries = {name: digest(ROOT / "target/release" / name) for name in ["vio", "render", "fc", "ffctl", "localization", "planner", "aliked", "lightglue"]}
@@ -94,13 +95,14 @@ def provenance():
     for name, expected in visual["models"]["artifacts"].items():
         if digest(ROOT / "models" / name) != expected:
             raise ValueError(f"visual model content changed: {name}")
-    verify_map_compatibility(visual["assets"])
-    return {"visual_map": visual, "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+    compatibility = verify_map_compatibility(visual["assets"], allow_rig_translation=allow_map_rig_translation)
+    return {"visual_map": visual, "visual_map_compatibility": compatibility, "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
             "git_status": subprocess.check_output(["git", "status", "--short"], cwd=ROOT, text=True),
             "source_sha256": source, "binary_sha256": binaries,
             "configs": {str(p.relative_to(ROOT)): p.read_text() for p in (ROOT / "configs").glob("*.toml")},
             "assets": manifest, "asset_manifest_sha256": digest(manifest_path),
             "platform": platform.platform(), "python": sys.version,
+            "display_environment": {key: os.environ.get(key) for key in ["DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "WGPU_BACKEND"]},
             "dependencies": {name: version(name) for name in ["numpy", "mujoco", "iceoryx2", "rerun-sdk"]}}
 
 
@@ -127,6 +129,8 @@ def main(argv=None):
     parser.add_argument("--case", choices=["all", "nominal", "reference_loss", "estimator_loss"], default="all")
     parser.add_argument("--repeat", type=int, default=1, help="每种任务独立启动次数；全部使用固定配置")
     parser.add_argument("--output-dir", type=Path, help="logs/ 下不存在的报告目录；默认使用唯一运行 ID")
+    parser.add_argument("--allow-map-rig-translation", action="store_true",
+                        help="显式允许冻结地图与当前 rig 的共同安装平移差异；记录差异，仍校验其他标定与资产")
     args = parser.parse_args(argv)
     if not 1 <= args.repeat <= 100:
         parser.error("--repeat must be in 1..100")
@@ -149,7 +153,8 @@ def main(argv=None):
         options.validate()
         report["options"] = asdict(options)
         report["contact_policy"] = CONTACT_POLICY
-        report["provenance"] = provenance()
+        report["provenance"] = (provenance(allow_map_rig_translation=True)
+                                if args.allow_map_rig_translation else provenance())
         cases = ["nominal", "reference_loss", "estimator_loss"] if args.case == "all" else [args.case]
         save_report(directory, report)
         for attempt, name in [(attempt, name) for attempt in range(1, args.repeat + 1) for name in cases]:

@@ -13,6 +13,24 @@ from mission_sim import permitted_pad_contact
 from firefly_mujoco import drone_pad
 
 
+def test_command_keeps_observation_pump_running(tmp_path, monkeypatch):
+    import mission
+    from types import SimpleNamespace
+    binary = tmp_path / "target/release/ffctl"
+    binary.parent.mkdir(parents=True)
+    gate = tmp_path / "observation_received"
+    binary.write_text(f"#!{sys.executable}\nimport pathlib,time\nwhile not pathlib.Path({str(gate)!r}).exists(): time.sleep(.01)\n")
+    binary.chmod(0o755)
+    monkeypatch.setattr(mission, "ROOT", tmp_path)
+    pumps = []
+    def pump():
+        pumps.append(True)
+        gate.touch()
+    subject = SimpleNamespace(recorder=SimpleNamespace(event=lambda *a: None), t=0., pump=pump)
+    mission.Mission.command(subject, "fc", "hold")
+    assert pumps and gate.exists()
+
+
 def poses():
     time = np.arange(0., 3.01, .1)
     rows = np.zeros((len(time), 8))
@@ -65,10 +83,28 @@ def test_contact_exception_only_covers_low_speed_pad_touchdown():
 
 def test_invalid_thresholds_and_missing_mission_are_rejected():
     Options().validate()
+    Options(waypoints=((9., 0., 2.),), finish_action="hold").validate()
     with pytest.raises(ValueError):
         Options(vio_ate_rmse_m=float("nan")).validate()
     with pytest.raises(ValueError):
         Options(waypoints=[]).validate()
+    with pytest.raises(ValueError):
+        Options(finish_action="unknown").validate()
+
+
+def test_terminal_hold_requires_independent_truth_accuracy(monkeypatch):
+    import mission_metrics
+    truth = poses()
+    truth[:, 1:4] = [8.4, 0., 2.]
+    velocity = np.column_stack([truth[:, 0], np.zeros((len(truth), 3))])
+    monkeypatch.setattr(mission_metrics, "read_evidence", lambda path: {
+        "gt": truth, "gt_velocity": velocity})
+    case = {"case": "nominal", "recording": "unused", "stages": {
+        "tracking": {"status": "blocked"},
+        "terminal_hold": {"status": "passed", "end_sim_s": 3.}}}
+    mission_metrics.score(case, Options(waypoints=((9., 0., 2.),), finish_action="hold"))
+    assert case["stages"]["terminal_hold_accuracy"]["status"] == "failed"
+    assert case["stages"]["terminal_hold_accuracy"]["metrics"]["max_position_error_m"] == pytest.approx(.6)
 
 
 def test_preflight_failure_returns_nonzero_and_keeps_report(tmp_path, monkeypatch):
