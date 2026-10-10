@@ -309,7 +309,7 @@ impl App {
         start: [f64; 3],
         goal: Option<[f64; 3]>,
     ) -> Result<Self> {
-        let mut grid = map_file.to_grid_map()?;
+        let mut grid = map_file.to_grid_map(config.obstacle_clearance)?;
         // 心跳超时阈值先取（config 随后移入 Planner）
         let heartbeat_timeout = config.heartbeat_timeout;
         // 虚拟地面/天花板（对照官方 enable_virtual_wall）：任一配置存在即单独生效

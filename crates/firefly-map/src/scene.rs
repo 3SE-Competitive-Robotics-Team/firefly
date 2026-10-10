@@ -153,7 +153,7 @@ mod tests {
         let scene = sample_scene();
         let map = scene.to_map_file().unwrap();
         // box 中心被占据
-        let grid = map.to_grid_map().unwrap();
+        let grid = map.to_grid_map(0.0).unwrap();
         assert!(grid.is_occupied(Vector3::new(2.0, 2.0, 1.0)));
         // 起点不被占据
         assert!(!grid.is_occupied(Vector3::new(0.5, 0.5, 0.5)));
@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn voxel_state_unknown_by_default() {
         let scene = sample_scene();
-        let grid = scene.to_map_file().unwrap().to_grid_map().unwrap();
+        let grid = scene.to_map_file().unwrap().to_grid_map(0.0).unwrap();
         // log-odds 语义：初始占据为 clamp_min，对应 Free（Unknown 保留但不再作为初始/查询结果）
         let idx = grid.index_of(Vector3::new(4.5, 4.5, 0.5)).unwrap();
         assert_eq!(grid.state(idx), VoxelState::Free);

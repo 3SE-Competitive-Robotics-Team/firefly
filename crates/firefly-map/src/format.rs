@@ -135,10 +135,15 @@ impl MapFile {
     /// # Errors
     ///
     /// `InvalidData`：占据体素超出地图范围。
-    pub fn to_grid_map(&self) -> Result<GridMap> {
+    /// 转占据栅格；`obstacles_inflation` 为障碍膨胀半径（米）。
+    ///
+    /// 该半径决定 `is_occupied_inflated` 的判据，A* 搜索、细检与代价阈值必须与它一致，
+    /// 否则会出现「全局搜得到、局部飞不了」的路径（见 `docs/architecture.md` 规划层）。
+    pub fn to_grid_map(&self, obstacles_inflation: f64) -> Result<GridMap> {
         let origin = Vector3::new(self.origin[0], self.origin[1], self.origin[2]);
         let mut map = GridMapBuilder::new(self.resolution, self.dims)
             .with_origin(origin)
+            .with_obstacles_inflation(obstacles_inflation)
             .build()?;
         for p in &self.occupied {
             let idx = map
@@ -486,7 +491,7 @@ MOTION sphere 15 4 1 0.5
         assert_eq!(map.motions.len(), 2);
         assert!(map.motions[0].loop_back);
         assert!(!map.motions[1].loop_back);
-        let grid = map.to_grid_map().unwrap();
+        let grid = map.to_grid_map(0.0).unwrap();
         assert!(grid.is_occupied(Vector3::new(1.2, 0.6, 1.4)));
     }
 
@@ -519,7 +524,7 @@ MOTION sphere 15 4 1 0.5
     #[test]
     fn motion_voxels_in_map() {
         let map: MapFile = SAMPLE.parse().unwrap();
-        let grid = map.to_grid_map().unwrap();
+        let grid = map.to_grid_map(0.0).unwrap();
         let voxels = map.motion_voxels(0.0, &grid);
         assert_ne!(voxels, [] as [[usize; 3]; 0]);
         // 每个体素都在界内

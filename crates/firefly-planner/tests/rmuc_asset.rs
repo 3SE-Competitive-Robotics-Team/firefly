@@ -11,7 +11,7 @@ use nalgebra::{Point3, Vector3};
 fn exported_rmuc_map_supports_pad_departure() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../apps/planner/maps/rmuc2026.ffmap");
-    let map = MapFile::from_file(path).unwrap().to_grid_map().unwrap();
+    let map = MapFile::from_file(path).unwrap().to_grid_map(0.0).unwrap();
     let config = PlannerConfig::default();
     let mut planner = Planner::new(config.clone(), map);
     let start = State {

@@ -10,7 +10,8 @@ pub struct PlannerConfig {
     pub constraint_points_per_piece: usize,
     pub planning_distance: f64,
     pub obstacle_clearance: f64,
-    /// 障碍软净距（官方 v2 `obstacle_clearance_soft`，平滑尾）。
+    /// 舒适带（米）：代价里"离障碍多远才算舒服"的偏好，**不是可行性判据**。
+    /// 它提供把轨迹推离障碍的梯度；过小会让优化器在窄通道里失去"往哪边让"的信息。
     pub obstacle_clearance_soft: f64,
     /// 软层权重（官方 v2 `weight_obstacle_soft`）。
     pub weight_obstacle_soft: f64,

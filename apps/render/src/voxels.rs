@@ -231,7 +231,7 @@ fn load_field(path: &str) -> Option<FieldVoxels> {
             return None;
         }
     };
-    let grid = match file.to_grid_map() {
+    let grid = match file.to_grid_map(0.0) {
         Ok(grid) => grid,
         Err(e) => {
             log::warn!("体素视图：{path} 转占据栅格失败，静态场地不显示：{e}");
