@@ -1,6 +1,7 @@
 //! 地图系里程计输入：校验、墙钟存活检测与深度帧位姿插值。
 //!
-//! 对照 EGO-Planner-v2 的 `have_odom_` 门控和失联后禁用自动恢复的约束。
+//! 对照 EGO-Planner-v2 的 `have_odom_` 门控；状态源由上游估计服务封装。
+//! 不依赖观测算法或地图匹配成功频率。
 //! 失联锁存须重启进程解除，轨迹参考不能充当状态观测。
 
 use std::collections::VecDeque;
@@ -265,107 +266,5 @@ mod tests {
                 .is_none()
         );
         assert!(input.pose_at(1.05).is_none());
-    }
-}
-
-/// 视觉地图质量门控；获得可用状态后，退化或中断锁存停止。
-#[derive(Default)]
-pub struct QualityInput {
-    latest: Option<(firefly_pubsub::odom::LocalizationStatus, Instant)>,
-    ready_once: bool,
-    stopped: bool,
-    /// 累计收到的状态条数（区分「没收到」与「收到但未就绪」）。
-    observed: usize,
-}
-impl QualityInput {
-    pub fn observe(&mut self, status: firefly_pubsub::odom::LocalizationStatus, now: Instant) {
-        if !status.timestamp.is_finite() || status.timestamp < 0. {
-            return;
-        }
-        if self
-            .latest
-            .is_some_and(|(previous, _)| status.timestamp <= previous.timestamp)
-        {
-            return;
-        }
-        if self.latest.is_none() {
-            log::info!(
-                "首个 LocalizationStatus：tracking_ready={} visual_t={:.3} disagreement={:.3}",
-                status.tracking_ready,
-                status.visual_timestamp,
-                status.position_disagreement
-            );
-        }
-        self.observed += 1;
-        self.stopped |= self.ready_once
-            && (!status.tracking_ready
-                || self
-                    .latest
-                    .is_some_and(|(_, received)| now.duration_since(received) >= MAX_AGE));
-        self.ready_once |= status.tracking_ready;
-        self.latest = Some((status, now));
-    }
-    pub fn ready(&mut self, timestamp: f64, now: Instant) -> bool {
-        let current = self.latest.is_some_and(|(s, received)| {
-            s.tracking_ready
-                && now.duration_since(received) < MAX_AGE
-                && (timestamp - s.timestamp).abs() <= 0.2
-        });
-        self.stopped |= self.ready_once && !current;
-        current && !self.stopped
-    }
-    pub fn stopped(&self) -> bool {
-        self.stopped
-    }
-    /// 是否收到过任何状态（诊断用）。
-    #[must_use]
-    pub fn has_received(&self) -> bool {
-        self.observed > 0
-    }
-    /// 最新状态的原始 `tracking_ready` 标志（诊断用）。
-    #[must_use]
-    pub fn latest_tracking_ready(&self) -> bool {
-        self.latest.is_some_and(|(s, _)| s.tracking_ready)
-    }
-}
-
-#[cfg(test)]
-mod quality_tests {
-    use super::*;
-    use firefly_pubsub::odom::LocalizationStatus;
-    #[test]
-    fn degradation_latches_and_duplicates_do_not_refresh() {
-        let now = Instant::now();
-        let status = LocalizationStatus {
-            timestamp: 1.,
-            visual_timestamp: 1.,
-            position_disagreement: 0.1,
-            tracking_ready: true,
-        };
-        let mut gate = QualityInput::default();
-        assert!(!gate.ready(1., now));
-        gate.observe(status, now);
-        assert!(gate.ready(1., now));
-        gate.observe(status, now + Duration::from_millis(400));
-        assert!(!gate.ready(1., now + Duration::from_millis(501)));
-        gate.observe(
-            LocalizationStatus {
-                timestamp: 2.,
-                ..status
-            },
-            now + Duration::from_millis(502),
-        );
-        assert!(!gate.ready(2., now + Duration::from_millis(502)));
-        let mut gate = QualityInput::default();
-        gate.observe(status, now);
-        gate.observe(
-            LocalizationStatus {
-                timestamp: 1.1,
-                tracking_ready: false,
-                ..status
-            },
-            now,
-        );
-        assert!(gate.stopped());
     }
 }

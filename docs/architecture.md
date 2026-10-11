@@ -1,6 +1,6 @@
 # firefly 自主无人机系统架构
 
-状态估计路线：VIO + ALIKED + LightGlue + 回环。离线库图 PnP 产生地图锚点，
+状态估计主干为双目 + IMU 的 VIO；ALIKED、LightGlue 和回环提供可选全局校正。离线库图 PnP 产生地图锚点，
 在线 RGB-D 关键帧匹配产生经过连续确认的回环边，`localization` 通过四自由度图
 统一优化并发布地图里程计。实现与验收范围见 [在线回环](loop_closure.md)。
 
@@ -90,7 +90,7 @@ flowchart TD
 
     MSCKF -->|Odom| TOPIC_ODOM
     VISUAL["aliked / lightglue<br/>库图 PnP + 在线 RGB-D 回环"]
-    LOC["localization<br/>VIO 边 + 地图锚点 + 回环边"]
+    LOC["localization<br/>固定启动对齐 + 连续 VIO<br/>可选地图锚点 / 回环校正"]
     TOPIC_MAP_ODOM["Firefly/CorrectedOdometry"]
     TOPIC_SENS --> VISUAL
     TOPIC_DEPTH --> VISUAL
@@ -109,6 +109,68 @@ flowchart TD
     TOPIC_CTRL -->|订阅·取最新| SIMP
     DRV -.->|实机：同一话题层| FLIGHT
 ```
+
+## 估计、全局校正与规划的边界
+
+VIO 是完整的局部运动估计器：双目约束尺度，IMU 约束重力，输出连续的位姿、速度；
+初始位置和航向是局部坐标规范，不是场地绝对坐标。地图定位回答的是当前估计与已知
+场地的关系，回环则约束同一会话的历史漂移。没有近期地图匹配，并不等于 VIO 失效。
+
+- `vio` 负责 IMU/双目前端、滤波与高频预测。`Odometry` 始终在 odom 系。
+- `localization` 是地图系状态服务，统一组合 `T_map_body = T_map_odom T_odom_body`。
+  固定启动先验建立初始关系；位姿图或互斥 ESKF 接收可选的低频约束。
+  无新约束时保持变换并使用新鲜 VIO，不冻结机体位置，也不重复融合同一观测。
+- `planner` 只消费该服务的 `CorrectedOdometry`。要求坐标对齐、状态有效和新鲜，
+  检查深度覆盖与碰撞；不订阅视觉观测诊断，不识别 ALIKED、LightGlue 或纯 VIO 模式。
+- `fc` 的位置反馈、Hold 锚点保持在连续 odom 系；地图参考通过同刻配对的坐标变换
+  转入 odom。全局校正不会替换控制反馈源。
+- 测试/任务入口决定启动哪些进程，并独立评判地图精度、库图证据和真实到点。
+  缺少观测不能被记作视觉链路通过；有观测也不能证明真实位置正确。
+
+本实现支持固定场地、固定启动先验和同一 VIO 会话。planner 在 map 系维护静态地图，
+因此保留 localization 这一坐标适配服务；不能把 raw odom 直接标成 map，或在漂移后
+自动切换反馈坐标。任意位置重定位、跨会话恢复和地图跳变下的局部地图重建不在此契约内。
+`is_initialized`、有限数值和新鲜度是基本状态契约，尚不是有协方差界的跟踪健康证明；
+VIO 漂移、短时视觉退化与估计不确定性仍需单独验证，不能用库图观测年龄代替。
+
+### 参考实现核对
+
+| 项目 / 固定版本 | 源码位置 | 可迁移的职责边界 |
+|---|---|---|
+| OpenVINS `69488123ed9362dd44b6f28e7f4680abbff1442b` | `ov_msckf/src/ros/ROS1Visualizer.cpp:245`、`:840` | 初始化后从 VIO/IMU 预测发布里程计；回环信息是另外的输出，不是发布里程计的前提 |
+| VINS-Fusion `be55a937a57436548ddfb1bd324bc1e9a9e828e0` | `vins_estimator/src/utility/visualization.cpp:53`；`loop_fusion/src/pose_graph_node.cpp:192` | 本地里程计持续发布；回环节点用保存的对齐与漂移变换校正每条新里程计，不等待下一次回环 |
+| EGO-Planner-v2 `9d85475ea7b9bf5c112cf7c3c3d0d3f9e96d9010` | `swarm-playground/main_ws/src/planner/plan_manage/src/ego_replan_fsm.cpp:46`、`:632` | 订阅 `odom_world`，消费位置和速度；规划就绪不以外部视觉匹配成功为条件 |
+| ORB-SLAM3 `4452a3c4ab75b1cde34e5505a36ec3f9edcdc4c4` | `src/System.cc:213`；`src/Tracking.cc:1940`、`:2120` | 跟踪、局部建图、回环分工；跟踪状态由运动/局部地图跟踪决定，回环成功与否不是跟踪心跳 |
+
+这些工程并不共享完全相同的融合器或恢复策略。本项目的 500ms 状态失联锁存、固定
+启动点和独立真值验收是部署约束，不声称为参考项目的逐项移植。
+
+### 架构纠偏记录
+
+将“3s 内有库图观测、融合后分歧小于 0.5m”命名为 `tracking_ready` 并交给 planner
+锁存，混淆了局部里程计可用性、全局观测新鲜度和任务绝对精度。后果是低频校正器的
+推理长尾也能切断规划，而融合服务仍在输出有效状态；`--vio-only` 旁路又让同一规划器
+有两套准入逻辑。融合后残差小也不能作为独立的绝对误差证明。
+
+planner 的来源门控和定位/规划进程的纯 VIO 特例已删除。库图质量仅保留为 RRD 诊断，
+`accept_rmuc.py --vio-only` 仅改变进程部署；完整链路的库图证据在评分阶段独立检查。
+这一纠偏减少模块耦合，允许低频或间歇校正，不自动改善 VIO 精度，也不豁免飞行验收。
+
+验证：全仓 Rust 测试、16 项任务评分测试、相关 Clippy、Rust/Python IPC 契约通过；
+屏蔽 PlantState 的传感器启动检查通过，证据为
+`logs/vio_sensor_startup_20261011T080855Z.rrd`。默认定位后端的回归覆盖无库图观测、
+观测超期、里程计断流与估计器重置；部署测试确认两种模式启动同一个 planner 入口。
+
+22m 真实进程闭环仿真使用完全相同的 `acceptance_22m.toml` 与数值阈值：
+
+| 部署 | 原始证据目录（各含 RRD 和报告） | 结果 |
+|---|---|---|
+| 完整视觉链路 | `logs/acceptance/architecture_visual_20261011T080938Z/` | 7 次地图观测，地图 RMSE 0.115m；规划多次达到重启上限并急停，去程 25s 超时，任务失败 |
+| 纯 VIO | `logs/acceptance/architecture_vio_20261011T080938Z/` | 默认接口完成估计往返；真实到点误差最大 1.51m / 1.87m，降落非预期接触，任务失败 |
+
+这些结果验证了进程依赖的解除，不证明飞行性能通过；两组运行全部通过 SIGINT 退出。
+主机采样证据为 `logs/architecture_host_20261011T080938Z.rrd`。
+
 
 ## 控制链（`firefly-flight` + `apps/fc`）
 

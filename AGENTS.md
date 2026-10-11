@@ -144,9 +144,10 @@ cargo run --release -p fc
 sim 发布 IMU 100Hz、仿真位姿 10Hz、PlantState 200Hz、Airframe 1Hz；
 render 提供双目与深度。VIO 视觉更新 10Hz、预测里程计 100Hz；飞控 1kHz。
 planner 默认读取 `apps/planner/maps/rmuc2026.ffmap`，缺文件报错。
-地图系算法必须使用经过固定启动先验或独立定位对齐的状态。planner 订阅 CorrectedOdometry 和 LocalizationStatus；
-未就绪不发布参考，500ms 墙钟失联、无效状态或定位质量退化触发停止发布并锁存，须重启恢复。
-定位质量默认要求独立视觉测量年龄 ≤3s、融合后同刻位置分歧 ≤0.5m；参数在 localization 的 quality 配置。
+地图系算法必须使用经过固定启动先验或地图定位对齐的状态。planner 只消费 CorrectedOdometry，
+不依赖视觉观测来源、库图匹配频率或神经网络进程；未就绪不发布参考，500ms 墙钟失联或无效状态
+触发停止发布并锁存，须重启恢复。localization 统一提供地图系状态，低频地图观测与回环是可选校正。
+localization 的 quality 参数仅用于库图观测诊断，不作为 planner 准入条件；地图任务精度由独立验收评分。
 FFMap 场地占据是不可被深度空闲射线、衰减或动态移除擦除的先验。
 重复/乱序样本不得续期，禁止用参考轨迹代替状态或自动切回局部 VIO。
 

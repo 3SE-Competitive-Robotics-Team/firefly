@@ -62,10 +62,11 @@ class MissionFailure(RuntimeError):
 
 
 class Mission:
-    def __init__(self, directory, case, options):
+    def __init__(self, directory, case, options, *, vio_only=False):
         self.options, self.case = options, case
+        self.vio_only = vio_only
         self.recording = directory / f"{case}.rrd"
-        self.result = {"case": case, "status": "running", "recording": str(self.recording), "stages": {}}
+        self.result = {"case": case, "status": "running", "recording": str(self.recording), "stages": {}, "localization_mode": "vio_only" if vio_only else "visual"}
         self.processes = {}
         self.diagnostics = queue.Queue(maxsize=8192)
         self.diagnostic_drops = 0
@@ -293,13 +294,15 @@ class Mission:
         return {"stable_seconds": self.options.hover_seconds}
 
     def map_ready(self):
-        self.start("aliked", [str(ROOT / "target/release/aliked")])
-        self.start("lightglue", [str(ROOT / "target/release/lightglue"), "--map", str(ROOT / "apps/planner/maps/rmuc2026.ffvmap")])
+        if not self.vio_only:
+            self.start("aliked", [str(ROOT / "target/release/aliked")])
+            self.start("lightglue", [str(ROOT / "target/release/lightglue"), "--map", str(ROOT / "apps/planner/maps/rmuc2026.ffvmap")])
         self.wait(lambda: "corrected" in self.latest and self.latest["corrected"][4], wall=30.)
-        self.wait(lambda: self.visual_updates >= 2, wall=60.)
         self.start("planner", [str(ROOT / "target/release/planner"), "--goal", *map(str, self.options.waypoints[0])])
         self.wait(lambda: "reference" in self.latest, wall=30.)
-        return {"source": "VIO + ALIKED-N16 + LightGlue + PnP + localization", "accepted_visual_updates": self.visual_updates, "online_loop_closure": "diagnostics_only"}
+        return {"source": "VIO + fixed startup prior; optional map/loop corrections",
+                "visual_frontend": "disabled" if self.vio_only else "enabled",
+                "accepted_visual_updates_at_start": self.visual_updates}
 
     def tracking(self):
         self.command("fc", "track")

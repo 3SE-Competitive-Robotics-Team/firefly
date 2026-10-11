@@ -14,9 +14,8 @@ use firefly_localization::quality::{Quality, QualityOptions};
 use firefly_observability::init as init_observability;
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::odom::CORRECTED_ODOM_TOPIC;
-use firefly_pubsub::odom::{LOCALIZATION_STATUS_TOPIC, LocalizationStatus, OdomMessage};
+use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::publish::CorrectedOdomPublisher;
-use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::{OdomSubscriber, Subscriber};
 use firefly_pubsub::vision::{LOOP_TOPIC, LoopConstraint, POSE_OBS_TOPIC, PoseObservation};
 use firefly_pubsub::viz::{VizMessage, VizPublisher, kind};
@@ -140,14 +139,14 @@ fn gate_diag(gate: &RelocGate, max_innovation_trans: f64) -> Option<[f64; 4]> {
 }
 
 struct App {
+    backend: Backend,
     fusion: FusionFilter,
     quality: Quality,
     quality_options: QualityOptions,
-    quality_pub: Publisher<LocalizationStatus>,
     graph: Option<PoseGraph>,
     graph_options: Option<GraphOptions>,
-    loops: Subscriber<LoopConstraint>,
-    keyframes: Subscriber<OdomMessage>,
+    loops: Option<Subscriber<LoopConstraint>>,
+    keyframes: Option<Subscriber<OdomMessage>>,
     origin: firefly_localization::config::InitialAlignment,
     alignment_ready: bool,
     estimator_reset: bool,
@@ -195,8 +194,13 @@ impl App {
         let node = create_node()?;
         let log_ipc = firefly_observability::init_ipc(&node, "localization");
         let odom_sub = Some(OdomSubscriber::with_topic(&node, odom_topic)?);
-        let loops = Subscriber::with_topic(&node, LOOP_TOPIC)?;
-        let keyframes = Subscriber::with_topic(&node, firefly_pubsub::vision::KEYFRAME_TOPIC)?;
+        let graph_inputs = cfg.backend == Backend::PoseGraph;
+        let loops = graph_inputs
+            .then(|| Subscriber::with_topic(&node, LOOP_TOPIC))
+            .transpose()?;
+        let keyframes = graph_inputs
+            .then(|| Subscriber::with_topic(&node, firefly_pubsub::vision::KEYFRAME_TOPIC))
+            .transpose()?;
         let visual_obs = Some(Subscriber::with_topic(&node, POSE_OBS_TOPIC)?);
         let corrected_pub = Some(CorrectedOdomPublisher::new(&node)?);
         let viz_pub = match VizPublisher::new(&node) {
@@ -212,12 +216,11 @@ impl App {
                 None
             }
         };
-        let quality_pub = Publisher::with_topic(&node, LOCALIZATION_STATUS_TOPIC)?;
         Ok(Self {
+            backend: cfg.backend,
             fusion,
             quality: Quality::default(),
             quality_options: cfg.quality,
-            quality_pub,
             graph: None,
             graph_options: (cfg.backend == Backend::PoseGraph).then_some(cfg.graph),
             loops,
@@ -292,7 +295,7 @@ impl App {
                 self.t_sim = self.t_sim.max(m.timestamp);
                 self.last_odom_recv = std::time::Instant::now();
                 let t_vio = pose.matrix();
-                if self.graph.is_none() {
+                if self.backend == Backend::Eskf {
                     self.fusion.predict(&t_vio);
                 }
                 self.latest_odom = Some(m);
@@ -325,55 +328,60 @@ impl App {
     }
 
     fn poll_loop_constraints(&mut self) -> Result<()> {
-        while let Some(sample) = self.keyframes.receive()? {
-            if self.estimator_reset
-                || !sample.is_initialized
-                || self.latest_odom.is_none_or(|m| {
-                    sample.timestamp > m.timestamp
-                        || m.timestamp - sample.timestamp > PENDING_VISUAL_TIMEOUT
-                })
-            {
-                continue;
-            }
-            if let Some(graph) = &mut self.graph {
-                let result = sample.body_pose(FrameId::ODOM).and_then(|pose| {
-                    graph.insert(
-                        sample.timestamp,
-                        graph.raw_pose(sample.timestamp).unwrap_or(pose),
-                    )
-                });
-                if let Err(e) = result {
-                    log::warn!("在线关键帧拒收: {e}");
+        if let Some(keyframes) = &self.keyframes {
+            while let Some(sample) = keyframes.receive()? {
+                if self.estimator_reset
+                    || !sample.is_initialized
+                    || self.latest_odom.is_none_or(|m| {
+                        sample.timestamp > m.timestamp
+                            || m.timestamp - sample.timestamp > PENDING_VISUAL_TIMEOUT
+                    })
+                {
+                    continue;
+                }
+                if let Some(graph) = &mut self.graph {
+                    let result = sample.body_pose(FrameId::ODOM).and_then(|pose| {
+                        graph.insert(
+                            sample.timestamp,
+                            graph.raw_pose(sample.timestamp).unwrap_or(pose),
+                        )
+                    });
+                    if let Err(e) = result {
+                        log::warn!("在线关键帧拒收: {e}");
+                    }
                 }
             }
         }
-        while let Some(sample) = self.loops.receive()? {
-            let edge = *sample;
-            if self.estimator_reset
-                || self.latest_odom.is_none_or(|m| {
-                    edge.to.timestamp > m.timestamp
-                        || m.timestamp - edge.to.timestamp > PENDING_VISUAL_TIMEOUT
-                })
-            {
-                continue;
-            }
-            if let Some(graph) = &mut self.graph {
-                let result = graph.observe_loop(&edge);
-                if let Some(viz) = &self.viz_pub {
-                    let mut msg = VizMessage::base(kind::SCALARS, self.t_sim, "corr/debug/loops");
-                    msg.scalars[0] = graph.loop_count() as f64;
-                    msg.scalars[1] = graph.node_count() as f64;
-                    msg.scalars[2] = f64::from(result.is_ok());
-                    msg.scalar_count = 3;
-                    let _ = viz.publish(msg);
+        if let Some(loops) = &self.loops {
+            while let Some(sample) = loops.receive()? {
+                let edge = *sample;
+                if self.estimator_reset
+                    || self.latest_odom.is_none_or(|m| {
+                        edge.to.timestamp > m.timestamp
+                            || m.timestamp - edge.to.timestamp > PENDING_VISUAL_TIMEOUT
+                    })
+                {
+                    continue;
                 }
-                match result {
-                    Ok(()) => log::info!(
-                        "在线回环接受 {:.3} → {:.3}",
-                        edge.from.timestamp,
-                        edge.to.timestamp
-                    ),
-                    Err(e) => log::warn!("在线回环拒收: {e}"),
+                if let Some(graph) = &mut self.graph {
+                    let result = graph.observe_loop(&edge);
+                    if let Some(viz) = &self.viz_pub {
+                        let mut msg =
+                            VizMessage::base(kind::SCALARS, self.t_sim, "corr/debug/loops");
+                        msg.scalars[0] = graph.loop_count() as f64;
+                        msg.scalars[1] = graph.node_count() as f64;
+                        msg.scalars[2] = f64::from(result.is_ok());
+                        msg.scalar_count = 3;
+                        let _ = viz.publish(msg);
+                    }
+                    match result {
+                        Ok(()) => log::info!(
+                            "在线回环接受 {:.3} → {:.3}",
+                            edge.from.timestamp,
+                            edge.to.timestamp
+                        ),
+                        Err(e) => log::warn!("在线回环拒收: {e}"),
+                    }
                 }
             }
         }
@@ -534,14 +542,17 @@ impl App {
         };
         let msg = corrected_odom(odom, &alignment)?;
         let status = self.quality.status(msg.timestamp, &self.quality_options);
-        self.quality_pub.publish(status)?;
         if let Some(viz) = &self.viz_pub {
             let mut metric =
-                VizMessage::base(kind::SCALARS, msg.timestamp, "corr/debug/tracking_quality");
+                VizMessage::base(kind::SCALARS, msg.timestamp, "corr/debug/map_observation");
             metric.scalars[..3].copy_from_slice(&[
-                msg.timestamp - status.visual_timestamp,
+                if status.visual_timestamp >= 0. {
+                    msg.timestamp - status.visual_timestamp
+                } else {
+                    -1.
+                },
                 status.position_disagreement,
-                f64::from(status.tracking_ready),
+                f64::from(status.recent_consistent),
             ]);
             metric.scalar_count = 3;
             let _ = viz.publish(metric);
@@ -628,7 +639,8 @@ impl App {
 
     fn run(&mut self) -> Result<()> {
         log::info!(
-            "localization 进程启动：订阅 VIO odom + 视觉位姿观测，发布 {CORRECTED_ODOM_TOPIC}"
+            "localization 进程启动：backend={:?}，发布 {CORRECTED_ODOM_TOPIC}",
+            self.backend
         );
         let waitset = iceoryx2::waitset::WaitSetBuilder::new()
             .create::<iceoryx2::prelude::ipc::Service>()
@@ -707,6 +719,90 @@ fn main() {
 mod tests {
     use super::{RelocGate, gate_diag};
     use nalgebra::Vector6;
+
+    #[test]
+    fn default_backend_navigates_without_map_observations_and_latches_estimator_reset() {
+        // IPC 可视化消息在 debug 构建中需要足够的线程栈。
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                use super::*;
+                use firefly_pubsub::publish::Publisher;
+                let topic = format!("Firefly/Test/MapOdometry/{}", std::process::id());
+                let mut app = App::new(
+                    LocalizationConfig {
+                        origin: Some(firefly_localization::config::InitialAlignment {
+                            position: [-13., 0., 0.405],
+                            yaw: 0.,
+                        }),
+                        ..Default::default()
+                    },
+                    &topic,
+                )
+                .unwrap();
+                assert_eq!(app.backend, Backend::PoseGraph);
+                assert!(app.visual_obs.is_some());
+                let node = create_node().unwrap();
+                let raw = Publisher::<OdomMessage>::with_topic(&node, &topic).unwrap();
+                let corrected =
+                    firefly_pubsub::subscriber::CorrectedOdomSubscriber::new(&node).unwrap();
+                let mut sample = OdomMessage {
+                    timestamp: 2.,
+                    is_initialized: true,
+                    ..Default::default()
+                };
+                raw.publish(sample).unwrap();
+                app.step().unwrap();
+                assert!(app.alignment_ready);
+                let _ = corrected.receive().unwrap();
+                sample.timestamp = 7.;
+                sample.position_x = 2.;
+                sample.position_y = 3.;
+                sample.position_z = 1.;
+                raw.publish(sample).unwrap();
+                app.step().unwrap();
+                let mapped = corrected.receive().unwrap().unwrap();
+                assert!((mapped.position_x + 11.).abs() < 1e-12);
+                assert!((mapped.position_y - 3.).abs() < 1e-12);
+                assert!((mapped.position_z - 1.405).abs() < 1e-12);
+                assert!(
+                    !app.quality
+                        .status(7., &app.quality_options)
+                        .recent_consistent
+                );
+                drop(mapped);
+                app.quality.observe(2., 0.1);
+                assert!(
+                    !app.quality
+                        .status(7.1, &app.quality_options)
+                        .recent_consistent
+                );
+                sample.timestamp = 7.1;
+                raw.publish(sample).unwrap();
+                app.step().unwrap();
+                assert!(corrected.receive().unwrap().is_some());
+                app.last_odom_recv = std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(2))
+                    .unwrap();
+                sample.timestamp = 7.2;
+                app.latest_odom = Some(sample);
+                app.publish_corrected().unwrap();
+                assert!(corrected.receive().unwrap().is_none());
+                sample.timestamp = 8.;
+                sample.is_initialized = false;
+                raw.publish(sample).unwrap();
+                app.step().unwrap();
+                assert!(app.estimator_reset);
+                sample.timestamp = 9.;
+                sample.is_initialized = true;
+                raw.publish(sample).unwrap();
+                app.step().unwrap();
+                assert!(corrected.receive().unwrap().is_none());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 
     #[test]
     fn interpolation_has_closed_bounds_and_analytic_pose() {

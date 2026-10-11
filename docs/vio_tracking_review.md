@@ -93,12 +93,12 @@ ALIKED 最小帧间隔为 0.2s，单算子线程，只取最新帧。处理上�
 地图观测仍按图像测量时刻与 VIO 历史配对，随后把校正作用于当前 VIO；
 不能将推理完成时刻伪装成测量时刻。
 
-`LocalizationStatus` 独立于地图查询先验：接受的视觉观测年龄超过 3s，或融合后
-同刻位置分歧超过 0.5m，禁止跟踪。planner 就绪后退化锁存停止，须显式重启恢复。
-这不是误差上界证明，也不是独立于 VIO 的悬停保证。
+库图观测年龄和融合后同刻位置分歧是诊断量，不是规划准入条件。planner 只依赖
+融合服务输出的有效地图里程计，500ms 墙钟中断或无效状态锁存停止。
+无地图校正时仍需独立评分漂移，不能把状态流可用解释为绝对精度保证。
 
 RRD 实体包括 `vio/debug/camera_age`、滤波状态和偏置、`vision/debug/map_query_wall_s`、
-`corr/debug/tracking_quality`、`loop/debug/frontend`、`corr/debug/loops`。
+`corr/debug/map_observation`、`loop/debug/frontend`、`corr/debug/loops`。
 验收进程将子进程 ConsoleReporter 输出转入 `logs/acceptance` TextLog。
 日志 IPC 队列容量为 256，进程输出汇集队列 8192；溢出必须显式记录。
 

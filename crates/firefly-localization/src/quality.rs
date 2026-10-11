@@ -1,6 +1,6 @@
-//! 地图跟踪可用性；仅消费同一时刻配对的估计与视觉观测，不消费真值。
+//! 库图观测诊断；不代表里程计有效性、统计置信界或任务准入条件。
 
-/// 任务层误差预算；不是概率置信区间或碰撞安全保证。
+/// 库图观测的新鲜度与融合后分歧诊断阈值。
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QualityOptions {
@@ -26,6 +26,12 @@ impl QualityOptions {
             .all(|x| x.is_finite() && *x > 0.)
     }
 }
+/// 库图观测摘要；与局部 VIO 是否有效无关。
+pub struct ObservationStatus {
+    pub visual_timestamp: f64,
+    pub position_disagreement: f64,
+    pub recent_consistent: bool,
+}
 #[derive(Default)]
 pub struct Quality {
     observation: Option<(f64, f64)>,
@@ -41,20 +47,15 @@ impl Quality {
             self.observation = Some((timestamp, disagreement));
         }
     }
-    /// 按当前观测与参数给出定位质量状态。
+    /// 按估计时刻记录最近库图观测的年龄与分歧；无观测用 -1 表示。
     #[must_use]
-    pub fn status(
-        &self,
-        timestamp: f64,
-        options: &QualityOptions,
-    ) -> firefly_pubsub::odom::LocalizationStatus {
+    pub fn status(&self, timestamp: f64, options: &QualityOptions) -> ObservationStatus {
         let (visual_timestamp, position_disagreement) = self.observation.unwrap_or((-1., -1.));
         let age = timestamp - visual_timestamp;
-        firefly_pubsub::odom::LocalizationStatus {
-            timestamp,
+        ObservationStatus {
             visual_timestamp,
             position_disagreement,
-            tracking_ready: self.observation.is_some()
+            recent_consistent: self.observation.is_some()
                 && timestamp.is_finite()
                 && age >= 0.
                 && age <= options.max_visual_age
@@ -66,21 +67,21 @@ impl Quality {
 mod tests {
     use super::*;
     #[test]
-    fn delayed_repeated_and_inconsistent_observations_do_not_certify_tracking() {
+    fn delayed_repeated_and_inconsistent_observations_remain_diagnostic() {
         let o = QualityOptions::default();
         let mut q = Quality::default();
-        assert!(!q.status(1., &o).tracking_ready);
+        assert!(!q.status(1., &o).recent_consistent);
         q.observe(1., 0.1);
-        assert!(q.status(2., &o).tracking_ready);
-        assert!(!q.status(4.01, &o).tracking_ready);
+        assert!(q.status(2., &o).recent_consistent);
+        assert!(!q.status(4.01, &o).recent_consistent);
         q.observe(1., 0.);
-        assert!(!q.status(4.01, &o).tracking_ready);
+        assert!(!q.status(4.01, &o).recent_consistent);
         q.observe(5., 0.6);
-        assert!(!q.status(5.1, &o).tracking_ready);
+        assert!(!q.status(5.1, &o).recent_consistent);
         q.observe(6., 0.1);
-        assert!(q.status(6.1, &o).tracking_ready);
+        assert!(q.status(6.1, &o).recent_consistent);
         q.observe(f64::NAN, 0.);
-        assert!(!q.status(10., &o).tracking_ready);
-        assert!(!q.status(5., &o).tracking_ready);
+        assert!(!q.status(10., &o).recent_consistent);
+        assert!(!q.status(5., &o).recent_consistent);
     }
 }

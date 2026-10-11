@@ -173,6 +173,13 @@ def score(case, options):
             result.update(alignment="none", yaw_rmse_deg=yaw_error(gt, estimate))
             return result["rmse_m"] <= options.map_ate_rmse_m and result["yaw_rmse_deg"] <= options.map_yaw_rmse_deg, result
         check("map_accuracy", corrected)
+    if case.get("localization_mode") == "visual" and case["case"] != "estimator_loss":
+        def visual_evidence():
+            updates = data.get("visual_update", np.empty((0, 5)))
+            accepted = int(np.count_nonzero(updates[:, 4] == 1))
+            return accepted >= 2, {"accepted_map_observations": accepted,
+                                   "required": 2, "source": "RRD acceptance/visual_update"}
+        check("visual_localization", visual_evidence)
     if case["case"] == "nominal":
         def arrivals():
             results = []
@@ -209,7 +216,7 @@ def score(case, options):
         "online_keyframes": int(frontend[:, 1].max()) if len(frontend) else None,
         "maximum_loop_candidates": max_candidates,
         "accepted_online_loops": accepted_loops,
-        "loop_evidence": "accepted" if accepted_loops else "no_accepted_constraint_observed" if len(frontend) else "missing",
+        "loop_evidence": "disabled_vio_only" if case.get("localization_mode") == "vio_only" else "accepted" if accepted_loops else "no_accepted_constraint_observed" if len(frontend) else "missing",
         "measurement_source": "RRD; ground truth only for route scoring; no post-hoc map alignment",
     }
     case["evidence_entities"] = {entity: {"samples": len(rows), "first_sim_s": float(rows[0, 0]),

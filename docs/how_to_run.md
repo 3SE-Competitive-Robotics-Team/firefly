@@ -57,6 +57,20 @@ cargo run --release -p localization
 默认连接 `127.0.0.1:9876`。离线录制用 `rerun logs/rmuc_run.rrd` 回放。
 `--save` 使用离线模式。传感器原图在 render 调试面板中查看。
 
+render 底栏的左右灰度图固定叠加 VIO 当前活动点（绿色圆环），无需开关。
+标题中的 `显示数/总数` 与 `t` 是该相机的点数和原图时间；每相机最多显示 512 点。
+显示的是 FAST + 金字塔 LK 前端的检测/跟踪结果，不代表每个点都通过了后端 EKF 门控；
+ALIKED + LightGlue 用于地图定位和回环，不是这里的逐帧 VIO 跟踪器。
+跟踪结果与八拍缓存中的原图按时间戳精确配对，因此灰度面板可略晚于实时 RGB/深度。
+无匹配原图或一秒墙钟内无新结果时回到原始灰度，并显示 `waiting for VIO`。
+叠加只写显示副本，不改变传感器数据；离线采集不接收在线 VIO 标记。
+
+| 可视化数据 | 实体 | Rerun 类型 | 时间轴 |
+|---|---|---|---|
+| 当前左右目像素点 | `vio/debug/keypoints/left`、`vio/debug/keypoints/right` | `Points2D`，每帧快照，空集清除点 | `sim_time`，原始相机时间 |
+
+关键点通过现有 `Firefly/Viz` 通道写入 RRD；传感器原图仍不写入 RRD。
+
 render 的主视图与体素视图同时显示青色真值轨迹、橙色地图融合定位轨迹与线框无人机影子。
 影子直接使用 `Firefly/CorrectedOdometry` 的地图系位姿，不做真值对齐；需启动 localization
 才能显示。位姿无效或墙钟 500ms 无新样本时隐藏影子，历史轨迹保留，断流区间不连线。
@@ -136,13 +150,25 @@ cargo run --release -p lightglue -- --map apps/planner/maps/rmuc2026.ffvmap
 `configs/lightglue.toml`（支持 `--config`）。回环阈值、容量和验收边界见
 [在线回环](loop_closure.md)。如需 ESKF 对照，设置 `localization.toml` 顶层
 `backend = "eskf"`，并在 `lightglue.toml` 设置 `enabled = false` 关闭在线回环。
-完成地图对齐和视觉质量检查后，可运行 planner 接收 `Firefly/CorrectedOdometry` 与
-`Firefly/LocalizationStatus` 并发布飞控参考；
+地图对齐后，可运行 planner 接收 `Firefly/CorrectedOdometry` 并发布飞控参考；
 通过 `ffctl fc track` 进入跟踪模式，`ffctl planner goal X Y Z` 发布地图系目标。
 planner 不订阅原始局部 VIO，不提供平移偏置捷径。未收到有效初始化状态时不发布
-参考；状态/质量流失联 500ms、定位质量退化、变为未初始化或出现非法数值时停止发布并锁存，恢复定位后
+参考；状态流失联 500ms、变为未初始化或出现非法数值时停止发布并锁存，恢复定位后
 须重启 planner。飞控按自己的参考流超时策略处置，不会收到伪造的位置反馈。
 飞控反馈与 Hold 锚点保持在 odom 系，仅将地图目标转换到 odom；详情见 [坐标契约](frames.md)。
+
+纯 VIO 运行只需不启动 ALIKED 与 LightGlue。localization 与 planner 使用相同的默认入口：
+
+```bash
+cargo run --release -p localization
+cargo run --release -p planner
+```
+
+localization 使用 `[origin]` 建立固定启动变换，并随 VIO 持续发布地图系状态；没有地图
+观测或回环时，不产生额外校正。planner 不识别传感器或定位算法种类，状态新鲜度、
+非法状态锁存和深度检查在所有运行方式下一致。测试入口 `accept_rmuc.py --vio-only`
+只控制是否启动神经网络进程，不改变定位/规划进程参数。没有绝对校正时可能累积漂移，
+必须独立检查地图误差和真实到点情况；状态流可用不代表任务精度通过。
 
 `scripts/collect_vision_map.py` 独立启动 `render --offline`，在隔离的
 `Firefly/Offline/*` 话题设置已知相机位姿，严格按同一时间戳配对左图、深度与标签。

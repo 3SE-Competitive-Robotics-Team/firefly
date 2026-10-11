@@ -13,19 +13,6 @@ pub const ODOM_TOPIC: &str = "Firefly/Odometry";
 /// 校正后里程计话题（localization 进程发布，planner 订阅，低频全局矫正 VIO 漂移）。
 pub const CORRECTED_ODOM_TOPIC: &str = "Firefly/CorrectedOdometry";
 
-/// 地图跟踪质量；初始化/坐标变换有效性与任务跟踪可用性分开发布。
-pub const LOCALIZATION_STATUS_TOPIC: &str = "Firefly/LocalizationStatus";
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, ZeroCopySend)]
-#[type_name("FireflyLocalizationStatus")]
-pub struct LocalizationStatus {
-    pub timestamp: f64,
-    pub visual_timestamp: f64,
-    pub position_disagreement: f64,
-    pub tracking_ready: bool,
-}
-
 /// 仿真真值：仅供传感器图像生成、评测与可视化对照。
 pub const GROUND_TRUTH_TOPIC: &str = "Firefly/GroundTruth";
 

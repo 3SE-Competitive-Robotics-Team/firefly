@@ -38,7 +38,7 @@ def save_report(directory, report):
     categories = {
         "初始化": ["initialization"], "起飞": ["takeoff"], "悬停": ["hover", "hover_accuracy", "terminal_hold", "terminal_hold_accuracy"],
         "降落": ["landing", "landing_accuracy"],
-        "路径跟踪": ["tracking", "tracking_error", "waypoint_accuracy"], "定位误差": ["vio_accuracy", "map_accuracy"],
+        "路径跟踪": ["tracking", "tracking_error", "waypoint_accuracy"], "定位误差": ["vio_accuracy", "map_accuracy"], "库图观测": ["visual_localization"],
         "碰撞": ["collision"], "失联安全响应": ["reference_loss", "failure_hold", "failure_hold_accuracy", "estimator_fallback", "degraded_support", "failure_terminal"],
         "进程退出": ["shutdown"],
     }
@@ -67,8 +67,9 @@ def save_report(directory, report):
     document = ("<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>RMUC 自动任务验收</title>"
                 "<style>body{font:16px system-ui;max-width:1200px;margin:40px auto;padding:0 24px;color:#202a34}table{border-collapse:collapse;width:100%}td,th{border:1px solid #d2d8de;padding:10px;text-align:left;vertical-align:top}pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font-size:13px}.passed{color:#176a37}.failed{color:#b02020}.blocked{color:#8a6000}h2{margin-top:36px}</style>"
                 f"<h1>RMUC 自动任务验收：{escape(report['status'])}</h1><p>运行 ID：{escape(report['run_id'])}</p>"
-                "<p>真实 sim / render / VIO / FC；路径任务另启 localization / planner。真值仅供评分。局部 VIO 误差允许固定尺度航向和平移对齐，地图定位与路径跟踪不对齐。正常起降接触与碰撞分开统计。</p>"
-                "<p>库图重定位必须有已接受的视觉观测；回环检测单独汇总，不以库图更新次数代替回环。操作系统与 GPU 调度不是确定性的，单次通过不代表可靠性概率。</p>"
+                f"<p>运行范围：{escape(report.get('scope', ''))}</p>"
+                "<p>真实 sim / render / VIO / FC；路径任务另启 localization / planner。定位模式见运行范围。真值仅供评分。局部 VIO 误差允许固定尺度航向和平移对齐，地图定位与路径跟踪不对齐。正常起降接触与碰撞分开统计。</p>"
+                "<p>视觉定位模式要求已接受的库图观测；纯 VIO 模式只使用固定启动先验。回环检测单独汇总，不以库图更新次数代替回环。操作系统与 GPU 调度不是确定性的，单次通过不代表可靠性概率。</p>"
                 "<p><a href='report.json'>完整机器报告（配置、源码、二进制、资产及 RRD 的 SHA-256）</a></p>"
                 + "<table><tr><th>汇总项</th><th>结果</th></tr>" + "".join(
                     f"<tr><td>{escape(label)}</td><td class='{value['status']}'>{value['status']}</td></tr>" for label, value in summary.items()) + "</table>"
@@ -77,10 +78,13 @@ def save_report(directory, report):
     (directory / "report.html").write_text(document)
 
 
-def provenance(*, allow_map_rig_translation=False):
+def provenance(*, allow_map_rig_translation=False, vio_only=False):
     files = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT).decode().split("\0")
     source = {name: digest(ROOT / name) for name in files if name and (ROOT / name).is_file()}
-    binaries = {name: digest(ROOT / "target/release" / name) for name in ["vio", "render", "fc", "ffctl", "localization", "planner", "aliked", "lightglue"]}
+    names = ["vio", "render", "fc", "ffctl", "localization", "planner"]
+    if not vio_only:
+        names += ["aliked", "lightglue"]
+    binaries = {name: digest(ROOT / "target/release" / name) for name in names}
     manifest_path = ROOT / "models/rmuc2026/asset_manifest.json"
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("status") != "passed":
@@ -88,14 +92,17 @@ def provenance(*, allow_map_rig_translation=False):
     for path, expected in manifest["artifacts"].items():
         if digest(Path(path)) != expected:
             raise ValueError(f"asset content changed: {path}")
-    visual_manifest = ROOT / "apps/planner/maps/rmuc2026.manifest.json"
-    visual = json.loads(visual_manifest.read_text())
-    if digest(ROOT / "apps/planner/maps/rmuc2026.ffvmap") != visual["map_sha256"]:
-        raise ValueError("visual map content changed")
-    for name, expected in visual["models"]["artifacts"].items():
-        if digest(ROOT / "models" / name) != expected:
-            raise ValueError(f"visual model content changed: {name}")
-    compatibility = verify_map_compatibility(visual["assets"], allow_rig_translation=allow_map_rig_translation)
+    visual = None
+    compatibility = {"status": "not_used_vio_only"}
+    if not vio_only:
+        visual_manifest = ROOT / "apps/planner/maps/rmuc2026.manifest.json"
+        visual = json.loads(visual_manifest.read_text())
+        if digest(ROOT / "apps/planner/maps/rmuc2026.ffvmap") != visual["map_sha256"]:
+            raise ValueError("visual map content changed")
+        for name, expected in visual["models"]["artifacts"].items():
+            if digest(ROOT / "models" / name) != expected:
+                raise ValueError(f"visual model content changed: {name}")
+        compatibility = verify_map_compatibility(visual["assets"], allow_rig_translation=allow_map_rig_translation)
     return {"visual_map": visual, "visual_map_compatibility": compatibility, "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
             "git_status": subprocess.check_output(["git", "status", "--short"], cwd=ROOT, text=True),
             "source_sha256": source, "binary_sha256": binaries,
@@ -127,11 +134,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=ROOT / "configs/acceptance.toml")
     parser.add_argument("--case", choices=["all", "nominal", "reference_loss", "estimator_loss"], default="all")
+    parser.add_argument("--vio-only", action="store_true", help="纯 VIO + 固定启动先验；不启动 ALIKED/LightGlue，不要求冻结视觉库")
     parser.add_argument("--repeat", type=int, default=1, help="每种任务独立启动次数；全部使用固定配置")
     parser.add_argument("--output-dir", type=Path, help="logs/ 下不存在的报告目录；默认使用唯一运行 ID")
     parser.add_argument("--allow-map-rig-translation", action="store_true",
                         help="显式允许冻结地图与当前 rig 的共同安装平移差异；记录差异，仍校验其他标定与资产")
     args = parser.parse_args(argv)
+    if args.vio_only and args.allow_map_rig_translation:
+        parser.error("--vio-only does not use a visual map; omit --allow-map-rig-translation")
     if not 1 <= args.repeat <= 100:
         parser.error("--repeat must be in 1..100")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -142,6 +152,8 @@ def main(argv=None):
     directory.mkdir(parents=True)
     report = {"schema_version": 2, "mission_decisions": "fresh estimated state; independent ground-truth scoring", "run_id": run_id, "status": "running", "cases": [],
               "repeat": args.repeat, "scope": "RMUC fixed-pad mission; VIO + ALIKED-N16 + LightGlue + localization + planner; online loop diagnostics reported separately"}
+    if args.vio_only:
+        report["scope"] = "RMUC fixed-pad mission; VIO + fixed startup prior + planner; no independent visual correction or loop closure"
     lock = (ROOT / "logs/acceptance.lock").open("w")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -153,15 +165,16 @@ def main(argv=None):
         options.validate()
         report["options"] = asdict(options)
         report["contact_policy"] = CONTACT_POLICY
-        report["provenance"] = (provenance(allow_map_rig_translation=True)
-                                if args.allow_map_rig_translation else provenance())
+        report["provenance"] = (provenance(vio_only=True) if args.vio_only else
+                                provenance(allow_map_rig_translation=True) if args.allow_map_rig_translation else provenance())
         cases = ["nominal", "reference_loss", "estimator_loss"] if args.case == "all" else [args.case]
         save_report(directory, report)
         for attempt, name in [(attempt, name) for attempt in range(1, args.repeat + 1) for name in cases]:
             case_directory = directory if args.repeat == 1 else directory / f"attempt_{attempt:02d}"
             case_directory.mkdir(exist_ok=True)
             log.info("开始任务验收 %s，证据目录 %s", name, directory)
-            mission = Mission(case_directory, name, options)
+            mission = (Mission(case_directory, name, options, vio_only=True) if args.vio_only
+                       else Mission(case_directory, name, options))
             case = mission.run()
             case["attempt"] = attempt
             try:

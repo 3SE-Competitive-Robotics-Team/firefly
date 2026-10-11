@@ -117,6 +117,27 @@ cargo build --release -j 2 -p vio -p render -p fc -p ffctl -p localization -p pl
 uv run --all-packages --extra test python scripts/accept_rmuc.py
 ```
 
+22m 去程到地图坐标 `(9, 0, 2)m`，到位后返回停机坪上方并降落：
+
+```bash
+uv run --all-packages --extra test python scripts/accept_rmuc.py --case nominal --config configs/acceptance_22m.toml
+```
+
+该配置只指定航点，飞行、定位、碰撞及时间预算均使用默认验收条件。
+运行前完成全部编译，避免编译负载与传感器进程争抢资源。
+
+纯 VIO 的相同路线对照：
+
+```bash
+uv run --all-packages --extra test python scripts/accept_rmuc.py --case nominal --config configs/acceptance_22m.toml --vio-only
+```
+
+该模式不启动 ALIKED/LightGlue，不要求模型或冻结视觉库；localization 与 planner 使用
+和完整链路相同的默认入口。报告将视觉前端与回环标为关闭，真值评分仍使用相同的飞行、
+地图误差、碰撞、时间预算阈值。完整视觉链路额外从 RRD 检查至少两次已接受地图观测，
+该验收项不阻塞规划启动。VIO 对照不能替代完整视觉链路的验收。
+
+
 配置为 `configs/acceptance.toml`（`--config` 可覆盖），缺键采用
 `tests/system/mission.py::Options`。`--case nominal|reference_loss|estimator_loss`
 可单独复现。要求独占本仓库闭环进程与图形会话；检测到其他进程时拒绝运行，
@@ -245,8 +266,9 @@ RUST_LOG=info FIREFLY_QUERY_MAP=<独立查询.ffvmap> FIREFLY_QUERY_COUNT=20 \
   容差 1e-6m；另有四自由度残差与整体目标函数的差分检查。
 - 占据图：重复像素每帧只累积一次证据；先验经空闲射线、3000 次衰减、动态移除、
   窗口移出/移入后仍占据。飞控测试要求起飞完成容差不改变指令的 Hold 高度。
-- 跟踪质量：延迟、重复、无穷/NaN 和不一致观测不能证明跟踪可用；planner
-  在就绪后退化锁存停止，不能被后续好消息自动解除。
+- 状态输入：重复、乱序、无穷/NaN、未初始化及 500ms 墙钟断流不能维持规划；
+  锁存后不能被后续好消息自动解除。默认定位后端在没有库图观测、观测超期时仍输出
+  新鲜 VIO 的地图变换；未对齐或估计器重置不得输出。库图观测质量只用于诊断。
 
 - 图像时刻先验：90° 转向和平移的解析坐标组合，时间窗口外必须拒绝。
 - 电机分配：偏航饱和时保留总推力与滚转/俯仰力矩；总推力对请求值导数为一。

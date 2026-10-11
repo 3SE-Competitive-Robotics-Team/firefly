@@ -204,3 +204,55 @@ def test_estimated_arrival_does_not_require_truth_and_false_arrival_fails_scorin
         settled_truth({"gt": gt[:-5], "gt_velocity": velocity}, 3., 1., goal, .35, .3)
     mission.t = 3.5
     assert not mission.estimated_near("corrected", goal, .35, .3)
+
+
+def test_vio_only_map_stage_starts_only_planner_and_labels_fixed_prior(tmp_path, monkeypatch):
+    from mission import Mission
+    mission = Mission(tmp_path, "nominal", Options(), vio_only=True)
+    mission.latest["corrected"] = (2., None, None, None, True)
+    mission.latest["reference"] = None
+    launched = []
+    monkeypatch.setattr(mission, "start", lambda name, command: launched.append((name, command)))
+    monkeypatch.setattr(mission, "wait", lambda predicate, **kwargs: predicate() or pytest.fail("not ready"))
+    result = mission.map_ready()
+    assert [name for name, _ in launched] == ["planner"]
+    assert "--vio-only" not in launched[0][1]
+    assert result["accepted_visual_updates_at_start"] == 0
+    assert result["visual_frontend"] == "disabled"
+    assert mission.result["localization_mode"] == "vio_only"
+
+
+def test_default_map_stage_starts_visual_frontend(tmp_path, monkeypatch):
+    from mission import Mission
+    mission = Mission(tmp_path, "nominal", Options())
+    mission.latest["corrected"] = (2., None, None, None, True)
+    mission.latest["reference"] = None
+    mission.visual_updates = 0
+    launched = []
+    monkeypatch.setattr(mission, "start", lambda name, command: launched.append((name, command)))
+    monkeypatch.setattr(mission, "wait", lambda predicate, **kwargs: predicate() or pytest.fail("not ready"))
+    result = mission.map_ready()
+    assert [name for name, _ in launched] == ["aliked", "lightglue", "planner"]
+    assert all("--vio-only" not in command for _, command in launched)
+    assert result["accepted_visual_updates_at_start"] == 0
+    assert result["visual_frontend"] == "enabled"
+
+
+@pytest.mark.parametrize("observations,passed", [(0, False), (1, False), (2, True)])
+def test_visual_evidence_is_scored_independently_of_navigation(monkeypatch, observations, passed):
+    import mission_metrics
+    evidence = {"gt": poses(), "visual_update": np.array(
+        [[float(i + 1), 0., 3., .1, 1.] for i in range(observations)]).reshape(-1, 5)}
+    if not observations:
+        evidence.pop("visual_update")
+    monkeypatch.setattr(mission_metrics, "read_evidence", lambda path: evidence)
+    case = {"case": "nominal", "localization_mode": "visual", "recording": "unused",
+            "stages": {"tracking": {"status": "blocked"}}}
+    mission_metrics.score(case, Options())
+    assert (case["stages"]["visual_localization"]["status"] == "passed") == passed
+    assert case["stages"]["visual_localization"]["metrics"]["accepted_map_observations"] == observations
+    case["localization_mode"] = "vio_only"
+    case["stages"] = {"tracking": {"status": "blocked"}}
+    mission_metrics.score(case, Options())
+    assert "visual_localization" not in case["stages"]
+    assert case["mission_summary"]["loop_evidence"] == "disabled_vio_only"
