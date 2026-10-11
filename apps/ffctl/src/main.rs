@@ -22,7 +22,7 @@ use firefly_error::{Error, ErrorKind};
 use firefly_pubsub::command::kind;
 use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
 use iceoryx2::prelude::{LogLevel, set_log_level};
-use usage::{Args, Cli, Run, Subcommands};
+use usage_rs::{Args, Cli, Run, Subcommands};
 
 use ipc::{deliver, new_publisher, report, wall_seconds};
 
@@ -107,7 +107,7 @@ impl Run for Completion {
 /// # Errors
 /// shell 名不在 `Shell::from_name` 支持集内（`choices` 已先挡一层）。
 fn print_completion(shell: &str) -> Result<(), Error> {
-    let shell = usage::complete::Shell::from_name(shell).ok_or_else(|| {
+    let shell = usage_rs::complete::Shell::from_name(shell).ok_or_else(|| {
         Error::new(
             ErrorKind::InvalidArgument,
             format!("不支持的 shell：{shell}"),

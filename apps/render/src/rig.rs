@@ -8,11 +8,11 @@ use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{Camera, ClearColorConfig, Exposure, Projection, RenderTarget};
 use bevy::core_pipeline::prepass::DepthPrepass;
-use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::render::view::Msaa;
+use bevy::render::view::Tonemapping;
 use bevy::ui::IsDefaultUiCamera;
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_WIDTH};
 use firefly_pubsub::trace::TraceContext;
@@ -192,7 +192,7 @@ pub fn spawn_rig(
             Camera3d::default(),
             Msaa::Off,
             sensor_projection(),
-            Tonemapping::None,
+            Tonemapping::Linear,
             sensor_exposure,
             sensor_layers.clone(),
             env.clone(),
@@ -203,7 +203,7 @@ pub fn spawn_rig(
 
     // 深度相机：只跑深度预通道。`RenderTarget::None` 无颜色输出，Bevy 会移除
     // `ViewTarget`，彩色主 pass 不执行（省掉一整遍 5M 三角面）；深度经
-    // `ViewDepthTexture` 回读。
+    // `ViewDepthStencilTexture` 回读。
     commands.spawn((
         Camera {
             is_active: false,
@@ -226,7 +226,7 @@ pub fn spawn_rig(
     commands.spawn((
         Camera3d::default(),
         Msaa::Off,
-        Tonemapping::None,
+        Tonemapping::Linear,
         Exposure {
             ev100: config.view.viewer_ev100(),
         },
@@ -257,7 +257,7 @@ pub fn spawn_rig(
             ..default()
         },
         Msaa::Off,
-        Tonemapping::None,
+        Tonemapping::Linear,
         RenderLayers::from_layers(&[VOXEL_LAYER, DRONE_LAYER, PATH_LAYER]),
         VoxelView,
     ));

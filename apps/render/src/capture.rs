@@ -26,7 +26,7 @@ use bevy::render::render_resource::{
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::sync_world::RenderEntity;
 use bevy::render::texture::GpuImage;
-use bevy::render::view::ViewDepthTexture;
+use bevy::render::view::ViewDepthStencilTexture;
 use bevy::render::{Extract, RenderSystems};
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_WIDTH};
 use firefly_pubsub::trace::TraceContext;
@@ -203,7 +203,7 @@ fn copy_sensors(
     hub: Res<CaptureHub>,
     mut extracted: ResMut<ExtractedRequest>,
     images: Res<RenderAssets<GpuImage>>,
-    depth_cams: Query<(Entity, &Eye, &ViewDepthTexture)>,
+    depth_cams: Query<(Entity, &Eye, &ViewDepthStencilTexture)>,
     buffers: Res<CaptureBuffers>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
@@ -235,7 +235,7 @@ fn copy_sensors(
     let mut depth_tex = None;
     for (_, eye, view) in &depth_cams {
         if *eye == Eye::Depth {
-            depth_tex = Some(&view.texture);
+            depth_tex = Some(view.texture());
             break;
         }
     }
@@ -329,18 +329,22 @@ fn map_for_readback(
         if let Err(e) = result {
             log::warn!("{label} 回读映射失败：{e:?}");
         } else {
-            let bytes = owned.slice(..).get_mapped_range().to_vec();
+            let bytes = owned.slice(..).get_mapped_range().map(|view| view.to_vec());
             owned.unmap();
-            hub.done
-                .lock()
-                .expect("hub poisoned")
-                .push_back(CapturedFrame {
-                    seq: req.seq,
-                    kind,
-                    stamp: req.stamp,
-                    trace: req.trace,
-                    bytes,
-                });
+            match bytes {
+                Ok(bytes) => hub
+                    .done
+                    .lock()
+                    .expect("hub poisoned")
+                    .push_back(CapturedFrame {
+                        seq: req.seq,
+                        kind,
+                        stamp: req.stamp,
+                        trace: req.trace,
+                        bytes,
+                    }),
+                Err(error) => log::warn!("{label} 回读范围不可用：{error:?}"),
+            }
         }
         if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
             hub.inflight_sets.fetch_sub(1, Ordering::SeqCst);
@@ -366,7 +370,12 @@ impl Plugin for CapturePlugin {
                 bevy::render::ExtractSchedule,
                 (extract_eyes, extract_request),
             )
-            .add_systems(Render, copy_sensors.in_set(RenderSystems::Cleanup));
+            .add_systems(
+                Render,
+                copy_sensors
+                    .in_set(RenderSystems::Cleanup)
+                    .after(RenderSystems::Render),
+            );
     }
 }
 

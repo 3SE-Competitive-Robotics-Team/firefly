@@ -9,9 +9,9 @@ requires-python = ">=3.12"
 dependencies = [
     # cadquery-ocp-novtk 而非全量 cadquery-ocp：管线全 headless，
     # 不需要 VTK 可视化；OCP 模块名仍为 `OCP`，API 与 OCCT C++ 一一对应。
-    "cadquery-ocp-novtk>=8.0.1.0.0",
+    "cadquery-ocp-novtk>=8.0.1.1.0",
     # 碰撞聚合：trimesh 体素化（fill 实心）+ scipy（trimesh 体素稀疏编码后端）。
-    "trimesh>=5.1.0",
+    "trimesh>=5.1.1",
     "scipy>=1.18.1",
 ]
 
@@ -22,5 +22,5 @@ firefly-cad-collide = "firefly_cad.collide:main"
 firefly-cad-build = "firefly_cad.pipeline:main"
 
 [build-system]
-requires = ["uv_build>=0.12.21,<0.13"]
+requires = ["uv_build>=0.13.0,<0.14"]
 build-backend = "uv_build"

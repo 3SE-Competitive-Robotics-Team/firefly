@@ -30,7 +30,7 @@ members = ["packages/*", "apps/firefly-sim", "apps/firefly-viz"]
 [dependency-groups]
 dev = [
     "rerun-sdk>=0.38.1,<0.39",
-    "trimesh>=5.1.0",
+    "trimesh>=5.1.1",
     "scipy>=1.18.1",
 ]
 

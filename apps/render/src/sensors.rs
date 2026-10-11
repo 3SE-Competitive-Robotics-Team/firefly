@@ -2,7 +2,7 @@
 //!
 //! 深度线性化依据：`Bevy` 相机投影恒为无限远反向 Z
 //! （`PerspectiveProjection::get_clip_from_view` 用
-//! `perspective_infinite_reverse_rh`），深度预通道纹理存 NDC `d ∈ [0, 1]`，
+//! `perspective_infinite_reverse`），深度预通道纹理存 NDC `d ∈ [0, 1]`，
 //! `d = 0` 为清空值（无几何体，判无效），`dist = near / d` 精确还原光轴 Z 深度。
 
 /// 深度有效下限（米）。
@@ -148,7 +148,6 @@ pub fn depth_to_display(depth: &[f32], rgba: &mut [u8], max_range: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::math::Mat4;
 
     /// BT.601 三原色与白场定点值。
     #[test]
@@ -168,7 +167,8 @@ mod tests {
     #[test]
     fn depth_linearize_matches_projection() {
         let near = 0.05f32;
-        let proj = Mat4::perspective_infinite_reverse_rh(70.88f32.to_radians(), 4.0 / 3.0, near);
+        let proj =
+            bevy::math::proj::perspective_infinite_reverse(70.88f32.to_radians(), 4.0 / 3.0, near);
         // 恰为近平面时按有效掩码（`z > 0.05`）判无效，故从内侧取值。
         for z in [0.06, 1.0, 10.0, 99.0] {
             let clip = proj * bevy::math::Vec4::new(0.0, 0.0, -z, 1.0);

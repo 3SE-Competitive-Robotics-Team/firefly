@@ -87,7 +87,7 @@ uv run --all-packages --extra test python scripts/accept_rmuc.py
 
 ## 最小闭环
 
-要求 Rust 1.97+、Python 3.12+、uv，以及对应平台的图形运行依赖。
+要求 Rust 1.97.1+、Python 3.12+、uv，以及对应平台的图形运行依赖。
 仅支持 RMUC2026，必须提供 `models/rmuc2026/field.glb` 与
 `models/rmuc2026/rmuc2026_collision.json`；缺资产直接报错。
 MuJoCo 负责物理与 IMU，Bevy `render` 负责双目与深度。
