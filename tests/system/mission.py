@@ -1,5 +1,4 @@
 """真实进程任务验收；预设命令，真值只评分，失败不调整门槛。"""
-from collections import deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import logging
@@ -8,7 +7,6 @@ import queue
 import signal
 import subprocess
 import sys
-import threading
 import time
 
 import iceoryx2 as iox2
@@ -16,6 +14,7 @@ import numpy as np
 from firefly_mujoco import ControlMessage, OdomMessage
 from firefly_viz.messages import VizMessage
 
+from process_lifecycle import ManagedProcess, isolated_run
 from mission_io import Recorder, ReferenceMessage, pose_values, service
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -88,27 +87,24 @@ class Mission:
 
     def start(self, name, command):
         env = {**os.environ, "RUST_LOG": "info", "FIREFLY_MISSION_SEED": str(self.options.seed), "PYTHONDONTWRITEBYTECODE": "1"}
-        process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        tail = deque(maxlen=12)
-        def drain():
-            for line in process.stdout:
-                tail.append(line.rstrip())
-                try:
-                    self.diagnostics.put_nowait((name, line.rstrip()))
-                except queue.Full:
-                    self.diagnostic_drops += 1
-        threading.Thread(target=drain, daemon=True).start()
-        self.processes[name] = process, tail
+        if name in self.processes and self.processes[name].process.poll() is None:
+            raise RuntimeError(f"process already running: {name}")
+
+        def on_line(line):
+            try:
+                self.diagnostics.put_nowait((name, line))
+            except queue.Full:
+                self.diagnostic_drops += 1
+
+        child = ManagedProcess(command, cwd=ROOT, env=env, on_line=on_line, tail_size=12)
+        self.processes[name] = child
+        self.expected_stops.discard(name)
         if self.recorder:
-            self.recorder.event(f"process start name={name} pid={process.pid} argv={command}", self.t)
+            self.recorder.event(f"process start name={name} pid={child.pid} argv={command}", self.t)
 
     def stop(self, name):
-        process, _ = self.processes[name]
         self.expected_stops.add(name)
-        if process.poll() is None:
-            process.send_signal(signal.SIGINT)
-            process.wait(timeout=15)
-        return process.returncode
+        return self.processes[name].stop()
 
     def command(self, *args):
         self.recorder.event(f"command ffctl {' '.join(map(str, args))}", self.t)
@@ -155,7 +151,8 @@ class Mission:
         if self.diagnostic_drops:
             self.recorder.event(f"diagnostic queue overflow: {self.diagnostic_drops} lines", self.t, True)
             self.diagnostic_drops = 0
-        for name, (process, tail) in self.processes.items():
+        for name, child in self.processes.items():
+            process, tail = child.process, child.tail
             if name not in self.expected_stops and process.poll() is not None:
                 diagnostic = " | ".join(tail)
                 self.recorder.event(f"unexpected process exit {name} code={process.returncode} {diagnostic}", self.t, True)
@@ -369,7 +366,7 @@ class Mission:
         failures = []
         results = {}
         # 先停止物理，保留日志写入器直到所有计算进程都退出。
-        order = ["sim", "planner", "lightglue", "aliked", "localization", "fc", "vio", "render"]
+        order = ["sim", *(name for name in reversed(self.processes) if name not in {"sim", "viz"})]
         for name in order:
             if name not in self.processes:
                 continue
@@ -378,22 +375,25 @@ class Mission:
                 results[name] = {"exit_code": self.stop(name), "wall_seconds": time.monotonic() - start}
                 if results[name]["exit_code"] != 0:
                     failures.append(f"{name} nonzero exit")
-            except subprocess.TimeoutExpired:
-                failures.append(f"{name} did not exit, pid={self.processes[name][0].pid}")
+            except (subprocess.TimeoutExpired, RuntimeError, OSError) as error:
+                failures.append(f"{name} shutdown failed, pid={self.processes[name].pid}: {error}")
         if self.recorder:
-            self.recorder.event(f"shutdown {results} failures={failures}", self.t, bool(failures))
-            time.sleep(0.4)
+            try:
+                self.recorder.event(f"shutdown {results} failures={failures}", self.t, bool(failures))
+                time.sleep(0.4)
+            except Exception as error:
+                failures.append(f"shutdown recording failed: {error}")
         if "viz" in self.processes:
             try:
                 results["viz"] = {"exit_code": self.stop("viz")}
                 if results["viz"]["exit_code"] != 0:
                     failures.append("viz nonzero exit")
-            except subprocess.TimeoutExpired:
-                failures.append(f"viz did not exit, pid={self.processes['viz'][0].pid}")
+            except (subprocess.TimeoutExpired, RuntimeError, OSError) as error:
+                failures.append(f"viz shutdown failed, pid={self.processes['viz'].pid}: {error}")
         self.result["stages"]["shutdown"] = {"status": "failed" if failures else "passed", "processes": results, "failures": failures}
         self.result["live_counts"] = self.counts
         self.result["last_physics_counters"] = self.physics
-        self.result["remaining_pids"] = [p.pid for p, _ in self.processes.values() if p.poll() is None]
+        self.result["remaining_pids"] = [child.pid for child in self.processes.values() if child.process.poll() is None]
 
     def run(self):
         phases = [("initialization", self.initialized), ("takeoff", self.takeoff), ("hover", self.hover)]
@@ -415,6 +415,10 @@ class Mission:
 
     def run_phases(self, phases, applications):
         """依次执行验收阶段，共用 RRD 记录、进程存活检查和优雅退出。"""
+        with isolated_run(ROOT):
+            return self._run_phases(phases, applications)
+
+    def _run_phases(self, phases, applications):
         self.result["stages"] = {name: {"status": "blocked", "reason": "preceding phase not completed"} for name, _ in phases}
         try:
             self.start("viz", [sys.executable, "-m", "firefly_viz.main", "--save", str(self.recording)])

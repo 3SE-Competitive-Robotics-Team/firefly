@@ -2,9 +2,8 @@
 
 运行方式：`uv run firefly-viz [--save out.rrd] [--serve]`。
 
-默认连共享 rerun viewer（`127.0.0.1:9876`，需先 `rerun` 起 viewer）；
-`--serve` 由本进程起内置 viewer；`--save path.rrd` 离线录制（与 --serve
-互斥）。无任何选项时自动 `rerun.spawn()` 起 viewer 并连接。
+默认连接共享 rerun viewer（`127.0.0.1:9876`，需先启动 viewer）。
+`--serve` 启动内置 viewer；`--save path.rrd` 离线录制，与 --serve 互斥。
 
 线程模型：收/落盘分离（channel IPC + 落盘批处理）——
 - 收线程（主线程）：排空 `Firefly/Viz` + `Firefly/Log` 订阅，把消息
@@ -16,7 +15,7 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
+import logging
 import faulthandler
 import queue
 import sys
@@ -48,8 +47,7 @@ from .messages import (
 TOPIC_VIZ = "Firefly/Viz"
 TOPIC_LOG = "Firefly/Log"
 
-#: 共享 ApplicationId / RecordingId（多进程共享同一 recording，对照已删
-#: firefly-rerun 的 APP_ID/RECORDING_ID：各进程流合并为 viewer 单应用）
+#: 共享 ApplicationId / RecordingId：各进程流合并为 viewer 单应用。
 APP_ID = "firefly"
 RECORDING_ID = "firefly-sim-loop"
 
@@ -69,8 +67,7 @@ FLUSH_PERIOD = 0.2
 _LEVELS = {1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE"}
 
 
-def log(msg: str) -> None:
-    print(f"[firefly-viz] {msg}", flush=True)
+logger = logging.getLogger("firefly-viz")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -92,16 +89,16 @@ def _open_recording(args: argparse.Namespace) -> None:
     rr.init(APP_ID, recording_id=RECORDING_ID)
     if args.save:
         rr.save(args.save)
-        log(f"离线录制到 {args.save}")
+        logger.info("离线录制到 %s", args.save)
     elif args.serve:
         rr.spawn(port=9876, connect=True)
-        log("已启动内置 viewer 并连接（127.0.0.1:9876）")
+        logger.info("已启动内置 viewer 并连接（127.0.0.1:9876）")
     elif args.connect:
         rr.connect_grpc(args.connect)
-        log(f"连接共享 viewer {args.connect}")
+        logger.info("连接共享 viewer %s", args.connect)
     else:
         rr.connect_grpc("127.0.0.1:9876")
-        log("连接共享 viewer 127.0.0.1:9876（需先起 `rerun`；或加 --serve）")
+        logger.info("连接共享 viewer 127.0.0.1:9876（需先起 `rerun`；或加 --serve）")
 
 
 def _send_default_blueprint() -> None:
@@ -126,7 +123,7 @@ def _send_default_blueprint() -> None:
         play_state=rr.blueprint.components.PlayState.Following,
     )
     rr.send_blueprint(rr.blueprint.Blueprint(scene, time_panel))
-    log("已发送默认布局（场景 3D，sim_time 全历史可见范围，时间面板锁定 sim_time）")
+    logger.info("已发送默认布局（场景 3D，sim_time 全历史可见范围，时间面板锁定 sim_time）")
 
 
 #: 静态场景 mesh 实体（世界系，与仿真同原点同单位，见下）。
@@ -150,29 +147,17 @@ def _log_static_mesh() -> None:
     if not mesh_path.is_file():
         raise FileNotFoundError(f"RMUC 视觉资产缺失：{mesh_path}")
     rr.log(ENTITY_SCENE_MESH, rr.Asset3D(path=mesh_path), static=True)
-    log(f"已记 RMUC 场景：{mesh_path}")
+    logger.info("已记 RMUC 场景：%s", mesh_path)
 
 
 def detach_copy(msg):
-    """零拷贝 loan 的私有化深拷贝：进跨线程队列前必须调用。
-
-    `sample.payload().contents` 只是 loan 内存的别名包装——发布端复用 loan
-    发下一帧（覆盖）或进程退出（解除映射）后，队列里滞留的别名读到撕裂
-    数据（rrd 里 `vio/deb` 类垃圾实体即此来源），乃至释放后使用直接
-    `SIGSEGV`（writer 线程滞后秒级，窗口极大）。拷贝一次（`VizMessage`
-    约 217KB，百 Hz 下约数 MB/s）买断生命周期；背压丢弃只影响新鲜度。
-    """
-    cls = type(msg)
-    dst = cls()
-    ctypes.memmove(ctypes.addressof(dst), ctypes.addressof(msg), ctypes.sizeof(cls))
-    return dst
+    """复制 IPC loan 的全部字节；跨线程队列必须持有独立存储。"""
+    return type(msg).from_buffer_copy(msg)
 
 
 #: 体素实体累计集合（增量协议：`VOXELS` 全量替换 / `_ADD` 并入 / `_REMOVE` 移除）。
 #: rrd 按时间索引，增量必须在这里先攒成全量再写，回放才与实时视图一致。
 _VOXEL_SETS: dict[str, set[tuple[int, int, int]]] = {}
-#: 体素实体布局（尺寸、原点），随消息刷新。
-_VOXEL_LAYOUT: dict[str, tuple[list[float], list[float]]] = {}
 
 
 def _log_voxels(entity: str, msg: VizMessage, kind: int) -> None:
@@ -187,16 +172,11 @@ def _log_voxels(entity: str, msg: VizMessage, kind: int) -> None:
             voxels.update(incoming)
         else:
             voxels.difference_update(incoming)
-    _VOXEL_LAYOUT[entity] = (
-        [msg.voxel_size[0], msg.voxel_size[1], msg.voxel_size[2]],
-        [msg.voxel_origin[0], msg.voxel_origin[1], msg.voxel_origin[2]],
-    )
-    size, translation = _VOXEL_LAYOUT[entity]
+    size = list(msg.voxel_size)
+    translation = list(msg.voxel_origin)
     if not voxels:
         rr.log(entity, rr.Clear(recursive=True))
         return
-    # 不传 colors：rerun 0.36 的 colors 路径在体素数超 ~1000 时渲染性能悬崖
-    # （实测 4590 体素 30s+ 卡死）；去掉 colors 用默认着色 <0.5s
     rr.log(entity, rr.VoxelGridMap(sorted(voxels), size, translation=translation))
 
 
@@ -245,7 +225,7 @@ def _handle(msg: VizMessage, trace_id: str) -> None:
     elif kind == VIZ_KIND_CLEAR:
         rr.log(entity if entity else "/", rr.Clear(recursive=True))
     else:
-        log(f"未知 kind {kind}（entity={entity}，trace={trace_id}），忽略")
+        logger.warning("未知 kind %s（entity=%s，trace=%s），忽略", kind, entity, trace_id)
 
 
 def _bin_abscissa(msg: VizMessage) -> list[float]:
@@ -297,7 +277,7 @@ def _subscribe(node, topic: str, payload_cls, buffer_size: int = VIZ_BUFFER_SIZE
         except Exception:
             # 服务已被他方先建（上限非预期）：重建 builder 降级加入，不炸启动
             #（上限不足时后到的发布端会降级，见各进程 `可视化发布不可用` warn）。
-            log("Firefly/Viz 服务已存在，降级加入（发布端上限非预期）")
+            logger.info("Firefly/Viz 服务已存在，降级加入（发布端上限非预期）")
             service = (
                 node.service_builder(iox2.ServiceName.new(topic))
                 .publish_subscribe(payload_cls)
@@ -311,16 +291,12 @@ def _subscribe(node, topic: str, payload_cls, buffer_size: int = VIZ_BUFFER_SIZE
 
 
 #: 同话题发布端上限（与 Rust `firefly_pubsub::log::LOG_MAX_PUBLISHERS` 一致；
-#: 本进程先创建服务定上限，Rust 发布端只 open，见 `_precreate_log_service`）。
+#: 本进程先创建服务定上限，Rust 发布端只 open，见 `_subscribe_logs`）。
 LOG_MAX_PUBLISHERS = 10
 
 
-def _precreate_log_service(node) -> None:
-    """预创建 `Firefly/Log` 服务（`max_publishers=10` 定上限）。
-
-    本进程常驻、先于全部 Rust 发布端启动（runbook 顺序），故上限恒成立。
-    预创建后立即关闭临时订阅端（服务定义保留，发布端随后可 open）。
-    """
+def _subscribe_logs(node):
+    """创建日志服务及订阅端；发布者容量与 Rust 的 LOG_MAX_PUBLISHERS 一致。"""
     service = (
         node.service_builder(iox2.ServiceName.new(TOPIC_LOG))
         .publish_subscribe(LogMessage)
@@ -329,8 +305,6 @@ def _precreate_log_service(node) -> None:
         .subscriber_max_buffer_size(LOG_BUFFER_SIZE)
         .open_or_create()
     )
-    # 返回值必须存活：Python 绑定里 builder 链式调用返回新对象（`is` 为 False，
-    # 见探针），`service` 局部变量持有服务句柄；订阅端建在服务上（不弃置）。
     return service.subscriber_builder().buffer_size(LOG_BUFFER_SIZE).create()
 
 
@@ -343,7 +317,6 @@ def _writer_loop(inbox: queue.Queue) -> None:
     否则其后全部日志/可视化静默丢失）。
     """
     import itertools
-    import traceback
 
     seq = itertools.count()
     buf: list = []
@@ -362,27 +335,16 @@ def _writer_loop(inbox: queue.Queue) -> None:
                 deadline = time.monotonic() + FLUSH_PERIOD
         except queue.Empty:
             pass
-        except Exception:  # noqa: BLE001 - 落盘线程永不退出
-            print("[firefly-viz] writer 入队异常（跳过）：", flush=True)
-            traceback.print_exc()
-        if time.monotonic() >= deadline and buf:
+        except Exception:
+            logger.exception("writer 入队异常（跳过）")
+        if time.monotonic() >= deadline:
             _flush_sorted(buf)
             buf.clear()
             deadline = time.monotonic() + FLUSH_PERIOD
-    for ts, _, kind, payload in sorted(buf):
-        try:
-            if kind == "viz":
-                msg, trace_id = payload
-                _handle(msg, trace_id)
-            else:
-                _log_text(payload)
-        except Exception:  # noqa: BLE001 - 退出排空尽力而为
-            traceback.print_exc()
+    _flush_sorted(buf)
 
 
 def _flush_sorted(buf: list) -> None:
-    import traceback
-
     for _, _, kind, payload in sorted(buf):
         try:
             if kind == "viz":
@@ -391,12 +353,12 @@ def _flush_sorted(buf: list) -> None:
             else:
                 _log_text(payload)
         except Exception:  # noqa: BLE001 - 单条坏消息不杀落盘线程
-            print("[firefly-viz] writer 落盘异常（跳过本条）：", flush=True)
-            traceback.print_exc()
+            logger.exception("writer 落盘异常（跳过本条）")
 
 
 def main() -> None:
     # native 段错误时打 Python 栈（`rerun` 底层是 Rust，裸 `SIGSEGV` 否则无信息）。
+    logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
     faulthandler.enable()
     args = _parse_args()
     if args.save and args.serve:
@@ -411,8 +373,8 @@ def main() -> None:
     # 发布；iceoryx2 `open_or_create` 语义：先创建方定上限，后续 open 必须 ≤
     # 该值——Rust 发布端只 `open` 不创建，见 `LogPublisher::new`）。
     # 预创建返回的订阅端即本进程的 Log 订阅端（服务句柄由其持有，不另建）。
-    log_sub = _precreate_log_service(node)
-    log(f"iceoryx2 已订阅 {TOPIC_VIZ} + {TOPIC_LOG}（Rust 计算线程零 IO，统一写 rerun）")
+    log_sub = _subscribe_logs(node)
+    logger.info("iceoryx2 已订阅 %s + %s（Rust 计算线程零 IO，统一写 rerun）", TOPIC_VIZ, TOPIC_LOG)
     inbox: queue.Queue = queue.Queue(maxsize=QUEUE_MAX)
     writer = threading.Thread(target=_writer_loop, args=(inbox,), name="firefly-viz-writer", daemon=True)
     writer.start()
@@ -423,7 +385,7 @@ def main() -> None:
             while (sample := viz_sub.receive()) is not None:
                 header = sample.user_header().contents
                 trace_id = f"{header.trace_id_hi:016x}{header.trace_id_lo:016x}"
-                # 深拷贝后进队（见 `detach_copy`：别名滞留即撕裂读/`SIGSEGV`）。
+                # 队列持有独立副本，不能保留 IPC loan 的别名。
                 msg = detach_copy(sample.payload().contents)
                 if _enqueue(inbox, ("viz", float(msg.timestamp), (msg, trace_id))):
                     dropped += 1
@@ -437,12 +399,20 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        inbox.put(None)
-        writer.join(timeout=5.0)
+        _stop_writer(inbox, writer)
+        rr.disconnect()
         if dropped:
-            log(f"退出（队列满丢弃 {dropped} 条）")
+            logger.info("退出（队列满丢弃 %s 条）", dropped)
         else:
-            log("退出")
+            logger.info("退出")
+
+
+def _stop_writer(inbox: queue.Queue, writer: threading.Thread) -> None:
+    """退出哨兵排在所有已接收消息之后；超时必须报告录制未完成。"""
+    inbox.put(None, timeout=5.0)
+    writer.join(timeout=5.0)
+    if writer.is_alive():
+        raise RuntimeError("firefly-viz writer did not finish draining")
 
 
 def _enqueue(inbox: queue.Queue, item) -> bool:

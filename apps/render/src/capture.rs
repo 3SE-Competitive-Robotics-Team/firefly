@@ -18,13 +18,13 @@ use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::GpuResourceAppExt;
 use bevy::render::Render;
+use bevy::render::extract_component::ExtractComponentPlugin;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::{
     Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, MapMode, Origin3d,
     PollType, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
-use bevy::render::sync_world::RenderEntity;
 use bevy::render::texture::GpuImage;
 use bevy::render::view::ViewDepthStencilTexture;
 use bevy::render::{Extract, RenderSystems};
@@ -160,7 +160,7 @@ struct CaptureSet {
 #[derive(Resource)]
 struct CaptureBuffers {
     /// 双缓冲组。
-    sets: Vec<CaptureSet>,
+    sets: [CaptureSet; CAPTURE_SETS],
 }
 
 impl FromWorld for CaptureBuffers {
@@ -172,25 +172,13 @@ impl FromWorld for CaptureBuffers {
             usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
         };
-        let sets = (0..CAPTURE_SETS)
-            .map(|_| CaptureSet {
-                left: device.create_buffer(&desc),
-                right: device.create_buffer(&desc),
-                depth: device.create_buffer(&desc),
-                pending: Arc::new(AtomicU32::new(0)),
-            })
-            .collect();
+        let sets = std::array::from_fn(|_| CaptureSet {
+            left: device.create_buffer(&desc),
+            right: device.create_buffer(&desc),
+            depth: device.create_buffer(&desc),
+            pending: Arc::new(AtomicU32::new(0)),
+        });
         Self { sets }
-    }
-}
-
-/// 透传 rig 标记到渲染世界（渲染世界的相机实体靠它辨认深度相机）。
-#[allow(clippy::needless_pass_by_value)]
-fn extract_eyes(query: Extract<Query<(RenderEntity, &Eye)>>, mut commands: Commands) {
-    for (entity, eye) in &query {
-        if let Ok(mut target) = commands.get_entity(entity) {
-            target.insert(*eye);
-        }
     }
 }
 
@@ -357,6 +345,7 @@ pub struct CapturePlugin;
 
 impl Plugin for CapturePlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugins(ExtractComponentPlugin::<Eye>::default());
         let hub = app.world().resource::<CaptureHub>().clone();
         let render_app = app.sub_app_mut(bevy::render::RenderApp);
         // 暂存缓冲必须等渲染设备就绪后创建（`RenderDevice` 在插件
@@ -366,10 +355,7 @@ impl Plugin for CapturePlugin {
             .insert_resource(hub)
             .init_resource::<ExtractedRequest>()
             .init_gpu_resource::<CaptureBuffers>()
-            .add_systems(
-                bevy::render::ExtractSchedule,
-                (extract_eyes, extract_request),
-            )
+            .add_systems(bevy::render::ExtractSchedule, extract_request)
             .add_systems(
                 Render,
                 copy_sensors

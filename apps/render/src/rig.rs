@@ -10,9 +10,10 @@ use bevy::camera::{Camera, ClearColorConfig, Exposure, Projection, RenderTarget}
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::image::Image;
 use bevy::prelude::*;
+use bevy::render::RenderApp;
+use bevy::render::extract_component::ExtractComponent;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
-use bevy::render::view::Msaa;
-use bevy::render::view::Tonemapping;
+use bevy::render::view::{Msaa, Tonemapping};
 use bevy::ui::IsDefaultUiCamera;
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_WIDTH};
 use firefly_pubsub::trace::TraceContext;
@@ -54,7 +55,8 @@ pub const VOXEL_LAYER: usize = 2;
 pub const PATH_LAYER: usize = 3;
 
 /// rig 相机标记（主世界→渲染世界的透传标记，见 [`crate::capture`]）。
-#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug, ExtractComponent)]
+#[extract_app(RenderApp)]
 pub enum Eye {
     /// 左目 RGB（发布 `Firefly/CameraLeft` 的灰度源）。
     Left,

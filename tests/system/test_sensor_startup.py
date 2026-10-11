@@ -6,14 +6,11 @@ GroundTruth 仅供 render 合成图像；屏蔽 PlantState，算法只使用 IMU
 """
 from __future__ import annotations
 
-from collections import deque
 from datetime import datetime, timezone
 import os
 from pathlib import Path
-import signal
 import subprocess
 import sys
-import threading
 import time
 import tomllib
 
@@ -22,6 +19,8 @@ import numpy as np
 import pytest
 
 from firefly_mujoco import ControlMessage, DepthImageMessage, OdomMessage, TraceContext
+
+from process_lifecycle import ManagedProcess, isolated_run
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -32,6 +31,11 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_sensor_startup() -> None:
+    with isolated_run(ROOT):
+        _sensor_startup()
+
+
+def _sensor_startup() -> None:
     from firefly_mujoco import build_scene, load_scene_name
     load_scene_name()
     build_scene()
@@ -45,22 +49,15 @@ def test_sensor_startup() -> None:
     output.parent.mkdir(exist_ok=True)
     env = os.environ.copy()
     env.update(RUST_LOG="info")
-    processes: list[tuple[str, subprocess.Popen, deque[str]]] = []
+    processes: dict[str, ManagedProcess] = {}
 
     def start(name: str, command: list[str]) -> None:
-        process = subprocess.Popen(command, cwd=ROOT, env=env,
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        tail: deque[str] = deque(maxlen=30)
-        def drain() -> None:
-            for line in process.stdout:
-                tail.append(line.rstrip())
-        threading.Thread(target=drain, daemon=True).start()
-        processes.append((name, process, tail))
+        processes[name] = ManagedProcess(command, cwd=ROOT, env=env)
 
     def check_alive() -> None:
-        for name, process, tail in processes:
-            if process.poll() is not None:
-                raise RuntimeError(f"{name} exited ({process.returncode}):\n" + "\n".join(tail))
+        for name, child in processes.items():
+            if child.process.poll() is not None:
+                raise RuntimeError(f"{name} exited ({child.process.returncode}):\n" + "\n".join(child.tail))
 
     try:
         start("viz", [sys.executable, "-m", "firefly_viz.main", "--save", str(output)])
@@ -131,7 +128,7 @@ sim.main()
                 break
             time.sleep(0.01)
         if first_ready is None:
-            diagnostics = "\n".join(f"{name}:\n" + "\n".join(tail) for name, _, tail in processes)
+            diagnostics = "\n".join(f"{name}:\n" + "\n".join(child.tail) for name, child in processes.items())
             raise AssertionError("传感器启动未就绪\n" + diagnostics)
         assert first_ready >= 1.0, "不得跳过静止观测窗口"
         assert np.linalg.norm(first_position) < 0.1, f"初始位置应为局部原点: {first_position}"
@@ -143,13 +140,13 @@ sim.main()
     finally:
         # 只停止本次创建的进程；SIGINT 触发端口 Drop 与录制 flush。
         failures = []
-        for name, process, _ in reversed(processes):
-            if process.poll() is None:
-                process.send_signal(signal.SIGINT)
-                try:
-                    process.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    failures.append(f"{name} 未能优雅退出，PID={process.pid}")
+        for name, child in reversed(processes.items()):
+            try:
+                code = child.stop()
+                if code != 0:
+                    failures.append(f"{name} 退出码={code}，PID={child.pid}")
+            except (subprocess.TimeoutExpired, RuntimeError, OSError) as error:
+                failures.append(f"{name} 未能完整退出，PID={child.pid}: {error}")
         print(f"recording: {output}")
         if failures:
             raise RuntimeError("; ".join(failures))

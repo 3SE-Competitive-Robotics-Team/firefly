@@ -115,7 +115,7 @@ def test_preflight_failure_returns_nonzero_and_keeps_report(tmp_path, monkeypatc
     cli = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cli)
     monkeypatch.setattr(cli, "ROOT", tmp_path)
-    monkeypatch.setattr(cli, "active_processes", lambda: [])
+    monkeypatch.setattr(cli, "require_idle", lambda root: None)
     assert cli.main(["--config", str(tmp_path / "missing.toml")]) == 1
     reports = list((tmp_path / "logs/acceptance").glob("*/report.json"))
     assert len(reports) == 1
@@ -132,7 +132,7 @@ def test_repeated_failures_keep_four_distinct_recordings(tmp_path, monkeypatch):
     cli = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cli)
     monkeypatch.setattr(cli, "ROOT", tmp_path)
-    monkeypatch.setattr(cli, "active_processes", lambda: [])
+    monkeypatch.setattr(cli, "require_idle", lambda root: None)
     monkeypatch.setattr(cli, "provenance", lambda: {})
     monkeypatch.setattr(cli, "score", lambda case, options: case)
 

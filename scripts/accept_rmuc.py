@@ -3,7 +3,6 @@
 import argparse
 from dataclasses import asdict
 from datetime import datetime, timezone
-import fcntl
 import hashlib
 from html import escape
 from importlib.metadata import version
@@ -22,6 +21,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests/system"))
 sys.path.insert(0, str(ROOT / "tests/evaluation"))
 from mission import Mission, Options
+from process_lifecycle import require_idle
 from mission_metrics import score
 from mission_sim import CONTACT_POLICY
 from collect_vision_map import verify_map_compatibility
@@ -113,23 +113,6 @@ def provenance(*, allow_map_rig_translation=False, vio_only=False):
             "dependencies": {name: version(name) for name in ["numpy", "mujoco", "iceoryx2", "rerun-sdk"]}}
 
 
-def active_processes():
-    """只识别本仓库的闭环进程；有其他任务占用时拒绝运行，不终止它们。"""
-    found = []
-    binaries = {str(ROOT / "target/release" / name) for name in ["vio", "render", "fc", "localization", "planner", "aliked", "lightglue"]}
-    for path in Path("/proc").glob("[0-9]*/cmdline"):
-        try:
-            args = path.read_bytes().decode().split("\0")
-            cwd = (path.parent / "cwd").resolve()
-            if args[0] in binaries or (cwd == ROOT and any(arg in {
-                "firefly_sim.main", "firefly_viz.main", str(ROOT / "tests/system/mission_sim.py")
-            } for arg in args)):
-                found.append(int(path.parent.name))
-        except (OSError, UnicodeError):
-            continue
-    return found
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=ROOT / "configs/acceptance.toml")
@@ -154,12 +137,8 @@ def main(argv=None):
               "repeat": args.repeat, "scope": "RMUC fixed-pad mission; VIO + ALIKED-N16 + LightGlue + localization + planner; online loop diagnostics reported separately"}
     if args.vio_only:
         report["scope"] = "RMUC fixed-pad mission; VIO + fixed startup prior + planner; no independent visual correction or loop closure"
-    lock = (ROOT / "logs/acceptance.lock").open("w")
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        occupied = active_processes()
-        if occupied:
-            raise RuntimeError(f"repository flight processes already running: {occupied}")
+        require_idle(ROOT)
         with args.config.open("rb") as stream:
             options = Options(**tomllib.load(stream))
         options.validate()
@@ -197,7 +176,6 @@ def main(argv=None):
         log.error("验收中断：%s", error)
     finally:
         save_report(directory, report)
-        lock.close()
         log.info("可追溯报告：%s", directory / "report.html")
     return 0 if report["status"] == "passed" else 1
 
