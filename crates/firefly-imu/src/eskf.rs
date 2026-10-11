@@ -23,6 +23,14 @@ pub struct Gate {
     pub accepted: bool,
 }
 
+/// 六维外援创新检验与 CI 权重；未计算的量用 None 表示。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Intersection {
+    pub accepted: bool,
+    pub nis: Option<f64>,
+    pub local_weight: Option<f64>,
+}
+
 #[must_use]
 pub fn right_jacobian(phi: Vector3<f64>) -> Matrix3<f64> {
     let a = phi.norm();
@@ -169,10 +177,17 @@ impl AttitudeState {
     /// 外部状态无效或矩阵非正定。
     #[fastrace::trace]
     pub fn intersect(&mut self, external: &Self) -> Result<bool> {
+        Ok(self.intersect_diagnostic(external)?.accepted)
+    }
+
+    /// 与 `intersect` 相同，附带实际门控统计量和本地分布权重。
+    /// # Errors
+    /// 外部状态或信息矩阵无效。
+    pub fn intersect_diagnostic(&mut self, external: &Self) -> Result<Intersection> {
         external.validate()?;
         let delta = (self.rotation.inverse() * external.rotation).scaled_axis();
         if delta.norm() > 0.5 {
-            return Ok(false);
+            return Ok(Intersection::default());
         }
         let mut dx = Vector6::zeros();
         dx.fixed_rows_mut::<3>(0).copy_from(&delta);
@@ -189,8 +204,12 @@ impl AttitudeState {
         let bound = ((self.covariance + pe) * 2.)
             .cholesky()
             .ok_or_else(|| invalid("invalid aid covariance"))?;
-        if dx.dot(&bound.solve(&dx)) > 22.457_744_484_825_323 {
-            return Ok(false);
+        let nis = dx.dot(&bound.solve(&dx));
+        if nis > 22.457_744_484_825_323 {
+            return Ok(Intersection {
+                nis: Some(nis),
+                ..Intersection::default()
+            });
         }
         let a = self
             .covariance
@@ -202,6 +221,7 @@ impl AttitudeState {
             .ok_or_else(|| invalid("invalid external covariance"))?
             .inverse();
         let mut best = (f64::INFINITY, Matrix6::zeros(), Vector6::zeros());
+        let mut local_weight = 1.;
         for i in 0..=20 {
             let w = f64::from(i) / 20.;
             let info = (a * w + b * (1. - w))
@@ -210,10 +230,15 @@ impl AttitudeState {
             let score = -2. * info.l().diagonal().map(f64::ln).sum();
             if score < best.0 {
                 best = (score, info.inverse(), info.solve(&(b * dx * (1. - w))));
+                local_weight = w;
             }
         }
         self.covariance = best.1;
         self.inject(best.2);
-        Ok(true)
+        Ok(Intersection {
+            accepted: true,
+            nis: Some(nis),
+            local_weight: Some(local_weight),
+        })
     }
 }

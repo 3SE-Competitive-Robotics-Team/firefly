@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use firefly_planner::State;
+use firefly_pubsub::navigation::NavigationMessage;
 use firefly_pubsub::odom::OdomMessage;
 use nalgebra::{Isometry3, Point3, Translation3, UnitQuaternion, Vector3};
 
@@ -63,14 +64,74 @@ impl Snapshot {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct StateInput {
     history: VecDeque<Snapshot>,
     last_receive: Option<Instant>,
     stopped: bool,
+    navigation: Option<NavigationMessage>,
+    revised: bool,
 }
 
 impl StateInput {
+    /// 接收快照保留规划线程尚未处理的坐标版本变更。
+    pub fn replace_snapshot(&mut self, mut snapshot: Self) {
+        snapshot.revised |= self.revised;
+        *self = snapshot;
+    }
+
+    pub fn stop(&mut self) {
+        self.stopped = true;
+    }
+
+    /// 版本与位姿原子接收；跨修正版本禁止深度插值。
+    pub fn observe_navigation(&mut self, message: &NavigationMessage, now: Instant) -> bool {
+        self.check_timeout(now);
+        if message.alignment().is_err() {
+            self.stopped |= self.last_receive.is_some();
+            return false;
+        }
+        if let Some(old) = self.navigation {
+            if message.odom.timestamp <= old.odom.timestamp || message.revision < old.revision {
+                return false;
+            }
+            if message.revision == old.revision
+                && (message.alignment().unwrap().matrix() - old.alignment().unwrap().matrix())
+                    .norm()
+                    > 1e-9
+            {
+                self.stopped = true;
+                return false;
+            }
+        }
+        if !self.observe(&message.odom, now) {
+            return false;
+        }
+        if self
+            .navigation
+            .is_some_and(|old| old.revision != message.revision)
+        {
+            let latest = self.history.pop_back().unwrap();
+            self.history.clear();
+            self.history.push_back(latest);
+            self.revised = true;
+        }
+        self.navigation = Some(*message);
+        true
+    }
+
+    pub const fn revision_changed(&self) -> bool {
+        self.revised
+    }
+
+    pub fn take_revision_change(&mut self) -> bool {
+        std::mem::take(&mut self.revised)
+    }
+
+    pub fn navigation(&self) -> Option<NavigationMessage> {
+        self.navigation
+    }
+
     /// 有效状态建立后，失联或无效状态锁存停止；接收新包不能掩盖已发生的超时。
     pub fn observe(&mut self, message: &OdomMessage, now: Instant) -> bool {
         self.check_timeout(now);
@@ -185,6 +246,41 @@ mod tests {
         }
     }
 
+    fn navigation(t: f64, revision: u64, shift: f64) -> NavigationMessage {
+        let alignment = firefly_base::RigidTransform::from_parts(
+            firefly_base::FrameId::MAP,
+            firefly_base::FrameId::ODOM,
+            [shift, 0., 0.],
+            [0., 0., 0., 1.],
+        )
+        .unwrap();
+        NavigationMessage::new(message(t), &alignment, revision)
+    }
+
+    #[test]
+    fn revision_discards_interpolation_across_loop_correction() {
+        let mut input = StateInput::default();
+        let now = Instant::now();
+        assert!(input.observe_navigation(&navigation(1., 0, 0.), now));
+        assert!(input.observe_navigation(&navigation(1.1, 0, 0.), now));
+        assert!(input.pose_at(1.05).is_some());
+        assert!(input.observe_navigation(&navigation(1.2, 1, 2.), now));
+        assert!(input.take_revision_change());
+        assert!(input.pose_at(1.15).is_none());
+        assert!(input.pose_at(1.2).is_some());
+        assert!(!input.observe_navigation(&navigation(1.3, 0, 0.), now));
+        assert!(!input.take_revision_change());
+    }
+
+    #[test]
+    fn unversioned_transform_change_stops_planning() {
+        let mut input = StateInput::default();
+        let now = Instant::now();
+        input.observe_navigation(&navigation(1., 0, 0.), now);
+        assert!(!input.observe_navigation(&navigation(1.1, 0, 1.), now));
+        assert!(input.stopped());
+    }
+
     #[test]
     fn waits_for_initialized_finite_state() {
         let mut input = StateInput::default();
@@ -221,6 +317,47 @@ mod tests {
         input.observe(&message(1.0), now);
         assert!(!input.observe(&message(2.0), now + Duration::from_secs(1)));
         assert!(input.current(now + Duration::from_secs(1)).is_none());
+    }
+
+    #[test]
+    fn slow_planning_does_not_expire_continuously_received_state() {
+        let now = Instant::now();
+        let mut receiver = StateInput::default();
+        receiver.observe_navigation(&navigation(1., 0, 0.), now);
+        let mut planner = receiver.clone();
+        for i in 1..=100 {
+            assert!(receiver.observe_navigation(
+                &navigation(1. + f64::from(i) / 100., 0, 0.),
+                now + Duration::from_millis(i as u64 * 10),
+            ));
+        }
+        planner.replace_snapshot(receiver.clone());
+        assert_eq!(
+            planner
+                .current(now + Duration::from_secs(1))
+                .unwrap()
+                .timestamp,
+            2.
+        );
+        receiver.current(now + Duration::from_secs(2));
+        planner.replace_snapshot(receiver);
+        assert!(planner.current(now + Duration::from_secs(2)).is_none());
+        assert!(planner.stopped());
+    }
+
+    #[test]
+    fn repeated_snapshots_preserve_unhandled_coordinate_revision() {
+        let now = Instant::now();
+        let mut receiver = StateInput::default();
+        receiver.observe_navigation(&navigation(1., 0, 0.), now);
+        let mut planner = receiver.clone();
+        receiver.observe_navigation(&navigation(1.1, 1, 2.), now);
+        planner.replace_snapshot(receiver.clone());
+        receiver.take_revision_change();
+        planner.replace_snapshot(receiver.clone());
+        assert!(planner.take_revision_change());
+        planner.replace_snapshot(receiver);
+        assert!(!planner.take_revision_change());
     }
 
     #[test]

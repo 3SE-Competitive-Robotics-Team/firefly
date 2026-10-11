@@ -9,10 +9,12 @@ from metrics import compute_metrics, interp_linear
 def read_evidence(path):
     reader = RrdReader(path)
     rows = {}
+    aliases = {"fc/imu/health": "imu_health", "fc/imu/quaternion_xyzw": "imu_attitude",
+                   "fc/debug/state": "fc_state"}
     for store in reader.recordings():
         for chunk in reader.stream(store=store):
             entity = chunk.entity_path.lstrip("/")
-            if not entity.startswith("acceptance/") or chunk.is_static:
+            if (not entity.startswith("acceptance/") and entity not in aliases) or chunk.is_static:
                 continue
             batch = chunk.to_record_batch()
             if "sim_time" not in batch.schema.names:
@@ -26,7 +28,7 @@ def read_evidence(path):
                 values = batch.column("Scalars:scalars").to_pylist()
             else:
                 continue
-            rows.setdefault(entity.removeprefix("acceptance/"), []).extend(
+            rows.setdefault(aliases.get(entity, entity.removeprefix("acceptance/")), []).extend(
                 (t / 1e9, *v) for t, v in zip(times, values) if t is not None and v is not None)
     result = {}
     for entity, values in rows.items():
@@ -105,8 +107,52 @@ def settled_truth(data, end, seconds, goal, tolerance, speed):
                          "max_speed_mps": float(velocities.max())}
 
 
+def landing_truth(data, phase, options):
+    """固定上锁后等待期之后的静止窗口；触地冲击由全过程接触策略独立评分。"""
+    if phase.get("status") != "passed":
+        raise ValueError("landing did not complete")
+    metrics = phase["metrics"]
+    rest_start = metrics["rest_start_sim_s"]
+    end = phase["end_sim_s"]
+    if (not np.isfinite([rest_start, end, metrics["disarmed_sim_s"]]).all()
+            or abs(rest_start - metrics["disarmed_sim_s"] - options.landing_settle_seconds) > 1e-6
+            or end - options.landing_rest_seconds < rest_start - 1e-6
+            or end - options.landing_rest_seconds > rest_start + .3):
+        raise ValueError("landing rest window does not match fixed post-disarm timing")
+    goal = data["gt"][0, 1:4].copy()
+    passed, result = settled_truth(data, end, options.landing_rest_seconds, goal,
+                                  np.array([options.hover_xy_error_m] * 2 + [.08]), .1)
+    result.update(disarmed_sim_s=metrics["disarmed_sim_s"], rest_start_sim_s=rest_start,
+                  settle_seconds=options.landing_settle_seconds)
+    return passed, result
+
+
+def startup_truth(data):
+    """仅评分换坐标：由首个真值样本定义会话原点，禁止拟合后续轨迹或反馈算法。"""
+    result = dict(data)
+    truth = data["gt"].copy()
+    origin = truth[0, 1:4].copy()
+    x, y, z, w = truth[0, 4:8]
+    yaw = np.arctan2(2 * (w*z + x*y), 1 - 2 * (y*y + z*z))
+    c, s = np.cos(yaw), np.sin(yaw)
+    rotation = np.array([[c, -s, 0.], [s, c, 0.], [0., 0., 1.]])
+    truth[:, 1:4] = (truth[:, 1:4] - origin) @ rotation
+    c, s = np.cos(-yaw / 2), np.sin(-yaw / 2)
+    x, y, z, w = truth[:, 4:8].copy().T
+    truth[:, 4:8] = np.column_stack((c*x-s*y, c*y+s*x, c*z+s*w, c*w-s*z))
+    result["gt"] = truth
+    if "gt_velocity" in data:
+        velocity = data["gt_velocity"].copy()
+        velocity[:, 1:4] = velocity[:, 1:4] @ rotation
+        result["gt_velocity"] = velocity
+    return result, {"method": "first_truth_sample_startup_frame", "origin_world_m": origin.tolist(),
+                    "yaw_world_rad": float(yaw), "trajectory_fitting": False, "feedback_to_algorithms": False}
+
+
 def score(case, options):
     data = read_evidence(case["recording"])
+    if case.get("map_frame") == "startup_session":
+        data, case["evaluation_frame"] = startup_truth(data)
     stages = case["stages"]
     def check(name, action):
         try:
@@ -142,17 +188,15 @@ def score(case, options):
         return (result["ate_rmse"] <= options.vio_ate_rmse_m
                 and result["rpe_rmse_1s"] is not None and result["rpe_rmse_1s"] <= options.vio_rpe_rmse_m), result
     check("vio_accuracy", vio)
-    for name, seconds, speed in [("hover", options.hover_seconds, options.hover_speed_mps),
-                                  ("landing", 1., .1)]:
-        phase = stages.get(name, {})
-        if phase.get("status") == "passed":
-            goal = data["gt"][0, 1:4].copy()
-            if name == "hover":
-                goal[2] += options.altitude_m
-                tolerance = np.array([options.hover_xy_error_m] * 2 + [options.hover_height_error_m])
-            else:
-                tolerance = np.array([options.hover_xy_error_m] * 2 + [.08])
-            check(name + "_accuracy", lambda: settled_truth(data, phase["end_sim_s"], seconds, goal, tolerance, speed))
+    phase = stages.get("hover", {})
+    if phase.get("status") == "passed":
+        goal = data["gt"][0, 1:4].copy()
+        goal[2] += options.altitude_m
+        tolerance = np.array([options.hover_xy_error_m] * 2 + [options.hover_height_error_m])
+        check("hover_accuracy", lambda: settled_truth(data, phase["end_sim_s"], options.hover_seconds,
+                                                    goal, tolerance, options.hover_speed_mps))
+    if stages.get("landing", {}).get("status") == "passed":
+        check("landing_accuracy", lambda: landing_truth(data, stages["landing"], options))
     if stages.get("failure_hold", {}).get("status") == "passed":
         def hold_accuracy():
             truth = data["gt"]
@@ -205,6 +249,9 @@ def score(case, options):
     backend = data.get("loop_backend", np.empty((0, 4)))
     max_candidates = int(frontend[:, 2].max()) if len(frontend) else None
     accepted_loops = int(backend[:, 1].max()) if len(backend) else 0 if len(frontend) else None
+    if case.get("localization_mode") == "online_slam" and case["case"] == "nominal":
+        stages["online_loop"] = {"status": "passed" if accepted_loops else "failed",
+                                 "metrics": {"accepted_constraints": accepted_loops, "required": 1}}
     case["mission_summary"] = {
         "waypoint_arrivals": case.get("waypoint_arrivals", []),
         "waypoints_required": len(options.waypoints) if case["case"] == "nominal" else 0,

@@ -86,7 +86,7 @@ def visible_fraction(boxes, position, yaw):
     """相机标定射线与静态碰撞盒的粗可见性；真实纹理质量由渲染帧再检查。"""
     focal = 120. / np.tan(np.deg2rad(70.88/2))
     u,v = np.meshgrid(np.linspace(32,288,7), np.linspace(24,216,5))
-    dx,dy = (u.ravel()-160)/focal, -(v.ravel()-120)/focal
+    dx,dy = (u.ravel()-(W-1)/2)/focal, -(v.ravel()-(H-1)/2)/focal
     tilt,angle = np.deg2rad(20.),np.deg2rad(yaw)
     rays = np.stack([np.cos(tilt)+np.sin(tilt)*dy,-dx,-np.sin(tilt)+np.cos(tilt)*dy],axis=1)
     rotation = np.array([[np.cos(angle),-np.sin(angle),0],[np.sin(angle),np.cos(angle),0],[0,0,1.]])

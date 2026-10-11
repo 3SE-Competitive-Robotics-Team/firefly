@@ -119,19 +119,11 @@ impl Default for EnvConfig {
 }
 
 /// 体素显示配置。
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct VoxelsConfig {
     /// 静态场地 `.ffmap` 路径（相对仓库根；缺文件则静态层不显示）。
-    pub field_map: String,
-}
-
-impl Default for VoxelsConfig {
-    fn default() -> Self {
-        Self {
-            field_map: "apps/planner/maps/rmuc2026.ffmap".to_owned(),
-        }
-    }
+    pub field_map: Option<String>,
 }
 
 /// `configs/render.toml` 顶层：场景光照、相机曝光与深度退化。
@@ -179,6 +171,7 @@ pub struct AssetContract {
     depth_labels: &'static str,
     width: usize,
     height: usize,
+    principal_point: [f64; 2],
     fov_y_deg: f32,
     downtilt_deg: f32,
     left_offset: [f32; 3],
@@ -196,6 +189,10 @@ impl RenderConfig {
             depth_labels: "ideal_geometry_z",
             width: firefly_pubsub::camera::IMAGE_WIDTH,
             height: firefly_pubsub::camera::IMAGE_HEIGHT,
+            principal_point: firefly_base::rig::principal_point(
+                firefly_pubsub::camera::IMAGE_WIDTH,
+                firefly_pubsub::camera::IMAGE_HEIGHT,
+            ),
             fov_y_deg: crate::rig::FOV_Y_DEG,
             downtilt_deg: crate::rig::DOWNTILT_DEG,
             left_offset: crate::rig::LEFT_OFFSET.to_array(),

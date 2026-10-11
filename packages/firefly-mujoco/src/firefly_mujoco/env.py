@@ -160,8 +160,10 @@ class DroneEnv:
         self.data.ctrl[self._rotor_ids] = t
 
     def step(self) -> None:
-        """推进一个物理步。"""
+        """推进一个物理步，并将位姿、接触与传感器缓存刷新到 data.time。"""
         mujoco.mj_step(self.model, self.data)
+        # mj_step 最后才积分 qpos/qvel；发布前必须刷新依赖状态的派生量。
+        mujoco.mj_forward(self.model, self.data)
 
     # ---- 传感器 ----
 

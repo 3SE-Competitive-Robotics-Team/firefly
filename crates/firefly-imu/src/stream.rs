@@ -1,5 +1,5 @@
 //! 测量时钟、静止窗口与有界延迟重放；不接受跨 VIO 会话外援。
-use crate::{AttitudeState, Gate, Matrix6, Options, invalid};
+use crate::{AttitudeState, Gate, Intersection, Matrix6, Options, invalid};
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{UnitQuaternion, Vector3};
 use std::collections::VecDeque;
@@ -35,14 +35,16 @@ pub struct Estimator {
     window: VecDeque<Sample>,
     latest: Option<Sample>,
     state: Option<AttitudeState>,
+    /// 仅由原始 IMU 更新的本地分支；CI 后验只供控制输出，禁止回灌。
+    inertial: Option<AttitudeState>,
     rate: Vector3<f64>,
     continuous: bool,
     aligned: bool,
     session: Option<u64>,
     session_fault: bool,
-    /// 同一 IMU 区间内可有多次外援；保留最近外援时刻的后验。
-    aid_checkpoint: Option<(f64, AttitudeState)>,
+    last_aid: Option<f64>,
     gate: Gate,
+    aid_gate: Intersection,
 }
 impl Estimator {
     /// # Errors
@@ -55,13 +57,15 @@ impl Estimator {
             window: VecDeque::with_capacity(STATIONARY_CAPACITY),
             latest: None,
             state: None,
+            inertial: None,
             rate: Vector3::zeros(),
             continuous: true,
             aligned: false,
             session: None,
             session_fault: false,
-            aid_checkpoint: None,
+            last_aid: None,
             gate: Gate::default(),
+            aid_gate: Intersection::default(),
         })
     }
     #[must_use]
@@ -81,10 +85,12 @@ impl Estimator {
         self.gate
     }
     #[must_use]
+    pub const fn aid_gate(&self) -> Intersection {
+        self.aid_gate
+    }
+    #[must_use]
     pub fn last_aid(&self) -> Option<f64> {
-        self.aid_checkpoint
-            .as_ref()
-            .map(|(timestamp, _)| *timestamp)
+        self.last_aid
     }
 
     /// 每个时间戳只消费一次；只有地面允许静止初始化与加计修正。
@@ -137,14 +143,19 @@ impl Estimator {
                 bias: gyro,
                 covariance,
             });
+            self.inertial = self.state.clone();
             self.rate = sample.gyro - gyro;
         } else if let Some(state) = &mut self.state {
+            if let Some(inertial) = &mut self.inertial {
+                inertial.predict(sample.gyro, dt, &self.options)?;
+                inertial.correct_accel(sample.accel, dt, stationary, &self.options)?;
+            }
             state.predict(sample.gyro, dt, &self.options)?;
             self.gate = state.correct_accel(sample.accel, dt, stationary, &self.options)?;
             let alpha = 1. - (-std::f64::consts::TAU * self.options.rate_cutoff_hz * dt).exp();
             self.rate += (sample.gyro - state.bias - self.rate) * alpha;
         }
-        if let Some(state) = &self.state {
+        if let Some(state) = &self.inertial {
             if self.history.len() == HISTORY_CAPACITY {
                 self.history.pop_front();
             }
@@ -203,7 +214,7 @@ impl Estimator {
     }
 
     /// 外援在其观测时刻融合，再按已接收 IMU 重放到当前时刻。
-    /// 首次外援确定 odom 航向规范并接管该时刻分布；后续使用 CI。
+    /// 首次外援只确定 odom 航向规范；所有外援均通过 CI 保留静止标定信息。
     /// # Errors
     /// 外援非有限、协方差无效或会话变化。乱序/缓存外外援返回 false。
     #[fastrace::trace]
@@ -242,14 +253,8 @@ impl Estimator {
             return Ok(false);
         };
         let base = &self.history[index];
-        let (base_time, mut state) = self
-            .aid_checkpoint
-            .as_ref()
-            .filter(|(t, _)| *t > base.sample.timestamp)
-            .map_or_else(
-                || (base.sample.timestamp, base.state.clone()),
-                |(t, state)| (*t, state.clone()),
-            );
+        let base_time = base.sample.timestamp;
+        let mut state = base.state.clone();
         if aid.timestamp > base_time {
             state.predict(
                 self.history[index + 1].sample.gyro,
@@ -257,17 +262,36 @@ impl Estimator {
                 &self.options,
             )?;
         }
+        let mut alignment = None;
         if self.session.is_none() {
-            state = aid.state.clone();
-        } else if !state.intersect(&aid.state)? {
+            // 左乘世界竖直轴旋转只改变航向规范，机体系右误差协方差与零偏不变。
+            // 重力确定的倾角和静止陀螺标定不能被首次视觉分布覆盖。
+            let heading = |rotation: &UnitQuaternion<f64>| {
+                let forward = rotation * Vector3::x();
+                if forward.x.hypot(forward.y) < 1e-6 {
+                    return Err(invalid("undefined heading for attitude alignment"));
+                }
+                Ok(forward.y.atan2(forward.x))
+            };
+            let yaw = heading(&aid.state.rotation)? - heading(&state.rotation)?;
+            let rotation = UnitQuaternion::from_scaled_axis(Vector3::z() * yaw);
+            state.rotation = rotation * state.rotation;
+            alignment = Some(rotation);
+        }
+        self.aid_gate = state.intersect_diagnostic(&aid.state)?;
+        if !self.aid_gate.accepted {
             return Ok(false);
         }
-        let posterior = state.clone();
-        if aid.timestamp == self.history[index].sample.timestamp {
-            self.history[index].state = state.clone();
+        if let Some(rotation) = alignment {
+            for step in &mut self.history {
+                step.state.rotation = rotation * step.state.rotation;
+            }
+            if let Some(inertial) = &mut self.inertial {
+                inertial.rotation = rotation * inertial.rotation;
+            }
         }
         let mut previous = aid.timestamp;
-        for step in self.history.iter_mut().skip(index + 1) {
+        for step in self.history.iter().skip(index + 1) {
             state.predict(
                 step.sample.gyro,
                 step.sample.timestamp - previous,
@@ -276,14 +300,13 @@ impl Estimator {
             self.gate =
                 state.correct_accel(step.sample.accel, step.dt, step.stationary, &self.options)?;
             previous = step.sample.timestamp;
-            step.state = state.clone();
         }
         if let Some(old) = &self.state {
             self.rate += old.bias - state.bias;
         }
         self.state = Some(state);
         self.session = Some(aid.session);
-        self.aid_checkpoint = Some((aid.timestamp, posterior));
+        self.last_aid = Some(aid.timestamp);
         self.aligned = true;
         Ok(true)
     }

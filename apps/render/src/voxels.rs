@@ -150,10 +150,17 @@ pub fn setup_gizmo_layers(mut store: ResMut<GizmoConfigStore>) {
 
 /// 画规划路径（`plan/global_path`、`plan/local_traj`）。
 #[allow(clippy::needless_pass_by_value)] // `SystemParam` 契约，与同 crate 其它系统一致
-pub fn draw_paths(paths: Res<Paths>, mut gizmos: Gizmos) {
+pub fn draw_paths(
+    paths: Res<Paths>,
+    overlay: Res<crate::flight_overlay::FlightOverlay>,
+    mut gizmos: Gizmos,
+) {
+    let Some(frame) = overlay.map_to_display else {
+        return;
+    };
     for (points, color) in paths.lines.values() {
         if points.len() >= 2 {
-            gizmos.linestrip(points.iter().copied(), *color);
+            gizmos.linestrip(points.iter().map(|p| frame.transform_point(*p)), *color);
         }
     }
 }
@@ -284,44 +291,45 @@ pub fn setup_voxels(
     config: Res<crate::config::RenderConfig>,
 ) {
     let VoxelsConfig { field_map } = &config.voxels;
-    let field_indices = load_field(field_map);
-    let field_mesh = match field_indices {
-        Some((indices, origin, size)) => meshes.add(cube_mesh(&indices, origin, size, FIELD_FILL)),
-        None => meshes.add(cube_mesh(&[], [0.0; 3], [1.0; 3], FIELD_FILL)),
-    };
-    // 初始给一个退化方块而不是空 mesh：空 mesh 会触发 Bevy `slab_allocator`
-    // 的 use-after-free 报错（实测）。
-    let live_mesh = meshes.add(cube_mesh(&[[0, 0, 0]], [0.0; 3], [f32::EPSILON; 3], 1.0));
-    let field_material = materials.add(StandardMaterial {
-        base_color: FIELD_COLOR,
-        unlit: true,
-        cull_mode: None,
-        alpha_mode: AlphaMode::Opaque,
-        ..default()
-    });
-    let live_material = materials.add(StandardMaterial {
-        base_color: LIVE_COLOR,
-        unlit: true,
-        cull_mode: None,
-        alpha_mode: AlphaMode::Opaque,
-        ..default()
-    });
-    for (mesh, material) in [
-        (field_mesh.clone(), field_material),
-        (live_mesh.clone(), live_material),
-    ] {
+    if let Some((indices, origin, size)) = field_map.as_deref().and_then(load_field)
+        && !indices.is_empty()
+    {
+        let mesh = meshes.add(cube_mesh(&indices, origin, size, FIELD_FILL));
+        let material = materials.add(StandardMaterial {
+            base_color: FIELD_COLOR,
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        });
         commands.spawn((
             Mesh3d(mesh),
             MeshMaterial3d(material),
-            Transform::default(),
-            Visibility::default(),
             RenderLayers::layer(crate::rig::VOXEL_LAYER),
             VoxelLayer,
         ));
     }
+    // 必须保留非空顶点缓冲，避免动态网格替换触发 slab 分配器的空缓冲边界。
+    let live_mesh = meshes.add(cube_mesh(&[[0, 0, 0]], [0.0; 3], [f32::EPSILON; 3], 1.0));
+    let live_material = materials.add(StandardMaterial {
+        base_color: LIVE_COLOR,
+        unlit: true,
+        cull_mode: None,
+        ..default()
+    });
+    commands.spawn((
+        Mesh3d(live_mesh.clone()),
+        MeshMaterial3d(live_material),
+        Visibility::Hidden,
+        RenderLayers::layer(crate::rig::VOXEL_LAYER),
+        VoxelLayer,
+        LiveMapLayer,
+    ));
     commands.insert_resource(VoxelMeshes { live: live_mesh });
     commands.insert_resource(LiveVoxelAccum::default());
 }
+
+#[derive(Component)]
+pub struct LiveMapLayer;
 
 /// 消费 `Firefly/Viz` 的地图、路径与 VIO 点集，按需重建实时层网格。
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
@@ -334,7 +342,17 @@ pub fn update_live_voxels(
     mut paths: ResMut<Paths>,
     wall: Res<Time<Real>>,
     mut keypoints: ResMut<crate::keypoints::KeypointOverlay>,
+    overlay: Res<crate::flight_overlay::FlightOverlay>,
+    mut live_layers: Query<(&mut Transform, &mut Visibility), With<LiveMapLayer>>,
 ) {
+    for (mut transform, mut visible) in &mut live_layers {
+        if let Some(frame) = overlay.map_to_display {
+            transform.set_if_neq(frame);
+            visible.set_if_neq(Visibility::Visible);
+        } else {
+            visible.set_if_neq(Visibility::Hidden);
+        }
+    }
     let Some(sub) = &ports.viz_sub else {
         return;
     };

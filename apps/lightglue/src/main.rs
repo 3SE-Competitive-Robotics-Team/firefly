@@ -1,24 +1,21 @@
-//! ALIKED 特征匹配：离线地图定位与在线 RGB-D 关键帧回环。
-//! `PoseObservation` 表达地图绝对位姿；`LoopConstraint` 表达历史机体到当前机体。
-//! 原始 VIO 与深度由独立线程配对，地图先验仅用于离线库图查询。
+//! ALIKED/LightGlue 离线视觉地图定位；在线路标回环由 slam 进程维护。
 
-mod online;
 mod sensors;
 #[cfg(test)]
 mod validation;
-mod worker;
 
 use firefly_pubsub::event::TopicListener;
+use firefly_pubsub::navigation::{NAVIGATION_TOPIC, NavigationMessage};
 use firefly_pubsub::node::create_node;
-use firefly_pubsub::odom::{CORRECTED_ODOM_TOPIC, OdomMessage};
+use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::publish::Publisher;
-use firefly_pubsub::subscriber::{CorrectedOdomSubscriber, Subscriber};
+use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::vision::{
     DESC_DIM, FEATURE_TOPIC, FeatureMessage, MAX_FEATURES as NUM_POINTS, OBS_SOURCE_VISUAL,
     POSE_OBS_TOPIC, PoseObservation,
 };
 use firefly_vision_map::VisionMap;
-use firefly_vision_match::calibration::{body_pose_to_cam, cam_pose_to_body, focal};
+use firefly_vision_match::calibration::{body_pose_to_cam, cam_pose_to_body, pinhole};
 use firefly_vision_match::{CameraIntrinsics, pose_covariance, solve_visual_pose};
 use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetAttachmentId;
@@ -43,8 +40,8 @@ const MAX_HEADING_DEG: f64 = 60.0;
 /// odom 先验新鲜度（秒），超时跳过本次查询。
 const ODOM_FRESH_TIMEOUT: f64 = 1.0;
 
-/// 解析 `--model/--map`（缺省见 [`DEFAULT_MODEL`]，地图必填）。
-fn parse_args() -> Result<(String, String, String), String> {
+/// 解析模型、显式离线地图与应用配置。
+fn parse_args() -> Result<(String, Option<String>, String), String> {
     let mut it = std::env::args().skip(1);
     let mut model = DEFAULT_MODEL.to_owned();
     let mut map: Option<String> = None;
@@ -65,7 +62,6 @@ fn parse_args() -> Result<(String, String, String), String> {
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    let map = map.ok_or_else(|| "missing --map <map.ffvmap>".to_owned())?;
     Ok((model, map, config))
 }
 
@@ -90,24 +86,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         std::process::exit(2);
     })?;
-    let map = firefly_vision_map::load_map(std::path::Path::new(&map_path)).map_err(|e| {
-        eprintln!("视觉库图加载失败: {e}");
-        std::process::exit(2);
-    })?;
-    log::info!(
-        "视觉库图就绪（{} 帧，{} 点）",
-        map.frames.len(),
-        map.num_points()
-    );
+    let map_path = map_path
+        .ok_or("lightglue requires --map <map.ffvmap>; online loop closure runs in slam")?;
+    let map = firefly_vision_map::load_map(std::path::Path::new(&map_path))?;
+    let options: Options = toml::from_str(&std::fs::read_to_string(config)?)?;
+    if !options.query_period.is_finite() || options.query_period <= 0. {
+        return Err("query_period must be positive".into());
+    }
     let mut session = load_session(&model)?;
     smoke_inference(&mut session)?;
-    let options: online::Options = toml::from_str(&std::fs::read_to_string(config)?)?;
-    options.validate()?;
-    let loop_session = Session::builder()?
-        .with_intra_threads(1)?
-        .commit_from_file(&model)?;
-    run_loop(&mut session, &map, options, loop_session)?;
+    run_loop(&mut session, &map, &options)?;
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Options {
+    /// 查询最小间隔，秒；限制过期特征积压。
+    query_period: f64,
+}
+impl Default for Options {
+    fn default() -> Self {
+        Self { query_period: 1. }
+    }
 }
 
 /// 冒烟推理：零特征自匹配，校验输出形状（`[1,512]` 静态）。
@@ -146,24 +147,16 @@ fn smoke_inference(session: &mut Session) -> Result<(), Box<dyn std::error::Erro
 fn run_loop(
     session: &mut Session,
     map: &VisionMap,
-    options: online::Options,
-    loop_session: Session,
+    options: &Options,
 ) -> Result<(), firefly_error::Error> {
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "lightglue");
     let sensors = sensors::Sensors::start()?;
-    let online = worker::Worker::start(loop_session, options)?;
-    let loop_pub = Publisher::<firefly_pubsub::vision::LoopConstraint>::with_topic(
-        &node,
-        firefly_pubsub::vision::LOOP_TOPIC,
-    )?;
-    let keyframe_pub =
-        Publisher::<OdomMessage>::with_topic(&node, firefly_pubsub::vision::KEYFRAME_TOPIC)?;
     let viz = firefly_pubsub::viz::VizPublisher::new(&node)?;
     let feat_sub = Subscriber::<FeatureMessage>::with_topic(&node, FEATURE_TOPIC)?;
     log::info!("已订阅特征话题 {FEATURE_TOPIC}");
-    let corrected_sub = CorrectedOdomSubscriber::new(&node)?;
-    log::info!("已订阅地图系里程计 {CORRECTED_ODOM_TOPIC}（查询先验）");
+    let corrected_sub = Subscriber::<NavigationMessage>::with_topic(&node, NAVIGATION_TOPIC)?;
+    log::info!("已订阅地图系里程计 {NAVIGATION_TOPIC}（查询先验）");
     let obs_pub = Publisher::<PoseObservation>::with_topic(&node, POSE_OBS_TOPIC)?;
     log::info!("已打开位姿观测话题 {POSE_OBS_TOPIC}");
 
@@ -200,8 +193,7 @@ fn run_loop(
     // 特征发布端带 notify（`aliked` 为 `with_topic_notify`）：特征到即醒；
     // 心跳仅兜底无事件时的 odom 缓存更新与断流自愈。
     let mut latest_corrected: Option<OdomMessage> = None;
-    // 地图查询节流 1Hz：查询耗时（~200ms）超过特征周期（5Hz）必然积压，
-    // 显式降频保每次查询新鲜，吞吐与新鲜度解耦（回环 worker 不受影响）。
+    // 查询节流独立于特征发布，消费最新图像以限制等待时间。
     let mut last_map_query = f64::NEG_INFINITY;
     let on_event = |attachment_id: WaitSetAttachmentId<ipc::Service>| {
         let root = fastrace::Span::root("lightglue", fastrace::prelude::SpanContext::random());
@@ -212,7 +204,7 @@ fn run_loop(
         let _ = attachment_id.has_event_from(&tick_guard);
         let _ = feat_events.drain();
         while let Ok(Some(sample)) = corrected_sub.receive() {
-            latest_corrected = Some(*sample);
+            latest_corrected = (sample.external_map == 1).then_some(sample.odom);
         }
         let mut latest_feat: Option<FeatureMessage> = None;
         while let Ok(Some(sample)) = feat_sub.receive() {
@@ -220,11 +212,6 @@ fn run_loop(
         }
         if sensors.is_stopped() {
             return CallbackProgression::Stop;
-        }
-        if let Some(feat) = latest_feat
-            && let Some((odom, depth)) = sensors.sample(feat.timestamp)
-        {
-            online.submit(&feat, odom, depth);
         }
         let prior = latest_corrected.filter(|m| m.is_initialized).and_then(|m| {
             let feat = latest_feat.as_ref()?;
@@ -235,7 +222,7 @@ fn run_loop(
         });
         if let (Some(feat), Some(odom)) = (latest_feat, prior)
             && feat.timestamp - odom.timestamp <= ODOM_FRESH_TIMEOUT
-            && feat.timestamp - last_map_query >= 1.0
+            && feat.timestamp - last_map_query >= options.query_period
         {
             last_map_query = feat.timestamp;
             // 特征时间戳即 sim 时钟；查询前后各 pump 一次（匹配阻塞下积压排空）。
@@ -282,26 +269,7 @@ fn run_loop(
             }
             firefly_observability::pump_log_ipc(&log_ipc);
         }
-        for result in online.results() {
-            if let Some(edge) = result.edge
-                && let Err(e) = loop_pub.publish(edge)
-            {
-                log::warn!("回环发布失败: {e}");
-            }
-            if let Some(odom) = result.keyframe
-                && let Err(e) = keyframe_pub.publish(odom)
-            {
-                log::warn!("关键帧发布失败: {e}");
-            }
-            let mut msg = firefly_pubsub::viz::VizMessage::base(
-                firefly_pubsub::viz::kind::SCALARS,
-                result.timestamp,
-                "loop/debug/frontend",
-            );
-            msg.scalars[..4].copy_from_slice(&result.diagnostics);
-            msg.scalar_count = 4;
-            let _ = viz.publish(msg);
-        }
+        firefly_observability::pump_log_ipc(&log_ipc);
         drop(trace_guard);
         drop(root);
         fastrace::flush();
@@ -385,6 +353,7 @@ impl MatchBindings {
 }
 
 /// 把查询侧特征写进已绑定张量并重新登记（查询侧每查询都变，必须重绑）。
+#[cfg(test)]
 fn bind_query(
     bindings: &mut MatchBindings,
     feat: &FeatureMessage,
@@ -404,35 +373,37 @@ fn bind_query(
 }
 
 /// 有效前缀全部覆盖，仅清零填充尾部；候选缩短时也不得残留上一帧数据。
-fn fill_map_inputs(k1: &mut [f32], d1: &mut [f32], points: &[firefly_vision_map::VisionMapPoint]) {
-    k1[points.len() * 2..].fill(0.);
-    d1[points.len() * DESC_DIM..].fill(0.);
-    for (i, point) in points.iter().enumerate() {
-        k1[2 * i..2 * (i + 1)].copy_from_slice(&point.uv);
-        d1[i * DESC_DIM..(i + 1) * DESC_DIM].copy_from_slice(&point.descriptor);
+fn fill_feature_inputs<'a>(
+    k1: &mut [f32],
+    d1: &mut [f32],
+    features: impl ExactSizeIterator<Item = (&'a [f32; 2], &'a [f32; DESC_DIM])>,
+) {
+    k1[features.len() * 2..].fill(0.);
+    d1[features.len() * DESC_DIM..].fill(0.);
+    for (i, (uv, descriptor)) in features.enumerate() {
+        k1[2 * i..2 * (i + 1)].copy_from_slice(uv);
+        d1[i * DESC_DIM..(i + 1) * DESC_DIM].copy_from_slice(descriptor);
     }
 }
 
-/// 单帧匹配：query 特征 vs 库图一帧 → 2D-3D 对应（丢弃填充/低分匹配）。
-#[allow(clippy::type_complexity)]
+/// 外观对应保留两侧索引，深度缺失不能影响模型的输入与注意力计算。
 #[fastrace::trace]
-fn match_points(
+#[allow(clippy::type_complexity)]
+fn match_features<'a>(
     session: &mut Session,
     bindings: &mut MatchBindings,
-    points: &[firefly_vision_map::VisionMapPoint],
+    features: impl ExactSizeIterator<Item = (&'a [f32; 2], &'a [f32; DESC_DIM])>,
     feat: &FeatureMessage,
-) -> Result<Vec<(usize, [f64; 3], f32)>, Box<dyn std::error::Error>> {
-    let n_map = points.len().min(NUM_POINTS);
+) -> Result<Vec<(usize, usize, f32)>, Box<dyn std::error::Error>> {
+    let n_map = features.len().min(NUM_POINTS);
     if n_map < 6 {
         return Ok(Vec::new());
     }
-    // 库侧写进已绑定的张量内存；无效尾部保持零填充。
     {
         let (_, k1) = bindings.k1.try_extract_tensor_mut::<f32>()?;
         let (_, d1) = bindings.d1.try_extract_tensor_mut::<f32>()?;
-        fill_map_inputs(k1, d1, &points[..n_map]);
+        fill_feature_inputs(k1, d1, features.take(n_map));
     }
-    // 数据已更新 → 重新登记（`bind_input` 的语义是绑定时登记一次，之后改动须重绑）。
     bindings.binding.bind_input("k1", &bindings.k1)?;
     bindings.binding.bind_input("d1", &bindings.d1)?;
     let outputs = session.run_binding(&bindings.binding)?;
@@ -444,9 +415,27 @@ fn match_points(
         if mi < 0 || mi as usize >= n_map || scores[qi] < SCORE_THRESHOLD {
             continue;
         }
-        pairs.push((qi, points[mi as usize].position, scores[qi]));
+        pairs.push((qi, mi as usize, scores[qi]));
     }
     Ok(pairs)
+}
+
+#[allow(clippy::type_complexity)]
+fn match_points(
+    session: &mut Session,
+    bindings: &mut MatchBindings,
+    points: &[firefly_vision_map::VisionMapPoint],
+    feat: &FeatureMessage,
+) -> Result<Vec<(usize, [f64; 3], f32)>, Box<dyn std::error::Error>> {
+    Ok(match_features(
+        session,
+        bindings,
+        points.iter().map(|p| (&p.uv, &p.descriptor)),
+        feat,
+    )?
+    .into_iter()
+    .map(|(i, j, score)| (i, points[j].position, score))
+    .collect())
 }
 
 /// 候选库图帧：先验邻域内 + 航向接近，按距离升序取 `QUERY_TOPK`。
@@ -593,10 +582,11 @@ fn observation_from_matches(
         return Ok(None);
     }
     let total = pairs_2d.len();
+    let camera = pinhole();
     let intrinsics = CameraIntrinsics {
-        focal: focal(),
-        cx: 160.0,
-        cy: 120.0,
+        focal: camera.focal,
+        cx: camera.cx,
+        cy: camera.cy,
     };
     let t_cam_prior = body_pose_to_cam(t_body_prior);
     let Some(pose) = solve_visual_pose(&pairs_2d, &pairs_3d, intrinsics, Some(t_cam_prior))
@@ -645,7 +635,7 @@ mod tests {
 
     #[test]
     fn candidate_inputs_overwrite_prefix_and_clear_tail_across_resizes() {
-        use super::{DESC_DIM, NUM_POINTS, fill_map_inputs};
+        use super::{DESC_DIM, NUM_POINTS, fill_feature_inputs};
         use firefly_vision_map::VisionMapPoint;
         let mut keypoints = vec![f32::NAN; NUM_POINTS * 2];
         let mut descriptors = vec![f32::NAN; NUM_POINTS * DESC_DIM];
@@ -663,7 +653,11 @@ mod tests {
                     score: 1.,
                 })
                 .collect();
-            fill_map_inputs(&mut keypoints, &mut descriptors, &points);
+            fill_feature_inputs(
+                &mut keypoints,
+                &mut descriptors,
+                points.iter().map(|p| (&p.uv, &p.descriptor)),
+            );
             for index in 0..NUM_POINTS {
                 let expected_uv = points.get(index).map_or([0.; 2], |point| point.uv);
                 let expected_descriptor = points

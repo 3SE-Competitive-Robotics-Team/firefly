@@ -28,6 +28,8 @@ class Options:
     hover_height_error_m: float = 0.15
     hover_xy_error_m: float = 0.5
     hover_speed_mps: float = 0.2
+    landing_settle_seconds: float = 1.0
+    landing_rest_seconds: float = 1.0
     goal_tolerance_m: float = 0.35
     goal_speed_mps: float = 0.3
     tracking_rmse_m: float = 0.35
@@ -42,8 +44,8 @@ class Options:
     waypoint_sim_s: float = 25.0
     # 单程任务可在目标点悬停结束；仅 land 验收返回停机坪后的降落。
     finish_action: str = "land"
-    # 地图系米；飞往台阶上空，再返回起飞点上方。
-    waypoints: tuple = ((-11.0, 0.0, 2.0), (-13.0, 0.0, 1.405))
+    # 会话地图系米；启动位置为零、启动航向为 +X。
+    waypoints: tuple = ((2.0, 0.0, 1.595), (0.0, 0.0, 1.0))
 
     def validate(self):
         for key, value in asdict(self).items():
@@ -61,11 +63,14 @@ class MissionFailure(RuntimeError):
 
 
 class Mission:
-    def __init__(self, directory, case, options, *, vio_only=False):
+    def __init__(self, directory, case, options, *, vio_only=False, prior_maps=False, localization_config=None):
         self.options, self.case = options, case
         self.vio_only = vio_only
+        self.prior_maps = prior_maps
+        self.localization_config = localization_config
         self.recording = directory / f"{case}.rrd"
-        self.result = {"case": case, "status": "running", "recording": str(self.recording), "stages": {}, "localization_mode": "vio_only" if vio_only else "visual"}
+        self.result = {"case": case, "status": "running", "recording": str(self.recording), "stages": {}, "localization_mode": "vio_only" if vio_only else "visual" if prior_maps else "online_slam"}
+        self.result["map_frame"] = "external" if prior_maps else "startup_session"
         self.processes = {}
         self.diagnostics = queue.Queue(maxsize=8192)
         self.diagnostic_drops = 0
@@ -77,6 +82,7 @@ class Mission:
         self.mode = None
         self.physics = None
         self.physics_time = None
+        self.attitude_health = None
         self.zero_controls = 0
         self.nonzero_controls = 0
         self.last_motors = [0.] * 4
@@ -164,6 +170,8 @@ class Mission:
                     entity = bytes(msg.entity[:msg.entity_len]).decode(errors="replace")
                     if entity == "fc/debug/state":
                         self.mode = int(msg.scalars[0])
+                    elif entity == "fc/imu/health" and msg.scalar_count >= 2:
+                        self.attitude_health = (msg.timestamp, msg.scalars[0] == 1., msg.scalars[1] == 1., time.monotonic())
                     elif entity == "corr/debug/gate" and msg.scalar_count == 4 and msg.scalars[3] == 1:
                         self.visual_updates += 1
                         self.recorder.scalars("acceptance/visual_update", msg.timestamp, list(msg.scalars[:4]))
@@ -202,7 +210,7 @@ class Mission:
                 self.counts[name] = self.counts.get(name, 0) + 1
                 if name == "odom":
                     self.t = max(self.t, stamp)
-                if stamp - self.last_logged.get(name, -1.) >= 0.099 - 1e-9:
+                if name == "gt" or stamp - self.last_logged.get(name, -1.) >= 0.099 - 1e-9:
                     self.recorder.pose("acceptance/" + name, stamp, pos, quat)
                     self.recorder.scalars("acceptance/" + name + "_velocity", stamp, vel)
                     self.last_logged[name] = stamp
@@ -255,14 +263,18 @@ class Mission:
     def initialized(self):
         def ready():
             odom = self.latest.get("odom")
-            return (odom is not None and self.estimated_near("odom", odom[1], float("inf"), float("inf")) and self.counts["odom"] >= 20
+            attitude = self.attitude_health
+            attitude_ready = (attitude is not None and attitude[1] and attitude[2]
+                              and 0. <= self.t - attitude[0] <= 1.5
+                              and time.monotonic() - attitude[3] <= 1.5)
+            return (attitude_ready and odom is not None and self.estimated_near("odom", odom[1], float("inf"), float("inf")) and self.counts["odom"] >= 20
                     and self.zero_controls >= 100)
         self.wait(ready)
         odom = self.latest["odom"]
         if odom[0] < 1.0 or np.linalg.norm(odom[1]) > 0.1 or self.nonzero_controls:
             raise MissionFailure("initialization window, local origin or disarmed motor contract failed")
         self.control_origin = odom[1].copy()
-        return {"ready_sim_s": odom[0], "local_origin_m": odom[1].tolist(), "zero_controls": self.zero_controls}
+        return {"ready_sim_s": odom[0], "fc_attitude_ready_sim_s": self.attitude_health[0], "local_origin_m": odom[1].tolist(), "zero_controls": self.zero_controls}
 
     def takeoff(self):
         self.command("fc", "arm")
@@ -291,13 +303,13 @@ class Mission:
         return {"stable_seconds": self.options.hover_seconds}
 
     def map_ready(self):
-        if not self.vio_only:
-            self.start("aliked", [str(ROOT / "target/release/aliked")])
-            self.start("lightglue", [str(ROOT / "target/release/lightglue"), "--map", str(ROOT / "apps/planner/maps/rmuc2026.ffvmap")])
         self.wait(lambda: "corrected" in self.latest and self.latest["corrected"][4], wall=30.)
-        self.start("planner", [str(ROOT / "target/release/planner"), "--goal", *map(str, self.options.waypoints[0])])
+        command = [str(ROOT / "target/release/planner"), "--goal", *map(str, self.options.waypoints[0])]
+        if self.prior_maps:
+            command += ["--map", str(ROOT / "apps/planner/maps/rmuc2026.ffmap")]
+        self.start("planner", command)
         self.wait(lambda: "reference" in self.latest, wall=30.)
-        return {"source": "VIO + fixed startup prior; optional map/loop corrections",
+        return {"source": "VIO + external map alignment" if self.prior_maps else "VIO + startup session frame; online depth mapping",
                 "visual_frontend": "disabled" if self.vio_only else "enabled",
                 "accepted_visual_updates_at_start": self.visual_updates}
 
@@ -316,9 +328,23 @@ class Mission:
         return {"arrivals": arrivals}
 
     def landing(self):
+        start = self.t
         self.command("fc", "land")
-        self.wait(lambda: self.mode == 0, stable=1., sim=20.)
-        return {"completion_source": "fc_disarmed", "physical_touchdown": "independently_scored"}
+        self.wait(lambda: self.mode == 0, sim=20.)
+        disarmed = self.t
+        rest_start = disarmed + self.options.landing_settle_seconds
+        end = rest_start + self.options.landing_rest_seconds
+
+        def recorded_rest_window():
+            if self.mode != 0:
+                raise MissionFailure("FC left disarmed mode during landing rest observation")
+            return self.t >= end
+
+        self.wait(recorded_rest_window, sim=max(0., 20. - (self.t - start)))
+        return {"completion_source": "fc_disarmed", "physical_touchdown": "independently_scored",
+                "disarmed_sim_s": disarmed, "rest_start_sim_s": rest_start,
+                "settle_seconds": self.options.landing_settle_seconds,
+                "rest_seconds": self.options.landing_rest_seconds}
 
     def terminal_hold(self):
         goal = np.asarray(self.options.waypoints[-1])
@@ -407,7 +433,12 @@ class Mission:
             phases.extend([("reference_loss", self.reference_loss), ("failure_hold", self.failure_hold), ("landing", self.landing)])
         else:
             phases.extend([("estimator_fallback", self.estimator_fallback), ("degraded_support", self.degraded_support)])
-        result = self.run_phases(phases, ("render", "vio", "fc", "localization"))
+        applications = ["render", "vio", "fc", "localization"]
+        if not self.vio_only and self.case != "estimator_loss":
+            applications.append("slam")
+            if self.prior_maps:
+                applications.extend(("aliked", "lightglue"))
+        result = self.run_phases(phases, applications)
         if self.case == "estimator_loss":
             result["stages"]["failure_terminal"] = {"status": "not_supported", "reason": "No independent position/altitude estimate: IMU attitude support cannot guarantee hover or safe landing"}
             result["status"] = "failed"
@@ -425,7 +456,12 @@ class Mission:
             time.sleep(2.)
             self.connect()
             for name in applications:
-                self.start(name, [str(ROOT / f"target/release/{name}")])
+                command = [str(ROOT / f"target/release/{name}")]
+                if name == "localization" and self.localization_config is not None:
+                    command += ["--config", str(self.localization_config)]
+                if name == "lightglue" and self.prior_maps:
+                    command += ["--map", str(ROOT / "apps/planner/maps/rmuc2026.ffvmap")]
+                self.start(name, command)
             self.start("sim", [sys.executable, str(ROOT / "tests/system/mission_sim.py")])
             for name, action in phases:
                 self.phase(name, action)

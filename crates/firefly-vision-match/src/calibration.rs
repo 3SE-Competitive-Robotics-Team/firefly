@@ -72,12 +72,13 @@ pub fn left_from_depth() -> RigidTransform {
 /// RMUC 图像分辨率与针孔内参。
 #[must_use]
 pub fn pinhole() -> crate::depth::Pinhole {
+    let [cx, cy] = firefly_base::rig::principal_point(320, 240);
     crate::depth::Pinhole {
         width: 320,
         height: 240,
         focal: focal(),
-        cx: 160.,
-        cy: 120.,
+        cx,
+        cy,
     }
 }
 
@@ -119,5 +120,7 @@ mod tests {
         // 钉住派生值：FOV_Y=70.88°、H=240 时 focal ≈ 168.60699394364997，
         // 与离线建库/发布一致；改动 `rig::FOV_Y_DEG` 会在此处暴露。
         assert!((focal() - 168.606_993_943_649_97).abs() < 1e-9);
+        let camera = pinhole();
+        assert!((camera.cx - 159.5).abs() < 1e-12 && (camera.cy - 119.5).abs() < 1e-12);
     }
 }

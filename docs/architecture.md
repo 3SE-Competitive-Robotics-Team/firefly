@@ -1,7 +1,7 @@
 # firefly 自主无人机系统架构
 
-状态估计主干为双目 + IMU 的 VIO；ALIKED、LightGlue 和回环提供可选全局校正。离线库图 PnP 产生地图锚点，
-在线 RGB-D 关键帧匹配产生经过连续确认的回环边，`localization` 通过四自由度图
+状态估计主干为双目 + IMU 的 VIO；持久路标回环与可选 ALIKED/LightGlue 库图定位提供全局校正。离线库图 PnP 产生地图锚点，
+在线持久路标匹配产生经过连续确认的回环边，`localization` 通过四自由度图
 统一优化并发布地图里程计。实现与验收范围见 [在线回环](loop_closure.md)。
 
 ```mermaid
@@ -89,14 +89,17 @@ flowchart TD
     end
 
     MSCKF -->|Odom| TOPIC_ODOM
-    VISUAL["aliked / lightglue<br/>库图 PnP + 在线 RGB-D 回环"]
-    LOC["localization<br/>固定启动对齐 + 连续 VIO<br/>可选地图锚点 / 回环校正"]
-    TOPIC_MAP_ODOM["Firefly/CorrectedOdometry"]
+    VISUAL["aliked / lightglue<br/>可选库图 PnP"]
+    SLAM["slam<br/>持久路标、共视图与回环"]
+    LOC["localization<br/>会话坐标初始化 + 连续 VIO<br/>可选地图锚点 / 回环校正"]
+    TOPIC_MAP_ODOM["Firefly/Navigation"]
     TOPIC_SENS --> VISUAL
-    TOPIC_DEPTH --> VISUAL
     TOPIC_ODOM --> VISUAL
     TOPIC_ODOM --> LOC
-    VISUAL -->|地图观测 / 关键帧 / 回环约束| LOC
+    VISUAL -->|地图观测| LOC
+    MSCKF -->|原子关键帧| SLAM
+    SLAM -->|关键帧 / 回环约束| LOC
+    LOC -->|图修正与接受确认| SLAM
     LOC --> TOPIC_MAP_ODOM
     TOPIC_MAP_ODOM -->|地图查询先验| VISUAL
     TOPIC_MAP_ODOM -->|订阅| FSM
@@ -118,18 +121,18 @@ VIO 是完整的局部运动估计器：双目约束尺度，IMU 约束重力，
 
 - `vio` 负责 IMU/双目前端、滤波与高频预测。`Odometry` 始终在 odom 系。
 - `localization` 是地图系状态服务，统一组合 `T_map_body = T_map_odom T_odom_body`。
-  固定启动先验建立初始关系；位姿图或互斥 ESKF 接收可选的低频约束。
+  默认静止启动定义会话地图，可选固定先验对齐外部地图；位姿图或互斥 ESKF 接收可选的低频约束。
   无新约束时保持变换并使用新鲜 VIO，不冻结机体位置，也不重复融合同一观测。
-- `planner` 只消费该服务的 `CorrectedOdometry`。要求坐标对齐、状态有效和新鲜，
+- `planner` 只消费该服务的原子 `Navigation` 快照。要求坐标对齐、状态有效和新鲜，
   检查深度覆盖与碰撞；不订阅视觉观测诊断，不识别 ALIKED、LightGlue 或纯 VIO 模式。
-- `fc` 的位置反馈、Hold 锚点保持在连续 odom 系；地图参考通过同刻配对的坐标变换
+- `fc` 的位置反馈、Hold 锚点保持在连续 odom 系；地图参考通过消息携带的生成时坐标变换
   转入 odom。全局校正不会替换控制反馈源。
 - 测试/任务入口决定启动哪些进程，并独立评判地图精度、库图证据和真实到点。
   缺少观测不能被记作视觉链路通过；有观测也不能证明真实位置正确。
 
-本实现支持固定场地、固定启动先验和同一 VIO 会话。planner 在 map 系维护静态地图，
-因此保留 localization 这一坐标适配服务；不能把 raw odom 直接标成 map，或在漂移后
-自动切换反馈坐标。任意位置重定位、跨会话恢复和地图跳变下的局部地图重建不在此契约内。
+本实现默认支持同一 VIO 会话的空地图启动、在线回环与滚动深度建图。规划器在会话
+map 系工作，显式静态地图要求外部坐标先验；回环版本切换后清除传感器融合、重建局部
+规划，目标保持 map 坐标。任意位置重定位、跨会话恢复与全局稠密地图优化不在此契约内。
 `is_initialized`、有限数值和新鲜度是基本状态契约，尚不是有协方差界的跟踪健康证明；
 VIO 漂移、短时视觉退化与估计不确定性仍需单独验证，不能用库图观测年龄代替。
 
@@ -205,8 +208,8 @@ Firefly/Command（地面站：解锁/模式/起降）
 - **节拍与锁步**：控制律无积分项，dt 不进控制；飞控每 tick 都发指令（上锁时零
   推力），被控对象按指令新鲜度（墙钟 50ms）决定物理是否推进——飞控停发即世界停转
   （仿真时间暂停）；飞控在等待初始化期间持续发零推力，允许物理与传感器时间推进。
-- **初始化与坐标系**：VIO 使用静止 IMU 与视觉视差检查完成初始化。局部位置原点为零，航向无绝对观测。静态地图和规划目标必须先与局部
-  里程计通过固定启动先验或独立定位建立关系（见 `frames.md`）；真值仅供仿真传感器生成、评测与可视化。
+- **初始化与坐标系**：VIO 使用静止 IMU 与视觉视差检查完成初始化。默认以启动位置与航向定义会话地图，在线地图和目标使用该坐标系。
+  外部静态地图和全局目标必须通过显式启动先验或独立定位建立坐标关系（见 `frames.md`）；真值仅供仿真传感器生成、评测与可视化。
 - **验证范围**：传感器初始化与控制隔离有自动回归；当前版本的漂移、延迟和
   闭环成功率须通过对应录制与评测确认。
 

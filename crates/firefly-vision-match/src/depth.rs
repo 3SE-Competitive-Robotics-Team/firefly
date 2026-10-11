@@ -39,18 +39,35 @@ impl Pinhole {
 pub struct RegisteredDepth {
     camera: Pinhole,
     values: Vec<f64>,
+    /// 输入量程内像素数与注册后有效像素数；用于区分传感器缺测和重投影覆盖损失。
+    pub coverage: [usize; 2],
+}
+
+/// 亚像素深度没有可靠几何支撑的原因。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DepthRejection {
+    Outside,
+    Hole,
+    Edge,
 }
 impl RegisteredDepth {
     /// 在连续像素处采样；要求四邻点有效且属于连续表面，禁止跨边缘插值。
     #[must_use]
     pub fn point_at(&self, uv: [f64; 2]) -> Option<Vector3<f64>> {
+        self.sample(uv).ok()
+    }
+
+    /// 与 `point_at` 使用相同门限，并返回缺测原因。
+    /// # Errors
+    /// 非法像素、注册空洞或跨深度边缘。
+    pub fn sample(&self, uv: [f64; 2]) -> std::result::Result<Vector3<f64>, DepthRejection> {
         if !uv.iter().all(|v| v.is_finite()) || uv[0] < 0. || uv[1] < 0. {
-            return None;
+            return Err(DepthRejection::Outside);
         }
         let x = uv[0].floor() as usize;
         let y = uv[1].floor() as usize;
         if uv[0] >= (self.camera.width - 1) as f64 || uv[1] >= (self.camera.height - 1) as f64 {
-            return None;
+            return Err(DepthRejection::Outside);
         }
         let w = self.camera.width;
         let z = [
@@ -60,18 +77,18 @@ impl RegisteredDepth {
             self.values[(y + 1) * w + x + 1],
         ];
         if !z.iter().all(|v| v.is_finite()) {
-            return None;
+            return Err(DepthRejection::Hole);
         }
         let near = z.iter().copied().fold(f64::INFINITY, f64::min);
         let far = z.iter().copied().fold(0., f64::max);
         // 三厘米或深度的 2%：只允许连续表面的小范围插值。
         if far - near > 0.03_f64.max(near * 0.02) {
-            return None;
+            return Err(DepthRejection::Edge);
         }
         let a = uv[0] - x as f64;
         let b = uv[1] - y as f64;
         let depth = (1. - b) * ((1. - a) * z[0] + a * z[1]) + b * ((1. - a) * z[2] + a * z[3]);
-        Some(self.camera.point(uv, depth))
+        Ok(self.camera.point(uv, depth))
     }
 }
 
@@ -108,11 +125,13 @@ pub fn register_depth(
         ));
     }
     let mut values = vec![f64::NAN; target.width * target.height];
+    let mut coverage = [0; 2];
     for (i, &depth) in depth.iter().enumerate() {
         let z = f64::from(depth);
         if !(0.2..=20.).contains(&z) {
             continue;
         }
+        coverage[0] += 1;
         let source_point = source.point([(i % source.width) as f64, (i / source.width) as f64], z);
         let p = transform.point(source_point.into()).coords;
         let Some(uv) = target.pixel(p) else {
@@ -124,6 +143,9 @@ pub fn register_depth(
             continue;
         }
         let value = &mut values[y as usize * target.width + x as usize];
+        if !value.is_finite() {
+            coverage[1] += 1;
+        }
         if !value.is_finite() || -p.z < *value {
             *value = -p.z;
         }
@@ -131,6 +153,7 @@ pub fn register_depth(
     Ok(RegisteredDepth {
         camera: target,
         values,
+        coverage,
     })
 }
 
@@ -185,6 +208,8 @@ mod tests {
         src[12 * 32 + 18] = 1.;
         let d = register_depth(&src, k, k, &shift(-0.02)).unwrap();
         assert_eq!(d.values[12 * 32 + 16], 1.);
+        assert_eq!(d.coverage, [2, 1]);
+        assert_eq!(d.sample([10., 10.]), Err(DepthRejection::Hole));
         let mut src = vec![1.; 32 * 24];
         for y in 0..24 {
             for x in 16..32 {
@@ -193,8 +218,10 @@ mod tests {
         }
         let d = register_depth(&src, k, k, &shift(0.)).unwrap();
         assert!(d.point_at([15.5, 12.]).is_none());
+        assert_eq!(d.sample([15.5, 12.]), Err(DepthRejection::Edge));
         assert!(d.point_at([10., 12.]).is_some());
         assert!(d.point_at([f64::NAN, 0.]).is_none());
+        assert_eq!(d.sample([f64::NAN, 0.]), Err(DepthRejection::Outside));
     }
     #[test]
     fn rotated_plane_matches_independent_plane_equation() {

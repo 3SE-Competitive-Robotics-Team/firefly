@@ -18,7 +18,7 @@ use crate::helper::gram_schmidt;
 use crate::options::InitOptions;
 use firefly_vio_core::sensor::ImuData;
 use firefly_vio_types::quat_ops::{quat_2_rot, rot_2_quat};
-use nalgebra::{DMatrix, Vector3};
+use nalgebra::{DMatrix, Matrix3, Vector3};
 
 /// 静态初始化器（对照 `StaticInitializer`）。
 #[derive(Debug, Clone)]
@@ -152,13 +152,21 @@ impl StaticInitializer {
         imu_state[10..13].copy_from_slice(bg.as_slice());
         imu_state[13..16].copy_from_slice(ba.as_slice());
 
-        // 协方差 15×15：q 0.02²、p 0.05²、v 0.01²（其余块 0.02²）
+        // 姿态、位置、速度和加计偏置先验对照 OpenVINS；陀螺均值按静止窗口统计。
         let mut covariance = 0.02f64.powi(2) * DMatrix::<f64>::identity(15, 15);
         // p 块 0.05²、v 块 0.01²（q 块保持 0.02²）
         for i in 0..3 {
             covariance[(3 + i, 3 + i)] = 0.05f64.powi(2);
             covariance[(6 + i, 6 + i)] = 0.01f64.powi(2);
         }
+        covariance
+            .view_mut((9, 9), (3, 3))
+            .copy_from(&gyro_mean_covariance(
+                &window_2to1,
+                &bg,
+                self.params.sigma_w,
+                self.params.sigma_wb,
+            )?);
 
         let timestamp = window_2to1[window_2to1.len() - 1].timestamp;
         log::info!("静态初始化成功：t={timestamp:.3}");
@@ -183,6 +191,36 @@ fn mean_accel(window: &[ImuData]) -> Vector3<f64> {
 fn mean_gyro(window: &[ImuData]) -> Vector3<f64> {
     let sum = window.iter().fold(Vector3::zeros(), |acc, d| acc + d.wm);
     sum / window.len() as f64
+}
+
+/// 静止陀螺均值相对窗口末端零偏的协方差（rad²/s²）。
+/// 连续白噪声按采样间隔离散化；随机游走保留均值到末端的差异。
+/// 样本散布作为额外模型余量，不能用有限窗口的低样本方差压低已标定噪声。
+fn gyro_mean_covariance(
+    window: &[ImuData],
+    mean: &Vector3<f64>,
+    density: f64,
+    walk: f64,
+) -> Option<Matrix3<f64>> {
+    if window.len() < 2 || !density.is_finite() || density <= 0. || !walk.is_finite() || walk < 0. {
+        return None;
+    }
+    let n = window.len() as f64;
+    let mut white = density.powi(2) / (window[1].timestamp - window[0].timestamp);
+    let mut random_walk = 0.;
+    for (i, pair) in window.windows(2).enumerate() {
+        let dt = pair[1].timestamp - pair[0].timestamp;
+        if !dt.is_finite() || dt <= 0. {
+            return None;
+        }
+        white += density.powi(2) / dt;
+        random_walk += walk.powi(2) * dt * ((i + 1) as f64 / n).powi(2);
+    }
+    let scatter = window.iter().fold(Matrix3::zeros(), |sum, sample| {
+        let residual = sample.wm - mean;
+        sum + residual * residual.transpose()
+    });
+    Some(scatter / (n * (n - 1.)) + Matrix3::identity() * (white / n.powi(2) + random_walk))
 }
 
 /// 相对均值加速度的样本标准差（对照 C++ 的 `sqrt(Σ|am-avg|² / (n-1))`)。
@@ -259,6 +297,68 @@ mod tests {
         assert!(res.clones_imu.is_empty() && res.features_slam.is_empty());
         // 时间戳应为 2→1 窗口最后读数时刻（最晚不超过 newesttime=2.0）
         assert!(res.timestamp > 1.0 && res.timestamp <= 2.0);
+    }
+
+    #[test]
+    fn gyro_mean_uncertainty_matches_sample_noise_and_endpoint_walk() {
+        let window: Vec<_> = (0..4)
+            .map(|i| ImuData {
+                timestamp: f64::from(i) * 0.1,
+                wm: Vector3::new(0.001, -0.002, 0.003),
+                am: Vector3::z() * 9.81,
+            })
+            .collect();
+        let mean = mean_gyro(&window);
+        let density = 2e-4_f64;
+        let walk = 1.9e-5_f64;
+        // 四个白噪声样本取均值；三个独立游走增量的误差系数为 1/4、2/4、3/4。
+        let expected = density.powi(2) / (0.1 * 4.) + walk.powi(2) * 0.1 * (1. + 4. + 9.) / 16.;
+        let covariance = gyro_mean_covariance(&window, &mean, density, walk).unwrap();
+        assert!((covariance - Matrix3::identity() * expected).amax() < 1e-18);
+        for sample in 0..4 {
+            for axis in 0..3 {
+                let mut plus = window.clone();
+                let mut minus = window.clone();
+                plus[sample].wm[axis] += 1e-6;
+                minus[sample].wm[axis] -= 1e-6;
+                let derivative = (mean_gyro(&plus) - mean_gyro(&minus)) / 2e-6;
+                assert!((derivative - Matrix3::identity().column(axis) / 4.).amax() < 1e-9);
+            }
+        }
+        let mut noisy = window.clone();
+        noisy[0].wm.x += 0.002;
+        noisy[1].wm.x -= 0.002;
+        let actual = gyro_mean_covariance(&noisy, &mean_gyro(&noisy), density, walk).unwrap();
+        assert!((actual[(0, 0)] - expected - 2. * 0.002_f64.powi(2) / 12.).abs() < 1e-18);
+    }
+
+    #[test]
+    fn static_initialization_exports_the_measured_bias_covariance() {
+        let options = InitOptions {
+            sigma_w: 2e-4,
+            sigma_wb: 1.9e-5,
+            ..InitOptions::default()
+        };
+        let mut init = StaticInitializer::new(options);
+        for i in 0..=200 {
+            init.feed_imu(
+                &ImuData {
+                    timestamp: f64::from(i) * 0.01,
+                    wm: Vector3::new(0.003, -0.004, 0.005),
+                    am: Vector3::z() * 9.81,
+                },
+                0.,
+            );
+        }
+        let result = init.initialize(false).unwrap();
+        for axis in 0..3 {
+            assert!((result.imu_state[10 + axis] - [0.003, -0.004, 0.005][axis]).abs() < 1e-12);
+            // 50 个 100Hz 样本；Σ k² (k=1..49)=40425。
+            let expected =
+                (2e-4_f64).powi(2) / (50. * 0.01) + (1.9e-5_f64).powi(2) * 0.01 * 40_425. / 2500.;
+            assert!((result.covariance[(9 + axis, 9 + axis)] - expected).abs() < 1e-18);
+        }
+        assert!(result.covariance.cholesky().is_some());
     }
 
     #[test]

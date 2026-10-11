@@ -107,11 +107,12 @@ fn linearize(a: &Node, b: &Node, z: &Vector4<f64>) -> (Vector4<f64>, Matrix4<f64
     jb[(3, 3)] = 1.;
     (r, ja, jb)
 }
-/// 一个进程会话中的有界图；首节点固定，图满时拒绝扩容。
+/// 一个进程会话中的有界图；首个注册节点固定，允许异步补入更早节点，图满时拒绝扩容。
 pub struct PoseGraph {
     options: GraphOptions,
     initial: RigidTransform,
     nodes: BTreeMap<u64, Node>,
+    fixed: Option<u64>,
     loops: BTreeMap<(u64, u64), Vector4<f64>>,
     drift: RigidTransform,
 }
@@ -130,6 +131,7 @@ impl PoseGraph {
             options,
             initial,
             nodes: BTreeMap::new(),
+            fixed: None,
             loops: BTreeMap::new(),
             drift: initial,
         })
@@ -155,17 +157,11 @@ impl PoseGraph {
         if self.nodes.len() >= self.options.max_nodes {
             return Err(invalid("pose graph capacity reached"));
         }
-        if self
-            .nodes
-            .first_key_value()
-            .is_some_and(|(&first, _)| key < first)
-        {
-            return Err(invalid("keyframe predates fixed graph origin"));
-        }
         let map = self.drift.compose(&raw)?;
         let value = coordinates(&map);
         let tilt =
             UnitQuaternion::from_axis_angle(&Vector3::z_axis(), -value.w) * map.isometry().rotation;
+        self.fixed.get_or_insert(key);
         self.nodes.insert(
             key,
             Node {
@@ -329,6 +325,24 @@ impl PoseGraph {
     pub fn alignment(&self) -> RigidTransform {
         self.drift
     }
+    /// 优化后关键帧 map←body 快照；不改写原始 odom 节点。
+    /// # Panics
+    /// 图优化产生非有限状态，违反已验证节点不变量。
+    pub fn poses(&self) -> impl Iterator<Item = (f64, RigidTransform)> + '_ {
+        self.nodes.iter().map(|(&time, node)| {
+            let q = rotation(node);
+            (
+                f64::from_bits(time),
+                RigidTransform::from_parts(
+                    FrameId::MAP,
+                    FrameId::BODY,
+                    [node.value.x, node.value.y, node.value.z],
+                    [q.i, q.j, q.k, q.w],
+                )
+                .expect("validated graph state"),
+            )
+        })
+    }
     #[must_use]
     pub fn node_count(&self) -> usize {
         self.nodes.len()
@@ -395,9 +409,13 @@ impl PoseGraph {
     fn optimize(&mut self) -> Result<()> {
         let keys: Vec<_> = self.nodes.keys().copied().collect();
         let mut nodes: Vec<_> = self.nodes.values().cloned().collect();
+        let fixed = self
+            .fixed
+            .and_then(|key| keys.binary_search(&key).ok())
+            .ok_or_else(|| invalid("missing fixed graph node"))?;
         let edges = self.edges(&keys);
         for _ in 0..self.options.iterations {
-            let (blocks, gradient) = normal(&nodes, &edges, &self.options);
+            let (blocks, gradient) = normal(&nodes, &edges, &self.options, fixed);
             let Some(delta) = pcg(&blocks, &gradient) else {
                 return Err(invalid("pose graph linear solve failed"));
             };
@@ -409,7 +427,10 @@ impl PoseGraph {
             for step in 0..12 {
                 let mut candidate = nodes.clone();
                 let scale = 0.5_f64.powi(step);
-                for i in 1..nodes.len() {
+                for i in 0..nodes.len() {
+                    if i == fixed {
+                        continue;
+                    }
                     candidate[i].value -= scale * delta[i];
                     candidate[i].value.w = wrap(candidate[i].value.w);
                 }
@@ -487,7 +508,12 @@ struct Blocks {
     diagonal: Vec<Matrix4<f64>>,
     cross: Vec<(usize, usize, Matrix4<f64>)>,
 }
-fn normal(nodes: &[Node], edges: &[Edge], o: &GraphOptions) -> (Blocks, Vec<Vector4<f64>>) {
+fn normal(
+    nodes: &[Node],
+    edges: &[Edge],
+    o: &GraphOptions,
+    fixed: usize,
+) -> (Blocks, Vec<Vector4<f64>>) {
     let mut blocks = Blocks {
         diagonal: vec![Matrix4::identity() * 1e-6; nodes.len()],
         cross: Vec::new(),
@@ -504,26 +530,26 @@ fn normal(nodes: &[Node], edges: &[Edge], o: &GraphOptions) -> (Blocks, Vec<Vect
         } else {
             1.
         };
-        if e.i > 0 {
+        if e.i != fixed {
             blocks.diagonal[e.i] += weight * ja.transpose() * ja;
             g[e.i] += weight * ja.transpose() * r;
         }
-        if e.j > 0 {
+        if e.j != fixed {
             blocks.diagonal[e.j] += weight * jb.transpose() * jb;
             g[e.j] += weight * jb.transpose() * r;
         }
-        if e.i > 0 && e.j > 0 {
+        if e.i != fixed && e.j != fixed {
             blocks.cross.push((e.i, e.j, weight * ja.transpose() * jb));
         }
     }
-    for (i, n) in nodes.iter().enumerate().skip(1) {
+    for (i, n) in nodes.iter().enumerate().filter(|(i, _)| *i != fixed) {
         if let Some((r, j)) = anchor_residual(n, o) {
             let w = robust(r.norm(), o.huber).1;
             blocks.diagonal[i] += w * j.transpose() * j;
             g[i] += w * j.transpose() * r;
         }
     }
-    blocks.diagonal[0] = Matrix4::identity();
+    blocks.diagonal[fixed] = Matrix4::identity();
     (blocks, g)
 }
 fn apply_into(a: &Blocks, x: &[Vector4<f64>], out: &mut [Vector4<f64>]) {
@@ -630,6 +656,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn delayed_earlier_keyframe_keeps_the_registered_gauge_and_complete_snapshot() {
+        let mut graph = PoseGraph::new(GraphOptions::default(), origin()).unwrap();
+        let raw = |x| {
+            RigidTransform::from_parts(FrameId::ODOM, FrameId::BODY, [x, 0., 0.], [0., 0., 0., 1.])
+                .unwrap()
+        };
+        graph.insert(1., raw(1.)).unwrap();
+        graph.insert(0.5, raw(0.5)).unwrap();
+        graph.insert(2., raw(2.)).unwrap();
+        graph
+            .close_loop(0.5, 2., Vector3::new(1.2, 0., 0.), 0.)
+            .unwrap();
+        let poses: Vec<_> = graph.poses().collect();
+        assert_eq!(
+            poses.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+            [0.5, 1., 2.]
+        );
+        // 三条独立一维边的方差为 0.005、0.01、0.0025 m²。
+        let variance = 0.005 + 0.01 + 0.0025;
+        assert!(
+            (poses[0].1.isometry().translation.x - (0.5 + 0.3 * 0.005 / variance)).abs() < 1e-6
+        );
+        assert_eq!(poses[1].1.isometry().translation.x, 1.);
+        assert!((poses[2].1.isometry().translation.x - (2. - 0.3 * 0.01 / variance)).abs() < 1e-6);
+        assert_eq!(graph.raw_pose(0.5).unwrap().isometry().translation.x, 0.5);
+    }
     #[test]
     fn asynchronous_loop_endpoints_reuse_registered_odometry() {
         use firefly_pubsub::{odom::OdomMessage, vision::LoopConstraint};
@@ -796,17 +849,20 @@ mod tests {
         nodes[2].value.x += 0.03;
         nodes[3].value.w += 0.01;
         nodes[3].anchor = Some(Vector4::new(0.55, 0.12, 0., 0.32));
-        let (_, gradient) = normal(&nodes, &edges, &graph.options);
-        for i in 1..nodes.len() {
-            for (axis, expected) in gradient[i].iter().enumerate() {
-                let mut positive = nodes.clone();
-                let mut negative = nodes.clone();
-                positive[i].value[axis] += 1e-6;
-                negative[i].value[axis] -= 1e-6;
-                let fd = (objective(&positive, &edges, &graph.options)
-                    - objective(&negative, &edges, &graph.options))
-                    / 2e-6;
-                assert!((fd - expected).abs() < 1e-5);
+        for fixed in 0..nodes.len() {
+            let (_, gradient) = normal(&nodes, &edges, &graph.options, fixed);
+            assert_eq!(gradient[fixed], Vector4::zeros());
+            for i in (0..nodes.len()).filter(|&i| i != fixed) {
+                for (axis, expected) in gradient[i].iter().enumerate() {
+                    let mut positive = nodes.clone();
+                    let mut negative = nodes.clone();
+                    positive[i].value[axis] += 1e-6;
+                    negative[i].value[axis] -= 1e-6;
+                    let fd = (objective(&positive, &edges, &graph.options)
+                        - objective(&negative, &edges, &graph.options))
+                        / 2e-6;
+                    assert!((fd - expected).abs() < 1e-5);
+                }
             }
         }
     }

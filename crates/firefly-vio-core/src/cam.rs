@@ -111,6 +111,9 @@ pub trait CameraModel: std::fmt::Debug + Send + Sync {
     /// 原始内参向量（`[f_x f_y c_x c_y k_1 k_2 k_3 k_4]`）。
     fn value(&self) -> [f64; CALIB_LEN];
 
+    /// 是否采用等距鱼眼模型；跨进程标定快照必须保留投影类型。
+    fn is_fisheye(&self) -> bool;
+
     /// 相机内参矩阵 `K = [[f_x,0,c_x],[0,f_y,c_y],[0,0,1]]`
     /// （对照 `CamBase::get_K`）。
     #[must_use]
@@ -207,6 +210,9 @@ impl CamRadtan {
 }
 
 impl CameraModel for CamRadtan {
+    fn is_fisheye(&self) -> bool {
+        false
+    }
     fn with_calibration(&self, calib: &[f64]) -> SharedCamera {
         let mut camera = *self;
         camera.set_value(calib);
@@ -357,6 +363,9 @@ impl CamEqui {
 }
 
 impl CameraModel for CamEqui {
+    fn is_fisheye(&self) -> bool {
+        true
+    }
     fn with_calibration(&self, calib: &[f64]) -> SharedCamera {
         let mut camera = *self;
         camera.set_value(calib);

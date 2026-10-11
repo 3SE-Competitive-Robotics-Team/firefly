@@ -49,10 +49,11 @@
 
 ## 技术路线
 
-- 状态估计主线为 VIO + ALIKED + LightGlue + 回环。
-- 视觉链路包含离线库图 PnP 定位与会话内 RGB-D 关键帧回环；默认四自由度位姿图
+- 默认从空会话地图启动：VIO + 持久路标在线回环（slam） + 深度滚动建图规划；
+  `.ffvmap` / `.ffmap` 与外部地图启动先验均为显式可选增强。
+- 视觉链路包含离线库图 PnP 定位与会话内持久路标回环；默认四自由度位姿图
   联合 VIO、地图锚点和回环约束。ESKF 为互斥可选后端，禁止重复融合同一观测。
-- 左目路标必须使用注册到左目的深度（重投影、z-buffer、空洞与边缘拒绝），禁止同索引
+- 用深度图生成左目路标时必须注册到左目（重投影、z-buffer、空洞与边缘拒绝），禁止同索引
   读取居中深度相机。回环证据与库图重定位分别验收，模型集成测试不能替代飞行回环验收。
 - 在线图和关键帧库默认上限各 512，容量耗尽显式拒绝扩容；只支持同一 VIO 会话，
   不提供跨会话地图恢复、完整 BA 或任意位置重定位。边界与公式见 `docs/loop_closure.md`。
@@ -80,7 +81,9 @@
 - 坐标树是同一时刻的几何快照，时间同步与新鲜度由消费端负责。
 - VIO 空中失联时仅在新鲜 IMU 下提供姿态稳定与标称悬停推力；不承诺保高/定点，
   不用陈旧位置判落地。恢复必须有有效里程计和显式 Hold/Land 指令。
-- 飞控反馈和 Hold 锚点始终在 odom 系；map 系规划参考通过坐标树转换，禁止切换反馈源。
+- 飞控反馈和 Hold 锚点始终在 odom 系；map 系规划参考携带生成时的 map←odom 快照，禁止切换反馈源。
+- 回环修正版本变更必须清除旧局部深度融合并废弃执行轨迹，禁止跨版本插值；
+  任务目标保持地图坐标，重建期间等待有效深度，不能复用旧参考的坐标变换。
 - 飞控姿态由 `firefly-imu` 独立线程维护右误差 ESKF；上锁静止窗口与三自由度 NIS
   同时通过才用加计校正，禁止将机动比力当作重力。VIO 姿态/零偏联合边缘分布通过
   `Firefly/VioAttitudeAid` 按测量时刻 CI 融合与重放，禁止当作独立观测重复计数。
@@ -122,6 +125,8 @@
 - **构建与运行验收分开**：编译结束后采样实际 CPU/GPU 负载、温度与降频计数增量，确认资源
   稳定再启动；`ps %CPU` 的进程生命周期均值不能代替采样。后台重负载、持续降频或残留进程
   未排除时不作性能归因，不修改验收阈值；原始诊断证据随运行写入 `logs/*.rrd`。
+- iceoryx2 的终止信号读取会消费事件；独立接收线程退出后必须设置停止标志，主循环同步检查，
+  不能依赖每个节点都收到同一份 SIGINT。线程错误须传播，主线程退出后回收全部线程。
 - **退出必须收尾**：启动器记录每个子进程及其输出线程，所有成功、失败、超时和中断路径
   均执行 SIGINT、等待退出并回收线程/管道；记录进程最后退出以完成 RRD flush。
   核对所启动 PID 和相关子进程均已退出，残留必须显式报错并阻止下一轮，禁止把超时当清理完成。
@@ -152,8 +157,8 @@ cargo run --release -p fc
 
 sim 发布 IMU 100Hz、仿真位姿 10Hz、PlantState 200Hz、Airframe 1Hz；
 render 提供双目与深度。VIO 视觉更新 10Hz、预测里程计 100Hz；飞控 1kHz。
-planner 默认读取 `apps/planner/maps/rmuc2026.ffmap`，缺文件报错。
-地图系算法必须使用经过固定启动先验或地图定位对齐的状态。planner 只消费 CorrectedOdometry，
+planner 默认创建空滚动地图；只有显式 `--map` 才加载 `.ffmap`，指定文件缺失必须报错。
+默认地图原点和水平 +X 由静止启动位姿定义；外部地图必须显式对齐。planner 只消费原子 Navigation 快照，
 不依赖视觉观测来源、库图匹配频率或神经网络进程；未就绪不发布参考，500ms 墙钟失联或无效状态
 触发停止发布并锁存，须重启恢复。localization 统一提供地图系状态，低频地图观测与回环是可选校正。
 localization 的 quality 参数仅用于库图观测诊断，不作为 planner 准入条件；地图任务精度由独立验收评分。
@@ -218,6 +223,10 @@ cargo run --release -p planner -- --map <实际存在的地图.ffmap>
 
 - `cargo test`
 - `cargo test -p firefly-planner --test planner_contracts`
+- 姿态融合、初始化、坐标、视觉前端或仿真传感器改动：release 构建后，运行
+  `uv run pytest tests/system/test_imu_flight.py -q -k imu_hover`。
+  必须通过整段 20 秒独立真值悬停、姿态外援健康、降落与退出检查；普通 CI 的 skip
+  不能计作通过，悬停通过不能代替航程与回环验收。固定阈值与证据规则见 `docs/imu.md`。
 - 传感器进程启动：准备 RMUC 资产，先 release 构建 vio / fc / render，确保没有其他闭环进程；运行
   `FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/system/test_sensor_startup.py -q`。
   检查屏蔽 PlantState、保留 render 生成图像所需的 GroundTruth；需图形会话，录制只进 `logs/*.rrd`，所有子进程通过 SIGINT 退出。

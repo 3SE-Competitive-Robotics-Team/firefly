@@ -94,10 +94,29 @@ impl ControlFrames {
         max_age: Duration,
         dt: f64,
     ) -> Option<PositionSetpoint> {
-        if now.duration_since(self.alignment_at?) > max_age {
-            return None;
-        }
-        let transform = self.tree.lookup(FrameId::ODOM, FrameId::MAP).ok()?;
+        let transform = match msg.has_alignment {
+            1 => {
+                let (_, _, received) = self.history.back()?;
+                if now.duration_since(*received) > max_age {
+                    return None;
+                }
+                RigidTransform::from_parts(
+                    FrameId::MAP,
+                    FrameId::ODOM,
+                    msg.alignment_translation,
+                    msg.alignment_rotation,
+                )
+                .ok()?
+                .inverse()
+            }
+            0 => {
+                if now.duration_since(self.alignment_at?) > max_age {
+                    return None;
+                }
+                self.tree.lookup(FrameId::ODOM, FrameId::MAP).ok()?
+            }
+            _ => return None,
+        };
         let position = transform.point(Point3::new(msg.position_x, msg.position_y, msg.position_z));
         let velocity =
             transform.vector(Vector3::new(msg.velocity_x, msg.velocity_y, msg.velocity_z));
@@ -199,6 +218,54 @@ mod tests {
                 .is_none()
         );
     }
+    #[test]
+    fn delayed_reference_keeps_its_own_alignment_after_loop_correction() {
+        let now = Instant::now();
+        let mut frames = ControlFrames::default();
+        frames.observe_odom(&raw(1.), now);
+        frames.observe_corrected(
+            OdomMessage {
+                position_x: 20.,
+                ..raw(1.)
+            },
+            now,
+        );
+        let reference = ReferenceMessage {
+            position_x: 10.,
+            position_y: 2.,
+            velocity_y: 1.,
+            acceleration_y: 0.5,
+            yaw: std::f64::consts::FRAC_PI_2,
+            yaw_dot: 0.3,
+            has_alignment: 1,
+            alignment_translation: [10., 0., 0.],
+            alignment_rotation: [
+                0.,
+                0.,
+                std::f64::consts::FRAC_1_SQRT_2,
+                std::f64::consts::FRAC_1_SQRT_2,
+            ],
+            ..Default::default()
+        };
+        let r = frames
+            .reference(&reference, now, Duration::from_millis(500), 0.)
+            .unwrap();
+        assert!((r.position - glam::Vec3::new(2., 0., 0.)).length() < 1e-6);
+        assert!((r.velocity - glam::Vec3::X).length() < 1e-6);
+        assert!((r.acceleration - 0.5 * glam::Vec3::X).length() < 1e-6);
+        assert!(r.yaw.abs() < 1e-6 && (r.yaw_rate - 0.3).abs() < 1e-6);
+        assert!(
+            frames
+                .reference(
+                    &reference,
+                    now + Duration::from_secs(1),
+                    Duration::from_millis(500),
+                    0.
+                )
+                .is_none()
+        );
+    }
+
     /// dt 外推：`p += v·dt + ½a·dt²`、`v += a·dt`。
     #[test]
     fn reference_setpoint_is_extrapolated_by_dt() {

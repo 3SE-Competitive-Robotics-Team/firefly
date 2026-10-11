@@ -185,6 +185,35 @@ fn correlated_identical_estimates_do_not_double_count_information() {
     assert!(!a.intersect(&b).unwrap());
 }
 #[test]
+fn first_visual_aid_aligns_yaw_without_discarding_stationary_bias() {
+    for yaw in [-1.7, 0., 2.4] {
+        let mut e = initialized();
+        let before = e.state().unwrap().clone();
+        let mut visual = state();
+        visual.rotation = UnitQuaternion::from_euler_angles(0., 0.01, yaw);
+        visual.bias = Vector3::new(0., 0.008, 0.);
+        visual.covariance = Matrix6::identity() * 0.02_f64.powi(2);
+        assert!(
+            e.aid(&Aid {
+                timestamp: 2.1,
+                session: 7,
+                state: visual
+            })
+            .unwrap()
+        );
+        let after = e.state().unwrap();
+        assert!((after.rotation.euler_angles().2 - yaw).abs() < 1e-5);
+        assert!((after.bias - before.bias).norm() < 1e-4);
+        assert!((after.rotation.inverse() * Vector3::z() - Vector3::z()).norm() < 1e-3);
+        // 零角速度下倾角漂移应受静止零偏精度约束：20 秒仍低于 0.2°。
+        for i in 211..=2210 {
+            e.observe(sample(f64::from(i) * 0.01), false).unwrap();
+        }
+        let up = e.state().unwrap().rotation * Vector3::z();
+        assert!(up.z.acos() < 0.2_f64.to_radians());
+    }
+}
+#[test]
 fn stationary_initialization_estimates_tilt_bias_and_rejects_motion() {
     let o = Options::default();
     let mut e = Estimator::new(o).unwrap();
@@ -282,38 +311,50 @@ fn delayed_aid_replay_equals_on_time_update_and_rejects_uncovered_time() {
     assert!(!b.aid(&aid).unwrap());
 }
 #[test]
-fn consecutive_aids_inside_one_imu_interval_preserve_the_first_posterior() {
-    let mut e = initialized();
-    for i in 211..=221 {
+fn visual_posteriors_do_not_contaminate_the_inertial_branch() {
+    let mut a = initialized();
+    let mut b = initialized();
+    let first = Aid {
+        timestamp: 2.1,
+        session: 7,
+        state: state(),
+    };
+    assert!(a.aid(&first).unwrap());
+    assert!(b.aid(&first).unwrap());
+    for i in 211..=250 {
         let mut s = sample(f64::from(i) * 0.01);
         s.gyro = Vector3::z() * 0.1;
-        e.observe(s, false).unwrap();
+        a.observe(s, false).unwrap();
+        b.observe(s, false).unwrap();
     }
-    let mut first = state();
-    first.rotation = UnitQuaternion::from_scaled_axis(Vector3::z() * 0.2);
-    first.covariance *= 0.1;
+    let mut intermediate = state();
+    intermediate.rotation = UnitQuaternion::from_euler_angles(0., 0.002, 0.02);
+    intermediate.bias.y = 0.0002;
+    intermediate.covariance *= 0.01;
     assert!(
-        e.aid(&Aid {
+        a.aid(&Aid {
             timestamp: 2.205,
             session: 7,
-            state: first
+            state: intermediate
         })
         .unwrap()
     );
-    let mut second = state();
-    second.rotation = UnitQuaternion::from_scaled_axis(Vector3::z() * 0.3);
-    assert!(
-        e.aid(&Aid {
-            timestamp: 2.207,
-            session: 7,
-            state: second
-        })
-        .unwrap()
-    );
-    // 首份分布各方向均更精确，CI 取其端点；角度由恒定角速度解析积分。
-    let expected = UnitQuaternion::from_scaled_axis(Vector3::z() * (0.2 + 0.1 * 0.005));
-    assert!((e.state().unwrap().rotation.inverse() * expected).angle() < 1e-12);
-    assert!(e.state().unwrap().covariance.trace() < 0.001);
+    // 同一 IMU 区间的下一份外援应与直接接收它一致，不重用上一份视觉后验。
+    let mut final_state = state();
+    final_state.rotation = UnitQuaternion::from_scaled_axis(Vector3::z() * 0.0107);
+    final_state.covariance *= 1e-9;
+    let final_aid = Aid {
+        timestamp: 2.207,
+        session: 7,
+        state: final_state,
+    };
+    assert!(a.aid(&final_aid).unwrap());
+    assert!(b.aid(&final_aid).unwrap());
+    let expected = UnitQuaternion::from_scaled_axis(Vector3::z() * 0.04);
+    assert!((a.state().unwrap().rotation.inverse() * expected).angle() < 1e-12);
+    assert!((a.state().unwrap().rotation.inverse() * b.state().unwrap().rotation).angle() < 1e-12);
+    assert!((a.state().unwrap().covariance - b.state().unwrap().covariance).amax() < 1e-12);
+    assert!((a.state().unwrap().bias - b.state().unwrap().bias).norm() < 1e-12);
 }
 
 #[test]

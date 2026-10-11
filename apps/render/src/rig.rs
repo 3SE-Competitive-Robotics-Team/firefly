@@ -291,3 +291,40 @@ pub fn apply_pose_to_eyes(pose: &PoseState, eyes: &mut Query<(&Eye, &mut Transfo
         *transform = eye_transform(pose.pos, pose.quat, offset);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sensor_projection_matches_integer_pixel_centers() {
+        let projection = sensor_projection().get_clip_from_view();
+        let focal =
+            (IMAGE_HEIGHT as f64 / 2.0) / (firefly_base::rig::FOV_Y_DEG.to_radians() / 2.0).tan();
+        let [cx, cy] = firefly_base::rig::principal_point(IMAGE_WIDTH, IMAGE_HEIGHT);
+        assert!((cx - 159.5).abs() < 1e-12 && (cy - 119.5).abs() < 1e-12);
+        // WebGPU viewport 坐标位于像素边界；数组 (u,v) 的采样位置为 (u+.5,v+.5)。
+        let pixel = |point: Vec3| {
+            let clip = projection * point.extend(1.0);
+            Vec2::new(
+                (clip.x / clip.w + 1.0) * IMAGE_WIDTH as f32 / 2.0 - 0.5,
+                (1.0 - clip.y / clip.w) * IMAGE_HEIGHT as f32 / 2.0 - 0.5,
+            )
+        };
+        for z in [0.1, 1.0, 10.0] {
+            for (u, v) in [(0., 0.), (319., 239.), (159.5, 119.5), (43.25, 187.75)] {
+                let point = Vec3::new(
+                    ((u - cx) * z / focal) as f32,
+                    (-(v - cy) * z / focal) as f32,
+                    -z as f32,
+                );
+                assert!((pixel(point) - Vec2::new(u as f32, v as f32)).length() < 1e-4);
+            }
+        }
+        let point = Vec3::new(0.2, -0.3, -2.0);
+        let epsilon = 1e-3;
+        let dx =
+            (pixel(point + Vec3::X * epsilon) - pixel(point - Vec3::X * epsilon)) / (2.0 * epsilon);
+        assert!((dx.x - focal as f32 / 2.0).abs() < 0.02 && dx.y.abs() < 0.02);
+    }
+}

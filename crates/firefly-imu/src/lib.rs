@@ -4,7 +4,9 @@
 mod eskf;
 mod stream;
 
-pub use eskf::{AttitudeState, Gate, Matrix6, gravity_jacobian, right_jacobian, transition};
+pub use eskf::{
+    AttitudeState, Gate, Intersection, Matrix6, gravity_jacobian, right_jacobian, transition,
+};
 use firefly_error::{Error, ErrorKind, Result};
 use serde::Deserialize;
 pub use stream::{Aid, Estimator, Sample};

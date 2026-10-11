@@ -29,6 +29,8 @@ pub struct Snapshot {
     pub accel_accepted: bool,
     pub bias: [f64; 3],
     pub aid_time: Option<f64>,
+    pub aid_gate: firefly_imu::Intersection,
+    pub covariance_diagonal: [f64; 6],
 }
 pub struct Worker {
     latest: Arc<Mutex<Option<Snapshot>>>,
@@ -186,6 +188,9 @@ fn run(
                     accel_accepted: estimator.gate().accepted,
                     bias,
                     aid_time: estimator.last_aid(),
+                    aid_gate: estimator.aid_gate(),
+                    covariance_diagonal: state
+                        .map_or([0.; 6], |s| std::array::from_fn(|i| s.covariance[(i, i)])),
                 });
             }
         }

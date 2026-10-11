@@ -25,6 +25,27 @@ pub struct FlightGizmos;
 pub struct FlightOverlay {
     pub actual: Track,
     estimate: Track,
+    startup_display: Option<Transform>,
+    pub map_to_display: Option<Transform>,
+}
+
+impl FlightOverlay {
+    /// 仅调试图层使用首个仿真样本确定显示坐标；禁止反馈传感器、估计或控制。
+    pub fn observe_actual(&mut self, msg: &OdomMessage, wall: f64) {
+        if self.startup_display.is_none()
+            && msg.timestamp <= 0.5
+            && msg.timestamp >= 0.
+            && let Ok(pose) = msg.body_pose(FrameId::MAP)
+        {
+            let p = pose.isometry().translation.vector;
+            self.startup_display = Some(Transform {
+                translation: Vec3::new(p.x as f32, p.y as f32, p.z as f32),
+                rotation: Quat::from_rotation_z(pose.isometry().rotation.euler_angles().2 as f32),
+                ..default()
+            });
+        }
+        self.actual.observe(msg, wall);
+    }
 }
 
 struct TrailPoint {
@@ -144,7 +165,31 @@ pub fn poll_estimate(
     };
     loop {
         match subscriber.receive() {
-            Ok(Some(sample)) => overlay.estimate.observe(&sample, time.elapsed_secs_f64()),
+            Ok(Some(sample)) => {
+                overlay.map_to_display = if sample.external_map == 1 {
+                    Some(Transform::IDENTITY)
+                } else {
+                    overlay.startup_display
+                };
+                if let Some(display) = overlay.map_to_display {
+                    let mut msg = sample.odom;
+                    let p = display.transform_point(Vec3::new(
+                        msg.position_x as f32,
+                        msg.position_y as f32,
+                        msg.position_z as f32,
+                    ));
+                    let q = display.rotation
+                        * Quat::from_xyzw(
+                            msg.quat_x as f32,
+                            msg.quat_y as f32,
+                            msg.quat_z as f32,
+                            msg.quat_w as f32,
+                        );
+                    [msg.position_x, msg.position_y, msg.position_z] = p.to_array().map(f64::from);
+                    [msg.quat_x, msg.quat_y, msg.quat_z, msg.quat_w] = q.to_array().map(f64::from);
+                    overlay.estimate.observe(&msg, time.elapsed_secs_f64());
+                }
+            }
             Ok(None) => break,
             Err(error) => {
                 log::warn!("地图定位影子接收失败: {error:?}");
@@ -213,6 +258,23 @@ mod tests {
             is_initialized: true,
             ..default()
         }
+    }
+
+    #[test]
+    fn session_display_origin_is_fixed_and_never_tracks_later_truth() {
+        let mut overlay = FlightOverlay::default();
+        let mut sample = OdomMessage {
+            timestamp: 0.1,
+            position_x: 10.,
+            is_initialized: true,
+            ..Default::default()
+        };
+        overlay.observe_actual(&sample, 0.1);
+        sample.timestamp = 2.;
+        sample.position_x = 50.;
+        overlay.observe_actual(&sample, 2.);
+        assert_eq!(overlay.startup_display.unwrap().translation.x, 10.);
+        assert!(overlay.map_to_display.is_none());
     }
 
     #[test]

@@ -12,10 +12,11 @@ use firefly_localization::filter::{FusionFilter, RelocGate};
 use firefly_localization::graph::{GraphOptions, PoseGraph};
 use firefly_localization::quality::{Quality, QualityOptions};
 use firefly_observability::init as init_observability;
+use firefly_pubsub::navigation::{NAVIGATION_TOPIC, NavigationMessage};
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::odom::CORRECTED_ODOM_TOPIC;
 use firefly_pubsub::odom::OdomMessage;
-use firefly_pubsub::publish::CorrectedOdomPublisher;
+use firefly_pubsub::publish::{CorrectedOdomPublisher, Publisher};
 use firefly_pubsub::subscriber::{OdomSubscriber, Subscriber};
 use firefly_pubsub::vision::{LOOP_TOPIC, LoopConstraint, POSE_OBS_TOPIC, PoseObservation};
 use firefly_pubsub::viz::{VizMessage, VizPublisher, kind};
@@ -138,6 +139,41 @@ fn gate_diag(gate: &RelocGate, max_innovation_trans: f64) -> Option<[f64; 4]> {
     }
 }
 
+// IPC 快照使用固定上限；图优化完成后一次发布，消费端不得混用版本。
+#[allow(clippy::large_stack_arrays)]
+fn landmark_snapshot(
+    graph: &PoseGraph,
+    from: f64,
+    to: f64,
+    loop_event: bool,
+) -> firefly_pubsub::landmarks::Correction {
+    let mut correction = firefly_pubsub::landmarks::Correction {
+        from,
+        to,
+        accepted: true,
+        loop_event,
+        count: graph.node_count() as u32,
+        poses: [OdomMessage::default(); 4096],
+    };
+    for (dst, (timestamp, pose)) in correction.poses.iter_mut().zip(graph.poses()) {
+        let p = pose.isometry().translation.vector;
+        let q = pose.isometry().rotation;
+        *dst = OdomMessage {
+            timestamp,
+            position_x: p.x,
+            position_y: p.y,
+            position_z: p.z,
+            quat_x: q.i,
+            quat_y: q.j,
+            quat_z: q.k,
+            quat_w: q.w,
+            is_initialized: true,
+            ..Default::default()
+        };
+    }
+    correction
+}
+
 struct App {
     backend: Backend,
     fusion: FusionFilter,
@@ -147,8 +183,15 @@ struct App {
     graph_options: Option<GraphOptions>,
     loops: Option<Subscriber<LoopConstraint>>,
     keyframes: Option<Subscriber<OdomMessage>>,
+    pending_keyframes: std::collections::VecDeque<OdomMessage>,
+    pending_loops: std::collections::VecDeque<LoopConstraint>,
+    landmark_correction: Publisher<firefly_pubsub::landmarks::Correction>,
     origin: firefly_localization::config::InitialAlignment,
     alignment_ready: bool,
+    navigation_pub: Publisher<NavigationMessage>,
+    published_alignment: Option<RigidTransform>,
+    alignment_revision: u64,
+    external_map: bool,
     estimator_reset: bool,
     reloc_ticks: usize,
     viewer_odom: Option<OdomSubscriber>,
@@ -199,7 +242,13 @@ impl App {
             .then(|| Subscriber::with_topic(&node, LOOP_TOPIC))
             .transpose()?;
         let keyframes = graph_inputs
-            .then(|| Subscriber::with_topic(&node, firefly_pubsub::vision::KEYFRAME_TOPIC))
+            .then(|| {
+                Subscriber::with_topic_and_buffer(
+                    &node,
+                    firefly_pubsub::vision::KEYFRAME_TOPIC,
+                    firefly_pubsub::landmarks::KEYFRAME_BUFFER,
+                )
+            })
             .transpose()?;
         let visual_obs = Some(Subscriber::with_topic(&node, POSE_OBS_TOPIC)?);
         let corrected_pub = Some(CorrectedOdomPublisher::new(&node)?);
@@ -225,13 +274,19 @@ impl App {
             graph_options: (cfg.backend == Backend::PoseGraph).then_some(cfg.graph),
             loops,
             keyframes,
-            origin: cfg.origin.ok_or_else(|| {
-                Error::new(
-                    ErrorKind::InvalidArgument,
-                    "explicit fixed startup [origin] is required",
-                )
-            })?,
+            pending_keyframes: std::collections::VecDeque::new(),
+            pending_loops: std::collections::VecDeque::new(),
+            landmark_correction: Publisher::with_topic_and_buffer(
+                &node,
+                firefly_pubsub::landmarks::CORRECTION_TOPIC,
+                Some(firefly_pubsub::landmarks::CORRECTION_BUFFER),
+            )?,
+            external_map: cfg.origin.is_some(),
+            origin: cfg.origin.unwrap_or_default(),
             alignment_ready: false,
+            navigation_pub: Publisher::with_topic(&node, NAVIGATION_TOPIC)?,
+            published_alignment: None,
+            alignment_revision: 0,
             estimator_reset: false,
             reloc_ticks: 0,
             viewer_odom: odom_sub,
@@ -259,7 +314,7 @@ impl App {
                 let m: OdomMessage = *sample;
                 if self.alignment_ready && !m.is_initialized {
                     self.estimator_reset = true;
-                    log::error!("VIO 初始化状态丢失，地图输出锁存停止；须在固定启动点重启");
+                    log::error!("VIO 初始化状态丢失，地图输出锁存停止；须重启会话");
                 }
                 if self.estimator_reset {
                     continue;
@@ -290,7 +345,7 @@ impl App {
                         self.fusion.set_alignment(alignment)?;
                     }
                     self.alignment_ready = true;
-                    log::info!("固定启动位姿与静止 VIO 对齐，地图里程计就绪");
+                    log::info!("启动坐标系与静止 VIO 对齐，地图里程计就绪");
                 }
                 self.t_sim = self.t_sim.max(m.timestamp);
                 self.last_odom_recv = std::time::Instant::now();
@@ -330,59 +385,94 @@ impl App {
     fn poll_loop_constraints(&mut self) -> Result<()> {
         if let Some(keyframes) = &self.keyframes {
             while let Some(sample) = keyframes.receive()? {
-                if self.estimator_reset
-                    || !sample.is_initialized
-                    || self.latest_odom.is_none_or(|m| {
-                        sample.timestamp > m.timestamp
-                            || m.timestamp - sample.timestamp > PENDING_VISUAL_TIMEOUT
-                    })
-                {
-                    continue;
+                if !sample.is_initialized || !sample.timestamp.is_finite() {
+                    return Err(Error::new(
+                        ErrorKind::InvalidArgument,
+                        "invalid online keyframe",
+                    ));
                 }
-                if let Some(graph) = &mut self.graph {
-                    let result = sample.body_pose(FrameId::ODOM).and_then(|pose| {
-                        graph.insert(
-                            sample.timestamp,
-                            graph.raw_pose(sample.timestamp).unwrap_or(pose),
-                        )
-                    });
-                    if let Err(e) = result {
-                        log::warn!("在线关键帧拒收: {e}");
-                    }
-                }
+                self.pending_keyframes.push_back(*sample);
             }
         }
         if let Some(loops) = &self.loops {
             while let Some(sample) = loops.receive()? {
-                let edge = *sample;
-                if self.estimator_reset
-                    || self.latest_odom.is_none_or(|m| {
-                        edge.to.timestamp > m.timestamp
-                            || m.timestamp - edge.to.timestamp > PENDING_VISUAL_TIMEOUT
-                    })
-                {
-                    continue;
+                if !sample.to.timestamp.is_finite() {
+                    return Err(Error::new(
+                        ErrorKind::InvalidArgument,
+                        "invalid loop timestamp",
+                    ));
                 }
-                if let Some(graph) = &mut self.graph {
-                    let result = graph.observe_loop(&edge);
-                    if let Some(viz) = &self.viz_pub {
-                        let mut msg =
-                            VizMessage::base(kind::SCALARS, self.t_sim, "corr/debug/loops");
-                        msg.scalars[0] = graph.loop_count() as f64;
-                        msg.scalars[1] = graph.node_count() as f64;
-                        msg.scalars[2] = f64::from(result.is_ok());
-                        msg.scalar_count = 3;
-                        let _ = viz.publish(msg);
-                    }
-                    match result {
-                        Ok(()) => log::info!(
-                            "在线回环接受 {:.3} → {:.3}",
-                            edge.from.timestamp,
-                            edge.to.timestamp
-                        ),
-                        Err(e) => log::warn!("在线回环拒收: {e}"),
-                    }
-                }
+                self.pending_loops.push_back(*sample);
+            }
+        }
+        if self.pending_keyframes.len() > firefly_pubsub::landmarks::KEYFRAME_BUFFER
+            || self.pending_loops.len() > PENDING_VISUAL_CAP
+        {
+            return Err(Error::new(
+                ErrorKind::Internal,
+                "online graph input queue exhausted",
+            ));
+        }
+        if self.estimator_reset {
+            self.pending_keyframes.clear();
+            self.pending_loops.clear();
+            return Ok(());
+        }
+        let (Some(latest), Some(graph)) = (self.latest_odom, &mut self.graph) else {
+            return Ok(());
+        };
+        // 独立 IPC 话题可以先于预测里程计到达；保留完整关键帧，等待里程计覆盖。
+        while self
+            .pending_keyframes
+            .front()
+            .is_some_and(|sample| sample.timestamp <= latest.timestamp)
+        {
+            let sample = self.pending_keyframes.pop_front().expect("front checked");
+            if latest.timestamp - sample.timestamp > PENDING_VISUAL_TIMEOUT {
+                return Err(Error::new(
+                    ErrorKind::InvalidArgument,
+                    "online keyframe expired before graph insertion",
+                ));
+            }
+            let pose = sample.body_pose(FrameId::ODOM)?;
+            graph.insert(
+                sample.timestamp,
+                graph.raw_pose(sample.timestamp).unwrap_or(pose),
+            )?;
+        }
+        while self
+            .pending_loops
+            .front()
+            .is_some_and(|edge| edge.to.timestamp <= latest.timestamp)
+        {
+            let edge = self.pending_loops.pop_front().expect("front checked");
+            let result = if latest.timestamp - edge.to.timestamp > PENDING_VISUAL_TIMEOUT {
+                Err(Error::new(
+                    ErrorKind::InvalidArgument,
+                    "loop observation expired",
+                ))
+            } else {
+                graph.observe_loop(&edge)
+            };
+            let mut correction =
+                landmark_snapshot(graph, edge.from.timestamp, edge.to.timestamp, true);
+            correction.accepted = result.is_ok();
+            self.landmark_correction.publish(correction)?;
+            if let Some(viz) = &self.viz_pub {
+                let mut msg = VizMessage::base(kind::SCALARS, self.t_sim, "corr/debug/loops");
+                msg.scalars[0] = graph.loop_count() as f64;
+                msg.scalars[1] = graph.node_count() as f64;
+                msg.scalars[2] = f64::from(result.is_ok());
+                msg.scalar_count = 3;
+                let _ = viz.publish(msg);
+            }
+            match result {
+                Ok(()) => log::info!(
+                    "在线回环接受 {:.3} → {:.3}",
+                    edge.from.timestamp,
+                    edge.to.timestamp
+                ),
+                Err(e) => log::warn!("在线回环拒收: {e}"),
             }
         }
         Ok(())
@@ -446,6 +536,10 @@ impl App {
     /// 视觉观测融合：按观测时刻插值 odom 作预测位姿，选定后端更新。
     #[fastrace::trace]
     fn fuse_visual(&mut self, obs: &PoseObservation) {
+        if !self.external_map {
+            log::warn!("会话地图未对齐外部地图，拒绝绝对地图观测");
+            return;
+        }
         let Some(t_vio) = interp_odom(&self.odom_hist, obs.timestamp) else {
             log::debug!("视觉观测无 odom 内插（ts={:.2}），跳过", obs.timestamp);
             return;
@@ -463,6 +557,12 @@ impl App {
                     obs.timestamp,
                     (predicted.fixed_view::<3, 1>(0, 3) - observed).norm(),
                 );
+            }
+            if result.is_ok() {
+                let correction = landmark_snapshot(graph, obs.timestamp, obs.timestamp, false);
+                if let Err(error) = self.landmark_correction.publish(correction) {
+                    log::error!("地图锚点快照发布失败: {error}");
+                }
             }
             let applied = (graph.alignment().matrix().fixed_view::<3, 1>(0, 3)
                 - before.fixed_view::<3, 1>(0, 3))
@@ -557,6 +657,20 @@ impl App {
             metric.scalar_count = 3;
             let _ = viz.publish(metric);
         }
+        if self
+            .published_alignment
+            .as_ref()
+            .is_some_and(|old| (old.matrix() - alignment.matrix()).norm() > 1e-10)
+        {
+            self.alignment_revision = self
+                .alignment_revision
+                .checked_add(1)
+                .ok_or_else(|| Error::new(ErrorKind::Internal, "alignment revision exhausted"))?;
+        }
+        let mut navigation = NavigationMessage::new(msg, &alignment, self.alignment_revision);
+        navigation.external_map = u64::from(self.external_map);
+        self.navigation_pub.publish(navigation)?;
+        self.published_alignment = Some(alignment);
         pub_.publish(msg).map(|_| ())?;
         self.last_published = msg.timestamp;
         self.log_corrected_viz(&msg);
@@ -729,17 +843,7 @@ mod tests {
                 use super::*;
                 use firefly_pubsub::publish::Publisher;
                 let topic = format!("Firefly/Test/MapOdometry/{}", std::process::id());
-                let mut app = App::new(
-                    LocalizationConfig {
-                        origin: Some(firefly_localization::config::InitialAlignment {
-                            position: [-13., 0., 0.405],
-                            yaw: 0.,
-                        }),
-                        ..Default::default()
-                    },
-                    &topic,
-                )
-                .unwrap();
+                let mut app = App::new(LocalizationConfig::default(), &topic).unwrap();
                 assert_eq!(app.backend, Backend::PoseGraph);
                 assert!(app.visual_obs.is_some());
                 let node = create_node().unwrap();
@@ -755,16 +859,46 @@ mod tests {
                 app.step().unwrap();
                 assert!(app.alignment_ready);
                 let _ = corrected.receive().unwrap();
+                let keyframes = Publisher::<OdomMessage>::with_topic(
+                    &node,
+                    firefly_pubsub::vision::KEYFRAME_TOPIC,
+                )
+                .unwrap();
+                keyframes
+                    .publish(OdomMessage {
+                        timestamp: 1.95,
+                        ..sample
+                    })
+                    .unwrap();
+                keyframes
+                    .publish(OdomMessage {
+                        timestamp: 3.,
+                        ..sample
+                    })
+                    .unwrap();
+                app.step().unwrap();
+                assert!(app.graph.as_ref().unwrap().raw_pose(1.95).is_some());
+                assert!(app.graph.as_ref().unwrap().raw_pose(3.).is_none());
+                assert_eq!(app.pending_keyframes.len(), 1);
                 sample.timestamp = 7.;
                 sample.position_x = 2.;
                 sample.position_y = 3.;
                 sample.position_z = 1.;
                 raw.publish(sample).unwrap();
                 app.step().unwrap();
+                assert!(app.pending_keyframes.is_empty());
+                let snapshot = landmark_snapshot(app.graph.as_ref().unwrap(), 1.95, 3., true);
+                assert_eq!(
+                    snapshot.poses[..snapshot.count as usize]
+                        .iter()
+                        .map(|p| p.timestamp)
+                        .collect::<Vec<_>>(),
+                    [1.95, 2., 3.]
+                );
                 let mapped = corrected.receive().unwrap().unwrap();
-                assert!((mapped.position_x + 11.).abs() < 1e-12);
+                assert!((mapped.position_x - 2.).abs() < 1e-12);
                 assert!((mapped.position_y - 3.).abs() < 1e-12);
-                assert!((mapped.position_z - 1.405).abs() < 1e-12);
+                assert!((mapped.position_z - 1.).abs() < 1e-12);
                 assert!(
                     !app.quality
                         .status(7., &app.quality_options)

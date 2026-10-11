@@ -48,6 +48,7 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
     /// `buffer_size` 控制 iceoryx2 内部环形缓冲区深度：
     /// - IMU（100 Hz）建议 ≥20，避免 VIO 处理期间丢帧；
     /// - 相机（10 Hz）建议 1，只保留最新帧避免左右目交叉。
+    /// 大于 1 的缓冲同时声明服务所需容量，允许订阅端先创建服务。
     ///
     /// # Errors
     /// Service/Subscriber 创建失败（IPC 资源不可用等）。
@@ -56,7 +57,7 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
         topic: &str,
         buffer_size: usize,
     ) -> Result<Self, firefly_error::Error> {
-        let service = node
+        let mut builder = node
             .service_builder(&topic.try_into().map_err(|e| {
                 firefly_error::Error::new(
                     firefly_error::ErrorKind::InvalidArgument,
@@ -64,14 +65,16 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
                 )
             })?)
             .publish_subscribe::<T>()
-            .user_header::<TraceContext>()
-            .open_or_create()
-            .map_err(|e| {
-                firefly_error::Error::new(
-                    firefly_error::ErrorKind::Internal,
-                    format!("打开/创建话题 `{topic}` 失败: {e:?}"),
-                )
-            })?;
+            .user_header::<TraceContext>();
+        if buffer_size > 1 {
+            builder = builder.subscriber_max_buffer_size(buffer_size);
+        }
+        let service = builder.open_or_create().map_err(|e| {
+            firefly_error::Error::new(
+                firefly_error::ErrorKind::Internal,
+                format!("打开/创建话题 `{topic}` 失败: {e:?}"),
+            )
+        })?;
         let subscriber = service
             .subscriber_builder()
             .buffer_size(buffer_size)

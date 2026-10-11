@@ -54,3 +54,29 @@ def test_physics_and_imu_without_renderer(tmp_path, monkeypatch):
     for _ in range(40):
         env.step()
     assert env.state()[1][2] > 0.5
+
+
+def test_sensor_snapshot_uses_integrated_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(scene, "_RMUC_DIR", tmp_path)
+    (tmp_path / "rmuc2026_collision.json").write_text(json.dumps({
+        "boxes": [[-13.0, 0.0, 0.1875, 0.5, 0.5, 0.1875]],
+    }))
+    env = DroneEnv(gyro_noise=0.0, accel_noise=0.0)
+    origin = np.array([0.0, 0.0, 5.0])
+    env.reset(origin, np.array([0.0, 0.0, 0.0, 1.0]))
+    env.data.qvel[:3] = [1.0, 0.0, 0.0]
+    env.data.qvel[3:6] = [0.0, 0.0, 0.4]
+    for _ in range(3):
+        env.step()
+        position, velocity, quaternion, rate = env.state()
+        np.testing.assert_allclose(position, env.data.qpos[:3], atol=1e-12)
+        np.testing.assert_allclose(quaternion, env.data.qpos[[4, 5, 6, 3]], atol=1e-12)
+        np.testing.assert_allclose(position[:2], [env.time, 0.0], atol=1e-12)
+        np.testing.assert_allclose(velocity[2], -9.81 * env.time, atol=1e-12)
+        gyro, accel = env.imu()
+        np.testing.assert_allclose(gyro, rate, atol=1e-12)
+        np.testing.assert_allclose(accel, 0.0, atol=1e-10)
+        gt_position, gt_quaternion, gt_velocity = env.gt_pose()
+        np.testing.assert_array_equal(gt_position, position)
+        np.testing.assert_array_equal(gt_quaternion, quaternion)
+        np.testing.assert_array_equal(gt_velocity, velocity)

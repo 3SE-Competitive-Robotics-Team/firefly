@@ -222,7 +222,7 @@ def test_vio_only_map_stage_starts_only_planner_and_labels_fixed_prior(tmp_path,
     assert mission.result["localization_mode"] == "vio_only"
 
 
-def test_default_map_stage_starts_visual_frontend(tmp_path, monkeypatch):
+def test_default_map_stage_uses_running_visual_frontend(tmp_path, monkeypatch):
     from mission import Mission
     mission = Mission(tmp_path, "nominal", Options())
     mission.latest["corrected"] = (2., None, None, None, True)
@@ -232,10 +232,26 @@ def test_default_map_stage_starts_visual_frontend(tmp_path, monkeypatch):
     monkeypatch.setattr(mission, "start", lambda name, command: launched.append((name, command)))
     monkeypatch.setattr(mission, "wait", lambda predicate, **kwargs: predicate() or pytest.fail("not ready"))
     result = mission.map_ready()
-    assert [name for name, _ in launched] == ["aliked", "lightglue", "planner"]
-    assert all("--vio-only" not in command for _, command in launched)
+    assert [name for name, _ in launched] == ["planner"]
+    assert all("--vio-only" not in command and "--map" not in command for _, command in launched)
     assert result["accepted_visual_updates_at_start"] == 0
     assert result["visual_frontend"] == "enabled"
+
+
+@pytest.mark.parametrize(("vio_only", "prior_maps"), [(False, False), (False, True), (True, False)])
+def test_online_frontend_runs_during_takeoff_and_initial_hover(tmp_path, monkeypatch, vio_only, prior_maps):
+    from mission import Mission
+    mission = Mission(tmp_path, "nominal", Options(), vio_only=vio_only, prior_maps=prior_maps)
+
+    def run_phases(phases, applications):
+        assert [name for name, _ in phases][:3] == ["initialization", "takeoff", "hover"]
+        assert ("slam" in applications) == (not vio_only)
+        assert ("aliked" in applications) == prior_maps
+        assert ("lightglue" in applications) == prior_maps
+        return mission.result
+
+    monkeypatch.setattr(mission, "run_phases", run_phases)
+    mission.run()
 
 
 @pytest.mark.parametrize("observations,passed", [(0, False), (1, False), (2, True)])
@@ -256,3 +272,29 @@ def test_visual_evidence_is_scored_independently_of_navigation(monkeypatch, obse
     mission_metrics.score(case, Options())
     assert "visual_localization" not in case["stages"]
     assert case["mission_summary"]["loop_evidence"] == "disabled_vio_only"
+
+
+def test_session_scoring_uses_only_initial_truth_gauge_and_preserves_drift():
+    from mission_metrics import startup_truth
+    truth = poses()
+    truth[:, 1:4] = np.column_stack((np.full(len(truth), 10.), truth[:, 0] + 20., np.full(len(truth), 3.)))
+    truth[:, 6:8] = np.sqrt(.5)
+    original = truth.copy()
+    data, frame = startup_truth({"gt": truth})
+    expected = poses()
+    assert np.allclose(data["gt"], expected)
+    assert np.array_equal(truth, original)
+    drifted = expected.copy()
+    drifted[:, 2] += .6
+    assert position_error(data["gt"], drifted, 0., 3.)["rmse_m"] == pytest.approx(.6)
+    assert not frame["trajectory_fitting"] and not frame["feedback_to_algorithms"]
+
+
+def test_online_slam_requires_loop_constraint_even_without_prior_map(monkeypatch):
+    import mission_metrics
+    monkeypatch.setattr(mission_metrics, "read_evidence", lambda _: {"gt": poses()})
+    case = {"case": "nominal", "localization_mode": "online_slam", "recording": "unused",
+            "stages": {"tracking": {"status": "blocked"}}}
+    mission_metrics.score(case, Options())
+    assert case["stages"]["online_loop"]["status"] == "failed"
+    assert "visual_localization" not in case["stages"]

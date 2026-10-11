@@ -39,9 +39,9 @@ pub struct PlannerConfig {
     /// 多拓扑候选轨迹(官方 `manager/use_multitopology_trajs`,默认关闭;
     /// 关闭时规划路径与单候选完全一致)。
     pub use_multitopology_trajs: bool,
-    /// 虚拟地板 z（米，世界坐标；官方 `grid_map/virtual_ground`，None = 不启用）。
+    /// 虚拟地板 z（米，规划地图坐标；官方 `grid_map/virtual_ground`，None = 不启用）。
     pub virtual_ground: Option<f64>,
-    /// 虚拟天花板 z（米，世界坐标；官方 `grid_map/virtual_ceil`，None = 不启用）。
+    /// 虚拟天花板 z（米，规划地图坐标；官方 `grid_map/virtual_ceil`，None = 不启用）。
     pub virtual_ceiling: Option<f64>,
     /// 偏航保持（本项目扩展，官方只有朝速度方向）：true 时参考偏航锁定
     /// 起飞朝向、偏航角速度恒零，多旋翼侧飞，视角稳定以利视觉定位；

@@ -102,3 +102,66 @@ fn rust_python_payload_header_and_event_roundtrip() {
     assert!(notifications > 0);
     assert_eq!(listener.drain().unwrap(), 0, "event queue must be drained");
 }
+
+#[test]
+#[ignore = "requires FIREFLY_TEST_PYTHON pointing to the synced workspace Python"]
+fn reference_alignment_snapshot_roundtrip() {
+    let python = std::env::var("FIREFLY_TEST_PYTHON").expect("workspace Python path");
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let request = format!("Firefly/Test/Interop/{unique}/Request");
+    let response = format!("Firefly/Test/Interop/{unique}/Response");
+    let node = create_node().unwrap();
+    let publisher = firefly_pubsub::publish::Publisher::<firefly_pubsub::reference::ReferenceMessage>::with_topic(&node, &request).unwrap();
+    let subscriber = firefly_pubsub::subscriber::Subscriber::<
+        firefly_pubsub::reference::ReferenceMessage,
+    >::with_topic(&node, &response)
+    .unwrap();
+    let listener = TopicListener::with_topic(&node, &response).unwrap();
+    let peer = PEER.replace("OdomMessage", "ReferenceMessage").replace("msg.is_initialized", "msg.has_alignment == 1 and list(msg.alignment_translation) == [10., 20., 30.] and msg.alignment_rotation[3] == 1.");
+    let mut child = Command::new(python)
+        .args(["-c", &peer, &request, &response])
+        .spawn()
+        .unwrap();
+    let message = firefly_pubsub::reference::ReferenceMessage {
+        timestamp: 12.5,
+        position_x: 2.5,
+        velocity_y: -3.25,
+        has_alignment: 1,
+        alignment_translation: [10., 20., 30.],
+        ..firefly_pubsub::reference::ReferenceMessage::default()
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut received = None;
+    let mut notifications = 0;
+    while Instant::now() < deadline {
+        publisher.publish(message).unwrap();
+        if let Some(sample) = subscriber.receive().unwrap() {
+            received = Some((*sample, *sample.user_header()));
+        }
+        notifications += listener.drain().unwrap();
+        if received.is_some() && notifications > 0 {
+            publisher
+                .publish(firefly_pubsub::reference::ReferenceMessage {
+                    timestamp: 14.5,
+                    ..message
+                })
+                .unwrap();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(child.wait().unwrap().success(), "Python peer failed");
+    let (reply, header) = received.expect("Python reply");
+    assert!((reply.timestamp - 13.5).abs() < f64::EPSILON);
+    assert!((reply.position_x - message.position_x).abs() < f64::EPSILON);
+    assert!((reply.velocity_y - message.velocity_y).abs() < f64::EPSILON);
+    assert_eq!(reply.has_alignment, 1);
+    assert_eq!(reply.alignment_translation, [10., 20., 30.]);
+    assert_eq!(reply.alignment_rotation, [0., 0., 0., 1.]);
+    assert!(header.send_ts_secs > 0);
+    assert!(notifications > 0);
+    assert_eq!(listener.drain().unwrap(), 0, "event queue must be drained");
+}

@@ -35,6 +35,7 @@ use iceoryx2::waitset::WaitSetRunResult;
 mod config;
 mod input;
 mod keypoints;
+mod mapping;
 mod odometry;
 use config::VioConfig;
 
@@ -82,11 +83,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 相机标定（内参来自配置：RMUC render 双目 320×240、focal≈168.6、无畸变；
     // 真机换 D430 标定值即可，见 configs/vio.toml）。
+    let [cx, cy] = firefly_base::rig::principal_point(cfg.camera.width, cfg.camera.height);
     let intrinsics = [
         cfg.camera.focal,
         cfg.camera.focal,
-        cfg.camera.width as f64 / 2.0,
-        cfg.camera.height as f64 / 2.0,
+        cx,
+        cy,
         0.0,
         0.0,
         0.0,
@@ -248,6 +250,11 @@ fn run_loop(
         .map_err(|e| firefly_error::Error::new(firefly_error::ErrorKind::Internal, e.to_string()))?
         .as_nanos() as u64;
     let mut last_aid = f64::NEG_INFINITY;
+    let mapping_pub =
+        firefly_pubsub::publish::Publisher::<firefly_pubsub::landmarks::Keyframe>::with_topic(
+            node,
+            firefly_pubsub::landmarks::TOPIC,
+        )?;
     let mut t_sim = 0.0f64;
     let mut next_odom = 0.0f64;
     let mut next_viz = 0.0f64;
@@ -331,6 +338,12 @@ fn run_loop(
         if let Some(cam) = input.next_camera() {
             camera_count += 1;
             vio.feed_measurement_camera(&cam);
+            if let Some(snapshot) = vio.mapping_snapshot.take()
+                && let Some(message) = mapping::message(&snapshot, &cam, session)
+                && let Err(error) = mapping_pub.publish(message)
+            {
+                log::warn!("地图关键帧发布失败: {error}");
+            }
             keypoints::publish(viz_pub, &cam, &vio.track_feats);
             log::debug!(
                 "camera t={:.3} sensors={:?} imgs={}x{}",

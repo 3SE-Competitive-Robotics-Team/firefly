@@ -4,20 +4,9 @@ import math
 import time
 
 import iceoryx2 as iox2
-from firefly_mujoco import LogMessage, TraceContext
+from firefly_mujoco import LogMessage, TraceContext, ReferenceMessage
 from firefly_viz.messages import VizMessage
 
-
-class ReferenceMessage(ctypes.Structure):
-    _pack_ = 8
-    _fields_ = [(name, ctypes.c_double) for name in (
-        "timestamp", "position_x", "position_y", "position_z", "velocity_x",
-        "velocity_y", "velocity_z", "acceleration_x", "acceleration_y",
-        "acceleration_z", "yaw", "yaw_dot")]
-
-    @staticmethod
-    def type_name():
-        return "FireflyReferenceMessage"
 
 
 def service(node, topic, cls, capacity=None, publishers=None):

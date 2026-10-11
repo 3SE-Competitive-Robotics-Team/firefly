@@ -113,15 +113,29 @@ CI 的 Rust job 执行全部普通测试；Python job 执行 `tests/`、`apps/`�
 ## 自动任务验收
 
 ```bash
-cargo build --release -j 2 -p vio -p render -p fc -p ffctl -p localization -p planner -p aliked -p lightglue
+cargo build --release -j 2 -p vio -p render -p fc -p ffctl -p localization -p planner -p slam
 uv run --all-packages --extra test python scripts/accept_rmuc.py
 ```
 
-22m 去程到地图坐标 `(9, 0, 2)m`，到位后返回停机坪上方并降落：
+22m 去程到会话地图坐标 `(22, 0, 1.595)m`，到位后返回启动点上方并降落：
 
 ```bash
-uv run --all-packages --extra test python scripts/accept_rmuc.py --case nominal --config configs/acceptance_22m.toml
+uv run pytest tests/system/test_roundtrip.py
 ```
+
+该无 mock 用例直接调用正式验收器 `scripts/accept_rmuc.py`，使用
+`configs/acceptance_22m.toml`，默认空地图、在线回环和深度建图；不加载离线地图。
+运行前须准备 RMUC 资产及图形会话，并构建运行程序：
+
+```bash
+cargo build --release -p render -p vio -p fc -p ffctl -p localization -p planner -p slam
+```
+
+初始化、往返真值精度、轨迹跟踪、在线回环、降落、碰撞和进程退出沿用正式验收阈值，
+任何一项失败均使 pytest 失败；JSON/HTML 汇总与原始 RRD 位于 `logs/test_roundtrip_22m_*/`。
+`tests/system/conftest.py` 共用运行条件检查、证据目录与退出核对；显式指定文件即执行，
+普通全仓测试收集时跳过真实飞行。悬停入口仍为
+`uv run pytest tests/system/test_imu_flight.py -k imu_hover`。
 
 该配置只指定航点，飞行、定位、碰撞及时间预算均使用默认验收条件。
 运行前完成全部编译，避免编译负载与传感器进程争抢资源。
@@ -132,10 +146,11 @@ uv run --all-packages --extra test python scripts/accept_rmuc.py --case nominal 
 uv run --all-packages --extra test python scripts/accept_rmuc.py --case nominal --config configs/acceptance_22m.toml --vio-only
 ```
 
-该模式不启动 ALIKED/LightGlue，不要求模型或冻结视觉库；localization 与 planner 使用
+该模式不启动 slam 或 ALIKED/LightGlue，不要求模型或冻结视觉库；localization 与 planner 使用
 和完整链路相同的默认入口。报告将视觉前端与回环标为关闭，真值评分仍使用相同的飞行、
-地图误差、碰撞、时间预算阈值。完整视觉链路额外从 RRD 检查至少两次已接受地图观测，
-该验收项不阻塞规划启动。VIO 对照不能替代完整视觉链路的验收。
+地图误差、碰撞、时间预算阈值。默认在线 SLAM 任务额外从 RRD 检查已接受回环约束；
+外部地图模式另检查至少两次已接受地图观测，二者不阻塞规划启动。
+VIO 对照不能替代完整视觉链路的验收。
 
 
 配置为 `configs/acceptance.toml`（`--config` 可覆盖），缺键采用
@@ -143,12 +158,14 @@ uv run --all-packages --extra test python scripts/accept_rmuc.py --case nominal 
 可单独复现。要求独占本仓库闭环进程与图形会话；检测到其他进程时拒绝运行，
 不终止其他任务。命令默认不重建二进制；完整场地准备入口会先 release 构建再调用它。
 
-单程任务可配置 `waypoints = [[9.0, 0.0, 2.0]]` 与 `finish_action = "hold"`：
+单程任务可配置 `waypoints = [[22.0, 0.0, 1.595]]` 与 `finish_action = "hold"`：
 到达后在终点持续悬停，再停止仿真。悬停由新鲜估计状态与 FC 模式判定，RRD 中
 真值独立评分 `terminal_hold_accuracy`；不执行或声称通过降落验收。
 `finish_action` 缺省为 `land`，用于返回停机坪的任务。
 
-`--allow-map-rig-translation` 是显式的冻结视觉库复用例外：只允许左目和深度相机
+`--prior-maps --localization-config <含显式 origin 的配置>` 启用外部地图模式；
+航点与规划高度边界必须使用该外部地图坐标。默认在线模式无需两份预建地图。
+`--allow-map-rig-translation` 仅用于外部地图模式，是显式的冻结视觉库复用例外：只允许左目和深度相机
 发生相同的机体内平移，其他几何、内参、相对标定与外观契约必须相同。三维路标
 保留地图坐标；采集时机体位置仍用于候选检索，位置偏移和例外状态写入报告的
 `provenance.visual_map_compatibility`。该开关不修改冻结地图或其生成清单。
@@ -159,7 +176,7 @@ uv run --all-packages --extra test python scripts/accept_rmuc.py --case nominal 
 uv run --all-packages --extra test python scripts/accept_rmuc.py --case nominal --config configs/acceptance_10m.toml --repeat 4
 ```
 
-该配置使用地图高度 2.2m、航点 `(-3,6,2.2)` → `(-13,0,2.2)`，每段预算
+该配置使用会话高度 1.795m、航点 `(10,6,1.795)` → `(0,0,1.795)`，每段预算
 90s 仿真时间；到达与误差阈值采用相同默认值。未通过估计状态的去程到达判定时不会进入返航。
 各次使用相同噪声种子，不能视为独立随机样本；RRD 分别保存在 `attempt_NN/`。
 单次任务失败仍继续下一次，进程未退出或用户中断则停止。
@@ -168,10 +185,11 @@ uv run --all-packages --extra test python scripts/accept_rmuc.py --case nominal 
 |---|---|
 | 初始化 | 真实 IMU/图像，屏蔽 PlantState；静止窗口至少 1s，局部原点误差 <0.1m，上锁电机为零 |
 | 起飞 / 悬停 | 起飞 1m；高度误差 <0.15m，水平偏移 <0.5m，速度 <0.2m/s，连续保持 3s |
-| 路径跟踪 | 真实视觉定位与 planner，地图系航点 `(-11,0,2)` → `(-13,0,1.405)`；逐点到达误差 <0.35m、速度 <0.3m/s 持续 1s |
-| 跟踪评分 | 同时刻 GT 与实际 Reference，禁止对齐；RMSE ≤0.35m，最大误差 ≤0.8m |
+| 路径跟踪 | VIO、在线回环与 planner，会话航点 `(2,0,1.595)` → `(0,0,1)`；逐点到达误差 <0.35m、速度 <0.3m/s 持续 1s |
+| 跟踪评分 | 同时刻 GT 与实际 Reference，禁止轨迹拟合；RMSE ≤0.35m，最大误差 ≤0.8m |
 | 局部定位 | 固定尺度航向/平移对齐；VIO ATE RMSE ≤0.2m，1s 位置增量 RPE RMSE ≤0.15m |
-| 地图定位 | 至少两次已接受的视觉融合；禁止对齐；位置 RMSE ≤0.25m，航向 RMSE ≤15° |
+| 地图定位 | 禁止轨迹拟合；位置 RMSE ≤0.25m，航向 RMSE ≤15°；外部地图模式另要求至少两次已接受库图观测 |
+| 在线回环 | 默认在线 SLAM 往返至少一条已接受回环约束；库图观测不能替代 |
 | 碰撞 | MuJoCo 每物理步累计；只豁免停机坪半径 0.5m、高差 0.06m、速度 <0.5m/s 且法线竖直余弦 ≥0.9 的接触；其他接触必须为零 |
 | 参考失联 | SIGINT 停止 planner；2.5s 墙钟内进入 Hold，在失联点 0.5m 内连续保持 2s |
 | 估计失联 | SIGINT 停止 VIO；0.8s 内进入姿态降级（编码 6），连续 3s 保持非零推力且无碰撞；安全落地明确标为 not_supported，不计作任务成功 |
@@ -188,7 +206,8 @@ OS/GPU 调度。正常起飞、悬停、到达和返航由新鲜估计状态驱�
 数据映射：`acceptance/{gt,odom,corrected,reference}` 为各自原坐标系的
 `Transform3D`，`*_velocity` 与 `motors/physics/penetration` 为 `Scalars`，
 均为 `sim_time` 上的实时原始观测，经 Firefly/Viz 聚合；阶段、指令和故障注入
-写入 `logs/acceptance` 的 `TextLog`。位置评分只读取这些 RRD，不向控制链反馈。
+写入 `logs/acceptance` 的 `TextLog`。会话地图评分用首个真值位置/航向确定固定换基，
+不拟合估计轨迹，不向控制链反馈；原始坐标保留在 RRD，换基参数写入报告。
 接触计数以 200Hz 物理步统计并以 20Hz 发布累计值，位姿评分约 10Hz；记录缺失、
 回退时钟或超过 0.5s 的评分数据断流不能计为通过。
 
@@ -196,7 +215,7 @@ OS/GPU 调度。正常起飞、悬停、到达和返航由新鲜估计状态驱�
 与 `report.html`。JSON 保留 Git 提交及脏状态、源码/二进制/资产/RRD SHA-256、
 完整配置、运行依赖版本、阶段时间窗、实际指标与退出码。HTML 为可读汇总。
 中途失败后的依赖阶段标为 blocked；碰撞通过只覆盖报告中实际观测到的时间，
-不能代替尚未完成的整段任务。该入口验证 ALIKED/LightGlue 库图重定位，不验证在线回环。
+不能代替尚未完成的整段任务。默认入口验证在线回环，库图重定位仅在外部地图模式验收。
 
 ## 深度注册与在线回环
 
@@ -207,25 +226,22 @@ OS/GPU 调度。正常起飞、悬停、到达和返航由新鲜估计状态驱�
 - RGB-D 已知刚体运动、25% 外点、共线拒绝、平移导数。
 - 图的四自由度残差解析值、雅可比中心差分（`1e-6` 步长，`1e-6` 误差）、
   鲁棒目标梯度（`1e-5` 误差）、位置/航向闭合与原始 odom 不变。
-- 未覆盖时间不外推、乱序拒绝、初始化丢失锁存、连续确认与错误深度拒绝。
+- 未覆盖时间不外推、乱序拒绝、初始化丢失锁存与错误几何拒绝。
 
 ```bash
-cargo test -p firefly-vision-match -p firefly-localization -p lightglue -p localization
+cargo test -p firefly-landmarks -p slam -p firefly-vio -p firefly-vision-match -p firefly-localization -p lightglue -p localization
 ```
 
-真实资产测试显式启用，`FIREFLY_LOOP_CAPTURES` 指向视觉地图清单中
-`capture_manifest` 所在目录，模型和地图需先按标准 pipeline 构建：
+`firefly-landmarks` 检查解析投影、雅可比差分、已知三维点与位姿恢复、
+双侧几何外点拒绝、无当前深度时的持久几何、真实观测三角化与共视关系。
+`slam` 使用校准的合成双目图检查图像到三维点的完整输入输出，并验证后端确认的
+端点匹配、缺失快照拒绝、原始位姿不变和离线锚点修正同步。
+这些检查不能代替以下无 mock 飞行用例：
 
 ```bash
-FIREFLY_LOOP_CAPTURES=models/rmuc2026/derived/vision/170f31928eb82cd9 \
-  cargo test --release -p lightglue -- --ignored
+uv run pytest tests/system/test_imu_flight.py -q -k imu_hover
+uv run pytest tests/system/test_roundtrip.py -q
 ```
-
-`real_model_revisit_contract` 必须生成经过三次确认的回环，注入 0.4m 漂移后，图优化
-输出误差小于 0.2m，并拒绝低质量回环。它重访同一采集图，不代表跨视角飞行成功。
-`real_model_insufficient_overlap_rejection_contract` 固定使用 `[-13,-1,1.2]` 与
-`[-12,-1,1.2]`、同航向的两帧 RMUC 库图，检查不足 30 对应时明确拒绝；该拒绝
-不计为定位或回环任务成功。不能把场景中的一米位置差直接等价为足够视觉重叠。
 
 `accept_rmuc.py` 验证真实进程闭环、地图定位和故障处置；报告单独汇总在线
 关键帧、候选与已接受回环约束。未完成返航重访时，零回环不能证明回环能力通过或失败；
@@ -257,15 +273,27 @@ RUST_LOG=info FIREFLY_QUERY_MAP=<独立查询.ffvmap> FIREFLY_QUERY_COUNT=20 \
 
 ## VIO 与地图融合的数值契约
 
-- `track` LK 偏置测试：整数平移下 purecv 金字塔 LK 的均值误差阈值 2.5px，
-  仅拦截坐标/金字塔缩放量级的实现级大错。
+持续悬停回归入口与阈值见 [本地姿态门控](imu.md#参考与测试)。新增门控须用当前固定
+配置独立启动三次，三次全部通过才建立基线，失败不得用重试后的通过覆盖。
+降落的触地安全与上锁后的静止状态分别评分：上锁后固定等待 1 秒，再检查连续 1 秒
+静止；全过程接触/重置判定保持有效，时间窗口不能依真值自适应后移。
+
+- `track` LK 偏置测试：已知整数平移的平均误差 <0.25px，保留点数 ≥90%；
+  遮挡夹具同时要求拒绝消失的纹理、保留仍可见点的正确位移。双向检查对照
+  VINS-Fusion `FLOW_BACK`，不能排除所有重复纹理误匹配。
 - `vio_manager/analytic_contract.rs`：10m 加速、非恒定航向、20° 相机下倾的双目
   解析投影，传播、三角化和 SLAM 更新全部执行；全程位置与最终速度误差 <0.01。
   这隔离滤波数学，不替代真实图像前端或真实飞行验收。
+- SLAM 观测消费：体素未选中的已有路标不能进入 MSCKF；重新选中后的协方差
+  必须等于单次 SLAM 更新，不能重复增益。同一批未选中观测不能被提前清理。
+- 静止陀螺初始化：独立白噪声/游走闭式值、均值的有限差分以及完整初始化输出
+  共同验证零偏协方差；噪声由部署配置同步到初始化器与传播器。
 - 位姿图：一秒运动拆成 1/2/4/10 段，对等方差下的解析融合位置均为 1.05m，
   容差 1e-6m；另有四自由度残差与整体目标函数的差分检查。
 - 占据图：重复像素每帧只累积一次证据；先验经空闲射线、3000 次衰减、动态移除、
-  窗口移出/移入后仍占据。飞控测试要求起飞完成容差不改变指令的 Hold 高度。
+  窗口移出/移入后仍占据。飞控测试要求起飞完成容差不改变指令的 Hold 位置与航向。
+- 仿真步进：发布的位姿、IMU、接触缓存与积分后的 `data.time` 同刻；常速水平
+  运动、自由落体和旋转分别校验位置、速度与角速度。验收噪声使用显式 Generator 种子。
 - 状态输入：重复、乱序、无穷/NaN、未初始化及 500ms 墙钟断流不能维持规划；
   锁存后不能被后续好消息自动解除。默认定位后端在没有库图观测、观测超期时仍输出
   新鲜 VIO 的地图变换；未对齐或估计器重置不得输出。库图观测质量只用于诊断。

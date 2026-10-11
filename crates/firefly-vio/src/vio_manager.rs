@@ -69,6 +69,9 @@ pub struct VioManager {
     pub timelastupdate: f64,
     /// 上次传播的时间偏移（`Propagator::last_prop_time_offset`）。
     last_prop_time_offset: Option<f64>,
+    /// 最新只读地图关键帧；消费端取走，不保留无界队列。
+    pub mapping_snapshot: Option<crate::mapping::Snapshot>,
+    last_mapping_time: f64,
 }
 
 impl VioManager {
@@ -95,7 +98,13 @@ impl VioManager {
             params.state_options.feat_rep_slam,
             params.triangulation_options,
         );
-        let init_options = params.init_options.clone();
+        let init_options = firefly_vio_init::options::InitOptions {
+            sigma_w: params.imu_noises.sigma_w,
+            sigma_wb: params.imu_noises.sigma_wb,
+            sigma_a: params.imu_noises.sigma_a,
+            sigma_ab: params.imu_noises.sigma_ab,
+            ..params.init_options.clone()
+        };
         let voxel_map = VoxelMap::new(params.voxel_options.clone());
         let active_tracks = ActiveTrackTriangulator::new(IntersectOptions {
             max_cond_number: params.triangulation_options.max_cond_number,
@@ -131,6 +140,8 @@ impl VioManager {
             startup_time: -1.0,
             timelastupdate: -1.0,
             last_prop_time_offset: None,
+            mapping_snapshot: None,
+            last_mapping_time: f64::NEG_INFINITY,
         };
         mgr.state.cameras = cameras;
 
@@ -471,9 +482,11 @@ impl VioManager {
 
         // 3. 只保留与当前消息相机相关的特征（对照 C++ 的 camid 过滤）
         feats_lost.retain(|feat| {
-            feat.timestamps
-                .keys()
-                .any(|cam| message.sensor_ids.contains(&(*cam as i32)))
+            !self.state.features_slam.contains_key(&feat.featid)
+                && feat
+                    .timestamps
+                    .keys()
+                    .any(|cam| message.sensor_ids.contains(&(*cam as i32)))
         });
 
         // 4. 边缘化时刻特征（对照 C++ 的 feats_marg）
@@ -486,6 +499,8 @@ impl VioManager {
                 .track_feats
                 .database_mut()
                 .features_containing(marg_time, false, true);
+            // 已有路标的测量只属于 SLAM；体素未选中时也不能作为独立 MSCKF 特征消费。
+            feats_marg.retain(|feat| !self.state.features_slam.contains_key(&feat.featid));
         }
 
         // 5. 去重：feats_lost 中不允许包含 feats_marg（对照 C++ 第二段循环）
@@ -679,6 +694,10 @@ impl VioManager {
             self.refresh_recent_voxels();
         }
 
+        if self.state.timestamp - self.last_mapping_time >= 0.2 - 1e-9 {
+            self.mapping_snapshot = crate::mapping::capture(self);
+            self.last_mapping_time = self.state.timestamp;
+        }
         // 17. 清理（对照 C++ 末尾：cleanup + 边缘化旧克隆）
         self.track_feats.database_mut().cleanup();
         // 18. 锚点切换（锚定表示用；当前 GLOBAL_3D 为 no-op）
@@ -1139,6 +1158,41 @@ mod tests {
         mgr.refresh_recent_voxels();
     }
 
+    #[test]
+    fn mapping_snapshot_owns_geometry_without_mutating_filter_or_retiming_it() {
+        let mut mgr = voxel_manager();
+        let point = Vector3::new(0.55, 0.25, 3.05);
+        for (i, position) in four_views().into_iter().enumerate() {
+            let timestamp = 1. + i as f64;
+            feed_voxel_frame(&mut mgr, timestamp, position, &[(7, point)]);
+            let relative = point - position;
+            let u = (relative.x / relative.z) as f32;
+            let v = (relative.y / relative.z) as f32;
+            mgr.track_feats.database_mut().update_feature(
+                7,
+                timestamp,
+                0,
+                600. * u + 320.,
+                600. * v + 240.,
+                u,
+                v,
+            );
+        }
+        mgr.last_prop_time_offset = Some(0.02);
+        mgr.track_feats.database_mut().mark_deleted([7]);
+        let covariance = mgr.state.cov.clone();
+        let snapshot = crate::mapping::capture(&mgr).unwrap();
+        assert_eq!(snapshot.camera_time, 4.);
+        assert!((snapshot.imu_time - 4.02).abs() < 1e-12);
+        assert_eq!(snapshot.observations.len(), 1);
+        let actual = Vector3::from(snapshot.observations[0].point_body.unwrap());
+        assert!((actual - (point - four_views()[3])).norm() < 1e-5);
+        assert_eq!(mgr.state.cov, covariance);
+        mgr.track_feats.database_mut().cleanup();
+        assert!(mgr.track_feats.database().get_feature_clone(7).is_none());
+        assert_eq!(snapshot.observations[0].id, 7);
+    }
+
     /// 四个不共线视角（射线方向不退化）。
     fn four_views() -> [Vector3<f64>; 4] {
         [
@@ -1215,6 +1269,89 @@ mod tests {
         assert!(!mgr.params.voxel_options.enabled);
         mgr.refresh_recent_voxels();
         assert_eq!(mgr.recent_voxels, [] as [firefly_voxel_svio::VoxelKey; 0]);
+    }
+
+    #[test]
+    fn deferred_slam_observations_are_consumed_once_by_slam_only() {
+        use crate::{landmark::Landmark, options::FeatRepresentation};
+        let mut mgr = voxel_manager();
+        mgr.state.options.max_clone_size = 6;
+        let point = Vector3::new(0.55, 0.25, 3.05);
+        for i in 0..6 {
+            let t = f64::from(i);
+            let position = Vector3::new(0.1 * t, 0.0, 0.0);
+            feed_voxel_frame(&mut mgr, t, position, &[]);
+            let pc = point - position;
+            let uv = Vector2::new(pc.x / pc.z, pc.y / pc.z);
+            mgr.track_feats.database_mut().update_feature(
+                100,
+                t,
+                0,
+                (600. * uv.x + 320.) as f32,
+                (600. * uv.y + 240.) as f32,
+                uv.x as f32,
+                uv.y as f32,
+            );
+        }
+        let size = mgr.state.cov.nrows();
+        let mut landmark = Landmark::new(FeatRepresentation::Global3D, 100);
+        landmark.unique_camera_id = 0;
+        landmark.set_from_xyz(&point, false);
+        landmark.set_from_xyz(&point, true);
+        landmark.set_local_id(size as i32);
+        mgr.state.features_slam.insert(100, landmark);
+        mgr.state.cov = mgr.state.cov.clone().resize(size + 3, size + 3, 0.);
+        for i in size..size + 3 {
+            mgr.state.cov[(i, i)] = 0.01;
+        }
+        assert!(mgr.voxel_map.add_point(100, &point));
+        mgr.recent_voxels.clear();
+        let before = mgr.state.cov.clone();
+        mgr.do_feature_propagate_update(&CameraData {
+            timestamp: 5.,
+            sensor_ids: vec![0],
+            images: vec![],
+            masks: vec![],
+        });
+        assert!(
+            mgr.track_feats
+                .database_mut()
+                .get_feature(100, false)
+                .is_some(),
+            "unselected SLAM measurements must remain available for the landmark update"
+        );
+        assert_eq!(
+            mgr.state.cov, before,
+            "no selected measurement means no information gain"
+        );
+        let feature = mgr
+            .track_feats
+            .database_mut()
+            .get_feature(100, false)
+            .unwrap();
+        let mut once = mgr.state.clone();
+        assert_eq!(
+            mgr.updater_slam.update(&mut once, &mut vec![feature]),
+            vec![100]
+        );
+        assert!(once.cov.trace() < before.trace());
+        mgr.recent_voxels = vec![mgr.voxel_map.key_of(&point)];
+        mgr.do_feature_propagate_update(&CameraData {
+            timestamp: 5.,
+            sensor_ids: vec![0],
+            images: vec![],
+            masks: vec![],
+        });
+        assert!(
+            (mgr.state.cov.clone() - once.cov).amax() < 1e-12,
+            "one SLAM observation batch must not also update MSCKF"
+        );
+        assert!(
+            mgr.track_feats
+                .database_mut()
+                .get_feature(100, false)
+                .is_none()
+        );
     }
 }
 

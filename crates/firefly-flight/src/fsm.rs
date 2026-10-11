@@ -437,8 +437,8 @@ impl FlightFsm {
                 let slow = state.velocity.z.abs()
                     <= self.params.takeoff_complete_climb_frac * self.params.takeoff_climb_rate;
                 if reached && slow {
-                    self.enter_hold(state);
-                    // 完成容差只决定模式切换，不能替代指令高度。
+                    // 自动完成起飞须保留整个位姿目标；容差只决定模式切换。
+                    self.state = FlightState::Hold;
                     self.target.z = target_z;
                     self.ramp_z = target_z;
                 }
@@ -815,16 +815,19 @@ mod tests {
     }
 
     #[test]
-    fn takeoff_tolerance_preserves_commanded_hold_altitude() {
+    fn takeoff_tolerance_preserves_commanded_hold_pose() {
         let mut rig = Rig::new();
         rig.cmd(Command::Arm).unwrap();
-        let origin = rig.state.position.z;
+        let origin = rig.state.position;
+        let yaw = crate::state::yaw_of(rig.state.attitude);
         rig.cmd(Command::Takeoff { altitude: 1.795 }).unwrap();
-        rig.state.position.z = origin + 1.795 * 0.91;
+        rig.state.position = origin + Vec3::new(0.2, -0.3, 1.795 * 0.91);
+        rig.state.attitude = glam::Quat::from_rotation_z(yaw + 0.1);
         rig.state.velocity = Vec3::ZERO;
         let out = rig.fsm.update(DT, &rig.state, None, ok_health());
         assert_eq!(rig.fsm.state(), FlightState::Hold);
-        assert!((out.setpoint.position.z - origin - 1.795).abs() < 1e-6);
+        assert!((out.setpoint.position - origin - Vec3::Z * 1.795).length() < 1e-6);
+        assert!((out.setpoint.yaw - yaw).abs() < 1e-6);
     }
 
     #[test]

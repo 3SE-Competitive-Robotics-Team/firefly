@@ -11,7 +11,7 @@ use crate::filter::FusionOptions;
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct LocalizationConfig {
-    /// 固定启动机体位姿；属于部署配置，不来自在线真值。
+    /// 可选外部地图启动位姿；缺省以启动位置和航向建立会话地图，不来自在线真值。
     pub origin: Option<InitialAlignment>,
     /// 融合参数。
     pub fusion: FusionOptions,
@@ -52,7 +52,7 @@ impl InitialAlignment {
         {
             return Err(Error::new(
                 ErrorKind::InvalidArgument,
-                "fixed prior requires stationary initialized odometry at startup origin",
+                "startup alignment requires stationary initialized odometry at local origin",
             ));
         }
         let forward = pose.vector(Vector3::x());

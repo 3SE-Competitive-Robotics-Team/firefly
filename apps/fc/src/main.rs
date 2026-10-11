@@ -334,6 +334,8 @@ struct Controller {
     /// 最近一次控制使用的本地姿态；测量与协方差归 IMU 线程所有。
     attitude: Quat,
     attitude_ready: bool,
+    position_error: Vec3,
+    position_target: Vec3,
     /// 飞行状态机（模式与安全层）。
     fsm: FlightFsm,
     /// 已执行的最大指令序号（重复投递去重）。
@@ -349,6 +351,8 @@ impl Controller {
         Self {
             attitude: Quat::IDENTITY,
             attitude_ready: false,
+            position_error: Vec3::ZERO,
+            position_target: Vec3::ZERO,
             fsm: FlightFsm::new(fsm),
             last_command_seq: 0,
             altitude: 0.0,
@@ -372,6 +376,8 @@ impl Controller {
         self.apply_command(inputs.command, health, &state);
         let reference = fresh_reference(inputs);
         let out = self.fsm.update(dt, &state, reference.as_ref(), health);
+        self.position_target = out.setpoint.position;
+        self.position_error = out.setpoint.position - position;
         report_event(out.event);
         self.altitude = self.fsm.altitude_above_origin(&state);
         if !out.motors_enabled || !health.imu_alive || !self.attitude_ready {
@@ -472,6 +478,24 @@ impl Controller {
             return;
         }
         self.last_viz = sim_time;
+        publish_scalars(
+            ports.viz_ref(),
+            sim_time,
+            "fc/imu/quaternion_xyzw",
+            &attitude.to_array().map(f64::from),
+        );
+        publish_scalars(
+            ports.viz_ref(),
+            sim_time,
+            "fc/debug/position_target_odom",
+            &self.position_target.to_array().map(f64::from),
+        );
+        publish_scalars(
+            ports.viz_ref(),
+            sim_time,
+            "fc/debug/position_error_odom",
+            &self.position_error.to_array().map(f64::from),
+        );
         let total: f32 = motors.iter().sum();
         let tilt = (attitude * Vec3::Z).z.clamp(-1.0, 1.0).acos().to_degrees();
         publish_scalars(
@@ -664,6 +688,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &[s.nis, f64::from(s.accel_accepted)],
                 );
                 publish_scalars(&ports.viz, sim_time, "fc/imu/gyro_bias", &s.bias);
+                publish_scalars(
+                    &ports.viz,
+                    sim_time,
+                    "fc/imu/aid_gate",
+                    &[
+                        f64::from(s.aid_gate.accepted),
+                        s.aid_gate.nis.unwrap_or(-1.),
+                        s.aid_gate.local_weight.unwrap_or(-1.),
+                    ],
+                );
+                publish_scalars(
+                    &ports.viz,
+                    sim_time,
+                    "fc/imu/attitude_variance",
+                    &s.covariance_diagonal[..3],
+                );
+                publish_scalars(
+                    &ports.viz,
+                    sim_time,
+                    "fc/imu/bias_variance",
+                    &s.covariance_diagonal[3..],
+                );
             }
             publish_scalars(&ports.viz, sim_time, "fc/debug/tick_rate", &[rate]);
             publish_scalars(
@@ -733,6 +779,8 @@ mod tests {
                 accel_accepted: false,
                 bias: [0.; 3],
                 aid_time: Some(0.),
+                aid_gate: firefly_imu::Intersection::default(),
+                covariance_diagonal: [0.; 6],
             }),
             vehicle: Some((QuadParams::default(), Airframe::default())),
             estimate: Some(Estimate {

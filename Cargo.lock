@@ -2949,6 +2949,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "firefly-landmarks"
+version = "0.1.0"
+dependencies = [
+ "fastrace",
+ "firefly-base",
+ "firefly-error",
+ "firefly-vision-match",
+ "log",
+ "nalgebra",
+ "purecv",
+ "serde",
+]
+
+[[package]]
 name = "firefly-localization"
 version = "0.1.0"
 dependencies = [
@@ -6429,6 +6443,22 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "slam"
+version = "0.1.0"
+dependencies = [
+ "fastrace",
+ "firefly-base",
+ "firefly-error",
+ "firefly-landmarks",
+ "firefly-observability",
+ "firefly-pubsub",
+ "firefly-vio-core",
+ "log",
+ "nalgebra",
+ "toml 1.1.8+spec-1.1.0",
+]
 
 [[package]]
 name = "slotmap"

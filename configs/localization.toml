@@ -1,7 +1,5 @@
-# 固定启动先验与四自由度位姿图；数值缺省见 firefly-localization。
+# 会话地图原点为启动位置，水平 +X 为启动航向；可选 [origin] 指定外部地图对齐。
 # backend 默认为 pose_graph；fusion 段仅供 backend = "eskf" 的对照运行。
-[origin]
-position = [-13.0, 0.0, 0.405] # m，RMUC 停机坪机体原点
 
 [fusion.visual]
 max_innovation_trans = 20.0 # m，VINS-Fusion 特征验证后的门限

@@ -4,6 +4,7 @@
 //! `VioManager` 编排 IMU/相机输入。由 firefly-vio 移植成员实现。
 
 pub mod landmark;
+pub mod mapping;
 pub mod options;
 pub mod state;
 pub mod state_helper;

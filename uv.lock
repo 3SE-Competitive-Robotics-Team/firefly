@@ -99,6 +99,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "pytest" },
     { name = "rerun-sdk" },
     { name = "scipy" },
     { name = "trimesh" },
@@ -113,6 +114,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "pytest", specifier = ">=9.1.1" },
     { name = "rerun-sdk", specifier = ">=0.38.1,<0.39" },
     { name = "scipy", specifier = ">=1.18.1" },
     { name = "trimesh", specifier = ">=5.1.1" },

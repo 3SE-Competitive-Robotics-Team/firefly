@@ -25,10 +25,13 @@
 //!   [`GridMap::global_index`] / [`GridMap::window_index`] 换算）。位置查询
 //!   （`is_occupied` 等）按当前窗口判定：窗口外视为自由（官方 `getOccupancy`
 //!   的 `!isInBuf → 0` 分支）；虚拟墙例外——墙是世界系物理约束，窗口外仍生效。
+//! - 可选会话历史按全局体素索引保存移出窗口的 log-odds，重新进入时恢复；
+//!   启用时关闭时间衰减，只由观测射线清除占据。容量耗尽必须停止运动；坐标修正
+//!   清除当前及历史观测。未观测空间仍采用乐观查询，历史缓存不构成未知空间安全保证。
 //! - 官方另有 `GridMapBigmap` 全局地图变体（`grid_map_bigmap.h/cpp`），
 //!   swarm-playground 中无任何引用，不对齐。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use firefly_error::{Error, ErrorKind};
 use nalgebra::Vector3;
@@ -99,6 +102,10 @@ pub struct GridMap {
     occupancy: Vec<f64>,
     /// 世界锚定的场地先验；传感器空闲射线、衰减与动态障碍移除不能清除。
     prior: HashSet<[i64; 3]>,
+    /// 当前坐标修正版本内移出窗口的观测；它们可被后续空闲射线更新。
+    history: HashMap<[i64; 3], f64>,
+    history_capacity: usize,
+    history_exhausted: bool,
     /// 膨胀计数缓冲（对照官方 `occupancy_buffer_inflate_`）：障碍体素自身 `±GRID_MAP_OBS_FLAG`，周围 `inf_grid` 格内 `±1`；`>0` 即膨胀。
     inflate: Vec<u16>,
     /// 虚拟地面/天花板；None = 不启用（官方 `enable_virtual_wall = false` 默认）。
@@ -138,6 +145,7 @@ pub struct GridMapBuilder {
     /// advanced_param.xml:79-81 默认 5.5/5.5/2.0）。Some 时覆盖 `dims`：
     /// buffer 尺寸 = 2 × ceil(range / resolution)（官方 `grid_map.cpp:55`）。
     local_update_range: Option<[f64; 3]>,
+    history_capacity: usize,
 }
 
 impl GridMapBuilder {
@@ -156,6 +164,7 @@ impl GridMapBuilder {
             fading_time: 1000.0,
             obstacles_inflation: 0.2,
             local_update_range: None,
+            history_capacity: 0,
         }
     }
 
@@ -199,6 +208,17 @@ impl GridMapBuilder {
     #[must_use]
     pub fn with_local_update_range(mut self, range: [f64; 3]) -> Self {
         self.local_update_range = Some(range);
+        self
+    }
+
+    /// 保存移出窗口的传感器观测，容量单位为体素；零表示仅保留局部窗口。
+    /// 会话地图通过实际空闲射线清除障碍，不因离开视场而衰减。
+    #[must_use]
+    pub fn with_observation_history(mut self, capacity: usize) -> Self {
+        self.history_capacity = capacity;
+        if capacity > 0 {
+            self.fading_time = 0.;
+        }
         self
     }
 
@@ -297,6 +317,9 @@ impl GridMapBuilder {
             center_last: [dims_i64[0] / 2, dims_i64[1] / 2, dims_i64[2] / 2],
             occupancy: vec![clamp_min_log; capacity],
             prior: HashSet::new(),
+            history: HashMap::new(),
+            history_capacity: self.history_capacity,
+            history_exhausted: false,
             inflate: vec![0; inf_capacity],
             virtual_wall: self.virtual_wall,
             prob_hit_log,
@@ -479,6 +502,30 @@ impl GridMap {
         } else {
             VoxelState::Free
         }
+    }
+
+    /// 丢弃当前坐标修正版本的传感器融合，保留世界锚定先验与虚拟墙。
+    pub fn clear_observations(&mut self) {
+        self.history.clear();
+        self.history_exhausted = false;
+        self.occupancy.fill(self.clamp_min_log);
+        self.inflate.fill(0);
+        let prior: Vec<_> = self
+            .prior
+            .iter()
+            .filter_map(|g| self.window_index(*g))
+            .collect();
+        for idx in prior {
+            self.set_state(idx, VoxelState::Occupied);
+        }
+        self.touch();
+        self.inflate_obstacles();
+    }
+
+    /// 容量耗尽后调用方必须停止运动，不能把丢失的历史当作空闲。
+    #[must_use]
+    pub fn history_exhausted(&self) -> bool {
+        self.history_exhausted
     }
 
     /// 登记不可由在线观测清除的场地占据体素。
@@ -727,6 +774,22 @@ impl GridMap {
         self.up = new_up;
         self.inf_low = new_inf_low;
         self.inf_up = new_inf_up;
+        if !self.history.is_empty() {
+            let restored: Vec<_> = self
+                .history
+                .iter()
+                .filter(|(g, _)| self.window_index(**g).is_some())
+                .map(|(&g, &value)| (g, value))
+                .collect();
+            for (g, value) in restored {
+                self.history.remove(&g);
+                let address = self.occ_addr(g);
+                self.occupancy[address] = value;
+                if value >= self.min_occupancy_log {
+                    self.touch();
+                }
+            }
+        }
         if !self.prior.is_empty() {
             let restores: Vec<[usize; 3]> = self
                 .prior
@@ -736,8 +799,8 @@ impl GridMap {
             for idx in restores {
                 self.set_state(idx, VoxelState::Occupied);
             }
-            self.inflate_obstacles();
         }
+        self.inflate_obstacles();
     }
 
     /// 清除移出窗口的体素条带（对照官方 `clearBuffer(casein, bound)`，
@@ -753,12 +816,25 @@ impl GridMap {
         let y1 = if case == 3 { bound } else { self.up[1] };
         let z0 = if case == 4 { bound } else { self.low[2] };
         let z1 = if case == 5 { bound } else { self.up[2] };
-        for x in x0..=x1 {
-            for y in y0..=y1 {
-                for z in z0..=z1 {
+        for x in x0.max(self.low[0])..=x1.min(self.up[0]) {
+            for y in y0.max(self.low[1])..=y1.min(self.up[1]) {
+                for z in z0.max(self.low[2])..=z1.min(self.up[2]) {
                     let g = [x, y, z];
                     let a = self.occ_addr(g);
-                    if self.occupancy[a] >= self.min_occupancy_log {
+                    let value = self.occupancy[a];
+                    if self.history_capacity > 0
+                        && value > self.clamp_min_log
+                        && !self.prior.contains(&g)
+                    {
+                        if self.history.len() < self.history_capacity
+                            || self.history.contains_key(&g)
+                        {
+                            self.history.insert(g, value);
+                        } else {
+                            self.history_exhausted = true;
+                        }
+                    }
+                    if value >= self.min_occupancy_log {
                         self.touch();
                     }
                     self.occupancy[a] = self.clamp_min_log;
@@ -835,6 +911,70 @@ impl GridMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_obstacles_survive_outbound_and_return_but_free_rays_can_clear() {
+        let mut map = GridMapBuilder::new(0.1, [160, 40, 40])
+            .with_observation_history(10_000)
+            .build()
+            .unwrap();
+        map.move_ring_buffer(Vector3::new(8., 0., 1.));
+        let obstacle = Vector3::new(13.25, 0.05, 1.35);
+        let index = map.index_of(obstacle).unwrap();
+        for _ in 0..8 {
+            map.update_occupancy(index, map.prob_hit_log());
+        }
+        map.inflate_obstacles();
+        let probability = map.occupancy_at(index);
+        assert!(map.is_occupied(obstacle));
+        for x in [14., 18., 22., 18., 14., 8.] {
+            map.move_ring_buffer(Vector3::new(x, 0., 1.));
+            map.fade();
+        }
+        assert!(!map.history_exhausted());
+        let index = map.index_of(obstacle).unwrap();
+        assert!((map.occupancy_at(index) - probability).abs() < 1e-12);
+        assert!(map.is_occupied_inflated(obstacle + Vector3::new(0.1, 0., 0.)));
+        for _ in 0..20 {
+            map.update_occupancy(index, map.prob_miss_log());
+        }
+        map.inflate_obstacles();
+        map.move_ring_buffer(Vector3::new(22., 0., 1.));
+        map.move_ring_buffer(Vector3::new(8., 0., 1.));
+        assert!(!map.is_occupied(obstacle));
+        assert!(!map.is_occupied_inflated(obstacle));
+    }
+
+    #[test]
+    fn history_capacity_and_revision_reset_are_explicit() {
+        let mut map = GridMapBuilder::new(1., [4, 4, 4])
+            .with_observation_history(1)
+            .build()
+            .unwrap();
+        map.set_state([0, 1, 1], VoxelState::Occupied);
+        map.set_state([1, 1, 1], VoxelState::Occupied);
+        map.move_ring_buffer(Vector3::new(20., 2., 2.));
+        assert!(map.history_exhausted());
+        assert_eq!(map.history.len(), 1);
+        map.clear_observations();
+        map.move_ring_buffer(Vector3::new(2., 2., 2.));
+        assert!(!map.history_exhausted());
+        assert!(!map.is_occupied(Vector3::new(0.5, 1.5, 1.5)));
+        assert!(!map.is_occupied(Vector3::new(1.5, 1.5, 1.5)));
+    }
+
+    #[test]
+    fn correction_clears_sensor_obstacles_but_preserves_world_prior() {
+        let mut map = GridMapBuilder::new(0.1, [20; 3]).build().unwrap();
+        map.set_prior_occupied([2, 2, 2]);
+        map.set_state([15, 15, 15], VoxelState::Occupied);
+        map.inflate_obstacles();
+        map.clear_observations();
+        assert_eq!(map.state([2, 2, 2]), VoxelState::Occupied);
+        assert_eq!(map.state([15, 15, 15]), VoxelState::Free);
+        assert_eq!(map.inflate_at([15, 15, 15]), 0);
+        assert!(map.inflate_at([2, 2, 2]) > 0);
+    }
 
     #[test]
     fn inflate_skips_recompute_when_map_unchanged() {

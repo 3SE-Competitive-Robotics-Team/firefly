@@ -29,6 +29,13 @@ pub const RIGHT_IN_BODY: [f64; 3] = [CAMERA_FORWARD_M, BASELINE / 2.0, 0.0];
 /// 深度相机在机体系位置（米，与双目前脸齐平）。
 pub const DEPTH_IN_BODY: [f64; 3] = [CAMERA_FORWARD_M, 0.0, 0.0];
 
+/// 对称透视投影的主点，使用左上像素中心为 `(0, 0)` 的图像坐标。
+/// GPU 帧缓冲原点在像素边界，读取到图像数组后必须减去半个像素。
+#[must_use]
+pub fn principal_point(width: usize, height: usize) -> [f64; 2] {
+    [(width as f64 - 1.0) / 2.0, (height as f64 - 1.0) / 2.0]
+}
+
 /// rig 的三个相机坐标系。
 pub const CAMERAS: [FrameId; 3] = [
     FrameId::LEFT_CAMERA,

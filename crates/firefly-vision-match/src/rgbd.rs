@@ -32,6 +32,28 @@ fn fit(
     let r = vt.transpose() * sign * u.transpose();
     Some((r, b - r * a))
 }
+/// 已知对应的固定尺度最小二乘配准；拒绝退化与无效索引。
+#[must_use]
+pub fn fit_rigid(
+    source: &[Vector3<f64>],
+    target: &[Vector3<f64>],
+    indices: &[usize],
+    target_frame: FrameId,
+    source_frame: FrameId,
+) -> Option<RigidTransform> {
+    if source.len() != target.len() || indices.iter().any(|&i| i >= source.len()) {
+        return None;
+    }
+    let (rotation, translation) = fit(source, target, indices)?;
+    let q = UnitQuaternion::from_matrix(&rotation);
+    RigidTransform::from_parts(
+        target_frame,
+        source_frame,
+        translation.into(),
+        [q.i, q.j, q.k, q.w],
+    )
+    .ok()
+}
 /// 三点 RANSAC + 共识 SVD；阈值为三维欧氏距离（米）。
 /// 共线、低共识、非有限输入不产生约束；旋转的行列式必须为正。
 #[must_use]

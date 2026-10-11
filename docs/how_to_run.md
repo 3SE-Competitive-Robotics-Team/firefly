@@ -60,7 +60,7 @@ cargo run --release -p localization
 render 底栏的左右灰度图固定叠加 VIO 当前活动点（绿色圆环），无需开关。
 标题中的 `显示数/总数` 与 `t` 是该相机的点数和原图时间；每相机最多显示 512 点。
 显示的是 FAST + 金字塔 LK 前端的检测/跟踪结果，不代表每个点都通过了后端 EKF 门控；
-ALIKED + LightGlue 用于地图定位和回环，不是这里的逐帧 VIO 跟踪器。
+ALIKED + LightGlue 用于可选离线地图定位，slam 用于持久路标回环，不是这里的逐帧 VIO 跟踪器。
 跟踪结果与八拍缓存中的原图按时间戳精确配对，因此灰度面板可略晚于实时 RGB/深度。
 无匹配原图或一秒墙钟内无新结果时回到原始灰度，并显示 `waiting for VIO`。
 叠加只写显示副本，不改变传感器数据；离线采集不接收在线 VIO 标记。
@@ -72,8 +72,9 @@ ALIKED + LightGlue 用于地图定位和回环，不是这里的逐帧 VIO 跟�
 关键点通过现有 `Firefly/Viz` 通道写入 RRD；传感器原图仍不写入 RRD。
 
 render 的主视图与体素视图同时显示青色真值轨迹、橙色地图融合定位轨迹与线框无人机影子。
-影子直接使用 `Firefly/CorrectedOdometry` 的地图系位姿，不做真值对齐；需启动 localization
-才能显示。位姿无效或墙钟 500ms 无新样本时隐藏影子，历史轨迹保留，断流区间不连线。
+影子使用 `Firefly/Navigation` 的地图系位姿；会话模式仅在调试图层使用首个仿真样本
+定义显示原点，路径、感知体素与影子共用该固定显示变换，不拟合轨迹、不反馈在线链路。
+外部地图模式直接使用场地坐标。需启动 localization 才能显示。位姿无效或墙钟 500ms 无新样本时隐藏影子，历史轨迹保留，断流区间不连线。
 每条轨迹通常按最高 20Hz 追加，最多保留 8192 点，容量满时移除最早的点；断流恢复立即追加。
 这两条轨迹与影子只用于调试，不进入双目/深度相机，也不参与估计与控制。`--offline` 禁用此叠加层。
 
@@ -103,16 +104,15 @@ render 的主视图与体素视图同时显示青色真值轨迹、橙色地图�
 
 ## 3. 视觉定位与规划
 
-VIO 输出重力对齐的局部坐标：初始位置为零，航向为规范自由度。
-RMUC 静态地图和视觉库图在场地坐标系；`configs/localization.toml [origin]` 配置固定启动位置与航向，
-由定位进程建立 map←odom 变换。改变启动点必须同步配置。
-不能直接把原始里程计当成场地坐标，也不能用真值提供在线对齐。
+默认从空地图启动。VIO 输出重力对齐的局部坐标；localization 在静止初始化时建立
+会话地图坐标，起点为零、启动航向为 +X。无需已知世界位置或提前采集 `.ffvmap` / `.ffmap`。
+已知场地部署可显式配置 `[origin]` 并传 `--map`，所有地图文件必须使用该外部地图坐标。
 
 可选资产：
 
 | 文件 | 用途 |
 |---|---|
-| `apps/planner/maps/rmuc2026.ffmap` | planner 的默认静态地图 |
+| `apps/planner/maps/rmuc2026.ffmap` | planner 的可选静态地图 |
 | `apps/planner/maps/rmuc2026.ffvmap` | LightGlue 视觉库图 |
 | `models/aliked-n16-k512.onnx` | ALIKED 特征提取权重，可用 `--model` 指定 |
 | `models/lightglue-aliked-k512.onnx` | LightGlue 匹配权重，可用 `--model` 指定 |
@@ -135,36 +135,38 @@ T16 为 64 维，无法直接使用官方 ALIKED LightGlue 权重。导出保留
 视觉地图旁的 `.manifest.json` 关联模型、构建器、采集清单和场地指纹。
 模型与地图是本地产物，不进入 Git；上游源码及权重的许可见固定版本的 LightGlue 仓库。
 
-`firefly-cad-build` 从碰撞体的相同体素格导出 `.ffmap` 并核验坐标；
-缺失时 planner 启动失败。
-`--map` 可指定其他路径，但内容必须对应当前 RMUC 场地。
+`firefly-cad-build` 可从碰撞体导出 `.ffmap`；只有显式 `--map` 才加载它，指定文件缺失时报错。
+
+```bash
+cargo run --release -p slam
+```
+
+`slam` 从 VIO 原子关键帧建立有界路标地图，配置为 `configs/slam.toml`。
+默认四自由度位姿图发布 `Firefly/Navigation`。在线链路不读取预建地图或模型权重；
+回环、容量与坐标契约见 [在线回环](loop_closure.md)。
+离线地图定位为显式增强，需要先配置外部地图对齐：
 
 ```bash
 cargo run --release -p aliked
-cargo run --release -p lightglue -- --map apps/planner/maps/rmuc2026.ffvmap
+cargo run --release -p lightglue -- --map <地图.ffvmap>
 ```
 
-视觉进程同时执行库图 PnP 定位和在线 RGB-D 关键帧回环；`localization` 默认
-采用四自由度位姿图发布 `Firefly/CorrectedOdometry`。在线采集需要同步的
-`Firefly/Depth`、`Firefly/Odometry` 和 `Firefly/Features`，配置在
-`configs/lightglue.toml`（支持 `--config`）。回环阈值、容量和验收边界见
-[在线回环](loop_closure.md)。如需 ESKF 对照，设置 `localization.toml` 顶层
-`backend = "eskf"`，并在 `lightglue.toml` 设置 `enabled = false` 关闭在线回环。
-地图对齐后，可运行 planner 接收 `Firefly/CorrectedOdometry` 并发布飞控参考；
+ESKF 对照模式设置 `localization.toml` 的 `backend = "eskf"`，且不启动 `slam`。
+地图对齐后，可运行 planner 接收 `Firefly/Navigation` 并发布飞控参考；
 通过 `ffctl fc track` 进入跟踪模式，`ffctl planner goal X Y Z` 发布地图系目标。
 planner 不订阅原始局部 VIO，不提供平移偏置捷径。未收到有效初始化状态时不发布
 参考；状态流失联 500ms、变为未初始化或出现非法数值时停止发布并锁存，恢复定位后
 须重启 planner。飞控按自己的参考流超时策略处置，不会收到伪造的位置反馈。
 飞控反馈与 Hold 锚点保持在 odom 系，仅将地图目标转换到 odom；详情见 [坐标契约](frames.md)。
 
-纯 VIO 运行只需不启动 ALIKED 与 LightGlue。localization 与 planner 使用相同的默认入口：
+纯 VIO 运行不启动 slam、ALIKED 与 LightGlue。localization 与 planner 使用相同的默认入口：
 
 ```bash
 cargo run --release -p localization
 cargo run --release -p planner
 ```
 
-localization 使用 `[origin]` 建立固定启动变换，并随 VIO 持续发布地图系状态；没有地图
+localization 默认以启动位置和航向定义会话地图，可选 `[origin]` 对齐外部地图，并随 VIO 持续发布状态；没有地图
 观测或回环时，不产生额外校正。planner 不识别传感器或定位算法种类，状态新鲜度、
 非法状态锁存和深度检查在所有运行方式下一致。测试入口 `accept_rmuc.py --vio-only`
 只控制是否启动神经网络进程，不改变定位/规划进程参数。没有绝对校正时可能累积漂移，
@@ -221,3 +223,11 @@ VIO 失联超过墙钟 500ms 或变为未初始化时，空中进入 `ATTITUDE_F
 定位进程不支持空中重启后的 odom 坐标重置；恢复样本必须仍属于原来的 odom 系。
 地面未起飞时失联则上锁；IMU 也失联时没有可维持姿态的反馈，推力保护仍会归零。
 该行为只是一种能力受限的降级，不作为自主安全降落验收通过的依据。
+
+
+空地图任务使用会话坐标，例如 `ffctl planner goal 22 0 1` 和 `ffctl planner goal 0 0 1`。
+`accept_rmuc.py` 默认验收在线回环，`--vio-only` 关闭视觉回环以作对照。
+离线地图验收显式使用 `--prior-maps --localization-config <含 origin 的配置>`，并提供外部
+地图坐标的任务配置；默认任务坐标是会话坐标。仿真场地 GLB/碰撞几何仅用于生成传感器
+与独立评分，不能作为默认在线规划先验。回环后的局部地图重建与未知空间边界见
+[在线回环](loop_closure.md#空地图启动与规划坐标一致性)。

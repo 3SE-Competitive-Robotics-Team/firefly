@@ -25,6 +25,7 @@ def permitted_pad_contact(position, velocity, normal):
 class ObservedEnv(DroneEnv):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._rng = np.random.default_rng(int(os.environ["FIREFLY_MISSION_SEED"]))
         self.node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
         self.recorder = Recorder(self.node)
         self.steps = self.contact_steps = self.collisions = self.resets = 0
@@ -69,7 +70,6 @@ class ObservedEnv(DroneEnv):
 
 
 def main():
-    np.random.seed(int(os.environ["FIREFLY_MISSION_SEED"]))
     sim = importlib.import_module("firefly_sim.main")
     sim.DroneEnv = ObservedEnv
     sim._publish_plant_state = lambda *args: None

@@ -19,6 +19,45 @@ fn ctl() -> ControlParams {
     ControlParams::default()
 }
 
+/// 重力对齐世界系的航向和平移规范不改变机体系电机指令。
+#[test]
+fn position_control_and_allocation_are_invariant_to_odom_gauge() {
+    let (p, c, air) = (params(), ctl(), Airframe::default());
+    let state = QuadState {
+        position: Vec3::new(0.2, -0.1, 1.),
+        velocity: Vec3::new(0.05, -0.02, 0.01),
+        attitude: Quat::from_rotation_y(0.02),
+        ang_vel: Vec3::new(0.01, -0.02, 0.03),
+    };
+    let target = PositionSetpoint {
+        position: Vec3::Z,
+        ..Default::default()
+    };
+    let expected = air.allocate(state.attitude, &position_mode(&state, &target, &p, &c));
+    for yaw in [-std::f32::consts::FRAC_PI_2, 0.7, 2.8] {
+        let rotation = Quat::from_rotation_z(yaw);
+        let shift = Vec3::new(2., -3., 0.5);
+        let transformed = QuadState {
+            position: rotation * state.position + shift,
+            velocity: rotation * state.velocity,
+            attitude: rotation * state.attitude,
+            ..state
+        };
+        let target = PositionSetpoint {
+            position: rotation * target.position + shift,
+            yaw,
+            ..target
+        };
+        let actual = air.allocate(
+            transformed.attitude,
+            &position_mode(&transformed, &target, &p, &c),
+        );
+        for (actual, expected) in actual.motors.into_iter().zip(expected.motors) {
+            assert!((actual - expected).abs() < 2e-5);
+        }
+    }
+}
+
 /// 一步闭环：期望力/力矩 → 分配（限幅）→ 实际力/力矩 → 积分。
 fn step(state: &mut QuadState, desired: firefly_flight::Wrench, p: &QuadParams, air: &Airframe) {
     let alloc = air.allocate(state.attitude, &desired);

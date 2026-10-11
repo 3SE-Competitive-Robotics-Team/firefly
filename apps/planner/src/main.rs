@@ -1,7 +1,7 @@
 //! planner 进程：任务执行（`firefly_planner::PlannerManager` 驱动）+ IPC
 //! 接线 + 可视化发布（经 `Firefly/Viz` 话题，`firefly-viz` 进程统一写 rerun）。
 //!
-//! 状态源固定为已对齐地图系的 `Firefly/CorrectedOdometry`；500ms 墙钟失联
+//! 状态源固定为已对齐地图系的 `Firefly/Navigation`；500ms 墙钟失联
 //! 或有效状态变坏时停止发布参考并锁存，恢复定位后须重启本进程。
 //! 深度感知建图的位姿同源，深度流超时（对照官方 `grid_map/odom_depth_timeout`）
 //! 触发急停且禁用 fail-safe。真值不参与状态链路（vio 进程侧仅作对比可视化）。
@@ -26,6 +26,7 @@
 //! （静态先验，启动时一次性记录）。
 
 mod config;
+mod navigation;
 mod scene;
 mod state_input;
 
@@ -43,10 +44,9 @@ use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager, Reference};
 use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage};
 use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
 use firefly_pubsub::node::create_node;
-use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::reference::{REFERENCE_TOPIC, ReferenceMessage};
-use firefly_pubsub::subscriber::{CorrectedOdomSubscriber, Received, Subscriber};
+use firefly_pubsub::subscriber::{Received, Subscriber};
 
 /// 深度样本句柄：零拷贝持有，tick 消费 `&data` 后释放，无 300KB 全拷贝。
 type ReceivedDepth = Received<DepthImageMessage>;
@@ -178,7 +178,7 @@ fn parse_args() -> Result<Args> {
     let mut args = Args {
         map: None,
         config: PathBuf::from(DEFAULT_CONFIG),
-        start: [-13.0, 0.0, 1.405],
+        start: [0.0; 3],
         // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
         goal: None,
         mandatory_stop: false,
@@ -239,7 +239,7 @@ struct App {
     /// 日志聚合句柄（主循环作用域持有，每 tick 传给 `pump_log_ipc`；
     /// 发布端只活在创建线程，无跨线程触碰，见 `firefly-observability`）。
     log_ipc: firefly_observability::LogIpc,
-    map_file: MapFile,
+    map_file: Option<MapFile>,
     /// 静态占据体素（动态障碍不得清掉它们）。
     /// 上一帧动态障碍占据体素。
     prev_dyn: Vec<[usize; 3]>,
@@ -247,6 +247,7 @@ struct App {
     perceived_center: Vector3<f64>,
     /// 各体素实体**上次发布的集合**：与当前集合做差得到增量（新增/删除）。
     voxel_state: HashMap<String, HashSet<[i32; 3]>>,
+    voxel_geometry: HashMap<String, ([f32; 3], [f32; 3])>,
     /// 体素增量发布的复用缓冲（每 tick 都要用，避免反复分配）。
     voxel_current: HashSet<[i32; 3]>,
     voxel_added: Vec<[i32; 3]>,
@@ -257,7 +258,8 @@ struct App {
     /// 状态时钟（秒），只由通过校验的地图系里程计推进。
     t_sim: f64,
     wall_origin: Instant,
-    odom: CorrectedOdomSubscriber,
+    odom: navigation::NavigationReceiver,
+    mapped_frames: usize,
     state_input: StateInput,
     received_state: bool,
     state_loss_reported: bool,
@@ -300,13 +302,17 @@ impl App {
     /// 地图体素化 / 全局引导构造 / IPC 端口创建失败。
     #[allow(clippy::too_many_lines)]
     fn new(
-        map_file: MapFile,
+        map_file: Option<MapFile>,
         config: PlannerConfig,
+        mapping: config::MappingOptions,
         manager_options: ManagerOptions,
         start: [f64; 3],
         goal: Option<[f64; 3]>,
     ) -> Result<Self> {
-        let mut grid = map_file.to_grid_map(config.obstacle_clearance)?;
+        let mut grid = match &map_file {
+            Some(map) => map.to_grid_map(config.obstacle_clearance)?,
+            None => mapping.build(config.obstacle_clearance)?,
+        };
         // 心跳超时阈值先取（config 随后移入 Planner）
         let heartbeat_timeout = config.heartbeat_timeout;
         // 虚拟地面/天花板（对照官方 enable_virtual_wall）：任一配置存在即单独生效
@@ -330,7 +336,7 @@ impl App {
         let node = create_node()?;
         let log_ipc = firefly_observability::init_ipc(&node, "planner");
         // 地图系输入是必需端口；局部 VIO 不能替代它。
-        let odom = CorrectedOdomSubscriber::new(&node)
+        let odom = navigation::NavigationReceiver::start(map_file.is_some())
             .map_err(|e| e.with_context("operation", "创建规划器地图系里程计订阅"))?;
         let depth = open_sub::<DepthImageMessage>(
             &node,
@@ -357,7 +363,7 @@ impl App {
                 None
             }
         };
-        log::info!("状态源：Firefly/CorrectedOdometry；等待地图系有效状态，失联后停止发布并锁存");
+        log::info!("状态源：Firefly/Navigation；等待地图系有效状态，失联后停止发布并锁存");
         // 可视化发布端：经 Firefly/Viz 话题发布，firefly-viz 进程统一写 rerun
         // （计算线程零 IO；创建失败只降级日志，规划链路不受影响）
         let viz_pub = match VizPublisher::new(&node) {
@@ -378,6 +384,7 @@ impl App {
             prev_dyn: Vec::new(),
             perceived_center: Vector3::zeros(),
             voxel_state: HashMap::new(),
+            voxel_geometry: HashMap::new(),
             voxel_current: HashSet::new(),
             voxel_added: Vec::new(),
             voxel_removed: Vec::new(),
@@ -387,6 +394,7 @@ impl App {
             t_sim: 0.0,
             wall_origin: Instant::now(),
             state_input: StateInput::default(),
+            mapped_frames: 0,
             received_state: false,
             state_loss_reported: false,
             initial_goal,
@@ -411,20 +419,22 @@ impl App {
         })
     }
 
+    fn poll_navigation(&mut self) -> Result<()> {
+        let (state, ctx) = self.odom.snapshot()?;
+        self.state_input.replace_snapshot(state);
+        if let Some(navigation) = self.state_input.navigation() {
+            self.t_sim = navigation.odom.timestamp;
+            self.odom_trace = ctx
+                .is_traced()
+                .then(|| (ctx.trace_id(), ctx.span_id, ctx.sampled()));
+        }
+        Ok(())
+    }
+
     /// 排空 odom/深度订阅：续接 trace span、锚定 sim 时钟、记录最新快照。
     #[fastrace::trace]
     fn poll_sensors(&mut self) -> Result<()> {
-        while let Some(sample) = self.odom.receive()? {
-            let ctx = *sample.user_header();
-            let _span = ctx.continue_span("recv-map-odom");
-            let message: OdomMessage = *sample;
-            if self.state_input.observe(&message, Instant::now()) {
-                self.t_sim = message.timestamp;
-                self.odom_trace = ctx
-                    .is_traced()
-                    .then(|| (ctx.trace_id(), ctx.span_id, ctx.sampled()));
-            }
-        }
+        self.poll_navigation()?;
         if let Some(sub) = &self.depth {
             while let Some(sample) = sub.receive()? {
                 let ctx = *sample.user_header();
@@ -486,17 +496,28 @@ impl App {
             return;
         };
         self.perceived_center = pose.translation.vector;
-        update_from_depth(self.manager.map_mut(), &self.depth_cam, &pose, &depth.data);
+        if self.map_file.is_none() {
+            self.manager
+                .map_mut()
+                .move_ring_buffer(pose.translation.vector);
+        }
+        if update_from_depth(self.manager.map_mut(), &self.depth_cam, &pose, &depth.data) == 0 {
+            return;
+        }
+        self.mapped_frames = self.mapped_frames.saturating_add(1);
         self.depth_freshness.observe(wall_time);
         self.depth_loss_reported = false;
     }
 
     /// 动态障碍按仿真时钟插值，增量更新占据地图（静态体素保护）。
     fn update_motion(&mut self) {
-        if self.map_file.motions.is_empty() {
+        let Some(map_file) = &self.map_file else {
+            return;
+        };
+        if map_file.motions.is_empty() {
             return;
         }
-        let dyn_voxels = self.map_file.motion_voxels(self.t_sim, self.manager.map());
+        let dyn_voxels = map_file.motion_voxels(self.t_sim, self.manager.map());
         let map = self.manager.map_mut();
         for idx in &self.prev_dyn {
             map.set_state(*idx, VoxelState::Unknown);
@@ -526,6 +547,15 @@ impl App {
             return Ok(());
         };
         let measured = Some(snapshot.state);
+        if self.state_input.take_revision_change() {
+            self.manager.map_mut().clear_observations();
+            self.prev_dyn.clear();
+            self.manager.invalidate_localization(now, snapshot.state)?;
+            self.last_ref_pos = None;
+            self.mapped_frames = 0;
+            self.finished = false;
+            log::info!("地图修正版本变更：清空局部融合并重新规划，任务目标保持地图坐标");
+        }
         if !self.received_state {
             self.manager
                 .set_goal(now, measured, snapshot.state.position.coords)?;
@@ -539,6 +569,12 @@ impl App {
 
         // 深度感知建图 + 动态障碍写入（规划地图更新先于重规划决策）
         self.update_map_from_depth(wall_time);
+        if self.manager.map().history_exhausted() {
+            log::error!("会话障碍地图容量耗尽，停止规划；必须建立新会话");
+            self.manager
+                .trigger_emergency_stop_disable_failsafe(now, measured);
+            return Ok(());
+        }
         // 地图衰减（对照官方 `fadingCallback` 2Hz）：每 0.5s 调用一次固定 `fade()`，
         // 膨胀层在 `fade` 内部增量移除（计数缓冲，对照官方 `changeInfBuf`）。
         self.fade_ticks += 1;
@@ -583,6 +619,12 @@ impl App {
                 ),
                 Err(e) => log::warn!("目标 ({target:?}) 不可达，忽略：{e}"),
             }
+        }
+        // 至少四次命中才能从 clamp_min 达到占据阈值；初始化与坐标修正均须重新积累。
+        if self.mapped_frames < 4 {
+            let hold = hover_reference(snapshot.state.position.coords, self.manager.yaw_state());
+            self.publish_reference(&hold, now);
+            return Ok(());
         }
         let report = self.manager.tick(now, measured);
 
@@ -643,9 +685,9 @@ impl App {
             [q.i, q.j, q.k, q.w],
             now,
         );
-        if !self.map_file.motions.is_empty() {
+        if let Some(map_file) = &self.map_file {
             let mut indices = std::mem::take(&mut self.motion_indices);
-            for m in &self.map_file.motions {
+            for m in &map_file.motions {
                 let p = m.position_at(now);
                 indices.extend(human_voxels(p[0], p[1]));
             }
@@ -660,10 +702,16 @@ impl App {
 
     /// 发布一条参考状态；`now` 为仿真时刻（写进消息，飞控据此外推到当前时刻）。
     fn publish_reference(&mut self, reference: &Reference, now: f64) {
-        if self.state_input.current(Instant::now()).is_none() {
+        if self.poll_navigation().is_err()
+            || self.state_input.revision_changed()
+            || self.state_input.current(Instant::now()).is_none()
+        {
             return;
         }
         let Some(pub_) = &self.ref_pub else { return };
+        let Some(navigation) = self.state_input.navigation() else {
+            return;
+        };
         match pub_.publish(ReferenceMessage {
             timestamp: now,
             position_x: reference.position.x,
@@ -677,6 +725,9 @@ impl App {
             acceleration_z: reference.acceleration.z,
             yaw: reference.yaw,
             yaw_dot: reference.yaw_dot,
+            alignment_translation: navigation.translation,
+            alignment_rotation: navigation.rotation,
+            has_alignment: 1,
         }) {
             // 官方 last_pos_：超时悬停与跟踪共用最近指令位置
             Ok(_) => self.last_ref_pos = Some(reference.position),
@@ -692,6 +743,9 @@ impl App {
         while Instant::now() + REFERENCE_PERIOD < deadline {
             std::thread::sleep(REFERENCE_PERIOD);
             self.poll_sensors()?;
+            if self.state_input.revision_changed() {
+                break;
+            }
             firefly_observability::set_sim_time(self.t_sim);
             let Some(reference) = self.manager.current_reference(self.t_sim) else {
                 break;
@@ -725,6 +779,10 @@ impl App {
         let on_tick = |attachment_id: WaitSetAttachmentId<ipc::Service>| {
             if !attachment_id.has_event_from(&tick_guard) {
                 return CallbackProgression::Continue;
+            }
+            // 接收线程可能先消费进程终止信号，主循环必须同步检查停止标志。
+            if self.odom.terminated() {
+                return CallbackProgression::Stop;
             }
             // 动态目标工作流：到达后保持运行（悬停 + 等待新目标），
             // 不因 finished 退出进程（仅 SIGINT/SIGTERM 优雅退出）
@@ -780,6 +838,7 @@ impl App {
                 ));
             }
         }
+        self.odom.snapshot()?;
         log::info!(
             "进程退出：本会话 {} 次重规划，仿真时长 {:.1}s（悬停保持中，等待新目标可继续）",
             self.manager.replans(),
@@ -910,6 +969,11 @@ impl App {
         t: f64,
         force_full: bool,
     ) {
+        let force_full = force_full
+            || self
+                .voxel_geometry
+                .insert(entity.to_owned(), (size, origin))
+                != Some((size, origin));
         self.voxel_current.clear();
         self.voxel_current.extend(indices.iter().copied());
         let (first, full) = {
@@ -1093,19 +1157,21 @@ fn main() {
         }
     };
     log::info!("已加载配置 {}", args.config.display());
-    let map_path = args
+    let map_file = args
         .map
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("apps/planner/maps/rmuc2026.ffmap"));
-    let map_file = MapFile::from_file(&map_path).unwrap_or_else(|e| {
-        log::error!("加载 RMUC 地图失败 {}：{e}", map_path.display());
-        std::process::exit(1);
-    });
+        .as_ref()
+        .map(MapFile::from_file)
+        .transpose()
+        .unwrap_or_else(|e| {
+            log::error!("加载显式场地地图失败：{e}");
+            std::process::exit(1);
+        });
     // 可视化发布端在 App::new 内随进程共享节点创建（经 Firefly/Viz 话题，
     // firefly-viz 进程统一写 rerun）
     match App::new(
         map_file,
         toml_cfg.config,
+        toml_cfg.mapping,
         toml_cfg.manager,
         args.start,
         args.goal,

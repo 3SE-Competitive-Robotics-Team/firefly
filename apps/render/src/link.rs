@@ -20,8 +20,9 @@ use firefly_pubsub::camera::{
     IMAGE_HEIGHT, IMAGE_SIZE, IMAGE_WIDTH,
 };
 use firefly_pubsub::event::{CAMERA_PAIR_TOPIC, TopicNotifier};
+use firefly_pubsub::navigation::{NAVIGATION_TOPIC, NavigationMessage};
 use firefly_pubsub::node::{IpcNode, create_node};
-use firefly_pubsub::odom::{CORRECTED_ODOM_TOPIC, GROUND_TRUTH_TOPIC, OdomMessage};
+use firefly_pubsub::odom::{GROUND_TRUTH_TOPIC, OdomMessage};
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::trace::TraceContext;
@@ -58,7 +59,7 @@ pub struct IpcPorts {
     /// 可视化订阅（`Firefly/Viz` 的地图、路径与 VIO 图像点集）。
     pub viz_sub: Option<Subscriber<VizMessage>>,
     /// 地图融合定位，只用于在线调试影子与轨迹。
-    pub corrected_sub: Option<Subscriber<OdomMessage>>,
+    pub corrected_sub: Option<Subscriber<NavigationMessage>>,
     /// 进程共享节点，必须在全部端口之后释放。
     pub node: IpcNode,
 }
@@ -85,7 +86,7 @@ pub fn open_ports(offline: bool) -> Result<IpcPorts, firefly_error::Error> {
     let corrected_sub = if offline {
         None
     } else {
-        Some(Subscriber::with_topic(&node, CORRECTED_ODOM_TOPIC)?)
+        Some(Subscriber::with_topic(&node, NAVIGATION_TOPIC)?)
     };
     log::info!("IPC 就绪：订阅位姿，发布双目/深度，offline={offline}");
     Ok(IpcPorts {
@@ -202,7 +203,7 @@ pub fn poll_pose(
         match ports.pose_sub.receive() {
             Ok(Some(sample)) => {
                 if ports.corrected_sub.is_some() {
-                    overlay.actual.observe(&sample, wall.elapsed_secs_f64());
+                    overlay.observe_actual(&sample, wall.elapsed_secs_f64());
                 }
                 newest = Some((*sample, *sample.user_header()));
             }

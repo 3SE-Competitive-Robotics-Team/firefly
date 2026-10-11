@@ -43,10 +43,12 @@ pub mod pyramid;
 /// purecv 金字塔 LK（对照 OpenCV `calcOpticalFlowPyrLK`：内部 f32 金字塔 +
 /// Scharr 导数、`OPTFLOW_USE_INITIAL_FLOW` 初值）。
 ///
-/// `max_level=3`（4 层金字塔）+ 21×21 窗口：近地面特征（深度 0.8m、f=168）
-/// 在 10Hz 下帧间位移 ~31px。4 层实测优于 3 层（231m vs 387m@34s）——
-/// 顶层 40×30 的窗口越界损失被大位移捕获能力弥补。
-fn lk_optical_flow(
+/// 21×21 窗口、四层前向金字塔；按 VINS-Fusion `FLOW_BACK` 用两层反向跟踪，
+/// 仅接受往返误差 ≤0.5px 的对应。反向初值为原始点，不用预测位移。
+/// # Panics
+/// 图像必须是完整、同尺寸的灰度缓冲，初值数量必须与输入点一致。
+#[must_use]
+pub fn lk_optical_flow(
     prev: &GrayImage,
     next: &GrayImage,
     prev_pts: &[nalgebra::Vector2<f32>],
@@ -69,11 +71,34 @@ fn lk_optical_flow(
         1e-4,
     )
     .expect("purecv LK 不应失败（灰度单通道、同尺寸）");
+    let (reverse, reverse_status, _) = purecv::video::calc_optical_flow_pyramid_lk(
+        &next_mat,
+        &prev_mat,
+        &out,
+        Some(&p0),
+        Size2i::new(21, 21),
+        1,
+        TermCriteria::new(TermType::Both, 30, 0.01),
+        purecv::video::OPTFLOW_USE_INITIAL_FLOW,
+        1e-4,
+    )
+    .expect("purecv reverse LK uses the same valid image pair");
+    let accepted = status
+        .iter()
+        .zip(&reverse_status)
+        .zip(&reverse)
+        .zip(&p0)
+        .map(|(((forward, backward), returned), original)| {
+            *forward != 0
+                && *backward != 0
+                && (returned.x - original.x).hypot(returned.y - original.y) <= 0.5
+        })
+        .collect();
     let pts: Vec<nalgebra::Vector2<f32>> = out
         .into_iter()
         .map(|p| nalgebra::Vector2::new(p.x, p.y))
         .collect();
-    (pts, status.into_iter().map(|s| s != 0).collect())
+    (pts, accepted)
 }
 
 /// 图像预处理方法（对照 `TrackBase.h` 的 `HistogramMethod` 枚举）。
@@ -782,6 +807,15 @@ impl TrackKlt {
 
         // LK（OPTFLOW_USE_INITIAL_FLOW → use_initial_flow=true；purecv 金字塔 LK）
         let (out, status) = lk_optical_flow(img0, img1, &pts0, &pts1);
+        let valid: Vec<usize> = status
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &ok)| ok.then_some(i))
+            .collect();
+        if valid.len() < 10 {
+            mask_out.resize(pts0.len(), false);
+            return;
+        }
 
         // 去畸变归一化（RANSAC 需要在规范坐标上进行，同 C++ 第 860-866 行）
         let cam0 = self.base.camera_calib.get(&cam_key0).cloned();
@@ -789,10 +823,14 @@ impl TrackKlt {
         let (Some(cam0), Some(cam1)) = (cam0, cam1) else {
             return;
         };
-        let pts0_n: Vec<nalgebra::Vector2<f64>> =
-            pts0.iter().map(|p| cam0.undistort_d(p.cast())).collect();
-        let pts1_n: Vec<nalgebra::Vector2<f64>> =
-            out.iter().map(|p| cam1.undistort_d(p.cast())).collect();
+        let pts0_n: Vec<nalgebra::Vector2<f64>> = valid
+            .iter()
+            .map(|&i| cam0.undistort_d(pts0[i].cast()))
+            .collect();
+        let pts1_n: Vec<nalgebra::Vector2<f64>> = valid
+            .iter()
+            .map(|&i| cam1.undistort_d(out[i].cast()))
+            .collect();
 
         // max_focallength = 两相机焦距最大值（同 C++ 第 870-872 行）
         let max_focal = {
@@ -827,11 +865,10 @@ impl TrackKlt {
         }
         let mask_rsc: Vec<bool> = mask_rsc.into_iter().map(|m| m != 0).collect();
 
-        // 合并 KLT 与 RANSAC 掩码（同 C++ 第 876-879 行）
-        for i in 0..status.len() {
-            let ok = status.get(i).copied().unwrap_or(false)
-                && mask_rsc.get(i).copied().unwrap_or(false);
-            mask_out.push(ok);
+        // RANSAC 只使用双向 LK 有效的对应，掩码再还原到原始点索引。
+        mask_out.resize(status.len(), false);
+        for (i, accepted) in valid.into_iter().zip(mask_rsc) {
+            mask_out[i] = accepted;
         }
 
         // 回写位置（pts0 未变，pts1 取 LK 结果；同 C++ 第 882-885 行）
@@ -1123,9 +1160,7 @@ mod lk_bias_tests {
         }
     }
 
-    /// 量化 LK 位移估计的系统性偏置：整数平移 (dx,dy) 下，输出位移应精确
-    /// 等于 (dx,dy)；均值误差 >0.2px 即为系统性偏置（EKF 会把它当姿态/速度
-    /// 误差，现场运动场景姿态线性漂的根源）。
+    /// 已知整数平移：同时约束保留点数和平均位移，拒绝全丢点的空通过。
     #[test]
     fn lk_displacement_bias() {
         let img0 = checkerboard(320, 240, 8);
@@ -1162,21 +1197,30 @@ mod lk_bias_tests {
             let n = errs.len() as f32;
             let mx = errs.iter().map(|e| e.0).sum::<f32>() / n;
             let my = errs.iter().map(|e| e.1).sum::<f32>() / n;
-            let mse = errs.iter().map(|e| e.0 * e.0 + e.1 * e.1).sum::<f32>() / n;
-            println!(
-                "shift=({dx},{dy}) ok={ok}/{} mean_err=({mx:.3},{my:.3})px rmse={:.3}px",
-                pts0.len(),
-                mse.sqrt()
-            );
-            // 合成图斜向位移存在 ~5-8% 方向耦合偏置（LK 数值特性：H 非对角
-            // 项 + 双线性插值；真实场景平滑纹理往返残差 0.12px 健康，见
-            // lk_real_scene_displacement_bias）。阈值 2.5px 仅拦截实现级
-            // 大错（坐标/金字塔缩放错误量级为全幅位移）。
+            assert!(ok >= pts0.len() * 9 / 10);
             assert!(
-                mx.abs() < 2.5 && my.abs() < 2.5,
+                mx.abs() < 0.25 && my.abs() < 0.25,
                 "LK 位移系统性偏置 ({mx:.3},{my:.3})px @ shift=({dx},{dy})"
             );
         }
+    }
+
+    #[test]
+    fn bidirectional_lk_rejects_occluded_points_and_keeps_visible_motion() {
+        let first = checkerboard(320, 240, 8);
+        let mut second = shift(&first, 4, 3);
+        for y in 70..170 {
+            second.data[y * 320 + 70..y * 320 + 170].fill(0);
+        }
+        let original = vec![Vector2::new(110., 110.), Vector2::new(240., 110.)];
+        let guess: Vec<_> = original.iter().map(|p| p + Vector2::new(4., 3.)).collect();
+        let (tracked, accepted) = lk_optical_flow(&first, &second, &original, &guess);
+        assert!(
+            !accepted[0],
+            "occluded texture must not enter the estimator"
+        );
+        assert!(accepted[1]);
+        assert!((tracked[1] - guess[1]).norm() < 0.05);
     }
 }
 

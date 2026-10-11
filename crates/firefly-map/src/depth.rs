@@ -46,10 +46,11 @@ impl DepthCamera {
     #[must_use]
     pub fn mujoco_default() -> Self {
         let focal = (240.0 / 2.0) / (firefly_base::rig::FOV_Y_DEG.to_radians() / 2.0).tan();
+        let [cx, cy] = firefly_base::rig::principal_point(320, 240);
         Self {
             focal,
-            cx: 160.0,
-            cy: 120.0,
+            cx,
+            cy,
             width: 320,
             height: 240,
             rot_cam_to_body: firefly_base::rig::cam_axes_in_body(),
@@ -71,6 +72,8 @@ impl DepthCamera {
 /// 注意：`Isometry * Vector3` 只旋转不平移（Vector 视为方向量），平移须用
 /// `Isometry * Point3`。
 ///
+/// 返回有效体素投票数；零表示本帧未提供地图观测。
+///
 /// # Panics
 /// 深度长度与相机尺寸不一致，或 `pixel_step` 为零。
 pub fn update_from_depth(
@@ -78,7 +81,7 @@ pub fn update_from_depth(
     cam: &DepthCamera,
     body_pose: &Isometry3<f64>,
     depth: &[f32],
-) {
+) -> usize {
     assert_eq!(depth.len(), cam.width * cam.height);
     assert!(cam.pixel_step > 0);
     // (体素, 是否命中)：收集后按体素排序折叠，确定性顺序，每体素每帧一次更新；
@@ -103,7 +106,9 @@ pub fn update_from_depth(
         }
         v += cam.pixel_step;
     }
+    let observations = votes.len();
     apply_votes(map, votes);
+    observations
 }
 
 /// 帧内多数投票，每体素每帧最多一次 log-odds 更新；相等时取命中。
@@ -284,6 +289,7 @@ mod tests {
     fn default_camera_focal_matches_fovy() {
         let cam = DepthCamera::mujoco_default();
         assert!((cam.focal - 168.607).abs() < 1e-3);
+        assert!((cam.cx - 159.5).abs() < 1e-12 && (cam.cy - 119.5).abs() < 1e-12);
     }
 
     #[test]

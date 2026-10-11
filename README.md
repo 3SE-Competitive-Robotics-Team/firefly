@@ -33,16 +33,16 @@ VIO 通过 `Firefly/VioAttitudeAid` 提供带联合协方差的外援；共享 I
 
 ## 视觉定位与回环路线
 
-采用 **VIO + ALIKED + LightGlue + 回环**：VIO 提供局部运动估计，ALIKED
-提取图像特征，LightGlue 匹配候选关键帧，几何验证产生回环约束。
+采用 **VIO + 持久路标地图 + 在线回环**：VIO 提供局部运动估计与几何初值，
+`slam` 使用 ORB 外观、双目及多视图观测维护路标和共视图。ALIKED/LightGlue 用于可选离线库图定位。
 
 离线库图 PnP 通过 `Firefly/PoseObservation` 提供地图锚点；在线关键帧通过
-外观检索、RGB-D 几何验证和连续三帧确认产生 `Firefly/LoopConstraint`。
+共视区域检索、双侧路标几何验证和连续三帧确认产生 `Firefly/LoopConstraint`。
 `localization` 默认联合优化 VIO 相对边、地图锚点和回环边，发布
-`Firefly/CorrectedOdometry`；飞控仍使用连续的原始 odom 反馈。
+`Firefly/Navigation` 原子快照；飞控仍使用连续的原始 odom 反馈。
 
-左目路标使用跨相机注册深度，深度另用于近场障碍感知。职责、阈值、参考源码和
-验收边界见 [在线回环](docs/loop_closure.md)。在线回环的模型集成测试与实际飞行
+在线路标复用 VIO 与双目、多视图几何；离线库图标签使用左目注册深度，深度另用于障碍感知。
+职责、阈值、参考源码和验收边界见 [在线回环](docs/loop_closure.md)。几何单元测试与实际飞行
 回环验收分别报告，不以库图定位成功代替重访验证。
 
 ## 目录与职责
@@ -56,7 +56,7 @@ VIO 通过 `Firefly/VioAttitudeAid` 提供带联合协方差的外援；共享 I
 | `crates/firefly-flight` | 飞行模式、安全条件、姿态/位置控制与电机分配 |
 | `crates/firefly-imu` | 姿态/陀螺零偏 ESKF、静止初始化、加计 NIS 与相关 VIO 外援 |
 | `crates/firefly-{pubsub,error,observability,render}` | IPC 消息、错误、日志/trace、共享 Bevy 场景与光照 |
-| `apps/` | Rust 进程 `vio`、`fc`、`planner`、`localization`、`aliked`、`lightglue`、`render`、`quad`、`ffctl`；Python 进程 `firefly-sim`、`firefly-viz` |
+| `apps/` | Rust 进程 `vio`、`fc`、`planner`、`localization`、`slam`、`aliked`、`lightglue`、`render`、`quad`、`ffctl`；Python 进程 `firefly-sim`、`firefly-viz` |
 | `packages/` | Python 库 `firefly-mujoco` 与 CAD 资产处理 `firefly-cad` |
 | `configs/` | 每应用一份 TOML，缺键回落代码默认值，缺文件报错 |
 | `tests/`、`docs/` | 评测指标、启动检查与运行/架构说明 |
@@ -119,12 +119,12 @@ IMU 窗口与双目视差检查。观察就绪日志或里程计的
 ```
 
 **坐标约定**：原始里程计在重力对齐的局部系运行，初始位置为零，航向属于规范
-自由度。地图对齐由 `configs/localization.toml [origin]` 的固定启动先验建立，并由定位修正；不能将
+自由度。默认以静止启动位置和航向建立会话地图；`configs/localization.toml [origin]` 可选对齐外部地图，不能将
 局部里程计直接当成 MuJoCo 世界坐标。
 评测可对轨迹进行固定尺度的航向与平移对齐，变换只作用于评测数据。
 
-规划器只接收 `Firefly/CorrectedOdometry`，要求地图坐标已对齐、状态有效且新鲜。
-ALIKED/LightGlue 提供可选的地图与回环校正，其观测频率不作为规划器的准入条件。
+规划器只接收原子 `Firefly/Navigation` 快照，要求地图坐标已对齐、状态有效且新鲜。
+持久路标回环与可选 ALIKED/LightGlue 库图定位提供地图校正，其观测频率不作为规划器的准入条件。
 等待首个有效状态期间不发布参考；状态流失联 500ms 或状态无效后停止发布并锁存，
 恢复定位后须重启 planner。不会以轨迹参考代替实测位置。
 
@@ -166,3 +166,8 @@ FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/sys
 - [purecv](https://github.com/webarkit/purecv)：视觉前端。
 
 运动估计与跟踪验收的已知限制和复测结果见 [VIO 与跟踪审查](docs/vio_tracking_review.md)。
+
+
+默认导航无需 `.ffvmap` / `.ffmap`：VIO、在线关键帧回环与实时深度地图共同工作。
+`lightglue --map` / `planner --map` 是显式增强，须与外部地图坐标对齐。回环修正采用
+版本化导航快照、局部地图重建与参考变换快照，契约见 [在线回环](docs/loop_closure.md)。

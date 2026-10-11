@@ -262,7 +262,7 @@ impl PlannerManager {
         start: Vector3<f64>,
         goal: Vector3<f64>,
     ) -> Result<Self> {
-        let global_path = global_waypoints(planner.map_ref(), start, goal)?;
+        let global_path = global_waypoints(start, goal)?;
         let max_vel = planner.config().max_velocity;
         let global_traj = plan_global_traj_waypoints(start, &global_path, max_vel)?;
         // 初始全局轨迹锚点取管理器时钟原点（0.0）：glb_t 簿记是相对游标，
@@ -330,7 +330,7 @@ impl PlannerManager {
             return Ok(());
         }
         let start = self.estimated_position(now, measured);
-        let global_path = global_waypoints(self.planner.map_ref(), start, goal)?;
+        let global_path = global_waypoints(start, goal)?;
         let max_vel = self.planner.config().max_velocity;
         let global_traj = plan_global_traj_waypoints(start, &global_path, max_vel)?;
         log::info!(
@@ -353,6 +353,24 @@ impl PlannerManager {
         self.replans = 0;
         self.replan_cooldown_until = 0.0;
         self.emergency = false;
+        Ok(())
+    }
+
+    /// 坐标修正使执行轨迹失效；地图系任务目标保持固定，锁存停止状态保留。
+    /// # Errors
+    /// 非有限位置或全局引导轨迹构造失败。
+    pub fn invalidate_localization(&mut self, now: f64, measured: State) -> Result<()> {
+        self.local = None;
+        self.last_result = None;
+        self.touch_goal = false;
+        self.finished = false;
+        self.replan_cooldown_until = 0.;
+        let start = measured.position.coords;
+        let path = global_waypoints(start, self.goal.coords)?;
+        let trajectory =
+            plan_global_traj_waypoints(start, &path, self.planner.config().max_velocity)?;
+        self.global_path = path;
+        self.global = GlobalTraj::new(trajectory, now);
         Ok(())
     }
 
@@ -653,7 +671,7 @@ impl PlannerManager {
             let pt = point_at_arc(&path, &cum, s);
             if !self.planner.map_ref().is_occupied_inflated(pt) {
                 let start = self.estimated_position(now, measured);
-                match global_waypoints(self.planner.map_ref(), start, pt) {
+                match global_waypoints(start, pt) {
                     Ok(new_path) => {
                         let max_vel = self.planner.config().max_velocity;
                         if let Ok(new_global_traj) =
@@ -1579,16 +1597,12 @@ fn point_at_arc(points: &[Vector3<f64>], cum: &[f64], s: f64) -> Vector3<f64> {
 
 /// 官方 `planNextWaypoint` 的单目标输入：全局引导不承担碰撞验收，
 /// 局部 A* / Rebound 与最终连续轨迹检查负责生成可执行参考。
-fn global_waypoints(
-    map: &GridMap,
-    start: Vector3<f64>,
-    goal: Vector3<f64>,
-) -> Result<Vec<Vector3<f64>>> {
+fn global_waypoints(start: Vector3<f64>, goal: Vector3<f64>) -> Result<Vec<Vector3<f64>>> {
     for (name, point) in [("start", start), ("goal", goal)] {
-        if point.iter().any(|v| !v.is_finite()) || map.index_of(point).is_none() {
+        if point.iter().any(|v| !v.is_finite()) {
             return Err(firefly_error::Error::new(
                 firefly_error::ErrorKind::OutOfRange,
-                "global waypoint is outside the map",
+                "global waypoint is not finite",
             )
             .with_context(name, format!("{point:?}")));
         }
@@ -1698,6 +1712,31 @@ mod tests {
         assert!((h.target - start).norm() >= manager.options.planning_horizon);
         assert!((start.z..=goal.z).contains(&h.target.z));
         assert!(!h.touch_goal);
+    }
+
+    #[test]
+    fn distant_goal_is_a_guide_outside_the_rolling_window() {
+        let start = Vector3::new(1., 1., 1.);
+        let goal = Vector3::new(30., 1., 1.);
+        assert_eq!(global_waypoints(start, goal).unwrap(), vec![start, goal]);
+        assert!(global_waypoints(start, Vector3::repeat(f64::NAN)).is_err());
+    }
+
+    #[test]
+    fn localization_correction_invalidates_trajectory_preserving_goal_and_stop() {
+        let mut manager = open_manager();
+        let _ = manager.tick(0., Some(state_at(Vector3::new(1., 1., 1.))));
+        let goal = manager.goal();
+        manager
+            .invalidate_localization(1., state_at(Vector3::new(2., 1., 1.)))
+            .unwrap();
+        assert!(manager.local().is_none());
+        assert_eq!(manager.goal(), goal);
+        manager.mandatory_stop(1., None);
+        manager
+            .invalidate_localization(2., state_at(Vector3::new(2., 1., 1.)))
+            .unwrap();
+        assert!(manager.mandatory_stop);
     }
 
     #[test]

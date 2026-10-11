@@ -1,0 +1,24 @@
+[package]
+name = "firefly-landmarks"
+version = "0.1.0"
+edition = "2024"
+keywords = ["slam", "robotics", "landmarks"]
+categories = ["robotics", "science"]
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+firefly-base.workspace = true
+firefly-error.workspace = true
+firefly-vision-match.workspace = true
+nalgebra.workspace = true
+purecv.workspace = true
+fastrace.workspace = true
+serde.workspace = true
+log.workspace = true
+
+[lints]
+workspace = true

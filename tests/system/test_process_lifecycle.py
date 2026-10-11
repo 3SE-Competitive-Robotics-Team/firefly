@@ -12,8 +12,9 @@ import pytest
 from process_lifecycle import ManagedProcess, active_processes, isolated_run
 
 
-def test_stop_reaps_child_and_output_thread(tmp_path):
-    script = tmp_path / "firefly-sim"
+@pytest.mark.parametrize("entry", ["firefly-sim", "disturbance_sim.py"])
+def test_stop_reaps_child_and_output_thread(tmp_path, entry):
+    script = tmp_path / entry
     script.write_text("""import signal, sys
 signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
 print('ready', flush=True)

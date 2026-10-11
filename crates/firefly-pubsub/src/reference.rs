@@ -31,6 +31,11 @@ pub struct ReferenceMessage {
     pub yaw: f64,
     /// 参考偏航角速度（rad/s）。
     pub yaw_dot: f64,
+    /// 与参考原子发布的 map←odom 快照，禁止使用较新回环修正解释旧参考。
+    pub alignment_translation: [f64; 3],
+    pub alignment_rotation: [f64; 4],
+    /// 1 使用消息快照；0 使用同刻配对的外部地图变换。
+    pub has_alignment: u64,
 }
 
 impl Default for ReferenceMessage {
@@ -48,6 +53,9 @@ impl Default for ReferenceMessage {
             acceleration_z: 0.0,
             yaw: 0.0,
             yaw_dot: 0.0,
+            alignment_translation: [0.; 3],
+            alignment_rotation: [0., 0., 0., 1.],
+            has_alignment: 0,
         }
     }
 }
@@ -59,8 +67,8 @@ mod tests {
     #[test]
     fn reference_message_is_plain_old_data() {
         let m = ReferenceMessage::default();
-        // 12 × f64（timestamp + 位置 3 + 速度 3 + 加速度 3 + yaw 2）
-        assert_eq!(std::mem::size_of::<ReferenceMessage>(), 96);
+        // 12 × f64 参考 + 7 × f64 变换 + u64 标记。
+        assert_eq!(std::mem::size_of::<ReferenceMessage>(), 160);
         assert!((m.timestamp + 1.0).abs() < 1e-9);
     }
 }

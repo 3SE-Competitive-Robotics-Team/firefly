@@ -1,0 +1,27 @@
+[package]
+name = "slam"
+version = "0.1.0"
+edition = "2024"
+keywords = ["slam", "robotics", "landmarks"]
+categories = ["robotics", "science"]
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+firefly-vio-core.workspace = true
+
+firefly-base.workspace = true
+firefly-error.workspace = true
+firefly-landmarks.workspace = true
+firefly-pubsub.workspace = true
+firefly-observability.workspace = true
+fastrace.workspace = true
+nalgebra.workspace = true
+log.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true
