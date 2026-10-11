@@ -526,13 +526,16 @@ fn normal(nodes: &[Node], edges: &[Edge], o: &GraphOptions) -> (Blocks, Vec<Vect
     blocks.diagonal[0] = Matrix4::identity();
     (blocks, g)
 }
-fn apply(a: &Blocks, x: &[Vector4<f64>]) -> Vec<Vector4<f64>> {
-    let mut out: Vec<_> = a.diagonal.iter().zip(x).map(|(a, x)| a * x).collect();
+fn apply_into(a: &Blocks, x: &[Vector4<f64>], out: &mut [Vector4<f64>]) {
+    debug_assert_eq!(a.diagonal.len(), x.len());
+    debug_assert_eq!(out.len(), x.len());
+    for ((a, x), out) in a.diagonal.iter().zip(x).zip(out.iter_mut()) {
+        *out = a * x;
+    }
     for &(i, j, b) in &a.cross {
         out[i] += b * x[j];
         out[j] += b.transpose() * x[i];
     }
-    out
 }
 fn dot(a: &[Vector4<f64>], b: &[Vector4<f64>]) -> f64 {
     a.iter().zip(b).map(|(a, b)| a.dot(b)).sum()
@@ -549,11 +552,12 @@ fn pcg(a: &Blocks, b: &[Vector4<f64>]) -> Option<Vec<Vector4<f64>>> {
     let mut p = z.clone();
     let mut rz = dot(&r, &z);
     let tolerance = 1e-14 * dot(b, b).max(1.);
+    let mut ap = vec![Vector4::zeros(); b.len()];
     for _ in 0..(b.len() * 8).min(1000) {
         if dot(&r, &r) <= tolerance {
             return Some(x);
         }
-        let ap = apply(a, &p);
+        apply_into(a, &p, &mut ap);
         let den = dot(&p, &ap);
         if !den.is_finite() || den <= 0. {
             return None;
@@ -577,6 +581,55 @@ fn pcg(a: &Blocks, b: &[Vector4<f64>]) -> Option<Vec<Vector4<f64>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pcg_buffer_reuse_matches_analytic_quadratic() {
+        let blocks = Blocks {
+            diagonal: vec![4. * Matrix4::identity(), 3. * Matrix4::identity()],
+            cross: vec![(0, 1, Matrix4::identity())],
+        };
+        let x = [Vector4::new(1., 2., 3., 4.), Vector4::new(-2., 0., 1., 5.)];
+        let b = [Vector4::new(1., 2., 3., 4.), Vector4::new(5., 6., 7., 8.)];
+        let mut product = [Vector4::repeat(f64::NAN); 2];
+        apply_into(&blocks, &x, &mut product);
+        assert_eq!(product[0], Vector4::new(2., 8., 13., 21.));
+        assert_eq!(product[1], Vector4::new(-5., 2., 6., 19.));
+
+        // E = Σ(2x₀² + x₀x₁ + 1.5x₁² − b₀x₀ − b₁x₁)，梯度为 Ax − b。
+        let energy = |x: &[Vector4<f64>; 2]| {
+            (0..4)
+                .map(|i| {
+                    2. * x[0][i].powi(2) + x[0][i] * x[1][i] + 1.5 * x[1][i].powi(2)
+                        - b[0][i] * x[0][i]
+                        - b[1][i] * x[1][i]
+                })
+                .sum::<f64>()
+        };
+        for block in 0..2 {
+            for axis in 0..4 {
+                let (mut plus, mut minus) = (x, x);
+                plus[block][axis] += 1e-6;
+                minus[block][axis] -= 1e-6;
+                let derivative = (energy(&plus) - energy(&minus)) / 2e-6;
+                assert!((derivative - (product[block][axis] - b[block][axis])).abs() < 1e-7);
+            }
+        }
+
+        apply_into(&blocks, &[Vector4::zeros(); 2], &mut product);
+        assert_eq!(product, [Vector4::zeros(); 2]);
+        let solution = pcg(&blocks, &b).unwrap();
+        assert!((solution[0] - (3. * b[0] - b[1]) / 11.).norm() < 1e-12);
+        assert!((solution[1] - (4. * b[1] - b[0]) / 11.).norm() < 1e-12);
+        apply_into(&blocks, &solution, &mut product);
+        for i in 0..2 {
+            assert!((product[i] - b[i]).norm() < 1e-12);
+        }
+        assert_eq!(
+            pcg(&blocks, &[Vector4::zeros(); 2]).unwrap(),
+            vec![Vector4::zeros(); 2]
+        );
+    }
+
     #[test]
     fn asynchronous_loop_endpoints_reuse_registered_odometry() {
         use firefly_pubsub::{odom::OdomMessage, vision::LoopConstraint};

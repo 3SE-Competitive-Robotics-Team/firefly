@@ -1,51 +1,37 @@
-//! FAST-9 角点检测（基于 purecv `FastFeatureDetector`）。
-//!
-//! purecv 内部使用 Edward Rosten 的优化算法 + `parallel` feature 的 Rayon
-//! 行并行扫描，对齐 OpenCV `cv::FAST` 的检测语义。
-//!
-//! 与自实现版本的差异：
-//! - NMS 用严格 `>`（purecv）vs 扫描序 `>=`（自实现）：合成同分场景行为不同，
-//!   自然图像无影响；
-//! - 得分类型 `u8`（purecv Rosten 算法）vs `f32`（自实现连续段差之和）：
-//!   值域不同但排序语义一致。
+//! FAST-9 角点检测（purecv `FastFeatureDetector`）。
+//! 角点得分存于 `KeyPoint::response`；NMS 要求得分严格大于八邻域。
 
-use crate::sensor::GrayImage;
 use crate::track::KeyPoint;
-use crate::track::pyramid::gray_to_matrix;
+use purecv::core::Matrix;
 use purecv::features2d::{FastFeatureDetector, FastType};
 
-/// 与 [`fast`] 相同，但额外返回每个角点的得分（供 grider 排序复用）。
+/// 检测单通道矩阵中的角点；对齐 OpenCV CPU FAST，关闭 NMS 时响应值为零。
 #[must_use]
-pub fn fast_with_score(
-    img: &GrayImage,
-    threshold: i32,
-    nonmax_suppression: bool,
-) -> (Vec<KeyPoint>, Vec<f32>) {
-    if img.width < 4 || img.height < 4 {
-        return (Vec::new(), Vec::new());
-    }
-    let mat = gray_to_matrix(img);
+pub fn detect(img: &Matrix<u8>, threshold: i32, nonmax_suppression: bool) -> Vec<KeyPoint> {
     let detector = FastFeatureDetector::new(
         threshold.clamp(0, 255) as u8,
         nonmax_suppression,
         FastType::Type9_16,
     );
-    let kps = detector.detect(&mat).unwrap_or_default();
-    let scores: Vec<f32> = kps.iter().map(|kp| kp.response).collect();
-    let out: Vec<KeyPoint> = kps
+    detector
+        .detect(img)
+        .unwrap_or_default()
         .into_iter()
         .map(|kp| KeyPoint {
             x: kp.pt.x,
             y: kp.pt.y,
-            response: kp.response,
+            // 仅适配 OpenCV CPU 的响应约定；上游差异见 webarkit/purecv#161。
+            // 适配范围与移除条件：https://github.com/3SE-Competitive-Robotics-Team/firefly/issues/5
+            response: if nonmax_suppression { kp.response } else { 0.0 },
         })
-        .collect();
-    (out, scores)
+        .collect()
 }
 
 #[cfg(test)]
 mod purecv_tests {
     use super::*;
+    use crate::sensor::GrayImage;
+    use crate::track::pyramid::gray_to_matrix;
 
     fn corner_img(cx: usize, cy: usize, w: usize, h: usize) -> GrayImage {
         let mut data = vec![0u8; w * h];
@@ -62,15 +48,36 @@ mod purecv_tests {
     }
 
     #[test]
-    fn purecv_fast_with_score_detects_corner() {
-        // 2x2 白块（自研 fast() 已知能检出）
-        let img = corner_img(20, 20, 40, 40);
-        let (kps, _) = fast_with_score(&img, 20, false);
-        assert!(!kps.is_empty(), "purecv FAST 对 2x2 白块检出 0");
+    fn isolated_corner_has_analytic_fast_response() {
+        let mut img = GrayImage {
+            width: 15,
+            height: 15,
+            data: vec![0; 15 * 15],
+        };
+        img.data[7 * 15 + 7] = 150;
+        let result = detect(&gray_to_matrix(&img), 20, true);
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            (result[0].x, result[0].y, result[0].response),
+            (7., 7., 149.)
+        );
+        assert_eq!(
+            detect(&gray_to_matrix(&img), 150, true),
+            [] as [KeyPoint; 0]
+        );
     }
 
     #[test]
-    fn purecv_fast_with_score_detects_blob() {
+    fn purecv_fast_detects_corner() {
+        // 2x2 白块在关闭 NMS 时包含多个角点。
+        let img = corner_img(20, 20, 40, 40);
+        let kps = detect(&gray_to_matrix(&img), 20, false);
+        assert!(!kps.is_empty(), "purecv FAST 对 2x2 白块检出 0");
+        assert!(kps.iter().all(|kp| kp.response == 0.0));
+    }
+
+    #[test]
+    fn purecv_fast_detects_blob() {
         // 3x3 亮点（150）在黑背景（0）上：圆周 16 点全暗 → 应检出
         let (w, h) = (64, 64);
         let mut data = vec![0u8; w * h];
@@ -84,12 +91,12 @@ mod purecv_tests {
             height: h,
             data,
         };
-        let (kps, _) = fast_with_score(&img, 10, false);
+        let kps = detect(&gray_to_matrix(&img), 10, false);
         assert!(!kps.is_empty(), "purecv FAST 对 3x3 亮点检出 0: {kps:?}");
     }
 
     #[test]
-    fn purecv_fast_with_score_blob_on_checker() {
+    fn purecv_fast_blob_on_checker() {
         // 3x3 亮点（150）在棋盘背景（60/100）上：圆周 16 点 60/100 < 140
         // → 应检出（合成测试场景）
         let (w, h) = (64, 64);
@@ -113,17 +120,11 @@ mod purecv_tests {
             height: h,
             data,
         };
-        let (kps, _) = fast_with_score(&img, 10, false);
-        println!(
-            "棋盘亮点 NMS关: {} 个, response={:?}",
-            kps.len(),
-            kps.iter().map(|k| k.response).take(5).collect::<Vec<_>>()
-        );
+        let kps = detect(&gray_to_matrix(&img), 10, false);
         assert!(!kps.is_empty(), "purecv FAST 棋盘上亮点检出 0: {kps:?}");
         // NMS 开：平台斑（3x3 同 level）响应平坦，"严格大于"8 邻域 → 全抑制
         // （OpenCV 同行为，数学事实）——合成测试因此用高斯斑（单峰）
-        let (kps_nms, _) = fast_with_score(&img, 10, true);
-        println!("棋盘亮点 NMS开: {} 个", kps_nms.len());
+        let kps_nms = detect(&gray_to_matrix(&img), 10, true);
         assert!(kps_nms.is_empty(), "平台斑 NMS 应全抑制（响应平坦）");
     }
 }

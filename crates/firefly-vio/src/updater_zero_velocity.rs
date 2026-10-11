@@ -29,13 +29,15 @@ use crate::updater_helper::measurement_compress_inplace;
 /// 返回 `(平均视差, 方差, 特征数)`；无共同特征时返回 `None`。
 #[must_use]
 pub fn compute_disparity(
-    db: &mut FeatureDatabase,
+    db: &FeatureDatabase,
     time0: f64,
     time1: f64,
 ) -> Option<(f64, f64, usize)> {
-    let feats0 = db.features_containing(time0, false, true);
+    let feats0 = db.iter_features().filter(|feat| {
+        !feat.to_delete && feat.timestamps.values().any(|times| times.contains(&time0))
+    });
     let mut disparities: Vec<f64> = Vec::new();
-    for feat in &feats0 {
+    for feat in feats0 {
         for (cam_id, times) in &feat.timestamps {
             // 该相机在 time0/time1 都有测量（精确相等；对照 C++ 的 find）
             let idx0 = times.iter().position(|t| t.total_cmp(&time0).is_eq())?;
@@ -250,11 +252,12 @@ impl UpdaterZeroVelocity {
 
         // chi2 检验（含 bias 演化噪声）
         let mut p_marg = get_marginal_covariance(state, &hx_order);
-        let bias_block =
-            p_marg.view((3, 3), (6, 6)).into_owned() + q_bias.view((0, 0), (6, 6)).into_owned();
-        p_marg.view_mut((3, 3), (6, 6)).copy_from(&bias_block);
+        {
+            let mut bias_block = p_marg.view_mut((3, 3), (6, 6));
+            bias_block += &q_bias;
+        }
         let s = &h * p_marg * h.transpose() + &r;
-        let chi2 = match s.clone().cholesky() {
+        let chi2 = match s.cholesky() {
             Some(chol) => res.dot(&chol.solve(&res)),
             None => f64::INFINITY,
         };
@@ -309,6 +312,42 @@ mod tests {
     use crate::state::State;
     use crate::state_helper::augment_clone;
     use firefly_vio_core::sensor::ImuData;
+
+    #[test]
+    fn disparity_reads_history_without_mutation_and_preserves_rejection() {
+        let mut db = FeatureDatabase::new();
+        assert!(compute_disparity(&db, 1., 2.).is_none());
+        // 两相机的位移分别为 3 和 5 像素，均值 4、总体方差 1。
+        for (camera, du, dv) in [(0, 3., 0.), (1, 3., 4.)] {
+            db.update_feature(1, 1., camera, 10., 20., 0., 0.);
+            db.update_feature(1, 2., camera, 10. + du, 20. + dv, 0., 0.);
+        }
+        db.update_feature(2, 1., 0, 0., 0., 0., 0.);
+        db.mark_deleted([2]);
+        db.update_feature(3, 3., 0, 0., 0., 0., 0.);
+        let feature = db
+            .iter_features()
+            .find(|feature| feature.featid == 1)
+            .unwrap();
+        let address = feature.uvs[&0].as_ptr();
+        let before = feature.clone();
+        let (mean, variance, count) = compute_disparity(&db, 1., 2.).unwrap();
+        assert!((mean - 4.).abs() < 1e-12);
+        assert!((variance - 1.).abs() < 1e-12);
+        assert_eq!(count, 2);
+        let feature = db
+            .iter_features()
+            .find(|feature| feature.featid == 1)
+            .unwrap();
+        assert_eq!(feature.uvs[&0].as_ptr(), address);
+        assert_eq!(feature.timestamps, before.timestamps);
+        assert_eq!(feature.uvs, before.uvs);
+        assert_eq!(feature.uvs_norm, before.uvs_norm);
+        assert_eq!(db.size(), 3);
+        // 命中的特征有相机缺少目标时刻时，查询整体拒绝。
+        db.update_feature(1, 1., 2, 0., 0., 0., 0.);
+        assert!(compute_disparity(&db, 1., 2.).is_none());
+    }
 
     fn zero_vel() -> UpdaterZeroVelocity {
         UpdaterZeroVelocity::new(

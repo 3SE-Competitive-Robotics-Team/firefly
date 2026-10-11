@@ -262,6 +262,10 @@ impl VioManager {
             "sensor_ids 与 images 长度必须一致"
         );
 
+        if !message.is_valid() {
+            return;
+        }
+
         if self.state.options.do_calib_camera_intrinsics {
             for (&id, camera) in &self.state.cameras {
                 self.track_feats.set_camera_calibration(id, camera.clone());
@@ -490,19 +494,13 @@ impl VioManager {
         feats_lost.retain(|f| !marg_ids.contains(&f.featid));
 
         // 6. 从 feats_marg 中挑出达到最大跟踪长度的长轨迹（SLAM 候选）
-        let mut feats_maxtracks: Vec<Feature> = Vec::new();
-        feats_marg.retain_mut(|feat| {
-            let reached_max = feat
-                .timestamps
-                .values()
-                .any(|ts| ts.len() > self.state.options.max_clone_size);
-            if reached_max {
-                feats_maxtracks.push(feat.clone());
-                false
-            } else {
-                true
-            }
-        });
+        let mut feats_maxtracks: Vec<Feature> = feats_marg
+            .extract_if(.., |feat| {
+                feat.timestamps
+                    .values()
+                    .any(|ts| ts.len() > self.state.options.max_clone_size)
+            })
+            .collect();
 
         // 7. 现有 SLAM 特征数（无 aruco → 全部按特征 id 判断时不进位减；
         //    max_aruco_features=0 → curr_aruco_tags 恒为 0）
@@ -539,14 +537,15 @@ impl VioManager {
         };
         for featid in visited {
             let feat2 = self.track_feats.database_mut().get_feature(featid, false);
-            if let Some(f2) = &feat2 {
-                feats_slam.push(f2.clone());
+            let feature_missing = feat2.is_none();
+            if let Some(f2) = feat2 {
+                feats_slam.push(f2);
             }
             let Some(lm) = self.state.features_slam.get_mut(&featid) else {
                 continue;
             };
             let host_cam_in_frame = message.sensor_ids.contains(&lm.unique_camera_id);
-            if feat2.is_none() && host_cam_in_frame {
+            if feature_missing && host_cam_in_frame {
                 lm.should_marg = true;
             }
             if lm.update_fail_count > 1 {

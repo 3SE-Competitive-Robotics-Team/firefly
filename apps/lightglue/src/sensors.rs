@@ -4,10 +4,6 @@ use firefly_pubsub::{
     odom::OdomMessage,
     subscriber::{OdomSubscriber, Subscriber},
 };
-use firefly_vision_match::{
-    calibration::{left_from_depth, pinhole},
-    depth::{RegisteredDepth, register_depth},
-};
 use nalgebra::{Quaternion, UnitQuaternion};
 use std::{
     collections::VecDeque,
@@ -22,7 +18,7 @@ use std::{
 #[derive(Default)]
 struct History {
     odom: VecDeque<OdomMessage>,
-    depth: VecDeque<(f64, Vec<f32>)>,
+    depth: VecDeque<(f64, Arc<[f32]>)>,
     reset: bool,
 }
 impl History {
@@ -48,6 +44,24 @@ impl History {
             self.odom.pop_front();
         }
     }
+    fn push_depth(&mut self, timestamp: f64, values: &[f32]) {
+        if values.len() != 320 * 240
+            || !timestamp.is_finite()
+            || timestamp < 0.
+            || self
+                .depth
+                .back()
+                .is_some_and(|(last, _)| timestamp <= *last)
+        {
+            return;
+        }
+        self.depth.push_back((timestamp, Arc::from(values)));
+        // 八帧覆盖特征配对窗口；工作线程持有的快照不受历史淘汰影响。
+        while self.depth.len() > 8 {
+            self.depth.pop_front();
+        }
+    }
+
     fn odom_at(&self, t: f64) -> Option<OdomMessage> {
         if self.reset || !t.is_finite() {
             return None;
@@ -89,13 +103,10 @@ impl History {
         }
         None
     }
-    fn sample(&self, t: f64) -> Option<(OdomMessage, RegisteredDepth)> {
+    fn sample(&self, t: f64) -> Option<(OdomMessage, Arc<[f32]>)> {
         let odom = self.odom_at(t)?;
         let (_, depth) = self.depth.iter().find(|(s, _)| (s - t).abs() < 1e-6)?;
-        Some((
-            odom,
-            register_depth(depth, pinhole(), pinhole(), &left_from_depth()).ok()?,
-        ))
+        Some((odom, depth.clone()))
     }
     /// `T_map_body(t) = T_map_body(s) T_odom_body(s)^-1 T_odom_body(t)`。
     fn map_prior(&self, t: f64, corrected: OdomMessage) -> Option<OdomMessage> {
@@ -160,19 +171,8 @@ impl Sensors {
                             history.push_odom(*m);
                         }
                         while let Some(d) = depth.receive()? {
-                            if d.width != 320
-                                || d.height != 240
-                                || !d.timestamp.is_finite()
-                                || d.timestamp < 0.
-                                || history.depth.back().is_some_and(|(t, _)| d.timestamp <= *t)
-                            {
-                                continue;
-                            }
-                            history.depth.push_back((d.timestamp, d.data.to_vec()));
-                            // 深度只与新鲜特征精确时间戳配对（特征 buffer=1 只进最新帧），
-                            // 8 帧（10Hz 下 0.8s）足够覆盖配对窗口；旧帧永远配不上，只占内存。
-                            while history.depth.len() > 8 {
-                                history.depth.pop_front();
+                            if d.width == 320 && d.height == 240 {
+                                history.push_depth(d.timestamp, &d.data);
                             }
                         }
                     }
@@ -204,7 +204,7 @@ impl Sensors {
     pub fn is_stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
     }
-    pub fn sample(&self, t: f64) -> Option<(OdomMessage, RegisteredDepth)> {
+    pub fn sample(&self, t: f64) -> Option<(OdomMessage, Arc<[f32]>)> {
         self.history.lock().ok()?.sample(t)
     }
 }
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn interpolation_requires_coverage_and_rejects_reset() {
         let mut h = History::default();
-        h.depth.push_back((1.025, vec![1.; 320 * 240]));
+        h.depth.push_back((1.025, vec![1.; 320 * 240].into()));
         h.push_odom(OdomMessage {
             timestamp: 1.,
             is_initialized: true,
@@ -280,5 +280,42 @@ mod tests {
         assert!((h.sample(1.025).unwrap().0.position_x - 0.05).abs() < 1e-12);
         h.push_odom(OdomMessage::default());
         assert!(h.sample(1.025).is_none());
+    }
+    #[test]
+    fn sampled_depth_survives_eviction_and_rejects_wrong_timestamps() {
+        use firefly_vision_match::{
+            calibration::{left_from_depth, pinhole},
+            depth::register_depth,
+        };
+        let mut history = History::default();
+        history.push_odom(OdomMessage {
+            timestamp: 1.,
+            is_initialized: true,
+            ..Default::default()
+        });
+        let pixels = vec![2.; 320 * 240];
+        history.push_depth(1., &pixels);
+        let (odom, snapshot) = history.sample(1.).unwrap();
+        assert_eq!(odom.timestamp, 1.);
+        assert!(Arc::ptr_eq(&snapshot, &history.depth[0].1));
+        for time in [1., 0.5, f64::NAN, -1.] {
+            history.push_depth(time, &vec![9.; 320 * 240]);
+        }
+        assert_eq!(history.depth.len(), 1);
+        assert!(history.sample(1.001).is_none());
+        for i in 2..=10 {
+            history.push_depth(f64::from(i), &pixels);
+        }
+        assert_eq!(history.depth.len(), 8);
+        assert!(history.sample(1.).is_none());
+        assert_eq!(snapshot.as_ref(), pixels);
+        let actual = register_depth(&snapshot, pinhole(), pinhole(), &left_from_depth()).unwrap();
+        let expected = register_depth(&pixels, pinhole(), pinhole(), &left_from_depth()).unwrap();
+        for y in 0..240 {
+            for x in 0..320 {
+                let uv = [f64::from(x) + 0.25, f64::from(y) + 0.5];
+                assert_eq!(actual.point_at(uv), expected.point_at(uv));
+            }
+        }
     }
 }

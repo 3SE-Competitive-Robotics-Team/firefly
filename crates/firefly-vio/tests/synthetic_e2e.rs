@@ -300,10 +300,10 @@ fn run_cfg(cfg: &ScenarioCfg) -> (f64, f64, Vector3<f64>) {
             timestamp: t_cam,
             sensor_ids: vec![0, 1],
             images: vec![
-                render_dots(&uv_l, seed_l, cfg.img_noise_amp),
-                render_dots(&uv_r, seed_r, cfg.img_noise_amp),
+                render_dots(&uv_l, seed_l, cfg.img_noise_amp).into(),
+                render_dots(&uv_r, seed_r, cfg.img_noise_amp).into(),
             ],
-            masks: vec![zeros(), zeros()],
+            masks: vec![zeros().into(), zeros().into()],
         });
     }
 
@@ -394,13 +394,14 @@ fn sensor_only_stationary_startup() {
             mgr.feed_measurement_camera(&CameraData {
                 timestamp: time,
                 sensor_ids: vec![0, 1],
-                images: images.clone(),
+                images: images.iter().cloned().map(Into::into).collect(),
                 masks: vec![
                     GrayImage {
                         width: W,
                         height: H,
                         data: vec![0; W * H]
-                    };
+                    }
+                    .into();
                     2
                 ],
             });

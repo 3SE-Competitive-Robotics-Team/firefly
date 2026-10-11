@@ -305,7 +305,7 @@ impl UpdaterSlam {
             for i in 0..n {
                 s[(i, i)] += self.options.sigma_pix_sq;
             }
-            let chi2 = match s.clone().cholesky() {
+            let chi2 = match s.cholesky() {
                 Some(chol) => res.dot(&chol.solve(&res)),
                 None => f64::INFINITY,
             };
@@ -348,9 +348,7 @@ impl UpdaterSlam {
             let mut src_col = 0usize;
             for (var_id, var_size) in x_order {
                 let dst_col = hx_mapping[&(*var_id, *var_size)];
-                let block = h_xf_block
-                    .view((0, src_col), (rows, *var_size))
-                    .into_owned();
+                let block = h_xf_block.view((0, src_col), (rows, *var_size));
                 hx_big
                     .view_mut((*row0, dst_col), (rows, *var_size))
                     .copy_from(&block);

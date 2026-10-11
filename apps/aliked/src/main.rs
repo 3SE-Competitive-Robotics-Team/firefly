@@ -22,7 +22,8 @@ use firefly_vision_match::calibration::{body_pose_to_cam, left_from_depth, pinho
 use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetAttachmentId;
 use nalgebra::{Isometry3, Translation3, UnitQuaternion};
-use ort::session::Session;
+use ort::session::{Session, SessionOutputs};
+use ort::value::Tensor;
 use std::path::{Path, PathBuf};
 
 /// 缺省权重路径（相对运行目录，通常为仓库根）。
@@ -107,10 +108,14 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
-/// 加载 ONNX 会话（文件缺失即报错，不静默）。
-///
-/// 四条算子线程（96ms→48ms，1e-7 ulp 一致），空闲休眠，保留控制线程预算。
-fn load_session(model: &str) -> Result<Session, Box<dyn std::error::Error>> {
+/// ONNX 会话与可复用的 CPU 输入张量；每次推理前完整覆盖三个通道。
+struct Model {
+    session: Session,
+    input: Tensor<f32>,
+}
+
+/// 加载 ONNX 会话（文件缺失即报错）。四条算子线程，空闲休眠。
+fn load_model(model: &str) -> Result<Model, Box<dyn std::error::Error>> {
     if !std::path::Path::new(model).is_file() {
         return Err(format!("权重缺失：{model}（见 models/，离线导出，不进 git）").into());
     }
@@ -119,7 +124,11 @@ fn load_session(model: &str) -> Result<Session, Box<dyn std::error::Error>> {
         .with_intra_op_spinning(false)?
         .commit_from_file(model)?;
     log::info!("aliked 会话就绪：{model}");
-    Ok(session)
+    let input = Tensor::from_array((
+        [1usize, 3, HEIGHT, WIDTH],
+        vec![0f32; 3 * HEIGHT * WIDTH].into_boxed_slice(),
+    ))?;
+    Ok(Model { session, input })
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -136,18 +145,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         std::process::exit(2);
     })?;
-    let mut session = load_session(&model)?;
+    let mut model = load_model(&model)?;
     if let (Some(dir), Some(out)) = (build_map, out) {
-        build_map_offline(&mut session, &dir, &out)?;
+        build_map_offline(&mut model, &dir, &out)?;
         return Ok(());
     }
-    smoke_inference(&mut session)?;
-    run_loop(&mut session, 1.0 / rate_hz)?;
+    smoke_inference(&mut model)?;
+    run_loop(&mut model, 1.0 / rate_hz)?;
     Ok(())
 }
 
 /// 主循环：相机对事件唤醒 → 取最新左目帧 → 按 `period` 节流推理 → 发布特征。
-fn run_loop(session: &mut Session, period: f64) -> Result<(), firefly_error::Error> {
+fn run_loop(model: &mut Model, period: f64) -> Result<(), firefly_error::Error> {
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "aliked");
     let left_sub = Subscriber::<GrayImageMessage>::with_topic(&node, CAMERA_LEFT_TOPIC)?;
@@ -208,7 +217,7 @@ fn run_loop(session: &mut Session, period: f64) -> Result<(), firefly_error::Err
         firefly_observability::pump_log_ipc(&log_ipc);
         let root = fastrace::Span::root("aliked", fastrace::prelude::SpanContext::random());
         let trace_guard = root.set_local_parent();
-        match infer_frame(session, frame) {
+        match infer_frame(model, frame) {
             Ok(msg) => {
                 log::debug!(
                     "特征发布 t={:.2}（{} 点，含低分）",
@@ -247,48 +256,73 @@ fn run_loop(session: &mut Session, period: f64) -> Result<(), firefly_error::Err
     Ok(())
 }
 
-/// 模型推理：u8 灰度 → f32 NCHW（/255，三通道复用）→ keypoints/descriptors/scores
-/// （`[1, K, 2]`/`[1, K, 128]`/`[1, K]`，展平）。在线/离线建库共用。
-#[allow(clippy::type_complexity)]
-fn run_model(
-    session: &mut Session,
-    gray: &[u8],
-    width: usize,
-    height: usize,
-) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), Box<dyn std::error::Error>> {
-    use ort::value::Tensor;
-    if width != WIDTH || height != HEIGHT {
-        return Err(format!("分辨率不匹配: {width}x{height}（导出约定 {WIDTH}x{HEIGHT}）").into());
+impl Model {
+    /// u8 灰度 → f32 NCHW（/255，三通道复用）；输出持有至本帧消费完成。
+    #[fastrace::trace]
+    fn run(
+        &mut self,
+        gray: &[u8],
+        width: usize,
+        height: usize,
+    ) -> Result<SessionOutputs<'_>, Box<dyn std::error::Error>> {
+        if width != WIDTH || height != HEIGHT || gray.len() != WIDTH * HEIGHT {
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                format!(
+                    "输入不匹配: {width}x{height}, {} 像素（约定 {WIDTH}x{HEIGHT}）",
+                    gray.len()
+                ),
+            )
+            .with_context("operation", "aliked input")
+            .into());
+        }
+        let n = width * height;
+        let (_, input) = self.input.extract_tensor_mut();
+        for (i, &px) in gray.iter().enumerate() {
+            let v = f32::from(px) / 255.0;
+            input[i] = v;
+            input[n + i] = v;
+            input[2 * n + i] = v;
+        }
+        Ok(self.session.run(ort::inputs!["image" => &self.input])?)
     }
-    let n = width * height;
-    let mut input = vec![0f32; 3 * n];
-    for (i, &px) in gray.iter().enumerate() {
-        let v = f32::from(px) / 255.0;
-        input[i] = v;
-        input[n + i] = v;
-        input[2 * n + i] = v;
+}
+
+/// 借用 ONNX 输出的展平切片；消息和库图只在最终存储处取得自有数据。
+struct Features<'a> {
+    keypoints: &'a [f32],
+    descriptors: &'a [f32],
+    scores: &'a [f32],
+}
+
+impl<'a> Features<'a> {
+    fn from_outputs(outputs: &'a SessionOutputs<'_>) -> Result<Self, Box<dyn std::error::Error>> {
+        let (shape, keypoints) = outputs["keypoints"].try_extract_tensor::<f32>()?;
+        assert_eq!(&shape[..], &[1, NUM_POINTS as i64, 2], "keypoints 形状");
+        let (shape, descriptors) = outputs["descriptors"].try_extract_tensor::<f32>()?;
+        assert_eq!(
+            &shape[..],
+            &[1, NUM_POINTS as i64, DESC_DIM as i64],
+            "descriptors 形状"
+        );
+        let (shape, scores) = outputs["scores"].try_extract_tensor::<f32>()?;
+        assert_eq!(&shape[..], &[1, NUM_POINTS as i64], "scores 形状");
+        Ok(Self {
+            keypoints,
+            descriptors,
+            scores,
+        })
     }
-    let tensor = Tensor::from_array(([1usize, 3, height, width], input.into_boxed_slice()))?;
-    let outputs = session.run(ort::inputs!["image" => tensor])?;
-    let (shape, kpts) = outputs["keypoints"].try_extract_tensor::<f32>()?;
-    assert_eq!(&shape[..], &[1, NUM_POINTS as i64, 2]);
-    let (_, descs) = outputs["descriptors"].try_extract_tensor::<f32>()?;
-    let (_, scores) = outputs["scores"].try_extract_tensor::<f32>()?;
-    Ok((kpts.to_vec(), descs.to_vec(), scores.to_vec()))
 }
 
 /// 单帧推理（在线）：灰度帧 → 特征消息（定长 512，大数组是设计使然）。
 #[allow(clippy::large_stack_arrays)]
 fn infer_frame(
-    session: &mut Session,
+    model: &mut Model,
     frame: &GrayImageMessage,
 ) -> Result<FeatureMessage, Box<dyn std::error::Error>> {
-    let (kpts, descs, scores) = run_model(
-        session,
-        &frame.data,
-        frame.width as usize,
-        frame.height as usize,
-    )?;
+    let outputs = model.run(&frame.data, frame.width as usize, frame.height as usize)?;
+    let features = Features::from_outputs(&outputs)?;
     let mut msg = FeatureMessage {
         timestamp: frame.timestamp,
         count: NUM_POINTS as u32,
@@ -297,9 +331,9 @@ fn infer_frame(
         scores: [0.0; NUM_POINTS],
     };
     for i in 0..NUM_POINTS {
-        msg.keypoints[i] = [kpts[2 * i], kpts[2 * i + 1]];
-        msg.scores[i] = scores[i];
-        msg.descriptors[i].copy_from_slice(&descs[i * DESC_DIM..(i + 1) * DESC_DIM]);
+        msg.keypoints[i] = [features.keypoints[2 * i], features.keypoints[2 * i + 1]];
+        msg.scores[i] = features.scores[i];
+        msg.descriptors[i].copy_from_slice(&features.descriptors[i * DESC_DIM..(i + 1) * DESC_DIM]);
     }
     Ok(msg)
 }
@@ -307,7 +341,7 @@ fn infer_frame(
 /// 离线建库：摆拍 bin（`collect_vision_map.py` 布局）→ 每帧提特征 +
 /// 深度向左目重投影、遮挡筛选与连续表面采样 → 地图路标 → 写 `ffvmap`。
 fn build_map_offline(
-    session: &mut Session,
+    model: &mut Model,
     frames_dir: &Path,
     out: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -342,7 +376,8 @@ fn build_map_offline(
         let pos = [rd(pos_off), rd(pos_off + 8), rd(pos_off + 16)];
         let quat = [24, 32, 40, 48].map(|offset| rd(pos_off + offset));
         let t = rd(pos_off + 56);
-        let (kpts, descs, scores) = run_model(session, &buf[img_off..depth_off], width, height)?;
+        let outputs = model.run(&buf[img_off..depth_off], width, height)?;
+        let features = Features::from_outputs(&outputs)?;
         let t_body = Isometry3::from_parts(
             Translation3::new(pos[0], pos[1], pos[2]),
             UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
@@ -365,17 +400,20 @@ fn build_map_offline(
         )?;
         let mut points = Vec::new();
         for i in 0..NUM_POINTS {
-            let Some(point) =
-                registered.point_at([f64::from(kpts[2 * i]), f64::from(kpts[2 * i + 1])])
-            else {
+            let Some(point) = registered.point_at([
+                f64::from(features.keypoints[2 * i]),
+                f64::from(features.keypoints[2 * i + 1]),
+            ]) else {
                 continue;
             };
             let xw = t_cam * point.push(1.);
             points.push(VisionMapPoint {
                 position: [xw[0], xw[1], xw[2]],
-                uv: [kpts[2 * i], kpts[2 * i + 1]],
-                descriptor: descs[i * DESC_DIM..(i + 1) * DESC_DIM].try_into().unwrap(),
-                score: scores[i],
+                uv: [features.keypoints[2 * i], features.keypoints[2 * i + 1]],
+                descriptor: features.descriptors[i * DESC_DIM..(i + 1) * DESC_DIM]
+                    .try_into()
+                    .unwrap(),
+                score: features.scores[i],
             });
         }
         let n_pts = points.len();
@@ -423,30 +461,16 @@ fn landmark_coverage(points: &[VisionMapPoint]) -> bool {
 }
 
 /// 冒烟推理：零图单帧，校验输出形状（K=512、描述子 128 维）。
-fn smoke_inference(session: &mut Session) -> Result<(), Box<dyn std::error::Error>> {
-    use ort::value::Tensor;
-    let input = Tensor::from_array((
-        [1usize, 3, HEIGHT, WIDTH],
-        vec![0f32; 3 * HEIGHT * WIDTH].into_boxed_slice(),
-    ))?;
-    let outputs = session.run(ort::inputs!["image" => input])?;
-    let (shape, _) = outputs["keypoints"].try_extract_tensor::<f32>()?;
-    assert_eq!(&shape[..], &[1, NUM_POINTS as i64, 2], "keypoints 形状");
-    let (shape, _) = outputs["descriptors"].try_extract_tensor::<f32>()?;
-    assert_eq!(
-        &shape[..],
-        &[1, NUM_POINTS as i64, DESC_DIM as i64],
-        "descriptors 形状"
-    );
-    let (shape, _) = outputs["scores"].try_extract_tensor::<f32>()?;
-    assert_eq!(&shape[..], &[1, NUM_POINTS as i64], "scores 形状");
+fn smoke_inference(model: &mut Model) -> Result<(), Box<dyn std::error::Error>> {
+    let outputs = model.run(&vec![0; WIDTH * HEIGHT], WIDTH, HEIGHT)?;
+    Features::from_outputs(&outputs)?;
     log::info!("aliked 冒烟推理通过（输出 K={NUM_POINTS}，描述子 {DESC_DIM} 维）");
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::DEFAULT_MODEL;
+    use super::*;
 
     /// 测试用权重路径：先 CWD相对，再相对 `CARGO_MANIFEST_DIR` 回仓库根；
     /// 都缺失时跳过（`models/` 已 ignore，CI 无权重）。
@@ -469,10 +493,62 @@ mod tests {
     #[test]
     fn onnx_smoke_or_skip() {
         let Some(path) = test_model_path() else {
-            println!("skip: 无权重 {DEFAULT_MODEL}");
+            log::warn!("skip: 无权重 {DEFAULT_MODEL}");
             return;
         };
-        let mut session = super::load_session(&path).unwrap();
-        super::smoke_inference(&mut session).unwrap();
+        let mut model = super::load_model(&path).unwrap();
+        super::smoke_inference(&mut model).unwrap();
+    }
+
+    #[test]
+    fn reused_input_matches_fresh_tensor_across_frames_or_skip() {
+        let Some(path) = test_model_path() else {
+            log::warn!("skip: 无权重 {DEFAULT_MODEL}");
+            return;
+        };
+        let mut model = load_model(&path).unwrap();
+        let input_ptr = model.input.extract_tensor().1.as_ptr();
+        let mut frame = GrayImageMessage {
+            width: WIDTH as u32,
+            height: HEIGHT as u32,
+            ..GrayImageMessage::default()
+        };
+        assert!(model.run(&frame.data, WIDTH - 1, HEIGHT).is_err());
+        assert!(model.run(&frame.data[..WIDTH], WIDTH, HEIGHT).is_err());
+        let mut retained = None;
+        for seed in [17usize, 0, 93] {
+            frame.timestamp += 0.5;
+            for (i, px) in frame.data.iter_mut().enumerate() {
+                *px = ((i * seed + (i / WIDTH) * 31 * seed) % 256) as u8;
+            }
+            let msg = infer_frame(&mut model, &frame).unwrap();
+            assert_eq!(model.input.extract_tensor().1.as_ptr(), input_ptr);
+
+            let input: Vec<f32> = frame.data.iter().map(|&px| f32::from(px) / 255.0).collect();
+            let fresh = Tensor::from_array((
+                [1usize, 3, HEIGHT, WIDTH],
+                input.repeat(3).into_boxed_slice(),
+            ))
+            .unwrap();
+            let outputs = model.session.run(ort::inputs!["image" => fresh]).unwrap();
+            let expected = Features::from_outputs(&outputs).unwrap();
+            assert_eq!(msg.timestamp, frame.timestamp);
+            assert_eq!(msg.count, NUM_POINTS as u32);
+            assert_eq!(msg.keypoints.as_flattened(), expected.keypoints);
+            assert_eq!(msg.descriptors.as_flattened(), expected.descriptors);
+            assert_eq!(&msg.scores, expected.scores);
+            if retained.is_none() {
+                retained = Some((
+                    Box::new(msg),
+                    expected.keypoints.to_vec(),
+                    expected.descriptors.to_vec(),
+                    expected.scores.to_vec(),
+                ));
+            }
+        }
+        let (msg, keypoints, descriptors, scores) = retained.unwrap();
+        assert_eq!(msg.keypoints.as_flattened(), keypoints);
+        assert_eq!(msg.descriptors.as_flattened(), descriptors);
+        assert_eq!(msg.scores.as_slice(), scores);
     }
 }

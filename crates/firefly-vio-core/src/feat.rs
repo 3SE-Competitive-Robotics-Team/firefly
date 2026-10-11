@@ -125,16 +125,11 @@ fn retain_measurements(
     uvs_norm: &mut HashMap<usize, Vec<Vector2<f32>>>,
     remove_if: impl Fn(f64) -> bool,
 ) {
-    // 先取出相机 id 集合，避免与后续可变借用冲突。
-    let cam_ids: Vec<usize> = timestamps.keys().copied().collect();
-    for cam_id in cam_ids {
-        let Some(ts) = timestamps.get_mut(&cam_id) else {
+    for (cam_id, ts) in timestamps.iter_mut() {
+        let Some(uv) = uvs.get_mut(cam_id) else {
             continue;
         };
-        let Some(uv) = uvs.get_mut(&cam_id) else {
-            continue;
-        };
-        let Some(uvn) = uvs_norm.get_mut(&cam_id) else {
+        let Some(uvn) = uvs_norm.get_mut(cam_id) else {
             continue;
         };
         // 原版以 `assert` 保证三者等长（release 下为 no-op）；Rust 编译期保证不了
@@ -209,6 +204,13 @@ impl FeatureDatabase {
     #[must_use]
     pub fn get_feature_clone(&self, id: usize) -> Option<Feature> {
         self.features.get(&id).cloned()
+    }
+
+    /// 指定特征、相机最近两次原始像素坐标，按测量插入顺序返回 `[前次, 最近]`。
+    /// 特征或相机不存在、测量不足两次时返回 `None`；只读借用，不复制历史。
+    #[must_use]
+    pub fn latest_uv_pair(&self, id: usize, cam_id: usize) -> Option<&[Vector2<f32>; 2]> {
+        self.features.get(&id)?.uvs.get(&cam_id)?.last_chunk()
     }
 
     /// 当前库内全部特征的 `(id, 引用)` 迭代（诊断/测试用，无序）。
@@ -530,6 +532,43 @@ mod tests {
     }
 
     // ---- CRUD ----
+
+    #[test]
+    fn latest_uv_pair_is_camera_specific_and_tracks_measurement_cleanup() {
+        let mut db = FeatureDatabase::new();
+        assert!(db.latest_uv_pair(7, 0).is_none());
+        db.update_feature(7, 1.0, 0, 10.0, 20.0, 0.1, 0.2);
+        assert!(db.latest_uv_pair(7, 0).is_none());
+        db.update_feature(7, 2.0, 0, 13.0, 18.0, 0.13, 0.18);
+        assert_eq!(
+            db.latest_uv_pair(7, 0),
+            Some(&[Vector2::new(10.0, 20.0), Vector2::new(13.0, 18.0)])
+        );
+        db.update_feature(7, 3.0, 0, 17.0, 15.0, 0.17, 0.15);
+        db.update_feature(7, 2.0, 1, 80.0, 90.0, 0.8, 0.9);
+        db.update_feature(7, 3.0, 1, 75.0, 92.0, 0.75, 0.92);
+        assert_eq!(
+            db.latest_uv_pair(7, 0),
+            Some(&[Vector2::new(13.0, 18.0), Vector2::new(17.0, 15.0)])
+        );
+        assert_eq!(
+            db.latest_uv_pair(7, 1),
+            Some(&[Vector2::new(80.0, 90.0), Vector2::new(75.0, 92.0)])
+        );
+        assert!(db.latest_uv_pair(7, 2).is_none());
+        db.features
+            .get_mut(&7)
+            .unwrap()
+            .clean_older_measurements(2.0);
+        assert!(db.latest_uv_pair(7, 0).is_none());
+        db.features
+            .get_mut(&7)
+            .unwrap()
+            .clean_older_measurements(3.0);
+        assert!(db.latest_uv_pair(7, 1).is_none());
+        db.get_feature(7, true);
+        assert!(db.latest_uv_pair(7, 0).is_none());
+    }
 
     #[test]
     fn crud_insert_get_clone_remove() {

@@ -3,7 +3,7 @@
 //! 实现 `firefly_vio_core::input::SensorInput` 端口：订阅 `MuJoCo` 发布的
 //! IMU 与双目灰度话题，按时间戳配对成 `CameraData`。
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use firefly_pubsub::camera::{CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, GrayImageMessage};
 use firefly_pubsub::imu::ImuSubscriber;
@@ -28,8 +28,8 @@ pub struct IceoryxInput {
     last_left: Option<Received<GrayImageMessage>>,
     /// 最近右目帧（等待与左目配对；持样本句柄零拷贝）。
     last_right: Option<Received<GrayImageMessage>>,
-    /// 复用的全零掩码（跟踪器要求与图像同尺寸；只读，逐帧复用免分配）。
-    zero_mask: Vec<u8>,
+    /// 按左右目尺寸缓存全零掩码；相同尺寸共享像素，尺寸变化时替换。
+    zero_masks: [Option<Arc<GrayImage>>; 2],
     /// 最新收到数据的时刻（秒）。
     now_t: f64,
     /// 最近收到消息携带的 trace 上下文 `(trace_id, span_id, sampled)`。
@@ -49,7 +49,7 @@ impl IceoryxInput {
             imu_queue: VecDeque::new(),
             last_left: None,
             last_right: None,
-            zero_mask: Vec::new(),
+            zero_masks: [None, None],
             now_t: 0.0,
             last_trace: None,
         })
@@ -136,6 +136,18 @@ impl SensorInput for IceoryxInput {
         if (l.timestamp - r.timestamp).abs() > TOLERANCE {
             return None;
         }
+        if l.width == 0
+            || l.height == 0
+            || r.width == 0
+            || r.height == 0
+            || (l.width as usize).checked_mul(l.height as usize) != Some(l.data.len())
+            || (r.width as usize).checked_mul(r.height as usize) != Some(r.data.len())
+            || l.sensor_id == r.sensor_id
+        {
+            self.last_left = None;
+            self.last_right = None;
+            return None;
+        }
         let left = GrayImage {
             width: l.width as usize,
             height: l.height as usize,
@@ -148,32 +160,61 @@ impl SensorInput for IceoryxInput {
         };
         let timestamp = l.timestamp.max(r.timestamp);
         let sensor_ids = vec![l.sensor_id, r.sensor_id];
-        // 全零 mask（对照 OpenVINS `VioManager.cpp` 的 `cv::Mat::zeros` 默认掩码：
-        // 0 = 全像素有效，tracker 的 `feed_new_camera` 要求 `images.len()==masks.len()`，
-        // 空 mask 会被校验拒绝 → 跟踪器从未运行 → MSCKF 无特征）。
-        // 复用缓存：跟踪器只读（内部克隆），缓存恒零，免每帧 2x77KB 分配。
-        let n = left.width * left.height;
-        self.zero_mask.resize(n, 0);
-        debug_assert!(self.zero_mask.iter().all(|&b| b == 0));
-        let masks = vec![
-            GrayImage {
-                width: left.width,
-                height: left.height,
-                data: self.zero_mask.clone(),
-            },
-            GrayImage {
-                width: right.width,
-                height: right.height,
-                data: self.zero_mask.clone(),
-            },
-        ];
+        let left_mask = zero_mask(&mut self.zero_masks[0], left.width, left.height);
+        if right.width == left.width && right.height == left.height {
+            self.zero_masks[1] = Some(left_mask.clone());
+        }
+        let right_mask = zero_mask(&mut self.zero_masks[1], right.width, right.height);
+        let masks = vec![left_mask, right_mask];
         self.last_left = None;
         self.last_right = None;
         Some(CameraData {
             timestamp,
             sensor_ids,
-            images: vec![left, right],
+            images: vec![Arc::new(left), Arc::new(right)],
             masks,
         })
+    }
+}
+
+fn zero_mask(cache: &mut Option<Arc<GrayImage>>, width: usize, height: usize) -> Arc<GrayImage> {
+    let mask = cache.get_or_insert_with(|| {
+        Arc::new(GrayImage {
+            width,
+            height,
+            data: vec![0; width * height],
+        })
+    });
+    if mask.width != width || mask.height != height {
+        *mask = Arc::new(GrayImage {
+            width,
+            height,
+            data: vec![0; width * height],
+        });
+    }
+    mask.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_mask_reuses_storage_and_keeps_old_frames_valid_on_resize() {
+        let mut cache = None;
+        let first = zero_mask(&mut cache, 32, 24);
+        let repeated = zero_mask(&mut cache, 32, 24);
+        assert!(Arc::ptr_eq(&first, &repeated));
+        let resized = zero_mask(&mut cache, 24, 32);
+        assert!(!Arc::ptr_eq(&first, &resized));
+        assert_eq!((first.width, first.height), (32, 24));
+        assert_eq!((resized.width, resized.height), (24, 32));
+        assert!(
+            first
+                .data
+                .iter()
+                .chain(&resized.data)
+                .all(|pixel| *pixel == 0)
+        );
     }
 }

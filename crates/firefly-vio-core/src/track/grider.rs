@@ -14,6 +14,7 @@ use crate::sensor::GrayImage;
 use crate::track::KeyPoint;
 use crate::track::fast;
 use crate::track::mask_on;
+use purecv::core::Matrix;
 use rayon::prelude::*;
 
 /// 网格 FAST 特征提取（对照 `Grider_GRID::perform_griding`）。
@@ -79,9 +80,7 @@ pub fn perform_griding(
             }
             // 取 ROI
             let roi = crop_roi(img, x as usize, y as usize, size_x, size_y);
-            let kpts = fast::fast_with_score(&roi, threshold, true);
-            // 按响应降序
-            let mut sorted = kpts.0;
+            let mut sorted = fast::detect(&roi, threshold, true);
             sorted.sort_by(|a, b| {
                 b.response
                     .partial_cmp(&a.response)
@@ -131,29 +130,50 @@ pub fn perform_griding(
     out
 }
 
-/// 从图像中裁剪 ROI（复用现有数据，不复制）。返回视图结构。
-///
-/// # Panics
-///
-/// 内部 `corner_sub_pix`（purecv）失败时 panic（合法输入不应发生）。
+/// 将 ROI 的像素复制到连续矩阵；FAST 的邻域边界以 ROI 为准。
 #[must_use]
-fn crop_roi(img: &GrayImage, x: usize, y: usize, w: usize, h: usize) -> GrayImage {
-    // 组装 ROI 视图并转成 flat GrayImage（仅用于 FAST 检测）
+fn crop_roi(img: &GrayImage, x: usize, y: usize, w: usize, h: usize) -> Matrix<u8> {
     let mut data = Vec::with_capacity(w * h);
     for yy in y..y + h {
         let row = yy * img.width;
         data.extend_from_slice(&img.data[row + x..row + x + w]);
     }
-    GrayImage {
-        width: w,
-        height: h,
-        data,
-    }
+    Matrix::from_vec(h, w, 1, data)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roi_matrix_preserves_pixels_keypoint_order_and_responses() {
+        use purecv::features2d::{FastFeatureDetector, FastType};
+        let img = GrayImage {
+            width: 53,
+            height: 47,
+            data: (0usize..53 * 47)
+                .map(|i| ((i.wrapping_mul(2_654_435_761) >> 16) & 255) as u8)
+                .collect(),
+        };
+        for (x, y, w, h) in [(7, 9, 31, 27), (0, 0, 53, 47), (4, 5, 3, 3)] {
+            let roi = crop_roi(&img, x, y, w, h);
+            let mut reference = Matrix::new(h, w, 1);
+            for row in 0..h {
+                for col in 0..w {
+                    reference.data[row * w + col] = img.data[(row + y) * img.width + col + x];
+                }
+            }
+            assert_eq!(roi.data, reference.data);
+            let expected = FastFeatureDetector::new(20, true, FastType::Type9_16)
+                .detect(&reference)
+                .unwrap();
+            let actual = fast::detect(&roi, 20, true);
+            assert_eq!(actual.len(), expected.len());
+            for (a, b) in actual.iter().zip(expected) {
+                assert_eq!((a.x, a.y, a.response), (b.pt.x, b.pt.y, b.response));
+            }
+        }
+    }
 
     /// 布满明亮方块的图（FAST 检测用）。
     ///

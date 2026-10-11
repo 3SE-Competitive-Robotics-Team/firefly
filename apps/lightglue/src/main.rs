@@ -403,6 +403,16 @@ fn bind_query(
     Ok(())
 }
 
+/// 有效前缀全部覆盖，仅清零填充尾部；候选缩短时也不得残留上一帧数据。
+fn fill_map_inputs(k1: &mut [f32], d1: &mut [f32], points: &[firefly_vision_map::VisionMapPoint]) {
+    k1[points.len() * 2..].fill(0.);
+    d1[points.len() * DESC_DIM..].fill(0.);
+    for (i, point) in points.iter().enumerate() {
+        k1[2 * i..2 * (i + 1)].copy_from_slice(&point.uv);
+        d1[i * DESC_DIM..(i + 1) * DESC_DIM].copy_from_slice(&point.descriptor);
+    }
+}
+
 /// 单帧匹配：query 特征 vs 库图一帧 → 2D-3D 对应（丢弃填充/低分匹配）。
 #[allow(clippy::type_complexity)]
 #[fastrace::trace]
@@ -416,17 +426,11 @@ fn match_points(
     if n_map < 6 {
         return Ok(Vec::new());
     }
-    // 库侧写进已绑定的张量内存：先清零（后过滤填充匹配），再填本候选。
+    // 库侧写进已绑定的张量内存；无效尾部保持零填充。
     {
         let (_, k1) = bindings.k1.try_extract_tensor_mut::<f32>()?;
         let (_, d1) = bindings.d1.try_extract_tensor_mut::<f32>()?;
-        k1.fill(0.);
-        d1.fill(0.);
-        for (i, p) in points.iter().take(n_map).enumerate() {
-            k1[2 * i] = p.uv[0];
-            k1[2 * i + 1] = p.uv[1];
-            d1[i * DESC_DIM..(i + 1) * DESC_DIM].copy_from_slice(&p.descriptor);
-        }
+        fill_map_inputs(k1, d1, &points[..n_map]);
     }
     // 数据已更新 → 重新登记（`bind_input` 的语义是绑定时登记一次，之后改动须重绑）。
     bindings.binding.bind_input("k1", &bindings.k1)?;
@@ -638,6 +642,47 @@ fn observation_from_matches(
 #[cfg(test)]
 mod tests {
     use super::DEFAULT_MODEL;
+
+    #[test]
+    fn candidate_inputs_overwrite_prefix_and_clear_tail_across_resizes() {
+        use super::{DESC_DIM, NUM_POINTS, fill_map_inputs};
+        use firefly_vision_map::VisionMapPoint;
+        let mut keypoints = vec![f32::NAN; NUM_POINTS * 2];
+        let mut descriptors = vec![f32::NAN; NUM_POINTS * DESC_DIM];
+        for (round, count) in [NUM_POINTS, 7, 511, 0, 6, NUM_POINTS]
+            .into_iter()
+            .enumerate()
+        {
+            let points: Vec<_> = (0..count)
+                .map(|index| VisionMapPoint {
+                    position: [0.; 3],
+                    uv: [index as f32, -(round as f32)],
+                    descriptor: std::array::from_fn(|column| {
+                        (round * NUM_POINTS * DESC_DIM + index * DESC_DIM + column) as f32
+                    }),
+                    score: 1.,
+                })
+                .collect();
+            fill_map_inputs(&mut keypoints, &mut descriptors, &points);
+            for index in 0..NUM_POINTS {
+                let expected_uv = points.get(index).map_or([0.; 2], |point| point.uv);
+                let expected_descriptor = points
+                    .get(index)
+                    .map_or([0.; DESC_DIM], |point| point.descriptor);
+                assert_eq!(
+                    keypoints[2 * index..2 * (index + 1)]
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect::<Vec<_>>(),
+                    expected_uv.map(f32::to_bits)
+                );
+                assert_eq!(
+                    descriptors[index * DESC_DIM..(index + 1) * DESC_DIM],
+                    expected_descriptor
+                );
+            }
+        }
+    }
 
     /// 已知库帧提供独立地图位姿，匹配和 `PnP` 必须恢复它。
     #[test]

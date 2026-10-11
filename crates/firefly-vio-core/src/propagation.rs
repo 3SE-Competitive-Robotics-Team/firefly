@@ -197,6 +197,8 @@ pub struct Propagator {
     gravity: Vector3<f64>,
     /// 历史 IMU 消息（时间戳递增）。
     imu_data: Mutex<Vec<ImuData>>,
+    /// fast-prop 的区间测量工作区，容量跨次调用保留。
+    fast_imu_readings: Vec<ImuData>,
     /// fast-prop 缓存是否有效（对应 `cache_imu_valid`）。
     cache_imu_valid: bool,
     /// fast-prop 缓存的起始时间。
@@ -229,6 +231,7 @@ impl Propagator {
             noise,
             gravity: Vector3::new(0.0, 0.0, gravity_mag),
             imu_data: Mutex::new(Vec::new()),
+            fast_imu_readings: Vec::new(),
             cache_imu_valid: false,
             cache_state_time: 0.0,
             cache_state_est: [0.0; 16],
@@ -462,13 +465,22 @@ impl Propagator {
         time1: f64,
         _warn: bool,
     ) -> Option<Vec<ImuData>> {
-        // 警告日志：firefly-vio-core 当前无 log 依赖，`warn` 仅保留 API 语义
-        //（波形 2 接观测层后接入）。逻辑对照 C++ 的 PRINT_WARNING 分叉（不改变返回值）。
+        let mut prop_data = Vec::new();
+        Self::select_imu_readings_into(imu_data, time0, time1, &mut prop_data)?;
+        Some(prop_data)
+    }
+
+    fn select_imu_readings_into(
+        imu_data: &[ImuData],
+        time0: f64,
+        time1: f64,
+        prop_data: &mut Vec<ImuData>,
+    ) -> Option<()> {
+        prop_data.clear();
         if imu_data.is_empty() {
             return None;
         }
 
-        let mut prop_data: Vec<ImuData> = Vec::new();
         let mut i = 0usize;
         while i + 1 < imu_data.len() {
             // CASE 1: 在 time0 处切断当前测量。
@@ -547,7 +559,7 @@ impl Propagator {
             return None;
         }
 
-        Some(prop_data)
+        Some(())
     }
 
     /// fast-prop 缓存是否有效（对照 `cache_imu_valid`）。
@@ -591,7 +603,7 @@ impl Propagator {
         // 选取测量（warn=false，对照 C++）
         let time0 = self.cache_state_time + self.cache_t_off;
         let time1 = timestamp;
-        let prop_data = {
+        {
             let imu = self.imu_data.lock().expect("imu_data 锁");
             // 输出时间必须由已有 IMU 覆盖，禁止把外推结果标成新测量状态。
             if !time1.is_finite()
@@ -601,11 +613,9 @@ impl Propagator {
             {
                 return None;
             }
-            Self::select_imu_readings(&imu, time0, time1, false)?
-        };
-        if prop_data.len() < 2 {
-            return None;
+            Self::select_imu_readings_into(&imu, time0, time1, &mut self.fast_imu_readings)?;
         }
+        let prop_data = &self.fast_imu_readings;
 
         let bias_g = Vector3::new(
             self.cache_state_est[10],
@@ -1477,6 +1487,10 @@ mod tests {
         let _out1 = prop
             .fast_state_propagate(Some(&init), 0.5, &calib)
             .expect("第一次应成功");
+        let readings_ptr = prop.fast_imu_readings.as_ptr();
+        let readings_capacity = prop.fast_imu_readings.capacity();
+        assert!(prop.fast_state_propagate(None, 3.0, &calib).is_none());
+        assert!(prop.fast_state_propagate(None, 0.5, &calib).is_none());
         let out2 = prop
             .fast_state_propagate(None, 1.0, &calib)
             .expect("缓存应使第二次成功");
@@ -1487,6 +1501,17 @@ mod tests {
             out2.p.z
         );
         assert!((out2.v.z - (-9.81)).abs() < 1e-6, "v.z = {}", out2.v.z);
+        let out3 = prop.fast_state_propagate(None, 1.05, &calib).unwrap();
+        assert!((out3.p.z + 0.5 * 9.81 * 1.05 * 1.05).abs() < 1e-6);
+        assert!((out3.v.z + 9.81 * 1.05).abs() < 1e-6);
+        assert_eq!(prop.fast_imu_readings.as_ptr(), readings_ptr);
+        assert_eq!(prop.fast_imu_readings.capacity(), readings_capacity);
+        prop.invalidate_cache();
+        let reset = prop
+            .fast_state_propagate(Some(&init), 0.05, &calib)
+            .unwrap();
+        assert!((reset.p.z + 0.5 * 9.81 * 0.05 * 0.05).abs() < 1e-6);
+        assert_eq!(prop.fast_imu_readings.as_ptr(), readings_ptr);
     }
 
     fn default_imu_data() -> ImuData {
@@ -1903,6 +1928,39 @@ mod tests {
     #[test]
     fn select_empty_returns_none() {
         assert!(Propagator::select_imu_readings(&[], 0.0, 1.0, false).is_none());
+    }
+
+    #[test]
+    fn select_reuses_buffer_with_interpolated_linear_measurements() {
+        let data: Vec<_> = (0..=4)
+            .map(|i| {
+                let t = f64::from(i);
+                ImuData {
+                    timestamp: t,
+                    wm: Vector3::new(t, 2.0 * t, -t),
+                    am: Vector3::new(1.0 + t, 2.0 - t, 3.0 * t),
+                }
+            })
+            .collect();
+        let mut selected = Vec::new();
+        Propagator::select_imu_readings_into(&data, 0.25, 3.5, &mut selected).unwrap();
+        let ptr = selected.as_ptr();
+        for (start, end, times) in [
+            (1.25, 2.5, vec![1.25, 2.0, 2.5]),
+            (2.0, 3.0, vec![2.0, 3.0]),
+        ] {
+            Propagator::select_imu_readings_into(&data, start, end, &mut selected).unwrap();
+            assert_eq!(selected.len(), times.len());
+            assert_eq!(selected.as_ptr(), ptr);
+            for (reading, t) in selected.iter().zip(times) {
+                assert_eq!(reading.timestamp, t);
+                assert_eq!(reading.wm, Vector3::new(t, 2.0 * t, -t));
+                assert_eq!(reading.am, Vector3::new(1.0 + t, 2.0 - t, 3.0 * t));
+            }
+        }
+        assert!(Propagator::select_imu_readings_into(&[], 0.0, 1.0, &mut selected).is_none());
+        assert!(selected.is_empty());
+        assert_eq!(selected.as_ptr(), ptr);
     }
 
     #[test]

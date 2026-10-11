@@ -69,7 +69,7 @@ pub fn ekf_propagation(
     state
         .cov
         .view_mut((start_id, 0), (size_new, total))
-        .copy_from(&cov_phi_t.transpose());
+        .tr_copy_from(&cov_phi_t);
     state
         .cov
         .view_mut((0, start_id), (total, size_new))
@@ -121,21 +121,19 @@ pub fn ekf_update(
     let mut m_a = DMatrix::zeros(state.cov.nrows(), res.len());
     for (var_id, var_size) in state.variable_order() {
         let id = var_id as usize;
-        let mut m_i = DMatrix::zeros(var_size, res.len());
+        let mut m_i = m_a.view_mut((id, 0), (var_size, res.len()));
         for (i, (meas_id, meas_size)) in h_order.iter().enumerate() {
             let mid = *meas_id as usize;
             let cov_sub = state.cov.view((id, mid), (var_size, *meas_size));
             let h_sub = h.view((0, h_id[i]), (h.nrows(), *meas_size));
             m_i += cov_sub * h_sub.transpose();
         }
-        m_a.view_mut((id, 0), (var_size, res.len())).copy_from(&m_i);
     }
 
     // P_small（测量变量子协方差）→ S = H·P_small·Hᵀ + R → Cholesky 求逆
     let p_small = get_marginal_covariance(state, h_order);
     let s = h * p_small * h.transpose() + r;
     let s_inv = s
-        .clone()
         .cholesky()
         .unwrap_or_else(|| panic!("EKFUpdate: S 矩阵不正定，无法 Cholesky 分解"))
         .inverse();
@@ -171,9 +169,7 @@ pub fn set_initial_covariance(
     for (i_id, i_size) in order {
         let mut k_index = 0usize;
         for (k_id, k_size) in order {
-            let sub = covariance
-                .view((i_index, k_index), (*i_size, *k_size))
-                .into_owned();
+            let sub = covariance.view((i_index, k_index), (*i_size, *k_size));
             state
                 .cov
                 .view_mut((*i_id as usize, *k_id as usize), (*i_size, *k_size))
@@ -196,8 +192,7 @@ pub fn get_marginal_covariance(state: &State, small_variables: &[(i32, usize)]) 
         for (k_id, k_size) in small_variables {
             let sub = state
                 .cov
-                .view((*i_id as usize, *k_id as usize), (*i_size, *k_size))
-                .into_owned();
+                .view((*i_id as usize, *k_id as usize), (*i_size, *k_size));
             small_cov
                 .view_mut((i_index, k_index), (*i_size, *k_size))
                 .copy_from(&sub);
@@ -238,10 +233,9 @@ pub fn marginalize(state: &mut State, marg_id: i32, marg_size: usize) {
         .view_mut((0, marg_id), (marg_id, x2_size))
         .copy_from(&state.cov.view((0, marg_id + marg_size), (marg_id, x2_size)));
     // P(x2,x1) = P(x1,x2)ᵀ
-    let p12 = cov_new.view((0, marg_id), (marg_id, x2_size)).into_owned();
     cov_new
         .view_mut((marg_id, 0), (x2_size, marg_id))
-        .copy_from(&p12.transpose());
+        .tr_copy_from(&state.cov.view((0, marg_id + marg_size), (marg_id, x2_size)));
     // P(x2,x2)
     cov_new
         .view_mut((marg_id, marg_id), (x2_size, x2_size))
@@ -376,7 +370,7 @@ pub fn initialize_feature(
     let p_up = get_marginal_covariance(state, h_order);
     debug_assert_eq!(h_up.ncols(), p_up.ncols());
     let s = &h_up * p_up * h_up.transpose() + &r_up;
-    let chi2 = match s.clone().cholesky() {
+    let chi2 = match s.cholesky() {
         Some(chol) => res_up.dot(&chol.solve(&res_up)),
         None => f64::INFINITY,
     };
@@ -391,16 +385,13 @@ pub fn initialize_feature(
     let mut m_a = DMatrix::zeros(state.cov.nrows(), res_init.len());
     for (var_id, var_size) in state.variable_order() {
         let id = var_id as usize;
-        let mut m_i = DMatrix::zeros(var_size, res_init.len());
+        let mut m_i = m_a.view_mut((id, 0), (var_size, res_init.len()));
         for (i, (meas_id, meas_size)) in h_order.iter().enumerate() {
             let mid = *meas_id as usize;
             let cov_sub = state.cov.view((id, mid), (var_size, *meas_size));
             let h_sub = hx_init.view((0, hx_col(i, h_order)), (hx_init.nrows(), *meas_size));
             m_i += cov_sub * h_sub.transpose();
-            let _ = meas_id;
         }
-        m_a.view_mut((id, 0), (var_size, res_init.len()))
-            .copy_from(&m_i);
     }
 
     let p_small = get_marginal_covariance(state, h_order);
@@ -419,7 +410,7 @@ pub fn initialize_feature(
     cov.view_mut((0, old_size), (old_size, new_var_size))
         .copy_from(&cross);
     cov.view_mut((old_size, 0), (new_var_size, old_size))
-        .copy_from(&cross.transpose());
+        .tr_copy_from(&cross);
     cov.view_mut((old_size, old_size), (new_var_size, new_var_size))
         .copy_from(&p_ll);
     state.cov = cov;
@@ -477,7 +468,7 @@ pub fn marginalize_old_clone(state: &mut State) {
     if state.clones_imu.len() > state.options.max_clone_size {
         let marg_time = state.marg_timestep();
         assert!(marg_time >= 0.0, "marginalize_old_clone: 无克隆可边缘化");
-        let (_, clone) = state.clones_imu.front().expect("克隆应存在").clone();
+        let (_, clone) = state.clones_imu.front().expect("克隆应存在");
         let (marg_id, marg_size) = (clone.id(), clone.size());
         marginalize(state, marg_id, marg_size);
         state.clones_imu.pop_front();
@@ -580,6 +571,59 @@ mod tests {
     }
 
     #[test]
+    fn marginalize_preserves_blocks_and_mirrors_upper_cross_block() {
+        for start in [0, 6, 15] {
+            let mut s = State::new(StateOptions::default());
+            s.cov = DMatrix::from_fn(21, 21, |r, c| (r * 21 + c) as f64);
+            marginalize(&mut s, start as i32, 6);
+            assert_eq!(s.cov.shape(), (15, 15));
+            let retained: Vec<_> = (0..21)
+                .filter(|i| !(start..start + 6).contains(i))
+                .collect();
+            for (r, &source_r) in retained.iter().enumerate() {
+                for (c, &source_c) in retained.iter().enumerate() {
+                    let expected = if r >= start && c < start {
+                        source_c * 21 + source_r
+                    } else {
+                        source_r * 21 + source_c
+                    };
+                    assert_eq!(s.cov[(r, c)], expected as f64);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ekf_update_coupled_positions_and_independent_velocity() {
+        let mut s = State::new(StateOptions::default());
+        s.timestamp = 1.0;
+        augment_clone(&mut s, &Vector3::zeros());
+        s.cov = DMatrix::identity(21, 21);
+        s.cov[(3, 18)] = 0.25;
+        s.cov[(18, 3)] = 0.25;
+        // z₁ = x_imu + 2·x_clone，S₁ = 1 + 4 + 4·0.25 + 0.75 = 6.75。
+        // z₂ = v_y，S₂ = 1 + 2 = 3；两个测量相互独立。
+        let h = DMatrix::from_row_slice(2, 3, &[2.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+        let res = DVector::from_vec(vec![2.0, -3.0]);
+        let r = DMatrix::from_diagonal(&DVector::from_vec(vec![0.75, 2.0]));
+        ekf_update(&mut s, &[(18, 1), (3, 1), (7, 1)], &h, &res, &r);
+        assert!((s.imu.pos().x - 4.0 / 9.0).abs() < 1e-12);
+        assert!((s.clones_imu[0].1.pos().x - 2.0 / 3.0).abs() < 1e-12);
+        assert!((s.imu.vel().y + 1.0).abs() < 1e-12);
+        for row in 0..21 {
+            for col in 0..21 {
+                let expected = match (row, col) {
+                    (3, 3) | (7, 7) => 2.0 / 3.0,
+                    (18, 18) => 0.25,
+                    (3, 18) | (18, 3) => -0.25,
+                    _ => f64::from(row == col),
+                };
+                assert!((s.cov[(row, col)] - expected).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
     fn ekf_update_scalar_system() {
         // 标量系统：x ~ N(0,1)，测量 z = x + v（R=1），res=1
         // 后验均值 dx = K·res = 0.5；后验方差 = 1 − 1/2 = 0.5
@@ -616,6 +660,36 @@ mod tests {
     }
 
     #[test]
+    fn ekf_propagation_preserves_cross_covariance_with_unpropagated_clone() {
+        let mut s = State::new(StateOptions::default());
+        s.timestamp = 1.0;
+        augment_clone(&mut s, &Vector3::zeros());
+        s.cov = DMatrix::identity(21, 21);
+        s.cov[(3, 18)] = 0.25;
+        s.cov[(18, 3)] = 0.25;
+        s.cov[(4, 19)] = -0.5;
+        s.cov[(19, 4)] = -0.5;
+        let phi = DMatrix::from_row_slice(2, 2, &[2.0, 1.0, 0.0, 3.0]);
+        let q = DMatrix::from_diagonal(&DVector::from_vec(vec![0.5, 0.25]));
+        ekf_propagation(&mut s, &[(3, 2)], &[(3, 2)], &phi, &q);
+        // x′ = 2x + y + n_x，y′ = 3y + n_y；克隆变量保持不变。
+        for row in 0..21 {
+            for col in 0..21 {
+                let expected = match (row, col) {
+                    (3, 3) => 5.5,
+                    (4, 4) => 9.25,
+                    (3, 4) | (4, 3) => 3.0,
+                    (3, 18) | (18, 3) => 0.5,
+                    (3, 19) | (19, 3) => -0.5,
+                    (4, 19) | (19, 4) => -1.5,
+                    _ => f64::from(row == col),
+                };
+                assert!((s.cov[(row, col)] - expected).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
     fn get_marginal_covariance_extracts_block() {
         let mut s = State::new(StateOptions::default());
         s.cov[(0, 0)] = 2.0;
@@ -625,5 +699,40 @@ mod tests {
         assert_eq!(small.nrows(), 6);
         assert!((small[(0, 0)] - 2.0).abs() < 1e-12);
         assert!((small[(4, 4)] - 3.0).abs() < 1e-12);
+    }
+    #[test]
+    fn covariance_blocks_preserve_reordered_cross_terms() {
+        let mut state = State::new(StateOptions::default());
+        let indices = [9, 10, 1, 2, 3];
+        let order = [(9, 2), (1, 3)];
+        state.cov = DMatrix::from_fn(15, 15, |r, c| (r * 15 + c) as f64);
+        let extracted = get_marginal_covariance(&state, &order);
+        for r in 0..5 {
+            for c in 0..5 {
+                assert_eq!(extracted[(r, c)], (indices[r] * 15 + indices[c]) as f64);
+            }
+        }
+        state.cov = DMatrix::identity(15, 15);
+        let input = DMatrix::from_fn(5, 5, |r, c| (r * 5 + c) as f64);
+        set_initial_covariance(&mut state, &input, &order);
+        for r in 0..15 {
+            for c in 0..15 {
+                let expected = match (
+                    indices.iter().position(|i| *i == r),
+                    indices.iter().position(|i| *i == c),
+                ) {
+                    (Some(a), Some(b)) => 3.0 * (a + b) as f64,
+                    _ => {
+                        if r == c {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                };
+                assert_eq!(state.cov[(r, c)], expected);
+            }
+        }
+        assert_eq!(get_marginal_covariance(&state, &[]).shape(), (0, 0));
     }
 }

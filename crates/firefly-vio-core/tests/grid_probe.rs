@@ -1,15 +1,13 @@
 //! 前端回归：FAST/NMS/LK 在合成点阵上的行为锚点。
 //!
-//! 背景（2026-08 调试）：purecv NMS 为 8 邻域严格 `>` 比较——常值亮度
-//! 平台（纯色方块、规则点阵）会整片互斥归零；真实帧因传感器噪声极少
-//! 同分，故仅影响极端合成图。LK 已知位移回归防止光流方向/步长回退。
+//! FAST NMS 使用八邻域严格 `>` 比较，常值亮度平台的等分角点会互相抑制。
+//! LK 测试使用已知位移检查光流方向和幅度。
 
 use firefly_vio_core::sensor::GrayImage;
-use firefly_vio_core::track::fast::fast_with_score;
+use firefly_vio_core::track::fast::detect;
 use firefly_vio_core::track::{grider, pyramid};
 
-/// purecv 金字塔 LK（替代已移除的自研 lk.rs；OpenCV 语义，与 track.rs
-/// `lk_optical_flow` 同参数：2 层金字塔、15×15 窗口、initial flow）。
+/// purecv 金字塔 LK 测试配置：2 层金字塔、15×15 窗口、initial flow。
 fn lk_flow(
     prev: &GrayImage,
     next: &GrayImage,
@@ -82,7 +80,7 @@ fn dotted_image(w: usize, h: usize, level_jitter: bool) -> (GrayImage, Vec<(f32,
 #[test]
 fn fast_without_nms_detects_all_dots() {
     let (img, dots) = dotted_image(320, 240, true);
-    let kps = fast_with_score(&img, 10, false).0;
+    let kps = detect(&pyramid::gray_to_matrix(&img), 10, false);
     assert!(
         kps.len() >= dots.len(),
         "检出 {} 少于点数 {}",
@@ -110,7 +108,7 @@ fn fast_nms_tie_plateau_suppresses_all() {
         height: 240,
         data,
     };
-    let with_nms = fast_with_score(&img, 10, true).0;
+    let with_nms = detect(&pyramid::gray_to_matrix(&img), 10, true);
     assert_eq!(
         with_nms.len(),
         0,
@@ -188,7 +186,7 @@ fn lk_tracks_known_shift() {
 fn grider_stage_diagnosis() {
     let (img, _) = dotted_image(320, 240, true);
     // 全图
-    let full = fast_with_score(&img, 10, true).0;
+    let full = detect(&pyramid::gray_to_matrix(&img), 10, true);
     println!("stage1 全图NMS={}", full.len());
     // 单格 ROI（cell 64×48）：取含点的一格
     // 复制 crop_roi 逻辑（私有函数，测试内联同款实现）
@@ -203,9 +201,9 @@ fn grider_stage_diagnosis() {
         height: ch,
         data: roi_data,
     };
-    let roi_kps = fast_with_score(&roi, 10, true).0;
+    let roi_kps = detect(&pyramid::gray_to_matrix(&roi), 10, true);
     println!("stage2 ROI NMS={}", roi_kps.len());
-    let roi_no = fast_with_score(&roi, 10, false).0;
+    let roi_no = detect(&pyramid::gray_to_matrix(&roi), 10, false);
     println!("stage2b ROI 无NMS={}", roi_no.len());
 }
 

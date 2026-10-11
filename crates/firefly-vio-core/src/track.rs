@@ -1,8 +1,8 @@
 //! KLT 视觉前端（对照 `OpenVINS` `ov_core/src/track`：`TrackBase`/`TrackKLT`/`Grider_GRID`）。
 //!
-//! 本模块实现 OpenVINS 的 KLT 稀疏特征跟踪前端。OpenCV 算法两条来源
-//! （均不引入 `opencv` crate）：检测/均衡自实现；LK 光流与基础矩阵 RANSAC
-//! 用 purecv（OpenCV 语义镜像；有问题给上游提）：
+//! 本模块实现 OpenVINS 的 KLT 稀疏特征跟踪前端。直方图均衡由本模块实现；
+//! FAST、子像素精化、LK 光流与基础矩阵 RANSAC 使用 purecv
+//!（OpenCV 语义镜像；有问题给上游提）：
 //! - [`histogram`]：直方图均衡（`equalizeHist`）与 CLAHE（`createCLAHE`）；
 //! - [`pyramid`]：灰度图 ↔ purecv Matrix 转换（`gray_to_matrix`）；
 //! - [`fast`]：FAST-9 角点检测 + 非极大值抑制（`cv::FAST`）；
@@ -33,7 +33,7 @@
 use crate::cam::CameraModel;
 use crate::feat::FeatureDatabase;
 use crate::sensor::{CameraData, GrayImage};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 pub mod fast;
 pub mod grider;
@@ -41,7 +41,7 @@ pub mod histogram;
 pub mod pyramid;
 
 /// purecv 金字塔 LK（对照 OpenCV `calcOpticalFlowPyrLK`：内部 f32 金字塔 +
-/// Sobel 导数、`OPTFLOW_USE_INITIAL_FLOW` 初值）。
+/// Scharr 导数、`OPTFLOW_USE_INITIAL_FLOW` 初值）。
 ///
 /// `max_level=3`（4 层金字塔）+ 21×21 窗口：近地面特征（深度 0.8m、f=168）
 /// 在 10Hz 下帧间位移 ~31px。4 层实测优于 3 层（231m vs 387m@34s）——
@@ -205,11 +205,11 @@ impl TrackerBase {
 #[derive(Debug)]
 struct CamState {
     /// 当前帧预处理图像（`img_curr`）。
-    img_curr: GrayImage,
+    img_curr: Arc<GrayImage>,
     /// 上一帧图像（`img_last`）。
-    img_last: GrayImage,
+    img_last: Arc<GrayImage>,
     /// 上一帧掩码（`img_mask_last`）。
-    mask_last: GrayImage,
+    mask_last: Arc<GrayImage>,
     /// 上一帧成功跟踪点（`pts_last`）。
     pts_last: Vec<KeyPoint>,
     /// 上一帧各点特征 id（`ids_last`）。
@@ -226,9 +226,9 @@ impl Default for CamState {
             }
         }
         Self {
-            img_curr: empty(),
-            img_last: empty(),
-            mask_last: empty(),
+            img_curr: Arc::new(empty()),
+            img_last: Arc::new(empty()),
+            mask_last: Arc::new(empty()),
             pts_last: Vec::new(),
             ids_last: Vec::new(),
         }
@@ -371,10 +371,7 @@ impl TrackKlt {
     /// 否则对每张图逐个 `feed_monocular`（C++ 中配双目但 `use_stereo=false` 时并行）。
     #[fastrace::trace]
     pub fn feed_new_camera(&mut self, msg: &CameraData) {
-        let valid = !msg.sensor_ids.is_empty()
-            && msg.sensor_ids.len() == msg.images.len()
-            && msg.images.len() == msg.masks.len();
-        if !valid {
+        if !msg.is_valid() || (self.base.use_stereo && msg.images.len() > 2) {
             return; // 数据不一致：忽略（C++ 直接 `exit`，这里取安全策略）
         }
         self.preprocess_into_curr(msg);
@@ -414,9 +411,9 @@ impl TrackKlt {
                 let key = sensor_key(sid);
                 let src = &msg.images[i];
                 let processed = match hist_method {
-                    HistogramMethod::Histogram => histogram::equalize_hist(src),
+                    HistogramMethod::Histogram => Arc::new(histogram::equalize_hist(src)),
                     HistogramMethod::Clahe => {
-                        histogram::clahe(src, &histogram::ClaheParams::default())
+                        Arc::new(histogram::clahe(src, &histogram::ClaheParams::default()))
                     }
                     HistogramMethod::None => src.clone(),
                 };
@@ -439,7 +436,7 @@ impl TrackKlt {
         let timestamp = msg.timestamp;
         let cam_sensor_id = msg.sensor_ids[msg_id];
 
-        // 取当前帧数据（克隆副本，避免跨 `&mut self` 调用的借用冲突）
+        // 共享不可变像素，使当前帧和历史帧的所有权独立于状态更新。
         let img_curr = {
             let s = self.cams.get(&key).expect("camera state after preprocess");
             s.img_curr.clone()
@@ -609,27 +606,13 @@ impl TrackKlt {
         // 运动外推初值：LK 初值 = 上一帧位置 + 最近两帧位移（按特征 id 查
         // 库），减小大位移（10Hz 下近地面特征 ~31px/帧）下 LK 收敛滞后。
         for (i, id) in ids_l.iter().enumerate() {
-            if let Some(uvs) = self
-                .base
-                .database
-                .get_feature_clone(*id)
-                .and_then(|f| f.uvs.get(&keyl).cloned())
-                && uvs.len() >= 2
-            {
-                let (last, prev) = (uvs[uvs.len() - 1], uvs[uvs.len() - 2]);
+            if let Some([prev, last]) = self.base.database.latest_uv_pair(*id, keyl) {
                 pts_l_new[i].x += last.x - prev.x;
                 pts_l_new[i].y += last.y - prev.y;
             }
         }
         for (i, id) in ids_r.iter().enumerate() {
-            if let Some(uvs) = self
-                .base
-                .database
-                .get_feature_clone(*id)
-                .and_then(|f| f.uvs.get(&keyr).cloned())
-                && uvs.len() >= 2
-            {
-                let (last, prev) = (uvs[uvs.len() - 1], uvs[uvs.len() - 2]);
+            if let Some([prev, last]) = self.base.database.latest_uv_pair(*id, keyr) {
                 pts_r_new[i].x += last.x - prev.x;
                 pts_r_new[i].y += last.y - prev.y;
             }
@@ -730,7 +713,7 @@ impl TrackKlt {
             let sl = self.cams.get_mut(&keyl).unwrap();
             sl.img_last = img_l;
             sl.mask_last = mask_l;
-            sl.pts_last.clone_from(&good_l);
+            sl.pts_last = good_l;
             sl.ids_last = good_ids_l;
         }
         {
@@ -958,10 +941,11 @@ impl TrackKlt {
         // 扎堆到已占 close-grid 单元而被全拒、特征库饿死。
         let (w_i, h_i) = (w as i32, h as i32);
         let r = min_px as i32;
-        let mut mask_updated = mask0.clone();
+        let mut mask_updated = std::borrow::Cow::Borrowed(mask0);
         for p in pts0.iter() {
             let (x, y) = (p.x as i32, p.y as i32);
             if x - r >= 0 && x + r < w_i && y - r >= 0 && y + r < h_i {
+                let mask_updated = mask_updated.to_mut();
                 for y0 in (y - r)..=(y + r) {
                     let row = (y0 as usize) * mask_updated.width;
                     for x0 in (x - r)..=(x + r) {
@@ -1034,8 +1018,7 @@ impl TrackKlt {
                 .iter()
                 .map(|k| nalgebra::Vector2::new(k.x, k.y))
                 .collect();
-            let init = left.clone();
-            let (right_out, status) = lk_optical_flow(img0, img1, &left, &init);
+            let (right_out, status) = lk_optical_flow(img0, img1, &left, &left);
             let (w, h) = (img1.width as f32, img1.height as f32);
             for i in n_old_left..new_len {
                 let si = i - n_old_left;
@@ -1193,6 +1176,129 @@ mod lk_bias_tests {
                 mx.abs() < 2.5 && my.abs() < 2.5,
                 "LK 位移系统性偏置 ({mx:.3},{my:.3})px @ shift=({dx},{dy})"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod shared_frame_tests {
+    use super::*;
+
+    fn frame(stereo: bool, value: u8) -> CameraData {
+        let image = Arc::new(GrayImage {
+            width: 64,
+            height: 64,
+            data: vec![value; 64 * 64],
+        });
+        let mask = Arc::new(GrayImage {
+            width: 64,
+            height: 64,
+            data: vec![0; 64 * 64],
+        });
+        let n = if stereo { 2 } else { 1 };
+        CameraData {
+            timestamp: f64::from(value),
+            sensor_ids: (0..n).collect(),
+            images: vec![image; n as usize],
+            masks: vec![mask; n as usize],
+        }
+    }
+
+    #[test]
+    fn shared_frames_advance_on_first_empty_and_rejected_tracks() {
+        for stereo in [false, true] {
+            let mut tracker = TrackKlt::new(
+                HashMap::new(),
+                2,
+                0,
+                stereo,
+                HistogramMethod::None,
+                20,
+                2,
+                2,
+                5,
+            );
+            let first = frame(stereo, 0);
+            tracker.feed_new_camera(&first);
+            for (index, _) in first.sensor_ids.iter().enumerate() {
+                let state = &tracker.cams[&index];
+                assert!(Arc::ptr_eq(&state.img_curr, &first.images[index]));
+                assert!(Arc::ptr_eq(&state.img_last, &first.images[index]));
+                assert!(Arc::ptr_eq(&state.mask_last, &first.masks[index]));
+            }
+            // 越界点在补点时被移除，匹配的空结果必须推进图像和掩码。
+            for id in &first.sensor_ids {
+                tracker.set_last_observations(*id, vec![KeyPoint::new(-1.0, -1.0)], vec![1]);
+            }
+            let second = frame(stereo, 1);
+            tracker.feed_new_camera(&second);
+            assert!(
+                tracker
+                    .cams
+                    .values()
+                    .all(|state| state.pts_last.is_empty() && state.ids_last.is_empty())
+            );
+            assert!(Arc::ptr_eq(&tracker.cams[&0].img_last, &second.images[0]));
+            // 单侧有效点不足 RANSAC 的十点门槛；非空拒绝结果走正常提交路径。
+            tracker.set_last_observations(0, vec![KeyPoint::new(32.0, 32.0)], vec![2]);
+            let third = frame(stereo, 2);
+            tracker.feed_new_camera(&third);
+            for (index, _) in third.sensor_ids.iter().enumerate() {
+                let state = &tracker.cams[&index];
+                assert!(state.pts_last.is_empty() && state.ids_last.is_empty());
+                assert!(Arc::ptr_eq(&state.img_last, &third.images[index]));
+                assert!(Arc::ptr_eq(&state.mask_last, &third.masks[index]));
+            }
+            assert!(first.images[0].data.iter().all(|pixel| *pixel == 0));
+            assert!(first.masks[0].data.iter().all(|pixel| *pixel == 0));
+        }
+    }
+
+    #[test]
+    fn invalid_input_leaves_all_camera_state_untouched() {
+        let mut tracker = TrackKlt::new(
+            HashMap::new(),
+            2,
+            0,
+            true,
+            HistogramMethod::None,
+            20,
+            2,
+            2,
+            5,
+        );
+        let valid = frame(true, 0);
+        tracker.feed_new_camera(&valid);
+        tracker.set_last_observations(0, vec![KeyPoint::new(32.0, 32.0)], vec![7]);
+        for case in 0..6 {
+            let mut invalid = frame(true, 1);
+            match case {
+                0 => invalid.masks.clear(),
+                1 => Arc::make_mut(&mut invalid.masks[1]).data.clear(),
+                2 => Arc::make_mut(&mut invalid.masks[1]).width = 32,
+                3 => {
+                    Arc::make_mut(&mut invalid.images[1]).data.pop();
+                }
+                4 => invalid.sensor_ids[1] = invalid.sensor_ids[0],
+                _ => Arc::make_mut(&mut invalid.images[1]).width = usize::MAX,
+            }
+            assert!(!invalid.is_valid());
+            tracker.feed_new_camera(&invalid);
+            assert_eq!(tracker.last_ids(0), &[7]);
+            for index in 0..2 {
+                assert!(Arc::ptr_eq(
+                    &tracker.cams[&index].img_curr,
+                    &valid.images[index]
+                ));
+                assert!(Arc::ptr_eq(
+                    &tracker.cams[&index].img_last,
+                    &valid.images[index]
+                ));
+                assert!(Arc::ptr_eq(
+                    &tracker.cams[&index].mask_last,
+                    &valid.masks[index]
+                ));
+            }
         }
     }
 }
