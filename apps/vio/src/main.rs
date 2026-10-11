@@ -34,6 +34,7 @@ use iceoryx2::waitset::WaitSetRunResult;
 
 mod config;
 mod input;
+mod keypoints;
 mod odometry;
 use config::VioConfig;
 
@@ -330,6 +331,7 @@ fn run_loop(
         if let Some(cam) = input.next_camera() {
             camera_count += 1;
             vio.feed_measurement_camera(&cam);
+            keypoints::publish(viz_pub, &cam, &vio.track_feats);
             log::debug!(
                 "camera t={:.3} sensors={:?} imgs={}x{}",
                 cam.timestamp,

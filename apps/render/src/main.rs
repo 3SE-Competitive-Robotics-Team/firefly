@@ -14,6 +14,7 @@ mod config;
 mod depth_noise;
 mod flight_overlay;
 mod freecam;
+mod keypoints;
 mod link;
 mod process;
 mod rig;
@@ -134,6 +135,7 @@ fn build_app(
     .insert_resource(FreeCam::default())
     .insert_resource(viewer_pose::ViewerPose::default())
     .init_resource::<flight_overlay::FlightOverlay>()
+    .init_resource::<keypoints::KeypointOverlay>()
     .insert_non_send(ports)
     .insert_non_send(log_ipc)
     .add_plugins(CapturePlugin)
@@ -169,7 +171,14 @@ fn build_app(
     )
     .add_systems(
         Last,
-        (drain_captures, publish_processed, pump_logs, flush_on_exit).chain(),
+        (
+            drain_captures,
+            publish_processed,
+            keypoints::update_panels,
+            pump_logs,
+            flush_on_exit,
+        )
+            .chain(),
     );
     if !offline {
         app.init_gizmo_group::<flight_overlay::FlightGizmos>()

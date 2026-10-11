@@ -55,7 +55,7 @@ pub struct IpcPorts {
     pub depth_pub: Publisher<DepthImageMessage>,
     /// 相机对事件通知（左右目成对发布后单次唤醒）。
     pub pair_notify: TopicNotifier,
-    /// 可视化订阅（`Firefly/Viz` 的体素消息，实时感知地图显示用）。
+    /// 可视化订阅（`Firefly/Viz` 的地图、路径与 VIO 图像点集）。
     pub viz_sub: Option<Subscriber<VizMessage>>,
     /// 地图融合定位，只用于在线调试影子与轨迹。
     pub corrected_sub: Option<Subscriber<OdomMessage>>,
@@ -361,13 +361,14 @@ pub fn publish_processed(
     mut stats: ResMut<CaptureStats>,
     mut views: ResMut<DebugViews>,
     mut images: ResMut<Assets<Image>>,
+    mut keypoints: ResMut<crate::keypoints::KeypointOverlay>,
 ) {
     while let Some(result) = pipeline.try_recv() {
         pipeline.busy = false;
         stats.published += 1;
         stats.last_stamp = result.stamp;
         publish(&ports, &result);
-        update_views(&mut views, &mut images, result);
+        update_views(&mut views, &mut images, &mut keypoints, result);
         if let Some(next) = pipeline.pending.take() {
             pipeline.submit(next);
             pipeline.busy = true;
@@ -427,19 +428,19 @@ fn publish_depth(publisher: &Publisher<DepthImageMessage>, depth: &[f32], stamp:
     }
 }
 
-/// 调试图更新（工作线程算好的 RGBA 直接搬入 `Assets<Image>`，无二次转换）。
-fn update_views(views: &mut DebugViews, images: &mut Assets<Image>, result: ProcessedCapture) {
+/// RGB/深度显示图直接搬入 `Assets<Image>`；灰度原图交给关键点显示缓存。
+fn update_views(
+    views: &mut DebugViews,
+    images: &mut Assets<Image>,
+    keypoints: &mut crate::keypoints::KeypointOverlay,
+    result: ProcessedCapture,
+) {
+    keypoints.push_frame(result.stamp, [result.left_gray, result.right_gray]);
     if let Some(mut image) = images.get_mut(&views.left_rgb) {
         image.data = Some(result.left_rgb);
     }
     if let Some(mut image) = images.get_mut(&views.right_rgb) {
         image.data = Some(result.right_rgb);
-    }
-    if let Some(mut image) = images.get_mut(&views.left_gray) {
-        image.data = Some(result.left_gray_rgba);
-    }
-    if let Some(mut image) = images.get_mut(&views.right_gray) {
-        image.data = Some(result.right_gray_rgba);
     }
     if let Some(mut image) = images.get_mut(&views.depth) {
         image.data = Some(result.depth_rgba);

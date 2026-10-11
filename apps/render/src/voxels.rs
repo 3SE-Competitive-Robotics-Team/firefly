@@ -323,8 +323,8 @@ pub fn setup_voxels(
     commands.insert_resource(LiveVoxelAccum::default());
 }
 
-/// 消费 `Firefly/Viz` 的体素消息，按需重建实时层网格。
-#[allow(clippy::needless_pass_by_value)] // `SystemParam` 契约，与同 crate 其它系统一致
+/// 消费 `Firefly/Viz` 的地图、路径与 VIO 点集，按需重建实时层网格。
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub fn update_live_voxels(
     time: Res<Time>,
     ports: NonSend<IpcPorts>,
@@ -332,6 +332,8 @@ pub fn update_live_voxels(
     layer: Res<VoxelMeshes>,
     mut accum: ResMut<LiveVoxelAccum>,
     mut paths: ResMut<Paths>,
+    wall: Res<Time<Real>>,
+    mut keypoints: ResMut<crate::keypoints::KeypointOverlay>,
 ) {
     let Some(sub) = &ports.viz_sub else {
         return;
@@ -342,7 +344,13 @@ pub fn update_live_voxels(
         match sub.receive() {
             Ok(Some(sample)) => {
                 let msg: &VizMessage = &sample;
-                let entity = &msg.entity[..msg.entity_len as usize];
+                if msg.kind == kind::KEYPOINTS_2D {
+                    if ports.corrected_sub.is_some() {
+                        keypoints.observe(msg, wall.elapsed_secs_f64());
+                    }
+                    continue;
+                }
+                let entity = msg.entity().as_bytes();
                 if msg.kind == kind::LINE_STRIP {
                     // 规划路径：只收 planner 发的 `plan/*`，直接并存（点数少，无需节流）。
                     if msg.point_count == 0 || !entity.starts_with(b"plan/") {
@@ -416,13 +424,9 @@ pub fn update_live_voxels(
 /// 打开可视化订阅（失败降级为不显示实时层，不影响出图链路）。
 #[must_use]
 pub fn open_subscription(node: &firefly_pubsub::node::IpcNode) -> Option<Subscriber<VizMessage>> {
-    // planner 一次 replan 会连着发多条不同实体（global_path/local_traj/planes…），
-    // 缓冲 1 只会留下最后一条；给一个小缓冲覆盖突发，同时不冒犯"先建服务"那端的
-    // `subscriber_max_buffer_size` 上限（要太大时会
-    // `BufferSizeExceedsMaxSupportedBufferSizeOfService`）。
-    match Subscriber::with_topic_and_buffer(node, VIZ_TOPIC, 8) {
+    match firefly_pubsub::viz::subscribe(node) {
         Ok(sub) => {
-            log::info!("体素视图：已订阅 {VIZ_TOPIC}（实时感知地图）");
+            log::info!("已订阅 {VIZ_TOPIC}（实时感知地图与 VIO 关键点）");
             Some(sub)
         }
         Err(e) => {

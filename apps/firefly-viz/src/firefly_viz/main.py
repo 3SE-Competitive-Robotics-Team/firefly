@@ -34,6 +34,7 @@ from .messages import (
     VIZ_KIND_ARROWS,
     VIZ_KIND_BAR_CHART,
     VIZ_KIND_CLEAR,
+    VIZ_KIND_KEYPOINTS_2D,
     VIZ_KIND_LINE_STRIP,
     VIZ_KIND_POSE,
     VIZ_KIND_SCALARS,
@@ -218,6 +219,10 @@ def _handle(msg: VizMessage, trace_id: str) -> None:
                 quaternion=[msg.quat_xyzw[0], msg.quat_xyzw[1], msg.quat_xyzw[2], msg.quat_xyzw[3]],
             ),
         )
+    elif kind == VIZ_KIND_KEYPOINTS_2D:
+        n = min(msg.point_count, len(msg.points))
+        pts = np.array([[msg.points[i][0], msg.points[i][1]] for i in range(n)], dtype=np.float32).reshape(-1, 2)
+        rr.log(entity, rr.Points2D(pts, colors=[[*msg.color, 255]], radii=2.0))
     elif kind == VIZ_KIND_LINE_STRIP:
         n = msg.point_count
         pts = [[msg.points[i][0], msg.points[i][1], msg.points[i][2]] for i in range(n)]

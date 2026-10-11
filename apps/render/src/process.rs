@@ -49,10 +49,6 @@ pub struct ProcessedCapture {
     pub right_gray: Vec<u8>,
     /// 深度（米，行主序；在线含退化，离线为几何标签）。
     pub depth: Vec<f32>,
-    /// 左目灰度显示图（`RGBA8`）。
-    pub left_gray_rgba: Vec<u8>,
-    /// 右目灰度显示图（`RGBA8`）。
-    pub right_gray_rgba: Vec<u8>,
     /// 深度伪彩显示图（`RGBA8`）。
     pub depth_rgba: Vec<u8>,
 }
@@ -102,10 +98,6 @@ fn process(job: CaptureJob, options: &DepthNoiseOptions, offline: bool) -> Proce
         );
     }
 
-    let mut left_gray_rgba = vec![0u8; 4 * IMAGE_SIZE];
-    sensors::gray_to_display(&left_gray, &mut left_gray_rgba);
-    let mut right_gray_rgba = vec![0u8; 4 * IMAGE_SIZE];
-    sensors::gray_to_display(&right_gray, &mut right_gray_rgba);
     let mut depth_rgba = vec![0u8; 4 * IMAGE_SIZE];
     sensors::depth_to_display(&depth, &mut depth_rgba, sensors::DISPLAY_DEPTH_RANGE);
 
@@ -118,8 +110,6 @@ fn process(job: CaptureJob, options: &DepthNoiseOptions, offline: bool) -> Proce
         left_gray,
         right_gray,
         depth,
-        left_gray_rgba,
-        right_gray_rgba,
         depth_rgba,
     }
 }
@@ -168,8 +158,6 @@ mod tests {
         assert_eq!(out.left_gray.len(), IMAGE_SIZE);
         assert_eq!(out.right_gray.len(), IMAGE_SIZE);
         assert_eq!(out.depth.len(), IMAGE_SIZE);
-        assert_eq!(out.left_gray_rgba.len(), 4 * IMAGE_SIZE);
-        assert_eq!(out.right_gray_rgba.len(), 4 * IMAGE_SIZE);
         assert_eq!(out.depth_rgba.len(), 4 * IMAGE_SIZE);
         // 原始深度全为清空值 → 全无效，显示为黑。
         assert!(out.depth.iter().all(|z| *z == 0.0));

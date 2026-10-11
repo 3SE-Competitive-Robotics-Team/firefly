@@ -36,7 +36,14 @@ pub mod kind {
     pub const ARROWS: u32 = 6;
     /// 清除实体（空 entity 表示全清；当前无发布端，预留扩展点）。
     pub const CLEAR: u32 = 7;
+    /// 图像像素坐标点集：`points = [u, v, 0]`；`scalars = [宽, 高, 总点数]`。
+    /// `point_count` 为实际携带点数，允许小于总数；空点集清除该帧标记。
+    pub const KEYPOINTS_2D: u32 = 10;
 }
+
+/// VIO 左/右相机当前活动点；时间戳为原始相机时钟，不是滤波器时间。
+pub const VIO_KEYPOINT_ENTITIES: [&str; 2] =
+    ["vio/debug/keypoints/left", "vio/debug/keypoints/right"];
 
 /// 实体路径字节上限（64 字节，UTF-8；超出截断，见 [`VizMessage::set_entity`]）。
 pub const ENTITY_MAX: usize = 64;
@@ -75,7 +82,7 @@ pub struct VizMessage {
     pub xyz: [f64; 3],
     /// 姿态四元数 xyzw（pose；JPL 分量顺序，与 `OdomMessage` 一致）。
     pub quat_xyzw: [f64; 4],
-    /// 折线点集（`line_strip`；`points[..point_count]`）。
+    /// 折线或图像点集（`line_strip` / `keypoints_2d`；`points[..point_count]`）。
     pub points: [[f64; 3]; POINTS_MAX],
     /// `points` 有效数。
     pub point_count: u32,
@@ -93,7 +100,7 @@ pub struct VizMessage {
     pub voxel_size: [f32; 3],
     /// 体素网格原点（世界坐标，米）。
     pub voxel_origin: [f32; 3],
-    /// 标量值（scalars；`scalars[..scalar_count]`）。
+    /// 标量值或图像点集元数据（`scalars` / `keypoints_2d`；`scalars[..scalar_count]`）。
     pub scalars: [f64; SCALARS_MAX],
     /// `scalars` 有效数。
     pub scalar_count: u32,
@@ -206,12 +213,79 @@ impl VizPublisher {
     }
 }
 
+/// 订阅完整可视化突发；与发布端使用同一服务容量，支持任意启动顺序。
+///
+/// # Errors
+/// 服务或订阅器创建失败时返回 IPC 错误。
+pub fn subscribe(
+    node: &crate::node::IpcNode,
+) -> Result<crate::subscriber::Subscriber<VizMessage>, firefly_error::Error> {
+    subscribe_with_topic(node, VIZ_TOPIC).map_err(|error| error.with_context("topic", VIZ_TOPIC))
+}
+
+fn subscribe_with_topic(
+    node: &crate::node::IpcNode,
+    topic: &str,
+) -> Result<crate::subscriber::Subscriber<VizMessage>, firefly_error::Error> {
+    use firefly_error::{Error, ErrorKind};
+    let name = topic
+        .try_into()
+        .map_err(|e| Error::new(ErrorKind::InvalidArgument, format!("非法可视化话题：{e:?}")))?;
+    let service = node
+        .service_builder(&name)
+        .publish_subscribe::<VizMessage>()
+        .user_header::<crate::trace::TraceContext>()
+        .subscriber_max_buffer_size(VIZ_BUFFER_SIZE)
+        .open_or_create()
+        .map_err(|e| Error::new(ErrorKind::Internal, format!("打开可视化话题失败：{e:?}")))?;
+    let subscriber = service
+        .subscriber_builder()
+        .buffer_size(VIZ_BUFFER_SIZE)
+        .create()
+        .map_err(|e| Error::new(ErrorKind::Internal, format!("订阅可视化话题失败：{e:?}")))?;
+    Ok(crate::subscriber::Subscriber::from_inner(subscriber))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// 编译期断言：满足 iceoryx2 零拷贝约束。
     fn assert_zero_copy_send<T: ZeroCopySend>() {}
+
+    #[test]
+    fn subscriber_first_retains_keypoints_across_health_message_burst() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let topic = format!("Firefly/Test/Viz/{unique}");
+        let node = crate::node::create_node().unwrap();
+        let subscriber = subscribe_with_topic(&node, &topic).unwrap();
+        let publisher =
+            crate::publish::Publisher::with_topic_and_buffer(&node, &topic, Some(VIZ_BUFFER_SIZE))
+                .unwrap();
+        publisher
+            .publish(VizMessage::base(
+                kind::KEYPOINTS_2D,
+                1.0,
+                VIO_KEYPOINT_ENTITIES[0],
+            ))
+            .unwrap();
+        for _ in 0..20 {
+            publisher
+                .publish(VizMessage::base(kind::SCALARS, 1.0, "vio/debug/db_size"))
+                .unwrap();
+        }
+        let first = subscriber.receive().unwrap().expect("关键点快照");
+        assert_eq!(first.kind, kind::KEYPOINTS_2D);
+        drop(first);
+        let mut count = 0;
+        while subscriber.receive().unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 20);
+    }
 
     #[test]
     fn viz_message_is_plain_old_data() {

@@ -1,4 +1,4 @@
-//! 调试面板：右侧固定栏展示左/右 RGB、左/右灰度、深度。
+//! 调试面板：底栏展示左/右 RGB、左/右 VIO 跟踪图、深度。
 //!
 //! 布局（窗口 1280×720，视口由 [`layout_viewports`] 每帧按窗口尺寸与 DPI 重算）：
 //! ```text
@@ -9,8 +9,7 @@
 //! └───────────────────────────────┘
 //! ```
 //!
-//! 显示与发布同源（`link` 每节拍写入同一像素，显示侧只做 RGBA 展开），
-//! 所见即 VIO 所得。
+//! 显示与发布同源；灰度跟踪图与 VIO 结果按相机时间配对，标记仅写入显示副本。
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::{Camera, Viewport};
@@ -22,7 +21,7 @@ use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_SIZE, IMAGE_WIDTH};
 use firefly_render::camera::FollowCamera;
 
 /// 底部面板高度（像素）。
-const PANEL_HEIGHT: f32 = 170.0;
+const PANEL_HEIGHT: f32 = 184.0;
 /// 缩略图尺寸（像素，`320×240` 等比缩小）。
 const THUMB_WIDTH: f32 = 188.0;
 /// 缩略图高度（像素）。
@@ -106,7 +105,7 @@ pub fn layout_viewports(
     }
 }
 
-/// 装配调试面板（五行：两行 RGB/灰度缩略对 + 通栏深度）。
+/// 装配五列调试面板；左右 VIO 标题显示点数与配对图像时间。
 pub fn setup_panel(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let views = DebugViews {
         left_rgb: images.add(display_image()),
@@ -116,11 +115,15 @@ pub fn setup_panel(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         depth: images.add(display_image()),
     };
     let tiles = [
-        views.left_rgb.clone(),
-        views.right_rgb.clone(),
-        views.left_gray.clone(),
-        views.right_gray.clone(),
-        views.depth.clone(),
+        (views.left_rgb.clone(), "Left RGB", None),
+        (views.right_rgb.clone(), "Right RGB", None),
+        (views.left_gray.clone(), "L gray | waiting for VIO", Some(0)),
+        (
+            views.right_gray.clone(),
+            "R gray | waiting for VIO",
+            Some(1),
+        ),
+        (views.depth.clone(), "Depth", None),
     ];
     commands.insert_resource(views);
 
@@ -157,15 +160,36 @@ pub fn setup_panel(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             BackgroundColor(Color::srgb(0.05, 0.05, 0.07)),
         ))
         .with_children(|panel| {
-            for handle in tiles {
-                panel.spawn((
-                    ImageNode::new(handle),
-                    Node {
-                        width: Val::Px(THUMB_WIDTH),
-                        height: Val::Px(THUMB_HEIGHT),
+            for (handle, label, eye) in tiles {
+                panel
+                    .spawn(Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(4.0),
+                        flex_shrink: 0.0,
                         ..default()
-                    },
-                ));
+                    })
+                    .with_children(|tile| {
+                        let mut caption = tile.spawn((
+                            Text::new(label),
+                            TextFont {
+                                font_size: FontSize::Px(11.0),
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.85, 0.9, 0.9)),
+                        ));
+                        if let Some(eye) = eye {
+                            caption.insert(crate::keypoints::KeypointLabel(eye));
+                        }
+                        tile.spawn((
+                            ImageNode::new(handle),
+                            Node {
+                                width: Val::Px(THUMB_WIDTH),
+                                height: Val::Px(THUMB_HEIGHT),
+                                flex_shrink: 0.0,
+                                ..default()
+                            },
+                        ));
+                    });
             }
         });
 }
