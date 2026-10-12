@@ -234,8 +234,7 @@ fn run_loop(
             let query_outcome = query_once(session, &mut bindings, map, &feat, &odom, || {
                 sensors.is_stopped()
             });
-            let mut timing = firefly_pubsub::viz::VizMessage::base(
-                firefly_pubsub::viz::kind::SCALARS,
+            let mut timing = firefly_pubsub::viz::ScalarMessage::base(
                 feat.timestamp,
                 "vision/debug/map_query_wall_s",
             );

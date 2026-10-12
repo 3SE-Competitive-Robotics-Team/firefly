@@ -51,7 +51,7 @@ use firefly_pubsub::subscriber::{Received, Subscriber};
 /// 深度样本句柄：零拷贝持有，tick 消费 `&data` 后释放，无 300KB 全拷贝。
 type ReceivedDepth = Received<DepthImageMessage>;
 use firefly_pubsub::viz::{
-    ARROWS_MAX, POINTS_MAX, VIZ_TOPIC, VOXELS_MAX, VizMessage, VizPublisher, kind,
+    ARROWS_MAX, POINTS_MAX, VIZ_TOPIC, VOXELS_MAX, VizMessage, VizPublisher, VoxelMessage, kind,
 };
 use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetRunResult;
@@ -366,7 +366,7 @@ impl App {
         log::info!("状态源：Firefly/Navigation；等待地图系有效状态，失联后停止发布并锁存");
         // 可视化发布端：经 Firefly/Viz 话题发布，firefly-viz 进程统一写 rerun
         // （计算线程零 IO；创建失败只降级日志，规划链路不受影响）
-        let viz_pub = match VizPublisher::new(&node) {
+        let viz_pub = match VizPublisher::with_voxels(&node) {
             Ok(p) => {
                 log::info!("已打开话题 {VIZ_TOPIC}");
                 Some(p)
@@ -918,16 +918,14 @@ impl App {
     }
 
     /// 占据体素索引 → voxels 消息（体素中心 = 原点 + (idx+0.5)·尺寸，
-    /// Python 端 `VoxelGridMap` 直接镜像）。超限截断并告警一次（锁存防刷屏）。
+    /// Python 端在完整更新到达后构造 `VoxelGridMap`）。
     fn log_voxels(&mut self, entity: &str, indices: &[[i32; 3]], t: f64) {
         self.publish_voxel_delta(entity, indices, [0.1, 0.1, 0.1], [0.0, 0.0, 0.0], t, false);
     }
 
     /// 局部窗口内的占据体素索引（`center` 为空则全量栅格），附带网格尺寸与原点。
     ///
-    /// 局部窗口：以 `center` 为中心取 `local_update_range` 内的格子。全量栅格
-    /// （数万格）会超 `VOXELS_MAX` 被按遍历顺序截断，画出来是固定切片、看不出
-    /// 更新；只发窗口内的格子既不截断、又随飞机移动。
+    /// 局部窗口以 `center` 为中心取 `local_update_range` 内的格子，限制传输量。
     fn occupied_indices(
         map: &GridMap,
         center: Option<Vector3<f64>>,
@@ -958,8 +956,7 @@ impl App {
     }
 
     /// 体素层按**增量**发布：与上次发布的集合做差，只发新增/删除。首次发布、
-    /// `force_full` 或差集超单条消息上限时发全量快照——消费端以此替换集合，
-    /// 截断不会让两边分叉。
+    /// `force_full` 或差集超单条消息上限时发分块全量快照；消费端原子替换集合。
     fn publish_voxel_delta(
         &mut self,
         entity: &str,
@@ -1022,8 +1019,7 @@ impl App {
         }
     }
 
-    /// 发布一条体素消息；`indices` 超上限按遍历顺序截断并告警（消费端由周期性
-    /// 全量重同步纠正）。
+    /// 连续发布完整更新的所有分块；空快照通过一个空块表达。
     fn publish_voxels(
         &self,
         kind: u32,
@@ -1033,20 +1029,22 @@ impl App {
         origin: [f32; 3],
         t: f64,
     ) {
-        let mut msg = VizMessage::base(kind, t, entity);
-        msg.voxel_count = indices.len().min(VOXELS_MAX) as u32;
-        for (i, &[x, y, z]) in indices.iter().take(VOXELS_MAX).enumerate() {
-            msg.voxels[i] = [x, y, z];
+        let Some(publisher) = &self.viz_pub else {
+            return;
+        };
+        let chunks = indices.len().div_ceil(VOXELS_MAX).max(1);
+        for chunk in 0..chunks {
+            let begin = chunk * VOXELS_MAX;
+            let end = (begin + VOXELS_MAX).min(indices.len());
+            let mut msg = VoxelMessage::base(kind, t, entity);
+            msg.voxel_count = (end - begin) as u32;
+            msg.voxels[..end - begin].copy_from_slice(&indices[begin..end]);
+            msg.voxel_size = size;
+            msg.voxel_origin = origin;
+            msg.chunk_index = chunk as u32;
+            msg.chunk_count = chunks as u32;
+            let _ = publisher.publish(msg);
         }
-        msg.voxel_size = size;
-        msg.voxel_origin = origin;
-        if indices.len() > VOXELS_MAX {
-            log::warn!(
-                "{entity} 体素数 {} 超上限 {VOXELS_MAX}，已截断",
-                indices.len()
-            );
-        }
-        self.viz_publish(&msg);
     }
 
     /// `center` 周围 `local_update_range` 对应的窗口索引范围（闭区间，已裁剪

@@ -45,7 +45,7 @@ use firefly_pubsub::plant::{
 };
 use firefly_pubsub::reference::{REFERENCE_TOPIC, ReferenceMessage};
 use firefly_pubsub::subscriber::{CorrectedOdomSubscriber, OdomSubscriber, Subscriber};
-use firefly_pubsub::viz::{SCALARS_MAX, VizMessage, VizPublisher, kind};
+use firefly_pubsub::viz::{SCALARS_MAX, ScalarMessage, VizPublisher};
 use glam::{Quat, Vec3};
 use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 
@@ -580,7 +580,7 @@ fn pace(next: &mut Instant, period: Duration, stats: &mut Stats) {
 
 /// 发布一条标量可视化（10Hz；`values[..n]` 单实体多值）。
 fn publish_scalars(viz: &VizPublisher, t: f64, entity: &str, values: &[f64]) {
-    let mut msg = VizMessage::base(kind::SCALARS, t, entity);
+    let mut msg = ScalarMessage::base(t, entity);
     let count = values.len().min(SCALARS_MAX);
     msg.scalars[..count].copy_from_slice(&values[..count]);
     msg.scalar_count = count as u32;

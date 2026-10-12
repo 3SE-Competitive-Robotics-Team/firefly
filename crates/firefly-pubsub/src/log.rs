@@ -136,13 +136,9 @@ impl LogMessage {
     }
 }
 
-/// 同话题发布端上限（7 进程 + 工具链余量；服务首次创建时生效，
+/// 同话题发布端上限（7 进程 + 工具链余量），服务首次创建时生效，
 /// 见 [`crate::publish::Publisher::with_topic_buffer_publishers`]。
-/// 注：`max_publishers` 只在服务创建时生效——`firefly-viz` 聚合端先启动
-/// 预创建（`_precreate_log_service`，上限 10），Rust 发布端只 `open`
-/// 不创建；顺序反了（发布端先建，默认上限 2）即
-/// `DoesNotSupportRequestedAmountOfPublishers` 降级纯 stderr，
-/// 见 `firefly-viz/main.py` 的 runbook 注释）。
+/// 发布端与聚合端都使用相同容量；先启动聚合端才能记录启动阶段日志。
 pub const LOG_MAX_PUBLISHERS: usize = 10;
 
 /// 日志发布器（话题 [`LOG_TOPIC`]，泛型核心的命名封装）。

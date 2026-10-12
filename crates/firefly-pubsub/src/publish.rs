@@ -64,7 +64,7 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
     /// 指定（多发布端同话题，如 `Firefly/Log` 7 进程聚合，须 ≥ 发布端数）。
     /// 注：`max_publishers` 只在服务创建时生效；`open_or_create` 对已存在
     /// 服务做上限校验（后建 ≤ 先建，否则 `DoesNotSupportRequestedAmountOfPublishers`），
-    /// 故聚合服务必须由常驻先行者（`firefly-viz` `_precreate_log_service`）先创建。
+    /// 聚合服务由先启动的 `firefly-viz` 使用全量容量创建。
     ///
     /// # Errors
     /// Service/Publisher 创建失败（IPC 资源不可用等）。

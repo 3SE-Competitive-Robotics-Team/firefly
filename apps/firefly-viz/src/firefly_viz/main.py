@@ -1,440 +1,315 @@
-"""firefly-viz 主循环（CLI 入口，见 `firefly_viz.__init__` 文档）。
-
-运行方式：`uv run firefly-viz [--save out.rrd] [--serve]`。
-
-默认连接共享 rerun viewer（`127.0.0.1:9876`，需先启动 viewer）。
-`--serve` 启动内置 viewer；`--save path.rrd` 离线录制，与 --serve 互斥。
-
-线程模型：收/落盘分离（channel IPC + 落盘批处理）——
-- 收线程（主线程）：排空 `Firefly/Viz` + `Firefly/Log` 订阅，把消息
-  `put_nowait` 进有界队列（满即丢，日志语义，见 `QUEUE_MAX`），不做 rerun IO；
-- 落盘线程：`get` 阻塞消费，按（时间戳，序号）排序后批量 `rr.log`，
-  每批最多 `BATCH_MAX` 条或 `FLUSH_PERIOD` 超时刷一次。
-"""
+"""独立录制进程：有界 IPC 接收、诊断写入和媒体处理分别调度。"""
 
 from __future__ import annotations
 
 import argparse
-import logging
+from dataclasses import asdict
+from datetime import datetime, timezone
 import faulthandler
+import logging
+import json
+import math
+from pathlib import Path
 import queue
-import sys
+import signal
 import threading
 import time
-from pathlib import Path
+import uuid
 
 import iceoryx2 as iox2
-import numpy as np
 import rerun as rr
 
-from firefly_mujoco import LogMessage, TraceContext, load_scene_name
-
-from .messages import (
-    VIZ_KIND_ARROWS,
-    VIZ_KIND_BAR_CHART,
-    VIZ_KIND_CLEAR,
-    VIZ_KIND_KEYPOINTS_2D,
-    VIZ_KIND_LINE_STRIP,
-    VIZ_KIND_MATRIX,
-    VIZ_KIND_POSE,
-    VIZ_KIND_SCALARS,
-    VIZ_KIND_VOXELS,
-    VIZ_KIND_VOXELS_ADD,
-    VIZ_KIND_VOXELS_REMOVE,
-    VizMessage,
+from firefly_mujoco import (
+    DepthImageMessage, GrayImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH,
+    LogMessage, TraceContext, load_scene_name,
 )
 
-#: 话题名（与 Rust `firefly_pubsub::{viz::VIZ_TOPIC, log::LOG_TOPIC}` 一致）
-TOPIC_VIZ = "Firefly/Viz"
-TOPIC_LOG = "Firefly/Log"
-
-#: 共享 ApplicationId / RecordingId：各进程流合并为 viewer 单应用。
-APP_ID = "firefly"
-RECORDING_ID = "firefly-sim-loop"
-
-#: 订阅缓冲区深度：多实体（vio 4 条 + planner 5+ 条）10Hz 突发，防溢出丢帧
-VIZ_BUFFER_SIZE = 256
-#: 突发日志与 trace 诊断队列，与 Rust LOG_BUFFER_SIZE 一致。
-LOG_BUFFER_SIZE = 256
-
-#: 收/落盘队列上限：日志低频，1024 足够突发；满即丢（日志语义）。
-QUEUE_MAX = 1024
-#: 落盘批上限（条）：单批排序后写入，防长尾延迟。
-BATCH_MAX = 256
-#: 落盘刷盘周期（秒）：超时即刷，不足一批也写。
-FLUSH_PERIOD = 0.2
-
-#: 日志级别映射（Rust `firefly_pubsub::log::level` → rerun `TextLogLevel`）
-_LEVELS = {1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE"}
+from .capture import Capture
+from .config import ROOT, load
+from .messages import ScalarMessage, VizMessage, VoxelMessage
+from .recording import Recordings, URL
+from .video import Frame
+from .writer import Writer
 
 
 logger = logging.getLogger("firefly-viz")
-
-
-def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        prog="firefly-viz",
-        description="订阅 Firefly/Viz 话题，统一写 rerun viewer / rrd",
-    )
-    p.add_argument("--save", metavar="out.rrd", help="离线录制到 rrd 文件")
-    p.add_argument("--serve", action="store_true", help="本进程起内置 rerun viewer")
-    p.add_argument("--connect", metavar="URL", default=None, help="rerun viewer gRPC 地址（缺省 127.0.0.1:9876）")
-    return p.parse_args()
-
-
-def _open_recording(args: argparse.Namespace) -> None:
-    """初始化 rerun recording（app_id + recording_id 共享）并打开目标。
-
-    --save 优先，其次 --serve / --connect，否则连共享 viewer。
-    """
-    rr.init(APP_ID, recording_id=RECORDING_ID)
-    if args.save:
-        rr.save(args.save)
-        logger.info("离线录制到 %s", args.save)
-    elif args.serve:
-        rr.spawn(port=9876, connect=True)
-        logger.info("已启动内置 viewer 并连接（127.0.0.1:9876）")
-    elif args.connect:
-        rr.connect_grpc(args.connect)
-        logger.info("连接共享 viewer %s", args.connect)
-    else:
-        rr.connect_grpc("127.0.0.1:9876")
-        logger.info("连接共享 viewer 127.0.0.1:9876（需先起 `rerun`；或加 --serve）")
-
-
-def _send_default_blueprint() -> None:
-    """默认布局：场景 3D 视图 + 全部空间实体；sim_time 配 [最早, 游标] 可见
-    时间范围，viewer 端用 range 查询聚合全部历史增量段（增量写 + 全量显示，
-    对照 rerun 官方示例 line_strips3d_time_window）。"""
-    scene = rr.blueprint.Spatial3DView(
-        origin="/",
-        contents=["+ /**"],
-        time_ranges=[
-            rr.blueprint.VisibleTimeRange(
-                "sim_time",
-                start=rr.blueprint.TimeRangeBoundary.infinite(),
-                end=rr.blueprint.TimeRangeBoundary.cursor_relative(),
-            )
-        ],
-    )
-    # 时间面板锁定 `sim_time`（全链路统一时钟；不限则 viewer 默认落到
-    # `log_time`，轨迹实体不可见）+ 游标跟随最新（回放直接看到整条轨迹）。
-    time_panel = rr.blueprint.TimePanel(
-        timeline="sim_time",
-        play_state=rr.blueprint.components.PlayState.Following,
-    )
-    rr.send_blueprint(rr.blueprint.Blueprint(scene, time_panel))
-    logger.info("已发送默认布局（场景 3D，sim_time 全历史可见范围，时间面板锁定 sim_time）")
-
-
-#: 静态场景 mesh 实体（世界系，与仿真同原点同单位，见下）。
-ENTITY_SCENE_MESH = "world/rmuc2026"
-
-
-def _repo_root() -> Path:
-    """仓库根（`firefly_mujoco` 包位置反推，与启动 CWD 无关）。
-
-    `__init__.py` 的五级父目录：包 → `src` → 包发行目录 → `packages` → 根。
-    """
-    import firefly_mujoco
-
-    return Path(firefly_mujoco.__file__).resolve().parent.parent.parent.parent.parent
-
-
-def _log_static_mesh() -> None:
-    """记录 RMUC 视觉资产，世界系米，与物理场景共用原点。"""
-    load_scene_name()
-    mesh_path = _repo_root() / "models" / "rmuc2026" / "field.glb"
-    if not mesh_path.is_file():
-        raise FileNotFoundError(f"RMUC 视觉资产缺失：{mesh_path}")
-    rr.log(ENTITY_SCENE_MESH, rr.Asset3D(path=mesh_path), static=True)
-    logger.info("已记 RMUC 场景：%s", mesh_path)
+VIZ_BUFFER_SIZE = 256
+VIZ_MAX_PUBLISHERS = 8
+LOG_BUFFER_SIZE = 256
+LOG_MAX_PUBLISHERS = 10
+VOXEL_BUFFER_SIZE = 32
 
 
 def detach_copy(msg):
-    """复制 IPC loan 的全部字节；跨线程队列必须持有独立存储。"""
+    """IPC loan 归还前获得自有存储，不能把 ctypes 别名交给异步线程。"""
     return type(msg).from_buffer_copy(msg)
 
 
-#: 体素实体累计集合（增量协议：`VOXELS` 全量替换 / `_ADD` 并入 / `_REMOVE` 移除）。
-#: rrd 按时间索引，增量必须在这里先攒成全量再写，回放才与实时视图一致。
-_VOXEL_SETS: dict[str, set[tuple[int, int, int]]] = {}
+def _subscribe(node, topic, payload, capacity=VIZ_BUFFER_SIZE, publishers=VIZ_MAX_PUBLISHERS):
+    builder = node.service_builder(iox2.ServiceName.new(topic)).publish_subscribe(payload).user_header(TraceContext)
+    if capacity > 1:
+        builder = builder.subscriber_max_buffer_size(capacity)
+    if publishers is not None:
+        builder = builder.max_publishers(publishers)
+    return builder.open_or_create().subscriber_builder().buffer_size(capacity).create()
 
 
-def _log_voxels(entity: str, msg: VizMessage, kind: int) -> None:
-    """按增量协议维护体素实体集合并写 rerun。"""
-    n = msg.voxel_count
-    incoming = {(msg.voxels[i][0], msg.voxels[i][1], msg.voxels[i][2]) for i in range(n)}
-    if kind == VIZ_KIND_VOXELS:
-        voxels = _VOXEL_SETS[entity] = incoming
-    else:
-        voxels = _VOXEL_SETS.setdefault(entity, set())
-        if kind == VIZ_KIND_VOXELS_ADD:
-            voxels.update(incoming)
+class Continuity:
+    """每个 IPC 发布者的连续序号；有界记录发布者，丢诊断不能被当作采样。"""
+
+    def __init__(self, capacity):
+        self.capacity, self.last = capacity, {}
+
+    def observe(self, publisher, sequence):
+        if publisher in self.last:
+            if sequence != self.last[publisher] + 1:
+                raise ValueError(f"diagnostic sequence gap: publisher={publisher}, sequence={sequence}")
+        elif len(self.last) >= self.capacity:
+            raise ValueError("diagnostic publisher budget exceeded")
+        self.last[publisher] = sequence
+
+
+class Worker:
+    def __init__(self, name, capacity, consume, tick, finish, timeout):
+        self.inbox = queue.Queue(maxsize=capacity)
+        self.errors = queue.SimpleQueue()
+        self.failure = None
+        self.closing = threading.Event()
+        self.consume, self.tick, self.finish, self.timeout = consume, tick, finish, timeout
+        self.high_water = 0
+        self.thread = threading.Thread(target=self._run, name=name)
+        self.thread.start()
+
+    def _run(self):
+        try:
+            while True:
+                try:
+                    item = self.inbox.get(timeout=0.05)
+                except queue.Empty:
+                    if self.closing.is_set():
+                        break
+                    self.tick()
+                    continue
+                self.consume(item)
+                self.tick()
+        except Exception as error:
+            self.errors.put(error)
+        finally:
+            try:
+                self.finish()
+            except Exception as error:
+                self.errors.put(error)
+
+    def check(self):
+        if self.failure is None:
+            try:
+                self.failure = self.errors.get_nowait()
+            except queue.Empty:
+                pass
+        if self.failure is not None:
+            raise RuntimeError(f"{self.thread.name} failed: {self.failure}") from self.failure
+
+    def put(self, item):
+        self.check()
+        if self.closing.is_set():
+            raise RuntimeError(f"{self.thread.name} is closing")
+        self.inbox.put_nowait(item)
+        self.high_water = max(self.high_water, self.inbox.qsize())
+
+    def close(self):
+        # 唯一生产者已经停止；关闭信号不占队列容量，超时后也能继续排空退出。
+        self.closing.set()
+        if self.thread.is_alive():
+            self.thread.join(self.timeout)
+        if self.thread.is_alive():
+            raise RuntimeError(f"{self.thread.name} did not finish draining")
+        self.check()
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser(prog="firefly-viz", description="Record diagnostics and H.265; visualize in Rerun")
+    parser.add_argument("--config", type=Path, default=ROOT / "configs/viz.toml")
+    target = parser.add_mutually_exclusive_group()
+    target.add_argument("--save", type=Path, help="RRD path; with no viewer option, record offline")
+    target.add_argument("--no-save", action="store_true", help="Explicitly disable persistent recording")
+    viewer = parser.add_mutually_exclusive_group()
+    viewer.add_argument("--serve", action="store_true", help="Spawn native Rerun Viewer")
+    viewer.add_argument("--connect", metavar="URL", help="Connect to an existing Rerun Viewer")
+    return parser.parse_args()
+
+
+def run(args):
+    rr.set_strict_mode(True)
+    options = load(args.config)
+    url = args.connect or (URL if args.no_save or args.save is None else None)
+    path = args.save
+    if path is None and not args.no_save:
+        now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        path = ROOT / "logs" / f"{now}-{uuid.uuid4().hex[:8]}.rrd"
+    load_scene_name()
+    mesh = ROOT / "models/rmuc2026/field.glb"
+    drone = ROOT / "models/drone/drone.glb"
+    for asset in (mesh, drone):
+        if not asset.is_file():
+            raise FileNotFoundError(asset)
+    recordings = Recordings(path, url, args.serve, options)
+    workers = []
+    subscriptions = []
+    node = None
+    subscriber = None
+    cameras = []
+    stop, trigger = threading.Event(), threading.Event()
+    handlers = {}
+    errors = []
+    dropped_frames = 0
+    last_health = time.monotonic()
+    try:
+        recordings.archive.log("world/rmuc2026", rr.Asset3D(path=mesh), static=True, strict=True)
+        # 模型 +Y-up/+Z-forward → 机体 +Z-up/+X-forward，与 firefly-render::drone 一致。
+        model = rr.Asset3D(path=drone)
+        for parent in ("gt/pose", "vio/odom", "corr/odom", "plan/drone"):
+            recordings.archive.log(f"{parent}/model", model,
+                                   rr.Transform3D(quaternion=[0.5, 0.5, 0.5, 0.5]), static=True, strict=True)
+            recordings.archive.log(f"{parent}/forward", rr.Arrows3D(origins=[[0, 0, 0]],
+                                    vectors=[[0.15, 0, 0]], colors=[64, 255, 64]), static=True, strict=True)
+        recordings.diagnostic(f"recording={path}; config={args.config}; video={options.video.encoder if options.video.enabled else 'disabled'}")
+        recordings.archive.log("viz/config", rr.TextDocument(args.config.read_text()), static=True)
+        recordings.archive.log("viz/effective_config", rr.TextDocument(json.dumps(asdict(options), indent=2)), static=True)
+        node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
+        for sig, callback in ((signal.SIGINT, lambda *_: stop.set()), (signal.SIGTERM, lambda *_: stop.set()),
+                              (signal.SIGUSR1, lambda *_: trigger.set())):
+            handlers[sig] = signal.signal(sig, callback)
+        writer = Writer(recordings, options, trigger)
+        continuity = Continuity(options.capture.max_entities)
+        telemetry = Worker("viz-telemetry", options.telemetry_queue,
+                           lambda item: writer.log_text(item[1]) if item[0] == "log" else writer.handle(item[1]),
+                           writer.tick, lambda: writer.tick(final=True), options.shutdown_seconds)
+        workers.append(telemetry)
+        capture = Capture(recordings, options, trigger)
+        media = Worker("viz-media", options.capture.queue_frames, capture.handle, capture.tick,
+                       capture.close, options.shutdown_seconds + 4 * options.video.shutdown_seconds)
+        workers.append(media)
+        for kind, topic, cls, publishers, capacity in (
+            ("viz", "Firefly/VizScalars", ScalarMessage, VIZ_MAX_PUBLISHERS, VIZ_BUFFER_SIZE),
+            ("viz", "Firefly/Viz", VizMessage, VIZ_MAX_PUBLISHERS, VIZ_BUFFER_SIZE),
+            ("viz", "Firefly/VizVoxels", VoxelMessage, 1, VOXEL_BUFFER_SIZE),
+            ("log", "Firefly/Log", LogMessage, LOG_MAX_PUBLISHERS, LOG_BUFFER_SIZE),
+        ):
+            subscriptions.append((kind, _subscribe(node, topic, cls, capacity, publishers)))
+        for name, topic, cls in (("left", "CameraLeft", GrayImageMessage),
+                                  ("right", "CameraRight", GrayImageMessage), ("depth", "Depth", DepthImageMessage)):
+            cameras.append((name, _subscribe(node, f"Firefly/{topic}", cls, capacity=1, publishers=None)))
+        # 各目的地只在 Capture 中采样一次，避免不同频率的串联采样互相混叠。
+        needed = {
+            name: (name == "left" and options.video.enabled)
+            or (recordings.live is not None and options.capture.preview_hz > 0)
+            or getattr(options.capture, f"{name}_hz", 0) > 0 for name, _ in cameras
+        }
+        last_stamp = dict.fromkeys(needed, float("-inf"))
+        indices = dict.fromkeys(needed, 0)
+        retain_window = options.capture.before_frames > 0 or options.capture.after_frames > 0
+        logger.info("RRD: %s; SIGUSR1 captures a lossless window", path)
+        while not stop.is_set():
+            for worker in workers:
+                worker.check()
+            for kind, subscriber in subscriptions:
+                # 公平排空，连续高频日志不能饿死相机接收。
+                for _ in range(VIZ_BUFFER_SIZE):
+                    sample = subscriber.receive()
+                    if sample is None:
+                        break
+                    try:
+                        message = detach_copy(sample.payload().contents)
+                        try:
+                            if kind == "viz":
+                                continuity.observe(sample.header.publisher_id.value, message.sequence)
+                            telemetry.put((kind, message))
+                        finally:
+                            del message
+                    except queue.Full as error:
+                        recordings.health("telemetry/overflow", [1, telemetry.high_water])
+                        raise RuntimeError("telemetry queue overflow; recording is incomplete") from error
+                    finally:
+                        del sample
+            for name, subscriber in cameras:
+                sample = subscriber.receive()
+                if sample is None:
+                    continue
+                msg = None
+                try:
+                    msg = sample.payload().contents
+                    stamp = float(msg.timestamp)
+                    if not math.isfinite(stamp) or stamp < 0 or stamp <= last_stamp[name]:
+                        raise ValueError(f"{name}: invalid or regressed capture timestamp {stamp}")
+                    if (msg.width, msg.height) != (IMAGE_WIDTH, IMAGE_HEIGHT):
+                        raise ValueError(f"{name}: unexpected sensor resolution")
+                    if msg.sensor_id != (1 if name == "right" else 0):
+                        raise ValueError(f"{name}: unexpected sensor id")
+                    last_stamp[name] = stamp
+                    index = indices[name]
+                    indices[name] += 1
+                    if not retain_window and not needed[name]:
+                        continue
+                    if media.inbox.full():
+                        dropped_frames += 1
+                        continue
+                    media.put(Frame(name, stamp, index, msg.width, msg.height, bytes(msg.data)))
+                finally:
+                    del msg
+                    del sample
+            if time.monotonic() - last_health >= 1.0:
+                recordings.health("queues", [telemetry.inbox.qsize(), media.inbox.qsize(),
+                                             telemetry.high_water, dropped_frames])
+                last_health = time.monotonic()
+            stop.wait(0.001)
+    except Exception as error:
+        errors.append(error)
+        try:
+            recordings.diagnostic(f"recording incomplete: {error}", level="ERROR")
+        except Exception as diagnostic_error:
+            errors.append(diagnostic_error)
+    finally:
+        # 先排空诊断（可能触发截图），再排空媒体，最后关闭 Rerun sinks。
+        for worker in workers:
+            try:
+                worker.close()
+            except Exception as error:
+                errors.append(error)
+                logger.error("shutdown failed: %s", error)
+        try:
+            recordings.health("camera/dropped_before_processing", [dropped_frames])
+            recordings.diagnostic("recording incomplete" if errors else "producers drained; flushing recording", level="ERROR" if errors else "INFO")
+        except Exception as error:
+            errors.append(error)
+        alive = [worker.thread.name for worker in workers if worker.thread.is_alive()]
+        # Encoder 的子线程也可能在媒体 finish 失败后仍持有 sink。
+        if len(workers) == 2 and capture.encoder:
+            alive.extend(thread.name for thread in capture.encoder.threads if thread.is_alive())
+            if capture.encoder.process.poll() is None:
+                alive.append(f"ffmpeg pid={capture.encoder.process.pid}")
+        if alive:
+            errors.append(RuntimeError(f"cleanup incomplete; keeping sinks open for active writers: {alive}"))
         else:
-            voxels.difference_update(incoming)
-    size = list(msg.voxel_size)
-    translation = list(msg.voxel_origin)
-    if not voxels:
-        rr.log(entity, rr.Clear(recursive=True))
-        return
-    rr.log(entity, rr.VoxelGridMap(sorted(voxels), size, translation=translation))
+            try:
+                recordings.close()
+            except Exception as error:
+                errors.append(error)
+        subscriptions.clear()
+        # iceoryx 端口必须先于其节点释放。
+        cameras.clear()
+        subscriber = None
+        node = None
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+    if errors:
+        raise ExceptionGroup("firefly-viz recording failed", errors)
 
 
-def _entity(msg: VizMessage) -> str:
-    n = min(msg.entity_len, len(msg.entity))
-    return bytes(msg.entity[:n]).decode("utf-8", errors="replace")
-
-
-def _handle(msg: VizMessage, trace_id: str) -> None:
-    kind = msg.kind
-    entity = _entity(msg)
-    rr.set_time("sim_time", duration=msg.timestamp)
-
-    if kind == VIZ_KIND_POSE:
-        # 四元数 xyzw 分量顺序与 Rust JPL 一致，直接透传（rerun Quaternion 为 xyzw）
-        rr.log(
-            entity,
-            rr.Transform3D(
-                translation=[msg.xyz[0], msg.xyz[1], msg.xyz[2]],
-                quaternion=[msg.quat_xyzw[0], msg.quat_xyzw[1], msg.quat_xyzw[2], msg.quat_xyzw[3]],
-            ),
-        )
-    elif kind == VIZ_KIND_KEYPOINTS_2D:
-        n = min(msg.point_count, len(msg.points))
-        pts = np.array([[msg.points[i][0], msg.points[i][1]] for i in range(n)], dtype=np.float32).reshape(-1, 2)
-        ids = np.array([msg.points[i][2] for i in range(n)], dtype=np.uint64)
-        rr.log(entity, rr.Points2D(pts, colors=[[*msg.color, 255]], radii=2.0), rr.AnyValues(track_id=ids))
-    elif kind == VIZ_KIND_MATRIX:
-        rows, cols = msg.scalars[:2]
-        n = msg.point_count
-        if (msg.scalar_count != 2 or not np.isfinite([rows, cols]).all()
-                or rows <= 0 or cols <= 0 or rows != int(rows) or cols != int(cols)
-                or int(rows) * int(cols) != n or n > 3 * len(msg.points)):
-            logger.warning("无效矩阵载荷：%s", entity)
-            return
-        # Rerun 可异步持有数组；必须在归还 IPC 样本之前取得自有存储。
-        values = np.ctypeslib.as_array(msg.points).reshape(-1)[:n].copy()
-        rr.log(entity, rr.Tensor(values.reshape(int(rows), int(cols))))
-    elif kind == VIZ_KIND_LINE_STRIP:
-        n = msg.point_count
-        pts = [[msg.points[i][0], msg.points[i][1], msg.points[i][2]] for i in range(n)]
-        rr.log(entity, rr.LineStrips3D(strips=[pts], colors=[[*msg.color, 255]]))
-    elif kind in (VIZ_KIND_VOXELS, VIZ_KIND_VOXELS_ADD, VIZ_KIND_VOXELS_REMOVE):
-        _log_voxels(entity, msg, kind)
-    elif kind == VIZ_KIND_SCALARS:
-        n = msg.scalar_count
-        rr.log(entity, rr.Scalars([msg.scalars[i] for i in range(n)]))
-    elif kind == VIZ_KIND_BAR_CHART:
-        n = msg.bin_count
-        values = [float(msg.bins[i]) for i in range(n)]
-        # x 轴 bin 标注：首桶下界 bin_start、桶宽 bin_width（1 时等价于桶序号）
-        rr.log(entity, rr.BarChart(values, abscissa=_bin_abscissa(msg)))
-    elif kind == VIZ_KIND_ARROWS:
-        n = msg.arrow_count
-        origins = [[msg.arrow_origins[i][0], msg.arrow_origins[i][1], msg.arrow_origins[i][2]] for i in range(n)]
-        vectors = [[msg.arrow_vectors[i][0], msg.arrow_vectors[i][1], msg.arrow_vectors[i][2]] for i in range(n)]
-        rr.log(entity, rr.Arrows3D(vectors=vectors, origins=origins, colors=[[*msg.color, 255]]))
-    elif kind == VIZ_KIND_CLEAR:
-        rr.log(entity if entity else "/", rr.Clear(recursive=True))
-    else:
-        logger.warning("未知 kind %s（entity=%s，trace=%s），忽略", kind, entity, trace_id)
-
-
-def _bin_abscissa(msg: VizMessage) -> list[float]:
-    """BarChart 的 x 轴坐标：bin_start + k*bin_width。"""
-    n = msg.bin_count
-    return [msg.bin_start + k * msg.bin_width for k in range(n)]
-
-
-def _log_text(msg: LogMessage) -> None:
-    """结构化日志 → rerun `TextLog`（实体 `logs/<tag>`，持久可检索）。
-
-    时间轴规则（问答决议）：`sim_time >= 0` 落 `sim_time` 轴（与位姿同轴
-    对齐）；`< 0`（发布端尚无 sim 时钟，如 ORT 模型加载期）落墙钟轴
-    （`wall_secs + wall_nanos`，显式未对齐、可检索）。
-    """
-    n_tag = min(msg.tag_len, len(msg.tag))
-    tag = bytes(msg.tag[:n_tag]).decode("utf-8", errors="replace") or "unknown"
-    n_text = min(msg.text_len, len(msg.text))
-    text = bytes(msg.text[:n_text]).decode("utf-8", errors="replace")
-    level = _LEVELS.get(msg.log_level, "INFO")
-    if msg.sim_time >= 0:
-        rr.set_time("sim_time", duration=float(msg.sim_time))
-    else:
-        # 墙钟回落轴：`set_time(timeline, timestamp=...)` 取 unix 秒
-        #（纳秒值会被 rerun 误判为毫秒，见 `to_nanos_since_epoch` 校验）。
-        rr.set_time("wall_time", timestamp=float(msg.wall_secs) + float(msg.wall_nanos) * 1e-9)
-    rr.log(f"logs/{tag}", rr.TextLog(text, level=level))
-
-
-#: 可视化话题发布端上限（发布端 = vio + localization + planner 三家；iceoryx2 缺省
-#: 上限仅 2，第三家 `open` 必 `ExceedsMaxSupportedPublishers` 静默降级——
-#: 本进程先创建服务定上限，Rust 发布端只 open，见 `_subscribe`）。
-VIZ_MAX_PUBLISHERS = 8
-
-
-def _subscribe(node, topic: str, payload_cls, buffer_size: int = VIZ_BUFFER_SIZE):
-    builder = (
-        node.service_builder(iox2.ServiceName.new(topic))
-        .publish_subscribe(payload_cls)
-        .user_header(TraceContext)
-    )
-    if topic == TOPIC_VIZ:
-        # 高频突发话题：与 Rust 发布端一致（先启动方创建服务，
-        # 谁创建都要给出 256 上限，订阅端 buffer_size 才能匹配）；
-        # 发布端上限同步声明（见 `VIZ_MAX_PUBLISHERS`）。
-        builder = builder.subscriber_max_buffer_size(VIZ_BUFFER_SIZE)
-        try:
-            service = builder.max_publishers(VIZ_MAX_PUBLISHERS).open_or_create()
-        except Exception:
-            # 服务已被他方先建（上限非预期）：重建 builder 降级加入，不炸启动
-            #（上限不足时后到的发布端会降级，见各进程 `可视化发布不可用` warn）。
-            logger.info("Firefly/Viz 服务已存在，降级加入（发布端上限非预期）")
-            service = (
-                node.service_builder(iox2.ServiceName.new(topic))
-                .publish_subscribe(payload_cls)
-                .user_header(TraceContext)
-                .subscriber_max_buffer_size(VIZ_BUFFER_SIZE)
-                .open_or_create()
-            )
-        return service.subscriber_builder().buffer_size(buffer_size).create()
-    service = builder.open_or_create()
-    return service.subscriber_builder().buffer_size(buffer_size).create()
-
-
-#: 同话题发布端上限（与 Rust `firefly_pubsub::log::LOG_MAX_PUBLISHERS` 一致；
-#: 本进程先创建服务定上限，Rust 发布端只 open，见 `_subscribe_logs`）。
-LOG_MAX_PUBLISHERS = 10
-
-
-def _subscribe_logs(node):
-    """创建日志服务及订阅端；发布者容量与 Rust 的 LOG_MAX_PUBLISHERS 一致。"""
-    service = (
-        node.service_builder(iox2.ServiceName.new(TOPIC_LOG))
-        .publish_subscribe(LogMessage)
-        .user_header(TraceContext)
-        .max_publishers(LOG_MAX_PUBLISHERS)
-        .subscriber_max_buffer_size(LOG_BUFFER_SIZE)
-        .open_or_create()
-    )
-    return service.subscriber_builder().buffer_size(LOG_BUFFER_SIZE).create()
-
-
-def _writer_loop(inbox: queue.Queue) -> None:
-    """落盘线程：阻塞消费 → 按（时间戳，序号）排序 → 批量 `rr.log`。
-
-    第一元素的序号保证同时间戳多实体间的稳定顺序（`itertools.count`
-    单调递增，跨实体可比）；`FLUSH_PERIOD` 超时即刷，不足一批也写。
-    单条写入异常只记 stderr（落盘线程常驻，不因一条坏消息退出——
-    否则其后全部日志/可视化静默丢失）。
-    """
-    import itertools
-
-    seq = itertools.count()
-    buf: list = []
-    deadline = time.monotonic() + FLUSH_PERIOD
-    while True:
-        timeout = max(0.0, deadline - time.monotonic())
-        try:
-            item = inbox.get(timeout=timeout)
-            if item is None:  # 退出哨兵：排空残余后返回
-                break
-            kind, ts, payload = item
-            buf.append((ts, next(seq), kind, payload))
-            if len(buf) >= BATCH_MAX:
-                _flush_sorted(buf)
-                buf.clear()
-                deadline = time.monotonic() + FLUSH_PERIOD
-        except queue.Empty:
-            pass
-        except Exception:
-            logger.exception("writer 入队异常（跳过）")
-        if time.monotonic() >= deadline:
-            _flush_sorted(buf)
-            buf.clear()
-            deadline = time.monotonic() + FLUSH_PERIOD
-    _flush_sorted(buf)
-
-
-def _flush_sorted(buf: list) -> None:
-    for _, _, kind, payload in sorted(buf):
-        try:
-            if kind == "viz":
-                msg, trace_id = payload
-                _handle(msg, trace_id)
-            else:
-                _log_text(payload)
-        except Exception:  # noqa: BLE001 - 单条坏消息不杀落盘线程
-            logger.exception("writer 落盘异常（跳过本条）")
-
-
-def main() -> None:
-    # native 段错误时打 Python 栈（`rerun` 底层是 Rust，裸 `SIGSEGV` 否则无信息）。
+def main():
     logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
     faulthandler.enable()
-    args = _parse_args()
-    if args.save and args.serve:
-        sys.exit("[firefly-viz] --save 与 --serve 互斥，只能二选一")
     iox2.set_log_level(iox2.LogLevel.Error)
-    _open_recording(args)
-    _send_default_blueprint()
-    _log_static_mesh()
-    node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
-    viz_sub = _subscribe(node, TOPIC_VIZ, VizMessage)
-    # `Firefly/Log` 服务必须由本进程先创建（`max_publishers=10`，7 进程同话题
-    # 发布；iceoryx2 `open_or_create` 语义：先创建方定上限，后续 open 必须 ≤
-    # 该值——Rust 发布端只 `open` 不创建，见 `LogPublisher::new`）。
-    # 预创建返回的订阅端即本进程的 Log 订阅端（服务句柄由其持有，不另建）。
-    log_sub = _subscribe_logs(node)
-    logger.info("iceoryx2 已订阅 %s + %s（Rust 计算线程零 IO，统一写 rerun）", TOPIC_VIZ, TOPIC_LOG)
-    inbox: queue.Queue = queue.Queue(maxsize=QUEUE_MAX)
-    writer = threading.Thread(target=_writer_loop, args=(inbox,), name="firefly-viz-writer", daemon=True)
-    writer.start()
-    dropped = 0
-    try:
-        while True:
-            # 收线程：只排空订阅、进队，不做 rerun IO（落盘由 writer 线程批处理）
-            while (sample := viz_sub.receive()) is not None:
-                header = sample.user_header().contents
-                trace_id = f"{header.trace_id_hi:016x}{header.trace_id_lo:016x}"
-                # 队列持有独立副本，不能保留 IPC loan 的别名。
-                msg = detach_copy(sample.payload().contents)
-                if _enqueue(inbox, ("viz", float(msg.timestamp), (msg, trace_id))):
-                    dropped += 1
-            while (sample := log_sub.receive()) is not None:
-                msg = detach_copy(sample.payload().contents)
-                ts = float(msg.sim_time) if msg.sim_time >= 0 else float(msg.wall_secs) + float(msg.wall_nanos) * 1e-9
-                if _enqueue(inbox, ("log", ts, msg)):
-                    dropped += 1
-            # 拉模型：无新样本时让出 CPU（事件通知缺席时也不 busy-loop）
-            time.sleep(0.001)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        _stop_writer(inbox, writer)
-        rr.disconnect()
-        if dropped:
-            logger.info("退出（队列满丢弃 %s 条）", dropped)
-        else:
-            logger.info("退出")
-
-
-def _stop_writer(inbox: queue.Queue, writer: threading.Thread) -> None:
-    """退出哨兵排在所有已接收消息之后；超时必须报告录制未完成。"""
-    inbox.put(None, timeout=5.0)
-    writer.join(timeout=5.0)
-    if writer.is_alive():
-        raise RuntimeError("firefly-viz writer did not finish draining")
-
-
-def _enqueue(inbox: queue.Queue, item) -> bool:
-    """进队；队列满返回 `True`（调用方计数），落盘永不阻塞接收线程。"""
-    try:
-        inbox.put_nowait(item)
-    except queue.Full:
-        return True
-    return False
+    run(_parse_args())
 
 
 if __name__ == "__main__":

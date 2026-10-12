@@ -1,5 +1,5 @@
 //! 每帧滤波诊断：标量保留曲线语义，联合协方差与逐特征贡献打包为矩阵。
-use firefly_pubsub::viz::{VizMessage, VizPublisher, kind};
+use firefly_pubsub::viz::{ScalarMessage, VizMessage, VizPublisher};
 use firefly_vio::vio_manager::VioManager;
 
 pub fn publish(viz_pub: &VizPublisher, camera_time: f64, vio: &VioManager) {
@@ -39,7 +39,7 @@ pub fn publish(viz_pub: &VizPublisher, camera_time: f64, vio: &VioManager) {
             } else {
                 format!("{entity}/{part}")
             };
-            let mut msg = VizMessage::base(kind::SCALARS, vio.state.timestamp, &path);
+            let mut msg = ScalarMessage::base(vio.state.timestamp, &path);
             msg.scalars[..values.len()].copy_from_slice(values);
             msg.scalar_count = values.len() as u32;
             let _ = viz_pub.publish(msg);

@@ -1,57 +1,108 @@
-"""关键点 IPC → Rerun 的像素坐标、空帧与时间轴契约。"""
+"""图像与叠加按采集时间精确配对；丢帧和延迟不能复用旧点。"""
 
-import ctypes
+import threading
+from types import SimpleNamespace
 
+import pytest
 import rerun as rr
 
-from firefly_viz import main
-from firefly_viz.messages import VIZ_KIND_KEYPOINTS_2D, VizMessage
+from firefly_viz.config import Options
+from firefly_viz.messages import VIZ_KIND_KEYPOINTS_2D, VIZ_KIND_MATRIX, VizMessage
+from firefly_viz.recording import MatchedPoints
+from firefly_viz.writer import Writer
 
 
-def test_keypoints_preserve_camera_time_and_clear_empty_frames(monkeypatch):
-    calls = []
-    times = []
-    monkeypatch.setattr(main.rr, "log", lambda *args: calls.append(args))
-    monkeypatch.setattr(main.rr, "set_time", lambda *args, **kwargs: times.append((args, kwargs)))
+class Recording:
+    def __init__(self):
+        self.stamp = None
+        self.calls = []
+        self.timelines = {}
+        self.times = []
+
+    def reset_time(self):
+        self.stamp = None
+        self.timelines = {}
+
+    def set_time(self, name, **kwargs):
+        self.stamp = name, kwargs
+        self.timelines[name] = kwargs
+
+    def log(self, *args, **kwargs):
+        self.calls.append((self.stamp, args))
+        self.times.append(dict(self.timelines))
+
+
+def test_out_of_order_annotation_only_matches_its_image_and_missing_frames_are_empty():
+    rec = Recording()
+    pairs = MatchedPoints(rec, 2)
+    pairs.observe('left', 1., [[12.25, 41.5]], [42], [64, 255, 128])
+    assert not rec.calls
+    pairs.frame('left', 1.)
+    pairs.frame('left', 2.)
+    points = [(stamp, args[1]) for stamp, args in rec.calls if isinstance(args[1], rr.Points2D)]
+    assert points[0][0] == ('sim_time', {'duration': 1.})
+    assert points[0][1].positions.as_arrow_array().to_pylist() == [[12.75, 42.]]
+    assert points[1][1].positions.as_arrow_array().to_pylist() == []
+    pairs.observe('left', 2., [[1, 2]], [7], [255, 0, 0])
+    assert rec.calls[-2][0] == ('sim_time', {'duration': 2.})
+    pairs.frame('left', 3.)
+    before = len(rec.calls)
+    pairs.observe('left', 1., [[3, 4]], [8], [0, 0, 0])
+    assert len(rec.calls) == before
+    assert len(pairs.frames['left']) == 2
+    assert len(pairs.points['left']) == 2
+
+
+def test_matrix_owns_storage_and_rejects_invalid_shapes():
+    rec = Recording()
+    writer = Writer(SimpleNamespace(archive=rec, matches=MatchedPoints(rec, 4)), Options(), threading.Event())
     msg = VizMessage()
-    msg.kind = VIZ_KIND_KEYPOINTS_2D
-    entity = b"vio/debug/keypoints/left"
-    msg.entity_len = len(entity)
-    msg.entity[:len(entity)] = entity
-    msg.timestamp = 1.25
-    msg.point_count = 1
-    msg.points[0] = (ctypes.c_double * 3)(12.25, 41.5, 42.0)
-    msg.color = (ctypes.c_uint8 * 3)(64, 255, 128)
-    main._handle(msg, "")
-    assert calls[0][0] == entity.decode()
-    assert isinstance(calls[0][1], rr.Points2D)
-    assert calls[0][1].positions.as_arrow_array().to_pylist() == [[12.25, 41.5]]
-    assert calls[0][2].as_component_batches()[0].as_arrow_array().to_pylist() == [42]
-    assert times[0] == (("sim_time",), {"duration": 1.25})
-    msg.timestamp = 1.5
-    msg.point_count = 0
-    main._handle(msg, "")
-    assert calls[1][1].positions.as_arrow_array().to_pylist() == []
-
-
-def test_matrix_payload_preserves_shape_values_and_owns_storage(monkeypatch):
-    calls = []
-    monkeypatch.setattr(main.rr, "log", lambda *args: calls.append(args))
-    monkeypatch.setattr(main.rr, "set_time", lambda *args, **kwargs: None)
-    msg = VizMessage()
-    msg.kind = main.VIZ_KIND_MATRIX
+    name = b'vio/update/test'
+    msg.entity_len, msg.entity[:len(name)] = len(name), name
+    msg.kind = VIZ_KIND_MATRIX
+    msg.timestamp = 1.
     msg.scalar_count = 2
     msg.scalars[:2] = [2, 3]
     msg.point_count = 6
     msg.points[0][:] = [1, 2, 3]
     msg.points[1][:] = [4, 5, 6]
-    main._handle(msg, "")
+    writer.handle(msg)
     msg.points[0][0] = 999
-    data = calls[0][1].data.as_arrow_array().to_pylist()[0]
-    assert data["shape"] == [2, 3]
-    assert data["buffer"] == [1, 2, 3, 4, 5, 6]
-    for rows, cols, count in [(0, 3, 0), (2, 3, 5), (2.5, 2, 5), (float("nan"), 2, 6), (1000, 3, 3000)]:
-        msg.scalars[:2] = [rows, cols]
-        msg.point_count = count
-        main._handle(msg, "")
-    assert len(calls) == 1
+    data = rec.calls[0][1][1].data.as_arrow_array().to_pylist()[0]
+    assert data['shape'] == [2, 3]
+    assert data['buffer'] == [1, 2, 3, 4, 5, 6]
+    for rows, cols, count in [(0, 3, 0), (2, 3, 5), (2.5, 2, 5), (float('nan'), 2, 6)]:
+        msg.scalars[:2], msg.point_count = [rows, cols], count
+        with pytest.raises(ValueError, match='matrix'):
+            writer.handle(msg)
+
+
+def test_late_points_keep_original_video_index_and_do_not_cross_cameras():
+    rec = Recording()
+    pairs = MatchedPoints(rec, 4)
+    pairs.frame('left', 1.125, 8)
+    pairs.frame('left', 1.875, 11)
+    pairs.observe('right', 1.125, [[9, 9]], [12], [0, 0, 0])
+    assert len(rec.calls) == 4
+    pairs.observe('left', 1.125, [[2, 3]], [42], [64, 255, 128])
+    assert rec.times[-2] == {'sim_time': {'duration': 1.125}, 'left_frame': {'sequence': 8}}
+    assert rec.calls[-2][1][1].positions.as_arrow_array().to_pylist() == [[2.5, 3.5]]
+    before = len(rec.calls)
+    pairs.observe('left', 1.125000001, [[4, 5]], [43], [0, 0, 0])
+    assert len(rec.calls) == before
+
+
+def test_keypoint_resolution_mismatch_cannot_reach_overlay():
+    rec = Recording()
+    pairs = MatchedPoints(rec, 4)
+    writer = Writer(SimpleNamespace(archive=rec, matches=pairs), Options(), threading.Event())
+    msg = VizMessage()
+    name = b'vio/debug/keypoints/left'
+    msg.entity_len, msg.entity[:len(name)] = len(name), name
+    msg.kind, msg.timestamp = VIZ_KIND_KEYPOINTS_2D, 1.
+    msg.scalars[:3], msg.scalar_count = [640, 480, 1], 3
+    msg.points[0][:], msg.point_count = [12, 20, 1], 1
+    pairs.frame('left', 1., 3)
+    with pytest.raises(ValueError, match='resolution'):
+        writer.handle(msg)
+    assert not pairs.points['left']

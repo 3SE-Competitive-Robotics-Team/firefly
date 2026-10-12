@@ -6,7 +6,7 @@
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
-use bevy::camera::{Camera, ClearColorConfig, Exposure, Projection, RenderTarget};
+use bevy::camera::{Camera, Exposure, Projection, RenderTarget};
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::image::Image;
 use bevy::prelude::*;
@@ -14,10 +14,8 @@ use bevy::render::RenderApp;
 use bevy::render::extract_component::ExtractComponent;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::render::view::{Msaa, Tonemapping};
-use bevy::ui::IsDefaultUiCamera;
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_WIDTH};
 use firefly_pubsub::trace::TraceContext;
-use firefly_render::camera::FollowCamera;
 
 use crate::config::RenderConfig;
 
@@ -45,15 +43,6 @@ pub const SENSOR_FAR: f32 = 100.0;
 
 /// 场地 mesh 层：所有相机都渲染。
 pub const WORLD_LAYER: usize = 0;
-/// 机体模型层：两个 3D 视图都渲染（作为空间参照）；传感器相机位于机体内，
-/// 必须排除机体模型，否则自遮挡。
-pub const DRONE_LAYER: usize = 1;
-/// 仅体素视图渲染的数据层：传感器图像是 VIO/深度的输入，任何调试几何都必须
-/// 排除在这一层之外，否则会被当成真实场景写进发布数据。
-pub const VOXEL_LAYER: usize = 2;
-/// 规划路径（折线 gizmo）层：两个 3D 视图都渲染，便于真实场景与数据层对照。
-pub const PATH_LAYER: usize = 3;
-
 /// rig 相机标记（主世界→渲染世界的透传标记，见 [`crate::capture`]）。
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug, ExtractComponent)]
 #[extract_app(RenderApp)]
@@ -66,11 +55,7 @@ pub enum Eye {
     Depth,
 }
 
-/// 体素专用 3D 视图（只渲染 [`VOXEL_LAYER`]：体素 + 规划路径，不含真实场景）。
-#[derive(Component)]
-pub struct VoxelView;
-
-/// 位姿状态（`link` 每收到新真值写入，rig 相机与主视角跟随读取）。
+/// 位姿状态（`link` 每收到新真值写入，rig 相机读取）。
 #[derive(Resource, Default)]
 pub struct PoseState {
     /// 机体位置（世界系，米）。
@@ -142,7 +127,7 @@ pub fn sensor_target() -> Image {
     image
 }
 
-/// 装配 rig：三传感器相机（左/右/深度）+ 主视角跟随相机。
+/// 装配 rig：三传感器相机（左/右/深度）。
 // 系统参数按值传递（`SystemParam` 契约，见 `main.rs` 同类标注）。
 #[allow(clippy::needless_pass_by_value)]
 pub fn spawn_rig(
@@ -222,59 +207,30 @@ pub fn spawn_rig(
         eye_transform(pose.pos, pose.quat, DEPTH_OFFSET),
         DepthPrepass,
     ));
+}
 
-    // 主视角：相机配置缺省与传感器一致（曝光 `viewer_ev100` 缺省 = `sensor_ev100`），
-    // 只多机体层——它是这条链路的 debug 窗口，与发布图像同源观感。
-    commands.spawn((
-        Camera3d::default(),
-        Msaa::Off,
-        Tonemapping::Linear,
-        Exposure {
-            ev100: config.view.viewer_ev100(),
-        },
-        RenderLayers::from_layers(&[WORLD_LAYER, DRONE_LAYER, PATH_LAYER]),
-        env,
-        // 第三人称追踪（与 `apps/quad` 同一实现 `firefly-render`）；自由浏览模式下
-        // 让位给 `freecam::freecam_move`（见 `main.rs` 的运行条件）。
-        FollowCamera,
-        Transform::from_translation(
-            pose.pos
-                + Vec3::new(
-                    -firefly_render::camera::BACK,
-                    0.0,
-                    firefly_render::camera::UP,
-                ),
-        )
-        .looking_at(pose.pos, Vec3::Z),
-    ));
-
-    // UI 单独用一个铺满窗口的相机：主相机被 `layout_viewports` 限到左侧视口后，
-    // UI 的坐标空间会跟着缩到左半，面板的 `right: 0` 就落到窗口中间了。
-    // 体素专用视图：只渲染 `VOXEL_LAYER`（体素与规划路径），背景独立配色，
-    // 与真实场景并排但互不混淆。位姿由 `sync_voxel_view` 跟随主视角。
-    commands.spawn((
-        Camera3d::default(),
-        Camera {
-            clear_color: ClearColorConfig::Custom(Color::srgb(0.02, 0.02, 0.03)),
-            ..default()
-        },
-        Msaa::Off,
-        Tonemapping::Linear,
-        RenderLayers::from_layers(&[VOXEL_LAYER, DRONE_LAYER, PATH_LAYER]),
-        VoxelView,
-    ));
-
-    commands.spawn((
-        Camera2d,
-        Camera {
-            order: 1,
-            // 满窗相机默认会清屏；它在主 3D 相机之后渲染，清屏会把 3D 视图整个
-            // 擦成背景色（实测左侧全黑）。UI 相机只画 UI，不清屏。
-            clear_color: ClearColorConfig::None,
-            ..default()
-        },
-        IsDefaultUiCamera,
-    ));
+/// 从传感器几何唯一来源生成可视化标定；相机光学轴采用 RDF。
+#[must_use]
+pub fn camera_calibration(stamp: f64) -> [firefly_pubsub::viz::VizMessage; 3] {
+    use firefly_pubsub::viz::{VizMessage, kind};
+    let focal = (IMAGE_HEIGHT as f64 / 2.0) / (firefly_base::rig::FOV_Y_DEG.to_radians() / 2.0).tan();
+    let [cx, cy] = firefly_base::rig::principal_point(IMAGE_WIDTH, IMAGE_HEIGHT);
+    let rotation = cam_mount() * Quat::from_rotation_x(std::f32::consts::PI);
+    [
+        ("left", LEFT_OFFSET),
+        ("right", RIGHT_OFFSET),
+        ("depth", DEPTH_OFFSET),
+    ]
+    .map(|(name, offset)| {
+        let mut msg = VizMessage::base(kind::CAMERA, stamp, &format!("cameras/{name}"));
+        msg.xyz = offset.to_array().map(f64::from);
+        msg.quat_xyzw = rotation.to_array().map(f64::from);
+        msg.scalars = [focal, focal, cx, cy];
+        msg.scalar_count = 4;
+        msg.points[0] = [IMAGE_WIDTH as f64, IMAGE_HEIGHT as f64, 0.];
+        msg.point_count = 1;
+        msg
+    })
 }
 
 /// rig 相机摆位（纯函数：`poll_pose` 在同系统内调用，保证渲染用新变换出图）。
@@ -295,6 +251,21 @@ pub fn apply_pose_to_eyes(pose: &PoseState, eyes: &mut Query<(&Eye, &mut Transfo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::float_cmp)] // IPC 标定的直接字段拷贝要求精确相等。
+    fn rerun_calibration_uses_cv_axes_and_shared_intrinsics() {
+        let [left, right, depth] = camera_calibration(1.5);
+        for (message, offset) in [(left, LEFT_OFFSET), (right, RIGHT_OFFSET), (depth, DEPTH_OFFSET)] {
+            assert_eq!(message.xyz, offset.to_array().map(f64::from));
+            assert_eq!(message.points[0], [IMAGE_WIDTH as f64, IMAGE_HEIGHT as f64, 0.]);
+            let rotation = Quat::from_array(message.quat_xyzw.map(|v| v as f32));
+            let cv_point = Vec3::new(0.2, 0.3, 2.0);
+            let bevy_point = Vec3::new(cv_point.x, -cv_point.y, -cv_point.z);
+            assert!((rotation * cv_point - cam_mount() * bevy_point).length() < 1e-5);
+            assert_eq!(message.scalars[2..], [159.5, 119.5]);
+        }
+    }
 
     #[test]
     fn sensor_projection_matches_integer_pixel_centers() {

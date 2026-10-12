@@ -1,17 +1,8 @@
-//! 可视化消息（iceoryx2 zero-copy，Rust → `firefly-viz` Python 进程）。
-//!
-//! 单一话题 [`VIZ_TOPIC`] 承载全部可视化数据：计算线程（vio/planner）只做
-//! 零拷贝发布，rerun 写入统一由 Python 进程 `firefly-viz` 消费（计算线程
-//! 零 IO）。消息为**单一扁平结构体**——`kind` 区分消息类型，各类型字段平铺，
-//! 无效字段必须保持零值（iceoryx2 `ZeroCopySend` derive 拒绝 enum/union，
-//! 见 `iceoryx2-bb-derive-macros` 的 `zero_copy_send_compile_tests.rs`；
-//! Python 端以 `ctypes.Structure` 平铺镜像，见 `firefly_viz/messages.py`）。
-//!
-//! 布局约束：`#[repr(C)]` 定长、无堆指针、`'static`、无 `Drop`。总大小由
-//! 最大的体素数组决定（16384 体素 × 12B ≈ 192KB，与 `DepthImageMessage`
-//! 307KB 同量级，iceoryx2 共享内存无压力）。
+//! Rerun 数据出口：小型标量、空间诊断和体素分别使用有界 IPC 话题。
+//! 计算进程只发布测量时间与数值，录制策略及显示由 firefly-viz 持有。
 
 use iceoryx2::prelude::*;
+use std::cell::Cell;
 
 /// 统一可视化话题（Rust 发布端 → Python `firefly-viz` 订阅端）。
 pub const VIZ_TOPIC: &str = "Firefly/Viz";
@@ -34,7 +25,7 @@ pub mod kind {
     pub const BAR_CHART: u32 = 5;
     /// 3D 箭头（障碍平面法线、轨迹速度向量）。
     pub const ARROWS: u32 = 6;
-    /// 清除实体（空 entity 表示全清；当前无发布端，预留扩展点）。
+    /// 递归清除指定的非空实体路径。
     pub const CLEAR: u32 = 7;
     /// 图像像素坐标点集：`points = [u, v, track_id]`；`scalars = [宽, 高, 总点数]`。
     /// `point_count` 为实际携带点数，允许小于总数；空点集清除该帧标记。
@@ -42,11 +33,12 @@ pub mod kind {
     /// 数值矩阵：`scalars=[行数,列数]`，`points` 展平后为行主序元素，
     /// `point_count` 为元素数（上限 `3 * POINTS_MAX`）。
     pub const MATRIX: u32 = 11;
+    /// 固定相机标定：scalars=[fx,fy,cx,cy]，points[0]=[width,height,0]，pose 为 body←CV camera。
+    pub const CAMERA: u32 = 12;
 }
 
 /// VIO 左/右相机当前活动点；时间戳为原始相机时钟，不是滤波器时间。
-pub const VIO_KEYPOINT_ENTITIES: [&str; 2] =
-    ["vio/debug/keypoints/left", "vio/debug/keypoints/right"];
+pub const VIO_KEYPOINT_ENTITIES: [&str; 2] = ["vio/debug/keypoints/left", "vio/debug/keypoints/right"];
 
 /// 实体路径字节上限（64 字节，UTF-8；超出截断，见 [`VizMessage::set_entity`]）。
 pub const ENTITY_MAX: usize = 64;
@@ -58,8 +50,7 @@ pub const POINTS_MAX: usize = 512;
 /// 箭头数上限（256，起点 + 向量各一数组；轨迹速度箭头 100 采样点、障碍
 /// 平面法线均远小于此）。
 pub const ARROWS_MAX: usize = 256;
-/// 体素索引数上限（16384 × 12B = 192KB；感知地图 80×35×13=36400 体素全
-/// 占据是理论上限，实际数千——发布端超限截断并 `log::warn` 一次，锁存防刷屏）。
+/// 单个体素分块的索引数上限；完整更新可包含多个连续分块。
 pub const VOXELS_MAX: usize = 16_384;
 /// 直方图桶数上限（64；vio `track_length` 直方图 21 桶）。
 pub const BINS_MAX: usize = 64;
@@ -69,7 +60,7 @@ pub const SCALARS_MAX: usize = 4;
 /// 可视化消息（扁平 tagged-union：`kind` 区分类型，其余字段按类型取用）。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
-#[type_name("FireflyVizMessage")]
+#[type_name("FireflyVizMessageV2")]
 pub struct VizMessage {
     /// 消息类型（[`kind`] 常量）。
     pub kind: u32,
@@ -83,7 +74,7 @@ pub struct VizMessage {
     pub entity: [u8; ENTITY_MAX],
     /// 位置（pose）。
     pub xyz: [f64; 3],
-    /// 姿态四元数 xyzw（pose；JPL 分量顺序，与 `OdomMessage` 一致）。
+    /// Hamilton xyzw、机体→父坐标系；与 `OdomMessage` 的分量解释边界一致。
     pub quat_xyzw: [f64; 4],
     /// 折线或图像点集；`matrix` 复用其连续 f64 存储（见 [`kind::MATRIX`]）。
     pub points: [[f64; 3]; POINTS_MAX],
@@ -95,14 +86,6 @@ pub struct VizMessage {
     pub arrow_origins: [[f64; 3]; ARROWS_MAX],
     /// 箭头向量（arrows；`arrow_vectors[..arrow_count]`）。
     pub arrow_vectors: [[f64; 3]; ARROWS_MAX],
-    /// 体素索引（`[x, y, z]`，voxels；`voxels[..voxel_count]`）。
-    pub voxels: [[i32; 3]; VOXELS_MAX],
-    /// `voxels` 有效数。
-    pub voxel_count: u32,
-    /// 体素尺寸（米）。
-    pub voxel_size: [f32; 3],
-    /// 体素网格原点（世界坐标，米）。
-    pub voxel_origin: [f32; 3],
     /// 标量值或点集/矩阵元数据（`scalars[..scalar_count]`）。
     pub scalars: [f64; SCALARS_MAX],
     /// `scalars` 有效数。
@@ -115,10 +98,11 @@ pub struct VizMessage {
     pub bin_start: i64,
     /// 桶宽（`bar_chart`）。
     pub bin_width: i64,
+    /// 发布器内连续序号，用于检测订阅缓冲覆盖。
+    pub sequence: u64,
 }
 
 impl Default for VizMessage {
-    // 定长共享内存消息（约 217KB），大数组是设计使然
     #[allow(clippy::large_stack_arrays)]
     fn default() -> Self {
         Self {
@@ -134,23 +118,20 @@ impl Default for VizMessage {
             arrow_count: 0,
             arrow_origins: [[0.0; 3]; ARROWS_MAX],
             arrow_vectors: [[0.0; 3]; ARROWS_MAX],
-            voxels: [[0; 3]; VOXELS_MAX],
-            voxel_count: 0,
-            voxel_size: [0.0; 3],
-            voxel_origin: [0.0; 3],
             scalars: [0.0; SCALARS_MAX],
             scalar_count: 0,
             bins: [0; BINS_MAX],
             bin_count: 0,
             bin_start: 0,
             bin_width: 0,
+            sequence: 0,
         }
     }
 }
 
 impl VizMessage {
     /// 构造已设 `kind`/`timestamp`/`entity` 的默认实例（其余字段零值，
-    /// 按 kind 填充 payload 字段）。颜色默认白色，需配色时再覆写。
+    /// 按 kind 填充 payload 字段）。
     #[must_use]
     pub fn base(kind: u32, timestamp: f64, entity: &str) -> Self {
         let mut m = Self {
@@ -180,18 +161,7 @@ impl VizMessage {
 
     /// 设置实体路径（UTF-8，超长截断；内部以字符边界保护不切碎多字节序列）。
     pub fn set_entity(&mut self, entity: &str) {
-        let bytes = entity.as_bytes();
-        let mut n = bytes.len().min(ENTITY_MAX);
-        // 回退到合法字符边界：先退过续字节（0b10xxxxxx），若停在多字节序列
-        // 首字节（0b11xxxxxx）再退一位（该序列整体超出上限）
-        while n > 0 && (bytes[n - 1] & 0xC0) == 0x80 {
-            n -= 1;
-        }
-        if n > 0 && (bytes[n - 1] & 0xC0) == 0xC0 {
-            n -= 1;
-        }
-        self.entity[..n].copy_from_slice(&bytes[..n]);
-        self.entity_len = n as u32;
+        (self.entity, self.entity_len) = entity_bytes(entity);
     }
 
     /// 实体路径（按 `entity_len` 截断，非法 UTF-8 以替换符呈现）。
@@ -202,33 +172,205 @@ impl VizMessage {
     }
 }
 
-/// 可视化发布器（话题 [`VIZ_TOPIC`]，泛型核心的命名封装）。
-pub struct VizPublisher(pub(crate) crate::publish::Publisher<VizMessage>);
+/// 标量话题；每条消息固定 128 字节。
+pub const SCALAR_TOPIC: &str = "Firefly/VizScalars";
+/// 体素快照与增量话题。
+pub const VOXEL_TOPIC: &str = "Firefly/VizVoxels";
+/// 单一 planner 发布体素；独立缓冲限制大载荷的共享内存预算。
+pub const VOXEL_BUFFER_SIZE: usize = 32;
+/// 所有可视化话题允许的发布者数。
+pub const VIZ_MAX_PUBLISHERS: usize = 8;
+
+/// 不携带图像、点集或体素的标量载荷。
+#[repr(C)]
+#[derive(Debug, Clone, Copy, ZeroCopySend)]
+#[type_name("FireflyScalarMessage")]
+pub struct ScalarMessage {
+    pub kind: u32,
+    pub entity_len: u32,
+    pub timestamp: f64,
+    pub entity: [u8; ENTITY_MAX],
+    pub scalars: [f64; SCALARS_MAX],
+    pub scalar_count: u32,
+    pub sequence: u64,
+}
+
+impl ScalarMessage {
+    /// 构造指定实体和测量时刻的空标量消息。
+    #[must_use]
+    pub fn base(timestamp: f64, entity: &str) -> Self {
+        let (entity, entity_len) = entity_bytes(entity);
+        Self {
+            kind: kind::SCALARS,
+            entity_len,
+            timestamp,
+            entity,
+            scalars: [0.; SCALARS_MAX],
+            scalar_count: 0,
+            sequence: 0,
+        }
+    }
+}
+
+/// 体素有独立容量与通道，不放大标量和特征点消息。
+#[repr(C)]
+#[derive(Debug, Clone, Copy, ZeroCopySend)]
+#[type_name("FireflyVoxelMessage")]
+pub struct VoxelMessage {
+    pub kind: u32,
+    pub entity_len: u32,
+    pub timestamp: f64,
+    pub entity: [u8; ENTITY_MAX],
+    pub voxels: [[i32; 3]; VOXELS_MAX],
+    pub voxel_count: u32,
+    pub voxel_size: [f32; 3],
+    pub voxel_origin: [f32; 3],
+    /// 发布器内单调序号；接收端检测缺块、重启和乱序。
+    pub sequence: u64,
+    /// 本次同实体、同类型、同测量时刻更新的分块序号（从零开始）。
+    pub chunk_index: u32,
+    /// 本次更新的总分块数；空快照也发送一个空块。
+    pub chunk_count: u32,
+}
+
+impl VoxelMessage {
+    /// 构造一个空的单块更新；序号由发布器填写。
+    #[must_use]
+    #[allow(clippy::large_stack_arrays)]
+    pub fn base(kind: u32, timestamp: f64, entity: &str) -> Self {
+        let (entity, entity_len) = entity_bytes(entity);
+        Self {
+            kind,
+            entity_len,
+            timestamp,
+            entity,
+            voxels: [[0; 3]; VOXELS_MAX],
+            voxel_count: 0,
+            voxel_size: [0.; 3],
+            voxel_origin: [0.; 3],
+            sequence: 0,
+            chunk_index: 0,
+            chunk_count: 1,
+        }
+    }
+}
+
+fn entity_bytes(value: &str) -> ([u8; ENTITY_MAX], u32) {
+    let mut n = value.len().min(ENTITY_MAX);
+    while !value.is_char_boundary(n) {
+        n -= 1;
+    }
+    let mut bytes = [0; ENTITY_MAX];
+    bytes[..n].copy_from_slice(&value.as_bytes()[..n]);
+    (bytes, n as u32)
+}
+
+/// 按载荷类型路由至对应 IPC 话题，避免将小消息装入最大载荷的 enum。
+pub trait VizPayload {
+    /// # Errors
+    /// IPC 借出或发送失败。
+    fn publish_to(
+        self,
+        publisher: &VizPublisher,
+    ) -> Result<crate::trace::TraceContext, firefly_error::Error>;
+}
+
+/// 小型诊断发布器；只有显式启用体素的 planner 分配大载荷发布缓冲。
+pub struct VizPublisher {
+    geometry: crate::publish::Publisher<VizMessage>,
+    scalars: crate::publish::Publisher<ScalarMessage>,
+    voxels: Option<crate::publish::Publisher<VoxelMessage>>,
+    voxel_sequence: Cell<u64>,
+    geometry_sequence: Cell<u64>,
+    scalar_sequence: Cell<u64>,
+}
 
 impl VizPublisher {
-    /// 打开统一可视化话题的发布器（服务 `subscriber_max_buffer_size` = 256，
-    /// 防多实体 10Hz 突发溢出；订阅端 `buffer_size` 不得超过该值）。
-    ///
     /// # Errors
-    /// 见 [`crate::publish::Publisher::with_topic_and_buffer`]。
+    /// 任一服务或发布端创建失败。
     pub fn new(node: &crate::node::IpcNode) -> Result<Self, firefly_error::Error> {
-        Ok(Self(crate::publish::Publisher::with_topic_and_buffer(
-            node,
-            VIZ_TOPIC,
-            Some(VIZ_BUFFER_SIZE),
-        )?))
+        use crate::publish::Publisher;
+        Ok(Self {
+            geometry: Publisher::with_topic_buffer_publishers(
+                node,
+                VIZ_TOPIC,
+                Some(VIZ_BUFFER_SIZE),
+                Some(VIZ_MAX_PUBLISHERS),
+            )?,
+            scalars: Publisher::with_topic_buffer_publishers(
+                node,
+                SCALAR_TOPIC,
+                Some(VIZ_BUFFER_SIZE),
+                Some(VIZ_MAX_PUBLISHERS),
+            )?,
+            voxels: None,
+            voxel_sequence: Cell::new(0),
+            geometry_sequence: Cell::new(0),
+            scalar_sequence: Cell::new(0),
+        })
     }
 
-    /// 发布一条可视化消息（trace 上下文自动注入，见
-    /// [`crate::publish::Publisher::publish`]）。
+    /// 打开诊断与单发布者体素通道。
     ///
     /// # Errors
-    /// 见 [`crate::publish::Publisher::publish`]。
+    /// 任一服务或发布端创建失败。
+    pub fn with_voxels(node: &crate::node::IpcNode) -> Result<Self, firefly_error::Error> {
+        let mut publisher = Self::new(node)?;
+        publisher.voxels = Some(crate::publish::Publisher::with_topic_buffer_publishers(
+            node,
+            VOXEL_TOPIC,
+            Some(VOXEL_BUFFER_SIZE),
+            Some(1),
+        )?);
+        Ok(publisher)
+    }
+
+    /// 发布失败记入结构化日志；诊断链路不得阻塞算法。
+    /// # Errors
+    /// IPC 借出或发送失败。
     pub fn publish(
         &self,
-        msg: VizMessage,
+        msg: impl VizPayload,
     ) -> Result<crate::trace::TraceContext, firefly_error::Error> {
-        self.0.publish(msg)
+        let result = msg.publish_to(self);
+        if let Err(error) = &result {
+            log::warn!("可视化 IPC 发布失败: {error}");
+        }
+        result
+    }
+}
+
+impl VizPayload for VizMessage {
+    fn publish_to(
+        mut self,
+        publisher: &VizPublisher,
+    ) -> Result<crate::trace::TraceContext, firefly_error::Error> {
+        self.sequence = publisher.geometry_sequence.get();
+        publisher.geometry_sequence.set(self.sequence.wrapping_add(1));
+        publisher.geometry.publish(self)
+    }
+}
+impl VizPayload for ScalarMessage {
+    fn publish_to(
+        mut self,
+        publisher: &VizPublisher,
+    ) -> Result<crate::trace::TraceContext, firefly_error::Error> {
+        self.sequence = publisher.scalar_sequence.get();
+        publisher.scalar_sequence.set(self.sequence.wrapping_add(1));
+        publisher.scalars.publish(self)
+    }
+}
+impl VizPayload for VoxelMessage {
+    fn publish_to(
+        mut self,
+        publisher: &VizPublisher,
+    ) -> Result<crate::trace::TraceContext, firefly_error::Error> {
+        let voxels = publisher.voxels.as_ref().ok_or_else(|| {
+            firefly_error::Error::new(firefly_error::ErrorKind::InvalidArgument, "体素通道未启用")
+        })?;
+        self.sequence = publisher.voxel_sequence.get();
+        publisher.voxel_sequence.set(self.sequence.wrapping_add(1));
+        voxels.publish(self)
     }
 }
 
@@ -253,6 +395,7 @@ fn subscribe_with_topic(
     let service = node
         .service_builder(&name)
         .publish_subscribe::<VizMessage>()
+        .max_publishers(VIZ_MAX_PUBLISHERS)
         .user_header::<crate::trace::TraceContext>()
         .subscriber_max_buffer_size(VIZ_BUFFER_SIZE)
         .open_or_create()
@@ -283,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn subscriber_first_retains_keypoints_across_health_message_burst() {
+    fn subscriber_first_retains_geometry_burst() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -303,7 +446,7 @@ mod tests {
             .unwrap();
         for _ in 0..20 {
             publisher
-                .publish(VizMessage::base(kind::SCALARS, 1.0, "vio/debug/db_size"))
+                .publish(VizMessage::base(kind::POSE, 1.0, "vio/odom"))
                 .unwrap();
         }
         let first = subscriber.receive().unwrap().expect("关键点快照");
@@ -319,11 +462,11 @@ mod tests {
     #[test]
     fn viz_message_is_plain_old_data() {
         assert_zero_copy_send::<VizMessage>();
-        // 定长布局（8 字节对齐）：4(kind)+4(len)+3(color)+1(pad)+8(ts)+
-        // 64(entity)+24(xyz)+32(quat)+12288(points)+4+4+6144(origins)+
-        // 6144(vectors)+196608(voxels)+4+12+12+32(scalars)+4+4(pad)+
-        // 512(bins)+4+4(pad)+8+8 = 221944
-        assert_eq!(std::mem::size_of::<VizMessage>(), 221_944);
+        assert_eq!(std::mem::size_of::<VizMessage>(), 25_312);
+        assert_eq!(std::mem::size_of::<ScalarMessage>(), 128);
+        assert_eq!(std::mem::size_of::<VoxelMessage>(), 196_736);
+        assert_zero_copy_send::<ScalarMessage>();
+        assert_zero_copy_send::<VoxelMessage>();
         let m = VizMessage::default();
         assert_eq!(m.kind, 0);
         assert!((m.timestamp + 1.0).abs() < 1e-9);
@@ -365,11 +508,9 @@ mod tests {
         assert!(m.points.iter().all(|p| p == &[0.0; 3]));
         assert!(m.arrow_origins.iter().all(|p| p == &[0.0; 3]));
         assert!(m.arrow_vectors.iter().all(|p| p == &[0.0; 3]));
-        assert!(m.voxels.iter().all(|v| v == &[0; 3]));
         assert!(m.bins.iter().all(|&b| b == 0));
         assert_eq!(m.point_count, 0);
         assert_eq!(m.arrow_count, 0);
-        assert_eq!(m.voxel_count, 0);
         assert_eq!(m.scalar_count, 0);
         assert_eq!(m.bin_count, 0);
     }

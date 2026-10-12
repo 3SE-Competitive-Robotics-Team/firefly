@@ -17,8 +17,8 @@
 //! - [`goal`]：`GoalMessage`——外部工具发布的飞行目标（动态重目标入口）；
 //! - [`command`]：`CommandMessage`——外部工具发布的地面站指令（解锁/起飞/保持/
 //!   跟踪/降落/上锁，按序号去重）；
-//! - [`viz`]：`VizMessage`——统一可视化消息（Rust 计算线程零 IO，经
-//!   `Firefly/Viz` 话题由 `firefly-viz` Python 进程统一写 rerun）；
+//! - [`viz`]：标量、空间诊断与体素分流，Rust 计算线程经 IPC 发布，
+//!   `firefly-viz` Python 进程统一写入 Rerun；
 //! - [`vision`]：`FeatureMessage`/`PoseObservation`——视觉定位消息
 //!   （特征与位姿观测分离，融合核保持传感器无关）；
 //! - [`publish`]/[`subscriber`]：泛型发布/订阅端（自动注入/续接 trace 上下文）；

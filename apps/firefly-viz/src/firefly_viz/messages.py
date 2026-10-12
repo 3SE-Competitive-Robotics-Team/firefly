@@ -22,6 +22,7 @@ VIZ_KIND_VOXELS_ADD = 8
 VIZ_KIND_VOXELS_REMOVE = 9
 VIZ_KIND_KEYPOINTS_2D = 10
 VIZ_KIND_MATRIX = 11
+VIZ_KIND_CAMERA = 12
 
 #: 定长数组上限（与 Rust `viz.rs` 常量一致）
 ENTITY_MAX = 64
@@ -33,7 +34,7 @@ SCALARS_MAX = 4
 
 
 class VizMessage(ctypes.Structure):
-    """统一可视化消息：与 Rust `VizMessage`（`FireflyVizMessage`）布局一致。
+    """空间诊断消息：与 Rust `VizMessage`（`FireflyVizMessageV2`）布局一致。
 
     字段顺序与 `#[repr(C)]` 完全对应（含隐式 padding），
     `sizeof` 自检见 [`_self_check`]。
@@ -53,29 +54,63 @@ class VizMessage(ctypes.Structure):
         ("arrow_count", ctypes.c_uint32),
         ("arrow_origins", (ctypes.c_double * 3) * ARROWS_MAX),
         ("arrow_vectors", (ctypes.c_double * 3) * ARROWS_MAX),
-        ("voxels", (ctypes.c_int32 * 3) * VOXELS_MAX),
-        ("voxel_count", ctypes.c_uint32),
-        ("voxel_size", ctypes.c_float * 3),
-        ("voxel_origin", ctypes.c_float * 3),
         ("scalars", ctypes.c_double * SCALARS_MAX),
         ("scalar_count", ctypes.c_uint32),
         ("bins", ctypes.c_uint64 * BINS_MAX),
         ("bin_count", ctypes.c_uint32),
         ("bin_start", ctypes.c_int64),
         ("bin_width", ctypes.c_int64),
+        ("sequence", ctypes.c_uint64),
     ]
 
     @staticmethod
     def type_name() -> str:
-        return "FireflyVizMessage"
+        return "FireflyVizMessageV2"
 
 
 def _self_check() -> None:
     """布局自检：与 Rust 侧 `viz_message_is_plain_old_data` 断言一致。"""
-    assert ctypes.sizeof(VizMessage) == 221944, ctypes.sizeof(VizMessage)
+    assert ctypes.sizeof(VizMessage) == 25312, ctypes.sizeof(VizMessage)
     # kind 常量与 Rust `viz::kind` 一致
     assert VIZ_KIND_ARROWS == 6
     assert VIZ_KIND_CLEAR == 7
 
 
 _self_check()
+
+
+class ScalarMessage(ctypes.Structure):
+    """Firefly/VizScalars，与 Rust ScalarMessage 一致。"""
+    _pack_ = 8
+    _fields_ = [
+        ("kind", ctypes.c_uint32), ("entity_len", ctypes.c_uint32),
+        ("timestamp", ctypes.c_double), ("entity", ctypes.c_uint8 * ENTITY_MAX),
+        ("scalars", ctypes.c_double * SCALARS_MAX), ("scalar_count", ctypes.c_uint32),
+        ("sequence", ctypes.c_uint64),
+    ]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflyScalarMessage"
+
+
+class VoxelMessage(ctypes.Structure):
+    """Firefly/VizVoxels，全量替换或有序增量。"""
+    _pack_ = 8
+    _fields_ = [
+        ("kind", ctypes.c_uint32), ("entity_len", ctypes.c_uint32),
+        ("timestamp", ctypes.c_double), ("entity", ctypes.c_uint8 * ENTITY_MAX),
+        ("voxels", (ctypes.c_int32 * 3) * VOXELS_MAX),
+        ("voxel_count", ctypes.c_uint32), ("voxel_size", ctypes.c_float * 3),
+        ("voxel_origin", ctypes.c_float * 3),
+        ("sequence", ctypes.c_uint64),
+        ("chunk_index", ctypes.c_uint32), ("chunk_count", ctypes.c_uint32),
+    ]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflyVoxelMessage"
+
+
+assert ctypes.sizeof(ScalarMessage) == 128
+assert ctypes.sizeof(VoxelMessage) == 196736

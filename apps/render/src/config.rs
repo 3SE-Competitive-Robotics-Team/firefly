@@ -37,34 +37,22 @@ impl Default for LightConfig {
     }
 }
 
-/// 相机曝光配置（传感器 rig 与主视角各一份，主视角缺省同值）。
+/// 传感器相机曝光配置。
 #[derive(Deserialize, Serialize, Clone, Copy, Debug)]
 pub struct ViewConfig {
     /// 传感器相机曝光 EV100（越大越暗）。
     #[serde(default = "default_sensor_ev100")]
     pub sensor_ev100: f32,
-    /// 主视角曝光 EV100（缺省 = `sensor_ev100`）。
-    #[serde(default)]
-    pub ev100: Option<f32>,
 }
 
 fn default_sensor_ev100() -> f32 {
     DEFAULT_SENSOR_EV100
 }
 
-impl ViewConfig {
-    /// 主视角曝光（未显式配置时与传感器一致）。
-    #[must_use]
-    pub fn viewer_ev100(&self) -> f32 {
-        self.ev100.unwrap_or(self.sensor_ev100)
-    }
-}
-
 impl Default for ViewConfig {
     fn default() -> Self {
         Self {
             sensor_ev100: DEFAULT_SENSOR_EV100,
-            ev100: None,
         }
     }
 }
@@ -118,14 +106,6 @@ impl Default for EnvConfig {
     }
 }
 
-/// 体素显示配置。
-#[derive(Deserialize, Clone, Debug, Default)]
-#[serde(default)]
-pub struct VoxelsConfig {
-    /// 静态场地 `.ffmap` 路径（相对仓库根；缺文件则静态层不显示）。
-    pub field_map: Option<String>,
-}
-
 /// `configs/render.toml` 顶层：场景光照、相机曝光与深度退化。
 #[derive(Resource, Deserialize, Clone, Debug, Default)]
 pub struct RenderConfig {
@@ -141,9 +121,6 @@ pub struct RenderConfig {
     /// 深度传感器退化模型。
     #[serde(default)]
     pub depth_noise: crate::depth_noise::DepthNoiseOptions,
-    /// 体素显示（静态场地 + 实时感知）。
-    #[serde(default)]
-    pub voxels: VoxelsConfig,
 }
 
 /// 读 `configs/render.toml`；缺文件/解析失败即报错退出。
@@ -209,11 +186,10 @@ impl RenderConfig {
 mod tests {
     use super::*;
     #[test]
-    fn asset_contract_excludes_online_noise_and_viewer_but_tracks_sensor_exposure() {
+    fn asset_contract_excludes_online_noise_but_tracks_sensor_exposure() {
         let mut config = RenderConfig::default();
         let original = toml::to_string(&config.asset_contract()).unwrap();
         config.depth_noise.temporal_fraction = 0.5;
-        config.view.ev100 = Some(14.);
         assert_eq!(original, toml::to_string(&config.asset_contract()).unwrap());
         config.view.sensor_ev100 += 1.;
         assert_ne!(original, toml::to_string(&config.asset_contract()).unwrap());

@@ -1,24 +1,9 @@
 # firefly-viz
 
-rerun 统一写入进程：订阅 iceoryx2 `Firefly/Viz` 话题，把可视化数据写入
-共享 rerun viewer（默认 `127.0.0.1:9876`）或离线 rrd 文件。
+独立 Python 调试数据进程：订阅诊断与传感器 IPC，保存标量、H.265 左目视频、
+采样图像及事件无损窗口，使用 Rerun Viewer 展示。实时 static 预览与持久录制分流，
+接收、写入、编码队列有界；叠加信息不烧进视频。
 
-Rust 计算线程（vio/planner）零 IO——经 `Firefly/Viz` 话题零拷贝发布
-`VizMessage`，由本进程统一写 rerun（blueprint、时间轴、录制全部收归
-Python 端）。
-
-## 运行
-
-```bash
-# 先起共享 viewer（多进程共用）
-rerun
-
-# 连共享 viewer
-uv run firefly-viz
-
-# 离线录制
-uv run firefly-viz --save logs/run.rrd
-
-# 由本进程起内置 viewer
-uv run firefly-viz --serve
-```
+配置入口为 [`configs/viz.toml`](../../configs/viz.toml)。启动、依赖、信号触发与验证见
+[开发指南](../../docs/development.md#diagnostics)，数据模型与职责见
+[系统架构](../../docs/architecture.md#诊断记录与展示)。

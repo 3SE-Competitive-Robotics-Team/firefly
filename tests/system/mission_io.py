@@ -5,7 +5,7 @@ import time
 
 import iceoryx2 as iox2
 from firefly_mujoco import LogMessage, TraceContext, ReferenceMessage
-from firefly_viz.messages import VizMessage
+from firefly_viz.messages import ScalarMessage, VizMessage
 
 
 
@@ -21,11 +21,15 @@ def service(node, topic, cls, capacity=None, publishers=None):
 class Recorder:
     def __init__(self, node):
         self.viz = service(node, "Firefly/Viz", VizMessage, 256, 8).publisher_builder().create()
+        self.scalar_pub = service(node, "Firefly/VizScalars", ScalarMessage, 256, 8).publisher_builder().create()
         self.logs = service(node, "Firefly/Log", LogMessage, capacity=256, publishers=10).publisher_builder().create()
+        self.sequence = {4: 0, 1: 0}
 
     def message(self, kind, entity, stamp):
-        msg = VizMessage()
+        msg = ScalarMessage() if kind == 4 else VizMessage()
         msg.kind, msg.timestamp = kind, stamp
+        msg.sequence = self.sequence[kind]
+        self.sequence[kind] += 1
         raw = entity.encode()
         if len(raw) > 64:
             raise ValueError("entity path too long")
@@ -35,7 +39,7 @@ class Recorder:
     def scalars(self, entity, stamp, values):
         msg = self.message(4, entity, stamp)
         msg.scalars[:len(values)], msg.scalar_count = values, len(values)
-        self.viz.loan_uninit().write_payload(msg).send()
+        self.scalar_pub.loan_uninit().write_payload(msg).send()
 
     def pose(self, entity, stamp, position, quaternion):
         msg = self.message(1, entity, stamp)

@@ -1,7 +1,7 @@
 [project]
 name = "firefly-viz"
 version = "0.1.0"
-description = "rerun 统一写入进程：订阅 Firefly/Viz 话题，写共享 viewer 或离线 rrd"
+description = "独立 Rerun 调试进程：诊断、H.265 左目视频、采样与事件窗口"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

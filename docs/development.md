@@ -50,7 +50,9 @@ purecv 使用 `XiaoPengYouCode/purecv` fork，锁定版本见 Cargo.lock，发�
 只支持 `configs/scene.toml` 指定的 RMUC2026。必须有 `models/rmuc2026/field.glb`、
 `rmuc2026_collision.json` 和 `models/drone/drone.glb`，缺失报错，不回退场景。
 停机坪定义来自 `firefly_mujoco.scene.PAD` / `PAD_CLEARANCE`，不在文档复制坐标。
-运行需图形会话；Rust/Python 版本和依赖以 workspace 配置为准。
+render 使用无窗口 GPU 渲染；Rerun 原生 Viewer 需要图形会话。Rust/Python 版本和依赖
+以 workspace 配置为准。视频记录依赖外部 FFmpeg、所选编码器和 GPU 用户态驱动；
+默认走 Intel VA-API，设备与编码选项见 `configs/viz.toml`。仅列出编码器并不证明驱动可用。
 
 ```bash
 uv sync --all-packages --extra test
@@ -145,13 +147,20 @@ T16 为 64 维，无法直接使用官方 ALIKED LightGlue 权重。导出保留
 ## 记录与性能
 
 正式运行原始证据只写 `logs/*.rrd`，不写文本日志或 `/tmp`；JSON/HTML 只存配置、
-内容指纹和汇总。Rust 计算线程经 `Firefly/Viz` 发数值，经 `Firefly/Log` 发 log 宏诊断，
+内容指纹和汇总。Rust 计算线程经 `Firefly/VizScalars` 发标量，经 `Firefly/Viz` 发空间诊断，
+planner 经 `Firefly/VizVoxels` 发地图更新，经 `Firefly/Log` 发 log 宏诊断，
 由 firefly-viz 统一落盘；stderr 仅作进程诊断的双 sink，不作第二份录制。
 
 各进程以测量时刻设置 `sim_time`；无仿真时刻的进程日志回落 `wall_time`。
 常用实体为 `vio/odom`、`vio/traj`、`gt/pose`、`gt/traj`、`vio/debug/*`、`fc/debug/*`、
-`plan/*`、`logs/<app>`。传感器原图只在 render 面板，不进 RRD。
-render 默认按原图时间配对叠加 VIO 点；图像标记和估计/真值影子只改调试显示，不进传感器。
+`plan/*`、`logs/<app>`。左目 H.265 视频、可选右目/深度采样及触发无损窗口进入 RRD；
+Rerun 按原图时间配对叠加 VIO 点，不把标记烧进视频。`/live/**` 是独立 gRPC stream
+发送的 static 最新预览，不写入 RRD，也不代表时间光标处的历史数据。
+
+`configs/viz.toml` 控制视频、预览频率、图像采样、触发窗口与容量；未知配置键拒绝启动。
+SIGUSR1 请求保存前后无损帧窗口，ERROR 日志可自动触发，窗口与冷却时间遵循该配置。
+所有输入先复制到自有内存再释放 IPC loan，队列与环形缓存有界。体素分块完整后才更新地图；
+标量不携带体素数组。队列丢帧、编码耗时、输出 sample 大小与退出状态在 `viz/**` 查看。
 
 传感器延迟按原始采集 `sim_time` 记录墙钟耗时（秒）：
 `render/capture/stages_s` 为请求→提交、提交→回读、回读→装配、装配→处理；
@@ -159,9 +168,21 @@ render 默认按原图时间配对叠加 VIO 点；图像标记和估计/真值�
 这些诊断不改图像时间戳；`vio/debug/camera_age` 是消费时仿真时刻减采集时刻，
 `fc/imu/health` 的外援年龄还包含视觉更新与等待下一拍的时间。
 
-实时查看先启动 rerun，再运行不带 `--save` 的 firefly-viz，默认连接 `127.0.0.1:9876`。
+实时查看先启动 `rerun`，再运行 `uv run firefly-viz`：默认连接 `127.0.0.1:9876` 并创建
+`logs/` 下唯一 RRD。`--save logs/run.rrd` 单独使用为离线录制；加 `--serve` 同时启动原生
+Viewer，或加 `--connect rerun+http://127.0.0.1:9876/proxy` 连接已有 Viewer。仅实时查看须
+显式加 `--no-save`。既有 RRD 路径拒绝覆盖，recording ID 每次运行独立。
 离线回放 `rerun logs/rmuc_run.rrd`；数值可用 `rerun rrd print`、`rerun rrd stats` 或
 Python RrdReader，读取方法见仓库 `.agents/skills/rerun/SKILL.md`。
+
+H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码也需要 FFmpeg；
+浏览器端的 HEVC 能力不能替代原生回放验收。硬件初始化失败会结束录制并保留错误证据；
+软件编码仅在配置显式选择 `libx265` 时启用。IPC 布局升级后须同批重建、重启所有生产者
+与消费者，不能混用不同版本的消息类型。
+
+长录制默认不积累完整文件 footer 索引，避免索引内存随 chunk 数增长；代价是离线随机访问
+变慢，依赖 footer 的工具需先用标准 `rerun rrd optimize` 生成带索引的副本。短录制可显式
+配置 `write_footer = true`。这项预算独立于 Viewer 内存限制、图像环形缓冲和编码队列。
 
 性能只认相同构建、硬件、输入与环境下的 trace 实测。主循环建 root span、设置 local parent、
 结束 flush；热路径不使用无条件格式化大对象的 `#[logcall]`。ConsoleReporter span 树
@@ -215,7 +236,12 @@ cargo test --all-targets
 cargo test -p firefly-planner --test planner_contracts
 uv run --all-packages --extra test pytest -q -p no:cacheprovider
 FIREFLY_TEST_PYTHON="$PWD/.venv/bin/python" cargo test -p firefly-pubsub --test python_interop -- --ignored
+FIREFLY_RUN_VIDEO_ENCODER=1 uv run --all-packages --extra test pytest apps/firefly-viz/tests/test_video_integration.py -q
 ```
+
+视频集成用例使用当前 `configs/viz.toml` 指定的真实编码器，检查帧数、采集时间关联和
+FFmpeg 解码后的画面；默认跳过不代表通过。Rerun 回放还需检查视频跳转、逐帧点集匹配、
+static 预览不进入文件和正常/异常退出时的完整性。构建、单测与实际 Viewer 回放分别记录结果。
 
 数学测试同时包含独立公式/解析值、中心差分和最终输出契约，不能只让代价与梯度互证。
 确定性任务必须成功；随机安全属性允许明确有界拒绝，但拒绝不计成功，不用整体成功率

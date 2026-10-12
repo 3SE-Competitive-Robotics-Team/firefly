@@ -23,7 +23,7 @@ use firefly_pubsub::odom::ODOM_TOPIC;
 use firefly_pubsub::odom::{GROUND_TRUTH_TOPIC, OdomMessage};
 use firefly_pubsub::publish::OdomPublisher;
 use firefly_pubsub::subscriber::Subscriber;
-use firefly_pubsub::viz::{VizMessage, VizPublisher, kind};
+use firefly_pubsub::viz::{ScalarMessage, VizMessage, VizPublisher, kind};
 use firefly_vio::options::VioManagerOptions;
 use firefly_vio::vio_manager::VioManager;
 use firefly_vio_core::cam::{CamRadtan, SharedCamera};
@@ -327,7 +327,7 @@ fn run_loop(
         let mut imu_batch = 0u32;
         while let Some(imu) = input.next_imu() {
             for (entity, values) in [("vio/input/gyro", imu.wm), ("vio/input/accel", imu.am)] {
-                let mut msg = VizMessage::base(kind::SCALARS, imu.timestamp, entity);
+                let mut msg = ScalarMessage::base(imu.timestamp, entity);
                 msg.scalars[..3].copy_from_slice(values.as_slice());
                 msg.scalar_count = 3;
                 let _ = viz_pub.publish(msg);
@@ -482,7 +482,7 @@ fn publish_frontend_health(viz_pub: &VizPublisher, t_sim: f64, camera_time: f64,
         ("vio/debug/accel_bias", vio.state.imu.bias_a()),
         ("vio/debug/gyro_bias", vio.state.imu.bias_g()),
     ] {
-        let mut msg = VizMessage::base(kind::SCALARS, vio.state.timestamp, entity);
+        let mut msg = ScalarMessage::base(vio.state.timestamp, entity);
         msg.scalars[..3].copy_from_slice(values.as_slice());
         msg.scalar_count = 3;
         let _ = viz_pub.publish(msg);
@@ -503,7 +503,7 @@ fn publish_frontend_health(viz_pub: &VizPublisher, t_sim: f64, camera_time: f64,
         ("vio/debug/camera_age", t_sim - camera_time),
         ("vio/debug/track_avg_len", avg_len),
     ] {
-        let mut msg = VizMessage::base(kind::SCALARS, t_sim, entity);
+        let mut msg = ScalarMessage::base(t_sim, entity);
         msg.scalars[0] = value;
         msg.scalar_count = 1;
         let _ = viz_pub.publish(msg);

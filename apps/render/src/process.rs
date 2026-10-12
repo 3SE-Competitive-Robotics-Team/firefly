@@ -1,6 +1,6 @@
-//! 逐像素处理工作线程：灰度化 + 深度线性化/噪声 + 调试显示映射。
+//! 逐像素处理工作线程：灰度化 + 深度线性化/噪声。
 //!
-//! iceoryx2 发布端口在工作线程内创建和使用；UI 只读取最新的显示结果。
+//! iceoryx2 发布端口在工作线程内创建和使用。
 //!
 //! 深度退化由 `depth_noise` 配置，在线测量施加噪声；离线地图路标使用理想几何深度标签。
 
@@ -33,7 +33,7 @@ pub struct CaptureJob {
     pub depth_raw: Vec<u8>,
 }
 
-/// 一拍的全部输出（工作线程算好后交回主世界发布/显示）。
+/// 一拍的全部输出（工作线程内发布）。
 #[derive(Debug)]
 pub struct ProcessedCapture {
     /// 单调序号。
@@ -43,18 +43,12 @@ pub struct ProcessedCapture {
     pub stamp: f64,
     /// 上游 trace 上下文。
     pub trace: TraceContext,
-    /// 左目 RGB（直显用）。
-    pub left_rgb: Vec<u8>,
-    /// 右目 RGB（直显用）。
-    pub right_rgb: Vec<u8>,
     /// 左目灰度（发布）。
     pub left_gray: Vec<u8>,
     /// 右目灰度（发布）。
     pub right_gray: Vec<u8>,
     /// 深度（米，行主序；在线含退化，离线为几何标签）。
     pub depth: Vec<f32>,
-    /// 深度伪彩显示图（`RGBA8`）。
-    pub depth_rgba: Vec<u8>,
 }
 
 /// 有界最新值邮箱：生产者不等待消费者；关闭唤醒接收端并丢弃未处理任务。
@@ -81,6 +75,7 @@ impl<T> Latest<T> {
         }
     }
 
+    #[cfg(test)]
     pub fn take(&self) -> Option<T> {
         self.state
             .lock()
@@ -104,10 +99,9 @@ impl<T> Latest<T> {
     }
 }
 
-/// 像素处理后立即发布；显示端不参与工作线程的进度与背压。
+/// 像素处理后立即发布。
 pub fn run_worker(
     jobs: &Latest<CaptureJob>,
-    results: &Latest<ProcessedCapture>,
     options: &DepthNoiseOptions,
     offline: bool,
     mut publish: impl FnMut(&ProcessedCapture),
@@ -122,7 +116,6 @@ pub fn run_worker(
         let guard = root.set_local_parent();
         let result = process(job, options, offline);
         publish(&result);
-        results.replace(result);
         drop(guard);
         fastrace::flush();
     }
@@ -153,21 +146,15 @@ pub fn process(
         );
     }
 
-    let mut depth_rgba = vec![0u8; 4 * IMAGE_SIZE];
-    sensors::depth_to_display(&depth, &mut depth_rgba, sensors::DISPLAY_DEPTH_RANGE);
-
     job.timing.processed = Instant::now();
     ProcessedCapture {
         seq: job.seq,
         timing: job.timing,
         stamp: job.stamp,
         trace: job.trace,
-        left_rgb: job.left_rgb,
-        right_rgb: job.right_rgb,
         left_gray,
         right_gray,
         depth,
-        depth_rgba,
     }
 }
 
@@ -198,13 +185,11 @@ mod tests {
     #[test]
     fn worker_publishes_without_ui_polling_and_preserves_capture_stamp_and_pixels() {
         let jobs = Latest::default();
-        let results = Latest::default();
         let (published, received) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
             let worker = scope.spawn(|| {
                 run_worker(
                     &jobs,
-                    &results,
                     &DepthNoiseOptions::default(),
                     true,
                     |result| {
@@ -246,7 +231,6 @@ mod tests {
                 assert_eq!((left, right), (128, 64));
             }
         });
-        assert_eq!(results.take().unwrap().seq, 2);
     }
 
     #[test]
@@ -272,7 +256,7 @@ mod tests {
         assert!(measured.depth.iter().all(|z| *z == 0.));
     }
 
-    /// 单拍管线产出各缓冲尺寸正确；全清空深度保持无效 `0.0`（显示全黑）。
+    /// 单拍管线产出各缓冲尺寸正确；全清空深度保持无效 `0.0`。
     #[test]
     fn process_produces_expected_buffers() {
         let options = DepthNoiseOptions::default();
@@ -291,15 +275,6 @@ mod tests {
         assert_eq!(out.left_gray.len(), IMAGE_SIZE);
         assert_eq!(out.right_gray.len(), IMAGE_SIZE);
         assert_eq!(out.depth.len(), IMAGE_SIZE);
-        assert_eq!(out.depth_rgba.len(), 4 * IMAGE_SIZE);
-        // 原始深度全为清空值 → 全无效，显示为黑。
         assert!(out.depth.iter().all(|z| *z == 0.0));
-        assert!(
-            out.depth_rgba
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .all(|px| px[0] == 0)
-        );
     }
 }

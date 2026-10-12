@@ -19,7 +19,7 @@ use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::publish::{CorrectedOdomPublisher, Publisher};
 use firefly_pubsub::subscriber::{OdomSubscriber, Subscriber};
 use firefly_pubsub::vision::{LOOP_TOPIC, LoopConstraint, POSE_OBS_TOPIC, PoseObservation};
-use firefly_pubsub::viz::{VizMessage, VizPublisher, kind};
+use firefly_pubsub::viz::{ScalarMessage, VizMessage, VizPublisher, kind};
 use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetRunResult;
 use nalgebra::{Isometry3, Matrix4, Quaternion, Translation3, UnitQuaternion, Vector3};
@@ -459,7 +459,7 @@ impl App {
             correction.accepted = result.is_ok();
             self.landmark_correction.publish(correction)?;
             if let Some(viz) = &self.viz_pub {
-                let mut msg = VizMessage::base(kind::SCALARS, self.t_sim, "corr/debug/loops");
+                let mut msg = ScalarMessage::base(self.t_sim, "corr/debug/loops");
                 msg.scalars[0] = graph.loop_count() as f64;
                 msg.scalars[1] = graph.node_count() as f64;
                 msg.scalars[2] = f64::from(result.is_ok());
@@ -568,7 +568,7 @@ impl App {
                 - before.fixed_view::<3, 1>(0, 3))
             .norm();
             if let Some(viz) = &self.viz_pub {
-                let mut msg = VizMessage::base(kind::SCALARS, self.t_sim, "corr/debug/gate");
+                let mut msg = ScalarMessage::base(self.t_sim, "corr/debug/gate");
                 msg.scalars[..4].copy_from_slice(&[
                     obs.error,
                     3.,
@@ -643,8 +643,7 @@ impl App {
         let msg = corrected_odom(odom, &alignment)?;
         let status = self.quality.status(msg.timestamp, &self.quality_options);
         if let Some(viz) = &self.viz_pub {
-            let mut metric =
-                VizMessage::base(kind::SCALARS, msg.timestamp, "corr/debug/map_observation");
+            let mut metric = ScalarMessage::base(msg.timestamp, "corr/debug/map_observation");
             metric.scalars[..3].copy_from_slice(&[
                 if status.visual_timestamp >= 0. {
                     msg.timestamp - status.visual_timestamp
@@ -689,7 +688,7 @@ impl App {
         let Some(viz) = &self.viz_pub else {
             return;
         };
-        let mut g = VizMessage::base(kind::SCALARS, self.t_sim, "corr/debug/gate");
+        let mut g = ScalarMessage::base(self.t_sim, "corr/debug/gate");
         g.scalars[0] = metric;
         g.scalars[1] = limit;
         g.scalars[2] = applied;
@@ -700,7 +699,7 @@ impl App {
             return;
         }
         let d = self.fusion.drift();
-        let mut drift = VizMessage::base(kind::SCALARS, self.t_sim, "corr/debug/drift");
+        let mut drift = ScalarMessage::base(self.t_sim, "corr/debug/drift");
         drift.scalars[0] = d[(0, 3)];
         drift.scalars[1] = d[(1, 3)];
         drift.scalars[2] = d[(2, 3)];

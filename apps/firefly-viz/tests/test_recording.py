@@ -1,0 +1,118 @@
+"""持久化和静态预览的目的地必须分开；初始化失败也释放流。"""
+
+from dataclasses import replace
+import uuid
+
+import pytest
+
+from firefly_viz import recording
+from firefly_viz.config import Options
+
+
+class Stream:
+    instances = []
+
+    def __init__(self, application, **kwargs):
+        self.kwargs = kwargs
+        self.sinks = []
+        self.closed = False
+        self.logs = []
+        self.instances.append(self)
+
+    def set_sinks(self, *sinks):
+        self.sinks = sinks
+
+    def is_enabled(self):
+        return True
+
+    def send_blueprint(self, blueprint):
+        pass
+
+    def log(self, *args, **kwargs):
+        self.logs.append((args, kwargs))
+
+    def flush(self, **kwargs):
+        pass
+
+    def disconnect(self):
+        self.closed = True
+
+
+def install(monkeypatch):
+    Stream.instances = []
+    monkeypatch.setattr(recording.rr, 'RecordingStream', Stream)
+    monkeypatch.setattr(recording.rr, 'FileSink', lambda path, write_footer: ('file', path, write_footer))
+    monkeypatch.setattr(recording.rr, 'GrpcSink', lambda url: ('grpc', url))
+    monkeypatch.setattr(recording, 'blueprint', lambda live: live)
+
+
+def test_live_static_cannot_reach_file_sink_and_uses_same_recording(monkeypatch, tmp_path):
+    install(monkeypatch)
+    options = Options()
+    options = replace(options, video=replace(options.video, enabled=False))
+    path = tmp_path / 'run.rrd'
+    streams = recording.Recordings(path, recording.URL, False, options)
+    assert streams.archive.sinks == (('file', str(path), False), ('grpc', recording.URL))
+    assert streams.live.sinks == (('grpc', recording.URL),)
+    assert streams.archive.kwargs['recording_id'] == streams.live.kwargs['recording_id']
+    streams.close()
+    assert all(stream.closed for stream in Stream.instances)
+
+
+def test_existing_evidence_is_never_overwritten(monkeypatch, tmp_path):
+    install(monkeypatch)
+    path = tmp_path / 'run.rrd'
+    path.write_bytes(b'existing evidence')
+    with pytest.raises(FileExistsError):
+        recording.Recordings(path, None, False, Options())
+    assert path.read_bytes() == b'existing evidence'
+    assert all(stream.closed for stream in Stream.instances)
+
+
+def test_same_id_native_streams_keep_static_preview_out_of_rrd(tmp_path):
+    """真实 SDK/file sink 契约；不启动 Viewer、网络或编码器。"""
+    from rerun.chunk import RrdReader
+
+    rr = recording.rr
+    identity = str(uuid.uuid4())
+    archive = rr.RecordingStream('sink-isolation', recording_id=identity)
+    live = rr.RecordingStream('sink-isolation', recording_id=identity, send_properties=False)
+    path = tmp_path / 'archive.rrd'
+    archive.set_sinks(rr.FileSink(str(path), write_footer=False))
+    preview = rr.binary_stream(recording=live)
+    try:
+        archive.log('calibration', rr.AnyValues(focal_length=200.), static=True)
+        recording.at(archive, 2.5)
+        archive.log('metrics', rr.Scalars(7.), strict=True)
+        for value in range(3):
+            live.log('live/preview', rr.AnyValues(value=value), static=True, strict=True)
+        archive.flush(timeout_sec=5.)
+        assert preview.read(flush_timeout_sec=5.)
+    finally:
+        live.disconnect()
+        archive.disconnect()
+    reader = RrdReader(path)
+    entities = {chunk.entity_path.lstrip('/'): chunk.is_static
+                for store in reader.recordings() for chunk in reader.stream(store=store)}
+    assert entities['calibration'] is True
+    assert entities['metrics'] is False
+    assert not any(entity == 'live' or entity.startswith('live/') for entity in entities)
+
+
+def test_initialization_disconnects_both_streams_even_if_first_cleanup_fails(monkeypatch, tmp_path):
+    install(monkeypatch)
+
+    def fail_blueprint(*args):
+        raise ValueError('blueprint failure')
+
+    def disconnect(stream):
+        stream.closed = True
+        if stream is Stream.instances[1]:
+            raise RuntimeError('live disconnect failure')
+
+    monkeypatch.setattr(Stream, 'send_blueprint', fail_blueprint)
+    monkeypatch.setattr(Stream, 'disconnect', disconnect)
+    with pytest.raises(ExceptionGroup, match='initialization and cleanup failed') as caught:
+        recording.Recordings(tmp_path / 'failed.rrd', recording.URL, False, Options())
+    assert all(stream.closed for stream in Stream.instances)
+    assert [str(error) for error in caught.value.exceptions] == ['blueprint failure', 'live disconnect failure']

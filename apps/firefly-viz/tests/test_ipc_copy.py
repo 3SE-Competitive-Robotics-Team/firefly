@@ -9,7 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from firefly_viz.main import _entity, detach_copy  # noqa: E402
+from firefly_viz.main import detach_copy  # noqa: E402
+from firefly_viz.writer import entity as _entity  # noqa: E402
 from firefly_viz.messages import VizMessage  # noqa: E402
 
 
@@ -50,15 +51,26 @@ def test_detach_preserves_type():
     assert dst.kind == 1
 
 
-def test_entity_tolerates_garbage():
-    """坏实体不炸（fuzz 实证过 `rr.log` 容忍；此处只锁解码不抛异常）。"""
+def test_entity_rejects_corrupt_payload():
+    import pytest
     m = _make_pose()
-    m.entity_len = 64
-    for i in range(64):
-        m.entity[i] = 0xFF
-    assert isinstance(_entity(m), str)
-    m.entity_len = 20
-    raw = b"vio/odom\x00\x00garbage!!"
-    for i, c in enumerate(raw):
-        m.entity[i] = c
-    assert _entity(m).startswith("vio/odom")
+    m.entity_len = 65
+    with pytest.raises(ValueError):
+        _entity(m)
+    m.entity_len = 1
+    m.entity[0] = 0xFF
+    with pytest.raises(UnicodeDecodeError):
+        _entity(m)
+
+
+def test_wire_layouts_match_rust():
+    from firefly_viz.messages import ScalarMessage, VoxelMessage
+    assert ctypes.sizeof(ScalarMessage) == 128
+    assert ctypes.sizeof(VizMessage) == 25312
+    assert ctypes.sizeof(VoxelMessage) == 196736
+    assert ScalarMessage.timestamp.offset == 8
+    assert ScalarMessage.scalars.offset == 80
+    assert ScalarMessage.sequence.offset == 120
+    assert VoxelMessage.voxels.offset == 80
+    assert VoxelMessage.sequence.offset == 196720
+    assert VizMessage.points.offset == 144

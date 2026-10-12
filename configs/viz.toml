@@ -1,0 +1,8 @@
+# 默认记录左目 H.265 与结构化诊断；各预算及单位见 firefly_viz/config.py。
+# 默认 hevc_vaapi 需要可用的 Intel iHD 驱动，不自动回落软件编码。
+# [video]
+# enabled = false
+# encoder = "libx265"
+# [capture]
+# right_hz = 1.0
+# depth_hz = 1.0

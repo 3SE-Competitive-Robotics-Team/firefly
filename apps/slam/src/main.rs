@@ -9,7 +9,7 @@ use firefly_pubsub::{
     publish::Publisher,
     subscriber::Subscriber,
     vision::{self, LoopConstraint},
-    viz::{VizMessage, VizPublisher, kind},
+    viz::{ScalarMessage, VizPublisher},
 };
 use std::time::Duration;
 
@@ -84,7 +84,7 @@ fn main() -> Result<()> {
                 loops.publish(edge)?;
             }
             let mut msg =
-                VizMessage::base(kind::SCALARS, message.camera_time, "loop/debug/frontend");
+                ScalarMessage::base(message.camera_time, "loop/debug/frontend");
             msg.scalar_count = 4;
             msg.scalars[..4].copy_from_slice(&result.diagnostics);
             viz.publish(msg)?;

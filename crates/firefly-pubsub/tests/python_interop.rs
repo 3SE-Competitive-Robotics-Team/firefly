@@ -9,6 +9,54 @@ use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::publish::OdomPublisher;
 use firefly_pubsub::subscriber::OdomSubscriber;
 
+#[test]
+#[ignore = "requires FIREFLY_TEST_PYTHON pointing to the synced workspace Python"]
+fn viz_python_layout_matches_rust_offsets_and_sizes() {
+    use firefly_pubsub::viz::{ScalarMessage, VizMessage, VoxelMessage};
+    use std::mem::{offset_of, size_of};
+
+    let python = std::env::var("FIREFLY_TEST_PYTHON").expect("workspace Python path");
+    let script = r"
+import ctypes
+from firefly_viz.messages import ScalarMessage, VizMessage, VoxelMessage
+for cls, fields in [
+    (ScalarMessage, ['timestamp', 'scalars', 'sequence']),
+    (VizMessage, ['timestamp', 'points', 'sequence']),
+    (VoxelMessage, ['voxels', 'sequence', 'chunk_index', 'chunk_count']),
+]:
+    print(ctypes.sizeof(cls), *(getattr(cls, name).offset for name in fields))
+";
+    let output = Command::new(python).args(["-c", script]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual: Vec<usize> = String::from_utf8(output.stdout)
+        .unwrap()
+        .split_whitespace()
+        .map(|word| word.parse().unwrap())
+        .collect();
+    assert_eq!(
+        actual,
+        vec![
+            size_of::<ScalarMessage>(),
+            offset_of!(ScalarMessage, timestamp),
+            offset_of!(ScalarMessage, scalars),
+            offset_of!(ScalarMessage, sequence),
+            size_of::<VizMessage>(),
+            offset_of!(VizMessage, timestamp),
+            offset_of!(VizMessage, points),
+            offset_of!(VizMessage, sequence),
+            size_of::<VoxelMessage>(),
+            offset_of!(VoxelMessage, voxels),
+            offset_of!(VoxelMessage, sequence),
+            offset_of!(VoxelMessage, chunk_index),
+            offset_of!(VoxelMessage, chunk_count),
+        ]
+    );
+}
+
 const PEER: &str = r"
 import ctypes
 import sys

@@ -5,7 +5,7 @@
 //!   以 sim 时间为轴）发起回读，并激活传感器相机；回读被渲染世界取走后收起
 //!   相机，限制传感器渲染只在有采集请求时执行。
 //! - 三份同 `seq` 回复到齐后装配成 [`CaptureJob`] 交给工作线程；工作线程算完
-//!   立即发布传感器，并回传 [`ProcessedCapture`] 供主线程更新调试显示。
+//!   立即发布传感器，不向主线程回传像素缓冲。
 //! - 发布走 [`Publisher::publish`]，自动注入续接后的 trace 上下文。
 
 use std::collections::HashMap;
@@ -24,18 +24,16 @@ use firefly_pubsub::camera::{
     IMAGE_HEIGHT, IMAGE_SIZE, IMAGE_WIDTH,
 };
 use firefly_pubsub::event::{CAMERA_PAIR_TOPIC, TopicNotifier};
-use firefly_pubsub::navigation::{NAVIGATION_TOPIC, NavigationMessage};
 use firefly_pubsub::node::{IpcNode, create_node};
 use firefly_pubsub::odom::{GROUND_TRUTH_TOPIC, OdomMessage};
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::trace::TraceContext;
-use firefly_pubsub::viz::{VizMessage, VizPublisher, kind};
+use firefly_pubsub::viz::{ScalarMessage, VizPublisher};
 
 use crate::capture::{CaptureHub, CaptureRequest, CapturedFrame, SensorKind};
 use crate::process::{CaptureJob, Latest, ProcessedCapture, run_worker};
 use crate::rig::{Eye, PoseState, apply_pose_to_eyes};
-use crate::ui::DebugViews;
 
 /// 出图节拍（秒，sim 时间轴）：固定 10Hz，与真值到达边沿解耦。
 pub const CAPTURE_PERIOD: f64 = 0.1;
@@ -52,10 +50,6 @@ const CAPTURE_TOLERANCE: f64 = CAPTURE_PERIOD * 0.1;
 pub struct IpcPorts {
     /// 位姿订阅（`Firefly/GroundTruth`，只保留最新）。
     pub pose_sub: Subscriber<OdomMessage>,
-    /// 可视化订阅（`Firefly/Viz` 的地图、路径与 VIO 图像点集）。
-    pub viz_sub: Option<Subscriber<VizMessage>>,
-    /// 地图融合定位，只用于在线调试影子与轨迹。
-    pub corrected_sub: Option<Subscriber<NavigationMessage>>,
     /// 进程共享节点，必须在全部端口之后释放。
     pub node: IpcNode,
 }
@@ -74,17 +68,9 @@ pub fn open_ports(offline: bool) -> Result<IpcPorts, firefly_error::Error> {
         }
     };
     let pose_sub = Subscriber::with_topic(&node, &topic(GROUND_TRUTH_TOPIC))?;
-    let viz_sub = crate::voxels::open_subscription(&node);
-    let corrected_sub = if offline {
-        None
-    } else {
-        Some(Subscriber::with_topic(&node, NAVIGATION_TOPIC)?)
-    };
     log::info!("IPC 就绪：订阅位姿，offline={offline}");
     Ok(IpcPorts {
         pose_sub,
-        viz_sub,
-        corrected_sub,
         node,
     })
 }
@@ -96,6 +82,7 @@ struct SensorPublishers {
     depth_pub: Publisher<DepthImageMessage>,
     pair_notify: TopicNotifier,
     viz_pub: VizPublisher,
+    calibration_stamp: std::cell::Cell<f64>,
     _node: IpcNode,
 }
 
@@ -115,6 +102,7 @@ impl SensorPublishers {
             depth_pub: Publisher::with_topic(&node, &topic(DEPTH_TOPIC))?,
             pair_notify: TopicNotifier::with_topic(&node, &topic(CAMERA_PAIR_TOPIC))?,
             viz_pub: VizPublisher::new(&node)?,
+            calibration_stamp: std::cell::Cell::new(f64::NEG_INFINITY),
             _node: node,
         })
     }
@@ -144,8 +132,6 @@ impl Default for PendingFrames {
 pub struct CaptureStats {
     /// 本统计周期内已发布的拍数。
     pub published: u32,
-    /// 最近发布拍的时间戳（秒，sim 时间）。
-    pub last_stamp: f64,
 }
 
 /// 传感器出图节拍与相机激活状态（主线程独占）。
@@ -159,11 +145,10 @@ pub struct SensorCapture {
     requested_seq: u64,
 }
 
-/// 逐像素处理与发布不依赖 UI 消费；任务与显示缓存各只保留最新一拍。
+/// 逐像素处理与发布；待处理任务只保留最新一拍。
 #[derive(Resource)]
 pub struct CapturePipeline {
     jobs: Arc<Latest<CaptureJob>>,
-    results: Arc<Latest<ProcessedCapture>>,
     published: Arc<AtomicU32>,
     worker: Option<JoinHandle<()>>,
 }
@@ -174,9 +159,8 @@ impl CapturePipeline {
         offline: bool,
     ) -> Result<Self, firefly_error::Error> {
         let jobs = Arc::new(Latest::<CaptureJob>::default());
-        let results = Arc::new(Latest::default());
         let published = Arc::new(AtomicU32::new(0));
-        let (input, output, count) = (jobs.clone(), results.clone(), published.clone());
+        let (input, count) = (jobs.clone(), published.clone());
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let worker = std::thread::Builder::new()
             .name("sensor-process".to_owned())
@@ -191,7 +175,7 @@ impl CapturePipeline {
                         return;
                     }
                 };
-                run_worker(&input, &output, &options, offline, |result| {
+                run_worker(&input, &options, offline, |result| {
                     publish(&ports, result);
                     count.fetch_add(1, Ordering::Relaxed);
                 });
@@ -202,7 +186,6 @@ impl CapturePipeline {
             })?;
         let pipeline = Self {
             jobs,
-            results,
             published,
             worker: Some(worker),
         };
@@ -230,10 +213,6 @@ impl Drop for CapturePipeline {
 pub fn poll_pose(
     ports: NonSend<IpcPorts>,
     mut pose: ResMut<PoseState>,
-    mut viewer: ResMut<crate::viewer_pose::ViewerPose>,
-    mut overlay: ResMut<crate::flight_overlay::FlightOverlay>,
-    time: Res<Time>,
-    wall: Res<Time<Real>>,
     hub: Res<CaptureHub>,
     targets: Option<Res<crate::rig::SensorTargets>>,
     mut capture: ResMut<SensorCapture>,
@@ -245,9 +224,6 @@ pub fn poll_pose(
     loop {
         match ports.pose_sub.receive() {
             Ok(Some(sample)) => {
-                if ports.corrected_sub.is_some() {
-                    overlay.observe_actual(&sample, wall.elapsed_secs_f64());
-                }
                 newest = Some((*sample, *sample.user_header()));
             }
             Ok(None) => break,
@@ -256,28 +232,6 @@ pub fn poll_pose(
                 break;
             }
         }
-    }
-    if let Some((msg, _)) = newest
-        && msg.is_initialized
-    {
-        viewer.observe(
-            Transform {
-                translation: Vec3::new(
-                    msg.position_x as f32,
-                    msg.position_y as f32,
-                    msg.position_z as f32,
-                ),
-                rotation: Quat::from_xyzw(
-                    msg.quat_x as f32,
-                    msg.quat_y as f32,
-                    msg.quat_z as f32,
-                    msg.quat_w as f32,
-                ),
-                ..default()
-            },
-            msg.timestamp,
-            time.elapsed_secs_f64(),
-        );
     }
     if let Some((msg, header)) = newest
         && msg.is_initialized
@@ -397,29 +351,18 @@ pub fn drain_captures(
     pipeline.jobs.replace(job);
 }
 
-/// UI 只取最新显示副本；发布已由工作线程完成。
+/// 汇总发布计数，工作线程提前退出视为传感器故障。
 #[allow(clippy::needless_pass_by_value)]
-pub fn update_processed_views(
+pub fn poll_processor(
     pipeline: Res<CapturePipeline>,
     mut stats: ResMut<CaptureStats>,
-    mut views: ResMut<DebugViews>,
-    mut images: ResMut<Assets<Image>>,
-    mut keypoints: ResMut<crate::keypoints::KeypointOverlay>,
     mut exits: MessageWriter<AppExit>,
 ) {
-    if pipeline
-        .worker
-        .as_ref()
-        .is_some_and(JoinHandle::is_finished)
-    {
+    if pipeline.worker.as_ref().is_some_and(JoinHandle::is_finished) {
         log::error!("sensor-process 工作线程意外退出");
         exits.write(AppExit::error());
     }
     stats.published += pipeline.published.swap(0, Ordering::Relaxed);
-    if let Some(result) = pipeline.results.take() {
-        stats.last_stamp = result.stamp;
-        update_views(&mut views, &mut images, &mut keypoints, result);
-    }
 }
 
 /// 发布一拍：续接 trace → 左/右灰度 + 深度 + 相机对事件。
@@ -431,6 +374,12 @@ fn publish(ports: &SensorPublishers, result: &ProcessedCapture) {
         .unwrap_or_else(|| Span::root("render-sensors", SpanContext::random().sampled(false)));
     let _guard = root.set_local_parent();
 
+    if result.stamp - ports.calibration_stamp.get() >= 1.0 {
+        for calibration in crate::rig::camera_calibration(result.stamp) {
+            let _ = ports.viz_pub.publish(calibration);
+        }
+        ports.calibration_stamp.set(result.stamp);
+    }
     publish_gray(&ports.left_pub, &result.left_gray, result.stamp, 0);
     publish_gray(&ports.right_pub, &result.right_gray, result.stamp, 1);
     publish_depth(&ports.depth_pub, &result.depth, result.stamp);
@@ -456,7 +405,7 @@ fn publish(ports: &SensorPublishers, result: &ProcessedCapture) {
             ],
         ),
     ] {
-        let mut message = VizMessage::base(kind::SCALARS, result.stamp, entity);
+        let mut message = ScalarMessage::base(result.stamp, entity);
         message.scalars = values;
         message.scalar_count = 4;
         let _ = ports.viz_pub.publish(message);
@@ -497,24 +446,5 @@ fn publish_depth(publisher: &Publisher<DepthImageMessage>, depth: &[f32], stamp:
     msg.data.copy_from_slice(depth);
     if let Err(e) = publisher.publish(msg) {
         log::warn!("深度发布失败：{e:?}");
-    }
-}
-
-/// RGB/深度显示图直接搬入 `Assets<Image>`；灰度原图交给关键点显示缓存。
-fn update_views(
-    views: &mut DebugViews,
-    images: &mut Assets<Image>,
-    keypoints: &mut crate::keypoints::KeypointOverlay,
-    result: ProcessedCapture,
-) {
-    keypoints.push_frame(result.stamp, [result.left_gray, result.right_gray]);
-    if let Some(mut image) = images.get_mut(&views.left_rgb) {
-        image.data = Some(result.left_rgb);
-    }
-    if let Some(mut image) = images.get_mut(&views.right_rgb) {
-        image.data = Some(result.right_rgb);
-    }
-    if let Some(mut image) = images.get_mut(&views.depth) {
-        image.data = Some(result.depth_rgba);
     }
 }

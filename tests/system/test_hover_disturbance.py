@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from firefly_viz.messages import VizMessage
+from firefly_viz.messages import ScalarMessage, VizMessage
 
 from disturbance_metrics import DisturbanceLimits, round_checks, score_disturbance
 from disturbance_sim import ForcePulse, TOPIC
@@ -37,32 +37,34 @@ class DisturbanceMission(Mission):
     def connect(self):
         super().connect()
         self.force_publisher = service(self.node, TOPIC, ForcePulse).publisher_builder().create()
-        self.evidence_sub = service(self.node, "Firefly/Viz", VizMessage, 256, 8).subscriber_builder().buffer_size(256).create()
+        self.evidence_subs = [service(self.node, topic, cls, 256, 8).subscriber_builder().buffer_size(256).create()
+                              for topic, cls in [("Firefly/Viz", VizMessage), ("Firefly/VizScalars", ScalarMessage)]]
         self.evidence = {}
 
     def pump(self, guard=True):
         super().pump(guard)
-        while (sample := self.evidence_sub.receive()) is not None:
-            msg = sample.payload().contents
-            entity = bytes(msg.entity[:msg.entity_len]).decode()
-            key = self.evidence_aliases.get(entity, entity.removeprefix("acceptance/"))
-            if key not in self.required_evidence and not key.startswith("disturbance_force/"):
-                continue
-            if msg.kind == 1 and key == "gt":
-                values = [*msg.xyz, *msg.quat_xyzw]
-            elif msg.kind == 4 and key != "gt":
-                values = list(msg.scalars[:msg.scalar_count])
-            else:
-                raise MissionFailure(f"unexpected live evidence kind: {entity}")
-            row = np.array([msg.timestamp, *values], dtype=float)
-            if not np.isfinite(row).all():
-                raise MissionFailure(f"non-finite live evidence: {entity}")
-            rows = self.evidence.setdefault(key, [])
-            if rows and row[0] <= rows[-1][0]:
-                if np.array_equal(row, rows[-1]):
+        for subscriber in self.evidence_subs:
+            while (sample := subscriber.receive()) is not None:
+                msg = sample.payload().contents
+                entity = bytes(msg.entity[:msg.entity_len]).decode()
+                key = self.evidence_aliases.get(entity, entity.removeprefix("acceptance/"))
+                if key not in self.required_evidence and not key.startswith("disturbance_force/"):
                     continue
-                raise MissionFailure(f"nonmonotonic/conflicting live evidence: {entity}")
-            rows.append(row)
+                if msg.kind == 1 and key == "gt":
+                    values = [*msg.xyz, *msg.quat_xyzw]
+                elif msg.kind == 4 and key != "gt":
+                    values = list(msg.scalars[:msg.scalar_count])
+                else:
+                    raise MissionFailure(f"unexpected live evidence kind: {entity}")
+                row = np.array([msg.timestamp, *values], dtype=float)
+                if not np.isfinite(row).all():
+                    raise MissionFailure(f"non-finite live evidence: {entity}")
+                rows = self.evidence.setdefault(key, [])
+                if rows and row[0] <= rows[-1][0]:
+                    if np.array_equal(row, rows[-1]):
+                        continue
+                    raise MissionFailure(f"nonmonotonic/conflicting live evidence: {entity}")
+                rows.append(row)
 
     def require_hover(self, reason):
         """否决时记录组成门控的各项数值，阈值仍由 Options 统一定义。"""
