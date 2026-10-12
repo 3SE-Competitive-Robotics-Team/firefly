@@ -143,7 +143,11 @@ def main(argv=None, *, resolve_workspace=workspace_root, check_idle=require_idle
         parser.error("--prior-maps requires --localization-config with explicit [origin]")
     if not 1 <= args.repeat <= 100:
         parser.error("--repeat must be in 1..100")
-    options = startup(args.config, decode_options)
+    startup_error = None
+    try:
+        options = startup(args.config, decode_options)
+    except (OSError, ValueError, TypeError) as error:
+        startup_error = error
     if args.localization_config:
         with args.localization_config.open("rb") as stream:
             if "origin" not in tomllib.load(stream):
@@ -160,6 +164,8 @@ def main(argv=None, *, resolve_workspace=workspace_root, check_idle=require_idle
     elif args.prior_maps:
         report["scope"] = "RMUC mission; VIO + explicit external map alignment + offline visual map localization + online loops + prior/depth mapping"
     try:
+        if startup_error is not None:
+            raise startup_error
         check_idle(root)
         report["options"] = asdict(options)
         report["contact_policy"] = CONTACT_POLICY

@@ -110,13 +110,18 @@ def test_terminal_hold_requires_independent_truth_accuracy():
     assert case["stages"]["terminal_hold_accuracy"]["metrics"]["max_position_error_m"] == pytest.approx(.6)
 
 
-def test_preflight_failure_returns_nonzero_and_keeps_report(tmp_path):
+@pytest.mark.parametrize("contents", ["altitude_m = [", "altitude_m = -1", "unknown = 1"],
+                         ids=["invalid_toml", "invalid_threshold", "unknown_option"])
+def test_preflight_failure_returns_nonzero_and_keeps_report(tmp_path, contents):
     import json
     from firefly_evaluation import cli
     config = tmp_path / "invalid.toml"
-    config.write_text("altitude_m = [")
+    config.write_text(contents)
+    resource_calls = []
     assert cli.main(["--config", str(config)], resolve_workspace=lambda _: tmp_path,
-                    check_idle=lambda _: None) == 1
+                    check_idle=lambda _: resource_calls.append("check_idle"),
+                    collect_provenance=lambda _: resource_calls.append("provenance")) == 1
+    assert resource_calls == []
     reports = list((tmp_path / "logs/acceptance").glob("*/report.json"))
     assert len(reports) == 1
     report = json.loads(reports[0].read_text())
