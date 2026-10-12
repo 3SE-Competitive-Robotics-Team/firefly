@@ -15,12 +15,12 @@ const APPS: &[&str] = &[
 
 fn main() -> ExitCode {
     let Some(command) = std::env::args().nth(1) else {
-        eprintln!("usage: cargo xtask build");
+        eprintln!("usage: cargo xtask build-all-release");
         return ExitCode::FAILURE;
     };
 
-    if command != "build" {
-        eprintln!("unknown xtask command: {command}\nusage: cargo xtask build");
+    if command != "build-all-release" {
+        eprintln!("unknown xtask command: {command}\nusage: cargo xtask build-all-release");
         return ExitCode::FAILURE;
     }
 
