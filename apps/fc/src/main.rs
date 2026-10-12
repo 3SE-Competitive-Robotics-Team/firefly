@@ -696,6 +696,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         f64::from(s.aid_gate.accepted),
                         s.aid_gate.nis.unwrap_or(-1.),
                         s.aid_gate.local_weight.unwrap_or(-1.),
+                        s.aid_gate_time.unwrap_or(-1.),
                     ],
                 );
                 publish_scalars(
@@ -704,6 +705,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "fc/imu/attitude_variance",
                     &s.covariance_diagonal[..3],
                 );
+                for (name, values) in [
+                    ("residual", s.aid_gate.residual),
+                    ("residual_variance", s.aid_gate.residual_variance),
+                    ("whitened_residual", s.aid_gate.whitened_residual),
+                ] {
+                    if let Some(values) = values {
+                        for (part, values) in values.chunks(3).enumerate() {
+                            publish_scalars(
+                                &ports.viz,
+                                sim_time,
+                                &format!("fc/imu/aid_{name}/{part}"),
+                                values,
+                            );
+                        }
+                    }
+                }
                 publish_scalars(
                     &ports.viz,
                     sim_time,
@@ -780,6 +797,7 @@ mod tests {
                 bias: [0.; 3],
                 aid_time: Some(0.),
                 aid_gate: firefly_imu::Intersection::default(),
+                aid_gate_time: None,
                 covariance_diagonal: [0.; 6],
             }),
             vehicle: Some((QuadParams::default(), Airframe::default())),

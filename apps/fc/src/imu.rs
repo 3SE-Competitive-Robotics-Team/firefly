@@ -30,6 +30,7 @@ pub struct Snapshot {
     pub bias: [f64; 3],
     pub aid_time: Option<f64>,
     pub aid_gate: firefly_imu::Intersection,
+    pub aid_gate_time: Option<f64>,
     pub covariance_diagonal: [f64; 6],
 }
 pub struct Worker {
@@ -189,6 +190,7 @@ fn run(
                     bias,
                     aid_time: estimator.last_aid(),
                     aid_gate: estimator.aid_gate(),
+                    aid_gate_time: estimator.aid_gate_time(),
                     covariance_diagonal: state
                         .map_or([0.; 6], |s| std::array::from_fn(|i| s.covariance[(i, i)])),
                 });

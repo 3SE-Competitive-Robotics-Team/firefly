@@ -29,6 +29,12 @@ pub struct Intersection {
     pub accepted: bool,
     pub nis: Option<f64>,
     pub local_weight: Option<f64>,
+    /// 同一测量时刻、同一切空间的 `[δθ(rad), δbg(rad/s)]` 创新。
+    pub residual: Option<[f64; 6]>,
+    /// 保守创新协方差 `2(P_local + P_external)` 的对角。
+    pub residual_variance: Option<[f64; 6]>,
+    /// `L⁻¹ residual`，其中 `LLᵀ` 为完整创新协方差；平方和等于 NIS。
+    pub whitened_residual: Option<[f64; 6]>,
 }
 
 #[must_use]
@@ -201,15 +207,26 @@ impl AttitudeState {
         );
         let pe = symmetric(transport * external.covariance * transport.transpose());
         // Cov(e1-e2) ≤ 2(P1+P2) 对任意未知相关成立；χ²(6) 99.9% 保守门。
-        let bound = ((self.covariance + pe) * 2.)
+        let covariance = (self.covariance + pe) * 2.;
+        let bound = covariance
             .cholesky()
             .ok_or_else(|| invalid("invalid aid covariance"))?;
         let nis = dx.dot(&bound.solve(&dx));
+        let diagnostic = Intersection {
+            nis: Some(nis),
+            residual: Some(dx.into()),
+            residual_variance: Some(covariance.diagonal().into()),
+            whitened_residual: Some(
+                bound
+                    .l()
+                    .solve_lower_triangular(&dx)
+                    .ok_or_else(|| invalid("singular aid whitening"))?
+                    .into(),
+            ),
+            ..Intersection::default()
+        };
         if nis > 22.457_744_484_825_323 {
-            return Ok(Intersection {
-                nis: Some(nis),
-                ..Intersection::default()
-            });
+            return Ok(diagnostic);
         }
         let a = self
             .covariance
@@ -237,8 +254,8 @@ impl AttitudeState {
         self.inject(best.2);
         Ok(Intersection {
             accepted: true,
-            nis: Some(nis),
             local_weight: Some(local_weight),
+            ..diagnostic
         })
     }
 }

@@ -459,7 +459,7 @@ fn publish_odom(odom_pub: &OdomPublisher, msg: OdomMessage) {
 /// 前端健康度：统计保留在计算线程，结果经 Firefly/Viz 发布
 /// （bar_chart/scalars），firefly-viz 进程统一写 rerun。
 fn publish_frontend_health(viz_pub: &VizPublisher, t_sim: f64, camera_time: f64, vio: &VioManager) {
-    diagnostics::publish(viz_pub, vio);
+    diagnostics::publish(viz_pub, camera_time, vio);
     let db = vio.track_feats.database();
     let mut hist = vec![0i64; 21];
     let mut total_len = 0usize;

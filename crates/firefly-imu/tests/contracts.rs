@@ -12,6 +12,47 @@ fn state() -> AttitudeState {
         covariance: Matrix6::identity() * 0.001,
     }
 }
+
+#[test]
+fn aid_diagnostics_preserve_joint_nis_and_rejection() {
+    for bias_z in [0.0001, -0.0019] {
+        let mut local = state();
+        let mut external = state();
+        for axis in 0..3 {
+            local.covariance[(axis + 3, axis + 3)] = 5e-8;
+            external.covariance[(axis + 3, axis + 3)] = 1e-8;
+        }
+        // 相关的 x/z 零偏，解析逆矩阵保留非对角项。
+        local.covariance[(3, 5)] = 2e-8;
+        local.covariance[(5, 3)] = 2e-8;
+        external.bias.z = bias_z;
+        let before = local.clone();
+        let result = local.intersect_diagnostic(&external).unwrap();
+        let variance = 2. * (5e-8 + 1e-8);
+        let cross = 2. * 2e-8;
+        let expected = bias_z * bias_z * variance / (variance * variance - cross * cross);
+        assert!((result.nis.unwrap() - expected).abs() < 1e-12);
+        assert!(
+            (result
+                .whitened_residual
+                .unwrap()
+                .iter()
+                .map(|x| x * x)
+                .sum::<f64>()
+                - expected)
+                .abs()
+                < 1e-12
+        );
+        assert_eq!(result.residual.unwrap(), [0., 0., 0., 0., 0., bias_z]);
+        assert!((result.residual_variance.unwrap()[5] - variance).abs() < 1e-20);
+        assert_eq!(result.accepted, bias_z > 0.);
+        if !result.accepted {
+            assert_eq!(local.rotation, before.rotation);
+            assert_eq!(local.bias, before.bias);
+            assert_eq!(local.covariance, before.covariance);
+        }
+    }
+}
 fn sample(t: f64) -> Sample {
     Sample {
         timestamp: t,
@@ -26,6 +67,36 @@ fn initialized() -> Estimator {
     }
     assert!(e.state().is_some());
     e
+}
+
+#[test]
+fn rejected_aid_records_measurement_time_without_refreshing_health() {
+    let mut estimator = initialized();
+    let mut aid = Aid {
+        timestamp: 2.1,
+        session: 7,
+        state: state(),
+    };
+    assert!(estimator.aid(&aid).unwrap());
+    for i in 211..=220 {
+        estimator
+            .observe(sample(f64::from(i) * 0.01), false)
+            .unwrap();
+    }
+    aid.timestamp = 2.2;
+    aid.state.bias.z = 0.01;
+    aid.state.covariance *= 1e-6;
+    let before = estimator.state().unwrap().clone();
+    assert!(!estimator.aid(&aid).unwrap());
+    assert_eq!(estimator.aid_gate_time(), Some(2.2));
+    assert_eq!(estimator.last_aid(), Some(2.1));
+    assert!(estimator.aid_gate().nis.unwrap() > 22.457_744_484_825_323);
+    assert_eq!(estimator.state().unwrap().covariance, before.covariance);
+    assert_eq!(estimator.state().unwrap().bias, before.bias);
+    assert_eq!(estimator.state().unwrap().rotation, before.rotation);
+    aid.timestamp = 10.;
+    assert!(!estimator.aid(&aid).unwrap());
+    assert_eq!(estimator.aid_gate_time(), Some(2.2));
 }
 fn perturb(s: &AttitudeState, delta: SVector<f64, 6>) -> AttitudeState {
     AttitudeState {

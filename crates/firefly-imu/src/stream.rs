@@ -45,6 +45,7 @@ pub struct Estimator {
     last_aid: Option<f64>,
     gate: Gate,
     aid_gate: Intersection,
+    aid_gate_time: Option<f64>,
 }
 impl Estimator {
     /// # Errors
@@ -66,6 +67,7 @@ impl Estimator {
             last_aid: None,
             gate: Gate::default(),
             aid_gate: Intersection::default(),
+            aid_gate_time: None,
         })
     }
     #[must_use]
@@ -87,6 +89,11 @@ impl Estimator {
     #[must_use]
     pub const fn aid_gate(&self) -> Intersection {
         self.aid_gate
+    }
+    /// 最近一次完成创新检验的测量时刻，包括被拒绝的外援。
+    #[must_use]
+    pub const fn aid_gate_time(&self) -> Option<f64> {
+        self.aid_gate_time
     }
     #[must_use]
     pub fn last_aid(&self) -> Option<f64> {
@@ -287,6 +294,7 @@ impl Estimator {
             alignment = Some(rotation);
         }
         self.aid_gate = state.intersect_diagnostic(&aid.state)?;
+        self.aid_gate_time = Some(aid.timestamp);
         if !self.aid_gate.accepted {
             return Ok(false);
         }
