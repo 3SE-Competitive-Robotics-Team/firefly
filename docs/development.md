@@ -21,6 +21,15 @@
   由消息模块导出；独立接收深度和服务容量用 `SubscriberOptions`。需要事件唤醒的发布端
   显式使用 `with_topic_notify`，trace 用户头由泛型端口统一处理。
 
+### 地面站 CLI
+
+`ffctl` 用 `usage-rs`，固定 `<域> <动词>` 两层，命令声明在 `apps/ffctl/src/cli/`。新增子命令：
+在 `cli/<域>/` 加一个文件，`#[derive(Args)]` 与 `impl Run` 写在一起，再在该域的动词枚举里
+挂上；新增域则在 `cli/<域>/mod.rs` 建容器、在顶层 `Command` 挂上并给 `display_order`。
+取值与约束写成 `usage-rs` 的声明式属性（`value_enum`、`validate` 等），`main.rs` 通常不动。
+框架用法见官方 [Rust 框架文档](https://usage.jdx.dev/rust/) 的 quickstart、subcommands、
+args-and-flags、validation。
+
 ### 注释规范
 
 - **禁止过程叙事**：注释只描述现在的设计与约束，不写「曾/旧版/之前/原来/不再/
