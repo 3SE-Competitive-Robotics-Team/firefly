@@ -18,21 +18,30 @@ class DroneEnv:
 
     参数：
         timestep: 物理步长（秒）。
-        gyro_noise: 陀螺仪白噪声标准差（rad/s）。
-        accel_noise: 加速度计白噪声标准差（m/s²）。
+        imu_period: IMU 采样周期（秒）；缺省为物理步长。
+        gyro_density: 陀螺仪连续白噪声密度（rad/s/√Hz）。
+        accel_density: 加速度计连续白噪声密度（m/s²/√Hz）。
     """
 
     def __init__(
         self,
-        timestep: float = 0.005,
-        gyro_noise: float = 0.002,
-        accel_noise: float = 0.02,
+        timestep: float = 0.001,
+        imu_period: float | None = None,
+        gyro_density: float = 2.0e-4,
+        accel_density: float = 2.0e-3,
     ) -> None:
+        if imu_period is None:
+            imu_period = timestep
+        if not np.isfinite([timestep, imu_period, gyro_density, accel_density]).all():
+            raise ValueError("物理步长、IMU 周期与噪声密度必须有限")
+        if timestep <= 0 or imu_period < timestep or gyro_density < 0 or accel_density < 0:
+            raise ValueError("物理步长须为正，IMU 周期不得短于物理步长，噪声密度不得为负")
         self.model = mujoco.MjModel.from_xml_string(build_scene())
         self.model.opt.timestep = timestep
         self.data = mujoco.MjData(self.model)
-        self._gyro_noise = gyro_noise
-        self._accel_noise = accel_noise
+        # 周期平均白噪声的方差为 density²/Δt，与估计器的离散测量模型一致。
+        self._gyro_noise = gyro_density / np.sqrt(imu_period)
+        self._accel_noise = accel_density / np.sqrt(imu_period)
 
         self._drone_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_BODY, "drone"

@@ -30,13 +30,14 @@ def test_collision_asset_is_required(tmp_path, monkeypatch):
         scene.build_scene()
 
 
-def test_physics_and_imu_without_renderer(tmp_path, monkeypatch):
+@pytest.mark.parametrize("rate", [200, 1000])
+def test_physics_and_imu_without_renderer(tmp_path, monkeypatch, rate):
     monkeypatch.setattr(scene, "_RMUC_DIR", tmp_path)
     # 测试台阶顶面与停机坪同高，足够覆盖机体；不表示完整 RMUC 场地。
     (tmp_path / "rmuc2026_collision.json").write_text(json.dumps({
         "boxes": [[-13.0, 0.0, 0.1875, 0.5, 0.5, 0.1875]],
     }))
-    env = DroneEnv(gyro_noise=0.0, accel_noise=0.0)
+    env = DroneEnv(timestep=1.0 / rate, gyro_density=0.0, accel_density=0.0)
     np.testing.assert_allclose(env.state()[0], scene.drone_pad())
     assert env.data.ncon == 0
     assert env.model.nu == 4
@@ -44,14 +45,14 @@ def test_physics_and_imu_without_renderer(tmp_path, monkeypatch):
     assert env.mass == pytest.approx(0.219)
     assert np.all(env.inertia_body() > 0)
     env.apply_motor_thrusts(np.zeros(4))
-    for _ in range(400):
+    for _ in range(2 * rate):
         env.step()
     gyro, accel = env.imu()
     np.testing.assert_allclose(gyro, 0.0, atol=1e-5)
     np.testing.assert_allclose(accel, [0.0, 0.0, 9.81], atol=1e-3)
     assert env.state()[0][2] > scene.PAD[2]
     env.apply_motor_thrusts(np.full(4, env.airframe()["max_thrust_per_motor"]))
-    for _ in range(40):
+    for _ in range(round(0.2 * rate)):
         env.step()
     assert env.state()[1][2] > 0.5
 
@@ -61,7 +62,7 @@ def test_sensor_snapshot_uses_integrated_state(tmp_path, monkeypatch):
     (tmp_path / "rmuc2026_collision.json").write_text(json.dumps({
         "boxes": [[-13.0, 0.0, 0.1875, 0.5, 0.5, 0.1875]],
     }))
-    env = DroneEnv(gyro_noise=0.0, accel_noise=0.0)
+    env = DroneEnv(gyro_density=0.0, accel_density=0.0)
     origin = np.array([0.0, 0.0, 5.0])
     env.reset(origin, np.array([0.0, 0.0, 0.0, 1.0]))
     env.data.qvel[:3] = [1.0, 0.0, 0.0]
@@ -80,3 +81,23 @@ def test_sensor_snapshot_uses_integrated_state(tmp_path, monkeypatch):
         np.testing.assert_array_equal(gt_position, position)
         np.testing.assert_array_equal(gt_quaternion, quaternion)
         np.testing.assert_array_equal(gt_velocity, velocity)
+
+
+@pytest.mark.parametrize("imu_rate", [100, 1000])
+def test_imu_noise_preserves_continuous_density(tmp_path, monkeypatch, imu_rate):
+    import tomllib
+    from pathlib import Path
+
+    monkeypatch.setattr(scene, "_RMUC_DIR", tmp_path)
+    (tmp_path / "rmuc2026_collision.json").write_text(json.dumps({
+        "boxes": [[-13.0, 0.0, 0.1875, 0.5, 0.5, 0.1875]],
+    }))
+    env = DroneEnv(imu_period=1.0 / imu_rate)
+    env._rng = np.random.default_rng(20260930)
+    samples = np.array([np.concatenate(env.imu()) for _ in range(20000)])
+    variance = samples.var(axis=0, ddof=1)
+    with (Path(__file__).resolve().parents[3] / "configs/vio.toml").open("rb") as stream:
+        imu = tomllib.load(stream)["imu"]
+    density_squared = np.array([imu["gyro_noise"] ** 2] * 3 + [imu["accel_noise"] ** 2] * 3)
+    # 由实际噪声样本估计每秒积分方差：N·Var(sample)·Δt²。
+    np.testing.assert_allclose(variance / imu_rate, density_squared, rtol=0.03)

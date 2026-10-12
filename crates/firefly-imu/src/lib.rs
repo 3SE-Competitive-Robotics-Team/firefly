@@ -17,11 +17,11 @@ pub use stream::{Aid, Estimator, Sample};
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(default)]
 pub struct Options {
-    /// rad/s/√Hz，MuJoCo 100Hz 下每样本 0.002 rad/s。
+    /// rad/s/√Hz，采样标准差为 density/√Δt。
     pub gyro_density: f64,
     /// rad/s²/√Hz，保守零偏随机游走模型；需由部署 IMU 标定。
     pub bias_walk: f64,
-    /// m/s²/√Hz，MuJoCo 100Hz 下每样本 0.02 m/s²。
+    /// m/s²/√Hz，采样标准差为 density/√Δt。
     pub accel_density: f64,
     /// m/s²，静止加计模型余量（安装振动与未估计的加计零偏）。
     pub accel_model_std: f64,
@@ -31,9 +31,9 @@ pub struct Options {
     pub accel_nis_limit: f64,
     /// s，连续静止窗口。
     pub stationary_seconds: f64,
-    /// rad/s，静止窗口每轴陀螺标准差上限。
+    /// rad/s，静止窗口每轴陀螺运动标准差余量；测量白噪声方差另加。
     pub stationary_gyro_std: f64,
-    /// m/s²，静止窗口每轴加计标准差上限。
+    /// m/s²，静止窗口每轴加计运动标准差余量；测量白噪声方差另加。
     pub stationary_accel_std: f64,
     /// rad/s，静止窗口陀螺均值模长上限。
     pub stationary_gyro_max: f64,
@@ -54,8 +54,9 @@ impl Default for Options {
             gravity: 9.81,
             accel_nis_limit: 11.344_866_730_144_373,
             stationary_seconds: 2.0,
-            stationary_gyro_std: 0.005,
-            stationary_accel_std: 0.1,
+            // 100Hz 标定预算扣除测量白噪声，运动余量不随采样率变化。
+            stationary_gyro_std: (0.005_f64.powi(2) - 0.002_f64.powi(2)).sqrt(),
+            stationary_accel_std: (0.1_f64.powi(2) - 0.02_f64.powi(2)).sqrt(),
             stationary_gyro_max: 0.05,
             stationary_accel_error: 0.3,
             max_dt: 0.05,

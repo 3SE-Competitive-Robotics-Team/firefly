@@ -32,6 +32,10 @@ pub fn publish(viz_pub: &VizPublisher, camera_time: f64, vio: &VioManager) {
             rows.as_flattened(),
         ));
     }
+    // 初始化前没有有效滤波状态或更新时刻；像素观测仍按相机时钟记录。
+    if !vio.initialized() {
+        return;
+    }
     let publish = |entity: &str, values: &[f64]| {
         for (part, values) in values.chunks(4).enumerate() {
             let path = if part == 0 {
@@ -82,4 +86,61 @@ pub fn publish(viz_pub: &VizPublisher, camera_time: f64, vio: &VioManager) {
             vio.state.features_slam.len() as f64,
         ],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use firefly_pubsub::{
+        node::create_node,
+        subscriber::Subscriber,
+        viz::{SCALAR_TOPIC, VIZ_BUFFER_SIZE},
+    };
+    use firefly_vio::options::VioManagerOptions;
+    use firefly_vio_core::track::{HistogramMethod, TrackKlt};
+    use std::collections::{BTreeMap, HashMap};
+
+    #[test]
+    fn startup_diagnostics_do_not_publish_uninitialized_filter_state() {
+        let tracker = TrackKlt::new(
+            HashMap::new(),
+            1,
+            0,
+            false,
+            HistogramMethod::None,
+            10,
+            5,
+            5,
+            15,
+        );
+        let vio = VioManager::new(VioManagerOptions::default(), BTreeMap::new(), tracker);
+        assert!(!vio.initialized() && vio.state.timestamp < 0.);
+        let node = create_node().unwrap();
+        let publisher = VizPublisher::new(&node).unwrap();
+        let scalars = Subscriber::<ScalarMessage>::with_topic_and_buffer(
+            &node,
+            SCALAR_TOPIC,
+            VIZ_BUFFER_SIZE,
+        )
+        .unwrap();
+        super::publish(&publisher, 0.1, &vio);
+        assert!(scalars.receive().unwrap().is_none());
+        crate::publish_frontend_health(&publisher, 0.2, 0.1, &vio);
+        let mut count = 0;
+        while let Some(message) = scalars.receive().unwrap() {
+            assert!(message.timestamp.is_finite() && message.timestamp >= 0.);
+            let entity =
+                std::str::from_utf8(&message.entity[..message.entity_len as usize]).unwrap();
+            assert!(
+                [
+                    "vio/debug/db_size",
+                    "vio/debug/camera_age",
+                    "vio/debug/track_avg_len"
+                ]
+                .contains(&entity)
+            );
+            count += 1;
+        }
+        assert_eq!(count, 3);
+    }
 }

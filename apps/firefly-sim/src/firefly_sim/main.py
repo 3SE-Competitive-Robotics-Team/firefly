@@ -179,13 +179,18 @@ def main() -> None:
     trace_enabled = not args.no_trace
     cfg = load_config(args.config)
     rates = cfg.get("rates", {})
-    physics_period = 1.0 / rates.get("physics", 200.0)
-    imu_period = 1.0 / rates.get("imu", 100.0)
-    cam_period = 1.0 / rates.get("cam", 10.0)
+    frequencies = [rates.get("physics", 1000.0), rates.get("imu", 1000.0), rates.get("pose", 10.0)]
+    if not np.isfinite(frequencies).all() or any(rate <= 0 for rate in frequencies):
+        raise ValueError("物理、IMU 与位姿频率必须有限且为正")
+    for rate in frequencies[1:]:
+        ratio = frequencies[0] / rate
+        if ratio < 1 or abs(ratio - round(ratio)) > 1e-9:
+            raise ValueError("物理频率必须为 IMU 与位姿频率的整数倍")
+    physics_period, imu_period, pose_period = (1.0 / rate for rate in frequencies)
     # 停机坪：缺配置时按场景定义（`firefly_mujoco.scene.PAD`）——上电停在地面
     load_scene_name()
     start_pos = np.array(cfg.get("start", drone_pad()))
-    env = DroneEnv(timestep=physics_period)
+    env = DroneEnv(timestep=physics_period, imu_period=imu_period)
     env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))  # xyzw 单位四元数
     ftrace.init(enabled=trace_enabled)
     airframe = env.airframe()
@@ -226,8 +231,8 @@ def main() -> None:
     physics_paused = False
 
     cycle = None
-    next_imu = 0.0
-    next_cam = 0.0
+    next_imu = imu_period
+    next_pose = 0.0
     next_airframe = 0.0
     t_start = time.perf_counter()
     try:
@@ -276,13 +281,13 @@ def main() -> None:
                 _publish_airframe(airframe_pub, env, t)
                 next_airframe = t + AIRFRAME_PERIOD
 
-            # 新相机帧 → 新周期 trace（周期内所有发布共享同一 trace_id）
-            if t + 1e-12 >= next_cam:
+            # 位姿发布节拍开启 trace 周期，周期内所有发布共享同一 trace_id。
+            if t + 1e-12 >= next_pose:
                 if cycle is not None:
                     ftrace.end_cycle(cycle)
                 cycle = ftrace.start_cycle()
 
-            # 100Hz IMU（当前周期的子 span）
+            # IMU（当前周期的子 span）
             if t + 1e-12 >= next_imu:
                 gyro, accel = env.imu()
                 msg = ImuMessage()
@@ -292,7 +297,7 @@ def main() -> None:
                 _publish_traced(imu_pub, cycle, "publish-imu", msg, t)
                 _notify(imu_notify)
                 # 推进到 t 之后的网格点（防止 t 越过后下一步重复发布，
-                # 保证 IMU 严格 0.01s 间隔、相机严格 0.1s 间隔）
+                # 保证传感器时间戳落在各自的采样网格上）
                 next_imu, skipped = advance_grid(next_imu, t, imu_period)
                 if skipped >= 1:
                     # 物理不可倒带：跳过的采样永久丢失（VIO 断流告警的对端证据）。
@@ -305,22 +310,22 @@ def main() -> None:
                     )
 
             # 仿真位姿供 render 摆放传感器及评测使用。
-            if t + 1e-12 >= next_cam:
+            if t + 1e-12 >= next_pose:
                 _publish_gt(gt_pub, cycle, env, t)
-                next_cam, skipped = advance_grid(next_cam, t, cam_period)
+                next_pose, skipped = advance_grid(next_pose, t, pose_period)
                 if skipped >= 1:
                     log(
-                        "相机追赶跳过 {} 帧（{:.2f}s 图像丢失）".format(
-                            skipped, skipped * cam_period
+                        "位姿追赶跳过 {} 样本（{:.2f}s 位姿数据丢失）".format(
+                            skipped, skipped * pose_period
                         ),
                         LOG_LEVEL_WARN,
                         t,
                     )
-            # 实时节奏（--no-trace 时仍限速 1x：步进 0.36ms << 5ms 预算，sleep 自动限速）
+            # 以仿真时刻为绝对截止时间，处理耗时计入物理周期预算。
             wall = time.perf_counter() - t_start
             target = t
-            if wall < target - physics_period:
-                time.sleep(target - wall - physics_period)
+            if wall < target:
+                time.sleep(target - wall)
     except KeyboardInterrupt:
         if cycle is not None:
             ftrace.end_cycle(cycle)

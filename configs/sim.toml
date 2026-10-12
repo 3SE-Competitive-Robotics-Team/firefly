@@ -5,6 +5,6 @@
 # （`ffctl takeoff`），清单不起飞。需要临时改起点时才在此加 `start = [x, y, z]`。
 
 [rates]
-physics = 200.0 # Hz
-imu = 100.0 # Hz
-cam = 10.0 # Hz（仿真位姿；render 据此生成双目与深度）
+physics = 1000.0 # Hz
+imu = 1000.0 # Hz
+pose = 10.0 # Hz（GroundTruth 位姿；render 据此生成双目与深度）

@@ -1,11 +1,11 @@
 //! 飞控进程：1kHz 控制环（`firefly-flight`）+ iceoryx2。
 //!
 //! 输入：
-//! - `Firefly/PlantState`（真值，200Hz）——仅供倾斜误差评测。
+//! - `Firefly/PlantState`（真值，每物理步）——仅供倾斜误差评测。
 //! - `Firefly/Airframe`（质量/惯量/旋翼几何/电机上限，1Hz 电平）——飞控参数的唯一来源；
 //! - `Firefly/Odometry`——连续 odom 系位置/速度/航向反馈；
 //! - `Firefly/CorrectedOdometry`——同时间戳配对建立 map←odom，转换地图参考；
-//! - `Firefly/Imu`（陀螺 + 加计，100Hz）——独立线程的姿态 ESKF；
+//! - `Firefly/Imu`（陀螺 + 加计，1kHz）——独立线程的姿态 ESKF；
 //! - `Firefly/VioAttitudeAid`——odom 系姿态、零偏与六维协方差外援；
 //! - `Firefly/Reference`（规划参考：位置/速度/偏航/偏航角速度）；
 //! - `Firefly/Command`（地面站指令：解锁/上锁/起飞/保持/跟踪/降落）。
@@ -55,7 +55,7 @@ const DEFAULT_CONFIG: &str = "configs/fc.toml";
 const SPIN_MARGIN: Duration = Duration::from_micros(150);
 /// 里程计陈旧阈值（墙钟秒）：覆盖 10Hz 视觉更新间隔，触发姿态降级。
 const ODOM_STALE_LIMIT: Duration = Duration::from_millis(500);
-/// IMU 陈旧阈值（墙钟）：100Hz 下 5 个周期；陈旧则不得解锁。
+/// IMU 陈旧阈值（墙钟）；陈旧则不得解锁。
 const IMU_STALE_LIMIT: Duration = Duration::from_millis(50);
 /// 参考流新鲜窗口（墙钟）：planner 以 10Hz 发布，5 帧未到即视为流断（断开后由
 /// 状态机的 `reference_timeout` 计时回落位置保持）。

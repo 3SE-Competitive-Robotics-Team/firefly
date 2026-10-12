@@ -115,7 +115,7 @@ def _rmuc_collision_xml() -> str:
 def build_scene() -> str:
     """RMUC2026 场地：Bevy 负责视觉（`field.glb`），MuJoCo 只加载聚合碰撞盒。"""
     return rf"""<mujoco model="firefly-rmuc2026">
-  <option timestep="0.005" gravity="0 0 -9.81"/>
+  <option timestep="0.001" gravity="0 0 -9.81"/>
 
   <worldbody>
     <!-- 视觉：Bevy 载 models/rmuc2026/field.glb；物理只有下面的透明碰撞盒 -->

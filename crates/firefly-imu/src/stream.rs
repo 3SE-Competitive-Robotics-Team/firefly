@@ -222,10 +222,23 @@ impl Estimator {
             return false;
         }
         let (g, a, gv, av) = self.moments();
+        // 对 1/N 中心化样本方差，独立异方差白噪声的期望为
+        // (N-1)/N² · Σ density²/Δti；首样本采用相邻周期。
+        let n = self.window.len() as f64;
+        let mut inverse_periods = 0.;
+        for i in 1..self.window.len() {
+            let dt = self.window[i].timestamp - self.window[i - 1].timestamp;
+            inverse_periods += if i == 1 { 2. / dt } else { 1. / dt };
+        }
+        let noise_scale = (n - 1.) / n.powi(2) * inverse_periods;
         g.norm() <= self.options.stationary_gyro_max
             && (a.norm() - self.options.gravity).abs() <= self.options.stationary_accel_error
-            && gv.max() <= self.options.stationary_gyro_std.powi(2)
-            && av.max() <= self.options.stationary_accel_std.powi(2)
+            && gv.max()
+                <= self.options.stationary_gyro_std.powi(2)
+                    + self.options.gyro_density.powi(2) * noise_scale
+            && av.max()
+                <= self.options.stationary_accel_std.powi(2)
+                    + self.options.accel_density.powi(2) * noise_scale
     }
 
     /// 外援在其观测时刻融合，再按已接收 IMU 重放到当前时刻。

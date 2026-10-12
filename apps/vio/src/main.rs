@@ -45,7 +45,7 @@ use input::IceoryxInput;
 /// `configs/vio.toml` 缺省路径（相对运行目录，通常为仓库根）。
 const DEFAULT_CONFIG: &str = "configs/vio.toml";
 
-/// odom 发布周期（秒）：100Hz（IMU propagation 速率，视觉仍 10Hz 修正）。
+/// odom 发布周期（秒）：100Hz 位置反馈；本地姿态由 FC 独立消费全部 IMU。
 const ODOM_PERIOD: f64 = 0.01;
 /// 可视化发布周期（秒）：10Hz（位姿/轨迹，防 Viz 话题洪泛）。
 const VIZ_PERIOD: f64 = 0.1;
@@ -221,7 +221,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// IMU 断流警戒阈值（正常 100Hz，超过视为断流）。
+/// IMU 断流警戒阈值（墙钟，超过视为断流）。
 const IMU_STALL: Duration = Duration::from_millis(200);
 /// 兜底心跳周期：无事件时也周期醒来（断流警戒/诊断打印/odom 节拍兜底）。
 const HEARTBEAT: Duration = Duration::from_millis(100);
@@ -476,16 +476,18 @@ fn publish_frontend_health(viz_pub: &VizPublisher, t_sim: f64, camera_time: f64,
     } else {
         0.0
     };
-    for (entity, values) in [
-        ("vio/debug/filter_position", vio.state.imu.pos()),
-        ("vio/debug/filter_velocity", vio.state.imu.vel()),
-        ("vio/debug/accel_bias", vio.state.imu.bias_a()),
-        ("vio/debug/gyro_bias", vio.state.imu.bias_g()),
-    ] {
-        let mut msg = ScalarMessage::base(vio.state.timestamp, entity);
-        msg.scalars[..3].copy_from_slice(values.as_slice());
-        msg.scalar_count = 3;
-        let _ = viz_pub.publish(msg);
+    if vio.initialized() {
+        for (entity, values) in [
+            ("vio/debug/filter_position", vio.state.imu.pos()),
+            ("vio/debug/filter_velocity", vio.state.imu.vel()),
+            ("vio/debug/accel_bias", vio.state.imu.bias_a()),
+            ("vio/debug/gyro_bias", vio.state.imu.bias_g()),
+        ] {
+            let mut msg = ScalarMessage::base(vio.state.timestamp, entity);
+            msg.scalars[..3].copy_from_slice(values.as_slice());
+            msg.scalar_count = 3;
+            let _ = viz_pub.publish(msg);
+        }
     }
     // BarChart: x=track_length, y=count
     let mut hist_msg = VizMessage::base(kind::BAR_CHART, t_sim, "vio/debug/track_length");

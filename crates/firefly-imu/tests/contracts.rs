@@ -134,6 +134,26 @@ fn zero_time_identity_and_zero_rate_noise_have_closed_form() {
         assert!((s.covariance[(i + 3, i + 3)] - (0.001 + o.bias_walk.powi(2) * dt)).abs() < 1e-14);
     }
 }
+
+#[test]
+fn one_second_process_covariance_is_independent_of_sample_rate() {
+    let o = Options::default();
+    for hz in [100, 1000] {
+        let mut s = state();
+        for _ in 0..hz {
+            s.predict(Vector3::zeros(), 1. / f64::from(hz), &o).unwrap();
+        }
+        // T=1s 的闭式积分，含零偏随机游走对姿态的贡献和交叉协方差。
+        for i in 0..3 {
+            let angular = 0.002 + o.gyro_density.powi(2) + o.bias_walk.powi(2) / 3.;
+            let cross = -0.001 - o.bias_walk.powi(2) / 2.;
+            let bias = 0.001 + o.bias_walk.powi(2);
+            assert!((s.covariance[(i, i)] - angular).abs() < 1e-14);
+            assert!((s.covariance[(i, i + 3)] - cross).abs() < 1e-14);
+            assert!((s.covariance[(i + 3, i + 3)] - bias).abs() < 1e-14);
+        }
+    }
+}
 #[test]
 fn transition_matches_independent_nominal_dynamics_difference() {
     let o = Options::default();
@@ -453,7 +473,12 @@ fn invalid_configuration_measurements_and_covariances_are_rejected() {
 
 #[test]
 fn initialization_bias_covariance_follows_density_rate_and_window() {
-    for (density, hz, seconds) in [(2e-4, 100, 2.), (0.004, 100, 2.), (0.004, 50, 4.)] {
+    for (density, hz, seconds) in [
+        (2e-4, 100, 2.),
+        (2e-4, 1000, 2.),
+        (0.004, 100, 2.),
+        (0.004, 50, 4.),
+    ] {
         let options = Options {
             gyro_density: density,
             stationary_seconds: seconds,
@@ -476,6 +501,33 @@ fn initialization_bias_covariance_follows_density_rate_and_window() {
             (s.covariance.fixed_view::<3, 3>(3, 3) - Matrix3::identity() * expected).amax() < 1e-17
         );
         assert!(s.covariance.cholesky().is_some());
+    }
+}
+
+#[test]
+fn stationary_detection_accounts_for_sample_noise_without_accepting_motion() {
+    for hz in [100, 1000] {
+        for moving in [false, true] {
+            let options = Options::default();
+            let mut e = Estimator::new(options).unwrap();
+            let gyro_std = if moving {
+                0.02
+            } else {
+                options.gyro_density * f64::from(hz).sqrt()
+            };
+            let accel_std = options.accel_density * f64::from(hz).sqrt();
+            for i in 0..=2 * hz {
+                let sign = if i % 2 == 0 { 1. } else { -1. };
+                let mut s = sample(f64::from(i) / f64::from(hz));
+                s.gyro = Vector3::repeat(sign * gyro_std);
+                s.accel += Vector3::repeat(sign * accel_std);
+                e.observe(s, true).unwrap();
+                if i < 2 * hz {
+                    assert!(e.state().is_none());
+                }
+            }
+            assert_eq!(e.state().is_some(), !moving, "hz={hz}, moving={moving}");
+        }
     }
 }
 

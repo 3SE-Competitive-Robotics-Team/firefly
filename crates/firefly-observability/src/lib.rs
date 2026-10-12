@@ -86,8 +86,8 @@ impl fastrace::collector::Reporter for CompactReporter {
     }
 }
 
-/// 当前 sim 时钟（秒）的位表示；`NaN` = 尚无 sim 时钟（聚合端回落墙钟轴）。
-static SIM_TIME_BITS: AtomicU64 = AtomicU64::new(f64::NAN.to_bits());
+/// 当前 sim 时钟（秒）的位表示；负值表示尚无 sim 时钟（聚合端回落墙钟轴）。
+static SIM_TIME_BITS: AtomicU64 = AtomicU64::new((-1.0_f64).to_bits());
 
 /// 更新本进程的 sim 时钟（主循环每 tick 调用一次；`firefly-viz` 聚合端除外）。
 pub fn set_sim_time(t: f64) {
@@ -258,4 +258,15 @@ pub fn flush() {
     // 残余落盘）；此处只刷 trace（logforth stderr 无缓冲）。
     // 注：`flush()` 签名保持无参——调用方退出路径手补一次 pump 即可。
     fastrace::flush();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn startup_log_clock_satisfies_wire_timestamp_contract() {
+        let time = f64::from_bits(super::sim_time_bits());
+        assert!(time.is_finite() && time < 0.);
+        super::set_sim_time(0.001);
+        assert_eq!(super::sim_time_bits(), 0.001_f64.to_bits());
+    }
 }

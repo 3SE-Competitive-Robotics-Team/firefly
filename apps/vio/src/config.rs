@@ -35,18 +35,17 @@ impl Default for Camera {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct Imu {
-    /// 陀螺白噪声密度，rad/s/√Hz；MuJoCo 每采样 σ=0.002、100 Hz。
+    /// 陀螺白噪声密度，rad/s/√Hz；采样标准差为 density/√Δt。
     pub gyro_noise: f64,
     pub gyro_walk: f64,
-    /// 加速度白噪声密度，m/s²/√Hz；MuJoCo 每采样 σ=0.02、100 Hz。
+    /// 加速度白噪声密度，m/s²/√Hz；采样标准差为 density/√Δt。
     pub accel_noise: f64,
     pub accel_walk: f64,
 }
 
 impl Default for Imu {
     fn default() -> Self {
-        // MuJoCo 注入：σ_gyro=0.002 rad/s、σ_accel=0.02 m/s² 每采样高斯
-        // @100Hz → 连续谱密度 σ_cont = σ_disc/√fs
+        // 连续密度与 MuJoCo 采样噪声同源；离散方差由实际测量周期决定。
         Self {
             gyro_noise: 2.0e-4,
             gyro_walk: 1.9e-5,
@@ -179,17 +178,21 @@ mod tests {
     }
 
     #[test]
-    fn imu_density_matches_simulator_sample_variance() {
+    fn imu_density_preserves_calibrated_integral_variance_across_rates() {
         let config = VioConfig::load(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../configs/vio.toml"
         ))
         .unwrap();
-        let sim: toml::Value = toml::from_str(include_str!("../../../configs/sim.toml")).unwrap();
-        let rate = sim["rates"]["imu"].as_float().unwrap();
         for imu in [config.imu, super::Imu::default()] {
-            assert!((imu.gyro_noise.powi(2) * rate - 0.002_f64.powi(2)).abs() < 1e-15);
-            assert!((imu.accel_noise.powi(2) * rate - 0.02_f64.powi(2)).abs() < 1e-15);
+            for rate in [100., 1000.] {
+                // 同一秒积分噪声方差 = N·(σ_density²·fs)·Δt² = σ_density²。
+                let gyro_integral_variance = rate * (imu.gyro_noise.powi(2) * rate) / rate.powi(2);
+                let accel_integral_variance =
+                    rate * (imu.accel_noise.powi(2) * rate) / rate.powi(2);
+                assert!((gyro_integral_variance - 4e-8).abs() < 1e-18);
+                assert!((accel_integral_variance - 4e-6).abs() < 1e-18);
+            }
         }
     }
 

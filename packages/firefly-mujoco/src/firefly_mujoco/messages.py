@@ -134,7 +134,7 @@ class OdomMessage(ctypes.Structure):
 
 
 class PlantStateMessage(ctypes.Structure):
-    """被控对象状态（真值，200Hz）：与 Rust `PlantStateMessage`（`FireflyPlantStateMessage`）一致。
+    """被控对象状态（真值，每物理步）：与 Rust `PlantStateMessage`（`FireflyPlantStateMessage`）一致。
 
     姿态为**机体→世界** Hamilton 四元数 `[x, y, z, w]`（与 `firefly-flight` 的
     `QuadState::attitude` 同约定）；角速度为机体系。注意与 `OdomMessage` 的
@@ -207,7 +207,7 @@ class ControlMessage(ctypes.Structure):
         return "FireflyControlMessage"
 
 
-#: 被控对象状态话题（sim → 飞控，200Hz）
+#: 被控对象状态话题（sim → 飞控，每物理步）
 PLANT_STATE_TOPIC = "Firefly/PlantState"
 #: 机体/执行器描述话题（sim → 飞控，1Hz 电平）
 AIRFRAME_TOPIC = "Firefly/Airframe"
