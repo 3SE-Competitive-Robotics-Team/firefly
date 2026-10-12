@@ -26,7 +26,7 @@ use crate::updater_helper::measurement_compress_inplace;
 
 /// 计算两时刻间的特征平均视差（对照 `FeatureHelper::compute_disparity`）。
 ///
-/// 返回 `(平均视差, 方差, 特征数)`；无共同特征时返回 `None`。
+/// 返回 `(平均视差, 样本标准差, 特征数)`；少于两个配对观测时返回 `None`。
 #[must_use]
 pub fn compute_disparity(
     db: &FeatureDatabase,
@@ -40,15 +40,19 @@ pub fn compute_disparity(
     for feat in feats0 {
         for (cam_id, times) in &feat.timestamps {
             // 该相机在 time0/time1 都有测量（精确相等；对照 C++ 的 find）
-            let idx0 = times.iter().position(|t| t.total_cmp(&time0).is_eq())?;
-            let idx1 = times.iter().position(|t| t.total_cmp(&time1).is_eq())?;
+            let (Some(idx0), Some(idx1)) = (
+                times.iter().position(|t| t.total_cmp(&time0).is_eq()),
+                times.iter().position(|t| t.total_cmp(&time1).is_eq()),
+            ) else {
+                continue;
+            };
             let uv0 = feat.uvs[cam_id][idx0];
             let uv1 = feat.uvs[cam_id][idx1];
             let d = (uv1 - uv0).norm();
             disparities.push(f64::from(d));
         }
     }
-    if disparities.is_empty() {
+    if disparities.len() < 2 {
         return None;
     }
     let n = disparities.len() as f64;
@@ -57,8 +61,8 @@ pub fn compute_disparity(
         .iter()
         .map(|d| (d - mean) * (d - mean))
         .sum::<f64>()
-        / n;
-    Some((mean, var, disparities.len()))
+        / (n - 1.);
+    Some((mean, var.sqrt(), disparities.len()))
 }
 
 /// 零速更新器（对照 `UpdaterZeroVelocity`；阈值参数对应官方 `zupt_*` 系列）。
@@ -314,10 +318,10 @@ mod tests {
     use firefly_vio_core::sensor::ImuData;
 
     #[test]
-    fn disparity_reads_history_without_mutation_and_preserves_rejection() {
+    fn disparity_skips_unpaired_observations_without_mutating_history() {
         let mut db = FeatureDatabase::new();
         assert!(compute_disparity(&db, 1., 2.).is_none());
-        // 两相机的位移分别为 3 和 5 像素，均值 4、总体方差 1。
+        // 两相机位移为 3、5 像素，均值 4，样本标准差 √2。
         for (camera, du, dv) in [(0, 3., 0.), (1, 3., 4.)] {
             db.update_feature(1, 1., camera, 10., 20., 0., 0.);
             db.update_feature(1, 2., camera, 10. + du, 20. + dv, 0., 0.);
@@ -333,7 +337,7 @@ mod tests {
         let before = feature.clone();
         let (mean, variance, count) = compute_disparity(&db, 1., 2.).unwrap();
         assert!((mean - 4.).abs() < 1e-12);
-        assert!((variance - 1.).abs() < 1e-12);
+        assert!((variance - 2_f64.sqrt()).abs() < 1e-12);
         assert_eq!(count, 2);
         let feature = db
             .iter_features()
@@ -344,9 +348,13 @@ mod tests {
         assert_eq!(feature.uvs, before.uvs);
         assert_eq!(feature.uvs_norm, before.uvs_norm);
         assert_eq!(db.size(), 3);
-        // 命中的特征有相机缺少目标时刻时，查询整体拒绝。
+        // 单侧跟丢或其他相机缺失测量不应使完整配对失效。
         db.update_feature(1, 1., 2, 0., 0., 0., 0.);
-        assert!(compute_disparity(&db, 1., 2.).is_none());
+        db.update_feature(4, 1., 0, 0., 0., 0., 0.);
+        let (mean, std, count) = compute_disparity(&db, 1., 2.).unwrap();
+        assert!((mean - 4.).abs() < 1e-12);
+        assert!((std - 2_f64.sqrt()).abs() < 1e-12);
+        assert_eq!(count, 2);
     }
 
     fn zero_vel() -> UpdaterZeroVelocity {

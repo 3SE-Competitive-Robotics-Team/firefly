@@ -229,3 +229,62 @@ fn voxel_selection_ten_meter_stereo_has_metric_scale() {
         "协方差维度必须与克隆(PoseJpl)/SLAM 路标数严格对应（不留孤儿变量）"
     );
 }
+
+/// 小幅周期倾斜与平移下，精确观测不得产生虚假的加速度零偏。
+#[test]
+fn sustained_tilted_hover_preserves_zero_bias() {
+    let (mut manager, rc) = analytic_stereo_manager(false);
+    let mut initial = [0.; 17];
+    initial[4] = 1.;
+    initial[7] = 1.;
+    manager.initialize_with_gt(&initial);
+    let points = analytic_points();
+    let mut peak_bias = 0_f64;
+    let mut peak_tilt = 0_f64;
+    let mut slam_peak = 0;
+    for k in 0..=6000 {
+        let t = f64::from(k) * 0.01;
+        let angle = 0.08 * (0.7 * t).sin();
+        let r = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), angle);
+        let position = Vector3::new(0.1 * (1. - (0.5 * t).cos()), 0., 1.);
+        manager.feed_measurement_imu(&ImuData {
+            timestamp: t,
+            wm: Vector3::new(0.056 * (0.7 * t).cos(), 0., 0.),
+            am: r.inverse() * Vector3::new(0.025 * (0.5 * t).cos(), 0., 9.81),
+        });
+        if k == 0 || k % 10 != 0 {
+            continue;
+        }
+        manager.propagate_and_clone(t);
+        for (id, p) in points.iter().enumerate() {
+            for (cam, y) in [(0, -0.025), (1, 0.025)] {
+                let pc = rc * (r.inverse() * (p - position) - Vector3::new(0., y, 0.));
+                let (u, v) = (168.607 * pc.x / pc.z + 160., 168.607 * pc.y / pc.z + 120.);
+                if pc.z > 0.5 && (4. ..316.).contains(&u) && (4. ..236.).contains(&v) {
+                    manager.track_feats.database_mut().update_feature(
+                        id,
+                        t,
+                        cam,
+                        u as f32,
+                        v as f32,
+                        (pc.x / pc.z) as f32,
+                        (pc.y / pc.z) as f32,
+                    );
+                }
+            }
+        }
+        manager.do_feature_propagate_update(&CameraData {
+            timestamp: t,
+            sensor_ids: vec![0, 1],
+            images: vec![],
+            masks: vec![],
+        });
+        slam_peak = slam_peak.max(manager.state.features_slam.len());
+        peak_bias = peak_bias.max(manager.state.imu.bias_a().norm());
+        let estimated_gravity = manager.state.imu.pose().rot() * Vector3::z();
+        peak_tilt = peak_tilt.max(estimated_gravity.angle(&(r.inverse() * Vector3::z())));
+    }
+    assert!(slam_peak > 0, "persistent landmarks must participate");
+    assert!(peak_bias < 0.005, "peak accel bias {peak_bias}");
+    assert!(peak_tilt < 0.001, "peak tilt {peak_tilt}");
+}

@@ -115,6 +115,26 @@ VIO 会话改变锁存未对齐，需重启 FC；IMU 间隔超过 50ms 锁存不
 
 运行记录由 `firefly-viz` 写入 `logs/*.rrd`。
 
+### VIO 更新诊断
+
+所有诊断只写入 RRD，不回流估计器或控制器，时间轴为 `sim_time`。
+`vio/input/gyro` 与 `vio/input/accel` 保留送入 VIO 的原始 IMU 采样。
+`vio/debug/keypoints/{left,right}` 的 `track_id` 将像素轨迹与滤波路标关联。
+
+`vio/update/{msckf,slam,landmark_init,zero_velocity}` 按相机帧汇总：
+
+- `innovation`：残差维数之和、RMS、各次 NIS 之和、更新次数。
+- `correction`：各次局部切空间的 15 维修正之和，顺序为 θ、p、v、bg、ba。
+- `{before,after}/state`：首个更新前、最后更新后的 q_GtoI（JPL xyzw）、p、v、bg、ba。
+- `{before,after}/variance`：15 维误差状态对角方差。
+- `{before,after}/attitude_bias_covariance`：θ、bg、ba 的 9×9 联合边缘协方差。
+
+标量每四项拆成一个实体，后续块使用 `/1`、`/2`、`/3`。
+`vio/update/slam/features/{batch}` 为逐路标矩阵：列依次为 id、残差维数、RMS、NIS、
+是否接受，以及该路标对 θ、bg、ba 的九维修正贡献；拒绝项的贡献为零。
+各已接受路标贡献之和等于该批 SLAM 更新实际施加的修正。
+姿态单位 rad、速度 m/s、陀螺零偏 rad/s、加计零偏 m/s²；协方差使用相应单位的乘积。
+
 ## 参考与测试
 
 - Robo-Rust `eskf_imu.rs`：`cdd5611c327ee1637464663392bc928f178f6d20`；名义/误差状态结构参考。
@@ -162,3 +182,8 @@ uv run pytest tests/system/test_imu_flight.py -q -k imu_hover
 可设置 `FIREFLY_RUN_IMU_FLIGHT=1` 一并执行。
 CI 绿色不能代替上述命令的通过报告。修改姿态融合、初始化、坐标、前端或仿真传感器后，
 必须补跑该门控；悬停通过也不能代替 22m 往返精度与回环验收。
+
+十轮扰动悬停验收：`uv run pytest tests/system/test_hover_disturbance.py::test_hover_disturbance -q`。
+固定种子生成十个水平力脉冲，每轮等待 10 秒恢复，再验证连续 20 秒悬停；水平恢复误差
+必须 <0.2m，姿态健康沿用上述 2° 门槛。每轮独立真值评分通过后才发下一轮，最后降落并
+检查进程退出。禁止重发 Hold 改变目标，或把失败后的未执行轮次计为通过。

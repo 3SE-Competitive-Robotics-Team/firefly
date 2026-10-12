@@ -317,7 +317,6 @@ fn run_cfg(cfg: &ScenarioCfg) -> (f64, f64, Vector3<f64>) {
 /// 无零偏纯 MSCKF 场景：零旋转、前向恒速、稀疏点阵和 5cm 立体基线。
 /// 3m 位置阈值仅检查严重发散，不代表定位精度达标。
 #[test]
-#[ignore = "零旋转、纯前向和稀疏点阵导致弱可观，不能作为精度验收"]
 fn synthetic_pure_msckf_zero_bias() {
     let (err_p, _, _) = run_scenario(false, 0);
     assert!(
@@ -337,7 +336,6 @@ fn synthetic_slam_zero_bias() {
 
 /// 静止 5s 后运动，与 [`synthetic_slam_zero_bias`] 对比启动运动条件。
 #[test]
-#[ignore = "与 synthetic_slam_zero_bias 配套的扩展场景"]
 fn synthetic_slam_static_then_move() {
     let (err_p, err_v, _) = run_cfg(&ScenarioCfg {
         max_slam: 25,

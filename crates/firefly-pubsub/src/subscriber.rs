@@ -48,6 +48,7 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
     /// `buffer_size` 控制 iceoryx2 内部环形缓冲区深度：
     /// - IMU（100 Hz）建议 ≥20，避免 VIO 处理期间丢帧；
     /// - 相机（10 Hz）建议 1，只保留最新帧避免左右目交叉。
+    ///
     /// 大于 1 的缓冲同时声明服务所需容量，允许订阅端先创建服务。
     ///
     /// # Errors

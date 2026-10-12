@@ -376,70 +376,36 @@ impl CameraModel for CamEqui {
         self.intrinsics = Intrinsics::from_slice(calib);
     }
 
-    /// 去畸变：复刻 `cv::fisheye::undistortPoints`（无 R/P 归一化分支）的
-    /// Newton 迭代，来源 `OpenCV modules/calib3d/src/fisheye.cpp`：
-    ///
-    /// 以归一化畸变坐标 `(x0,y0)=((u-cx)/fx,(v-cy)/fy)` 为初值，固定 10 次
-    /// Newton 迭代求解满足 `distort(mx,my) = (x0,y0)` 的 `(mx,my)`。每次：
-    /// ```text
-    /// r      = sqrt(mx² + my²)
-    /// θ      = atan(r)
-    /// θ_d    = θ(1 + k1θ² + k2θ⁴ + k3θ⁶ + k4θ⁸)
-    /// s      = θ_d / r                      // r 甚小时 s→1
-    /// gx     = s·mx - x0 ,  gy = s·my - y0  // 残差
-    /// J      = ∂(gx,gy)/∂(mx,my)            // 2×2 解析雅可比
-    /// (mx,my) -=  J⁻¹ · (gx,gy)
-    /// ```
-    ///
-    /// OpenCV fisheye `undistortPoints` 的默认 `TermCriteria(MAX_ITER+EPS,
-    /// 100, FLT_EPSILON)` 中，`FLT_EPSILON` 对常规像素过大/过小不定，实际主循环
-    /// 以 Newton 步 `(J⁻¹g)` 的模长判停；本实现固定 10 次迭代并在残差模长
-    /// 小于 `1e-8` 时提前收敛（等价且更稳）。单点 `f32` 语义与 C++ 一致。
+    /// 对照 OpenCV `fisheye::undistortPoints`：在角度 θ 上作 Newton 迭代，
+    /// 默认最多 10 次、步长容差 1e-8；不收敛或角度翻转返回 (-1e6, -1e6)。
     fn undistort_f(&self, uv_dist: Vector2<f32>) -> Vector2<f32> {
         let p = self.intrinsics;
-        let n0 = p.normalized_point(uv_dist);
-        let mut mx = n0.x;
-        let mut my = n0.y;
-        let (k1, k2, k3, k4) = (p.k[0], p.k[1], p.k[2], p.k[3]);
+        let normalized = p.normalized_point(uv_dist);
+        let theta_d = normalized.norm().min(std::f64::consts::FRAC_PI_2);
+        if theta_d <= 1e-8 {
+            return Vector2::zeros();
+        }
+        let mut theta = theta_d;
+        let mut converged = false;
         for _ in 0..10 {
-            let r = (mx * mx + my * my).sqrt();
-            if r < 1e-8 {
-                break;
-            }
-            let th = r.atan();
-            let th2 = th * th;
-            let th4 = th2 * th2;
-            let th6 = th4 * th2;
-            let th8 = th4 * th4;
-            let thd = th * (1.0 + k1 * th2 + k2 * th4 + k3 * th6 + k4 * th8);
-            let s = thd / r;
-
-            let gx = s * mx - n0.x;
-            let gy = s * my - n0.y;
-            // J = ∂(s·m)/∂m，链式展开（r² 而非 r）
-            let dash = 1.0 + 3.0 * k1 * th2 + 5.0 * k2 * th4 + 7.0 * k3 * th6 + 9.0 * k4 * th8;
-            let drdx = mx / r;
-            let drdy = my / r;
-            // ∂s/∂r 由 θ_d 与 r 的关系导出
-            let dsdr = (dash - s) / r;
-            let dgx_dmx = s + mx * dsdr * drdx;
-            let dgx_dmy = mx * dsdr * drdy;
-            let dgy_dmx = my * dsdr * drdx;
-            let dgy_dmy = s + my * dsdr * drdy;
-            let det = dgx_dmx * dgy_dmy - dgx_dmy * dgy_dmx;
-            if det.abs() < 1e-16 {
-                break;
-            }
-            let inv = 1.0 / det;
-            let dx = (dgy_dmy * gx - dgy_dmx * gy) * inv; // 注意到 2×2 逆
-            let dy = (-dgx_dmy * gx + dgx_dmx * gy) * inv;
-            mx -= dx;
-            my -= dy;
-            if (dx * dx + dy * dy) < 1e-16 {
+            let t2 = theta * theta;
+            let t4 = t2 * t2;
+            let t6 = t4 * t2;
+            let t8 = t6 * t2;
+            let [a, b, c, d] = [p.k[0] * t2, p.k[1] * t4, p.k[2] * t6, p.k[3] * t8];
+            let step = (theta * (1.0 + a + b + c + d) - theta_d)
+                / (1.0 + 3.0 * a + 5.0 * b + 7.0 * c + 9.0 * d);
+            theta -= step;
+            if step.abs() < 1e-8 {
+                converged = true;
                 break;
             }
         }
-        Vector2::new(mx as f32, my as f32)
+        if converged && theta >= 0.0 {
+            (normalized * (theta.tan() / theta_d)).cast()
+        } else {
+            Vector2::repeat(-1e6)
+        }
     }
 
     /// 畸变闭式公式（对照 `CamEqui.h::distort_f`），输出去畸变前的像素坐标。
@@ -611,6 +577,43 @@ mod tests {
         let cdist = theta_d / r;
         assert!((uv.x - (fx * x * cdist + cx) as f32).abs() < 1e-4);
         assert!((uv.y - (fy * y * cdist + cy) as f32).abs() < 1e-4);
+    }
+
+    #[test]
+    fn equi_edge_matches_analytic_and_opencv() {
+        let cam = CamEqui::new(640, 480, &[300., 300., 320., 240., 0., 0., 0., 0.]);
+        let distorted = Vector2::new(0_f32, 0_f32);
+        let radius = 400.0_f64 / 300.0;
+        let expected = Vector2::new(-0.8 * radius.tan(), -0.6 * radius.tan());
+        assert!((cam.undistort_f(distorted).cast::<f64>() - expected).norm() < 1e-6);
+        // 零畸变等距模型在水平轴满足 x=tan((u-cx)/fx)。
+        let step = 0.25_f32;
+        let plus = cam.undistort_f(Vector2::new(620. + step, 240.));
+        let minus = cam.undistort_f(Vector2::new(620. - step, 240.));
+        let slope = f64::from((plus.x - minus.x) / (2. * step));
+        let analytic_slope = 1. / (300. * 1_f64.cos().powi(2));
+        assert!((slope - analytic_slope).abs() < 1e-6);
+    }
+
+    #[test]
+    fn equi_undistortion_matches_opencv_distorted_edge_and_rejection() {
+        // OpenCV 4.12.0 fisheye::undistortPoints，默认终止条件与 float 输入。
+        let cam = CamEqui::new(
+            640,
+            480,
+            &[300., 300., 320., 240., 0.1, -0.03, 0.002, -0.001],
+        );
+        for (pixel, expected) in [
+            ([0., 0.], [-2.253_479, -1.690_109_4]),
+            ([639., 479.], [2.224_695_7, 1.666_778_2]),
+            ([600., 100.], [1.322_614_6, -0.661_307_3]),
+        ] {
+            assert!(
+                (cam.undistort_f(Vector2::from(pixel)) - Vector2::from(expected)).norm() < 1e-6
+            );
+        }
+        let invalid = CamEqui::new(640, 480, &[300., 300., 320., 240., -1., 0., 0., 0.]);
+        assert_eq!(invalid.undistort_f(Vector2::zeros()), Vector2::repeat(-1e6));
     }
 
     #[test]

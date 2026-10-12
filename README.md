@@ -153,7 +153,8 @@ FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/sys
 传感器、估计器与飞控进程，录制到 `logs/*_sensor_startup_*.rrd`，并通过 SIGINT 退出。
 它验证静止初始化和未解锁零推力，不代表飞行精度验收。
 
-测试设计与验收边界见 [测试契约](docs/testing.md)。
+VIO 全套 Rust 回归可单独运行 `cargo test-vio`；包含忽略场景的诊断入口为
+`cargo test-vio-synthetic`。测试分层与验收边界见 [测试契约](docs/testing.md)。
 
 测试包含传感器独立初始化、真值与控制隔离、雅可比/梯度检查及规划/飞控测试。
 `synthetic_e2e` 中标记 `ignore` 的场景不属于通过保证；运行与精度结论以对应版本的

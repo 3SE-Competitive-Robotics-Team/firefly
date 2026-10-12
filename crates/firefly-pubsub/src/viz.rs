@@ -36,9 +36,12 @@ pub mod kind {
     pub const ARROWS: u32 = 6;
     /// 清除实体（空 entity 表示全清；当前无发布端，预留扩展点）。
     pub const CLEAR: u32 = 7;
-    /// 图像像素坐标点集：`points = [u, v, 0]`；`scalars = [宽, 高, 总点数]`。
+    /// 图像像素坐标点集：`points = [u, v, track_id]`；`scalars = [宽, 高, 总点数]`。
     /// `point_count` 为实际携带点数，允许小于总数；空点集清除该帧标记。
     pub const KEYPOINTS_2D: u32 = 10;
+    /// 数值矩阵：`scalars=[行数,列数]`，`points` 展平后为行主序元素，
+    /// `point_count` 为元素数（上限 `3 * POINTS_MAX`）。
+    pub const MATRIX: u32 = 11;
 }
 
 /// VIO 左/右相机当前活动点；时间戳为原始相机时钟，不是滤波器时间。
@@ -82,9 +85,9 @@ pub struct VizMessage {
     pub xyz: [f64; 3],
     /// 姿态四元数 xyzw（pose；JPL 分量顺序，与 `OdomMessage` 一致）。
     pub quat_xyzw: [f64; 4],
-    /// 折线或图像点集（`line_strip` / `keypoints_2d`；`points[..point_count]`）。
+    /// 折线或图像点集；`matrix` 复用其连续 f64 存储（见 [`kind::MATRIX`]）。
     pub points: [[f64; 3]; POINTS_MAX],
-    /// `points` 有效数。
+    /// `points` 有效点数；`matrix` 时为展平后的有效元素数。
     pub point_count: u32,
     /// 箭头数（arrows）。
     pub arrow_count: u32,
@@ -100,7 +103,7 @@ pub struct VizMessage {
     pub voxel_size: [f32; 3],
     /// 体素网格原点（世界坐标，米）。
     pub voxel_origin: [f32; 3],
-    /// 标量值或图像点集元数据（`scalars` / `keypoints_2d`；`scalars[..scalar_count]`）。
+    /// 标量值或点集/矩阵元数据（`scalars[..scalar_count]`）。
     pub scalars: [f64; SCALARS_MAX],
     /// `scalars` 有效数。
     pub scalar_count: u32,
@@ -157,6 +160,22 @@ impl VizMessage {
         };
         m.set_entity(entity);
         m
+    }
+
+    /// 构造行主序数值矩阵，保持扁平 IPC 布局。
+    ///
+    /// # Panics
+    /// 行列数为零、元素数量与尺寸不符或超出定长载荷。
+    #[must_use]
+    pub fn matrix(timestamp: f64, entity: &str, rows: usize, cols: usize, values: &[f64]) -> Self {
+        assert!(rows > 0 && cols > 0 && rows.checked_mul(cols) == Some(values.len()));
+        assert!(values.len() <= 3 * POINTS_MAX);
+        let mut msg = Self::base(kind::MATRIX, timestamp, entity);
+        msg.scalars[..2].copy_from_slice(&[rows as f64, cols as f64]);
+        msg.scalar_count = 2;
+        msg.points.as_flattened_mut()[..values.len()].copy_from_slice(values);
+        msg.point_count = values.len() as u32;
+        msg
     }
 
     /// 设置实体路径（UTF-8，超长截断；内部以字符边界保护不切碎多字节序列）。
@@ -252,6 +271,16 @@ mod tests {
 
     /// 编译期断言：满足 iceoryx2 零拷贝约束。
     fn assert_zero_copy_send<T: ZeroCopySend>() {}
+
+    #[test]
+    fn matrix_preserves_row_major_shape_and_values() {
+        let msg = VizMessage::matrix(1.5, "vio/covariance", 2, 3, &[1., 2., 3., 4., 5., 6.]);
+        assert_eq!(msg.kind, kind::MATRIX);
+        assert_eq!(msg.scalar_count, 2);
+        assert_eq!(msg.scalars[..2], [2., 3.]);
+        assert_eq!(msg.point_count, 6);
+        assert_eq!(msg.points[..2], [[1., 2., 3.], [4., 5., 6.]]);
+    }
 
     #[test]
     fn subscriber_first_retains_keypoints_across_health_message_burst() {

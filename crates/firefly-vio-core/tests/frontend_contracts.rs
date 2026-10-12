@@ -181,15 +181,13 @@ fn lk_tracks_known_shift() {
     }
 }
 
-/// 分层诊断：全图 FAST → 单格 ROI FAST → grider，定位检出断点。
+/// 全图与含角点的 ROI 均可检测，NMS 只从候选中筛选。
 #[test]
-fn grider_stage_diagnosis() {
+fn fast_roi_nms_preserves_candidate_coordinates() {
     let (img, _) = dotted_image(320, 240, true);
-    // 全图
     let full = detect(&pyramid::gray_to_matrix(&img), 10, true);
-    println!("stage1 全图NMS={}", full.len());
+    assert!(!full.is_empty(), "全图必须检出角点");
     // 单格 ROI（cell 64×48）：取含点的一格
-    // 复制 crop_roi 逻辑（私有函数，测试内联同款实现）
     let (cx0, cy0, cw, ch) = (40usize, 40usize, 64usize, 48usize);
     let mut roi_data = Vec::with_capacity(cw * ch);
     for yy in cy0..cy0 + ch {
@@ -202,12 +200,20 @@ fn grider_stage_diagnosis() {
         data: roi_data,
     };
     let roi_kps = detect(&pyramid::gray_to_matrix(&roi), 10, true);
-    println!("stage2 ROI NMS={}", roi_kps.len());
+    assert!(!roi_kps.is_empty(), "含角点 ROI 必须检出角点");
     let roi_no = detect(&pyramid::gray_to_matrix(&roi), 10, false);
-    println!("stage2b ROI 无NMS={}", roi_no.len());
+    assert!(roi_kps.len() <= roi_no.len());
+    for point in &roi_kps {
+        assert!(
+            roi_no
+                .iter()
+                .any(|candidate| candidate.x.to_bits() == point.x.to_bits()
+                    && candidate.y.to_bits() == point.y.to_bits())
+        );
+    }
 }
 
-/// 小位移(-0.9,-0.9)+帧间独立噪声：复现现场"跟踪反向滞后"现象。
+/// 一像素负向位移与帧间噪声下，每个坐标误差小于 0.1 像素。
 #[test]
 fn lk_small_shift_with_flicker_noise() {
     use firefly_vio_core::sensor::GrayImage;
@@ -239,24 +245,22 @@ fn lk_small_shift_with_flicker_noise() {
             data,
         }
     };
-    // 真实观测：真值 +0.15px/帧向右，跟踪却 -0.9px/帧向左
     let img0 = mk(1, (0.0, 0.0));
-    let img1 = mk(2, (-0.9, -0.9));
+    let img1 = mk(2, (-1.0, -1.0));
     let prev = vec![nalgebra::Vector2::new(171.0f32, 117.0f32)];
     let init = prev.clone();
     let (out, status) = lk_flow(&img0, &img1, &prev, &init);
-    println!(
-        "小位移(-0.9,-0.9): out=({:.2},{:.2}) status={}",
-        out[0].x - prev[0].x,
-        out[0].y - prev[0].y,
-        status[0]
+    assert!(status[0], "含噪小位移必须保持跟踪");
+    let error = out[0] - prev[0] - nalgebra::Vector2::new(-1.0, -1.0);
+    assert!(
+        error.x.abs() < 0.1 && error.y.abs() < 0.1,
+        "误差 {error:?} px"
     );
 }
 
-/// 最终探针：不同小位移 × 有无帧间噪声，量化 purecv LK 系统偏差。
-/// 真值位移已知，输出「测量-真值」误差向量；多 seed 取均值分离系统项。
+/// 六种整数位移、四种起始位置与帧间噪声下，全点跟踪误差小于 0.1 像素。
 #[test]
-fn lk_systematic_error_sweep() {
+fn lk_integer_shift_sweep_preserves_tracks_and_accuracy() {
     use firefly_vio_core::sensor::GrayImage;
     let w = 320usize;
     let h = 240usize;
@@ -284,8 +288,7 @@ fn lk_systematic_error_sweep() {
             data,
         }
     };
-    // 注意：亚像素部分用面积近似不可行，这里仅测整数+半像素级位移；
-    // 点阵渲染为整像素方块，亚像素真值需重心插值——超出本探针范围。
+    // 方块按整数像素绘制，因此只验证整数真值位移。
     let shifts: [(f64, f64); 6] = [
         (0.0, 0.0),
         (1.0, 1.0),
@@ -294,10 +297,7 @@ fn lk_systematic_error_sweep() {
         (-2.0, -2.0),
         (4.0, 2.0),
     ];
-    println!("位移(px)      | 无噪误差px | 有噪(amp7)误差px");
-    println!("--------------+------------+-----------------");
     for (dx, dy) in shifts {
-        let mut err_clean = Vec::new();
         for trial in 0..4u64 {
             // 平移点阵整体位置避免同一初始点集的系统效应
             let off = trial as f64 * 1.0;
@@ -309,21 +309,17 @@ fn lk_systematic_error_sweep() {
                 .collect();
             let init = prev.clone();
             let (out, status) = lk_flow(&img0, &img1, &prev, &init);
-            let e: f64 = out
-                .iter()
-                .zip(prev.iter())
-                .enumerate()
-                .filter(|(i, _)| status[*i])
-                .map(|(_, (o, p))| {
-                    (((f64::from(o.x) - f64::from(p.x)) - dx).powi(2)
-                        + ((f64::from(o.y) - f64::from(p.y)) - dy).powi(2))
-                    .sqrt()
-                })
-                .sum::<f64>()
-                / status.iter().filter(|s| **s).count().max(1) as f64;
-            err_clean.push(e);
+            assert_eq!(out.len(), prev.len());
+            assert_eq!(status.len(), prev.len());
+            for (i, (point, previous)) in out.iter().zip(&prev).enumerate() {
+                assert!(status[i], "位移 ({dx},{dy}) trial={trial} 点 {i} 丢失");
+                let error = (f64::from(point.x - previous.x) - dx)
+                    .hypot(f64::from(point.y - previous.y) - dy);
+                assert!(
+                    error < 0.1,
+                    "位移 ({dx},{dy}) trial={trial} 点 {i} 误差 {error} px"
+                );
+            }
         }
-        let ec = err_clean.iter().sum::<f64>() / err_clean.len() as f64;
-        println!("({dx:+.1},{dy:+.1})   | {ec:.3}      |");
     }
 }

@@ -16,6 +16,12 @@ use crate::options::{ImuModel, StateOptions};
 /// 滤波器状态（对照 `State`）。
 #[derive(Debug, Clone)]
 pub struct State {
+    /// 当前相机帧按更新来源汇总的 EKF 快照。
+    pub update_diagnostics: Vec<crate::diagnostics::UpdateDiagnostic>,
+    /// 当前更新来源，只用于诊断分组。
+    pub update_source: &'static str,
+    /// SLAM 逐特征诊断：id、残差维数、RMS、NIS、接受标志、姿态/bg/ba 九维修正。
+    pub slam_diagnostics: Vec<[f64; 14]>,
     /// 当前时间戳（相机时钟系，最后一次更新时刻；对照 `_timestamp`）。
     pub timestamp: f64,
     /// 滤波器选项。
@@ -61,6 +67,9 @@ impl State {
     pub fn new(options: StateOptions) -> Self {
         let mut st = Self {
             timestamp: -1.0,
+            update_diagnostics: Vec::new(),
+            slam_diagnostics: Vec::new(),
+            update_source: "other",
             options,
             imu: ImuState::default(),
             clones_imu: VecDeque::new(),

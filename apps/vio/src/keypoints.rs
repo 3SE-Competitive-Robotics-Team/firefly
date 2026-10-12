@@ -19,6 +19,7 @@ pub fn publish(publisher: &VizPublisher, camera: &CameraData, tracker: &TrackKlt
             image.width,
             image.height,
             tracker.last_points(sensor),
+            tracker.last_ids(sensor),
         );
         if let Err(error) = publisher.publish(msg) {
             log::debug!("VIO 关键点发布失败：{error}");
@@ -32,14 +33,15 @@ fn snapshot(
     width: usize,
     height: usize,
     points: &[KeyPoint],
+    ids: &[usize],
 ) -> VizMessage {
     let mut msg = VizMessage::base(kind::KEYPOINTS_2D, timestamp, entity);
     msg.color = [64, 255, 128];
     msg.scalars[..3].copy_from_slice(&[width as f64, height as f64, points.len() as f64]);
     msg.scalar_count = 3;
-    let n = points.len().min(msg.points.len());
-    for (dst, point) in msg.points.iter_mut().zip(points) {
-        *dst = [f64::from(point.x), f64::from(point.y), 0.0];
+    let n = points.len().min(ids.len()).min(msg.points.len());
+    for ((dst, point), id) in msg.points.iter_mut().zip(points).zip(ids) {
+        *dst = [f64::from(point.x), f64::from(point.y), *id as f64];
     }
     msg.point_count = n as u32;
     msg
@@ -60,13 +62,20 @@ mod tests {
             };
             POINTS_MAX + 3
         ];
-        let msg = snapshot(1.25, VIO_KEYPOINT_ENTITIES[1], 320, 240, &points);
+        let msg = snapshot(
+            1.25,
+            VIO_KEYPOINT_ENTITIES[1],
+            320,
+            240,
+            &points,
+            &vec![42; points.len()],
+        );
         assert_eq!(msg.timestamp, 1.25);
         assert_eq!(msg.entity(), VIO_KEYPOINT_ENTITIES[1]);
-        assert_eq!(msg.points[0], [12.25, 41.5, 0.0]);
+        assert_eq!(msg.points[0], [12.25, 41.5, 42.0]);
         assert_eq!(msg.point_count as usize, POINTS_MAX);
         assert_eq!(msg.scalars[..3], [320.0, 240.0, (POINTS_MAX + 3) as f64]);
-        let empty = snapshot(1.5, VIO_KEYPOINT_ENTITIES[0], 320, 240, &[]);
+        let empty = snapshot(1.5, VIO_KEYPOINT_ENTITIES[0], 320, 240, &[], &[]);
         assert_eq!(empty.point_count, 0);
         assert_eq!(empty.scalars[2], 0.0);
     }

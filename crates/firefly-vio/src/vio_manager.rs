@@ -266,6 +266,9 @@ impl VioManager {
     /// 消息的 `sensor_ids` 为空或与 `images` 长度不一致（对照 C++ 的 assert）。
     #[fastrace::trace]
     pub fn feed_measurement_camera(&mut self, message: &CameraData) {
+        self.state.update_diagnostics.clear();
+        self.state.slam_diagnostics.clear();
+        self.state.update_source = "zero_velocity";
         assert!(!message.sensor_ids.is_empty(), "相机消息必须含传感器 id");
         assert_eq!(
             message.sensor_ids.len(),
@@ -632,6 +635,7 @@ impl VioManager {
         // 更新：先 MSCKF，再批量 SLAM 更新，最后延迟初始化（对照 C++ 505-548）
         //=====================================================================
         let msckf_ids: Vec<usize> = featsup_msckf.iter().map(|f| f.featid).collect();
+        self.state.update_source = "msckf";
         self.updater_msckf
             .update(&mut self.state, &mut featsup_msckf);
         self.propagator.invalidate_cache();
@@ -645,6 +649,7 @@ impl VioManager {
         // not reuse information」）：不标记则同一测量会被 marg/max-track
         // 查询再次取用（MSCKF 双重消费 + 同一更新批次内重复入列）。
         let max_slam_in_update = self.state.options.max_slam_in_update;
+        self.state.update_source = "slam";
         while !feats_slam_update.is_empty() {
             let take = max_slam_in_update.min(feats_slam_update.len());
             let mut batch: Vec<Feature> = feats_slam_update.drain(..take).collect();
@@ -658,6 +663,7 @@ impl VioManager {
 
         // 15. SLAM 延迟初始化（对照 C++）
         let delayed_ids: Vec<usize> = feats_slam_delayed.iter().map(|f| f.featid).collect();
+        self.state.update_source = "landmark_init";
         if !feats_slam_delayed.is_empty() {
             self.updater_slam
                 .delayed_init(&mut self.state, &mut feats_slam_delayed);

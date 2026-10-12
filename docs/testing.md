@@ -1,5 +1,50 @@
 # 测试契约
 
+## VIO 分层回归
+
+从仓库根目录执行；无需图形会话、参考项目源码或场地资产：
+
+```bash
+cargo test-vio
+cargo test-vio -- --list
+cargo test-vio-synthetic
+```
+
+`test-vio` 覆盖四个 VIO 库和 `vio` 应用的所有测试 target；`--list` 列出当前用例，
+避免以文档中的静态计数作为覆盖依据。普通 CI 的 `cargo test --all-targets` 包含同一组测试。
+`test-vio-synthetic` 额外执行显式忽略的图像运动场景；它是诊断入口，不保证通过。
+
+| 层级 / 入口 | 约束 |
+|---|---|
+| `firefly-vio-types` 单测 | JPL 四元数、姿态扰动、变量与雅可比基础 |
+| `firefly-vio-core` 单测、`frontend_contracts` | 相机模型、IMU 传播、特征数据库、双目补点、FAST/NMS 与 LK 输出 |
+| `firefly-vio-init` 单测 | 静止初始化、动态初始化求解与边缘协方差 |
+| `firefly-vio` 单测 | 状态增广、MSCKF/SLAM、FEJ、ZUPT 与预测时序 |
+| `jacobian_fd_check`、`tests/support` | 共用相机/克隆夹具；独立解析值、有限差分及当前像素残差 |
+| `vio_manager::analytic_contract` | 解析 IMU 与特征轨迹的尺度、速度、倾角和零偏最终输出 |
+| `synthetic_e2e` | 像素图像经完整前端与滤波器；静止启动及运动场景 |
+| `vio` 应用单测 | 输入、发布与诊断消息契约 |
+
+移植基准为 OpenVINS `69488123ed9362dd44b6f28e7f4680abbff1442b`。
+图像语义对照 OpenCV `d7b17c1bbc361f608768a44d9cd89458fe70bea8`，固定像素/鱼眼
+输出夹具由 OpenCV CPU 4.12.0 生成；测试运行时无需安装 OpenCV。
+
+重点契约各自保留最小反例，不以飞行一次成功替代：
+
+- 双目补点覆盖旧点裁剪后的起始下标、已配对右点保留和网格总预算。
+- FEJ 外参导数使用冻结几何，残差使用当前状态；锚定特征检查各表示的自观测抵消。
+- 直方图检查常量图、非整除网格与裁剪/插值；鱼眼检查解析边缘射线、差分及失败哨兵。
+- ZUPT 视差跳过不完整观测对，使用样本标准差；初始化协方差检查完整系统的边缘分布。
+- LK 对固定整数位移逐点检查跟踪成功和像素误差，不能只打印均值或忽略丢失点。
+
+雅可比相对误差与差分步长在各测试中固定；LK 含噪整数位移误差预算为 0.1 像素。
+合成纯 MSCKF 无偏场景的 3m 阈值只拦截严重发散，不代表精度达标。
+`synthetic_pure_msckf_with_bias` 和 `synthetic_slam_zero_bias` 保留显式 `ignore`，
+分别存在位置/零偏与末端速度的验收缺口；不得把它们计作 CI 通过的用例。
+
+真实进程的悬停、十轮扰动悬停、22m 往返入口与固定门槛见 [IMU 契约](imu.md)。
+这些用例依赖 release 构建、RMUC 资产和图形会话，普通 CI 的 skip 不计作飞行通过。
+
 ## 数学依据
 
 规划器对照 EGO-Planner-v2 `9d85475ea7b9bf5c112cf7c3c3d0d3f9e96d9010`

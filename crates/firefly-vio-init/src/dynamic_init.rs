@@ -1488,21 +1488,18 @@ fn is_fisheye_cam(shared: &SharedCamera) -> bool {
 
 fn reconstruct_covariance(
     params: &InitOptions,
-    cov_j: &DMatrix<f64>,
+    information: &DMatrix<f64>,
     newest_pose_idx: usize,
 ) -> Option<DMatrix<f64>> {
     let off = newest_pose_idx * 15;
-    let sub = cov_j.view((off, off), (15, 15)).into_owned();
-    let inv: DMatrix<f64> = sub.cholesky()?.inverse();
-    let mut cov = inv;
-    let mut diag = cov.diagonal().norm();
-    if !diag.is_finite() || diag < 1e-30 {
-        // 极小/非正定 → 视为失败（返回 None 由调用方处理）
+    // 联合信息矩阵逆的 IMU 子块才是边缘协方差；只解所需的 15 列。
+    let mut selector = DMatrix::zeros(information.nrows(), 15);
+    selector.view_mut((off, 0), (15, 15)).fill_with_identity();
+    let columns = information.clone().cholesky()?.solve(&selector);
+    let mut cov = columns.rows(off, 15).into_owned();
+    if !cov.iter().all(|x| x.is_finite()) || cov.diagonal().norm() < 1e-30 {
         return None;
     }
-    diag = diag.max(0.0);
-    let _ = diag;
-    // 条件数近似：||C||_F^2 与最小奇异值
     let sv = cov.clone().symmetric_eigen().eigenvalues;
     let s_min = sv.iter().fold(f64::INFINITY, |a: f64, &b| a.min(b.abs()));
     let s_max = sv.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
@@ -1540,6 +1537,37 @@ fn reconstruct_covariance(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn covariance_marginalizes_other_poses_and_landmarks() {
+        let params = InitOptions {
+            init_dyn_inflation_orientation: 1.,
+            init_dyn_inflation_velocity: 1.,
+            init_dyn_inflation_bias_gyro: 1.,
+            init_dyn_inflation_bias_accel: 1.,
+            ..InitOptions::default()
+        };
+        // 独立二元高斯 I=[[2,1],[1,2]]：边缘方差 2/3，条件方差 1/2。
+        let mut information = 2. * DMatrix::<f64>::identity(33, 33);
+        information[(15, 30)] = 1.;
+        information[(30, 15)] = 1.;
+        information[(16, 0)] = 1.;
+        information[(0, 16)] = 1.;
+        let covariance = reconstruct_covariance(&params, &information, 1).unwrap();
+        assert!((covariance[(0, 0)] - 2. / 3.).abs() < 1e-12);
+        assert!((covariance[(1, 1)] - 2. / 3.).abs() < 1e-12);
+        assert!((covariance[(2, 2)] - 0.5).abs() < 1e-12);
+        assert!((&covariance - covariance.transpose()).amax() < 1e-12);
+        // 积去其余变量的二次代价，其中心差分曲率为 Schur 补 3/2。
+        let minimized_cost = |x: f64| {
+            let nuisance = -x / 2.;
+            (2. * x * x + 2. * x * nuisance + 2. * nuisance * nuisance) / 2.
+        };
+        let eps = 1e-3;
+        let curvature =
+            (minimized_cost(eps) - 2. * minimized_cost(0.) + minimized_cost(-eps)) / eps.powi(2);
+        assert!((curvature * covariance[(0, 0)] - 1.).abs() < 1e-12);
+    }
 
     #[test]
     fn empty_db_returns_none() {

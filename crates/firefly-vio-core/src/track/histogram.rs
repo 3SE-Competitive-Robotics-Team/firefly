@@ -1,60 +1,33 @@
-//! 图像直方图增强（自实现，对照 `OpenCV modules/imgproc/src/clahe.cpp` 与
-//! `cv::equalizeHist`）。
-//!
-//! - [`equalize_hist`]：全局直方图均衡（`cv::equalizeHist`）；在 8 位灰度图上构建
-//!   全局灰度直方图，累计分布做映射。
-//! - [`clahe`]：对比度受限自适应直方图均衡（`cv::CLAHE::apply`）；把图像分成
-//!   `tiles_x × tiles_y` 个瓦片，每个瓦片做裁剪限制 + 直方图均衡的 LUT，再按
-//!   像素位置做双线性插值合成（边界瓦片退化为就近瓦片）。
+//! 8 位灰度直方图增强，对照 OpenCV CPU `equalizeHist` 与 `CLAHE::apply`。
 
-#![allow(
-    clippy::doc_markdown,
-    clippy::many_single_char_names,
-    clippy::similar_names
-)]
 use crate::sensor::GrayImage;
 
-/// 灰度级数（8 位）。
 const HIST_SIZE: usize = 256;
 
-/// 全局直方图均衡（对照 `cv::equalizeHist`）。
-///
-/// 1. 统计全局灰度直方图 `hist[0..256]`；
-/// 2. 累计分布 `cumsum`：
-///    ```text
-///    scale = 255 / (width × height)
-///    lut[g] = (g == 0) ? round(cumsum(0)·scale)
-///                       : round(cumsum(g)·scale)
-///    ```
-/// 3. 逐像素查 LUT 映射输出。
-///
-/// 按 OpenCV 语义，第 0 级（灰度为 0）直接映射为 0，其余按 `round(cdf·scale)`
-/// （四舍五入），与 C++ `equalizeHist` 的取整一致。
+/// 全局均衡：最低占用灰度映射为零，常值图保持原值。
 #[must_use]
 pub fn equalize_hist(img: &GrayImage) -> GrayImage {
-    let n = img.width * img.height;
-    let mut hist = [0u64; HIST_SIZE];
+    let mut hist = [0usize; HIST_SIZE];
     for &px in &img.data {
-        hist[px as usize] += 1;
+        hist[usize::from(px)] += 1;
     }
-
-    let scale = 255.0 / n as f64;
+    let Some(first) = hist.iter().position(|&count| count != 0) else {
+        return img.clone();
+    };
+    if hist[first] == img.data.len() {
+        return img.clone();
+    }
+    let scale = 255.0_f32 / (img.data.len() - hist[first]) as f32;
     let mut lut = [0u8; HIST_SIZE];
-    let mut cumsum = 0u64;
-    for g in 0..HIST_SIZE {
-        cumsum += hist[g];
-        if g == 0 {
-            lut[g] = 0;
-        } else {
-            lut[g] = (cumsum as f64 * scale).round() as u8;
-        }
+    let mut sum = 0;
+    for i in first + 1..HIST_SIZE {
+        sum += hist[i];
+        lut[i] = (sum as f32 * scale).round_ties_even() as u8;
     }
-
-    let data = img.data.iter().map(|&px| lut[px as usize]).collect();
     GrayImage {
         width: img.width,
         height: img.height,
-        data,
+        data: img.data.iter().map(|&px| lut[usize::from(px)]).collect(),
     }
 }
 
@@ -79,147 +52,103 @@ impl Default for ClaheParams {
     }
 }
 
-/// CLAHE 自适应直方图均衡（对照 `OpenCV clahe.cpp`）。
+/// CLAHE：REFLECT_101 补边、均匀裁剪再分配、瓦片中心双线性插值。
+/// `clip_limit <= 0` 禁用裁剪；空图返回空图。
 ///
-/// 算法：
-/// 1. 每个瓦片尺寸 `tile_w = ceil(cols/tiles_x)`、`tile_h = ceil(rows/tiles_y)`；
-/// 2. 裁剪限制（`clipLimit_ = clip_limit * tile_area / 256`）：
-///    每个瓦片统计直方图后，把超过限制的 bin 计数截到限制值，并把超出总量
-///    平均摊回所有 bin（余数逐个 +1），保证总面积守恒；
-/// 3. 对每个瓦片按裁剪后的直方图做 CDF 映射生成 256 长的 LUT：
-///    `lut[g] = round(255 · cdf(g) / tile_area)`；
-/// 4. 输出：逐像素找所在瓦片 `(ty, tx)` 与瓦片内归一化位置，用相邻 2×2 瓦片
-///    的 LUT 做双线性插值；边界瓦片回退到最近瓦片（`clamp` 语义同 OpenCV）。
-///
-/// 8×8 网格 + `clip_limit=10.0` 即 `TrackKLT.cpp` 第 61-63 行所用值。
+/// # Panics
+/// 网格任一维为零。
 #[must_use]
-// 与 OpenCV CLAHE 1:1 移植的长流程函数，拆分会破坏对照可审计性。
 #[allow(clippy::too_many_lines)]
 pub fn clahe(img: &GrayImage, params: &ClaheParams) -> GrayImage {
+    assert!(
+        params.tiles_x > 0 && params.tiles_y > 0,
+        "CLAHE grid must be nonzero"
+    );
     let (cols, rows) = (img.width, img.height);
-    let tile_w = cols.div_ceil(params.tiles_x);
-    let tile_h = rows.div_ceil(params.tiles_y);
-    let tile_area = (tile_w * tile_h) as f64;
-
-    let clip_limit = if params.clip_limit > 0.0 {
-        params.clip_limit * tile_area / HIST_SIZE as f64
-    } else {
-        0.0
+    if cols == 0 || rows == 0 {
+        return img.clone();
+    }
+    // OpenCV 在任一维不整除时同时补两维，整除的另一维也补一个网格周期。
+    let (padded_cols, padded_rows) =
+        if cols.is_multiple_of(params.tiles_x) && rows.is_multiple_of(params.tiles_y) {
+            (cols, rows)
+        } else {
+            (
+                cols + params.tiles_x - cols % params.tiles_x,
+                rows + params.tiles_y - rows % params.tiles_y,
+            )
+        };
+    let tile_w = padded_cols / params.tiles_x;
+    let tile_h = padded_rows / params.tiles_y;
+    let tile_area = tile_w * tile_h;
+    let scale = 255.0_f32 / tile_area as f32;
+    let clip_value = ((params.clip_limit * tile_area as f64 / HIST_SIZE as f64) as usize).max(1);
+    let reflect = |pos: usize, len: usize| {
+        if len == 1 {
+            return 0;
+        }
+        let period = 2 * (len - 1);
+        let folded = pos % period;
+        folded.min(period - folded)
     };
-    let clip_value = if params.clip_limit > 0.0 {
-        clip_limit.ceil()
-    } else {
-        0.0
-    };
-
-    // 每个瓦片生成 LUT[256]
-    let mut luts: Vec<[u8; HIST_SIZE]> = Vec::with_capacity(params.tiles_x * params.tiles_y);
+    let mut luts = Vec::with_capacity(params.tiles_x * params.tiles_y);
     for ty in 0..params.tiles_y {
         for tx in 0..params.tiles_x {
-            let x0 = tx * tile_w;
-            let y0 = ty * tile_h;
-            let x1 = (x0 + tile_w).min(cols);
-            let y1 = (y0 + tile_h).min(rows);
-            if x1 <= x0 || y1 <= y0 {
-                // 瓦片完全落在图像外：置恒等 LUT，保证后续插值安全。
-                let mut lut = [0u8; HIST_SIZE];
-                for (g, slot) in lut.iter_mut().enumerate() {
-                    *slot = g as u8;
-                }
-                luts.push(lut);
-                continue;
-            }
-
-            let mut hist = [0u64; HIST_SIZE];
-            for y in y0..y1 {
-                let row = y * cols;
-                for x in x0..x1 {
-                    let g = img.data[row + x] as usize;
-                    hist[g] += 1;
+            let mut hist = [0usize; HIST_SIZE];
+            for y in ty * tile_h..(ty + 1) * tile_h {
+                for x in tx * tile_w..(tx + 1) * tile_w {
+                    hist[usize::from(img.data[reflect(y, rows) * cols + reflect(x, cols)])] += 1;
                 }
             }
-
-            // 裁剪并再分配
-            let mut total_excess = 0u64;
-            for h in &mut hist {
-                if *h > clip_value as u64 {
-                    total_excess += *h - clip_value as u64;
-                    *h = clip_value as u64;
+            if params.clip_limit > 0.0 {
+                let mut clipped = 0;
+                for count in &mut hist {
+                    clipped += count.saturating_sub(clip_value);
+                    *count = (*count).min(clip_value);
+                }
+                for count in &mut hist {
+                    *count += clipped / HIST_SIZE;
+                }
+                let residual = clipped % HIST_SIZE;
+                if let Some(step) = HIST_SIZE.checked_div(residual) {
+                    for bin in (0..HIST_SIZE).step_by(step.max(1)).take(residual) {
+                        hist[bin] += 1;
+                    }
                 }
             }
-            let step = total_excess / HIST_SIZE as u64;
-            let mut rem = total_excess % HIST_SIZE as u64;
-            for h in &mut hist {
-                *h += step;
-                if rem > 0 {
-                    *h += 1;
-                    rem -= 1;
-                }
-            }
-
-            // CDF → LUT
             let mut lut = [0u8; HIST_SIZE];
-            let area = ((x1 - x0) * (y1 - y0)) as f64;
-            let mut sum = 0u64;
-            for g in 0..HIST_SIZE {
-                sum += hist[g];
-                let val = (sum as f64 * (HIST_SIZE - 1) as f64 / area).round();
-                lut[g] = val as u8;
+            let mut sum = 0;
+            for (i, count) in hist.into_iter().enumerate() {
+                sum += count;
+                lut[i] = (sum as f32 * scale).round_ties_even() as u8;
             }
             luts.push(lut);
         }
     }
-
-    // 双线性插值合成输出
-    let mut data = vec![0u8; cols * rows];
-    let lut_at =
-        |ty: usize, tx: usize, g: usize| -> f64 { f64::from(luts[ty * params.tiles_x + tx][g]) };
+    let weights = |pos: usize, tile_size: usize, tiles: usize| {
+        let coordinate = pos as f32 * (1.0 / tile_size as f32) - 0.5;
+        let low = coordinate.floor() as isize;
+        let weight = coordinate - low as f32;
+        (
+            low.max(0) as usize,
+            (low + 1).min(tiles as isize - 1) as usize,
+            weight,
+        )
+    };
+    let x_weights: Vec<_> = (0..cols)
+        .map(|x| weights(x, tile_w, params.tiles_x))
+        .collect();
+    let mut data = vec![0; cols * rows];
     for y in 0..rows {
-        // 瓦片行
-        let ty_raw = if y == 0 {
-            0
-        } else {
-            (y / tile_h).min(params.tiles_y - 1)
-        };
-        // 大于 0 的行，位置归一化到 [0,1) 内
-        let ty_pos = if tile_h > 0 {
-            let f = (y % tile_h) as f64 / tile_h as f64;
-            f.min(1.0)
-        } else {
-            0.0
-        };
-        let ty0 = ty_raw;
-        // 相邻瓦片行（行内最后一个瓦片回退到自身）
-        let ty1 = (ty_raw + 1).min(params.tiles_y - 1);
-
-        for x in 0..cols {
-            let tx_raw = if x == 0 {
-                0
-            } else {
-                (x / tile_w).min(params.tiles_x - 1)
-            };
-            let tx_pos = if tile_w > 0 {
-                let f = (x % tile_w) as f64 / tile_w as f64;
-                f.min(1.0)
-            } else {
-                0.0
-            };
-            let tx0 = tx_raw;
-            let tx1 = (tx_raw + 1).min(params.tiles_x - 1);
-
+        let (y0, y1, wy) = weights(y, tile_h, params.tiles_y);
+        for (x, &(x0, x1, wx)) in x_weights.iter().enumerate() {
             let g = usize::from(img.data[y * cols + x]);
-            let t00 = lut_at(ty0, tx0, g);
-            let t01 = lut_at(ty0, tx1, g);
-            let t10 = lut_at(ty1, tx0, g);
-            let t11 = lut_at(ty1, tx1, g);
-            // 先沿 x、再沿 y 双线性
-            let top = t00 * (1.0 - tx_pos) + t01 * tx_pos;
-            let bot = t10 * (1.0 - tx_pos) + t11 * tx_pos;
-            let val = top * (1.0 - ty_pos) + bot * ty_pos;
-            data[y * cols + x] = val.round().clamp(0.0, 255.0) as u8;
+            let at = |ty: usize, tx: usize| f32::from(luts[ty * params.tiles_x + tx][g]);
+            let value = (at(y0, x0) * (1.0 - wx) + at(y0, x1) * wx) * (1.0 - wy)
+                + (at(y1, x0) * (1.0 - wx) + at(y1, x1) * wx) * wy;
+            data[y * cols + x] = value.round_ties_even() as u8;
         }
     }
-
     GrayImage {
         width: cols,
         height: rows,
@@ -264,11 +193,11 @@ mod tests {
 
     #[test]
     fn equalize_hist_constant_image_stable() {
-        // 常值图：均衡后仍为常值（不引入伪对比），且映射到最高 bin 对应的值。
+        // 常值图必须保留输入灰度，不能只检查输出是否为常数。
         let img = gray(&[100u8; 100], 10, 10);
         let out = equalize_hist(&img);
         assert!(
-            out.data.iter().all(|&px| px == 255 || px == 100),
+            out.data.iter().all(|&px| px == 100),
             "constant image should stay constant"
         );
         let first = out.data[0];
@@ -365,6 +294,73 @@ mod tests {
             },
         );
         assert_eq!(out.data.len(), 30 * 30);
+    }
+
+    #[test]
+    fn equalization_subtracts_the_first_occupied_bin() {
+        let img = gray(&[60, 60, 80, 100, 120, 140], 6, 1);
+        assert_eq!(equalize_hist(&img).data, [0, 0, 64, 128, 191, 255]);
+    }
+
+    #[test]
+    fn clahe_matches_opencv_cpu_fixtures() {
+        // OpenCV 4.12.0 CPU，2×2 网格；覆盖零裁剪、瓦片中心和单轴补边。
+        let cases: &[(usize, usize, f64, &[u8])] = &[
+            (
+                8,
+                6,
+                0.,
+                &[
+                    21, 64, 128, 160, 191, 250, 42, 85, 85, 149, 212, 255, 53, 122, 149, 212, 188,
+                    234, 35, 102, 168, 222, 21, 99, 244, 64, 117, 196, 255, 74, 138, 212, 82, 166,
+                    212, 24, 101, 179, 18, 88, 170, 234, 64, 160, 234, 48, 128, 234,
+                ],
+            ),
+            (
+                8,
+                6,
+                10.,
+                &[
+                    21, 64, 128, 160, 191, 250, 42, 85, 85, 149, 212, 255, 53, 122, 149, 212, 184,
+                    230, 38, 106, 168, 224, 24, 102, 234, 64, 128, 191, 250, 85, 149, 223, 82, 149,
+                    194, 42, 119, 188, 35, 106, 149, 212, 64, 149, 223, 64, 149, 234,
+                ],
+            ),
+            (
+                7,
+                6,
+                2.,
+                &[
+                    32, 64, 112, 151, 191, 223, 64, 80, 143, 207, 247, 64, 108, 143, 175, 223, 48,
+                    96, 159, 207, 48, 235, 68, 124, 193, 241, 90, 136, 80, 143, 191, 50, 108, 183,
+                    32, 143, 199, 76, 141, 197, 79, 135,
+                ],
+            ),
+            (
+                7,
+                5,
+                2.,
+                &[
+                    21, 64, 128, 160, 191, 234, 64, 85, 149, 212, 250, 64, 122, 149, 184, 230, 42,
+                    106, 166, 208, 46, 234, 74, 128, 199, 234, 101, 138, 99, 149, 212, 61, 119,
+                    192, 57,
+                ],
+            ),
+        ];
+        for &(w, h, clip_limit, expected) in cases {
+            let pixels: Vec<_> = (0..h)
+                .flat_map(|y| (0..w).map(move |x| ((x * 17 + y * 29 + x * y * 3) % 96 + 60) as u8))
+                .collect();
+            let out = clahe(
+                &gray(&pixels, w, h),
+                &ClaheParams {
+                    clip_limit,
+                    tiles_x: 2,
+                    tiles_y: 2,
+                },
+            );
+            assert_eq!(out.data, expected, "{w}×{h}, clip={clip_limit}");
+        }
     }
 
     #[test]

@@ -92,7 +92,7 @@ pub fn ekf_propagation(
 /// EKF 更新（对照 `StateHelper::EKFUpdate`）。
 ///
 /// `h_order` 为测量涉及变量的 `(id, size)` 列表，`h`/`res`/`r` 为雅可比、
-/// 残差与测量噪声（`r` 为方阵）。
+/// 残差与测量噪声（`r` 为方阵）。返回 Kalman 增益供观测贡献诊断使用。
 ///
 /// # Panics
 /// 若 `S = H·P·Hᵀ + R` 不正定（无法 Cholesky），或更新后协方差对角为负。
@@ -102,7 +102,7 @@ pub fn ekf_update(
     h: &DMatrix<f64>,
     res: &DVector<f64>,
     r: &DMatrix<f64>,
-) {
+) -> DMatrix<f64> {
     debug_assert_eq!(h.nrows(), res.len());
     debug_assert_eq!(h.nrows(), r.nrows());
     debug_assert_eq!(h.nrows(), r.ncols());
@@ -138,6 +138,8 @@ pub fn ekf_update(
         .unwrap_or_else(|| panic!("EKFUpdate: S 矩阵不正定，无法 Cholesky 分解"))
         .inverse();
 
+    let before = crate::diagnostics::ImuSnapshot::capture(state);
+    let nis = res.dot(&(&s_inv * res));
     let k = &m_a * s_inv;
     // Cov ← Cov − K·M_aᵀ + 对称化（对照 C++ 的上三角技巧）
     state.cov -= &k * m_a.transpose();
@@ -154,6 +156,42 @@ pub fn ekf_update(
     // dx = K·res，逐变量 boxplus 更新（对照 C++ 末尾循环）
     let dx = &k * res;
     state.update_all(&dx);
+    let offset = state.imu.id() as usize;
+    let after = crate::diagnostics::ImuSnapshot::capture(state);
+    if let Some(previous) = state
+        .update_diagnostics
+        .iter_mut()
+        .find(|entry| entry.source == state.update_source)
+    {
+        let rows = previous.innovation[0] + res.len() as f64;
+        let squared = previous.innovation[1].powi(2) * previous.innovation[0] + res.norm_squared();
+        previous.innovation = [
+            rows,
+            (squared / rows.max(1.)).sqrt(),
+            previous.innovation[2] + nis,
+            previous.innovation[3] + 1.,
+        ];
+        previous.after = after;
+        for (i, value) in previous.correction.iter_mut().enumerate() {
+            *value += dx[offset + i];
+        }
+    } else {
+        state
+            .update_diagnostics
+            .push(crate::diagnostics::UpdateDiagnostic {
+                source: state.update_source,
+                before,
+                after,
+                innovation: [
+                    res.len() as f64,
+                    res.norm() / (res.len().max(1) as f64).sqrt(),
+                    nis,
+                    1.,
+                ],
+                correction: std::array::from_fn(|i| dx[offset + i]),
+            });
+    }
+    k
 }
 
 /// 设置初始协方差块（对照 `StateHelper::set_initial_covariance`）。

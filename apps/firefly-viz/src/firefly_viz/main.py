@@ -35,6 +35,7 @@ from .messages import (
     VIZ_KIND_CLEAR,
     VIZ_KIND_KEYPOINTS_2D,
     VIZ_KIND_LINE_STRIP,
+    VIZ_KIND_MATRIX,
     VIZ_KIND_POSE,
     VIZ_KIND_SCALARS,
     VIZ_KIND_VOXELS,
@@ -202,7 +203,19 @@ def _handle(msg: VizMessage, trace_id: str) -> None:
     elif kind == VIZ_KIND_KEYPOINTS_2D:
         n = min(msg.point_count, len(msg.points))
         pts = np.array([[msg.points[i][0], msg.points[i][1]] for i in range(n)], dtype=np.float32).reshape(-1, 2)
-        rr.log(entity, rr.Points2D(pts, colors=[[*msg.color, 255]], radii=2.0))
+        ids = np.array([msg.points[i][2] for i in range(n)], dtype=np.uint64)
+        rr.log(entity, rr.Points2D(pts, colors=[[*msg.color, 255]], radii=2.0), rr.AnyValues(track_id=ids))
+    elif kind == VIZ_KIND_MATRIX:
+        rows, cols = msg.scalars[:2]
+        n = msg.point_count
+        if (msg.scalar_count != 2 or not np.isfinite([rows, cols]).all()
+                or rows <= 0 or cols <= 0 or rows != int(rows) or cols != int(cols)
+                or int(rows) * int(cols) != n or n > 3 * len(msg.points)):
+            logger.warning("无效矩阵载荷：%s", entity)
+            return
+        # Rerun 可异步持有数组；必须在归还 IPC 样本之前取得自有存储。
+        values = np.ctypeslib.as_array(msg.points).reshape(-1)[:n].copy()
+        rr.log(entity, rr.Tensor(values.reshape(int(rows), int(cols))))
     elif kind == VIZ_KIND_LINE_STRIP:
         n = msg.point_count
         pts = [[msg.points[i][0], msg.points[i][1], msg.points[i][2]] for i in range(n)]

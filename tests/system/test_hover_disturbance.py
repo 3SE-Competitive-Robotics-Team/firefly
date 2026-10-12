@@ -8,6 +8,7 @@ uv run pytest tests/system/test_hover_disturbance.py -q
 from dataclasses import asdict
 from functools import partial
 import sys
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -63,13 +64,30 @@ class DisturbanceMission(Mission):
                 raise MissionFailure(f"nonmonotonic/conflicting live evidence: {entity}")
             rows.append(row)
 
+    def require_hover(self, reason):
+        """否决时记录组成门控的各项数值，阈值仍由 Options 统一定义。"""
+        if self.mode == 3 and self.hover_ok():
+            return
+        self.recorder.event(reason, self.t, error=True)
+        state = self.latest.get("odom")
+        self.recorder.scalars("acceptance/hover_failure/state", self.t,
+                              [self.mode, state is not None, self.control_origin is not None])
+        if state is not None:
+            self.recorder.scalars("acceptance/hover_failure/freshness", self.t,
+                                  [self.t - state[0], time.monotonic() - state[5], state[4]])
+            if self.control_origin is not None:
+                self.recorder.scalars("acceptance/hover_failure/error", self.t,
+                                      [float(np.linalg.norm(state[1][:2] - self.control_origin[:2])),
+                                       abs(state[1][2] - self.control_origin[2] - self.options.altitude_m),
+                                       float(np.linalg.norm(state[2]))])
+        raise MissionFailure(reason)
+
     def assess_round(self, options, limits, hover_limits, force, index):
         """独立真值评分只可中止验收；下一轮仍须通过新鲜里程计的悬停检查。"""
         end = self.result["stages"][f"recovery_{index:02d}"]["end_sim_s"]
 
         def evidence_ready():
-            if self.mode != 3 or not self.hover_ok():
-                raise MissionFailure("hover lost while waiting for round evidence")
+            self.require_hover("hover lost while waiting for round evidence")
             return all(key in self.evidence and self.evidence[key][-1][0] >= end
                        for key in self.required_evidence)
 
@@ -121,8 +139,7 @@ def test_hover_disturbance(flight_directory, flight_report):
         end = mission.t + hover_limits.seconds
 
         def observing():
-            if mission.mode != 3 or not mission.hover_ok():
-                raise MissionFailure("fresh estimated hover not maintained after recovery deadline")
+            mission.require_hover("fresh estimated hover not maintained after recovery deadline")
             return mission.t >= end
 
         mission.wait(observing, sim=hover_limits.seconds + .3)

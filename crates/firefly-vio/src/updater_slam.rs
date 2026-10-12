@@ -198,7 +198,7 @@ impl UpdaterSlam {
     #[allow(clippy::missing_panics_doc)]
     pub fn update(&mut self, state: &mut State, feature_vec: &mut Vec<Feature>) -> Vec<usize> {
         // (h_x_and_f, res, x_order, row0)
-        type Block = (DMatrix<f64>, DVector<f64>, Vec<(i32, usize)>, usize);
+        type Block = (DMatrix<f64>, DVector<f64>, Vec<(i32, usize)>, usize, usize);
         if feature_vec.is_empty() {
             return Vec::new();
         }
@@ -310,6 +310,17 @@ impl UpdaterSlam {
                 None => f64::INFINITY,
             };
             let chi2_check = chi2_95(res.len());
+            let diagnostic_index = state.slam_diagnostics.len();
+            let accepted = chi2 <= self.options.chi2_multipler * chi2_check;
+            let mut diagnostic = [0.; 14];
+            diagnostic[..5].copy_from_slice(&[
+                feat.featid as f64,
+                res.len() as f64,
+                res.norm() / (res.len() as f64).sqrt(),
+                chi2,
+                f64::from(accepted),
+            ]);
+            state.slam_diagnostics.push(diagnostic);
             if chi2 > self.options.chi2_multipler * chi2_check {
                 // 拒绝（对照 C++ UpdaterSLAM.cpp:415：非 aruco → 失败计数 + 删除；
                 // should_marg 由 VioManager 每帧按 update_fail_count > 1 统一触发）
@@ -331,7 +342,7 @@ impl UpdaterSlam {
                 }
                 let row0 = total_rows;
                 total_rows += h_combined.nrows();
-                blocks.push((h_combined, res, x_order, row0));
+                blocks.push((h_combined, res, x_order, row0, diagnostic_index));
                 consumed.push(feat.featid);
                 true
             }
@@ -343,7 +354,7 @@ impl UpdaterSlam {
         }
         let mut hx_big = DMatrix::zeros(total_rows, next_col);
         let mut res_big = DVector::zeros(total_rows);
-        for (h_xf_block, res, x_order, row0) in &blocks {
+        for (h_xf_block, res, x_order, row0, _) in &blocks {
             let rows = h_xf_block.nrows();
             let mut src_col = 0usize;
             for (var_id, var_size) in x_order {
@@ -362,7 +373,15 @@ impl UpdaterSlam {
 
         // 4. EKF 更新（对照 C++ 末尾）
         let r = self.options.sigma_pix_sq * DMatrix::identity(total_rows, total_rows);
-        ekf_update(state, &hx_order_big, &hx_big, &res_big, &r);
+        let gain = ekf_update(state, &hx_order_big, &hx_big, &res_big, &r);
+        let imu_id = state.imu.id() as usize;
+        for (_, residual, _, row0, index) in &blocks {
+            for (column, axis) in [0, 1, 2, 9, 10, 11, 12, 13, 14].into_iter().enumerate() {
+                state.slam_diagnostics[*index][5 + column] = (0..residual.len())
+                    .map(|j| gain[(imu_id + axis, row0 + j)] * residual[j])
+                    .sum();
+            }
+        }
         consumed
     }
 
@@ -856,6 +875,50 @@ mod tests {
         assert!(feats.is_empty());
         assert!(st.features_slam.is_empty());
         assert_eq!(st.cov.nrows(), 27);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp, reason = "接受标志使用精确的 0/1 编码")]
+    fn feature_contributions_sum_to_the_applied_imu_correction() {
+        let (mut state, first) = slam_scene();
+        let mut second = first.clone();
+        second.featid = 2;
+        let mut features = vec![first, second];
+        let mut updater = UpdaterSlam::new(
+            UpdaterOptions::default(),
+            FeatRepresentation::Global3D,
+            TriangulationOptions::default(),
+        );
+        updater.delayed_init(&mut state, &mut features);
+        assert_eq!(state.features_slam.len(), 2);
+        let clone_id = state.clones_imu[0].1.id() as usize;
+        let mut root = DMatrix::identity(state.cov.nrows(), state.cov.ncols()) * 0.1;
+        for axis in 0..3 {
+            root[(9 + axis, clone_id + axis)] = 0.01;
+            root[(12 + axis, clone_id + 3 + axis)] = 0.01;
+        }
+        state.cov = &root * root.transpose();
+        for (i, feature) in features.iter_mut().enumerate() {
+            for uv in feature.uvs.get_mut(&0).unwrap() {
+                uv.x += 0.2 * (i + 1) as f32;
+                uv.y -= 0.1;
+            }
+        }
+        state.update_diagnostics.clear();
+        state.update_source = "slam";
+        updater.update(&mut state, &mut features);
+        assert_eq!(state.slam_diagnostics.len(), 2);
+        assert!(state.slam_diagnostics.iter().all(|row| row[4] == 1.));
+        let applied = state.update_diagnostics[0].correction;
+        assert!(applied.iter().any(|x| x.abs() > 1e-7));
+        for (column, axis) in [0, 1, 2, 9, 10, 11, 12, 13, 14].into_iter().enumerate() {
+            let sum: f64 = state
+                .slam_diagnostics
+                .iter()
+                .map(|row| row[5 + column])
+                .sum();
+            assert!((sum - applied[axis]).abs() < 1e-12);
+        }
     }
 
     #[test]

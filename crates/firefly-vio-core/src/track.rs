@@ -472,7 +472,7 @@ impl TrackKlt {
         if first_frame {
             let mut good = Vec::new();
             let mut ids = Vec::new();
-            self.perform_detection_monocular(&mask, &img_curr, &mut good, &mut ids);
+            self.perform_detection_monocular(&mask, &img_curr, &mut good, &mut ids, &[]);
             let s = self.cams.get_mut(&key).unwrap();
             s.pts_last = good;
             s.ids_last = ids;
@@ -490,7 +490,7 @@ impl TrackKlt {
             let s = self.cams.get(&key).unwrap();
             (s.mask_last.clone(), s.img_last.clone())
         };
-        self.perform_detection_monocular(&mask_last, &img_last, &mut pts_old, &mut ids_old);
+        self.perform_detection_monocular(&mask_last, &img_last, &mut pts_old, &mut ids_old, &[]);
 
         // 时间 LK + RANSAC
         let mut pts_new = pts_old.clone();
@@ -878,7 +878,7 @@ impl TrackKlt {
         }
     }
 
-    /// 单目检测（对照 `TrackKlt::perform_detection_monocular`）。
+    /// 单目检测，返回剔除旧点后的新增点起始下标（对照 `TrackKlt::perform_detection_monocular`）。
     // 与 C++ 1:1 移植的长流程函数，拆分会破坏对照可审计性。
     #[allow(clippy::too_many_lines)]
     #[fastrace::trace]
@@ -888,7 +888,9 @@ impl TrackKlt {
         img0: &GrayImage,
         pts0: &mut Vec<KeyPoint>,
         ids0: &mut Vec<usize>,
-    ) {
+        stereo_ids: &[usize],
+    ) -> usize {
+        let stereo_ids: std::collections::HashSet<_> = stereo_ids.iter().copied().collect();
         let min_px = self.min_px_dist.max(1) as usize;
         let (w, h) = (img0.width, img0.height);
         // 距离占用网格（每 cell = min_px² 像素）
@@ -919,7 +921,8 @@ impl TrackKlt {
             if xc >= close_w || yc >= close_h {
                 continue;
             }
-            if grid_close[yc * close_w + xc] > 127 {
+            // 对照 OpenVINS：右目已配对的点必须保留，网格去重只剔除单目点。
+            if grid_close[yc * close_w + xc] > 127 && !stereo_ids.contains(&fid) {
                 continue;
             }
             if mask_on(mask0, p.x as i32, p.y as i32) {
@@ -941,13 +944,15 @@ impl TrackKlt {
         pts0.extend(keep);
         ids0.extend(keep_ids);
 
+        let new_start = pts0.len();
+
         // 需要的补点数
         let min_feat_percent = 0.50;
         let num_needed = self.num_features.saturating_sub(pts0.len());
         let min_threshold =
             std::cmp::min(20, (min_feat_percent * self.num_features as f64) as usize);
         if num_needed < min_threshold {
-            return;
+            return new_start;
         }
 
         // 掩码下采样到网格（INTER_NEAREST）
@@ -961,11 +966,12 @@ impl TrackKlt {
         }
 
         // 有效网格（该格未满 + 该格掩码未全遮）
-        let features_per_grid = (num_needed / (grid_x * grid_y)).max(1) + 1;
+        let features_per_grid = self.num_features / (grid_x * grid_y) + 1;
+        let required_per_grid = ((min_feat_percent * features_per_grid as f64) as usize).max(1);
         let mut valid = Vec::new();
         for xg in 0..grid_x {
             for yg in 0..grid_y {
-                if (grid_count[yg * grid_x + xg] as usize) < features_per_grid
+                if (grid_count[yg * grid_x + xg] as usize) < required_per_grid
                     && mask_grid[yg * grid_x + xg] != 255
                 {
                     valid.push((xg as i32, yg as i32));
@@ -997,7 +1003,7 @@ impl TrackKlt {
             img0,
             &mask_updated,
             &valid,
-            num_needed,
+            self.num_features,
             grid_x,
             grid_y,
             self.fast_threshold,
@@ -1020,16 +1026,13 @@ impl TrackKlt {
             pts0.push(p);
             ids0.push(self.currid);
         }
+        new_start
     }
 
     /// 双目检测（对照 `TrackKLT::perform_detection_stereo`）。
     ///
-    /// 左目单目检测后，对新增左特征做 **左→右 KLT 匹配**，把匹配成功的
-    /// 左右目点以**同一 feature id** 入列 —— 使特征从出生起就带双目测量
-    /// （`cams=2`）。0.05m 基线提供瞬时横向视差，打破"单目前向运动 → 前向
-    /// 特征近共线 → 三角化秩亏"的退化（此前耦合被回退，特征恒为单目 → 无
-    /// 约束 → Y/Z 漂移发散）。右图画去重由随后的 right 单目检测 close-grid
-    /// 承担（OpenVINS 同思路）。
+    /// 新增左目点通过左→右 LK 建立同一 feature id 的双目观测。
+    /// 右目补点只对单目点执行邻近去重，必须保留已有双目对应。
     #[allow(clippy::too_many_arguments)]
     #[fastrace::trace]
     fn perform_detection_stereo(
@@ -1044,21 +1047,20 @@ impl TrackKlt {
         ids1: &mut Vec<usize>,
     ) {
         // 1. 左目单目检测（过滤旧的 + 增补新左特征）→ pts0/ids0
-        let n_old_left = pts0.len();
-        self.perform_detection_monocular(mask0, img0, pts0, ids0);
+        let new_start = self.perform_detection_monocular(mask0, img0, pts0, ids0, &[]);
 
         // 2. 新增左特征左→右 LK 匹配（对照 OpenVINS：kpts1_new=kpts0_new →
         //    calcOpticalFlowPyrLK(left→right)，左右目同 id 双测量）
         let new_len = pts0.len();
-        if new_len > n_old_left {
-            let left: Vec<nalgebra::Vector2<f32>> = pts0[n_old_left..]
+        if new_len > new_start {
+            let left: Vec<nalgebra::Vector2<f32>> = pts0[new_start..]
                 .iter()
                 .map(|k| nalgebra::Vector2::new(k.x, k.y))
                 .collect();
             let (right_out, status) = lk_optical_flow(img0, img1, &left, &left);
             let (w, h) = (img1.width as f32, img1.height as f32);
-            for i in n_old_left..new_len {
-                let si = i - n_old_left;
+            for i in new_start..new_len {
+                let si = i - new_start;
                 let p = right_out[si];
                 if status[si] && p.x >= 0.0 && p.y >= 0.0 && p.x < w && p.y < h {
                     // 双目耦合：右目点 + 同一 id → 特征同时有左右目测量
@@ -1073,7 +1075,7 @@ impl TrackKlt {
         }
 
         // 3. 右目单目增补（close-grid 自动避开已耦合的右目点）
-        self.perform_detection_monocular(mask1, img1, pts1, ids1);
+        self.perform_detection_monocular(mask1, img1, pts1, ids1, ids0);
     }
 }
 
@@ -1202,6 +1204,152 @@ mod lk_bias_tests {
                 mx.abs() < 0.25 && my.abs() < 0.25,
                 "LK 位移系统性偏置 ({mx:.3},{my:.3})px @ shift=({dx},{dy})"
             );
+        }
+    }
+
+    #[test]
+    fn empty_tile_detection_budget_is_independent_of_other_tiles_occupancy() {
+        let image = checkerboard(320, 240, 8);
+        let mask = GrayImage {
+            width: 320,
+            height: 240,
+            data: vec![0; 320 * 240],
+        };
+        let detect = |mut points: Vec<KeyPoint>| {
+            let mut tracker = TrackKlt::new(
+                HashMap::new(),
+                200,
+                0,
+                false,
+                HistogramMethod::None,
+                20,
+                4,
+                4,
+                10,
+            );
+            let mut ids = (1..=points.len()).collect();
+            tracker.currid = points.len();
+            tracker.perform_detection_monocular(&mask, &image, &mut points, &mut ids, &[]);
+            points
+                .into_iter()
+                .filter(|p| p.x < 80. && p.y < 60.)
+                .collect::<Vec<_>>()
+        };
+        let empty = detect(Vec::new());
+        let occupied = detect(
+            (0..100)
+                .map(|i| KeyPoint::new(100. + (i % 10) as f32 * 20., 20. + (i / 10) as f32 * 20.))
+                .collect(),
+        );
+        assert_ne!(empty, [] as [KeyPoint; 0]);
+        assert_eq!(empty, occupied);
+    }
+
+    #[test]
+    fn stereo_detection_keeps_paired_right_points_in_the_same_grid_cell() {
+        let image = GrayImage {
+            width: 100,
+            height: 100,
+            data: vec![0; 10_000],
+        };
+        let mut tracker = TrackKlt::new(
+            HashMap::new(),
+            2,
+            0,
+            true,
+            HistogramMethod::None,
+            20,
+            5,
+            5,
+            10,
+        );
+        let mut left = vec![KeyPoint::new(50., 50.), KeyPoint::new(65., 50.)];
+        let mut right = vec![KeyPoint::new(50., 50.), KeyPoint::new(55., 50.)];
+        let mut ids_left = vec![1, 2];
+        let mut ids_right = ids_left.clone();
+        tracker.perform_detection_stereo(
+            &image,
+            &image,
+            &image,
+            &image,
+            &mut left,
+            &mut right,
+            &mut ids_left,
+            &mut ids_right,
+        );
+        assert_eq!(ids_left, vec![1, 2]);
+        assert_eq!(ids_right, ids_left);
+    }
+
+    #[test]
+    fn stereo_replenishment_matches_new_points_after_pruning_old_tracks() {
+        let image = checkerboard(320, 240, 8);
+        let mask = GrayImage {
+            width: 320,
+            height: 240,
+            data: vec![0; 320 * 240],
+        };
+        let mut tracker = TrackKlt::new(
+            HashMap::new(),
+            80,
+            0,
+            true,
+            HistogramMethod::None,
+            20,
+            5,
+            5,
+            10,
+        );
+        tracker.currid = 80;
+        let mut left = vec![KeyPoint::new(-1., -1.); 80];
+        let mut ids_left: Vec<_> = (1..=80).collect();
+        let mut right = Vec::new();
+        let mut ids_right = Vec::new();
+        tracker.perform_detection_stereo(
+            &mask,
+            &mask,
+            &image,
+            &image,
+            &mut left,
+            &mut right,
+            &mut ids_left,
+            &mut ids_right,
+        );
+        assert_ne!(left, [] as [KeyPoint; 0]);
+        let mut reference = TrackKlt::new(
+            HashMap::new(),
+            80,
+            0,
+            true,
+            HistogramMethod::None,
+            20,
+            5,
+            5,
+            10,
+        );
+        reference.currid = 80;
+        let (mut ref_left, mut ref_right, mut ref_ids_left, mut ref_ids_right) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        reference.perform_detection_stereo(
+            &mask,
+            &mask,
+            &image,
+            &image,
+            &mut ref_left,
+            &mut ref_right,
+            &mut ref_ids_left,
+            &mut ref_ids_right,
+        );
+        assert!(ref_ids_left.iter().any(|id| ref_ids_right.contains(id)));
+        assert_eq!(
+            (&left, &right, &ids_left, &ids_right),
+            (&ref_left, &ref_right, &ref_ids_left, &ref_ids_right)
+        );
+        for (p, id) in left.iter().zip(&ids_left) {
+            assert!(*id > 80);
+            if let Some(i) = ids_right.iter().position(|r| r == id) {
+                assert!((p.x - right[i].x).hypot(p.y - right[i].y) < 0.01);
+            }
         }
     }
 

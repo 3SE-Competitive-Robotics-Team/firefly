@@ -33,6 +33,7 @@ use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetRunResult;
 
 mod config;
+mod diagnostics;
 mod input;
 mod keypoints;
 mod mapping;
@@ -325,6 +326,12 @@ fn run_loop(
 
         let mut imu_batch = 0u32;
         while let Some(imu) = input.next_imu() {
+            for (entity, values) in [("vio/input/gyro", imu.wm), ("vio/input/accel", imu.am)] {
+                let mut msg = VizMessage::base(kind::SCALARS, imu.timestamp, entity);
+                msg.scalars[..3].copy_from_slice(values.as_slice());
+                msg.scalar_count = 3;
+                let _ = viz_pub.publish(msg);
+            }
             vio.feed_measurement_imu(&imu);
             imu_batch += 1;
         }
@@ -452,6 +459,7 @@ fn publish_odom(odom_pub: &OdomPublisher, msg: OdomMessage) {
 /// 前端健康度：统计保留在计算线程，结果经 Firefly/Viz 发布
 /// （bar_chart/scalars），firefly-viz 进程统一写 rerun。
 fn publish_frontend_health(viz_pub: &VizPublisher, t_sim: f64, camera_time: f64, vio: &VioManager) {
+    diagnostics::publish(viz_pub, vio);
     let db = vio.track_feats.database();
     let mut hist = vec![0i64; 21];
     let mut total_len = 0usize;

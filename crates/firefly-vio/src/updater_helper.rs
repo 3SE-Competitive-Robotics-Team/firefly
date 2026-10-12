@@ -254,7 +254,7 @@ pub fn get_feature_jacobian_full(
                 let mut dpfc_dcalib = DMatrix::<f64>::zeros(3, 6);
                 dpfc_dcalib
                     .view_mut((0, 0), (3, 3))
-                    .copy_from(&skew_x(&(p_fin_ci - p_iin_c)));
+                    .copy_from(&skew_x(&(p_fin_ci_j - p_iin_c)));
                 dpfc_dcalib
                     .view_mut((0, 3), (3, 3))
                     .copy_from(&Matrix3::identity());
