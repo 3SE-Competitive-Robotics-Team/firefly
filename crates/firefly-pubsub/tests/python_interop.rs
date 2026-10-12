@@ -12,19 +12,20 @@ use firefly_pubsub::subscriber::OdomSubscriber;
 #[test]
 #[ignore = "requires FIREFLY_TEST_PYTHON pointing to the synced workspace Python"]
 fn viz_python_layout_matches_rust_offsets_and_sizes() {
-    use firefly_pubsub::viz::{ScalarMessage, VizMessage, VoxelMessage};
+    use firefly_pubsub::viz::{SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage};
     use std::mem::{offset_of, size_of};
 
     let python = std::env::var("FIREFLY_TEST_PYTHON").expect("workspace Python path");
     let script = r"
 import ctypes
-from firefly_viz.messages import ScalarMessage, VizMessage, VoxelMessage
+from firefly_viz.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage
 for cls, fields in [
     (ScalarMessage, ['timestamp', 'scalars', 'sequence']),
     (VizMessage, ['timestamp', 'points', 'sequence']),
     (VoxelMessage, ['voxels', 'sequence', 'chunk_index', 'chunk_count']),
 ]:
     print(ctypes.sizeof(cls), *(getattr(cls, name).offset for name in fields))
+print(SCALAR_BUFFER_SIZE)
 ";
     let output = Command::new(python).args(["-c", script]).output().unwrap();
     assert!(
@@ -53,6 +54,7 @@ for cls, fields in [
             offset_of!(VoxelMessage, sequence),
             offset_of!(VoxelMessage, chunk_index),
             offset_of!(VoxelMessage, chunk_count),
+            SCALAR_BUFFER_SIZE,
         ]
     );
 }

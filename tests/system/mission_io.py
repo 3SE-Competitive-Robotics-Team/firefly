@@ -5,7 +5,7 @@ import time
 
 import iceoryx2 as iox2
 from firefly_mujoco import LogMessage, TraceContext, ReferenceMessage
-from firefly_viz.messages import ScalarMessage, VizMessage
+from firefly_viz.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage
 
 
 
@@ -21,7 +21,7 @@ def service(node, topic, cls, capacity=None, publishers=None):
 class Recorder:
     def __init__(self, node):
         self.viz = service(node, "Firefly/Viz", VizMessage, 256, 8).publisher_builder().create()
-        self.scalar_pub = service(node, "Firefly/VizScalars", ScalarMessage, 256, 8).publisher_builder().create()
+        self.scalar_pub = service(node, "Firefly/VizScalars", ScalarMessage, SCALAR_BUFFER_SIZE, 8).publisher_builder().create()
         self.logs = service(node, "Firefly/Log", LogMessage, capacity=256, publishers=10).publisher_builder().create()
         self.sequence = {4: 0, 1: 0}
 

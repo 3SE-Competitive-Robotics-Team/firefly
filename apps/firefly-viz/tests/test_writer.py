@@ -29,6 +29,72 @@ class Recording:
         pass
 
 
+def test_cold_start_empty_keypoints_preserve_typed_ids_and_clear_previous_points(tmp_path):
+    import signal
+    import subprocess
+    import sys
+    import textwrap
+
+    import pyarrow as pa
+    from rerun.chunk import RrdReader
+
+    path = tmp_path / 'keypoints.rrd'
+    # 独立 SDK 进程保证首帧没有 track_id 类型缓存。
+    code = textwrap.dedent('''
+        import sys, threading
+        from types import SimpleNamespace
+        import rerun as rr
+        from firefly_viz.config import Options
+        from firefly_viz.messages import VizMessage, VIZ_KIND_KEYPOINTS_2D
+        from firefly_viz.recording import MatchedPoints
+        from firefly_viz.writer import Writer
+
+        archive = rr.RecordingStream('cold-start-keypoints')
+        archive.set_sinks(rr.FileSink(sys.argv[1], write_footer=True))
+        matches = MatchedPoints(archive, 4)
+        writer = Writer(SimpleNamespace(archive=archive, live=None, matches=matches), Options(), threading.Event())
+        try:
+            matches.frame('left', 0.5, 0)
+            for stamp, ids in [(1., []), (2., [42]), (3., [])]:
+                msg = VizMessage()
+                msg.kind, msg.timestamp = VIZ_KIND_KEYPOINTS_2D, stamp
+                entity = b'vio/debug/keypoints/left'
+                msg.entity_len, msg.entity[:len(entity)] = len(entity), entity
+                msg.scalar_count, msg.scalars[:3] = 3, [320., 240., float(len(ids))]
+                msg.point_count = len(ids)
+                for index, track_id in enumerate(ids):
+                    msg.points[index][:] = [12.25, 41.5, track_id]
+                writer.handle(msg)
+                matches.frame('left', stamp, int(stamp))
+            archive.flush(timeout_sec=5.)
+        finally:
+            archive.disconnect()
+    ''')
+    with subprocess.Popen([sys.executable, '-c', code, str(path)],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+        try:
+            _, stderr = process.communicate()
+        finally:
+            if process.poll() is None:
+                process.send_signal(signal.SIGINT)
+                process.communicate(timeout=5.)
+        assert process.returncode == 0, stderr
+    rows = {'/vio/debug/keypoints/left': [], '/cameras/left/points': []}
+    for chunk in RrdReader(path).stream():
+        if chunk.entity_path not in rows:
+            continue
+        batch = chunk.to_record_batch()
+        ids = batch.column('track_id')
+        assert ids.type == pa.list_(pa.uint64())
+        rows[chunk.entity_path].extend(zip(batch.column('sim_time').cast(pa.int64()).to_pylist(),
+                                          batch.column('Points2D:positions').to_pylist(), ids.to_pylist()))
+    assert sorted(rows['/vio/debug/keypoints/left']) == [
+        (1_000_000_000, [], []), (2_000_000_000, [[12.25, 41.5]], [42]), (3_000_000_000, [], [])]
+    assert sorted(rows['/cameras/left/points']) == [
+        (500_000_000, [], []), (1_000_000_000, [], []),
+        (2_000_000_000, [[12.75, 42.]], [42]), (3_000_000_000, [], [])]
+
+
 def test_worker_shutdown_drains_in_order_and_finishes():
     received = []
     worker = Worker('contract', 16, received.append, lambda: None, lambda: received.append('done'), 2.)

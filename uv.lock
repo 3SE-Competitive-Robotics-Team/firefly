@@ -190,6 +190,7 @@ dependencies = [
     { name = "firefly-mujoco" },
     { name = "iceoryx2" },
     { name = "numpy" },
+    { name = "pyarrow" },
     { name = "rerun-sdk" },
 ]
 
@@ -198,6 +199,7 @@ requires-dist = [
     { name = "firefly-mujoco", editable = "packages/firefly-mujoco" },
     { name = "iceoryx2", specifier = "==0.10.0" },
     { name = "numpy", specifier = ">=2.5.4,<3" },
+    { name = "pyarrow", specifier = ">=26.0.0" },
     { name = "rerun-sdk", specifier = ">=0.38.1,<0.39" },
 ]
 

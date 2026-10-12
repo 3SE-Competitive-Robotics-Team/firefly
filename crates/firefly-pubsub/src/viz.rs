@@ -38,7 +38,8 @@ pub mod kind {
 }
 
 /// VIO 左/右相机当前活动点；时间戳为原始相机时钟，不是滤波器时间。
-pub const VIO_KEYPOINT_ENTITIES: [&str; 2] = ["vio/debug/keypoints/left", "vio/debug/keypoints/right"];
+pub const VIO_KEYPOINT_ENTITIES: [&str; 2] =
+    ["vio/debug/keypoints/left", "vio/debug/keypoints/right"];
 
 /// 实体路径字节上限（64 字节，UTF-8；超出截断，见 [`VizMessage::set_entity`]）。
 pub const ENTITY_MAX: usize = 64;
@@ -174,6 +175,8 @@ impl VizMessage {
 
 /// 标量话题；每条消息固定 128 字节。
 pub const SCALAR_TOPIC: &str = "Firefly/VizScalars";
+/// 1kHz IMU 双标量与相机更新突发的独立接收容量；每条仅 128 字节。
+pub const SCALAR_BUFFER_SIZE: usize = 1024;
 /// 体素快照与增量话题。
 pub const VOXEL_TOPIC: &str = "Firefly/VizVoxels";
 /// 单一 planner 发布体素；独立缓冲限制大载荷的共享内存预算。
@@ -300,7 +303,7 @@ impl VizPublisher {
             scalars: Publisher::with_topic_buffer_publishers(
                 node,
                 SCALAR_TOPIC,
-                Some(VIZ_BUFFER_SIZE),
+                Some(SCALAR_BUFFER_SIZE),
                 Some(VIZ_MAX_PUBLISHERS),
             )?,
             voxels: None,
@@ -346,7 +349,9 @@ impl VizPayload for VizMessage {
         publisher: &VizPublisher,
     ) -> Result<crate::trace::TraceContext, firefly_error::Error> {
         self.sequence = publisher.geometry_sequence.get();
-        publisher.geometry_sequence.set(self.sequence.wrapping_add(1));
+        publisher
+            .geometry_sequence
+            .set(self.sequence.wrapping_add(1));
         publisher.geometry.publish(self)
     }
 }
@@ -457,6 +462,39 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 20);
+    }
+
+    #[test]
+    fn scalar_queue_retains_one_khz_imu_burst_in_order() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let topic = format!("Firefly/Test/Scalars/{unique}");
+        let node = crate::node::create_node().unwrap();
+        let subscriber = crate::subscriber::Subscriber::<ScalarMessage>::with_topic_and_buffer(
+            &node,
+            &topic,
+            SCALAR_BUFFER_SIZE,
+        )
+        .unwrap();
+        let publisher = crate::publish::Publisher::with_topic_and_buffer(
+            &node,
+            &topic,
+            Some(SCALAR_BUFFER_SIZE),
+        )
+        .unwrap();
+        // 250ms IMU 双通道突发，覆盖录制接收线程短暂停顿。
+        for sequence in 0_u32..500 {
+            let mut message = ScalarMessage::base(f64::from(sequence / 2) * 0.001, "vio/input/imu");
+            message.sequence = u64::from(sequence);
+            publisher.publish(message).unwrap();
+        }
+        for sequence in 0..500 {
+            let sample = subscriber.receive().unwrap().expect("IMU scalar");
+            assert_eq!(sample.sequence, sequence);
+        }
+        assert!(subscriber.receive().unwrap().is_none());
     }
 
     #[test]

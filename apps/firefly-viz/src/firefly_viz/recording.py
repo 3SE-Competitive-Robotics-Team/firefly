@@ -7,6 +7,7 @@ import time
 import uuid
 
 import numpy as np
+import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
 
@@ -187,6 +188,6 @@ class MatchedPoints:
             self.recording.set_time("left_frame", sequence=index)
         display_points = np.asarray(points, dtype=np.float32).reshape(-1, 2) + PIXEL_CENTER_OFFSET
         self.recording.log(f"cameras/{camera}/points", rr.Points2D(display_points, radii=2, colors=color),
-                           rr.AnyValues(track_id=np.asarray(ids, dtype=np.uint64)), strict=True)
+                           rr.AnyValues(track_id=pa.array(ids, type=pa.uint64())), strict=True)
         self.recording.log(f"cameras/{camera}/annotation", rr.AnyValues(matched=value is not None,
                                                                       capture_time=stamp), strict=True)

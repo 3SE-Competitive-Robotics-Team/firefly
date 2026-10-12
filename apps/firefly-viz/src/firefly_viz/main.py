@@ -26,7 +26,7 @@ from firefly_mujoco import (
 
 from .capture import Capture
 from .config import ROOT, load
-from .messages import ScalarMessage, VizMessage, VoxelMessage
+from .messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage
 from .recording import Recordings, URL
 from .video import Frame
 from .writer import Writer
@@ -190,7 +190,7 @@ def run(args):
                        capture.close, options.shutdown_seconds + 4 * options.video.shutdown_seconds)
         workers.append(media)
         for kind, topic, cls, publishers, capacity in (
-            ("viz", "Firefly/VizScalars", ScalarMessage, VIZ_MAX_PUBLISHERS, VIZ_BUFFER_SIZE),
+            ("viz", "Firefly/VizScalars", ScalarMessage, VIZ_MAX_PUBLISHERS, SCALAR_BUFFER_SIZE),
             ("viz", "Firefly/Viz", VizMessage, VIZ_MAX_PUBLISHERS, VIZ_BUFFER_SIZE),
             ("viz", "Firefly/VizVoxels", VoxelMessage, 1, VOXEL_BUFFER_SIZE),
             ("log", "Firefly/Log", LogMessage, LOG_MAX_PUBLISHERS, LOG_BUFFER_SIZE),

@@ -12,7 +12,7 @@ import time
 import iceoryx2 as iox2
 import numpy as np
 from firefly_mujoco import ControlMessage, OdomMessage
-from firefly_viz.messages import ScalarMessage
+from firefly_viz.messages import SCALAR_BUFFER_SIZE, ScalarMessage
 
 from process_lifecycle import ManagedProcess, isolated_run
 from mission_io import Recorder, ReferenceMessage, pose_values, service
@@ -145,7 +145,7 @@ class Mission:
             ("corrected", "CorrectedOdometry", OdomMessage, None, None),
             ("reference", "Reference", ReferenceMessage, None, None),
             ("control", "Control", ControlMessage, 32, None),
-            ("viz", "VizScalars", ScalarMessage, 256, 8),
+            ("viz", "VizScalars", ScalarMessage, SCALAR_BUFFER_SIZE, 8),
         ]:
             builder = service(self.node, "Firefly/" + topic, cls, capacity, publishers).subscriber_builder()
             self.subs[name] = builder.buffer_size(capacity or 2).create()

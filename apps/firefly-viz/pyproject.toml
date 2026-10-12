@@ -8,6 +8,7 @@ dependencies = [
     "firefly-mujoco",
     "iceoryx2==0.10.0",
     "numpy>=2.5.4,<3",
+    "pyarrow>=26.0.0",
     "rerun-sdk>=0.38.1,<0.39",
 ]
 

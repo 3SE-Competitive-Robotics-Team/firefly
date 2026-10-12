@@ -31,6 +31,8 @@ ARROWS_MAX = 256
 VOXELS_MAX = 16384
 BINS_MAX = 64
 SCALARS_MAX = 4
+#: 1kHz IMU 双标量与相机诊断突发的接收容量，与 Rust SCALAR_BUFFER_SIZE 一致。
+SCALAR_BUFFER_SIZE = 1024
 
 
 class VizMessage(ctypes.Structure):

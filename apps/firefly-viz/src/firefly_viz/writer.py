@@ -4,6 +4,7 @@ import math
 import time
 
 import numpy as np
+import pyarrow as pa
 import rerun as rr
 from firefly_mujoco import IMAGE_HEIGHT, IMAGE_WIDTH
 
@@ -64,7 +65,8 @@ class Writer:
                 raise ValueError(f"invalid keypoints {name}")
             points = np.array([[p[0], p[1]] for p in msg.points[:n]], dtype=np.float32).reshape(-1, 2)
             ids = np.array([p[2] for p in msg.points[:n]], dtype=np.uint64)
-            self.rec.log(name, rr.Points2D(points, colors=list(msg.color), radii=2), rr.AnyValues(track_id=ids), strict=True)
+            self.rec.log(name, rr.Points2D(points, colors=list(msg.color), radii=2),
+                         rr.AnyValues(track_id=pa.array(ids, type=pa.uint64())), strict=True)
             if name in ("vio/debug/keypoints/left", "vio/debug/keypoints/right"):
                 if (width, height) != (IMAGE_WIDTH, IMAGE_HEIGHT):
                     raise ValueError(f"keypoint resolution does not match camera: {name}")
