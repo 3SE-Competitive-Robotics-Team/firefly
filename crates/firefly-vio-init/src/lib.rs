@@ -2,14 +2,14 @@
 //!
 //! - [`InertialInitializer`]：编排静态/动态初始化（对照 `InertialInitializer`）；
 //! - [`StaticInitializer`]：静态初始化（静止/急动检测，对照 `StaticInitializer`）；
-//! - [`DynamicInitializer`]：动态初始化（线性系统 + 高斯牛顿 MLE，对照
-//!   `DynamicInitializer`，Ceres 由自研 GN 优化器替代）；
+//! - [`DynamicInitializer`]：动态初始化（线性系统 + DOGLEG MLE，对照 `OpenVINS`）；
 //! - [`CpiV1`]：连续预积分（对照 `ov_core::CpiV1`）；
 //! - [`InitializerHelper`]：插值/读数选择/董氏系数。
 //!
 //! 结果以纯数据形式返回（[`InitResult`]），由 `VioManager` 组装进 `State`。
 
 pub mod cpi_v1;
+mod dogleg;
 pub mod dynamic_init;
 pub mod helper;
 pub mod inertial_init;

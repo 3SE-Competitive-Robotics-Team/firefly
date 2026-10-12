@@ -6,11 +6,11 @@
 //! 3. 构造带 |g|=9.81 约束的线性系统求解速度/重力/特征初值（董氏系数 +
 //!    伴矩阵特征值，EigenSolver → nalgebra `complex_eigenvalues`）；
 //! 4. 恢复各时刻位姿/速度与全局特征初值；
-//! 5. 自研高斯牛顿（GN）MLE（替代 Ceres DOGLEG）：IMU 预积分因子 +
+//! 5. DOGLEG 信赖域 MLE：IMU 预积分因子 +
 //!    重投影因子（Cauchy loss）+ 首姿态/标定先验；
 //! 6. 从最终最优点的 `J` 恢复 IMU 15×15 协方差（含先验，膨胀并对称化）。
 //!
-//! Ceres 求解器不用移植；线性系统部分与三个因子（`Factor_ImuCPIv1`、
+//! DOGLEG 策略对照 Ceres 2.2；线性系统部分与三个因子（`Factor_ImuCPIv1`、
 //! `Factor_ImageReprojCalib`、`Factor_GenericPrior`）的残差/雅可比公式
 //! 逐行对照 C++。
 
@@ -27,9 +27,10 @@
 
 use crate::InitResult;
 use crate::cpi_v1::CpiV1;
+use crate::dogleg::{self, Linearization};
 use crate::helper::{compute_dongsi_coeff, gram_schmidt, select_imu_readings};
 use crate::options::InitOptions;
-use firefly_vio_core::cam::{CamEqui, CamRadtan, CameraModel, SharedCamera};
+use firefly_vio_core::cam::{CamEqui, CamRadtan, CameraModel};
 use firefly_vio_core::feat::{Feature, FeatureDatabase};
 use firefly_vio_core::sensor::ImuData;
 use firefly_vio_types::quat_ops::{
@@ -400,9 +401,9 @@ impl DynamicInitializer {
         }
 
         // ---------------------------------------------------------------
-        // 6. MLE 高斯牛顿（替代 Ceres，对照 C++ 572-898 行）
+        // 6. MLE DOGLEG（对照 C++ 572-898 行）
         // ---------------------------------------------------------------
-        let (opt_state, cov_j) = run_gn_mle(
+        let (opt_state, cov_j) = run_mle(
             params,
             &features,
             &camera_times,
@@ -744,10 +745,11 @@ struct GnCalib {
     q: Vector4<f64>,
     p: Vector3<f64>,
     intr: [f64; 8],
-    /// 是否鱼眼（构造时经探针判定，对照 C++ `dynamic_pointer_cast<CamEqui>`）。
+    /// 是否鱼眼（由相机模型显式提供，对照 C++ `dynamic_pointer_cast<CamEqui>`）。
     is_fisheye: bool,
 }
 
+#[derive(Clone)]
 struct GnState {
     poses: Vec<GnPose>,
     features: HashMap<usize, Vector3<f64>>,
@@ -766,6 +768,28 @@ struct GnState {
 }
 
 impl GnState {
+    fn parameters(&self, opt_calib: bool) -> DVector<f64> {
+        let mut values = Vec::new();
+        for pose in &self.poses {
+            values.extend_from_slice(pose.q.as_slice());
+            for v in [pose.p, pose.v, pose.bg, pose.ba] {
+                values.extend_from_slice(v.as_slice());
+            }
+        }
+        for id in &self.feat_order {
+            values.extend_from_slice(self.features[id].as_slice());
+        }
+        if opt_calib {
+            for id in &self.calib_order {
+                let c = &self.calibs[id];
+                values.extend_from_slice(c.q.as_slice());
+                values.extend_from_slice(c.p.as_slice());
+                values.extend_from_slice(&c.intr);
+            }
+        }
+        DVector::from_vec(values)
+    }
+
     fn pose_index(&self, time: f64) -> usize {
         self.pose_lookup[&Tk::of(time)]
     }
@@ -789,11 +813,11 @@ fn pose_dof(i: usize) -> usize {
 }
 
 // ===========================================================================
-// MLE 高斯牛顿
+// MLE DOGLEG
 // ===========================================================================
 
 #[allow(clippy::too_many_arguments)]
-fn run_gn_mle(
+fn run_mle(
     params: &InitOptions,
     features: &HashMap<usize, Feature>,
     camera_times: &TimeSet,
@@ -842,13 +866,13 @@ fn run_gn_mle(
                 q: Vector4::new(ext[0], ext[1], ext[2], ext[3]),
                 p: Vector3::new(ext[4], ext[5], ext[6]),
                 intr: shared.value(),
-                is_fisheye: is_fisheye_cam(shared),
+                is_fisheye: shared.is_fisheye(),
             },
         );
     }
     let calib_base = feat_base + feat_order.len() * 3;
     let calib_lin = calibs.clone();
-    let mut state = GnState {
+    let state = GnState {
         poses,
         features: gn_features,
         pose_lookup,
@@ -860,56 +884,35 @@ fn run_gn_mle(
         feat_order,
     };
 
-    let n_iter = params.init_dyn_mle_max_iter;
+    let x_lin = state.poses[0];
     let opt_calib = params.init_dyn_mle_opt_calib;
-    if n_iter != 0 {
-        let x_lin = state.poses[0];
-        let mut prev_cost = f64::INFINITY;
-        let mut converged = false;
-        for _ in 0..n_iter {
-            let (r, j, cost) = build_gn_residuals(
+    let (state, linearization) = dogleg::minimize(
+        state,
+        params.init_dyn_mle_max_iter,
+        params.init_dyn_mle_max_time,
+        |state| {
+            build_gn_residuals(
                 params,
                 features,
                 camera_times,
                 map_camera_cpi_IitoIi1,
                 map_features_num_meas,
                 min_num_meas_to_optimize,
-                &state,
+                state,
                 gravity,
                 opt_calib,
                 &x_lin,
-            );
-            let ata = &j.transpose() * &j;
-            let g = -(&j.transpose() * &r);
-            // 稀疏起见用 LU；必要时加小阻尼（LM 风格）
-            let delta = ata.lu().solve(&g)?;
-            apply_delta(&mut state, &delta, opt_calib);
-            log::debug!("[init-d]: GN 迭代 cost={cost:.6e}");
-            if (prev_cost - cost).abs() < 1e-5 {
-                converged = true;
-                break;
-            }
-            prev_cost = cost;
-        }
-        if !converged {
-            log::warn!("[init-d]: GN MLE 未收敛");
-            return None;
-        }
-    }
-
-    let (_, j, _) = build_gn_residuals(
-        params,
-        features,
-        camera_times,
-        map_camera_cpi_IitoIi1,
-        map_features_num_meas,
-        min_num_meas_to_optimize,
-        &state,
-        gravity,
-        opt_calib,
-        &state.poses[0],
-    );
-    Some((state, &j.transpose() * &j))
+            )
+        },
+        |state, delta| {
+            let mut candidate = state.clone();
+            apply_delta(&mut candidate, delta, opt_calib);
+            candidate
+        },
+        |state| state.parameters(opt_calib),
+    )?;
+    let j = linearization.jacobian;
+    Some((state, j.transpose() * j))
 }
 
 /// GN 残差行数统计。
@@ -961,7 +964,7 @@ fn build_gn_residuals(
     gravity: Vector3<f64>,
     opt_calib: bool,
     x_lin: &GnPose,
-) -> (DVector<f64>, DMatrix<f64>, f64) {
+) -> Option<Linearization> {
     let n_rows = num_gn_rows(
         features,
         camera_times,
@@ -990,13 +993,13 @@ fn build_gn_residuals(
             .as_ref()
             .expect("cpi present");
         let (res, jac) =
-            imu_factor_residual_jacobian(&state.poses[pi], &state.poses[pi2], cpi, gravity);
+            imu_factor_residual_jacobian(&state.poses[pi], &state.poses[pi2], cpi, gravity)?;
         let base = pose_dof(pi);
         let base2 = pose_dof(pi2);
         // jac 顺序：q1,bg1,v1,ba1,p1,q2,bg2,v2,ba2,p2（各 15×3）
         for (ii, val) in res.iter().enumerate() {
             r[row + ii] = *val;
-            cost += val * val;
+            cost += 0.5 * val * val;
         }
         scatter_pose(
             &mut j, row, base, &jac[0], &jac[1], &jac[2], &jac[3], &jac[4],
@@ -1012,7 +1015,7 @@ fn build_gn_residuals(
         let (res, jac) = prior_first_pose(&state.poses[0], x_lin);
         for (ii, val) in res.iter().enumerate() {
             r[row + ii] = *val;
-            cost += val * val;
+            cost += 0.5 * val * val;
         }
         scatter_first_prior(&mut j, row, pose_dof(0), &jac);
         row += 10;
@@ -1027,7 +1030,7 @@ fn build_gn_residuals(
         let (res, jac) = calib_prior(calib, lin);
         for (ii, val) in res.iter().enumerate() {
             r[row + ii] = *val;
-            cost += val * val;
+            cost += 0.5 * val * val;
         }
         if opt_calib {
             let cidx = state.calib_index(*cam_id).unwrap();
@@ -1064,11 +1067,11 @@ fn build_gn_residuals(
                     reproj_factor_residual_jacobian(params, pose, &feat_p, calib, uv_meas);
                 // Cauchy loss 权重（对照 ceres::CauchyLoss(1.0)）
                 let s = res.x * res.x + res.y * res.y;
-                let w_sqrt = 1.0 / (1.0 + s).sqrt();
+                let (robust_cost, w_sqrt) = dogleg::cauchy(s);
                 res *= w_sqrt;
                 r[row] = res.x;
                 r[row + 1] = res.y;
-                cost += res.x * res.x + res.y * res.y;
+                cost += robust_cost;
                 // 6 块：q,p,feat,qcalib,pcalib,intr
                 scatter_block(&mut j, row, pose_dof, &(w_sqrt * &jac[0]));
                 scatter_block(&mut j, row, pose_dof + 3, &(w_sqrt * &jac[1]));
@@ -1083,7 +1086,11 @@ fn build_gn_residuals(
         }
     }
 
-    (r, j, cost)
+    Some(Linearization {
+        residual: r,
+        jacobian: j,
+        cost,
+    })
 }
 
 /// 把姿态的 5 个 15×3 雅可比块散布到 `base`（顺序：q, p, v, bg, ba 的 dof）。
@@ -1176,7 +1183,7 @@ fn imu_factor_residual_jacobian(
     s2: &GnPose,
     cpi: &CpiV1,
     gravity: Vector3<f64>,
-) -> (DVector<f64>, [DMatrix<f64>; 10]) {
+) -> Option<(DVector<f64>, [DMatrix<f64>; 10])> {
     let eye = Matrix3::<f64>::identity();
     let r_1 = quat_2_rot(&s1.q);
     let q_2 = s2.q;
@@ -1203,7 +1210,7 @@ fn imu_factor_residual_jacobian(
             - cpi.h_a * dba
             - cpi.alpha_tau),
     );
-    let sqrti = sqrt_info(&cpi.p_meas);
+    let sqrti = sqrt_info(&cpi.p_meas)?;
     res = &sqrti * &res;
 
     let q_meas_p = quat_multiply(&inv_quat(&q_breve), &q_b);
@@ -1248,27 +1255,29 @@ fn imu_factor_residual_jacobian(
     for (k, c0) in cols.iter().enumerate() {
         out[k] = jac.columns(*c0, 3).into_owned();
     }
-    (res, out)
+    Some((res, out))
 }
 
 /// P 的信息矩阵平方根（对照 C++ sqrtI = LLT(Pinv)）。
-fn sqrt_info(p: &DMatrix<f64>) -> DMatrix<f64> {
-    let n = p.nrows();
-    // inv(P) via cholesky
-    let info = p
+fn sqrt_info(p: &DMatrix<f64>) -> Option<DMatrix<f64>> {
+    if !p.is_square()
+        || p.nrows() == 0
+        || !p.iter().all(|x| x.is_finite())
+        || (p - p.transpose()).amax() > 1e-12 * p.amax()
+    {
+        log::warn!("[init-d]: invalid preintegration covariance");
+        return None;
+    }
+    // P=LLᵀ ⇒ W=L⁻¹, WᵀW=P⁻¹；正交白化基不改变代价与正规方程。
+    let result = p
         .clone()
         .cholesky()
-        .map_or_else(|| p.clone(), |c| c.inverse());
-    let l = info
-        .cholesky()
-        .map_or_else(|| DMatrix::<f64>::identity(n, n), |c| c.l());
-    let mut out = DMatrix::<f64>::zeros(n, n);
-    for i in 0..n {
-        for k in 0..n {
-            out[(k, i)] = l[(i, k)];
-        }
+        .and_then(|chol| chol.l().try_inverse())
+        .filter(|w| w.iter().all(|x| x.is_finite()));
+    if result.is_none() {
+        log::warn!("[init-d]: preintegration covariance is not positive definite");
     }
-    out
+    result
 }
 
 /// 2×3 定维矩阵转 DMatrix（nalgebra 无 From 实现，显式拷贝）。
@@ -1456,32 +1465,6 @@ fn reproj_factor_residual_jacobian(
     (res, out)
 }
 
-/// 判断共享相机是否鱼眼（对照 C++ `dynamic_pointer_cast<CamEqui>`）。
-///
-/// `CameraModel` 无 `Any` 上界，无法直接 `downcast_ref`；改用**探针法**：
-/// 在若干归一化点上对比共享相机对象与临时 `CamRadtan` 的 `distort_d` 输出，
-/// 一致则共享相机为 Radtan，否则为 Equi。两种模型在非零畸变下几乎处处不同，
-/// 零畸变时等价于 Radtan 恒等映射（此时判定准确）。
-fn is_fisheye_cam(shared: &SharedCamera) -> bool {
-    let calib = shared.value();
-    let tmp = CamRadtan::new(0, 0, &calib);
-    let probes = [
-        Vector2::new(0.2, -0.3),
-        Vector2::new(-0.4, 0.1),
-        Vector2::new(0.5, 0.4),
-    ];
-    let mut agree = 0usize;
-    for p in probes {
-        let d1 = shared.distort_d(p);
-        let d2 = tmp.distort_d(p);
-        if (d1 - d2).norm() < 1e-2 {
-            agree += 1;
-        }
-    }
-    let is_radtan = agree > probes.len() / 2;
-    !is_radtan
-}
-
 // ===========================================================================
 // 协方差恢复
 // ===========================================================================
@@ -1612,3 +1595,7 @@ mod tests {
         assert!((c[0] - 1.0).abs() < 1e-12);
     }
 }
+
+#[cfg(test)]
+#[path = "dynamic_contracts.rs"]
+mod contracts;

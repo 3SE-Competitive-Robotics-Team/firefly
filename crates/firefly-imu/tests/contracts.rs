@@ -379,3 +379,54 @@ fn invalid_configuration_measurements_and_covariances_are_rejected() {
     let h = gravity_jacobian(Vector3::z() * 9.81);
     assert_eq!(h.fixed_view::<3, 3>(0, 3), Matrix3::zeros());
 }
+
+#[test]
+fn initialization_bias_covariance_follows_density_rate_and_window() {
+    for (density, hz, seconds) in [(2e-4, 100, 2.), (0.004, 100, 2.), (0.004, 50, 4.)] {
+        let options = Options {
+            gyro_density: density,
+            stationary_seconds: seconds,
+            ..Options::default()
+        };
+        let mut e = Estimator::new(options).unwrap();
+        let count = (seconds * f64::from(hz)) as usize;
+        for i in 0..=count {
+            let mut s = sample(i as f64 / f64::from(hz));
+            s.gyro = Vector3::new(0.001, -0.002, 0.003);
+            e.observe(s, true).unwrap();
+        }
+        let n = (count + 1) as f64;
+        let dt = 1. / f64::from(hz);
+        let expected = density.powi(2) / (dt * n)
+            + options.bias_walk.powi(2) * dt * (n - 1.) * n * (2. * n - 1.) / (6. * n * n);
+        let s = e.state().unwrap();
+        assert!((s.bias - Vector3::new(0.001, -0.002, 0.003)).norm() < 1e-14);
+        assert!(
+            (s.covariance.fixed_view::<3, 3>(3, 3) - Matrix3::identity() * expected).amax() < 1e-17
+        );
+        assert!(s.covariance.cholesky().is_some());
+    }
+}
+
+#[test]
+fn stationary_covariance_handles_irregular_samples_cross_terms_and_invalid_data() {
+    use firefly_imu::gyro_mean_covariance;
+    let samples = [
+        (0., Vector3::new(1., 2., 0.)),
+        (0.1, Vector3::new(-1., -2., 0.)),
+        (0.3, Vector3::zeros()),
+    ];
+    let c = gyro_mean_covariance(samples.into_iter(), 0.01, 0.02).unwrap();
+    let white = 0.01_f64.powi(2) * (10. + 10. + 5.) / 9.;
+    let walk = 0.02_f64.powi(2) * (0.1 + 4. * 0.2) / 9.;
+    let scatter = Matrix3::new(2., 4., 0., 4., 8., 0., 0., 0., 0.) / 6.;
+    assert!((c - scatter - Matrix3::identity() * (white + walk)).amax() < 1e-15);
+    for times in [[0., 0., 1.], [0., -1., 1.], [0., f64::NAN, 1.]] {
+        assert!(
+            gyro_mean_covariance(times.into_iter().map(|t| (t, Vector3::zeros())), 0.01, 0.02)
+                .is_none()
+        );
+    }
+    assert!(gyro_mean_covariance(samples[..1].iter().copied(), 0.01, 0.02).is_none());
+    assert!(gyro_mean_covariance(samples.into_iter(), f64::NAN, 0.02).is_none());
+}

@@ -131,7 +131,15 @@ impl Estimator {
             let (gyro, accel, _, _) = self.moments();
             let rotation = UnitQuaternion::rotation_between(&accel, &Vector3::z())
                 .ok_or_else(|| invalid("ambiguous initial gravity direction"))?;
-            let mut covariance = Matrix6::identity() * 1e-6;
+            let mut covariance = Matrix6::zeros();
+            covariance.fixed_view_mut::<3, 3>(3, 3).copy_from(
+                &crate::gyro_mean_covariance(
+                    self.window.iter().map(|s| (s.timestamp, s.gyro)),
+                    self.options.gyro_density,
+                    self.options.bias_walk,
+                )
+                .ok_or_else(|| invalid("invalid stationary gyro covariance"))?,
+            );
             // 重力只约束倾角；绕世界竖直轴的初始航向是自由规范。
             let up = rotation.inverse() * Vector3::z();
             covariance.fixed_view_mut::<3, 3>(0, 0).copy_from(

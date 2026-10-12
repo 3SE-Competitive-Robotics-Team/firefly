@@ -2,7 +2,9 @@
 //! 原始 IMU 同时供 VIO 消费；此库不拥有线程、IPC 或控制器。
 
 mod eskf;
+mod stationary;
 mod stream;
+pub use stationary::gyro_mean_covariance;
 
 pub use eskf::{
     AttitudeState, Gate, Intersection, Matrix6, gravity_jacobian, right_jacobian, transition,
