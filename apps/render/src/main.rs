@@ -5,7 +5,7 @@
 //! 通过 `Firefly/CameraPair` 唤醒订阅端。真值只用于生成仿真测量。
 //! 视觉资产必须存在于 `models/rmuc2026/field.glb`。
 //!
-//! 传感器相机按 10Hz 窗口激活，逐像素处理在工作线程完成，IPC 端口由主线程持有。
+//! 传感器相机按 10Hz 窗口激活，逐像素处理与传感器发布在工作线程完成。
 //! 日志经 `firefly-observability` 汇入统一 rrd 记录。
 //! `--offline` 使用独立 `Firefly/Offline/*` 数据话题供离线库图渲染。
 
@@ -41,7 +41,7 @@ use firefly_render::scene::{MODELS_DIR, spawn_scene};
 use freecam::{FreeCam, freecam_move, toggle_freecam, update_mode_label};
 use link::{
     CapturePipeline, CaptureStats, PendingFrames, SensorCapture, drain_captures, open_ports,
-    poll_pose, publish_processed,
+    poll_pose, update_processed_views,
 };
 use rig::{DRONE_LAYER, PoseState, VoxelView, spawn_rig};
 use scene::SceneSpec;
@@ -87,7 +87,12 @@ fn main() {
         std::process::exit(1);
     });
     let log_ipc = firefly_observability::init_ipc(&ports.node, "render");
-    build_app(spec, &render_config, ports, log_ipc, offline).run();
+    build_app(spec, &render_config, ports, log_ipc, offline)
+        .unwrap_or_else(|error| {
+            log::error!("render 初始化失败: {error}");
+            std::process::exit(1);
+        })
+        .run();
 }
 
 /// 组装 Bevy 应用（插件、资源与系统注册）；`main` 只做参数、日志与 IPC 准备。
@@ -97,7 +102,7 @@ fn build_app(
     ports: link::IpcPorts,
     log_ipc: firefly_observability::LogIpc,
     offline: bool,
-) -> App {
+) -> Result<App, firefly_error::Error> {
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -130,7 +135,7 @@ fn build_app(
     .insert_resource(CaptureHub::default())
     .insert_resource(PendingFrames::default())
     .insert_resource(SensorCapture::default())
-    .insert_resource(CapturePipeline::spawn(render_config.depth_noise, offline))
+    .insert_resource(CapturePipeline::spawn(render_config.depth_noise, offline)?)
     .insert_resource(CaptureStats::default())
     .insert_resource(FreeCam::default())
     .insert_resource(viewer_pose::ViewerPose::default())
@@ -173,7 +178,7 @@ fn build_app(
         Last,
         (
             drain_captures,
-            publish_processed,
+            update_processed_views,
             keypoints::update_panels,
             pump_logs,
             flush_on_exit,
@@ -186,7 +191,7 @@ fn build_app(
             .add_systems(PreUpdate, flight_overlay::poll_estimate)
             .add_systems(Update, flight_overlay::draw);
     }
-    app
+    Ok(app)
 }
 
 /// 体素视图跟随主视角（同一机位，便于左右对照）。

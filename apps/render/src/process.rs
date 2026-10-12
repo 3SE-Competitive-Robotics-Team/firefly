@@ -1,10 +1,12 @@
 //! 逐像素处理工作线程：灰度化 + 深度线性化/噪声 + 调试显示映射。
 //!
-//! iceoryx2 端口非 `Send`，由主线程装配采集帧并发布结果；本线程处理像素。
+//! iceoryx2 发布端口在工作线程内创建和使用；UI 只读取最新的显示结果。
 //!
 //! 深度退化由 `depth_noise` 配置，在线测量施加噪声；离线地图路标使用理想几何深度标签。
 
-use std::sync::mpsc::{Receiver, SyncSender};
+use crate::capture::CaptureTiming;
+use std::sync::{Condvar, Mutex};
+use std::time::Instant;
 
 use crate::depth_noise::{self, DepthNoiseOptions};
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_SIZE, IMAGE_WIDTH};
@@ -18,6 +20,7 @@ use crate::sensors;
 pub struct CaptureJob {
     /// 单调序号。
     pub seq: u64,
+    pub timing: CaptureTiming,
     /// 位姿时间戳（秒，sim 时间）。
     pub stamp: f64,
     /// 上游 trace 上下文（发布时续接）。
@@ -35,6 +38,7 @@ pub struct CaptureJob {
 pub struct ProcessedCapture {
     /// 单调序号。
     pub seq: u64,
+    pub timing: CaptureTiming,
     /// 位姿时间戳（秒）。
     pub stamp: f64,
     /// 上游 trace 上下文。
@@ -53,33 +57,84 @@ pub struct ProcessedCapture {
     pub depth_rgba: Vec<u8>,
 }
 
-/// 工作线程主循环：阻塞收任务，算完阻塞回结果；通道关闭即退出。
-pub fn run_worker(
-    jobs: &Receiver<CaptureJob>,
-    results: &SyncSender<ProcessedCapture>,
-    options: DepthNoiseOptions,
-    offline: bool,
-) {
-    while let Ok(job) = jobs.recv() {
-        let out = {
-            let root = job.trace.continue_span("render-pixels").unwrap_or_else(|| {
-                fastrace::Span::root(
-                    "render-pixels",
-                    fastrace::prelude::SpanContext::random().sampled(false),
-                )
-            });
-            let _guard = root.set_local_parent();
-            process(job, &options, offline)
-        };
-        fastrace::flush();
-        if results.send(out).is_err() {
-            break;
+/// 有界最新值邮箱：生产者不等待消费者；关闭唤醒接收端并丢弃未处理任务。
+pub struct Latest<T> {
+    state: Mutex<(Option<T>, bool)>,
+    ready: Condvar,
+}
+
+impl<T> Default for Latest<T> {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new((None, false)),
+            ready: Condvar::new(),
         }
     }
 }
 
+impl<T> Latest<T> {
+    pub fn replace(&self, value: T) {
+        let mut state = self.state.lock().expect("capture mailbox poisoned");
+        if !state.1 {
+            state.0 = Some(value);
+            self.ready.notify_one();
+        }
+    }
+
+    pub fn take(&self) -> Option<T> {
+        self.state
+            .lock()
+            .expect("capture mailbox poisoned")
+            .0
+            .take()
+    }
+
+    pub fn recv(&self) -> Option<T> {
+        let state = self.state.lock().expect("capture mailbox poisoned");
+        let mut state = self
+            .ready
+            .wait_while(state, |s| s.0.is_none() && !s.1)
+            .expect("capture mailbox poisoned");
+        state.0.take()
+    }
+
+    pub fn close(&self) {
+        *self.state.lock().expect("capture mailbox poisoned") = (None, true);
+        self.ready.notify_all();
+    }
+}
+
+/// 像素处理后立即发布；显示端不参与工作线程的进度与背压。
+pub fn run_worker(
+    jobs: &Latest<CaptureJob>,
+    results: &Latest<ProcessedCapture>,
+    options: &DepthNoiseOptions,
+    offline: bool,
+    mut publish: impl FnMut(&ProcessedCapture),
+) {
+    while let Some(job) = jobs.recv() {
+        let root = job.trace.continue_span("render-pixels").unwrap_or_else(|| {
+            fastrace::Span::root(
+                "render-pixels",
+                fastrace::prelude::SpanContext::random().sampled(false),
+            )
+        });
+        let guard = root.set_local_parent();
+        let result = process(job, options, offline);
+        publish(&result);
+        results.replace(result);
+        drop(guard);
+        fastrace::flush();
+    }
+}
+
 /// 单拍像素管线。
-fn process(job: CaptureJob, options: &DepthNoiseOptions, offline: bool) -> ProcessedCapture {
+pub fn process(
+    mut job: CaptureJob,
+    options: &DepthNoiseOptions,
+    offline: bool,
+) -> ProcessedCapture {
+    job.timing.started = Instant::now();
     let mut left_gray = vec![0u8; IMAGE_SIZE];
     let mut right_gray = vec![0u8; IMAGE_SIZE];
     sensors::rgb_to_gray(&job.left_rgb, &mut left_gray);
@@ -101,8 +156,10 @@ fn process(job: CaptureJob, options: &DepthNoiseOptions, offline: bool) -> Proce
     let mut depth_rgba = vec![0u8; 4 * IMAGE_SIZE];
     sensors::depth_to_display(&depth, &mut depth_rgba, sensors::DISPLAY_DEPTH_RANGE);
 
+    job.timing.processed = Instant::now();
     ProcessedCapture {
         seq: job.seq,
+        timing: job.timing,
         stamp: job.stamp,
         trace: job.trace,
         left_rgb: job.left_rgb,
@@ -119,6 +176,80 @@ mod tests {
     use super::*;
 
     #[test]
+    fn latest_mailbox_overwrites_pending_and_close_wakes_receiver() {
+        let jobs = Latest::default();
+        jobs.replace(1);
+        jobs.replace(2);
+        assert_eq!(jobs.recv(), Some(2));
+        assert_eq!(jobs.take(), None);
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| jobs.recv());
+            jobs.close();
+            assert_eq!(worker.join().unwrap(), None);
+        });
+        jobs.replace(3);
+        assert_eq!(jobs.recv(), None);
+        let pending = Latest::default();
+        pending.replace(4);
+        pending.close();
+        assert_eq!(pending.take(), None);
+    }
+
+    #[test]
+    fn worker_publishes_without_ui_polling_and_preserves_capture_stamp_and_pixels() {
+        let jobs = Latest::default();
+        let results = Latest::default();
+        let (published, received) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                run_worker(
+                    &jobs,
+                    &results,
+                    &DepthNoiseOptions::default(),
+                    true,
+                    |result| {
+                        published
+                            .send((
+                                result.seq,
+                                result.stamp,
+                                result.left_gray[0],
+                                result.right_gray[0],
+                            ))
+                            .unwrap();
+                    },
+                );
+            });
+            let mut observations = Vec::new();
+            for seq in 1..=2 {
+                jobs.replace(CaptureJob {
+                    seq,
+                    stamp: 7. + seq as f64 / 10.,
+                    timing: CaptureTiming::default(),
+                    trace: TraceContext::empty(),
+                    left_rgb: vec![128; 4 * IMAGE_SIZE],
+                    right_rgb: vec![64; 4 * IMAGE_SIZE],
+                    depth_raw: vec![0; 4 * IMAGE_SIZE],
+                });
+                // 有限等待只检测线程死锁；不把处理耗时作为数值正确性门槛。
+                let value = received.recv_timeout(std::time::Duration::from_secs(10));
+                if value.is_err() {
+                    jobs.close();
+                }
+                observations.push(value.unwrap());
+            }
+            jobs.close();
+            worker.join().unwrap();
+            for (index, (id, stamp, left, right)) in observations.into_iter().enumerate() {
+                let seq = index as u64 + 1;
+                assert_eq!(id, seq);
+                assert!((stamp - (7. + seq as f64 / 10.)).abs() < f64::EPSILON);
+                assert_eq!((left, right), (128, 64));
+            }
+        });
+        assert_eq!(results.take().unwrap().seq, 2);
+    }
+
+    #[test]
     fn offline_depth_is_geometry_independent_of_sensor_range_and_noise() {
         let options = DepthNoiseOptions {
             max_depth_m: 4.,
@@ -126,6 +257,7 @@ mod tests {
         };
         let job = || CaptureJob {
             seq: 1,
+            timing: CaptureTiming::default(),
             stamp: 1.,
             trace: TraceContext::empty(),
             left_rgb: vec![128; 4 * IMAGE_SIZE],
@@ -146,6 +278,7 @@ mod tests {
         let options = DepthNoiseOptions::default();
         let job = CaptureJob {
             seq: 3,
+            timing: CaptureTiming::default(),
             stamp: 1.5,
             trace: TraceContext::empty(),
             left_rgb: vec![128u8; 4 * IMAGE_SIZE],

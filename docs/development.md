@@ -153,6 +153,12 @@ T16 为 64 维，无法直接使用官方 ALIKED LightGlue 权重。导出保留
 `plan/*`、`logs/<app>`。传感器原图只在 render 面板，不进 RRD。
 render 默认按原图时间配对叠加 VIO 点；图像标记和估计/真值影子只改调试显示，不进传感器。
 
+传感器延迟按原始采集 `sim_time` 记录墙钟耗时（秒）：
+`render/capture/stages_s` 为请求→提交、提交→回读、回读→装配、装配→处理；
+`render/capture/publish_s` 为像素处理、处理结束→发布、请求→发布、帧序号。
+这些诊断不改图像时间戳；`vio/debug/camera_age` 是消费时仿真时刻减采集时刻，
+`fc/imu/health` 的外援年龄还包含视觉更新与等待下一拍的时间。
+
 实时查看先启动 rerun，再运行不带 `--save` 的 firefly-viz，默认连接 `127.0.0.1:9876`。
 离线回放 `rerun logs/rmuc_run.rrd`；数值可用 `rerun rrd print`、`rerun rrd stats` 或
 Python RrdReader，读取方法见仓库 `.agents/skills/rerun/SKILL.md`。

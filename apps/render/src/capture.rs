@@ -1,9 +1,9 @@
 //! GPU 纹理回读：传感器颜色目标 + 深度预通道纹理 → CPU。
 //!
 //! 链路（每相机节拍一次，由 `link` 按固定 10Hz 发起请求）：
-//! 主世界 `CaptureHub::request` → 渲染世界 `copy_sensors`（`Cleanup` 阶段，
-//! 图执行之后同队列提交拷贝）→ `map_async` 回调经通道回传字节 →
-//! 主世界 `link` 配对三份同 `seq` 回复后发布。
+//! 主世界 `CaptureHub::request` → 渲染世界 `copy_sensors`（`RenderGraphSystems::Finish` 阶段，
+//! 图像绘制提交后、窗口呈现前在同队列提交拷贝）→ `map_async` 回调经通道回传字节 →
+//! 主世界 `link` 配对三份同 `seq` 回复后，交给像素线程处理并发布。
 //!
 //! [`CAPTURE_SETS`] 组回读缓冲允许多拍在途；全部占用时等待空闲缓冲。
 //!
@@ -13,21 +13,21 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use bevy::image::Image;
 use bevy::prelude::*;
+use bevy::render::Extract;
 use bevy::render::GpuResourceAppExt;
-use bevy::render::Render;
 use bevy::render::extract_component::ExtractComponentPlugin;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::{
     Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, MapMode, Origin3d,
     PollType, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect,
 };
-use bevy::render::renderer::{RenderDevice, RenderQueue};
+use bevy::render::renderer::{RenderDevice, RenderGraph, RenderGraphSystems, RenderQueue};
 use bevy::render::texture::GpuImage;
 use bevy::render::view::ViewDepthStencilTexture;
-use bevy::render::{Extract, RenderSystems};
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_WIDTH};
 use firefly_pubsub::trace::TraceContext;
 
@@ -51,11 +51,37 @@ pub enum SensorKind {
     Depth,
 }
 
+/// 同一拍的墙钟阶段边界；只用于延迟诊断，不参与传感器时间戳。
+#[derive(Clone, Copy, Debug)]
+pub struct CaptureTiming {
+    pub issued: Instant,
+    pub submitted: Instant,
+    pub readback: Instant,
+    pub assembled: Instant,
+    pub started: Instant,
+    pub processed: Instant,
+}
+
+impl Default for CaptureTiming {
+    fn default() -> Self {
+        let now = Instant::now();
+        Self {
+            issued: now,
+            submitted: now,
+            readback: now,
+            assembled: now,
+            started: now,
+            processed: now,
+        }
+    }
+}
+
 /// 回读请求（主世界→渲染世界，`seq` 关联三份回复与位姿时间戳）。
 #[derive(Clone, Copy, Debug)]
 pub struct CaptureRequest {
     /// 单调序号。
     pub seq: u64,
+    pub timing: CaptureTiming,
     /// 位姿时间戳（秒，发布时原样透传）。
     pub stamp: f64,
     /// 上游 trace 上下文（发布时续接）。
@@ -71,6 +97,7 @@ pub struct CaptureRequest {
 pub struct CapturedFrame {
     /// 对应请求的序号。
     pub seq: u64,
+    pub timing: CaptureTiming,
     /// 传感器种类。
     pub kind: SensorKind,
     /// 时间戳（透传自请求）。
@@ -182,7 +209,7 @@ impl FromWorld for CaptureBuffers {
     }
 }
 
-/// 拷贝传感器纹理 → 空闲暂存组（`Render` 之后同队列提交，顺序保证新于渲染）。
+/// 拷贝传感器纹理 → 空闲暂存组（绘制提交后同队列拷贝，窗口呈现前完成回读）。
 ///
 /// 请求在无空闲组或纹理未就绪时保留在共享槽：主世界据此保持相机激活、
 /// 下帧重试（相机按需激活，见 `link::poll_pose`）。
@@ -209,7 +236,7 @@ fn copy_sensors(
     else {
         return;
     };
-    let Some(req) = extracted.0.take() else {
+    let Some(mut req) = extracted.0.take() else {
         return;
     };
     let Some(left) = images.get(req.left) else {
@@ -241,7 +268,8 @@ fn copy_sensors(
     encode_copy(&mut encoder, &left.texture, &set.left);
     encode_copy(&mut encoder, &right.texture, &set.right);
     encode_copy(&mut encoder, depth_tex, &set.depth);
-    queue.submit(std::iter::once(encoder.finish()));
+    let submission = queue.submit(std::iter::once(encoder.finish()));
+    req.timing.submitted = Instant::now();
     *hub.inner.request.lock().expect("hub poisoned") = None;
     hub.inner.taken_seq.store(req.seq, Ordering::SeqCst);
     // 映射必须在提交之后：提交校验要求被引用的缓冲处于 Idle，预映射
@@ -270,6 +298,14 @@ fn copy_sensors(
         SensorKind::Depth,
         req,
     );
+    // 传感器提交必须完成后才放行下一帧，限制 GPU 在途年龄；仅等待本拍，
+    // 不等待后续窗口提交。超时保留在途缓冲，由下一次 poll 回收。
+    if let Err(error) = device.poll(PollType::Wait {
+        submission_index: Some(submission),
+        timeout: Some(std::time::Duration::from_secs(1)),
+    }) {
+        log::warn!("传感器 GPU 回读等待失败: {error}");
+    }
 }
 
 /// 单份纹理拷贝编码（只编码不映射，映射见 `map_for_readback`）。
@@ -326,6 +362,10 @@ fn map_for_readback(
                     .expect("hub poisoned")
                     .push_back(CapturedFrame {
                         seq: req.seq,
+                        timing: CaptureTiming {
+                            readback: Instant::now(),
+                            ..req.timing
+                        },
                         kind,
                         stamp: req.stamp,
                         trace: req.trace,
@@ -356,12 +396,7 @@ impl Plugin for CapturePlugin {
             .init_resource::<ExtractedRequest>()
             .init_gpu_resource::<CaptureBuffers>()
             .add_systems(bevy::render::ExtractSchedule, extract_request)
-            .add_systems(
-                Render,
-                copy_sensors
-                    .in_set(RenderSystems::Cleanup)
-                    .after(RenderSystems::Render),
-            );
+            .add_systems(RenderGraph, copy_sensors.in_set(RenderGraphSystems::Finish));
     }
 }
 
@@ -374,6 +409,7 @@ mod tests {
         let hub = CaptureHub::default();
         let request = CaptureRequest {
             seq: 1,
+            timing: CaptureTiming::default(),
             stamp: 1.0,
             trace: TraceContext::empty(),
             left: Handle::<Image>::default().id(),
