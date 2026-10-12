@@ -212,7 +212,7 @@ pub fn single_triangulation(
 ///
 /// # Panics
 /// 特征无测量或锚点克隆缺失（调用方组装错误，与 [`single_triangulation`] 同）。
-// 与 C++ 1:1 移植的 LM 迭代长函数，拆分会破坏对照可审计性。
+// LM 迭代步骤与 OpenVINS `single_gaussnewton` 对应。
 #[allow(clippy::too_many_lines, clippy::implicit_hasher)]
 #[must_use]
 pub fn single_gaussnewton(

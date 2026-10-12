@@ -29,8 +29,7 @@ pub const DEFAULT_PLANNING_HORIZON: f64 = 6.0;
 /// 到达判定距离（米）。
 pub const DEFAULT_ARRIVE_DIST: f64 = 0.5;
 const REPLAN_COOLDOWN: f64 = 0.5;
-/// 随机重启次数（官方 `planFromLocalTraj` `trial_times` = 1；此处取 2，失败路径
-/// 偶发，成本为 2 次 EGO 求解，多一次逃出机会）。
+/// 每次局部重规划可尝试的随机初始化次数。
 const RANDOM_RESTART_TRIALS: usize = 2;
 /// 前视时间（秒，官方 `traj_server/time_forward`，swarm-playground 各 launch
 /// 均取 1.0）：yaw 期望方向取参考位置再往前该时长的轨迹点。
@@ -315,8 +314,7 @@ impl PlannerManager {
         measured: Option<State>,
         goal: Vector3<f64>,
     ) -> Result<()> {
-        // 同目标幂等：CLI 为防一次性投递竞态会连发数条，重复目标不重置
-        // 状态机（避免中途丢弃当前轨迹导致规划抖动）。
+        // 重复目标视为幂等操作，保留当前执行状态。
         if (goal - self.goal.coords).norm() < 1e-6 {
             return Ok(());
         }
@@ -345,7 +343,7 @@ impl PlannerManager {
         // 官方 setGlobalTraj：全局轨迹重建即重置 glb_t 簿记（glb = now，last = -1）
         self.global = GlobalTraj::new(global_traj, now);
         self.goal = Point3::from(goal);
-        // 重置状态机：丢弃旧轨迹/旧终点标记，下一 tick 初始规划飞往新目标
+        // 清除当前轨迹与到达标记，使下一 tick 为新目标执行初始规划。
         self.local = None;
         self.last_result = None;
         self.touch_goal = false;
@@ -784,8 +782,7 @@ impl PlannerManager {
     }
 
     /// 重规划（官方 `planFromLocalTraj`）：起点取上一轨迹在重规划时刻的
-    /// **参考状态**（保证前后参考时间连续——改用实测滞后位置会引发
-    /// "进-退"振荡）；初始解走暖启动优先、冷启动兜底的降级链。
+    /// **参考状态**，保持轨迹参考连续；初始解优先暖启动，失败时使用冷启动。
     /// 返回是否入库了新轨迹；碰撞监控路径不受冷却期约束直接调用，
     /// 失败仍会设置冷却期（下一 tick 的阈值路径不空转）。
     #[allow(clippy::too_many_lines)]
@@ -918,7 +915,7 @@ impl PlannerManager {
                 }
             }
         };
-        // 退化轨迹防护：时长过短的异常解会触发逐 tick 强制重规划空转
+        // 拒绝过短轨迹，避免每个 tick 都触发重规划。
         if result.trajectory.duration() < 0.5 {
             log::warn!(
                 "重规划产出退化轨迹（时长 {:.2}s），保持旧轨迹",
@@ -1235,8 +1232,7 @@ impl PlannerManager {
 
     /// 进入急停（官方 `changeFSMExecState(EMERGENCY_STOP)` + 首轮
     /// `callEmergencyStop(odom_pos_)`）：按当前位置生成停车轨迹并入库为
-    /// 可执行轨迹，参考输出变为原地定点悬停。幂等：已在急停中不再重复
-    /// 生成（对照 `flag_escape_emergency_` 的防重复调用语义）。
+    /// 可执行轨迹，参考输出变为原地定点悬停。急停态下重复调用保持现有急停轨迹。
     /// 停车轨迹入库失败（采样退化）仍置急停态，保持旧轨迹悬停等待恢复。
     fn enter_emergency_stop(&mut self, now: f64, measured: Option<State>) {
         if self.emergency {
@@ -1283,7 +1279,7 @@ impl PlannerManager {
             horizon.touch_goal,
         ) {
             Ok(result) => {
-                // 同 replan 的退化防护：异常短轨迹会触发逐 tick 空转
+                // 拒绝过短轨迹，避免每个 tick 都重试急停恢复。
                 if result.trajectory.duration() < 0.5 {
                     log::warn!(
                         "急停恢复产出退化轨迹（时长 {:.2}s），保持急停",

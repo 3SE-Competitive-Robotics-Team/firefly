@@ -5,11 +5,8 @@
 //! 比力残差接近零）且图像视差足够小时，用零速约束更新状态——等效于在
 //! 相机时刻做一次"零位移"观测，抑制漂移。
 //!
-//! 对照官方四个分支开关的默认组合：`integrated_accel_constraint=false`
-//! （本实现做成构造参数，两套残差均已实现并有测试）、
-//! `model_time_varying_bias=true`、`override_with_disparity_check=true`；
-//! `explicitly_enforce_zero_motion=true` 显式零运动分支官方标注 untested，
-//! 未移植（其余两个开关的非默认路径为平凡裁剪，同样未移植）。
+//! 支持 `integrated_accel_constraint` 两种残差模型、时变偏置建模和视差检查。
+//! 显式零运动分支不受支持；其余开关使用默认行为。
 
 use firefly_vio_core::feat::FeatureDatabase;
 use firefly_vio_core::noise::ImuNoise;
@@ -119,7 +116,7 @@ impl UpdaterZeroVelocity {
     ///
     /// 返回 `true` 表示接受了零速更新（状态时间被推进到 `timestamp`，且不会
     /// 在该时刻增广克隆——调用方需据此跳过传播/克隆逻辑）。
-    // 与 C++ 1:1 移植的长流程函数，拆分会破坏对照可审计性。
+    // 更新步骤与 `UpdaterZeroVelocity::try_update` 对应。
     #[allow(clippy::too_many_lines)]
     pub fn try_update(
         &mut self,

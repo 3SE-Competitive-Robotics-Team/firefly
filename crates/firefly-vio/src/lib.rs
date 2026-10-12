@@ -1,7 +1,7 @@
 //! MSCKF 编排层（对照 `OpenVINS` `ov_msckf`）。
 //!
 //! `State`/`StateHelper` 管理滑动窗口与协方差，`UpdaterMSCKF` 做视觉更新，
-//! `VioManager` 编排 IMU/相机输入。由 firefly-vio 移植成员实现。
+//! `VioManager` 编排 IMU/相机输入。
 
 pub mod diagnostics;
 pub mod landmark;

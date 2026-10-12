@@ -19,8 +19,8 @@ headless 调用：
 
 微表面纹理：程序化可平铺噪声（[`DETAIL_SIZE`]²，np.roll 环绕无缝）按世界空间三
 平面投影生成 UV（[`UV_TILE`] 米一周期），进体面的 Base Color（乘性微变化）与
-Roughness（[`ROUGH_LO`, `ROUGH_HI`]）——大平面不再是一块塑料平色。灯饰材质不加
-纹理，保持自发光干净。
+Roughness（[`ROUGH_LO`, `ROUGH_HI`]）表现大平面的粗糙度变化。灯饰材质不加纹理，
+保持自发光外观。
 
 坐标：npz 已是 `MuJoCo` 世界系（米，Z 上、地面 z=0）。Blender 内部同为 Z 上，
 导出必须 `export_yup=False`，否则 glTF 规范的 Y 上转换会让场地相对 `apps/render`

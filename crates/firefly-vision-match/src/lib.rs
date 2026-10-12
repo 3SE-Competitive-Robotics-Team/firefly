@@ -141,7 +141,7 @@ pub fn solve_visual_pose(
         .collect();
     let image: Vec<Point2f> = points_2d.iter().map(|p| Point2f::new(p[0], p[1])).collect();
     let cam = camera_matrix(intrinsics);
-    // 主路：全集 RANSAC＋精化。无先验不校验、有先验过门即发布（原行为）。
+    // 在全部对应上执行 RANSAC 与精化；有先验时通过几何门才发布。
     if let Some((t_global, inliers)) = ransac_pose(&object, &image, &cam)? {
         let prior_ok = prior
             .as_ref()
@@ -157,11 +157,8 @@ pub fn solve_visual_pose(
             }));
         }
     }
-    // 恢复路：主路未发布（门拒收或 RANSAC 无共识）且先验存在 → 先验子集重解：
-    // 先验投影误差宽松筛选（`PRIOR_SUBSET_PX`）后子集上再跑 RANSAC＋精化。
-    // 走廊混叠下全集共识常锁翻转解；子集提高真值占比后 RANSAC 有机会命中
-    // 真值 basin。失败即回落 `None`（fail-closed，原行为）。严格增量：主路
-    // 能过则绝不走到这里，已发布行为零变化。
+    // 主路未发布且先验存在时，在先验投影误差筛选出的子集上重新执行 RANSAC 与精化。
+    // 子集仍无有效解时返回 None；主路通过时不执行此步骤。
     let Some(t_prior) = prior else {
         return Ok(None);
     };
@@ -402,7 +399,7 @@ fn ransac_pose(
     )))
 }
 
-/// 相机位姿右扰动协方差（对角 6×6，`[rot, trans]`），由内点数与重投影误差经验映射。
+/// 相机位姿右扰动协方差（对角 6×6，`[rot, trans]`），按内点数与重投影误差估计。
 #[must_use]
 pub fn pose_covariance(pose: &VisualPose) -> Matrix6<f64> {
     let n = pose.num_inliers.max(1) as f64;

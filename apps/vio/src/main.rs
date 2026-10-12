@@ -584,7 +584,7 @@ fn log_viz(
 /// 与 [`firefly_map::DepthCamera`] 投影一致）：`cam_x`（右）= 机体 `-y`，
 /// `OpenVINS` 系（`x` 右 / `y` 下 / `z` 前）为 `MuJoCo` 系绕 `x` 转 180°（`y`、`z` 取反）：
 /// 行 = `[Mx, -My, -Mz]` = `[(0,-1,0), (-0.342,0,-0.9397), (0.9397,0,-0.342)]`
-///（视轴 = `+z`，即前下 20°；`depth` 中心斜距 2.89m = 1/sin20° 实测吻合）。
+///（视轴 = `+z`，即前下 20°；中心斜距为 `1/sin(20°)`）。
 /// VIO 三角化视线取 `(nx, ny, 1)`（标准 y-down / z-forward 相机系），故
 /// body→camera 旋转行 = `[x, y, z]`（行为相机轴在 body 下的坐标）。
 /// IMU 在两相机中点，基线 `baseline` 米。
@@ -630,7 +630,7 @@ mod tests {
     fn camera_forward_is_body_x() {
         let (q, _) = mujoco_stereo_extrinsic();
         let r = quat_2_rot(&q);
-        // 视轴 +z 在 body 下 = 前下 20°（`depth` 中心斜距 1/sin20° 实测）
+        // 视轴 +z 在 body 下 = 前下 20°（中心斜距为 `1/sin(20°)`）
         let cam_fwd = r.transpose() * Vector3::new(0.0, 0.0, 1.0);
         assert!((cam_fwd - Vector3::new(0.9397, 0.0, -0.3420)).norm() < 1e-4);
         // 图像下 +y 在 body 下 = 前上 (-0.342, 0, -0.9397)

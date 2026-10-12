@@ -207,8 +207,7 @@ def main() -> None:
     )
     log("RMUC 双目与深度由 render 进程发布")
 
-    # 抑制 iceoryx2 内部告警噪音（如投递到历史残留幽灵监听端的
-    # `FailedToDeliverSignal`——良性，数据面仍由订阅端兜底节拍驱动）。
+    # 仅输出 error 及以上级别的 iceoryx2 日志；消息消费由订阅端轮询驱动。
     iox2.set_log_level(iox2.LogLevel.Error)
     node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
     imu_pub = _publisher(node, TOPIC_IMU, ImuMessage, IMU_SERVICE_MAX)
@@ -268,8 +267,7 @@ def main() -> None:
                     )
                 t_start += physics_period
                 time.sleep(physics_period)
-            # 失稳守卫：MuJoCo 发散（QACC NaN/Inf）后状态永久污染且传感器
-            # 全变 NaN，下游 VIO 会被毒化——检测到即重置到起点，长跑不挂。
+            # qpos 或 qvel 非有限时重置被控对象，避免发布无效状态。
             if not np.isfinite(env.data.qpos).all() or not np.isfinite(env.data.qvel).all():
                 log("物理失稳（NaN/Inf）@ t={:.2f}，重置到起点".format(env.time), LOG_LEVEL_ERROR, env.time)
                 env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))

@@ -1,10 +1,9 @@
 //! 传感器输入源端口（物理环境 / 真实驱动统一入口）。
 //!
-//! [`SensorInput`] 抽象"按时间推进产出 IMU 与相机数据"的数据源，
-//! 让 VIO 编排层不关心数据来自哪里：
+//! [`SensorInput`] 按时间推进并产出 IMU 与相机数据，使 VIO 编排层与数据源解耦：
 //! - 物理环境源（`iceoryx2` 订阅 `MuJoCo` 发布的传感器数据，见 `apps/vio`
 //!   的 `IceoryxInput`）；
-//! - 未来真实驱动源（realsense/串口）。
+//! - 其他传感器驱动实现。
 
 use crate::sensor::{CameraData, ImuData};
 

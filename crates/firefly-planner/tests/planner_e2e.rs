@@ -22,9 +22,6 @@ fn min_pair_distance(
 #[test]
 fn plan_avoids_wall() {
     // 10m × 10m × 10m 地图，x=4.5 处一堵矮墙（y 贯穿，z 高 0.5m）。
-    // 注：simplify 直线检查改用膨胀后（正确），MINCO 对"翻越 1.5m 高墙"
-    //（膨胀顶 z≈2.0，跨壁攀升下沉易碰撞）收敛不稳；矮墙（膨胀顶 z≈1.0）
-    // 可稳健飞越，保留"规划出绕障安全轨迹"的端到端意图。
     let mut map = GridMapBuilder::new(0.5, [20, 20, 20]).build().unwrap();
     for y in 0..20 {
         for z in 0..1 {
@@ -361,9 +358,7 @@ fn swarm_avoids_stationary_peer() {
 #[allow(clippy::float_cmp)] // 系数只会被精确地置 1 / ×2，无舍入
 fn formation_following_with_peer() {
     // 2 机队形：peer 沿 x 直线（y=0），自己偏移 y=1 应跟随保持。
-    // 官方语义：队形是软约束，靠持续重规划收敛——单次 plan() 不达标即
-    // 报错（restart 上限内无达标解），此处用 PlannerManager 按 10Hz
-    // tick 驱动多轮重规划，验证队形偏差逐轮收敛。
+    // 队形是软约束；通过 PlannerManager 按 10Hz 重规划验证队形偏差收敛。
     use firefly_planner::{ManagerOptions, PlannerManager};
     let start = State {
         position: Point3::new(0.5, 2.0, 1.0),
@@ -399,10 +394,7 @@ fn formation_following_with_peer() {
         self_id: 1,
         peers: vec![firefly_cost::Peer::new(0, 0.0, peer_traj, 1.0)],
     };
-    // 注：formation 功能仅存在于 formation_ws，main_ws（对照基准）无此项；
-    // try_finish 不查队形达成（代价项靠优化与持续重规划收敛），单次 plan()
-    // 须成功——此前自创 formation_safe 成功门 + 提前接受在此互相掩盖，
-    // 本断言锁定清理后的真实语义。
+    // 单次 plan() 应成功；队形偏差由优化代价与 PlannerManager 的持续重规划收敛。
     let mut planner_direct = Planner::new(
         PlannerConfig::default(),
         GridMapBuilder::new(0.5, [24, 12, 12]).build().unwrap(),

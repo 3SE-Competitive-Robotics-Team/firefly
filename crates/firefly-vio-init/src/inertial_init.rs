@@ -60,7 +60,7 @@ impl InertialInitializer {
     ///
     /// `wait_for_jerk`：是否等待静止窗口后的急动；静止上电初始化可设 false。
     /// 成功返回 [`InitResult`]；数据不足/未通过视差与激励检查返回 `None`。
-    // 与 C++ 1:1 移植的编排流程，拆分会破坏对照可审计性。
+    // 初始化步骤与 `InertialInitializer::initialize` 对应。
     #[allow(clippy::too_many_lines)]
     pub fn initialize(
         &mut self,

@@ -7,8 +7,7 @@
 use firefly_base::{FrameId, RigidTransform};
 use nalgebra::{Matrix3, Matrix4};
 
-/// 像素焦距（`fx=fy`）：`(H/2)/tan(FOV_Y/2)`，由 [`firefly_base::rig::FOV_Y_DEG`]
-/// 派生，不再单独维护字面量。
+/// 像素焦距（`fx=fy`），由 [`firefly_base::rig::FOV_Y_DEG`] 和图像高度推导，单位 px。
 #[must_use]
 pub fn focal() -> f64 {
     // 图像高 240 px（与 render/发布一致）。

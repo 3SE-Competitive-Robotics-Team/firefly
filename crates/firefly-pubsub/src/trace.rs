@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(back.trace_id, sc.trace_id);
         assert_eq!(back.span_id, sc.span_id);
         assert_eq!(back.sampled, sc.sampled);
-        // 墙钟始终可采集；单调时间与底层时钟能力一致（macOS 上游 bug → 0）
+        // 墙钟始终可采集；单调时钟不可用时字段为 0。
         assert!(ctx.send_ts_secs > 0);
         if Time::now_with_clock(ClockType::Monotonic).is_ok() {
             assert!(ctx.send_ts_mono_ns > 0);

@@ -1,14 +1,13 @@
 //! 初始化器选项（对照 `OpenVINS` `ov_init/src/init/InertialInitializerOptions.h`）。
 //!
-//! 只移植 struct + 默认值；YAML 解析属于 apps 层职责（与 `firefly-vio` 的
-//! 选项模块同一约定）。
+//! 本 crate 提供选项类型与默认值；YAML 解析由 apps 层负责。
 
 use firefly_vio_core::cam::SharedCamera;
 use nalgebra::{SVector, Vector3};
 use std::collections::BTreeMap;
 
 /// 初始化器选项（对照 `InertialInitializerOptions`，默认值与其成员初始化一致）。
-// 与 C++ 结构 1:1 移植（大量布尔/数值开关），拆分反而破坏对照可审计性。
+// 选项字段与 OpenVINS `InertialInitializerOptions` 对应。
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct InitOptions {

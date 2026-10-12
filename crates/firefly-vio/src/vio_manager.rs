@@ -7,8 +7,7 @@
 //! - [`VioManager::initialize_with_gt`]：真值初始化（仅供合成算法评测夹具）；
 //! - [`VioManager::try_to_initialize`]：静态/动态初始化（`firefly-vio-init`）。
 //!
-//! 裁剪（对照 C++ 超出范围的部分）：ARUCO 跟踪器（`max_aruco_features=0`）、
-//! 降采样、统计文件与可视化。
+//! 本模块不提供 ARUCO 跟踪、图像降采样、统计文件或可视化。
 
 use firefly_vio_core::feat::Feature;
 use firefly_vio_core::imu_model::ImuCalibration;
@@ -339,11 +338,7 @@ impl VioManager {
         // FEJ 同步为首估计（对照 C++ 的 set_value + set_fej）
         self.state.imu.set_fej(q, p, v, bg, ba);
 
-        // IMU 协方差块重写（对照 C++ initialize_with_gt 的
-        // StateHelper::set_initial_covariance 段）：`State::new` 的 1e-6
-        // 单位阵等价于"全知"先验——σ_ba=1mm/s² 使加速度零偏不可观测，
-        // 有偏场景视觉更新无法修正状态而发散。诚实先验：基础 σ=20mm/s
-        // （覆盖 bg/ba），姿态 1.7°，位置 5cm，速度 1cm/s。
+        // 初始化协方差先验：姿态标准差 1.7°，位置 5 cm，速度 1 cm/s。
         let id = self.state.imu.id() as usize;
         let base = 0.02_f64 * 0.02;
         let mut cov = base * DMatrix::<f64>::identity(15, 15);
@@ -352,9 +347,7 @@ impl VioManager {
                 cov[(blk + r, blk + r)] = sigma * sigma;
             }
         }
-        // bg/ba 先验 σ 由参数控制（默认 0.02；MuJoCo 无偏置场景应用层调小）：
-        // 视觉会把 KLT 亚像素偏置误学成 bg/ba，σ 大 → bg 学到 -0.03 rad/s
-        // → roll 线性漂 → 重力投影错 → 位置二次发散。
+        // bg/ba 先验标准差由参数控制；无偏置仿真可由应用配置更小的值。
         let bias_sigma = self.params.init_bias_sigma;
         for blk in [9usize, 12] {
             for r in 0..3 {
@@ -434,9 +427,7 @@ impl VioManager {
         true
     }
 
-    /// 传播 + 增广 + MSCKF/SLAM 更新（对照 `VioManager::do_feature_propagate_update`，
-    /// SLAM 分支完整移植；ARUCO 分支裁剪——无 aruco 跟踪器）。
-    // 与 C++ 1:1 移植的编排长流程，拆分会破坏对照可审计性。
+    /// 传播、克隆增广与 MSCKF/SLAM 更新；输入流程与 `VioManager::do_feature_propagate_update` 对应。
     #[allow(clippy::too_many_lines)]
     #[fastrace::trace]
     fn do_feature_propagate_update(&mut self, message: &CameraData) {
@@ -668,9 +659,7 @@ impl VioManager {
             self.updater_slam
                 .delayed_init(&mut self.state, &mut feats_slam_delayed);
             self.propagator.invalidate_cache();
-            // 对照官方 `delayedInit`：新路标必须成功入体素图，否则丢弃该路标。
-            // 官方此时已把变量加入协方差却不写 `map_points`（孤儿变量），这里改为
-            // 回滚边缘化：语义等同且不留孤儿。
+            // 延迟初始化路标须进入体素图；未入图的路标标记为边缘化，保持状态与地图一致。
             if self.params.voxel_options.enabled {
                 for id in &delayed_ids {
                     if let Some(lm) = self.state.features_slam.get(id) {
@@ -693,9 +682,7 @@ impl VioManager {
         // 清理与边缘化（对照 C++ 552-596）
         //=====================================================================
 
-        // 16. 刷新可见体素缓存（对照 `triangulateActiveTracks` + `getRecentVoxel`，
-        // 官方在 delayedInit 之后、清理之前调用，且只在左目触发帧执行）：查询源是
-        // tracker 的 last obs，不读特征库，故不受本帧清理影响。
+        // 在左目触发帧刷新可见体素缓存；数据源为 tracker 的 last observation。
         if message.sensor_ids.first() == Some(&0) {
             self.refresh_recent_voxels();
         }
@@ -916,8 +903,7 @@ impl VioManager {
     }
 }
 
-/// 单相机参数（占位：`VioManagerOptions` 中与跟踪器相关的字段由应用层
-/// 直接配置 `TrackKlt`，此处不重复）。
+    /// 单相机参数；跟踪器选项由应用层直接传给 `TrackKlt`。
 pub type CamParamsPlaceholder = ();
 
 #[cfg(test)]
@@ -1054,7 +1040,7 @@ mod tests {
 
     #[test]
     fn voxel_selection_defaults_off_and_wires() {
-        // 默认关闭：行为与改动前一致，体素索引全程空置。
+        // 默认关闭时体素索引保持空置。
         let mgr = test_manager();
         assert!(!mgr.params.voxel_options.enabled);
         assert_eq!(mgr.voxel_map.num_points(), 0);

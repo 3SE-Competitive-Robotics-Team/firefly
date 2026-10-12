@@ -4,8 +4,8 @@
 //! - 存储为 `occupancy: Vec<f64>`（log-odds），初始为 `clamp_min_log_`
 //!   （`logit(p_min)`，`p_min=0.12`）；`state()` 按 `occupancy >= min_occupancy_log_`
 //!   判 `Occupied`，否则 `Free`。对照官方 `occupancy_buffer_`（参数初始化
-//!   `grid_map.cpp:34-77`、logit 宏 `grid_map.h:27`）。`VoxelState::Unknown`
-//!   仅兼容历史测试代码（写入等价 `clamp_min`）。
+//!   `grid_map.cpp:34-77`、logit 宏 `grid_map.h:27`）。`VoxelState::Unknown` 写入时
+//!   映射为 `clamp_min`，读取时按占据阈值归类为 `Free` 或 `Occupied`。
 //! - 膨胀层为计数缓冲（对照官方 `occupancy_buffer_inflate_`）：障碍体素自身
 //!   `±GRID_MAP_OBS_FLAG`、周围 `inf_grid` 格内 ±1，`>0` 判膨胀；`inf_grid`
 //!   构造时按 `obstacles_inflation` 计算，超 4 自动放大分辨率
@@ -28,8 +28,7 @@
 //! - 可选会话历史按全局体素索引保存移出窗口的 log-odds，重新进入时恢复；
 //!   启用时关闭时间衰减，只由观测射线清除占据。容量耗尽必须停止运动；坐标修正
 //!   清除当前及历史观测。未观测空间仍采用乐观查询，历史缓存不构成未知空间安全保证。
-//! - 官方另有 `GridMapBigmap` 全局地图变体（`grid_map_bigmap.h/cpp`），
-//!   swarm-playground 中无任何引用，不对齐。
+//! - 仅实现官方 `GridMap` 局部地图变体，不包含 `GridMapBigmap` 全局地图行为。
 
 use std::collections::{HashMap, HashSet};
 
@@ -39,7 +38,7 @@ use nalgebra::Vector3;
 /// 障碍体素在膨胀计数缓冲中的标志增量，对照 `grid_map.h:28` `GRID_MAP_OBS_FLAG 32767`。
 pub const GRID_MAP_OBS_FLAG: u16 = 32767;
 
-/// 体素占据状态（兼容层，见模块头注）。
+/// 体素占据状态；`Unknown` 写入栅格时映射为最低 log-odds。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoxelState {
     Unknown,
@@ -493,7 +492,7 @@ impl GridMap {
     }
 
     /// 体素占据状态查询（`occupancy >= min_occupancy_log_` → Occupied，否则 Free）。
-    /// `Unknown` 保留在枚举中但不再作为初始/查询结果（见模块头注）。
+    /// `Unknown` 写入时映射为最低 log-odds；查询结果为 `Free` 或 `Occupied`。
     #[must_use]
     pub fn state(&self, idx: [usize; 3]) -> VoxelState {
         let occ = self.occupancy[self.occ_addr(self.global_index(idx))];
@@ -1372,8 +1371,7 @@ mod tests {
         // 含边界列，grid_map.cpp:747-757），占据清除、槽位回收
         m.move_ring_buffer(Vector3::new(5.5, 2.5, 2.5));
         assert!(!m.is_occupied(Vector3::new(3.5, 2.5, 2.5)));
-        // 回收槽位写入新障碍：全局 x=6（窗口坐标 3）经环形映射可查询，
-        // 旧 x=3 不复现
+        // 回收槽位写入新障碍：全局 x=6（窗口坐标 3）经环形映射可查询。
         m.set_state([3, 2, 2], VoxelState::Occupied);
         assert!(m.is_occupied(Vector3::new(6.5, 2.5, 2.5)));
         assert!(!m.is_occupied(Vector3::new(3.5, 2.5, 2.5)));

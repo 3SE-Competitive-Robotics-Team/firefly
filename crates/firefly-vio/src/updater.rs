@@ -72,7 +72,7 @@ impl UpdaterMsckf {
     ///
     /// 被 chi2 拒绝或三角化失败的特征标记 `to_delete`（由调用方在更新后
     /// 调用 `FeatureDatabase::cleanup` 清理）。
-    // 与 C++ 1:1 移植的长流程函数，拆分会破坏对照可审计性。
+    // 更新步骤与 `UpdaterMSCKF::update` 对应。
     #[allow(clippy::too_many_lines)]
     #[fastrace::trace]
     pub fn update(&mut self, state: &mut State, feature_vec: &mut Vec<Feature>) {
@@ -121,10 +121,8 @@ impl UpdaterMsckf {
         });
 
         let n_triang = feature_vec.len();
-        // 4b. 反投影一致性门控：p_FinA 在每视图的归一化反投影须与测量一致
-        // （<0.3 归一化 ≈ 60px）。低视差下 DLT 深度病态会产出"贴近相机"的
-        // 垃圾点，其他视图投影被视差放大 → 巨大残差 + 巨大增益修正（实测单次
-        // 56m）。此门与协方差 P 无关，直接从源头拒掉不一致特征。
+        // 4b. 反投影一致性门控：每个视图的归一化反投影须与测量相差小于 0.3。
+        // 该门控直接验证几何一致性，不依赖协方差 `P`。
         // 预建时间→克隆查找表，避免每个测量线性扫描 clones（O(n²)→O(n)）
         let clone_map: std::collections::HashMap<u64, &PoseJpl> = state
             .clones_imu

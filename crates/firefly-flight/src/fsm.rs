@@ -412,7 +412,7 @@ impl FlightFsm {
         health: Health,
     ) -> Event {
         let prev = self.state;
-        // 在依赖位置的自动转移之前处理失效，陈旧高度不能触发落地上锁。
+        // 先处理失效状态，避免位置依赖的自动转移使用陈旧高度。
         if self.state.motors_enabled() && (!health.estimator_ready || !health.odometry_alive) {
             if self.state == FlightState::ArmedGrounded {
                 self.state = FlightState::Disarmed;
@@ -568,7 +568,7 @@ impl FlightFsm {
         if !self.state.motors_enabled() {
             return Err(Reject::WrongState);
         }
-        // 仅允许在地面上锁（空中上锁 = 摔机，留作显式的强制通道另议）
+        // 空中禁止上锁，避免飞行中关闭电机。
         if !self.on_ground(state) {
             return Err(Reject::NotOnGround);
         }
@@ -1103,7 +1103,7 @@ mod tests {
         assert_eq!(rig.fsm.state(), FlightState::Takeoff);
         assert_eq!(rig.cmd(Command::Hold), Ok(()));
         assert_eq!(rig.fsm.state(), FlightState::Hold);
-        // 中止后不再爬升（保持点 = 中止瞬间的位置）
+        // Hold 保持在中止瞬间的位置。
         let held = rig.state.position;
         rig.ticks(200);
         assert!((rig.state.position.z - held.z).abs() < 1e-6);

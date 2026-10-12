@@ -226,8 +226,7 @@ fn run_loop(
         {
             last_map_query = feat.timestamp;
             // 特征时间戳即 sim 时钟；查询前后各 pump 一次（匹配阻塞下积压排空）。
-            // 查询耗时即管线滞后主项（ORT 推理，rrd 侧只能看到特征时间戳，
-            // 到达滞后由 localization 融合/超期日志体现）。
+            // 记录查询耗时；特征时间戳用于 sim 时钟，到达滞后由定位侧记录。
             firefly_observability::set_sim_time(feat.timestamp);
             firefly_observability::pump_log_ipc(&log_ipc);
             let t_query = std::time::Instant::now();
@@ -317,7 +316,7 @@ struct MatchBindings {
 impl MatchBindings {
     fn new(session: &Session) -> Result<Self, Box<dyn std::error::Error>> {
         let mut binding = session.create_binding()?;
-        // 输出绑定到预分配张量：每次推理写回同一块内存，不再每次新建。
+        // 输出绑定到预分配张量，推理结果写回绑定内存。
         binding.bind_output(
             "matches0",
             Tensor::from_array(([1usize, NUM_POINTS], vec![0i64; NUM_POINTS]))?,

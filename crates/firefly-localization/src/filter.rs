@@ -56,10 +56,8 @@ impl GateProfile {
         }
     }
 
-    /// 松门（特征验证路径：真正的验证（RANSAC 内点、重投影误差、先验
-    /// 几何门）在观测产生侧已完成，此处只做 VINS `20m/30°` 荒谬性 sanity；
-    /// 接受即全量应用后验（对照 pose graph 对验证边的完整吸收），限幅只拦
-    /// 荒谬值，避免钳制与 P 收缩互锁（残差修不完→下次 chi2 拒→ perpetual）。
+    /// 松门用于已通过 RANSAC、重投影误差和先验几何验证的观测；此处仅做
+    /// VINS `20m/30°` 新息检查。接受后应用完整后验，限幅只拦截超限修正。
     #[must_use]
     pub fn loose() -> Self {
         Self {
@@ -89,8 +87,7 @@ pub struct FusionOptions {
     /// 单步过程噪声：平移 `m²`（每 odom 步，100Hz 下按秒 ≈1e-3；覆盖悬停
     /// 随机游走）。
     pub process_noise_pos: f64,
-    /// 里程过程噪声：平移 `m²/m`（每行驶 1 米膨胀的方差；漂移随里程成比例
-    /// 累积（尺度类系统性偏差），P 按行驶距离膨胀，悬停时此项为零）。
+    /// 里程过程噪声：平移 `m²/m`，每行驶 1 米增加的方差；悬停时此项为零。
     pub process_noise_pos_per_m: f64,
     /// 观测噪声回退：旋转 `rad²`（`h` 不可逆时）。
     pub fallback_noise_rot: f64,
@@ -245,17 +242,14 @@ impl FusionFilter {
         self.consecutive_rejects
     }
 
-    /// 由 `VIO` 位姿预测：仅膨胀 `P`，不改 `T_drift`。平移扩散 = 时间项 +
-    /// 里程项（本步行驶距离 × `process_noise_pos_per_m`），后者覆盖随里程
-    /// 成比例的系统性漂移（纯时间项在长距离飞行后会让 `P` 相对真实误差过小，
-    /// `chi2` 恒拒真值）；旋转保持纯时间项（陀螺游走是时间过程，与尺度类
-    /// 平移偏差物理不同）。
+    /// 由 `VIO` 位姿预测：仅膨胀 `P`，不改 `T_drift`。平移协方差按时间与行驶
+    /// 距离扩散；旋转协方差只按时间扩散。
     #[fastrace::trace]
     pub fn predict(&mut self, t_vio: &Matrix4<f64>) {
         let dist = if let Some(last) = &self.last_vio {
             let d = t_vio.fixed_view::<3, 1>(0, 3) - last.fixed_view::<3, 1>(0, 3);
             let dist = d.norm();
-            // 数值防护：非有限位移不膨胀（坏 odom 不污染协方差）
+            // 非有限位移不参与协方差扩散。
             if dist.is_finite() { dist } else { 0.0 }
         } else {
             self.last_vio = Some(*t_vio);
@@ -272,7 +266,7 @@ impl FusionFilter {
         self.p += q;
         // 数值防护：保持对称
         self.p = (self.p + self.p.transpose()) * 0.5;
-        // 下限钳制（见 `p_min_pos`）：`Joseph` 收缩不对抗残余系统性误差。
+        // 平移协方差下限见 `p_min_pos`。
         for i in 3..6 {
             if self.p[(i, i)] < self.options.p_min_pos {
                 self.p[(i, i)] = self.options.p_min_pos;
@@ -345,8 +339,7 @@ impl FusionFilter {
         let error = drift.inverse().matrix() * observed_drift.matrix();
         let z = se3_log(&error);
 
-        // 2b. 新息限幅（按入口画像）：超过画像门限的跳变直接拒收，
-        // 不进 chi2（R 失配时 chi2 恒小，拦不住）
+        // 新息限幅先于 chi2 检验，拒绝超过入口画像门限的跳变。
         let innov_rot = z.fixed_rows::<3>(0).norm();
         let innov_trans = z.fixed_rows::<3>(3).norm();
         if innov_trans > profile.max_innovation_trans || innov_rot > profile.max_innovation_rot {
@@ -384,8 +377,7 @@ impl FusionFilter {
             fallback * self.r_scale
         };
 
-        // R 下限（离线标定修正噪声）：防 h⁻¹ 过自信导致 chi2 恒小、
-        // 有偏修正照单全收
+        // R 下限按离线标定修正噪声设置，限制观测信息矩阵的置信度。
         for i in 0..3 {
             if r[(i, i)] < self.options.r_floor_rot {
                 r[(i, i)] = self.options.r_floor_rot;
@@ -650,7 +642,7 @@ mod tests {
 
     #[test]
     fn predict_enforces_p_floor() {
-        // 高置信更新把 P 压到 R 量级后，一次预测即托回下限（防 perpetual）。
+        // 高置信更新后，预测将平移协方差恢复到设定下限。
         let mut f = FusionFilter::with_default();
         let t_vio = Matrix4::identity();
         f.predict(&t_vio);
@@ -691,9 +683,7 @@ mod tests {
         assert!((p - 0.41).abs() < 1e-9);
     }
 
-    /// 实测 replay：20m 出程后远端悬停（VIO 短 2.3m），特征验证过的视觉
-    /// 观测必须被接受且全量应用（自锁回归：P 经里程扩散覆盖漂移，chi2≈6.2
-    /// < 12.6；松画像不限幅，K·z≈2.19m 一次注入，残差清零防 perpetual）。
+    /// 远端悬停时 VIO 位姿存在平移偏差；已通过特征验证的视觉观测应被接受并完整融合。
     #[test]
     fn replay_far_end_hover_accepts() {
         use firefly_pubsub::vision::{OBS_SOURCE_VISUAL, PoseObservation};
@@ -944,8 +934,7 @@ mod tests {
         let mut f = FusionFilter::new(opts);
         let t_vio = Matrix4::identity();
         f.predict(&t_vio);
-        // 新息门内（0.25m/4°）+ 高置信（R 被下限托住）：delta≈K·z 超限幅，
-        // 旋转与平移分别截断（非真空断言：限幅是温和钳制非零修正）
+        // 新息门内的高置信观测仍会按入口画像限制旋转和平移修正幅度。
         let t_observed = pose(Vector3::new(0.25, 0.0, 0.0), 4.0);
         let h = Matrix6::identity() * 1.0e6; // R→下限，K≈0.7/0.9
         let g = f.update(&t_vio, &obs(&t_observed, &h));

@@ -172,10 +172,7 @@ pub fn get_feature_jacobian_full(
                 .find(|(ct, _)| ct.total_cmp(t).is_eq())
                 .map(|(_, c)| c)
                 .expect("特征测量时刻必须存在对应克隆");
-            // 残差与投影用**当前**位姿（对照 C++：res 在 FEJ 覆盖段之前用
-            // `clone_Ii->Rot()/pos()` 当前值计算）；FEJ 只影响雅可比线性化
-            // 点——不得用 fej 算残差，否则克隆 fej 随更新变陈旧，EKF 会把
-            // 状态系统性往 fej 方向拖。
+            // 残差与投影使用当前克隆位姿；FEJ 仅用于雅可比线性化。
             let r_gto_ii = clone.rot();
             let p_iin_g = clone.pos();
 

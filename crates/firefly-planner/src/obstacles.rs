@@ -599,8 +599,7 @@ fn intersection_on_path(
                 break;
             }
         } else {
-            // 先判 0 再减,避免 usize 下溢(官方 C++ 有符号 int 无此问题,
-            // Rust debug 下 0-1 直接 panic)。
+            // 索引为 0 时结束回退，避免无符号下溢。
             if astar_id == 0 {
                 break;
             }
@@ -861,9 +860,7 @@ mod tests {
 
     #[test]
     fn intersection_on_path_walks_back_to_0_without_underflow() {
-        // 所有 A* 点都在 `point` 沿 ctrl 的"后方"(投影 < 0),搜索会一路
-        // 回退到索引 0 仍无符号翻转 → 返回 None;此前 0-1 在 debug 下
-        // usize 下溢 panic("attempt to subtract with overflow")。
+        // 所有 A* 点都在 `point` 沿 ctrl 的后方（投影 < 0）；索引回退至 0 后返回 None。
         let path = vec![
             Vector3::new(0.0, 0.0, 0.0),
             Vector3::new(2.0, 0.0, 0.0),

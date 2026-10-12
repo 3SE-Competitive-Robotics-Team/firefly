@@ -14,7 +14,7 @@ pub struct NavigationMessage {
     /// map←odom 平移（米）与 xyzw 四元数。
     pub translation: [f64; 3],
     pub rotation: [f64; 4],
-    /// 单会话单调递增；变更后不得复用旧版深度融合或执行轨迹。
+    /// 单会话单调递增；下游缓存与执行轨迹必须绑定此版本。
     pub revision: u64,
     /// 1 表示配置了外部地图启动先验；0 表示自主建立的会话地图。
     pub external_map: u64,

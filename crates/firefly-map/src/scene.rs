@@ -160,7 +160,7 @@ mod tests {
         // 球内体素中心（球心 x=5.0 恰在窗口右界外，体素被 clamp 截断）
         assert!(grid.is_occupied(Vector3::new(4.75, 2.0, 1.0)));
         assert_ne!(map.occupied, [] as [[f64; 3]; 0]);
-        // 不重复体素（去重？先对称断言）
+        // 占据坐标唯一。
         let mut dedup = map.occupied.clone();
         dedup.sort_by(|a, b| a.partial_cmp(b).unwrap());
         dedup.dedup();
@@ -193,7 +193,7 @@ mod tests {
     fn voxel_state_unknown_by_default() {
         let scene = sample_scene();
         let grid = scene.to_map_file().unwrap().to_grid_map(0.0).unwrap();
-        // log-odds 语义：初始占据为 clamp_min，对应 Free（Unknown 保留但不再作为初始/查询结果）
+        // 初始 log-odds 取 clamp_min，对应 Free；Unknown 表示运行期未观测体素。
         let idx = grid.index_of(Vector3::new(4.5, 4.5, 0.5)).unwrap();
         assert_eq!(grid.state(idx), VoxelState::Free);
     }

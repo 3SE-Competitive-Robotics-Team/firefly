@@ -53,8 +53,7 @@ pub fn init() {
                 .append(logforth::append::Stderr::default())
         })
         .dispatch(|d| d.append(logforth::append::FastraceEvent::default()))
-        // 聚合半边：`init_ipc` 接通前 dormant（无发布端即 no-op，见
-        // [`IpcAppend::append`]），单次安装、此后不再 `try_apply`。
+        // 聚合器在 `init_ipc` 接通前保持 dormant；无发布端时 append 不执行发布。
         .dispatch(|d| {
             d.filter(RustLogFilterBuilder::from_default_env().build())
                 .append(IpcAppend)
@@ -66,11 +65,7 @@ pub fn init() {
 
 /// 紧凑 span 报告：每条 span 一行 `时长ms 名字 trace=<id>`。
 ///
-/// fastrace 自带的 `ConsoleReporter` 用 `{:#?}` 打印整条 [`SpanRecord`]——每条固定
-/// 29 行，其中 identifiers 占 9 行，`properties`/`events`/`links` 多数为空。有逐帧
-/// span 的进程（aliked/lightglue）在 10Hz 级采样下每秒写数百行 stderr，格式化开销
-/// 直接落在热路径线程上（实测 75s 内 32k 行）。这里保留全部 span、时长与 trace 关联，
-/// 只压成一行；日志与指标本身不减少。
+/// 保留 span 名称、时长与 trace 关联，每条 span 输出一行，便于高频采样进程使用。
 struct CompactReporter;
 
 impl fastrace::collector::Reporter for CompactReporter {
@@ -151,7 +146,7 @@ fn log_queue() -> &'static Queue {
 /// 建端失败时返回 `LogIpc { publisher: None }` = 纯 stderr 模式（记一条 warn）。
 ///
 /// # Panics
-/// 内部标签/武装锁中毒时（调用方 bug，不应发生）。
+/// 内部标签锁或武装锁中毒时。
 #[must_use]
 pub fn init_ipc(node: &IpcNode, tag: &str) -> LogIpc {
     tag.clone_into(&mut TAG.lock().expect("log tag mutex"));
@@ -174,7 +169,7 @@ pub fn init_ipc(node: &IpcNode, tag: &str) -> LogIpc {
 /// 主循环驱动：排空日志队列并零拷贝发布（每 tick 调用一次，见模块文档）。
 ///
 /// # Panics
-/// 内部队列锁中毒时（调用方 bug，不应发生）。
+/// 内部队列锁中毒时。
 pub fn pump_log_ipc(log_ipc: &LogIpc) {
     let Some(publisher) = log_ipc.publisher.as_ref() else {
         return;
@@ -239,7 +234,7 @@ impl logforth::append::Append for IpcAppend {
             trace_id_hi,
             trace_id_lo,
         };
-        // 满即丢：日志路径无 temporary 重试语义
+        // 队列满时丢弃该记录。
         let _ = log_queue()
             .tx
             .lock()
@@ -254,9 +249,7 @@ impl logforth::append::Append for IpcAppend {
 }
 
 pub fn flush() {
-    // 日志队列由主循环 `pump_log_ipc(&log_ipc)` 排空（退出路径调一次，
-    // 残余落盘）；此处只刷 trace（logforth stderr 无缓冲）。
-    // 注：`flush()` 签名保持无参——调用方退出路径手补一次 pump 即可。
+    // 日志队列由主循环排空；此处刷新 trace。stderr sink 无缓冲。
     fastrace::flush();
 }
 

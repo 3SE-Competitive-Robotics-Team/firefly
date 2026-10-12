@@ -1,8 +1,7 @@
 //! KLT 视觉前端（对照 `OpenVINS` `ov_core/src/track`：`TrackBase`/`TrackKLT`/`Grider_GRID`）。
 //!
 //! 本模块实现 OpenVINS 的 KLT 稀疏特征跟踪前端。直方图均衡由本模块实现；
-//! FAST、子像素精化、LK 光流与基础矩阵 RANSAC 使用 purecv
-//!（OpenCV 语义镜像；有问题给上游提）：
+//! FAST、子像素精化、LK 光流与基础矩阵 RANSAC 使用 purecv：
 //! - [`histogram`]：直方图均衡（`equalizeHist`）与 CLAHE（`createCLAHE`）；
 //! - [`pyramid`]：灰度图 ↔ purecv Matrix 转换（`gray_to_matrix`）；
 //! - [`fast`]：FAST-9 角点检测 + 非极大值抑制（`cv::FAST`）；
@@ -12,14 +11,9 @@
 //! `FeatureDatabase`，按时间跟踪（单目）与双目一致性跟踪，并把去畸变归一化
 //! 坐标写入特征库。
 //!
-//! 可视化（`display_active`/`display_history`）无 GUI，不移植，见 [`TrackerBase`]。
+//! [`TrackerBase`] 不提供 `display_active`/`display_history` GUI 可视化接口。
 //!
-//! ARUCO 决策：**不引入**（原 `docs/aruco-feasibility.md` 评估结论已并入本注释）。
-//! OpenCV `detectMarkers` 需数千行检测管线或 `opencv` 绑定（违反仓库纯 Rust
-//! 依赖原则），且传感器未贴标签时纯增开销；`max_aruco_features = 0` 即等价
-//! OpenVINS 无 aruco 语义。若未来需要标签陆标：优先自研轻量检测器（复用本模块
-//! FAST/金字塔/均衡 + nalgebra homography，DICT_4X4_50，约 1.5–2k 行），
-//! `UpdaterSLAM` 的 aruco sigma/chi2 分支已就绪。
+//! 跟踪器仅输出 FAST/KLT 特征。
 //!
 //! 说明：双目/网格代码中左右（`_l`/`_r`）变量与数学单字符名、OpenCV/OpenVINS
 //! 文档引用、镜像 C++ 的多参数签名属于固有结构，予以模块级允许。
@@ -172,11 +166,9 @@ fn sensor_key(id: i32) -> usize {
 /// - `use_stereo`：是否双目一致性跟踪（`TrackBase::use_stereo`）；
 /// - `histogram_method`：直方图预处理方式（`TrackBase::histogram_method`）。
 ///
-/// `currid`（全局特征 id 游标）在 C++ 中为 `std::atomic<size_t>`（支持多线程）；
-/// 本单线程移植用 [`TrackKlt::currid`] 的 `usize` 字段表示。
+/// 全局特征 id 游标 [`TrackKlt::currid`] 在单线程跟踪器中以 `usize` 表示。
 ///
-/// 可视化接口（`display_active`/`display_history`）依赖 GUI，超出本 crate 范畴
-/// 不移植；`change_feat_id` 依赖特征库内部重排接口，见 [`TrackerBase::change_feat_id`] 文档。
+/// 本 crate 不提供 GUI 可视化；特征 id 更新见 [`TrackerBase::change_feat_id`]。
 #[derive(Debug)]
 pub struct TrackerBase {
     /// 相机 id → 相机标定（对照 `TrackBase::camera_calib`）。
@@ -543,8 +535,7 @@ impl TrackKlt {
     }
 
     /// 双目跟踪（对照 `TrackKLT::feed_stereo`，具体双目一致性逻辑见注释）。
-    // 与 C++ 1:1 移植的长流程函数，拆分会破坏对照可审计性（仓库惯例：
-    // 移植代码允许带注释的 targeted allow，同 firefly-cost 的 too_many_arguments）。
+    // 双目处理流程与 `TrackKLT::feed_stereo` 对应。
     #[allow(clippy::too_many_lines)]
     #[fastrace::trace]
     fn feed_stereo(&mut self, msg: &CameraData, idl: usize, idr: usize) {
@@ -562,8 +553,7 @@ impl TrackKlt {
             let sr = self.cams.get(&keyr).unwrap();
             (sl.img_curr.clone(), sr.img_curr.clone())
         };
-        // 上一帧图像（时间 LK 的 img0）：必须用 last 帧——用当前帧会同帧
-        // 自匹配，特征坐标冻结 → 射线平行 → 三角化退化 → 更新饿死
+        // 时间跟踪的源图像使用上一帧，目标图像使用当前帧。
         let (img_l_last, img_r_last) = {
             let sl = self.cams.get(&keyl).unwrap();
             let sr = self.cams.get(&keyr).unwrap();
@@ -615,9 +605,7 @@ impl TrackKlt {
         self.perform_detection_stereo(
             &mask_l_last,
             &mask_r_last,
-            // 对照 C++：补点检测在 `img_pyramid_last` 上做，新点随时间 LK
-            // 跟进当前帧（不得传当前帧，否则新点坐标被当作上一帧位置二次
-            // 跟踪，首跳即死 → db 饿死）
+            // 新点在上一帧检测，再由时间 LK 跟踪到当前帧。
             &img_l_last,
             &img_r_last,
             &mut pts_l,
@@ -731,9 +719,7 @@ impl TrackKlt {
         // 入库
         self.insert_to_db(timestamp, sid_l, &good_l, &good_ids_l);
         self.insert_to_db(timestamp, sid_r, &good_r, &good_ids_r);
-        // Move forward in time（对照 C++ feed_stereo 末尾同名段）：img/mask/
-        // pts/ids_last 必须全部推进到当前帧，漏任何一项都会让跟踪基线错乱、
-        // db 被死特征淹没
+        // 将图像、掩码、跟踪点和 id 一并推进到当前帧。
         {
             let sl = self.cams.get_mut(&keyl).unwrap();
             sl.img_last = img_l;
@@ -879,7 +865,7 @@ impl TrackKlt {
     }
 
     /// 单目检测，返回剔除旧点后的新增点起始下标（对照 `TrackKlt::perform_detection_monocular`）。
-    // 与 C++ 1:1 移植的长流程函数，拆分会破坏对照可审计性。
+    // 单目检测流程与 `TrackKLT::perform_detection_monocular` 对应。
     #[allow(clippy::too_many_lines)]
     #[fastrace::trace]
     fn perform_detection_monocular(
@@ -979,9 +965,7 @@ impl TrackKlt {
             }
         }
 
-        // 构造"更新掩码"：把已有特征周围 2*min_px_dist 方块涂白，让 grider
-        // 不在已有特征邻近提取（对照 OpenVINS `mask0_updated`），避免高分点
-        // 扎堆到已占 close-grid 单元而被全拒、特征库饿死。
+        // 更新掩码覆盖已有特征周围的 `2 * min_px_dist` 区域，维持特征间距。
         let (w_i, h_i) = (w as i32, h as i32);
         let r = min_px as i32;
         let mut mask_updated = std::borrow::Cow::Borrowed(mask0);
@@ -1166,8 +1150,7 @@ mod lk_bias_tests {
     #[test]
     fn lk_displacement_bias() {
         let img0 = checkerboard(320, 240, 8);
-        // 位移 ≤15px：更大位移在 4-12px 随机格子上触发周期混淆（合成图
-        // 特性，非 LK 缺陷；真实场景无周期，见真实场景测试）
+        // 位移 ≤15px，避免随机格纹理的周期混淆。
         for (dx, dy) in [
             (0i32, 0i32),
             (10, 0),

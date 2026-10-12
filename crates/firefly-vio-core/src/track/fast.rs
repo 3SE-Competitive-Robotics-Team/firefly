@@ -20,8 +20,7 @@ pub fn detect(img: &Matrix<u8>, threshold: i32, nonmax_suppression: bool) -> Vec
         .map(|kp| KeyPoint {
             x: kp.pt.x,
             y: kp.pt.y,
-            // 仅适配 OpenCV CPU 的响应约定；上游差异见 webarkit/purecv#161。
-            // 适配范围与移除条件：https://github.com/3SE-Competitive-Robotics-Team/firefly/issues/5
+            // 仅在启用 NMS 时使用响应值；未启用时 purecv 不提供有效分数。
             response: if nonmax_suppression { kp.response } else { 0.0 },
         })
         .collect()

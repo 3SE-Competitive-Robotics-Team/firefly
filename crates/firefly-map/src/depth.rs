@@ -42,7 +42,7 @@ pub struct DepthCamera {
 
 impl DepthCamera {
     /// RMUC render 默认标定：深度相机与双目前脸齐平，垂直视场 70.88°，320×240。
-    /// 几何（机位、朝向、下倾、视场）全部来自 [`firefly_base::rig`]，此处不再复制。
+    /// 机位、朝向、下倾与视场参数统一来自 [`firefly_base::rig`]。
     #[must_use]
     pub fn mujoco_default() -> Self {
         let focal = (240.0 / 2.0) / (firefly_base::rig::FOV_Y_DEG.to_radians() / 2.0).tan();

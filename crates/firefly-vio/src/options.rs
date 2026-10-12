@@ -60,7 +60,7 @@ impl FeatRepresentation {
 }
 
 /// 滤波器核心选项（对照 `StateOptions`，默认值与其成员初始化一致）。
-// 与 C++ 结构 1:1 移植（6 个布尔开关），拆分反而破坏对照可审计性。
+// 选项字段与 OpenVINS `StateOptions` 对应。
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct StateOptions {

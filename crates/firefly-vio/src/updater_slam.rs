@@ -6,11 +6,10 @@
 //!   因为特征已在状态中 → chi2 → EKF 更新）；
 //! - [`UpdaterSlam::change_anchors`]：锚点切换（锚定表示重锚 + 协方差传播）。
 //!
-//! ARUCO 分支（`feat_rep_aruco`）未移植：`max_aruco_features` 为 0 时所有
-//! 特征走 SLAM 表示。单逆深度表示（`ANCHORED_INVERSE_DEPTH_SINGLE`）合并到
-//! MSCKF 逆深度（对照 C++ 的映射）。
+//! `max_aruco_features` 为 0，所有特征走 SLAM 表示。
+//! 单逆深度表示（`ANCHORED_INVERSE_DEPTH_SINGLE`）映射到 MSCKF 逆深度。
 
-// 数学符号/新旧锚点块命名对照 C++ 源码（h_f_old/h_x_new 等），保留可审计性。
+// 数学符号和锚点块名称与 C++ 源码保持一致（如 h_f_old/h_x_new）。
 #![allow(
     clippy::many_single_char_names,
     clippy::similar_names,
@@ -64,7 +63,7 @@ impl UpdaterSlam {
     ///
     /// 成功初始化的特征被加入 `state.features_slam` 并标记 `to_delete`；
     /// 失败的特征标记 `to_delete` 并从 `feature_vec` 移除。
-    // 与 C++ 1:1 移植的长流程，拆分会破坏对照可审计性。
+    // 初始化步骤与 `UpdaterSLAM::delayed_init` 对应。
     #[allow(clippy::too_many_lines)]
     pub fn delayed_init(&mut self, state: &mut State, feature_vec: &mut Vec<Feature>) {
         if feature_vec.is_empty() {
@@ -189,10 +188,8 @@ impl UpdaterSlam {
     ///
     /// 特征已在状态中，故把 `H_f` 追加到 `H_x` 组成 `H_xf`，并将 landmark
     /// 追加到 `Hx_order`。返回本次消费（进入更新流程）的特征 id，调用方须
-    /// 在特征数据库标记 `to_delete`——对照 C++ 末尾的标记段
-    /// （「Delete it so we do not reuse information」），防止同一测量被
-    /// marg/max-track 查询再次取用（MSCKF 双重消费或批次内重复入列）。
-    // 与 C++ 1:1 移植的长流程，拆分会破坏对照可审计性。
+    /// 在特征数据库标记 `to_delete`，防止同一测量被边缘化/MSCKF 查询再次取用。
+    // 更新步骤与 `UpdaterSLAM::update` 对应。
     #[allow(clippy::too_many_lines)]
     // 与 C++ 的 `.at()` 断言语义一致：特征无对应 landmark 时崩溃。
     #[allow(clippy::missing_panics_doc)]
@@ -419,7 +416,7 @@ impl UpdaterSlam {
             if (lm.anchor_clone_timestamp - marg_timestep).abs() < 1e-9 {
                 let new_anchor_timestamp = state.timestamp;
                 let new_cam_id = lm.anchor_cam_id as usize;
-                // 借用问题：先克隆重锚所需数据，再执行
+                // 复制重锚所需数据，再执行锚点切换。
                 let lm2 = state.features_slam.get(&featid).cloned();
                 if let Some(mut lm2) = lm2 {
                     perform_anchor_change(state, &mut lm2, new_anchor_timestamp, new_cam_id);
@@ -709,9 +706,7 @@ mod tests {
         st.cameras.insert(0, Arc::new(cam));
 
         // 两个克隆：t=1 原点静止；t=2 沿 +x 平移 0.5m
-        // 注意：FEJ（默认开启）下克隆线性化点取首估计，故每次 set_value 后
-        // 必须同步 set_fej（对照 VioManager::initialize_with_gt 的语义），
-        // 否则两个克隆的 FEJ 位姿相同 → H_f 秩亏 → 初始化失败。
+        // FEJ 默认开启；每个克隆的首估计位姿与对应状态值同步设置。
         st.timestamp = 1.0;
         st.imu.set_value(
             nalgebra::Vector4::new(0.0, 0.0, 0.0, 1.0),
@@ -861,7 +856,7 @@ mod tests {
     #[test]
     fn delayed_init_rejects_degenerate() {
         let (mut st, mut feat) = slam_scene();
-        // 破坏测量：两个时刻同位置（零视差）→ 三角化失败 → 删除
+        // 两个时刻位于同一位置，零视差测量应导致初始化失败并删除特征。
         feat.timestamps = HashMap::from([(0usize, vec![1.0f64, 2.0])]);
         feat.uvs = HashMap::from([(0usize, vec![Vector2::new(0.1f32, 0.04f32); 2])]);
         feat.uvs_norm = HashMap::from([(0usize, vec![Vector2::new(0.1, 0.04); 2])]);

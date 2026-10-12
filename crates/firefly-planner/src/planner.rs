@@ -390,7 +390,6 @@ impl Planner {
     /// - 全局迭代上限 [`Self::REBOUND_MAX_ITERATIONS`] 兜底所有分支。
     /// - criterion 3 门控锁存位每次进入复位为 false（官方
     ///   `optimizeTrajectory` Preparision 1）。
-    // 主循环编排（L-BFGS/fine check/restart 多阶段），clippy too_many_lines 允许
     #[allow(clippy::too_many_lines)]
     fn rebound_inner(
         &mut self,
@@ -412,9 +411,7 @@ impl Planner {
 
         loop {
             iteration += 1;
-            // 全局迭代上限：所有内部分支（rebound/restart/时间缩放失败重试）
-            // 共享此预算。没有它，"解安全但时间缩放后不可行"的确定性失败
-            // 会零计数空转（try_finish 返回 None 不推进任何计数器）。
+            // 所有 Rebound、restart 和时间缩放尝试共享迭代预算。
             if iteration > Self::REBOUND_MAX_ITERATIONS {
                 return Err(Error::temporary(
                     ErrorKind::Convergence,
@@ -595,8 +592,7 @@ impl Planner {
     /// 避免采样漏峰导致时间缩放不足。
     /// 保持端点 PVA，迭代分配时间并重新求解；每轮检查实际轨迹的全程极值。
     /// 时间比仅用于提出候选，不保证导数单调下降。内部超限时预算耗尽拒绝输出；
-    /// 边界本身超限时（官方 planGlobalTraj 的 warn-and-go：只告警不限行），
-    /// 拉伸改变不了固定端点，直接接受当次优化结果——重规划永不因此锁死。
+    /// 边界本身超限时，时间缩放无法消除固定端点约束；告警并返回优化结果。
     #[fastrace::trace]
     fn ensure_feasible(&self, minco: &Minco) -> firefly_error::Result<Trajectory> {
         let limits = [
@@ -968,9 +964,8 @@ impl Planner {
         let to_goal = goal - start;
         let dist = to_goal.norm();
         if dist <= self.config.planning_distance {
-            // 目标在规划距离内：若被膨胀障碍占用（随机地图常见），沿方向回退到
-            // 最近自由点，否则 A* 直接报 "goal is occupied"——plan() 对随机地图
-            // 成功率骤降，须先在此回退到自由点再交给 A*。
+            // 目标在规划距离内且落入膨胀占据区时，沿目标方向回退到最近自由点，
+            // 使 A* 的终点位于可通行区域。
             if self.map.is_occupied_inflated(goal) {
                 let dir = to_goal / dist.max(1e-9);
                 for step in 1..=24 {
@@ -1003,10 +998,9 @@ mod tests {
     use super::*;
     use firefly_map::{GridMapBuilder, VoxelState};
 
-    /// EGO 在可行 1.1m 门缝（膨胀后）走不通：已知鲁棒性缺口（22m 返程同类），
-    /// 先钉住，调参另立项。当前行为：`restart limit` 全灭。
+    /// 膨胀栅格中的窄门通行场景。
     #[test]
-    #[ignore = "known robustness gap: feasible inflated slot rejected; needs EGO tuning, not a regression"]
+    #[ignore = "known planner robustness limitation"]
     fn ego_threads_feasible_slot() {
         let mut map = firefly_map::GridMapBuilder::new(0.5, [40, 24, 16])
             .build()
@@ -1137,10 +1131,7 @@ mod tests {
 
     #[test]
     fn rebound_with_multitopology_escapes_wall() {
-        // 集成冒烟：开关开 + 同一穿墙场景（初始轨迹必穿入 → 碰撞段非空,
-        // 多拓扑分支必然启用;候选数 >1 由 multitopo 单元测试覆盖）。
-        // 取舍:不构造双墙分叉 e2e 场景——候选数依赖运行时碰撞段分布,
-        // 场景构造不稳,此处只验证"开开关后完整规划链路成功且安全"。
+        // 初始轨迹穿入障碍以启用多拓扑分支；验证最终轨迹安全并生成约束平面。
         let config = PlannerConfig {
             use_multitopology_trajs: true,
             ..PlannerConfig::default()

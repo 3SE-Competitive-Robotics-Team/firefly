@@ -581,7 +581,7 @@ impl Propagator {
     ///
     /// # Panics
     /// `imu_data` 互斥锁中毒时 panic（本模块内不跨线程持有锁）。
-    // 与 C++ 1:1 移植的长流程函数，拆分会破坏对照可审计性。
+    // 保持函数主体与 C++ `fast_state_propagate` 控制流对应。
     #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn fast_state_propagate(
@@ -1585,12 +1585,8 @@ mod tests {
     /// 四元数用左扰动 `q' = dq ⊗ q`、`dq=[0.5·δθ;1]`（与 `IMU::update` boxplus 一致），
     /// 输出 `δθ` 取 `log_so3(R(q')R(q)ᵀ)`；p/v 用直接加性扰动。
     ///
-    /// p/v 用 `ε = 1e-7`、容差 1e-4。θ 块用 `ε_th = 1e-4`（信号 ~1e-4 显著大于线性化点随
-    /// 扰动的 O(ε²)=1e-8 漂移，能被 1e-5 容差捕获）；并对 θ 取**实际实现**的输入扰动
-    /// `δθ_in = log_so3(R(q')R(q)ᵀ)` 作为标量（本库 JPL 约定下 `dq=[0.5ε;1]` 得到
-    /// `δθ_in ≈ −ε·e_c`），对照 `F[:,c]·δθ_in[c]`——从而同时校验符号与量级，且对
-    /// quat/rot 的符号约定不敏感（早先直接用名义 `ε` 时，θ 信号 < 容差，存在"符号错也能过"
-    /// 空档）。
+    /// p/v 用 `ε = 1e-7`、容差 1e-4。θ 块用 `ε_th = 1e-4`，并以实际旋转误差
+    /// `δθ_in = log_so3(R(q')R(q)ᵀ)` 对照 `F[:,c]·δθ_in[c]`，校验符号与量级。
     #[test]
     fn finite_difference_jacobian_f() {
         let prop = Propagator::default();
@@ -1618,14 +1614,12 @@ mod tests {
         };
 
         // th 扰动（误差列 0..3）。
-        // 残差公式为 `dθ_out = log_so3(R(q'_out)·R(q_out)ᵀ)`，与审查方/管理者确认的
-        // 原始公式一致（**未交换**，A⁻¹ 侧是 `R(q_out)ᵀ`）。注意该库 `quat_2_rot` 的
-        // JPL 约定使 `dq = [0.5·ε·e_c; 1]` 对应的旋转 log 为 `−ε·e_c`
-        // （实测 `log_so3(R(dq)·I) ≈ −ε e_c`），故实际实现的输入扰动
-        // `δθ_in = log_so3(R(q'_in)·R(q_in)ᵀ) ≈ −ε·e_c`。残差侧推导不变：
+        // 残差为 `dθ_out = log_so3(R(q'_out)·R(q_out)ᵀ)`；该库 JPL 约定下，
+        // `dq = [0.5·ε·e_c; 1]` 对应的输入旋转误差为
+        // `δθ_in = log_so3(R(q'_in)·R(q_in)ᵀ) ≈ −ε·e_c`。残差侧推导为：
         // `R(q'_out)R(q_out)ᵀ = R(q_ktok1)·R(dq)·R(q_ktok1)ᵀ = exp([R(q_ktok1)·δθ_in]×)`
-        // ⇒ `dθ_out = R(q_ktok1)·δθ_in = F[:,c]·δθ_in[c]`。因此对照标量取*实际* `δθ_in[c]`
-        //（而非名义 `ε`，避免因库的符号约定误判），从而符号与量级都真正得到校验。
+        // ⇒ `dθ_out = R(q_ktok1)·δθ_in = F[:,c]·δθ_in[c]`。对照量使用实际 `δθ_in[c]`，
+        // 以匹配库的四元数符号约定。
         for c in 0..3 {
             let mut e = Vector3::zeros();
             e[c] = 1.0;

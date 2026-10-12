@@ -497,7 +497,7 @@ mod tests {
         assert!(before_q == cpi.q_k2tau, "q_k2tau should not change");
         assert!(before_alpha == cpi.alpha_tau, "alpha_tau should not change");
         assert!(before_p == cpi.p_meas, "P_meas should not change");
-        // DT 仍累加（对照 C++：DT += delta_t 在 zero-dt 检查之前），此处 delta_t=0
+        // DT 在零时间步下保持不变。
         assert!(
             (cpi.dt - 0.0).abs() < 1e-15,
             "dt should stay ~0, got {}",

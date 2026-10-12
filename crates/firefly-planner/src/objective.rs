@@ -62,7 +62,7 @@ pub struct ReboundDetector<'a> {
     /// 官方 `use_multitopology_trajs`:开启时按 criterion 3 门控检测。
     multitopo: bool,
     /// 官方 `initial_obstacles_avoided`:初始障碍已避开的锁存位
-    /// (一旦为 true 不再回头;每次内层优化开始复位为 false)。
+    /// 锁存至下一次内层优化开始，并在该处复位。
     gate_latched: bool,
 }
 

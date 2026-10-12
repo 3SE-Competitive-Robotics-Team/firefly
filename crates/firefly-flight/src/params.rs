@@ -5,7 +5,7 @@ use serde::Deserialize;
 /// 机体参数（刚体本身；旋翼布局与推力上限见 [`crate::Airframe`]）。
 ///
 /// 默认值按 219g 级 2.5~3 寸微型机取（对角 ~127mm）。质量/惯量与 sim 侧 `MuJoCo`
-/// 几何同源（见 `packages/firefly-mujoco`；sim 以 `mjModel` 实测值为准并运行时发布）。
+/// 几何同源（见 `packages/firefly-mujoco`；sim 从 `mjModel` 读取并在运行时发布）。
 /// `linear_drag`/`angular_drag` 是**被控对象的气动阻尼**，由 [`crate::integrate`] 施加；
 /// 无气动模型的对象（如 `MuJoCo`）在 [`crate::Airframe`] 消息里发布 0。
 #[derive(Deserialize, Clone, Copy, Debug)]

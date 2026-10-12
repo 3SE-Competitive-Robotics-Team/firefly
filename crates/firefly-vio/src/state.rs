@@ -61,7 +61,7 @@ pub struct State {
 
 impl State {
     /// 构造（对照 `State::State(StateOptions&)`：变量布局 + 初始协方差）。
-    // 与 C++ 构造函数 1:1 移植的长流程，拆分会破坏对照可审计性。
+    // 状态变量布局与 `State::State` 对应。
     #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn new(options: StateOptions) -> Self {

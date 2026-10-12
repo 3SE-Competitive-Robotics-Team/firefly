@@ -196,8 +196,7 @@ impl FrameTree {
         self.parents.insert(t.source, t);
         Ok(())
     }
-    /// 累乘到根。边均由 [`FrameTree::set`] 校验过（合法刚体变换），故乘积仍合法，
-    /// 直接构造不再重复校验。
+    /// 沿父链累乘变换至根帧。
     fn to_root(&self, frame: FrameId) -> RigidTransform {
         let mut pose = Isometry3::identity();
         let mut target = frame;

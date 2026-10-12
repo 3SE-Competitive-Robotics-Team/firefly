@@ -313,7 +313,7 @@ impl App {
             Some(map) => map.to_grid_map(config.obstacle_clearance)?,
             None => mapping.build(config.obstacle_clearance)?,
         };
-        // 心跳超时阈值先取（config 随后移入 Planner）
+        // 保存心跳超时阈值，供应用层发布门控使用。
         let heartbeat_timeout = config.heartbeat_timeout;
         // 虚拟地面/天花板（对照官方 enable_virtual_wall）：任一配置存在即单独生效
         if config.virtual_ground.is_some() || config.virtual_ceiling.is_some() {
@@ -633,7 +633,7 @@ impl App {
         // 目标点为悬停参考（进程保持运行等待新目标）
         let tracked = if self.manager.is_finished() {
             let goal = self.manager.goal().coords;
-            // 到达悬停保持最后朝向（无轨迹可前视，不再推进 yaw 状态）
+            // 到达后保持 manager 中的 yaw 状态。
             Some(hover_reference(goal, self.manager.yaw_state()))
         } else {
             report.reference

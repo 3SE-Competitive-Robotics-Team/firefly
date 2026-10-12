@@ -5,16 +5,12 @@
 //! 删除与测量清理。
 //!
 //! ## 并发说明
-//! 原版 `FeatureDatabase` 用 `std::mutex` 提供异步多线程接入（每个特征为裸指针、
-//! 直接返回共享且不安全，需 `remove=true` 取出以免跟踪器并发改写）。Rust 借用规则
-//! 由编译期保证所有权安全，故此处省略互斥锁，采用单线程所有权模型：
-//! `remove=true` 时移出数据库并转移所有权，`remove=false` 时返回克隆快照
-//! （语义见各方法）。若需并发，在 crate 层包一层 `Mutex` 即可。
+//! 数据库采用单线程独占访问，不含互斥锁。`remove=true` 时移出数据库并转移所有权，
+//! `remove=false` 时返回克隆快照。并发访问由 crate 调用方负责同步。
 //!
 //! ## MSCKF updater 消费约定
-//! 移植 `MSCKF` 滑动窗口 updater 时，取用本库特征**必须使用 `remove=true` 语义**
-//! （含三个查询方法与 [`FeatureDatabase::get_feature`]），与 C++ 中多线程异步跟踪场景
-//! 持"取出后跟踪器不得再改写"的约定一致；`remove=false`/克隆仅用于纯只读快照。
+//! `MSCKF` 滑动窗口 updater 取用本库特征**必须使用 `remove=true` 语义**
+//! （含三个查询方法与 [`FeatureDatabase::get_feature`]）；`remove=false`/克隆仅用于只读快照。
 
 use nalgebra::{Vector2, Vector3};
 use std::collections::HashMap;
@@ -107,8 +103,7 @@ impl Default for Feature {
             timestamps: HashMap::new(),
             anchor_cam_id: -1,
             anchor_clone_timestamp: 0.0,
-            // 原版默认未初始化（Eigen 的 `Vector3d` 默认不赋值、`double` 也不赋值，
-            // 需三角化后才能用）；Rust 以安全零值占位，使用前须由三角化逻辑写入。
+            // 三角化位置写入前以零值占位，使用前须完成三角化。
             p_FinA: Vector3::zeros(),
             p_FinG: Vector3::zeros(),
             p_FinA_fej: Vector3::zeros(),
@@ -132,9 +127,7 @@ fn retain_measurements(
         let Some(uvn) = uvs_norm.get_mut(cam_id) else {
             continue;
         };
-        // 原版以 `assert` 保证三者等长（release 下为 no-op）；Rust 编译期保证不了
-        // 跨字段不变量，故用 `debug_assert` 显式检查，release 下紧随其后的按位
-        // 压缩需要三者等长，索引均在各自切片内。
+        // 时间戳、像素坐标和归一化坐标必须等长；按位压缩会共同索引这三个切片。
         let len = ts.len();
         debug_assert_eq!(len, uv.len(), "uvs 与 timestamps 长度不一致 (cam {cam_id})");
         debug_assert_eq!(
@@ -185,9 +178,8 @@ impl FeatureDatabase {
 
     /// 取出指定 id 的特征（对照 `OpenVINS` `FeatureDatabase::get_feature`）。
     ///
-    /// `remove=true` 时从库中移除并转移所有权；`remove=false` 时返回一份克隆
-    /// （原版基于 `shared_ptr` 直接返回共享引用，Rust 以所有权模型取代——
-    /// 克隆保证调用方无法与原库内容并发改写，需跟随后续变化的请用 `remove=true`）。
+    /// `remove=true` 时从库中移除并转移所有权；`remove=false` 时返回一份独立克隆。
+    /// 需要修改库内对象时使用 `remove=true`。
     ///
     /// 不存在则返回 `None`。
     pub fn get_feature(&mut self, id: usize, remove: bool) -> Option<Feature> {
@@ -220,8 +212,7 @@ impl FeatureDatabase {
 
     /// 追加一次测量（对照 `OpenVINS` `FeatureDatabase::update_feature`）。
     ///
-    /// 若 id 已存在则向对应相机桶追加速度/归一化坐标与时间戳；
-    /// 若是新 id 则自动创建并入库。原版返回 `void`，Rust 端用 `&mut self` 表达就地更新。
+    /// 若 id 已存在则向对应相机桶追加像素/归一化坐标与时间戳；若是新 id 则自动创建并入库。
     #[allow(clippy::too_many_arguments)] // 形参由跨端 API 契约逐一定死，与 C++ 签名一一对应
     pub fn update_feature(
         &mut self,
@@ -359,8 +350,8 @@ impl FeatureDatabase {
     /// 删除每个特征中恰好发生在 `timestamp` 时刻的测量；若某特征被清空则整体删除
     /// （对照 `OpenVINS` `FeatureDatabase::cleanup_measurements_exact`）。
     ///
-    /// 注意：原版实现是调用 `clean_invalid_measurements({timestamp})`，即**删掉**
-    /// 该时刻的测量（常用于剔除刚被边缘化克隆时刻的测量），并非"仅保留该时刻"。
+    /// 按 OpenVINS `cleanup_measurements_exact` 语义删除该时刻的测量，
+    /// 常用于剔除已边缘化克隆时刻的观测。
     pub fn cleanup_measurements_exact(&mut self, timestamp: f64) {
         let times = [timestamp];
         self.purge_empty_after(|f| f.clean_invalid_measurements(&times));
@@ -382,14 +373,12 @@ impl FeatureDatabase {
     }
 
     /// 全库最早测量时间戳；空库或无测量时返回 `-1.0`
-    /// （对照 `OpenVINS` `FeatureDatabase::get_oldest_timestamp`，原实现用 `-1` 哨兵）。
+    /// （对照 `OpenVINS` `FeatureDatabase::get_oldest_timestamp`）。
     #[must_use]
     pub fn get_oldest_timestamp(&self) -> f64 {
         // 取全库最早测量时刻：先展平出各相机桶的首个时间戳，再取最小。
         // `min_by(f64::total_cmp)` 以确定性全序比较（`f64` 未实现 `Ord`）。
-        // 注意 `total_cmp` 的边界语义：`-0.0 < +0.0` 且 NaN 有确定位置，
-        // 与 C++ 原实现 `oldest_time > at(0)` 的 IEEE 偏序不同——VIO 测量时间戳
-        // 无 NaN，±0.0 亦为无效时刻，此处差异仅理论存在，结果等同。
+        // `total_cmp` 对 NaN 与正负零也提供确定顺序；VIO 时间戳应为有限值，零时刻无效。
         self.features
             .values()
             .flat_map(|f| f.timestamps.values())
@@ -403,8 +392,7 @@ impl FeatureDatabase {
     /// （对照 `OpenVINS` `FeatureDatabase::append_new_measurements`）。
     ///
     /// - 已存在特征：逐相机合并，仅追加本地尚未出现的时间戳（其余字段不变）。
-    /// - 不存在特征：复制 `featid`/`timestamps`/`uvs`/`uvs_norm` 入库
-    ///   （原版复制的正是这四项，`to_delete`/锚点/三角化不在其列）。
+    /// - 不存在特征：复制 id、时间戳、像素坐标和归一化坐标入库。
     pub fn append_new_measurements(&mut self, other: &FeatureDatabase) {
         for (id, ofeat) in &other.features {
             match self.features.entry(*id) {
@@ -447,9 +435,8 @@ impl FeatureDatabase {
 
 /// 把 `other` 特征在 `cam_id` 桶下的测量并入 `local`（幂等：跳过已存在的时间戳）。
 ///
-/// 对应 `append_new_measurements` 中"已存在特征逐相机合并"的一段，
-/// 且与 C++ 相同——先对现有时间戳取快照再判定，故会忠实保留原版对
-/// 同桶内重复时间戳的追加行为。
+/// 已存在特征按相机逐桶合并。先快照目标桶的时间戳，再判定待追加测量；
+/// 同一批输入中的重复时间戳仍会分别追加。
 ///
 /// 去重判定 `snap.contains(&t)` 用 f64 的 `==`（因此 `+0.0` 与 `-0.0` 视为同一时刻），
 /// 与 C++ `std::find` 对时间戳的相等比较一致。
@@ -490,8 +477,7 @@ fn append_cam_measurements(local: &mut Feature, other: &Feature, cam_id: usize) 
 
 #[cfg(test)]
 mod tests {
-    // 测试中大量比较精确可复现的浮点值（整数型常数、逐字转录的字面量），
-    // 直接相等即可，豁免 pedantic 的 `float_cmp`。
+    // 测试值由整数常量构造，可精确比较，豁免 `float_cmp`。
     #![allow(clippy::float_cmp)]
 
     use super::*;
@@ -789,7 +775,7 @@ mod tests {
 
     #[test]
     fn containing_older_hits_other_camera_when_first_cam_first_ge_t() {
-        // 审查场景：某相机桶首元素 >= t，但另一相机桶更早。
+        // 某相机桶首元素 >= t，另一相机桶首元素 < t。
         // C++ `contains_older` 逐相机桶判 `first < timestamp`，任一命中即成立
         // （等价于全局最早时刻 < t）。cam0 first=6.0(>=5.0)，cam1 first=3.0(<5.0)。
         let mut db = FeatureDatabase::new();
@@ -811,7 +797,7 @@ mod tests {
 
     #[test]
     fn query_boundary_equal_to_timestamp() {
-        // 审查场景：三个查询在 `timestamp == t` 边界的包含/排除行为（t=5.0）。
+        // 检查三个查询在 `timestamp == t` 边界的包含/排除行为（t=5.0）。
         // 特征A 唯一测量恰为 5.0：
         //   not_containing_newer：最晚=5.0 >= 5.0 -> 有更新的测量 -> 排除
         //   containing_older    ：first=5.0，5.0<5.0 为假 -> 不排除的更早测量 -> 排除
@@ -847,7 +833,7 @@ mod tests {
 
     #[test]
     fn query_tolerates_missing_camera_bucket() {
-        // 审查场景：特征只有 cam0 桶、根本没有 cam1 桶，三查询遍历 `timestamps` 时
+        // 特征只有 cam0 桶；三查询遍历 `timestamps` 时
         // 不应因缺失的相机而 panic 或误判；clean_older 同样只动既有桶。
         let mut db = FeatureDatabase::new();
         db.features
@@ -965,7 +951,7 @@ mod tests {
 
         db.append_new_measurements(&other);
         let f = db.get_feature_clone(5).unwrap();
-        // 原版新特征只复制 featid/timestamps/uvs/uvs_norm
+        // 新特征复制 id、时间戳、像素坐标和归一化坐标。
         assert_eq!(f.featid, 5);
         assert_eq!(cam0_t(&f), &[1.0]);
         assert!(!f.to_delete);

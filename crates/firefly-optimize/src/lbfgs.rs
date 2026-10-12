@@ -575,9 +575,8 @@ fn update_trial_interval(
 
 /// More-Thuente 线搜索（对照 `line_search_morethuente`）。
 /// 成功返回评估次数；Err 携带官方错误码。
-// 步长被 clip 成恰好等于边界，官方用精确相等判定触界；stx/sty、dgxm/dgym
-// 等成对变量名保留官方命名，便于逐行核对；主循环为官方控制流的逐行移植，
-// 拆分会破坏对照性
+// 步长裁剪到边界后使用精确相等判定触界；成对变量 stx/sty、dgxm/dgym
+// 与官方命名一致。
 #[allow(clippy::float_cmp, clippy::similar_names, clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 fn line_search_morethuente(

@@ -80,9 +80,7 @@ def read_census(stp_path: Path, progress_every: int = 100) -> dict:
         "OCP.STEPCAFControl", fromlist=["STEPCAFControl_Reader"]
     ).STEPCAFControl_Reader
     reader = reader_cls()
-    # 产品名全为匿名 BREP_N，装配名对分组无用：关 NameMode 绕开 XCAF 逐子形状
-    # 命名的平方级路径（实测该模式使 1.2G 装配的 Transfer 卡死 >1h，关闭后 ~37s）。
-    # 颜色必须保留（分组与红蓝灯饰识别的依据）。
+    # 装配名称不用于分组；保留颜色以识别分组和灯饰。
     reader.SetColorMode(True)
     reader.SetNameMode(False)
     reader.SetLayerMode(False)

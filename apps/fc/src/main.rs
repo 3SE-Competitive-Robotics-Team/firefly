@@ -51,7 +51,7 @@ use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 
 /// `configs/fc.toml` 缺省路径（相对运行目录，通常为仓库根）。
 const DEFAULT_CONFIG: &str = "configs/fc.toml";
-/// 每拍最后 150µs 自旋，之前使用线程睡眠。
+/// 每拍末尾用于对齐截止时间的自旋窗口。
 const SPIN_MARGIN: Duration = Duration::from_micros(150);
 /// 里程计陈旧阈值（墙钟秒）：覆盖 10Hz 视觉更新间隔，触发姿态降级。
 const ODOM_STALE_LIMIT: Duration = Duration::from_millis(500);
