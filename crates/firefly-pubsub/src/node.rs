@@ -8,7 +8,7 @@
 //!
 //! ⚠️ 硬杀进程（SIGKILL / pkill -9）会跳过 Drop，在内核里留下孤儿共享内存
 //! 对象与幽灵端口注册（后续订阅端会连上死端口的残留连接，收不到任何数据）。
-//! 排障时的清理手段见仓库 AGENTS.md。
+//! 排障时的清理手段见仓库 `docs/development.md`。
 
 use iceoryx2::node::Node;
 use iceoryx2::prelude::*;

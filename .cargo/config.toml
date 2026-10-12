@@ -1,3 +1,0 @@
-[alias]
-test-vio = "test --all-targets -p firefly-vio-types -p firefly-vio-core -p firefly-vio-init -p firefly-vio -p vio"
-test-vio-synthetic = "test -p firefly-vio --test synthetic_e2e -- --include-ignored"

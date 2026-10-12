@@ -13,4 +13,4 @@ uv run firefly-sim
 ```
 
 上电保持静止，等待传感器初始化完成后用 `ffctl fc` 解锁和起飞。
-完整启动说明见 [运行文档](../../docs/how_to_run.md)。
+完整启动说明见 [运行文档](../../docs/development.md#run)。

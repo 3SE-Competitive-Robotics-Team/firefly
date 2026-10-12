@@ -37,7 +37,7 @@ def flight_environment(request):
         pytest.fail(f"missing release binaries: {missing}; run cargo build --release -p render -p vio -p fc -p ffctl")
     for asset in ("field.glb", "rmuc2026_collision.json"):
         if not (ROOT / "models/rmuc2026" / asset).is_file():
-            pytest.fail(f"missing RMUC asset: {asset}; see docs/how_to_run.md")
+            pytest.fail(f"missing RMUC asset: {asset}; see docs/development.md#run")
     try:
         yield
     finally:

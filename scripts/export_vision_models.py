@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export official ALIKED-N16 / LightGlue weights, with numerical parity checks.
 
-Use the isolated models/vision-export/.venv described in docs/how_to_run.md.
+Use the isolated models/vision-export/.venv described in docs/development.md#assets.
 The source checkout is pinned; outputs and provenance live under models/.
 """
 from __future__ import annotations

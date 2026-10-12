@@ -122,7 +122,7 @@ impl FlightState {
         }
     }
 
-    /// 整数编码（rrd 里当标量记录，见 `docs/how_to_run.md`；顺序即编码，不得重排）。
+    /// 整数编码（RRD 标量记录；顺序即编码，不得重排）。
     #[must_use]
     pub fn code(self) -> u8 {
         match self {

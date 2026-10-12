@@ -16,4 +16,4 @@ vel_kp = 2.4
 # 全用 crate 默认值（`firefly-flight::FsmParams`），需要时才在此覆盖。
 
 # [imu]：本地姿态 ESKF 使用 firefly_imu::Options 默认值；部署需标定噪声密度。
-# 静止窗口、NIS 门限和角速度低通参数见 docs/imu.md。
+# 静止窗口、NIS 门限和角速度低通参数见 docs/architecture.md#imu。

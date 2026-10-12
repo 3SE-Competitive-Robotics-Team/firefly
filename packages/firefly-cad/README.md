@@ -68,4 +68,4 @@ FIREFLY_RUN_RMUC_ASSETS=1 uv run --all-packages --extra test pytest tests/system
 ```
 
 实际转换记录见 [CONVERSION.md](CONVERSION.md)，系统验收边界见
-[测试契约](../../docs/testing.md)。
+[测试契约](../../docs/development.md#tests)。
