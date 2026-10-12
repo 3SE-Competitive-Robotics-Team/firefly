@@ -213,7 +213,8 @@ pub fn spawn_rig(
 #[must_use]
 pub fn camera_calibration(stamp: f64) -> [firefly_pubsub::viz::VizMessage; 3] {
     use firefly_pubsub::viz::{VizMessage, kind};
-    let focal = (IMAGE_HEIGHT as f64 / 2.0) / (firefly_base::rig::FOV_Y_DEG.to_radians() / 2.0).tan();
+    let focal =
+        (IMAGE_HEIGHT as f64 / 2.0) / (firefly_base::rig::FOV_Y_DEG.to_radians() / 2.0).tan();
     let [cx, cy] = firefly_base::rig::principal_point(IMAGE_WIDTH, IMAGE_HEIGHT);
     let rotation = cam_mount() * Quat::from_rotation_x(std::f32::consts::PI);
     [
@@ -256,15 +257,21 @@ mod tests {
     #[allow(clippy::float_cmp)] // IPC 标定的直接字段拷贝要求精确相等。
     fn rerun_calibration_uses_cv_axes_and_shared_intrinsics() {
         let [left, right, depth] = camera_calibration(1.5);
-        for (message, offset) in [(left, LEFT_OFFSET), (right, RIGHT_OFFSET), (depth, DEPTH_OFFSET)] {
+        let assert_camera = |message: &firefly_pubsub::viz::VizMessage, offset: Vec3| {
             assert_eq!(message.xyz, offset.to_array().map(f64::from));
-            assert_eq!(message.points[0], [IMAGE_WIDTH as f64, IMAGE_HEIGHT as f64, 0.]);
+            assert_eq!(
+                message.points[0],
+                [IMAGE_WIDTH as f64, IMAGE_HEIGHT as f64, 0.]
+            );
             let rotation = Quat::from_array(message.quat_xyzw.map(|v| v as f32));
             let cv_point = Vec3::new(0.2, 0.3, 2.0);
             let bevy_point = Vec3::new(cv_point.x, -cv_point.y, -cv_point.z);
             assert!((rotation * cv_point - cam_mount() * bevy_point).length() < 1e-5);
             assert_eq!(message.scalars[2..], [159.5, 119.5]);
-        }
+        };
+        assert_camera(&left, LEFT_OFFSET);
+        assert_camera(&right, RIGHT_OFFSET);
+        assert_camera(&depth, DEPTH_OFFSET);
     }
 
     #[test]

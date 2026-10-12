@@ -83,8 +83,7 @@ fn main() -> Result<()> {
             if let Some(edge) = result.edge {
                 loops.publish(edge)?;
             }
-            let mut msg =
-                ScalarMessage::base(message.camera_time, "loop/debug/frontend");
+            let mut msg = ScalarMessage::base(message.camera_time, "loop/debug/frontend");
             msg.scalar_count = 4;
             msg.scalars[..4].copy_from_slice(&result.diagnostics);
             viz.publish(msg)?;

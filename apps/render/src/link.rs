@@ -69,10 +69,7 @@ pub fn open_ports(offline: bool) -> Result<IpcPorts, firefly_error::Error> {
     };
     let pose_sub = Subscriber::with_topic(&node, &topic(GROUND_TRUTH_TOPIC))?;
     log::info!("IPC 就绪：订阅位姿，offline={offline}");
-    Ok(IpcPorts {
-        pose_sub,
-        node,
-    })
+    Ok(IpcPorts { pose_sub, node })
 }
 
 /// 传感器发布端口只在像素工作线程构造和使用，节点最后释放。
@@ -358,7 +355,11 @@ pub fn poll_processor(
     mut stats: ResMut<CaptureStats>,
     mut exits: MessageWriter<AppExit>,
 ) {
-    if pipeline.worker.as_ref().is_some_and(JoinHandle::is_finished) {
+    if pipeline
+        .worker
+        .as_ref()
+        .is_some_and(JoinHandle::is_finished)
+    {
         log::error!("sensor-process 工作线程意外退出");
         exits.write(AppExit::error());
     }

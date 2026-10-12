@@ -188,21 +188,16 @@ mod tests {
         let (published, received) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
             let worker = scope.spawn(|| {
-                run_worker(
-                    &jobs,
-                    &DepthNoiseOptions::default(),
-                    true,
-                    |result| {
-                        published
-                            .send((
-                                result.seq,
-                                result.stamp,
-                                result.left_gray[0],
-                                result.right_gray[0],
-                            ))
-                            .unwrap();
-                    },
-                );
+                run_worker(&jobs, &DepthNoiseOptions::default(), true, |result| {
+                    published
+                        .send((
+                            result.seq,
+                            result.stamp,
+                            result.left_gray[0],
+                            result.right_gray[0],
+                        ))
+                        .unwrap();
+                });
             });
             let mut observations = Vec::new();
             for seq in 1..=2 {

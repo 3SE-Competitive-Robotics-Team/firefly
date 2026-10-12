@@ -903,7 +903,7 @@ impl VioManager {
     }
 }
 
-    /// 单相机参数；跟踪器选项由应用层直接传给 `TrackKlt`。
+/// 单相机参数；跟踪器选项由应用层直接传给 `TrackKlt`。
 pub type CamParamsPlaceholder = ();
 
 #[cfg(test)]

@@ -350,7 +350,7 @@ impl FeatureDatabase {
     /// 删除每个特征中恰好发生在 `timestamp` 时刻的测量；若某特征被清空则整体删除
     /// （对照 `OpenVINS` `FeatureDatabase::cleanup_measurements_exact`）。
     ///
-    /// 按 OpenVINS `cleanup_measurements_exact` 语义删除该时刻的测量，
+    /// 按 `OpenVINS` `cleanup_measurements_exact` 语义删除该时刻的测量，
     /// 常用于剔除已边缘化克隆时刻的观测。
     pub fn cleanup_measurements_exact(&mut self, timestamp: f64) {
         let times = [timestamp];

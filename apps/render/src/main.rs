@@ -31,8 +31,8 @@ use config::RenderConfig;
 use firefly_render::lighting::spawn_scene_lighting;
 use firefly_render::scene::{MODELS_DIR, spawn_scene};
 use link::{
-    CapturePipeline, CaptureStats, PendingFrames, SensorCapture, drain_captures, open_ports, poll_pose,
-    poll_processor,
+    CapturePipeline, CaptureStats, PendingFrames, SensorCapture, drain_captures, open_ports,
+    poll_pose, poll_processor,
 };
 use rig::{PoseState, spawn_rig};
 use scene::SceneSpec;
