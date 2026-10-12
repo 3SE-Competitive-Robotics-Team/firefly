@@ -17,6 +17,16 @@ for directory in (ROOT / "scripts", ROOT / "tests/evaluation"):
 from process_lifecycle import require_idle
 
 
+@pytest.fixture(scope="session", autouse=True)
+def build_release_apps():
+    """Build every Rust app once before system tests can launch release binaries."""
+    subprocess.run(
+        ["cargo", "xtask", "build-all-release"],
+        cwd=ROOT,
+        check=True,
+    )
+
+
 @pytest.fixture
 def flight_environment(request):
     """显式选择文件或节点才启动飞行；全仓收集不要求图形环境。"""

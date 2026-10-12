@@ -229,8 +229,9 @@ H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码
 
 ## 验证
 
-源码有改动时，运行测试前先执行 `cargo xtask build-all-release`，重建所有 Rust 应用的 release
-二进制，避免端到端测试使用旧产物。该命令不构建 Python 应用。
+运行 `pytest tests/system` 时，session fixture 会在系统用例启动前执行
+`cargo xtask build-all-release`，重建所有 Rust 应用的 release 二进制，避免端到端测试使用旧产物。
+该命令不构建 Python 应用。
 
 ```bash
 cargo fmt --all --check
