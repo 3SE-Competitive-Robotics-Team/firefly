@@ -177,12 +177,14 @@ name = "firefly-mujoco"
 version = "0.1.0"
 source = { editable = "packages/firefly-mujoco" }
 dependencies = [
+    { name = "firefly-workspace" },
     { name = "mujoco" },
     { name = "numpy" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "firefly-workspace", editable = "packages/firefly-workspace" },
     { name = "mujoco", specifier = ">=3.15,<4" },
     { name = "numpy", specifier = ">=2.5.4,<3" },
 ]
@@ -193,6 +195,7 @@ version = "0.1.0"
 source = { editable = "apps/firefly-sim" }
 dependencies = [
     { name = "firefly-mujoco" },
+    { name = "firefly-workspace" },
     { name = "iceoryx2" },
     { name = "numpy" },
     { name = "opentelemetry-api" },
@@ -208,6 +211,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "firefly-mujoco", editable = "packages/firefly-mujoco" },
+    { name = "firefly-workspace", editable = "packages/firefly-workspace" },
     { name = "iceoryx2", specifier = "==0.10.0" },
     { name = "numpy", specifier = ">=2.5.4,<3" },
     { name = "opentelemetry-api", specifier = ">=1.45.1,<2" },
@@ -223,6 +227,7 @@ version = "0.1.0"
 source = { editable = "apps/firefly-viz" }
 dependencies = [
     { name = "firefly-mujoco" },
+    { name = "firefly-workspace" },
     { name = "iceoryx2" },
     { name = "numpy" },
     { name = "pyarrow" },
@@ -232,6 +237,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "firefly-mujoco", editable = "packages/firefly-mujoco" },
+    { name = "firefly-workspace", editable = "packages/firefly-workspace" },
     { name = "iceoryx2", specifier = "==0.10.0" },
     { name = "numpy", specifier = ">=2.5.4,<3" },
     { name = "pyarrow", specifier = ">=26.0.0" },

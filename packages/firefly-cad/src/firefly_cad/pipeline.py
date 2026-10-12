@@ -12,11 +12,10 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import tomllib
 
 import numpy as np
 
-from firefly_workspace import digest, workspace_root
+from firefly_workspace import load_toml, digest, workspace_root
 
 from .collide import collide, write_collision
 from .map_export import export_map
@@ -183,8 +182,7 @@ def main(argv=None):
     parser.add_argument("--blender", default="blender")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    with args.config.open("rb") as stream:
-        options = Options(**tomllib.load(stream))
+    options = Options(**load_toml(args.config))
     build(args.stp, args.out_dir, args.map_out, options, args.blender)
     return 0
 

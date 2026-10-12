@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field, fields
 import math
 from pathlib import Path
-import tomllib
+from firefly_workspace import load_toml
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -54,8 +54,7 @@ class Options:
 
 
 def load(path: str | Path = ROOT / "configs/viz.toml") -> Options:
-    with Path(path).open("rb") as file:
-        values = tomllib.load(file)
+    values = load_toml(path)
     video = VideoOptions(**values.pop("video", {}))
     capture = CaptureOptions(**values.pop("capture", {}))
     options = Options(video=video, capture=capture, **values)

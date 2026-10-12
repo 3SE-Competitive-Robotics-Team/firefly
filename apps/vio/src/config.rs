@@ -1,10 +1,10 @@
-//! `configs/vio.toml` 加载：缺键回落默认值，文件缺失/解析失败报错。
+//! `configs/vio.toml` 加载：缺键回落默认值，缺文件使用默认值，读取/解析失败报错。
 //!
-//! 默认值 = 随仓库发布的 RMUC render 双目部署（与 `configs/vio.toml` 一致）。
+//! 相机与 IMU 默认值对应 RMUC render 双目部署；体素选点由配置启用。
 
 use std::path::Path;
 
-use firefly_error::{Error, ErrorKind, Result};
+use firefly_error::Result;
 use serde::Deserialize;
 
 /// 双目相机标定（同内参，IMU 居中）。
@@ -138,13 +138,9 @@ impl VioConfig {
     ///
     /// # Errors
     ///
-    /// 文件不可读（`NotFound`）或 TOML 解析失败。
+    /// 文件存在但不可读，或 TOML 解析失败。
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        let raw = std::fs::read_to_string(path)
-            .map_err(|e| Error::new(ErrorKind::NotFound, "config file not found").with_source(e))?;
-        toml::from_str(&raw)
-            .map_err(|e| Error::new(ErrorKind::InvalidArgument, "invalid config").with_source(e))
+        firefly_config::load(path)
     }
 }
 

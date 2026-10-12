@@ -28,12 +28,7 @@ fn main() -> Result<()> {
             .next()
             .ok_or_else(|| Error::new(ErrorKind::InvalidArgument, "missing config"))?;
     }
-    let config = std::fs::read_to_string(&path).map_err(|e| {
-        Error::new(ErrorKind::InvalidArgument, e.to_string()).with_context("config", &path)
-    })?;
-    let options: Options = toml::from_str(&config).map_err(|e| {
-        Error::new(ErrorKind::InvalidArgument, e.to_string()).with_context("config", &path)
-    })?;
+    let options: Options = firefly_config::load(&path)?;
     let mut backend = backend::Backend::new(options)?;
     let node = firefly_pubsub::node::create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "slam");
@@ -54,7 +49,7 @@ fn main() -> Result<()> {
         firefly_observability::pump_log_ipc(&log_ipc);
         while let Some(correction) = corrections.receive()? {
             backend.correct(&correction).map_err(|e| {
-                e.with_context("operation", "apply landmark correction")
+                e.with_operation("apply landmark correction")
                     .with_context("to", correction.to)
             })?;
         }
@@ -70,13 +65,13 @@ fn main() -> Result<()> {
             let guard = root.set_local_parent();
             firefly_observability::set_sim_time(message.camera_time);
             let frame = frontend::convert(&message).map_err(|e| {
-                e.with_context("operation", "build landmark frame")
+                e.with_operation("build landmark frame")
                     .with_context("camera_time", message.camera_time)
             })?;
             let result = backend
                 .process(message.session, frame, message.odom)
                 .map_err(|e| {
-                    e.with_context("operation", "update landmark map")
+                    e.with_operation("update landmark map")
                         .with_context("camera_time", message.camera_time)
                 })?;
             keyframes.publish(message.odom)?;
@@ -96,4 +91,16 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod config_tests {
+    #[test]
+    fn config_defaults_without_file() {
+        let _: firefly_landmarks::Options = firefly_config::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../configs/__missing__/slam.toml"
+        ))
+        .unwrap();
+    }
 }

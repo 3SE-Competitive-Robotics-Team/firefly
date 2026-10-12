@@ -4,6 +4,7 @@ exclude = ["apps/firefly-sim", "apps/firefly-viz"]
 resolver = "3"
 
 [workspace.dependencies]
+firefly-config = { path = "crates/firefly-config" }
 firefly-landmarks = { path = "crates/firefly-landmarks" }
 serde_json = "1.0.152"
 firefly-base = { path = "crates/firefly-base" }

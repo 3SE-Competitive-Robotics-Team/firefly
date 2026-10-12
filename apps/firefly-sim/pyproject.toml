@@ -5,6 +5,7 @@ description = "MuJoCo 物理环境主循环：RMUC 物理与 IMU、订阅电机�
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "firefly-workspace",
     "firefly-mujoco",
     "iceoryx2==0.10.0",
     "numpy>=2.5.4,<3",
@@ -13,6 +14,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
+firefly-workspace = { workspace = true }
 firefly-mujoco = { workspace = true }
 
 [build-system]

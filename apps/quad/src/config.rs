@@ -1,7 +1,7 @@
 //! `configs/quad.toml`：飞行 demo 的场地/起点 + `firefly-flight` 的机体、机体布局与飞控参数。
 //!
 //! 参数类型定义在 `firefly-flight`（四旋翼模型与飞控的唯一实现），缺键回落
-//! 那边的默认值（219g 级微型机）；本文件只写需要按 demo 调整的键。
+//! 对应类型的默认值。
 
 use bevy::prelude::*;
 use firefly_flight::{Airframe, ControlParams, QuadParams};
@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 /// 顶层配置。
 #[derive(Resource, Deserialize, Clone, Debug)]
+#[serde(default)]
 pub struct QuadConfig {
     /// 场地 glb（相对 `models/`）。
     pub field: String,
@@ -25,15 +26,42 @@ pub struct QuadConfig {
     pub control: ControlParams,
 }
 
-/// 读配置；缺文件/解析失败即报错退出。
+impl Default for QuadConfig {
+    fn default() -> Self {
+        Self {
+            field: "rmuc2026/field.glb".into(),
+            start: [0.0, -2.0, 1.2],
+            drone: QuadParams::default(),
+            airframe: Airframe::default(),
+            control: ControlParams::default(),
+        }
+    }
+}
+
+/// 读配置；缺文件使用默认值，读取/解析失败报错退出。
 #[must_use]
 pub fn load(path: &str) -> QuadConfig {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        log::error!("读取 {path} 失败：{e}");
-        std::process::exit(1);
-    });
-    toml::from_str(&text).unwrap_or_else(|e| {
-        log::error!("解析 {path} 失败：{e}");
+    firefly_config::load(path).unwrap_or_else(|e| {
+        log::error!("加载配置 {path} 失败：{e}");
         std::process::exit(1);
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shipped_config_preserves_control_overrides() {
+        let config: QuadConfig =
+            toml::from_str(include_str!("../../../configs/quad.toml")).unwrap();
+        let expected = ControlParams {
+            attitude_kp: 9.0,
+            rate_kp: 6.0,
+            ..ControlParams::default()
+        };
+        assert_eq!(config.field, "rmuc2026/field.glb");
+        assert_eq!(config.start, [0.0, -2.0, 1.2]);
+        assert_eq!(format!("{:?}", config.control), format!("{expected:?}"));
+    }
 }

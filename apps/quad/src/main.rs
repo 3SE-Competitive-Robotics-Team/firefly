@@ -24,25 +24,25 @@ use quad::{Quad, QuadInput};
 const CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/quad.toml");
 
 fn main() {
-    let cfg = config::load(CONFIG);
-    log::info!("quad：场地 {}，起点 {:?}", cfg.field, cfg.start);
-    App::new()
-        .add_plugins(
-            DefaultPlugins
-                .set(AssetPlugin {
-                    file_path: MODELS_DIR.to_owned(),
-                    ..default()
-                })
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        resolution: (1280, 720).into(),
-                        title: "firefly quad".to_owned(),
-                        ..default()
-                    }),
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(AssetPlugin {
+                file_path: MODELS_DIR.to_owned(),
+                ..default()
+            })
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    resolution: (1280, 720).into(),
+                    title: "firefly quad".to_owned(),
                     ..default()
                 }),
-        )
-        .insert_resource(cfg)
+                ..default()
+            }),
+    );
+    let cfg = config::load(CONFIG);
+    log::info!("quad：场地 {}，起点 {:?}", cfg.field, cfg.start);
+    app.insert_resource(cfg)
         .insert_resource(QuadInput::default())
         // 动力学定步长 240Hz（显式积分稳定）。
         .insert_resource(Time::<Fixed>::from_hz(240.0))

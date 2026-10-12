@@ -13,7 +13,7 @@ from .messages import (
     VIZ_KIND_VOXELS, VIZ_KIND_VOXELS_ADD, VIZ_KIND_VOXELS_REMOVE, VIZ_KIND_SCALARS,
     VIZ_KIND_BAR_CHART, VIZ_KIND_ARROWS, VIZ_KIND_CLEAR, VIZ_KIND_CAMERA,
 )
-from .recording import PIXEL_CENTER_OFFSET, at
+from .recording import RecordingOutputs, PIXEL_CENTER_OFFSET, at
 
 
 def entity(msg):
@@ -33,7 +33,7 @@ def count(value, capacity):
 
 
 class Writer:
-    def __init__(self, recordings, options, trigger):
+    def __init__(self, recordings: RecordingOutputs, options, trigger):
         self.recordings, self.options, self.trigger = recordings, options, trigger
         self.rec = recordings.archive
         self.voxels = {}

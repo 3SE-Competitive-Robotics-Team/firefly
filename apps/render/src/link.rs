@@ -179,7 +179,7 @@ impl CapturePipeline {
             })
             .map_err(|error| {
                 firefly_error::Error::new(firefly_error::ErrorKind::Internal, error.to_string())
-                    .with_context("operation", "spawn sensor processor")
+                    .with_operation("spawn sensor processor")
             })?;
         let pipeline = Self {
             jobs,
@@ -188,7 +188,7 @@ impl CapturePipeline {
         };
         ready_rx.recv().map_err(|error| {
             firefly_error::Error::new(firefly_error::ErrorKind::Internal, error.to_string())
-                .with_context("operation", "open sensor publishers")
+                .with_operation("open sensor publishers")
         })??;
         Ok(pipeline)
     }
@@ -317,7 +317,7 @@ pub fn drain_captures(
     let mut right_rgb = None;
     let mut depth_raw = None;
     let mut stamp = 0.0;
-    let mut trace = TraceContext::empty();
+    let mut trace = TraceContext::default();
     let mut timing = frames[0].timing;
     for frame in frames {
         timing.readback = timing.readback.max(frame.timing.readback);

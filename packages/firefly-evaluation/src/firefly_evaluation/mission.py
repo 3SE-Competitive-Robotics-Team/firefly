@@ -1,4 +1,5 @@
 """真实进程任务验收；预设命令，真值只评分，失败不调整门槛。"""
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 import logging
 import os
@@ -62,7 +63,8 @@ class MissionFailure(RuntimeError):
 
 
 class Mission:
-    def __init__(self, directory, case, options, *, vio_only=False, prior_maps=False, localization_config=None, workspace=None):
+    def __init__(self, directory, case, options, *, vio_only=False, prior_maps=False, localization_config=None, workspace=None, sleep: Callable[[float], None] = time.sleep):
+        self.sleep = sleep
         self.root = workspace_root(workspace)
         self.options, self.case = options, case
         self.vio_only = vio_only
@@ -239,7 +241,7 @@ class Mission:
             else:
                 held = None
             previous = self.t
-            time.sleep(0.01)
+            self.sleep(0.01)
         raise MissionFailure("wall-clock deadline exceeded")
 
     def phase(self, name, action):
@@ -406,7 +408,7 @@ class Mission:
         if self.recorder:
             try:
                 self.recorder.event(f"shutdown {results} failures={failures}", self.t, bool(failures))
-                time.sleep(0.4)
+                self.sleep(0.4)
             except Exception as error:
                 failures.append(f"shutdown recording failed: {error}")
         if "viz" in self.processes:
@@ -453,7 +455,7 @@ class Mission:
         self.result["stages"] = {name: {"status": "blocked", "reason": "preceding phase not completed"} for name, _ in phases}
         try:
             self.start("viz", [sys.executable, "-m", "firefly_viz.main", "--save", str(self.recording)])
-            time.sleep(2.)
+            self.sleep(2.)
             self.connect()
             for name in applications:
                 command = [str(self.root / f"target/release/{name}")]

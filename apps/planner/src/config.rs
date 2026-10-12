@@ -1,4 +1,4 @@
-//! `configs/planner.toml` 加载：缺键回落默认值，文件缺失/解析失败报错。
+//! `configs/planner.toml` 加载：缺键回落默认值，缺文件使用默认值，读取/解析失败报错。
 
 use std::path::Path;
 
@@ -21,13 +21,9 @@ impl PlannerToml {
     ///
     /// # Errors
     ///
-    /// 文件不可读（`NotFound`）或 TOML 解析失败。
+    /// 文件存在但不可读，或 TOML 解析失败。
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        let raw = std::fs::read_to_string(path)
-            .map_err(|e| Error::new(ErrorKind::NotFound, "config file not found").with_source(e))?;
-        toml::from_str(&raw)
-            .map_err(|e| Error::new(ErrorKind::InvalidArgument, "invalid config").with_source(e))
+        firefly_config::load(path)
     }
 }
 
@@ -44,6 +40,8 @@ mod tests {
             "/../../configs/planner.toml"
         ))
         .expect("shipped configs/planner.toml must parse");
+        assert!(cfg.config.yaw_hold);
+        assert!((cfg.config.obstacle_clearance - 0.4).abs() < 1e-12);
         assert!((cfg.config.max_velocity - 1.5).abs() < 1e-12);
         assert!((cfg.config.weight_obstacle - 10_000.0).abs() < 1e-9);
         assert_eq!(cfg.config.virtual_ground, Some(-0.505));

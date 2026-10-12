@@ -14,14 +14,13 @@ import signal
 import struct
 import subprocess
 import time
-import tomllib
 
 import iceoryx2 as iox2
 import numpy as np
 
 from firefly_evaluation.vision_assets import capture_assets
 from firefly_mujoco import DepthImageMessage, GrayImageMessage, OdomMessage, TraceContext
-from firefly_workspace import digest, workspace_root
+from firefly_workspace import digest, load_toml, workspace_root
 
 ROOT = workspace_root(Path(__file__))
 W, H = 320, 240
@@ -210,8 +209,7 @@ def main():
         raise FileNotFoundError(f"ALIKED model missing: {args.model}")
     collision = ROOT / "models/rmuc2026/rmuc2026_collision.json"
     boxes = np.asarray(json.loads(collision.read_text())["boxes"])
-    with (ROOT / "configs/vision_map.toml").open("rb") as stream:
-        configuration = tomllib.load(stream)
+    configuration = load_toml(ROOT / "configs/vision_map.toml")
     configuration.update({key: getattr(args, key) for key in ["step", "heights", "yaws", "x_range", "y_range"]
                           if getattr(args, key) is not None})
     poses = list(configured_poses(boxes, configuration))

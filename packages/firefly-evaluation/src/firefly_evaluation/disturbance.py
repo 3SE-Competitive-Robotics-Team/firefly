@@ -32,6 +32,10 @@ class DisturbanceMission(Mission):
                               for topic, cls in [("Firefly/Viz", VizMessage), ("Firefly/VizScalars", ScalarMessage)]]
         self.evidence = {}
 
+    def send_force(self, pulse: ForcePulse) -> None:
+        """发送一条世界系力脉冲；顺序和有效性由接收端校验。"""
+        self.force_publisher.loan_uninit().write_payload(pulse).send()
+
     def pump(self, guard=True):
         super().pump(guard)
         for subscriber in self.evidence_subs:
@@ -93,7 +97,9 @@ class DisturbanceMission(Mission):
         return {name: metrics for name, (_, metrics) in checks.items()}
 
 
-def run_disturbance(directory, options, limits, hover_limits, *, workspace=None):
+def run_disturbance(directory, options, limits, hover_limits, *, workspace=None,
+                    mission_factory: type[DisturbanceMission] = DisturbanceMission,
+                    hover_scorer=score_hover, disturbance_scorer=score_disturbance):
     """执行固定种子的外力序列；任何轮次失败均阻止下一次注入，返回评分与外力数组。"""
     options.validate()
     rng = np.random.default_rng(limits.seed)
@@ -103,7 +109,7 @@ def run_disturbance(directory, options, limits, hover_limits, *, workspace=None)
         magnitude = rng.uniform(limits.min_force_n, limits.max_force_n)
         forces.append([magnitude * np.cos(angle), magnitude * np.sin(angle), 0.])
     forces = np.asarray(forces)
-    mission = DisturbanceMission(directory, "hover_disturbance", options, vio_only=True, workspace=workspace)
+    mission = mission_factory(directory, "hover_disturbance", options, vio_only=True, workspace=workspace)
 
     def disturb(index, force):
         if index > 1 and mission.result["stages"][f"assess_{index - 1:02d}"]["status"] != "passed":
@@ -113,7 +119,7 @@ def run_disturbance(directory, options, limits, hover_limits, *, workspace=None)
         pulse = ForcePulse()
         pulse.timestamp, pulse.seconds, pulse.index = mission.t, limits.pulse_seconds, index
         pulse.force[:] = force
-        mission.force_publisher.loan_uninit().write_payload(pulse).send()
+        mission.send_force(pulse)
         mission.recorder.event(f"force request round={index}/{limits.rounds} seed={limits.seed} world_N={force.tolist()} duration_s={limits.pulse_seconds}", mission.t)
         end = mission.t + limits.pulse_seconds + limits.recovery_seconds
 
@@ -144,6 +150,6 @@ def run_disturbance(directory, options, limits, hover_limits, *, workspace=None)
         ])
     phases.append(("landing", mission.landing))
     result = mission.run_phases(phases, ("render", "vio", "fc"))
-    score_hover(result, options, hover_limits, phase_name=f"recovery_{limits.rounds:02d}")
-    score_disturbance(result, options, limits, forces, hover_limits)
+    hover_scorer(result, options, hover_limits, phase_name=f"recovery_{limits.rounds:02d}")
+    disturbance_scorer(result, options, limits, forces, hover_limits)
     return result, forces

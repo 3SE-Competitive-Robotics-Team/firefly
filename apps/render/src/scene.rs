@@ -37,18 +37,19 @@ const RMUC: SceneSpec = SceneSpec {
 /// `configs/scene.toml` 的反序列化形态。
 #[derive(Deserialize)]
 struct SceneConfig {
+    #[serde(default = "default_scene")]
     scene: String,
 }
 
-/// 读 `configs/scene.toml` 的 `scene`；缺文件/解析失败即报错退出。
+fn default_scene() -> String {
+    DEFAULT_SCENE.into()
+}
+
+/// 读取场景；缺配置使用默认场景，读取/解析失败报错退出。
 fn load_scene_name() -> String {
-    let text = std::fs::read_to_string(SCENE_CONFIG).unwrap_or_else(|e| {
-        log::error!("读取 configs/scene.toml 失败：{e}");
-        std::process::exit(1);
-    });
-    toml::from_str::<SceneConfig>(&text)
+    firefly_config::load::<SceneConfig>(SCENE_CONFIG)
         .unwrap_or_else(|e| {
-            log::error!("解析 configs/scene.toml 失败：{e}");
+            log::error!("加载 configs/scene.toml 失败：{e}");
             std::process::exit(1);
         })
         .scene

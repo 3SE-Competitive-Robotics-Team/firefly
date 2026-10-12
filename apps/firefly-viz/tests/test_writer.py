@@ -1,7 +1,6 @@
 """异步故障必须传播；退出排空，不能把坏录制报告为成功。"""
 
 import threading
-from types import SimpleNamespace
 
 import pytest
 
@@ -42,17 +41,19 @@ def test_cold_start_empty_keypoints_preserve_typed_ids_and_clear_previous_points
     # 独立 SDK 进程保证首帧没有 track_id 类型缓存。
     code = textwrap.dedent('''
         import sys, threading
-        from types import SimpleNamespace
+        from unittest.mock import create_autospec
         import rerun as rr
         from firefly_viz.config import Options
         from firefly_viz.messages import VizMessage, VIZ_KIND_KEYPOINTS_2D
-        from firefly_viz.recording import MatchedPoints
+        from firefly_viz.recording import MatchedPoints, RecordingOutputs
         from firefly_viz.writer import Writer
 
         archive = rr.RecordingStream('cold-start-keypoints')
         archive.set_sinks(rr.FileSink(sys.argv[1], write_footer=True))
         matches = MatchedPoints(archive, 4)
-        writer = Writer(SimpleNamespace(archive=archive, live=None, matches=matches), Options(), threading.Event())
+        outputs = create_autospec(RecordingOutputs, instance=True, spec_set=True)
+        outputs.archive, outputs.live, outputs.matches = archive, None, matches
+        writer = Writer(outputs, Options(), threading.Event())
         try:
             matches.frame('left', 0.5, 0)
             for stamp, ids in [(1., []), (2., [42]), (3., [])]:
@@ -170,9 +171,9 @@ def voxel(kind, points, stamp=1., sequence=0, chunk_index=0, chunk_count=1):
     return msg
 
 
-def test_voxel_history_uses_complete_snapshots_after_ordered_deltas():
+def test_voxel_history_uses_complete_snapshots_after_ordered_deltas(recordings_factory):
     archive, live = Recording(), Recording()
-    writer = Writer(SimpleNamespace(archive=archive, live=live), Options(), threading.Event())
+    writer = Writer(recordings_factory(archive=archive, live=live), Options(), threading.Event())
     writer.handle(voxel(3, [(1, 2, 3), (4, 5, 6)]))
     writer.handle(voxel(8, [(7, 8, 9)], 2., sequence=1))
     writer.handle(voxel(9, [(1, 2, 3)], 2., sequence=2))
@@ -187,15 +188,15 @@ def test_voxel_history_uses_complete_snapshots_after_ordered_deltas():
         writer.handle(voxel(9, [(4, 5, 6)], 1., sequence=3))
 
 
-def test_voxel_delta_cannot_create_an_unknown_baseline():
-    writer = Writer(SimpleNamespace(archive=Recording(), live=None), Options(), threading.Event())
+def test_voxel_delta_cannot_create_an_unknown_baseline(recordings_factory):
+    writer = Writer(recordings_factory(archive=Recording(), live=None), Options(), threading.Event())
     with pytest.raises(ValueError, match='baseline'):
         writer.handle(voxel(8, [(1, 2, 3)]))
 
 
-def test_voxel_chunk_commit_is_atomic_and_gaps_are_fatal():
+def test_voxel_chunk_commit_is_atomic_and_gaps_are_fatal(recordings_factory):
     archive = Recording()
-    writer = Writer(SimpleNamespace(archive=archive, live=None), Options(), threading.Event())
+    writer = Writer(recordings_factory(archive=archive, live=None), Options(), threading.Event())
     writer.handle(voxel(3, [(1, 2, 3)], chunk_count=2))
     writer.tick()
     assert not archive.calls
@@ -207,9 +208,9 @@ def test_voxel_chunk_commit_is_atomic_and_gaps_are_fatal():
         writer.handle(voxel(9, [(1, 2, 3)], 2., sequence=3))
 
 
-def test_voxel_partial_update_fails_at_shutdown_and_empty_snapshot_clears():
+def test_voxel_partial_update_fails_at_shutdown_and_empty_snapshot_clears(recordings_factory):
     archive = Recording()
-    writer = Writer(SimpleNamespace(archive=archive, live=None), Options(), threading.Event())
+    writer = Writer(recordings_factory(archive=archive, live=None), Options(), threading.Event())
     writer.handle(voxel(3, [], chunk_count=1))
     writer.tick(final=True)
     assert writer.voxels['plan/voxels'][0] == set()

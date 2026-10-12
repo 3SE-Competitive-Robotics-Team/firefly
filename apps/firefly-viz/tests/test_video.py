@@ -5,12 +5,20 @@ import io
 import queue
 import threading
 import time
-from types import SimpleNamespace
+from unittest.mock import create_autospec
+from dataclasses import dataclass
+from typing import BinaryIO
 
 import pytest
 
 from firefly_viz.config import VideoOptions
 from firefly_viz.video import AccessUnits, Encoder, Frame, command, nal_types
+
+
+@dataclass
+class ProcessPipes:
+    stdout: BinaryIO | None = None
+    stdin: BinaryIO | None = None
 
 
 def nal(kind, payload=b'\x99', prefix=b'\x00\x00\x00\x01'):
@@ -72,7 +80,7 @@ def test_reader_pairs_fifo_capture_times_and_repeats_headers_after_aud():
               for index, stamp in [(2, 1.1), (7, 1.73), (8, 1.8)]]
     encoder = Encoder.__new__(Encoder)
     encoder.options = VideoOptions()
-    encoder.process = SimpleNamespace(stdout=io.BytesIO(b''.join(samples)))
+    encoder.process = ProcessPipes(stdout=io.BytesIO(b''.join(samples)))
     encoder.pending = queue.Queue(16)
     for frame in frames:
         encoder.pending.put((frame, time.monotonic()))
@@ -95,8 +103,10 @@ def test_input_drains_a_full_queue_without_a_sentinel_slot():
     encoder.aborting, encoder.draining = threading.Event(), threading.Event()
     encoder.draining.set()
     writes, closed = [], []
-    encoder.process = SimpleNamespace(stdin=SimpleNamespace(write=writes.append, flush=lambda: None,
-                                                            close=lambda: closed.append(True)))
+    pipe = create_autospec(io.BufferedWriter, instance=True, spec_set=True)
+    pipe.write.side_effect = writes.append
+    pipe.close.side_effect = lambda: closed.append(True)
+    encoder.process = ProcessPipes(stdin=pipe)
     encoder.submitted = 0
     encoder._write()
     assert writes == [frame.pixels]

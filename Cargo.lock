@@ -2867,6 +2867,7 @@ version = "0.1.0"
 dependencies = [
  "fastrace",
  "firefly-base",
+ "firefly-config",
  "firefly-error",
  "firefly-flight",
  "firefly-imu",
@@ -2911,6 +2912,16 @@ dependencies = [
  "fastrace",
  "firefly-error",
  "nalgebra",
+]
+
+[[package]]
+name = "firefly-config"
+version = "0.1.0"
+dependencies = [
+ "firefly-error",
+ "log",
+ "serde",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]
@@ -2968,6 +2979,7 @@ version = "0.1.0"
 dependencies = [
  "fastrace",
  "firefly-base",
+ "firefly-config",
  "firefly-error",
  "firefly-pubsub",
  "log",
@@ -4489,6 +4501,7 @@ version = "0.1.0"
 dependencies = [
  "fastrace",
  "firefly-base",
+ "firefly-config",
  "firefly-error",
  "firefly-localization",
  "firefly-observability",
@@ -4502,7 +4515,6 @@ dependencies = [
  "ort",
  "serde",
  "serde_json",
- "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]
@@ -5717,6 +5729,7 @@ version = "0.1.0"
 dependencies = [
  "fastrace",
  "firefly-base",
+ "firefly-config",
  "firefly-error",
  "firefly-map",
  "firefly-observability",
@@ -5881,6 +5894,7 @@ name = "quad"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "firefly-config",
  "firefly-flight",
  "firefly-render",
  "log",
@@ -6102,6 +6116,7 @@ dependencies = [
  "bevy",
  "fastrace",
  "firefly-base",
+ "firefly-config",
  "firefly-error",
  "firefly-observability",
  "firefly-pubsub",
@@ -6445,6 +6460,7 @@ version = "0.1.0"
 dependencies = [
  "fastrace",
  "firefly-base",
+ "firefly-config",
  "firefly-error",
  "firefly-landmarks",
  "firefly-observability",
@@ -6452,7 +6468,6 @@ dependencies = [
  "firefly-vio-core",
  "log",
  "nalgebra",
- "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]
@@ -7141,6 +7156,7 @@ version = "0.1.0"
 dependencies = [
  "fastrace",
  "firefly-base",
+ "firefly-config",
  "firefly-error",
  "firefly-observability",
  "firefly-pubsub",

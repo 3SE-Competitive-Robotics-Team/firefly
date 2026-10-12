@@ -15,6 +15,7 @@ name = "planner"
 path = "src/main.rs"
 
 [dependencies]
+firefly-config.workspace = true
 firefly-base.workspace = true
 fastrace = { workspace = true }
 firefly-error = { workspace = true }
@@ -28,7 +29,9 @@ iceoryx2 = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }
 serde = { workspace = true }
-toml = { workspace = true }
+
+[dev-dependencies]
+toml.workspace = true
 
 [lints]
 workspace = true

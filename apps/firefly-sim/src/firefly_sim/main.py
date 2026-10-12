@@ -6,8 +6,13 @@
 from __future__ import annotations
 
 import argparse
+import logging
+from collections.abc import Sequence
+from typing import Protocol
+
 import time
-import sys
+
+from firefly_workspace import load_toml
 
 import iceoryx2 as iox2
 import numpy as np
@@ -39,19 +44,6 @@ TOPIC_IMU = "Firefly/Imu"
 TOPIC_GT = "Firefly/GroundTruth"
 #: 事件 id：「该话题有新样本」（与 Rust event::EVENT_ID_SENT_SAMPLE 一致）
 EVENT_ID_SENT_SAMPLE = 0
-
-
-def load_config(path: str = "configs/sim.toml") -> dict:
-    """加载 TOML 配置（缺键回落代码默认值；文件缺失即退出）。"""
-    import tomllib
-
-    try:
-        with open(path, "rb") as f:
-            return tomllib.load(f)
-    except FileNotFoundError as exc:
-        sys.exit(f"[firefly-sim] 配置文件缺失：{path}（{exc}）")
-    except tomllib.TOMLDecodeError as exc:
-        sys.exit(f"[firefly-sim] 配置解析失败：{path}（{exc}）")
 
 
 #: IMU 服务订阅端上限（与 Rust `imu.rs: IMU_SERVICE_MAX` 同值；先创建方定上限，
@@ -171,13 +163,21 @@ def _publish_airframe(pub, env: DroneEnv, t: float) -> None:
     _publish_traced(pub, None, "publish-airframe", msg, t)
 
 
-def main() -> None:
+class EnvironmentFactory(Protocol):
+    """创建仿真环境；运行器依赖 DroneEnv 的物理、传感器和状态接口。"""
+
+    def __call__(self, *, timestep: float, imu_period: float) -> DroneEnv: ...
+
+
+def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory = DroneEnv,
+         publish_plant_state: bool = True) -> None:
     parser = argparse.ArgumentParser(description="RMUC MuJoCo 物理进程；图像由 render 提供")
     parser.add_argument("--no-trace", action="store_true")
     parser.add_argument("--config", default="configs/sim.toml")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     trace_enabled = not args.no_trace
-    cfg = load_config(args.config)
+    cfg = load_toml(args.config)
     rates = cfg.get("rates", {})
     frequencies = [rates.get("physics", 1000.0), rates.get("imu", 1000.0), rates.get("pose", 10.0)]
     if not np.isfinite(frequencies).all() or any(rate <= 0 for rate in frequencies):
@@ -190,7 +190,7 @@ def main() -> None:
     # 停机坪：缺配置时按场景定义（`firefly_mujoco.scene.PAD`）——上电停在地面
     load_scene_name()
     start_pos = np.array(cfg.get("start", drone_pad()))
-    env = DroneEnv(timestep=physics_period, imu_period=imu_period)
+    env = env_factory(timestep=physics_period, imu_period=imu_period)
     env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))  # xyzw 单位四元数
     ftrace.init(enabled=trace_enabled)
     airframe = env.airframe()
@@ -213,7 +213,8 @@ def main() -> None:
     imu_pub = _publisher(node, TOPIC_IMU, ImuMessage, IMU_SERVICE_MAX)
     gt_pub = _publisher(node, TOPIC_GT, OdomMessage)
     # 被控对象状态供评测；机体描述以 1Hz 发布给飞控
-    plant_pub = _publisher(node, PLANT_STATE_TOPIC, PlantStateMessage, PLANT_STATE_SERVICE_MAX)
+    plant_pub = (_publisher(node, PLANT_STATE_TOPIC, PlantStateMessage, PLANT_STATE_SERVICE_MAX)
+                 if publish_plant_state else None)
     airframe_pub = _publisher(node, AIRFRAME_TOPIC, AirframeMessage, AIRFRAME_SERVICE_MAX)
     # 飞控指令订阅（闭环模式）：位置/速度反馈由飞控消费，本进程只做被控对象。
     # 服务订阅端上限须与 Rust 侧同值：先创建方定上限，否则飞控发布端声明 32 会被拒。
@@ -274,7 +275,8 @@ def main() -> None:
             t = env.time
 
             # 被控对象状态供评测（每个物理步），机体描述供飞控（1Hz）
-            _publish_plant_state(plant_pub, env, t)
+            if plant_pub is not None:
+                _publish_plant_state(plant_pub, env, t)
             if t + 1e-12 >= next_airframe:
                 _publish_airframe(airframe_pub, env, t)
                 next_airframe = t + AIRFRAME_PERIOD

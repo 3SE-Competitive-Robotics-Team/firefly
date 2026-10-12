@@ -87,25 +87,23 @@ def test_visibility_rejects_outward_views_and_parallel_rays():
     assert capture.visible_fraction(wall, [0., 0., 1.], 180.) == 0.
 
 
-def test_runtime_compatibility_ignores_capture_selection_but_not_calibration(monkeypatch):
+def test_runtime_compatibility_ignores_capture_selection_but_not_calibration():
     assets = {"schema": 2, "files": {"field": "hash"}, "sensor": {"focal": 100}, "selection": {"step": 2}}
-    monkeypatch.setattr(vision_assets, "capture_assets", lambda root: assets)
-    vision_assets.verify_map_compatibility(assets | {"selection": {"step": 1}})
+    vision_assets.verify_map_compatibility(assets | {"selection": {"step": 1}}, capture=lambda _: assets)
     with pytest.raises(ValueError, match="contract"):
-        vision_assets.verify_map_compatibility(assets | {"sensor": {"focal": 200}})
+        vision_assets.verify_map_compatibility(assets | {"sensor": {"focal": 200}}, capture=lambda _: assets)
 
 
-def test_explicit_rig_translation_exception_preserves_other_contracts(monkeypatch):
+def test_explicit_rig_translation_exception_preserves_other_contracts():
     from copy import deepcopy
     old = {"schema": 2, "files": {"field": "hash"}, "sensor": {
         "focal": 100, "left_offset": [0., -.025, 0.], "depth_offset": [0., 0., 0.]}}
     current = deepcopy(old)
     for key in ["left_offset", "depth_offset"]:
         current["sensor"][key][0] = .06
-    monkeypatch.setattr(vision_assets, "capture_assets", lambda root: current)
     with pytest.raises(ValueError, match="contract"):
-        vision_assets.verify_map_compatibility(old)
-    result = vision_assets.verify_map_compatibility(old, allow_rig_translation=True)
+        vision_assets.verify_map_compatibility(old, capture=lambda _: current)
+    result = vision_assets.verify_map_compatibility(old, allow_rig_translation=True, capture=lambda _: current)
     assert result["rig_translation_body_m"] == pytest.approx([.06, 0., 0.])
     for changed in ["focal", "depth_offset", "field"]:
         incompatible = deepcopy(current)
@@ -115,6 +113,5 @@ def test_explicit_rig_translation_exception_preserves_other_contracts(monkeypatc
             incompatible["sensor"]["focal"] = 200
         else:
             incompatible["sensor"]["depth_offset"][0] = .07
-        monkeypatch.setattr(vision_assets, "capture_assets", lambda root: incompatible)
         with pytest.raises(ValueError, match="contract"):
-            vision_assets.verify_map_compatibility(old, allow_rig_translation=True)
+            vision_assets.verify_map_compatibility(old, allow_rig_translation=True, capture=lambda _: incompatible)

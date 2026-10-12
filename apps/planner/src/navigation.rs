@@ -87,7 +87,7 @@ impl NavigationReceiver {
         };
         if let Err(error) = startup.recv().map_err(|e| e.to_string()).and_then(|v| v) {
             receiver.shutdown();
-            return Err(internal(error).with_context("operation", "start navigation receiver"));
+            return Err(internal(error).with_operation("start navigation receiver"));
         }
         Ok(receiver)
     }

@@ -15,12 +15,15 @@ name = "quad"
 path = "src/main.rs"
 
 [dependencies]
+firefly-config.workspace = true
 bevy = { workspace = true }
 firefly-flight = { workspace = true }
 firefly-render = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
-toml = { workspace = true }
+
+[dev-dependencies]
+toml.workspace = true
 
 [lints]
 workspace = true

@@ -6,14 +6,14 @@ import pytest
 
 from firefly_evaluation.mission_metrics import position_error, yaw_error
 
-from firefly_evaluation.mission import Options
+from firefly_evaluation.mission import Mission, Options
+from firefly_evaluation.mission_io import Recorder
+from unittest.mock import create_autospec
 from firefly_evaluation.mission_sim import permitted_pad_contact
 from firefly_mujoco import drone_pad
 
 
-def test_command_keeps_observation_pump_running(tmp_path, monkeypatch):
-    from firefly_evaluation import mission
-    from types import SimpleNamespace
+def test_command_keeps_observation_pump_running(tmp_path):
     binary = tmp_path / "target/release/ffctl"
     binary.parent.mkdir(parents=True)
     gate = tmp_path / "observation_received"
@@ -23,8 +23,14 @@ def test_command_keeps_observation_pump_running(tmp_path, monkeypatch):
     def pump():
         pumps.append(True)
         gate.touch()
-    subject = SimpleNamespace(root=tmp_path, recorder=SimpleNamespace(event=lambda *a: None), t=0., pump=pump)
-    mission.Mission.command(subject, "fc", "hold")
+    class PumpMission(Mission):
+        def pump(self, guard=True):
+            pump()
+
+    subject = PumpMission(tmp_path, "nominal", Options())
+    subject.root = tmp_path
+    subject.recorder = create_autospec(Recorder, instance=True, spec_set=True)
+    subject.command("fc", "hold")
     assert pumps and gate.exists()
 
 
@@ -89,27 +95,28 @@ def test_invalid_thresholds_and_missing_mission_are_rejected():
         Options(finish_action="unknown").validate()
 
 
-def test_terminal_hold_requires_independent_truth_accuracy(monkeypatch):
+def test_terminal_hold_requires_independent_truth_accuracy():
     from firefly_evaluation import mission_metrics
     truth = poses()
     truth[:, 1:4] = [8.4, 0., 2.]
     velocity = np.column_stack([truth[:, 0], np.zeros((len(truth), 3))])
-    monkeypatch.setattr(mission_metrics, "read_evidence", lambda path: {
-        "gt": truth, "gt_velocity": velocity})
+    evidence = {"gt": truth, "gt_velocity": velocity}
     case = {"case": "nominal", "recording": "unused", "stages": {
         "tracking": {"status": "blocked"},
         "terminal_hold": {"status": "passed", "end_sim_s": 3.}}}
-    mission_metrics.score(case, Options(waypoints=((9., 0., 2.),), finish_action="hold"))
+    mission_metrics.score(case, Options(waypoints=((9., 0., 2.),), finish_action="hold"),
+                          evidence_reader=lambda _: evidence)
     assert case["stages"]["terminal_hold_accuracy"]["status"] == "failed"
     assert case["stages"]["terminal_hold_accuracy"]["metrics"]["max_position_error_m"] == pytest.approx(.6)
 
 
-def test_preflight_failure_returns_nonzero_and_keeps_report(tmp_path, monkeypatch):
+def test_preflight_failure_returns_nonzero_and_keeps_report(tmp_path):
     import json
     from firefly_evaluation import cli
-    monkeypatch.setattr(cli, "workspace_root", lambda start: tmp_path)
-    monkeypatch.setattr(cli, "require_idle", lambda root: None)
-    assert cli.main(["--config", str(tmp_path / "missing.toml")]) == 1
+    config = tmp_path / "invalid.toml"
+    config.write_text("altitude_m = [")
+    assert cli.main(["--config", str(config)], resolve_workspace=lambda _: tmp_path,
+                    check_idle=lambda _: None) == 1
     reports = list((tmp_path / "logs/acceptance").glob("*/report.json"))
     assert len(reports) == 1
     report = json.loads(reports[0].read_text())
@@ -117,13 +124,9 @@ def test_preflight_failure_returns_nonzero_and_keeps_report(tmp_path, monkeypatc
     assert report["error"] and reports[0].with_suffix(".html").is_file()
 
 
-def test_repeated_failures_keep_four_distinct_recordings(tmp_path, monkeypatch):
+def test_repeated_failures_keep_four_distinct_recordings(tmp_path):
     import json
     from firefly_evaluation import cli
-    monkeypatch.setattr(cli, "workspace_root", lambda start: tmp_path)
-    monkeypatch.setattr(cli, "require_idle", lambda root: None)
-    monkeypatch.setattr(cli, "provenance", lambda root: {})
-    monkeypatch.setattr(cli, "score", lambda case, options: case)
 
     class FailedMission:
         def __init__(self, directory, name, options, *, workspace):
@@ -135,10 +138,12 @@ def test_repeated_failures_keep_four_distinct_recordings(tmp_path, monkeypatch):
             return {"case": self.name, "status": "failed", "recording": str(self.recording),
                     "remaining_pids": [], "stages": {"tracking": {"status": "failed"}}}
 
-    monkeypatch.setattr(cli, "Mission", FailedMission)
     config = tmp_path / "acceptance.toml"
     config.write_text("")
-    assert cli.main(["--config", str(config), "--case", "nominal", "--repeat", "4"]) == 1
+    assert cli.main(["--config", str(config), "--case", "nominal", "--repeat", "4"],
+                    resolve_workspace=lambda _: tmp_path, check_idle=lambda _: None,
+                    collect_provenance=lambda _: {}, mission_factory=FailedMission,
+                    score_case=lambda case, options: case) == 1
     report_path, = (tmp_path / "logs/acceptance").glob("*/report.json")
     report = json.loads(report_path.read_text())
     assert report["status"] == "failed"
@@ -151,16 +156,15 @@ def test_repeated_failures_keep_four_distinct_recordings(tmp_path, monkeypatch):
         assert f"href='{relative}'" in html
 
 
-def test_roundtrip_distance_summary_does_not_override_failed_acceptance(monkeypatch):
+def test_roundtrip_distance_summary_does_not_override_failed_acceptance():
     from firefly_evaluation import mission_metrics
     truth = np.array([[0., -13., 0., 2.2, 0., 0., 0., 1.],
                       [10., -3., 0., 2.2, 0., 0., 0., 1.],
                       [20., -13., 0., 2.2, 0., 0., 0., 1.]])
-    monkeypatch.setattr(mission_metrics, "read_evidence", lambda path: {
-        "gt": truth, "loop_frontend": np.array([[20., 12., 3., 0., 0.]])})
+    evidence = {"gt": truth, "loop_frontend": np.array([[20., 12., 3., 0., 0.]])}
     case = {"case": "nominal", "recording": "unused", "waypoint_arrivals": [{}, {}],
             "stages": {"tracking": {"status": "blocked"}}}
-    mission_metrics.score(case, Options())
+    mission_metrics.score(case, Options(), evidence_reader=lambda _: evidence)
     summary = case["mission_summary"]
     assert summary["max_horizontal_distance_from_start_m"] == pytest.approx(10.)
     assert summary["horizontal_path_length_m"] == pytest.approx(20.)
@@ -195,14 +199,20 @@ def test_estimated_arrival_does_not_require_truth_and_false_arrival_fails_scorin
     assert not mission.estimated_near("corrected", goal, .35, .3)
 
 
-def test_vio_only_map_stage_starts_only_planner_and_labels_fixed_prior(tmp_path, monkeypatch):
+def test_vio_only_map_stage_starts_only_planner_and_labels_fixed_prior(tmp_path):
     from firefly_evaluation.mission import Mission
-    mission = Mission(tmp_path, "nominal", Options(), vio_only=True)
+    launched = []
+
+    class MapMission(Mission):
+        def start(self, name, command):
+            launched.append((name, command))
+
+        def wait(self, predicate, **kwargs):
+            assert predicate(), "not ready"
+
+    mission = MapMission(tmp_path, "nominal", Options(), vio_only=True)
     mission.latest["corrected"] = (2., None, None, None, True)
     mission.latest["reference"] = None
-    launched = []
-    monkeypatch.setattr(mission, "start", lambda name, command: launched.append((name, command)))
-    monkeypatch.setattr(mission, "wait", lambda predicate, **kwargs: predicate() or pytest.fail("not ready"))
     result = mission.map_ready()
     assert [name for name, _ in launched] == ["planner"]
     assert "--vio-only" not in launched[0][1]
@@ -211,15 +221,21 @@ def test_vio_only_map_stage_starts_only_planner_and_labels_fixed_prior(tmp_path,
     assert mission.result["localization_mode"] == "vio_only"
 
 
-def test_default_map_stage_uses_running_visual_frontend(tmp_path, monkeypatch):
+def test_default_map_stage_uses_running_visual_frontend(tmp_path):
     from firefly_evaluation.mission import Mission
-    mission = Mission(tmp_path, "nominal", Options())
+    launched = []
+
+    class MapMission(Mission):
+        def start(self, name, command):
+            launched.append((name, command))
+
+        def wait(self, predicate, **kwargs):
+            assert predicate(), "not ready"
+
+    mission = MapMission(tmp_path, "nominal", Options())
     mission.latest["corrected"] = (2., None, None, None, True)
     mission.latest["reference"] = None
     mission.visual_updates = 0
-    launched = []
-    monkeypatch.setattr(mission, "start", lambda name, command: launched.append((name, command)))
-    monkeypatch.setattr(mission, "wait", lambda predicate, **kwargs: predicate() or pytest.fail("not ready"))
     result = mission.map_ready()
     assert [name for name, _ in launched] == ["planner"]
     assert all("--vio-only" not in command and "--map" not in command for _, command in launched)
@@ -228,37 +244,34 @@ def test_default_map_stage_uses_running_visual_frontend(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(("vio_only", "prior_maps"), [(False, False), (False, True), (True, False)])
-def test_online_frontend_runs_during_takeoff_and_initial_hover(tmp_path, monkeypatch, vio_only, prior_maps):
+def test_online_frontend_runs_during_takeoff_and_initial_hover(tmp_path, vio_only, prior_maps):
     from firefly_evaluation.mission import Mission
-    mission = Mission(tmp_path, "nominal", Options(), vio_only=vio_only, prior_maps=prior_maps)
+    class PhaseMission(Mission):
+        def run_phases(self, phases, applications):
+            assert [name for name, _ in phases][:3] == ["initialization", "takeoff", "hover"]
+            assert ("slam" in applications) == (not vio_only)
+            assert ("aliked" in applications) == prior_maps
+            assert ("lightglue" in applications) == prior_maps
+            return self.result
 
-    def run_phases(phases, applications):
-        assert [name for name, _ in phases][:3] == ["initialization", "takeoff", "hover"]
-        assert ("slam" in applications) == (not vio_only)
-        assert ("aliked" in applications) == prior_maps
-        assert ("lightglue" in applications) == prior_maps
-        return mission.result
-
-    monkeypatch.setattr(mission, "run_phases", run_phases)
-    mission.run()
+    PhaseMission(tmp_path, "nominal", Options(), vio_only=vio_only, prior_maps=prior_maps).run()
 
 
 @pytest.mark.parametrize("observations,passed", [(0, False), (1, False), (2, True)])
-def test_visual_evidence_is_scored_independently_of_navigation(monkeypatch, observations, passed):
+def test_visual_evidence_is_scored_independently_of_navigation(observations, passed):
     from firefly_evaluation import mission_metrics
     evidence = {"gt": poses(), "visual_update": np.array(
         [[float(i + 1), 0., 3., .1, 1.] for i in range(observations)]).reshape(-1, 5)}
     if not observations:
         evidence.pop("visual_update")
-    monkeypatch.setattr(mission_metrics, "read_evidence", lambda path: evidence)
     case = {"case": "nominal", "localization_mode": "visual", "recording": "unused",
             "stages": {"tracking": {"status": "blocked"}}}
-    mission_metrics.score(case, Options())
+    mission_metrics.score(case, Options(), evidence_reader=lambda _: evidence)
     assert (case["stages"]["visual_localization"]["status"] == "passed") == passed
     assert case["stages"]["visual_localization"]["metrics"]["accepted_map_observations"] == observations
     case["localization_mode"] = "vio_only"
     case["stages"] = {"tracking": {"status": "blocked"}}
-    mission_metrics.score(case, Options())
+    mission_metrics.score(case, Options(), evidence_reader=lambda _: evidence)
     assert "visual_localization" not in case["stages"]
     assert case["mission_summary"]["loop_evidence"] == "disabled_vio_only"
 
@@ -279,11 +292,11 @@ def test_session_scoring_uses_only_initial_truth_gauge_and_preserves_drift():
     assert not frame["trajectory_fitting"] and not frame["feedback_to_algorithms"]
 
 
-def test_online_slam_requires_loop_constraint_even_without_prior_map(monkeypatch):
+def test_online_slam_requires_loop_constraint_even_without_prior_map():
     from firefly_evaluation import mission_metrics
-    monkeypatch.setattr(mission_metrics, "read_evidence", lambda _: {"gt": poses()})
+    evidence = {"gt": poses()}
     case = {"case": "nominal", "localization_mode": "online_slam", "recording": "unused",
             "stages": {"tracking": {"status": "blocked"}}}
-    mission_metrics.score(case, Options())
+    mission_metrics.score(case, Options(), evidence_reader=lambda _: evidence)
     assert case["stages"]["online_loop"]["status"] == "failed"
     assert "visual_localization" not in case["stages"]

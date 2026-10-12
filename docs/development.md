@@ -9,7 +9,9 @@
 
 - 新 crate：`cargo new crates/<name> --lib --edition 2024`（自动纳入 workspace）。
 - DDD 拆 crate（firefly-*），依赖自上而下，领域层不依赖应用层。
-- 错误用 firefly-error：kind/status 分类，模块边界 .with_context。
+- 错误用 firefly-error：kind/status 分类，操作名统一 `.with_operation(...)`，其他诊断字段
+  用 `.with_context(...)`；不得以 `"operation"` 上下文键绕过结构化字段。
+  `Permanent` 表示不可重试，`Temporary` 表示允许重试。
 - 可观测性：关键函数 `#[fastrace::trace]`，日志用 log 宏，禁 println!。
 - 场景光照唯一一份（`firefly-render::lighting`），所有相机共用；视角差异只写相机
   配置（曝光/色调映射），禁止给单个相机加专属可聚簇光源（`PointLight`/`SpotLight`）
@@ -35,8 +37,11 @@
 ### 配置
 
 - **TOML、一应用一份**：统一放仓库顶层 `configs/`（`sim.toml` / `vio.toml` / `planner.toml`），
-  启动时加载（Rust 支持 `--config` 换文件），缺文件即报错。
-- **最小化**：只写与代码默认值不同的键，缺失键回落 `*Options::default()`；
+  启动时加载（Rust 支持 `--config` 换文件）。配置文件可选：缺文件记录一行 INFO 并使用
+  代码默认值；文件存在但不可读、格式或参数无效仍报错，不静默回落。Rust 使用
+  `firefly_config::load`，Python 使用 `firefly_workspace.load_toml`。
+- **最小化**：保留必填键，只对有默认值的键写差异覆盖；无覆盖项时保留仅含用途和
+  默认值来源注释的配置文件。缺失键使用代码默认值；
   纯数据 Options 直接 `serde::Deserialize` + `#[serde(default)]`，Python 用标准库
   `tomllib`；不引 YAML。
 
@@ -233,6 +238,13 @@ H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码
 <a id="tests"></a>
 
 ## 验证
+
+测试依赖通过构造函数或函数参数显式注入（环境工厂、时钟、证据读取器、进程/录制接口），
+不得通过 importlib 后修改生产模块全局变量、替换类或改写 `sys.argv` 接管运行。
+数据夹具使用真实 dataclass/消息类型；行为替身使用实现生产接口的测试类，或
+`create_autospec(..., spec_set=True)` 检查成员和调用签名。禁止 `SimpleNamespace` 和无规格
+mock 拼接接口。测试子类只覆盖外部交互边界，执行和评分逻辑仍使用生产实现；环境变量、
+工作目录等进程环境可用 pytest 的 monkeypatch 夹具隔离并恢复。
 
 运行 `pytest tests/system` 时，session fixture 会在系统用例启动前执行
 `cargo xtask build-all-release`，重建所有 Rust 应用的 release 二进制，避免端到端测试使用旧产物。

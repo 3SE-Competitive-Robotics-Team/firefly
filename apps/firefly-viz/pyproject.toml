@@ -5,6 +5,7 @@ description = "独立 Rerun 调试进程：诊断、H.265 左目视频、采样�
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "firefly-workspace",
     "firefly-mujoco",
     "iceoryx2==0.10.0",
     "numpy>=2.5.4,<3",
@@ -13,6 +14,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
+firefly-workspace = { workspace = true }
 firefly-mujoco = { workspace = true }
 
 [build-system]

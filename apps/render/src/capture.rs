@@ -411,7 +411,7 @@ mod tests {
             seq: 1,
             timing: CaptureTiming::default(),
             stamp: 1.0,
-            trace: TraceContext::empty(),
+            trace: TraceContext::default(),
             left: Handle::<Image>::default().id(),
             right: Handle::<Image>::default().id(),
         };

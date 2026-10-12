@@ -38,20 +38,18 @@ class Stream:
         self.closed = True
 
 
-def install(monkeypatch):
+def dependencies(stream_factory=Stream):
     Stream.instances = []
-    monkeypatch.setattr(recording.rr, 'RecordingStream', Stream)
-    monkeypatch.setattr(recording.rr, 'FileSink', lambda path, write_footer: ('file', path, write_footer))
-    monkeypatch.setattr(recording.rr, 'GrpcSink', lambda url: ('grpc', url))
-    monkeypatch.setattr(recording, 'blueprint', lambda live: live)
+    return dict(stream_factory=stream_factory,
+                file_sink=lambda path, write_footer: ('file', path, write_footer),
+                grpc_sink=lambda url: ('grpc', url), blueprint_factory=lambda live: live)
 
 
-def test_live_static_cannot_reach_file_sink_and_uses_same_recording(monkeypatch, tmp_path):
-    install(monkeypatch)
+def test_live_static_cannot_reach_file_sink_and_uses_same_recording(tmp_path):
     options = Options()
     options = replace(options, video=replace(options.video, enabled=False))
     path = tmp_path / 'run.rrd'
-    streams = recording.Recordings(path, recording.URL, False, options)
+    streams = recording.Recordings(path, recording.URL, False, options, **dependencies())
     assert streams.archive.sinks == (('file', str(path), False), ('grpc', recording.URL))
     assert streams.live.sinks == (('grpc', recording.URL),)
     assert streams.archive.kwargs['recording_id'] == streams.live.kwargs['recording_id']
@@ -59,12 +57,11 @@ def test_live_static_cannot_reach_file_sink_and_uses_same_recording(monkeypatch,
     assert all(stream.closed for stream in Stream.instances)
 
 
-def test_existing_evidence_is_never_overwritten(monkeypatch, tmp_path):
-    install(monkeypatch)
+def test_existing_evidence_is_never_overwritten(tmp_path):
     path = tmp_path / 'run.rrd'
     path.write_bytes(b'existing evidence')
     with pytest.raises(FileExistsError):
-        recording.Recordings(path, None, False, Options())
+        recording.Recordings(path, None, False, Options(), **dependencies())
     assert path.read_bytes() == b'existing evidence'
     assert all(stream.closed for stream in Stream.instances)
 
@@ -99,20 +96,19 @@ def test_same_id_native_streams_keep_static_preview_out_of_rrd(tmp_path):
     assert not any(entity == 'live' or entity.startswith('live/') for entity in entities)
 
 
-def test_initialization_disconnects_both_streams_even_if_first_cleanup_fails(monkeypatch, tmp_path):
-    install(monkeypatch)
+def test_initialization_disconnects_both_streams_even_if_first_cleanup_fails(tmp_path):
 
-    def fail_blueprint(*args):
-        raise ValueError('blueprint failure')
+    class FailingStream(Stream):
+        def send_blueprint(self, blueprint):
+            raise ValueError('blueprint failure')
 
-    def disconnect(stream):
-        stream.closed = True
-        if stream is Stream.instances[1]:
-            raise RuntimeError('live disconnect failure')
+        def disconnect(self):
+            self.closed = True
+            if self is Stream.instances[1]:
+                raise RuntimeError('live disconnect failure')
 
-    monkeypatch.setattr(Stream, 'send_blueprint', fail_blueprint)
-    monkeypatch.setattr(Stream, 'disconnect', disconnect)
     with pytest.raises(ExceptionGroup, match='initialization and cleanup failed') as caught:
-        recording.Recordings(tmp_path / 'failed.rrd', recording.URL, False, Options())
+        recording.Recordings(tmp_path / 'failed.rrd', recording.URL, False, Options(),
+                             **dependencies(FailingStream))
     assert all(stream.closed for stream in Stream.instances)
     assert [str(error) for error in caught.value.exceptions] == ['blueprint failure', 'live disconnect failure']

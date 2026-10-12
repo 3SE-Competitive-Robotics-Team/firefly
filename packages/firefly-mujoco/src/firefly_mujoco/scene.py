@@ -5,6 +5,7 @@
 
 import json
 from pathlib import Path
+from firefly_workspace import load_toml
 
 SCENE_NAME = "rmuc2026"
 
@@ -94,13 +95,13 @@ _RMUC_DIR = (
 )
 
 
-def _rmuc_collision_xml() -> str:
+def _rmuc_collision_xml(asset_dir: Path) -> str:
     """聚合碰撞盒 MJCF（视觉归 Bevy，此处只放透明碰撞体）。
 
     盒集合来自 `firefly-cad-collide`（实心体素 + 贪心 AABB，保留凹结构，
     对照 `models/rmuc2026/rmuc2026_collision.json`）。
     """
-    path = _RMUC_DIR / "rmuc2026_collision.json"
+    path = asset_dir / "rmuc2026_collision.json"
     if not path.is_file():
         raise FileNotFoundError(f"RMUC 碰撞资产缺失：{path}；请先运行 firefly-cad-collide 生成资产")
     report = json.loads(path.read_text(encoding="utf-8"))
@@ -112,14 +113,14 @@ def _rmuc_collision_xml() -> str:
     )
 
 
-def build_scene() -> str:
+def build_scene(*, asset_dir: Path = _RMUC_DIR) -> str:
     """RMUC2026 场地：Bevy 负责视觉（`field.glb`），MuJoCo 只加载聚合碰撞盒。"""
     return rf"""<mujoco model="firefly-rmuc2026">
   <option timestep="0.001" gravity="0 0 -9.81"/>
 
   <worldbody>
     <!-- 视觉：Bevy 载 models/rmuc2026/field.glb；物理只有下面的透明碰撞盒 -->
-{_rmuc_collision_xml()}
+{_rmuc_collision_xml(asset_dir)}
 
     <!-- 无人机（freejoint 六自由度，停机坪上电） -->
 {_drone_xml("%g %g %g" % drone_pad())}
@@ -145,11 +146,8 @@ def config_path() -> Path:
 
 
 def load_scene_name(path: Path | None = None) -> str:
-    """读 `configs/scene.toml` 的 `scene`；缺文件即报错。"""
-    import tomllib
-
-    with open(path or config_path(), "rb") as f:
-        name = tomllib.load(f)["scene"]
+    """读取可选场景配置；只支持 RMUC2026。"""
+    name = load_toml(path or config_path()).get("scene", SCENE_NAME)
     if name != SCENE_NAME:
         raise ValueError(f"仅支持场景 {SCENE_NAME!r}，收到 {name!r}")
     return SCENE_NAME

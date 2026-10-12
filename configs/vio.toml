@@ -1,23 +1,5 @@
 # VIO 配置（RMUC render 双目部署；缺键回落代码默认值，`--config` 可换文件）
 
-[camera]
-width = 320
-height = 240
-focal = 168.607 # MuJoCo fovy=70.88° 推导；真机换标定值
-baseline = 0.05 # 米，IMU 居中
-
-[imu]
-gyro_noise = 2.0e-4 # rad/s/√Hz；σ_sample=σ_density/√Δt
-gyro_walk = 1.9e-5
-accel_noise = 2.0e-3 # m/s²/√Hz；σ_sample=σ_density/√Δt
-accel_walk = 3.0e-3
-
-[frontend]
-num_pts = 300 # 每相机 KLT 目标特征数
-
-[estimator]
-max_baseline = 120 # 三角化深度/基线比上限（OpenVINS 默认 40）
-
 [slam]
 # 体素地图（Voxel-SVIO）：`VoxelMap` 维护路标、`ActiveTrackTriangulator` 跨帧累积，
 # 每帧只喂相机可见体素内的点进 MSCKF 更新。开关同时启用整条体素通路

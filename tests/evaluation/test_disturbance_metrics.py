@@ -1,10 +1,9 @@
 """外力验收评分的合成证据契约；不启动飞行进程。"""
-from types import SimpleNamespace
+from firefly_evaluation.mission import Options
 
 import numpy as np
 import pytest
 
-from firefly_evaluation import disturbance_metrics
 from firefly_evaluation import hover_metrics
 from firefly_evaluation.disturbance_metrics import DisturbanceLimits, disturbance_checks, round_checks, score_disturbance
 from firefly_evaluation.hover_metrics import HoverLimits
@@ -26,7 +25,7 @@ def evidence():
     stages = {"hover": {"status": "passed", "end_sim_s": 4.},
               "disturbance": {"status": "passed", "start_sim_s": 4.},
               "sustained_hover": {"status": "passed", "start_sim_s": 14.5, "end_sim_s": 34.5}}
-    options = SimpleNamespace(altitude_m=1., hover_xy_error_m=.2, hover_height_error_m=.15,
+    options = Options(altitude_m=1., hover_xy_error_m=.2, hover_height_error_m=.15,
                               hover_seconds=3., hover_speed_mps=.2)
     return data, stages, options, DisturbanceLimits(), force
 
@@ -132,16 +131,15 @@ def ten_rounds(evidence):
     return data, stages, options, limits, np.tile(force, (10, 1))
 
 
-def score_synthetic(monkeypatch, evidence, status="passed"):
+def score_synthetic(evidence, status="passed"):
     data, stages, options, limits, forces = evidence
-    monkeypatch.setattr(disturbance_metrics, "read_evidence", lambda _: data)
-    monkeypatch.setattr(disturbance_metrics, "startup_truth", lambda rows: (rows, {"synthetic": True}))
     case = {"status": status, "stages": stages, "recording": "synthetic.rrd"}
-    return score_disturbance(case, options, limits, forces)
+    return score_disturbance(case, options, limits, forces, evidence_reader=lambda _: data,
+                             frame_transform=lambda rows: (rows, {"synthetic": True}))
 
 
 @pytest.mark.parametrize("with_assessments", [False, True])
-def test_ten_rounds_pass(monkeypatch, ten_rounds, with_assessments):
+def test_ten_rounds_pass(ten_rounds, with_assessments):
     data, stages, options, limits, forces = ten_rounds
     if with_assessments:
         for index in range(1, 11):
@@ -149,13 +147,13 @@ def test_ten_rounds_pass(monkeypatch, ten_rounds, with_assessments):
     assert limits.rounds == 10
     for index, force in enumerate(forces, 1):
         assert all(ok for ok, _ in round_checks(data, stages, options, limits, force, index).values())
-    result = score_synthetic(monkeypatch, ten_rounds)
+    result = score_synthetic(ten_rounds)
     assert result["status"] == "passed"
     assert all(result["stages"][f"round_{i:02d}"]["status"] == "passed" for i in range(1, 11))
 
 
 @pytest.mark.parametrize("fault", ["unrecovered", "missing_force", "missing_phase", "short", "blocked", "failed"])
-def test_round_failure_blocks_all_following_rounds(monkeypatch, ten_rounds, fault):
+def test_round_failure_blocks_all_following_rounds(ten_rounds, fault):
     data, stages, *_ = ten_rounds
     recovery = stages["recovery_04"]
     if fault == "unrecovered":
@@ -169,7 +167,7 @@ def test_round_failure_blocks_all_following_rounds(monkeypatch, ten_rounds, faul
         recovery["end_sim_s"] -= .5
     else:
         recovery["status"] = fault
-    result = score_synthetic(monkeypatch, ten_rounds)
+    result = score_synthetic(ten_rounds)
     assert result["status"] == "failed"
     assert all(stages[f"round_{i:02d}"]["status"] == "passed" for i in range(1, 4))
     assert stages["round_04"]["status"] == "failed"
@@ -192,22 +190,22 @@ def test_round_index_is_one_based(ten_rounds, index):
         round_checks(data, stages, options, limits, forces[0], index)
 
 
-def test_failed_case_is_not_promoted(monkeypatch, ten_rounds):
-    assert score_synthetic(monkeypatch, ten_rounds, status="failed")["status"] == "failed"
+def test_failed_case_is_not_promoted(ten_rounds):
+    assert score_synthetic(ten_rounds, status="failed")["status"] == "failed"
 
 
 @pytest.mark.parametrize("status", ["failed", "blocked"])
-def test_existing_round_verdict_is_not_promoted(monkeypatch, ten_rounds, status):
+def test_existing_round_verdict_is_not_promoted(ten_rounds, status):
     stages = ten_rounds[1]
     stages["round_04"] = {"status": status, "reason": "online verdict"}
-    score_synthetic(monkeypatch, ten_rounds)
+    score_synthetic(ten_rounds)
     assert stages["round_04"]["status"] == status
     assert stages["round_05"]["status"] == "blocked"
 
 
 @pytest.mark.parametrize("status", ["failed", "blocked"])
 @pytest.mark.parametrize("previous_status", [None, "passed", "failed", "blocked"])
-def test_online_assessment_vetoes_offline_round(monkeypatch, ten_rounds, status, previous_status):
+def test_online_assessment_vetoes_offline_round(ten_rounds, status, previous_status):
     stages = ten_rounds[1]
     for index in range(1, 11):
         stages[f"assess_{index:02d}"] = {"status": "passed"}
@@ -217,7 +215,7 @@ def test_online_assessment_vetoes_offline_round(monkeypatch, ten_rounds, status,
         stages["round_04"] = {"status": previous_status}
     for index in range(5, 11):
         stages[f"round_{index:02d}"] = {"status": "passed"}
-    result = score_synthetic(monkeypatch, ten_rounds)
+    result = score_synthetic(ten_rounds)
     assert result["status"] == "failed"
     assert stages["assess_04"] == assessment
     assert all(stages[f"round_{i:02d}"]["status"] == "passed" for i in range(1, 4))
@@ -227,9 +225,9 @@ def test_online_assessment_vetoes_offline_round(monkeypatch, ten_rounds, status,
 
 
 @pytest.mark.parametrize("count", [0, 9, 11])
-def test_exactly_ten_forces_required(monkeypatch, ten_rounds, count):
+def test_exactly_ten_forces_required(ten_rounds, count):
     data, stages, options, limits, _ = ten_rounds
-    result = score_synthetic(monkeypatch, (data, stages, options, limits, np.zeros((count, 3))))
+    result = score_synthetic((data, stages, options, limits, np.zeros((count, 3))))
     assert result["status"] == "failed"
     assert stages["disturbance_evidence"]["status"] == "failed"
 
@@ -241,7 +239,7 @@ def test_custom_hover_limits_are_forwarded(ten_rounds):
 
 
 @pytest.mark.parametrize("phase_name", ["sustained_hover", "recovery_10"])
-def test_hover_global_checks_support_named_phase(monkeypatch, evidence, phase_name):
+def test_hover_global_checks_support_named_phase(evidence, phase_name):
     data, stages, options, _, _ = evidence
     phase = stages.pop("sustained_hover")
     stages[phase_name] = phase
@@ -251,15 +249,12 @@ def test_hover_global_checks_support_named_phase(monkeypatch, evidence, phase_na
     times = data["gt"][:, 0]
     steps = np.arange(1, len(times) + 1)
     data["physics"] = np.column_stack((times, steps, np.zeros((len(times), 3))))
-    monkeypatch.setattr(hover_metrics, "read_evidence", lambda _: data)
-    monkeypatch.setattr(hover_metrics, "startup_truth", lambda rows: (rows, {}))
-    monkeypatch.setattr(hover_metrics, "landing_truth", lambda *_: (True, {}))
     case = {"status": "passed", "stages": stages, "recording": "synthetic.rrd",
             "last_physics_counters": [int(steps[-1]), 0, 0, 0], "remaining_pids": []}
-    if phase_name == "sustained_hover":
-        result = hover_metrics.score_hover(case, options)
-    else:
-        result = hover_metrics.score_hover(case, options, phase_name=phase_name)
+    result = hover_metrics.score_hover(
+        case, options, phase_name=phase_name, evidence_reader=lambda _: data,
+        frame_transform=lambda rows: (rows, {}), landing_check=lambda *_: (True, {}),
+    )
     assert result["status"] == "passed"
     for name in ("sustained_hover_accuracy", "attitude_health", "landing_accuracy", "collision"):
         assert stages[name]["status"] == "passed"

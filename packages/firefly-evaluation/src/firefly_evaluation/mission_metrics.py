@@ -149,8 +149,8 @@ def startup_truth(data):
                     "yaw_world_rad": float(yaw), "trajectory_fitting": False, "feedback_to_algorithms": False}
 
 
-def score(case, options):
-    data = read_evidence(case["recording"])
+def score(case, options, *, evidence_reader=read_evidence):
+    data = evidence_reader(case["recording"])
     if case.get("map_frame") == "startup_session":
         data, case["evaluation_frame"] = startup_truth(data)
     stages = case["stages"]

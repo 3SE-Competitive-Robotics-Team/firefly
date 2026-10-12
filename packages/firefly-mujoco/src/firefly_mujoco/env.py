@@ -6,6 +6,8 @@ IMU 输出机体系角速度（rad/s）与比力（m/s²，静止读 +9.81）。
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 
 import mujoco
@@ -29,6 +31,9 @@ class DroneEnv:
         imu_period: float | None = None,
         gyro_density: float = 2.0e-4,
         accel_density: float = 2.0e-3,
+        *,
+        scene_factory: Callable[[], str] = build_scene,
+        rng: np.random.Generator | None = None,
     ) -> None:
         if imu_period is None:
             imu_period = timestep
@@ -36,7 +41,7 @@ class DroneEnv:
             raise ValueError("物理步长、IMU 周期与噪声密度必须有限")
         if timestep <= 0 or imu_period < timestep or gyro_density < 0 or accel_density < 0:
             raise ValueError("物理步长须为正，IMU 周期不得短于物理步长，噪声密度不得为负")
-        self.model = mujoco.MjModel.from_xml_string(build_scene())
+        self.model = mujoco.MjModel.from_xml_string(scene_factory())
         self.model.opt.timestep = timestep
         self.data = mujoco.MjData(self.model)
         # 周期平均白噪声的方差为 density²/Δt，与估计器的离散测量模型一致。
@@ -51,7 +56,7 @@ class DroneEnv:
         self._gyro_adr = int(self.model.sensor_adr[gyro_id])
         self._accel_adr = int(self.model.sensor_adr[accel_id])
         # IMU 噪声发生器：default_rng 比全局 RandomState 快约 3 倍（同分布）。
-        self._rng = np.random.default_rng()
+        self._rng = rng if rng is not None else np.random.default_rng()
 
         self._rotor_positions = np.array(
             [

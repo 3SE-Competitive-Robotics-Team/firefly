@@ -89,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let map_path = map_path
         .ok_or("lightglue requires --map <map.ffvmap>; online loop closure runs in slam")?;
     let map = firefly_vision_map::load_map(std::path::Path::new(&map_path))?;
-    let options: Options = toml::from_str(&std::fs::read_to_string(config)?)?;
+    let options: Options = firefly_config::load(config)?;
     if !options.query_period.is_finite() || options.query_period <= 0. {
         return Err("query_period must be positive".into());
     }
@@ -351,7 +351,6 @@ impl MatchBindings {
 }
 
 /// 把查询侧特征写进已绑定张量并重新登记（查询侧每查询都变，必须重绑）。
-#[cfg(test)]
 fn bind_query(
     bindings: &mut MatchBindings,
     feat: &FeatureMessage,
@@ -359,11 +358,7 @@ fn bind_query(
     {
         let (_, k0) = bindings.k0.try_extract_tensor_mut::<f32>()?;
         let (_, d0) = bindings.d0.try_extract_tensor_mut::<f32>()?;
-        for i in 0..NUM_POINTS {
-            k0[2 * i] = feat.keypoints[i][0];
-            k0[2 * i + 1] = feat.keypoints[i][1];
-            d0[i * DESC_DIM..(i + 1) * DESC_DIM].copy_from_slice(&feat.descriptors[i]);
-        }
+        fill_feature_inputs(k0, d0, feat.keypoints.iter().zip(&feat.descriptors));
     }
     bindings.binding.bind_input("k0", &bindings.k0)?;
     bindings.binding.bind_input("d0", &bindings.d0)?;
@@ -498,17 +493,7 @@ fn query_once(
     }
     // 多帧拼对应：单帧共面时 PnP 有翻转二义性，多视角点集破退化。
     // query 侧每查询填一次，库侧每候选填一次（都写进已绑定张量的内存）。
-    {
-        let (_, k0) = bindings.k0.try_extract_tensor_mut::<f32>()?;
-        let (_, d0) = bindings.d0.try_extract_tensor_mut::<f32>()?;
-        for i in 0..NUM_POINTS {
-            k0[2 * i] = feat.keypoints[i][0];
-            k0[2 * i + 1] = feat.keypoints[i][1];
-            d0[i * DESC_DIM..(i + 1) * DESC_DIM].copy_from_slice(&feat.descriptors[i]);
-        }
-    }
-    bindings.binding.bind_input("k0", &bindings.k0)?;
-    bindings.binding.bind_input("d0", &bindings.d0)?;
+    bind_query(bindings, feat)?;
     // 同一像素只保留最高分的地图对应，避免跨库帧重复计算信息量。
     let mut best = vec![None::<([f64; 3], f32)>; NUM_POINTS];
     for (candidate_index, &frame_idx) in candidates.iter().enumerate() {
@@ -630,6 +615,50 @@ fn observation_from_matches(
 #[cfg(test)]
 mod tests {
     use super::DEFAULT_MODEL;
+
+    #[test]
+    fn config_defaults_without_file() {
+        let options: super::Options = firefly_config::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../configs/__missing__/lightglue.toml"
+        ))
+        .unwrap();
+        assert!((options.query_period - 1.).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    #[allow(clippy::large_stack_arrays)]
+    fn query_inputs_preserve_all_transmitted_features() {
+        use super::{DESC_DIM, FeatureMessage, NUM_POINTS, fill_feature_inputs};
+        let mut features = FeatureMessage {
+            timestamp: 1.,
+            count: 7,
+            keypoints: [[0.; 2]; NUM_POINTS],
+            descriptors: [[0.; DESC_DIM]; NUM_POINTS],
+            scores: [0.; NUM_POINTS],
+        };
+        for index in 0..NUM_POINTS {
+            features.keypoints[index] = [index as f32, -(index as f32)];
+            features.descriptors[index] = std::array::from_fn(|column| (index + column) as f32);
+        }
+        let mut keypoints = vec![f32::NAN; NUM_POINTS * 2];
+        let mut descriptors = vec![f32::NAN; NUM_POINTS * DESC_DIM];
+        fill_feature_inputs(
+            &mut keypoints,
+            &mut descriptors,
+            features.keypoints.iter().zip(&features.descriptors),
+        );
+        for index in 0..NUM_POINTS {
+            assert_eq!(
+                keypoints[2 * index..2 * (index + 1)],
+                features.keypoints[index]
+            );
+            assert_eq!(
+                descriptors[index * DESC_DIM..(index + 1) * DESC_DIM],
+                features.descriptors[index]
+            );
+        }
+    }
 
     #[test]
     fn candidate_inputs_overwrite_prefix_and_clear_tail_across_resizes() {

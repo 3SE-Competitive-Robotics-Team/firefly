@@ -83,12 +83,8 @@ def _sensor_startup() -> None:
         depth_max = depth_options.get("max_depth_m", 8.0)
         # GroundTruth 供 render 摆放传感器；PlantState 不参与启动。
         simulation = """
-import importlib
-import sys
-sim = importlib.import_module('firefly_sim.main')
-sim._publish_plant_state = lambda *args: None
-sys.argv = ['firefly-sim', '--no-trace']
-sim.main()
+from firefly_sim.main import main
+main(["--no-trace"], publish_plant_state=False)
 """
         start("sim", [sys.executable, "-c", simulation])
         first_ready = None

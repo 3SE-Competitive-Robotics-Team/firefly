@@ -1,6 +1,7 @@
 """RMUC 资产边界与物理执行器契约；几何夹具仅供单元测试。"""
 
 import json
+from functools import partial
 
 import numpy as np
 import pytest
@@ -17,27 +18,24 @@ def test_scene_config_requires_rmuc(tmp_path):
     with pytest.raises(ValueError, match="仅支持场景"):
         scene.load_scene_name(config)
     config.unlink()
-    with pytest.raises(FileNotFoundError):
-        scene.load_scene_name(config)
+    assert scene.load_scene_name(config) == scene.SCENE_NAME
 
 
-def test_collision_asset_is_required(tmp_path, monkeypatch):
-    monkeypatch.setattr(scene, "_RMUC_DIR", tmp_path)
+def test_collision_asset_is_required(tmp_path):
     with pytest.raises(FileNotFoundError, match="RMUC 碰撞资产缺失"):
-        scene.build_scene()
+        scene.build_scene(asset_dir=tmp_path)
     (tmp_path / "rmuc2026_collision.json").write_text('{"boxes": []}')
     with pytest.raises(ValueError, match="RMUC 碰撞资产为空"):
-        scene.build_scene()
+        scene.build_scene(asset_dir=tmp_path)
 
 
 @pytest.mark.parametrize("rate", [200, 1000])
-def test_physics_and_imu_without_renderer(tmp_path, monkeypatch, rate):
-    monkeypatch.setattr(scene, "_RMUC_DIR", tmp_path)
+def test_physics_and_imu_without_renderer(tmp_path, rate):
     # 测试台阶顶面与停机坪同高，足够覆盖机体；不表示完整 RMUC 场地。
     (tmp_path / "rmuc2026_collision.json").write_text(json.dumps({
         "boxes": [[-13.0, 0.0, 0.1875, 0.5, 0.5, 0.1875]],
     }))
-    env = DroneEnv(timestep=1.0 / rate, gyro_density=0.0, accel_density=0.0)
+    env = DroneEnv(scene_factory=partial(scene.build_scene, asset_dir=tmp_path), timestep=1.0 / rate, gyro_density=0.0, accel_density=0.0)
     np.testing.assert_allclose(env.state()[0], scene.drone_pad())
     assert env.data.ncon == 0
     assert env.model.nu == 4
@@ -57,12 +55,11 @@ def test_physics_and_imu_without_renderer(tmp_path, monkeypatch, rate):
     assert env.state()[1][2] > 0.5
 
 
-def test_sensor_snapshot_uses_integrated_state(tmp_path, monkeypatch):
-    monkeypatch.setattr(scene, "_RMUC_DIR", tmp_path)
+def test_sensor_snapshot_uses_integrated_state(tmp_path):
     (tmp_path / "rmuc2026_collision.json").write_text(json.dumps({
         "boxes": [[-13.0, 0.0, 0.1875, 0.5, 0.5, 0.1875]],
     }))
-    env = DroneEnv(gyro_density=0.0, accel_density=0.0)
+    env = DroneEnv(scene_factory=partial(scene.build_scene, asset_dir=tmp_path), gyro_density=0.0, accel_density=0.0)
     origin = np.array([0.0, 0.0, 5.0])
     env.reset(origin, np.array([0.0, 0.0, 0.0, 1.0]))
     env.data.qvel[:3] = [1.0, 0.0, 0.0]
@@ -84,20 +81,16 @@ def test_sensor_snapshot_uses_integrated_state(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("imu_rate", [100, 1000])
-def test_imu_noise_preserves_continuous_density(tmp_path, monkeypatch, imu_rate):
-    import tomllib
-    from pathlib import Path
-
-    monkeypatch.setattr(scene, "_RMUC_DIR", tmp_path)
+def test_imu_noise_preserves_continuous_density(tmp_path, imu_rate):
     (tmp_path / "rmuc2026_collision.json").write_text(json.dumps({
         "boxes": [[-13.0, 0.0, 0.1875, 0.5, 0.5, 0.1875]],
     }))
-    env = DroneEnv(imu_period=1.0 / imu_rate)
-    env._rng = np.random.default_rng(20260930)
+    env = DroneEnv(scene_factory=partial(scene.build_scene, asset_dir=tmp_path),
+                   imu_period=1.0 / imu_rate, rng=np.random.default_rng(20260930))
     samples = np.array([np.concatenate(env.imu()) for _ in range(20000)])
     variance = samples.var(axis=0, ddof=1)
-    with (Path(__file__).resolve().parents[3] / "configs/vio.toml").open("rb") as stream:
-        imu = tomllib.load(stream)["imu"]
-    density_squared = np.array([imu["gyro_noise"] ** 2] * 3 + [imu["accel_noise"] ** 2] * 3)
+    # 与 VIO 的 imu_density_preserves_calibrated_integral_variance_across_rates
+    # 使用相同的标定积分方差契约；部署 TOML 只包含差异覆盖。
+    density_squared = np.array([4e-8] * 3 + [4e-6] * 3)
     # 由实际噪声样本估计每秒积分方差：N·Var(sample)·Δt²。
     np.testing.assert_allclose(variance / imu_rate, density_squared, rtol=0.03)

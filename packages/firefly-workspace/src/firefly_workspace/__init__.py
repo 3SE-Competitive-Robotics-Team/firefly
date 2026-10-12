@@ -1,5 +1,6 @@
-"""工具共用的工作区定位与文件内容指纹；仅使用标准库。"""
+"""工具共用的工作区定位、可选配置与文件内容指纹；仅使用标准库。"""
 import hashlib
+import logging
 from pathlib import Path
 import tomllib
 
@@ -23,3 +24,13 @@ def digest(path: str | Path) -> str:
     """流式计算文件 SHA-256，返回小写十六进制摘要。"""
     with Path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def load_toml(path: str | Path) -> dict:
+    """可选 TOML 覆盖项；仅缺文件返回空表，读取和解析错误继续传播。"""
+    try:
+        with Path(path).open("rb") as stream:
+            return tomllib.load(stream)
+    except FileNotFoundError:
+        logging.getLogger(__name__).info("配置 %s 不存在，使用默认值", path)
+        return {}

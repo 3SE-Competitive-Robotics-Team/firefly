@@ -2,18 +2,8 @@
 # 机体/执行器参数（质量、惯量、旋翼几何、单电机推力上限）不在这里：由被控对象经
 # `Firefly/Airframe` 发布，飞控运行时装配——改机体不动飞控。
 
-# 控制环频率（Hz）：指令按此频率发布，被控对象每步取最新样本
-rate_hz = 1000.0
-
 [control]
 # 位置/速度反馈来自 VIO（IMU 预测输出 100Hz，视觉更新 10Hz）。
 # 外环带宽约 1.5 rad/s，阻尼比约 0.81。
 pos_kp = 2.2
 vel_kp = 2.4
-# 内环（姿态/角速度）跑在 1kHz，保持 crate 默认的带宽（attitude_kp=10、rate_kp=20）。
-
-# [fsm]：飞行状态机参数（起飞高度/爬升率、降落率、落地判据、参考失联超时）
-# 全用 crate 默认值（`firefly-flight::FsmParams`），需要时才在此覆盖。
-
-# [imu]：本地姿态 ESKF 使用 firefly_imu::Options 默认值；部署需标定噪声密度。
-# 静止窗口、NIS 门限和角速度低通参数见 docs/architecture.md#imu。

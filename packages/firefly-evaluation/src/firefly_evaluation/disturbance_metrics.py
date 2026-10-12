@@ -97,7 +97,8 @@ def round_checks(data, stages, options, limits, force, index, hover_limits=Hover
         options, limits, force, hover_limits)
 
 
-def score_disturbance(case, options, limits, forces, hover_limits=HoverLimits()):
+def score_disturbance(case, options, limits, forces, hover_limits=HoverLimits(), *,
+                      evidence_reader=read_evidence, frame_transform=startup_truth):
     """逐轮离线评分；首个失败后全部阻塞，已有失败不得覆盖为通过。"""
     stages = case["stages"]
     already_failed = (case.get("status") == "failed"
@@ -106,7 +107,7 @@ def score_disturbance(case, options, limits, forces, hover_limits=HoverLimits())
         forces = np.asarray(forces, dtype=float)
         if limits.rounds != 10 or forces.shape != (10, 3) or not np.isfinite(forces).all():
             raise ValueError("disturbance acceptance requires ten finite force vectors")
-        data, case["evaluation_frame"] = startup_truth(read_evidence(case["recording"]))
+        data, case["evaluation_frame"] = frame_transform(evidence_reader(case["recording"]))
     except (OSError, TypeError, ValueError, KeyError, IndexError) as error:
         stages["disturbance_evidence"] = {"status": "failed", "reason": str(error)}
         case["status"] = "failed"

@@ -7,7 +7,7 @@ import time
 import numpy as np
 import rerun as rr
 
-from .recording import at
+from .recording import RecordingOutputs, at
 from .video import Encoder
 
 
@@ -37,7 +37,7 @@ def pixels(frame):
 
 
 class Capture:
-    def __init__(self, recordings, options, trigger):
+    def __init__(self, recordings: RecordingOutputs, options, trigger):
         self.recordings, self.options, self.trigger = recordings, options, trigger
         self.encoder = None
         self.shape = None

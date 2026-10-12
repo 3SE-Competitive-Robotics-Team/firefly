@@ -19,7 +19,7 @@ from .process_lifecycle import require_idle
 from .mission_metrics import score
 from .mission_sim import CONTACT_POLICY
 from .vision_assets import verify_map_compatibility
-from firefly_workspace import digest, workspace_root
+from firefly_workspace import digest, load_toml, workspace_root
 
 log = logging.getLogger("acceptance")
 
@@ -108,7 +108,8 @@ def provenance(root, *, allow_map_rig_translation=False, vio_only=False, prior_m
             "dependencies": {name: version(name) for name in ["numpy", "mujoco", "iceoryx2", "rerun-sdk"]}}
 
 
-def main(argv=None):
+def main(argv=None, *, resolve_workspace=workspace_root, check_idle=require_idle,
+         collect_provenance=provenance, mission_factory=Mission, score_case=score):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path, help="firefly 工作区目录；默认从当前目录向上查找")
     parser.add_argument("--config", type=Path)
@@ -122,7 +123,7 @@ def main(argv=None):
                         help="显式允许冻结地图与当前 rig 的共同安装平移差异；记录差异，仍校验其他标定与资产")
     args = parser.parse_args(argv)
     try:
-        root = workspace_root(args.workspace)
+        root = resolve_workspace(args.workspace)
     except ValueError as error:
         parser.error(str(error))
     if args.config is None:
@@ -152,28 +153,27 @@ def main(argv=None):
     elif args.prior_maps:
         report["scope"] = "RMUC mission; VIO + explicit external map alignment + offline visual map localization + online loops + prior/depth mapping"
     try:
-        require_idle(root)
-        with args.config.open("rb") as stream:
-            options = Options(**tomllib.load(stream))
+        check_idle(root)
+        options = Options(**load_toml(args.config))
         options.validate()
         report["options"] = asdict(options)
         report["contact_policy"] = CONTACT_POLICY
-        report["provenance"] = (provenance(root, vio_only=True) if args.vio_only else
-                                provenance(root, prior_maps=True, allow_map_rig_translation=args.allow_map_rig_translation) if args.prior_maps else provenance(root))
+        report["provenance"] = (collect_provenance(root, vio_only=True) if args.vio_only else
+                                collect_provenance(root, prior_maps=True, allow_map_rig_translation=args.allow_map_rig_translation) if args.prior_maps else collect_provenance(root))
         cases = ["nominal", "reference_loss", "estimator_loss"] if args.case == "all" else [args.case]
         save_report(directory, report)
         for attempt, name in [(attempt, name) for attempt in range(1, args.repeat + 1) for name in cases]:
             case_directory = directory if args.repeat == 1 else directory / f"attempt_{attempt:02d}"
             case_directory.mkdir(exist_ok=True)
             log.info("开始任务验收 %s，证据目录 %s", name, directory)
-            mission = (Mission(case_directory, name, options, workspace=root, vio_only=True) if args.vio_only
-                       else Mission(case_directory, name, options, workspace=root, prior_maps=True, localization_config=args.localization_config) if args.prior_maps
-                       else Mission(case_directory, name, options, workspace=root))
+            mission = (mission_factory(case_directory, name, options, workspace=root, vio_only=True) if args.vio_only
+                       else mission_factory(case_directory, name, options, workspace=root, prior_maps=True, localization_config=args.localization_config) if args.prior_maps
+                       else mission_factory(case_directory, name, options, workspace=root))
             case = mission.run()
             case["attempt"] = attempt
             try:
                 case["recording_sha256"] = digest(Path(case["recording"]))
-                score(case, options)
+                score_case(case, options)
             except Exception as error:
                 case["status"] = "failed"
                 case["evidence_error"] = str(error)

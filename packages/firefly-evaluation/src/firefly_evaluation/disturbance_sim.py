@@ -1,9 +1,8 @@
 """RMUC 外力验收夹具：世界系质心力脉冲，仅供测试，不修改状态或飞控目标。"""
 import ctypes
-import importlib
-import sys
 
 import numpy as np
+from firefly_sim.main import main as run_sim
 
 from .mission_io import service
 from .mission_sim import ObservedEnv
@@ -59,12 +58,8 @@ class DisturbedEnv(ObservedEnv):
         super().step()
 
 
-def main():
-    sim = importlib.import_module("firefly_sim.main")
-    sim.DroneEnv = DisturbedEnv
-    sim._publish_plant_state = lambda *args: None
-    sys.argv = ["firefly-sim", "--no-trace"]
-    sim.main()
+def main(*, runner=run_sim):
+    runner(["--no-trace"], env_factory=DisturbedEnv, publish_plant_state=False)
 
 
 if __name__ == "__main__":

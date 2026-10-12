@@ -80,12 +80,9 @@ impl LocalizationConfig {
     ///
     /// # Errors
     ///
-    /// 文件不可读或解析失败。
+    /// 文件存在但不可读，或解析失败。
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
-        let raw = std::fs::read_to_string(path.as_ref())
-            .map_err(|e| Error::new(ErrorKind::NotFound, "config file not found").with_source(e))?;
-        toml::from_str(&raw)
-            .map_err(|e| Error::new(ErrorKind::InvalidArgument, "invalid config").with_source(e))
+        firefly_config::load(path)
     }
 }
 

@@ -27,15 +27,29 @@ fn d_rate_hz() -> f64 {
     1000.0
 }
 
-/// 读配置；缺文件/解析失败即报错退出。
+/// 读配置；缺文件使用默认值，读取/解析失败报错退出。
 #[must_use]
 pub fn load(path: &str) -> FcConfig {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        log::error!("读取 {path} 失败：{e}");
-        std::process::exit(1);
-    });
-    toml::from_str(&text).unwrap_or_else(|e| {
-        log::error!("解析 {path} 失败：{e}");
+    firefly_config::load(path).unwrap_or_else(|e| {
+        log::error!("加载配置 {path} 失败：{e}");
         std::process::exit(1);
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shipped_config_preserves_control_overrides() {
+        let config: FcConfig = toml::from_str(include_str!("../../../configs/fc.toml")).unwrap();
+        let defaults: FcConfig = toml::from_str("").unwrap();
+        let expected = ControlParams {
+            pos_kp: 2.2,
+            vel_kp: 2.4,
+            ..ControlParams::default()
+        };
+        assert!((config.rate_hz - defaults.rate_hz).abs() < f64::EPSILON);
+        assert_eq!(format!("{:?}", config.control), format!("{expected:?}"));
+    }
 }

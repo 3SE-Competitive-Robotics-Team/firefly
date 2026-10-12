@@ -5,7 +5,7 @@ import tomllib
 
 import numpy as np
 
-from firefly_workspace import digest, workspace_root
+from firefly_workspace import digest, load_toml, workspace_root
 
 
 def capture_assets(root=None):
@@ -16,15 +16,15 @@ def capture_assets(root=None):
     subprocess.run([str(root / "target/release/render"), "--export-asset-contract", str(contract)], check=True, cwd=root)
     with contract.open("rb") as stream:
         sensor = tomllib.load(stream)
-    with (root / "configs/vision_map.toml").open("rb") as stream:
-        selection = tomllib.load(stream)
+    selection = load_toml(root / "configs/vision_map.toml")
     return {"schema": 2, "files": {name: digest(root / name) for name in [
-        "models/rmuc2026/field.glb", "models/rmuc2026/rmuc2026_collision.json", "configs/scene.toml",
+        "models/rmuc2026/field.glb", "models/rmuc2026/rmuc2026_collision.json",
+        *(["configs/scene.toml"] if (root / "configs/scene.toml").exists() else []),
     ]}, "sensor": sensor, "selection": selection}
 
 
-def verify_map_compatibility(assets, *, root=None, allow_rig_translation=False):
-    current = capture_assets(root)
+def verify_map_compatibility(assets, *, root=None, allow_rig_translation=False, capture=capture_assets):
+    current = capture(root)
     if assets.get("schema") != 2 or assets.get("files") != current["files"]:
         raise ValueError("visual map geometry/calibration/appearance contract differs from runtime")
     if assets.get("sensor") == current["sensor"]:

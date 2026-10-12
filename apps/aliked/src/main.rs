@@ -273,7 +273,7 @@ impl Model {
                     gray.len()
                 ),
             )
-            .with_context("operation", "aliked input")
+            .with_operation("aliked input")
             .into());
         }
         let n = width * height;

@@ -108,7 +108,7 @@ impl DepthNoiseOptions {
         {
             return Err(
                 Error::new(ErrorKind::InvalidArgument, "invalid depth noise parameters")
-                    .with_context("operation", "validate render.depth_noise"),
+                    .with_operation("validate render.depth_noise"),
             );
         }
         Ok(())

@@ -123,15 +123,11 @@ pub struct RenderConfig {
     pub depth_noise: crate::depth_noise::DepthNoiseOptions,
 }
 
-/// 读 `configs/render.toml`；缺文件/解析失败即报错退出。
+/// 读 `configs/render.toml`；缺文件使用默认值，读取/解析失败报错退出。
 #[must_use]
 pub fn load() -> RenderConfig {
-    let text = std::fs::read_to_string(RENDER_CONFIG).unwrap_or_else(|e| {
-        log::error!("读取 configs/render.toml 失败：{e}");
-        std::process::exit(1);
-    });
-    let config: RenderConfig = toml::from_str(&text).unwrap_or_else(|e| {
-        log::error!("解析 configs/render.toml 失败：{e}");
+    let config: RenderConfig = firefly_config::load(RENDER_CONFIG).unwrap_or_else(|e| {
+        log::error!("加载 configs/render.toml 失败：{e}");
         std::process::exit(1);
     });
     config.depth_noise.validate().unwrap_or_else(|e| {

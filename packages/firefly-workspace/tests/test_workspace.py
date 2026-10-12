@@ -4,6 +4,27 @@ import pytest
 from firefly_workspace import digest, workspace_root
 
 
+def test_optional_toml_only_defaults_when_missing(tmp_path, caplog):
+    import logging
+    import tomllib
+    from firefly_workspace import load_toml
+
+    path = tmp_path / "optional.toml"
+    with caplog.at_level(logging.INFO):
+        assert load_toml(path) == {}
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.INFO
+    path.write_text("# defaults\n")
+    assert load_toml(path) == {}
+    path.write_text("rate = 50")
+    assert load_toml(path) == {"rate": 50}
+    path.write_text("rate = [")
+    with pytest.raises(tomllib.TOMLDecodeError):
+        load_toml(path)
+    with pytest.raises(IsADirectoryError):
+        load_toml(tmp_path)
+
+
 def test_workspace_discovery_uses_workspace_manifest(tmp_path, monkeypatch):
     (tmp_path / "Cargo.toml").write_text("[workspace]\n")
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "firefly"\n[tool.uv.workspace]\nmembers = []\n')

@@ -1,2 +1,2 @@
 # sim / render / viz 共用；仅支持 RMUC2026，资产缺失时报错。
-scene = "rmuc2026"
+# 默认场景见 firefly_mujoco.scene.SCENE_NAME / apps/render/src/scene.rs。

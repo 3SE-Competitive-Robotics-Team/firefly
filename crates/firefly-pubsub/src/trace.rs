@@ -23,6 +23,8 @@ use iceoryx2_bb_posix::clock::{ClockType, Time};
 
 /// 消息携带的 trace 上下文（iceoryx2 User Header，零拷贝 POD）。
 ///
+/// [`Default`] 产生全零占位（`version == 0`），不携带有效发送时间。
+/// [`Self::timestamps_only`] 采集发送时间并填写当前版本，但不携带 span。
 /// `version == 1` 表示结构已填充；`trace_id == 0` 表示发布端不在任何 fastrace
 /// span 内（此时仅时间戳有效，[`TraceContext::is_traced`] 为 `false`）。
 #[repr(C)]
@@ -54,22 +56,6 @@ impl TraceContext {
     pub const VERSION: u8 = 1;
     /// sampled 标志位（W3C bit0）。
     pub const FLAG_SAMPLED: u8 = 0b0000_0001;
-
-    /// 空上下文（未填充，等价于全零）。
-    #[must_use]
-    pub fn empty() -> Self {
-        Self {
-            version: 0,
-            flags: 0,
-            reserved: [0; 2],
-            trace_id_hi: 0,
-            trace_id_lo: 0,
-            span_id: 0,
-            send_ts_secs: 0,
-            send_ts_nanos: 0,
-            send_ts_mono_ns: 0,
-        }
-    }
 
     /// 从 fastrace 活动 span 上下文构建（发布端注入），同时采集双时间戳。
     #[must_use]
@@ -171,9 +157,12 @@ mod tests {
     fn trace_context_is_plain_old_data() {
         assert_zero_copy_send::<TraceContext>();
         assert_eq!(std::mem::size_of::<TraceContext>(), 56);
-        let e = TraceContext::empty();
+        let e = TraceContext::default();
         assert_eq!(e.version, 0);
         assert_eq!(e.trace_id(), 0);
+        assert_eq!(e.send_ts_secs, 0);
+        assert_eq!(e.send_ts_mono_ns, 0);
+        assert!(e.span_context().is_none());
     }
 
     #[test]

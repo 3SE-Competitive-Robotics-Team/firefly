@@ -4,13 +4,12 @@
 pub enum ErrorStatus {
     Permanent,
     Temporary,
-    Persistent,
 }
 
 impl ErrorStatus {
     #[must_use]
     pub const fn is_retryable(self) -> bool {
-        matches!(self, Self::Temporary | Self::Persistent)
+        matches!(self, Self::Temporary)
     }
 }
 
@@ -19,7 +18,6 @@ impl core::fmt::Display for ErrorStatus {
         match self {
             Self::Permanent => f.write_str("permanent"),
             Self::Temporary => f.write_str("temporary"),
-            Self::Persistent => f.write_str("persistent"),
         }
     }
 }

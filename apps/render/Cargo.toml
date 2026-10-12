@@ -15,6 +15,7 @@ name = "render"
 path = "src/main.rs"
 
 [dependencies]
+firefly-config.workspace = true
 firefly-base = { workspace = true }
 bevy = { workspace = true }
 fastrace = { workspace = true }

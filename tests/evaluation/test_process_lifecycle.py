@@ -5,7 +5,7 @@ import signal
 import subprocess
 import sys
 import threading
-from types import SimpleNamespace
+from unittest.mock import create_autospec
 
 import pytest
 
@@ -87,7 +87,8 @@ def test_mission_cleans_remaining_children_after_one_stop_times_out(tmp_path):
     class Child:
         def __init__(self, name, pid):
             self.name, self.pid = name, pid
-            self.process = SimpleNamespace(poll=lambda: None if name == "extra" else 0)
+            self.process = create_autospec(subprocess.Popen, instance=True, spec_set=True)
+            self.process.poll.return_value = None if name == "extra" else 0
 
         def stop(self):
             stopped.append(self.name)

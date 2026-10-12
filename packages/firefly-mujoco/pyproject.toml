@@ -7,6 +7,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "firefly-workspace",
     "mujoco>=3.15,<4",
     "numpy>=2.5.4,<3",
 ]
@@ -14,3 +15,6 @@ dependencies = [
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14"]
 build-backend = "uv_build"
+
+[tool.uv.sources]
+firefly-workspace = { workspace = true }

@@ -60,8 +60,7 @@ impl Worker {
                 }
             })
             .map_err(|e| {
-                Error::new(ErrorKind::Internal, e.to_string())
-                    .with_context("operation", "spawn FC IMU worker")
+                Error::new(ErrorKind::Internal, e.to_string()).with_operation("spawn FC IMU worker")
             })?;
         Ok(Self {
             latest,
@@ -108,7 +107,7 @@ fn run(
     grounded: &AtomicBool,
     stop: &AtomicBool,
 ) -> Result<()> {
-    let node = create_node().map_err(|e| e.with_context("operation", "FC IMU node"))?;
+    let node = create_node().map_err(|e| e.with_operation("FC IMU node"))?;
     let imu = Subscriber::<ImuMessage>::with_options(&node, IMU_TOPIC, IMU_SUBSCRIPTION)?;
     let aids = Subscriber::<AttitudeAidMessage>::with_topic(&node, ATTITUDE_AID_TOPIC)?;
     let mut estimator = Estimator::new(options)?;

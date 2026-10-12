@@ -1,6 +1,7 @@
 """持久记录与 latest-only 预览分流，所有时间戳属于原始测量时刻。"""
 
 from collections import OrderedDict
+from typing import Protocol
 from pathlib import Path
 import threading
 import time
@@ -71,17 +72,41 @@ def blueprint(live: bool):
     )
 
 
+class RecordingOutputs(Protocol):
+    """写入器与采集器所需的录制端口；成员和方法签名供测试替身校验。"""
+
+    @property
+    def archive(self) -> rr.RecordingStream: ...
+
+    @property
+    def live(self) -> rr.RecordingStream | None: ...
+
+    @property
+    def matches(self) -> "MatchedPoints": ...
+
+    def diagnostic(self, text: str, *, stamp=None, level="INFO") -> None: ...
+
+    def health(self, name: str, values, stamp=None) -> None: ...
+
+    def video(self, frame, sample, keyframe, latency) -> None: ...
+
+    def close(self) -> None: ...
+
+
 class Recordings:
-    def __init__(self, path: Path | None, url: str | None, serve: bool, options):
+    def __init__(self, path: Path | None, url: str | None, serve: bool, options, *,
+                 stream_factory=rr.RecordingStream, file_sink=rr.FileSink,
+                 grpc_sink=rr.GrpcSink, blueprint_factory=blueprint):
         self.options = options
         self.path = path
         recording_id = str(uuid.uuid4())
-        self.archive = rr.RecordingStream(APP_ID, recording_id=recording_id)
+        self.archive = stream_factory(APP_ID, recording_id=recording_id)
         self.live = None
         try:
             if not self.archive.is_enabled():
                 raise RuntimeError("Rerun recording is disabled by the environment")
-            self._connect(path, url, serve, options, recording_id)
+            self._connect(path, url, serve, options, recording_id,
+                          stream_factory, file_sink, grpc_sink, blueprint_factory)
         except Exception as error:
             errors = [error]
             for recording in (self.live, self.archive):
@@ -95,26 +120,27 @@ class Recordings:
             raise
         self.matches = MatchedPoints(self.archive, options.capture.match_frames)
 
-    def _connect(self, path, url, serve, options, recording_id):
+    def _connect(self, path, url, serve, options, recording_id,
+                 stream_factory, file_sink, grpc_sink, blueprint_factory):
         sinks = []
         if path is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
             # 不覆盖既有证据；预先占位，文件 sink 仅打开本次创建的文件。
             with path.open("xb"):
                 pass
-            sinks.append(rr.FileSink(str(path), write_footer=options.write_footer))
+            sinks.append(file_sink(str(path), write_footer=options.write_footer))
         if serve:
             self.archive.spawn(connect=False, memory_limit=options.viewer_memory)
             url = url or URL
         if url:
-            sinks.append(rr.GrpcSink(url=url))
+            sinks.append(grpc_sink(url=url))
             # 同一 recording_id 合并视图；只有这个 stream 接收 /live，且没有 FileSink。
-            self.live = rr.RecordingStream(APP_ID, recording_id=recording_id, send_properties=False)
-            self.live.set_sinks(rr.GrpcSink(url=url))
+            self.live = stream_factory(APP_ID, recording_id=recording_id, send_properties=False)
+            self.live.set_sinks(grpc_sink(url=url))
         if not sinks:
             raise ValueError("at least one file or viewer destination is required")
         self.archive.set_sinks(*sinks)
-        self.archive.send_blueprint(blueprint(bool(self.live)))
+        self.archive.send_blueprint(blueprint_factory(bool(self.live)))
         self.archive.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
         self.archive.log("viz/session", rr.AnyValues(recording_id=recording_id, rerun_version=rr.__version__), static=True)
         if options.video.enabled:

@@ -75,6 +75,7 @@ impl Error {
         self
     }
 
+    /// 设置当前操作；上层边界再次设置时替换该字段，不写入通用上下文。
     #[must_use]
     pub fn with_operation(mut self, operation: &'static str) -> Self {
         self.operation = Some(operation);
@@ -195,6 +196,10 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("iterations: 100"), "{text}");
+        assert_eq!(e.operation(), Some("optimize"));
+        assert_eq!(e.context().collect::<Vec<_>>(), vec![("iterations", "100")]);
+        let e = e.with_operation("plan");
+        assert_eq!(e.operation(), Some("plan"));
         // source 链
         let inner = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
         let e = Error::new(ErrorKind::NotFound, "map file missing").with_source(inner);

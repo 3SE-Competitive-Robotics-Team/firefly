@@ -1,7 +1,6 @@
 """图像与叠加按采集时间精确配对；丢帧和延迟不能复用旧点。"""
 
 import threading
-from types import SimpleNamespace
 
 import pytest
 import rerun as rr
@@ -53,9 +52,9 @@ def test_out_of_order_annotation_only_matches_its_image_and_missing_frames_are_e
     assert len(pairs.points['left']) == 2
 
 
-def test_matrix_owns_storage_and_rejects_invalid_shapes():
+def test_matrix_owns_storage_and_rejects_invalid_shapes(recordings_factory):
     rec = Recording()
-    writer = Writer(SimpleNamespace(archive=rec, matches=MatchedPoints(rec, 4)), Options(), threading.Event())
+    writer = Writer(recordings_factory(archive=rec, matches=MatchedPoints(rec, 4)), Options(), threading.Event())
     msg = VizMessage()
     name = b'vio/update/test'
     msg.entity_len, msg.entity[:len(name)] = len(name), name
@@ -92,10 +91,10 @@ def test_late_points_keep_original_video_index_and_do_not_cross_cameras():
     assert len(rec.calls) == before
 
 
-def test_keypoint_resolution_mismatch_cannot_reach_overlay():
+def test_keypoint_resolution_mismatch_cannot_reach_overlay(recordings_factory):
     rec = Recording()
     pairs = MatchedPoints(rec, 4)
-    writer = Writer(SimpleNamespace(archive=rec, matches=pairs), Options(), threading.Event())
+    writer = Writer(recordings_factory(archive=rec, matches=pairs), Options(), threading.Event())
     msg = VizMessage()
     name = b'vio/debug/keypoints/left'
     msg.entity_len, msg.entity[:len(name)] = len(name), name

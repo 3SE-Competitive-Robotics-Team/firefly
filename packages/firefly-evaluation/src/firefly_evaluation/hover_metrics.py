@@ -54,7 +54,8 @@ def attitude_health(data, start, end, limits):
                           "health_samples": len(health), "attitude_samples": len(attitude)}
 
 
-def score_hover(case, options, limits=HoverLimits(), *, phase_name="sustained_hover"):
+def score_hover(case, options, limits=HoverLimits(), *, phase_name="sustained_hover",
+                evidence_reader=read_evidence, frame_transform=startup_truth, landing_check=landing_truth):
     """完整 20 秒真值悬停、姿态链路、落地、物理安全和退出必须同时通过。"""
     stages = case["stages"]
 
@@ -67,7 +68,7 @@ def score_hover(case, options, limits=HoverLimits(), *, phase_name="sustained_ho
             stages[name] = {"status": "failed", "reason": str(error)}
 
     try:
-        data, case["evaluation_frame"] = startup_truth(read_evidence(case["recording"]))
+        data, case["evaluation_frame"] = frame_transform(evidence_reader(case["recording"]))
         phase = stages[phase_name]
         start, end = phase["start_sim_s"], phase["end_sim_s"]
         if phase["status"] != "passed" or end - start < limits.seconds - 1e-6:
@@ -80,7 +81,7 @@ def score_hover(case, options, limits=HoverLimits(), *, phase_name="sustained_ho
     check("sustained_hover_accuracy", lambda: settled_truth(
         data, end, end - start, np.array([0., 0., options.altitude_m]), tolerance, options.hover_speed_mps))
     check("attitude_health", lambda: attitude_health(data, start, end, limits))
-    check("landing_accuracy", lambda: landing_truth(data, stages["landing"], options))
+    check("landing_accuracy", lambda: landing_check(data, stages["landing"], options))
 
     def physics():
         rows = data["physics"]

@@ -337,7 +337,7 @@ impl App {
         let log_ipc = firefly_observability::init_ipc(&node, "planner");
         // 地图系输入是必需端口；局部 VIO 不能替代它。
         let odom = navigation::NavigationReceiver::start(map_file.is_some())
-            .map_err(|e| e.with_context("operation", "创建规划器地图系里程计订阅"))?;
+            .map_err(|e| e.with_operation("创建规划器地图系里程计订阅"))?;
         let depth = open_sub::<DepthImageMessage>(
             &node,
             DEPTH_TOPIC,
