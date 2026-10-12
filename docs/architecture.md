@@ -199,7 +199,10 @@ P_new = Jr(delta) P_posterior Jr(delta)ᵀ
 IMU 传播及三角化；`firefly-vio-init` 负责初始化；`firefly-vio` 编排状态与更新。
 对照 OpenVINS，在线入口为 `apps/vio`。
 
-1. 初始化要求静止 IMU 与图像视差检查；测量不足或检测到运动时保持未就绪。
+1. 默认采用静态初始化，检查 IMU 静止条件与图像视差；测量不足或不满足静态初始化条件时
+   保持未就绪。`firefly-vio-init` 在 `init_dyn_use=true` 且视差检测到运动时尝试动态初始化；
+   该选项默认关闭，`apps/vio` 的 TOML 配置未暴露此开关。路径选择见
+   `crates/firefly-vio-init/src/inertial_init.rs`，默认值见同 crate 的 `options.rs`。
 2. 前端在上一帧补网格 FAST 点，对新增左点做左→右 LK 同 ID 配对，再做左右时间 LK、
    几何外点剔除和归一化测量入库。右目去重必须保留已配对点。
 3. IMU 传播至相机时刻并增广克隆；三角化、FEJ 雅可比、零空间投影、创新检验与
@@ -230,7 +233,7 @@ VIO 外援订阅端。控制线程通过非阻塞内存快照读取姿态与去�
 - 角速度反馈：`gyro - estimated_bias`，按测量间隔的一阶 30Hz 低通。
 - 姿态反馈：本地六误差状态 ESKF，Hamilton body→odom。
 - 位置/速度反馈：`Firefly/Odometry`。地图融合只通过坐标树转换规划参考。
-- IMU 100Hz、物理 200Hz；FC 按墙钟 1kHz 调度，样本间保持最近姿态与角速度。
+- IMU 与物理各 1kHz；FC 按墙钟 1kHz 调度，样本间保持最近姿态与角速度。
   ESKF 只按新测量的时间戳传播，不在控制 tick 上重复积分或外推。
 
 `configs/fc.toml [imu]` 可覆盖 `firefly_imu::Options`；缺键使用代码默认值。
@@ -360,9 +363,13 @@ VIO 发布同刻原始位姿、轨迹 ID、像素/归一化观测、可靠三维
 - 双侧几何来自持久路标，不要求两张图各有可用深度图。固定尺度三点刚体假设按双向
   重投影判共识，初解用于投影扩匹配与精化；再检查内点、支持比例、图像覆盖与 VIO 新息。
 - 连续不同图像沿确认区域、传播初解并重新匹配，不能把运动预测当确认；区域解冲突拒绝。
-  门限、连续确认和冷却见 `firefly-landmarks`，不得因一次失败调低。
+  几何验证门限见 `crates/firefly-landmarks/src/map.rs`；连续确认与发布冷却由
+  `apps/slam/src/backend.rs` 编排，不得因一次失败调低门限。
 - 后端独立验收回环。只有明确接受才融合跨区路标身份；等待确认时停止新关键帧，
-  超时报错。修正快照必须覆盖全部已建关键帧；不完整时暂缓，原始 VIO 位姿不可覆盖。
+  超时报错。已接受的修正快照必须覆盖全部已建关键帧：地图锚点快照缺帧时暂缓，
+  等待完整快照；匹配当前待确认回环的已接受快照缺帧时，`Map::correct` 返回错误，
+  经 `apps/slam/src/main.rs` 传播并退出进程。分支判断见 `apps/slam/src/backend.rs`；
+  原始 VIO 位姿不可覆盖。
 
 地图、图节点、路标及等待队列均有容量上限，耗尽显式拒绝，不静默扩容。
 本实现不是 ORB-SLAM3 联合局部 BA，不含 DBoW、Atlas、全局视觉惯性 BA、跨会话恢复或
@@ -434,9 +441,11 @@ FFMap 先验独立保护，不可被射线、衰减、动态障碍移除擦除�
 
 ### 深度代理模型
 
-`apps/render/src/depth_noise.rs` 将 reverse-Z 转为相机光轴深度 `z=near/reverse_z`，
-无效值为零。在线施加量程裁剪、由干净几何生成的边缘掩码、相关块状缺测、横向扰动、
-视差噪声与量化；`render --offline` 输出理想几何标签，仍需左目注册。
+`apps/render/src/sensors.rs::linearize_depth` 将 reverse-Z 转为相机光轴深度
+`z=near/reverse_z`，无效值与超出有效深度范围的值置零。`apps/render/src/process.rs`
+先调用线性化，再在线调用 `depth_noise.rs::apply`，对米制深度施加量程裁剪、由干净几何
+生成的边缘掩码、相关块状缺测、横向扰动、视差噪声与量化。`render --offline` 保留
+线性化并跳过噪声处理，输出理想几何标签，仍需左目注册。
 
 ```text
 g = √(1-α) g_fixed + √α g_dynamic(t)
@@ -486,7 +495,13 @@ d = fB/z; d_m = q round((d+ε)/q); z_m = fB/d_m
 VINS-Fusion 的四自由度残差、固定首节点和漂移输出是参考；本项目使用弧度、相邻增量链、
 地图锚点和自有 PCG，并非 Ceres 的逐项移植。ORB-SLAM3 参考共视排除、固定尺度几何与
 连续确认，不包含其完整词袋和 BA。源码审查不能替代独立公式、差分和最终输出验证。
-OpenCV 图像语义基准为 `d7b17c1bbc361f608768a44d9cd89458fe70bea8`，固定 CPU 夹具为 4.12.0。
+OpenCV 兼容性对齐以 purecv 上游约定的 **4.10.0** 为目标。现有参考材料的版本分别为：
+
+- 源码查阅快照 `d7b17c1bbc361f608768a44d9cd89458fe70bea8` 属于 5.x
+  （`git describe` 为 `5.0.0-712-gd7b17c1bb`），不作为 4.10.0 数值一致性的证据。
+- `crates/firefly-vio-core/src/track/histogram.rs` 的 CLAHE CPU 夹具及
+  `crates/firefly-vio-core/src/cam.rs` 的鱼眼去畸变夹具来自 **4.12.0**；
+  它们保留真实来源标注，不能据此宣称已与 4.10.0 对齐。
 
 姿态数学参考 Solà《Quaternion kinematics for the error-state Kalman filter》第 5–6 节、
 Julier/Uhlmann 的协方差交集；实现不采用连续拒绝后强制放行的经验逻辑。

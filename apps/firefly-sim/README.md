@@ -2,7 +2,7 @@
 
 RMUC MuJoCo 物理进程，由根 uv workspace 管理。
 
-200Hz 物理步进，发布 IMU、仿真位姿、评测状态与机体参数；接收
+物理与 IMU 各 1kHz，发布 IMU、仿真位姿、评测状态与机体参数；接收
 `Firefly/Control` 四电机推力，无有效控制指令时物理暂停。
 双目与深度由独立的 Bevy `render` 进程生成。
 
