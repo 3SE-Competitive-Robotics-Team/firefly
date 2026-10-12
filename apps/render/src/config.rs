@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// 配置路径（编译期绝对路径，与运行 `CWD` 无关）。
-const RENDER_CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/render.toml");
+pub const RENDER_CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/render.toml");
 
 /// 场景三方向光缺省照度（lux）。
 pub const DEFAULT_DIRECTIONAL: [f32; 3] = firefly_render::lighting::ILLUMINANCE;
@@ -121,20 +121,6 @@ pub struct RenderConfig {
     /// 深度传感器退化模型。
     #[serde(default)]
     pub depth_noise: crate::depth_noise::DepthNoiseOptions,
-}
-
-/// 读 `configs/render.toml`；缺文件使用默认值，读取/解析失败报错退出。
-#[must_use]
-pub fn load() -> RenderConfig {
-    let config: RenderConfig = firefly_config::load(RENDER_CONFIG).unwrap_or_else(|e| {
-        log::error!("加载 configs/render.toml 失败：{e}");
-        std::process::exit(1);
-    });
-    config.depth_noise.validate().unwrap_or_else(|e| {
-        log::error!("深度噪声配置无效：{e}");
-        std::process::exit(1);
-    });
-    config
 }
 
 /// 离线资产兼容契约；算法版本与生产二进制另外记录为 provenance。

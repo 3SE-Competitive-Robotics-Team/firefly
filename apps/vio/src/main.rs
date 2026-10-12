@@ -72,12 +72,15 @@ fn parse_config_path() -> Result<String, String> {
 
 #[allow(clippy::too_many_lines)] // 启动编排（标定/初始化/订阅/主循环），结构由进程生命周期驱动
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    firefly_observability::init();
     let config_path = parse_config_path().map_err(|e| {
         eprintln!("{e}\n用法：vio [--config configs/vio.toml]");
         std::process::exit(2);
     })?;
-    let cfg = VioConfig::load(&config_path)?;
+    let cfg = firefly_config::startup::<VioConfig>(
+        &config_path,
+        firefly_observability::init,
+        |_| Ok(()),
+    )?;
     log::info!(
         "VIO 进程启动：订阅 MuJoCo 物理环境（iceoryx2 输入 + trace 上下文），配置 {config_path}"
     );

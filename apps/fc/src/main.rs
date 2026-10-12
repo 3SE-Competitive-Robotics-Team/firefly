@@ -613,12 +613,15 @@ fn publish_scalars(viz: &VizPublisher, t: f64, entity: &str, values: &[f64]) {
 
 #[allow(clippy::too_many_lines)] // 进程生命周期与控制节拍编排
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    firefly_observability::init();
     let config_path = parse_config_path().map_err(|e| {
         eprintln!("{e}\n用法：fc [--config configs/fc.toml]");
         std::process::exit(2);
     })?;
-    let cfg = config::load(&config_path);
+    let cfg = firefly_config::startup::<config::FcConfig>(
+        &config_path,
+        firefly_observability::init,
+        config::FcConfig::validate,
+    )?;
     let period = Duration::from_secs_f64(1.0 / cfg.rate_hz);
     let dt = (1.0 / cfg.rate_hz) as f32;
 

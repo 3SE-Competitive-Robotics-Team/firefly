@@ -15,7 +15,7 @@ import sys
 
 import numpy as np
 
-from firefly_workspace import load_toml, digest, workspace_root
+from firefly_workspace import startup, digest, workspace_root
 
 from .collide import collide, write_collision
 from .map_export import export_map
@@ -173,6 +173,13 @@ def build(source: Path, output: Path, map_path: Path, options: Options, blender:
     return summary
 
 
+def decode_options(values: dict) -> Options:
+    """转换并校验 CLI 配置，在构建资产前完成。"""
+    options = Options(**values)
+    options.validate()
+    return options
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stp", type=Path)
@@ -181,8 +188,7 @@ def main(argv=None):
     parser.add_argument("--config", type=Path, default=ROOT / "configs/cad.toml")
     parser.add_argument("--blender", default="blender")
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    options = Options(**load_toml(args.config))
+    options = startup(args.config, decode_options)
     build(args.stp, args.out_dir, args.map_out, options, args.blender)
     return 0
 

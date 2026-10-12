@@ -1,4 +1,7 @@
 """工具共用的工作区定位、可选配置与文件内容指纹；仅使用标准库。"""
+from collections.abc import Callable
+from typing import TypeVar
+
 import hashlib
 import logging
 from pathlib import Path
@@ -26,11 +29,42 @@ def digest(path: str | Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+T = TypeVar("T")
+
+
+def init_logging() -> None:
+    """CLI 基础日志；已配置的宿主日志保持其处理器与过滤级别。"""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+
+def startup(path: str | Path, decode: Callable[[dict], T], *,
+            init_logging: Callable[[], None] = init_logging) -> T:
+    """命令行解析后初始化日志、读取并转换/校验主配置，然后报告来源。
+
+    decode 只构造和校验配置；返回成功后调用方才创建运行资源。
+    """
+    init_logging()
+    values, exists = _read_toml(path)
+    config = decode(values)
+    _report_config(path, exists)
+    return config
+
+
 def load_toml(path: str | Path) -> dict:
-    """可选 TOML 覆盖项；仅缺文件返回空表，读取和解析错误继续传播。"""
+    """已初始化日志的进程读取辅助配置；仅缺文件返回空表，其他错误传播。"""
+    values, exists = _read_toml(path)
+    _report_config(path, exists)
+    return values
+
+
+def _read_toml(path: str | Path) -> tuple[dict, bool]:
     try:
         with Path(path).open("rb") as stream:
-            return tomllib.load(stream)
+            return tomllib.load(stream), True
     except FileNotFoundError:
-        logging.getLogger(__name__).info("配置 %s 不存在，使用默认值", path)
-        return {}
+        return {}, False
+
+
+def _report_config(path: str | Path, exists: bool) -> None:
+    message = "已加载配置 %s" if exists else "配置 %s 不存在，使用默认值"
+    logging.getLogger(__name__).info(message, path)

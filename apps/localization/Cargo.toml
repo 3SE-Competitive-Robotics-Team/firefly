@@ -15,6 +15,7 @@ name = "localization"
 path = "src/main.rs"
 
 [dependencies]
+firefly-config.workspace = true
 firefly-base.workspace = true
 fastrace = { workspace = true }
 firefly-error = { workspace = true }

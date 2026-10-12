@@ -132,7 +132,6 @@ fn load_model(model: &str) -> Result<Model, Box<dyn std::error::Error>> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    firefly_observability::init();
     let Args {
         model,
         build_map,
@@ -145,6 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         std::process::exit(2);
     })?;
+    firefly_observability::init();
     let mut model = load_model(&model)?;
     if let (Some(dir), Some(out)) = (build_map, out) {
         build_map_offline(&mut model, &dir, &out)?;

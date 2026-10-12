@@ -1127,7 +1127,6 @@ impl DepthFreshness {
 }
 
 fn main() {
-    init_observability();
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
@@ -1138,6 +1137,7 @@ fn main() {
         }
     };
     if args.mandatory_stop {
+        init_observability();
         if let Err(e) = emit_mandatory_stop() {
             log::error!("强制停止指令发布失败：{e}");
             firefly_observability::flush();
@@ -1147,14 +1147,17 @@ fn main() {
         firefly_observability::flush();
         return;
     }
-    let toml_cfg = match config::PlannerToml::load(&args.config) {
+    let toml_cfg = match firefly_config::startup::<config::PlannerToml>(
+        &args.config,
+        init_observability,
+        |_| Ok(()),
+    ) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("加载配置失败：{e}");
             std::process::exit(1);
         }
     };
-    log::info!("已加载配置 {}", args.config.display());
     let map_file = args
         .map
         .as_ref()

@@ -1,6 +1,4 @@
-//! `configs/localization.toml` 加载（纯数据 `Options`，缺键回落 `Default`）。
-
-use std::path::Path;
+//! `configs/localization.toml` 的参数定义；缺失字段使用对应类型的默认值。
 
 use firefly_error::{Error, ErrorKind, Result};
 use serde::Deserialize;
@@ -72,17 +70,6 @@ impl InitialAlignment {
             translation.into(),
             [0., 0., half.sin(), half.cos()],
         )
-    }
-}
-
-impl LocalizationConfig {
-    /// 从 TOML 文件加载。
-    ///
-    /// # Errors
-    ///
-    /// 文件存在但不可读，或解析失败。
-    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
-        firefly_config::load(path)
     }
 }
 
@@ -238,7 +225,7 @@ mod tests {
 
     #[test]
     fn shipped_config_parses() {
-        let cfg = LocalizationConfig::load(concat!(
+        let cfg = firefly_config::load::<LocalizationConfig>(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../configs/localization.toml"
         ))

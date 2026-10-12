@@ -2919,6 +2919,7 @@ name = "firefly-config"
 version = "0.1.0"
 dependencies = [
  "firefly-error",
+ "firefly-observability",
  "log",
  "serde",
  "toml 1.1.8+spec-1.1.0",
@@ -4553,6 +4554,7 @@ version = "0.1.0"
 dependencies = [
  "fastrace",
  "firefly-base",
+ "firefly-config",
  "firefly-error",
  "firefly-localization",
  "firefly-observability",

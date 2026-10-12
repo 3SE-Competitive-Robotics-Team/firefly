@@ -1,10 +1,7 @@
-//! `configs/vio.toml` 加载：缺键回落默认值，缺文件使用默认值，读取/解析失败报错。
+//! `configs/vio.toml` 的参数定义；缺失字段使用对应类型的默认值。
 //!
 //! 相机与 IMU 默认值对应 RMUC render 双目部署；体素选点由配置启用。
 
-use std::path::Path;
-
-use firefly_error::Result;
 use serde::Deserialize;
 
 /// 双目相机标定（同内参，IMU 居中）。
@@ -133,17 +130,6 @@ pub struct VioConfig {
     pub slam: Slam,
 }
 
-impl VioConfig {
-    /// 从 TOML 文件加载。
-    ///
-    /// # Errors
-    ///
-    /// 文件存在但不可读，或 TOML 解析失败。
-    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
-        firefly_config::load(path)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Slam, VioConfig};
@@ -151,7 +137,7 @@ mod tests {
     /// 随仓库发布的配置文件必须可解析且为完整部署值。
     #[test]
     fn shipped_config_parses() {
-        let cfg = VioConfig::load(concat!(
+        let cfg = firefly_config::load::<VioConfig>(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../configs/vio.toml"
         ))
@@ -175,7 +161,7 @@ mod tests {
 
     #[test]
     fn imu_density_preserves_calibrated_integral_variance_across_rates() {
-        let config = VioConfig::load(concat!(
+        let config = firefly_config::load::<VioConfig>(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../configs/vio.toml"
         ))

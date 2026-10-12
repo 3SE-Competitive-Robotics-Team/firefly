@@ -1,6 +1,4 @@
-//! `configs/planner.toml` 加载：缺键回落默认值，缺文件使用默认值，读取/解析失败报错。
-
-use std::path::Path;
+//! `configs/planner.toml` 的参数定义；缺失字段使用对应类型的默认值。
 
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_planner::{ManagerOptions, PlannerConfig};
@@ -16,17 +14,6 @@ pub struct PlannerToml {
     pub mapping: MappingOptions,
 }
 
-impl PlannerToml {
-    /// 从 TOML 文件加载。
-    ///
-    /// # Errors
-    ///
-    /// 文件存在但不可读，或 TOML 解析失败。
-    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
-        firefly_config::load(path)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::PlannerToml;
@@ -35,7 +22,7 @@ mod tests {
     /// 随仓库发布的配置文件必须可解析且为完整部署值。
     #[test]
     fn shipped_config_parses() {
-        let cfg = PlannerToml::load(concat!(
+        let cfg = firefly_config::load::<PlannerToml>(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../configs/planner.toml"
         ))

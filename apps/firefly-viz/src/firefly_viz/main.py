@@ -24,8 +24,10 @@ from firefly_mujoco import (
     LogMessage, TraceContext, load_scene_name,
 )
 
+from firefly_workspace import startup
+
 from .capture import Capture
-from .config import ROOT, load
+from .config import ROOT, decode
 from .messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage
 from .recording import Recordings, URL
 from .video import Frame
@@ -139,8 +141,9 @@ def _parse_args():
 
 
 def run(args):
+    options = startup(args.config, decode, init_logging=lambda: logging.basicConfig(
+        level=logging.INFO, format="[%(name)s] %(message)s"))
     rr.set_strict_mode(True)
-    options = load(args.config)
     url = args.connect or (URL if args.no_save or args.save is None else None)
     path = args.save
     if path is None and not args.no_save:
@@ -306,10 +309,10 @@ def run(args):
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
+    args = _parse_args()
     faulthandler.enable()
     iox2.set_log_level(iox2.LogLevel.Error)
-    run(_parse_args())
+    run(args)
 
 
 if __name__ == "__main__":

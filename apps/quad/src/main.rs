@@ -10,6 +10,7 @@ mod config;
 mod quad;
 
 use bevy::asset::AssetPlugin;
+use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use bevy::text::FontSize;
 use bevy::window::{Window, WindowPlugin};
@@ -23,8 +24,15 @@ use quad::{Quad, QuadInput};
 /// 配置（编译期绝对路径）。
 const CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/quad.toml");
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new();
+    let cfg = firefly_config::startup::<QuadConfig>(
+        CONFIG,
+        || {
+            app.add_plugins(LogPlugin::default());
+        },
+        |_| Ok(()),
+    )?;
     app.add_plugins(
         DefaultPlugins
             .set(AssetPlugin {
@@ -38,9 +46,9 @@ fn main() {
                     ..default()
                 }),
                 ..default()
-            }),
+            })
+            .disable::<LogPlugin>(),
     );
-    let cfg = config::load(CONFIG);
     log::info!("quad：场地 {}，起点 {:?}", cfg.field, cfg.start);
     app.insert_resource(cfg)
         .insert_resource(QuadInput::default())
@@ -50,6 +58,7 @@ fn main() {
         .add_systems(FixedUpdate, quad::dynamics)
         .add_systems(Update, (quad::read_input, follow_camera, update_hud))
         .run();
+    Ok(())
 }
 
 /// 场地 + 光照 + 主相机。

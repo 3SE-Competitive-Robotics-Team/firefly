@@ -14,7 +14,6 @@ use firefly_pubsub::{
 use std::time::Duration;
 
 fn main() -> Result<()> {
-    firefly_observability::init();
     let mut args = std::env::args().skip(1);
     let mut path = "configs/slam.toml".to_owned();
     while let Some(arg) = args.next() {
@@ -28,7 +27,7 @@ fn main() -> Result<()> {
             .next()
             .ok_or_else(|| Error::new(ErrorKind::InvalidArgument, "missing config"))?;
     }
-    let options: Options = firefly_config::load(&path)?;
+    let options: Options = firefly_config::startup(&path, firefly_observability::init, |_| Ok(()))?;
     let mut backend = backend::Backend::new(options)?;
     let node = firefly_pubsub::node::create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "slam");

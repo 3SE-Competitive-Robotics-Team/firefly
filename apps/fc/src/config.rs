@@ -27,13 +27,16 @@ fn d_rate_hz() -> f64 {
     1000.0
 }
 
-/// 读配置；缺文件使用默认值，读取/解析失败报错退出。
-#[must_use]
-pub fn load(path: &str) -> FcConfig {
-    firefly_config::load(path).unwrap_or_else(|e| {
-        log::error!("加载配置 {path} 失败：{e}");
-        std::process::exit(1);
-    })
+impl FcConfig {
+    pub fn validate(&self) -> firefly_error::Result<()> {
+        if !self.rate_hz.is_finite() || self.rate_hz <= 0. {
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                "rate_hz must be finite and positive",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

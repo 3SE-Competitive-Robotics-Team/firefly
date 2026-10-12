@@ -54,7 +54,12 @@ class Options:
 
 
 def load(path: str | Path = ROOT / "configs/viz.toml") -> Options:
-    values = load_toml(path)
+    return decode(load_toml(path))
+
+
+def decode(values: dict) -> Options:
+    """构造并校验录制配置；不创建录制、编码或 IPC 资源。"""
+    values = values.copy()
     video = VideoOptions(**values.pop("video", {}))
     capture = CaptureOptions(**values.pop("capture", {}))
     options = Options(video=video, capture=capture, **values)

@@ -79,7 +79,6 @@ fn load_session(model: &str) -> Result<Session, Box<dyn std::error::Error>> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    firefly_observability::init();
     let (model, map_path, config) = parse_args().map_err(|e| {
         eprintln!(
             "{e}\n用法：lightglue --map <map.ffvmap> [--model models/lightglue-aliked-k512.onnx]"
@@ -88,11 +87,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     let map_path = map_path
         .ok_or("lightglue requires --map <map.ffvmap>; online loop closure runs in slam")?;
+    let options =
+        firefly_config::startup::<Options>(config, firefly_observability::init, |options| {
+            if !options.query_period.is_finite() || options.query_period <= 0. {
+                return Err(firefly_error::Error::new(
+                    firefly_error::ErrorKind::InvalidArgument,
+                    "query_period must be finite and positive",
+                ));
+            }
+            Ok(())
+        })?;
     let map = firefly_vision_map::load_map(std::path::Path::new(&map_path))?;
-    let options: Options = firefly_config::load(config)?;
-    if !options.query_period.is_finite() || options.query_period <= 0. {
-        return Err("query_period must be positive".into());
-    }
     let mut session = load_session(&model)?;
     smoke_inference(&mut session)?;
     run_loop(&mut session, &map, &options)?;

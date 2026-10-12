@@ -38,12 +38,38 @@
 
 - **TOML、一应用一份**：统一放仓库顶层 `configs/`（`sim.toml` / `vio.toml` / `planner.toml`），
   启动时加载（Rust 支持 `--config` 换文件）。配置文件可选：缺文件记录一行 INFO 并使用
-  代码默认值；文件存在但不可读、格式或参数无效仍报错，不静默回落。Rust 使用
-  `firefly_config::load`，Python 使用 `firefly_workspace.load_toml`。
+  代码默认值；文件存在但不可读、格式或参数无效仍报错，不静默回落。
 - **最小化**：保留必填键，只对有默认值的键写差异覆盖；无覆盖项时保留仅含用途和
   默认值来源注释的配置文件。缺失键使用代码默认值；
   纯数据 Options 直接 `serde::Deserialize` + `#[serde(default)]`，Python 用标准库
   `tomllib`；不引 YAML。
+
+#### 应用启动入口
+
+固定顺序：**解析命令行 → 初始化基础日志 → 读取、转换并校验配置 → 报告配置来源
+→ 创建运行资源 → 运行应用**。命令行帮助与参数错误不创建运行资源。
+
+- Rust 主配置通过 `firefly_config::startup(path, init_logging, validate)` 加载。
+  普通进程传入 `firefly_observability::init`；校验函数返回 `firefly_error::Result<()>`。
+  无额外参数约束时传入 `|_| Ok(())`。配置类型只描述字段、默认值和参数约束，
+  不再包装文件读取、安装日志或调用 `process::exit`；启动错误交给 `main` 返回或处理。
+- Python 主配置通过 `firefly_workspace.startup(path, decode)` 加载。
+  `decode` 将字典转换为应用配置并校验，不创建运行资源；默认安装标准库 INFO 日志。
+  宿主需要特殊日志格式时通过 `init_logging` 参数提供初始化函数。
+- 公共入口成功返回后才创建 IPC、模型、工作线程、窗口等资源。辅助配置在此之后使用
+  `firefly_config::load` / `firefly_workspace.load_toml`，不重复初始化进程日志。
+  领域对象构造时仍保留自己的不变量校验。
+- 配置来源由公共加载模块记录，调用方不再重复打印“已加载配置”。缺文件与空文件
+  使用相同默认值；缺文件仅在转换、校验成功后提示回落。INFO 的显示尊重日志过滤设置，
+  Rust 可用 `RUST_LOG=info` 查看。
+- Bevy 先独立安装日志设施，在配置通过后安装其余插件。使用 `LogPlugin` 时，
+  在随后的 `DefaultPlugins` 中禁用它，避免重复安装；自定义日志宿主沿用自己的桥接。
+
+新应用以可编译的 [Rust 最小应用](../crates/firefly-config/examples/minimal.rs) 和
+[Python 最小应用](../packages/firefly-workspace/examples/minimal.py) 为入口示例；
+Bevy 日志接线参考 [quad](../apps/quad/src/main.rs)。示例调用公共实现，配置默认值
+仍归各应用自己的类型。Rust 示例随 `cargo check --workspace --all-targets` 编译，
+不维护第二份示例代码或独立应用名单。
 
 标定与噪声改对应 Options 默认值，doc 注释写单位和来源；部署覆盖同步 `configs/`。
 升级视觉依赖必须运行 LK 位移回归，不放宽容差；依赖统一在根 Cargo/uv workspace 和锁文件。

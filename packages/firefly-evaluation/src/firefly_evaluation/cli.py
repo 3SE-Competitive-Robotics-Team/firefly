@@ -19,7 +19,7 @@ from .process_lifecycle import require_idle
 from .mission_metrics import score
 from .mission_sim import CONTACT_POLICY
 from .vision_assets import verify_map_compatibility
-from firefly_workspace import digest, load_toml, workspace_root
+from firefly_workspace import digest, startup, workspace_root
 
 log = logging.getLogger("acceptance")
 
@@ -108,6 +108,13 @@ def provenance(root, *, allow_map_rig_translation=False, vio_only=False, prior_m
             "dependencies": {name: version(name) for name in ["numpy", "mujoco", "iceoryx2", "rerun-sdk"]}}
 
 
+def decode_options(values: dict) -> Options:
+    """转换并校验验收配置，不启动任务或创建证据目录。"""
+    options = Options(**values)
+    options.validate()
+    return options
+
+
 def main(argv=None, *, resolve_workspace=workspace_root, check_idle=require_idle,
          collect_provenance=provenance, mission_factory=Mission, score_case=score):
     parser = argparse.ArgumentParser(description=__doc__)
@@ -134,13 +141,13 @@ def main(argv=None, *, resolve_workspace=workspace_root, check_idle=require_idle
         parser.error("--allow-map-rig-translation requires --prior-maps")
     if args.prior_maps != (args.localization_config is not None):
         parser.error("--prior-maps requires --localization-config with explicit [origin]")
+    if not 1 <= args.repeat <= 100:
+        parser.error("--repeat must be in 1..100")
+    options = startup(args.config, decode_options)
     if args.localization_config:
         with args.localization_config.open("rb") as stream:
             if "origin" not in tomllib.load(stream):
                 parser.error("external maps require explicit [origin]")
-    if not 1 <= args.repeat <= 100:
-        parser.error("--repeat must be in 1..100")
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     directory = args.output_dir.resolve() if args.output_dir else root / "logs/acceptance" / run_id
     if not directory.is_relative_to(root / "logs"):
@@ -154,8 +161,6 @@ def main(argv=None, *, resolve_workspace=workspace_root, check_idle=require_idle
         report["scope"] = "RMUC mission; VIO + explicit external map alignment + offline visual map localization + online loops + prior/depth mapping"
     try:
         check_idle(root)
-        options = Options(**load_toml(args.config))
-        options.validate()
         report["options"] = asdict(options)
         report["contact_policy"] = CONTACT_POLICY
         report["provenance"] = (collect_provenance(root, vio_only=True) if args.vio_only else

@@ -792,7 +792,6 @@ impl App {
 }
 
 fn main() {
-    init_observability();
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
@@ -802,14 +801,17 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let cfg = match LocalizationConfig::load(&args.config) {
+    let cfg = match firefly_config::startup::<LocalizationConfig>(
+        &args.config,
+        init_observability,
+        |_| Ok(()),
+    ) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("加载配置失败 {}：{e}", args.config.display());
             std::process::exit(1);
         }
     };
-    log::info!("已加载配置 {}", args.config.display());
     let mut app = match App::new(cfg, &args.odom_topic) {
         Ok(a) => a,
         Err(e) => {

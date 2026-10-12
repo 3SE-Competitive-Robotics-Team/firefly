@@ -38,15 +38,6 @@ impl Default for QuadConfig {
     }
 }
 
-/// 读配置；缺文件使用默认值，读取/解析失败报错退出。
-#[must_use]
-pub fn load(path: &str) -> QuadConfig {
-    firefly_config::load(path).unwrap_or_else(|e| {
-        log::error!("加载配置 {path} 失败：{e}");
-        std::process::exit(1);
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

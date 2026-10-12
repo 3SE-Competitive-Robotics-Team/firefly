@@ -6,13 +6,12 @@
 from __future__ import annotations
 
 import argparse
-import logging
 from collections.abc import Sequence
 from typing import Protocol
 
 import time
 
-from firefly_workspace import load_toml
+from firefly_workspace import startup
 
 import iceoryx2 as iox2
 import numpy as np
@@ -169,15 +168,8 @@ class EnvironmentFactory(Protocol):
     def __call__(self, *, timestep: float, imu_period: float) -> DroneEnv: ...
 
 
-def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory = DroneEnv,
-         publish_plant_state: bool = True) -> None:
-    parser = argparse.ArgumentParser(description="RMUC MuJoCo 物理进程；图像由 render 提供")
-    parser.add_argument("--no-trace", action="store_true")
-    parser.add_argument("--config", default="configs/sim.toml")
-    args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    trace_enabled = not args.no_trace
-    cfg = load_toml(args.config)
+def decode_config(cfg: dict) -> tuple[float, float, float, np.ndarray]:
+    """将 TOML 覆盖项转换为已校验的周期和初始位置。"""
     rates = cfg.get("rates", {})
     frequencies = [rates.get("physics", 1000.0), rates.get("imu", 1000.0), rates.get("pose", 10.0)]
     if not np.isfinite(frequencies).all() or any(rate <= 0 for rate in frequencies):
@@ -188,8 +180,19 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
             raise ValueError("物理频率必须为 IMU 与位姿频率的整数倍")
     physics_period, imu_period, pose_period = (1.0 / rate for rate in frequencies)
     # 停机坪：缺配置时按场景定义（`firefly_mujoco.scene.PAD`）——上电停在地面
-    load_scene_name()
     start_pos = np.array(cfg.get("start", drone_pad()))
+    return physics_period, imu_period, pose_period, start_pos
+
+
+def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory = DroneEnv,
+         publish_plant_state: bool = True) -> None:
+    parser = argparse.ArgumentParser(description="RMUC MuJoCo 物理进程；图像由 render 提供")
+    parser.add_argument("--no-trace", action="store_true")
+    parser.add_argument("--config", default="configs/sim.toml")
+    args = parser.parse_args(argv)
+    trace_enabled = not args.no_trace
+    physics_period, imu_period, pose_period, start_pos = startup(args.config, decode_config)
+    load_scene_name()
     env = env_factory(timestep=physics_period, imu_period=imu_period)
     env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))  # xyzw 单位四元数
     ftrace.init(enabled=trace_enabled)

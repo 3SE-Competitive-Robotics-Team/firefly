@@ -38,29 +38,31 @@ use rig::{PoseState, spawn_rig};
 use scene::SceneSpec;
 
 /// 以 RMUC 资产和初始摆位启动 Bevy；仿真位姿到达后更新机体与传感器。
-fn main() {
-    firefly_observability::init();
-    // 在 Bevy 启动前安装全局 tracing → log 转发器。
-    if let Err(e) = trace_bridge::init() {
-        log::warn!("tracing 转发安装失败（Bevy 侧日志将静默）: {e}");
-    }
-    let spec = scene::selected();
-    let render_config = config::load();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
-    if let Some(index) = args.iter().position(|arg| arg == "--export-asset-contract") {
-        let outcome = args
-            .get(index + 1)
-            .ok_or("missing asset contract path".to_owned())
-            .and_then(|path| {
-                toml::to_string_pretty(&render_config.asset_contract())
-                    .map_err(|error| error.to_string())
-                    .and_then(|text| std::fs::write(path, text).map_err(|error| error.to_string()))
-            });
-        if let Err(error) = outcome {
-            log::error!("资产契约导出失败: {error}");
-            std::process::exit(1);
-        }
-        return;
+    let export_path = args
+        .iter()
+        .position(|arg| arg == "--export-asset-contract")
+        .map(|index| args.get(index + 1).ok_or("missing asset contract path"))
+        .transpose()?;
+    let offline = args.iter().any(|arg| arg == "--offline");
+    let render_config = firefly_config::startup::<RenderConfig>(
+        config::RENDER_CONFIG,
+        || {
+            firefly_observability::init();
+            if let Err(e) = trace_bridge::init() {
+                log::warn!("tracing 转发安装失败（Bevy 侧日志将静默）: {e}");
+            }
+        },
+        |config| config.depth_noise.validate(),
+    )?;
+    let spec = scene::selected();
+    if let Some(path) = export_path {
+        std::fs::write(
+            path,
+            toml::to_string_pretty(&render_config.asset_contract())?,
+        )?;
+        return Ok(());
     }
 
     log::info!(
@@ -70,7 +72,6 @@ fn main() {
         spec.asset_path(),
         spec.start
     );
-    let offline = std::env::args().any(|arg| arg == "--offline");
     let ports = open_ports(offline).unwrap_or_else(|e| {
         log::error!("IPC 端口打开失败：{e:?}");
         std::process::exit(1);
@@ -82,6 +83,7 @@ fn main() {
             std::process::exit(1);
         })
         .run();
+    Ok(())
 }
 
 /// 组装 Bevy 应用（插件、资源与系统注册）；`main` 只做参数、日志与 IPC 准备。
