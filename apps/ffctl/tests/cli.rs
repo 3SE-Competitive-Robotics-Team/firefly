@@ -3,14 +3,18 @@
 //! 只测不碰 IPC 的面（帮助/用法/规格）——投递路径要真发布消息，放在实测里跑，
 //! 免得测试去动一架正在飞的飞机。
 
-/// 顶层只列域与自用命令（不列动词）。
+/// 顶层只列域与自用命令（不列动词）；域在前，`completion` 排在最后。
 #[test]
 fn top_level_lists_domains() {
     let out = usage_rs::test::command!("ffctl", "--help").assert_success();
     let stdout = out.stdout_text();
-    assert!(stdout.contains("fc"), "{stdout}");
-    assert!(stdout.contains("planner"), "{stdout}");
-    assert!(stdout.contains("completion"), "{stdout}");
+    let at = |row: &str| {
+        stdout
+            .find(&format!("\n  {row}"))
+            .unwrap_or_else(|| panic!("缺少 {row} 行：{stdout}"))
+    };
+    assert!(at("fc ") < at("planner "), "{stdout}");
+    assert!(at("planner ") < at("completion "), "{stdout}");
 }
 
 /// 域的下一层是动词，且每个域自带帮助。
@@ -59,4 +63,30 @@ fn usage_spec_exports_domains() {
     assert!(spec.contains("cmd planner"), "{spec}");
     assert!(spec.contains("cmd takeoff"), "{spec}");
     assert!(spec.contains("effect=write"), "{spec}");
+}
+
+/// shell 的取值来自 `ValueEnum`：帮助里列全可能值，补全候选同源。
+#[test]
+fn completion_takes_a_value_enum_shell() {
+    let out = usage_rs::test::command!("ffctl", "completion", "--help").assert_success();
+    let stdout = out.stdout_text();
+    for shell in ["bash", "elvish", "fish", "nu", "powershell", "zsh"] {
+        assert!(stdout.contains(shell), "缺少 {shell}：{stdout}");
+    }
+}
+
+/// `validate` 声明的高度范围：负值是用法错误（退出码 2）。
+#[test]
+fn negative_altitude_is_a_usage_error() {
+    let out = usage_rs::test::command!("ffctl", "fc", "takeoff", "-1");
+    assert_eq!(out.status.code(), Some(2), "{}", out.stderr_text());
+    assert!(out.stderr_text().contains("高度"), "{}", out.stderr_text());
+}
+
+/// 坐标/高度必须是有限数值：`inf` 在解析期被拒（退出码 2）。
+#[test]
+fn non_finite_goal_is_a_usage_error() {
+    let out = usage_rs::test::command!("ffctl", "planner", "goal", "inf", "0", "1");
+    assert_eq!(out.status.code(), Some(2), "{}", out.stderr_text());
+    assert!(out.stderr_text().contains("有限"), "{}", out.stderr_text());
 }
