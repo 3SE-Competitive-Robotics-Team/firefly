@@ -7,10 +7,11 @@
 //! `M(T) c = b(q)`，M 为块下双对角带形矩阵，c 由带形 LU 求解。
 //! 参数 {q, T} 与系数 c 之间可线性复杂度地传播梯度。
 
-use crate::banded::BandedMatrix;
+use crate::banded::{BandedMatrix, BandedSolver};
 use nalgebra::DMatrix;
 use nalgebra::DVector;
 use nalgebra::Vector3;
+use std::sync::Arc;
 
 pub type Point3 = nalgebra::Point3<f64>;
 
@@ -37,6 +38,8 @@ pub struct Minco {
     end: Endpoint,
     q: DMatrix<f64>,
     t: DVector<f64>,
+    /// 不可变 LU 只依赖段时长；正向与伴随求解共用。
+    solver: Arc<BandedSolver>,
 }
 
 #[derive(Debug)]
@@ -54,7 +57,8 @@ impl MincoBuilder {
 
     /// # Errors
     ///
-    /// `InvalidArgument`：段数为零、中间点数不匹配或时长非正。
+    /// `InvalidArgument`：段数为零、中间点数不匹配或时长非正/非有限。
+    /// `Convergence`：MINCO 系统奇异。
     pub fn build(self, waypoints: &[Point3], durations: &[f64]) -> firefly_error::Result<Minco> {
         let pieces = durations.len();
         let interior = waypoints.len();
@@ -72,7 +76,7 @@ impl MincoBuilder {
             .with_context("pieces", pieces)
             .with_context("waypoints", interior));
         }
-        if durations.iter().any(|t| *t <= 0.0) {
+        if durations.iter().any(|t| !t.is_finite() || *t <= 0.0) {
             return Err(firefly_error::Error::new(
                 firefly_error::ErrorKind::InvalidArgument,
                 "durations must be positive",
@@ -80,6 +84,7 @@ impl MincoBuilder {
         }
         let q = DMatrix::from_fn(3, interior, |r, c| waypoints[c][r]);
         let t = DVector::from_fn(pieces, |r, _| durations[r]);
+        let solver = Arc::new(BandedSolver::new(&Minco::build_banded(durations))?);
         Ok(Minco {
             order: self.order,
             pieces,
@@ -87,11 +92,46 @@ impl MincoBuilder {
             end: self.end,
             q,
             t,
+            solver,
         })
     }
 }
 
 impl Minco {
+    /// 更新固定段数的参数；只有时长变化才重新组装、分解系统。
+    /// 失败保留完整的原参数及 LU。
+    /// # Errors
+    /// `InvalidArgument`：点数/段数不匹配或时长非正/非有限。
+    /// `Convergence`：MINCO 系统奇异。
+    pub fn update(
+        &mut self,
+        start: Endpoint,
+        end: Endpoint,
+        waypoints: &[Point3],
+        durations: &[f64],
+    ) -> firefly_error::Result<()> {
+        if durations.len() != self.pieces
+            || waypoints.len() + 1 != self.pieces
+            || durations.iter().any(|t| !t.is_finite() || *t <= 0.0)
+        {
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                "MINCO update requires matching piece count and positive finite durations",
+            ));
+        }
+        if durations != self.t.as_slice() {
+            let solver = Arc::new(BandedSolver::new(&Self::build_banded(durations))?);
+            self.t.as_mut_slice().copy_from_slice(durations);
+            self.solver = solver;
+        }
+        self.start = start;
+        self.end = end;
+        for (i, point) in waypoints.iter().enumerate() {
+            self.q.set_column(i, &point.coords);
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn order(&self) -> SolverOrder {
         self.order
@@ -144,12 +184,10 @@ impl Minco {
     #[fastrace::trace]
     /// # Errors
     ///
-    /// `Convergence`：MINCO 系统奇异（理论上 T > 0 时不会发生）。
+    /// 系统矩阵的奇异性在构建或更新时检查，此处使用已验证的 LU。
     pub fn solve(&self) -> firefly_error::Result<Trajectory> {
-        let m = self.build_banded();
-        let b = self.build_rhs();
-        let solver = crate::banded::BandedSolver::new(&m)?;
-        let c = solver.solve(&b);
+        let mut c = self.build_rhs();
+        self.solver.solve_in_place(&mut c);
         Ok(Trajectory {
             coefficients: c,
             durations: self.t.clone(),
@@ -162,16 +200,14 @@ impl Minco {
     #[fastrace::trace]
     /// # Errors
     ///
-    /// `Convergence`：MINCO 系统奇异（理论上 T > 0 时不会发生）。
+    /// 系统矩阵的奇异性在构建或更新时检查，此处使用已验证的 LU。
     pub fn propagate_gradient(
         &self,
         trajectory: &Trajectory,
         d_f_d_c: &DMatrix<f64>,
         d_f_d_t: &DVector<f64>,
     ) -> firefly_error::Result<(DMatrix<f64>, DVector<f64>)> {
-        let m = self.build_banded();
-        let solver = crate::banded::BandedSolver::new(&m)?;
-        let g = solver.solve_transpose(d_f_d_c);
+        let g = self.solver.solve_transpose(d_f_d_c);
 
         let mut d_f_d_q = DMatrix::zeros(3, self.pieces - 1);
         for i in 0..self.pieces - 1 {
@@ -187,8 +223,14 @@ impl Minco {
             let w = self.dm_dt_c(i, &trajectory.coefficients);
             for dim in 0..3 {
                 let mut dot = 0.0;
-                for r in 0..w.nrows() {
-                    dot += g[(r, dim)] * w[(r, dim)];
+                let first_row = if i + 1 < self.pieces {
+                    6 * i + 3
+                } else {
+                    6 * self.pieces - 3
+                };
+                let rows = if i + 1 < self.pieces { 6 } else { 3 };
+                for r in 0..rows {
+                    dot += g[(first_row + r, dim)] * w[r][dim];
                 }
                 d_f_d_t_out[i] -= dot;
             }
@@ -196,60 +238,36 @@ impl Minco {
         Ok((d_f_d_q, d_f_d_t_out))
     }
 
-    /// ∂M/∂Tᵢ · c，仅中间块 i（或终点块）相关行非零（6M × 3）。
-    /// 与 `build_banded` 的官方布局对应：Tᵢ 出现在块 i 的
-    /// {jerk 连续, snap 连续, 位置, 位置连续, 速度连续, 加速度连续} 行。
-    #[allow(clippy::many_single_char_names)]
-    fn dm_dt_c(&self, i: usize, c: &DMatrix<f64>) -> DMatrix<f64> {
-        let n = COEFFS_PER_PIECE * self.pieces;
-        let mut w = DMatrix::zeros(n, 3);
+    /// ∂M/∂Tᵢ · c 的非零块：中间段六行，末段三行。
+    fn dm_dt_c(&self, i: usize, c: &DMatrix<f64>) -> [[f64; 3]; 6] {
+        let mut w = [[0.0; 3]; 6];
         let ti = self.t[i];
-        let t2 = ti * ti;
-        let t3 = t2 * ti;
-        let t4 = t3 * ti;
         let base = 6 * i;
-        // 行 6i+3（jerk 连续）：∂/∂T[6, 24T, 60T²] = [0, 24, 120T]
-        if i < self.pieces - 1 {
-            let row = 6 * i + 3;
-            // jerk 连续行：∂/∂T[6, 24T, 60T²]·c[6i+3..6i+5] = 24·c[6i+4] + 120T·c[6i+5]
-            w[(row, 0)] = 24.0 * c[(base + 4, 0)] + 120.0 * ti * c[(base + 5, 0)];
-            w[(row, 1)] = 24.0 * c[(base + 4, 1)] + 120.0 * ti * c[(base + 5, 1)];
-            w[(row, 2)] = 24.0 * c[(base + 4, 2)] + 120.0 * ti * c[(base + 5, 2)];
-            // snap 连续行：∂/∂T[24, 120T]·c[6i+4..6i+5] = 120·c[6i+5]
-            w[(row + 1, 0)] = 120.0 * c[(base + 5, 0)];
-            w[(row + 1, 1)] = 120.0 * c[(base + 5, 1)];
-            w[(row + 1, 2)] = 120.0 * c[(base + 5, 2)];
-            // 行 6i+5、6i+6（位置 / 位置连续）：∂/∂T β(T) = β'(T)
-            // 行 6i+7（速度连续）：∂/∂T β'(T) = β''(T)
-            // 行 6i+8（加速度连续）：∂/∂T β''(T) = β'''(T)
-            let b1 = beta_derivative(1, ti);
-            let b2 = beta_derivative(2, ti);
-            let b3 = beta_derivative(3, ti);
+        let interior = i + 1 < self.pieces;
+        let offset = if interior {
             for dim in 0..3 {
-                for k in 0..COEFFS_PER_PIECE {
-                    let v = c[(base + k, dim)];
-                    w[(row + 2, dim)] += b1[k] * v;
-                    w[(row + 3, dim)] += b1[k] * v;
-                    w[(row + 4, dim)] += b2[k] * v;
-                    w[(row + 5, dim)] += b3[k] * v;
-                }
+                w[0][dim] = 24.0 * c[(base + 4, dim)] + 120.0 * ti * c[(base + 5, dim)];
+                w[1][dim] = 120.0 * c[(base + 5, dim)];
             }
+            2
         } else {
-            // 终点块（行 n−3..n−1）：∂/∂T [β(T); β'(T); β''(T)]
-            let row = n - 3;
-            let b1 = beta_derivative(1, ti);
-            let b2 = beta_derivative(2, ti);
-            let b3 = beta_derivative(3, ti);
-            for dim in 0..3 {
-                for k in 0..COEFFS_PER_PIECE {
-                    let v = c[(base + k, dim)];
-                    w[(row, dim)] += b1[k] * v;
-                    w[(row + 1, dim)] += b2[k] * v;
-                    w[(row + 2, dim)] += b3[k] * v;
+            0
+        };
+        let b1 = beta_derivative(1, ti);
+        let b2 = beta_derivative(2, ti);
+        let b3 = beta_derivative(3, ti);
+        let velocity_row = if interior { 4 } else { 1 };
+        for dim in 0..3 {
+            for k in 0..COEFFS_PER_PIECE {
+                let v = c[(base + k, dim)];
+                w[offset][dim] += b1[k] * v;
+                if interior {
+                    w[offset + 1][dim] += b1[k] * v;
                 }
+                w[velocity_row][dim] += b2[k] * v;
+                w[velocity_row + 1][dim] += b3[k] * v;
             }
         }
-        let _ = (t2, t3, t4);
         w
     }
 
@@ -258,8 +276,9 @@ impl Minco {
     /// 行序：起点 PVA / 中间块 {jerk 连续, snap 连续, 位置, 位置连续,
     /// 速度连续, 加速度连续} / 终点 PVA。带宽 (6, 6)，
     /// 对角全非零 → 无主元带形 LU 稳定（官方注释：NO PIVOT for efficiency）。
-    fn build_banded(&self) -> BandedMatrix {
-        let n = COEFFS_PER_PIECE * self.pieces;
+    fn build_banded(durations: &[f64]) -> BandedMatrix {
+        let pieces = durations.len();
+        let n = COEFFS_PER_PIECE * pieces;
         let mut m = BandedMatrix::new(n, 6, 6);
 
         // 起点：位置/速度/加速度
@@ -267,9 +286,8 @@ impl Minco {
         m.set(1, 1, 1.0);
         m.set(2, 2, 2.0);
 
-        for i in 0..self.pieces - 1 {
+        for (i, &t) in durations.iter().take(pieces - 1).enumerate() {
             let row = 6 * i + 3;
-            let t = self.t[i];
             let t2 = t * t;
             let t3 = t2 * t;
             let t4 = t3 * t;
@@ -314,12 +332,12 @@ impl Minco {
         }
 
         // 终点：位置/速度/加速度
-        let t = self.t[self.pieces - 1];
+        let t = durations[pieces - 1];
         let t2 = t * t;
         let t3 = t2 * t;
         let t4 = t3 * t;
         let t5 = t4 * t;
-        let base = 6 * (self.pieces - 1);
+        let base = 6 * (pieces - 1);
         m.set(n - 3, base, 1.0);
         m.set(n - 3, base + 1, t);
         m.set(n - 3, base + 2, t2);
@@ -565,6 +583,116 @@ mod tests {
         assert!((left.position - right.position).norm() < 1e-6);
         assert!((left.velocity - right.velocity).norm() < 1e-6);
         assert!((left.acceleration - right.acceleration).norm() < 1e-6);
+    }
+
+    #[test]
+    fn lu_reuse_and_parameter_updates_preserve_constraints() {
+        let mut minco = sample();
+        let original_lu = Arc::clone(&minco.solver);
+        let start = endpoint([0.2, -0.3, 0.4], [0.1, 0.2, -0.1], [0.03, 0.02, 0.01]);
+        let end = endpoint([3.0, 0.5, 0.8], [-0.2, 0.1, 0.3], [0.01, -0.03, 0.02]);
+        let waypoint = Point3::new(1.2, 0.6, -0.2);
+        for durations in [[1.0, 1.0], [0.8, 1.4]] {
+            minco.update(start, end, &[waypoint], &durations).unwrap();
+            assert_eq!(
+                Arc::ptr_eq(&original_lu, &minco.solver),
+                durations == [1.0, 1.0]
+            );
+            let trajectory = minco.solve().unwrap();
+            let lu = Arc::clone(&minco.solver);
+            minco
+                .propagate_gradient(&trajectory, &DMatrix::zeros(12, 3), &DVector::zeros(2))
+                .unwrap();
+            assert!(Arc::ptr_eq(&lu, &minco.solver));
+            for (sample, expected) in [
+                (trajectory.eval(0.0), start),
+                (trajectory.eval(trajectory.duration()), end),
+            ] {
+                assert!((sample.position - expected.position).norm() < 1e-9);
+                assert!((sample.velocity - expected.velocity).norm() < 1e-9);
+                assert!((sample.acceleration - expected.acceleration).norm() < 1e-9);
+            }
+            assert!(
+                (trajectory.eval_piece(0, durations[0]).position - waypoint.coords).norm() < 1e-9
+            );
+            let left = trajectory.eval_piece(0, durations[0]);
+            let right = trajectory.eval_piece(1, 0.0);
+            assert!((left.position - right.position).norm() < 1e-9);
+            assert!((left.velocity - right.velocity).norm() < 1e-9);
+            assert!((left.acceleration - right.acceleration).norm() < 1e-9);
+            let before = trajectory.coefficients.clone();
+            for invalid in [[0.0, 1.0], [f64::NAN, 1.0], [1.0, f64::INFINITY]] {
+                assert!(
+                    minco
+                        .update(minco.start, minco.end, &[Point3::origin()], &invalid)
+                        .is_err()
+                );
+                assert!(Arc::ptr_eq(&lu, &minco.solver));
+                assert_eq!(minco.solve().unwrap().coefficients, before);
+            }
+        }
+    }
+
+    #[test]
+    fn updated_multi_piece_gradient_matches_all_axis_differences() {
+        let start = endpoint([0.2, -0.3, 0.4], [0.1, 0.2, -0.1], [0.03, 0.02, 0.01]);
+        let end = endpoint([3.0, 0.5, 0.8], [-0.2, 0.1, 0.3], [0.01, -0.03, 0.02]);
+        let mut q = [Point3::new(1.0, 0.4, 0.2), Point3::new(2.0, -0.2, 0.9)];
+        let mut t = [0.8, 1.2, 1.4];
+        let mut minco = MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
+            .build(&q, &t)
+            .unwrap();
+        let dc = DMatrix::from_fn(18, 3, |r, c| ((r * 3 + c) as f64).sin() * 0.1);
+        let explicit_dt = DVector::from_vec(vec![0.05, 0.1, -0.03]);
+        let loss = |q: &[Point3], t: &[f64]| {
+            let trajectory = MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
+                .build(q, t)
+                .unwrap()
+                .solve()
+                .unwrap();
+            dc.component_mul(trajectory.coefficients()).sum()
+                + explicit_dt.dot(trajectory.durations())
+        };
+        for change in 0..3 {
+            if change == 1 {
+                q[1].y += 0.3;
+            }
+            if change == 2 {
+                t[0] += 0.2;
+            }
+            minco.update(start, end, &q, &t).unwrap();
+            let trajectory = minco.solve().unwrap();
+            let (dq, dt) = minco
+                .propagate_gradient(&trajectory, &dc, &explicit_dt)
+                .unwrap();
+            let h = 1e-6;
+            for i in 0..2 {
+                for dim in 0..3 {
+                    let mut plus = q;
+                    let mut minus = q;
+                    plus[i][dim] += h;
+                    minus[i][dim] -= h;
+                    let numeric = (loss(&plus, &t) - loss(&minus, &t)) / (2.0 * h);
+                    assert!(
+                        (numeric - dq[(dim, i)]).abs() < 1e-5,
+                        "q[{i},{dim}] {numeric} vs {}",
+                        dq[(dim, i)]
+                    );
+                }
+            }
+            for i in 0..3 {
+                let mut plus = t;
+                let mut minus = t;
+                plus[i] += h;
+                minus[i] -= h;
+                let numeric = (loss(&q, &plus) - loss(&q, &minus)) / (2.0 * h);
+                assert!(
+                    (numeric - dt[i]).abs() < 1e-5,
+                    "t[{i}] {numeric} vs {}",
+                    dt[i]
+                );
+            }
+        }
     }
 
     #[test]

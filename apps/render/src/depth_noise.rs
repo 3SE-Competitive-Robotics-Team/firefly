@@ -220,7 +220,9 @@ fn measured_depth(z: f32, fb: f32, error: f32, step: f32) -> f32 {
 }
 
 /// 原地生成测量；从干净几何检测边缘，空洞不填补、不转换为无穷远自由射线。
+/// clean 为调用方自有工作缓冲，每次刷新为已裁剪的干净几何。
 #[fastrace::trace]
+#[allow(clippy::too_many_arguments)]
 pub fn apply(
     depth: &mut [f32],
     width: usize,
@@ -228,6 +230,7 @@ pub fn apply(
     focal_px: f32,
     stamp: f64,
     options: &DepthNoiseOptions,
+    clean: &mut Vec<f32>,
 ) {
     assert_eq!(depth.len(), width * height);
     assert!(stamp.is_finite() && stamp >= 0.0 && focal_px.is_finite() && focal_px > 0.0);
@@ -239,7 +242,8 @@ pub fn apply(
     if !options.enabled {
         return;
     }
-    let clean = depth.to_vec();
+    clean.resize(depth.len(), 0.0);
+    clean.copy_from_slice(depth);
     let holes = Field::new(width, height, options, stamp, 1);
     let axial = Field::new(width, height, options, stamp, 2);
     let lateral_x = Field::new(width, height, options, stamp, 3);
@@ -344,7 +348,7 @@ mod tests {
         };
         let rms = |z: f32| {
             let mut image = vec![z; 256 * 256];
-            apply(&mut image, 256, 256, 160.0, 1.0, &options);
+            apply(&mut image, 256, 256, 160.0, 1.0, &options, &mut Vec::new());
             (image.iter().map(|v| (*v - z).powi(2)).sum::<f32>() / image.len() as f32).sqrt()
         };
         let near = rms(1.0);
@@ -363,7 +367,15 @@ mod tests {
         };
         let make = |stamp| {
             let mut image = vec![2.0; 256 * 256];
-            apply(&mut image, 256, 256, 160.0, stamp, &options);
+            apply(
+                &mut image,
+                256,
+                256,
+                160.0,
+                stamp,
+                &options,
+                &mut Vec::new(),
+            );
             image
         };
         let image = make(1.0);
@@ -408,7 +420,7 @@ mod tests {
                 image[y * 64 + x] = 4.0;
             }
         }
-        apply(&mut image, 64, 64, 160.0, 1.0, &options);
+        apply(&mut image, 64, 64, 160.0, 1.0, &options, &mut Vec::new());
         assert_eq!(image[20 * 64 + 29], 2.0);
         assert_eq!(image[20 * 64 + 34], 4.0);
         assert!(image[20 * 64 + 30..20 * 64 + 34].iter().all(|v| *v == 0.0));
@@ -418,7 +430,15 @@ mod tests {
                 silhouette[y * 64 + x] = 0.0;
             }
         }
-        apply(&mut silhouette, 64, 64, 160.0, 1.0, &options);
+        apply(
+            &mut silhouette,
+            64,
+            64,
+            160.0,
+            1.0,
+            &options,
+            &mut Vec::new(),
+        );
         assert_eq!(silhouette[20 * 64 + 29], 2.0);
         assert!(
             silhouette[20 * 64 + 30..20 * 64 + 64]
@@ -440,7 +460,7 @@ mod tests {
             }
         }
         let original = image.clone();
-        apply(&mut image, 128, 128, 160.0, 1.0, &options);
+        apply(&mut image, 128, 128, 160.0, 1.0, &options, &mut Vec::new());
         assert!(image.iter().all(|z| [0.0, 2.0, 4.0].contains(z)));
         assert!(image.iter().zip(original).any(|(a, b)| *a > 0.0 && *a != b));
     }
@@ -452,7 +472,7 @@ mod tests {
             enabled: false,
             ..DepthNoiseOptions::default()
         };
-        apply(&mut image, 4, 2, 160.0, 0.0, &options);
+        apply(&mut image, 4, 2, 160.0, 0.0, &options, &mut Vec::new());
         assert_eq!(image, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 4.0]);
         let mut full = vec![4.0; 128 * 128];
         full[0] = 0.0;
@@ -463,6 +483,7 @@ mod tests {
             160.0,
             0.0,
             &DepthNoiseOptions::default(),
+            &mut Vec::new(),
         );
         assert_eq!(full[0], 0.0);
         assert!(

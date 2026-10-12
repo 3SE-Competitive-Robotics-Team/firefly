@@ -6,7 +6,7 @@
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
-use bevy::camera::{Camera, Exposure, Projection, RenderTarget};
+use bevy::camera::{Camera, CompositingSpace, Exposure, Projection, RenderTarget};
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::image::Image;
 use bevy::prelude::*;
@@ -47,9 +47,9 @@ pub const WORLD_LAYER: usize = 0;
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug, ExtractComponent)]
 #[extract_app(RenderApp)]
 pub enum Eye {
-    /// 左目 RGB（发布 `Firefly/CameraLeft` 的灰度源）。
+    /// 左目灰度（发布 `Firefly/CameraLeft`）。
     Left,
-    /// 右目 RGB（发布 `Firefly/CameraRight` 的灰度源）。
+    /// 右目灰度（发布 `Firefly/CameraRight`）。
     Right,
     /// 深度（预通道纹理即深度源，颜色输出仅占位）。
     Depth,
@@ -73,9 +73,9 @@ pub struct PoseState {
 /// 传感器回读目标（主世界句柄，`capture` 按 `AssetId` 在渲染世界取 GPU 纹理）。
 #[derive(Resource)]
 pub struct SensorTargets {
-    /// 左目颜色目标。
+    /// 左目灰度目标。
     pub left: Handle<Image>,
-    /// 右目颜色目标。
+    /// 右目灰度目标。
     pub right: Handle<Image>,
 }
 
@@ -108,7 +108,7 @@ pub fn sensor_projection() -> Projection {
     })
 }
 
-/// 新建传感器颜色回读目标（`RGBA8 sRGB`，渲染挂载 + CPU 回读两用）。
+/// 新建传感器灰度目标（`R8`；感知灰度由最终 blit 生成）。
 #[must_use]
 pub fn sensor_target() -> Image {
     let mut image = Image::new(
@@ -118,8 +118,8 @@ pub fn sensor_target() -> Image {
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        vec![0u8; 4 * IMAGE_WIDTH * IMAGE_HEIGHT],
-        TextureFormat::Rgba8UnormSrgb,
+        vec![0u8; IMAGE_WIDTH * IMAGE_HEIGHT],
+        TextureFormat::R8Unorm,
         RenderAssetUsages::RENDER_WORLD,
     );
     image.texture_descriptor.usage =
@@ -164,7 +164,7 @@ pub fn spawn_rig(
     };
     let sensor_layers = RenderLayers::layer(WORLD_LAYER);
 
-    // 双目彩色相机：各出 RGB（回读左/右目颜色目标）。
+    // 双目灰度相机：颜色中间纹理用 sRGB 编码，最终输出单通道 BT.601。
     // 出图窗口由 `link::poll_pose` 激活：非出图帧不渲染传感器（省 GPU）。
     for (eye, offset, target) in [
         (Eye::Left, LEFT_OFFSET, left),
@@ -180,6 +180,7 @@ pub fn spawn_rig(
             Msaa::Off,
             sensor_projection(),
             Tonemapping::Linear,
+            CompositingSpace::Srgb,
             sensor_exposure,
             sensor_layers.clone(),
             env.clone(),

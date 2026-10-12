@@ -139,7 +139,7 @@ pub struct MincoObjective<'a> {
     end: Endpoint,
     pieces: usize,
     cost: Cost,
-    // L-BFGS 对同一 x 先 evaluate 再 gradient:缓存 solve 结果省一半计算
+    // 只缓存参数映射与轨迹；每次回调重新应用当前代价项。
     cache: Option<(DVector<f64>, Minco, firefly_trajectory::Trajectory)>,
     detector: Option<ReboundDetector<'a>>,
     eval_count: usize,
@@ -204,20 +204,29 @@ impl<'a> MincoObjective<'a> {
         }
     }
 
-    /// 重建 minco 并求解,命中缓存时复用。
-    #[must_use]
-    fn solve_cached(&mut self, x: &DVector<f64>) -> Option<firefly_trajectory::Trajectory> {
+    /// 缓存轨迹及同一时长的 LU；代价与梯度由各回调重新计算。
+    fn solve_cached(&mut self, x: &DVector<f64>) -> Option<()> {
         if self
             .cache
             .as_ref()
             .is_some_and(|(last_x, _, _)| last_x == x)
         {
-            return self.cache.as_ref().map(|(_, _, traj)| traj.clone());
+            return Some(());
         }
-        let minco = self.rebuild(x).ok()?;
-        let traj = minco.solve().ok()?;
-        self.cache = Some((x.clone(), minco, traj.clone()));
-        Some(traj)
+        let (q, t) = self.unpack(x);
+        let points: Vec<Point3<f64>> = q.into_iter().map(Point3::from).collect();
+        if let Some((last_x, minco, traj)) = &mut self.cache {
+            minco.update(self.start, self.end, &points, &t).ok()?;
+            *traj = minco.solve().ok()?;
+            last_x.clone_from(x);
+        } else {
+            let minco = MincoBuilder::new(SolverOrder::MinimumJerk, self.start, self.end)
+                .build(&points, &t)
+                .ok()?;
+            let traj = minco.solve().ok()?;
+            self.cache = Some((x.clone(), minco, traj));
+        }
+        Some(())
     }
 
     #[must_use]
@@ -280,16 +289,17 @@ fn constraint_points_straight_enough(points: &[Vector3<f64>]) -> bool {
 impl Objective for MincoObjective<'_> {
     fn evaluate(&mut self, x: &DVector<f64>) -> f64 {
         self.eval_count += 1;
-        let Some(traj) = self.solve_cached(x) else {
+        let Some(()) = self.solve_cached(x) else {
             return f64::INFINITY;
         };
+        let (_, _, traj) = self.cache.as_ref().expect("solved trajectory");
         if self.eval_count > 3
             && let Some(detector) = &mut self.detector
-            && detector.check(&traj)
+            && detector.check(traj)
         {
             self.early_exit = true;
         }
-        self.cost.evaluate(&traj)
+        self.cost.evaluate(traj)
     }
 
     fn early_exit(&self) -> bool {
@@ -297,19 +307,16 @@ impl Objective for MincoObjective<'_> {
     }
 
     fn gradient(&mut self, x: &DVector<f64>) -> DVector<f64> {
-        let Some(traj) = self.solve_cached(x) else {
+        let Some(()) = self.solve_cached(x) else {
             return DVector::zeros(3 * (self.pieces - 1) + self.pieces);
         };
-        let Some(minco) = self.rebuild(x).ok() else {
-            return DVector::zeros(3 * (self.pieces - 1) + self.pieces);
-        };
-        let (d_f_d_c, d_f_d_t) = self.cost.gradient(&traj);
-        let Ok((dq, dt)) = minco.propagate_gradient(&traj, &d_f_d_c, &d_f_d_t) else {
+        let (_, minco, traj) = self.cache.as_ref().expect("solved trajectory");
+        let (d_f_d_c, d_f_d_t) = self.cost.gradient(traj);
+        let Ok((dq, dt)) = minco.propagate_gradient(traj, &d_f_d_c, &d_f_d_t) else {
             return DVector::zeros(3 * (self.pieces - 1) + self.pieces);
         };
         let n_q = 3 * (self.pieces - 1);
-        let vt: Vec<f64> = (0..self.pieces).map(|i| x[n_q + i]).collect();
-        self.pack(&dq, &dt, &vt)
+        self.pack(&dq, &dt, &x.as_slice()[n_q..])
     }
 }
 
@@ -317,6 +324,64 @@ impl Objective for MincoObjective<'_> {
 mod tests {
     use super::*;
     use firefly_map::{GridMapBuilder, VoxelState};
+
+    #[test]
+    fn callbacks_share_trajectory_but_recompute_changed_cost() {
+        use firefly_cost::{SmoothnessPenalty, TimePenalty};
+        let start = Endpoint {
+            position: Vector3::zeros(),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let end = Endpoint {
+            position: Vector3::new(3.0, 0.5, 1.0),
+            ..start
+        };
+        let mut objective = MincoObjective::new(start, end, 2, Cost::new().add(1.0, TimePenalty));
+        let mut x = DVector::from_vec(vec![1.2, 0.8, -0.2, 0.2, -0.5]);
+        let first_gradient = objective.gradient(&x);
+        let coefficients = objective.cache.as_ref().unwrap().2.coefficients().as_ptr();
+        let cost = objective.evaluate(&x);
+        assert!((cost - (1.22 + 1.0 / 1.625)).abs() < 1e-12);
+        assert_eq!(
+            coefficients,
+            objective.cache.as_ref().unwrap().2.coefficients().as_ptr()
+        );
+        assert_eq!(first_gradient, objective.gradient(&x));
+        objective.cost = Cost::new().add(3.0, TimePenalty);
+        assert!((objective.evaluate(&x) - 3.0 * cost).abs() < 1e-12);
+        assert!((objective.gradient(&x) - first_gradient * 3.0).norm() < 1e-12);
+        assert_eq!(
+            coefficients,
+            objective.cache.as_ref().unwrap().2.coefficients().as_ptr()
+        );
+
+        objective.cost = Cost::new()
+            .add(1.0, SmoothnessPenalty)
+            .add(0.3, TimePenalty);
+        for change in 0..3 {
+            if change == 1 {
+                x[1] += 0.15;
+            }
+            if change == 2 {
+                x[3] += 0.1;
+            }
+            objective.evaluate(&x);
+            let gradient = objective.gradient(&x);
+            for i in 0..x.len() {
+                let mut plus = x.clone();
+                let mut minus = x.clone();
+                plus[i] += 1e-6;
+                minus[i] -= 1e-6;
+                let numeric = (objective.evaluate(&plus) - objective.evaluate(&minus)) / 2e-6;
+                assert!(
+                    (numeric - gradient[i]).abs() < 1e-4 * gradient[i].abs().max(1.0),
+                    "component {i}: {numeric} vs {}",
+                    gradient[i]
+                );
+            }
+        }
+    }
 
     #[test]
     fn rebound_gate_uses_trajectory_samples_and_excludes_end_regions() {

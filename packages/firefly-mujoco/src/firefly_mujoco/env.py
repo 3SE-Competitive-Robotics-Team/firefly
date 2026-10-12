@@ -15,6 +15,9 @@ import mujoco
 from .scene import ROTORS, build_scene
 
 
+_IMU_NOISE_BATCH_SIZE = 256
+
+
 class DroneEnv:
     """MuJoCo 无人机环境。
 
@@ -53,10 +56,27 @@ class DroneEnv:
         )
         gyro_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "gyro")
         accel_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "accel")
-        self._gyro_adr = int(self.model.sensor_adr[gyro_id])
-        self._accel_adr = int(self.model.sensor_adr[accel_id])
-        # IMU 噪声发生器：default_rng 比全局 RandomState 快约 3 倍（同分布）。
+        gyro_adr = int(self.model.sensor_adr[gyro_id])
+        accel_adr = int(self.model.sensor_adr[accel_id])
         self._rng = rng if rng is not None else np.random.default_rng()
+        noise_scales = [scale for scale in (self._gyro_noise, self._accel_noise) if scale > 0]
+        self._noise_scales = np.repeat(noise_scales, 3)
+        self._noise_batch = np.empty((_IMU_NOISE_BATCH_SIZE, len(self._noise_scales)))
+        self._gyro_noise_samples = (
+            tuple(self._noise_batch[i, :3] for i in range(_IMU_NOISE_BATCH_SIZE))
+            if self._gyro_noise > 0 else ()
+        )
+        self._accel_noise_samples = (
+            tuple(self._noise_batch[i, -3:] for i in range(_IMU_NOISE_BATCH_SIZE))
+            if self._accel_noise > 0 else ()
+        )
+        self._noise_index = _IMU_NOISE_BATCH_SIZE
+        self._gyro = self.data.sensordata[gyro_adr : gyro_adr + 3]
+        self._accel = self.data.sensordata[accel_adr : accel_adr + 3]
+        self._position_world = self.data.xpos[self._drone_id]
+        self._quat_wxyz = self.data.xquat[self._drone_id]
+        self._velocity_world = self.data.qvel[:3]
+        self._angvel_body = self.data.qvel[3:6]
 
         self._rotor_positions = np.array(
             [
@@ -124,16 +144,25 @@ class DroneEnv:
             )
         return np.diag(full).copy()
 
-    def state(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """真值状态 `(pos, vel_world, quat_xyzw, angvel_body)`（仅供评测的 PlantState）。"""
-        d = self.data
-        quat_wxyz = d.xquat[self._drone_id]
-        return (
-            d.xpos[self._drone_id].copy(),
-            d.qvel[0:3].copy(),
-            np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]]),
-            d.qvel[3:6].copy(),
+    def state(
+        self,
+        *,
+        out: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """真值 `(pos, vel_world, quat_xyzw, angvel_body)`，仅供评测。
+
+        缺省返回独立快照；out 为调用方自有的 float64 缓冲，形状依次为 3、3、4、3。
+        """
+        if out is None:
+            out = (np.empty(3), np.empty(3), np.empty(4), np.empty(3))
+        pos, vel, quat, angvel = out
+        np.copyto(pos, self._position_world)
+        np.copyto(vel, self._velocity_world)
+        quat[0], quat[1], quat[2], quat[3] = (
+            self._quat_wxyz[1], self._quat_wxyz[2], self._quat_wxyz[3], self._quat_wxyz[0]
         )
+        np.copyto(angvel, self._angvel_body)
+        return out
 
     def airframe(self) -> dict:
         """机体/执行器描述（`Firefly/Airframe` 的唯一内容来源）。
@@ -181,16 +210,31 @@ class DroneEnv:
 
     # ---- 传感器 ----
 
-    def imu(self) -> tuple[np.ndarray, np.ndarray]:
-        """IMU 测量：`(gyro, accel)`，体坐标系，带高斯噪声。"""
-        d = self.data
-        gyro = d.sensordata[self._gyro_adr : self._gyro_adr + 3].copy()
-        accel = d.sensordata[self._accel_adr : self._accel_adr + 3].copy()
+    def imu(
+        self, *, out: tuple[np.ndarray, np.ndarray] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """IMU `(gyro, accel)`，体坐标系，带高斯噪声。
+
+        缺省返回独立快照；out 为调用方自有的两个形状为 (3,) 的 float64 缓冲。
+        注入的 rng 按批次提前消耗随机数；零噪声轴不消耗随机数。
+        """
+        if out is None:
+            out = (np.empty(3), np.empty(3))
+        gyro, accel = out
+        np.copyto(gyro, self._gyro)
+        np.copyto(accel, self._accel)
+        if self._noise_batch.shape[1] == 0:
+            return out
+        if self._noise_index == _IMU_NOISE_BATCH_SIZE:
+            self._rng.standard_normal(out=self._noise_batch)
+            self._noise_batch *= self._noise_scales
+            self._noise_index = 0
         if self._gyro_noise > 0:
-            gyro += self._rng.normal(0.0, self._gyro_noise, 3)
+            gyro += self._gyro_noise_samples[self._noise_index]
         if self._accel_noise > 0:
-            accel += self._rng.normal(0.0, self._accel_noise, 3)
-        return gyro, accel
+            accel += self._accel_noise_samples[self._noise_index]
+        self._noise_index += 1
+        return out
 
     def gt_pose(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """真值：`(pos, quat_xyzw, vel_world)`。"""

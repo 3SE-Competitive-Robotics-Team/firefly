@@ -19,10 +19,55 @@ use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::Subscriber;
 
 const TOPIC: &str = "Firefly/Test/E2eTrace";
+static LOGGING: std::sync::Once = std::sync::Once::new();
+
+#[test]
+fn in_place_image_preserves_payload_trace_and_event() {
+    use firefly_pubsub::camera::{GrayImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH};
+
+    LOGGING.call_once(init_observability);
+    let node = create_node().unwrap();
+    let topic = format!("{TOPIC}/InPlace/{}", std::process::id());
+    let publisher = Publisher::<GrayImageMessage>::with_topic_notify(&node, &topic).unwrap();
+    let subscriber = Subscriber::<GrayImageMessage>::with_topic(&node, &topic).unwrap();
+    let listener = TopicListener::with_topic(&node, &topic).unwrap();
+    listener.drain().unwrap();
+    let root = Span::root("in-place-image", SpanContext::random());
+    let _guard = root.set_local_parent();
+    let active = SpanContext::current_local_parent().unwrap();
+    let sent = publisher
+        .publish_with(|image| {
+            image.timestamp = 1.25;
+            image.sensor_id = 1;
+            image.width = IMAGE_WIDTH as u32;
+            image.height = IMAGE_HEIGHT as u32;
+            for (i, pixel) in image.data.iter_mut().enumerate() {
+                *pixel = i as u8;
+            }
+        })
+        .unwrap();
+    assert_eq!(listener.drain().unwrap(), 1);
+    let sample = subscriber.receive().unwrap().unwrap();
+    assert!((sample.timestamp - 1.25).abs() < f64::EPSILON);
+    assert_eq!(
+        (sample.sensor_id, sample.width, sample.height),
+        (1, IMAGE_WIDTH as u32, IMAGE_HEIGHT as u32)
+    );
+    assert!(
+        sample
+            .data
+            .iter()
+            .enumerate()
+            .all(|(i, pixel)| *pixel == i as u8)
+    );
+    assert_eq!(sample.user_header().trace_id(), active.trace_id.0);
+    assert_eq!(sample.user_header().span_id, sent.span_id);
+    assert!(sample.user_header().send_ts_secs > 0);
+}
 
 #[test]
 fn trace_context_crosses_pubsub_boundary() {
-    init_observability();
+    LOGGING.call_once(init_observability);
 
     let node = create_node().expect("创建节点");
     let publisher = Publisher::<OdomMessage>::with_topic_notify(&node, TOPIC).expect("创建发布端");

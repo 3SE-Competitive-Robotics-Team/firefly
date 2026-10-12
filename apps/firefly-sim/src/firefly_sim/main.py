@@ -132,9 +132,12 @@ def _publish_traced(pub, cycle, name: str, msg, ts: float) -> None:
     sample.write_payload(msg).send()
 
 
-def _publish_plant_state(pub, env: DroneEnv, t: float) -> None:
+def _publish_plant_state(
+    pub, env: DroneEnv, t: float,
+    *, out: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
+) -> None:
     """发布被控对象状态（真值，每个物理步；无 span——高频状态不进 trace 树）。"""
-    pos, vel, quat_xyzw, angvel = env.state()
+    pos, vel, quat_xyzw, angvel = env.state(out=out)
     msg = PlantStateMessage()
     msg.timestamp = t
     msg.position_x, msg.position_y, msg.position_z = pos
@@ -226,8 +229,9 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
     _init_log_ipc(node)
     log("iceoryx2 已就绪：发布 IMU/仿真位姿/状态/机体，订阅飞控指令")
 
-    # 最新飞控指令：(state_time, 4 电机推力)；None = 未收到
-    latest_control = None
+    motor_thrusts = np.empty(4)
+    state_out = (np.empty(3), np.empty(3), np.empty(4), np.empty(3))
+    imu_out = (np.empty(3), np.empty(3))
     # 飞控指令的墙钟到达时刻（锁步下 sim 时间由指令推进，指令陈旧只能按墙钟判）
     control_rx_wall = None
     # 物理是否处于暂停（无有效飞控指令；告警一次，恢复时告知）
@@ -242,19 +246,19 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
         while True:
             while (sample := control_sub.receive()) is not None:
                 m = sample.payload().contents
-                latest_control = (m.state_time, np.array(m.thrust, dtype=float))
+                # 样本释放前复制到自有缓冲，后续物理步只读取该副本。
+                motor_thrusts[0], motor_thrusts[1], motor_thrusts[2], motor_thrusts[3] = m.thrust
                 control_rx_wall = time.monotonic()
 
             if (
-                latest_control is not None
-                and control_rx_wall is not None
+                control_rx_wall is not None
                 and time.monotonic() - control_rx_wall <= CONTROL_STALE
             ):
                 # 闭环模式：施加飞控下发的 4 电机推力（被控对象按机体几何合成 wrench）
                 if physics_paused:
                     physics_paused = False
                     log("飞控指令恢复，物理继续推进")
-                env.apply_motor_thrusts(latest_control[1])
+                env.apply_motor_thrusts(motor_thrusts)
                 env.step()
             else:
                 # 无有效指令（飞控未启动/停发）：物理不推进——锁步语义，对照
@@ -279,7 +283,7 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
 
             # 被控对象状态供评测（每个物理步），机体描述供飞控（1Hz）
             if plant_pub is not None:
-                _publish_plant_state(plant_pub, env, t)
+                _publish_plant_state(plant_pub, env, t, out=state_out)
             if t + 1e-12 >= next_airframe:
                 _publish_airframe(airframe_pub, env, t)
                 next_airframe = t + AIRFRAME_PERIOD
@@ -292,7 +296,7 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
 
             # IMU（当前周期的子 span）
             if t + 1e-12 >= next_imu:
-                gyro, accel = env.imu()
+                gyro, accel = env.imu(out=imu_out)
                 msg = ImuMessage()
                 msg.timestamp = t
                 msg.angular_velocity_x, msg.angular_velocity_y, msg.angular_velocity_z = gyro

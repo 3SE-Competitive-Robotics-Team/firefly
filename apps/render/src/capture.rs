@@ -1,14 +1,13 @@
-//! GPU 纹理回读：传感器颜色目标 + 深度预通道纹理 → CPU。
+//! GPU 回读：紧凑灰度缓冲 + 深度预通道纹理 → CPU。
 //!
 //! 链路（每相机节拍一次，由 `link` 按固定 10Hz 发起请求）：
 //! 主世界 `CaptureHub::request` → 渲染世界 `copy_sensors`（`RenderGraphSystems::Finish` 阶段，
 //! 图像绘制提交后、窗口呈现前在同队列提交拷贝）→ `map_async` 回调经通道回传字节 →
 //! 主世界 `link` 配对三份同 `seq` 回复后，交给像素线程处理并发布。
 //!
-//! [`CAPTURE_SETS`] 组回读缓冲允许多拍在途；全部占用时等待空闲缓冲。
+//! [`CAPTURE_SETS`] 组回读缓冲允许多拍在途；全部占用时保留请求，下帧重试。
 //!
-//! 行距 `320 × 4 = 1280` 字节满足 wgpu 的 256 字节对齐，无需填充。
-//! 颜色与深度（`Depth32Float`）均为每像素 4 字节。
+//! 灰度由 GPU 打包为每像素一字节；深度行距 `320 × 4 = 1280` 字节满足 256 对齐。
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -31,10 +30,14 @@ use bevy::render::view::ViewDepthStencilTexture;
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_WIDTH};
 use firefly_pubsub::trace::TraceContext;
 
+use crate::buffer::{BufferPool, PooledBuffer};
+use crate::grayscale::GrayPackPipeline;
 use crate::rig::Eye;
 
-/// 单帧字节数（`RGBA8` / `Depth32Float` 皆 4 字节每像素）。
+/// 单帧深度字节数（`Depth32Float`，每像素 4 字节）。
 pub const FRAME_BYTES: usize = 4 * IMAGE_WIDTH * IMAGE_HEIGHT;
+/// 单帧紧凑灰度字节数。
+pub const GRAY_BYTES: usize = IMAGE_WIDTH * IMAGE_HEIGHT;
 /// 拷贝行距（字节，256 对齐，无填充）。
 pub const BYTES_PER_ROW: u32 = 4 * IMAGE_WIDTH as u32;
 /// 回读缓冲组数：双缓冲，允许上一拍在途时发起下一拍。
@@ -43,9 +46,9 @@ pub const CAPTURE_SETS: usize = 2;
 /// 传感器种类（回读回复的归属标记）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SensorKind {
-    /// 左目颜色。
+    /// 左目灰度。
     Left,
-    /// 右目颜色。
+    /// 右目灰度。
     Right,
     /// 深度预通道。
     Depth,
@@ -86,9 +89,9 @@ pub struct CaptureRequest {
     pub stamp: f64,
     /// 上游 trace 上下文（发布时续接）。
     pub trace: TraceContext,
-    /// 左目颜色目标。
+    /// 左目灰度目标。
     pub left: AssetId<Image>,
-    /// 右目颜色目标。
+    /// 右目灰度目标。
     pub right: AssetId<Image>,
 }
 
@@ -104,8 +107,15 @@ pub struct CapturedFrame {
     pub stamp: f64,
     /// 上游 trace 上下文（透传自请求）。
     pub trace: TraceContext,
-    /// 紧凑像素（颜色 `RGBA8` / 深度小端 f32，行主序无填充）。
-    pub bytes: Vec<u8>,
+    /// 紧凑像素（灰度 u8 / 深度小端 f32，行主序无填充）。
+    pub bytes: PooledBuffer,
+}
+
+/// 单份回读结果；失败序号用于立即释放该拍的其余片段。
+#[derive(Debug)]
+pub enum CaptureReply {
+    Frame(CapturedFrame),
+    Failed(u64),
 }
 
 /// 跨世界回读通道（主世界与渲染世界各持同一 `Arc`）。
@@ -121,8 +131,8 @@ pub struct HubInner {
     /// 待执行请求；主世界保持对应相机姿态，直到渲染世界确认拷贝。
     pub request: Mutex<Option<CaptureRequest>>,
     /// 已完成的回复队列。
-    pub done: Mutex<VecDeque<CapturedFrame>>,
-    /// 在途缓冲组数（`0..=CAPTURE_SETS`；回调清零一份回复时递减）。
+    pub done: Mutex<VecDeque<CaptureReply>>,
+    /// 在途缓冲组数（`0..=CAPTURE_SETS`；组内三份回复全部完成后递减）。
     pub inflight_sets: AtomicU32,
     /// 最近一次被渲染世界**取走**（提交拷贝）的请求序号；主世界据此收起
     /// 传感器相机（单调持久值，不受帧率/时序影响，见 `link::poll_pose`）。
@@ -136,7 +146,7 @@ impl CaptureHub {
     }
 
     /// 取出全部已完成的回复。
-    pub fn drain(&self) -> Vec<CapturedFrame> {
+    pub fn drain(&self) -> Vec<CaptureReply> {
         self.inner
             .done
             .lock()
@@ -173,6 +183,9 @@ fn extract_request(hub: Extract<Res<CaptureHub>>, mut request: ResMut<ExtractedR
 
 /// 单组回读暂存（三份纹理各一块；回调内 `unmap` 后归还）。
 struct CaptureSet {
+    /// 灰度 GPU 打包目标（不可映射，供 compute 写入）。
+    left_packed: Buffer,
+    right_packed: Buffer,
     /// 左目暂存。
     left: Buffer,
     /// 右目暂存。
@@ -188,6 +201,9 @@ struct CaptureSet {
 struct CaptureBuffers {
     /// 双缓冲组。
     sets: [CaptureSet; CAPTURE_SETS],
+    left: BufferPool,
+    right: BufferPool,
+    depth: BufferPool,
 }
 
 impl FromWorld for CaptureBuffers {
@@ -200,16 +216,38 @@ impl FromWorld for CaptureBuffers {
             mapped_at_creation: false,
         };
         let sets = std::array::from_fn(|_| CaptureSet {
-            left: device.create_buffer(&desc),
-            right: device.create_buffer(&desc),
+            left_packed: device.create_buffer(&BufferDescriptor {
+                size: GRAY_BYTES as u64,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+                ..desc
+            }),
+            right_packed: device.create_buffer(&BufferDescriptor {
+                size: GRAY_BYTES as u64,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+                ..desc
+            }),
+            left: device.create_buffer(&BufferDescriptor {
+                size: GRAY_BYTES as u64,
+                ..desc
+            }),
+            right: device.create_buffer(&BufferDescriptor {
+                size: GRAY_BYTES as u64,
+                ..desc
+            }),
             depth: device.create_buffer(&desc),
             pending: Arc::new(AtomicU32::new(0)),
         });
-        Self { sets }
+        // 在途两拍、待处理一拍与正在处理一拍分别持有自有 CPU 缓冲。
+        Self {
+            sets,
+            left: BufferPool::new(CAPTURE_SETS + 2, GRAY_BYTES),
+            right: BufferPool::new(CAPTURE_SETS + 2, GRAY_BYTES),
+            depth: BufferPool::new(CAPTURE_SETS + 2, FRAME_BYTES),
+        }
     }
 }
 
-/// 拷贝传感器纹理 → 空闲暂存组（绘制提交后同队列拷贝，窗口呈现前完成回读）。
+/// 拷贝传感器纹理 → 空闲暂存组（绘制提交后同队列拷贝，映射回调异步回传）。
 ///
 /// 请求在无空闲组或纹理未就绪时保留在共享槽：主世界据此保持相机激活、
 /// 下帧重试（相机按需激活，见 `link::poll_pose`）。
@@ -222,11 +260,16 @@ fn copy_sensors(
     buffers: Res<CaptureBuffers>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
+    gray: Res<GrayPackPipeline>,
 ) {
     if hub.inner.inflight_sets.load(Ordering::SeqCst) == 0 && !hub.has_pending() {
         return;
     }
-    let _ = device.poll(PollType::Poll);
+    // 在途组需要逐帧轮询，即使没有新请求也须推进映射回调。
+    if let Err(error) = device.poll(PollType::Poll) {
+        log::warn!("传感器 GPU 回读轮询失败: {error}");
+        return;
+    }
 
     // 先找空闲组：全忙时把请求留在槽里（主世界不会顶掉），下帧再试。
     let Some(set) = buffers
@@ -258,6 +301,13 @@ fn copy_sensors(
         log::debug!("深度预通道纹理尚未就绪，下帧重试");
         return;
     };
+    let (Some(left_bytes), Some(right_bytes), Some(depth_bytes)) = (
+        buffers.left.take(),
+        buffers.right.take(),
+        buffers.depth.take(),
+    ) else {
+        return;
+    };
 
     // 请求被真正消费（拷贝已编码）：主世界以 `taken_seq` 判据收起相机。
     set.pending.store(3, Ordering::SeqCst);
@@ -265,10 +315,22 @@ fn copy_sensors(
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("sensor-capture"),
     });
-    encode_copy(&mut encoder, &left.texture, &set.left);
-    encode_copy(&mut encoder, &right.texture, &set.right);
+    gray.encode(
+        &device,
+        &mut encoder,
+        &left.texture_view,
+        &set.left_packed,
+        &set.left,
+    );
+    gray.encode(
+        &device,
+        &mut encoder,
+        &right.texture_view,
+        &set.right_packed,
+        &set.right,
+    );
     encode_copy(&mut encoder, depth_tex, &set.depth);
-    let submission = queue.submit(std::iter::once(encoder.finish()));
+    queue.submit(std::iter::once(encoder.finish()));
     req.timing.submitted = Instant::now();
     *hub.inner.request.lock().expect("hub poisoned") = None;
     hub.inner.taken_seq.store(req.seq, Ordering::SeqCst);
@@ -281,6 +343,7 @@ fn copy_sensors(
         set.pending.clone(),
         SensorKind::Left,
         req,
+        left_bytes,
     );
     map_for_readback(
         &set.right,
@@ -289,6 +352,7 @@ fn copy_sensors(
         set.pending.clone(),
         SensorKind::Right,
         req,
+        right_bytes,
     );
     map_for_readback(
         &set.depth,
@@ -297,15 +361,8 @@ fn copy_sensors(
         set.pending.clone(),
         SensorKind::Depth,
         req,
+        depth_bytes,
     );
-    // 传感器提交必须完成后才放行下一帧，限制 GPU 在途年龄；仅等待本拍，
-    // 不等待后续窗口提交。超时保留在途缓冲，由下一次 poll 回收。
-    if let Err(error) = device.poll(PollType::Wait {
-        submission_index: Some(submission),
-        timeout: Some(std::time::Duration::from_secs(1)),
-    }) {
-        log::warn!("传感器 GPU 回读等待失败: {error}");
-    }
 }
 
 /// 单份纹理拷贝编码（只编码不映射，映射见 `map_for_readback`）。
@@ -346,21 +403,29 @@ fn map_for_readback(
     pending: Arc<AtomicU32>,
     kind: SensorKind,
     req: CaptureRequest,
+    mut bytes: PooledBuffer,
 ) {
     let hub = hub.inner.clone();
     let owned = buffer.clone();
     buffer.slice(..).map_async(MapMode::Read, move |result| {
         if let Err(e) = result {
             log::warn!("{label} 回读映射失败：{e:?}");
+            hub.done
+                .lock()
+                .expect("hub poisoned")
+                .push_back(CaptureReply::Failed(req.seq));
         } else {
-            let bytes = owned.slice(..).get_mapped_range().map(|view| view.to_vec());
+            let copied = owned
+                .slice(..)
+                .get_mapped_range()
+                .map(|view| bytes.copy_from_slice(&view));
             owned.unmap();
-            match bytes {
-                Ok(bytes) => hub
+            match copied {
+                Ok(()) => hub
                     .done
                     .lock()
                     .expect("hub poisoned")
-                    .push_back(CapturedFrame {
+                    .push_back(CaptureReply::Frame(CapturedFrame {
                         seq: req.seq,
                         timing: CaptureTiming {
                             readback: Instant::now(),
@@ -370,8 +435,14 @@ fn map_for_readback(
                         stamp: req.stamp,
                         trace: req.trace,
                         bytes,
-                    }),
-                Err(error) => log::warn!("{label} 回读范围不可用：{error:?}"),
+                    })),
+                Err(error) => {
+                    log::warn!("{label} 回读范围不可用：{error:?}");
+                    hub.done
+                        .lock()
+                        .expect("hub poisoned")
+                        .push_back(CaptureReply::Failed(req.seq));
+                }
             }
         }
         if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
@@ -395,6 +466,7 @@ impl Plugin for CapturePlugin {
             .insert_resource(hub)
             .init_resource::<ExtractedRequest>()
             .init_gpu_resource::<CaptureBuffers>()
+            .init_gpu_resource::<GrayPackPipeline>()
             .add_systems(bevy::render::ExtractSchedule, extract_request)
             .add_systems(RenderGraph, copy_sensors.in_set(RenderGraphSystems::Finish));
     }

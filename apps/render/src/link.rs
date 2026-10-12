@@ -6,7 +6,7 @@
 //!   相机，限制传感器渲染只在有采集请求时执行。
 //! - 三份同 `seq` 回复到齐后装配成 [`CaptureJob`] 交给工作线程；工作线程算完
 //!   立即发布传感器，不向主线程回传像素缓冲。
-//! - 发布走 [`Publisher::publish`]，自动注入续接后的 trace 上下文。
+//! - 图像走 [`Publisher::publish_with`]，就地填充并注入续接后的 trace 上下文。
 
 use std::collections::HashMap;
 use std::sync::{
@@ -21,7 +21,7 @@ use bevy::prelude::*;
 use fastrace::prelude::*;
 use firefly_pubsub::camera::{
     CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DEPTH_TOPIC, DepthImageMessage, GrayImageMessage,
-    IMAGE_HEIGHT, IMAGE_SIZE, IMAGE_WIDTH,
+    IMAGE_HEIGHT, IMAGE_WIDTH,
 };
 use firefly_pubsub::event::{CAMERA_PAIR_TOPIC, TopicNotifier};
 use firefly_pubsub::node::{IpcNode, create_node};
@@ -31,7 +31,7 @@ use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::trace::TraceContext;
 use firefly_pubsub::viz::{ScalarMessage, VizPublisher};
 
-use crate::capture::{CaptureHub, CaptureRequest, CapturedFrame, SensorKind};
+use crate::capture::{CaptureHub, CaptureReply, CaptureRequest, CapturedFrame, SensorKind};
 use crate::process::{CaptureJob, Latest, ProcessedCapture, run_worker};
 use crate::rig::{Eye, PoseState, apply_pose_to_eyes};
 
@@ -112,6 +112,8 @@ pub struct PendingFrames {
     pub frames: HashMap<u64, Vec<CapturedFrame>>,
     /// 下一个回读序号。
     pub next_seq: u64,
+    /// 已完成或失败的最新序号；迟到片段必须丢弃并归还缓冲。
+    retired_seq: u64,
 }
 
 impl Default for PendingFrames {
@@ -120,6 +122,7 @@ impl Default for PendingFrames {
         Self {
             frames: HashMap::new(),
             next_seq: 1,
+            retired_seq: 0,
         }
     }
 }
@@ -297,55 +300,70 @@ pub fn drain_captures(
     mut pending: ResMut<PendingFrames>,
     pipeline: Res<CapturePipeline>,
 ) {
-    for frame in hub.drain() {
-        pending.frames.entry(frame.seq).or_default().push(frame);
+    if let Some(job) = pending.assemble(hub.drain()) {
+        pipeline.jobs.replace(job);
     }
-    let ready: Vec<u64> = pending
-        .frames
-        .iter()
-        .filter(|(_, v)| v.len() >= 3)
-        .map(|(k, _)| *k)
-        .collect();
-    if ready.is_empty() {
-        return;
-    }
-    // 只处理最新完整节拍，旧节拍丢弃（渲染追最新，积压无意义）。
-    let seq = ready.into_iter().max().expect("non-empty");
-    let frames = pending.frames.remove(&seq).unwrap_or_default();
-    pending.frames.clear();
-    let mut left_rgb = None;
-    let mut right_rgb = None;
-    let mut depth_raw = None;
-    let mut stamp = 0.0;
-    let mut trace = TraceContext::default();
-    let mut timing = frames[0].timing;
-    for frame in frames {
-        timing.readback = timing.readback.max(frame.timing.readback);
-        stamp = frame.stamp;
-        trace = frame.trace;
-        match frame.kind {
-            SensorKind::Left => left_rgb = Some(frame.bytes),
-            SensorKind::Right => right_rgb = Some(frame.bytes),
-            SensorKind::Depth => depth_raw = Some(frame.bytes),
-        }
-    }
-    let (Some(left_rgb), Some(right_rgb), Some(depth_raw)) = (left_rgb, right_rgb, depth_raw)
-    else {
-        log::warn!("seq={seq} 回复不全（同类重复），丢弃本节拍");
-        return;
-    };
+}
 
-    timing.assembled = Instant::now();
-    let job = CaptureJob {
-        seq,
-        timing,
-        stamp,
-        trace,
-        left_rgb,
-        right_rgb,
-        depth_raw,
-    };
-    pipeline.jobs.replace(job);
+impl PendingFrames {
+    fn retire(&mut self, seq: u64) {
+        self.retired_seq = self.retired_seq.max(seq);
+        self.frames.retain(|id, _| *id > self.retired_seq);
+    }
+
+    /// 保留较新的未完整拍；淘汰序号的迟到片段不得再次占用缓冲。
+    fn assemble(&mut self, replies: impl IntoIterator<Item = CaptureReply>) -> Option<CaptureJob> {
+        for reply in replies {
+            match reply {
+                CaptureReply::Frame(frame) if frame.seq > self.retired_seq => {
+                    self.frames.entry(frame.seq).or_default().push(frame);
+                }
+                CaptureReply::Failed(seq) => self.retire(seq),
+                CaptureReply::Frame(_) => {}
+            }
+        }
+        let seq = self
+            .frames
+            .iter()
+            .filter(|(_, frames)| frames.len() >= 3)
+            .map(|(seq, _)| *seq)
+            .max()?;
+        let frames = self.frames.remove(&seq).expect("complete frame");
+        self.retire(seq);
+        let mut left_gray = None;
+        let mut right_gray = None;
+        let mut depth_raw = None;
+        let mut stamp = 0.0;
+        let mut trace = TraceContext::default();
+        let mut timing = frames[0].timing;
+        for frame in frames {
+            timing.readback = timing.readback.max(frame.timing.readback);
+            stamp = frame.stamp;
+            trace = frame.trace;
+            match frame.kind {
+                SensorKind::Left => left_gray = Some(frame.bytes),
+                SensorKind::Right => right_gray = Some(frame.bytes),
+                SensorKind::Depth => depth_raw = Some(frame.bytes),
+            }
+        }
+        let (Some(left_gray), Some(right_gray), Some(depth_raw)) =
+            (left_gray, right_gray, depth_raw)
+        else {
+            log::warn!("seq={seq} 回复不全（同类重复），丢弃本节拍");
+            return None;
+        };
+
+        timing.assembled = Instant::now();
+        Some(CaptureJob {
+            seq,
+            timing,
+            stamp,
+            trace,
+            left_gray,
+            right_gray,
+            depth_raw,
+        })
+    }
 }
 
 /// 汇总发布计数，工作线程提前退出视为传感器故障。
@@ -383,7 +401,7 @@ fn publish(ports: &SensorPublishers, result: &ProcessedCapture) {
     }
     publish_gray(&ports.left_pub, &result.left_gray, result.stamp, 0);
     publish_gray(&ports.right_pub, &result.right_gray, result.stamp, 1);
-    publish_depth(&ports.depth_pub, &result.depth, result.stamp);
+    publish_depth(&ports.depth_pub, result.depth, result.stamp);
     ports.pair_notify.notify_sent_sample();
     let t = result.timing;
     for (entity, values) in [
@@ -419,33 +437,136 @@ fn publish(ports: &SensorPublishers, result: &ProcessedCapture) {
 }
 
 /// 灰度发布（行主序，`sensor_id` 左右目区分）。
-#[allow(clippy::large_stack_arrays)]
 fn publish_gray(publisher: &Publisher<GrayImageMessage>, gray: &[u8], stamp: f64, sensor_id: i32) {
-    let mut msg = GrayImageMessage {
-        timestamp: stamp,
-        sensor_id,
-        width: IMAGE_WIDTH as u32,
-        height: IMAGE_HEIGHT as u32,
-        data: [0u8; IMAGE_SIZE],
-    };
-    msg.data.copy_from_slice(gray);
-    if let Err(e) = publisher.publish(msg) {
+    if let Err(e) = publisher.publish_with(|msg| {
+        msg.timestamp = stamp;
+        msg.sensor_id = sensor_id;
+        msg.width = IMAGE_WIDTH as u32;
+        msg.height = IMAGE_HEIGHT as u32;
+        msg.data.copy_from_slice(gray);
+    }) {
         log::warn!("灰度发布失败（id={sensor_id}）：{e:?}");
     }
 }
 
 /// 深度发布（米制 f32，行主序；噪声已在工作线程加入）。
-#[allow(clippy::large_stack_arrays)]
 fn publish_depth(publisher: &Publisher<DepthImageMessage>, depth: &[f32], stamp: f64) {
-    let mut msg = DepthImageMessage {
-        timestamp: stamp,
-        sensor_id: 0,
-        width: IMAGE_WIDTH as u32,
-        height: IMAGE_HEIGHT as u32,
-        data: [0.0; IMAGE_SIZE],
-    };
-    msg.data.copy_from_slice(depth);
-    if let Err(e) = publisher.publish(msg) {
+    if let Err(e) = publisher.publish_with(|msg| {
+        msg.timestamp = stamp;
+        msg.sensor_id = 0;
+        msg.width = IMAGE_WIDTH as u32;
+        msg.height = IMAGE_HEIGHT as u32;
+        msg.data.copy_from_slice(depth);
+    }) {
         log::warn!("深度发布失败：{e:?}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buffer::BufferPool;
+    use crate::capture::{CaptureTiming, FRAME_BYTES, GRAY_BYTES};
+
+    struct Replies {
+        left: BufferPool,
+        right: BufferPool,
+        depth: BufferPool,
+    }
+
+    impl Replies {
+        fn new() -> Self {
+            Self {
+                left: BufferPool::new(2, GRAY_BYTES),
+                right: BufferPool::new(2, GRAY_BYTES),
+                depth: BufferPool::new(2, FRAME_BYTES),
+            }
+        }
+
+        fn frame(&self, seq: u64, kind: SensorKind) -> CaptureReply {
+            let pool = match kind {
+                SensorKind::Left => &self.left,
+                SensorKind::Right => &self.right,
+                SensorKind::Depth => &self.depth,
+            };
+            CaptureReply::Frame(CapturedFrame {
+                seq,
+                timing: CaptureTiming::default(),
+                kind,
+                stamp: seq as f64,
+                trace: TraceContext::default(),
+                bytes: pool.take().unwrap(),
+            })
+        }
+
+        fn complete(&self, seq: u64) -> [CaptureReply; 3] {
+            [
+                self.frame(seq, SensorKind::Left),
+                self.frame(seq, SensorKind::Right),
+                self.frame(seq, SensorKind::Depth),
+            ]
+        }
+    }
+
+    #[test]
+    fn newer_partial_capture_survives_older_complete_capture() {
+        let replies = Replies::new();
+        let mut pending = PendingFrames::default();
+        assert!(
+            pending
+                .assemble([replies.frame(2, SensorKind::Left)])
+                .is_none()
+        );
+        let first = pending.assemble(replies.complete(1)).unwrap();
+        assert_eq!(first.seq, 1);
+        drop(first);
+        let second = pending
+            .assemble([
+                replies.frame(2, SensorKind::Depth),
+                replies.frame(2, SensorKind::Right),
+            ])
+            .unwrap();
+        assert_eq!(second.seq, 2);
+        assert!((second.stamp - 2.).abs() < f64::EPSILON);
+        assert!(pending.frames.is_empty());
+    }
+
+    #[test]
+    fn late_and_failed_fragments_release_buffers_for_future_captures() {
+        let replies = Replies::new();
+        let mut pending = PendingFrames::default();
+        assert!(
+            pending
+                .assemble([replies.frame(1, SensorKind::Left)])
+                .is_none()
+        );
+        let newer = pending.assemble(replies.complete(2)).unwrap();
+        drop(newer);
+        assert!(
+            pending
+                .assemble([replies.frame(1, SensorKind::Depth)])
+                .is_none()
+        );
+        assert!(pending.frames.is_empty());
+        assert!(
+            pending
+                .assemble([
+                    replies.frame(3, SensorKind::Left),
+                    replies.frame(3, SensorKind::Right),
+                    CaptureReply::Failed(3)
+                ])
+                .is_none()
+        );
+        assert!(
+            pending
+                .assemble([replies.frame(3, SensorKind::Depth)])
+                .is_none()
+        );
+        assert!(pending.frames.is_empty());
+        for seq in 4..=6 {
+            let job = pending.assemble(replies.complete(seq)).unwrap();
+            assert_eq!(job.seq, seq);
+            drop(job);
+        }
     }
 }

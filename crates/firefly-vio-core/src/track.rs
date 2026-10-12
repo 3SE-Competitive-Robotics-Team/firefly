@@ -27,7 +27,10 @@
 use crate::cam::CameraModel;
 use crate::feat::FeatureDatabase;
 use crate::sensor::{CameraData, GrayImage};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 pub mod fast;
 pub mod grider;
@@ -48,16 +51,40 @@ pub fn lk_optical_flow(
     prev_pts: &[nalgebra::Vector2<f32>],
     init_pts: &[nalgebra::Vector2<f32>],
 ) -> (Vec<nalgebra::Vector2<f32>>, Vec<bool>) {
+    let mut buffers = FlowBuffers::default();
+    lk_optical_flow_with_buffers(prev, next, prev_pts, init_pts, &mut buffers);
+    (buffers.tracked, buffers.accepted)
+}
+
+#[derive(Debug, Default)]
+struct FlowBuffers {
+    original: Vec<purecv::core::types::Point2f>,
+    initial: Vec<purecv::core::types::Point2f>,
+    tracked: Vec<nalgebra::Vector2<f32>>,
+    accepted: Vec<bool>,
+}
+
+fn lk_optical_flow_with_buffers<'a>(
+    prev: &GrayImage,
+    next: &GrayImage,
+    prev_pts: &[nalgebra::Vector2<f32>],
+    init_pts: &[nalgebra::Vector2<f32>],
+    buffers: &'a mut FlowBuffers,
+) -> (&'a [nalgebra::Vector2<f32>], &'a [bool]) {
     use purecv::core::types::{Point2f, Size2i, TermCriteria, TermType};
     let prev_mat = pyramid::gray_to_matrix(prev);
     let next_mat = pyramid::gray_to_matrix(next);
-    let p0: Vec<Point2f> = prev_pts.iter().map(|p| Point2f::new(p.x, p.y)).collect();
-    let p1: Vec<Point2f> = init_pts.iter().map(|p| Point2f::new(p.x, p.y)).collect();
+    let p0 = &mut buffers.original;
+    let p1 = &mut buffers.initial;
+    p0.clear();
+    p1.clear();
+    p0.extend(prev_pts.iter().map(|p| Point2f::new(p.x, p.y)));
+    p1.extend(init_pts.iter().map(|p| Point2f::new(p.x, p.y)));
     let (out, status, _err) = purecv::video::calc_optical_flow_pyramid_lk(
         &prev_mat,
         &next_mat,
-        &p0,
-        Some(&p1),
+        p0,
+        Some(p1),
         Size2i::new(21, 21),
         3,
         TermCriteria::new(TermType::Both, 30, 0.01),
@@ -69,7 +96,7 @@ pub fn lk_optical_flow(
         &next_mat,
         &prev_mat,
         &out,
-        Some(&p0),
+        Some(p0),
         Size2i::new(21, 21),
         1,
         TermCriteria::new(TermType::Both, 30, 0.01),
@@ -77,22 +104,24 @@ pub fn lk_optical_flow(
         1e-4,
     )
     .expect("purecv reverse LK uses the same valid image pair");
-    let accepted = status
-        .iter()
-        .zip(&reverse_status)
-        .zip(&reverse)
-        .zip(&p0)
-        .map(|(((forward, backward), returned), original)| {
-            *forward != 0
-                && *backward != 0
-                && (returned.x - original.x).hypot(returned.y - original.y) <= 0.5
-        })
-        .collect();
-    let pts: Vec<nalgebra::Vector2<f32>> = out
-        .into_iter()
-        .map(|p| nalgebra::Vector2::new(p.x, p.y))
-        .collect();
-    (pts, accepted)
+    buffers.accepted.clear();
+    buffers.accepted.extend(
+        status
+            .iter()
+            .zip(&reverse_status)
+            .zip(&reverse)
+            .zip(p0.iter())
+            .map(|(((forward, backward), returned), original)| {
+                *forward != 0
+                    && *backward != 0
+                    && (returned.x - original.x).hypot(returned.y - original.y) <= 0.5
+            }),
+    );
+    buffers.tracked.clear();
+    buffers
+        .tracked
+        .extend(out.into_iter().map(|p| nalgebra::Vector2::new(p.x, p.y)));
+    (&buffers.tracked, &buffers.accepted)
 }
 
 /// 图像预处理方法（对照 `TrackBase.h` 的 `HistogramMethod` 枚举）。
@@ -231,6 +260,11 @@ struct CamState {
     pts_last: Vec<KeyPoint>,
     /// 上一帧各点特征 id（`ids_last`）。
     ids_last: Vec<usize>,
+    /// 下一帧输出、LK 初值和匹配掩码复用容量。
+    pts_next: Vec<KeyPoint>,
+    ids_next: Vec<usize>,
+    pts_flow: Vec<KeyPoint>,
+    matching_mask: Vec<bool>,
 }
 
 impl Default for CamState {
@@ -248,8 +282,65 @@ impl Default for CamState {
             mask_last: Arc::new(empty()),
             pts_last: Vec::new(),
             ids_last: Vec::new(),
+            pts_next: Vec::new(),
+            ids_next: Vec::new(),
+            pts_flow: Vec::new(),
+            matching_mask: Vec::new(),
         }
     }
+}
+
+impl CamState {
+    fn prepare(&mut self) {
+        self.pts_next.clear();
+        self.ids_next.clear();
+        self.matching_mask.clear();
+    }
+
+    fn advance(&mut self, image: Arc<GrayImage>, mask: Arc<GrayImage>) {
+        std::mem::swap(&mut self.pts_last, &mut self.pts_next);
+        std::mem::swap(&mut self.ids_last, &mut self.ids_next);
+        self.pts_next.clear();
+        self.ids_next.clear();
+        self.img_last = image;
+        self.mask_last = mask;
+    }
+}
+
+#[derive(Debug)]
+struct DetectionBuffers {
+    grid_close: Vec<u8>,
+    grid_count: Vec<u8>,
+    valid: Vec<(i32, i32)>,
+    stereo_ids: HashSet<usize>,
+    mask: GrayImage,
+}
+
+impl Default for DetectionBuffers {
+    fn default() -> Self {
+        Self {
+            grid_close: Vec::new(),
+            grid_count: Vec::new(),
+            valid: Vec::new(),
+            stereo_ids: HashSet::new(),
+            mask: GrayImage {
+                width: 0,
+                height: 0,
+                data: Vec::new(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct MatchingBuffers {
+    pts0: Vec<nalgebra::Vector2<f32>>,
+    pts1: Vec<nalgebra::Vector2<f32>>,
+    valid: Vec<usize>,
+    normalized0: Vec<purecv::core::types::Point2f>,
+    normalized1: Vec<purecv::core::types::Point2f>,
+    ransac_mask: Vec<u8>,
+    flow: FlowBuffers,
 }
 
 /// KLT 特征跟踪器（对照 `TrackKLT.cpp` / `TrackKLT.h`）。
@@ -276,6 +367,12 @@ pub struct TrackKlt {
     currid: usize,
     /// 每相机跟踪状态。
     cams: HashMap<usize, CamState>,
+    detection: DetectionBuffers,
+    matching: MatchingBuffers,
+    right_index: HashMap<usize, usize>,
+    right_ids: HashSet<usize>,
+    stereo_points: Vec<nalgebra::Vector2<f32>>,
+    stereo_flow: FlowBuffers,
 }
 
 impl TrackKlt {
@@ -309,6 +406,12 @@ impl TrackKlt {
             min_px_dist,
             currid,
             cams: HashMap::new(),
+            detection: DetectionBuffers::default(),
+            matching: MatchingBuffers::default(),
+            right_index: HashMap::new(),
+            right_ids: HashSet::new(),
+            stereo_points: Vec::new(),
+            stereo_flow: FlowBuffers::default(),
         }
     }
 
@@ -412,12 +515,18 @@ impl TrackKlt {
 
     /// 对 `msg` 中所有相机做直方图预处理，将结果写入 `img_curr`
     /// （对照 `TrackKLT.cpp` 第 49-76 行；purecv LK 自建金字塔，此处只做
-    /// 直方图）。两相机独立，用 rayon 并行处理。
+    /// 直方图）。None 直接共享输入，其余方法按相机用 rayon 并行处理。
     #[fastrace::trace]
     fn preprocess_into_curr(&mut self, msg: &CameraData) {
         use rayon::prelude::*;
 
         let hist_method = self.base.histogram_method;
+        if hist_method == HistogramMethod::None {
+            for (&sid, image) in msg.sensor_ids.iter().zip(&msg.images) {
+                self.cams.entry(sensor_key(sid)).or_default().img_curr = Arc::clone(image);
+            }
+            return;
+        }
 
         // 并行：每相机独立做直方图预处理（purecv LK 内部自建 f32 金字塔）
         let results: Vec<_> = msg
@@ -449,67 +558,56 @@ impl TrackKlt {
     #[fastrace::trace]
     fn feed_monocular(&mut self, msg: &CameraData, msg_id: usize) {
         let key = sensor_key(msg.sensor_ids[msg_id]);
+        let mut state = self
+            .cams
+            .remove(&key)
+            .expect("camera state after preprocess");
+        state.prepare();
+        self.track_monocular(msg, msg_id, &mut state);
+        self.cams.insert(key, state);
+    }
+
+    fn track_monocular(&mut self, msg: &CameraData, msg_id: usize, state: &mut CamState) {
+        let key = sensor_key(msg.sensor_ids[msg_id]);
         let mask = msg.masks[msg_id].clone();
         let timestamp = msg.timestamp;
         let cam_sensor_id = msg.sensor_ids[msg_id];
 
-        // 共享不可变像素，使当前帧和历史帧的所有权独立于状态更新。
-        let img_curr = {
-            let s = self.cams.get(&key).expect("camera state after preprocess");
-            s.img_curr.clone()
-        };
-
-        // 首帧或上帧无点 → 直接重检测
-        let first_frame = self.cams.get(&key).is_none_or(|s| s.pts_last.is_empty());
-        if first_frame {
-            let mut good = Vec::new();
-            let mut ids = Vec::new();
-            self.perform_detection_monocular(&mask, &img_curr, &mut good, &mut ids, &[]);
-            let s = self.cams.get_mut(&key).unwrap();
-            s.pts_last = good;
-            s.ids_last = ids;
-            s.img_last = img_curr;
-            s.mask_last = mask;
+        let img_curr = Arc::clone(&state.img_curr);
+        if state.pts_last.is_empty() {
+            self.perform_detection_monocular(
+                &mask,
+                &img_curr,
+                &mut state.pts_last,
+                &mut state.ids_last,
+                &[],
+            );
+            state.img_last = img_curr;
+            state.mask_last = mask;
             return;
         }
 
-        // 补点：在上一帧（last）上检测，保证点数足够
-        let (mut pts_old, mut ids_old) = {
-            let s = self.cams.get(&key).unwrap();
-            (s.pts_last.clone(), s.ids_last.clone())
-        };
-        let (mask_last, img_last) = {
-            let s = self.cams.get(&key).unwrap();
-            (s.mask_last.clone(), s.img_last.clone())
-        };
-        self.perform_detection_monocular(&mask_last, &img_last, &mut pts_old, &mut ids_old, &[]);
+        let (pts_old, ids_old) = (&mut state.pts_last, &mut state.ids_last);
+        let (mask_last, img_last) = (&state.mask_last, &state.img_last);
+        self.perform_detection_monocular(mask_last, img_last, pts_old, ids_old, &[]);
 
         // 时间 LK + RANSAC
-        let mut pts_new = pts_old.clone();
-        let mut mask_ll = Vec::new();
-        self.perform_matching(
-            &img_last,
-            &img_curr,
-            &mut pts_old,
-            &mut pts_new,
-            key,
-            key,
-            &mut mask_ll,
-        );
+        state.pts_flow.clone_from(pts_old);
+        let pts_new = &mut state.pts_flow;
+        let mask_ll = &mut state.matching_mask;
+        self.perform_matching(img_last, &img_curr, pts_old, pts_new, key, key, mask_ll);
 
         // RANSAC 失败 → 复位（同 C++ 的 mask_ll.empty() 分支）
         if mask_ll.is_empty() {
-            let s = self.cams.get_mut(&key).unwrap();
-            s.pts_last.clear();
-            s.ids_last.clear();
-            s.img_last = img_curr;
-            s.mask_last = mask;
+            state.pts_last.clear();
+            state.ids_last.clear();
+            state.advance(img_curr, mask);
             return;
         }
 
         let (w, h) = (img_curr.width as i32, img_curr.height as i32);
-        let mut good = Vec::new();
-        let mut good_ids = Vec::new();
+        let good = &mut state.pts_next;
+        let good_ids = &mut state.ids_next;
         for i in 0..pts_new.len() {
             let p = pts_new[i];
             if p.x < 0.0 || p.y < 0.0 || (p.x as i32) >= w || (p.y as i32) >= h {
@@ -525,13 +623,9 @@ impl TrackKlt {
         }
 
         // 入库（去畸变 → 归一化坐标）
-        self.insert_to_db(timestamp, cam_sensor_id, &good, &good_ids);
+        self.insert_to_db(timestamp, cam_sensor_id, good, good_ids);
 
-        let s = self.cams.get_mut(&key).unwrap();
-        s.pts_last = good;
-        s.ids_last = good_ids;
-        s.img_last = img_curr;
-        s.mask_last = mask;
+        state.advance(img_curr, mask);
     }
 
     /// 双目跟踪（对照 `TrackKLT::feed_stereo`，具体双目一致性逻辑见注释）。
@@ -541,81 +635,84 @@ impl TrackKlt {
     fn feed_stereo(&mut self, msg: &CameraData, idl: usize, idr: usize) {
         let keyl = sensor_key(msg.sensor_ids[idl]);
         let keyr = sensor_key(msg.sensor_ids[idr]);
+        if keyl == keyr {
+            return;
+        }
+        let mut left = self
+            .cams
+            .remove(&keyl)
+            .expect("left camera after preprocess");
+        let mut right = self
+            .cams
+            .remove(&keyr)
+            .expect("right camera after preprocess");
+        left.prepare();
+        right.prepare();
+        self.track_stereo(msg, idl, idr, &mut left, &mut right);
+        self.cams.insert(keyl, left);
+        self.cams.insert(keyr, right);
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn track_stereo(
+        &mut self,
+        msg: &CameraData,
+        idl: usize,
+        idr: usize,
+        sl: &mut CamState,
+        sr: &mut CamState,
+    ) {
+        let keyl = sensor_key(msg.sensor_ids[idl]);
+        let keyr = sensor_key(msg.sensor_ids[idr]);
         let mask_l = msg.masks[idl].clone();
         let mask_r = msg.masks[idr].clone();
         let timestamp = msg.timestamp;
         let sid_l = msg.sensor_ids[idl];
         let sid_r = msg.sensor_ids[idr];
 
-        // 当前帧数据
-        let (img_l, img_r) = {
-            let sl = self.cams.get(&keyl).unwrap();
-            let sr = self.cams.get(&keyr).unwrap();
-            (sl.img_curr.clone(), sr.img_curr.clone())
-        };
-        // 时间跟踪的源图像使用上一帧，目标图像使用当前帧。
-        let (img_l_last, img_r_last) = {
-            let sl = self.cams.get(&keyl).unwrap();
-            let sr = self.cams.get(&keyr).unwrap();
-            (sl.img_last.clone(), sr.img_last.clone())
-        };
-
-        let first_frame = {
-            let sl = self.cams.get(&keyl).is_none_or(|s| s.pts_last.is_empty());
-            let sr = self.cams.get(&keyr).is_none_or(|s| s.pts_last.is_empty());
-            sl && sr
-        };
-        if first_frame {
-            let mut gl = Vec::new();
-            let mut gr = Vec::new();
-            let mut il = Vec::new();
-            let mut ir = Vec::new();
+        let (img_l, img_r) = (Arc::clone(&sl.img_curr), Arc::clone(&sr.img_curr));
+        let (img_l_last, img_r_last) = (Arc::clone(&sl.img_last), Arc::clone(&sr.img_last));
+        if sl.pts_last.is_empty() && sr.pts_last.is_empty() {
             self.perform_detection_stereo(
-                &mask_l, &mask_r, &img_l, &img_r, &mut gl, &mut gr, &mut il, &mut ir,
+                &mask_l,
+                &mask_r,
+                &img_l,
+                &img_r,
+                &mut sl.pts_last,
+                &mut sr.pts_last,
+                &mut sl.ids_last,
+                &mut sr.ids_last,
             );
-            let sl = self.cams.get_mut(&keyl).unwrap();
-            sl.pts_last = gl;
-            sl.ids_last = il;
             sl.img_last = img_l;
             sl.mask_last = mask_l;
-            let sr = self.cams.get_mut(&keyr).unwrap();
-            sr.pts_last = gr;
-            sr.ids_last = ir;
             sr.img_last = img_r;
             sr.mask_last = mask_r;
             return;
         }
 
-        // 补点（last 图）
-        let (mut pts_l, mut pts_r, mut ids_l, mut ids_r) = {
-            let sl = self.cams.get(&keyl).unwrap();
-            let sr = self.cams.get(&keyr).unwrap();
-            (
-                sl.pts_last.clone(),
-                sr.pts_last.clone(),
-                sl.ids_last.clone(),
-                sr.ids_last.clone(),
-            )
-        };
-        let (mask_l_last, mask_r_last) = {
-            let sl = self.cams.get(&keyl).unwrap();
-            let sr = self.cams.get(&keyr).unwrap();
-            (sl.mask_last.clone(), sr.mask_last.clone())
-        };
+        let (pts_l, pts_r, ids_l, ids_r) = (
+            &mut sl.pts_last,
+            &mut sr.pts_last,
+            &mut sl.ids_last,
+            &mut sr.ids_last,
+        );
+        let (mask_l_last, mask_r_last) = (&sl.mask_last, &sr.mask_last);
         self.perform_detection_stereo(
-            &mask_l_last,
-            &mask_r_last,
+            mask_l_last,
+            mask_r_last,
             // 新点在上一帧检测，再由时间 LK 跟踪到当前帧。
             &img_l_last,
             &img_r_last,
-            &mut pts_l,
-            &mut pts_r,
-            &mut ids_l,
-            &mut ids_r,
+            pts_l,
+            pts_r,
+            ids_l,
+            ids_r,
         );
 
         // 左右时间 LK + RANSAC
-        let (mut pts_l_new, mut pts_r_new) = (pts_l.clone(), pts_r.clone());
+        sl.pts_flow.clone_from(pts_l);
+        sr.pts_flow.clone_from(pts_r);
+        let (pts_l_new, pts_r_new) = (&mut sl.pts_flow, &mut sr.pts_flow);
         // 运动外推初值：LK 初值 = 上一帧位置 + 最近两帧位移（按特征 id 查
         // 库），减小大位移（10Hz 下近地面特征 ~31px/帧）下 LK 收敛滞后。
         for (i, id) in ids_l.iter().enumerate() {
@@ -630,34 +727,15 @@ impl TrackKlt {
                 pts_r_new[i].y += last.y - prev.y;
             }
         }
-        let mut mask_ll = Vec::new();
-        let mut mask_rr = Vec::new();
-        self.perform_matching(
-            &img_l_last,
-            &img_l,
-            &mut pts_l,
-            &mut pts_l_new,
-            keyl,
-            keyl,
-            &mut mask_ll,
-        );
-        self.perform_matching(
-            &img_r_last,
-            &img_r,
-            &mut pts_r,
-            &mut pts_r_new,
-            keyr,
-            keyr,
-            &mut mask_rr,
-        );
+        let (mask_ll, mask_rr) = (&mut sl.matching_mask, &mut sr.matching_mask);
+        self.perform_matching(&img_l_last, &img_l, pts_l, pts_l_new, keyl, keyl, mask_ll);
+        self.perform_matching(&img_r_last, &img_r, pts_r, pts_r_new, keyr, keyr, mask_rr);
 
         if mask_ll.is_empty() && mask_rr.is_empty() {
-            let sl = self.cams.get_mut(&keyl).unwrap();
             sl.pts_last.clear();
             sl.ids_last.clear();
             sl.img_last = img_l;
             sl.mask_last = mask_l;
-            let sr = self.cams.get_mut(&keyr).unwrap();
             sr.pts_last.clear();
             sr.ids_last.clear();
             sr.img_last = img_r;
@@ -667,15 +745,14 @@ impl TrackKlt {
 
         let (w_l, h_l) = (img_l.width as i32, img_l.height as i32);
         let (w_r, h_r) = (img_r.width as i32, img_r.height as i32);
-        let mut good_l = Vec::new();
-        let mut good_r = Vec::new();
-        let mut good_ids_l = Vec::new();
-        let mut good_ids_r = Vec::new();
+        let (good_l, good_r) = (&mut sl.pts_next, &mut sr.pts_next);
+        let (good_ids_l, good_ids_r) = (&mut sl.ids_next, &mut sr.ids_next);
 
         // LEFT loop（对照 TrackKLT.cpp 第 306-338 行）
         // 右目 id → 位置预建表：O(1) 替代 O(n) 线性扫描（同 RIGHT loop 的 HashSet
         // 做法；`or_insert` 保留首个下标，与线性扫描找到首个即停同语义）。
-        let mut r_index = std::collections::HashMap::with_capacity(ids_r.len() * 2);
+        let r_index = &mut self.right_index;
+        r_index.clear();
         for (n, &idr) in ids_r.iter().enumerate() {
             r_index.entry(idr).or_insert(n);
         }
@@ -704,7 +781,9 @@ impl TrackKlt {
         }
         // RIGHT loop（对照 TrackKLT.cpp 第 341-354 行）
         // 用 HashSet 加速重复 id 查找（O(1) 替代 O(n) 线性扫描）
-        let good_ids_r_set: std::collections::HashSet<usize> = good_ids_r.iter().copied().collect();
+        let good_ids_r_set = &mut self.right_ids;
+        good_ids_r_set.clear();
+        good_ids_r_set.extend(good_ids_r.iter().copied());
         for i in 0..pts_r_new.len() {
             let p = pts_r_new[i];
             if p.x < 0.0 || p.y < 0.0 || (p.x as i32) >= w_r || (p.y as i32) >= h_r {
@@ -717,23 +796,10 @@ impl TrackKlt {
         }
 
         // 入库
-        self.insert_to_db(timestamp, sid_l, &good_l, &good_ids_l);
-        self.insert_to_db(timestamp, sid_r, &good_r, &good_ids_r);
-        // 将图像、掩码、跟踪点和 id 一并推进到当前帧。
-        {
-            let sl = self.cams.get_mut(&keyl).unwrap();
-            sl.img_last = img_l;
-            sl.mask_last = mask_l;
-            sl.pts_last = good_l;
-            sl.ids_last = good_ids_l;
-        }
-        {
-            let sr = self.cams.get_mut(&keyr).unwrap();
-            sr.img_last = img_r;
-            sr.mask_last = mask_r;
-            sr.pts_last = good_r;
-            sr.ids_last = good_ids_r;
-        }
+        self.insert_to_db(timestamp, sid_l, good_l, good_ids_l);
+        self.insert_to_db(timestamp, sid_r, good_r, good_ids_r);
+        sl.advance(img_l, mask_l);
+        sr.advance(img_r, mask_r);
     }
 
     /// 把 `(点,id)` 对经当前相机去畸变后写入特征库（对照 `TrackKLT.cpp` 入库段）。
@@ -776,14 +842,13 @@ impl TrackKlt {
         if kpts0.is_empty() {
             return;
         }
-        let pts0: Vec<nalgebra::Vector2<f32>> = kpts0
-            .iter()
-            .map(|k| nalgebra::Vector2::new(k.x, k.y))
-            .collect();
-        let pts1: Vec<nalgebra::Vector2<f32>> = kpts1
-            .iter()
-            .map(|k| nalgebra::Vector2::new(k.x, k.y))
-            .collect();
+        let workspace = &mut self.matching;
+        let pts0 = &mut workspace.pts0;
+        let pts1 = &mut workspace.pts1;
+        pts0.clear();
+        pts1.clear();
+        pts0.extend(kpts0.iter().map(|k| nalgebra::Vector2::new(k.x, k.y)));
+        pts1.extend(kpts1.iter().map(|k| nalgebra::Vector2::new(k.x, k.y)));
 
         // 点数不足做 RANSAC → 全部失败（同 C++ 第 846-852 行）
         if pts0.len() < 10 {
@@ -792,12 +857,16 @@ impl TrackKlt {
         }
 
         // LK（OPTFLOW_USE_INITIAL_FLOW → use_initial_flow=true；purecv 金字塔 LK）
-        let (out, status) = lk_optical_flow(img0, img1, &pts0, &pts1);
-        let valid: Vec<usize> = status
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &ok)| ok.then_some(i))
-            .collect();
+        let (out, status) =
+            lk_optical_flow_with_buffers(img0, img1, pts0, pts1, &mut workspace.flow);
+        let valid = &mut workspace.valid;
+        valid.clear();
+        valid.extend(
+            status
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &ok)| ok.then_some(i)),
+        );
         if valid.len() < 10 {
             mask_out.resize(pts0.len(), false);
             return;
@@ -809,14 +878,18 @@ impl TrackKlt {
         let (Some(cam0), Some(cam1)) = (cam0, cam1) else {
             return;
         };
-        let pts0_n: Vec<nalgebra::Vector2<f64>> = valid
-            .iter()
-            .map(|&i| cam0.undistort_d(pts0[i].cast()))
-            .collect();
-        let pts1_n: Vec<nalgebra::Vector2<f64>> = valid
-            .iter()
-            .map(|&i| cam1.undistort_d(out[i].cast()))
-            .collect();
+        let pts0_p = &mut workspace.normalized0;
+        let pts1_p = &mut workspace.normalized1;
+        pts0_p.clear();
+        pts1_p.clear();
+        pts0_p.extend(valid.iter().map(|&i| {
+            let p = cam0.undistort_d(pts0[i].cast());
+            purecv::core::types::Point2f::new(p.x as f32, p.y as f32)
+        }));
+        pts1_p.extend(valid.iter().map(|&i| {
+            let p = cam1.undistort_d(out[i].cast());
+            purecv::core::types::Point2f::new(p.x as f32, p.y as f32)
+        }));
 
         // max_focallength = 两相机焦距最大值（同 C++ 第 870-872 行）
         let max_focal = {
@@ -828,33 +901,26 @@ impl TrackKlt {
 
         // RANSAC（同 C++ 第 873 行；purecv `findFundamentalMat` = OpenCV 语义，
         // 替代手搓 ransac——退化时（内点 <8）返回 Err，等同 OpenCV 空 mask 全拒）
-        let mut mask_rsc = Vec::new();
-        let pts0_p: Vec<purecv::core::types::Point2f> = pts0_n
-            .iter()
-            .map(|p| purecv::core::types::Point2f::new(p.x as f32, p.y as f32))
-            .collect();
-        let pts1_p: Vec<purecv::core::types::Point2f> = pts1_n
-            .iter()
-            .map(|p| purecv::core::types::Point2f::new(p.x as f32, p.y as f32))
-            .collect();
+        let mask_rsc = &mut workspace.ransac_mask;
+        mask_rsc.clear();
         let f_res = purecv::calib3d::find_fundamental_mat(
-            &pts0_p,
-            &pts1_p,
+            pts0_p,
+            pts1_p,
             purecv::calib3d::FundamentalMatMethod::FM_RANSAC,
             threshold,
             0.999,
             1000,
-            Some(&mut mask_rsc),
+            Some(mask_rsc),
         );
         if f_res.is_err() {
             mask_rsc.clear();
         }
-        let mask_rsc: Vec<bool> = mask_rsc.into_iter().map(|m| m != 0).collect();
 
         // RANSAC 只使用双向 LK 有效的对应，掩码再还原到原始点索引。
         mask_out.resize(status.len(), false);
-        for (i, accepted) in valid.into_iter().zip(mask_rsc) {
-            mask_out[i] = accepted;
+        mask_out.fill(false);
+        for (&i, &accepted) in valid.iter().zip(mask_rsc.iter()) {
+            mask_out[i] = accepted != 0;
         }
 
         // 回写位置（pts0 未变，pts1 取 LK 结果；同 C++ 第 882-885 行）
@@ -876,25 +942,33 @@ impl TrackKlt {
         ids0: &mut Vec<usize>,
         stereo_ids: &[usize],
     ) -> usize {
-        let stereo_ids: std::collections::HashSet<_> = stereo_ids.iter().copied().collect();
+        let workspace = &mut self.detection;
+        workspace.stereo_ids.clear();
+        workspace.stereo_ids.extend(stereo_ids.iter().copied());
+        let stereo_ids = &workspace.stereo_ids;
         let min_px = self.min_px_dist.max(1) as usize;
         let (w, h) = (img0.width, img0.height);
         // 距离占用网格（每 cell = min_px² 像素）
         let close_w = w.div_ceil(min_px);
         let close_h = h.div_ceil(min_px);
-        let mut grid_close = vec![0u8; close_w * close_h];
+        let grid_close = &mut workspace.grid_close;
+        grid_close.resize(close_w * close_h, 0);
+        grid_close.fill(0);
         let grid_x = self.grid_x.max(1);
         let grid_y = self.grid_y.max(1);
         let size_x = w as f32 / grid_x as f32;
         let size_y = h as f32 / grid_y as f32;
-        let mut grid_count = vec![0u8; grid_x * grid_y];
+        let grid_count = &mut workspace.grid_count;
+        grid_count.resize(grid_x * grid_y, 0);
+        grid_count.fill(0);
         let edge = 10i32;
         let (w_i, h_i) = (w as i32, h as i32);
 
         // 遍历既有特征：剔除越界/掩码/过近，并用之占用 close-grid 与网格计数
-        let mut keep = Vec::with_capacity(pts0.len());
-        let mut keep_ids = Vec::with_capacity(ids0.len());
-        for (p, &fid) in pts0.iter().zip(ids0.iter()) {
+        let mut kept = 0;
+        for i in 0..pts0.len() {
+            let p = pts0[i];
+            let fid = ids0[i];
             if p.x < edge as f32
                 || p.y < edge as f32
                 || p.x >= (w_i - edge) as f32
@@ -922,13 +996,12 @@ impl TrackKlt {
             grid_close[yc * close_w + xc] = 255;
             let cell = &mut grid_count[yg * grid_x + xg];
             *cell = cell.saturating_add(1);
-            keep.push(*p);
-            keep_ids.push(fid);
+            pts0[kept] = p;
+            ids0[kept] = fid;
+            kept += 1;
         }
-        pts0.clear();
-        ids0.clear();
-        pts0.extend(keep);
-        ids0.extend(keep_ids);
+        pts0.truncate(kept);
+        ids0.truncate(kept);
 
         let new_start = pts0.len();
 
@@ -941,24 +1014,17 @@ impl TrackKlt {
             return new_start;
         }
 
-        // 掩码下采样到网格（INTER_NEAREST）
-        let mut mask_grid = vec![0u8; grid_x * grid_y];
-        for yg in 0..grid_y {
-            for xg in 0..grid_x {
-                let sy = ((yg * h) / grid_y).min(h.saturating_sub(1));
-                let sx = ((xg * w) / grid_x).min(w.saturating_sub(1));
-                mask_grid[yg * grid_x + xg] = mask0.data[sy * w + sx];
-            }
-        }
-
         // 有效网格（该格未满 + 该格掩码未全遮）
         let features_per_grid = self.num_features / (grid_x * grid_y) + 1;
         let required_per_grid = ((min_feat_percent * features_per_grid as f64) as usize).max(1);
-        let mut valid = Vec::new();
+        let valid = &mut workspace.valid;
+        valid.clear();
         for xg in 0..grid_x {
             for yg in 0..grid_y {
                 if (grid_count[yg * grid_x + xg] as usize) < required_per_grid
-                    && mask_grid[yg * grid_x + xg] != 255
+                    && mask0.data
+                        [((yg * h) / grid_y).min(h - 1) * w + ((xg * w) / grid_x).min(w - 1)]
+                        != 255
                 {
                     valid.push((xg as i32, yg as i32));
                 }
@@ -968,25 +1034,32 @@ impl TrackKlt {
         // 更新掩码覆盖已有特征周围的 `2 * min_px_dist` 区域，维持特征间距。
         let (w_i, h_i) = (w as i32, h as i32);
         let r = min_px as i32;
-        let mut mask_updated = std::borrow::Cow::Borrowed(mask0);
+        let mut mask_updated = mask0;
+        let mut copied = false;
         for p in pts0.iter() {
             let (x, y) = (p.x as i32, p.y as i32);
             if x - r >= 0 && x + r < w_i && y - r >= 0 && y + r < h_i {
-                let mask_updated = mask_updated.to_mut();
+                if !copied {
+                    workspace.mask.width = w;
+                    workspace.mask.height = h;
+                    workspace.mask.data.clone_from(&mask0.data);
+                    copied = true;
+                }
                 for y0 in (y - r)..=(y + r) {
-                    let row = (y0 as usize) * mask_updated.width;
-                    for x0 in (x - r)..=(x + r) {
-                        mask_updated.data[row + x0 as usize] = 255;
-                    }
+                    let row = y0 as usize * w;
+                    workspace.mask.data[row + (x - r) as usize..=row + (x + r) as usize].fill(255);
                 }
             }
+        }
+        if copied {
+            mask_updated = &workspace.mask;
         }
 
         // 网格提取 + 去畸变/掩码过滤（对照 Grider_GRID）
         let extracted = grider::perform_griding(
             img0,
-            &mask_updated,
-            &valid,
+            mask_updated,
+            valid,
             self.num_features,
             grid_x,
             grid_y,
@@ -1037,11 +1110,15 @@ impl TrackKlt {
         //    calcOpticalFlowPyrLK(left→right)，左右目同 id 双测量）
         let new_len = pts0.len();
         if new_len > new_start {
-            let left: Vec<nalgebra::Vector2<f32>> = pts0[new_start..]
-                .iter()
-                .map(|k| nalgebra::Vector2::new(k.x, k.y))
-                .collect();
-            let (right_out, status) = lk_optical_flow(img0, img1, &left, &left);
+            let left = &mut self.stereo_points;
+            left.clear();
+            left.extend(
+                pts0[new_start..]
+                    .iter()
+                    .map(|k| nalgebra::Vector2::new(k.x, k.y)),
+            );
+            let (right_out, status) =
+                lk_optical_flow_with_buffers(img0, img1, left, left, &mut self.stereo_flow);
             let (w, h) = (img1.width as f32, img1.height as f32);
             for i in new_start..new_len {
                 let si = i - new_start;
@@ -1226,6 +1303,51 @@ mod lk_bias_tests {
         );
         assert_ne!(empty, [] as [KeyPoint; 0]);
         assert_eq!(empty, occupied);
+    }
+
+    #[test]
+    fn detection_workspace_resets_mask_and_grids_across_frames_and_sizes() {
+        let make_tracker = || {
+            TrackKlt::new(
+                HashMap::new(),
+                80,
+                0,
+                false,
+                HistogramMethod::None,
+                20,
+                4,
+                4,
+                10,
+            )
+        };
+        let mut tracker = make_tracker();
+        for (w, h) in [(320, 240), (320, 240), (160, 120), (320, 240)] {
+            let image = checkerboard(w, h, 8);
+            let mask = GrayImage {
+                width: w,
+                height: h,
+                data: vec![0; w * h],
+            };
+            let mut points = vec![KeyPoint::new(50., 50.)];
+            let mut ids = vec![1];
+            tracker.currid = 1;
+            tracker.perform_detection_monocular(&mask, &image, &mut points, &mut ids, &[]);
+            assert_eq!(tracker.detection.mask.data.len(), w * h);
+            let grid_ptr = tracker.detection.grid_close.as_ptr();
+            let mask_ptr = tracker.detection.mask.data.as_ptr();
+            let mut fresh = make_tracker();
+            fresh.currid = tracker.currid;
+            let mut expected = Vec::new();
+            let mut expected_ids = Vec::new();
+            fresh.perform_detection_monocular(&mask, &image, &mut expected, &mut expected_ids, &[]);
+            points.clear();
+            ids.clear();
+            tracker.perform_detection_monocular(&mask, &image, &mut points, &mut ids, &[]);
+            assert_eq!(points, expected);
+            assert_eq!(ids, expected_ids);
+            assert_eq!(grid_ptr, tracker.detection.grid_close.as_ptr());
+            assert_eq!(mask_ptr, tracker.detection.mask.data.as_ptr());
+        }
     }
 
     #[test]

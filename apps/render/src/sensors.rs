@@ -1,4 +1,4 @@
-//! 传感器像素数学：灰度转换、深度线性化。
+//! 传感器像素数学：深度线性化与灰度参考公式。
 //!
 //! 深度线性化依据：`Bevy` 相机投影恒为无限远反向 Z
 //! （`PerspectiveProjection::get_clip_from_view` 用
@@ -12,6 +12,7 @@ pub const DEPTH_MAX: f32 = 100.0;
 /// RGB（sRGB 字节序）→ 灰度（BT.601 加权）。
 ///
 /// `rgb.len() == 4 * gray.len()`（RGBA 行主序转单通道行主序）。
+#[cfg(test)]
 pub fn rgb_to_gray(rgb: &[u8], gray: &mut [u8]) {
     debug_assert_eq!(rgb.len(), 4 * gray.len());
     for (dst, src) in gray.iter_mut().zip(rgb.as_chunks::<4>().0) {

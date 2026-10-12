@@ -11,6 +11,7 @@ use std::fmt::Debug;
 use fastrace::prelude::*;
 use iceoryx2::port::publisher::Publisher as Iox2Publisher;
 use iceoryx2::prelude::*;
+use iceoryx2::sample_mut::SampleMut;
 
 use crate::event::TopicNotifier;
 use crate::node::IpcNode;
@@ -139,19 +140,47 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
     /// # Errors
     /// 借出样本失败或发送失败（如发布端超时）。
     pub fn publish_counted(&self, msg: T) -> Result<(usize, TraceContext), firefly_error::Error> {
-        // Trace 上下文中间件：注入当前活动 span（无 span 时仅带时间戳）
-        let ctx = match SpanContext::current_local_parent() {
-            Some(sc) => TraceContext::from_span_context(sc),
-            None => TraceContext::timestamps_only(),
-        };
-        let mut sample = self.publisher.loan_uninit().map_err(|e| {
+        let sample = self.publisher.loan_uninit().map_err(|e| {
             firefly_error::Error::temporary(
                 firefly_error::ErrorKind::ResourceExhausted,
                 format!("借出零拷贝样本失败: {e:?}"),
             )
         })?;
-        *sample.user_header_mut() = ctx;
         let sample = sample.write_payload(msg);
+        self.send_sample(sample)
+    }
+
+    /// 借出由 Default 初始化的共享内存样本，就地填充后直接发送。
+    /// trace 上下文与事件通知遵循 [`publish`](Self::publish)。
+    ///
+    /// # Errors
+    /// 借出样本失败或发送失败。
+    pub fn publish_with(
+        &self,
+        fill: impl FnOnce(&mut T),
+    ) -> Result<TraceContext, firefly_error::Error>
+    where
+        T: Default,
+    {
+        let mut sample = self.publisher.loan().map_err(|e| {
+            firefly_error::Error::temporary(
+                firefly_error::ErrorKind::ResourceExhausted,
+                format!("借出零拷贝样本失败: {e:?}"),
+            )
+        })?;
+        fill(sample.payload_mut());
+        self.send_sample(sample).map(|(_, ctx)| ctx)
+    }
+
+    fn send_sample(
+        &self,
+        mut sample: SampleMut<ipc::Service, T, TraceContext>,
+    ) -> Result<(usize, TraceContext), firefly_error::Error> {
+        let ctx = match SpanContext::current_local_parent() {
+            Some(sc) => TraceContext::from_span_context(sc),
+            None => TraceContext::timestamps_only(),
+        };
+        *sample.user_header_mut() = ctx;
         sample
             .send()
             .map(|receivers| {

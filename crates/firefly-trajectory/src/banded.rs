@@ -186,30 +186,18 @@ impl BandedSolver {
         })
     }
 
-    pub fn solve(&self, rhs: &DMatrix<f64>) -> DMatrix<f64> {
-        let n = rhs.nrows();
-        let m = rhs.ncols();
-        let mut out = DMatrix::zeros(n, m);
-        for col in 0..m {
-            let mut b: Vec<f64> = (0..n).map(|r| rhs[(r, col)]).collect();
-            self.plu.solve_into(&mut b);
-            for (r, v) in b.into_iter().enumerate() {
-                out[(r, col)] = v;
-            }
+    pub fn solve_in_place(&self, rhs: &mut DMatrix<f64>) {
+        assert_eq!(rhs.nrows(), self.plu.n);
+        for mut col in rhs.column_iter_mut() {
+            self.plu.solve_into(col.as_mut_slice());
         }
-        out
     }
 
     pub fn solve_transpose(&self, rhs: &DMatrix<f64>) -> DMatrix<f64> {
-        let n = rhs.nrows();
-        let m = rhs.ncols();
-        let mut out = DMatrix::zeros(n, m);
-        for col in 0..m {
-            let mut b: Vec<f64> = (0..n).map(|r| rhs[(r, col)]).collect();
-            self.plu.solve_transpose_into(&mut b);
-            for (r, v) in b.into_iter().enumerate() {
-                out[(r, col)] = v;
-            }
+        assert_eq!(rhs.nrows(), self.plu.n);
+        let mut out = rhs.clone();
+        for mut col in out.column_iter_mut() {
+            self.plu.solve_transpose_into(col.as_mut_slice());
         }
         out
     }
@@ -250,7 +238,8 @@ mod tests {
             let solver = BandedSolver::new(&banded).unwrap();
             let rhs = DMatrix::from_fn(n, 3, |i, c| (i * 3 + c) as f64 * 0.1 + 1.0);
             // 普通求解
-            let got = solver.solve(&rhs);
+            let mut got = rhs.clone();
+            solver.solve_in_place(&mut got);
             let expected = dense.clone().lu().solve(&rhs).unwrap();
             let err = (&got - &expected).abs().max();
             assert!(err < 1e-8, "n={n} err={err}");

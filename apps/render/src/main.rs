@@ -9,9 +9,11 @@
 //! 日志经 `firefly-observability` 汇入统一 rrd 记录。
 //! `--offline` 使用独立 `Firefly/Offline/*` 数据话题供离线库图渲染。
 
+mod buffer;
 mod capture;
 mod config;
 mod depth_noise;
+mod grayscale;
 mod link;
 mod process;
 mod rig;
@@ -127,6 +129,7 @@ fn build_app(
     .insert_non_send(ports)
     .insert_non_send(log_ipc)
     .add_plugins(CapturePlugin)
+    .add_plugins(grayscale::GrayscalePlugin)
     .add_systems(Startup, (setup_scene, spawn_rig))
     .add_systems(PreUpdate, poll_pose)
     .add_systems(Update, (log_render_rate, stop_on_signal))
