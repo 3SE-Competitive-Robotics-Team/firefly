@@ -1,9 +1,15 @@
-//! `JPL` 四元数与 `Lie` 群运算（对照 `OpenVINS` `ov_core/quat_ops.h` 逐行翻译）。
+//! JPL 四元数运算（对照 `OpenVINS` `ov_core/quat_ops.h`）。
+//! 通用李群运算由 `firefly-base` 提供；此处沿用 `OpenVINS` 的函数名。
 //!
 //! JPL 惯例：四元数 `[x, y, z, w]`（标量在最后），与 Hamilton 相反；
 //! 旋转合成 `q ⊗ p` 采用 JPL 乘法（`quat_multiply`）。
 
-use nalgebra::{Matrix3, Matrix4, Vector3, Vector4, Vector6};
+use nalgebra::{Matrix3, Matrix4, Vector3, Vector4};
+
+pub use firefly_base::se3::{
+    hat_se3, inv_se3, jl_so3, jr_so3, log_so3, se3_exp as exp_se3, se3_log as log_se3,
+    skew as skew_x, so3_exp_matrix as exp_so3, vee,
+};
 
 /// 旋转矩阵 → JPL 四元数（Trawny 论文 Eq.74，按最大对角元分支避免除零）。
 #[must_use]
@@ -37,12 +43,6 @@ pub fn rot_2_quat(rot: &Matrix3<f64>) -> Vector4<f64> {
     quatnorm(q)
 }
 
-/// 反对称矩阵 `⌊w×⌋`。
-#[must_use]
-pub fn skew_x(w: &Vector3<f64>) -> Matrix3<f64> {
-    Matrix3::new(0.0, -w[2], w[1], w[2], 0.0, -w[0], -w[1], w[0], 0.0)
-}
-
 /// JPL 四元数 → SO(3) 旋转矩阵（Trawny Eq.62：`R = (2q₄²−1)I − 2q₄⌊q×⌋ + 2qqᵀ`）。
 #[must_use]
 pub fn quat_2_rot(q: &Vector4<f64>) -> Matrix3<f64> {
@@ -67,129 +67,6 @@ pub fn quat_multiply(q: &Vector4<f64>, p: &Vector4<f64>) -> Vector4<f64> {
     quatnorm(q_t)
 }
 
-/// 反对称矩阵 → 向量部分。
-#[must_use]
-pub fn vee(w_x: &Matrix3<f64>) -> Vector3<f64> {
-    Vector3::new(w_x[(2, 1)], w_x[(0, 2)], w_x[(1, 0)])
-}
-
-/// `SO(3)` 矩阵指数（Rodrigues，Eade Eq.15）。
-#[must_use]
-pub fn exp_so3(w: &Vector3<f64>) -> Matrix3<f64> {
-    let w_x = skew_x(w);
-    let theta = w.norm();
-    let (a, b) = if theta < 1e-7 {
-        (1.0, 0.5)
-    } else {
-        (theta.sin() / theta, (1.0 - theta.cos()) / (theta * theta))
-    };
-    if theta == 0.0 {
-        Matrix3::identity()
-    } else {
-        Matrix3::identity() + a * w_x + b * (w_x * w_x)
-    }
-}
-
-/// `SO(3)` 矩阵对数（GTSAM 稳定版，含 π 边界处理）。
-#[must_use]
-pub fn log_so3(rot: &Matrix3<f64>) -> Vector3<f64> {
-    let r11 = rot[(0, 0)];
-    let r12 = rot[(0, 1)];
-    let r13 = rot[(0, 2)];
-    let r21 = rot[(1, 0)];
-    let r22 = rot[(1, 1)];
-    let r23 = rot[(1, 2)];
-    let r31 = rot[(2, 0)];
-    let r32 = rot[(2, 1)];
-    let r33 = rot[(2, 2)];
-    let tr = rot.trace();
-    if tr + 1.0 < 1e-10 {
-        // θ = ±π, ±3π, ...：特殊处理
-        if (r33 + 1.0).abs() > 1e-5 {
-            (std::f64::consts::PI / (2.0 + 2.0 * r33).sqrt()) * Vector3::new(r13, r23, 1.0 + r33)
-        } else if (r22 + 1.0).abs() > 1e-5 {
-            (std::f64::consts::PI / (2.0 + 2.0 * r22).sqrt()) * Vector3::new(r12, 1.0 + r22, r32)
-        } else {
-            (std::f64::consts::PI / (2.0 + 2.0 * r11).sqrt()) * Vector3::new(1.0 + r11, r21, r31)
-        }
-    } else {
-        let tr_3 = tr - 3.0;
-        let magnitude = if tr_3 < -1e-7 {
-            let theta = ((tr - 1.0) / 2.0).acos();
-            theta / (2.0 * theta.sin())
-        } else {
-            // θ 接近 0：泰勒展开
-            0.5 - tr_3 / 12.0
-        };
-        magnitude * Vector3::new(r32 - r23, r13 - r31, r21 - r12)
-    }
-}
-
-/// `SE(3)` 矩阵指数（Eade Eq.19-21）。
-#[must_use]
-pub fn exp_se3(vec: &Vector6<f64>) -> Matrix4<f64> {
-    let w = Vector3::new(vec[0], vec[1], vec[2]);
-    let u = Vector3::new(vec[3], vec[4], vec[5]);
-    let theta = w.norm();
-    let w_skew = skew_x(&w);
-    let (coef_a, coef_b, coef_c) = if theta < 1e-7 {
-        (1.0, 0.5, 1.0 / 6.0)
-    } else {
-        (
-            theta.sin() / theta,
-            (1.0 - theta.cos()) / (theta * theta),
-            (1.0 - theta.sin() / theta) / (theta * theta),
-        )
-    };
-    let i33 = Matrix3::identity();
-    let v = i33 + coef_b * w_skew + coef_c * (w_skew * w_skew);
-    let mut mat = Matrix4::<f64>::zeros();
-    mat.fixed_view_mut::<3, 3>(0, 0)
-        .copy_from(&(i33 + coef_a * w_skew + coef_b * (w_skew * w_skew)));
-    mat.fixed_view_mut::<3, 1>(0, 3).copy_from(&(v * u));
-    mat[(3, 3)] = 1.0;
-    mat
-}
-
-/// `SE(3)` 矩阵对数（GTSAM 稳定版，Agrawal06iros Eq.14）。
-#[must_use]
-pub fn log_se3(mat: &Matrix4<f64>) -> Vector6<f64> {
-    let w = log_so3(&mat.fixed_view::<3, 3>(0, 0).into_owned());
-    let t = Vector3::new(mat[(0, 3)], mat[(1, 3)], mat[(2, 3)]);
-    let norm = w.norm();
-    if norm < 1e-10 {
-        return Vector6::new(w[0], w[1], w[2], t[0], t[1], t[2]);
-    }
-    let w_hat = skew_x(&(w / norm));
-    let tan = (0.5 * norm).tan();
-    let wt = w_hat * t;
-    let u = t - (0.5 * norm) * wt + (1.0 - norm / (2.0 * tan)) * (w_hat * wt);
-    Vector6::new(w[0], w[1], w[2], u[0], u[1], u[2])
-}
-
-/// `R6 -> se(3)` hat 算子。
-#[must_use]
-pub fn hat_se3(vec: &Vector6<f64>) -> Matrix4<f64> {
-    let w = Vector3::new(vec[0], vec[1], vec[2]);
-    let u = Vector3::new(vec[3], vec[4], vec[5]);
-    let mut mat = Matrix4::<f64>::zeros();
-    mat.fixed_view_mut::<3, 3>(0, 0).copy_from(&skew_x(&w));
-    mat.fixed_view_mut::<3, 1>(0, 3).copy_from(&u);
-    mat
-}
-
-/// `SE(3)` 解析逆（避免数值逆）。
-#[must_use]
-pub fn inv_se3(t: &Matrix4<f64>) -> Matrix4<f64> {
-    let mut tinv = Matrix4::<f64>::identity();
-    let r = t.fixed_view::<3, 3>(0, 0).into_owned();
-    let p = Vector3::new(t[(0, 3)], t[(1, 3)], t[(2, 3)]);
-    let r_t = r.transpose();
-    tinv.fixed_view_mut::<3, 3>(0, 0).copy_from(&r_t);
-    tinv.fixed_view_mut::<3, 1>(0, 3).copy_from(&(-r_t * p));
-    tinv
-}
-
 /// JPL 四元数逆 `q⁻¹ = [−q_vec; q₄]`。
 #[must_use]
 pub fn inv_quat(q: &Vector4<f64>) -> Vector4<f64> {
@@ -212,26 +89,6 @@ pub fn omega(w: &Vector3<f64>) -> Matrix4<f64> {
 pub fn quatnorm(q_t: Vector4<f64>) -> Vector4<f64> {
     let q = if q_t[3] < 0.0 { -q_t } else { q_t };
     q / q.norm()
-}
-
-/// `SO(3)` 左雅可比（Barfoot Eq.7.77b）。
-#[must_use]
-pub fn jl_so3(w: &Vector3<f64>) -> Matrix3<f64> {
-    let theta = w.norm();
-    if theta < 1e-6 {
-        Matrix3::identity()
-    } else {
-        let axis = w / theta;
-        theta.sin() / theta * Matrix3::identity()
-            + (1.0 - theta.sin() / theta) * (axis * axis.transpose())
-            + ((1.0 - theta.cos()) / theta) * skew_x(&axis)
-    }
-}
-
-/// `SO(3)` 右雅可比 `Jr(w) = Jl(−w)`。
-#[must_use]
-pub fn jr_so3(w: &Vector3<f64>) -> Matrix3<f64> {
-    jl_so3(&-w)
 }
 
 /// 旋转矩阵 → roll/pitch/yaw（`R = Rz(yaw)·Ry(pitch)·Rx(roll)`）。
@@ -273,6 +130,7 @@ pub fn rot_z(t: f64) -> Matrix3<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nalgebra::Vector6;
 
     fn assert_close(a: f64, b: f64, eps: f64) {
         assert!((a - b).abs() < eps, "{a} != {b}");
@@ -284,6 +142,26 @@ mod tests {
                 assert_close(a[(i, j)], b[(i, j)], eps);
             }
         }
+    }
+
+    #[test]
+    fn jpl_increment_has_opposite_matrix_rotation_to_hamilton() {
+        let angle = 0.4_f64;
+        let jpl = Vector4::new(0.0, 0.0, (angle / 2.0).sin(), (angle / 2.0).cos());
+        let expected = Matrix3::new(
+            angle.cos(),
+            angle.sin(),
+            0.0,
+            -angle.sin(),
+            angle.cos(),
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+        assert_mat_close(&quat_2_rot(&jpl), &expected, 1e-14);
+        assert_mat_close(&exp_so3(&Vector3::new(0.0, 0.0, -angle)), &expected, 1e-14);
+        assert!((log_so3(&expected) - Vector3::new(0.0, 0.0, -angle)).norm() < 1e-14);
     }
 
     #[test]

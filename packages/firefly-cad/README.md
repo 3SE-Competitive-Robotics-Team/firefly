@@ -10,9 +10,6 @@ RMUC STEP 资产构建。源文件只读，统一归一化为米、Z 向上、XY
 ```bash
 # 几何资产：三角化 → 碰撞 → Blender GLB → FFMap → 独立读回验收
 uv run --package firefly-cad firefly-cad-build /path/to/RMUC2026_V2.0.0.stp
-
-# 构建、物理接触检查、release 进程、离线图像采集、可用权重下建库、自动任务验收
-uv run --all-packages --extra test python scripts/prepare_rmuc.py /path/to/RMUC2026_V2.0.0.stp
 ```
 
 数值配置统一在 `configs/cad.toml`，默认三角化偏差 2mm，碰撞/规划分辨率
@@ -20,14 +17,10 @@ uv run --all-packages --extra test python scripts/prepare_rmuc.py /path/to/RMUC2
 若发行版 Blender 缺 NumPy，构建器使用 `uv` 将匹配 Python ABI 的 NumPy
 安装到 `derived/blender-python-*`，仅给导出子进程设置路径，不修改系统 Python。
 
-`prepare_rmuc.py --assets-only` 只执行资产与物理接触验收。完整入口需要图形会话、
-支持 Bevy 的 GPU、Rust 构建环境；ALIKED/LightGlue 权重仍须单独提供。
-若阶段失败或权重缺失，报告保留 failed/blocked/not_run，完整命令返回非零。
-建库完成不等于在线重定位或在线回环验收通过。
-资产构建后的任务、碰撞和故障验收由 `scripts/accept_rmuc.py` 执行，独立报告
-保留在 `logs/acceptance/<运行ID>/`，准备报告引用其 JSON 路径。
-当前入口没有在线重定位验收，该项固定为 `not_run`，因此完整报告不能标为全部通过；
-补齐权重可运行特征建库，但仍须独立验证在线定位。
+Rust 应用统一用 `cargo xtask build-all-release` 构建；物理资产检查、离线图像采集、
+建库和任务验收各自使用 [开发指南](../../docs/development.md#assets) 中的入口。
+任务、碰撞和故障验收由 `firefly-evaluation` 包的 `uv run firefly-evaluate` 执行，
+报告保存在 `logs/acceptance/<运行ID>/`。几何验收与建库完成不能替代飞行或在线定位验收。
 
 ## 产物
 
@@ -38,10 +31,9 @@ uv run --all-packages --extra test python scripts/prepare_rmuc.py /path/to/RMUC2
 | `models/rmuc2026/rmuc2026_collision.json` | MuJoCo；米制 `[cx,cy,cz,hx,hy,hz]` 碰撞盒 |
 | `apps/planner/maps/rmuc2026.ffmap` | planner；与物理碰撞同一体素格，未额外膨胀 |
 | `models/rmuc2026/asset_manifest.json` | 源 SHA-256、转换参数、依赖版本、坐标变换、产物 hash 与几何验收 |
-| `models/rmuc2026/preparation_report.json` | 完整入口各阶段的实际验收状态 |
 
 `derived/stages/` 保存阶段输入与产物内容 hash；二者都匹配才复用。
-离线采集也检查输入及逐帧内容 hash；损坏或未完成的采集保留，重试写入新目录。
+离线采集也检查输入及逐帧内容 hash；损坏或未完成的采集保留，重试时通过 `--frames-dir` 指定新目录。
 总清单只有 `status=passed` 才代表本次几何验收完成。图像采集与飞行记录分别放在
 独立资产目录和 `logs/*.rrd`，不把原始传感器数据写成文本日志。
 

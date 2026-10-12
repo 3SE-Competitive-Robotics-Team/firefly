@@ -5,7 +5,7 @@
 //! **期望**力/力矩，**不限幅**：可达集与饱和由 [`crate::Airframe::allocate`] 的分配与
 //! 逐电机限幅决定（全栈唯一的饱和点）。
 
-use glam::{Mat3, Quat, Vec3};
+use nalgebra::{Matrix3, Unit, UnitQuaternion, Vector3};
 
 use crate::{
     G,
@@ -30,12 +30,12 @@ pub struct AngleCommand {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PositionSetpoint {
     /// 期望位置（m）。
-    pub position: Vec3,
+    pub position: Vector3<f32>,
     /// 期望速度（m/s）。
-    pub velocity: Vec3,
+    pub velocity: Vector3<f32>,
     /// 期望加速度（m/s²，世界系）：位置环**前馈**项。缺它时跟踪滞后约
     /// `a_ref / pos_kp`（1 m/s²、kp=2.2 → 0.45m，过弯明显切内道）。
-    pub acceleration: Vec3,
+    pub acceleration: Vector3<f32>,
     /// 期望航向（rad，世界 Z；水平面内机体 `+X` 的方向）。
     pub yaw: f32,
     /// 期望航向角速度（rad/s，姿态内环前馈）。
@@ -46,8 +46,8 @@ pub struct PositionSetpoint {
 /// 新鲜 IMU 是调用前置条件；倾斜补偿限制在 60°，由分配器执行推力上限。
 #[must_use]
 pub fn attitude_support(
-    attitude: Quat,
-    ang_vel: Vec3,
+    attitude: UnitQuaternion<f32>,
+    ang_vel: Vector3<f32>,
     yaw: f32,
     params: &QuadParams,
     ctl: &ControlParams,
@@ -57,8 +57,14 @@ pub fn attitude_support(
         ang_vel,
         ..Default::default()
     };
-    let torque = attitude_torque(&state, Quat::from_rotation_z(yaw), 0., params, ctl);
-    let up = attitude * Vec3::Z;
+    let torque = attitude_torque(
+        &state,
+        UnitQuaternion::from_axis_angle(&Vector3::z_axis(), yaw),
+        0.,
+        params,
+        ctl,
+    );
+    let up = attitude * Vector3::z();
     let thrust = params.mass * G / up.z.clamp(0.5, 1.);
     Wrench {
         force: up * thrust,
@@ -78,19 +84,19 @@ pub fn angle_mode(
     // 随倾斜一起转（真机绕机体轴偏航），故用姿态内环的角速度前馈。
     let tilt = ctl.tilt_max_deg.to_radians();
     let yaw = state.yaw();
-    let q_des = Quat::from_rotation_z(yaw)
-        * Quat::from_rotation_y(cmd.pitch * tilt)
-        * Quat::from_rotation_x(cmd.roll * tilt);
+    let q_des = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), yaw)
+        * UnitQuaternion::from_axis_angle(&Vector3::y_axis(), cmd.pitch * tilt)
+        * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), cmd.roll * tilt);
     let torque = attitude_torque(state, q_des, -cmd.yaw * ctl.yaw_rate_max, params, ctl);
 
     // 垂直速度控制 + 倾斜补偿：推力沿机体 z，倾斜时须补 1/cosθ 才维持高度。
-    let up_z = (state.attitude * Vec3::Z).z.clamp(0.3, 1.0);
+    let up_z = (state.attitude * Vector3::z()).z.clamp(0.3, 1.0);
     let vz_des = cmd.throttle * ctl.climb_rate_max;
     let a_vert = G + ctl.vz_kp * (vz_des - state.velocity.z);
     let thrust = (params.mass * a_vert / up_z).max(0.0);
 
     Wrench {
-        force: state.attitude * (Vec3::Z * thrust),
+        force: state.attitude * (Vector3::z() * thrust),
         torque,
     }
 }
@@ -107,37 +113,42 @@ pub fn position_mode(
     let a_des = setpoint.acceleration
         + ctl.pos_kp * (setpoint.position - state.position)
         + ctl.vel_kp * (setpoint.velocity - state.velocity);
-    let f_des = (a_des + Vec3::Z * G) * params.mass;
+    let f_des = (a_des + Vector3::z() * G) * params.mass;
 
     // 可用的只有机体 z 方向的推力：大小取所需合力，方向取期望力方向（限幅在倾角锥内）。
     // 实际力始终沿**当前**机体 z，方向差由姿态内环转过来——倾斜-平移耦合即在此。
-    let thrust = f_des.length().max(0.0);
+    let thrust = f_des.norm().max(0.0);
     let q_des = attitude_from_thrust_dir(thrust_direction(f_des, ctl.tilt_max_deg), setpoint.yaw);
     let torque = attitude_torque(state, q_des, setpoint.yaw_rate, params, ctl);
 
     Wrench {
-        force: state.attitude * (Vec3::Z * thrust),
+        force: state.attitude * (Vector3::z() * thrust),
         torque,
     }
 }
 
 /// 期望推力方向：期望力方向，超出 `tilt_max` 锥时压回锥面（俯仰/横滚限幅）。
-fn thrust_direction(f_des: Vec3, tilt_max_deg: f32) -> Vec3 {
-    let dir = f_des.try_normalize().unwrap_or(Vec3::Z);
+fn thrust_direction(f_des: Vector3<f32>, tilt_max_deg: f32) -> Vector3<f32> {
+    let dir = f_des.try_normalize(0.0).unwrap_or(Vector3::z());
     let max_tilt = tilt_max_deg.to_radians();
     if dir.z.clamp(-1.0, 1.0) >= max_tilt.cos() {
         return dir;
     }
-    let axis = Vec3::Z.cross(dir).try_normalize().unwrap_or(Vec3::X);
-    Quat::from_axis_angle(axis, max_tilt) * Vec3::Z
+    let axis = Vector3::z()
+        .cross(&dir)
+        .try_normalize(0.0)
+        .unwrap_or(Vector3::x());
+    UnitQuaternion::from_axis_angle(&Unit::new_unchecked(axis), max_tilt) * Vector3::z()
 }
 
 /// 由推力方向（机体 z）+ 期望航向（机体 x 的水平投影）构造期望姿态。
-fn attitude_from_thrust_dir(b3: Vec3, yaw: f32) -> Quat {
-    let b1_ref = Vec3::new(yaw.cos(), yaw.sin(), 0.0);
-    let b2 = b3.cross(b1_ref).try_normalize().unwrap_or(Vec3::Y);
-    let b1 = b2.cross(b3);
-    Quat::from_mat3(&Mat3::from_cols(b1, b2, b3))
+fn attitude_from_thrust_dir(b3: Vector3<f32>, yaw: f32) -> UnitQuaternion<f32> {
+    let b1_ref = Vector3::new(yaw.cos(), yaw.sin(), 0.0);
+    let b2 = b3.cross(&b1_ref).try_normalize(0.0).unwrap_or(Vector3::y());
+    let b1 = b2.cross(&b3);
+    UnitQuaternion::from_rotation_matrix(&nalgebra::Rotation3::from_matrix_unchecked(
+        Matrix3::from_columns(&[b1, b2, b3]),
+    ))
 }
 
 /// 姿态内环（两个模式共用）：姿态误差 → 机体角速度指令 → 角加速度 → 世界系力矩。
@@ -145,20 +156,16 @@ fn attitude_from_thrust_dir(b3: Vec3, yaw: f32) -> Quat {
 /// `yaw_rate_ff`：机体 z 角速度前馈（角度模式的偏航摇杆 / 位置模式的参考偏航角速度）。
 fn attitude_torque(
     state: &QuadState,
-    q_des: Quat,
+    q_des: UnitQuaternion<f32>,
     yaw_rate_ff: f32,
     params: &QuadParams,
     ctl: &ControlParams,
-) -> Vec3 {
-    // `q` 与 `-q` 表示同一旋转：`w<0` 时 `to_scaled_axis` 返回接近 2π 的大角度
-    //（航向在 ±π 回绕时触发），须折叠到最近路径，否则会绕远路整圈。
-    let mut q_err = state.attitude.inverse() * q_des;
-    if q_err.w < 0.0 {
-        q_err = -q_err;
-    }
-    let rate_des = q_err.to_scaled_axis() * ctl.attitude_kp + Vec3::Z * yaw_rate_ff;
+) -> Vector3<f32> {
+    // scaled_axis 返回最短旋转的主值，模长不超过 π。
+    let q_err = state.attitude.inverse() * q_des;
+    let rate_des = q_err.scaled_axis() * ctl.attitude_kp + Vector3::z() * yaw_rate_ff;
     let ang_accel = (rate_des - state.ang_vel) * ctl.rate_kp;
-    let torque_body = Vec3::from(params.inertia) * ang_accel;
+    let torque_body = Vector3::from(params.inertia).component_mul(&ang_accel);
     state.attitude * torque_body
 }
 
@@ -171,22 +178,22 @@ mod fallback_tests {
         let ctl = ControlParams::default();
         let expected = p.mass * G;
         for theta in [-0.4_f32, 0., 0.4] {
-            let q = Quat::from_rotation_y(theta);
-            let out = attitude_support(q, Vec3::ZERO, 0., &p, &ctl);
+            let q = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), theta);
+            let out = attitude_support(q, Vector3::zeros(), 0., &p, &ctl);
             assert!((out.force.z - expected).abs() < 1e-5);
             assert!((out.force.x - expected * theta.tan()).abs() < 1e-5);
             assert!(out.torque.y * theta <= 0.);
             let epsilon = 1e-3;
             let a = attitude_support(
-                Quat::from_rotation_y(theta + epsilon),
-                Vec3::ZERO,
+                UnitQuaternion::from_axis_angle(&Vector3::y_axis(), theta + epsilon),
+                Vector3::zeros(),
                 0.,
                 &p,
                 &ctl,
             );
             let b = attitude_support(
-                Quat::from_rotation_y(theta - epsilon),
-                Vec3::ZERO,
+                UnitQuaternion::from_axis_angle(&Vector3::y_axis(), theta - epsilon),
+                Vector3::zeros(),
                 0.,
                 &p,
                 &ctl,

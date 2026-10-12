@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
-import hashlib
 from importlib.metadata import version
 import json
 import logging
@@ -17,12 +16,15 @@ import tomllib
 
 import numpy as np
 
+from firefly_workspace import digest, workspace_root
+
 from .collide import collide, write_collision
 from .map_export import export_map
 from .tessellate import tessellate
 
 log = logging.getLogger(__name__)
-ROOT = Path(__file__).resolve().parents[4]
+
+ROOT = workspace_root(Path(__file__))
 
 
 @dataclass(frozen=True)
@@ -38,11 +40,6 @@ class Options:
             raise ValueError("CAD options must be finite")
         if min(self.deflection_mm, self.resolution_m, self.ceiling_m) <= 0 or self.padding_m < 0:
             raise ValueError("invalid CAD options")
-
-
-def digest(path: Path) -> str:
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def save_json(path: Path, value: dict):

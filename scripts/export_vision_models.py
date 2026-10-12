@@ -7,7 +7,6 @@ The source checkout is pinned; outputs and provenance live under models/.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 from pathlib import Path
@@ -23,15 +22,12 @@ import torch
 import torch.nn.functional as F
 import torchvision
 
-ROOT = Path(__file__).resolve().parents[1]
+from firefly_workspace import digest, workspace_root
+
+ROOT = workspace_root(Path(__file__))
 REVISION = "eb42fee2d71449efb0aa5c10549752b5d75384d8"
 K = 512
 log = logging.getLogger(__name__)
-
-
-def digest(path):
-    with Path(path).open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def deform_forward(self, x):

@@ -12,7 +12,7 @@
 //! 高度一律相对**起飞点**（`origin`，第一次 update 时锁存；`Arm` 时刷新）——与
 //! `ArduPilot` 的 "alt-above-home" 语义一致，免去对世界原点的假设。
 
-use glam::Vec3;
+use nalgebra::Vector3;
 use serde::Deserialize;
 
 use crate::control::PositionSetpoint;
@@ -281,7 +281,7 @@ pub struct FlightFsm {
     /// 起飞点高度（世界 z，第一次 update 时锁存；`Arm` 时刷新）。
     origin_z: Option<f32>,
     /// 当前模式下发给位置环的目标位置（斜坡/保持点都由它承载）。
-    target: Vec3,
+    target: Vector3<f32>,
     /// 目标航向（进入各模式时锁存；`Track` 由参考给）。
     target_yaw: f32,
     /// 目标高度（世界 z）：起飞/降落段按速率斜坡逼近它。
@@ -304,7 +304,7 @@ impl FlightFsm {
             params,
             state: FlightState::Disarmed,
             origin_z: None,
-            target: Vec3::ZERO,
+            target: Vector3::zeros(),
             target_yaw: 0.0,
             ramp_z: 0.0,
             takeoff_target: params.takeoff_altitude,
@@ -528,9 +528,9 @@ impl FlightFsm {
     /// 斜坡/保持段的参考：水平位置锁 `target`，高度取斜坡值，垂速由斜坡隐含。
     fn ramp_setpoint(&self) -> PositionSetpoint {
         PositionSetpoint {
-            position: Vec3::new(self.target.x, self.target.y, self.ramp_z),
-            velocity: Vec3::ZERO,
-            acceleration: Vec3::ZERO,
+            position: Vector3::new(self.target.x, self.target.y, self.ramp_z),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
             yaw: self.target_yaw,
             yaw_rate: 0.0,
         }
@@ -709,7 +709,7 @@ mod tests {
 
     fn hovering(z: f32) -> QuadState {
         QuadState {
-            position: Vec3::new(1.0, 2.0, z),
+            position: Vector3::new(1.0, 2.0, z),
             ..QuadState::default()
         }
     }
@@ -738,7 +738,7 @@ mod tests {
             let out = self.fsm.update(DT, &self.state, None, ok_health());
             // 完美位置环：位置/速度直接吃参考（起飞/降落的斜坡因此成为真实轨迹）
             self.state.position = out.setpoint.position;
-            self.state.velocity = Vec3::ZERO;
+            self.state.velocity = Vector3::zeros();
         }
 
         fn ticks(&mut self, n: usize) {
@@ -821,12 +821,13 @@ mod tests {
         let origin = rig.state.position;
         let yaw = crate::state::yaw_of(rig.state.attitude);
         rig.cmd(Command::Takeoff { altitude: 1.795 }).unwrap();
-        rig.state.position = origin + Vec3::new(0.2, -0.3, 1.795 * 0.91);
-        rig.state.attitude = glam::Quat::from_rotation_z(yaw + 0.1);
-        rig.state.velocity = Vec3::ZERO;
+        rig.state.position = origin + Vector3::new(0.2, -0.3, 1.795 * 0.91);
+        rig.state.attitude =
+            nalgebra::UnitQuaternion::from_axis_angle(&Vector3::z_axis(), yaw + 0.1);
+        rig.state.velocity = Vector3::zeros();
         let out = rig.fsm.update(DT, &rig.state, None, ok_health());
         assert_eq!(rig.fsm.state(), FlightState::Hold);
-        assert!((out.setpoint.position - origin - Vec3::Z * 1.795).length() < 1e-6);
+        assert!((out.setpoint.position - origin - Vector3::z() * 1.795).norm() < 1e-6);
         assert!((out.setpoint.yaw - yaw).abs() < 1e-6);
     }
 
@@ -941,16 +942,16 @@ mod tests {
         rig.cmd(Command::Track).unwrap();
 
         let setpoint = PositionSetpoint {
-            position: Vec3::new(3.0, 4.0, 1.02),
-            velocity: Vec3::new(0.5, 0.0, 0.0),
-            acceleration: Vec3::new(0.2, 0.0, 0.0),
+            position: Vector3::new(3.0, 4.0, 1.02),
+            velocity: Vector3::new(0.5, 0.0, 0.0),
+            acceleration: Vector3::new(0.2, 0.0, 0.0),
             yaw: 0.3,
             yaw_rate: 0.0,
         };
         // 短暂提供参考：状态仍是 Track、参考被透传
         let mut out = rig.fsm.update(DT, &rig.state, Some(&setpoint), ok_health());
         assert_eq!(rig.fsm.state(), FlightState::Track);
-        assert!((out.setpoint.position - setpoint.position).length() < 1e-6);
+        assert!((out.setpoint.position - setpoint.position).norm() < 1e-6);
         out = rig.fsm.update(DT, &rig.state, Some(&setpoint), ok_health());
         assert!(
             (out.setpoint.yaw - 0.3).abs() < 1e-6,
@@ -958,12 +959,12 @@ mod tests {
             out.setpoint.yaw
         );
 
-        rig.state.position = Vec3::new(10., 6., 1.8);
+        rig.state.position = Vector3::new(10., 6., 1.8);
         let lost_at = rig.state.position;
         let first = rig.fsm.update(DT, &rig.state, None, ok_health());
         assert_eq!(first.setpoint.position, lost_at);
-        assert_eq!(first.setpoint.velocity, Vec3::ZERO);
-        rig.state.position += Vec3::new(0.1, 0.2, -0.1);
+        assert_eq!(first.setpoint.velocity, Vector3::zeros());
+        rig.state.position += Vector3::new(0.1, 0.2, -0.1);
         let mut event = Event::None;
         let mut ticks = 1;
         while ticks < 1000 {
@@ -983,11 +984,11 @@ mod tests {
         assert_eq!(rig.fsm.state(), FlightState::Hold);
         let out = rig.fsm.update(DT, &rig.state, None, ok_health());
         assert!(
-            (out.setpoint.position - lost_at).length() < 1e-3,
+            (out.setpoint.position - lost_at).norm() < 1e-3,
             "{:?}",
             out.setpoint.position
         );
-        assert!(out.setpoint.velocity.length() < 1e-6);
+        assert!(out.setpoint.velocity.norm() < 1e-6);
     }
 
     /// 失联降级锁存，恢复消息不能自动接管；无有效位置时不推断落地。
@@ -1006,7 +1007,7 @@ mod tests {
             Event::FailsafeEstimatorLost
         ));
         assert_eq!(rig.fsm.state(), FlightState::AttitudeFallback);
-        rig.state.position = Vec3::ZERO;
+        rig.state.position = Vector3::zeros();
         for _ in 0..1000 {
             assert!(rig.fsm.update(DT, &rig.state, None, bad).motors_enabled);
         }
@@ -1030,13 +1031,13 @@ mod tests {
         rig.cmd(Command::Takeoff { altitude: 1.0 }).unwrap();
         rig.ticks(1000);
         let setpoint = PositionSetpoint {
-            position: Vec3::new(9.0, 9.0, 2.0),
+            position: Vector3::new(9.0, 9.0, 2.0),
             ..PositionSetpoint::default()
         };
         rig.fsm.reference_fresh = true;
         let out = rig.fsm.update(DT, &rig.state, Some(&setpoint), ok_health());
         assert_eq!(rig.fsm.state(), FlightState::Hold);
-        assert!((out.setpoint.position - rig.state.position).length() < 1e-3);
+        assert!((out.setpoint.position - rig.state.position).norm() < 1e-3);
     }
 
     /// 状态变化必须上报事件：指令引起的转移由 `command` 返回，自动转移由 `update` 返回。
@@ -1064,7 +1065,7 @@ mod tests {
         for _ in 0..1000 {
             let out = rig.fsm.update(DT, &rig.state, None, ok_health());
             rig.state.position = out.setpoint.position;
-            rig.state.velocity = Vec3::ZERO;
+            rig.state.velocity = Vector3::zeros();
             if out.event != Event::None {
                 event = out.event;
                 break;
@@ -1148,18 +1149,14 @@ mod tests {
         rig.cmd(Command::Takeoff { altitude: 1.0 }).unwrap();
         rig.ticks(1000);
         let out = rig.fsm.update(DT, &rig.state, None, ok_health());
-        assert_eq!(out.setpoint.velocity, Vec3::ZERO);
+        assert_eq!(out.setpoint.velocity, Vector3::zeros());
         let wrench = crate::position_mode(
             &rig.state,
             &out.setpoint,
             &crate::QuadParams::default(),
             &crate::ControlParams::default(),
         );
-        assert!(
-            wrench.force.truncate().length() < 1e-3,
-            "{:?}",
-            wrench.force
-        );
+        assert!(wrench.force.xy().norm() < 1e-3, "{:?}", wrench.force);
         assert!(
             (wrench.force.z - 0.219 * G).abs() < 1e-3,
             "{:?}",

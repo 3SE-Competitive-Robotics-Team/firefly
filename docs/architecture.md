@@ -80,6 +80,9 @@ stream 发送 static，永不进入文件 sink。反复 static log 仍会产生�
 ## 坐标与时间
 
 跨模块使用 `firefly-base::{FrameId, RigidTransform, FrameTree}`；算法内部矩阵不隐含跨系语义。
+算法与飞控统一使用 nalgebra，飞控保持 f32，估计与规划保持 f64；Bevy 数学类型仅用于渲染接线。
+通用 SO(3)/SE(3) 运算由 `firefly-base::se3` 提供，95% 卡方门限由 `firefly-base::stats` 提供。
+VIO 的 `quat_ops` 保留 OpenVINS JPL 四元数语义，通用李群函数转用基础库。
 
 ### 方向与树
 

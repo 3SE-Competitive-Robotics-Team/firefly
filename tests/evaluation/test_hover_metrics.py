@@ -1,15 +1,12 @@
 """悬停门控反例：估计自洽、末尾恢复和缺测均不能掩盖真实漂移。"""
-from pathlib import Path
-import sys
 
 import numpy as np
 import pytest
 
-import hover_metrics
-from hover_metrics import HoverLimits, attitude_health, score_hover
+from firefly_evaluation import hover_metrics
+from firefly_evaluation.hover_metrics import HoverLimits, attitude_health, score_hover
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "system"))
-from mission import Options
+from firefly_evaluation.mission import Options
 
 
 @pytest.fixture
@@ -105,7 +102,7 @@ def test_rest_window_cannot_include_touchdown_or_wait_until_pass(evidence, end):
 
 
 def test_landing_observes_fixed_window_without_truth(tmp_path, monkeypatch):
-    from mission import Mission
+    from firefly_evaluation.mission import Mission
     mission = Mission(tmp_path, "imu_hover", Options())
     mission.t, mission.mode = 10., 5
     monkeypatch.setattr(mission, "command", lambda *args: None)

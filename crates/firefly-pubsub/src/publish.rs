@@ -1,12 +1,10 @@
-//! 发布端封装：泛型零拷贝发布器 + 按话题的命名封装。
+//! 泛型发布端：注入 trace 上下文，并按需发送事件唤醒。
 //!
 //! 对照 iceoryx2 最佳实践（`examples/rust/publish_subscribe_with_user_header`）：
 //! `NodeBuilder` → `service_builder(...).publish_subscribe::<T>()` →
 //! `user_header::<TraceContext>()` → `publisher_builder().create()` →
 //! `loan_uninit`/`write_payload`/`send`。trace 上下文与时间戳放在
 //! User Header（零拷贝），payload 保持精简。
-//!
-//! [`Publisher`] 为泛型核心；[`OdomPublisher`] 是 odom 话题的命名封装。
 
 use std::fmt::Debug;
 
@@ -16,7 +14,6 @@ use iceoryx2::prelude::*;
 
 use crate::event::TopicNotifier;
 use crate::node::IpcNode;
-use crate::odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC, OdomMessage};
 use crate::trace::TraceContext;
 
 /// 泛型零拷贝发布端（iceoryx2 ipc 服务，User Header 携带 trace 上下文）。
@@ -45,7 +42,7 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
     /// `subscriber_max_buffer_size`（订阅端环形缓冲历史上限；`None` 用
     /// iceoryx2 默认 2，适用于 odom/相机等单消费者低频话题）与
     /// `max_publishers`（同话题发布端上限；`None` 用默认 2——`Firefly/Log`
-    /// 7 进程同话题发布，须显式调大，见 [`crate::log::LogPublisher`]）。
+    /// 7 进程同话题发布，须显式调大，见 [`crate::log::LOG_MAX_PUBLISHERS`]）。
     ///
     /// 服务首次创建时生效（后续 open 的端口必须 ≤ 该值）；高频突发话题
     ///（如 [`crate::viz::VIZ_TOPIC`] 多实体 10Hz）显式调大防溢出丢帧。
@@ -170,65 +167,5 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
                     format!("发送样本失败: {e:?}"),
                 )
             })
-    }
-}
-
-/// 里程计发布器（话题 `Firefly/Odometry`，泛型核心的命名封装）。
-///
-/// 带事件唤醒：publish 后自动 notify，订阅端可挂 `WaitSet` 即到即醒。
-pub struct OdomPublisher(Publisher<OdomMessage>);
-
-/// 校正后里程计发布器（话题 `Firefly/CorrectedOdometry`）。
-pub struct CorrectedOdomPublisher(Publisher<OdomMessage>);
-
-impl OdomPublisher {
-    /// 打开 odom 话题的发布器。
-    ///
-    /// # Errors
-    /// 见 [`Publisher::with_topic`]。
-    pub fn new(node: &IpcNode) -> Result<Self, firefly_error::Error> {
-        Self::with_topic(node, ODOM_TOPIC)
-    }
-
-    /// 以自定义话题名打开 odom 发布器。
-    ///
-    /// # Errors
-    /// 见 [`Publisher::with_topic_notify`]。
-    pub fn with_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
-        Ok(Self(Publisher::with_topic_notify(node, topic)?))
-    }
-
-    /// 发布一条 odom 消息（trace 上下文自动注入，见 [`Publisher::publish`]）。
-    ///
-    /// # Errors
-    /// 见 [`Publisher::publish`]。
-    pub fn publish(&self, msg: OdomMessage) -> Result<TraceContext, firefly_error::Error> {
-        self.0.publish(msg)
-    }
-}
-
-impl CorrectedOdomPublisher {
-    /// 打开校正后里程计话题的发布器。
-    ///
-    /// # Errors
-    /// 见 [`Publisher::with_topic`]。
-    pub fn new(node: &IpcNode) -> Result<Self, firefly_error::Error> {
-        Self::with_topic(node, CORRECTED_ODOM_TOPIC)
-    }
-
-    /// 以自定义话题名打开发布器。
-    ///
-    /// # Errors
-    /// 见 [`Publisher::with_topic_notify`]。
-    pub fn with_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
-        Ok(Self(Publisher::with_topic_notify(node, topic)?))
-    }
-
-    /// 发布一条校正后里程计。
-    ///
-    /// # Errors
-    /// 见 [`Publisher::publish`]。
-    pub fn publish(&self, msg: OdomMessage) -> Result<TraceContext, firefly_error::Error> {
-        self.0.publish(msg)
     }
 }

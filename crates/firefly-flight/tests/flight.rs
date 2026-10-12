@@ -7,7 +7,7 @@ use firefly_flight::{
     Airframe, AngleCommand, ControlParams, G, PositionSetpoint, QuadParams, QuadState, angle_mode,
     integrate, position_mode,
 };
-use glam::{Quat, Vec3};
+use nalgebra::{UnitQuaternion, Vector3};
 
 const DT: f32 = 0.005;
 
@@ -24,19 +24,19 @@ fn ctl() -> ControlParams {
 fn position_control_and_allocation_are_invariant_to_odom_gauge() {
     let (p, c, air) = (params(), ctl(), Airframe::default());
     let state = QuadState {
-        position: Vec3::new(0.2, -0.1, 1.),
-        velocity: Vec3::new(0.05, -0.02, 0.01),
-        attitude: Quat::from_rotation_y(0.02),
-        ang_vel: Vec3::new(0.01, -0.02, 0.03),
+        position: Vector3::new(0.2, -0.1, 1.),
+        velocity: Vector3::new(0.05, -0.02, 0.01),
+        attitude: UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.02),
+        ang_vel: Vector3::new(0.01, -0.02, 0.03),
     };
     let target = PositionSetpoint {
-        position: Vec3::Z,
+        position: Vector3::z(),
         ..Default::default()
     };
     let expected = air.allocate(state.attitude, &position_mode(&state, &target, &p, &c));
     for yaw in [-std::f32::consts::FRAC_PI_2, 0.7, 2.8] {
-        let rotation = Quat::from_rotation_z(yaw);
-        let shift = Vec3::new(2., -3., 0.5);
+        let rotation = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), yaw);
+        let shift = Vector3::new(2., -3., 0.5);
         let transformed = QuadState {
             position: rotation * state.position + shift,
             velocity: rotation * state.velocity,
@@ -69,7 +69,7 @@ fn step(state: &mut QuadState, desired: firefly_flight::Wrench, p: &QuadParams, 
 fn hover_is_an_equilibrium() {
     let (p, c, air) = (params(), ctl(), Airframe::default());
     let mut state = QuadState {
-        position: Vec3::new(1.0, 2.0, 1.5),
+        position: Vector3::new(1.0, 2.0, 1.5),
         ..Default::default()
     };
     let setpoint = PositionSetpoint {
@@ -83,8 +83,8 @@ fn hover_is_an_equilibrium() {
         "悬停期望推力应等于 mg：{}",
         desired.force.z
     );
-    assert!(desired.force.truncate().length() < 1e-3);
-    assert!(desired.torque.length() < 1e-3);
+    assert!(desired.force.xy().norm() < 1e-3);
+    assert!(desired.torque.norm() < 1e-3);
 
     let alloc = air.allocate(state.attitude, &desired);
     assert!(!alloc.saturated, "悬停不应触限");
@@ -97,7 +97,7 @@ fn hover_is_an_equilibrium() {
         let desired = position_mode(&state, &setpoint, &p, &c);
         step(&mut state, desired, &p, &air);
     }
-    let drift = state.position.distance(setpoint.position);
+    let drift = (state.position - setpoint.position).norm();
     assert!(drift < 1e-3, "悬停 1 s 位置漂移 {drift:.5} m");
 }
 
@@ -107,16 +107,16 @@ fn lateral_step_tilts_then_translates() {
     let (p, c, air) = (params(), ctl(), Airframe::default());
     let mut state = QuadState::default();
     let setpoint = PositionSetpoint {
-        position: Vec3::new(1.0, 0.0, 0.0),
+        position: Vector3::new(1.0, 0.0, 0.0),
         ..Default::default()
     };
 
     // 初始水平：推力全在竖直方向，瞬时水平力应为 0（先倾斜才有力）。
     let first = position_mode(&state, &setpoint, &p, &c);
     assert!(
-        first.force.truncate().length() < 1e-3,
+        first.force.xy().norm() < 1e-3,
         "水平姿态下不应有水平力：{}",
-        first.force.truncate().length()
+        first.force.xy().norm()
     );
 
     let limit = c.tilt_max_deg.to_radians();
@@ -124,7 +124,7 @@ fn lateral_step_tilts_then_translates() {
     for _ in 0..600 {
         let desired = position_mode(&state, &setpoint, &p, &c);
         step(&mut state, desired, &p, &air);
-        let tilt = (state.attitude * Vec3::Z).z.clamp(-1.0, 1.0).acos();
+        let tilt = (state.attitude * Vector3::z()).z.clamp(-1.0, 1.0).acos();
         max_tilt = max_tilt.max(tilt);
     }
 
@@ -151,11 +151,11 @@ fn collective_is_limited_by_mixer() {
     let (p, c, air) = (params(), ctl(), Airframe::default());
     let state = QuadState::default();
     let setpoint = PositionSetpoint {
-        position: Vec3::new(50.0, 0.0, 50.0),
+        position: Vector3::new(50.0, 0.0, 50.0),
         ..Default::default()
     };
     let desired = position_mode(&state, &setpoint, &p, &c);
-    assert!(desired.force.length() > air.max_thrust(), "期望应超出能力");
+    assert!(desired.force.norm() > air.max_thrust(), "期望应超出能力");
 
     let alloc = air.allocate(state.attitude, &desired);
     assert!(alloc.saturated, "顶到上限应置饱和标志");
@@ -167,7 +167,7 @@ fn collective_is_limited_by_mixer() {
     );
 
     let down = PositionSetpoint {
-        position: Vec3::new(0.0, 0.0, -50.0),
+        position: Vector3::new(0.0, 0.0, -50.0),
         ..Default::default()
     };
     let desired = position_mode(&state, &down, &p, &c);
@@ -189,7 +189,7 @@ fn collective_is_limited_by_mixer() {
 fn tilt_is_limited() {
     let (p, c, air) = (params(), ctl(), Airframe::default());
     let setpoint = PositionSetpoint {
-        position: Vec3::new(50.0, 0.0, 0.0),
+        position: Vector3::new(50.0, 0.0, 0.0),
         ..Default::default()
     };
     let mut probe = QuadState::default();
@@ -197,7 +197,7 @@ fn tilt_is_limited() {
     for _ in 0..400 {
         let desired = position_mode(&probe, &setpoint, &p, &c);
         step(&mut probe, desired, &p, &air);
-        let tilt = (probe.attitude * Vec3::Z).z.clamp(-1.0, 1.0).acos();
+        let tilt = (probe.attitude * Vector3::z()).z.clamp(-1.0, 1.0).acos();
         max_tilt = max_tilt.max(tilt);
     }
     let limit = c.tilt_max_deg.to_radians();
@@ -212,11 +212,11 @@ fn tilt_is_limited() {
 fn yaw_takes_shortest_path() {
     let (p, c) = (params(), ctl());
     let state = QuadState {
-        attitude: Quat::from_rotation_z(-std::f32::consts::PI + 0.05),
+        attitude: UnitQuaternion::from_axis_angle(&Vector3::z_axis(), -std::f32::consts::PI + 0.05),
         ..Default::default()
     };
     let setpoint = PositionSetpoint {
-        position: Vec3::ZERO,
+        position: Vector3::zeros(),
         yaw: std::f32::consts::PI - 0.05,
         ..Default::default()
     };
@@ -237,7 +237,7 @@ fn setpoint_yaw_rate_is_fed_forward() {
     let (p, c) = (params(), ctl());
     let state = QuadState::default();
     let setpoint = PositionSetpoint {
-        position: Vec3::ZERO,
+        position: Vector3::zeros(),
         yaw_rate: 1.0,
         ..Default::default()
     };
@@ -255,15 +255,15 @@ fn setpoint_yaw_rate_is_fed_forward() {
 fn angle_mode_levels_out() {
     let (p, c, air) = (params(), ctl(), Airframe::default());
     let mut state = QuadState {
-        position: Vec3::new(0.0, 0.0, 1.0),
-        attitude: Quat::from_rotation_y(0.5),
+        position: Vector3::new(0.0, 0.0, 1.0),
+        attitude: UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.5),
         ..Default::default()
     };
     for _ in 0..600 {
         let desired = angle_mode(&state, &AngleCommand::default(), &p, &c);
         step(&mut state, desired, &p, &air);
     }
-    let tilt = (state.attitude * Vec3::Z).z.clamp(-1.0, 1.0).acos();
+    let tilt = (state.attitude * Vector3::z()).z.clamp(-1.0, 1.0).acos();
     assert!(tilt < 0.02, "应回正，实测残倾 {tilt:.4} rad");
     assert!(
         state.position.z > 0.9,

@@ -6,7 +6,7 @@
 //! 把电机推力还原为机体产生的世界系力/力矩——两者共用同一份几何，互为逆运算
 //! （单测断言往返一致）。限幅是**唯一**的饱和点：控制律不限幅，真实电机在分配处饱和。
 
-use glam::{Quat, Vec3};
+use nalgebra::{UnitQuaternion, Vector3};
 use serde::Deserialize;
 
 use crate::state::{QuadState, Wrench};
@@ -114,7 +114,7 @@ impl Airframe {
     /// 首个 `solve4` 成功即证明分配矩阵非奇异，后续对同一矩阵的求解不会返回
     /// `None`；若 `rotors` 布局使矩阵奇异，首个求解已提前返回而不会走到此分支。
     #[must_use]
-    pub fn allocate(&self, attitude: Quat, desired: &Wrench) -> Allocation {
+    pub fn allocate(&self, attitude: UnitQuaternion<f32>, desired: &Wrench) -> Allocation {
         let body_force = attitude.inverse() * desired.force;
         let body_torque = attitude.inverse() * desired.torque;
         let c = self.torque_coefficient;
@@ -167,17 +167,17 @@ impl Airframe {
     ///
     /// 刚体等效：力 `R·Σ T_i ẑ`，力矩 `R·(Σ r_i × T_i ẑ + Σ s_i·c_τ·T_i ẑ)`。
     #[must_use]
-    pub fn realize(&self, attitude: Quat, motors: &[f32; 4]) -> Wrench {
+    pub fn realize(&self, attitude: UnitQuaternion<f32>, motors: &[f32; 4]) -> Wrench {
         let c = self.torque_coefficient;
         let mut total = 0.0f32;
-        let mut torque_body = Vec3::ZERO;
+        let mut torque_body = Vector3::zeros();
         for (rotor, t) in self.rotors.iter().zip(motors) {
-            let r = Vec3::from(rotor.position);
+            let r = Vector3::from(rotor.position);
             total += *t;
-            torque_body += r.cross(Vec3::Z * *t) + Vec3::Z * (rotor.spin * c * *t);
+            torque_body += r.cross(&(Vector3::z() * *t)) + Vector3::z() * (rotor.spin * c * *t);
         }
         Wrench {
-            force: attitude * (Vec3::Z * total),
+            force: attitude * (Vector3::z() * total),
             torque: attitude * torque_body,
         }
     }
@@ -243,8 +243,9 @@ fn solve4(a: &[[f32; 4]; 4], b: &[f32; 4]) -> Option<[f32; 4]> {
 mod tests {
     use super::*;
 
-    fn attitude() -> Quat {
-        Quat::from_rotation_z(0.7) * Quat::from_rotation_x(0.2)
+    fn attitude() -> UnitQuaternion<f32> {
+        UnitQuaternion::from_axis_angle(&Vector3::z_axis(), 0.7)
+            * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), 0.2)
     }
 
     #[test]
@@ -252,10 +253,10 @@ mod tests {
         let air = Airframe::default();
         for yaw in [-1_f32, 1.] {
             let desired = Wrench {
-                force: Vec3::Z,
-                torque: Vec3::new(0.002, -0.001, yaw),
+                force: Vector3::z(),
+                torque: Vector3::new(0.002, -0.001, yaw),
             };
-            let output = air.allocate(Quat::IDENTITY, &desired);
+            let output = air.allocate(UnitQuaternion::identity(), &desired);
             assert!(output.saturated);
             assert!((output.realized.force.z - 1.).abs() < 1e-5);
             assert!((output.realized.torque.x - 0.002).abs() < 1e-5);
@@ -275,10 +276,10 @@ mod tests {
         let air = Airframe::default();
         let force = |z| {
             air.allocate(
-                Quat::IDENTITY,
+                UnitQuaternion::identity(),
                 &Wrench {
-                    force: Vec3::Z * z,
-                    torque: Vec3::Z,
+                    force: Vector3::z() * z,
+                    torque: Vector3::z(),
                 },
             )
             .realized
@@ -294,19 +295,19 @@ mod tests {
         let air = Airframe::default();
         let q = attitude();
         let desired = Wrench {
-            force: q * Vec3::new(0.0, 0.0, 3.0),
-            torque: q * Vec3::new(0.01, -0.015, 0.001),
+            force: q * Vector3::new(0.0, 0.0, 3.0),
+            torque: q * Vector3::new(0.01, -0.015, 0.001),
         };
         let alloc = air.allocate(q, &desired);
         assert!(!alloc.saturated, "能力范围内不应触限");
         assert!(
-            (alloc.realized.force - desired.force).length() < 1e-4,
+            (alloc.realized.force - desired.force).norm() < 1e-4,
             "力 {:?} vs {:?}",
             alloc.realized.force,
             desired.force
         );
         assert!(
-            (alloc.realized.torque - desired.torque).length() < 1e-4,
+            (alloc.realized.torque - desired.torque).norm() < 1e-4,
             "力矩 {:?} vs {:?}",
             alloc.realized.torque,
             desired.torque
@@ -319,17 +320,17 @@ mod tests {
         let air = Airframe::default();
         let weight = 0.219 * crate::G;
         let alloc = air.allocate(
-            Quat::IDENTITY,
+            UnitQuaternion::identity(),
             &Wrench {
-                force: Vec3::Z * weight,
-                torque: Vec3::ZERO,
+                force: Vector3::z() * weight,
+                torque: Vector3::zeros(),
             },
         );
         assert!(!alloc.saturated);
         for t in alloc.motors {
             assert!((t - weight / 4.0).abs() < 1e-5, "电机推力不均衡：{t}");
         }
-        assert!(alloc.realized.torque.length() < 1e-5);
+        assert!(alloc.realized.torque.norm() < 1e-5);
     }
 
     /// 纯偏航力矩只靠反扭矩：4 电机推力均值不变，成对角差动。
@@ -338,10 +339,10 @@ mod tests {
         let air = Airframe::default();
         let collective = 0.5;
         let alloc = air.allocate(
-            Quat::IDENTITY,
+            UnitQuaternion::identity(),
             &Wrench {
-                force: Vec3::Z * collective,
-                torque: Vec3::Z * 0.002,
+                force: Vector3::z() * collective,
+                torque: Vector3::z() * 0.002,
             },
         );
         let sum: f32 = alloc.motors.iter().sum();
@@ -362,10 +363,10 @@ mod tests {
     fn saturation_clamps_motors() {
         let air = Airframe::default();
         let desired = Wrench {
-            force: Vec3::Z * air.max_thrust() * 2.0,
-            torque: Vec3::ZERO,
+            force: Vector3::z() * air.max_thrust() * 2.0,
+            torque: Vector3::zeros(),
         };
-        let alloc = air.allocate(Quat::IDENTITY, &desired);
+        let alloc = air.allocate(UnitQuaternion::identity(), &desired);
         assert!(alloc.saturated);
         for t in alloc.motors {
             assert!(t >= 0.0 && t <= air.max_thrust_per_motor + 1e-6);
@@ -379,21 +380,21 @@ mod tests {
     fn negative_collective_clamps_to_zero() {
         let air = Airframe::default();
         let alloc = air.allocate(
-            Quat::IDENTITY,
+            UnitQuaternion::identity(),
             &Wrench {
-                force: Vec3::NEG_Z * 5.0,
-                torque: Vec3::ZERO,
+                force: -Vector3::z() * 5.0,
+                torque: Vector3::zeros(),
             },
         );
         assert!(alloc.motors.iter().all(|t| t.abs() < 1e-6));
-        assert!(alloc.realized.force.length() < 1e-6);
+        assert!(alloc.realized.force.norm() < 1e-6);
     }
 
     /// 合成侧几何符号：前右（+x, −y）加推力 → `(r×ẑ) = (y·T, −x·T, 0)` 给出负滚转、负俯仰。
     #[test]
     fn realize_geometry_signs() {
         let air = Airframe::default();
-        let w = air.realize(Quat::IDENTITY, &[0.1, 0.0, 0.0, 0.0]);
+        let w = air.realize(UnitQuaternion::identity(), &[0.1, 0.0, 0.0, 0.0]);
         assert!(w.torque.x < 0.0, "前右加推力应产生负滚转：{:?}", w.torque);
         assert!(w.torque.y < 0.0, "前右加推力应产生负俯仰：{:?}", w.torque);
         assert!((w.force.z - 0.1).abs() < 1e-6);

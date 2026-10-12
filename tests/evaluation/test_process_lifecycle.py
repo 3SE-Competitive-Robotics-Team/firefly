@@ -9,19 +9,29 @@ from types import SimpleNamespace
 
 import pytest
 
-from process_lifecycle import ManagedProcess, active_processes, isolated_run
+from firefly_evaluation.process_lifecycle import ManagedProcess, active_processes, isolated_run
 
 
-@pytest.mark.parametrize("entry", ["firefly-sim", "disturbance_sim.py"])
+@pytest.mark.parametrize("entry", ["firefly-sim", "firefly-viz",
+                                  "firefly_evaluation.mission_sim",
+                                  "firefly_evaluation.disturbance_sim"])
 def test_stop_reaps_child_and_output_thread(tmp_path, entry):
-    script = tmp_path / entry
+    if entry.startswith("firefly_evaluation."):
+        package = tmp_path / "firefly_evaluation"
+        package.mkdir()
+        (package / "__init__.py").write_text("")
+        script = package / (entry.rsplit(".", 1)[1] + ".py")
+        command = [sys.executable, "-m", entry]
+    else:
+        script = tmp_path / entry
+        command = [sys.executable, str(script)]
     script.write_text("""import signal, sys
 signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
 print('ready', flush=True)
 signal.pause()
 """)
     ready = threading.Event()
-    child = ManagedProcess([sys.executable, str(script)], cwd=tmp_path, env=dict(os.environ),
+    child = ManagedProcess(command, cwd=tmp_path, env=dict(os.environ),
                            on_line=lambda line: ready.set())
     try:
         assert ready.wait(timeout=5.)
@@ -70,7 +80,7 @@ def test_shutdown_timeout_does_not_report_success():
 
 
 def test_mission_cleans_remaining_children_after_one_stop_times_out(tmp_path):
-    from mission import Mission, Options
+    from firefly_evaluation.mission import Mission, Options
 
     stopped = []
 

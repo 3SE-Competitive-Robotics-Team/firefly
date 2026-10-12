@@ -1,13 +1,14 @@
-//! SO(3)/SE(3) 李代数运算（对照 official `util/lie.hpp`）。
+//! SO(3)/SE(3) 共用李群运算。
 //!
-//! `so3_exp` 取自 Sophus 的 SO(3) expmap（小角展开与 Eigen 四元数约定一致），
-//! `se3_exp` 为「旋转优先」的 SE(3) expmap。数值定义与官方逐行对齐。
+//! Hamilton 主动旋转，扭量按 `[rotation, translation]` 排列。
+//! 指数映射与 Sophus / `OpenVINS` 的数学定义一致，小角使用 Taylor 展开；
+//! JPL 四元数表示及其乘法由 `firefly-vio-types::quat_ops` 处理。
 
 use nalgebra::{Matrix3, Matrix4, Quaternion, Rotation3, UnitQuaternion, Vector3, Vector6};
 
 /// 反对称矩阵（对照 `skew`）。
 ///
-/// `skew(x) · y = x × y`。仅用于 `se3_exp` 的 V 矩阵构造。
+/// `skew(x) · y = x × y`。
 #[must_use]
 pub fn skew(x: &Vector3<f64>) -> Matrix3<f64> {
     Matrix3::new(
@@ -53,73 +54,90 @@ pub fn so3_exp(omega: &Vector3<f64>) -> UnitQuaternion<f64> {
 #[must_use]
 pub fn se3_exp(a: &Vector6<f64>) -> Matrix4<f64> {
     let omega = a.fixed_rows::<3>(0).into_owned();
-    let theta_sq = omega.dot(&omega);
-    let theta = theta_sq.sqrt();
-
-    let mut se3 = Matrix4::identity();
-    let r = so3_exp(&omega);
-    se3.fixed_view_mut::<3, 3>(0, 0)
-        .copy_from(r.to_rotation_matrix().matrix());
-
     let v = a.fixed_rows::<3>(3).into_owned();
-    if theta < 1e-10 {
-        // 小角：V ≈ I，平移 = R · v（该展开在数值上精确）
-        se3.fixed_view_mut::<3, 1>(0, 3)
-            .copy_from(&(r.to_rotation_matrix().matrix() * v));
-    } else {
-        let omega_skew = skew(&omega);
-        let v_mat = Matrix3::identity()
-            + ((1.0 - theta.cos()) / theta_sq) * omega_skew
-            + ((theta - theta.sin()) / (theta_sq * theta)) * (omega_skew * omega_skew);
-        se3.fixed_view_mut::<3, 1>(0, 3).copy_from(&(v_mat * v));
-    }
-
+    let mut se3 = Matrix4::identity();
+    se3.fixed_view_mut::<3, 3>(0, 0)
+        .copy_from(&so3_exp_matrix(&omega));
+    se3.fixed_view_mut::<3, 1>(0, 3)
+        .copy_from(&(jl_so3(&omega) * v));
     se3
 }
 
-/// SO(3) logmap（用于测试与逆向校验，对照 Sophus `log`）。
+/// SO(3) logmap（对照 Sophus `log`）。
 ///
-/// 输出主值 `omega`，模长落在 `[0, π]`。零旋转返回零向量。
+/// 输出主值 `omega`，模长落在 `[0, π]`。零旋转返回零向量；π 处的轴符号不唯一。
 #[must_use]
 pub fn so3_log(q: &UnitQuaternion<f64>) -> Vector3<f64> {
     let mut v = q.vector().into_owned();
     let mut w = q.scalar();
-    // 取反四元数（同一旋转）使夹角落在 [0, π]，保证主值唯一
+    // 取反四元数（同一旋转）使夹角落在 [0, π]
     if w < 0.0 {
         v = -v;
         w = -w;
     }
     let norm = v.norm();
     if norm < 1e-10 {
-        return Vector3::zeros();
+        return v * 2.0;
     }
     let angle = 2.0 * norm.atan2(w);
     v * (angle / norm)
 }
 
-/// SE(3) logmap（用于测试与逆向校验）。
-///
-/// 由齐次变换矩阵反解扭曲向量 `[omega; v]`，`omega` 取主值。
-/// # Panics
-/// 输入不是有效 SE(3)，导致平移雅可比不可逆。
+/// SO(3) 矩阵指数；与四元数形式共享同一个指数映射。
+#[must_use]
+pub fn so3_exp_matrix(omega: &Vector3<f64>) -> Matrix3<f64> {
+    so3_exp(omega).to_rotation_matrix().into_inner()
+}
+
+/// SO(3) 矩阵对数；输入必须是有效旋转矩阵，输出转角主值不超过 π。
+#[must_use]
+pub fn log_so3(rotation: &Matrix3<f64>) -> Vector3<f64> {
+    so3_log(&UnitQuaternion::from_rotation_matrix(
+        &Rotation3::from_matrix_unchecked(*rotation),
+    ))
+}
+
+/// SO(3) 左雅可比（Barfoot Eq.7.77b），也是 SE(3) 指数映射的平移矩阵。
+#[must_use]
+pub fn jl_so3(omega: &Vector3<f64>) -> Matrix3<f64> {
+    let theta_sq = omega.norm_squared();
+    let (b, c) = if theta_sq < 1e-8 {
+        (
+            0.5 - theta_sq / 24.0 + theta_sq * theta_sq / 720.0,
+            1.0 / 6.0 - theta_sq / 120.0 + theta_sq * theta_sq / 5040.0,
+        )
+    } else {
+        let theta = theta_sq.sqrt();
+        (
+            (1.0 - theta.cos()) / theta_sq,
+            (theta - theta.sin()) / (theta_sq * theta),
+        )
+    };
+    let w = skew(omega);
+    Matrix3::identity() + b * w + c * w * w
+}
+
+/// SO(3) 右雅可比 `Jr(ω) = Jl(−ω)`。
+#[must_use]
+pub fn jr_so3(omega: &Vector3<f64>) -> Matrix3<f64> {
+    jl_so3(&-omega)
+}
+
+/// SE(3) 对数映射，输出 `[rotation, translation]`，旋转取主值。
+/// 输入必须是有效 SE(3) 齐次变换。
 #[must_use]
 pub fn se3_log(t: &Matrix4<f64>) -> Vector6<f64> {
-    let r = Rotation3::from_matrix(&t.fixed_view::<3, 3>(0, 0).into_owned().into_owned());
-    let omega = so3_log(&UnitQuaternion::from_rotation_matrix(&r));
+    let omega = log_so3(&t.fixed_view::<3, 3>(0, 0).into_owned());
     let translation = t.fixed_view::<3, 1>(0, 3).into_owned();
-
-    let theta = omega.norm();
-    let v = if theta < 1e-10 {
-        translation
+    let theta_sq = omega.norm_squared();
+    let coefficient = if theta_sq < 1e-8 {
+        1.0 / 12.0 + theta_sq / 720.0 + theta_sq * theta_sq / 30240.0
     } else {
-        let omega_skew = skew(&omega);
-        let theta_sq = theta * theta;
-        let v_mat = Matrix3::identity()
-            + ((1.0 - theta.cos()) / theta_sq) * omega_skew
-            + ((theta - theta.sin()) / (theta_sq * theta)) * (omega_skew * omega_skew);
-        v_mat.try_inverse().expect("V 矩阵非奇异（theta ≠ 0）") * translation
+        let half_theta = 0.5 * theta_sq.sqrt();
+        (1.0 - half_theta / half_theta.tan()) / theta_sq
     };
-
+    let w = skew(&omega);
+    let v = (Matrix3::identity() - 0.5 * w + coefficient * w * w) * translation;
     let mut a = Vector6::zeros();
     a.fixed_rows_mut::<3>(0).copy_from(&omega);
     a.fixed_rows_mut::<3>(3).copy_from(&v);
@@ -146,6 +164,35 @@ pub fn right_jacobian(x: &Vector6<f64>) -> nalgebra::Matrix6<f64> {
         }
     }
     sum
+}
+
+/// 反对称矩阵 → 向量部分。
+#[must_use]
+pub fn vee(w_x: &Matrix3<f64>) -> Vector3<f64> {
+    Vector3::new(w_x[(2, 1)], w_x[(0, 2)], w_x[(1, 0)])
+}
+
+/// `R6 -> se(3)` hat 算子。
+#[must_use]
+pub fn hat_se3(vec: &Vector6<f64>) -> Matrix4<f64> {
+    let w = Vector3::new(vec[0], vec[1], vec[2]);
+    let u = Vector3::new(vec[3], vec[4], vec[5]);
+    let mut mat = Matrix4::<f64>::zeros();
+    mat.fixed_view_mut::<3, 3>(0, 0).copy_from(&skew(&w));
+    mat.fixed_view_mut::<3, 1>(0, 3).copy_from(&u);
+    mat
+}
+
+/// `SE(3)` 解析逆（避免数值逆）。
+#[must_use]
+pub fn inv_se3(t: &Matrix4<f64>) -> Matrix4<f64> {
+    let mut tinv = Matrix4::<f64>::identity();
+    let r = t.fixed_view::<3, 3>(0, 0).into_owned();
+    let p = Vector3::new(t[(0, 3)], t[(1, 3)], t[(2, 3)]);
+    let r_t = r.transpose();
+    tinv.fixed_view_mut::<3, 3>(0, 0).copy_from(&r_t);
+    tinv.fixed_view_mut::<3, 1>(0, 3).copy_from(&(-r_t * p));
+    tinv
 }
 
 #[cfg(test)]
@@ -241,6 +288,80 @@ mod tests {
                 diff = diff.max((rec[k] - a[k]).abs());
             }
             assert!(diff <= 1e-8, "a={a:?} rec={rec:?} diff={diff}");
+        }
+    }
+
+    #[test]
+    fn analytic_rotation_and_translation_at_small_angles_and_pi() {
+        for angle in [
+            0.0,
+            1e-12,
+            1e-8,
+            1e-4,
+            0.7,
+            std::f64::consts::PI - 1e-9,
+            std::f64::consts::PI,
+        ] {
+            let (sin, cos) = angle.sin_cos();
+            let expected = Matrix3::new(cos, -sin, 0.0, sin, cos, 0.0, 0.0, 0.0, 1.0);
+            let omega = Vector3::z() * angle;
+            assert!((so3_exp_matrix(&omega) - expected).norm() < 1e-14);
+            assert!((log_so3(&expected) - omega).norm() < 1e-14);
+            assert!(
+                (so3_log(&UnitQuaternion::new_unchecked(
+                    -so3_exp(&omega).into_inner()
+                )) - omega)
+                    .norm()
+                    < 1e-14
+            );
+
+            // 绕 z 的单位 x 平移扭量：积分 [cos(tθ), sin(tθ), 0], t∈[0,1]。
+            let (x, y) = if angle == 0.0 {
+                (1.0, 0.0)
+            } else {
+                (sin / angle, 2.0 * (angle / 2.0).sin().powi(2) / angle)
+            };
+            let mut transform = Matrix4::identity();
+            transform.fixed_view_mut::<3, 3>(0, 0).copy_from(&expected);
+            transform
+                .fixed_view_mut::<3, 1>(0, 3)
+                .copy_from(&Vector3::new(x, y, 0.0));
+            let tangent = Vector6::new(0.0, 0.0, angle, 1.0, 0.0, 0.0);
+            assert!((se3_exp(&tangent) - transform).norm() < 1e-12);
+            assert!((se3_log(&transform) - tangent).norm() < 1e-12);
+        }
+        for axis in [
+            Vector3::x(),
+            Vector3::y(),
+            Vector3::new(1.0, -2.0, 3.0).normalize(),
+        ] {
+            // R(π) = 2aaᵀ - I，π 处只比较旋转，轴的正负均有效。
+            let expected = 2.0 * axis * axis.transpose() - Matrix3::identity();
+            let recovered = log_so3(&expected);
+            assert!((recovered.norm() - std::f64::consts::PI).abs() < 1e-14);
+            assert!((so3_exp_matrix(&recovered) - expected).norm() < 1e-14);
+        }
+    }
+
+    #[test]
+    fn so3_jacobians_match_small_angle_terms_and_central_differences() {
+        let tiny = Vector3::new(1e-8, -2e-8, 3e-8);
+        let expected = Matrix3::identity() + skew(&tiny) * 0.5 + skew(&tiny) * skew(&tiny) / 6.0;
+        assert!((jl_so3(&tiny) - expected).norm() < 1e-16);
+        for omega in [Vector3::zeros(), tiny, Vector3::new(0.4, -0.7, 1.2)] {
+            let rotation = so3_exp_matrix(&omega);
+            let eps = 1e-6;
+            for column in 0..3 {
+                let mut delta = Vector3::zeros();
+                delta[column] = eps;
+                let derivative = (so3_exp_matrix(&(omega + delta))
+                    - so3_exp_matrix(&(omega - delta)))
+                    / (2.0 * eps);
+                let left = vee(&(derivative * rotation.transpose()));
+                let right = vee(&(rotation.transpose() * derivative));
+                assert!((left - jl_so3(&omega).column(column)).norm() < 1e-9);
+                assert!((right - jr_so3(&omega).column(column)).norm() < 1e-9);
+            }
         }
     }
 

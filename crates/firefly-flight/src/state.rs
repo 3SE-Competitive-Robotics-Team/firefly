@@ -1,6 +1,6 @@
 //! 机体状态与控制输出、六自由度积分。
 
-use glam::{Quat, Vec3};
+use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 
 use crate::{G, params::QuadParams};
 
@@ -11,22 +11,22 @@ use crate::{G, params::QuadParams};
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Wrench {
     /// 世界系力（N）。
-    pub force: Vec3,
+    pub force: Vector3<f32>,
     /// 世界系力矩（N·m）。
-    pub torque: Vec3,
+    pub torque: Vector3<f32>,
 }
 
 /// 六自由度机体状态。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct QuadState {
     /// 世界系位置（m）。
-    pub position: Vec3,
+    pub position: Vector3<f32>,
     /// 世界系速度（m/s）。
-    pub velocity: Vec3,
+    pub velocity: Vector3<f32>,
     /// 姿态（机体→世界）。
-    pub attitude: Quat,
+    pub attitude: UnitQuaternion<f32>,
     /// 机体系角速度（rad/s）。
-    pub ang_vel: Vec3,
+    pub ang_vel: Vector3<f32>,
 }
 
 impl QuadState {
@@ -41,8 +41,8 @@ impl QuadState {
 ///
 /// 全栈唯一的航向定义：控制律的偏航误差、飞控的姿态估计与 VIO 航向接入都用它。
 #[must_use]
-pub fn yaw_of(attitude: Quat) -> f32 {
-    let fwd = attitude * Vec3::X;
+pub fn yaw_of(attitude: UnitQuaternion<f32>) -> f32 {
+    let fwd = attitude * Vector3::x();
     fwd.y.atan2(fwd.x)
 }
 
@@ -54,23 +54,19 @@ pub fn yaw_of(attitude: Quat) -> f32 {
 /// 的输出）。
 pub fn integrate(state: &mut QuadState, wrench: &Wrench, params: &QuadParams, dt: f32) {
     let accel =
-        (wrench.force - state.velocity * params.linear_drag) / params.mass + Vec3::NEG_Z * G;
+        (wrench.force - state.velocity * params.linear_drag) / params.mass - Vector3::z() * G;
     state.velocity += accel * dt;
     state.position += state.velocity * dt;
 
     // 世界系力矩 → 机体系角加速度（惯量取对角元）：ω̇ = I⁻¹·R⁻¹·(τ − I·k·ω)
-    let damping = Vec3::from(params.inertia) * (state.ang_vel * params.angular_drag);
-    let ang_accel =
-        (state.attitude.inverse() * (wrench.torque - damping)) / Vec3::from(params.inertia);
+    let damping =
+        Vector3::from(params.inertia).component_mul(&(state.ang_vel * params.angular_drag));
+    let ang_accel = (state.attitude.inverse() * (wrench.torque - damping))
+        .component_div(&Vector3::from(params.inertia));
     state.ang_vel += ang_accel * dt;
 
-    let wq = Quat::from_xyzw(state.ang_vel.x, state.ang_vel.y, state.ang_vel.z, 0.0);
-    let dq = (state.attitude * wq) * (0.5 * dt);
-    state.attitude = Quat::from_xyzw(
-        state.attitude.x + dq.x,
-        state.attitude.y + dq.y,
-        state.attitude.z + dq.z,
-        state.attitude.w + dq.w,
-    )
-    .normalize();
+    let wq = Quaternion::from_parts(0.0, state.ang_vel);
+    let q = state.attitude.into_inner();
+    let dq = (q * wq) * (0.5 * dt);
+    state.attitude = UnitQuaternion::new_normalize(q + dq);
 }

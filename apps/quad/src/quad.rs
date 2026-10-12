@@ -80,6 +80,6 @@ pub fn dynamics(
         integrate(&mut quad.state, &alloc.realized, &cfg.drone, dt);
     }
 
-    transform.translation = Vec3::from_array(quad.state.position.to_array());
-    transform.rotation = Quat::from_array(quad.state.attitude.to_array());
+    transform.translation = Vec3::from_array(quad.state.position.into());
+    transform.rotation = Quat::from_array(quad.state.attitude.coords.into());
 }

@@ -10,7 +10,6 @@ firefly-base = { path = "crates/firefly-base" }
 bevy = "0.20.0"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 fastrace = { version = "0.7.19", default-features = false }
-glam = "0.34.1"
 iceoryx2 = "0.10.0"
 iceoryx2-bb-posix = "0.10.0"
 jiff = "0.2.38"

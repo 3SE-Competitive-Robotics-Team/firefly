@@ -3,7 +3,7 @@ import numpy as np
 import pyarrow as pa
 from rerun.chunk import RrdReader
 
-from metrics import compute_metrics, interp_linear
+from .metrics import compute_metrics, interp_linear
 
 
 def read_evidence(path):

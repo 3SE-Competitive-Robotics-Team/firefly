@@ -3,12 +3,11 @@ use firefly_error::{Error, ErrorKind, Result};
 use firefly_imu::{Aid, AttitudeState, Estimator, Matrix6, Options, Sample};
 use firefly_pubsub::{
     attitude::{ATTITUDE_AID_TOPIC, AttitudeAidMessage},
-    imu::ImuSubscriber,
+    imu::{IMU_SUBSCRIPTION, IMU_TOPIC, ImuMessage},
     node::create_node,
     subscriber::Subscriber,
 };
-use glam::{Quat, Vec3};
-use nalgebra::Vector3;
+use nalgebra::{UnitQuaternion, Vector3};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -21,8 +20,8 @@ pub struct Snapshot {
     pub timestamp: f64,
     pub received: Instant,
     pub count: u64,
-    pub rotation: Quat,
-    pub rate: Vec3,
+    pub rotation: UnitQuaternion<f32>,
+    pub rate: Vector3<f32>,
     pub ready: bool,
     pub aligned: bool,
     pub nis: f64,
@@ -102,9 +101,6 @@ fn to_aid(m: &AttitudeAidMessage) -> Result<Aid> {
         },
     })
 }
-fn vector(v: Vector3<f64>) -> Vec3 {
-    Vec3::new(v.x as f32, v.y as f32, v.z as f32)
-}
 #[allow(clippy::too_many_lines)]
 fn run(
     options: Options,
@@ -113,7 +109,7 @@ fn run(
     stop: &AtomicBool,
 ) -> Result<()> {
     let node = create_node().map_err(|e| e.with_context("operation", "FC IMU node"))?;
-    let imu = ImuSubscriber::new(&node)?;
+    let imu = Subscriber::<ImuMessage>::with_options(&node, IMU_TOPIC, IMU_SUBSCRIPTION)?;
     let aids = Subscriber::<AttitudeAidMessage>::with_topic(&node, ATTITUDE_AID_TOPIC)?;
     let mut estimator = Estimator::new(options)?;
     let mut latest = None;
@@ -171,10 +167,7 @@ fn run(
         }
         if changed && let Some((sample, received)) = latest {
             let state = estimator.state();
-            let rotation = state.map_or(Quat::IDENTITY, |s| {
-                let q = s.rotation.quaternion();
-                Quat::from_xyzw(q.i as f32, q.j as f32, q.k as f32, q.w as f32)
-            });
+            let rotation = state.map_or(UnitQuaternion::identity(), |s| s.rotation.cast::<f32>());
             let bias = state.map_or([0.; 3], |s| [s.bias.x, s.bias.y, s.bias.z]);
             if let Ok(mut value) = output.lock() {
                 *value = Some(Snapshot {
@@ -182,7 +175,7 @@ fn run(
                     received,
                     count,
                     rotation,
-                    rate: vector(estimator.rate()),
+                    rate: estimator.rate().cast::<f32>(),
                     ready: state.is_some(),
                     aligned: estimator.aligned(),
                     nis: estimator.gate().nis,

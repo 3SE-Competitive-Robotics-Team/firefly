@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from mission_metrics import landing_truth, read_evidence, settled_truth, startup_truth
+from .mission_metrics import landing_truth, read_evidence, settled_truth, startup_truth
 
 
 @dataclass(frozen=True)

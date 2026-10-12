@@ -1,6 +1,5 @@
 """真实进程任务验收；预设命令，真值只评分，失败不调整门槛。"""
 from dataclasses import asdict, dataclass
-from pathlib import Path
 import logging
 import os
 import queue
@@ -14,10 +13,10 @@ import numpy as np
 from firefly_mujoco import ControlMessage, OdomMessage
 from firefly_viz.messages import SCALAR_BUFFER_SIZE, ScalarMessage
 
-from process_lifecycle import ManagedProcess, isolated_run
-from mission_io import Recorder, ReferenceMessage, pose_values, service
+from .process_lifecycle import ManagedProcess, isolated_run
+from .mission_io import Recorder, ReferenceMessage, pose_values, service
 
-ROOT = Path(__file__).resolve().parents[2]
+from firefly_workspace import workspace_root
 
 
 @dataclass(frozen=True)
@@ -63,7 +62,8 @@ class MissionFailure(RuntimeError):
 
 
 class Mission:
-    def __init__(self, directory, case, options, *, vio_only=False, prior_maps=False, localization_config=None):
+    def __init__(self, directory, case, options, *, vio_only=False, prior_maps=False, localization_config=None, workspace=None):
+        self.root = workspace_root(workspace)
         self.options, self.case = options, case
         self.vio_only = vio_only
         self.prior_maps = prior_maps
@@ -102,7 +102,7 @@ class Mission:
             except queue.Full:
                 self.diagnostic_drops += 1
 
-        child = ManagedProcess(command, cwd=ROOT, env=env, on_line=on_line, tail_size=12)
+        child = ManagedProcess(command, cwd=self.root, env=env, on_line=on_line, tail_size=12)
         self.processes[name] = child
         self.expected_stops.discard(name)
         if self.recorder:
@@ -114,7 +114,7 @@ class Mission:
 
     def command(self, *args):
         self.recorder.event(f"command ffctl {' '.join(map(str, args))}", self.t)
-        with subprocess.Popen([str(ROOT / "target/release/ffctl"), *map(str, args)], cwd=ROOT,
+        with subprocess.Popen([str(self.root / "target/release/ffctl"), *map(str, args)], cwd=self.root,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
             deadline = time.monotonic() + 5.
             try:
@@ -304,9 +304,9 @@ class Mission:
 
     def map_ready(self):
         self.wait(lambda: "corrected" in self.latest and self.latest["corrected"][4], wall=30.)
-        command = [str(ROOT / "target/release/planner"), "--goal", *map(str, self.options.waypoints[0])]
+        command = [str(self.root / "target/release/planner"), "--goal", *map(str, self.options.waypoints[0])]
         if self.prior_maps:
-            command += ["--map", str(ROOT / "apps/planner/maps/rmuc2026.ffmap")]
+            command += ["--map", str(self.root / "apps/planner/maps/rmuc2026.ffmap")]
         self.start("planner", command)
         self.wait(lambda: "reference" in self.latest, wall=30.)
         return {"source": "VIO + external map alignment" if self.prior_maps else "VIO + startup session frame; online depth mapping",
@@ -446,7 +446,7 @@ class Mission:
 
     def run_phases(self, phases, applications):
         """依次执行验收阶段，共用 RRD 记录、进程存活检查和优雅退出。"""
-        with isolated_run(ROOT):
+        with isolated_run(self.root):
             return self._run_phases(phases, applications)
 
     def _run_phases(self, phases, applications):
@@ -456,13 +456,13 @@ class Mission:
             time.sleep(2.)
             self.connect()
             for name in applications:
-                command = [str(ROOT / f"target/release/{name}")]
+                command = [str(self.root / f"target/release/{name}")]
                 if name == "localization" and self.localization_config is not None:
                     command += ["--config", str(self.localization_config)]
                 if name == "lightglue" and self.prior_maps:
-                    command += ["--map", str(ROOT / "apps/planner/maps/rmuc2026.ffvmap")]
+                    command += ["--map", str(self.root / "apps/planner/maps/rmuc2026.ffvmap")]
                 self.start(name, command)
-            self.start("sim", [sys.executable, str(ROOT / "tests/system/mission_sim.py")])
+            self.start("sim", [sys.executable, "-m", "firefly_evaluation.mission_sim"])
             for name, action in phases:
                 self.phase(name, action)
         except KeyboardInterrupt:

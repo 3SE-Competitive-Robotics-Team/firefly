@@ -7,8 +7,8 @@ from dataclasses import asdict
 
 import pytest
 
-from mission import Mission, Options
-from hover_metrics import HoverLimits, score_hover
+from firefly_evaluation.mission import Mission, Options
+from firefly_evaluation.hover_metrics import HoverLimits, score_hover
 
 
 @pytest.mark.parametrize("case", ["imu_landing", "imu_vio_loss", "imu_hover"])

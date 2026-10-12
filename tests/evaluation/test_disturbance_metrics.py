@@ -4,10 +4,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-import disturbance_metrics
-import hover_metrics
-from disturbance_metrics import DisturbanceLimits, disturbance_checks, round_checks, score_disturbance
-from hover_metrics import HoverLimits
+from firefly_evaluation import disturbance_metrics
+from firefly_evaluation import hover_metrics
+from firefly_evaluation.disturbance_metrics import DisturbanceLimits, disturbance_checks, round_checks, score_disturbance
+from firefly_evaluation.hover_metrics import HoverLimits
 
 
 @pytest.fixture

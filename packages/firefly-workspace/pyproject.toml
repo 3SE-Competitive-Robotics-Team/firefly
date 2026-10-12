@@ -1,0 +1,10 @@
+[project]
+name = "firefly-workspace"
+version = "0.1.0"
+description = "工作区定位与文件内容指纹；仅依赖 Python 标准库"
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14"]
+build-backend = "uv_build"

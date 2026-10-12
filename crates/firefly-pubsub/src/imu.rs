@@ -5,10 +5,6 @@
 
 use iceoryx2::prelude::*;
 
-use crate::node::IpcNode;
-use crate::subscriber::{Received, Subscriber};
-use crate::trace::TraceContext;
-
 /// imu 话题名（对照 `docs/architecture.md` 的 `topic: imu`）。
 pub const IMU_TOPIC: &str = "Firefly/Imu";
 
@@ -46,72 +42,14 @@ impl Default for ImuMessage {
     }
 }
 
-/// 收到的 imu 样本。
-pub type ReceivedImu = Received<ImuMessage>;
-
-/// IMU 订阅缓冲区深度：100Hz 时覆盖约 1s 排空停顿；溢出会丢失测量。
-/// 服务上限见 `IMU_SERVICE_MAX`（本文件创建服务时显式声明，不依赖机器全局配置）。
-const IMU_BUFFER_SIZE: usize = 100;
-/// IMU 服务订阅端上限：须 ≥ 订阅缓冲（`iceoryx2` 建服务方定上限，后续
-/// `open` 不得超限；`sim` 先起时由 Python 侧以同值创建，见 `main.py`）。
-const IMU_SERVICE_MAX: usize = 128;
-
-/// imu 订阅器（话题 `Firefly/Imu`，泛型核心的命名封装）。
-pub struct ImuSubscriber(Subscriber<ImuMessage>);
-
-impl ImuSubscriber {
-    /// 打开 imu 话题的订阅器，缓冲 `IMU_BUFFER_SIZE` 个样本。
-    ///
-    /// # Errors
-    /// 见 [`Subscriber::with_topic_and_buffer`]。
-    pub fn new(node: &IpcNode) -> Result<Self, firefly_error::Error> {
-        Self::with_topic(node, IMU_TOPIC)
-    }
-
-    /// 以自定义话题名打开 imu 订阅器（服务上限 `IMU_SERVICE_MAX`，订阅缓冲
-    /// `IMU_BUFFER_SIZE`；先创建方定上限，`sim`/`vio` 任一先起皆一致）。
-    ///
-    /// # Errors
-    /// 服务或订阅器创建失败（IPC 资源不可用等）。
-    pub fn with_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
-        let service = node
-            .service_builder(&topic.try_into().map_err(|e| {
-                firefly_error::Error::new(
-                    firefly_error::ErrorKind::InvalidArgument,
-                    format!("非法话题名 `{topic}`: {e:?}"),
-                )
-            })?)
-            .publish_subscribe::<ImuMessage>()
-            .user_header::<TraceContext>()
-            .subscriber_max_buffer_size(IMU_SERVICE_MAX)
-            .open_or_create()
-            .map_err(|e| {
-                firefly_error::Error::new(
-                    firefly_error::ErrorKind::Internal,
-                    format!("打开/创建话题 `{topic}` 失败: {e:?}"),
-                )
-            })?;
-        let subscriber = service
-            .subscriber_builder()
-            .buffer_size(IMU_BUFFER_SIZE)
-            .create()
-            .map_err(|e| {
-                firefly_error::Error::new(
-                    firefly_error::ErrorKind::Internal,
-                    format!("创建订阅器失败: {e:?}"),
-                )
-            })?;
-        Ok(Self(Subscriber::from_inner(subscriber)))
-    }
-
-    /// 接收一条 imu 消息（见 [`Subscriber::receive`]）。
-    ///
-    /// # Errors
-    /// 见 [`Subscriber::receive`]。
-    pub fn receive(&self) -> Result<Option<ReceivedImu>, firefly_error::Error> {
-        self.0.receive()
-    }
-}
+/// IMU 服务容量与接收队列；Python 发布端声明相同服务容量。
+/// 接收队列覆盖 100Hz 下约 1s 排空停顿，溢出会丢失测量。
+pub const IMU_SUBSCRIPTION: crate::subscriber::SubscriberOptions =
+    crate::subscriber::SubscriberOptions {
+        buffer_size: 100,
+        service_max_buffer_size: Some(128),
+        max_publishers: None,
+    };
 
 #[cfg(test)]
 mod tests {
@@ -126,9 +64,9 @@ mod tests {
     }
 
     /// 缓冲不变量（编译期）：订阅缓冲 ≤ 服务上限（超限则创建直接失败，见
-    /// `with_topic`），且覆盖 100Hz 下 1s 排空停顿。
+    /// `Subscriber::with_options`），且覆盖 100Hz 下 1s 排空停顿。
     const _: () = {
-        assert!(IMU_BUFFER_SIZE <= IMU_SERVICE_MAX);
-        assert!(IMU_BUFFER_SIZE >= 100);
+        assert!(IMU_SUBSCRIPTION.buffer_size <= IMU_SUBSCRIPTION.service_max_buffer_size.unwrap());
+        assert!(IMU_SUBSCRIPTION.buffer_size >= 100);
     };
 }

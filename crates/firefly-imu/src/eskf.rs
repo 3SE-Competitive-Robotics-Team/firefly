@@ -2,6 +2,7 @@
 //! 加计 NIS 对照 `WangHongxi2001` `QuaternionEKF.c::IMU_QuaternionEKF_xhatUpdate`。
 
 use crate::{Options, invalid};
+use firefly_base::se3::{jr_so3, skew};
 use firefly_error::Result;
 use nalgebra::{Matrix3, SMatrix, SVector, UnitQuaternion, Vector3};
 
@@ -39,12 +40,7 @@ pub struct Intersection {
 
 #[must_use]
 pub fn right_jacobian(phi: Vector3<f64>) -> Matrix3<f64> {
-    let a = phi.norm();
-    let w = skew(phi);
-    if a < 1e-5 {
-        return Matrix3::identity() - w * 0.5 + w * w / 6.;
-    }
-    Matrix3::identity() - w * ((1. - a.cos()) / a.powi(2)) + w * w * ((a - a.sin()) / a.powi(3))
+    jr_so3(&phi)
 }
 
 /// 常角速度、机体系常零偏误差的精确离散转移；dt 单位秒。
@@ -65,11 +61,8 @@ pub fn transition(omega: Vector3<f64>, dt: f64) -> Matrix6 {
 #[must_use]
 pub fn gravity_jacobian(h: Vector3<f64>) -> SMatrix<f64, 3, 6> {
     let mut out = SMatrix::<f64, 3, 6>::zeros();
-    out.fixed_view_mut::<3, 3>(0, 0).copy_from(&skew(h));
+    out.fixed_view_mut::<3, 3>(0, 0).copy_from(&skew(&h));
     out
-}
-fn skew(v: Vector3<f64>) -> Matrix3<f64> {
-    Matrix3::new(0., -v.z, v.y, v.z, 0., -v.x, -v.y, v.x, 0.)
 }
 #[allow(clippy::large_types_passed_by_value)] // 固定维矩阵表达式的值语义
 fn symmetric(p: Matrix6) -> Matrix6 {

@@ -5,8 +5,8 @@ import sys
 
 import numpy as np
 
-from mission_io import service
-from mission_sim import ObservedEnv
+from .mission_io import service
+from .mission_sim import ObservedEnv
 
 TOPIC = "Firefly/Test/HoverDisturbance"
 

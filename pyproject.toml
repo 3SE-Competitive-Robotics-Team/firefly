@@ -14,12 +14,16 @@ version = "0.1.0"
 description = "firefly 双语言 monorepo：Rust（EGO 规划 + MSCKF VIO）+ Python（MuJoCo 物理环境 + rerun 可视化）"
 requires-python = ">=3.12"
 dependencies = [
+    "firefly-workspace",
+    "firefly-evaluation",
     "firefly-mujoco",
     "firefly-sim",
     "firefly-viz",
 ]
 
 [tool.uv.sources]
+firefly-workspace = { workspace = true }
+firefly-evaluation = { workspace = true }
 firefly-mujoco = { workspace = true }
 firefly-sim = { workspace = true }
 firefly-viz = { workspace = true }

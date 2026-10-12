@@ -16,8 +16,8 @@ use firefly_pubsub::navigation::{NAVIGATION_TOPIC, NavigationMessage};
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::odom::CORRECTED_ODOM_TOPIC;
 use firefly_pubsub::odom::OdomMessage;
-use firefly_pubsub::publish::{CorrectedOdomPublisher, Publisher};
-use firefly_pubsub::subscriber::{OdomSubscriber, Subscriber};
+use firefly_pubsub::publish::Publisher;
+use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::vision::{LOOP_TOPIC, LoopConstraint, POSE_OBS_TOPIC, PoseObservation};
 use firefly_pubsub::viz::{ScalarMessage, VizMessage, VizPublisher, kind};
 use iceoryx2::prelude::*;
@@ -194,8 +194,8 @@ struct App {
     external_map: bool,
     estimator_reset: bool,
     reloc_ticks: usize,
-    viewer_odom: Option<OdomSubscriber>,
-    corrected_pub: Option<CorrectedOdomPublisher>,
+    viewer_odom: Option<Subscriber<OdomMessage>>,
+    corrected_pub: Option<Publisher<OdomMessage>>,
     viz_pub: Option<VizPublisher>,
     corr_prev: Option<[f64; 3]>,
     latest_odom: Option<OdomMessage>,
@@ -236,7 +236,7 @@ impl App {
         let fusion = FusionFilter::new(cfg.fusion);
         let node = create_node()?;
         let log_ipc = firefly_observability::init_ipc(&node, "localization");
-        let odom_sub = Some(OdomSubscriber::with_topic(&node, odom_topic)?);
+        let odom_sub = Some(Subscriber::with_topic(&node, odom_topic)?);
         let graph_inputs = cfg.backend == Backend::PoseGraph;
         let loops = graph_inputs
             .then(|| Subscriber::with_topic(&node, LOOP_TOPIC))
@@ -251,7 +251,7 @@ impl App {
             })
             .transpose()?;
         let visual_obs = Some(Subscriber::with_topic(&node, POSE_OBS_TOPIC)?);
-        let corrected_pub = Some(CorrectedOdomPublisher::new(&node)?);
+        let corrected_pub = Some(Publisher::with_topic_notify(&node, CORRECTED_ODOM_TOPIC)?);
         let viz_pub = match VizPublisher::new(&node) {
             Ok(p) => {
                 log::info!(
@@ -848,7 +848,7 @@ mod tests {
                 let node = create_node().unwrap();
                 let raw = Publisher::<OdomMessage>::with_topic(&node, &topic).unwrap();
                 let corrected =
-                    firefly_pubsub::subscriber::CorrectedOdomSubscriber::new(&node).unwrap();
+                    Subscriber::<OdomMessage>::with_topic(&node, CORRECTED_ODOM_TOPIC).unwrap();
                 let mut sample = OdomMessage {
                     timestamp: 2.,
                     is_initialized: true,

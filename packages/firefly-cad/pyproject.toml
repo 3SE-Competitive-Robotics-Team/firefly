@@ -7,6 +7,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "firefly-workspace",
     # cadquery-ocp-novtk 而非全量 cadquery-ocp：管线全 headless，
     # 不需要 VTK 可视化；OCP 模块名仍为 `OCP`，API 与 OCCT C++ 一一对应。
     "cadquery-ocp-novtk>=8.0.1.1.0",
@@ -24,3 +25,6 @@ firefly-cad-build = "firefly_cad.pipeline:main"
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14"]
 build-backend = "uv_build"
+
+[tool.uv.sources]
+firefly-workspace = { workspace = true }

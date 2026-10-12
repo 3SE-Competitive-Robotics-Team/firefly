@@ -1,5 +1,8 @@
 //! 独立接收线程保存原始里程计时间窗口；匹配推理不得阻塞传感器接收。
-use firefly_pubsub::{odom::OdomMessage, subscriber::OdomSubscriber};
+use firefly_pubsub::{
+    odom::{ODOM_TOPIC, OdomMessage},
+    subscriber::Subscriber,
+};
 use nalgebra::{Quaternion, UnitQuaternion};
 use std::{
     collections::VecDeque,
@@ -128,7 +131,7 @@ impl Sensors {
             .spawn(move || {
                 let result = (|| {
                     let node = firefly_pubsub::node::create_node()?;
-                    let odom = OdomSubscriber::new(&node)?;
+                    let odom = Subscriber::<OdomMessage>::with_topic(&node, ODOM_TOPIC)?;
                     let _ = tx.send(Ok(()));
                     while !s.load(Ordering::Relaxed) && node.wait(Duration::from_millis(2)).is_ok()
                     {

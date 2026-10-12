@@ -11,6 +11,7 @@ repository.workspace = true
 readme.workspace = true
 
 [dependencies]
+firefly-base.workspace = true
 fastrace = { workspace = true }
 firefly-error = { workspace = true }
 firefly-vio-core = { workspace = true }
@@ -24,5 +25,4 @@ nalgebra = { workspace = true }
 workspace = true
 
 [dev-dependencies]
-firefly-base = { workspace = true }
 firefly-observability = { workspace = true }

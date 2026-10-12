@@ -3,8 +3,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from hover_metrics import HoverLimits, attitude_health, covered_window
-from mission_metrics import read_evidence, settled_truth, startup_truth
+from .hover_metrics import HoverLimits, attitude_health, covered_window
+from .mission_metrics import read_evidence, settled_truth, startup_truth
 
 
 @dataclass(frozen=True)

@@ -6,8 +6,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use firefly_pubsub::event::TopicListener;
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::odom::OdomMessage;
-use firefly_pubsub::publish::OdomPublisher;
-use firefly_pubsub::subscriber::OdomSubscriber;
+use firefly_pubsub::publish::Publisher;
+use firefly_pubsub::subscriber::Subscriber;
 
 #[test]
 #[ignore = "requires FIREFLY_TEST_PYTHON pointing to the synced workspace Python"]
@@ -108,8 +108,8 @@ fn rust_python_payload_header_and_event_roundtrip() {
     let request = format!("Firefly/Test/Interop/{unique}/Request");
     let response = format!("Firefly/Test/Interop/{unique}/Response");
     let node = create_node().unwrap();
-    let publisher = OdomPublisher::with_topic(&node, &request).unwrap();
-    let subscriber = OdomSubscriber::with_topic(&node, &response).unwrap();
+    let publisher = Publisher::<OdomMessage>::with_topic_notify(&node, &request).unwrap();
+    let subscriber = Subscriber::<OdomMessage>::with_topic(&node, &response).unwrap();
     let listener = TopicListener::with_topic(&node, &response).unwrap();
     let mut child = Command::new(python)
         .args(["-c", PEER, &request, &response])

@@ -141,39 +141,6 @@ impl LogMessage {
 /// 发布端与聚合端都使用相同容量；先启动聚合端才能记录启动阶段日志。
 pub const LOG_MAX_PUBLISHERS: usize = 10;
 
-/// 日志发布器（话题 [`LOG_TOPIC`]，泛型核心的命名封装）。
-pub struct LogPublisher(pub(crate) crate::publish::Publisher<LogMessage>);
-
-impl LogPublisher {
-    /// 打开统一日志话题的发布器（`max_publishers` = [`LOG_MAX_PUBLISHERS`]，
-    /// 7 进程同话题发布；先启动的进程创建服务，后续 open 必须 ≤ 该值）。
-    ///
-    /// # Errors
-    /// 见 [`crate::publish::Publisher::with_topic`]。
-    pub fn new(node: &crate::node::IpcNode) -> Result<Self, firefly_error::Error> {
-        Ok(Self(
-            crate::publish::Publisher::with_topic_buffer_publishers(
-                node,
-                LOG_TOPIC,
-                Some(LOG_BUFFER_SIZE),
-                Some(LOG_MAX_PUBLISHERS),
-            )?,
-        ))
-    }
-
-    /// 发布一条日志消息（trace 上下文由调用方随消息携带，见
-    /// [`firefly_observability::IpcAppend`]）。
-    ///
-    /// # Errors
-    /// 见 [`crate::publish::Publisher::publish`]。
-    pub fn publish(
-        &self,
-        msg: LogMessage,
-    ) -> Result<crate::trace::TraceContext, firefly_error::Error> {
-        self.0.publish(msg)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

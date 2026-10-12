@@ -8,24 +8,7 @@ use firefly_base::se3::{right_jacobian, se3_exp, se3_log};
 use firefly_base::{FrameId, RigidTransform};
 use nalgebra::{Matrix4, Matrix6, Vector6};
 
-/// `chi2 95%` 分位数（与 `firefly-vio/src/updater.rs:24` 同表）。
-const CHI2_95_TABLE: [f64; 30] = [
-    3.8415, 5.9915, 7.8147, 9.4877, 11.0705, 12.5916, 14.0671, 15.5073, 16.9190, 18.3070, 19.6751,
-    21.0261, 22.3620, 23.6848, 24.9958, 26.2962, 27.5871, 28.8693, 30.1435, 31.4104, 32.6706,
-    33.9244, 35.1725, 36.4150, 37.6525, 38.8851, 40.1133, 41.3372, 42.5570, 43.7730,
-];
-
-fn chi2_95(dof: usize) -> f64 {
-    if dof == 0 {
-        return 0.0;
-    }
-    if dof <= CHI2_95_TABLE.len() {
-        return CHI2_95_TABLE[dof - 1];
-    }
-    let nu = dof as f64;
-    let t = 1.0 - 2.0 / (9.0 * nu) + 1.644_853_626_951_472_2 * (2.0 / (9.0 * nu)).sqrt();
-    nu * t * t * t
-}
+use firefly_base::stats::chi2_95;
 
 /// 单源门控画像：同一信任等级的观测共用一套门限（对照 VINS-Fusion
 /// `findConnection` 的外生验证定信任：特征验证过的边走宽门，几何混叠

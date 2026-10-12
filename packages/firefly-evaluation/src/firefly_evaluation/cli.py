@@ -1,9 +1,7 @@
-#!/usr/bin/env python3
 """运行真实 RMUC 任务与失联故障验收；RRD 原始证据 + 内容指纹 + JSON/HTML 报告。"""
 import argparse
 from dataclasses import asdict
 from datetime import datetime, timezone
-import hashlib
 from html import escape
 from importlib.metadata import version
 import json
@@ -16,22 +14,14 @@ import sys
 import tomllib
 import uuid
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-sys.path.insert(0, str(ROOT / "tests/system"))
-sys.path.insert(0, str(ROOT / "tests/evaluation"))
-from mission import Mission, Options
-from process_lifecycle import require_idle
-from mission_metrics import score
-from mission_sim import CONTACT_POLICY
-from collect_vision_map import verify_map_compatibility
+from .mission import Mission, Options
+from .process_lifecycle import require_idle
+from .mission_metrics import score
+from .mission_sim import CONTACT_POLICY
+from .vision_assets import verify_map_compatibility
+from firefly_workspace import digest, workspace_root
 
 log = logging.getLogger("acceptance")
-
-
-def digest(path):
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def save_report(directory, report):
@@ -78,17 +68,17 @@ def save_report(directory, report):
     (directory / "report.html").write_text(document)
 
 
-def provenance(*, allow_map_rig_translation=False, vio_only=False, prior_maps=False):
-    files = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT).decode().split("\0")
-    source = {name: digest(ROOT / name) for name in files if name and (ROOT / name).is_file()}
+def provenance(root, *, allow_map_rig_translation=False, vio_only=False, prior_maps=False):
+    files = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=root).decode().split("\0")
+    source = {name: digest(root / name) for name in files if name and (root / name).is_file()}
     names = ["vio", "render", "fc", "ffctl", "localization", "planner"]
     if not vio_only:
         names += ["slam"]
         if prior_maps:
             names += ["aliked", "lightglue"]
-    binaries = {name: digest(ROOT / "target/release" / name) for name in names}
-    models = {} if vio_only or not prior_maps else {name: digest(ROOT / "models" / name) for name in ("aliked-n16-k512.onnx", "lightglue-aliked-k512.onnx")}
-    manifest_path = ROOT / "models/rmuc2026/asset_manifest.json"
+    binaries = {name: digest(root / "target/release" / name) for name in names}
+    models = {} if vio_only or not prior_maps else {name: digest(root / "models" / name) for name in ("aliked-n16-k512.onnx", "lightglue-aliked-k512.onnx")}
+    manifest_path = root / "models/rmuc2026/asset_manifest.json"
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("status") != "passed":
         raise ValueError("geometry has not passed acceptance")
@@ -100,18 +90,18 @@ def provenance(*, allow_map_rig_translation=False, vio_only=False, prior_maps=Fa
     visual = None
     compatibility = {"status": "not_used_empty_map"}
     if prior_maps:
-        visual_manifest = ROOT / "apps/planner/maps/rmuc2026.manifest.json"
+        visual_manifest = root / "apps/planner/maps/rmuc2026.manifest.json"
         visual = json.loads(visual_manifest.read_text())
-        if digest(ROOT / "apps/planner/maps/rmuc2026.ffvmap") != visual["map_sha256"]:
+        if digest(root / "apps/planner/maps/rmuc2026.ffvmap") != visual["map_sha256"]:
             raise ValueError("visual map content changed")
         for name, expected in visual["models"]["artifacts"].items():
-            if digest(ROOT / "models" / name) != expected:
+            if digest(root / "models" / name) != expected:
                 raise ValueError(f"visual model content changed: {name}")
-        compatibility = verify_map_compatibility(visual["assets"], allow_rig_translation=allow_map_rig_translation)
-    return {"visual_map": visual, "visual_map_compatibility": compatibility, "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-            "git_status": subprocess.check_output(["git", "status", "--short"], cwd=ROOT, text=True),
+        compatibility = verify_map_compatibility(visual["assets"], root=root, allow_rig_translation=allow_map_rig_translation)
+    return {"visual_map": visual, "visual_map_compatibility": compatibility, "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
+            "git_status": subprocess.check_output(["git", "status", "--short"], cwd=root, text=True),
             "source_sha256": source, "binary_sha256": binaries, "model_sha256": models,
-            "configs": {str(p.relative_to(ROOT)): p.read_text() for p in (ROOT / "configs").glob("*.toml")},
+            "configs": {str(p.relative_to(root)): p.read_text() for p in (root / "configs").glob("*.toml")},
             "assets": manifest, "asset_manifest_sha256": digest(manifest_path),
             "platform": platform.platform(), "python": sys.version,
             "display_environment": {key: os.environ.get(key) for key in ["DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "WGPU_BACKEND"]},
@@ -120,7 +110,8 @@ def provenance(*, allow_map_rig_translation=False, vio_only=False, prior_maps=Fa
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=ROOT / "configs/acceptance.toml")
+    parser.add_argument("--workspace", type=Path, help="firefly 工作区目录；默认从当前目录向上查找")
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--case", choices=["all", "nominal", "reference_loss", "estimator_loss"], default="all")
     parser.add_argument("--vio-only", action="store_true", help="纯 VIO + 会话坐标系；不启动 slam 或 ALIKED/LightGlue")
     parser.add_argument("--prior-maps", action="store_true", help="显式加载 RMUC 离线视觉地图与规划地图")
@@ -130,6 +121,12 @@ def main(argv=None):
     parser.add_argument("--allow-map-rig-translation", action="store_true",
                         help="显式允许冻结地图与当前 rig 的共同安装平移差异；记录差异，仍校验其他标定与资产")
     args = parser.parse_args(argv)
+    try:
+        root = workspace_root(args.workspace)
+    except ValueError as error:
+        parser.error(str(error))
+    if args.config is None:
+        args.config = root / "configs/acceptance.toml"
     if args.vio_only and args.prior_maps:
         parser.error("--vio-only and --prior-maps are mutually exclusive")
     if args.allow_map_rig_translation and not args.prior_maps:
@@ -144,8 +141,8 @@ def main(argv=None):
         parser.error("--repeat must be in 1..100")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
-    directory = args.output_dir.resolve() if args.output_dir else ROOT / "logs/acceptance" / run_id
-    if not directory.is_relative_to(ROOT / "logs"):
+    directory = args.output_dir.resolve() if args.output_dir else root / "logs/acceptance" / run_id
+    if not directory.is_relative_to(root / "logs"):
         parser.error("acceptance evidence must be stored under repository logs/")
     directory.mkdir(parents=True)
     report = {"schema_version": 2, "mission_decisions": "fresh estimated state; independent ground-truth scoring", "run_id": run_id, "status": "running", "cases": [],
@@ -155,23 +152,23 @@ def main(argv=None):
     elif args.prior_maps:
         report["scope"] = "RMUC mission; VIO + explicit external map alignment + offline visual map localization + online loops + prior/depth mapping"
     try:
-        require_idle(ROOT)
+        require_idle(root)
         with args.config.open("rb") as stream:
             options = Options(**tomllib.load(stream))
         options.validate()
         report["options"] = asdict(options)
         report["contact_policy"] = CONTACT_POLICY
-        report["provenance"] = (provenance(vio_only=True) if args.vio_only else
-                                provenance(prior_maps=True, allow_map_rig_translation=args.allow_map_rig_translation) if args.prior_maps else provenance())
+        report["provenance"] = (provenance(root, vio_only=True) if args.vio_only else
+                                provenance(root, prior_maps=True, allow_map_rig_translation=args.allow_map_rig_translation) if args.prior_maps else provenance(root))
         cases = ["nominal", "reference_loss", "estimator_loss"] if args.case == "all" else [args.case]
         save_report(directory, report)
         for attempt, name in [(attempt, name) for attempt in range(1, args.repeat + 1) for name in cases]:
             case_directory = directory if args.repeat == 1 else directory / f"attempt_{attempt:02d}"
             case_directory.mkdir(exist_ok=True)
             log.info("开始任务验收 %s，证据目录 %s", name, directory)
-            mission = (Mission(case_directory, name, options, vio_only=True) if args.vio_only
-                       else Mission(case_directory, name, options, prior_maps=True, localization_config=args.localization_config) if args.prior_maps
-                       else Mission(case_directory, name, options))
+            mission = (Mission(case_directory, name, options, workspace=root, vio_only=True) if args.vio_only
+                       else Mission(case_directory, name, options, workspace=root, prior_maps=True, localization_config=args.localization_config) if args.prior_maps
+                       else Mission(case_directory, name, options, workspace=root))
             case = mission.run()
             case["attempt"] = attempt
             try:

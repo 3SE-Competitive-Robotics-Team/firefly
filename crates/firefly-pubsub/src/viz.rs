@@ -393,24 +393,15 @@ fn subscribe_with_topic(
     node: &crate::node::IpcNode,
     topic: &str,
 ) -> Result<crate::subscriber::Subscriber<VizMessage>, firefly_error::Error> {
-    use firefly_error::{Error, ErrorKind};
-    let name = topic
-        .try_into()
-        .map_err(|e| Error::new(ErrorKind::InvalidArgument, format!("非法可视化话题：{e:?}")))?;
-    let service = node
-        .service_builder(&name)
-        .publish_subscribe::<VizMessage>()
-        .max_publishers(VIZ_MAX_PUBLISHERS)
-        .user_header::<crate::trace::TraceContext>()
-        .subscriber_max_buffer_size(VIZ_BUFFER_SIZE)
-        .open_or_create()
-        .map_err(|e| Error::new(ErrorKind::Internal, format!("打开可视化话题失败：{e:?}")))?;
-    let subscriber = service
-        .subscriber_builder()
-        .buffer_size(VIZ_BUFFER_SIZE)
-        .create()
-        .map_err(|e| Error::new(ErrorKind::Internal, format!("订阅可视化话题失败：{e:?}")))?;
-    Ok(crate::subscriber::Subscriber::from_inner(subscriber))
+    crate::subscriber::Subscriber::with_options(
+        node,
+        topic,
+        crate::subscriber::SubscriberOptions {
+            buffer_size: VIZ_BUFFER_SIZE,
+            max_publishers: Some(VIZ_MAX_PUBLISHERS),
+            ..Default::default()
+        },
+    )
 }
 
 #[cfg(test)]
@@ -439,9 +430,13 @@ mod tests {
         let topic = format!("Firefly/Test/Viz/{unique}");
         let node = crate::node::create_node().unwrap();
         let subscriber = subscribe_with_topic(&node, &topic).unwrap();
-        let publisher =
-            crate::publish::Publisher::with_topic_and_buffer(&node, &topic, Some(VIZ_BUFFER_SIZE))
-                .unwrap();
+        let publisher = crate::publish::Publisher::with_topic_buffer_publishers(
+            &node,
+            &topic,
+            Some(VIZ_BUFFER_SIZE),
+            Some(VIZ_MAX_PUBLISHERS),
+        )
+        .unwrap();
         publisher
             .publish(VizMessage::base(
                 kind::KEYPOINTS_2D,

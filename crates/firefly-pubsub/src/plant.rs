@@ -8,23 +8,15 @@
 
 use iceoryx2::prelude::*;
 
-use crate::node::IpcNode;
-use crate::subscriber::{Received, Subscriber};
-use crate::trace::TraceContext;
-
 /// 被控对象状态话题（sim → 飞控）。
 pub const PLANT_STATE_TOPIC: &str = "Firefly/PlantState";
 /// 机体/执行器描述话题（sim → 飞控，持续重发，晚订阅必收）。
 pub const AIRFRAME_TOPIC: &str = "Firefly/Airframe";
 
-/// 状态订阅缓冲区深度：40ms（飞控 1kHz 排空，覆盖短促停顿后仍拿最新样本）。
-const PLANT_STATE_BUFFER_SIZE: usize = 8;
-/// 状态服务订阅端上限（先创建方定上限，Python 侧同值）。
-const PLANT_STATE_SERVICE_MAX: usize = 8;
-/// 机体描述订阅缓冲深度（1Hz 电平，2 条足够）。
-const AIRFRAME_BUFFER_SIZE: usize = 4;
-/// 机体描述服务订阅端上限（Python 侧同值）。
-const AIRFRAME_SERVICE_MAX: usize = 4;
+/// 状态订阅缓冲区深度与服务容量（Python 侧同值）：40ms（飞控 1kHz 排空，覆盖短促停顿后仍拿最新样本）。
+pub const PLANT_STATE_BUFFER_SIZE: usize = 8;
+/// 机体描述订阅缓冲深度与服务容量（1Hz 电平，Python 侧同值）。
+pub const AIRFRAME_BUFFER_SIZE: usize = 4;
 
 /// 被控对象状态（真值）：位置/速度世界系，姿态为**机体→世界** Hamilton
 /// 四元数 `[x,y,z,w]`（与 [`firefly_flight::QuadState`] 同约定），角速度机体系。
@@ -125,118 +117,6 @@ impl Default for AirframeMessage {
     }
 }
 
-/// 收到的被控对象状态样本。
-pub type ReceivedPlantState = Received<PlantStateMessage>;
-/// 收到的机体描述样本。
-pub type ReceivedAirframe = Received<AirframeMessage>;
-
-/// 被控对象状态订阅器（话题 `Firefly/PlantState`）。
-pub struct PlantStateSubscriber(Subscriber<PlantStateMessage>);
-
-/// 机体描述订阅器（话题 `Firefly/Airframe`）。
-pub struct AirframeSubscriber(Subscriber<AirframeMessage>);
-
-impl PlantStateSubscriber {
-    /// 打开状态话题的订阅器。
-    ///
-    /// # Errors
-    /// 见 [`Subscriber::with_topic_and_buffer`]。
-    pub fn new(node: &IpcNode) -> Result<Self, firefly_error::Error> {
-        Self::with_topic(node, PLANT_STATE_TOPIC)
-    }
-
-    /// 以自定义话题名打开订阅器（服务上限 [`PLANT_STATE_SERVICE_MAX`]，先创建方定上限）。
-    ///
-    /// # Errors
-    /// 见 [`Subscriber::with_topic_and_buffer`]。
-    pub fn with_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
-        Ok(Self(open_subscriber(
-            node,
-            topic,
-            PLANT_STATE_SERVICE_MAX,
-            PLANT_STATE_BUFFER_SIZE,
-        )?))
-    }
-
-    /// 接收一条状态消息（见 [`Subscriber::receive`]）。
-    ///
-    /// # Errors
-    /// 见 [`Subscriber::receive`]。
-    pub fn receive(&self) -> Result<Option<ReceivedPlantState>, firefly_error::Error> {
-        self.0.receive()
-    }
-}
-
-impl AirframeSubscriber {
-    /// 打开机体描述话题的订阅器。
-    ///
-    /// # Errors
-    /// 见 [`Subscriber::with_topic_and_buffer`]。
-    pub fn new(node: &IpcNode) -> Result<Self, firefly_error::Error> {
-        Self::with_topic(node, AIRFRAME_TOPIC)
-    }
-
-    /// 以自定义话题名打开订阅器（服务上限 [`AIRFRAME_SERVICE_MAX`]）。
-    ///
-    /// # Errors
-    /// 见 [`Subscriber::with_topic_and_buffer`]。
-    pub fn with_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
-        Ok(Self(open_subscriber(
-            node,
-            topic,
-            AIRFRAME_SERVICE_MAX,
-            AIRFRAME_BUFFER_SIZE,
-        )?))
-    }
-
-    /// 接收一条机体描述（见 [`Subscriber::receive`]）。
-    ///
-    /// # Errors
-    /// 见 [`Subscriber::receive`]。
-    pub fn receive(&self) -> Result<Option<ReceivedAirframe>, firefly_error::Error> {
-        self.0.receive()
-    }
-}
-
-/// 打开带服务上限的订阅器（服务上限与订阅缓冲必须 ≤ 服务创建时声明的值，
-/// 先创建方定上限——`sim`（Python）以同值创建，两边任一先起皆一致）。
-fn open_subscriber<T: std::fmt::Debug + ZeroCopySend + 'static>(
-    node: &IpcNode,
-    topic: &str,
-    service_max: usize,
-    buffer_size: usize,
-) -> Result<Subscriber<T>, firefly_error::Error> {
-    let name: iceoryx2::service::service_name::ServiceName = topic.try_into().map_err(|e| {
-        firefly_error::Error::new(
-            firefly_error::ErrorKind::InvalidArgument,
-            format!("非法话题名 `{topic}`: {e:?}"),
-        )
-    })?;
-    let service = node
-        .service_builder(&name)
-        .publish_subscribe::<T>()
-        .user_header::<TraceContext>()
-        .subscriber_max_buffer_size(service_max)
-        .open_or_create()
-        .map_err(|e| {
-            firefly_error::Error::new(
-                firefly_error::ErrorKind::Internal,
-                format!("打开/创建话题 `{topic}` 失败: {e:?}"),
-            )
-        })?;
-    let subscriber = service
-        .subscriber_builder()
-        .buffer_size(buffer_size)
-        .create()
-        .map_err(|e| {
-            firefly_error::Error::new(
-                firefly_error::ErrorKind::Internal,
-                format!("创建订阅器失败: {e:?}"),
-            )
-        })?;
-    Ok(Subscriber::from_inner(subscriber))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,10 +137,4 @@ mod tests {
         assert_eq!(std::mem::size_of::<AirframeMessage>(), 200);
         assert!(m.rotor_spins.iter().all(|s| (*s - 1.0).abs() < 1e-12));
     }
-
-    /// 缓冲不变量（编译期）：订阅缓冲 ≤ 服务上限（超限创建直接失败）。
-    const _: () = {
-        assert!(PLANT_STATE_BUFFER_SIZE <= PLANT_STATE_SERVICE_MAX);
-        assert!(AIRFRAME_BUFFER_SIZE <= AIRFRAME_SERVICE_MAX);
-    };
 }

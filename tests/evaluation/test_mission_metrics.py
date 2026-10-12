@@ -1,32 +1,29 @@
 """任务评分独立解析反例：禁止地图误差对齐、跨数据断流评分或放行高速着陆接触。"""
-from pathlib import Path
 import sys
 
 import numpy as np
 import pytest
 
-from mission_metrics import position_error, yaw_error
+from firefly_evaluation.mission_metrics import position_error, yaw_error
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "system"))
-from mission import Options
-from mission_sim import permitted_pad_contact
+from firefly_evaluation.mission import Options
+from firefly_evaluation.mission_sim import permitted_pad_contact
 from firefly_mujoco import drone_pad
 
 
 def test_command_keeps_observation_pump_running(tmp_path, monkeypatch):
-    import mission
+    from firefly_evaluation import mission
     from types import SimpleNamespace
     binary = tmp_path / "target/release/ffctl"
     binary.parent.mkdir(parents=True)
     gate = tmp_path / "observation_received"
     binary.write_text(f"#!{sys.executable}\nimport pathlib,time\nwhile not pathlib.Path({str(gate)!r}).exists(): time.sleep(.01)\n")
     binary.chmod(0o755)
-    monkeypatch.setattr(mission, "ROOT", tmp_path)
     pumps = []
     def pump():
         pumps.append(True)
         gate.touch()
-    subject = SimpleNamespace(recorder=SimpleNamespace(event=lambda *a: None), t=0., pump=pump)
+    subject = SimpleNamespace(root=tmp_path, recorder=SimpleNamespace(event=lambda *a: None), t=0., pump=pump)
     mission.Mission.command(subject, "fc", "hold")
     assert pumps and gate.exists()
 
@@ -93,7 +90,7 @@ def test_invalid_thresholds_and_missing_mission_are_rejected():
 
 
 def test_terminal_hold_requires_independent_truth_accuracy(monkeypatch):
-    import mission_metrics
+    from firefly_evaluation import mission_metrics
     truth = poses()
     truth[:, 1:4] = [8.4, 0., 2.]
     velocity = np.column_stack([truth[:, 0], np.zeros((len(truth), 3))])
@@ -108,13 +105,9 @@ def test_terminal_hold_requires_independent_truth_accuracy(monkeypatch):
 
 
 def test_preflight_failure_returns_nonzero_and_keeps_report(tmp_path, monkeypatch):
-    import importlib.util
     import json
-    path = Path(__file__).resolve().parents[2] / "scripts/accept_rmuc.py"
-    spec = importlib.util.spec_from_file_location("acceptance_cli", path)
-    cli = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(cli)
-    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    from firefly_evaluation import cli
+    monkeypatch.setattr(cli, "workspace_root", lambda start: tmp_path)
     monkeypatch.setattr(cli, "require_idle", lambda root: None)
     assert cli.main(["--config", str(tmp_path / "missing.toml")]) == 1
     reports = list((tmp_path / "logs/acceptance").glob("*/report.json"))
@@ -125,19 +118,15 @@ def test_preflight_failure_returns_nonzero_and_keeps_report(tmp_path, monkeypatc
 
 
 def test_repeated_failures_keep_four_distinct_recordings(tmp_path, monkeypatch):
-    import importlib.util
     import json
-    path = Path(__file__).resolve().parents[2] / "scripts/accept_rmuc.py"
-    spec = importlib.util.spec_from_file_location("acceptance_cli_repeat", path)
-    cli = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(cli)
-    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    from firefly_evaluation import cli
+    monkeypatch.setattr(cli, "workspace_root", lambda start: tmp_path)
     monkeypatch.setattr(cli, "require_idle", lambda root: None)
-    monkeypatch.setattr(cli, "provenance", lambda: {})
+    monkeypatch.setattr(cli, "provenance", lambda root: {})
     monkeypatch.setattr(cli, "score", lambda case, options: case)
 
     class FailedMission:
-        def __init__(self, directory, name, options):
+        def __init__(self, directory, name, options, *, workspace):
             self.recording = directory / f"{name}.rrd"
             self.name = name
 
@@ -163,7 +152,7 @@ def test_repeated_failures_keep_four_distinct_recordings(tmp_path, monkeypatch):
 
 
 def test_roundtrip_distance_summary_does_not_override_failed_acceptance(monkeypatch):
-    import mission_metrics
+    from firefly_evaluation import mission_metrics
     truth = np.array([[0., -13., 0., 2.2, 0., 0., 0., 1.],
                       [10., -3., 0., 2.2, 0., 0., 0., 1.],
                       [20., -13., 0., 2.2, 0., 0., 0., 1.]])
@@ -186,8 +175,8 @@ def test_roundtrip_distance_summary_does_not_override_failed_acceptance(monkeypa
 
 def test_estimated_arrival_does_not_require_truth_and_false_arrival_fails_scoring():
     import time
-    from mission import Mission
-    from mission_metrics import settled_truth
+    from firefly_evaluation.mission import Mission
+    from firefly_evaluation.mission_metrics import settled_truth
     mission = Mission.__new__(Mission)
     mission.t = 3.
     goal = np.array([1., 0., 2.])
@@ -207,7 +196,7 @@ def test_estimated_arrival_does_not_require_truth_and_false_arrival_fails_scorin
 
 
 def test_vio_only_map_stage_starts_only_planner_and_labels_fixed_prior(tmp_path, monkeypatch):
-    from mission import Mission
+    from firefly_evaluation.mission import Mission
     mission = Mission(tmp_path, "nominal", Options(), vio_only=True)
     mission.latest["corrected"] = (2., None, None, None, True)
     mission.latest["reference"] = None
@@ -223,7 +212,7 @@ def test_vio_only_map_stage_starts_only_planner_and_labels_fixed_prior(tmp_path,
 
 
 def test_default_map_stage_uses_running_visual_frontend(tmp_path, monkeypatch):
-    from mission import Mission
+    from firefly_evaluation.mission import Mission
     mission = Mission(tmp_path, "nominal", Options())
     mission.latest["corrected"] = (2., None, None, None, True)
     mission.latest["reference"] = None
@@ -240,7 +229,7 @@ def test_default_map_stage_uses_running_visual_frontend(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(("vio_only", "prior_maps"), [(False, False), (False, True), (True, False)])
 def test_online_frontend_runs_during_takeoff_and_initial_hover(tmp_path, monkeypatch, vio_only, prior_maps):
-    from mission import Mission
+    from firefly_evaluation.mission import Mission
     mission = Mission(tmp_path, "nominal", Options(), vio_only=vio_only, prior_maps=prior_maps)
 
     def run_phases(phases, applications):
@@ -256,7 +245,7 @@ def test_online_frontend_runs_during_takeoff_and_initial_hover(tmp_path, monkeyp
 
 @pytest.mark.parametrize("observations,passed", [(0, False), (1, False), (2, True)])
 def test_visual_evidence_is_scored_independently_of_navigation(monkeypatch, observations, passed):
-    import mission_metrics
+    from firefly_evaluation import mission_metrics
     evidence = {"gt": poses(), "visual_update": np.array(
         [[float(i + 1), 0., 3., .1, 1.] for i in range(observations)]).reshape(-1, 5)}
     if not observations:
@@ -275,7 +264,7 @@ def test_visual_evidence_is_scored_independently_of_navigation(monkeypatch, obse
 
 
 def test_session_scoring_uses_only_initial_truth_gauge_and_preserves_drift():
-    from mission_metrics import startup_truth
+    from firefly_evaluation.mission_metrics import startup_truth
     truth = poses()
     truth[:, 1:4] = np.column_stack((np.full(len(truth), 10.), truth[:, 0] + 20., np.full(len(truth), 3.)))
     truth[:, 6:8] = np.sqrt(.5)
@@ -291,7 +280,7 @@ def test_session_scoring_uses_only_initial_truth_gauge_and_preserves_drift():
 
 
 def test_online_slam_requires_loop_constraint_even_without_prior_map(monkeypatch):
-    import mission_metrics
+    from firefly_evaluation import mission_metrics
     monkeypatch.setattr(mission_metrics, "read_evidence", lambda _: {"gt": poses()})
     case = {"case": "nominal", "localization_mode": "online_slam", "recording": "unused",
             "stages": {"tracking": {"status": "blocked"}}}

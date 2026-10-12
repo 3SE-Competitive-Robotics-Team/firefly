@@ -23,7 +23,6 @@ firefly-error = { workspace = true }
 firefly-flight = { workspace = true }
 firefly-observability = { workspace = true }
 firefly-pubsub = { workspace = true }
-glam = { workspace = true }
 iceoryx2-bb-posix = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }

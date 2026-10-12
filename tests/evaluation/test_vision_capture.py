@@ -6,6 +6,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 from firefly_mujoco import GrayImageMessage, DepthImageMessage
+from firefly_evaluation import vision_assets
+from firefly_workspace import digest
 
 spec = importlib.util.spec_from_file_location("capture", Path(__file__).resolve().parents[2] / "scripts/collect_vision_map.py")
 capture = importlib.util.module_from_spec(spec)
@@ -62,39 +64,21 @@ def test_capture_cache_rejects_missing_modified_or_unlisted_frames(tmp_path):
     frame.write_bytes(b"pixels and depth")
     assets = {"renderer": "version1"}
     manifest = {"status": "complete", "requested": 1, "assets": assets,
-                "frames": [{"index": 0, "accepted": True, "sha256": capture.digest(frame)}]}
+                "frames": [{"index": 0, "accepted": True, "sha256": digest(frame)}]}
     path = tmp_path / "capture_manifest.json"
     path.write_text(json.dumps(manifest))
-    assert capture.reusable_capture(tmp_path, assets)
-    assert not capture.reusable_capture(tmp_path, {"renderer": "version2"})
+    assert vision_assets.reusable_capture(tmp_path, assets)
+    assert not vision_assets.reusable_capture(tmp_path, {"renderer": "version2"})
     frame.write_bytes(b"corrupted pixels")
-    assert not capture.reusable_capture(tmp_path, assets)
+    assert not vision_assets.reusable_capture(tmp_path, assets)
     frame.unlink()
-    assert not capture.reusable_capture(tmp_path, assets)
+    assert not vision_assets.reusable_capture(tmp_path, assets)
     frame.write_bytes(b"pixels and depth")
     (tmp_path / "frame_00001.bin").write_bytes(b"unexpected")
-    assert not capture.reusable_capture(tmp_path, assets)
+    assert not vision_assets.reusable_capture(tmp_path, assets)
     manifest["frames"] = [{"index": 0, "accepted": False}]
     path.write_text(json.dumps(manifest))
-    assert not capture.reusable_capture(tmp_path, assets)
-
-
-def test_capture_retry_preserves_incomplete_attempt(tmp_path, monkeypatch):
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "scripts"))
-    from prepare_rmuc import capture_directory
-    assets = {"renderer": "version1"}
-    first = capture_directory(tmp_path, assets)
-    first.mkdir()
-    frame = first / "frame_00000.bin"
-    frame.write_bytes(b"unfinished")
-    second = capture_directory(tmp_path, assets)
-    assert second != first and not second.exists()
-    assert frame.read_bytes() == b"unfinished"
-    manifest = {"status": "complete", "requested": 1, "assets": assets,
-                "frames": [{"index": 0, "accepted": True, "sha256": capture.digest(frame)}]}
-    (first / "capture_manifest.json").write_text(json.dumps(manifest))
-    assert capture_directory(tmp_path, assets) == first
-    assert capture_directory(tmp_path, {"renderer": "version2"}) != first
+    assert not vision_assets.reusable_capture(tmp_path, assets)
 
 
 def test_visibility_rejects_outward_views_and_parallel_rays():
@@ -105,10 +89,10 @@ def test_visibility_rejects_outward_views_and_parallel_rays():
 
 def test_runtime_compatibility_ignores_capture_selection_but_not_calibration(monkeypatch):
     assets = {"schema": 2, "files": {"field": "hash"}, "sensor": {"focal": 100}, "selection": {"step": 2}}
-    monkeypatch.setattr(capture, "capture_assets", lambda: assets)
-    capture.verify_map_compatibility(assets | {"selection": {"step": 1}})
+    monkeypatch.setattr(vision_assets, "capture_assets", lambda root: assets)
+    vision_assets.verify_map_compatibility(assets | {"selection": {"step": 1}})
     with pytest.raises(ValueError, match="contract"):
-        capture.verify_map_compatibility(assets | {"sensor": {"focal": 200}})
+        vision_assets.verify_map_compatibility(assets | {"sensor": {"focal": 200}})
 
 
 def test_explicit_rig_translation_exception_preserves_other_contracts(monkeypatch):
@@ -118,10 +102,10 @@ def test_explicit_rig_translation_exception_preserves_other_contracts(monkeypatc
     current = deepcopy(old)
     for key in ["left_offset", "depth_offset"]:
         current["sensor"][key][0] = .06
-    monkeypatch.setattr(capture, "capture_assets", lambda: current)
+    monkeypatch.setattr(vision_assets, "capture_assets", lambda root: current)
     with pytest.raises(ValueError, match="contract"):
-        capture.verify_map_compatibility(old)
-    result = capture.verify_map_compatibility(old, allow_rig_translation=True)
+        vision_assets.verify_map_compatibility(old)
+    result = vision_assets.verify_map_compatibility(old, allow_rig_translation=True)
     assert result["rig_translation_body_m"] == pytest.approx([.06, 0., 0.])
     for changed in ["focal", "depth_offset", "field"]:
         incompatible = deepcopy(current)
@@ -131,6 +115,6 @@ def test_explicit_rig_translation_exception_preserves_other_contracts(monkeypatc
             incompatible["sensor"]["focal"] = 200
         else:
             incompatible["sensor"]["depth_offset"][0] = .07
-        monkeypatch.setattr(capture, "capture_assets", lambda: incompatible)
+        monkeypatch.setattr(vision_assets, "capture_assets", lambda root: incompatible)
         with pytest.raises(ValueError, match="contract"):
-            capture.verify_map_compatibility(old, allow_rig_translation=True)
+            vision_assets.verify_map_compatibility(old, allow_rig_translation=True)

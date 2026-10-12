@@ -137,19 +137,15 @@ impl ControlFrames {
             return None;
         }
         let result = PositionSetpoint {
-            position: glam::Vec3::new(position.x as f32, position.y as f32, position.z as f32),
-            velocity: glam::Vec3::new(velocity.x as f32, velocity.y as f32, velocity.z as f32),
-            acceleration: glam::Vec3::new(
-                acceleration.x as f32,
-                acceleration.y as f32,
-                acceleration.z as f32,
-            ),
+            position: position.coords.cast::<f32>(),
+            velocity: velocity.cast::<f32>(),
+            acceleration: acceleration.cast::<f32>(),
             yaw: direction.y.atan2(direction.x) as f32,
             yaw_rate: ((direction.x * derivative.y - direction.y * derivative.x) / horizontal)
                 as f32,
         };
-        (result.position.is_finite()
-            && result.velocity.is_finite()
+        (result.position.iter().all(|v| v.is_finite())
+            && result.velocity.iter().all(|v| v.is_finite())
             && result.yaw.is_finite()
             && result.yaw_rate.is_finite())
         .then_some(result)
@@ -204,8 +200,8 @@ mod tests {
         let r = frames
             .reference(&reference, now, Duration::from_millis(500), 0.0)
             .unwrap();
-        assert!((r.position - glam::Vec3::new(2., 0., 0.)).length() < 1e-6);
-        assert!((r.velocity - glam::Vec3::X).length() < 1e-6);
+        assert!((r.position - Vector3::new(2., 0., 0.)).norm() < 1e-6);
+        assert!((r.velocity - Vector3::x()).norm() < 1e-6);
         assert!(r.yaw.abs() < 1e-6 && (r.yaw_rate - 0.3).abs() < 1e-6);
         assert!(
             frames
@@ -250,9 +246,9 @@ mod tests {
         let r = frames
             .reference(&reference, now, Duration::from_millis(500), 0.)
             .unwrap();
-        assert!((r.position - glam::Vec3::new(2., 0., 0.)).length() < 1e-6);
-        assert!((r.velocity - glam::Vec3::X).length() < 1e-6);
-        assert!((r.acceleration - 0.5 * glam::Vec3::X).length() < 1e-6);
+        assert!((r.position - Vector3::new(2., 0., 0.)).norm() < 1e-6);
+        assert!((r.velocity - Vector3::x()).norm() < 1e-6);
+        assert!((r.acceleration - Vector3::x() * 0.5).norm() < 1e-6);
         assert!(r.yaw.abs() < 1e-6 && (r.yaw_rate - 0.3).abs() < 1e-6);
         assert!(
             frames

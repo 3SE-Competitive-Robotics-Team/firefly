@@ -20,7 +20,9 @@ import shutil
 import numpy as np
 import trimesh
 
-ROOT = Path(__file__).resolve().parent.parent
+from firefly_workspace import workspace_root
+
+ROOT = workspace_root(Path(__file__))
 RAW = ROOT / "models" / "drone" / "drone_raw.glb"
 OUT = ROOT / "models" / "drone" / "drone.glb"
 URL = "https://static.poly.pizza/4eb88feb-cb2d-46c3-980d-3e704868361c.glb"

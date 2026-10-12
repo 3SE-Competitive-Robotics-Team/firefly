@@ -6,7 +6,7 @@
 use std::{collections::VecDeque, sync::Arc};
 
 use firefly_pubsub::camera::{CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, GrayImageMessage};
-use firefly_pubsub::imu::ImuSubscriber;
+use firefly_pubsub::imu::{IMU_SUBSCRIPTION, IMU_TOPIC, ImuMessage};
 use firefly_pubsub::node::IpcNode;
 use firefly_pubsub::subscriber::{Received, Subscriber};
 use firefly_pubsub::trace::TraceContext;
@@ -17,7 +17,7 @@ use nalgebra::Vector3;
 /// iceoryx2 物理环境输入源：订阅 sim 发布的 IMU 与 render 发布的双目灰度。
 pub struct IceoryxInput {
     /// IMU 订阅（`Firefly/Imu`）。
-    imu_sub: ImuSubscriber,
+    imu_sub: Subscriber<ImuMessage>,
     /// 左目灰度订阅（`Firefly/CameraLeft`）。
     left_sub: Subscriber<GrayImageMessage>,
     /// 右目灰度订阅（`Firefly/CameraRight`）。
@@ -43,7 +43,7 @@ impl IceoryxInput {
     /// iceoryx2 订阅创建失败。
     pub fn new(node: &IpcNode) -> Result<Self, firefly_error::Error> {
         Ok(Self {
-            imu_sub: ImuSubscriber::new(node)?,
+            imu_sub: Subscriber::with_options(node, IMU_TOPIC, IMU_SUBSCRIPTION)?,
             left_sub: Subscriber::with_topic(node, CAMERA_LEFT_TOPIC)?,
             right_sub: Subscriber::with_topic(node, CAMERA_RIGHT_TOPIC)?,
             imu_queue: VecDeque::new(),

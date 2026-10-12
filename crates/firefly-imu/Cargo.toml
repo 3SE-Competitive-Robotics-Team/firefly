@@ -11,6 +11,7 @@ keywords = ["imu", "eskf", "robotics"]
 categories = ["science::robotics"]
 
 [dependencies]
+firefly-base.workspace = true
 fastrace.workspace = true
 firefly-error.workspace = true
 nalgebra.workspace = true

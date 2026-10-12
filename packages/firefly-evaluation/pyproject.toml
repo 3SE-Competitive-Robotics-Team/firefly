@@ -1,0 +1,28 @@
+[project]
+name = "firefly-evaluation"
+version = "0.1.0"
+description = "任务验收编排、进程生命周期、RRD 证据评分与报告"
+requires-python = ">=3.12"
+dependencies = [
+    "firefly-workspace",
+    "firefly-mujoco",
+    "firefly-sim",
+    "firefly-viz",
+    "iceoryx2==0.10.0",
+    "numpy>=2.5.4,<3",
+    "pyarrow>=26.0.0",
+    "rerun-sdk>=0.38.1,<0.39",
+]
+
+[tool.uv.sources]
+firefly-workspace = { workspace = true }
+firefly-mujoco = { workspace = true }
+firefly-sim = { workspace = true }
+firefly-viz = { workspace = true }
+
+[project.scripts]
+firefly-evaluate = "firefly_evaluation.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14"]
+build-backend = "uv_build"

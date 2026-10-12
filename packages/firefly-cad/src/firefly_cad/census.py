@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import sys
@@ -15,19 +14,12 @@ import time
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 
+from firefly_workspace import digest
+
 log = logging.getLogger(__name__)
 
 #: 毫米转米（源 STEP 单位，对照 strands：`SI_UNIT(.MILLI.,.METRE.)`）。
 MM_TO_M = 1e-3
-
-
-def sha256_of(path: Path) -> str:
-    """流式 sha256（1.2G 源文件不一次读入内存）。"""
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(8 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _count(shape, shape_type: int) -> int:
@@ -193,7 +185,7 @@ def read_census(stp_path: Path, progress_every: int = 100) -> dict:
         "input": {
             "path": stp_path.name,
             "bytes": stp_path.stat().st_size,
-            "sha256": sha256_of(stp_path),
+            "sha256": digest(stp_path),
         },
         "tool": {
             "ocp_wheel": pkg_version("cadquery-ocp-novtk"),

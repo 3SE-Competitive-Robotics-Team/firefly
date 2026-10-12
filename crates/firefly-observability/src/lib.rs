@@ -41,8 +41,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use fastrace::prelude::*;
-use firefly_pubsub::log::{LogMessage, LogPublisher, level};
+use firefly_pubsub::log::{LOG_BUFFER_SIZE, LOG_MAX_PUBLISHERS, LOG_TOPIC, LogMessage, level};
 use firefly_pubsub::node::IpcNode;
+use firefly_pubsub::publish::Publisher;
 use logforth::filter::rustlog::RustLogFilterBuilder;
 
 pub fn init() {
@@ -101,7 +102,7 @@ static TAG: Mutex<String> = Mutex::new(String::new());
 /// [`pump_log_ipc`]，从构造上不可能跨线程触碰，无 `unsafe`。
 /// `None` = 纯 stderr 模式（`init_ipc` 建端失败时）。
 pub struct LogIpc {
-    publisher: Option<LogPublisher>,
+    publisher: Option<Publisher<LogMessage>>,
 }
 
 /// 聚合链路是否已武装（`init_ipc` 置位；`IpcAppend` 的 dormant 判定；
@@ -152,7 +153,12 @@ pub fn init_ipc(node: &IpcNode, tag: &str) -> LogIpc {
     tag.clone_into(&mut TAG.lock().expect("log tag mutex"));
     let _ = log_queue();
     *IPC_ARMED.lock().expect("ipc armed mutex") = true;
-    match LogPublisher::new(node) {
+    match Publisher::with_topic_buffer_publishers(
+        node,
+        LOG_TOPIC,
+        Some(LOG_BUFFER_SIZE),
+        Some(LOG_MAX_PUBLISHERS),
+    ) {
         Ok(publisher) => {
             log::info!("日志聚合已挂载（tag={tag}，Firefly/Log → firefly-viz）");
             LogIpc {

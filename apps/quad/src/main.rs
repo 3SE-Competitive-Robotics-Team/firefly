@@ -122,7 +122,7 @@ fn update_hud(drone: Single<(&Quad, &Transform)>, mut text: Single<&mut Text, Wi
     let want = format!(
         "speed {:.1} m/s   alt {:.1} m\nmotors [{:.2} {:.2} {:.2} {:.2}] N{sat}\n\
          WASD tilt   Space/Shift up-down   Q/E yaw   R reset",
-        quad.state.velocity.length(),
+        quad.state.velocity.norm(),
         transform.translation.z,
         quad.motors[0],
         quad.motors[1],

@@ -6,15 +6,13 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import sys
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[2]
-for directory in (ROOT / "scripts", ROOT / "tests/evaluation"):
-    sys.path.insert(0, str(directory))
+from firefly_evaluation.process_lifecycle import require_idle
+from firefly_workspace import digest
 
-from process_lifecycle import require_idle
+ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -55,7 +53,7 @@ def flight_environment(request):
     missing = [name for name in ("render", "vio", "fc", "ffctl")
                if not (ROOT / f"target/release/{name}").is_file()]
     if missing:
-        pytest.fail(f"missing release binaries: {missing}; run cargo build --release -p render -p vio -p fc -p ffctl")
+        pytest.fail(f"missing release binaries: {missing}; run cargo xtask build-all-release")
     for asset in ("field.glb", "rmuc2026_collision.json"):
         if not (ROOT / "models/rmuc2026" / asset).is_file():
             pytest.fail(f"missing RMUC asset: {asset}; see docs/development.md#run")
@@ -83,8 +81,7 @@ def flight_report(flight_directory):
     files.update(ROOT / "models/rmuc2026" / name for name in ("field.glb", "rmuc2026_collision.json"))
     hashes = {}
     for path in sorted(files):
-        with path.open("rb") as stream:
-            hashes[str(path.relative_to(ROOT))] = hashlib.file_digest(stream, "sha256").hexdigest()
+        hashes[str(path.relative_to(ROOT))] = digest(path)
     provenance = {
         "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "working_tree_diff_sha256": hashlib.sha256(subprocess.check_output(["git", "diff", "HEAD"], cwd=ROOT)).hexdigest(),

@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from metrics import compute_metrics
+from firefly_evaluation.metrics import compute_metrics
 
 
 def trajectory():

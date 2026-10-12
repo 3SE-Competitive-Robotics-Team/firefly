@@ -21,7 +21,7 @@ use firefly_pubsub::event::{CAMERA_PAIR_TOPIC, TopicListener};
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::odom::ODOM_TOPIC;
 use firefly_pubsub::odom::{GROUND_TRUTH_TOPIC, OdomMessage};
-use firefly_pubsub::publish::OdomPublisher;
+use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::viz::{ScalarMessage, VizMessage, VizPublisher, kind};
 use firefly_vio::options::VioManagerOptions;
@@ -179,7 +179,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("iceoryx2 节点已创建（进程共享，信号处理 = HandleTerminationRequests）");
 
     // odom 发布器（Trace 上下文由中间件在 publish 时自动注入）
-    let odom_pub = OdomPublisher::new(&node)?;
+    let odom_pub = Publisher::<OdomMessage>::with_topic_notify(&node, ODOM_TOPIC)?;
     log::info!("已打开话题 {ODOM_TOPIC}");
 
     // 可视化发布器：经 Firefly/Viz 话题发布，firefly-viz 进程统一写 rerun
@@ -236,7 +236,7 @@ const DIAG_PERIOD: f64 = 10.0;
 fn run_loop(
     vio: &mut VioManager,
     input: &mut dyn SensorInput,
-    odom_pub: &OdomPublisher,
+    odom_pub: &Publisher<OdomMessage>,
     viz_pub: &VizPublisher,
     gt_sub: Option<&Subscriber<OdomMessage>>,
     node: &firefly_pubsub::node::IpcNode,
@@ -267,7 +267,7 @@ fn run_loop(
     let t_wall_start = std::time::Instant::now();
     let mut next_diag_wall = DIAG_PERIOD;
 
-    // 事件唤醒端：IMU + 相机对（notify 来自 sim；odom 由 OdomPublisher 自动通知）
+    // 事件唤醒端：IMU + 相机对（notify 来自 sim；odom 发布端配置 with_topic_notify 自动通知）
     let imu_events = TopicListener::with_topic(node, firefly_pubsub::imu::IMU_TOPIC)?;
     let cam_events = TopicListener::with_topic(node, CAMERA_PAIR_TOPIC)?;
     let waitset = WaitSetBuilder::new()
@@ -441,7 +441,7 @@ fn run_loop(
 }
 
 /// 发布已在目标时刻预测的里程计。
-fn publish_odom(odom_pub: &OdomPublisher, msg: OdomMessage) {
+fn publish_odom(odom_pub: &Publisher<OdomMessage>, msg: OdomMessage) {
     match odom_pub.publish(msg) {
         Ok(ctx) => log::debug!(
             "odom t={:.3} p=({:.3},{:.3},{:.3}) trace_id={:032x} sampled={}",

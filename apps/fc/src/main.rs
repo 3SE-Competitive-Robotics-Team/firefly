@@ -38,16 +38,19 @@ use firefly_flight::{
     QuadParams, QuadState, attitude_support, position_mode,
 };
 use firefly_pubsub::command::{COMMAND_TOPIC, CommandMessage, kind as command_kind};
-use firefly_pubsub::control::{ControlMessage, ControlPublisher};
+use firefly_pubsub::control::{CONTROL_BUFFER_SIZE, CONTROL_TOPIC, ControlMessage};
 use firefly_pubsub::node::{IpcNode, create_node};
+use firefly_pubsub::odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC, OdomMessage};
 use firefly_pubsub::plant::{
-    AirframeMessage, AirframeSubscriber, PlantStateMessage, PlantStateSubscriber,
+    AIRFRAME_BUFFER_SIZE, AIRFRAME_TOPIC, AirframeMessage, PLANT_STATE_BUFFER_SIZE,
+    PLANT_STATE_TOPIC, PlantStateMessage,
 };
+use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::reference::{REFERENCE_TOPIC, ReferenceMessage};
-use firefly_pubsub::subscriber::{CorrectedOdomSubscriber, OdomSubscriber, Subscriber};
+use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::viz::{SCALARS_MAX, ScalarMessage, VizPublisher};
-use glam::{Quat, Vec3};
 use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
+use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 
 /// `configs/fc.toml` 缺省路径（相对运行目录，通常为仓库根）。
 const DEFAULT_CONFIG: &str = "configs/fc.toml";
@@ -93,9 +96,9 @@ struct Estimate {
     /// 状态的测量时间（秒）。
     timestamp: f64,
     /// 估计位置（m）。
-    position: Vec3,
+    position: Vector3<f32>,
     /// 估计速度（m/s）。
-    velocity: Vec3,
+    velocity: Vector3<f32>,
     /// 最近有效估计到达的墙钟时刻。
     received_at: Instant,
     /// 估计器已初始化（解锁前置条件之一）。
@@ -124,26 +127,38 @@ struct Inputs {
 
 /// 控制输入、指令输出与评测端口。
 struct Ports {
-    plant: PlantStateSubscriber,
-    airframe: AirframeSubscriber,
-    odom: OdomSubscriber,
-    corrected: CorrectedOdomSubscriber,
+    plant: Subscriber<PlantStateMessage>,
+    airframe: Subscriber<AirframeMessage>,
+    odom: Subscriber<OdomMessage>,
+    corrected: Subscriber<OdomMessage>,
     reference: Subscriber<ReferenceMessage>,
     command: Subscriber<CommandMessage>,
-    control: ControlPublisher,
+    control: Publisher<ControlMessage>,
     viz: VizPublisher,
 }
 
 impl Ports {
     fn open(node: &IpcNode) -> Result<Self, firefly_error::Error> {
         Ok(Self {
-            plant: PlantStateSubscriber::new(node)?,
-            airframe: AirframeSubscriber::new(node)?,
-            odom: OdomSubscriber::new(node)?,
-            corrected: CorrectedOdomSubscriber::new(node)?,
+            plant: Subscriber::with_topic_and_buffer(
+                node,
+                PLANT_STATE_TOPIC,
+                PLANT_STATE_BUFFER_SIZE,
+            )?,
+            airframe: Subscriber::with_topic_and_buffer(
+                node,
+                AIRFRAME_TOPIC,
+                AIRFRAME_BUFFER_SIZE,
+            )?,
+            odom: Subscriber::with_topic(node, ODOM_TOPIC)?,
+            corrected: Subscriber::with_topic(node, CORRECTED_ODOM_TOPIC)?,
             reference: Subscriber::with_topic(node, REFERENCE_TOPIC)?,
             command: Subscriber::with_topic(node, COMMAND_TOPIC)?,
-            control: ControlPublisher::new(node)?,
+            control: Publisher::with_topic_and_buffer(
+                node,
+                CONTROL_TOPIC,
+                Some(CONTROL_BUFFER_SIZE),
+            )?,
             viz: VizPublisher::new(node)?,
         })
     }
@@ -177,17 +192,21 @@ impl Ports {
             if !inputs.frames.observe_odom(&m, received_at) {
                 continue;
             }
-            let position = Vec3::new(
+            let position = Vector3::new(
                 m.position_x as f32,
                 m.position_y as f32,
                 m.position_z as f32,
             );
-            let velocity = Vec3::new(
+            let velocity = Vector3::new(
                 m.velocity_x as f32,
                 m.velocity_y as f32,
                 m.velocity_z as f32,
             );
-            if !position.is_finite() || !velocity.is_finite() {
+            if !position
+                .iter()
+                .chain(velocity.iter())
+                .all(|v| v.is_finite())
+            {
                 continue;
             }
             inputs.estimate = Some(Estimate {
@@ -332,10 +351,10 @@ fn report_event(event: Event) {
 /// 控制环的跨 tick 状态。
 struct Controller {
     /// 最近一次控制使用的本地姿态；测量与协方差归 IMU 线程所有。
-    attitude: Quat,
+    attitude: UnitQuaternion<f32>,
     attitude_ready: bool,
-    position_error: Vec3,
-    position_target: Vec3,
+    position_error: Vector3<f32>,
+    position_target: Vector3<f32>,
     /// 飞行状态机（模式与安全层）。
     fsm: FlightFsm,
     /// 已执行的最大指令序号（重复投递去重）。
@@ -349,10 +368,10 @@ struct Controller {
 impl Controller {
     fn new(fsm: FsmParams) -> Self {
         Self {
-            attitude: Quat::IDENTITY,
+            attitude: UnitQuaternion::identity(),
             attitude_ready: false,
-            position_error: Vec3::ZERO,
-            position_target: Vec3::ZERO,
+            position_error: Vector3::zeros(),
+            position_target: Vector3::zeros(),
             fsm: FlightFsm::new(fsm),
             last_command_seq: 0,
             altitude: 0.0,
@@ -365,7 +384,9 @@ impl Controller {
         let (attitude, ang_vel) = self.attitude_and_rates(inputs);
         let (position, velocity) = inputs
             .estimate
-            .map_or((Vec3::ZERO, Vec3::ZERO), |est| (est.position, est.velocity));
+            .map_or((Vector3::zeros(), Vector3::zeros()), |est| {
+                (est.position, est.velocity)
+            });
         let state = QuadState {
             position,
             velocity,
@@ -417,13 +438,12 @@ impl Controller {
         })?;
         stats.published += 1;
         let truth = inputs.plant.map(|(plant, _)| {
-            Quat::from_xyzw(
+            UnitQuaternion::new_normalize(Quaternion::new(
+                plant.quat_w as f32,
                 plant.quat_x as f32,
                 plant.quat_y as f32,
                 plant.quat_z as f32,
-                plant.quat_w as f32,
-            )
-            .normalize()
+            ))
         });
         self.publish_viz(ports, inputs.imu_time, self.attitude, truth, &motors);
         Ok(())
@@ -451,7 +471,7 @@ impl Controller {
     }
 
     /// 姿态环读取本地 ESKF，角速度反馈来自去偏低通后的陀螺。
-    fn attitude_and_rates(&mut self, inputs: &Inputs) -> (Quat, Vec3) {
+    fn attitude_and_rates(&mut self, inputs: &Inputs) -> (UnitQuaternion<f32>, Vector3<f32>) {
         self.attitude_ready = inputs
             .attitude
             .is_some_and(|s| s.ready && s.received.elapsed() <= IMU_STALE_LIMIT);
@@ -461,7 +481,7 @@ impl Controller {
             self.attitude = snapshot.rotation;
             (snapshot.rotation, snapshot.rate)
         } else {
-            (self.attitude, Vec3::ZERO)
+            (self.attitude, Vector3::zeros())
         }
     }
 
@@ -470,8 +490,8 @@ impl Controller {
         &mut self,
         ports: &Ports,
         sim_time: f64,
-        attitude: Quat,
-        plant_attitude: Option<Quat>,
+        attitude: UnitQuaternion<f32>,
+        plant_attitude: Option<UnitQuaternion<f32>>,
         motors: &[f32; 4],
     ) {
         if sim_time - self.last_viz < VIZ_PERIOD {
@@ -482,22 +502,26 @@ impl Controller {
             ports.viz_ref(),
             sim_time,
             "fc/imu/quaternion_xyzw",
-            &attitude.to_array().map(f64::from),
+            attitude.coords.cast::<f64>().as_slice(),
         );
         publish_scalars(
             ports.viz_ref(),
             sim_time,
             "fc/debug/position_target_odom",
-            &self.position_target.to_array().map(f64::from),
+            self.position_target.cast::<f64>().as_slice(),
         );
         publish_scalars(
             ports.viz_ref(),
             sim_time,
             "fc/debug/position_error_odom",
-            &self.position_error.to_array().map(f64::from),
+            self.position_error.cast::<f64>().as_slice(),
         );
         let total: f32 = motors.iter().sum();
-        let tilt = (attitude * Vec3::Z).z.clamp(-1.0, 1.0).acos().to_degrees();
+        let tilt = (attitude * Vector3::z())
+            .z
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees();
         publish_scalars(
             ports.viz_ref(),
             sim_time,
@@ -518,8 +542,8 @@ impl Controller {
         );
         if let Some(truth) = plant_attitude {
             // 重力在机体系中的方向不依赖局部航向，可直接与真值比较。
-            let error = (attitude.inverse() * Vec3::Z)
-                .angle_between(truth.inverse() * Vec3::Z)
+            let error = (attitude.inverse() * Vector3::z())
+                .angle(&(truth.inverse() * Vector3::z()))
                 .to_degrees();
             publish_scalars(
                 ports.viz_ref(),
@@ -788,8 +812,8 @@ mod tests {
                 timestamp: 0.,
                 received: Instant::now(),
                 count: 1,
-                rotation: Quat::IDENTITY,
-                rate: Vec3::ZERO,
+                rotation: UnitQuaternion::identity(),
+                rate: Vector3::zeros(),
                 ready: true,
                 aligned: true,
                 nis: 0.,
@@ -803,8 +827,8 @@ mod tests {
             vehicle: Some((QuadParams::default(), Airframe::default())),
             estimate: Some(Estimate {
                 timestamp: 0.,
-                position: Vec3::ZERO,
-                velocity: Vec3::ZERO,
+                position: Vector3::zeros(),
+                velocity: Vector3::zeros(),
                 initialized: true,
                 received_at: Instant::now(),
             }),
@@ -878,8 +902,8 @@ mod tests {
         assert!(fallback.iter().all(|m| m.is_finite() && *m > 0.));
         assert_eq!(a.fsm.state(), firefly_flight::FlightState::AttitudeFallback);
         let estimate = inputs.estimate.as_mut().unwrap();
-        estimate.position = Vec3::splat(10000.);
-        estimate.velocity = Vec3::splat(-1000.);
+        estimate.position = Vector3::repeat(10000.);
+        estimate.velocity = Vector3::repeat(-1000.);
         let (same, _) = a.motor_output(&inputs, 0.001, &ctl);
         assert_eq!(fallback.map(f32::to_bits), same.map(f32::to_bits));
     }

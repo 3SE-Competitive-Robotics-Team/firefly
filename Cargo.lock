@@ -2872,7 +2872,6 @@ dependencies = [
  "firefly-imu",
  "firefly-observability",
  "firefly-pubsub",
- "glam 0.34.1",
  "iceoryx2-bb-posix",
  "log",
  "nalgebra",
@@ -2934,7 +2933,7 @@ version = "0.1.0"
 name = "firefly-flight"
 version = "0.1.0"
 dependencies = [
- "glam 0.34.1",
+ "nalgebra",
  "serde",
 ]
 
@@ -2943,6 +2942,7 @@ name = "firefly-imu"
 version = "0.1.0"
 dependencies = [
  "fastrace",
+ "firefly-base",
  "firefly-error",
  "nalgebra",
  "serde",
@@ -3131,6 +3131,7 @@ dependencies = [
 name = "firefly-vio-types"
 version = "0.1.0"
 dependencies = [
+ "firefly-base",
  "nalgebra",
 ]
 
@@ -3455,12 +3456,6 @@ dependencies = [
  "rand",
  "serde_core",
 ]
-
-[[package]]
-name = "glam"
-version = "0.34.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc148d4ddd3930c52f9e5ae79b89805c6f07e9ff417e7b083e0348cea60a5aba"
 
 [[package]]
 name = "glob"

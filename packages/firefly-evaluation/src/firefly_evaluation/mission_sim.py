@@ -7,7 +7,7 @@ import iceoryx2 as iox2
 import numpy as np
 from firefly_mujoco import DroneEnv, drone_pad
 
-from mission_io import Recorder
+from .mission_io import Recorder
 
 CONTACT_POLICY = {"pad_radius_m": 0.5, "height_tolerance_m": 0.06,
                   "speed_limit_mps": 0.5, "min_vertical_normal_cosine": 0.9}

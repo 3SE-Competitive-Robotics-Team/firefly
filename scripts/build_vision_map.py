@@ -6,11 +6,14 @@ from pathlib import Path
 import subprocess
 import shutil
 
-from collect_vision_map import ROOT, capture_assets, digest, reusable_capture
+from firefly_evaluation.vision_assets import capture_assets, reusable_capture
+from firefly_workspace import digest, workspace_root
+
+ROOT = workspace_root(Path(__file__))
 
 
 def build(frames, output):
-    assets = capture_assets()
+    assets = capture_assets(ROOT)
     if not reusable_capture(frames, assets):
         raise ValueError("captures do not match current scene, camera, renderer or per-frame hashes")
     model_manifest = ROOT / "models/vision_models.json"

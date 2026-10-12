@@ -12,10 +12,11 @@
 
 use fastrace::prelude::*;
 use firefly_observability::init as init_observability;
+use firefly_pubsub::event::TopicListener;
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::odom::OdomMessage;
-use firefly_pubsub::publish::OdomPublisher;
-use firefly_pubsub::subscriber::OdomSubscriber;
+use firefly_pubsub::publish::Publisher;
+use firefly_pubsub::subscriber::Subscriber;
 
 const TOPIC: &str = "Firefly/Test/E2eTrace";
 
@@ -24,8 +25,10 @@ fn trace_context_crosses_pubsub_boundary() {
     init_observability();
 
     let node = create_node().expect("创建节点");
-    let publisher = OdomPublisher::with_topic(&node, TOPIC).expect("创建发布端");
-    let subscriber = OdomSubscriber::with_topic(&node, TOPIC).expect("创建订阅端");
+    let publisher = Publisher::<OdomMessage>::with_topic_notify(&node, TOPIC).expect("创建发布端");
+    let subscriber = Subscriber::<OdomMessage>::with_topic(&node, TOPIC).expect("创建订阅端");
+    let listener = TopicListener::with_topic(&node, TOPIC).expect("创建事件监听端");
+    listener.drain().unwrap();
 
     // 发布端：root span 下发布，header 应携带当前活动 span 上下文
     let (trace_id, span_id) = {
@@ -56,6 +59,7 @@ fn trace_context_crosses_pubsub_boundary() {
     };
 
     // 订阅端：收到同一条消息，上下文一致
+    assert_eq!(listener.drain().unwrap(), 1, "发布后发送一次事件通知");
     let sample = subscriber
         .receive()
         .expect("接收")

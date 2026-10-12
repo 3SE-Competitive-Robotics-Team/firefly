@@ -15,6 +15,9 @@
   配置（曝光/色调映射），禁止给单个相机加专属可聚簇光源（`PointLight`/`SpotLight`）
   ——Bevy GPU 聚簇在多视图同帧渲染时不按 `RenderLayers` 隔离，会渗进别的视角。
 - 依赖统一在根 `[workspace.dependencies]`。
+- IPC 发布/订阅使用 `firefly-pubsub` 的 `Publisher<T>` / `Subscriber<T>`，话题名与容量
+  由消息模块导出；独立接收深度和服务容量用 `SubscriberOptions`。需要事件唤醒的发布端
+  显式使用 `with_topic_notify`，trace 用户头由泛型端口统一处理。
 
 ### 注释规范
 
@@ -56,7 +59,7 @@ render 使用无窗口 GPU 渲染；Rerun 原生 Viewer 需要图形会话。Rus
 
 ```bash
 uv sync --all-packages --extra test
-cargo build --release -p render -p vio -p fc -p ffctl -p localization -p planner -p slam
+cargo xtask build-all-release
 ```
 
 运行进程一律 release；普通 `cargo test` 用 debug。源码改动后先完成构建，再做运行验收。
@@ -110,12 +113,13 @@ ESKF 对照设置 `backend="eskf"`，不启动 slam。禁止把场地真值当�
 
 ## 场地与可选离线资产
 
+脚本、CAD 与验收共用 `firefly-workspace` 的工作区定位和流式 SHA-256；该包只依赖标准库。
+
 ```bash
-uv run --all-packages --extra test python scripts/prepare_rmuc.py <场地.stp>
+uv run --package firefly-cad firefly-cad-build <场地.stp>
 ```
 
-`--assets-only` 仅构建验收几何；入口按阶段报告，不保证飞行通过。
-构建器为 `firefly-cad-build`，配置为 `configs/cad.toml`。GLB、碰撞盒、FFMap 必须来自
+`firefly-cad-build` 构建并验收几何资产，配置为 `configs/cad.toml`。GLB、碰撞盒、FFMap 必须来自
 同一归一化几何，通过内容 hash、坐标和占据检查；细节见 `packages/firefly-cad/README.md`。
 
 `scripts/collect_vision_map.py` 使用 `render --offline` 和隔离的 `Firefly/Offline/*`，
@@ -128,6 +132,7 @@ uv run --all-packages --extra test python scripts/prepare_rmuc.py <场地.stp>
 
 ```bash
 uv venv models/vision-export/.venv --python 3.12
+uv pip install --python models/vision-export/.venv/bin/python -e packages/firefly-workspace
 uv pip install --python models/vision-export/.venv/bin/python torch==2.14.1 torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cpu
 uv pip install --python models/vision-export/.venv/bin/python onnxscript==0.7.2 onnx==1.23.1 onnxruntime==1.30.0 kornia==0.8.3 opencv-python==5.0.0.93 matplotlib==3.11.2
 models/vision-export/.venv/bin/python scripts/export_vision_models.py
@@ -231,7 +236,13 @@ H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码
 
 运行 `pytest tests/system` 时，session fixture 会在系统用例启动前执行
 `cargo xtask build-all-release`，重建所有 Rust 应用的 release 二进制，避免端到端测试使用旧产物。
-该命令不构建 Python 应用。
+该命令是全部 Rust 应用 release 构建的统一入口，应用列表只在 xtask 维护；
+并行度使用 Cargo 默认值或 `CARGO_BUILD_JOBS`。Python 依赖通过 `uv sync` 安装。
+
+`packages/firefly-evaluation` 提供任务编排、进程管理、物理观测、RRD 评分与报告。
+CLI 和系统测试都通过 uv workspace 导入该包；`tests/` 仅保留测试和 pytest fixtures。
+包从当前目录向上定位工作区，CLI 可用 `--workspace` 指定目录。
+纯评分、报告与进程管理单元测试：`uv run pytest tests/evaluation -q`。
 
 ```bash
 cargo fmt --all --check
@@ -295,8 +306,8 @@ uv run pytest tests/system/test_roundtrip.py -q
 - 22m 往返使用 `configs/acceptance_22m.toml`，默认空地图、在线回环与深度建图；初始化、
   真实到点、跟踪、定位、回环、降落、碰撞和退出必须分别通过。
 
-门槛唯一来源为 `tests/system/mission.py::Options`、`tests/evaluation/hover_metrics.py::HoverLimits`、
-`tests/evaluation/disturbance_metrics.py::DisturbanceLimits` 及 `configs/acceptance*.toml`；
+门槛唯一来源为 `firefly_evaluation.mission.Options`、`firefly_evaluation.hover_metrics.HoverLimits`、
+`firefly_evaluation.disturbance_metrics.DisturbanceLimits` 及 `configs/acceptance*.toml`；
 运行前固定并随报告保存，不能按失败结果放宽。新增门控须用当前固定配置独立启动三次，
 三次全通过才建立基线，不以重试通过覆盖失败。
 
@@ -306,9 +317,12 @@ uv run pytest tests/system/test_roundtrip.py -q
 
 ### 任务验收与可选地图
 
+CLI 使用已构建的 release 程序，运行前执行统一构建命令：
+
 ```bash
-uv run --all-packages --extra test python scripts/accept_rmuc.py
-uv run --all-packages --extra test python scripts/accept_rmuc.py --case nominal --config configs/acceptance_22m.toml --vio-only
+cargo xtask build-all-release
+uv run firefly-evaluate
+uv run firefly-evaluate --case nominal --config configs/acceptance_22m.toml --vio-only
 ```
 
 `--case nominal|reference_loss|estimator_loss` 选择任务；纯 VIO 仅改变进程部署和回环证据项，
