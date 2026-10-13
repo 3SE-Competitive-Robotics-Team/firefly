@@ -241,6 +241,10 @@ H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码
 - `fc/imu/accel_gate`：NIS、是否实际应用加计校正。
 - `fc/imu/gyro_bias`：控制输出采用的三轴零偏，rad/s。
 - `fc/imu/aid_gate`：最近一次 CI 的接受标记、六维 NIS、本地权重；未计算为 -1。
+- `fc/imu/aid_comparison`：比对旋转差（rad）和统计拒绝码；拒绝码见
+  `firefly_imu::IntersectionRejection`，零表示没有统计拒绝。
+- `fc/imu/aid_{local,external}_quaternion_xyzw`：CI 注入前、同一外援测量时刻的
+  本地 IMU 历史分支与外援姿态；测量时刻见 `aid_gate` 的第四项。
 - `fc/imu/attitude_variance` / `bias_variance`：输出协方差对角，rad² / (rad/s)²。
 - `fc/debug/tilt_deg` 与 `fc/debug/tilt_err_deg`：估计倾角与仅供评测的真值倾角误差。
 

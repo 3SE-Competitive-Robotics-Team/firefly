@@ -689,13 +689,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stats.max_late.as_secs_f64() * 1e3,
                 stats.saturated as f64 / stats.published.max(1) as f64 * 100.0,
                 stats.imu as f64 / window.as_secs_f64(),
-                if inputs.attitude.is_some_and(|s| s.aligned) {
-                    "本地 ESKF + VIO CI"
-                } else if controller.attitude_ready {
-                    "IMU 初始化"
-                } else {
-                    "等待 IMU"
-                },
+                inputs
+                    .attitude
+                    .map_or("等待 IMU", |s| s.source(ODOM_STALE_LIMIT)),
             );
             if let Some(s) = inputs.attitude {
                 publish_scalars(
@@ -732,6 +728,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "fc/imu/attitude_variance",
                     &s.covariance_diagonal[..3],
                 );
+                publish_scalars(
+                    &ports.viz,
+                    sim_time,
+                    "fc/imu/aid_comparison",
+                    &[
+                        s.aid_gate.rotation_distance().unwrap_or(-1.),
+                        s.aid_gate
+                            .rejection
+                            .map_or(0., |reason| f64::from(reason as u8)),
+                    ],
+                );
+                for (name, values) in [
+                    ("local", s.aid_gate.local_quat_xyzw),
+                    ("external", s.aid_gate.external_quat_xyzw),
+                ] {
+                    if let Some(values) = values {
+                        publish_scalars(
+                            &ports.viz,
+                            sim_time,
+                            &format!("fc/imu/aid_{name}_quaternion_xyzw"),
+                            &values,
+                        );
+                    }
+                }
                 for (name, values) in [
                     ("residual", s.aid_gate.residual),
                     ("residual_variance", s.aid_gate.residual_variance),
@@ -784,6 +804,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attitude_source_distinguishes_alignment_rejection_and_stale_aid() {
+        let mut snapshot = sensor_inputs().attitude.unwrap();
+        snapshot.aid_gate.accepted = true;
+        assert_eq!(snapshot.source(ODOM_STALE_LIMIT), "本地 ESKF + VIO CI");
+        snapshot.aid_gate.accepted = false;
+        assert_eq!(
+            snapshot.source(ODOM_STALE_LIMIT),
+            "CI 后验 IMU 传播（外援拒绝）"
+        );
+        snapshot.aid_gate.accepted = true;
+        snapshot.timestamp = ODOM_STALE_LIMIT.as_secs_f64() + 0.001;
+        assert_eq!(
+            snapshot.source(ODOM_STALE_LIMIT),
+            "CI 后验 IMU 传播（无新鲜外援）"
+        );
+        snapshot.aligned = false;
+        assert_eq!(
+            snapshot.source(ODOM_STALE_LIMIT),
+            "本地 ESKF（未对齐 odom）"
+        );
+        snapshot.ready = false;
+        assert_eq!(snapshot.source(ODOM_STALE_LIMIT), "等待 IMU");
+    }
 
     #[test]
     fn stale_grounded_estimator_cannot_start_hover_thrust() {

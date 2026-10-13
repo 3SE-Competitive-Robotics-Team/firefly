@@ -7,7 +7,8 @@ mod stream;
 pub use stationary::gyro_mean_covariance;
 
 pub use eskf::{
-    AttitudeState, Gate, Intersection, Matrix6, gravity_jacobian, right_jacobian, transition,
+    AttitudeState, Gate, Intersection, IntersectionRejection, Matrix6, gravity_jacobian,
+    right_jacobian, transition,
 };
 use firefly_error::{Error, ErrorKind, Result};
 use serde::Deserialize;

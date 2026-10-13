@@ -32,6 +32,25 @@ pub struct Snapshot {
     pub aid_gate_time: Option<f64>,
     pub covariance_diagonal: [f64; 6],
 }
+
+impl Snapshot {
+    pub fn source(&self, stale_limit: Duration) -> &'static str {
+        if !self.ready {
+            "等待 IMU"
+        } else if !self.aligned {
+            "本地 ESKF（未对齐 odom）"
+        } else if self
+            .aid_time
+            .is_none_or(|t| self.timestamp - t > stale_limit.as_secs_f64())
+        {
+            "CI 后验 IMU 传播（无新鲜外援）"
+        } else if !self.aid_gate.accepted {
+            "CI 后验 IMU 传播（外援拒绝）"
+        } else {
+            "本地 ESKF + VIO CI"
+        }
+    }
+}
 pub struct Worker {
     latest: Arc<Mutex<Option<Snapshot>>>,
     pub grounded: Arc<AtomicBool>,
@@ -115,6 +134,7 @@ fn run(
     let mut pending = None;
     let mut count = 0u64;
     let mut rejected = false;
+    let mut aid_rejected = false;
     while !stop.load(Ordering::Relaxed) && super::RUNNING.load(Ordering::Relaxed) {
         let root = fastrace::Span::root(
             "fc-imu",
@@ -159,8 +179,41 @@ fn run(
             && latest.is_some_and(|(s, _)| msg.timestamp <= s.timestamp)
         {
             pending = None;
-            if let Err(error) = to_aid(&msg).and_then(|aid| estimator.aid(&aid)) {
-                log::warn!("VIO 姿态外援拒绝: {error}");
+            match to_aid(&msg).and_then(|aid| estimator.aid(&aid)) {
+                Ok(true) => {
+                    if aid_rejected {
+                        log::info!("VIO 姿态外援恢复接受，测量时刻 {:.6}", msg.timestamp);
+                    }
+                    aid_rejected = false;
+                }
+                Ok(false) => {
+                    if !aid_rejected {
+                        let gate = (estimator.aid_gate_time() == Some(msg.timestamp))
+                            .then(|| estimator.aid_gate());
+                        let reason = match gate.and_then(|g| g.rejection) {
+                            Some(firefly_imu::IntersectionRejection::RotationDistance) => {
+                                "旋转差超过 0.5 rad"
+                            }
+                            Some(firefly_imu::IntersectionRejection::Innovation) => {
+                                "六维创新门未通过"
+                            }
+                            None => "测量时间未覆盖、重复/乱序或 IMU 不连续",
+                        };
+                        log::warn!(
+                            "VIO 姿态外援拒绝: {reason}，测量时刻 {:.6}，旋转差 {:?} rad，NIS {:?}",
+                            msg.timestamp,
+                            gate.and_then(|g| g.rotation_distance()),
+                            gate.and_then(|g| g.nis)
+                        );
+                    }
+                    aid_rejected = true;
+                }
+                Err(error) => {
+                    if !aid_rejected {
+                        log::warn!("VIO 姿态外援拒绝: {error}");
+                    }
+                    aid_rejected = true;
+                }
             }
             changed = true;
         }

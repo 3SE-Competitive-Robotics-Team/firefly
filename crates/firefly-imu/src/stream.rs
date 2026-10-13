@@ -147,12 +147,11 @@ impl Estimator {
                 )
                 .ok_or_else(|| invalid("invalid stationary gyro covariance"))?,
             );
-            // 重力只约束倾角；绕世界竖直轴的初始航向是自由规范。
-            let up = rotation.inverse() * Vector3::z();
-            covariance.fixed_view_mut::<3, 3>(0, 0).copy_from(
-                &(nalgebra::Matrix3::identity() * 1e-4
-                    + up * up.transpose() * std::f64::consts::PI.powi(2)),
-            );
+            // 航向固定本地坐标规范；与 odom 的未知规范关系由 aligned 表达。
+            // 协方差描述此规范下的局部小角误差，不能把全局未知航向当作 π rad 误差。
+            covariance
+                .fixed_view_mut::<3, 3>(0, 0)
+                .copy_from(&(nalgebra::Matrix3::identity() * 1e-4));
             self.state = Some(AttitudeState {
                 rotation,
                 bias: gyro,

@@ -24,18 +24,37 @@ pub struct Gate {
     pub accepted: bool,
 }
 
+/// 外援通过元数据与协方差校验后的统计拒绝原因。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum IntersectionRejection {
+    RotationDistance = 1,
+    Innovation = 2,
+}
+
 /// 六维外援创新检验与 CI 权重；未计算的量用 None 表示。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Intersection {
     pub accepted: bool,
     pub nis: Option<f64>,
     pub local_weight: Option<f64>,
+    pub rejection: Option<IntersectionRejection>,
+    /// 比较时刻的本地 IMU 分支与外援姿态，Hamilton xyzw，CI 注入前。
+    pub local_quat_xyzw: Option<[f64; 4]>,
+    pub external_quat_xyzw: Option<[f64; 4]>,
     /// 同一测量时刻、同一切空间的 `[δθ(rad), δbg(rad/s)]` 创新。
     pub residual: Option<[f64; 6]>,
     /// 保守创新协方差 `2(P_local + P_external)` 的对角。
     pub residual_variance: Option<[f64; 6]>,
     /// `L⁻¹ residual`，其中 `LLᵀ` 为完整创新协方差；平方和等于 NIS。
     pub whitened_residual: Option<[f64; 6]>,
+}
+
+impl Intersection {
+    #[must_use]
+    pub fn rotation_distance(&self) -> Option<f64> {
+        self.residual.map(|r| Vector3::new(r[0], r[1], r[2]).norm())
+    }
 }
 
 #[must_use]
@@ -185,13 +204,22 @@ impl AttitudeState {
     pub fn intersect_diagnostic(&mut self, external: &Self) -> Result<Intersection> {
         external.validate()?;
         let delta = (self.rotation.inverse() * external.rotation).scaled_axis();
-        if delta.norm() > 0.5 {
-            return Ok(Intersection::default());
-        }
         let mut dx = Vector6::zeros();
         dx.fixed_rows_mut::<3>(0).copy_from(&delta);
         dx.fixed_rows_mut::<3>(3)
             .copy_from(&(external.bias - self.bias));
+        let diagnostic = Intersection {
+            residual: Some(dx.into()),
+            local_quat_xyzw: Some(self.rotation.coords.into()),
+            external_quat_xyzw: Some(external.rotation.coords.into()),
+            ..Intersection::default()
+        };
+        if delta.norm() > 0.5 {
+            return Ok(Intersection {
+                rejection: Some(IntersectionRejection::RotationDistance),
+                ..diagnostic
+            });
+        }
         let mut transport = Matrix6::identity();
         transport.fixed_view_mut::<3, 3>(0, 0).copy_from(
             &right_jacobian(delta)
@@ -207,7 +235,6 @@ impl AttitudeState {
         let nis = dx.dot(&bound.solve(&dx));
         let diagnostic = Intersection {
             nis: Some(nis),
-            residual: Some(dx.into()),
             residual_variance: Some(covariance.diagonal().into()),
             whitened_residual: Some(
                 bound
@@ -216,10 +243,13 @@ impl AttitudeState {
                     .ok_or_else(|| invalid("singular aid whitening"))?
                     .into(),
             ),
-            ..Intersection::default()
+            ..diagnostic
         };
         if nis > 22.457_744_484_825_323 {
-            return Ok(diagnostic);
+            return Ok(Intersection {
+                rejection: Some(IntersectionRejection::Innovation),
+                ..diagnostic
+            });
         }
         let a = self
             .covariance

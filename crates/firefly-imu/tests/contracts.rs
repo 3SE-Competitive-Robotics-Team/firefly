@@ -1,8 +1,8 @@
 //! 独立解析、有限差分与最终输出契约；时间单位秒，角度单位 rad。
 #![allow(clippy::float_cmp)]
 use firefly_imu::{
-    Aid, AttitudeState, Estimator, Matrix6, Options, Sample, gravity_jacobian, right_jacobian,
-    transition,
+    Aid, AttitudeState, Estimator, IntersectionRejection, Matrix6, Options, Sample,
+    gravity_jacobian, right_jacobian, transition,
 };
 use nalgebra::{Matrix3, SVector, UnitQuaternion, Vector3};
 fn state() -> AttitudeState {
@@ -46,12 +46,39 @@ fn aid_diagnostics_preserve_joint_nis_and_rejection() {
         assert_eq!(result.residual.unwrap(), [0., 0., 0., 0., 0., bias_z]);
         assert!((result.residual_variance.unwrap()[5] - variance).abs() < 1e-20);
         assert_eq!(result.accepted, bias_z > 0.);
+        assert_eq!(
+            result.rejection,
+            (bias_z < 0.).then_some(IntersectionRejection::Innovation)
+        );
         if !result.accepted {
             assert_eq!(local.rotation, before.rotation);
             assert_eq!(local.bias, before.bias);
             assert_eq!(local.covariance, before.covariance);
         }
     }
+}
+
+#[test]
+fn angular_rejection_preserves_comparison_and_does_not_inject() {
+    let mut local = state();
+    let mut external = state();
+    external.rotation = UnitQuaternion::from_scaled_axis(Vector3::z() * 0.6);
+    let before = local.clone();
+    let result = local.intersect_diagnostic(&external).unwrap();
+    assert_eq!(
+        result.rejection,
+        Some(IntersectionRejection::RotationDistance)
+    );
+    assert!(!result.accepted);
+    assert!(result.nis.is_none() && result.local_weight.is_none());
+    assert!((result.rotation_distance().unwrap() - 0.6).abs() < 1e-12);
+    assert_eq!(result.local_quat_xyzw.unwrap(), [0., 0., 0., 1.]);
+    let external_quat: [f64; 4] = external.rotation.coords.into();
+    assert_eq!(result.external_quat_xyzw.unwrap(), external_quat);
+    assert!((result.residual.unwrap()[2] - 0.6).abs() < 1e-12);
+    assert_eq!(local.rotation, before.rotation);
+    assert_eq!(local.bias, before.bias);
+    assert_eq!(local.covariance, before.covariance);
 }
 fn sample(t: f64) -> Sample {
     Sample {
@@ -529,6 +556,86 @@ fn stationary_detection_accounts_for_sample_noise_without_accepting_motion() {
             assert_eq!(e.state().is_some(), !moving, "hz={hz}, moving={moving}");
         }
     }
+}
+
+#[test]
+fn stationary_noise_preserves_the_chosen_yaw_gauge() {
+    for mut seed in [0x1234_5678_u32, 0x0064_5019, 0x0a59_cb75, 13] {
+        let options = Options::default();
+        let mut estimator = Estimator::new(options).unwrap();
+        let mut noise = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (f64::from(seed) / f64::from(u32::MAX) * 2. - 1.) * 3_f64.sqrt()
+        };
+        for i in 0..=4000 {
+            let mut measured = sample(f64::from(i) * 0.001);
+            measured.gyro =
+                Vector3::from_fn(|_, _| noise()) * (options.gyro_density / 0.001_f64.sqrt());
+            measured.accel +=
+                Vector3::from_fn(|_, _| noise()) * (options.accel_density / 0.001_f64.sqrt());
+            estimator.observe(measured, true).unwrap();
+            if let Some(estimate) = estimator.state() {
+                assert!(
+                    estimate.rotation.euler_angles().2.abs() < 0.01,
+                    "static gravity cannot determine or rotate the chosen heading at t={}",
+                    measured.timestamp
+                );
+                assert!((estimate.rotation * Vector3::z() - Vector3::z()).norm() < 0.01);
+            }
+        }
+        assert!(estimator.state().is_some());
+        assert!(!estimator.aligned());
+    }
+}
+
+#[test]
+fn noisy_ground_alignment_and_delayed_aids_keep_the_inertial_comparison_consistent() {
+    let options = Options::default();
+    let mut estimator = Estimator::new(options).unwrap();
+    let mut seed = 0x1234_5678_u32;
+    let mut noise = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        (f64::from(seed) / f64::from(u32::MAX) * 2. - 1.) * 3_f64.sqrt()
+    };
+    let mut accepted = 0;
+    for i in 0..=4000 {
+        let mut measured = sample(f64::from(i) * 0.001);
+        measured.gyro =
+            Vector3::from_fn(|_, _| noise()) * (options.gyro_density / 0.001_f64.sqrt());
+        measured.accel +=
+            Vector3::from_fn(|_, _| noise()) * (options.accel_density / 0.001_f64.sqrt());
+        estimator.observe(measured, i < 2920).unwrap();
+        if i >= 2350 && (i - 2350) % 100 == 0 {
+            let mut visual = state();
+            visual.rotation = UnitQuaternion::from_scaled_axis(Vector3::z() * 1.2);
+            visual
+                .covariance
+                .fixed_view_mut::<3, 3>(3, 3)
+                .copy_from(&(Matrix3::identity() * 2e-8));
+            let timestamp = f64::from(i - 150) * 0.001;
+            assert!(
+                estimator
+                    .aid(&Aid {
+                        timestamp,
+                        session: 7,
+                        state: visual
+                    })
+                    .unwrap(),
+                "valid static attitude must pass after delayed alignment: {:?}",
+                estimator.aid_gate()
+            );
+            accepted += 1;
+            assert_eq!(estimator.last_aid(), Some(timestamp));
+            assert!(estimator.aid_gate().rotation_distance().unwrap() < 0.01);
+            assert!((estimator.state().unwrap().rotation.euler_angles().2 - 1.2).abs() < 0.01);
+        }
+    }
+    assert_eq!(accepted, 17);
+    assert!(estimator.aligned());
 }
 
 #[test]
