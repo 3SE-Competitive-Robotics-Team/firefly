@@ -84,7 +84,7 @@ Bevy 日志接线参考 [quad](../apps/quad/src/main.rs)。示例调用公共实
 升级视觉依赖必须运行 LK 位移回归，不放宽容差；依赖统一在根 Cargo/uv workspace 和锁文件。
 改行为前阅读对应官方源码，固定版本与差异见架构文档。参考仓库位于 `~/Projects/`：
 `open_vins`、`ORB_SLAM3`、`VINS-Fusion`、`EGO-Planner-v2`、`iceoryx2`、`logforth`、`fastrace`；
-purecv 使用 `XiaoPengYouCode/purecv` fork，锁定版本见 Cargo.lock，发现上游问题应提 issue。
+purecv 使用上游 crates.io 发布版（当前锁定版本见 Cargo.lock），发现上游问题应提 issue。
 
 <a id="run"></a>
 
