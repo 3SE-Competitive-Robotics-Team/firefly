@@ -12,6 +12,7 @@ use firefly_pubsub::{
     attitude::{ATTITUDE_TOPIC, AttitudeMessage},
     imu::{IMU_SUBSCRIPTION, IMU_TOPIC, ImuMessage},
     node::create_node,
+    odom::{ODOM_TOPIC, OdomMessage},
     publish::Publisher,
     subscriber::Subscriber,
 };
@@ -22,10 +23,19 @@ use firefly_vio_core::{
     propagation::{FastInit, Propagator},
     sensor::ImuData,
 };
+use firefly_vio_types::quat_ops::quat_2_rot;
 use nalgebra::Vector3;
 
 const HISTORY_CAPACITY: usize = 4096;
 const MAX_IMU_GAP: f64 = 0.05;
+const ODOM_PERIOD: f64 = 0.01;
+/// 无视觉校正时高频位置输出的最大预测跨度（秒）。
+const ODOM_PREDICTION_HORIZON: f64 = 0.5;
+
+struct Prediction {
+    attitude: AttitudeMessage,
+    odometry: Option<OdomMessage>,
+}
 
 struct Posterior {
     initial: FastInit,
@@ -88,7 +98,7 @@ impl Predictor {
         Ok(())
     }
 
-    fn sample(&mut self) -> Option<AttitudeMessage> {
+    fn sample(&mut self) -> Option<Prediction> {
         let time = *self.times.back()?;
         if self
             .pending
@@ -116,14 +126,33 @@ impl Predictor {
             &posterior.calibration,
         )?;
         self.last_output = time;
-        Some(AttitudeMessage {
-            timestamp: time,
-            posterior_time: posterior.initial.time,
-            session: self.session,
-            quat_xyzw: predicted.q.into(),
-            angular_velocity: predicted.w.into(),
-            gyro_bias: posterior.initial.est[10..13].try_into().ok()?,
-            attitude_variance: std::array::from_fn(|i| predicted.covariance[(i, i)]),
+        let velocity = quat_2_rot(&predicted.q).transpose() * predicted.v;
+        Some(Prediction {
+            odometry: (time - posterior.initial.time <= ODOM_PREDICTION_HORIZON).then_some(
+                OdomMessage {
+                    timestamp: time,
+                    position_x: predicted.p.x,
+                    position_y: predicted.p.y,
+                    position_z: predicted.p.z,
+                    velocity_x: velocity.x,
+                    velocity_y: velocity.y,
+                    velocity_z: velocity.z,
+                    quat_x: predicted.q[0],
+                    quat_y: predicted.q[1],
+                    quat_z: predicted.q[2],
+                    quat_w: predicted.q[3],
+                    is_initialized: true,
+                },
+            ),
+            attitude: AttitudeMessage {
+                timestamp: time,
+                posterior_time: posterior.initial.time,
+                session: self.session,
+                quat_xyzw: predicted.q.into(),
+                angular_velocity: predicted.w.into(),
+                gyro_bias: posterior.initial.est[10..13].try_into().ok()?,
+                attitude_variance: std::array::from_fn(|i| predicted.covariance[(i, i)]),
+            },
         })
     }
 }
@@ -198,6 +227,8 @@ fn run(
     let node = create_node()?;
     let imu = Subscriber::<ImuMessage>::with_options(&node, IMU_TOPIC, IMU_SUBSCRIPTION)?;
     let output = Publisher::<AttitudeMessage>::with_topic(&node, ATTITUDE_TOPIC)?;
+    let odometry = Publisher::<OdomMessage>::with_topic_notify(&node, ODOM_TOPIC)?;
+    let mut next_odom = f64::NEG_INFINITY;
     let mut predictor = Predictor::new(noise, session);
     while !stop.load(Ordering::Relaxed) {
         while let Some(m) = imu.receive()? {
@@ -219,7 +250,13 @@ fn run(
             predictor.pending = Some(posterior);
         }
         if let Some(message) = predictor.sample() {
-            output.publish(message)?;
+            output.publish(message.attitude)?;
+            if let Some(message) = message.odometry
+                && message.timestamp + 1e-9 >= next_odom
+            {
+                odometry.publish(message)?;
+                next_odom = message.timestamp + ODOM_PERIOD;
+            }
         }
         if node.wait(Duration::from_millis(1)).is_err() {
             break;
@@ -281,7 +318,7 @@ mod tests {
         }
         assert!(prediction.sample().is_none());
         prediction.pending = Some(posterior(0.035, 0.4, 0.1));
-        let first = prediction.sample().unwrap();
+        let first = prediction.sample().unwrap().attitude;
         assert!((yaw(first) - (0.4 + 0.5 * 0.065)).abs() < 1e-12);
         assert!((first.angular_velocity[2] - 0.5).abs() < 1e-12);
         assert!((first.posterior_time - 0.035).abs() < 1e-12);
@@ -290,14 +327,54 @@ mod tests {
         // 后验变化可以包含大角度修正；输出必须从新后验重新传播。
         prediction.pending = Some(posterior(0.06, -0.7, 0.2));
         prediction.observe(measured(0.101)).unwrap();
-        let next = prediction.sample().unwrap();
+        let next = prediction.sample().unwrap().attitude;
         assert!((yaw(next) - (-0.7 + 0.4 * 0.041)).abs() < 1e-12);
         assert!((next.angular_velocity[2] - 0.4).abs() < 1e-12);
         prediction.observe(measured(0.102)).unwrap();
-        let cached = prediction.sample().unwrap();
+        let cached = prediction.sample().unwrap().attitude;
         assert!((yaw(cached) - (-0.7 + 0.4 * 0.042)).abs() < 1e-12);
         assert_eq!(cached.session, 7);
         assert!((cached.posterior_time - 0.06).abs() < 1e-12);
+    }
+
+    #[test]
+    fn odometry_continues_from_measured_imu_while_visual_update_is_busy() {
+        let mut prediction = Predictor::new(ImuNoise::default(), 7);
+        let mut initial = posterior(0., std::f64::consts::FRAC_PI_2, 0.6);
+        initial.initial.est[4] = 2.;
+        initial.initial.est[7] = 1.;
+        prediction.pending = Some(initial);
+        for i in 0..=400 {
+            let time = f64::from(i) * 0.001;
+            prediction.observe(measured(time)).unwrap();
+            if i == 0 {
+                assert!(prediction.sample().is_none());
+                continue;
+            }
+            let output = prediction.sample().unwrap();
+            let odom = output.odometry.unwrap();
+            assert_eq!(odom.timestamp, output.attitude.timestamp);
+            assert_eq!(output.attitude.posterior_time, 0.);
+            assert!((odom.position_x - (2. + time)).abs() < 1e-10);
+            assert!(odom.position_y.abs() < 1e-10);
+            assert!((odom.velocity_x - 1.).abs() < 1e-10);
+            assert!(odom.velocity_y.abs() < 1e-10);
+        }
+        assert!(prediction.sample().is_none());
+        let mut corrected = posterior(0.3, 0., 0.6);
+        corrected.initial.est[4] = 3.;
+        prediction.pending = Some(corrected);
+        prediction.observe(measured(0.401)).unwrap();
+        let output = prediction.sample().unwrap();
+        assert!((output.odometry.unwrap().position_x - 3.).abs() < 1e-10);
+        assert!(output.odometry.unwrap().velocity_x.abs() < 1e-10);
+        assert_eq!(output.attitude.posterior_time, 0.3);
+        for i in 402..=801 {
+            prediction.observe(measured(f64::from(i) * 0.001)).unwrap();
+            let output = prediction.sample().unwrap();
+            assert_eq!(output.odometry.is_some(), i <= 800);
+            assert_eq!(output.attitude.posterior_time, 0.3);
+        }
     }
 
     #[test]
@@ -313,7 +390,7 @@ mod tests {
         assert!(prediction.sample().is_none());
         prediction.pending = Some(posterior(0.05, 2., 0.));
         prediction.observe(measured(0.13)).unwrap();
-        assert!((yaw(prediction.sample().unwrap()) - 0.012).abs() < 1e-12);
+        assert!((yaw(prediction.sample().unwrap().attitude) - 0.012).abs() < 1e-12);
         assert!(prediction.observe(measured(0.2)).is_err());
         assert!(prediction.observe(measured(f64::NAN)).is_err());
     }

@@ -11,3 +11,5 @@ voxel_size = 0.3
 neighbor_radius = 2
 min_point_distance = 0.0
 max_slam_features = 100
+# 可见体素内的所有有效路标参与更新，保持小范围运动时的视觉约束。
+use_all_points = true

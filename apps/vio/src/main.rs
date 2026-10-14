@@ -19,9 +19,7 @@ use std::time::Duration;
 use fastrace::prelude::*;
 use firefly_pubsub::event::{CAMERA_PAIR_TOPIC, TopicListener};
 use firefly_pubsub::node::create_node;
-use firefly_pubsub::odom::ODOM_TOPIC;
 use firefly_pubsub::odom::{GROUND_TRUTH_TOPIC, OdomMessage};
-use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::viz::{ScalarMessage, VizMessage, VizPublisher, kind};
 use firefly_vio::options::VioManagerOptions;
@@ -46,8 +44,6 @@ use input::IceoryxInput;
 /// `configs/vio.toml` 缺省路径（相对运行目录，通常为仓库根）。
 const DEFAULT_CONFIG: &str = "configs/vio.toml";
 
-/// odom 发布周期（秒）：100Hz 位置反馈；姿态由独立输出线程从 VIO 后验预测。
-const ODOM_PERIOD: f64 = 0.01;
 /// 可视化发布周期（秒）：10Hz（位姿/轨迹，防 Viz 话题洪泛）。
 const VIZ_PERIOD: f64 = 0.1;
 /// rerun 图例颜色：真值=蓝、估计=橙。
@@ -181,10 +177,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log_ipc = firefly_observability::init_ipc(&node, "vio");
     log::info!("iceoryx2 节点已创建（进程共享，信号处理 = HandleTerminationRequests）");
 
-    // odom 发布器（Trace 上下文由中间件在 publish 时自动注入）
-    let odom_pub = Publisher::<OdomMessage>::with_topic_notify(&node, ODOM_TOPIC)?;
-    log::info!("已打开话题 {ODOM_TOPIC}");
-
     // 可视化发布器：经 Firefly/Viz 话题发布，firefly-viz 进程统一写 rerun
     // （计算线程零 IO；发布失败只降级 debug 日志，不影响估计）
     let viz_pub = VizPublisher::new(&node)?;
@@ -214,7 +206,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     run_loop(
         &mut vio,
         &mut input,
-        &odom_pub,
         &viz_pub,
         gt_sub.as_ref(),
         &node,
@@ -226,7 +217,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// IMU 断流警戒阈值（墙钟，超过视为断流）。
 const IMU_STALL: Duration = Duration::from_millis(200);
-/// 兜底心跳周期：无事件时也周期醒来（断流警戒/诊断打印/odom 节拍兜底）。
+/// 兜底心跳周期：无事件时也周期醒来（断流警戒/诊断打印）。
 const HEARTBEAT: Duration = Duration::from_millis(100);
 /// 诊断打印间隔（墙钟秒）。
 const DIAG_PERIOD: f64 = 10.0;
@@ -239,7 +230,6 @@ const DIAG_PERIOD: f64 = 10.0;
 fn run_loop(
     vio: &mut VioManager,
     input: &mut dyn SensorInput,
-    odom_pub: &Publisher<OdomMessage>,
     viz_pub: &VizPublisher,
     gt_sub: Option<&Subscriber<OdomMessage>>,
     node: &firefly_pubsub::node::IpcNode,
@@ -256,7 +246,6 @@ fn run_loop(
             firefly_pubsub::landmarks::TOPIC,
         )?;
     let mut t_sim = 0.0f64;
-    let mut next_odom = 0.0f64;
     let mut next_viz = 0.0f64;
     let mut wake_count = 0u64;
     let mut est_prev: Option<[f64; 3]> = None;
@@ -382,22 +371,9 @@ fn run_loop(
             log::warn!("IMU 断流 >{IMU_STALL:?}：滤波器停更，等待 sim 恢复");
         }
 
-        // 同一预测同时供里程计与可视化使用，时间戳属于预测状态。
-        let output = if t_sim + 1e-9 >= next_odom || t_sim + 1e-9 >= next_viz {
-            odometry::sample(vio, t_sim)
-        } else {
-            None
-        };
-        if t_sim + 1e-9 >= next_odom {
-            if let Some(msg) = output {
-                publish_odom(odom_pub, msg);
-            }
-            next_odom = t_sim + ODOM_PERIOD;
-        }
-
         // 瘦版可视化：位姿 + 轨迹折线 @10Hz（只记位姿不流图像）
         if t_sim + 1e-9 >= next_viz {
-            if let Some(msg) = output {
+            if let Some(msg) = odometry::sample(vio, t_sim) {
                 log_viz(
                     viz_pub,
                     msg.timestamp,
@@ -433,22 +409,6 @@ fn run_loop(
     }
     prediction.finish()?;
     Ok(())
-}
-
-/// 发布已在目标时刻预测的里程计。
-fn publish_odom(odom_pub: &Publisher<OdomMessage>, msg: OdomMessage) {
-    match odom_pub.publish(msg) {
-        Ok(ctx) => log::debug!(
-            "odom t={:.3} p=({:.3},{:.3},{:.3}) trace_id={:032x} sampled={}",
-            msg.timestamp,
-            msg.position_x,
-            msg.position_y,
-            msg.position_z,
-            ctx.trace_id(),
-            ctx.sampled(),
-        ),
-        Err(e) => log::warn!("odom 发布失败（temporary 可重试）: {e}"),
-    }
 }
 
 /// 前端健康度：统计保留在计算线程，结果经 Firefly/Viz 发布

@@ -540,7 +540,7 @@ impl VioManager {
         }
 
         // 9. SLAM 更新集来源（对照官方 `featureUpdate` 的 voxel 循环）：开启体素
-        // 选点 → 遍历上一帧算出的可见体素，每体素取块首 map point；关闭 → 遍历
+        // 选点 → 遍历上一帧算出的可见体素，按 use_all_points 取块首或全部点；关闭 → 遍历
         // 全部 SLAM 路标（官方无开关，此为 firefly 的关闭语义）。对每个被访问的
         // 路标：feature 在库则加入更新集；feature 缺失且其 host 相机在本帧 → 标记
         // 边缘化；`update_fail_count > 1` → 标记边缘化。标记只作用于被访问的路标，
@@ -597,7 +597,7 @@ impl VioManager {
         );
 
         // 11b. 体素选点（对照 Voxel-SVIO `featureUpdate` 的选点段；仅开启时）：
-        // 对上一帧末算出的可见体素（`recent_voxels`）取每体素**块首**路标的 id，
+        // 对上一帧末算出的可见体素（`recent_voxels`）按配置选取路标 id，
         // 保留其中仍在待更新集里的特征；无可见体素则本帧无路标更新
         // （官方行为，无回落）。落选特征保留在库中延后更新（不标记删除）。
         if self.params.voxel_options.enabled && !feats_slam_update.is_empty() {
@@ -1087,10 +1087,15 @@ mod tests {
     /// 体素场景：相机 0 内参 `fx=fy=600`、`cx=320`、`cy=240`，外参为单位位姿
     /// （相机系 = IMU 系平移）。供整体输入输出测试注入跟踪观测与路标。
     fn voxel_manager() -> VioManager {
+        voxel_manager_with_all_points(false)
+    }
+
+    fn voxel_manager_with_all_points(use_all_points: bool) -> VioManager {
         use firefly_vio_core::cam::{CamRadtan, SharedCamera};
         use std::sync::Arc;
         let mut params = VioManagerOptions::default();
         params.voxel_options.enabled = true;
+        params.voxel_options.use_all_points = use_all_points;
         // 同格多路标场景需要允许同体素多点；解析夹具点距 0.5~1m，体素与邻域
         // 按官方 EuRoC/TUM-VI 调参（0.3 / ±2）。
         params.voxel_options.min_point_distance = 0.0;
@@ -1258,6 +1263,88 @@ mod tests {
             feed_voxel_frame(&mut mgr, 1.0 + i as f64, *p_imu, &[(7, p)]);
         }
         assert_eq!(mgr.voxel_map.select(&mgr.recent_voxels), vec![100]);
+    }
+
+    #[test]
+    fn all_points_option_controls_actual_slam_measurement_updates() {
+        use crate::{landmark::Landmark, options::FeatRepresentation};
+
+        for use_all_points in [false, true] {
+            let mut mgr = voxel_manager_with_all_points(use_all_points);
+            mgr.state.options.max_clone_size = 6;
+            let points = [
+                (100, Vector3::new(0.55, 0.25, 3.05)),
+                (101, Vector3::new(0.56, 0.26, 3.06)),
+            ];
+            assert_eq!(
+                mgr.voxel_map.key_of(&points[0].1),
+                mgr.voxel_map.key_of(&points[1].1)
+            );
+            for i in 0..6 {
+                let time = f64::from(i);
+                let position = Vector3::new(0.1 * time, 0., 0.);
+                feed_voxel_frame(&mut mgr, time, position, &[]);
+                for (id, point) in points {
+                    let relative = point - position;
+                    let uv = Vector2::new(relative.x / relative.z, relative.y / relative.z);
+                    mgr.track_feats.database_mut().update_feature(
+                        id,
+                        time,
+                        0,
+                        (600. * uv.x + 320.) as f32,
+                        (600. * uv.y + 240.) as f32,
+                        uv.x as f32,
+                        uv.y as f32,
+                    );
+                }
+            }
+            for (id, point) in points {
+                let size = mgr.state.cov.nrows();
+                let mut landmark = Landmark::new(FeatRepresentation::Global3D, id);
+                landmark.unique_camera_id = 0;
+                landmark.set_from_xyz(&point, false);
+                landmark.set_from_xyz(&point, true);
+                landmark.set_local_id(size as i32);
+                mgr.state.features_slam.insert(id, landmark);
+                mgr.state.cov = mgr.state.cov.clone().resize(size + 3, size + 3, 0.);
+                for axis in size..size + 3 {
+                    mgr.state.cov[(axis, axis)] = 0.01;
+                }
+                assert!(mgr.voxel_map.add_point(id, &point));
+            }
+            mgr.recent_voxels = vec![mgr.voxel_map.key_of(&points[0].1)];
+            let before = mgr.state.cov.trace();
+            mgr.do_feature_propagate_update(&CameraData {
+                timestamp: 5.,
+                sensor_ids: vec![0],
+                images: vec![],
+                masks: vec![],
+            });
+            let expected = if use_all_points {
+                vec![100, 101]
+            } else {
+                vec![100]
+            };
+            let updated: Vec<_> = mgr
+                .state
+                .slam_diagnostics
+                .iter()
+                .map(|row| row[0] as usize)
+                .collect();
+            assert_eq!(updated, expected);
+            assert!(mgr.state.slam_diagnostics.iter().all(|row| row[4] == 1.));
+            assert!(mgr.state.cov.trace() < before);
+            assert!(
+                mgr.state
+                    .update_diagnostics
+                    .iter()
+                    .all(|update| update.source == "slam")
+            );
+            assert_eq!(
+                mgr.track_feats.database().get_feature_clone(101).is_none(),
+                use_all_points
+            );
+        }
     }
 
     /// 关闭时 `refresh_recent_voxels` 全程空转，缓存保持为空。
