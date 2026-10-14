@@ -128,7 +128,8 @@ class Recordings:
             # 不覆盖既有证据；预先占位，文件 sink 仅打开本次创建的文件。
             with path.open("xb"):
                 pass
-            sinks.append(file_sink(str(path), write_footer=options.write_footer))
+            # 持久证据必须带完整索引，供 Viewer 与随机访问读取器直接打开。
+            sinks.append(file_sink(str(path), write_footer=True))
         if serve:
             self.archive.spawn(connect=False, memory_limit=options.viewer_memory)
             url = url or URL
