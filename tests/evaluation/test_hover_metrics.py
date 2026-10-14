@@ -15,6 +15,7 @@ def evidence():
     truth[:, 3] = np.where((times >= 3.) & (times < 28.), 1., 0.)
     health_times = np.arange(31.)
     data = {"gt": truth, "gt_velocity": np.column_stack((times, np.zeros((len(times), 3)))),
+            "attitude_source": np.column_stack((times, np.ones(len(times)))),
             "imu_attitude": np.column_stack((times, np.zeros((len(times), 3)), np.ones(len(times)))),
             "imu_health": np.column_stack((health_times, np.ones((31, 2)), np.full(31, .2))),
             "physics": np.column_stack((times, times * 200 + 1, np.zeros((len(times), 3))))}
@@ -33,11 +34,11 @@ def test_complete_hover_and_independent_yaw_gauge_pass(evidence):
     assert score_hover(case, Options(), evidence_reader=lambda _: data)["status"] == "passed"
     metrics = case["stages"]["attitude_health"]["metrics"]
     assert metrics["max_tilt_error_deg"] == pytest.approx(0.)
-    assert metrics["max_aid_age_s"] == pytest.approx(.2)
+    assert metrics["max_posterior_age_s"] == pytest.approx(.2)
 
 
-@pytest.mark.parametrize("fault", ["drift_then_return", "speed_spike", "aid_starvation", "tilt",
-                                   "attitude_gap", "health_missing", "short_window", "landing_offset",
+@pytest.mark.parametrize("fault", ["drift_then_return", "speed_spike", "posterior_starvation", "tilt",
+                                   "attitude_gap", "health_missing", "standby_selected", "source_missing", "short_window", "landing_offset",
                                    "collision", "reset", "physics_truncated", "remaining_process", "shutdown"])
 def test_hover_gate_rejects_each_failure(evidence, fault):
     case, data = evidence
@@ -45,12 +46,16 @@ def test_hover_gate_rejects_each_failure(evidence, fault):
         data["gt"][80:120, 1] = .6
     elif fault == "speed_spike":
         data["gt_velocity"][100, 1] = .3
-    elif fault == "aid_starvation":
+    elif fault == "posterior_starvation":
         data["imu_health"][10, 3] = 16.
     elif fault == "tilt":
         data["imu_attitude"][100, 1:5] = [0., np.sin(np.deg2rad(5.) / 2), 0., np.cos(np.deg2rad(5.) / 2)]
     elif fault == "attitude_gap":
         data["imu_attitude"] = np.delete(data["imu_attitude"], np.arange(100, 150), axis=0)
+    elif fault == "standby_selected":
+        data["attitude_source"][100, 1] = 2.
+    elif fault == "source_missing":
+        del data["attitude_source"]
     elif fault == "health_missing":
         del data["imu_health"]
     elif fault == "short_window":

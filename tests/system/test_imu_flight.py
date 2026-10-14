@@ -1,4 +1,4 @@
-"""独立姿态链路的 release 起降、持续悬停与视觉失联验收；原始证据只写 RRD。
+"""VIO 主姿态与独立 ESKF 热备的 release 起降、持续悬停与失联验收；原始证据只写 RRD。
 
 uv run pytest tests/system/test_imu_flight.py -q -k imu_hover
 需要图形会话、RMUC 资产和 release vio/fc/render/ffctl；运行前须停止其他闭环进程。

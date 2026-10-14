@@ -38,6 +38,7 @@ mod input;
 mod keypoints;
 mod mapping;
 mod odometry;
+mod prediction;
 use config::VioConfig;
 
 use input::IceoryxInput;
@@ -45,7 +46,7 @@ use input::IceoryxInput;
 /// `configs/vio.toml` 缺省路径（相对运行目录，通常为仓库根）。
 const DEFAULT_CONFIG: &str = "configs/vio.toml";
 
-/// odom 发布周期（秒）：100Hz 位置反馈；本地姿态由 FC 独立消费全部 IMU。
+/// odom 发布周期（秒）：100Hz 位置反馈；姿态由独立输出线程从 VIO 后验预测。
 const ODOM_PERIOD: f64 = 0.01;
 /// 可视化发布周期（秒）：10Hz（位姿/轨迹，防 Viz 话题洪泛）。
 const VIZ_PERIOD: f64 = 0.1;
@@ -245,15 +246,11 @@ fn run_loop(
     node: &firefly_pubsub::node::IpcNode,
     log_ipc: &firefly_observability::LogIpc,
 ) -> Result<(), firefly_error::Error> {
-    let aid_pub = firefly_pubsub::publish::Publisher::with_topic(
-        node,
-        firefly_pubsub::attitude::ATTITUDE_AID_TOPIC,
-    )?;
     let session = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| firefly_error::Error::new(firefly_error::ErrorKind::Internal, e.to_string()))?
         .as_nanos() as u64;
-    let mut last_aid = f64::NEG_INFINITY;
+    let mut prediction = prediction::Worker::spawn(vio, session)?;
     let mapping_pub =
         firefly_pubsub::publish::Publisher::<firefly_pubsub::landmarks::Keyframe>::with_topic(
             node,
@@ -305,6 +302,9 @@ fn run_loop(
     let mut stall_warned = false;
 
     let on_event = |attachment_id: WaitSetAttachmentId<ipc::Service>| {
+        if prediction.stopped() {
+            return CallbackProgression::Stop;
+        }
         let heartbeat = attachment_id.has_event_from(&tick_guard);
         // 官方纪律：唤醒后必须排空监听端，否则 fd 持续可读 → busy-loop
         let _ = imu_events.drain();
@@ -348,6 +348,7 @@ fn run_loop(
         if let Some(cam) = input.next_camera() {
             camera_count += 1;
             vio.feed_measurement_camera(&cam);
+            prediction.update(vio);
             if let Some(snapshot) = vio.mapping_snapshot.take()
                 && let Some(message) = mapping::message(&snapshot, &cam, session)
                 && let Err(error) = mapping_pub.publish(message)
@@ -380,15 +381,6 @@ fn run_loop(
         if heartbeat && !stall_warned && last_imu_wall.is_some_and(|t| t.elapsed() > IMU_STALL) {
             stall_warned = true;
             log::warn!("IMU 断流 >{IMU_STALL:?}：滤波器停更，等待 sim 恢复");
-        }
-
-        if let Some(aid) = odometry::attitude_aid(vio, session)
-            && aid.timestamp > last_aid
-        {
-            match aid_pub.publish(aid) {
-                Ok(_) => last_aid = aid.timestamp,
-                Err(error) => log::warn!("VIO 姿态外援发布失败: {error}"),
-            }
         }
 
         // 同一预测同时供里程计与可视化使用，时间戳属于预测状态。
@@ -440,6 +432,7 @@ fn run_loop(
             ));
         }
     }
+    prediction.finish()?;
     Ok(())
 }
 

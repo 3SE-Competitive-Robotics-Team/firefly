@@ -17,8 +17,8 @@ from .mission_metrics import startup_truth
 class DisturbanceMission(Mission):
     """同源 Viz 证据仅用于验收否决；不修改飞控目标、状态或估计器输入。"""
     evidence_aliases = {"fc/imu/health": "imu_health", "fc/imu/quaternion_xyzw": "imu_attitude",
-                        "fc/debug/state": "fc_state"}
-    required_evidence = {"gt", "gt_velocity", "imu_health", "imu_attitude", "fc_state"}
+                        "fc/debug/state": "fc_state", "fc/imu/source": "attitude_source"}
+    required_evidence = {"gt", "gt_velocity", "imu_health", "imu_attitude", "fc_state", "attitude_source"}
 
     def start(self, name, command):
         if name == "sim":

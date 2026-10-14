@@ -211,7 +211,7 @@ SIGUSR1 请求保存前后无损帧窗口，ERROR 日志可自动触发，窗口
 `render/capture/stages_s` 为请求→提交、提交→回读、回读→装配、装配→处理；
 `render/capture/publish_s` 为像素处理、处理结束→发布、请求→发布、帧序号。
 这些诊断不改图像时间戳；`vio/debug/camera_age` 是消费时仿真时刻减采集时刻，
-`fc/imu/health` 的外援年龄还包含视觉更新与等待下一拍的时间。
+`fc/imu/health` 的后验年龄还包含视觉更新与等待下一拍的时间。
 
 实时查看先启动 `rerun`，再运行 `uv run firefly-viz`：默认连接 `127.0.0.1:9876` 并创建
 `logs/` 下唯一 RRD。`--save logs/run.rrd` 单独使用为离线录制；加 `--serve` 同时启动原生
@@ -235,17 +235,15 @@ H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码
 
 ### 姿态与 VIO 诊断
 
-- `fc/imu/quaternion_xyzw`：控制实际使用的 Hamilton body→odom 姿态（10Hz）。
+- `fc/imu/quaternion_xyzw`：控制实际使用的 Hamilton 姿态（主链路为 body→odom，备用为 body→本地重力系）（10Hz）。
 - `fc/debug/position_target_odom` / `position_error_odom`：odom 系目标与位置误差（10Hz）。
-- `fc/imu/health`：本地可用、odom 已对齐、最后接受外援的测量年龄（秒）。
-- `fc/imu/accel_gate`：NIS、是否实际应用加计校正。
-- `fc/imu/gyro_bias`：控制输出采用的三轴零偏，rad/s。
-- `fc/imu/aid_gate`：最近一次 CI 的接受标记、六维 NIS、本地权重；未计算为 -1。
-- `fc/imu/aid_comparison`：比对旋转差（rad）和统计拒绝码；拒绝码见
-  `firefly_imu::IntersectionRejection`，零表示没有统计拒绝。
-- `fc/imu/aid_{local,external}_quaternion_xyzw`：CI 注入前、同一外援测量时刻的
-  本地 IMU 历史分支与外援姿态；测量时刻见 `aid_gate` 的第四项。
-- `fc/imu/attitude_variance` / `bias_variance`：输出协方差对角，rad² / (rad/s)²。
+- `fc/imu/health`：所选姿态可用、VIO 主链路新鲜、VIO 后验测量年龄（秒）。
+- `fc/imu/source`：0 未就绪、1 VIO 预测、2 独立 ESKF 热备（10Hz）。
+- `fc/standby/health`：独立 ESKF 可用标记、IMU 墙钟年龄（秒）。
+- `fc/standby/accel_gate`：NIS、是否实际应用地面加计校正。
+- `fc/standby/gyro_bias`、`quaternion_xyzw`、`attitude_variance`、`bias_variance`：
+  独立热备状态；姿态属于备用本地重力系，方差单位 rad² / (rad/s)²。
+- `fc/vio/gyro_bias` / `attitude_variance`：主链路采用的 VIO 零偏及传播后的姿态方差。
 - `fc/debug/tilt_deg` 与 `fc/debug/tilt_err_deg`：估计倾角与仅供评测的真值倾角误差。
 
 运行记录由 `firefly-viz` 写入 `logs/*.rrd`。
@@ -350,7 +348,7 @@ uv run pytest tests/system/test_roundtrip.py -q
 
 - 启动检查屏蔽 PlantState，保留 render 所需 GroundTruth；未启用飞行时只证明初始化与零推力。
 - IMU 三例分别检查飞行、持续悬停与 VIO 失联后的有限姿态支持。持续悬停保持原目标 20 秒，
-  独立评分整段真值、姿态与外援健康；上锁后固定等待再评分固定静止窗口，不能按真值自适应
+  独立评分整段真值、姿态与主链路健康；上锁后固定等待再评分固定静止窗口，不能按真值自适应
   推迟窗口。全过程碰撞、重置和退出检查始终有效。
 - 十轮扰动每次恢复后连续悬停，逐轮真值评分通过才发下一轮，不重发 Hold 改目标。
   失败后的未执行轮次不能记通过。

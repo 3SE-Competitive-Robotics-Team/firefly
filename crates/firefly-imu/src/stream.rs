@@ -1,5 +1,5 @@
-//! 测量时钟、静止窗口与有界延迟重放；不接受跨 VIO 会话外援。
-use crate::{AttitudeState, Gate, Intersection, Matrix6, Options, invalid};
+//! 独立 IMU 热备：测量时钟与静止窗口；不接收视觉状态或修正。
+use crate::{AttitudeState, Gate, Matrix6, Options, invalid};
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{UnitQuaternion, Vector3};
 use std::collections::VecDeque;
@@ -11,41 +11,17 @@ pub struct Sample {
     pub gyro: Vector3<f64>,
     pub accel: Vector3<f64>,
 }
-/// 同一 IMU 时刻的局部 odom 系分布；禁止传入地图校正姿态。
-#[derive(Clone, Debug)]
-pub struct Aid {
-    pub timestamp: f64,
-    pub session: u64,
-    pub state: AttitudeState,
-}
-#[derive(Clone)]
-struct Step {
-    sample: Sample,
-    state: AttitudeState,
-    stationary: bool,
-    dt: f64,
-}
-const HISTORY_CAPACITY: usize = 2048;
 const STATIONARY_CAPACITY: usize = 4096;
 
 /// 独立姿态估计器；IMU 缺口锁存，VIO 失联仍可用连续 IMU 传播。
 pub struct Estimator {
     options: Options,
-    history: VecDeque<Step>,
     window: VecDeque<Sample>,
     latest: Option<Sample>,
     state: Option<AttitudeState>,
-    /// 仅由原始 IMU 更新的本地分支；CI 后验只供控制输出，禁止回灌。
-    inertial: Option<AttitudeState>,
     rate: Vector3<f64>,
     continuous: bool,
-    aligned: bool,
-    session: Option<u64>,
-    session_fault: bool,
-    last_aid: Option<f64>,
     gate: Gate,
-    aid_gate: Intersection,
-    aid_gate_time: Option<f64>,
 }
 impl Estimator {
     /// # Errors
@@ -54,29 +30,17 @@ impl Estimator {
         options.validate()?;
         Ok(Self {
             options,
-            history: VecDeque::with_capacity(HISTORY_CAPACITY),
             window: VecDeque::with_capacity(STATIONARY_CAPACITY),
             latest: None,
             state: None,
-            inertial: None,
             rate: Vector3::zeros(),
             continuous: true,
-            aligned: false,
-            session: None,
-            session_fault: false,
-            last_aid: None,
             gate: Gate::default(),
-            aid_gate: Intersection::default(),
-            aid_gate_time: None,
         })
     }
     #[must_use]
     pub fn state(&self) -> Option<&AttitudeState> {
         self.state.as_ref().filter(|_| self.continuous)
-    }
-    #[must_use]
-    pub const fn aligned(&self) -> bool {
-        self.aligned && self.continuous
     }
     #[must_use]
     pub const fn rate(&self) -> Vector3<f64> {
@@ -86,20 +50,6 @@ impl Estimator {
     pub const fn gate(&self) -> Gate {
         self.gate
     }
-    #[must_use]
-    pub const fn aid_gate(&self) -> Intersection {
-        self.aid_gate
-    }
-    /// 最近一次完成创新检验的测量时刻，包括被拒绝的外援。
-    #[must_use]
-    pub const fn aid_gate_time(&self) -> Option<f64> {
-        self.aid_gate_time
-    }
-    #[must_use]
-    pub fn last_aid(&self) -> Option<f64> {
-        self.last_aid
-    }
-
     /// 每个时间戳只消费一次；只有地面允许静止初始化与加计修正。
     /// # Errors
     /// 非有限测量或超过 `max_dt` 的间断。间断后实例不可继续使用。
@@ -147,7 +97,7 @@ impl Estimator {
                 )
                 .ok_or_else(|| invalid("invalid stationary gyro covariance"))?,
             );
-            // 航向固定本地坐标规范；与 odom 的未知规范关系由 aligned 表达。
+            // 航向固定本地坐标规范，与 VIO 的 odom 航向独立。
             // 协方差描述此规范下的局部小角误差，不能把全局未知航向当作 π rad 误差。
             covariance
                 .fixed_view_mut::<3, 3>(0, 0)
@@ -157,28 +107,12 @@ impl Estimator {
                 bias: gyro,
                 covariance,
             });
-            self.inertial = self.state.clone();
             self.rate = sample.gyro - gyro;
         } else if let Some(state) = &mut self.state {
-            if let Some(inertial) = &mut self.inertial {
-                inertial.predict(sample.gyro, dt, &self.options)?;
-                inertial.correct_accel(sample.accel, dt, stationary, &self.options)?;
-            }
             state.predict(sample.gyro, dt, &self.options)?;
             self.gate = state.correct_accel(sample.accel, dt, stationary, &self.options)?;
             let alpha = 1. - (-std::f64::consts::TAU * self.options.rate_cutoff_hz * dt).exp();
             self.rate += (sample.gyro - state.bias - self.rate) * alpha;
-        }
-        if let Some(state) = &self.inertial {
-            if self.history.len() == HISTORY_CAPACITY {
-                self.history.pop_front();
-            }
-            self.history.push_back(Step {
-                sample,
-                state: state.clone(),
-                stationary,
-                dt,
-            });
         }
         Ok(true)
     }
@@ -238,104 +172,5 @@ impl Estimator {
             && av.max()
                 <= self.options.stationary_accel_std.powi(2)
                     + self.options.accel_density.powi(2) * noise_scale
-    }
-
-    /// 外援在其观测时刻融合，再按已接收 IMU 重放到当前时刻。
-    /// 首次外援只确定 odom 航向规范；所有外援均通过 CI 保留静止标定信息。
-    /// # Errors
-    /// 外援非有限、协方差无效或会话变化。乱序/缓存外外援返回 false。
-    #[fastrace::trace]
-    #[allow(clippy::float_cmp)] // 测量时间戳相等时复用已完成的样本更新
-    pub fn aid(&mut self, aid: &Aid) -> Result<bool> {
-        aid.state.validate()?;
-        if !aid.timestamp.is_finite() || aid.timestamp < 0. || aid.session == 0 {
-            return Err(invalid("invalid attitude aid metadata"));
-        }
-        if self.session_fault || self.session.is_some_and(|s| s != aid.session) {
-            self.session_fault = true;
-            self.aligned = false;
-            return Err(Error::new(
-                ErrorKind::Unsupported,
-                "VIO session changed; FC restart required",
-            ));
-        }
-        if !self.continuous
-            || self.last_aid().is_some_and(|t| aid.timestamp <= t)
-            || self
-                .history
-                .back()
-                .is_none_or(|s| aid.timestamp > s.sample.timestamp)
-            || self
-                .history
-                .front()
-                .is_none_or(|s| aid.timestamp < s.sample.timestamp)
-        {
-            return Ok(false);
-        }
-        let Some(index) = self
-            .history
-            .iter()
-            .rposition(|s| s.sample.timestamp <= aid.timestamp)
-        else {
-            return Ok(false);
-        };
-        let base = &self.history[index];
-        let base_time = base.sample.timestamp;
-        let mut state = base.state.clone();
-        if aid.timestamp > base_time {
-            state.predict(
-                self.history[index + 1].sample.gyro,
-                aid.timestamp - base_time,
-                &self.options,
-            )?;
-        }
-        let mut alignment = None;
-        if self.session.is_none() {
-            // 左乘世界竖直轴旋转只改变航向规范，机体系右误差协方差与零偏不变。
-            // 重力确定的倾角和静止陀螺标定不能被首次视觉分布覆盖。
-            let heading = |rotation: &UnitQuaternion<f64>| {
-                let forward = rotation * Vector3::x();
-                if forward.x.hypot(forward.y) < 1e-6 {
-                    return Err(invalid("undefined heading for attitude alignment"));
-                }
-                Ok(forward.y.atan2(forward.x))
-            };
-            let yaw = heading(&aid.state.rotation)? - heading(&state.rotation)?;
-            let rotation = UnitQuaternion::from_scaled_axis(Vector3::z() * yaw);
-            state.rotation = rotation * state.rotation;
-            alignment = Some(rotation);
-        }
-        self.aid_gate = state.intersect_diagnostic(&aid.state)?;
-        self.aid_gate_time = Some(aid.timestamp);
-        if !self.aid_gate.accepted {
-            return Ok(false);
-        }
-        if let Some(rotation) = alignment {
-            for step in &mut self.history {
-                step.state.rotation = rotation * step.state.rotation;
-            }
-            if let Some(inertial) = &mut self.inertial {
-                inertial.rotation = rotation * inertial.rotation;
-            }
-        }
-        let mut previous = aid.timestamp;
-        for step in self.history.iter().skip(index + 1) {
-            state.predict(
-                step.sample.gyro,
-                step.sample.timestamp - previous,
-                &self.options,
-            )?;
-            self.gate =
-                state.correct_accel(step.sample.accel, step.dt, step.stationary, &self.options)?;
-            previous = step.sample.timestamp;
-        }
-        if let Some(old) = &self.state {
-            self.rate += old.bias - state.bias;
-        }
-        self.state = Some(state);
-        self.session = Some(aid.session);
-        self.last_aid = Some(aid.timestamp);
-        self.aligned = true;
-        Ok(true)
     }
 }

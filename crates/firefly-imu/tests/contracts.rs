@@ -1,8 +1,8 @@
 //! 独立解析、有限差分与最终输出契约；时间单位秒，角度单位 rad。
 #![allow(clippy::float_cmp)]
 use firefly_imu::{
-    Aid, AttitudeState, Estimator, IntersectionRejection, Matrix6, Options, Sample,
-    gravity_jacobian, right_jacobian, transition,
+    AttitudeState, Estimator, Matrix6, Options, Sample, gravity_jacobian, right_jacobian,
+    transition,
 };
 use nalgebra::{Matrix3, SVector, UnitQuaternion, Vector3};
 fn state() -> AttitudeState {
@@ -13,73 +13,6 @@ fn state() -> AttitudeState {
     }
 }
 
-#[test]
-fn aid_diagnostics_preserve_joint_nis_and_rejection() {
-    for bias_z in [0.0001, -0.0019] {
-        let mut local = state();
-        let mut external = state();
-        for axis in 0..3 {
-            local.covariance[(axis + 3, axis + 3)] = 5e-8;
-            external.covariance[(axis + 3, axis + 3)] = 1e-8;
-        }
-        // 相关的 x/z 零偏，解析逆矩阵保留非对角项。
-        local.covariance[(3, 5)] = 2e-8;
-        local.covariance[(5, 3)] = 2e-8;
-        external.bias.z = bias_z;
-        let before = local.clone();
-        let result = local.intersect_diagnostic(&external).unwrap();
-        let variance = 2. * (5e-8 + 1e-8);
-        let cross = 2. * 2e-8;
-        let expected = bias_z * bias_z * variance / (variance * variance - cross * cross);
-        assert!((result.nis.unwrap() - expected).abs() < 1e-12);
-        assert!(
-            (result
-                .whitened_residual
-                .unwrap()
-                .iter()
-                .map(|x| x * x)
-                .sum::<f64>()
-                - expected)
-                .abs()
-                < 1e-12
-        );
-        assert_eq!(result.residual.unwrap(), [0., 0., 0., 0., 0., bias_z]);
-        assert!((result.residual_variance.unwrap()[5] - variance).abs() < 1e-20);
-        assert_eq!(result.accepted, bias_z > 0.);
-        assert_eq!(
-            result.rejection,
-            (bias_z < 0.).then_some(IntersectionRejection::Innovation)
-        );
-        if !result.accepted {
-            assert_eq!(local.rotation, before.rotation);
-            assert_eq!(local.bias, before.bias);
-            assert_eq!(local.covariance, before.covariance);
-        }
-    }
-}
-
-#[test]
-fn angular_rejection_preserves_comparison_and_does_not_inject() {
-    let mut local = state();
-    let mut external = state();
-    external.rotation = UnitQuaternion::from_scaled_axis(Vector3::z() * 0.6);
-    let before = local.clone();
-    let result = local.intersect_diagnostic(&external).unwrap();
-    assert_eq!(
-        result.rejection,
-        Some(IntersectionRejection::RotationDistance)
-    );
-    assert!(!result.accepted);
-    assert!(result.nis.is_none() && result.local_weight.is_none());
-    assert!((result.rotation_distance().unwrap() - 0.6).abs() < 1e-12);
-    assert_eq!(result.local_quat_xyzw.unwrap(), [0., 0., 0., 1.]);
-    let external_quat: [f64; 4] = external.rotation.coords.into();
-    assert_eq!(result.external_quat_xyzw.unwrap(), external_quat);
-    assert!((result.residual.unwrap()[2] - 0.6).abs() < 1e-12);
-    assert_eq!(local.rotation, before.rotation);
-    assert_eq!(local.bias, before.bias);
-    assert_eq!(local.covariance, before.covariance);
-}
 fn sample(t: f64) -> Sample {
     Sample {
         timestamp: t,
@@ -96,35 +29,6 @@ fn initialized() -> Estimator {
     e
 }
 
-#[test]
-fn rejected_aid_records_measurement_time_without_refreshing_health() {
-    let mut estimator = initialized();
-    let mut aid = Aid {
-        timestamp: 2.1,
-        session: 7,
-        state: state(),
-    };
-    assert!(estimator.aid(&aid).unwrap());
-    for i in 211..=220 {
-        estimator
-            .observe(sample(f64::from(i) * 0.01), false)
-            .unwrap();
-    }
-    aid.timestamp = 2.2;
-    aid.state.bias.z = 0.01;
-    aid.state.covariance *= 1e-6;
-    let before = estimator.state().unwrap().clone();
-    assert!(!estimator.aid(&aid).unwrap());
-    assert_eq!(estimator.aid_gate_time(), Some(2.2));
-    assert_eq!(estimator.last_aid(), Some(2.1));
-    assert!(estimator.aid_gate().nis.unwrap() > 22.457_744_484_825_323);
-    assert_eq!(estimator.state().unwrap().covariance, before.covariance);
-    assert_eq!(estimator.state().unwrap().bias, before.bias);
-    assert_eq!(estimator.state().unwrap().rotation, before.rotation);
-    aid.timestamp = 10.;
-    assert!(!estimator.aid(&aid).unwrap());
-    assert_eq!(estimator.aid_gate_time(), Some(2.2));
-}
 fn perturb(s: &AttitudeState, delta: SVector<f64, 6>) -> AttitudeState {
     AttitudeState {
         rotation: s.rotation
@@ -285,52 +189,7 @@ fn nis_matches_scalar_analytic_value_and_rejects_outliers_without_forced_recover
     assert!(gate.nis < o.accel_nis_limit);
     assert!(!gate.accepted);
 }
-#[test]
-fn correlated_identical_estimates_do_not_double_count_information() {
-    let mut a = state();
-    let original = a.clone();
-    for _ in 0..20 {
-        assert!(a.intersect(&original).unwrap());
-    }
-    assert!((a.covariance - original.covariance).amax() < 1e-12);
-    let mut b = original.clone();
-    b.rotation = UnitQuaternion::from_scaled_axis(Vector3::y() * 0.01);
-    b.covariance *= 0.1;
-    assert!(a.intersect(&b).unwrap());
-    assert!((a.rotation.inverse() * b.rotation).angle() < 1e-8);
-    a.validate().unwrap();
-    b.rotation = UnitQuaternion::from_scaled_axis(Vector3::x());
-    assert!(!a.intersect(&b).unwrap());
-}
-#[test]
-fn first_visual_aid_aligns_yaw_without_discarding_stationary_bias() {
-    for yaw in [-1.7, 0., 2.4] {
-        let mut e = initialized();
-        let before = e.state().unwrap().clone();
-        let mut visual = state();
-        visual.rotation = UnitQuaternion::from_euler_angles(0., 0.01, yaw);
-        visual.bias = Vector3::new(0., 0.008, 0.);
-        visual.covariance = Matrix6::identity() * 0.02_f64.powi(2);
-        assert!(
-            e.aid(&Aid {
-                timestamp: 2.1,
-                session: 7,
-                state: visual
-            })
-            .unwrap()
-        );
-        let after = e.state().unwrap();
-        assert!((after.rotation.euler_angles().2 - yaw).abs() < 1e-5);
-        assert!((after.bias - before.bias).norm() < 1e-4);
-        assert!((after.rotation.inverse() * Vector3::z() - Vector3::z()).norm() < 1e-3);
-        // 零角速度下倾角漂移应受静止零偏精度约束：20 秒仍低于 0.2°。
-        for i in 211..=2210 {
-            e.observe(sample(f64::from(i) * 0.01), false).unwrap();
-        }
-        let up = e.state().unwrap().rotation * Vector3::z();
-        assert!(up.z.acos() < 0.2_f64.to_radians());
-    }
-}
+
 #[test]
 fn stationary_initialization_estimates_tilt_bias_and_rejects_motion() {
     let o = Options::default();
@@ -355,7 +214,6 @@ fn stationary_initialization_estimates_tilt_bias_and_rejects_motion() {
         (state.rotation.inverse() * Vector3::z() - rotation.inverse() * Vector3::z()).norm()
             < 1e-10
     );
-    assert!(!e.aligned());
 }
 #[test]
 fn constant_gyro_follows_analytic_rotation_at_multiple_sample_rates() {
@@ -372,107 +230,14 @@ fn constant_gyro_follows_analytic_rotation_at_multiple_sample_rates() {
     }
 }
 #[test]
-fn timestamps_gap_and_session_changes_cannot_silently_reset_estimator() {
+fn timestamps_and_gaps_cannot_silently_reset_estimator() {
     let mut e = initialized();
     let before = e.state().unwrap().clone();
     assert!(!e.observe(sample(2.1), true).unwrap());
     assert!(!e.observe(sample(1.), true).unwrap());
     assert_eq!(e.state().unwrap().covariance, before.covariance);
-    let aid = Aid {
-        timestamp: 2.1,
-        session: 1,
-        state: state(),
-    };
-    assert!(e.aid(&aid).unwrap());
-    assert!(e.aligned());
-    assert!(
-        e.aid(&Aid {
-            session: 2,
-            ..aid.clone()
-        })
-        .is_err()
-    );
-    assert!(!e.aligned());
-    assert!(e.aid(&aid).is_err());
     assert!(e.observe(sample(3.), false).is_err());
     assert!(e.state().is_none());
-}
-#[test]
-fn delayed_aid_replay_equals_on_time_update_and_rejects_uncovered_time() {
-    let mut a = initialized();
-    let mut b = initialized();
-    let first = Aid {
-        timestamp: 2.1,
-        session: 7,
-        state: state(),
-    };
-    assert!(a.aid(&first).unwrap());
-    assert!(b.aid(&first).unwrap());
-    let mut aid = first.clone();
-    aid.timestamp = 2.205;
-    aid.state.rotation = UnitQuaternion::from_scaled_axis(Vector3::z() * 0.015);
-    // 2.205 位于两个 IMU 样本间；a 最早在 2.21 收到，b 在 2.50 收到。
-    for i in 211..=250 {
-        let mut s = sample(f64::from(i) * 0.01);
-        s.gyro = Vector3::z() * 0.1;
-        a.observe(s, false).unwrap();
-        b.observe(s, false).unwrap();
-        if i == 221 {
-            assert!(a.aid(&aid).unwrap());
-        }
-    }
-    assert!(b.aid(&aid).unwrap());
-    assert!((a.state().unwrap().rotation.inverse() * b.state().unwrap().rotation).angle() < 1e-12);
-    assert!((a.state().unwrap().covariance - b.state().unwrap().covariance).amax() < 1e-12);
-    assert!(!b.aid(&aid).unwrap());
-    aid.timestamp = 10.;
-    assert!(!b.aid(&aid).unwrap());
-}
-#[test]
-fn visual_posteriors_do_not_contaminate_the_inertial_branch() {
-    let mut a = initialized();
-    let mut b = initialized();
-    let first = Aid {
-        timestamp: 2.1,
-        session: 7,
-        state: state(),
-    };
-    assert!(a.aid(&first).unwrap());
-    assert!(b.aid(&first).unwrap());
-    for i in 211..=250 {
-        let mut s = sample(f64::from(i) * 0.01);
-        s.gyro = Vector3::z() * 0.1;
-        a.observe(s, false).unwrap();
-        b.observe(s, false).unwrap();
-    }
-    let mut intermediate = state();
-    intermediate.rotation = UnitQuaternion::from_euler_angles(0., 0.002, 0.02);
-    intermediate.bias.y = 0.0002;
-    intermediate.covariance *= 0.01;
-    assert!(
-        a.aid(&Aid {
-            timestamp: 2.205,
-            session: 7,
-            state: intermediate
-        })
-        .unwrap()
-    );
-    // 同一 IMU 区间的下一份外援应与直接接收它一致，不重用上一份视觉后验。
-    let mut final_state = state();
-    final_state.rotation = UnitQuaternion::from_scaled_axis(Vector3::z() * 0.0107);
-    final_state.covariance *= 1e-9;
-    let final_aid = Aid {
-        timestamp: 2.207,
-        session: 7,
-        state: final_state,
-    };
-    assert!(a.aid(&final_aid).unwrap());
-    assert!(b.aid(&final_aid).unwrap());
-    let expected = UnitQuaternion::from_scaled_axis(Vector3::z() * 0.04);
-    assert!((a.state().unwrap().rotation.inverse() * expected).angle() < 1e-12);
-    assert!((a.state().unwrap().rotation.inverse() * b.state().unwrap().rotation).angle() < 1e-12);
-    assert!((a.state().unwrap().covariance - b.state().unwrap().covariance).amax() < 1e-12);
-    assert!((a.state().unwrap().bias - b.state().unwrap().bias).norm() < 1e-12);
 }
 
 #[test]
@@ -586,56 +351,7 @@ fn stationary_noise_preserves_the_chosen_yaw_gauge() {
             }
         }
         assert!(estimator.state().is_some());
-        assert!(!estimator.aligned());
     }
-}
-
-#[test]
-fn noisy_ground_alignment_and_delayed_aids_keep_the_inertial_comparison_consistent() {
-    let options = Options::default();
-    let mut estimator = Estimator::new(options).unwrap();
-    let mut seed = 0x1234_5678_u32;
-    let mut noise = || {
-        seed ^= seed << 13;
-        seed ^= seed >> 17;
-        seed ^= seed << 5;
-        (f64::from(seed) / f64::from(u32::MAX) * 2. - 1.) * 3_f64.sqrt()
-    };
-    let mut accepted = 0;
-    for i in 0..=4000 {
-        let mut measured = sample(f64::from(i) * 0.001);
-        measured.gyro =
-            Vector3::from_fn(|_, _| noise()) * (options.gyro_density / 0.001_f64.sqrt());
-        measured.accel +=
-            Vector3::from_fn(|_, _| noise()) * (options.accel_density / 0.001_f64.sqrt());
-        estimator.observe(measured, i < 2920).unwrap();
-        if i >= 2350 && (i - 2350) % 100 == 0 {
-            let mut visual = state();
-            visual.rotation = UnitQuaternion::from_scaled_axis(Vector3::z() * 1.2);
-            visual
-                .covariance
-                .fixed_view_mut::<3, 3>(3, 3)
-                .copy_from(&(Matrix3::identity() * 2e-8));
-            let timestamp = f64::from(i - 150) * 0.001;
-            assert!(
-                estimator
-                    .aid(&Aid {
-                        timestamp,
-                        session: 7,
-                        state: visual
-                    })
-                    .unwrap(),
-                "valid static attitude must pass after delayed alignment: {:?}",
-                estimator.aid_gate()
-            );
-            accepted += 1;
-            assert_eq!(estimator.last_aid(), Some(timestamp));
-            assert!(estimator.aid_gate().rotation_distance().unwrap() < 0.01);
-            assert!((estimator.state().unwrap().rotation.euler_angles().2 - 1.2).abs() < 0.01);
-        }
-    }
-    assert_eq!(accepted, 17);
-    assert!(estimator.aligned());
 }
 
 #[test]

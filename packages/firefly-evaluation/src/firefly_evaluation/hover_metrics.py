@@ -9,8 +9,8 @@ from .mission_metrics import landing_truth, read_evidence, settled_truth, startu
 @dataclass(frozen=True)
 class HoverLimits:
     seconds: float = 20.0
-    # 10Hz 视觉外援的测量年龄预算；只用于验收，不改变飞控的创新门。
-    aid_age_s: float = 0.5
+    # VIO 后验的测量年龄预算；只用于验收，不改变飞控新鲜度门限。
+    posterior_age_s: float = 0.5
     tilt_error_deg: float = 2.0
 
 
@@ -36,6 +36,7 @@ def body_gravity(quaternions):
 
 
 def attitude_health(data, start, end, limits):
+    source = covered_window(data["attitude_source"], start, end, 1.2)
     health = covered_window(data["imu_health"], start, end, 1.2)
     attitude = covered_window(data["imu_attitude"], start, end, .2)
     truth = covered_window(data["gt"], start, end, .2)
@@ -48,9 +49,9 @@ def attitude_health(data, start, end, limits):
     estimated = body_gravity(attitude[:, 1:5])
     angles = np.rad2deg(np.arccos(np.clip(np.sum(actual * estimated, axis=1), -1., 1.)))
     max_age, max_tilt = float(health[:, 3].max()), float(angles.max())
-    passed = (np.all(health[:, 1:3] == 1.) and np.all(health[:, 3] >= 0.)
-              and max_age <= limits.aid_age_s and max_tilt <= limits.tilt_error_deg)
-    return bool(passed), {"max_aid_age_s": max_age, "max_tilt_error_deg": max_tilt,
+    passed = (np.all(source[:, 1] == 1.) and np.all(health[:, 1:3] == 1.) and np.all(health[:, 3] >= 0.)
+              and max_age <= limits.posterior_age_s and max_tilt <= limits.tilt_error_deg)
+    return bool(passed), {"max_posterior_age_s": max_age, "max_tilt_error_deg": max_tilt,
                           "health_samples": len(health), "attitude_samples": len(attitude)}
 
 

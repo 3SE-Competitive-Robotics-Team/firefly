@@ -1,4 +1,4 @@
-//! FC 姿态领域：Hamilton body→odom，右误差 `[δθ, δbg]`，SI 单位。
+//! FC 姿态领域：Hamilton body→本地重力系，右误差 `[δθ, δbg]`，SI 单位。
 //! 原始 IMU 同时供 VIO 消费；此库不拥有线程、IPC 或控制器。
 
 mod eskf;
@@ -6,13 +6,10 @@ mod stationary;
 mod stream;
 pub use stationary::gyro_mean_covariance;
 
-pub use eskf::{
-    AttitudeState, Gate, Intersection, IntersectionRejection, Matrix6, gravity_jacobian,
-    right_jacobian, transition,
-};
+pub use eskf::{AttitudeState, Gate, Matrix6, gravity_jacobian, right_jacobian, transition};
 use firefly_error::{Error, ErrorKind, Result};
 use serde::Deserialize;
-pub use stream::{Aid, Estimator, Sample};
+pub use stream::{Estimator, Sample};
 
 /// 噪声密度为连续时间标准差；方差按实际测量间隔离散化。
 #[derive(Clone, Copy, Debug, Deserialize)]

@@ -5,8 +5,8 @@
 //! - `Firefly/Airframe`（质量/惯量/旋翼几何/电机上限，1Hz 电平）——飞控参数的唯一来源；
 //! - `Firefly/Odometry`——连续 odom 系位置/速度/航向反馈；
 //! - `Firefly/CorrectedOdometry`——同时间戳配对建立 map←odom，转换地图参考；
-//! - `Firefly/Imu`（陀螺 + 加计，1kHz）——独立线程的姿态 ESKF；
-//! - `Firefly/VioAttitudeAid`——odom 系姿态、零偏与六维协方差外援；
+//! - `Firefly/Imu`（陀螺 + 加计，1kHz）——独立线程的备用姿态 ESKF；
+//! - `Firefly/VioAttitude`——VIO 后验的高频姿态与角速度预测；
 //! - `Firefly/Reference`（规划参考：位置/速度/偏航/偏航角速度）；
 //! - `Firefly/Command`（地面站指令：解锁/上锁/起飞/保持/跟踪/降落）。
 //!
@@ -14,8 +14,8 @@
 //! 上锁时发零推力：被控对象按指令新鲜度决定物理是否推进，飞控停发等于世界停转。
 //!
 //! [`FlightFsm`] 根据估计状态和健康条件生成参考与电机使能信号。
-//! 内环读取 IMU 线程的姿态与去偏角速度，位置/速度来自局部里程计。
-//! 真值只用于评测。姿态估计与 VIO 外援约定见 `docs/architecture.md#imu`。
+//! 内环正常读取 VIO 预测，降级读取独立 ESKF 的姿态与去偏角速度，位置/速度来自局部里程计。
+//! 真值只用于评测。姿态主备选择约定见 `docs/architecture.md#imu`。
 //!
 //! 控制节拍使用墙钟，诊断时间取自 IMU。未就绪时持续发零推力，使被控对象能产生初始化测量。
 //!
@@ -24,6 +24,7 @@
 //!
 //! 运行：`cargo run --release -p fc`（配合 `uv run firefly-sim`）。
 
+mod attitude;
 mod config;
 mod frames;
 mod imu;
@@ -37,6 +38,7 @@ use firefly_flight::{
     Airframe, Command, ControlParams, Event, FlightFsm, FsmParams, Health, PositionSetpoint,
     QuadParams, QuadState, attitude_support, position_mode,
 };
+use firefly_pubsub::attitude::{ATTITUDE_TOPIC, AttitudeMessage};
 use firefly_pubsub::command::{COMMAND_TOPIC, CommandMessage, kind as command_kind};
 use firefly_pubsub::control::{CONTROL_BUFFER_SIZE, CONTROL_TOPIC, ControlMessage};
 use firefly_pubsub::node::{IpcNode, create_node};
@@ -119,6 +121,7 @@ struct Inputs {
     imu_time: f64,
     /// 独立 IMU 工作线程发布的完整快照。
     attitude: Option<imu::Snapshot>,
+    primary: attitude::Input,
     /// 参考（位置/速度/偏航/偏航角速度）与到达墙钟时刻（判新鲜）。
     reference: Option<(ReferenceMessage, Instant)>,
     /// 最新地面站指令（序号最大的那条）。
@@ -131,6 +134,7 @@ struct Ports {
     airframe: Subscriber<AirframeMessage>,
     odom: Subscriber<OdomMessage>,
     corrected: Subscriber<OdomMessage>,
+    attitude: Subscriber<AttitudeMessage>,
     reference: Subscriber<ReferenceMessage>,
     command: Subscriber<CommandMessage>,
     control: Publisher<ControlMessage>,
@@ -152,6 +156,7 @@ impl Ports {
             )?,
             odom: Subscriber::with_topic(node, ODOM_TOPIC)?,
             corrected: Subscriber::with_topic(node, CORRECTED_ODOM_TOPIC)?,
+            attitude: Subscriber::with_topic(node, ATTITUDE_TOPIC)?,
             reference: Subscriber::with_topic(node, REFERENCE_TOPIC)?,
             command: Subscriber::with_topic(node, COMMAND_TOPIC)?,
             control: Publisher::with_topic_and_buffer(
@@ -171,6 +176,9 @@ impl Ports {
     /// 非阻塞排空控制输入，保留每个话题的最新有效消息。
     #[allow(clippy::too_many_lines)]
     fn drain(&self, inputs: &mut Inputs) -> Result<(), firefly_error::Error> {
+        while let Some(sample) = self.attitude.receive()? {
+            inputs.primary.observe(*sample, Instant::now());
+        }
         while let Some(sample) = self.plant.receive()? {
             inputs.plant = Some((*sample, Instant::now()));
         }
@@ -287,14 +295,15 @@ fn airframe_to_params(msg: &AirframeMessage) -> (QuadParams, Airframe) {
 fn health_of(inputs: &Inputs) -> Health {
     Health {
         estimator_ready: inputs.estimate.is_some_and(|e| e.initialized)
-            && inputs.attitude.is_some_and(|s| s.ready && s.aligned),
+            && inputs.primary.fresh(inputs.imu_time),
         airframe_ready: inputs.vehicle.is_some(),
         odometry_alive: inputs
             .estimate
             .is_some_and(|e| e.received_at.elapsed() <= ODOM_STALE_LIMIT),
         imu_alive: inputs
             .attitude
-            .is_some_and(|s| s.received.elapsed() <= IMU_STALE_LIMIT),
+            .is_some_and(|s| s.ready && s.received.elapsed() <= IMU_STALE_LIMIT)
+            || inputs.primary.fresh(inputs.imu_time),
     }
 }
 
@@ -350,9 +359,11 @@ fn report_event(event: Event) {
 
 /// 控制环的跨 tick 状态。
 struct Controller {
-    /// 最近一次控制使用的本地姿态；测量与协方差归 IMU 线程所有。
+    /// 最近一次控制使用的姿态；所属航向系由 source 决定。
     attitude: UnitQuaternion<f32>,
     attitude_ready: bool,
+    source: attitude::Source,
+    standby_yaw: f32,
     position_error: Vector3<f32>,
     position_target: Vector3<f32>,
     /// 飞行状态机（模式与安全层）。
@@ -370,6 +381,8 @@ impl Controller {
         Self {
             attitude: UnitQuaternion::identity(),
             attitude_ready: false,
+            source: attitude::Source::Unavailable,
+            standby_yaw: 0.,
             position_error: Vector3::zeros(),
             position_target: Vector3::zeros(),
             fsm: FlightFsm::new(fsm),
@@ -381,7 +394,18 @@ impl Controller {
 
     /// 空中失联只用 IMU 维持姿态支持；禁止陈旧位置进入控制律。
     fn motor_output(&mut self, inputs: &Inputs, dt: f32, ctl: &ControlParams) -> ([f32; 4], bool) {
-        let (attitude, ang_vel) = self.attitude_and_rates(inputs);
+        let health = health_of(inputs);
+        let recovering = self.fsm.state() == firefly_flight::FlightState::AttitudeFallback
+            && health.estimator_ready
+            && health.odometry_alive
+            && inputs.command.is_some_and(|m| {
+                m.sequence > self.last_command_seq
+                    && matches!(m.kind, command_kind::HOLD | command_kind::LAND)
+            });
+        let standby = !health.estimator_ready
+            || !health.odometry_alive
+            || (self.fsm.state() == firefly_flight::FlightState::AttitudeFallback && !recovering);
+        let (attitude, ang_vel) = self.attitude_and_rates(inputs, standby);
         let (position, velocity) = inputs
             .estimate
             .map_or((Vector3::zeros(), Vector3::zeros()), |est| {
@@ -393,8 +417,13 @@ impl Controller {
             attitude,
             ang_vel,
         };
-        let health = health_of(inputs);
-        self.apply_command(inputs.command, health, &state);
+        let mut command_health = health;
+        if inputs.command.is_some_and(|m| m.kind == command_kind::ARM) {
+            command_health.estimator_ready &= inputs
+                .attitude
+                .is_some_and(|s| s.ready && s.received.elapsed() <= IMU_STALE_LIMIT);
+        }
+        self.apply_command(inputs.command, command_health, &state);
         let reference = fresh_reference(inputs);
         let out = self.fsm.update(dt, &state, reference.as_ref(), health);
         self.position_target = out.setpoint.position;
@@ -408,7 +437,7 @@ impl Controller {
             return ([0.0; 4], false);
         };
         let desired = if self.fsm.state() == firefly_flight::FlightState::AttitudeFallback {
-            attitude_support(attitude, ang_vel, out.setpoint.yaw, &quad, ctl)
+            attitude_support(attitude, ang_vel, self.standby_yaw, &quad, ctl)
         } else {
             if !health.estimator_ready || !health.odometry_alive {
                 return ([0.; 4], false);
@@ -470,16 +499,37 @@ impl Controller {
         }
     }
 
-    /// 姿态环读取本地 ESKF，角速度反馈来自去偏低通后的陀螺。
-    fn attitude_and_rates(&mut self, inputs: &Inputs) -> (UnitQuaternion<f32>, Vector3<f32>) {
-        self.attitude_ready = inputs
-            .attitude
-            .is_some_and(|s| s.ready && s.received.elapsed() <= IMU_STALE_LIMIT);
-        if self.attitude_ready
-            && let Some(snapshot) = inputs.attitude
-        {
-            self.attitude = snapshot.rotation;
-            (snapshot.rotation, snapshot.rate)
+    /// 主备只选择、不融合；降级锁存的航向目标属于备用 ESKF 的本地重力系。
+    fn attitude_and_rates(
+        &mut self,
+        inputs: &Inputs,
+        standby: bool,
+    ) -> (UnitQuaternion<f32>, Vector3<f32>) {
+        let selected = if standby {
+            inputs
+                .attitude
+                .filter(|s| s.ready && s.received.elapsed() <= IMU_STALE_LIMIT)
+                .map(|s| (s.rotation, s.rate, attitude::Source::Standby))
+        } else {
+            inputs
+                .primary
+                .latest
+                .filter(|_| inputs.primary.fresh(inputs.imu_time))
+                .map(|s| (s.rotation, s.rate, attitude::Source::Vio))
+        };
+        self.attitude_ready = selected.is_some();
+        let source = selected.map_or(attitude::Source::Unavailable, |(_, _, source)| source);
+        if source != self.source {
+            log::info!("姿态源 {} → {}", self.source.name(), source.name());
+            if let Some((rotation, _, attitude::Source::Standby)) = selected {
+                let forward = rotation * Vector3::x();
+                self.standby_yaw = forward.y.atan2(forward.x);
+            }
+            self.source = source;
+        }
+        if let Some((rotation, rate, _)) = selected {
+            self.attitude = rotation;
+            (rotation, rate)
         } else {
             (self.attitude, Vector3::zeros())
         }
@@ -498,6 +548,12 @@ impl Controller {
             return;
         }
         self.last_viz = sim_time;
+        publish_scalars(
+            ports.viz_ref(),
+            sim_time,
+            "fc/imu/source",
+            &[self.source.code()],
+        );
         publish_scalars(
             ports.viz_ref(),
             sim_time,
@@ -689,90 +745,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stats.max_late.as_secs_f64() * 1e3,
                 stats.saturated as f64 / stats.published.max(1) as f64 * 100.0,
                 stats.imu as f64 / window.as_secs_f64(),
-                inputs
-                    .attitude
-                    .map_or("等待 IMU", |s| s.source(ODOM_STALE_LIMIT)),
+                controller.source.name(),
+            );
+            publish_scalars(
+                &ports.viz,
+                sim_time,
+                "fc/imu/health",
+                &[
+                    f64::from(controller.attitude_ready),
+                    f64::from(inputs.primary.fresh(sim_time)),
+                    inputs
+                        .primary
+                        .latest
+                        .map_or(-1., |s| sim_time - s.message.posterior_time),
+                ],
             );
             if let Some(s) = inputs.attitude {
                 publish_scalars(
                     &ports.viz,
                     sim_time,
-                    "fc/imu/health",
-                    &[
-                        f64::from(s.ready),
-                        f64::from(s.aligned),
-                        s.aid_time.map_or(-1., |t| sim_time - t),
-                    ],
+                    "fc/standby/health",
+                    &[f64::from(s.ready), s.received.elapsed().as_secs_f64()],
                 );
                 publish_scalars(
                     &ports.viz,
                     sim_time,
-                    "fc/imu/accel_gate",
+                    "fc/standby/accel_gate",
                     &[s.nis, f64::from(s.accel_accepted)],
                 );
-                publish_scalars(&ports.viz, sim_time, "fc/imu/gyro_bias", &s.bias);
+                publish_scalars(&ports.viz, sim_time, "fc/standby/gyro_bias", &s.bias);
                 publish_scalars(
                     &ports.viz,
                     sim_time,
-                    "fc/imu/aid_gate",
-                    &[
-                        f64::from(s.aid_gate.accepted),
-                        s.aid_gate.nis.unwrap_or(-1.),
-                        s.aid_gate.local_weight.unwrap_or(-1.),
-                        s.aid_gate_time.unwrap_or(-1.),
-                    ],
+                    "fc/standby/quaternion_xyzw",
+                    s.rotation.coords.map(f64::from).as_slice(),
                 );
                 publish_scalars(
                     &ports.viz,
                     sim_time,
-                    "fc/imu/attitude_variance",
+                    "fc/standby/attitude_variance",
                     &s.covariance_diagonal[..3],
                 );
                 publish_scalars(
                     &ports.viz,
                     sim_time,
-                    "fc/imu/aid_comparison",
-                    &[
-                        s.aid_gate.rotation_distance().unwrap_or(-1.),
-                        s.aid_gate
-                            .rejection
-                            .map_or(0., |reason| f64::from(reason as u8)),
-                    ],
+                    "fc/standby/bias_variance",
+                    &s.covariance_diagonal[3..],
                 );
-                for (name, values) in [
-                    ("local", s.aid_gate.local_quat_xyzw),
-                    ("external", s.aid_gate.external_quat_xyzw),
-                ] {
-                    if let Some(values) = values {
-                        publish_scalars(
-                            &ports.viz,
-                            sim_time,
-                            &format!("fc/imu/aid_{name}_quaternion_xyzw"),
-                            &values,
-                        );
-                    }
-                }
-                for (name, values) in [
-                    ("residual", s.aid_gate.residual),
-                    ("residual_variance", s.aid_gate.residual_variance),
-                    ("whitened_residual", s.aid_gate.whitened_residual),
-                ] {
-                    if let Some(values) = values {
-                        for (part, values) in values.chunks(3).enumerate() {
-                            publish_scalars(
-                                &ports.viz,
-                                sim_time,
-                                &format!("fc/imu/aid_{name}/{part}"),
-                                values,
-                            );
-                        }
-                    }
-                }
+            }
+            if let Some(s) = inputs.primary.latest {
                 publish_scalars(
                     &ports.viz,
                     sim_time,
-                    "fc/imu/bias_variance",
-                    &s.covariance_diagonal[3..],
+                    "fc/vio/gyro_bias",
+                    &s.message.gyro_bias,
+                );
+                publish_scalars(
+                    &ports.viz,
+                    sim_time,
+                    "fc/vio/attitude_variance",
+                    &s.message.attitude_variance,
                 );
             }
             publish_scalars(&ports.viz, sim_time, "fc/debug/tick_rate", &[rate]);
@@ -806,31 +838,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn attitude_source_distinguishes_alignment_rejection_and_stale_aid() {
-        let mut snapshot = sensor_inputs().attitude.unwrap();
-        snapshot.aid_gate.accepted = true;
-        assert_eq!(snapshot.source(ODOM_STALE_LIMIT), "本地 ESKF + VIO CI");
-        snapshot.aid_gate.accepted = false;
-        assert_eq!(
-            snapshot.source(ODOM_STALE_LIMIT),
-            "CI 后验 IMU 传播（外援拒绝）"
-        );
-        snapshot.aid_gate.accepted = true;
-        snapshot.timestamp = ODOM_STALE_LIMIT.as_secs_f64() + 0.001;
-        assert_eq!(
-            snapshot.source(ODOM_STALE_LIMIT),
-            "CI 后验 IMU 传播（无新鲜外援）"
-        );
-        snapshot.aligned = false;
-        assert_eq!(
-            snapshot.source(ODOM_STALE_LIMIT),
-            "本地 ESKF（未对齐 odom）"
-        );
-        snapshot.ready = false;
-        assert_eq!(snapshot.source(ODOM_STALE_LIMIT), "等待 IMU");
-    }
-
-    #[test]
     fn stale_grounded_estimator_cannot_start_hover_thrust() {
         let mut controller = Controller::new(FsmParams::default());
         let mut inputs = sensor_inputs();
@@ -855,7 +862,21 @@ mod tests {
     }
 
     fn sensor_inputs() -> Inputs {
+        let mut primary = attitude::Input::default();
+        primary.observe(
+            AttitudeMessage {
+                timestamp: 0.,
+                posterior_time: 0.,
+                session: 7,
+                quat_xyzw: [0., 0., 0., 1.],
+                angular_velocity: [0.; 3],
+                gyro_bias: [0.; 3],
+                attitude_variance: [0.; 3],
+            },
+            Instant::now(),
+        );
         Inputs {
+            primary,
             attitude: Some(imu::Snapshot {
                 timestamp: 0.,
                 received: Instant::now(),
@@ -863,13 +884,9 @@ mod tests {
                 rotation: UnitQuaternion::identity(),
                 rate: Vector3::zeros(),
                 ready: true,
-                aligned: true,
                 nis: 0.,
                 accel_accepted: false,
                 bias: [0.; 3],
-                aid_time: Some(0.),
-                aid_gate: firefly_imu::Intersection::default(),
-                aid_gate_time: None,
                 covariance_diagonal: [0.; 6],
             }),
             vehicle: Some((QuadParams::default(), Airframe::default())),
@@ -954,5 +971,108 @@ mod tests {
         estimate.velocity = Vector3::repeat(-1000.);
         let (same, _) = a.motor_output(&inputs, 0.001, &ctl);
         assert_eq!(fallback.map(f32::to_bits), same.map(f32::to_bits));
+    }
+    fn airborne(inputs: &mut Inputs) -> Controller {
+        let mut controller = Controller::new(FsmParams::default());
+        for (kind, sequence) in [(command_kind::ARM, 1), (command_kind::TAKEOFF, 2)] {
+            inputs.command = Some(CommandMessage {
+                kind,
+                sequence,
+                altitude: 1.,
+                ..Default::default()
+            });
+            controller.motor_output(inputs, 0.001, &ControlParams::default());
+        }
+        inputs.estimate.as_mut().unwrap().position.z = 1.;
+        controller
+    }
+
+    #[test]
+    fn primary_is_selected_and_loss_latches_independent_standby_until_command() {
+        let mut inputs = sensor_inputs();
+        let mut controller = airborne(&mut inputs);
+        inputs.attitude.as_mut().unwrap().rotation = UnitQuaternion::from_euler_angles(0., 0., 1.8);
+        controller.motor_output(&inputs, 0.001, &ControlParams::default());
+        assert_eq!(controller.source, attitude::Source::Vio);
+        assert!(controller.attitude.angle() < 1e-6);
+        // 高频主预测断流，而低频里程计仍新鲜，也必须接管。
+        inputs.primary = attitude::Input::default();
+        let motors = controller
+            .motor_output(&inputs, 0.001, &ControlParams::default())
+            .0;
+        assert_eq!(controller.source, attitude::Source::Standby);
+        assert_eq!(
+            controller.fsm.state(),
+            firefly_flight::FlightState::AttitudeFallback
+        );
+        assert!((controller.attitude.angle() - 1.8).abs() < 1e-6);
+        assert!(motors.iter().all(|m| *m > 0.));
+        assert!(motors.iter().all(|m| (*m - motors[0]).abs() < 1e-5));
+        inputs.primary = sensor_inputs().primary;
+        controller.motor_output(&inputs, 0.001, &ControlParams::default());
+        assert_eq!(controller.source, attitude::Source::Standby);
+        inputs.command = Some(CommandMessage {
+            kind: command_kind::HOLD,
+            sequence: 3,
+            ..Default::default()
+        });
+        controller.motor_output(&inputs, 0.001, &ControlParams::default());
+        assert_eq!(controller.source, attitude::Source::Vio);
+        assert_eq!(controller.fsm.state(), firefly_flight::FlightState::Hold);
+        assert!((inputs.attitude.unwrap().rotation.angle() - 1.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn unavailable_standby_cuts_thrust_and_new_session_cannot_recover() {
+        let mut inputs = sensor_inputs();
+        let mut controller = airborne(&mut inputs);
+        let mut restarted = inputs.primary.latest.unwrap().message;
+        restarted.session += 1;
+        restarted.timestamp += 0.01;
+        inputs.primary.observe(restarted, Instant::now());
+        inputs.command = Some(CommandMessage {
+            kind: command_kind::HOLD,
+            sequence: 3,
+            ..Default::default()
+        });
+        controller.motor_output(&inputs, 0.001, &ControlParams::default());
+        assert_eq!(controller.source, attitude::Source::Standby);
+        assert_eq!(
+            controller.fsm.state(),
+            firefly_flight::FlightState::AttitudeFallback
+        );
+        inputs.attitude.as_mut().unwrap().received =
+            Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            controller
+                .motor_output(&inputs, 0.001, &ControlParams::default())
+                .0
+                .map(f32::to_bits),
+            [0; 4]
+        );
+        assert_eq!(controller.source, attitude::Source::Unavailable);
+    }
+
+    #[test]
+    fn arm_requires_ready_standby_even_with_valid_vio() {
+        let mut inputs = sensor_inputs();
+        inputs.attitude.as_mut().unwrap().ready = false;
+        inputs.command = Some(CommandMessage {
+            kind: command_kind::ARM,
+            sequence: 1,
+            ..Default::default()
+        });
+        let mut controller = Controller::new(FsmParams::default());
+        assert_eq!(
+            controller
+                .motor_output(&inputs, 0.001, &ControlParams::default())
+                .0
+                .map(f32::to_bits),
+            [0; 4]
+        );
+        assert_eq!(
+            controller.fsm.state(),
+            firefly_flight::FlightState::Disarmed
+        );
     }
 }

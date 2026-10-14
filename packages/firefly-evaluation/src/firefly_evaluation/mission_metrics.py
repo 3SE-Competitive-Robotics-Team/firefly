@@ -10,7 +10,7 @@ def read_evidence(path):
     reader = RrdReader(path)
     rows = {}
     aliases = {"fc/imu/health": "imu_health", "fc/imu/quaternion_xyzw": "imu_attitude",
-                   "fc/debug/state": "fc_state"}
+                   "fc/debug/state": "fc_state", "fc/imu/source": "attitude_source"}
     for store in reader.recordings():
         for chunk in reader.stream(store=store):
             entity = chunk.entity_path.lstrip("/")

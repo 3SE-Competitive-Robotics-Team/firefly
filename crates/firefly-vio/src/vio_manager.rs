@@ -202,27 +202,33 @@ impl VioManager {
         let initial = if self.propagator.cache_valid() {
             None
         } else {
-            let q = self.state.imu.quat();
-            let p = self.state.imu.pos();
-            let v = self.state.imu.vel();
-            let bg = self.state.imu.bias_g();
-            let ba = self.state.imu.bias_a();
-            let mut est = [0.0f64; 16];
-            est[0..4].copy_from_slice(q.as_slice());
-            est[4..7].copy_from_slice(p.as_slice());
-            est[7..10].copy_from_slice(v.as_slice());
-            est[10..13].copy_from_slice(bg.as_slice());
-            est[13..16].copy_from_slice(ba.as_slice());
-            let cov = crate::state_helper::get_marginal_covariance(&self.state, &[(0, 15)]);
-            Some(firefly_vio_core::propagation::FastInit {
-                time: self.state.timestamp,
-                t_off: self.time_offset(),
-                est,
-                covariance: cov,
-            })
+            Some(self.fast_state_snapshot())
         };
         self.propagator
             .fast_state_propagate(initial.as_ref(), timestamp, &calib)
+    }
+
+    /// 供异步输出传播使用的完整 IMU 后验副本；时间固定在实际积分到的 IMU 时刻。
+    #[must_use]
+    pub fn fast_state_snapshot(&self) -> firefly_vio_core::propagation::FastInit {
+        let q = self.state.imu.quat();
+        let p = self.state.imu.pos();
+        let v = self.state.imu.vel();
+        let bg = self.state.imu.bias_g();
+        let ba = self.state.imu.bias_a();
+        let mut est = [0.0f64; 16];
+        est[0..4].copy_from_slice(q.as_slice());
+        est[4..7].copy_from_slice(p.as_slice());
+        est[7..10].copy_from_slice(v.as_slice());
+        est[10..13].copy_from_slice(bg.as_slice());
+        est[13..16].copy_from_slice(ba.as_slice());
+        let cov = crate::state_helper::get_marginal_covariance(&self.state, &[(0, 15)]);
+        firefly_vio_core::propagation::FastInit {
+            time: self.state_imu_timestamp(),
+            t_off: 0.0,
+            est,
+            covariance: cov,
+        }
     }
 
     /// 纯 IMU 传播到指定时刻（无相机更新；对应 C++ `fast_state_propagate`

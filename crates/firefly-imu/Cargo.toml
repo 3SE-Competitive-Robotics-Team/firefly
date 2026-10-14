@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
-description = "Timestamped attitude ESKF, stationary initialization and correlated VIO aiding"
+description = "Independent standby attitude ESKF and stationary initialization"
 keywords = ["imu", "eskf", "robotics"]
 categories = ["science::robotics"]
 

@@ -20,6 +20,7 @@ def evidence():
     pulse = np.array([[4. + i / 10., *force, .1] for i in range(5)] + [[4.5, 0., 0., 0., 0.]])
     data = {"gt": gt, "gt_velocity": velocity, "disturbance_force": pulse,
             "fc_state": np.column_stack((times, np.full(len(times), 3.))),
+            "attitude_source": np.column_stack((times, np.ones(len(times)))),
             "imu_attitude": np.column_stack((times, gt[:, 4:8])),
             "imu_health": np.column_stack((times, np.ones((len(times), 2)), np.full(len(times), .1)))}
     stages = {"hover": {"status": "passed", "end_sim_s": 4.},
@@ -82,7 +83,7 @@ def test_safety_and_initial_hover_are_required(evidence, fault):
     assert not disturbance_checks(*evidence)[key][0]
 
 
-@pytest.mark.parametrize("fault", ["position", "speed", "aid", "attitude", "short", "missing", "gap"])
+@pytest.mark.parametrize("fault", ["position", "speed", "posterior", "attitude", "short", "missing", "gap"])
 def test_complete_recovery_is_required(evidence, fault):
     data, stages, *_ = evidence
     key = "sustained_hover_accuracy"
@@ -90,7 +91,7 @@ def test_complete_recovery_is_required(evidence, fault):
         data["gt"][200, 1] = .25
     elif fault == "speed":
         data["gt_velocity"][200, 1] = .3
-    elif fault == "aid":
+    elif fault == "posterior":
         data["imu_health"][200, 3] = .6
         key = "attitude_health"
     elif fault == "attitude":
@@ -117,6 +118,7 @@ def ten_rounds(evidence):
     gt[:, 0], gt[:, 3], gt[:, 7] = times, 1., 1.
     data = {"gt": gt, "gt_velocity": np.column_stack((times, np.zeros((len(times), 3)))),
             "fc_state": np.column_stack((times, np.full(len(times), 3.))),
+            "attitude_source": np.column_stack((times, np.ones(len(times)))),
             "imu_attitude": np.column_stack((times, gt[:, 4:8])),
             "imu_health": np.column_stack((times, np.ones((len(times), 2)), np.full(len(times), .1)))}
     stages = {"hover": {"status": "passed", "end_sim_s": 4.}}
@@ -234,7 +236,7 @@ def test_exactly_ten_forces_required(ten_rounds, count):
 
 def test_custom_hover_limits_are_forwarded(ten_rounds):
     data, stages, options, limits, forces = ten_rounds
-    checks = round_checks(data, stages, options, limits, forces[0], 1, HoverLimits(aid_age_s=.05))
+    checks = round_checks(data, stages, options, limits, forces[0], 1, HoverLimits(posterior_age_s=.05))
     assert not checks["attitude_health"][0]
 
 

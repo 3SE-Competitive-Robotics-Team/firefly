@@ -85,6 +85,7 @@ class Mission:
         self.physics = None
         self.physics_time = None
         self.attitude_health = None
+        self.attitude_source = None
         self.zero_controls = 0
         self.nonzero_controls = 0
         self.last_motors = [0.] * 4
@@ -172,6 +173,8 @@ class Mission:
                     entity = bytes(msg.entity[:msg.entity_len]).decode(errors="replace")
                     if entity == "fc/debug/state":
                         self.mode = int(msg.scalars[0])
+                    elif entity == "fc/imu/source":
+                        self.attitude_source = (msg.timestamp, int(msg.scalars[0]), time.monotonic())
                     elif entity == "fc/imu/health" and msg.scalar_count >= 2:
                         self.attitude_health = (msg.timestamp, msg.scalars[0] == 1., msg.scalars[1] == 1., time.monotonic())
                     elif entity == "corr/debug/gate" and msg.scalar_count == 4 and msg.scalars[3] == 1:
@@ -376,18 +379,23 @@ class Mission:
                   stable=2., sim=5.)
         return {"hold_radius_m": 0.5, "stable_seconds": 2.0}
 
+    def standby_active(self):
+        source = self.attitude_source
+        return (self.mode == 6 and source is not None and source[1] == 2
+                and 0. <= self.t - source[0] <= 1.5 and time.monotonic() - source[2] <= 1.5)
+
     def estimator_fallback(self):
         self.recorder.event("fault inject: stop VIO with SIGINT", self.t)
         start = time.monotonic()
         self.stop("vio")
-        self.wait(lambda: self.mode == 6 and min(self.last_motors) > 0., wall=max(0.01, self.options.estimator_fallback_wall_s - (time.monotonic() - start)))
+        self.wait(lambda: self.standby_active() and min(self.last_motors) > 0., wall=max(0.01, self.options.estimator_fallback_wall_s - (time.monotonic() - start)))
         latency = time.monotonic() - start
         if latency > self.options.estimator_fallback_wall_s:
             raise MissionFailure(f"estimator fallback too slow: {latency}s")
         return {"attitude_fallback_latency_wall_s": latency, "flight_mode": self.mode}
 
     def degraded_support(self):
-        self.wait(lambda: self.mode == 6 and min(self.last_motors) > 0., stable=3., sim=5.)
+        self.wait(lambda: self.standby_active() and min(self.last_motors) > 0., stable=3., sim=5.)
         return {"observed_seconds": 3., "capability": "IMU attitude support with nominal hover thrust; no position or altitude guarantee"}
 
     def shutdown(self):
