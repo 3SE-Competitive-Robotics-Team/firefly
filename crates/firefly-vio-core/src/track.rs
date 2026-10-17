@@ -899,8 +899,8 @@ impl TrackKlt {
         };
         let threshold = 2.0 / max_focal;
 
-        // RANSAC（同 C++ 第 873 行；purecv `findFundamentalMat` = OpenCV 语义，
-        // 替代手搓 ransac——退化时（内点 <8）返回 Err，等同 OpenCV 空 mask 全拒）
+        // RANSAC（同 C++ 第 873 行；purecv `findFundamentalMat` 为 OpenCV 语义：
+        // 退化时（内点 <8）返回 Err，等同 OpenCV 空 mask 全拒）
         let mask_rsc = &mut workspace.ransac_mask;
         mask_rsc.clear();
         let f_res = purecv::calib3d::find_fundamental_mat(

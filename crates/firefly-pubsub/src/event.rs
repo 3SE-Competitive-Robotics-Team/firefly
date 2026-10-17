@@ -2,7 +2,7 @@
 //!
 //! 对照 iceoryx2 官方 `examples/rust/event_based_communication`：每个话题
 //! 配对一个**同名** event service——发布端 send 后 notify，订阅端把
-//! [`TopicListener`] 挂进 `WaitSet` 即到即醒，替代固定节拍轮询。
+//! [`TopicListener`] 挂进 `WaitSet` 即到即醒，不靠固定节拍轮询。
 //!
 //! - 通知不携带数据；trace 上下文仍走 pubsub User Header（[`crate::trace`]）
 //! - `EventId` 跨语言统一为 [`EVENT_ID_SENT_SAMPLE`]（Python 侧 `iox2.EventId.new(0)`）

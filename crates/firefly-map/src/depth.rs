@@ -85,7 +85,7 @@ pub fn update_from_depth(
     assert_eq!(depth.len(), cam.width * cam.height);
     assert!(cam.pixel_step > 0);
     // (体素, 是否命中)：收集后按体素排序折叠，确定性顺序，每体素每帧一次更新；
-    // 单次 Vec 分配替代逐体素堆节点。
+    // 单次 Vec 分配，避免逐体素堆节点。
     let mut votes: Vec<([usize; 3], bool)> = Vec::new();
     let cam_world = body_pose * Point3::from(cam.pos_in_body);
     let mut v = 0usize;
@@ -364,11 +364,11 @@ mod tests {
 
     #[test]
     fn update_from_depth_maps_mujoco_box() {
-        // 复现 demo 场景：无人机在 (1,4,1) 恒等姿态；下倾 20° 相机射线经
+        // 场景：无人机在 (1,4,1) 恒等姿态；下倾 20° 相机射线经
         // 像素 (207,69)（pixel_step=3 网格点）深度 6.471m → 命中箱 (8,2)
         // 前表面世界 (7.75,2.20,0.63)，体素 [19,17,1]，多次观测后占据
         let cam = DepthCamera::mujoco_default();
-        // 地图与 demo 一致：origin (0,-5,0)、0.4m、dims [80,35,13]
+        // 地图参数：origin (0,-5,0)、0.4m、dims [80,35,13]
         let mut map = GridMapBuilder::new(0.4, [80, 35, 13])
             .with_origin(Vector3::new(0.0, -5.0, 0.0))
             .build()
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn mark_ray_diagonal_box_ray() {
-        // 直接测 mark_ray：from (1,4,1) → to (6.59,2.41,0.60)，地图与 demo 一致
+        // 直接测 mark_ray：from (1,4,1) → to (6.59,2.41,0.60)，地图参数相同
         let mut map = GridMapBuilder::new(0.4, [80, 35, 13])
             .with_origin(Vector3::new(0.0, -5.0, 0.0))
             .build()

@@ -1,6 +1,6 @@
 //! 结构化日志消息（iceoryx2 zero-copy）：各进程经 `Firefly/Log` 话题向
-//! `firefly-viz` 聚合，统一写 rerun `TextLog`（持久可检索）——替代散落的
-//! 终端 stderr 文本行。
+//! `firefly-viz` 聚合，统一写 rerun `TextLog`（持久可检索）；stderr 只作
+//! 进程级诊断，不作记录载体。
 //!
 //! 设计约束：
 //! - `#[repr(C)]` 定长结构，满足 `ZeroCopySend`（自包含、无堆指针、

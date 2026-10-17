@@ -1059,7 +1059,7 @@ mod tests {
     }
 
     fn wall_scenario(config: PlannerConfig) -> (Planner, State, Point3<f64>) {
-        // 0.1m 分辨率（与 demo 一致）：墙 x=4.5，高 z<1.5
+        // 0.1m 分辨率：墙 x=4.5，高 z<1.5
         let mut map = GridMapBuilder::new(0.1, [100, 100, 100]).build().unwrap();
         for y in 0..100 {
             for z in 0..15 {

@@ -8,7 +8,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct VoxelOptions {
-    /// 总开关（默认关闭，保持现有行为；实验经配置开启）。
+    /// 总开关（默认关闭）。
     pub enabled: bool,
     /// 体素边长（米，默认 0.1，对照 `voxel_size`）。
     pub voxel_size: f64,

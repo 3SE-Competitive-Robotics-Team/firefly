@@ -33,7 +33,7 @@ def _count(shape, shape_type: int) -> int:
 
 
 def _shape_color(color_tool, shape):
-    """按 Gen→Surf→Curv 顺序取色（STEP 往返会把 Gen 烘成 Surf，实测结论）。"""
+    """按 Gen→Surf→Curv 顺序取色（STEP 往返会把 Gen 烘成 Surf）。"""
     from OCP.Quantity import Quantity_Color
     from OCP.XCAFDoc import XCAFDoc_ColorCurv, XCAFDoc_ColorGen, XCAFDoc_ColorSurf
 

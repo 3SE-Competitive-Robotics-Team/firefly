@@ -122,9 +122,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     params.state_options.num_cameras = 2;
     params.triangulation_options.max_baseline = cfg.estimator.max_baseline;
-    // SLAM 默认开（OpenVINS 默认 25）：10 轨迹 bench 相对纯 MSCKF 均值 -8%
-    //（8/10 路线占优；logs/bench suite_*_10x1x34s）。KLT 滞后偏置被持久路标
-    // 吸收的机制仍在（单轮方差大），体素选点作 opt-in 优化（`[slam]` 开启）。
+    // SLAM 路标上限（对照 OpenVINS 默认 25）：持久路标吸收 KLT 的滞后偏置；
+    // 体素选点另由 `[slam] voxel_selection` 单独开启。
     params.state_options.max_slam_features = cfg.slam.max_slam_features;
     params.voxel_options.enabled = cfg.slam.voxel_selection;
     params.voxel_options.voxel_size = cfg.slam.voxel_size;
@@ -132,9 +131,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     params.voxel_options.min_point_distance = cfg.slam.min_point_distance;
     params.voxel_options.neighbor_radius = cfg.slam.neighbor_radius;
     params.voxel_options.use_all_points = cfg.slam.use_all_points;
-    // 零速更新保持 OpenVINS 默认关闭（官方参数 try_zupt=false）：慢速运动下
-    // 加速度低于 IMU 噪声 σ 时 chi2 不超限 → 误接受 → 估计位置冻结；
-    // 显式零运动分支（官方标注 untested）同样不属默认路径。
+    // 零速更新关闭（对照 OpenVINS 参数 `try_zupt=false`）：慢速运动下加速度
+    // 低于 IMU 噪声 σ，零速判据会被噪声触发并冻结位置估计；官方显式零运动
+    // 分支同样标注 untested，不属默认路径。
     let mut tracker_calib = std::collections::HashMap::new();
     tracker_calib.insert(0usize, cam_left.clone());
     tracker_calib.insert(1usize, cam_right.clone());
@@ -143,7 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg.frontend.num_pts,
         0,
         true,
-        HistogramMethod::None, // 全局直方图均衡实测引入亚像素偏置（残差 -1px → -0.4px）
+        HistogramMethod::None, // 全局直方图均衡引入亚像素偏置，必须关闭
         20,                    // fast_threshold: OpenVINS 默认值
         5,                     // grid_x: OpenVINS 默认值
         5,                     // grid_y: OpenVINS 默认值
@@ -585,18 +584,17 @@ fn log_viz(
 /// body→camera 旋转行 = `[x, y, z]`（行为相机轴在 body 下的坐标）。
 /// IMU 在两相机中点，基线 `baseline` 米。
 ///
-/// 平移为 **`p_IinC`（IMU 原点在相机系下的坐标）**，非体系杆臂！由期望的
+/// 平移为 **`p_IinC`（IMU 原点在相机系下的坐标）**，非体系杆臂。由期望的
 /// 体系横向安装位置 `p_CinI = (0, ±baseline/2, 0)` 换算：
-/// `p_IinC = -R_ItoC · p_CinI` ⇒ `(±baseline/2, 0, 0)`。
-/// 注意：误填体系值会经 R 旋成沿视线方向的纵向基线——立体视差恒为零，
-/// 三角化全部退化。
+/// `p_IinC = -R_ItoC · p_CinI` ⇒ `(±baseline/2, 0, 0)`。填成体系值会让基线
+/// 旋到视线方向，立体视差恒为零，三角化全部退化。
 /// 双目相机-IMU 外参 `(q_ItoC, [p_IinC_left, p_IinC_right])`；机位几何全部来自
 /// [`firefly_base::rig`]（唯一来源）。
 ///
 /// JPL 四元数 (x, y, z, w)：必须用项目的 [`rot_2_quat`]（Trawny Eq.74，与
 /// `PoseJpl::rot` 的 `quat_2_rot` 互逆）。nalgebra 的 `UnitQuaternion` 是
-/// Hamilton 约定，直接喂给 JPL 估计器等效于转置旋转（相机“侧装”、立体基线
-/// 变纵向，视觉更新全部退化的根因）。
+/// Hamilton 约定，直接喂给 JPL 估计器等效于转置旋转，相机轴与基线一起转错，
+/// 视觉更新失效。
 #[must_use]
 fn mujoco_stereo_extrinsic() -> (nalgebra::Vector4<f64>, [nalgebra::Vector3<f64>; 2]) {
     use firefly_base::{FrameId, rig};

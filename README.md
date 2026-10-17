@@ -28,7 +28,7 @@
 | `crates/firefly-imu` | 独立备用姿态/陀螺零偏 ESKF、静止初始化与加计 NIS |
 | `crates/firefly-{base,config,landmarks}` | 坐标/刚体变换、可选 TOML 配置、有界会话路标地图 |
 | `crates/firefly-{pubsub,error,observability,render}` | IPC 消息、错误、日志/trace、共享 Bevy 场景与光照 |
-| `configs/` | 每应用一份 TOML，缺键回落代码默认值，缺文件报错 |
+| `configs/` | 每应用一份 TOML，缺键回落代码默认值 |
 | `tests/`、`docs/` | 评测指标、启动检查与运行/架构说明 |
 | `apps/`、`packages/` | Rust/Python 进程与 Python 库，逐个职责见[应用与职责](#应用与职责) |
 

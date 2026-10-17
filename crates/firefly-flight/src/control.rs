@@ -34,7 +34,7 @@ pub struct PositionSetpoint {
     /// 期望速度（m/s）。
     pub velocity: Vector3<f32>,
     /// 期望加速度（m/s²，世界系）：位置环**前馈**项。缺它时跟踪滞后约
-    /// `a_ref / pos_kp`（1 m/s²、kp=2.2 → 0.45m，过弯明显切内道）。
+    /// `a_ref / pos_kp`。
     pub acceleration: Vector3<f32>,
     /// 期望航向（rad，世界 Z；水平面内机体 `+X` 的方向）。
     pub yaw: f32,
