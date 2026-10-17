@@ -6,6 +6,7 @@ use std::time::Duration;
 use fastrace::prelude::*;
 use firefly_base::{FrameId, RigidTransform};
 use firefly_error::{Error, ErrorKind, Result};
+use firefly_localization::CorrectionOptions;
 use firefly_localization::config::{Backend, LocalizationConfig};
 use firefly_localization::convert::corrected_odom;
 use firefly_localization::filter::{FusionFilter, RelocGate};
@@ -189,7 +190,9 @@ struct App {
     origin: firefly_localization::config::InitialAlignment,
     alignment_ready: bool,
     navigation_pub: Publisher<NavigationMessage>,
-    published_alignment: Option<RigidTransform>,
+    /// 最近一次提交坐标系时的对齐；修订号只随超过门限的修正递增。
+    revision_alignment: Option<RigidTransform>,
+    correction: CorrectionOptions,
     alignment_revision: u64,
     external_map: bool,
     estimator_reset: bool,
@@ -226,6 +229,7 @@ impl App {
         if cfg.backend == Backend::PoseGraph {
             cfg.graph.validate()?;
         }
+        cfg.correction.validate()?;
         if !cfg.quality.valid() {
             return Err(Error::new(
                 ErrorKind::InvalidArgument,
@@ -285,7 +289,8 @@ impl App {
             origin: cfg.origin.unwrap_or_default(),
             alignment_ready: false,
             navigation_pub: Publisher::with_topic(&node, NAVIGATION_TOPIC)?,
-            published_alignment: None,
+            revision_alignment: None,
+            correction: cfg.correction,
             alignment_revision: 0,
             estimator_reset: false,
             reloc_ticks: 0,
@@ -621,6 +626,22 @@ impl App {
         }
     }
 
+    /// 新对齐是否要提交坐标系：`None` 表示首次建立，`Some(true)` 表示超过门限。
+    /// 首次只记录，不递增修订号；未超过门限时下游复用局部地图与在途参考。
+    fn commit_alignment(
+        &self,
+        alignment: &RigidTransform,
+        odom: &OdomMessage,
+    ) -> Result<Option<bool>> {
+        let Some(committed) = self.revision_alignment else {
+            return Ok(None);
+        };
+        let body = odom.body_pose(FrameId::ODOM)?;
+        let now = alignment.compose(&body)?;
+        let before = committed.compose(&body)?;
+        Ok(Some(self.correction.committed(&now, &before)))
+    }
+
     fn publish_corrected(&mut self) -> Result<()> {
         if !self.alignment_ready || self.estimator_reset {
             return Ok(());
@@ -656,20 +677,22 @@ impl App {
             metric.scalar_count = 3;
             let _ = viz.publish(metric);
         }
-        if self
-            .published_alignment
-            .as_ref()
-            .is_some_and(|old| (old.matrix() - alignment.matrix()).norm() > 1e-10)
-        {
-            self.alignment_revision = self
-                .alignment_revision
-                .checked_add(1)
-                .ok_or_else(|| Error::new(ErrorKind::Internal, "alignment revision exhausted"))?;
+        // 低于门限的修正只更新对齐：下游按同一修订号复用局部地图与在途参考，
+        // 误差不超过门限，避免为厘米级修正清空融合并重建地图。
+        match self.commit_alignment(&alignment, odom)? {
+            None => self.revision_alignment = Some(alignment),
+            Some(true) => {
+                self.alignment_revision =
+                    self.alignment_revision.checked_add(1).ok_or_else(|| {
+                        Error::new(ErrorKind::Internal, "alignment revision exhausted")
+                    })?;
+                self.revision_alignment = Some(alignment);
+            }
+            Some(false) => {}
         }
         let mut navigation = NavigationMessage::new(msg, &alignment, self.alignment_revision);
         navigation.external_map = u64::from(self.external_map);
         self.navigation_pub.publish(navigation)?;
-        self.published_alignment = Some(alignment);
         pub_.publish(msg).map(|_| ())?;
         self.last_published = msg.timestamp;
         self.log_corrected_viz(&msg);
@@ -834,6 +857,58 @@ fn main() {
 mod tests {
     use super::{RelocGate, gate_diag};
     use nalgebra::Vector6;
+
+    #[test]
+    fn corrections_below_the_drift_threshold_keep_the_revision() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                use super::*;
+                use firefly_pubsub::publish::Publisher;
+                let topic = format!("Firefly/Test/MapOdometry/{}", std::process::id());
+                let mut app = App::new(LocalizationConfig::default(), &topic).unwrap();
+                let node = create_node().unwrap();
+                let _raw = Publisher::<OdomMessage>::with_topic(&node, &topic).unwrap();
+                let _corrected =
+                    Subscriber::<OdomMessage>::with_topic(&node, CORRECTED_ODOM_TOPIC).unwrap();
+                let shifted = |x: f64| {
+                    RigidTransform::from_parts(
+                        FrameId::MAP,
+                        FrameId::ODOM,
+                        [x, 0., 0.],
+                        [0., 0., 0., 1.],
+                    )
+                    .unwrap()
+                };
+                let base = shifted(0.);
+                app.alignment_ready = true;
+                app.revision_alignment = Some(base);
+                app.fusion.set_alignment(base).unwrap();
+                let mut sample = OdomMessage {
+                    timestamp: 3.,
+                    is_initialized: true,
+                    ..Default::default()
+                };
+                app.latest_odom = Some(sample);
+                app.publish_corrected().unwrap();
+                assert_eq!(app.alignment_revision, 0);
+                // 9 cm 修正低于 10 cm 漂移门限：对齐更新但不切换坐标系。
+                app.fusion.set_alignment(shifted(0.09)).unwrap();
+                sample.timestamp = 4.;
+                app.latest_odom = Some(sample);
+                app.publish_corrected().unwrap();
+                assert_eq!(app.alignment_revision, 0);
+                // 11 cm 超过门限：下游废弃局部地图与在途参考。
+                app.fusion.set_alignment(shifted(0.11)).unwrap();
+                sample.timestamp = 5.;
+                app.latest_odom = Some(sample);
+                app.publish_corrected().unwrap();
+                assert_eq!(app.alignment_revision, 1);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 
     #[test]
     fn default_backend_navigates_without_map_observations_and_latches_estimator_reset() {

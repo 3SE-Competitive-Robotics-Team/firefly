@@ -6,3 +6,6 @@ max_innovation_trans = 20.0 # m，VINS-Fusion 特征验证后的门限
 max_innovation_rot = 0.5235987755982988 # rad
 max_correction_trans = 20.0 # m
 max_correction_rot = 0.5235987755982988 # rad
+
+# [correction] 对齐提交门限：当前机体位姿在新旧对齐下的差异超过 10 cm 或 1° 才
+# 递增修订号并让下游废弃局部地图。默认值见 firefly_localization::CorrectionOptions。
