@@ -119,7 +119,8 @@ fn load_model(model: &str) -> Result<Model, Box<dyn std::error::Error>> {
     if !std::path::Path::new(model).is_file() {
         return Err(format!("权重缺失：{model}（见 models/，离线导出，不进 git）").into());
     }
-    let session = Session::builder()?
+    let environment = ort::init().build()?;
+    let session = Session::builder(&environment)?
         .with_intra_threads(4)?
         .with_intra_op_spinning(false)?
         .commit_from_file(model)?;
