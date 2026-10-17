@@ -86,9 +86,9 @@ impl SensorInput for IceoryxInput {
             self.now_t = self.now_t.max(m.timestamp);
             imu_count += 1;
         }
-        // 拉取双目帧：**排空各侧队列并保留最新**。sim 同帧先发 left 再发 right，
-        // 若每轮只读一个样本，左右目会差一帧（0.1s 滞后）而让 `next_camera` 的
-        // 0.01s 配对容差永远失败 → 相机帧被丢 ~90% → 滤波器喂不进视觉。
+        // 拉取双目帧：必须**排空各侧队列并保留最新**。sim 同帧先发 left 再发 right，
+        // 逐样本读取会让左右目差一帧，超出 `next_camera` 的 0.01s 配对容差，
+        // 整组视觉帧被丢弃。
         let mut left_count = 0u32;
         let mut right_count = 0u32;
         while let Ok(Some(s)) = self.left_sub.receive() {

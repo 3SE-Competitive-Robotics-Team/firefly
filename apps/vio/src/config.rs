@@ -83,7 +83,7 @@ impl Default for Estimator {
     }
 }
 
-/// SLAM 路标与体素选点（默认关闭，保持现有纯 MSCKF 行为）。
+/// SLAM 路标与体素选点（SLAM 默认开启，体素选点默认关闭）。
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct Slam {
@@ -107,7 +107,7 @@ impl Default for Slam {
     fn default() -> Self {
         let voxel = firefly_voxel_svio::VoxelOptions::default();
         Self {
-            // OpenVINS 默认 25；10 轨迹 bench 均值 -8%（logs/bench suite_*_10x1x34s）
+            // 对照 OpenVINS 默认值 25
             max_slam_features: 25,
             voxel_selection: false,
             voxel_size: voxel.voxel_size,
@@ -188,7 +188,7 @@ mod tests {
         assert!(!cfg.slam.voxel_selection);
     }
 
-    /// `[slam]` 开启 SLAM + 体素选点（A/B 实验配置）。
+    /// `[slam]` 段开启 SLAM 与体素选点。
     #[test]
     fn slam_section_enables_voxel_selection() {
         let cfg: VioConfig = toml::from_str(

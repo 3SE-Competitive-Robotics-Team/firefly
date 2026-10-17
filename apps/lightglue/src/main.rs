@@ -65,7 +65,7 @@ fn parse_args() -> Result<(String, Option<String>, String), String> {
     Ok((model, map, config))
 }
 
-/// 加载 ONNX 会话；六条算子线程（207ms→180ms/匹配），空闲时休眠。
+/// 加载 ONNX 会话；六条算子线程，空闲时休眠。
 fn load_session(model: &str) -> Result<Session, Box<dyn std::error::Error>> {
     if !std::path::Path::new(model).is_file() {
         return Err(format!("权重缺失：{model}（见 models/，离线导出，不进 git）").into());
