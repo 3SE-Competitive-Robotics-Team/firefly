@@ -103,7 +103,7 @@ map
 
 长度为米，角度为弧度，四元数为 Hamilton xyzw、source→target 主动旋转。
 IPC 中 JPL world→body 四元数的同一组分量按 Hamilton 解释恰为 body→world；
-`OdomMessage::body_pose(parent)` 集中处理这一边界。消息布局不变。
+`OdomMessage::body_pose(parent)` 集中处理这一边界。
 
 - `compose` 检查中间坐标系，不能把 map 位姿与 odom 位姿直接混乘。
 - `FrameTree::set` 拒绝自环、闭环、多父节点；错误不修改树。
@@ -285,7 +285,7 @@ R^+=R\operatorname{Exp}(\omega\Delta t),\qquad
 \]
 
 过程噪声使用五点 Gauss–Legendre 对 `∫Φ(s)QcΦ(s)ᵀ ds` 积分，保留姿态/零偏
-交叉项；零角速度有闭式测试。加计使用未归一化的三轴原始比力：
+交叉项；零角速度处有闭式解。加计使用未归一化的三轴原始比力：
 
 \[
 h=R^T(0,0,g)^T,\quad H=([h]_\times,0),\quad
@@ -295,7 +295,7 @@ r=a_m-h,\quad S=HPH^T+R_a,\quad \mathrm{NIS}=r^TS^{-1}r.
 `R_a = (σ_accel²/Δt + σ_model²) I`。静止高斯线性化假设下使用 χ²(3) 的
 99% 分位数 **11.344866730144373**；三维残差包含模长信息，不套用归一化方向
 的两自由度检验。模型余量为工程参数，门限概率不是实际飞行误接受率保证。
-范数与静止条件仍须同时满足。大协方差可能让错误加速度通过 NIS，测试显式覆盖该反例。
+范数与静止条件仍须同时满足。大协方差可能让错误加速度通过 NIS。
 拒绝只保持预测，不因连续拒绝超过某次数而强制放行。
 
 接受时均值使用完整 `Kr`，协方差用同一 K 的 Joseph 形式。零创新仍更新协方差。
@@ -381,7 +381,7 @@ VIO 边只连相邻节点，标准差为扩散密度乘 `√Δt`，避免同批�
 残差按米/弧度白化；VIO 用二次代价，地图与回环用 Huber 核。权重见 `GraphOptions`。
 解析雅可比构成稀疏四维块正规方程，块 Jacobi 预条件 PCG 与回溯求解；优化副本一次提交，
 失败不发布部分解。仅更新 map←odom，不把地图跳变当物理速度。
-该图不传播完整 VIO 协方差，也不完整去相关视觉信息；工程权重不等于统计校准。
+该图不传播完整 VIO 协方差，也不能完整去相关视觉信息；工程权重不等于统计校准。
 `backend="eskf"` 与图后端互斥，不接收图回环校正。
 
 ### 可选离线地图定位
@@ -492,13 +492,8 @@ d = fB/z; d_m = q round((d+ε)/q); z_m = fB/d_m
 VINS-Fusion 的四自由度残差、固定首节点和漂移输出是参考；本项目使用弧度、相邻增量链、
 地图锚点和自有 PCG，并非 Ceres 的逐项移植。ORB-SLAM3 参考共视排除、固定尺度几何与
 连续确认，不包含其完整词袋和 BA。源码审查不能替代独立公式、差分和最终输出验证。
-OpenCV 兼容性对齐以 purecv 上游约定的 **4.10.0** 为目标。现有参考材料的版本分别为：
-
-- 源码查阅快照 `d7b17c1bbc361f608768a44d9cd89458fe70bea8` 属于 5.x
-  （`git describe` 为 `5.0.0-712-gd7b17c1bb`），不作为 4.10.0 数值一致性的证据。
-- `crates/firefly-vio-core/src/track/histogram.rs` 的 CLAHE CPU 夹具及
-  `crates/firefly-vio-core/src/cam.rs` 的鱼眼去畸变夹具来自 **4.12.0**；
-  它们保留真实来源标注，不能据此宣称已与 4.10.0 对齐。
+OpenCV 兼容性对齐以 purecv 上游约定的 **4.10.0** 为目标；夹具保留各自真实来源版本，
+不能据此宣称已与之对齐。
 
 姿态数学参考 Solà《Quaternion kinematics for the error-state Kalman filter》第 5–6 节；
 实现不采用连续拒绝后强制放行的经验逻辑。
