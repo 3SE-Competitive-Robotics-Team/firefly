@@ -8,7 +8,7 @@
 //! 地图索引固定在占据窗口；连续线段净距校验为本项目安全扩展，
 //! 26 邻域的对角连边也必须避开膨胀体素。
 
-use crate::segment::segment_is_clear;
+use crate::segment::{adjacent_step_is_clear, segment_is_clear};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -195,6 +195,7 @@ impl Astar {
         });
 
         let mut expansions = 0usize;
+        let mut neighbors: Vec<(Node, f64, [usize; 3])> = Vec::with_capacity(26);
         while let Some(Entry { node, g, .. }) = open.pop() {
             if self.rounds[node.0 as usize] != round
                 || self.state[node.0 as usize] != NodeState::Open
@@ -227,45 +228,54 @@ impl Astar {
             expansions += 1;
             self.state[node.0 as usize] = NodeState::Closed;
             let idx = Self::decode(map, node);
-            for (nb, step_len) in Self::neighbors(map, idx) {
-                let tentative = g + step_len;
-                let explored = self.rounds[nb.0 as usize] == round;
-                if explored && self.state[nb.0 as usize] == NodeState::Closed {
-                    continue;
-                }
-                if !explored {
-                    self.touch(nb, round);
-                    self.g_score[nb.0 as usize] = tentative;
-                    self.came_from[nb.0 as usize] = node;
-                    self.state[nb.0 as usize] = NodeState::Open;
-                    open.push(Entry {
-                        node: nb,
-                        g: tentative,
-                        f: tentative
-                            + self.config.heuristic_weight
-                                * Self::heuristic(map, Self::decode(map, nb), goal_idx),
-                    });
-                } else if tentative < self.g_score[nb.0 as usize] {
-                    self.g_score[nb.0 as usize] = tentative;
-                    self.came_from[nb.0 as usize] = node;
-                    open.push(Entry {
-                        node: nb,
-                        g: tentative,
-                        f: tentative
-                            + self.config.heuristic_weight
-                                * Self::heuristic(map, Self::decode(map, nb), goal_idx),
-                    });
-                }
-            }
+            Self::fill_neighbors(map, idx, &mut neighbors);
+            self.relax(map, goal_idx, &mut open, node, g, &neighbors);
         }
         Err(Error::temporary(ErrorKind::NotFound, "no path found"))
     }
 
+    /// 把已展开节点的邻居写入 open 集；闭集与无改进的节点跳过。
+    fn relax(
+        &mut self,
+        map: &GridMap,
+        goal_idx: [usize; 3],
+        open: &mut BinaryHeap<Entry>,
+        node: Node,
+        g: f64,
+        neighbors: &[(Node, f64, [usize; 3])],
+    ) {
+        let round = self.round;
+        for &(nb, step_len, nb_idx) in neighbors {
+            let tentative = g + step_len;
+            let explored = self.rounds[nb.0 as usize] == round;
+            if explored
+                && (self.state[nb.0 as usize] == NodeState::Closed
+                    || tentative >= self.g_score[nb.0 as usize])
+            {
+                continue;
+            }
+            if !explored {
+                self.touch(nb, round);
+                self.state[nb.0 as usize] = NodeState::Open;
+            }
+            self.g_score[nb.0 as usize] = tentative;
+            self.came_from[nb.0 as usize] = node;
+            open.push(Entry {
+                node: nb,
+                g: tentative,
+                f: tentative
+                    + self.config.heuristic_weight * Self::heuristic(map, nb_idx, goal_idx),
+            });
+        }
+    }
+
     /// 26 邻域（官方 `dx,dy,dz ∈ {-1,0,1}`），代价 = 格长 `√(dx²+dy²+dz²)`。
-    fn neighbors(map: &GridMap, idx: [usize; 3]) -> Vec<(Node, f64)> {
+    ///
+    /// 写入调用方缓冲（跨扩展复用）；只保留避开膨胀层的单位步。
+    fn fill_neighbors(map: &GridMap, idx: [usize; 3], out: &mut Vec<(Node, f64, [usize; 3])>) {
+        out.clear();
         let [dx, dy, dz] = map.dims();
         let [x, y, z] = idx;
-        let mut out = Vec::with_capacity(26);
         for i in -1i32..=1 {
             for j in -1i32..=1 {
                 for k in -1i32..=1 {
@@ -282,20 +292,17 @@ impl Astar {
                     {
                         continue;
                     }
-                    let idx = [nx as usize, ny as usize, nz as usize];
+                    let nidx = [nx as usize, ny as usize, nz as usize];
                     // 官方 `checkOccupancy` = `getInflateOccupancy`：A* 在**膨胀层**上搜索。
-                    // 只查原始占据会让路径穿进车体过不去的窄缝（全局搜得到、局部飞不了）。
-                    if map.is_occupied_inflated(center_of(map, idx))
-                        || !segment_is_clear(map, center_of(map, [x, y, z]), center_of(map, idx))
-                    {
+                    // 单位步在格心连线中点接触的角格必须全部自由，否则对角连边会擦角。
+                    if !adjacent_step_is_clear(map, idx, nidx) {
                         continue;
                     }
                     let step = f64::from(i * i + j * j + k * k).sqrt() * map.resolution();
-                    out.push((Node(Self::linear(map, idx)), step));
+                    out.push((Node(Self::linear(map, nidx)), step, nidx));
                 }
             }
         }
-        out
     }
 
     /// 对角启发（对照官方 `tie_breaker_ * getDiagHeu`）：三轴位移格数排序后按
@@ -704,5 +711,86 @@ mod gap_tests {
             .iter()
             .any(|p| p.x >= 4.5 && p.x <= 7.5 && (p.y - 6.5).abs() < 1.0);
         assert!(through_gap, "A* 应穿过门缝而非绕外圈");
+    }
+}
+
+#[cfg(test)]
+mod neighbor_tests {
+    use super::*;
+    use firefly_map::{GridMapBuilder, VirtualWall, VoxelState};
+
+    /// 旧判定：每个邻居做世界坐标膨胀查询 + 通用线段净距检查。
+    fn legacy_neighbors(map: &GridMap, idx: [usize; 3]) -> Vec<(u32, f64)> {
+        let [dx, dy, dz] = map.dims();
+        let [x, y, z] = idx;
+        let mut out = Vec::with_capacity(26);
+        for i in -1i32..=1 {
+            for j in -1i32..=1 {
+                for k in -1i32..=1 {
+                    if i == 0 && j == 0 && k == 0 {
+                        continue;
+                    }
+                    let (nx, ny, nz) = (x as i32 + i, y as i32 + j, z as i32 + k);
+                    if nx < 0
+                        || ny < 0
+                        || nz < 0
+                        || nx >= dx as i32
+                        || ny >= dy as i32
+                        || nz >= dz as i32
+                    {
+                        continue;
+                    }
+                    let nidx = [nx as usize, ny as usize, nz as usize];
+                    if map.is_occupied_inflated(center_of(map, nidx))
+                        || !segment_is_clear(map, center_of(map, idx), center_of(map, nidx))
+                    {
+                        continue;
+                    }
+                    out.push((
+                        Astar::linear(map, nidx),
+                        f64::from(i * i + j * j + k * k).sqrt() * map.resolution(),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn fill_neighbors_matches_legacy_predicate() {
+        let mut map = GridMapBuilder::new(0.4, [12, 12, 12])
+            .with_origin(Vector3::new(-1.3, 2.1, -0.7))
+            .with_obstacles_inflation(0.8)
+            .build()
+            .unwrap();
+        let mut seed = 0x2E8B_A5F3_4C1D_77E9_u64;
+        let mut draw = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) as usize % 12
+        };
+        for _ in 0..40 {
+            map.set_state([draw(), draw(), draw()], VoxelState::Occupied);
+        }
+        map.inflate_obstacles();
+        map.set_virtual_wall(VirtualWall {
+            ground: 0.0,
+            ceil: 3.0,
+        });
+        let mut actual = Vec::new();
+        for x in 0..12 {
+            for y in 0..12 {
+                for z in 0..12 {
+                    let idx = [x, y, z];
+                    Astar::fill_neighbors(&map, idx, &mut actual);
+                    let got: Vec<(u32, f64)> = actual
+                        .iter()
+                        .map(|&(node, step, _)| (node.0, step))
+                        .collect();
+                    assert_eq!(got, legacy_neighbors(&map, idx), "at {idx:?}");
+                }
+            }
+        }
     }
 }
