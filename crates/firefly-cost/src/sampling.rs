@@ -19,3 +19,53 @@ pub fn trapezoid_weight(j: usize, samples_per_piece: usize) -> f64 {
         1.0
     }
 }
+
+use firefly_trajectory::{Sample, Trajectory};
+use nalgebra::Vector3;
+
+/// 一条轨迹在 `i·K+j` 约束点网格上的采样缓存。
+///
+/// 多个惩罚项共用同一批采样点，避免重复 `eval_piece`。
+pub struct Samples {
+    pub samples_per_piece: usize,
+    grid: Vec<Sample>,
+}
+
+impl Samples {
+    #[must_use]
+    pub fn new(traj: &Trajectory, samples_per_piece: usize) -> Self {
+        let k = samples_per_piece;
+        let mut grid = Vec::with_capacity(traj.pieces() * (k + 1));
+        for (i, ti) in traj.durations().iter().enumerate() {
+            for j in 0..=k {
+                grid.push(traj.eval_piece(i, j as f64 / k as f64 * ti));
+            }
+        }
+        Self {
+            samples_per_piece: k,
+            grid,
+        }
+    }
+
+    #[must_use]
+    pub fn get(&self, piece: usize, j: usize) -> &Sample {
+        &self.grid[piece * (self.samples_per_piece + 1) + j]
+    }
+
+    /// 写入唯一约束点序列（段边界只保留一次），顺序与
+    /// `constraint_sample_points` 一致。
+    pub fn unique_positions(&self, out: &mut Vec<Vector3<f64>>) {
+        out.clear();
+        let pieces = self.grid.len() / (self.samples_per_piece + 1);
+        for i in 0..pieces {
+            let j_max = if i + 1 == pieces {
+                self.samples_per_piece
+            } else {
+                self.samples_per_piece - 1
+            };
+            for j in 0..=j_max {
+                out.push(self.get(i, j).position);
+            }
+        }
+    }
+}
