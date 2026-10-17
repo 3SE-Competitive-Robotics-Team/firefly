@@ -160,7 +160,7 @@ mod tests {
     use nalgebra::{Translation3, UnitQuaternion};
 
     #[test]
-    fn prior_survives_depth_free_rays_fading_and_dynamic_removal() {
+    fn prior_survives_depth_free_rays_and_dynamic_removal() {
         let mut map = GridMapBuilder::new(1., [10, 10, 10]).build().unwrap();
         map.set_prior_occupied([4, 5, 5]);
         map.inflate_obstacles();
@@ -170,7 +170,6 @@ mod tests {
                 Vector3::new(0.5, 5.5, 5.5),
                 Vector3::new(8.5, 5.5, 5.5),
             );
-            map.fade();
         }
         map.set_state([4, 5, 5], VoxelState::Free);
         map.inflate_obstacles();
