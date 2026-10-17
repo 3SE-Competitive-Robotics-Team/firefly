@@ -75,7 +75,8 @@ impl DepthCamera {
 /// 返回有效体素投票数；零表示本帧未提供地图观测。
 ///
 /// # Panics
-/// 深度长度与相机尺寸不一致，或 `pixel_step` 为零。
+/// 深度长度与相机尺寸不一致，`pixel_step` 为零，或地图体素数超出 u32 投票
+/// 编码容量（`2^31`，实际受内存限制不可达）。
 pub fn update_from_depth(
     map: &mut GridMap,
     cam: &DepthCamera,
@@ -84,9 +85,15 @@ pub fn update_from_depth(
 ) -> usize {
     assert_eq!(depth.len(), cam.width * cam.height);
     assert!(cam.pixel_step > 0);
-    // (体素, 是否命中)：收集后按体素排序折叠，确定性顺序，每体素每帧一次更新；
-    // 单次 Vec 分配，避免逐体素堆节点。
-    let mut votes: Vec<([usize; 3], bool)> = Vec::new();
+    assert!(
+        map.dims().iter().product::<usize>() <= 1usize << 31,
+        "地图体素数超出 u32 投票编码容量"
+    );
+    // 体素线性索引 + 命中位打包成 u64：收集后排序折叠，确定性顺序，每体素每帧
+    // 一次更新；单次 Vec 分配，避免逐体素堆节点。
+    let step = cam.pixel_step;
+    let rays = cam.width.div_ceil(step) * cam.height.div_ceil(step);
+    let mut votes: Vec<u32> = Vec::with_capacity(rays * 8);
     let cam_world = body_pose * Point3::from(cam.pos_in_body);
     let mut v = 0usize;
     while v < cam.height {
@@ -113,21 +120,21 @@ pub fn update_from_depth(
 
 /// 帧内多数投票，每体素每帧最多一次 log-odds 更新；相等时取命中。
 /// 对照 EGO-Planner-v2 `raycastProcess` 的 `count_hit`/`count_hit_and_miss`。
-fn apply_votes(map: &mut GridMap, votes: Vec<([usize; 3], bool)>) {
-    let mut votes = votes;
-    votes.sort_unstable_by_key(|v| v.0);
+fn apply_votes(map: &mut GridMap, mut votes: Vec<u32>) {
+    votes.sort_unstable();
     let mut i = 0usize;
     while i < votes.len() {
-        let idx = votes[i].0;
+        let key = votes[i] >> 1;
         let (mut hits, mut misses) = (0u32, 0u32);
-        while i < votes.len() && votes[i].0 == idx {
-            if votes[i].1 {
+        while i < votes.len() && votes[i] >> 1 == key {
+            if votes[i] & 1 == 1 {
                 hits += 1;
             } else {
                 misses += 1;
             }
             i += 1;
         }
+        let idx = vote_index(map, key);
         map.update_occupancy(
             idx,
             if hits >= misses {
@@ -139,6 +146,20 @@ fn apply_votes(map: &mut GridMap, votes: Vec<([usize; 3], bool)>) {
     }
 }
 
+/// 窗口线性索引 + 命中位（`u32` 排序比 32 字节结构快）。
+fn vote_key(map: &GridMap, idx: [usize; 3], hit: bool) -> u32 {
+    let [_, dy, dz] = map.dims();
+    let linear = (idx[0] * dy + idx[1]) * dz + idx[2];
+    (linear as u32) << 1 | u32::from(hit)
+}
+
+/// 从线性索引还原窗口索引。
+fn vote_index(map: &GridMap, linear: u32) -> [usize; 3] {
+    let [_, dy, dz] = map.dims();
+    let linear = linear as usize;
+    [linear / (dz * dy), (linear / dz) % dy, linear % dz]
+}
+
 #[cfg(test)]
 fn mark_ray(map: &mut GridMap, from: Vector3<f64>, to: Vector3<f64>) {
     let mut votes = Vec::new();
@@ -147,12 +168,7 @@ fn mark_ray(map: &mut GridMap, from: Vector3<f64>, to: Vector3<f64>) {
 }
 
 /// 有限线段的 3D DDA；起点体素不作为空闲证据。
-fn vote_ray(
-    map: &GridMap,
-    from: Vector3<f64>,
-    to: Vector3<f64>,
-    votes: &mut Vec<([usize; 3], bool)>,
-) {
+fn vote_ray(map: &GridMap, from: Vector3<f64>, to: Vector3<f64>, votes: &mut Vec<u32>) {
     let Some(mut idx) = map.index_of(from) else {
         return;
     };
@@ -160,7 +176,7 @@ fn vote_ray(
         return;
     };
     if idx == idx_to {
-        votes.push((idx, true));
+        votes.push(vote_key(map, idx, true));
         return;
     }
 
@@ -200,10 +216,10 @@ fn vote_ray(
             break;
         }
         if idx == idx_to {
-            votes.push((idx, true));
+            votes.push(vote_key(map, idx, true));
             break;
         }
-        votes.push((idx, false));
+        votes.push(vote_key(map, idx, false));
         // 防御：射线异常长时截断（应被命中或出界提前终止）
         if t > 100.0 * dir.norm() {
             break;
@@ -257,11 +273,11 @@ mod tests {
         assert!((map.occupancy_at([4, 5, 5]) - expected).abs() < 1e-12);
         assert_eq!(map.state([4, 5, 5]), VoxelState::Free);
         let votes = vec![
-            ([4, 5, 5], true),
-            ([4, 5, 5], true),
-            ([4, 5, 5], false),
-            ([4, 5, 5], false),
-            ([4, 5, 5], false),
+            vote_key(&map, [4, 5, 5], true),
+            vote_key(&map, [4, 5, 5], true),
+            vote_key(&map, [4, 5, 5], false),
+            vote_key(&map, [4, 5, 5], false),
+            vote_key(&map, [4, 5, 5], false),
         ];
         apply_votes(&mut map, votes);
         assert!((map.occupancy_at([4, 5, 5]) - (expected + map.prob_miss_log())).abs() < 1e-12);
