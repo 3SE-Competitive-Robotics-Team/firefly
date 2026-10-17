@@ -107,6 +107,18 @@ pub struct GridMap {
     history_exhausted: bool,
     /// 膨胀计数缓冲（对照官方 `occupancy_buffer_inflate_`）：障碍体素自身 `±GRID_MAP_OBS_FLAG`，周围 `inf_grid` 格内 `±1`；`>0` 即膨胀。
     inflate: Vec<u16>,
+    /// 帧内 hit 计数（官方 `count_hit_`），按占据缓冲地址索引。
+    count_hit: Vec<u16>,
+    /// 帧内 hit+miss 计数（官方 `count_hit_and_miss_`）。
+    count_total: Vec<u16>,
+    /// 帧内射线终点标记（官方 `flag_rayend_`），值为当前 `raycast_num`。
+    flag_rayend: Vec<u32>,
+    /// 帧内遍历标记（官方 `flag_traverse_`）。
+    flag_traverse: Vec<u32>,
+    /// 当前 raycast 世代（官方 `raycast_num_`；官方为 char，这里用 u32 避免回绕 UB）。
+    raycast_num: u32,
+    /// 本帧碰过的体素全局索引（官方 `cache_voxel_`）。
+    cache_voxel: Vec<[i64; 3]>,
     /// 虚拟地面/天花板；None = 不启用（官方 `enable_virtual_wall = false` 默认）。
     virtual_wall: Option<VirtualWall>,
     // --- log-odds 参数（对照 grid_map.cpp 34-77 行，默认值与官方一致）---
@@ -320,6 +332,12 @@ impl GridMapBuilder {
             history_capacity: self.history_capacity,
             history_exhausted: false,
             inflate: vec![0; inf_capacity],
+            count_hit: vec![0; capacity],
+            count_total: vec![0; capacity],
+            flag_rayend: vec![0; capacity],
+            flag_traverse: vec![0; capacity],
+            raycast_num: 0,
+            cache_voxel: Vec::with_capacity(capacity),
             virtual_wall: self.virtual_wall,
             prob_hit_log,
             prob_miss_log,
@@ -340,6 +358,118 @@ impl GridMap {
     fn touch(&mut self) {
         self.revision = self.revision.wrapping_add(1);
     }
+    /// 开始一帧 raycast：世代加一、清空 cache 列表（官方 `raycastProcess` 开头）。
+    pub(crate) fn raycast_begin(&mut self) {
+        self.raycast_num = self.raycast_num.wrapping_add(1);
+        self.cache_voxel.clear();
+    }
+
+    /// 记一次 hit/miss（官方 `setCacheOccupancy`），返回占据缓冲地址。
+    pub(crate) fn raycast_cache(&mut self, pos: Vector3<f64>, hit: bool) -> usize {
+        let g = self.pos_to_global_index(pos);
+        let a = self.occ_addr(g);
+        self.count_total[a] = self.count_total[a].saturating_add(1);
+        if self.count_total[a] == 1 {
+            self.cache_voxel.push(g);
+        }
+        if hit {
+            self.count_hit[a] = self.count_hit[a].saturating_add(1);
+        }
+        a
+    }
+
+    /// 本帧第一次把这个体素当射线终点时返回 `true` 并置标记
+    /// （官方 `flag_rayend_` 判据）。
+    pub(crate) fn rayend_is_new(&mut self, address: usize) -> bool {
+        if self.flag_rayend[address] == self.raycast_num {
+            return false;
+        }
+        self.flag_rayend[address] = self.raycast_num;
+        true
+    }
+
+    /// 本帧第一次遍历到这个体素时返回 `true` 并置标记
+    /// （官方 `flag_traverse_` 判据）。
+    pub(crate) fn traverse_is_new(&mut self, address: usize) -> bool {
+        if self.flag_traverse[address] == self.raycast_num {
+            return false;
+        }
+        self.flag_traverse[address] = self.raycast_num;
+        true
+    }
+
+    /// 收尾：逐 cache 体素多数投票、计数清零、clamp 检查后更新
+    /// （官方 `raycastProcess` 收尾循环）。
+    pub(crate) fn raycast_end(&mut self) {
+        for i in 0..self.cache_voxel.len() {
+            let g = self.cache_voxel[i];
+            let a = self.occ_addr(g);
+            let hits = self.count_hit[a];
+            let total = self.count_total[a];
+            self.count_hit[a] = 0;
+            self.count_total[a] = 0;
+            let delta = if hits >= total - hits {
+                self.prob_hit_log
+            } else {
+                self.prob_miss_log
+            };
+            let occ = self.occupancy[a];
+            if (delta >= 0.0 && occ >= self.clamp_max_log)
+                || (delta <= 0.0 && occ <= self.clamp_min_log)
+            {
+                continue;
+            }
+            self.update_occupancy_global(g, delta);
+        }
+    }
+
+    /// 世界坐标是否在当前环形窗口内（官方 `isInBuf`：闭区间，
+    /// 上界为最后一格下角点）。
+    #[must_use]
+    pub(crate) fn is_in_window(&self, pos: Vector3<f64>) -> bool {
+        let low = self.window_low_world();
+        let up = self.window_up_world();
+        (0..3).all(|i| pos[i] >= low[i] && pos[i] <= up[i])
+    }
+
+    /// 把窗口外的点裁到窗口边界内侧（官方 `closetPointInMap`）。
+    #[must_use]
+    pub(crate) fn clip_to_window(&self, pt: Vector3<f64>, camera: Vector3<f64>) -> Vector3<f64> {
+        let diff = pt - camera;
+        let max_tc = self.window_up_world() - camera;
+        let min_tc = self.window_low_world() - camera;
+        let mut min_t = 1_000_000.0_f64;
+        for i in 0..3 {
+            if diff[i].abs() > 0.0 {
+                let t1 = max_tc[i] / diff[i];
+                if t1 > 0.0 && t1 < min_t {
+                    min_t = t1;
+                }
+                let t2 = min_tc[i] / diff[i];
+                if t2 > 0.0 && t2 < min_t {
+                    min_t = t2;
+                }
+            }
+        }
+        camera + diff * (min_t - 1e-3)
+    }
+
+    fn window_low_world(&self) -> Vector3<f64> {
+        Vector3::new(
+            self.world_origin.x + self.low[0] as f64 * self.resolution,
+            self.world_origin.y + self.low[1] as f64 * self.resolution,
+            self.world_origin.z + self.low[2] as f64 * self.resolution,
+        )
+    }
+
+    fn window_up_world(&self) -> Vector3<f64> {
+        Vector3::new(
+            self.world_origin.x + self.up[0] as f64 * self.resolution,
+            self.world_origin.y + self.up[1] as f64 * self.resolution,
+            self.world_origin.z + self.up[2] as f64 * self.resolution,
+        )
+    }
+
     #[must_use]
     pub fn resolution(&self) -> f64 {
         self.resolution
@@ -837,6 +967,10 @@ impl GridMap {
                         self.touch();
                     }
                     self.occupancy[a] = self.clamp_min_log;
+                    self.count_hit[a] = 0;
+                    self.count_total[a] = 0;
+                    self.flag_rayend[a] = self.raycast_num;
+                    self.flag_traverse[a] = self.raycast_num;
                     let ia = self.inf_addr(g);
                     if self.inflate[ia] >= GRID_MAP_OBS_FLAG {
                         self.change_inf_buf_global(false, g, true);

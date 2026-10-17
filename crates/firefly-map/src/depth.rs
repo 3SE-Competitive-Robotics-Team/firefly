@@ -1,23 +1,22 @@
 //! 深度相机 → 占据栅格（感知建图，log-odds 更新）。
 //!
-//! 把一帧深度图投影成世界系点云并做光线标记：相机原点 → 命中点射线沿途
-//! 体素以 `prob_miss_log` 递减（趋向 Free），命中体素以 `prob_hit_log` 递增
-//! （趋向 Occupied），对照官方 `grid_map.cpp:577-700` `raycastProcess` 的
-//! 帧内多数投票与单次 log-odds 更新语义。
-//!
-//! 相机模型与 RMUC render 标定一致（`apps/render/src/rig.rs`），
-//! 投影约定见 `DepthCamera::mujoco_default`。
+//! 逐行对照官方 `EGO-Planner-v2 plan_env/src/grid_map.cpp` 的
+//! `projectDepthImage` / `raycastProcess`：深度像素投影为世界系点，frame 内
+//! 按体素累计 hit/miss，每体素每帧一次多数投票后更新 log-odds。
 
 use crate::grid::GridMap;
+use crate::raycast::RayCaster;
+use firefly_base::rig::CV_FROM_RENDER;
 use nalgebra::{Isometry3, Matrix3, Point3, Vector3};
 
 /// 深度相机标定（内参 + 外参 + 感知参数）。
 ///
-/// 投影模型（render 深度预通道）：
-/// - 像素 (u, v)（左上原点，v 向下）→ 相机系射线 `(dx, dy, -1)`，
-///   `dx=(u-cx)/focal`、`dy=-(v-cy)/focal`；
-/// - 深度值为**相机空间 Z**（视线方向的垂直距离，非欧氏距离）；
-/// - 相机系命中点 `(dx·z, dy·z, -z)`，经 [`Self::rot_cam_to_body`] 转到机体系。
+/// 官方 `grid_map.cpp` 的深度输入是 `uint16` 并按 `k_depth_scaling_factor`
+/// 换算；本项目直接消费 `f32` 米制深度，投影与过滤约定一致：
+/// - 像素 `(u, v)`（左上原点，v 向下）→ CV 相机系射线 `(dx, dy, 1)`；
+/// - 深度值为相机空间 Z（视线方向的垂直距离，非欧氏距离）；
+/// - 相机系命中点经 [`CV_FROM_RENDER`] 的转置转回 render 机体系，再经
+///   [`Self::rot_cam_to_body`] 转到机体系。
 #[derive(Debug, Clone)]
 pub struct DepthCamera {
     /// 像素焦距（`fx=fy`，方形像素）。
@@ -34,15 +33,18 @@ pub struct DepthCamera {
     pub rot_cam_to_body: Matrix3<f64>,
     /// 相机在机体系的位置（米）。
     pub pos_in_body: Vector3<f64>,
-    /// 最大感知距离（米），超出视为无效。
-    pub max_range: f64,
-    /// 像素降采样步长（每 `step` 个像素取一个，控制射线数）。
-    pub pixel_step: usize,
+    /// 深度过滤边距（像素，官方 `grid_map/depth_filter_margin`，默认 2）。
+    pub depth_filter_margin: usize,
+    /// 最小有效深度（米，官方 `grid_map/depth_filter_mindist`，默认 0.2）。
+    pub min_range: f64,
+    /// 像素降采样步长（官方 `grid_map/skip_pixel`，默认 2）。
+    pub skip_pixel: usize,
 }
 
 impl DepthCamera {
     /// RMUC render 默认标定：深度相机与双目前脸齐平，垂直视场 70.88°，320×240。
-    /// 机位、朝向、下倾与视场参数统一来自 [`firefly_base::rig`]。
+    /// 机位、朝向、下倾与视场参数统一来自 [`firefly_base::rig`]；
+    /// 过滤参数取官方 `advanced_param.xml` 默认值。
     #[must_use]
     pub fn mujoco_default() -> Self {
         let focal = (240.0 / 2.0) / (firefly_base::rig::FOV_Y_DEG.to_radians() / 2.0).tan();
@@ -55,27 +57,25 @@ impl DepthCamera {
             height: 240,
             rot_cam_to_body: firefly_base::rig::cam_axes_in_body(),
             pos_in_body: Vector3::from(firefly_base::rig::DEPTH_IN_BODY),
-            max_range: 8.0,
-            pixel_step: 3,
+            depth_filter_margin: 2,
+            min_range: 0.2,
+            skip_pixel: 2,
         }
     }
 }
 
 /// 用一帧深度图更新占据地图（感知建图，log-odds）。
 ///
-/// 对每个有效像素（`0.05 < z ≤ max_range` 且有限）：把命中点变换到世界系，
-/// 相机原点 → 命中点射线沿途体素以 `prob_miss_log` 递减、命中体素以
-/// `prob_hit_log` 递增（对照官方 `raycastProcess` 658-669 行的 log-odds 更新）。
+/// 对照官方 `projectDepthImage`：跳过 `depth_filter_margin` 边框、每
+/// `skip_pixel` 取一个像素，丢弃深度小于 `min_range` 或非有限值的像素
+/// （官方 `grid_map.cpp` 的 `raycastProcess` 不使用最大距离过滤）。
 ///
-/// `body_pose` 为深度测量时刻的机体 → 地图变换，由地图系里程计插值得到。
+/// `body_pose` 为深度测量时刻的机体 → 地图变换。
 ///
-/// 注意：`Isometry * Vector3` 只旋转不平移（Vector 视为方向量），平移须用
-/// `Isometry * Point3`。
-///
-/// 返回有效体素投票数；零表示本帧未提供地图观测。
+/// 返回投影点数量；零表示本帧未提供地图观测。
 ///
 /// # Panics
-/// 深度长度与相机尺寸不一致，或 `pixel_step` 为零。
+/// 深度长度与相机尺寸不一致，或 `skip_pixel` 为零。
 pub fn update_from_depth(
     map: &mut GridMap,
     cam: &DepthCamera,
@@ -83,132 +83,74 @@ pub fn update_from_depth(
     depth: &[f32],
 ) -> usize {
     assert_eq!(depth.len(), cam.width * cam.height);
-    assert!(cam.pixel_step > 0);
-    // (体素, 是否命中)：收集后按体素排序折叠，确定性顺序，每体素每帧一次更新；
-    // 单次 Vec 分配，避免逐体素堆节点。
-    let mut votes: Vec<([usize; 3], bool)> = Vec::new();
-    let cam_world = body_pose * Point3::from(cam.pos_in_body);
-    let mut v = 0usize;
-    while v < cam.height {
-        let mut u = 0usize;
-        while u < cam.width {
-            let z = depth[v * cam.width + u];
-            let z = f64::from(z);
-            if z > 0.05 && z <= cam.max_range && z.is_finite() {
-                let dx = (u as f64 - cam.cx) / cam.focal;
-                let dy = -(v as f64 - cam.cy) / cam.focal;
-                let hit_cam = Vector3::new(dx * z, dy * z, -z);
-                let hit_world =
-                    body_pose * Point3::from(cam.pos_in_body + cam.rot_cam_to_body * hit_cam);
-                vote_ray(map, cam_world.coords, hit_world.coords, &mut votes);
-            }
-            u += cam.pixel_step;
-        }
-        v += cam.pixel_step;
+    assert!(cam.skip_pixel > 0);
+    let margin = cam.depth_filter_margin;
+    if cam.width <= 2 * margin || cam.height <= 2 * margin {
+        return 0;
     }
-    let observations = votes.len();
-    apply_votes(map, votes);
-    observations
+    let rot_cam_to_body = cam.rot_cam_to_body * CV_FROM_RENDER.transpose();
+    let mut points: Vec<Vector3<f64>> =
+        Vec::with_capacity((cam.width / cam.skip_pixel) * (cam.height / cam.skip_pixel));
+    for v in (margin..cam.height - margin).step_by(cam.skip_pixel) {
+        for u in (margin..cam.width - margin).step_by(cam.skip_pixel) {
+            let z = f64::from(depth[v * cam.width + u]);
+            if !z.is_finite() || z < cam.min_range {
+                continue;
+            }
+            let p_cv = Vector3::new(
+                (u as f64 - cam.cx) * z / cam.focal,
+                (v as f64 - cam.cy) * z / cam.focal,
+                z,
+            );
+            let p_body = rot_cam_to_body * p_cv;
+            points.push((body_pose * Point3::from(cam.pos_in_body + p_body)).coords);
+        }
+    }
+    let camera_pos = (body_pose * Point3::from(cam.pos_in_body)).coords;
+    raycast_points(map, camera_pos, &points);
+    points.len()
 }
 
-/// 帧内多数投票，每体素每帧最多一次 log-odds 更新；相等时取命中。
-/// 对照 EGO-Planner-v2 `raycastProcess` 的 `count_hit`/`count_hit_and_miss`。
-fn apply_votes(map: &mut GridMap, votes: Vec<([usize; 3], bool)>) {
-    let mut votes = votes;
-    votes.sort_unstable_by_key(|v| v.0);
-    let mut i = 0usize;
-    while i < votes.len() {
-        let idx = votes[i].0;
-        let (mut hits, mut misses) = (0u32, 0u32);
-        while i < votes.len() && votes[i].0 == idx {
-            if votes[i].1 {
-                hits += 1;
-            } else {
-                misses += 1;
-            }
-            i += 1;
-        }
-        map.update_occupancy(
-            idx,
-            if hits >= misses {
-                map.prob_hit_log()
-            } else {
-                map.prob_miss_log()
-            },
-        );
+/// 官方 `raycastProcess`：点云 → 帧内多数投票 → 每体素一次 log-odds 更新。
+fn raycast_points(map: &mut GridMap, camera_pos: Vector3<f64>, points: &[Vector3<f64>]) {
+    if points.is_empty() {
+        return;
     }
+    let res = map.resolution();
+    map.raycast_begin();
+    let mut ray_pt = [0_i32; 3];
+    for &point in points {
+        // 官方：窗口外裁到边界按 miss；窗口内按 hit。
+        let (pt, hit) = if map.is_in_window(point) {
+            (point, true)
+        } else {
+            (map.clip_to_window(point, camera_pos), false)
+        };
+        let address = map.raycast_cache(pt, hit);
+        if !map.rayend_is_new(address) {
+            continue;
+        }
+        let Some(mut caster) = RayCaster::new(pt / res, camera_pos / res) else {
+            continue;
+        };
+        while caster.step(&mut ray_pt) {
+            let tmp = Vector3::new(
+                (f64::from(ray_pt[0]) + 0.5) * res,
+                (f64::from(ray_pt[1]) + 0.5) * res,
+                (f64::from(ray_pt[2]) + 0.5) * res,
+            );
+            let address = map.raycast_cache(tmp, false);
+            if !map.traverse_is_new(address) {
+                break;
+            }
+        }
+    }
+    map.raycast_end();
 }
 
 #[cfg(test)]
 fn mark_ray(map: &mut GridMap, from: Vector3<f64>, to: Vector3<f64>) {
-    let mut votes = Vec::new();
-    vote_ray(map, from, to, &mut votes);
-    apply_votes(map, votes);
-}
-
-/// 有限线段的 3D DDA；起点体素不作为空闲证据。
-fn vote_ray(
-    map: &GridMap,
-    from: Vector3<f64>,
-    to: Vector3<f64>,
-    votes: &mut Vec<([usize; 3], bool)>,
-) {
-    let Some(mut idx) = map.index_of(from) else {
-        return;
-    };
-    let Some(idx_to) = map.index_of(to) else {
-        return;
-    };
-    if idx == idx_to {
-        votes.push((idx, true));
-        return;
-    }
-
-    let res = map.resolution();
-    let origin = map.origin();
-    // DDA（Amanatides & Woo）：沿射线逐格推进
-    let dir = to - from;
-    let mut step = [0i32; 3];
-    let mut t_delta = [0.0f64; 3];
-    let mut t_max = [0.0f64; 3];
-    for i in 0..3 {
-        if dir[i].abs() < 1e-12 {
-            step[i] = 0;
-            t_delta[i] = f64::INFINITY;
-            t_max[i] = f64::INFINITY;
-        } else if dir[i] > 0.0 {
-            step[i] = 1;
-            let bound = origin[i] + (idx[i] as f64 + 1.0) * res;
-            t_delta[i] = res / dir[i].abs();
-            t_max[i] = (bound - from[i]) / dir[i];
-        } else {
-            step[i] = -1;
-            let bound = origin[i] + idx[i] as f64 * res;
-            t_delta[i] = res / dir[i].abs();
-            t_max[i] = (bound - from[i]) / dir[i];
-        }
-    }
-    loop {
-        let axis = (0..3)
-            .min_by(|&a, &b| t_max[a].total_cmp(&t_max[b]))
-            .unwrap();
-        let t = t_max[axis];
-        t_max[axis] += t_delta[axis];
-        idx[axis] = idx[axis].wrapping_add_signed(step[axis] as isize);
-        let [x, y, z] = idx;
-        if x >= map.dims()[0] || y >= map.dims()[1] || z >= map.dims()[2] {
-            break;
-        }
-        if idx == idx_to {
-            votes.push((idx, true));
-            break;
-        }
-        votes.push((idx, false));
-        // 防御：射线异常长时截断（应被命中或出界提前终止）
-        if t > 100.0 * dir.norm() {
-            break;
-        }
-    }
+    raycast_points(map, from, std::slice::from_ref(&to));
 }
 
 #[cfg(test)]
@@ -242,29 +184,116 @@ mod tests {
 
     #[test]
     fn repeated_pixels_contribute_only_one_frame_update() {
+        let pos = Vector3::new(4.5, 5.5, 5.5);
         let mut map = GridMapBuilder::new(1., [10, 10, 10]).build().unwrap();
-        let mut votes = Vec::new();
+        // 同一帧内同一体素 100 次 hit（官方 setCacheOccupancy 累计、收尾只更新一次）
+        map.raycast_begin();
         for _ in 0..100 {
-            vote_ray(
-                &map,
-                Vector3::new(0.5, 5.5, 5.5),
-                Vector3::new(4.5, 5.5, 5.5),
-                &mut votes,
-            );
+            map.raycast_cache(pos, true);
         }
-        apply_votes(&mut map, votes);
+        map.raycast_end();
         let expected = map.clamp_min_log() + map.prob_hit_log();
         assert!((map.occupancy_at([4, 5, 5]) - expected).abs() < 1e-12);
         assert_eq!(map.state([4, 5, 5]), VoxelState::Free);
-        let votes = vec![
-            ([4, 5, 5], true),
-            ([4, 5, 5], true),
-            ([4, 5, 5], false),
-            ([4, 5, 5], false),
-            ([4, 5, 5], false),
-        ];
-        apply_votes(&mut map, votes);
+
+        // 同一帧 2 hit / 3 miss：miss 多，取 miss
+        map.raycast_begin();
+        for _ in 0..2 {
+            map.raycast_cache(pos, true);
+        }
+        for _ in 0..3 {
+            map.raycast_cache(pos, false);
+        }
+        map.raycast_end();
         assert!((map.occupancy_at([4, 5, 5]) - (expected + map.prob_miss_log())).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rayend_and_traverse_flags_reset_per_frame() {
+        let mut map = GridMapBuilder::new(1., [10, 10, 10]).build().unwrap();
+        let pos = Vector3::new(4.5, 5.5, 5.5);
+        map.raycast_begin();
+        let address = map.raycast_cache(pos, true);
+        assert!(map.rayend_is_new(address));
+        assert!(!map.rayend_is_new(address));
+        assert!(map.traverse_is_new(address));
+        assert!(!map.traverse_is_new(address));
+        map.raycast_end();
+        map.raycast_begin();
+        assert!(map.rayend_is_new(address));
+        assert!(map.traverse_is_new(address));
+    }
+
+    #[test]
+    fn majority_tie_prefers_hit_and_clamped_votes_are_skipped() {
+        let pos = Vector3::new(4.5, 5.5, 5.5);
+        let mut map = GridMapBuilder::new(1., [10, 10, 10]).build().unwrap();
+        map.raycast_begin();
+        for _ in 0..2 {
+            map.raycast_cache(pos, true);
+        }
+        for _ in 0..2 {
+            map.raycast_cache(pos, false);
+        }
+        map.raycast_end();
+        let expected = map.clamp_min_log() + map.prob_hit_log();
+        assert!((map.occupancy_at([4, 5, 5]) - expected).abs() < 1e-12);
+
+        // 到 clamp_max 后继续投 hit：官方收尾直接跳过
+        while map.occupancy_at([4, 5, 5]) < map.clamp_max_log() {
+            map.raycast_begin();
+            map.raycast_cache(pos, true);
+            map.raycast_end();
+        }
+        let saturated = map.occupancy_at([4, 5, 5]);
+        map.raycast_begin();
+        map.raycast_cache(pos, true);
+        map.raycast_end();
+        assert!((map.occupancy_at([4, 5, 5]) - saturated).abs() < 1e-12);
+    }
+
+    #[test]
+    fn out_of_window_point_is_clipped_and_voted_as_miss() {
+        let mut map = GridMapBuilder::new(1., [5, 5, 5]).build().unwrap();
+        let camera = Vector3::new(0.5, 2.5, 2.5);
+        let boundary = Vector3::new(3.5, 2.5, 2.5);
+        for _ in 0..5 {
+            map.raycast_begin();
+            map.raycast_cache(boundary, true);
+            map.raycast_end();
+        }
+        let before = map.occupancy_at([3, 2, 2]);
+        raycast_points(&mut map, camera, &[Vector3::new(9.5, 2.5, 2.5)]);
+        assert!(map.occupancy_at([3, 2, 2]) < before);
+    }
+
+    #[test]
+    fn duplicate_ray_ends_cast_only_one_ray() {
+        fn lost(path: &[Vector3<f64>]) -> f64 {
+            let mut map = GridMapBuilder::new(1., [10, 10, 10]).build().unwrap();
+            map.set_state([3, 5, 5], VoxelState::Occupied);
+            let before = map.occupancy_at([3, 5, 5]);
+            raycast_points(&mut map, Vector3::new(0.5, 5.5, 5.5), path);
+            before - map.occupancy_at([3, 5, 5])
+        }
+        let one = lost(&[Vector3::new(4.5, 5.5, 5.5)]);
+        let two = lost(&[Vector3::new(4.5, 5.5, 5.5); 2]);
+        assert!((one - two).abs() < 1e-12, "one={one} two={two}");
+    }
+
+    #[test]
+    fn traversal_stops_at_already_visited_voxel() {
+        fn lost(points: &[Vector3<f64>]) -> f64 {
+            let mut map = GridMapBuilder::new(1., [10, 10, 10]).build().unwrap();
+            map.set_state([3, 5, 5], VoxelState::Occupied);
+            let before = map.occupancy_at([3, 5, 5]);
+            raycast_points(&mut map, Vector3::new(0.5, 5.5, 5.5), points);
+            before - map.occupancy_at([3, 5, 5])
+        }
+        let one = lost(&[Vector3::new(4.5, 5.5, 5.5)]);
+        // 第二条射线在 [4,5,5] 撞到本帧已遍历格后停止，不应再记 [3,5,5] 的 miss
+        let two = lost(&[Vector3::new(4.5, 5.5, 5.5), Vector3::new(6.5, 5.5, 5.5)]);
+        assert!((one - two).abs() < 1e-12, "one={one} two={two}");
     }
 
     #[test]
@@ -340,14 +369,14 @@ mod tests {
 
     #[test]
     fn update_from_depth_projects_to_world() {
-        // 无旋转机体 + 采样像素 (u=159, v=54)（pixel_step=3 网格点）：
-        // 下倾 20° 相机射线在深度 5m 处命中机体系 ≈ (5.37, 0.03, 0.13)，
+        // 无旋转机体 + 采样像素 (u=158, v=54)（margin=2、skip=2 网格点）：
+        // 下倾 20° 相机射线在深度 5m 处命中机体系 ≈ (5.42, 0.04, 0.12)，
         // 需多次观测才跨阈值
         let cam = DepthCamera::mujoco_default();
         let mut map = GridMapBuilder::new(1.0, [20, 20, 10]).build().unwrap();
         let pose = Isometry3::identity();
         let mut depth = vec![0.0f32; cam.width * cam.height];
-        depth[54 * cam.width + 159] = 5.0;
+        depth[54 * cam.width + 158] = 5.0;
         let clamp_min = map.clamp_min_log();
         let hit = map.prob_hit_log();
         // 单帧命中一次
@@ -365,8 +394,8 @@ mod tests {
     #[test]
     fn update_from_depth_maps_mujoco_box() {
         // 场景：无人机在 (1,4,1) 恒等姿态；下倾 20° 相机射线经
-        // 像素 (207,69)（pixel_step=3 网格点）深度 6.471m → 命中箱 (8,2)
-        // 前表面世界 (7.75,2.20,0.63)，体素 [19,17,1]，多次观测后占据
+        // 像素 (208,70)（margin=2、skip=2 网格点）深度 6.471m → 命中箱 (8,2)
+        // 前表面世界 (7.79,2.14,0.57)，体素 [19,17,1]，多次观测后占据
         let cam = DepthCamera::mujoco_default();
         // 地图参数：origin (0,-5,0)、0.4m、dims [80,35,13]
         let mut map = GridMapBuilder::new(0.4, [80, 35, 13])
@@ -376,7 +405,7 @@ mod tests {
         let pose =
             Isometry3::from_parts(Translation3::new(1.0, 4.0, 1.0), UnitQuaternion::identity());
         let mut depth = vec![0.0f32; cam.width * cam.height];
-        depth[69 * cam.width + 207] = 6.471;
+        depth[70 * cam.width + 208] = 6.471;
         let hit = map.prob_hit_log();
         let clamp_min = map.clamp_min_log();
         update_from_depth(&mut map, &cam, &pose, &depth);
