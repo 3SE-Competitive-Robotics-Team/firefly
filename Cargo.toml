@@ -9,7 +9,6 @@ firefly-landmarks = { path = "crates/firefly-landmarks" }
 serde_json = "1.0.152"
 firefly-base = { path = "crates/firefly-base" }
 bevy = "0.20.0"
-criterion = { version = "0.8.2", features = ["html_reports"] }
 fastrace = { version = "0.7.19", default-features = false }
 iceoryx2 = "0.10.0"
 iceoryx2-bb-posix = "0.10.0"
