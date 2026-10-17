@@ -3,11 +3,11 @@
 - 每个相机帧周期（10Hz）开一条新 trace（root span `sim-cycle`）；
 - 周期内所有发布（imu/双目/深度/真值）为 cycle 的子 span，共享同一
   `trace_id`，`trace_id`/`span_id` 填进 iceoryx2 `TraceContext` header；
-- Rust 侧（vio/demo）续接该 trace，参考回到本进程后周期闭合，
-  下一相机帧开新 trace（可区分每次输入）。
+- Rust 侧（vio/planner）续接该 trace，把同一 `trace_id` 延续到规划参考；
+  下一相机帧开始时结束上一周期并开新 trace（可区分每次输入）。
 
 ``--no-trace`` 模式下所有 span 操作退化为 no-op，消除 OTel Python SDK
-开销（实测可将 sim 从 0.37x 提升至 14x real-time）。
+开销。
 """
 
 from __future__ import annotations
