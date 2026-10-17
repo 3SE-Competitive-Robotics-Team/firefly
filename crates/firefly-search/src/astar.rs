@@ -8,13 +8,13 @@
 //! 地图索引固定在占据窗口；连续线段净距校验为本项目安全扩展，
 //! 26 邻域的对角连边也必须避开膨胀体素。
 
-use crate::segment::{adjacent_step_is_clear, segment_is_clear};
-use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use crate::segment::segment_is_clear_with_events;
 
 use firefly_error::{Error, ErrorKind};
 use firefly_map::GridMap;
 use nalgebra::Vector3;
+
+const SQRT_3: f64 = 1.732_050_807_568_877_2;
 
 #[derive(Debug, Clone)]
 pub struct AstarConfig {
@@ -58,30 +58,6 @@ struct Entry {
     f: f64,
 }
 
-impl PartialEq for Entry {
-    fn eq(&self, other: &Self) -> bool {
-        self.f == other.f
-    }
-}
-
-impl Eq for Entry {}
-
-impl PartialOrd for Entry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Entry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .f
-            .partial_cmp(&self.f)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| self.node.cmp(&other.node))
-    }
-}
-
 /// 节点状态（官方 `GridNode::enum_state`）。
 #[derive(Clone, Copy, PartialEq)]
 enum NodeState {
@@ -98,7 +74,74 @@ pub struct Astar {
     rounds: Vec<u32>,
     state: Vec<NodeState>,
     round: u32,
+    /// 索引二叉堆（去重 + decrease-key）；`heap_pos[node]` 为堆内下标。
+    heap: Vec<Entry>,
+    heap_pos: Vec<u32>,
 }
+
+const NO_HEAP: u32 = u32::MAX;
+const HEAP_ARITY: usize = 4;
+
+/// 每个单位步方向（`((i+1)*3+(j+1))*3+(k+1)`）中点接触格的位掩码。
+const fn direction_masks() -> [u32; 27] {
+    let mut masks = [0u32; 27];
+    let mut i = -1i32;
+    while i <= 1 {
+        let mut j = -1i32;
+        while j <= 1 {
+            let mut k = -1i32;
+            while k <= 1 {
+                if i != 0 || j != 0 || k != 0 {
+                    let (x0, x1) = if i < 0 {
+                        (-1, 0)
+                    } else if i > 0 {
+                        (0, 1)
+                    } else {
+                        (0, 0)
+                    };
+                    let (y0, y1) = if j < 0 {
+                        (-1, 0)
+                    } else if j > 0 {
+                        (0, 1)
+                    } else {
+                        (0, 0)
+                    };
+                    let (z0, z1) = if k < 0 {
+                        (-1, 0)
+                    } else if k > 0 {
+                        (0, 1)
+                    } else {
+                        (0, 0)
+                    };
+                    let direction = ((i + 1) * 3 + (j + 1)) as usize * 3 + (k + 1) as usize;
+                    let mut mask = 0u32;
+                    let mut di = x0;
+                    while di <= x1 {
+                        let mut dj = y0;
+                        while dj <= y1 {
+                            let mut dk = z0;
+                            while dk <= z1 {
+                                let index =
+                                    ((di + 1) * 3 + (dj + 1)) as usize * 3 + (dk + 1) as usize;
+                                mask |= 1 << index;
+                                dk += 1;
+                            }
+                            dj += 1;
+                        }
+                        di += 1;
+                    }
+                    masks[direction] = mask;
+                }
+                k += 1;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    masks
+}
+
+static DIRECTION_MASKS: [u32; 27] = direction_masks();
 
 impl Default for Astar {
     fn default() -> Self {
@@ -116,6 +159,8 @@ impl Astar {
             rounds: Vec::new(),
             state: Vec::new(),
             round: 0,
+            heap: Vec::new(),
+            heap_pos: Vec::new(),
         }
     }
 
@@ -187,30 +232,27 @@ impl Astar {
         self.came_from[start_node.0 as usize] = Node::NONE;
         self.state[start_node.0 as usize] = NodeState::Open;
 
-        let mut open = BinaryHeap::new();
-        open.push(Entry {
+        self.heap_clear();
+        self.heap_push(Entry {
             node: start_node,
             g: 0.0,
             f: self.config.heuristic_weight * Self::heuristic(map, start_idx, goal_idx),
         });
 
         let mut expansions = 0usize;
-        let mut neighbors: Vec<(Node, f64, [usize; 3])> = Vec::with_capacity(26);
-        while let Some(Entry { node, g, .. }) = open.pop() {
+        while let Some(Entry { node, g, .. }) = self.heap_pop() {
             if self.rounds[node.0 as usize] != round
                 || self.state[node.0 as usize] != NodeState::Open
             {
                 continue;
             }
-            if g > self.g_score[node.0 as usize] {
-                continue; // 陈旧条目（节点已通过更优 g 重新入队）
-            }
             if node == goal_node {
                 let path = self.reconstruct(map, goal_node, start_pt, goal_pt);
+                let mut events = Vec::new();
                 if path
                     .points()
                     .windows(2)
-                    .all(|w| segment_is_clear(map, w[0], w[1]))
+                    .all(|w| segment_is_clear_with_events(map, w[0], w[1], &mut events))
                 {
                     return Ok(path);
                 }
@@ -228,53 +270,29 @@ impl Astar {
             expansions += 1;
             self.state[node.0 as usize] = NodeState::Closed;
             let idx = Self::decode(map, node);
-            Self::fill_neighbors(map, idx, &mut neighbors);
-            self.relax(map, goal_idx, &mut open, node, g, &neighbors);
+            self.expand(map, idx, goal_idx, node, g);
         }
         Err(Error::temporary(ErrorKind::NotFound, "no path found"))
     }
 
-    /// 把已展开节点的邻居写入 open 集；闭集与无改进的节点跳过。
-    fn relax(
-        &mut self,
-        map: &GridMap,
-        goal_idx: [usize; 3],
-        open: &mut BinaryHeap<Entry>,
-        node: Node,
-        g: f64,
-        neighbors: &[(Node, f64, [usize; 3])],
-    ) {
-        let round = self.round;
-        for &(nb, step_len, nb_idx) in neighbors {
-            let tentative = g + step_len;
-            let explored = self.rounds[nb.0 as usize] == round;
-            if explored
-                && (self.state[nb.0 as usize] == NodeState::Closed
-                    || tentative >= self.g_score[nb.0 as usize])
-            {
-                continue;
-            }
-            if !explored {
-                self.touch(nb, round);
-                self.state[nb.0 as usize] = NodeState::Open;
-            }
-            self.g_score[nb.0 as usize] = tentative;
-            self.came_from[nb.0 as usize] = node;
-            open.push(Entry {
-                node: nb,
-                g: tentative,
-                f: tentative
-                    + self.config.heuristic_weight * Self::heuristic(map, nb_idx, goal_idx),
-            });
-        }
+    /// 展开一个节点：缓存 3×3×3 膨胀占用，逐个邻居松弛（不经过中间 Vec）。
+    #[inline]
+    fn expand(&mut self, map: &GridMap, idx: [usize; 3], goal_idx: [usize; 3], node: Node, g: f64) {
+        let blocked = map.inflated_neighborhood_mask(idx);
+        Self::for_each_neighbor(map, idx, blocked, |nb, step, nb_idx| {
+            self.relax_neighbor(map, goal_idx, node, g, nb, step, nb_idx);
+        });
     }
 
-    /// 26 邻域（官方 `dx,dy,dz ∈ {-1,0,1}`），代价 = 格长 `√(dx²+dy²+dz²)`。
-    ///
-    /// 写入调用方缓冲（跨扩展复用）；只保留避开膨胀层的单位步。
-    fn fill_neighbors(map: &GridMap, idx: [usize; 3], out: &mut Vec<(Node, f64, [usize; 3])>) {
-        out.clear();
+    /// 遍历 26 邻域中避开膨胀层的单位步。
+    fn for_each_neighbor(
+        map: &GridMap,
+        idx: [usize; 3],
+        blocked: u32,
+        mut visit: impl FnMut(Node, f64, [usize; 3]),
+    ) {
         let [dx, dy, dz] = map.dims();
+        let resolution = map.resolution();
         let [x, y, z] = idx;
         for i in -1i32..=1 {
             for j in -1i32..=1 {
@@ -292,16 +310,149 @@ impl Astar {
                     {
                         continue;
                     }
-                    let nidx = [nx as usize, ny as usize, nz as usize];
-                    // 官方 `checkOccupancy` = `getInflateOccupancy`：A* 在**膨胀层**上搜索。
-                    // 单位步在格心连线中点接触的角格必须全部自由，否则对角连边会擦角。
-                    if !adjacent_step_is_clear(map, idx, nidx) {
+                    let direction = ((i + 1) * 3 + (j + 1)) as usize * 3 + (k + 1) as usize;
+                    if blocked & DIRECTION_MASKS[direction] != 0 {
                         continue;
                     }
-                    let step = f64::from(i * i + j * j + k * k).sqrt() * map.resolution();
-                    out.push((Node(Self::linear(map, nidx)), step, nidx));
+                    let step = match i * i + j * j + k * k {
+                        1 => resolution,
+                        2 => std::f64::consts::SQRT_2 * resolution,
+                        3 => SQRT_3 * resolution,
+                        _ => unreachable!("26 邻域步长平方只能是 1/2/3"),
+                    };
+                    let nidx = [nx as usize, ny as usize, nz as usize];
+                    visit(Node(Self::linear(map, nidx)), step, nidx);
                 }
             }
+        }
+    }
+
+    /// 单邻居松弛：闭集与无改进的节点跳过。
+    #[inline]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "展开热路径，避免为邻居临时打包结构体"
+    )]
+    fn relax_neighbor(
+        &mut self,
+        map: &GridMap,
+        goal_idx: [usize; 3],
+        node: Node,
+        g: f64,
+        nb: Node,
+        step_len: f64,
+        nb_idx: [usize; 3],
+    ) {
+        let tentative = g + step_len;
+        let round = self.round;
+        let explored = self.rounds[nb.0 as usize] == round;
+        if explored
+            && (self.state[nb.0 as usize] == NodeState::Closed
+                || tentative >= self.g_score[nb.0 as usize])
+        {
+            return;
+        }
+        if !explored {
+            self.touch(nb, round);
+            self.state[nb.0 as usize] = NodeState::Open;
+        }
+        self.g_score[nb.0 as usize] = tentative;
+        self.came_from[nb.0 as usize] = node;
+        self.heap_push(Entry {
+            node: nb,
+            g: tentative,
+            f: tentative + self.config.heuristic_weight * Self::heuristic(map, nb_idx, goal_idx),
+        });
+    }
+
+    /// 测试用：返回邻居集合（生产路径直接 `expand`，不分配）。
+    #[cfg(test)]
+    fn fill_neighbors(map: &GridMap, idx: [usize; 3], out: &mut Vec<(Node, f64, [usize; 3])>) {
+        out.clear();
+        let blocked = map.inflated_neighborhood_mask(idx);
+        Self::for_each_neighbor(map, idx, blocked, |node, step, nidx| {
+            out.push((node, step, nidx));
+        });
+    }
+
+    fn heap_clear(&mut self) {
+        for i in 0..self.heap.len() {
+            let node = self.heap[i].node.0 as usize;
+            self.heap_pos[node] = NO_HEAP;
+        }
+        self.heap.clear();
+    }
+
+    /// 与旧 `BinaryHeap` 的 `Ord` 平局规则一致：f 相同取 node 较大者先出。
+    fn heap_less(a: &Entry, b: &Entry) -> bool {
+        match a.f.total_cmp(&b.f) {
+            std::cmp::Ordering::Less => true,
+            std::cmp::Ordering::Greater => false,
+            std::cmp::Ordering::Equal => a.node > b.node,
+        }
+    }
+
+    fn heap_push(&mut self, entry: Entry) {
+        let node = entry.node.0 as usize;
+        let pos = self.heap_pos[node];
+        if pos == NO_HEAP {
+            let index = self.heap.len();
+            self.heap_pos[node] = index as u32;
+            self.heap.push(entry);
+            self.sift_up(index);
+        } else {
+            let index = pos as usize;
+            self.heap[index] = entry;
+            self.sift_up(index);
+        }
+    }
+
+    fn heap_pop(&mut self) -> Option<Entry> {
+        let last = self.heap.pop()?;
+        if self.heap.is_empty() {
+            self.heap_pos[last.node.0 as usize] = NO_HEAP;
+            return Some(last);
+        }
+        let root = std::mem::replace(&mut self.heap[0], last);
+        self.heap_pos[root.node.0 as usize] = NO_HEAP;
+        self.heap_pos[self.heap[0].node.0 as usize] = 0;
+        self.sift_down(0);
+        Some(root)
+    }
+
+    fn sift_up(&mut self, mut index: usize) {
+        while index > 0 {
+            let parent = (index - 1) / HEAP_ARITY;
+            if !Self::heap_less(&self.heap[index], &self.heap[parent]) {
+                break;
+            }
+            self.heap.swap(index, parent);
+            self.heap_pos[self.heap[index].node.0 as usize] = index as u32;
+            self.heap_pos[self.heap[parent].node.0 as usize] = parent as u32;
+            index = parent;
+        }
+    }
+
+    fn sift_down(&mut self, mut index: usize) {
+        loop {
+            let first = HEAP_ARITY * index + 1;
+            if first >= self.heap.len() {
+                break;
+            }
+            let end = (first + HEAP_ARITY).min(self.heap.len());
+            let mut smallest = first;
+            for child in first + 1..end {
+                if Self::heap_less(&self.heap[child], &self.heap[smallest]) {
+                    smallest = child;
+                }
+            }
+            if !Self::heap_less(&self.heap[smallest], &self.heap[index]) {
+                break;
+            }
+            self.heap.swap(index, smallest);
+            self.heap_pos[self.heap[index].node.0 as usize] = index as u32;
+            self.heap_pos[self.heap[smallest].node.0 as usize] = smallest as u32;
+            index = smallest;
         }
     }
 
@@ -320,7 +471,7 @@ impl Astar {
         let mid = dx + dy + dz - low - high;
         TIE_BREAKER
             * map.resolution()
-            * (3f64.sqrt() * low + 2f64.sqrt() * (mid - low) + (high - mid))
+            * (SQRT_3 * low + std::f64::consts::SQRT_2 * (mid - low) + (high - mid))
     }
 
     /// 标记节点为本代已访问（首次使用时分配缓冲）。
@@ -334,6 +485,7 @@ impl Astar {
             self.came_from.resize(total, Node::NONE);
             self.rounds.resize(total, 0);
             self.state.resize(total, NodeState::Undefined);
+            self.heap_pos.resize(total, NO_HEAP);
         }
     }
 
@@ -742,7 +894,11 @@ mod neighbor_tests {
                     }
                     let nidx = [nx as usize, ny as usize, nz as usize];
                     if map.is_occupied_inflated(center_of(map, nidx))
-                        || !segment_is_clear(map, center_of(map, idx), center_of(map, nidx))
+                        || !crate::segment::segment_is_clear(
+                            map,
+                            center_of(map, idx),
+                            center_of(map, nidx),
+                        )
                     {
                         continue;
                     }

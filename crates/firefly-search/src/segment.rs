@@ -7,6 +7,18 @@ use nalgebra::Vector3;
 /// 同时穿越多个体素面时检查全部相邻格；地图外和非有限输入拒绝。
 #[must_use]
 pub fn segment_is_clear(map: &GridMap, a: Vector3<f64>, b: Vector3<f64>) -> bool {
+    let mut events = Vec::new();
+    segment_is_clear_with_events(map, a, b, &mut events)
+}
+
+/// [`segment_is_clear`] 的复用事件表版本；`events` 仅借用，避免逐段分配。
+#[must_use]
+pub(crate) fn segment_is_clear_with_events(
+    map: &GridMap,
+    a: Vector3<f64>,
+    b: Vector3<f64>,
+    events: &mut Vec<f64>,
+) -> bool {
     if a.iter().chain(b.iter()).any(|v| !v.is_finite())
         || map.index_of(a).is_none()
         || map.index_of(b).is_none()
@@ -18,7 +30,9 @@ pub fn segment_is_clear(map: &GridMap, a: Vector3<f64>, b: Vector3<f64>) -> bool
     let from = (a - map.origin()) / map.resolution();
     let to = (b - map.origin()) / map.resolution();
     let delta = to - from;
-    let mut events = vec![0., 1.];
+    events.clear();
+    events.push(0.);
+    events.push(1.);
     for axis in 0..3 {
         if delta[axis] == 0. {
             continue;
@@ -47,6 +61,7 @@ pub fn segment_is_clear(map: &GridMap, a: Vector3<f64>, b: Vector3<f64>) -> bool
 /// 单位步在格心连线中点同时跨过所有变化轴，线段只经过源/目标格与中点接触的
 /// `2^k` 个格；检查这些格与 `segment_is_clear` 在单位步上等价，但不分配事件表、
 /// 不做世界坐标换算。调用方保证两端都在地图内。
+#[cfg(test)]
 #[must_use]
 pub(crate) fn adjacent_step_is_clear(map: &GridMap, from: [usize; 3], to: [usize; 3]) -> bool {
     debug_assert!(
