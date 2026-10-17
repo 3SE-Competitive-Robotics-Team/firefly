@@ -338,6 +338,34 @@ impl GridMapBuilder {
     }
 }
 
+/// 环形缓冲轴索引：窗口内索引只需一次加减；极端越界回退取模。
+#[inline]
+fn wrap_index(value: i64, origin: i64, size: i64) -> usize {
+    let mut v = value - origin;
+    if v < 0 {
+        v += size;
+    }
+    if v >= size {
+        v -= size;
+    }
+    if v < 0 || v >= size {
+        v = v.rem_euclid(size);
+    }
+    usize::try_from(v).expect("wrapped index is non-negative")
+}
+
+/// 环形缓冲轴坐标加一个 ±1 偏移（单侧回绕）。
+#[inline]
+fn wrap_offset(coord: usize, delta: i32, size: usize) -> usize {
+    let mut v = coord as i32 + delta;
+    if v < 0 {
+        v += size as i32;
+    } else if v >= size as i32 {
+        v -= size as i32;
+    }
+    v as usize
+}
+
 impl GridMap {
     /// 占据/膨胀状态版本号加一。只在跨越占据阈值（`min_occupancy_log`，即
     /// 重算膨胀会产生不同结果）时调用；纯数值衰减不计。
@@ -407,6 +435,76 @@ impl GridMap {
             }
             self.update_occupancy_global(g, delta);
         }
+    }
+
+    /// 以 `center` 为中心的 3×3×3 膨胀占用位掩码（含虚拟墙；越界格视为不阻挡）。
+    ///
+    /// 位序：`((di+1)*3+(dj+1))*3+(dk+1)`，`di/dj/dk ∈ {-1,0,1}`。
+    #[inline]
+    #[must_use]
+    pub fn inflated_neighborhood_mask(&self, center: [usize; 3]) -> u32 {
+        let dims = self.dims;
+        let g = self.global_index(center);
+        let c = [
+            wrap_index(g[0], self.inf_ring_origin[0], self.inf_dims[0] as i64),
+            wrap_index(g[1], self.inf_ring_origin[1], self.inf_dims[1] as i64),
+            wrap_index(g[2], self.inf_ring_origin[2], self.inf_dims[2] as i64),
+        ];
+        // 虚拟墙只依赖 z：先算三层的阻挡状态，避免 27 次浮点换算。
+        let mut wall_blocked = [false; 3];
+        if let Some(wall) = self.virtual_wall {
+            for (slot, dk) in (-1i32..=1).enumerate() {
+                let cz = self.world_origin.z
+                    + (g[2] + i64::from(dk)) as f64 * self.resolution
+                    + 0.5 * self.resolution;
+                wall_blocked[slot] = wall.blocks(cz);
+            }
+        }
+        let sx = [
+            wrap_offset(c[0], -1, self.inf_dims[0]),
+            c[0],
+            wrap_offset(c[0], 1, self.inf_dims[0]),
+        ];
+        let sy = [
+            wrap_offset(c[1], -1, self.inf_dims[1]),
+            c[1],
+            wrap_offset(c[1], 1, self.inf_dims[1]),
+        ];
+        let sz = [
+            wrap_offset(c[2], -1, self.inf_dims[2]),
+            c[2],
+            wrap_offset(c[2], 1, self.inf_dims[2]),
+        ];
+        let stride_x = self.inf_dims[1] * self.inf_dims[2];
+        let stride_y = self.inf_dims[2];
+        let mut out = 0u32;
+        for di in -1i32..=1 {
+            let nx = center[0] as i32 + di;
+            if nx < 0 || nx >= dims[0] as i32 {
+                continue;
+            }
+            let plane = sx[(di + 1) as usize] * stride_x;
+            for dj in -1i32..=1 {
+                let ny = center[1] as i32 + dj;
+                if ny < 0 || ny >= dims[1] as i32 {
+                    continue;
+                }
+                let row = plane + sy[(dj + 1) as usize] * stride_y;
+                for dk in -1i32..=1 {
+                    let nz = center[2] as i32 + dk;
+                    if nz < 0 || nz >= dims[2] as i32 {
+                        continue;
+                    }
+                    let index = ((di + 1) * 3 + (dj + 1)) as usize * 3 + (dk + 1) as usize;
+                    if wall_blocked[(dk + 1) as usize]
+                        || self.inflate[row + sz[(dk + 1) as usize]] > 0
+                    {
+                        out |= 1 << index;
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// 世界坐标是否在当前环形窗口内（官方 `isInBuf`：闭区间，
@@ -557,29 +655,21 @@ impl GridMap {
 
     /// 全局索引 → 占据缓冲线性地址：`(id − ring_origin) % size` 取模映射后行主序展开。
     fn occ_addr(&self, g: [i64; 3]) -> usize {
-        let mut c = [0usize; 3];
-        for i in 0..3 {
-            let s = self.dims[i] as i64;
-            let mut v = (g[i] - self.ring_origin[i]) % s;
-            if v < 0 {
-                v += s;
-            }
-            c[i] = v as usize;
-        }
+        let c = [
+            wrap_index(g[0], self.ring_origin[0], self.dims[0] as i64),
+            wrap_index(g[1], self.ring_origin[1], self.dims[1] as i64),
+            wrap_index(g[2], self.ring_origin[2], self.dims[2] as i64),
+        ];
         (c[0] * self.dims[1] + c[1]) * self.dims[2] + c[2]
     }
 
     /// 全局索引 → 膨胀缓冲线性地址（独立环形原点/尺寸，同上映射）。
     fn inf_addr(&self, g: [i64; 3]) -> usize {
-        let mut c = [0usize; 3];
-        for i in 0..3 {
-            let s = self.inf_dims[i] as i64;
-            let mut v = (g[i] - self.inf_ring_origin[i]) % s;
-            if v < 0 {
-                v += s;
-            }
-            c[i] = v as usize;
-        }
+        let c = [
+            wrap_index(g[0], self.inf_ring_origin[0], self.inf_dims[0] as i64),
+            wrap_index(g[1], self.inf_ring_origin[1], self.inf_dims[1] as i64),
+            wrap_index(g[2], self.inf_ring_origin[2], self.inf_dims[2] as i64),
+        ];
         (c[0] * self.inf_dims[1] + c[1]) * self.inf_dims[2] + c[2]
     }
 
@@ -753,14 +843,14 @@ impl GridMap {
     /// 索引是否落在膨胀层内（对照官方 `getInflateOccupancy` 下游 `>0` 判膨胀）。
     #[must_use]
     pub fn is_inflated(&self, idx: [usize; 3]) -> bool {
+        let g = self.global_index(idx);
         if let Some(wall) = self.virtual_wall {
-            let cz =
-                self.world_origin.z + (self.global_index(idx)[2] as f64 + 0.5) * self.resolution;
+            let cz = self.world_origin.z + (g[2] as f64 + 0.5) * self.resolution;
             if wall.blocks(cz) {
                 return true;
             }
         }
-        self.inflate[self.inf_addr(self.global_index(idx))] > 0
+        self.inflate[self.inf_addr(g)] > 0
     }
 
     /// 位置是否落在膨胀层内（官方 `getInflateOccupancy(pos)`：虚拟墙命中视为
@@ -1354,6 +1444,61 @@ mod tests {
     }
 
     // --- ringbuffer 平移 ---
+
+    /// 3×3×3 膨胀位掩码必须与逐格 `is_inflated` 一致（含环形窗平移）。
+    #[test]
+    fn inflated_neighborhood_mask_matches_cell_queries() {
+        let mut m = GridMapBuilder::new(0.5, [12, 10, 8])
+            .with_obstacles_inflation(0.5)
+            .with_virtual_wall(-0.1, 2.9)
+            .build()
+            .unwrap();
+        for idx in [[2, 2, 2], [8, 6, 5], [9, 8, 6], [3, 7, 1]] {
+            m.set_state(idx, VoxelState::Occupied);
+        }
+        m.inflate_obstacles();
+        for center in [
+            Vector3::new(0.5, 0.5, 0.5),
+            Vector3::new(3.5, 2.5, 2.5),
+            Vector3::new(6.0, 4.0, 3.0),
+            Vector3::new(2.5, 3.5, 2.0),
+        ] {
+            m.move_ring_buffer(center);
+            let dims = m.dims();
+            for x in 0..dims[0] {
+                for y in 0..dims[1] {
+                    for z in 0..dims[2] {
+                        let mask = m.inflated_neighborhood_mask([x, y, z]);
+                        let mut expected = 0u32;
+                        for di in -1i32..=1 {
+                            let nx = x as i32 + di;
+                            if nx < 0 || nx >= dims[0] as i32 {
+                                continue;
+                            }
+                            for dj in -1i32..=1 {
+                                let ny = y as i32 + dj;
+                                if ny < 0 || ny >= dims[1] as i32 {
+                                    continue;
+                                }
+                                for dk in -1i32..=1 {
+                                    let nz = z as i32 + dk;
+                                    if nz < 0 || nz >= dims[2] as i32 {
+                                        continue;
+                                    }
+                                    if m.is_inflated([nx as usize, ny as usize, nz as usize]) {
+                                        let index = ((di + 1) * 3 + (dj + 1)) as usize * 3
+                                            + (dk + 1) as usize;
+                                        expected |= 1 << index;
+                                    }
+                                }
+                            }
+                        }
+                        assert_eq!(mask, expected, "center {x},{y},{z}");
+                    }
+                }
+            }
+        }
+    }
 
     /// 相机未动：`move_ring_buffer` 无副作用，内容原样保留。
     #[test]
