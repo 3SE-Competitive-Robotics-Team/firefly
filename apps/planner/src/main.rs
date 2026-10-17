@@ -71,8 +71,6 @@ const DEPTH_TIMEOUT: f64 = 1.0;
 /// 体素层全量重同步周期（帧；10Hz 循环下 50 帧 = 5s）。增量协议下每拍只发
 /// 变化量，周期性补发全量快照，任一增量消息丢失后消费端可自愈。
 const VOXEL_RESYNC_TICKS: usize = 50;
-/// 地图衰减周期（帧；10Hz 循环下 5 帧 = 0.5s，对照官方 `fading_timer` 2Hz）。
-const FADE_TICKS: usize = 5;
 /// 实时感知体素的显示半径（米）：以机体为中心的立方窗口。
 ///
 /// 不用 `local_update_range`——它按整段局部更新范围，窗口里连整片地板一起算，
@@ -290,8 +288,6 @@ struct App {
     ref_pub: Option<Publisher<ReferenceMessage>>,
     depth_cam: DepthCamera,
     finished: bool,
-    /// 衰减节拍计数（10Hz 累计，满 5 帧触发 2Hz `fade`）。
-    fade_ticks: usize,
 }
 
 impl App {
@@ -415,7 +411,6 @@ impl App {
             ref_pub,
             depth_cam: DepthCamera::mujoco_default(),
             finished: false,
-            fade_ticks: 0,
         })
     }
 
@@ -574,13 +569,6 @@ impl App {
             self.manager
                 .trigger_emergency_stop_disable_failsafe(now, measured);
             return Ok(());
-        }
-        // 地图衰减（对照官方 `fadingCallback` 2Hz）：每 0.5s 调用一次固定 `fade()`，
-        // 膨胀层在 `fade` 内部增量移除（计数缓冲，对照官方 `changeInfBuf`）。
-        self.fade_ticks += 1;
-        if self.fade_ticks >= FADE_TICKS {
-            self.manager.map_mut().fade();
-            self.fade_ticks = 0;
         }
         self.update_motion();
 

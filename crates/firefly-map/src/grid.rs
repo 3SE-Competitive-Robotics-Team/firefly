@@ -107,6 +107,18 @@ pub struct GridMap {
     history_exhausted: bool,
     /// 膨胀计数缓冲（对照官方 `occupancy_buffer_inflate_`）：障碍体素自身 `±GRID_MAP_OBS_FLAG`，周围 `inf_grid` 格内 `±1`；`>0` 即膨胀。
     inflate: Vec<u16>,
+    /// 帧内 hit 计数（官方 `count_hit_`），按占据缓冲地址索引。
+    count_hit: Vec<u16>,
+    /// 帧内 hit+miss 计数（官方 `count_hit_and_miss_`）。
+    count_total: Vec<u16>,
+    /// 帧内射线终点标记（官方 `flag_rayend_`），值为当前 `raycast_num`。
+    flag_rayend: Vec<u32>,
+    /// 帧内遍历标记（官方 `flag_traverse_`）。
+    flag_traverse: Vec<u32>,
+    /// 当前 raycast 世代（官方 `raycast_num_`；官方为 char，这里用 u32 避免回绕 UB）。
+    raycast_num: u32,
+    /// 本帧碰过的体素全局索引（官方 `cache_voxel_`）。
+    cache_voxel: Vec<[i64; 3]>,
     /// 虚拟地面/天花板；None = 不启用（官方 `enable_virtual_wall = false` 默认）。
     virtual_wall: Option<VirtualWall>,
     // --- log-odds 参数（对照 grid_map.cpp 34-77 行，默认值与官方一致）---
@@ -115,7 +127,6 @@ pub struct GridMap {
     pub(crate) clamp_min_log: f64,
     pub(crate) clamp_max_log: f64,
     pub(crate) min_occupancy_log: f64,
-    pub(crate) fading_time: f64,
     /// 构造时按 `obstacles_inflation` 计算的膨胀步长（官方 `inf_grid_`，恒 ≤ 4），用于 `change_inf_buf` 增量更新。
     inf_grid: i32,
     /// 占据/膨胀状态版本号：任何改变两者的可变方法加一。`inflate_obstacles`
@@ -137,7 +148,6 @@ pub struct GridMapBuilder {
     p_occ: f64,
     p_hit: f64,
     p_miss: f64,
-    fading_time: f64,
     /// 障碍膨胀半径（米，官方 `grid_map/obstacles_inflation`）。
     obstacles_inflation: f64,
     /// 局部更新范围（米，官方 `grid_map/local_update_range_x/y/z`，launch
@@ -160,7 +170,6 @@ impl GridMapBuilder {
             p_occ: 0.80,
             p_hit: 0.70,
             p_miss: 0.35,
-            fading_time: 1000.0,
             obstacles_inflation: 0.2,
             local_update_range: None,
             history_capacity: 0,
@@ -215,25 +224,15 @@ impl GridMapBuilder {
     #[must_use]
     pub fn with_observation_history(mut self, capacity: usize) -> Self {
         self.history_capacity = capacity;
-        if capacity > 0 {
-            self.fading_time = 0.;
-        }
         self
     }
 
-    /// 覆盖 `p_min/p_max/p_occ/fading_time`（默认 0.12/0.97/0.80/1000.0）。
+    /// 覆盖 `p_min/p_max/p_occ`（默认 0.12/0.97/0.80）。
     #[must_use]
-    pub fn with_odds_params(
-        mut self,
-        p_min: f64,
-        p_max: f64,
-        p_occ: f64,
-        fading_time: f64,
-    ) -> Self {
+    pub fn with_odds_params(mut self, p_min: f64, p_max: f64, p_occ: f64) -> Self {
         self.p_min = p_min;
         self.p_max = p_max;
         self.p_occ = p_occ;
-        self.fading_time = fading_time;
         self
     }
 
@@ -320,13 +319,18 @@ impl GridMapBuilder {
             history_capacity: self.history_capacity,
             history_exhausted: false,
             inflate: vec![0; inf_capacity],
+            count_hit: vec![0; capacity],
+            count_total: vec![0; capacity],
+            flag_rayend: vec![0; capacity],
+            flag_traverse: vec![0; capacity],
+            raycast_num: 0,
+            cache_voxel: Vec::with_capacity(capacity),
             virtual_wall: self.virtual_wall,
             prob_hit_log,
             prob_miss_log,
             clamp_min_log,
             clamp_max_log,
             min_occupancy_log,
-            fading_time: self.fading_time,
             inf_grid,
             revision: 0,
             inflated_revision: 0,
@@ -340,6 +344,118 @@ impl GridMap {
     fn touch(&mut self) {
         self.revision = self.revision.wrapping_add(1);
     }
+    /// 开始一帧 raycast：世代加一、清空 cache 列表（官方 `raycastProcess` 开头）。
+    pub(crate) fn raycast_begin(&mut self) {
+        self.raycast_num = self.raycast_num.wrapping_add(1);
+        self.cache_voxel.clear();
+    }
+
+    /// 记一次 hit/miss（官方 `setCacheOccupancy`），返回占据缓冲地址。
+    pub(crate) fn raycast_cache(&mut self, pos: Vector3<f64>, hit: bool) -> usize {
+        let g = self.pos_to_global_index(pos);
+        let a = self.occ_addr(g);
+        self.count_total[a] = self.count_total[a].saturating_add(1);
+        if self.count_total[a] == 1 {
+            self.cache_voxel.push(g);
+        }
+        if hit {
+            self.count_hit[a] = self.count_hit[a].saturating_add(1);
+        }
+        a
+    }
+
+    /// 本帧第一次把这个体素当射线终点时返回 `true` 并置标记
+    /// （官方 `flag_rayend_` 判据）。
+    pub(crate) fn rayend_is_new(&mut self, address: usize) -> bool {
+        if self.flag_rayend[address] == self.raycast_num {
+            return false;
+        }
+        self.flag_rayend[address] = self.raycast_num;
+        true
+    }
+
+    /// 本帧第一次遍历到这个体素时返回 `true` 并置标记
+    /// （官方 `flag_traverse_` 判据）。
+    pub(crate) fn traverse_is_new(&mut self, address: usize) -> bool {
+        if self.flag_traverse[address] == self.raycast_num {
+            return false;
+        }
+        self.flag_traverse[address] = self.raycast_num;
+        true
+    }
+
+    /// 收尾：逐 cache 体素多数投票、计数清零、clamp 检查后更新
+    /// （官方 `raycastProcess` 收尾循环）。
+    pub(crate) fn raycast_end(&mut self) {
+        for i in 0..self.cache_voxel.len() {
+            let g = self.cache_voxel[i];
+            let a = self.occ_addr(g);
+            let hits = self.count_hit[a];
+            let total = self.count_total[a];
+            self.count_hit[a] = 0;
+            self.count_total[a] = 0;
+            let delta = if hits >= total - hits {
+                self.prob_hit_log
+            } else {
+                self.prob_miss_log
+            };
+            let occ = self.occupancy[a];
+            if (delta >= 0.0 && occ >= self.clamp_max_log)
+                || (delta <= 0.0 && occ <= self.clamp_min_log)
+            {
+                continue;
+            }
+            self.update_occupancy_global(g, delta);
+        }
+    }
+
+    /// 世界坐标是否在当前环形窗口内（官方 `isInBuf`：闭区间，
+    /// 上界为最后一格下角点）。
+    #[must_use]
+    pub(crate) fn is_in_window(&self, pos: Vector3<f64>) -> bool {
+        let low = self.window_low_world();
+        let up = self.window_up_world();
+        (0..3).all(|i| pos[i] >= low[i] && pos[i] <= up[i])
+    }
+
+    /// 把窗口外的点裁到窗口边界内侧（官方 `closetPointInMap`）。
+    #[must_use]
+    pub(crate) fn clip_to_window(&self, pt: Vector3<f64>, camera: Vector3<f64>) -> Vector3<f64> {
+        let diff = pt - camera;
+        let max_tc = self.window_up_world() - camera;
+        let min_tc = self.window_low_world() - camera;
+        let mut min_t = 1_000_000.0_f64;
+        for i in 0..3 {
+            if diff[i].abs() > 0.0 {
+                let t1 = max_tc[i] / diff[i];
+                if t1 > 0.0 && t1 < min_t {
+                    min_t = t1;
+                }
+                let t2 = min_tc[i] / diff[i];
+                if t2 > 0.0 && t2 < min_t {
+                    min_t = t2;
+                }
+            }
+        }
+        camera + diff * (min_t - 1e-3)
+    }
+
+    fn window_low_world(&self) -> Vector3<f64> {
+        Vector3::new(
+            self.world_origin.x + self.low[0] as f64 * self.resolution,
+            self.world_origin.y + self.low[1] as f64 * self.resolution,
+            self.world_origin.z + self.low[2] as f64 * self.resolution,
+        )
+    }
+
+    fn window_up_world(&self) -> Vector3<f64> {
+        Vector3::new(
+            self.world_origin.x + self.up[0] as f64 * self.resolution,
+            self.world_origin.y + self.up[1] as f64 * self.resolution,
+            self.world_origin.z + self.up[2] as f64 * self.resolution,
+        )
+    }
+
     #[must_use]
     pub fn resolution(&self) -> f64 {
         self.resolution
@@ -610,11 +726,6 @@ impl GridMap {
         self.min_occupancy_log
     }
 
-    #[must_use]
-    pub fn fading_time(&self) -> f64 {
-        self.fading_time
-    }
-
     /// 为已构建实例注入虚拟墙（覆盖已有配置，影响膨胀查询语义）。
     pub fn set_virtual_wall(&mut self, wall: VirtualWall) {
         self.virtual_wall = Some(wall);
@@ -673,7 +784,7 @@ impl GridMap {
         self.change_inf_buf_global(dir, self.global_index(idx), true);
     }
 
-    /// 全局索引版膨胀增量更新（`clearBuffer`/`fade` 共用；`inflate_obstacles`
+    /// 全局索引版膨胀增量更新（`clearBuffer` 共用；`inflate_obstacles`
     /// 重建时调用不计版本，重建结束统一同步）。
     fn change_inf_buf_global(&mut self, dir: bool, g: [i64; 3], track: bool) {
         if track {
@@ -837,6 +948,10 @@ impl GridMap {
                         self.touch();
                     }
                     self.occupancy[a] = self.clamp_min_log;
+                    self.count_hit[a] = 0;
+                    self.count_total[a] = 0;
+                    self.flag_rayend[a] = self.raycast_num;
+                    self.flag_traverse[a] = self.raycast_num;
                     let ia = self.inf_addr(g);
                     if self.inflate[ia] >= GRID_MAP_OBS_FLAG {
                         self.change_inf_buf_global(false, g, true);
@@ -864,47 +979,6 @@ impl GridMap {
         }
         self.inflated_revision = self.revision;
     }
-
-    /// 地图衰减（对照官方 `grid_map.cpp:204-222` `fadingCallback`，必须 2Hz 调用）。
-    ///
-    /// - `reduce = (clamp_max_log_ - min_occupancy_log_) / (fading_time * 2)` 固定值，对应官方 2Hz 定时器（每 0.5s）。
-    /// - `low_thres = clamp_min_log_ + reduce`，仅 `> low_thres` 的体素衰减，避免跌破下界。
-    /// - 衰减前 `>= min_occupancy` 且衰减后 `<` 的体素（障碍→自由）经全局索引
-    ///   调用 `change_inf_buf_global(false, g)` 增量移除膨胀（官方
-    ///   `BufIdx2GlobalIdx(i)` 反解后跨缓冲定位）。
-    pub fn fade(&mut self) {
-        if self.fading_time <= 0.0 {
-            return;
-        }
-        let reduce = (self.clamp_max_log - self.min_occupancy_log) / (self.fading_time * 2.0);
-        if reduce <= 0.0 {
-            return;
-        }
-        let low_thres = self.clamp_min_log + reduce;
-        // 先更新占据并收集跨阈值的全局索引
-        let mut crossed: Vec<[i64; 3]> = Vec::new();
-        for a in 0..self.occupancy.len() {
-            if self.prior.contains(&self.addr_global(a)) {
-                continue;
-            }
-            let occ = self.occupancy[a];
-            if occ > low_thres {
-                let was_occupied = occ >= self.min_occupancy_log;
-                let mut new_occ = occ - reduce;
-                if new_occ < self.clamp_min_log {
-                    new_occ = self.clamp_min_log;
-                }
-                self.occupancy[a] = new_occ;
-                if was_occupied && new_occ < self.min_occupancy_log {
-                    crossed.push(self.addr_global(a));
-                }
-            }
-        }
-        // 增量移除膨胀（计数缓冲）
-        for g in crossed {
-            self.change_inf_buf_global(false, g, true);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -928,7 +1002,6 @@ mod tests {
         assert!(map.is_occupied(obstacle));
         for x in [14., 18., 22., 18., 14., 8.] {
             map.move_ring_buffer(Vector3::new(x, 0., 1.));
-            map.fade();
         }
         assert!(!map.history_exhausted());
         let index = map.index_of(obstacle).unwrap();
@@ -1200,7 +1273,6 @@ mod tests {
         assert!((m.clamp_min_log() - min).abs() < 1e-12);
         assert!((m.clamp_max_log() - max).abs() < 1e-12);
         assert!((m.min_occupancy_log() - occ).abs() < 1e-12);
-        assert!((m.fading_time() - 1000.0).abs() < 1e-12);
         // 初始占据为 clamp_min，对应 Free
         assert_eq!(m.state([0, 0, 0]), VoxelState::Free);
         assert!((m.occupancy_at([0, 0, 0]) - min).abs() < 1e-12);
@@ -1279,37 +1351,6 @@ mod tests {
         m.inflate_obstacles();
         assert_eq!(m.inflate_at([24, 20, 20]), 1);
         assert_eq!(m.inflate_at([25, 20, 20]), 0);
-    }
-
-    #[test]
-    fn fade_decays_and_updates_inflation() {
-        let mut m = GridMapBuilder::new(0.5, [10, 10, 10])
-            .with_obstacles_inflation(0.6)
-            .build()
-            .unwrap();
-        // 构造占据体素并膨胀（step=1 对应 0.2 也有 step=2 对应 0.6，按 0.6 膨胀以验证增量移除覆盖邻域）
-        m.set_state([5, 5, 5], VoxelState::Occupied);
-        m.inflate_obstacles();
-        assert!(m.is_occupied(Vector3::new(2.5, 2.5, 2.5)));
-        assert!(m.is_occupied_inflated(Vector3::new(3.0, 2.5, 2.5)));
-        // 固定 reduce 语义：必须 2Hz 调用，约 2000 次从 max 衰减到阈值以下
-        let reduce = (m.clamp_max_log() - m.min_occupancy_log()) / (m.fading_time() * 2.0);
-        let steps_to_cross =
-            ((m.clamp_max_log() - m.min_occupancy_log()) / reduce).ceil() as usize + 2;
-        for _ in 0..steps_to_cross {
-            m.fade();
-        }
-        // 跨阈值后变为 Free
-        assert_eq!(m.state([5, 5, 5]), VoxelState::Free);
-        assert!(!m.is_occupied(Vector3::new(2.5, 2.5, 2.5)));
-        // 增量移除：膨胀计数归零，>0 判定 false
-        assert_eq!(m.inflate_at([5, 5, 5]), 0);
-        assert!(!m.is_occupied_inflated(Vector3::new(3.0, 2.5, 2.5)));
-        assert!(!m.is_inflated([5, 5, 5]));
-        // low_thres 以下体素不继续衰减（已在 clamp_min）
-        let before = m.occupancy_at([0, 0, 0]);
-        m.fade();
-        assert!((m.occupancy_at([0, 0, 0]) - before).abs() < 1e-12);
     }
 
     // --- ringbuffer 平移 ---
@@ -1402,27 +1443,6 @@ mod tests {
         assert!(!m.is_occupied_inflated(Vector3::new(0.5, 2.5, 2.5)));
         // B 的邻域计数随障碍源移除：全局 x=1（窗口坐标 0）只剩 A 的 +1
         assert_eq!(m.inflate_at([0, 2, 2]), 1);
-    }
-
-    /// fade 作用于当前窗口内容：平移后被清空区域不参与衰减，幸存障碍正常衰减。
-    #[test]
-    fn fade_works_after_translation() {
-        let mut m = GridMapBuilder::new(1.0, [6, 4, 4]).build().unwrap();
-        m.set_state([1, 2, 2], VoxelState::Occupied);
-        // 右移两格：障碍仍在窗内（全局 x=1 → 窗口坐标 0... 窗口 [2,7]，x=1 出窗）
-        m.move_ring_buffer(Vector3::new(4.5, 2.5, 2.5));
-        assert!(!m.is_occupied(Vector3::new(1.5, 2.5, 2.5)));
-        // 窗内新障碍（窗口坐标 5 = 全局 x=6）
-        m.set_state([5, 2, 2], VoxelState::Occupied);
-        assert!(m.is_occupied(Vector3::new(6.5, 2.5, 2.5)));
-        let reduce = (m.clamp_max_log() - m.min_occupancy_log()) / (m.fading_time() * 2.0);
-        let steps = ((m.clamp_max_log() - m.min_occupancy_log()) / reduce).ceil() as usize + 2;
-        for _ in 0..steps {
-            m.fade();
-        }
-        // 幸存障碍衰减至 Free，出窗障碍不影响判定
-        assert!(!m.is_occupied(Vector3::new(6.5, 2.5, 2.5)));
-        assert_eq!(m.state([4, 2, 2]), VoxelState::Free);
     }
 
     /// 各轴独立平移：仅移动轴清除条带，正交轴内容不受影响。

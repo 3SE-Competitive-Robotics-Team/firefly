@@ -7,6 +7,7 @@ mod depth;
 mod format;
 mod grid;
 mod plane;
+mod raycast;
 mod scene;
 
 pub use depth::{DepthCamera, update_from_depth};
