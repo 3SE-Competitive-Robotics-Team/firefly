@@ -25,6 +25,16 @@ impl Accumulator {
         }
     }
 
+    /// 复用现有存储并清零；尺寸变化时重新分配。
+    pub fn reset(&mut self, pieces: usize) {
+        if self.d_f_d_c.nrows() == 6 * pieces && self.d_f_d_t.len() == pieces {
+            self.d_f_d_c.fill(0.0);
+            self.d_f_d_t.fill(0.0);
+        } else {
+            *self = Self::new(pieces);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn add(
         &mut self,
@@ -38,18 +48,15 @@ impl Accumulator {
         d_j: Vector3<f64>,
     ) {
         let t_local = tau * duration;
-        let beta0 = beta_derivative(0, t_local);
-        let beta1 = beta_derivative(1, t_local);
-        let beta2 = beta_derivative(2, t_local);
-        let beta3 = beta_derivative(3, t_local);
+        let beta = beta_derivatives(t_local);
 
         let row = piece * 6;
-        for k in 0..6 {
+        for (k, b0) in beta[0].iter().enumerate() {
             for dim in 0..3 {
-                self.d_f_d_c[(row + k, dim)] += beta0[k] * d_p[dim]
-                    + beta1[k] * d_v[dim]
-                    + beta2[k] * d_a[dim]
-                    + beta3[k] * d_j[dim];
+                self.d_f_d_c[(row + k, dim)] += b0 * d_p[dim]
+                    + beta[1][k] * d_v[dim]
+                    + beta[2][k] * d_a[dim]
+                    + beta[3][k] * d_j[dim];
             }
         }
 
@@ -79,18 +86,15 @@ impl Accumulator {
         d_j: Vector3<f64>,
     ) {
         let t_local = tau * duration;
-        let beta0 = beta_derivative(0, t_local);
-        let beta1 = beta_derivative(1, t_local);
-        let beta2 = beta_derivative(2, t_local);
-        let beta3 = beta_derivative(3, t_local);
+        let beta = beta_derivatives(t_local);
 
         let row = piece * 6;
-        for k in 0..6 {
+        for (k, b0) in beta[0].iter().enumerate() {
             for dim in 0..3 {
-                self.d_f_d_c[(row + k, dim)] += beta0[k] * d_p[dim]
-                    + beta1[k] * d_v[dim]
-                    + beta2[k] * d_a[dim]
-                    + beta3[k] * d_j[dim];
+                self.d_f_d_c[(row + k, dim)] += b0 * d_p[dim]
+                    + beta[1][k] * d_v[dim]
+                    + beta[2][k] * d_a[dim]
+                    + beta[3][k] * d_j[dim];
             }
         }
 
@@ -112,16 +116,23 @@ impl Accumulator {
     }
 }
 
-fn beta_derivative(order: usize, t: f64) -> [f64; 6] {
-    let mut v = [0.0; 6];
-    for (j, slot) in v.iter_mut().enumerate().skip(order) {
-        let mut coeff = 1.0;
-        for k in 0..order {
-            coeff *= (j - k) as f64;
-        }
-        *slot = coeff * t.powi((j - order) as i32);
+fn beta_derivatives(t: f64) -> [[f64; 6]; 4] {
+    let mut powers = [1.0; 6];
+    for i in 1..6 {
+        powers[i] = powers[i - 1] * t;
     }
-    v
+    let mut out = [[0.0; 6]; 4];
+    out[0].copy_from_slice(&powers);
+    for j in 1..6 {
+        out[1][j] = j as f64 * powers[j - 1];
+    }
+    for j in 2..6 {
+        out[2][j] = (j * (j - 1)) as f64 * powers[j - 2];
+    }
+    for j in 3..6 {
+        out[3][j] = (j * (j - 1) * (j - 2)) as f64 * powers[j - 3];
+    }
+    out
 }
 
 #[cfg(test)]

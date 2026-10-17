@@ -464,6 +464,7 @@ impl Trajectory {
             jerk: Vector3::zeros(),
             snap: Vector3::zeros(),
         };
+        let beta = beta_derivatives(t);
         for (derivative, out) in [
             &mut sample.position,
             &mut sample.velocity,
@@ -474,8 +475,7 @@ impl Trajectory {
         .into_iter()
         .enumerate()
         {
-            let beta = beta_derivative(derivative, t);
-            for (k, value) in beta.into_iter().enumerate() {
+            for (k, value) in beta[derivative].into_iter().enumerate() {
                 let row = piece * COEFFS_PER_PIECE + k;
                 out.x += self.coefficients[(row, 0)] * value;
                 out.y += self.coefficients[(row, 1)] * value;
@@ -486,16 +486,30 @@ impl Trajectory {
     }
 }
 
-fn beta_derivative(order: usize, t: f64) -> [f64; COEFFS_PER_PIECE] {
-    let mut v = [0.0; COEFFS_PER_PIECE];
-    for (j, slot) in v.iter_mut().enumerate().skip(order) {
-        let mut coeff = 1.0;
-        for k in 0..order {
-            coeff *= (j - k) as f64;
-        }
-        *slot = coeff * t.powi((j - order) as i32);
+fn beta_derivatives(t: f64) -> [[f64; COEFFS_PER_PIECE]; 5] {
+    let mut powers = [1.0; COEFFS_PER_PIECE];
+    for i in 1..COEFFS_PER_PIECE {
+        powers[i] = powers[i - 1] * t;
     }
-    v
+    let mut out = [[0.0; COEFFS_PER_PIECE]; 5];
+    out[0].copy_from_slice(&powers);
+    for j in 1..COEFFS_PER_PIECE {
+        out[1][j] = j as f64 * powers[j - 1];
+    }
+    for j in 2..COEFFS_PER_PIECE {
+        out[2][j] = (j * (j - 1)) as f64 * powers[j - 2];
+    }
+    for j in 3..COEFFS_PER_PIECE {
+        out[3][j] = (j * (j - 1) * (j - 2)) as f64 * powers[j - 3];
+    }
+    for j in 4..COEFFS_PER_PIECE {
+        out[4][j] = (j * (j - 1) * (j - 2) * (j - 3)) as f64 * powers[j - 4];
+    }
+    out
+}
+
+fn beta_derivative(order: usize, t: f64) -> [f64; COEFFS_PER_PIECE] {
+    beta_derivatives(t)[order]
 }
 
 #[cfg(test)]

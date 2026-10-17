@@ -11,7 +11,8 @@
 //! 沿数组 in/out 自由点搜索 + A\* 绕障 + 交点平面,命中即提前终止
 //! (官方 `STOP_FOR_REBOUND`),由外层吸收新平面后重新优化。
 
-use firefly_cost::Cost;
+use firefly_cost::Samples;
+use firefly_cost::{Accumulator, Cost};
 use firefly_map::{GridMap, Plane};
 use firefly_optimize::Objective;
 use firefly_trajectory::{Endpoint, Minco, MincoBuilder, SolverOrder};
@@ -100,11 +101,16 @@ impl<'a> ReboundDetector<'a> {
     /// 约束。返回是否发现新障碍(触发 Rebound)。
     #[must_use]
     pub fn check(&mut self, traj: &firefly_trajectory::Trajectory) -> bool {
+        let points = constraint_sample_points(traj, self.samples_per_piece);
+        self.check_points(&points)
+    }
+
+    /// 用调用方已算好的唯一约束点做检测。
+    pub fn check_points(&mut self, points: &[Vector3<f64>]) -> bool {
         let scanner = ObstacleScanner::new(self.map)
             .with_samples(self.samples_per_piece)
             .with_max_vel(self.max_vel);
-        let points = constraint_sample_points(traj, self.samples_per_piece);
-        if !constraint_points_straight_enough(&points) {
+        if !constraint_points_straight_enough(points) {
             return false;
         }
         // 官方 allowRebound criterion 3:多拓扑下任一内部控制点仍在初始基点
@@ -124,7 +130,7 @@ impl<'a> ReboundDetector<'a> {
                 return false;
             }
         }
-        scanner.roughly_check(&mut self.astar, &points, &mut self.planes, self.touch_goal)
+        scanner.roughly_check(&mut self.astar, points, &mut self.planes, self.touch_goal)
     }
 
     /// 取走(含新追加平面的)完整平面池,供外层下一轮使用。
@@ -140,10 +146,13 @@ pub struct MincoObjective<'a> {
     pieces: usize,
     cost: Cost,
     // 只缓存参数映射与轨迹；每次回调重新应用当前代价项。
-    cache: Option<(DVector<f64>, Minco, firefly_trajectory::Trajectory)>,
+    cache: Option<(DVector<f64>, Minco, firefly_trajectory::Trajectory, Samples)>,
     detector: Option<ReboundDetector<'a>>,
     eval_count: usize,
     early_exit: bool,
+    acc: Accumulator,
+    points: Vec<Point3<f64>>,
+    detector_points: Vec<Vector3<f64>>,
 }
 
 impl<'a> MincoObjective<'a> {
@@ -158,6 +167,9 @@ impl<'a> MincoObjective<'a> {
             detector: None,
             eval_count: 0,
             early_exit: false,
+            acc: Accumulator::new(pieces),
+            points: Vec::with_capacity(3 * pieces.saturating_sub(1)),
+            detector_points: Vec::new(),
         }
     }
 
@@ -209,22 +221,26 @@ impl<'a> MincoObjective<'a> {
         if self
             .cache
             .as_ref()
-            .is_some_and(|(last_x, _, _)| last_x == x)
+            .is_some_and(|(last_x, _, _, _)| last_x == x)
         {
             return Some(());
         }
         let (q, t) = self.unpack(x);
-        let points: Vec<Point3<f64>> = q.into_iter().map(Point3::from).collect();
-        if let Some((last_x, minco, traj)) = &mut self.cache {
-            minco.update(self.start, self.end, &points, &t).ok()?;
+        self.points.clear();
+        self.points.extend(q.into_iter().map(Point3::from));
+        let k = self.cost.samples_per_piece();
+        if let Some((last_x, minco, traj, samples)) = &mut self.cache {
+            minco.update(self.start, self.end, &self.points, &t).ok()?;
             *traj = minco.solve().ok()?;
+            *samples = Samples::new(traj, k);
             last_x.clone_from(x);
         } else {
             let minco = MincoBuilder::new(SolverOrder::MinimumJerk, self.start, self.end)
-                .build(&points, &t)
+                .build(&self.points, &t)
                 .ok()?;
             let traj = minco.solve().ok()?;
-            self.cache = Some((x.clone(), minco, traj));
+            let samples = Samples::new(&traj, k);
+            self.cache = Some((x.clone(), minco, traj, samples));
         }
         Some(())
     }
@@ -292,14 +308,16 @@ impl Objective for MincoObjective<'_> {
         let Some(()) = self.solve_cached(x) else {
             return f64::INFINITY;
         };
-        let (_, _, traj) = self.cache.as_ref().expect("solved trajectory");
-        if self.eval_count > 3
-            && let Some(detector) = &mut self.detector
-            && detector.check(traj)
-        {
-            self.early_exit = true;
+        let (_, _, traj, samples) = self.cache.as_ref().expect("solved trajectory");
+        if self.eval_count > 3 {
+            samples.unique_positions(&mut self.detector_points);
+            if let Some(detector) = &mut self.detector
+                && detector.check_points(&self.detector_points)
+            {
+                self.early_exit = true;
+            }
         }
-        self.cost.evaluate(traj)
+        self.cost.evaluate_with(traj, samples)
     }
 
     fn early_exit(&self) -> bool {
@@ -310,9 +328,10 @@ impl Objective for MincoObjective<'_> {
         let Some(()) = self.solve_cached(x) else {
             return DVector::zeros(3 * (self.pieces - 1) + self.pieces);
         };
-        let (_, minco, traj) = self.cache.as_ref().expect("solved trajectory");
-        let (d_f_d_c, d_f_d_t) = self.cost.gradient(traj);
-        let Ok((dq, dt)) = minco.propagate_gradient(traj, &d_f_d_c, &d_f_d_t) else {
+        let (_, minco, traj, samples) = self.cache.as_ref().expect("solved trajectory");
+        self.cost.gradient_into_with(traj, samples, &mut self.acc);
+        let Ok((dq, dt)) = minco.propagate_gradient(traj, &self.acc.d_f_d_c, &self.acc.d_f_d_t)
+        else {
             return DVector::zeros(3 * (self.pieces - 1) + self.pieces);
         };
         let n_q = 3 * (self.pieces - 1);

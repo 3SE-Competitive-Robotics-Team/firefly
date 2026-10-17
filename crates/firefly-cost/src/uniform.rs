@@ -9,9 +9,10 @@
 //! 防止段时长消失(Tᵢ→0 是 MINCO 奇异点)与薄障碍漏检。
 //! 采样不乘积分权重,但端点折半(`omg`,官方 `addPVAGradCost2CT` 中 uniform 段)。
 
-use firefly_trajectory::{Sample, Trajectory};
+use firefly_trajectory::Trajectory;
 use nalgebra::Vector3;
 
+use crate::sampling::Samples;
 use crate::{Accumulator, Penalty};
 
 pub struct UniformPenalty {
@@ -31,25 +32,6 @@ impl UniformPenalty {
         self.samples_per_piece = samples;
         self
     }
-
-    /// 全部采样点(N·(K+1) 个,段边界**重复**:官方 `i_dp` 在边界两侧
-    /// 各累加一次,`omg=0.5`,梯度按 `i_dp = i·K+j` 对齐)。
-    fn samples(&self, traj: &Trajectory) -> Vec<(usize, usize, f64, Sample)> {
-        let k = self.samples_per_piece;
-        let mut out = Vec::with_capacity(traj.pieces() * (k + 1));
-        for (i, ti) in traj.durations().iter().enumerate() {
-            for j in 0..=k {
-                let tau = j as f64 / k as f64;
-                out.push((i * k + j, i, tau, traj.eval_piece(i, tau * ti)));
-            }
-        }
-        out
-    }
-
-    /// 唯一约束点(N·K+1:段边界只算一次)数量。
-    fn n_points(&self, traj: &Trajectory) -> usize {
-        traj.pieces() * self.samples_per_piece + 1
-    }
 }
 
 impl Default for UniformPenalty {
@@ -60,56 +42,75 @@ impl Default for UniformPenalty {
 
 impl Penalty for UniformPenalty {
     fn evaluate(&self, traj: &Trajectory) -> f64 {
-        // 唯一约束点序列(N·K+1)求相邻距离(官方 ps 列)。
+        let samples = Samples::new(traj, self.samples_per_piece);
+        self.evaluate_with(traj, &samples)
+    }
+
+    fn evaluate_with(&self, traj: &Trajectory, samples: &Samples) -> f64 {
+        if samples.samples_per_piece != self.samples_per_piece {
+            return self.evaluate(traj);
+        }
         let k = self.samples_per_piece;
-        let n_points = self.n_points(traj);
-        let n = n_points - 1;
+        let n = traj.pieces() * k;
         if n == 0 {
             return 0.0;
         }
-        let mut pos: Vec<Vector3<f64>> = Vec::with_capacity(n_points);
-        for (i, ti) in traj.durations().iter().enumerate() {
+        let mut last: Option<Vector3<f64>> = None;
+        let mut dquar_sum = 0.0;
+        for i in 0..traj.pieces() {
             let j_max = if i + 1 == traj.pieces() { k } else { k - 1 };
             for j in 0..=j_max {
-                let tau = j as f64 / k as f64;
-                pos.push(traj.eval_piece(i, tau * ti).position);
+                let p = samples.get(i, j).position;
+                if let Some(prev) = last {
+                    let r = (p - prev).norm_squared();
+                    dquar_sum += r * r;
+                }
+                last = Some(p);
             }
-        }
-        let mut dquar_sum = 0.0;
-        for i in 0..n {
-            let r = (pos[i + 1] - pos[i]).norm_squared();
-            dquar_sum += r * r;
         }
         dquar_sum / n as f64
     }
 
+    fn accumulate(&self, traj: &Trajectory, weight: f64, acc: &mut Accumulator) {
+        let samples = Samples::new(traj, self.samples_per_piece);
+        self.accumulate_with(traj, &samples, weight, acc);
+    }
+
     // 与官方公式逐行对应(k/n/i/j/tau/dps/r),单字符命名保可读性
     #[allow(clippy::many_single_char_names)]
-    fn accumulate(&self, traj: &Trajectory, weight: f64, acc: &mut Accumulator) {
+    fn accumulate_with(
+        &self,
+        traj: &Trajectory,
+        samples: &Samples,
+        weight: f64,
+        acc: &mut Accumulator,
+    ) {
+        if samples.samples_per_piece != self.samples_per_piece {
+            return self.accumulate(traj, weight, acc);
+        }
         let k = self.samples_per_piece;
-        let pts = self.samples(traj);
-        let n_points = self.n_points(traj);
-        let n = n_points - 1;
+        let n = traj.pieces() * k;
         if n == 0 {
             return;
         }
         // 唯一约束点序列的相邻差与平方距离(官方 dps / dsqrs)
         let mut dps: Vec<Vector3<f64>> = Vec::with_capacity(n);
         let mut r: Vec<f64> = Vec::with_capacity(n);
-        let mut last = traj.eval_piece(0, 0.0).position;
-        for (i, ti) in traj.durations().iter().enumerate() {
+        let mut last = samples.get(0, 0).position;
+        for i in 0..traj.pieces() {
             let j_max = if i + 1 == traj.pieces() { k } else { k - 1 };
             for j in 0..=j_max {
-                let s = traj.eval_piece(i, j as f64 / k as f64 * ti);
+                let p = samples.get(i, j).position;
                 if i > 0 || j > 0 {
-                    let d = s.position - last;
+                    let d = p - last;
                     dps.push(d);
                     r.push(d.norm_squared());
                 }
-                last = s.position;
+                last = p;
             }
         }
         // 官方梯度(不含 wei,wei 由 Cost 权重提供):4/N·(R[i−1]·dps[i−1] − R[i]·dps[i])
+        let n_points = n + 1;
         let mut gdp = vec![Vector3::zeros(); n_points];
         for i in 0..=n {
             if i != 0 {
@@ -120,21 +121,23 @@ impl Penalty for UniformPenalty {
             }
         }
         // 全采样(含段边界重复):边界点两侧各累加一次,omg=0.5(官方一致)
-        for &(i_dp, piece, tau, ref s) in &pts {
-            let ti = traj.durations()[piece];
-            // 官方 omg = (j==0 || j==K) ? 0.5 : 1.0,即 i_dp % K == 0
-            let omg = if i_dp % k == 0 { 0.5 } else { 1.0 };
-            let d_p = gdp[i_dp] * (weight * omg);
-            acc.add(
-                piece,
-                tau,
-                ti,
-                s,
-                d_p,
-                Vector3::zeros(),
-                Vector3::zeros(),
-                Vector3::zeros(),
-            );
+        for (i, ti) in traj.durations().iter().enumerate() {
+            for j in 0..=k {
+                let i_dp = i * k + j;
+                // 官方 omg = (j==0 || j==K) ? 0.5 : 1.0,即 i_dp % K == 0
+                let omg = if i_dp.is_multiple_of(k) { 0.5 } else { 1.0 };
+                let d_p = gdp[i_dp] * (weight * omg);
+                acc.add(
+                    i,
+                    j as f64 / k as f64,
+                    *ti,
+                    samples.get(i, j),
+                    d_p,
+                    Vector3::zeros(),
+                    Vector3::zeros(),
+                    Vector3::zeros(),
+                );
+            }
         }
     }
 }

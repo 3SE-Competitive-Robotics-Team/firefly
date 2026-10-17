@@ -882,6 +882,7 @@ impl Planner {
     ) -> MincoObjective<'a> {
         let k = self.config.constraint_points_per_piece;
         let mut cost = Cost::new()
+            .with_samples(k)
             .add(self.config.weight_smoothness, SmoothnessPenalty)
             .add(self.config.weight_time, TimePenalty)
             .add(

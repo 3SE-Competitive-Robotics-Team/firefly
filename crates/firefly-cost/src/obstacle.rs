@@ -12,7 +12,7 @@ use firefly_map::Plane;
 use firefly_trajectory::Trajectory;
 use nalgebra::Vector3;
 
-use crate::sampling::{sample_index, trapezoid_weight};
+use crate::sampling::{Samples, sample_index, trapezoid_weight};
 use crate::{Accumulator, Penalty};
 
 /// 障碍距离惩罚(官方 v2 双层 clearance)。
@@ -59,13 +59,20 @@ impl ObstaclePenalty {
 
 impl Penalty for ObstaclePenalty {
     fn evaluate(&self, traj: &Trajectory) -> f64 {
+        let samples = Samples::new(traj, self.samples_per_piece);
+        self.evaluate_with(traj, &samples)
+    }
+
+    fn evaluate_with(&self, traj: &Trajectory, samples: &Samples) -> f64 {
+        if samples.samples_per_piece != self.samples_per_piece {
+            return self.evaluate(traj);
+        }
         let k = self.samples_per_piece;
         let mut cost = 0.0;
         for (i, ti) in traj.durations().iter().enumerate() {
             let step = ti / k as f64;
             for j in 0..=k {
-                let tau = j as f64 / k as f64;
-                let s = traj.eval_piece(i, tau * ti);
+                let s = samples.get(i, j);
                 let idx = sample_index(i, j, k);
                 if let Some(t) = self.two_thirds
                     && (idx == 0 || idx > t)
@@ -80,12 +87,25 @@ impl Penalty for ObstaclePenalty {
     }
 
     fn accumulate(&self, traj: &Trajectory, weight: f64, acc: &mut Accumulator) {
+        let samples = Samples::new(traj, self.samples_per_piece);
+        self.accumulate_with(traj, &samples, weight, acc);
+    }
+
+    fn accumulate_with(
+        &self,
+        traj: &Trajectory,
+        samples: &Samples,
+        weight: f64,
+        acc: &mut Accumulator,
+    ) {
+        if samples.samples_per_piece != self.samples_per_piece {
+            return self.accumulate(traj, weight, acc);
+        }
         let k = self.samples_per_piece;
         for (i, ti) in traj.durations().iter().enumerate() {
             let step = ti / k as f64;
             for j in 0..=k {
-                let tau = j as f64 / k as f64;
-                let s = traj.eval_piece(i, tau * ti);
+                let s = samples.get(i, j);
                 let idx = sample_index(i, j, k);
                 if let Some(t) = self.two_thirds
                     && (idx == 0 || idx > t)
@@ -100,9 +120,9 @@ impl Penalty for ObstaclePenalty {
                     * (weight * omg * step);
                 acc.add(
                     i,
-                    tau,
+                    j as f64 / k as f64,
                     *ti,
-                    &s,
+                    s,
                     d_p,
                     Vector3::zeros(),
                     Vector3::zeros(),

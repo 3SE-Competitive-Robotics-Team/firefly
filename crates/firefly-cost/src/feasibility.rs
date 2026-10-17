@@ -8,7 +8,7 @@
 use firefly_trajectory::Trajectory;
 use nalgebra::Vector3;
 
-use crate::sampling::trapezoid_weight;
+use crate::sampling::{Samples, trapezoid_weight};
 use crate::{Accumulator, Penalty};
 
 pub struct FeasibilityPenalty {
@@ -38,13 +38,20 @@ impl FeasibilityPenalty {
 
 impl Penalty for FeasibilityPenalty {
     fn evaluate(&self, traj: &Trajectory) -> f64 {
+        let samples = Samples::new(traj, self.samples_per_piece);
+        self.evaluate_with(traj, &samples)
+    }
+
+    fn evaluate_with(&self, traj: &Trajectory, samples: &Samples) -> f64 {
+        if samples.samples_per_piece != self.samples_per_piece {
+            return self.evaluate(traj);
+        }
         let k = self.samples_per_piece;
         let mut cost = 0.0;
         for (i, ti) in traj.durations().iter().enumerate() {
             let step = ti / k as f64;
             for j in 0..=k {
-                let tau = j as f64 / k as f64;
-                let s = traj.eval_piece(i, tau * ti);
+                let s = samples.get(i, j);
                 let omg = trapezoid_weight(j, k);
                 cost += omg
                     * step
@@ -57,12 +64,25 @@ impl Penalty for FeasibilityPenalty {
     }
 
     fn accumulate(&self, traj: &Trajectory, weight: f64, acc: &mut Accumulator) {
+        let samples = Samples::new(traj, self.samples_per_piece);
+        self.accumulate_with(traj, &samples, weight, acc);
+    }
+
+    fn accumulate_with(
+        &self,
+        traj: &Trajectory,
+        samples: &Samples,
+        weight: f64,
+        acc: &mut Accumulator,
+    ) {
+        if samples.samples_per_piece != self.samples_per_piece {
+            return self.accumulate(traj, weight, acc);
+        }
         let k = self.samples_per_piece;
         for (i, ti) in traj.durations().iter().enumerate() {
             let step = ti / k as f64;
             for j in 0..=k {
-                let tau = j as f64 / k as f64;
-                let s = traj.eval_piece(i, tau * ti);
+                let s = samples.get(i, j);
                 let omg = trapezoid_weight(j, k);
                 let d_v = derivative(s.velocity, self.max_velocity) * (weight * omg * step);
                 let d_a = derivative(s.acceleration, self.max_acceleration) * (weight * omg * step);
@@ -72,7 +92,16 @@ impl Penalty for FeasibilityPenalty {
                     + penalty(s.acceleration.norm_squared(), self.max_acceleration)
                     + penalty(s.jerk.norm_squared(), self.max_jerk);
                 acc.d_f_d_t[i] += weight * omg * point_cost / k as f64;
-                acc.add(i, tau, *ti, &s, Vector3::zeros(), d_v, d_a, d_j);
+                acc.add(
+                    i,
+                    j as f64 / k as f64,
+                    *ti,
+                    s,
+                    Vector3::zeros(),
+                    d_v,
+                    d_a,
+                    d_j,
+                );
             }
         }
     }
