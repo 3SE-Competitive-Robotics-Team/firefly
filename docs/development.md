@@ -172,7 +172,8 @@ adb -s firefly-0001 shell 'systemctl start firefly'
 
 ```bash
 cd /opt/firefly
-./bin/ffctl process status
+./bin/ffctl process status                      # 一次性，含 CPU%/MEM
+./bin/ffctl process status --watch --interval 1 # top 式刷新，Ctrl-C 退出
 ./bin/ffctl process start [name...]     # 省略 = 所有 autostart；显式名字忽略 autostart
 ./bin/ffctl process stop [name...]      # 省略 = 全部，逆序
 ./bin/ffctl process restart [name...]

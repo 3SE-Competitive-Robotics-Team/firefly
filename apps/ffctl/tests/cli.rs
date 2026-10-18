@@ -45,6 +45,15 @@ fn domains_list_verbs() {
     }
 }
 
+/// `status` 的实时刷新与间隔参数都出现在帮助里。
+#[test]
+fn status_exposes_watch_and_interval() {
+    let out = usage_rs::test::command!("ffctl", "process", "status", "--help").assert_success();
+    let stdout = out.stdout_text();
+    assert!(stdout.contains("--watch"), "{stdout}");
+    assert!(stdout.contains("--interval"), "{stdout}");
+}
+
 /// 未知子命令：clap 风格错误 + 退出码 2。
 #[test]
 fn unknown_subcommand_exits_two() {
