@@ -86,6 +86,26 @@ Bevy 日志接线参考 [quad](../apps/quad/src/main.rs)。示例调用公共实
 `open_vins`、`ORB_SLAM3`、`VINS-Fusion`、`EGO-Planner-v2`、`iceoryx2`、`logforth`、`fastrace`；
 purecv 使用上游 crates.io 发布版（当前锁定版本见 Cargo.lock），发现上游问题应提 issue。
 
+## 提交与 PR
+
+commit message 沿用 `<type>(<scope>): <摘要>`。**PR 标题用 `<type>: <中文摘要>`，不写括号**
+（中英文括号都不用）：括号里的补充说明改成逗号分隔的短句，保证在 PR 列表和合并提交里
+一行可读。
+
+- `feat: 切换到 PX4 控制核心，补起降平滑、安全标志与 VIO 验收`
+- `fix: 修正悬停参考的速度前馈`
+- `perf: 共用约束点采样，单次规划 2.08→0.98ms`
+- `docs: 补充 PR 标题约定`
+- `refactor: 删除旧角度模式与 mixer，quad 切到 PX4 链`
+
+反例：
+
+- `feat(fc): 切换到 PX4 控制核心（起降平滑）`：PR 标题不写 scope 括号
+- `feat: 切换到 PX4 控制核心 (VIO 验收)`：不写英文括号
+- `feat: 切换到 PX4 控制核心（WIP，后续补安全标志）`：不写阶段或计划叙事
+
+PR 标题描述整个 PR 的最终结果，不写 WIP、阶段编号或“后续再做”；同一条规则只维护在本节。
+
 <a id="run"></a>
 
 ## 构建与运行
