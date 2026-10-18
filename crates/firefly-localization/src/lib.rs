@@ -3,6 +3,7 @@
 //! - `graph`：重力对齐四自由度图，联合原始 VIO、地图锚点和在线回环。
 //! - `filter`：可选对照后端，误差态 EKF，状态为 `VIO→全局` 的漂移 `SE(3)`，预测由 VIO 增量驱动，
 //!   观测为几何/视觉全局位姿（`R = h⁻¹`），`chi2` 门控与 Joseph 更新。
+//! - `correction`：地图坐标切换门限，低于门限的修正不切换下游坐标系。
 //! - `convert`：位姿表示转换（各融合消费端共用）。
 //!
 //! 数值滤波代码：单字符矩阵名（`h/z/r/k`）与有限比较为领域惯例。
@@ -10,10 +11,12 @@
 
 pub mod config;
 pub mod convert;
+pub mod correction;
 pub mod filter;
 pub mod graph;
 pub mod quality;
 
 pub use config::LocalizationConfig;
 pub use convert::corrected_odom;
+pub use correction::CorrectionOptions;
 pub use filter::{FusionFilter, FusionOptions, GateProfile, Observation, RelocGate};

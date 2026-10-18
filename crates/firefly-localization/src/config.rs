@@ -17,6 +17,8 @@ pub struct LocalizationConfig {
     pub backend: Backend,
     pub graph: crate::graph::GraphOptions,
     pub quality: crate::quality::QualityOptions,
+    /// 对齐修正提交门限；低于门限不递增修订号。
+    pub correction: crate::correction::CorrectionOptions,
 }
 
 /// 静止启动时机体在地图中的位置与航向；odom 航向规范由测量确定。
