@@ -120,7 +120,7 @@ render 使用无窗口 GPU 渲染；Rerun 原生 Viewer 需要图形会话。Rus
 
 ```bash
 uv sync --all-packages --extra test
-cargo xtask build-all-release
+cargo xtask release
 ```
 
 运行进程一律 release；普通 `cargo test` 用 debug。源码改动后先完成构建，再做运行验收。
@@ -141,6 +141,49 @@ cargo run --release -p planner
 的相同入口。离线库图显式启动 aliked 和 `lightglue --map <地图.ffvmap>`；静态规划图用
 `planner --map <地图.ffmap>`，两者均要求 `configs/localization.toml [origin]` 声明外部对齐。
 ESKF 对照设置 `backend="eskf"`，不启动 slam。禁止把场地真值当作默认定位或规划先验。
+
+### 机载部署
+
+板载计算是 Orange Pi Zero 3W（aarch64 Debian 13，glibc 2.41）。`--target aarch64` 在
+Apple container 的 `rust:1.98.1-trixie` 里原生构建，镜像按 digest 固定，产物在
+`target/container/aarch64/release`；不维护交叉 sysroot。首次构建前运行
+`container system start`，需要拉取镜像并编译依赖。
+
+产物固定放 `/opt/firefly/{bin,configs,models}`，进程必须从 `/opt/firefly` 启动，
+默认的相对配置和模型路径才成立：
+
+```bash
+cargo xtask release --target aarch64
+cargo xtask deploy
+adb -s firefly-0001 shell 'systemctl start firefly'
+```
+
+`release --target aarch64` 只构建机载应用（不含 render/quad），并在容器内构建设备端
+`xtask` 解包器；`deploy` 把二进制、`configs/*.toml` 与默认视觉模型打成
+`dist/firefly-aarch64.zst`（zstd 容器，不是 tar），推到设备后由同一 xtask 的 `unpack`
+解包，`--device` 默认 `firefly-0001`。可复现性由固定镜像 digest、Rust 1.98.1、`--locked`
+和 `Cargo.lock` 保证；升级 Rust 或 Debian 时同步更新 `xtask/src/container.rs` 的镜像 digest。
+干净构建先删除 `target/container/`，再执行上面的命令。
+
+`firefly.service` 由镜像构建 [`orangepi-build`](https://github.com/3SE-Competitive-Robotics-Team/orangepi-build)
+预置并默认启动；`deploy` 只发布二进制、配置和模型。systemd 按 `configs/processes.toml`
+的数组顺序拉起 `autostart = true` 的进程。`processes.toml` 被 `deploy` 覆盖（烧录语义）；
+`lightglue` 在生产 `.ffvmap` 部署前保持 `autostart = false`。运行期管理：
+
+```bash
+cd /opt/firefly
+./bin/ffctl process status
+./bin/ffctl process start [name...]     # 省略 = 所有 autostart；显式名字忽略 autostart
+./bin/ffctl process stop [name...]      # 省略 = 全部，逆序
+./bin/ffctl process restart [name...]
+./bin/ffctl process enable <name...>    # 改 processes.toml，下次 supervisor 启动生效
+./bin/ffctl process disable <name...>
+systemctl stop firefly                  # supervisor 逆序 SIGINT 所有进程
+```
+
+supervisor 对异常退出按 1s→30s 退避重启；停止等待 5s，超时只报错、不 SIGKILL；
+进程日志在 `logs/process/<name>.log`。板载的 MIPI 相机、IMU 和飞控串口数据入口尚未接入
+生产二进制，当前部署只验证启动、链接、配置加载和 IPC 节点创建，不能当作飞行验收。
 
 静止初始化就绪后，按任务顺序发送指令（不要一次执行整组）：
 
@@ -313,7 +356,7 @@ mock 拼接接口。测试子类只覆盖外部交互边界，执行和评分逻
 工作目录等进程环境可用 pytest 的 monkeypatch 夹具隔离并恢复。
 
 运行 `pytest tests/system` 时，session fixture 会在系统用例启动前执行
-`cargo xtask build-all-release`，重建所有 Rust 应用的 release 二进制，避免端到端测试使用旧产物。
+`cargo xtask release`，重建所有 Rust 应用的 release 二进制，避免端到端测试使用旧产物。
 该命令是全部 Rust 应用 release 构建的统一入口，应用列表只在 xtask 维护；
 并行度使用 Cargo 默认值或 `CARGO_BUILD_JOBS`。Python 依赖通过 `uv sync` 安装。
 
@@ -398,7 +441,7 @@ uv run pytest tests/system/test_roundtrip.py -q
 CLI 使用已构建的 release 程序，运行前执行统一构建命令：
 
 ```bash
-cargo xtask build-all-release
+cargo xtask release
 uv run firefly-evaluate
 uv run firefly-evaluate --case nominal --config configs/acceptance_22m.toml --vio-only
 ```

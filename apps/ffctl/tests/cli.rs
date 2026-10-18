@@ -14,7 +14,8 @@ fn top_level_lists_domains() {
             .unwrap_or_else(|| panic!("缺少 {row} 行：{stdout}"))
     };
     assert!(at("fc ") < at("planner "), "{stdout}");
-    assert!(at("planner ") < at("completion "), "{stdout}");
+    assert!(at("planner ") < at("process "), "{stdout}");
+    assert!(at("process ") < at("completion "), "{stdout}");
 }
 
 /// 域的下一层是动词，且每个域自带帮助。
@@ -28,6 +29,20 @@ fn domains_list_verbs() {
 
     let out = usage_rs::test::command!("ffctl", "planner", "--help").assert_success();
     assert!(out.stdout_text().contains("goal"), "{}", out.stdout_text());
+
+    let out = usage_rs::test::command!("ffctl", "process", "--help").assert_success();
+    let stdout = out.stdout_text();
+    for verb in [
+        "start",
+        "stop",
+        "restart",
+        "enable",
+        "disable",
+        "status",
+        "supervise",
+    ] {
+        assert!(stdout.contains(verb), "缺少 {verb}：{stdout}");
+    }
 }
 
 /// 未知子命令：clap 风格错误 + 退出码 2。
@@ -54,13 +69,14 @@ fn takeoff_rejects_non_numeric_altitude() {
     );
 }
 
-/// 规格导出（`usage-rs` 白送）：两个域都在，且带 `effect` 标注。
+/// 规格导出（`usage-rs` 白送）：三个域都在，且带 `effect` 标注。
 #[test]
 fn usage_spec_exports_domains() {
     let out = usage_rs::test::command!("ffctl", "__usage_spec__").assert_success();
     let spec = out.stdout_text();
     assert!(spec.contains("cmd fc"), "{spec}");
     assert!(spec.contains("cmd planner"), "{spec}");
+    assert!(spec.contains("cmd process"), "{spec}");
     assert!(spec.contains("cmd takeoff"), "{spec}");
     assert!(spec.contains("effect=write"), "{spec}");
 }

@@ -1,0 +1,34 @@
+[[process]]
+name = "vio"
+command = ["bin/vio"]
+autostart = true
+
+[[process]]
+name = "fc"
+command = ["bin/fc"]
+autostart = true
+
+[[process]]
+name = "localization"
+command = ["bin/localization"]
+autostart = true
+
+[[process]]
+name = "slam"
+command = ["bin/slam"]
+autostart = true
+
+[[process]]
+name = "planner"
+command = ["bin/planner"]
+autostart = true
+
+[[process]]
+name = "aliked"
+command = ["bin/aliked"]
+autostart = true
+
+[[process]]
+name = "lightglue"
+command = ["bin/lightglue", "--map", "maps/rmuc2026-2.0.0.ffvmap"]
+autostart = false

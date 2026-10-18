@@ -78,10 +78,15 @@ Rust 应用的 release 构建统一走 xtask（`.cargo/config.toml` 已把 `carg
 `xtask` 包）：
 
 ```bash
-cargo xtask build-all-release
+cargo xtask release
 ```
 
-`build-all-release` 依次为全部 Rust 应用执行 `cargo build --release -p <app>`。应用名单只在
-`xtask/src/main.rs` 维护，不要在脚本、CI 或文档里复制第二份；新增 xtask 子命令时同步
-`usage` 文本与本说明。实际运行须准备 RMUC 场地资产、图形会话和 release 构建，按开发指南
-检查宿主机、启动与清理进程。CI 绿色不代表真实进程悬停、22m 往返或回环验收通过。
+`release` 为全部 Rust 应用执行 release 构建；`--target x64`（默认）在本机编译，
+`--target aarch64` 在 Apple container 的 Debian trixie 里原生编译机载进程。应用名单只在
+`xtask/src/target.rs` 维护，不要在脚本、CI 或文档里复制第二份；新增 xtask 子命令时同步
+`usage` 文本与本说明。`cargo xtask deploy` 把 aarch64 构建、配置和默认模型打成 zstd 包，
+经 adb 部署到 `firefly-0001:/opt/firefly`。`firefly.service` 由镜像构建
+`orangepi-build` 默认启动；进程清单在 `configs/processes.toml`，用
+`ffctl process status/start/stop/restart/enable/disable` 管理。实际运行须准备 RMUC
+场地资产、图形会话和 release 构建，按开发指南检查宿主机、启动与清理进程。CI 绿色不代表
+真实进程悬停、22m 往返或回环验收通过。
