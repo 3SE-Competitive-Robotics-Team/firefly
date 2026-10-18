@@ -144,7 +144,7 @@ ESKF 对照设置 `backend="eskf"`，不启动 slam。禁止把场地真值当�
 
 ### 机载部署
 
-板载计算是 Orange Pi Zero 3W（aarch64 Debian 13，glibc 2.41）。`--target aarch64` 在
+板载计算是 Orange Pi Zero 3W（aarch64 Debian 13，glibc 2.41）。`--target board` 在
 Apple container 的 `rust:1.98.1-trixie` 里原生构建，镜像按 digest 固定，产物在
 `target/container/aarch64/release`；不维护交叉 sysroot。首次构建前运行
 `container system start`，需要拉取镜像并编译依赖。
@@ -153,12 +153,12 @@ Apple container 的 `rust:1.98.1-trixie` 里原生构建，镜像按 digest 固�
 默认的相对配置和模型路径才成立：
 
 ```bash
-cargo xtask release --target aarch64
+cargo xtask release --target board
 cargo xtask deploy
 adb -s firefly-0001 shell 'systemctl start firefly'
 ```
 
-`release --target aarch64` 只构建机载应用（不含 render/quad），并在容器内构建设备端
+`release --target board` 只构建机载应用（不含 render/quad），并在容器内构建设备端
 `xtask` 解包器；`deploy` 把二进制、`configs/*.toml` 与默认视觉模型打成
 `dist/firefly-aarch64.zst`（zstd 容器，不是 tar），推到设备后由同一 xtask 的 `unpack`
 解包，`--device` 默认 `firefly-0001`。可复现性由固定镜像 digest、Rust 1.98.1、`--locked`

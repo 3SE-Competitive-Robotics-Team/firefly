@@ -41,15 +41,15 @@ impl Target {
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
             "host" => Ok(Self::Desktop),
-            "aarch64" => Ok(Self::Board),
-            other => Err(format!("unknown target {other}: expected host or aarch64")),
+            "board" => Ok(Self::Board),
+            other => Err(format!("unknown target {other}: expected host or board")),
         }
     }
 
     pub fn name(self) -> &'static str {
         match self {
             Self::Desktop => "host",
-            Self::Board => "aarch64",
+            Self::Board => "board",
         }
     }
 

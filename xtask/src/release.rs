@@ -13,7 +13,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--target" => {
                 let value = it
                     .next()
-                    .ok_or_else(|| "missing --target value (host or aarch64)".to_owned())?;
+                    .ok_or_else(|| "missing --target value (host or board)".to_owned())?;
                 target = Target::parse(value)?;
             }
             other => return Err(format!("unknown argument {other}")),
@@ -30,7 +30,7 @@ pub fn build(target: Target) -> Result<(), String> {
 }
 
 fn build_desktop(target: Target) -> Result<(), String> {
-    println!("release {}（host）", target.name());
+    println!("release {}", target.name());
     let mut command = Command::new("cargo");
     command
         .current_dir(target::workspace_root())
