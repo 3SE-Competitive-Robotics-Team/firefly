@@ -1,4 +1,4 @@
-//! 微无人机第三人称飞行 demo（独立，不接 IPC / VIO）。
+//! 微无人机第三人称飞行游戏（独立，不接 IPC / VIO）。
 //!
 //! 四旋翼模型与飞控（角度模式）由 `firefly-flight` 提供——与闭环评估共用同一实现；
 //! 本 app 只做输入/相机/场景接线，在 `configs/quad.toml` 指定的场地里飞。
@@ -85,9 +85,11 @@ fn setup_drone(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let mut quad = Quad::new(cfg.control);
+    quad.state.position = cfg.start.into();
     commands
         .spawn((
-            Quad::default(),
+            quad,
             FollowTarget,
             Transform::from_translation(Vec3::from(cfg.start)),
             Visibility::default(),

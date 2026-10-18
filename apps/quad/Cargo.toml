@@ -20,6 +20,7 @@ bevy = { workspace = true }
 firefly-flight = { workspace = true }
 firefly-render = { workspace = true }
 log = { workspace = true }
+nalgebra = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]

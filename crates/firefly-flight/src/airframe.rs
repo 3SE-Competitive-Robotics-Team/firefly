@@ -1,15 +1,17 @@
-//! 机体（airframe）：4 旋翼几何/旋向/推力上限 + 分配（mixer）与合成（正模型）。
+//! 机体（airframe）：4 旋翼几何/旋向/推力上限与正模型（电机 → 力/力矩）。
 //!
 //! 四旋翼唯一力源是 4 个沿机体 `+Z` 的旋翼推力：水平力只能靠倾斜，滚转/俯仰力矩
-//! 来自推力差，偏航力矩来自旋翼反扭矩。控制器给出**期望**世界系力/力矩，
-//! [`Airframe::allocate`] 分配到 4 个电机并逐电机限幅，[`Airframe::realize`]
-//! 把电机推力还原为机体产生的世界系力/力矩——两者共用同一份几何，互为逆运算
-//! （单测断言往返一致）。限幅是**唯一**的饱和点：控制律不限幅，真实电机在分配处饱和。
+//! 来自推力差，偏航力矩来自旋翼反扭矩。[`Airframe::realize`] 把 4 电机推力还原为
+//! 机体的世界系力/力矩，供 `integrate` 或 `MuJoCo` 被控对象使用。
+//!
+//! 控制分配不在这里：产品链路使用 PX4 的
+//! [`ControlAllocationSequentialDesaturation`](crate::px4::allocation::ControlAllocationSequentialDesaturation)，
+//! 效能矩阵由 [`crate::px4::allocation::effectiveness_from_rotors`] 从同一份旋翼几何构造。
 
 use nalgebra::{UnitQuaternion, Vector3};
 use serde::Deserialize;
 
-use crate::state::{QuadState, Wrench};
+use crate::state::Wrench;
 
 /// 单个旋翼：机体系安装位置 + 旋向。
 #[derive(Deserialize, Clone, Copy, Debug)]
@@ -84,17 +86,6 @@ impl Default for Airframe {
     }
 }
 
-/// 一次分配的落点：电机推力 + 限幅后机体实际产生的世界系力/力矩 + 是否触限。
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Allocation {
-    /// 各电机推力（N，已限幅到 `[0, max_thrust_per_motor]`）。
-    pub motors: [f32; 4],
-    /// 限幅后机体实际产生的世界系力/力矩（不含气动阻尼与重力）。
-    pub realized: Wrench,
-    /// 是否有机电触限（期望推力被削）。
-    pub saturated: bool,
-}
-
 impl Airframe {
     /// 4 电机总推力上限（N）。
     #[must_use]
@@ -102,70 +93,10 @@ impl Airframe {
         4.0 * self.max_thrust_per_motor
     }
 
-    /// 期望世界系力/力矩 → 4 电机推力（N），优先保持集合推力和滚转/俯仰。
-    ///
-    /// 分配取期望力的**机体 z 分量**为集合推力（水平力由姿态倾斜产生，旋翼给不出
-    /// 侧向力），期望力矩取机体三轴；4 电机推力约束为
-    /// `[0, max_thrust_per_motor]`；饱和先缩减偏航差动，再缩减滚转/俯仰差动。
-    /// 共同缩放零和差动保持集合推力；再回代 [`realize`](Self::realize) 得到实际落点。
-    ///
-    /// # Panics
-    ///
-    /// 首个 `solve4` 成功即证明分配矩阵非奇异，后续对同一矩阵的求解不会返回
-    /// `None`；若 `rotors` 布局使矩阵奇异，首个求解已提前返回而不会走到此分支。
-    #[must_use]
-    pub fn allocate(&self, attitude: UnitQuaternion<f32>, desired: &Wrench) -> Allocation {
-        let body_force = attitude.inverse() * desired.force;
-        let body_torque = attitude.inverse() * desired.torque;
-        let c = self.torque_coefficient;
-
-        // A·T = [集合推力, τ_x, τ_y, τ_z]：行 2 为 (r×ẑ)_x = y，行 3 为 (r×ẑ)_y = −x
-        let mut a = [[0.0f32; 4]; 4];
-        for (i, rotor) in self.rotors.iter().enumerate() {
-            let [x, y, _] = rotor.position;
-            a[0][i] = 1.0;
-            a[1][i] = y;
-            a[2][i] = -x;
-            a[3][i] = c * rotor.spin;
-        }
-        let rhs = [body_force.z, body_torque.x, body_torque.y, body_torque.z];
-        let Some(raw) = solve4(&a, &rhs) else {
-            // 退化布局（几何奇异）：给不出任何推力，如实报告饱和
-            return Allocation {
-                motors: [0.0; 4],
-                realized: Wrench::default(),
-                saturated: true,
-            };
-        };
-
-        let max = self.max_thrust_per_motor;
-        let collective = body_force.z.clamp(0., self.max_thrust());
-        let baseline = [collective / 4.; 4];
-        let roll_pitch = solve4(&a, &[collective, body_torque.x, body_torque.y, 0.])
-            .expect("allocation matrix already validated");
-        let delta = std::array::from_fn(|i| roll_pitch[i] - baseline[i]);
-        let scale = feasible_scale(&baseline, &delta, max);
-        let mut motors = std::array::from_fn(|i| baseline[i] + scale * delta[i]);
-        let yaw =
-            solve4(&a, &[0., 0., 0., body_torque.z]).expect("allocation matrix already validated");
-        let yaw_scale = feasible_scale(&motors, &yaw, max);
-        for i in 0..4 {
-            motors[i] = (motors[i] + yaw_scale * yaw[i]).clamp(0., max);
-        }
-        let saturated = motors
-            .iter()
-            .zip(raw)
-            .any(|(actual, requested)| (actual - requested).abs() > 1e-6);
-        Allocation {
-            motors,
-            realized: self.realize(attitude, &motors),
-            saturated,
-        }
-    }
-
     /// 4 电机推力 → 机体产生的世界系力/力矩（不含气动阻尼与重力）。
     ///
     /// 刚体等效：力 `R·Σ T_i ẑ`，力矩 `R·(Σ r_i × T_i ẑ + Σ s_i·c_τ·T_i ẑ)`。
+    /// 输入电机推力单位 N，顺序与 [`Airframe::rotors`] 一致。
     #[must_use]
     pub fn realize(&self, attitude: UnitQuaternion<f32>, motors: &[f32; 4]) -> Wrench {
         let c = self.torque_coefficient;
@@ -181,216 +112,12 @@ impl Airframe {
             torque: attitude * torque_body,
         }
     }
-
-    /// 一步闭环：期望力/力矩 → 分配 → 实际力/力矩（plant 与 demo 共用的入口）。
-    #[must_use]
-    pub fn act(&self, state: &QuadState, desired: &Wrench) -> Allocation {
-        self.allocate(state.attitude, desired)
-    }
-}
-
-/// 可行步长区间与 [0,1] 的交集；各电机沿共同步长缩放，保持增量零和。
-fn feasible_scale(base: &[f32; 4], delta: &[f32; 4], maximum: f32) -> f32 {
-    let mut scale = 1_f32;
-    for i in 0..4 {
-        if delta[i] > 0. {
-            scale = scale.min((maximum - base[i]) / delta[i]);
-        }
-        if delta[i] < 0. {
-            scale = scale.min(-base[i] / delta[i]);
-        }
-    }
-    scale.clamp(0., 1.)
-}
-
-/// 4×4 线性方程求解（列主元高斯消元）；奇异返回 `None`。
-fn solve4(a: &[[f32; 4]; 4], b: &[f32; 4]) -> Option<[f32; 4]> {
-    let mut m = *a;
-    let mut x = *b;
-    for col in 0..4 {
-        let pivot = (col..4).max_by(|&i, &j| {
-            m[i][col]
-                .abs()
-                .partial_cmp(&m[j][col].abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })?;
-        if m[pivot][col].abs() < 1e-9 {
-            return None;
-        }
-        m.swap(col, pivot);
-        x.swap(col, pivot);
-        for row in (col + 1)..4 {
-            let factor = m[row][col] / m[col][col];
-            let pivot_row = m[col];
-            for (k, value) in m[row].iter_mut().enumerate().skip(col) {
-                *value -= factor * pivot_row[k];
-            }
-            x[row] -= factor * x[col];
-        }
-    }
-    let mut out = [0.0f32; 4];
-    for row in (0..4).rev() {
-        let mut acc = x[row];
-        for k in (row + 1)..4 {
-            acc -= m[row][k] * out[k];
-        }
-        out[row] = acc / m[row][row];
-    }
-    Some(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn attitude() -> UnitQuaternion<f32> {
-        UnitQuaternion::from_axis_angle(&Vector3::z_axis(), 0.7)
-            * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), 0.2)
-    }
-
-    #[test]
-    fn saturated_yaw_preserves_collective_and_roll_pitch() {
-        let air = Airframe::default();
-        for yaw in [-1_f32, 1.] {
-            let desired = Wrench {
-                force: Vector3::z(),
-                torque: Vector3::new(0.002, -0.001, yaw),
-            };
-            let output = air.allocate(UnitQuaternion::identity(), &desired);
-            assert!(output.saturated);
-            assert!((output.realized.force.z - 1.).abs() < 1e-5);
-            assert!((output.realized.torque.x - 0.002).abs() < 1e-5);
-            assert!((output.realized.torque.y + 0.001).abs() < 1e-5);
-            assert!(output.realized.torque.z * yaw >= 0.);
-            assert!(
-                output
-                    .motors
-                    .iter()
-                    .all(|t| *t >= 0. && *t <= air.max_thrust_per_motor)
-            );
-        }
-    }
-
-    #[test]
-    fn collective_derivative_stays_one_under_yaw_saturation() {
-        let air = Airframe::default();
-        let force = |z| {
-            air.allocate(
-                UnitQuaternion::identity(),
-                &Wrench {
-                    force: Vector3::z() * z,
-                    torque: Vector3::z(),
-                },
-            )
-            .realized
-            .force
-            .z
-        };
-        let derivative = (force(1.001) - force(0.999)) / 0.002;
-        assert!((derivative - 1.).abs() < 1e-3);
-    }
-
-    #[test]
-    fn allocate_then_realize_round_trips() {
-        let air = Airframe::default();
-        let q = attitude();
-        let desired = Wrench {
-            force: q * Vector3::new(0.0, 0.0, 3.0),
-            torque: q * Vector3::new(0.01, -0.015, 0.001),
-        };
-        let alloc = air.allocate(q, &desired);
-        assert!(!alloc.saturated, "能力范围内不应触限");
-        assert!(
-            (alloc.realized.force - desired.force).norm() < 1e-4,
-            "力 {:?} vs {:?}",
-            alloc.realized.force,
-            desired.force
-        );
-        assert!(
-            (alloc.realized.torque - desired.torque).norm() < 1e-4,
-            "力矩 {:?} vs {:?}",
-            alloc.realized.torque,
-            desired.torque
-        );
-    }
-
-    /// 悬停分配对称：集合推力均分到 4 个电机，力矩 ≈ 0。
-    #[test]
-    fn hover_allocation_is_symmetric() {
-        let air = Airframe::default();
-        let weight = 0.219 * crate::G;
-        let alloc = air.allocate(
-            UnitQuaternion::identity(),
-            &Wrench {
-                force: Vector3::z() * weight,
-                torque: Vector3::zeros(),
-            },
-        );
-        assert!(!alloc.saturated);
-        for t in alloc.motors {
-            assert!((t - weight / 4.0).abs() < 1e-5, "电机推力不均衡：{t}");
-        }
-        assert!(alloc.realized.torque.norm() < 1e-5);
-    }
-
-    /// 纯偏航力矩只靠反扭矩：4 电机推力均值不变，成对角差动。
-    #[test]
-    fn yaw_torque_uses_reaction_only() {
-        let air = Airframe::default();
-        let collective = 0.5;
-        let alloc = air.allocate(
-            UnitQuaternion::identity(),
-            &Wrench {
-                force: Vector3::z() * collective,
-                torque: Vector3::z() * 0.002,
-            },
-        );
-        let sum: f32 = alloc.motors.iter().sum();
-        assert!((sum - collective).abs() < 1e-4, "集合推力被偏航改变：{sum}");
-        assert!(
-            (alloc.realized.torque.z - 0.002).abs() < 1e-5,
-            "偏航力矩 {}",
-            alloc.realized.torque.z
-        );
-        // 同旋向的两个对角电机推力同向变化
-        assert!((alloc.motors[0] - alloc.motors[1]).abs() < 1e-6);
-        assert!((alloc.motors[2] - alloc.motors[3]).abs() < 1e-6);
-        assert!(alloc.motors[0] > alloc.motors[2]);
-    }
-
-    /// 电机触限：单电机被压到 `[0, T_max]`，饱和标志置位，实际力矩小于期望。
-    #[test]
-    fn saturation_clamps_motors() {
-        let air = Airframe::default();
-        let desired = Wrench {
-            force: Vector3::z() * air.max_thrust() * 2.0,
-            torque: Vector3::zeros(),
-        };
-        let alloc = air.allocate(UnitQuaternion::identity(), &desired);
-        assert!(alloc.saturated);
-        for t in alloc.motors {
-            assert!(t >= 0.0 && t <= air.max_thrust_per_motor + 1e-6);
-        }
-        let sum: f32 = alloc.motors.iter().sum();
-        assert!((sum - air.max_thrust()).abs() < 1e-4);
-    }
-
-    /// 拉力上限只由分配决定：负推力（下压）被压到 0，不给"反向拉力"。
-    #[test]
-    fn negative_collective_clamps_to_zero() {
-        let air = Airframe::default();
-        let alloc = air.allocate(
-            UnitQuaternion::identity(),
-            &Wrench {
-                force: -Vector3::z() * 5.0,
-                torque: Vector3::zeros(),
-            },
-        );
-        assert!(alloc.motors.iter().all(|t| t.abs() < 1e-6));
-        assert!(alloc.realized.force.norm() < 1e-6);
-    }
-
-    /// 合成侧几何符号：前右（+x, −y）加推力 → `(r×ẑ) = (y·T, −x·T, 0)` 给出负滚转、负俯仰。
     #[test]
     fn realize_geometry_signs() {
         let air = Airframe::default();
@@ -399,5 +126,16 @@ mod tests {
         assert!(w.torque.y < 0.0, "前右加推力应产生负俯仰：{:?}", w.torque);
         assert!((w.force.z - 0.1).abs() < 1e-6);
         assert!((w.torque.z - 0.1 * air.torque_coefficient).abs() < 1e-6);
+    }
+
+    /// 悬停：4 电机均分 `mg`，合力竖直、无力矩。
+    #[test]
+    fn realize_hover_is_symmetric() {
+        let air = Airframe::default();
+        let per_motor = 0.219 * crate::G / 4.0;
+        let w = air.realize(UnitQuaternion::identity(), &[per_motor; 4]);
+        assert!((w.force.z - 0.219 * crate::G).abs() < 1e-5);
+        assert!(w.force.xy().norm() < 1e-6);
+        assert!(w.torque.norm() < 1e-6);
     }
 }

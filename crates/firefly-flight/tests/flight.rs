@@ -1,73 +1,54 @@
-//! 飞行力学/飞控的数学不变量（无渲染、无 ECS）。
-//!
-//! 闭环口径与真实链路一致：控制律给**期望**力/力矩 → [`Airframe::allocate`] 分配并
-//! 逐电机限幅 → [`Airframe::realize`] 回代实际力/力矩 → [`integrate`] 积分（含气动阻尼）。
+//! PX4 控制链的闭环不变量（与 `apps/fc` 相同的接线：控制器 → 电机 → 刚体）。
 
 use firefly_flight::{
-    Airframe, AngleCommand, ControlParams, G, PositionSetpoint, QuadParams, QuadState, angle_mode,
-    integrate, position_mode,
+    Airframe, Command, Controller, FlightFsm, FlightState, FsmParams, G, Health, PositionSetpoint,
+    Px4Params, QuadParams, QuadState, Wrench, integrate,
 };
 use nalgebra::{UnitQuaternion, Vector3};
 
-const DT: f32 = 0.005;
+const DT: f32 = 0.001;
 
-fn params() -> QuadParams {
-    QuadParams::default()
-}
-
-fn ctl() -> ControlParams {
-    ControlParams::default()
-}
-
-/// 重力对齐世界系的航向和平移规范不改变机体系电机指令。
-#[test]
-fn position_control_and_allocation_are_invariant_to_odom_gauge() {
-    let (p, c, air) = (params(), ctl(), Airframe::default());
-    let state = QuadState {
-        position: Vector3::new(0.2, -0.1, 1.),
-        velocity: Vector3::new(0.05, -0.02, 0.01),
-        attitude: UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.02),
-        ang_vel: Vector3::new(0.01, -0.02, 0.03),
-    };
-    let target = PositionSetpoint {
-        position: Vector3::z(),
-        ..Default::default()
-    };
-    let expected = air.allocate(state.attitude, &position_mode(&state, &target, &p, &c));
-    for yaw in [-std::f32::consts::FRAC_PI_2, 0.7, 2.8] {
-        let rotation = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), yaw);
-        let shift = Vector3::new(2., -3., 0.5);
-        let transformed = QuadState {
-            position: rotation * state.position + shift,
-            velocity: rotation * state.velocity,
-            attitude: rotation * state.attitude,
-            ..state
-        };
-        let target = PositionSetpoint {
-            position: rotation * target.position + shift,
-            yaw,
-            ..target
-        };
-        let actual = air.allocate(
-            transformed.attitude,
-            &position_mode(&transformed, &target, &p, &c),
-        );
-        for (actual, expected) in actual.motors.into_iter().zip(expected.motors) {
-            assert!((actual - expected).abs() < 2e-5);
-        }
+/// 去掉气动阻尼：与 `MuJoCo` 被控对象一致，只留 `PX4` 控制律本身。
+fn plant() -> QuadParams {
+    QuadParams {
+        linear_drag: 0.0,
+        angular_drag: 0.0,
+        ..QuadParams::default()
     }
 }
 
-/// 一步闭环：期望力/力矩 → 分配（限幅）→ 实际力/力矩 → 积分。
-fn step(state: &mut QuadState, desired: firefly_flight::Wrench, p: &QuadParams, air: &Airframe) {
-    let alloc = air.allocate(state.attitude, &desired);
-    integrate(state, &alloc.realized, p, DT);
+fn controller() -> Controller {
+    Controller::new(Px4Params::default())
 }
 
-/// 悬停是平衡点：参考=当前状态、姿态水平 → 集合推力 = mg 均分到 4 电机，位置不动。
+fn tick(
+    state: &mut QuadState,
+    setpoint: &PositionSetpoint,
+    ctrl: &mut Controller,
+    quad: &QuadParams,
+    air: &Airframe,
+    wind: Vector3<f32>,
+) -> [f32; 4] {
+    let motors = ctrl
+        .update(state, setpoint, quad, air, DT, false)
+        .expect("finite setpoint");
+    let realized = air.realize(state.attitude, &motors);
+    integrate(
+        state,
+        &Wrench {
+            force: realized.force + wind,
+            torque: realized.torque,
+        },
+        quad,
+        DT,
+    );
+    motors
+}
+
 #[test]
 fn hover_is_an_equilibrium() {
-    let (p, c, air) = (params(), ctl(), Airframe::default());
+    let (quad, air) = (plant(), Airframe::default());
+    let mut ctrl = controller();
     let mut state = QuadState {
         position: Vector3::new(1.0, 2.0, 1.5),
         ..Default::default()
@@ -76,221 +57,342 @@ fn hover_is_an_equilibrium() {
         position: state.position,
         ..Default::default()
     };
-
-    let desired = position_mode(&state, &setpoint, &p, &c);
-    assert!(
-        (desired.force.z - p.mass * G).abs() < 1e-3,
-        "悬停期望推力应等于 mg：{}",
-        desired.force.z
-    );
-    assert!(desired.force.xy().norm() < 1e-3);
-    assert!(desired.torque.norm() < 1e-3);
-
-    let alloc = air.allocate(state.attitude, &desired);
-    assert!(!alloc.saturated, "悬停不应触限");
-    let per_motor = p.mass * G / 4.0;
-    for t in alloc.motors {
-        assert!((t - per_motor).abs() < 1e-4, "悬停推力不均分：{t}");
+    let mut motors = [0.0; 4];
+    for _ in 0..2000 {
+        motors = tick(
+            &mut state,
+            &setpoint,
+            &mut ctrl,
+            &quad,
+            &air,
+            Vector3::zeros(),
+        );
     }
-
-    for _ in 0..200 {
-        let desired = position_mode(&state, &setpoint, &p, &c);
-        step(&mut state, desired, &p, &air);
+    assert!((state.position - setpoint.position).norm() < 2e-3);
+    assert!(state.velocity.norm() < 2e-3);
+    let total: f32 = motors.iter().sum();
+    assert!((total - quad.mass * G).abs() < 0.02, "悬停总推力 {total}");
+    for motor in motors {
+        assert!((motor - total / 4.0).abs() < 0.02, "电机不均衡 {motor}");
     }
-    let drift = (state.position - setpoint.position).norm();
-    assert!(drift < 1e-3, "悬停 1 s 位置漂移 {drift:.5} m");
 }
 
-/// 侧向阶跃必须靠倾斜产生水平力（推力只能沿机体 z），最终收敛到目标且高度保持。
 #[test]
 fn lateral_step_tilts_then_translates() {
-    let (p, c, air) = (params(), ctl(), Airframe::default());
-    let mut state = QuadState::default();
-    let setpoint = PositionSetpoint {
-        position: Vector3::new(1.0, 0.0, 0.0),
+    let (quad, air) = (plant(), Airframe::default());
+    let mut ctrl = controller();
+    let mut state = QuadState {
+        position: Vector3::new(0.0, 0.0, 1.5),
         ..Default::default()
     };
-
-    // 初始水平：推力全在竖直方向，瞬时水平力应为 0（先倾斜才有力）。
-    let first = position_mode(&state, &setpoint, &p, &c);
-    assert!(
-        first.force.xy().norm() < 1e-3,
-        "水平姿态下不应有水平力：{}",
-        first.force.xy().norm()
-    );
-
-    let limit = c.tilt_max_deg.to_radians();
-    let mut max_tilt = 0.0f32;
-    for _ in 0..600 {
-        let desired = position_mode(&state, &setpoint, &p, &c);
-        step(&mut state, desired, &p, &air);
-        let tilt = (state.attitude * Vector3::z()).z.clamp(-1.0, 1.0).acos();
+    let setpoint = PositionSetpoint {
+        position: Vector3::new(1.0, 0.0, 1.5),
+        ..Default::default()
+    };
+    let mut max_tilt = 0.0_f32;
+    for _ in 0..6000 {
+        tick(
+            &mut state,
+            &setpoint,
+            &mut ctrl,
+            &quad,
+            &air,
+            Vector3::zeros(),
+        );
+        let tilt = (state.attitude * Vector3::z())
+            .z
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees();
         max_tilt = max_tilt.max(tilt);
     }
-
-    assert!(max_tilt > 0.05, "应出现明显倾斜，实测 {max_tilt:.3} rad");
-    assert!(
-        max_tilt <= limit + 1e-2,
-        "倾角 {max_tilt:.3} rad 超过限幅 {limit:.3} rad"
-    );
+    assert!(max_tilt > 3.0, "应倾斜，实测 {max_tilt:.2}°");
+    assert!(max_tilt <= 40.0, "倾角超限 {max_tilt:.2}°");
     assert!(
         (state.position.x - 1.0).abs() < 0.05,
-        "应收敛到目标 x，实测 {:.3} m",
+        "x={:.3}",
         state.position.x
     );
     assert!(
-        state.position.z.abs() < 0.05,
-        "高度应保持，实测 {:.3} m",
-        state.position.z
+        (state.position.z - 1.5).abs() < 0.1,
+        "高度漂移 {:.3}",
+        state.position.z - 1.5
     );
 }
 
-/// 饱和口径：控制律不限幅，限幅发生在分配处——大误差下 4 电机顶到上限，实际合力 `= 4·T_max`。
+/// 大水平误差不得靠集合推力顶满把姿态权限挤掉（旧实现 15m 会锁死爬升）。
 #[test]
-fn collective_is_limited_by_mixer() {
-    let (p, c, air) = (params(), ctl(), Airframe::default());
-    let state = QuadState::default();
+fn large_lateral_error_tilts_instead_of_climbing() {
+    let (quad, air) = (plant(), Airframe::default());
+    let mut ctrl = controller();
+    let mut state = QuadState {
+        position: Vector3::new(0.0, 0.0, 1.5),
+        ..Default::default()
+    };
+    let setpoint = PositionSetpoint {
+        position: Vector3::new(20.0, 0.0, 1.5),
+        ..Default::default()
+    };
+    let mut max_tilt = 0.0_f32;
+    let mut max_height = 0.0_f32;
+    for _ in 0..1000 {
+        let motors = tick(
+            &mut state,
+            &setpoint,
+            &mut ctrl,
+            &quad,
+            &air,
+            Vector3::zeros(),
+        );
+        assert!(motors.iter().all(|m| m.is_finite() && *m >= 0.0));
+        max_tilt = max_tilt.max(
+            (state.attitude * Vector3::z())
+                .z
+                .clamp(-1.0, 1.0)
+                .acos()
+                .to_degrees(),
+        );
+        max_height = max_height.max((state.position.z - 1.5).abs());
+    }
+    assert!(max_tilt > 15.0, "应明显倾斜，实测 {max_tilt:.1}°");
+    assert!(max_height < 0.5, "1s 内高度偏差 {max_height:.2} m");
+    assert!(
+        state.position.x > 0.5,
+        "应朝目标移动，实测 {:.2} m",
+        state.position.x
+    );
+}
+
+/// 电机推力永不超过机体上限，且不为负。
+#[test]
+fn motors_stay_within_limits() {
+    let (quad, air) = (plant(), Airframe::default());
+    let mut ctrl = controller();
+    let mut state = QuadState {
+        position: Vector3::new(0.0, 0.0, 1.5),
+        ..Default::default()
+    };
     let setpoint = PositionSetpoint {
         position: Vector3::new(50.0, 0.0, 50.0),
         ..Default::default()
     };
-    let desired = position_mode(&state, &setpoint, &p, &c);
-    assert!(desired.force.norm() > air.max_thrust(), "期望应超出能力");
-
-    let alloc = air.allocate(state.attitude, &desired);
-    assert!(alloc.saturated, "顶到上限应置饱和标志");
-    assert!(
-        alloc.realized.force.z <= air.max_thrust() + 1e-4,
-        "实际合力 {} 超过 4·T_max {}",
-        alloc.realized.force.z,
-        air.max_thrust()
-    );
-
-    let down = PositionSetpoint {
-        position: Vector3::new(0.0, 0.0, -50.0),
-        ..Default::default()
-    };
-    let desired = position_mode(&state, &down, &p, &c);
-    assert!(
-        desired.force.z >= 0.0,
-        "期望推力不得为负：{}",
-        desired.force.z
-    );
-    let alloc = air.allocate(state.attitude, &desired);
-    assert!(
-        alloc.motors.iter().all(|t| *t >= 0.0),
-        "电机推力不得为负：{:?}",
-        alloc.motors
-    );
-}
-
-/// 大水平误差下期望倾角被压在 `tilt_max` 锥内（限幅作用于期望姿态，内环可有少量超调）。
-#[test]
-fn tilt_is_limited() {
-    let (p, c, air) = (params(), ctl(), Airframe::default());
-    let setpoint = PositionSetpoint {
-        position: Vector3::new(50.0, 0.0, 0.0),
-        ..Default::default()
-    };
-    let mut probe = QuadState::default();
-    let mut max_tilt = 0.0f32;
-    for _ in 0..400 {
-        let desired = position_mode(&probe, &setpoint, &p, &c);
-        step(&mut probe, desired, &p, &air);
-        let tilt = (probe.attitude * Vector3::z()).z.clamp(-1.0, 1.0).acos();
-        max_tilt = max_tilt.max(tilt);
+    for _ in 0..2000 {
+        let motors = tick(
+            &mut state,
+            &setpoint,
+            &mut ctrl,
+            &quad,
+            &air,
+            Vector3::zeros(),
+        );
+        for motor in motors {
+            assert!(motor >= 0.0 && motor <= air.max_thrust_per_motor + 1e-4);
+        }
     }
-    let limit = c.tilt_max_deg.to_radians();
-    assert!(
-        max_tilt <= limit * 1.15,
-        "倾角 {max_tilt:.3} rad 明显超过限幅 {limit:.3} rad（期望姿态限幅+内环超调）"
-    );
 }
 
-/// 偏航在 ±π 回绕处走最近路径：从 −π+ε 到 +π−ε 只差 2ε，不得绕整圈。
+/// 常值侧风下速度积分项消除稳态位置偏差。
 #[test]
-fn yaw_takes_shortest_path() {
-    let (p, c) = (params(), ctl());
-    let state = QuadState {
-        attitude: UnitQuaternion::from_axis_angle(&Vector3::z_axis(), -std::f32::consts::PI + 0.05),
-        ..Default::default()
-    };
-    let setpoint = PositionSetpoint {
-        position: Vector3::zeros(),
-        yaw: std::f32::consts::PI - 0.05,
-        ..Default::default()
-    };
-    let wrench = position_mode(&state, &setpoint, &p, &c);
-    // 最近路径只需 0.1 rad 的偏航修正：偏航力矩应远小于"绕整圈"的量级。
-    let unit = c.attitude_kp * c.rate_kp * p.inertia[2] * 0.1;
-    assert!(
-        wrench.torque.z.abs() < unit * 3.0,
-        "偏航力矩 {:.4} 过大，疑似绕远路（阈值 {:.4}）",
-        wrench.torque.z,
-        unit * 3.0
-    );
-}
-
-/// 参考偏航角速度进姿态内环前馈：水平姿态、零偏航误差 → 偏航力矩 `= I_zz·rate_kp·yaw_rate`。
-#[test]
-fn setpoint_yaw_rate_is_fed_forward() {
-    let (p, c) = (params(), ctl());
-    let state = QuadState::default();
-    let setpoint = PositionSetpoint {
-        position: Vector3::zeros(),
-        yaw_rate: 1.0,
-        ..Default::default()
-    };
-    let wrench = position_mode(&state, &setpoint, &p, &c);
-    let expected = p.inertia[2] * c.rate_kp * 1.0;
-    assert!(
-        (wrench.torque.z - expected).abs() < 1e-5,
-        "偏航前馈力矩 {:.6} ≠ {expected:.6}",
-        wrench.torque.z
-    );
-}
-
-/// 角度模式：倾斜 30° 且零指令时应回正、且不产生水平净位移。
-#[test]
-fn angle_mode_levels_out() {
-    let (p, c, air) = (params(), ctl(), Airframe::default());
+fn wind_is_rejected_by_velocity_integrator() {
+    let (quad, air) = (plant(), Airframe::default());
+    let mut ctrl = controller();
     let mut state = QuadState {
-        position: Vector3::new(0.0, 0.0, 1.0),
-        attitude: UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.5),
+        position: Vector3::new(0.0, 0.0, 1.5),
         ..Default::default()
     };
-    for _ in 0..600 {
-        let desired = angle_mode(&state, &AngleCommand::default(), &p, &c);
-        step(&mut state, desired, &p, &air);
+    let setpoint = PositionSetpoint {
+        position: Vector3::new(0.0, 0.0, 1.5),
+        ..Default::default()
+    };
+    let wind = Vector3::new(0.5, 0.0, 0.0);
+    for _ in 0..20_000 {
+        tick(&mut state, &setpoint, &mut ctrl, &quad, &air, wind);
     }
-    let tilt = (state.attitude * Vector3::z()).z.clamp(-1.0, 1.0).acos();
-    assert!(tilt < 0.02, "应回正，实测残倾 {tilt:.4} rad");
     assert!(
-        state.position.z > 0.9,
-        "应维持高度，实测 {:.3} m",
+        state.position.x.abs() < 0.1,
+        "0.5N 侧风稳态偏差 {:.3} m",
+        state.position.x
+    );
+    assert!(
+        (state.position.z - 1.5).abs() < 0.1,
+        "高度偏差 {:.3}",
+        state.position.z - 1.5
+    );
+}
+
+/// 匀速参考 + 真实阻力：速度积分项把滞后压到可接受范围。
+#[test]
+fn velocity_tracking_with_drag_has_small_lag() {
+    let quad = QuadParams::default();
+    let air = Airframe::default();
+    let mut ctrl = controller();
+    let mut state = QuadState {
+        position: Vector3::new(0.0, 0.0, 1.5),
+        ..Default::default()
+    };
+    let mut lag = 0.0;
+    for k in 0..20_000 {
+        let t = k as f32 * DT;
+        let setpoint = PositionSetpoint {
+            position: Vector3::new(t, 0.0, 1.5),
+            velocity: Vector3::new(1.0, 0.0, 0.0),
+            ..Default::default()
+        };
+        tick(
+            &mut state,
+            &setpoint,
+            &mut ctrl,
+            &quad,
+            &air,
+            Vector3::zeros(),
+        );
+        lag = t - state.position.x;
+    }
+    assert!(lag.abs() < 0.1, "1m/s 稳态滞后 {lag:.3} m");
+}
+
+/// 产品系航向设定值：+90° 偏航后机体 +X 指向产品世界 +Y。
+#[test]
+fn yaw_setpoint_turns_to_requested_heading() {
+    let (quad, air) = (plant(), Airframe::default());
+    let mut ctrl = controller();
+    let mut state = QuadState {
+        position: Vector3::new(0.0, 0.0, 1.5),
+        ..Default::default()
+    };
+    let setpoint = PositionSetpoint {
+        position: Vector3::new(0.0, 0.0, 1.5),
+        yaw: std::f32::consts::FRAC_PI_2,
+        ..Default::default()
+    };
+    for _ in 0..6000 {
+        tick(
+            &mut state,
+            &setpoint,
+            &mut ctrl,
+            &quad,
+            &air,
+            Vector3::zeros(),
+        );
+    }
+    let yaw = firefly_flight::yaw_of(state.attitude);
+    assert!(
+        (yaw - std::f32::consts::FRAC_PI_2).abs() < 0.05,
+        "航向 {yaw:.3} rad"
+    );
+    assert!(
+        (state.position.z - 1.5).abs() < 0.1,
+        "高度漂移 {:.3}",
+        state.position.z - 1.5
+    );
+}
+
+/// 姿态支持只稳定姿态与悬停推力，不产生水平加速度。
+#[test]
+fn fallback_support_is_level_and_hovering() {
+    let (quad, air) = (plant(), Airframe::default());
+    let mut ctrl = controller();
+    let mut state = QuadState {
+        attitude: UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.3),
+        position: Vector3::new(0.0, 0.0, 1.5),
+        ..Default::default()
+    };
+    for _ in 0..3000 {
+        let motors = ctrl
+            .support(&state, 0.0, &quad, &air, DT)
+            .expect("valid support");
+        let realized = air.realize(state.attitude, &motors);
+        integrate(&mut state, &realized, &quad, DT);
+    }
+    let tilt = (state.attitude * Vector3::z())
+        .z
+        .clamp(-1.0, 1.0)
+        .acos()
+        .to_degrees();
+    assert!(tilt < 3.0, "应回正，实测 {tilt:.2}°");
+    assert!(
+        state.position.z > 1.0,
+        "应维持高度，实测 {:.2}",
         state.position.z
     );
 }
 
-/// 满油门上升不触限：219g 机的垂向余量（推重比 ≈ 3）足够支撑角度模式的最大爬升率。
+/// 产品级闭环：起飞 → 保持 → 降落，状态机与 PX4 控制链一起跑。
 #[test]
-fn full_throttle_climb_stays_within_limits() {
-    let (p, c, air) = (params(), ctl(), Airframe::default());
-    let mut state = QuadState::default();
-    let cmd = AngleCommand {
-        throttle: 1.0,
+fn arm_takeoff_hold_land_closes_the_loop() {
+    let (quad, air) = (plant(), Airframe::default());
+    let mut ctrl = controller();
+    let mut fsm = FlightFsm::new(FsmParams::default());
+    let mut state = QuadState {
+        position: Vector3::new(0.0, 0.0, 0.02),
         ..Default::default()
     };
-    for _ in 0..400 {
-        let desired = angle_mode(&state, &cmd, &p, &c);
-        let alloc = air.allocate(state.attitude, &desired);
-        assert!(!alloc.saturated, "满油门爬升不应触限");
-        integrate(&mut state, &alloc.realized, &p, DT);
-    }
+    let health = Health {
+        estimator_ready: true,
+        airframe_ready: true,
+        odometry_alive: true,
+        imu_alive: true,
+        attitude_session_ok: true,
+    };
+    fsm.update(DT, &state, None, health);
+    fsm.command(Command::Arm, health, &state).unwrap();
+    fsm.command(Command::Takeoff { altitude: 1.0 }, health, &state)
+        .unwrap();
+
+    let fly = |state: &mut QuadState, fsm: &mut FlightFsm, ctrl: &mut Controller, steps: usize| {
+        for _ in 0..steps {
+            let out = fsm.update(DT, state, None, health);
+            let motors = if out.motors_enabled {
+                ctrl.update(state, &out.setpoint, &quad, &air, DT, fsm.on_ground(state))
+                    .expect("valid setpoint")
+            } else {
+                [0.0; 4]
+            };
+            let realized = air.realize(state.attitude, &motors);
+            integrate(state, &realized, &quad, DT);
+        }
+    };
+
+    fly(&mut state, &mut fsm, &mut ctrl, 12_000);
+    assert_eq!(fsm.state(), FlightState::Hold);
+    let altitude = fsm.altitude_above_origin(&state);
+    assert!((altitude - 1.0).abs() < 0.12, "起飞高度 {altitude:.3} m");
+
+    fsm.command(Command::Land, health, &state).unwrap();
+    fly(&mut state, &mut fsm, &mut ctrl, 12_000);
+    assert_eq!(fsm.state(), FlightState::Disarmed);
     assert!(
-        state.velocity.z > c.climb_rate_max * 0.8,
-        "应接近指令爬升率，实测 {:.3} m/s",
-        state.velocity.z
+        fsm.altitude_above_origin(&state) < 0.1,
+        "落地高度 {:.3}",
+        fsm.altitude_above_origin(&state)
     );
-    assert!(state.position.z > 1.0);
+}
+
+/// 瞬时无效位置设定值保留上一次有效推力，不能把电机切零。
+#[test]
+fn invalid_setpoint_keeps_last_valid_thrust() {
+    let (quad, air) = (plant(), Airframe::default());
+    let mut ctrl = controller();
+    let mut state = QuadState {
+        position: Vector3::new(0.0, 0.0, 1.5),
+        ..Default::default()
+    };
+    let hover = PositionSetpoint {
+        position: state.position,
+        ..Default::default()
+    };
+    for _ in 0..100 {
+        tick(&mut state, &hover, &mut ctrl, &quad, &air, Vector3::zeros());
+    }
+    let bad = PositionSetpoint {
+        position: Vector3::repeat(f32::NAN),
+        velocity: Vector3::repeat(f32::NAN),
+        acceleration: Vector3::repeat(f32::NAN),
+        ..Default::default()
+    };
+    let motors = ctrl
+        .update(&state, &bad, &quad, &air, DT, false)
+        .expect("last valid attitude setpoint is kept");
+    assert!(ctrl.input_invalid);
+    assert!(motors.iter().all(|m| m.is_finite() && *m > 0.0));
 }

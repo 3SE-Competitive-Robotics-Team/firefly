@@ -46,7 +46,7 @@
 | `aliked` | ALIKED-N16 特征提取：在线发布特征，`--build-map` 离线建 `ffvmap` 库图 |
 | `lightglue` | ALIKED/LightGlue 离线库图定位：`--map <地图.ffvmap>` 解算视觉位姿 |
 | `render` | 视觉传感器进程：订阅真值位姿渲染双目与深度并发布 IPC，`--offline` 供离线建库 |
-| `quad` | 独立微无人机第三人称飞行 demo，不接 IPC/VIO |
+| `quad` | 独立微无人机第三人称飞行游戏，不接 IPC/VIO |
 | `ffctl` | 地面站 CLI：把操作员意图发成 IPC 消息，命令为 `<域> <动词>` 两层 |
 
 ### Python 进程（`apps/`）

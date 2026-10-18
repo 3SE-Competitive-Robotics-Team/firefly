@@ -1,205 +1,22 @@
-//! 飞控：角度模式（飞行手柄）与位置模式（飞控外环），共用姿态内环。
+//! 位置参考（产品世界系，Z 上）。
 //!
-//! 推力恒沿机体 `+Z`：两个模式都只决定“推力大小 + 期望姿态”，水平加速因此只能来自
-//! 倾斜，姿态动力学决定响应快慢——这是四旋翼所有动态耦合的来源。本模块只给出
-//! **期望**力/力矩，**不限幅**：可达集与饱和由 [`crate::Airframe::allocate`] 的分配与
-//! 逐电机限幅决定（全栈唯一的饱和点）。
+//! 产品飞控（`apps/fc`）由 [`crate::FlightFsm`] 生成该参考，再经
+//! [`crate::Controller`] 转到 PX4 的 NED 与归一化指令。手动飞行（`apps/quad`）
+//! 不经过本结构，直接用 [`crate::Controller::attitude_mode`]。
 
-use nalgebra::{Matrix3, Unit, UnitQuaternion, Vector3};
+use nalgebra::Vector3;
 
-use crate::{
-    G,
-    params::{ControlParams, QuadParams},
-    state::{QuadState, Wrench},
-};
-
-/// 角度模式指令（−1..1 归一化输入，飞行手柄）。
-#[derive(Clone, Copy, Debug, Default)]
-pub struct AngleCommand {
-    /// 俯仰（+1 = 前倾）。
-    pub pitch: f32,
-    /// 横滚（+1 = 右倾）。
-    pub roll: f32,
-    /// 偏航角速度（+1 = 右偏，绕机体 z）。
-    pub yaw: f32,
-    /// 升降速度（+1 = 上升）。
-    pub throttle: f32,
-}
-
-/// 位置模式参考（世界系）。
+/// 位置模式参考（世界系，Z 上）。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PositionSetpoint {
     /// 期望位置（m）。
     pub position: Vector3<f32>,
     /// 期望速度（m/s）。
     pub velocity: Vector3<f32>,
-    /// 期望加速度（m/s²，世界系）：位置环**前馈**项。缺它时跟踪滞后约
-    /// `a_ref / pos_kp`。
+    /// 期望加速度（m/s²，世界系）：位置环前馈。
     pub acceleration: Vector3<f32>,
     /// 期望航向（rad，世界 Z；水平面内机体 `+X` 的方向）。
     pub yaw: f32,
     /// 期望航向角速度（rad/s，姿态内环前馈）。
     pub yaw_rate: f32,
-}
-
-/// 无位置/速度反馈的姿态稳定与标称悬停推力，不保证保高或定点。
-/// 新鲜 IMU 是调用前置条件；倾斜补偿限制在 60°，由分配器执行推力上限。
-#[must_use]
-pub fn attitude_support(
-    attitude: UnitQuaternion<f32>,
-    ang_vel: Vector3<f32>,
-    yaw: f32,
-    params: &QuadParams,
-    ctl: &ControlParams,
-) -> Wrench {
-    let state = QuadState {
-        attitude,
-        ang_vel,
-        ..Default::default()
-    };
-    let torque = attitude_torque(
-        &state,
-        UnitQuaternion::from_axis_angle(&Vector3::z_axis(), yaw),
-        0.,
-        params,
-        ctl,
-    );
-    let up = attitude * Vector3::z();
-    let thrust = params.mass * G / up.z.clamp(0.5, 1.);
-    Wrench {
-        force: up * thrust,
-        torque,
-    }
-}
-
-/// 角度模式：`cmd` 的期望倾斜/偏航角速度 + 升降速度 → 世界系力/力矩。
-#[must_use]
-pub fn angle_mode(
-    state: &QuadState,
-    cmd: &AngleCommand,
-    params: &QuadParams,
-    ctl: &ControlParams,
-) -> Wrench {
-    // 期望姿态：当前航向下叠加期望倾斜。偏航不写进姿态——它是机体 z 的角速度，
-    // 随倾斜一起转（真机绕机体轴偏航），故用姿态内环的角速度前馈。
-    let tilt = ctl.tilt_max_deg.to_radians();
-    let yaw = state.yaw();
-    let q_des = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), yaw)
-        * UnitQuaternion::from_axis_angle(&Vector3::y_axis(), cmd.pitch * tilt)
-        * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), cmd.roll * tilt);
-    let torque = attitude_torque(state, q_des, -cmd.yaw * ctl.yaw_rate_max, params, ctl);
-
-    // 垂直速度控制 + 倾斜补偿：推力沿机体 z，倾斜时须补 1/cosθ 才维持高度。
-    let up_z = (state.attitude * Vector3::z()).z.clamp(0.3, 1.0);
-    let vz_des = cmd.throttle * ctl.climb_rate_max;
-    let a_vert = G + ctl.vz_kp * (vz_des - state.velocity.z);
-    let thrust = (params.mass * a_vert / up_z).max(0.0);
-
-    Wrench {
-        force: state.attitude * (Vector3::z() * thrust),
-        torque,
-    }
-}
-
-/// 位置模式：位置/速度/偏航参考 → 期望推力矢量与姿态 → 姿态内环。
-#[must_use]
-pub fn position_mode(
-    state: &QuadState,
-    setpoint: &PositionSetpoint,
-    params: &QuadParams,
-    ctl: &ControlParams,
-) -> Wrench {
-    // 轨迹加速度前馈 + 位置/速度 PD → 期望加速度；加上重力补偿得到所需外力。
-    let a_des = setpoint.acceleration
-        + ctl.pos_kp * (setpoint.position - state.position)
-        + ctl.vel_kp * (setpoint.velocity - state.velocity);
-    let f_des = (a_des + Vector3::z() * G) * params.mass;
-
-    // 可用的只有机体 z 方向的推力：大小取所需合力，方向取期望力方向（限幅在倾角锥内）。
-    // 实际力始终沿**当前**机体 z，方向差由姿态内环转过来——倾斜-平移耦合即在此。
-    let thrust = f_des.norm().max(0.0);
-    let q_des = attitude_from_thrust_dir(thrust_direction(f_des, ctl.tilt_max_deg), setpoint.yaw);
-    let torque = attitude_torque(state, q_des, setpoint.yaw_rate, params, ctl);
-
-    Wrench {
-        force: state.attitude * (Vector3::z() * thrust),
-        torque,
-    }
-}
-
-/// 期望推力方向：期望力方向，超出 `tilt_max` 锥时压回锥面（俯仰/横滚限幅）。
-fn thrust_direction(f_des: Vector3<f32>, tilt_max_deg: f32) -> Vector3<f32> {
-    let dir = f_des.try_normalize(0.0).unwrap_or(Vector3::z());
-    let max_tilt = tilt_max_deg.to_radians();
-    if dir.z.clamp(-1.0, 1.0) >= max_tilt.cos() {
-        return dir;
-    }
-    let axis = Vector3::z()
-        .cross(&dir)
-        .try_normalize(0.0)
-        .unwrap_or(Vector3::x());
-    UnitQuaternion::from_axis_angle(&Unit::new_unchecked(axis), max_tilt) * Vector3::z()
-}
-
-/// 由推力方向（机体 z）+ 期望航向（机体 x 的水平投影）构造期望姿态。
-fn attitude_from_thrust_dir(b3: Vector3<f32>, yaw: f32) -> UnitQuaternion<f32> {
-    let b1_ref = Vector3::new(yaw.cos(), yaw.sin(), 0.0);
-    let b2 = b3.cross(&b1_ref).try_normalize(0.0).unwrap_or(Vector3::y());
-    let b1 = b2.cross(&b3);
-    UnitQuaternion::from_rotation_matrix(&nalgebra::Rotation3::from_matrix_unchecked(
-        Matrix3::from_columns(&[b1, b2, b3]),
-    ))
-}
-
-/// 姿态内环（两个模式共用）：姿态误差 → 机体角速度指令 → 角加速度 → 世界系力矩。
-///
-/// `yaw_rate_ff`：机体 z 角速度前馈（角度模式的偏航摇杆 / 位置模式的参考偏航角速度）。
-fn attitude_torque(
-    state: &QuadState,
-    q_des: UnitQuaternion<f32>,
-    yaw_rate_ff: f32,
-    params: &QuadParams,
-    ctl: &ControlParams,
-) -> Vector3<f32> {
-    // scaled_axis 返回最短旋转的主值，模长不超过 π。
-    let q_err = state.attitude.inverse() * q_des;
-    let rate_des = q_err.scaled_axis() * ctl.attitude_kp + Vector3::z() * yaw_rate_ff;
-    let ang_accel = (rate_des - state.ang_vel) * ctl.rate_kp;
-    let torque_body = Vector3::from(params.inertia).component_mul(&ang_accel);
-    state.attitude * torque_body
-}
-
-#[cfg(test)]
-mod fallback_tests {
-    use super::*;
-    #[test]
-    fn support_has_analytic_vertical_force_and_restoring_torque() {
-        let p = QuadParams::default();
-        let ctl = ControlParams::default();
-        let expected = p.mass * G;
-        for theta in [-0.4_f32, 0., 0.4] {
-            let q = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), theta);
-            let out = attitude_support(q, Vector3::zeros(), 0., &p, &ctl);
-            assert!((out.force.z - expected).abs() < 1e-5);
-            assert!((out.force.x - expected * theta.tan()).abs() < 1e-5);
-            assert!(out.torque.y * theta <= 0.);
-            let epsilon = 1e-3;
-            let a = attitude_support(
-                UnitQuaternion::from_axis_angle(&Vector3::y_axis(), theta + epsilon),
-                Vector3::zeros(),
-                0.,
-                &p,
-                &ctl,
-            );
-            let b = attitude_support(
-                UnitQuaternion::from_axis_angle(&Vector3::y_axis(), theta - epsilon),
-                Vector3::zeros(),
-                0.,
-                &p,
-                &ctl,
-            );
-            let derivative = (a.force.x - b.force.x) / (2. * epsilon);
-            assert!((derivative - expected / theta.cos().powi(2)).abs() < 0.002);
-        }
-    }
 }

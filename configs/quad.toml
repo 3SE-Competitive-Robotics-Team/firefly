@@ -1,8 +1,18 @@
-# 微无人机飞行 demo（apps/quad）：独立 6-DOF 四旋翼，不接 IPC / VIO。
-# 机体、旋翼布局与飞控参数见 crates/firefly-flight。
+# 微无人机第三人称飞行（apps/quad）：独立 6-DOF 四旋翼，不接 IPC / VIO。
+# 机体、旋翼布局与 PX4 控制参数见 crates/firefly-flight。
 
-[control]
-# demo 跑在渲染帧率上（定步长积分 240Hz、系统 dt 上限 120Hz），内环增益比
-# 1kHz 的飞控进程保守：rate_kp=20 在 16ms 步长下会因显式积分引入振荡。
-attitude_kp = 9.0     # 姿态误差 → 机体角速度指令（1/s）
-rate_kp = 6.0         # 角速度误差 → 角加速度（1/s）
+[control.rate]
+# 240Hz 定步长 + 显式积分：内环比 1kHz 飞控进程保守，避免步长引入振荡。
+p = [0.02, 0.02, 0.04]
+i = [0.05, 0.05, 0.02]
+d = [0.0, 0.0, 0.0]
+
+[control.attitude]
+# 姿态误差 → 角速度设定值（1/s），沿用旧手感。
+p = [9.0, 9.0, 6.0]
+
+[manual]
+# 满油门 3 m/s 升降，垂直速度误差 → 加速度 4 1/s，满舵 3 rad/s 偏航。
+climb_rate_max = 3.0
+vz_kp = 4.0
+yaw_rate_max = 3.0
