@@ -12,6 +12,7 @@
 
 - [开发指南](docs/development.md)：实现约定、构建运行、资产、诊断与测试入口。
 - [系统架构](docs/architecture.md)：数据流、坐标、VIO、姿态融合、回环与规划边界。
+- [硬件规格](docs/hw/spec.md)：板卡算力、接口与项目约束。
 - [协作原则](AGENTS.md)：agent 的工作约定。
 
 参数、测试清单与门槛以代码和配置为准；运行证据保存在 `logs/`。
