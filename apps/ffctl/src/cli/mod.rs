@@ -8,11 +8,13 @@ mod completion;
 mod fc;
 mod meters;
 mod planner;
+mod process;
 
 pub(crate) use completion::Completion;
 pub(crate) use fc::Fc;
 pub(crate) use meters::Meters;
 pub(crate) use planner::Planner;
+pub(crate) use process::Process;
 
 use usage_rs::{Cli, Subcommands};
 
@@ -33,5 +35,7 @@ pub(crate) enum Command {
     #[usage(display_order = 1)]
     Planner(Planner),
     #[usage(display_order = 2)]
+    Process(Process),
+    #[usage(display_order = 3)]
     Completion(Completion),
 }

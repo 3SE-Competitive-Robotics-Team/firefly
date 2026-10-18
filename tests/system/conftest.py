@@ -30,7 +30,7 @@ def build_release_apps(request):
         return
 
     subprocess.run(
-        ["cargo", "xtask", "build-all-release"],
+        ["cargo", "xtask", "release"],
         cwd=ROOT,
         check=True,
     )
@@ -53,7 +53,7 @@ def flight_environment(request):
     missing = [name for name in ("render", "vio", "fc", "ffctl")
                if not (ROOT / f"target/release/{name}").is_file()]
     if missing:
-        pytest.fail(f"missing release binaries: {missing}; run cargo xtask build-all-release")
+        pytest.fail(f"missing release binaries: {missing}; run cargo xtask release")
     from firefly_mujoco import load_scene_name, resolve_scene
 
     scene = resolve_scene(load_scene_name())

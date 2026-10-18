@@ -1,41 +1,49 @@
-use std::process::{Command, ExitCode};
+//! 仓库构建与机载部署入口。
 
-const APPS: &[&str] = &[
-    "aliked",
-    "fc",
-    "ffctl",
-    "lightglue",
-    "localization",
-    "planner",
-    "quad",
-    "render",
-    "slam",
-    "vio",
-];
+mod archive;
+mod container;
+mod deploy;
+mod release;
+mod target;
+
+use std::path::Path;
+use std::process::ExitCode;
+
+const USAGE: &str = "\
+usage:
+  cargo xtask release [--target x64|aarch64]
+  cargo xtask deploy [--device <serial>]
+  cargo xtask unpack <package> <directory>";
 
 fn main() -> ExitCode {
-    let Some(command) = std::env::args().nth(1) else {
-        eprintln!("usage: cargo xtask build-all-release");
-        return ExitCode::FAILURE;
-    };
-
-    if command != "build-all-release" {
-        eprintln!("unknown xtask command: {command}\nusage: cargo xtask build-all-release");
-        return ExitCode::FAILURE;
-    }
-
-    let mut cargo = Command::new("cargo");
-    cargo.args(["build", "--release"]);
-    for app in APPS {
-        cargo.args(["-p", app]);
-    }
-
-    match cargo.status() {
-        Ok(status) if status.success() => ExitCode::SUCCESS,
-        Ok(_) => ExitCode::FAILURE,
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("failed to run cargo build: {error}");
+            eprintln!("{error}\n{USAGE}");
             ExitCode::FAILURE
         }
     }
+}
+
+fn run() -> Result<(), String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (command, rest) = args
+        .split_first()
+        .ok_or_else(|| "missing command".to_owned())?;
+    match command.as_str() {
+        "release" => release::run(rest),
+        "deploy" => deploy::run(rest),
+        "unpack" => unpack(rest),
+        other => Err(format!("unknown command: {other}")),
+    }
+}
+
+fn unpack(args: &[String]) -> Result<(), String> {
+    let [package, destination] = args else {
+        return Err("unpack expects <package> <directory>".to_owned());
+    };
+    let count = archive::unpack(Path::new(package), Path::new(destination))
+        .map_err(|error| format!("unpack {package}: {error}"))?;
+    println!("unpacked {count} files into {destination}");
+    Ok(())
 }

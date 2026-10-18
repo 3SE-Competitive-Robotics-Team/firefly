@@ -17,7 +17,7 @@ uv run --package firefly-cad firefly-cad-build <场地.stp> --scene <赛季>@<�
 若发行版 Blender 缺 NumPy，构建器使用 `uv` 将匹配 Python ABI 的 NumPy
 安装到 `derived/blender-python-*`，仅给导出子进程设置路径，不修改系统 Python。
 
-Rust 应用统一用 `cargo xtask build-all-release` 构建；物理资产检查、离线图像采集、
+Rust 应用统一用 `cargo xtask release` 构建；物理资产检查、离线图像采集、
 建库和任务验收各自使用 [开发指南](../../docs/development.md#assets) 中的入口。
 任务、碰撞和故障验收由 `firefly-evaluation` 包的 `uv run firefly-evaluate` 执行，
 报告保存在 `logs/acceptance/<运行ID>/`。几何验收与建库完成不能替代飞行或在线定位验收。
