@@ -129,6 +129,7 @@ fn watch(config: &Config, interval: Duration) -> ExitCode {
             &current,
             now.saturating_duration_since(last),
         );
+        println!("\nq to quit");
         let _ = std::io::stdout().flush();
         previous = current;
         last = now;
