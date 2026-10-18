@@ -11,7 +11,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = "\
 usage:
-  cargo xtask release [--target host|aarch64]
+  cargo xtask release [--target host|board]
   cargo xtask deploy [--device <serial>]
   cargo xtask unpack <package> <directory>";
 

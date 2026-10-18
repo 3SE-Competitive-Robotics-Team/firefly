@@ -82,7 +82,7 @@ cargo xtask release
 ```
 
 `release` 为全部 Rust 应用执行 release 构建；`--target host`（默认）在本机编译，
-`--target aarch64` 在 Apple container 的 Debian trixie 里原生编译机载进程。应用名单只在
+`--target board` 在 Apple container 的 Debian trixie 里原生编译机载进程。应用名单只在
 `xtask/src/target.rs` 维护，不要在脚本、CI 或文档里复制第二份；新增 xtask 子命令时同步
 `usage` 文本与本说明。`cargo xtask deploy` 把 aarch64 构建、配置和默认模型打成 zstd 包，
 经 adb 部署到 `firefly-0001:/opt/firefly`。`firefly.service` 由镜像构建

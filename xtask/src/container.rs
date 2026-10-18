@@ -23,7 +23,7 @@ pub fn build(root: &Path, apps: &[&str], with_unpacker: bool) -> Result<(), Stri
         fs::create_dir_all(&path).map_err(|error| format!("create {}: {error}", path.display()))?;
     }
 
-    println!("release aarch64（container {IMAGE}）");
+    println!("release board（container {IMAGE}）");
     let mount = format!("{}:/work", root.display());
     let mut command = Command::new("container");
     command.args([

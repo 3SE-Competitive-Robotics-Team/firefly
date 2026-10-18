@@ -59,7 +59,7 @@ fn package() -> Result<PathBuf, String> {
         let source = release_dir.join(app);
         if !source.is_file() {
             return Err(format!(
-                "missing {}: run cargo xtask release --target aarch64",
+                "missing {}: run cargo xtask release --target board",
                 source.display()
             ));
         }
