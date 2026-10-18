@@ -1,13 +1,18 @@
-"""RMUC2026 物理场景：聚合碰撞体、无人机、IMU 与旋翼执行器。
+"""RMUC 物理场景：按赛季与场地版本加载聚合碰撞体、无人机、IMU 与旋翼执行器。
 
-视觉由 Bevy 从同坐标系的 field.glb 渲染；碰撞资产必须显式存在。
+视觉由 Bevy 从同坐标系的 field.glb 渲染；场景必须是注册表里的版本，碰撞资产显式存在。
 """
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
-from firefly_workspace import load_toml
 
-SCENE_NAME = "rmuc2026"
+from firefly_workspace import load_toml, parse_scene, workspace_root
+
+ROOT = workspace_root(Path(__file__))
+
+#: 默认场景；必须与 `configs/scene.toml` 的缺省一致。
+DEFAULT_SCENE = "rmuc2027@1.0.0"
 
 #: 机体（微型机）：质量 219g，外观对齐 `models/drone/drone.glb`（0.16×0.118×0.043 m
 #: 包围盒）。旋翼 site 与 `firefly-flight` 默认 X 布局同构（半轴距 45mm、对角 127mm）——
@@ -34,16 +39,55 @@ ROTOR_TORQUE_COEFFICIENT = 0.016
 ROTOR_THRUST_TO_WEIGHT = 3.0
 
 #: 停机坪离地余量（m）：机体盒半高 0.021 加余量——上电停在地面且无穿模。
-#: 场地表面高度见 [`PAD`]。
 PAD_CLEARANCE = 0.03
 
-#: 停机坪 `(x, y, 场地表面高度)`，世界系米；主台阶顶面为 0.375 m。
-PAD = (-13.0, 0.0, 0.375)
+
+@dataclass(frozen=True)
+class Scene:
+    """一个已注册的场地版本；`pad` 是起飞点 `(x, y, 场地表面高度)`，米。"""
+
+    name: str
+    pad: tuple[float, float, float]
+
+    @property
+    def id(self):
+        return parse_scene(self.name)
+
+    @property
+    def dir(self) -> Path:
+        """`models/<赛季>/v<版本>/`。"""
+        return ROOT / self.id.dir
+
+    @property
+    def visual(self) -> Path:
+        return self.dir / "field.glb"
+
+    @property
+    def collision(self) -> Path:
+        return self.dir / self.id.collision
 
 
-def drone_pad() -> tuple[float, float, float]:
-    """RMUC 停机坪机体原点，世界系米。"""
-    x, y, surface = PAD
+#: 已接入的场地版本。新增版本：目录 `models/<赛季>/v<版本>/` 加一行。
+SCENES = {
+    "rmuc2026@2.0.0": Scene("rmuc2026@2.0.0", (-13.0, 0.0, 0.375)),
+    "rmuc2027@1.0.0": Scene("rmuc2027@1.0.0", (-13.0, 0.0, 0.375)),
+}
+
+
+def resolve(name: str | None = None) -> Scene:
+    """按名称取场景；缺省用默认场景，未注册的版本报错。"""
+    resolved = name or DEFAULT_SCENE
+    try:
+        return SCENES[resolved]
+    except KeyError:
+        raise ValueError(
+            f"未注册的场景 {resolved!r}；可用：{', '.join(SCENES)}"
+        ) from None
+
+
+def drone_pad(name: str | None = None) -> tuple[float, float, float]:
+    """机体原点（世界系米）：场景停机坪表面加离地余量。"""
+    x, y, surface = resolve(name).pad
     return (x, y, surface + PAD_CLEARANCE)
 
 
@@ -87,23 +131,14 @@ def _rotor_actuators_xml() -> str:
   </actuator>"""
 
 
-#: RMUC2026 资产目录（相对仓库根；models/ 已 ignore，不进 git）。
-_RMUC_DIR = (
-    Path(__file__).resolve().parent.parent.parent.parent.parent
-    / "models"
-    / "rmuc2026"
-)
-
-
-def _rmuc_collision_xml(asset_dir: Path) -> str:
+def _collision_xml(asset_dir: Path, filename: str) -> str:
     """聚合碰撞盒 MJCF（视觉归 Bevy，此处只放透明碰撞体）。
 
-    盒集合来自 `firefly-cad-collide`（实心体素 + 贪心 AABB，保留凹结构，
-    对照 `models/rmuc2026/rmuc2026_collision.json`）。
+    盒集合来自 `firefly-cad-collide`（实心体素 + 贪心 AABB，保留凹结构）。
     """
-    path = asset_dir / "rmuc2026_collision.json"
+    path = asset_dir / filename
     if not path.is_file():
-        raise FileNotFoundError(f"RMUC 碰撞资产缺失：{path}；请先运行 firefly-cad-collide 生成资产")
+        raise FileNotFoundError(f"RMUC 碰撞资产缺失：{path}；请先运行 firefly-cad-build 生成资产")
     report = json.loads(path.read_text(encoding="utf-8"))
     if not report["boxes"]:
         raise ValueError(f"RMUC 碰撞资产为空：{path}")
@@ -113,17 +148,20 @@ def _rmuc_collision_xml(asset_dir: Path) -> str:
     )
 
 
-def build_scene(*, asset_dir: Path = _RMUC_DIR) -> str:
-    """RMUC2026 场地：Bevy 负责视觉（`field.glb`），MuJoCo 只加载聚合碰撞盒。"""
-    return rf"""<mujoco model="firefly-rmuc2026">
+def build_scene(*, name: str | None = None, asset_dir: Path | None = None) -> str:
+    """场地：Bevy 负责视觉（`field.glb`），MuJoCo 只加载聚合碰撞盒。"""
+    scene = resolve(name)
+    directory = asset_dir or scene.dir
+    collision = _collision_xml(directory, scene.id.collision)
+    return rf"""<mujoco model="firefly-{scene.id.season}">
   <option timestep="0.001" gravity="0 0 -9.81"/>
 
   <worldbody>
-    <!-- 视觉：Bevy 载 models/rmuc2026/field.glb；物理只有下面的透明碰撞盒 -->
-{_rmuc_collision_xml(asset_dir)}
+    <!-- 视觉：Bevy 载 {scene.id.dir / "field.glb"}；物理只有下面的透明碰撞盒 -->
+{collision}
 
     <!-- 无人机（freejoint 六自由度，停机坪上电） -->
-{_drone_xml("%g %g %g" % drone_pad())}
+{_drone_xml("%g %g %g" % drone_pad(scene.name))}
   </worldbody>
 
 {_rotor_actuators_xml()}
@@ -138,16 +176,11 @@ def build_scene(*, asset_dir: Path = _RMUC_DIR) -> str:
 
 def config_path() -> Path:
     """仓库 `configs/scene.toml`（世界观单一来源，对照 AGENTS 配置约定）。"""
-    return (
-        Path(__file__).resolve().parent.parent.parent.parent.parent
-        / "configs"
-        / "scene.toml"
-    )
+    return ROOT / "configs" / "scene.toml"
 
 
 def load_scene_name(path: Path | None = None) -> str:
-    """读取可选场景配置；只支持 RMUC2026。"""
-    name = load_toml(path or config_path()).get("scene", SCENE_NAME)
-    if name != SCENE_NAME:
-        raise ValueError(f"仅支持场景 {SCENE_NAME!r}，收到 {name!r}")
-    return SCENE_NAME
+    """读取可选场景配置并校验已注册；缺文件使用默认场景。"""
+    name = load_toml(path or config_path()).get("scene", DEFAULT_SCENE)
+    resolve(name)
+    return name

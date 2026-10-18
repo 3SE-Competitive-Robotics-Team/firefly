@@ -36,8 +36,8 @@ fn held_out_map_localization_contract() {
     let path = std::env::var("FIREFLY_QUERY_MAP").expect("FIREFLY_QUERY_MAP required");
     let report = std::env::var("FIREFLY_MAP_VALIDATION_REPORT").expect("report path required");
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let map =
-        firefly_vision_map::load_map(&root.join("apps/planner/maps/rmuc2026.ffvmap")).unwrap();
+    let map = firefly_vision_map::load_map(&root.join("apps/planner/maps/rmuc2026-2.0.0.ffvmap"))
+        .unwrap();
     let queries = firefly_vision_map::load_map(std::path::Path::new(&path)).unwrap();
     let expected: usize = std::env::var("FIREFLY_QUERY_COUNT")
         .expect("expected capture count required")

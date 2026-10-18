@@ -21,7 +21,7 @@ import rerun as rr
 
 from firefly_mujoco import (
     DepthImageMessage, GrayImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH,
-    LogMessage, TraceContext, load_scene_name,
+    LogMessage, TraceContext, load_scene_name, resolve_scene,
 )
 
 from firefly_workspace import startup
@@ -149,8 +149,8 @@ def run(args):
     if path is None and not args.no_save:
         now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         path = ROOT / "logs" / f"{now}-{uuid.uuid4().hex[:8]}.rrd"
-    load_scene_name()
-    mesh = ROOT / "models/rmuc2026/field.glb"
+    scene = resolve_scene(load_scene_name())
+    mesh = scene.visual
     drone = ROOT / "models/drone/drone.glb"
     for asset in (mesh, drone):
         if not asset.is_file():
@@ -167,7 +167,7 @@ def run(args):
     dropped_frames = 0
     last_health = time.monotonic()
     try:
-        recordings.archive.log("world/rmuc2026", rr.Asset3D(path=mesh), static=True, strict=True)
+        recordings.archive.log(f"world/{scene.id.season}", rr.Asset3D(path=mesh), static=True, strict=True)
         # 模型 +Y-up/+Z-forward → 机体 +Z-up/+X-forward，与 firefly-render::drone 一致。
         model = rr.Asset3D(path=drone)
         for parent in ("gt/pose", "vio/odom", "corr/odom", "plan/drone"):

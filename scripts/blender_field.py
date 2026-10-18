@@ -3,7 +3,7 @@
 headless 调用：
 ```sh
 /Applications/Blender.app/Contents/MacOS/Blender --background --python scripts/blender_field.py -- \
-  models/rmuc2026/derived/raw/field_raw.npz models/rmuc2026/field.glb
+  models/rmuc2026/v2.0.0/derived/raw/field_raw.npz models/rmuc2026/v2.0.0/field.glb
 ```
 
 几何：**不做减面、不做焊接**。CAD 逐 solid 三角化时顶点只在单个 BRep 面内共享

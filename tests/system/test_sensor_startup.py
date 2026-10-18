@@ -36,10 +36,11 @@ def test_sensor_startup() -> None:
 
 
 def _sensor_startup() -> None:
-    from firefly_mujoco import build_scene, load_scene_name
-    load_scene_name()
+    from firefly_mujoco import build_scene, load_scene_name, resolve_scene
+
+    scene = resolve_scene(load_scene_name())
     build_scene()
-    mesh = ROOT / "models/rmuc2026/field.glb"
+    mesh = scene.visual
     if not mesh.is_file():
         raise FileNotFoundError(f"RMUC 视觉资产缺失：{mesh}")
     for name in ("vio", "fc", "render"):

@@ -32,14 +32,20 @@ from .messages import (
     ReferenceMessage,
     TraceContext,
 )
-from .scene import PAD_CLEARANCE, PAD, build_scene, drone_pad, load_scene_name
+from .scene import (
+    DEFAULT_SCENE, PAD_CLEARANCE, SCENES, Scene, build_scene, drone_pad, load_scene_name,
+    resolve as resolve_scene,
+)
 
 __all__ = [
     "DroneEnv",
     "build_scene",
     "load_scene_name",
+    "resolve_scene",
+    "DEFAULT_SCENE",
+    "SCENES",
+    "Scene",
     "drone_pad",
-    "PAD",
     "PAD_CLEARANCE",
     "IMAGE_WIDTH",
     "IMAGE_HEIGHT",

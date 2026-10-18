@@ -17,6 +17,7 @@ wheels/
 
 # 文档与地图资源
 docs/papers/
+docs/reference/**/*.pdf
 apps/planner/maps/*.ffmap
 apps/planner/maps/*.ffvmap
 apps/planner/maps/*.manifest.json

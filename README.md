@@ -82,5 +82,5 @@ cargo xtask build-all-release
 
 `build-all-release` 依次为全部 Rust 应用执行 `cargo build --release -p <app>`。应用名单只在
 `xtask/src/main.rs` 维护，不要在脚本、CI 或文档里复制第二份；新增 xtask 子命令时同步
-`usage` 文本与本说明。实际运行须准备 RMUC2026 资产、图形会话和 release 构建，按开发指南
+`usage` 文本与本说明。实际运行须准备 RMUC 场地资产、图形会话和 release 构建，按开发指南
 检查宿主机、启动与清理进程。CI 绿色不代表真实进程悬停、22m 往返或回环验收通过。

@@ -27,7 +27,7 @@ def build(frames, output):
         if (existing["map_sha256"] == digest(output) and existing["assets"] == assets
                 and existing["models"] == models):
             return
-        archive = ROOT / "models/rmuc2026/derived/vision_maps" / digest(output)
+        archive = ROOT / "models/rmuc2026/v2.0.0/derived/vision_maps" / digest(output)
         archive.mkdir(parents=True, exist_ok=True)
         shutil.copy2(output, archive / output.name)
         shutil.copy2(manifest_path, archive / manifest_path.name)
@@ -43,6 +43,6 @@ def build(frames, output):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("frames", type=Path)
-    parser.add_argument("--out", type=Path, default=ROOT / "apps/planner/maps/rmuc2026.ffvmap")
+    parser.add_argument("--out", type=Path, default=ROOT / "apps/planner/maps/rmuc2026-2.0.0.ffvmap")
     args = parser.parse_args()
     build(args.frames, args.out)

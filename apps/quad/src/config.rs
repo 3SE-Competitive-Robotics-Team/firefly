@@ -29,7 +29,7 @@ pub struct QuadConfig {
 impl Default for QuadConfig {
     fn default() -> Self {
         Self {
-            field: "rmuc2026/field.glb".into(),
+            field: "rmuc2027/v1.0.0/field.glb".into(),
             start: [0.0, -2.0, 1.2],
             drone: QuadParams::default(),
             airframe: Airframe::default(),
@@ -51,7 +51,7 @@ mod tests {
             rate_kp: 6.0,
             ..ControlParams::default()
         };
-        assert_eq!(config.field, "rmuc2026/field.glb");
+        assert_eq!(config.field, "rmuc2027/v1.0.0/field.glb");
         assert_eq!(config.start, [0.0, -2.0, 1.2]);
         assert_eq!(format!("{:?}", config.control), format!("{expected:?}"));
     }

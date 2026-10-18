@@ -61,3 +61,19 @@ RMUC 场地 STEP→glTF 的转换记录（工具版本、参数、映射；`mode
   连续两秒悬停、降落验收通过。此结果不代表全场巡航或在线重定位通过。
 - 本机缺 ALIKED / LightGlue ONNX 权重，未生成 `.ffvmap`；入口也没有在线
   重定位验收，完整报告为 `incomplete`。飞行与采集诊断保留在 `logs/*.rrd`。
+
+## 2026-10-18 RMUC2027 v1.0.0 → rmuc2027@1.0.0
+
+- 源：`RMUC2027_V1.0.0.stp`，653,443,279 B，SHA-256
+  `a5ad3ede3b7674fc98f2e73b71717216383cb2b4b5dcdbe900c2038918bea8e0`；
+  官方 2027 场地 V1.0.0（组委会在 RoboMaster 论坛发布），配套 2027 规则手册 V1.0.0。
+- 工具：cadquery-ocp-novtk 8.0.1.0.0、NumPy 2.5.3、trimesh 5.1.0、
+  scipy 1.18.1、Blender 5.2.1 LTS；三角化偏差 2mm，碰撞/规划分辨率 0.15m。
+- 网格：4,297,611 顶点，4,111,445 三角；单位毫米，装配 `00_RMUC20270001_ASM`。
+- 碰撞：874 盒；FFMap 72,280 占据格，总占据体积 243.95 m³。
+- 视觉：`models/rmuc2027/v1.0.0/field.glb`（192 MB）；GLB 包围盒与归一化网格一致。
+- 场地包围盒：`[-14.000,-8.002,0]` 至 `[14.000,8.002,3.799]` m。
+- 接入：`configs/scene.toml` 的 `scene = "rmuc2027@1.0.0"`；`rmuc2026` 同步迁入
+  `models/rmuc2026/v2.0.0/`（源 STP 已删除，派生资产保留）。
+- 地图：`apps/planner/maps/rmuc2027-1.0.0.ffmap`；2026 地图改名为
+  `rmuc2026-2.0.0.ffmap`。

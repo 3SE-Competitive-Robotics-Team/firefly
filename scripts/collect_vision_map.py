@@ -193,7 +193,7 @@ def collect(poses, directory, timeout):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--frames-dir", type=Path, default=ROOT / "models/rmuc2026/derived/vision_frames")
+    parser.add_argument("--frames-dir", type=Path, default=ROOT / "models/rmuc2026/v2.0.0/derived/vision_frames")
     parser.add_argument("--step", type=float)
     parser.add_argument("--heights", type=float, nargs="+")
     parser.add_argument("--yaws", type=float, nargs="+")
@@ -202,12 +202,12 @@ def main():
     parser.add_argument("--timeout", type=float, default=15.)
     parser.add_argument("--build", action="store_true")
     parser.add_argument("--model", type=Path, default=ROOT / "models/aliked-n16-k512.onnx")
-    parser.add_argument("--out", type=Path, default=ROOT / "apps/planner/maps/rmuc2026.ffvmap")
+    parser.add_argument("--out", type=Path, default=ROOT / "apps/planner/maps/rmuc2026-2.0.0.ffvmap")
     args = parser.parse_args()
     configuration = startup(ROOT / "configs/vision_map.toml", dict)
     if args.build and not args.model.is_file():
         raise FileNotFoundError(f"ALIKED model missing: {args.model}")
-    collision = ROOT / "models/rmuc2026/rmuc2026_collision.json"
+    collision = ROOT / "models/rmuc2026/v2.0.0/rmuc2026_collision.json"
     boxes = np.asarray(json.loads(collision.read_text())["boxes"])
     configuration.update({key: getattr(args, key) for key in ["step", "heights", "yaws", "x_range", "y_range"]
                           if getattr(args, key) is not None})

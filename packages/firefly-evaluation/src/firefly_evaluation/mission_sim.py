@@ -4,7 +4,7 @@ import os
 import iceoryx2 as iox2
 import numpy as np
 from firefly_sim.main import main as run_sim
-from firefly_mujoco import DroneEnv, drone_pad
+from firefly_mujoco import DroneEnv, drone_pad, load_scene_name
 
 from .mission_io import Recorder
 
@@ -12,9 +12,9 @@ CONTACT_POLICY = {"pad_radius_m": 0.5, "height_tolerance_m": 0.06,
                   "speed_limit_mps": 0.5, "min_vertical_normal_cosine": 0.9}
 
 
-def permitted_pad_contact(position, velocity, normal):
+def permitted_pad_contact(position, velocity, normal, origin=None):
     """停机坪附近低速竖直接触可用于起降；其他接触计为碰撞。"""
-    origin = np.asarray(drone_pad())
+    origin = np.asarray(drone_pad() if origin is None else origin)
     return (np.linalg.norm(position[:2] - origin[:2]) < CONTACT_POLICY["pad_radius_m"]
             and abs(position[2] - origin[2]) < CONTACT_POLICY["height_tolerance_m"]
             and np.linalg.norm(velocity) < CONTACT_POLICY["speed_limit_mps"]
@@ -24,6 +24,7 @@ def permitted_pad_contact(position, velocity, normal):
 class ObservedEnv(DroneEnv):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, rng=np.random.default_rng(int(os.environ["FIREFLY_MISSION_SEED"])), **kwargs)
+        self.pad = np.asarray(drone_pad(load_scene_name()))
         self.node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
         self.recorder = Recorder(self.node)
         self.steps = self.contact_steps = self.collisions = self.resets = 0
@@ -53,7 +54,7 @@ class ObservedEnv(DroneEnv):
             self.contact_steps += 1
             self.max_penetration = max(self.max_penetration, max(-float(c.dist) for c in contacts))
             pos, vel, _, _ = self.state()
-            if not all(permitted_pad_contact(pos, vel, c.frame[:3]) for c in contacts):
+            if not all(permitted_pad_contact(pos, vel, c.frame[:3], self.pad) for c in contacts):
                 self.collisions += 1
                 if self.collisions == 1:
                     self.recorder.event(f"unexpected contact position={pos.tolist()} velocity={vel.tolist()}", self.time, True)
