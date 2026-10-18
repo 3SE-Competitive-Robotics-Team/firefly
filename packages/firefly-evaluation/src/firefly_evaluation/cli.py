@@ -78,7 +78,7 @@ def provenance(root, *, allow_map_rig_translation=False, vio_only=False, prior_m
             names += ["aliked", "lightglue"]
     binaries = {name: digest(root / "target/release" / name) for name in names}
     models = {} if vio_only or not prior_maps else {name: digest(root / "models" / name) for name in ("aliked-n16-k512.onnx", "lightglue-aliked-k512.onnx")}
-    manifest_path = root / "models/rmuc2026/asset_manifest.json"
+    manifest_path = root / "models/rmuc2026/v2.0.0/asset_manifest.json"
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("status") != "passed":
         raise ValueError("geometry has not passed acceptance")
@@ -92,7 +92,7 @@ def provenance(root, *, allow_map_rig_translation=False, vio_only=False, prior_m
     if prior_maps:
         visual_manifest = root / "apps/planner/maps/rmuc2026.manifest.json"
         visual = json.loads(visual_manifest.read_text())
-        if digest(root / "apps/planner/maps/rmuc2026.ffvmap") != visual["map_sha256"]:
+        if digest(root / "apps/planner/maps/rmuc2026-2.0.0.ffvmap") != visual["map_sha256"]:
             raise ValueError("visual map content changed")
         for name, expected in visual["models"]["artifacts"].items():
             if digest(root / "models" / name) != expected:

@@ -54,8 +54,11 @@ def flight_environment(request):
                if not (ROOT / f"target/release/{name}").is_file()]
     if missing:
         pytest.fail(f"missing release binaries: {missing}; run cargo xtask build-all-release")
-    for asset in ("field.glb", "rmuc2026_collision.json"):
-        if not (ROOT / "models/rmuc2026" / asset).is_file():
+    from firefly_mujoco import load_scene_name, resolve_scene
+
+    scene = resolve_scene(load_scene_name())
+    for asset in (scene.visual, scene.collision):
+        if not asset.is_file():
             pytest.fail(f"missing RMUC asset: {asset}; see docs/development.md#run")
     try:
         yield
@@ -78,7 +81,10 @@ def flight_report(flight_directory):
     ).decode().split("\0")
     files = {ROOT / name for name in names if name and (ROOT / name).is_file()}
     files.update(ROOT / f"target/release/{name}" for name in ("render", "vio", "fc", "ffctl"))
-    files.update(ROOT / "models/rmuc2026" / name for name in ("field.glb", "rmuc2026_collision.json"))
+    from firefly_mujoco import load_scene_name, resolve_scene
+
+    scene = resolve_scene(load_scene_name())
+    files.update((scene.visual, scene.collision))
     hashes = {}
     for path in sorted(files):
         hashes[str(path.relative_to(ROOT))] = digest(path)

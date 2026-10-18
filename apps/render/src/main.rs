@@ -3,7 +3,7 @@
 //! sim 负责 `MuJoCo` 物理和 IMU；本进程从 `Firefly/GroundTruth` 摆放传感器，
 //! 发布 `Firefly/CameraLeft`、`Firefly/CameraRight`、`Firefly/Depth`，
 //! 通过 `Firefly/CameraPair` 唤醒订阅端。真值只用于生成仿真测量。
-//! 视觉资产必须存在于 `models/rmuc2026/field.glb`。
+//! 视觉资产必须存在于 `models/rmuc2026/v2.0.0/field.glb`。
 //!
 //! 传感器相机按 10Hz 窗口激活，逐像素处理与传感器发布在工作线程完成。
 //! 日志经 `firefly-observability` 汇入统一 rrd 记录。

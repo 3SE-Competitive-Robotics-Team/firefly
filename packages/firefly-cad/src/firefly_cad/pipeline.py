@@ -15,7 +15,7 @@ import sys
 
 import numpy as np
 
-from firefly_workspace import startup, digest, workspace_root
+from firefly_workspace import SceneId, parse_scene, startup, digest, workspace_root
 
 from .collide import collide, write_collision
 from .map_export import export_map
@@ -130,7 +130,7 @@ def validate_assets(raw: Path, visual: Path, collision: Path, map_path: Path) ->
             "flight_validation": "not_run", "vision_localization_validation": "not_run"}
 
 
-def build(source: Path, output: Path, map_path: Path, options: Options, blender: str) -> dict:
+def build(source: Path, scene: SceneId, output: Path, map_path: Path, options: Options, blender: str) -> dict:
     options.validate()
     source = source.resolve(strict=True)
     executable = shutil.which(blender)
@@ -142,13 +142,13 @@ def build(source: Path, output: Path, map_path: Path, options: Options, blender:
     raw_dir = output / "derived" / "raw"
     raw = raw_dir / "field_raw.npz"
     visual = output / "field.glb"
-    collision = output / "rmuc2026_collision.json"
+    collision = output / scene.collision
     source_hash = digest(source)
     # 模块源码与依赖版本参与缓存，避免沿用另一套转换规则的资产。
     code = {p.name: digest(p) for p in Path(__file__).parent.glob("*.py")}
     versions = {p: version(p) for p in ["cadquery-ocp-novtk", "numpy", "trimesh", "scipy"]}
     common = {"dependencies": versions}
-    save_json(output / "asset_manifest.json", {"status": "building", "source_sha256": source_hash})
+    save_json(output / "asset_manifest.json", {"status": "building", "scene": scene.name, "source_sha256": source_hash})
     stage("tessellate", cache, {**common, "code": code["tessellate.py"], "source_sha256": source_hash, "deflection_mm": options.deflection_mm},
           [raw, raw_dir / "_manifest.json"], lambda: tessellate(source, raw_dir, options.deflection_mm))
     raw_hash = digest(raw)
@@ -164,7 +164,7 @@ def build(source: Path, output: Path, map_path: Path, options: Options, blender:
     summary = validate_assets(raw, visual, collision, map_path)
     if digest(source) != source_hash:
         raise ValueError("source STP changed during build")
-    summary.update({"status": "passed", "source": {"path": str(source), "sha256": source_hash, "bytes": source.stat().st_size},
+    summary.update({"status": "passed", "scene": scene.name, "source": {"path": str(source), "sha256": source_hash, "bytes": source.stat().st_size},
                     "options": asdict(options), "dependencies": versions, "blender": blender_version,
                     "world_frame": {"units": "m", "up": "Z", "normalization": json.loads((raw_dir / "_manifest.json").read_text())["shift_mm"]},
                     "artifacts": {str(p.resolve()): digest(p) for p in [raw, visual, collision, map_path]}})
@@ -183,13 +183,17 @@ def decode_options(values: dict) -> Options:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stp", type=Path)
-    parser.add_argument("--out-dir", type=Path, default=ROOT / "models/rmuc2026")
-    parser.add_argument("--map-out", type=Path, default=ROOT / "apps/planner/maps/rmuc2026.ffmap")
+    parser.add_argument("--scene", required=True, help="场景标识，如 rmuc2027@1.0.0")
+    parser.add_argument("--out-dir", type=Path, help="缺省 models/<season>/v<version>")
+    parser.add_argument("--map-out", type=Path, help="缺省 apps/planner/maps/<season>-<version>.ffmap")
     parser.add_argument("--config", type=Path, default=ROOT / "configs/cad.toml")
     parser.add_argument("--blender", default="blender")
     args = parser.parse_args(argv)
+    scene = parse_scene(args.scene)
     options = startup(args.config, decode_options)
-    build(args.stp, args.out_dir, args.map_out, options, args.blender)
+    out_dir = args.out_dir or ROOT / scene.dir
+    map_out = args.map_out or ROOT / "apps/planner/maps" / scene.map
+    build(args.stp, scene, out_dir, map_out, options, args.blender)
     return 0
 
 

@@ -90,9 +90,10 @@ purecv 使用上游 crates.io 发布版（当前锁定版本见 Cargo.lock），
 
 ## 构建与运行
 
-只支持 `configs/scene.toml` 指定的 RMUC2026。必须有 `models/rmuc2026/field.glb`、
-`rmuc2026_collision.json` 和 `models/drone/drone.glb`，缺失报错，不回退场景。
-停机坪定义来自 `firefly_mujoco.scene.PAD` / `PAD_CLEARANCE`，不在文档复制坐标。
+场景由 `configs/scene.toml` 的 `scene = "<赛季>@<版本>"` 唯一选择，已注册
+`rmuc2026@2.0.0` / `rmuc2027@1.0.0`；资产在 `models/<赛季>/v<版本>/`（`field.glb`、
+`<赛季>_collision.json`），另需 `models/drone/drone.glb`。未注册版本或缺失资产报错，不回退场景。
+停机坪定义来自 `firefly_mujoco.scene.SCENES[].pad` 与 `PAD_CLEARANCE`，不在文档复制坐标。
 render 使用无窗口 GPU 渲染；Rerun 原生 Viewer 需要图形会话。Rust/Python 版本和依赖
 以 workspace 配置为准。视频记录依赖外部 FFmpeg、所选编码器和 GPU 用户态驱动；
 默认走 Intel VA-API，设备与编码选项见 `configs/viz.toml`。仅列出编码器并不证明驱动可用。

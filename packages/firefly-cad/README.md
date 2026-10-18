@@ -9,7 +9,7 @@ RMUC STEP 资产构建。源文件只读，统一归一化为米、Z 向上、XY
 
 ```bash
 # 几何资产：三角化 → 碰撞 → Blender GLB → FFMap → 独立读回验收
-uv run --package firefly-cad firefly-cad-build /path/to/RMUC2026_V2.0.0.stp
+uv run --package firefly-cad firefly-cad-build <场地.stp> --scene <赛季>@<版本>
 ```
 
 数值配置统一在 `configs/cad.toml`，默认三角化偏差 2mm，碰撞/规划分辨率
@@ -26,11 +26,11 @@ Rust 应用统一用 `cargo xtask build-all-release` 构建；物理资产检查
 
 | 文件 | 消费者与契约 |
 |---|---|
-| `models/rmuc2026/derived/raw/field_raw.npz` | 归一化顶点、三角形、逐面颜色、零件 tag |
-| `models/rmuc2026/field.glb` | Bevy / Rerun；CAD 颜色与程序化材质，不减面、不焊接 |
-| `models/rmuc2026/rmuc2026_collision.json` | MuJoCo；米制 `[cx,cy,cz,hx,hy,hz]` 碰撞盒 |
-| `apps/planner/maps/rmuc2026.ffmap` | planner；与物理碰撞同一体素格，未额外膨胀 |
-| `models/rmuc2026/asset_manifest.json` | 源 SHA-256、转换参数、依赖版本、坐标变换、产物 hash 与几何验收 |
+| `models/<赛季>/v<版本>/derived/raw/field_raw.npz` | 归一化顶点、三角形、逐面颜色、零件 tag |
+| `models/<赛季>/v<版本>/field.glb` | Bevy / Rerun；CAD 颜色与程序化材质，不减面、不焊接 |
+| `models/<赛季>/v<版本>/<赛季>_collision.json` | MuJoCo；米制 `[cx,cy,cz,hx,hy,hz]` 碰撞盒 |
+| `apps/planner/maps/<赛季>-<版本>.ffmap` | planner；与物理碰撞同一体素格，未额外膨胀 |
+| `models/<赛季>/v<版本>/asset_manifest.json` | 源 SHA-256、转换参数、依赖版本、坐标变换、产物 hash 与几何验收 |
 
 `derived/stages/` 保存阶段输入与产物内容 hash；二者都匹配才复用。
 离线采集也检查输入及逐帧内容 hash；损坏或未完成的采集保留，重试时通过 `--frames-dir` 指定新目录。

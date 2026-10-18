@@ -182,8 +182,8 @@ def decode_config(cfg: dict) -> tuple[float, float, float, np.ndarray]:
         if ratio < 1 or abs(ratio - round(ratio)) > 1e-9:
             raise ValueError("物理频率必须为 IMU 与位姿频率的整数倍")
     physics_period, imu_period, pose_period = (1.0 / rate for rate in frequencies)
-    # 停机坪：缺配置时按场景定义（`firefly_mujoco.scene.PAD`）——上电停在地面
-    start_pos = np.array(cfg.get("start", drone_pad()))
+    # 停机坪：缺配置时按场景定义（`firefly_mujoco.scene.SCENES[].pad`）——上电停在地面
+    start_pos = np.array(cfg.get("start", drone_pad(load_scene_name())))
     return physics_period, imu_period, pose_period, start_pos
 
 
@@ -195,7 +195,6 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
     args = parser.parse_args(argv)
     trace_enabled = not args.no_trace
     physics_period, imu_period, pose_period, start_pos = startup(args.config, decode_config)
-    load_scene_name()
     env = env_factory(timestep=physics_period, imu_period=imu_period)
     env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))  # xyzw 单位四元数
     ftrace.init(enabled=trace_enabled)

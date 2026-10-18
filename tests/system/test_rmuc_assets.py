@@ -13,7 +13,9 @@ pytestmark = pytest.mark.skipif(os.environ.get("FIREFLY_RUN_RMUC_ASSETS") != "1"
 
 
 def test_asset_provenance():
-    manifest = json.loads((ROOT / "models/rmuc2026/asset_manifest.json").read_text())
+    from firefly_mujoco.scene import resolve, load_scene_name
+
+    manifest = json.loads((resolve(load_scene_name()).dir / "asset_manifest.json").read_text())
     assert manifest["status"] == "passed"
     for name, expected in manifest["artifacts"].items():
         with Path(name).open("rb") as stream:

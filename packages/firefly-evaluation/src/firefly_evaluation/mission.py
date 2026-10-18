@@ -311,7 +311,7 @@ class Mission:
         self.wait(lambda: "corrected" in self.latest and self.latest["corrected"][4], wall=30.)
         command = [str(self.root / "target/release/planner"), "--goal", *map(str, self.options.waypoints[0])]
         if self.prior_maps:
-            command += ["--map", str(self.root / "apps/planner/maps/rmuc2026.ffmap")]
+            command += ["--map", str(self.root / "apps/planner/maps/rmuc2026-2.0.0.ffmap")]
         self.start("planner", command)
         self.wait(lambda: "reference" in self.latest, wall=30.)
         return {"source": "VIO + external map alignment" if self.prior_maps else "VIO + startup session frame; online depth mapping",
@@ -470,7 +470,7 @@ class Mission:
                 if name == "localization" and self.localization_config is not None:
                     command += ["--config", str(self.localization_config)]
                 if name == "lightglue" and self.prior_maps:
-                    command += ["--map", str(self.root / "apps/planner/maps/rmuc2026.ffvmap")]
+                    command += ["--map", str(self.root / "apps/planner/maps/rmuc2026-2.0.0.ffvmap")]
                 self.start(name, command)
             self.start("sim", [sys.executable, "-m", "firefly_evaluation.mission_sim"])
             for name, action in phases:

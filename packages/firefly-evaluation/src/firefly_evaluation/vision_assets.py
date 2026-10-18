@@ -11,14 +11,14 @@ from firefly_workspace import digest, load_toml, workspace_root
 def capture_assets(root=None):
     """场地/传感器兼容条件与采集选择；二进制只作为生成来源保存。"""
     root = workspace_root(root)
-    contract = root / "models/rmuc2026/derived/render_contract.toml"
+    contract = root / "models/rmuc2026/v2.0.0/derived/render_contract.toml"
     contract.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run([str(root / "target/release/render"), "--export-asset-contract", str(contract)], check=True, cwd=root)
     with contract.open("rb") as stream:
         sensor = tomllib.load(stream)
     selection = load_toml(root / "configs/vision_map.toml")
     return {"schema": 2, "files": {name: digest(root / name) for name in [
-        "models/rmuc2026/field.glb", "models/rmuc2026/rmuc2026_collision.json",
+        "models/rmuc2026/v2.0.0/field.glb", "models/rmuc2026/v2.0.0/rmuc2026_collision.json",
         *(["configs/scene.toml"] if (root / "configs/scene.toml").exists() else []),
     ]}, "sensor": sensor, "selection": selection}
 

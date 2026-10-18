@@ -6,7 +6,7 @@ RMUC MuJoCo 物理进程，由根 uv workspace 管理。
 `Firefly/Control` 四电机推力，无有效控制指令时物理暂停。
 双目与深度由独立的 Bevy `render` 进程生成。
 
-必须提供 `models/rmuc2026/rmuc2026_collision.json`。
+必须提供 `configs/scene.toml` 所选场景的 `models/<赛季>/v<版本>/<赛季>_collision.json`。
 
 ```bash
 uv run firefly-sim

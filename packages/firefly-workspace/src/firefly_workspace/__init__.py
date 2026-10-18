@@ -1,4 +1,4 @@
-"""工具共用的工作区定位、可选配置与文件内容指纹；仅使用标准库。"""
+"""工具共用的工作区定位、可选配置、场景标识与文件内容指纹；仅使用标准库。"""
 from collections.abc import Callable
 from typing import TypeVar
 
@@ -6,6 +6,8 @@ import hashlib
 import logging
 from pathlib import Path
 import tomllib
+
+from .scene import SceneId, parse_scene
 
 
 def workspace_root(start: Path | None = None) -> Path:
