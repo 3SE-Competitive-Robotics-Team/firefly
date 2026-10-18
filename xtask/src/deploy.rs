@@ -15,9 +15,6 @@ const DESTINATION: &str = "/opt/firefly";
 const PACKAGE: &str = "dist/firefly-aarch64.zst";
 const REMOTE_PACKAGE: &str = "/tmp/firefly-package.zst";
 const REMOTE_UNPACKER: &str = "/tmp/firefly-xtask";
-const UNIT_SOURCE: &str = "packaging/systemd/firefly.service";
-const UNIT_ARCHIVE: &str = "systemd/firefly.service";
-const REMOTE_UNIT: &str = "/etc/systemd/system/firefly.service";
 /// 只部署默认模型；`lightglue` 的权重带外部数据文件，两者必须同批部署。
 const MODELS: &[&str] = &[
     "aliked-n16-k512.onnx",
@@ -114,16 +111,6 @@ fn package() -> Result<PathBuf, String> {
         }
     }
 
-    let unit = root.join(UNIT_SOURCE);
-    if !unit.is_file() {
-        return Err(format!("missing {}", unit.display()));
-    }
-    entries.push(Entry {
-        path: UNIT_ARCHIVE.to_owned(),
-        mode: 0o644,
-        source: unit,
-    });
-
     let package = root.join(PACKAGE);
     if let Some(parent) = package.parent() {
         fs::create_dir_all(parent)
@@ -158,16 +145,6 @@ fn push(device: &str, package: &Path) -> Result<(), String> {
             &format!("{REMOTE_UNPACKER} unpack {REMOTE_PACKAGE} {DESTINATION}"),
         ],
     )?;
-    adb(device, &["shell", "sync"])?;
-    adb(
-        device,
-        &[
-            "shell",
-            &format!("cp {DESTINATION}/{UNIT_ARCHIVE} {REMOTE_UNIT}"),
-        ],
-    )?;
-    adb(device, &["shell", "systemctl daemon-reload"])?;
-    adb(device, &["shell", "systemctl enable firefly"])?;
     adb(device, &["shell", "sync"])?;
     adb(
         device,

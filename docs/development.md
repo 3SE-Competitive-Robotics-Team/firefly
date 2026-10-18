@@ -165,10 +165,9 @@ adb -s firefly-0001 shell 'systemctl start firefly'
 和 `Cargo.lock` 保证；升级 Rust 或 Debian 时同步更新 `xtask/src/container.rs` 的镜像 digest。
 干净构建先删除 `target/container/`，再执行上面的命令。
 
-`deploy` 另外安装并 enable [firefly.service](../packaging/systemd/firefly.service)，但不自动
-start；开机由 systemd 启动 `ffctl process supervise`，按 `configs/processes.toml` 的数组顺序
-拉起 `autostart = true` 的进程。部署时如果旧 supervisor 还在运行，用
-`systemctl restart firefly` 切到新二进制。`processes.toml` 被 `deploy` 覆盖（烧录语义）；
+`firefly.service` 由镜像构建 [`orangepi-build`](https://github.com/3SE-Competitive-Robotics-Team/orangepi-build)
+预置并默认启动；`deploy` 只发布二进制、配置和模型。systemd 按 `configs/processes.toml`
+的数组顺序拉起 `autostart = true` 的进程。`processes.toml` 被 `deploy` 覆盖（烧录语义）；
 `lightglue` 在生产 `.ffvmap` 部署前保持 `autostart = false`。运行期管理：
 
 ```bash
