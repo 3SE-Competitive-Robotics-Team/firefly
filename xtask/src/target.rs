@@ -40,15 +40,15 @@ pub enum Target {
 impl Target {
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
-            "x64" => Ok(Self::Desktop),
+            "host" => Ok(Self::Desktop),
             "aarch64" => Ok(Self::Board),
-            other => Err(format!("unknown target {other}: expected x64 or aarch64")),
+            other => Err(format!("unknown target {other}: expected host or aarch64")),
         }
     }
 
     pub fn name(self) -> &'static str {
         match self {
-            Self::Desktop => "x64",
+            Self::Desktop => "host",
             Self::Board => "aarch64",
         }
     }

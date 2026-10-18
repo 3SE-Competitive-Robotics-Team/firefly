@@ -13,7 +13,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--target" => {
                 let value = it
                     .next()
-                    .ok_or_else(|| "missing --target value (x64 or aarch64)".to_owned())?;
+                    .ok_or_else(|| "missing --target value (host or aarch64)".to_owned())?;
                 target = Target::parse(value)?;
             }
             other => return Err(format!("unknown argument {other}")),
