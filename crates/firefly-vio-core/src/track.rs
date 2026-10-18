@@ -80,6 +80,7 @@ fn lk_optical_flow_with_buffers<'a>(
     p1.clear();
     p0.extend(prev_pts.iter().map(|p| Point2f::new(p.x, p.y)));
     p1.extend(init_pts.iter().map(|p| Point2f::new(p.x, p.y)));
+    // `err` 不参与外点过滤：让 purecv 返回已算好的最小特征值，跳过未使用的 MAE 窗口扫描。
     let (out, status, _err) = purecv::video::calc_optical_flow_pyramid_lk(
         &prev_mat,
         &next_mat,
@@ -88,7 +89,7 @@ fn lk_optical_flow_with_buffers<'a>(
         Size2i::new(21, 21),
         3,
         TermCriteria::new(TermType::Both, 30, 0.01),
-        purecv::video::OPTFLOW_USE_INITIAL_FLOW,
+        purecv::video::OPTFLOW_USE_INITIAL_FLOW | purecv::video::OPTFLOW_LK_GET_MIN_EIGENVALS,
         1e-4,
     )
     .expect("purecv LK 不应失败（灰度单通道、同尺寸）");
@@ -100,7 +101,7 @@ fn lk_optical_flow_with_buffers<'a>(
         Size2i::new(21, 21),
         1,
         TermCriteria::new(TermType::Both, 30, 0.01),
-        purecv::video::OPTFLOW_USE_INITIAL_FLOW,
+        purecv::video::OPTFLOW_USE_INITIAL_FLOW | purecv::video::OPTFLOW_LK_GET_MIN_EIGENVALS,
         1e-4,
     )
     .expect("purecv reverse LK uses the same valid image pair");
