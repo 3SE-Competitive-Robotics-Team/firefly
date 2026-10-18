@@ -78,6 +78,12 @@ impl Input {
         true
     }
 
+    /// VIO 会话是否仍然有效（会话改变后不可恢复，需重启 FC）。
+    #[must_use]
+    pub fn session_ok(&self) -> bool {
+        !self.session_fault
+    }
+
     pub fn fresh(&self, imu_time: f64) -> bool {
         self.valid
             && !self.session_fault

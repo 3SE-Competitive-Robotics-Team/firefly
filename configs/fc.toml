@@ -2,8 +2,23 @@
 # 机体/执行器参数（质量、惯量、旋翼几何、单电机推力上限）不在这里：由被控对象经
 # `Firefly/Airframe` 发布，飞控运行时装配——改机体不动飞控。
 
-[control]
-# 位置/速度反馈来自 VIO（IMU 预测输出 100Hz，视觉更新 10Hz）。
-# 外环带宽约 1.5 rad/s，阻尼比约 0.81。
-pos_kp = 2.2
-vel_kp = 2.4
+[control.position]
+# PX4 `MPC_*`：位置 P、速度 PID、速度/倾角包线。
+# 位置反馈来自 VIO。vel_p 由 PX4 默认 1.8 提到 2.4，使等效位置增益
+# pos_p·vel_p≈2.28 与旧 PD 的 2.2 对齐，压低 1m 阶跃超调（约 10%→4%）。
+p = [0.95, 0.95, 1.0]
+vel_p = [2.4, 2.4, 4.0]
+vel_i = [0.4, 0.4, 2.0]
+vel_max_horizontal = 3.0
+tilt_max_deg = 32.0
+
+[control.allocation]
+# 1 = 滚转/俯仰 airmode：垂直推力饱和时保留姿态权限。
+airmode = 1
+
+# [fsm]
+# 起降垂直参考由 VelocitySmoothing 生成；以下为覆盖默认值的示例。
+# takeoff_accel = 1.0
+# takeoff_jerk = 4.0
+# land_accel = 0.8
+# land_jerk = 3.0

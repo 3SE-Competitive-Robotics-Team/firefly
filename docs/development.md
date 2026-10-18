@@ -246,6 +246,14 @@ H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码
   独立热备状态；姿态属于备用本地重力系，方差单位 rad² / (rad/s)²。
 - `fc/vio/gyro_bias` / `attitude_variance`：主链路采用的 VIO 零偏及传播后的姿态方差。
 - `fc/debug/tilt_deg` 与 `fc/debug/tilt_err_deg`：估计倾角与仅供评测的真值倾角误差。
+- `fc/debug/rate_sp_frd` / `rate_flu`：PX4 角速度设定值（FRD）与实测角速度（FLU）。
+- `fc/debug/torque_sp_frd` / `allocated_control`：归一化力矩设定值与分配实际达到的控制量。
+- `fc/debug/saturated` / `hover_thrust`：分配饱和标志与归一化悬停推力。
+- `fc/arming/failed`：未解锁时首个失败解锁检查的位掩码（定义见 `firefly-flight::ArmingCheck`）。
+  VIO 已初始化后位 1 仍可能置位，表示独立 ESKF 热备尚未完成静止初始化；等待清零后重试
+  `ffctl fc arm`。
+- `fc/failsafe/flags` / `fc/failsafe/action`：失效条件位掩码与动作编码（定义见
+  `firefly-flight::safety`）；1Hz 日志同时输出名字。
 
 运行记录由 `firefly-viz` 写入 `logs/*.rrd`。
 

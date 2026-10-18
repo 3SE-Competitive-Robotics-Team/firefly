@@ -1,16 +1,17 @@
-//! 飞行 demo 的 Bevy 接线：键盘 → [`AngleCommand`] → `firefly-flight` 的角度模式
-//! → 旋翼分配（限幅）→ 六自由度积分 → 写回 `Transform`。
+//! 第三人称飞行的 Bevy 接线：键盘 → 期望姿态/推力 → PX4 控制链
+//! （`AttitudeControl` → `RateControl` → `ControlAllocation`）→ 六自由度积分 → `Transform`。
 //!
-//! 模型与飞控本体（推力沿机体 z、4 旋翼分配、姿态内环、惯量、饱和）在
-//! `firefly-flight`，本模块只做输入与 ECS 搬运。
+//! 模型与飞控本体在 `firefly-flight`，本模块只做输入、坐标搬运和手柄到
+//! 姿态/推力的映射。
 
 use bevy::prelude::*;
-use firefly_flight::{AngleCommand, QuadState, angle_mode, integrate};
+use firefly_flight::{Controller, G, Px4Params, QuadState, integrate, yaw_of};
+use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::config::QuadConfig;
 
 /// 机体状态（挂机体根实体；位置/姿态同步到 `Transform`）。
-#[derive(Component, Default)]
+#[derive(Component)]
 pub struct Quad {
     /// 六自由度状态。
     pub state: QuadState,
@@ -18,6 +19,21 @@ pub struct Quad {
     pub motors: [f32; 4],
     /// 最近一次分配是否触限。
     pub saturated: bool,
+    /// PX4 控制链（角速度 → 姿态 → 分配）。
+    pub ctrl: Controller,
+}
+
+impl Quad {
+    /// 以飞控参数构造；机体参数在每 tick 由 `QuadConfig` 注入。
+    #[must_use]
+    pub fn new(params: Px4Params) -> Self {
+        Self {
+            state: QuadState::default(),
+            motors: [0.0; 4],
+            saturated: false,
+            ctrl: Controller::new(params),
+        }
+    }
 }
 
 /// 每帧控制输入（归一化 -1..1）。
@@ -49,35 +65,54 @@ pub fn read_input(keys: Res<ButtonInput<KeyCode>>, mut input: ResMut<QuadInput>)
     input.reset = keys.just_pressed(KeyCode::KeyR);
 }
 
-/// 定步长积分（`FixedUpdate`）：角度模式 → 期望力/力矩 → 旋翼分配 → 实际力/力矩 → 积分。
+/// 定步长（`FixedUpdate`）：手柄 → 期望姿态/推力 → PX4 控制链 → 积分。
 // 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 pub fn dynamics(
-    time: Res<Time>,
+    time: Res<Time<Fixed>>,
     cfg: Res<QuadConfig>,
     input: Res<QuadInput>,
     drone: Single<(&mut Quad, &mut Transform)>,
 ) {
     let (mut quad, mut transform) = drone.into_inner();
-    let dt = time.delta_secs().min(1.0 / 120.0);
+    // 固定 240Hz 步长；PX4 内环参数按这个 dt 配置。
+    let dt = time.delta_secs();
 
     if input.reset {
         quad.state = QuadState {
             position: cfg.start.into(),
             ..default()
         };
+        quad.ctrl.reset();
     } else {
-        let cmd = AngleCommand {
-            pitch: input.pitch,
-            roll: input.roll,
-            yaw: input.yaw,
-            throttle: input.throttle,
-        };
-        let desired = angle_mode(&quad.state, &cmd, &cfg.drone, &cfg.control);
-        let alloc = cfg.airframe.allocate(quad.state.attitude, &desired);
-        quad.motors = alloc.motors;
-        quad.saturated = alloc.saturated;
-        integrate(&mut quad.state, &alloc.realized, &cfg.drone, dt);
+        // `state` 复制一份，避免同时借用 `quad.ctrl`（可变）与 `quad.state`（不可变）。
+        let state = quad.state;
+        // 期望姿态：当前航向下叠加倾角；偏航是机体 z 的角速度前馈，不写进姿态。
+        let tilt = cfg.control.position.tilt_max_deg.to_radians();
+        let q_sp = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), yaw_of(state.attitude))
+            * UnitQuaternion::from_axis_angle(&Vector3::y_axis(), input.pitch * tilt)
+            * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), input.roll * tilt);
+        let yaw_rate = -input.yaw * cfg.manual.yaw_rate_max;
+
+        // 升降速度环 + 倾斜补偿：推力沿机体 z，倾斜时须补 1/cosθ 才维持高度。
+        let up_z = (state.attitude * Vector3::z()).z.clamp(0.3, 1.0);
+        let vz_des = input.throttle * cfg.manual.climb_rate_max;
+        let a_vert = G + cfg.manual.vz_kp * (vz_des - state.velocity.z);
+        let thrust_norm = (cfg.drone.mass * a_vert / up_z).max(0.0) / cfg.airframe.max_thrust();
+
+        let motors = quad.ctrl.attitude_mode(
+            &state,
+            q_sp,
+            thrust_norm,
+            yaw_rate,
+            &cfg.drone,
+            &cfg.airframe,
+            dt,
+        );
+        let realized = cfg.airframe.realize(state.attitude, &motors);
+        quad.motors = motors;
+        quad.saturated = quad.ctrl.saturated;
+        integrate(&mut quad.state, &realized, &cfg.drone, dt);
     }
 
     transform.translation = Vec3::from_array(quad.state.position.into());

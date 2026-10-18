@@ -14,6 +14,8 @@
 //! 上锁时发零推力：被控对象按指令新鲜度决定物理是否推进，飞控停发等于世界停转。
 //!
 //! [`FlightFsm`] 根据估计状态和健康条件生成参考与电机使能信号。
+//! [`firefly_flight::Controller`] 是 PX4 控制核心的 1:1 移植：
+//! 位置 → 姿态 → 角速度 → 分配；本进程只做坐标/单位边界与主备姿态选择。
 //! 内环正常读取 VIO 预测，降级读取独立 ESKF 的姿态与去偏角速度，位置/速度来自局部里程计。
 //! 真值只用于评测。姿态主备选择约定见 `docs/architecture.md#imu`。
 //!
@@ -35,8 +37,9 @@ use std::time::{Duration, Instant};
 
 use fastrace::prelude::*;
 use firefly_flight::{
-    Airframe, Command, ControlParams, Event, FlightFsm, FsmParams, Health, PositionSetpoint,
-    QuadParams, QuadState, attitude_support, position_mode,
+    Airframe, ArmingCheck, Command, Controller as Px4Controller, Event, FailsafeAction,
+    FailsafeFlags, FlightFsm, FsmParams, Health, PositionSetpoint, Px4Params, QuadParams,
+    QuadState, Reject,
 };
 use firefly_pubsub::attitude::{ATTITUDE_TOPIC, AttitudeMessage};
 use firefly_pubsub::command::{COMMAND_TOPIC, CommandMessage, kind as command_kind};
@@ -297,6 +300,7 @@ fn health_of(inputs: &Inputs) -> Health {
         estimator_ready: inputs.estimate.is_some_and(|e| e.initialized)
             && inputs.primary.fresh(inputs.imu_time),
         airframe_ready: inputs.vehicle.is_some(),
+        attitude_session_ok: inputs.primary.session_ok(),
         odometry_alive: inputs
             .estimate
             .is_some_and(|e| e.received_at.elapsed() <= ODOM_STALE_LIMIT),
@@ -374,10 +378,20 @@ struct Controller {
     altitude: f32,
     /// 上次可视化时刻（仿真时间）。
     last_viz: f64,
+    /// 最近一次控制使用的机体系角速度（FLU，rad/s），供诊断。
+    ang_vel: Vector3<f32>,
+    /// PX4 控制链（位置 → 姿态 → 角速度 → 分配）。
+    px4: Px4Controller,
+    /// 解锁前首个失败项的位掩码（未解锁时有效）。
+    arming_failed: u32,
+    /// 最近一 tick 的失效条件位掩码。
+    failsafe_flags: FailsafeFlags,
+    /// 最近一 tick 的失效动作。
+    failsafe_action: FailsafeAction,
 }
 
 impl Controller {
-    fn new(fsm: FsmParams) -> Self {
+    fn new(fsm: FsmParams, params: Px4Params) -> Self {
         Self {
             attitude: UnitQuaternion::identity(),
             attitude_ready: false,
@@ -389,11 +403,16 @@ impl Controller {
             last_command_seq: 0,
             altitude: 0.0,
             last_viz: f64::NEG_INFINITY,
+            ang_vel: Vector3::zeros(),
+            px4: Px4Controller::new(params),
+            arming_failed: 0,
+            failsafe_flags: FailsafeFlags::default(),
+            failsafe_action: FailsafeAction::None,
         }
     }
 
     /// 空中失联只用 IMU 维持姿态支持；禁止陈旧位置进入控制律。
-    fn motor_output(&mut self, inputs: &Inputs, dt: f32, ctl: &ControlParams) -> ([f32; 4], bool) {
+    fn motor_output(&mut self, inputs: &Inputs, dt: f32) -> ([f32; 4], bool) {
         let health = health_of(inputs);
         let recovering = self.fsm.state() == firefly_flight::FlightState::AttitudeFallback
             && health.estimator_ready
@@ -417,6 +436,21 @@ impl Controller {
             attitude,
             ang_vel,
         };
+        self.ang_vel = state.ang_vel;
+        // 解锁还要求独立 ESKF 热备可用；诊断必须与 `apply_command` 的实际门控一致，
+        // 否则地面站会看到“检查全过、Arm 仍被拒”。
+        let mut arm_health = health;
+        arm_health.estimator_ready &= inputs
+            .attitude
+            .is_some_and(|s| s.ready && s.received.elapsed() <= IMU_STALE_LIMIT);
+        self.arming_failed = if self.fsm.state().motors_enabled() {
+            0
+        } else {
+            self.fsm
+                .arming_check(arm_health, &state)
+                .err()
+                .map_or(0, ArmingCheck::bit)
+        };
         let mut command_health = health;
         if inputs.command.is_some_and(|m| m.kind == command_kind::ARM) {
             command_health.estimator_ready &= inputs
@@ -426,6 +460,8 @@ impl Controller {
         self.apply_command(inputs.command, command_health, &state);
         let reference = fresh_reference(inputs);
         let out = self.fsm.update(dt, &state, reference.as_ref(), health);
+        self.failsafe_flags = out.flags;
+        self.failsafe_action = out.failsafe;
         self.position_target = out.setpoint.position;
         self.position_error = out.setpoint.position - position;
         report_event(out.event);
@@ -436,16 +472,30 @@ impl Controller {
         let Some((quad, airframe)) = inputs.vehicle else {
             return ([0.0; 4], false);
         };
-        let desired = if self.fsm.state() == firefly_flight::FlightState::AttitudeFallback {
-            attitude_support(attitude, ang_vel, self.standby_yaw, &quad, ctl)
-        } else {
-            if !health.estimator_ready || !health.odometry_alive {
-                return ([0.; 4], false);
-            }
-            position_mode(&state, &out.setpoint, &quad, ctl)
-        };
-        let allocation = airframe.allocate(attitude, &desired);
-        (allocation.motors, allocation.saturated)
+        let (motors, saturated) =
+            if self.fsm.state() == firefly_flight::FlightState::AttitudeFallback {
+                self.px4
+                    .support(&state, self.standby_yaw, &quad, &airframe, dt)
+                    .map_or(([0.0; 4], true), |m| (m, self.px4.saturated))
+            } else {
+                if !health.estimator_ready || !health.odometry_alive {
+                    return ([0.0; 4], false);
+                }
+                self.px4
+                    .update(
+                        &state,
+                        &out.setpoint,
+                        &quad,
+                        &airframe,
+                        dt,
+                        self.fsm.on_ground(&state),
+                    )
+                    .map_or(([0.0; 4], true), |m| (m, self.px4.saturated))
+            };
+        if !self.fsm.state().motors_enabled() {
+            self.px4.reset();
+        }
+        (motors, saturated)
     }
 
     /// 每 tick 发布控制；启动等待期的零推力允许仿真推进并产生初始化测量。
@@ -454,11 +504,10 @@ impl Controller {
         ports: &Ports,
         inputs: &Inputs,
         dt: f32,
-        ctl: &ControlParams,
         tick: u64,
         stats: &mut Stats,
     ) -> Result<(), firefly_error::Error> {
-        let (motors, saturated) = self.motor_output(inputs, dt, ctl);
+        let (motors, saturated) = self.motor_output(inputs, dt);
         stats.saturated += u64::from(saturated);
         ports.control.publish(ControlMessage {
             state_time: inputs.imu_time,
@@ -494,6 +543,9 @@ impl Controller {
             Ok(event) => {
                 log::info!("指令 {cmd:?} → {}", self.fsm.state().name());
                 report_event(event);
+            }
+            Err(Reject::Arming(check)) => {
+                log::warn!("指令 {cmd:?} 被拒：{}（{}）", check.name(), check.reason());
             }
             Err(reject) => log::warn!("指令 {cmd:?} 被拒：{}", reject.reason()),
         }
@@ -536,6 +588,7 @@ impl Controller {
     }
 
     /// 控制量 + 模式 + 姿态校验进 rrd（10Hz）。
+    #[allow(clippy::too_many_lines)] // 诊断字段按实体平铺，拆函数只会增加跳转
     fn publish_viz(
         &mut self,
         ports: &Ports,
@@ -595,6 +648,77 @@ impl Controller {
             sim_time,
             "fc/debug/motors",
             &motors.map(f64::from),
+        );
+        publish_scalars(
+            ports.viz_ref(),
+            sim_time,
+            "fc/debug/rate_sp_frd",
+            &[
+                f64::from(self.px4.rates_setpoint.roll),
+                f64::from(self.px4.rates_setpoint.pitch),
+                f64::from(self.px4.rates_setpoint.yaw),
+            ],
+        );
+        publish_scalars(
+            ports.viz_ref(),
+            sim_time,
+            "fc/debug/rate_flu",
+            &[
+                f64::from(self.ang_vel.x),
+                f64::from(self.ang_vel.y),
+                f64::from(self.ang_vel.z),
+            ],
+        );
+        publish_scalars(
+            ports.viz_ref(),
+            sim_time,
+            "fc/debug/torque_sp_frd",
+            &[
+                f64::from(self.px4.torque_setpoint.xyz.x),
+                f64::from(self.px4.torque_setpoint.xyz.y),
+                f64::from(self.px4.torque_setpoint.xyz.z),
+            ],
+        );
+        publish_scalars(
+            ports.viz_ref(),
+            sim_time,
+            "fc/debug/allocated_control",
+            &[
+                f64::from(self.px4.allocated_control[0]),
+                f64::from(self.px4.allocated_control[1]),
+                f64::from(self.px4.allocated_control[2]),
+                f64::from(self.px4.allocated_control[3]),
+            ],
+        );
+        publish_scalars(
+            ports.viz_ref(),
+            sim_time,
+            "fc/debug/saturated",
+            &[f64::from(self.px4.saturated)],
+        );
+        publish_scalars(
+            ports.viz_ref(),
+            sim_time,
+            "fc/debug/hover_thrust",
+            &[f64::from(self.px4.hover_thrust)],
+        );
+        publish_scalars(
+            ports.viz_ref(),
+            sim_time,
+            "fc/arming/failed",
+            &[f64::from(self.arming_failed)],
+        );
+        publish_scalars(
+            ports.viz_ref(),
+            sim_time,
+            "fc/failsafe/flags",
+            &[f64::from(self.failsafe_flags.bits())],
+        );
+        publish_scalars(
+            ports.viz_ref(),
+            sim_time,
+            "fc/failsafe/action",
+            &[f64::from(self.failsafe_action.code())],
         );
         if let Some(truth) = plant_attitude {
             // 重力在机体系中的方向不依赖局部航向，可直接与真值比较。
@@ -701,7 +825,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let imu_worker = imu::Worker::spawn(cfg.imu)?;
     let mut imu_count = 0u64;
     let mut inputs = Inputs::default();
-    let mut controller = Controller::new(cfg.fsm);
+    let mut controller = Controller::new(cfg.fsm, cfg.control);
     let mut stats = Stats::default();
     let mut window_start = Instant::now();
     let mut sim_time = 0.0f64;
@@ -717,7 +841,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             inputs.attitude = Some(snapshot);
         }
         sim_time = inputs.imu_time;
-        controller.step(&ports, &inputs, dt, &cfg.control, tick, &mut stats)?;
+        controller.step(&ports, &inputs, dt, tick, &mut stats)?;
         imu_worker.grounded.store(
             controller.fsm.state() == firefly_flight::FlightState::Disarmed,
             Ordering::Relaxed,
@@ -839,20 +963,17 @@ mod tests {
 
     #[test]
     fn stale_grounded_estimator_cannot_start_hover_thrust() {
-        let mut controller = Controller::new(FsmParams::default());
+        let mut controller = Controller::new(FsmParams::default(), Px4Params::default());
         let mut inputs = sensor_inputs();
         inputs.command = Some(CommandMessage {
             kind: command_kind::ARM,
             sequence: 1,
             ..Default::default()
         });
-        controller.motor_output(&inputs, 0.001, &ControlParams::default());
+        controller.motor_output(&inputs, 0.001);
         inputs.estimate.as_mut().unwrap().initialized = false;
         assert_eq!(
-            controller
-                .motor_output(&inputs, 0.001, &ControlParams::default())
-                .0
-                .map(f32::to_bits),
+            controller.motor_output(&inputs, 0.001).0.map(f32::to_bits),
             [0; 4]
         );
         assert_eq!(
@@ -913,8 +1034,8 @@ mod tests {
             }),
             ..Inputs::default()
         };
-        let mut controller = Controller::new(FsmParams::default());
-        let (motors, _) = controller.motor_output(&inputs, 0.001, &ControlParams::default());
+        let mut controller = Controller::new(FsmParams::default(), Px4Params::default());
+        let (motors, _) = controller.motor_output(&inputs, 0.001);
         assert_eq!(motors.map(f32::to_bits), [0; 4]);
         assert!(!controller.attitude_ready);
         assert_eq!(
@@ -926,12 +1047,11 @@ mod tests {
     #[test]
     fn changing_truth_cannot_change_motor_output() {
         let mut inputs = sensor_inputs();
-        let mut a = Controller::new(FsmParams::default());
-        let mut b = Controller::new(FsmParams::default());
-        let ctl = ControlParams::default();
+        let mut a = Controller::new(FsmParams::default(), Px4Params::default());
+        let mut b = Controller::new(FsmParams::default(), Px4Params::default());
         for _ in 0..1000 {
-            a.motor_output(&inputs, 0.001, &ctl);
-            b.motor_output(&inputs, 0.001, &ctl);
+            a.motor_output(&inputs, 0.001);
+            b.motor_output(&inputs, 0.001);
         }
         for (kind, sequence) in [(command_kind::ARM, 1), (command_kind::TAKEOFF, 2)] {
             inputs.command = Some(CommandMessage {
@@ -941,7 +1061,7 @@ mod tests {
                 ..CommandMessage::default()
             });
             inputs.plant = None;
-            let (left, _) = a.motor_output(&inputs, 0.001, &ctl);
+            let (left, _) = a.motor_output(&inputs, 0.001);
             inputs.plant = Some((
                 PlantStateMessage {
                     position_x: 1000.0,
@@ -951,29 +1071,24 @@ mod tests {
                 },
                 Instant::now(),
             ));
-            let (right, _) = b.motor_output(&inputs, 0.001, &ctl);
+            let (right, _) = b.motor_output(&inputs, 0.001);
             assert_eq!(left.map(f32::to_bits), right.map(f32::to_bits));
         }
         assert_eq!(a.fsm.state(), firefly_flight::FlightState::Takeoff);
-        assert!(
-            a.motor_output(&inputs, 0.001, &ctl)
-                .0
-                .iter()
-                .any(|m| *m > 0.0)
-        );
+        assert!(a.motor_output(&inputs, 0.001).0.iter().any(|m| *m > 0.0));
         inputs.estimate.as_mut().unwrap().received_at =
             Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
-        let (fallback, _) = a.motor_output(&inputs, 0.001, &ctl);
+        let (fallback, _) = a.motor_output(&inputs, 0.001);
         assert!(fallback.iter().all(|m| m.is_finite() && *m > 0.));
         assert_eq!(a.fsm.state(), firefly_flight::FlightState::AttitudeFallback);
         let estimate = inputs.estimate.as_mut().unwrap();
         estimate.position = Vector3::repeat(10000.);
         estimate.velocity = Vector3::repeat(-1000.);
-        let (same, _) = a.motor_output(&inputs, 0.001, &ctl);
+        let (same, _) = a.motor_output(&inputs, 0.001);
         assert_eq!(fallback.map(f32::to_bits), same.map(f32::to_bits));
     }
     fn airborne(inputs: &mut Inputs) -> Controller {
-        let mut controller = Controller::new(FsmParams::default());
+        let mut controller = Controller::new(FsmParams::default(), Px4Params::default());
         for (kind, sequence) in [(command_kind::ARM, 1), (command_kind::TAKEOFF, 2)] {
             inputs.command = Some(CommandMessage {
                 kind,
@@ -981,7 +1096,7 @@ mod tests {
                 altitude: 1.,
                 ..Default::default()
             });
-            controller.motor_output(inputs, 0.001, &ControlParams::default());
+            controller.motor_output(inputs, 0.001);
         }
         inputs.estimate.as_mut().unwrap().position.z = 1.;
         controller
@@ -992,14 +1107,12 @@ mod tests {
         let mut inputs = sensor_inputs();
         let mut controller = airborne(&mut inputs);
         inputs.attitude.as_mut().unwrap().rotation = UnitQuaternion::from_euler_angles(0., 0., 1.8);
-        controller.motor_output(&inputs, 0.001, &ControlParams::default());
+        controller.motor_output(&inputs, 0.001);
         assert_eq!(controller.source, attitude::Source::Vio);
         assert!(controller.attitude.angle() < 1e-6);
         // 高频主预测断流，而低频里程计仍新鲜，也必须接管。
         inputs.primary = attitude::Input::default();
-        let motors = controller
-            .motor_output(&inputs, 0.001, &ControlParams::default())
-            .0;
+        let motors = controller.motor_output(&inputs, 0.001).0;
         assert_eq!(controller.source, attitude::Source::Standby);
         assert_eq!(
             controller.fsm.state(),
@@ -1009,14 +1122,14 @@ mod tests {
         assert!(motors.iter().all(|m| *m > 0.));
         assert!(motors.iter().all(|m| (*m - motors[0]).abs() < 1e-5));
         inputs.primary = sensor_inputs().primary;
-        controller.motor_output(&inputs, 0.001, &ControlParams::default());
+        controller.motor_output(&inputs, 0.001);
         assert_eq!(controller.source, attitude::Source::Standby);
         inputs.command = Some(CommandMessage {
             kind: command_kind::HOLD,
             sequence: 3,
             ..Default::default()
         });
-        controller.motor_output(&inputs, 0.001, &ControlParams::default());
+        controller.motor_output(&inputs, 0.001);
         assert_eq!(controller.source, attitude::Source::Vio);
         assert_eq!(controller.fsm.state(), firefly_flight::FlightState::Hold);
         assert!((inputs.attitude.unwrap().rotation.angle() - 1.8).abs() < 1e-6);
@@ -1035,7 +1148,7 @@ mod tests {
             sequence: 3,
             ..Default::default()
         });
-        controller.motor_output(&inputs, 0.001, &ControlParams::default());
+        controller.motor_output(&inputs, 0.001);
         assert_eq!(controller.source, attitude::Source::Standby);
         assert_eq!(
             controller.fsm.state(),
@@ -1044,10 +1157,7 @@ mod tests {
         inputs.attitude.as_mut().unwrap().received =
             Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
         assert_eq!(
-            controller
-                .motor_output(&inputs, 0.001, &ControlParams::default())
-                .0
-                .map(f32::to_bits),
+            controller.motor_output(&inputs, 0.001).0.map(f32::to_bits),
             [0; 4]
         );
         assert_eq!(controller.source, attitude::Source::Unavailable);
@@ -1062,12 +1172,9 @@ mod tests {
             sequence: 1,
             ..Default::default()
         });
-        let mut controller = Controller::new(FsmParams::default());
+        let mut controller = Controller::new(FsmParams::default(), Px4Params::default());
         assert_eq!(
-            controller
-                .motor_output(&inputs, 0.001, &ControlParams::default())
-                .0
-                .map(f32::to_bits),
+            controller.motor_output(&inputs, 0.001).0.map(f32::to_bits),
             [0; 4]
         );
         assert_eq!(

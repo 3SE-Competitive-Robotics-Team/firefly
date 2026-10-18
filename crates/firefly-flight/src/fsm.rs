@@ -3,7 +3,7 @@
 //!
 //! 纯逻辑：不做 IO、不读时钟（`dt` 由调用方给），全部转移条件显式、可单测。
 //! 上层（`apps/fc`）负责把健康电平与指令喂进来，并把 [`FlightFsm::update`] 的输出
-//!（当前模式该飞的参考 + 电机是否使能）映射成 `position_mode` 的参考与 4 电机推力。
+//!（当前模式该飞的参考 + 电机是否使能）映射成 PX4 控制链的参考与 4 电机推力。
 //!
 //! 指令语义 = **"谁在控制"**（对照 `MAVLink` `COMMAND_LONG`）：目标点（goal）属规划侧
 //! 输入，设定值流（`Firefly/Reference`）只在 [`FlightState::Track`] 下被消费，且其
@@ -16,6 +16,8 @@ use nalgebra::Vector3;
 use serde::Deserialize;
 
 use crate::control::PositionSetpoint;
+use crate::px4::velocity_smoothing::VelocitySmoothing;
+use crate::safety::{ArmingCheck, FailsafeAction, FailsafeFlags};
 use crate::state::QuadState;
 
 /// 地面站指令（对照 `MAVLink` `COMMAND_LONG` 的解锁/模式类子集）。
@@ -44,20 +46,12 @@ pub enum Command {
 /// 指令被拒绝的原因（逐项上报，对照 `PX4` `HealthAndArmingChecks` 的"为什么不能解锁"）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reject {
+    /// 解锁前检查失败（具体项见 [`ArmingCheck`]）。
+    Arming(ArmingCheck),
     /// 需要先解锁。
     NotArmed,
     /// 当前状态不允许该指令。
     WrongState,
-    /// 状态估计未就绪。
-    EstimatorNotReady,
-    /// 未收到机体/执行器描述。
-    NoAirframe,
-    /// 里程计陈旧。
-    OdometryStale,
-    /// IMU 陈旧。
-    ImuStale,
-    /// 不在起飞点地面（解锁要求停在地面）。
-    NotOnGround,
     /// 参考流不存在或陈旧。
     ReferenceNotReady,
     /// 起飞高度超范围。
@@ -69,13 +63,9 @@ impl Reject {
     #[must_use]
     pub fn reason(self) -> &'static str {
         match self {
+            Self::Arming(check) => check.reason(),
             Self::NotArmed => "未解锁",
             Self::WrongState => "当前状态不允许",
-            Self::EstimatorNotReady => "状态估计未就绪",
-            Self::NoAirframe => "未收到机体描述",
-            Self::OdometryStale => "里程计陈旧",
-            Self::ImuStale => "IMU 陈旧",
-            Self::NotOnGround => "不在起飞点地面",
             Self::ReferenceNotReady => "参考流未就绪",
             Self::AltitudeOutOfRange => "起飞高度超范围",
         }
@@ -150,6 +140,8 @@ pub struct Health {
     pub odometry_alive: bool,
     /// IMU 新鲜。
     pub imu_alive: bool,
+    /// VIO 姿态会话未改变（会话改变后不可恢复）。
+    pub attitude_session_ok: bool,
 }
 
 /// 状态机参数（缺键回落默认值；单位与来源见各字段）。
@@ -159,9 +151,15 @@ pub struct FsmParams {
     /// `NAV_TAKEOFF` 的 param7 缺省语义——两家飞控都有对应参数）。
     #[serde(default = "d_takeoff_altitude")]
     pub takeoff_altitude: f32,
-    /// 起飞爬升率（m/s）：起飞段目标高度按此速率斜坡上升。
+    /// 起飞爬升率（m/s）：起飞段的速度上限。
     #[serde(default = "d_takeoff_climb_rate")]
     pub takeoff_climb_rate: f32,
+    /// 起飞段最大垂直加速度（m/s²）。
+    #[serde(default = "d_takeoff_accel")]
+    pub takeoff_accel: f32,
+    /// 起飞段最大垂直 jerk（m/s³）。
+    #[serde(default = "d_takeoff_jerk")]
+    pub takeoff_jerk: f32,
     /// 起飞完成判据①：高度进入目标 ±此比例。（对照 `ArduPilot`：10%）
     #[serde(default = "d_takeoff_complete_frac")]
     pub takeoff_complete_frac: f32,
@@ -174,9 +172,15 @@ pub struct FsmParams {
     /// 起飞高度上限（m）。
     #[serde(default = "d_max_takeoff_altitude")]
     pub max_takeoff_altitude: f32,
-    /// 降落下降率（m/s）：降落段目标高度按此速率斜坡下降。
+    /// 降落下降率（m/s）：降落段的速度上限。
     #[serde(default = "d_land_descent_rate")]
     pub land_descent_rate: f32,
+    /// 降落段最大垂直加速度（m/s²）。
+    #[serde(default = "d_land_accel")]
+    pub land_accel: f32,
+    /// 降落段最大垂直 jerk（m/s³）。
+    #[serde(default = "d_land_jerk")]
+    pub land_jerk: f32,
     /// 地面判定：相对起飞点高度阈值（m）。
     #[serde(default = "d_on_ground_altitude")]
     pub on_ground_altitude: f32,
@@ -198,6 +202,12 @@ fn d_takeoff_altitude() -> f32 {
 fn d_takeoff_climb_rate() -> f32 {
     0.6
 }
+fn d_takeoff_accel() -> f32 {
+    1.0
+}
+fn d_takeoff_jerk() -> f32 {
+    4.0
+}
 fn d_takeoff_complete_frac() -> f32 {
     0.10
 }
@@ -212,6 +222,12 @@ fn d_max_takeoff_altitude() -> f32 {
 }
 fn d_land_descent_rate() -> f32 {
     0.4
+}
+fn d_land_accel() -> f32 {
+    0.8
+}
+fn d_land_jerk() -> f32 {
+    3.0
 }
 fn d_on_ground_altitude() -> f32 {
     0.06
@@ -231,11 +247,15 @@ impl Default for FsmParams {
         Self {
             takeoff_altitude: d_takeoff_altitude(),
             takeoff_climb_rate: d_takeoff_climb_rate(),
+            takeoff_accel: d_takeoff_accel(),
+            takeoff_jerk: d_takeoff_jerk(),
             takeoff_complete_frac: d_takeoff_complete_frac(),
             takeoff_complete_climb_frac: d_takeoff_complete_climb_frac(),
             min_takeoff_altitude: d_min_takeoff_altitude(),
             max_takeoff_altitude: d_max_takeoff_altitude(),
             land_descent_rate: d_land_descent_rate(),
+            land_accel: d_land_accel(),
+            land_jerk: d_land_jerk(),
             on_ground_altitude: d_on_ground_altitude(),
             on_ground_velocity: d_on_ground_velocity(),
             land_complete_hold: d_land_complete_hold(),
@@ -253,6 +273,10 @@ pub struct Output {
     pub motors_enabled: bool,
     /// 本 tick 自动产生的决策（指令引起的转移由 [`FlightFsm::command`] 返回）。
     pub event: Event,
+    /// 本 tick 的失效条件位掩码（记录用）。
+    pub flags: FailsafeFlags,
+    /// 本 tick 的失效动作（记录用）。
+    pub failsafe: FailsafeAction,
 }
 
 /// 状态机的内部决策（`update` 的返回值，供上层记录/上报）。
@@ -284,8 +308,10 @@ pub struct FlightFsm {
     target: Vector3<f32>,
     /// 目标航向（进入各模式时锁存；`Track` 由参考给）。
     target_yaw: f32,
-    /// 目标高度（世界 z）：起飞/降落段按速率斜坡逼近它。
+    /// 保持段的目标高度（世界 z）。
     ramp_z: f32,
+    /// 起飞/降落段的 jerk 受限垂直轨迹。
+    vertical: VelocitySmoothing,
     /// 起飞目标高度（相对起飞点，m）。
     takeoff_target: f32,
     /// 连续满足落地判据的时长（s）。
@@ -307,6 +333,7 @@ impl FlightFsm {
             target: Vector3::zeros(),
             target_yaw: 0.0,
             ramp_z: 0.0,
+            vertical: VelocitySmoothing::default(),
             takeoff_target: params.takeoff_altitude,
             ground_time: 0.0,
             reference_fresh: false,
@@ -354,13 +381,16 @@ impl FlightFsm {
         let from = self.state;
         if !matches!(cmd, Command::Arm) && self.state.motors_enabled() {
             if !health.estimator_ready {
-                return Err(Reject::EstimatorNotReady);
+                return Err(Reject::Arming(ArmingCheck::EstimatorReady));
+            }
+            if !health.attitude_session_ok {
+                return Err(Reject::Arming(ArmingCheck::AttitudeSession));
             }
             if !health.odometry_alive {
-                return Err(Reject::OdometryStale);
+                return Err(Reject::Arming(ArmingCheck::OdometryAlive));
             }
             if !health.imu_alive {
-                return Err(Reject::ImuStale);
+                return Err(Reject::Arming(ArmingCheck::ImuAlive));
             }
         }
         if self.state == FlightState::AttitudeFallback
@@ -396,10 +426,33 @@ impl FlightFsm {
         }
         self.reference_fresh = reference.is_some();
         let event = self.step(dt, state, reference, health);
+        let flags = FailsafeFlags::from_health(
+            health,
+            matches!(event, Event::FailsafeReferenceLost)
+                || (self.state == FlightState::Track && reference.is_none()),
+            matches!(event, Event::FailsafeReferenceLost)
+                || (self.state == FlightState::Track
+                    && self.reference_lost >= self.params.reference_timeout),
+        );
+        let failsafe = if matches!(event, Event::FailsafeEstimatorLost)
+            && self.state == FlightState::Disarmed
+        {
+            FailsafeAction::Disarm
+        } else if matches!(event, Event::FailsafeEstimatorLost)
+            || self.state == FlightState::AttitudeFallback
+        {
+            FailsafeAction::AttitudeFallback
+        } else if matches!(event, Event::FailsafeReferenceLost) {
+            FailsafeAction::Hold
+        } else {
+            FailsafeAction::None
+        };
         Output {
             setpoint: self.output_setpoint(dt, state, reference),
             motors_enabled: self.state.motors_enabled(),
             event,
+            flags,
+            failsafe,
         }
     }
 
@@ -488,15 +541,17 @@ impl FlightFsm {
             }),
             FlightState::Takeoff => {
                 let goal = self.origin_z.unwrap_or(0.0) + self.takeoff_target;
-                self.ramp_toward(goal, self.params.takeoff_climb_rate * dt, true);
-                self.ramp_setpoint()
+                let target = self.vertical_target(goal, self.params.takeoff_climb_rate, true);
+                self.vertical.update(dt, target);
+                self.vertical_setpoint()
             }
             FlightState::Land => {
                 let goal = self.origin_z.unwrap_or(0.0);
-                self.ramp_toward(goal, self.params.land_descent_rate * dt, false);
-                self.ramp_setpoint()
+                let target = self.vertical_target(goal, self.params.land_descent_rate, false);
+                self.vertical.update(dt, target);
+                self.vertical_setpoint()
             }
-            FlightState::Hold => self.ramp_setpoint(),
+            FlightState::Hold => self.ramp_setpoint(0.0),
             FlightState::AttitudeFallback => PositionSetpoint {
                 yaw: self.target_yaw,
                 ..Default::default()
@@ -504,7 +559,7 @@ impl FlightFsm {
             FlightState::ArmedGrounded => {
                 self.ramp_z = state.position.z;
                 self.target.z = state.position.z;
-                self.ramp_setpoint()
+                self.ramp_setpoint(0.0)
             }
             FlightState::Disarmed => PositionSetpoint {
                 position: state.position,
@@ -514,22 +569,40 @@ impl FlightFsm {
         }
     }
 
-    /// 目标高度按速率斜坡向 `goal` 推进（`ascend` 决定方向；不越过 `goal`）。
-    fn ramp_toward(&mut self, goal: f32, step: f32, ascend: bool) {
-        let delta = goal - self.ramp_z;
-        let limited = if ascend {
-            delta.min(step).max(0.0)
+    /// 垂直速度目标：位置误差线性映射到速度，并按爬升/下降方向限幅。
+    ///
+    /// 水平位置锁 `target`；垂直通道由 [`VelocitySmoothing`] 限制加速度与 jerk。
+    fn vertical_target(&self, goal: f32, max_velocity: f32, ascend: bool) -> f32 {
+        // 误差 0.3 m（爬升）/0.2 m（下降）内速度开始收敛，避免终点硬切。
+        let gain = max_velocity / if ascend { 0.3 } else { 0.2 };
+        let target = (goal - self.vertical.current_position()) * gain;
+        if ascend {
+            target.clamp(0.0, max_velocity)
         } else {
-            delta.max(-step).min(0.0)
-        };
-        self.ramp_z += limited;
+            target.clamp(-max_velocity, 0.0)
+        }
     }
 
-    /// 斜坡/保持段的参考：水平位置锁 `target`，高度取斜坡值，垂速由斜坡隐含。
-    fn ramp_setpoint(&self) -> PositionSetpoint {
+    /// 起飞/降落段的参考：水平锁 `target`，垂直取平滑轨迹的位置/速度/加速度。
+    fn vertical_setpoint(&self) -> PositionSetpoint {
+        PositionSetpoint {
+            position: Vector3::new(
+                self.target.x,
+                self.target.y,
+                self.vertical.current_position(),
+            ),
+            velocity: Vector3::new(0.0, 0.0, self.vertical.current_velocity()),
+            acceleration: Vector3::new(0.0, 0.0, self.vertical.current_acceleration()),
+            yaw: self.target_yaw,
+            yaw_rate: 0.0,
+        }
+    }
+
+    /// 保持段的参考：水平位置锁 `target`，高度锁 `ramp_z`，零垂速。
+    fn ramp_setpoint(&self, velocity_z: f32) -> PositionSetpoint {
         PositionSetpoint {
             position: Vector3::new(self.target.x, self.target.y, self.ramp_z),
-            velocity: Vector3::zeros(),
+            velocity: Vector3::new(0.0, 0.0, velocity_z),
             acceleration: Vector3::zeros(),
             yaw: self.target_yaw,
             yaw_rate: 0.0,
@@ -537,24 +610,7 @@ impl FlightFsm {
     }
 
     fn arm(&mut self, health: Health, state: &QuadState) -> Result<(), Reject> {
-        if self.state != FlightState::Disarmed {
-            return Err(Reject::WrongState);
-        }
-        if !health.estimator_ready {
-            return Err(Reject::EstimatorNotReady);
-        }
-        if !health.airframe_ready {
-            return Err(Reject::NoAirframe);
-        }
-        if !health.odometry_alive {
-            return Err(Reject::OdometryStale);
-        }
-        if !health.imu_alive {
-            return Err(Reject::ImuStale);
-        }
-        if !self.on_ground(state) {
-            return Err(Reject::NotOnGround);
-        }
+        self.arming_check(health, state).map_err(Reject::Arming)?;
         // 起飞点以解锁时刻为准（`ArduPilot` 的 home 语义）
         self.origin_z = Some(state.position.z);
         self.target = state.position;
@@ -564,13 +620,44 @@ impl FlightFsm {
         Ok(())
     }
 
+    /// 逐项执行解锁前检查，返回首个失败项（顺序即 [`ArmingCheck::ALL`]）。
+    ///
+    /// 状态机与 `apps/fc` 的诊断共用这一份判定，避免“日志说能解锁、实际拒绝”。
+    ///
+    /// # Errors
+    /// 返回首个不满足的 [`ArmingCheck`]；全部通过时返回 `Ok(())`。
+    pub fn arming_check(&self, health: Health, state: &QuadState) -> Result<(), ArmingCheck> {
+        if self.state != FlightState::Disarmed {
+            return Err(ArmingCheck::Disarmed);
+        }
+        if !health.estimator_ready {
+            return Err(ArmingCheck::EstimatorReady);
+        }
+        if !health.attitude_session_ok {
+            return Err(ArmingCheck::AttitudeSession);
+        }
+        if !health.airframe_ready {
+            return Err(ArmingCheck::AirframeReady);
+        }
+        if !health.odometry_alive {
+            return Err(ArmingCheck::OdometryAlive);
+        }
+        if !health.imu_alive {
+            return Err(ArmingCheck::ImuAlive);
+        }
+        if !self.on_ground(state) {
+            return Err(ArmingCheck::OnGround);
+        }
+        Ok(())
+    }
+
     fn disarm(&mut self, state: &QuadState) -> Result<(), Reject> {
         if !self.state.motors_enabled() {
             return Err(Reject::WrongState);
         }
         // 空中禁止上锁，避免飞行中关闭电机。
         if !self.on_ground(state) {
-            return Err(Reject::NotOnGround);
+            return Err(Reject::Arming(ArmingCheck::OnGround));
         }
         self.state = FlightState::Disarmed;
         self.ground_time = 0.0;
@@ -600,6 +687,10 @@ impl FlightFsm {
         self.target = state.position;
         self.ramp_z = state.position.z;
         self.target_yaw = crate::state::yaw_of(state.attitude);
+        self.vertical.reset(0.0, state.velocity.z, state.position.z);
+        self.vertical.set_max_jerk(self.params.takeoff_jerk);
+        self.vertical.set_max_accel(self.params.takeoff_accel);
+        self.vertical.set_max_vel(self.params.takeoff_climb_rate);
         self.state = FlightState::Takeoff;
         Ok(())
     }
@@ -651,7 +742,11 @@ impl FlightFsm {
         self.state = FlightState::Land;
         // 降在起飞点正上方（x/y 取起飞点；我们的 origin 只存了高度，故取当前水平位置）
         self.target = state.position;
-        self.ramp_z = self.ramp_z.max(state.position.z);
+        self.ramp_z = state.position.z;
+        self.vertical.reset(0.0, state.velocity.z, state.position.z);
+        self.vertical.set_max_jerk(self.params.land_jerk);
+        self.vertical.set_max_accel(self.params.land_accel);
+        self.vertical.set_max_vel(self.params.land_descent_rate);
         self.ground_time = 0.0;
     }
 }
@@ -668,7 +763,6 @@ fn event_of(from: FlightState, to: FlightState) -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::G;
 
     const DT: f32 = 0.005;
 
@@ -687,14 +781,6 @@ mod tests {
             state.position.z = height;
             let out = fsm.update(0.001, &state, None, ok_health());
             assert!((out.setpoint.position.z - 1.0).abs() < 1e-6);
-            let params = crate::QuadParams::default();
-            let wrench = crate::position_mode(
-                &state,
-                &out.setpoint,
-                &params,
-                &crate::ControlParams::default(),
-            );
-            assert!((wrench.force.z - params.mass * crate::G) * (1.0 - height) > 0.0);
         }
     }
 
@@ -704,6 +790,7 @@ mod tests {
             airframe_ready: true,
             odometry_alive: true,
             imu_alive: true,
+            attitude_session_ok: true,
         }
     }
 
@@ -767,28 +854,35 @@ mod tests {
                     estimator_ready: false,
                     ..ok_health()
                 },
-                Reject::EstimatorNotReady,
+                Reject::Arming(ArmingCheck::EstimatorReady),
+            ),
+            (
+                Health {
+                    attitude_session_ok: false,
+                    ..ok_health()
+                },
+                Reject::Arming(ArmingCheck::AttitudeSession),
             ),
             (
                 Health {
                     airframe_ready: false,
                     ..ok_health()
                 },
-                Reject::NoAirframe,
+                Reject::Arming(ArmingCheck::AirframeReady),
             ),
             (
                 Health {
                     odometry_alive: false,
                     ..ok_health()
                 },
-                Reject::OdometryStale,
+                Reject::Arming(ArmingCheck::OdometryAlive),
             ),
             (
                 Health {
                     imu_alive: false,
                     ..ok_health()
                 },
-                Reject::ImuStale,
+                Reject::Arming(ArmingCheck::ImuAlive),
             ),
         ] {
             let _ = rig.fsm.update(DT, &rig.state, None, ok_health());
@@ -810,7 +904,7 @@ mod tests {
         let air = hovering(1.0);
         assert_eq!(
             fsm.command(Command::Arm, ok_health(), &air),
-            Err(Reject::NotOnGround)
+            Err(Reject::Arming(ArmingCheck::OnGround))
         );
     }
 
@@ -910,7 +1004,10 @@ mod tests {
         rig.cmd(Command::Takeoff { altitude: 1.0 }).unwrap();
         rig.ticks(1000);
         assert_eq!(rig.fsm.state(), FlightState::Hold);
-        assert_eq!(rig.cmd(Command::Disarm), Err(Reject::NotOnGround));
+        assert_eq!(
+            rig.cmd(Command::Disarm),
+            Err(Reject::Arming(ArmingCheck::OnGround))
+        );
 
         rig.cmd(Command::Land).unwrap();
         assert_eq!(rig.fsm.state(), FlightState::Land);
@@ -965,16 +1062,20 @@ mod tests {
         assert_eq!(first.setpoint.position, lost_at);
         assert_eq!(first.setpoint.velocity, Vector3::zeros());
         rig.state.position += Vector3::new(0.1, 0.2, -0.1);
-        let mut event = Event::None;
+        let mut out = rig.fsm.update(DT, &rig.state, None, ok_health());
+        let mut event = out.event;
         let mut ticks = 1;
         while ticks < 1000 {
             ticks += 1;
-            event = rig.fsm.step(DT, &rig.state, None, ok_health());
+            out = rig.fsm.update(DT, &rig.state, None, ok_health());
+            event = out.event;
             if event != Event::None {
                 break;
             }
         }
         assert_eq!(event, Event::FailsafeReferenceLost);
+        assert!(out.flags.contains(FailsafeFlags::REFERENCE_LOST));
+        assert_eq!(out.failsafe, FailsafeAction::Hold);
         let timeout = FsmParams::default().reference_timeout;
         assert!(
             (ticks as f32 * DT - timeout).abs() <= DT,
@@ -1002,10 +1103,11 @@ mod tests {
             odometry_alive: false,
             ..ok_health()
         };
-        assert!(matches!(
-            rig.fsm.update(DT, &rig.state, None, bad).event,
-            Event::FailsafeEstimatorLost
-        ));
+        let out = rig.fsm.update(DT, &rig.state, None, bad);
+        assert!(matches!(out.event, Event::FailsafeEstimatorLost));
+        assert!(out.flags.contains(FailsafeFlags::LOCAL_POSITION_INVALID));
+        assert!(out.flags.contains(FailsafeFlags::LOCAL_VELOCITY_INVALID));
+        assert_eq!(out.failsafe, FailsafeAction::AttitudeFallback);
         assert_eq!(rig.fsm.state(), FlightState::AttitudeFallback);
         rig.state.position = Vector3::zeros();
         for _ in 0..1000 {
@@ -1013,7 +1115,7 @@ mod tests {
         }
         assert_eq!(
             rig.fsm.command(Command::Land, bad, &rig.state),
-            Err(Reject::OdometryStale)
+            Err(Reject::Arming(ArmingCheck::OdometryAlive))
         );
         rig.fsm.update(DT, &rig.state, None, ok_health());
         assert_eq!(rig.fsm.state(), FlightState::AttitudeFallback);
@@ -1150,17 +1252,35 @@ mod tests {
         rig.ticks(1000);
         let out = rig.fsm.update(DT, &rig.state, None, ok_health());
         assert_eq!(out.setpoint.velocity, Vector3::zeros());
-        let wrench = crate::position_mode(
-            &rig.state,
-            &out.setpoint,
-            &crate::QuadParams::default(),
-            &crate::ControlParams::default(),
-        );
-        assert!(wrench.force.xy().norm() < 1e-3, "{:?}", wrench.force);
-        assert!(
-            (wrench.force.z - 0.219 * G).abs() < 1e-3,
-            "{:?}",
-            wrench.force
-        );
+        assert_eq!(out.setpoint.acceleration, Vector3::zeros());
+    }
+    /// 起飞垂直参考由 `VelocitySmoothing` 生成：加速度与 jerk 受限，速度连续。
+    #[test]
+    fn takeoff_vertical_reference_is_jerk_limited() {
+        let mut rig = Rig::new();
+        rig.cmd(Command::Arm).unwrap();
+        rig.cmd(Command::Takeoff { altitude: 1.0 }).unwrap();
+        let (mut previous_accel, mut previous_velocity) = (0.0f32, 0.0f32);
+        let (mut max_accel, mut max_velocity) = (0.0f32, 0.0f32);
+        for _ in 0..800 {
+            let out = rig.fsm.update(DT, &rig.state, None, ok_health());
+            if out.event != Event::None {
+                break;
+            }
+            let accel = out.setpoint.acceleration.z;
+            let velocity = out.setpoint.velocity.z;
+            assert!((accel - previous_accel).abs() <= rig.fsm.params.takeoff_jerk * DT + 1e-3);
+            assert!(
+                (velocity - previous_velocity).abs() <= rig.fsm.params.takeoff_accel * DT + 1e-3
+            );
+            previous_accel = accel;
+            previous_velocity = velocity;
+            max_accel = max_accel.max(accel.abs());
+            max_velocity = max_velocity.max(velocity.abs());
+            rig.state.position = out.setpoint.position;
+            rig.state.velocity = out.setpoint.velocity;
+        }
+        assert!(max_velocity > 0.2, "应出现爬升速度，实测 {max_velocity:.3}");
+        assert!(max_accel <= rig.fsm.params.takeoff_accel + 1e-3);
     }
 }

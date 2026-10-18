@@ -1,10 +1,10 @@
-//! `configs/quad.toml`：飞行 demo 的场地/起点 + `firefly-flight` 的机体、机体布局与飞控参数。
+//! `configs/quad.toml`：第三人称飞行的场地/起点 + 机体、机体布局与 PX4 控制参数。
 //!
 //! 参数类型定义在 `firefly-flight`（四旋翼模型与飞控的唯一实现），缺键回落
 //! 对应类型的默认值。
 
 use bevy::prelude::*;
-use firefly_flight::{Airframe, ControlParams, QuadParams};
+use firefly_flight::{Airframe, Px4Params, QuadParams};
 use serde::Deserialize;
 
 /// 顶层配置。
@@ -21,9 +21,34 @@ pub struct QuadConfig {
     /// 机体布局（旋翼几何/旋向/电机推力上限）。
     #[serde(default)]
     pub airframe: Airframe,
-    /// 飞控参数。
+    /// PX4 控制参数（角速度/姿态/位置环、分配 airmode）。
     #[serde(default)]
-    pub control: ControlParams,
+    pub control: Px4Params,
+    /// 手柄到姿态/推力的映射参数。
+    #[serde(default)]
+    pub manual: ManualParams,
+}
+
+/// 手柄映射：倾角上限与偏航角速度复用 `control`，这里只留垂直速度环。
+#[derive(Deserialize, Clone, Copy, Debug)]
+#[serde(default)]
+pub struct ManualParams {
+    /// 满油门升降速度（m/s）。
+    pub climb_rate_max: f32,
+    /// 升降速度误差 → 垂直加速度（1/s）。
+    pub vz_kp: f32,
+    /// 满舵偏航角速度（rad/s，绕产品世界 +Z）。
+    pub yaw_rate_max: f32,
+}
+
+impl Default for ManualParams {
+    fn default() -> Self {
+        Self {
+            climb_rate_max: 3.0,
+            vz_kp: 4.0,
+            yaw_rate_max: 3.0,
+        }
+    }
 }
 
 impl Default for QuadConfig {
@@ -33,7 +58,8 @@ impl Default for QuadConfig {
             start: [0.0, -2.0, 1.2],
             drone: QuadParams::default(),
             airframe: Airframe::default(),
-            control: ControlParams::default(),
+            control: Px4Params::default(),
+            manual: ManualParams::default(),
         }
     }
 }
@@ -46,13 +72,15 @@ mod tests {
     fn shipped_config_preserves_control_overrides() {
         let config: QuadConfig =
             toml::from_str(include_str!("../../../configs/quad.toml")).unwrap();
-        let expected = ControlParams {
-            attitude_kp: 9.0,
-            rate_kp: 6.0,
-            ..ControlParams::default()
-        };
         assert_eq!(config.field, "rmuc2027/v1.0.0/field.glb");
-        assert_eq!(config.start, [0.0, -2.0, 1.2]);
-        assert_eq!(format!("{:?}", config.control), format!("{expected:?}"));
+        for (actual, expected) in config.start.iter().zip([0.0, -2.0, 1.2]) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+        // 240Hz 定步长下把角速度环压慢，姿态环沿用旧手感。
+        assert!((config.control.rate.p[0] - 0.02).abs() < 1e-6);
+        assert!((config.control.attitude.p[0] - 9.0).abs() < 1e-6);
+        assert!((config.manual.climb_rate_max - 3.0).abs() < 1e-6);
+        assert!((config.manual.vz_kp - 4.0).abs() < 1e-6);
+        assert!((config.manual.yaw_rate_max - 3.0).abs() < 1e-6);
     }
 }

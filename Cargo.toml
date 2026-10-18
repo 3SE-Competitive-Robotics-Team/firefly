@@ -68,3 +68,5 @@ cast_precision_loss = { level = "allow", priority = 2 }
 cast_sign_loss = { level = "allow", priority = 2 }
 # 上游传递依赖版本分叉（syn/glam/bitflags），非本仓库可控
 multiple_crate_versions = { level = "allow", priority = 2 }
+# 测试逐位校验协议/解析浮点值，断言相等是有意的；生产代码浮点比较由 review 保证
+float_cmp = { level = "allow", priority = 2 }

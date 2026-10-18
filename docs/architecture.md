@@ -314,11 +314,83 @@ FC 同时检查预测到达时间、测量年龄、后验测量年龄与后验�
 会话改变锁存主链路不可用，需重启 FC；主链路失效不阻断独立 ESKF。
 IMU 缺口使相应传播链失效，不补造测量。
 
-### 控制与失联
+### 控制核心（PX4 1:1 移植）
 
-`Command → FlightFsm → 位置/姿态控制 → Airframe::allocate → Control`。
-机体质量、惯量、旋翼几何和推力上限来自 Airframe；四旋翼只能沿机体 +Z 产生推力，
-水平加速依赖倾斜。逐电机分配为唯一饱和点，按总推力、滚转/俯仰、偏航优先级保留可行分量。
+控制律是 PX4-Autopilot `4dbd2e069a5c30c2e53e47e842095d2576dc38c4` 的 1:1 Rust 移植：
+参考源码在 `~/Projects/PX4-Autopilot`（BSD-3；与 OpenVINS/VINS/ORB-SLAM 一样不纳入本仓库），
+`crates/firefly-flight/src/px4/` 是逐类、逐函数、逐字段对应的实现，不含 uORB/参数/调度等平台层。
+
+```text
+参考 → PositionControl（P 位置 + PID 速度 + 推力矢量 + 倾角限幅）
+     → AttitudeControl（四元数 P + 二阶参考模型 + yaw 权重 + 角速度限幅）
+     → RateControl（角速度 PID + 前馈 + 分配饱和反馈）
+     → ControlAllocationSequentialDesaturation（效能矩阵 + 顺序解饱和 + airmode）
+     → 4 电机推力（归一化 [0,1] × 单电机推力上限）
+```
+
+- 模块内部保持 PX4 的 **NED 世界系 / FRD 机体系**与归一化指令：力矩 `[-1,1]`、
+  推力 `[0,1]`、执行器 `[0,1]`。产品 Z-up/FLU 的转换只发生在
+  `px4::controller::Controller` 与 `px4::frames` 边界（`F = diag(1,-1,-1)`）。
+- 位置/速度反馈来自 `Firefly/Odometry`；地图参考用消息自带的变换转入 odom。
+- 归一化悬停推力由质量与推力上限计算（`mg / 4T_max`），不手填。
+- 分配器按旋翼几何构造 4×4 效能矩阵（FRD 行序 `[roll, pitch, yaw, thrust_z]`），
+  伪逆后按轴归一化；`airmode` 默认开滚转/俯仰，垂直推力饱和时保留姿态权限。
+  逐电机 `[0,1]` 限幅是唯一饱和点，未分配力矩回送角速度环做抗积分饱和。
+- 四旋翼只能沿机体 `+Z` 产生推力，水平加速依赖倾斜。
+- 起飞/降落的垂直参考由 `VelocitySmoothing` 生成（jerk 受限），替换旧的位置斜坡；
+  `FsmParams` 的 `takeoff_accel/jerk`、`land_accel/jerk` 限制加速度与 jerk，
+  位置/速度/加速度一起进入 `PositionControl` 前馈。水平位置与航向仍由状态机锁存。
+- 角加速度反馈暂缺省为零（PX4 用 `vehicle_angular_velocity.xyz_derivative`），
+  不伪造测量；默认 D 增益因此很小。
+- `ATTITUDE_FALLBACK` 复用同一姿态/角速度/分配链，只给水平姿态与悬停推力，
+  并将参考姿态吸附到当前设定值，避免跨航向系平滑过渡。
+
+### 解锁检查与失效标志
+
+`firefly-flight::safety` 按 PX4 `ArmingCheck` / `FailsafeFlags` 的语义，只定义本产品
+能评估的条件；RC/GCS/电池/地理围栏/GNSS/mission/失控检测没有输入，因此不设位，
+不伪造“永远通过”的位。
+
+解锁前检查（位号 = 枚举判别值，顺序即首次失败上报顺序）：
+
+| 位 | 检查 | 失败条件 |
+|---:|---|---|
+| 0 | `DISARMED` | 不在 `DISARMED` |
+| 1 | `ESTIMATOR_READY` | 估计未初始化或主姿态链路不新鲜 |
+| 2 | `ATTITUDE_SESSION` | VIO 会话改变 |
+| 3 | `AIRFRAME_READY` | 未收到机体描述 |
+| 4 | `ODOMETRY_ALIVE` | 里程计陈旧 |
+| 5 | `IMU_ALIVE` | IMU 陈旧 |
+| 6 | `ON_GROUND` | 不在起飞点地面 |
+
+`apps/fc` 在 `Arm` 时还把独立 ESKF 热备可用折入 `ESTIMATOR_READY`：主链路 VIO 已就绪
+但热备尚未完成静止初始化时仍拒绝解锁。`fc/arming/failed` 使用同一判定，地面站应等待
+该位清零后重试，不得绕过检查。
+
+失效条件（位号固定，`fc/failsafe/flags` 的 u32 位掩码）：
+
+| 位 | 标志 | 置位条件 |
+|---:|---|---|
+| 0 | `ATTITUDE_INVALID` | 估计未就绪或姿态会话失效 |
+| 1 | `LOCAL_POSITION_INVALID` | 里程计陈旧 |
+| 2 | `LOCAL_VELOCITY_INVALID` | 里程计陈旧（与位置同源） |
+| 3 | `IMU_STALE` | IMU 陈旧 |
+| 4 | `AIRFRAME_MISSING` | 未收到机体描述 |
+| 5 | `ATTITUDE_SESSION_CHANGED` | VIO 会话改变 |
+| 6 | `REFERENCE_STALE` | `TRACK` 下参考缺席（未到超时） |
+| 7 | `REFERENCE_LOST` | `TRACK` 下参考超过失联超时 |
+
+失效动作（`fc/failsafe/action` 的整数编码）：`0 NONE`、`1 HOLD`、
+`2 ATTITUDE_FALLBACK`、`3 DISARM`。
+
+记录形式：`fc/arming/failed` 为未解锁时首个失败检查的位掩码；`fc/failsafe/flags`
+与 `fc/failsafe/action` 为失效位与动作编码，均 10Hz 标量。1Hz 日志输出
+`失效标志 [<名字>] 动作 <NAME>，解锁检查失败位 0xNN`；指令被拒时输出
+`指令 <cmd> 被拒：<检查名>（<中文原因>）`。
+
+`configs/fc.toml` 只覆盖产品包线（位置/速度增益、3 m/s 水平限速、32° 倾角、airmode）；
+角速度/姿态环用 PX4 默认值。质量、惯量、旋翼几何、推力上限仍由 `Firefly/Airframe`
+在运行时提供，飞控不保存第二份。
 
 起飞进入 Hold 后仍保持指令目标；参考流首次失效即锁定当时 odom 位姿、输出零速目标，
 模式超时不重置锚点。飞控每 tick 发布 Control，上锁时为零；指令墙钟超时后 sim 暂停物理
@@ -493,6 +565,7 @@ d = fB/z; d_m = q round((d+ε)/q); z_m = fB/d_m
 | VINS-Fusion `be55a937a57436548ddfb1bd324bc1e9a9e828e0` | `vins_estimator/src/utility/visualization.cpp:53`；`loop_fusion/src/pose_graph_node.cpp:192` | 本地里程计持续发布；回环节点用保存的对齐与漂移变换校正每条新里程计，不等待下一次回环 |
 | EGO-Planner-v2 `9d85475ea7b9bf5c112cf7c3c3d0d3f9e96d9010` | `swarm-playground/main_ws/src/planner/plan_manage/src/ego_replan_fsm.cpp:46`、`:632` | 订阅 `odom_world`，消费位置和速度；规划就绪不以外部视觉匹配成功为条件 |
 | ORB-SLAM3 `4452a3c4ab75b1cde34e5505a36ec3f9edcdc4c4` | `src/System.cc:213`；`src/Tracking.cc:1940`、`:2120` | 跟踪、局部建图、回环分工；跟踪状态由运动/局部地图跟踪决定，回环成功与否不是跟踪心跳 |
+| PX4-Autopilot `4dbd2e069a5c30c2e53e47e842095d2576dc38c4` | `src/lib/rate_control/rate_control.cpp`；`src/modules/mc_att_control/AttitudeControl/AttitudeControl.cpp`；`src/modules/mc_pos_control/PositionControl/PositionControl.cpp`；`src/lib/control_allocation/control_allocation/`；`src/lib/motion_planning/VelocitySmoothing.cpp` | 位置/姿态/角速度/分配四层与起降 jerk 受限参考；四轴专用分配去掉 6 轴/16 执行器分支 |
 
 VINS-Fusion 的四自由度残差、固定首节点和漂移输出是参考；本项目使用弧度、相邻增量链、
 地图锚点和自有 PCG，并非 Ceres 的逐项移植。ORB-SLAM3 参考共视排除、固定尺度几何与
