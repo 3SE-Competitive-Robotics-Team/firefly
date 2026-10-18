@@ -1,0 +1,22 @@
+# firefly-camera 配置；缺键回落代码默认值（apps/camera/src/capture.rs）。
+# 设备节点随内核与接线变化，上板先核对：v4l2-ctl --list-devices。
+# 板载相机走 MIPI-CSI（docs/hw/spec.md），在 Linux 上表现为 /dev/videoN。
+
+# 分辨率由 IPC 消息布局定死（FireflyGrayImageMessage 定长数组），配置须一致。
+width = 320
+height = 240
+
+[left]
+device = "/dev/video0"
+# grey = V4L2_PIX_FMT_GREY；yuyv = V4L2_PIX_FMT_YUYV（取亮度分量）。
+format = "grey"
+
+[right]
+device = "/dev/video1"
+format = "grey"
+
+# 深度可选：删掉这一节就不发布 Firefly/Depth，planner 按无深度源等待。
+[depth]
+device = "/dev/video2"
+# V4L2_PIX_FMT_Z16 原始单位 → 米。
+scale = 0.001

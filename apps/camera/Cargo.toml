@@ -1,0 +1,34 @@
+[package]
+name = "camera"
+version = "0.1.0"
+keywords = ['camera', 'v4l2', 'driver']
+categories = ['hardware-support']
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "camera"
+path = "src/main.rs"
+
+[dependencies]
+firefly-config.workspace = true
+firefly-error.workspace = true
+firefly-hal.workspace = true
+firefly-observability.workspace = true
+firefly-pubsub.workspace = true
+iceoryx2-bb-posix.workspace = true
+log.workspace = true
+serde.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+v4l.workspace = true
+
+[dev-dependencies]
+toml.workspace = true
+
+[lints]
+workspace = true

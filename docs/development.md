@@ -147,7 +147,9 @@ ESKF 对照设置 `backend="eskf"`，不启动 slam。禁止把场地真值当�
 板载计算是 Orange Pi Zero 3W（aarch64 Debian 13，glibc 2.41）。`--target board` 在
 Apple container 的 `rust:1.98.1-trixie` 里原生构建，镜像按 digest 固定，产物在
 `target/container/aarch64/release`；不维护交叉 sysroot。首次构建前运行
-`container system start`，需要拉取镜像并编译依赖。
+`container system start`，需要拉取镜像并编译依赖。构建镜像是在基础镜像上
+加装 `libclang-dev` 的派生镜像（`v4l2-sys-mit` 用 bindgen 生成 V4L2 绑定），
+`xtask` 首次运行会 `container build` 并复用缓存。
 
 产物固定放 `/opt/firefly/{bin,configs,models}`，进程必须从 `/opt/firefly` 启动，
 默认的相对配置和模型路径才成立：
@@ -162,8 +164,35 @@ adb -s firefly-0001 shell 'systemctl start firefly'
 `xtask` 解包器；`deploy` 把二进制、`configs/*.toml` 与默认视觉模型打成
 `dist/firefly-aarch64.zst`（zstd 容器，不是 tar），推到设备后由同一 xtask 的 `unpack`
 解包，`--device` 默认 `firefly-0001`。可复现性由固定镜像 digest、Rust 1.98.1、`--locked`
-和 `Cargo.lock` 保证；升级 Rust 或 Debian 时同步更新 `xtask/src/container.rs` 的镜像 digest。
+和 `Cargo.lock` 保证；升级 Rust 或 Debian 时只需更新 `xtask/src/container.rs` 的
+基础镜像 digest，派生构建镜像的标签由工具链与 digest 前缀拼出，会自动重建。
 干净构建先删除 `target/container/`，再执行上面的命令。
+
+板侧传感器与执行器由三个独占进程接替仿真侧的 `render` 与 `firefly-sim`：
+
+| 进程 | 设备 | 话题 |
+|---|---|---|
+| `camera` | `V4L2` 节点（MIPI-CSI） | 发布 `Firefly/CameraLeft`、`CameraRight`、可选 `Depth` |
+| `imu` | `spidev`（`BMI088` 两片） | 发布 `Firefly/Imu` |
+| `motor` | `sysfs` PWM | 订阅 `Firefly/Control`，发布 `Firefly/Airframe` |
+
+三者都只在板侧构建，宿主机上不参与构建矩阵。上板前按配置文件核对：
+
+- `configs/camera.toml`：`/dev/videoN` 编号随内核与接线变化，先用
+  `v4l2-ctl --list-devices` 核对。分辨率由 IPC 定长消息定死（320×240），
+  驱动不接受该组合时进程直接报错，不静默换成别的分辨率。删掉 `[depth]`
+  就不发布深度。**USB `D430` 不是 `V4L2` 设备**（需 librealsense），
+  当前实现只覆盖走内核 `V4L2` 的相机。
+- `configs/imu.toml`：目前只实现 `BMI088`，`WHO_AM_I` 不匹配直接退出，
+  不会在错型号上继续跑。寄存器初始化值取自数据手册，首次上板须核对
+  `Firefly/Imu` 的读数是否落在量程内的合理重力/静止零偏。
+- `configs/motor.toml`：`sysfs` PWM 只适用于 PWM 电调。`[airframe]`
+  （质量/惯量/旋翼几何/推力上限）在这里维护一份，真机装配后必须换成实测值，
+  否则飞控会拿仿真机体的参数去分配推力。`Control` 断流时四路回到零推力脉宽。
+
+`camera` 与 `imu` 的时间戳都用 `CLOCK_MONOTONIC` 秒，与仿真侧 `sim_time`
+语义不同，同一份录制里不要混用。三个进程都可以单独起停：`bin/camera`、
+`bin/imu`、`bin/motor` 接 `--config <path>`，`Ctrl-C` 正常退出。
 
 `firefly.service` 由镜像构建 [`orangepi-build`](https://github.com/3SE-Competitive-Robotics-Team/orangepi-build)
 预置并默认启动；`deploy` 只发布二进制、配置和模型。systemd 按 `configs/processes.toml`

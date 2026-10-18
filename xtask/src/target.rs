@@ -17,12 +17,17 @@ const DESKTOP_APPS: &[&str] = &[
 ];
 
 /// 机载应用：Orange Pi Zero 3W 上运行的进程，不含 Bevy 仿真/演示程序。
+/// `camera`/`imu`/`motor` 是板侧独占的传感器与执行器驱动，替代仿真侧的
+/// `render` 与 `firefly-sim`。
 const BOARD_APPS: &[&str] = &[
     "aliked",
+    "camera",
     "fc",
     "ffctl",
+    "imu",
     "lightglue",
     "localization",
+    "motor",
     "planner",
     "slam",
     "vio",
