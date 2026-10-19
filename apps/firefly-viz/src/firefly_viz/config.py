@@ -47,8 +47,6 @@ class Options:
     flush_seconds: float = 0.2
     shutdown_seconds: float = 15.0
     viewer_memory: str = "2GiB"
-    # 完整 footer 的 chunk 索引随时长增长；长录制默认不在内存中积累该索引。
-    write_footer: bool = False
     video: VideoOptions = field(default_factory=VideoOptions)
     capture: CaptureOptions = field(default_factory=CaptureOptions)
 

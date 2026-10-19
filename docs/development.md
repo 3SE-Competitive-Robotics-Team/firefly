@@ -319,9 +319,9 @@ H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码
 软件编码仅在配置显式选择 `libx265` 时启用。IPC 布局升级后须同批重建、重启所有生产者
 与消费者，不能混用不同版本的消息类型。
 
-长录制默认不积累完整文件 footer 索引，避免索引内存随 chunk 数增长；代价是离线随机访问
-变慢，依赖 footer 的工具需先用标准 `rerun rrd optimize` 生成带索引的副本。短录制可显式
-配置 `write_footer = true`。这项预算独立于 Viewer 内存限制、图像环形缓冲和编码队列。
+文件录制固定启用完整 footer/manifest，正常关闭后供 Viewer 与随机访问工具直接打开；
+不提供关闭索引的配置项。索引内存随 chunk 数增长，独立于 Viewer、图像缓存和编码队列预算。
+异常中断或历史文件缺少 footer 时，可用标准 `rerun rrd optimize` 生成带索引副本。
 
 性能只认相同构建、硬件、输入与环境下的 trace 实测。主循环建 root span、设置 local parent、
 结束 flush；热路径不使用无条件格式化大对象的 `#[logcall]`。ConsoleReporter span 树
