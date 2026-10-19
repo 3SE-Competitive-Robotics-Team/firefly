@@ -1,0 +1,43 @@
+# firefly-motor 配置；缺键回落代码默认值（apps/motor/src/actuator.rs）。
+# 本进程把 Firefly/Control 的牛顿映射成 sysfs PWM 脉宽，并按 airframe 周期性
+# 发布 Firefly/Airframe（板端被控对象属性的唯一来源）。
+
+rate_hz = 200
+# Control 断流判定（ms）：超过即四路回到零推力脉宽。
+stale_ms = 100
+# Airframe 重发周期（ms）；晚启动的飞控靠持续重发拿到机体参数。
+airframe_ms = 1000
+
+[pwm]
+# 400 Hz 周期，脉宽 1.0..2.0 ms（常规 PWM 电调）。
+period_ns = 2500000
+min_duty_ns = 1000000
+max_duty_ns = 2000000
+
+# 四路通道，顺序与 ControlMessage::thrust 一致：0 前右、1 后左、2 前左、3 后右。
+[[channel]]
+chip = 0
+pwm = 0
+
+[[channel]]
+chip = 0
+pwm = 1
+
+[[channel]]
+chip = 0
+pwm = 2
+
+[[channel]]
+chip = 0
+pwm = 3
+
+[airframe]
+# 与 MuJoCo 场景同一套几何（packages/firefly-mujoco/src/firefly_mujoco/scene.py），
+# 真机装配后用实测值替换；质量/惯量/几何/推力上限只在这里维护一份。
+mass = 0.219
+inertia = [0.0002, 0.0003, 0.0004]
+rotor_positions = [[0.045, -0.045, 0.0], [-0.045, 0.045, 0.0], [0.045, 0.045, 0.0], [-0.045, -0.045, 0.0]]
+rotor_spins = [1.0, 1.0, -1.0, -1.0]
+# 单电机推力上限（N）：3.0 推重比 × 0.219 kg × 9.81 / 4。
+max_thrust_per_motor = 1.611
+torque_coefficient = 0.016

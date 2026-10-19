@@ -1,4 +1,19 @@
 [[process]]
+name = "camera"
+command = ["bin/camera"]
+autostart = true
+
+[[process]]
+name = "imu"
+command = ["bin/imu"]
+autostart = true
+
+[[process]]
+name = "motor"
+command = ["bin/motor"]
+autostart = true
+
+[[process]]
 name = "vio"
 command = ["bin/vio"]
 autostart = true

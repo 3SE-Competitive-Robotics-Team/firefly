@@ -1,0 +1,18 @@
+# firefly-imu 配置；缺键回落代码默认值（apps/imu/src/source.rs）。
+# BMI088 是同一封装内的两片 SPI 从机：加速度计与陀螺各占一条片选。
+
+rate_hz = 400
+# SPI 时钟模式；BMI088 用模式 3，接线异常时先查这里。
+mode = 3
+
+[accel]
+device = "/dev/spidev1.0"
+speed_hz = 10000000
+# 量程 3/6/12/24 g；灵敏度见 crates/firefly-hal/src/bmi088.rs。
+range_g = 6
+
+[gyro]
+device = "/dev/spidev1.1"
+speed_hz = 10000000
+# 量程 125/250/500/1000/2000 °/s。
+range_dps = 2000

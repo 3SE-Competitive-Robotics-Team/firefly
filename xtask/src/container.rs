@@ -1,7 +1,11 @@
 //! 机载构建：在 Apple container 里用 aarch64 Debian trixie 原生编译。
 //!
-//! 镜像固定到 digest，系统 glibc 2.41 与 Orange Pi Zero 3W 一致；ONNX Runtime
+//! 基础镜像固定到 digest，系统 glibc 2.41 与 Orange Pi Zero 3W 一致；ONNX Runtime
 //! 静态库因此不需要交叉 sysroot。构建产物在 `target/container/aarch64/release`。
+//!
+//! 构建镜像在基础镜像上加装 `libclang-dev`：`v4l` 依赖的 `v4l2-sys-mit` 用 bindgen
+//! 生成 V4L2 绑定，需要 libclang 的共享库。`Containerfile` 由基础镜像常量生成，
+//! 保证 digest 只有一处来源。
 
 use std::fs;
 use std::path::Path;
@@ -13,6 +17,8 @@ pub const IMAGE: &str =
 const TOOLCHAIN: &str = "1.98.1";
 /// Apple container 默认只给约 1GB，release 并行编译会被 OOM kill。
 const MEMORY: &str = "8G";
+/// 派生构建镜像的仓库名。
+const BUILDER_IMAGE: &str = "firefly-board-builder";
 
 pub fn build(root: &Path, apps: &[&str], with_unpacker: bool) -> Result<(), String> {
     let uid = id("-u")?;
@@ -23,7 +29,9 @@ pub fn build(root: &Path, apps: &[&str], with_unpacker: bool) -> Result<(), Stri
         fs::create_dir_all(&path).map_err(|error| format!("create {}: {error}", path.display()))?;
     }
 
-    println!("release board（container {IMAGE}）");
+    let image = builder_tag();
+    ensure_builder_image(&cache, &image)?;
+    println!("release board（container {image}）");
     let mount = format!("{}:/work", root.display());
     let mut command = Command::new("container");
     command.args([
@@ -55,7 +63,7 @@ pub fn build(root: &Path, apps: &[&str], with_unpacker: bool) -> Result<(), Stri
         "XDG_CACHE_HOME=/work/target/container/cache",
         "--env",
         "TMPDIR=/work/target/container/tmp",
-        IMAGE,
+        &image,
         "cargo",
         "build",
         "--release",
@@ -76,6 +84,45 @@ pub fn build(root: &Path, apps: &[&str], with_unpacker: bool) -> Result<(), Stri
     if !status.success() {
         return Err(format!(
             "container build failed: {status}；若提示 XPC 连接失败，先运行 container system start"
+        ));
+    }
+    Ok(())
+}
+
+/// 派生镜像标签：工具链 + 基础镜像 digest 前缀。换 digest 即换标签，
+/// 不会静默复用旧层。
+fn builder_tag() -> String {
+    let digest = IMAGE.split_once("sha256:").map_or("", |(_, digest)| digest);
+    let short = digest.get(..12).unwrap_or(digest);
+    format!("{BUILDER_IMAGE}:{TOOLCHAIN}-{short}")
+}
+
+/// 生成并（首次）构建构建镜像：基础镜像 + `libclang-dev`。
+fn ensure_builder_image(cache: &Path, image: &str) -> Result<(), String> {
+    let inspect = Command::new("container")
+        .args(["image", "inspect", image])
+        .output()
+        .map_err(|error| format!("failed to run container: {error}"))?;
+    if inspect.status.success() {
+        return Ok(());
+    }
+
+    let containerfile = cache.join("Containerfile");
+    let recipe = format!(
+        "FROM {IMAGE}\nRUN apt-get update && apt-get install -y --no-install-recommends libclang-dev && rm -rf /var/lib/apt/lists/*\n"
+    );
+    fs::write(&containerfile, recipe)
+        .map_err(|error| format!("write {}: {error}", containerfile.display()))?;
+    println!("构建板载构建镜像 {image}（首次需要下载 libclang）");
+    let status = Command::new("container")
+        .args(["build", "--arch", "arm64", "--tag", image, "--file"])
+        .arg(&containerfile)
+        .arg(cache)
+        .status()
+        .map_err(|error| format!("failed to run container build: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "container build failed: {status}；构建镜像需要能访问 Debian 软件源"
         ));
     }
     Ok(())

@@ -45,6 +45,30 @@ flowchart LR
 - `render` 是无窗口的传感器生成进程，只渲染场景与左、右、深度相机。调试界面、
   机体模型、图像叠加、轨迹、地图和曲线由独立 Python `firefly-viz` 与 Rerun Viewer 承担。
 
+### 板载拓扑
+
+真机没有 `firefly-sim` 与 `render`，它们的角色由 `camera`、`imu`、`motor` 三个
+板侧进程接替；`vio` 及之后的算法进程在两种部署里是同一份代码、同一个二进制，
+对数据来源无感知。硬件差异只出现在总线两端：传感器是发布端，执行器是订阅端。
+
+```mermaid
+flowchart LR
+    C[camera：MIPI-CSI] -->|双目与可选深度| V[vio]
+    M[imu：SPI BMI088] -->|原始 IMU| V
+    V -->|连续 odom| F[fc]
+    F -->|四电机推力| T[motor：sysfs PWM → 电调]
+    T -->|Airframe| F
+```
+
+- `camera` 只做格式协商与帧发布，标定留在消费者侧；深度可选，配置不写 `[depth]`
+  就不发布 `Firefly/Depth`，`planner` 按无深度源等待，不回退到其他估计。
+- `imu` 只发布原始角速度与比力；姿态解算仍是飞控进程内的 `firefly-imu`。换 IMU
+  型号只影响该进程的寄存器层，总线契约不变。
+- `Airframe` 在仿真里来自 MuJoCo 模型，在板端由 `motor` 按 `configs/motor.toml`
+  持续重发；两处都是各自部署里的唯一来源，飞控不另抄，板端数据必须换成实测装配值。
+- 板载时间戳用 `CLOCK_MONOTONIC` 秒（`camera` 与 `imu` 同一时钟域），仿真侧用
+  `sim_time`；两者都是单调秒，但同一份录制里不能混用。
+
 ### 诊断记录与展示
 
 `Firefly/VizScalars` 使用小型定长消息长期保存数值；`Firefly/Viz` 保存位姿、点集、矩阵、
