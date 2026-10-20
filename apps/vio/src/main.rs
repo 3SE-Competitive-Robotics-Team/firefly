@@ -118,15 +118,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     params.state_options.num_cameras = 2;
     params.triangulation_options.max_baseline = cfg.estimator.max_baseline;
-    // SLAM 路标上限（对照 OpenVINS 默认 25）：持久路标吸收 KLT 的滞后偏置；
-    // 体素选点另由 `[slam] voxel_selection` 单独开启。
+    // SLAM 路标上限（对照 OpenVINS 默认 25）：持久路标吸收 KLT 的滞后偏置。
     params.state_options.max_slam_features = cfg.slam.max_slam_features;
-    params.voxel_options.enabled = cfg.slam.voxel_selection;
-    params.voxel_options.voxel_size = cfg.slam.voxel_size;
-    params.voxel_options.max_points_per_voxel = cfg.slam.max_points_per_voxel;
-    params.voxel_options.min_point_distance = cfg.slam.min_point_distance;
-    params.voxel_options.neighbor_radius = cfg.slam.neighbor_radius;
-    params.voxel_options.use_all_points = cfg.slam.use_all_points;
     // 零速更新关闭（对照 OpenVINS 参数 `try_zupt=false`）：慢速运动下加速度
     // 低于 IMU 噪声 σ，零速判据会被噪声触发并冻结位置估计；官方显式零运动
     // 分支同样标注 untested，不属默认路径。

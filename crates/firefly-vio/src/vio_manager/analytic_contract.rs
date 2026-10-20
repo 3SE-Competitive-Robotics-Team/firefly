@@ -3,15 +3,14 @@ use super::*;
 use firefly_vio_core::{
     cam::{CamRadtan, SharedCamera},
     sensor::{CameraData, ImuData},
-    track::{HistogramMethod, KeyPoint},
+    track::HistogramMethod,
 };
 use firefly_vio_types::quat_ops::rot_2_quat;
 use nalgebra::{Matrix3, UnitQuaternion};
 use std::{collections::HashMap, sync::Arc};
 
-/// 解析双目场景：2 相机、倾斜 20° 安装；`voxel_selection` 控制体素选点。
-/// 返回管理器与 `R_ItoC`。
-fn analytic_stereo_manager(voxel_selection: bool) -> (VioManager, Matrix3<f64>) {
+/// 解析双目场景：2 相机、倾斜 20° 安装。返回管理器与 `R_ItoC`。
+fn analytic_stereo_manager() -> (VioManager, Matrix3<f64>) {
     let intrinsics = [168.607, 168.607, 160., 120., 0., 0., 0., 0.];
     let cameras: BTreeMap<usize, SharedCamera> = (0..2)
         .map(|id| {
@@ -37,14 +36,6 @@ fn analytic_stereo_manager(voxel_selection: bool) -> (VioManager, Matrix3<f64>) 
     );
     let mut options = VioManagerOptions::default();
     options.state_options.num_cameras = 2;
-    options.voxel_options.enabled = voxel_selection;
-    if voxel_selection {
-        // 与 configs/vio.toml 一致（官方 EuRoC/TUM-VI 调参）。解析点云间距 0.5~1m，
-        // 需 0.3m 体素 ±2 邻域才能覆盖路标体素；代码默认 0.1m/±1 命中恒为 0。
-        options.voxel_options.voxel_size = 0.3;
-        options.voxel_options.neighbor_radius = 2;
-        options.voxel_options.min_point_distance = 0.0;
-    }
     let mut manager = VioManager::new(options, cameras, tracker);
     let tilt = 20_f64.to_radians();
     let rc = Matrix3::new(
@@ -86,7 +77,7 @@ fn trajectory_rotation(t: f64) -> UnitQuaternion<f64> {
 }
 
 /// 解析双目点云：8 层沿行进方向（x 间距 2m）+ 每层 20 点在 y/z 上以 0.15m
-/// 密排，使相机可见层内相邻点落在 0.3m 体素的 ±2 邻域内（真实特征密度）。
+/// 密排，贴近真实特征密度。
 fn analytic_points() -> Vec<Vector3<f64>> {
     (0..160)
         .map(|i| {
@@ -105,8 +96,6 @@ struct TrajectoryOutcome {
     peak: f64,
     /// 最大 SLAM 路标数。
     slam_peak: usize,
-    /// 可见体素缓存非空的更新帧数（体素选点是否真的生效）。
-    voxel_frames: usize,
 }
 
 /// 跑 10 秒加速/转向轨迹（解析 IMU 与双目投影），返回观测量。
@@ -119,7 +108,6 @@ fn run_accelerated_trajectory(manager: &mut VioManager, rc: &Matrix3<f64>) -> Tr
     let points = analytic_points();
     let mut peak = 0_f64;
     let mut slam_peak = 0;
-    let mut voxel_frames = 0;
     for k in 0..=1000 {
         let t = f64::from(k) * 0.01;
         let r = trajectory_rotation(t);
@@ -133,7 +121,6 @@ fn run_accelerated_trajectory(manager: &mut VioManager, rc: &Matrix3<f64>) -> Tr
             continue;
         }
         manager.propagate_and_clone(t);
-        let mut last: [Vec<(usize, f32, f32)>; 2] = [Vec::new(), Vec::new()];
         for (id, p) in points.iter().enumerate() {
             for (cam, y) in [(0, -0.025), (1, 0.025)] {
                 let pc =
@@ -149,20 +136,8 @@ fn run_accelerated_trajectory(manager: &mut VioManager, rc: &Matrix3<f64>) -> Tr
                         (pc.x / pc.z) as f32,
                         (pc.y / pc.z) as f32,
                     );
-                    last[cam].push((id, u as f32, v as f32));
                 }
             }
-        }
-        // 体素选点的查询源是 tracker 的 last obs（对照官方），一并写入。
-        for (cam, entries) in last.iter().enumerate() {
-            let pts = entries
-                .iter()
-                .map(|(_, u, v)| KeyPoint::new(*u, *v))
-                .collect();
-            let ids = entries.iter().map(|(id, _, _)| *id).collect();
-            manager
-                .track_feats
-                .set_last_observations(cam as i32, pts, ids);
         }
         manager.do_feature_propagate_update(&CameraData {
             timestamp: t,
@@ -172,15 +147,8 @@ fn run_accelerated_trajectory(manager: &mut VioManager, rc: &Matrix3<f64>) -> Tr
         });
         peak = peak.max((manager.state.imu.pos() - trajectory_position(t)).norm());
         slam_peak = slam_peak.max(manager.state.features_slam.len());
-        if manager.params.voxel_options.enabled && !manager.recent_voxels.is_empty() {
-            voxel_frames += 1;
-        }
     }
-    TrajectoryOutcome {
-        peak,
-        slam_peak,
-        voxel_frames,
-    }
+    TrajectoryOutcome { peak, slam_peak }
 }
 
 /// 度量尺度契约：解析投影下位置/速度误差必须小于 1cm。
@@ -199,41 +167,15 @@ fn assert_metric_scale(manager: &VioManager, peak: f64, slam_peak: usize, tag: &
 
 #[test]
 fn accelerated_ten_meter_stereo_has_metric_scale() {
-    let (mut manager, rc) = analytic_stereo_manager(false);
+    let (mut manager, rc) = analytic_stereo_manager();
     let outcome = run_accelerated_trajectory(&mut manager, &rc);
     assert_metric_scale(&manager, outcome.peak, outcome.slam_peak, "纯 MSCKF");
-}
-
-/// 体素选点开启后仍须保持度量尺度，且可见体素缓存确实在多数更新帧生效。
-#[test]
-fn voxel_selection_ten_meter_stereo_has_metric_scale() {
-    let (mut manager, rc) = analytic_stereo_manager(true);
-    let base_cov = manager.state.cov.nrows();
-    let base_clones = manager.state.clones_imu.len();
-    let base_landmarks = manager.state.features_slam.len();
-    let outcome = run_accelerated_trajectory(&mut manager, &rc);
-    assert_metric_scale(&manager, outcome.peak, outcome.slam_peak, "体素选点");
-    assert!(manager.voxel_map.num_points() > 0, "体素索引必须已收录路标");
-    assert!(
-        outcome.voxel_frames >= 20,
-        "可见体素缓存生效帧数不足：{}",
-        outcome.voxel_frames
-    );
-    // 协方差维度必须与 SLAM 路标数严格对应：入体素图失败的路标已被回滚
-    //（对照官方 `delayedInit` 的丢弃语义，但不留已入协方差的孤儿变量）。
-    assert_eq!(
-        manager.state.cov.nrows(),
-        base_cov
-            + 6 * (manager.state.clones_imu.len() - base_clones)
-            + 3 * (manager.state.features_slam.len() - base_landmarks),
-        "协方差维度必须与克隆(PoseJpl)/SLAM 路标数严格对应（不留孤儿变量）"
-    );
 }
 
 /// 小幅周期倾斜与平移下，精确观测不得产生虚假的加速度零偏。
 #[test]
 fn sustained_tilted_hover_preserves_zero_bias() {
-    let (mut manager, rc) = analytic_stereo_manager(false);
+    let (mut manager, rc) = analytic_stereo_manager();
     let mut initial = [0.; 17];
     initial[4] = 1.;
     initial[7] = 1.;

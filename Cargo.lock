@@ -3176,7 +3176,6 @@ dependencies = [
  "firefly-vio-core",
  "firefly-vio-init",
  "firefly-vio-types",
- "firefly-voxel-svio",
  "log",
  "nalgebra",
 ]
@@ -3228,19 +3227,6 @@ dependencies = [
  "log",
  "nalgebra",
  "purecv",
-]
-
-[[package]]
-name = "firefly-voxel-svio"
-version = "0.1.0"
-dependencies = [
- "fastrace",
- "firefly-error",
- "firefly-vio-types",
- "log",
- "nalgebra",
- "serde",
- "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]
@@ -7427,7 +7413,6 @@ dependencies = [
  "firefly-vio",
  "firefly-vio-core",
  "firefly-vio-types",
- "firefly-voxel-svio",
  "iceoryx2",
  "log",
  "nalgebra",

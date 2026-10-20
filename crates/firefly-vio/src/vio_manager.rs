@@ -15,10 +15,7 @@ use firefly_vio_core::propagation::{LinearizationPoint, MeanState, Propagator};
 use firefly_vio_core::sensor::{CameraData, ImuData};
 use firefly_vio_core::track::TrackKlt;
 use firefly_vio_types::var::Variable as _;
-use firefly_voxel_svio::{
-    ActiveTrackTriangulator, IntersectOptions, RayObservation, VoxelKey, VoxelMap,
-};
-use nalgebra::{DMatrix, Vector2, Vector3};
+use nalgebra::{DMatrix, Vector3};
 use std::collections::BTreeMap;
 
 use crate::options::VioManagerOptions;
@@ -45,15 +42,6 @@ pub struct VioManager {
     pub updater_msckf: UpdaterMsckf,
     /// SLAM 特征更新器。
     pub updater_slam: UpdaterSlam,
-    /// 体素地图（`voxel_options.enabled` 时与 `state.features_slam` 同步，
-    /// 为 SLAM 更新做可见体素选点；关闭时全程空置）。
-    pub voxel_map: VoxelMap,
-    /// 上一帧活跃轨迹命中的可见体素（对照 `getRecentVoxel`：每帧末刷新，
-    /// 供下一帧 SLAM 选点；仅在 `voxel_options.enabled` 时维护）。
-    recent_voxels: Vec<VoxelKey>,
-    /// 活跃轨迹跨帧射线交会累积器（对照 `active_feat_linsys_*`；仅在
-    /// `voxel_options.enabled` 时使用）。
-    active_tracks: ActiveTrackTriangulator,
     /// 初始化器（对照 C++ 的 `initializer`）。
     pub initializer: firefly_vio_init::inertial_init::InertialInitializer,
     /// 零速更新器（`try_zero_velocity` 开启时使用）。
@@ -104,12 +92,6 @@ impl VioManager {
             sigma_ab: params.imu_noises.sigma_ab,
             ..params.init_options.clone()
         };
-        let voxel_map = VoxelMap::new(params.voxel_options.clone());
-        let active_tracks = ActiveTrackTriangulator::new(IntersectOptions {
-            max_cond_number: params.triangulation_options.max_cond_number,
-            min_dist: params.triangulation_options.min_dist,
-            max_dist: params.triangulation_options.max_dist,
-        });
         let updater_zero_velocity = if params.zero_velocity_options.try_zero_velocity {
             Some(UpdaterZeroVelocity::new(
                 params.msckf_options.clone(),
@@ -129,9 +111,6 @@ impl VioManager {
             track_feats: tracker,
             updater_msckf,
             updater_slam,
-            voxel_map,
-            recent_voxels: Vec::new(),
-            active_tracks,
             initializer: firefly_vio_init::inertial_init::InertialInitializer::new(init_options),
             updater_zero_velocity,
             has_moved_since_zero_vel: false,
@@ -499,7 +478,7 @@ impl VioManager {
                 .track_feats
                 .database_mut()
                 .features_containing(marg_time, false, true);
-            // 已有路标的测量只属于 SLAM；体素未选中时也不能作为独立 MSCKF 特征消费。
+            // 已有路标的测量只属于 SLAM，不能作为独立 MSCKF 特征消费。
             feats_marg.retain(|feat| !self.state.features_slam.contains_key(&feat.featid));
         }
 
@@ -539,18 +518,11 @@ impl VioManager {
             }
         }
 
-        // 9. SLAM 更新集来源（对照官方 `featureUpdate` 的 voxel 循环）：开启体素
-        // 选点 → 遍历上一帧算出的可见体素，按 use_all_points 取块首或全部点；关闭 → 遍历
-        // 全部 SLAM 路标（官方无开关，此为 firefly 的关闭语义）。对每个被访问的
-        // 路标：feature 在库则加入更新集；feature 缺失且其 host 相机在本帧 → 标记
-        // 边缘化；`update_fail_count > 1` → 标记边缘化。标记只作用于被访问的路标，
-        // 不可见的路标不因此被丢弃（官方语义）。
-        let visited: Vec<usize> = if self.params.voxel_options.enabled {
-            self.voxel_map.select(&self.recent_voxels)
-        } else {
-            self.state.features_slam.keys().copied().collect()
-        };
-        for featid in visited {
+        // 9. SLAM 更新集来源（对照官方 `featureUpdate` 的路标循环）：遍历全部 SLAM
+        // 路标。对每个路标：feature 在库则加入更新集；feature 缺失且其 host 相机在
+        // 本帧 → 标记边缘化；`update_fail_count > 1` → 标记边缘化。标记只作用于
+        // 被访问的路标，缺失但未标记的路标不因此被丢弃。
+        for featid in self.state.features_slam.keys().copied().collect::<Vec<_>>() {
             let feat2 = self.track_feats.database_mut().get_feature(featid, false);
             let feature_missing = feat2.is_none();
             if let Some(f2) = feat2 {
@@ -570,12 +542,7 @@ impl VioManager {
 
         // 10. 边缘化所有标记 `should_marg` 的 SLAM 特征（对照官方
         // `marginalizeSlam`：在选点循环之后执行）。
-        let marged = marginalize_slam(&mut self.state);
-        if self.params.voxel_options.enabled {
-            for id in marged {
-                let _ = self.voxel_map.remove_point(id);
-            }
-        }
+        marginalize_slam(&mut self.state);
 
         // 11. 分离为新特征（延迟初始化）与老特征（SLAM 更新）（对照 C++）
         let mut feats_slam_delayed: Vec<Feature> = Vec::new();
@@ -588,32 +555,12 @@ impl VioManager {
             }
         }
         log::debug!(
-            "SLAM 选点 t={:.2} 路标={} 可见体素={} 更新={} 延迟={}",
+            "SLAM 选点 t={:.2} 路标={} 更新={} 延迟={}",
             self.state.timestamp,
             self.state.features_slam.len(),
-            self.recent_voxels.len(),
             feats_slam_update.len(),
             feats_slam_delayed.len()
         );
-
-        // 11b. 体素选点（对照 Voxel-SVIO `featureUpdate` 的选点段；仅开启时）：
-        // 对上一帧末算出的可见体素（`recent_voxels`）按配置选取路标 id，
-        // 保留其中仍在待更新集里的特征；无可见体素则本帧无路标更新
-        // （官方行为，无回落）。落选特征保留在库中延后更新（不标记删除）。
-        if self.params.voxel_options.enabled && !feats_slam_update.is_empty() {
-            let selected = self.voxel_map.select(&self.recent_voxels);
-            log::debug!(
-                "体素选点 t={:.2} 候选={} 可见体素={} 选中={} 索引={}点/{}体素",
-                self.state.timestamp,
-                feats_slam_update.len(),
-                self.recent_voxels.len(),
-                selected.len(),
-                self.voxel_map.num_points(),
-                self.voxel_map.num_voxels()
-            );
-            let keep: std::collections::HashSet<usize> = selected.into_iter().collect();
-            feats_slam_update.retain(|f| keep.contains(&f.featid));
-        }
         // 12. MSCKF 更新用的特征 = lost + marg + maxtracks 剩余（对照 C++）
         let mut featsup_msckf = feats_lost;
         featsup_msckf.append(&mut feats_marg);
@@ -653,9 +600,6 @@ impl VioManager {
             let consumed = self.updater_slam.update(&mut self.state, &mut batch);
             self.propagator.invalidate_cache();
             self.track_feats.database_mut().mark_deleted(consumed);
-            // 对照官方：每批 SLAM 更新后把所有路标迁到当前体素
-            // （`changeHostVoxel`）。
-            self.sync_voxel_positions();
         }
 
         // 15. SLAM 延迟初始化（对照 C++）
@@ -665,33 +609,12 @@ impl VioManager {
             self.updater_slam
                 .delayed_init(&mut self.state, &mut feats_slam_delayed);
             self.propagator.invalidate_cache();
-            // 延迟初始化路标须进入体素图；未入图的路标标记为边缘化，保持状态与地图一致。
-            if self.params.voxel_options.enabled {
-                for id in &delayed_ids {
-                    if let Some(lm) = self.state.features_slam.get(id) {
-                        let p = lm.get_xyz(false);
-                        if !self.voxel_map.add_point(*id, &p)
-                            && let Some(lm) = self.state.features_slam.get_mut(id)
-                        {
-                            lm.should_marg = true;
-                        }
-                    }
-                }
-                for id in marginalize_slam(&mut self.state) {
-                    let _ = self.voxel_map.remove_point(id);
-                }
-            }
             self.track_feats.database_mut().mark_deleted(delayed_ids);
         }
 
         //=====================================================================
         // 清理与边缘化（对照 C++ 552-596）
         //=====================================================================
-
-        // 在左目触发帧刷新可见体素缓存；数据源为 tracker 的 last observation。
-        if message.sensor_ids.first() == Some(&0) {
-            self.refresh_recent_voxels();
-        }
 
         if self.state.timestamp - self.last_mapping_time >= 0.2 - 1e-9 {
             self.mapping_snapshot = crate::mapping::capture(self);
@@ -708,81 +631,6 @@ impl VioManager {
                 .cleanup_measurements(marg_time);
         }
         marginalize_old_clone(&mut self.state);
-    }
-
-    /// 把 `state.features_slam` 中已在体素图里的路标迁到当前体素（对照官方
-    /// `changeHostVoxel`：EKF 更新后路标会移动，跨体素自动搬家）。
-    fn sync_voxel_positions(&mut self) {
-        if !self.params.voxel_options.enabled {
-            return;
-        }
-        for (id, lm) in &self.state.features_slam {
-            if self.voxel_map.contains(*id) {
-                let _ = self.voxel_map.update_point(*id, &lm.get_xyz(false));
-            }
-        }
-    }
-
-    /// 刷新可见体素缓存（对照 Voxel-SVIO `triangulateActiveTracks` +
-    /// `getRecentVoxel`，`stereoVio.cpp:627-895`）。
-    ///
-    /// 用 tracker 的上一帧观测（`last_ids`/`last_points`，不经特征库，故不受
-    /// 本帧清理影响）对非 SLAM 特征做跨帧射线交会（[`ActiveTrackTriangulator`]），
-    /// 产出世界坐标；再用它们标记 ±`neighbor_radius` 内的可见体素，供下一帧
-    /// 选点。仅在 `voxel_options.enabled` 时维护；关闭时缓存保持为空。
-    #[fastrace::trace]
-    fn refresh_recent_voxels(&mut self) {
-        if !self.params.voxel_options.enabled {
-            return;
-        }
-        let timestamp = self.state.timestamp;
-        let clones_cam = crate::updater_slam::build_clones_cam(&self.state);
-        let slam_ids: std::collections::HashSet<usize> =
-            self.state.features_slam.keys().copied().collect();
-        let mut observations: Vec<RayObservation> = Vec::new();
-        for cam_id in self
-            .state
-            .calib_imu_to_cam
-            .keys()
-            .copied()
-            .collect::<Vec<_>>()
-        {
-            let (Some(cam), Some(clones)) =
-                (self.state.cameras.get(&cam_id), clones_cam.get(&cam_id))
-            else {
-                continue;
-            };
-            let Some(clone) = clones
-                .iter()
-                .find(|(t, _)| t.total_cmp(&timestamp).is_eq())
-                .map(|(_, c)| c)
-            else {
-                continue;
-            };
-            let sensor = cam_id as i32;
-            let ids = self.track_feats.last_ids(sensor);
-            let pts = self.track_feats.last_points(sensor);
-            for (id, kp) in ids.iter().zip(pts.iter()) {
-                // 官方跳过 `map_points`（SLAM 路标不作为查询源）。
-                if slam_ids.contains(id) {
-                    continue;
-                }
-                let uv_norm = cam.undistort_d(Vector2::new(f64::from(kp.x), f64::from(kp.y)));
-                observations.push(RayObservation {
-                    featid: *id,
-                    uv_norm,
-                    rot_g_to_c: clone.rot,
-                    pos_c_in_g: clone.pos,
-                });
-            }
-        }
-        let queries: Vec<Vector3<f64>> = self
-            .active_tracks
-            .update(&observations)
-            .into_iter()
-            .map(|(_, p_g)| p_g)
-            .collect();
-        self.recent_voxels = self.voxel_map.recent_voxels(&queries, timestamp);
     }
 
     /// 传播到指定相机时刻并增广克隆（对照
@@ -918,6 +766,7 @@ mod tests {
     use crate::options::StateOptions;
     use firefly_vio_core::sensor::GrayImage;
     use firefly_vio_core::track::{HistogramMethod, TrackKlt};
+    use nalgebra::Vector2;
     use std::collections::HashMap;
 
     fn test_manager() -> VioManager {
@@ -1045,36 +894,6 @@ mod tests {
     }
 
     #[test]
-    fn voxel_selection_defaults_off_and_wires() {
-        // 默认关闭时体素索引保持空置。
-        let mgr = test_manager();
-        assert!(!mgr.params.voxel_options.enabled);
-        assert_eq!(mgr.voxel_map.num_points(), 0);
-        // 开启后索引可用：收录 → 可见查询 → 每体素限量选点。
-        let mut params = VioManagerOptions::default();
-        params.voxel_options.enabled = true;
-        let cameras = BTreeMap::new();
-        let tracker = TrackKlt::new(
-            HashMap::new(),
-            200,
-            0,
-            false,
-            HistogramMethod::None,
-            10,
-            5,
-            5,
-            15,
-        );
-        let mut mgr = VioManager::new(params, cameras, tracker);
-        assert!(mgr.voxel_map.add_point(1, &Vector3::new(0.05, 0.0, 3.0)));
-        assert!(mgr.voxel_map.add_point(2, &Vector3::new(5.0, 0.0, 3.0)));
-        let recent = mgr
-            .voxel_map
-            .recent_voxels(&[Vector3::new(0.05, 0.0, 3.0)], 1.0);
-        assert_eq!(mgr.voxel_map.select(&recent), vec![1]);
-    }
-
-    #[test]
     fn gray_image_roundtrip() {
         let img = GrayImage {
             width: 4,
@@ -1084,23 +903,13 @@ mod tests {
         assert_eq!(img.data.len(), 16);
     }
 
-    /// 体素场景：相机 0 内参 `fx=fy=600`、`cx=320`、`cy=240`，外参为单位位姿
+    /// SLAM 场景：相机 0 内参 `fx=fy=600`、`cx=320`、`cy=240`，外参为单位位姿
     /// （相机系 = IMU 系平移）。供整体输入输出测试注入跟踪观测与路标。
-    fn voxel_manager() -> VioManager {
-        voxel_manager_with_all_points(false)
-    }
-
-    fn voxel_manager_with_all_points(use_all_points: bool) -> VioManager {
+    fn slam_manager() -> VioManager {
         use firefly_vio_core::cam::{CamRadtan, SharedCamera};
         use std::sync::Arc;
         let mut params = VioManagerOptions::default();
-        params.voxel_options.enabled = true;
-        params.voxel_options.use_all_points = use_all_points;
-        // 同格多路标场景需要允许同体素多点；解析夹具点距 0.5~1m，体素与邻域
-        // 按官方 EuRoC/TUM-VI 调参（0.3 / ±2）。
-        params.voxel_options.min_point_distance = 0.0;
-        params.voxel_options.voxel_size = 0.3;
-        params.voxel_options.neighbor_radius = 2;
+        params.state_options.max_clone_size = 6;
         let cam: SharedCamera = Arc::new(CamRadtan::new(
             640,
             480,
@@ -1120,15 +929,8 @@ mod tests {
         VioManager::new(params, BTreeMap::from([(0usize, cam)]), tracker)
     }
 
-    /// 推进一帧：设置 IMU 位姿、增广克隆、写入相机 0 的 last obs（世界点 `p_g`），
-    /// 并刷新可见体素缓存（与流水线一致，逐帧累积）。累积器需覆盖 4 帧才产出
-    /// （对照官方 `count > 3`）。
-    fn feed_voxel_frame(
-        mgr: &mut VioManager,
-        t: f64,
-        p_imu: Vector3<f64>,
-        tracks: &[(usize, Vector3<f64>)],
-    ) {
+    /// 推进一帧：设置 IMU 位姿并增广克隆。
+    fn feed_frame(mgr: &mut VioManager, t: f64, p_imu: Vector3<f64>) {
         let q = nalgebra::Vector4::new(0.0, 0.0, 0.0, 1.0);
         mgr.state.timestamp = t;
         mgr.state.imu.set_value(
@@ -1146,28 +948,15 @@ mod tests {
             Vector3::zeros(),
         );
         crate::state_helper::augment_clone(&mut mgr.state, &Vector3::zeros());
-        let mut pts = Vec::new();
-        let mut ids = Vec::new();
-        for (id, p_g) in tracks {
-            let pc = p_g - p_imu;
-            let (un, vn) = (pc.x / pc.z, pc.y / pc.z);
-            pts.push(firefly_vio_core::track::KeyPoint::new(
-                (600.0 * un + 320.0) as f32,
-                (600.0 * vn + 240.0) as f32,
-            ));
-            ids.push(*id);
-        }
-        mgr.track_feats.set_last_observations(0, pts, ids);
-        mgr.refresh_recent_voxels();
     }
 
     #[test]
     fn mapping_snapshot_owns_geometry_without_mutating_filter_or_retiming_it() {
-        let mut mgr = voxel_manager();
+        let mut mgr = slam_manager();
         let point = Vector3::new(0.55, 0.25, 3.05);
         for (i, position) in four_views().into_iter().enumerate() {
             let timestamp = 1. + i as f64;
-            feed_voxel_frame(&mut mgr, timestamp, position, &[(7, point)]);
+            feed_frame(&mut mgr, timestamp, position);
             let relative = point - position;
             let u = (relative.x / relative.z) as f32;
             let v = (relative.y / relative.z) as f32;
@@ -1206,166 +995,20 @@ mod tests {
         ]
     }
 
-    /// 体素选点整体输入输出（对照帧末 `triangulateActiveTracks` +
-    /// `getRecentVoxel` → 下帧 `select`）：last obs → 跨帧交会 → 命中体素 → 块首选点。
-    #[test]
-    fn voxel_pipeline_marks_visible_voxel_and_selects_front_point() {
-        let mut mgr = voxel_manager();
-        let p_vis = Vector3::new(0.55, 0.25, 3.05);
-        assert!(mgr.voxel_map.add_point(100, &p_vis));
-        for (i, p_imu) in four_views().iter().enumerate() {
-            feed_voxel_frame(&mut mgr, 1.0 + i as f64, *p_imu, &[(7, p_vis)]);
-        }
-        assert!(
-            mgr.recent_voxels.contains(&mgr.voxel_map.key_of(&p_vis)),
-            "可见体素未命中：{:?}",
-            mgr.recent_voxels
-        );
-        assert_eq!(mgr.voxel_map.select(&mgr.recent_voxels), vec![100]);
-    }
-
-    /// 不足四帧不产出（对照官方 `count > 3`）：可见体素保持为空。
-    #[test]
-    fn voxel_pipeline_needs_four_frames() {
-        let mut mgr = voxel_manager();
-        let p = Vector3::new(0.55, 0.25, 3.05);
-        assert!(mgr.voxel_map.add_point(100, &p));
-        for (i, p_imu) in four_views().iter().take(3).enumerate() {
-            feed_voxel_frame(&mut mgr, 1.0 + i as f64, *p_imu, &[(7, p)]);
-        }
-        assert_eq!(mgr.voxel_map.num_points(), 1);
-        assert_eq!(mgr.recent_voxels, [] as [firefly_voxel_svio::VoxelKey; 0]);
-    }
-
-    /// 视野外路标不进入可见体素（查询源是活跃轨迹，不是地图点）。
-    #[test]
-    fn voxel_pipeline_excludes_out_of_view_landmark() {
-        let mut mgr = voxel_manager();
-        let p_vis = Vector3::new(0.55, 0.25, 3.05);
-        let p_far = Vector3::new(50.05, 0.05, 3.05);
-        assert!(mgr.voxel_map.add_point(100, &p_vis));
-        assert!(mgr.voxel_map.add_point(200, &p_far));
-        for (i, p_imu) in four_views().iter().enumerate() {
-            feed_voxel_frame(&mut mgr, 1.0 + i as f64, *p_imu, &[(7, p_vis)]);
-        }
-        assert!(mgr.recent_voxels.contains(&mgr.voxel_map.key_of(&p_vis)));
-        assert!(!mgr.recent_voxels.contains(&mgr.voxel_map.key_of(&p_far)));
-    }
-
-    /// 同体素多路标时只取块首（对照官方 `points.front()`）。
-    #[test]
-    fn voxel_pipeline_selects_front_point_per_voxel() {
-        let mut mgr = voxel_manager();
-        let p = Vector3::new(0.55, 0.25, 3.05);
-        assert!(mgr.voxel_map.add_point(100, &p));
-        assert!(mgr.voxel_map.add_point(101, &p));
-        for (i, p_imu) in four_views().iter().enumerate() {
-            feed_voxel_frame(&mut mgr, 1.0 + i as f64, *p_imu, &[(7, p)]);
-        }
-        assert_eq!(mgr.voxel_map.select(&mgr.recent_voxels), vec![100]);
-    }
-
-    #[test]
-    fn all_points_option_controls_actual_slam_measurement_updates() {
-        use crate::{landmark::Landmark, options::FeatRepresentation};
-
-        for use_all_points in [false, true] {
-            let mut mgr = voxel_manager_with_all_points(use_all_points);
-            mgr.state.options.max_clone_size = 6;
-            let points = [
-                (100, Vector3::new(0.55, 0.25, 3.05)),
-                (101, Vector3::new(0.56, 0.26, 3.06)),
-            ];
-            assert_eq!(
-                mgr.voxel_map.key_of(&points[0].1),
-                mgr.voxel_map.key_of(&points[1].1)
-            );
-            for i in 0..6 {
-                let time = f64::from(i);
-                let position = Vector3::new(0.1 * time, 0., 0.);
-                feed_voxel_frame(&mut mgr, time, position, &[]);
-                for (id, point) in points {
-                    let relative = point - position;
-                    let uv = Vector2::new(relative.x / relative.z, relative.y / relative.z);
-                    mgr.track_feats.database_mut().update_feature(
-                        id,
-                        time,
-                        0,
-                        (600. * uv.x + 320.) as f32,
-                        (600. * uv.y + 240.) as f32,
-                        uv.x as f32,
-                        uv.y as f32,
-                    );
-                }
-            }
-            for (id, point) in points {
-                let size = mgr.state.cov.nrows();
-                let mut landmark = Landmark::new(FeatRepresentation::Global3D, id);
-                landmark.unique_camera_id = 0;
-                landmark.set_from_xyz(&point, false);
-                landmark.set_from_xyz(&point, true);
-                landmark.set_local_id(size as i32);
-                mgr.state.features_slam.insert(id, landmark);
-                mgr.state.cov = mgr.state.cov.clone().resize(size + 3, size + 3, 0.);
-                for axis in size..size + 3 {
-                    mgr.state.cov[(axis, axis)] = 0.01;
-                }
-                assert!(mgr.voxel_map.add_point(id, &point));
-            }
-            mgr.recent_voxels = vec![mgr.voxel_map.key_of(&points[0].1)];
-            let before = mgr.state.cov.trace();
-            mgr.do_feature_propagate_update(&CameraData {
-                timestamp: 5.,
-                sensor_ids: vec![0],
-                images: vec![],
-                masks: vec![],
-            });
-            let expected = if use_all_points {
-                vec![100, 101]
-            } else {
-                vec![100]
-            };
-            let updated: Vec<_> = mgr
-                .state
-                .slam_diagnostics
-                .iter()
-                .map(|row| row[0] as usize)
-                .collect();
-            assert_eq!(updated, expected);
-            assert!(mgr.state.slam_diagnostics.iter().all(|row| row[4] == 1.));
-            assert!(mgr.state.cov.trace() < before);
-            assert!(
-                mgr.state
-                    .update_diagnostics
-                    .iter()
-                    .all(|update| update.source == "slam")
-            );
-            assert_eq!(
-                mgr.track_feats.database().get_feature_clone(101).is_none(),
-                use_all_points
-            );
-        }
-    }
-
-    /// 关闭时 `refresh_recent_voxels` 全程空转，缓存保持为空。
-    #[test]
-    fn voxel_pipeline_is_noop_when_disabled() {
-        let mut mgr = test_manager();
-        assert!(!mgr.params.voxel_options.enabled);
-        mgr.refresh_recent_voxels();
-        assert_eq!(mgr.recent_voxels, [] as [firefly_voxel_svio::VoxelKey; 0]);
-    }
-
+    /// 已有 SLAM 路标的测量只由批量 SLAM 更新消费一次：帧内更新路径的结果必须与
+    /// 单独调用一次 `updater_slam.update` 完全一致，MSCKF 不得同时使用同一测量。
     #[test]
     fn deferred_slam_observations_are_consumed_once_by_slam_only() {
         use crate::{landmark::Landmark, options::FeatRepresentation};
-        let mut mgr = voxel_manager();
-        mgr.state.options.max_clone_size = 6;
+        let mut mgr = slam_manager();
+        // 克隆上限放到帧数之上：本测试只比较一次 SLAM 观测批次的消费结果，
+        // 不掺入克隆边缘化带来的协方差维度变化。
+        mgr.state.options.max_clone_size = 10;
         let point = Vector3::new(0.55, 0.25, 3.05);
         for i in 0..6 {
             let t = f64::from(i);
             let position = Vector3::new(0.1 * t, 0.0, 0.0);
-            feed_voxel_frame(&mut mgr, t, position, &[]);
+            feed_frame(&mut mgr, t, position);
             let pc = point - position;
             let uv = Vector2::new(pc.x / pc.z, pc.y / pc.z);
             mgr.track_feats.database_mut().update_feature(
@@ -1389,26 +1032,7 @@ mod tests {
         for i in size..size + 3 {
             mgr.state.cov[(i, i)] = 0.01;
         }
-        assert!(mgr.voxel_map.add_point(100, &point));
-        mgr.recent_voxels.clear();
         let before = mgr.state.cov.clone();
-        mgr.do_feature_propagate_update(&CameraData {
-            timestamp: 5.,
-            sensor_ids: vec![0],
-            images: vec![],
-            masks: vec![],
-        });
-        assert!(
-            mgr.track_feats
-                .database_mut()
-                .get_feature(100, false)
-                .is_some(),
-            "unselected SLAM measurements must remain available for the landmark update"
-        );
-        assert_eq!(
-            mgr.state.cov, before,
-            "no selected measurement means no information gain"
-        );
         let feature = mgr
             .track_feats
             .database_mut()
@@ -1420,7 +1044,6 @@ mod tests {
             vec![100]
         );
         assert!(once.cov.trace() < before.trace());
-        mgr.recent_voxels = vec![mgr.voxel_map.key_of(&point)];
         mgr.do_feature_propagate_update(&CameraData {
             timestamp: 5.,
             sensor_ids: vec![0],
@@ -1429,7 +1052,7 @@ mod tests {
         });
         assert!(
             (mgr.state.cov.clone() - once.cov).amax() < 1e-12,
-            "one SLAM observation batch must not also update MSCKF"
+            "帧内 SLAM 更新必须等价于单次批量 SLAM 更新，同一测量不得再进 MSCKF"
         );
         assert!(
             mgr.track_feats

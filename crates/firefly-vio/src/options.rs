@@ -241,8 +241,6 @@ pub struct VioManagerOptions {
     /// 合成算法评测夹具的 bg/ba 初始先验 σ（rad/s 与 m/s²）。
     /// 默认 0.02，对照 `OpenVINS` `initialize_with_gt`；传感器初始化使用其独立协方差。
     pub init_bias_sigma: f64,
-    /// 体素选点参数（`firefly-voxel-svio`；默认关闭）。
-    pub voxel_options: firefly_voxel_svio::VoxelOptions,
 }
 
 impl Default for VioManagerOptions {
@@ -259,7 +257,6 @@ impl Default for VioManagerOptions {
             dt_slam_delay: 2.0,
             zero_velocity_options: ZeroVelocityOptions::default(),
             init_bias_sigma: 0.02,
-            voxel_options: firefly_voxel_svio::VoxelOptions::default(),
         }
     }
 }

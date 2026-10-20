@@ -1,6 +1,6 @@
 //! `configs/vio.toml` 的参数定义；缺失字段使用对应类型的默认值。
 //!
-//! 相机与 IMU 默认值对应 RMUC render 双目部署；体素选点由配置启用。
+//! 相机与 IMU 默认值对应 RMUC render 双目部署。
 
 use serde::Deserialize;
 
@@ -83,38 +83,19 @@ impl Default for Estimator {
     }
 }
 
-/// SLAM 路标与体素选点（SLAM 默认开启，体素选点默认关闭）。
+/// SLAM 路标（SLAM 默认开启）。
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct Slam {
     /// 最大 SLAM 路标数（0 = 关闭 SLAM 分支）。
     pub max_slam_features: usize,
-    /// 体素选点总开关（对照 Voxel-SVIO；开启要求 `max_slam_features > 0`）。
-    pub voxel_selection: bool,
-    /// 体素边长（米）。
-    pub voxel_size: f64,
-    /// 每体素上限点数。
-    pub max_points_per_voxel: usize,
-    /// 体素内最小点间距（米）。
-    pub min_point_distance: f64,
-    /// 查询邻域半径（体素格；0 = 单体素，1 = 27 邻域）。
-    pub neighbor_radius: i32,
-    /// 每体素喂入全部候选点（false = 每体素只取首点）。
-    pub use_all_points: bool,
 }
 
 impl Default for Slam {
     fn default() -> Self {
-        let voxel = firefly_voxel_svio::VoxelOptions::default();
         Self {
             // 对照 OpenVINS 默认值 25
             max_slam_features: 25,
-            voxel_selection: false,
-            voxel_size: voxel.voxel_size,
-            max_points_per_voxel: voxel.max_points_per_voxel,
-            min_point_distance: voxel.min_point_distance,
-            neighbor_radius: voxel.neighbor_radius,
-            use_all_points: voxel.use_all_points,
         }
     }
 }
@@ -132,7 +113,7 @@ pub struct VioConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{Slam, VioConfig};
+    use super::VioConfig;
 
     /// 随仓库发布的配置文件必须可解析且为完整部署值。
     #[test]
@@ -148,15 +129,7 @@ mod tests {
         assert!((cfg.camera.baseline - 0.05).abs() < 1e-9);
         assert_eq!(cfg.frontend.num_pts, 300);
         assert!((cfg.estimator.max_baseline - 120.0).abs() < 1e-9);
-        assert!(
-            cfg.slam.voxel_selection,
-            "部署配置启用体素地图（Voxel-SVIO）"
-        );
         assert_eq!(cfg.slam.max_slam_features, 100);
-        // 官方 EuRoC/TUM-VI 调参：0.1m/±1 的代码默认邻域命中过少。
-        assert!((cfg.slam.voxel_size - 0.3).abs() < 1e-12);
-        assert_eq!(cfg.slam.neighbor_radius, 2);
-        assert!((cfg.slam.min_point_distance - 0.0).abs() < 1e-12);
     }
 
     #[test]
@@ -185,36 +158,5 @@ mod tests {
         assert_eq!(cfg.camera.width, 320);
         assert!((cfg.estimator.max_baseline - 60.0).abs() < 1e-9);
         assert_eq!(cfg.slam.max_slam_features, 25);
-        assert!(!cfg.slam.voxel_selection);
-    }
-
-    /// `[slam]` 段开启 SLAM 与体素选点。
-    #[test]
-    fn slam_section_enables_voxel_selection() {
-        let cfg: VioConfig = toml::from_str(
-            "[slam]\nmax_slam_features = 25\nvoxel_selection = true\nvoxel_size = 0.2",
-        )
-        .unwrap();
-        assert_eq!(cfg.slam.max_slam_features, 25);
-        assert!(cfg.slam.voxel_selection);
-        assert!((cfg.slam.voxel_size - 0.2).abs() < 1e-12);
-        assert_eq!(cfg.slam.max_points_per_voxel, 5);
-    }
-
-    /// 体素选点的邻域半径与全点开关可配置，缺省回落代码默认（对照
-    /// `VoxelOptions`：1 / false）。
-    #[test]
-    fn slam_section_carries_voxel_query_options() {
-        let cfg: VioConfig = toml::from_str(
-            "[slam]\nvoxel_selection = true\nneighbor_radius = 0\nuse_all_points = true",
-        )
-        .unwrap();
-        assert_eq!(cfg.slam.neighbor_radius, 0);
-        assert!(cfg.slam.use_all_points);
-
-        let default: Slam = toml::from_str("voxel_selection = true").unwrap();
-        let voxel = firefly_voxel_svio::VoxelOptions::default();
-        assert_eq!(default.neighbor_radius, voxel.neighbor_radius);
-        assert_eq!(default.use_all_points, voxel.use_all_points);
     }
 }

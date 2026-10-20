@@ -17,7 +17,6 @@ firefly-error = { workspace = true }
 firefly-vio-core = { workspace = true }
 firefly-vio-init = { workspace = true }
 firefly-vio-types = { workspace = true }
-firefly-voxel-svio = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }
 
