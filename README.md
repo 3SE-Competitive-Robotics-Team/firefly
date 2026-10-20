@@ -22,7 +22,6 @@
 | 位置 | 内容 |
 |---|---|
 | `crates/firefly-vio*` | 对照 OpenVINS：类型、KLT 前端、IMU 传播、静态/动态初始化、MSCKF/SLAM 更新 |
-| `crates/firefly-voxel-svio` | VIO 路标的体素索引与选点 |
 | `crates/firefly-{map,search,trajectory,optimize,cost,obstacle,planner}` | 占据地图、A*、MINCO、L-BFGS、代价、动态障碍与重规划 |
 | `crates/firefly-{localization,vision-map,vision-match}` | 定位融合、视觉库图与匹配 |
 | `crates/firefly-flight` | 飞行模式、安全条件、姿态/位置控制与电机分配 |

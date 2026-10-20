@@ -238,7 +238,6 @@ IMU 传播及三角化；`firefly-vio-init` 负责初始化；`firefly-vio` 编�
 
 在线内参更新须同步投影模型与下一帧跟踪器；锚定表示的 FEJ 由统一表示雅可比处理。
 IMU 白噪声使用连续时间密度，采样噪声换算 `σ_density = σ_sample / √fs`。
-`firefly-voxel-svio` 为可选体素选点与交会缓存，关闭时不执行该路径。
 默认静止初始化、局部跟踪可用性不等于所有退化运动下的可观测性或精度保证。
 动态初始化的 MLE 使用 traditional DOGLEG 与 CauchyLoss(1)，对照 OpenVINS 的
 Ceres 2.2 配置及 `DoglegStrategy` / `Corrector`。正规方程使用稠密 Cholesky；

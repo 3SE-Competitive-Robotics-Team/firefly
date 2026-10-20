@@ -47,7 +47,6 @@ firefly-pubsub = { path = "crates/firefly-pubsub" }
 firefly-localization = { path = "crates/firefly-localization" }
 firefly-search = { path = "crates/firefly-search" }
 firefly-trajectory = { path = "crates/firefly-trajectory" }
-firefly-voxel-svio = { path = "crates/firefly-voxel-svio" }
 firefly-vision-map = { path = "crates/firefly-vision-map" }
 firefly-vision-match = { path = "crates/firefly-vision-match" }
 firefly-render = { path = "crates/firefly-render" }
