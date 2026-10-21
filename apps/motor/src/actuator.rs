@@ -345,10 +345,17 @@ impl Channel {
         let duty_path = channel_dir.join("duty_cycle");
         // 先失能再改时序：部分驱动不允许在使能状态下改周期。
         let _ = fs::write(&enable, "0");
-        write_attribute(&duty_path, 0)?;
+        // 周期未设时内核拒绝任何占空比（周期 0 非法），这次清零失败是预期的；
+        // 它只在通道被上次运行留在高占空比时才起作用。
+        let _ = write_attribute(&duty_path, 0);
         write_attribute(&channel_dir.join("period"), mapping.period_ns())?;
         write_attribute(&duty_path, mapping.min_duty_ns())?;
-        write_attribute(&enable, 1)?;
+        write_attribute(&enable, 1).map_err(|error| {
+            format!(
+                "{error}；`sysfs` 通道使能需要设备树描述，`pwm-sunxi` 会拒绝未描述的通道\
+                 （dmesg 里是 `can't parse pwm device`）"
+            )
+        })?;
         Ok(Self {
             duty_path,
             current: mapping.min_duty_ns(),

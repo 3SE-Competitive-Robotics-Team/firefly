@@ -189,6 +189,14 @@ adb -s firefly-0001 shell 'systemctl start firefly'
 - `configs/motor.toml`：`sysfs` PWM 只适用于 PWM 电调。`[airframe]`
   （质量/惯量/旋翼几何/推力上限）在这里维护一份，真机装配后必须换成实测值，
   否则飞控会拿仿真机体的参数去分配推力。`Control` 断流时四路回到零推力脉宽。
+  当前内核的 `pwm-sunxi` 拒绝使能**没有设备树描述**的通道（dmesg 报
+  `can't parse pwm device`），所以上板前必须先补 PWM 通道的 DT 节点，否则
+  `sysfs` 只能写周期和占空比、`enable` 永远失败。
+
+三个驱动默认 `autostart = false`：板上还没有相机与 IMU，SPI 控制器也需要先在设备树
+启用才有 `/dev/spidev*`。硬件到位后逐个 `ffctl process enable camera`、`imu`、`motor`
+打开并单独验证，不要一次性全开——失败原因会互相掩盖。`processes.toml` 是烧录语义，
+`deploy` 会覆盖它，所以在设备上手动改的结果不持久。
 
 `camera` 与 `imu` 的时间戳都用 `CLOCK_MONOTONIC` 秒，与仿真侧 `sim_time`
 语义不同，同一份录制里不要混用。三个进程都可以单独起停：`bin/camera`、
