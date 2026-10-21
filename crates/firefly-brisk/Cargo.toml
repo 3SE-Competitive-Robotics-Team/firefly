@@ -1,0 +1,22 @@
+[package]
+name = "firefly-brisk"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "BRISK and AGAST image features translated into Rust"
+license = "BSD-3-Clause"
+repository.workspace = true
+readme = "README.md"
+keywords = ["vision", "robotics", "slam"]
+categories = ["algorithms", "science"]
+
+[dependencies]
+firefly-error = { workspace = true }
+nalgebra = { workspace = true }
+purecv = { workspace = true }
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

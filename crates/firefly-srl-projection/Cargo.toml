@@ -1,0 +1,22 @@
+[package]
+name = "firefly-srl-projection"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "SRL camera projection geometry translated into Rust"
+license = "BSD-3-Clause"
+repository.workspace = true
+readme = "README.md"
+keywords = ["camera", "projection", "geometry", "robotics"]
+categories = ["algorithms", "science"]
+
+[dependencies]
+firefly-error = { workspace = true }
+nalgebra = { workspace = true }
+purecv = { workspace = true }
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
