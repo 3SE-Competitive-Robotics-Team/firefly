@@ -18,6 +18,9 @@ name = "firefly-okvis-x"
 path = "src/main.rs"
 
 [dependencies]
+fastrace.workspace = true
+firefly-base.workspace = true
+firefly-pubsub.workspace = true
 faer.workspace = true
 firefly-brisk.workspace = true
 firefly-config.workspace = true

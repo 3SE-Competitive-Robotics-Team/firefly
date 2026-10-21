@@ -181,6 +181,17 @@ pub trait ThreadedGraph: FrontendGraph {
     /// # Errors
     /// Returns an error for invalid/missing state, frame or measurement data, or a failed
     /// estimator, graph, mapper, queue, callback or worker operation.
+    /// Joint covariance in the pose and speed/bias tangent coordinates.
+    /// # Errors
+    /// Returns an error if graph linearization fails.
+    fn state_covariance(
+        &self,
+        _id: StateId,
+    ) -> Result<Option<crate::ceres::imu_error::Covariance>> {
+        Ok(None)
+    }
+    /// # Errors
+    /// Returns graph serialization or file output errors.
     fn write_final_csv_trajectory(&self, path: &Path, rpg: bool) -> Result<()>;
     /// # Errors
     /// Returns an error for invalid/missing state, frame or measurement data, or a failed
@@ -443,6 +454,7 @@ struct Shared {
     shutdown: AtomicBool,
     downsampling_counter: AtomicUsize,
     callback: Mutex<Option<OptimisedGraphCallback>>,
+    lossless_publications: AtomicBool,
     alignment_callback: Mutex<Option<AlignmentPublishCallback>>,
     errors: Mutex<Vec<String>>,
     pause: Mutex<()>,
@@ -467,6 +479,7 @@ impl Default for Shared {
             shutdown: AtomicBool::new(false),
             downsampling_counter: AtomicUsize::new(0),
             callback: Mutex::new(None),
+            lossless_publications: AtomicBool::new(false),
             alignment_callback: Mutex::new(None),
             errors: Mutex::new(Vec::new()),
             pause: Mutex::new(()),
@@ -926,6 +939,12 @@ pub struct SensorInputHandle {
     shared: Arc<Shared>,
 }
 impl ThreadedSlam {
+    /// Backpressures the graph owner instead of dropping committed state updates.
+    pub fn enable_lossless_publications(&self) {
+        self.shared
+            .lossless_publications
+            .store(true, Ordering::Release);
+    }
     #[must_use]
     pub fn sensor_input_handle(&self) -> SensorInputHandle {
         SensorInputHandle {
@@ -935,6 +954,23 @@ impl ThreadedSlam {
     }
 }
 impl SensorInputHandle {
+    /// Closes ingestion and wakes estimator waits for sensor coverage.
+    pub fn close_inputs(&self) {
+        self.shared.close_sensors();
+        self.shared.resume.notify_all();
+    }
+
+    /// Pending IMU, stereo-pair and depth measurement counts, in that order.
+    /// # Errors
+    /// Returns an error if a sensor queue mutex is poisoned.
+    pub fn pending_measurements(&self) -> Result<[usize; 3]> {
+        Ok([
+            self.shared.imu.len()?,
+            self.shared.cameras.len()?,
+            self.shared.depth.len()?,
+        ])
+    }
+
     fn push<T>(&self, queue: &ThreadsafeQueue<T>, value: T, capacity: usize) -> Result<bool> {
         let blocking = self.shared.blocking.load(Ordering::Acquire);
         Ok(queue
@@ -1199,6 +1235,8 @@ pub struct ProcessingCore<G: ThreadedGraph, S, B, M> {
     last_optimised: Option<State>,
     pre_last_optimised: Option<State>,
     first_frame: bool,
+    graph_revision: u64,
+    publish_covariance: bool,
     trajectory: Trajectory,
     affected_states: BTreeSet<StateId>,
     lidar_keyframes: BTreeSet<StateId>,
@@ -1239,6 +1277,8 @@ where
             last_optimised: None,
             pre_last_optimised: None,
             first_frame: true,
+            graph_revision: 0,
+            publish_covariance: false,
             trajectory: Trajectory::default(),
             affected_states: BTreeSet::new(),
             lidar_keyframes: BTreeSet::new(),
@@ -1250,6 +1290,10 @@ where
             depth_camera: None,
             full_graph: None,
         }
+    }
+    /// Enables marginal covariance extraction for online posterior publication.
+    pub fn enable_covariance(&mut self) {
+        self.publish_covariance = true;
     }
     /// # Errors
     /// Returns an error for invalid/missing state, frame or measurement data, or a failed
@@ -1842,6 +1886,10 @@ where
                 ));
             }
             let synchronized = self.graph.synchronise_realtime_and_full_graph()?;
+            self.graph_revision = self
+                .graph_revision
+                .checked_add(1)
+                .ok_or_else(|| runtime_error("graph revision exhausted"))?;
             if synchronized.is_empty() {
                 updated
             } else {
@@ -1852,6 +1900,9 @@ where
         };
         let id = StateId::new(frame.borrow().id());
         let mut state = self.make_state(id, false)?;
+        if self.publish_covariance {
+            state.covariance = self.graph.state_covariance(id)?;
+        }
         state.omega_s = gyro - state.b_g;
         state.is_online_extrinsics = Some(self.parameters.camera.online_calibration.do_extrinsics);
         if self.parameters.camera.online_calibration.do_extrinsics && self.depth_camera.is_some() {
@@ -1954,6 +2005,7 @@ where
                 TrackingQuality::Good
             },
             backend: crate::runtime::vi_interface::BackendTrackingState {
+                revision: self.graph_revision,
                 recognised_place: self.graph.closed_loop(id),
                 is_full_graph_optimising: self.full_graph.is_some(),
             },
@@ -2006,7 +2058,8 @@ where
         Ok(publication)
     }
     fn publish(shared: &Shared, data: PublicationData) -> Result<()> {
-        let blocking = shared.blocking.load(Ordering::Acquire);
+        let blocking = shared.blocking.load(Ordering::Acquire)
+            || shared.lossless_publications.load(Ordering::Acquire);
         if shared.shutdown.load(Ordering::Acquire) {
             let callback = shared
                 .callback

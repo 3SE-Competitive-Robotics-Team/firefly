@@ -18,9 +18,7 @@ pub const GROUND_TRUTH_TOPIC: &str = "Firefly/GroundTruth";
 
 /// 里程计消息（对照 `docs/architecture.md` 的 `topic: odom`）。
 ///
-/// 字段布局与 `firefly-vio` 的 `State` 输出对应：
-/// - 位置/速度在全局系（`p_IinG`/`v_IinG`）；
-/// - 姿态为 JPL 四元数 `q_GtoI`（标量在最后，与 `firefly-vio-types` 一致）。
+/// 位置和物理速度表达在对应父坐标系；Hamilton xyzw 表示 body→parent。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
 #[type_name("FireflyOdomMessage")]
@@ -35,7 +33,7 @@ pub struct OdomMessage {
     pub velocity_x: f64,
     pub velocity_y: f64,
     pub velocity_z: f64,
-    /// 姿态四元数 `q_GtoI = [x, y, z, w]`。
+    /// Hamilton body→parent 四元数 `[x, y, z, w]`。
     pub quat_x: f64,
     pub quat_y: f64,
     pub quat_z: f64,
@@ -65,7 +63,7 @@ impl Default for OdomMessage {
 
 impl OdomMessage {
     /// 将消息解释为 parent←body。原始里程计 parent=ODOM，校正里程计 parent=MAP。
-    /// JPL 世界→机体的 xyzw 分量等于 Hamilton 机体→世界的 xyzw 分量。
+    /// 四元数采用 Hamilton body→parent 的 xyzw 分量。
     ///
     /// # Errors
     /// 位姿非有限或四元数不是单位四元数。

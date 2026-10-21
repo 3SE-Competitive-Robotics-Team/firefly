@@ -3233,12 +3233,15 @@ name = "firefly-okvis-x"
 version = "0.1.0"
 dependencies = [
  "faer",
+ "fastrace",
+ "firefly-base",
  "firefly-brisk",
  "firefly-config",
  "firefly-dbow2",
  "firefly-error",
  "firefly-observability",
  "firefly-opengv",
+ "firefly-pubsub",
  "firefly-supereight2",
  "image",
  "jiff",

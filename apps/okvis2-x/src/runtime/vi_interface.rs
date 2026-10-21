@@ -90,6 +90,8 @@ pub struct State {
     pub timestamp: Timestamp,
     pub id: StateId,
     pub previous_imu_measurements: ImuMeasurementDeque,
+    /// Joint [position, orientation, velocity, gyro bias, accel bias] covariance.
+    pub covariance: Option<crate::ceres::imu_error::Covariance>,
     pub is_keyframe: bool,
     pub t_ai_w: BTreeMap<u64, Transformation>,
     pub covisible_frame_ids: BTreeSet<StateId>,
@@ -120,6 +122,7 @@ impl State {
             id,
             is_keyframe,
             previous_imu_measurements: ImuMeasurementDeque::new(),
+            covariance: None,
             t_ai_w: BTreeMap::new(),
             covisible_frame_ids: BTreeSet::new(),
             state_changed: None,
@@ -171,6 +174,8 @@ pub enum TrackingQuality {
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BackendTrackingState {
+    /// Monotonic count of committed full-graph corrections.
+    pub revision: u64,
     pub recognised_place: bool,
     pub is_full_graph_optimising: bool,
 }

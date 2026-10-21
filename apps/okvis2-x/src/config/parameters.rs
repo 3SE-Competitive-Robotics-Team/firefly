@@ -60,7 +60,7 @@ pub struct CameraParameters {
 #[derive(Clone, Debug)]
 pub struct ImuParameters {
     pub r#use: bool,
-    /// Transformation from body to IMU sensor coordinates.
+    /// Body-from-IMU sensor transformation `T_BS`.
     pub t_bs: Transformation,
     /// Accelerometer saturation, metres per second squared.
     pub a_max: f64,

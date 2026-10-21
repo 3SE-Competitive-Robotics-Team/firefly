@@ -339,3 +339,5 @@ impl TopViewPainter for HeadlessPainter {
 }
 pub mod okvis2x_app_network_synchronous;
 pub mod okvis2x_app_synchronous;
+
+pub mod live;
