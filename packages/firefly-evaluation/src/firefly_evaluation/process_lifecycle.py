@@ -57,7 +57,7 @@ class ManagedProcess:
 def active_processes(root: Path) -> list[int]:
     """识别本仓库进程；依赖可执行路径与 argv，禁止模糊匹配命令行全文。"""
     found = []
-    binaries = {"vio", "render", "fc", "localization", "planner", "aliked", "lightglue", "slam"}
+    binaries = {"firefly-okvis-x", "render", "fc", "localization", "planner", "aliked", "lightglue"}
     scripts = {"firefly-sim", "firefly-viz", "rerun", "collect_vision_map.py"}
     modules = {"firefly_sim", "firefly_sim.main", "firefly_viz", "firefly_viz.main",
                "firefly_evaluation.mission_sim", "firefly_evaluation.disturbance_sim"}

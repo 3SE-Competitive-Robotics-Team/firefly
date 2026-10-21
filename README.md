@@ -3,7 +3,7 @@
 自主无人机的 Rust / Python monorepo：视觉惯性里程计、在线路标回环、深度建图、
 轨迹规划、四旋翼飞控、MuJoCo 仿真与 Rerun 可视化。
 
-默认从空会话地图启动，使用 VIO + 持久路标回环 + 在线深度规划，不依赖已知世界起点、
+默认从空会话地图启动，使用 OKVIS2-X 视觉惯性估计、DBoW2 在线回环与深度建图规划，不依赖已知世界起点、
 预建地图或神经网络权重。ALIKED/LightGlue 库图定位和静态地图是显式可选增强。
 真值只供传感器生成、评测和可视化，不参与估计或控制。
 当前部署用于仿真研究与算法验证，能力边界和飞行结果须分别验收。
@@ -21,12 +21,13 @@
 
 | 位置 | 内容 |
 |---|---|
-| `crates/firefly-vio*` | 对照 OpenVINS：类型、KLT 前端、IMU 传播、静态/动态初始化、MSCKF/SLAM 更新 |
+| `apps/okvis2-x` | OKVIS2-X 视觉惯性图、在线回环、深度子地图及 IPC/离线入口 |
+| `crates/firefly-{brisk,dbow2,opengv,srl-projection,supereight2}` | 特征、词袋、几何求解、投影与深度融合 |
 | `crates/firefly-{map,search,trajectory,optimize,cost,obstacle,planner}` | 占据地图、A*、MINCO、L-BFGS、代价、动态障碍与重规划 |
 | `crates/firefly-{localization,vision-map,vision-match}` | 定位融合、视觉库图与匹配 |
 | `crates/firefly-flight` | 飞行模式、安全条件、姿态/位置控制与电机分配 |
 | `crates/firefly-imu` | 独立备用姿态/陀螺零偏 ESKF、静止初始化与加计 NIS |
-| `crates/firefly-{base,config,landmarks}` | 坐标/刚体变换、可选 TOML 配置、有界会话路标地图 |
+| `crates/firefly-{base,config}` | 坐标/刚体变换、可选 TOML 配置 |
 | `crates/firefly-{pubsub,error,observability,render}` | IPC 消息、错误、日志/trace、共享 Bevy 场景与光照 |
 | `configs/` | 每应用一份 TOML，缺键回落代码默认值 |
 | `tests/`、`docs/` | 评测指标、启动检查与运行/架构说明 |
@@ -38,12 +39,10 @@
 
 | 应用 | 职责 |
 |---|---|
-| `vio` | MSCKF VIO 估计器：订阅 IMU 与双目灰度，100Hz 发布 `Firefly/Odometry` |
 | `fc` | 1kHz 飞控环：飞行模式与安全条件、姿态/位置控制、电机分配 |
 | `planner` | 任务执行：全局/局部规划、参考发布与可视化，状态源为已对齐地图系 |
-| `localization` | 视觉定位融合：VIO 时间配对、map←odom 修正、发布地图里程计 |
-| `slam` | 关键帧驱动的有界会话视觉地图与在线路标回环 |
-| `firefly-okvis-x` | OKVIS2-X 的离线数据集入口：VIO、在线回环与针孔深度占用建图；不创建 IPC 端点 |
+| `localization` | 可选外部库图 ESKF：时间配对、map←odom 修正与导航发布，要求显式启动对齐 |
+| `firefly-okvis-x` | 默认 IPC 入口：双目/IMU、在线回环、深度占用建图、里程计/姿态/导航发布；保留离线数据集入口 |
 | `aliked` | ALIKED-N16 特征提取：在线发布特征，`--build-map` 离线建 `ffvmap` 库图 |
 | `lightglue` | ALIKED/LightGlue 离线库图定位：`--map <地图.ffvmap>` 解算视觉位姿 |
 | `render` | 视觉传感器进程：订阅真值位姿渲染双目与深度并发布 IPC，`--offline` 供离线建库 |

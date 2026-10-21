@@ -7,7 +7,7 @@
 //! 触发急停且禁用 fail-safe。真值不参与状态链路（vio 进程侧仅作对比可视化）。
 //!
 //! 运行：`cargo run --release -p planner`（配合 `uv run firefly-sim` +
-//! `cargo run --release -p vio`），或
+//! `cargo run --release -p firefly-okvis-x`），或
 //! `cargo run --release -p planner -- --map apps/planner/maps/rmuc2026-2.0.0.ffmap`。
 //!
 //! 动态目标：订阅 `Firefly/Goal`（`ffctl planner goal X Y Z` 发布），

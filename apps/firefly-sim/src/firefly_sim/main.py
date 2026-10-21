@@ -46,7 +46,7 @@ EVENT_ID_SENT_SAMPLE = 0
 
 
 #: IMU 服务订阅端上限（与 Rust `imu.rs: IMU_SERVICE_MAX` 同值；先创建方定上限，
-#: 后续 open 不得超限——sim / vio 启动顺序任意，两边必须一致）。
+#: 后续 open 不得超限——sim / firefly-okvis-x 启动顺序任意，两边必须一致）。
 IMU_SERVICE_MAX = 128
 
 #: 被控对象状态服务订阅端上限（与 Rust `plant.rs: PLANT_STATE_SERVICE_MAX` 同值；

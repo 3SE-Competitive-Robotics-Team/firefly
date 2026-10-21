@@ -2,7 +2,6 @@
 //!
 //! Hamilton 主动旋转，扭量按 `[rotation, translation]` 排列。
 //! 指数映射与 Sophus / `OpenVINS` 的数学定义一致，小角使用 Taylor 展开；
-//! JPL 四元数表示及其乘法由 `firefly-vio-types::quat_ops` 处理。
 
 use nalgebra::{Matrix3, Matrix4, Quaternion, Rotation3, UnitQuaternion, Vector3, Vector6};
 

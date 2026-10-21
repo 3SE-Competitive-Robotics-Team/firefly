@@ -7,10 +7,9 @@ use fastrace::prelude::*;
 use firefly_base::{FrameId, RigidTransform};
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_localization::CorrectionOptions;
-use firefly_localization::config::{Backend, LocalizationConfig};
+use firefly_localization::config::LocalizationConfig;
 use firefly_localization::convert::corrected_odom;
 use firefly_localization::filter::{FusionFilter, RelocGate};
-use firefly_localization::graph::{GraphOptions, PoseGraph};
 use firefly_localization::quality::{Quality, QualityOptions};
 use firefly_observability::init as init_observability;
 use firefly_pubsub::navigation::{NAVIGATION_TOPIC, NavigationMessage};
@@ -19,16 +18,13 @@ use firefly_pubsub::odom::CORRECTED_ODOM_TOPIC;
 use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::Subscriber;
-use firefly_pubsub::vision::{LOOP_TOPIC, LoopConstraint, POSE_OBS_TOPIC, PoseObservation};
+use firefly_pubsub::vision::{POSE_OBS_TOPIC, PoseObservation};
 use firefly_pubsub::viz::{ScalarMessage, VizMessage, VizPublisher, kind};
 use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetRunResult;
 use nalgebra::{Isometry3, Matrix4, Quaternion, Translation3, UnitQuaternion, Vector3};
 
 const LOOP_PERIOD: Duration = Duration::from_millis(10);
-/// 矫正后位姿可视化节拍（10Hz 主循环每 tick 发一次位姿+轨迹段，与
-/// `vio/odom`/`gt/pose` 同频率，rrd 里可逐点对比三条轨迹）。
-const VIZ_PERIOD: usize = 1;
 /// 矫正后位姿图例颜色（绿，与 vio 橙 / 真值蓝区分）。
 const CORRECTED_COLOR: (u8, u8, u8) = (60, 200, 80);
 const DEFAULT_CONFIG: &str = "configs/localization.toml";
@@ -140,53 +136,10 @@ fn gate_diag(gate: &RelocGate, max_innovation_trans: f64) -> Option<[f64; 4]> {
     }
 }
 
-// IPC 快照使用固定上限；图优化完成后一次发布，消费端不得混用版本。
-#[allow(clippy::large_stack_arrays)]
-fn landmark_snapshot(
-    graph: &PoseGraph,
-    from: f64,
-    to: f64,
-    loop_event: bool,
-) -> firefly_pubsub::landmarks::Correction {
-    let mut correction = firefly_pubsub::landmarks::Correction {
-        from,
-        to,
-        accepted: true,
-        loop_event,
-        count: graph.node_count() as u32,
-        poses: [OdomMessage::default(); 4096],
-    };
-    for (dst, (timestamp, pose)) in correction.poses.iter_mut().zip(graph.poses()) {
-        let p = pose.isometry().translation.vector;
-        let q = pose.isometry().rotation;
-        *dst = OdomMessage {
-            timestamp,
-            position_x: p.x,
-            position_y: p.y,
-            position_z: p.z,
-            quat_x: q.i,
-            quat_y: q.j,
-            quat_z: q.k,
-            quat_w: q.w,
-            is_initialized: true,
-            ..Default::default()
-        };
-    }
-    correction
-}
-
 struct App {
-    backend: Backend,
     fusion: FusionFilter,
     quality: Quality,
     quality_options: QualityOptions,
-    graph: Option<PoseGraph>,
-    graph_options: Option<GraphOptions>,
-    loops: Option<Subscriber<LoopConstraint>>,
-    keyframes: Option<Subscriber<OdomMessage>>,
-    pending_keyframes: std::collections::VecDeque<OdomMessage>,
-    pending_loops: std::collections::VecDeque<LoopConstraint>,
-    landmark_correction: Publisher<firefly_pubsub::landmarks::Correction>,
     origin: firefly_localization::config::InitialAlignment,
     alignment_ready: bool,
     navigation_pub: Publisher<NavigationMessage>,
@@ -194,16 +147,14 @@ struct App {
     revision_alignment: Option<RigidTransform>,
     correction: CorrectionOptions,
     alignment_revision: u64,
-    external_map: bool,
     estimator_reset: bool,
-    reloc_ticks: usize,
-    viewer_odom: Option<Subscriber<OdomMessage>>,
-    corrected_pub: Option<Publisher<OdomMessage>>,
+    odom_sub: Subscriber<OdomMessage>,
+    corrected_pub: Publisher<OdomMessage>,
     viz_pub: Option<VizPublisher>,
     corr_prev: Option<[f64; 3]>,
     latest_odom: Option<OdomMessage>,
     /// 视觉位姿观测订阅（`lightglue` 进程发布，定位后端融合）。
-    visual_obs: Option<Subscriber<PoseObservation>>,
+    visual_obs: Subscriber<PoseObservation>,
     /// odom 环形历史（时间戳，消息）：按观测时间戳插值位姿，消除
     /// 最新配对 ~0.1s 失配（1.5m/s 下 15cm 系统性错位）；`ODOM_HIST_CAP` 深
     /// 容忍低速 odom 与视觉滞后内插。
@@ -224,38 +175,22 @@ struct App {
 }
 
 impl App {
-    #[allow(clippy::needless_pass_by_value)]
     fn new(cfg: LocalizationConfig, odom_topic: &str) -> Result<Self> {
-        if cfg.backend == Backend::PoseGraph {
-            cfg.graph.validate()?;
-        }
-        cfg.correction.validate()?;
-        if !cfg.quality.valid() {
-            return Err(Error::new(
+        cfg.validate()?;
+        let origin = cfg.origin.ok_or_else(|| {
+            Error::new(
                 ErrorKind::InvalidArgument,
-                "invalid localization quality options",
-            ));
-        }
+                "external localization requires an explicit origin",
+            )
+            .with_operation("create_external_localization")
+        })?;
         let innov_limit_visual = cfg.fusion.visual.max_innovation_trans;
         let fusion = FusionFilter::new(cfg.fusion);
         let node = create_node()?;
         let log_ipc = firefly_observability::init_ipc(&node, "localization");
-        let odom_sub = Some(Subscriber::with_topic(&node, odom_topic)?);
-        let graph_inputs = cfg.backend == Backend::PoseGraph;
-        let loops = graph_inputs
-            .then(|| Subscriber::with_topic(&node, LOOP_TOPIC))
-            .transpose()?;
-        let keyframes = graph_inputs
-            .then(|| {
-                Subscriber::with_topic_and_buffer(
-                    &node,
-                    firefly_pubsub::vision::KEYFRAME_TOPIC,
-                    firefly_pubsub::landmarks::KEYFRAME_BUFFER,
-                )
-            })
-            .transpose()?;
-        let visual_obs = Some(Subscriber::with_topic(&node, POSE_OBS_TOPIC)?);
-        let corrected_pub = Some(Publisher::with_topic_notify(&node, CORRECTED_ODOM_TOPIC)?);
+        let odom_sub = Subscriber::with_topic(&node, odom_topic)?;
+        let visual_obs = Subscriber::with_topic(&node, POSE_OBS_TOPIC)?;
+        let corrected_pub = Publisher::with_topic_notify(&node, CORRECTED_ODOM_TOPIC)?;
         let viz_pub = match VizPublisher::new(&node) {
             Ok(p) => {
                 log::info!(
@@ -270,31 +205,17 @@ impl App {
             }
         };
         Ok(Self {
-            backend: cfg.backend,
             fusion,
             quality: Quality::default(),
             quality_options: cfg.quality,
-            graph: None,
-            graph_options: (cfg.backend == Backend::PoseGraph).then_some(cfg.graph),
-            loops,
-            keyframes,
-            pending_keyframes: std::collections::VecDeque::new(),
-            pending_loops: std::collections::VecDeque::new(),
-            landmark_correction: Publisher::with_topic_and_buffer(
-                &node,
-                firefly_pubsub::landmarks::CORRECTION_TOPIC,
-                Some(firefly_pubsub::landmarks::CORRECTION_BUFFER),
-            )?,
-            external_map: cfg.origin.is_some(),
-            origin: cfg.origin.unwrap_or_default(),
+            origin,
             alignment_ready: false,
             navigation_pub: Publisher::with_topic(&node, NAVIGATION_TOPIC)?,
             revision_alignment: None,
             correction: cfg.correction,
             alignment_revision: 0,
             estimator_reset: false,
-            reloc_ticks: 0,
-            viewer_odom: odom_sub,
+            odom_sub,
             visual_obs,
             corrected_pub,
             viz_pub,
@@ -313,7 +234,8 @@ impl App {
     }
 
     fn poll_sensors(&mut self) -> Result<()> {
-        if let Some(sub) = &self.viewer_odom {
+        {
+            let sub = &self.odom_sub;
             let mut odom_arrived = false;
             while let Some(sample) = sub.receive()? {
                 let m: OdomMessage = *sample;
@@ -341,23 +263,14 @@ impl App {
                     let Ok(alignment) = self.origin.at_start(&m) else {
                         continue;
                     };
-                    if let Some(options) = self.graph_options.as_ref() {
-                        let mut graph = PoseGraph::new(options.clone(), alignment)?;
-                        graph.insert(m.timestamp, pose)?;
-                        self.graph = Some(graph);
-                        self.graph_options = None;
-                    } else {
-                        self.fusion.set_alignment(alignment)?;
-                    }
+                    self.fusion.set_alignment(alignment)?;
                     self.alignment_ready = true;
                     log::info!("启动坐标系与静止 VIO 对齐，地图里程计就绪");
                 }
                 self.t_sim = self.t_sim.max(m.timestamp);
                 self.last_odom_recv = std::time::Instant::now();
                 let t_vio = pose.matrix();
-                if self.backend == Backend::Eskf {
-                    self.fusion.predict(&t_vio);
-                }
+                self.fusion.predict(&t_vio);
                 self.latest_odom = Some(m);
                 self.odom_hist.push_back((m.timestamp, m));
                 while self.odom_hist.len() > ODOM_HIST_CAP {
@@ -371,122 +284,18 @@ impl App {
                 self.drain_pending_visual();
             }
         }
-        if self.visual_obs.is_some() {
-            let mut arrived = Vec::new();
-            if let Some(sub) = &self.visual_obs {
-                while let Some(sample) = sub.receive()? {
-                    let obs: PoseObservation = *sample;
-                    arrived.push(obs);
-                }
-            }
-            for obs in arrived {
-                self.enqueue_visual(obs);
-            }
-            self.drain_pending_visual();
+        let mut arrived = Vec::new();
+        while let Some(sample) = self.visual_obs.receive()? {
+            arrived.push(*sample);
         }
-        self.poll_loop_constraints()
-    }
-
-    fn poll_loop_constraints(&mut self) -> Result<()> {
-        if let Some(keyframes) = &self.keyframes {
-            while let Some(sample) = keyframes.receive()? {
-                if !sample.is_initialized || !sample.timestamp.is_finite() {
-                    return Err(Error::new(
-                        ErrorKind::InvalidArgument,
-                        "invalid online keyframe",
-                    ));
-                }
-                self.pending_keyframes.push_back(*sample);
-            }
+        for obs in &arrived {
+            self.enqueue_visual(obs);
         }
-        if let Some(loops) = &self.loops {
-            while let Some(sample) = loops.receive()? {
-                if !sample.to.timestamp.is_finite() {
-                    return Err(Error::new(
-                        ErrorKind::InvalidArgument,
-                        "invalid loop timestamp",
-                    ));
-                }
-                self.pending_loops.push_back(*sample);
-            }
-        }
-        if self.pending_keyframes.len() > firefly_pubsub::landmarks::KEYFRAME_BUFFER
-            || self.pending_loops.len() > PENDING_VISUAL_CAP
-        {
-            return Err(Error::new(
-                ErrorKind::Internal,
-                "online graph input queue exhausted",
-            ));
-        }
-        if self.estimator_reset {
-            self.pending_keyframes.clear();
-            self.pending_loops.clear();
-            return Ok(());
-        }
-        let (Some(latest), Some(graph)) = (self.latest_odom, &mut self.graph) else {
-            return Ok(());
-        };
-        // 独立 IPC 话题可以先于预测里程计到达；保留完整关键帧，等待里程计覆盖。
-        while self
-            .pending_keyframes
-            .front()
-            .is_some_and(|sample| sample.timestamp <= latest.timestamp)
-        {
-            let sample = self.pending_keyframes.pop_front().expect("front checked");
-            if latest.timestamp - sample.timestamp > PENDING_VISUAL_TIMEOUT {
-                return Err(Error::new(
-                    ErrorKind::InvalidArgument,
-                    "online keyframe expired before graph insertion",
-                ));
-            }
-            let pose = sample.body_pose(FrameId::ODOM)?;
-            graph.insert(
-                sample.timestamp,
-                graph.raw_pose(sample.timestamp).unwrap_or(pose),
-            )?;
-        }
-        while self
-            .pending_loops
-            .front()
-            .is_some_and(|edge| edge.to.timestamp <= latest.timestamp)
-        {
-            let edge = self.pending_loops.pop_front().expect("front checked");
-            let result = if latest.timestamp - edge.to.timestamp > PENDING_VISUAL_TIMEOUT {
-                Err(Error::new(
-                    ErrorKind::InvalidArgument,
-                    "loop observation expired",
-                ))
-            } else {
-                graph.observe_loop(&edge)
-            };
-            let mut correction =
-                landmark_snapshot(graph, edge.from.timestamp, edge.to.timestamp, true);
-            correction.accepted = result.is_ok();
-            self.landmark_correction.publish(correction)?;
-            if let Some(viz) = &self.viz_pub {
-                let mut msg = ScalarMessage::base(self.t_sim, "corr/debug/loops");
-                msg.scalars[0] = graph.loop_count() as f64;
-                msg.scalars[1] = graph.node_count() as f64;
-                msg.scalars[2] = f64::from(result.is_ok());
-                msg.scalar_count = 3;
-                let _ = viz.publish(msg);
-            }
-            match result {
-                Ok(()) => log::info!(
-                    "在线回环接受 {:.3} → {:.3}",
-                    edge.from.timestamp,
-                    edge.to.timestamp
-                ),
-                Err(e) => log::warn!("在线回环拒收: {e}"),
-            }
-        }
+        self.drain_pending_visual();
         Ok(())
     }
 
-    /// 观测入队：按 `timestamp` 有序插入，溢出丢最旧（值语义：`Copy` 类型，
-    /// 384B 过栈拷贝的代价远小于一次 `PnP`/融合，见 `fuse_visual` 同惯例）。
-    #[allow(clippy::large_types_passed_by_value)]
-    fn enqueue_visual(&mut self, obs: PoseObservation) {
+    fn enqueue_visual(&mut self, obs: &PoseObservation) {
         if !obs.timestamp.is_finite()
             || obs.timestamp < 0.
             || obs.timestamp <= self.last_visual
@@ -503,7 +312,7 @@ impl App {
             .iter()
             .position(|o| o.timestamp > obs.timestamp)
             .unwrap_or(self.pending_visual.len());
-        self.pending_visual.insert(pos, obs);
+        self.pending_visual.insert(pos, *obs);
         while self.pending_visual.len() > PENDING_VISUAL_CAP {
             self.pending_visual.pop_front();
         }
@@ -538,57 +347,13 @@ impl App {
         }
     }
 
-    /// 视觉观测融合：按观测时刻插值 odom 作预测位姿，选定后端更新。
+    /// 视觉观测融合：按观测时刻插值 odom 作预测位姿，更新 ESKF。
     #[fastrace::trace]
     fn fuse_visual(&mut self, obs: &PoseObservation) {
-        if !self.external_map {
-            log::warn!("会话地图未对齐外部地图，拒绝绝对地图观测");
-            return;
-        }
         let Some(t_vio) = interp_odom(&self.odom_hist, obs.timestamp) else {
             log::debug!("视觉观测无 odom 内插（ts={:.2}），跳过", obs.timestamp);
             return;
         };
-        if let Some(graph) = &mut self.graph {
-            let t_vio = graph
-                .raw_pose(obs.timestamp)
-                .map_or(t_vio, |pose| pose.matrix());
-            let before = graph.alignment().matrix();
-            let result = graph.observe_map(obs, &t_vio);
-            if result.is_ok() {
-                let predicted = graph.alignment().matrix() * t_vio;
-                let observed = Vector3::new(obs.position_x, obs.position_y, obs.position_z);
-                self.quality.observe(
-                    obs.timestamp,
-                    (predicted.fixed_view::<3, 1>(0, 3) - observed).norm(),
-                );
-            }
-            if result.is_ok() {
-                let correction = landmark_snapshot(graph, obs.timestamp, obs.timestamp, false);
-                if let Err(error) = self.landmark_correction.publish(correction) {
-                    log::error!("地图锚点快照发布失败: {error}");
-                }
-            }
-            let applied = (graph.alignment().matrix().fixed_view::<3, 1>(0, 3)
-                - before.fixed_view::<3, 1>(0, 3))
-            .norm();
-            if let Some(viz) = &self.viz_pub {
-                let mut msg = ScalarMessage::base(self.t_sim, "corr/debug/gate");
-                msg.scalars[..4].copy_from_slice(&[
-                    obs.error,
-                    3.,
-                    applied,
-                    f64::from(result.is_ok()),
-                ]);
-                msg.scalar_count = 4;
-                let _ = viz.publish(msg);
-            }
-            match result {
-                Ok(()) => log::info!("地图锚点接受 t={:.3}", obs.timestamp),
-                Err(e) => log::info!("地图锚点拒收 t={:.3}: {e}", obs.timestamp),
-            }
-            return;
-        }
         let gate = self.fusion.update_with_observation(&t_vio, obs);
         if matches!(gate, RelocGate::Accepted { .. }) {
             let predicted = self.fusion.drift() * t_vio;
@@ -646,9 +411,6 @@ impl App {
         if !self.alignment_ready || self.estimator_reset {
             return Ok(());
         }
-        let Some(pub_) = &self.corrected_pub else {
-            return Ok(());
-        };
         let Some(odom) = &self.latest_odom else {
             return Ok(());
         };
@@ -657,10 +419,8 @@ impl App {
         {
             return Ok(());
         }
-        let alignment = match &self.graph {
-            Some(graph) => graph.alignment(),
-            None => RigidTransform::from_matrix(FrameId::MAP, FrameId::ODOM, self.fusion.drift())?,
-        };
+        let alignment =
+            RigidTransform::from_matrix(FrameId::MAP, FrameId::ODOM, self.fusion.drift())?;
         let msg = corrected_odom(odom, &alignment)?;
         let status = self.quality.status(msg.timestamp, &self.quality_options);
         if let Some(viz) = &self.viz_pub {
@@ -691,9 +451,9 @@ impl App {
             Some(false) => {}
         }
         let mut navigation = NavigationMessage::new(msg, &alignment, self.alignment_revision);
-        navigation.external_map = u64::from(self.external_map);
+        navigation.external_map = 1;
         self.navigation_pub.publish(navigation)?;
-        pub_.publish(msg).map(|_| ())?;
+        self.corrected_pub.publish(msg)?;
         self.last_published = msg.timestamp;
         self.log_corrected_viz(&msg);
         Ok(())
@@ -733,11 +493,8 @@ impl App {
     }
 
     /// 矫正后位姿可视化（`corr/odom` 位姿 + `corr/traj` 增量轨迹段，绿，
-    /// 与 vio `log_viz` 同增量段写法；发布失败只降级，不影响融合）。
+    /// 发布失败只降级，不影响融合）。
     fn log_corrected_viz(&mut self, msg: &OdomMessage) {
-        if !self.reloc_ticks.is_multiple_of(VIZ_PERIOD) {
-            return;
-        }
         let Some(viz) = &self.viz_pub else {
             return;
         };
@@ -768,16 +525,12 @@ impl App {
         self.poll_sensors()?;
         firefly_observability::set_sim_time(self.t_sim);
         firefly_observability::pump_log_ipc(&self.log_ipc);
-        self.reloc_ticks = self.reloc_ticks.wrapping_add(1);
         self.publish_corrected()?;
         Ok(())
     }
 
     fn run(&mut self) -> Result<()> {
-        log::info!(
-            "localization 进程启动：backend={:?}，发布 {CORRECTED_ODOM_TOPIC}",
-            self.backend
-        );
+        log::info!("外部库图定位启动：ESKF，发布 {CORRECTED_ODOM_TOPIC}");
         let waitset = iceoryx2::waitset::WaitSetBuilder::new()
             .create::<iceoryx2::prelude::ipc::Service>()
             .map_err(|e| Error::new(ErrorKind::Internal, format!("创建 WaitSet 失败: {e:?}")))?;
@@ -827,7 +580,7 @@ fn main() {
     let cfg = match firefly_config::startup::<LocalizationConfig>(
         &args.config,
         init_observability,
-        |_| Ok(()),
+        LocalizationConfig::validate,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -855,7 +608,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{RelocGate, gate_diag};
+    use super::{
+        App, CORRECTED_ODOM_TOPIC, LocalizationConfig, OdomMessage, Publisher, RelocGate,
+        Subscriber, create_node, gate_diag,
+    };
     use nalgebra::Vector6;
 
     #[test]
@@ -866,7 +622,7 @@ mod tests {
                 use super::*;
                 use firefly_pubsub::publish::Publisher;
                 let topic = format!("Firefly/Test/MapOdometry/{}", std::process::id());
-                let mut app = App::new(LocalizationConfig::default(), &topic).unwrap();
+                let mut app = App::new(toml::from_str("[origin]").unwrap(), &topic).unwrap();
                 let node = create_node().unwrap();
                 let _raw = Publisher::<OdomMessage>::with_topic(&node, &topic).unwrap();
                 let _corrected =
@@ -911,107 +667,54 @@ mod tests {
     }
 
     #[test]
-    fn default_backend_navigates_without_map_observations_and_latches_estimator_reset() {
-        // IPC 可视化消息在 debug 构建中需要足够的线程栈。
-        std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
-            .spawn(|| {
-                use super::*;
-                use firefly_pubsub::publish::Publisher;
-                let topic = format!("Firefly/Test/MapOdometry/{}", std::process::id());
-                let mut app = App::new(LocalizationConfig::default(), &topic).unwrap();
-                assert_eq!(app.backend, Backend::PoseGraph);
-                assert!(app.visual_obs.is_some());
-                let node = create_node().unwrap();
-                let raw = Publisher::<OdomMessage>::with_topic(&node, &topic).unwrap();
-                let corrected =
-                    Subscriber::<OdomMessage>::with_topic(&node, CORRECTED_ODOM_TOPIC).unwrap();
-                let mut sample = OdomMessage {
-                    timestamp: 2.,
-                    is_initialized: true,
-                    ..Default::default()
-                };
-                raw.publish(sample).unwrap();
-                app.step().unwrap();
-                assert!(app.alignment_ready);
-                let _ = corrected.receive().unwrap();
-                let keyframes = Publisher::<OdomMessage>::with_topic(
-                    &node,
-                    firefly_pubsub::vision::KEYFRAME_TOPIC,
-                )
-                .unwrap();
-                keyframes
-                    .publish(OdomMessage {
-                        timestamp: 1.95,
-                        ..sample
-                    })
-                    .unwrap();
-                keyframes
-                    .publish(OdomMessage {
-                        timestamp: 3.,
-                        ..sample
-                    })
-                    .unwrap();
-                app.step().unwrap();
-                assert!(app.graph.as_ref().unwrap().raw_pose(1.95).is_some());
-                assert!(app.graph.as_ref().unwrap().raw_pose(3.).is_none());
-                assert_eq!(app.pending_keyframes.len(), 1);
-                sample.timestamp = 7.;
-                sample.position_x = 2.;
-                sample.position_y = 3.;
-                sample.position_z = 1.;
-                raw.publish(sample).unwrap();
-                app.step().unwrap();
-                assert!(app.pending_keyframes.is_empty());
-                let snapshot = landmark_snapshot(app.graph.as_ref().unwrap(), 1.95, 3., true);
-                assert_eq!(
-                    snapshot.poses[..snapshot.count as usize]
-                        .iter()
-                        .map(|p| p.timestamp)
-                        .collect::<Vec<_>>(),
-                    [1.95, 2., 3.]
-                );
-                let mapped = corrected.receive().unwrap().unwrap();
-                assert!((mapped.position_x - 2.).abs() < 1e-12);
-                assert!((mapped.position_y - 3.).abs() < 1e-12);
-                assert!((mapped.position_z - 1.).abs() < 1e-12);
-                assert!(
-                    !app.quality
-                        .status(7., &app.quality_options)
-                        .recent_consistent
-                );
-                drop(mapped);
-                app.quality.observe(2., 0.1);
-                assert!(
-                    !app.quality
-                        .status(7.1, &app.quality_options)
-                        .recent_consistent
-                );
-                sample.timestamp = 7.1;
-                raw.publish(sample).unwrap();
-                app.step().unwrap();
-                assert!(corrected.receive().unwrap().is_some());
-                app.last_odom_recv = std::time::Instant::now()
-                    .checked_sub(std::time::Duration::from_secs(2))
-                    .unwrap();
-                sample.timestamp = 7.2;
-                app.latest_odom = Some(sample);
-                app.publish_corrected().unwrap();
-                assert!(corrected.receive().unwrap().is_none());
-                sample.timestamp = 8.;
-                sample.is_initialized = false;
-                raw.publish(sample).unwrap();
-                app.step().unwrap();
-                assert!(app.estimator_reset);
-                sample.timestamp = 9.;
-                sample.is_initialized = true;
-                raw.publish(sample).unwrap();
-                app.step().unwrap();
-                assert!(corrected.receive().unwrap().is_none());
-            })
-            .unwrap()
-            .join()
+    fn optional_external_localization_preserves_odometry_freshness_and_latches_reset() {
+        let topic = format!("Firefly/Test/ExternalLocalization/{}", std::process::id());
+        let mut app = App::new(toml::from_str("[origin]").unwrap(), &topic).unwrap();
+        let node = create_node().unwrap();
+        let raw = Publisher::<OdomMessage>::with_topic(&node, &topic).unwrap();
+        let corrected = Subscriber::<OdomMessage>::with_topic(&node, CORRECTED_ODOM_TOPIC).unwrap();
+        let mut sample = OdomMessage {
+            timestamp: 2.0,
+            is_initialized: true,
+            ..Default::default()
+        };
+        raw.publish(sample).unwrap();
+        app.step().unwrap();
+        assert!(app.alignment_ready);
+        assert!(corrected.receive().unwrap().is_some());
+        sample.timestamp = 3.0;
+        sample.position_x = 2.0;
+        raw.publish(sample).unwrap();
+        app.step().unwrap();
+        assert!((corrected.receive().unwrap().unwrap().position_x - 2.0).abs() < 1e-12);
+        app.last_odom_recv = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(2))
             .unwrap();
+        sample.timestamp = 3.1;
+        app.latest_odom = Some(sample);
+        app.publish_corrected().unwrap();
+        assert!(corrected.receive().unwrap().is_none());
+        sample.timestamp = 4.0;
+        sample.is_initialized = false;
+        raw.publish(sample).unwrap();
+        app.step().unwrap();
+        assert!(app.estimator_reset);
+        sample.timestamp = 5.0;
+        sample.is_initialized = true;
+        raw.publish(sample).unwrap();
+        app.step().unwrap();
+        assert!(corrected.receive().unwrap().is_none());
+    }
+
+    #[test]
+    fn optional_localization_requires_explicit_external_origin_before_opening_ipc() {
+        assert!(
+            App::new(
+                LocalizationConfig::default(),
+                "Firefly/Test/NoExternalOrigin"
+            )
+            .is_err()
+        );
     }
 
     #[test]

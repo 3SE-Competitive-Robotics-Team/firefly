@@ -14,8 +14,8 @@ command = ["bin/motor"]
 autostart = true
 
 [[process]]
-name = "vio"
-command = ["bin/vio"]
+name = "firefly-okvis-x"
+command = ["bin/firefly-okvis-x"]
 autostart = true
 
 [[process]]
@@ -26,12 +26,7 @@ autostart = true
 [[process]]
 name = "localization"
 command = ["bin/localization"]
-autostart = true
-
-[[process]]
-name = "slam"
-command = ["bin/slam"]
-autostart = true
+autostart = false
 
 [[process]]
 name = "planner"
@@ -41,7 +36,7 @@ autostart = true
 [[process]]
 name = "aliked"
 command = ["bin/aliked"]
-autostart = true
+autostart = false
 
 [[process]]
 name = "lightglue"

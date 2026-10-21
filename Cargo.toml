@@ -17,7 +17,6 @@ serde_yaml = "0.9.34"
 firefly-srl-projection = { path = "crates/firefly-srl-projection" }
 firefly-supereight2 = { path = "crates/firefly-supereight2" }
 firefly-config = { path = "crates/firefly-config" }
-firefly-landmarks = { path = "crates/firefly-landmarks" }
 serde_json = "1.0.154"
 signal-hook = "0.3"
 firefly-base = { path = "crates/firefly-base" }
@@ -47,10 +46,6 @@ firefly-error = { path = "crates/firefly-error" }
 firefly-hal = { path = "crates/firefly-hal" }
 firefly-imu = { path = "crates/firefly-imu" }
 firefly-flight = { path = "crates/firefly-flight" }
-firefly-vio-core = { path = "crates/firefly-vio-core" }
-firefly-vio-types = { path = "crates/firefly-vio-types" }
-firefly-vio-init = { path = "crates/firefly-vio-init" }
-firefly-vio = { path = "crates/firefly-vio" }
 firefly-map = { path = "crates/firefly-map" }
 firefly-observability = { path = "crates/firefly-observability" }
 firefly-optimize = { path = "crates/firefly-optimize" }

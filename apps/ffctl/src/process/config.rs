@@ -141,7 +141,7 @@ mod tests {
     use std::path::PathBuf;
     const SAMPLE: &str = r#"
 [[process]]
-name = "vio"
+name = "firefly-okvis-x"
 command = ["bin/vio"]
 autostart = true
 
@@ -175,7 +175,7 @@ autostart = false
         let reloaded = Config::load(&path).unwrap();
         assert_eq!(reloaded.processes.len(), 2);
         assert!(reloaded.processes.iter().all(|process| process.autostart));
-        assert_eq!(reloaded.processes[0].name, "vio");
+        assert_eq!(reloaded.processes[0].name, "firefly-okvis-x");
         assert_eq!(reloaded.processes[1].name, "fc");
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -189,12 +189,12 @@ autostart = false
             &path,
             r#"
 [[process]]
-name = "vio"
+name = "firefly-okvis-x"
 command = ["bin/vio"]
 autostart = true
 
 [[process]]
-name = "vio"
+name = "firefly-okvis-x"
 command = ["bin/fc"]
 autostart = true
 "#,
@@ -206,7 +206,7 @@ autostart = true
             &path,
             r#"
 [[process]]
-name = "vio"
+name = "firefly-okvis-x"
 command = ["bin/vio"]
 autostart = true
 extra = 1
@@ -231,7 +231,7 @@ extra = 1
     #[test]
     fn autostart_lookup() {
         let config: Config = toml::from_str(SAMPLE).unwrap();
-        assert!(autostart_of(&config, "vio").is_some());
+        assert!(autostart_of(&config, "firefly-okvis-x").is_some());
         assert!(autostart_of(&config, "nope").is_none());
     }
 }

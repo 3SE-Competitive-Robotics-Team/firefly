@@ -9,16 +9,38 @@ use crate::filter::FusionOptions;
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct LocalizationConfig {
-    /// 可选外部地图启动位姿；缺省以启动位置和航向建立会话地图，不来自在线真值。
+    /// 外部地图启动位姿；运行外部定位服务时必须显式提供，不来自在线真值。
     pub origin: Option<InitialAlignment>,
     /// 融合参数。
     pub fusion: FusionOptions,
-    /// 默认统一位姿图；ESKF 用于无回环的对照运行，两者不叠加校正。
-    pub backend: Backend,
-    pub graph: crate::graph::GraphOptions,
     pub quality: crate::quality::QualityOptions,
     /// 对齐修正提交门限；低于门限不递增修订号。
     pub correction: crate::correction::CorrectionOptions,
+}
+
+impl LocalizationConfig {
+    /// # Errors
+    /// Requires a finite external startup prior and valid correction/quality settings.
+    pub fn validate(&self) -> Result<()> {
+        let origin = self.origin.as_ref().ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidArgument,
+                "external localization requires an explicit [origin]",
+            )
+            .with_operation("validate_external_localization")
+        })?;
+        if origin.position.iter().any(|x| !x.is_finite())
+            || !origin.yaw.is_finite()
+            || !self.quality.valid()
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidArgument,
+                "invalid external localization configuration",
+            )
+            .with_operation("validate_external_localization"));
+        }
+        self.correction.validate()
+    }
 }
 
 /// 静止启动时机体在地图中的位置与航向；odom 航向规范由测量确定。
@@ -73,15 +95,6 @@ impl InitialAlignment {
             [0., 0., half.sin(), half.cos()],
         )
     }
-}
-
-/// 地图定位后端，进程启动时固定。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Backend {
-    #[default]
-    PoseGraph,
-    Eskf,
 }
 
 #[cfg(test)]

@@ -33,18 +33,18 @@ mod tests {
     #[test]
     fn requests_and_status_roundtrip() {
         let start = Request::Start {
-            names: vec!["vio".to_owned()],
+            names: vec!["firefly-okvis-x".to_owned()],
         };
         let text = serde_json::to_string(&start).unwrap();
-        assert_eq!(text, r#"{"cmd":"start","names":["vio"]}"#);
+        assert_eq!(text, r#"{"cmd":"start","names":["firefly-okvis-x"]}"#);
         let decoded: Request = serde_json::from_str(&text).unwrap();
-        assert!(matches!(decoded, Request::Start { names } if names == ["vio"]));
+        assert!(matches!(decoded, Request::Start { names } if names == ["firefly-okvis-x"]));
 
         let status = Response {
             ok: true,
             message: "ok".to_owned(),
             processes: vec![ProcessStatus {
-                name: "vio".to_owned(),
+                name: "firefly-okvis-x".to_owned(),
                 running: true,
                 pid: Some(42),
                 restarts: 1,

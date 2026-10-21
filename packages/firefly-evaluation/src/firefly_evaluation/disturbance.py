@@ -149,7 +149,7 @@ def run_disturbance(directory, options, limits, hover_limits, *, workspace=None,
             (f"assess_{index:02d}", partial(mission.assess_round, options, limits, hover_limits, force, index)),
         ])
     phases.append(("landing", mission.landing))
-    result = mission.run_phases(phases, ("render", "vio", "fc"))
+    result = mission.run_phases(phases, ("render", "firefly-okvis-x", "fc"))
     hover_scorer(result, options, hover_limits, phase_name=f"recovery_{limits.rounds:02d}")
     disturbance_scorer(result, options, limits, forces, hover_limits)
     return result, forces

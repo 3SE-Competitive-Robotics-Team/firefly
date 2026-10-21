@@ -50,7 +50,7 @@ def flight_environment(request):
     require_idle(ROOT)
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         pytest.fail("flight test requires a graphical session (DISPLAY or WAYLAND_DISPLAY)")
-    missing = [name for name in ("render", "vio", "fc", "ffctl")
+    missing = [name for name in ("render", "firefly-okvis-x", "fc", "ffctl")
                if not (ROOT / f"target/release/{name}").is_file()]
     if missing:
         pytest.fail(f"missing release binaries: {missing}; run cargo xtask release")
@@ -80,7 +80,7 @@ def flight_report(flight_directory):
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT,
     ).decode().split("\0")
     files = {ROOT / name for name in names if name and (ROOT / name).is_file()}
-    files.update(ROOT / f"target/release/{name}" for name in ("render", "vio", "fc", "ffctl"))
+    files.update(ROOT / f"target/release/{name}" for name in ("render", "firefly-okvis-x", "fc", "ffctl"))
     from firefly_mujoco import load_scene_name, resolve_scene
 
     scene = resolve_scene(load_scene_name())
