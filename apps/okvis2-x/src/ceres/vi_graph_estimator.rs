@@ -452,12 +452,16 @@ impl ViGraphEstimator {
             .online_calibration
             .do_extrinsics
         {
+            // 上游两个构造函数都默认 stayConst = true：两帧共用同一组外参块，
+            // `visual_parameters` 也只注册 a 的 num_cams 个外参参数块。传 false 会让
+            // 错误项期待 2*num_cams 个槽位，第二帧的槽位永远填不上，线性化时报
+            // "extrinsics snapshot is absent"。
             Ok(VisualFactor::Extrinsics(TwoPoseExtrinsicsGraphError::new(
-                a, b, cameras, false,
+                a, b, cameras, true,
             )))
         } else {
             Ok(VisualFactor::Standard(TwoPoseStandardGraphError::new(
-                a, b, cameras, false,
+                a, b, cameras, true,
             )))
         }
     }
