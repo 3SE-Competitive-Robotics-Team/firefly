@@ -3161,20 +3161,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "firefly-landmarks"
-version = "0.1.0"
-dependencies = [
- "fastrace",
- "firefly-base",
- "firefly-error",
- "firefly-vision-match",
- "log",
- "nalgebra",
- "purecv",
- "serde",
-]
-
-[[package]]
 name = "firefly-localization"
 version = "0.1.0"
 dependencies = [
@@ -3360,52 +3346,6 @@ dependencies = [
  "firefly-error",
  "log",
  "logcall",
- "nalgebra",
-]
-
-[[package]]
-name = "firefly-vio"
-version = "0.1.0"
-dependencies = [
- "fastrace",
- "firefly-base",
- "firefly-error",
- "firefly-observability",
- "firefly-vio-core",
- "firefly-vio-init",
- "firefly-vio-types",
- "log",
- "nalgebra",
-]
-
-[[package]]
-name = "firefly-vio-core"
-version = "0.1.0"
-dependencies = [
- "fastrace",
- "firefly-vio-types",
- "log",
- "nalgebra",
- "purecv",
- "rayon",
-]
-
-[[package]]
-name = "firefly-vio-init"
-version = "0.1.0"
-dependencies = [
- "firefly-imu",
- "firefly-vio-core",
- "firefly-vio-types",
- "log",
- "nalgebra",
-]
-
-[[package]]
-name = "firefly-vio-types"
-version = "0.1.0"
-dependencies = [
- "firefly-base",
  "nalgebra",
 ]
 
@@ -7139,22 +7079,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
-name = "slam"
-version = "0.1.0"
-dependencies = [
- "fastrace",
- "firefly-base",
- "firefly-config",
- "firefly-error",
- "firefly-landmarks",
- "firefly-observability",
- "firefly-pubsub",
- "firefly-vio-core",
- "log",
- "nalgebra",
-]
-
-[[package]]
 name = "slotmap"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7930,26 +7854,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vio"
-version = "0.1.0"
-dependencies = [
- "fastrace",
- "firefly-base",
- "firefly-config",
- "firefly-error",
- "firefly-observability",
- "firefly-pubsub",
- "firefly-vio",
- "firefly-vio-core",
- "firefly-vio-types",
- "iceoryx2",
- "log",
- "nalgebra",
- "serde",
- "toml 1.1.8+spec-1.1.0",
-]
 
 [[package]]
 name = "walkdir"

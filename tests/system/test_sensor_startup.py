@@ -1,7 +1,7 @@
 """发布构建的传感器启动检查；运行记录仅写 logs/ 下的 rrd。
 
 从仓库根运行：FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/system/test_sensor_startup.py -q
-需要 RMUC 资产、图形会话与 release 构建的 vio / fc / render，且没有其他闭环进程。
+需要 RMUC 资产、图形会话与 release 构建的 firefly-okvis-x / fc / render，且没有其他闭环进程。
 GroundTruth 仅供 render 合成图像；屏蔽 PlantState，算法只使用 IMU 与图像。
 """
 from __future__ import annotations
@@ -43,7 +43,7 @@ def _sensor_startup() -> None:
     mesh = scene.visual
     if not mesh.is_file():
         raise FileNotFoundError(f"RMUC 视觉资产缺失：{mesh}")
-    for name in ("vio", "fc", "render"):
+    for name in ("firefly-okvis-x", "fc", "render"):
         if not (ROOT / "target" / "release" / name).is_file():
             raise RuntimeError(f"missing release binary: {name}")
     output = ROOT / "logs" / f"vio_sensor_startup_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.rrd"
@@ -65,7 +65,7 @@ def _sensor_startup() -> None:
         time.sleep(2)
         check_alive()
         start("render", [str(ROOT / "target/release/render")])
-        start("vio", [str(ROOT / "target/release/vio")])
+        start("firefly-okvis-x", [str(ROOT / "target/release/firefly-okvis-x")])
         start("fc", [str(ROOT / "target/release/fc")])
         iox2.set_log_level(iox2.LogLevel.Error)
         node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)

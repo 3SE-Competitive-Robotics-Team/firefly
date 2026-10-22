@@ -1,4 +1,4 @@
-//! ALIKED/LightGlue 离线视觉地图定位；在线路标回环由 slam 进程维护。
+//! ALIKED/LightGlue 离线视觉地图定位；在线回环由 OKVIS2-X 维护。
 
 mod sensors;
 #[cfg(test)]

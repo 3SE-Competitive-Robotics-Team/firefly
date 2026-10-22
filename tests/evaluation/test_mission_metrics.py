@@ -166,7 +166,7 @@ def test_roundtrip_distance_summary_does_not_override_failed_acceptance():
     truth = np.array([[0., -13., 0., 2.2, 0., 0., 0., 1.],
                       [10., -3., 0., 2.2, 0., 0., 0., 1.],
                       [20., -13., 0., 2.2, 0., 0., 0., 1.]])
-    evidence = {"gt": truth, "loop_frontend": np.array([[20., 12., 3., 0., 0.]])}
+    evidence = {"gt": truth, "loop_backend": np.array([[20., 0.]])}
     case = {"case": "nominal", "recording": "unused", "waypoint_arrivals": [{}, {}],
             "stages": {"tracking": {"status": "blocked"}}}
     mission_metrics.score(case, Options(), evidence_reader=lambda _: evidence)
@@ -176,9 +176,8 @@ def test_roundtrip_distance_summary_does_not_override_failed_acceptance():
     assert summary["last_horizontal_distance_from_start_m"] == pytest.approx(0.)
     assert summary["estimated_waypoints_completed"]
     assert not summary["all_waypoints_reached"]
-    assert summary["online_keyframes"] == 12
-    assert summary["maximum_loop_candidates"] == 3
-    assert summary["loop_evidence"] == "no_accepted_constraint_observed"
+    assert summary["committed_full_graph_updates"] == 0
+    assert summary["loop_evidence"] == "no_committed_update_observed"
     assert case["status"] == "failed"
 
 
@@ -254,7 +253,9 @@ def test_online_frontend_runs_during_takeoff_and_initial_hover(tmp_path, vio_onl
     class PhaseMission(Mission):
         def run_phases(self, phases, applications):
             assert [name for name, _ in phases][:3] == ["initialization", "takeoff", "hover"]
-            assert ("slam" in applications) == (not vio_only)
+            assert "firefly-okvis-x" in applications
+            assert "slam" not in applications
+            assert ("localization" in applications) == prior_maps
             assert ("aliked" in applications) == prior_maps
             assert ("lightglue" in applications) == prior_maps
             return self.result
@@ -305,3 +306,16 @@ def test_online_slam_requires_loop_constraint_even_without_prior_map():
     mission_metrics.score(case, Options(), evidence_reader=lambda _: evidence)
     assert case["stages"]["online_loop"]["status"] == "failed"
     assert "visual_localization" not in case["stages"]
+
+
+@pytest.mark.parametrize("updates, expected", [(0., "failed"), (1., "passed"), (3., "passed")])
+def test_online_loop_requires_a_committed_full_graph_update(updates, expected):
+    from firefly_evaluation import mission_metrics
+    case = {"case": "nominal", "localization_mode": "online_slam", "recording": "unused",
+            "waypoint_arrivals": [], "stages": {"tracking": {"status": "blocked"}}}
+    evidence = {"loop_backend": np.array([[1., 0.], [2., updates]])}
+    mission_metrics.score(case, Options(), evidence_reader=lambda _: evidence)
+    assert case["stages"]["online_loop"]["status"] == expected
+    assert case["stages"]["online_loop"]["metrics"]["committed_full_graph_updates"] == updates
+    # A loop commit alone cannot pass route, landing and lifecycle acceptance.
+    assert case["status"] == "failed"

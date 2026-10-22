@@ -1,6 +1,5 @@
 //! 低频全局重定位与 VIO 的松耦合融合。
 //!
-//! - `graph`：重力对齐四自由度图，联合原始 VIO、地图锚点和在线回环。
 //! - `filter`：可选对照后端，误差态 EKF，状态为 `VIO→全局` 的漂移 `SE(3)`，预测由 VIO 增量驱动，
 //!   观测为几何/视觉全局位姿（`R = h⁻¹`），`chi2` 门控与 Joseph 更新。
 //! - `correction`：地图坐标切换门限，低于门限的修正不切换下游坐标系。
@@ -13,7 +12,6 @@ pub mod config;
 pub mod convert;
 pub mod correction;
 pub mod filter;
-pub mod graph;
 pub mod quality;
 
 pub use config::LocalizationConfig;

@@ -180,9 +180,8 @@ class Mission:
                     elif entity == "corr/debug/gate" and msg.scalar_count == 4 and msg.scalars[3] == 1:
                         self.visual_updates += 1
                         self.recorder.scalars("acceptance/visual_update", msg.timestamp, list(msg.scalars[:4]))
-                    elif entity in {"loop/debug/frontend", "corr/debug/loops"}:
-                        suffix = "loop_frontend" if entity == "loop/debug/frontend" else "loop_backend"
-                        self.recorder.scalars("acceptance/" + suffix, msg.timestamp, list(msg.scalars[:msg.scalar_count]))
+                    elif entity == "okvis/loop_commits":
+                        self.recorder.scalars("acceptance/loop_backend", msg.timestamp, list(msg.scalars[:msg.scalar_count]))
                     elif entity == "acceptance/physics":
                         self.physics = list(msg.scalars)
                         self.physics_time = msg.timestamp
@@ -387,7 +386,7 @@ class Mission:
     def estimator_fallback(self):
         self.recorder.event("fault inject: stop VIO with SIGINT", self.t)
         start = time.monotonic()
-        self.stop("vio")
+        self.stop("firefly-okvis-x")
         self.wait(lambda: self.standby_active() and min(self.last_motors) > 0., wall=max(0.01, self.options.estimator_fallback_wall_s - (time.monotonic() - start)))
         latency = time.monotonic() - start
         if latency > self.options.estimator_fallback_wall_s:
@@ -443,11 +442,9 @@ class Mission:
             phases.extend([("reference_loss", self.reference_loss), ("failure_hold", self.failure_hold), ("landing", self.landing)])
         else:
             phases.extend([("estimator_fallback", self.estimator_fallback), ("degraded_support", self.degraded_support)])
-        applications = ["render", "vio", "fc", "localization"]
-        if not self.vio_only and self.case != "estimator_loss":
-            applications.append("slam")
-            if self.prior_maps:
-                applications.extend(("aliked", "lightglue"))
+        applications = ["render", "firefly-okvis-x", "fc"]
+        if self.prior_maps and self.case != "estimator_loss":
+            applications.extend(("localization", "aliked", "lightglue"))
         result = self.run_phases(phases, applications)
         if self.case == "estimator_loss":
             result["stages"]["failure_terminal"] = {"status": "not_supported", "reason": "No independent position/altitude estimate: IMU attitude support cannot guarantee hover or safe landing"}
@@ -467,6 +464,11 @@ class Mission:
             self.connect()
             for name in applications:
                 command = [str(self.root / f"target/release/{name}")]
+                if name == "firefly-okvis-x":
+                    if self.vio_only:
+                        command += ["--no-loop-closures", "--no-mapping"]
+                    if self.prior_maps:
+                        command += ["--external-localization"]
                 if name == "localization" and self.localization_config is not None:
                     command += ["--config", str(self.localization_config)]
                 if name == "lightglue" and self.prior_maps:

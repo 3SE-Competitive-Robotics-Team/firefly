@@ -1,7 +1,7 @@
 """VIO 主姿态与独立 ESKF 热备的 release 起降、持续悬停与失联验收；原始证据只写 RRD。
 
 uv run pytest tests/system/test_imu_flight.py -q -k imu_hover
-需要图形会话、RMUC 资产和 release vio/fc/render/ffctl；运行前须停止其他闭环进程。
+需要图形会话、RMUC 资产和 release firefly-okvis-x/fc/render/ffctl；运行前须停止其他闭环进程。
 """
 from dataclasses import asdict
 
@@ -29,7 +29,7 @@ def test_imu_flight(case, flight_directory, flight_report):
     phases.extend([("landing", mission.landing)] if case != "imu_vio_loss" else [
         ("estimator_fallback", mission.estimator_fallback), ("degraded_support", mission.degraded_support),
     ])
-    result = mission.run_phases(phases, ("render", "vio", "fc"))
+    result = mission.run_phases(phases, ("render", "firefly-okvis-x", "fc"))
     if case == "imu_hover":
         score_hover(result, options, limits)
     if case == "imu_vio_loss":

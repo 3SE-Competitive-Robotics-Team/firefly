@@ -5,69 +5,56 @@
 
 ## 数据流与职责
 
-默认从空会话地图启动：双目/IMU VIO、持久路标回环、在线深度建图规划。
-不依赖已知世界起点、`.ffvmap`、`.ffmap` 或神经网络权重；离线地图定位是显式增强。
+默认从空会话地图启动，`firefly-okvis-x` 在一个进程内执行视觉惯性图优化、在线回环和深度子地图。
+不依赖已知世界起点、`.ffvmap`、`.ffmap` 或神经网络权重；离线库图定位是显式可选增强。
 
 ```mermaid
 flowchart LR
-    SIM[sim：物理与传感器源] -->|IMU| V[VIO]
+    SIM[sim：物理与传感器源] -->|IMU| V[firefly-okvis-x]
     SIM -->|仿真位姿，仅生成图像| R[render]
-    R -->|双目| V
-    V -->|连续 odom| F[fc]
-    SIM -->|原始 IMU| I[firefly-imu]
-    V -->|后验高频 IMU 预测| F
-    I -->|独立 ESKF 安全热备| F
+    R -->|双目与深度| V
+    V -->|连续 odom 与后验 IMU 预测姿态| F[fc]
+    SIM -->|原始 IMU| I[firefly-imu：FC 内独立热备]
+    I --> F
     F -->|四电机推力| SIM
-    V -->|原子关键帧| S[slam：持久路标与共视图]
-    V -->|原始里程计| L[localization]
-    S -->|关键帧与回环边| L
-    L -->|图修正与接受确认| S
-    A[可选 ALIKED / LightGlue 库图定位] -->|地图锚点| L
-    L -->|原子 Navigation| P[planner]
+    V -->|默认原子 Navigation| P[planner]
+    V -->|原始 odom| L[可选 localization ESKF]
+    A[可选 ALIKED / LightGlue 库图定位] -->|地图位姿观测| L
+    L -->|外部地图模式独占 Navigation| P
     R -->|深度| P
     P -->|携带坐标变换的 Reference| F
-    R -->|左目、按需右目与深度| D[firefly-viz：独立 Python 录制进程]
+    R -->|图像| D[firefly-viz]
     V -->|诊断 IPC| D
-    P -->|规划与地图诊断 IPC| D
-    D -->|数值、事件、H.265、采样快照| RRD[RRD]
-    D -->|持久数据与仅实时的 static 预览| RV[Rerun Viewer]
+    P -->|诊断 IPC| D
+    D --> RRD[RRD / Rerun Viewer]
 ```
 
-- `vio` 输出有米制尺度、重力对齐的局部位姿和速度；初始位置与航向是坐标规范。
-  `Odometry` 始终在 odom 系，回环不回写滤波状态。
-- `localization` 组合 `T_map_body = T_map_odom T_odom_body`。没有新地图约束时保持
-  变换并使用新鲜 VIO，不冻结位置、不重发旧状态伪造新鲜度。
-- `planner` 只消费原子 `Navigation`，检查状态、深度覆盖和碰撞，不识别定位算法或
-  库图匹配频率。地图观测质量是诊断量，不是 VIO 可用性或绝对精度证明。
-- `fc` 的位置反馈和 Hold 锚点固定在 odom 系，地图参考用消息自带的变换转入 odom。
-- GroundTruth 只供合成传感器、评测和可视化；PlantState 只作评测。两者不得进入
-  估计器初始化、状态修正、飞控反馈、解锁判据或失效回退。
-- `render` 是无窗口的传感器生成进程，只渲染场景与左、右、深度相机。调试界面、
-  机体模型、图像叠加、轨迹、地图和曲线由独立 Python `firefly-viz` 与 Rerun Viewer 承担。
+- 视觉惯性图和回环共同更新 OKVIS 状态与历史轨迹。适配层用共同历史锚点维护
+  map←odom，向现有控制接口发布局部 odom，将全图修正与物理运动分开表达。
+- 默认由 OKVIS 发布 `Navigation`；外部库图模式由 `localization` 独占发布。
+  没有新地图观测时使用新鲜里程计，不能重发旧状态伪造新鲜度。
+- `planner` 只消费原子 `Navigation`，检查状态、深度覆盖与碰撞。地图质量诊断不代表绝对精度。
+- `fc` 的位置反馈与 Hold 锚点属于 odom 系；地图参考用消息内的变换转入 odom。
+- GroundTruth 只供合成传感器、评测与可视化；PlantState 只作评测，均不得进入估计或控制。
+- `render` 只生成传感器图像，诊断记录与展示由独立 `firefly-viz` 承担。
 
 ### 板载拓扑
 
-真机没有 `firefly-sim` 与 `render`，它们的角色由 `camera`、`imu`、`motor` 三个
-板侧进程接替；`vio` 及之后的算法进程在两种部署里是同一份代码、同一个二进制，
-对数据来源无感知。硬件差异只出现在总线两端：传感器是发布端，执行器是订阅端。
+真机由 `camera`、`imu`、`motor` 接替仿真与渲染；算法进程使用相同 IPC 消息。
 
 ```mermaid
 flowchart LR
-    C[camera：MIPI-CSI] -->|双目与可选深度| V[vio]
+    C[camera] -->|双目与可选深度| V[firefly-okvis-x]
     M[imu：SPI BMI088] -->|原始 IMU| V
-    V -->|连续 odom| F[fc]
-    F -->|四电机推力| T[motor：sysfs PWM → 电调]
+    V -->|odom 与预测姿态| F[fc]
+    F -->|推力| T[motor：sysfs PWM]
     T -->|Airframe| F
 ```
 
-- `camera` 只做格式协商与帧发布，标定留在消费者侧；深度可选，配置不写 `[depth]`
-  就不发布 `Firefly/Depth`，`planner` 按无深度源等待，不回退到其他估计。
-- `imu` 只发布原始角速度与比力；姿态解算仍是飞控进程内的 `firefly-imu`。换 IMU
-  型号只影响该进程的寄存器层，总线契约不变。
-- `Airframe` 在仿真里来自 MuJoCo 模型，在板端由 `motor` 按 `configs/motor.toml`
-  持续重发；两处都是各自部署里的唯一来源，飞控不另抄，板端数据必须换成实测装配值。
-- 板载时间戳用 `CLOCK_MONOTONIC` 秒（`camera` 与 `imu` 同一时钟域），仿真侧用
-  `sim_time`；两者都是单调秒，但同一份录制里不能混用。
+相机标定由消费者配置，深度可选；无深度时规划器等待覆盖。IMU 进程只发布角速度与比力，
+独立备用姿态解算在 FC 内。`Airframe` 在仿真中来自 MuJoCo，板端来自实测装配配置。
+板端时间为同一 `CLOCK_MONOTONIC` 秒，仿真为 `sim_time`，不得混合时钟域。
+通讯适配的测试不代表设备驱动、运行时限或板端飞行验收。
 
 ### 诊断记录与展示
 
@@ -106,7 +93,7 @@ stream 发送 static，永不进入文件 sink。反复 static log 仍会产生�
 跨模块使用 `firefly-base::{FrameId, RigidTransform, FrameTree}`；算法内部矩阵不隐含跨系语义。
 算法与飞控统一使用 nalgebra，飞控保持 f32，估计与规划保持 f64；Bevy 数学类型仅用于渲染接线。
 通用 SO(3)/SE(3) 运算由 `firefly-base::se3` 提供，95% 卡方门限由 `firefly-base::stats` 提供。
-VIO 的 `quat_ops` 保留 OpenVINS JPL 四元数语义，通用李群函数转用基础库。
+OKVIS 内部使用 Hamilton 四元数及自己的流形运算；跨进程方向由消息类型明确约定。
 
 ### 方向与树
 
@@ -126,8 +113,7 @@ map
 ```
 
 长度为米，角度为弧度，四元数为 Hamilton xyzw、source→target 主动旋转。
-IPC 中 JPL world→body 四元数的同一组分量按 Hamilton 解释恰为 body→world；
-`OdomMessage::body_pose(parent)` 集中处理这一边界。
+`OdomMessage::body_pose(parent)` 按 Hamilton body→parent 解释消息四元数。
 
 - `compose` 检查中间坐标系，不能把 map 位姿与 odom 位姿直接混乘。
 - `FrameTree::set` 拒绝自环、闭环、多父节点；错误不修改树。
@@ -172,8 +158,9 @@ v_odom_ref = R_odom_map v_map_ref
 
 ### 会话坐标与可选外部地图
 
-默认以静止启动位置为会话地图零点，启动航向为 +X；无需世界坐标。
-`configs/localization.toml` 可选 `[origin]` 显式声明外部地图中的启动 `position` 和 `yaw`，
+默认自主模式使用视觉惯性初始化的会话规范，无需世界坐标。
+以下启动先验与锁存约束仅适用于显式启用的外部地图定位。
+外部定位必须在 `configs/localization.toml` 的 `[origin]` 显式声明外部地图中的启动 `position` 和 `yaw`，
 该先验必须来自部署配置，禁止读取在线 GroundTruth。
 
 原始 VIO 仍用传感器初始化，位置在局部系归零。定位进程必须在解锁前启动，
@@ -240,33 +227,13 @@ IMU 时间未覆盖不提交视觉帧；接收端在释放 loan 前复制成自�
 原始 odom 和 ALIKED/LightGlue 的位姿观测并独占地图导航发布；默认自主模式由 OKVIS 发布。
 本节定义通讯与坐标适配，不代表完整数据集精度、运行时限或飞行验收。
 
-## VIO
+## 视觉惯性估计
 
-`firefly-vio-types` 提供 JPL/SO(3)/SE(3) 与变量类型；`firefly-vio-core` 提供相机、前端、
-IMU 传播及三角化；`firefly-vio-init` 负责初始化；`firefly-vio` 编排状态与更新。
-对照 OpenVINS，在线入口为 `apps/vio`。
-
-1. 默认采用静态初始化，检查 IMU 静止条件与图像视差；测量不足或不满足静态初始化条件时
-   保持未就绪。`firefly-vio-init` 在 `init_dyn_use=true` 且视差检测到运动时尝试动态初始化；
-   该选项默认关闭，`apps/vio` 的 TOML 配置未暴露此开关。路径选择见
-   `crates/firefly-vio-init/src/inertial_init.rs`，默认值见同 crate 的 `options.rs`。
-2. 前端在上一帧补网格 FAST 点，对新增左点做左→右 LK 同 ID 配对，再做左右时间 LK、
-   几何外点剔除和归一化测量入库。右目去重必须保留已配对点。
-   `HistogramMethod::None` 直接共享输入图像，不调度 rayon 预处理；跟踪点和 ID
-   使用交换缓冲，检测网格、掩码及匹配中间数组复用容量。
-3. IMU 传播至相机时刻并增广克隆；三角化、FEJ 雅可比、零空间投影、创新检验与
-   测量压缩后执行 MSCKF/SLAM 更新，边缘化最旧克隆。已有 SLAM 路标观测不能重复用于 MSCKF。
-4. 高频里程计来自独立 IMU 预测缓存，不推进相机滤波状态或增广克隆。状态时间戳必须
-   对应实际 IMU 时刻；测量未覆盖时不发布。速度转到局部世界系。
-
-在线内参更新须同步投影模型与下一帧跟踪器；锚定表示的 FEJ 由统一表示雅可比处理。
-IMU 白噪声使用连续时间密度，采样噪声换算 `σ_density = σ_sample / √fs`。
-默认静止初始化、局部跟踪可用性不等于所有退化运动下的可观测性或精度保证。
-动态初始化的 MLE 使用 traditional DOGLEG 与 CauchyLoss(1)，对照 OpenVINS 的
-Ceres 2.2 配置及 `DoglegStrategy` / `Corrector`。正规方程使用稠密 Cholesky；
-真实代价决定候选步接受与信赖域收缩，收敛检查使用相对代价、梯度及流形更新后的参数步长。
-返回最后接受的状态及其线性化；无效预积分协方差、预算耗尽与信赖域塌缩均拒绝初始化。
-相机类型由模型显式提供，不能从投影结果猜测。
+入口在 `apps/okvis2-x/src/application`，算法按相机、前端、因子、图与运行时领域组织。
+BRISK/AGAST 检测和描述子匹配产生双目与时间关联，IMU 预积分与重投影因子进入局部图，
+边缘化保留历史信息；DBoW2/OpenGV 支持在线回环，全图优化异步提交。
+初始化、阈值、鲁棒核与退化输入处理以算法源码及测试为准。
+独立预测复用同一 IMU 传播实现，使用后验副本与真实测量，不回写优化图。
 
 <a id="imu"></a>
 
@@ -274,8 +241,8 @@ Ceres 2.2 配置及 `DoglegStrategy` / `Corrector`。正规方程使用稠密 Ch
 
 ### 职责与接线
 
-VIO 是正常飞行的状态来源：视觉/IMU 联合估计后，`apps/vio/src/prediction.rs` 的独立线程
-复用 OpenVINS 式 `Propagator::fast_state_propagate`，传播完整 IMU 后验的副本。
+VIO 是正常飞行的状态来源：视觉/IMU 联合估计后，`apps/okvis2-x/src/application/live/output.rs` 的独立接收线程
+复用 `ImuError::propagation`，传播完整 IMU 后验的副本。
 相机处理不占用预测线程；每次后验更新使预测缓存失效，并从后验时刻重放已覆盖的 IMU。
 预测不回写滤波器，不产生额外观测。姿态与标定去偏角速度经 `Firefly/VioAttitude` 发布。
 
@@ -305,12 +272,12 @@ VIO 是正常飞行的状态来源：视觉/IMU 联合估计后，`apps/vio/src/
 降级接管时，在备用航向系锁定当前航向目标；不把 odom 航向目标直接用于备用姿态，
 也不将 VIO 姿态或偏置注入备用滤波器。滚转/俯仰使用备用估计，不保证切换无瞬态。
 
-VIO 与飞控静态初始化共用 `firefly-imu` 的陀螺均值协方差计算，按各自静止窗口统计，
+独立飞控热备使用 `firefly-imu` 的陀螺均值协方差计算，按静止窗口统计，
 使用与传播器相同的白噪声密度和随机游走。N 个样本均值的白噪声方差为 `Σ(σg²/Δti)/N²`；均值到窗口末端
 零偏的游走方差为 `Σ σbg² Δti (i/N)²`（i=1…N−1）。额外加入样本协方差除以 N
 作为模型余量，低样本散布不能压低已标定噪声。首样本周期采用相邻周期。
 该模型依赖真正静止、采样白噪声与已标定的密度；不能识别所有缓慢转动或温漂。
-姿态、位置、速度和加计偏置先验仍按 OpenVINS 静态初始化约定。
+该热备的初始化模型与 OKVIS 的视觉惯性初始化各自独立。
 
 加计创新检验每个 IMU 样本都可计算，但只有上锁且完整静止窗口通过时才允许校正。
 飞行中不根据 NIS 通过就强制使用重力假设。无磁力计/外部观测时，绝对航向不可观测；
@@ -357,7 +324,7 @@ r=a_m-h,\quad S=HPH^T+R_a,\quad \mathrm{NIS}=r^TS^{-1}r.
 
 独立预测线程同时发布姿态与 odom；位置、速度和姿态来自同一次 IMU 传播，
 速度转换回 odom 系。视觉计算不阻塞位置输出；后验超过预测跨度时停止发布 odom，
-姿态消息仍保留真实后验时间供接收方判失效，不以高频预测掩盖视觉停更。
+姿态输出同步停止；有效消息保留真实后验时间，不以高频预测掩盖视觉停更。
 
 FC 同时检查预测到达时间、测量年龄、后验测量年龄与后验更新的墙钟年龄。
 持续发布 IMU 预测不能掩盖视觉后验停更；重复/乱序样本不能刷新健康状态。
@@ -453,63 +420,16 @@ IMU 和显式 Hold/Land 指令；地面失联上锁，IMU 也失联时推力保�
 
 <a id="loops"></a>
 
-## 持久路标与回环
+## 在线回环
 
-VIO 发布同刻原始位姿、轨迹 ID、像素/归一化观测、可靠三维初值、左右图像及标定的
-原子快照。地图拥有数据副本，不持有滤波变量、不回写协方差或 FEJ。关键帧图像用于算法 IPC；
-调试图像由独立 viz 按上述视频与快照策略记录，算法端不直接写 RRD。
-几何初值优先复用 VIO Global3D SLAM 点，其余使用 VIO 多视图三角化与精化；它们不是
-独立于 VIO 的新传感器观测，不能作为额外位置先验重复计权。
+回环在 OKVIS 内执行：DBoW2 对 BRISK 描述子检索历史关键帧，几何匹配和 OpenGV
+验证提供回环约束，后台全图优化完成后同步状态与历史轨迹。候选召回不等于后端提交。
+`okvis/loop_commits` 记录已提交全图修订次数，不代表候选数或回环边总数。
+局部估计、回环与子地图通过进程内回调和数值快照连接，不需要跨进程关键帧协议。
+词典是内嵌的压缩 BRISK 视觉词汇资源，不是神经网络权重；在线回环不依赖 ALIKED/LightGlue。
 
-`slam` 在 VIO 像素计算 ORB 描述子，并用多层 ORB 补充外观覆盖。补充像素只能通过
-实际双目往返 LK 或多视图对应取得几何，禁止借用相邻 VIO 点坐标。无可靠几何的二维
-特征仍保留并参与检索；描述子、补充匹配、建图和回环均在 slam 进程，不阻塞 VIO。
-
-- 路标以宿主关键帧坐标保存实际观测，轨迹 ID 延续身份；局部固定关键帧位姿精化三维点，
-  保留左右观测与尺度约束。使用 Huber 重投影代价、解析雅可比、线搜索和条件数检查。
-- 几何离群观测不参与共视或验证。有效共享路标建立共视连接，不足时保留最强非零连接。
-  路标清理不删除关键帧外观；VIO 点和补充点共用持久地图。
-- 多表二进制倒排索引按稀有度召回，完整 Hamming 匹配投票排序，排除当前共视邻居及其邻居。
-  候选区域由代表帧与共视邻居组成；当前点、历史路标各计一次。
-- 双侧几何来自持久路标，不要求两张图各有可用深度图。固定尺度三点刚体假设按双向
-  重投影判共识，初解用于投影扩匹配与精化；再检查内点、支持比例、图像覆盖与 VIO 新息。
-- 连续不同图像沿确认区域、传播初解并重新匹配，不能把运动预测当确认；区域解冲突拒绝。
-  几何验证门限见 `crates/firefly-landmarks/src/map.rs`；连续确认与发布冷却由
-  `apps/slam/src/backend.rs` 编排，不得因一次失败调低门限。
-- 后端独立验收回环。只有明确接受才融合跨区路标身份；等待确认时停止新关键帧，
-  超时报错。已接受的修正快照必须覆盖全部已建关键帧：地图锚点快照缺帧时暂缓，
-  等待完整快照；匹配当前待确认回环的已接受快照缺帧时，`Map::correct` 返回错误，
-  经 `apps/slam/src/main.rs` 传播并退出进程。分支判断见 `apps/slam/src/backend.rs`；
-  原始 VIO 位姿不可覆盖。
-
-地图、图节点、路标及等待队列均有容量上限，耗尽显式拒绝，不静默扩容。
-本实现不是 ORB-SLAM3 联合局部 BA，不含 DBoW、Atlas、全局视觉惯性 BA、跨会话恢复或
-任意位置重定位。VIO 重启后，定位、规划与视觉进程必须建立新会话。
-
-### 四自由度位姿图
-
-节点 `x_i=(p_i,ψ_i)`；滚转/俯仰固定为 VIO 重力估计。首个注册节点固定启动规范，
-异步补入更早的相机节点不切换固定节点。同刻原始位姿由首个节点固定，地图与回环端点复用。
-
-```text
-R_i = Rz(ψ_i) R_tilt_i
-r_ij = [R_iᵀ(p_j-p_i)-t_ij, wrap(ψ_j-ψ_i-Δψ_ij)]
-r_map = [p_i-p_observed, wrap(ψ_i-ψ_observed)]
-R_map_odom = Rz(ψ_optimized-ψ_raw)
-t_map_odom = p_optimized-R_map_odom p_raw
-```
-
-VIO 边只连相邻节点，标准差为扩散密度乘 `√Δt`，避免同批增量重复计权及权重随分段数变化。
-残差按米/弧度白化；VIO 用二次代价，地图与回环用 Huber 核。权重见 `GraphOptions`。
-解析雅可比构成稀疏四维块正规方程，块 Jacobi 预条件 PCG 与回溯求解；优化副本一次提交，
-失败不发布部分解。仅更新 map←odom，不把地图跳变当物理速度。
-该图不传播完整 VIO 协方差，也不能完整去相关视觉信息；工程权重不等于统计校准。
-`backend="eskf"` 与图后端互斥，不接收图回环校正。
-
-对齐修正按幅度提交：只有当前机体位姿在新旧对齐下的差异超过 10 cm 或 1° 时才递增修订号，
-低于门限只更新 map←odom，下游不清空局部融合、不废弃在途参考。门限与论文的 10 cm 漂移
-门限一致；1° 由 10 cm 在 5 m 测距处的角分辨率给出。参数见
-`firefly_localization::CorrectionOptions`。
+全图修订经适配层转换为原子导航快照；可选外部库图 ESKF 使用独立的对齐修订号。
+外部修正提交门限由 `firefly_localization::CorrectionOptions` 维护。
 
 ### 可选离线地图定位
 
@@ -617,9 +537,8 @@ d = fB/z; d_m = q round((d+ε)/q); z_m = fB/d_m
 | ORB-SLAM3 `4452a3c4ab75b1cde34e5505a36ec3f9edcdc4c4` | `src/System.cc:213`；`src/Tracking.cc:1940`、`:2120` | 跟踪、局部建图、回环分工；跟踪状态由运动/局部地图跟踪决定，回环成功与否不是跟踪心跳 |
 | PX4-Autopilot `4dbd2e069a5c30c2e53e47e842095d2576dc38c4` | `src/lib/rate_control/rate_control.cpp`；`src/modules/mc_att_control/AttitudeControl/AttitudeControl.cpp`；`src/modules/mc_pos_control/PositionControl/PositionControl.cpp`；`src/lib/control_allocation/control_allocation/`；`src/lib/motion_planning/VelocitySmoothing.cpp` | 位置/姿态/角速度/分配四层与起降 jerk 受限参考；四轴专用分配去掉 6 轴/16 执行器分支 |
 
-VINS-Fusion 的四自由度残差、固定首节点和漂移输出是参考；本项目使用弧度、相邻增量链、
-地图锚点和自有 PCG，并非 Ceres 的逐项移植。ORB-SLAM3 参考共视排除、固定尺度几何与
-连续确认，不包含其完整词袋和 BA。源码审查不能替代独立公式、差分和最终输出验证。
+源码审查不能替代独立公式、差分与最终输出验证；当前算法差异与审计结论见
+[OKVIS 审计日志](../apps/firefly-okvis-x/README.md)。
 OpenCV 兼容性对齐以 purecv 上游约定的 **4.10.0** 为目标；夹具保留各自真实来源版本，
 不能据此宣称已与之对齐。
 

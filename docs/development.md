@@ -45,7 +45,7 @@ args-and-flags、validation。
 
 ### 配置
 
-- **TOML、一应用一份**：统一放仓库顶层 `configs/`（`sim.toml` / `vio.toml` / `planner.toml`），
+- **TOML、一应用一份**：统一放仓库顶层 `configs/`（`sim.toml` / `okvis2-x.toml` / `planner.toml`），
   启动时加载（Rust 支持 `--config` 换文件）。配置文件可选：缺文件记录一行 INFO 并使用
   代码默认值；文件存在但不可读、格式或参数无效仍报错，不静默回落。
 - **最小化**：保留必填键，只对有默认值的键写差异覆盖；无覆盖项时保留仅含用途和
@@ -81,10 +81,10 @@ Bevy 日志接线参考 [quad](../apps/quad/src/main.rs)。示例调用公共实
 不维护第二份示例代码或独立应用名单。
 
 标定与噪声改对应 Options 默认值，doc 注释写单位和来源；部署覆盖同步 `configs/`。
-升级视觉依赖必须运行 LK 位移回归，不放宽容差；依赖统一在根 Cargo/uv workspace 和锁文件。
+升级视觉依赖必须运行相关前端、投影及匹配回归，不放宽容差；依赖统一在根 Cargo/uv workspace 和锁文件。
 改行为前阅读对应官方源码，固定版本与差异见架构文档。参考仓库位于 `~/Projects/`：
 `open_vins`、`ORB_SLAM3`、`VINS-Fusion`、`EGO-Planner-v2`、`iceoryx2`、`logforth`、`fastrace`；
-purecv 使用上游 crates.io 发布版（当前锁定版本见 Cargo.lock），发现上游问题应提 issue。
+purecv 的来源与固定版本以 workspace 依赖及 Cargo.lock 为准，发现上游问题应提 issue。
 
 ## 提交与 PR
 
@@ -130,17 +130,18 @@ cargo xtask release
 uv run firefly-viz --save logs/rmuc_run.rrd
 uv run firefly-sim
 cargo run --release -p render
-cargo run --release -p vio
+cargo run --release -p firefly-okvis-x
 cargo run --release -p fc
-cargo run --release -p localization
-cargo run --release -p slam
 cargo run --release -p planner
 ```
 
-最小闭环只需 viz/sim/render/vio/fc。纯 VIO 规划对照不启动 slam，保留 localization/planner
-的相同入口。离线库图显式启动 aliked 和 `lightglue --map <地图.ffvmap>`；静态规划图用
-`planner --map <地图.ffmap>`，两者均要求 `configs/localization.toml [origin]` 声明外部对齐。
-ESKF 对照设置 `backend="eskf"`，不启动 slam。禁止把场地真值当作默认定位或规划先验。
+最小闭环只需 viz/sim/render/firefly-okvis-x/fc；规划增加 planner。
+纯 VIO 对照用 `firefly-okvis-x --no-loop-closures --no-mapping`。
+可选库图定位先填写 `configs/localization.toml [origin]`，并用
+`firefly-okvis-x --external-localization`，再启动 localization、aliked 和
+`lightglue --map <地图.ffvmap>`。默认进程清单不自动启动这些可选服务。
+静态规划图用 `planner --map <地图.ffmap>`，同样要求明确外部对齐。
+禁止把场地真值作为默认定位或规划先验。
 
 ### 机载部署
 
@@ -312,8 +313,7 @@ SIGUSR1 请求保存前后无损帧窗口，ERROR 日志可自动触发，窗口
 传感器延迟按原始采集 `sim_time` 记录墙钟耗时（秒）：
 `render/capture/stages_s` 为请求→提交、提交→回读、回读→装配、装配→处理；
 `render/capture/publish_s` 为像素处理、处理结束→发布、请求→发布、帧序号。
-这些诊断不改图像时间戳；`vio/debug/camera_age` 是消费时仿真时刻减采集时刻，
-`fc/imu/health` 的后验年龄还包含视觉更新与等待下一拍的时间。
+这些诊断不改图像时间戳；`fc/imu/health` 的后验年龄还包含视觉更新与等待下一拍的时间。
 
 实时查看先启动 `rerun`，再运行 `uv run firefly-viz`：默认连接 `127.0.0.1:9876` 并创建
 `logs/` 下唯一 RRD。`--save logs/run.rrd` 单独使用为离线录制；加 `--serve` 同时启动原生
@@ -358,29 +358,12 @@ H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码
 
 运行记录由 `firefly-viz` 写入 `logs/*.rrd`。
 
-#### VIO 更新诊断
+#### 估计与回环诊断
 
-所有诊断只写入 RRD，不回流估计器或控制器，时间轴为 `sim_time`。
-`vio/input/gyro` 与 `vio/input/accel` 保留送入 VIO 的原始 IMU 采样。
-`vio/debug/keypoints/{left,right}` 的 `track_id` 将像素轨迹与滤波路标关联。
-
-`vio/update/{msckf,slam,landmark_init,zero_velocity}` 按相机帧汇总：
-
-- `innovation`：残差维数之和、RMS、各次 NIS 之和、更新次数。
-- `correction`：各次局部切空间的 15 维修正之和，顺序为 θ、p、v、bg、ba。
-- `{before,after}/state`：首个更新前、最后更新后的 q_GtoI（JPL xyzw）、p、v、bg、ba。
-- `{before,after}/variance`：15 维误差状态对角方差。
-- `{before,after}/attitude_bias_covariance`：θ、bg、ba 的 9×9 联合边缘协方差。
-
-标量每四项拆成一个实体，后续块使用 `/1`、`/2`、`/3`。
-`vio/update/slam/features/{batch}` 为逐路标矩阵：列依次为 id、残差维数、RMS、NIS、
-是否接受，以及该路标对 θ、bg、ba 的九维修正贡献；拒绝项的贡献为零。
-各已接受路标贡献之和等于该批 SLAM 更新实际施加的修正。
-姿态单位 rad、速度 m/s、陀螺零偏 rad/s、加计零偏 m/s²；协方差使用相应单位的乘积。
-
-回环查看 `loop/debug/frontend`（关键帧、候选、内点、连续确认）、`corr/debug/loops`
-（已接受约束）、`corr/debug/gate`、`logs/slam` / `logs/localization`（拒收、容量和同步）。
-关键帧产生或候选匹配成功不等于后端接受。
+OKVIS 的位姿使用 `vio/odom` 实体。
+`okvis/loop_commits` 是后端已提交全图修订次数，任务评分记录为 `acceptance/loop_backend`；
+候选检索和几何验证不单独计为提交。外部库图模式的融合诊断位于 `corr/debug/*`。
+通讯测试和修订计数不替代完整轨迹精度验证。
 
 <a id="tests"></a>
 
@@ -427,19 +410,18 @@ static 预览不进入文件和正常/异常退出时的完整性。构建、单
 - 前端检查已知位移、丢点与双目约束；解析轨迹隔离滤波数学，不能代替实际纹理和飞行。
 - CAD、深度、IPC 分别验证资产一致性、噪声/投票/先验保护和双语言布局、头部、事件往返。
 
-### VIO 专项
+### OKVIS 算法与通讯专项
 
 ```bash
-cargo test --all-targets \
-  -p firefly-vio-types -p firefly-vio-core -p firefly-vio-init -p firefly-vio -p vio
-cargo test -p firefly-vio --test synthetic_e2e -- --include-ignored
+cargo test --all-targets -p firefly-okvis-x -p firefly-brisk -p firefly-dbow2 \
+  -p firefly-opengv -p firefly-srl-projection -p firefly-supereight2
+cargo test -p firefly-okvis-x application::live::tests
 ```
 
-第一条覆盖四个库与应用，末尾加 `-- --list` 枚举当前用例。`frontend_contracts` 约束 FAST/LK
-输出，`jacobian_fd_check` 使用共享夹具做测量差分，`vio_manager::analytic_contract` 检查
-完整传播/更新后的尺度、倾角和零偏。具体输入、误差预算和断言以测试源码为准。
-第二条包含已知失败的 `synthetic_pure_msckf_with_bias`、`synthetic_slam_zero_bias`；
-ignore 不计通过，合成无偏场景的严重发散检查也不代表定位精度验收。
+算法测试覆盖独立解析值、几何退化、差分与数值边界；通讯测试覆盖配对、测量覆盖、
+丢失与过期状态、回环坐标修订、协方差与真实 iceoryx2 消息往返。
+夹具回归、Rust 自身基线和独立算法性质测试分别说明来源，不将自身基线当作跨语言等价证明。
+无输入启动与退出、编译和单测不等于实际数据集或飞行验收。
 
 <a id="system-tests"></a>
 

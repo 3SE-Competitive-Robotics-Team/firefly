@@ -13,8 +13,6 @@ const DESKTOP_APPS: &[&str] = &[
     "planner",
     "quad",
     "render",
-    "slam",
-    "vio",
 ];
 
 /// 机载应用：Orange Pi Zero 3W 上运行的进程，不含 Bevy 仿真/演示程序。
@@ -31,8 +29,6 @@ const BOARD_APPS: &[&str] = &[
     "localization",
     "motor",
     "planner",
-    "slam",
-    "vio",
 ];
 
 /// `--target` 的可选值。

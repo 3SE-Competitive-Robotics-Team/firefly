@@ -20,8 +20,10 @@ extrinsic 及 imu 参数。外参均为 body←sensor，Hamilton xyzw；深度�
 无阻尼边缘协方差及 IMU 噪声传播；无法求得协方差时不伪造姿态置信度。
 跟踪丢失、IMU 缺口或后验超时停止预测，重复/倒序输入不刷新测量时间。
 
-可选 ALIKED/LightGlue 外部地图定位使用 `navigation = "external_localization"`，
-并显式启动外部定位进程；该模式由外部进程发布地图导航，避免两个修正发布者竞争。
+可选 ALIKED/LightGlue 外部地图定位使用 `--external-localization` 或
+`navigation = "external_localization"`，填写 `configs/localization.toml [origin]`，
+显式启动 localization、aliked 与带 `--map` 的 lightglue；由外部进程独占地图导航发布。
+纯 VIO 对照使用 `--no-loop-closures --no-mapping`；这些开关仅用于在线入口。
 原有离线数据集入口通过 `--dataset` 选择，仍使用完整 VI/地图格式的离线 TOML：
 
 ```bash

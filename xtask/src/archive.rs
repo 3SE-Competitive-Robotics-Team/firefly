@@ -171,7 +171,7 @@ mod tests {
                 source: binary,
             },
             Entry {
-                path: "configs/vio.toml".to_owned(),
+                path: "configs/okvis2-x.toml".to_owned(),
                 mode: 0o644,
                 source: config,
             },
@@ -184,7 +184,7 @@ mod tests {
         assert_eq!(unpack(&package, &out).unwrap(), 2);
         assert_eq!(fs::read(out.join("bin/fc")).unwrap(), b"binary");
         assert_eq!(
-            fs::read_to_string(out.join("configs/vio.toml")).unwrap(),
+            fs::read_to_string(out.join("configs/okvis2-x.toml")).unwrap(),
             "key = 1\n"
         );
         assert_eq!(

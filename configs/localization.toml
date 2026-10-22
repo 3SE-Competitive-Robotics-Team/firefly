@@ -1,5 +1,5 @@
-# 会话地图原点为启动位置，水平 +X 为启动航向；可选 [origin] 指定外部地图对齐。
-# backend 默认为 pose_graph；fusion 段仅供 backend = "eskf" 的对照运行。
+# 可选外部库图定位 ESKF；启动时必须显式填写 [origin]。
+# OKVIS 配置 navigation = "external_localization" 后由本进程独占导航发布。
 
 [fusion.visual]
 max_innovation_trans = 20.0 # m，VINS-Fusion 特征验证后的门限

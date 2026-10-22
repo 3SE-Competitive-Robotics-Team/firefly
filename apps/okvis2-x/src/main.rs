@@ -6,7 +6,7 @@ use firefly_error::{Error, ErrorKind, Result};
 use firefly_okvis_x::application::{OfflineApplicationFactory, okvis2x_app_synchronous};
 use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 
-const USAGE: &str = "firefly-okvis-x [--config configs/okvis2-x.toml] [--dataset <directory>] [--output <directory>] [--vocabulary <directory>]";
+const USAGE: &str = "firefly-okvis-x [--config configs/okvis2-x.toml] [--dataset <directory>] [--output <directory>] [--vocabulary <directory>] [--no-loop-closures] [--no-mapping] [--external-localization]";
 
 struct Arguments {
     executable: OsString,
@@ -14,6 +14,9 @@ struct Arguments {
     dataset: Option<PathBuf>,
     output: Option<PathBuf>,
     vocabulary: Option<PathBuf>,
+    loop_closures: bool,
+    mapping: bool,
+    external: bool,
 }
 
 fn parse() -> Result<Option<Arguments>> {
@@ -23,9 +26,24 @@ fn parse() -> Result<Option<Arguments>> {
     let mut vocabulary = None;
     let mut dataset = None;
     let mut output = None;
+    let mut loop_closures = true;
+    let mut mapping = true;
+    let mut external = false;
     while let Some(argument) = args.next() {
         if argument == "--help" || argument == "-h" {
             return Ok(None);
+        }
+        if argument == "--no-loop-closures" {
+            loop_closures = false;
+            continue;
+        }
+        if argument == "--no-mapping" {
+            mapping = false;
+            continue;
+        }
+        if argument == "--external-localization" {
+            external = true;
+            continue;
         }
         let target = if argument == "--config" {
             &mut config
@@ -61,12 +79,20 @@ fn parse() -> Result<Option<Arguments>> {
     if dataset.is_none() && output.is_some() {
         return Err(argument_error("--output requires --dataset"));
     }
+    if dataset.is_some() && (!loop_closures || !mapping || external) {
+        return Err(argument_error(
+            "online mode flags cannot be used with --dataset",
+        ));
+    }
     Ok(Some(Arguments {
         executable,
         config,
         dataset,
         output,
         vocabulary,
+        loop_closures,
+        mapping,
+        external,
     }))
 }
 
@@ -82,11 +108,21 @@ fn run() -> Result<()> {
         return Ok(());
     };
     let Some(dataset) = arguments.dataset else {
-        let config = firefly_config::startup(
+        let mut config = firefly_config::startup(
             &arguments.config,
             firefly_observability::init,
             firefly_okvis_x::application::live::config::Config::validate,
         )?;
+        if !arguments.loop_closures {
+            config.loop_closures = false;
+        }
+        if !arguments.mapping {
+            config.mapping = false;
+        }
+        if arguments.external {
+            config.navigation =
+                firefly_okvis_x::application::live::config::Navigation::ExternalLocalization;
+        }
         return firefly_okvis_x::application::live::run(config, arguments.vocabulary.as_deref());
     };
     let mut factory = OfflineApplicationFactory::load(&arguments.config)?;

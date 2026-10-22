@@ -1,5 +1,0 @@
-# VIO 配置（RMUC render 双目部署；缺键回落代码默认值，`--config` 可换文件）
-
-[slam]
-# SLAM 路标上限（对照 OpenVINS 默认 25）：持久路标吸收 KLT 的滞后偏置。
-max_slam_features = 100

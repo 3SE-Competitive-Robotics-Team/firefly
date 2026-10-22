@@ -21,7 +21,7 @@ use firefly_pubsub::{
     odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC, OdomMessage},
     publish::Publisher,
     subscriber::{Subscriber, SubscriberOptions},
-    viz::{VizMessage, VizPublisher, kind},
+    viz::{ScalarMessage, VizMessage, VizPublisher, kind},
 };
 use jiff::Timestamp;
 use nalgebra::Vector3;
@@ -182,7 +182,7 @@ pub(super) struct Ports {
 }
 pub(super) fn run(mut ports: Ports) -> Result<()> {
     let node = create_node()?;
-    let _log_ipc = firefly_observability::init_ipc(&node, "firefly-okvis-x");
+    let log_ipc = firefly_observability::init_ipc(&node, "firefly-okvis-x");
     let imu = Subscriber::<ImuMessage>::with_options(&node, &ports.topics.imu, IMU_SUBSCRIPTION)?;
     let options = SubscriberOptions {
         buffer_size: 2,
@@ -202,8 +202,10 @@ pub(super) fn run(mut ports: Ports) -> Result<()> {
     let mut last_depth = None;
 
     while !ports.stop.load(Ordering::Acquire) && node.wait(Duration::from_millis(1)).is_ok() {
+        firefly_observability::pump_log_ipc(&log_ipc);
         while let Ok(publication) = ports.publications.try_recv() {
             output.posterior(&publication)?;
+            publishers.posterior(&publication)?;
         }
         while let Some(packet) = imu.receive()? {
             let trace = *packet.user_header();
@@ -229,6 +231,7 @@ pub(super) fn run(mut ports: Ports) -> Result<()> {
             if imu_time.is_some_and(|last| time <= last) {
                 continue;
             }
+            firefly_observability::set_sim_time(packet.timestamp);
             imu_time = Some(time);
             if !ports.sensors.add_imu_measurement(time, &alpha, &omega) {
                 return Err(invalid("estimator IMU queue rejected measurement"));
@@ -271,6 +274,7 @@ pub(super) fn run(mut ports: Ports) -> Result<()> {
             }
         }
     }
+    firefly_observability::pump_log_ipc(&log_ipc);
     ports.stop.store(true, Ordering::Release);
     Ok(())
 }
@@ -312,6 +316,18 @@ impl Publishers {
         })
     }
 
+    fn posterior(&self, publication: &PublicationData) -> Result<()> {
+        if let Some(viz) = &self.viz {
+            let mut loops = ScalarMessage::base(
+                publication.state.timestamp.as_nanosecond() as f64 * 1e-9,
+                "okvis/loop_commits",
+            );
+            loops.scalars[0] = publication.tracking_state.backend.revision as f64;
+            loops.scalar_count = 1;
+            viz.publish(loops)?;
+        }
+        Ok(())
+    }
     fn publish(&mut self, sample: &output::Sample, stamp: f64) -> Result<()> {
         self.odometry.publish(sample.odom)?;
         if !self.external_localization {
