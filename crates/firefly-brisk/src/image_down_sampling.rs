@@ -99,14 +99,20 @@ pub fn halfsample_8(src: &Matrix<u8>, dst: &mut Matrix<u8>) -> Result<()> {
 }
 /// # Errors
 /// Returns an error for malformed images or mismatched output dimensions.
-/// The 16-bit half-sampler also returns an error on NEON targets.
+/// The 16-bit half-sampler also returns an error on the Linux aarch64 target.
 pub fn halfsample_16(src: &Matrix<u16>, dst: &mut Matrix<u16>) -> Result<()> {
     target(src, dst, 1, 2)?;
-    #[cfg(any(target_arch = "aarch64", target_feature = "neon"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_feature = "neon")
+    ))]
     {
         return Err(invalid("Halfsample16 is not implemented for NEON"));
     }
-    #[cfg(not(any(target_arch = "aarch64", target_feature = "neon")))]
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_feature = "neon")
+    )))]
     {
         if src.cols / 2 * 2 < 16 {
             return Ok(());
@@ -152,7 +158,10 @@ pub fn twothirdsample_8(src: &Matrix<u8>, dst: &mut Matrix<u8>) -> Result<()> {
                         (4 * leading + 2 * (quadratic + linear + 1) + constant + 1) / 9
                     };
                     let at = (by * 2 + oy) * dst.cols + bx * 2 + ox;
-                    #[cfg(any(target_arch = "aarch64", target_feature = "neon"))]
+                    #[cfg(all(
+                        target_os = "linux",
+                        any(target_arch = "aarch64", target_feature = "neon")
+                    ))]
                     {
                         if bx * 3 < blocks * 15 && bx / 5 * 10 + 16 > dst.cols {
                             dst.data[at] |= value as u8;
@@ -160,7 +169,10 @@ pub fn twothirdsample_8(src: &Matrix<u8>, dst: &mut Matrix<u8>) -> Result<()> {
                             dst.data[at] = value as u8;
                         }
                     }
-                    #[cfg(not(any(target_arch = "aarch64", target_feature = "neon")))]
+                    #[cfg(not(all(
+                        target_os = "linux",
+                        any(target_arch = "aarch64", target_feature = "neon")
+                    )))]
                     {
                         dst.data[at] = value as u8;
                     }
@@ -175,11 +187,17 @@ pub fn twothirdsample_8(src: &Matrix<u8>, dst: &mut Matrix<u8>) -> Result<()> {
 /// the required reduction ratio.
 pub fn twothirdsample_16(src: &Matrix<u16>, dst: &mut Matrix<u16>) -> Result<()> {
     target(src, dst, 2, 3)?;
-    #[cfg(any(target_arch = "aarch64", target_feature = "neon"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_feature = "neon")
+    ))]
     {
         return Err(invalid("Twothirdsample16 is not implemented for NEON"));
     }
-    #[cfg(not(any(target_arch = "aarch64", target_feature = "neon")))]
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_feature = "neon")
+    )))]
     {
         if src.cols / 3 * 3 < 12 {
             return Ok(());
