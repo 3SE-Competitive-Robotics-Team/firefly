@@ -203,11 +203,9 @@ impl DensePoolingImage {
             return Err(invalid("pooling bounds outside image"));
         }
         let side = (u_max - u_min).min(v_max - v_min);
-        if side < 2 {
-            return Err(invalid(
-                "pooling level uses logarithm of zero for box side below two",
-            ));
-        }
+        // 上游 `poolBoundingBox` 对 side < 2 靠 `max(0, min(max_level, log2(side / 2)))`
+        // 兜回 0 级：log2(0) 是 -inf，被 max(0, ·) 吸收。Rust 的浮点转整数是饱和转换，
+        // 同样的表达式已得到 0，这里不需要额外的错误分支。
         let level = (f64::from(side / 2).log2().ceil() as i32)
             .min(self.max_level)
             .max(0);

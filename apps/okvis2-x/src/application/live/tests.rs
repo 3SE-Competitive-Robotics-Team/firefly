@@ -213,9 +213,15 @@ fn lost_tracking_or_uncovered_imu_gap_stops_predictions_and_unknown_covariance_i
     posterior.state.covariance = None;
     predictor.posterior(&posterior).unwrap();
     assert!(imu(&mut predictor, 1.01).unwrap().attitude.is_none());
+    let session_before = predictor.session_id();
     posterior.tracking_state.tracking_quality = TrackingQuality::Lost;
     predictor.posterior(&posterior).unwrap();
     assert!(imu(&mut predictor, 1.02).is_none());
+    assert_eq!(
+        predictor.session_id(),
+        session_before,
+        "跟踪丢失只停预测，不得改动进程会话标识"
+    );
     let posterior = publication(1.02, 2, Transformation::identity(), 0);
     predictor.posterior(&posterior).unwrap();
     assert!(imu(&mut predictor, 1.1).is_none());

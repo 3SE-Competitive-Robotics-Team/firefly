@@ -40,6 +40,11 @@ pub(super) struct Output {
     last_published: Option<Timestamp>,
 }
 impl Output {
+    /// 进程运行标识；只随进程启动变化，跟踪丢失不改变它。
+    #[cfg(test)]
+    pub fn session_id(&self) -> u64 {
+        self.session
+    }
     pub fn new(config: Config, session: u64) -> Self {
         Self {
             config,
@@ -79,11 +84,12 @@ impl Output {
     pub fn posterior(&mut self, publication: &PublicationData) -> Result<()> {
         let state = &publication.state;
         if publication.tracking_state.tracking_quality == TrackingQuality::Lost {
+            // 跟踪丢失只让预测失效，不改 `session`：`session` 是进程运行标识，
+            // 下游（飞控）把它的变化当作进程重启，会永久降级到备用姿态源。
+            // 预测清空后不再发 AttitudeMessage，下游按新鲜度超时自然回落并在
+            // 恢复后重新接纳；跟踪质量同时经 viz 标量暴露。
             if self.prediction.take().is_some() {
-                self.session = self
-                    .session
-                    .checked_add(1)
-                    .ok_or_else(|| invalid("session exhausted"))?;
+                log::warn!("VIO 跟踪丢失，停止姿态预测（会话不变）");
             }
             return Ok(());
         }
