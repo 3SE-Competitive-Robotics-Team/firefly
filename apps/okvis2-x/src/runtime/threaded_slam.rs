@@ -181,15 +181,6 @@ pub trait ThreadedGraph: FrontendGraph {
     /// # Errors
     /// Returns an error for invalid/missing state, frame or measurement data, or a failed
     /// estimator, graph, mapper, queue, callback or worker operation.
-    /// Joint covariance in the pose and speed/bias tangent coordinates.
-    /// # Errors
-    /// Returns an error if graph linearization fails.
-    fn state_covariance(
-        &self,
-        _id: StateId,
-    ) -> Result<Option<crate::ceres::imu_error::Covariance>> {
-        Ok(None)
-    }
     /// # Errors
     /// Returns graph serialization or file output errors.
     fn write_final_csv_trajectory(&self, path: &Path, rpg: bool) -> Result<()>;
@@ -1236,7 +1227,6 @@ pub struct ProcessingCore<G: ThreadedGraph, S, B, M> {
     pre_last_optimised: Option<State>,
     first_frame: bool,
     graph_revision: u64,
-    publish_covariance: bool,
     trajectory: Trajectory,
     affected_states: BTreeSet<StateId>,
     lidar_keyframes: BTreeSet<StateId>,
@@ -1278,7 +1268,6 @@ where
             pre_last_optimised: None,
             first_frame: true,
             graph_revision: 0,
-            publish_covariance: false,
             trajectory: Trajectory::default(),
             affected_states: BTreeSet::new(),
             lidar_keyframes: BTreeSet::new(),
@@ -1290,10 +1279,6 @@ where
             depth_camera: None,
             full_graph: None,
         }
-    }
-    /// Enables marginal covariance extraction for online posterior publication.
-    pub fn enable_covariance(&mut self) {
-        self.publish_covariance = true;
     }
     /// # Errors
     /// Returns an error for invalid/missing state, frame or measurement data, or a failed
@@ -1900,9 +1885,6 @@ where
         };
         let id = StateId::new(frame.borrow().id());
         let mut state = self.make_state(id, false)?;
-        if self.publish_covariance {
-            state.covariance = self.graph.state_covariance(id)?;
-        }
         state.omega_s = gyro - state.b_g;
         state.is_online_extrinsics = Some(self.parameters.camera.online_calibration.do_extrinsics);
         if self.parameters.camera.online_calibration.do_extrinsics && self.depth_camera.is_some() {

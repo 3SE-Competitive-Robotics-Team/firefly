@@ -23,7 +23,6 @@ use super::{
     output::{self, Output},
 };
 use crate::{
-    ceres::imu_error::Covariance,
     frames::frame_typedefs::{MapPointVector, StateId},
     kinematics::transformation::Transformation,
     runtime::{
@@ -35,7 +34,7 @@ use firefly_pubsub::camera::{GrayImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH};
 use nalgebra::{UnitQuaternion, Vector3};
 use std::{collections::BTreeMap, sync::Arc};
 fn publication(time: f64, id: u64, pose: Transformation, revision: u64) -> PublicationData {
-    let mut state = State::new(
+    let state = State::new(
         pose,
         Vector3::zeros(),
         (Vector3::zeros(), Vector3::zeros()),
@@ -44,7 +43,6 @@ fn publication(time: f64, id: u64, pose: Transformation, revision: u64) -> Publi
         StateId::new(id),
         true,
     );
-    state.covariance = Some(Covariance::identity() * 1e-4);
     PublicationData {
         tracking_state: TrackingState {
             id: state.id,
@@ -144,12 +142,6 @@ fn posterior_imu_prediction_preserves_stationary_geometry_and_never_renews_a_sta
             let attitude = sample.attitude.unwrap();
             assert_eq!(attitude.session, 7);
             assert_eq!(attitude.posterior_time, 1.0);
-            assert!(
-                attitude
-                    .attitude_variance
-                    .iter()
-                    .all(|x| x.is_finite() && *x > 0.0)
-            );
         } else {
             assert!(sample.is_none());
         }
@@ -206,13 +198,13 @@ fn loop_commit_changes_map_coordinates_atomically_without_moving_local_odometry(
     );
 }
 #[test]
-fn lost_tracking_or_uncovered_imu_gap_stops_predictions_and_unknown_covariance_is_not_fabricated() {
+fn lost_tracking_or_uncovered_imu_gap_stops_predictions_without_resetting_session() {
     let mut predictor = Output::new(Config::default(), 1);
     imu(&mut predictor, 1.0);
     let mut posterior = publication(1.0, 1, Transformation::identity(), 0);
-    posterior.state.covariance = None;
     predictor.posterior(&posterior).unwrap();
-    assert!(imu(&mut predictor, 1.01).unwrap().attitude.is_none());
+    // 上游不计算协方差，姿态照常发布，不做置信度门控。
+    assert!(imu(&mut predictor, 1.01).unwrap().attitude.is_some());
     let session_before = predictor.session_id();
     posterior.tracking_state.tracking_quality = TrackingQuality::Lost;
     predictor.posterior(&posterior).unwrap();

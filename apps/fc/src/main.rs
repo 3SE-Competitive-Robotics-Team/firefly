@@ -924,12 +924,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "fc/vio/gyro_bias",
                     &s.message.gyro_bias,
                 );
-                publish_scalars(
-                    &ports.viz,
-                    sim_time,
-                    "fc/vio/attitude_variance",
-                    &s.message.attitude_variance,
-                );
             }
             publish_scalars(&ports.viz, sim_time, "fc/debug/tick_rate", &[rate]);
             publish_scalars(
@@ -992,7 +986,6 @@ mod tests {
                 quat_xyzw: [0., 0., 0., 1.],
                 angular_velocity: [0.; 3],
                 gyro_bias: [0.; 3],
-                attitude_variance: [0.; 3],
             },
             Instant::now(),
         );
