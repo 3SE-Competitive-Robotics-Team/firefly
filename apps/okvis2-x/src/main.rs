@@ -1,26 +1,26 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! Offline dataset entry point for OKVIS2-X.
+//! Online IPC and offline dataset entry points for OKVIS2-X.
 
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_okvis_x::application::{OfflineApplicationFactory, okvis2x_app_synchronous};
 use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 
-const USAGE: &str = "firefly-okvis-x [--config configs/okvis2-x.toml] --dataset <directory> [--output <directory>] [--vocabulary <directory>]";
+const USAGE: &str = "firefly-okvis-x [--config configs/okvis2-x.toml] [--dataset <directory>] [--output <directory>] [--vocabulary <directory>]";
 
 struct Arguments {
     executable: OsString,
     config: PathBuf,
-    dataset: PathBuf,
+    dataset: Option<PathBuf>,
     output: Option<PathBuf>,
-    vocabulary: PathBuf,
+    vocabulary: Option<PathBuf>,
 }
 
 fn parse() -> Result<Option<Arguments>> {
     let mut args = std::env::args_os();
     let executable = args.next().unwrap_or_else(|| "firefly-okvis-x".into());
     let mut config = PathBuf::from("configs/okvis2-x.toml");
-    let mut vocabulary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+    let mut vocabulary = None;
     let mut dataset = None;
     let mut output = None;
     while let Some(argument) = args.next() {
@@ -30,7 +30,11 @@ fn parse() -> Result<Option<Arguments>> {
         let target = if argument == "--config" {
             &mut config
         } else if argument == "--vocabulary" {
-            &mut vocabulary
+            vocabulary =
+                Some(PathBuf::from(args.next().ok_or_else(|| {
+                    argument_error("missing --vocabulary value")
+                })?));
+            continue;
         } else if argument == "--dataset" {
             dataset = Some(PathBuf::from(
                 args.next()
@@ -54,10 +58,13 @@ fn parse() -> Result<Option<Arguments>> {
             .ok_or_else(|| argument_error(format!("missing {} value", argument.to_string_lossy())))?
             .into();
     }
+    if dataset.is_none() && output.is_some() {
+        return Err(argument_error("--output requires --dataset"));
+    }
     Ok(Some(Arguments {
         executable,
         config,
-        dataset: dataset.ok_or_else(|| argument_error("--dataset is required"))?,
+        dataset,
         output,
         vocabulary,
     }))
@@ -74,12 +81,20 @@ fn run() -> Result<()> {
             .map_err(|error| Error::new(ErrorKind::Internal, "write help").with_source(error))?;
         return Ok(());
     };
+    let Some(dataset) = arguments.dataset else {
+        let config = firefly_config::startup(
+            &arguments.config,
+            firefly_observability::init,
+            firefly_okvis_x::application::live::config::Config::validate,
+        )?;
+        return firefly_okvis_x::application::live::run(config, arguments.vocabulary.as_deref());
+    };
     let mut factory = OfflineApplicationFactory::load(&arguments.config)?;
     let mut source_arguments = vec![
         arguments.executable,
         arguments.config.clone().into_os_string(),
         arguments.config.into_os_string(),
-        arguments.dataset.into_os_string(),
+        dataset.into_os_string(),
     ];
     if let Some(output) = arguments.output {
         source_arguments.push(output.into_os_string());
@@ -87,7 +102,12 @@ fn run() -> Result<()> {
     okvis2x_app_synchronous::run_with_vocabulary(
         &source_arguments,
         &mut factory,
-        Some(&arguments.vocabulary),
+        Some(
+            arguments
+                .vocabulary
+                .as_deref()
+                .unwrap_or(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources")),
+        ),
     )
     .map_err(|error| Error::new(ErrorKind::Internal, "offline OKVIS2-X failed").with_source(error))
 }

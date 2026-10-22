@@ -26,6 +26,7 @@ const BOARD_APPS: &[&str] = &[
     "fc",
     "ffctl",
     "imu",
+    "firefly-okvis-x",
     "lightglue",
     "localization",
     "motor",

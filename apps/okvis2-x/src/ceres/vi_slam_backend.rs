@@ -3558,6 +3558,22 @@ impl crate::frontend::pipeline::FrontendGraph for ViSlamBackend {
     }
 }
 impl crate::runtime::threaded_slam::ThreadedGraph for ViSlamBackend {
+    fn state_covariance(&self, id: StateId) -> Result<Option<crate::ceres::imu_error::Covariance>> {
+        let graph = &self.realtime_graph;
+        let parameters = [
+            crate::ceres::vi_graph::Parameter::Pose(graph.pose_block(id)?),
+            crate::ceres::vi_graph::Parameter::SpeedBias(graph.speed_bias_block(id)?),
+        ];
+        Ok(
+            crate::ceres::vi_graph::RustGraphSolver::marginal_covariance(
+                &graph.problem,
+                &parameters,
+            )?
+            .filter(|value| value.nrows() == 15 && value.ncols() == 15)
+            .map(|value| crate::ceres::imu_error::Covariance::from_column_slice(value.as_slice())),
+        )
+    }
+
     type FullGraphResult = SolverUpdate;
     fn add_imu(&mut self, p: &ImuParameters) -> Result<()> {
         if ViSlamBackend::add_imu(self, p.clone()) < 0 {

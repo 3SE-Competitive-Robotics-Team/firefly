@@ -606,6 +606,21 @@ impl<F: DescriptorOps> TemplatedVocabulary<F> {
             serde_yaml::from_value(root.get("vocabulary").ok_or("missing vocabulary")?.clone())?;
         Self::from_storage(storage)
     }
+    /// Loads a plain YAML or gzip-compressed vocabulary from an owned/embedded resource.
+    /// # Errors
+    /// Returns decompression, YAML schema or vocabulary validation errors.
+    pub fn load_bytes(bytes: &[u8]) -> StorageResult<Self> {
+        let mut input = String::new();
+        if bytes.starts_with(&[0x1f, 0x8b]) {
+            flate2::read::GzDecoder::new(bytes).read_to_string(&mut input)?;
+        } else {
+            std::io::Cursor::new(bytes).read_to_string(&mut input)?;
+        }
+        let root = parse_storage(&input)?;
+        let storage =
+            serde_yaml::from_value(root.get("vocabulary").ok_or("missing vocabulary")?.clone())?;
+        Self::from_storage(storage)
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VocabularyStorage {
@@ -647,9 +662,12 @@ pub fn read_storage(path: impl AsRef<Path>) -> StorageResult<serde_yaml::Mapping
     } else {
         std::io::BufReader::new(file).read_to_string(&mut input)?;
     }
+    parse_storage(&input)
+}
+fn parse_storage(input: &str) -> StorageResult<serde_yaml::Mapping> {
     let yaml = input
         .strip_prefix("%YAML:1.0")
-        .map_or(input.as_str(), |s| s.trim_start_matches(['\r', '\n']));
+        .map_or(input, |s| s.trim_start_matches(['\r', '\n']));
     Ok(serde_yaml::from_str(&normalize_opencv_flow_keys(yaml))?)
 }
 /// `OpenCV` emits flow-map separators without YAML's required following space.

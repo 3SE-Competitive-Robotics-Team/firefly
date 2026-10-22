@@ -217,6 +217,29 @@ P_new = Jr(delta) P_posterior Jr(delta)ᵀ
 
 <a id="vio"></a>
 
+## OKVIS2-X 在线通讯
+
+`firefly-okvis-x` 默认运行在线 IPC 模式，单个应用承载 BRISK/AGAST、视觉惯性图、DBoW2
+回环和 Supereight2 深度子地图。传感器接收/预测线程独立于图求解；各图的所有者仍在线程内
+持有非 Send 参数块，通过有界队列传递输入和数值快照。在线图发布使用背压保留全部提交，
+线程退出关闭传感器队列并回收估计与地图工作线程。
+
+输入复用 `Firefly/Imu`、`CameraLeft`、`CameraRight` 和 `Depth`。双目严格按标定容差配对，
+IMU 时间未覆盖不提交视觉帧；接收端在释放 loan 前复制成自有图像。深度话题的 sensor_id=0
+映射到算法内部第 3 个标定槽，具有独立内外参，米制深度不重复缩放；无效深度表示为 0。
+标定来自公共 rig 或明确配置，不从真值推导。
+
+`Odometry` 与 `VioAttitude` 表达在适配层的局部 odom 系。全图修正提交有独立单调版本，
+通过更新后的共同历史锚点计算 map←odom；不将修正的位姿跳变当成物理速度。
+`CorrectedOdometry` 与原子 `Navigation` 来自同一预测状态及修正版本。
+预测仅传播真实 IMU 覆盖的时间段，并保持后验时刻；姿态协方差由无阻尼图边缘协方差
+和 IMU Jacobian/过程噪声计算，奇异图不伪造有效姿态协方差。
+跟踪丢失、IMU 超间隔、后验过旧时停止预测，让下游新鲜度自然失效。
+
+可选外部库图模式显式设置 `navigation="external_localization"`，由外部定位服务消费
+原始 odom 和 ALIKED/LightGlue 的位姿观测并独占地图导航发布；默认自主模式由 OKVIS 发布。
+本节定义通讯与坐标适配，不代表完整数据集精度、运行时限或飞行验收。
+
 ## VIO
 
 `firefly-vio-types` 提供 JPL/SO(3)/SE(3) 与变量类型；`firefly-vio-core` 提供相机、前端、

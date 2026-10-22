@@ -819,6 +819,12 @@ impl<B: SupereightBackend> SubmappingInterface<B> {
         }));
     }
 
+    /// Checks worker failures without flushing pending depth or changing integration state.
+    /// # Errors
+    /// Returns a processing or integration worker error.
+    pub fn check_health(&self) -> io::Result<()> {
+        self.check_worker_error()
+    }
     /// # Errors
     /// Returns an error for invalid configuration or sensor/map data, absent frames/maps,
     /// or a failed storage, integration, alignment, callback, worker or file operation.

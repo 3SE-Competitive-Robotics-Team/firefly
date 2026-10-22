@@ -712,6 +712,29 @@ struct Linearization {
     eliminated_points: Vec<usize>,
 }
 impl Linearization {
+    fn lower_normal(&self, regularization: &DVector<f64>) -> BTreeMap<(usize, usize), f64> {
+        let count = self.gradient.len();
+        let mut lower: BTreeMap<(usize, usize), f64> = BTreeMap::new();
+        for row in &self.rows {
+            for (oa, left_block) in &row.blocks {
+                for (ob, right_block) in &row.blocks {
+                    for ca in 0..left_block.ncols() {
+                        for cb in 0..right_block.ncols() {
+                            let (index, column) = (oa + ca, ob + cb);
+                            if index >= column {
+                                *lower.entry((index, column)).or_default() +=
+                                    left_block.column(ca).dot(&right_block.column(cb));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for index in 0..count {
+            *lower.entry((index, index)).or_default() += regularization[index];
+        }
+        lower
+    }
     fn scaled(&mut self, scale: &DVector<f64>) {
         for row in &mut self.rows {
             for (offset, j) in &mut row.blocks {
@@ -854,25 +877,7 @@ impl Linearization {
         if !matches!(kind, "SPARSE_NORMAL_CHOLESKY" | "DENSE_SCHUR") {
             return None;
         }
-        let mut lower: BTreeMap<(usize, usize), f64> = BTreeMap::new();
-        for row in &self.rows {
-            for (oa, left_block) in &row.blocks {
-                for (ob, right_block) in &row.blocks {
-                    for ca in 0..left_block.ncols() {
-                        for cb in 0..right_block.ncols() {
-                            let (index, column) = (oa + ca, ob + cb);
-                            if index >= column {
-                                *lower.entry((index, column)).or_default() +=
-                                    left_block.column(ca).dot(&right_block.column(cb));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        for index in 0..count {
-            *lower.entry((index, index)).or_default() += regularization[index];
-        }
+        let lower = self.lower_normal(regularization);
         if kind == "DENSE_SCHUR" {
             return self.solve_schur(&lower);
         }
@@ -1327,6 +1332,63 @@ impl GraphSolver for RustGraphSolver {
             Vector3::from_column_slice(&p[..3]),
             Quaternion::new(p[6], p[3], p[4], p[5]),
         ))
+    }
+}
+
+impl RustGraphSolver {
+    /// Extracts an undamped marginal block, conditional on the graph's fixed gauge.
+    /// Singular normal equations return None; no epsilon prior is introduced.
+    /// # Errors
+    /// Returns an error if factor snapshots or linearization are invalid.
+    pub fn marginal_covariance(
+        problem: &GraphProblem,
+        parameters: &[Parameter],
+    ) -> Result<Option<DMatrix<f64>>> {
+        let mut snapshot = Snapshot::capture(problem)?;
+        let disabled = BTreeSet::new();
+        let (offsets, size) = snapshot.variable_offsets(&SolverOptions::default(), &disabled)?;
+        let values = snapshot.values.clone();
+        let model = snapshot.evaluate(&values, &offsets, size, &disabled, true)?;
+        let mut columns = Vec::new();
+        for parameter in parameters {
+            let key = parameter.key();
+            let value = values
+                .get(&key)
+                .ok_or_else(|| graph_error("covariance parameter is not registered"))?;
+            if !value.fixed && !offsets.contains_key(&key) {
+                return Ok(None);
+            }
+            let offset = offsets.get(&key).copied();
+            columns.extend((0..value.tangent_size()).map(|axis| offset.map(|start| start + axis)));
+        }
+        if size == 0 {
+            return Ok(Some(DMatrix::zeros(columns.len(), columns.len())));
+        }
+        let lower = model.lower_normal(&DVector::zeros(size));
+        let triplets: Vec<_> = lower
+            .into_iter()
+            .map(|((row, col), value)| Triplet::new(row, col, value))
+            .collect();
+        let Ok(normal) = SparseColMat::<usize, f64>::try_new_from_triplets(size, size, &triplets)
+        else {
+            return Ok(None);
+        };
+        let Ok(factor) = normal.sp_cholesky(faer::Side::Lower) else {
+            return Ok(None);
+        };
+        let rhs = faer::Mat::from_fn(size, columns.len(), |row, col| {
+            f64::from(columns[col] == Some(row))
+        });
+        let solved = factor.solve(rhs.as_ref());
+        let covariance = DMatrix::from_fn(columns.len(), columns.len(), |row, col| {
+            columns[row].map_or(0.0, |index| solved[(index, col)])
+        });
+        if covariance.iter().any(|x| !x.is_finite())
+            || covariance.diagonal().iter().any(|x| *x < 0.0)
+        {
+            return Ok(None);
+        }
+        Ok(Some((&covariance + covariance.transpose()) * 0.5))
     }
 }
 

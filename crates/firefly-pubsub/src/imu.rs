@@ -10,8 +10,7 @@ pub const IMU_TOPIC: &str = "Firefly/Imu";
 
 /// IMU 消息。
 ///
-/// 字段与 `firefly-vio-core` 的 [`ImuData`](firefly_vio_core::sensor::ImuData)
-/// 输出对应：角速度（陀螺仪，rad/s）+ 比力（加速度计，m/s²）。
+/// 传感器坐标系的角速度（陀螺仪，rad/s）和比力（加速度计，m/s²）。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
 #[type_name("FireflyImuMessage")]
