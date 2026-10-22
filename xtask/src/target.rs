@@ -7,6 +7,7 @@ const DESKTOP_APPS: &[&str] = &[
     "aliked",
     "fc",
     "ffctl",
+    "firefly-okvis-x",
     "lightglue",
     "localization",
     "planner",
