@@ -30,7 +30,7 @@ extrinsic 及 imu 参数。外参均为 body←sensor，Hamilton xyzw；深度�
 cargo run --locked --release -p firefly-okvis-x -- --config <offline-config.toml> --dataset <dataset-directory> --output <output-directory>
 ```
 
-历史源码审计、兼容差异和已知边界保留在 `apps/firefly-okvis-x/README.md`。
+历史源码审计、兼容差异和已知边界保留在 [`AUDIT.md`](AUDIT.md)。
 SE01 窄窗口、S78 ICP cost-only 及其他既定行为选择保持原处理；地图工作线程的错误向上传播。
 当前在线深度后端使用针孔投影，原生窗口、神经网络及硬件 SDK 由外部能力实现。
 许可证及版权声明汇总于仓库主 README 末尾，本包 LICENSE 保留。

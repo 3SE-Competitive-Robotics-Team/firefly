@@ -1,5 +1,8 @@
 //! `cargo xtask deploy`：构建机载 release，打成 zstd 包并推到设备解包。
 //!
+//! 解包前会停掉 `firefly.service` 并清空 `bin`、`configs`、`models`，因此已退役的
+//! 进程与配置不会残留；`logs` 保留。
+//!
 //! 设备端由同一个 `xtask` 二进制的 `unpack` 子命令解包，不依赖 tar 或 zstd CLI。
 
 use std::fs;
@@ -138,6 +141,18 @@ fn push(device: &str, package: &Path) -> Result<(), String> {
     adb(device, &["push", &package_arg, REMOTE_PACKAGE])?;
     adb(device, &["push", &unpacker_arg, REMOTE_UNPACKER])?;
     adb(device, &["shell", &format!("chmod 755 {REMOTE_UNPACKER}")])?;
+
+    // 部署是覆盖语义会留下已退役的二进制与配置，解包前先停服务并清空受管目录；
+    // `logs` 与镜像预置的 `systemd` 不动。包已推到设备，这一步之后解包失败才会
+    // 留下空的受管目录，所以清理放在推送之后。
+    adb(device, &["shell", "systemctl stop firefly || true"])?;
+    adb(
+        device,
+        &[
+            "shell",
+            &format!("rm -rf {DESTINATION}/bin {DESTINATION}/configs {DESTINATION}/models"),
+        ],
+    )?;
     adb(
         device,
         &[

@@ -538,7 +538,7 @@ d = fB/z; d_m = q round((d+ε)/q); z_m = fB/d_m
 | PX4-Autopilot `4dbd2e069a5c30c2e53e47e842095d2576dc38c4` | `src/lib/rate_control/rate_control.cpp`；`src/modules/mc_att_control/AttitudeControl/AttitudeControl.cpp`；`src/modules/mc_pos_control/PositionControl/PositionControl.cpp`；`src/lib/control_allocation/control_allocation/`；`src/lib/motion_planning/VelocitySmoothing.cpp` | 位置/姿态/角速度/分配四层与起降 jerk 受限参考；四轴专用分配去掉 6 轴/16 执行器分支 |
 
 源码审查不能替代独立公式、差分与最终输出验证；当前算法差异与审计结论见
-[OKVIS 审计日志](../apps/firefly-okvis-x/README.md)。
+[OKVIS 审计日志](../apps/okvis2-x/AUDIT.md)。
 OpenCV 兼容性对齐以 purecv 上游约定的 **4.10.0** 为目标；夹具保留各自真实来源版本，
 不能据此宣称已与之对齐。
 

@@ -66,11 +66,17 @@ impl Hamming {
     /// # Errors
     /// Returns an error if the word count is invalid or either descriptor is too short.
     pub fn popcnt_of_xored(a: &[u8], b: &[u8], words: i32) -> Result<u32> {
-        #[cfg(any(target_arch = "aarch64", target_feature = "neon"))]
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "aarch64", target_feature = "neon")
+        ))]
         {
             Self::neon_popcnt_of_xored(a, b, words)
         }
-        #[cfg(not(any(target_arch = "aarch64", target_feature = "neon")))]
+        #[cfg(not(all(
+            target_os = "linux",
+            any(target_arch = "aarch64", target_feature = "neon")
+        )))]
         {
             Self::ssse3_popcnt_of_xored(a, b, words)
         }
