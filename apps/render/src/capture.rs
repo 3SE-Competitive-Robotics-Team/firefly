@@ -1,6 +1,6 @@
 //! GPU 回读：紧凑灰度缓冲 + 深度预通道纹理 → CPU。
 //!
-//! 链路（每相机节拍一次，由 `link` 按固定 10Hz 发起请求）：
+//! 链路（每相机节拍一次，由 `link` 按固定 30Hz 发起请求）：
 //! 主世界 `CaptureHub::request` → 渲染世界 `copy_sensors`（`RenderGraphSystems::Finish` 阶段，
 //! 图像绘制提交后、窗口呈现前在同队列提交拷贝）→ `map_async` 回调经通道回传字节 →
 //! 主世界 `link` 配对三份同 `seq` 回复后，交给像素线程处理并发布。

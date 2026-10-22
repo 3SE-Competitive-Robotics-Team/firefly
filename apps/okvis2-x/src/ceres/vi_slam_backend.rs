@@ -619,13 +619,20 @@ impl ViSlamBackend {
         keypoint: usize,
     ) -> Result<bool> {
         let key = KeypointIdentifier::new(id.value(), camera, keypoint);
-        let lm = self
+        // 该观测可能已被更早的清理/合并移除；上游此处同样只做 debug 断言。
+        // 仍然清掉关键点的地标编号，保持 multi-frame 与图一致。
+        let Some(lm) = self
             .realtime_graph
             .observations
             .get(&key)
-            .ok_or_else(|| graph_error("observation absent"))?
-            .core
-            .landmark_id;
+            .map(|observation| observation.core.landmark_id)
+        else {
+            log::debug!("backend observation {key:?} already removed");
+            self.multi_frame(id)?
+                .borrow_mut()
+                .set_landmark_id(camera, keypoint, 0);
+            return Ok(false);
+        };
         if self.full_graph_busy() {
             self.touched_states.insert(id);
             self.touched_landmarks.insert(lm);

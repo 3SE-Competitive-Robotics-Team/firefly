@@ -1369,10 +1369,12 @@ impl ViGraph {
     /// Returns an error if required graph states, parameter blocks or measurements are absent,
     /// input dimensions/values are invalid, or evaluation, optimization or graph I/O fails.
     pub fn remove_observation(&mut self, key: KeypointIdentifier) -> Result<bool> {
-        let obs = self
-            .observations
-            .remove(&key)
-            .ok_or_else(|| graph_error("observation absent"))?;
+        // 上游用仅 debug 生效的断言；缺失观测说明它已被移除（合并链/清理先后顺序），
+        // 再次删除按“未发生”处理，不能因此中断处理线程。
+        let Some(obs) = self.observations.remove(&key) else {
+            log::debug!("observation {key:?} already removed");
+            return Ok(false);
+        };
         self.problem.residuals.remove(&obs.residual);
         if let Some(id) = obs.depth_error {
             self.problem.residuals.remove(&id);

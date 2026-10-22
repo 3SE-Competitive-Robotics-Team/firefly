@@ -1,7 +1,7 @@
-//! IPC 接线：真值订阅 → 固定 10Hz 回读 → 工作线程逐像素处理 → 图像发布。
+//! IPC 接线：真值订阅 → 固定 30Hz 回读 → 工作线程逐像素处理 → 图像发布。
 //!
-//! 时序（对照 `firefly-sim/main.py` 的 10Hz 相机节拍）：
-//! - `poll_pose` 排空真值更新位姿，按**固定 10Hz 节拍**（`CAPTURE_PERIOD`，
+//! 时序（对照 `firefly-sim/main.py` 的 30Hz 位姿节拍）：
+//! - `poll_pose` 排空真值更新位姿，按**固定 30Hz 节拍**（`CAPTURE_PERIOD`，
 //!   以 sim 时间为轴）发起回读，并激活传感器相机；回读被渲染世界取走后收起
 //!   相机，限制传感器渲染只在有采集请求时执行。
 //! - 三份同 `seq` 回复到齐后装配成 [`CaptureJob`] 交给工作线程；工作线程算完
@@ -35,8 +35,8 @@ use crate::capture::{CaptureHub, CaptureReply, CaptureRequest, CapturedFrame, Se
 use crate::process::{CaptureJob, Latest, ProcessedCapture, run_worker};
 use crate::rig::{Eye, PoseState, apply_pose_to_eyes};
 
-/// 出图节拍（秒，sim 时间轴）：固定 10Hz，与真值到达边沿解耦。
-pub const CAPTURE_PERIOD: f64 = 0.1;
+/// 出图节拍（秒，sim 时间轴）：固定 30Hz，与真值到达边沿解耦。
+pub const CAPTURE_PERIOD: f64 = 1.0 / 30.0;
 
 /// 节拍比较容差（秒）：sim 时间戳有浮点抖动，`next_stamp` 精确相等比较会
 /// 偶发漏拍（漏一拍即掉到 5Hz）。取半个周期的 10%。
@@ -258,7 +258,7 @@ pub fn poll_pose(
         capture.active = false;
     }
 
-    // 按仿真时间以 10Hz 触发采集；回读双缓冲，
+    // 按仿真时间以 30Hz 触发采集；回读双缓冲，
     // 只要还有空闲组就可发起（上一拍在途不阻塞下一拍）。
     if !capture.active
         && hub.can_issue()

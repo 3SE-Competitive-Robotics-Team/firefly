@@ -5,7 +5,7 @@
 //! 通过 `Firefly/CameraPair` 唤醒订阅端。真值只用于生成仿真测量。
 //! 视觉资产必须存在于 `models/rmuc2026/v2.0.0/field.glb`。
 //!
-//! 传感器相机按 10Hz 窗口激活，逐像素处理与传感器发布在工作线程完成。
+//! 传感器相机按 30Hz 窗口激活，逐像素处理与传感器发布在工作线程完成。
 //! 日志经 `firefly-observability` 汇入统一 rrd 记录。
 //! `--offline` 使用独立 `Firefly/Offline/*` 数据话题供离线库图渲染。
 
@@ -159,7 +159,7 @@ fn setup_scene(
 }
 
 /// 出图节奏诊断：每 [`RATE_LOG_PERIOD`] 秒报一次应用帧率与**真实供图速率**。
-/// 供图目标 10Hz（传感器节拍）；帧率是供给侧余量，供图才是 VIO 拿到的输入。
+/// 供图目标 30Hz（传感器节拍）；帧率是供给侧余量，供图才是 VIO 拿到的输入。
 // 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 fn log_render_rate(time: Res<Time>, mut acc: Local<(f32, u32)>, mut stats: ResMut<CaptureStats>) {
