@@ -116,7 +116,7 @@ PR 标题描述整个 PR 的最终结果，不写 WIP、阶段编号或“后续
 停机坪定义来自 `firefly_mujoco.scene.SCENES[].pad` 与 `PAD_CLEARANCE`，不在文档复制坐标。
 render 使用无窗口 GPU 渲染；Rerun 原生 Viewer 需要图形会话。Rust/Python 版本和依赖
 以 workspace 配置为准。视频记录依赖外部 FFmpeg、所选编码器和 GPU 用户态驱动；
-默认走 Intel VA-API，设备与编码选项见 `configs/viz.toml`。仅列出编码器并不证明驱动可用。
+编码器按平台选择（macOS 用系统 VideoToolbox，其余用 Intel VA-API），设备与编码选项见 `configs/viz.toml`。仅列出编码器并不证明驱动可用。
 
 ```bash
 uv sync --all-packages --extra test

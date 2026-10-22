@@ -3,17 +3,23 @@
 from dataclasses import dataclass, field, fields
 import math
 from pathlib import Path
+import sys
 from firefly_workspace import load_toml
 
 
 ROOT = Path(__file__).resolve().parents[4]
 
 
+def default_encoder() -> str:
+    """平台默认 H.265 编码器：macOS 用系统 VideoToolbox，其余用 Intel VA-API。"""
+    return "hevc_videotoolbox" if sys.platform == "darwin" else "hevc_vaapi"
+
+
 @dataclass(frozen=True)
 class VideoOptions:
     enabled: bool = True
     ffmpeg: str = "ffmpeg"
-    encoder: str = "hevc_vaapi"
+    encoder: str = field(default_factory=default_encoder)
     device: str = "/dev/dri/renderD128"
     fps: int = 10
     bitrate: int = 256_000
@@ -79,8 +85,8 @@ def decode(values: dict) -> Options:
                     raise ValueError(f"{item.name} must be a positive integer")
     if min(options.flush_seconds, options.shutdown_seconds, video.shutdown_seconds) <= 0:
         raise ValueError("flush/shutdown timeouts must be positive")
-    if video.encoder not in ("hevc_vaapi", "hevc_qsv", "libx265"):
-        raise ValueError("video.encoder must be hevc_vaapi, hevc_qsv or libx265 (explicit software mode)")
+    if video.encoder not in ("hevc_vaapi", "hevc_qsv", "hevc_videotoolbox", "libx265"):
+        raise ValueError("video.encoder must be hevc_vaapi, hevc_qsv, hevc_videotoolbox or libx265")
     if video.max_inflight < 4 or capture.match_frames < video.max_inflight:
         raise ValueError("match_frames >= max_inflight >= 4 is required")
     return options

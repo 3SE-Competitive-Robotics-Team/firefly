@@ -11,6 +11,7 @@ from typing import BinaryIO
 
 import pytest
 
+from firefly_viz import config as viz_config
 from firefly_viz.config import VideoOptions
 from firefly_viz.video import AccessUnits, Encoder, Frame, command, nal_types
 
@@ -62,8 +63,14 @@ def test_access_unit_requires_exactly_one_picture_but_allows_multiple_slices():
         AccessUnits(1024).feed(nal(35) + nal(19) + b'\x00\x00\x01\x02', final=True)
 
 
+def test_platform_default_encoder_matches_host():
+    expected = "hevc_videotoolbox" if viz_config.sys.platform == "darwin" else "hevc_vaapi"
+    assert viz_config.default_encoder() == expected
+    assert VideoOptions().encoder == expected
+
+
 def test_hardware_commands_are_explicit_and_have_no_b_frames():
-    for encoder in ('hevc_vaapi', 'hevc_qsv', 'libx265'):
+    for encoder in ('hevc_vaapi', 'hevc_qsv', 'hevc_videotoolbox', 'libx265'):
         args = command(replace(VideoOptions(), encoder=encoder), 320, 240)
         assert args[args.index('-c:v') + 1] == encoder
         assert args[args.index('-bf') + 1] == '0'

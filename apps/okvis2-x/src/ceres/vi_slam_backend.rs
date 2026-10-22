@@ -1587,9 +1587,13 @@ impl ViSlamBackend {
     pub fn merge_landmark(&mut self, from: LandmarkId, into: LandmarkId) -> Result<bool> {
         self.realtime_graph
             .merge_landmark(from, into, &mut self.multi_frames)?;
-        let keys = self.realtime_graph.landmark_info[&into]
-            .observations
-            .clone();
+        // 合并链（a→b 之后又出现 b→a）会让目标地标已不在图里；此时这次合并没有
+        // 可刷新的观测，按“未发生”返回，不能用索引直接打死处理线程。
+        let Some(target) = self.realtime_graph.landmark_info.get(&into) else {
+            log::warn!("landmark merge target {into:?} already removed; merge ignored");
+            return Ok(false);
+        };
+        let keys = target.observations.clone();
         for key in &keys {
             self.multi_frame(StateId::new(key.frame_id))?
                 .borrow_mut()
