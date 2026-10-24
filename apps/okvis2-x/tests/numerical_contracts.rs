@@ -221,6 +221,113 @@ fn imu_samples(gyro: Vector3<f64>, acc: Vector3<f64>) -> ImuMeasurementDeque {
 }
 
 #[test]
+fn imu_residual_only_preserves_cost_and_cache_across_bias_updates() {
+    for count in [21, 50, 101] {
+        let samples = (0..count)
+            .map(|i| {
+                let t = i as f64 * 0.01;
+                ImuMeasurement::new(
+                    time(i * 10),
+                    ImuSensorReadings::new(
+                        Vector3::new(0.1 + t, -0.2 * t, 0.3 - t),
+                        Vector3::new(t, 0.5 - t, 9.81 + 0.2 * t),
+                    ),
+                    -1,
+                )
+            })
+            .collect();
+        let mut cost_factor =
+            ImuError::new(samples, imu_parameters(), time(0), time((count - 1) * 10)).unwrap();
+        let mut full_factor = cost_factor.clone();
+        let first = Transformation::new(
+            Vector3::new(0.1, -0.2, 0.3),
+            delta_q(&Vector3::new(0.2, -0.1, 0.3)),
+        );
+        let second = Transformation::new(
+            Vector3::new(-0.4, 0.2, 0.1),
+            delta_q(&Vector3::new(-0.1, 0.2, 0.1)),
+        );
+        let initial =
+            SVector::<f64, 9>::from_row_slice(&[0.1, -0.2, 0.3, 0.01, -0.02, 0.03, 0.1, -0.2, 0.3]);
+        let end = -initial;
+        for (trial, bias_delta) in [0.0, 0.0001, 0.0005, 0.0001].into_iter().enumerate() {
+            let mut start = initial;
+            start[3] += bias_delta;
+            start[6] += trial as f64 * 0.01;
+            let cost = cost_factor
+                .evaluate_residual(first.coeffs(), &start, second.coeffs(), &end)
+                .unwrap();
+            let full = full_factor
+                .evaluate(first.coeffs(), &start, second.coeffs(), &end)
+                .unwrap();
+            assert!(cost.norm() > 0.0 && cost.iter().all(|v| v.is_finite()));
+            assert_eq!(cost, full.residual, "count={count}, trial={trial}");
+            assert_eq!(cost_factor.redo, full_factor.redo);
+            assert_eq!(cost_factor.redo_counter, full_factor.redo_counter);
+            let expected_redos = if count < 50 { trial.max(1) } else { 1 };
+            assert_eq!(cost_factor.redo_counter, expected_redos);
+            assert_eq!(cost_factor.redo, count >= 50 && trial >= 2);
+            assert_eq!(cost_factor.information, full_factor.information);
+            assert_eq!(
+                cost_factor.square_root_information,
+                full_factor.square_root_information
+            );
+            let after = cost_factor
+                .evaluate(first.coeffs(), &start, second.coeffs(), &end)
+                .unwrap();
+            assert_eq!(after.residual, full.residual);
+            assert_eq!(after.pose0, full.pose0);
+            assert_eq!(after.pose1, full.pose1);
+            assert_eq!(after.speed_bias0, full.speed_bias0);
+            assert_eq!(after.speed_bias1, full.speed_bias1);
+            assert_eq!(after.pose0_minimal, full.pose0_minimal);
+            assert_eq!(after.pose1_minimal, full.pose1_minimal);
+            assert_eq!(after.speed_bias0_minimal, full.speed_bias0_minimal);
+            assert_eq!(after.speed_bias1_minimal, full.speed_bias1_minimal);
+        }
+    }
+}
+
+#[test]
+fn imu_residual_only_preserves_integration_and_covariance_errors() {
+    let pose = Transformation::identity();
+    let sb = SVector::<f64, 9>::zeros();
+    let mut factor = ImuError::new(
+        imu_samples(Vector3::zeros(), Vector3::z() * 9.81),
+        imu_parameters(),
+        time(0),
+        time(1000),
+    )
+    .unwrap();
+    let mut missing = factor.clone();
+    missing.imu_measurements.clear();
+    assert_eq!(
+        missing.evaluate_residual(pose.coeffs(), &sb, pose.coeffs(), &sb),
+        Err(IntegrationError::MissingMeasurements)
+    );
+    assert_eq!(
+        missing
+            .evaluate(pose.coeffs(), &sb, pose.coeffs(), &sb)
+            .unwrap_err(),
+        IntegrationError::MissingMeasurements
+    );
+    factor
+        .evaluate_residual(pose.coeffs(), &sb, pose.coeffs(), &sb)
+        .unwrap();
+    factor.square_root_information = None;
+    assert_eq!(
+        factor.evaluate_residual(pose.coeffs(), &sb, pose.coeffs(), &sb),
+        Err(IntegrationError::InvalidCovariance)
+    );
+    assert_eq!(
+        factor
+            .evaluate(pose.coeffs(), &sb, pose.coeffs(), &sb)
+            .unwrap_err(),
+        IntegrationError::InvalidCovariance
+    );
+}
+
+#[test]
 fn imu_constant_acceleration_and_bias_cancellation_follow_analytic_motion() {
     let parameters = imu_parameters();
     for acceleration in [Vector3::zeros(), Vector3::new(0.4, -0.2, 0.1)] {

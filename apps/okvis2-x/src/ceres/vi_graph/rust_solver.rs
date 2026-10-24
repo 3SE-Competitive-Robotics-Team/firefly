@@ -321,14 +321,24 @@ impl Factor {
                 if p.len() != 4 || p.iter().map(|p| p.len()).ne([7, 9, 7, 9]) {
                     return Err(failed());
                 }
+                let pose0 = SVector::from_column_slice(p[0]);
+                let sb0 = SVector::from_column_slice(p[1]);
+                let pose1 = SVector::from_column_slice(p[2]);
+                let sb1 = SVector::from_column_slice(p[3]);
+                let evaluation_error = |e| graph_error(&format!("IMU evaluation: {e:?}"));
+                if !mask.is_some_and(|m| m.iter().any(|&requested| requested)) {
+                    let residual = f
+                        .evaluate_residual(&pose0, &sb0, &pose1, &sb1)
+                        .map_err(evaluation_error)?;
+                    return Ok(ErrorEvaluation {
+                        residuals: DVector::from_column_slice(residual.as_slice()),
+                        jacobians: vec![None; 4],
+                        minimal_jacobians: vec![None; 4],
+                    });
+                }
                 let e = f
-                    .evaluate(
-                        &SVector::from_column_slice(p[0]),
-                        &SVector::from_column_slice(p[1]),
-                        &SVector::from_column_slice(p[2]),
-                        &SVector::from_column_slice(p[3]),
-                    )
-                    .map_err(|e| graph_error(&format!("IMU evaluation: {e:?}")))?;
+                    .evaluate(&pose0, &sb0, &pose1, &sb1)
+                    .map_err(evaluation_error)?;
                 Ok(imu_output(&e, mask))
             }
             Self::PseudoImu(f) => {
@@ -1799,6 +1809,107 @@ mod tests {
                     .evaluate(&values, &offsets, 9, &BTreeSet::new(), jacobians)
                     .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn imu_cost_only_matches_linearization_for_active_and_fixed_factors() {
+        use crate::{
+            config::parameters::ImuParameters,
+            sensors::measurements::{ImuMeasurement, ImuSensorReadings},
+        };
+        use jiff::Timestamp;
+
+        let parameters = ImuParameters {
+            r#use: true,
+            t_bs: Transformation::identity(),
+            a_max: 100.,
+            g_max: 20.,
+            sigma_g_c: 0.002,
+            sigma_bg: 0.01,
+            sigma_a_c: 0.02,
+            sigma_ba: 0.02,
+            sigma_gw_c: 0.0002,
+            sigma_aw_c: 0.002,
+            g0: Vector3::zeros(),
+            a0: Vector3::zeros(),
+            g: 9.81,
+            s_a: Vector3::repeat(1.),
+        };
+        let samples = (0..=10)
+            .map(|i| {
+                ImuMeasurement::new(
+                    Timestamp::from_millisecond(i * 10).unwrap(),
+                    ImuSensorReadings::new(
+                        Vector3::new(0.1, 0.2, -0.1),
+                        Vector3::new(0.2, 0.1, 9.81),
+                    ),
+                    -1,
+                )
+            })
+            .collect();
+        let factor = ImuError::new(
+            samples,
+            parameters,
+            Timestamp::UNIX_EPOCH,
+            Timestamp::from_millisecond(100).unwrap(),
+        )
+        .unwrap();
+        for fixed in [false, true] {
+            let values = [
+                (vec![0., 0., 0., 0., 0., 0., 1.], ManifoldKind::Pose),
+                (vec![0.; 9], ManifoldKind::Euclidean),
+                (vec![0.1, 0., 0., 0., 0., 0., 1.], ManifoldKind::Pose),
+                (vec![0.; 9], ManifoldKind::Euclidean),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(key, (data, manifold))| {
+                (
+                    key,
+                    Values {
+                        data,
+                        manifold,
+                        fixed,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+            let mut snapshot = Snapshot {
+                values: values.clone(),
+                factors: vec![FactorRecord {
+                    id: 1,
+                    factor: Factor::Imu(Box::new(factor.clone())),
+                    keys: vec![0, 1, 2, 3],
+                    loss: Some(RobustLoss::Huber(1.)),
+                }],
+            };
+            let offsets = if fixed {
+                BTreeMap::new()
+            } else {
+                BTreeMap::from([(0, 0), (1, 6), (2, 15), (3, 21)])
+            };
+            let size = if fixed { 0 } else { 30 };
+            let cost = snapshot
+                .evaluate(&values, &offsets, size, &BTreeSet::new(), false)
+                .unwrap();
+            let full = snapshot
+                .evaluate(&values, &offsets, size, &BTreeSet::new(), true)
+                .unwrap();
+            assert_eq!(cost.cost, full.cost);
+            assert_eq!(cost.fixed_cost, full.fixed_cost);
+            assert!(cost.cost + cost.fixed_cost > 0.);
+            assert_eq!(cost.cost == 0., fixed);
+            assert_eq!(cost.fixed_cost == 0., !fixed);
+            assert!(cost.rows.is_empty() && cost.gradient.is_empty());
+            assert_eq!(full.rows.is_empty(), fixed);
+            let inputs: Vec<_> = values.values().map(|v| v.data.as_slice()).collect();
+            let factor = &mut snapshot.factors[0].factor;
+            for mask in [None, Some([false; 4].as_slice())] {
+                let result = factor.evaluate_motion(&inputs, mask).unwrap();
+                assert!(result.jacobians.iter().all(Option::is_none));
+                assert!(result.minimal_jacobians.iter().all(Option::is_none));
+            }
         }
     }
 

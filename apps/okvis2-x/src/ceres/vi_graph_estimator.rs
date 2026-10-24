@@ -1197,14 +1197,13 @@ fn factor_norm(factor: &GraphFactor, p: &[Vec<f64>]) -> Result<f64> {
         }
         GraphFactor::Imu(f) => Ok(f
             .borrow_mut()
-            .evaluate(
+            .evaluate_residual(
                 &SVector::from_column_slice(&p[0]),
                 &SVector::from_column_slice(&p[1]),
                 &SVector::from_column_slice(&p[2]),
                 &SVector::from_column_slice(&p[3]),
             )
             .map_err(|e| graph_error(&format!("IMU check: {e:?}")))?
-            .residual
             .norm_squared()),
         GraphFactor::PseudoImu(f) => Ok(f
             .borrow()
