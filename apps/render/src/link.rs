@@ -1,8 +1,8 @@
-//! IPC 接线：真值订阅 → 固定 30Hz 回读 → 工作线程逐像素处理 → 图像发布。
+//! IPC 接线：新真值触发回读 → 工作线程逐像素处理 → 图像发布。
 //!
-//! 时序（对照 `firefly-sim/main.py` 的 30Hz 位姿节拍）：
-//! - `poll_pose` 排空真值更新位姿，按**固定 30Hz 节拍**（`CAPTURE_PERIOD`，
-//!   以 sim 时间为轴）发起回读，并激活传感器相机；回读被渲染世界取走后收起
+//! 时序（采集频率由位姿发布端决定，sim 默认 30Hz）：
+//! - `poll_pose` 排空真值保留最新，新时间戳且有空闲缓冲时发起回读，
+//!   并激活传感器相机；回读被渲染世界取走后收起
 //!   相机，限制传感器渲染只在有采集请求时执行。
 //! - 三份同 `seq` 回复到齐后装配成 [`CaptureJob`] 交给工作线程；工作线程算完
 //!   立即发布传感器，不向主线程回传像素缓冲。
@@ -34,13 +34,6 @@ use firefly_pubsub::viz::{ScalarMessage, VizPublisher};
 use crate::capture::{CaptureHub, CaptureReply, CaptureRequest, CapturedFrame, SensorKind};
 use crate::process::{CaptureJob, Latest, ProcessedCapture, run_worker};
 use crate::rig::{Eye, PoseState, apply_pose_to_eyes};
-
-/// 出图节拍（秒，sim 时间轴）：固定 30Hz，与真值到达边沿解耦。
-pub const CAPTURE_PERIOD: f64 = 1.0 / 30.0;
-
-/// 节拍比较容差（秒）：sim 时间戳有浮点抖动，`next_stamp` 精确相等比较会
-/// 偶发漏拍（漏一拍即掉到 5Hz）。取半个周期的 10%。
-const CAPTURE_TOLERANCE: f64 = CAPTURE_PERIOD * 0.1;
 
 /// 主线程订阅端口束（节点最后声明最后释放，对照 `firefly-pubsub/node` 的 Drop 纪律）。
 ///
@@ -134,15 +127,39 @@ pub struct CaptureStats {
     pub published: u32,
 }
 
-/// 传感器出图节拍与相机激活状态（主线程独占）。
+/// 最新待采集位姿与相机激活状态（主线程独占）。
 #[derive(Resource, Default)]
 pub struct SensorCapture {
-    /// 下一个允许触发的 sim 时刻（秒）。
-    next_stamp: f64,
+    /// 最新已接收时间戳；重复与乱序位姿不触发采集。
+    latest_stamp: Option<f64>,
+    /// 渲染繁忙时只保留最新位姿，不改动正在等待提交的相机变换。
+    queued_pose: Option<(OdomMessage, TraceContext)>,
     /// 传感器相机是否处于出图窗口（激活中）。
     active: bool,
     /// 当前出图窗口对应的请求序号（渲染世界取走它即收起相机）。
     requested_seq: u64,
+}
+
+impl SensorCapture {
+    fn observe(&mut self, msg: OdomMessage, trace: TraceContext) {
+        if msg.is_initialized
+            && msg.timestamp.is_finite()
+            && self.latest_stamp.is_none_or(|stamp| msg.timestamp > stamp)
+        {
+            self.latest_stamp = Some(msg.timestamp);
+            self.queued_pose = Some((msg, trace));
+        }
+    }
+
+    fn take_ready(&mut self, hub: &CaptureHub) -> Option<(OdomMessage, TraceContext)> {
+        if self.active && hub.taken_seq() >= self.requested_seq {
+            self.active = false;
+        }
+        if self.active || !hub.can_issue() || hub.has_pending() {
+            return None;
+        }
+        self.queued_pose.take()
+    }
 }
 
 /// 逐像素处理与发布；待处理任务只保留最新一拍。
@@ -208,7 +225,7 @@ impl Drop for CapturePipeline {
     }
 }
 
-/// 位姿轮询 + 出图节拍：排空真值保留最新 → 按固定节拍发起回读并按需激活相机。
+/// 位姿驱动采集：排空真值保留最新 → 有空闲缓冲时发起回读并按需激活相机。
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub fn poll_pose(
     ports: NonSend<IpcPorts>,
@@ -220,11 +237,10 @@ pub fn poll_pose(
     mut eyes: Query<(&Eye, &mut Transform)>,
     mut cameras: Query<&mut Camera, With<Eye>>,
 ) {
-    let mut newest: Option<(OdomMessage, TraceContext)> = None;
     loop {
         match ports.pose_sub.receive() {
             Ok(Some(sample)) => {
-                newest = Some((*sample, *sample.user_header()));
+                capture.observe(*sample, *sample.user_header());
             }
             Ok(None) => break,
             Err(e) => {
@@ -233,9 +249,8 @@ pub fn poll_pose(
             }
         }
     }
-    if let Some((msg, header)) = newest
-        && msg.is_initialized
-        && !hub.has_pending()
+    if let Some(targets) = targets
+        && let Some((msg, header)) = capture.take_ready(&hub)
     {
         pose.pos = Vec3::new(
             msg.position_x as f32,
@@ -251,22 +266,6 @@ pub fn poll_pose(
         pose.stamp = msg.timestamp;
         pose.trace = header;
         pose.has_pose = true;
-    }
-
-    // 渲染世界已取走本窗口的请求（拷贝已编码）→ 收起传感器相机，停止空转。
-    if capture.active && hub.taken_seq() >= capture.requested_seq {
-        capture.active = false;
-    }
-
-    // 按仿真时间以 30Hz 触发采集；回读双缓冲，
-    // 只要还有空闲组就可发起（上一拍在途不阻塞下一拍）。
-    if !capture.active
-        && hub.can_issue()
-        && !hub.has_pending()
-        && pose.has_pose
-        && pose.stamp >= capture.next_stamp
-        && let Some(targets) = targets
-    {
         let seq = pending.next_seq;
         pending.next_seq += 1;
         hub.request(CaptureRequest {
@@ -279,7 +278,6 @@ pub fn poll_pose(
         });
         capture.active = true;
         capture.requested_seq = seq;
-        capture.next_stamp = pose.stamp + CAPTURE_PERIOD - CAPTURE_TOLERANCE;
         log::debug!("pose t={:.3} 回读 seq={seq}", pose.stamp);
     }
 
@@ -467,6 +465,87 @@ mod tests {
     use super::*;
     use crate::buffer::BufferPool;
     use crate::capture::{CaptureTiming, FRAME_BYTES, GRAY_BYTES};
+
+    fn pose_message(stamp: f64) -> OdomMessage {
+        OdomMessage {
+            timestamp: stamp,
+            position_x: stamp,
+            is_initialized: true,
+            ..OdomMessage::default()
+        }
+    }
+
+    #[test]
+    fn each_new_pose_triggers_once_without_a_second_sampling_clock() {
+        let hub = CaptureHub::default();
+        let mut capture = SensorCapture::default();
+        for stamp in [0., 0.034, 0.067, 0.100, 0.134] {
+            capture.observe(pose_message(stamp), TraceContext::default());
+            let (msg, _) = capture.take_ready(&hub).unwrap();
+            assert!((msg.timestamp - stamp).abs() < f64::EPSILON);
+            assert!(capture.take_ready(&hub).is_none());
+            capture.observe(pose_message(stamp), TraceContext::default());
+            capture.observe(pose_message(stamp - 0.001), TraceContext::default());
+            assert!(capture.take_ready(&hub).is_none());
+        }
+        capture.observe(pose_message(f64::NAN), TraceContext::default());
+        capture.observe(pose_message(f64::INFINITY), TraceContext::default());
+        capture.observe(OdomMessage::default(), TraceContext::default());
+        assert!(capture.take_ready(&hub).is_none());
+    }
+
+    #[test]
+    fn busy_capture_retains_only_the_latest_pose_and_its_trace() {
+        let hub = CaptureHub::default();
+        let mut capture = SensorCapture {
+            active: true,
+            requested_seq: 1,
+            ..SensorCapture::default()
+        };
+        let request = CaptureRequest {
+            seq: 1,
+            timing: CaptureTiming::default(),
+            stamp: 0.,
+            trace: TraceContext::default(),
+            left: Handle::<Image>::default().id(),
+            right: Handle::<Image>::default().id(),
+        };
+        hub.request(request);
+        for (index, stamp) in [0.034, 0.067, 0.100].into_iter().enumerate() {
+            capture.observe(
+                pose_message(stamp),
+                TraceContext {
+                    span_id: index as u64 + 1,
+                    ..TraceContext::default()
+                },
+            );
+            assert!(capture.take_ready(&hub).is_none());
+        }
+        assert!(
+            hub.inner
+                .request
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .stamp
+                .abs()
+                < f64::EPSILON
+        );
+        hub.inner.taken_seq.store(1, Ordering::SeqCst);
+        assert!(capture.take_ready(&hub).is_none());
+        hub.inner.request.lock().unwrap().take();
+        hub.inner
+            .inflight_sets
+            .store(crate::capture::CAPTURE_SETS as u32, Ordering::SeqCst);
+        assert!(capture.take_ready(&hub).is_none());
+        hub.inner.inflight_sets.store(0, Ordering::SeqCst);
+        let (msg, trace) = capture.take_ready(&hub).unwrap();
+        assert!((msg.timestamp - 0.100).abs() < f64::EPSILON);
+        assert!((msg.position_x - msg.timestamp).abs() < f64::EPSILON);
+        assert_eq!(trace.span_id, 3);
+        assert!(capture.take_ready(&hub).is_none());
+    }
 
     struct Replies {
         left: BufferPool,

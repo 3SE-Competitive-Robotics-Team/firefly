@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from firefly_sim.main import advance_grid
+import pytest
+
+from firefly_sim.main import advance_grid, decode_config
 
 
 def test_steady_advance_skips_none():
@@ -24,3 +26,30 @@ def test_exact_grid_boundary_advances_one():
     nxt, skipped = advance_grid(5.00, 5.00, 0.1)
     assert skipped == 0
     assert abs(nxt - 5.1) < 1e-12
+
+
+def test_default_pose_rate_is_30hz_with_1khz_physics_and_imu():
+    physics, imu, pose, _ = decode_config({"start": [0., 0., 0.]})
+    assert physics == pytest.approx(0.001)
+    assert imu == pytest.approx(0.001)
+    assert pose == pytest.approx(1. / 30.)
+
+
+def test_30hz_pose_grid_uses_actual_physics_timestamps_without_skipping():
+    next_pose = 0.
+    stamps = []
+    for step in range(1001):
+        stamp = step / 1000.
+        if stamp + 1e-12 >= next_pose:
+            stamps.append(step)
+            next_pose, skipped = advance_grid(next_pose, stamp, 1. / 30.)
+            assert skipped == 0
+    assert len(stamps) == 31
+    assert stamps[:4] == [0, 34, 67, 100]
+    assert set(b - a for a, b in zip(stamps, stamps[1:])) == {33, 34}
+
+
+@pytest.mark.parametrize("rates", [{"imu": 30.}, {"pose": 1001.}])
+def test_invalid_sensor_rates_are_rejected(rates):
+    with pytest.raises(ValueError):
+        decode_config({"rates": rates, "start": [0., 0., 0.]})
