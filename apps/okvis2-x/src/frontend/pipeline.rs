@@ -2326,13 +2326,9 @@ mod matching_tests {
     ) -> Vec<usize> {
         candidates
             .into_iter()
-            .filter_map(|k| {
+            .filter(|&k| {
                 let error = (projection - index.pixels[k]).norm_squared();
-                if error > radius_squared {
-                    None
-                } else {
-                    Some(k)
-                }
+                error.partial_cmp(&radius_squared) != Some(std::cmp::Ordering::Greater)
             })
             .collect()
     }
@@ -2341,7 +2337,7 @@ mod matching_tests {
     fn indexed_projection_gate_matches_exhaustive_search_and_keypoint_order() {
         let mut pixels: Vec<_> = (0..400)
             .map(|i| {
-                let i = i as f64;
+                let i = f64::from(i);
                 Vector2::new((i * 0.7).sin() * 400.0, (i * 1.3).cos() * 240.0)
             })
             .collect();
@@ -2382,7 +2378,7 @@ mod matching_tests {
         }
         let empty = ProjectedKeypointIndex::new(Vec::new());
         empty.query(&Vector2::zeros(), 25.0, &mut nearby);
-        assert!(nearby.is_empty());
+        assert_eq!(nearby, Vec::<usize>::new());
     }
 
     #[test]
@@ -2391,7 +2387,7 @@ mod matching_tests {
             .flat_map(|y| {
                 (0..100)
                     .rev()
-                    .map(move |x| Vector2::new(x as f64, y as f64))
+                    .map(move |x| Vector2::new(f64::from(x), f64::from(y)))
             })
             .collect();
         let index = ProjectedKeypointIndex::new(pixels);
@@ -2473,7 +2469,7 @@ mod consensus_tests {
                 Ok(Some(self.models))
             }
             fn scores(&mut self, model: &usize, indices: &[usize], scores: &mut Vec<f64>) {
-                assert!(scores.is_empty());
+                assert_eq!(*scores, Vec::<f64>::new());
                 self.scored_models.push(*model);
                 scores.extend(indices.iter().map(|&i| match (*model, i) {
                     (1, 0..2) | (2 | 3, 2..) => 0.0,
