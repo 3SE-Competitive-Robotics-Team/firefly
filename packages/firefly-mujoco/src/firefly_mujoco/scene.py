@@ -148,9 +148,10 @@ def _collision_xml(asset_dir: Path, filename: str) -> str:
     )
 
 
-def build_scene(*, name: str | None = None, asset_dir: Path | None = None) -> str:
-    """场地：Bevy 负责视觉（`field.glb`），MuJoCo 只加载聚合碰撞盒。"""
-    scene = resolve(name)
+def build_scene(*, name: str | None = None, asset_dir: Path | None = None,
+                config: Path | None = None) -> str:
+    """MuJoCo 碰撞场地；未显式指定名称时读取场景配置，视觉由 Bevy 渲染。"""
+    scene = resolve(load_scene_name(config) if name is None else name)
     directory = asset_dir or scene.dir
     collision = _collision_xml(directory, scene.id.collision)
     return rf"""<mujoco model="firefly-{scene.id.season}">

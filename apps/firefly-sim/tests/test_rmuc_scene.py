@@ -29,6 +29,39 @@ def test_collision_asset_is_required(tmp_path):
         scene.build_scene(name="rmuc2026@2.0.0", asset_dir=tmp_path)
 
 
+@pytest.mark.parametrize("name", ["rmuc2026@2.0.0", "rmuc2027@1.0.0"])
+def test_environment_scene_follows_configuration_when_name_is_omitted(tmp_path, name):
+    config = tmp_path / "scene.toml"
+    config.write_text(f'scene = "{name}"\n')
+    selected = scene.resolve(name)
+    (tmp_path / selected.id.collision).write_text(json.dumps({
+        "boxes": [[-13.0, 0.0, 0.1875, 0.5, 0.5, 0.1875]],
+    }))
+    env = DroneEnv(scene_factory=partial(scene.build_scene, config=config, asset_dir=tmp_path))
+    assert env.model.names.split(b"\x00", 1)[0] == f"firefly-{selected.id.season}".encode()
+    np.testing.assert_allclose(env.state()[0], scene.drone_pad(name))
+
+
+def test_default_scene_rejects_invalid_configuration_without_fallback(tmp_path):
+    config = tmp_path / "scene.toml"
+    config.write_text('scene = "unsupported"\n')
+    with pytest.raises(ValueError, match="未注册的场景"):
+        scene.build_scene(config=config, asset_dir=tmp_path)
+    config.write_text('scene = "unterminated')
+    with pytest.raises(ValueError):
+        scene.build_scene(config=config, asset_dir=tmp_path)
+
+
+def test_explicit_scene_name_overrides_configuration(tmp_path):
+    config = tmp_path / "scene.toml"
+    config.write_text('scene = "rmuc2027@1.0.0"\n')
+    (tmp_path / "rmuc2026_collision.json").write_text(json.dumps({
+        "boxes": [[-13.0, 0.0, 0.1875, 0.5, 0.5, 0.1875]],
+    }))
+    assert 'model="firefly-rmuc2026"' in scene.build_scene(
+        name="rmuc2026@2.0.0", config=config, asset_dir=tmp_path)
+
+
 @pytest.mark.parametrize("rate", [200, 1000])
 def test_physics_and_imu_without_renderer(tmp_path, rate):
     # 测试台阶顶面与停机坪同高，足够覆盖机体；不表示完整 RMUC 场地。
