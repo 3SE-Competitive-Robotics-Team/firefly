@@ -646,12 +646,16 @@ impl Snapshot {
                 Vec::new()
             },
         };
+        let mut p = Vec::new();
+        let mut mask = Vec::new();
         for f in &mut self.factors {
             if disabled.contains(&f.id) {
                 continue;
             }
-            let p: Vec<_> = f.keys.iter().map(|k| values[k].data.as_slice()).collect();
-            let mask: Vec<_> = f.keys.iter().map(|k| offsets.contains_key(k)).collect();
+            p.clear();
+            p.extend(f.keys.iter().map(|k| values[k].data.as_slice()));
+            mask.clear();
+            mask.extend(f.keys.iter().map(|k| offsets.contains_key(k)));
             let constant = !mask.iter().any(|x| *x);
             let mut e = f
                 .factor
@@ -1458,8 +1462,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cost_only_matches_linearization_without_allocating_linearization_buffers() {
+    fn mixed_factor_snapshot() -> Snapshot {
         let values = BTreeMap::from([
             (
                 1,
@@ -1486,8 +1489,8 @@ mod tests {
                 },
             ),
         ]);
-        let mut snapshot = Snapshot {
-            values: values.clone(),
+        Snapshot {
+            values,
             factors: vec![
                 FactorRecord {
                     id: 1,
@@ -1514,7 +1517,13 @@ mod tests {
                     loss: None,
                 },
             ],
-        };
+        }
+    }
+
+    #[test]
+    fn cost_only_matches_linearization_without_allocating_linearization_buffers() {
+        let mut snapshot = mixed_factor_snapshot();
+        let values = snapshot.values.clone();
         let offsets = BTreeMap::from([(1, 0), (3, 6)]);
         for disabled in [BTreeSet::new(), BTreeSet::from([1])] {
             let full = snapshot
@@ -1546,6 +1555,37 @@ mod tests {
                     .evaluate(&values, &offsets, 9, &BTreeSet::new(), jacobians)
                     .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn evaluation_reuses_scratch_with_shrinking_and_alternating_factor_inputs() {
+        let mut snapshot = mixed_factor_snapshot();
+        let values = snapshot.values.clone();
+        let offsets = BTreeMap::from([(1, 0), (3, 6)]);
+        let baseline = snapshot
+            .evaluate(&values, &offsets, 9, &BTreeSet::new(), true)
+            .unwrap();
+        snapshot.factors.reverse();
+        for disabled in [BTreeSet::new(), BTreeSet::from([2])] {
+            let full = snapshot
+                .evaluate(&values, &offsets, 9, &disabled, true)
+                .unwrap();
+            let cost = snapshot
+                .evaluate(&values, &offsets, 9, &disabled, false)
+                .unwrap();
+            assert_eq!(full.cost, 7.);
+            assert_eq!(full.fixed_cost, if disabled.contains(&2) { 0. } else { 2. });
+            assert_eq!(cost.cost, full.cost);
+            assert_eq!(cost.fixed_cost, full.fixed_cost);
+            assert_eq!(full.gradient, baseline.gradient);
+            assert_eq!(full.diagonal, baseline.diagonal);
+            assert_eq!(full.rows.len(), 2);
+            assert_eq!(full.rows[0].blocks.len(), 2);
+            assert_eq!(full.rows[1].blocks.len(), 1);
+            assert_eq!(full.rows[0].blocks[0].0, 0);
+            assert_eq!(full.rows[0].blocks[1].0, 6);
+            assert_eq!(full.rows[1].blocks[0].0, 0);
         }
     }
 
