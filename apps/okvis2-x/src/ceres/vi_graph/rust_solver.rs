@@ -970,7 +970,7 @@ impl Strategy {
         let gn = self.gn.as_ref()?;
         let gnorm = self.gradient.norm();
         let bnorm = gn.norm();
-        let s = if bnorm <= self.radius {
+        let mut s = if bnorm <= self.radius {
             gn.clone()
         } else if gnorm * self.alpha >= self.radius {
             (-self.radius / gnorm) * &self.gradient
@@ -988,7 +988,8 @@ impl Strategy {
             (-self.alpha * (1.0 - beta)) * &self.gradient + beta * gn
         };
         self.dogleg_norm = s.norm();
-        Some(s.component_div(&self.diagonal))
+        s.component_div_assign(&self.diagonal);
+        Some(s)
     }
     fn accepted(&mut self, quality: f64, lm: bool) {
         if lm {
