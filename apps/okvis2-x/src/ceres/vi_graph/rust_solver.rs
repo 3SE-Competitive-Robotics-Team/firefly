@@ -700,9 +700,11 @@ impl Snapshot {
             }
             e.residuals *= sqrt;
             for (offset, j) in &blocks {
-                let g = j.transpose() * &e.residuals;
+                model
+                    .gradient
+                    .rows_mut(*offset, j.ncols())
+                    .gemv_tr(1.0, j, &e.residuals, 1.0);
                 for c in 0..j.ncols() {
-                    model.gradient[offset + c] += g[c];
                     model.diagonal[offset + c] += j.column(c).norm_squared();
                 }
             }
@@ -1411,6 +1413,53 @@ impl RustGraphSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gradient_accumulation_matches_weighted_priors_at_distinct_offsets() {
+        let values = BTreeMap::from([1, 2].map(|key| {
+            (
+                key,
+                Values {
+                    data: (0..9).map(|i| (key + i) as f64 / 10.).collect(),
+                    manifold: ManifoldKind::Euclidean,
+                    fixed: false,
+                },
+            )
+        }));
+        let factors = (0..)
+            .zip([(1, 4., -2.), (1, 9., 3.), (2, 1., 0.)])
+            .map(|(id, (key, weight, measurement))| FactorRecord {
+                id,
+                factor: Factor::SpeedBiasPrior(Box::new(SpeedAndBiasError::new(
+                    SVector::repeat(measurement),
+                    SMatrix::identity() * weight,
+                ))),
+                keys: vec![key],
+                loss: None,
+            })
+            .collect();
+        let mut snapshot = Snapshot {
+            values: values.clone(),
+            factors,
+        };
+        let model = snapshot
+            .evaluate(
+                &values,
+                &BTreeMap::from([(1, 0), (2, 9)]),
+                18,
+                &BTreeSet::new(),
+                true,
+            )
+            .unwrap();
+        for i in 0..9 {
+            let x = values[&1].data[i];
+            let expected = 4. * (x + 2.) + 9. * (x - 3.);
+            assert!((model.gradient[i] - expected).abs() < 1e-12);
+            assert_eq!(model.diagonal[i], 13.);
+            assert_eq!(model.gradient[9 + i], values[&2].data[i]);
+            assert_eq!(model.diagonal[9 + i], 1.);
+        }
+    }
 
     #[test]
     fn euclidean_jacobian_conversion_reuses_the_input_buffer() {
