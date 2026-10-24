@@ -5,7 +5,7 @@
  */
 //! BRISK matching, landmark triangulation, initialization and place recognition.
 use super::{
-    f_brisk::{Descriptor, FBrisk},
+    f_brisk::{Descriptor, FBrisk, hamming},
     frame_absolute_pose_sac_problem::{
         AbsolutePoseSolver, Algorithm as AbsoluteAlgorithm, FrameAbsolutePoseSacProblem,
     },
@@ -1298,21 +1298,29 @@ impl<
             let mut distances = vec![self.brisk_matching_threshold; assignment.len()];
             let mut errors = vec![0.0; threads];
             let mut ctrs = vec![0usize; threads];
-            {
+            if candidates.values().any(|candidate| candidate.is_3d) {
                 let mf = frame.borrow();
                 let threshold =
                     3.0 + focal(&mf, c) * if parameters.imu.r#use { 0.06 } else { 0.34 };
+                let threshold_squared = threshold * threshold;
+                let keypoints = ProjectedKeypointIndex::new(
+                    (0..mf.num_keypoints(c))
+                        .map(|k| keypoint(&mf, c, k))
+                        .collect(),
+                );
+                let mut nearby = Vec::new();
                 for (&lm, candidate) in &candidates {
                     if !candidate.is_3d {
                         continue;
                     }
-                    for k in 0..mf.num_keypoints(c) {
+                    keypoints.query(&candidate.projection, threshold_squared, &mut nearby);
+                    for &k in &nearby {
                         if exclusive.is_none() && mf.landmark_id(c, k) != 0 {
                             continue;
                         }
-                        let pixel = keypoint(&mf, c, k);
+                        let pixel = keypoints.pixels[k];
                         let error = (candidate.projection - pixel).norm_squared();
-                        if error > threshold * threshold {
+                        if error > threshold_squared {
                             continue;
                         }
                         for descriptor in &candidate.descriptors {
@@ -1906,6 +1914,54 @@ struct LandmarkToMatch {
     descriptors: Vec<MapDescriptor>,
     ignore: bool,
 }
+/// Conservative horizontal search; the caller applies the circular distance gate.
+struct ProjectedKeypointIndex {
+    pixels: Vec<Vector2<f64>>,
+    by_x: Vec<usize>,
+    nonfinite: Vec<usize>,
+}
+impl ProjectedKeypointIndex {
+    fn new(pixels: Vec<Vector2<f64>>) -> Self {
+        let (mut by_x, nonfinite): (Vec<_>, Vec<_>) =
+            (0..pixels.len()).partition(|&k| pixels[k].iter().all(|v| v.is_finite()));
+        by_x.sort_unstable_by(|&a, &b| pixels[a].x.total_cmp(&pixels[b].x));
+        Self {
+            pixels,
+            by_x,
+            nonfinite,
+        }
+    }
+    fn query(&self, projection: &Vector2<f64>, radius_squared: f64, indices: &mut Vec<usize>) {
+        indices.clear();
+        let range = if projection.iter().all(|v| v.is_finite())
+            && radius_squared.is_finite()
+            && radius_squared >= 0.0
+        {
+            // Squared differences use the same arithmetic as the circular gate;
+            // rounded projection +/- radius bounds can exclude boundary points.
+            let first = self.by_x.partition_point(|&k| {
+                let dx = projection.x - self.pixels[k].x;
+                self.pixels[k].x < projection.x && dx * dx > radius_squared
+            });
+            let last = self.by_x.partition_point(|&k| {
+                let dx = projection.x - self.pixels[k].x;
+                self.pixels[k].x <= projection.x || dx * dx <= radius_squared
+            });
+            first..last
+        } else {
+            0..self.by_x.len()
+        };
+        if range.len() + self.nonfinite.len() == self.pixels.len() {
+            indices.extend(0..self.pixels.len());
+            return;
+        }
+        indices.extend_from_slice(&self.by_x[range]);
+        // Nonfinite coordinates must reach the caller's IEEE distance comparison.
+        indices.extend_from_slice(&self.nonfinite);
+        // Keep descriptor ties and reprojection-error accumulation in keypoint order.
+        indices.sort_unstable();
+    }
+}
 struct BorrowedView<'a> {
     a: &'a MultiFrame,
     b: Option<&'a MultiFrame>,
@@ -1930,15 +1986,6 @@ impl EstimatorView for BorrowedView<'_> {
 }
 fn frontend_error(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::InvalidArgument, message.into()).with_operation("Frontend")
-}
-fn hamming(a: &[u8], b: &[u8]) -> f64 {
-    f64::from(
-        a.iter()
-            .take(48)
-            .zip(b)
-            .map(|(&a, &b)| (a ^ b).count_ones())
-            .sum::<u32>(),
-    )
 }
 fn descriptor(frame: &MultiFrame, camera_index: usize, keypoint: usize) -> Result<Descriptor> {
     frame
@@ -2172,7 +2219,7 @@ trait ConsensusProblem {
     type Model: Clone;
     fn sample_size(&self) -> usize;
     fn model(&mut self, sample: &[usize]) -> Result<Option<Self::Model>>;
-    fn scores(&mut self, model: &Self::Model, indices: &[usize]) -> Vec<f64>;
+    fn scores(&mut self, model: &Self::Model, indices: &[usize], scores: &mut Vec<f64>);
 }
 impl<A: AbsoluteAdapter, S: AbsolutePoseSolver> ConsensusProblem
     for FrameAbsolutePoseSacProblem<'_, A, S>
@@ -2184,10 +2231,8 @@ impl<A: AbsoluteAdapter, S: AbsolutePoseSolver> ConsensusProblem
     fn model(&mut self, s: &[usize]) -> Result<Option<Self::Model>> {
         self.compute_model_coefficients(s)
     }
-    fn scores(&mut self, m: &Self::Model, i: &[usize]) -> Vec<f64> {
-        let mut scores = Vec::new();
-        self.get_selected_distances_to_model(m, i, &mut scores);
-        scores
+    fn scores(&mut self, m: &Self::Model, i: &[usize], scores: &mut Vec<f64>) {
+        self.get_selected_distances_to_model(m, i, scores);
     }
 }
 impl<S: CentralRelativePoseSolver> ConsensusProblem for FrameRelativePoseSacProblem<'_, S> {
@@ -2198,10 +2243,8 @@ impl<S: CentralRelativePoseSolver> ConsensusProblem for FrameRelativePoseSacProb
     fn model(&mut self, s: &[usize]) -> Result<Option<Self::Model>> {
         self.compute_model_coefficients(s)
     }
-    fn scores(&mut self, m: &Self::Model, i: &[usize]) -> Vec<f64> {
-        let mut scores = Vec::new();
-        self.get_selected_distances_to_model(m, i, &mut scores);
-        scores
+    fn scores(&mut self, m: &Self::Model, i: &[usize], scores: &mut Vec<f64>) {
+        self.get_selected_distances_to_model(m, i, scores);
     }
 }
 impl<S: RotationOnlySolver> ConsensusProblem for FrameRotationOnlySacProblem<'_, S> {
@@ -2212,10 +2255,8 @@ impl<S: RotationOnlySolver> ConsensusProblem for FrameRotationOnlySacProblem<'_,
     fn model(&mut self, s: &[usize]) -> Result<Option<Self::Model>> {
         self.compute_model_coefficients(s)
     }
-    fn scores(&mut self, m: &Self::Model, i: &[usize]) -> Vec<f64> {
-        let mut scores = Vec::new();
-        self.get_selected_distances_to_model(m, i, &mut scores);
-        scores
+    fn scores(&mut self, m: &Self::Model, i: &[usize], scores: &mut Vec<f64>) {
+        self.get_selected_distances_to_model(m, i, scores);
     }
 }
 fn compute_ransac<P: ConsensusProblem>(
@@ -2236,22 +2277,19 @@ fn compute_ransac<P: ConsensusProblem>(
     let mut bound = 1.0;
     let mut iterations = 0;
     let mut skipped = 0;
+    let mut sample = vec![0; sample_size];
+    let mut scores = Vec::with_capacity(n);
     while (iterations as f64) < bound && skipped < max_iterations.saturating_mul(10) {
-        let mut sample = vec![0; sample_size];
         sampling.draw_index_sample(&mut sample);
         let Some(model) = problem.model(&sample)? else {
             skipped += 1;
             continue;
         };
-        let scores = problem.scores(&model, &indices);
-        let inliers = scores
-            .iter()
-            .enumerate()
-            .filter(|(_, score)| **score < threshold)
-            .map(|(i, _)| i)
-            .collect::<Vec<_>>();
-        if inliers.len() as i32 > best_count {
-            best_count = inliers.len() as i32;
+        scores.clear();
+        problem.scores(&model, &indices, &mut scores);
+        let inliers = scores.iter().filter(|score| **score < threshold).count();
+        if inliers as i32 > best_count {
+            best_count = inliers as i32;
             let w = f64::from(best_count) / n as f64;
             let p_no_outliers =
                 (1.0 - w.powf(sample_size as f64)).clamp(f64::EPSILON, 1.0 - f64::EPSILON);
@@ -2264,8 +2302,9 @@ fn compute_ransac<P: ConsensusProblem>(
         }
     }
     Ok(best.map(|model| {
-        let inliers = problem
-            .scores(&model, &indices)
+        scores.clear();
+        problem.scores(&model, &indices, &mut scores);
+        let inliers = scores
             .iter()
             .enumerate()
             .filter(|(_, score)| **score < threshold)
@@ -2273,6 +2312,96 @@ fn compute_ransac<P: ConsensusProblem>(
             .collect();
         (model, inliers)
     }))
+}
+
+#[cfg(test)]
+mod matching_tests {
+    use super::*;
+
+    fn accepted(
+        index: &ProjectedKeypointIndex,
+        projection: &Vector2<f64>,
+        radius_squared: f64,
+        candidates: impl IntoIterator<Item = usize>,
+    ) -> Vec<usize> {
+        candidates
+            .into_iter()
+            .filter(|&k| {
+                let error = (projection - index.pixels[k]).norm_squared();
+                error.partial_cmp(&radius_squared) != Some(std::cmp::Ordering::Greater)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn indexed_projection_gate_matches_exhaustive_search_and_keypoint_order() {
+        let mut pixels: Vec<_> = (0..400)
+            .map(|i| {
+                let i = f64::from(i);
+                Vector2::new((i * 0.7).sin() * 400.0, (i * 1.3).cos() * 240.0)
+            })
+            .collect();
+        pixels.extend([
+            Vector2::new(0.0, 0.0),
+            Vector2::new(-0.0, 0.0),
+            Vector2::new(3.0, 4.0),
+            Vector2::new(-3.0, -4.0),
+            Vector2::new(5.0, 0.0),
+            Vector2::new(5.0_f64.next_up(), 0.0),
+            Vector2::new(5.0_f64.next_down(), 0.0),
+            Vector2::new(f64::NAN, 2.0),
+            Vector2::new(1000.0, f64::NAN),
+            Vector2::new(f64::INFINITY, 0.0),
+            Vector2::new(0.0, f64::NEG_INFINITY),
+            Vector2::new(f64::MAX, 0.0),
+            Vector2::new(-f64::MAX, 0.0),
+        ]);
+        let index = ProjectedKeypointIndex::new(pixels);
+        let mut nearby = Vec::new();
+        for projection in [
+            Vector2::zeros(),
+            Vector2::new(0.1, -0.2),
+            Vector2::new(-400.0, 240.0),
+            Vector2::new(f64::MAX, 0.0),
+            Vector2::new(f64::NAN, 1.0),
+            Vector2::new(f64::INFINITY, 1.0),
+        ] {
+            for radius_squared in [0.0, 25.0, 200.0, f64::MAX, f64::INFINITY, f64::NAN] {
+                index.query(&projection, radius_squared, &mut nearby);
+                assert!(nearby.windows(2).all(|pair| pair[0] < pair[1]));
+                assert_eq!(
+                    accepted(&index, &projection, radius_squared, nearby.iter().copied()),
+                    accepted(&index, &projection, radius_squared, 0..index.pixels.len()),
+                    "projection={projection:?}, radius_squared={radius_squared}"
+                );
+            }
+        }
+        let empty = ProjectedKeypointIndex::new(Vec::new());
+        empty.query(&Vector2::zeros(), 25.0, &mut nearby);
+        assert_eq!(nearby, Vec::<usize>::new());
+    }
+
+    #[test]
+    fn projection_search_limits_candidate_checks_to_the_horizontal_neighborhood() {
+        let pixels = (0..10)
+            .flat_map(|y| {
+                (0..100)
+                    .rev()
+                    .map(move |x| Vector2::new(f64::from(x), f64::from(y)))
+            })
+            .collect();
+        let index = ProjectedKeypointIndex::new(pixels);
+        let projection = Vector2::new(50.0, 5.0);
+        let mut nearby = Vec::new();
+        index.query(&projection, 4.0, &mut nearby);
+        assert_eq!(index.pixels.len(), 1000);
+        assert_eq!(nearby.len(), 50);
+        let matches = accepted(&index, &projection, 4.0, nearby.iter().copied());
+        assert_eq!(matches.len(), 13);
+        assert_eq!(matches, accepted(&index, &projection, 4.0, 0..1000));
+        index.query(&projection, f64::INFINITY, &mut nearby);
+        assert_eq!(nearby, (0..1000).collect::<Vec<_>>());
+    }
 }
 
 #[cfg(test)]
@@ -2294,11 +2423,12 @@ mod consensus_tests {
             self.calls += 1;
             Ok((self.calls > self.rejected).then_some(self.calls))
         }
-        fn scores(&mut self, _: &usize, indices: &[usize]) -> Vec<f64> {
-            indices
-                .iter()
-                .map(|&i| if i < self.inliers { 0.0 } else { 2.0 })
-                .collect()
+        fn scores(&mut self, _: &usize, indices: &[usize], scores: &mut Vec<f64>) {
+            scores.extend(
+                indices
+                    .iter()
+                    .map(|&i| if i < self.inliers { 0.0 } else { 2.0 }),
+            );
         }
     }
 
@@ -2320,6 +2450,40 @@ mod consensus_tests {
             assert_eq!(problem.calls, expected_calls);
             assert_eq!(result.map(|(_, indices)| indices.len()), expected_inliers);
         }
+    }
+
+    #[test]
+    fn ransac_scores_models_independently_and_keeps_the_first_tied_model() {
+        #[derive(Default)]
+        struct ChangingScores {
+            models: usize,
+            scored_models: Vec<usize>,
+        }
+        impl ConsensusProblem for ChangingScores {
+            type Model = usize;
+            fn sample_size(&self) -> usize {
+                2
+            }
+            fn model(&mut self, _: &[usize]) -> Result<Option<usize>> {
+                self.models += 1;
+                Ok(Some(self.models))
+            }
+            fn scores(&mut self, model: &usize, indices: &[usize], scores: &mut Vec<f64>) {
+                assert_eq!(*scores, Vec::<f64>::new());
+                self.scored_models.push(*model);
+                scores.extend(indices.iter().map(|&i| match (*model, i) {
+                    (1, 0..2) | (2 | 3, 2..) => 0.0,
+                    (2 | 3, 0) => f64::NAN,
+                    _ => 1.0,
+                }));
+            }
+        }
+        let mut problem = ChangingScores::default();
+        let (model, inliers) = compute_ransac(&mut problem, 10, 1.0, 50).unwrap().unwrap();
+        assert_eq!(model, 2);
+        assert_eq!(inliers, (2..10).collect::<Vec<_>>());
+        assert_eq!(problem.models, 5);
+        assert_eq!(problem.scored_models, vec![1, 2, 3, 4, 5, 2]);
     }
 }
 
