@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from functools import partial
 from typing import Protocol
 
 import time
@@ -32,6 +33,7 @@ from firefly_mujoco import (
     OdomMessage,
     PlantStateMessage,
     TraceContext,
+    build_scene,
     drone_pad,
     load_scene_name,
 )
@@ -168,10 +170,12 @@ def _publish_airframe(pub, env: DroneEnv, t: float) -> None:
 class EnvironmentFactory(Protocol):
     """创建仿真环境；运行器依赖 DroneEnv 的物理、传感器和状态接口。"""
 
-    def __call__(self, *, timestep: float, imu_period: float) -> DroneEnv: ...
+    def __call__(self, *, timestep: float, imu_period: float,
+                 scene_factory: Callable[[], str]) -> DroneEnv: ...
 
 
-def decode_config(cfg: dict) -> tuple[float, float, float, np.ndarray]:
+def decode_config(cfg: dict, *, scene_loader: Callable[[], str] = load_scene_name
+                  ) -> tuple[float, float, float, np.ndarray, str]:
     """将 TOML 覆盖项转换为已校验的周期和初始位置。"""
     rates = cfg.get("rates", {})
     frequencies = [rates.get("physics", 1000.0), rates.get("imu", 1000.0), rates.get("pose", 10.0)]
@@ -183,19 +187,23 @@ def decode_config(cfg: dict) -> tuple[float, float, float, np.ndarray]:
             raise ValueError("物理频率必须为 IMU 与位姿频率的整数倍")
     physics_period, imu_period, pose_period = (1.0 / rate for rate in frequencies)
     # 停机坪：缺配置时按场景定义（`firefly_mujoco.scene.SCENES[].pad`）——上电停在地面
-    start_pos = np.array(cfg.get("start", drone_pad(load_scene_name())))
-    return physics_period, imu_period, pose_period, start_pos
+    scene_name = scene_loader()
+    start_pos = np.array(cfg.get("start", drone_pad(scene_name)))
+    return physics_period, imu_period, pose_period, start_pos, scene_name
 
 
 def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory = DroneEnv,
-         publish_plant_state: bool = True) -> None:
+         publish_plant_state: bool = True,
+         scene_loader: Callable[[], str] = load_scene_name) -> None:
     parser = argparse.ArgumentParser(description="RMUC MuJoCo 物理进程；图像由 render 提供")
     parser.add_argument("--no-trace", action="store_true")
     parser.add_argument("--config", default="configs/sim.toml")
     args = parser.parse_args(argv)
     trace_enabled = not args.no_trace
-    physics_period, imu_period, pose_period, start_pos = startup(args.config, decode_config)
-    env = env_factory(timestep=physics_period, imu_period=imu_period)
+    physics_period, imu_period, pose_period, start_pos, scene_name = startup(
+        args.config, partial(decode_config, scene_loader=scene_loader))
+    env = env_factory(timestep=physics_period, imu_period=imu_period,
+                      scene_factory=partial(build_scene, name=scene_name))
     env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))  # xyzw 单位四元数
     ftrace.init(enabled=trace_enabled)
     airframe = env.airframe()

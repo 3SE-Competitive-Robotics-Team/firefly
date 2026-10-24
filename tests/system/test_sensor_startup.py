@@ -39,7 +39,7 @@ def _sensor_startup() -> None:
     from firefly_mujoco import build_scene, load_scene_name, resolve_scene
 
     scene = resolve_scene(load_scene_name())
-    build_scene()
+    build_scene(name=scene.name)
     mesh = scene.visual
     if not mesh.is_file():
         raise FileNotFoundError(f"RMUC 视觉资产缺失：{mesh}")
