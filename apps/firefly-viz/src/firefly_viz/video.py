@@ -86,8 +86,10 @@ def command(options: VideoOptions, width: int, height: int) -> list[str]:
              "-framerate", str(options.fps), "-i", "pipe:0", "-an"]
     if options.encoder == "hevc_vaapi":
         args += ["-vf", "format=nv12,hwupload"]
+    elif options.encoder == "hevc_qsv":
+        args += ["-vf", "format=nv12"]
     else:
-        args += ["-vf", "format=yuv420p" if options.encoder == "libx265" else "format=nv12"]
+        args += ["-vf", "format=yuv420p"]
     args += ["-c:v", options.encoder, "-bf", "0", "-g", str(options.keyframe_interval),
              "-b:v", str(options.bitrate), "-maxrate", str(options.bitrate),
              "-bufsize", str(options.bitrate * 2)]
@@ -96,6 +98,9 @@ def command(options: VideoOptions, width: int, height: int) -> list[str]:
                  f"bframes=0:open-gop=0:scenecut=0:repeat-headers=1:aud=1:keyint={options.keyframe_interval}:pools=1"]
     elif options.encoder == "hevc_vaapi":
         args += ["-idr_interval", "0", "-async_depth", "1"]
+    elif options.encoder == "hevc_videotoolbox":
+        # VideoToolbox 是系统硬件编码器：无设备节点，允许回落到软件实现。
+        args += ["-realtime", "1", "-allow_sw", "1"]
     else:
         args += ["-look_ahead_depth", "0", "-async_depth", "1", "-forced_idr", "1", "-idr_interval", "0"]
     args += ["-bsf:v", "dump_extra=freq=keyframe,hevc_metadata=aud=insert",

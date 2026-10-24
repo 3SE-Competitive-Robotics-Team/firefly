@@ -712,9 +712,11 @@ struct Linearization {
     eliminated_points: Vec<usize>,
 }
 impl Linearization {
-    fn lower_normal(&self, regularization: &DVector<f64>) -> BTreeMap<(usize, usize), f64> {
+    /// 法方程下三角（对称存全阵）。逐标量查 `BTreeMap` 比稠密累加慢三成，
+    /// 而变量规模只到数百，直接落稠密矩阵。
+    fn lower_normal(&self, regularization: &DVector<f64>) -> DMatrix<f64> {
         let count = self.gradient.len();
-        let mut lower: BTreeMap<(usize, usize), f64> = BTreeMap::new();
+        let mut lower = DMatrix::<f64>::zeros(count, count);
         for row in &self.rows {
             for (oa, left_block) in &row.blocks {
                 for (ob, right_block) in &row.blocks {
@@ -722,7 +724,7 @@ impl Linearization {
                         for cb in 0..right_block.ncols() {
                             let (index, column) = (oa + ca, ob + cb);
                             if index >= column {
-                                *lower.entry((index, column)).or_default() +=
+                                lower[(index, column)] +=
                                     left_block.column(ca).dot(&right_block.column(cb));
                             }
                         }
@@ -731,7 +733,7 @@ impl Linearization {
             }
         }
         for index in 0..count {
-            *lower.entry((index, index)).or_default() += regularization[index];
+            lower[(index, index)] += regularization[index];
         }
         lower
     }
@@ -768,7 +770,7 @@ impl Linearization {
     }
     /// Eliminate independent 3D landmark blocks, solve the reduced normal
     /// equations by Cholesky, then back-substitute the landmark increments.
-    fn solve_schur(&self, lower: &BTreeMap<(usize, usize), f64>) -> Option<DVector<f64>> {
+    fn solve_schur(&self, lower: &DMatrix<f64>) -> Option<DVector<f64>> {
         let count = self.gradient.len();
         let mut point_for_column = vec![None; count];
         for (point, &offset) in self.eliminated_points.iter().enumerate() {
@@ -776,17 +778,14 @@ impl Linearization {
         }
         // Coupled landmarks cannot form an independent elimination set. Solve
         // their complete normal equations without dropping cross terms.
-        if lower.iter().any(|(&(index, column), &value)| {
-            value != 0.0
-                && matches!((point_for_column[index], point_for_column[column]),
-                (Some(a), Some(b)) if a != b)
+        if (0..count).any(|index| {
+            (0..=index).any(|column| {
+                lower[(index, column)] != 0.0
+                    && matches!((point_for_column[index], point_for_column[column]),
+                    (Some(a), Some(b)) if a != b)
+            })
         }) {
-            let matrix = DMatrix::from_fn(count, count, |index, column| {
-                lower
-                    .get(&(index.max(column), index.min(column)))
-                    .copied()
-                    .unwrap_or(0.0)
-            });
+            let matrix = lower.clone();
             return matrix
                 .cholesky()
                 .map(|factorization| factorization.solve(&(-&self.gradient)))
@@ -795,12 +794,7 @@ impl Linearization {
         let retained: Vec<_> = (0..count)
             .filter(|index| point_for_column[*index].is_none())
             .collect();
-        let get = |index: usize, column: usize| {
-            lower
-                .get(&(index.max(column), index.min(column)))
-                .copied()
-                .unwrap_or(0.0)
-        };
+        let get = |index: usize, column: usize| lower[(index.max(column), index.min(column))];
         let mut reduced = DMatrix::from_fn(retained.len(), retained.len(), |index, column| {
             get(retained[index], retained[column])
         });
@@ -881,10 +875,14 @@ impl Linearization {
         if kind == "DENSE_SCHUR" {
             return self.solve_schur(&lower);
         }
-        let triplets: Vec<_> = lower
-            .into_iter()
-            .filter(|((index, column), value)| index == column || *value != 0.0)
-            .map(|((index, column), value)| Triplet::new(index, column, value))
+        let triplet_source = &lower;
+        let triplets: Vec<_> = (0..count)
+            .flat_map(|index| {
+                (0..=index).filter_map(move |column| {
+                    let value = triplet_source[(index, column)];
+                    (index == column || value != 0.0).then(|| Triplet::new(index, column, value))
+                })
+            })
             .collect();
         let normal_matrix =
             SparseColMat::<usize, f64>::try_new_from_triplets(count, count, &triplets).ok()?;
@@ -1365,10 +1363,12 @@ impl RustGraphSolver {
             return Ok(Some(DMatrix::zeros(columns.len(), columns.len())));
         }
         let lower = model.lower_normal(&DVector::zeros(size));
-        let triplets: Vec<_> = lower
-            .into_iter()
-            .map(|((row, col), value)| Triplet::new(row, col, value))
-            .collect();
+        let mut triplets = Vec::with_capacity(size * (size + 1) / 2);
+        for row in 0..size {
+            for col in 0..=row {
+                triplets.push(Triplet::new(row, col, lower[(row, col)]));
+            }
+        }
         let Ok(normal) = SparseColMat::<usize, f64>::try_new_from_triplets(size, size, &triplets)
         else {
             return Ok(None);
@@ -1410,10 +1410,7 @@ mod tests {
         let gradient = DVector::from_row_slice(&[1., -2., 3., -4., 5., -6., 7., -8.]);
         for regularization in [0., 1e-4, 0.7] {
             let matrix = &h + DMatrix::identity(8, 8) * regularization;
-            let lower = (0..8)
-                .flat_map(|i| (0..=i).map(move |j| (i, j)))
-                .map(|(i, j)| ((i, j), matrix[(i, j)]))
-                .collect();
+            let lower = matrix.clone();
             let expected = matrix.lu().solve(&(-&gradient)).unwrap();
             for points in [vec![0, 3], vec![]] {
                 let model = Linearization {
@@ -1440,17 +1437,19 @@ mod tests {
             diagonal: DVector::zeros(6),
             eliminated_points: vec![0, 3],
         };
-        let mut lower: BTreeMap<_, _> = (0..6).map(|i| ((i, i), 4.)).collect();
+        let mut lower = DMatrix::identity(6, 6) * 4.;
         assert_eq!(
             model.solve_schur(&lower).unwrap(),
             DVector::from_element(6, -0.5)
         );
-        lower.insert((3, 0), 0.1);
+        lower[(3, 0)] = 0.1;
+        lower[(0, 3)] = 0.1;
         let coupled = model.solve_schur(&lower).unwrap();
         assert!((coupled[0] + 2. / 4.1).abs() < 1e-14);
         assert!((coupled[3] + 2. / 4.1).abs() < 1e-14);
-        lower.insert((3, 0), 0.);
-        lower.insert((0, 0), 0.);
+        lower[(3, 0)] = 0.;
+        lower[(0, 3)] = 0.;
+        lower[(0, 0)] = 0.;
         assert!(model.solve_schur(&lower).is_none());
     }
 }

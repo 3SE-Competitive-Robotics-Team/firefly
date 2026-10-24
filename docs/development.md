@@ -116,7 +116,7 @@ PR 标题描述整个 PR 的最终结果，不写 WIP、阶段编号或“后续
 停机坪定义来自 `firefly_mujoco.scene.SCENES[].pad` 与 `PAD_CLEARANCE`，不在文档复制坐标。
 render 使用无窗口 GPU 渲染；Rerun 原生 Viewer 需要图形会话。Rust/Python 版本和依赖
 以 workspace 配置为准。视频记录依赖外部 FFmpeg、所选编码器和 GPU 用户态驱动；
-默认走 Intel VA-API，设备与编码选项见 `configs/viz.toml`。仅列出编码器并不证明驱动可用。
+编码器按平台选择（macOS 用系统 VideoToolbox，其余用 Intel VA-API），设备与编码选项见 `configs/viz.toml`。仅列出编码器并不证明驱动可用。
 
 ```bash
 uv sync --all-packages --extra test
@@ -325,8 +325,8 @@ Viewer，或加 `--connect rerun+http://127.0.0.1:9876/proxy` 连接已有 Viewe
 Python RrdReader，读取方法见仓库 `.agents/skills/rerun/SKILL.md`。
 
 H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码也需要 FFmpeg；
-浏览器端的 HEVC 能力不能替代原生回放验收。硬件初始化失败会结束录制并保留错误证据；
-软件编码仅在配置显式选择 `libx265` 时启用。IPC 布局升级后须同批重建、重启所有生产者
+浏览器端的 HEVC 能力不能替代原生回放验收。macOS 的 VideoToolbox 允许使用系统软件实现；
+编码器初始化失败会结束录制并保留错误证据。IPC 布局升级后须同批重建、重启所有生产者
 与消费者，不能混用不同版本的消息类型。
 
 文件录制固定启用完整 footer/manifest，正常关闭后供 Viewer 与随机访问工具直接打开；

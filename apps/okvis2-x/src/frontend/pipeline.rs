@@ -1636,13 +1636,8 @@ impl<
         if average < 182.0 && inliers.len() < 20 {
             return Ok(None);
         }
-        if parameters.n_camera_system.distortion_type(0)
-            == crate::cameras::n_camera_system::DistortionType::NoDistortion
-        {
-            return Err(frontend_error(
-                "Unsupported distortion type in loop refinement",
-            ));
-        }
+        // 无畸变相机同样走回环精化：后续残差计算经相机模型投影，不区分畸变类型，
+        // 上游也没有这个拒绝分支。
         let mut residuals = Vec::new();
         for &i in &inliers {
             let c = adapter.cam_index(i);

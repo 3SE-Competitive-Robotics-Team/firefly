@@ -1,5 +1,6 @@
 # 默认记录左目 H.265 与结构化诊断；各预算及单位见 firefly_viz/config.py。
-# 默认 hevc_vaapi 需要可用的 Intel iHD 驱动，不自动回落软件编码。
+# 编码器默认按平台选择（macOS 用系统 VideoToolbox，其余用 Intel VA-API），
+# 由 firefly_viz.config.default_encoder 决定；需要固定某一实现时在此显式覆盖。
 # [video]
 # enabled = false
 # encoder = "libx265"
