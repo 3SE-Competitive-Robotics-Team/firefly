@@ -226,14 +226,12 @@ fn inertial_factor_vanishes_on_independently_integrated_constant_acceleration() 
             let mut evaluate = |changed| {
                 if block == 0 {
                     factor
-                        .evaluate(first.coeffs(), changed, second.coeffs(), &end)
+                        .evaluate_residual(first.coeffs(), changed, second.coeffs(), &end)
                         .unwrap()
-                        .residual
                 } else {
                     factor
-                        .evaluate(first.coeffs(), &start, second.coeffs(), changed)
+                        .evaluate_residual(first.coeffs(), &start, second.coeffs(), changed)
                         .unwrap()
-                        .residual
                 }
             };
             let numeric = (evaluate(&plus) - evaluate(&minus)) / 2e-6;
