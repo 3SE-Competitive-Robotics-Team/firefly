@@ -688,9 +688,11 @@ impl ViSlamBackend {
         let mut union = 0i64;
         let mut match_mask = 0;
         for camera in 0..frame.num_frames() {
-            let image = frame
-                .image(camera)
-                .ok_or_else(|| graph_error("frame image absent"))?;
+            // 深度相机只有深度图。上游对每路相机都取 image，缺失时是空 Mat（0×0），
+            // 对交集/并集贡献为零；这里沿用同一语义跳过，与 overlap_fraction 一致。
+            let Some(image) = frame.image(camera) else {
+                continue;
+            };
             let (rows, cols) = (image.rows() / 10, image.cols() / 10);
             let radius = rows.min(cols) as f64 * self.keypoint_radius;
             let mut circles = Vec::new();
@@ -712,7 +714,7 @@ impl ViSlamBackend {
             intersection += (mask.iter().filter(|&&v| v).count() as i64 - point_area).max(0);
             union += rows as i64 * cols as i64 - point_area;
         }
-        Ok(if match_mask < 8 {
+        Ok(if match_mask < 8 || union <= 0 {
             0.0
         } else {
             intersection as f64 / union as f64

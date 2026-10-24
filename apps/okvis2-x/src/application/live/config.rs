@@ -2,9 +2,9 @@
 //! Online sensor calibration and transport limits; all times are sensor-clock seconds.
 use crate::{
     cameras::{
+        camera_base::CameraBase,
+        eucm_camera::EucmCamera,
         n_camera_system::{CameraType, DepthType, DistortionType, NCameraSystem},
-        no_distortion::NoDistortion,
-        pinhole_camera::PinholeCamera,
     },
     config::parameters::{
         CameraParameters, DisplayOptions, EstimatorParameters, FrontendParameters, ImuParameters,
@@ -219,14 +219,19 @@ impl Config {
         {
             let t_sc = Arc::new(body_from_imu.inverse().compose(&camera.extrinsic.pose()?));
             let [fx, fy, cx, cy] = camera.intrinsics;
+            // `NoDistortion` 在上游对应 EUCM 几何（FrameRelativeAdapter 按相机类取焦距），
+            // alpha=beta=0 时 EUCM 退化为针孔，与 live 标定的内参模型一致。
+            // awareness maps 不能省：缺了 BRISK 工厂会以 "camera awareness maps not
+            // initialised" 失败。
+            let mut eucm = EucmCamera::new(
+                (IMAGE_WIDTH as i32, IMAGE_HEIGHT as i32),
+                (fx, fy, cx, cy, 0.0, 0.0),
+                index as u64,
+            );
+            eucm.initialise_camera_awareness_maps();
             cameras.add_camera(
                 &t_sc,
-                Arc::new(PinholeCamera::new(
-                    (IMAGE_WIDTH as i32, IMAGE_HEIGHT as i32),
-                    (fx, fy, cx, cy),
-                    NoDistortion,
-                    index as u64,
-                )),
+                Arc::new(eucm),
                 DistortionType::NoDistortion,
                 true,
                 CameraType {

@@ -517,11 +517,8 @@ impl<
         if *as_keyframe {
             self.match_stereo(graph, frame, *as_keyframe)?;
         }
-        if distortion == crate::cameras::n_camera_system::DistortionType::NoDistortion {
-            return Err(frontend_error(
-                "Unsupported distortion type in final outlier removal",
-            ));
-        }
+        // 无畸变相机同样走这两遍剪枝：remove_outliers 经 valid_reprojection_inclusive
+        // 走相机模型投影，本身不区分畸变类型，这里不再拦截。
         // The source calls this same pruning stage twice.
         self.remove_outliers(graph, frame)?;
         self.remove_outliers(graph, frame)?;
