@@ -54,9 +54,7 @@ impl Input {
                 .angular_velocity
                 .iter()
                 .chain(m.gyro_bias.iter())
-                .chain(m.attitude_variance.iter())
                 .all(|x| (*x as f32).is_finite())
-            || m.attitude_variance.iter().any(|x| *x < 0.)
             || pose.is_err()
         {
             self.valid = false;
@@ -134,7 +132,6 @@ mod tests {
             quat_xyzw: [0., 0., 0., 1.],
             angular_velocity: [0.; 3],
             gyro_bias: [0.; 3],
-            attitude_variance: [0.01; 3],
         }
     }
 

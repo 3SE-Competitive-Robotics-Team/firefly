@@ -165,14 +165,13 @@ fn create_estimator(
                 solver,
                 RustBriskFeatureFactory,
             );
-            let mut core = ProcessingCore::new(
+            let core = ProcessingCore::new(
                 ViSlamBackend::default(),
                 frontend,
                 params,
                 submap_config,
                 OccupancyMappingRuntime::new(worker_maps),
             );
-            core.enable_covariance();
             Ok(core)
         },
         None,

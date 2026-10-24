@@ -15,7 +15,6 @@ pub struct AttitudeMessage {
     pub quat_xyzw: [f64; 4],
     pub angular_velocity: [f64; 3],
     pub gyro_bias: [f64; 3],
-    pub attitude_variance: [f64; 3],
 }
 
 #[cfg(test)]
@@ -23,7 +22,7 @@ mod tests {
     #[test]
     fn attitude_has_fixed_interprocess_layout() {
         use super::AttitudeMessage;
-        assert_eq!(std::mem::size_of::<AttitudeMessage>(), 128);
+        assert_eq!(std::mem::size_of::<AttitudeMessage>(), 104);
         assert_eq!(std::mem::offset_of!(AttitudeMessage, quat_xyzw), 24);
     }
 }

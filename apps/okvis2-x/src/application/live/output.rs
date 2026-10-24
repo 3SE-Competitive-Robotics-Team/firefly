@@ -2,7 +2,7 @@
 //! Bounded IMU replay and coordinate adaptation of committed estimator posteriors.
 use super::config::{Config, invalid};
 use crate::{
-    ceres::imu_error::{Covariance, ImuError, Jacobian},
+    ceres::imu_error::ImuError,
     frames::frame_typedefs::StateId,
     kinematics::transformation::Transformation,
     runtime::{threaded_slam::PublicationData, vi_interface::TrackingQuality},
@@ -26,7 +26,6 @@ struct Prediction {
     time: Timestamp,
     pose: Transformation,
     speed_bias: SVector<f64, 9>,
-    covariance: Option<Covariance>,
 }
 pub(super) struct Output {
     config: Config,
@@ -131,7 +130,6 @@ impl Output {
             time: state.timestamp,
             pose: state.t_ws.clone(),
             speed_bias: state.speed_and_bias(),
-            covariance: state.covariance,
         });
         Ok(())
     }
@@ -171,20 +169,15 @@ impl Output {
             return Ok(None);
         }
         let parameters = self.config.imu_parameters()?;
-        let mut noise = Covariance::zeros();
-        let mut jacobian = Jacobian::identity();
         ImuError::propagation(
             &measurements,
             &parameters,
             &mut prediction.pose,
             &mut prediction.speed_bias,
             (prediction.time, time),
-            (Some(&mut noise), Some(&mut jacobian)),
+            (None, None),
         )
         .map_err(|error| invalid(format!("IMU prediction: {error:?}")))?;
-        if let Some(covariance) = &mut prediction.covariance {
-            *covariance = jacobian * *covariance * jacobian.transpose() + noise;
-        }
         prediction.time = time;
         let omega = self.imu.back().unwrap().measurement.gyroscopes
             - prediction.speed_bias.fixed_rows::<3>(3).into_owned();
@@ -201,9 +194,8 @@ impl Output {
         let corrected = message(time, &map_from_body, &velocity_map);
         let alignment = rigid(&self.map_from_odom)?;
         let navigation = NavigationMessage::new(corrected, &alignment, self.revision);
-        let attitude = prediction.covariance.as_ref().map(|covariance| {
-            let rotation = odom_from_map.rotation_matrix();
-            let variance = rotation * covariance.fixed_view::<3, 3>(3, 3) * rotation.transpose();
+        // 上游 OKVIS2-X 不计算状态协方差，姿态照常发布；这里同样不做协方差门控。
+        let attitude = Some({
             let q = local.quaternion();
             AttitudeMessage {
                 timestamp: timestamp(time),
@@ -214,7 +206,6 @@ impl Output {
                 gyro_bias: body_from_imu
                     .rotate_vector(&prediction.speed_bias.fixed_rows::<3>(3).into_owned())
                     .into(),
-                attitude_variance: variance.diagonal().into(),
             }
         });
         self.last_published = Some(time);
