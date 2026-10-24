@@ -185,9 +185,9 @@ impl DensePoolingImage {
     pub fn in_image(&self, u: i32, v: i32) -> bool {
         u >= 0 && u < self.width && v >= 0 && v < self.height
     }
+    /// Windows with a coordinate span below two use pooling level zero.
     /// # Errors
-    /// Returns an error for out-of-image bounds or a window whose pooling level cannot be
-    /// represented; one-coordinate-wide windows are rejected.
+    /// Returns an error for out-of-image or reversed bounds.
     pub fn pool_bounding_box(
         &self,
         u_min: i32,
@@ -203,11 +203,9 @@ impl DensePoolingImage {
             return Err(invalid("pooling bounds outside image"));
         }
         let side = (u_max - u_min).min(v_max - v_min);
-        if side < 2 {
-            return Err(invalid(
-                "pooling level uses logarithm of zero for box side below two",
-            ));
-        }
+        // 上游 `poolBoundingBox` 对 side < 2 靠 `max(0, min(max_level, log2(side / 2)))`
+        // 兜回 0 级：log2(0) 是 -inf，被 max(0, ·) 吸收。Rust 的浮点转整数是饱和转换，
+        // 同样的表达式已得到 0，这里不需要额外的错误分支。
         let level = (f64::from(side / 2).log2().ceil() as i32)
             .min(self.max_level)
             .max(0);
@@ -245,9 +243,10 @@ impl DensePoolingImage {
         };
         Ok(batch)
     }
+    /// Clips bounds to the image; fully outside or zero-span windows return an outside pixel.
+    /// Windows with a coordinate span of one use pooling level zero.
     /// # Errors
-    /// Returns an error for out-of-image bounds or a window whose pooling level cannot be
-    /// represented; one-coordinate-wide windows are rejected.
+    /// Returns an error if the clipped pooling bounds are invalid.
     pub fn conservative_query(
         &self,
         bb_min: &Vector2<i32>,

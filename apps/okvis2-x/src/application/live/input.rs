@@ -6,7 +6,7 @@ use super::{
 };
 use crate::runtime::{
     threaded_slam::{PublicationData, SensorInputHandle},
-    vi_interface::{ImageMap, ViInterface},
+    vi_interface::{ImageMap, TrackingQuality, ViInterface},
 };
 use firefly_error::Result;
 use firefly_pubsub::{
@@ -318,13 +318,22 @@ impl Publishers {
 
     fn posterior(&self, publication: &PublicationData) -> Result<()> {
         if let Some(viz) = &self.viz {
-            let mut loops = ScalarMessage::base(
-                publication.state.timestamp.as_nanosecond() as f64 * 1e-9,
-                "okvis/loop_commits",
-            );
+            let stamp = publication.state.timestamp.as_nanosecond() as f64 * 1e-9;
+            let mut loops = ScalarMessage::base(stamp, "okvis/loop_commits");
             loops.scalars[0] = publication.tracking_state.backend.revision as f64;
             loops.scalar_count = 1;
             viz.publish(loops)?;
+
+            // 跟踪质量是“姿态预测是否有效”的下游信号：Lost 时预测停发，
+            // 但 `session` 保持不变，飞控按新鲜度回落而不是判定进程重启。
+            let mut tracking = ScalarMessage::base(stamp, "okvis/tracking");
+            tracking.scalars[0] = match publication.tracking_state.tracking_quality {
+                TrackingQuality::Lost => 0.0,
+                TrackingQuality::Marginal => 1.0,
+                TrackingQuality::Good => 2.0,
+            };
+            tracking.scalar_count = 1;
+            viz.publish(tracking)?;
         }
         Ok(())
     }
