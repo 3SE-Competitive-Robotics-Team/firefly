@@ -45,6 +45,143 @@ pub enum IntegrationError {
     InvalidCovariance,
 }
 
+fn saturation_multipliers(
+    params: &ImuParameters,
+    (w0, w1): (Vector3<f64>, Vector3<f64>),
+    (a0, a1): (Vector3<f64>, Vector3<f64>),
+) -> (f64, f64) {
+    let saturated = |first: &Vector3<f64>, second: &Vector3<f64>, limit: f64| {
+        first
+            .iter()
+            .chain(second.iter())
+            .any(|component| component.abs() > limit)
+    };
+    let gyro = if saturated(&w0, &w1, params.g_max) {
+        log::warn!("gyr saturation");
+        100.0
+    } else {
+        1.0
+    };
+    let acc = if saturated(&a0, &a1, params.a_max) {
+        log::warn!("acc saturation");
+        100.0
+    } else {
+        1.0
+    };
+    (gyro, acc)
+}
+
+fn integrate_measurements(
+    measurements: &ImuMeasurementDeque,
+    (start, end): (Timestamp, Timestamp),
+    mut step: impl FnMut((Vector3<f64>, Vector3<f64>), (Vector3<f64>, Vector3<f64>), f64),
+) -> Result<(usize, f64), IntegrationError> {
+    let first = measurements
+        .front()
+        .ok_or(IntegrationError::MissingMeasurements)?;
+    let last = measurements
+        .back()
+        .ok_or(IntegrationError::MissingMeasurements)?;
+    if first.time_stamp > start {
+        return Err(IntegrationError::StartNotCovered);
+    }
+    if last.time_stamp < end {
+        return Err(IntegrationError::EndNotCovered);
+    }
+    let mut time = start;
+    let mut started = false;
+    let mut steps = 0;
+    let mut total = 0.0;
+    // Only adjacent pairs have both readings defined in the source domain.
+    for i in 0..measurements.len().saturating_sub(1) {
+        let m0 = &measurements[i];
+        let m1 = &measurements[i + 1];
+        let (mut w0, mut w1) = (m0.measurement.gyroscopes, m1.measurement.gyroscopes);
+        let (mut a0, mut a1) = (m0.measurement.accelerometers, m1.measurement.accelerometers);
+        let mut next = m1.time_stamp;
+        let mut dt = seconds(next, time);
+        if end < next {
+            let interval = seconds(next, m0.time_stamp);
+            next = end;
+            dt = seconds(next, time);
+            let r = dt / interval;
+            w1 = (1.0 - r) * w0 + r * w1;
+            a1 = (1.0 - r) * a0 + r * a1;
+        }
+        if dt <= 0.0 {
+            continue;
+        }
+        if !started {
+            started = true;
+            let r = dt / seconds(next, m0.time_stamp);
+            w0 = r * w0 + (1.0 - r) * w1;
+            a0 = r * a0 + (1.0 - r) * a1;
+        }
+        step((w0, w1), (a0, a1), dt);
+        total += dt;
+        time = next;
+        steps += 1;
+        if next == end {
+            break;
+        }
+    }
+    Ok((steps, total))
+}
+
+/// Motion increments without covariance or bias derivatives.
+struct MotionDelta {
+    delta_q: Quaternion<f64>,
+    acc_integral: Vector3<f64>,
+    acc_doubleintegral: Vector3<f64>,
+}
+impl MotionDelta {
+    fn integrate(
+        measurements: &ImuMeasurementDeque,
+        params: &ImuParameters,
+        sb: &SpeedAndBias,
+        interval: (Timestamp, Timestamp),
+    ) -> Result<(Self, usize, f64), IntegrationError> {
+        let mut motion = Self {
+            delta_q: Quaternion::identity(),
+            acc_integral: Vector3::zeros(),
+            acc_doubleintegral: Vector3::zeros(),
+        };
+        let (steps, total) = integrate_measurements(measurements, interval, |w, a, dt| {
+            saturation_multipliers(params, w, a);
+            let angular_velocity = 0.5 * (w.0 + w.1) - sb.fixed_rows::<3>(3);
+            let dq = delta_q(&(angular_velocity * dt));
+            let q1 = motion.delta_q * dq;
+            let rotation = raw_rotation_matrix(&motion.delta_q);
+            let c1 = raw_rotation_matrix(&q1);
+            let acceleration = 0.5 * (a.0 + a.1) - sb.fixed_rows::<3>(6);
+            let ai1 = motion.acc_integral + 0.5 * (rotation + c1) * acceleration * dt;
+            motion.acc_doubleintegral +=
+                motion.acc_integral * dt + 0.25 * (rotation + c1) * acceleration * dt * dt;
+            motion.delta_q = q1;
+            motion.acc_integral = ai1;
+        })?;
+        Ok((motion, steps, total))
+    }
+    fn apply(
+        &self,
+        params: &ImuParameters,
+        pose: &mut Transformation,
+        sb: &mut SpeedAndBias,
+        dt: f64,
+    ) -> Matrix3<f64> {
+        let c = pose.rotation_matrix();
+        let g = Vector3::new(0.0, 0.0, params.g);
+        pose.set(
+            pose.translation() + sb.fixed_rows::<3>(0) * dt + c * self.acc_doubleintegral
+                - 0.5 * g * dt * dt,
+            pose.quaternion() * self.delta_q,
+        );
+        let v = sb.fixed_rows::<3>(0).into_owned() + c * self.acc_integral - g * dt;
+        sb.fixed_rows_mut::<3>(0).copy_from(&v);
+        c
+    }
+}
+
 /// Identity increments and covariance basis matrices before the first sample.
 #[derive(Clone, Debug)]
 pub(crate) struct Preintegration {
@@ -165,25 +302,7 @@ impl Preintegration {
         transition: &Covariance,
     ) {
         if let Some(p) = params {
-            let saturated =
-                |first_reading: &Vector3<f64>, second_reading: &Vector3<f64>, limit: f64| {
-                    first_reading
-                        .iter()
-                        .chain(second_reading.iter())
-                        .any(|component| component.abs() > limit)
-                };
-            let gm = if saturated(&w0, &w1, p.g_max) {
-                log::warn!("gyr saturation");
-                100.0
-            } else {
-                1.0
-            };
-            let am = if saturated(&a0, &a1, p.a_max) {
-                log::warn!("acc saturation");
-                100.0
-            } else {
-                1.0
-            };
+            let (gm, am) = saturation_multipliers(p, (w0, w1), (a0, a1));
             match noise {
                 NoiseMode::None => {}
                 NoiseMode::Basis => {
@@ -249,56 +368,9 @@ impl Preintegration {
         right_alpha: bool,
         noise: NoiseMode,
     ) -> Result<(usize, f64), IntegrationError> {
-        let first = measurements
-            .front()
-            .ok_or(IntegrationError::MissingMeasurements)?;
-        let last = measurements
-            .back()
-            .ok_or(IntegrationError::MissingMeasurements)?;
-        if first.time_stamp > start {
-            return Err(IntegrationError::StartNotCovered);
-        }
-        if last.time_stamp < end {
-            return Err(IntegrationError::EndNotCovered);
-        }
-        let mut time = start;
-        let mut started = false;
-        let mut steps = 0;
-        let mut total = 0.0;
-        // Only adjacent pairs have both readings defined in the source domain.
-        for i in 0..measurements.len().saturating_sub(1) {
-            let m0 = &measurements[i];
-            let m1 = &measurements[i + 1];
-            let (mut w0, mut w1) = (m0.measurement.gyroscopes, m1.measurement.gyroscopes);
-            let (mut a0, mut a1) = (m0.measurement.accelerometers, m1.measurement.accelerometers);
-            let mut next = m1.time_stamp;
-            let mut dt = seconds(next, time);
-            if end < next {
-                let interval = seconds(next, m0.time_stamp);
-                next = end;
-                dt = seconds(next, time);
-                let r = dt / interval;
-                w1 = (1.0 - r) * w0 + r * w1;
-                a1 = (1.0 - r) * a0 + r * a1;
-            }
-            if dt <= 0.0 {
-                continue;
-            }
-            if !started {
-                started = true;
-                let r = dt / seconds(next, m0.time_stamp);
-                w0 = r * w0 + (1.0 - r) * w1;
-                a0 = r * a0 + (1.0 - r) * a1;
-            }
-            self.step((w0, w1), (a0, a1), dt, sb, params, (right_alpha, noise));
-            total += dt;
-            time = next;
-            steps += 1;
-            if next == end {
-                break;
-            }
-        }
-        Ok((steps, total))
+        integrate_measurements(measurements, (start, end), |w, a, dt| {
+            self.step(w, a, dt, sb, params, (right_alpha, noise));
+        })
     }
     pub(crate) fn propagation_jacobian(&self, c: &Matrix3<f64>, dt: f64) -> Jacobian {
         let mut f = Jacobian::identity();
@@ -526,6 +598,12 @@ impl ImuError {
         (start, end): (Timestamp, Timestamp),
         (covariance, jacobian): (Option<&mut Covariance>, Option<&mut Jacobian>),
     ) -> Result<usize, IntegrationError> {
+        if covariance.is_none() && jacobian.is_none() {
+            let (motion, steps, dt) =
+                MotionDelta::integrate(measurements, params, sb, (start, end))?;
+            motion.apply(params, pose, sb, dt);
+            return Ok(steps);
+        }
         let mut p = Preintegration::default();
         let noise = if covariance.is_some() {
             NoiseMode::Direct
@@ -534,15 +612,12 @@ impl ImuError {
         };
         let (steps, dt) =
             p.integrate(measurements, Some(params), sb, (start, end), false, noise)?;
-        let c = pose.rotation_matrix();
-        let g = Vector3::new(0.0, 0.0, params.g);
-        pose.set(
-            pose.translation() + sb.fixed_rows::<3>(0) * dt + c * p.acc_doubleintegral
-                - 0.5 * g * dt * dt,
-            pose.quaternion() * p.delta_q,
-        );
-        let v = sb.fixed_rows::<3>(0).into_owned() + c * p.acc_integral - g * dt;
-        sb.fixed_rows_mut::<3>(0).copy_from(&v);
+        let c = MotionDelta {
+            delta_q: p.delta_q,
+            acc_integral: p.acc_integral,
+            acc_doubleintegral: p.acc_doubleintegral,
+        }
+        .apply(params, pose, sb, dt);
         if let Some(j) = jacobian {
             *j = p.propagation_jacobian(&c, dt);
         }
@@ -885,3 +960,6 @@ impl PseudoImuError {
         }
     }
 }
+
+#[cfg(test)]
+mod propagation_tests;
