@@ -44,7 +44,7 @@ use crate::ceres::{
 };
 use faer::linalg::solvers::{Solve, SolveLstsq};
 use faer::sparse::{SparseColMat, Triplet};
-use nalgebra::{DMatrix, DMatrixView, DVector, DVectorView};
+use nalgebra::{DMatrix, DMatrixView, DVector, DVectorView, DVectorViewMut};
 use std::{sync::Arc, time::Instant};
 
 #[derive(Default)]
@@ -772,30 +772,37 @@ impl Linearization {
     fn product_sum(
         &self,
         v: &DVector<f64>,
-        mut contribution: impl FnMut(DVectorView<'_, f64>, &Row) -> f64,
+        mut contribution: impl FnMut(DVectorView<'_, f64>, DVectorViewMut<'_, f64>, &Row) -> f64,
     ) -> f64 {
-        let mut scratch = DVector::zeros(
-            self.rows
-                .iter()
-                .map(|row| row.residual.len())
-                .max()
-                .unwrap_or(0),
-        );
+        let max_rows = self
+            .rows
+            .iter()
+            .map(|row| row.residual.len())
+            .max()
+            .unwrap_or(0);
+        let mut scratch = DVector::zeros(max_rows);
+        let mut block_scratch = DVector::zeros(max_rows);
         self.rows
             .iter()
             .map(|row| {
                 let mut product = scratch.rows_mut(0, row.residual.len());
+                let mut block_product = block_scratch.rows_mut(0, row.residual.len());
                 product.fill(0.0);
                 for (offset, j) in &row.blocks {
-                    product.gemv(1.0, j, &v.rows(*offset, j.ncols()), 1.0);
+                    // Complete block-local cancellation before adding earlier blocks.
+                    block_product.gemv(1.0, j, &v.rows(*offset, j.ncols()), 0.0);
+                    product += &block_product;
                 }
-                contribution(product.as_view(), row)
+                contribution(product.as_view(), block_product, row)
             })
             .sum()
     }
     fn predicted_change(&self, step: &DVector<f64>) -> f64 {
-        self.product_sum(step, |product, row| {
-            -product.dot(&row.residual) - 0.5 * product.norm_squared()
+        self.product_sum(step, |product, mut workspace, row| {
+            // Cancel the residual and half-step before multiplication to avoid overflow.
+            workspace.copy_from(&row.residual);
+            workspace.axpy(0.5, &product, 1.0);
+            -product.dot(&workspace)
         })
     }
     /// Eliminate independent 3D landmark blocks, solve the reduced normal
@@ -956,7 +963,7 @@ impl Strategy {
             self.diagonal = m.diagonal.map(|x| x.clamp(1e-6, 1e32).sqrt());
             self.gradient = m.gradient.component_div(&self.diagonal);
             let v = self.gradient.component_div(&self.diagonal);
-            let jg_squared = m.product_sum(&v, |product, _| product.norm_squared());
+            let jg_squared = m.product_sum(&v, |product, _, _| product.norm_squared());
             self.alpha = self.gradient.norm_squared() / jg_squared;
             while self.mu < 1.0 {
                 let r = self.diagonal.component_mul(&self.diagonal) * self.mu;
@@ -1444,6 +1451,7 @@ mod tests {
                     blocks: vec![
                         (0, DMatrix::from_row_slice(2, 2, &[1., 2., 3., 4.])),
                         (2, DMatrix::from_row_slice(2, 2, &[-1., 0.5, 2., -3.])),
+                        (0, DMatrix::zeros(2, 0)),
                     ],
                 },
                 Row {
@@ -1459,7 +1467,7 @@ mod tests {
                 },
                 Row {
                     residual: DVector::zeros(0),
-                    blocks: vec![],
+                    blocks: vec![(0, DMatrix::zeros(0, 4))],
                 },
             ],
             gradient: design.tr_mul(&residual),
@@ -1475,7 +1483,7 @@ mod tests {
         for scale in [0., -0.25, 1., 2.] {
             let step = DVector::from_row_slice(&[0.5, -1., 0.25, 2.]) * scale;
             let product = &design * &step;
-            let squared_norm = model.product_sum(&step, |product, _| product.norm_squared());
+            let squared_norm = model.product_sum(&step, |product, _, _| product.norm_squared());
             assert!((squared_norm - product.norm_squared()).abs() < 1e-12);
             let expected = 0.5 * (residual.norm_squared() - (&residual + product).norm_squared());
             assert!((model.predicted_change(&step) - expected).abs() < 1e-12);
@@ -1483,10 +1491,97 @@ mod tests {
         model.rows.clear();
         let step = DVector::repeat(4, 1.);
         assert_eq!(
-            model.product_sum(&step, |product, _| product.norm_squared()),
+            model.product_sum(&step, |product, _, _| product.norm_squared()),
             0.
         );
         assert_eq!(model.predicted_change(&step), 0.);
+    }
+
+    #[test]
+    fn predicted_change_keeps_cancellation_before_multiplication_at_large_magnitudes() {
+        let mut model = Linearization {
+            cost: 0.,
+            fixed_cost: 0.,
+            rows: vec![Row {
+                residual: DVector::from_element(1, -0.75e154),
+                blocks: vec![(0, DMatrix::identity(1, 1))],
+            }],
+            gradient: DVector::zeros(1),
+            diagonal: DVector::repeat(1, 1.),
+            eliminated_points: vec![],
+        };
+        let step = DVector::<f64>::from_element(1, 1.5e154);
+        assert!(step.norm_squared().is_infinite());
+        assert_eq!(model.predicted_change(&step), 0.);
+        model.rows[0].residual[0] = -0.8e154;
+        let expected = -step[0] * (model.rows[0].residual[0] + 0.5 * step[0]);
+        assert!(expected.is_finite() && expected > 0.);
+        assert_eq!(model.predicted_change(&step), expected);
+    }
+
+    #[test]
+    fn streamed_product_preserves_small_blocks_when_another_block_cancels() {
+        let model = Linearization {
+            cost: 0.5,
+            fixed_cost: 0.,
+            rows: vec![Row {
+                residual: DVector::from_element(1, -1.),
+                blocks: vec![
+                    (0, DMatrix::from_element(1, 1, 1.)),
+                    (1, DMatrix::from_row_slice(1, 2, &[1e16, -1e16])),
+                ],
+            }],
+            gradient: DVector::zeros(3),
+            diagonal: DVector::repeat(3, 1.),
+            eliminated_points: vec![],
+        };
+        let step = DVector::repeat(3, 1.);
+        assert_eq!(
+            model.product_sum(&step, |product, _, _| product.norm_squared()),
+            1.
+        );
+        assert_eq!(model.predicted_change(&step), 0.5);
+    }
+
+    #[test]
+    fn streamed_reduction_preserves_owned_product_and_dot_evaluation() {
+        for rows in [1, 2, 9, 15] {
+            let row = Row {
+                residual: DVector::from_fn(rows, |r, _| (r as f64 + 0.5).cos()),
+                blocks: [(0, 3), (3, 9), (12, 6)]
+                    .into_iter()
+                    .map(|(offset, columns)| {
+                        (
+                            offset,
+                            DMatrix::from_fn(rows, columns, |r, c| {
+                                ((r + offset + 1) as f64 * (c + 1) as f64).sin()
+                            }),
+                        )
+                    })
+                    .collect(),
+            };
+            let step = DVector::from_fn(18, |i, _| (i as f64 + 0.25).sin());
+            let owned_product = row
+                .blocks
+                .iter()
+                .fold(DVector::zeros(rows), |sum, (offset, j)| {
+                    sum + j * step.rows(*offset, j.ncols())
+                });
+            let expected = -owned_product.dot(&(&row.residual + &owned_product * 0.5));
+            let model = Linearization {
+                cost: 0.,
+                fixed_cost: 0.,
+                rows: vec![row],
+                gradient: DVector::zeros(18),
+                diagonal: DVector::repeat(18, 1.),
+                eliminated_points: vec![],
+            };
+            assert_eq!(model.predicted_change(&step), expected);
+            assert_eq!(
+                model.product_sum(&step, |product, _, _| product.norm_squared()),
+                owned_product.norm_squared()
+            );
+        }
     }
 
     #[test]
@@ -1812,6 +1907,77 @@ mod tests {
         assert!(Snapshot::plus(&values, &offsets, &invalid).is_err());
         for (key, value) in &values {
             assert_eq!(value.data, original[key].data);
+        }
+    }
+
+    #[test]
+    fn staged_solves_use_committed_values_and_preserve_nonparticipating_blocks() {
+        for trust_region in ["DOGLEG", "LEVENBERG_MARQUARDT"] {
+            for linear_solver in ["DENSE_QR", "DENSE_SCHUR", "SPARSE_NORMAL_CHOLESKY"] {
+                let inactive = vec![0., 0., 0., 0., 0., 0., 1.];
+                let mut snapshot = Snapshot {
+                    values: BTreeMap::from([
+                        (
+                            1,
+                            Values {
+                                data: vec![5.; 9],
+                                manifold: ManifoldKind::Euclidean,
+                                fixed: false,
+                            },
+                        ),
+                        (
+                            2,
+                            Values {
+                                data: inactive.clone(),
+                                manifold: ManifoldKind::Pose,
+                                fixed: false,
+                            },
+                        ),
+                    ]),
+                    factors: [(1, 2., 1.), (2, -1., 2.)]
+                        .into_iter()
+                        .map(|(id, target, weight)| FactorRecord {
+                            id,
+                            factor: Factor::SpeedBiasPrior(Box::new(SpeedAndBiasError::new(
+                                SVector::repeat(target),
+                                SMatrix::identity() * weight,
+                            ))),
+                            keys: vec![1],
+                            loss: None,
+                        })
+                        .collect(),
+                };
+                let options = SolverOptions {
+                    trust_region,
+                    linear_solver,
+                    function_tolerance: 1e-12,
+                    ..Default::default()
+                };
+                let first = snapshot.run(&options, &BTreeSet::from([2])).unwrap();
+                assert!(first.final_cost.unwrap() < 1e-14);
+                assert!(
+                    snapshot.values[&1]
+                        .data
+                        .iter()
+                        .all(|x| (x - 2.).abs() < 1e-8)
+                );
+                let second = snapshot.run(&options, &BTreeSet::from([1])).unwrap();
+                assert!((second.initial_cost.unwrap() - 81.).abs() < 1e-6);
+                assert!(second.final_cost.unwrap() < 1e-14);
+                assert!(
+                    snapshot.values[&1]
+                        .data
+                        .iter()
+                        .all(|x| (x + 1.).abs() < 1e-8),
+                    "{trust_region}/{linear_solver}: {:?}, {second:?}",
+                    snapshot.values[&1].data
+                );
+                assert_eq!(snapshot.values[&2].data, inactive);
+                let before = snapshot.values[&1].data.clone();
+                let disabled = snapshot.run(&options, &BTreeSet::from([1, 2])).unwrap();
+                assert_eq!(disabled.final_cost, Some(0.));
+                assert_eq!(snapshot.values[&1].data, before);
+            }
         }
     }
 

@@ -22,7 +22,10 @@ use crate::{
     },
 };
 use firefly_error::{Error, ErrorKind, Result};
-use nalgebra::{DMatrix, DVector, Quaternion, SMatrix, SVector, SymmetricEigen, Vector3, Vector4};
+use nalgebra::{
+    DMatrix, DMatrixView, DVector, Dyn, Quaternion, SMatrix, SVector, SymmetricEigen, Vector3,
+    Vector4,
+};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
@@ -399,11 +402,17 @@ impl TwoPoseGraphError {
             *h_total += h00;
             *b_total += b0;
             let m = h01 * &inverse_sqrt;
-            for column in m.column_iter() {
-                mh.ger(1.0, &column, &column, 1.0);
-            }
+            // Swap strides without copying; dot products must finish before updating the totals.
+            let transposed = DMatrixView::<f64, Dyn, Dyn>::from_slice_with_strides(
+                m.as_slice(),
+                m.ncols(),
+                m.nrows(),
+                m.nrows(),
+                1,
+            );
+            mh.gemm_tr(1.0, &transposed, &transposed, 1.0);
             let projected = inverse_sqrt.tr_mul(&b1);
-            mb.gemv(1.0, &m, &projected, 1.0);
+            mb.gemv_tr(1.0, &transposed, &projected, 1.0);
         }
     }
 
@@ -958,10 +967,34 @@ mod tests {
     }
 
     #[test]
+    fn schur_accumulation_preserves_prior_contributions_during_landmark_cancellation() {
+        let mut system = empty_system();
+        system.h11 = DMatrix::identity(3, 3);
+        system
+            .h01
+            .row_mut(0)
+            .copy_from(&nalgebra::RowVector3::new(1e8, 1e8, 0.));
+        system
+            .h01
+            .row_mut(1)
+            .copy_from(&nalgebra::RowVector3::new(1e8, -1e8, 0.));
+        system.b1 = DVector::from_row_slice(&[1e8, -1e8, 0.]);
+        let mut h = DMatrix::zeros(12, 12);
+        let mut b = DVector::zeros(12);
+        let mut mh = DMatrix::repeat(12, 12, 1.);
+        let mut mb = DVector::repeat(12, 1.);
+        TwoPoseGraphError::accumulate_schur(system, 3., (&mut h, &mut b, &mut mh, &mut mb));
+        assert_eq!(mh[(0, 1)], 1.);
+        assert_eq!(mh[(1, 0)], 1.);
+        assert_eq!(mb[0], 1.);
+    }
+
+    #[test]
     fn observation_accumulation_matches_independent_robust_normal_equations() {
-        let losses: [Option<Rc<dyn LossFunction>>; 4] = [
+        let losses: [Option<Rc<dyn LossFunction>>; 5] = [
             None,
             Some(Rc::new(RobustLoss::Huber(0.2))),
+            Some(Rc::new(RobustLoss::Cauchy(0.2))),
             Some(Rc::new(RobustLoss::Tukey(0.2))),
             Some(Rc::new(ConvexLoss)),
         ];

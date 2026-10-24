@@ -114,6 +114,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn spectral_factors_match_dense_reference_through_imu_dimension() {
+        for size in [1, 3, 6, 15] {
+            let basis = DMatrix::from_fn(size, size, |row, col| {
+                ((row + 1) as f64 * (col + 3) as f64).sin() + if row == col { 2. } else { 0. }
+            });
+            for scale in [1e-12, 1., 1e12] {
+                let input = basis.tr_mul(&basis) * scale;
+                for epsilon in [f64::EPSILON, 1e-6] {
+                    let (vectors, weights) = spectral_inverse(&input, epsilon, None);
+                    let expected_inverse =
+                        &vectors * DMatrix::from_diagonal(&weights) * vectors.transpose();
+                    let expected_root = &vectors * DMatrix::from_diagonal(&weights.map(f64::sqrt));
+                    let mut inverse = DMatrix::zeros(0, 0);
+                    let mut root = DMatrix::zeros(0, 0);
+                    let mut upper = DMatrix::zeros(0, 0);
+                    PseudoInverse::symm(&input, &mut inverse, epsilon, None);
+                    PseudoInverse::symm_sqrt(&input, &mut root, epsilon, None);
+                    PseudoInverse::symm_sqrt_u(&input, &mut upper, epsilon, None);
+                    let bound = 2e-14 * size as f64;
+                    assert!(
+                        (&inverse - &expected_inverse).amax() <= bound * expected_inverse.amax()
+                    );
+                    assert!((&root - &expected_root).amax() <= bound * expected_root.amax());
+                    assert!(
+                        (upper - expected_root.transpose()).amax() <= bound * expected_root.amax()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn spectral_factors_match_rotated_analytic_inverse_with_eigenvalue_flooring() {
         let epsilon = 1e-3_f64;
         let tolerance = epsilon * 3. * 8.;
