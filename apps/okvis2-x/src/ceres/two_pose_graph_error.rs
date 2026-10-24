@@ -399,8 +399,11 @@ impl TwoPoseGraphError {
             *h_total += h00;
             *b_total += b0;
             let m = h01 * &inverse_sqrt;
-            *mh += &m * m.transpose();
-            *mb += m * (inverse_sqrt.transpose() * b1);
+            for column in m.column_iter() {
+                mh.ger(1.0, &column, &column, 1.0);
+            }
+            let projected = inverse_sqrt.tr_mul(&b1);
+            mb.gemv(1.0, &m, &projected, 1.0);
         }
     }
 
@@ -906,6 +909,51 @@ mod tests {
             h01: DMatrix::zeros(12, 3),
             h11: DMatrix::zeros(3, 3),
             b1: DVector::zeros(3),
+        }
+    }
+
+    #[test]
+    fn schur_accumulation_matches_analytic_inverse_and_preserves_rank_distance_gate() {
+        for eigenvalue in [0., 4.] {
+            for distance in [2., 3.] {
+                let mut system = empty_system();
+                system.h00.fill(0.5);
+                system.b0.fill(-0.25);
+                system.h01 = DMatrix::from_fn(12, 3, |r, c| (r + 2 * c + 1) as f64 / 10.);
+                system.h11 =
+                    DMatrix::from_diagonal(&DVector::from_row_slice(&[1., 2., eigenvalue]));
+                system.b1 = DVector::from_row_slice(&[0.5, -1., 2.]);
+                let floor = 1e-7 * 3. * 2.;
+                let inverse = DMatrix::from_diagonal(&DVector::from_row_slice(&[
+                    1.,
+                    0.5,
+                    if eigenvalue == 0. { 1. / floor } else { 0.25 },
+                ]));
+                let expected_h = &system.h01 * &inverse * system.h01.transpose();
+                let expected_b = &system.h01 * inverse * &system.b1;
+                let mut h = DMatrix::repeat(12, 12, 1.);
+                let mut b = DVector::repeat(12, 2.);
+                let mut mh = DMatrix::repeat(12, 12, 3.);
+                let mut mb = DVector::repeat(12, 4.);
+                TwoPoseGraphError::accumulate_schur(
+                    system,
+                    distance,
+                    (&mut h, &mut b, &mut mh, &mut mb),
+                );
+                if eigenvalue == 0. && distance < 2.99 {
+                    assert_eq!(h, DMatrix::repeat(12, 12, 1.));
+                    assert_eq!(b, DVector::repeat(12, 2.));
+                    assert_eq!(mh, DMatrix::repeat(12, 12, 3.));
+                    assert_eq!(mb, DVector::repeat(12, 4.));
+                } else {
+                    assert_eq!(h, DMatrix::repeat(12, 12, 1.5));
+                    assert_eq!(b, DVector::repeat(12, 1.75));
+                    let h_error = (mh - DMatrix::repeat(12, 12, 3.) - &expected_h).amax();
+                    let b_error = (mb - DVector::repeat(12, 4.) - &expected_b).amax();
+                    assert!(h_error < 1e-12 * expected_h.amax().max(1.));
+                    assert!(b_error < 1e-12 * expected_b.amax().max(1.));
+                }
+            }
         }
     }
 
