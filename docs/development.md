@@ -347,7 +347,7 @@ H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码
 - `fc/standby/accel_gate`：NIS、是否实际应用地面加计校正。
 - `fc/standby/gyro_bias`、`quaternion_xyzw`、`attitude_variance`、`bias_variance`：
   独立热备状态；姿态属于备用本地重力系，方差单位 rad² / (rad/s)²。
-- `fc/vio/gyro_bias` / `attitude_variance`：主链路采用的 VIO 零偏及传播后的姿态方差。
+- `fc/vio/gyro_bias`：主链路采用的 VIO 陀螺零偏；主链路不发布姿态方差。
 - `fc/debug/tilt_deg` 与 `fc/debug/tilt_err_deg`：估计倾角与仅供评测的真值倾角误差。
 - `fc/debug/rate_sp_frd` / `rate_flu`：PX4 角速度设定值（FRD）与实测角速度（FLU）。
 - `fc/debug/torque_sp_frd` / `allocated_control`：归一化力矩设定值与分配实际达到的控制量。
