@@ -325,8 +325,8 @@ Viewer，或加 `--connect rerun+http://127.0.0.1:9876/proxy` 连接已有 Viewe
 Python RrdReader，读取方法见仓库 `.agents/skills/rerun/SKILL.md`。
 
 H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码也需要 FFmpeg；
-浏览器端的 HEVC 能力不能替代原生回放验收。硬件初始化失败会结束录制并保留错误证据；
-软件编码仅在配置显式选择 `libx265` 时启用。IPC 布局升级后须同批重建、重启所有生产者
+浏览器端的 HEVC 能力不能替代原生回放验收。macOS 的 VideoToolbox 允许使用系统软件实现；
+编码器初始化失败会结束录制并保留错误证据。IPC 布局升级后须同批重建、重启所有生产者
 与消费者，不能混用不同版本的消息类型。
 
 文件录制固定启用完整 footer/manifest，正常关闭后供 Viewer 与随机访问工具直接打开；

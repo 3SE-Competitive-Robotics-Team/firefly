@@ -258,12 +258,8 @@ impl ViGraphEstimator {
         into: LandmarkId,
         frames: &mut BTreeMap<StateId, MultiFramePtr>,
     ) -> Result<bool> {
-        // 上游用 OKVIS_ASSERT_TRUE_DBG，只在 debug 下检查；缺失地标意味着它已被
-        // 更早的合并移除（合并链/重复对），这次合并按“未发生”处理，不能让处理
-        // 线程因为一个退化合并退出。
         if !self.landmarks.contains_key(&from) || !self.landmarks.contains_key(&into) {
-            log::debug!("landmark merge {from:?} -> {into:?} skipped: already removed");
-            return Ok(false);
+            return Err(graph_error("landmark absent"));
         }
         let keys = self.landmark_info[&from].observations.clone();
         for key in keys {
