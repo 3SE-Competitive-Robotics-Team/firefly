@@ -146,7 +146,7 @@ impl Default for Config {
             max_posterior_age: 0.3,
             max_imu_gap: 0.05,
             loop_closures: true,
-            num_keypoints: 300,
+            num_keypoints: 2500,
             realtime_iterations: 5,
             realtime_time_limit: 0.03,
             mapping: true,
@@ -265,11 +265,11 @@ impl Config {
 
             frontend: FrontendParameters {
                 detection_threshold: 30.0,
-                absolute_threshold: 200.0,
+                absolute_threshold: 5.0,
                 matching_threshold: 60.0,
-                octaves: 3,
+                octaves: 0,
                 max_num_keypoints: self.num_keypoints,
-                keyframe_overlap: 0.6,
+                keyframe_overlap: 0.55,
                 use_cnn: false,
                 parallelise_detection: false,
                 num_matching_threads: 1,
