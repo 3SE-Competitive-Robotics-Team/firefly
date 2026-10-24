@@ -325,8 +325,8 @@ Viewer，或加 `--connect rerun+http://127.0.0.1:9876/proxy` 连接已有 Viewe
 Python RrdReader，读取方法见仓库 `.agents/skills/rerun/SKILL.md`。
 
 H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码也需要 FFmpeg；
-浏览器端的 HEVC 能力不能替代原生回放验收。硬件初始化失败会结束录制并保留错误证据；
-软件编码仅在配置显式选择 `libx265` 时启用。IPC 布局升级后须同批重建、重启所有生产者
+浏览器端的 HEVC 能力不能替代原生回放验收。macOS 的 VideoToolbox 允许使用系统软件实现；
+编码器初始化失败会结束录制并保留错误证据。IPC 布局升级后须同批重建、重启所有生产者
 与消费者，不能混用不同版本的消息类型。
 
 文件录制固定启用完整 footer/manifest，正常关闭后供 Viewer 与随机访问工具直接打开；
@@ -347,7 +347,7 @@ H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码
 - `fc/standby/accel_gate`：NIS、是否实际应用地面加计校正。
 - `fc/standby/gyro_bias`、`quaternion_xyzw`、`attitude_variance`、`bias_variance`：
   独立热备状态；姿态属于备用本地重力系，方差单位 rad² / (rad/s)²。
-- `fc/vio/gyro_bias` / `attitude_variance`：主链路采用的 VIO 零偏及传播后的姿态方差。
+- `fc/vio/gyro_bias`：主链路采用的 VIO 陀螺零偏；主链路不发布姿态方差。
 - `fc/debug/tilt_deg` 与 `fc/debug/tilt_err_deg`：估计倾角与仅供评测的真值倾角误差。
 - `fc/debug/rate_sp_frd` / `rate_flu`：PX4 角速度设定值（FRD）与实测角速度（FLU）。
 - `fc/debug/torque_sp_frd` / `allocated_control`：归一化力矩设定值与分配实际达到的控制量。
