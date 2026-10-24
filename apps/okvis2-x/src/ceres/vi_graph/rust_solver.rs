@@ -44,7 +44,7 @@ use crate::ceres::{
 };
 use faer::linalg::solvers::{Solve, SolveLstsq};
 use faer::sparse::{SparseColMat, Triplet};
-use nalgebra::{DMatrix, DMatrixView, DVector};
+use nalgebra::{DMatrix, DMatrixView, DVector, DVectorView};
 use std::{sync::Arc, time::Instant};
 
 #[derive(Default)]
@@ -767,26 +767,36 @@ impl Linearization {
         }
         self.gradient.component_mul_assign(scale);
         self.diagonal
-            .component_mul_assign(&scale.component_mul(scale));
+            .zip_apply(scale, |diagonal, scale| *diagonal *= scale * scale);
     }
-    fn product(&self, v: &DVector<f64>) -> Vec<DVector<f64>> {
+    fn product_sum(
+        &self,
+        v: &DVector<f64>,
+        mut contribution: impl FnMut(DVectorView<'_, f64>, &Row) -> f64,
+    ) -> f64 {
+        let mut scratch = DVector::zeros(
+            self.rows
+                .iter()
+                .map(|row| row.residual.len())
+                .max()
+                .unwrap_or(0),
+        );
         self.rows
             .iter()
             .map(|row| {
-                row.blocks
-                    .iter()
-                    .fold(DVector::zeros(row.residual.len()), |s, (o, j)| {
-                        s + j * v.rows(*o, j.ncols())
-                    })
+                let mut product = scratch.rows_mut(0, row.residual.len());
+                product.fill(0.0);
+                for (offset, j) in &row.blocks {
+                    product.gemv(1.0, j, &v.rows(*offset, j.ncols()), 1.0);
+                }
+                contribution(product.as_view(), row)
             })
-            .collect()
+            .sum()
     }
     fn predicted_change(&self, step: &DVector<f64>) -> f64 {
-        self.product(step)
-            .iter()
-            .zip(&self.rows)
-            .map(|(m, row)| -m.dot(&(&row.residual + m * 0.5)))
-            .sum()
+        self.product_sum(step, |product, row| {
+            -product.dot(&row.residual) - 0.5 * product.norm_squared()
+        })
     }
     /// Eliminate independent 3D landmark blocks, solve the reduced normal
     /// equations by Cholesky, then back-substitute the landmark increments.
@@ -833,8 +843,8 @@ impl Linearization {
             let point_rhs = Vector3::from_fn(|index, _| -self.gradient[offset + index]);
             let solved_cross = factor.solve(&cross);
             let solved_rhs = factor.solve(&point_rhs);
-            reduced -= cross.transpose() * &solved_cross;
-            rhs -= cross.transpose() * solved_rhs;
+            reduced.gemm_tr(-1.0, &cross, &solved_cross, 1.0);
+            rhs.gemv_tr(-1.0, &cross, &solved_rhs, 1.0);
             points.push((offset, solved_cross, solved_rhs));
         }
         let solution = if retained.is_empty() {
@@ -946,7 +956,7 @@ impl Strategy {
             self.diagonal = m.diagonal.map(|x| x.clamp(1e-6, 1e32).sqrt());
             self.gradient = m.gradient.component_div(&self.diagonal);
             let v = self.gradient.component_div(&self.diagonal);
-            let jg_squared: f64 = m.product(&v).iter().map(DVector::norm_squared).sum();
+            let jg_squared = m.product_sum(&v, |product, _| product.norm_squared());
             self.alpha = self.gradient.norm_squared() / jg_squared;
             while self.mu < 1.0 {
                 let r = self.diagonal.component_mul(&self.diagonal) * self.mu;
@@ -1413,6 +1423,95 @@ impl RustGraphSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn block_linearization() -> (Linearization, DMatrix<f64>, DVector<f64>) {
+        let design = DMatrix::from_row_slice(
+            6,
+            4,
+            &[
+                1., 2., -1., 0.5, 3., 4., 2., -3., 0., 2., -1., 3., 0., 0., 4., -2., 0., 1., 0.,
+                2., 0., 0., 0., 0.,
+            ],
+        );
+        let residual = DVector::from_row_slice(&[1., -2., 0.5, 1., -0.25, 7.]);
+        let model = Linearization {
+            cost: 0.5 * residual.norm_squared(),
+            fixed_cost: 0.,
+            rows: vec![
+                Row {
+                    residual: DVector::from_row_slice(&[1., -2.]),
+                    blocks: vec![
+                        (0, DMatrix::from_row_slice(2, 2, &[1., 2., 3., 4.])),
+                        (2, DMatrix::from_row_slice(2, 2, &[-1., 0.5, 2., -3.])),
+                    ],
+                },
+                Row {
+                    residual: DVector::from_row_slice(&[0.5, 1., -0.25]),
+                    blocks: vec![(
+                        1,
+                        DMatrix::from_row_slice(3, 3, &[2., -1., 3., 0., 4., -2., 1., 0., 2.]),
+                    )],
+                },
+                Row {
+                    residual: DVector::from_element(1, 7.),
+                    blocks: vec![],
+                },
+                Row {
+                    residual: DVector::zeros(0),
+                    blocks: vec![],
+                },
+            ],
+            gradient: design.tr_mul(&residual),
+            diagonal: DVector::from_iterator(4, design.column_iter().map(|c| c.norm_squared())),
+            eliminated_points: vec![],
+        };
+        (model, design, residual)
+    }
+
+    #[test]
+    fn streamed_products_and_prediction_match_the_dense_quadratic() {
+        let (mut model, design, residual) = block_linearization();
+        for scale in [0., -0.25, 1., 2.] {
+            let step = DVector::from_row_slice(&[0.5, -1., 0.25, 2.]) * scale;
+            let product = &design * &step;
+            let squared_norm = model.product_sum(&step, |product, _| product.norm_squared());
+            assert!((squared_norm - product.norm_squared()).abs() < 1e-12);
+            let expected = 0.5 * (residual.norm_squared() - (&residual + product).norm_squared());
+            assert!((model.predicted_change(&step) - expected).abs() < 1e-12);
+        }
+        model.rows.clear();
+        let step = DVector::repeat(4, 1.);
+        assert_eq!(
+            model.product_sum(&step, |product, _| product.norm_squared()),
+            0.
+        );
+        assert_eq!(model.predicted_change(&step), 0.);
+    }
+
+    #[test]
+    fn diagonal_scaling_matches_dense_column_scaling_and_reuses_storage() {
+        let (mut model, design, residual) = block_linearization();
+        let scale = DVector::from_row_slice(&[0., -2., 0.5, 3.]);
+        let gradient_pointer = model.gradient.as_ptr();
+        let diagonal_pointer = model.diagonal.as_ptr();
+        model.scaled(&scale);
+        let scaled_design = &design * DMatrix::from_diagonal(&scale);
+        let expected_gradient = scaled_design.tr_mul(&residual);
+        let expected_diagonal = DVector::from_iterator(
+            4,
+            scaled_design
+                .column_iter()
+                .map(|column| column.norm_squared()),
+        );
+        assert_eq!(model.gradient.as_ptr(), gradient_pointer);
+        assert_eq!(model.diagonal.as_ptr(), diagonal_pointer);
+        assert!((&model.gradient - expected_gradient).amax() < 1e-12);
+        assert!((&model.diagonal - expected_diagonal).amax() < 1e-12);
+        let step = DVector::from_row_slice(&[0.5, -1., 0.25, 2.]);
+        let expected =
+            0.5 * (residual.norm_squared() - (&residual + scaled_design * &step).norm_squared());
+        assert!((model.predicted_change(&step) - expected).abs() < 1e-12);
+    }
 
     #[test]
     fn gradient_accumulation_matches_weighted_priors_at_distinct_offsets() {
