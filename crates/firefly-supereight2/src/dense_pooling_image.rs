@@ -185,9 +185,9 @@ impl DensePoolingImage {
     pub fn in_image(&self, u: i32, v: i32) -> bool {
         u >= 0 && u < self.width && v >= 0 && v < self.height
     }
+    /// Windows with a coordinate span below two use pooling level zero.
     /// # Errors
-    /// Returns an error for out-of-image bounds or a window whose pooling level cannot be
-    /// represented; one-coordinate-wide windows are rejected.
+    /// Returns an error for out-of-image or reversed bounds.
     pub fn pool_bounding_box(
         &self,
         u_min: i32,
@@ -243,9 +243,10 @@ impl DensePoolingImage {
         };
         Ok(batch)
     }
+    /// Clips bounds to the image; fully outside or zero-span windows return an outside pixel.
+    /// Windows with a coordinate span of one use pooling level zero.
     /// # Errors
-    /// Returns an error for out-of-image bounds or a window whose pooling level cannot be
-    /// represented; one-coordinate-wide windows are rejected.
+    /// Returns an error if the clipped pooling bounds are invalid.
     pub fn conservative_query(
         &self,
         bb_min: &Vector2<i32>,
