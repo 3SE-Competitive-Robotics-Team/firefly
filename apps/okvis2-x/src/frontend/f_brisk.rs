@@ -13,6 +13,23 @@ pub type Descriptor = [u8; DESCRIPTOR_LENGTH];
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FBrisk;
 
+pub(super) fn hamming(a: &[u8], b: &[u8]) -> f64 {
+    let len = DESCRIPTOR_LENGTH.min(a.len()).min(b.len());
+    let (a_words, a_tail) = a[..len].as_chunks::<8>();
+    let (b_words, b_tail) = b[..len].as_chunks::<8>();
+    let words = a_words
+        .iter()
+        .zip(b_words)
+        .map(|(&a, &b)| (u64::from_ne_bytes(a) ^ u64::from_ne_bytes(b)).count_ones())
+        .sum::<u32>();
+    let tail = a_tail
+        .iter()
+        .zip(b_tail)
+        .map(|(&a, &b)| (a ^ b).count_ones())
+        .sum::<u32>();
+    f64::from(words + tail)
+}
+
 impl FBrisk {
     pub fn mean_value(descriptors: &[&Descriptor], mean: &mut Descriptor) {
         mean.fill(0);
@@ -36,12 +53,7 @@ impl FBrisk {
 
     #[must_use]
     pub fn distance(a: &Descriptor, b: &Descriptor) -> f64 {
-        f64::from(
-            a.iter()
-                .zip(b)
-                .map(|(&left, &right)| (left ^ right).count_ones())
-                .sum::<u32>(),
-        )
+        hamming(a, b)
     }
 
     #[must_use]
@@ -116,5 +128,38 @@ impl firefly_dbow2::templated_vocabulary::DescriptorOps for FBrisk {
             *out = x as u8;
         }
         Ok(d)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hamming_matches_bytewise_reference_for_unaligned_and_partial_descriptors() {
+        let a: Vec<_> = (0..80).map(|i| (i * 37 + 13) as u8).collect();
+        let b: Vec<_> = (0..80).map(|i| (i * 19 + 41) as u8).collect();
+        for offset in 0..8 {
+            for len_a in 0..=64 {
+                for len_b in [0, 7, 8, 9, 47, 48, 64] {
+                    let a = &a[offset..offset + len_a];
+                    let b = &b[7 - offset..7 - offset + len_b];
+                    let reference = a
+                        .iter()
+                        .take(DESCRIPTOR_LENGTH)
+                        .zip(b)
+                        .map(|(&a, &b)| (a ^ b).count_ones())
+                        .sum::<u32>();
+                    assert_eq!(hamming(a, b), f64::from(reference));
+                }
+            }
+        }
+        assert_eq!(FBrisk::distance(&[0; 48], &[255; 48]), 384.0);
+        for bit in 0..384 {
+            let mut descriptor = [0; 48];
+            descriptor[bit / 8] = 1 << (bit % 8);
+            assert_eq!(FBrisk::distance(&[0; 48], &descriptor), 1.0);
+            assert_eq!(FBrisk::distance(&descriptor, &descriptor), 0.0);
+        }
     }
 }
