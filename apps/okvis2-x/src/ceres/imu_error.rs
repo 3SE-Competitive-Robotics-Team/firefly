@@ -581,7 +581,8 @@ impl ImuError {
         p1: &Transformation,
         sb1: &SpeedAndBias,
         db: &SVector<f64, 6>,
-    ) -> (SVector<f64, 15>, Jacobian, Jacobian) {
+        jacobians: Option<(&mut Jacobian, &mut Jacobian)>,
+    ) -> SVector<f64, 15> {
         let p = &self.preintegration;
         let ct = p0.rotation_matrix().transpose();
         let dt = seconds(self.t1, self.t0);
@@ -592,51 +593,61 @@ impl ImuError {
         let dq = delta_q(&(-p.dalpha_db_g * db.fixed_rows::<3>(0))) * p.delta_q;
         let q0 = p0.quaternion();
         let q1i = quaternion_inverse(&p1.quaternion());
-        let mut f0 = Jacobian::identity();
-        let mut f1 = -Jacobian::identity();
-        f0.fixed_view_mut::<3, 3>(0, 0).copy_from(&ct);
-        f0.fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&(ct * cross_mx(&dp)));
-        f0.fixed_view_mut::<3, 3>(0, 6).copy_from(&(ct * dt));
-        f0.fixed_view_mut::<3, 3>(0, 9).copy_from(&p.dp_db_g);
-        f0.fixed_view_mut::<3, 3>(0, 12)
+        let mut position_bias = SMatrix::<f64, 3, 6>::zeros();
+        position_bias
+            .fixed_columns_mut::<3>(0)
+            .copy_from(&p.dp_db_g);
+        position_bias
+            .fixed_columns_mut::<3>(3)
             .copy_from(&-p.c_doubleintegral);
-        f0.fixed_view_mut::<3, 3>(3, 3)
-            .copy_from(&(plus(&(dq * q1i)) * oplus(&q0)).fixed_view::<3, 3>(0, 0));
-        f0.fixed_view_mut::<3, 3>(3, 9).copy_from(
-            &((oplus(&(q1i * q0)) * oplus(&dq)).fixed_view::<3, 3>(0, 0) * (-p.dalpha_db_g)),
-        );
-        f0.fixed_view_mut::<3, 3>(6, 3)
-            .copy_from(&(ct * cross_mx(&dv)));
-        f0.fixed_view_mut::<3, 3>(6, 6).copy_from(&ct);
-        f0.fixed_view_mut::<3, 3>(6, 9).copy_from(&p.dv_db_g);
-        f0.fixed_view_mut::<3, 3>(6, 12).copy_from(&-p.c_integral);
-        f1.fixed_view_mut::<3, 3>(0, 0).copy_from(&-ct);
-        f1.fixed_view_mut::<3, 3>(3, 3)
-            .copy_from(&-(plus(&dq) * oplus(&q0) * plus(&q1i)).fixed_view::<3, 3>(0, 0));
-        f1.fixed_view_mut::<3, 3>(6, 6).copy_from(&-ct);
+        let mut velocity_bias = SMatrix::<f64, 3, 6>::zeros();
+        velocity_bias
+            .fixed_columns_mut::<3>(0)
+            .copy_from(&p.dv_db_g);
+        velocity_bias
+            .fixed_columns_mut::<3>(3)
+            .copy_from(&-p.c_integral);
+        if let Some((f0, f1)) = jacobians {
+            *f0 = Jacobian::identity();
+            *f1 = -Jacobian::identity();
+            f0.fixed_view_mut::<3, 3>(0, 0).copy_from(&ct);
+            f0.fixed_view_mut::<3, 3>(0, 3)
+                .copy_from(&(ct * cross_mx(&dp)));
+            f0.fixed_view_mut::<3, 3>(0, 6).copy_from(&(ct * dt));
+            f0.fixed_view_mut::<3, 6>(0, 9).copy_from(&position_bias);
+            f0.fixed_view_mut::<3, 3>(3, 3)
+                .copy_from(&(plus(&(dq * q1i)) * oplus(&q0)).fixed_view::<3, 3>(0, 0));
+            f0.fixed_view_mut::<3, 3>(3, 9).copy_from(
+                &((oplus(&(q1i * q0)) * oplus(&dq)).fixed_view::<3, 3>(0, 0) * (-p.dalpha_db_g)),
+            );
+            f0.fixed_view_mut::<3, 3>(6, 3)
+                .copy_from(&(ct * cross_mx(&dv)));
+            f0.fixed_view_mut::<3, 3>(6, 6).copy_from(&ct);
+            f0.fixed_view_mut::<3, 6>(6, 9).copy_from(&velocity_bias);
+            f1.fixed_view_mut::<3, 3>(0, 0).copy_from(&-ct);
+            f1.fixed_view_mut::<3, 3>(3, 3)
+                .copy_from(&-(plus(&dq) * oplus(&q0) * plus(&q1i)).fixed_view::<3, 3>(0, 0));
+            f1.fixed_view_mut::<3, 3>(6, 6).copy_from(&-ct);
+        }
         let mut e = SVector::<f64, 15>::zeros();
         e.fixed_rows_mut::<3>(0)
-            .copy_from(&(ct * dp + p.acc_doubleintegral + f0.fixed_view::<3, 6>(0, 9) * db));
+            .copy_from(&(ct * dp + p.acc_doubleintegral + position_bias * db));
         e.fixed_rows_mut::<3>(3)
             .copy_from(&(2.0 * (dq * (q1i * q0)).coords.fixed_rows::<3>(0)));
         e.fixed_rows_mut::<3>(6)
-            .copy_from(&(ct * dv + p.acc_integral + f0.fixed_view::<3, 6>(6, 9) * db));
+            .copy_from(&(ct * dv + p.acc_integral + velocity_bias * db));
         e.fixed_rows_mut::<6>(9)
             .copy_from(&(sb0.fixed_rows::<6>(3) - sb1.fixed_rows::<6>(3)));
-        (e, f0, f1)
+        e
     }
-    /// Mutable access serializes cache updates; callers can share behind a mutex.
-    /// # Errors
-    /// Returns an error if required graph states, parameter blocks or measurements are absent,
-    /// input dimensions/values are invalid, or evaluation, optimization or graph I/O fails.
-    pub fn evaluate(
+    fn evaluate_unweighted(
         &mut self,
         pose0: &SVector<f64, 7>,
         sb0: &SpeedAndBias,
         pose1: &SVector<f64, 7>,
         sb1: &SpeedAndBias,
-    ) -> Result<ImuEvaluation, IntegrationError> {
+        jacobians: Option<(&mut Jacobian, &mut Jacobian)>,
+    ) -> Result<(SVector<f64, 15>, bool), IntegrationError> {
         let p0 = pose_from_parameters(pose0);
         let p1 = pose_from_parameters(pose1);
         let mut db = sb0.fixed_rows::<6>(3) - self.preintegration.reference.fixed_rows::<6>(3);
@@ -656,33 +667,60 @@ impl ImuError {
             db.fill(0.0);
             self.redo = false;
         }
-        let (mut e, f0, f1) = self.unweighted(&p0, sb0, &p1, sb1, &db);
+        let mut e = self.unweighted(&p0, sb0, &p1, sb1, &db, jacobians);
         if !success {
             e.fill(0.0);
         }
+        Ok((e, success))
+    }
+    /// Evaluates the weighted residual and updates the preintegration cache.
+    /// # Errors
+    /// Returns an error if integration fails or the covariance is invalid.
+    pub fn evaluate_residual(
+        &mut self,
+        pose0: &SVector<f64, 7>,
+        sb0: &SpeedAndBias,
+        pose1: &SVector<f64, 7>,
+        sb1: &SpeedAndBias,
+    ) -> Result<SVector<f64, 15>, IntegrationError> {
+        let (e, _) = self.evaluate_unweighted(pose0, sb0, pose1, sb1, None)?;
+        Ok(self
+            .square_root_information
+            .ok_or(IntegrationError::InvalidCovariance)?
+            * e)
+    }
+    /// Mutable access serializes cache updates; callers can share behind a mutex.
+    /// # Errors
+    /// Returns an error if required graph states, parameter blocks or measurements are absent,
+    /// input dimensions/values are invalid, or evaluation, optimization or graph I/O fails.
+    pub fn evaluate(
+        &mut self,
+        pose0: &SVector<f64, 7>,
+        sb0: &SpeedAndBias,
+        pose1: &SVector<f64, 7>,
+        sb1: &SpeedAndBias,
+    ) -> Result<ImuEvaluation, IntegrationError> {
+        let mut f0 = Jacobian::zeros();
+        let mut f1 = Jacobian::zeros();
+        let (e, success) =
+            self.evaluate_unweighted(pose0, sb0, pose1, sb1, Some((&mut f0, &mut f1)))?;
         let u = self
             .square_root_information
             .ok_or(IntegrationError::InvalidCovariance)?;
         let j0 = u * f0.fixed_columns::<6>(0);
         let j2 = u * f1.fixed_columns::<6>(0);
+        let j1 = u * f0.fixed_columns::<9>(6);
+        let j3 = u * f1.fixed_columns::<9>(6);
         Ok(ImuEvaluation {
             residual: u * e,
             pose0: j0 * PoseManifold::minus_jacobian(pose0),
             pose1: j2 * PoseManifold::minus_jacobian(pose1),
-            speed_bias0: u * f0.fixed_columns::<9>(6),
-            speed_bias1: u * f1.fixed_columns::<9>(6),
+            speed_bias0: j1,
+            speed_bias1: j3,
             pose0_minimal: if success { j0 } else { SMatrix::zeros() },
             pose1_minimal: if success { j2 } else { SMatrix::zeros() },
-            speed_bias0_minimal: if success {
-                u * f0.fixed_columns::<9>(6)
-            } else {
-                SMatrix::zeros()
-            },
-            speed_bias1_minimal: if success {
-                u * f1.fixed_columns::<9>(6)
-            } else {
-                SMatrix::zeros()
-            },
+            speed_bias0_minimal: if success { j1 } else { SMatrix::zeros() },
+            speed_bias1_minimal: if success { j3 } else { SMatrix::zeros() },
             integration_success: success,
         })
     }
@@ -698,12 +736,13 @@ impl ImuError {
     ) -> Option<(f64, SVector<f64, 4>, SMatrix<f64, 4, 4>)> {
         let information = self.information?;
         let db = sb0.fixed_rows::<6>(3) - self.preintegration.reference.fixed_rows::<6>(3);
-        let (e, _, _) = self.unweighted(
+        let e = self.unweighted(
             &pose_from_parameters(pose0),
             sb0,
             &pose_from_parameters(pose1),
             sb1,
             &db,
+            None,
         );
         let inf_e = information * e;
         let cost_sum = e.dot(&inf_e) + self.preintegration.p_delta.determinant().ln();
