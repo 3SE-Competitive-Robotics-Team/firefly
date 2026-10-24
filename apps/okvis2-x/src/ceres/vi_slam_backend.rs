@@ -3442,6 +3442,21 @@ impl crate::frontend::pipeline::FrontendGraph for ViSlamBackend {
         self.get_landmarks()
             .expect("graph landmark estimates exist")
     }
+    fn get_landmark(&self, id: LandmarkId) -> Result<MapPoint2> {
+        ViSlamBackend::get_landmark(self, id)
+    }
+    fn landmark(&self, id: LandmarkId) -> Result<Vector4<f64>> {
+        self.realtime_graph.landmark(id)
+    }
+    fn is_landmark_added(&self, id: LandmarkId) -> bool {
+        ViSlamBackend::is_landmark_added(self, id)
+    }
+    fn is_landmark_initialised(&self, id: LandmarkId) -> Result<bool> {
+        ViSlamBackend::is_landmark_initialised(self, id)
+    }
+    fn is_observed(&self, key: KeypointIdentifier) -> bool {
+        ViSlamBackend::is_observed(self, key)
+    }
     fn add_landmark(&mut self, point: Vector4<f64>, initialized: bool) -> Result<LandmarkId> {
         self.add_landmark_auto(point, initialized)
     }

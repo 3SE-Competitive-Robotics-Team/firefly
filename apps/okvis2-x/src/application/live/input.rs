@@ -197,7 +197,7 @@ pub(super) fn run(mut ports: Ports) -> Result<()> {
         .transpose()?;
     let mut publishers = Publishers::open(&node, &ports.config, &ports.topics)?;
     let mut pairs = Pairs::new(ports.config.stereo_tolerance);
-    let mut output = Output::new(ports.config.clone(), session());
+    let mut output = Output::new(ports.config.clone(), session())?;
     let mut imu_time = None;
     let mut last_depth = None;
 

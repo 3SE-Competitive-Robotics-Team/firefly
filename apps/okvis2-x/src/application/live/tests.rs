@@ -128,7 +128,7 @@ fn posterior_imu_prediction_preserves_stationary_geometry_and_never_renews_a_sta
         max_imu_gap: 0.02,
         ..Default::default()
     };
-    let mut predictor = Output::new(config, 7);
+    let mut predictor = Output::new(config, 7).unwrap();
     assert!(imu(&mut predictor, 1.0).is_none());
     predictor
         .posterior(&publication(1.0, 1, Transformation::identity(), 0))
@@ -153,7 +153,7 @@ fn posterior_imu_prediction_preserves_stationary_geometry_and_never_renews_a_sta
 }
 #[test]
 fn loop_commit_changes_map_coordinates_atomically_without_moving_local_odometry() {
-    let mut predictor = Output::new(Config::default(), 1);
+    let mut predictor = Output::new(Config::default(), 1).unwrap();
     imu(&mut predictor, 1.0);
     predictor
         .posterior(&publication(1.0, 1, Transformation::identity(), 0))
@@ -199,7 +199,7 @@ fn loop_commit_changes_map_coordinates_atomically_without_moving_local_odometry(
 }
 #[test]
 fn lost_tracking_or_uncovered_imu_gap_stops_predictions_without_resetting_session() {
-    let mut predictor = Output::new(Config::default(), 1);
+    let mut predictor = Output::new(Config::default(), 1).unwrap();
     imu(&mut predictor, 1.0);
     let mut posterior = publication(1.0, 1, Transformation::identity(), 0);
     predictor.posterior(&posterior).unwrap();
@@ -218,6 +218,51 @@ fn lost_tracking_or_uncovered_imu_gap_stops_predictions_without_resetting_sessio
     predictor.posterior(&posterior).unwrap();
     assert!(imu(&mut predictor, 1.1).is_none());
     assert!(imu(&mut predictor, 1.11).is_none());
+}
+
+#[test]
+fn prediction_reuses_calibration_across_samples_and_posterior_replay() {
+    let mut config = Config::default();
+    config.imu.extrinsic.translation = [0.1, -0.2, 0.3];
+    let rotation = UnitQuaternion::from_euler_angles(0.2, -0.1, 0.3);
+    let q = rotation.quaternion();
+    config.imu.extrinsic.rotation = [q.i, q.j, q.k, q.w];
+    config.imu.accelerometer_scale = [2., 0.5, 1.];
+    let sensor_pose = config.imu.extrinsic.pose().unwrap();
+    let raw_acceleration = sensor_pose
+        .inverse()
+        .rotate_vector(&Vector3::new(0., 0., config.imu.gravity))
+        .component_div(&Vector3::from(config.imu.accelerometer_scale));
+    let mut predictor = Output::new(config, 3).unwrap();
+    for index in 0..=40 {
+        let time = 1. + index as f64 * 0.001;
+        if index == 10 || index == 30 {
+            predictor
+                .posterior(&publication(time - 0.005, index, sensor_pose.clone(), 0))
+                .unwrap();
+        }
+        let sample = predictor
+            .imu(
+                output::time(time).unwrap(),
+                raw_acceleration,
+                Vector3::zeros(),
+            )
+            .unwrap();
+        if index < 10 {
+            assert!(sample.is_none());
+        } else {
+            let sample = sample.unwrap();
+            assert!(sample.odom.position_x.abs() < 1e-12);
+            assert!(sample.odom.position_y.abs() < 1e-12);
+            assert!(sample.odom.position_z.abs() < 1e-12);
+            assert!(sample.odom.velocity_z.abs() < 1e-12);
+            assert!((sample.odom.quat_w - 1.).abs() < 1e-12);
+            assert_eq!(sample.attitude.unwrap().session, 3);
+        }
+    }
+    let mut invalid = Config::default();
+    invalid.imu.extrinsic.rotation = [0.; 4];
+    assert!(Output::new(invalid, 1).is_err());
 }
 #[test]
 fn marginal_covariance_matches_analytic_independent_priors_and_rejects_unobserved_parameters() {
