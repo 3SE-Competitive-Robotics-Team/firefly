@@ -26,7 +26,6 @@ pub struct MappingFactorConfig {
 #[serde(default)]
 pub struct SubMapConfig {
     pub results_directory: String,
-    pub write_mesh_output: bool,
     pub sensor_measurement_downsampling: usize,
     #[serde(rename = "depth_image_resolution_downsampling")]
     pub depth_image_res_downsampling: usize,
@@ -49,7 +48,6 @@ impl Default for SubMapConfig {
     fn default() -> Self {
         Self {
             results_directory: "/home/".into(),
-            write_mesh_output: false,
             sensor_measurement_downsampling: 1,
             depth_image_res_downsampling: 1,
             submap_kf_threshold: 5,
@@ -85,7 +83,6 @@ impl SubMapConfig {
 impl fmt::Display for SubMapConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "results_directory: {}", self.results_directory)?;
-        writeln!(f, "write_mesh_output: {}", self.write_mesh_output)?;
         writeln!(
             f,
             "sensor_measurement_downsampling: {}",

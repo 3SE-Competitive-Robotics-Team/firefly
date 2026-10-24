@@ -291,19 +291,3 @@ impl std::fmt::Display for MapConfig {
         )
     }
 }
-impl Map {
-    /// # Errors
-    /// Returns an error for an invalid mesh scale or inconsistent neighbour/block scale
-    /// storage.
-    pub fn mesh(
-        &self,
-        t_ow: &nalgebra::Matrix4<f32>,
-        min_desired_scale: i32,
-    ) -> Result<crate::mesh::TriangleMesh> {
-        let scale = nalgebra::Matrix4::new_nonuniform_scaling(&Vector3::repeat(self.resolution));
-        self.octree.mesh(
-            &(t_ow * self.t_wm.to_homogeneous() * scale),
-            min_desired_scale,
-        )
-    }
-}
