@@ -45,7 +45,6 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
 };
 pub type DepthFrames = BTreeMap<usize, Vec<CameraMeasurement>>;
 pub type RayVector = Vec<(Matrix4<f32>, Vector3<f32>)>;
@@ -765,19 +764,18 @@ impl<B: SupereightBackend> SubmappingInterface<B> {
         self.workers.push(thread::spawn(move || {
             let result = (|| {
                 while !finished.load(Ordering::Acquire) {
-                    let frame = {
-                        let mut s = state
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let (lock, cv) = &*inputs;
-                        let mut q = lock
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let frame = s.assemble_frame(&mut q)?;
-                        cv.notify_all();
-                        frame
-                    };
+                    let mut s = state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let (lock, cv) = &*inputs;
+                    let mut q = lock
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let frame = s.assemble_frame(&mut q)?;
+                    cv.notify_all();
+                    drop(s);
                     if let Some(f) = frame {
+                        drop(q);
                         pending.fetch_add(1, Ordering::AcqRel);
                         if blocking {
                             if !frames.push_blocking(f) {
@@ -788,15 +786,16 @@ impl<B: SupereightBackend> SubmappingInterface<B> {
                             pending.fetch_sub(1, Ordering::AcqRel);
                         }
                     } else {
-                        let (lock, cv) = &*inputs;
-                        let q = lock
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         if q.shutdown {
                             break;
                         }
+                        if !q.states.is_empty() {
+                            continue;
+                        }
+                        // Keep the input lock from the empty check through waiting so an
+                        // arriving measurement or shutdown cannot lose its notification.
                         drop(
-                            cv.wait_timeout(q, Duration::from_millis(1))
+                            cv.wait(q)
                                 .unwrap_or_else(std::sync::PoisonError::into_inner),
                         );
                     }
@@ -2824,6 +2823,65 @@ fn save_occupancy_mesh(mesh: &[MeshFace], path: &Path, t_wm: &Matrix4<f32>) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assembly_worker_processes_updates_and_shuts_down_without_polling() {
+        use crate::application::live::config::Config;
+        use crate::runtime::vi_interface::{BackendTrackingState, TrackingQuality};
+        use std::{sync::mpsc, time::Duration};
+
+        let parameters = Config::default().parameters().unwrap();
+        let backend = crate::mapping::object_mapping::OccupancyMapBackend::new(
+            firefly_supereight2::map::MapConfig::default(),
+            firefly_supereight2::data::DataConfig::default(),
+        );
+        let mut mapper =
+            SubmappingInterface::new(SubMapConfig::default(), &parameters, backend).unwrap();
+        let (sender, received) = mpsc::channel();
+        mapper.state.lock().unwrap().anchored_update_callback = Some(Arc::new(move |s, _| {
+            sender.send(s.id).unwrap();
+        }));
+        let inputs = mapper.input_handle();
+        let update = |id| {
+            let id = StateId::new(id);
+            let state = State::new(
+                Transformation::identity(),
+                Vector3::zeros(),
+                (Vector3::zeros(), Vector3::zeros()),
+                Vector3::zeros(),
+                Timestamp::from_second(id.value() as i64).unwrap(),
+                id,
+                true,
+            );
+            let tracking = TrackingState {
+                id,
+                is_keyframe: true,
+                is_lidar_keyframe: false,
+                tracking_quality: TrackingQuality::Good,
+                backend: BackendTrackingState::default(),
+                current_keyframe_id: id,
+            };
+            let updates = Arc::new(BTreeMap::from([(id, state.clone())]));
+            inputs
+                .state_update_callback(state, tracking, updates)
+                .unwrap();
+        };
+        update(1);
+        mapper.start().unwrap();
+        let mut observed = Vec::new();
+        for id in 1..=64 {
+            if id != 1 {
+                update(id);
+            }
+            match received.recv_timeout(Duration::from_secs(2)) {
+                Ok(id) => observed.push(id.value()),
+                Err(_) => break,
+            }
+        }
+        mapper.set_finished().unwrap();
+        assert_eq!(observed, (1..=64).collect::<Vec<_>>());
+        assert!(mapper.is_finished());
+    }
 
     #[test]
     fn depth_pose_adapter_preserves_the_input_matrix() {

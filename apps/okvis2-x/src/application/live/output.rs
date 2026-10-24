@@ -3,6 +3,7 @@
 use super::config::{Config, invalid};
 use crate::{
     ceres::imu_error::ImuError,
+    config::parameters::ImuParameters,
     frames::frame_typedefs::StateId,
     kinematics::transformation::Transformation,
     runtime::{threaded_slam::PublicationData, vi_interface::TrackingQuality},
@@ -30,9 +31,13 @@ struct Prediction {
 pub(super) struct Output {
     config: Config,
     imu: ImuMeasurementDeque,
+    prediction_measurements: ImuMeasurementDeque,
+    imu_parameters: ImuParameters,
+    sensor_from_body: Transformation,
     prediction: Option<Prediction>,
     anchors: BTreeMap<StateId, Transformation>,
-    map_from_odom: Transformation,
+    odom_from_map: Transformation,
+    alignment: RigidTransform,
     graph_revision: u64,
     revision: u64,
     session: u64,
@@ -44,18 +49,26 @@ impl Output {
     pub fn session_id(&self) -> u64 {
         self.session
     }
-    pub fn new(config: Config, session: u64) -> Self {
-        Self {
+    pub fn new(config: Config, session: u64) -> Result<Self> {
+        let imu_parameters = config.imu_parameters()?;
+        let sensor_from_body = imu_parameters.t_bs.inverse();
+        let map_from_odom = Transformation::identity();
+        let alignment = rigid(&map_from_odom)?;
+        Ok(Self {
             config,
             imu: VecDeque::new(),
+            prediction_measurements: VecDeque::new(),
+            imu_parameters,
+            sensor_from_body,
             prediction: None,
             anchors: BTreeMap::new(),
-            map_from_odom: Transformation::identity(),
+            odom_from_map: Transformation::identity(),
+            alignment,
             graph_revision: 0,
             revision: 0,
             session,
             last_published: None,
-        }
+        })
     }
     pub fn imu(
         &mut self,
@@ -66,7 +79,7 @@ impl Output {
         if self.imu.back().is_some_and(|m| m.time_stamp >= time) {
             return Ok(None);
         }
-        let alpha = alpha.component_mul(&Vector3::from(self.config.imu.accelerometer_scale));
+        let alpha = alpha.component_mul(&self.imu_parameters.s_a);
         self.imu.push_back(ImuMeasurement::new(
             time,
             ImuSensorReadings::new(omega, alpha),
@@ -108,7 +121,10 @@ impl Output {
                     .map(|updated| (local, updated))
             });
             if let Some((local, updated)) = anchor {
-                self.map_from_odom = updated.t_ws.compose(&local.inverse());
+                let map_from_odom = updated.t_ws.compose(&local.inverse());
+                let alignment = rigid(&map_from_odom)?;
+                self.odom_from_map = map_from_odom.inverse();
+                self.alignment = alignment;
             } else if !self.anchors.is_empty() {
                 return Err(invalid(
                     "full-graph correction has no common odometry anchor",
@@ -121,7 +137,7 @@ impl Output {
                 .ok_or_else(|| invalid("navigation revision exhausted"))?;
         }
         self.anchors
-            .insert(state.id, self.map_from_odom.inverse().compose(&state.t_ws));
+            .insert(state.id, self.odom_from_map.compose(&state.t_ws));
         while self.anchors.len() > 512 {
             self.anchors.pop_first();
         }
@@ -150,13 +166,15 @@ impl Output {
         let Some(start) = start else {
             return Ok(None);
         };
-        let measurements: ImuMeasurementDeque = self
-            .imu
-            .iter()
-            .skip(start)
-            .take_while(|m| m.time_stamp <= time)
-            .cloned()
-            .collect();
+        self.prediction_measurements.clear();
+        self.prediction_measurements.extend(
+            self.imu
+                .iter()
+                .skip(start)
+                .take_while(|m| m.time_stamp <= time)
+                .cloned(),
+        );
+        let measurements = &self.prediction_measurements;
         if measurements.len() < 2 {
             return Ok(None);
         }
@@ -168,10 +186,9 @@ impl Output {
             self.prediction = None;
             return Ok(None);
         }
-        let parameters = self.config.imu_parameters()?;
         ImuError::propagation(
-            &measurements,
-            &parameters,
+            measurements,
+            &self.imu_parameters,
             &mut prediction.pose,
             &mut prediction.speed_bias,
             (prediction.time, time),
@@ -181,19 +198,18 @@ impl Output {
         prediction.time = time;
         let omega = self.imu.back().unwrap().measurement.gyroscopes
             - prediction.speed_bias.fixed_rows::<3>(3).into_owned();
-        let body_from_imu = self.config.imu.extrinsic.pose()?;
-        let sensor_from_body = body_from_imu.inverse();
-        let map_from_body = prediction.pose.compose(&sensor_from_body);
+        let body_from_imu = &self.imu_parameters.t_bs;
+        let sensor_from_body = &self.sensor_from_body;
+        let map_from_body = prediction.pose.compose(sensor_from_body);
         let velocity_map = prediction.speed_bias.fixed_rows::<3>(0).into_owned()
             + prediction
                 .pose
                 .rotate_vector(&omega.cross(&sensor_from_body.translation()));
-        let odom_from_map = self.map_from_odom.inverse();
+        let odom_from_map = &self.odom_from_map;
         let local = odom_from_map.compose(&map_from_body);
         let odom = message(time, &local, &odom_from_map.rotate_vector(&velocity_map));
         let corrected = message(time, &map_from_body, &velocity_map);
-        let alignment = rigid(&self.map_from_odom)?;
-        let navigation = NavigationMessage::new(corrected, &alignment, self.revision);
+        let navigation = NavigationMessage::new(corrected, &self.alignment, self.revision);
         // 上游 OKVIS2-X 不计算状态协方差，姿态照常发布；这里同样不做协方差门控。
         let attitude = Some({
             let q = local.quaternion();

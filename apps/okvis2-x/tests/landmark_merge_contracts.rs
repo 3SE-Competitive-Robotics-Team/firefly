@@ -62,3 +62,33 @@ fn batch_merge_rejects_missing_landmarks_and_mismatched_vectors() {
     assert_eq!(backend.realtime_graph.landmarks.len(), 3);
     assert_eq!(backend.full_graph.landmarks.len(), 3);
 }
+
+#[test]
+fn frontend_queries_only_the_selected_landmark_and_observes_graph_updates() {
+    use firefly_okvis_x::frontend::pipeline::FrontendGraph;
+
+    let mut backend = backend();
+    let (a, b) = (LandmarkId::new(1), LandmarkId::new(2));
+    {
+        let _unrelated = backend.realtime_graph.landmarks[&a].h_point.borrow_mut();
+        let selected = FrontendGraph::get_landmark(&backend, b).unwrap();
+        assert_eq!(selected.id, b);
+        assert_eq!(selected.point, Vector4::new(2., 0., 1., 1.));
+        assert_eq!(
+            FrontendGraph::landmark(&backend, b).unwrap(),
+            selected.point
+        );
+        assert!(FrontendGraph::is_landmark_initialised(&backend, b).unwrap());
+    }
+    let changed = Vector4::new(-1., 2., 3., 1.);
+    backend.set_landmark(b, changed, false).unwrap();
+    assert_eq!(
+        FrontendGraph::get_landmark(&backend, b).unwrap().point,
+        changed
+    );
+    assert!(!FrontendGraph::is_landmark_initialised(&backend, b).unwrap());
+    backend.merge_landmark(a, b).unwrap();
+    assert!(!FrontendGraph::is_landmark_added(&backend, a));
+    assert!(FrontendGraph::get_landmark(&backend, a).is_err());
+    assert!(FrontendGraph::is_landmark_added(&backend, b));
+}

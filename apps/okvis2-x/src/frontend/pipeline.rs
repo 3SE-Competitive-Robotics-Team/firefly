@@ -62,6 +62,17 @@ pub trait FrontendGraph {
     fn set_pose(&mut self, id: StateId, pose: Transformation) -> Result<()>;
     fn landmarks(&self) -> MapPoints;
     /// # Errors
+    /// Returns an error if the landmark is absent.
+    fn landmark(&self, id: LandmarkId) -> Result<Vector4<f64>>;
+    /// # Errors
+    /// Returns an error if the landmark or its graph metadata is absent.
+    fn get_landmark(&self, id: LandmarkId) -> Result<MapPoint2>;
+    fn is_landmark_added(&self, id: LandmarkId) -> bool;
+    /// # Errors
+    /// Returns an error if the landmark is absent.
+    fn is_landmark_initialised(&self, id: LandmarkId) -> Result<bool>;
+    fn is_observed(&self, key: KeypointIdentifier) -> bool;
+    /// # Errors
     /// Returns an error if required frames, cameras, landmarks or vocabulary data are absent,
     /// measurement dimensions are invalid, or matching, geometry, graph or file operations fail.
     fn add_landmark(&mut self, point: Vector4<f64>, initialized: bool) -> Result<LandmarkId>;
@@ -681,7 +692,6 @@ impl<
     /// Returns an error if required frames, cameras, landmarks or vocabulary data are absent,
     /// measurement dimensions are invalid, or matching, geometry, graph or file operations fail.
     pub fn remove_outliers(&self, graph: &mut G, frame: &MultiFramePtr) -> Result<usize> {
-        let points = graph.landmarks();
         let mut count = 0;
         let mut removals = Vec::new();
         {
@@ -691,8 +701,9 @@ impl<
                 let t_cw = pose.compose(mf.t_sc(c)).inverse();
                 for k in 0..mf.num_keypoints(c) {
                     let id = LandmarkId::new(mf.landmark_id(c, k));
-                    if let Some(point) = points.get(&id) {
-                        if valid_reprojection_inclusive(&mf, c, k, &t_cw, &point.point, 4.0) {
+                    if graph.is_landmark_added(id) {
+                        let point = graph.landmark(id)?;
+                        if valid_reprojection_inclusive(&mf, c, k, &t_cw, &point, 4.0) {
                             count += 1;
                         } else {
                             removals.push(KeypointIdentifier::new(mf.id(), c, k));
@@ -810,8 +821,7 @@ impl<
                         if id0 != id1 {
                             graph.merge_landmark(id1, id0)?;
                         }
-                        let points = graph.landmarks();
-                        if !points[&id0].is_initialised && initialized {
+                        if !graph.is_landmark_initialised(id0)? && initialized {
                             graph.set_landmark(id0, point, true)?;
                         }
                         continue;
@@ -829,7 +839,7 @@ impl<
                         add0 = true;
                         add1 = true;
                     }
-                    let effective = graph.landmarks()[&lm].point;
+                    let effective = graph.landmark(lm)?;
                     for (c, k, t, add) in [(c0, k0, &t0, add0), (c1, k1, &t1, add1)] {
                         if add
                             && valid_reprojection(
@@ -901,27 +911,26 @@ impl<
             for c in 0..self.num_cameras {
                 let twc0 = t0.compose(&graph.extrinsics(older, c)?);
                 let twc1 = t1.compose(&graph.extrinsics(current, c)?);
-                let points = graph.landmarks();
                 let match_mask = self.motion_stereo_candidates(
+                    graph,
                     (&frame0, &frame1),
                     (older, c),
-                    &points,
                     (&twc0, &twc1),
-                );
+                )?;
                 for (k0, k1, point, initialized, quality) in match_mask {
                     if frame1.borrow().landmark_id(c, k1) != 0 {
                         continue;
                     }
                     let kid0 = KeypointIdentifier::new(older.value(), c, k0);
                     let old = LandmarkId::new(frame0.borrow().landmark_id(c, k0));
-                    let points = graph.landmarks();
-                    if points.values().any(|p| p.observations.contains(&kid0)) {
+                    if graph.is_observed(kid0) {
                         continue;
                     }
                     let lm = if old.is_initialised() {
-                        let Some(p) = points.get(&old) else {
+                        if !graph.is_landmark_added(old) {
                             continue;
-                        };
+                        }
+                        let p = graph.get_landmark(old)?;
                         if p.is_initialised {
                             continue;
                         }
@@ -955,11 +964,11 @@ impl<
     }
     fn motion_stereo_candidates(
         &self,
+        graph: &G,
         (frame0, frame1): (&MultiFramePtr, &MultiFramePtr),
         (older, c): (StateId, usize),
-        points: &MapPoints,
         (twc0, twc1): (&Transformation, &Transformation),
-    ) -> Vec<MotionStereoMatch> {
+    ) -> Result<Vec<MotionStereoMatch>> {
         let mut match_mask = Vec::new();
         {
             let f0 = frame0.borrow();
@@ -967,12 +976,12 @@ impl<
             for k0 in 0..f0.num_keypoints(c) {
                 let id0 = LandmarkId::new(f0.landmark_id(c, k0));
                 if id0.is_initialised()
-                    && (!points.contains_key(&id0) || points[&id0].is_initialised)
+                    && (!graph.is_landmark_added(id0) || graph.is_landmark_initialised(id0)?)
                 {
                     continue;
                 }
                 let kid0 = KeypointIdentifier::new(older.value(), c, k0);
-                if points.values().any(|p| p.observations.contains(&kid0)) {
+                if graph.is_observed(kid0) {
                     continue;
                 }
                 let mut best = None;
@@ -1007,7 +1016,7 @@ impl<
                 }
             }
         }
-        match_mask
+        Ok(match_mask)
     }
 
     /// # Errors
@@ -1133,7 +1142,7 @@ impl<
                     graph.remove_observation(kid)?;
                     merges.push((previous, lm));
                 }
-                let point = graph.landmarks()[&lm].clone();
+                let point = graph.get_landmark(lm)?;
                 if let Some(hp) = hp {
                     let mut valid = true;
                     for obs in &point.observations {
