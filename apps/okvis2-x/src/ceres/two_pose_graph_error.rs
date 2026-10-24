@@ -22,7 +22,10 @@ use crate::{
     },
 };
 use firefly_error::{Error, ErrorKind, Result};
-use nalgebra::{DMatrix, DVector, Quaternion, SMatrix, SVector, SymmetricEigen, Vector3, Vector4};
+use nalgebra::{
+    DMatrix, DMatrixView, DVector, Dyn, Quaternion, SMatrix, SVector, SymmetricEigen, Vector3,
+    Vector4,
+};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
@@ -399,13 +402,22 @@ impl TwoPoseGraphError {
             *h_total += h00;
             *b_total += b0;
             let m = h01 * &inverse_sqrt;
-            *mh += &m * m.transpose();
-            *mb += m * (inverse_sqrt.transpose() * b1);
+            // Swap strides without copying; dot products must finish before updating the totals.
+            let transposed = DMatrixView::<f64, Dyn, Dyn>::from_slice_with_strides(
+                m.as_slice(),
+                m.ncols(),
+                m.nrows(),
+                m.nrows(),
+                1,
+            );
+            mh.gemm_tr(1.0, &transposed, &transposed, 1.0);
+            let projected = inverse_sqrt.tr_mul(&b1);
+            mb.gemv_tr(1.0, &transposed, &projected, 1.0);
         }
     }
 
     fn accumulate_observation(
-        evaluation: ErrorEvaluation,
+        mut evaluation: ErrorEvaluation,
         loss_function: Option<&Rc<dyn LossFunction>>,
         extrinsics_index: usize,
         system: &mut LandmarkSystem,
@@ -422,11 +434,11 @@ impl TwoPoseGraphError {
         if residual.norm() > 3.0 {
             return Ok(false);
         }
-        let mut j0 = evaluation.minimal_jacobians[0].clone();
+        let mut j0 = evaluation.minimal_jacobians[0].take();
         let mut j1 = evaluation.minimal_jacobians[1]
-            .clone()
+            .take()
             .ok_or_else(|| graph_error("landmark Jacobian is absent"))?;
-        let mut j2 = evaluation.minimal_jacobians[2].clone();
+        let mut j2 = evaluation.minimal_jacobians[2].take();
         if let Some(loss) = loss_function {
             let sq_norm = residual.norm_squared();
             let rho = loss.evaluate(sq_norm);
@@ -438,27 +450,31 @@ impl TwoPoseGraphError {
                 let alpha = 1.0 - d.sqrt();
                 (sqrt_rho1 / (1.0 - alpha), alpha / sq_norm)
             };
-            if let Some(j) = &mut j0 {
-                *j = sqrt_rho1 * (&*j - alpha_sq_norm * &residual * (residual.transpose() * &*j));
-            }
-            j1 = sqrt_rho1 * (&j1 - alpha_sq_norm * &residual * (residual.transpose() * &j1));
-            if let Some(j) = &mut j2 {
-                *j = sqrt_rho1 * (&*j - alpha_sq_norm * &residual * (residual.transpose() * &*j));
+            for j in j0
+                .iter_mut()
+                .chain(std::iter::once(&mut j1))
+                .chain(j2.iter_mut())
+            {
+                if alpha_sq_norm == 0.0 {
+                    *j *= sqrt_rho1;
+                } else {
+                    *j = sqrt_rho1 * (&*j - alpha_sq_norm * &residual * residual.tr_mul(&*j));
+                }
             }
             residual *= residual_scaling;
         }
         if let Some(j0) = &j0 {
-            add_block(h00, 0, 0, &(j0.transpose() * j0));
-            add_vector(b0, 0, &(-j0.transpose() * &residual));
-            add_block(h01, 0, 0, &(j0.transpose() * &j1));
+            add_normal_block(h00, 0, 0, j0, j0);
+            add_gradient(b0, 0, j0, &residual);
+            add_normal_block(h01, 0, 0, j0, &j1);
             if let Some(j2) = &j2 {
                 if extrinsics_index + 6 > n {
                     return Err(graph_error(
                         "extrinsics ordering exceeds residual dimension",
                     ));
                 }
-                add_block(h00, 0, extrinsics_index, &(j0.transpose() * j2));
-                add_block(h00, extrinsics_index, 0, &(j2.transpose() * j0));
+                add_normal_block(h00, 0, extrinsics_index, j0, j2);
+                add_normal_block(h00, extrinsics_index, 0, j2, j0);
             }
         }
         if let Some(j2) = &j2 {
@@ -467,17 +483,12 @@ impl TwoPoseGraphError {
                     "extrinsics ordering exceeds residual dimension",
                 ));
             }
-            add_block(h01, extrinsics_index, 0, &(j2.transpose() * &j1));
-            add_block(
-                h00,
-                extrinsics_index,
-                extrinsics_index,
-                &(j2.transpose() * j2),
-            );
-            add_vector(b0, extrinsics_index, &(-j2.transpose() * &residual));
+            add_normal_block(h01, extrinsics_index, 0, j2, &j1);
+            add_normal_block(h00, extrinsics_index, extrinsics_index, j2, j2);
+            add_gradient(b0, extrinsics_index, j2, &residual);
         }
-        *h11 += j1.transpose() * &j1;
-        *b1 -= j1.transpose() * &residual;
+        h11.gemm_tr(1.0, &j1, &j1, 1.0);
+        b1.gemv_tr(-1.0, &j1, &residual, 1.0);
         Ok(true)
     }
 }
@@ -809,9 +820,15 @@ pub(crate) fn factor_system(h: &DMatrix<f64>, b: &DVector<f64>) -> (DMatrix<f64>
     let tolerance = 1.0e-8 * h.ncols() as f64 * values.max();
     let sqrt = values.map(|v| if v > tolerance { v.sqrt() } else { 0.0 });
     let inverse = values.map(|v| if v > tolerance { (1.0 / v).sqrt() } else { 0.0 });
-    let j = DMatrix::from_diagonal(&sqrt) * vectors.transpose();
-    let m = vectors * DMatrix::from_diagonal(&inverse);
-    let dx = -&m * (m.transpose() * b);
+    let mut j = vectors.transpose();
+    for (mut row, scale) in j.row_iter_mut().zip(sqrt.iter()) {
+        row.scale_mut(*scale);
+    }
+    let mut m = vectors;
+    for (mut column, scale) in m.column_iter_mut().zip(inverse.iter()) {
+        column.scale_mut(*scale);
+    }
+    let dx = -(&m * m.tr_mul(b));
     (j, dx)
 }
 pub(crate) fn system_strength(h: &DMatrix<f64>) -> f64 {
@@ -825,17 +842,26 @@ pub(crate) fn system_strength(h: &DMatrix<f64>) -> f64 {
         1.0 / inverse.norm().sqrt()
     }
 }
-fn add_block(target: &mut DMatrix<f64>, row: usize, col: usize, block: &DMatrix<f64>) {
-    for r in 0..block.nrows() {
-        for c in 0..block.ncols() {
-            target[(row + r, col + c)] += block[(r, c)];
-        }
-    }
+fn add_normal_block(
+    target: &mut DMatrix<f64>,
+    row: usize,
+    col: usize,
+    left: &DMatrix<f64>,
+    right: &DMatrix<f64>,
+) {
+    target
+        .view_mut((row, col), (left.ncols(), right.ncols()))
+        .gemm_tr(1.0, left, right, 1.0);
 }
-fn add_vector(target: &mut DVector<f64>, start: usize, block: &DVector<f64>) {
-    for i in 0..block.len() {
-        target[start + i] += block[i];
-    }
+fn add_gradient(
+    target: &mut DVector<f64>,
+    start: usize,
+    jacobian: &DMatrix<f64>,
+    residual: &DVector<f64>,
+) {
+    target
+        .rows_mut(start, jacobian.ncols())
+        .gemv_tr(-1.0, jacobian, residual, 1.0);
 }
 pub(crate) fn graph_error(message: &str) -> Error {
     Error::new(ErrorKind::InvalidArgument, message).with_operation("TwoPoseGraphError")
@@ -847,4 +873,216 @@ struct LandmarkSystem {
     h01: DMatrix<f64>,
     h11: DMatrix<f64>,
     b1: DVector<f64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ceres::vi_graph::RobustLoss;
+
+    struct ConvexLoss;
+    impl LossFunction for ConvexLoss {
+        fn evaluate(&self, s: f64) -> [f64; 3] {
+            [s + s * s, 1. + 2. * s, 2.]
+        }
+    }
+
+    fn observation(
+        pose: bool,
+        extrinsics: bool,
+        residual: &DVector<f64>,
+    ) -> (ErrorEvaluation, DMatrix<f64>) {
+        let dense = DMatrix::from_fn(2, 15, |row, col| {
+            if (col < 6 && !pose) || ((6..12).contains(&col) && !extrinsics) {
+                0.
+            } else {
+                (row as f64 - col as f64 + 2.) / 10.
+            }
+        });
+        let evaluation = ErrorEvaluation {
+            residuals: residual.clone(),
+            jacobians: vec![None; 3],
+            minimal_jacobians: vec![
+                pose.then(|| dense.columns(0, 6).into_owned()),
+                Some(dense.columns(12, 3).into_owned()),
+                extrinsics.then(|| dense.columns(6, 6).into_owned()),
+            ],
+        };
+        (evaluation, dense)
+    }
+
+    fn empty_system() -> LandmarkSystem {
+        LandmarkSystem {
+            h00: DMatrix::zeros(12, 12),
+            b0: DVector::zeros(12),
+            h01: DMatrix::zeros(12, 3),
+            h11: DMatrix::zeros(3, 3),
+            b1: DVector::zeros(3),
+        }
+    }
+
+    #[test]
+    fn schur_accumulation_matches_analytic_inverse_and_preserves_rank_distance_gate() {
+        for eigenvalue in [0., 4.] {
+            for distance in [2., 3.] {
+                let mut system = empty_system();
+                system.h00.fill(0.5);
+                system.b0.fill(-0.25);
+                system.h01 = DMatrix::from_fn(12, 3, |r, c| (r + 2 * c + 1) as f64 / 10.);
+                system.h11 =
+                    DMatrix::from_diagonal(&DVector::from_row_slice(&[1., 2., eigenvalue]));
+                system.b1 = DVector::from_row_slice(&[0.5, -1., 2.]);
+                let floor = 1e-7 * 3. * 2.;
+                let inverse = DMatrix::from_diagonal(&DVector::from_row_slice(&[
+                    1.,
+                    0.5,
+                    if eigenvalue == 0. { 1. / floor } else { 0.25 },
+                ]));
+                let expected_h = &system.h01 * &inverse * system.h01.transpose();
+                let expected_b = &system.h01 * inverse * &system.b1;
+                let mut h = DMatrix::repeat(12, 12, 1.);
+                let mut b = DVector::repeat(12, 2.);
+                let mut mh = DMatrix::repeat(12, 12, 3.);
+                let mut mb = DVector::repeat(12, 4.);
+                TwoPoseGraphError::accumulate_schur(
+                    system,
+                    distance,
+                    (&mut h, &mut b, &mut mh, &mut mb),
+                );
+                if eigenvalue == 0. && distance < 2.99 {
+                    assert_eq!(h, DMatrix::repeat(12, 12, 1.));
+                    assert_eq!(b, DVector::repeat(12, 2.));
+                    assert_eq!(mh, DMatrix::repeat(12, 12, 3.));
+                    assert_eq!(mb, DVector::repeat(12, 4.));
+                } else {
+                    assert_eq!(h, DMatrix::repeat(12, 12, 1.5));
+                    assert_eq!(b, DVector::repeat(12, 1.75));
+                    let h_error = (mh - DMatrix::repeat(12, 12, 3.) - &expected_h).amax();
+                    let b_error = (mb - DVector::repeat(12, 4.) - &expected_b).amax();
+                    assert!(h_error < 1e-12 * expected_h.amax().max(1.));
+                    assert!(b_error < 1e-12 * expected_b.amax().max(1.));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn schur_accumulation_preserves_prior_contributions_during_landmark_cancellation() {
+        let mut system = empty_system();
+        system.h11 = DMatrix::identity(3, 3);
+        system
+            .h01
+            .row_mut(0)
+            .copy_from(&nalgebra::RowVector3::new(1e8, 1e8, 0.));
+        system
+            .h01
+            .row_mut(1)
+            .copy_from(&nalgebra::RowVector3::new(1e8, -1e8, 0.));
+        system.b1 = DVector::from_row_slice(&[1e8, -1e8, 0.]);
+        let mut h = DMatrix::zeros(12, 12);
+        let mut b = DVector::zeros(12);
+        let mut mh = DMatrix::repeat(12, 12, 1.);
+        let mut mb = DVector::repeat(12, 1.);
+        TwoPoseGraphError::accumulate_schur(system, 3., (&mut h, &mut b, &mut mh, &mut mb));
+        assert_eq!(mh[(0, 1)], 1.);
+        assert_eq!(mh[(1, 0)], 1.);
+        assert_eq!(mb[0], 1.);
+    }
+
+    #[test]
+    fn observation_accumulation_matches_independent_robust_normal_equations() {
+        let losses: [Option<Rc<dyn LossFunction>>; 5] = [
+            None,
+            Some(Rc::new(RobustLoss::Huber(0.2))),
+            Some(Rc::new(RobustLoss::Cauchy(0.2))),
+            Some(Rc::new(RobustLoss::Tukey(0.2))),
+            Some(Rc::new(ConvexLoss)),
+        ];
+        for residual in [DVector::from_row_slice(&[0.3, -0.4]), DVector::zeros(2)] {
+            for (pose, extrinsics) in [(true, true), (false, true), (true, false), (false, false)] {
+                for loss in &losses {
+                    let mut system = empty_system();
+                    let (evaluation, dense) = observation(pose, extrinsics, &residual);
+                    let rho = loss
+                        .as_ref()
+                        .map_or([residual.norm_squared(), 1., 0.], |loss| {
+                            loss.evaluate(residual.norm_squared())
+                        });
+                    let gradient = DVector::from_fn(15, |col, _| {
+                        (0..2)
+                            .map(|row| dense[(row, col)] * residual[row])
+                            .sum::<f64>()
+                    });
+                    let expected_h = DMatrix::from_fn(15, 15, |a, b| {
+                        rho[1]
+                            * (0..2)
+                                .map(|row| dense[(row, a)] * dense[(row, b)])
+                                .sum::<f64>()
+                            + 2. * rho[2].max(0.) * gradient[a] * gradient[b]
+                    });
+                    let expected_b = -rho[1] * gradient;
+                    for count in 1..=2 {
+                        assert!(
+                            TwoPoseGraphError::accumulate_observation(
+                                evaluation.clone(),
+                                loss.as_ref(),
+                                6,
+                                &mut system,
+                            )
+                            .unwrap()
+                        );
+                        let count = f64::from(count);
+                        assert!(
+                            (&system.h00 - expected_h.view((0, 0), (12, 12)) * count).amax()
+                                < 1e-12
+                        );
+                        assert!(
+                            (&system.h01 - expected_h.view((0, 12), (12, 3)) * count).amax()
+                                < 1e-12
+                        );
+                        assert!(
+                            (&system.h11 - expected_h.view((12, 12), (3, 3)) * count).amax()
+                                < 1e-12
+                        );
+                        assert!((&system.b0 - expected_b.rows(0, 12) * count).amax() < 1e-12);
+                        assert!((&system.b1 - expected_b.rows(12, 3) * count).amax() < 1e-12);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn observation_accumulation_preserves_rejection_and_missing_parameter_errors() {
+        let mut system = empty_system();
+        let (mut evaluation, _) = observation(true, true, &DVector::from_element(2, 4.));
+        assert!(
+            !TwoPoseGraphError::accumulate_observation(evaluation.clone(), None, 6, &mut system)
+                .unwrap()
+        );
+        assert_eq!(system.h00.norm(), 0.);
+        evaluation.residuals.fill(0.);
+        evaluation.minimal_jacobians[1] = None;
+        assert!(
+            TwoPoseGraphError::accumulate_observation(evaluation, None, 6, &mut system).is_err()
+        );
+        let (evaluation, _) = observation(false, true, &DVector::zeros(2));
+        assert!(
+            TwoPoseGraphError::accumulate_observation(evaluation, None, 7, &mut system).is_err()
+        );
+    }
+
+    #[test]
+    fn factor_system_reconstructs_a_rotated_rank_deficient_quadratic() {
+        let h = DMatrix::from_row_slice(3, 3, &[0.64, -0.48, 0., -0.48, 0.36, 0., 0., 0., 4.]);
+        let b = DVector::from_row_slice(&[2., -1., 3.]);
+        let (j, dx) = factor_system(&h, &b);
+        assert!((j.tr_mul(&j) - h).amax() < 1e-12);
+        assert!((dx - DVector::from_row_slice(&[-1.76, 1.32, -0.75])).amax() < 1e-12);
+        assert!(
+            (&j * j.transpose() - DMatrix::from_diagonal(&DVector::from_row_slice(&[0., 1., 4.])))
+                .amax()
+                < 1e-12
+        );
+    }
 }

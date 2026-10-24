@@ -44,7 +44,7 @@ use crate::ceres::{
 };
 use faer::linalg::solvers::{Solve, SolveLstsq};
 use faer::sparse::{SparseColMat, Triplet};
-use nalgebra::{DMatrix, DVector};
+use nalgebra::{DMatrix, DMatrixView, DVector, DVectorView, DVectorViewMut};
 use std::{sync::Arc, time::Instant};
 
 #[derive(Default)]
@@ -110,23 +110,23 @@ impl Values {
         }
         Ok(v)
     }
-    fn plus_jacobian(&self) -> DMatrix<f64> {
+    fn apply_plus_jacobian(&self, jacobian: DMatrix<f64>) -> DMatrix<f64> {
         match self.manifold {
             ManifoldKind::Pose => {
                 let j = PoseManifold::plus_jacobian(&SVector::from_column_slice(&self.data));
-                DMatrix::from_column_slice(7, 6, j.as_slice())
+                jacobian * DMatrix::from_column_slice(7, 6, j.as_slice())
             }
             ManifoldKind::Pose4d => {
                 let j = PoseManifold4d::plus_jacobian(&SVector::from_column_slice(&self.data));
-                DMatrix::from_column_slice(7, 4, j.as_slice())
+                jacobian * DMatrix::from_column_slice(7, 4, j.as_slice())
             }
             ManifoldKind::HomogeneousPoint => {
                 let j = HomogeneousPointManifold::plus_jacobian(&Vector4::from_column_slice(
                     &self.data,
                 ));
-                DMatrix::from_column_slice(4, 3, j.as_slice())
+                jacobian * DMatrix::from_column_slice(4, 3, j.as_slice())
             }
-            ManifoldKind::Euclidean => DMatrix::identity(self.data.len(), self.data.len()),
+            ManifoldKind::Euclidean => jacobian,
         }
     }
 }
@@ -169,12 +169,9 @@ struct Snapshot {
     factors: Vec<FactorRecord>,
 }
 
-fn dynamic<const R: usize, const C: usize>(m: &SMatrix<f64, R, C>) -> DMatrix<f64> {
-    DMatrix::from_column_slice(R, C, m.as_slice())
-}
-fn output(
+fn output<const N: usize>(
     residuals: DVector<f64>,
-    jacobians: Vec<DMatrix<f64>>,
+    jacobians: [DMatrixView<'_, f64>; N],
     mask: Option<&[bool]>,
 ) -> ErrorEvaluation {
     ErrorEvaluation {
@@ -183,7 +180,7 @@ fn output(
         jacobians: jacobians
             .into_iter()
             .enumerate()
-            .map(|(i, j)| mask.is_some_and(|m| m[i]).then_some(j))
+            .map(|(i, j)| mask.is_some_and(|m| m[i]).then(|| j.into_owned()))
             .collect(),
     }
 }
@@ -193,11 +190,11 @@ fn imu_output(
 ) -> ErrorEvaluation {
     output(
         DVector::from_column_slice(e.residual.as_slice()),
-        vec![
-            dynamic(&e.pose0),
-            dynamic(&e.speed_bias0),
-            dynamic(&e.pose1),
-            dynamic(&e.speed_bias1),
+        [
+            e.pose0.as_view(),
+            e.speed_bias0.as_view(),
+            e.pose1.as_view(),
+            e.speed_bias1.as_view(),
         ],
         mask,
     )
@@ -274,7 +271,7 @@ impl Factor {
                 }
                 Ok(output(
                     DVector::from_element(1, r),
-                    vec![dynamic(&j0), dynamic(&j1), dynamic(&j2)],
+                    [j0.as_view(), j1.as_view(), j2.as_view()],
                     mask,
                 ))
             }
@@ -292,7 +289,7 @@ impl Factor {
                 }
                 Ok(output(
                     DVector::from_column_slice(r.as_slice()),
-                    vec![dynamic(&j)],
+                    [j.as_view()],
                     mask,
                 ))
             }
@@ -310,7 +307,7 @@ impl Factor {
                 }
                 Ok(output(
                     DVector::from_column_slice(r.as_slice()),
-                    vec![dynamic(&j)],
+                    [j.as_view()],
                     mask,
                 ))
             }
@@ -373,7 +370,7 @@ impl Factor {
                 }
                 Ok(output(
                     DVector::from_column_slice(r.as_slice()),
-                    vec![dynamic(&j0), dynamic(&j1)],
+                    [j0.as_view(), j1.as_view()],
                     mask,
                 ))
             }
@@ -396,10 +393,10 @@ impl Factor {
                     .map_err(|e| graph_error(&format!("GPS evaluation: {e:?}")))?;
                 Ok(output(
                     DVector::from_column_slice(e.residual.as_slice()),
-                    vec![
-                        dynamic(&e.pose),
-                        dynamic(&e.speed_bias),
-                        dynamic(&e.gps_world),
+                    [
+                        e.pose.as_view(),
+                        e.speed_bias.as_view(),
+                        e.gps_world.as_view(),
                     ],
                     mask,
                 ))
@@ -427,7 +424,7 @@ impl Factor {
                 }
                 Ok(output(
                     DVector::from_element(1, r),
-                    vec![dynamic(&j0), dynamic(&j1)],
+                    [j0.as_view(), j1.as_view()],
                     mask,
                 ))
             }
@@ -451,7 +448,7 @@ impl Factor {
                 let j = minimal * PoseManifold::minus_jacobian(&SVector::from_column_slice(p[0]));
                 Ok(output(
                     DVector::from_column_slice(r.as_slice()),
-                    vec![dynamic(&j)],
+                    [j.as_view()],
                     mask,
                 ))
             }
@@ -598,17 +595,29 @@ impl Snapshot {
         Ok(())
     }
     fn plus(
-        &self,
+        values: &BTreeMap<usize, Values>,
         offsets: &BTreeMap<usize, usize>,
         delta: &DVector<f64>,
     ) -> Result<BTreeMap<usize, Values>> {
-        let mut next = self.values.clone();
-        for (&key, &offset) in offsets {
-            let v = &self.values[&key];
-            next.get_mut(&key).expect("registered value").data =
-                v.plus(&delta.as_slice()[offset..offset + v.tangent_size()])?;
-        }
-        Ok(next)
+        values
+            .iter()
+            .map(|(&key, v)| {
+                let data = match offsets.get(&key) {
+                    Some(&offset) => {
+                        v.plus(&delta.as_slice()[offset..offset + v.tangent_size()])?
+                    }
+                    None => v.data.clone(),
+                };
+                Ok((
+                    key,
+                    Values {
+                        data,
+                        manifold: v.manifold,
+                        fixed: v.fixed,
+                    },
+                ))
+            })
+            .collect()
     }
     fn evaluate(
         &mut self,
@@ -618,26 +627,35 @@ impl Snapshot {
         disabled: &BTreeSet<ResidualId>,
         jacobians: bool,
     ) -> Result<Linearization> {
+        let linearization_size = if jacobians { size } else { 0 };
         let mut model = Linearization {
             cost: 0.0,
             fixed_cost: 0.0,
             rows: Vec::new(),
-            gradient: DVector::zeros(size),
-            diagonal: DVector::zeros(size),
-            eliminated_points: offsets
-                .iter()
-                .filter_map(|(&key, &offset)| {
-                    matches!(values[&key].manifold, ManifoldKind::HomogeneousPoint)
-                        .then_some(offset)
-                })
-                .collect(),
+            gradient: DVector::zeros(linearization_size),
+            diagonal: DVector::zeros(linearization_size),
+            eliminated_points: if jacobians {
+                offsets
+                    .iter()
+                    .filter_map(|(&key, &offset)| {
+                        matches!(values[&key].manifold, ManifoldKind::HomogeneousPoint)
+                            .then_some(offset)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
         };
+        let mut p = Vec::new();
+        let mut mask = Vec::new();
         for f in &mut self.factors {
             if disabled.contains(&f.id) {
                 continue;
             }
-            let p: Vec<_> = f.keys.iter().map(|k| values[k].data.as_slice()).collect();
-            let mask: Vec<_> = f.keys.iter().map(|k| offsets.contains_key(k)).collect();
+            p.clear();
+            p.extend(f.keys.iter().map(|k| values[k].data.as_slice()));
+            mask.clear();
+            mask.extend(f.keys.iter().map(|k| offsets.contains_key(k)));
             let constant = !mask.iter().any(|x| *x);
             let mut e = f
                 .factor
@@ -673,7 +691,7 @@ impl Snapshot {
                 {
                     return Err(graph_error("invalid ambient factor Jacobian"));
                 }
-                blocks.push((offset, j * values[key].plus_jacobian()));
+                blocks.push((offset, values[key].apply_plus_jacobian(j)));
             }
             // Ceres Corrector disables curvature correction for the three concave losses.
             let sqrt = rho[1].sqrt();
@@ -682,9 +700,11 @@ impl Snapshot {
             }
             e.residuals *= sqrt;
             for (offset, j) in &blocks {
-                let g = j.transpose() * &e.residuals;
+                model
+                    .gradient
+                    .rows_mut(*offset, j.ncols())
+                    .gemv_tr(1.0, j, &e.residuals, 1.0);
                 for c in 0..j.ncols() {
-                    model.gradient[offset + c] += g[c];
                     model.diagonal[offset + c] += j.column(c).norm_squared();
                 }
             }
@@ -747,26 +767,43 @@ impl Linearization {
         }
         self.gradient.component_mul_assign(scale);
         self.diagonal
-            .component_mul_assign(&scale.component_mul(scale));
+            .zip_apply(scale, |diagonal, scale| *diagonal *= scale * scale);
     }
-    fn product(&self, v: &DVector<f64>) -> Vec<DVector<f64>> {
+    fn product_sum(
+        &self,
+        v: &DVector<f64>,
+        mut contribution: impl FnMut(DVectorView<'_, f64>, DVectorViewMut<'_, f64>, &Row) -> f64,
+    ) -> f64 {
+        let max_rows = self
+            .rows
+            .iter()
+            .map(|row| row.residual.len())
+            .max()
+            .unwrap_or(0);
+        let mut scratch = DVector::zeros(max_rows);
+        let mut block_scratch = DVector::zeros(max_rows);
         self.rows
             .iter()
             .map(|row| {
-                row.blocks
-                    .iter()
-                    .fold(DVector::zeros(row.residual.len()), |s, (o, j)| {
-                        s + j * v.rows(*o, j.ncols())
-                    })
+                let mut product = scratch.rows_mut(0, row.residual.len());
+                let mut block_product = block_scratch.rows_mut(0, row.residual.len());
+                product.fill(0.0);
+                for (offset, j) in &row.blocks {
+                    // Complete block-local cancellation before adding earlier blocks.
+                    block_product.gemv(1.0, j, &v.rows(*offset, j.ncols()), 0.0);
+                    product += &block_product;
+                }
+                contribution(product.as_view(), block_product, row)
             })
-            .collect()
+            .sum()
     }
     fn predicted_change(&self, step: &DVector<f64>) -> f64 {
-        self.product(step)
-            .iter()
-            .zip(&self.rows)
-            .map(|(m, row)| -m.dot(&(&row.residual + m * 0.5)))
-            .sum()
+        self.product_sum(step, |product, mut workspace, row| {
+            // Cancel the residual and half-step before multiplication to avoid overflow.
+            workspace.copy_from(&row.residual);
+            workspace.axpy(0.5, &product, 1.0);
+            -product.dot(&workspace)
+        })
     }
     /// Eliminate independent 3D landmark blocks, solve the reduced normal
     /// equations by Cholesky, then back-substitute the landmark increments.
@@ -813,8 +850,8 @@ impl Linearization {
             let point_rhs = Vector3::from_fn(|index, _| -self.gradient[offset + index]);
             let solved_cross = factor.solve(&cross);
             let solved_rhs = factor.solve(&point_rhs);
-            reduced -= cross.transpose() * &solved_cross;
-            rhs -= cross.transpose() * solved_rhs;
+            reduced.gemm_tr(-1.0, &cross, &solved_cross, 1.0);
+            rhs.gemv_tr(-1.0, &cross, &solved_rhs, 1.0);
             points.push((offset, solved_cross, solved_rhs));
         }
         let solution = if retained.is_empty() {
@@ -926,7 +963,7 @@ impl Strategy {
             self.diagonal = m.diagonal.map(|x| x.clamp(1e-6, 1e32).sqrt());
             self.gradient = m.gradient.component_div(&self.diagonal);
             let v = self.gradient.component_div(&self.diagonal);
-            let jg_squared: f64 = m.product(&v).iter().map(DVector::norm_squared).sum();
+            let jg_squared = m.product_sum(&v, |product, _, _| product.norm_squared());
             self.alpha = self.gradient.norm_squared() / jg_squared;
             while self.mu < 1.0 {
                 let r = self.diagonal.component_mul(&self.diagonal) * self.mu;
@@ -940,7 +977,7 @@ impl Strategy {
         let gn = self.gn.as_ref()?;
         let gnorm = self.gradient.norm();
         let bnorm = gn.norm();
-        let s = if bnorm <= self.radius {
+        let mut s = if bnorm <= self.radius {
             gn.clone()
         } else if gnorm * self.alpha >= self.radius {
             (-self.radius / gnorm) * &self.gradient
@@ -958,7 +995,8 @@ impl Strategy {
             (-self.alpha * (1.0 - beta)) * &self.gradient + beta * gn
         };
         self.dogleg_norm = s.norm();
-        Some(s.component_div(&self.diagonal))
+        s.component_div_assign(&self.diagonal);
+        Some(s)
     }
     fn accepted(&mut self, quality: f64, lm: bool) {
         if lm {
@@ -1050,9 +1088,8 @@ impl Snapshot {
                 break;
             }
             if accepted {
-                self.values = values.clone();
                 let negative = -&model.gradient;
-                let projected = self.plus(&offsets, &negative)?;
+                let projected = Self::plus(&values, &offsets, &negative)?;
                 if ambient_difference(&values, &projected, &offsets).1 <= 1e-10 {
                     report = "Gradient tolerance reached";
                     break;
@@ -1077,8 +1114,7 @@ impl Snapshot {
                 iteration_time = iteration_start.elapsed().as_secs_f64();
                 continue;
             };
-            self.values = values.clone();
-            let candidate = self.plus(&offsets, &delta);
+            let candidate = Self::plus(&values, &offsets, &delta);
             let cost = candidate
                 .as_ref()
                 .ok()
@@ -1395,6 +1431,580 @@ impl RustGraphSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn block_linearization() -> (Linearization, DMatrix<f64>, DVector<f64>) {
+        let design = DMatrix::from_row_slice(
+            6,
+            4,
+            &[
+                1., 2., -1., 0.5, 3., 4., 2., -3., 0., 2., -1., 3., 0., 0., 4., -2., 0., 1., 0.,
+                2., 0., 0., 0., 0.,
+            ],
+        );
+        let residual = DVector::from_row_slice(&[1., -2., 0.5, 1., -0.25, 7.]);
+        let model = Linearization {
+            cost: 0.5 * residual.norm_squared(),
+            fixed_cost: 0.,
+            rows: vec![
+                Row {
+                    residual: DVector::from_row_slice(&[1., -2.]),
+                    blocks: vec![
+                        (0, DMatrix::from_row_slice(2, 2, &[1., 2., 3., 4.])),
+                        (2, DMatrix::from_row_slice(2, 2, &[-1., 0.5, 2., -3.])),
+                        (0, DMatrix::zeros(2, 0)),
+                    ],
+                },
+                Row {
+                    residual: DVector::from_row_slice(&[0.5, 1., -0.25]),
+                    blocks: vec![(
+                        1,
+                        DMatrix::from_row_slice(3, 3, &[2., -1., 3., 0., 4., -2., 1., 0., 2.]),
+                    )],
+                },
+                Row {
+                    residual: DVector::from_element(1, 7.),
+                    blocks: vec![],
+                },
+                Row {
+                    residual: DVector::zeros(0),
+                    blocks: vec![(0, DMatrix::zeros(0, 4))],
+                },
+            ],
+            gradient: design.tr_mul(&residual),
+            diagonal: DVector::from_iterator(4, design.column_iter().map(|c| c.norm_squared())),
+            eliminated_points: vec![],
+        };
+        (model, design, residual)
+    }
+
+    #[test]
+    fn streamed_products_and_prediction_match_the_dense_quadratic() {
+        let (mut model, design, residual) = block_linearization();
+        for scale in [0., -0.25, 1., 2.] {
+            let step = DVector::from_row_slice(&[0.5, -1., 0.25, 2.]) * scale;
+            let product = &design * &step;
+            let squared_norm = model.product_sum(&step, |product, _, _| product.norm_squared());
+            assert!((squared_norm - product.norm_squared()).abs() < 1e-12);
+            let expected = 0.5 * (residual.norm_squared() - (&residual + product).norm_squared());
+            assert!((model.predicted_change(&step) - expected).abs() < 1e-12);
+        }
+        model.rows.clear();
+        let step = DVector::repeat(4, 1.);
+        assert_eq!(
+            model.product_sum(&step, |product, _, _| product.norm_squared()),
+            0.
+        );
+        assert_eq!(model.predicted_change(&step), 0.);
+    }
+
+    #[test]
+    fn predicted_change_keeps_cancellation_before_multiplication_at_large_magnitudes() {
+        let mut model = Linearization {
+            cost: 0.,
+            fixed_cost: 0.,
+            rows: vec![Row {
+                residual: DVector::from_element(1, -0.75e154),
+                blocks: vec![(0, DMatrix::identity(1, 1))],
+            }],
+            gradient: DVector::zeros(1),
+            diagonal: DVector::repeat(1, 1.),
+            eliminated_points: vec![],
+        };
+        let step = DVector::<f64>::from_element(1, 1.5e154);
+        assert!(step.norm_squared().is_infinite());
+        assert_eq!(model.predicted_change(&step), 0.);
+        model.rows[0].residual[0] = -0.8e154;
+        let expected = -step[0] * (model.rows[0].residual[0] + 0.5 * step[0]);
+        assert!(expected.is_finite() && expected > 0.);
+        assert_eq!(model.predicted_change(&step), expected);
+    }
+
+    #[test]
+    fn streamed_product_preserves_small_blocks_when_another_block_cancels() {
+        let model = Linearization {
+            cost: 0.5,
+            fixed_cost: 0.,
+            rows: vec![Row {
+                residual: DVector::from_element(1, -1.),
+                blocks: vec![
+                    (0, DMatrix::from_element(1, 1, 1.)),
+                    (1, DMatrix::from_row_slice(1, 2, &[1e16, -1e16])),
+                ],
+            }],
+            gradient: DVector::zeros(3),
+            diagonal: DVector::repeat(3, 1.),
+            eliminated_points: vec![],
+        };
+        let step = DVector::repeat(3, 1.);
+        assert_eq!(
+            model.product_sum(&step, |product, _, _| product.norm_squared()),
+            1.
+        );
+        assert_eq!(model.predicted_change(&step), 0.5);
+    }
+
+    #[test]
+    fn streamed_reduction_preserves_owned_product_and_dot_evaluation() {
+        for rows in [1, 2, 9, 15] {
+            let row = Row {
+                residual: DVector::from_fn(rows, |r, _| (r as f64 + 0.5).cos()),
+                blocks: [(0, 3), (3, 9), (12, 6)]
+                    .into_iter()
+                    .map(|(offset, columns)| {
+                        (
+                            offset,
+                            DMatrix::from_fn(rows, columns, |r, c| {
+                                ((r + offset + 1) as f64 * (c + 1) as f64).sin()
+                            }),
+                        )
+                    })
+                    .collect(),
+            };
+            let step = DVector::from_fn(18, |i, _| (i as f64 + 0.25).sin());
+            let owned_product = row
+                .blocks
+                .iter()
+                .fold(DVector::zeros(rows), |sum, (offset, j)| {
+                    sum + j * step.rows(*offset, j.ncols())
+                });
+            let expected = -owned_product.dot(&(&row.residual + &owned_product * 0.5));
+            let model = Linearization {
+                cost: 0.,
+                fixed_cost: 0.,
+                rows: vec![row],
+                gradient: DVector::zeros(18),
+                diagonal: DVector::repeat(18, 1.),
+                eliminated_points: vec![],
+            };
+            assert_eq!(model.predicted_change(&step), expected);
+            assert_eq!(
+                model.product_sum(&step, |product, _, _| product.norm_squared()),
+                owned_product.norm_squared()
+            );
+        }
+    }
+
+    #[test]
+    fn diagonal_scaling_matches_dense_column_scaling_and_reuses_storage() {
+        let (mut model, design, residual) = block_linearization();
+        let scale = DVector::from_row_slice(&[0., -2., 0.5, 3.]);
+        let gradient_pointer = model.gradient.as_ptr();
+        let diagonal_pointer = model.diagonal.as_ptr();
+        model.scaled(&scale);
+        let scaled_design = &design * DMatrix::from_diagonal(&scale);
+        let expected_gradient = scaled_design.tr_mul(&residual);
+        let expected_diagonal = DVector::from_iterator(
+            4,
+            scaled_design
+                .column_iter()
+                .map(|column| column.norm_squared()),
+        );
+        assert_eq!(model.gradient.as_ptr(), gradient_pointer);
+        assert_eq!(model.diagonal.as_ptr(), diagonal_pointer);
+        assert!((&model.gradient - expected_gradient).amax() < 1e-12);
+        assert!((&model.diagonal - expected_diagonal).amax() < 1e-12);
+        let step = DVector::from_row_slice(&[0.5, -1., 0.25, 2.]);
+        let expected =
+            0.5 * (residual.norm_squared() - (&residual + scaled_design * &step).norm_squared());
+        assert!((model.predicted_change(&step) - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn gradient_accumulation_matches_weighted_priors_at_distinct_offsets() {
+        let values = BTreeMap::from([1, 2].map(|key| {
+            (
+                key,
+                Values {
+                    data: (0..9).map(|i| (key + i) as f64 / 10.).collect(),
+                    manifold: ManifoldKind::Euclidean,
+                    fixed: false,
+                },
+            )
+        }));
+        let factors = (0..)
+            .zip([(1, 4., -2.), (1, 9., 3.), (2, 1., 0.)])
+            .map(|(id, (key, weight, measurement))| FactorRecord {
+                id,
+                factor: Factor::SpeedBiasPrior(Box::new(SpeedAndBiasError::new(
+                    SVector::repeat(measurement),
+                    SMatrix::identity() * weight,
+                ))),
+                keys: vec![key],
+                loss: None,
+            })
+            .collect();
+        let mut snapshot = Snapshot {
+            values: values.clone(),
+            factors,
+        };
+        let model = snapshot
+            .evaluate(
+                &values,
+                &BTreeMap::from([(1, 0), (2, 9)]),
+                18,
+                &BTreeSet::new(),
+                true,
+            )
+            .unwrap();
+        for i in 0..9 {
+            let x = values[&1].data[i];
+            let expected = 4. * (x + 2.) + 9. * (x - 3.);
+            assert!((model.gradient[i] - expected).abs() < 1e-12);
+            assert_eq!(model.diagonal[i], 13.);
+            assert_eq!(model.gradient[9 + i], values[&2].data[i]);
+            assert_eq!(model.diagonal[9 + i], 1.);
+        }
+    }
+
+    #[test]
+    fn euclidean_jacobian_conversion_reuses_the_input_buffer() {
+        for dimension in [1, 9] {
+            let value = Values {
+                data: vec![0.; dimension],
+                manifold: ManifoldKind::Euclidean,
+                fixed: false,
+            };
+            let jacobian = DMatrix::from_fn(15, dimension, |r, c| (r as f64 - 2. * c as f64) / 3.);
+            let expected = jacobian.clone();
+            let pointer = jacobian.as_ptr();
+            let result = value.apply_plus_jacobian(jacobian);
+            assert_eq!(result.as_ptr(), pointer);
+            assert_eq!(result, expected);
+        }
+    }
+
+    #[test]
+    fn manifold_jacobian_conversion_matches_update_differences() {
+        for (manifold, data) in [
+            (ManifoldKind::Pose, vec![1., -2., 3., 0., 0., 0.6, 0.8]),
+            (ManifoldKind::Pose4d, vec![1., -2., 3., 0., 0., 0.6, 0.8]),
+            (ManifoldKind::HomogeneousPoint, vec![2., -1., 3., 1.]),
+        ] {
+            let value = Values {
+                data,
+                manifold,
+                fixed: false,
+            };
+            let jacobian =
+                DMatrix::from_fn(5, value.data.len(), |r, c| (r as f64 - 2. * c as f64) / 3.);
+            let epsilon = 1e-6;
+            let mut differential = DMatrix::zeros(value.data.len(), value.tangent_size());
+            for column in 0..value.tangent_size() {
+                let mut delta = vec![0.; value.tangent_size()];
+                delta[column] = epsilon;
+                let positive = value.plus(&delta).unwrap();
+                delta[column] = -epsilon;
+                let negative = value.plus(&delta).unwrap();
+                for row in 0..value.data.len() {
+                    differential[(row, column)] = (positive[row] - negative[row]) / (2. * epsilon);
+                }
+            }
+            let expected = &jacobian * differential;
+            let result = value.apply_plus_jacobian(jacobian);
+            assert_eq!(result.shape(), (5, value.tangent_size()));
+            assert!((result - expected).amax() < 1e-8);
+        }
+    }
+
+    fn mixed_factor_snapshot() -> Snapshot {
+        let values = BTreeMap::from([
+            (
+                1,
+                Values {
+                    data: vec![0., 0., 0., 0., 0., 0., 1.],
+                    manifold: ManifoldKind::Pose,
+                    fixed: false,
+                },
+            ),
+            (
+                2,
+                Values {
+                    data: vec![0., 0., 0., 0., 0., 0., 1.],
+                    manifold: ManifoldKind::Pose,
+                    fixed: true,
+                },
+            ),
+            (
+                3,
+                Values {
+                    data: vec![0., 0., 2., 1.],
+                    manifold: ManifoldKind::HomogeneousPoint,
+                    fixed: false,
+                },
+            ),
+        ]);
+        Snapshot {
+            values,
+            factors: vec![
+                FactorRecord {
+                    id: 1,
+                    factor: Factor::Alignment {
+                        gps: Vector3::zeros(),
+                        world: Vector3::new(3., 0., 0.),
+                    },
+                    keys: vec![1],
+                    loss: Some(RobustLoss::Huber(1.)),
+                },
+                FactorRecord {
+                    id: 2,
+                    factor: Factor::Alignment {
+                        gps: Vector3::zeros(),
+                        world: Vector3::new(2., 0., 0.),
+                    },
+                    keys: vec![2],
+                    loss: None,
+                },
+                FactorRecord {
+                    id: 3,
+                    factor: Factor::Depth(OneSidedDepthError::new(5., 1.)),
+                    keys: vec![1, 3, 2],
+                    loss: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn cost_only_matches_linearization_without_allocating_linearization_buffers() {
+        let mut snapshot = mixed_factor_snapshot();
+        let values = snapshot.values.clone();
+        let offsets = BTreeMap::from([(1, 0), (3, 6)]);
+        for disabled in [BTreeSet::new(), BTreeSet::from([1])] {
+            let full = snapshot
+                .evaluate(&values, &offsets, 9, &disabled, true)
+                .unwrap();
+            let cost = snapshot
+                .evaluate(&values, &offsets, 9, &disabled, false)
+                .unwrap();
+            assert_eq!(full.cost, if disabled.contains(&1) { 4.5 } else { 7. });
+            assert_eq!(full.fixed_cost, 2.);
+            assert_eq!(cost.cost, full.cost);
+            assert_eq!(cost.fixed_cost, full.fixed_cost);
+            assert_eq!(full.gradient.len(), 9);
+            assert_eq!(full.diagonal.len(), 9);
+            assert_eq!(full.eliminated_points, vec![6]);
+            assert!(!full.rows.is_empty());
+            assert_eq!(cost.gradient.data.as_vec().capacity(), 0);
+            assert_eq!(cost.diagonal.data.as_vec().capacity(), 0);
+            assert_eq!(cost.eliminated_points.capacity(), 0);
+            assert_eq!(cost.rows.capacity(), 0);
+        }
+        snapshot.factors[0].factor = Factor::Alignment {
+            gps: Vector3::new(f64::NAN, 0., 0.),
+            world: Vector3::zeros(),
+        };
+        for jacobians in [false, true] {
+            assert!(
+                snapshot
+                    .evaluate(&values, &offsets, 9, &BTreeSet::new(), jacobians)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn evaluation_reuses_scratch_with_shrinking_and_alternating_factor_inputs() {
+        let mut snapshot = mixed_factor_snapshot();
+        let values = snapshot.values.clone();
+        let offsets = BTreeMap::from([(1, 0), (3, 6)]);
+        let baseline = snapshot
+            .evaluate(&values, &offsets, 9, &BTreeSet::new(), true)
+            .unwrap();
+        snapshot.factors.reverse();
+        for disabled in [BTreeSet::new(), BTreeSet::from([2])] {
+            let full = snapshot
+                .evaluate(&values, &offsets, 9, &disabled, true)
+                .unwrap();
+            let cost = snapshot
+                .evaluate(&values, &offsets, 9, &disabled, false)
+                .unwrap();
+            assert_eq!(full.cost, 7.);
+            assert_eq!(full.fixed_cost, if disabled.contains(&2) { 0. } else { 2. });
+            assert_eq!(cost.cost, full.cost);
+            assert_eq!(cost.fixed_cost, full.fixed_cost);
+            assert_eq!(full.gradient, baseline.gradient);
+            assert_eq!(full.diagonal, baseline.diagonal);
+            assert_eq!(full.rows.len(), 2);
+            assert_eq!(full.rows[0].blocks.len(), 2);
+            assert_eq!(full.rows[1].blocks.len(), 1);
+            assert_eq!(full.rows[0].blocks[0].0, 0);
+            assert_eq!(full.rows[0].blocks[1].0, 6);
+            assert_eq!(full.rows[1].blocks[0].0, 0);
+        }
+    }
+
+    #[test]
+    fn parameter_updates_read_the_source_and_preserve_inactive_blocks() {
+        let values = BTreeMap::from([
+            (
+                1,
+                Values {
+                    data: vec![1., 2., 3., 0., 0., 0., 1.],
+                    manifold: ManifoldKind::Pose,
+                    fixed: false,
+                },
+            ),
+            (
+                2,
+                Values {
+                    data: vec![4., 5., 6.],
+                    manifold: ManifoldKind::Euclidean,
+                    fixed: false,
+                },
+            ),
+            (
+                3,
+                Values {
+                    data: vec![2., 3., 4., 1.],
+                    manifold: ManifoldKind::HomogeneousPoint,
+                    fixed: true,
+                },
+            ),
+            (
+                4,
+                Values {
+                    data: vec![0., 0., 0., 0., 0., 0., 1.],
+                    manifold: ManifoldKind::Pose4d,
+                    fixed: false,
+                },
+            ),
+        ]);
+        let original = values.clone();
+        let offsets = BTreeMap::from([(1, 0), (2, 6)]);
+        for scale in [1., -2.] {
+            let delta = DVector::from_row_slice(&[
+                scale,
+                2. * scale,
+                3. * scale,
+                0.,
+                0.,
+                0.,
+                scale,
+                -scale,
+                2. * scale,
+            ]);
+            let next = Snapshot::plus(&values, &offsets, &delta).unwrap();
+            assert_eq!(next.len(), values.len());
+            assert_eq!(
+                next[&1].data,
+                vec![1. + scale, 2. + 2. * scale, 3. + 3. * scale, 0., 0., 0., 1.]
+            );
+            assert_eq!(next[&2].data, vec![4. + scale, 5. - scale, 6. + 2. * scale]);
+            for key in [3, 4] {
+                assert_eq!(next[&key].data, original[&key].data);
+            }
+            for (key, value) in &values {
+                assert_eq!(value.data, original[key].data);
+                assert_eq!(
+                    std::mem::discriminant(&next[key].manifold),
+                    std::mem::discriminant(&value.manifold)
+                );
+                assert_eq!(next[key].fixed, value.fixed);
+            }
+        }
+        let mut invalid = DVector::zeros(9);
+        invalid[6] = f64::NAN;
+        assert!(Snapshot::plus(&values, &offsets, &invalid).is_err());
+        for (key, value) in &values {
+            assert_eq!(value.data, original[key].data);
+        }
+    }
+
+    #[test]
+    fn staged_solves_use_committed_values_and_preserve_nonparticipating_blocks() {
+        for trust_region in ["DOGLEG", "LEVENBERG_MARQUARDT"] {
+            for linear_solver in ["DENSE_QR", "DENSE_SCHUR", "SPARSE_NORMAL_CHOLESKY"] {
+                let inactive = vec![0., 0., 0., 0., 0., 0., 1.];
+                let mut snapshot = Snapshot {
+                    values: BTreeMap::from([
+                        (
+                            1,
+                            Values {
+                                data: vec![5.; 9],
+                                manifold: ManifoldKind::Euclidean,
+                                fixed: false,
+                            },
+                        ),
+                        (
+                            2,
+                            Values {
+                                data: inactive.clone(),
+                                manifold: ManifoldKind::Pose,
+                                fixed: false,
+                            },
+                        ),
+                    ]),
+                    factors: [(1, 2., 1.), (2, -1., 2.)]
+                        .into_iter()
+                        .map(|(id, target, weight)| FactorRecord {
+                            id,
+                            factor: Factor::SpeedBiasPrior(Box::new(SpeedAndBiasError::new(
+                                SVector::repeat(target),
+                                SMatrix::identity() * weight,
+                            ))),
+                            keys: vec![1],
+                            loss: None,
+                        })
+                        .collect(),
+                };
+                let options = SolverOptions {
+                    trust_region,
+                    linear_solver,
+                    function_tolerance: 1e-12,
+                    ..Default::default()
+                };
+                let first = snapshot.run(&options, &BTreeSet::from([2])).unwrap();
+                assert!(first.final_cost.unwrap() < 1e-14);
+                assert!(
+                    snapshot.values[&1]
+                        .data
+                        .iter()
+                        .all(|x| (x - 2.).abs() < 1e-8)
+                );
+                let second = snapshot.run(&options, &BTreeSet::from([1])).unwrap();
+                assert!((second.initial_cost.unwrap() - 81.).abs() < 1e-6);
+                assert!(second.final_cost.unwrap() < 1e-14);
+                assert!(
+                    snapshot.values[&1]
+                        .data
+                        .iter()
+                        .all(|x| (x + 1.).abs() < 1e-8),
+                    "{trust_region}/{linear_solver}: {:?}, {second:?}",
+                    snapshot.values[&1].data
+                );
+                assert_eq!(snapshot.values[&2].data, inactive);
+                let before = snapshot.values[&1].data.clone();
+                let disabled = snapshot.run(&options, &BTreeSet::from([1, 2])).unwrap();
+                assert_eq!(disabled.final_cost, Some(0.));
+                assert_eq!(snapshot.values[&1].data, before);
+            }
+        }
+    }
+
+    #[test]
+    fn output_preserves_residuals_and_only_copies_requested_jacobians() {
+        let residuals = DVector::from_row_slice(&[1.0, -2.0]);
+        let pose = SMatrix::<f64, 2, 7>::from_fn(|r, c| (r + 2 * c) as f64);
+        let point = SMatrix::<f64, 2, 4>::from_fn(|r, c| (10 + r + 2 * c) as f64);
+        let masks = [[false, false], [true, false], [false, true], [true, true]];
+        for mask in std::iter::once(None).chain(masks.iter().map(|m| Some(m.as_slice()))) {
+            let result = output(residuals.clone(), [pose.as_view(), point.as_view()], mask);
+            assert_eq!(result.residuals, residuals);
+            assert_eq!(result.minimal_jacobians, vec![None, None]);
+            assert_eq!(result.jacobians.len(), 2);
+            let expected: [DMatrixView<'_, f64>; 2] = [pose.as_view(), point.as_view()];
+            for (i, expected) in expected.into_iter().enumerate() {
+                if mask.is_some_and(|m| m[i]) {
+                    assert_eq!(
+                        result.jacobians[i].as_ref().unwrap(),
+                        &expected.into_owned()
+                    );
+                } else {
+                    assert!(result.jacobians[i].is_none());
+                }
+            }
+        }
+    }
 
     #[test]
     fn dense_schur_matches_full_system_with_multiple_landmarks_and_regularization() {

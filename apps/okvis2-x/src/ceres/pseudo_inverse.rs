@@ -29,7 +29,13 @@ impl PseudoInverse {
         rank: Option<&mut usize>,
     ) -> bool {
         let (vectors, inverse_values) = spectral_inverse(a, epsilon, rank);
-        *result = &vectors * DMatrix::from_diagonal(&inverse_values) * vectors.transpose();
+        if result.shape() != a.shape() {
+            result.resize_mut(a.nrows(), a.ncols(), 0.0);
+        }
+        result.fill(0.0);
+        for (column, weight) in vectors.column_iter().zip(inverse_values.iter()) {
+            result.ger(*weight, &column, &column, 1.0);
+        }
         true
     }
 
@@ -40,8 +46,11 @@ impl PseudoInverse {
         epsilon: f64,
         rank: Option<&mut usize>,
     ) -> bool {
-        let (vectors, inverse_values) = spectral_inverse(a, epsilon, rank);
-        *result = vectors * DMatrix::from_diagonal(&inverse_values.map(f64::sqrt));
+        let (mut vectors, inverse_values) = spectral_inverse(a, epsilon, rank);
+        for (mut column, weight) in vectors.column_iter_mut().zip(inverse_values.iter()) {
+            column.scale_mut(weight.sqrt());
+        }
+        *result = vectors;
         true
     }
 
@@ -52,8 +61,12 @@ impl PseudoInverse {
         epsilon: f64,
         rank: Option<&mut usize>,
     ) -> bool {
-        let (vectors, inverse_values) = spectral_inverse(a, epsilon, rank);
-        *result = DMatrix::from_diagonal(&inverse_values.map(f64::sqrt)) * vectors.transpose();
+        let (mut vectors, inverse_values) = spectral_inverse(a, epsilon, rank);
+        for (mut column, weight) in vectors.column_iter_mut().zip(inverse_values.iter()) {
+            column.scale_mut(weight.sqrt());
+        }
+        vectors.transpose_mut();
+        *result = vectors;
         true
     }
 }
@@ -94,4 +107,130 @@ fn spectral_inverse(
         }
     });
     (vectors, inverse_values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spectral_factors_match_dense_reference_through_imu_dimension() {
+        for size in [1, 3, 6, 15] {
+            let basis = DMatrix::from_fn(size, size, |row, col| {
+                ((row + 1) as f64 * (col + 3) as f64).sin() + if row == col { 2. } else { 0. }
+            });
+            for scale in [1e-12, 1., 1e12] {
+                let input = basis.tr_mul(&basis) * scale;
+                for epsilon in [f64::EPSILON, 1e-6] {
+                    let (vectors, weights) = spectral_inverse(&input, epsilon, None);
+                    let expected_inverse =
+                        &vectors * DMatrix::from_diagonal(&weights) * vectors.transpose();
+                    let expected_root = &vectors * DMatrix::from_diagonal(&weights.map(f64::sqrt));
+                    let mut inverse = DMatrix::zeros(0, 0);
+                    let mut root = DMatrix::zeros(0, 0);
+                    let mut upper = DMatrix::zeros(0, 0);
+                    PseudoInverse::symm(&input, &mut inverse, epsilon, None);
+                    PseudoInverse::symm_sqrt(&input, &mut root, epsilon, None);
+                    PseudoInverse::symm_sqrt_u(&input, &mut upper, epsilon, None);
+                    let bound = 2e-14 * size as f64;
+                    assert!(
+                        (&inverse - &expected_inverse).amax() <= bound * expected_inverse.amax()
+                    );
+                    assert!((&root - &expected_root).amax() <= bound * expected_root.amax());
+                    assert!(
+                        (upper - expected_root.transpose()).amax() <= bound * expected_root.amax()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spectral_factors_match_rotated_analytic_inverse_with_eigenvalue_flooring() {
+        let epsilon = 1e-3_f64;
+        let tolerance = epsilon * 3. * 8.;
+        for eigenvalue in [1., 0., -1., 0.5 * tolerance, 2. * tolerance] {
+            let input = DMatrix::from_row_slice(
+                3,
+                3,
+                &[
+                    eigenvalue.midpoint(2.),
+                    (eigenvalue - 2.) / 2.,
+                    0.,
+                    (eigenvalue - 2.) / 2.,
+                    eigenvalue.midpoint(2.),
+                    0.,
+                    0.,
+                    0.,
+                    8.,
+                ],
+            );
+            let weight = if eigenvalue > tolerance {
+                1. / eigenvalue
+            } else {
+                1. / tolerance
+            };
+            let expected = DMatrix::from_row_slice(
+                3,
+                3,
+                &[
+                    weight.midpoint(0.5),
+                    (weight - 0.5) / 2.,
+                    0.,
+                    (weight - 0.5) / 2.,
+                    weight.midpoint(0.5),
+                    0.,
+                    0.,
+                    0.,
+                    0.125,
+                ],
+            );
+            let expected_rank = if eigenvalue > tolerance { 3 } else { 2 };
+            let mut rank = 0;
+            let mut inverse = DMatrix::repeat(3, 3, 99.);
+            let pointer = inverse.as_ptr();
+            assert!(PseudoInverse::symm(
+                &input,
+                &mut inverse,
+                epsilon,
+                Some(&mut rank)
+            ));
+            assert_eq!(rank, expected_rank);
+            assert_eq!(inverse.as_ptr(), pointer);
+            assert!((&inverse - &expected).amax() < 1e-11);
+            assert!(PseudoInverse::symm(&input, &mut inverse, epsilon, None));
+            assert!((&inverse - &expected).amax() < 1e-11);
+            let mut root = DMatrix::zeros(1, 1);
+            assert!(PseudoInverse::symm_sqrt(
+                &input,
+                &mut root,
+                epsilon,
+                Some(&mut rank)
+            ));
+            assert_eq!(rank, expected_rank);
+            assert!((&root * root.transpose() - &expected).amax() < 1e-11);
+            let mut upper = DMatrix::zeros(1, 1);
+            assert!(PseudoInverse::symm_sqrt_u(
+                &input,
+                &mut upper,
+                epsilon,
+                Some(&mut rank)
+            ));
+            assert_eq!(rank, expected_rank);
+            assert!((upper.tr_mul(&upper) - &expected).amax() < 1e-11);
+            assert!((upper - root.transpose()).amax() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn spectral_inverse_preserves_lower_triangle_and_strict_threshold_semantics() {
+        let mut input = DMatrix::from_diagonal(&DVector::from_row_slice(&[0.024, 2., 8.]));
+        input[(0, 1)] = 100.;
+        let mut output = DMatrix::zeros(1, 1);
+        let mut rank = 0;
+        PseudoInverse::symm(&input, &mut output, 1e-3, Some(&mut rank));
+        assert_eq!(rank, 2);
+        let expected = DMatrix::from_diagonal(&DVector::from_row_slice(&[1. / 0.024, 0.5, 0.125]));
+        assert!((output - expected).amax() < 1e-12);
+    }
 }

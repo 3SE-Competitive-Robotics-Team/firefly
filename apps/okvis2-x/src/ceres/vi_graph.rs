@@ -1622,8 +1622,7 @@ impl ViGraph {
             let j = e.minimal_jacobians[1]
                 .as_ref()
                 .ok_or_else(|| graph_error("landmark Jacobian absent"))?;
-            let product = j.transpose() * j;
-            h += Matrix3::from_column_slice(product.as_slice());
+            h.gemm_tr(1.0, j, j, 1.0);
         }
         Ok(h)
     }
@@ -2744,6 +2743,66 @@ impl SolverUpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn landmark_hessian_matches_analytic_stereo_perspective_information() {
+        use crate::cameras::{no_distortion::NoDistortion, pinhole_camera::PinholeCamera};
+        use std::sync::Arc;
+
+        let mut graph = ViGraph::new();
+        let landmark = LandmarkId::new(1);
+        graph
+            .add_landmark(landmark, Vector4::new(2., 1., 4., 1.), true)
+            .unwrap();
+        assert_eq!(
+            graph.get_landmark_hessian(landmark).unwrap(),
+            Matrix3::zeros()
+        );
+        assert!(graph.get_landmark_hessian(LandmarkId::new(99)).is_err());
+        let camera = Arc::new(PinholeCamera::new(
+            (320, 240),
+            (8., 12., 160., 120.),
+            NoDistortion,
+            0,
+        ));
+        for id in 1..=2 {
+            let stamp = Timestamp::UNIX_EPOCH;
+            let pose = Transformation::new(
+                Vector3::new((id - 1) as f64, 0., 0.),
+                Quaternion::identity(),
+            );
+            graph.states.insert(
+                StateId::new(id),
+                ComponentState {
+                    pose: Some(Rc::new(RefCell::new(PoseParameterBlock::new(
+                        &pose, id, stamp,
+                    )))),
+                    extrinsics: vec![Some(Rc::new(RefCell::new(PoseParameterBlock::new(
+                        &Transformation::identity(),
+                        id + 10,
+                        stamp,
+                    ))))],
+                    ..Default::default()
+                },
+            );
+            let factor = ReprojectionError::new(
+                camera.clone(),
+                0,
+                Vector2::new(160., 120.),
+                Matrix2::identity(),
+            );
+            graph
+                .add_external_observation(
+                    &factor,
+                    landmark,
+                    KeypointIdentifier::new(id, 0, 0),
+                    false,
+                )
+                .unwrap();
+        }
+        let expected = Matrix3::new(8., 0., -3., 0., 18., -4.5, -3., -4.5, 2.375);
+        assert!((graph.get_landmark_hessian(landmark).unwrap() - expected).amax() < 1e-12);
+    }
 
     #[test]
     fn copied_states_register_only_residual_parameters_in_ambient_space() {
