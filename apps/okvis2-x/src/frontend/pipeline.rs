@@ -259,6 +259,10 @@ struct InitializedMatches {
     count: usize,
     reprojection_error: f64,
 }
+
+/// 单相机复用的一组特征检测器/描述子。
+type FeaturePair = (Arc<dyn FeatureDetector>, Arc<dyn DescriptorExtractor>);
+
 pub struct Frontend<G, S, B> {
     pub is_initialized: bool,
     pub tracking_lost: bool,
@@ -269,6 +273,9 @@ pub struct Frontend<G, S, B> {
     solver: S,
     features: B,
     detection_mutexes: Vec<Mutex<()>>,
+    /// 每相机只构建一次的 BRISK 检测器/描述子：旋转模式表与相机属性与帧无关，
+    /// 每帧重建要重算约 390 万个旋转项。
+    features_cache: Vec<Mutex<Option<FeaturePair>>>,
     bow: BowDatabase,
     components: Vec<ComponentDatabase>,
     graph: PhantomData<G>,
@@ -314,6 +321,7 @@ impl<
             solver,
             features,
             detection_mutexes: (0..num_cameras).map(|_| Mutex::new(())).collect(),
+            features_cache: (0..num_cameras).map(|_| Mutex::new(None)).collect(),
             bow: BowDatabase::new(vocabulary),
             components: Vec::new(),
             graph: PhantomData,
@@ -374,9 +382,26 @@ impl<
             .rotate_vector(&Vector3::new(0.0, 0.0, -1.0))
             .cast::<f32>();
         let mut frame = frame.borrow_mut();
-        let (detector, extractor) =
-            self.features
-                .create(frame.geometry(camera).as_ref(), &self.brisk, direction)?;
+        let (detector, extractor) = {
+            let mut cached = self
+                .features_cache
+                .get(camera)
+                .ok_or_else(|| frontend_error("camera index out of range"))?
+                .lock()
+                .map_err(|_| frontend_error("feature cache mutex poisoned"))?;
+            if let Some(pair) = cached.as_ref() {
+                pair.clone()
+            } else {
+                let pair = self.features.create(
+                    frame.geometry(camera).as_ref(),
+                    &self.brisk,
+                    direction,
+                )?;
+                *cached = Some(pair.clone());
+                pair
+            }
+        };
+        extractor.set_extraction_direction(direction);
         frame.set_detector(camera, detector);
         frame.set_extractor(camera, extractor);
         frame.detect(camera)?;
@@ -2396,7 +2421,12 @@ impl BriskFeatureFactory for RustBriskFeatureFactory {
         )?;
         extractor.set_camera_properties(maps.rays.clone(), maps.image_jacobians.clone(), focal)?;
         extractor.set_extraction_direction(direction);
-        Ok((Arc::new(detector), Arc::new(BriskExtractor { extractor })))
+        Ok((
+            Arc::new(detector),
+            Arc::new(BriskExtractor {
+                extractor: std::sync::Mutex::new(extractor),
+            }),
+        ))
     }
 }
 

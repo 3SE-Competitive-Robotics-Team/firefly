@@ -25,6 +25,8 @@ pub trait FeatureDetector {
 }
 /// Descriptor computation may remove keypoints, as `OpenCV`'s compute does.
 pub trait DescriptorExtractor {
+    /// 更新描述子提取的重力方向；实现可忽略，默认无操作。
+    fn set_extraction_direction(&self, _direction: Vector3<f32>) {}
     /// # Errors
     /// Returns an error if required image/camera/feature resources are absent, indices or
     /// image/descriptor shapes are invalid, or the detector, extractor or model fails.
@@ -439,9 +441,15 @@ impl FeatureDetector for BriskDetector {
 
 /// Camera-aware BRISK descriptor computation using the source BRISK2 pattern.
 pub struct BriskExtractor {
-    pub extractor: firefly_brisk::brisk_descriptor_extractor::BriskDescriptorExtractor,
+    pub extractor:
+        std::sync::Mutex<firefly_brisk::brisk_descriptor_extractor::BriskDescriptorExtractor>,
 }
 impl DescriptorExtractor for BriskExtractor {
+    fn set_extraction_direction(&self, direction: Vector3<f32>) {
+        if let Ok(mut extractor) = self.extractor.lock() {
+            extractor.set_extraction_direction(direction);
+        }
+    }
     fn compute(
         &self,
         image: &DynamicMatrix,
@@ -451,7 +459,11 @@ impl DescriptorExtractor for BriskExtractor {
         let purecv::core::DynamicData::U8(image) = &image.data else {
             return Err(missing("8-bit grayscale image", "BriskExtractor::compute"));
         };
-        *descriptors = self.extractor.compute(image, keypoints)?;
+        let extractor = self
+            .extractor
+            .lock()
+            .map_err(|_| missing("BRISK extractor lock", "BriskExtractor::compute"))?;
+        *descriptors = extractor.compute(image, keypoints)?;
         Ok(())
     }
 }
