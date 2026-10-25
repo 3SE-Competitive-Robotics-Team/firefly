@@ -97,6 +97,10 @@ pub trait FrontendGraph {
     /// Returns an error if required frames, cameras, landmarks or vocabulary data are absent,
     /// measurement dimensions are invalid, or matching, geometry, graph or file operations fail.
     fn merge_landmark(&mut self, from: LandmarkId, into: LandmarkId) -> Result<()>;
+    /// Resolve repeated and chained IDs across one loop-matching batch, as in upstream.
+    /// # Errors
+    /// Returns an error for mismatched vectors, absent landmarks or a busy full graph.
+    fn merge_landmarks(&mut self, from: &[LandmarkId], into: &[LandmarkId]) -> Result<usize>;
     /// # Errors
     /// Returns an error if required frames, cameras, landmarks or vocabulary data are absent,
     /// measurement dimensions are invalid, or matching, geometry, graph or file operations fail.
@@ -1100,8 +1104,13 @@ impl<
             exclusive,
             (&mut count, &mut merges),
         )?;
-        for (from, into) in merges {
-            graph.merge_landmark(from, into)?;
+        if exclusive.is_some() {
+            let (from, into): (Vec<_>, Vec<_>) = merges.into_iter().unzip();
+            graph.merge_landmarks(&from, &into).map_err(|error| {
+                error
+                    .with_context("stage", "Frontend::match_to_map")
+                    .with_context("frame_id", current.value())
+            })?;
         }
         if second_ransac {
             if !self.run_ransac_3d2d(graph, &frame, true, true)? {
@@ -2317,6 +2326,143 @@ fn compute_ransac<P: ConsensusProblem>(
 #[cfg(test)]
 mod matching_tests {
     use super::*;
+
+    use crate::{
+        application::live::config::Config,
+        cameras::{
+            n_camera_system::{CameraType, DistortionType, NCameraSystem},
+            no_distortion::NoDistortion,
+            pinhole_camera::PinholeCamera,
+        },
+        ceres::vi_slam_backend::ViSlamBackend,
+        frames::frame::KeyPoint,
+        frontend::frame_absolute_pose_sac_problem::OpenGvSolver,
+        sensors::measurements::{ImuMeasurement, ImuSensorReadings},
+    };
+    use purecv::core::{Matrix, types::Point2f};
+    use std::{cell::RefCell, rc::Rc};
+
+    fn stereo_merge_graph() -> (ViSlamBackend, ViParameters) {
+        let mut parameters = Config::default().parameters().unwrap();
+        parameters.frontend.num_matching_threads = 1;
+        let mut rig = NCameraSystem::new();
+        for camera in 0..2 {
+            rig.add_camera(
+                &Arc::new(Transformation::identity()),
+                Arc::new(PinholeCamera::new(
+                    (64, 48),
+                    (60., 60., 31.5, 23.5),
+                    NoDistortion,
+                    camera,
+                )),
+                DistortionType::NoDistortion,
+                true,
+                CameraType::default(),
+            );
+        }
+        parameters.n_camera_system = rig;
+        let mut graph = ViSlamBackend::default();
+        graph.add_imu(parameters.imu.clone());
+        for _ in 0..2 {
+            graph.add_camera(parameters.camera.clone());
+        }
+        let imu = (0..=30)
+            .map(|i| {
+                ImuMeasurement::new(
+                    Timestamp::from_millisecond(i * 10).unwrap(),
+                    ImuSensorReadings::new(
+                        Vector3::zeros(),
+                        Vector3::new(0., 0., parameters.imu.g),
+                    ),
+                    0,
+                )
+            })
+            .collect();
+        for state in 1..=2 {
+            let mut frame = MultiFrame::new(
+                &parameters.n_camera_system,
+                Timestamp::from_millisecond(state * 100).unwrap(),
+                state as u64,
+            );
+            for camera in 0..2 {
+                let keypoints: Vec<_> = (0..3)
+                    .map(|k| {
+                        KeyPoint::new(
+                            Point2f::new(11.5 + k as f32 * 20., 23.5),
+                            12.,
+                            -1.,
+                            1.,
+                            0,
+                            -1,
+                        )
+                    })
+                    .collect();
+                frame.reset_keypoints(camera, &keypoints);
+                frame.reset_descriptors(
+                    camera,
+                    Arc::new(Matrix::from_vec(3, 48, 1, vec![0; 3 * 48])),
+                );
+                frame.compute_back_projections(camera);
+            }
+            graph
+                .add_states(Rc::new(RefCell::new(frame)), &imu, true)
+                .unwrap();
+            for k in 0..3 {
+                let id = LandmarkId::new((state as u64 - 1) * 3 + k as u64 + 1);
+                graph
+                    .add_landmark(id, Vector4::new(k as f64 - 1., 0., 3., 1.), true)
+                    .unwrap();
+                for g in [&mut graph.realtime_graph, &mut graph.full_graph] {
+                    g.set_landmark_quality(id, 1.).unwrap();
+                }
+                for camera in 0..2 {
+                    graph
+                        .multi_frame(StateId::new(state as u64))
+                        .unwrap()
+                        .borrow_mut()
+                        .set_landmark_id(camera, k, id.value());
+                    graph
+                        .add_observation(id, StateId::new(state as u64), camera, k, true)
+                        .unwrap();
+                }
+            }
+        }
+        (graph, parameters)
+    }
+
+    #[test]
+    fn loop_matching_merges_shared_stereo_landmarks_as_one_batch() {
+        let (mut graph, parameters) = stereo_merge_graph();
+        let frontend = Frontend::<ViSlamBackend, OpenGvSolver, _>::with_vocabulary(
+            2,
+            &TemplatedVocabulary::default(),
+            OpenGvSolver::default(),
+            RustBriskFeatureFactory,
+        );
+        let exclusive = (1..=3).map(LandmarkId::new).collect();
+        assert_eq!(
+            frontend
+                .match_to_map(&mut graph, &parameters, StateId::new(2), Some(&exclusive))
+                .unwrap(),
+            6
+        );
+        for g in [&graph.realtime_graph, &graph.full_graph] {
+            assert_eq!(
+                g.landmarks.keys().copied().collect::<Vec<_>>(),
+                (1..=3).map(LandmarkId::new).collect::<Vec<_>>()
+            );
+            for id in 1..=3 {
+                assert_eq!(g.landmark_info[&LandmarkId::new(id)].observations.len(), 4);
+            }
+        }
+        for frame in graph.multi_frames.values() {
+            for camera in 0..2 {
+                for k in 0..3 {
+                    assert_eq!(frame.borrow().landmark_id(camera, k), k as u64 + 1);
+                }
+            }
+        }
+    }
 
     fn accepted(
         index: &ProjectedKeypointIndex,

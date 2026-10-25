@@ -29,7 +29,12 @@ fn single_merge_updates_both_graphs_and_rejects_missing_landmarks() {
         assert!(!graph.landmarks.contains_key(&a));
         assert!(graph.landmarks.contains_key(&b));
     }
-    assert!(backend.merge_landmark(a, b).is_err());
+    let error = backend.merge_landmark(a, b).unwrap_err();
+    assert_eq!(error.operation(), Some("ViGraphEstimator::merge_landmark"));
+    assert_eq!(
+        error.context().collect::<Vec<_>>(),
+        vec![("from", "1"), ("into", "2")]
+    );
     assert!(backend.merge_landmark(b, missing).is_err());
     assert!(backend.realtime_graph.landmarks.contains_key(&b));
     assert!(backend.full_graph.landmarks.contains_key(&b));
