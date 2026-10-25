@@ -21,7 +21,7 @@ import rerun as rr
 
 from firefly_mujoco import (
     DepthImageMessage, GrayImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH,
-    LogMessage, TraceContext, load_scene_name, resolve_scene,
+    LogMessage, OdomMessage, TraceContext, load_scene_name, resolve_scene,
 )
 
 from firefly_workspace import startup
@@ -185,7 +185,7 @@ def run(args):
         writer = Writer(recordings, options, trigger)
         continuity = Continuity(options.capture.max_entities)
         telemetry = Worker("viz-telemetry", options.telemetry_queue,
-                           lambda item: writer.log_text(item[1]) if item[0] == "log" else writer.handle(item[1]),
+                           writer.consume,
                            writer.tick, lambda: writer.tick(final=True), options.shutdown_seconds)
         workers.append(telemetry)
         capture = Capture(recordings, options, trigger)
@@ -197,6 +197,7 @@ def run(args):
             ("viz", "Firefly/Viz", VizMessage, VIZ_MAX_PUBLISHERS, VIZ_BUFFER_SIZE),
             ("viz", "Firefly/VizVoxels", VoxelMessage, 1, VOXEL_BUFFER_SIZE),
             ("log", "Firefly/Log", LogMessage, LOG_MAX_PUBLISHERS, LOG_BUFFER_SIZE),
+            ("gt", "Firefly/GroundTruth", OdomMessage, None, 1),
         ):
             subscriptions.append((kind, _subscribe(node, topic, cls, capacity, publishers)))
         for name, topic, cls in (("left", "CameraLeft", GrayImageMessage),

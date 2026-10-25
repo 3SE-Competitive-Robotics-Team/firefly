@@ -24,6 +24,7 @@ flowchart LR
     R -->|深度| P
     P -->|携带坐标变换的 Reference| F
     R -->|图像| D[firefly-viz]
+    SIM -->|真值位姿| D
     V -->|诊断 IPC| D
     P -->|诊断 IPC| D
     D --> RRD[RRD / Rerun Viewer]
@@ -57,6 +58,10 @@ flowchart LR
 通讯适配的测试不代表设备驱动、运行时限或板端飞行验收。
 
 ### 诊断记录与展示
+
+`firefly-viz` 从 `Firefly/GroundTruth` 记录 `gt/pose` 与 `gt/traj`，从 `vio/odom`
+位姿诊断生成 `vio/traj`。轨迹按测量时刻记录相邻两点构成的线段，记录进程为每条轨迹
+保留一个前序点，Viewer 按时间范围展示历史。
 
 `Firefly/VizScalars` 使用小型定长消息长期保存数值；`Firefly/Viz` 保存位姿、点集、矩阵、
 标定等空间诊断；`Firefly/VizVoxels` 单独传输 planner 的地图更新。体素更新分块连续发送，

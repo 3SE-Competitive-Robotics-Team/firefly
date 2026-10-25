@@ -16,6 +16,10 @@ from .messages import (
 from .recording import RecordingOutputs, PIXEL_CENTER_OFFSET, at
 
 
+TRAJECTORIES = {"gt/pose": ("gt/traj", [64, 128, 255]),
+                "vio/odom": ("vio/traj", [255, 160, 64])}
+
+
 def entity(msg):
     if not 0 < msg.entity_len <= len(msg.entity):
         raise ValueError("invalid entity length")
@@ -40,17 +44,57 @@ class Writer:
         self.voxel_sequence = None
         self.voxel_pending = None
         self.calibrations = {}
+        self.previous_poses = {}
         self.last_flush = time.monotonic()
+
+    def consume(self, item):
+        kind, msg = item
+        if kind == "gt":
+            self.ground_truth(msg)
+        elif kind == "log":
+            self.log_text(msg)
+        elif kind == "viz":
+            self.handle(msg)
+        else:
+            raise ValueError(f"unsupported telemetry kind {kind}")
+
+    def ground_truth(self, msg):
+        if not msg.is_initialized:
+            self.previous_poses.pop("gt/pose", None)
+            return
+        self._pose("gt/pose", msg.timestamp,
+                   [msg.position_x, msg.position_y, msg.position_z],
+                   [msg.quat_x, msg.quat_y, msg.quat_z, msg.quat_w])
+
+    def _pose(self, name, stamp, xyz, quat):
+        if (not math.isfinite(stamp) or stamp < 0 or not np.isfinite([*xyz, *quat]).all()
+                or abs(np.linalg.norm(quat) - 1) > 1e-5):
+            raise ValueError(f"invalid pose for {name}")
+        trajectory = TRAJECTORIES.get(name)
+        previous = self.previous_poses.get(name)
+        if previous is not None:
+            if stamp < previous[0]:
+                raise ValueError(f"regressed pose timestamp for {name}")
+            if stamp == previous[0]:
+                return
+        at(self.rec, stamp)
+        self.rec.log(name, rr.Transform3D(translation=xyz, quaternion=quat), strict=True)
+        if trajectory is not None:
+            path, color = trajectory
+            if previous is not None:
+                self.rec.log(path, rr.LineStrips3D([[previous[1], xyz]], colors=color), strict=True)
+            self.previous_poses[name] = stamp, xyz
 
     def handle(self, msg):
         name = entity(msg)
         if not math.isfinite(msg.timestamp) or msg.timestamp < 0:
             raise ValueError(f"invalid sim_time for {name}")
-        at(self.rec, msg.timestamp)
         kind = msg.kind
         if kind == VIZ_KIND_POSE:
-            self.rec.log(name, rr.Transform3D(translation=list(msg.xyz), quaternion=list(msg.quat_xyzw)), strict=True)
-        elif kind == VIZ_KIND_SCALARS:
+            self._pose(name, msg.timestamp, list(msg.xyz), list(msg.quat_xyzw))
+            return
+        at(self.rec, msg.timestamp)
+        if kind == VIZ_KIND_SCALARS:
             n = count(msg.scalar_count, len(msg.scalars))
             self.rec.log(name, rr.Scalars(list(msg.scalars[:n])), strict=True)
         elif kind == VIZ_KIND_KEYPOINTS_2D:
@@ -99,6 +143,9 @@ class Writer:
             for key in list(self.voxels):
                 if key == name or key.startswith(name + "/"):
                     del self.voxels[key]
+            for key in list(self.previous_poses):
+                if key == name or key.startswith(name + "/") or TRAJECTORIES[key][0] == name:
+                    del self.previous_poses[key]
         elif kind == VIZ_KIND_CAMERA:
             self._calibration(name, msg)
         else:

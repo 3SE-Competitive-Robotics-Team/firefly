@@ -3,29 +3,109 @@
 import threading
 
 import pytest
+from firefly_mujoco import OdomMessage
 
 from firefly_viz.main import Continuity, Worker
 from firefly_viz.config import Options
 from firefly_viz.writer import Writer
-from firefly_viz.messages import VoxelMessage
+from firefly_viz.messages import VIZ_KIND_CLEAR, VIZ_KIND_POSE, VizMessage, VoxelMessage
 
 
 class Recording:
     def __init__(self):
         self.times = []
         self.calls = []
+        self.events = []
+        self.stamp = None
 
     def reset_time(self):
         self.times.append(('reset',))
+        self.stamp = None
 
     def set_time(self, name, **kwargs):
         self.times.append((name, kwargs))
+        self.stamp = name, kwargs
 
     def log(self, *args, **kwargs):
         self.calls.append((args, kwargs))
+        self.events.append((self.stamp, args))
 
     def flush(self, **kwargs):
         pass
+
+
+def vio_pose(stamp, xyz):
+    msg = VizMessage()
+    path = b'vio/odom'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    msg.kind, msg.timestamp = VIZ_KIND_POSE, stamp
+    msg.xyz[:], msg.quat_xyzw[:] = xyz, [0., 0., 0., 1.]
+    return msg
+
+
+def test_ground_truth_records_world_pose_and_incremental_trajectory(recordings_factory):
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options(), threading.Event())
+    msg = OdomMessage(timestamp=1., position_x=1., position_y=2., position_z=3., quat_w=1.)
+    writer.consume(('gt', msg))
+    assert not archive.calls
+    msg.is_initialized = True
+    writer.consume(('gt', msg))
+    msg.timestamp, msg.position_x = 2., 4.
+    msg.quat_z, msg.quat_w = 1., 0.
+    writer.consume(('gt', msg))
+    assert [args[0] for _, args in archive.events] == ['gt/pose', 'gt/pose', 'gt/traj']
+    assert [stamp for stamp, _ in archive.events] == [
+        ('sim_time', {'duration': 1.}), ('sim_time', {'duration': 2.}), ('sim_time', {'duration': 2.})]
+    assert archive.calls[0][0][1].translation.as_arrow_array().to_pylist() == [[1., 2., 3.]]
+    assert archive.calls[1][0][1].quaternion.as_arrow_array().to_pylist() == [[0., 0., 1., 0.]]
+    assert archive.calls[2][0][1].strips.as_arrow_array().to_pylist() == [[[1., 2., 3.], [4., 2., 3.]]]
+    assert all(not kwargs.get('static', False) for _, kwargs in archive.calls)
+
+
+def test_vio_trajectory_stores_two_point_segments_with_one_cached_endpoint(recordings_factory):
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options(), threading.Event())
+    for i in range(32):
+        writer.consume(('viz', vio_pose(float(i), [float(i), 0., 1.])))
+    segments = [args[1].strips.as_arrow_array().to_pylist() for args, _ in archive.calls
+                if args[0] == 'vio/traj']
+    assert segments == [[[[float(i - 1), 0., 1.], [float(i), 0., 1.]]] for i in range(1, 32)]
+    assert writer.previous_poses == {'vio/odom': (31., [31., 0., 1.])}
+    assert not any(args[0].startswith('gt/') for args, _ in archive.calls)
+    calls = len(archive.calls)
+    writer.consume(('viz', vio_pose(31., [31., 0., 1.])))
+    assert len(archive.calls) == calls
+    with pytest.raises(ValueError, match='regressed pose timestamp'):
+        writer.consume(('viz', vio_pose(30., [30., 0., 1.])))
+    assert len(archive.calls) == calls
+
+
+@pytest.mark.parametrize('field,value', [('timestamp', float('nan')), ('timestamp', -1.),
+                                        ('position_z', float('inf')), ('quat_w', 0.)])
+def test_invalid_ground_truth_cannot_reach_recording(recordings_factory, field, value):
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options(), threading.Event())
+    msg = OdomMessage(timestamp=1., quat_w=1., is_initialized=True)
+    setattr(msg, field, value)
+    with pytest.raises(ValueError, match='invalid pose'):
+        writer.consume(('gt', msg))
+    assert not archive.calls
+    assert not writer.previous_poses
+
+
+def test_clear_trajectory_breaks_the_next_segment(recordings_factory):
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options(), threading.Event())
+    writer.handle(vio_pose(1., [0., 0., 1.]))
+    clear = VizMessage()
+    path = b'vio/traj'
+    clear.entity_len, clear.entity[:len(path)] = len(path), path
+    clear.kind, clear.timestamp = VIZ_KIND_CLEAR, 2.
+    writer.handle(clear)
+    writer.handle(vio_pose(3., [5., 0., 1.]))
+    assert len(archive.calls) == 3
+    assert writer.previous_poses == {'vio/odom': (3., [5., 0., 1.])}
 
 
 def test_cold_start_empty_keypoints_preserve_typed_ids_and_clear_previous_points(tmp_path):

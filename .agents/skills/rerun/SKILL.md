@@ -50,7 +50,7 @@ description: Rerun 基础认知与 .rrd 录制文件的阅读方法。当需要�
 
 ## 7. 示例：读取 odom 与 GT 原始数据（本项目）
 
-数据已就位：vio 进程写 `vio/odom` + `vio/traj`（橙）与 `gt/pose` + `gt/traj`（蓝），统一 `sim_time`。
+记录进程从 sim 的 `Firefly/GroundTruth` 写 `gt/pose` + `gt/traj`（蓝），从 VIO 位姿诊断写 `vio/odom` + `vio/traj`（橙），统一 `sim_time`。
 
 1. 录制：按仓库 `docs/development.md` 的「构建与运行」启动统一记录进程与闭环；
    使用 `firefly-viz --save logs/run1.rrd` 保存本次证据。

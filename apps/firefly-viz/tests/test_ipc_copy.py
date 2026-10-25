@@ -51,6 +51,16 @@ def test_detach_preserves_type():
     assert dst.kind == 1
 
 
+def test_ground_truth_detach_owns_pose_storage():
+    from firefly_mujoco import OdomMessage
+
+    src = OdomMessage(timestamp=2., position_x=3., quat_z=1., is_initialized=True)
+    dst = detach_copy(src)
+    src.timestamp, src.position_x, src.quat_z = 0., 0., 0.
+    assert isinstance(dst, OdomMessage)
+    assert (dst.timestamp, dst.position_x, dst.quat_z, dst.is_initialized) == (2., 3., 1., True)
+
+
 def test_entity_rejects_corrupt_payload():
     import pytest
     m = _make_pose()
