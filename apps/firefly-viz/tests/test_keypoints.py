@@ -1,4 +1,4 @@
-"""图像与叠加按采集时间精确配对；丢帧和延迟不能复用旧点。"""
+"""图像与叠加按采集时间容差配对；丢帧和延迟不能复用旧点。"""
 
 import pytest
 import rerun as rr
@@ -74,8 +74,34 @@ def test_late_points_keep_original_video_index_and_do_not_cross_cameras():
     assert rec.times[-2] == {'sim_time': {'duration': 1.125}, 'left_frame': {'sequence': 8}}
     assert rec.calls[-2][1][1].positions.as_arrow_array().to_pylist() == [[2.5, 3.5]]
     before = len(rec.calls)
-    pairs.observe('left', 1.125000001, [[4, 5]], [43], [0, 0, 0])
+    pairs.observe('left', 1.126000001, [[4, 5]], [43], [0, 0, 0])
     assert len(rec.calls) == before
+
+
+@pytest.mark.parametrize('points_first', [False, True])
+@pytest.mark.parametrize('offset,matched', [(0.0005, True), (0.001, True), (-0.001, True), (0.001000001, False)])
+def test_keypoint_timestamp_tolerance(points_first, offset, matched):
+    rec = Recording()
+    pairs = MatchedPoints(rec, 4)
+    def observe():
+        pairs.observe('left', 1.0 + offset, [[12., 20.]], [5], [64, 255, 128])
+    if points_first:
+        observe()
+    pairs.frame('left', 1.0, 7)
+    if not points_first:
+        observe()
+    assert rec.calls[-2][1][1].positions.as_arrow_array().to_pylist() == ([[12.5, 20.5]] if matched else [])
+    assert rec.times[-2] == {'sim_time': {'duration': 1.0}, 'left_frame': {'sequence': 7}}
+
+
+def test_nearest_points_prefer_exact_timestamp():
+    rec = Recording()
+    pairs = MatchedPoints(rec, 4)
+    pairs.observe('left', 1.0005, [[1., 2.]], [1], [0, 0, 0])
+    pairs.observe('left', 1.0, [[3., 4.]], [2], [0, 0, 0])
+    pairs.frame('left', 1.0, 0)
+    pairs.observe('left', 1.0002, [[5., 6.]], [3], [0, 0, 0])
+    assert rec.calls[-2][1][1].positions.as_arrow_array().to_pylist() == [[3.5, 4.5]]
 
 
 @pytest.mark.parametrize('camera', ['left', 'right'])

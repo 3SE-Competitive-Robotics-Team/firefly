@@ -121,10 +121,14 @@ impl ReplanFsm {
     /// 新坐标快照无法生成全局引导。
     pub fn invalidate_localization(&mut self, now: f64, measured: State) -> Result<()> {
         self.manager.invalidate_localization(now, measured)?;
-        if !self.mandatory_stop {
+        if !self.mandatory_stop
+            && matches!(
+                self.state,
+                ExecState::ExecTraj | ExecState::ReplanTraj | ExecState::GenNewTraj
+            )
+        {
             self.change_state(ExecState::GenNewTraj);
         }
-        self.finished = false;
         Ok(())
     }
     pub(crate) fn request_emergency(&mut self) {
@@ -307,6 +311,33 @@ mod tests {
         assert!(fsm.manager.local().is_none());
         assert!(fsm.exec_tick(0.03, Some(measured())).replanned);
         assert_eq!(fsm.state(), ExecState::ExecTraj);
+    }
+    #[test]
+    fn localization_update_preserves_upstream_wait_and_emergency_states() {
+        let mut fsm = fsm();
+        fsm.invalidate_localization(0.0, measured()).unwrap();
+        assert_eq!(fsm.state(), ExecState::Init);
+        let _ = fsm.exec_tick(0.01, Some(measured()));
+        fsm.invalidate_localization(0.02, measured()).unwrap();
+        assert_eq!(fsm.state(), ExecState::WaitTarget);
+        assert!(!fsm.exec_tick(0.03, Some(measured())).replanned);
+        assert!(!fsm.has_target());
+        assert!(fsm.manager().local().is_none());
+        fsm.finished = true;
+        fsm.invalidate_localization(0.04, measured()).unwrap();
+        assert!(fsm.is_finished());
+        fsm.trigger_emergency_stop_disable_failsafe(0.05, Some(measured()));
+        fsm.invalidate_localization(0.06, measured()).unwrap();
+        assert_eq!(fsm.state(), ExecState::EmergencyStop);
+    }
+    #[test]
+    fn localization_update_replans_active_task() {
+        let mut fsm = fsm();
+        start(&mut fsm);
+        fsm.invalidate_localization(0.1, measured()).unwrap();
+        assert_eq!(fsm.state(), ExecState::GenNewTraj);
+        assert!(fsm.manager().local().is_none());
+        assert!(fsm.exec_tick(0.11, Some(measured())).replanned);
     }
     #[test]
     fn callbacks_keep_upstream_state_boundaries() {

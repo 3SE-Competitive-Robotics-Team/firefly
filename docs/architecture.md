@@ -68,7 +68,7 @@ OKVIS 跟踪质量以 `StateChange` 写入 `okvis/tracking`，仅在 Lost、Marg
 之间变化时记录，由 `StateTimelineView` 展示离散状态；回环更新次数与视觉查询耗时保留数值曲线。
 
 OKVIS 的帧诊断回调读取当前帧的二维关键点与路标 ID，
-在 `okvis/debug` 下发布有界诊断。关键点时间恢复为相机采集时刻；记录端按纳秒配对
+在 `okvis/debug` 下发布有界诊断。关键点时间恢复为相机采集时刻；记录端按采集时间容差配对
 图像与关键点，保留原始像素坐标和路标 ID，显示时应用像素中心偏移。
 
 `Firefly/VizScalars` 使用小型定长消息长期保存数值；`Firefly/Viz` 保存位姿、点集、
@@ -80,7 +80,8 @@ OKVIS 的帧诊断回调读取当前帧的二维关键点与路标 ID，
 `cameras/left/image` 与 `cameras/right/image` 的 `VideoStream`。codec、双目标定与无人机模型按 static 记录；
 视频 sample 属于原始采集 `sim_time`。编码输入只有有界缓冲，允许编码前丢帧，
 已经编码的依赖帧不能丢弃。视频是有损调试背景，不作为像素精度评测或算法输入。
-Rerun 绘制特征点，点集只有与已保存图像的采集时间完全一致才进入叠加层；每张已保存图像
+Rerun 绘制特征点，点集按 `MatchedPoints` 定义的容差匹配最近的已保存图像，
+叠加使用图像的采集时间与视频帧索引；每张已保存图像
 先写空点集，避免沿用上一张图的标记。点集与 track_id 只保存在各相机的 `points` 叠加层，
 不另外保存 `okvis/debug/keypoints/**` 副本。
 算法与 IPC 使用整数像素中心；[Rerun 0.38.1 图像边界从零开始](https://github.com/rerun-io/rerun/blob/0.38.1/crates/views/re_view_spatial/src/visualizers/video/mod.rs#L574)，

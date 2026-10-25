@@ -182,7 +182,9 @@ class Recordings:
 
 
 class MatchedPoints:
-    """点集只有在同时间图像已保存时才进入叠加层；缓存严格有界。"""
+    """点集匹配容差内最近的已保存图像；缓存严格有界。"""
+
+    MATCH_TOLERANCE_NS = 1_000_000
 
     def __init__(self, recording, capacity: int):
         self.recording, self.capacity = recording, capacity
@@ -195,13 +197,17 @@ class MatchedPoints:
         while len(cache) > self.capacity:
             cache.popitem(last=False)
 
+    def _nearest(self, cache, key):
+        nearest = min(cache, key=lambda candidate: (abs(candidate - key), candidate), default=None)
+        return nearest if nearest is not None and abs(nearest - key) <= self.MATCH_TOLERANCE_NS else None
+
     def frame(self, camera, stamp, index=None):
         if camera not in self.frames:
             return
         with self.lock:
             key = round(stamp * 1e9)
             self._remember(self.frames[camera], key, (stamp, index))
-            self._write(camera, stamp, self.points[camera].get(key))
+            self._write(camera, stamp, self.points[camera].get(self._nearest(self.points[camera], key)))
 
     def observe(self, camera, stamp, points, ids, color):
         if camera not in self.points:
@@ -210,8 +216,10 @@ class MatchedPoints:
             value = points, ids, color
             key = round(stamp * 1e9)
             self._remember(self.points[camera], key, value)
-            if key in self.frames[camera]:
-                self._write(camera, self.frames[camera][key][0], value)
+            frame_key = self._nearest(self.frames[camera], key)
+            if frame_key is not None:
+                point_key = self._nearest(self.points[camera], frame_key)
+                self._write(camera, self.frames[camera][frame_key][0], self.points[camera][point_key])
 
     def _write(self, camera, stamp, value):
         points, ids, color = value if value is not None else (np.empty((0, 2)), [], [64, 255, 128])
