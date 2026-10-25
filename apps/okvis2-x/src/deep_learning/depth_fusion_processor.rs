@@ -1,6 +1,6 @@
 /* OKVIS2-X — Copyright (c) 2015 ETH Zurich; 2020 Imperial College London;
  * 2025 Technical University of Munich and ETH Zurich. SPDX-License-Identifier: BSD-3-Clause */
-//! Delayed optimized-pose MVS, sparse landmark projection and inverse-variance depth fusion.
+//! Delayed optimized-pose MVS and inverse-variance depth fusion.
 use super::{
     deep_learning_processor::{
         CameraMeasurements, CameraWorker, DeepLearningProcessor, DisplayImages, ImageCallback,
@@ -11,12 +11,11 @@ use super::{
         StereoCalibration, StereoModel, StereoPrediction, disparity_to_depth,
     },
     utils::{
-        Tensor, VisualizationRaster, gray_to_bgr, image_f32, image_u8, invalid,
-        tensor_to_i_depth_vis, tensor_to_i_sigma_vis,
+        Tensor, VisualizationRaster, image_f32, image_u8, invalid, tensor_to_i_depth_vis,
+        tensor_to_i_sigma_vis,
     },
 };
 use crate::{
-    frames::frame_typedefs::MapPointVector,
     kinematics::transformation::Transformation,
     runtime::vi_interface::{State, TrackingState, Trajectory},
     sensors::measurements::{CameraData, Measurement},
@@ -44,10 +43,9 @@ pub struct MvsInput<'a> {
     pub source_k1: [Matrix4<f32>; 7],
     pub current_t_wc: Matrix4<f32>,
     pub source_t_wc: Vec<Matrix4<f32>>,
-    pub sparse_depth: &'a Matrix<f32>,
 }
 /// Multi-view inference receives current/source byte images, the three intrinsics
-/// tensors, world poses and sparse half-resolution depth in the source order.
+/// tensors and world poses in the source order.
 pub trait MvsModel: Send {
     /// # Errors
     /// Returns an error for invalid/missing calibration or tensor/image data, incompatible
@@ -63,7 +61,6 @@ struct SourceFrame {
 struct ViStates {
     tracking: TrackingState,
     updated: UpdatedStates,
-    landmarks: MapPointVector,
 }
 struct FusionQueues {
     states: VecDeque<ViStates>,
@@ -214,12 +211,6 @@ impl DepthFusionProcessor {
             stereo.forward(&warm, &warm)?;
         }
         let warm_sources = vec![warm.clone(); 7];
-        let sparse = Matrix::from_vec(
-            calibration.height / 2,
-            calibration.width / 2,
-            1,
-            vec![1.; calibration.height / 2 * (calibration.width / 2)],
-        );
         for _ in 0..10 {
             mvs.forward(MvsInput {
                 current: &warm,
@@ -229,7 +220,6 @@ impl DepthFusionProcessor {
                 source_k1: [Matrix4::identity(); 7],
                 current_t_wc: Matrix4::identity(),
                 source_t_wc: vec![Matrix4::identity(); 7],
-                sparse_depth: &sparse,
             })?;
         }
         Ok(())
@@ -251,7 +241,6 @@ impl DepthFusionProcessor {
             sources: VecDeque::new(),
             source_select_count: 0,
             trajectory: Trajectory::default(),
-            landmarks: BTreeMap::new(),
             mvs,
             raster,
         };
@@ -259,7 +248,7 @@ impl DepthFusionProcessor {
             let work = (|| -> Result<Option<StereoPrediction>> {
                 let mut queues = s.queues.lock().unwrap();
                 while let Some(update) = queues.states.pop_front() {
-                    processor.update_trajectory(update)?;
+                    processor.update_trajectory(&update)?;
                 }
                 s.available.notify_all();
                 let latest = processor.trajectory.state_ids().iter().next_back().copied();
@@ -343,7 +332,6 @@ impl DeepLearningProcessor for DepthFusionProcessor {
         _latest: &State,
         tracking: &TrackingState,
         updated: UpdatedStates,
-        landmarks: Arc<MapPointVector>,
     ) -> Result<bool> {
         self.worker.control.check_error()?;
         let blocking = self.worker.control.blocking()?;
@@ -367,11 +355,6 @@ impl DeepLearningProcessor for DepthFusionProcessor {
         queues.states.push_back(ViStates {
             tracking: tracking.clone(),
             updated,
-            landmarks: landmarks
-                .iter()
-                .filter(|lm| lm.state_id == tracking.id.value())
-                .cloned()
-                .collect(),
         });
         self.shared.available.notify_all();
         Ok(!dropped)
@@ -405,12 +388,11 @@ struct MotionProcessor {
     sources: VecDeque<SourceFrame>,
     source_select_count: u32,
     trajectory: Trajectory,
-    landmarks: BTreeMap<jiff::Timestamp, MapPointVector>,
     mvs: Box<dyn MvsModel>,
     raster: Arc<dyn VisualizationRaster>,
 }
 impl MotionProcessor {
-    fn update_trajectory(&mut self, states: ViStates) -> Result<()> {
+    fn update_trajectory(&mut self, states: &ViStates) -> Result<()> {
         self.trajectory
             .update(
                 &states.tracking,
@@ -418,14 +400,11 @@ impl MotionProcessor {
                 &mut std::collections::BTreeSet::new(),
             )
             .map_err(integration_error)?;
-        let last = states.updated.last_key_value().ok_or_else(|| {
-            invalid(
+        if states.updated.is_empty() {
+            return Err(invalid(
                 "updated state map is empty",
                 "DepthFusionProcessor::update_trajectory",
-            )
-        })?;
-        if states.tracking.id == *last.0 {
-            self.landmarks.insert(last.1.timestamp, states.landmarks);
+            ));
         }
         Ok(())
     }
@@ -472,7 +451,6 @@ impl MotionProcessor {
             .time_stamp
             .checked_sub(self.image_delay)
             .map_err(|e| invalid(e.to_string(), "DepthFusionProcessor::process"))?;
-        let mut sparse_vis = gray_to_bgr(&prediction.left)?;
         let mut mvs_result = None;
         if let Some(state) = self
             .trajectory
@@ -502,8 +480,7 @@ impl MotionProcessor {
                         source.t_wc = state.t_ws.compose(&self.calibration.t_sc);
                     }
                 }
-                let sparse = self.project_sparse_depth(&live, &mut sparse_vis)?;
-                mvs_result = Some(self.fuse_prediction(&prediction, &live, &sparse)?);
+                mvs_result = Some(self.fuse_prediction(&prediction, &live)?);
                 let transform = self
                     .sources
                     .back()
@@ -559,13 +536,12 @@ impl MotionProcessor {
             );
         }
         control.invoke(&mut frames)?;
-        self.prediction_images(prediction, sparse_vis, mvs_result)
+        self.prediction_images(prediction, mvs_result)
     }
     fn fuse_prediction(
         &mut self,
         prediction: &StereoPrediction,
         live: &SourceFrame,
-        sparse: &Matrix<f32>,
     ) -> Result<FusionResult> {
         let sources = self
             .sources
@@ -586,7 +562,6 @@ impl MotionProcessor {
             source_k1: k1,
             current_t_wc: live.t_wc.matrix().cast(),
             source_t_wc: poses,
-            sparse_depth: sparse,
         })?;
         let depth = output.plane(0)?;
         let sigma = output.plane(1)?.map(|x| {
@@ -601,7 +576,6 @@ impl MotionProcessor {
     fn prediction_images(
         &self,
         prediction: StereoPrediction,
-        sparse_vis: Matrix<u8>,
         mvs_result: Option<FusionResult>,
     ) -> Result<DisplayImages> {
         let stereo_depth = image_u8(tensor_to_i_depth_vis(
@@ -618,7 +592,6 @@ impl MotionProcessor {
             ("rightImage".into(), image_u8(prediction.right)),
             ("stereoDepth".into(), stereo_depth.clone()),
             ("stereoSigma".into(), stereo_sigma.clone()),
-            ("sparseDepth".into(), image_u8(sparse_vis)),
         ]);
         if self.sources.len() == 7 {
             for (i, source) in self.sources.iter().enumerate() {
@@ -663,42 +636,6 @@ impl MotionProcessor {
             images.insert("fuseSigma".into(), stereo_sigma);
         }
         Ok(images)
-    }
-
-    fn project_sparse_depth(
-        &mut self,
-        live: &SourceFrame,
-        sparse_vis: &mut Matrix<u8>,
-    ) -> Result<Matrix<f32>> {
-        let (half_h, half_w) = (self.calibration.height / 2, self.calibration.width / 2);
-        let mut sparse = Matrix::new(half_h, half_w, 1);
-        let t_cw = live.t_wc.inverse();
-        let half_f = 0.5 * (self.calibration.focal_length as f32);
-        let horizontal_center_sum = f64::from(self.calibration.intrinsics[2] as f32) + 0.5;
-        let half_cu = (0.5_f64 * horizontal_center_sum - 0.5) as f32;
-        let vertical_center_sum = f64::from(self.calibration.intrinsics[3] as f32) + 0.5;
-        let vertical_center = (0.5_f64 * vertical_center_sum - 0.5) as f32;
-        for lm in self.landmarks.remove(&live.stamp).unwrap_or_default() {
-            let p = t_cw.transform_homogeneous(&lm.point);
-            let z = p[2] as f32;
-            if f64::from(z) <= 0.4 || z > 10. {
-                continue;
-            }
-            let u = (f64::from(half_f) * (p[0] / f64::from(z)) + f64::from(half_cu)) as i32;
-            let v = (f64::from(half_f) * (p[1] / f64::from(z)) + f64::from(vertical_center)) as i32;
-            if u > 0 && u < half_w as i32 - 1 && v > 0 && v < half_h as i32 - 1 {
-                sparse.data[v as usize * half_w + u as usize] = z;
-                self.raster.circle(
-                    sparse_vis,
-                    [(2 * u) as f32, (2 * v) as f32],
-                    3,
-                    [0, (f64::from(z / 10.) * 255.) as u8, 0],
-                    -1,
-                    false,
-                )?;
-            }
-        }
-        Ok(sparse)
     }
 }
 /// # Errors

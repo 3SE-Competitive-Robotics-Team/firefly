@@ -10,7 +10,7 @@
 //! Trajectory CSV output and top-view scene construction.
 use crate::{
     ceres::imu_error::IntegrationError,
-    frames::frame_typedefs::{MapPointVector, StateId},
+    frames::frame_typedefs::StateId,
     kinematics::transformation::Transformation,
     runtime::{
         queued_trajectory::QueuedTrajectory,
@@ -78,12 +78,7 @@ pub trait TopViewPainter {
         size: i32,
     ) -> io::Result<()>;
 }
-type GraphStates = (
-    State,
-    TrackingState,
-    Arc<BTreeMap<StateId, State>>,
-    Arc<MapPointVector>,
-);
+type GraphStates = (State, TrackingState, Arc<BTreeMap<StateId, State>>);
 pub struct TrajectoryOutput {
     csv: Option<File>,
     rgb_csv: Option<File>,
@@ -155,14 +150,13 @@ impl TrajectoryOutput {
         state: &State,
         tracking: &TrackingState,
         updated: Arc<BTreeMap<StateId, State>>,
-        landmarks: Arc<MapPointVector>,
     ) -> io::Result<()> {
         if let Some(csv) = &mut self.csv {
             Self::write_state_to_csv(csv, state, self.rpg)?;
         }
         if self.draw && !updated.is_empty() {
             self.states
-                .push_blocking((state.clone(), tracking.clone(), updated, landmarks));
+                .push_blocking((state.clone(), tracking.clone(), updated));
         }
         Ok(())
     }
@@ -216,7 +210,7 @@ impl TrajectoryOutput {
         painter: &dyn TopViewPainter,
     ) -> io::Result<Option<Matrix<u8>>> {
         let mut changed = false;
-        while let Some((mut state, tracking, updated, landmarks)) = self.states.try_pop() {
+        while let Some((mut state, tracking, updated)) = self.states.try_pop() {
             let mut affected = BTreeSet::new();
             self.trajectory
                 .update(&tracking, &updated, &mut affected)
@@ -260,22 +254,6 @@ impl TrajectoryOutput {
             }
             self.scale = (500.0 / (self.max.x - self.min.x)).min(500.0 / (self.max.y - self.min.y));
             self.image.data.fill(10);
-            for lm in landmarks.iter() {
-                if lm.point.w.abs() < 1e-12 || lm.quality < 0.0001 {
-                    continue;
-                }
-                let p = lm.point.fixed_rows::<3>(0) / lm.point.w;
-                let pixel = self.convert_to_image_coordinates(Vector2::new(p.x, p.y));
-                if !inside(pixel) {
-                    continue;
-                }
-                painter.circle(
-                    &mut self.image,
-                    pixel,
-                    1.0,
-                    [0.0, 255.0 * (lm.quality / 0.1).min(1.0), 0.0],
-                )?;
-            }
             for updated_state in updated.values() {
                 let t_wg = updated_state.t_gw.inverse();
                 for point in &updated_state.gps_points {

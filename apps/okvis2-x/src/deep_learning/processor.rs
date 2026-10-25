@@ -8,7 +8,6 @@ use super::{
     utils::invalid,
 };
 use crate::{
-    frames::frame_typedefs::MapPointVector,
     kinematics::transformation::Transformation,
     runtime::vi_interface::{State, TrackingState},
 };
@@ -22,9 +21,8 @@ use std::{
     thread,
     time::Duration,
 };
-pub type OptimizedGraphCallback = Arc<
-    dyn Fn(&State, &TrackingState, UpdatedStates, Arc<MapPointVector>) -> Result<()> + Send + Sync,
->;
+pub type OptimizedGraphCallback =
+    Arc<dyn Fn(&State, &TrackingState, UpdatedStates) -> Result<()> + Send + Sync>;
 pub type AlignmentPublishCallback =
     Arc<dyn Fn(Timestamp, &Transformation, &[Vector3<f32>], bool) -> Result<()> + Send + Sync>;
 pub type AlignCallback<Map> = Arc<
@@ -208,13 +206,13 @@ where
         let dl = deep_learning.clone();
         let map = mapping.clone();
         let external = external_callback.clone();
-        slam.set_optimized_graph_callback(Arc::new(move |state, tracking, updated, landmarks| {
+        slam.set_optimized_graph_callback(Arc::new(move |state, tracking, updated| {
             map.state_update_callback(state, tracking, updated.clone())?;
             if fusion {
-                dl.state_update_callback(state, tracking, updated.clone(), landmarks.clone())?;
+                dl.state_update_callback(state, tracking, updated.clone())?;
             }
             if let Some(callback) = external.read().unwrap().as_ref() {
-                callback(state, tracking, updated, landmarks)?;
+                callback(state, tracking, updated)?;
             }
             Ok(())
         }))?;

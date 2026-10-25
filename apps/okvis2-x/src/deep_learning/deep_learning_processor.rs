@@ -4,7 +4,7 @@
 
 use super::utils::invalid;
 use crate::{
-    frames::frame_typedefs::{MapPointVector, StateId},
+    frames::frame_typedefs::StateId,
     runtime::vi_interface::{State, TrackingState},
     sensors::measurements::{CameraData, CameraMeasurement, Measurement},
 };
@@ -50,7 +50,6 @@ pub trait DeepLearningProcessor: Send + Sync {
         _latest: &State,
         _tracking: &TrackingState,
         _updated: UpdatedStates,
-        _landmarks: Arc<MapPointVector>,
     ) -> Result<bool> {
         Ok(false)
     }

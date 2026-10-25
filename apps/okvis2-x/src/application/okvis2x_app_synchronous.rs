@@ -375,11 +375,11 @@ pub(crate) fn set_graph_callback(
     processor: Option<Arc<dyn DeepLearningProcessor>>,
     failure: Failure,
 ) {
-    let cb: OptimisedGraphCallback = Arc::new(move |state, tracking, updated, landmarks| {
+    let cb: OptimisedGraphCallback = Arc::new(move |state, tracking, updated| {
         let result = writer
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .process_state(state, tracking, updated.clone(), landmarks.clone())
+            .process_state(state, tracking, updated.clone())
             .map(|()| true);
         latch(&failure, result);
         if let Some(m) = &m {
@@ -391,7 +391,7 @@ pub(crate) fn set_graph_callback(
         if let Some(p) = &processor {
             latch(
                 &failure,
-                p.state_update_callback(state, tracking, updated, landmarks)
+                p.state_update_callback(state, tracking, updated)
                     .map_err(|e| io::Error::other(e.to_string())),
             );
         }

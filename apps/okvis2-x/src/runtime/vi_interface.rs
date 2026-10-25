@@ -10,7 +10,7 @@
 //! State records, trajectory reconstruction and sensor-facing estimator interface.
 use crate::{
     ceres::imu_error::{IntegrationError, NoiseMode, Preintegration, seconds},
-    frames::frame_typedefs::{MapPointVector, SpeedAndBias, StateId},
+    frames::frame_typedefs::{SpeedAndBias, StateId},
     kinematics::transformation::{
         Transformation, delta_q, normalized_quaternion, quaternion_from_rotation_matrix,
     },
@@ -807,11 +807,8 @@ impl Trajectory {
     }
 }
 pub type ImageMap = BTreeMap<usize, Arc<DynamicMatrix>>;
-pub type OptimisedGraphCallback = Arc<
-    dyn Fn(&State, &TrackingState, Arc<BTreeMap<StateId, State>>, Arc<MapPointVector>)
-        + Send
-        + Sync,
->;
+pub type OptimisedGraphCallback =
+    Arc<dyn Fn(&State, &TrackingState, Arc<BTreeMap<StateId, State>>) + Send + Sync>;
 pub trait ViInterface {
     fn add_images(&mut self, stamp: Timestamp, images: &ImageMap, depth: &ImageMap) -> bool;
     fn add_imu_measurement(
