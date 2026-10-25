@@ -15,6 +15,7 @@ name = "ffctl"
 path = "src/main.rs"
 
 [dependencies]
+firefly-config.workspace = true
 firefly-error = { workspace = true }
 firefly-pubsub = { workspace = true }
 iceoryx2 = { workspace = true }

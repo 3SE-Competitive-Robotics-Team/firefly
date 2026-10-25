@@ -1,6 +1,7 @@
 //! `V4L2` 采集主循环与配置。
 
 use std::error::Error;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use firefly_hal::pixel::{FrameFormat, gray_from_yuyv, meters_from_z16};
@@ -21,7 +22,10 @@ use v4l::video::Capture;
 use v4l::{Format, FourCC};
 
 /// `configs/camera.toml` 缺省路径（相对运行目录，板上是 `/opt/firefly`）。
-const DEFAULT_CONFIG: &str = "configs/camera.toml";
+/// 缺省配置：按安装布局解析，与启动目录无关。
+fn default_config() -> PathBuf {
+    firefly_config::paths::config("camera.toml")
+}
 /// 默认采集缓冲数；太少容易在调度抖动时丢帧。
 const DEFAULT_BUFFERS: u32 = 4;
 /// `Z16` 深度默认按毫米缩放。
@@ -97,16 +101,17 @@ const fn default_depth_scale() -> f64 {
     DEFAULT_DEPTH_SCALE
 }
 
-/// 解析 `--config <path>`（缺省 [`DEFAULT_CONFIG`]）。
-fn parse_config_path() -> Result<String, String> {
+/// 解析 `--config <path>`（缺省 [`default_config`]）。
+fn parse_config_path() -> Result<PathBuf, String> {
     let mut it = std::env::args().skip(1);
-    let mut path = DEFAULT_CONFIG.to_owned();
+    let mut path = default_config();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--config" => {
-                path = it
-                    .next()
-                    .ok_or_else(|| "missing --config value".to_owned())?;
+                path = PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| "missing --config value".to_owned())?,
+                );
             }
             other => return Err(format!("unknown argument {other}")),
         }

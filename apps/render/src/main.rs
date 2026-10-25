@@ -31,7 +31,7 @@ use bevy::winit::WinitPlugin;
 use capture::{CaptureHub, CapturePlugin};
 use config::RenderConfig;
 use firefly_render::lighting::spawn_scene_lighting;
-use firefly_render::scene::{MODELS_DIR, spawn_scene};
+use firefly_render::scene::{models_dir, spawn_scene};
 use link::{
     CapturePipeline, CaptureStats, PendingFrames, SensorCapture, drain_captures, open_ports,
     poll_pose, poll_processor,
@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!(
         "场景 {}：asset root {}，视觉 {}，起点 {:?}",
         spec.dir,
-        MODELS_DIR,
+        models_dir().display(),
         spec.asset_path(),
         spec.start
     );
@@ -102,7 +102,7 @@ fn build_app(
             .build()
             .disable::<LogPlugin>()
             .set(AssetPlugin {
-                file_path: MODELS_DIR.to_owned(),
+                file_path: models_dir().display().to_string(),
                 ..default()
             })
             .disable::<WinitPlugin>()

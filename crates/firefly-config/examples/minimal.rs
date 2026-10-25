@@ -29,7 +29,9 @@ impl Options {
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let mut path = "configs/minimal.toml".to_owned();
+    let mut path = firefly_config::paths::config("minimal.toml")
+        .display()
+        .to_string();
     while let Some(arg) = args.next() {
         if arg != "--config" {
             return Err(Error::new(

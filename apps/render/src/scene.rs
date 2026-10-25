@@ -20,7 +20,7 @@ pub struct SceneSpec {
 }
 
 impl SceneSpec {
-    /// 相对 [`firefly_render::scene::MODELS_DIR`] 的 asset 路径（对照 `AssetPlugin.file_path`）。
+    /// 相对 [`firefly_render::scene::models_dir`] 的 asset 路径（对照 `AssetPlugin.file_path`）。
     #[must_use]
     pub fn asset_path(&self) -> String {
         format!("{}/{}", self.dir, self.visual)
@@ -80,7 +80,7 @@ pub fn selected() -> SceneSpec {
         log::error!("未注册的场景 {name}；可用：{}", supported.join(", "));
         std::process::exit(1);
     };
-    let path = std::path::Path::new(firefly_render::scene::MODELS_DIR).join(spec.asset_path());
+    let path = firefly_render::scene::models_dir().join(spec.asset_path());
     if !path.is_file() {
         log::error!("场景视觉资产缺失：{}", path.display());
         std::process::exit(1);

@@ -11,6 +11,7 @@ repository.workspace = true
 readme.workspace = true
 
 [dependencies]
+firefly-config.workspace = true
 bevy = { workspace = true }
 
 [lints]

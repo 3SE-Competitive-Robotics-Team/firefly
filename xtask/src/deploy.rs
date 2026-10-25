@@ -31,7 +31,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let package = package()?;
     push(&device, &package)?;
     println!(
-        "已部署到 {device}:{DESTINATION}；验证：adb -s {device} shell 'cd {DESTINATION} && ./bin/ffctl --version'"
+        "已部署到 {device}:{DESTINATION}，并软链到 /usr/local/bin；验证：adb -s {device} shell 'ffctl --version'"
     );
     Ok(())
 }
@@ -161,6 +161,7 @@ fn push(device: &str, package: &Path) -> Result<(), String> {
         ],
     )?;
     adb(device, &["shell", "sync"])?;
+    link(device)?;
     adb(
         device,
         &[
@@ -168,6 +169,19 @@ fn push(device: &str, package: &Path) -> Result<(), String> {
             &format!("rm -f {REMOTE_PACKAGE} {REMOTE_UNPACKER}"),
         ],
     )?;
+    Ok(())
+}
+
+/// 把已部署的二进制软链到 `/usr/local/bin`，让任意目录、非交互 shell 都能直接调用。
+/// 板上 `PATH` 默认包含该目录，因此不修改镜像的 shell 配置。
+fn link(device: &str) -> Result<(), String> {
+    let mut commands = Vec::with_capacity(Target::Board.apps().len());
+    for app in Target::Board.apps() {
+        commands.push(format!(
+            "ln -sf {DESTINATION}/bin/{app} /usr/local/bin/{app}"
+        ));
+    }
+    adb(device, &["shell", &commands.join(" && ")])?;
     Ok(())
 }
 

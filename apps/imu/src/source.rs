@@ -2,6 +2,7 @@
 
 use std::error::Error;
 use std::io;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,7 +17,10 @@ use serde::Deserialize;
 use spidev::{SpiModeFlags, Spidev, SpidevOptions, SpidevTransfer};
 
 /// `configs/imu.toml` 缺省路径（相对运行目录，板上是 `/opt/firefly`）。
-const DEFAULT_CONFIG: &str = "configs/imu.toml";
+/// 缺省配置：按安装布局解析，与启动目录无关。
+fn default_config() -> PathBuf {
+    firefly_config::paths::config("imu.toml")
+}
 /// 采样率上限（Hz）：再高只会重复读到同一输出数据率的结果。
 const MAX_RATE_HZ: f64 = 1_000.0;
 /// 日志与可视化的推进周期；高频采样下不必每拍都排空日志队列。
@@ -95,16 +99,17 @@ const fn default_gyro_range_dps() -> u32 {
     2_000
 }
 
-/// 解析 `--config <path>`（缺省 [`DEFAULT_CONFIG`]）。
-fn parse_config_path() -> Result<String, String> {
+/// 解析 `--config <path>`（缺省 [`default_config`]）。
+fn parse_config_path() -> Result<PathBuf, String> {
     let mut it = std::env::args().skip(1);
-    let mut path = DEFAULT_CONFIG.to_owned();
+    let mut path = default_config();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--config" => {
-                path = it
-                    .next()
-                    .ok_or_else(|| "missing --config value".to_owned())?;
+                path = PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| "missing --config value".to_owned())?,
+                );
             }
             other => return Err(format!("unknown argument {other}")),
         }

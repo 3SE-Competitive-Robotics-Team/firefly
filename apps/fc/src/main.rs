@@ -31,6 +31,7 @@ mod config;
 mod frames;
 mod imu;
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -58,7 +59,10 @@ use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 
 /// `configs/fc.toml` 缺省路径（相对运行目录，通常为仓库根）。
-const DEFAULT_CONFIG: &str = "configs/fc.toml";
+/// 缺省配置：按安装布局解析，与启动目录无关。
+fn default_config() -> PathBuf {
+    firefly_config::paths::config("fc.toml")
+}
 /// 每拍末尾用于对齐截止时间的自旋窗口。
 const SPIN_MARGIN: Duration = Duration::from_micros(150);
 /// 里程计陈旧阈值（墙钟秒）：覆盖 10Hz 视觉更新间隔，触发姿态降级。
@@ -78,16 +82,17 @@ const STATS_PERIOD: f64 = 1.0;
 /// 退出标志（信号处理器置位，主循环检查）。
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-/// 解析 `--config <path>`（缺省 [`DEFAULT_CONFIG`]）。
-fn parse_config_path() -> Result<String, String> {
+/// 解析 `--config <path>`（缺省 [`default_config`]）。
+fn parse_config_path() -> Result<PathBuf, String> {
     let mut it = std::env::args().skip(1);
-    let mut path = DEFAULT_CONFIG.to_owned();
+    let mut path = default_config();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--config" => {
-                path = it
-                    .next()
-                    .ok_or_else(|| "missing --config value".to_owned())?;
+                path = PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| "missing --config value".to_owned())?,
+                );
             }
             other => return Err(format!("unknown argument {other}")),
         }
@@ -818,7 +823,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ports = Ports::open(&node)?;
     let log_ipc = firefly_observability::init_ipc(&node, "fc");
     log::info!(
-        "飞控进程启动：{} Hz 控制环，配置 {config_path}；初始 DISARMED，等 `Firefly/Command`",
+        "飞控进程启动：{} Hz 控制环，配置 {}；初始 DISARMED，等 `Firefly/Command`",
+        config_path.display(),
         cfg.rate_hz
     );
 
