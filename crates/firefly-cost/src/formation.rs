@@ -64,30 +64,45 @@ impl FormationPenalty {
         self
     }
 
+    fn frame(&self) -> FormationFrame {
+        FormationFrame {
+            axis: (self.line_end - self.line_start).normalize(),
+            peer_durations: self.peers.iter().map(|peer| peer.traj.duration()).collect(),
+        }
+    }
+
     /// 队形轴与进度（官方：`a` 归一化，`l`/`dl_dt` 从其他机推断）。
     #[must_use]
     #[allow(clippy::many_single_char_names)]
     pub fn formation_state(&self, t_abs: f64) -> (Vector3<f64>, Vector3<f64>, f64, f64) {
+        self.formation_state_with(t_abs, &self.frame())
+    }
+
+    /// 复用预计算的逐样本投影；取值与 [`Self::formation_state`] 逐位一致。
+    #[allow(clippy::many_single_char_names)]
+    fn formation_state_with(
+        &self,
+        t_abs: f64,
+        frame: &FormationFrame,
+    ) -> (Vector3<f64>, Vector3<f64>, f64, f64) {
         let o = self.line_start;
-        let a = (self.line_end - self.line_start).normalize();
+        let a = frame.axis;
         let mut l = 0.0;
         let mut dl_dt = 0.0;
         let mut n = 0usize;
-        for peer in &self.peers {
+        for (index, peer) in self.peers.iter().enumerate() {
             if peer.drone_id == self.self_id || peer.drone_id >= self.offsets.len() {
                 continue;
             }
+            let duration = frame.peer_durations[index];
             let local_t = t_abs - peer.start_time;
-            let (p, v) = if local_t < peer.traj.duration() {
+            let (p, v) = if local_t < duration {
                 let s = peer.traj.eval(local_t);
                 (s.position, s.velocity)
             } else {
                 // 超出轨迹：外推匀速（官方处理）
-                let s = peer.traj.eval(peer.traj.duration());
-                (
-                    s.position + s.velocity * (local_t - peer.traj.duration()),
-                    s.velocity,
-                )
+                let s = peer.traj.eval(duration);
+                (s.position + s.velocity * (local_t - duration), s.velocity)
             };
             l += (p - o).dot(&a) - self.offsets[peer.drone_id].x;
             dl_dt += a.dot(&v);
@@ -112,6 +127,15 @@ impl FormationPenalty {
     }
 }
 
+/// 与 `t_abs` 无关的预计算：归一化轴向量与各 peer 总时长。
+///
+/// peer 轨迹在一次优化内不变，逐样本重算 `normalize` 与 `duration()`（O(M) 求和）
+/// 是纯浪费。
+struct FormationFrame {
+    axis: Vector3<f64>,
+    peer_durations: Vec<f64>,
+}
+
 impl Penalty for FormationPenalty {
     // 与官方公式逐行对应(k/i/j/o/a/l/s),单字符命名保可读性
     #[allow(clippy::many_single_char_names)]
@@ -121,6 +145,7 @@ impl Penalty for FormationPenalty {
         }
         let k = self.samples_per_piece;
         let mut cost = 0.0;
+        let frame = self.frame();
         // 前缀和随分段推进，避免每个样本重新累加 O(M)；求和顺序与原实现一致。
         let mut t_start = 0.0;
         for (i, ti) in traj.durations().iter().enumerate() {
@@ -137,7 +162,7 @@ impl Penalty for FormationPenalty {
                 }
                 let t_local = tau * ti;
                 let t_abs = t_start + t_local;
-                let (o, a, l, _) = self.formation_state(t_abs);
+                let (o, a, l, _) = self.formation_state_with(t_abs, &frame);
                 // 循环内已知分段，用局部时刻取点，省掉 eval 的线性定位。
                 let s = traj.eval_piece(i, t_local);
                 let omg = trapezoid_weight(j, k);
@@ -155,6 +180,7 @@ impl Penalty for FormationPenalty {
             return;
         }
         let k = self.samples_per_piece;
+        let frame = self.frame();
         let mut t_start = 0.0;
         for (i, ti) in traj.durations().iter().enumerate() {
             let step = ti / k as f64;
@@ -171,7 +197,7 @@ impl Penalty for FormationPenalty {
                 let omg = trapezoid_weight(j, k);
                 let t_local = tau * ti;
                 let t_abs = t_start + t_local;
-                let (o, a, l, dl_dt) = self.formation_state(t_abs);
+                let (o, a, l, dl_dt) = self.formation_state_with(t_abs, &frame);
                 let s = traj.eval_piece(i, t_local);
                 let tar = self.target(o, a, l);
                 let d_p = 2.0 * (s.position - tar) * (weight * omg * step);
