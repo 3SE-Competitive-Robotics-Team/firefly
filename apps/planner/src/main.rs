@@ -263,6 +263,8 @@ struct App {
     mapped_frames: usize,
     state_input: StateInput,
     received_state: bool,
+    /// 本拍是否拿到新鲜里程计：决定体素快照是否重扫（无状态时不扫）。
+    state_fresh: bool,
     state_loss_reported: bool,
     initial_goal: Option<[f64; 3]>,
     depth: Option<Subscriber<DepthImageMessage>>,
@@ -395,6 +397,7 @@ impl App {
             state_input: StateInput::default(),
             mapped_frames: 0,
             received_state: false,
+            state_fresh: false,
             state_loss_reported: false,
             initial_goal,
             odom,
@@ -531,6 +534,7 @@ impl App {
     #[allow(clippy::too_many_lines)]
     fn step(&mut self) -> Result<()> {
         let tick_start = Instant::now();
+        self.state_fresh = false;
         // 先消费传感器（更新权威仿真时钟），再取当帧 sim 时刻
         self.poll_sensors()?;
         let now = self.t_sim;
@@ -544,6 +548,7 @@ impl App {
             }
             return Ok(());
         };
+        self.state_fresh = true;
         let measured = Some(snapshot.state);
         if self.state_input.take_revision_change() {
             self.manager.map_mut().clear_observations();
@@ -798,22 +803,26 @@ impl App {
                 }
             }
             frame += 1;
-            // 感知占据地图：每拍只发变化量，周期性全量重同步
-            let mut indices = std::mem::take(&mut self.voxel_indices);
-            let (size, origin) = Self::occupied_indices(
-                self.manager.map(),
-                Some(self.perceived_center),
-                &mut indices,
-            );
-            self.publish_voxel_delta(
-                "plan/perceived",
-                &indices,
-                size,
-                origin,
-                self.t_sim,
-                frame.is_multiple_of(VOXEL_RESYNC_TICKS),
-            );
-            self.voxel_indices = indices;
+            // 感知占据地图：每拍只发变化量，周期性全量重同步。
+            // 无新鲜里程计时不重扫：窗口以机体位置为中心，没有位姿就没有
+            // 有意义的窗口，扫描只是对同一张图重复 53 万次体素读取。
+            if self.state_fresh {
+                let mut indices = std::mem::take(&mut self.voxel_indices);
+                let (size, origin) = Self::occupied_indices(
+                    self.manager.map(),
+                    Some(self.perceived_center),
+                    &mut indices,
+                );
+                self.publish_voxel_delta(
+                    "plan/perceived",
+                    &indices,
+                    size,
+                    origin,
+                    self.t_sim,
+                    frame.is_multiple_of(VOXEL_RESYNC_TICKS),
+                );
+                self.voxel_indices = indices;
+            }
             CallbackProgression::Continue
         };
 
