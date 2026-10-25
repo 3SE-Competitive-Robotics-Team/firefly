@@ -18,16 +18,18 @@ use bevy::window::{Window, WindowPlugin};
 use config::QuadConfig;
 use firefly_render::camera::{FollowCamera, FollowTarget, follow_camera};
 use firefly_render::lighting::{ILLUMINANCE, spawn_scene_lighting, viewer_camera};
-use firefly_render::scene::{MODELS_DIR, spawn_scene};
+use firefly_render::scene::{models_dir, spawn_scene};
 use quad::{Quad, QuadInput};
 
-/// 配置（编译期绝对路径）。
-const CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/quad.toml");
+/// 缺省配置：按安装布局解析，与启动目录无关。
+fn config_path() -> std::path::PathBuf {
+    firefly_config::paths::config("quad.toml")
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new();
     let cfg = firefly_config::startup::<QuadConfig>(
-        CONFIG,
+        &config_path(),
         || {
             app.add_plugins(LogPlugin::default());
         },
@@ -36,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.add_plugins(
         DefaultPlugins
             .set(AssetPlugin {
-                file_path: MODELS_DIR.to_owned(),
+                file_path: models_dir().display().to_string(),
                 ..default()
             })
             .set(WindowPlugin {

@@ -20,9 +20,7 @@ impl Run for Disable {
     type Output = ExitCode;
 
     fn run(self) -> Self::Output {
-        let path = self
-            .config
-            .unwrap_or_else(|| PathBuf::from(config::DEFAULT_PATH));
+        let path = self.config.unwrap_or_else(config::default_path);
         report(set_autostart(&path, &self.names, false))
     }
 }

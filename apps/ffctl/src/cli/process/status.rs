@@ -44,9 +44,7 @@ impl Run for Status {
     type Output = ExitCode;
 
     fn run(self) -> Self::Output {
-        let path = self
-            .config
-            .unwrap_or_else(|| PathBuf::from(config::DEFAULT_PATH));
+        let path = self.config.unwrap_or_else(config::default_path);
         let config = match Config::load(&path) {
             Ok(config) => config,
             Err(error) => return crate::process::report(Err(error)),

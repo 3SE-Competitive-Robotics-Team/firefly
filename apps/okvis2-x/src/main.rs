@@ -6,7 +6,7 @@ use firefly_error::{Error, ErrorKind, Result};
 use firefly_okvis_x::application::{OfflineApplicationFactory, okvis2x_app_synchronous};
 use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 
-const USAGE: &str = "firefly-okvis-x [--config configs/okvis2-x.toml] [--dataset <directory>] [--output <directory>] [--vocabulary <directory>] [--no-loop-closures] [--no-mapping] [--external-localization]";
+const USAGE: &str = "firefly-okvis-x [--config <path>] [--dataset <directory>] [--output <directory>] [--vocabulary <directory>] [--no-loop-closures] [--no-mapping] [--external-localization]";
 
 struct Arguments {
     executable: OsString,
@@ -22,7 +22,7 @@ struct Arguments {
 fn parse() -> Result<Option<Arguments>> {
     let mut args = std::env::args_os();
     let executable = args.next().unwrap_or_else(|| "firefly-okvis-x".into());
-    let mut config = PathBuf::from("configs/okvis2-x.toml");
+    let mut config = firefly_config::paths::config("okvis2-x.toml");
     let mut vocabulary = None;
     let mut dataset = None;
     let mut output = None;

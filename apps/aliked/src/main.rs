@@ -9,7 +9,7 @@
 //!
 //! 权重在 `models/`（已 ignore，不进 git）。
 //!
-//! 运行：`cargo run --release -p aliked [--model models/aliked-n16-k512.onnx]`。
+//! 运行：`cargo run --release -p aliked [--model <path>]`。
 
 use firefly_pubsub::camera::{CAMERA_LEFT_TOPIC, GrayImageMessage};
 use firefly_pubsub::event::{CAMERA_PAIR_TOPIC, TopicListener};
@@ -27,7 +27,10 @@ use ort::value::Tensor;
 use std::path::{Path, PathBuf};
 
 /// 缺省权重路径（相对运行目录，通常为仓库根）。
-const DEFAULT_MODEL: &str = "models/aliked-n16-k512.onnx";
+/// 缺省权重：按安装布局解析。
+fn default_model() -> PathBuf {
+    firefly_config::paths::models("aliked-n16-k512.onnx")
+}
 /// 导出约定：静态分辨率（见导出脚本）。
 const WIDTH: usize = 320;
 const HEIGHT: usize = 240;
@@ -57,7 +60,7 @@ struct Args {
 /// `--out <map.ffvmap>`（离线建库，两者必须同时出现）、`--rate-hz`（在线推理频率）。
 fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
-    let mut model = DEFAULT_MODEL.to_owned();
+    let mut model = default_model().display().to_string();
     let mut build_map: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;
     let mut rate_hz = DEFAULT_RATE_HZ;
@@ -140,7 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rate_hz,
     } = parse_args().map_err(|e| {
         eprintln!(
-            "{e}\n用法：aliked [--model models/aliked-n16-k512.onnx] [--rate-hz 2.0]\n       \
+            "{e}\n用法：aliked [--model <path>] [--rate-hz 2.0]\n       \
              aliked --build-map <frames_dir> --out <map.ffvmap> [--model ...]"
         );
         std::process::exit(2);
@@ -473,28 +476,19 @@ fn smoke_inference(model: &mut Model) -> Result<(), Box<dyn std::error::Error>> 
 mod tests {
     use super::*;
 
-    /// 测试用权重路径：先 CWD相对，再相对 `CARGO_MANIFEST_DIR` 回仓库根；
-    /// 都缺失时跳过（`models/` 已 ignore，CI 无权重）。
+    /// 测试用权重路径：按安装布局解析；缺失时跳过（`models/` 已 ignore，CI 无权重）。
     fn test_model_path() -> Option<String> {
-        let cwd = std::path::PathBuf::from(DEFAULT_MODEL);
-        if cwd.is_file() {
-            return cwd.to_str().map(str::to_owned);
-        }
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join(DEFAULT_MODEL);
-        if root.is_file() {
-            return root.to_str().map(str::to_owned);
-        }
-        None
+        let path = default_model();
+        path.is_file()
+            .then(|| path.to_str().map(str::to_owned))
+            .flatten()
     }
 
     /// 端到端冒烟：权重缺失时跳过。
     #[test]
     fn onnx_smoke_or_skip() {
         let Some(path) = test_model_path() else {
-            log::warn!("skip: 无权重 {DEFAULT_MODEL}");
+            log::warn!("skip: 无权重 {}", default_model().display());
             return;
         };
         let mut model = super::load_model(&path).unwrap();
@@ -504,7 +498,7 @@ mod tests {
     #[test]
     fn reused_input_matches_fresh_tensor_across_frames_or_skip() {
         let Some(path) = test_model_path() else {
-            log::warn!("skip: 无权重 {DEFAULT_MODEL}");
+            log::warn!("skip: 无权重 {}", default_model().display());
             return;
         };
         let mut model = load_model(&path).unwrap();

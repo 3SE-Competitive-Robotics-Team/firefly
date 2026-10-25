@@ -5,11 +5,14 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub(crate) const DEFAULT_PATH: &str = "configs/processes.toml";
+/// 缺省进程清单：按安装布局解析。
+pub(crate) fn default_path() -> PathBuf {
+    firefly_config::paths::config("processes.toml")
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

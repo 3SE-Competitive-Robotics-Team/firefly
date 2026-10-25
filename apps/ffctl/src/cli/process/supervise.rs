@@ -18,9 +18,7 @@ impl Run for Supervise {
     type Output = ExitCode;
 
     fn run(self) -> Self::Output {
-        let path = self
-            .config
-            .unwrap_or_else(|| PathBuf::from(config::DEFAULT_PATH));
+        let path = self.config.unwrap_or_else(config::default_path);
         report(supervisor::run(&path))
     }
 }

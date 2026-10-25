@@ -18,7 +18,10 @@ use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 use serde::Deserialize;
 
 /// `configs/motor.toml` 缺省路径（相对运行目录，板上是 `/opt/firefly`）。
-const DEFAULT_CONFIG: &str = "configs/motor.toml";
+/// 缺省配置：按安装布局解析，与启动目录无关。
+fn default_config() -> PathBuf {
+    firefly_config::paths::config("motor.toml")
+}
 /// `sysfs` PWM 类目录。
 const PWM_CLASS: &str = "/sys/class/pwm";
 /// 电机数：与 `ControlMessage::thrust` 的定长数组一致。
@@ -113,10 +116,10 @@ const fn default_airframe_ms() -> u64 {
     1_000
 }
 
-/// 解析 `--config <path>`（缺省 [`DEFAULT_CONFIG`]）。
+/// 解析 `--config <path>`（缺省 [`default_config`]）。
 fn parse_config_path() -> Result<String, String> {
     let mut it = std::env::args().skip(1);
-    let mut path = DEFAULT_CONFIG.to_owned();
+    let mut path = default_config().display().to_string();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--config" => {

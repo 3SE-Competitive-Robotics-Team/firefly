@@ -77,7 +77,10 @@ const VOXEL_RESYNC_TICKS: usize = 50;
 /// 占用格数仍超 `VOXELS_MAX`；4m @0.15m 约几千格，既不截断又跟得上机体。
 const PERCEIVED_VIEW_RADIUS_M: f64 = 4.0;
 /// `configs/planner.toml` 缺省路径（相对运行目录，通常为仓库根）。
-const DEFAULT_CONFIG: &str = "configs/planner.toml";
+/// 缺省配置：按安装布局解析，与启动目录无关。
+fn default_config() -> PathBuf {
+    firefly_config::paths::config("planner.toml")
+}
 
 /// 强制停止话题（外部工具 → 规划进程；对照官方 `mandatory_stop` topic）。
 const MANDATORY_STOP_TOPIC: &str = "Firefly/MandatoryStop";
@@ -175,7 +178,7 @@ fn parse_args() -> Result<Args> {
     let mut it = std::env::args().skip(1);
     let mut args = Args {
         map: None,
-        config: PathBuf::from(DEFAULT_CONFIG),
+        config: default_config(),
         start: [0.0; 3],
         // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
         goal: None,

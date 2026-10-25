@@ -114,3 +114,71 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+/// 运行期路径约定：板上固定 `/opt/firefly`，开发机构建用仓库根。
+///
+/// 部署布局是 `bin/`、`configs/`、`models/` 三个同级目录；二进制按约定定位，
+/// 不依赖启动时的工作目录。板上与开发机由目标三元组区分，不做运行时探测。
+pub mod paths {
+    use std::path::PathBuf;
+
+    /// 板载布局（Orange Pi Zero 3W，aarch64-linux）。
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    const ROOT: &str = "/opt/firefly";
+    /// 开发机：本 crate 位于 `<repo>/crates/firefly-config`，向上两级即仓库根。
+    #[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
+    const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+
+    /// firefly 安装根目录。
+    #[must_use]
+    pub fn root() -> PathBuf {
+        normalize(PathBuf::from(ROOT))
+    }
+
+    /// 去掉 `.`/`..` 的词法归一化：开发机构建的根路径含 `../..`，日志和报错里应给出
+    /// 干净路径；不访问文件系统，符号链接语义不影响。
+    fn normalize(path: PathBuf) -> PathBuf {
+        let mut out = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                other => out.push(other),
+            }
+        }
+        out
+    }
+
+    /// `configs/<name>` 的绝对路径。
+    #[must_use]
+    pub fn config(name: &str) -> PathBuf {
+        root().join("configs").join(name)
+    }
+
+    /// `models/` 下的绝对路径。
+    #[must_use]
+    pub fn models(name: &str) -> PathBuf {
+        root().join("models").join(name)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn config_and_models_follow_the_deployment_layout() {
+            assert!(config("fc.toml").ends_with("configs/fc.toml"));
+            assert!(models("aliked.onnx").ends_with("models/aliked.onnx"));
+            assert!(config("fc.toml").is_absolute());
+            assert!(!config("fc.toml").to_string_lossy().contains(".."));
+        }
+
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        #[test]
+        fn board_root_is_the_installed_prefix() {
+            assert_eq!(root(), PathBuf::from("/opt/firefly"));
+        }
+    }
+}

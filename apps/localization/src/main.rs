@@ -27,7 +27,10 @@ use nalgebra::{Isometry3, Matrix4, Quaternion, Translation3, UnitQuaternion, Vec
 const LOOP_PERIOD: Duration = Duration::from_millis(10);
 /// 矫正后位姿图例颜色（绿，与 vio 橙 / 真值蓝区分）。
 const CORRECTED_COLOR: (u8, u8, u8) = (60, 200, 80);
-const DEFAULT_CONFIG: &str = "configs/localization.toml";
+/// 缺省配置：按安装布局解析，与启动目录无关。
+fn default_config() -> PathBuf {
+    firefly_config::paths::config("localization.toml")
+}
 const ODOM_FRESH_TIMEOUT: f64 = 1.0;
 /// 视觉观测待融合队列上限（条）：观测先到、odom 后到时暂存，按 `timestamp`
 /// 排序，odom 追上即融合；溢出时丢最旧（对端断流的背压语义，非延时等待）。
@@ -48,7 +51,7 @@ struct Args {
 fn parse_args() -> Result<Args> {
     let mut it = std::env::args().skip(1);
     let mut args = Args {
-        config: PathBuf::from(DEFAULT_CONFIG),
+        config: default_config(),
         odom_topic: firefly_pubsub::odom::ODOM_TOPIC.to_string(),
     };
     while let Some(arg) = it.next() {

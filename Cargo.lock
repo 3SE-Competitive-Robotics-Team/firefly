@@ -126,6 +126,7 @@ name = "aliked"
 version = "0.1.0"
 dependencies = [
  "fastrace",
+ "firefly-config",
  "firefly-error",
  "firefly-observability",
  "firefly-pubsub",
@@ -3058,6 +3059,7 @@ dependencies = [
 name = "ffctl"
 version = "0.1.0"
 dependencies = [
+ "firefly-config",
  "firefly-error",
  "firefly-pubsub",
  "iceoryx2",
@@ -3301,6 +3303,7 @@ name = "firefly-render"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "firefly-config",
 ]
 
 [[package]]

@@ -166,7 +166,13 @@ adb -s firefly-0001 shell 'systemctl start firefly'
 `dist/firefly-aarch64.zst`（zstd 容器，不是 tar），推到设备后由同一 xtask 的 `unpack`
 解包，`--device` 默认 `firefly-0001`。解包前会停掉 `firefly.service` 并清空
 `/opt/firefly/{bin,configs,models}`，退役的进程与配置不会残留在板上；`logs` 与镜像
-预置的 `systemd` 保留。因此部署后要重新 `systemctl start firefly`。可复现性由固定镜像 digest、Rust 1.98.1、`--locked`
+预置的 `systemd` 保留。解包后把每个二进制软链到 `/usr/local/bin`，因此 `ffctl`、
+`fc` 等在任意目录、非交互 `adb shell` 下都可直接调用，不需要改镜像的 shell 配置。
+因此部署后要重新 `systemctl start firefly`。
+
+二进制按安装布局定位配置与模型：板载构建固定用 `/opt/firefly/configs`、`/opt/firefly/models`，
+开发机构建用仓库根下的同名目录（编译期确定，不做运行时探测）。所以运行目录不影响
+配置解析，`--config <path>` 仍可显式覆盖。可复现性由固定镜像 digest、Rust 1.98.1、`--locked`
 和 `Cargo.lock` 保证；升级 Rust 或 Debian 时只需更新 `xtask/src/container.rs` 的
 基础镜像 digest，派生构建镜像的标签由工具链与 digest 前缀拼出，会自动重建。
 干净构建先删除 `target/container/`，再执行上面的命令。

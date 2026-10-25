@@ -22,9 +22,12 @@ use iceoryx2::waitset::WaitSetAttachmentId;
 use nalgebra::{Rotation3, UnitQuaternion};
 use ort::session::{IoBinding, Session};
 use ort::value::Tensor;
+use std::path::PathBuf;
 
-/// 缺省权重路径（相对运行目录，通常为仓库根）。
-const DEFAULT_MODEL: &str = "models/lightglue-aliked-k512.onnx";
+/// 缺省权重：按安装布局解析。
+fn default_model() -> PathBuf {
+    firefly_config::paths::models("lightglue-aliked-k512.onnx")
+}
 /// 相机分辨率（`image_size` 输入，`[W, H]` int64）。
 const WIDTH: i64 = 320;
 const HEIGHT: i64 = 240;
@@ -43,9 +46,11 @@ const ODOM_FRESH_TIMEOUT: f64 = 1.0;
 /// 解析模型、显式离线地图与应用配置。
 fn parse_args() -> Result<(String, Option<String>, String), String> {
     let mut it = std::env::args().skip(1);
-    let mut model = DEFAULT_MODEL.to_owned();
+    let mut model = default_model().display().to_string();
     let mut map: Option<String> = None;
-    let mut config = "configs/lightglue.toml".to_owned();
+    let mut config = firefly_config::paths::config("lightglue.toml")
+        .display()
+        .to_string();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--model" => {
@@ -81,9 +86,7 @@ fn load_session(model: &str) -> Result<Session, Box<dyn std::error::Error>> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (model, map_path, config) = parse_args().map_err(|e| {
-        eprintln!(
-            "{e}\n用法：lightglue --map <map.ffvmap> [--model models/lightglue-aliked-k512.onnx]"
-        );
+        eprintln!("{e}\n用法：lightglue --map <map.ffvmap> [--model <path>]");
         std::process::exit(2);
     })?;
     let map_path = map_path
@@ -620,7 +623,7 @@ fn observation_from_matches(
 
 #[cfg(test)]
 mod tests {
-    use super::DEFAULT_MODEL;
+    use super::default_model;
 
     #[test]
     fn config_defaults_without_file() {
@@ -770,28 +773,19 @@ mod tests {
         assert!(observation.error < 1.);
     }
 
-    /// 测试用权重路径：先 CWD相对，再相对 `CARGO_MANIFEST_DIR` 回仓库根；
-    /// 都缺失时跳过（`models/` 已 ignore，CI 无权重）。
+    /// 测试用权重路径：按安装布局解析；缺失时跳过（`models/` 已 ignore，CI 无权重）。
     fn test_model_path() -> Option<String> {
-        let cwd = std::path::PathBuf::from(DEFAULT_MODEL);
-        if cwd.is_file() {
-            return cwd.to_str().map(str::to_owned);
-        }
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join(DEFAULT_MODEL);
-        if root.is_file() {
-            return root.to_str().map(str::to_owned);
-        }
-        None
+        let path = default_model();
+        path.is_file()
+            .then(|| path.to_str().map(str::to_owned))
+            .flatten()
     }
 
     /// 端到端冒烟：权重缺失时跳过。
     #[test]
     fn onnx_smoke_or_skip() {
         let Some(path) = test_model_path() else {
-            println!("skip: 无权重 {DEFAULT_MODEL}");
+            println!("skip: 无权重 {}", default_model().display());
             return;
         };
         let mut session = super::load_session(&path).unwrap();
