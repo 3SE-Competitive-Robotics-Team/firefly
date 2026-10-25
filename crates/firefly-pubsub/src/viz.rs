@@ -30,9 +30,6 @@ pub mod kind {
     /// 图像像素坐标点集：`points = [u, v, track_id]`；`scalars = [宽, 高, 总点数]`。
     /// `point_count` 为实际携带点数，允许小于总数；空点集清除该帧标记。
     pub const KEYPOINTS_2D: u32 = 10;
-    /// 数值矩阵：`scalars=[行数,列数]`，`points` 展平后为行主序元素，
-    /// `point_count` 为元素数（上限 `3 * POINTS_MAX`）。
-    pub const MATRIX: u32 = 11;
     /// 固定相机标定：scalars=[fx,fy,cx,cy]，points[0]=[width,height,0]，pose 为 body←CV camera。
     pub const CAMERA: u32 = 12;
 }
@@ -77,9 +74,9 @@ pub struct VizMessage {
     pub xyz: [f64; 3],
     /// Hamilton xyzw、机体→父坐标系；与 `OdomMessage` 的分量解释边界一致。
     pub quat_xyzw: [f64; 4],
-    /// 折线或图像点集；`matrix` 复用其连续 f64 存储（见 [`kind::MATRIX`]）。
+    /// 折线或图像点集。
     pub points: [[f64; 3]; POINTS_MAX],
-    /// `points` 有效点数；`matrix` 时为展平后的有效元素数。
+    /// `points` 有效点数。
     pub point_count: u32,
     /// 箭头数（arrows）。
     pub arrow_count: u32,
@@ -142,22 +139,6 @@ impl VizMessage {
         };
         m.set_entity(entity);
         m
-    }
-
-    /// 构造行主序数值矩阵，保持扁平 IPC 布局。
-    ///
-    /// # Panics
-    /// 行列数为零、元素数量与尺寸不符或超出定长载荷。
-    #[must_use]
-    pub fn matrix(timestamp: f64, entity: &str, rows: usize, cols: usize, values: &[f64]) -> Self {
-        assert!(rows > 0 && cols > 0 && rows.checked_mul(cols) == Some(values.len()));
-        assert!(values.len() <= 3 * POINTS_MAX);
-        let mut msg = Self::base(kind::MATRIX, timestamp, entity);
-        msg.scalars[..2].copy_from_slice(&[rows as f64, cols as f64]);
-        msg.scalar_count = 2;
-        msg.points.as_flattened_mut()[..values.len()].copy_from_slice(values);
-        msg.point_count = values.len() as u32;
-        msg
     }
 
     /// 设置实体路径（UTF-8，超长截断；内部以字符边界保护不切碎多字节序列）。
@@ -410,16 +391,6 @@ mod tests {
 
     /// 编译期断言：满足 iceoryx2 零拷贝约束。
     fn assert_zero_copy_send<T: ZeroCopySend>() {}
-
-    #[test]
-    fn matrix_preserves_row_major_shape_and_values() {
-        let msg = VizMessage::matrix(1.5, "vio/covariance", 2, 3, &[1., 2., 3., 4., 5., 6.]);
-        assert_eq!(msg.kind, kind::MATRIX);
-        assert_eq!(msg.scalar_count, 2);
-        assert_eq!(msg.scalars[..2], [2., 3.]);
-        assert_eq!(msg.point_count, 6);
-        assert_eq!(msg.points[..2], [[1., 2., 3.], [4., 5., 6.]]);
-    }
 
     #[test]
     fn subscriber_first_retains_geometry_burst() {

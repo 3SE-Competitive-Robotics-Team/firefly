@@ -4,7 +4,7 @@ import pytest
 import rerun as rr
 
 from firefly_viz.config import Options
-from firefly_viz.messages import VIZ_KIND_KEYPOINTS_2D, VIZ_KIND_MATRIX, VizMessage
+from firefly_viz.messages import VIZ_KIND_KEYPOINTS_2D, VizMessage
 from firefly_viz.recording import MatchedPoints
 from firefly_viz.writer import Writer
 
@@ -57,30 +57,6 @@ def test_out_of_order_annotation_only_matches_its_image_and_missing_frames_are_e
     assert len(rec.calls) == before
     assert len(pairs.frames['left']) == 2
     assert len(pairs.points['left']) == 2
-
-
-def test_matrix_owns_storage_and_rejects_invalid_shapes(recordings_factory):
-    rec = Recording()
-    writer = Writer(recordings_factory(archive=rec, matches=MatchedPoints(rec, 4)), Options())
-    msg = VizMessage()
-    name = b'okvis/debug/pose_imu/test'
-    msg.entity_len, msg.entity[:len(name)] = len(name), name
-    msg.kind = VIZ_KIND_MATRIX
-    msg.timestamp = 1.
-    msg.scalar_count = 2
-    msg.scalars[:2] = [2, 3]
-    msg.point_count = 6
-    msg.points[0][:] = [1, 2, 3]
-    msg.points[1][:] = [4, 5, 6]
-    writer.handle(msg)
-    msg.points[0][0] = 999
-    data = rec.calls[0][1][1].data.as_arrow_array().to_pylist()[0]
-    assert data['shape'] == [2, 3]
-    assert data['buffer'] == [1, 2, 3, 4, 5, 6]
-    for rows, cols, count in [(0, 3, 0), (2, 3, 5), (2.5, 2, 5), (float('nan'), 2, 6)]:
-        msg.scalars[:2], msg.point_count = [rows, cols], count
-        with pytest.raises(ValueError, match='matrix'):
-            writer.handle(msg)
 
 
 def test_late_points_keep_original_video_index_and_do_not_cross_cameras():

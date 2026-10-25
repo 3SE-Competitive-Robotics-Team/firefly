@@ -8,7 +8,7 @@ from firefly_mujoco import OdomMessage
 from firefly_viz.main import Continuity, Worker
 from firefly_viz.config import Options
 from firefly_viz.writer import Writer
-from firefly_viz.messages import VIZ_KIND_CLEAR, VIZ_KIND_POSE, VizMessage, VoxelMessage
+from firefly_viz.messages import VIZ_KIND_CLEAR, VIZ_KIND_POSE, VIZ_KIND_SCALARS, VizMessage, VoxelMessage
 
 
 class Recording:
@@ -41,6 +41,50 @@ def okvis_pose(stamp, xyz):
     msg.kind, msg.timestamp = VIZ_KIND_POSE, stamp
     msg.xyz[:], msg.quat_xyzw[:] = xyz, [0., 0., 0., 1.]
     return msg
+
+
+def test_tracking_is_recorded_as_state_transitions_and_counters_stay_numeric(recordings_factory):
+    import rerun as rr
+
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options())
+    msg = VizMessage()
+    path = b'okvis/tracking'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    msg.kind, msg.scalar_count = VIZ_KIND_SCALARS, 1
+    for stamp, state in [(1., 0), (2., 1), (3., 1), (4., 2), (5., 0)]:
+        msg.timestamp, msg.scalars[0] = stamp, state
+        writer.handle(msg)
+    assert [stamp for stamp, _ in archive.events] == [
+        ('sim_time', {'duration': stamp}) for stamp in [1., 2., 4., 5.]]
+    assert all(isinstance(args[1], rr.StateChange) for _, args in archive.events)
+    assert [args[1].state.as_arrow_array().to_pylist() for _, args in archive.events] == [
+        ['Lost'], ['Marginal'], ['Good'], ['Lost']]
+    msg.scalars[0] = 3
+    with pytest.raises(ValueError, match='tracking state'):
+        writer.handle(msg)
+    path = b'okvis/loop_commits'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    writer.handle(msg)
+    assert isinstance(archive.events[-1][1][1], rr.Scalars)
+
+
+def test_clear_tracking_allows_same_state_to_be_logged_again(recordings_factory):
+    import rerun as rr
+
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options())
+    msg = VizMessage()
+    path = b'okvis/tracking'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    msg.timestamp, msg.kind, msg.scalar_count, msg.scalars[0] = 1., VIZ_KIND_SCALARS, 1, 2
+    writer.handle(msg)
+    msg.timestamp, msg.kind = 2., VIZ_KIND_CLEAR
+    writer.handle(msg)
+    msg.timestamp, msg.kind = 3., VIZ_KIND_SCALARS
+    writer.handle(msg)
+    assert len(archive.events) == 3
+    assert isinstance(archive.events[-1][1][1], rr.StateChange)
 
 
 def test_ground_truth_records_world_pose_and_incremental_trajectory(recordings_factory):

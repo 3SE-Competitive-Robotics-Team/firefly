@@ -1232,7 +1232,7 @@ pub struct ProcessingCore<G: ThreadedGraph, S, B, M> {
     full_graph: Option<JoinHandle<Result<G::FullGraphResult>>>,
     frame_diagnostics: Option<FrameDiagnosticCallback>,
 }
-type FrameDiagnosticCallback = Box<dyn FnMut(&MultiFrame, &State)>;
+type FrameDiagnosticCallback = Box<dyn FnMut(&MultiFrame)>;
 impl<G, S, B, M> ProcessingCore<G, S, B, M>
 where
     G: ThreadedGraph,
@@ -1277,7 +1277,7 @@ where
         }
     }
     /// Runs on the graph owner after frame optimization and before marginalization.
-    pub fn set_frame_diagnostics(&mut self, callback: impl FnMut(&MultiFrame, &State) + 'static) {
+    pub fn set_frame_diagnostics(&mut self, callback: impl FnMut(&MultiFrame) + 'static) {
         self.frame_diagnostics = Some(Box::new(callback));
     }
     /// # Errors
@@ -1910,7 +1910,7 @@ where
             .collect();
         let publication = self.prepare_publication(state, &updated, false)?;
         if let Some(diagnostics) = &mut self.frame_diagnostics {
-            diagnostics(&frame.borrow(), &publication.state);
+            diagnostics(&frame.borrow());
         }
         shared.started.store(true, Ordering::Release);
         Self::publish(shared, publication.clone())?;

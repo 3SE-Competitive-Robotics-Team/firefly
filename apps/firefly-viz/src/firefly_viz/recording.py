@@ -32,32 +32,29 @@ def at(recording, stamp: float | None):
 def blueprint():
     history = [rrb.VisibleTimeRange("sim_time", start=rrb.TimeRangeBoundary.infinite(),
                                     end=rrb.TimeRangeBoundary.cursor_relative())]
-    # 三种空间坐标各自成图；未提供对齐变换时绝不把 odom/map 当成仿真世界。
-    spatial_views = [
-        rrb.Spatial3DView(origin="/", name="Simulation world",
-                          contents=["+ /gt/**"],
-                          overrides={"/gt/traj": rrb.VisibleTimeRanges(history)}),
-        rrb.Spatial3DView(origin="/", name="Map / planning",
-                          contents=["+ /okvis/map/**", "+ /plan/**"],
-                          overrides={"/okvis/map/traj": rrb.VisibleTimeRanges(history)}),
-        rrb.Spatial3DView(origin="/okvis", name="OKVIS odom", contents=["+ /okvis/odom/**", "+ /okvis/traj/**"],
-                          overrides={"/okvis/traj": rrb.VisibleTimeRanges(history)}),
-    ]
-    spatial = rrb.Tabs(*spatial_views)
+    spatial = rrb.Spatial3DView(
+        origin="/", name="Ground truth / VSLAM / planning",
+        contents=["+ /gt/**", "+ /okvis/odom/**", "+ /okvis/traj/**",
+                  "+ /okvis/map/**", "+ /plan/**"],
+        overrides={path: rrb.VisibleTimeRanges(history)
+                   for path in ("/gt/traj", "/okvis/traj", "/okvis/map/traj")},
+    )
     cameras = [rrb.Spatial2DView(origin=f"/cameras/{name}", name=f"{name.title()} · recorded",
                                  contents=[f"+ /cameras/{name}/**"])
                for name in ("left", "right")]
     return rrb.Blueprint(
         rrb.Vertical(
-            rrb.Horizontal(spatial, rrb.Tabs(*cameras), column_shares=[3, 2]),
+            rrb.Horizontal(spatial, rrb.Horizontal(*cameras), column_shares=[3, 2]),
             rrb.Tabs(
-                rrb.TimeSeriesView(origin="/okvis", name="OKVIS diagnostics"),
-                rrb.TimeSeriesView(origin="/vision/debug", name="Vision matching diagnostics"),
+                rrb.Vertical(
+                    rrb.StateTimelineView(origin="/okvis/tracking", name="Tracking state"),
+                    rrb.TimeSeriesView(origin="/okvis/loop_commits", name="Loop updates"),
+                    name="OKVIS diagnostics",
+                ),
                 rrb.TimeSeriesView(origin="/fc", name="Flight control"),
                 rrb.TimeSeriesView(origin="/viz", name="Recorder health"),
                 rrb.TimeSeriesView(origin="/render", name="Sensor latency"),
                 rrb.TextLogView(origin="/logs", name="Logs"),
-                rrb.TensorView(origin="/okvis/debug/pose_imu", name="OKVIS optimized IMU pose"),
             ), row_shares=[3, 2],
         ),
         rrb.TimePanel(timeline="sim_time", play_state=rrb.components.PlayState.Following),

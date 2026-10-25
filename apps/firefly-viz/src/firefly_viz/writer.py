@@ -9,7 +9,7 @@ import rerun as rr
 from firefly_mujoco import IMAGE_HEIGHT, IMAGE_WIDTH
 
 from .messages import (
-    VIZ_KIND_POSE, VIZ_KIND_KEYPOINTS_2D, VIZ_KIND_MATRIX, VIZ_KIND_LINE_STRIP,
+    VIZ_KIND_POSE, VIZ_KIND_KEYPOINTS_2D, VIZ_KIND_LINE_STRIP,
     VIZ_KIND_VOXELS, VIZ_KIND_VOXELS_ADD, VIZ_KIND_VOXELS_REMOVE, VIZ_KIND_SCALARS,
     VIZ_KIND_BAR_CHART, VIZ_KIND_ARROWS, VIZ_KIND_CLEAR, VIZ_KIND_CAMERA,
 )
@@ -19,6 +19,7 @@ from .recording import RecordingOutputs, PIXEL_CENTER_OFFSET, at
 TRAJECTORIES = {"gt/pose": ("gt/traj", [64, 128, 255]),
                 "okvis/odom": ("okvis/traj", [255, 160, 64]),
                 "okvis/map/pose": ("okvis/map/traj", [90, 235, 120])}
+TRACKING_STATES = {0: "Lost", 1: "Marginal", 2: "Good"}
 
 
 def entity(msg):
@@ -46,6 +47,7 @@ class Writer:
         self.voxel_pending = None
         self.calibrations = {}
         self.previous_poses = {}
+        self.tracking_state = None
         self.last_flush = time.monotonic()
 
     def consume(self, item):
@@ -102,7 +104,15 @@ class Writer:
         at(self.rec, msg.timestamp)
         if kind == VIZ_KIND_SCALARS:
             n = count(msg.scalar_count, len(msg.scalars))
-            self.rec.log(name, rr.Scalars(list(msg.scalars[:n])), strict=True)
+            if name == "okvis/tracking":
+                state = TRACKING_STATES.get(msg.scalars[0]) if n == 1 else None
+                if state is None:
+                    raise ValueError("invalid OKVIS tracking state")
+                if state != self.tracking_state:
+                    self.rec.log(name, rr.StateChange(state=state), strict=True)
+                    self.tracking_state = state
+            else:
+                self.rec.log(name, rr.Scalars(list(msg.scalars[:n])), strict=True)
         elif kind == VIZ_KIND_KEYPOINTS_2D:
             n = count(msg.point_count, len(msg.points))
             width, height, total = msg.scalars[:3]
@@ -123,14 +133,6 @@ class Writer:
                 self.rec.log(name, rr.Points2D(points, colors=list(msg.color), radii=2),
                              rr.AnyValues(track_id=pa.array(ids, type=pa.uint64()),
                                           image_width=int(width), image_height=int(height), total_keypoints=int(total)), strict=True)
-        elif kind == VIZ_KIND_MATRIX:
-            rows, cols = msg.scalars[:2]
-            n = count(msg.point_count, 3 * len(msg.points))
-            if (msg.scalar_count != 2 or not np.isfinite([rows, cols]).all() or rows <= 0 or cols <= 0
-                    or rows != int(rows) or cols != int(cols) or int(rows) * int(cols) != n):
-                raise ValueError(f"invalid matrix {name}")
-            values = np.ctypeslib.as_array(msg.points).reshape(-1)[:n].copy().reshape(int(rows), int(cols))
-            self.rec.log(name, rr.Tensor(values), strict=True)
         elif kind == VIZ_KIND_LINE_STRIP:
             n = count(msg.point_count, len(msg.points))
             self.rec.log(name, rr.LineStrips3D([list(map(list, msg.points[:n]))], colors=list(msg.color)), strict=True)
@@ -146,6 +148,8 @@ class Writer:
                                           vectors=list(map(list, msg.arrow_vectors[:n])), colors=list(msg.color)), strict=True)
         elif kind == VIZ_KIND_CLEAR:
             self.rec.log(name, rr.Clear(recursive=True), strict=True)
+            if name in ("okvis", "okvis/tracking"):
+                self.tracking_state = None
             for key in list(self.voxels):
                 if key == name or key.startswith(name + "/"):
                     del self.voxels[key]

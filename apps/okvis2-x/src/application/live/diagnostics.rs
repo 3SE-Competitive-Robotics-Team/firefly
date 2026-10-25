@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
-//! Bounded current-frame feature and optimized-state diagnostics on the graph owner.
-use crate::{frames::multi_frame::MultiFrame, runtime::vi_interface::State};
+//! Bounded current-frame feature diagnostics on the graph owner.
+use crate::frames::multi_frame::MultiFrame;
 use firefly_error::Result;
 use firefly_pubsub::{
     node::{IpcNode, create_node},
@@ -22,21 +22,13 @@ impl Diagnostics {
             image_delay,
         })
     }
-    pub fn publish(&mut self, frame: &MultiFrame, state: &State) {
+    pub fn publish(&mut self, frame: &MultiFrame) {
         let stamp = frame.timestamp().as_nanosecond() as f64 * 1e-9 + self.image_delay;
         for camera in 0..frame.num_frames().min(OKVIS_KEYPOINT_ENTITIES.len()) {
             if let Some(message) = keypoints(frame, camera, stamp) {
                 let _ = self.publisher.publish(message);
             }
         }
-        let pose = state.t_ws.matrix().transpose();
-        let _ = self.publisher.publish(VizMessage::matrix(
-            state.timestamp.as_nanosecond() as f64 * 1e-9,
-            "okvis/debug/pose_imu",
-            4,
-            4,
-            pose.as_slice(),
-        ));
     }
 }
 

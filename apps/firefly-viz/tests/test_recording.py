@@ -110,10 +110,42 @@ def test_initialization_reports_blueprint_and_cleanup_failures(tmp_path):
 
 
 def test_camera_blueprint_contains_only_recorded_stereo_views():
+    import rerun.blueprint as rrb
+
     root = recording.blueprint().root_container
-    cameras = root.contents[0].contents[1].contents
+    container = root.contents[0].contents[1]
+    assert isinstance(container, rrb.Horizontal)
+    cameras = container.contents
     assert [(view.origin, view.name) for view in cameras] == [
         ('/cameras/left', 'Left · recorded'),
         ('/cameras/right', 'Right · recorded')]
-    spatial = root.contents[0].contents[0].contents
-    assert all(view.origin != '/live' for view in spatial)
+    assert root.contents[0].contents[0].origin == '/'
+
+
+def test_spatial_blueprint_uses_one_view_for_ground_truth_vslam_and_planning():
+    import rerun.blueprint as rrb
+
+    spatial = recording.blueprint().root_container.contents[0].contents[0]
+    assert isinstance(spatial, rrb.Spatial3DView)
+    assert spatial.origin == '/'
+    assert spatial.name == 'Ground truth / VSLAM / planning'
+
+
+def test_okvis_diagnostics_uses_state_timeline_for_tracking_and_curves_for_counters():
+    import rerun.blueprint as rrb
+
+    diagnostics = recording.blueprint().root_container.contents[1].contents[0]
+    assert diagnostics.name == 'OKVIS diagnostics'
+    tracking, loops = diagnostics.contents
+    assert isinstance(tracking, rrb.StateTimelineView)
+    assert tracking.origin == '/okvis/tracking'
+    assert isinstance(loops, rrb.TimeSeriesView)
+    assert loops.origin == '/okvis/loop_commits'
+
+
+def test_diagnostics_blueprint_excludes_optional_vision_and_imu_matrix_views():
+    import rerun.blueprint as rrb
+
+    panels = recording.blueprint().root_container.contents[1].contents
+    assert all(panel.name != 'Vision matching diagnostics' for panel in panels)
+    assert not any(isinstance(panel, rrb.TensorView) for panel in panels)

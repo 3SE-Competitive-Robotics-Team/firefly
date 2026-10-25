@@ -64,11 +64,14 @@ flowchart LR
 记录 `okvis/map/pose` 与 `okvis/map/traj`。轨迹按测量时刻记录相邻两点构成的线段，记录进程为每条轨迹
 保留一个前序点，Viewer 按时间范围展示历史。
 
-OKVIS 的帧诊断回调读取当前帧的二维关键点、路标 ID 与优化后的 IMU 位姿矩阵，
+OKVIS 跟踪质量以 `StateChange` 写入 `okvis/tracking`，仅在 Lost、Marginal、Good
+之间变化时记录，由 `StateTimelineView` 展示离散状态；回环更新次数与视觉查询耗时保留数值曲线。
+
+OKVIS 的帧诊断回调读取当前帧的二维关键点与路标 ID，
 在 `okvis/debug` 下发布有界诊断。关键点时间恢复为相机采集时刻；记录端按纳秒配对
 图像与关键点，保留原始像素坐标和路标 ID，显示时应用像素中心偏移。
 
-`Firefly/VizScalars` 使用小型定长消息长期保存数值；`Firefly/Viz` 保存位姿、点集、矩阵、
+`Firefly/VizScalars` 使用小型定长消息长期保存数值；`Firefly/Viz` 保存位姿、点集、
 标定等空间诊断；`Firefly/VizVoxels` 单独传输 planner 的地图更新。体素更新分块连续发送，
 接收端检查序号、完整性和容量后更新集合，再按录制频率保存完整快照。缺块、乱序或未知
 基线上的增量使录制明确失败；不能把截断地图当作完整证据。
@@ -83,12 +86,13 @@ Rerun 绘制特征点，点集只有与已保存图像的采集时间完全一�
 算法与 IPC 使用整数像素中心；[Rerun 0.38.1 图像边界从零开始](https://github.com/rerun-io/rerun/blob/0.38.1/crates/views/re_view_spatial/src/visualizers/video/mod.rs#L574)，
 展示层的主点与叠加点统一加半个像素，原始诊断坐标保持不变。
 
-图像区仅有左右目 recorded 视图，分别展示视频和同帧关键点；深度图的业务话题由估计与
+图像区仅有左右目 recorded 视图，在 Horizontal 容器中并排展示视频和同帧关键点；深度图的业务话题由估计与
 建图进程消费。左右目关键点由 OKVIS 当前帧诊断提供。视频队列丢帧和退出状态写入 RRD。
 
 Viewer 和文件 sink 使用同一个 recording stream，只展示视频、关键点和地图的历史记录。
 不创建 `/live/**` static 预览流；录制和实时查看可以同时启用。
-三个空间视图分别使用仿真世界、OKVIS 地图系和局部 odom 坐标。
+单个 3D 视图同时展示真值、VSLAM odom、VSLAM map 与规划轨迹，保留各来源的原始
+坐标，不添加对齐变换。不同来源的原点可能不同，视图中的间距不能直接解释为定位误差。
 接收、诊断写入和媒体处理独立调度；小型诊断队列溢出、编码失败、部分体素更新或退出
 清理失败都报告录制不完整，不静默切换编码器。配置与具体预算见 `configs/viz.toml`
 及 `firefly_viz.config`，不在此复制参数表。
