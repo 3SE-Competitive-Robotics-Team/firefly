@@ -404,7 +404,7 @@ impl Planner {
 
         loop {
             iteration += 1;
-            // 所有 Rebound、restart 和时间缩放尝试共享迭代预算。
+            // 所有 Rebound 和 restart 尝试共享迭代预算。
             if iteration > Self::REBOUND_MAX_ITERATIONS {
                 return Err(Error::temporary(
                     ErrorKind::Convergence,
@@ -439,6 +439,7 @@ impl Planner {
             };
             let report = Lbfgs::new(config).minimize(&mut objective, x0)?;
             gate_latched = objective.gate_latched();
+            let swarm_safe = objective.swarm_safe();
             log::debug!(
                 "rebound {iteration}: lbfgs iter={} converged={} early_exit={} grad={:.2e}",
                 report.iterations,
@@ -468,7 +469,7 @@ impl Planner {
 
             // fine check（官方 finelyCheckAndSetConstraintPoints,flag_first_init=false）
             let traj = minco.solve()?;
-            match self.try_finish(&traj, peers, &mut planes_by_point, touch_goal) {
+            match self.try_finish(&traj, swarm_safe, &mut planes_by_point, touch_goal) {
                 FinishCheck::Accept(trajectory) => {
                     return Ok(InnerOutcome {
                         trajectory,
@@ -522,12 +523,12 @@ impl Planner {
     fn try_finish(
         &mut self,
         traj: &Trajectory,
-        peers: &[firefly_cost::Peer],
+        swarm_safe: bool,
         planes_by_point: &mut [Vec<Plane>],
         touch_goal: bool,
     ) -> FinishCheck {
         // 对照 optimizeTrajectory：先检查 swarm，再做 finelyCheckAndSetConstraintPoints。
-        if !self.swarm_safe(traj, peers) {
+        if !swarm_safe {
             return FinishCheck::SwarmTooClose;
         }
         let scanner = ObstacleScanner::new(&self.map)
@@ -540,35 +541,6 @@ impl Planner {
             return FinishCheck::Collision;
         }
         FinishCheck::Accept(traj.clone())
-    }
-
-    /// 集群安全：所有约束点对每架 peer 的椭球距离 ≥ Cw（同一绝对时刻）。
-    fn swarm_safe(&self, traj: &Trajectory, peers: &[firefly_cost::Peer]) -> bool {
-        const KAPPA: usize = 20;
-        if peers.is_empty() {
-            return true;
-        }
-        for (i, ti) in traj.durations().iter().enumerate() {
-            for j in 0..=KAPPA {
-                let tau = j as f64 / KAPPA as f64;
-                let mut t_abs = 0.0;
-                for l in 0..i {
-                    t_abs += traj.durations()[l];
-                }
-                t_abs += tau * ti;
-                let p = traj.eval(t_abs).position;
-                for peer in peers {
-                    let pp = peer.sample_at(t_abs).position;
-                    let diff = p - pp;
-                    let d2 = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z / 4.0;
-                    let c = (self.config.swarm_clearance + peer.clearance) * 1.25;
-                    if d2 < c * c {
-                        return false;
-                    }
-                }
-            }
-        }
-        true
     }
 
     pub(crate) fn trajectory_max_vel(traj: &Trajectory) -> f64 {

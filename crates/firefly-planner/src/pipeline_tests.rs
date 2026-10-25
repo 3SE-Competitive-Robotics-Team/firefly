@@ -96,7 +96,7 @@ impl PlannerManager {
         event.emergency_stop = self.fsm.is_emergency();
         self.synchronize();
         self.server.heartbeat(now);
-        let reference = self.server.sample(now, now);
+        let reference = self.server.sample(now, now).into_iter().flatten().last();
         Report { event, reference }
     }
     fn is_finished(&self) -> bool {

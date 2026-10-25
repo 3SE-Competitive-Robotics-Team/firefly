@@ -1,5 +1,5 @@
 //! planner 进程接入层：Navigation/深度/目标输入 → FSM → 规划管理 → 完整轨迹。
-//! FSM 为 100Hz，安全检查入口为 20Hz；独立轨迹输出线程为 100Hz，接收轨迹与心跳。
+//! FSM 为 100Hz，安全检查为 20Hz；`--traj-server` 启动独立的 100Hz 轨迹输出进程。
 //! Navigation 失联或无效状态锁存停止输出，坐标修正使旧版本轨迹立即失效。
 //! 深度超时触发急停并禁用 fail-safe；真值不进入规划状态链路。
 
@@ -19,9 +19,7 @@ use firefly_map::{
     DepthCamera, GridMap, MapFile, Plane, VirtualWall, VoxelState, update_from_depth,
 };
 use firefly_observability::init as init_observability;
-use firefly_planner::{
-    ManagerOptions, PlannerConfig, PlannerManager, Reference, ReplanFsm, TrajectoryCommand,
-};
+use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager, Reference, ReplanFsm};
 use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage};
 use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
 use firefly_pubsub::node::create_node;
@@ -98,6 +96,7 @@ struct Args {
     goal: Option<[f64; 3]>,
     /// 仅向 `Firefly/MandatoryStop` 发一条强制停止指令后退出。
     mandatory_stop: bool,
+    traj_server: bool,
 }
 
 fn parse_args() -> Result<Args> {
@@ -109,6 +108,7 @@ fn parse_args() -> Result<Args> {
         // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
         goal: None,
         mandatory_stop: false,
+        traj_server: false,
     };
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -125,6 +125,7 @@ fn parse_args() -> Result<Args> {
             "--start" => args.start = parse_vec3(&mut it, "--start")?,
             "--goal" => args.goal = Some(parse_vec3(&mut it, "--goal")?),
             "--mandatory-stop" => args.mandatory_stop = true,
+            "--traj-server" => args.traj_server = true,
             other => {
                 return Err(Error::new(
                     ErrorKind::InvalidArgument,
@@ -159,7 +160,7 @@ fn open_sub<T: std::fmt::Debug + ZeroCopySend + 'static>(
 #[allow(clippy::struct_excessive_bools)]
 struct App {
     fsm: ReplanFsm,
-    output: output::OutputWorker,
+    output: output::OutputPublisher,
     published_trajectory: u32,
     /// 管理器行为参数（来自配置，启动日志展示）。
     manager_options: ManagerOptions,
@@ -241,8 +242,6 @@ impl App {
                 ceil: config.virtual_ceiling.unwrap_or(f64::INFINITY),
             });
         }
-        let yaw_hold = config.yaw_hold;
-        let heartbeat_timeout = config.heartbeat_timeout;
         let planner = firefly_planner::Planner::new(config, grid);
         // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
         let initial_goal = goal;
@@ -277,7 +276,7 @@ impl App {
             "已订阅强制停止话题（`planner --mandatory-stop` 发布）",
             "强制停止订阅不可用",
         );
-        let output = output::OutputWorker::start(odom.reader(), yaw_hold, heartbeat_timeout)?;
+        let output = output::OutputPublisher::new(&node)?;
         let viz_pub = match VizPublisher::with_voxels(&node) {
             Ok(p) => {
                 log::info!("已打开话题 {VIZ_TOPIC}");
@@ -568,11 +567,7 @@ impl App {
         if let Some(local) = self.fsm.manager().local()
             && local.traj_id != self.published_trajectory
         {
-            self.output.trajectory(TrajectoryCommand {
-                trajectory: local.traj.clone(),
-                start_time: local.start_time,
-                traj_id: local.traj_id,
-            })?;
+            self.output.trajectory(local)?;
             self.published_trajectory = local.traj_id;
         }
 
@@ -648,9 +643,6 @@ impl App {
                 return CallbackProgression::Continue;
             }
             // 接收线程可能先消费进程终止信号，主循环必须同步检查停止标志。
-            if self.output.check().is_err() {
-                return CallbackProgression::Stop;
-            }
             if self.odom.terminated() {
                 return CallbackProgression::Stop;
             }
@@ -712,7 +704,6 @@ impl App {
                 ));
             }
         }
-        self.output.check()?;
         self.odom.snapshot()?;
         log::info!(
             "进程退出：本会话 {} 次重规划，仿真时长 {:.1}s（悬停保持中，等待新目标可继续）",
@@ -1006,7 +997,7 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!(
-                "{e}\n用法：planner [--map <map.ffmap>] [--config configs/planner.toml] [--start x y z] [--goal x y z] [--mandatory-stop]\n\n--goal 可省略（悬停等待 `ffctl planner goal X Y Z` 动态目标）；--mandatory-stop 向 {MANDATORY_STOP_TOPIC} 发一条强制停止指令后退出"
+                "{e}\n用法：planner [--traj-server] [--map <map.ffmap>] [--config configs/planner.toml] [--start x y z] [--goal x y z] [--mandatory-stop]\n\n--goal 可省略（悬停等待 `ffctl planner goal X Y Z` 动态目标）；--mandatory-stop 向 {MANDATORY_STOP_TOPIC} 发一条强制停止指令后退出"
             );
             std::process::exit(2);
         }
@@ -1033,6 +1024,16 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if args.traj_server {
+        if let Err(error) = output::run(toml_cfg.config.yaw_hold, toml_cfg.config.heartbeat_timeout)
+        {
+            log::error!("轨迹输出失败：{error}");
+            firefly_observability::flush();
+            std::process::exit(1);
+        }
+        firefly_observability::flush();
+        return;
+    }
     let map_file = args
         .map
         .as_ref()

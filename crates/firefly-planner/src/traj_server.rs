@@ -29,6 +29,7 @@ pub struct TrajectoryCommand {
 
 pub struct TrajectoryServer {
     trajectory: Option<TrajectoryCommand>,
+    received: bool,
     heartbeat: Option<f64>,
     timeout: f64,
     yaw_hold: bool,
@@ -42,6 +43,7 @@ impl TrajectoryServer {
     pub fn new(yaw_hold: bool, timeout: f64) -> Self {
         Self {
             trajectory: None,
+            received: false,
             heartbeat: None,
             timeout,
             yaw_hold,
@@ -53,60 +55,75 @@ impl TrajectoryServer {
     }
     pub fn receive(&mut self, command: TrajectoryCommand) {
         self.trajectory = Some(command);
+        self.received = true;
     }
     pub fn heartbeat(&mut self, now: f64) {
         self.heartbeat = Some(now);
     }
     pub fn invalidate(&mut self) {
         self.trajectory = None;
+        self.received = false;
     }
     #[must_use]
     pub const fn yaw_state(&self) -> (f64, f64) {
         (self.last_yaw, self.last_yaw_dot)
     }
+    /// 返回本拍的发布顺序：超时保持在前，正常轨迹指令在后。
+    /// 上游超时分支不提前返回，本拍继续采样，下一拍停止。
     #[must_use]
-    pub fn sample(&mut self, now: f64, heartbeat_now: f64) -> Option<Reference> {
-        let heartbeat = self.heartbeat?;
-        let command = self.trajectory.as_ref()?;
-        if heartbeat_now - heartbeat > self.timeout {
-            self.trajectory = None;
-            return Some(Reference {
+    pub fn sample(&mut self, now: f64, heartbeat_now: f64) -> [Option<Reference>; 2] {
+        let Some(heartbeat) = self.heartbeat else {
+            return [None, None];
+        };
+        if !self.received {
+            return [None, None];
+        }
+        let Some(command) = self.trajectory.as_ref() else {
+            return [None, None];
+        };
+        let hold = if heartbeat_now - heartbeat > self.timeout {
+            self.received = false;
+            Some(Reference {
                 position: self.last_position,
                 velocity: Vector3::zeros(),
                 acceleration: Vector3::zeros(),
                 yaw: self.last_yaw,
                 yaw_dot: 0.0,
-            });
-        }
+            })
+        } else {
+            None
+        };
         let elapsed = now - command.start_time;
         if elapsed < 0.0 {
-            return None;
+            return [hold, None];
         }
         let duration = command.trajectory.duration();
-        if elapsed >= duration {
+        let reference = if elapsed >= duration {
             self.last_position = command.trajectory.eval(duration).position;
-            return Some(Reference {
+            Reference {
                 position: self.last_position,
                 velocity: Vector3::zeros(),
                 acceleration: Vector3::zeros(),
                 yaw: self.last_yaw,
                 yaw_dot: 0.0,
-            });
-        }
-        let state = command.trajectory.eval(elapsed);
-        let target = command
-            .trajectory
-            .eval((elapsed + TIME_FORWARD).min(duration))
-            .position;
-        let (yaw, yaw_dot) = self.update_yaw(state.position, target, now);
-        self.last_position = state.position;
-        Some(Reference {
-            position: state.position,
-            velocity: state.velocity,
-            acceleration: state.acceleration,
-            yaw,
-            yaw_dot,
-        })
+            }
+        } else {
+            let state = command.trajectory.eval(elapsed);
+            let target = command
+                .trajectory
+                .eval((elapsed + TIME_FORWARD).min(duration))
+                .position;
+            let (yaw, yaw_dot) = self.update_yaw(state.position, target, now);
+            self.last_position = state.position;
+            Reference {
+                position: state.position,
+                velocity: state.velocity,
+                acceleration: state.acceleration,
+                yaw,
+                yaw_dot,
+            }
+        };
+        [hold, Some(reference)]
     }
     pub(crate) fn update_yaw(
         &mut self,
@@ -210,18 +227,22 @@ mod tests {
     fn heartbeat_timeout_invalidates_trajectory_until_another_is_received() {
         let mut server = TrajectoryServer::new(false, 0.5);
         server.receive(command());
-        assert!(server.sample(1.0, 0.0).is_none());
+        assert!(server.sample(1.0, 0.0)[1].is_none());
         server.heartbeat(0.0);
-        let tracked = server.sample(2.0, 0.2).unwrap();
+        let tracked = server.sample(2.0, 0.2)[1].unwrap();
         assert!(tracked.velocity.norm() > 0.0);
-        let stopped = server.sample(2.1, 0.51).unwrap();
+        let expired = server.sample(2.1, 0.51);
+        let stopped = expired[0].unwrap();
+        let continued = expired[1].unwrap();
+        assert!(continued.velocity.norm() > 0.);
+        assert!((continued.position - command().trajectory.eval(1.1).position).norm() < 1e-12);
         assert_eq!(stopped.position, tracked.position);
         assert_eq!(stopped.velocity, Vector3::zeros());
         assert_eq!(stopped.acceleration, Vector3::zeros());
         server.heartbeat(0.52);
-        assert!(server.sample(2.2, 0.52).is_none());
+        assert!(server.sample(2.2, 0.52)[1].is_none());
         server.receive(command());
-        assert!(server.sample(2.2, 0.52).is_some());
+        assert!(server.sample(2.2, 0.52)[1].is_some());
     }
     #[test]
     fn complete_snapshot_can_be_sampled_without_running_planning() {
@@ -231,7 +252,7 @@ mod tests {
         server.heartbeat(0.0);
         for i in 0..40 {
             let now = 1.0 + f64::from(i) * 0.01;
-            let reference = server.sample(now, f64::from(i) * 0.01).unwrap();
+            let reference = server.sample(now, f64::from(i) * 0.01)[1].unwrap();
             let state = command.trajectory.eval(now - command.start_time);
             assert!((reference.position - state.position).norm() < 1e-12);
             assert!((reference.velocity - state.velocity).norm() < 1e-12);
@@ -242,8 +263,8 @@ mod tests {
         let mut server = TrajectoryServer::new(false, 0.5);
         server.receive(command());
         server.heartbeat(0.0);
-        assert!(server.sample(0.99, 0.0).is_none());
-        let reference = server.sample(6.0, 0.1).unwrap();
+        assert!(server.sample(0.99, 0.0)[1].is_none());
+        let reference = server.sample(6.0, 0.1)[1].unwrap();
         assert!((reference.position - Vector3::new(5.0, 2.0, 3.0)).norm() < 1e-10);
         assert_eq!(reference.velocity, Vector3::zeros());
         assert_eq!(reference.acceleration, Vector3::zeros());

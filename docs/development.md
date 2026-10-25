@@ -132,10 +132,12 @@ uv run firefly-sim
 cargo run --release -p render
 cargo run --release -p firefly-okvis-x
 cargo run --release -p fc
+cargo run --release -p planner -- --traj-server
 cargo run --release -p planner
 ```
 
-最小闭环只需 viz/sim/render/firefly-okvis-x/fc；规划增加 planner。
+最小闭环只需 viz/sim/render/firefly-okvis-x/fc；规划同时启动 planner 与 `planner --traj-server`
+两个独立进程，前者规划并发布心跳，后者采样并发布飞控参考。
 纯 VIO 对照用 `firefly-okvis-x --no-loop-closures --no-mapping`。
 可选库图定位先填写 `configs/localization.toml [origin]`，并用
 `firefly-okvis-x --external-localization`，再启动 localization、aliked 和
@@ -407,6 +409,11 @@ uv run --all-packages --extra test pytest -q -p no:cacheprovider
 FIREFLY_TEST_PYTHON="$PWD/.venv/bin/python" cargo test -p firefly-pubsub --test python_interop -- --ignored
 FIREFLY_RUN_VIDEO_ENCODER=1 uv run --all-packages --extra test pytest apps/firefly-viz/tests/test_video_integration.py -q
 ```
+
+独立轨迹输出的真实 IPC 验证：先运行 `cargo build --release -p planner`，停止占用
+Navigation/Trajectory/Reference 话题的进程，再运行
+`cargo test -p planner --test trajectory_ipc -- --ignored`。该用例启动 release 输出进程，
+验证多项式传输、心跳超时当拍发布顺序、恢复条件和坐标版本门控；不代表飞行验收。
 
 视频集成用例使用当前 `configs/viz.toml` 指定的真实编码器，检查帧数、采集时间关联和
 FFmpeg 解码后的画面；默认跳过不代表通过。Rerun 回放还需检查视频跳转、逐帧点集匹配、

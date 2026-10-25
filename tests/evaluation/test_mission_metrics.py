@@ -203,7 +203,7 @@ def test_estimated_arrival_does_not_require_truth_and_false_arrival_fails_scorin
     assert not mission.estimated_near("corrected", goal, .35, .3)
 
 
-def test_vio_only_map_stage_starts_only_planner_and_labels_fixed_prior(tmp_path):
+def test_vio_only_map_stage_starts_planner_and_output_and_labels_fixed_prior(tmp_path):
     from firefly_evaluation.mission import Mission
     launched = []
 
@@ -218,8 +218,9 @@ def test_vio_only_map_stage_starts_only_planner_and_labels_fixed_prior(tmp_path)
     mission.latest["corrected"] = (2., None, None, None, True)
     mission.latest["reference"] = None
     result = mission.map_ready()
-    assert [name for name, _ in launched] == ["planner"]
-    assert "--vio-only" not in launched[0][1]
+    assert [name for name, _ in launched] == ["traj-server", "planner"]
+    assert "--traj-server" in launched[0][1]
+    assert "--vio-only" not in launched[1][1]
     assert result["accepted_visual_updates_at_start"] == 0
     assert result["visual_frontend"] == "disabled"
     assert mission.result["localization_mode"] == "vio_only"
@@ -241,7 +242,7 @@ def test_default_map_stage_uses_running_visual_frontend(tmp_path):
     mission.latest["reference"] = None
     mission.visual_updates = 0
     result = mission.map_ready()
-    assert [name for name, _ in launched] == ["planner"]
+    assert [name for name, _ in launched] == ["traj-server", "planner"]
     assert all("--vio-only" not in command and "--map" not in command for _, command in launched)
     assert result["accepted_visual_updates_at_start"] == 0
     assert result["visual_frontend"] == "enabled"

@@ -137,6 +137,7 @@ impl SwarmPenalty {
         time: f64,
         sample: &Sample,
         weight: f64,
+        min_ellip_dist2: &mut [f64],
     ) -> Option<(f64, Vector3<f64>, f64, f64)> {
         if self.two_thirds.is_some_and(|end| index == 0 || index > end) {
             return None;
@@ -146,11 +147,13 @@ impl SwarmPenalty {
         let mut gradient = Vector3::zeros();
         let mut grad_time = 0.0;
         let mut grad_previous_time = 0.0;
-        for peer in &self.peers {
+        for (peer, minimum) in self.peers.iter().zip(min_ellip_dist2) {
             let reference = peer.sample_at(time);
             let diff = sample.position - reference.position;
             let clearance = self.clearance(peer);
-            let excess = clearance * clearance - self.d2(diff);
+            let distance2 = self.d2(diff);
+            *minimum = minimum.min(distance2);
+            let excess = clearance * clearance - distance2;
             if excess > 0.0 {
                 active = true;
                 cost += weight * excess * excess * excess;

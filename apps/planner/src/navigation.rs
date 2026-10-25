@@ -22,29 +22,6 @@ struct Shared {
     error: Option<String>,
 }
 
-/// 输出线程只读输入，不消费规划线程的修正版本通知。
-#[derive(Clone)]
-pub struct NavigationReader {
-    shared: Arc<Mutex<Shared>>,
-    stop: Arc<AtomicBool>,
-}
-impl NavigationReader {
-    pub fn snapshot(&self) -> Result<StateInput> {
-        let state = self
-            .shared
-            .lock()
-            .map_err(|_| internal("navigation state poisoned"))?;
-        if let Some(error) = &state.error {
-            return Err(internal(error.clone()));
-        }
-        let mut input = state.input.clone();
-        if self.stop.load(Ordering::Relaxed) {
-            input.stop();
-        }
-        Ok(input)
-    }
-}
-
 pub struct NavigationReceiver {
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
@@ -52,13 +29,6 @@ pub struct NavigationReceiver {
 }
 
 impl NavigationReceiver {
-    pub fn reader(&self) -> NavigationReader {
-        NavigationReader {
-            shared: Arc::clone(&self.shared),
-            stop: Arc::clone(&self.stop),
-        }
-    }
-
     pub fn start(external_map: bool) -> Result<Self> {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let stop = Arc::new(AtomicBool::new(false));

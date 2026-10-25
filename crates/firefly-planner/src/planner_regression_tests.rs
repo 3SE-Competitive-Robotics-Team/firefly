@@ -20,6 +20,33 @@ fn planner(config: PlannerConfig) -> Planner {
     )
 }
 
+fn swarm_safe(planner: &Planner, traj: &Trajectory, peers: &[firefly_cost::Peer]) -> bool {
+    let k = planner.config.constraint_points_per_piece;
+    let cost = MincoCost {
+        swarm: Some((
+            1.,
+            SwarmPenalty::new(planner.config.swarm_clearance, 2., 1., peers.to_vec())
+                .with_two_thirds(two_thirds_id(traj.pieces() * k + 1, true)),
+        )),
+        ..MincoCost::default()
+    };
+    let mut objective = MincoObjective::new(
+        endpoint(traj.eval(0.).position),
+        endpoint(traj.eval(traj.duration()).position),
+        traj.pieces(),
+        cost,
+    );
+    let m = MincoBuilder::new(
+        SolverOrder::MinimumJerk,
+        endpoint(traj.eval(0.).position),
+        endpoint(traj.eval(traj.duration()).position),
+    )
+    .build(&[], traj.durations().as_slice())
+    .unwrap();
+    let _ = objective.evaluate_gradient(&Planner::pack(&m), &mut nalgebra::DVector::zeros(0));
+    objective.swarm_safe()
+}
+
 #[test]
 fn assembled_obstacle_cost_matches_independent_upstream_formula() {
     for (hard, soft) in [(10_000., 5000.), (0., 5000.), (10_000., 0.)] {
@@ -67,7 +94,7 @@ fn acceptance_preserves_optimizer_durations_and_coefficients() {
     let original = minco.solve().unwrap();
     assert!(Planner::trajectory_max_vel(&original) > planner.config.max_velocity);
     let mut planes = vec![Vec::new(); 6];
-    let FinishCheck::Accept(accepted) = planner.try_finish(&original, &[], &mut planes, true)
+    let FinishCheck::Accept(accepted) = planner.try_finish(&original, true, &mut planes, true)
     else {
         panic!("空图候选应通过上游后检查");
     };
@@ -99,7 +126,7 @@ fn swarm_acceptance_uses_clock_offset_and_both_clearances() {
         .unwrap();
     for (offset, safe) in [(-1., false), (2., true)] {
         let peer = firefly_cost::Peer::new(1, offset, other.clone(), 0.5);
-        assert_eq!(planner.swarm_safe(&t, &[peer]), safe, "offset={offset}");
+        assert_eq!(swarm_safe(&planner, &t, &[peer]), safe, "offset={offset}");
     }
     let stationary = endpoint(Vector3::new(4., 5., 2.));
     let other = MincoBuilder::new(SolverOrder::MinimumJerk, stationary, stationary)
@@ -110,7 +137,7 @@ fn swarm_acceptance_uses_clock_offset_and_both_clearances() {
     for clearance in [0.1, 0.5] {
         let peer = firefly_cost::Peer::new(1, 0., other.clone(), clearance);
         assert_eq!(
-            planner.swarm_safe(&t, std::slice::from_ref(&peer)),
+            swarm_safe(&planner, &t, std::slice::from_ref(&peer)),
             clearance < 0.5
         );
         let penalty = Cost::new().add(1., SwarmPenalty::new(0.5, 2., 1., vec![peer]));

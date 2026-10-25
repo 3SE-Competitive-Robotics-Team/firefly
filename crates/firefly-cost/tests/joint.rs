@@ -116,7 +116,7 @@ fn joint(
     acc: &mut Accumulator,
 ) -> f64 {
     let smoothness = cost.init_and_get_smoothness_grad_cost(trajectory, acc);
-    let terms = cost.add_pvaj_grad_cost(trajectory, acc, &mut Vec::new());
+    let terms = cost.add_pvaj_grad_cost(trajectory, acc, &mut Vec::new(), &mut Vec::new());
     // 独立偏导比较包括时间项；生产回调在伴随传播后加入该项。
     acc.d_f_d_t.add_scalar_mut(cost.weight_time);
     smoothness + terms.iter().sum::<f64>() + cost.weight_time * trajectory.duration()
@@ -252,4 +252,58 @@ fn joint_preserves_formation_and_accumulator_reset() {
     assert_eq!(joint(&inactive, &trajectory, &mut acc), 0.0);
     assert_eq!(acc.d_f_d_c.amax(), 0.0);
     assert_eq!(acc.d_f_d_t.amax(), 0.0);
+}
+
+#[test]
+fn joint_records_swarm_minimum_on_the_same_cutoff_and_resets_each_callback() {
+    let endpoint = firefly_trajectory::Endpoint {
+        position: Vector3::zeros(),
+        velocity: Vector3::x(),
+        acceleration: Vector3::zeros(),
+    };
+    let trajectory = firefly_trajectory::MincoBuilder::new(
+        firefly_trajectory::SolverOrder::MinimumJerk,
+        endpoint,
+        firefly_trajectory::Endpoint {
+            position: Vector3::x(),
+            ..endpoint
+        },
+    )
+    .build(&[], &[1.])
+    .unwrap()
+    .solve()
+    .unwrap();
+    let hover = firefly_trajectory::Endpoint {
+        position: Vector3::zeros(),
+        velocity: Vector3::zeros(),
+        acceleration: Vector3::zeros(),
+    };
+    let peer_trajectory = firefly_trajectory::MincoBuilder::new(
+        firefly_trajectory::SolverOrder::MinimumJerk,
+        hover,
+        hover,
+    )
+    .build(&[], &[2.])
+    .unwrap()
+    .solve()
+    .unwrap();
+    let mut cost = MincoCost {
+        samples_per_piece: 5,
+        swarm: Some((
+            0.,
+            SwarmPenalty::new(0.5, 2., 1., vec![Peer::new(1, 0., peer_trajectory, 0.5)])
+                .with_two_thirds(3),
+        )),
+        ..MincoCost::default()
+    };
+    let mut minimum = vec![0.];
+    let mut acc = Accumulator::new(1);
+    cost.add_pvaj_grad_cost(&trajectory, &mut acc, &mut Vec::new(), &mut minimum);
+    // p(t)=t，主积分排除 t=0；首个有效采样 t=0.2。
+    close(minimum[0], 0.04);
+    cost.swarm.as_mut().unwrap().1.peers[0].clearance = 0.;
+    let mut shifted = trajectory.clone();
+    shifted.coefficients_mut()[(0, 0)] = 2.;
+    cost.add_pvaj_grad_cost(&shifted, &mut acc, &mut Vec::new(), &mut minimum);
+    close(minimum[0], 2.2_f64.powi(2));
 }

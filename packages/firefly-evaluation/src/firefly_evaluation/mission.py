@@ -318,6 +318,7 @@ class Mission:
         command = [str(self.root / "target/release/planner"), "--goal", *map(str, self.options.waypoints[0])]
         if self.prior_maps:
             command += ["--map", str(self.root / "apps/planner/maps/rmuc2026-2.0.0.ffmap")]
+        self.start("traj-server", [str(self.root / "target/release/planner"), "--traj-server"])
         self.start("planner", command)
         self.wait(lambda: "reference" in self.latest, wall=30.)
         return {"source": "VIO + external map alignment" if self.prior_maps else "VIO + startup session frame; online depth mapping",

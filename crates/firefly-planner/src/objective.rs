@@ -162,6 +162,7 @@ pub struct MincoObjective<'a> {
     scratch_dq: DMatrix<f64>,
     scratch_dt: DVector<f64>,
     detector_points: Vec<Vector3<f64>>,
+    min_ellip_dist2: Vec<f64>,
 }
 
 impl<'a> MincoObjective<'a> {
@@ -185,7 +186,22 @@ impl<'a> MincoObjective<'a> {
             scratch_dq: DMatrix::zeros(3, pieces.saturating_sub(1)),
             scratch_dt: DVector::zeros(pieces),
             detector_points: Vec::new(),
+            min_ellip_dist2: Vec::new(),
         }
+    }
+
+    /// 对照上游优化后检查，复用最后一次联合求值记录的集群最小距离。
+    #[must_use]
+    pub fn swarm_safe(&self) -> bool {
+        self.cost.swarm.as_ref().is_none_or(|(_, penalty)| {
+            !penalty
+                .peers
+                .iter()
+                .zip(&self.min_ellip_dist2)
+                .any(|(peer, minimum)| {
+                    *minimum < ((penalty.self_clearance + peer.clearance) * 1.25).powi(2)
+                })
+        })
     }
 
     /// (代价求值次数，完整梯度次数，成功 LU 分解次数)。
@@ -364,9 +380,12 @@ impl Objective for MincoObjective<'_> {
         let smoothness_cost = self
             .cost
             .init_and_get_smoothness_grad_cost(traj, &mut self.acc);
-        let costs = self
-            .cost
-            .add_pvaj_grad_cost(traj, &mut self.acc, &mut self.detector_points);
+        let costs = self.cost.add_pvaj_grad_cost(
+            traj,
+            &mut self.acc,
+            &mut self.detector_points,
+            &mut self.min_ellip_dist2,
+        );
         if self.eval_count >= 3
             && let Some(detector) = &mut self.detector
             && detector.check_points(&self.detector_points)

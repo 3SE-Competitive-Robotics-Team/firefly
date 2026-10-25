@@ -1,243 +1,222 @@
-//! 独立轨迹输出线程；规划调用不占用 100Hz 指令输出节拍。
-use crate::navigation::NavigationReader;
+//! 规划进程只发布完整轨迹与心跳；输出模式在独立进程中以 100Hz 采样。
+use crate::navigation::NavigationReceiver;
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_planner::{Reference, TrajectoryCommand, TrajectoryServer};
 use firefly_pubsub::{
-    node::create_node,
+    node::{IpcNode, create_node},
     publish::Publisher,
     reference::{REFERENCE_TOPIC, ReferenceMessage},
+    subscriber::Subscriber,
+    trajectory::{
+        PLANNER_HEARTBEAT_TOPIC, PlannerHeartbeatMessage, TRAJECTORY_CONTROL_TOPIC,
+        TRAJECTORY_TOPIC, TrajectoryControlMessage, TrajectoryPieceMessage,
+    },
 };
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
-use std::thread::JoinHandle;
+use firefly_trajectory::Trajectory;
+use iceoryx2::prelude::*;
+use nalgebra::{DMatrix, DVector, Vector3};
 use std::time::{Duration, Instant};
 
-#[derive(Default)]
-struct Input {
+pub struct OutputPublisher {
+    trajectory: Publisher<[TrajectoryPieceMessage]>,
+    heartbeat: Publisher<PlannerHeartbeatMessage>,
+    control: Publisher<TrajectoryControlMessage>,
     revision: Option<u64>,
-    enabled: bool,
-    heartbeat: Option<Instant>,
-    command: Option<(u64, TrajectoryCommand)>,
-    hold: Option<Reference>,
-    error: Option<String>,
+    sequence: u64,
 }
-
-pub struct OutputWorker {
-    input: Arc<Mutex<Input>>,
-    stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl OutputWorker {
-    #[allow(clippy::too_many_lines)]
-    pub fn start(reader: NavigationReader, yaw_hold: bool, timeout: f64) -> Result<Self> {
-        let input = Arc::new(Mutex::new(Input::default()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let (state, stopping) = (Arc::clone(&input), Arc::clone(&stop));
-        let (ready, startup) = std::sync::mpsc::sync_channel(1);
-        let thread = std::thread::Builder::new()
-            .name("planner-traj-server".into())
-            .spawn(move || {
-                let result = (|| -> Result<()> {
-                    let node = create_node()?;
-                    let publisher =
-                        Publisher::<ReferenceMessage>::with_topic(&node, REFERENCE_TOPIC)?;
-                    let origin = Instant::now();
-                    let mut server = TrajectoryServer::new(yaw_hold, timeout);
-                    let mut revision = None;
-                    let _ = ready.send(Ok(()));
-                    while !stopping.load(Ordering::Relaxed) {
-                        let tick = Instant::now();
-                        let (enabled, next_revision, heartbeat, command, hold) = {
-                            let mut input = state
-                                .lock()
-                                .map_err(|_| internal("output state poisoned"))?;
-                            (
-                                input.enabled,
-                                input.revision,
-                                input.heartbeat,
-                                input.command.take(),
-                                input.hold,
-                            )
-                        };
-                        if revision != next_revision {
-                            server.invalidate();
-                            revision = next_revision;
-                        }
-                        if let Some((command_revision, command)) = command
-                            && Some(command_revision) == revision
-                        {
-                            server.receive(command);
-                        }
-                        if let Some(heartbeat) = heartbeat {
-                            server.heartbeat(heartbeat.duration_since(origin).as_secs_f64());
-                        }
-                        let mut navigation = reader.snapshot()?;
-                        if enabled
-                            && let Some(snapshot) = navigation.current(tick)
-                            && let Some(transform) = navigation.navigation()
-                            && Some(transform.revision) == revision
-                        {
-                            let reference = hold.or_else(|| {
-                                server.sample(
-                                    snapshot.timestamp,
-                                    tick.duration_since(origin).as_secs_f64(),
-                                )
-                            });
-                            if let Some(reference) = reference {
-                                publisher.publish(ReferenceMessage {
-                                    timestamp: snapshot.timestamp,
-                                    position_x: reference.position.x,
-                                    position_y: reference.position.y,
-                                    position_z: reference.position.z,
-                                    velocity_x: reference.velocity.x,
-                                    velocity_y: reference.velocity.y,
-                                    velocity_z: reference.velocity.z,
-                                    acceleration_x: reference.acceleration.x,
-                                    acceleration_y: reference.acceleration.y,
-                                    acceleration_z: reference.acceleration.z,
-                                    yaw: reference.yaw,
-                                    yaw_dot: reference.yaw_dot,
-                                    alignment_translation: transform.translation,
-                                    alignment_rotation: transform.rotation,
-                                    has_alignment: 1,
-                                })?;
-                            }
-                        }
-                        std::thread::sleep(
-                            Duration::from_millis(10).saturating_sub(tick.elapsed()),
-                        );
-                    }
-                    Ok(())
-                })();
-                if let Err(error) = result {
-                    let message = error.to_string();
-                    let _ = ready.send(Err(message.clone()));
-                    if let Ok(mut input) = state.lock() {
-                        input.error = Some(message);
-                    }
-                }
-            })
-            .map_err(|error| internal(error.to_string()))?;
-        let mut worker = Self {
-            input,
-            stop,
-            thread: Some(thread),
-        };
-        if let Err(error) = startup
-            .recv()
-            .map_err(|error| error.to_string())
-            .and_then(|result| result)
-        {
-            worker.shutdown();
-            return Err(internal(error));
-        }
-        Ok(worker)
+impl OutputPublisher {
+    pub fn new(node: &IpcNode) -> Result<Self> {
+        Ok(Self {
+            trajectory: Publisher::with_slice_topic(node, TRAJECTORY_TOPIC)?,
+            heartbeat: Publisher::with_topic(node, PLANNER_HEARTBEAT_TOPIC)?,
+            control: Publisher::with_topic(node, TRAJECTORY_CONTROL_TOPIC)?,
+            revision: None,
+            sequence: 0,
+        })
     }
-
-    pub fn heartbeat(&self) -> Result<()> {
-        let mut input = self
-            .input
-            .lock()
-            .map_err(|_| internal("output state poisoned"))?;
-        if let Some(error) = &input.error {
-            return Err(internal(error.clone()));
-        }
-        input.heartbeat = Some(Instant::now());
+    pub fn heartbeat(&mut self) -> Result<()> {
+        self.sequence = self.sequence.wrapping_add(1);
+        self.heartbeat.publish(PlannerHeartbeatMessage {
+            sequence: self.sequence,
+        })?;
         Ok(())
     }
     pub fn control(
-        &self,
+        &mut self,
         revision: Option<u64>,
         enabled: bool,
         hold: Option<Reference>,
     ) -> Result<()> {
-        let mut input = self
-            .input
-            .lock()
-            .map_err(|_| internal("output state poisoned"))?;
-        if input.revision != revision {
-            input.command = None;
-        }
-        input.revision = revision;
-        input.enabled = enabled;
-        input.hold = hold;
+        self.revision = revision;
+        self.control.publish(TrajectoryControlMessage {
+            revision: revision.unwrap_or_default(),
+            enabled: u64::from(enabled && revision.is_some()),
+            hold: u64::from(hold.is_some()),
+            position: hold.map_or([0.; 3], |r| r.position.into()),
+            yaw: hold.map_or(0., |r| r.yaw),
+            yaw_dot: hold.map_or(0., |r| r.yaw_dot),
+        })?;
         Ok(())
     }
-    pub fn trajectory(&self, command: TrajectoryCommand) -> Result<()> {
-        let mut input = self
-            .input
-            .lock()
-            .map_err(|_| internal("output state poisoned"))?;
-        if let Some(revision) = input.revision {
-            input.command = Some((revision, command));
-        }
+    pub fn trajectory(&self, command: &firefly_planner::LocalTraj) -> Result<()> {
+        let Some(revision) = self.revision else {
+            return Ok(());
+        };
+        self.trajectory
+            .publish_slice_with(command.traj.pieces(), |piece| TrajectoryPieceMessage {
+                start_time: command.start_time,
+                traj_id: u64::from(command.traj_id),
+                revision,
+                duration: command.traj.durations()[piece],
+                coefficients: std::array::from_fn(|axis| {
+                    std::array::from_fn(|power| {
+                        command.traj.coefficients()[(6 * piece + power, axis)]
+                    })
+                }),
+            })?;
         Ok(())
     }
-    pub fn check(&self) -> Result<()> {
-        let input = self
-            .input
-            .lock()
-            .map_err(|_| internal("output state poisoned"))?;
-        if let Some(error) = &input.error {
-            return Err(internal(error.clone()));
-        }
-        Ok(())
-    }
-    fn shutdown(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take()
-            && thread.join().is_err()
-        {
-            log::error!("trajectory output thread panicked");
-        }
-    }
-}
-impl Drop for OutputWorker {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-fn internal(message: impl Into<String>) -> Error {
-    Error::new(ErrorKind::Internal, message.into()).with_operation("trajectory output")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use firefly_trajectory::{Endpoint, MincoBuilder, SolverOrder};
-    use nalgebra::Vector3;
-
-    #[test]
-    fn revision_change_drops_queued_trajectory_instead_of_relabeling_it() {
-        let worker = OutputWorker {
-            input: Arc::new(Mutex::new(Input::default())),
-            stop: Arc::new(AtomicBool::new(false)),
-            thread: None,
-        };
-        let endpoint = Endpoint {
-            position: Vector3::zeros(),
-            velocity: Vector3::zeros(),
-            acceleration: Vector3::zeros(),
-        };
-        let trajectory = MincoBuilder::new(SolverOrder::MinimumJerk, endpoint, endpoint)
-            .build(&[], &[1.0])
-            .unwrap()
-            .solve()
-            .unwrap();
-        let command = TrajectoryCommand {
-            trajectory,
-            start_time: 0.0,
-            traj_id: 1,
-        };
-        worker.control(Some(1), true, None).unwrap();
-        worker.trajectory(command.clone()).unwrap();
-        assert_eq!(worker.input.lock().unwrap().command.as_ref().unwrap().0, 1);
-        worker.control(Some(2), true, None).unwrap();
-        assert!(worker.input.lock().unwrap().command.is_none());
-        worker.trajectory(command).unwrap();
-        assert_eq!(worker.input.lock().unwrap().command.as_ref().unwrap().0, 2);
+fn decode(pieces: &[TrajectoryPieceMessage]) -> Result<TrajectoryCommand> {
+    let first = pieces.first().ok_or_else(|| invalid("empty trajectory"))?;
+    let traj_id = u32::try_from(first.traj_id).map_err(|_| invalid("invalid trajectory id"))?;
+    if !first.start_time.is_finite()
+        || pieces.iter().any(|piece| {
+            piece.start_time != first.start_time
+                || piece.traj_id != first.traj_id
+                || piece.revision != first.revision
+        })
+    {
+        return Err(invalid("inconsistent trajectory metadata"));
     }
+    let coefficients = DMatrix::from_fn(6 * pieces.len(), 3, |row, axis| {
+        pieces[row / 6].coefficients[axis][row % 6]
+    });
+    let durations = DVector::from_iterator(pieces.len(), pieces.iter().map(|p| p.duration));
+    Ok(TrajectoryCommand {
+        trajectory: Trajectory::from_coefficients(coefficients, durations)?,
+        start_time: first.start_time,
+        traj_id,
+    })
+}
+
+/// 独立轨迹输出进程入口，对应上游 `traj_server` 节点。
+#[allow(clippy::too_many_lines)]
+pub fn run(yaw_hold: bool, timeout: f64) -> Result<()> {
+    let node = create_node()?;
+    let publisher = Publisher::<ReferenceMessage>::with_topic(&node, REFERENCE_TOPIC)?;
+    let trajectories =
+        Subscriber::<[TrajectoryPieceMessage]>::with_slice_topic(&node, TRAJECTORY_TOPIC)?;
+    let heartbeat =
+        Subscriber::<PlannerHeartbeatMessage>::with_topic(&node, PLANNER_HEARTBEAT_TOPIC)?;
+    let controls =
+        Subscriber::<TrajectoryControlMessage>::with_topic(&node, TRAJECTORY_CONTROL_TOPIC)?;
+    let navigation = NavigationReceiver::start(false)?;
+    let log_ipc = firefly_observability::init_ipc(&node, "traj-server");
+    let mut server = TrajectoryServer::new(yaw_hold, timeout);
+    let mut control = TrajectoryControlMessage::default();
+    let mut trajectory_revision = None;
+    let origin = Instant::now();
+    let waitset = WaitSetBuilder::new()
+        .create::<ipc::Service>()
+        .map_err(|e| internal(format!("create output waitset: {e:?}")))?;
+    let tick = waitset
+        .attach_interval(Duration::from_millis(10))
+        .map_err(|e| internal(format!("attach output timer: {e:?}")))?;
+    let mut error = None;
+    log::info!("独立轨迹输出启动：100Hz，心跳超时 {timeout}s");
+    let result = waitset.wait_and_process(|event: WaitSetAttachmentId<ipc::Service>| {
+        if navigation.terminated() {
+            return CallbackProgression::Stop;
+        }
+        if !event.has_event_from(&tick) {
+            return CallbackProgression::Continue;
+        }
+        let step = (|| -> Result<()> {
+            while let Some(message) = controls.receive()? {
+                if control.revision != message.revision
+                    && trajectory_revision != Some(message.revision)
+                {
+                    server.invalidate();
+                }
+                control = *message;
+            }
+            while heartbeat.receive()?.is_some() {
+                server.heartbeat(origin.elapsed().as_secs_f64());
+            }
+            while let Some(message) = trajectories.receive()? {
+                if let Some(first) = message.first()
+                    && first.revision >= control.revision
+                {
+                    let revision = first.revision;
+                    server.receive(decode(&message)?);
+                    trajectory_revision = Some(revision);
+                }
+            }
+            let (mut input, _) = navigation.snapshot()?;
+            let Some(snapshot) = input.current(Instant::now()) else {
+                return Ok(());
+            };
+            let Some(transform) = input.navigation() else {
+                return Ok(());
+            };
+            if control.enabled == 0 || transform.revision != control.revision {
+                return Ok(());
+            }
+            let references = if control.hold != 0 {
+                [
+                    None,
+                    Some(Reference {
+                        position: Vector3::from(control.position),
+                        velocity: Vector3::zeros(),
+                        acceleration: Vector3::zeros(),
+                        yaw: control.yaw,
+                        yaw_dot: control.yaw_dot,
+                    }),
+                ]
+            } else if trajectory_revision == Some(control.revision) {
+                server.sample(snapshot.timestamp, origin.elapsed().as_secs_f64())
+            } else {
+                [None, None]
+            };
+            for reference in references.into_iter().flatten() {
+                publisher.publish(ReferenceMessage {
+                    timestamp: snapshot.timestamp,
+                    position_x: reference.position.x,
+                    position_y: reference.position.y,
+                    position_z: reference.position.z,
+                    velocity_x: reference.velocity.x,
+                    velocity_y: reference.velocity.y,
+                    velocity_z: reference.velocity.z,
+                    acceleration_x: reference.acceleration.x,
+                    acceleration_y: reference.acceleration.y,
+                    acceleration_z: reference.acceleration.z,
+                    yaw: reference.yaw,
+                    yaw_dot: reference.yaw_dot,
+                    alignment_translation: transform.translation,
+                    alignment_rotation: transform.rotation,
+                    has_alignment: 1,
+                })?;
+            }
+            firefly_observability::pump_log_ipc(&log_ipc);
+            Ok(())
+        })();
+        if let Err(e) = step {
+            error = Some(e);
+            return CallbackProgression::Stop;
+        }
+        CallbackProgression::Continue
+    });
+    result.map_err(|e| internal(format!("output waitset: {e:?}")))?;
+    if let Some(error) = error {
+        return Err(error);
+    }
+    Ok(())
+}
+fn invalid(message: &str) -> Error {
+    Error::new(ErrorKind::InvalidArgument, message.to_owned())
+}
+fn internal(message: String) -> Error {
+    Error::new(ErrorKind::Internal, message).with_operation("trajectory output")
 }

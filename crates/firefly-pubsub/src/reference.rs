@@ -1,6 +1,6 @@
 //! 地图系规划参考消息（规划 → 飞控）。
 //!
-//! 规划进程把执行中轨迹的参考状态（位置/速度）发布到 `Firefly/Reference`，
+//! 轨迹输出进程把执行中轨迹的参考状态（位置/速度）发布到 `Firefly/Reference`，
 //! 飞控经 map←odom 变换转换到连续 odom 系。`#[repr(C)]` 定长零拷贝。
 
 use iceoryx2::prelude::*;

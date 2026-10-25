@@ -114,7 +114,13 @@ impl MincoCost {
         traj: &Trajectory,
         acc: &mut Accumulator,
         points: &mut Vec<Vector3<f64>>,
+        min_ellip_dist2: &mut Vec<f64>,
     ) -> [f64; 5] {
+        min_ellip_dist2.resize(
+            self.swarm.as_ref().map_or(0, |(_, p)| p.peers.len()),
+            f64::MAX,
+        );
+        min_ellip_dist2.fill(f64::MAX);
         let n = traj.pieces();
         let k = self.samples_per_piece;
         points.resize(n * k + 1, Vector3::zeros());
@@ -159,8 +165,13 @@ impl MincoCost {
                     costs[0] += omg * step * costp;
                 }
                 if let Some((weight, penalty)) = &self.swarm
-                    && let Some((costp, gradp, gradt, grad_prev_t)) =
-                        penalty.grad_cost(i_dp, time + step * j as f64, &s, *weight)
+                    && let Some((costp, gradp, gradt, grad_prev_t)) = penalty.grad_cost(
+                        i_dp,
+                        time + step * j as f64,
+                        &s,
+                        *weight,
+                        min_ellip_dist2,
+                    )
                 {
                     acc.add_coefficient_gradient(i, beta0.as_slice(), omg * step * gradp);
                     let grad_viola_pt = alpha * gradt;

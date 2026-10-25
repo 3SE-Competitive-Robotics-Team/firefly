@@ -47,7 +47,7 @@ impl Default for SubscriberOptions {
 ///
 /// 节点由调用方持有（进程共享单节点，见 [`crate::node`]），端口只借用其
 /// 创建服务；Drop 顺序由调用方作用域保证（节点最后释放）。
-pub struct Subscriber<T: Debug + ZeroCopySend + 'static> {
+pub struct Subscriber<T: Debug + IceoryxSend + ?Sized + 'static> {
     /// 订阅器句柄。
     subscriber: Iox2Subscriber<ipc::Service, T, TraceContext>,
 }
@@ -154,6 +154,53 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
             firefly_error::Error::temporary(
                 firefly_error::ErrorKind::Internal,
                 format!("接收样本失败: {e:?}"),
+            )
+        })
+    }
+}
+
+impl<T: Debug + ZeroCopySend + 'static> Subscriber<[T]> {
+    /// 订阅单个原子切片样本，保留统一 trace 用户头。
+    /// # Errors
+    /// 服务或订阅端创建失败。
+    pub fn with_slice_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
+        let name = topic.try_into().map_err(|e| {
+            firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                format!("非法话题名: {e:?}"),
+            )
+        })?;
+        let service = node
+            .service_builder(&name)
+            .publish_subscribe::<[T]>()
+            .user_header::<TraceContext>()
+            .open_or_create()
+            .map_err(|e| {
+                firefly_error::Error::new(
+                    firefly_error::ErrorKind::Internal,
+                    format!("创建切片服务失败: {e:?}"),
+                )
+            })?;
+        let subscriber = service
+            .subscriber_builder()
+            .buffer_size(1)
+            .create()
+            .map_err(|e| {
+                firefly_error::Error::new(
+                    firefly_error::ErrorKind::Internal,
+                    format!("创建切片订阅器失败: {e:?}"),
+                )
+            })?;
+        Ok(Self { subscriber })
+    }
+
+    /// # Errors
+    /// 接收 IPC 样本失败。
+    pub fn receive(&self) -> Result<Option<Received<[T]>>, firefly_error::Error> {
+        self.subscriber.receive().map_err(|e| {
+            firefly_error::Error::temporary(
+                firefly_error::ErrorKind::Internal,
+                format!("接收切片失败: {e:?}"),
             )
         })
     }
