@@ -15,6 +15,7 @@ use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::DMatrix;
 
 /// 带形矩阵：列主序带存储 `data[(i - j + upper_bw) * n + j]`。
+#[derive(Debug, Clone)]
 pub struct BandedMatrix {
     n: usize,
     lower_bw: usize,
@@ -29,6 +30,15 @@ impl BandedMatrix {
             lower_bw,
             upper_bw,
             data: vec![0.0; n * (lower_bw + upper_bw + 1)],
+        }
+    }
+
+    /// 复位到指定形状：形状不变时只清零，复用已有存储。
+    pub fn reset(&mut self, n: usize, lower_bw: usize, upper_bw: usize) {
+        if self.n == n && self.lower_bw == lower_bw && self.upper_bw == upper_bw {
+            self.data.fill(0.0);
+        } else {
+            *self = Self::new(n, lower_bw, upper_bw);
         }
     }
 
@@ -84,50 +94,22 @@ impl BandedPlu {
         upper_bw: usize,
         mut data: Vec<f64>,
     ) -> Result<Self> {
-        let get = |data: &[f64], i: usize, j: usize| {
-            if i + upper_bw >= j && i <= j + lower_bw {
-                data[(i + upper_bw - j) * n + j]
-            } else {
-                0.0
-            }
-        };
-
-        for k in 0..n.saturating_sub(1) {
-            let i_max = (k + lower_bw).min(n - 1);
-            let pivot = get(&data, k, k);
-            if pivot == 0.0 {
-                return Err(Error::new(
-                    ErrorKind::Convergence,
-                    "banded matrix is singular",
-                ));
-            }
-            for i in k + 1..=i_max {
-                let v = get(&data, i, k);
-                if v != 0.0 {
-                    data[(i + upper_bw - k) * n + k] = v / pivot;
-                }
-            }
-            let j_max = (k + upper_bw).min(n - 1);
-            for j in k + 1..=j_max {
-                let c = get(&data, k, j);
-                if c != 0.0 {
-                    for i in k + 1..=i_max {
-                        let lik = get(&data, i, k);
-                        if lik != 0.0 {
-                            let idx = (i + upper_bw - j) * n + j;
-                            data[idx] -= lik * c;
-                        }
-                    }
-                }
-            }
-        }
-
+        factor_data(n, lower_bw, upper_bw, &mut data)?;
         Ok(Self {
             n,
             lower_bw,
             upper_bw,
             data,
         })
+    }
+
+    /// 在已有分解上重算，复用 `data` 缓冲；带形维度必须一致。
+    pub fn refactorize(&mut self, a: &BandedMatrix) -> Result<()> {
+        assert_eq!(self.n, a.n);
+        assert_eq!(self.lower_bw, a.lower_bw);
+        assert_eq!(self.upper_bw, a.upper_bw);
+        self.data.clone_from(&a.data);
+        factor_data(self.n, self.lower_bw, self.upper_bw, &mut self.data)
     }
 
     fn get(&self, i: usize, j: usize) -> f64 {
@@ -188,6 +170,49 @@ impl BandedPlu {
     }
 }
 
+/// 带形 LU 分解主体：就地改写 `data`，供构造与重分解共用。
+fn factor_data(n: usize, lower_bw: usize, upper_bw: usize, data: &mut [f64]) -> Result<()> {
+    let get = |data: &[f64], i: usize, j: usize| {
+        if i + upper_bw >= j && i <= j + lower_bw {
+            data[(i + upper_bw - j) * n + j]
+        } else {
+            0.0
+        }
+    };
+
+    for k in 0..n.saturating_sub(1) {
+        let i_max = (k + lower_bw).min(n - 1);
+        let pivot = get(data, k, k);
+        if pivot == 0.0 {
+            return Err(Error::new(
+                ErrorKind::Convergence,
+                "banded matrix is singular",
+            ));
+        }
+        for i in k + 1..=i_max {
+            let v = get(data, i, k);
+            if v != 0.0 {
+                data[(i + upper_bw - k) * n + k] = v / pivot;
+            }
+        }
+        let j_max = (k + upper_bw).min(n - 1);
+        for j in k + 1..=j_max {
+            let c = get(data, k, j);
+            if c != 0.0 {
+                for i in k + 1..=i_max {
+                    let lik = get(data, i, k);
+                    if lik != 0.0 {
+                        let idx = (i + upper_bw - j) * n + j;
+                        data[idx] -= lik * c;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// 带形矩阵求解助手：构造 → 分解 → 求解多右端。
 #[derive(Debug)]
 pub struct BandedSolver {
@@ -213,6 +238,11 @@ impl BandedSolver {
     #[must_use]
     pub fn rows(&self) -> usize {
         self.plu.n
+    }
+
+    /// 在已有分解上重算，复用分解缓冲。
+    pub fn refactorize(&mut self, a: &BandedMatrix) -> Result<()> {
+        self.plu.refactorize(a)
     }
 
     pub fn solve_in_place(&self, rhs: &mut DMatrix<f64>) {

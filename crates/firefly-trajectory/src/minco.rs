@@ -40,6 +40,8 @@ pub struct Minco {
     t: DVector<f64>,
     /// 不可变 LU 只依赖段时长；正向与伴随求解共用。
     solver: Arc<BandedSolver>,
+    /// 带形系统的复用缓冲：时长变化时原地重填，不再每次新建。
+    banded: BandedMatrix,
 }
 
 #[derive(Debug)]
@@ -84,7 +86,8 @@ impl MincoBuilder {
         }
         let q = DMatrix::from_fn(3, interior, |r, c| waypoints[c][r]);
         let t = DVector::from_fn(pieces, |r, _| durations[r]);
-        let solver = Arc::new(BandedSolver::new_owned(Minco::build_banded(durations))?);
+        let banded = Minco::build_banded(durations);
+        let solver = Arc::new(BandedSolver::new_owned(banded.clone())?);
         Ok(Minco {
             order: self.order,
             pieces,
@@ -93,6 +96,7 @@ impl MincoBuilder {
             q,
             t,
             solver,
+            banded,
         })
     }
 }
@@ -120,9 +124,16 @@ impl Minco {
             ));
         }
         if durations != self.t.as_slice() {
-            let solver = Arc::new(BandedSolver::new_owned(Self::build_banded(durations))?);
+            // 段数终身不变 → 带形维度固定：原地重填再重分解，复用两块缓冲。
+            self.banded.reset(COEFFS_PER_PIECE * self.pieces, 6, 6);
+            Self::fill_banded(&mut self.banded, durations);
+            if let Some(solver) = Arc::get_mut(&mut self.solver) {
+                solver.refactorize(&self.banded)?;
+            } else {
+                // 有共享引用（仅测试会 clone Minco）：退回独占重建。
+                self.solver = Arc::new(BandedSolver::new_owned(self.banded.clone())?);
+            }
             self.t.as_mut_slice().copy_from_slice(durations);
-            self.solver = solver;
         }
         self.start = start;
         self.end = end;
@@ -336,9 +347,14 @@ impl Minco {
     /// 速度连续, 加速度连续} / 终点 PVA。带宽 (6, 6)，
     /// 对角全非零 → 无主元带形 LU 稳定（官方注释：NO PIVOT for efficiency）。
     fn build_banded(durations: &[f64]) -> BandedMatrix {
+        let mut m = BandedMatrix::new(COEFFS_PER_PIECE * durations.len(), 6, 6);
+        Self::fill_banded(&mut m, durations);
+        m
+    }
+
+    fn fill_banded(m: &mut BandedMatrix, durations: &[f64]) {
         let pieces = durations.len();
         let n = COEFFS_PER_PIECE * pieces;
-        let mut m = BandedMatrix::new(n, 6, 6);
 
         // 起点：位置/速度/加速度
         m.set(0, 0, 1.0);
@@ -412,7 +428,6 @@ impl Minco {
         m.set(n - 1, base + 3, 6.0 * t);
         m.set(n - 1, base + 4, 12.0 * t2);
         m.set(n - 1, base + 5, 20.0 * t3);
-        m
     }
 
     fn build_rhs_into(&self, b: &mut DMatrix<f64>) {
