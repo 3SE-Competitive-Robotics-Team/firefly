@@ -20,7 +20,7 @@ import iceoryx2 as iox2
 import rerun as rr
 
 from firefly_mujoco import (
-    DepthImageMessage, GrayImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH,
+    GrayImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH,
     LogMessage, OdomMessage, TraceContext,
 )
 
@@ -158,7 +158,7 @@ def run(args):
     node = None
     subscriber = None
     cameras = []
-    stop, trigger = threading.Event(), threading.Event()
+    stop = threading.Event()
     handlers = {}
     errors = []
     dropped_frames = 0
@@ -175,19 +175,20 @@ def run(args):
         recordings.archive.log("viz/config", rr.TextDocument(args.config.read_text()), static=True)
         recordings.archive.log("viz/effective_config", rr.TextDocument(json.dumps(asdict(options), indent=2)), static=True)
         node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
-        for sig, callback in ((signal.SIGINT, lambda *_: stop.set()), (signal.SIGTERM, lambda *_: stop.set()),
-                              (signal.SIGUSR1, lambda *_: trigger.set())):
-            handlers[sig] = signal.signal(sig, callback)
-        writer = Writer(recordings, options, trigger)
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            handlers[sig] = signal.signal(sig, lambda *_: stop.set())
+        writer = Writer(recordings, options)
         continuity = Continuity(options.capture.max_entities)
         telemetry = Worker("viz-telemetry", options.telemetry_queue,
                            writer.consume,
                            writer.tick, lambda: writer.tick(final=True), options.shutdown_seconds)
         workers.append(telemetry)
-        capture = Capture(recordings, options, trigger)
-        media = Worker("viz-media", options.capture.queue_frames, capture.handle, capture.tick,
-                       capture.close, options.shutdown_seconds + 4 * options.video.shutdown_seconds)
-        workers.append(media)
+        capture = Capture(recordings, options)
+        media = None
+        if options.video.enabled:
+            media = Worker("viz-media", options.capture.queue_frames, capture.handle, capture.tick,
+                           capture.close, options.shutdown_seconds + 4 * options.video.shutdown_seconds)
+            workers.append(media)
         for kind, topic, cls, publishers, capacity in (
             ("viz", "Firefly/VizScalars", ScalarMessage, VIZ_MAX_PUBLISHERS, SCALAR_BUFFER_SIZE),
             ("viz", "Firefly/Viz", VizMessage, VIZ_MAX_PUBLISHERS, VIZ_BUFFER_SIZE),
@@ -197,20 +198,13 @@ def run(args):
             ("map", "Firefly/CorrectedOdometry", OdomMessage, None, 1),
         ):
             subscriptions.append((kind, _subscribe(node, topic, cls, capacity, publishers)))
-        for name, topic, cls in (("left", "CameraLeft", GrayImageMessage),
-                                  ("right", "CameraRight", GrayImageMessage), ("depth", "Depth", DepthImageMessage)):
-            cameras.append((name, _subscribe(node, f"Firefly/{topic}", cls, capacity=1, publishers=None)))
-        # 各目的地只在 Capture 中采样一次，避免不同频率的串联采样互相混叠。
-        needed = {
-            name: (name == "left" and options.video.enabled)
-            or (recordings.live is not None and options.capture.preview_hz > 0)
-            or getattr(options.capture, f"{name}_hz", 0) > 0 for name, _ in cameras
-        }
-        last_stamp = dict.fromkeys(needed, float("-inf"))
+        if options.video.enabled:
+            cameras.append(("left", _subscribe(node, "Firefly/CameraLeft", GrayImageMessage,
+                                               capacity=1, publishers=None)))
+        last_stamp = {name: float("-inf") for name, _ in cameras}
+        indices = dict.fromkeys(last_stamp, 0)
         map_rate = Rate(10.0)
-        indices = dict.fromkeys(needed, 0)
-        retain_window = options.capture.before_frames > 0 or options.capture.after_frames > 0
-        logger.info("RRD: %s; SIGUSR1 captures a lossless window", path)
+        logger.info("RRD: %s", path)
         while not stop.is_set():
             for worker in workers:
                 worker.check()
@@ -256,13 +250,11 @@ def run(args):
                         raise ValueError(f"{name}: invalid or regressed capture timestamp {stamp}")
                     if (msg.width, msg.height) != (IMAGE_WIDTH, IMAGE_HEIGHT):
                         raise ValueError(f"{name}: unexpected sensor resolution")
-                    if msg.sensor_id != (1 if name == "right" else 0):
+                    if msg.sensor_id != 0:
                         raise ValueError(f"{name}: unexpected sensor id")
                     last_stamp[name] = stamp
                     index = indices[name]
                     indices[name] += 1
-                    if not retain_window and not needed[name]:
-                        continue
                     if media.inbox.full():
                         dropped_frames += 1
                         continue
@@ -271,7 +263,7 @@ def run(args):
                     del msg
                     del sample
             if time.monotonic() - last_health >= 1.0:
-                recordings.health("queues", [telemetry.inbox.qsize(), media.inbox.qsize(),
+                recordings.health("queues", [telemetry.inbox.qsize(), media.inbox.qsize() if media else 0,
                                              telemetry.high_water, dropped_frames])
                 last_health = time.monotonic()
             stop.wait(0.001)
@@ -282,7 +274,7 @@ def run(args):
         except Exception as diagnostic_error:
             errors.append(diagnostic_error)
     finally:
-        # 先排空诊断（可能触发截图），再排空媒体，最后关闭 Rerun sinks。
+        # 先排空诊断，再排空媒体，最后关闭 Rerun sinks。
         for worker in workers:
             try:
                 worker.close()

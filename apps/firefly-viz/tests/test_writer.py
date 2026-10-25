@@ -45,7 +45,7 @@ def okvis_pose(stamp, xyz):
 
 def test_ground_truth_records_world_pose_and_incremental_trajectory(recordings_factory):
     archive = Recording()
-    writer = Writer(recordings_factory(archive=archive), Options(), threading.Event())
+    writer = Writer(recordings_factory(archive=archive), Options())
     msg = OdomMessage(timestamp=1., position_x=1., position_y=2., position_z=3., quat_w=1.)
     writer.consume(('gt', msg))
     assert not archive.calls
@@ -65,7 +65,7 @@ def test_ground_truth_records_world_pose_and_incremental_trajectory(recordings_f
 
 def test_corrected_odometry_stays_in_map_frame_with_an_independent_trajectory(recordings_factory):
     archive = Recording()
-    writer = Writer(recordings_factory(archive=archive), Options(), threading.Event())
+    writer = Writer(recordings_factory(archive=archive), Options())
     writer.consume(('viz', okvis_pose(1., [0., 0., 1.])))
     for stamp, x in [(1., 10.), (2., 11.)]:
         writer.consume(('map', OdomMessage(timestamp=stamp, position_x=x, quat_w=1., is_initialized=True)))
@@ -77,7 +77,7 @@ def test_corrected_odometry_stays_in_map_frame_with_an_independent_trajectory(re
 
 def test_okvis_trajectory_stores_two_point_segments_with_one_cached_endpoint(recordings_factory):
     archive = Recording()
-    writer = Writer(recordings_factory(archive=archive), Options(), threading.Event())
+    writer = Writer(recordings_factory(archive=archive), Options())
     for i in range(32):
         writer.consume(('viz', okvis_pose(float(i), [float(i), 0., 1.])))
     segments = [args[1].strips.as_arrow_array().to_pylist() for args, _ in archive.calls
@@ -97,7 +97,7 @@ def test_okvis_trajectory_stores_two_point_segments_with_one_cached_endpoint(rec
                                         ('position_z', float('inf')), ('quat_w', 0.)])
 def test_invalid_ground_truth_cannot_reach_recording(recordings_factory, field, value):
     archive = Recording()
-    writer = Writer(recordings_factory(archive=archive), Options(), threading.Event())
+    writer = Writer(recordings_factory(archive=archive), Options())
     msg = OdomMessage(timestamp=1., quat_w=1., is_initialized=True)
     setattr(msg, field, value)
     with pytest.raises(ValueError, match='invalid pose'):
@@ -108,7 +108,7 @@ def test_invalid_ground_truth_cannot_reach_recording(recordings_factory, field, 
 
 def test_clear_trajectory_breaks_the_next_segment(recordings_factory):
     archive = Recording()
-    writer = Writer(recordings_factory(archive=archive), Options(), threading.Event())
+    writer = Writer(recordings_factory(archive=archive), Options())
     writer.handle(okvis_pose(1., [0., 0., 1.]))
     clear = VizMessage()
     path = b'okvis/traj'
@@ -132,7 +132,7 @@ def test_cold_start_empty_keypoints_preserve_typed_ids_and_clear_previous_points
     path = tmp_path / 'keypoints.rrd'
     # 独立 SDK 进程保证首帧没有 track_id 类型缓存。
     code = textwrap.dedent('''
-        import sys, threading
+        import sys
         from unittest.mock import create_autospec
         import rerun as rr
         from firefly_viz.config import Options
@@ -145,7 +145,7 @@ def test_cold_start_empty_keypoints_preserve_typed_ids_and_clear_previous_points
         matches = MatchedPoints(archive, 4)
         outputs = create_autospec(RecordingOutputs, instance=True, spec_set=True)
         outputs.archive, outputs.live, outputs.matches = archive, None, matches
-        writer = Writer(outputs, Options(), threading.Event())
+        writer = Writer(outputs, Options())
         try:
             matches.frame('left', 0.5, 0)
             for stamp, ids in [(1., []), (2., [42]), (3., [])]:
@@ -265,7 +265,7 @@ def voxel(kind, points, stamp=1., sequence=0, chunk_index=0, chunk_count=1):
 
 def test_voxel_history_uses_complete_snapshots_after_ordered_deltas(recordings_factory):
     archive, live = Recording(), Recording()
-    writer = Writer(recordings_factory(archive=archive, live=live), Options(), threading.Event())
+    writer = Writer(recordings_factory(archive=archive, live=live), Options())
     writer.handle(voxel(3, [(1, 2, 3), (4, 5, 6)]))
     writer.handle(voxel(8, [(7, 8, 9)], 2., sequence=1))
     writer.handle(voxel(9, [(1, 2, 3)], 2., sequence=2))
@@ -281,14 +281,14 @@ def test_voxel_history_uses_complete_snapshots_after_ordered_deltas(recordings_f
 
 
 def test_voxel_delta_cannot_create_an_unknown_baseline(recordings_factory):
-    writer = Writer(recordings_factory(archive=Recording(), live=None), Options(), threading.Event())
+    writer = Writer(recordings_factory(archive=Recording(), live=None), Options())
     with pytest.raises(ValueError, match='baseline'):
         writer.handle(voxel(8, [(1, 2, 3)]))
 
 
 def test_voxel_chunk_commit_is_atomic_and_gaps_are_fatal(recordings_factory):
     archive = Recording()
-    writer = Writer(recordings_factory(archive=archive, live=None), Options(), threading.Event())
+    writer = Writer(recordings_factory(archive=archive, live=None), Options())
     writer.handle(voxel(3, [(1, 2, 3)], chunk_count=2))
     writer.tick()
     assert not archive.calls
@@ -302,7 +302,7 @@ def test_voxel_chunk_commit_is_atomic_and_gaps_are_fatal(recordings_factory):
 
 def test_voxel_partial_update_fails_at_shutdown_and_empty_snapshot_clears(recordings_factory):
     archive = Recording()
-    writer = Writer(recordings_factory(archive=archive, live=None), Options(), threading.Event())
+    writer = Writer(recordings_factory(archive=archive, live=None), Options())
     writer.handle(voxel(3, [], chunk_count=1))
     writer.tick(final=True)
     assert writer.voxels['plan/voxels'][0] == set()

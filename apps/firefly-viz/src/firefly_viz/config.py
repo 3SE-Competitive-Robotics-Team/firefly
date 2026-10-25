@@ -32,15 +32,9 @@ class VideoOptions:
 
 @dataclass(frozen=True)
 class CaptureOptions:
+    # 体素地图的实时预览频率。
     preview_hz: float = 2.0
-    right_hz: float = 0.0
-    depth_hz: float = 0.0
     voxel_hz: float = 1.0
-    # 原始图像环形缓存的帧数；0 关闭事前窗口，事后窗口仍可触发。
-    before_frames: int = 10
-    after_frames: int = 10
-    trigger_on_error: bool = True
-    trigger_cooldown_seconds: float = 10.0
     queue_frames: int = 16
     max_voxels: int = 100_000
     max_entities: int = 256
@@ -80,9 +74,7 @@ def decode(values: dict) -> Options:
                 if not math.isfinite(value) or value < 0:
                     raise ValueError(f"{item.name} must be finite and nonnegative")
             if item.type is int and (type(value) is not int or value <= 0):
-                # before/after_frames can explicitly disable the corresponding window.
-                if item.name not in ("before_frames", "after_frames") or type(value) is not int or value < 0:
-                    raise ValueError(f"{item.name} must be a positive integer")
+                raise ValueError(f"{item.name} must be a positive integer")
     if min(options.flush_seconds, options.shutdown_seconds, video.shutdown_seconds) <= 0:
         raise ValueError("flush/shutdown timeouts must be positive")
     if video.encoder not in ("hevc_vaapi", "hevc_qsv", "hevc_videotoolbox", "libx265"):

@@ -1,7 +1,6 @@
-"""采样与触发窗口不改变原始像素或时间，实时 static 不进入文件流。"""
+"""左目视频按采集时间采样，编码结束必须报告完整性。"""
 
 from dataclasses import replace
-import threading
 
 from firefly_viz.capture import Capture, Rate
 from firefly_viz.config import Options, load
@@ -35,79 +34,50 @@ def test_rate_preserves_phase_across_timestamp_jitter():
     assert all(rate.accept(t) for t in [0., .1001, .2, .3001, .4])
 
 
-def test_preview_and_archive_sampling_have_independent_cadence(recordings_factory):
+def test_capture_has_no_image_output_when_video_is_disabled(recordings_factory):
     options = Options()
-    options = replace(options, video=replace(options.video, enabled=False),
-                      capture=replace(options.capture, before_frames=0, after_frames=0,
-                                      preview_hz=3., right_hz=2.))
+    options = replace(options, video=replace(options.video, enabled=False))
     archive, live = Recording(), Recording()
-    recordings = recordings_factory(archive=archive, live=live)
-    capture = Capture(recordings, options, threading.Event())
-    for i in range(11):
-        capture.handle(Frame('right', i / 10., i, 2, 2, b'\x00' * 4))
-    assert [call[0]['duration'] for call in archive.calls] == [0., .5, 1.]
-    assert len(live.calls) == 4
+    capture = Capture(recordings_factory(archive=archive, live=live), options)
+    capture.handle(Frame('left', 1., 0, 2, 2, b'\x00' * 4))
+    capture.close()
+    assert capture.encoder is None
+    assert not archive.calls
+    assert not live.calls
+    with pytest.raises(ValueError, match='left camera'):
+        capture.handle(Frame('right', 1., 0, 2, 2, b'\x00' * 4))
 
 
-def test_close_consumes_last_trigger_and_still_closes_failed_encoder(recordings_factory):
-    options = Options()
-    options = replace(options, video=replace(options.video, enabled=False),
-                      capture=replace(options.capture, before_frames=1, after_frames=0))
-    archive = Recording()
-    recordings = recordings_factory(archive=archive, live=None)
-    trigger = threading.Event()
-    capture = Capture(recordings, options, trigger)
-    capture.handle(Frame('left', 1., 0, 2, 2, b'\x01' * 4))
-    closed = []
+def test_close_reports_encoder_failure_and_records_final_counts(recordings_factory):
+    from firefly_viz.video import Encoder
 
-    def fail_close():
-        closed.append(True)
-        raise RuntimeError('encoder failed')
-
-    class FailedEncoder:
+    class FailedEncoder(Encoder):
         emitted = 0
         dropped = 0
 
-        def close(self):
-            fail_close()
+        def __init__(self):
+            self.closed = False
 
-    capture.encoder = FailedEncoder()
-    trigger.set()
+        def close(self):
+            self.closed = True
+            raise RuntimeError('encoder failed')
+
+    recordings = recordings_factory(archive=Recording())
+    capture = Capture(recordings, Options())
+    encoder = FailedEncoder()
+    capture.encoder = encoder
     with pytest.raises(ExceptionGroup, match='capture cleanup failed'):
         capture.close()
-    assert closed == [True]
-    assert not trigger.is_set()
-    assert archive.calls[0][0]['duration'] == 1.
-
-
-def test_trigger_keeps_bounded_before_and_after_and_preview_is_not_archived(recordings_factory):
-    options = Options()
-    options = replace(options, video=replace(options.video, enabled=False),
-                      capture=replace(options.capture, before_frames=2, after_frames=1, preview_hz=10.))
-    archive, live = Recording(), Recording()
-    recordings = recordings_factory(archive=archive, live=live)
-    trigger = threading.Event()
-    capture = Capture(recordings, options, trigger)
-    for i in range(3):
-        capture.handle(Frame('left', float(i), i, 2, 2, bytes([i] * 4)))
-    assert not archive.calls
-    assert len(capture.rings['left']) == 2
-    assert all(call[2]['static'] for call in live.calls)
-    trigger.set()
-    capture.handle(Frame('left', 3., 3, 2, 2, bytes([3] * 4)))
-    assert [call[0]['duration'] for call in archive.calls] == [1., 2., 3.]
-    assert all(call[1][0] == 'snapshots/left/image' for call in archive.calls)
-    assert all(not call[2].get('static', False) for call in archive.calls)
-    assert capture.after['left'] == 0
+    assert encoder.closed
+    recordings.health.assert_called_once_with('video/frames', [0, 0, 0, 0], None)
 
 
 def test_configuration_rejects_misspelled_keys_and_invalid_budgets(tmp_path):
     config = tmp_path / 'viz.toml'
     assert load(config) == Options()
     for text in ['[video]\nbitrat = 100', '[video]\nqueue_frames = 0',
-                 '[capture]\ndepth_hz = -1', '[video]\nencoder = "automatic"']:
+                 '[capture]\nqueue_frames = 0', '[video]\nencoder = "automatic"',
+                 '[capture]\nright_hz = 1.0', '[capture]\nbefore_frames = 0']:
         config.write_text(text)
         with pytest.raises((TypeError, ValueError)):
             load(config)
-    config.write_text('[capture]\nbefore_frames = 0\nafter_frames = 0')
-    assert load(config).capture.before_frames == 0

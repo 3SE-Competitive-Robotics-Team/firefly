@@ -38,8 +38,8 @@ def count(value, capacity):
 
 
 class Writer:
-    def __init__(self, recordings: RecordingOutputs, options, trigger):
-        self.recordings, self.options, self.trigger = recordings, options, trigger
+    def __init__(self, recordings: RecordingOutputs, options):
+        self.recordings, self.options = recordings, options
         self.rec = recordings.archive
         self.voxels = {}
         self.voxel_sequence = None
@@ -118,7 +118,7 @@ class Writer:
             self.rec.log(name, rr.Points2D(points, colors=list(msg.color), radii=2),
                          rr.AnyValues(track_id=pa.array(ids, type=pa.uint64()),
                                       image_width=int(width), image_height=int(height), total_keypoints=int(total)), strict=True)
-            if name in ("okvis/debug/keypoints/left", "okvis/debug/keypoints/right"):
+            if name == "okvis/debug/keypoints/left":
                 if (width, height) != (IMAGE_WIDTH, IMAGE_HEIGHT):
                     raise ValueError(f"keypoint resolution does not match camera: {name}")
                 self.recordings.matches.observe(name.rsplit("/", 1)[1], msg.timestamp, points, ids, list(msg.color))
@@ -169,11 +169,9 @@ class Writer:
         else:
             self.rec.set_time("wall_time", timestamp=float(msg.wall_secs) + float(msg.wall_nanos) * 1e-9)
         self.rec.log(f"logs/{tag}", rr.TextLog(text, level={1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE"}.get(msg.log_level, "INFO")), strict=True)
-        if msg.log_level == 1 and self.options.capture.trigger_on_error:
-            self.trigger.set()
 
     def _calibration(self, name, msg):
-        if name not in ("cameras/left", "cameras/right", "cameras/depth"):
+        if name != "cameras/left":
             raise ValueError("unknown calibrated camera")
         value = (*msg.xyz, *msg.quat_xyzw, *msg.scalars, *msg.points[0][:2])
         width, height = msg.points[0][:2]

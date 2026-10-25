@@ -113,3 +113,12 @@ def test_initialization_disconnects_both_streams_even_if_first_cleanup_fails(tmp
                              **dependencies(FailingStream))
     assert all(stream.closed for stream in Stream.instances)
     assert [str(error) for error in caught.value.exceptions] == ['blueprint failure', 'live disconnect failure']
+
+
+@pytest.mark.parametrize('live', [False, True])
+def test_camera_blueprint_contains_recorded_left_and_stereo_keypoints(live):
+    cameras = recording.blueprint(live).root_container.contents[0].contents[1].contents
+    assert [(view.origin, view.name) for view in cameras] == [
+        ('/cameras/left', 'Left · recorded'),
+        ('/okvis/debug/keypoints/left', 'Left · OKVIS keypoints'),
+        ('/okvis/debug/keypoints/right', 'Right · OKVIS keypoints')]

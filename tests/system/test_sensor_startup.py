@@ -170,14 +170,20 @@ def _verify_recording(path: Path) -> None:
                     matrix = np.asarray(tensor["buffer"]).reshape(4, 4)
                     assert np.isfinite(matrix).all()
                     np.testing.assert_array_equal(matrix[3], [0., 0., 0., 1.])
+        if name == "/render/capture/publish_s":
+            for values in chunk.to_record_batch().column("Scalars:scalars").to_pylist():
+                assert len(values) == 3
+                assert np.isfinite(values).all()
     for name in ("gt/pose", "okvis/odom", "okvis/map/pose"):
         assert counts[f"/{name}"] >= 2, f"missing pose history: {name}"
     for name in ("gt/traj", "okvis/traj", "okvis/map/traj", "okvis/tracking", "okvis/loop_commits",
                  "okvis/debug/keypoints/left", "okvis/debug/keypoints/right", "okvis/debug/pose_imu",
-                 "cameras/left/image"):
+                 "cameras/left/image", "render/capture/publish_s"):
         assert counts[f"/{name}"], f"missing recording entity: {name}"
     assert matched > 0, "OKVIS keypoints must match at least one recorded image"
     assert not any(name.startswith("/world/") for name in counts), "field mesh included in recording"
+    assert not any(name.startswith(("/cameras/right", "/cameras/depth", "/snapshots/", "/live/cameras/"))
+                   for name in counts), "extra camera recording included"
 
 
 def _verify_flight(ground_truth, check_alive):

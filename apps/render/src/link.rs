@@ -394,9 +394,9 @@ fn publish(ports: &SensorPublishers, result: &ProcessedCapture) {
     let _guard = root.set_local_parent();
 
     if result.stamp - ports.calibration_stamp.get() >= 1.0 {
-        for calibration in crate::rig::camera_calibration(result.stamp) {
-            let _ = ports.viz_pub.publish(calibration);
-        }
+        let _ = ports
+            .viz_pub
+            .publish(crate::rig::left_camera_calibration(result.stamp));
         ports.calibration_stamp.set(result.stamp);
     }
     publish_gray(&ports.left_pub, &result.left_gray, result.stamp, 0);
@@ -412,7 +412,8 @@ fn publish(ports: &SensorPublishers, result: &ProcessedCapture) {
                 t.readback.duration_since(t.submitted).as_secs_f64(),
                 t.assembled.duration_since(t.readback).as_secs_f64(),
                 t.started.duration_since(t.assembled).as_secs_f64(),
-            ],
+            ]
+            .as_slice(),
         ),
         (
             "render/capture/publish_s",
@@ -420,13 +421,13 @@ fn publish(ports: &SensorPublishers, result: &ProcessedCapture) {
                 t.processed.duration_since(t.started).as_secs_f64(),
                 t.processed.elapsed().as_secs_f64(),
                 t.issued.elapsed().as_secs_f64(),
-                result.seq as f64,
-            ],
+            ]
+            .as_slice(),
         ),
     ] {
         let mut message = ScalarMessage::base(result.stamp, entity);
-        message.scalars = values;
-        message.scalar_count = 4;
+        message.scalars[..values.len()].copy_from_slice(values);
+        message.scalar_count = values.len() as u32;
         let _ = ports.viz_pub.publish(message);
     }
     log::debug!(

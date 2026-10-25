@@ -49,15 +49,8 @@ def blueprint(live: bool):
     spatial = rrb.Tabs(*spatial_views)
     cameras = [rrb.Spatial2DView(origin="/cameras/left", name="Left · recorded",
                                  contents=["+ /cameras/left/**"])]
-    for name in ("right", "depth"):
-        cameras.append(rrb.Spatial2DView(origin=f"/cameras/{name}", name=f"{name.title()} · sampled"))
     cameras += [rrb.Spatial2DView(origin=f"/okvis/debug/keypoints/{name}", name=f"{name.title()} · OKVIS keypoints")
                 for name in ("left", "right")]
-    cameras += [rrb.Spatial2DView(origin=f"/snapshots/{name}", name=f"{name.title()} · lossless snapshot")
-                for name in ("left", "right", "depth")]
-    if live:
-        cameras += [rrb.Spatial2DView(origin=f"/live/cameras/{name}", name=f"{name.title()} · latest only")
-                    for name in ("left", "right", "depth")]
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(spatial, rrb.Tabs(*cameras), column_shares=[3, 2]),
@@ -188,8 +181,8 @@ class MatchedPoints:
 
     def __init__(self, recording, capacity: int):
         self.recording, self.capacity = recording, capacity
-        self.frames = {name: OrderedDict() for name in ("left", "right")}
-        self.points = {name: OrderedDict() for name in ("left", "right")}
+        self.frames = {"left": OrderedDict()}
+        self.points = {"left": OrderedDict()}
         self.lock = threading.Lock()
 
     def _remember(self, cache, key, value):
@@ -206,6 +199,8 @@ class MatchedPoints:
             self._write(camera, stamp, self.points[camera].get(key))
 
     def observe(self, camera, stamp, points, ids, color):
+        if camera not in self.points:
+            return
         with self.lock:
             value = points, ids, color
             key = round(stamp * 1e9)
