@@ -170,9 +170,14 @@ adb -s firefly-0001 shell 'systemctl start firefly'
 `fc` 等在任意目录、非交互 `adb shell` 下都可直接调用，不需要改镜像的 shell 配置。
 因此部署后要重新 `systemctl start firefly`。
 
-二进制按安装布局定位配置与模型：板载构建固定用 `/opt/firefly/configs`、`/opt/firefly/models`，
-开发机构建用仓库根下的同名目录（编译期确定，不做运行时探测）。所以运行目录不影响
-配置解析，`--config <path>` 仍可显式覆盖。可复现性由固定镜像 digest、Rust 1.98.1、`--locked`
+二进制按安装布局定位配置与模型，与启动目录无关；解析顺序（越显式越优先）：
+
+1. `FIREFLY_ROOT` 环境变量；
+2. 可执行文件的上两级（部署布局下 `bin/<app>` → 安装根；仅当该前缀下存在 `configs/`）；
+3. 编译期默认：板载 `/opt/firefly`，开发机构建为仓库根。
+
+`--config <path>` 仍可显式覆盖单个配置文件。运行 `firefly` 前若使用非标准前缀，
+设 `FIREFLY_ROOT` 即可，不需要改任何配置文件。可复现性由固定镜像 digest、Rust 1.98.1、`--locked`
 和 `Cargo.lock` 保证；升级 Rust 或 Debian 时只需更新 `xtask/src/container.rs` 的
 基础镜像 digest，派生构建镜像的标签由工具链与 digest 前缀拼出，会自动重建。
 干净构建先删除 `target/container/`，再执行上面的命令。

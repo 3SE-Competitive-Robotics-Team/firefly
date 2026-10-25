@@ -83,15 +83,16 @@ const STATS_PERIOD: f64 = 1.0;
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
 /// 解析 `--config <path>`（缺省 [`default_config`]）。
-fn parse_config_path() -> Result<String, String> {
+fn parse_config_path() -> Result<PathBuf, String> {
     let mut it = std::env::args().skip(1);
-    let mut path = default_config().display().to_string();
+    let mut path = default_config();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--config" => {
-                path = it
-                    .next()
-                    .ok_or_else(|| "missing --config value".to_owned())?;
+                path = PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| "missing --config value".to_owned())?,
+                );
             }
             other => return Err(format!("unknown argument {other}")),
         }
@@ -822,7 +823,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ports = Ports::open(&node)?;
     let log_ipc = firefly_observability::init_ipc(&node, "fc");
     log::info!(
-        "飞控进程启动：{} Hz 控制环，配置 {config_path}；初始 DISARMED，等 `Firefly/Command`",
+        "飞控进程启动：{} Hz 控制环，配置 {}；初始 DISARMED，等 `Firefly/Command`",
+        config_path.display(),
         cfg.rate_hz
     );
 

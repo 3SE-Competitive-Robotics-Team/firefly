@@ -48,12 +48,8 @@ fn held_out_map_localization_contract() {
         expected,
         "rejected query captures must not disappear from acceptance"
     );
-    let mut session = load_session(
-        firefly_config::paths::models("lightglue-aliked-k512.onnx")
-            .to_str()
-            .unwrap(),
-    )
-    .unwrap();
+    let mut session =
+        load_session(&firefly_config::paths::models("lightglue-aliked-k512.onnx")).unwrap();
     assert!(!queries.frames.is_empty());
     let mut results = Vec::new();
     for frame in &queries.frames {

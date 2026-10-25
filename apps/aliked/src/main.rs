@@ -49,7 +49,7 @@ const HEARTBEAT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// 命令行参数。
 struct Args {
-    model: String,
+    model: PathBuf,
     build_map: Option<PathBuf>,
     out: Option<PathBuf>,
     /// 特征推理频率（Hz，见 [`DEFAULT_RATE_HZ`]）。
@@ -60,16 +60,17 @@ struct Args {
 /// `--out <map.ffvmap>`（离线建库，两者必须同时出现）、`--rate-hz`（在线推理频率）。
 fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
-    let mut model = default_model().display().to_string();
+    let mut model = default_model();
     let mut build_map: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;
     let mut rate_hz = DEFAULT_RATE_HZ;
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--model" => {
-                model = it
-                    .next()
-                    .ok_or_else(|| "missing --model value".to_owned())?;
+                model = PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| "missing --model value".to_owned())?,
+                );
             }
             "--build-map" => {
                 build_map = Some(PathBuf::from(
@@ -118,16 +119,20 @@ struct Model {
 }
 
 /// 加载 ONNX 会话（文件缺失即报错）。四条算子线程，空闲休眠。
-fn load_model(model: &str) -> Result<Model, Box<dyn std::error::Error>> {
-    if !std::path::Path::new(model).is_file() {
-        return Err(format!("权重缺失：{model}（见 models/，离线导出，不进 git）").into());
+fn load_model(model: &std::path::Path) -> Result<Model, Box<dyn std::error::Error>> {
+    if !model.is_file() {
+        return Err(format!(
+            "权重缺失：{}（见 models/，离线导出，不进 git）",
+            model.display()
+        )
+        .into());
     }
     let environment = ort::init().build()?;
     let session = Session::builder(&environment)?
         .with_intra_threads(4)?
         .with_intra_op_spinning(false)?
         .commit_from_file(model)?;
-    log::info!("aliked 会话就绪：{model}");
+    log::info!("aliked 会话就绪：{}", model.display());
     let input = Tensor::from_array((
         [1usize, 3, HEIGHT, WIDTH],
         vec![0f32; 3 * HEIGHT * WIDTH].into_boxed_slice(),
@@ -477,11 +482,9 @@ mod tests {
     use super::*;
 
     /// 测试用权重路径：按安装布局解析；缺失时跳过（`models/` 已 ignore，CI 无权重）。
-    fn test_model_path() -> Option<String> {
+    fn test_model_path() -> Option<PathBuf> {
         let path = default_model();
-        path.is_file()
-            .then(|| path.to_str().map(str::to_owned))
-            .flatten()
+        path.is_file().then_some(path)
     }
 
     /// 端到端冒烟：权重缺失时跳过。

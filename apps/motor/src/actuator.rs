@@ -117,15 +117,16 @@ const fn default_airframe_ms() -> u64 {
 }
 
 /// 解析 `--config <path>`（缺省 [`default_config`]）。
-fn parse_config_path() -> Result<String, String> {
+fn parse_config_path() -> Result<PathBuf, String> {
     let mut it = std::env::args().skip(1);
-    let mut path = default_config().display().to_string();
+    let mut path = default_config();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--config" => {
-                path = it
-                    .next()
-                    .ok_or_else(|| "missing --config value".to_owned())?;
+                path = PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| "missing --config value".to_owned())?,
+                );
             }
             other => return Err(format!("unknown argument {other}")),
         }
