@@ -177,11 +177,9 @@ pub fn display_processor(
                 let rgb = (0..7)
                     .map(|i| gray_to_colour(get(&images, &format!("srcImage{i}"))?))
                     .collect::<io::Result<Vec<_>>>()?;
+                let current = gray_to_colour(get(&images, "leftImage")?)?;
                 let a = concatenate(&[&rgb[0], &rgb[1], &rgb[2], &rgb[3]], true)?;
-                let b = concatenate(
-                    &[&rgb[4], &rgb[5], &rgb[6], get(&images, "sparseDepth")?],
-                    true,
-                )?;
+                let b = concatenate(&[&rgb[4], &rgb[5], &rgb[6], &current], true)?;
                 factory.show_image("Input images", &concatenate(&[&a, &b], false)?)?;
             }
             if ["stereoDepth", "mvsDepth", "fuseDepth"]

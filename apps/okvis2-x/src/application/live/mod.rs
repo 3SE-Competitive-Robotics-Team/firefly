@@ -74,7 +74,7 @@ pub fn run(config: Config, vocabulary: Option<&Path>) -> Result<()> {
     let failure = Arc::new(Mutex::new(None::<String>));
     let stopping = stop.clone();
     let errors = failure.clone();
-    estimator.set_optimised_graph_callback(Arc::new(move |state, tracking, updated, landmarks| {
+    estimator.set_optimised_graph_callback(Arc::new(move |state, tracking, updated| {
         if let Some(mapper) = &map_inputs
             && let Err(error) =
                 mapper.state_update_callback(state.clone(), tracking.clone(), updated.clone())
@@ -89,7 +89,6 @@ pub fn run(config: Config, vocabulary: Option<&Path>) -> Result<()> {
                 state: state.clone(),
                 tracking_state: tracking.clone(),
                 updated_states: updated,
-                landmarks,
             })
             .is_err()
         {

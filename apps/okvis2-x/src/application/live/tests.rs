@@ -23,7 +23,7 @@ use super::{
     output::{self, Output},
 };
 use crate::{
-    frames::frame_typedefs::{MapPointVector, StateId},
+    frames::frame_typedefs::StateId,
     kinematics::transformation::Transformation,
     runtime::{
         threaded_slam::PublicationData,
@@ -57,7 +57,6 @@ fn publication(time: f64, id: u64, pose: Transformation, revision: u64) -> Publi
         },
         state,
         updated_states: Arc::new(BTreeMap::new()),
-        landmarks: Arc::new(MapPointVector::new()),
     }
 }
 fn frame(time: f64, id: i32) -> Box<GrayImageMessage> {

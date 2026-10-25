@@ -13,9 +13,7 @@ use crate::{
     },
     config::parameters::{CameraParameters, GpsParameters, ImuParameters, ViParameters},
     frames::{
-        frame_typedefs::{
-            LandmarkId, MapPoint, MapPointVector, Observation, SpeedAndBias, StateId,
-        },
+        frame_typedefs::{LandmarkId, Observation, SpeedAndBias, StateId},
         multi_frame::MultiFrame,
     },
     frontend::{
@@ -238,7 +236,6 @@ pub struct PublicationData {
     pub state: State,
     pub tracking_state: TrackingState,
     pub updated_states: Arc<BTreeMap<StateId, State>>,
-    pub landmarks: Arc<MapPointVector>,
 }
 #[derive(Clone)]
 pub struct VisualisationData {
@@ -552,12 +549,7 @@ impl ThreadedSlam {
                     .clone();
                 if let Some(callback) = callback {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        callback(
-                            &data.state,
-                            &data.tracking_state,
-                            data.updated_states,
-                            data.landmarks,
-                        );
+                        callback(&data.state, &data.tracking_state, data.updated_states);
                     }));
                     if result.is_err() {
                         publishing_shared.publications.shutdown();
@@ -2013,24 +2005,10 @@ where
                 state.gps_points.clear();
             }
         }
-        let landmarks = self
-            .graph
-            .landmarks()
-            .into_iter()
-            .map(|(id, lm)| {
-                let latest = if final_output {
-                    0
-                } else {
-                    lm.observations.last().map_or(0, |obs| obs.frame_id)
-                };
-                MapPoint::new(id.value(), lm.point, lm.quality, latest)
-            })
-            .collect();
         let publication = PublicationData {
             state,
             tracking_state: tracking,
             updated_states: Arc::new(states),
-            landmarks: Arc::new(landmarks),
         };
         if !publication.updated_states.is_empty() {
             let mut affected = BTreeSet::new();
@@ -2054,12 +2032,7 @@ where
                 .map_err(|_| runtime_error("callback mutex poisoned"))?
                 .clone();
             if let Some(callback) = callback {
-                callback(
-                    &data.state,
-                    &data.tracking_state,
-                    data.updated_states,
-                    data.landmarks,
-                );
+                callback(&data.state, &data.tracking_state, data.updated_states);
             }
             return Ok(());
         }
@@ -2492,6 +2465,49 @@ mod tests {
                 .unwrap()
                 .eliminated_states
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn publication_does_not_read_landmark_estimates() {
+        let mut core = marginalisation_core();
+        let id = StateId::new(1);
+        let frame = Rc::new(RefCell::new(MultiFrame::new(
+            &core.parameters.n_camera_system,
+            Timestamp::UNIX_EPOCH,
+            id.value(),
+        )));
+        let imu = VecDeque::from([ImuMeasurement::new(
+            Timestamp::UNIX_EPOCH,
+            ImuSensorReadings::new(Vector3::zeros(), Vector3::z() * 9.81),
+            -1,
+        )]);
+        assert!(core.graph.add_states(frame, &imu, true).unwrap());
+        core.imu_by_frame.insert(id, imu);
+        let landmark_id = LandmarkId::new(1);
+        core.graph
+            .realtime_graph
+            .add_landmark(landmark_id, nalgebra::Vector4::new(0., 0., 3., 1.), true)
+            .unwrap();
+        let point = core.graph.realtime_graph.landmarks[&landmark_id]
+            .h_point
+            .clone();
+        // Holding the mutable borrow makes any landmark-estimate read fail.
+        let estimate = point.borrow_mut();
+        for final_output in [false, true] {
+            let state = core.make_state(id, false).unwrap();
+            let publication = core
+                .prepare_publication(state, &[id], final_output)
+                .unwrap();
+            assert_eq!(publication.state.id, id);
+            assert_eq!(publication.tracking_state.id, id);
+            assert!(publication.updated_states.contains_key(&id));
+        }
+        drop(estimate);
+        assert_eq!(core.graph.realtime_graph.landmarks.len(), 1);
+        assert_eq!(
+            core.graph.realtime_graph.landmark(landmark_id).unwrap(),
+            nalgebra::Vector4::new(0., 0., 3., 1.)
         );
     }
 

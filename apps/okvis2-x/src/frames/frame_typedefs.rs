@@ -141,30 +141,6 @@ impl Match {
 pub type Matches = Vec<Match>;
 
 #[derive(Clone, Debug)]
-pub struct MapPoint {
-    pub id: u64,
-    pub point: Vector4<f64>,
-    pub quality: f64,
-    pub state_id: u64,
-}
-impl MapPoint {
-    #[must_use]
-    pub fn new(id: u64, point: Vector4<f64>, quality: f64, state_id: u64) -> Self {
-        Self {
-            id,
-            point,
-            quality,
-            state_id,
-        }
-    }
-}
-impl Default for MapPoint {
-    fn default() -> Self {
-        Self::new(0, Vector4::new(0.0, 0.0, 0.0, 1.0), 0.0, 0)
-    }
-}
-
-#[derive(Clone, Debug)]
 pub struct MapPoint2 {
     pub id: LandmarkId,
     pub point: Vector4<f64>,
@@ -178,7 +154,6 @@ pub type AlignedMap<K, V> = BTreeMap<K, V>;
 pub type AlignedUnorderedMap<K, V> = HashMap<K, V>;
 pub type AlignedVector<V> = Vec<V>;
 pub type AlignedSet<V> = BTreeSet<V>;
-pub type MapPointVector = Vec<MapPoint>;
 pub type MapPoints = BTreeMap<LandmarkId, MapPoint2>;
 pub type TransformationMap = BTreeMap<u64, Transformation>;
 
