@@ -326,7 +326,7 @@ planner 经 `Firefly/VizVoxels` 发地图更新，经 `Firefly/Log` 发 log 宏�
 传感器延迟按原始采集 `sim_time` 记录墙钟耗时（秒）：
 `render/capture/stages_s` 为请求→提交、提交→回读、回读→装配、装配→处理；
 `render/capture/publish_s` 为像素处理、处理结束→发布、请求→发布。
-这些诊断不改图像时间戳；`fc/imu/health` 的后验年龄还包含视觉更新与等待下一拍的时间。
+这些诊断不改图像时间戳；`fc/imu/posterior_age_s` 的后验年龄还包含视觉更新与等待下一拍的时间。
 
 实时查看先启动 `rerun`，再运行 `uv run firefly-viz`：默认连接 `127.0.0.1:9876` 并创建
 `logs/` 下唯一 RRD。`--save logs/run.rrd` 单独使用为离线录制；加 `--serve` 同时启动原生
@@ -350,30 +350,44 @@ H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码
 
 ### 姿态与 VIO 诊断
 
-- `fc/imu/quaternion_xyzw`：控制实际使用的 Hamilton 姿态（主链路为 body→odom，备用为 body→本地重力系）（10Hz）。
+默认 blueprint 只展示飞行模式与安全状态、主备姿态状态、高度与位置误差、总推力、
+OKVIS 跟踪状态、回环提交次数与单帧处理耗时；FC tick rate 使用独立尺度。零偏、方差、四元数、
+底层控制量、录制队列与传感器耗时保留录制，按需手动添加视图。
+状态由 viz 转成 `StateChange`；数值曲线用 `SeriesLines.names` 标明分量及单位，
+多分量诊断必须在 `firefly_viz.telemetry` 声明含义，禁止依赖自动生成的数字下标。
+验收专用原始数组保留数值顺序和评分门槛，并使用同样的曲线命名规则。
+
+- `fc/imu/quaternion_xyzw`：控制实际使用的 Hamilton 姿态（主链路为 body→odom，备用为 body→本地重力系）（10Hz），供验收订阅；普通 Recorder 不录制，验收任务保存为 `acceptance/imu_attitude`。
 - `fc/debug/position_target_odom` / `position_error_odom`：odom 系目标与位置误差（10Hz）。
-- `fc/imu/health`：所选姿态可用、VIO 主链路新鲜、VIO 后验测量年龄（秒）。
-- `fc/imu/source`：0 未就绪、1 VIO 预测、2 独立 ESKF 热备（10Hz）。
-- `fc/standby/health`：独立 ESKF 可用标记、IMU 墙钟年龄（秒）。
-- `fc/standby/accel_gate`：NIS、是否实际应用地面加计校正。
-- `fc/standby/gyro_bias`、`quaternion_xyzw`、`attitude_variance`、`bias_variance`：
+- `fc/imu/health`：IPC 发布所选姿态可用、VIO 主链路新鲜、VIO 后验测量年龄（秒）；viz 分别记录为 `fc/imu/attitude_ready`、`fc/imu/vio_fresh` 状态时间线与 `fc/imu/posterior_age_s` 数值曲线。验收任务将原始数值保存为 `acceptance/imu_health`。
+- `fc/imu/source`：0 未就绪、1 VIO 预测、2 独立 ESKF 热备（10Hz），viz 记录为状态时间线；验收任务将原始数值保存为 `acceptance/attitude_source`。
+- `fc/standby_eskf/health`：独立 ESKF 就绪标记（0/1），viz 记录为状态时间线。
+- `fc/standby_eskf/imu_age_s`：IMU 墙钟接收年龄（秒），保留录制，默认视图不显示。
+- `fc/standby_eskf/accel_nis`：三轴加计创新的 NIS 数值。
+- `fc/standby_eskf/accel_gate`：是否实际应用地面加计校正（0/1），viz 记录为状态时间线。
+- `fc/standby_eskf/gyro_bias`、`quaternion_xyzw`、`attitude_variance`、`bias_variance`：
   独立热备状态；姿态属于备用本地重力系，方差单位 rad² / (rad/s)²。
-- `fc/vio/gyro_bias`：主链路采用的 VIO 陀螺零偏；主链路不发布姿态方差。
+- `okvis/gyro_bias`：viz 直接订阅 `Firefly/VioAttitude`，以 1Hz 记录机体系 VIO 陀螺零偏（rad/s）；主链路不发布姿态方差。
 - `fc/debug/tilt_deg` 与 `fc/debug/tilt_err_deg`：估计倾角与仅供评测的真值倾角误差。
 - `fc/debug/rate_sp_frd` / `rate_flu`：PX4 角速度设定值（FRD）与实测角速度（FLU）。
 - `fc/debug/torque_sp_frd` / `allocated_control`：归一化力矩设定值与分配实际达到的控制量。
-- `fc/debug/saturated` / `hover_thrust`：分配饱和标志与归一化悬停推力。
+- `fc/debug/saturated`：当前分配饱和状态；`saturated_ticks` 为每秒窗口内的饱和次数。
+- `fc/debug/hover_thrust`：归一化悬停推力。
 - `fc/arming/failed`：未解锁时首个失败解锁检查的位掩码（定义见 `firefly-flight::ArmingCheck`）。
   VIO 已初始化后位 1 仍可能置位，表示独立 ESKF 热备尚未完成静止初始化；等待清零后重试
-  `ffctl fc arm`。
+  `ffctl fc arm`。viz 记录为具名状态，不显示位掩码曲线。
 - `fc/failsafe/flags` / `fc/failsafe/action`：失效条件位掩码与动作编码（定义见
-  `firefly-flight::safety`）；1Hz 日志同时输出名字。
+  `firefly-flight::safety`）；viz 记录为具名状态，1Hz 日志同时输出名字。
+- `fc/debug/state`：飞行模式状态时间线；验收任务将原始编码保存为 `acceptance/fc_state`。
 
 运行记录由 `firefly-viz` 写入 `logs/*.rrd`。
 
 #### 估计与回环诊断
 
 OKVIS 的位姿使用 `okvis/odom` 实体。
+`okvis/frame_processing_ms` 在独立二维曲线显示每个成功提交帧的处理墙钟耗时（毫秒），
+覆盖取帧、特征提取、匹配、优化、发布和边缘化，不包含进入处理线程前的排队与传感器延迟；
+曲线时间戳为图像测量时刻，后验测量年龄使用 `fc/imu/posterior_age_s`。
 `okvis/loop_commits` 是后端已提交全图修订次数，任务评分记录为 `acceptance/loop_backend`；
 候选检索和几何验证不单独计为提交。外部库图模式的融合诊断位于 `corr/debug/*`。
 通讯测试和修订计数不替代完整轨迹精度验证。

@@ -121,34 +121,27 @@ fn sensor_configuration_rejects_unknown_fields_nonfinite_geometry_and_invalid_no
     assert!(Pairs::new(0.001).push(&frame(1.0, 1), 0).is_err());
 }
 #[test]
-fn posterior_imu_prediction_preserves_stationary_geometry_and_never_renews_a_stale_posterior() {
-    let config = Config {
-        max_posterior_age: 0.05,
-        max_imu_gap: 0.02,
-        ..Default::default()
-    };
-    let mut predictor = Output::new(config, 7).unwrap();
+fn posterior_imu_prediction_continues_past_three_hundred_ms_without_renewing_posterior_time() {
+    let mut predictor = Output::new(Config::default(), 7).unwrap();
     assert!(imu(&mut predictor, 1.0).is_none());
     predictor
         .posterior(&publication(1.0, 1, Transformation::identity(), 0))
         .unwrap();
-    for index in 1..=10 {
-        let sample = imu(&mut predictor, 1.0 + f64::from(index) * 0.01);
-        if index <= 5 {
-            let sample = sample.unwrap();
-            assert!(sample.odom.position_z.abs() < 1e-12);
-            assert!(sample.odom.velocity_z.abs() < 1e-12);
-            let attitude = sample.attitude.unwrap();
-            assert_eq!(attitude.session, 7);
-            assert_eq!(attitude.posterior_time, 1.0);
-        } else {
-            assert!(sample.is_none());
-        }
+    for index in 1..=40 {
+        let stamp = 1.0 + f64::from(index) * 0.01;
+        let sample = imu(&mut predictor, stamp).unwrap();
+        assert!(sample.odom.position_z.abs() < 1e-12);
+        assert!(sample.odom.velocity_z.abs() < 1e-12);
+        let attitude = sample.attitude.unwrap();
+        assert_eq!(attitude.session, 7);
+        assert_eq!(attitude.posterior_time, 1.0);
+        assert!((attitude.timestamp - stamp).abs() < 1e-9);
     }
     predictor
-        .posterior(&publication(1.08, 2, Transformation::identity(), 0))
+        .posterior(&publication(1.35, 2, Transformation::identity(), 0))
         .unwrap();
-    assert!(imu(&mut predictor, 1.11).is_some());
+    let sample = imu(&mut predictor, 1.41).unwrap();
+    assert_eq!(sample.attitude.unwrap().posterior_time, 1.35);
 }
 #[test]
 fn loop_commit_changes_map_coordinates_atomically_without_moving_local_odometry() {
@@ -197,7 +190,7 @@ fn loop_commit_changes_map_coordinates_atomically_without_moving_local_odometry(
     );
 }
 #[test]
-fn lost_tracking_or_uncovered_imu_gap_stops_predictions_without_resetting_session() {
+fn prediction_uses_committed_states_and_available_imu_intervals_like_upstream() {
     let mut predictor = Output::new(Config::default(), 1).unwrap();
     imu(&mut predictor, 1.0);
     let mut posterior = publication(1.0, 1, Transformation::identity(), 0);
@@ -207,16 +200,18 @@ fn lost_tracking_or_uncovered_imu_gap_stops_predictions_without_resetting_sessio
     let session_before = predictor.session_id();
     posterior.tracking_state.tracking_quality = TrackingQuality::Lost;
     predictor.posterior(&posterior).unwrap();
-    assert!(imu(&mut predictor, 1.02).is_none());
+    assert!(imu(&mut predictor, 1.02).is_some());
     assert_eq!(
         predictor.session_id(),
         session_before,
-        "跟踪丢失只停预测，不得改动进程会话标识"
+        "跟踪质量不改变进程会话标识"
     );
     let posterior = publication(1.02, 2, Transformation::identity(), 0);
     predictor.posterior(&posterior).unwrap();
-    assert!(imu(&mut predictor, 1.1).is_none());
-    assert!(imu(&mut predictor, 1.11).is_none());
+    let sample = imu(&mut predictor, 1.1).unwrap();
+    assert!(sample.odom.position_z.abs() < 1e-12);
+    assert!(sample.odom.velocity_z.abs() < 1e-12);
+    assert!(imu(&mut predictor, 1.11).is_some());
 }
 
 #[test]

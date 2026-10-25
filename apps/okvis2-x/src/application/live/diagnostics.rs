@@ -4,9 +4,10 @@ use crate::frames::multi_frame::MultiFrame;
 use firefly_error::Result;
 use firefly_pubsub::{
     node::{IpcNode, create_node},
-    viz::{OKVIS_KEYPOINT_ENTITIES, POINTS_MAX, VizMessage, VizPublisher, kind},
+    viz::{OKVIS_KEYPOINT_ENTITIES, POINTS_MAX, ScalarMessage, VizMessage, VizPublisher, kind},
 };
 use nalgebra::Vector2;
+use std::time::Duration;
 
 pub(super) struct Diagnostics {
     publisher: VizPublisher,
@@ -22,14 +23,22 @@ impl Diagnostics {
             image_delay,
         })
     }
-    pub fn publish(&mut self, frame: &MultiFrame) {
+    pub fn publish(&mut self, frame: &MultiFrame, duration: Duration) {
         let stamp = frame.timestamp().as_nanosecond() as f64 * 1e-9 + self.image_delay;
+        let _ = self.publisher.publish(frame_timing(stamp, duration));
         for camera in 0..frame.num_frames().min(OKVIS_KEYPOINT_ENTITIES.len()) {
             if let Some(message) = keypoints(frame, camera, stamp) {
                 let _ = self.publisher.publish(message);
             }
         }
     }
+}
+
+fn frame_timing(stamp: f64, duration: Duration) -> ScalarMessage {
+    let mut message = ScalarMessage::base(stamp, "okvis/frame_processing_ms");
+    message.scalars[0] = duration.as_secs_f64() * 1000.0;
+    message.scalar_count = 1;
+    message
 }
 
 fn keypoints(frame: &MultiFrame, camera: usize, stamp: f64) -> Option<VizMessage> {
@@ -57,6 +66,18 @@ mod tests {
     use jiff::Timestamp;
     use purecv::core::{DynamicMatrix, types::Point2f};
     use std::sync::Arc;
+
+    #[test]
+    fn frame_processing_time_uses_milliseconds_and_the_frame_timestamp() {
+        let message = frame_timing(12.5, Duration::from_micros(125_750));
+        assert_eq!(message.timestamp, 12.5);
+        assert_eq!(message.scalar_count, 1);
+        assert_eq!(message.scalars[0], 125.75);
+        assert_eq!(
+            &message.entity[..message.entity_len as usize],
+            b"okvis/frame_processing_ms"
+        );
+    }
 
     #[test]
     fn feature_diagnostics_bound_sampling_and_preserve_capture_geometry_and_ids() {

@@ -42,6 +42,8 @@ class DisturbanceMission(Mission):
             while (sample := subscriber.receive()) is not None:
                 msg = sample.payload().contents
                 entity = bytes(msg.entity[:msg.entity_len]).decode()
+                if entity in ("acceptance/imu_attitude", "acceptance/imu_health", "acceptance/attitude_source", "acceptance/fc_state"):
+                    continue
                 key = self.evidence_aliases.get(entity, entity.removeprefix("acceptance/"))
                 if key not in self.required_evidence and not key.startswith("disturbance_force/"):
                     continue

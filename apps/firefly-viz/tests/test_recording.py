@@ -113,9 +113,9 @@ def test_camera_blueprint_contains_only_recorded_stereo_views():
     import rerun.blueprint as rrb
 
     root = recording.blueprint().root_container
-    container = root.contents[0].contents[1]
+    container = root.contents[0]
     assert isinstance(container, rrb.Horizontal)
-    cameras = container.contents
+    cameras = container.contents[1:]
     assert [(view.origin, view.name) for view in cameras] == [
         ('/cameras/left', 'Left · recorded'),
         ('/cameras/right', 'Right · recorded')]
@@ -136,11 +136,74 @@ def test_okvis_diagnostics_uses_state_timeline_for_tracking_and_curves_for_count
 
     diagnostics = recording.blueprint().root_container.contents[1].contents[0]
     assert diagnostics.name == 'OKVIS diagnostics'
-    tracking, loops = diagnostics.contents
+    tracking, loops, timing = diagnostics.contents
     assert isinstance(tracking, rrb.StateTimelineView)
     assert tracking.origin == '/okvis/tracking'
     assert isinstance(loops, rrb.TimeSeriesView)
     assert loops.origin == '/okvis/loop_commits'
+    assert isinstance(timing, rrb.TimeSeriesView)
+    assert timing.origin == '/okvis/frame_processing_ms'
+
+
+def test_tick_rate_has_a_separate_scale_from_flight_control():
+    panels = recording.blueprint().root_container.contents[1].contents
+    flight = next(panel for panel in panels if panel.name == 'Flight control')
+    assert all(panel.name != 'FC tick rate · Hz' for panel in panels)
+    import rerun.blueprint as rrb
+
+    rate, states, curves = flight.contents
+    assert isinstance(states, rrb.Horizontal)
+    assert isinstance(curves, rrb.Horizontal)
+    imu, safety, gate = states.contents
+    thrust, position = curves.contents
+    assert isinstance(safety, rrb.StateTimelineView)
+    assert safety.contents == ['+ /fc/debug/state', '+ /fc/arming/failed', '+ /fc/failsafe/flags',
+                               '+ /fc/failsafe/action', '+ /fc/debug/saturated']
+    assert gate.origin == '/fc/standby_eskf'
+    assert gate.contents == ['+ /fc/standby_eskf/accel_gate', '+ /fc/standby_eskf/health']
+    assert imu.origin == '/fc/imu'
+    assert imu.contents == ['+ /fc/imu/source', '+ /fc/imu/attitude_ready', '+ /fc/imu/vio_fresh']
+    assert position.contents == ['+ /fc/debug/altitude', '+ /fc/debug/position_error_odom']
+    assert thrust.origin == '/fc/debug/thrust_total'
+    assert rate.origin == '/fc/debug/tick_rate'
+    assert isinstance(rate, rrb.TimeSeriesView)
+
+
+def test_blueprint_uses_equal_splits_and_opens_flight_control():
+    root = recording.blueprint().root_container
+    scene, tabs = root.contents
+    flight = tabs.contents[1]
+    assert root.row_shares is None
+    assert scene.column_shares is None
+    assert flight.row_shares is None
+    assert flight.contents[1].column_shares is None
+    assert flight.contents[2].column_shares is None
+    assert tabs.active_tab == 1
+
+
+def test_blueprint_uses_default_camera_and_collapses_all_side_panels():
+    import rerun.blueprint as rrb
+
+    bp = recording.blueprint()
+    assert 'EyeControls3D' not in bp.root_container.contents[0].contents[0].properties
+    assert bp.time_panel.timeline == 'sim_time'
+    assert bp.time_panel.state == rrb.PanelState.Collapsed
+    assert bp.time_panel.play_state == rrb.components.PlayState.Paused
+    assert bp.selection_panel.state == rrb.PanelState.Collapsed
+    assert bp.blueprint_panel.state == rrb.PanelState.Collapsed
+
+
+def test_default_blueprint_does_not_include_internal_numeric_diagnostics():
+    def views(container):
+        for child in container.contents:
+            if hasattr(child, 'contents') and not hasattr(child, 'origin'):
+                yield from views(child)
+            else:
+                yield child
+
+    all_views = list(views(recording.blueprint().root_container))
+    assert not any(view.origin in ('/viz', '/render', '/okvis/gyro_bias') for view in all_views)
+    assert not any(view.origin == '/fc' and view.name == 'FC metrics' for view in all_views)
 
 
 def test_diagnostics_blueprint_excludes_optional_vision_and_imu_matrix_views():

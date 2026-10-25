@@ -28,7 +28,7 @@ from firefly_workspace import startup
 
 from .capture import Capture, Rate
 from .config import ROOT, decode
-from .messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage
+from .messages import AttitudeMessage, SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage
 from .recording import Recordings, URL
 from .video import Frame
 from .writer import Writer
@@ -199,6 +199,7 @@ def run(args):
             ("log", "Firefly/Log", LogMessage, LOG_MAX_PUBLISHERS, LOG_BUFFER_SIZE),
             ("gt", "Firefly/GroundTruth", OdomMessage, None, 1),
             ("map", "Firefly/CorrectedOdometry", OdomMessage, None, 1),
+            ("attitude", "Firefly/VioAttitude", AttitudeMessage, None, 1),
         ):
             subscriptions.append((kind, _subscribe(node, topic, cls, capacity, publishers)))
         if options.video.enabled:
@@ -207,6 +208,7 @@ def run(args):
         last_stamp = {name: float("-inf") for name, _ in cameras}
         indices = dict.fromkeys(last_stamp, 0)
         map_rate = Rate(10.0)
+        attitude_rate = Rate(1.0)
         logger.info("RRD: %s", path)
         while not stop.is_set():
             for worker in workers:
@@ -231,6 +233,11 @@ def run(args):
                                 del pose
                         message = detach_copy(sample.payload().contents)
                         try:
+                            if kind == "attitude":
+                                if not math.isfinite(message.timestamp) or message.timestamp < 0:
+                                    raise ValueError("invalid VIO attitude timestamp")
+                                if not attitude_rate.accept(message.timestamp):
+                                    continue
                             if kind == "viz":
                                 continuity.observe(sample.header.publisher_id.value, message.sequence)
                             telemetry.put((kind, message))

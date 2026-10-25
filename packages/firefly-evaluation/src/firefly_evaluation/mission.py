@@ -174,10 +174,13 @@ class Mission:
                     entity = bytes(msg.entity[:msg.entity_len]).decode(errors="replace")
                     if entity == "fc/debug/state":
                         self.mode = int(msg.scalars[0])
+                        self.recorder.scalars("acceptance/fc_state", msg.timestamp, list(msg.scalars[:msg.scalar_count]))
                     elif entity == "fc/imu/source":
                         self.attitude_source = (msg.timestamp, int(msg.scalars[0]), time.monotonic())
+                        self.recorder.scalars("acceptance/attitude_source", msg.timestamp, list(msg.scalars[:msg.scalar_count]))
                     elif entity == "fc/imu/health" and msg.scalar_count >= 2:
                         self.attitude_health = (msg.timestamp, msg.scalars[0] == 1., msg.scalars[1] == 1., time.monotonic())
+                        self.recorder.scalars("acceptance/imu_health", msg.timestamp, list(msg.scalars[:msg.scalar_count]))
                     elif entity == "fc/arming/failed" and msg.scalar_count == 1:
                         self.arming_health = (msg.timestamp, msg.scalars[0] == 0., time.monotonic())
                     elif entity == "corr/debug/gate" and msg.scalar_count == 4 and msg.scalars[3] == 1:
@@ -185,6 +188,8 @@ class Mission:
                         self.recorder.scalars("acceptance/visual_update", msg.timestamp, list(msg.scalars[:4]))
                     elif entity == "okvis/loop_commits":
                         self.recorder.scalars("acceptance/loop_backend", msg.timestamp, list(msg.scalars[:msg.scalar_count]))
+                    elif entity == "fc/imu/quaternion_xyzw":
+                        self.recorder.scalars("acceptance/imu_attitude", msg.timestamp, list(msg.scalars[:msg.scalar_count]))
                     elif entity == "acceptance/physics":
                         self.physics = list(msg.scalars)
                         self.physics_time = msg.timestamp

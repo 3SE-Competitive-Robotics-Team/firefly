@@ -43,6 +43,34 @@ def poses():
     return rows
 
 
+def test_imu_state_views_preserve_numeric_acceptance_evidence(tmp_path):
+    from firefly_evaluation.mission_metrics import read_evidence
+    from firefly_viz.config import Options as VizOptions
+    from firefly_viz.messages import ScalarMessage, VIZ_KIND_SCALARS
+    from firefly_viz.recording import Recordings
+    from firefly_viz.writer import Writer
+
+    path = tmp_path / 'imu.rrd'
+    recordings = Recordings(path, None, False, VizOptions())
+    try:
+        writer = Writer(recordings, VizOptions())
+        for entity, values in [('fc/imu/source', [1.]), ('fc/imu/health', [1., 1., .15]),
+                               ('fc/debug/state', [3.]), ('acceptance/fc_state', [3.]),
+                               ('acceptance/attitude_source', [1.]),
+                               ('acceptance/imu_health', [1., 1., .15])]:
+            msg = ScalarMessage(kind=VIZ_KIND_SCALARS, timestamp=2., scalar_count=len(values))
+            encoded = entity.encode()
+            msg.entity_len, msg.entity[:len(encoded)] = len(encoded), encoded
+            msg.scalars[:len(values)] = values
+            writer.consume(('viz', msg))
+    finally:
+        recordings.close()
+    evidence = read_evidence(path)
+    np.testing.assert_array_equal(evidence['attitude_source'], [[2., 1.]])
+    np.testing.assert_array_equal(evidence['imu_health'], [[2., 1., 1., .15]])
+    np.testing.assert_array_equal(evidence['fc_state'], [[2., 3.]])
+
+
 def test_map_tracking_error_preserves_translation_and_scale_error():
     gt = poses()
     estimate = gt.copy()

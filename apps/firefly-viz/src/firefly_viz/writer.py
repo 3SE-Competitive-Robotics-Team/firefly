@@ -14,12 +14,31 @@ from .messages import (
     VIZ_KIND_BAR_CHART, VIZ_KIND_ARROWS, VIZ_KIND_CLEAR, VIZ_KIND_CAMERA,
 )
 from .recording import RecordingOutputs, PIXEL_CENTER_OFFSET, at
+from .telemetry import log_scalars
 
 
 TRAJECTORIES = {"gt/pose": ("gt/traj", [64, 128, 255]),
                 "okvis/odom": ("okvis/traj", [255, 160, 64]),
                 "okvis/map/pose": ("okvis/map/traj", [90, 235, 120])}
 TRACKING_STATES = {0: "Lost", 1: "Marginal", 2: "Good"}
+ACCEL_GATE_STATES = {0: "Not accepted", 1: "Accepted"}
+STANDBY_HEALTH_STATES = {0: "Not ready", 1: "Ready"}
+IMU_SOURCE_STATES = {0: "Unavailable", 1: "OKVIS", 2: "Standby ESKF"}
+IMU_READY_STATES = {0: "Unavailable", 1: "Available"}
+VIO_FRESH_STATES = {0: "Stale", 1: "Fresh"}
+STATE_LABELS = {
+    "okvis/tracking": TRACKING_STATES,
+    "fc/standby_eskf/accel_gate": ACCEL_GATE_STATES,
+    "fc/standby_eskf/health": STANDBY_HEALTH_STATES,
+    "fc/imu/source": IMU_SOURCE_STATES,
+    "fc/debug/state": dict(enumerate(("Disarmed", "Armed on ground", "Takeoff", "Hold", "Track", "Land", "Attitude fallback"))),
+    "fc/debug/saturated": {0: "Not saturated", 1: "Saturated"},
+    "fc/failsafe/action": {0: "None", 1: "Hold", 2: "Attitude fallback", 3: "Disarm"},
+}
+ARMING_CHECKS = ("Must be disarmed", "Estimator not ready", "Attitude session invalid", "Airframe missing",
+                 "Odometry stale", "IMU stale", "Not on ground")
+FAILSAFE_FLAGS = ("Attitude invalid", "Position invalid", "Velocity invalid", "IMU stale",
+                  "Airframe missing", "Attitude session changed", "Reference stale", "Reference lost")
 
 
 def entity(msg):
@@ -47,7 +66,7 @@ class Writer:
         self.voxel_pending = None
         self.calibrations = {}
         self.previous_poses = {}
-        self.tracking_state = None
+        self.states = {}
         self.last_flush = time.monotonic()
 
     def consume(self, item):
@@ -61,6 +80,11 @@ class Writer:
                            [msg.quat_x, msg.quat_y, msg.quat_z, msg.quat_w])
         elif kind == "log":
             self.log_text(msg)
+        elif kind == "attitude":
+            if not math.isfinite(msg.timestamp) or msg.timestamp < 0 or not np.isfinite(msg.gyro_bias).all():
+                raise ValueError("invalid VIO gyro bias")
+            at(self.rec, msg.timestamp)
+            log_scalars(self.rec, "okvis/gyro_bias", list(msg.gyro_bias))
         elif kind == "viz":
             self.handle(msg)
         else:
@@ -104,15 +128,41 @@ class Writer:
         at(self.rec, msg.timestamp)
         if kind == VIZ_KIND_SCALARS:
             n = count(msg.scalar_count, len(msg.scalars))
-            if name == "okvis/tracking":
-                state = TRACKING_STATES.get(msg.scalars[0]) if n == 1 else None
-                if state is None:
-                    raise ValueError("invalid OKVIS tracking state")
-                if state != self.tracking_state:
-                    self.rec.log(name, rr.StateChange(state=state), strict=True)
-                    self.tracking_state = state
+            if name == "fc/imu/quaternion_xyzw":
+                return
+            if name in STATE_LABELS:
+                if n != 1:
+                    raise ValueError(f"invalid state count for {name}")
+                self._enum_state(name, msg.scalars[0], STATE_LABELS[name])
+            elif name == "fc/imu/health":
+                if (n != 3 or msg.scalars[0] not in IMU_READY_STATES
+                        or msg.scalars[1] not in VIO_FRESH_STATES or not math.isfinite(msg.scalars[2])):
+                    raise ValueError("invalid IMU health")
+                self._enum_state("fc/imu/attitude_ready", msg.scalars[0], IMU_READY_STATES)
+                self._enum_state("fc/imu/vio_fresh", msg.scalars[1], VIO_FRESH_STATES)
+                log_scalars(self.rec, "fc/imu/posterior_age_s", [msg.scalars[2]])
+            elif name in ("fc/arming/failed", "fc/failsafe/flags"):
+                labels = ARMING_CHECKS if name == "fc/arming/failed" else FAILSAFE_FLAGS
+                value = msg.scalars[0]
+                if n != 1 or not math.isfinite(value) or value != int(value) or not 0 <= value < 2**len(labels):
+                    raise ValueError(f"invalid state bitmask for {name}")
+                active = [label for bit, label in enumerate(labels) if int(value) & (1 << bit)]
+                clear = "No blocking check" if name == "fc/arming/failed" else "No active failsafe"
+                self._state(name, ", ".join(active) if active else clear)
+            elif name == "corr/debug/gate":
+                if n != 4 or msg.scalars[3] not in ACCEL_GATE_STATES:
+                    raise ValueError("invalid localization gate")
+                self._enum_state("corr/gate/accepted", msg.scalars[3], ACCEL_GATE_STATES)
+                for field, value in zip(("metric", "limit", "applied_translation_m"), msg.scalars[:3]):
+                    log_scalars(self.rec, f"corr/gate/{field}", [value])
+            elif name == "corr/debug/map_observation":
+                if n != 3 or msg.scalars[2] not in VIO_FRESH_STATES:
+                    raise ValueError("invalid map observation state")
+                self._enum_state("corr/map_observation/consistent", msg.scalars[2], {0: "Inconsistent", 1: "Consistent"})
+                for field, value in zip(("visual_age_s", "position_disagreement_m"), msg.scalars[:2]):
+                    log_scalars(self.rec, f"corr/map_observation/{field}", [value])
             else:
-                self.rec.log(name, rr.Scalars(list(msg.scalars[:n])), strict=True)
+                log_scalars(self.rec, name, list(msg.scalars[:n]))
         elif kind == VIZ_KIND_KEYPOINTS_2D:
             n = count(msg.point_count, len(msg.points))
             width, height, total = msg.scalars[:3]
@@ -148,8 +198,16 @@ class Writer:
                                           vectors=list(map(list, msg.arrow_vectors[:n])), colors=list(msg.color)), strict=True)
         elif kind == VIZ_KIND_CLEAR:
             self.rec.log(name, rr.Clear(recursive=True), strict=True)
-            if name in ("okvis", "okvis/tracking"):
-                self.tracking_state = None
+            derived = {
+                "fc/imu/health": ("fc/imu/attitude_ready", "fc/imu/vio_fresh", "fc/imu/posterior_age_s"),
+                "corr/debug/gate": ("corr/gate",),
+                "corr/debug/map_observation": ("corr/map_observation",),
+            }.get(name, ())
+            for path in derived:
+                self.rec.log(path, rr.Clear(recursive=True), strict=True)
+            for key in list(self.states):
+                if any(key == path or key.startswith(path + "/") for path in (name, *derived)):
+                    del self.states[key]
             for key in list(self.voxels):
                 if key == name or key.startswith(name + "/"):
                     del self.voxels[key]
@@ -160,6 +218,17 @@ class Writer:
             self._calibration(name, msg)
         else:
             raise ValueError(f"unsupported viz kind {kind}")
+
+    def _enum_state(self, name, value, labels):
+        state = labels.get(value)
+        if state is None:
+            raise ValueError(f"invalid {name.rsplit('/', 1)[-1]} state for {name}")
+        self._state(name, state)
+
+    def _state(self, name, state):
+        if self.states.get(name) != state:
+            self.rec.log(name, rr.StateChange(state=state), strict=True)
+            self.states[name] = state
 
     def log_text(self, msg):
         if not math.isfinite(msg.sim_time) or not 0 <= msg.wall_nanos < 1_000_000_000:

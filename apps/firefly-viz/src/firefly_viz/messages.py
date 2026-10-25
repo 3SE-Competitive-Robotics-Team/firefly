@@ -34,6 +34,24 @@ SCALARS_MAX = 4
 SCALAR_BUFFER_SIZE = 1024
 
 
+class AttitudeMessage(ctypes.Structure):
+    """Firefly/VioAttitude，与 Rust attitude::AttitudeMessage 一致。"""
+
+    _pack_ = 8
+    _fields_ = [
+        ("timestamp", ctypes.c_double),
+        ("posterior_time", ctypes.c_double),
+        ("session", ctypes.c_uint64),
+        ("quat_xyzw", ctypes.c_double * 4),
+        ("angular_velocity", ctypes.c_double * 3),
+        ("gyro_bias", ctypes.c_double * 3),
+    ]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflyVioAttitude"
+
+
 class VizMessage(ctypes.Structure):
     """空间诊断消息：与 Rust `VizMessage`（`FireflyVizMessageV2`）布局一致。
 

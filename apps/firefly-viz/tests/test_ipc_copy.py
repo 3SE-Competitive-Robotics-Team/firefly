@@ -74,7 +74,11 @@ def test_entity_rejects_corrupt_payload():
 
 
 def test_wire_layouts_match_rust():
-    from firefly_viz.messages import ScalarMessage, VoxelMessage
+    from firefly_viz.messages import AttitudeMessage, ScalarMessage, VoxelMessage
+    assert ctypes.sizeof(AttitudeMessage) == 104
+    assert AttitudeMessage.quat_xyzw.offset == 24
+    assert AttitudeMessage.gyro_bias.offset == 80
+    assert AttitudeMessage.type_name() == 'FireflyVioAttitude'
     assert ctypes.sizeof(ScalarMessage) == 128
     assert ctypes.sizeof(VizMessage) == 25312
     assert ctypes.sizeof(VoxelMessage) == 196736
@@ -84,3 +88,12 @@ def test_wire_layouts_match_rust():
     assert VoxelMessage.voxels.offset == 80
     assert VoxelMessage.sequence.offset == 196720
     assert VizMessage.points.offset == 144
+
+
+def test_vio_attitude_copy_owns_bias_storage():
+    from firefly_viz.messages import AttitudeMessage
+
+    source = AttitudeMessage(timestamp=2., gyro_bias=(.01, -.02, .03))
+    detached = detach_copy(source)
+    source.gyro_bias[:] = [0., 0., 0.]
+    assert list(detached.gyro_bias) == [.01, -.02, .03]
