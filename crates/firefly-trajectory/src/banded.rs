@@ -15,6 +15,7 @@ use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::DMatrix;
 
 /// 带形矩阵：列主序带存储 `data[(i - j + upper_bw) * n + j]`。
+#[derive(Debug, Clone)]
 pub struct BandedMatrix {
     n: usize,
     lower_bw: usize,
@@ -29,6 +30,15 @@ impl BandedMatrix {
             lower_bw,
             upper_bw,
             data: vec![0.0; n * (lower_bw + upper_bw + 1)],
+        }
+    }
+
+    /// 复位到指定形状：形状不变时只清零，复用已有存储。
+    pub fn reset(&mut self, n: usize, lower_bw: usize, upper_bw: usize) {
+        if self.n == n && self.lower_bw == lower_bw && self.upper_bw == upper_bw {
+            self.data.fill(0.0);
+        } else {
+            *self = Self::new(n, lower_bw, upper_bw);
         }
     }
 
@@ -65,54 +75,41 @@ pub struct BandedPlu {
 
 impl BandedPlu {
     /// 带形 LU 分解（官方 `BandedSystem::factorizeLU` 逻辑）。
+    /// 生产路径用 [`Self::factorize_owned`]；借用版本留给测试。
+    #[cfg(test)]
     pub fn factorize(a: &BandedMatrix) -> Result<Self> {
-        let n = a.n;
-        let mut data = a.data.clone();
-        let (lower_bw, upper_bw) = (a.lower_bw, a.upper_bw);
-        let get = |data: &[f64], i: usize, j: usize| {
-            if i + upper_bw >= j && i <= j + lower_bw {
-                data[(i + upper_bw - j) * n + j]
-            } else {
-                0.0
-            }
-        };
+        Self::factor_in_place(a.n, a.lower_bw, a.upper_bw, a.data.clone())
+    }
 
-        for k in 0..n.saturating_sub(1) {
-            let i_max = (k + lower_bw).min(n - 1);
-            let pivot = get(&data, k, k);
-            if pivot == 0.0 {
-                return Err(Error::new(
-                    ErrorKind::Convergence,
-                    "banded matrix is singular",
-                ));
-            }
-            for i in k + 1..=i_max {
-                let v = get(&data, i, k);
-                if v != 0.0 {
-                    data[(i + upper_bw - k) * n + k] = v / pivot;
-                }
-            }
-            let j_max = (k + upper_bw).min(n - 1);
-            for j in k + 1..=j_max {
-                let c = get(&data, k, j);
-                if c != 0.0 {
-                    for i in k + 1..=i_max {
-                        let lik = get(&data, i, k);
-                        if lik != 0.0 {
-                            let idx = (i + upper_bw - j) * n + j;
-                            data[idx] -= lik * c;
-                        }
-                    }
-                }
-            }
-        }
+    /// 同一分解，但接管矩阵存储，省掉一次 `n×(带宽)` 的克隆。
+    ///
+    /// 调用方（`Minco`）每次时长变化都会新建带形矩阵，克隆纯属浪费。
+    pub fn factorize_owned(a: BandedMatrix) -> Result<Self> {
+        Self::factor_in_place(a.n, a.lower_bw, a.upper_bw, a.data)
+    }
 
+    fn factor_in_place(
+        n: usize,
+        lower_bw: usize,
+        upper_bw: usize,
+        mut data: Vec<f64>,
+    ) -> Result<Self> {
+        factor_data(n, lower_bw, upper_bw, &mut data)?;
         Ok(Self {
             n,
             lower_bw,
             upper_bw,
             data,
         })
+    }
+
+    /// 在已有分解上重算，复用 `data` 缓冲；带形维度必须一致。
+    pub fn refactorize(&mut self, a: &BandedMatrix) -> Result<()> {
+        assert_eq!(self.n, a.n);
+        assert_eq!(self.lower_bw, a.lower_bw);
+        assert_eq!(self.upper_bw, a.upper_bw);
+        self.data.clone_from(&a.data);
+        factor_data(self.n, self.lower_bw, self.upper_bw, &mut self.data)
     }
 
     fn get(&self, i: usize, j: usize) -> f64 {
@@ -173,6 +170,49 @@ impl BandedPlu {
     }
 }
 
+/// 带形 LU 分解主体：就地改写 `data`，供构造与重分解共用。
+fn factor_data(n: usize, lower_bw: usize, upper_bw: usize, data: &mut [f64]) -> Result<()> {
+    let get = |data: &[f64], i: usize, j: usize| {
+        if i + upper_bw >= j && i <= j + lower_bw {
+            data[(i + upper_bw - j) * n + j]
+        } else {
+            0.0
+        }
+    };
+
+    for k in 0..n.saturating_sub(1) {
+        let i_max = (k + lower_bw).min(n - 1);
+        let pivot = get(data, k, k);
+        if pivot == 0.0 {
+            return Err(Error::new(
+                ErrorKind::Convergence,
+                "banded matrix is singular",
+            ));
+        }
+        for i in k + 1..=i_max {
+            let v = get(data, i, k);
+            if v != 0.0 {
+                data[(i + upper_bw - k) * n + k] = v / pivot;
+            }
+        }
+        let j_max = (k + upper_bw).min(n - 1);
+        for j in k + 1..=j_max {
+            let c = get(data, k, j);
+            if c != 0.0 {
+                for i in k + 1..=i_max {
+                    let lik = get(data, i, k);
+                    if lik != 0.0 {
+                        let idx = (i + upper_bw - j) * n + j;
+                        data[idx] -= lik * c;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// 带形矩阵求解助手：构造 → 分解 → 求解多右端。
 #[derive(Debug)]
 pub struct BandedSolver {
@@ -180,10 +220,29 @@ pub struct BandedSolver {
 }
 
 impl BandedSolver {
+    #[cfg(test)]
     pub fn new(a: &BandedMatrix) -> Result<Self> {
         Ok(Self {
             plu: BandedPlu::factorize(a)?,
         })
+    }
+
+    /// 接管矩阵存储的构造：`Minco` 的带形矩阵是一次性产物。
+    pub fn new_owned(a: BandedMatrix) -> Result<Self> {
+        Ok(Self {
+            plu: BandedPlu::factorize_owned(a)?,
+        })
+    }
+
+    /// 方阵维数（右端向量的行数）。
+    #[must_use]
+    pub fn rows(&self) -> usize {
+        self.plu.n
+    }
+
+    /// 在已有分解上重算，复用分解缓冲。
+    pub fn refactorize(&mut self, a: &BandedMatrix) -> Result<()> {
+        self.plu.refactorize(a)
     }
 
     pub fn solve_in_place(&self, rhs: &mut DMatrix<f64>) {
@@ -193,13 +252,19 @@ impl BandedSolver {
         }
     }
 
+    #[cfg(test)]
     pub fn solve_transpose(&self, rhs: &DMatrix<f64>) -> DMatrix<f64> {
-        assert_eq!(rhs.nrows(), self.plu.n);
         let mut out = rhs.clone();
-        for mut col in out.column_iter_mut() {
+        self.solve_transpose_in_place(&mut out);
+        out
+    }
+
+    /// 解 Aᵀx = b 就地；调用方自备缓冲，不覆盖入参。
+    pub fn solve_transpose_in_place(&self, rhs: &mut DMatrix<f64>) {
+        assert_eq!(rhs.nrows(), self.plu.n);
+        for mut col in rhs.column_iter_mut() {
             self.plu.solve_transpose_into(col.as_mut_slice());
         }
-        out
     }
 }
 

@@ -40,6 +40,8 @@ pub struct Minco {
     t: DVector<f64>,
     /// 不可变 LU 只依赖段时长；正向与伴随求解共用。
     solver: Arc<BandedSolver>,
+    /// 带形系统的复用缓冲：时长变化时原地重填，不再每次新建。
+    banded: BandedMatrix,
 }
 
 #[derive(Debug)]
@@ -84,7 +86,8 @@ impl MincoBuilder {
         }
         let q = DMatrix::from_fn(3, interior, |r, c| waypoints[c][r]);
         let t = DVector::from_fn(pieces, |r, _| durations[r]);
-        let solver = Arc::new(BandedSolver::new(&Minco::build_banded(durations))?);
+        let banded = Minco::build_banded(durations);
+        let solver = Arc::new(BandedSolver::new_owned(banded.clone())?);
         Ok(Minco {
             order: self.order,
             pieces,
@@ -93,6 +96,7 @@ impl MincoBuilder {
             q,
             t,
             solver,
+            banded,
         })
     }
 }
@@ -120,9 +124,23 @@ impl Minco {
             ));
         }
         if durations != self.t.as_slice() {
-            let solver = Arc::new(BandedSolver::new(&Self::build_banded(durations))?);
+            // 段数终身不变 → 带形维度固定：原地重填再重分解，复用两块缓冲。
+            self.banded.reset(COEFFS_PER_PIECE * self.pieces, 6, 6);
+            Self::fill_banded(&mut self.banded, durations);
+            if let Some(solver) = Arc::get_mut(&mut self.solver) {
+                if let Err(error) = solver.refactorize(&self.banded) {
+                    // 失败时分解缓冲可能已被部分改写，而 `self.t` 仍是旧值；
+                    // 用旧时长重建分解，保持对象可用后再返回错误。
+                    self.banded.reset(COEFFS_PER_PIECE * self.pieces, 6, 6);
+                    Self::fill_banded(&mut self.banded, self.t.as_slice());
+                    let _ = solver.refactorize(&self.banded);
+                    return Err(error);
+                }
+            } else {
+                // 有共享引用（仅测试会 clone Minco）：退回独占重建。
+                self.solver = Arc::new(BandedSolver::new_owned(self.banded.clone())?);
+            }
             self.t.as_mut_slice().copy_from_slice(durations);
-            self.solver = solver;
         }
         self.start = start;
         self.end = end;
@@ -186,12 +204,36 @@ impl Minco {
     ///
     /// 系统矩阵的奇异性在构建或更新时检查，此处使用已验证的 LU。
     pub fn solve(&self) -> firefly_error::Result<Trajectory> {
-        let mut c = self.build_rhs();
-        self.solver.solve_in_place(&mut c);
-        Ok(Trajectory {
-            coefficients: c,
+        let mut out = Trajectory {
+            coefficients: DMatrix::zeros(COEFFS_PER_PIECE * self.pieces, 3),
             durations: self.t.clone(),
-        })
+        };
+        self.solve_into(&mut out)?;
+        Ok(out)
+    }
+
+    /// 就地求解到已有 `Trajectory`：复用系数与时长缓冲。
+    ///
+    /// 一次优化内段数不变，形状稳定；形状不符时按需重建。
+    ///
+    /// # Errors
+    ///
+    /// 系统矩阵的奇异性在构建或更新时检查。
+    pub fn solve_into(&self, out: &mut Trajectory) -> firefly_error::Result<()> {
+        let n = COEFFS_PER_PIECE * self.pieces;
+        if out.coefficients.shape() == (n, 3) {
+            out.coefficients.fill(0.0);
+        } else {
+            out.coefficients = DMatrix::zeros(n, 3);
+        }
+        if out.durations.len() == self.pieces {
+            out.durations.copy_from(&self.t);
+        } else {
+            out.durations = self.t.clone();
+        }
+        self.build_rhs_into(&mut out.coefficients);
+        self.solver.solve_in_place(&mut out.coefficients);
+        Ok(())
     }
 
     /// 从目标对 (c, T) 的偏导传播到对 (q, T) 的偏导。
@@ -207,9 +249,44 @@ impl Minco {
         d_f_d_c: &DMatrix<f64>,
         d_f_d_t: &DVector<f64>,
     ) -> firefly_error::Result<(DMatrix<f64>, DVector<f64>)> {
-        let g = self.solver.solve_transpose(d_f_d_c);
-
+        let mut g = DMatrix::zeros(self.solver.rows(), 3);
         let mut d_f_d_q = DMatrix::zeros(3, self.pieces - 1);
+        let mut d_f_d_t_out = d_f_d_t.clone();
+        self.propagate_gradient_into(
+            trajectory,
+            d_f_d_c,
+            d_f_d_t,
+            &mut g,
+            &mut d_f_d_q,
+            &mut d_f_d_t_out,
+        )?;
+        Ok((d_f_d_q, d_f_d_t_out))
+    }
+
+    /// 就地版本：`g`/`d_f_d_q`/`d_f_d_t_out` 由调用方复用，避免每个 LBFGS
+    /// 迭代重新分配 `6M×3` 的转置解与两块输出。
+    ///
+    /// # Errors
+    ///
+    /// 系统矩阵的奇异性在构建或更新时检查，此处使用已验证的 LU。
+    pub fn propagate_gradient_into(
+        &self,
+        trajectory: &Trajectory,
+        d_f_d_c: &DMatrix<f64>,
+        d_f_d_t: &DVector<f64>,
+        g: &mut DMatrix<f64>,
+        d_f_d_q: &mut DMatrix<f64>,
+        d_f_d_t_out: &mut DVector<f64>,
+    ) -> firefly_error::Result<()> {
+        // 入参不可覆盖：先拷进调用方缓冲，再就地做转置求解。
+        g.copy_from(d_f_d_c);
+        self.solver.solve_transpose_in_place(g);
+
+        if d_f_d_q.shape() == (3, self.pieces - 1) {
+            d_f_d_q.fill(0.0);
+        } else {
+            *d_f_d_q = DMatrix::zeros(3, self.pieces - 1);
+        }
         for i in 0..self.pieces - 1 {
             // 官方布局：qᵢ 在 b 的第 6i+5 行（位置约束行）
             let row = 6 * i + 5;
@@ -218,7 +295,7 @@ impl Minco {
             }
         }
 
-        let mut d_f_d_t_out = d_f_d_t.clone();
+        d_f_d_t_out.copy_from(d_f_d_t);
         for i in 0..self.pieces {
             let w = self.dm_dt_c(i, &trajectory.coefficients);
             for dim in 0..3 {
@@ -235,7 +312,7 @@ impl Minco {
                 d_f_d_t_out[i] -= dot;
             }
         }
-        Ok((d_f_d_q, d_f_d_t_out))
+        Ok(())
     }
 
     /// ∂M/∂Tᵢ · c 的非零块：中间段六行，末段三行。
@@ -277,9 +354,14 @@ impl Minco {
     /// 速度连续, 加速度连续} / 终点 PVA。带宽 (6, 6)，
     /// 对角全非零 → 无主元带形 LU 稳定（官方注释：NO PIVOT for efficiency）。
     fn build_banded(durations: &[f64]) -> BandedMatrix {
+        let mut m = BandedMatrix::new(COEFFS_PER_PIECE * durations.len(), 6, 6);
+        Self::fill_banded(&mut m, durations);
+        m
+    }
+
+    fn fill_banded(m: &mut BandedMatrix, durations: &[f64]) {
         let pieces = durations.len();
         let n = COEFFS_PER_PIECE * pieces;
-        let mut m = BandedMatrix::new(n, 6, 6);
 
         // 起点：位置/速度/加速度
         m.set(0, 0, 1.0);
@@ -353,12 +435,10 @@ impl Minco {
         m.set(n - 1, base + 3, 6.0 * t);
         m.set(n - 1, base + 4, 12.0 * t2);
         m.set(n - 1, base + 5, 20.0 * t3);
-        m
     }
 
-    fn build_rhs(&self) -> DMatrix<f64> {
+    fn build_rhs_into(&self, b: &mut DMatrix<f64>) {
         let n = COEFFS_PER_PIECE * self.pieces;
-        let mut b = DMatrix::zeros(n, 3);
         for (k, state) in [
             self.start.position,
             self.start.velocity,
@@ -385,7 +465,6 @@ impl Minco {
                 b[(n - 3 + k, dim)] = state[dim];
             }
         }
-        b
     }
 }
 

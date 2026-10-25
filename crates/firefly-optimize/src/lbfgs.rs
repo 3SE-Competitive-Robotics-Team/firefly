@@ -160,6 +160,9 @@ impl Lbfgs {
         let mut k = 1usize;
         let mut end = 0usize;
         let mut iterations = 0usize;
+        // 线搜索回滚快照：维度终身不变，复用缓冲即可。
+        let mut xp = x.clone();
+        let mut gp = g.clone();
 
         let ret = loop {
             // firefly 语义：每次迭代前询问目标是否请求提前终止
@@ -168,8 +171,8 @@ impl Lbfgs {
                 return Ok(report(iterations, fx, &g, false, true, x));
             }
 
-            let xp = x.clone();
-            let gp = g.clone();
+            xp.copy_from(&x);
+            gp.copy_from(&g);
             let step_min = cfg.min_step;
             let step_max = cfg.max_step;
 
@@ -213,13 +216,16 @@ impl Lbfgs {
 
             // s/y 写入环形缓冲槽位 end
             let slot = &mut lm[end];
-            slot.s = &x - &xp;
-            slot.y = &g - &gp;
+            slot.s.copy_from(&x);
+            slot.s -= &xp;
+            slot.y.copy_from(&g);
+            slot.y -= &gp;
             let ys = slot.y.dot(&slot.s);
             let yy = slot.y.dot(&slot.y);
             slot.ys = ys;
 
-            d = -g.clone();
+            d.copy_from(&g);
+            d *= -1.0;
 
             // ys 过小跳过 L-BFGS 更新（Ceres 式），保持 d = −g
             if ys > f64::EPSILON {

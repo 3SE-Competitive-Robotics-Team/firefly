@@ -113,11 +113,12 @@ impl Penalty for ObstaclePenalty {
                     continue;
                 }
                 let omg = trapezoid_weight(j, k);
+                // 同一平面只算一次距离与误差，代价与导数一起产出。
+                let (point_cost, point_gradient) =
+                    self.point_cost_and_gradient(s.position, &self.planes_by_point[idx]);
                 // 采样权重 (omg·T/K) 对 T 的导数:omg·f/K
-                let point_cost = self.point_cost(s.position, &self.planes_by_point[idx]);
                 acc.d_f_d_t[i] += weight * omg * point_cost / k as f64;
-                let d_p = self.point_gradient(s.position, &self.planes_by_point[idx])
-                    * (weight * omg * step);
+                let d_p = point_gradient * (weight * omg * step);
                 acc.add(
                     i,
                     j as f64 / k as f64,
@@ -158,29 +159,28 @@ impl ObstaclePenalty {
             .sum()
     }
 
-    fn point_gradient(&self, p: Vector3<f64>, planes: &[Plane]) -> Vector3<f64> {
-        planes
-            .iter()
-            .map(|plane| {
-                let d = plane.distance(p).value();
-                let normal = plane.normal();
-                // 硬层梯度:−3·err²·n
-                let err_hard = self.clearance_hard - d;
-                let mut grad = Vector3::zeros();
-                if err_hard > 0.0 {
-                    grad += -self.weight_hard * 3.0 * err_hard * err_hard * normal;
-                }
-                // 软层梯度:−soft·err/term·n
-                let err_soft = self.clearance_soft - d;
-                if err_soft > 0.0 {
-                    let r = 0.05;
-                    let rsqr = r * r;
-                    let term = (1.0 + err_soft * err_soft / rsqr).sqrt();
-                    grad += -self.weight_soft * err_soft / term * normal;
-                }
-                grad
-            })
-            .sum()
+    /// 一次遍历同时累加代价与导数：距离、硬/软误差与软项平方根只算一次。
+    fn point_cost_and_gradient(&self, p: Vector3<f64>, planes: &[Plane]) -> (f64, Vector3<f64>) {
+        let mut cost = 0.0;
+        let mut grad = Vector3::zeros();
+        for plane in planes {
+            let d = plane.distance(p).value();
+            let normal = plane.normal();
+            let err_hard = self.clearance_hard - d;
+            if err_hard > 0.0 {
+                cost += self.weight_hard * err_hard * err_hard * err_hard;
+                grad += -self.weight_hard * 3.0 * err_hard * err_hard * normal;
+            }
+            let err_soft = self.clearance_soft - d;
+            if err_soft > 0.0 {
+                let r = 0.05;
+                let rsqr = r * r;
+                let term = (1.0 + err_soft * err_soft / rsqr).sqrt();
+                cost += self.weight_soft * rsqr * (term - 1.0);
+                grad += -self.weight_soft * err_soft / term * normal;
+            }
+        }
+        (cost, grad)
     }
 }
 
@@ -241,7 +241,7 @@ mod tests {
                 )
             };
             let numeric = (f(point[dim] + h) - f(point[dim] - h)) / (2.0 * h);
-            let analytic = p.point_gradient(point, planes)[dim];
+            let analytic = p.point_cost_and_gradient(point, planes).1[dim];
             assert!(
                 (numeric - analytic).abs() < 1e-6,
                 "dim={dim} numeric={numeric} analytic={analytic}"

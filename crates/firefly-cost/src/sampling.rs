@@ -47,6 +47,25 @@ impl Samples {
         }
     }
 
+    /// 就地重建网格：复用已有存储，只在容量不足时扩容。
+    ///
+    /// 一次优化内段数与 `samples_per_piece` 不变，因此 `solve_cached` 每轮重采样
+    /// 不必重新分配整块网格。
+    pub fn rebuild(&mut self, traj: &Trajectory, samples_per_piece: usize) {
+        let k = samples_per_piece;
+        let expected = traj.pieces() * (k + 1);
+        self.grid.clear();
+        // `reserve` 追加的是相对当前 len 的容量；clear 后 len == 0，
+        // 直接按目标长度预留即可（容量已足够时是空操作）。
+        self.grid.reserve(expected);
+        for (i, ti) in traj.durations().iter().enumerate() {
+            for j in 0..=k {
+                self.grid.push(traj.eval_piece(i, j as f64 / k as f64 * ti));
+            }
+        }
+        self.samples_per_piece = k;
+    }
+
     #[must_use]
     pub fn get(&self, piece: usize, j: usize) -> &Sample {
         &self.grid[piece * (self.samples_per_piece + 1) + j]
