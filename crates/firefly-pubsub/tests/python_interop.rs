@@ -12,6 +12,7 @@ use firefly_pubsub::subscriber::Subscriber;
 #[test]
 #[ignore = "requires FIREFLY_TEST_PYTHON pointing to the synced workspace Python"]
 fn viz_python_layout_matches_rust_offsets_and_sizes() {
+    use firefly_pubsub::trajectory::PlannerStatusMessage;
     use firefly_pubsub::viz::{SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage};
     use std::mem::{offset_of, size_of};
 
@@ -19,10 +20,12 @@ fn viz_python_layout_matches_rust_offsets_and_sizes() {
     let script = r"
 import ctypes
 from firefly_viz.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage
+from firefly_evaluation.mission_io import PlannerStatusMessage
 for cls, fields in [
     (ScalarMessage, ['timestamp', 'scalars', 'sequence']),
     (VizMessage, ['timestamp', 'points', 'sequence']),
     (VoxelMessage, ['voxels', 'sequence', 'chunk_index', 'chunk_count']),
+    (PlannerStatusMessage, ['timestamp', 'goal_timestamp', 'finished']),
 ]:
     print(ctypes.sizeof(cls), *(getattr(cls, name).offset for name in fields))
 print(SCALAR_BUFFER_SIZE)
@@ -54,6 +57,10 @@ print(SCALAR_BUFFER_SIZE)
             offset_of!(VoxelMessage, sequence),
             offset_of!(VoxelMessage, chunk_index),
             offset_of!(VoxelMessage, chunk_count),
+            size_of::<PlannerStatusMessage>(),
+            offset_of!(PlannerStatusMessage, timestamp),
+            offset_of!(PlannerStatusMessage, goal_timestamp),
+            offset_of!(PlannerStatusMessage, finished),
             SCALAR_BUFFER_SIZE,
         ]
     );
@@ -170,7 +177,7 @@ fn reference_alignment_snapshot_roundtrip() {
     >::with_topic(&node, &response)
     .unwrap();
     let listener = TopicListener::with_topic(&node, &response).unwrap();
-    let peer = PEER.replace("OdomMessage", "ReferenceMessage").replace("msg.is_initialized", "msg.has_alignment == 1 and list(msg.alignment_translation) == [10., 20., 30.] and msg.alignment_rotation[3] == 1.");
+    let peer = PEER.replace("OdomMessage", "ReferenceMessage").replace("msg.is_initialized", "msg.has_alignment == 1 and list(msg.alignment_translation) == [10., 20., 30.] and msg.alignment_rotation[3] == 1. and msg.goal_timestamp == 123.");
     let mut child = Command::new(python)
         .args(["-c", &peer, &request, &response])
         .spawn()
@@ -180,6 +187,7 @@ fn reference_alignment_snapshot_roundtrip() {
         position_x: 2.5,
         velocity_y: -3.25,
         has_alignment: 1,
+        goal_timestamp: 123.,
         alignment_translation: [10., 20., 30.],
         ..firefly_pubsub::reference::ReferenceMessage::default()
     };
@@ -211,6 +219,7 @@ fn reference_alignment_snapshot_roundtrip() {
     assert_eq!(reply.has_alignment, 1);
     assert_eq!(reply.alignment_translation, [10., 20., 30.]);
     assert_eq!(reply.alignment_rotation, [0., 0., 0., 1.]);
+    assert_eq!(reply.goal_timestamp, 123.);
     assert!(header.send_ts_secs > 0);
     assert!(notifications > 0);
     assert_eq!(listener.drain().unwrap(), 0, "event queue must be drained");

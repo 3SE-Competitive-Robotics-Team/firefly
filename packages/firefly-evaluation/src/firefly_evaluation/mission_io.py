@@ -8,6 +8,15 @@ from firefly_mujoco import LogMessage, TraceContext, ReferenceMessage
 from firefly_viz.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage
 
 
+class PlannerStatusMessage(ctypes.Structure):
+    """与 Rust trajectory::PlannerStatusMessage 的目标执行快照一致。"""
+
+    _fields_ = [("timestamp", ctypes.c_double), ("goal_timestamp", ctypes.c_double), ("finished", ctypes.c_uint64)]
+
+    @staticmethod
+    def type_name():
+        return "FireflyPlannerStatusMessage"
+
 
 def service(node, topic, cls, capacity=None, publishers=None):
     builder = node.service_builder(iox2.ServiceName.new(topic)).publish_subscribe(cls).user_header(TraceContext)

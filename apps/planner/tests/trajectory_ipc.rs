@@ -89,6 +89,7 @@ fn independent_output_preserves_coefficients_and_upstream_timeout_publish_order(
             trajectory
                 .publish_slice_with(2, |piece| TrajectoryPieceMessage {
                     start_time: 1.,
+                    goal_timestamp: 123.,
                     traj_id: 1,
                     revision: 0,
                     duration: 10.,
@@ -115,6 +116,7 @@ fn independent_output_preserves_coefficients_and_upstream_timeout_publish_order(
             assert_eq!(message.position_y, 2.);
             assert_eq!(message.position_z, 3.);
             assert_eq!(message.velocity_x, 1.);
+            assert_eq!(message.goal_timestamp, 123.);
             assert_eq!(message.acceleration_x, 0.);
             first_reference.get_or_insert(elapsed);
             if let Some(hold) = previous.take() {
@@ -157,6 +159,7 @@ fn independent_output_preserves_coefficients_and_upstream_timeout_publish_order(
     trajectory
         .publish_slice_with(1, |_| TrajectoryPieceMessage {
             start_time: 1.,
+            goal_timestamp: 124.,
             traj_id: 2,
             revision: 1,
             duration: 10.,
@@ -193,6 +196,7 @@ fn independent_output_preserves_coefficients_and_upstream_timeout_publish_order(
                 })
                 .unwrap();
             if let Some(reference) = references.receive().unwrap() {
+                assert_eq!(reference.goal_timestamp, 124.);
                 assert!(
                     (reference.position_x - (100. + 2. * (reference.timestamp - 1.))).abs() < 1e-10
                 );

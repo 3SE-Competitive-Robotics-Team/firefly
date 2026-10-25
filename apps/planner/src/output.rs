@@ -8,8 +8,9 @@ use firefly_pubsub::{
     reference::{REFERENCE_TOPIC, ReferenceMessage},
     subscriber::Subscriber,
     trajectory::{
-        PLANNER_HEARTBEAT_TOPIC, PlannerHeartbeatMessage, TRAJECTORY_CONTROL_TOPIC,
-        TRAJECTORY_TOPIC, TrajectoryControlMessage, TrajectoryPieceMessage,
+        PLANNER_HEARTBEAT_TOPIC, PLANNER_STATUS_TOPIC, PlannerHeartbeatMessage,
+        PlannerStatusMessage, TRAJECTORY_CONTROL_TOPIC, TRAJECTORY_TOPIC, TrajectoryControlMessage,
+        TrajectoryPieceMessage,
     },
 };
 use firefly_trajectory::Trajectory;
@@ -21,6 +22,8 @@ pub struct OutputPublisher {
     trajectory: Publisher<[TrajectoryPieceMessage]>,
     heartbeat: Publisher<PlannerHeartbeatMessage>,
     control: Publisher<TrajectoryControlMessage>,
+    status: Publisher<PlannerStatusMessage>,
+    pub goal_timestamp: f64,
     revision: Option<u64>,
     sequence: u64,
 }
@@ -30,6 +33,8 @@ impl OutputPublisher {
             trajectory: Publisher::with_slice_topic(node, TRAJECTORY_TOPIC)?,
             heartbeat: Publisher::with_topic(node, PLANNER_HEARTBEAT_TOPIC)?,
             control: Publisher::with_topic(node, TRAJECTORY_CONTROL_TOPIC)?,
+            status: Publisher::with_topic(node, PLANNER_STATUS_TOPIC)?,
+            goal_timestamp: 0.0,
             revision: None,
             sequence: 0,
         })
@@ -38,6 +43,14 @@ impl OutputPublisher {
         self.sequence = self.sequence.wrapping_add(1);
         self.heartbeat.publish(PlannerHeartbeatMessage {
             sequence: self.sequence,
+        })?;
+        Ok(())
+    }
+    pub fn status(&self, timestamp: f64, finished: bool) -> Result<()> {
+        self.status.publish(PlannerStatusMessage {
+            timestamp,
+            goal_timestamp: self.goal_timestamp,
+            finished: u64::from(finished),
         })?;
         Ok(())
     }
@@ -56,6 +69,7 @@ impl OutputPublisher {
         self.trajectory
             .publish_slice_with(command.traj.pieces(), |piece| TrajectoryPieceMessage {
                 start_time: command.start_time,
+                goal_timestamp: self.goal_timestamp,
                 traj_id: u64::from(command.traj_id),
                 revision,
                 duration: command.traj.durations()[piece],
@@ -73,8 +87,10 @@ fn decode(pieces: &[TrajectoryPieceMessage]) -> Result<TrajectoryCommand> {
     let first = pieces.first().ok_or_else(|| invalid("empty trajectory"))?;
     let traj_id = u32::try_from(first.traj_id).map_err(|_| invalid("invalid trajectory id"))?;
     if !first.start_time.is_finite()
+        || !first.goal_timestamp.is_finite()
         || pieces.iter().any(|piece| {
             piece.start_time != first.start_time
+                || piece.goal_timestamp != first.goal_timestamp
                 || piece.traj_id != first.traj_id
                 || piece.revision != first.revision
         })
@@ -108,6 +124,7 @@ pub fn run(yaw_hold: bool, timeout: f64) -> Result<()> {
     let mut server = TrajectoryServer::new(yaw_hold, timeout);
     let mut control = TrajectoryControlMessage::default();
     let mut trajectory_revision = None;
+    let mut goal_timestamp = 0.0;
     let origin = Instant::now();
     let waitset = WaitSetBuilder::new()
         .create::<ipc::Service>()
@@ -143,6 +160,7 @@ pub fn run(yaw_hold: bool, timeout: f64) -> Result<()> {
                     let revision = first.revision;
                     server.receive(decode(&message)?);
                     trajectory_revision = Some(revision);
+                    goal_timestamp = first.goal_timestamp;
                 }
             }
             let (mut input, _) = navigation.snapshot()?;
@@ -177,6 +195,7 @@ pub fn run(yaw_hold: bool, timeout: f64) -> Result<()> {
                     alignment_translation: transform.translation,
                     alignment_rotation: transform.rotation,
                     has_alignment: 1,
+                    goal_timestamp,
                 })?;
             }
             firefly_observability::pump_log_ipc(&log_ipc);

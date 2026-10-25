@@ -103,6 +103,7 @@ class ReferenceMessage(ctypes.Structure):
         ("alignment_translation", ctypes.c_double * 3),
         ("alignment_rotation", ctypes.c_double * 4),
         ("has_alignment", ctypes.c_uint64),
+        ("goal_timestamp", ctypes.c_double),
     ]
 
     @staticmethod
@@ -258,7 +259,7 @@ def _self_check() -> None:
     assert ctypes.sizeof(ImuMessage) == 56
     assert ctypes.sizeof(GrayImageMessage) == 76824
     assert ctypes.sizeof(DepthImageMessage) == 307224
-    assert ctypes.sizeof(ReferenceMessage) == 160
+    assert ctypes.sizeof(ReferenceMessage) == 168
     assert ctypes.sizeof(OdomMessage) == 96
     assert ctypes.sizeof(LogMessage) == 624, ctypes.sizeof(LogMessage)
     assert ctypes.sizeof(PlantStateMessage) == 112, ctypes.sizeof(PlantStateMessage)

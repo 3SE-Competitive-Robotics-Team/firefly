@@ -349,6 +349,14 @@ impl App {
         }
         if let Some(sub) = &self.goal_sub {
             while let Some(sample) = sub.receive()? {
+                if !sample.timestamp.is_finite()
+                    || sample.timestamp
+                        <= self
+                            .pending_goal
+                            .map_or(self.output.goal_timestamp, |goal| goal.timestamp)
+                {
+                    continue;
+                }
                 // 目标不参与 sim 时钟锚定（CLI 墙钟）；最新一条生效
                 self.pending_goal = Some(*sample);
                 log::info!(
@@ -494,12 +502,17 @@ impl App {
         if let Some(goal) = self.pending_goal.take() {
             let target = Vector3::new(goal.position_x, goal.position_y, goal.position_z);
             match self.fsm.set_goal(now, measured, target) {
-                Ok(()) => log::info!(
-                    "目标更新 ({:.1},{:.1},{:.1})，重新规划中",
-                    target.x,
-                    target.y,
-                    target.z
-                ),
+                Ok(()) => {
+                    if !self.fsm.is_mandatory_stopped() {
+                        self.output.goal_timestamp = goal.timestamp;
+                    }
+                    log::info!(
+                        "目标更新 ({:.1},{:.1},{:.1})，重新规划中",
+                        target.x,
+                        target.y,
+                        target.z
+                    );
+                }
                 Err(e) => log::warn!("目标 ({target:?}) 不可达，忽略：{e}"),
             }
         }
@@ -511,6 +524,11 @@ impl App {
         self.output.control(revision, true)?;
         let report = self.fsm.exec_tick(now, measured);
         self.handoff_trajectory()?;
+
+        self.output.status(
+            now,
+            self.fsm.is_finished() && !self.fsm.is_emergency() && !self.fsm.is_mandatory_stopped(),
+        )?;
 
         // 可视化：新轨迹 / 无人机位姿 / 动态障碍（经 Firefly/Viz 发布）
         if report.replanned
@@ -635,7 +653,7 @@ impl App {
             if self.odom.terminated() {
                 return CallbackProgression::Stop;
             }
-            // 动态目标工作流：到达后保持运行（悬停 + 等待新目标），
+            // 动态目标工作流：轨迹结束后保持运行并等待新目标，
             // 不因 finished 退出进程（仅 SIGINT/SIGTERM 优雅退出）
             // 每帧 trace 上下文：续接新鲜 odom 的 trace（跨进程同周期一条
             // trace），无新鲜 odom 时自建未采样 root（不产生 span 记录）
@@ -698,9 +716,11 @@ impl App {
         }
         self.odom.snapshot()?;
         log::info!(
-            "进程退出：本会话 {} 次重规划，仿真时长 {:.1}s（悬停保持中，等待新目标可继续）",
+            "进程退出：当前目标 {} 次重规划，仿真时长 {:.1}s，规划状态 {:?}，轨迹正常结束 {}",
             self.fsm.manager().replans(),
-            self.t_sim
+            self.t_sim,
+            self.fsm.state(),
+            self.fsm.is_finished()
         );
         Ok(())
     }

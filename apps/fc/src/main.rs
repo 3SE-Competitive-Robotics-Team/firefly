@@ -69,7 +69,7 @@ const SPIN_MARGIN: Duration = Duration::from_micros(150);
 const ODOM_STALE_LIMIT: Duration = Duration::from_millis(500);
 /// IMU 陈旧阈值（墙钟）；陈旧则不得解锁。
 const IMU_STALE_LIMIT: Duration = Duration::from_millis(50);
-/// 参考流新鲜窗口（墙钟）：planner 以 10Hz 发布，5 帧未到即视为流断（断开后由
+/// 参考流新鲜窗口（墙钟）：独立轨迹输出以 100Hz 发布，窗口内未到即视为流断（断开后由
 /// 状态机的 `reference_timeout` 计时回落位置保持）。
 const REFERENCE_STALE_LIMIT: Duration = Duration::from_millis(500);
 /// 落后节拍上限：连续落后超过这么多个周期就重新对齐（避免越追越紧）。
