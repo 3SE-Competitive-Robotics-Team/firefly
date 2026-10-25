@@ -546,27 +546,37 @@ fn tick_initial_plan_then_replan_at_threshold() {
     assert!(r1.reference.is_some());
 }
 
-/// `random_mid` 确定性：固定种子同输入同输出；幅度随连败增长（0 次约 0）。
+/// 采用固定测试随机源，独立检查上游轴向、整数归一化与连败幅度公式。
 #[test]
-fn random_mid_is_deterministic_and_grows_with_failures() {
-    let mut first = open_manager();
-    let (start, goal) = (Vector3::new(0.0, 0.0, 1.0), Vector3::new(6.0, 0.0, 1.0));
-    let mid_a = first.random_mid(start, goal);
-    let mut second = open_manager();
-    let mid_b = second.random_mid(start, goal);
-    assert!((mid_a - mid_b).norm() < 1e-12, "同种子应逐位一致");
-    // 0 连败幅度约 0（官方 (-0.978/0.989+0.989) ≈ 1e-4）
-    assert!(
-        (mid_a - Vector3::new(3.0, 0.0, 1.0)).norm() < 1e-2,
-        "0 连败应近中点"
-    );
-    first.consecutive_failures = 10;
-    let mid_c = first.random_mid(start, goal);
-    assert!(
-        (mid_c - Vector3::new(3.0, 0.0, 1.0)).norm() > 0.3,
-        "10 连败应显著偏移，实际 {}",
-        (mid_c - Vector3::new(3.0, 0.0, 1.0)).norm()
-    );
+fn random_mid_matches_upstream_directions_and_failure_scaling() {
+    use rand::{RngExt, SeedableRng, rngs::StdRng};
+    let mut manager = open_manager();
+    let (start, goal) = (Vector3::new(0., 0., 1.), Vector3::new(6., 0., 1.));
+    for failures in [0, 1, 10] {
+        manager.consecutive_failures = failures;
+        let mut rng = StdRng::seed_from_u64(71);
+        let mut expected_rng = StdRng::seed_from_u64(71);
+        let h = f64::from(expected_rng.random_range(0..=i32::MAX)) / f64::from(i32::MAX);
+        let v = f64::from(expected_rng.random_range(0..=i32::MAX)) / f64::from(i32::MAX);
+        let scale = -0.978 / (f64::from(failures) + 0.989) + 0.989;
+        let expected = Vector3::new(
+            3.,
+            (h - 0.5) * 6. * 0.8 * scale,
+            1. - (v - 0.5) * 6. * 0.4 * scale,
+        );
+        let actual = manager.random_mid(start, goal, &mut rng);
+        assert!((actual - expected).norm() < 1e-12);
+        assert_eq!(rng.random::<u64>(), expected_rng.random::<u64>());
+    }
+    // Eigen 对零向量归一化保留零，同时仍消费两次随机数。
+    for goal in [start, Vector3::new(0., 0., 7.)] {
+        let mut rng = StdRng::seed_from_u64(71);
+        let mut expected_rng = StdRng::seed_from_u64(71);
+        let _ = expected_rng.random_range(0..=i32::MAX);
+        let _ = expected_rng.random_range(0..=i32::MAX);
+        assert!((manager.random_mid(start, goal, &mut rng) - (start + goal) / 2.).norm() < 1e-12);
+        assert_eq!(rng.random::<u64>(), expected_rng.random::<u64>());
+    }
 }
 
 /// 成功重规划清零连败（不变量，未失败时恒为 0）。

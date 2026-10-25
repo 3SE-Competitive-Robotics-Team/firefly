@@ -352,14 +352,11 @@ mod tests {
             .unwrap();
         let _ = fsm.exec_tick(0.0, Some(measured()));
         let _ = fsm.exec_tick(0.01, Some(measured()));
-        let rng = fsm.manager.rng_state;
         assert!(!fsm.exec_tick(0.02, Some(measured())).replanned);
         assert_eq!(fsm.state(), ExecState::SequentialStart);
         assert_eq!(fsm.manager.consecutive_failures, 10);
-        assert_eq!(fsm.manager.rng_state, rng);
         assert!(!fsm.exec_tick(0.03, Some(measured())).replanned);
         assert_eq!(fsm.manager.consecutive_failures, 20);
-        assert_ne!(fsm.manager.rng_state, rng);
     }
     #[test]
     fn emergency_transition_and_recovery_take_separate_callbacks() {

@@ -4,6 +4,7 @@ use firefly_error::Result;
 use firefly_map::GridMap;
 use firefly_trajectory::{Endpoint, MincoBuilder, SolverOrder, Trajectory};
 use nalgebra::{Point3, Vector3};
+use rand::RngExt;
 
 use crate::obstacles::{ObstacleScanner, PointsToCheck};
 use crate::planner::{InitSource, PlanResult, Planner, State};
@@ -144,7 +145,6 @@ pub struct PlannerManager {
     pub(crate) swarm: Vec<Option<SwarmTraj>>,
     pub(crate) have_recv_pre_agent: bool,
     pub(crate) consecutive_failures: u32,
-    pub(crate) rng_state: u64,
 }
 
 impl PlannerManager {
@@ -183,7 +183,6 @@ impl PlannerManager {
             // 短路为真，直接置 true 等价
             have_recv_pre_agent,
             consecutive_failures: 0,
-            rng_state: 0x9E37_79B9_7F4A_7C15,
         })
     }
     /// # Errors
@@ -293,7 +292,7 @@ impl PlannerManager {
             .map(|local| (local.traj.clone(), now - local.start_time));
         let source = if random {
             InitSource::RandomStart {
-                mid: self.random_mid(start.position.coords, horizon.target),
+                mid: self.random_mid(start.position.coords, horizon.target, &mut rand::rng()),
             }
         } else if !poly_init && let Some((previous, elapsed)) = &previous {
             InitSource::WarmStart {
@@ -544,34 +543,25 @@ impl PlannerManager {
             .collect()
     }
 
-    /// 确定性均匀随机数 [0,1)（xorshift64*，固定种子保证可复现）。
-    pub(crate) fn next_rand(&mut self) -> f64 {
-        const M: f64 = (1u64 << 53) as f64;
-        let mut x = self.rng_state;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.rng_state = x;
-        ((x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64) / M
-    }
-
-    /// 随机重启中点（官方 `flag_randomPolyTraj` 内点公式）：起终点中点沿水平/
-    /// 垂直正交方向偏移，幅度随连败增长（0 次约 0，渐近 0.989）。起点终点过近
-    /// 时无法构造正交基，返回中点（退化为直飞种子）。
-    pub(crate) fn random_mid(&mut self, start: Vector3<f64>, goal: Vector3<f64>) -> Vector3<f64> {
-        const Z: Vector3<f64> = Vector3::new(0.0, 0.0, 1.0);
-        let d = goal - start;
-        let dist = d.norm();
-        let mid = (start + goal) / 2.0;
-        let h = d.cross(&Z);
-        if dist < 1e-6 || h.norm() < 1e-9 {
-            return mid;
-        }
-        let h = h.normalize();
-        let v = d.cross(&h).normalize();
+    /// 上游随机中点：整数随机数归一化至 [0,1]，沿水平与垂直方向偏移。
+    /// 归一化遵循 Eigen 的零向量语义，不对小位移设置额外退化阈值。
+    pub(crate) fn random_mid(
+        &self,
+        start: Vector3<f64>,
+        goal: Vector3<f64>,
+        rng: &mut impl rand::Rng,
+    ) -> Vector3<f64> {
+        let d = start - goal;
+        let h = d.cross(&Vector3::z());
+        let h = h.try_normalize(0.).unwrap_or(h);
+        let v = d.cross(&h);
+        let v = v.try_normalize(0.).unwrap_or(v);
         let k = -0.978 / (f64::from(self.consecutive_failures) + 0.989) + 0.989;
-        mid + (self.next_rand() - 0.5) * dist * h * 0.8 * k
-            + (self.next_rand() - 0.5) * dist * v * 0.4 * k
+        let horizontal = f64::from(rng.random_range(0..=i32::MAX)) / f64::from(i32::MAX);
+        let vertical = f64::from(rng.random_range(0..=i32::MAX)) / f64::from(i32::MAX);
+        (start + goal) / 2.
+            + (horizontal - 0.5) * d.norm() * h * 0.8 * k
+            + (vertical - 0.5) * d.norm() * v * 0.4 * k
     }
 
     /// 官方 `setLocalTrajFromOpt`：规划结果连同带时间戳检查点一并入库，

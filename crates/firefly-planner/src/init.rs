@@ -91,7 +91,7 @@ pub fn init_warm_start(
 
 /// 随机多项式初始化（官方 `computeInitState` `flag_randomPolyTraj`）：
 /// 起终点中点沿水平/垂直正交方向随机偏移（幅度随连败次数增长），2 段 min-jerk
-/// 作种子，再按 case1 后半段同构重采样为正式段数。起点终点过近时退化为直飞。
+/// 作种子，再按 case1 后半段同构重采样为正式段数。
 ///
 /// # Errors
 ///
@@ -103,11 +103,6 @@ pub fn init_random(
     mid: Vector3<f64>,
 ) -> Result<Minco> {
     let dist = (end.position - start.position).norm();
-    if dist < 1e-6 {
-        return MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
-            .build(&[], &[1e-3])
-            .map_err(|e| e.with_operation("planner::init:random_degenerate"));
-    }
     // 种子：起 → 随机中点 → 终，2 段各 1s（官方 init_of_init_totaldur = 2.0）。
     let seed = MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
         .build(&[Point3::from(mid)], &[1.0, 1.0])
@@ -117,20 +112,23 @@ pub fn init_random(
         .map_err(|e| e.with_operation("planner::init:random_seed"))?;
     // 重采样：段数 = round(距离/piece_length)，下限 2；段时长均匀 ts
     //（官方 `piece_dur_vec = Constant(piece_nums, ts)`，ts = piece_length/max_vel）。
-    let mut pieces = (dist / config.piece_length.max(1e-3)).round() as usize;
+    let mut pieces = (dist / config.piece_length).round() as usize;
     pieces = pieces.max(2);
     // 采样步长 = 2.0/pieces（种子轨迹总时长 2s），段时长均匀 ts
     //（官方 `piece_dur_vec = Constant(piece_nums, ts)`，ts = piece_length/max_vel）。
-    let ts = config.piece_length.max(1e-3) / config.max_velocity.max(1e-3);
+    let ts = config.piece_length / config.max_velocity;
     let step = 2.0 / pieces as f64;
     let mut waypoints = Vec::with_capacity(pieces.saturating_sub(1));
     let mut t = step;
-    while t < 2.0 - step / 2.0 && waypoints.len() + 1 < pieces {
+    while t < 2.0 - step / 2.0 {
         waypoints.push(Point3::from(seed_traj.eval(t).position));
         t += step;
     }
-    while waypoints.len() + 1 < pieces {
-        waypoints.push(Point3::from(end.position));
+    if waypoints.len() != pieces - 1 {
+        return Err(firefly_error::Error::new(
+            firefly_error::ErrorKind::InvalidArgument,
+            "random initialization waypoint count mismatch",
+        ));
     }
     let durations = vec![ts; pieces];
     MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
@@ -227,6 +225,29 @@ mod tests {
             t += 0.05;
         }
         assert!(dmin < 0.5, "应经过随机中点附近，实际 {dmin:.3}");
+    }
+
+    #[test]
+    fn random_init_uses_two_piece_seed_for_coincident_or_nearby_endpoints() {
+        let config = InitConfig {
+            max_velocity: 1.5,
+            piece_length: 1.5,
+        };
+        let start = Endpoint {
+            position: Vector3::new(1., 1., 1.),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        for distance in [0., 1e-8] {
+            let end = Endpoint {
+                position: start.position + Vector3::x() * distance,
+                ..start
+            };
+            let m = init_random(&config, start, end, (start.position + end.position) / 2.).unwrap();
+            assert_eq!(m.pieces(), 2);
+            assert_eq!(m.piece_duration(0), 1.);
+            assert_eq!(m.piece_duration(1), 1.);
+        }
     }
 
     fn warm_start_fixture() -> (Trajectory, Trajectory) {
