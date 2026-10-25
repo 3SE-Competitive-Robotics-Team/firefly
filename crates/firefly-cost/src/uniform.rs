@@ -93,40 +93,34 @@ impl Penalty for UniformPenalty {
         if n == 0 {
             return;
         }
-        // 唯一约束点序列的相邻差与平方距离(官方 dps / dsqrs)
-        let mut dps: Vec<Vector3<f64>> = Vec::with_capacity(n);
-        let mut r: Vec<f64> = Vec::with_capacity(n);
-        let mut last = samples.get(0, 0).position;
-        for i in 0..traj.pieces() {
-            let j_max = if i + 1 == traj.pieces() { k } else { k - 1 };
-            for j in 0..=j_max {
-                let p = samples.get(i, j).position;
-                if i > 0 || j > 0 {
-                    let d = p - last;
-                    dps.push(d);
-                    r.push(d.norm_squared());
-                }
-                last = p;
+        // 唯一约束点序列:第 m 个点的位置(段边界只保留一次)。
+        // 供逐点梯度就地取相邻两条边,不再物化 dps/r/gdp 三份整数组。
+        let pieces = traj.pieces();
+        let unique = |m: usize| -> Vector3<f64> {
+            if m == n {
+                samples.get(pieces - 1, k).position
+            } else {
+                samples.get(m / k, m % k).position
             }
-        }
-        // 官方梯度(不含 wei,wei 由 Cost 权重提供):4/N·(R[i−1]·dps[i−1] − R[i]·dps[i])
-        let n_points = n + 1;
-        let mut gdp = vec![Vector3::zeros(); n_points];
-        for i in 0..=n {
-            if i != 0 {
-                gdp[i] += 4.0 / n as f64 * r[i - 1] * dps[i - 1];
-            }
-            if i != n {
-                gdp[i] += -4.0 / n as f64 * r[i] * dps[i];
-            }
-        }
+        };
+        let inv = 4.0 / n as f64;
         // 全采样(含段边界重复):边界点两侧各累加一次,omg=0.5(官方一致)
         for (i, ti) in traj.durations().iter().enumerate() {
             for j in 0..=k {
                 let i_dp = i * k + j;
+                // 官方梯度(不含 wei):4/N·(R[i−1]·dps[i−1] − R[i]·dps[i])
+                let mut gdp = Vector3::zeros();
+                if i_dp != 0 {
+                    let d = unique(i_dp) - unique(i_dp - 1);
+                    gdp += inv * d.norm_squared() * d;
+                }
+                if i_dp != n {
+                    let d = unique(i_dp + 1) - unique(i_dp);
+                    gdp += -inv * d.norm_squared() * d;
+                }
                 // 官方 omg = (j==0 || j==K) ? 0.5 : 1.0,即 i_dp % K == 0
                 let omg = if i_dp.is_multiple_of(k) { 0.5 } else { 1.0 };
-                let d_p = gdp[i_dp] * (weight * omg);
+                let d_p = gdp * (weight * omg);
                 acc.add(
                     i,
                     j as f64 / k as f64,
