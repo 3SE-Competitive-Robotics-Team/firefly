@@ -25,15 +25,11 @@ pub struct PlannerHeartbeatMessage {
     pub sequence: u64,
 }
 
-/// 输出门控与地图坐标版本；hold 启用时在当前测量位置保持。
+/// 输出门控与地图坐标版本；参考仅由已接收轨迹产生。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, ZeroCopySend)]
 #[type_name("FireflyTrajectoryControlMessage")]
 pub struct TrajectoryControlMessage {
     pub revision: u64,
     pub enabled: u64,
-    pub hold: u64,
-    pub position: [f64; 3],
-    pub yaw: f64,
-    pub yaw_dot: f64,
 }

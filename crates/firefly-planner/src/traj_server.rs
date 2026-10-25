@@ -94,20 +94,11 @@ impl TrajectoryServer {
             None
         };
         let elapsed = now - command.start_time;
-        if elapsed < 0.0 {
+        if elapsed < 0.0 || elapsed >= command.trajectory.duration() {
             return [hold, None];
         }
         let duration = command.trajectory.duration();
-        let reference = if elapsed >= duration {
-            self.last_position = command.trajectory.eval(duration).position;
-            Reference {
-                position: self.last_position,
-                velocity: Vector3::zeros(),
-                acceleration: Vector3::zeros(),
-                yaw: self.last_yaw,
-                yaw_dot: 0.0,
-            }
-        } else {
+        let reference = {
             let state = command.trajectory.eval(elapsed);
             let target = command
                 .trajectory
@@ -224,6 +215,15 @@ mod tests {
         }
     }
     #[test]
+    fn heartbeat_without_trajectory_never_publishes() {
+        let mut server = TrajectoryServer::new(false, 0.5);
+        assert!(server.sample(1.0, 0.0).iter().all(Option::is_none));
+        server.heartbeat(0.0);
+        assert!(server.sample(1.1, 0.1).iter().all(Option::is_none));
+        assert!(server.sample(2.0, 1.0).iter().all(Option::is_none));
+    }
+
+    #[test]
     fn heartbeat_timeout_invalidates_trajectory_until_another_is_received() {
         let mut server = TrajectoryServer::new(false, 0.5);
         server.receive(command());
@@ -259,15 +259,17 @@ mod tests {
         }
     }
     #[test]
-    fn future_start_is_silent_and_finished_trajectory_holds_endpoint() {
+    fn future_start_and_finished_trajectory_are_silent_like_upstream() {
         let mut server = TrajectoryServer::new(false, 0.5);
         server.receive(command());
         server.heartbeat(0.0);
         assert!(server.sample(0.99, 0.0)[1].is_none());
-        let reference = server.sample(6.0, 0.1)[1].unwrap();
-        assert!((reference.position - Vector3::new(5.0, 2.0, 3.0)).norm() < 1e-10);
-        assert_eq!(reference.velocity, Vector3::zeros());
-        assert_eq!(reference.acceleration, Vector3::zeros());
-        assert_eq!(reference.yaw_dot, 0.0);
+        let tracked = server.sample(2.0, 0.1)[1].unwrap();
+        assert!(server.sample(5.0, 0.2).iter().all(Option::is_none));
+        assert!(server.sample(6.0, 0.3).iter().all(Option::is_none));
+        let expired = server.sample(6.1, 0.6);
+        assert_eq!(expired[0].unwrap().position, tracked.position);
+        assert!(expired[1].is_none());
+        assert!(server.sample(6.2, 0.7).iter().all(Option::is_none));
     }
 }

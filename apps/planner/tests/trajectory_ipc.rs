@@ -85,7 +85,7 @@ fn independent_output_preserves_coefficients_and_upstream_timeout_publish_order(
                 .unwrap();
         }
         // 两段 p(t)=(t,2,3)，完整系数直接跨进程传输。
-        if first_reference.is_none() || lost_for > 1.05 {
+        if (first_reference.is_none() && elapsed > 0.15) || lost_for > 1.05 {
             trajectory
                 .publish_slice_with(2, |piece| TrajectoryPieceMessage {
                     start_time: 1.,
@@ -102,6 +102,10 @@ fn independent_output_preserves_coefficients_and_upstream_timeout_publish_order(
         }
         let mut received = false;
         while let Some(message) = references.receive().unwrap() {
+            assert!(
+                elapsed > 0.15,
+                "control and heartbeat alone must not publish a reference"
+            );
             received = true;
             if message.velocity_x == 0. {
                 previous = Some(*message);
@@ -186,7 +190,6 @@ fn independent_output_preserves_coefficients_and_upstream_timeout_publish_order(
                 .publish(TrajectoryControlMessage {
                     revision: 1,
                     enabled: 1,
-                    ..TrajectoryControlMessage::default()
                 })
                 .unwrap();
             if let Some(reference) = references.receive().unwrap() {

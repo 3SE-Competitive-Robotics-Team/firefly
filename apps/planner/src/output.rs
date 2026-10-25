@@ -1,7 +1,7 @@
 //! 规划进程只发布完整轨迹与心跳；输出模式在独立进程中以 100Hz 采样。
 use crate::navigation::NavigationReceiver;
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_planner::{Reference, TrajectoryCommand, TrajectoryServer};
+use firefly_planner::{TrajectoryCommand, TrajectoryServer};
 use firefly_pubsub::{
     node::{IpcNode, create_node},
     publish::Publisher,
@@ -14,7 +14,7 @@ use firefly_pubsub::{
 };
 use firefly_trajectory::Trajectory;
 use iceoryx2::prelude::*;
-use nalgebra::{DMatrix, DVector, Vector3};
+use nalgebra::{DMatrix, DVector};
 use std::time::{Duration, Instant};
 
 pub struct OutputPublisher {
@@ -41,20 +41,11 @@ impl OutputPublisher {
         })?;
         Ok(())
     }
-    pub fn control(
-        &mut self,
-        revision: Option<u64>,
-        enabled: bool,
-        hold: Option<Reference>,
-    ) -> Result<()> {
+    pub fn control(&mut self, revision: Option<u64>, enabled: bool) -> Result<()> {
         self.revision = revision;
         self.control.publish(TrajectoryControlMessage {
             revision: revision.unwrap_or_default(),
             enabled: u64::from(enabled && revision.is_some()),
-            hold: u64::from(hold.is_some()),
-            position: hold.map_or([0.; 3], |r| r.position.into()),
-            yaw: hold.map_or(0., |r| r.yaw),
-            yaw_dot: hold.map_or(0., |r| r.yaw_dot),
         })?;
         Ok(())
     }
@@ -164,18 +155,7 @@ pub fn run(yaw_hold: bool, timeout: f64) -> Result<()> {
             if control.enabled == 0 || transform.revision != control.revision {
                 return Ok(());
             }
-            let references = if control.hold != 0 {
-                [
-                    None,
-                    Some(Reference {
-                        position: Vector3::from(control.position),
-                        velocity: Vector3::zeros(),
-                        acceleration: Vector3::zeros(),
-                        yaw: control.yaw,
-                        yaw_dot: control.yaw_dot,
-                    }),
-                ]
-            } else if trajectory_revision == Some(control.revision) {
+            let references = if trajectory_revision == Some(control.revision) {
                 server.sample(snapshot.timestamp, origin.elapsed().as_secs_f64())
             } else {
                 [None, None]

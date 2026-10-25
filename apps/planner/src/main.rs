@@ -19,7 +19,7 @@ use firefly_map::{
     DepthCamera, GridMap, MapFile, Plane, VirtualWall, VoxelState, update_from_depth,
 };
 use firefly_observability::init as init_observability;
-use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager, Reference, ReplanFsm};
+use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager, ReplanFsm};
 use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage};
 use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
 use firefly_pubsub::node::create_node;
@@ -73,19 +73,6 @@ pub struct MandatoryStopMessage {
 impl Default for MandatoryStopMessage {
     fn default() -> Self {
         Self { timestamp: -1.0 }
-    }
-}
-
-/// 零速悬停参考（对照官方 `publish_cmd(last_pos_, 0,0,0, last_yaw_, 0)`）：
-/// 位置/偏航保持，速度为零（参考通道不建模加速度/加加速度，隐含为零）。
-fn hover_reference(position: Vector3<f64>, yaw_state: (f64, f64)) -> Reference {
-    Reference {
-        position,
-        velocity: Vector3::zeros(),
-        acceleration: Vector3::zeros(),
-        yaw: yaw_state.0,
-        // 官方超时悬停的 yaw_dot 恒为 0
-        yaw_dot: 0.0,
     }
 }
 
@@ -454,7 +441,7 @@ impl App {
                 log::error!("地图系里程计失联或无效，停止发布规划参考；恢复定位后须重启 planner");
                 self.state_loss_reported = true;
             }
-            self.output.control(None, false, None)?;
+            self.output.control(None, false)?;
             return Ok(());
         };
         self.state_fresh = true;
@@ -490,7 +477,7 @@ impl App {
             log::error!("会话障碍地图容量耗尽，停止规划；必须建立新会话");
             self.fsm
                 .trigger_emergency_stop_disable_failsafe(now, measured);
-            self.output.control(revision, false, None)?;
+            self.output.control(revision, false)?;
             return Ok(());
         }
         self.update_motion();
@@ -518,13 +505,10 @@ impl App {
         }
         // 至少四次命中才能从 clamp_min 达到占据阈值；初始化与坐标修正均须重新积累。
         if self.mapped_frames < 4 {
-            let hold = hover_reference(snapshot.state.position.coords, (0.0, 0.0));
-            self.output.control(revision, true, Some(hold))?;
+            self.output.control(revision, false)?;
             return Ok(());
         }
-        let waiting = !self.fsm.has_target() && self.fsm.manager().local().is_none();
-        let hold = waiting.then(|| hover_reference(snapshot.state.position.coords, (0.0, 0.0)));
-        self.output.control(revision, true, hold)?;
+        self.output.control(revision, true)?;
         let report = self.fsm.exec_tick(now, measured);
         self.handoff_trajectory()?;
 
@@ -583,7 +567,7 @@ impl App {
     fn safety_step(&mut self) -> Result<()> {
         self.poll_sensors()?;
         let Some(snapshot) = self.state_input.current(Instant::now()) else {
-            self.output.control(None, false, None)?;
+            self.output.control(None, false)?;
             return Ok(());
         };
         // 坐标修正和地图预热由执行回调完成，期间不检查旧轨迹。
@@ -594,8 +578,8 @@ impl App {
         let measured = Some(snapshot.state);
         let wall_time = self.wall_origin.elapsed().as_secs_f64();
         // 深度/odom 超时急停（官方 checkCollisionCallback：有可执行轨迹且
-        // 未完成才监控深度丢失，命中则关 fail-safe 进急停、永不自动恢复）。
-        // 锁存后重复命中不刷屏（监视结构锁存 + enter 幂等）。
+        // 未完成才监控深度丢失，命中则关 fail-safe 进急停，随后继续碰撞检查）。
+        // 禁用 fail-safe 只阻止急停执行分支按低速条件恢复；安全回调仍可重规划。
         if self.fsm.manager().local().is_some()
             && !self.fsm.is_finished()
             && self.depth_freshness.timed_out(wall_time, DEPTH_TIMEOUT)

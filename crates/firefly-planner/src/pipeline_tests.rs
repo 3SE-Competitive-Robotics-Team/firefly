@@ -675,6 +675,22 @@ fn set_goal_rebuilds_path_and_dedups_same_target() {
 }
 
 #[test]
+fn depth_timeout_keeps_upstream_collision_replanning_order() {
+    let mut m = open_manager();
+    let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
+    let local = m.local().unwrap();
+    let obstacle = local.traj.eval(local.traj.duration() * 0.45).position;
+    let voxel = m.map().index_of(obstacle).unwrap();
+    m.map_mut().set_state(voxel, VoxelState::Occupied);
+    m.fsm.trigger_emergency_stop_disable_failsafe(0.5, None);
+    assert!(m.fsm.is_emergency());
+    let report = m.fsm.safety_tick(0.5, None);
+    assert!(report.collision && report.replanned);
+    assert_eq!(m.fsm.state(), ExecState::ExecTraj);
+    assert!(!m.fsm.failsafe_enabled);
+}
+
+#[test]
 fn collision_monitor_triggers_immediate_replan() {
     let mut m = open_manager();
     let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
@@ -1004,9 +1020,7 @@ fn emergency_stop_survives_trajectory_exhaustion() {
     assert!(m.fsm.is_emergency(), "轨迹耗尽不得退出急停");
     assert!(!r.replanned, "急停中轨迹耗尽不得常规重规划");
     assert_eq!(m.replans(), replans_before);
-    let reference = r.reference.expect("耗尽后仍应有悬停参考");
-    assert!((reference.position - stop_pos).norm() < 1e-6);
-    assert!(reference.velocity.norm() < 1e-9);
+    assert!(r.reference.is_none(), "上游默认末端分支不发布参考");
 }
 
 #[test]
