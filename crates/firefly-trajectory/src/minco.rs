@@ -128,7 +128,14 @@ impl Minco {
             self.banded.reset(COEFFS_PER_PIECE * self.pieces, 6, 6);
             Self::fill_banded(&mut self.banded, durations);
             if let Some(solver) = Arc::get_mut(&mut self.solver) {
-                solver.refactorize(&self.banded)?;
+                if let Err(error) = solver.refactorize(&self.banded) {
+                    // 失败时分解缓冲可能已被部分改写，而 `self.t` 仍是旧值；
+                    // 用旧时长重建分解，保持对象可用后再返回错误。
+                    self.banded.reset(COEFFS_PER_PIECE * self.pieces, 6, 6);
+                    Self::fill_banded(&mut self.banded, self.t.as_slice());
+                    let _ = solver.refactorize(&self.banded);
+                    return Err(error);
+                }
             } else {
                 // 有共享引用（仅测试会 clone Minco）：退回独占重建。
                 self.solver = Arc::new(BandedSolver::new_owned(self.banded.clone())?);
