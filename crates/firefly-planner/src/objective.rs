@@ -154,6 +154,10 @@ pub struct MincoObjective<'a> {
     points: Vec<Point3<f64>>,
     /// 时长缓冲：与 `points` 一样按需复用，避免每轮重建。
     scratch_t: Vec<f64>,
+    /// 梯度传播的复用缓冲：转置解 `6M×3`、`d_f_d_q`、`d_f_d_t`。
+    scratch_g: DMatrix<f64>,
+    scratch_dq: DMatrix<f64>,
+    scratch_dt: DVector<f64>,
     detector_points: Vec<Vector3<f64>>,
 }
 
@@ -172,6 +176,9 @@ impl<'a> MincoObjective<'a> {
             acc: Accumulator::new(pieces),
             points: Vec::with_capacity(pieces.saturating_sub(1)),
             scratch_t: Vec::with_capacity(pieces),
+            scratch_g: DMatrix::zeros(6 * pieces, 3),
+            scratch_dq: DMatrix::zeros(3, pieces.saturating_sub(1)),
+            scratch_dt: DVector::zeros(pieces),
             detector_points: Vec::new(),
         }
     }
@@ -349,12 +356,19 @@ impl Objective for MincoObjective<'_> {
         };
         let (_, minco, traj, samples) = self.cache.as_ref().expect("solved trajectory");
         self.cost.gradient_into_with(traj, samples, &mut self.acc);
-        let Ok((dq, dt)) = minco.propagate_gradient(traj, &self.acc.d_f_d_c, &self.acc.d_f_d_t)
-        else {
+        let propagated = minco.propagate_gradient_into(
+            traj,
+            &self.acc.d_f_d_c,
+            &self.acc.d_f_d_t,
+            &mut self.scratch_g,
+            &mut self.scratch_dq,
+            &mut self.scratch_dt,
+        );
+        if propagated.is_err() {
             return DVector::zeros(3 * (self.pieces - 1) + self.pieces);
-        };
+        }
         let n_q = 3 * (self.pieces - 1);
-        self.pack(&dq, &dt, &x.as_slice()[n_q..])
+        self.pack(&self.scratch_dq, &self.scratch_dt, &x.as_slice()[n_q..])
     }
 }
 

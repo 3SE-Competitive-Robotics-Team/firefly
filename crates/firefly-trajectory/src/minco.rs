@@ -231,9 +231,44 @@ impl Minco {
         d_f_d_c: &DMatrix<f64>,
         d_f_d_t: &DVector<f64>,
     ) -> firefly_error::Result<(DMatrix<f64>, DVector<f64>)> {
-        let g = self.solver.solve_transpose(d_f_d_c);
-
+        let mut g = DMatrix::zeros(self.solver.rows(), 3);
         let mut d_f_d_q = DMatrix::zeros(3, self.pieces - 1);
+        let mut d_f_d_t_out = d_f_d_t.clone();
+        self.propagate_gradient_into(
+            trajectory,
+            d_f_d_c,
+            d_f_d_t,
+            &mut g,
+            &mut d_f_d_q,
+            &mut d_f_d_t_out,
+        )?;
+        Ok((d_f_d_q, d_f_d_t_out))
+    }
+
+    /// 就地版本：`g`/`d_f_d_q`/`d_f_d_t_out` 由调用方复用，避免每个 LBFGS
+    /// 迭代重新分配 `6M×3` 的转置解与两块输出。
+    ///
+    /// # Errors
+    ///
+    /// 系统矩阵的奇异性在构建或更新时检查，此处使用已验证的 LU。
+    pub fn propagate_gradient_into(
+        &self,
+        trajectory: &Trajectory,
+        d_f_d_c: &DMatrix<f64>,
+        d_f_d_t: &DVector<f64>,
+        g: &mut DMatrix<f64>,
+        d_f_d_q: &mut DMatrix<f64>,
+        d_f_d_t_out: &mut DVector<f64>,
+    ) -> firefly_error::Result<()> {
+        // 入参不可覆盖：先拷进调用方缓冲，再就地做转置求解。
+        g.copy_from(d_f_d_c);
+        self.solver.solve_transpose_in_place(g);
+
+        if d_f_d_q.shape() == (3, self.pieces - 1) {
+            d_f_d_q.fill(0.0);
+        } else {
+            *d_f_d_q = DMatrix::zeros(3, self.pieces - 1);
+        }
         for i in 0..self.pieces - 1 {
             // 官方布局：qᵢ 在 b 的第 6i+5 行（位置约束行）
             let row = 6 * i + 5;
@@ -242,7 +277,7 @@ impl Minco {
             }
         }
 
-        let mut d_f_d_t_out = d_f_d_t.clone();
+        d_f_d_t_out.copy_from(d_f_d_t);
         for i in 0..self.pieces {
             let w = self.dm_dt_c(i, &trajectory.coefficients);
             for dim in 0..3 {
@@ -259,7 +294,7 @@ impl Minco {
                 d_f_d_t_out[i] -= dot;
             }
         }
-        Ok((d_f_d_q, d_f_d_t_out))
+        Ok(())
     }
 
     /// ∂M/∂Tᵢ · c 的非零块：中间段六行，末段三行。

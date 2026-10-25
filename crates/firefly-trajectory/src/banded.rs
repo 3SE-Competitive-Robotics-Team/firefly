@@ -206,6 +206,12 @@ impl BandedSolver {
         })
     }
 
+    /// 方阵维数（右端向量的行数）。
+    #[must_use]
+    pub fn rows(&self) -> usize {
+        self.plu.n
+    }
+
     pub fn solve_in_place(&self, rhs: &mut DMatrix<f64>) {
         assert_eq!(rhs.nrows(), self.plu.n);
         for mut col in rhs.column_iter_mut() {
@@ -214,12 +220,17 @@ impl BandedSolver {
     }
 
     pub fn solve_transpose(&self, rhs: &DMatrix<f64>) -> DMatrix<f64> {
-        assert_eq!(rhs.nrows(), self.plu.n);
         let mut out = rhs.clone();
-        for mut col in out.column_iter_mut() {
+        self.solve_transpose_in_place(&mut out);
+        out
+    }
+
+    /// 解 Aᵀx = b 就地；调用方自备缓冲，不覆盖入参。
+    pub fn solve_transpose_in_place(&self, rhs: &mut DMatrix<f64>) {
+        assert_eq!(rhs.nrows(), self.plu.n);
+        for mut col in rhs.column_iter_mut() {
             self.plu.solve_transpose_into(col.as_mut_slice());
         }
-        out
     }
 }
 
