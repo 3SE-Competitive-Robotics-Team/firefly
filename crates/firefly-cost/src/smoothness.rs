@@ -1,7 +1,7 @@
 //! 平滑惩罚：Js = ∫||p‴(t)||²dt（最小加加速度能量，闭式）。
 
 use firefly_trajectory::Trajectory;
-use nalgebra::DMatrix;
+use nalgebra::SMatrix;
 
 use crate::{Accumulator, Penalty};
 
@@ -46,8 +46,8 @@ impl Penalty for SmoothnessPenalty {
 }
 
 /// ∫β‴(τ)β‴(τ)ᵀdτ 的 Gram 矩阵（6×6，仅 3..5 阶非零）。
-fn jerk_gram(t: f64) -> DMatrix<f64> {
-    let mut g = DMatrix::zeros(6, 6);
+fn jerk_gram(t: f64) -> SMatrix<f64, 6, 6> {
+    let mut g = SMatrix::zeros();
     let t2 = t * t;
     let t3 = t2 * t;
     let t4 = t3 * t;
@@ -64,8 +64,8 @@ fn jerk_gram(t: f64) -> DMatrix<f64> {
     g
 }
 
-fn jerk_gram_derivative(t: f64) -> DMatrix<f64> {
-    let mut g = DMatrix::zeros(6, 6);
+fn jerk_gram_derivative(t: f64) -> SMatrix<f64, 6, 6> {
+    let mut g = SMatrix::zeros();
     let t2 = t * t;
     let t3 = t2 * t;
     let t4 = t3 * t;
