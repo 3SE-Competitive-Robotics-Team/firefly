@@ -121,6 +121,8 @@ impl Penalty for FormationPenalty {
         }
         let k = self.samples_per_piece;
         let mut cost = 0.0;
+        // 前缀和随分段推进，避免每个样本重新累加 O(M)；求和顺序与原实现一致。
+        let mut t_start = 0.0;
         for (i, ti) in traj.durations().iter().enumerate() {
             let step = ti / k as f64;
             for j in 0..=k {
@@ -133,12 +135,15 @@ impl Penalty for FormationPenalty {
                 {
                     continue;
                 }
-                let t_abs = absolute_time(traj, i, *ti, tau);
+                let t_local = tau * ti;
+                let t_abs = t_start + t_local;
                 let (o, a, l, _) = self.formation_state(t_abs);
-                let s = traj.eval(t_abs);
+                // 循环内已知分段，用局部时刻取点，省掉 eval 的线性定位。
+                let s = traj.eval_piece(i, t_local);
                 let omg = trapezoid_weight(j, k);
                 cost += omg * step * (s.position - self.target(o, a, l)).norm_squared();
             }
+            t_start += *ti;
         }
         cost
     }
@@ -150,6 +155,7 @@ impl Penalty for FormationPenalty {
             return;
         }
         let k = self.samples_per_piece;
+        let mut t_start = 0.0;
         for (i, ti) in traj.durations().iter().enumerate() {
             let step = ti / k as f64;
             for j in 0..=k {
@@ -163,9 +169,10 @@ impl Penalty for FormationPenalty {
                     continue;
                 }
                 let omg = trapezoid_weight(j, k);
-                let t_abs = absolute_time(traj, i, *ti, tau);
+                let t_local = tau * ti;
+                let t_abs = t_start + t_local;
                 let (o, a, l, dl_dt) = self.formation_state(t_abs);
-                let s = traj.eval(t_abs);
+                let s = traj.eval_piece(i, t_local);
                 let tar = self.target(o, a, l);
                 let d_p = 2.0 * (s.position - tar) * (weight * omg * step);
                 let point_cost = (s.position - tar).norm_squared();
@@ -184,16 +191,9 @@ impl Penalty for FormationPenalty {
                     Vector3::zeros(),
                 );
             }
+            t_start += *ti;
         }
     }
-}
-
-fn absolute_time(traj: &Trajectory, piece: usize, duration: f64, tau: f64) -> f64 {
-    let mut t = 0.0;
-    for k in 0..piece {
-        t += traj.durations()[k];
-    }
-    t + tau * duration
 }
 
 #[cfg(test)]
