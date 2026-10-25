@@ -316,11 +316,10 @@ planner 经 `Firefly/VizVoxels` 发地图更新，经 `Firefly/Log` 发 log 宏�
 
 各进程以测量时刻设置 `sim_time`；无仿真时刻的进程日志回落 `wall_time`。
 常用实体为 `okvis/odom`、`okvis/traj`、`gt/pose`、`gt/traj`、`okvis/debug/*`、`fc/debug/*`、
-`plan/*`、`logs/<app>`。左目 H.265 视频与双目关键点进入 RRD；
-Rerun 按原图时间配对叠加 VIO 点，不把标记烧进视频。`/live/**` 是独立 gRPC stream
-发送的 static 最新预览，不写入 RRD，也不代表时间光标处的历史数据。
+`plan/*`、`logs/<app>`。左右目 H.265 视频进入 RRD，VIO 点只按原图时间配对叠加在
+各自录制视图中，不把标记烧进视频，不额外保存独立关键点副本或 `/live/**` 预览。
 
-`configs/viz.toml` 控制视频、地图预览频率与队列容量；配置键和默认值见 `firefly_viz.config`。
+`configs/viz.toml` 控制视频、地图历史记录频率与队列容量；配置键和默认值见 `firefly_viz.config`。
 所有输入先复制到自有内存再释放 IPC loan，队列与环形缓存有界。体素分块完整后才更新地图；
 标量不携带体素数组。队列丢帧、编码耗时、输出 sample 大小与退出状态在 `viz/**` 查看。
 

@@ -73,21 +73,21 @@ OKVIS 的帧诊断回调读取当前帧的二维关键点、路标 ID 与优化�
 接收端检查序号、完整性和容量后更新集合，再按录制频率保存完整快照。缺块、乱序或未知
 基线上的增量使录制明确失败；不能把截断地图当作完整证据。
 
-左目灰度原图经 FFmpeg 编成无 B 帧的低码率 H.265，Annex B access unit 逐帧写入
-`cameras/left/image` 的 `VideoStream`。codec、左目标定与无人机模型按 static 记录；
+左右目灰度原图分别经 FFmpeg 编成无 B 帧的低码率 H.265，Annex B access unit 逐帧写入
+`cameras/left/image` 与 `cameras/right/image` 的 `VideoStream`。codec、双目标定与无人机模型按 static 记录；
 视频 sample 属于原始采集 `sim_time`。编码输入只有有界缓冲，允许编码前丢帧，
 已经编码的依赖帧不能丢弃。视频是有损调试背景，不作为像素精度评测或算法输入。
 Rerun 绘制特征点，点集只有与已保存图像的采集时间完全一致才进入叠加层；每张已保存图像
-先写空点集，避免沿用上一张图的标记。原始点集与 track_id 独立长期保存。
+先写空点集，避免沿用上一张图的标记。点集与 track_id 只保存在各相机的 `points` 叠加层，
+不另外保存 `okvis/debug/keypoints/**` 副本。
 算法与 IPC 使用整数像素中心；[Rerun 0.38.1 图像边界从零开始](https://github.com/rerun-io/rerun/blob/0.38.1/crates/views/re_view_spatial/src/visualizers/video/mod.rs#L574)，
 展示层的主点与叠加点统一加半个像素，原始诊断坐标保持不变。
 
-图像区展示左目 H.265 视频和双目关键点。右目原图、深度图的业务话题由估计与建图进程消费；
-左右目关键点由 OKVIS 当前帧诊断提供。视频队列丢帧和退出状态写入 RRD。
+图像区仅有左右目 recorded 视图，分别展示视频和同帧关键点；深度图的业务话题由估计与
+建图进程消费。左右目关键点由 OKVIS 当前帧诊断提供。视频队列丢帧和退出状态写入 RRD。
 
-地图预览写入同 recording 的 `/live/plan/**`，通过只有 gRPC sink 的独立
-stream 发送 static，永不进入文件 sink。反复 static log 仍会产生传输和存储开销，
-因此地图预览另有限频，历史分析使用 temporal 视频、关键点和地图快照。录制和实时查看可以同时启用。
+Viewer 和文件 sink 使用同一个 recording stream，只展示视频、关键点和地图的历史记录。
+不创建 `/live/**` static 预览流；录制和实时查看可以同时启用。
 三个空间视图分别使用仿真世界、OKVIS 地图系和局部 odom 坐标。
 接收、诊断写入和媒体处理独立调度；小型诊断队列溢出、编码失败、部分体素更新或退出
 清理失败都报告录制不完整，不静默切换编码器。配置与具体预算见 `configs/viz.toml`

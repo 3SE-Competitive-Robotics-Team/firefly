@@ -90,6 +90,10 @@ def test_late_points_keep_original_video_index_and_do_not_cross_cameras():
     pairs.frame('left', 1.875, 11)
     pairs.observe('right', 1.125, [[9, 9]], [12], [0, 0, 0])
     assert len(rec.calls) == 4
+    pairs.frame('right', 1.125, 5)
+    assert rec.times[-2] == {'sim_time': {'duration': 1.125}, 'right_frame': {'sequence': 5}}
+    assert rec.calls[-2][1][0] == 'cameras/right/points'
+    assert rec.calls[-2][1][1].positions.as_arrow_array().to_pylist() == [[9.5, 9.5]]
     pairs.observe('left', 1.125, [[2, 3]], [42], [64, 255, 128])
     assert rec.times[-2] == {'sim_time': {'duration': 1.125}, 'left_frame': {'sequence': 8}}
     assert rec.calls[-2][1][1].positions.as_arrow_array().to_pylist() == [[2.5, 3.5]]
@@ -98,17 +102,19 @@ def test_late_points_keep_original_video_index_and_do_not_cross_cameras():
     assert len(rec.calls) == before
 
 
-def test_keypoint_resolution_mismatch_cannot_reach_overlay(recordings_factory):
+@pytest.mark.parametrize('camera', ['left', 'right'])
+def test_keypoint_resolution_mismatch_cannot_reach_overlay(recordings_factory, camera):
     rec = Recording()
     pairs = MatchedPoints(rec, 4)
     writer = Writer(recordings_factory(archive=rec, matches=pairs), Options())
     msg = VizMessage()
-    name = b'okvis/debug/keypoints/left'
+    name = f'okvis/debug/keypoints/{camera}'.encode()
     msg.entity_len, msg.entity[:len(name)] = len(name), name
     msg.kind, msg.timestamp = VIZ_KIND_KEYPOINTS_2D, 1.
     msg.scalars[:3], msg.scalar_count = [640, 480, 1], 3
     msg.points[0][:], msg.point_count = [12, 20, 1], 1
-    pairs.frame('left', 1., 3)
+    pairs.frame(camera, 1., 3)
     with pytest.raises(ValueError, match='resolution'):
         writer.handle(msg)
-    assert not pairs.points['left']
+    assert not pairs.points[camera]
+    assert len(rec.calls) == 2

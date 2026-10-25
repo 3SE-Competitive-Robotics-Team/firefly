@@ -158,6 +158,7 @@ def run(args):
     node = None
     subscriber = None
     cameras = []
+    captures, media = {}, {}
     stop = threading.Event()
     handlers = {}
     errors = []
@@ -183,12 +184,14 @@ def run(args):
                            writer.consume,
                            writer.tick, lambda: writer.tick(final=True), options.shutdown_seconds)
         workers.append(telemetry)
-        capture = Capture(recordings, options)
-        media = None
         if options.video.enabled:
-            media = Worker("viz-media", options.capture.queue_frames, capture.handle, capture.tick,
-                           capture.close, options.shutdown_seconds + 4 * options.video.shutdown_seconds)
-            workers.append(media)
+            for name in ("left", "right"):
+                capture = Capture(recordings, options, name)
+                captures[name] = capture
+                worker = Worker(f"viz-media-{name}", options.capture.queue_frames, capture.handle, capture.tick,
+                                capture.close, options.shutdown_seconds + 4 * options.video.shutdown_seconds)
+                media[name] = worker
+                workers.append(worker)
         for kind, topic, cls, publishers, capacity in (
             ("viz", "Firefly/VizScalars", ScalarMessage, VIZ_MAX_PUBLISHERS, SCALAR_BUFFER_SIZE),
             ("viz", "Firefly/Viz", VizMessage, VIZ_MAX_PUBLISHERS, VIZ_BUFFER_SIZE),
@@ -199,8 +202,8 @@ def run(args):
         ):
             subscriptions.append((kind, _subscribe(node, topic, cls, capacity, publishers)))
         if options.video.enabled:
-            cameras.append(("left", _subscribe(node, "Firefly/CameraLeft", GrayImageMessage,
-                                               capacity=1, publishers=None)))
+            for name, topic in (("left", "Firefly/CameraLeft"), ("right", "Firefly/CameraRight")):
+                cameras.append((name, _subscribe(node, topic, GrayImageMessage, capacity=1, publishers=None)))
         last_stamp = {name: float("-inf") for name, _ in cameras}
         indices = dict.fromkeys(last_stamp, 0)
         map_rate = Rate(10.0)
@@ -250,20 +253,20 @@ def run(args):
                         raise ValueError(f"{name}: invalid or regressed capture timestamp {stamp}")
                     if (msg.width, msg.height) != (IMAGE_WIDTH, IMAGE_HEIGHT):
                         raise ValueError(f"{name}: unexpected sensor resolution")
-                    if msg.sensor_id != 0:
+                    if msg.sensor_id != {"left": 0, "right": 1}[name]:
                         raise ValueError(f"{name}: unexpected sensor id")
                     last_stamp[name] = stamp
                     index = indices[name]
                     indices[name] += 1
-                    if media.inbox.full():
+                    if media[name].inbox.full():
                         dropped_frames += 1
                         continue
-                    media.put(Frame(name, stamp, index, msg.width, msg.height, bytes(msg.data)))
+                    media[name].put(Frame(name, stamp, index, msg.width, msg.height, bytes(msg.data)))
                 finally:
                     del msg
                     del sample
             if time.monotonic() - last_health >= 1.0:
-                recordings.health("queues", [telemetry.inbox.qsize(), media.inbox.qsize() if media else 0,
+                recordings.health("queues", [telemetry.inbox.qsize(), sum(worker.inbox.qsize() for worker in media.values()),
                                              telemetry.high_water, dropped_frames])
                 last_health = time.monotonic()
             stop.wait(0.001)
@@ -288,10 +291,11 @@ def run(args):
             errors.append(error)
         alive = [worker.thread.name for worker in workers if worker.thread.is_alive()]
         # Encoder 的子线程也可能在媒体 finish 失败后仍持有 sink。
-        if len(workers) == 2 and capture.encoder:
-            alive.extend(thread.name for thread in capture.encoder.threads if thread.is_alive())
-            if capture.encoder.process.poll() is None:
-                alive.append(f"ffmpeg pid={capture.encoder.process.pid}")
+        for capture in captures.values():
+            if capture.encoder:
+                alive.extend(thread.name for thread in capture.encoder.threads if thread.is_alive())
+                if capture.encoder.process.poll() is None:
+                    alive.append(f"ffmpeg pid={capture.encoder.process.pid}")
         if alive:
             errors.append(RuntimeError(f"cleanup incomplete; keeping sinks open for active writers: {alive}"))
         else:

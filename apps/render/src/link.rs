@@ -394,9 +394,9 @@ fn publish(ports: &SensorPublishers, result: &ProcessedCapture) {
     let _guard = root.set_local_parent();
 
     if result.stamp - ports.calibration_stamp.get() >= 1.0 {
-        let _ = ports
-            .viz_pub
-            .publish(crate::rig::left_camera_calibration(result.stamp));
+        for calibration in crate::rig::camera_calibrations(result.stamp) {
+            let _ = ports.viz_pub.publish(calibration);
+        }
         ports.calibration_stamp.set(result.stamp);
     }
     publish_gray(&ports.left_pub, &result.left_gray, result.stamp, 0);

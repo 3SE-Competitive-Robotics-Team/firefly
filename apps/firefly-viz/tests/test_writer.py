@@ -144,7 +144,7 @@ def test_cold_start_empty_keypoints_preserve_typed_ids_and_clear_previous_points
         archive.set_sinks(rr.FileSink(sys.argv[1], write_footer=True))
         matches = MatchedPoints(archive, 4)
         outputs = create_autospec(RecordingOutputs, instance=True, spec_set=True)
-        outputs.archive, outputs.live, outputs.matches = archive, None, matches
+        outputs.archive, outputs.matches = archive, matches
         writer = Writer(outputs, Options())
         try:
             matches.frame('left', 0.5, 0)
@@ -181,8 +181,7 @@ def test_cold_start_empty_keypoints_preserve_typed_ids_and_clear_previous_points
         assert ids.type == pa.list_(pa.uint64())
         rows[chunk.entity_path].extend(zip(batch.column('sim_time').cast(pa.int64()).to_pylist(),
                                           batch.column('Points2D:positions').to_pylist(), ids.to_pylist()))
-    assert sorted(rows['/okvis/debug/keypoints/left']) == [
-        (1_000_000_000, [], []), (2_000_000_000, [[12.25, 41.5]], [42]), (3_000_000_000, [], [])]
+    assert rows['/okvis/debug/keypoints/left'] == []
     assert sorted(rows['/cameras/left/points']) == [
         (500_000_000, [], []), (1_000_000_000, [], []),
         (2_000_000_000, [[12.75, 42.]], [42]), (3_000_000_000, [], [])]
@@ -264,8 +263,8 @@ def voxel(kind, points, stamp=1., sequence=0, chunk_index=0, chunk_count=1):
 
 
 def test_voxel_history_uses_complete_snapshots_after_ordered_deltas(recordings_factory):
-    archive, live = Recording(), Recording()
-    writer = Writer(recordings_factory(archive=archive, live=live), Options())
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options())
     writer.handle(voxel(3, [(1, 2, 3), (4, 5, 6)]))
     writer.handle(voxel(8, [(7, 8, 9)], 2., sequence=1))
     writer.handle(voxel(9, [(1, 2, 3)], 2., sequence=2))
@@ -274,21 +273,20 @@ def test_voxel_history_uses_complete_snapshots_after_ordered_deltas(recordings_f
     assert len(archive.calls) == 1
     assert archive.calls[0][0][0] == 'plan/voxels'
     assert not archive.calls[0][1].get('static', False)
-    assert live.calls[0][0][0] == 'live/plan/voxels'
-    assert live.calls[0][1]['static'] is True
+    assert not any(args[0].startswith('live/') for args, _ in archive.calls)
     with pytest.raises(ValueError, match='out-of-order'):
         writer.handle(voxel(9, [(4, 5, 6)], 1., sequence=3))
 
 
 def test_voxel_delta_cannot_create_an_unknown_baseline(recordings_factory):
-    writer = Writer(recordings_factory(archive=Recording(), live=None), Options())
+    writer = Writer(recordings_factory(archive=Recording()), Options())
     with pytest.raises(ValueError, match='baseline'):
         writer.handle(voxel(8, [(1, 2, 3)]))
 
 
 def test_voxel_chunk_commit_is_atomic_and_gaps_are_fatal(recordings_factory):
     archive = Recording()
-    writer = Writer(recordings_factory(archive=archive, live=None), Options())
+    writer = Writer(recordings_factory(archive=archive), Options())
     writer.handle(voxel(3, [(1, 2, 3)], chunk_count=2))
     writer.tick()
     assert not archive.calls
@@ -302,7 +300,7 @@ def test_voxel_chunk_commit_is_atomic_and_gaps_are_fatal(recordings_factory):
 
 def test_voxel_partial_update_fails_at_shutdown_and_empty_snapshot_clears(recordings_factory):
     archive = Recording()
-    writer = Writer(recordings_factory(archive=archive, live=None), Options())
+    writer = Writer(recordings_factory(archive=archive), Options())
     writer.handle(voxel(3, [], chunk_count=1))
     writer.tick(final=True)
     assert writer.voxels['plan/voxels'][0] == set()

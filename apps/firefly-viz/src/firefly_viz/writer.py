@@ -115,13 +115,14 @@ class Writer:
                 raise ValueError(f"invalid keypoints {name}")
             points = np.array([[p[0], p[1]] for p in msg.points[:n]], dtype=np.float32).reshape(-1, 2)
             ids = np.array([p[2] for p in msg.points[:n]], dtype=np.uint64)
-            self.rec.log(name, rr.Points2D(points, colors=list(msg.color), radii=2),
-                         rr.AnyValues(track_id=pa.array(ids, type=pa.uint64()),
-                                      image_width=int(width), image_height=int(height), total_keypoints=int(total)), strict=True)
-            if name == "okvis/debug/keypoints/left":
+            if name in ("okvis/debug/keypoints/left", "okvis/debug/keypoints/right"):
                 if (width, height) != (IMAGE_WIDTH, IMAGE_HEIGHT):
                     raise ValueError(f"keypoint resolution does not match camera: {name}")
                 self.recordings.matches.observe(name.rsplit("/", 1)[1], msg.timestamp, points, ids, list(msg.color))
+            else:
+                self.rec.log(name, rr.Points2D(points, colors=list(msg.color), radii=2),
+                             rr.AnyValues(track_id=pa.array(ids, type=pa.uint64()),
+                                          image_width=int(width), image_height=int(height), total_keypoints=int(total)), strict=True)
         elif kind == VIZ_KIND_MATRIX:
             rows, cols = msg.scalars[:2]
             n = count(msg.point_count, 3 * len(msg.points))
@@ -145,8 +146,6 @@ class Writer:
                                           vectors=list(map(list, msg.arrow_vectors[:n])), colors=list(msg.color)), strict=True)
         elif kind == VIZ_KIND_CLEAR:
             self.rec.log(name, rr.Clear(recursive=True), strict=True)
-            if self.recordings.live:
-                self.recordings.live.log(f"live/{name}", rr.Clear(recursive=True), static=True, strict=True)
             for key in list(self.voxels):
                 if key == name or key.startswith(name + "/"):
                     del self.voxels[key]
@@ -171,7 +170,7 @@ class Writer:
         self.rec.log(f"logs/{tag}", rr.TextLog(text, level={1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE"}.get(msg.log_level, "INFO")), strict=True)
 
     def _calibration(self, name, msg):
-        if name != "cameras/left":
+        if name not in ("cameras/left", "cameras/right"):
             raise ValueError("unknown calibrated camera")
         value = (*msg.xyz, *msg.quat_xyzw, *msg.scalars, *msg.points[0][:2])
         width, height = msg.points[0][:2]
@@ -226,7 +225,7 @@ class Writer:
                 raise ValueError("voxel entity budget exceeded")
             if msg.kind != VIZ_KIND_VOXELS:
                 raise ValueError("voxel delta arrived before its baseline")
-            self.voxels[name] = [set(), geometry, msg.timestamp, True, float("-inf"), float("-inf")]
+            self.voxels[name] = [set(), geometry, msg.timestamp, True, float("-inf")]
         state = self.voxels[name]
         if msg.timestamp < state[2]:
             raise ValueError("out-of-order voxel delta")
@@ -245,22 +244,15 @@ class Writer:
     def tick(self, *, final=False):
         now = time.monotonic()
         for name, state in self.voxels.items():
-            values, (size, origin), stamp, dirty, last, last_preview = state
+            values, (size, origin), stamp, dirty, last = state
             hz = self.options.capture.voxel_hz
-            preview_hz = self.options.capture.preview_hz
-            save = hz and dirty and (final or now - last >= 1 / hz)
-            preview = self.recordings.live and preview_hz and now - last_preview >= 1 / preview_hz
-            if not save and not preview:
+            if not (hz and dirty and (final or now - last >= 1 / hz)):
                 continue
             value = rr.VoxelGridMap(np.asarray(sorted(values), dtype=np.int32).reshape(-1, 3),
                                    size, translation=origin)
-            if save:
-                at(self.rec, stamp)
-                self.rec.log(name, value, strict=True)
-                state[3:5] = False, now
-            if preview:
-                self.recordings.live.log(f"live/{name}", value, static=True, strict=True)
-                state[5] = now
+            at(self.rec, stamp)
+            self.rec.log(name, value, strict=True)
+            state[3:5] = False, now
         if final or now - self.last_flush >= self.options.flush_seconds:
             # flush 在 writer 线程执行，接收端只受自己的有界队列约束。
             self.rec.flush(timeout_sec=self.options.shutdown_seconds)

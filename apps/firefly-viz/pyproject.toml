@@ -1,7 +1,7 @@
 [project]
 name = "firefly-viz"
 version = "0.1.0"
-description = "独立 Rerun 调试进程：诊断、H.265 左目视频、采样与事件窗口"
+description = "独立 Rerun 调试进程：诊断、双目 H.265 视频与同帧关键点"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

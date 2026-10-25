@@ -8,10 +8,9 @@ from firefly_viz.recording import MatchedPoints, RecordingOutputs
 
 @pytest.fixture
 def recordings_factory():
-    def create(*, archive, live=None, matches=None):
+    def create(*, archive, matches=None):
         outputs = create_autospec(RecordingOutputs, instance=True, spec_set=True)
         outputs.archive = archive
-        outputs.live = live
         outputs.matches = matches if matches is not None else create_autospec(
             MatchedPoints, instance=True, spec_set=True)
         return outputs

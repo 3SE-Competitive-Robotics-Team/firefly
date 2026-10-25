@@ -1,4 +1,4 @@
-"""按采集时间采样左目视频，管理编码器及有界媒体队列。"""
+"""按采集时间分别录制左右目视频，管理编码器及有界媒体队列。"""
 
 import math
 
@@ -26,7 +26,10 @@ class Rate:
 
 
 class Capture:
-    def __init__(self, recordings: RecordingOutputs, options):
+    def __init__(self, recordings: RecordingOutputs, options, camera):
+        if camera not in ("left", "right"):
+            raise ValueError("unknown video camera")
+        self.camera = camera
         self.recordings, self.options = recordings, options
         self.encoder = None
         self.shape = None
@@ -40,8 +43,8 @@ class Capture:
 
     def handle(self, frame):
         self.tick()
-        if frame.camera != "left":
-            raise ValueError("video input must be the left camera")
+        if frame.camera != self.camera:
+            raise ValueError(f"video input must be the {self.camera} camera")
         self.last_stamp = frame.stamp
         if not self.options.video.enabled:
             return
@@ -67,7 +70,7 @@ class Capture:
             except Exception as error:
                 errors.append(error)
             try:
-                self.recordings.health("video/frames", [self.accepted, self.encoder.emitted,
+                self.recordings.health(f"video/{self.camera}/frames", [self.accepted, self.encoder.emitted,
                                                         self.encoder.dropped, self.skipped], self.last_stamp)
             except Exception as error:
                 errors.append(error)
