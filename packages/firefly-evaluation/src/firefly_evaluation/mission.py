@@ -375,7 +375,12 @@ class Mission:
             def arrived():
                 nonlocal holding
                 if not self.planner_status_fresh():
-                    raise MissionFailure("planner status stale during tracking")
+                    status = self.planner_status
+                    raise MissionFailure(
+                        "planner status stale during tracking: "
+                        f"measurement_age_s={self.t - status[0] if status else None}, "
+                        f"receipt_age_s={time.monotonic() - status[3] if status else None}"
+                    )
                 if self.planner_status[1] != goal_timestamp:
                     raise MissionFailure("planner goal replaced during tracking")
                 if self.mode != 4 and not holding:

@@ -434,8 +434,22 @@ impl App {
 
     /// 执行回调：传感器 → 感知/动态地图 → 状态机 → 完整轨迹交付与可视化。
     #[fastrace::trace]
-    #[allow(clippy::too_many_lines)]
     fn step(&mut self) -> Result<()> {
+        self.exec_step()?;
+        // 执行状态独立于轨迹输出门控；地图预热期间仍报告新鲜状态。
+        if self.state_fresh {
+            self.output.status(
+                self.t_sim,
+                self.fsm.is_finished()
+                    && !self.fsm.is_emergency()
+                    && !self.fsm.is_mandatory_stopped(),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn exec_step(&mut self) -> Result<()> {
         self.state_fresh = false;
         self.output.heartbeat()?;
         // 先消费传感器（更新权威仿真时钟），再取当帧 sim 时刻
@@ -524,11 +538,6 @@ impl App {
         self.output.control(revision, true)?;
         let report = self.fsm.exec_tick(now, measured);
         self.handoff_trajectory()?;
-
-        self.output.status(
-            now,
-            self.fsm.is_finished() && !self.fsm.is_emergency() && !self.fsm.is_mandatory_stopped(),
-        )?;
 
         // 可视化：新轨迹 / 无人机位姿 / 动态障碍（经 Firefly/Viz 发布）
         if report.replanned

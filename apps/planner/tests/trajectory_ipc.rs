@@ -7,8 +7,9 @@ use firefly_pubsub::{
     reference::{REFERENCE_TOPIC, ReferenceMessage},
     subscriber::Subscriber,
     trajectory::{
-        PLANNER_HEARTBEAT_TOPIC, PlannerHeartbeatMessage, TRAJECTORY_CONTROL_TOPIC,
-        TRAJECTORY_TOPIC, TrajectoryControlMessage, TrajectoryPieceMessage,
+        PLANNER_HEARTBEAT_TOPIC, PLANNER_STATUS_TOPIC, PlannerHeartbeatMessage,
+        PlannerStatusMessage, TRAJECTORY_CONTROL_TOPIC, TRAJECTORY_TOPIC, TrajectoryControlMessage,
+        TrajectoryPieceMessage,
     },
 };
 use std::{
@@ -23,6 +24,59 @@ impl Drop for OutputProcess {
             .args(["-INT", &self.0.id().to_string()])
             .status();
         let _ = self.0.wait();
+    }
+}
+
+#[test]
+#[ignore = "requires release planner and exclusive Navigation/PlannerStatus/TrajectoryControl IPC topics"]
+fn planner_status_continues_during_map_warmup_and_coordinate_revision() {
+    let node = create_node().unwrap();
+    let navigation = Publisher::<NavigationMessage>::with_topic(&node, NAVIGATION_TOPIC).unwrap();
+    let statuses =
+        Subscriber::<PlannerStatusMessage>::with_topic(&node, PLANNER_STATUS_TOPIC).unwrap();
+    let controls =
+        Subscriber::<TrajectoryControlMessage>::with_topic(&node, TRAJECTORY_CONTROL_TOPIC)
+            .unwrap();
+    let binary =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/planner");
+    let mut process = OutputProcess(Command::new(binary).spawn().unwrap());
+    let mut stamp = 1.;
+    for revision in [0, 1] {
+        let start = Instant::now();
+        let mut received = 0;
+        let mut disabled = false;
+        while received < 5 || !disabled {
+            assert!(
+                start.elapsed() < Duration::from_secs(3),
+                "status stopped during map warmup, revision={revision}"
+            );
+            assert!(process.0.try_wait().unwrap().is_none());
+            stamp += 0.01;
+            navigation
+                .publish(NavigationMessage {
+                    odom: OdomMessage {
+                        timestamp: stamp,
+                        is_initialized: true,
+                        ..OdomMessage::default()
+                    },
+                    revision,
+                    rotation: [0., 0., 0., 1.],
+                    ..NavigationMessage::default()
+                })
+                .unwrap();
+            while let Some(status) = statuses.receive().unwrap() {
+                assert_eq!(status.finished, 0);
+                assert!(status.timestamp <= stamp && stamp - status.timestamp < 0.3);
+                received += 1;
+            }
+            while let Some(control) = controls.receive().unwrap() {
+                if control.revision == revision {
+                    assert_eq!(control.enabled, 0, "depth-free map cannot enable output");
+                    disabled = true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
