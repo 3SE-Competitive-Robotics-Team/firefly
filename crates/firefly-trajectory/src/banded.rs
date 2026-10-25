@@ -65,6 +65,8 @@ pub struct BandedPlu {
 
 impl BandedPlu {
     /// 带形 LU 分解（官方 `BandedSystem::factorizeLU` 逻辑）。
+    /// 生产路径用 [`Self::factorize_owned`]；借用版本留给测试。
+    #[cfg(test)]
     pub fn factorize(a: &BandedMatrix) -> Result<Self> {
         Self::factor_in_place(a.n, a.lower_bw, a.upper_bw, a.data.clone())
     }
@@ -193,6 +195,7 @@ pub struct BandedSolver {
 }
 
 impl BandedSolver {
+    #[cfg(test)]
     pub fn new(a: &BandedMatrix) -> Result<Self> {
         Ok(Self {
             plu: BandedPlu::factorize(a)?,
@@ -219,6 +222,7 @@ impl BandedSolver {
         }
     }
 
+    #[cfg(test)]
     pub fn solve_transpose(&self, rhs: &DMatrix<f64>) -> DMatrix<f64> {
         let mut out = rhs.clone();
         self.solve_transpose_in_place(&mut out);
