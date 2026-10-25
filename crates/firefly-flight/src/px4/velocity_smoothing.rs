@@ -53,8 +53,6 @@ impl Default for VelocitySmoothing {
     }
 }
 
-// PX4 的私有成员函数保留 `&self` 形式，便于与参考实现逐行对照。
-#[allow(clippy::unused_self)]
 impl VelocitySmoothing {
     /// 以初始加速度/速度/位置构造。
     #[must_use]
@@ -102,7 +100,7 @@ impl VelocitySmoothing {
         let mut t_remain = self.local_time;
 
         let t1 = t_remain.min(self.t1);
-        self.state = self.evaluate_poly(
+        self.state = evaluate_poly(
             self.max_jerk,
             self.state_init.a,
             self.state_init.v,
@@ -114,13 +112,13 @@ impl VelocitySmoothing {
 
         if t_remain > 0.0 {
             let t2 = t_remain.min(self.t2);
-            self.state = self.evaluate_poly(0.0, self.state.a, self.state.v, self.state.x, t2, 0);
+            self.state = evaluate_poly(0.0, self.state.a, self.state.v, self.state.x, t2, 0);
             t_remain -= t2;
         }
 
         if t_remain > 0.0 {
             let t3 = t_remain.min(self.t3);
-            self.state = self.evaluate_poly(
+            self.state = evaluate_poly(
                 self.max_jerk,
                 self.state.a,
                 self.state.v,
@@ -132,7 +130,7 @@ impl VelocitySmoothing {
         }
 
         if t_remain > 0.0 {
-            self.state = self.evaluate_poly(0.0, 0.0, self.state.v, self.state.x, t_remain, 0);
+            self.state = evaluate_poly(0.0, 0.0, self.state.v, self.state.x, t_remain, 0);
         }
     }
 
@@ -247,91 +245,6 @@ impl VelocitySmoothing {
         self.t1 + self.t2 + self.t3
     }
 
-    fn saturate_t1_for_accel(&self, a0: f32, jerk_max: f32, t1: f32, accel_max: f32) -> f32 {
-        let accel_t1 = a0 + jerk_max * t1;
-        let mut t1_new = t1;
-        if accel_t1 > accel_max {
-            t1_new = (accel_max - a0) / jerk_max;
-        } else if accel_t1 < -accel_max {
-            t1_new = (-accel_max - a0) / jerk_max;
-        }
-        t1_new
-    }
-
-    fn compute_t1(&self, a0: f32, v3: f32, jerk_max: f32, accel_max: f32) -> f32 {
-        let delta = 2.0 * a0 * a0 + 4.0 * jerk_max * v3;
-        if delta < 0.0 {
-            return 0.0;
-        }
-        let sqrt_delta = delta.sqrt();
-        let t1_plus = (-a0 + 0.5 * sqrt_delta) / jerk_max;
-        let t1_minus = (-a0 - 0.5 * sqrt_delta) / jerk_max;
-        let t3_plus = a0 / jerk_max + t1_plus;
-        let t3_minus = a0 / jerk_max + t1_minus;
-        let t1 = if t1_plus >= 0.0 && t3_plus >= 0.0 {
-            t1_plus
-        } else if t1_minus >= 0.0 && t3_minus >= 0.0 {
-            t1_minus
-        } else {
-            0.0
-        };
-        self.saturate_t1_for_accel(a0, jerk_max, t1, accel_max)
-            .max(0.0)
-    }
-
-    fn compute_t1_with_total_time(
-        &self,
-        t123: f32,
-        a0: f32,
-        v3: f32,
-        jerk_max: f32,
-        accel_max: f32,
-    ) -> f32 {
-        let a = -jerk_max;
-        let b = jerk_max * t123 - a0;
-        let delta = t123 * t123 * jerk_max * jerk_max + 2.0 * t123 * a0 * jerk_max
-            - a0 * a0
-            - 4.0 * jerk_max * v3;
-        if delta < 0.0 {
-            return 0.0;
-        }
-        let sqrt_delta = delta.sqrt();
-        let denominator_inv = 1.0 / (2.0 * a);
-        let t1_plus = ((-b + sqrt_delta) * denominator_inv).max(0.0);
-        let t1_minus = ((-b - sqrt_delta) * denominator_inv).max(0.0);
-        let t3_plus = a0 / jerk_max + t1_plus;
-        let t3_minus = a0 / jerk_max + t1_minus;
-        let t1 = if (t1_plus >= 0.0 && t3_plus >= 0.0) && ((t1_plus + t3_plus) <= t123) {
-            t1_plus
-        } else if (t1_minus >= 0.0 && t3_minus >= 0.0) && ((t1_minus + t3_minus) <= t123) {
-            t1_minus
-        } else {
-            0.0
-        };
-        self.saturate_t1_for_accel(a0, jerk_max, t1, accel_max)
-    }
-
-    fn compute_t2(&self, t1: f32, t3: f32, a0: f32, v3: f32, jerk_max: f32) -> f32 {
-        let mut t2 = 0.0;
-        let den = a0 + jerk_max * t1;
-        if den.abs() > f32::EPSILON {
-            t2 = (-0.5 * t1 * t1 * jerk_max - t1 * t3 * jerk_max - t1 * a0
-                + 0.5 * t3 * t3 * jerk_max
-                - t3 * a0
-                + v3)
-                / den;
-        }
-        t2.max(0.0)
-    }
-
-    fn compute_t2_with_total_time(&self, t123: f32, t1: f32, t3: f32) -> f32 {
-        (t123 - t1 - t3).max(0.0)
-    }
-
-    fn compute_t3(&self, t1: f32, a0: f32, jerk_max: f32) -> f32 {
-        (a0 / jerk_max + t1).max(0.0)
-    }
-
     fn compute_direction(&self) -> i32 {
         let vel_zero_acc = self.compute_vel_at_zero_acc();
         let mut direction = sign(self.vel_sp - vel_zero_acc);
@@ -357,9 +270,9 @@ impl VelocitySmoothing {
         let jerk_max_t1 = self.direction as f32 * self.max_jerk;
         let delta_v = self.vel_sp - self.state.v;
         if jerk_max_t1.abs() > f32::EPSILON {
-            self.t1 = self.compute_t1(self.state.a, delta_v, jerk_max_t1, self.max_accel);
-            self.t3 = self.compute_t3(self.t1, self.state.a, jerk_max_t1);
-            self.t2 = self.compute_t2(self.t1, self.t3, self.state.a, delta_v, jerk_max_t1);
+            self.t1 = compute_t1(self.state.a, delta_v, jerk_max_t1, self.max_accel);
+            self.t3 = compute_t3(self.t1, self.state.a, jerk_max_t1);
+            self.t2 = compute_t2(self.t1, self.t3, self.state.a, delta_v, jerk_max_t1);
         } else {
             self.t1 = 0.0;
             self.t2 = 0.0;
@@ -371,39 +284,19 @@ impl VelocitySmoothing {
         let jerk_max_t1 = self.direction as f32 * self.max_jerk;
         let delta_v = self.vel_sp - self.state.v;
         if jerk_max_t1.abs() > f32::EPSILON {
-            self.t1 = self.compute_t1_with_total_time(
+            self.t1 = compute_t1_with_total_time(
                 t123,
                 self.state.a,
                 delta_v,
                 jerk_max_t1,
                 self.max_accel,
             );
-            self.t3 = self.compute_t3(self.t1, self.state.a, jerk_max_t1);
-            self.t2 = self.compute_t2_with_total_time(t123, self.t1, self.t3);
+            self.t3 = compute_t3(self.t1, self.state.a, jerk_max_t1);
+            self.t2 = compute_t2_with_total_time(t123, self.t1, self.t3);
         } else {
             self.t1 = 0.0;
             self.t2 = 0.0;
             self.t3 = 0.0;
-        }
-    }
-
-    fn evaluate_poly(
-        &self,
-        jerk: f32,
-        a0: f32,
-        v0: f32,
-        x0: f32,
-        t: f32,
-        direction: i32,
-    ) -> Trajectory {
-        let jt = direction as f32 * jerk;
-        let t2 = t * t;
-        let t3 = t2 * t;
-        Trajectory {
-            j: jt,
-            a: a0 + jt * t,
-            v: v0 + a0 * t + 0.5 * jt * t2,
-            x: x0 + v0 * t + 0.5 * a0 * t2 + 1.0 / 6.0 * jt * t3,
         }
     }
 }
@@ -416,6 +309,95 @@ fn sign(value: f32) -> i32 {
     } else {
         0
     }
+}
+
+// 以下四个是无状态的纯函数（只用参数），从 PX4 的成员函数拆出到模块作用域：
+// 它们不读 `self`，留在 `impl` 里只会让类型职责变模糊。
+
+fn compute_t1(a0: f32, v3: f32, jerk_max: f32, accel_max: f32) -> f32 {
+    let delta = 2.0 * a0 * a0 + 4.0 * jerk_max * v3;
+    if delta < 0.0 {
+        return 0.0;
+    }
+    let sqrt_delta = delta.sqrt();
+    let t1_plus = (-a0 + 0.5 * sqrt_delta) / jerk_max;
+    let t1_minus = (-a0 - 0.5 * sqrt_delta) / jerk_max;
+    let t3_plus = a0 / jerk_max + t1_plus;
+    let t3_minus = a0 / jerk_max + t1_minus;
+    let t1 = if t1_plus >= 0.0 && t3_plus >= 0.0 {
+        t1_plus
+    } else if t1_minus >= 0.0 && t3_minus >= 0.0 {
+        t1_minus
+    } else {
+        0.0
+    };
+    saturate_t1_for_accel(a0, jerk_max, t1, accel_max).max(0.0)
+}
+fn compute_t1_with_total_time(t123: f32, a0: f32, v3: f32, jerk_max: f32, accel_max: f32) -> f32 {
+    let a = -jerk_max;
+    let b = jerk_max * t123 - a0;
+    let delta = t123 * t123 * jerk_max * jerk_max + 2.0 * t123 * a0 * jerk_max
+        - a0 * a0
+        - 4.0 * jerk_max * v3;
+    if delta < 0.0 {
+        return 0.0;
+    }
+    let sqrt_delta = delta.sqrt();
+    let denominator_inv = 1.0 / (2.0 * a);
+    let t1_plus = ((-b + sqrt_delta) * denominator_inv).max(0.0);
+    let t1_minus = ((-b - sqrt_delta) * denominator_inv).max(0.0);
+    let t3_plus = a0 / jerk_max + t1_plus;
+    let t3_minus = a0 / jerk_max + t1_minus;
+    let t1 = if (t1_plus >= 0.0 && t3_plus >= 0.0) && ((t1_plus + t3_plus) <= t123) {
+        t1_plus
+    } else if (t1_minus >= 0.0 && t3_minus >= 0.0) && ((t1_minus + t3_minus) <= t123) {
+        t1_minus
+    } else {
+        0.0
+    };
+    saturate_t1_for_accel(a0, jerk_max, t1, accel_max)
+}
+fn evaluate_poly(jerk: f32, a0: f32, v0: f32, x0: f32, t: f32, direction: i32) -> Trajectory {
+    let jt = direction as f32 * jerk;
+    let t2 = t * t;
+    let t3 = t2 * t;
+    Trajectory {
+        j: jt,
+        a: a0 + jt * t,
+        v: v0 + a0 * t + 0.5 * jt * t2,
+        x: x0 + v0 * t + 0.5 * a0 * t2 + 1.0 / 6.0 * jt * t3,
+    }
+}
+
+fn saturate_t1_for_accel(a0: f32, jerk_max: f32, t1: f32, accel_max: f32) -> f32 {
+    let accel_t1 = a0 + jerk_max * t1;
+    let mut t1_new = t1;
+    if accel_t1 > accel_max {
+        t1_new = (accel_max - a0) / jerk_max;
+    } else if accel_t1 < -accel_max {
+        t1_new = (-accel_max - a0) / jerk_max;
+    }
+    t1_new
+}
+
+fn compute_t2(t1: f32, t3: f32, a0: f32, v3: f32, jerk_max: f32) -> f32 {
+    let mut t2 = 0.0;
+    let den = a0 + jerk_max * t1;
+    if den.abs() > f32::EPSILON {
+        t2 = (-0.5 * t1 * t1 * jerk_max - t1 * t3 * jerk_max - t1 * a0 + 0.5 * t3 * t3 * jerk_max
+            - t3 * a0
+            + v3)
+            / den;
+    }
+    t2.max(0.0)
+}
+
+fn compute_t2_with_total_time(t123: f32, t1: f32, t3: f32) -> f32 {
+    (t123 - t1 - t3).max(0.0)
+}
+
+fn compute_t3(t1: f32, a0: f32, jerk_max: f32) -> f32 {
+    (a0 / jerk_max + t1).max(0.0)
 }
 
 #[cfg(test)]
