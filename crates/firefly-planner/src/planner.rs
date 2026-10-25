@@ -8,8 +8,7 @@
 //! 5. 无新障碍时返回轨迹
 
 use firefly_cost::{
-    Cost, FeasibilityPenalty, FormationPenalty, ObstaclePenalty, SmoothnessPenalty, SwarmPenalty,
-    TimePenalty, UniformPenalty,
+    FeasibilityPenalty, FormationPenalty, MincoCost, ObstaclePenalty, SwarmPenalty,
 };
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_map::{GridMap, Plane};
@@ -455,7 +454,7 @@ impl Planner {
             );
             // 取回含新平面（roughly check 就地追加）的平面池
             planes_by_point = objective.take_planes();
-            // 无论是否 early exit，都从当前解继续（官方 lbfgs 就地更新 x）
+            // 沿用 final_x；取消时它是上游撤销未接受试探后的最后接受点。
             minco = objective.rebuild(&report.final_x)?;
             if report.early_exit {
                 // 官方 STOP_FOR_REBOUND：约束已变，重新优化
@@ -881,21 +880,12 @@ impl Planner {
         gate_latched: bool,
     ) -> MincoObjective<'a> {
         let k = self.config.constraint_points_per_piece;
-        let mut cost = Cost::new()
-            .with_samples(k)
-            .add(self.config.weight_smoothness, SmoothnessPenalty)
-            .add(self.config.weight_time, TimePenalty)
-            .add(
-                self.config.weight_feasibility,
-                // 官方:V/A/J 三项惩罚(K=κ=5,梯形权重,不截断)
-                FeasibilityPenalty::new(
-                    self.config.max_velocity,
-                    self.config.max_acceleration,
-                    self.config.max_jerk,
-                )
-                .with_samples(k),
-            )
-            .add(
+        // 两份平面分别归本轮代价快照与 Detector 所有；新增平面仅供下一轮。
+        let cost = MincoCost {
+            samples_per_piece: k,
+            weight_smoothness: self.config.weight_smoothness,
+            weight_time: self.config.weight_time,
+            obstacle: Some((
                 1.0,
                 ObstaclePenalty::new(
                     self.config.obstacle_clearance,
@@ -906,35 +896,38 @@ impl Planner {
                     planes_by_point.to_vec(),
                 )
                 .with_two_thirds(two_thirds),
-            )
-            .add(
-                // 官方代价与梯度同源使用 wei_swarm_mod_：收敛但间距不足的
-                // restart 逐次倍增，对避碰项指数加权直到解出安全间距
+            )),
+            swarm: Some((
                 self.config.weight_swarm * self.last_swarm_weight_mod,
                 SwarmPenalty::new(self.config.swarm_clearance, 2.0, 1.0, peers.to_vec())
                     .with_samples(k)
                     .with_two_thirds(two_thirds),
-            )
-            // 约束点均匀分布:官方 weight_sqrvariance,防段时长消失与薄障碍漏检
-            .add(
-                self.config.weight_sqrvariance,
-                UniformPenalty::new().with_samples(k),
-            );
-        // 队形保持（可选）：目标点从其他机位置动态推断（官方语义）
-        if let Some(f) = &self.formation {
-            cost = cost.add(
-                self.config.weight_formation,
-                FormationPenalty::new(
-                    f.line_start,
-                    f.line_end,
-                    f.offsets.clone(),
-                    f.self_id,
-                    f.peers.clone(),
+            )),
+            feasibility: Some((
+                self.config.weight_feasibility,
+                FeasibilityPenalty::new(
+                    self.config.max_velocity,
+                    self.config.max_acceleration,
+                    self.config.max_jerk,
                 )
-                .with_samples(k)
-                .with_two_thirds(two_thirds),
-            );
-        }
+                .with_samples(k),
+            )),
+            weight_sqrvariance: self.config.weight_sqrvariance,
+            formation: self.formation.as_ref().map(|formation| {
+                (
+                    self.config.weight_formation,
+                    FormationPenalty::new(
+                        formation.line_start,
+                        formation.line_end,
+                        formation.offsets.clone(),
+                        formation.self_id,
+                        formation.peers.clone(),
+                    )
+                    .with_samples(k)
+                    .with_two_thirds(two_thirds),
+                )
+            }),
+        };
         MincoObjective::new(start, end, pieces, cost).with_detector(
             &self.map,
             k,

@@ -107,6 +107,21 @@ impl Penalty for FeasibilityPenalty {
     }
 }
 
+/// 对照官方 feasibilityGradCostV/A/J；未激活时跳过系数与时间映射。
+pub(crate) fn grad_cost(
+    value: Vector3<f64>,
+    limit: f64,
+    weight: f64,
+) -> Option<(f64, Vector3<f64>)> {
+    let excess = value.norm_squared() - limit * limit;
+    (excess > 0.0).then(|| {
+        (
+            weight * excess * excess * excess,
+            weight * 6.0 * excess * excess * value,
+        )
+    })
+}
+
 /// f(c²) = max{(c²−cm²),0}³ 对 c 的梯度:6·max{(c²−cm²),0}²·c
 fn derivative(c: Vector3<f64>, limit: f64) -> Vector3<f64> {
     let excess = c.norm_squared() - limit * limit;

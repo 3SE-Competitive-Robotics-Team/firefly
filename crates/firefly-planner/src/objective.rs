@@ -11,8 +11,7 @@
 //! 沿数组 in/out 自由点搜索 + A\* 绕障 + 交点平面,命中即提前终止
 //! (官方 `STOP_FOR_REBOUND`),由外层吸收新平面后重新优化。
 
-use firefly_cost::Samples;
-use firefly_cost::{Accumulator, Cost};
+use firefly_cost::{Accumulator, MincoCost};
 use firefly_map::{GridMap, Plane};
 use firefly_optimize::Objective;
 use firefly_trajectory::{Endpoint, Minco, MincoBuilder, SolverOrder};
@@ -63,7 +62,7 @@ pub struct ReboundDetector<'a> {
     /// 官方 `use_multitopology_trajs`:开启时按 criterion 3 门控检测。
     multitopo: bool,
     /// 官方 `initial_obstacles_avoided`:初始障碍已避开的锁存位
-    /// 锁存至下一次内层优化开始，并在该处复位。
+    /// 同一次完整优化的内层重启共享；新一次完整优化开始时复位。
     gate_latched: bool,
 }
 
@@ -144,11 +143,15 @@ pub struct MincoObjective<'a> {
     start: Endpoint,
     end: Endpoint,
     pieces: usize,
-    cost: Cost,
-    // 只缓存参数映射与轨迹；每次回调重新应用当前代价项。
-    cache: Option<(DVector<f64>, Minco, firefly_trajectory::Trajectory, Samples)>,
+    // 本轮优化的约束快照；Detector 追加平面不修改此处的代价或梯度输入。
+    cost: MincoCost,
+    // 复用 MINCO 和轨迹缓冲；联合回调每次重新生成系数并应用当前代价项。
+    cache: Option<(DVector<f64>, Minco, firefly_trajectory::Trajectory)>,
+    // 平面池归检测器独占，新增约束由 take_planes 交给下一轮目标。
     detector: Option<ReboundDetector<'a>>,
     eval_count: usize,
+    gradient_count: usize,
+    lu_count: usize,
     early_exit: bool,
     acc: Accumulator,
     points: Vec<Point3<f64>>,
@@ -163,7 +166,7 @@ pub struct MincoObjective<'a> {
 
 impl<'a> MincoObjective<'a> {
     #[must_use]
-    pub fn new(start: Endpoint, end: Endpoint, pieces: usize, cost: Cost) -> Self {
+    pub fn new(start: Endpoint, end: Endpoint, pieces: usize, cost: MincoCost) -> Self {
         Self {
             start,
             end,
@@ -172,6 +175,8 @@ impl<'a> MincoObjective<'a> {
             cache: None,
             detector: None,
             eval_count: 0,
+            gradient_count: 0,
+            lu_count: 0,
             early_exit: false,
             acc: Accumulator::new(pieces),
             points: Vec::with_capacity(pieces.saturating_sub(1)),
@@ -181,6 +186,12 @@ impl<'a> MincoObjective<'a> {
             scratch_dt: DVector::zeros(pieces),
             detector_points: Vec::new(),
         }
+    }
+
+    /// (代价求值次数，完整梯度次数，成功 LU 分解次数)。
+    #[must_use]
+    pub fn evaluation_counts(&self) -> (usize, usize, usize) {
+        (self.eval_count, self.gradient_count, self.lu_count)
     }
 
     /// 挂载内循环碰撞检测(官方 `allowRebound` 三判据；
@@ -218,7 +229,8 @@ impl<'a> MincoObjective<'a> {
             .is_some_and(ReboundDetector::gate_latched)
     }
 
-    /// 取走本轮优化后的完整平面池(含检测到的新平面)。
+    /// 取走本轮优化后的完整平面池（含检测到的新平面），交给下一轮目标。
+    /// 本轮目标只供结束后的诊断读取，不得取走平面池后继续优化。
     pub fn take_planes(&mut self) -> Vec<Vec<Plane>> {
         match &mut self.detector {
             Some(d) => d.take_planes(),
@@ -226,33 +238,43 @@ impl<'a> MincoObjective<'a> {
         }
     }
 
-    /// 缓存轨迹及同一时长的 LU；代价与梯度由各回调重新计算。
-    fn solve_cached(&mut self, x: &DVector<f64>) -> Option<()> {
-        if self
-            .cache
-            .as_ref()
-            .is_some_and(|(last_x, _, _, _)| last_x == x)
-        {
-            return Some(());
-        }
+    /// MINCO generate：每次联合回调重新求系数，时长不变时复用 LU。
+    fn generate(&mut self, x: &DVector<f64>) -> Option<()> {
         self.unpack_into(x);
-        let k = self.cost.samples_per_piece();
-        if let Some((last_x, minco, traj, samples)) = &mut self.cache {
+        if let Some((last_x, minco, traj)) = &mut self.cache {
+            let times_changed = self
+                .scratch_t
+                .iter()
+                .enumerate()
+                .any(|(i, duration)| *duration != minco.piece_duration(i));
             minco
                 .update(self.start, self.end, &self.points, &self.scratch_t)
                 .ok()?;
+            self.lu_count += usize::from(times_changed);
             minco.solve_into(traj).ok()?;
-            samples.rebuild(traj, k);
             last_x.clone_from(x);
         } else {
             let minco = MincoBuilder::new(SolverOrder::MinimumJerk, self.start, self.end)
                 .build(&self.points, &self.scratch_t)
                 .ok()?;
+            self.lu_count += 1;
             let traj = minco.solve().ok()?;
-            let samples = Samples::new(&traj, k);
-            self.cache = Some((x.clone(), minco, traj, samples));
+            self.cache = Some((x.clone(), minco, traj));
         }
         Some(())
+    }
+
+    /// 独立测试回调共用同一条轨迹，代价和梯度仍各自计算。
+    fn solve_cached(&mut self, x: &DVector<f64>) -> Option<()> {
+        if self
+            .cache
+            .as_ref()
+            .is_some_and(|(last_x, _, _)| last_x == x)
+        {
+            Some(())
+        } else {
+            self.generate(x)
+        }
     }
 
     /// 就地展开参数：复用 `points` 与 `scratch_t`，不产生中间 `Vec`。
@@ -294,6 +316,7 @@ impl<'a> MincoObjective<'a> {
         MincoBuilder::new(SolverOrder::MinimumJerk, self.start, self.end).build(&points, &t)
     }
 
+    /// 打包独立测试接口的梯度，dt 已包含时间项。
     #[must_use]
     pub fn pack(&self, dq: &DMatrix<f64>, dt: &DVector<f64>, vt: &[f64]) -> DVector<f64> {
         let mut g = DVector::zeros(3 * (self.pieces - 1) + self.pieces);
@@ -329,21 +352,71 @@ fn constraint_points_straight_enough(points: &[Vector3<f64>]) -> bool {
 }
 
 impl Objective for MincoObjective<'_> {
+    /// 对照上游 costFunctionCallback 的执行顺序。
+    #[fastrace::trace]
+    fn evaluate_gradient(&mut self, x: &DVector<f64>, gradient: &mut DVector<f64>) -> f64 {
+        gradient.resize_vertically_mut(x.len(), 0.0);
+        let Some(()) = self.generate(x) else {
+            gradient.fill(0.0);
+            return f64::INFINITY;
+        };
+        let (_, minco, traj) = self.cache.as_ref().expect("solved trajectory");
+        let smoothness_cost = self
+            .cost
+            .init_and_get_smoothness_grad_cost(traj, &mut self.acc);
+        let costs = self
+            .cost
+            .add_pvaj_grad_cost(traj, &mut self.acc, &mut self.detector_points);
+        if self.eval_count >= 3
+            && let Some(detector) = &mut self.detector
+            && detector.check_points(&self.detector_points)
+        {
+            self.early_exit = true;
+        }
+        // 检测只更新下一轮的平面池；本次伴随传播使用惩罚累加时的同一快照。
+        let propagated = minco.propagate_gradient_into(
+            traj,
+            &self.acc.d_f_d_c,
+            &self.acc.d_f_d_t,
+            &mut self.scratch_g,
+            &mut self.scratch_dq,
+            &mut self.scratch_dt,
+        );
+        if propagated.is_err() {
+            gradient.fill(0.0);
+            return f64::INFINITY;
+        }
+        let n_q = 3 * (self.pieces - 1);
+        for i in 0..self.pieces - 1 {
+            for dim in 0..3 {
+                gradient[3 * i + dim] = self.scratch_dq[(dim, i)];
+            }
+        }
+        for i in 0..self.pieces {
+            gradient[n_q + i] =
+                (self.scratch_dt[i] + self.cost.weight_time) * d_real_d_virtual(x[n_q + i]);
+        }
+        let time_cost = traj.duration() * self.cost.weight_time;
+        self.gradient_count += 1;
+        self.eval_count += 1;
+        smoothness_cost + costs.iter().sum::<f64>() + time_cost
+    }
+
     fn evaluate(&mut self, x: &DVector<f64>) -> f64 {
         self.eval_count += 1;
         let Some(()) = self.solve_cached(x) else {
             return f64::INFINITY;
         };
-        let (_, _, traj, samples) = self.cache.as_ref().expect("solved trajectory");
+        let (_, _, traj) = self.cache.as_ref().expect("solved trajectory");
         if self.eval_count > 3 {
-            samples.unique_positions(&mut self.detector_points);
+            self.detector_points = constraint_sample_points(traj, self.cost.samples_per_piece);
             if let Some(detector) = &mut self.detector
                 && detector.check_points(&self.detector_points)
             {
                 self.early_exit = true;
             }
         }
-        self.cost.evaluate_with(traj, samples)
+        self.cost.evaluate(traj)
     }
 
     fn early_exit(&self) -> bool {
@@ -354,8 +427,8 @@ impl Objective for MincoObjective<'_> {
         let Some(()) = self.solve_cached(x) else {
             return DVector::zeros(3 * (self.pieces - 1) + self.pieces);
         };
-        let (_, minco, traj, samples) = self.cache.as_ref().expect("solved trajectory");
-        self.cost.gradient_into_with(traj, samples, &mut self.acc);
+        let (_, minco, traj) = self.cache.as_ref().expect("solved trajectory");
+        self.cost.gradient_into(traj, &mut self.acc);
         let propagated = minco.propagate_gradient_into(
             traj,
             &self.acc.d_f_d_c,
@@ -367,6 +440,7 @@ impl Objective for MincoObjective<'_> {
         if propagated.is_err() {
             return DVector::zeros(3 * (self.pieces - 1) + self.pieces);
         }
+        self.gradient_count += 1;
         let n_q = 3 * (self.pieces - 1);
         self.pack(&self.scratch_dq, &self.scratch_dt, &x.as_slice()[n_q..])
     }
@@ -378,8 +452,179 @@ mod tests {
     use firefly_map::{GridMapBuilder, VoxelState};
 
     #[test]
-    fn callbacks_share_trajectory_but_recompute_changed_cost() {
-        use firefly_cost::{SmoothnessPenalty, TimePenalty};
+    #[allow(clippy::too_many_lines)]
+    fn joint_callback_matches_pinned_cpp_and_constraint_points() {
+        use firefly_cost::{FeasibilityPenalty, ObstaclePenalty, Peer, SwarmPenalty};
+        let mut fixture = include_str!("../../firefly-cost/tests/reference/ego_callback.txt")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .flat_map(str::split_whitespace)
+            .map(|value| value.parse::<f64>().unwrap());
+        let close = |actual: f64, expected: f64| {
+            assert!(
+                (actual - expected).abs() <= 2e-9 * expected.abs().max(1.0),
+                "actual={actual:.17e}, upstream={expected:.17e}"
+            );
+        };
+        let start = Endpoint {
+            position: Vector3::zeros(),
+            velocity: Vector3::new(0.5, -0.2, 0.1),
+            acceleration: Vector3::new(0.1, 0.0, -0.1),
+        };
+        let end = Endpoint {
+            position: Vector3::new(4.0, 2.0, 1.0),
+            velocity: Vector3::new(0.2, 0.1, -0.1),
+            acceleration: Vector3::new(0.0, -0.1, 0.0),
+        };
+        let peer_start = Endpoint {
+            position: Vector3::new(1.8, 0.9, 0.4),
+            velocity: Vector3::new(0.2, -0.1, 0.05),
+            acceleration: Vector3::zeros(),
+        };
+        let peer_end = Endpoint {
+            position: Vector3::new(2.1, 1.1, 0.5),
+            velocity: Vector3::new(0.3, 0.1, -0.05),
+            ..peer_start
+        };
+        let peer_trajectory = MincoBuilder::new(SolverOrder::MinimumJerk, peer_start, peer_end)
+            .build(&[], &[1.4])
+            .unwrap()
+            .solve()
+            .unwrap();
+        let x = DVector::from_vec(vec![
+            1.5,
+            0.8,
+            0.3,
+            2.8,
+            1.5,
+            0.6,
+            real_to_virtual(0.8),
+            real_to_virtual(1.0),
+            real_to_virtual(1.2),
+        ]);
+        for variant in 0..3 {
+            let cutoff = if variant == 1 { 15 } else { 11 };
+            let limits = if variant == 2 {
+                [1e9; 3]
+            } else {
+                [1.2, 2.0, 4.0]
+            };
+            let planes = (0..16)
+                .map(|index| {
+                    if index % 4 == 0 {
+                        Vec::new()
+                    } else {
+                        vec![
+                            Plane::new(Vector3::new(1.0, 0.3, 0.2), Vector3::x()),
+                            Plane::new(Vector3::new(0.0, 1.6, 0.0), -Vector3::y()),
+                        ]
+                    }
+                })
+                .collect();
+            let cost = MincoCost {
+                weight_smoothness: 1.2,
+                weight_time: 0.4,
+                weight_sqrvariance: 0.8,
+                obstacle: Some((
+                    1.0,
+                    ObstaclePenalty::new(
+                        if variant == 2 { -100.0 } else { 0.1 },
+                        if variant == 2 { -100.0 } else { 0.5 },
+                        2.3,
+                        0.7,
+                        5,
+                        planes,
+                    )
+                    .with_two_thirds(cutoff),
+                )),
+                swarm: Some((
+                    1.7,
+                    SwarmPenalty::new(
+                        0.5,
+                        2.0,
+                        1.0,
+                        vec![Peer::new(1, 0.15, peer_trajectory.clone(), 0.45)],
+                    )
+                    .with_two_thirds(cutoff),
+                )),
+                feasibility: Some((
+                    0.3,
+                    FeasibilityPenalty::new(limits[0], limits[1], limits[2]),
+                )),
+                ..MincoCost::default()
+            };
+            let mut objective = MincoObjective::new(start, end, 3, cost);
+            let mut gradient = DVector::zeros(0);
+            close(
+                objective.evaluate_gradient(&x, &mut gradient),
+                fixture.next().unwrap(),
+            );
+            for dim in 0..3 {
+                for waypoint in 0..2 {
+                    close(gradient[waypoint * 3 + dim], fixture.next().unwrap());
+                }
+            }
+            for i in 0..3 {
+                close(gradient[6 + i], fixture.next().unwrap());
+            }
+            for dim in 0..3 {
+                for point in &objective.detector_points {
+                    close(point[dim], fixture.next().unwrap());
+                }
+            }
+            assert_eq!(objective.evaluation_counts(), (1, 1, 1));
+        }
+        assert!(fixture.next().is_none());
+    }
+
+    #[test]
+    fn rebound_keeps_current_snapshot_and_passes_planes_to_next_objective() {
+        use firefly_cost::ObstaclePenalty;
+        let map = wall_map();
+        let start = Endpoint {
+            position: Vector3::new(1.0, 0.5, 0.5),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let end = Endpoint {
+            position: Vector3::new(9.0, 0.5, 0.5),
+            ..start
+        };
+        let make_cost = |planes| MincoCost {
+            weight_smoothness: 1.0,
+            weight_time: 0.3,
+            obstacle: Some((1.0, ObstaclePenalty::new(0.1, 0.5, 2.0, 5.0, 5, planes))),
+            ..MincoCost::default()
+        };
+        let mut objective = MincoObjective::new(start, end, 1, make_cost(vec![Vec::new(); 6]))
+            .with_detector(&map, 5, 10.0, false, vec![Vec::new(); 6], false, false);
+        let mut reference = MincoObjective::new(start, end, 1, make_cost(vec![Vec::new(); 6]));
+        let x = DVector::from_vec(vec![real_to_virtual(4.0)]);
+        let mut gradient = DVector::zeros(1);
+        let mut expected_gradient = DVector::zeros(1);
+        let expected_cost = reference.evaluate_gradient(&x, &mut expected_gradient);
+        for call in 1..=4 {
+            assert_eq!(
+                objective.evaluate_gradient(&x, &mut gradient),
+                expected_cost
+            );
+            assert_eq!(gradient, expected_gradient);
+            assert_eq!(objective.early_exit(), call == 4);
+            assert_eq!(objective.evaluation_counts(), (call, call, 1));
+        }
+        assert!((objective.evaluate(&x) - expected_cost).abs() < 1e-10);
+        assert!((objective.gradient(&x) - &expected_gradient).amax() < 1e-10);
+        let planes = objective.take_planes();
+        assert!(planes.iter().any(|point| !point.is_empty()));
+        let mut next = MincoObjective::new(start, end, 1, make_cost(planes));
+        let updated_cost = next.evaluate_gradient(&x, &mut gradient);
+        assert!(updated_cost > expected_cost);
+        assert!((&gradient - expected_gradient).amax() > 1e-6);
+    }
+
+    #[test]
+    fn joint_callback_preserves_cache_counts_and_current_weights() {
+        use firefly_cost::FeasibilityPenalty;
         let start = Endpoint {
             position: Vector3::zeros(),
             velocity: Vector3::zeros(),
@@ -389,7 +634,78 @@ mod tests {
             position: Vector3::new(3.0, 0.5, 1.0),
             ..start
         };
-        let mut objective = MincoObjective::new(start, end, 2, Cost::new().add(1.0, TimePenalty));
+        let cost = MincoCost {
+            weight_smoothness: 1.0,
+            weight_time: 0.3,
+            feasibility: Some((0.2, FeasibilityPenalty::new(2.0, 3.0, 5.0))),
+            weight_sqrvariance: 0.8,
+            ..MincoCost::default()
+        };
+        let mut objective = MincoObjective::new(start, end, 2, cost);
+        let mut x = DVector::from_vec(vec![1.2, 0.8, -0.2, 0.2, -0.5]);
+        let mut joint_gradient = DVector::zeros(x.len());
+        for change in 0..3 {
+            if change == 1 {
+                x[1] += 0.15;
+            }
+            if change == 2 {
+                x[3] += 0.1;
+            }
+            let cost = objective.evaluate_gradient(&x, &mut joint_gradient);
+            assert_eq!(
+                objective.evaluation_counts(),
+                (
+                    change * 2 + 1,
+                    change * 2 + 1,
+                    if change < 2 { 1 } else { 2 }
+                )
+            );
+            let split_cost = objective.evaluate(&x);
+            let split_gradient = objective.gradient(&x);
+            assert!((cost - split_cost).abs() < 1e-12 * split_cost.abs().max(1.0));
+            assert!(
+                (&joint_gradient - split_gradient).amax() < 1e-10 * joint_gradient.amax().max(1.0)
+            );
+        }
+        let coefficients = objective.cache.as_ref().unwrap().2.coefficients().as_ptr();
+        let counts = objective.evaluation_counts();
+        objective.cost = MincoCost {
+            weight_time: 7.0,
+            ..MincoCost::default()
+        };
+        let cost = objective.evaluate_gradient(&x, &mut joint_gradient);
+        assert!((cost - 7.0 * (virtual_to_real(x[3]) + virtual_to_real(x[4]))).abs() < 1e-12);
+        assert_eq!(
+            coefficients,
+            objective.cache.as_ref().unwrap().2.coefficients().as_ptr()
+        );
+        assert_eq!(
+            objective.evaluation_counts(),
+            (counts.0 + 1, counts.1 + 1, counts.2)
+        );
+        assert_eq!(joint_gradient.rows(0, 3).amax(), 0.0);
+    }
+
+    #[test]
+    fn callbacks_share_trajectory_but_recompute_changed_cost() {
+        let start = Endpoint {
+            position: Vector3::zeros(),
+            velocity: Vector3::zeros(),
+            acceleration: Vector3::zeros(),
+        };
+        let end = Endpoint {
+            position: Vector3::new(3.0, 0.5, 1.0),
+            ..start
+        };
+        let mut objective = MincoObjective::new(
+            start,
+            end,
+            2,
+            MincoCost {
+                weight_time: 1.0,
+                ..MincoCost::default()
+            },
+        );
         let mut x = DVector::from_vec(vec![1.2, 0.8, -0.2, 0.2, -0.5]);
         let first_gradient = objective.gradient(&x);
         let coefficients = objective.cache.as_ref().unwrap().2.coefficients().as_ptr();
@@ -400,7 +716,10 @@ mod tests {
             objective.cache.as_ref().unwrap().2.coefficients().as_ptr()
         );
         assert_eq!(first_gradient, objective.gradient(&x));
-        objective.cost = Cost::new().add(3.0, TimePenalty);
+        objective.cost = MincoCost {
+            weight_time: 3.0,
+            ..MincoCost::default()
+        };
         assert!((objective.evaluate(&x) - 3.0 * cost).abs() < 1e-12);
         assert!((objective.gradient(&x) - first_gradient * 3.0).norm() < 1e-12);
         assert_eq!(
@@ -408,9 +727,11 @@ mod tests {
             objective.cache.as_ref().unwrap().2.coefficients().as_ptr()
         );
 
-        objective.cost = Cost::new()
-            .add(1.0, SmoothnessPenalty)
-            .add(0.3, TimePenalty);
+        objective.cost = MincoCost {
+            weight_smoothness: 1.0,
+            weight_time: 0.3,
+            ..MincoCost::default()
+        };
         for change in 0..3 {
             if change == 1 {
                 x[1] += 0.15;
@@ -523,7 +844,7 @@ mod tests {
         );
 
         let mut det = ReboundDetector::new(&map, 5, 10.0, false, planes.clone(), true, false);
-        assert!(!det.gate_latched(), "每次内层开始锁存位复位为 false");
+        assert!(!det.gate_latched(), "完整优化入口的初始锁存位为 false");
         assert!(
             !det.check(&traj),
             "初始障碍未避开时内循环检测必须被门控停用"

@@ -8,6 +8,7 @@
 mod accumulator;
 mod feasibility;
 mod formation;
+mod integrated;
 mod obstacle;
 mod peer;
 mod sampling;
@@ -19,6 +20,7 @@ mod uniform;
 pub use accumulator::Accumulator;
 pub use feasibility::FeasibilityPenalty;
 pub use formation::FormationPenalty;
+pub use integrated::MincoCost;
 pub use obstacle::ObstaclePenalty;
 pub use peer::Peer;
 pub use sampling::Samples;

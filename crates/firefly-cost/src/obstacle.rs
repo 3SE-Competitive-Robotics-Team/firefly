@@ -135,6 +135,48 @@ impl Penalty for ObstaclePenalty {
 }
 
 impl ObstaclePenalty {
+    /// 对照官方 obstacleGradCostP：同一次平面遍历输出代价、梯度及激活状态。
+    pub(crate) fn grad_cost(
+        &self,
+        index: usize,
+        position: Vector3<f64>,
+    ) -> Option<(f64, Vector3<f64>)> {
+        if self.two_thirds.is_some_and(|end| index == 0 || index > end) {
+            return None;
+        }
+        self.point_grad_cost(position, &self.planes_by_point[index])
+    }
+
+    fn point_grad_cost(
+        &self,
+        position: Vector3<f64>,
+        planes: &[Plane],
+    ) -> Option<(f64, Vector3<f64>)> {
+        let mut active = false;
+        let mut cost = 0.0;
+        let mut gradient = Vector3::zeros();
+        for plane in planes {
+            let distance = plane.distance(position).value();
+            let error = self.clearance_hard - distance;
+            let error_soft = self.clearance_soft - distance;
+            let normal = plane.normal();
+            if error > 0.0 {
+                active = true;
+                cost += self.weight_hard * error * error * error;
+                gradient += -self.weight_hard * 3.0 * error * error * normal;
+            }
+            if error_soft > 0.0 {
+                active = true;
+                let radius = 0.05;
+                let radius_squared = radius * radius;
+                let term = (1.0 + error_soft * error_soft / radius_squared).sqrt();
+                cost += self.weight_soft * radius_squared * (term - 1.0);
+                gradient += -self.weight_soft * error_soft / term * normal;
+            }
+        }
+        active.then_some((cost, gradient))
+    }
+
     fn point_cost(&self, p: Vector3<f64>, planes: &[Plane]) -> f64 {
         planes
             .iter()
@@ -161,26 +203,8 @@ impl ObstaclePenalty {
 
     /// 一次遍历同时累加代价与导数：距离、硬/软误差与软项平方根只算一次。
     fn point_cost_and_gradient(&self, p: Vector3<f64>, planes: &[Plane]) -> (f64, Vector3<f64>) {
-        let mut cost = 0.0;
-        let mut grad = Vector3::zeros();
-        for plane in planes {
-            let d = plane.distance(p).value();
-            let normal = plane.normal();
-            let err_hard = self.clearance_hard - d;
-            if err_hard > 0.0 {
-                cost += self.weight_hard * err_hard * err_hard * err_hard;
-                grad += -self.weight_hard * 3.0 * err_hard * err_hard * normal;
-            }
-            let err_soft = self.clearance_soft - d;
-            if err_soft > 0.0 {
-                let r = 0.05;
-                let rsqr = r * r;
-                let term = (1.0 + err_soft * err_soft / rsqr).sqrt();
-                cost += self.weight_soft * rsqr * (term - 1.0);
-                grad += -self.weight_soft * err_soft / term * normal;
-            }
-        }
-        (cost, grad)
+        self.point_grad_cost(p, planes)
+            .unwrap_or_else(|| (0.0, Vector3::zeros()))
     }
 }
 

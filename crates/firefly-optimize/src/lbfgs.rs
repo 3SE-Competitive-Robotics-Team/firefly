@@ -13,22 +13,31 @@ use nalgebra::DVector;
 const CONVERGENCE: i32 = 0;
 const STOP: i32 = 1;
 const ALREADY_MINIMIZED: i32 = 2;
-const ERR_OUTOFINTERVAL: i32 = -1038;
-const ERR_INCORRECT_TMINMAX: i32 = -1039;
-const ERR_ROUNDING_ERROR: i32 = -1040;
-const ERR_MINIMUMSTEP: i32 = -1041;
-const ERR_MAXIMUMSTEP: i32 = -1042;
-const ERR_MAXIMUMLINESEARCH: i32 = -1043;
-const ERR_MAXIMUMITERATION: i32 = -1044;
-const ERR_WIDTHTOOSMALL: i32 = -1045;
-const ERR_INVALIDPARAMETERS: i32 = -1046;
-const ERR_INCREASEGRADIENT: i32 = -1047;
+const ERR_CANCELED: i32 = -1022;
+const ERR_OUTOFINTERVAL: i32 = -1010;
+const ERR_INCORRECT_TMINMAX: i32 = -1009;
+const ERR_ROUNDING_ERROR: i32 = -1008;
+const ERR_MINIMUMSTEP: i32 = -1007;
+const ERR_MAXIMUMSTEP: i32 = -1006;
+const ERR_MAXIMUMLINESEARCH: i32 = -1005;
+const ERR_MAXIMUMITERATION: i32 = -1004;
+const ERR_WIDTHTOOSMALL: i32 = -1003;
+const ERR_INVALIDPARAMETERS: i32 = -1002;
+const ERR_INCREASEGRADIENT: i32 = -1001;
 
 pub trait Objective {
     fn evaluate(&mut self, x: &DVector<f64>) -> f64;
     fn gradient(&mut self, x: &DVector<f64>) -> DVector<f64>;
-    /// 目标函数是否请求提前终止（官方 earlyExitCallback：优化中动态更新约束后
-    /// 目标已变，当前搜索方向无效，终止后由外层重新优化）。
+    /// 单次求值同时返回代价并写入完整梯度；生产目标应覆盖此入口。
+    fn evaluate_gradient(&mut self, x: &DVector<f64>, gradient: &mut DVector<f64>) -> f64 {
+        let cost = self.evaluate(x);
+        *gradient = self.gradient(x);
+        cost
+    }
+
+    /// 官方 earlyExitCallback：在每次线搜索试探开始前轮询。
+    /// 本次求值完成后锁存的停止请求在下一次试探前生效；若当前试探满足
+    /// 收敛或线搜索失败条件，优先返回相应结果，与上游判定顺序一致。
     fn early_exit(&self) -> bool {
         false
     }
@@ -84,6 +93,11 @@ impl Default for LbfgsConfig {
 #[derive(Debug, Clone)]
 pub struct LbfgsReport {
     pub iterations: usize,
+    /// 初始点和全部线搜索试探点的联合求值次数。
+    pub evaluations: usize,
+    /// 全部线搜索试探步数，包含未接受的试探点。
+    pub line_search_steps: usize,
+    /// 对照上游 `ptr_fx`：取消时保留最后试探的代价，x/g 则恢复到最后接受点。
     pub final_cost: f64,
     pub gradient_norm: f64,
     pub converged: bool,
@@ -125,8 +139,9 @@ impl Lbfgs {
 
         let n = x0.len();
         let mut x = x0;
-        let mut fx = objective.evaluate(&x);
-        let mut g = objective.gradient(&x);
+        let mut g = DVector::zeros(n);
+        let mut fx = objective.evaluate_gradient(&x, &mut g);
+        let mut evaluations = 1;
 
         // 官方工作区：环形缓冲 lm[m]（end 指针推进）、过去 past 次目标值 pf
         let m = cfg.memory;
@@ -153,7 +168,7 @@ impl Lbfgs {
         }
         let gnorm = g.norm();
         if gnorm / xnorm <= cfg.gradient_epsilon {
-            return Ok(report(0, fx, &g, true, false, x));
+            return Ok(report(0, fx, &g, true, false, x, evaluations));
         }
 
         // k/end 与官方一致：k 从 1 起、每次有效更新 ++k；end 为环形缓冲写指针
@@ -165,19 +180,23 @@ impl Lbfgs {
         let mut gp = g.clone();
 
         let ret = loop {
-            // firefly 语义：每次迭代前询问目标是否请求提前终止
-            // （对应官方 proc_progress 返回非零取消优化的外层重优化路径）
-            if objective.early_exit() {
-                return Ok(report(iterations, fx, &g, false, true, x));
-            }
-
             xp.copy_from(&x);
             gp.copy_from(&g);
             let step_min = cfg.min_step;
             let step_max = cfg.max_step;
 
             match line_search_morethuente(
-                objective, &mut x, &mut fx, &mut g, &d, &mut step, &xp, step_min, step_max, &cfg,
+                objective,
+                &mut x,
+                &mut fx,
+                &mut g,
+                &d,
+                &mut step,
+                &xp,
+                step_min,
+                step_max,
+                &cfg,
+                &mut evaluations,
             ) {
                 Ok(_) => {}
                 Err(code) => {
@@ -239,9 +258,10 @@ impl Lbfgs {
         };
 
         match ret {
-            ERR_MAXIMUMITERATION => Ok(report(iterations, fx, &g, false, false, x)),
+            ERR_CANCELED => Ok(report(iterations, fx, &g, false, true, x, evaluations)),
+            ERR_MAXIMUMITERATION => Ok(report(iterations, fx, &g, false, false, x, evaluations)),
             CONVERGENCE | STOP | ALREADY_MINIMIZED => {
-                Ok(report(iterations, fx, &g, true, false, x))
+                Ok(report(iterations, fx, &g, true, false, x, evaluations))
             }
             code => Err(Error::new(ErrorKind::Convergence, strerror(code))),
         }
@@ -323,6 +343,7 @@ fn strerror(code: i32) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn report(
     iterations: usize,
     final_cost: f64,
@@ -330,9 +351,12 @@ fn report(
     converged: bool,
     early_exit: bool,
     final_x: DVector<f64>,
+    evaluations: usize,
 ) -> LbfgsReport {
     LbfgsReport {
         iterations,
+        evaluations,
+        line_search_steps: evaluations - 1,
         final_cost,
         gradient_norm: g.norm(),
         converged,
@@ -596,6 +620,7 @@ fn line_search_morethuente(
     stpmin: f64,
     stpmax: f64,
     cfg: &LbfgsConfig,
+    evaluations: &mut usize,
 ) -> std::result::Result<usize, i32> {
     if *stp <= 0.0 {
         return Err(ERR_INVALIDPARAMETERS);
@@ -625,6 +650,11 @@ fn line_search_morethuente(
     let mut dgy = dginit;
 
     loop {
+        // 对照上游 line_search_morethuente 的 proc_progress，先轮询再改写试探点。
+        if objective.early_exit() {
+            return Err(ERR_CANCELED);
+        }
+
         // 区间端点随 brackt 状态切换
         let (stmin, stmax) = if brackt {
             (stx.min(sty), stx.max(sty))
@@ -650,8 +680,8 @@ fn line_search_morethuente(
         // x ← xp + stp·s，评估目标与梯度
         x.copy_from(xp);
         x.axpy(*stp, s, 1.0);
-        *f = objective.evaluate(x);
-        *g = objective.gradient(x);
+        *evaluations += 1;
+        *f = objective.evaluate_gradient(x, g);
         let mut dg = g.dot(s);
 
         let ftest1 = finit + *stp * dgtest;
@@ -794,6 +824,115 @@ mod tests {
         fn early_exit(&self) -> bool {
             true
         }
+    }
+
+    #[test]
+    fn cancellation_order_matches_pinned_upstream() {
+        use std::cell::Cell;
+        struct StopAtTrial {
+            mode: usize,
+            calls: usize,
+            polls: Cell<usize>,
+        }
+        impl Objective for StopAtTrial {
+            fn evaluate(&mut self, _: &DVector<f64>) -> f64 {
+                panic!("split cost")
+            }
+            fn gradient(&mut self, _: &DVector<f64>) -> DVector<f64> {
+                panic!("split gradient")
+            }
+            fn evaluate_gradient(&mut self, x: &DVector<f64>, gradient: &mut DVector<f64>) -> f64 {
+                self.calls += 1;
+                if self.mode == 3 {
+                    gradient[0] = 0.0;
+                    return 0.0;
+                }
+                gradient[0] = 2.0 * x[0];
+                if self.calls == 2 && (self.mode == 0 || self.mode == 2) {
+                    gradient[0] = 2.0;
+                    return if self.mode == 0 { 100.0 } else { f64::INFINITY };
+                }
+                x[0] * x[0]
+            }
+            fn early_exit(&self) -> bool {
+                self.polls.set(self.polls.get() + 1);
+                self.mode == 3 || self.mode == 4 || self.calls >= 2
+            }
+        }
+        for row in include_str!("../tests/reference/ego_stop.txt")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+        {
+            let fields: Vec<_> = row.split_whitespace().collect();
+            let mode: usize = fields[0].parse().unwrap();
+            let code: i32 = fields[1].parse().unwrap();
+            let mut objective = StopAtTrial {
+                mode,
+                calls: 0,
+                polls: Cell::new(0),
+            };
+            let initial = if mode == 1 { 2.0 } else { 1.0 };
+            let result = Lbfgs::new(LbfgsConfig::default())
+                .minimize(&mut objective, DVector::from_vec(vec![initial]));
+            assert_eq!(
+                objective.calls,
+                fields[2].parse::<usize>().unwrap(),
+                "mode {mode}"
+            );
+            assert_eq!(
+                objective.polls.get(),
+                fields[3].parse::<usize>().unwrap(),
+                "mode {mode}"
+            );
+            if mode == 2 {
+                assert_eq!(code, ERR_ROUNDING_ERROR);
+                assert_eq!(result.unwrap_err().kind(), ErrorKind::Convergence);
+            } else {
+                let report = result.unwrap();
+                assert_eq!(report.early_exit, code == ERR_CANCELED, "mode {mode}");
+                assert_eq!(report.converged, code >= 0, "mode {mode}");
+                assert_eq!(
+                    report.final_x[0],
+                    fields[4].parse::<f64>().unwrap(),
+                    "mode {mode}"
+                );
+                assert_eq!(
+                    report.final_cost,
+                    fields[5].parse::<f64>().unwrap(),
+                    "mode {mode}"
+                );
+                assert_eq!(report.evaluations, objective.calls);
+                assert_eq!(report.line_search_steps, objective.calls - 1);
+            }
+        }
+    }
+
+    #[test]
+    fn all_trials_use_joint_callback_once() {
+        struct JointOnly {
+            calls: usize,
+        }
+        impl Objective for JointOnly {
+            fn evaluate(&mut self, _: &DVector<f64>) -> f64 {
+                panic!("split cost callback")
+            }
+            fn gradient(&mut self, _: &DVector<f64>) -> DVector<f64> {
+                panic!("split gradient callback")
+            }
+            fn evaluate_gradient(&mut self, x: &DVector<f64>, gradient: &mut DVector<f64>) -> f64 {
+                self.calls += 1;
+                gradient.clone_from(x);
+                x.norm_squared() * 0.5
+            }
+        }
+        let mut objective = JointOnly { calls: 0 };
+        let report = Lbfgs::new(LbfgsConfig::default())
+            .minimize(&mut objective, DVector::from_vec(vec![8.0, -3.0]))
+            .unwrap();
+        assert!(report.converged);
+        assert_eq!(report.evaluations, objective.calls);
+        assert_eq!(report.line_search_steps + 1, objective.calls);
+        assert!(report.line_search_steps >= report.iterations);
     }
 
     #[test]

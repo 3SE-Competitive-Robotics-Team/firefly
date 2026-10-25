@@ -130,6 +130,39 @@ impl Penalty for SwarmPenalty {
 }
 
 impl SwarmPenalty {
+    /// 对照官方 swarmGradCostP；时间梯度分别对应本段及前序段。
+    pub(crate) fn grad_cost(
+        &self,
+        index: usize,
+        time: f64,
+        sample: &Sample,
+        weight: f64,
+    ) -> Option<(f64, Vector3<f64>, f64, f64)> {
+        if self.two_thirds.is_some_and(|end| index == 0 || index > end) {
+            return None;
+        }
+        let mut active = false;
+        let mut cost = 0.0;
+        let mut gradient = Vector3::zeros();
+        let mut grad_time = 0.0;
+        let mut grad_previous_time = 0.0;
+        for peer in &self.peers {
+            let reference = peer.sample_at(time);
+            let diff = sample.position - reference.position;
+            let clearance = self.clearance(peer);
+            let excess = clearance * clearance - self.d2(diff);
+            if excess > 0.0 {
+                active = true;
+                cost += weight * excess * excess * excess;
+                let grad = weight * 3.0 * excess * excess * (-2.0) * self.e_mul(diff);
+                gradient += grad;
+                grad_time += grad.dot(&(sample.velocity - reference.velocity));
+                grad_previous_time -= grad.dot(&reference.velocity);
+            }
+        }
+        active.then_some((cost, gradient, grad_time, grad_previous_time))
+    }
+
     /// 椭球距离平方:`d² = dz²/a² + (dx²+dy²)/b²`(官方 `ellip_dist2`)。
     fn d2(&self, diff: Vector3<f64>) -> f64 {
         let ia2 = 1.0 / (self.ellipsoid_a * self.ellipsoid_a);
