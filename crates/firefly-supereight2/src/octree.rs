@@ -189,18 +189,3 @@ impl Octree {
         });
     }
 }
-
-impl Octree {
-    /// # Errors
-    /// Returns an error for an invalid mesh scale or inconsistent neighbour/block scale
-    /// storage.
-    pub fn mesh(
-        &self,
-        t_ov: &nalgebra::Matrix4<f32>,
-        min_desired_scale: i32,
-    ) -> Result<crate::mesh::TriangleMesh> {
-        let mut mesh = crate::marching_cube::marching_cube(self, min_desired_scale)?;
-        crate::mesh::transform(&mut mesh, t_ov);
-        Ok(mesh)
-    }
-}

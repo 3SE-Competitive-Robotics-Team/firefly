@@ -158,6 +158,13 @@ pub struct FinalBaStatistics {
     pub inlier_counts: Vec<usize>,
     pub outlier_counts: Vec<usize>,
 }
+/// State updates and removals produced by the window policy.
+pub struct StrategyResult {
+    /// Retained states whose published data needs updating.
+    pub affected_states: BTreeSet<StateId>,
+    /// Non-keyframes removed from the realtime graph and multiframe storage.
+    pub eliminated_states: BTreeSet<StateId>,
+}
 pub struct ViSlamBackend {
     pub realtime_graph: ViGraphEstimator,
     pub full_graph: ViGraphEstimator,
@@ -1072,7 +1079,8 @@ impl ViSlamBackend {
     /// # Panics
     /// Panics if an internal graph invariant is violated after its validation/insertion checks;
     /// referenced states, blocks and factor caches must remain consistent.
-    pub fn eliminate_imu_frames(&mut self, keep: usize) -> Result<()> {
+    pub fn eliminate_imu_frames(&mut self, keep: usize) -> Result<BTreeSet<StateId>> {
+        let mut eliminated = BTreeSet::new();
         let ids = self.imu_frames.clone();
         for id in ids {
             if self.imu_frames.len() <= keep {
@@ -1111,10 +1119,11 @@ impl ViSlamBackend {
                 }
                 self.imu_frames.remove(&id);
                 self.multi_frames.remove(&id);
+                eliminated.insert(id);
                 self.auxiliary_states.remove(&id);
             }
         }
-        Ok(())
+        Ok(eliminated)
     }
     /// # Errors
     /// Returns an error if required graph states, parameter blocks or measurements are absent,
@@ -1129,7 +1138,7 @@ impl ViSlamBackend {
         num_loop_frames: usize,
         num_imu_frames: usize,
         expand: bool,
-    ) -> Result<BTreeSet<StateId>> {
+    ) -> Result<StrategyResult> {
         if self.imu_frames.len() > 1 && !self.keyframes.is_empty() {
             let id = *self
                 .auxiliary_states
@@ -1141,10 +1150,13 @@ impl ViSlamBackend {
                 log::warn!("tracking quality weak: {quality}");
             }
         }
-        self.eliminate_imu_frames(num_imu_frames)?;
+        let eliminated_states = self.eliminate_imu_frames(num_imu_frames)?;
         let mut affected = BTreeSet::new();
         if self.current_keyframe_state_id(true)?.is_none() {
-            return Ok(affected);
+            return Ok(StrategyResult {
+                affected_states: affected,
+                eliminated_states,
+            });
         }
         let mut eliminated = false;
         let mut converted = 0;
@@ -1214,7 +1226,10 @@ impl ViSlamBackend {
                 self.expand_keyframe(id)?;
             }
         }
-        Ok(affected)
+        Ok(StrategyResult {
+            affected_states: affected,
+            eliminated_states,
+        })
     }
     fn convert_loop_frames(
         &mut self,
@@ -3702,7 +3717,7 @@ impl crate::runtime::threaded_slam::ThreadedGraph for ViSlamBackend {
             .t_gw(None)
             .expect("GPS transform exists")
     }
-    fn apply_strategy(&mut self, k: usize, l: usize, i: usize) -> Result<BTreeSet<StateId>> {
+    fn apply_strategy(&mut self, k: usize, l: usize, i: usize) -> Result<StrategyResult> {
         ViSlamBackend::apply_strategy(self, k, l, i, true)
     }
     fn do_final_ba(

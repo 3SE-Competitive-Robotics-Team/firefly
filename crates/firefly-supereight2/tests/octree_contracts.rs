@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
-//! Analytic fields exercise actual cross-block interpolation, refinement, pruning and meshing.
+//! Analytic fields exercise actual cross-block interpolation, refinement and pruning.
 use firefly_supereight2::{
     allocator,
     block::Block,
@@ -149,22 +149,4 @@ fn block_buffer_requires_twenty_integrations_and_ninety_percent_observation_supp
     let mut parent = OccupancyData::default();
     assert_eq!(up_prop_mean(&mut parent, &children), 8);
     assert_eq!(parent.field.occupancy, -1.0);
-}
-#[test]
-fn planar_zero_level_mesh_has_finite_nondegenerate_triangles_on_the_known_plane() {
-    let tree = tree_with_field(0, |p| p.z - 15.25);
-    let mesh = tree.mesh(&nalgebra::Matrix4::identity(), 0).unwrap();
-    assert!(!mesh.is_empty(), "plane must produce a surface");
-    for face in &mesh {
-        for p in face.vertices {
-            assert!(p.iter().all(|v| v.is_finite()));
-            assert!((p.z - 15.25).abs() < 1e-5, "vertex={p:?}");
-        }
-        assert!(
-            (face.vertices[1] - face.vertices[0])
-                .cross(&(face.vertices[2] - face.vertices[0]))
-                .norm()
-                > 1e-8
-        );
-    }
 }

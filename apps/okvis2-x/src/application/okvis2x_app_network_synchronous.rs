@@ -315,7 +315,6 @@ pub fn run(
             processor: Some(&processor),
             writer: &writer,
             parameters: &parameters,
-            config: &config,
             save: &save,
             mode: &mode,
             codec: codec.as_ref(),
@@ -454,7 +453,6 @@ fn process_dataset(
         processor,
         writer,
         parameters,
-        config,
         save,
         mode,
         codec,
@@ -492,7 +490,7 @@ fn process_dataset(
             log::info!("DatasetReader Finished!");
             app::finish_output(
                 (estimator, mapping, processor),
-                (parameters, config),
+                parameters,
                 (save, mode, codec),
                 failure,
                 start,

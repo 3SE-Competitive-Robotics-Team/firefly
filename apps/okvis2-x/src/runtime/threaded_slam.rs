@@ -9,6 +9,7 @@ use crate::{
     ceres::{
         component::MultiFramePtr,
         imu_error::{ImuError, seconds},
+        vi_slam_backend::StrategyResult,
     },
     config::parameters::{CameraParameters, GpsParameters, ImuParameters, ViParameters},
     frames::{
@@ -167,7 +168,7 @@ pub trait ThreadedGraph: FrontendGraph {
         keyframes: usize,
         loop_frames: usize,
         imu_frames: usize,
-    ) -> Result<BTreeSet<StateId>>;
+    ) -> Result<StrategyResult>;
     /// # Errors
     /// Returns an error for invalid/missing state, frame or measurement data, or a failed
     /// estimator, graph, mapper, queue, callback or worker operation.
@@ -1917,11 +1918,15 @@ where
             let data = self.prepare_visualisation(frame, publication)?;
             shared.visualisation.push(data, 1, false)?;
         }
-        self.affected_states = self.graph.apply_strategy(
+        let result = self.graph.apply_strategy(
             self.parameters.estimator.num_keyframes as usize,
             self.parameters.estimator.num_loop_closure_frames as usize,
             self.parameters.estimator.num_imu_frames as usize,
         )?;
+        self.affected_states = result.affected_states;
+        for id in result.eliminated_states {
+            self.imu_by_frame.remove(&id);
+        }
         Ok(())
     }
     fn make_state(&self, id: StateId, changed: bool) -> Result<State> {
@@ -2352,6 +2357,153 @@ impl MappingRuntime<crate::ceres::vi_slam_backend::ViSlamBackend> for OccupancyM
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        application::live::config::Config,
+        ceres::vi_slam_backend::ViSlamBackend,
+        frontend::{
+            frame_absolute_pose_sac_problem::OpenGvSolver, pipeline::RustBriskFeatureFactory,
+        },
+    };
+
+    fn marginalisation_core()
+    -> ProcessingCore<ViSlamBackend, OpenGvSolver, RustBriskFeatureFactory, OccupancyMappingRuntime>
+    {
+        let config = Config {
+            mapping: false,
+            ..Config::default()
+        };
+        let mut parameters = config.parameters().unwrap();
+        parameters.estimator.enforce_realtime = false;
+        parameters.estimator.num_imu_frames = 2;
+        parameters.estimator.realtime_max_iterations = 1;
+        let solver: OpenGvSolver = OpenGvSolver::default();
+        let frontend = Frontend::with_vocabulary(
+            parameters.n_camera_system.num_cameras(),
+            &firefly_dbow2::templated_vocabulary::TemplatedVocabulary::default(),
+            solver,
+            RustBriskFeatureFactory,
+        );
+        let mut core = ProcessingCore::new(
+            ViSlamBackend::default(),
+            frontend,
+            parameters,
+            SubMapConfig::default(),
+            OccupancyMappingRuntime::new(Arc::default()),
+        );
+        core.initialise().unwrap();
+        core
+    }
+
+    fn check_marginalised_frame_imu(full_graph_busy: bool) {
+        let mut core = marginalisation_core();
+        let shared = Shared::default();
+        let mut publications = Vec::new();
+        let mut task = None;
+        for index in 1..=6 {
+            let time = Timestamp::from_millisecond((index - 1) * 50).unwrap();
+            let frame = Rc::new(RefCell::new(MultiFrame::new(
+                &core.parameters.n_camera_system,
+                time,
+                index as u64,
+            )));
+            let imu = (-1..=index * 10)
+                .map(|i| {
+                    ImuMeasurement::new(
+                        Timestamp::from_millisecond(i * 5).unwrap(),
+                        ImuSensorReadings::new(Vector3::zeros(), Vector3::z() * 9.81),
+                        -1,
+                    )
+                })
+                .collect();
+            assert!(
+                core.graph
+                    .add_states(frame.clone(), &imu, index == 1 || index == 3)
+                    .unwrap()
+            );
+            let id = StateId::new(frame.borrow().id());
+            core.imu_by_frame.insert(id, imu);
+            core.optimise_publish_marginalise(&shared, &frame, Vector3::zeros())
+                .unwrap();
+            publications.push(shared.publications.pop(false).unwrap().unwrap());
+            if full_graph_busy && index == 3 {
+                task = Some(core.graph.prepare_full_graph_task(1, 1).unwrap());
+            }
+        }
+        assert_eq!(
+            core.imu_by_frame
+                .keys()
+                .map(StateId::value)
+                .collect::<Vec<_>>(),
+            vec![1, 3, 5, 6]
+        );
+        for value in [2, 4] {
+            let id = StateId::new(value);
+            assert!(!core.graph.realtime_graph.states.contains_key(&id));
+            assert!(core.graph.realtime_graph.any_state.contains_key(&id));
+            assert!(
+                !publications[value as usize - 1]
+                    .state
+                    .previous_imu_measurements
+                    .is_empty()
+            );
+            assert!(
+                !core
+                    .trajectory
+                    .state_by_id(id)
+                    .unwrap()
+                    .previous_imu_measurements
+                    .is_empty()
+            );
+            assert_eq!(
+                core.graph.full_graph.states.contains_key(&id),
+                full_graph_busy && value == 2
+            );
+            assert_eq!(
+                core.graph.eliminate_states.contains_key(&id),
+                full_graph_busy
+            );
+        }
+        if let Some(task) = task {
+            core.graph.finish_full_graph_task(task().unwrap()).unwrap();
+            let updated = core.graph.synchronise_realtime_and_full_graph().unwrap();
+            assert!(core.graph.eliminate_states.is_empty());
+            assert!(!updated.contains(&StateId::new(2)));
+            assert!(!updated.contains(&StateId::new(4)));
+            let state = core.make_state(StateId::new(6), false).unwrap();
+            let publication = core.prepare_publication(state, &updated, true).unwrap();
+            assert!(!publication.updated_states.is_empty());
+        }
+        for id in core.graph.realtime_graph.states.keys() {
+            assert!(
+                !core
+                    .make_state(*id, false)
+                    .unwrap()
+                    .previous_imu_measurements
+                    .is_empty()
+            );
+        }
+        let removed = StateId::new(5);
+        let result = core.graph.apply_strategy(5, 5, 1, true).unwrap();
+        assert_eq!(result.eliminated_states, BTreeSet::from([removed]));
+        assert!(!result.affected_states.contains(&removed));
+        assert!(
+            core.graph
+                .apply_strategy(5, 5, 1, true)
+                .unwrap()
+                .eliminated_states
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn marginalisation_releases_only_eliminated_frame_imu() {
+        check_marginalised_frame_imu(false);
+    }
+
+    #[test]
+    fn marginalisation_releases_frame_imu_before_full_graph_sync() {
+        check_marginalised_frame_imu(true);
+    }
 
     #[test]
     fn depth_pose_slerp_uses_eigens_near_equal_linear_branch() {

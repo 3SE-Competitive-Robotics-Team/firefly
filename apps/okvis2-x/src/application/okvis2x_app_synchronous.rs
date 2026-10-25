@@ -131,10 +131,6 @@ pub trait MappingApplication: Send {
     /// Returns an error if command-line/configuration input is invalid, an input/output file
     /// cannot be accessed, or a sensor, estimator, mapper or processor operation fails.
     fn set_finished(&mut self) -> io::Result<()>;
-    /// # Errors
-    /// Returns an error if command-line/configuration input is invalid, an input/output file
-    /// cannot be accessed, or a sensor, estimator, mapper or processor operation fails.
-    fn save_all_submap_meshes(&mut self) -> io::Result<()>;
     fn publish_submap_top_view(&mut self) -> Option<DynamicMatrix>;
     fn print_associations(&self);
 }
@@ -183,9 +179,6 @@ impl<B: SupereightBackend> MappingApplication for SubmappingInterface<B> {
     }
     fn set_finished(&mut self) -> io::Result<()> {
         SubmappingInterface::set_finished(self)
-    }
-    fn save_all_submap_meshes(&mut self) -> io::Result<()> {
-        SubmappingInterface::save_all_submap_meshes(self)
     }
     fn publish_submap_top_view(&mut self) -> Option<DynamicMatrix> {
         SubmappingInterface::publish_submap_top_view(self)
@@ -461,7 +454,7 @@ pub(crate) fn finish_output(
         Option<&MappingHandle>,
         Option<&Arc<dyn DeepLearningProcessor>>,
     ),
-    (parameters, config): (&ViParameters, &SubMapConfig),
+    parameters: &ViParameters,
     (save, mode, codec): (&Path, &str, &dyn ImageCodec),
     failure: &Failure,
     start: Instant,
@@ -489,9 +482,6 @@ pub(crate) fn finish_output(
         let mut m = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         m.set_finished()?;
         m.print_associations();
-        if config.write_mesh_output {
-            m.save_all_submap_meshes()?;
-        }
         if let Some(plot) = m.publish_submap_top_view()
             && plot.rows() > 0
             && plot.cols() > 0
@@ -614,7 +604,6 @@ pub fn run_with_vocabulary(
             processor: None,
             writer: &writer,
             parameters: &parameters,
-            config: &config,
             save: &save,
             mode: &mode,
             codec: codec.as_ref(),
@@ -703,7 +692,6 @@ fn process_dataset(
         processor: _,
         writer,
         parameters,
-        config,
         save,
         mode,
         codec,
@@ -748,7 +736,7 @@ fn process_dataset(
             log::info!("DatasetReader Finished!");
             finish_output(
                 (estimator, mapping, None),
-                (parameters, config),
+                parameters,
                 (save, mode, codec),
                 failure,
                 start,
@@ -771,7 +759,6 @@ pub(crate) struct RunOutput<'a> {
     pub processor: Option<&'a Arc<dyn DeepLearningProcessor>>,
     pub writer: &'a Arc<Mutex<TrajectoryOutput>>,
     pub parameters: &'a ViParameters,
-    pub config: &'a SubMapConfig,
     pub save: &'a Path,
     pub mode: &'a str,
     pub codec: &'a dyn ImageCodec,

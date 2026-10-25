@@ -86,6 +86,7 @@ class Mission:
         self.physics_time = None
         self.attitude_health = None
         self.attitude_source = None
+        self.arming_health = None
         self.zero_controls = 0
         self.nonzero_controls = 0
         self.last_motors = [0.] * 4
@@ -177,6 +178,8 @@ class Mission:
                         self.attitude_source = (msg.timestamp, int(msg.scalars[0]), time.monotonic())
                     elif entity == "fc/imu/health" and msg.scalar_count >= 2:
                         self.attitude_health = (msg.timestamp, msg.scalars[0] == 1., msg.scalars[1] == 1., time.monotonic())
+                    elif entity == "fc/arming/failed" and msg.scalar_count == 1:
+                        self.arming_health = (msg.timestamp, msg.scalars[0] == 0., time.monotonic())
                     elif entity == "corr/debug/gate" and msg.scalar_count == 4 and msg.scalars[3] == 1:
                         self.visual_updates += 1
                         self.recorder.scalars("acceptance/visual_update", msg.timestamp, list(msg.scalars[:4]))
@@ -271,7 +274,11 @@ class Mission:
             attitude_ready = (attitude is not None and attitude[1] and attitude[2]
                               and 0. <= self.t - attitude[0] <= 1.5
                               and time.monotonic() - attitude[3] <= 1.5)
-            return (attitude_ready and odom is not None and self.estimated_near("odom", odom[1], float("inf"), float("inf")) and self.counts["odom"] >= 20
+            arming = self.arming_health
+            arming_ready = (arming is not None and arming[1]
+                            and 0. <= self.t - arming[0] <= 0.3
+                            and time.monotonic() - arming[2] <= 0.5)
+            return (attitude_ready and arming_ready and odom is not None and self.estimated_near("odom", odom[1], float("inf"), float("inf")) and self.counts["odom"] >= 20
                     and self.zero_controls >= 100)
         self.wait(ready)
         odom = self.latest["odom"]

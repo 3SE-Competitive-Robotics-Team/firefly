@@ -23,12 +23,13 @@ def test_asset_provenance():
 
 
 def test_spawn_contact_and_passive_rest():
-    from firefly_mujoco.scene import build_scene, drone_pad
-    model = mujoco.MjModel.from_xml_string(build_scene())
+    from firefly_mujoco.scene import build_scene, drone_pad, load_scene_name
+    scene_name = load_scene_name()
+    model = mujoco.MjModel.from_xml_string(build_scene(name=scene_name))
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
     assert all(data.contact[i].dist >= -0.002 for i in range(data.ncon)), "spawn penetrates field"
-    start = np.array(drone_pad())
+    start = np.array(drone_pad(scene_name))
     for _ in range(400):
         mujoco.mj_step(model, data)
     assert np.isfinite(data.qpos).all()

@@ -16,7 +16,7 @@ use crate::{
         config_mapping::SubMapConfig,
         depth_utils::register_depth,
         map_typedefs::SupereightMapType,
-        object_mapping::{Descriptor, MeshFace, ObjectMap, ObjectMapBackend},
+        object_mapping::{ObjectMap, ObjectMapBackend},
         submapping_utils::{
             MeanOccupancyMap, Safe, downsample_point_cloud, downsample_points_uncertainty,
         },
@@ -105,8 +105,7 @@ pub struct DepthIntegration<'a> {
     pub colour: Option<(&'a Matrix<u8>, &'a PinholeSensor, Matrix4<f32>)>,
     pub segments: Option<&'a Matrix<u16>>,
 }
-/// Supereight allocation, interpolation, integration and meshing operations.
-/// The backend also supplies the mesh/voxel storage consumed by `ObjectMap`.
+/// Supereight allocation, interpolation and integration operations.
 pub trait SupereightBackend: ObjectMapBackend + Send + 'static {
     type Map: SupereightMapType + MeanOccupancyMap;
     /// # Errors
@@ -149,20 +148,11 @@ pub trait SupereightBackend: ObjectMapBackend + Send + 'static {
     /// # Errors
     /// Returns an error for invalid configuration or sensor/map data, absent frames/maps,
     /// or a failed storage, integration, alignment, callback, worker or file operation.
-    fn cache_mesh(&mut self, id: u64) -> io::Result<()>;
-    /// # Errors
-    /// Returns an error for invalid configuration or sensor/map data, absent frames/maps,
-    /// or a failed storage, integration, alignment, callback, worker or file operation.
     fn downsample_depth(&self, original: &Matrix<f32>, factor: usize) -> io::Result<Matrix<f32>>;
     /// # Errors
     /// Returns an error for invalid configuration or sensor/map data, absent frames/maps,
     /// or a failed storage, integration, alignment, callback, worker or file operation.
     fn save_depth_png(&self, depth: &Matrix<f32>, path: &Path) -> io::Result<()>;
-    /// # Errors
-    /// Returns an error for invalid configuration or sensor/map data, absent frames/maps,
-    /// or a failed storage, integration, alignment, callback, worker or file operation.
-    fn save_mesh(&self, mesh: &[MeshFace], path: &Path, t_wm: &Matrix4<f32>) -> io::Result<()>;
-    fn colour_mesh_by_id(&self, mesh: &mut [MeshFace]);
 }
 pub type AlignCallback = Arc<
     dyn Fn(Option<u64>, u64, u64, u64, &[Vector3<f32>], &[f32]) -> io::Result<bool> + Send + Sync,
@@ -224,7 +214,6 @@ pub struct SubmappingState<B: SupereightBackend> {
     pub alignment: SubmapAlignmentTerm,
     pub gt_poses: BTreeMap<i128, Transformation>,
     pub use_gt_poses: bool,
-    pub language_descriptor: Option<Descriptor>,
     pub odometry_publishing_rate: f64,
     pub visualize_submaps: bool,
     pub topview: Option<DynamicMatrix>,
@@ -388,7 +377,6 @@ impl<B: SupereightBackend> SubmappingInterface<B> {
             alignment,
             gt_poses: BTreeMap::new(),
             use_gt_poses: false,
-            language_descriptor: None,
             odometry_publishing_rate: 40.0,
             visualize_submaps: false,
             topview: None,
@@ -511,12 +499,6 @@ impl<B: SupereightBackend> SubmappingInterface<B> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .t_bs = t;
-    }
-    pub fn set_language_embedding(&self, d: Descriptor) {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .language_descriptor = Some(d);
     }
     pub fn set_use_gt_poses(&self, b: bool) {
         self.state
@@ -889,14 +871,6 @@ impl<B: SupereightBackend> SubmappingInterface<B> {
                 }
             }
         }
-        let mut s = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(id) = s.previous_keyframe {
-            s.object_map.backend.cache_mesh(id)?;
-            s.object_map.finish_submap_objects(id).map_err(err)?;
-        }
         if let Some(e) = failure {
             return Err(e);
         }
@@ -917,15 +891,6 @@ impl<B: SupereightBackend> SubmappingInterface<B> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .topview
             .take()
-    }
-    /// # Errors
-    /// Returns an error for invalid configuration or sensor/map data, absent frames/maps,
-    /// or a failed storage, integration, alignment, callback, worker or file operation.
-    pub fn save_all_submap_meshes(&self) -> io::Result<()> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .save_all_submap_meshes()
     }
 }
 /// Shared sensor ingress; blocking producers do not own the processing host lock.
@@ -2004,22 +1969,19 @@ impl<B: SupereightBackend> SubmappingState<B> {
             );
             cb(&current, &self.poses, &self.object_map.backend);
         }
-        if create && let Some(previous) = self.previous_submap {
-            self.object_map.backend.cache_mesh(previous)?;
-            self.object_map
-                .finish_submap_objects(previous)
-                .map_err(err)?;
-            if let Some(cb) = &self.submap_callback {
-                let poses = self
-                    .updated_maps
-                    .iter()
-                    .filter(|&&i| Some(i) != self.previous_keyframe)
-                    .filter_map(|i| self.poses.get(i).map(|p| (*i, p.clone())))
-                    .collect::<BTreeMap<_, _>>();
-                let ids = poses.keys().copied().collect::<Vec<_>>();
-                cb(&poses, &ids, &self.object_map);
-                self.updated_maps.clear();
-            }
+        if create
+            && self.previous_submap.is_some()
+            && let Some(cb) = &self.submap_callback
+        {
+            let poses = self
+                .updated_maps
+                .iter()
+                .filter(|&&i| Some(i) != self.previous_keyframe)
+                .filter_map(|i| self.poses.get(i).map(|p| (*i, p.clone())))
+                .collect::<BTreeMap<_, _>>();
+            let ids = poses.keys().copied().collect::<Vec<_>>();
+            cb(&poses, &ids, &self.object_map);
+            self.updated_maps.clear();
         }
         Ok(())
     }
@@ -2180,127 +2142,6 @@ impl<B: SupereightBackend> SubmappingState<B> {
         (depth_id, colour_id)
     }
 
-    /// # Errors
-    /// Returns an error for invalid configuration or sensor/map data, absent frames/maps,
-    /// or a failed storage, integration, alignment, callback, worker or file operation.
-    pub fn save_submap(&mut self, id: u64) -> io::Result<()> {
-        let directory = PathBuf::from(&self.config.results_directory);
-        if !directory.exists() {
-            fs::create_dir(&directory)?;
-        }
-        let numbering = if id < 1_000_000 {
-            format!("{id:06}")
-        } else {
-            String::new()
-        };
-        let filename = directory.join(format!("mesh_kf{numbering}.ply"));
-        let t = self
-            .poses
-            .get(&id)
-            .ok_or_else(|| invalid("submap pose missing"))?
-            .matrix()
-            .cast::<f32>();
-        if self.object_map.backend.mesh(id).is_err() {
-            self.object_map.backend.cache_mesh(id)?;
-        }
-        let mesh = self.object_map.backend.mesh(id).map_err(err)?.to_vec();
-        if self.object_map.backend.supports_colour_and_ids() {
-            let mut filtered: Vec<_> = mesh
-                .iter()
-                .filter(|f| f.colour.is_some())
-                .cloned()
-                .collect();
-            self.object_map.backend.colour_mesh_by_id(&mut filtered);
-            self.object_map.backend.save_mesh(
-                if filtered.is_empty() {
-                    &mesh
-                } else {
-                    &filtered
-                },
-                &filename,
-                &t,
-            )?;
-            if self.object_map.number_of_objects() > 0
-                && self
-                    .object_map
-                    .submap_objects
-                    .get(&id)
-                    .is_some_and(|m| !m.is_empty())
-                && let Some(mut d) = self.language_descriptor
-            {
-                let norm_squared = d.iter().map(|v| v * v).sum::<f32>();
-                if norm_squared > 0.0 {
-                    let norm = norm_squared.sqrt();
-                    for v in &mut d {
-                        *v /= norm;
-                    }
-                }
-                let objects = self
-                    .object_map
-                    .submap_objects
-                    .get(&id)
-                    .ok_or_else(|| invalid("object submap missing"))?;
-                for face in &mut filtered {
-                    let value = if face.id == 0 {
-                        0.0
-                    } else {
-                        let f = &objects
-                            .get(&face.id)
-                            .ok_or_else(|| invalid("object descriptor missing"))?
-                            .vl_feature;
-                        let norm_squared = f.iter().map(|v| v * v).sum::<f32>();
-                        let norm = norm_squared.sqrt();
-                        let similarity = f
-                            .iter()
-                            .zip(d)
-                            .map(|(a, b)| {
-                                if norm_squared > 0.0 {
-                                    a / norm * b
-                                } else {
-                                    a * b
-                                }
-                            })
-                            .sum::<f32>();
-                        f64::from((similarity.clamp(0.1, 0.5) - 0.1) / 0.4)
-                    };
-                    let c = self
-                        .object_map
-                        .backend
-                        .colour(value, crate::deep_learning::utils::ColourMap::Jet);
-                    face.colour = Some(c.map(|v| (255.0 * v) as u8));
-                }
-                self.object_map.backend.save_mesh(
-                    &filtered,
-                    &directory.join(format!("activationMesh_kf{numbering}.ply")),
-                    &t,
-                )?;
-            }
-        } else {
-            self.object_map.backend.save_mesh(&mesh, &filename, &t)?;
-        }
-        Ok(())
-    }
-    /// # Errors
-    /// Returns an error for invalid configuration or sensor/map data, absent frames/maps,
-    /// or a failed storage, integration, alignment, callback, worker or file operation.
-    pub fn save_all_submap_meshes(&mut self) -> io::Result<()> {
-        let ids: Vec<_> = self.poses.keys().copied().collect();
-        for id in ids {
-            self.save_submap(id)?;
-            if !self
-                .object_map
-                .save_objects(
-                    id,
-                    Path::new(&self.config.results_directory),
-                    &self.poses[&id].matrix().cast::<f32>(),
-                )
-                .map_err(err)?
-            {
-                log::warn!("Could not save objects for submap {id}");
-            }
-        }
-        Ok(())
-    }
     /// # Errors
     /// Returns an error for invalid configuration or sensor/map data, absent frames/maps,
     /// or a failed storage, integration, alignment, callback, worker or file operation.
@@ -2622,26 +2463,6 @@ impl SupereightBackend for crate::mapping::object_mapping::OccupancyMapBackend {
     ) -> io::Result<Matrix<u16>> {
         Err(invalid("occupancy-only maps do not store instance IDs"))
     }
-    fn cache_mesh(&mut self, id: u64) -> io::Result<()> {
-        let triangles = self
-            .map_handle(id)
-            .map_err(err)?
-            .read()
-            .map_err(err)?
-            .mesh(&Matrix4::identity(), 0)
-            .map_err(err)?;
-        let mesh = triangles
-            .into_iter()
-            .map(|face| MeshFace {
-                id: 0,
-                scale: face.scale,
-                vertices: face.vertices,
-                colour: None,
-            })
-            .collect();
-        self.meshes.insert(id, mesh);
-        Ok(())
-    }
     fn downsample_depth(&self, original: &Matrix<f32>, factor: usize) -> io::Result<Matrix<f32>> {
         if factor == 0
             || !original.rows.is_multiple_of(factor)
@@ -2684,10 +2505,6 @@ impl SupereightBackend for crate::mapping::object_mapping::OccupancyMapBackend {
             .write_image_data(&bytes)
             .map_err(err)
     }
-    fn save_mesh(&self, mesh: &[MeshFace], path: &Path, t_wm: &Matrix4<f32>) -> io::Result<()> {
-        save_occupancy_mesh(mesh, path, t_wm)
-    }
-    fn colour_mesh_by_id(&self, _mesh: &mut [MeshFace]) {}
 }
 fn se_rigid_transform(matrix: &Matrix4<f32>) -> io::Result<nalgebra::IsometryMatrix3<f32>> {
     if matrix.iter().any(|value| !value.is_finite()) {
@@ -2719,105 +2536,6 @@ fn se_pinhole_sensor(
         cy: sensor.cy,
     };
     firefly_supereight2::pinhole_camera::PinholeCamera::new(&config).map_err(err)
-}
-fn save_occupancy_mesh(mesh: &[MeshFace], path: &Path, t_wm: &Matrix4<f32>) -> io::Result<()> {
-    const SCALE_COLOURS: [[u8; 3]; 8] = [
-        [102, 194, 165],
-        [252, 141, 98],
-        [141, 160, 203],
-        [231, 138, 195],
-        [166, 216, 84],
-        [255, 217, 47],
-        [229, 196, 148],
-        [179, 179, 179],
-    ];
-    let extension = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| invalid("mesh file extension absent"))?;
-    if !matches!(extension, "ply" | "vtk" | "obj") {
-        return Err(invalid("unknown mesh file extension"));
-    }
-    if mesh.iter().any(|face| face.scale < 0) {
-        return Err(invalid("negative mesh scale has no source colour"));
-    }
-    let colour = |face: &MeshFace| SCALE_COLOURS[(face.scale as usize).min(7)];
-    let mut file = std::io::BufWriter::new(fs::File::create(path)?);
-    let vertices = mesh
-        .len()
-        .checked_mul(3)
-        .ok_or_else(|| invalid("mesh vertex count overflow"))?;
-    match extension {
-        "ply" => write!(
-            file,
-            "ply\nformat ascii 1.0\ncomment Mesh generated by supereight 2\nelement vertex {vertices}\nproperty float x\nproperty float y\nproperty float z\nelement face {}\nproperty list uchar int vertex_index\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n",
-            mesh.len()
-        )?,
-        "vtk" => write!(
-            file,
-            "# vtk DataFile Version 3.0\nMesh generated by supereight 2\nASCII\nDATASET POLYDATA\n\nPOINTS {vertices} float\n"
-        )?,
-        "obj" => write!(
-            file,
-            "# Mesh generated by supereight 2\n# {vertices} vertices\n# {} faces\n",
-            mesh.len()
-        )?,
-        _ => unreachable!(),
-    }
-    for face in mesh {
-        for vertex in &face.vertices {
-            let p = transform(t_wm, vertex);
-            if extension == "obj" {
-                write!(file, "v ")?;
-            }
-            writeln!(file, "{} {} {}", p.x, p.y, p.z)?;
-        }
-    }
-    if extension == "vtk" {
-        write!(file, "\nPOLYGONS {} {}\n", mesh.len(), mesh.len() * 4)?;
-    }
-    for (i, face) in mesh.iter().enumerate() {
-        match extension {
-            "ply" => {
-                let c = colour(face);
-                writeln!(
-                    file,
-                    "3 {} {} {} {} {} {}",
-                    i * 3,
-                    i * 3 + 1,
-                    i * 3 + 2,
-                    c[0],
-                    c[1],
-                    c[2]
-                )?;
-            }
-            "vtk" => writeln!(file, "3 {} {} {}", i * 3, i * 3 + 1, i * 3 + 2)?,
-            "obj" => writeln!(file, "f {} {} {}", i * 3 + 1, i * 3 + 2, i * 3 + 3)?,
-            _ => unreachable!(),
-        }
-    }
-    if extension == "vtk" {
-        write!(
-            file,
-            "\nCELL_DATA {}\n\nSCALARS scale unsigned_char\nLOOKUP_TABLE default\n",
-            mesh.len()
-        )?;
-        for face in mesh {
-            writeln!(file, "{}", face.scale)?;
-        }
-        writeln!(file, "COLOR_SCALARS scale_colour 3")?;
-        for face in mesh {
-            let c = colour(face);
-            writeln!(
-                file,
-                "{} {} {}",
-                f32::from(c[0]) / 255.0,
-                f32::from(c[1]) / 255.0,
-                f32::from(c[2]) / 255.0
-            )?;
-        }
-    }
-    file.flush()
 }
 
 #[cfg(test)]
