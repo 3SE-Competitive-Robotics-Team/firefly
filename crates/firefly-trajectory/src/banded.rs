@@ -66,9 +66,22 @@ pub struct BandedPlu {
 impl BandedPlu {
     /// 带形 LU 分解（官方 `BandedSystem::factorizeLU` 逻辑）。
     pub fn factorize(a: &BandedMatrix) -> Result<Self> {
-        let n = a.n;
-        let mut data = a.data.clone();
-        let (lower_bw, upper_bw) = (a.lower_bw, a.upper_bw);
+        Self::factor_in_place(a.n, a.lower_bw, a.upper_bw, a.data.clone())
+    }
+
+    /// 同一分解，但接管矩阵存储，省掉一次 `n×(带宽)` 的克隆。
+    ///
+    /// 调用方（`Minco`）每次时长变化都会新建带形矩阵，克隆纯属浪费。
+    pub fn factorize_owned(a: BandedMatrix) -> Result<Self> {
+        Self::factor_in_place(a.n, a.lower_bw, a.upper_bw, a.data)
+    }
+
+    fn factor_in_place(
+        n: usize,
+        lower_bw: usize,
+        upper_bw: usize,
+        mut data: Vec<f64>,
+    ) -> Result<Self> {
         let get = |data: &[f64], i: usize, j: usize| {
             if i + upper_bw >= j && i <= j + lower_bw {
                 data[(i + upper_bw - j) * n + j]
@@ -183,6 +196,13 @@ impl BandedSolver {
     pub fn new(a: &BandedMatrix) -> Result<Self> {
         Ok(Self {
             plu: BandedPlu::factorize(a)?,
+        })
+    }
+
+    /// 接管矩阵存储的构造：`Minco` 的带形矩阵是一次性产物。
+    pub fn new_owned(a: BandedMatrix) -> Result<Self> {
+        Ok(Self {
+            plu: BandedPlu::factorize_owned(a)?,
         })
     }
 

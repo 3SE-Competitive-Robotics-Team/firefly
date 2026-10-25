@@ -84,7 +84,7 @@ impl MincoBuilder {
         }
         let q = DMatrix::from_fn(3, interior, |r, c| waypoints[c][r]);
         let t = DVector::from_fn(pieces, |r, _| durations[r]);
-        let solver = Arc::new(BandedSolver::new(&Minco::build_banded(durations))?);
+        let solver = Arc::new(BandedSolver::new_owned(Minco::build_banded(durations))?);
         Ok(Minco {
             order: self.order,
             pieces,
@@ -120,7 +120,7 @@ impl Minco {
             ));
         }
         if durations != self.t.as_slice() {
-            let solver = Arc::new(BandedSolver::new(&Self::build_banded(durations))?);
+            let solver = Arc::new(BandedSolver::new_owned(Self::build_banded(durations))?);
             self.t.as_mut_slice().copy_from_slice(durations);
             self.solver = solver;
         }
