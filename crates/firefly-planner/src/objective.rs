@@ -232,7 +232,7 @@ impl<'a> MincoObjective<'a> {
         if let Some((last_x, minco, traj, samples)) = &mut self.cache {
             minco.update(self.start, self.end, &self.points, &t).ok()?;
             *traj = minco.solve().ok()?;
-            *samples = Samples::new(traj, k);
+            samples.rebuild(traj, k);
             last_x.clone_from(x);
         } else {
             let minco = MincoBuilder::new(SolverOrder::MinimumJerk, self.start, self.end)
