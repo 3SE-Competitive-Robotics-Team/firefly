@@ -193,9 +193,16 @@ fn render(
     current: &HashMap<u32, Sample>,
     elapsed: Duration,
 ) {
+    let width = name_width(config);
     println!(
-        "{:<14} {:<8} {:<8} {:<7} {:<9} {:<9} AUTOSTART",
-        "NAME", "RUNNING", "PID", "CPU%", "MEM(MiB)", "RESTARTS"
+        "{:<width$} {:<8} {:<8} {:<7} {:<9} {:<9} AUTOSTART",
+        "NAME",
+        "RUNNING",
+        "PID",
+        "CPU%",
+        "MEM(MiB)",
+        "RESTARTS",
+        width = width
     );
     for process in &config.processes {
         let status = statuses.iter().find(|status| status.name == process.name);
@@ -212,14 +219,57 @@ fn render(
         );
         let memory = usage.map_or_else(|| "-".to_owned(), |usage| format!("{:.1}", usage.rss_mib));
         println!(
-            "{:<14} {:<8} {:<8} {:<7} {:<9} {:<9} {}",
+            "{:<width$} {:<8} {:<8} {:<7} {:<9} {:<9} {}",
             process.name,
             if running { "yes" } else { "no" },
             pid.map_or_else(|| "-".to_owned(), |pid| pid.to_string()),
             cpu,
             memory,
             status.map_or(0, |status| status.restarts),
-            if process.autostart { "yes" } else { "no" }
+            if process.autostart { "yes" } else { "no" },
+            width = width
         );
+    }
+}
+
+/// NAME 列宽：取表头与最长进程名的较大者，进程名变长时不会被挤成一个空格。
+/// 终端列宽按 ASCII 字节数计算，进程名来自 `processes.toml`，不使用宽字符。
+fn name_width(config: &Config) -> usize {
+    config
+        .processes
+        .iter()
+        .map(|process| process.name.len())
+        .chain(std::iter::once("NAME".len()))
+        .max()
+        .unwrap_or("NAME".len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::name_width;
+    use crate::process::config::Config;
+
+    fn config_with(names: &[&str]) -> Config {
+        use std::fmt::Write;
+        let mut listing = String::new();
+        for name in names {
+            writeln!(
+                listing,
+                "[[process]]\nname = \"{name}\"\ncommand = [\"bin/{name}\"]\nautostart = false"
+            )
+            .expect("write to string");
+        }
+        toml::from_str(&listing).expect("process listing")
+    }
+
+    #[test]
+    fn name_column_holds_the_longest_process_name() {
+        assert_eq!(name_width(&config_with(&["camera"])), 6);
+        assert_eq!(name_width(&config_with(&["firefly-okvis-x"])), 15);
+        assert_eq!(
+            name_width(&config_with(&["camera", "firefly-okvis-x", "imu"])),
+            15
+        );
+        assert_eq!(name_width(&config_with(&[])), 4, "空清单用表头宽度");
     }
 }
