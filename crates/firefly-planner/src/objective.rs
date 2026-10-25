@@ -152,6 +152,8 @@ pub struct MincoObjective<'a> {
     early_exit: bool,
     acc: Accumulator,
     points: Vec<Point3<f64>>,
+    /// 时长缓冲：与 `points` 一样按需复用，避免每轮重建。
+    scratch_t: Vec<f64>,
     detector_points: Vec<Vector3<f64>>,
 }
 
@@ -168,7 +170,8 @@ impl<'a> MincoObjective<'a> {
             eval_count: 0,
             early_exit: false,
             acc: Accumulator::new(pieces),
-            points: Vec::with_capacity(3 * pieces.saturating_sub(1)),
+            points: Vec::with_capacity(pieces.saturating_sub(1)),
+            scratch_t: Vec::with_capacity(pieces),
             detector_points: Vec::new(),
         }
     }
@@ -225,24 +228,40 @@ impl<'a> MincoObjective<'a> {
         {
             return Some(());
         }
-        let (q, t) = self.unpack(x);
-        self.points.clear();
-        self.points.extend(q.into_iter().map(Point3::from));
+        self.unpack_into(x);
         let k = self.cost.samples_per_piece();
         if let Some((last_x, minco, traj, samples)) = &mut self.cache {
-            minco.update(self.start, self.end, &self.points, &t).ok()?;
+            minco
+                .update(self.start, self.end, &self.points, &self.scratch_t)
+                .ok()?;
             *traj = minco.solve().ok()?;
             samples.rebuild(traj, k);
             last_x.clone_from(x);
         } else {
             let minco = MincoBuilder::new(SolverOrder::MinimumJerk, self.start, self.end)
-                .build(&self.points, &t)
+                .build(&self.points, &self.scratch_t)
                 .ok()?;
             let traj = minco.solve().ok()?;
             let samples = Samples::new(&traj, k);
             self.cache = Some((x.clone(), minco, traj, samples));
         }
         Some(())
+    }
+
+    /// 就地展开参数：复用 `points` 与 `scratch_t`，不产生中间 `Vec`。
+    ///
+    /// 参数布局与 [`Self::unpack`] 一致；热路径（每个 LBFGS 迭代）走这里。
+    fn unpack_into(&mut self, x: &DVector<f64>) {
+        let n_q = 3 * (self.pieces - 1);
+        self.points.clear();
+        for i in 0..self.pieces - 1 {
+            self.points
+                .push(Point3::new(x[i * 3], x[i * 3 + 1], x[i * 3 + 2]));
+        }
+        self.scratch_t.clear();
+        for i in 0..self.pieces {
+            self.scratch_t.push(virtual_to_real(x[n_q + i]));
+        }
     }
 
     #[must_use]
