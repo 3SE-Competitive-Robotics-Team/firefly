@@ -393,15 +393,19 @@ fn fill_feature_inputs<'a>(
     }
 }
 
+/// 外观匹配结果：查询索引、库图索引、分数。
+type FeatureMatches = Vec<(usize, usize, f32)>;
+/// 点的库图匹配结果：查询索引、库图点坐标、分数。
+type PointMatches = Vec<(usize, [f64; 3], f32)>;
+
 /// 外观对应保留两侧索引，深度缺失不能影响模型的输入与注意力计算。
 #[fastrace::trace]
-#[allow(clippy::type_complexity)]
 fn match_features<'a>(
     session: &mut Session,
     bindings: &mut MatchBindings,
     features: impl ExactSizeIterator<Item = (&'a [f32; 2], &'a [f32; DESC_DIM])>,
     feat: &FeatureMessage,
-) -> Result<Vec<(usize, usize, f32)>, Box<dyn std::error::Error>> {
+) -> Result<FeatureMatches, Box<dyn std::error::Error>> {
     let n_map = features.len().min(NUM_POINTS);
     if n_map < 6 {
         return Ok(Vec::new());
@@ -427,13 +431,12 @@ fn match_features<'a>(
     Ok(pairs)
 }
 
-#[allow(clippy::type_complexity)]
 fn match_points(
     session: &mut Session,
     bindings: &mut MatchBindings,
     points: &[firefly_vision_map::VisionMapPoint],
     feat: &FeatureMessage,
-) -> Result<Vec<(usize, [f64; 3], f32)>, Box<dyn std::error::Error>> {
+) -> Result<PointMatches, Box<dyn std::error::Error>> {
     Ok(match_features(
         session,
         bindings,

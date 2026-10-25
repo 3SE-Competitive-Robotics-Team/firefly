@@ -4,14 +4,20 @@
 //! 函数与行为逐行对齐官方实现，仅做 Rust 习惯适配（`Vec<f64>` 领先系数在前，`BTreeSet<OrderedF64>` 代替 `std::set<double>`）。
 //! 公开 API：`poly_conv` / `poly_sqr` / `poly_val` / `count_roots` / `solve_polynomial`（对应官方 `RootFinder::` 命名空间）。
 
+// 逐行移植上游 `root_finder.hpp`：下列建议要么改变浮点语义（`midpoint`/`clamp`），
+// 要么要求调整与官方一致的语句顺序。按需逐条豁免，不整文件关闭 `all`/`pedantic`。
 #![allow(
     clippy::many_single_char_names,
     clippy::similar_names,
     clippy::too_many_lines,
     clippy::too_many_arguments,
-    clippy::pedantic,
-    clippy::nursery,
-    clippy::all
+    clippy::cast_lossless,
+    clippy::cloned_instead_of_copied,
+    clippy::inconsistent_digit_grouping,
+    clippy::items_after_statements,
+    clippy::manual_clamp,
+    clippy::manual_midpoint,
+    clippy::needless_range_loop
 )]
 
 use std::collections::BTreeSet;

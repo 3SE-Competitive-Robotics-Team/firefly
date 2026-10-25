@@ -320,12 +320,14 @@ fn project_ocv(
 /// `t_global`（camera→world，`-Z`）。无共识返回空；调用方做门与发布。
 /// （`purecv` 的 `RANSAC` 定种子，同输入同输出，子集与全集相同时禁止重试。）
 /// （返回类型复杂是领域常态，本文件 `match_frame` 处同惯例。）
-#[allow(clippy::type_complexity)]
+/// 位姿（camera→world）与 RANSAC 内点索引。
+type PoseAndInliers = (Matrix4<f64>, Vec<i32>);
+
 fn ransac_pose(
     object: &[Point3f],
     image: &[Point2f],
     cam: &Matrix<f64>,
-) -> Result<Option<(Matrix4<f64>, Vec<i32>)>, Error> {
+) -> Result<Option<PoseAndInliers>, Error> {
     let mut rvec = Matrix::new(3, 1, 1);
     let mut tvec = Matrix::new(3, 1, 1);
     let mut inliers: Vec<i32> = Vec::new();
