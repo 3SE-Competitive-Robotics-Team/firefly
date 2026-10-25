@@ -248,7 +248,7 @@ impl DepthFusionProcessor {
             let work = (|| -> Result<Option<StereoPrediction>> {
                 let mut queues = s.queues.lock().unwrap();
                 while let Some(update) = queues.states.pop_front() {
-                    processor.update_trajectory(update)?;
+                    processor.update_trajectory(&update)?;
                 }
                 s.available.notify_all();
                 let latest = processor.trajectory.state_ids().iter().next_back().copied();
@@ -392,7 +392,7 @@ struct MotionProcessor {
     raster: Arc<dyn VisualizationRaster>,
 }
 impl MotionProcessor {
-    fn update_trajectory(&mut self, states: ViStates) -> Result<()> {
+    fn update_trajectory(&mut self, states: &ViStates) -> Result<()> {
         self.trajectory
             .update(
                 &states.tracking,
