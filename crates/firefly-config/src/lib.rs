@@ -132,12 +132,12 @@ pub mod paths {
     /// firefly 安装根目录。
     #[must_use]
     pub fn root() -> PathBuf {
-        normalize(PathBuf::from(ROOT))
+        normalize(std::path::Path::new(ROOT))
     }
 
     /// 去掉 `.`/`..` 的词法归一化：开发机构建的根路径含 `../..`，日志和报错里应给出
     /// 干净路径；不访问文件系统，符号链接语义不影响。
-    fn normalize(path: PathBuf) -> PathBuf {
+    fn normalize(path: &std::path::Path) -> PathBuf {
         let mut out = PathBuf::new();
         for component in path.components() {
             match component {
