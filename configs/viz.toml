@@ -4,6 +4,3 @@
 # [video]
 # enabled = false
 # encoder = "libx265"
-# [capture]
-# right_hz = 1.0
-# depth_hz = 1.0

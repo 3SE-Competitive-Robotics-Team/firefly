@@ -2,7 +2,7 @@
 
 从仓库根运行：FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/system/test_sensor_startup.py -q
 需要 RMUC 资产、图形会话与 release 构建的 firefly-okvis-x / fc / render，且没有其他闭环进程。
-GroundTruth 仅供 render 合成图像；屏蔽 PlantState，算法只使用 IMU 与图像。
+GroundTruth 供 render 合成图像及 viz 对照记录；屏蔽 PlantState，算法只使用 IMU 与图像。
 """
 from __future__ import annotations
 
@@ -121,7 +121,8 @@ main(["--no-trace"], publish_plant_state=False)
                     assert msg.timestamp > previous_depth_timestamp
                 previous_depth_timestamp = msg.timestamp
                 valid_depth_frames += int(np.any(values > 0.))
-            if first_ready is not None and samples >= 20 and controls >= 100 and valid_depth_frames >= 3:
+            if (first_ready is not None and previous_timestamp - first_ready >= 0.5
+                    and samples >= 20 and controls >= 100 and valid_depth_frames >= 3):
                 break
             time.sleep(0.01)
         if first_ready is None:
@@ -147,6 +148,42 @@ main(["--no-trace"], publish_plant_state=False)
         print(f"recording: {output}")
         if failures:
             raise RuntimeError("; ".join(failures))
+    _verify_recording(output)
+
+
+def _verify_recording(path: Path) -> None:
+    from collections import Counter
+    from rerun.chunk import RrdReader
+
+    reader = RrdReader(path)
+    counts = Counter()
+    matched = 0
+    for chunk in reader.store(store=reader.recordings()[0]).stream():
+        name = chunk.entity_path
+        counts[name] += chunk.num_rows
+        if name == "/cameras/left/annotation":
+            matched += sum(any(row or []) for row in chunk.to_record_batch().column("matched").to_pylist())
+        if name == "/okvis/debug/pose_imu":
+            for row in chunk.to_record_batch().column("Tensor:data").to_pylist():
+                for tensor in row:
+                    assert tensor["shape"] == [4, 4]
+                    matrix = np.asarray(tensor["buffer"]).reshape(4, 4)
+                    assert np.isfinite(matrix).all()
+                    np.testing.assert_array_equal(matrix[3], [0., 0., 0., 1.])
+        if name == "/render/capture/publish_s":
+            for values in chunk.to_record_batch().column("Scalars:scalars").to_pylist():
+                assert len(values) == 3
+                assert np.isfinite(values).all()
+    for name in ("gt/pose", "okvis/odom", "okvis/map/pose"):
+        assert counts[f"/{name}"] >= 2, f"missing pose history: {name}"
+    for name in ("gt/traj", "okvis/traj", "okvis/map/traj", "okvis/tracking", "okvis/loop_commits",
+                 "okvis/debug/keypoints/left", "okvis/debug/keypoints/right", "okvis/debug/pose_imu",
+                 "cameras/left/image", "render/capture/publish_s"):
+        assert counts[f"/{name}"], f"missing recording entity: {name}"
+    assert matched > 0, "OKVIS keypoints must match at least one recorded image"
+    assert not any(name.startswith("/world/") for name in counts), "field mesh included in recording"
+    assert not any(name.startswith(("/cameras/right", "/cameras/depth", "/snapshots/", "/live/cameras/"))
+                   for name in counts), "extra camera recording included"
 
 
 def _verify_flight(ground_truth, check_alive):

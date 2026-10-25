@@ -347,7 +347,7 @@ impl Publishers {
             self.attitude.publish(message)?;
         }
         if stamp - self.last_viz >= 0.1 {
-            let mut message = VizMessage::base(kind::POSE, stamp, "vio/odom");
+            let mut message = VizMessage::base(kind::POSE, stamp, "okvis/odom");
             message.xyz = [
                 sample.odom.position_x,
                 sample.odom.position_y,

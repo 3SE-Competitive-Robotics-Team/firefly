@@ -17,7 +17,7 @@ from firefly_viz.messages import VizMessage  # noqa: E402
 def _make_pose() -> VizMessage:
     m = VizMessage()
     m.kind = 1
-    b = b"vio/odom"
+    b = b"okvis/odom"
     m.entity_len = len(b)
     for i, c in enumerate(b):
         m.entity[i] = c
@@ -31,15 +31,15 @@ def test_detach_is_independent():
     """改原对象后拷贝不变（别名则必变——回归即失败）。"""
     src = _make_pose()
     dst = detach_copy(src)
-    assert _entity(dst) == "vio/odom"
+    assert _entity(dst) == "okvis/odom"
     assert dst.timestamp == 12.5
     # 模拟 loan 复用覆盖 / 释放
     src.entity_len = 7
-    for i, c in enumerate(b"vio/deb"):
+    for i, c in enumerate(b"okvis/d"):
         src.entity[i] = c
     src.timestamp = -999.0
     src.xyz = (ctypes.c_double * 3)(0.0, 0.0, 0.0)
-    assert _entity(dst) == "vio/odom"
+    assert _entity(dst) == "okvis/odom"
     assert dst.timestamp == 12.5
     assert list(dst.xyz) == [1.0, 2.0, 3.0]
 
@@ -49,6 +49,16 @@ def test_detach_preserves_type():
     dst = detach_copy(_make_pose())
     assert isinstance(dst, VizMessage)
     assert dst.kind == 1
+
+
+def test_ground_truth_detach_owns_pose_storage():
+    from firefly_mujoco import OdomMessage
+
+    src = OdomMessage(timestamp=2., position_x=3., quat_z=1., is_initialized=True)
+    dst = detach_copy(src)
+    src.timestamp, src.position_x, src.quat_z = 0., 0., 0.
+    assert isinstance(dst, OdomMessage)
+    assert (dst.timestamp, dst.position_x, dst.quat_z, dst.is_initialized) == (2., 3., 1., True)
 
 
 def test_entity_rejects_corrupt_payload():

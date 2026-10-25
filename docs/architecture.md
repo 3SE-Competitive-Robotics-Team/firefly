@@ -11,7 +11,7 @@
 ```mermaid
 flowchart LR
     SIM[sim：物理与传感器源] -->|IMU| V[firefly-okvis-x]
-    SIM -->|仿真位姿，仅生成图像| R[render]
+    SIM -->|仿真位姿| R[render]
     R -->|双目与深度| V
     V -->|连续 odom 与后验 IMU 预测姿态| F[fc]
     SIM -->|原始 IMU| I[firefly-imu：FC 内独立热备]
@@ -24,6 +24,7 @@ flowchart LR
     R -->|深度| P
     P -->|携带坐标变换的 Reference| F
     R -->|图像| D[firefly-viz]
+    SIM -->|真值位姿| D
     V -->|诊断 IPC| D
     P -->|诊断 IPC| D
     D --> RRD[RRD / Rerun Viewer]
@@ -58,13 +59,22 @@ flowchart LR
 
 ### 诊断记录与展示
 
+`firefly-viz` 从 `Firefly/GroundTruth` 记录 `gt/pose` 与 `gt/traj`，从 `okvis/odom`
+位姿诊断生成 `okvis/traj`，从 OKVIS 发布的 `Firefly/CorrectedOdometry` 按 10Hz
+记录 `okvis/map/pose` 与 `okvis/map/traj`。轨迹按测量时刻记录相邻两点构成的线段，记录进程为每条轨迹
+保留一个前序点，Viewer 按时间范围展示历史。
+
+OKVIS 的帧诊断回调读取当前帧的二维关键点、路标 ID 与优化后的 IMU 位姿矩阵，
+在 `okvis/debug` 下发布有界诊断。关键点时间恢复为相机采集时刻；记录端按纳秒配对
+图像与关键点，保留原始像素坐标和路标 ID，显示时应用像素中心偏移。
+
 `Firefly/VizScalars` 使用小型定长消息长期保存数值；`Firefly/Viz` 保存位姿、点集、矩阵、
 标定等空间诊断；`Firefly/VizVoxels` 单独传输 planner 的地图更新。体素更新分块连续发送，
 接收端检查序号、完整性和容量后更新集合，再按录制频率保存完整快照。缺块、乱序或未知
 基线上的增量使录制明确失败；不能把截断地图当作完整证据。
 
 左目灰度原图经 FFmpeg 编成无 B 帧的低码率 H.265，Annex B access unit 逐帧写入
-`cameras/left/image` 的 `VideoStream`。codec、相机标定与场景资产只写一次 static；
+`cameras/left/image` 的 `VideoStream`。codec、左目标定与无人机模型按 static 记录；
 视频 sample 属于原始采集 `sim_time`。编码输入只有有界缓冲，允许编码前丢帧，
 已经编码的依赖帧不能丢弃。视频是有损调试背景，不作为像素精度评测或算法输入。
 Rerun 绘制特征点，点集只有与已保存图像的采集时间完全一致才进入叠加层；每张已保存图像
@@ -72,18 +82,17 @@ Rerun 绘制特征点，点集只有与已保存图像的采集时间完全一�
 算法与 IPC 使用整数像素中心；[Rerun 0.38.1 图像边界从零开始](https://github.com/rerun-io/rerun/blob/0.38.1/crates/views/re_view_spatial/src/visualizers/video/mod.rs#L574)，
 展示层的主点与叠加点统一加半个像素，原始诊断坐标保持不变。
 
-右目和深度支持独立采样；有界原图环形缓冲支持错误事件或 SIGUSR1 触发的前后无损窗口。
-窗口按各相机实际接收帧数计数，不声称未收到的帧存在。采样、队列丢帧和退出状态写入 RRD。
-无损快照保存原始灰度值或米制深度，H.265 不承载深度。
+图像区展示左目 H.265 视频和双目关键点。右目原图、深度图的业务话题由估计与建图进程消费；
+左右目关键点由 OKVIS 当前帧诊断提供。视频队列丢帧和退出状态写入 RRD。
 
-需要频繁替换的大数据预览写入同 recording 的 `/live/**`，通过只有 gRPC sink 的独立
+地图预览写入同 recording 的 `/live/plan/**`，通过只有 gRPC sink 的独立
 stream 发送 static，永不进入文件 sink。反复 static log 仍会产生传输和存储开销，
-因此预览另有限频，历史分析使用 temporal 视频和采样快照。录制和实时查看可以同时启用。
-仿真世界、map 与 VIO odom 分开显示；没有显式对齐时不能把三个坐标系的位姿混画。
+因此地图预览另有限频，历史分析使用 temporal 视频、关键点和地图快照。录制和实时查看可以同时启用。
+三个空间视图分别使用仿真世界、OKVIS 地图系和局部 odom 坐标。
 接收、诊断写入和媒体处理独立调度；小型诊断队列溢出、编码失败、部分体素更新或退出
 清理失败都报告录制不完整，不静默切换编码器。配置与具体预算见 `configs/viz.toml`
 及 `firefly_viz.config`，不在此复制参数表。
-退出先停止接收，再排空诊断（包括最后的错误触发），随后排空媒体与编码器，最后 flush
+退出先停止接收，再排空诊断，随后排空媒体与编码器，最后 flush
 并关闭 Rerun sinks。关闭信号不占队列槽位；超时残留须报告，仍有写入线程时不提前断开 sink。
 
 <a id="frames"></a>

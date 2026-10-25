@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //! Single-process online VIO, loop closure and depth mapping over iceoryx2.
 pub mod config;
+mod diagnostics;
 mod input;
 mod output;
 #[cfg(test)]
@@ -49,7 +50,13 @@ pub fn run(config: Config, vocabulary: Option<&Path>) -> Result<()> {
     let vocabulary = load_vocabulary(vocabulary)?;
     let maps = SharedOccupancyMaps::default();
     let submaps = Config::submaps();
-    let mut estimator = create_estimator(&parameters, &submaps, vocabulary, maps.clone())?;
+    let mut estimator = create_estimator(
+        &parameters,
+        &submaps,
+        vocabulary,
+        maps.clone(),
+        config.diagnostics,
+    )?;
     let mut mapping = if config.mapping {
         let mut backend = OccupancyMapBackend::new(config.map(), DataConfig::default());
         backend.shared_maps = maps;
@@ -151,6 +158,7 @@ fn create_estimator(
     submaps: &crate::mapping::config_mapping::SubMapConfig,
     vocabulary: Vocabulary,
     maps: SharedOccupancyMaps,
+    diagnostics: bool,
 ) -> Result<ThreadedSlam> {
     let params = parameters.clone();
     let submap_config = submaps.clone();
@@ -165,13 +173,18 @@ fn create_estimator(
                 solver,
                 RustBriskFeatureFactory,
             );
-            let core = ProcessingCore::new(
+            let image_delay = params.camera.image_delay;
+            let mut core = ProcessingCore::new(
                 ViSlamBackend::default(),
                 frontend,
                 params,
                 submap_config,
                 OccupancyMappingRuntime::new(worker_maps),
             );
+            if diagnostics {
+                let mut publisher = diagnostics::Diagnostics::new(image_delay)?;
+                core.set_frame_diagnostics(move |frame, state| publisher.publish(frame, state));
+            }
             Ok(core)
         },
         None,

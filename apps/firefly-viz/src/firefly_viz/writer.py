@@ -16,6 +16,11 @@ from .messages import (
 from .recording import RecordingOutputs, PIXEL_CENTER_OFFSET, at
 
 
+TRAJECTORIES = {"gt/pose": ("gt/traj", [64, 128, 255]),
+                "okvis/odom": ("okvis/traj", [255, 160, 64]),
+                "okvis/map/pose": ("okvis/map/traj", [90, 235, 120])}
+
+
 def entity(msg):
     if not 0 < msg.entity_len <= len(msg.entity):
         raise ValueError("invalid entity length")
@@ -33,24 +38,69 @@ def count(value, capacity):
 
 
 class Writer:
-    def __init__(self, recordings: RecordingOutputs, options, trigger):
-        self.recordings, self.options, self.trigger = recordings, options, trigger
+    def __init__(self, recordings: RecordingOutputs, options):
+        self.recordings, self.options = recordings, options
         self.rec = recordings.archive
         self.voxels = {}
         self.voxel_sequence = None
         self.voxel_pending = None
         self.calibrations = {}
+        self.previous_poses = {}
         self.last_flush = time.monotonic()
+
+    def consume(self, item):
+        kind, msg = item
+        if kind == "gt":
+            self.ground_truth(msg)
+        elif kind == "map":
+            if msg.is_initialized:
+                self._pose("okvis/map/pose", msg.timestamp,
+                           [msg.position_x, msg.position_y, msg.position_z],
+                           [msg.quat_x, msg.quat_y, msg.quat_z, msg.quat_w])
+        elif kind == "log":
+            self.log_text(msg)
+        elif kind == "viz":
+            self.handle(msg)
+        else:
+            raise ValueError(f"unsupported telemetry kind {kind}")
+
+    def ground_truth(self, msg):
+        if not msg.is_initialized:
+            self.previous_poses.pop("gt/pose", None)
+            return
+        self._pose("gt/pose", msg.timestamp,
+                   [msg.position_x, msg.position_y, msg.position_z],
+                   [msg.quat_x, msg.quat_y, msg.quat_z, msg.quat_w])
+
+    def _pose(self, name, stamp, xyz, quat):
+        if (not math.isfinite(stamp) or stamp < 0 or not np.isfinite([*xyz, *quat]).all()
+                or abs(np.linalg.norm(quat) - 1) > 1e-5):
+            raise ValueError(f"invalid pose for {name}")
+        trajectory = TRAJECTORIES.get(name)
+        previous = self.previous_poses.get(name)
+        if previous is not None:
+            if stamp < previous[0]:
+                raise ValueError(f"regressed pose timestamp for {name}")
+            if stamp == previous[0]:
+                return
+        at(self.rec, stamp)
+        self.rec.log(name, rr.Transform3D(translation=xyz, quaternion=quat), strict=True)
+        if trajectory is not None:
+            path, color = trajectory
+            if previous is not None:
+                self.rec.log(path, rr.LineStrips3D([[previous[1], xyz]], colors=color), strict=True)
+            self.previous_poses[name] = stamp, xyz
 
     def handle(self, msg):
         name = entity(msg)
         if not math.isfinite(msg.timestamp) or msg.timestamp < 0:
             raise ValueError(f"invalid sim_time for {name}")
-        at(self.rec, msg.timestamp)
         kind = msg.kind
         if kind == VIZ_KIND_POSE:
-            self.rec.log(name, rr.Transform3D(translation=list(msg.xyz), quaternion=list(msg.quat_xyzw)), strict=True)
-        elif kind == VIZ_KIND_SCALARS:
+            self._pose(name, msg.timestamp, list(msg.xyz), list(msg.quat_xyzw))
+            return
+        at(self.rec, msg.timestamp)
+        if kind == VIZ_KIND_SCALARS:
             n = count(msg.scalar_count, len(msg.scalars))
             self.rec.log(name, rr.Scalars(list(msg.scalars[:n])), strict=True)
         elif kind == VIZ_KIND_KEYPOINTS_2D:
@@ -66,8 +116,9 @@ class Writer:
             points = np.array([[p[0], p[1]] for p in msg.points[:n]], dtype=np.float32).reshape(-1, 2)
             ids = np.array([p[2] for p in msg.points[:n]], dtype=np.uint64)
             self.rec.log(name, rr.Points2D(points, colors=list(msg.color), radii=2),
-                         rr.AnyValues(track_id=pa.array(ids, type=pa.uint64())), strict=True)
-            if name in ("vio/debug/keypoints/left", "vio/debug/keypoints/right"):
+                         rr.AnyValues(track_id=pa.array(ids, type=pa.uint64()),
+                                      image_width=int(width), image_height=int(height), total_keypoints=int(total)), strict=True)
+            if name == "okvis/debug/keypoints/left":
                 if (width, height) != (IMAGE_WIDTH, IMAGE_HEIGHT):
                     raise ValueError(f"keypoint resolution does not match camera: {name}")
                 self.recordings.matches.observe(name.rsplit("/", 1)[1], msg.timestamp, points, ids, list(msg.color))
@@ -99,6 +150,9 @@ class Writer:
             for key in list(self.voxels):
                 if key == name or key.startswith(name + "/"):
                     del self.voxels[key]
+            for key in list(self.previous_poses):
+                if key == name or key.startswith(name + "/") or TRAJECTORIES[key][0] == name:
+                    del self.previous_poses[key]
         elif kind == VIZ_KIND_CAMERA:
             self._calibration(name, msg)
         else:
@@ -115,11 +169,9 @@ class Writer:
         else:
             self.rec.set_time("wall_time", timestamp=float(msg.wall_secs) + float(msg.wall_nanos) * 1e-9)
         self.rec.log(f"logs/{tag}", rr.TextLog(text, level={1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE"}.get(msg.log_level, "INFO")), strict=True)
-        if msg.log_level == 1 and self.options.capture.trigger_on_error:
-            self.trigger.set()
 
     def _calibration(self, name, msg):
-        if name not in ("cameras/left", "cameras/right", "cameras/depth"):
+        if name != "cameras/left":
             raise ValueError("unknown calibrated camera")
         value = (*msg.xyz, *msg.quat_xyzw, *msg.scalars, *msg.points[0][:2])
         width, height = msg.points[0][:2]
