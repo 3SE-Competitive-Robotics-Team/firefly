@@ -23,7 +23,7 @@ use crate::trace::TraceContext;
 ///
 /// 节点由调用方持有（进程共享单节点，见 [`crate::node`]），端口只借用其
 /// 创建服务；Drop 顺序由调用方作用域保证（节点最后释放）。
-pub struct Publisher<T: Debug + ZeroCopySend + 'static> {
+pub struct Publisher<T: Debug + IceoryxSend + ?Sized + 'static> {
     /// 发布器句柄。
     publisher: Iox2Publisher<ipc::Service, T, TraceContext>,
     /// 事件唤醒端：`Some` 时 publish 成功后自动通知（订阅端 `WaitSet` 即到即醒）。
@@ -171,7 +171,9 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
         fill(sample.payload_mut());
         self.send_sample(sample).map(|(_, ctx)| ctx)
     }
+}
 
+impl<T: Debug + IceoryxSend + ?Sized + 'static> Publisher<T> {
     fn send_sample(
         &self,
         mut sample: SampleMut<ipc::Service, T, TraceContext>,
@@ -196,5 +198,65 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
                     format!("发送样本失败: {e:?}"),
                 )
             })
+    }
+}
+
+impl<T: Debug + ZeroCopySend + 'static> Publisher<[T]> {
+    /// 创建可增长的切片发布器，完整切片以单个 IPC 样本原子发送。
+    /// # Errors
+    /// 服务或发布器创建失败。
+    pub fn with_slice_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
+        let name = topic.try_into().map_err(|e| {
+            firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                format!("非法话题名: {e:?}"),
+            )
+        })?;
+        let service = node
+            .service_builder(&name)
+            .publish_subscribe::<[T]>()
+            .user_header::<TraceContext>()
+            .open_or_create()
+            .map_err(|e| {
+                firefly_error::Error::new(
+                    firefly_error::ErrorKind::Internal,
+                    format!("创建切片服务失败: {e:?}"),
+                )
+            })?;
+        let publisher = service
+            .publisher_builder()
+            .allocation_strategy(AllocationStrategy::PowerOfTwo)
+            .create()
+            .map_err(|e| {
+                firefly_error::Error::new(
+                    firefly_error::ErrorKind::Internal,
+                    format!("创建切片发布器失败: {e:?}"),
+                )
+            })?;
+        Ok(Self {
+            publisher,
+            notifier: None,
+        })
+    }
+
+    /// 就地填写变长切片，沿用统一 trace 用户头。
+    /// # Errors
+    /// 借出共享内存或发送失败。
+    pub fn publish_slice_with(
+        &self,
+        len: usize,
+        fill: impl FnMut(usize) -> T,
+    ) -> Result<TraceContext, firefly_error::Error> {
+        let sample = self
+            .publisher
+            .loan_slice_uninit(len)
+            .map_err(|e| {
+                firefly_error::Error::temporary(
+                    firefly_error::ErrorKind::ResourceExhausted,
+                    format!("借出切片失败: {e:?}"),
+                )
+            })?
+            .write_from_fn(fill);
+        self.send_sample(sample).map(|(_, trace)| trace)
     }
 }

@@ -1,4 +1,4 @@
-"""持久记录与 latest-only 预览分流，所有时间戳属于原始测量时刻。"""
+"""左右目视频与同帧关键点的历史录制，所有时间戳属于原始测量时刻。"""
 
 from collections import OrderedDict
 from typing import Protocol
@@ -11,6 +11,8 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
+
+from .telemetry import log_scalars
 
 
 APP_ID = "firefly"
@@ -29,42 +31,60 @@ def at(recording, stamp: float | None):
         recording.set_time("sim_time", duration=stamp)
 
 
-def blueprint(live: bool):
+def blueprint():
     history = [rrb.VisibleTimeRange("sim_time", start=rrb.TimeRangeBoundary.infinite(),
                                     end=rrb.TimeRangeBoundary.cursor_relative())]
-    # 三种空间坐标各自成图；未提供对齐变换时绝不把 odom/map 当成仿真世界。
-    spatial_views = [
-        rrb.Spatial3DView(origin="/", name="Simulation world",
-                          contents=["+ /gt/**"],
-                          overrides={"/gt/traj": rrb.VisibleTimeRanges(history)}),
-        rrb.Spatial3DView(origin="/", name="Map / planning",
-                          contents=["+ /okvis/map/**", "+ /plan/**"],
-                          overrides={"/okvis/map/traj": rrb.VisibleTimeRanges(history)}),
-        rrb.Spatial3DView(origin="/okvis", name="OKVIS odom", contents=["+ /okvis/odom/**", "+ /okvis/traj/**"],
-                          overrides={"/okvis/traj": rrb.VisibleTimeRanges(history)}),
-    ]
-    if live:
-        spatial_views.append(rrb.Spatial3DView(origin="/live", name="Map · latest only",
-                                              contents=["+ /live/plan/**"]))
-    spatial = rrb.Tabs(*spatial_views)
-    cameras = [rrb.Spatial2DView(origin="/cameras/left", name="Left · recorded",
-                                 contents=["+ /cameras/left/**"])]
-    cameras += [rrb.Spatial2DView(origin=f"/okvis/debug/keypoints/{name}", name=f"{name.title()} · OKVIS keypoints")
-                for name in ("left", "right")]
+    spatial = rrb.Spatial3DView(
+        origin="/", name="Ground truth / VSLAM / planning",
+        contents=["+ /gt/**", "+ /okvis/odom/**", "+ /okvis/traj/**",
+                  "+ /okvis/map/**", "+ /plan/**"],
+        overrides={path: rrb.VisibleTimeRanges(history)
+                   for path in ("/gt/traj", "/okvis/traj", "/okvis/map/traj")},
+    )
+    cameras = [rrb.Spatial2DView(origin=f"/cameras/{name}", name=f"{name.title()} · recorded",
+                                 contents=[f"+ /cameras/{name}/**"])
+               for name in ("left", "right")]
     return rrb.Blueprint(
         rrb.Vertical(
-            rrb.Horizontal(spatial, rrb.Tabs(*cameras), column_shares=[3, 2]),
+            rrb.Horizontal(
+                spatial, *cameras,
+            ),
             rrb.Tabs(
-                rrb.TimeSeriesView(origin="/okvis", name="OKVIS diagnostics"),
-                rrb.TimeSeriesView(origin="/vision/debug", name="Vision matching diagnostics"),
-                rrb.TimeSeriesView(origin="/fc", name="Flight control"),
-                rrb.TimeSeriesView(origin="/viz", name="Recorder health"),
-                rrb.TimeSeriesView(origin="/render", name="Sensor latency"),
+                rrb.Vertical(
+                    rrb.StateTimelineView(origin="/okvis/tracking", name="Tracking state"),
+                    rrb.TimeSeriesView(origin="/okvis/loop_commits", name="Loop updates"),
+                    rrb.TimeSeriesView(origin="/okvis/frame_processing_ms", name="Frame processing · ms"),
+                    name="OKVIS diagnostics",
+                ),
+                rrb.Vertical(
+                    rrb.TimeSeriesView(origin="/fc/debug/tick_rate", name="FC tick rate · Hz"),
+                    rrb.Horizontal(
+                        rrb.StateTimelineView(origin="/fc/imu", name="IMU attitude states",
+                                              contents=["+ /fc/imu/source", "+ /fc/imu/attitude_ready",
+                                                        "+ /fc/imu/vio_fresh"]),
+                        rrb.StateTimelineView(origin="/fc", name="Flight mode / safety",
+                                              contents=["+ /fc/debug/state", "+ /fc/arming/failed",
+                                                        "+ /fc/failsafe/flags", "+ /fc/failsafe/action",
+                                                        "+ /fc/debug/saturated"]),
+                        rrb.StateTimelineView(origin="/fc/standby_eskf", name="Standby ESKF states",
+                                              contents=["+ /fc/standby_eskf/accel_gate",
+                                                        "+ /fc/standby_eskf/health"]),
+                    ),
+                    rrb.Horizontal(
+                        rrb.TimeSeriesView(origin="/fc/debug/thrust_total", name="Total thrust · N"),
+                        rrb.TimeSeriesView(origin="/fc/debug", name="Altitude / position error · m",
+                                           contents=["+ /fc/debug/altitude", "+ /fc/debug/position_error_odom"]),
+                    ),
+                    name="Flight control",
+                ),
                 rrb.TextLogView(origin="/logs", name="Logs"),
-                rrb.TensorView(origin="/okvis/debug/pose_imu", name="OKVIS optimized IMU pose"),
-            ), row_shares=[3, 2],
+                active_tab=1,
+            ),
         ),
-        rrb.TimePanel(timeline="sim_time", play_state=rrb.components.PlayState.Following),
+        rrb.TimePanel(timeline="sim_time", state=rrb.PanelState.Collapsed,
+                      play_state=rrb.components.PlayState.Paused),
+        rrb.SelectionPanel(state=rrb.PanelState.Collapsed),
+        rrb.BlueprintPanel(state=rrb.PanelState.Collapsed),
     )
 
 
@@ -73,9 +93,6 @@ class RecordingOutputs(Protocol):
 
     @property
     def archive(self) -> rr.RecordingStream: ...
-
-    @property
-    def live(self) -> rr.RecordingStream | None: ...
 
     @property
     def matches(self) -> "MatchedPoints": ...
@@ -97,27 +114,19 @@ class Recordings:
         self.path = path
         recording_id = str(uuid.uuid4())
         self.archive = stream_factory(APP_ID, recording_id=recording_id)
-        self.live = None
         try:
             if not self.archive.is_enabled():
                 raise RuntimeError("Rerun recording is disabled by the environment")
-            self._connect(path, url, serve, options, recording_id,
-                          stream_factory, file_sink, grpc_sink, blueprint_factory)
+            self._connect(path, url, serve, options, recording_id, file_sink, grpc_sink, blueprint_factory)
         except Exception as error:
-            errors = [error]
-            for recording in (self.live, self.archive):
-                if recording is not None:
-                    try:
-                        recording.disconnect()
-                    except Exception as cleanup_error:
-                        errors.append(cleanup_error)
-            if len(errors) > 1:
-                raise ExceptionGroup("Rerun initialization and cleanup failed", errors) from error
+            try:
+                self.archive.disconnect()
+            except Exception as cleanup_error:
+                raise ExceptionGroup("Rerun initialization and cleanup failed", [error, cleanup_error]) from error
             raise
         self.matches = MatchedPoints(self.archive, options.capture.match_frames)
 
-    def _connect(self, path, url, serve, options, recording_id,
-                 stream_factory, file_sink, grpc_sink, blueprint_factory):
+    def _connect(self, path, url, serve, options, recording_id, file_sink, grpc_sink, blueprint_factory):
         sinks = []
         if path is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -131,17 +140,15 @@ class Recordings:
             url = url or URL
         if url:
             sinks.append(grpc_sink(url=url))
-            # 同一 recording_id 合并视图；只有这个 stream 接收 /live，且没有 FileSink。
-            self.live = stream_factory(APP_ID, recording_id=recording_id, send_properties=False)
-            self.live.set_sinks(grpc_sink(url=url))
         if not sinks:
             raise ValueError("at least one file or viewer destination is required")
         self.archive.set_sinks(*sinks)
-        self.archive.send_blueprint(blueprint_factory(bool(self.live)))
+        self.archive.send_blueprint(blueprint_factory())
         self.archive.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
         self.archive.log("viz/session", rr.AnyValues(recording_id=recording_id, rerun_version=rr.__version__), static=True)
         if options.video.enabled:
-            self.archive.log("cameras/left/image", rr.VideoStream(codec=rr.VideoCodec.H265), static=True)
+            for camera in ("left", "right"):
+                self.archive.log(f"cameras/{camera}/image", rr.VideoStream(codec=rr.VideoCodec.H265), static=True)
 
     def diagnostic(self, text: str, *, stamp=None, level="INFO"):
         at(self.archive, stamp)
@@ -149,40 +156,40 @@ class Recordings:
 
     def health(self, name: str, values, stamp=None):
         at(self.archive, stamp)
-        self.archive.log(f"viz/{name}", rr.Scalars(values), strict=True)
+        log_scalars(self.archive, f"viz/{name}", values)
 
     def video(self, frame, sample, keyframe, latency):
         at(self.archive, frame.stamp)
-        self.archive.set_time("left_frame", sequence=frame.index)
-        self.archive.log("cameras/left/image", rr.VideoStream.from_fields(sample=sample, is_keyframe=keyframe),
+        self.archive.set_time(f"{frame.camera}_frame", sequence=frame.index)
+        self.archive.log(f"cameras/{frame.camera}/image", rr.VideoStream.from_fields(sample=sample, is_keyframe=keyframe),
                          rr.AnyValues(capture_time=frame.stamp, frame_index=frame.index), strict=True)
-        self.matches.frame("left", frame.stamp, frame.index)
-        self.health("video/encoded", [len(sample), latency, int(keyframe), frame.index], frame.stamp)
+        self.matches.frame(frame.camera, frame.stamp, frame.index)
+        self.health(f"video/{frame.camera}/encoded", [len(sample), latency, frame.index], frame.stamp)
 
     def close(self):
         errors = []
-        for recording in (self.live, self.archive):
-            if recording is not None:
-                try:
-                    recording.flush(timeout_sec=self.options.shutdown_seconds)
-                except Exception as error:
-                    errors.append(error)
-                finally:
-                    try:
-                        recording.disconnect()
-                    except Exception as error:
-                        errors.append(error)
+        try:
+            self.archive.flush(timeout_sec=self.options.shutdown_seconds)
+        except Exception as error:
+            errors.append(error)
+        finally:
+            try:
+                self.archive.disconnect()
+            except Exception as error:
+                errors.append(error)
         if errors:
             raise ExceptionGroup("Rerun flush failed", errors)
 
 
 class MatchedPoints:
-    """点集只有在同时间图像已保存时才进入叠加层；缓存严格有界。"""
+    """点集匹配容差内最近的已保存图像；缓存严格有界。"""
+
+    MATCH_TOLERANCE_NS = 1_000_000
 
     def __init__(self, recording, capacity: int):
         self.recording, self.capacity = recording, capacity
-        self.frames = {"left": OrderedDict()}
-        self.points = {"left": OrderedDict()}
+        self.frames = {camera: OrderedDict() for camera in ("left", "right")}
+        self.points = {camera: OrderedDict() for camera in ("left", "right")}
         self.lock = threading.Lock()
 
     def _remember(self, cache, key, value):
@@ -190,13 +197,17 @@ class MatchedPoints:
         while len(cache) > self.capacity:
             cache.popitem(last=False)
 
+    def _nearest(self, cache, key):
+        nearest = min(cache, key=lambda candidate: (abs(candidate - key), candidate), default=None)
+        return nearest if nearest is not None and abs(nearest - key) <= self.MATCH_TOLERANCE_NS else None
+
     def frame(self, camera, stamp, index=None):
         if camera not in self.frames:
             return
         with self.lock:
             key = round(stamp * 1e9)
             self._remember(self.frames[camera], key, (stamp, index))
-            self._write(camera, stamp, self.points[camera].get(key))
+            self._write(camera, stamp, self.points[camera].get(self._nearest(self.points[camera], key)))
 
     def observe(self, camera, stamp, points, ids, color):
         if camera not in self.points:
@@ -205,14 +216,16 @@ class MatchedPoints:
             value = points, ids, color
             key = round(stamp * 1e9)
             self._remember(self.points[camera], key, value)
-            if key in self.frames[camera]:
-                self._write(camera, self.frames[camera][key][0], value)
+            frame_key = self._nearest(self.frames[camera], key)
+            if frame_key is not None:
+                point_key = self._nearest(self.points[camera], frame_key)
+                self._write(camera, self.frames[camera][frame_key][0], self.points[camera][point_key])
 
     def _write(self, camera, stamp, value):
         points, ids, color = value if value is not None else (np.empty((0, 2)), [], [64, 255, 128])
         at(self.recording, stamp)
-        if camera == "left" and (index := self.frames[camera][round(stamp * 1e9)][1]) is not None:
-            self.recording.set_time("left_frame", sequence=index)
+        if (index := self.frames[camera][round(stamp * 1e9)][1]) is not None:
+            self.recording.set_time(f"{camera}_frame", sequence=index)
         display_points = np.asarray(points, dtype=np.float32).reshape(-1, 2) + PIXEL_CENTER_OFFSET
         self.recording.log(f"cameras/{camera}/points", rr.Points2D(display_points, radii=2, colors=color),
                            rr.AnyValues(track_id=pa.array(ids, type=pa.uint64())), strict=True)

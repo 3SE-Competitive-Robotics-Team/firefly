@@ -2683,6 +2683,7 @@ pub(crate) fn pose_isometry(p: &Transformation) -> nalgebra::Isometry3<f64> {
         nalgebra::UnitQuaternion::new_unchecked(p.quaternion()),
     )
 }
+#[track_caller]
 pub(crate) fn graph_error(message: &str) -> Error {
     Error::new(ErrorKind::InvalidArgument, message).with_operation("ViGraph")
 }

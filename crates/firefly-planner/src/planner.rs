@@ -8,13 +8,14 @@
 //! 5. 无新障碍时返回轨迹
 
 use firefly_cost::{
-    Cost, FeasibilityPenalty, FormationPenalty, ObstaclePenalty, SmoothnessPenalty, SwarmPenalty,
-    TimePenalty, UniformPenalty,
+    FeasibilityPenalty, FormationPenalty, MincoCost, ObstaclePenalty, SwarmPenalty,
 };
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_map::{GridMap, Plane};
 use firefly_optimize::{Lbfgs, LbfgsConfig};
-use firefly_trajectory::{Endpoint, Minco, MincoBuilder, SolverOrder, Trajectory};
+use firefly_trajectory::{Endpoint, Minco, Trajectory};
+#[cfg(test)]
+use firefly_trajectory::{MincoBuilder, SolverOrder};
 use nalgebra::{Point3, Vector3};
 
 use crate::config::PlannerConfig;
@@ -59,15 +60,15 @@ pub struct State {
 pub enum InitSource<'a> {
     /// case 1：2 秒多项式种子等时重采样（首帧 / 暖启动失败降级）。
     ColdStart,
-    /// case 2：从上一条最优轨迹暖启动。`elapsed` 为已执行时长；
-    /// `glb_seg` 为全局轨迹段（`last_glb_t_of_lc_tgt → glb_t_of_lc_tgt`）的
-    /// 时长（秒），与旧轨迹剩余段拼接成组合时间轴；`guide_tail` 为该全局
-    /// 轨迹段的等时采样点列（含两端，旧轨迹耗尽后沿它走到目标）。
+    /// case 2：旧局部轨迹与全局多项式拼接。
+    /// `elapsed` 为局部轨迹已执行时长；`global_start`、`global_end`
+    /// 为全局多项式上的相对时刻（秒）。
     WarmStart {
         prev: &'a Trajectory,
         elapsed: f64,
-        glb_seg: f64,
-        guide_tail: &'a [Vector3<f64>],
+        global: &'a Trajectory,
+        global_start: f64,
+        global_end: f64,
     },
     /// 随机多项式初始化（官方 `computeInitState` `flag_randomPolyTraj`）：
     /// `mid` 为带随机偏移的中点（调用方按连败次数定幅度），2 段种子重采样。
@@ -252,32 +253,24 @@ impl Planner {
             InitSource::WarmStart {
                 prev,
                 elapsed,
-                glb_seg,
-                guide_tail,
+                global,
+                global_start,
+                global_end,
             } => {
                 let init_config = InitConfig {
                     piece_length: self.config.piece_length,
                     max_velocity: self.config.max_velocity,
                 };
-                match init::init_warm_start(
+                init::init_warm_start(
                     &init_config,
                     start_endpoint,
                     local_goal,
                     prev,
                     elapsed,
-                    glb_seg,
-                    guide_tail,
-                ) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        log::debug!("暖启动不可用（{e}），降级冷启动");
-                        let cfg = InitConfig {
-                            piece_length: self.config.piece_length,
-                            max_velocity: self.config.max_velocity,
-                        };
-                        init::init_polynomial(&cfg, start_endpoint, local_goal)?
-                    }
-                }
+                    global,
+                    global_start,
+                    global_end,
+                )?
             }
             InitSource::RandomStart { mid } => {
                 let cfg = InitConfig {
@@ -411,7 +404,7 @@ impl Planner {
 
         loop {
             iteration += 1;
-            // 所有 Rebound、restart 和时间缩放尝试共享迭代预算。
+            // 所有 Rebound 和 restart 尝试共享迭代预算。
             if iteration > Self::REBOUND_MAX_ITERATIONS {
                 return Err(Error::temporary(
                     ErrorKind::Convergence,
@@ -446,6 +439,7 @@ impl Planner {
             };
             let report = Lbfgs::new(config).minimize(&mut objective, x0)?;
             gate_latched = objective.gate_latched();
+            let swarm_safe = objective.swarm_safe();
             log::debug!(
                 "rebound {iteration}: lbfgs iter={} converged={} early_exit={} grad={:.2e}",
                 report.iterations,
@@ -455,7 +449,7 @@ impl Planner {
             );
             // 取回含新平面（roughly check 就地追加）的平面池
             planes_by_point = objective.take_planes();
-            // 无论是否 early exit，都从当前解继续（官方 lbfgs 就地更新 x）
+            // 沿用 final_x；取消时它是上游撤销未接受试探后的最后接受点。
             minco = objective.rebuild(&report.final_x)?;
             if report.early_exit {
                 // 官方 STOP_FOR_REBOUND：约束已变，重新优化
@@ -475,7 +469,7 @@ impl Planner {
 
             // fine check（官方 finelyCheckAndSetConstraintPoints,flag_first_init=false）
             let traj = minco.solve()?;
-            match self.try_finish(&minco, &traj, peers, &mut planes_by_point, touch_goal)? {
+            match self.try_finish(&traj, swarm_safe, &mut planes_by_point, touch_goal) {
                 FinishCheck::Accept(trajectory) => {
                     return Ok(InnerOutcome {
                         trajectory,
@@ -528,12 +522,15 @@ impl Planner {
     /// 队形靠代价优化与持续重规划收敛。
     fn try_finish(
         &mut self,
-        minco: &Minco,
         traj: &Trajectory,
-        peers: &[firefly_cost::Peer],
+        swarm_safe: bool,
         planes_by_point: &mut [Vec<Plane>],
         touch_goal: bool,
-    ) -> Result<FinishCheck> {
+    ) -> FinishCheck {
+        // 对照 optimizeTrajectory：先检查 swarm，再做 finelyCheckAndSetConstraintPoints。
+        if !swarm_safe {
+            return FinishCheck::SwarmTooClose;
+        }
         let scanner = ObstacleScanner::new(&self.map)
             .with_samples(self.config.constraint_points_per_piece)
             .with_max_vel(self.config.max_velocity);
@@ -541,129 +538,9 @@ impl Planner {
         if scanner.finely_check(&mut self.astar, traj, &points, planes_by_point, touch_goal)
             != CheckResult::Free
         {
-            return Ok(FinishCheck::Collision);
+            return FinishCheck::Collision;
         }
-        let trajectory = self.ensure_feasible(minco)?;
-        if !scanner.is_safe(&trajectory) {
-            log::debug!("reallocated trajectory is not collision-free");
-            return Ok(FinishCheck::Collision);
-        }
-        if !self.swarm_safe(&trajectory, peers) {
-            return Ok(FinishCheck::SwarmTooClose);
-        }
-        Ok(FinishCheck::Accept(trajectory))
-    }
-
-    /// 集群安全：所有约束点对每架 peer 的椭球距离 ≥ Cw（同一绝对时刻）。
-    fn swarm_safe(&self, traj: &Trajectory, peers: &[firefly_cost::Peer]) -> bool {
-        const KAPPA: usize = 20;
-        if peers.is_empty() {
-            return true;
-        }
-        for (i, ti) in traj.durations().iter().enumerate() {
-            for j in 0..=KAPPA {
-                let tau = j as f64 / KAPPA as f64;
-                let mut t_abs = 0.0;
-                for l in 0..i {
-                    t_abs += traj.durations()[l];
-                }
-                t_abs += tau * ti;
-                let p = traj.eval(t_abs).position;
-                for peer in peers {
-                    let pp = peer.sample_at(t_abs).position;
-                    let diff = p - pp;
-                    let d2 = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z / 4.0;
-                    let c = (self.config.swarm_clearance + peer.clearance) * 1.25;
-                    if d2 < c * c {
-                        return false;
-                    }
-                }
-            }
-        }
-        true
-    }
-
-    /// 可行性后检查（论文：constraints are converted into objectives, feasibility is guaranteed by postchecking）。
-    /// 极值计算对照官方 `poly_traj_utils.hpp:165/263` `getMaxVelRate` / `getMaxAccRate` 范式：
-    /// 归一化系数（`* T^k`）→ `polySqr` 三分量平方和 → 求导 → 导数近零则返回端点值（对照 `gcopter.hpp:77`），否则
-    /// `solvePolynomial(导数, l, r, FLT_EPSILON/T)` 求 `[0,1]` 驻点 + 端点 0/1 → 取最大 `‖·‖`。
-    /// `getMaxVelRate` / `getMaxAccRate` / `getMaxJerkRate` 均用此范式；官方 `gcopter.hpp:121`
-    /// `getMaxAccRate` 仅查端点为简化，本实现保留全程精确语义（加速度/加加速度亦求驻点），
-    /// 避免采样漏峰导致时间缩放不足。
-    /// 保持端点 PVA，迭代分配时间并重新求解；每轮检查实际轨迹的全程极值。
-    /// 时间比仅用于提出候选，不保证导数单调下降。内部超限时预算耗尽拒绝输出；
-    /// 边界本身超限时，时间缩放无法消除固定端点约束；告警并返回优化结果。
-    #[fastrace::trace]
-    fn ensure_feasible(&self, minco: &Minco) -> firefly_error::Result<Trajectory> {
-        let limits = [
-            self.config.max_velocity,
-            self.config.max_acceleration,
-            self.config.max_jerk,
-        ];
-        if limits.iter().any(|v| !v.is_finite() || *v <= 0.) {
-            return Err(Error::new(
-                ErrorKind::InvalidArgument,
-                "invalid dynamical limits",
-            ));
-        }
-        for endpoint in [minco.start(), minco.end()] {
-            if !endpoint.velocity.iter().all(|v| v.is_finite())
-                || !endpoint.acceleration.iter().all(|v| v.is_finite())
-            {
-                return Err(Error::new(
-                    ErrorKind::InvalidArgument,
-                    "non-finite boundary state",
-                ));
-            }
-        }
-        // 官方行为：边界超限只告警（planGlobalTraj 拉长时间两次仍超就 warn 放行）。
-        // 端点固定使拉伸循环注定不收敛，跳过拉伸直接接受当次解。
-        let boundary_violated = [minco.start(), minco.end()].iter().any(|endpoint| {
-            endpoint.velocity.norm() > limits[0] || endpoint.acceleration.norm() > limits[1]
-        });
-        let waypoints: Vec<_> = minco.waypoints().collect();
-        let mut durations: Vec<_> = (0..minco.pieces())
-            .map(|i| minco.piece_duration(i))
-            .collect();
-        let mut candidate = minco.clone();
-        for _ in 0..12 {
-            let traj = candidate.solve()?;
-            if !traj.coefficients().iter().all(|v| v.is_finite()) {
-                return Err(Error::new(ErrorKind::Convergence, "non-finite trajectory"));
-            }
-            if boundary_violated {
-                log::warn!(
-                    "边界超限（官方 warn-and-go）：起点/终点速度/加速度超限，跳过拉伸直接接受"
-                );
-                return Ok(traj);
-            }
-            let maxima = [
-                Self::trajectory_max_vel(&traj),
-                Self::trajectory_max_acc(&traj),
-                Self::trajectory_max_jerk(&traj),
-            ];
-            if maxima
-                .iter()
-                .zip(limits)
-                .all(|(value, limit)| *value <= limit * (1. + 1e-9))
-            {
-                return Ok(traj);
-            }
-            let scale = (maxima[0] / limits[0])
-                .max((maxima[1] / limits[1]).sqrt())
-                .max((maxima[2] / limits[2]).cbrt())
-                .max(1.0)
-                * 1.05;
-            for duration in &mut durations {
-                *duration *= scale;
-            }
-            candidate = MincoBuilder::new(SolverOrder::MinimumJerk, minco.start(), minco.end())
-                .build(&waypoints, &durations)?;
-        }
-        Err(Error::temporary(
-            ErrorKind::Convergence,
-            "time allocation cannot satisfy dynamical limits",
-        ))
+        FinishCheck::Accept(traj.clone())
     }
 
     pub(crate) fn trajectory_max_vel(traj: &Trajectory) -> f64 {
@@ -675,6 +552,7 @@ impl Planner {
         m
     }
 
+    #[cfg(test)]
     fn trajectory_max_acc(traj: &Trajectory) -> f64 {
         let mut m = 0.0_f64;
         for i in 0..traj.pieces() {
@@ -684,6 +562,7 @@ impl Planner {
         m
     }
 
+    #[cfg(test)]
     fn trajectory_max_jerk(traj: &Trajectory) -> f64 {
         let mut m = 0.0_f64;
         for i in 0..traj.pieces() {
@@ -735,6 +614,7 @@ impl Planner {
 
     #[allow(clippy::many_single_char_names)]
     /// 单段最大加速度（对照 `poly_traj_utils.hpp:263`，但保留全程驻点求根而非仅端点）。
+    #[cfg(test)]
     fn piece_max_acc(traj: &Trajectory, piece: usize, dur: f64) -> f64 {
         // nAcc = T²·acc(Tu) = 2c2T²+6c3T³u+12c4T⁴u²+20c5T⁵u³，降幂 [20c5T⁵,12c4T⁴,6c3T³,2c2T²]
         let coeffs = traj.coefficients();
@@ -766,6 +646,7 @@ impl Planner {
 
     #[allow(clippy::many_single_char_names)]
     /// 单段最大加加速度（jerk），同范式扩展。
+    #[cfg(test)]
     fn piece_max_jerk(traj: &Trajectory, piece: usize, dur: f64) -> f64 {
         // nJer = T³·jer(Tu)=6c3T³+24c4T⁴u+60c5T⁵u²，降幂 [60c5T⁵,24c4T⁴,6c3T³]
         let coeffs = traj.coefficients();
@@ -881,21 +762,12 @@ impl Planner {
         gate_latched: bool,
     ) -> MincoObjective<'a> {
         let k = self.config.constraint_points_per_piece;
-        let mut cost = Cost::new()
-            .with_samples(k)
-            .add(self.config.weight_smoothness, SmoothnessPenalty)
-            .add(self.config.weight_time, TimePenalty)
-            .add(
-                self.config.weight_feasibility,
-                // 官方:V/A/J 三项惩罚(K=κ=5,梯形权重,不截断)
-                FeasibilityPenalty::new(
-                    self.config.max_velocity,
-                    self.config.max_acceleration,
-                    self.config.max_jerk,
-                )
-                .with_samples(k),
-            )
-            .add(
+        // 两份平面分别归本轮代价快照与 Detector 所有；新增平面仅供下一轮。
+        let cost = MincoCost {
+            samples_per_piece: k,
+            weight_smoothness: self.config.weight_smoothness,
+            weight_time: self.config.weight_time,
+            obstacle: Some((
                 1.0,
                 ObstaclePenalty::new(
                     self.config.obstacle_clearance,
@@ -906,35 +778,38 @@ impl Planner {
                     planes_by_point.to_vec(),
                 )
                 .with_two_thirds(two_thirds),
-            )
-            .add(
-                // 官方代价与梯度同源使用 wei_swarm_mod_：收敛但间距不足的
-                // restart 逐次倍增，对避碰项指数加权直到解出安全间距
+            )),
+            swarm: Some((
                 self.config.weight_swarm * self.last_swarm_weight_mod,
                 SwarmPenalty::new(self.config.swarm_clearance, 2.0, 1.0, peers.to_vec())
                     .with_samples(k)
                     .with_two_thirds(two_thirds),
-            )
-            // 约束点均匀分布:官方 weight_sqrvariance,防段时长消失与薄障碍漏检
-            .add(
-                self.config.weight_sqrvariance,
-                UniformPenalty::new().with_samples(k),
-            );
-        // 队形保持（可选）：目标点从其他机位置动态推断（官方语义）
-        if let Some(f) = &self.formation {
-            cost = cost.add(
-                self.config.weight_formation,
-                FormationPenalty::new(
-                    f.line_start,
-                    f.line_end,
-                    f.offsets.clone(),
-                    f.self_id,
-                    f.peers.clone(),
+            )),
+            feasibility: Some((
+                self.config.weight_feasibility,
+                FeasibilityPenalty::new(
+                    self.config.max_velocity,
+                    self.config.max_acceleration,
+                    self.config.max_jerk,
                 )
-                .with_samples(k)
-                .with_two_thirds(two_thirds),
-            );
-        }
+                .with_samples(k),
+            )),
+            weight_sqrvariance: self.config.weight_sqrvariance,
+            formation: self.formation.as_ref().map(|formation| {
+                (
+                    self.config.weight_formation,
+                    FormationPenalty::new(
+                        formation.line_start,
+                        formation.line_end,
+                        formation.offsets.clone(),
+                        formation.self_id,
+                        formation.peers.clone(),
+                    )
+                    .with_samples(k)
+                    .with_two_thirds(two_thirds),
+                )
+            }),
+        };
         MincoObjective::new(start, end, pieces, cost).with_detector(
             &self.map,
             k,

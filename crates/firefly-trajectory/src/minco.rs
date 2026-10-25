@@ -484,6 +484,30 @@ pub struct Sample {
 }
 
 impl Trajectory {
+    /// 从分段五次多项式构造轨迹，系数按段、升幂排列，三列对应 xyz。
+    /// # Errors
+    /// 段数、系数维度、有限性或正时长不满足时拒绝。
+    pub fn from_coefficients(
+        coefficients: DMatrix<f64>,
+        durations: DVector<f64>,
+    ) -> firefly_error::Result<Self> {
+        if durations.is_empty()
+            || coefficients.nrows() != 6 * durations.len()
+            || coefficients.ncols() != 3
+            || !coefficients.iter().all(|v| v.is_finite())
+            || !durations.iter().all(|v| v.is_finite() && *v > 0.)
+        {
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                "invalid polynomial trajectory",
+            ));
+        }
+        Ok(Self {
+            coefficients,
+            durations,
+        })
+    }
+
     #[must_use]
     pub fn pieces(&self) -> usize {
         self.durations.len()

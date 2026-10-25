@@ -132,10 +132,12 @@ uv run firefly-sim
 cargo run --release -p render
 cargo run --release -p firefly-okvis-x
 cargo run --release -p fc
+cargo run --release -p planner -- --traj-server
 cargo run --release -p planner
 ```
 
-最小闭环只需 viz/sim/render/firefly-okvis-x/fc；规划增加 planner。
+最小闭环只需 viz/sim/render/firefly-okvis-x/fc；规划同时启动 planner 与 `planner --traj-server`
+两个独立进程，前者规划并发布心跳，后者采样并发布飞控参考。
 纯 VIO 对照用 `firefly-okvis-x --no-loop-closures --no-mapping`。
 可选库图定位先填写 `configs/localization.toml [origin]`，并用
 `firefly-okvis-x --external-localization`，再启动 localization、aliked 和
@@ -317,18 +319,17 @@ planner 经 `Firefly/VizVoxels` 发地图更新，经 `Firefly/Log` 发 log 宏�
 
 各进程以测量时刻设置 `sim_time`；无仿真时刻的进程日志回落 `wall_time`。
 常用实体为 `okvis/odom`、`okvis/traj`、`gt/pose`、`gt/traj`、`okvis/debug/*`、`fc/debug/*`、
-`plan/*`、`logs/<app>`。左目 H.265 视频与双目关键点进入 RRD；
-Rerun 按原图时间配对叠加 VIO 点，不把标记烧进视频。`/live/**` 是独立 gRPC stream
-发送的 static 最新预览，不写入 RRD，也不代表时间光标处的历史数据。
+`plan/*`、`logs/<app>`。左右目 H.265 视频进入 RRD，VIO 点只按原图时间配对叠加在
+各自录制视图中，不把标记烧进视频，不额外保存独立关键点副本或 `/live/**` 预览。
 
-`configs/viz.toml` 控制视频、地图预览频率与队列容量；配置键和默认值见 `firefly_viz.config`。
+`configs/viz.toml` 控制视频、地图历史记录频率与队列容量；配置键和默认值见 `firefly_viz.config`。
 所有输入先复制到自有内存再释放 IPC loan，队列与环形缓存有界。体素分块完整后才更新地图；
 标量不携带体素数组。队列丢帧、编码耗时、输出 sample 大小与退出状态在 `viz/**` 查看。
 
 传感器延迟按原始采集 `sim_time` 记录墙钟耗时（秒）：
 `render/capture/stages_s` 为请求→提交、提交→回读、回读→装配、装配→处理；
 `render/capture/publish_s` 为像素处理、处理结束→发布、请求→发布。
-这些诊断不改图像时间戳；`fc/imu/health` 的后验年龄还包含视觉更新与等待下一拍的时间。
+这些诊断不改图像时间戳；`fc/imu/posterior_age_s` 的后验年龄还包含视觉更新与等待下一拍的时间。
 
 实时查看先启动 `rerun`，再运行 `uv run firefly-viz`：默认连接 `127.0.0.1:9876` 并创建
 `logs/` 下唯一 RRD。`--save logs/run.rrd` 单独使用为离线录制；加 `--serve` 同时启动原生
@@ -352,30 +353,44 @@ H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码
 
 ### 姿态与 VIO 诊断
 
-- `fc/imu/quaternion_xyzw`：控制实际使用的 Hamilton 姿态（主链路为 body→odom，备用为 body→本地重力系）（10Hz）。
+默认 blueprint 只展示飞行模式与安全状态、主备姿态状态、高度与位置误差、总推力、
+OKVIS 跟踪状态、回环提交次数与单帧处理耗时；FC tick rate 使用独立尺度。零偏、方差、四元数、
+底层控制量、录制队列与传感器耗时保留录制，按需手动添加视图。
+状态由 viz 转成 `StateChange`；数值曲线用 `SeriesLines.names` 标明分量及单位，
+多分量诊断必须在 `firefly_viz.telemetry` 声明含义，禁止依赖自动生成的数字下标。
+验收专用原始数组保留数值顺序和评分门槛，并使用同样的曲线命名规则。
+
+- `fc/imu/quaternion_xyzw`：控制实际使用的 Hamilton 姿态（主链路为 body→odom，备用为 body→本地重力系）（10Hz），供验收订阅；普通 Recorder 不录制，验收任务保存为 `acceptance/imu_attitude`。
 - `fc/debug/position_target_odom` / `position_error_odom`：odom 系目标与位置误差（10Hz）。
-- `fc/imu/health`：所选姿态可用、VIO 主链路新鲜、VIO 后验测量年龄（秒）。
-- `fc/imu/source`：0 未就绪、1 VIO 预测、2 独立 ESKF 热备（10Hz）。
-- `fc/standby/health`：独立 ESKF 可用标记、IMU 墙钟年龄（秒）。
-- `fc/standby/accel_gate`：NIS、是否实际应用地面加计校正。
-- `fc/standby/gyro_bias`、`quaternion_xyzw`、`attitude_variance`、`bias_variance`：
+- `fc/imu/health`：IPC 发布所选姿态可用、VIO 主链路新鲜、VIO 后验测量年龄（秒）；viz 分别记录为 `fc/imu/attitude_ready`、`fc/imu/vio_fresh` 状态时间线与 `fc/imu/posterior_age_s` 数值曲线。验收任务将原始数值保存为 `acceptance/imu_health`。
+- `fc/imu/source`：0 未就绪、1 VIO 预测、2 独立 ESKF 热备（10Hz），viz 记录为状态时间线；验收任务将原始数值保存为 `acceptance/attitude_source`。
+- `fc/standby_eskf/health`：独立 ESKF 就绪标记（0/1），viz 记录为状态时间线。
+- `fc/standby_eskf/imu_age_s`：IMU 墙钟接收年龄（秒），保留录制，默认视图不显示。
+- `fc/standby_eskf/accel_nis`：三轴加计创新的 NIS 数值。
+- `fc/standby_eskf/accel_gate`：是否实际应用地面加计校正（0/1），viz 记录为状态时间线。
+- `fc/standby_eskf/gyro_bias`、`quaternion_xyzw`、`attitude_variance`、`bias_variance`：
   独立热备状态；姿态属于备用本地重力系，方差单位 rad² / (rad/s)²。
-- `fc/vio/gyro_bias`：主链路采用的 VIO 陀螺零偏；主链路不发布姿态方差。
+- `okvis/gyro_bias`：viz 直接订阅 `Firefly/VioAttitude`，以 1Hz 记录机体系 VIO 陀螺零偏（rad/s）；主链路不发布姿态方差。
 - `fc/debug/tilt_deg` 与 `fc/debug/tilt_err_deg`：估计倾角与仅供评测的真值倾角误差。
 - `fc/debug/rate_sp_frd` / `rate_flu`：PX4 角速度设定值（FRD）与实测角速度（FLU）。
 - `fc/debug/torque_sp_frd` / `allocated_control`：归一化力矩设定值与分配实际达到的控制量。
-- `fc/debug/saturated` / `hover_thrust`：分配饱和标志与归一化悬停推力。
+- `fc/debug/saturated`：当前分配饱和状态；`saturated_ticks` 为每秒窗口内的饱和次数。
+- `fc/debug/hover_thrust`：归一化悬停推力。
 - `fc/arming/failed`：未解锁时首个失败解锁检查的位掩码（定义见 `firefly-flight::ArmingCheck`）。
   VIO 已初始化后位 1 仍可能置位，表示独立 ESKF 热备尚未完成静止初始化；等待清零后重试
-  `ffctl fc arm`。
+  `ffctl fc arm`。viz 记录为具名状态，不显示位掩码曲线。
 - `fc/failsafe/flags` / `fc/failsafe/action`：失效条件位掩码与动作编码（定义见
-  `firefly-flight::safety`）；1Hz 日志同时输出名字。
+  `firefly-flight::safety`）；viz 记录为具名状态，1Hz 日志同时输出名字。
+- `fc/debug/state`：飞行模式状态时间线；验收任务将原始编码保存为 `acceptance/fc_state`。
 
 运行记录由 `firefly-viz` 写入 `logs/*.rrd`。
 
 #### 估计与回环诊断
 
 OKVIS 的位姿使用 `okvis/odom` 实体。
+`okvis/frame_processing_ms` 在独立二维曲线显示每个成功提交帧的处理墙钟耗时（毫秒），
+覆盖取帧、特征提取、匹配、优化、发布和边缘化，不包含进入处理线程前的排队与传感器延迟；
+曲线时间戳为图像测量时刻，后验测量年龄使用 `fc/imu/posterior_age_s`。
 `okvis/loop_commits` 是后端已提交全图修订次数，任务评分记录为 `acceptance/loop_backend`；
 候选检索和几何验证不单独计为提交。外部库图模式的融合诊断位于 `corr/debug/*`。
 通讯测试和修订计数不替代完整轨迹精度验证。
@@ -411,6 +426,11 @@ FIREFLY_TEST_PYTHON="$PWD/.venv/bin/python" cargo test -p firefly-pubsub --test 
 FIREFLY_RUN_VIDEO_ENCODER=1 uv run --all-packages --extra test pytest apps/firefly-viz/tests/test_video_integration.py -q
 ```
 
+独立轨迹输出的真实 IPC 验证：先运行 `cargo build --release -p planner`，停止占用
+Navigation/Trajectory/Reference 话题的进程，再运行
+`cargo test -p planner --test trajectory_ipc -- --ignored`。该用例启动 release 输出进程，
+验证多项式传输、心跳超时当拍发布顺序、恢复条件和坐标版本门控；不代表飞行验收。
+
 视频集成用例使用当前 `configs/viz.toml` 指定的真实编码器，检查帧数、采集时间关联和
 FFmpeg 解码后的画面；默认跳过不代表通过。Rerun 回放还需检查视频跳转、逐帧点集匹配、
 static 预览不进入文件和正常/异常退出时的完整性。构建、单测与实际 Viewer 回放分别记录结果。
@@ -419,8 +439,10 @@ static 预览不进入文件和正常/异常退出时的完整性。构建、单
 确定性任务必须成功；随机安全属性允许明确有界拒绝，但拒绝不计成功，不用整体成功率
 掩盖指定任务失败，不用机器相关耗时作正确性门槛。参考版本见架构文档。
 
-- 规划检查端点 PVA、导数极值、地图/对端净距、时钟与输出轨迹一致性；测试侧独立极值
-  求根和几何采样，不用生产实现验证自身。A* 连边与 Bernstein 检查不等于动态安全证明。
+- 规划检查端点 PVA、分段 C2 连续性、具体避障/集群场景、时钟与输出轨迹一致性；
+  V/A/J 按固定上游的软惩罚公式与梯度验收，不要求输出满足额外的硬上限或工程超限容差。
+  测试侧独立公式、极值求根和几何采样不用生产实现验证自身；具体场景的避障回归不等于
+  所有输出都满足连续曲线无碰撞保证。A* 连边与 Bernstein 检查不等于动态安全证明。
 - 坐标、姿态、回环检查解析变换、残差/重置差分、相关信息不重复计权、会话与时间拒绝。
 - 前端检查已知位移、丢点与双目约束；解析轨迹隔离滤波数学，不能代替实际纹理和飞行。
 - CAD、深度、IPC 分别验证资产一致性、噪声/投票/先验保护和双语言布局、头部、事件往返。

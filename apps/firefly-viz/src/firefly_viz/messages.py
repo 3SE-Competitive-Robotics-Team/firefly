@@ -21,7 +21,6 @@ VIZ_KIND_CLEAR = 7
 VIZ_KIND_VOXELS_ADD = 8
 VIZ_KIND_VOXELS_REMOVE = 9
 VIZ_KIND_KEYPOINTS_2D = 10
-VIZ_KIND_MATRIX = 11
 VIZ_KIND_CAMERA = 12
 
 #: 定长数组上限（与 Rust `viz.rs` 常量一致）
@@ -33,6 +32,24 @@ BINS_MAX = 64
 SCALARS_MAX = 4
 #: 1kHz IMU 双标量与相机诊断突发的接收容量，与 Rust SCALAR_BUFFER_SIZE 一致。
 SCALAR_BUFFER_SIZE = 1024
+
+
+class AttitudeMessage(ctypes.Structure):
+    """Firefly/VioAttitude，与 Rust attitude::AttitudeMessage 一致。"""
+
+    _pack_ = 8
+    _fields_ = [
+        ("timestamp", ctypes.c_double),
+        ("posterior_time", ctypes.c_double),
+        ("session", ctypes.c_uint64),
+        ("quat_xyzw", ctypes.c_double * 4),
+        ("angular_velocity", ctypes.c_double * 3),
+        ("gyro_bias", ctypes.c_double * 3),
+    ]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflyVioAttitude"
 
 
 class VizMessage(ctypes.Structure):

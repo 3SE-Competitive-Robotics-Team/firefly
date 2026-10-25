@@ -64,11 +64,33 @@ impl FormationPenalty {
         self
     }
 
-    fn frame(&self) -> FormationFrame {
+    pub(crate) fn frame(&self) -> FormationFrame {
         FormationFrame {
             axis: (self.line_end - self.line_start).normalize(),
             peer_durations: self.peers.iter().map(|peer| peer.traj.duration()).collect(),
         }
+    }
+
+    pub(crate) fn grad_cost(
+        &self,
+        index: usize,
+        time: f64,
+        sample: &firefly_trajectory::Sample,
+        frame: &FormationFrame,
+    ) -> Option<(f64, Vector3<f64>, f64, f64)> {
+        if self.peers.is_empty() || self.two_thirds.is_some_and(|end| index == 0 || index > end) {
+            return None;
+        }
+        let (origin, axis, progress, velocity) = self.formation_state_with(time, frame);
+        let diff = sample.position - self.target(origin, axis, progress);
+        let gradient = 2.0 * diff;
+        let reference_velocity = axis * velocity;
+        Some((
+            diff.norm_squared(),
+            gradient,
+            gradient.dot(&(sample.velocity - reference_velocity)),
+            -gradient.dot(&reference_velocity),
+        ))
     }
 
     /// 队形轴与进度（官方：`a` 归一化，`l`/`dl_dt` 从其他机推断）。
@@ -131,7 +153,7 @@ impl FormationPenalty {
 ///
 /// peer 轨迹在一次优化内不变，逐样本重算 `normalize` 与 `duration()`（O(M) 求和）
 /// 是纯浪费。
-struct FormationFrame {
+pub(crate) struct FormationFrame {
     axis: Vector3<f64>,
     peer_durations: Vec<f64>,
 }

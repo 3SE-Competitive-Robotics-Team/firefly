@@ -35,6 +35,20 @@ impl Accumulator {
         }
     }
 
+    /// 单个激活惩罚的 β·gradᵀ，beta 由采样循环提供。
+    pub(crate) fn add_coefficient_gradient(
+        &mut self,
+        piece: usize,
+        beta: &[f64],
+        gradient: Vector3<f64>,
+    ) {
+        for (power, value) in beta.iter().enumerate() {
+            for dim in 0..3 {
+                self.d_f_d_c[(piece * 6 + power, dim)] += value * gradient[dim];
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn add(
         &mut self,

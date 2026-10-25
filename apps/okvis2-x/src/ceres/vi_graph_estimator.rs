@@ -259,7 +259,10 @@ impl ViGraphEstimator {
         frames: &mut BTreeMap<StateId, MultiFramePtr>,
     ) -> Result<bool> {
         if !self.landmarks.contains_key(&from) || !self.landmarks.contains_key(&into) {
-            return Err(graph_error("landmark absent"));
+            return Err(graph_error("landmark absent")
+                .with_operation("ViGraphEstimator::merge_landmark")
+                .with_context("from", from.value())
+                .with_context("into", into.value()));
         }
         let keys = self.landmark_info[&from].observations.clone();
         for key in keys {

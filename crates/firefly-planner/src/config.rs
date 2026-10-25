@@ -23,7 +23,7 @@ pub struct PlannerConfig {
     /// （官方 `SEQUENTIAL_START` 态语义）。
     pub drone_id: i32,
     /// 心跳超时（秒，官方 `traj_server::cmdCallback` 硬编码 0.5）：超过该时长
-    /// 未收到新执行节拍时，参考输出降级为零速悬停并停用轨迹跟踪。
+    /// 未收到心跳时，本拍先发布保持再发布轨迹指令，后续停止采样。
     pub heartbeat_timeout: f64,
     pub max_velocity: f64,
     pub max_acceleration: f64,

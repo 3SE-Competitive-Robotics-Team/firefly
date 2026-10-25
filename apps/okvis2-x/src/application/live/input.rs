@@ -324,8 +324,7 @@ impl Publishers {
             loops.scalar_count = 1;
             viz.publish(loops)?;
 
-            // 跟踪质量是“姿态预测是否有效”的下游信号：Lost 时预测停发，
-            // 但 `session` 保持不变，飞控按新鲜度回落而不是判定进程重启。
+            // 跟踪质量用于诊断；IMU 传播的发布条件与上游 Trajectory 一致。
             let mut tracking = ScalarMessage::base(stamp, "okvis/tracking");
             tracking.scalars[0] = match publication.tracking_state.tracking_quality {
                 TrackingQuality::Lost => 0.0,

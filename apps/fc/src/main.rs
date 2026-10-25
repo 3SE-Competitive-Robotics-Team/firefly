@@ -69,7 +69,7 @@ const SPIN_MARGIN: Duration = Duration::from_micros(150);
 const ODOM_STALE_LIMIT: Duration = Duration::from_millis(500);
 /// IMU 陈旧阈值（墙钟）；陈旧则不得解锁。
 const IMU_STALE_LIMIT: Duration = Duration::from_millis(50);
-/// 参考流新鲜窗口（墙钟）：planner 以 10Hz 发布，5 帧未到即视为流断（断开后由
+/// 参考流新鲜窗口（墙钟）：独立轨迹输出以 100Hz 发布，窗口内未到即视为流断（断开后由
 /// 状态机的 `reference_timeout` 计时回落位置保持）。
 const REFERENCE_STALE_LIMIT: Duration = Duration::from_millis(500);
 /// 落后节拍上限：连续落后超过这么多个周期就重新对齐（避免越追越紧）。
@@ -894,41 +894,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 publish_scalars(
                     &ports.viz,
                     sim_time,
-                    "fc/standby/health",
-                    &[f64::from(s.ready), s.received.elapsed().as_secs_f64()],
+                    "fc/standby_eskf/health",
+                    &[f64::from(s.ready)],
                 );
                 publish_scalars(
                     &ports.viz,
                     sim_time,
-                    "fc/standby/accel_gate",
-                    &[s.nis, f64::from(s.accel_accepted)],
+                    "fc/standby_eskf/imu_age_s",
+                    &[s.received.elapsed().as_secs_f64()],
                 );
-                publish_scalars(&ports.viz, sim_time, "fc/standby/gyro_bias", &s.bias);
                 publish_scalars(
                     &ports.viz,
                     sim_time,
-                    "fc/standby/quaternion_xyzw",
+                    "fc/standby_eskf/accel_gate",
+                    &[f64::from(s.accel_accepted)],
+                );
+                publish_scalars(&ports.viz, sim_time, "fc/standby_eskf/accel_nis", &[s.nis]);
+                publish_scalars(&ports.viz, sim_time, "fc/standby_eskf/gyro_bias", &s.bias);
+                publish_scalars(
+                    &ports.viz,
+                    sim_time,
+                    "fc/standby_eskf/quaternion_xyzw",
                     s.rotation.coords.map(f64::from).as_slice(),
                 );
                 publish_scalars(
                     &ports.viz,
                     sim_time,
-                    "fc/standby/attitude_variance",
+                    "fc/standby_eskf/attitude_variance",
                     &s.covariance_diagonal[..3],
                 );
                 publish_scalars(
                     &ports.viz,
                     sim_time,
-                    "fc/standby/bias_variance",
+                    "fc/standby_eskf/bias_variance",
                     &s.covariance_diagonal[3..],
-                );
-            }
-            if let Some(s) = inputs.primary.latest {
-                publish_scalars(
-                    &ports.viz,
-                    sim_time,
-                    "fc/vio/gyro_bias",
-                    &s.message.gyro_bias,
                 );
             }
             publish_scalars(&ports.viz, sim_time, "fc/debug/tick_rate", &[rate]);
@@ -941,7 +940,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             publish_scalars(
                 &ports.viz,
                 sim_time,
-                "fc/debug/saturated",
+                "fc/debug/saturated_ticks",
                 &[stats.saturated as f64],
             );
             window_start = Instant::now();

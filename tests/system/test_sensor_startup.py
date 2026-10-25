@@ -157,19 +157,13 @@ def _verify_recording(path: Path) -> None:
 
     reader = RrdReader(path)
     counts = Counter()
-    matched = 0
+    matched = Counter()
     for chunk in reader.store(store=reader.recordings()[0]).stream():
         name = chunk.entity_path
         counts[name] += chunk.num_rows
-        if name == "/cameras/left/annotation":
-            matched += sum(any(row or []) for row in chunk.to_record_batch().column("matched").to_pylist())
-        if name == "/okvis/debug/pose_imu":
-            for row in chunk.to_record_batch().column("Tensor:data").to_pylist():
-                for tensor in row:
-                    assert tensor["shape"] == [4, 4]
-                    matrix = np.asarray(tensor["buffer"]).reshape(4, 4)
-                    assert np.isfinite(matrix).all()
-                    np.testing.assert_array_equal(matrix[3], [0., 0., 0., 1.])
+        for camera in ("left", "right"):
+            if name == f"/cameras/{camera}/annotation":
+                matched[camera] += sum(any(row or []) for row in chunk.to_record_batch().column("matched").to_pylist())
         if name == "/render/capture/publish_s":
             for values in chunk.to_record_batch().column("Scalars:scalars").to_pylist():
                 assert len(values) == 3
@@ -177,12 +171,13 @@ def _verify_recording(path: Path) -> None:
     for name in ("gt/pose", "okvis/odom", "okvis/map/pose"):
         assert counts[f"/{name}"] >= 2, f"missing pose history: {name}"
     for name in ("gt/traj", "okvis/traj", "okvis/map/traj", "okvis/tracking", "okvis/loop_commits",
-                 "okvis/debug/keypoints/left", "okvis/debug/keypoints/right", "okvis/debug/pose_imu",
-                 "cameras/left/image", "render/capture/publish_s"):
+                 "cameras/left/image", "cameras/right/image", "cameras/left/points", "cameras/right/points",
+                 "render/capture/publish_s"):
         assert counts[f"/{name}"], f"missing recording entity: {name}"
-    assert matched > 0, "OKVIS keypoints must match at least one recorded image"
+    for camera in ("left", "right"):
+        assert matched[camera] > 0, f"OKVIS keypoints must match at least one recorded {camera} image"
     assert not any(name.startswith("/world/") for name in counts), "field mesh included in recording"
-    assert not any(name.startswith(("/cameras/right", "/cameras/depth", "/snapshots/", "/live/cameras/"))
+    assert not any(name.startswith(("/cameras/depth", "/snapshots/", "/live/", "/okvis/debug/keypoints/"))
                    for name in counts), "extra camera recording included"
 
 

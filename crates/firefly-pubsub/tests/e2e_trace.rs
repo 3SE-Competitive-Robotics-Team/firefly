@@ -130,3 +130,40 @@ fn trace_context_crosses_pubsub_boundary() {
 
     firefly_observability::flush();
 }
+
+#[test]
+fn growing_slices_arrive_atomically_with_trace_in_either_startup_order() {
+    let node = firefly_pubsub::node::create_node().unwrap();
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    for subscriber_first in [false, true] {
+        let topic = format!("Firefly/Test/Slice/{unique}/{subscriber_first}");
+        let (publisher, subscriber) = if subscriber_first {
+            let subscriber = Subscriber::<[u64]>::with_slice_topic(&node, &topic).unwrap();
+            (
+                Publisher::<[u64]>::with_slice_topic(&node, &topic).unwrap(),
+                subscriber,
+            )
+        } else {
+            let publisher = Publisher::<[u64]>::with_slice_topic(&node, &topic).unwrap();
+            (
+                publisher,
+                Subscriber::<[u64]>::with_slice_topic(&node, &topic).unwrap(),
+            )
+        };
+        for len in [1, 65, 512] {
+            let trace = publisher.publish_slice_with(len, |i| i as u64).unwrap();
+            let message = subscriber.receive().unwrap().unwrap();
+            assert_eq!(message.len(), len);
+            assert_eq!(
+                message.user_header().send_ts_mono_ns(),
+                trace.send_ts_mono_ns()
+            );
+            for (i, value) in message.iter().enumerate() {
+                assert_eq!(*value, i as u64);
+            }
+        }
+    }
+}

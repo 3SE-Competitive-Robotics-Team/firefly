@@ -1,4 +1,4 @@
-"""持久化和静态预览的目的地必须分开；初始化失败也释放流。"""
+"""双目只保存历史录制，初始化失败也释放录制流。"""
 
 from dataclasses import replace
 
@@ -41,17 +41,16 @@ def dependencies(stream_factory=Stream):
     Stream.instances = []
     return dict(stream_factory=stream_factory,
                 file_sink=lambda path, write_footer: ('file', path, write_footer),
-                grpc_sink=lambda url: ('grpc', url), blueprint_factory=lambda live: live)
+                grpc_sink=lambda url: ('grpc', url), blueprint_factory=lambda: None)
 
 
-def test_live_static_cannot_reach_file_sink_and_uses_same_recording(tmp_path):
+def test_file_and_viewer_share_one_recording_without_live_stream(tmp_path):
     options = Options()
     options = replace(options, video=replace(options.video, enabled=False))
     path = tmp_path / 'run.rrd'
     streams = recording.Recordings(path, recording.URL, False, options, **dependencies())
     assert streams.archive.sinks == (('file', str(path), True), ('grpc', recording.URL))
-    assert streams.live.sinks == (('grpc', recording.URL),)
-    assert streams.archive.kwargs['recording_id'] == streams.live.kwargs['recording_id']
+    assert len(Stream.instances) == 1
     streams.close()
     assert all(stream.closed for stream in Stream.instances)
 
@@ -65,39 +64,35 @@ def test_existing_evidence_is_never_overwritten(tmp_path):
     assert all(stream.closed for stream in Stream.instances)
 
 
-def test_same_id_native_streams_keep_preview_out_of_indexed_rrd(tmp_path):
-    """生产文件 sink 关闭后可索引读取，静态预览不落盘；不启动 Viewer 或编码器。"""
+def test_stereo_video_and_overlays_are_the_only_camera_history(tmp_path):
+    """写入原子视频样本与同帧点集，不启动 Viewer 或编码器。"""
     from rerun.chunk import RrdReader
+    from firefly_viz.video import Frame
 
-    rr = recording.rr
     path = tmp_path / 'archive.rrd'
-    options = Options()
-    options = replace(options, video=replace(options.video, enabled=False))
-    streams = recording.Recordings(path, None, False, options)
-    archive = streams.archive
-    live = rr.RecordingStream(recording.APP_ID, recording_id=archive.get_recording_id(),
-                              send_properties=False)
-    preview = rr.binary_stream(recording=live)
+    streams = recording.Recordings(path, None, False, Options())
     try:
-        archive.log('calibration', rr.AnyValues(focal_length=200.), static=True)
-        recording.at(archive, 2.5)
-        archive.log('metrics', rr.Scalars(7.), strict=True)
-        for value in range(3):
-            live.log('live/preview', rr.AnyValues(value=value), static=True, strict=True)
-        archive.flush(timeout_sec=5.)
-        assert preview.read(flush_timeout_sec=5.)
+        for camera, index in [('left', 3), ('right', 8)]:
+            streams.video(Frame(camera, 2.5, index, 320, 240, b''), b'encoded-frame', True, .001)
+            streams.matches.observe(camera, 2.5, [[12., 20.]], [index], [64, 255, 128])
     finally:
-        live.disconnect()
         streams.close()
-    reader = RrdReader(path)
-    entities = {chunk.entity_path.lstrip('/'): chunk.is_static
-                for store in reader.recordings() for chunk in reader.store(store=store).stream()}
-    assert entities['calibration'] is True
-    assert entities['metrics'] is False
-    assert not any(entity == 'live' or entity.startswith('live/') for entity in entities)
+    entities = {}
+    for chunk in RrdReader(path).stream():
+        name = chunk.entity_path.lstrip('/')
+        entities.setdefault(name, []).append(chunk.to_record_batch())
+    assert not any(name.startswith(('live/', 'okvis/debug/keypoints/')) for name in entities)
+    for camera, index in [('left', 3), ('right', 8)]:
+        assert f'cameras/{camera}/image' in entities
+        points = entities[f'cameras/{camera}/points']
+        assert any(row == [[12.5, 20.5]] for batch in points
+                   for row in batch.column('Points2D:positions').to_pylist())
+        assert all(f'{camera}_frame' in batch.schema.names for batch in points)
+        assert all(value == index for batch in points
+                   for value in batch.column(f'{camera}_frame').to_pylist())
 
 
-def test_initialization_disconnects_both_streams_even_if_first_cleanup_fails(tmp_path):
+def test_initialization_reports_blueprint_and_cleanup_failures(tmp_path):
 
     class FailingStream(Stream):
         def send_blueprint(self, blueprint):
@@ -105,20 +100,115 @@ def test_initialization_disconnects_both_streams_even_if_first_cleanup_fails(tmp
 
         def disconnect(self):
             self.closed = True
-            if self is Stream.instances[1]:
-                raise RuntimeError('live disconnect failure')
+            raise RuntimeError('disconnect failure')
 
     with pytest.raises(ExceptionGroup, match='initialization and cleanup failed') as caught:
         recording.Recordings(tmp_path / 'failed.rrd', recording.URL, False, Options(),
                              **dependencies(FailingStream))
     assert all(stream.closed for stream in Stream.instances)
-    assert [str(error) for error in caught.value.exceptions] == ['blueprint failure', 'live disconnect failure']
+    assert [str(error) for error in caught.value.exceptions] == ['blueprint failure', 'disconnect failure']
 
 
-@pytest.mark.parametrize('live', [False, True])
-def test_camera_blueprint_contains_recorded_left_and_stereo_keypoints(live):
-    cameras = recording.blueprint(live).root_container.contents[0].contents[1].contents
+def test_camera_blueprint_contains_only_recorded_stereo_views():
+    import rerun.blueprint as rrb
+
+    root = recording.blueprint().root_container
+    container = root.contents[0]
+    assert isinstance(container, rrb.Horizontal)
+    cameras = container.contents[1:]
     assert [(view.origin, view.name) for view in cameras] == [
         ('/cameras/left', 'Left · recorded'),
-        ('/okvis/debug/keypoints/left', 'Left · OKVIS keypoints'),
-        ('/okvis/debug/keypoints/right', 'Right · OKVIS keypoints')]
+        ('/cameras/right', 'Right · recorded')]
+    assert root.contents[0].contents[0].origin == '/'
+
+
+def test_spatial_blueprint_uses_one_view_for_ground_truth_vslam_and_planning():
+    import rerun.blueprint as rrb
+
+    spatial = recording.blueprint().root_container.contents[0].contents[0]
+    assert isinstance(spatial, rrb.Spatial3DView)
+    assert spatial.origin == '/'
+    assert spatial.name == 'Ground truth / VSLAM / planning'
+
+
+def test_okvis_diagnostics_uses_state_timeline_for_tracking_and_curves_for_counters():
+    import rerun.blueprint as rrb
+
+    diagnostics = recording.blueprint().root_container.contents[1].contents[0]
+    assert diagnostics.name == 'OKVIS diagnostics'
+    tracking, loops, timing = diagnostics.contents
+    assert isinstance(tracking, rrb.StateTimelineView)
+    assert tracking.origin == '/okvis/tracking'
+    assert isinstance(loops, rrb.TimeSeriesView)
+    assert loops.origin == '/okvis/loop_commits'
+    assert isinstance(timing, rrb.TimeSeriesView)
+    assert timing.origin == '/okvis/frame_processing_ms'
+
+
+def test_tick_rate_has_a_separate_scale_from_flight_control():
+    panels = recording.blueprint().root_container.contents[1].contents
+    flight = next(panel for panel in panels if panel.name == 'Flight control')
+    assert all(panel.name != 'FC tick rate · Hz' for panel in panels)
+    import rerun.blueprint as rrb
+
+    rate, states, curves = flight.contents
+    assert isinstance(states, rrb.Horizontal)
+    assert isinstance(curves, rrb.Horizontal)
+    imu, safety, gate = states.contents
+    thrust, position = curves.contents
+    assert isinstance(safety, rrb.StateTimelineView)
+    assert safety.contents == ['+ /fc/debug/state', '+ /fc/arming/failed', '+ /fc/failsafe/flags',
+                               '+ /fc/failsafe/action', '+ /fc/debug/saturated']
+    assert gate.origin == '/fc/standby_eskf'
+    assert gate.contents == ['+ /fc/standby_eskf/accel_gate', '+ /fc/standby_eskf/health']
+    assert imu.origin == '/fc/imu'
+    assert imu.contents == ['+ /fc/imu/source', '+ /fc/imu/attitude_ready', '+ /fc/imu/vio_fresh']
+    assert position.contents == ['+ /fc/debug/altitude', '+ /fc/debug/position_error_odom']
+    assert thrust.origin == '/fc/debug/thrust_total'
+    assert rate.origin == '/fc/debug/tick_rate'
+    assert isinstance(rate, rrb.TimeSeriesView)
+
+
+def test_blueprint_uses_equal_splits_and_opens_flight_control():
+    root = recording.blueprint().root_container
+    scene, tabs = root.contents
+    flight = tabs.contents[1]
+    assert root.row_shares is None
+    assert scene.column_shares is None
+    assert flight.row_shares is None
+    assert flight.contents[1].column_shares is None
+    assert flight.contents[2].column_shares is None
+    assert tabs.active_tab == 1
+
+
+def test_blueprint_uses_default_camera_and_collapses_all_side_panels():
+    import rerun.blueprint as rrb
+
+    bp = recording.blueprint()
+    assert 'EyeControls3D' not in bp.root_container.contents[0].contents[0].properties
+    assert bp.time_panel.timeline == 'sim_time'
+    assert bp.time_panel.state == rrb.PanelState.Collapsed
+    assert bp.time_panel.play_state == rrb.components.PlayState.Paused
+    assert bp.selection_panel.state == rrb.PanelState.Collapsed
+    assert bp.blueprint_panel.state == rrb.PanelState.Collapsed
+
+
+def test_default_blueprint_does_not_include_internal_numeric_diagnostics():
+    def views(container):
+        for child in container.contents:
+            if hasattr(child, 'contents') and not hasattr(child, 'origin'):
+                yield from views(child)
+            else:
+                yield child
+
+    all_views = list(views(recording.blueprint().root_container))
+    assert not any(view.origin in ('/viz', '/render', '/okvis/gyro_bias') for view in all_views)
+    assert not any(view.origin == '/fc' and view.name == 'FC metrics' for view in all_views)
+
+
+def test_diagnostics_blueprint_excludes_optional_vision_and_imu_matrix_views():
+    import rerun.blueprint as rrb
+
+    panels = recording.blueprint().root_container.contents[1].contents
+    assert all(panel.name != 'Vision matching diagnostics' for panel in panels)
+    assert not any(isinstance(panel, rrb.TensorView) for panel in panels)

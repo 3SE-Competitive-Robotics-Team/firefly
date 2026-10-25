@@ -32,8 +32,6 @@ class VideoOptions:
 
 @dataclass(frozen=True)
 class CaptureOptions:
-    # 体素地图的实时预览频率。
-    preview_hz: float = 2.0
     voxel_hz: float = 1.0
     queue_frames: int = 16
     max_voxels: int = 100_000

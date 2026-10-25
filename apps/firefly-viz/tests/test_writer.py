@@ -8,7 +8,7 @@ from firefly_mujoco import OdomMessage
 from firefly_viz.main import Continuity, Worker
 from firefly_viz.config import Options
 from firefly_viz.writer import Writer
-from firefly_viz.messages import VIZ_KIND_CLEAR, VIZ_KIND_POSE, VizMessage, VoxelMessage
+from firefly_viz.messages import VIZ_KIND_CLEAR, VIZ_KIND_POSE, VIZ_KIND_SCALARS, VizMessage, VoxelMessage
 
 
 class Recording:
@@ -41,6 +41,249 @@ def okvis_pose(stamp, xyz):
     msg.kind, msg.timestamp = VIZ_KIND_POSE, stamp
     msg.xyz[:], msg.quat_xyzw[:] = xyz, [0., 0., 0., 1.]
     return msg
+
+
+def test_vio_bias_is_recorded_directly_under_okvis(recordings_factory):
+    from firefly_viz.messages import AttitudeMessage
+
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options())
+    writer.consume(('attitude', AttitudeMessage(timestamp=2., gyro_bias=(.01, -.02, .03))))
+    stamp, args = archive.events[0]
+    assert stamp == ('sim_time', {'duration': 2.})
+    assert args[0] == 'okvis/gyro_bias'
+    assert args[1].scalars.as_arrow_array().to_pylist() == [.01, -.02, .03]
+
+
+def test_control_quaternion_is_only_recorded_as_acceptance_evidence(recordings_factory):
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options())
+    msg = VizMessage(timestamp=2., kind=VIZ_KIND_SCALARS, scalar_count=4)
+    msg.scalars[:] = [0., 0., 0., 1.]
+    path = b'fc/imu/quaternion_xyzw'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    writer.handle(msg)
+    assert not archive.events
+    path = b'acceptance/imu_attitude'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    writer.handle(msg)
+    assert archive.events[0][1][0] == 'acceptance/imu_attitude'
+    assert archive.events[0][1][1].scalars.as_arrow_array().to_pylist() == [0., 0., 0., 1.]
+
+
+def test_tracking_is_recorded_as_state_transitions_and_counters_stay_numeric(recordings_factory):
+    import rerun as rr
+
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options())
+    msg = VizMessage()
+    path = b'okvis/tracking'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    msg.kind, msg.scalar_count = VIZ_KIND_SCALARS, 1
+    for stamp, state in [(1., 0), (2., 1), (3., 1), (4., 2), (5., 0)]:
+        msg.timestamp, msg.scalars[0] = stamp, state
+        writer.handle(msg)
+    assert [stamp for stamp, _ in archive.events] == [
+        ('sim_time', {'duration': stamp}) for stamp in [1., 2., 4., 5.]]
+    assert all(isinstance(args[1], rr.StateChange) for _, args in archive.events)
+    assert [args[1].state.as_arrow_array().to_pylist() for _, args in archive.events] == [
+        ['Lost'], ['Marginal'], ['Good'], ['Lost']]
+    msg.scalars[0] = 3
+    with pytest.raises(ValueError, match='tracking state'):
+        writer.handle(msg)
+    path = b'okvis/loop_commits'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    writer.handle(msg)
+    assert isinstance(archive.events[-1][1][1], rr.Scalars)
+
+
+def test_clear_tracking_allows_same_state_to_be_logged_again(recordings_factory):
+    import rerun as rr
+
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options())
+    msg = VizMessage()
+    path = b'okvis/tracking'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    msg.timestamp, msg.kind, msg.scalar_count, msg.scalars[0] = 1., VIZ_KIND_SCALARS, 1, 2
+    writer.handle(msg)
+    msg.timestamp, msg.kind = 2., VIZ_KIND_CLEAR
+    writer.handle(msg)
+    msg.timestamp, msg.kind = 3., VIZ_KIND_SCALARS
+    writer.handle(msg)
+    assert len(archive.events) == 3
+    assert isinstance(archive.events[-1][1][1], rr.StateChange)
+
+
+def test_standby_accel_gate_records_transitions_and_nis_stays_numeric(recordings_factory):
+    import rerun as rr
+
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options())
+    msg = VizMessage(kind=VIZ_KIND_SCALARS, scalar_count=1)
+    path = b'fc/standby_eskf/accel_gate'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    for stamp, state in [(1., 0), (2., 1), (3., 1), (4., 0)]:
+        msg.timestamp, msg.scalars[0] = stamp, state
+        writer.handle(msg)
+    assert [stamp for stamp, _ in archive.events] == [
+        ('sim_time', {'duration': stamp}) for stamp in [1., 2., 4.]]
+    assert all(isinstance(args[1], rr.StateChange) for _, args in archive.events)
+    assert [args[1].state.as_arrow_array().to_pylist() for _, args in archive.events] == [
+        ['Not accepted'], ['Accepted'], ['Not accepted']]
+    msg.scalars[0] = 2.
+    with pytest.raises(ValueError, match='gate state'):
+        writer.handle(msg)
+    msg.kind = VIZ_KIND_CLEAR
+    writer.handle(msg)
+    msg.kind, msg.scalars[0] = VIZ_KIND_SCALARS, 0.
+    writer.handle(msg)
+    assert isinstance(archive.events[-1][1][1], rr.StateChange)
+    path = b'fc/standby_eskf/accel_nis'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    msg.scalars[0] = 120.
+    writer.handle(msg)
+    assert isinstance(archive.events[-1][1][1], rr.Scalars)
+
+
+def test_standby_health_is_state_and_imu_age_remains_recorded(recordings_factory):
+    import rerun as rr
+
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options())
+    msg = VizMessage(kind=VIZ_KIND_SCALARS, scalar_count=1)
+    path = b'fc/standby_eskf/health'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    for stamp, ready in [(1., 0), (2., 1), (3., 1), (4., 0)]:
+        msg.timestamp, msg.scalars[0] = stamp, ready
+        writer.handle(msg)
+    assert [args[1].state.as_arrow_array().to_pylist() for _, args in archive.events] == [
+        ['Not ready'], ['Ready'], ['Not ready']]
+    assert all(isinstance(args[1], rr.StateChange) for _, args in archive.events)
+    msg.scalars[0] = 2.
+    with pytest.raises(ValueError, match='health state'):
+        writer.handle(msg)
+    msg.kind = VIZ_KIND_CLEAR
+    writer.handle(msg)
+    msg.kind, msg.scalars[0] = VIZ_KIND_SCALARS, 0.
+    writer.handle(msg)
+    assert isinstance(archive.events[-1][1][1], rr.StateChange)
+    path = b'fc/standby_eskf/imu_age_s'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    msg.scalars[0] = .01
+    writer.handle(msg)
+    assert archive.events[-1][1][0] == 'fc/standby_eskf/imu_age_s'
+    assert archive.events[-1][1][1].scalars.as_arrow_array().to_pylist() == [.01]
+
+
+def test_imu_source_records_state_transitions(recordings_factory):
+    import rerun as rr
+
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options())
+    msg = VizMessage(kind=VIZ_KIND_SCALARS, scalar_count=1)
+    path = b'fc/imu/source'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    for stamp, source in [(1., 0), (2., 1), (3., 1), (4., 2), (5., 0)]:
+        msg.timestamp, msg.scalars[0] = stamp, source
+        writer.handle(msg)
+    assert [args[1].state.as_arrow_array().to_pylist() for _, args in archive.events] == [
+        ['Unavailable'], ['OKVIS'], ['Standby ESKF'], ['Unavailable']]
+    assert all(isinstance(args[1], rr.StateChange) for _, args in archive.events)
+    msg.scalars[0] = 3.
+    with pytest.raises(ValueError, match='source state'):
+        writer.handle(msg)
+    msg.kind = VIZ_KIND_CLEAR
+    writer.handle(msg)
+    msg.kind, msg.scalars[0] = VIZ_KIND_SCALARS, 0.
+    writer.handle(msg)
+    assert isinstance(archive.events[-1][1][1], rr.StateChange)
+
+
+def test_imu_health_separates_states_from_age(recordings_factory):
+    import rerun as rr
+
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options())
+    msg = VizMessage(kind=VIZ_KIND_SCALARS, scalar_count=3)
+    path = b'fc/imu/health'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    for stamp, values in [(1., [0., 0., -1.]), (2., [1., 1., .1]),
+                          (3., [1., 1., .2]), (4., [1., 0., .6])]:
+        msg.timestamp, msg.scalars[:3] = stamp, values
+        writer.handle(msg)
+    states = [(args[0], args[1].state.as_arrow_array().to_pylist())
+              for _, args in archive.events if isinstance(args[1], rr.StateChange)]
+    assert states == [('fc/imu/attitude_ready', ['Unavailable']), ('fc/imu/vio_fresh', ['Stale']),
+                      ('fc/imu/attitude_ready', ['Available']), ('fc/imu/vio_fresh', ['Fresh']),
+                      ('fc/imu/vio_fresh', ['Stale'])]
+    ages = [args[1].scalars.as_arrow_array().to_pylist()
+            for _, args in archive.events if args[0] == 'fc/imu/posterior_age_s']
+    assert ages == [[-1.], [.1], [.2], [.6]]
+    msg.scalars[0] = 2.
+    with pytest.raises(ValueError, match='invalid IMU health'):
+        writer.handle(msg)
+
+
+@pytest.mark.parametrize('entity,values,expected', [
+    ('fc/debug/state', [0., 3., 4., 6.], ['Disarmed', 'Hold', 'Track', 'Attitude fallback']),
+    ('fc/failsafe/action', [0., 1., 2., 3.], ['None', 'Hold', 'Attitude fallback', 'Disarm']),
+    ('fc/debug/saturated', [0., 1., 0.], ['Not saturated', 'Saturated', 'Not saturated']),
+    ('fc/arming/failed', [0., 2., 32.], ['No blocking check', 'Estimator not ready', 'IMU stale']),
+    ('fc/failsafe/flags', [0., 9., 128.], ['No active failsafe', 'Attitude invalid, IMU stale', 'Reference lost']),
+])
+def test_flight_modes_and_safety_codes_are_named_states(recordings_factory, entity, values, expected):
+    import rerun as rr
+
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options())
+    msg = VizMessage(kind=VIZ_KIND_SCALARS, scalar_count=1)
+    path = entity.encode()
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    for stamp, value in enumerate(values, 1):
+        msg.timestamp, msg.scalars[0] = stamp, value
+        writer.handle(msg)
+        writer.handle(msg)
+    assert all(isinstance(args[1], rr.StateChange) for _, args in archive.events)
+    assert [args[1].state.as_arrow_array().to_pylist()[0] for _, args in archive.events] == expected
+
+
+def test_saturation_count_is_a_separate_numeric_curve(recordings_factory):
+    import rerun as rr
+
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options())
+    msg = VizMessage(kind=VIZ_KIND_SCALARS, scalar_count=1, timestamp=1.)
+    path = b'fc/debug/saturated_ticks'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    msg.scalars[0] = 450.
+    writer.handle(msg)
+    assert isinstance(archive.events[0][1][1], rr.Scalars)
+    path = b'fc/debug/saturated'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    with pytest.raises(ValueError, match='saturated state'):
+        writer.handle(msg)
+
+
+def test_optional_localization_diagnostics_separate_states_and_values(recordings_factory):
+    import rerun as rr
+
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options())
+    msg = VizMessage(kind=VIZ_KIND_SCALARS, timestamp=1., scalar_count=4)
+    path = b'corr/debug/gate'
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    msg.scalars[:] = [3., 10., .2, 1.]
+    writer.handle(msg)
+    assert archive.events[0][1][0] == 'corr/gate/accepted'
+    assert isinstance(archive.events[0][1][1], rr.StateChange)
+    assert [args[0] for _, args in archive.events[1:]] == [
+        'corr/gate/metric', 'corr/gate/limit', 'corr/gate/applied_translation_m']
+    msg.kind = VIZ_KIND_CLEAR
+    writer.handle(msg)
+    msg.kind = VIZ_KIND_SCALARS
+    writer.handle(msg)
+    assert sum(isinstance(args[1], rr.StateChange) for _, args in archive.events) == 2
 
 
 def test_ground_truth_records_world_pose_and_incremental_trajectory(recordings_factory):
@@ -144,7 +387,7 @@ def test_cold_start_empty_keypoints_preserve_typed_ids_and_clear_previous_points
         archive.set_sinks(rr.FileSink(sys.argv[1], write_footer=True))
         matches = MatchedPoints(archive, 4)
         outputs = create_autospec(RecordingOutputs, instance=True, spec_set=True)
-        outputs.archive, outputs.live, outputs.matches = archive, None, matches
+        outputs.archive, outputs.matches = archive, matches
         writer = Writer(outputs, Options())
         try:
             matches.frame('left', 0.5, 0)
@@ -181,8 +424,7 @@ def test_cold_start_empty_keypoints_preserve_typed_ids_and_clear_previous_points
         assert ids.type == pa.list_(pa.uint64())
         rows[chunk.entity_path].extend(zip(batch.column('sim_time').cast(pa.int64()).to_pylist(),
                                           batch.column('Points2D:positions').to_pylist(), ids.to_pylist()))
-    assert sorted(rows['/okvis/debug/keypoints/left']) == [
-        (1_000_000_000, [], []), (2_000_000_000, [[12.25, 41.5]], [42]), (3_000_000_000, [], [])]
+    assert rows['/okvis/debug/keypoints/left'] == []
     assert sorted(rows['/cameras/left/points']) == [
         (500_000_000, [], []), (1_000_000_000, [], []),
         (2_000_000_000, [[12.75, 42.]], [42]), (3_000_000_000, [], [])]
@@ -264,8 +506,8 @@ def voxel(kind, points, stamp=1., sequence=0, chunk_index=0, chunk_count=1):
 
 
 def test_voxel_history_uses_complete_snapshots_after_ordered_deltas(recordings_factory):
-    archive, live = Recording(), Recording()
-    writer = Writer(recordings_factory(archive=archive, live=live), Options())
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options())
     writer.handle(voxel(3, [(1, 2, 3), (4, 5, 6)]))
     writer.handle(voxel(8, [(7, 8, 9)], 2., sequence=1))
     writer.handle(voxel(9, [(1, 2, 3)], 2., sequence=2))
@@ -274,21 +516,20 @@ def test_voxel_history_uses_complete_snapshots_after_ordered_deltas(recordings_f
     assert len(archive.calls) == 1
     assert archive.calls[0][0][0] == 'plan/voxels'
     assert not archive.calls[0][1].get('static', False)
-    assert live.calls[0][0][0] == 'live/plan/voxels'
-    assert live.calls[0][1]['static'] is True
+    assert not any(args[0].startswith('live/') for args, _ in archive.calls)
     with pytest.raises(ValueError, match='out-of-order'):
         writer.handle(voxel(9, [(4, 5, 6)], 1., sequence=3))
 
 
 def test_voxel_delta_cannot_create_an_unknown_baseline(recordings_factory):
-    writer = Writer(recordings_factory(archive=Recording(), live=None), Options())
+    writer = Writer(recordings_factory(archive=Recording()), Options())
     with pytest.raises(ValueError, match='baseline'):
         writer.handle(voxel(8, [(1, 2, 3)]))
 
 
 def test_voxel_chunk_commit_is_atomic_and_gaps_are_fatal(recordings_factory):
     archive = Recording()
-    writer = Writer(recordings_factory(archive=archive, live=None), Options())
+    writer = Writer(recordings_factory(archive=archive), Options())
     writer.handle(voxel(3, [(1, 2, 3)], chunk_count=2))
     writer.tick()
     assert not archive.calls
@@ -302,7 +543,7 @@ def test_voxel_chunk_commit_is_atomic_and_gaps_are_fatal(recordings_factory):
 
 def test_voxel_partial_update_fails_at_shutdown_and_empty_snapshot_clears(recordings_factory):
     archive = Recording()
-    writer = Writer(recordings_factory(archive=archive, live=None), Options())
+    writer = Writer(recordings_factory(archive=archive), Options())
     writer.handle(voxel(3, [], chunk_count=1))
     writer.tick(final=True)
     assert writer.voxels['plan/voxels'][0] == set()

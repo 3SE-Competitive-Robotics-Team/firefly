@@ -434,7 +434,8 @@ impl<'a> ObstacleScanner<'a> {
         Some(paths)
     }
 
-    /// 全程后检查：用 Bernstein 凸包递归覆盖曲线；无法确认自由时拒绝。
+    /// 测试侧独立几何检查，不参与生产轨迹验收。
+    #[cfg(test)]
     #[must_use]
     pub fn is_safe(&self, traj: &Trajectory) -> bool {
         crate::collision::trajectory_is_free(self.map, traj)

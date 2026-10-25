@@ -43,6 +43,34 @@ def poses():
     return rows
 
 
+def test_imu_state_views_preserve_numeric_acceptance_evidence(tmp_path):
+    from firefly_evaluation.mission_metrics import read_evidence
+    from firefly_viz.config import Options as VizOptions
+    from firefly_viz.messages import ScalarMessage, VIZ_KIND_SCALARS
+    from firefly_viz.recording import Recordings
+    from firefly_viz.writer import Writer
+
+    path = tmp_path / 'imu.rrd'
+    recordings = Recordings(path, None, False, VizOptions())
+    try:
+        writer = Writer(recordings, VizOptions())
+        for entity, values in [('fc/imu/source', [1.]), ('fc/imu/health', [1., 1., .15]),
+                               ('fc/debug/state', [3.]), ('acceptance/fc_state', [3.]),
+                               ('acceptance/attitude_source', [1.]),
+                               ('acceptance/imu_health', [1., 1., .15])]:
+            msg = ScalarMessage(kind=VIZ_KIND_SCALARS, timestamp=2., scalar_count=len(values))
+            encoded = entity.encode()
+            msg.entity_len, msg.entity[:len(encoded)] = len(encoded), encoded
+            msg.scalars[:len(values)] = values
+            writer.consume(('viz', msg))
+    finally:
+        recordings.close()
+    evidence = read_evidence(path)
+    np.testing.assert_array_equal(evidence['attitude_source'], [[2., 1.]])
+    np.testing.assert_array_equal(evidence['imu_health'], [[2., 1., 1., .15]])
+    np.testing.assert_array_equal(evidence['fc_state'], [[2., 3.]])
+
+
 def test_map_tracking_error_preserves_translation_and_scale_error():
     gt = poses()
     estimate = gt.copy()
@@ -203,7 +231,7 @@ def test_estimated_arrival_does_not_require_truth_and_false_arrival_fails_scorin
     assert not mission.estimated_near("corrected", goal, .35, .3)
 
 
-def test_vio_only_map_stage_starts_only_planner_and_labels_fixed_prior(tmp_path):
+def test_vio_only_map_stage_starts_planner_and_output_and_labels_fixed_prior(tmp_path):
     from firefly_evaluation.mission import Mission
     launched = []
 
@@ -218,8 +246,9 @@ def test_vio_only_map_stage_starts_only_planner_and_labels_fixed_prior(tmp_path)
     mission.latest["corrected"] = (2., None, None, None, True)
     mission.latest["reference"] = None
     result = mission.map_ready()
-    assert [name for name, _ in launched] == ["planner"]
-    assert "--vio-only" not in launched[0][1]
+    assert [name for name, _ in launched] == ["traj-server", "planner"]
+    assert "--traj-server" in launched[0][1]
+    assert "--vio-only" not in launched[1][1]
     assert result["accepted_visual_updates_at_start"] == 0
     assert result["visual_frontend"] == "disabled"
     assert mission.result["localization_mode"] == "vio_only"
@@ -241,7 +270,7 @@ def test_default_map_stage_uses_running_visual_frontend(tmp_path):
     mission.latest["reference"] = None
     mission.visual_updates = 0
     result = mission.map_ready()
-    assert [name for name, _ in launched] == ["planner"]
+    assert [name for name, _ in launched] == ["traj-server", "planner"]
     assert all("--vio-only" not in command and "--map" not in command for _, command in launched)
     assert result["accepted_visual_updates_at_start"] == 0
     assert result["visual_frontend"] == "enabled"

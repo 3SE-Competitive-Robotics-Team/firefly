@@ -1,4 +1,4 @@
-//! 固定种子安全属性测试：返回轨迹必须满足完整契约，拒绝必须是显式有界不收敛。
+//! 固定种子数值契约：输出满足端点 PVA、C2 连续性，拒绝必须是显式有界不收敛。
 //! 求解成功率不在本测试中定义；确定性任务完成由 mandatory_* 用例验证。
 
 use firefly_map::{GridMapBuilder, VoxelState};
@@ -70,7 +70,7 @@ fn check_case(index: usize) {
         use_multitopology_trajs: true,
         ..PlannerConfig::default()
     };
-    let mut planner = Planner::new(config.clone(), fixture.map.clone());
+    let mut planner = Planner::new(config, fixture.map);
     let start = State {
         position: fixture.start,
         velocity: Vector3::zeros(),
@@ -82,13 +82,7 @@ fn check_case(index: usize) {
         acceleration: Vector3::zeros(),
     };
     match planner.plan_with_init(start, end, firefly_planner::InitSource::ColdStart, true) {
-        Ok(result) => support::assert_trajectory_contract(
-            &result.trajectory,
-            planner.map_ref(),
-            &config,
-            start,
-            end,
-        ),
+        Ok(result) => support::assert_trajectory_contract(&result.trajectory, start, end),
         Err(error) => {
             assert_eq!(
                 error.kind(),
@@ -156,7 +150,7 @@ fn mandatory_wall_crossing_and_unreachable_goal() {
     let result = planner
         .plan_with_init(start, end, firefly_planner::InitSource::ColdStart, true)
         .expect("mandatory wall crossing");
-    support::assert_trajectory_contract(&result.trajectory, planner.map_ref(), &config, start, end);
+    support::assert_trajectory_contract(&result.trajectory, start, end);
     for y in 0..24 {
         for z in 0..20 {
             map.set_state([12, y, z], VoxelState::Occupied);
@@ -176,7 +170,7 @@ fn mandatory_wall_crossing_and_unreachable_goal() {
 fn mandatory_moving_boundaries_in_open_space() {
     let config = PlannerConfig::default();
     let map = GridMapBuilder::new(0.5, [30, 30, 20]).build().unwrap();
-    let mut planner = Planner::new(config.clone(), map);
+    let mut planner = Planner::new(config, map);
     let start = State {
         position: Point3::new(3., 4., 2.),
         velocity: Vector3::new(0.4, 0.1, 0.),
@@ -190,5 +184,5 @@ fn mandatory_moving_boundaries_in_open_space() {
     let result = planner
         .plan_with_init(start, end, firefly_planner::InitSource::ColdStart, true)
         .expect("mandatory moving boundaries");
-    support::assert_trajectory_contract(&result.trajectory, planner.map_ref(), &config, start, end);
+    support::assert_trajectory_contract(&result.trajectory, start, end);
 }

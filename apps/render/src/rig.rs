@@ -210,22 +210,28 @@ pub fn spawn_rig(
     ));
 }
 
-/// 从传感器几何生成左目可视化标定；相机光学轴采用 RDF。
+/// 从传感器几何生成左右目可视化标定；相机光学轴采用 RDF。
 #[must_use]
-pub fn left_camera_calibration(stamp: f64) -> firefly_pubsub::viz::VizMessage {
+pub fn camera_calibrations(stamp: f64) -> [firefly_pubsub::viz::VizMessage; 2] {
     use firefly_pubsub::viz::{VizMessage, kind};
     let focal =
         (IMAGE_HEIGHT as f64 / 2.0) / (firefly_base::rig::FOV_Y_DEG.to_radians() / 2.0).tan();
     let [cx, cy] = firefly_base::rig::principal_point(IMAGE_WIDTH, IMAGE_HEIGHT);
     let rotation = cam_mount() * Quat::from_rotation_x(std::f32::consts::PI);
-    let mut msg = VizMessage::base(kind::CAMERA, stamp, "cameras/left");
-    msg.xyz = LEFT_OFFSET.to_array().map(f64::from);
-    msg.quat_xyzw = rotation.to_array().map(f64::from);
-    msg.scalars = [focal, focal, cx, cy];
-    msg.scalar_count = 4;
-    msg.points[0] = [IMAGE_WIDTH as f64, IMAGE_HEIGHT as f64, 0.];
-    msg.point_count = 1;
-    msg
+    [
+        ("cameras/left", LEFT_OFFSET),
+        ("cameras/right", RIGHT_OFFSET),
+    ]
+    .map(|(name, offset)| {
+        let mut msg = VizMessage::base(kind::CAMERA, stamp, name);
+        msg.xyz = offset.to_array().map(f64::from);
+        msg.quat_xyzw = rotation.to_array().map(f64::from);
+        msg.scalars = [focal, focal, cx, cy];
+        msg.scalar_count = 4;
+        msg.points[0] = [IMAGE_WIDTH as f64, IMAGE_HEIGHT as f64, 0.];
+        msg.point_count = 1;
+        msg
+    })
 }
 
 /// rig 相机摆位（纯函数：`poll_pose` 在同系统内调用，保证渲染用新变换出图）。
@@ -250,7 +256,7 @@ mod tests {
     #[test]
     #[allow(clippy::float_cmp)] // IPC 标定的直接字段拷贝要求精确相等。
     fn rerun_calibration_uses_cv_axes_and_shared_intrinsics() {
-        let left = left_camera_calibration(1.5);
+        let [left, right] = camera_calibrations(1.5);
         let assert_camera = |message: &firefly_pubsub::viz::VizMessage, offset: Vec3| {
             assert_eq!(message.xyz, offset.to_array().map(f64::from));
             assert_eq!(
@@ -264,6 +270,9 @@ mod tests {
             assert_eq!(message.scalars[2..], [159.5, 119.5]);
         };
         assert_camera(&left, LEFT_OFFSET);
+        assert_camera(&right, RIGHT_OFFSET);
+        assert_eq!(left.entity(), "cameras/left");
+        assert_eq!(right.entity(), "cameras/right");
     }
 
     #[test]

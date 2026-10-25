@@ -3508,6 +3508,9 @@ impl crate::frontend::pipeline::FrontendGraph for ViSlamBackend {
         ViSlamBackend::merge_landmark(self, from, into)?;
         Ok(())
     }
+    fn merge_landmarks(&mut self, from: &[LandmarkId], into: &[LandmarkId]) -> Result<usize> {
+        ViSlamBackend::merge_landmarks(self, from, into)
+    }
     fn set_observation_information(
         &mut self,
         key: KeypointIdentifier,

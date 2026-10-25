@@ -43,6 +43,7 @@ pub mod publish;
 pub mod reference;
 pub mod subscriber;
 pub mod trace;
+pub mod trajectory;
 pub mod vision;
 pub mod viz;
 

@@ -120,7 +120,7 @@ impl StateInput {
         true
     }
 
-    pub const fn revision_changed(&self) -> bool {
+    pub const fn has_revision_change(&self) -> bool {
         self.revised
     }
 

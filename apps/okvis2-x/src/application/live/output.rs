@@ -6,7 +6,7 @@ use crate::{
     config::parameters::ImuParameters,
     frames::frame_typedefs::StateId,
     kinematics::transformation::Transformation,
-    runtime::{threaded_slam::PublicationData, vi_interface::TrackingQuality},
+    runtime::threaded_slam::PublicationData,
     sensors::measurements::{ImuMeasurement, ImuMeasurementDeque, ImuSensorReadings},
 };
 use firefly_base::{FrameId, RigidTransform};
@@ -95,16 +95,6 @@ impl Output {
     }
     pub fn posterior(&mut self, publication: &PublicationData) -> Result<()> {
         let state = &publication.state;
-        if publication.tracking_state.tracking_quality == TrackingQuality::Lost {
-            // 跟踪丢失只让预测失效，不改 `session`：`session` 是进程运行标识，
-            // 下游（飞控）把它的变化当作进程重启，会永久降级到备用姿态源。
-            // 预测清空后不再发 AttitudeMessage，下游按新鲜度超时自然回落并在
-            // 恢复后重新接纳；跟踪质量同时经 viz 标量暴露。
-            if self.prediction.take().is_some() {
-                log::warn!("VIO 跟踪丢失，停止姿态预测（会话不变）");
-            }
-            return Ok(());
-        }
         if self
             .prediction
             .as_ref()
@@ -153,10 +143,7 @@ impl Output {
         let Some(prediction) = self.prediction.as_mut() else {
             return Ok(None);
         };
-        if time <= prediction.time
-            || self.last_published.is_some_and(|last| time <= last)
-            || seconds(time, prediction.posterior) > self.config.max_posterior_age
-        {
+        if time <= prediction.time || self.last_published.is_some_and(|last| time <= last) {
             return Ok(None);
         }
         let start = self
@@ -176,14 +163,6 @@ impl Output {
         );
         let measurements = &self.prediction_measurements;
         if measurements.len() < 2 {
-            return Ok(None);
-        }
-        if measurements
-            .iter()
-            .zip(measurements.iter().skip(1))
-            .any(|(a, b)| seconds(b.time_stamp, a.time_stamp) > self.config.max_imu_gap)
-        {
-            self.prediction = None;
             return Ok(None);
         }
         ImuError::propagation(

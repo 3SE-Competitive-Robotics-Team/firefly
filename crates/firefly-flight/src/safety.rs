@@ -4,7 +4,7 @@
 //! 这台飞机实际能评估的检查与失效条件；PX4 中依赖这些输入的位不会伪造为“永远通过”。
 //!
 //! 记录形式：`ArmingCheck` 与 `FailsafeFlags` 都是稳定的位掩码（位号 = 枚举判别值），
-//! `apps/fc` 以 u32 标量写入 RRD，并在状态变化时写一条带名字的日志。
+//! `apps/fc` 通过 IPC 发布 u32 位掩码，viz 将其转换为具名状态时间线。
 
 use crate::fsm::Health;
 
@@ -194,7 +194,7 @@ pub enum FailsafeAction {
 }
 
 impl FailsafeAction {
-    /// 稳定整数编码（RRD 标量）。
+    /// 稳定整数编码（IPC 诊断）。
     #[must_use]
     pub const fn code(self) -> u8 {
         match self {

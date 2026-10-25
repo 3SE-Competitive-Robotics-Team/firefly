@@ -2,9 +2,9 @@
 //!
 //! 对照官方 `poly_traj_optimizer.cpp:1209` `VirtualTGradCost`：
 //! `costT = sum(T)·wei_time`，梯度 `gdVT = (gdRT + wei_time)·dT/dVT`。
-//! firefly 将 `wei_time` 并入 `d_f_d_t`（此处 `+= weight`），由
-//! `firefly-planner::objective::pack` 的链式 `dt·dT/dVT` 完成，不在
-//! 映射层重复加。
+//! 独立测试接口将 `wei_time` 并入 `d_f_d_t`（此处 `+= weight`），
+//! 由 `firefly-planner::objective::pack` 完成链式映射。
+//! 生产联合回调按上游顺序，在伴随传播后加入 `wei_time`。
 
 use firefly_trajectory::Trajectory;
 

@@ -58,7 +58,7 @@ jobs:
 
       - name: Rust/Python IPC compatibility
         run: |
-          uv sync --package firefly-sim --package firefly-viz --no-dev
+          uv sync --package firefly-sim --package firefly-viz --package firefly-evaluation --no-dev
           FIREFLY_TEST_PYTHON="$GITHUB_WORKSPACE/.venv/bin/python" cargo test -p firefly-pubsub --test python_interop -- --ignored
 
   python:

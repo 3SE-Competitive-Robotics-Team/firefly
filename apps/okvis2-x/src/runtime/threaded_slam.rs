@@ -58,7 +58,7 @@ use std::{
         mpsc,
     },
     thread::{self, JoinHandle},
-    time::Instant,
+    time::{Duration, Instant},
 };
 const IMU_TEMPORAL_OVERLAP: f64 = 0.02;
 /// Solver/graph primitives shared with Frontend; graph ownership stays on one thread.
@@ -1232,7 +1232,7 @@ pub struct ProcessingCore<G: ThreadedGraph, S, B, M> {
     full_graph: Option<JoinHandle<Result<G::FullGraphResult>>>,
     frame_diagnostics: Option<FrameDiagnosticCallback>,
 }
-type FrameDiagnosticCallback = Box<dyn FnMut(&MultiFrame, &State)>;
+type FrameDiagnosticCallback = Box<dyn FnMut(&MultiFrame, Duration)>;
 impl<G, S, B, M> ProcessingCore<G, S, B, M>
 where
     G: ThreadedGraph,
@@ -1276,8 +1276,9 @@ where
             frame_diagnostics: None,
         }
     }
-    /// Runs on the graph owner after frame optimization and before marginalization.
-    pub fn set_frame_diagnostics(&mut self, callback: impl FnMut(&MultiFrame, &State) + 'static) {
+    /// Runs on the graph owner after frame publication and marginalization.
+    /// Duration covers frame processing, including detection, matching and optimization.
+    pub fn set_frame_diagnostics(&mut self, callback: impl FnMut(&MultiFrame, Duration) + 'static) {
         self.frame_diagnostics = Some(Box::new(callback));
     }
     /// # Errors
@@ -1399,6 +1400,7 @@ where
         Ok(())
     }
     fn process_frame(&mut self, shared: &Shared) -> Result<bool> {
+        let processing_start = Instant::now();
         self.finish_full_graph(false)?;
         let Some(frame) = self.get_next_frame(shared)? else {
             return Ok(false);
@@ -1477,7 +1479,7 @@ where
                 self.imu.pop_front();
             }
         }
-        self.associate_and_optimise_frame(shared, &frame, time)
+        self.associate_and_optimise_frame(shared, &frame, time, processing_start)
     }
     fn predicted_frame_pose(&self, last: &State, time: Timestamp) -> Result<Transformation> {
         let mut pose;
@@ -1542,6 +1544,7 @@ where
         shared: &Shared,
         frame: &MultiFramePtr,
         time: Timestamp,
+        processing_start: Instant,
     ) -> Result<bool> {
         let matching_start = Instant::now();
         if !self.graph.add_states(frame.clone(), &self.imu, false)? {
@@ -1606,7 +1609,7 @@ where
             )?;
             self.full_graph = Some(thread::spawn(task));
         }
-        self.optimise_publish_marginalise(shared, frame, gyro)?;
+        self.optimise_publish_marginalise(shared, frame, gyro, processing_start)?;
         Ok(true)
     }
 
@@ -1857,6 +1860,7 @@ where
         shared: &Shared,
         frame: &MultiFramePtr,
         gyro: Vector3<f64>,
+        processing_start: Instant,
     ) -> Result<()> {
         let updated = self.graph.optimise_realtime_graph(
             self.parameters.estimator.realtime_max_iterations,
@@ -1909,9 +1913,6 @@ where
             .map(|(component, alignment)| (component, alignment.compose(&state.t_ws.inverse())))
             .collect();
         let publication = self.prepare_publication(state, &updated, false)?;
-        if let Some(diagnostics) = &mut self.frame_diagnostics {
-            diagnostics(&frame.borrow(), &publication.state);
-        }
         shared.started.store(true, Ordering::Release);
         Self::publish(shared, publication.clone())?;
         if self.parameters.output.display.display_matches
@@ -1928,6 +1929,9 @@ where
         self.affected_states = result.affected_states;
         for id in result.eliminated_states {
             self.imu_by_frame.remove(&id);
+        }
+        if let Some(diagnostics) = &mut self.frame_diagnostics {
+            diagnostics(&frame.borrow(), processing_start.elapsed());
         }
         Ok(())
     }
@@ -2405,7 +2409,7 @@ mod tests {
             );
             let id = StateId::new(frame.borrow().id());
             core.imu_by_frame.insert(id, imu);
-            core.optimise_publish_marginalise(&shared, &frame, Vector3::zeros())
+            core.optimise_publish_marginalise(&shared, &frame, Vector3::zeros(), Instant::now())
                 .unwrap();
             publications.push(shared.publications.pop(false).unwrap().unwrap());
             if full_graph_busy && index == 3 {

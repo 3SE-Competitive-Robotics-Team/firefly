@@ -29,6 +29,11 @@ command = ["bin/localization"]
 autostart = false
 
 [[process]]
+name = "traj-server"
+command = ["bin/planner", "--traj-server"]
+autostart = true
+
+[[process]]
 name = "planner"
 command = ["bin/planner"]
 autostart = true

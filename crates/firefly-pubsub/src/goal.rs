@@ -15,7 +15,8 @@ pub const GOAL_TOPIC: &str = "Firefly/Goal";
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
 #[type_name("FireflyGoalMessage")]
 pub struct GoalMessage {
-    /// 发送时刻（墙钟秒，仅诊断用；规划以自身 sim 时钟为准）。
+    /// 发送时刻（墙钟秒），同时作为单调递增的目标身份；重复投递保持不变。
+    /// 规划仍以自身 sim 时钟为准，参考与执行状态回显此值供任务层关联。
     pub timestamp: f64,
     /// 目标位置 `p`（地图系，米）。
     pub position_x: f64,

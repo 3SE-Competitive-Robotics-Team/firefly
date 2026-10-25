@@ -1,6 +1,6 @@
 //! 地图系规划参考消息（规划 → 飞控）。
 //!
-//! 规划进程把执行中轨迹的参考状态（位置/速度）发布到 `Firefly/Reference`，
+//! 轨迹输出进程把执行中轨迹的参考状态（位置/速度）发布到 `Firefly/Reference`，
 //! 飞控经 map←odom 变换转换到连续 odom 系。`#[repr(C)]` 定长零拷贝。
 
 use iceoryx2::prelude::*;
@@ -36,6 +36,8 @@ pub struct ReferenceMessage {
     pub alignment_rotation: [f64; 4],
     /// 1 使用消息快照；0 使用同刻配对的外部地图变换。
     pub has_alignment: u64,
+    /// 生成此参考的目标身份，回显 GoalMessage.timestamp；启动预置目标为 0。
+    pub goal_timestamp: f64,
 }
 
 impl Default for ReferenceMessage {
@@ -56,6 +58,7 @@ impl Default for ReferenceMessage {
             alignment_translation: [0.; 3],
             alignment_rotation: [0., 0., 0., 1.],
             has_alignment: 0,
+            goal_timestamp: 0.0,
         }
     }
 }
@@ -67,8 +70,8 @@ mod tests {
     #[test]
     fn reference_message_is_plain_old_data() {
         let m = ReferenceMessage::default();
-        // 12 × f64 参考 + 7 × f64 变换 + u64 标记。
-        assert_eq!(std::mem::size_of::<ReferenceMessage>(), 160);
+        // 12 × f64 参考 + 7 × f64 变换 + u64 标记 + f64 目标身份。
+        assert_eq!(std::mem::size_of::<ReferenceMessage>(), 168);
         assert!((m.timestamp + 1.0).abs() < 1e-9);
     }
 }

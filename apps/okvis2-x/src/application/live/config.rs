@@ -120,8 +120,6 @@ pub struct Config {
     pub image_delay: f64,
     pub stereo_tolerance: f64,
     pub imu_history_seconds: f64,
-    pub max_posterior_age: f64,
-    pub max_imu_gap: f64,
     pub loop_closures: bool,
     pub num_keypoints: i32,
     pub realtime_iterations: i32,
@@ -143,8 +141,6 @@ impl Default for Config {
             image_delay: 0.0,
             stereo_tolerance: 0.001,
             imu_history_seconds: 5.0,
-            max_posterior_age: 0.3,
-            max_imu_gap: 0.05,
             loop_closures: true,
             num_keypoints: 2500,
             realtime_iterations: 5,
@@ -163,8 +159,6 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         let positive = [
             self.imu_history_seconds,
-            self.max_posterior_age,
-            self.max_imu_gap,
             self.realtime_time_limit,
             self.imu.gravity,
             self.imu.gyro_noise,
@@ -177,8 +171,6 @@ impl Config {
             || !self.stereo_tolerance.is_finite()
             || self.stereo_tolerance < 0.0
             || self.stereo_tolerance > 0.01
-            || self.imu_history_seconds <= self.max_posterior_age
-            || self.max_imu_gap > self.max_posterior_age
             || self.num_keypoints <= 0
             || self.realtime_iterations <= 0
             || !self.map_dimension.is_finite()

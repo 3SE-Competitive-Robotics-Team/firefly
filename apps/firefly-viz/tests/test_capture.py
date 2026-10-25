@@ -1,4 +1,4 @@
-"""左目视频按采集时间采样，编码结束必须报告完整性。"""
+"""双目视频按采集时间采样，编码结束必须报告完整性。"""
 
 from dataclasses import replace
 
@@ -34,18 +34,19 @@ def test_rate_preserves_phase_across_timestamp_jitter():
     assert all(rate.accept(t) for t in [0., .1001, .2, .3001, .4])
 
 
-def test_capture_has_no_image_output_when_video_is_disabled(recordings_factory):
+@pytest.mark.parametrize('camera', ['left', 'right'])
+def test_capture_has_no_image_output_when_video_is_disabled(recordings_factory, camera):
     options = Options()
     options = replace(options, video=replace(options.video, enabled=False))
-    archive, live = Recording(), Recording()
-    capture = Capture(recordings_factory(archive=archive, live=live), options)
-    capture.handle(Frame('left', 1., 0, 2, 2, b'\x00' * 4))
+    archive = Recording()
+    capture = Capture(recordings_factory(archive=archive), options, camera)
+    capture.handle(Frame(camera, 1., 0, 2, 2, b'\x00' * 4))
     capture.close()
     assert capture.encoder is None
     assert not archive.calls
-    assert not live.calls
-    with pytest.raises(ValueError, match='left camera'):
-        capture.handle(Frame('right', 1., 0, 2, 2, b'\x00' * 4))
+    other = 'right' if camera == 'left' else 'left'
+    with pytest.raises(ValueError, match=f'{camera} camera'):
+        capture.handle(Frame(other, 1., 0, 2, 2, b'\x00' * 4))
 
 
 def test_close_reports_encoder_failure_and_records_final_counts(recordings_factory):
@@ -63,13 +64,13 @@ def test_close_reports_encoder_failure_and_records_final_counts(recordings_facto
             raise RuntimeError('encoder failed')
 
     recordings = recordings_factory(archive=Recording())
-    capture = Capture(recordings, Options())
+    capture = Capture(recordings, Options(), "left")
     encoder = FailedEncoder()
     capture.encoder = encoder
     with pytest.raises(ExceptionGroup, match='capture cleanup failed'):
         capture.close()
     assert encoder.closed
-    recordings.health.assert_called_once_with('video/frames', [0, 0, 0, 0], None)
+    recordings.health.assert_called_once_with('video/left/frames', [0, 0, 0, 0], None)
 
 
 def test_configuration_rejects_misspelled_keys_and_invalid_budgets(tmp_path):

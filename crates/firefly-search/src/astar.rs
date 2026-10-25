@@ -5,10 +5,7 @@
 //! 对角启发、端点入障沿远离对端方向外推至自由、节点池预分配 +
 //! 世代计数复用（`rounds` 区分每次搜索，免重置）。
 //!
-//! 地图索引固定在占据窗口；连续线段净距校验为本项目安全扩展，
-//! 26 邻域的对角连边也必须避开膨胀体素。
-
-use crate::segment::segment_is_clear_with_events;
+//! 地图索引固定在占据窗口；26 邻域只检查目标节点的膨胀占据。
 
 use firefly_error::{Error, ErrorKind};
 use firefly_map::GridMap;
@@ -81,67 +78,6 @@ pub struct Astar {
 
 const NO_HEAP: u32 = u32::MAX;
 const HEAP_ARITY: usize = 4;
-
-/// 每个单位步方向（`((i+1)*3+(j+1))*3+(k+1)`）中点接触格的位掩码。
-const fn direction_masks() -> [u32; 27] {
-    let mut masks = [0u32; 27];
-    let mut i = -1i32;
-    while i <= 1 {
-        let mut j = -1i32;
-        while j <= 1 {
-            let mut k = -1i32;
-            while k <= 1 {
-                if i != 0 || j != 0 || k != 0 {
-                    let (x0, x1) = if i < 0 {
-                        (-1, 0)
-                    } else if i > 0 {
-                        (0, 1)
-                    } else {
-                        (0, 0)
-                    };
-                    let (y0, y1) = if j < 0 {
-                        (-1, 0)
-                    } else if j > 0 {
-                        (0, 1)
-                    } else {
-                        (0, 0)
-                    };
-                    let (z0, z1) = if k < 0 {
-                        (-1, 0)
-                    } else if k > 0 {
-                        (0, 1)
-                    } else {
-                        (0, 0)
-                    };
-                    let direction = ((i + 1) * 3 + (j + 1)) as usize * 3 + (k + 1) as usize;
-                    let mut mask = 0u32;
-                    let mut di = x0;
-                    while di <= x1 {
-                        let mut dj = y0;
-                        while dj <= y1 {
-                            let mut dk = z0;
-                            while dk <= z1 {
-                                let index =
-                                    ((di + 1) * 3 + (dj + 1)) as usize * 3 + (dk + 1) as usize;
-                                mask |= 1 << index;
-                                dk += 1;
-                            }
-                            dj += 1;
-                        }
-                        di += 1;
-                    }
-                    masks[direction] = mask;
-                }
-                k += 1;
-            }
-            j += 1;
-        }
-        i += 1;
-    }
-    masks
-}
-
-static DIRECTION_MASKS: [u32; 27] = direction_masks();
 
 impl Default for Astar {
     fn default() -> Self {
@@ -247,19 +183,7 @@ impl Astar {
                 continue;
             }
             if node == goal_node {
-                let path = self.reconstruct(map, goal_node, start_pt, goal_pt);
-                let mut events = Vec::new();
-                if path
-                    .points()
-                    .windows(2)
-                    .all(|w| segment_is_clear_with_events(map, w[0], w[1], &mut events))
-                {
-                    return Ok(path);
-                }
-                return Err(Error::temporary(
-                    ErrorKind::NotFound,
-                    "endpoint connector touches inflated occupancy",
-                ));
+                return Ok(self.reconstruct(map, goal_node, start_pt, goal_pt));
             }
             if expansions >= self.config.max_expansions {
                 return Err(Error::temporary(
@@ -311,7 +235,7 @@ impl Astar {
                         continue;
                     }
                     let direction = ((i + 1) * 3 + (j + 1)) as usize * 3 + (k + 1) as usize;
-                    if blocked & DIRECTION_MASKS[direction] != 0 {
+                    if blocked & (1 << direction) != 0 {
                         continue;
                     }
                     let step = match i * i + j * j + k * k {
@@ -625,6 +549,32 @@ mod tests {
     }
 
     #[test]
+    fn diagonal_step_checks_only_destination_occupancy() {
+        for dims in [[2, 2, 1], [2, 2, 2]] {
+            let mut map = firefly_map::GridMapBuilder::new(1.0, dims)
+                .with_obstacles_inflation(0.)
+                .build()
+                .unwrap();
+            let last = [1, 1, dims[2] - 1];
+            for x in 0..2 {
+                for y in 0..2 {
+                    for z in 0..dims[2] {
+                        let idx = [x, y, z];
+                        if idx != [0, 0, 0] && idx != last {
+                            map.set_state(idx, firefly_map::VoxelState::Occupied);
+                        }
+                    }
+                }
+            }
+            map.inflate_obstacles();
+            let start = [0.5, 0.5, 0.5];
+            let goal = [1.5, 1.5, last[2] as f64 + 0.5];
+            let path = search(&mut Astar::default(), &map, start, goal).unwrap();
+            assert_eq!(path.points(), &[Vector3::from(start), Vector3::from(goal)]);
+        }
+    }
+
+    #[test]
     fn open_grid_path_length_is_analytic_optimum() {
         // 空图对角线：8 格 dx/dy/dz 全等 → 最优 8×√3（米制 resolution=1）。
         let map = empty_map();
@@ -656,9 +606,8 @@ mod tests {
     }
 
     #[test]
-    fn path_keeps_inflated_clearance() {
-        // 官方 `checkOccupancy` = `getInflateOccupancy`：路径点不得落在膨胀层内；
-        // 连边用连续体素覆盖校验；每条边用独立稠密采样核验膨胀净距。
+    fn path_nodes_keep_inflated_clearance() {
+        // 上游 checkOccupancy 使用膨胀占据，验收路径节点与 26 邻域步长。
         let mut map = empty_map();
         map.set_state([5, 5, 5], firefly_map::VoxelState::Occupied);
         map.inflate_obstacles();
@@ -672,11 +621,6 @@ mod tests {
             .iter()
             .map(|p| map.index_of(*p).expect("路径点应在地图内"))
             .collect();
-        for w in path.points().windows(2) {
-            for k in 0..=100 {
-                assert!(!map.is_occupied_inflated(w[0] + (w[1] - w[0]) * (f64::from(k) / 100.)));
-            }
-        }
         for w in idx.windows(2) {
             for axis in 0..3 {
                 assert!(
@@ -705,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn corner_touch_requires_two_axis_steps() {
+    fn corner_touch_allows_diagonal_step_like_upstream() {
         let mut map = firefly_map::GridMapBuilder::new(1., [10, 10, 10])
             .with_obstacles_inflation(0.)
             .build()
@@ -720,8 +664,8 @@ mod tests {
         )
         .unwrap();
         let length: f64 = path.points().windows(2).map(|w| (w[1] - w[0]).norm()).sum();
-        assert!((length - 2.).abs() < 1e-12);
-        assert_eq!(path.points().len(), 3);
+        assert!((length - std::f64::consts::SQRT_2).abs() < 1e-12);
+        assert_eq!(path.points().len(), 2);
     }
 
     #[test]
@@ -871,8 +815,8 @@ mod neighbor_tests {
     use super::*;
     use firefly_map::{GridMapBuilder, VirtualWall, VoxelState};
 
-    /// 旧判定：每个邻居做世界坐标膨胀查询 + 通用线段净距检查。
-    fn legacy_neighbors(map: &GridMap, idx: [usize; 3]) -> Vec<(u32, f64)> {
+    /// 上游邻居判定：只查询目标节点的膨胀占据。
+    fn upstream_neighbors(map: &GridMap, idx: [usize; 3]) -> Vec<(u32, f64)> {
         let [dx, dy, dz] = map.dims();
         let [x, y, z] = idx;
         let mut out = Vec::with_capacity(26);
@@ -893,13 +837,7 @@ mod neighbor_tests {
                         continue;
                     }
                     let nidx = [nx as usize, ny as usize, nz as usize];
-                    if map.is_occupied_inflated(center_of(map, nidx))
-                        || !crate::segment::segment_is_clear(
-                            map,
-                            center_of(map, idx),
-                            center_of(map, nidx),
-                        )
-                    {
+                    if map.is_occupied_inflated(center_of(map, nidx)) {
                         continue;
                     }
                     out.push((
@@ -913,7 +851,7 @@ mod neighbor_tests {
     }
 
     #[test]
-    fn fill_neighbors_matches_legacy_predicate() {
+    fn fill_neighbors_matches_upstream_occupancy() {
         let mut map = GridMapBuilder::new(0.4, [12, 12, 12])
             .with_origin(Vector3::new(-1.3, 2.1, -0.7))
             .with_obstacles_inflation(0.8)
@@ -944,7 +882,7 @@ mod neighbor_tests {
                         .iter()
                         .map(|&(node, step, _)| (node.0, step))
                         .collect();
-                    assert_eq!(got, legacy_neighbors(&map, idx), "at {idx:?}");
+                    assert_eq!(got, upstream_neighbors(&map, idx), "at {idx:?}");
                 }
             }
         }

@@ -15,7 +15,7 @@ from firefly_mujoco import ControlMessage, OdomMessage
 from firefly_viz.messages import SCALAR_BUFFER_SIZE, ScalarMessage
 
 from .process_lifecycle import ManagedProcess, isolated_run
-from .mission_io import Recorder, ReferenceMessage, pose_values, service
+from .mission_io import PlannerStatusMessage, Recorder, ReferenceMessage, pose_values, service
 
 from firefly_workspace import workspace_root
 
@@ -94,6 +94,8 @@ class Mission:
         self.recorder = None
         self.control_origin = None
         self.visual_updates = 0
+        self.planner_status = None
+        self.reference_goal = None
 
     def start(self, name, command):
         env = {**os.environ, "RUST_LOG": "info", "FIREFLY_MISSION_SEED": str(self.options.seed), "PYTHONDONTWRITEBYTECODE": "1"}
@@ -148,6 +150,7 @@ class Mission:
             ("odom", "Odometry", OdomMessage, None, None),
             ("corrected", "CorrectedOdometry", OdomMessage, None, None),
             ("reference", "Reference", ReferenceMessage, None, None),
+            ("planner_status", "PlannerStatus", PlannerStatusMessage, None, None),
             ("control", "Control", ControlMessage, 32, None),
             ("viz", "VizScalars", ScalarMessage, SCALAR_BUFFER_SIZE, 8),
         ]:
@@ -170,14 +173,25 @@ class Mission:
         for name, sub in self.subs.items():
             while (sample := sub.receive()) is not None:
                 msg = sample.payload().contents
+                if name == "planner_status":
+                    if not np.isfinite([msg.timestamp, msg.goal_timestamp]).all() or msg.finished not in (0, 1):
+                        raise MissionFailure("invalid planner status")
+                    status = (msg.timestamp, msg.goal_timestamp, bool(msg.finished), time.monotonic())
+                    if self.planner_status is None or status[1:3] != self.planner_status[1:3]:
+                        self.recorder.event(f"planner goal={status[1]} finished={status[2]}", status[0])
+                    self.planner_status = status
+                    continue
                 if name == "viz":
                     entity = bytes(msg.entity[:msg.entity_len]).decode(errors="replace")
                     if entity == "fc/debug/state":
                         self.mode = int(msg.scalars[0])
+                        self.recorder.scalars("acceptance/fc_state", msg.timestamp, list(msg.scalars[:msg.scalar_count]))
                     elif entity == "fc/imu/source":
                         self.attitude_source = (msg.timestamp, int(msg.scalars[0]), time.monotonic())
+                        self.recorder.scalars("acceptance/attitude_source", msg.timestamp, list(msg.scalars[:msg.scalar_count]))
                     elif entity == "fc/imu/health" and msg.scalar_count >= 2:
                         self.attitude_health = (msg.timestamp, msg.scalars[0] == 1., msg.scalars[1] == 1., time.monotonic())
+                        self.recorder.scalars("acceptance/imu_health", msg.timestamp, list(msg.scalars[:msg.scalar_count]))
                     elif entity == "fc/arming/failed" and msg.scalar_count == 1:
                         self.arming_health = (msg.timestamp, msg.scalars[0] == 0., time.monotonic())
                     elif entity == "corr/debug/gate" and msg.scalar_count == 4 and msg.scalars[3] == 1:
@@ -185,6 +199,8 @@ class Mission:
                         self.recorder.scalars("acceptance/visual_update", msg.timestamp, list(msg.scalars[:4]))
                     elif entity == "okvis/loop_commits":
                         self.recorder.scalars("acceptance/loop_backend", msg.timestamp, list(msg.scalars[:msg.scalar_count]))
+                    elif entity == "fc/imu/quaternion_xyzw":
+                        self.recorder.scalars("acceptance/imu_attitude", msg.timestamp, list(msg.scalars[:msg.scalar_count]))
                     elif entity == "acceptance/physics":
                         self.physics = list(msg.scalars)
                         self.physics_time = msg.timestamp
@@ -213,6 +229,8 @@ class Mission:
                 if previous and stamp == previous[0]:
                     continue
                 initialized = getattr(msg, "is_initialized", True)
+                if name == "reference":
+                    self.reference_goal = msg.goal_timestamp
                 self.latest[name] = (stamp, np.array(pos), np.array(vel), quat, initialized, time.monotonic())
                 self.counts[name] = self.counts.get(name, 0) + 1
                 if name == "odom":
@@ -318,24 +336,65 @@ class Mission:
         command = [str(self.root / "target/release/planner"), "--goal", *map(str, self.options.waypoints[0])]
         if self.prior_maps:
             command += ["--map", str(self.root / "apps/planner/maps/rmuc2026-2.0.0.ffmap")]
+        self.start("traj-server", [str(self.root / "target/release/planner"), "--traj-server"])
         self.start("planner", command)
         self.wait(lambda: "reference" in self.latest, wall=30.)
         return {"source": "VIO + external map alignment" if self.prior_maps else "VIO + startup session frame; online depth mapping",
                 "visual_frontend": "disabled" if self.vio_only else "enabled",
                 "accepted_visual_updates_at_start": self.visual_updates}
 
-    def tracking(self):
+    def planner_status_fresh(self):
+        status = self.planner_status
+        return (status is not None and abs(self.t - status[0]) <= .3
+                and time.monotonic() - status[3] <= .5)
+
+    def leg_reference_ready(self, issued_at):
+        reference = self.latest.get("reference")
+        return (self.planner_status_fresh() and self.planner_status[1] >= issued_at
+                and not self.planner_status[2] and reference is not None
+                and self.reference_goal == self.planner_status[1]
+                and abs(self.t - reference[0]) <= .3
+                and time.monotonic() - reference[5] <= .5)
+
+    def start_leg(self, waypoint):
+        issued_at = time.time()
+        self.command("planner", "goal", *waypoint)
+        self.wait(lambda: self.leg_reference_ready(issued_at), wall=5.)
+        goal_timestamp = self.planner_status[1]
         self.command("fc", "track")
         self.wait(lambda: self.mode == 4, wall=5.)
+        return goal_timestamp
+
+    def tracking(self):
         arrivals = self.result.setdefault("waypoint_arrivals", [])
         for waypoint in self.options.waypoints:
-            self.command("planner", "goal", *waypoint)
+            goal_timestamp = self.start_leg(waypoint)
             goal = np.asarray(waypoint)
-            self.wait(lambda: self.estimated_near("corrected", goal, self.options.goal_tolerance_m, self.options.goal_speed_mps),
-                      stable=1., sim=self.options.waypoint_sim_s)
+            holding = False
+
+            def arrived():
+                nonlocal holding
+                if not self.planner_status_fresh():
+                    status = self.planner_status
+                    raise MissionFailure(
+                        "planner status stale during tracking: "
+                        f"measurement_age_s={self.t - status[0] if status else None}, "
+                        f"receipt_age_s={time.monotonic() - status[3] if status else None}"
+                    )
+                if self.planner_status[1] != goal_timestamp:
+                    raise MissionFailure("planner goal replaced during tracking")
+                if self.mode != 4 and not holding:
+                    raise MissionFailure("tracking interrupted before normal trajectory completion")
+                if self.planner_status[2] and not holding:
+                    self.recorder.event(f"normal trajectory completion goal={goal_timestamp}; request Hold", self.t)
+                    self.command("fc", "hold")
+                    holding = True
+                return (holding and self.mode == 3
+                        and self.estimated_near("corrected", goal, self.options.goal_tolerance_m, self.options.goal_speed_mps))
+
+            self.wait(arrived, stable=1., sim=self.options.waypoint_sim_s)
             arrivals.append({"goal_map_m": list(waypoint), "arrived_sim_s": self.t, "decision_source": "corrected"})
             self.recorder.event(f"waypoint reached {list(waypoint)}", self.t)
-        self.command("fc", "hold")
         return {"arrivals": arrivals}
 
     def landing(self):
