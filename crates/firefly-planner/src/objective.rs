@@ -234,7 +234,7 @@ impl<'a> MincoObjective<'a> {
             minco
                 .update(self.start, self.end, &self.points, &self.scratch_t)
                 .ok()?;
-            *traj = minco.solve().ok()?;
+            minco.solve_into(traj).ok()?;
             samples.rebuild(traj, k);
             last_x.clone_from(x);
         } else {

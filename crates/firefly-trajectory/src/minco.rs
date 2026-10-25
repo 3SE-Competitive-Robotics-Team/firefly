@@ -186,12 +186,36 @@ impl Minco {
     ///
     /// 系统矩阵的奇异性在构建或更新时检查，此处使用已验证的 LU。
     pub fn solve(&self) -> firefly_error::Result<Trajectory> {
-        let mut c = self.build_rhs();
-        self.solver.solve_in_place(&mut c);
-        Ok(Trajectory {
-            coefficients: c,
+        let mut out = Trajectory {
+            coefficients: DMatrix::zeros(COEFFS_PER_PIECE * self.pieces, 3),
             durations: self.t.clone(),
-        })
+        };
+        self.solve_into(&mut out)?;
+        Ok(out)
+    }
+
+    /// 就地求解到已有 `Trajectory`：复用系数与时长缓冲。
+    ///
+    /// 一次优化内段数不变，形状稳定；形状不符时按需重建。
+    ///
+    /// # Errors
+    ///
+    /// 系统矩阵的奇异性在构建或更新时检查。
+    pub fn solve_into(&self, out: &mut Trajectory) -> firefly_error::Result<()> {
+        let n = COEFFS_PER_PIECE * self.pieces;
+        if out.coefficients.shape() == (n, 3) {
+            out.coefficients.fill(0.0);
+        } else {
+            out.coefficients = DMatrix::zeros(n, 3);
+        }
+        if out.durations.len() == self.pieces {
+            out.durations.copy_from(&self.t);
+        } else {
+            out.durations = self.t.clone();
+        }
+        self.build_rhs_into(&mut out.coefficients);
+        self.solver.solve_in_place(&mut out.coefficients);
+        Ok(())
     }
 
     /// 从目标对 (c, T) 的偏导传播到对 (q, T) 的偏导。
@@ -356,9 +380,8 @@ impl Minco {
         m
     }
 
-    fn build_rhs(&self) -> DMatrix<f64> {
+    fn build_rhs_into(&self, b: &mut DMatrix<f64>) {
         let n = COEFFS_PER_PIECE * self.pieces;
-        let mut b = DMatrix::zeros(n, 3);
         for (k, state) in [
             self.start.position,
             self.start.velocity,
@@ -385,7 +408,6 @@ impl Minco {
                 b[(n - 3 + k, dim)] = state[dim];
             }
         }
-        b
     }
 }
 
