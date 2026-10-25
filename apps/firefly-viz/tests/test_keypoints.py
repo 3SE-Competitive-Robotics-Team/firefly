@@ -31,6 +31,15 @@ class Recording:
         self.times.append(dict(self.timelines))
 
 
+def test_camera_and_okvis_match_on_the_same_nanosecond_after_clock_conversion():
+    rec = Recording()
+    pairs = MatchedPoints(rec, 2)
+    pairs.frame('left', 0.30000000000000004, 3)
+    pairs.observe('left', 0.3, [[12., 20.]], [5], [64, 255, 128])
+    assert rec.calls[-2][1][1].positions.as_arrow_array().to_pylist() == [[12.5, 20.5]]
+    assert rec.times[-2] == {'sim_time': {'duration': 0.30000000000000004}, 'left_frame': {'sequence': 3}}
+
+
 def test_out_of_order_annotation_only_matches_its_image_and_missing_frames_are_empty():
     rec = Recording()
     pairs = MatchedPoints(rec, 2)
@@ -56,7 +65,7 @@ def test_matrix_owns_storage_and_rejects_invalid_shapes(recordings_factory):
     rec = Recording()
     writer = Writer(recordings_factory(archive=rec, matches=MatchedPoints(rec, 4)), Options(), threading.Event())
     msg = VizMessage()
-    name = b'vio/update/test'
+    name = b'okvis/debug/pose_imu/test'
     msg.entity_len, msg.entity[:len(name)] = len(name), name
     msg.kind = VIZ_KIND_MATRIX
     msg.timestamp = 1.
@@ -96,7 +105,7 @@ def test_keypoint_resolution_mismatch_cannot_reach_overlay(recordings_factory):
     pairs = MatchedPoints(rec, 4)
     writer = Writer(recordings_factory(archive=rec, matches=pairs), Options(), threading.Event())
     msg = VizMessage()
-    name = b'vio/debug/keypoints/left'
+    name = b'okvis/debug/keypoints/left'
     msg.entity_len, msg.entity[:len(name)] = len(name), name
     msg.kind, msg.timestamp = VIZ_KIND_KEYPOINTS_2D, 1.
     msg.scalars[:3], msg.scalar_count = [640, 480, 1], 3

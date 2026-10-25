@@ -21,12 +21,12 @@ import rerun as rr
 
 from firefly_mujoco import (
     DepthImageMessage, GrayImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH,
-    LogMessage, OdomMessage, TraceContext, load_scene_name, resolve_scene,
+    LogMessage, OdomMessage, TraceContext,
 )
 
 from firefly_workspace import startup
 
-from .capture import Capture
+from .capture import Capture, Rate
 from .config import ROOT, decode
 from .messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage
 from .recording import Recordings, URL
@@ -149,12 +149,9 @@ def run(args):
     if path is None and not args.no_save:
         now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         path = ROOT / "logs" / f"{now}-{uuid.uuid4().hex[:8]}.rrd"
-    scene = resolve_scene(load_scene_name())
-    mesh = scene.visual
     drone = ROOT / "models/drone/drone.glb"
-    for asset in (mesh, drone):
-        if not asset.is_file():
-            raise FileNotFoundError(asset)
+    if not drone.is_file():
+        raise FileNotFoundError(drone)
     recordings = Recordings(path, url, args.serve, options)
     workers = []
     subscriptions = []
@@ -167,10 +164,9 @@ def run(args):
     dropped_frames = 0
     last_health = time.monotonic()
     try:
-        recordings.archive.log(f"world/{scene.id.season}", rr.Asset3D(path=mesh), static=True, strict=True)
         # 模型 +Y-up/+Z-forward → 机体 +Z-up/+X-forward，与 firefly-render::drone 一致。
         model = rr.Asset3D(path=drone)
-        for parent in ("gt/pose", "vio/odom", "corr/odom", "plan/drone"):
+        for parent in ("gt/pose", "okvis/odom", "okvis/map/pose", "plan/drone"):
             recordings.archive.log(f"{parent}/model", model,
                                    rr.Transform3D(quaternion=[0.5, 0.5, 0.5, 0.5]), static=True, strict=True)
             recordings.archive.log(f"{parent}/forward", rr.Arrows3D(origins=[[0, 0, 0]],
@@ -198,6 +194,7 @@ def run(args):
             ("viz", "Firefly/VizVoxels", VoxelMessage, 1, VOXEL_BUFFER_SIZE),
             ("log", "Firefly/Log", LogMessage, LOG_MAX_PUBLISHERS, LOG_BUFFER_SIZE),
             ("gt", "Firefly/GroundTruth", OdomMessage, None, 1),
+            ("map", "Firefly/CorrectedOdometry", OdomMessage, None, 1),
         ):
             subscriptions.append((kind, _subscribe(node, topic, cls, capacity, publishers)))
         for name, topic, cls in (("left", "CameraLeft", GrayImageMessage),
@@ -210,6 +207,7 @@ def run(args):
             or getattr(options.capture, f"{name}_hz", 0) > 0 for name, _ in cameras
         }
         last_stamp = dict.fromkeys(needed, float("-inf"))
+        map_rate = Rate(10.0)
         indices = dict.fromkeys(needed, 0)
         retain_window = options.capture.before_frames > 0 or options.capture.after_frames > 0
         logger.info("RRD: %s; SIGUSR1 captures a lossless window", path)
@@ -223,6 +221,17 @@ def run(args):
                     if sample is None:
                         break
                     try:
+                        if kind == "map":
+                            pose = sample.payload().contents
+                            try:
+                                if not pose.is_initialized:
+                                    continue
+                                if not math.isfinite(pose.timestamp) or pose.timestamp < 0:
+                                    raise ValueError("invalid corrected odometry timestamp")
+                                if not map_rate.accept(pose.timestamp):
+                                    continue
+                            finally:
+                                del pose
                         message = detach_copy(sample.payload().contents)
                         try:
                             if kind == "viz":

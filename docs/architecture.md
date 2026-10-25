@@ -11,7 +11,7 @@
 ```mermaid
 flowchart LR
     SIM[sim：物理与传感器源] -->|IMU| V[firefly-okvis-x]
-    SIM -->|仿真位姿，仅生成图像| R[render]
+    SIM -->|仿真位姿| R[render]
     R -->|双目与深度| V
     V -->|连续 odom 与后验 IMU 预测姿态| F[fc]
     SIM -->|原始 IMU| I[firefly-imu：FC 内独立热备]
@@ -59,9 +59,14 @@ flowchart LR
 
 ### 诊断记录与展示
 
-`firefly-viz` 从 `Firefly/GroundTruth` 记录 `gt/pose` 与 `gt/traj`，从 `vio/odom`
-位姿诊断生成 `vio/traj`。轨迹按测量时刻记录相邻两点构成的线段，记录进程为每条轨迹
+`firefly-viz` 从 `Firefly/GroundTruth` 记录 `gt/pose` 与 `gt/traj`，从 `okvis/odom`
+位姿诊断生成 `okvis/traj`，从 OKVIS 发布的 `Firefly/CorrectedOdometry` 按 10Hz
+记录 `okvis/map/pose` 与 `okvis/map/traj`。轨迹按测量时刻记录相邻两点构成的线段，记录进程为每条轨迹
 保留一个前序点，Viewer 按时间范围展示历史。
+
+OKVIS 的帧诊断回调读取当前帧的二维关键点、路标 ID 与优化后的 IMU 位姿矩阵，
+在 `okvis/debug` 下发布有界诊断。关键点时间恢复为相机采集时刻；记录端按纳秒配对
+图像与关键点，保留原始像素坐标和路标 ID，显示时应用像素中心偏移。
 
 `Firefly/VizScalars` 使用小型定长消息长期保存数值；`Firefly/Viz` 保存位姿、点集、矩阵、
 标定等空间诊断；`Firefly/VizVoxels` 单独传输 planner 的地图更新。体素更新分块连续发送，
@@ -84,7 +89,7 @@ Rerun 绘制特征点，点集只有与已保存图像的采集时间完全一�
 需要频繁替换的大数据预览写入同 recording 的 `/live/**`，通过只有 gRPC sink 的独立
 stream 发送 static，永不进入文件 sink。反复 static log 仍会产生传输和存储开销，
 因此预览另有限频，历史分析使用 temporal 视频和采样快照。录制和实时查看可以同时启用。
-仿真世界、map 与 VIO odom 分开显示；没有显式对齐时不能把三个坐标系的位姿混画。
+三个空间视图分别使用仿真世界、OKVIS 地图系和局部 odom 坐标。
 接收、诊断写入和媒体处理独立调度；小型诊断队列溢出、编码失败、部分体素更新或退出
 清理失败都报告录制不完整，不静默切换编码器。配置与具体预算见 `configs/viz.toml`
 及 `firefly_viz.config`，不在此复制参数表。

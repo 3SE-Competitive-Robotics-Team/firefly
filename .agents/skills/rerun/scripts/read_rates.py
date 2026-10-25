@@ -12,7 +12,7 @@ import numpy as np
 import pyarrow as pa
 from rerun.chunk import RrdReader
 
-DEFAULT_ENTITIES = ("gt/pose", "vio/odom")
+DEFAULT_ENTITIES = ("gt/pose", "okvis/odom")
 
 
 def rates(reader, store, entity):

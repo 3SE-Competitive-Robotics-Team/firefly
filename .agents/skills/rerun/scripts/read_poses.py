@@ -1,8 +1,8 @@
-"""从 .rrd 读取位姿实体（gt/pose、vio/odom）的原始数据。
+"""从 .rrd 读取位姿实体（gt/pose、okvis/odom）的原始数据。
 
 用法（仓库根目录，rerun-sdk 是根项目 dev 依赖，直接 uv run）：
     uv run python .agents/skills/rerun/scripts/read_poses.py logs/run1.rrd
-    uv run python .agents/skills/rerun/scripts/read_poses.py logs/run1.rrd vio/odom gt/pose  # 自定义实体
+    uv run python .agents/skills/rerun/scripts/read_poses.py logs/run1.rrd okvis/odom gt/pose  # 自定义实体
 
 输出：每个实体先打一行统计，再逐行输出
     <sim_time_ns> x y z qx qy qz qw
@@ -18,7 +18,7 @@ import sys
 import pyarrow as pa
 from rerun.chunk import RrdReader
 
-DEFAULT_ENTITIES = ("gt/pose", "vio/odom")
+DEFAULT_ENTITIES = ("gt/pose", "okvis/odom")
 
 
 def read_pose(reader, store, entity):

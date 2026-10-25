@@ -35,13 +35,13 @@ def blueprint(live: bool):
     # 三种空间坐标各自成图；未提供对齐变换时绝不把 odom/map 当成仿真世界。
     spatial_views = [
         rrb.Spatial3DView(origin="/", name="Simulation world",
-                          contents=["+ /world/**", "+ /gt/**"],
+                          contents=["+ /gt/**"],
                           overrides={"/gt/traj": rrb.VisibleTimeRanges(history)}),
         rrb.Spatial3DView(origin="/", name="Map / planning",
-                          contents=["+ /corr/**", "+ /plan/**"],
-                          overrides={"/corr/traj": rrb.VisibleTimeRanges(history)}),
-        rrb.Spatial3DView(origin="/vio", name="VIO odom", contents=["+ /vio/odom/**", "+ /vio/traj/**"],
-                          overrides={"/vio/traj": rrb.VisibleTimeRanges(history)}),
+                          contents=["+ /okvis/map/**", "+ /plan/**"],
+                          overrides={"/okvis/map/traj": rrb.VisibleTimeRanges(history)}),
+        rrb.Spatial3DView(origin="/okvis", name="OKVIS odom", contents=["+ /okvis/odom/**", "+ /okvis/traj/**"],
+                          overrides={"/okvis/traj": rrb.VisibleTimeRanges(history)}),
     ]
     if live:
         spatial_views.append(rrb.Spatial3DView(origin="/live", name="Map · latest only",
@@ -51,6 +51,8 @@ def blueprint(live: bool):
                                  contents=["+ /cameras/left/**"])]
     for name in ("right", "depth"):
         cameras.append(rrb.Spatial2DView(origin=f"/cameras/{name}", name=f"{name.title()} · sampled"))
+    cameras += [rrb.Spatial2DView(origin=f"/okvis/debug/keypoints/{name}", name=f"{name.title()} · OKVIS keypoints")
+                for name in ("left", "right")]
     cameras += [rrb.Spatial2DView(origin=f"/snapshots/{name}", name=f"{name.title()} · lossless snapshot")
                 for name in ("left", "right", "depth")]
     if live:
@@ -60,12 +62,13 @@ def blueprint(live: bool):
         rrb.Vertical(
             rrb.Horizontal(spatial, rrb.Tabs(*cameras), column_shares=[3, 2]),
             rrb.Tabs(
-                rrb.TimeSeriesView(origin="/vio", name="VIO diagnostics"),
+                rrb.TimeSeriesView(origin="/okvis", name="OKVIS diagnostics"),
+                rrb.TimeSeriesView(origin="/vision/debug", name="Vision matching diagnostics"),
                 rrb.TimeSeriesView(origin="/fc", name="Flight control"),
                 rrb.TimeSeriesView(origin="/viz", name="Recorder health"),
                 rrb.TimeSeriesView(origin="/render", name="Sensor latency"),
                 rrb.TextLogView(origin="/logs", name="Logs"),
-                rrb.TensorView(origin="/vio/update", name="Update matrices"),
+                rrb.TensorView(origin="/okvis/debug/pose_imu", name="OKVIS optimized IMU pose"),
             ), row_shares=[3, 2],
         ),
         rrb.TimePanel(timeline="sim_time", play_state=rrb.components.PlayState.Following),
@@ -198,20 +201,22 @@ class MatchedPoints:
         if camera not in self.frames:
             return
         with self.lock:
-            self._remember(self.frames[camera], stamp, index)
-            self._write(camera, stamp, self.points[camera].get(stamp))
+            key = round(stamp * 1e9)
+            self._remember(self.frames[camera], key, (stamp, index))
+            self._write(camera, stamp, self.points[camera].get(key))
 
     def observe(self, camera, stamp, points, ids, color):
         with self.lock:
             value = points, ids, color
-            self._remember(self.points[camera], stamp, value)
-            if stamp in self.frames[camera]:
-                self._write(camera, stamp, value)
+            key = round(stamp * 1e9)
+            self._remember(self.points[camera], key, value)
+            if key in self.frames[camera]:
+                self._write(camera, self.frames[camera][key][0], value)
 
     def _write(self, camera, stamp, value):
         points, ids, color = value if value is not None else (np.empty((0, 2)), [], [64, 255, 128])
         at(self.recording, stamp)
-        if camera == "left" and (index := self.frames[camera].get(stamp)) is not None:
+        if camera == "left" and (index := self.frames[camera][round(stamp * 1e9)][1]) is not None:
             self.recording.set_time("left_frame", sequence=index)
         display_points = np.asarray(points, dtype=np.float32).reshape(-1, 2) + PIXEL_CENTER_OFFSET
         self.recording.log(f"cameras/{camera}/points", rr.Points2D(display_points, radii=2, colors=color),

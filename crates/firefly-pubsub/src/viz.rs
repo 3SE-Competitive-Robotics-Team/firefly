@@ -9,7 +9,7 @@ pub const VIZ_TOPIC: &str = "Firefly/Viz";
 
 /// 消息类型（`VizMessage::kind` 取值，与 `firefly_viz/messages.py` 一致）。
 pub mod kind {
-    /// 位姿（`vio/odom`、`gt/pose` 等刚体变换实体）。
+    /// 位姿（`okvis/odom`、`gt/pose` 等刚体变换实体）。
     pub const POSE: u32 = 1;
     /// 折线（轨迹增量段、全局路径）。
     pub const LINE_STRIP: u32 = 2;
@@ -37,9 +37,9 @@ pub mod kind {
     pub const CAMERA: u32 = 12;
 }
 
-/// VIO 左/右相机当前活动点；时间戳为原始相机时钟，不是滤波器时间。
-pub const VIO_KEYPOINT_ENTITIES: [&str; 2] =
-    ["vio/debug/keypoints/left", "vio/debug/keypoints/right"];
+/// OKVIS 左/右相机当前关键点；时间戳为原始相机时钟。
+pub const OKVIS_KEYPOINT_ENTITIES: [&str; 2] =
+    ["okvis/debug/keypoints/left", "okvis/debug/keypoints/right"];
 
 /// 实体路径字节上限（64 字节，UTF-8；超出截断，见 [`VizMessage::set_entity`]）。
 pub const ENTITY_MAX: usize = 64;
@@ -441,12 +441,12 @@ mod tests {
             .publish(VizMessage::base(
                 kind::KEYPOINTS_2D,
                 1.0,
-                VIO_KEYPOINT_ENTITIES[0],
+                OKVIS_KEYPOINT_ENTITIES[0],
             ))
             .unwrap();
         for _ in 0..20 {
             publisher
-                .publish(VizMessage::base(kind::POSE, 1.0, "vio/odom"))
+                .publish(VizMessage::base(kind::POSE, 1.0, "okvis/odom"))
                 .unwrap();
         }
         let first = subscriber.receive().unwrap().expect("关键点快照");
@@ -509,9 +509,9 @@ mod tests {
     #[test]
     fn entity_round_trips() {
         let mut m = VizMessage::default();
-        m.set_entity("vio/odom");
-        assert_eq!(m.entity(), "vio/odom");
-        assert_eq!(m.entity_len, 8);
+        m.set_entity("okvis/odom");
+        assert_eq!(m.entity(), "okvis/odom");
+        assert_eq!(m.entity_len, 10);
     }
 
     #[test]

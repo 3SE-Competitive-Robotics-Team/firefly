@@ -17,7 +17,8 @@ from .recording import RecordingOutputs, PIXEL_CENTER_OFFSET, at
 
 
 TRAJECTORIES = {"gt/pose": ("gt/traj", [64, 128, 255]),
-                "vio/odom": ("vio/traj", [255, 160, 64])}
+                "okvis/odom": ("okvis/traj", [255, 160, 64]),
+                "okvis/map/pose": ("okvis/map/traj", [90, 235, 120])}
 
 
 def entity(msg):
@@ -51,6 +52,11 @@ class Writer:
         kind, msg = item
         if kind == "gt":
             self.ground_truth(msg)
+        elif kind == "map":
+            if msg.is_initialized:
+                self._pose("okvis/map/pose", msg.timestamp,
+                           [msg.position_x, msg.position_y, msg.position_z],
+                           [msg.quat_x, msg.quat_y, msg.quat_z, msg.quat_w])
         elif kind == "log":
             self.log_text(msg)
         elif kind == "viz":
@@ -110,8 +116,9 @@ class Writer:
             points = np.array([[p[0], p[1]] for p in msg.points[:n]], dtype=np.float32).reshape(-1, 2)
             ids = np.array([p[2] for p in msg.points[:n]], dtype=np.uint64)
             self.rec.log(name, rr.Points2D(points, colors=list(msg.color), radii=2),
-                         rr.AnyValues(track_id=pa.array(ids, type=pa.uint64())), strict=True)
-            if name in ("vio/debug/keypoints/left", "vio/debug/keypoints/right"):
+                         rr.AnyValues(track_id=pa.array(ids, type=pa.uint64()),
+                                      image_width=int(width), image_height=int(height), total_keypoints=int(total)), strict=True)
+            if name in ("okvis/debug/keypoints/left", "okvis/debug/keypoints/right"):
                 if (width, height) != (IMAGE_WIDTH, IMAGE_HEIGHT):
                     raise ValueError(f"keypoint resolution does not match camera: {name}")
                 self.recordings.matches.observe(name.rsplit("/", 1)[1], msg.timestamp, points, ids, list(msg.color))

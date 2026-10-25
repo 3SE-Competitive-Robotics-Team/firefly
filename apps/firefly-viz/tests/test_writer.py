@@ -34,9 +34,9 @@ class Recording:
         pass
 
 
-def vio_pose(stamp, xyz):
+def okvis_pose(stamp, xyz):
     msg = VizMessage()
-    path = b'vio/odom'
+    path = b'okvis/odom'
     msg.entity_len, msg.entity[:len(path)] = len(path), path
     msg.kind, msg.timestamp = VIZ_KIND_POSE, stamp
     msg.xyz[:], msg.quat_xyzw[:] = xyz, [0., 0., 0., 1.]
@@ -63,21 +63,33 @@ def test_ground_truth_records_world_pose_and_incremental_trajectory(recordings_f
     assert all(not kwargs.get('static', False) for _, kwargs in archive.calls)
 
 
-def test_vio_trajectory_stores_two_point_segments_with_one_cached_endpoint(recordings_factory):
+def test_corrected_odometry_stays_in_map_frame_with_an_independent_trajectory(recordings_factory):
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options(), threading.Event())
+    writer.consume(('viz', okvis_pose(1., [0., 0., 1.])))
+    for stamp, x in [(1., 10.), (2., 11.)]:
+        writer.consume(('map', OdomMessage(timestamp=stamp, position_x=x, quat_w=1., is_initialized=True)))
+    assert [args[0] for args, _ in archive.calls] == [
+        'okvis/odom', 'okvis/map/pose', 'okvis/map/pose', 'okvis/map/traj']
+    assert archive.calls[-1][0][1].strips.as_arrow_array().to_pylist() == [[[10., 0., 0.], [11., 0., 0.]]]
+    assert writer.previous_poses['okvis/odom'] == (1., [0., 0., 1.])
+
+
+def test_okvis_trajectory_stores_two_point_segments_with_one_cached_endpoint(recordings_factory):
     archive = Recording()
     writer = Writer(recordings_factory(archive=archive), Options(), threading.Event())
     for i in range(32):
-        writer.consume(('viz', vio_pose(float(i), [float(i), 0., 1.])))
+        writer.consume(('viz', okvis_pose(float(i), [float(i), 0., 1.])))
     segments = [args[1].strips.as_arrow_array().to_pylist() for args, _ in archive.calls
-                if args[0] == 'vio/traj']
+                if args[0] == 'okvis/traj']
     assert segments == [[[[float(i - 1), 0., 1.], [float(i), 0., 1.]]] for i in range(1, 32)]
-    assert writer.previous_poses == {'vio/odom': (31., [31., 0., 1.])}
+    assert writer.previous_poses == {'okvis/odom': (31., [31., 0., 1.])}
     assert not any(args[0].startswith('gt/') for args, _ in archive.calls)
     calls = len(archive.calls)
-    writer.consume(('viz', vio_pose(31., [31., 0., 1.])))
+    writer.consume(('viz', okvis_pose(31., [31., 0., 1.])))
     assert len(archive.calls) == calls
     with pytest.raises(ValueError, match='regressed pose timestamp'):
-        writer.consume(('viz', vio_pose(30., [30., 0., 1.])))
+        writer.consume(('viz', okvis_pose(30., [30., 0., 1.])))
     assert len(archive.calls) == calls
 
 
@@ -97,15 +109,15 @@ def test_invalid_ground_truth_cannot_reach_recording(recordings_factory, field, 
 def test_clear_trajectory_breaks_the_next_segment(recordings_factory):
     archive = Recording()
     writer = Writer(recordings_factory(archive=archive), Options(), threading.Event())
-    writer.handle(vio_pose(1., [0., 0., 1.]))
+    writer.handle(okvis_pose(1., [0., 0., 1.]))
     clear = VizMessage()
-    path = b'vio/traj'
+    path = b'okvis/traj'
     clear.entity_len, clear.entity[:len(path)] = len(path), path
     clear.kind, clear.timestamp = VIZ_KIND_CLEAR, 2.
     writer.handle(clear)
-    writer.handle(vio_pose(3., [5., 0., 1.]))
+    writer.handle(okvis_pose(3., [5., 0., 1.]))
     assert len(archive.calls) == 3
-    assert writer.previous_poses == {'vio/odom': (3., [5., 0., 1.])}
+    assert writer.previous_poses == {'okvis/odom': (3., [5., 0., 1.])}
 
 
 def test_cold_start_empty_keypoints_preserve_typed_ids_and_clear_previous_points(tmp_path):
@@ -139,7 +151,7 @@ def test_cold_start_empty_keypoints_preserve_typed_ids_and_clear_previous_points
             for stamp, ids in [(1., []), (2., [42]), (3., [])]:
                 msg = VizMessage()
                 msg.kind, msg.timestamp = VIZ_KIND_KEYPOINTS_2D, stamp
-                entity = b'vio/debug/keypoints/left'
+                entity = b'okvis/debug/keypoints/left'
                 msg.entity_len, msg.entity[:len(entity)] = len(entity), entity
                 msg.scalar_count, msg.scalars[:3] = 3, [320., 240., float(len(ids))]
                 msg.point_count = len(ids)
@@ -160,7 +172,7 @@ def test_cold_start_empty_keypoints_preserve_typed_ids_and_clear_previous_points
                 process.send_signal(signal.SIGINT)
                 process.communicate(timeout=5.)
         assert process.returncode == 0, stderr
-    rows = {'/vio/debug/keypoints/left': [], '/cameras/left/points': []}
+    rows = {'/okvis/debug/keypoints/left': [], '/cameras/left/points': []}
     for chunk in RrdReader(path).stream():
         if chunk.entity_path not in rows:
             continue
@@ -169,7 +181,7 @@ def test_cold_start_empty_keypoints_preserve_typed_ids_and_clear_previous_points
         assert ids.type == pa.list_(pa.uint64())
         rows[chunk.entity_path].extend(zip(batch.column('sim_time').cast(pa.int64()).to_pylist(),
                                           batch.column('Points2D:positions').to_pylist(), ids.to_pylist()))
-    assert sorted(rows['/vio/debug/keypoints/left']) == [
+    assert sorted(rows['/okvis/debug/keypoints/left']) == [
         (1_000_000_000, [], []), (2_000_000_000, [[12.25, 41.5]], [42]), (3_000_000_000, [], [])]
     assert sorted(rows['/cameras/left/points']) == [
         (500_000_000, [], []), (1_000_000_000, [], []),

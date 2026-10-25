@@ -302,7 +302,7 @@ planner 经 `Firefly/VizVoxels` 发地图更新，经 `Firefly/Log` 发 log 宏�
 由 firefly-viz 统一落盘；stderr 仅作进程诊断的双 sink，不作第二份录制。
 
 各进程以测量时刻设置 `sim_time`；无仿真时刻的进程日志回落 `wall_time`。
-常用实体为 `vio/odom`、`vio/traj`、`gt/pose`、`gt/traj`、`vio/debug/*`、`fc/debug/*`、
+常用实体为 `okvis/odom`、`okvis/traj`、`gt/pose`、`gt/traj`、`okvis/debug/*`、`fc/debug/*`、
 `plan/*`、`logs/<app>`。左目 H.265 视频、可选右目/深度采样及触发无损窗口进入 RRD；
 Rerun 按原图时间配对叠加 VIO 点，不把标记烧进视频。`/live/**` 是独立 gRPC stream
 发送的 static 最新预览，不写入 RRD，也不代表时间光标处的历史数据。
@@ -362,7 +362,7 @@ H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码
 
 #### 估计与回环诊断
 
-OKVIS 的位姿使用 `vio/odom` 实体。
+OKVIS 的位姿使用 `okvis/odom` 实体。
 `okvis/loop_commits` 是后端已提交全图修订次数，任务评分记录为 `acceptance/loop_backend`；
 候选检索和几何验证不单独计为提交。外部库图模式的融合诊断位于 `corr/debug/*`。
 通讯测试和修订计数不替代完整轨迹精度验证。
