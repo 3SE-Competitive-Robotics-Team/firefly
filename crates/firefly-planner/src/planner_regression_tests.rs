@@ -57,41 +57,22 @@ fn assembled_obstacle_cost_matches_independent_upstream_formula() {
 }
 
 #[test]
-fn reallocation_checks_actual_derivatives_and_preserves_boundary_state() {
-    let planner = planner(PlannerConfig::default());
-    let start = Endpoint {
-        velocity: Vector3::new(0.5, 0., 0.),
-        acceleration: Vector3::new(-5., 0., 0.),
-        ..endpoint(Vector3::new(2., 2., 2.))
-    };
-    let end = endpoint(Vector3::new(2.1, 2., 2.));
-    let m = MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
-        .build(&[], &[0.2])
+fn acceptance_preserves_optimizer_durations_and_coefficients() {
+    let mut planner = planner(PlannerConfig::default());
+    let start = endpoint(Vector3::new(2., 2., 2.));
+    let end = endpoint(Vector3::new(3., 2., 2.));
+    let minco = MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
+        .build(&[], &[0.8])
         .unwrap();
-    let t = planner.ensure_feasible(&m).unwrap();
-    for (time, expected) in [(0., start), (t.duration(), end)] {
-        let state = t.eval(time);
-        assert!((state.position - expected.position).norm() < 1e-8);
-        assert!((state.velocity - expected.velocity).norm() < 1e-8);
-        assert!((state.acceleration - expected.acceleration).norm() < 1e-8);
-    }
-    // 稠密求值独立于生产代码的极值求根实现。
-    for k in 0..=10000 {
-        let state = t.eval(t.duration() * f64::from(k) / 10000.);
-        assert!(state.velocity.norm() <= 1.5 + 1e-8);
-        assert!(state.acceleration.norm() <= 6. + 1e-8);
-        assert!(state.jerk.norm() <= 10. + 1e-8);
-    }
-    let bad = Endpoint {
-        velocity: Vector3::new(2., 0., 0.),
-        ..start
+    let original = minco.solve().unwrap();
+    assert!(Planner::trajectory_max_vel(&original) > planner.config.max_velocity);
+    let mut planes = vec![Vec::new(); 6];
+    let FinishCheck::Accept(accepted) = planner.try_finish(&original, &[], &mut planes, true)
+    else {
+        panic!("空图候选应通过上游后检查");
     };
-    let m = MincoBuilder::new(SolverOrder::MinimumJerk, bad, end)
-        .build(&[], &[1.])
-        .unwrap();
-    // 官方 warn-and-go：边界超限不断行，直接接受当次解（端点保持原值）。
-    let t = planner.ensure_feasible(&m).unwrap();
-    assert!((t.eval(0.0).velocity - bad.velocity).norm() < 1e-9);
+    assert_eq!(accepted.durations(), original.durations());
+    assert_eq!(accepted.coefficients(), original.coefficients());
 }
 
 #[test]
@@ -160,8 +141,9 @@ fn cold_and_warm_plans_preserve_nonzero_terminal_velocity() {
             InitSource::WarmStart {
                 prev: &cold.trajectory,
                 elapsed: 0.,
-                glb_seg: 0.,
-                guide_tail: &[],
+                global: &cold.trajectory,
+                global_start: 0.,
+                global_end: 0.,
             },
             true,
         )
@@ -172,43 +154,6 @@ fn cold_and_warm_plans_preserve_nonzero_terminal_velocity() {
         assert!((state.velocity - end.velocity).norm() < 1e-7);
         assert!((state.acceleration - end.acceleration).norm() < 1e-7);
     }
-}
-
-#[test]
-fn swarm_acceptance_checks_reallocated_timeline() {
-    let mut planner = planner(PlannerConfig::default());
-    let start = endpoint(Vector3::new(2., 2., 2.));
-    let end = endpoint(Vector3::new(3., 2., 2.));
-    let m = MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
-        .build(&[], &[0.2])
-        .unwrap();
-    let original = m.solve().unwrap();
-    let reallocated = planner.ensure_feasible(&m).unwrap();
-    let crossing_time = reallocated.duration() / 2.;
-    let peer_start = Endpoint {
-        position: Vector3::new(2.5, 2. + crossing_time, 2.),
-        velocity: -Vector3::y(),
-        acceleration: Vector3::zeros(),
-    };
-    let peer_end = Endpoint {
-        position: peer_start.position + peer_start.velocity * 4.,
-        ..peer_start
-    };
-    let peer_traj = MincoBuilder::new(SolverOrder::MinimumJerk, peer_start, peer_end)
-        .build(&[], &[4.])
-        .unwrap()
-        .solve()
-        .unwrap();
-    let peers = [firefly_cost::Peer::new(1, 0., peer_traj, 0.)];
-    assert!(planner.swarm_safe(&original, &peers));
-    assert!(!planner.swarm_safe(&reallocated, &peers));
-    let mut planes = vec![Vec::new(); 6];
-    assert!(matches!(
-        planner
-            .try_finish(&m, &original, &peers, &mut planes, true)
-            .unwrap(),
-        FinishCheck::SwarmTooClose
-    ));
 }
 
 #[test]

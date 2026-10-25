@@ -17,7 +17,7 @@ pub struct PlannerToml {
 #[cfg(test)]
 mod tests {
     use super::PlannerToml;
-    use firefly_planner::manager::{DEFAULT_ARRIVE_DIST, DEFAULT_REPLAN_THRESH};
+    use firefly_planner::manager::DEFAULT_REPLAN_THRESH;
 
     /// 随仓库发布的配置文件必须可解析且为完整部署值。
     #[test]
@@ -45,7 +45,6 @@ mod tests {
         // 缺键 = 不启用虚拟墙（官方 enable_virtual_wall 默认 false）
         assert_eq!(cfg.config.virtual_ground, None);
         assert_eq!(cfg.config.virtual_ceiling, None);
-        assert!((cfg.manager.arrive_dist - DEFAULT_ARRIVE_DIST).abs() < 1e-12);
     }
 }
 

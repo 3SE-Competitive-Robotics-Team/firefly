@@ -13,7 +13,7 @@ fn exported_rmuc_map_supports_pad_departure() {
         .join("../../apps/planner/maps/rmuc2026-2.0.0.ffmap");
     let map = MapFile::from_file(path).unwrap().to_grid_map(0.0).unwrap();
     let config = PlannerConfig::default();
-    let mut planner = Planner::new(config.clone(), map);
+    let mut planner = Planner::new(config, map);
     let start = State {
         position: Point3::new(-13., 0., 1.4),
         velocity: Vector3::zeros(),
@@ -33,5 +33,5 @@ fn exported_rmuc_map_supports_pad_departure() {
     let result = planner
         .plan_with_init(start, end, InitSource::ColdStart, true)
         .expect("RMUC pad departure must be feasible");
-    support::assert_trajectory_contract(&result.trajectory, planner.map_ref(), &config, start, end);
+    support::assert_trajectory_contract(&result.trajectory, start, end);
 }
