@@ -84,11 +84,11 @@ cargo xtask release
 `--target board` 在 Apple container 的 Debian trixie 里原生编译机载进程。应用名单只在
 `xtask/src/target.rs` 维护，不要在脚本、CI 或文档里复制第二份；新增 xtask 子命令时同步
 `usage` 文本与本说明。`cargo xtask deploy` 把 aarch64 构建、配置和默认模型打成 zstd 包，
-经 adb 部署到 `firefly-0001:/opt/firefly`。`firefly.service` 由镜像构建
-`orangepi-build` 默认启动；进程清单在 `configs/processes.toml`，用
-`ffctl process status/start/stop/restart/enable/disable` 管理。实际运行须准备 RMUC
-场地资产、图形会话和 release 构建，按开发指南检查宿主机、启动与清理进程。CI 绿色不代表
-真实进程悬停、22m 往返或回环验收通过。
+经 adb 部署到 `firefly-0001:/opt/firefly`，结束后重新启动 `firefly.service` 并确认
+supervisor 应答。`firefly.service` 由镜像构建 `orangepi-build` 默认启动；进程清单在
+`configs/processes.toml`，用 `ffctl process status/start/stop/restart/enable/disable` 管理。
+实际运行须准备 RMUC 场地资产、图形会话和 release 构建，按开发指南检查宿主机、启动与清理
+进程。CI 绿色不代表真实进程悬停、22m 往返或回环验收通过。
 
 ## OKVIS2-X 算法移植的许可证与版权声明
 

@@ -158,7 +158,6 @@ Apple container 的 `rust:1.98.1-trixie` 里原生构建，镜像按 digest 固�
 ```bash
 cargo xtask release --target board
 cargo xtask deploy
-adb -s firefly-0001 shell 'systemctl start firefly'
 ```
 
 `release --target board` 只构建机载应用（不含 render/quad），并在容器内构建设备端
@@ -168,7 +167,11 @@ adb -s firefly-0001 shell 'systemctl start firefly'
 `/opt/firefly/{bin,configs,models}`，退役的进程与配置不会残留在板上；`logs` 与镜像
 预置的 `systemd` 保留。解包后把每个二进制软链到 `/usr/local/bin`，因此 `ffctl`、
 `fc` 等在任意目录、非交互 `adb shell` 下都可直接调用，不需要改镜像的 shell 配置。
-因此部署后要重新 `systemctl start firefly`。
+最后重新 `systemctl start firefly`，并以 `ffctl process status` 能在超时内应答为就绪
+判据——`systemd` 的 active 状态早于 supervisor 的 socket 就绪，只看 `is-active` 会把
+“起来了但不应答”判成成功。启动失败或解包缺文件时 `deploy` 以非零退出，不留“已部署但
+没运行”的中间态。板载 adbd 走 legacy shell 协议，`adb shell` 不传递远端退出码，所以
+这两项都靠远端输出判定。
 
 二进制按安装布局定位配置与模型，与启动目录无关；解析顺序（越显式越优先）：
 

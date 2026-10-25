@@ -1,9 +1,12 @@
-//! `cargo xtask deploy`：构建机载 release，打成 zstd 包并推到设备解包。
+//! `cargo xtask deploy`：构建机载 release，打成 zstd 包并推到设备解包，最后拉起服务。
 //!
 //! 解包前会停掉 `firefly.service` 并清空 `bin`、`configs`、`models`，因此已退役的
-//! 进程与配置不会残留；`logs` 保留。
+//! 进程与配置不会残留；`logs` 保留。部署流程自己停的服务由自己拉起，失败不算部署成功。
 //!
 //! 设备端由同一个 `xtask` 二进制的 `unpack` 子命令解包，不依赖 tar 或 zstd CLI。
+//!
+//! 板载 adbd 走 legacy shell 协议，`adb shell` 不传递远端退出码（远端失败也返回 0），
+//! 所以解包完整性与服务就绪都靠远端输出判定，不能依赖 `adb` 的退出状态。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,9 +33,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     release::build(Target::Board)?;
     let package = package()?;
     push(&device, &package)?;
-    println!(
-        "已部署到 {device}:{DESTINATION}，并软链到 /usr/local/bin；验证：adb -s {device} shell 'ffctl --version'"
-    );
+    start(&device)?;
+    println!("部署完成");
     Ok(())
 }
 
@@ -160,6 +162,7 @@ fn push(device: &str, package: &Path) -> Result<(), String> {
             &format!("{REMOTE_UNPACKER} unpack {REMOTE_PACKAGE} {DESTINATION}"),
         ],
     )?;
+    check_unpacked(device)?;
     adb(device, &["shell", "sync"])?;
     link(device)?;
     adb(
@@ -169,6 +172,52 @@ fn push(device: &str, package: &Path) -> Result<(), String> {
             &format!("rm -f {REMOTE_PACKAGE} {REMOTE_UNPACKER}"),
         ],
     )?;
+    Ok(())
+}
+
+/// 解包失败在板载 adbd 上不会反映成 `adb` 的退出码，所以按应用名单逐个确认可执行位。
+fn check_unpacked(device: &str) -> Result<(), String> {
+    let expected = Target::Board
+        .apps()
+        .iter()
+        .map(|app| format!("{DESTINATION}/bin/{app}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let missing = adb_output(
+        device,
+        &[
+            "shell",
+            &format!("for file in {expected}; do test -x $file || echo $file; done"),
+        ],
+    )?;
+    if missing.trim().is_empty() {
+        Ok(())
+    } else {
+        Err(format!("解包后缺少可执行文件：\n{missing}"))
+    }
+}
+
+/// 部署流程自己停了 `firefly.service`，解包完成后必须重新拉起。
+///
+/// `systemd` 的 active 状态早于 supervisor 的 socket 就绪，只看 `is-active` 会把
+/// “起来了但不应答”判成成功，所以以 `ffctl process status` 在超时内应答为就绪判据。
+fn start(device: &str) -> Result<(), String> {
+    adb(device, &["shell", "systemctl start firefly"])?;
+    let probe = concat!(
+        "for attempt in $(seq 1 20); do ",
+        "if ffctl process status >/dev/null 2>&1; then echo SUPERVISOR_READY; break; fi; ",
+        "sleep 0.5; ",
+        "done"
+    );
+    if !adb_output(device, &["shell", probe])?.contains("SUPERVISOR_READY") {
+        let status = adb_output(
+            device,
+            &["shell", "systemctl status firefly --no-pager -l | head -20"],
+        )?;
+        return Err(format!(
+            "firefly.service 启动后 supervisor 未应答：\n{status}"
+        ));
+    }
     Ok(())
 }
 
@@ -197,6 +246,24 @@ fn check_device(device: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// 捕获远端输出。板载 `adb shell` 不传递远端退出码，调用方应检查输出内容而非状态。
+fn adb_output(device: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("adb")
+        .args(["-s", device])
+        .args(args)
+        .output()
+        .map_err(|error| format!("failed to run adb: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "adb {} failed: {}\n{}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn adb(device: &str, args: &[&str]) -> Result<(), String> {
