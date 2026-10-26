@@ -455,7 +455,8 @@ Schur 微基准通过 `cargo bench -p firefly-okvis-x --bench schur --no-run` �
 完成后向记录进程发送 SIGINT 并等待退出。逐批样本及汇总在 `logs/schur-bench`。
 基准源码为 `apps/okvis2-x/benches/schur.rs`，确定性合成窗口、预热、批次数与数值门槛
 均在源码维护。两种求解均包含布局、分配、组装、消元、求解与回代；p95 是批均值的
-分位数，不是单帧尾延迟。生产路径保留稠密组装，按块组装仅编入测试及基准。
+分位数，不是单帧尾延迟。生产 `DENSE_SCHUR` 使用按块组装；因子连接不同路标时
+自动回退完整稠密系统，保留路标间交叉项。基准中的稠密组装用于对照。
 合成线性系统的对比不代表真实 VIO 整帧性能或板端收益。
 `cargo test --all-targets` 下该基准只执行数值自检，不启动 IPC 或计时采样。
 

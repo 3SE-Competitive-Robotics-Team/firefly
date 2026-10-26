@@ -845,7 +845,7 @@ impl Linearization {
             return None;
         }
         if kind == "DENSE_SCHUR" {
-            return self.system().dense(regularization);
+            return self.system().block(regularization);
         }
         let lower = self.lower_normal(regularization);
         let triplet_source = &lower;
@@ -1697,6 +1697,24 @@ mod tests {
                     loss: None,
                 },
             ],
+        }
+    }
+
+    #[test]
+    fn production_schur_matches_qr_for_scaled_manifold_factors() {
+        let mut snapshot = mixed_factor_snapshot();
+        let values = snapshot.values.clone();
+        let offsets = BTreeMap::from([(1, 0), (3, 6)]);
+        let mut model = snapshot
+            .evaluate(&values, &offsets, 9, &BTreeSet::new(), true)
+            .unwrap();
+        assert_eq!(model.eliminated_points, vec![6]);
+        model.scaled(&DVector::from_fn(9, |i, _| 0.5 + i as f64));
+        for damping in [1e-5, 0.1, 10.0] {
+            let regularization = DVector::from_element(9, damping);
+            let expected = model.solve(&regularization, "DENSE_QR").unwrap();
+            let actual = model.solve(&regularization, "DENSE_SCHUR").unwrap();
+            assert!((&actual - &expected).amax() <= 1e-9 * (1.0 + expected.amax()));
         }
     }
 

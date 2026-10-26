@@ -30,9 +30,26 @@ fn verify(fixture: &Fixture) {
     }
     let expected = design.qr().solve_lstsq(rhs.as_ref());
     let expected = DVector::from_iterator(n, (0..n).map(|i| expected[(i, 0)]));
+    // Exercise the production dispatch as well as the individual assemblers.
+    let model = Linearization {
+        cost: 0.0,
+        fixed_cost: 0.0,
+        rows: fixture
+            .rows
+            .iter()
+            .map(|row| Row {
+                residual: row.residual.clone(),
+                blocks: row.blocks.clone(),
+            })
+            .collect(),
+        gradient: fixture.gradient.clone(),
+        diagonal: DVector::zeros(n),
+        eliminated_points: fixture.system().eliminated_points.to_vec(),
+    };
     for actual in [
         fixture.system().dense(&fixture.regularization),
         fixture.system().block(&fixture.regularization),
+        model.solve(&fixture.regularization, "DENSE_SCHUR"),
     ] {
         let actual = actual.unwrap();
         assert!((&actual - &expected).amax() <= 1e-9 * (1.0 + expected.amax()));
