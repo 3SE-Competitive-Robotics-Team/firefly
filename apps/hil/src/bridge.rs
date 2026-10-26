@@ -248,6 +248,11 @@ fn ipc_loop(
     let mut imu_batch: Vec<ImuMessage> = Vec::with_capacity(options.imu_batch);
     while !stop.load(Ordering::Relaxed) {
         let mut activity = false;
+        // 先排空上行控制：图像/IMU 下行不能把 1 kHz 控制的回传压在后面。
+        while let Ok(message) = up_rx.try_recv() {
+            dispatch_uplink(&up, &mut stats, &mut session, message, last_imu_stamp)?;
+            activity = true;
+        }
         while let Ok(Some(sample)) = down.command.receive() {
             let command = *sample.payload();
             log::info!(
@@ -317,10 +322,6 @@ fn ipc_loop(
                 last_image_stamp = left.timestamp;
                 last_image = Instant::now();
             }
-        }
-        while let Ok(message) = up_rx.try_recv() {
-            dispatch_uplink(&up, &mut stats, &mut session, message, last_imu_stamp)?;
-            activity = true;
         }
         if last_heartbeat.elapsed() >= Duration::from_millis(500) {
             // 主机在线但暂无 IMU 时也要让板端心跳新鲜，避免看门狗误恢复 adb。
