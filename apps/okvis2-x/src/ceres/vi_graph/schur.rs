@@ -46,7 +46,6 @@ pub struct SchurSystem<'a> {
 impl SchurSystem<'_> {
     /// Assemble only retained normal equations and connected landmark blocks.
     /// Factors connecting distinct landmarks use the complete dense system.
-    #[cfg(test)]
     pub fn block(&self, regularization: &DVector<f64>) -> Option<DVector<f64>> {
         let count = self.gradient.len();
         let mut point_for_column = vec![None; count];
@@ -149,7 +148,6 @@ impl SchurSystem<'_> {
             .then_some(output)
     }
 
-    #[cfg(test)]
     fn point_blocks(
         &self,
         point_for_column: &[Option<(usize, usize)>],
@@ -296,7 +294,6 @@ impl SchurSystem<'_> {
     }
 }
 
-#[cfg(test)]
 struct PointBlock {
     hessian: Matrix3<f64>,
     neighbors: Vec<usize>,
