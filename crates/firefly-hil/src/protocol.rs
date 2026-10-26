@@ -32,7 +32,7 @@ use firefly_pubsub::viz::{ENTITY_MAX, SCALARS_MAX, ScalarMessage, kind as viz_ki
 /// 帧头魔数（ASCII `FHL1`）。
 pub const MAGIC: [u8; 4] = *b"FHL1";
 /// 当前协议版本；版本不一致时只允许 `Hello`/`HelloAck` 用于协商失败原因。
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 /// 固定帧头长度（字节）。
 pub const HEADER_LEN: usize = 48;
 /// 单帧负载上限（字节）；大消息按此分片，限制单次 USB 传输的排队时延。
@@ -41,6 +41,10 @@ pub const MAX_FRAGMENT: usize = 16 * 1024;
 pub const MAX_MESSAGE: usize = 512 * 1024;
 /// 单个 IMU 批次的最大样本数（主机按到达批次聚合）。
 pub const MAX_IMU_BATCH: usize = 64;
+/// 图像分块头长度：时间戳 8 + 传感器 1 + 图像号 4 + 块下标 2 + 块总数 2。
+pub const IMAGE_CHUNK_HEADER_LEN: usize = 17;
+/// 单块像素上限：块头 + 像素能放进一个 16KiB 帧，不再二次分片。
+pub const IMAGE_CHUNK_DATA_MAX: usize = MAX_FRAGMENT - 64;
 
 /// 消息所属的 USB 端点/方向。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +97,8 @@ pub enum Kind {
     Pong = 18,
     /// 会话结束。
     Bye = 19,
+    /// 图像分块（大图按块传输，块间可插高优先消息）。
+    ImageChunk = 20,
 }
 
 impl Kind {
@@ -125,6 +131,7 @@ impl Kind {
             17 => Self::Ping,
             18 => Self::Pong,
             19 => Self::Bye,
+            20 => Self::ImageChunk,
             _ => return None,
         })
     }
@@ -137,6 +144,7 @@ impl Kind {
             | Self::GrayLeft
             | Self::GrayRight
             | Self::Depth
+            | Self::ImageChunk
             | Self::Airframe
             | Self::Hello
             | Self::Command
@@ -165,6 +173,7 @@ impl Kind {
             Self::GrayLeft => "gray_left",
             Self::GrayRight => "gray_right",
             Self::Depth => "depth",
+            Self::ImageChunk => "image_chunk",
             Self::Airframe => "airframe",
             Self::Control => "control",
             Self::Odometry => "odometry",
@@ -224,6 +233,75 @@ pub struct Stats {
     pub uplink_errors: u64,
 }
 
+/// 图像分块头：同一 `image_id` 的块在板端拼回一张图。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImageChunkHeader {
+    /// 图像采集时间（秒）。
+    pub timestamp: f64,
+    /// 传感器：0 左目、1 右目、2 深度。
+    pub sensor_id: u8,
+    /// 图像号；新图号到达即丢弃未完成的旧图。
+    pub image_id: u32,
+    /// 本块下标。
+    pub chunk_index: u16,
+    /// 本图总块数。
+    pub chunk_count: u16,
+}
+
+impl ImageChunkHeader {
+    /// 线上长度。
+    pub const LEN: usize = IMAGE_CHUNK_HEADER_LEN;
+
+    /// 编码为定长头。
+    #[must_use]
+    pub fn encode(&self) -> [u8; Self::LEN] {
+        let mut out = [0_u8; Self::LEN];
+        out[..8].copy_from_slice(&self.timestamp.to_le_bytes());
+        out[8] = self.sensor_id;
+        out[9..13].copy_from_slice(&self.image_id.to_le_bytes());
+        out[13..15].copy_from_slice(&self.chunk_index.to_le_bytes());
+        out[15..17].copy_from_slice(&self.chunk_count.to_le_bytes());
+        out
+    }
+
+    /// 从消息体前缀解析；校验块号、块数与传感器号。
+    ///
+    /// # Errors
+    /// 长度不足、块数为零、块号越界或传感器号非法。
+    pub fn decode(body: &[u8]) -> io::Result<Self> {
+        let raw: [u8; Self::LEN] = body
+            .get(..Self::LEN)
+            .and_then(|slice| slice.try_into().ok())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "image chunk header"))?;
+        let header = Self {
+            timestamp: f64::from_le_bytes(raw[..8].try_into().unwrap_or_default()),
+            sensor_id: raw[8],
+            image_id: u32::from_le_bytes(raw[9..13].try_into().unwrap_or_default()),
+            chunk_index: u16::from_le_bytes(raw[13..15].try_into().unwrap_or_default()),
+            chunk_count: u16::from_le_bytes(raw[15..17].try_into().unwrap_or_default()),
+        };
+        if header.chunk_count == 0
+            || header.chunk_index >= header.chunk_count
+            || header.sensor_id > 2
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "image chunk header",
+            ));
+        }
+        Ok(header)
+    }
+}
+
+/// 一张图的一个分块。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageChunk {
+    /// 分块头。
+    pub header: ImageChunkHeader,
+    /// 像素/深度字节；按块号顺序拼接。
+    pub data: Vec<u8>,
+}
+
 /// 协议消息。
 ///
 /// 变体大小差异来自定长遥测结构；消息按值传递时只搬移几百字节，
@@ -241,6 +319,8 @@ pub enum Message {
     Gray(Box<GrayImageMessage>),
     /// 深度图（装箱）。
     Depth(Box<DepthImageMessage>),
+    /// 图像分块。
+    ImageChunk(ImageChunk),
     /// 机体描述。
     Airframe(AirframeMessage),
     /// 控制输出。
@@ -321,6 +401,7 @@ impl Message {
                 }
             }
             Self::Depth(_) => Kind::Depth,
+            Self::ImageChunk(_) => Kind::ImageChunk,
             Self::Airframe(_) => Kind::Airframe,
             Self::Control(_) => Kind::Control,
             Self::Odometry(_) => Kind::Odometry,
@@ -344,6 +425,7 @@ impl Message {
             Self::Imu(samples) => samples.first().map_or(-1.0, |m| m.timestamp),
             Self::Gray(m) => m.timestamp,
             Self::Depth(m) => m.timestamp,
+            Self::ImageChunk(m) => m.header.timestamp,
             Self::Airframe(m) => m.timestamp,
             Self::Control(m) => m.state_time,
             Self::Odometry(m) | Self::CorrectedOdometry(m) => m.timestamp,
@@ -413,6 +495,10 @@ impl Message {
                 for value in message.data {
                     out.extend_from_slice(&value.to_le_bytes());
                 }
+            }
+            Self::ImageChunk(chunk) => {
+                out.extend_from_slice(&chunk.header.encode());
+                out.extend_from_slice(&chunk.data);
             }
             Self::Airframe(message) => {
                 put_f64(&mut out, message.timestamp);
@@ -623,6 +709,14 @@ impl Message {
                     ]);
                 }
                 Self::Depth(message)
+            }
+            Kind::ImageChunk => {
+                let header = ImageChunkHeader::decode(body)?;
+                let data = body[IMAGE_CHUNK_HEADER_LEN..].to_vec();
+                if data.len() > IMAGE_CHUNK_DATA_MAX {
+                    return Err(invalid("image chunk payload"));
+                }
+                Self::ImageChunk(ImageChunk { header, data })
             }
             Kind::Airframe => {
                 let timestamp = input.f64()?;
