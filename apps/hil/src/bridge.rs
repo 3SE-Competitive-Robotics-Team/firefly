@@ -1,18 +1,22 @@
 //! 主机侧链路运行时：USB 端点与本地 IPC 话题双向转接。
 //!
 //! iceoryx2 端口是单线程对象，因此主线程独占全部发布/订阅端口，USB 读与写
-//! 各由一个线程持有；三方通过有界 `mpsc` 通道交接消息。图像走 `try_send`，
-//! 满队列即丢当前帧；IMU、控制与指令走阻塞 `send`，不静默丢采样。
+//! 各由一个线程持有；三方通过有界 `mpsc` 通道交接消息。图像走独立的 `try_send`
+//! 队列，满队列即丢当前帧；IMU、控制与指令走高优先阻塞队列。写线程先排空高优先
+//! 队列，再把图像按 16 KiB 分块写出，块与块之间继续插高优先消息，避免整帧图像
+//! 把 1 kHz 的 IMU 压在后面。
 
 use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use firefly_hil::frame::{FrameReader, FrameWriter};
-use firefly_hil::protocol::{Hello, Message, ROLE_HOST, VERSION};
+use firefly_hil::protocol::{
+    Hello, IMAGE_CHUNK_DATA_MAX, ImageChunkHeader, Kind, Message, ROLE_HOST, VERSION,
+};
 use firefly_pubsub::attitude::{ATTITUDE_TOPIC, AttitudeMessage};
 use firefly_pubsub::camera::{
     CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DEPTH_TOPIC, DepthImageMessage, GrayImageMessage,
@@ -84,15 +88,26 @@ pub fn run(config: &Config) -> Result<(), String> {
         signal_hook::flag::register(signal, Arc::clone(&stop))
             .map_err(|error| format!("register signal: {error}"))?;
     }
-    let (down_tx, down_rx) = sync_channel(DOWNLINK_QUEUE);
+    let (priority_tx, priority_rx) = sync_channel(DOWNLINK_QUEUE);
+    let (image_tx, image_rx) = sync_channel(config.link.image_queue);
     let (up_tx, up_rx) = sync_channel(UPLINK_QUEUE);
     let writer_stop = Arc::clone(&stop);
-    let writer = std::thread::spawn(move || usb_writer(writer, down_rx, session, writer_stop));
+    let writer =
+        std::thread::spawn(move || usb_writer(writer, priority_rx, image_rx, session, writer_stop));
     let reader_stop = Arc::clone(&stop);
     let reader = std::thread::spawn(move || usb_reader(reader, up_tx, reader_stop));
     log::info!("HIL 链路已打开，session={session:#x}");
-    let result = ipc_loop(down, up, &down_tx, &up_rx, &stop, &config.link);
-    drop(down_tx);
+    let result = ipc_loop(
+        down,
+        up,
+        &priority_tx,
+        &image_tx,
+        &up_rx,
+        &stop,
+        &config.link,
+    );
+    drop(priority_tx);
+    drop(image_tx);
     let writer = writer.join().map_err(|_| "USB 写线程 panic".to_owned())?;
     let reader = reader.join().map_err(|_| "USB 读线程 panic".to_owned())?;
     writer?;
@@ -174,7 +189,8 @@ fn open_ports(node: &IpcNode) -> Result<(Downlink, Uplink), String> {
 #[allow(clippy::needless_pass_by_value)]
 fn usb_writer(
     writer: EndpointWrite<Bulk>,
-    queue: Receiver<Message>,
+    priority: Receiver<Message>,
+    images: Receiver<Message>,
     session: u64,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
@@ -187,13 +203,94 @@ fn usb_writer(
             session,
         }))
         .map_err(|error| format!("写 hello: {error}"))?;
-    while let Ok(message) = queue.recv() {
-        if stop.load(Ordering::Relaxed) {
-            break;
+    let mut next_image_id = 0_u32;
+    while !stop.load(Ordering::Relaxed) {
+        let mut wrote = false;
+        // 高优先队列优先：IMU/指令最多等一个图像块的传输时间。
+        while let Ok(message) = priority.try_recv() {
+            writer
+                .write_message(&message)
+                .map_err(|error| format!("写 {}: {error}", message.kind().name()))?;
+            wrote = true;
         }
+        if let Ok(message) = images.try_recv() {
+            write_image(&mut writer, &message, &priority, &mut next_image_id)?;
+            continue;
+        }
+        if wrote {
+            continue;
+        }
+        match priority.recv_timeout(Duration::from_millis(1)) {
+            Ok(message) => writer
+                .write_message(&message)
+                .map_err(|error| format!("写 {}: {error}", message.kind().name()))?,
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    Ok(())
+}
+
+/// 把一张完整图像按块写出；每块之间排空高优先队列。
+fn write_image(
+    writer: &mut FrameWriter<EndpointWrite<Bulk>>,
+    message: &Message,
+    priority: &Receiver<Message>,
+    next_image_id: &mut u32,
+) -> Result<(), String> {
+    match message {
+        Message::Gray(image) => {
+            let sensor = u8::try_from(image.sensor_id).unwrap_or(0);
+            write_chunks(
+                writer,
+                priority,
+                image.timestamp,
+                sensor,
+                &image.data,
+                next_image_id,
+            )
+        }
+        Message::Depth(image) => {
+            let mut raw = Vec::with_capacity(image.data.len() * 4);
+            for value in image.data {
+                raw.extend_from_slice(&value.to_le_bytes());
+            }
+            write_chunks(writer, priority, image.timestamp, 2, &raw, next_image_id)
+        }
+        other => Err(format!("图像通道收到 {}", other.kind().name())),
+    }
+}
+
+fn write_chunks(
+    writer: &mut FrameWriter<EndpointWrite<Bulk>>,
+    priority: &Receiver<Message>,
+    timestamp: f64,
+    sensor_id: u8,
+    data: &[u8],
+    next_image_id: &mut u32,
+) -> Result<(), String> {
+    let count = u16::try_from(data.len().div_ceil(IMAGE_CHUNK_DATA_MAX).max(1))
+        .map_err(|_| "图像块数过多".to_owned())?;
+    let image_id = *next_image_id;
+    *next_image_id = next_image_id.wrapping_add(1);
+    for (index, chunk) in data.chunks(IMAGE_CHUNK_DATA_MAX).enumerate() {
+        let header = ImageChunkHeader {
+            timestamp,
+            sensor_id,
+            image_id,
+            chunk_index: u16::try_from(index).unwrap_or(0),
+            chunk_count: count,
+        };
+        let encoded = header.encode();
         writer
-            .write_message(&message)
-            .map_err(|error| format!("写 {}: {error}", message.kind().name()))?;
+            .write_parts(Kind::ImageChunk, timestamp, &[&encoded, chunk])
+            .map_err(|error| format!("写图像块: {error}"))?;
+        // 一块最多挡住 IMU 约 0.4ms；这里把积压的 IMU/指令立刻插出去。
+        while let Ok(message) = priority.try_recv() {
+            writer
+                .write_message(&message)
+                .map_err(|error| format!("写 {}: {error}", message.kind().name()))?;
+        }
     }
     Ok(())
 }
@@ -228,7 +325,8 @@ fn usb_reader(
 fn ipc_loop(
     down: Downlink,
     up: Uplink,
-    down_tx: &SyncSender<Message>,
+    priority_tx: &SyncSender<Message>,
+    image_tx: &SyncSender<Message>,
     up_rx: &Receiver<Message>,
     stop: &AtomicBool,
     options: &crate::config::Link,
@@ -260,15 +358,15 @@ fn ipc_loop(
                 command.kind,
                 command.sequence
             );
-            send_blocking(down_tx, Message::Command(command))?;
+            send_blocking(priority_tx, Message::Command(command))?;
             activity = true;
         }
         while let Ok(Some(sample)) = down.goal.receive() {
-            send_blocking(down_tx, Message::Goal(*sample.payload()))?;
+            send_blocking(priority_tx, Message::Goal(*sample.payload()))?;
             activity = true;
         }
         while let Ok(Some(sample)) = down.airframe.receive() {
-            send_blocking(down_tx, Message::Airframe(*sample.payload()))?;
+            send_blocking(priority_tx, Message::Airframe(*sample.payload()))?;
             activity = true;
         }
         while imu_batch.len() < options.imu_batch {
@@ -281,7 +379,7 @@ fn ipc_loop(
             last_imu_stamp = imu_batch
                 .last()
                 .map_or(last_imu_stamp, |sample| sample.timestamp);
-            send_blocking(down_tx, Message::Imu(std::mem::take(&mut imu_batch)))?;
+            send_blocking(priority_tx, Message::Imu(std::mem::take(&mut imu_batch)))?;
             activity = true;
         }
         // 图像按周期节流：板端 VIO 处理不过来的帧在主机侧丢弃，不排队进 USB。
@@ -314,10 +412,10 @@ fn ipc_loop(
                 let right = pending_right.take().expect("已检查非空");
                 record_image_checksum(&mut stats, &left);
                 record_image_checksum(&mut stats, &right);
-                try_image(down_tx, Message::Gray(Box::new(left)), &mut stats);
-                try_image(down_tx, Message::Gray(Box::new(right)), &mut stats);
+                try_image(image_tx, Message::Gray(Box::new(left)), &mut stats);
+                try_image(image_tx, Message::Gray(Box::new(right)), &mut stats);
                 if let Some(depth) = pending_depth.take() {
-                    try_image(down_tx, Message::Depth(Box::new(depth)), &mut stats);
+                    try_image(image_tx, Message::Depth(Box::new(depth)), &mut stats);
                 }
                 last_image_stamp = left.timestamp;
                 last_image = Instant::now();
@@ -326,7 +424,7 @@ fn ipc_loop(
         if last_heartbeat.elapsed() >= Duration::from_millis(500) {
             // 主机在线但暂无 IMU 时也要让板端心跳新鲜，避免看门狗误恢复 adb。
             send_blocking(
-                down_tx,
+                priority_tx,
                 Message::Ping(now_seconds().to_bits().wrapping_add(stats.heartbeat)),
             )?;
             stats.heartbeat = stats.heartbeat.wrapping_add(1);

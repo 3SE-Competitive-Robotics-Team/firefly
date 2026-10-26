@@ -59,36 +59,83 @@ impl<W: Write> FrameWriter<W> {
     /// 消息体超过 [`MAX_MESSAGE`] 或底层写入失败。
     pub fn write_message(&mut self, message: &Message) -> io::Result<()> {
         let body = message.encode();
-        if body.len() > MAX_MESSAGE {
+        self.write_parts(message.kind(), message.capture_time(), &[&body])
+    }
+
+    /// 写入一条由多段拼成的消息体，不构造整条消息的中间 `Vec`。
+    ///
+    /// 图像分块用「块头 + 像素切片」两段直接写，避免 16 KiB 块体再拷一次。
+    ///
+    /// # Errors
+    /// 消息体超过 [`MAX_MESSAGE`]、分片过多或底层写入失败。
+    pub fn write_parts(
+        &mut self,
+        kind: Kind,
+        capture_time: f64,
+        parts: &[&[u8]],
+    ) -> io::Result<()> {
+        let total: usize = parts.iter().map(|part| part.len()).sum();
+        if total > MAX_MESSAGE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "hil message exceeds maximum size",
             ));
         }
-        let chunks = body.len().div_ceil(MAX_FRAGMENT).max(1);
+        let chunks = total.div_ceil(MAX_FRAGMENT).max(1);
         let fragment_count = u16::try_from(chunks).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "hil message has too many fragments",
             )
         })?;
-        let kind = message.kind();
-        let capture_time = message.capture_time();
         let seq = self.seq;
-        for (index, chunk) in body.chunks(MAX_FRAGMENT).enumerate() {
+        if total <= MAX_FRAGMENT {
             let header = Header {
                 kind,
                 session: self.session,
                 seq,
                 capture_time,
-                fragment_index: u16::try_from(index).unwrap_or(0),
+                fragment_index: 0,
                 fragment_count,
-                payload_len: u32::try_from(chunk.len()).unwrap_or(0),
+                payload_len: u32::try_from(total).unwrap_or(0),
             };
-            let mut frame = Vec::with_capacity(crate::protocol::HEADER_LEN + chunk.len());
-            frame.extend_from_slice(&encode_header(&header));
-            frame.extend_from_slice(chunk);
-            self.inner.write_all(&frame)?;
+            self.inner.write_all(&encode_header(&header))?;
+            for part in parts {
+                self.inner.write_all(part)?;
+            }
+        } else {
+            let mut index = 0_u16;
+            let mut remaining = total;
+            let mut part_index = 0_usize;
+            let mut offset = 0_usize;
+            while remaining > 0 {
+                let take = remaining.min(MAX_FRAGMENT);
+                let header = Header {
+                    kind,
+                    session: self.session,
+                    seq,
+                    capture_time,
+                    fragment_index: index,
+                    fragment_count,
+                    payload_len: u32::try_from(take).unwrap_or(0),
+                };
+                self.inner.write_all(&encode_header(&header))?;
+                let mut left = take;
+                while left > 0 {
+                    while part_index < parts.len() && offset == parts[part_index].len() {
+                        part_index += 1;
+                        offset = 0;
+                    }
+                    let part = parts[part_index];
+                    let available = part.len() - offset;
+                    let n = left.min(available);
+                    self.inner.write_all(&part[offset..offset + n])?;
+                    offset += n;
+                    left -= n;
+                }
+                remaining -= take;
+                index = index.saturating_add(1);
+            }
         }
         self.seq = self.seq.wrapping_add(1);
         self.inner.flush()
@@ -137,11 +184,14 @@ impl<R: Read> FrameReader<R> {
         self.inner
     }
 
-    /// 读取下一条完整消息。
+    /// 读取下一条完整消息的原始消息体（不在这里解码）。
+    ///
+    /// 图像分块走这条路径：调用方拿到 `Vec` 后直接把像素拷进目标缓冲，
+    /// 避免 `Message::decode` 再复制一次。
     ///
     /// # Errors
     /// 底层读取失败、流提前结束或帧头/消息体非法。
-    pub fn read_frame(&mut self) -> io::Result<Frame> {
+    pub fn read_raw(&mut self) -> io::Result<(Header, Vec<u8>)> {
         loop {
             self.compact();
             let available = self.buffer.len().saturating_sub(self.start);
@@ -161,20 +211,29 @@ impl<R: Read> FrameReader<R> {
                 [self.start + crate::protocol::HEADER_LEN..self.start + frame_len]
                 .to_vec();
             self.start += frame_len;
-            if let Some(frame) = self.accept(header, payload)? {
-                return Ok(frame);
+            if let Some(result) = self.accept_raw(header, payload) {
+                return Ok(result);
             }
         }
     }
 
-    fn accept(&mut self, header: Header, payload: Vec<u8>) -> io::Result<Option<Frame>> {
+    /// 读取下一条完整消息并解码。
+    ///
+    /// # Errors
+    /// 底层读取失败、流提前结束或帧头/消息体非法。
+    pub fn read_frame(&mut self) -> io::Result<Frame> {
+        let (header, body) = self.read_raw()?;
+        let message = Message::decode(header.kind, &body)
+            .map_err(|error| decode_error(header.kind, &error))?;
+        Ok(Frame { header, message })
+    }
+
+    fn accept_raw(&mut self, header: Header, payload: Vec<u8>) -> Option<(Header, Vec<u8>)> {
         if header.fragment_count == 1 {
             if self.pending.take().is_some() {
                 self.dropped = self.dropped.saturating_add(1);
             }
-            let message = Message::decode(header.kind, &payload)
-                .map_err(|error| decode_error(header.kind, &error))?;
-            return Ok(Some(Frame { header, message }));
+            return Some((header, payload));
         }
         if header.fragment_index == 0 {
             if self.pending.take().is_some() {
@@ -189,11 +248,11 @@ impl<R: Read> FrameReader<R> {
                 next_index: 1,
                 body: payload,
             });
-            return Ok(None);
+            return None;
         }
         let Some(pending) = self.pending.as_mut() else {
             self.dropped = self.dropped.saturating_add(1);
-            return Ok(None);
+            return None;
         };
         if pending.kind != header.kind
             || pending.session != header.session
@@ -203,25 +262,22 @@ impl<R: Read> FrameReader<R> {
         {
             self.pending = None;
             self.dropped = self.dropped.saturating_add(1);
-            return Ok(None);
+            return None;
         }
         if pending.body.len().saturating_add(payload.len()) > MAX_MESSAGE {
             self.pending = None;
             self.dropped = self.dropped.saturating_add(1);
-            return Ok(None);
+            return None;
         }
         pending.body.extend_from_slice(&payload);
         pending.next_index = pending.next_index.saturating_add(1);
         if pending.next_index < pending.fragment_count {
-            return Ok(None);
+            return None;
         }
         let pending = self.pending.take().expect("pending fragment set above");
-        let kind = pending.kind;
-        let message =
-            Message::decode(kind, &pending.body).map_err(|error| decode_error(kind, &error))?;
-        Ok(Some(Frame {
-            header: Header {
-                kind,
+        Some((
+            Header {
+                kind: pending.kind,
                 session: pending.session,
                 seq: pending.seq,
                 capture_time: pending.capture_time,
@@ -229,8 +285,8 @@ impl<R: Read> FrameReader<R> {
                 fragment_count: pending.fragment_count,
                 payload_len: u32::try_from(pending.body.len()).unwrap_or(0),
             },
-            message,
-        }))
+            pending.body,
+        ))
     }
 
     fn compact(&mut self) {
@@ -242,16 +298,21 @@ impl<R: Read> FrameReader<R> {
     }
 
     fn fill(&mut self, wanted: usize) -> io::Result<()> {
-        let mut chunk = vec![0_u8; 64 * 1024];
         while self.buffer.len().saturating_sub(self.start) < wanted {
-            let read = self.inner.read(&mut chunk)?;
+            let available = self.buffer.len().saturating_sub(self.start);
+            let need = wanted - available;
+            let start = self.buffer.len();
+            // FunctionFS 端点要求读缓冲不小于端点最大包长（512B），否则返回
+            // EOVERFLOW；按 64 KiB 读，顺便省掉「临时块 + extend」的第二次拷贝。
+            self.buffer.resize(start + need.max(64 * 1024), 0);
+            let read = self.inner.read(&mut self.buffer[start..])?;
+            self.buffer.truncate(start + read);
             if read == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "hil stream closed",
                 ));
             }
-            self.buffer.extend_from_slice(&chunk[..read]);
         }
         Ok(())
     }
@@ -385,5 +446,48 @@ mod tests {
         assert!((decoded.rotor_spins[1] + 1.0).abs() < 1e-12);
         assert!((decoded.max_thrust_per_motor - 1.61).abs() < 1e-12);
         assert!((decoded.torque_coefficient - 0.011).abs() < 1e-12);
+    }
+
+    #[test]
+    fn image_chunk_roundtrip_preserves_bytes() {
+        let header = crate::protocol::ImageChunkHeader {
+            timestamp: 3.5,
+            sensor_id: 1,
+            image_id: 9,
+            chunk_index: 1,
+            chunk_count: 3,
+        };
+        let data = vec![7_u8; 1024];
+        let mut bytes = Vec::new();
+        let mut writer = FrameWriter::new(&mut bytes);
+        writer
+            .write_parts(
+                Kind::ImageChunk,
+                header.timestamp,
+                &[&header.encode(), &data],
+            )
+            .unwrap();
+        let mut reader = FrameReader::new(bytes.as_slice());
+        let (raw, body) = reader.read_raw().unwrap();
+        assert_eq!(raw.kind, Kind::ImageChunk);
+        assert_eq!(
+            crate::protocol::ImageChunkHeader::decode(&body).unwrap(),
+            header
+        );
+        assert_eq!(&body[crate::protocol::IMAGE_CHUNK_HEADER_LEN..], &data[..]);
+    }
+
+    #[test]
+    fn write_parts_fragments_are_reassembled() {
+        let data = vec![5_u8; 40 * 1024];
+        let mut bytes = Vec::new();
+        let mut writer = FrameWriter::new(&mut bytes);
+        writer
+            .write_parts(Kind::Scalar, 1.0, &[&data[..10 * 1024], &data[10 * 1024..]])
+            .unwrap();
+        let mut reader = FrameReader::new(bytes.as_slice());
+        let (header, body) = reader.read_raw().unwrap();
+        assert_eq!(header.fragment_count, 3);
+        assert_eq!(body, data);
     }
 }
