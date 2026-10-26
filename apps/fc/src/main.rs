@@ -94,6 +94,8 @@ fn parse_config_path() -> Result<PathBuf, String> {
                         .ok_or_else(|| "missing --config value".to_owned())?,
                 );
             }
+            // HIL 验证开关；实际覆盖在 `main` 里应用。
+            "--airmode-off" => {}
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -539,6 +541,7 @@ impl Controller {
         if msg.sequence <= self.last_command_seq {
             return;
         }
+        log::info!("收到指令 kind={} seq={}", msg.kind, msg.sequence);
         self.last_command_seq = msg.sequence;
         let Some(cmd) = command_of(&msg) else {
             log::warn!("未知指令编码 {}（已忽略）", msg.kind);
@@ -653,6 +656,18 @@ impl Controller {
             sim_time,
             "fc/debug/motors",
             &motors.map(f64::from),
+        );
+        let vertical = self.px4.debug_vertical();
+        publish_scalars(
+            ports.viz_ref(),
+            sim_time,
+            "fc/debug/vertical_ned",
+            &[
+                f64::from(vertical[0]),
+                f64::from(vertical[1]),
+                f64::from(vertical[2]),
+                f64::from(vertical[3]),
+            ],
         );
         publish_scalars(
             ports.viz_ref(),
@@ -799,14 +814,20 @@ fn publish_scalars(viz: &VizPublisher, t: f64, entity: &str, values: &[f64]) {
 #[allow(clippy::too_many_lines)] // 进程生命周期与控制节拍编排
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = parse_config_path().map_err(|e| {
-        eprintln!("{e}\n用法：fc [--config configs/fc.toml]");
+        eprintln!("{e}\n用法：fc [--config configs/fc.toml] [--airmode-off]");
         std::process::exit(2);
     })?;
-    let cfg = firefly_config::startup::<config::FcConfig>(
+    let mut cfg = firefly_config::startup::<config::FcConfig>(
         &config_path,
         firefly_observability::init,
         config::FcConfig::validate,
     )?;
+    // 只用于 HIL 验证：板端 VIO 后验延迟会让速率环在低集合推力下饱和，
+    // airmode 抬高总推力形成爬升。生产配置仍由 fc.toml 决定（默认 1）。
+    if std::env::args().any(|arg| arg == "--airmode-off") {
+        cfg.control.allocation.airmode = 0;
+        log::warn!("HIL 验证：airmode=0，速率环饱和时裁掉姿态力矩、优先总推力");
+    }
     let period = Duration::from_secs_f64(1.0 / cfg.rate_hz);
     let dt = (1.0 / cfg.rate_hz) as f32;
 

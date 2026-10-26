@@ -85,11 +85,18 @@ fn run(
     stop: &AtomicBool,
 ) -> Result<()> {
     let node = create_node().map_err(|e| e.with_operation("FC IMU node"))?;
-    let imu = Subscriber::<ImuMessage>::with_options(&node, IMU_TOPIC, IMU_SUBSCRIPTION)?;
+    let imu = Subscriber::<ImuMessage>::with_options(&node, IMU_TOPIC, IMU_SUBSCRIPTION).map_err(
+        |error| {
+            log::error!("FC IMU 订阅失败: {error}");
+            error
+        },
+    )?;
+    log::info!("FC IMU 订阅已建立：{IMU_TOPIC}");
     let mut estimator = Estimator::new(options)?;
     let mut latest = None;
     let mut count = 0u64;
     let mut rejected = false;
+    let mut last_log = Instant::now();
     while !stop.load(Ordering::Relaxed) && super::RUNNING.load(Ordering::Relaxed) {
         let root = fastrace::Span::root(
             "fc-imu",
@@ -126,6 +133,10 @@ fn run(
                     changed = true;
                 }
             }
+        }
+        if last_log.elapsed() >= Duration::from_secs(1) {
+            log::debug!("FC IMU worker 已收 {count} 条");
+            last_log = Instant::now();
         }
         if changed && let Some((sample, received)) = latest {
             let state = estimator.state();

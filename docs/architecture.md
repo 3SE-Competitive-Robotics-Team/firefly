@@ -63,6 +63,39 @@ flowchart LR
 板端时间为同一 `CLOCK_MONOTONIC` 秒，仿真为 `sim_time`，不得混合时钟域。
 通讯适配的测试不代表设备驱动、运行时限或板端飞行验收。
 
+### HIL 闭环（USB）
+
+硬件在环把电脑仿真与板端计算接成一台机器：电脑运行 `firefly-sim`、`render` 与
+`firefly-viz`，板端运行生产 `firefly-okvis-x`、`fc` 与 `planner`。跨机传输由两端
+桥接进程承担，算法进程仍只使用本机 IPC：
+
+| 侧 | 进程 | 职责 |
+|---|---|---|
+| 电脑 | `hil` | nusb 认领厂商接口；下行传感器/指令，上行控制/里程计/遥测 |
+| 板端 | `hil-gadget` | 重建 configfs gadget、写 FunctionFS 描述符并绑定 UDC |
+| 板端 | `camera --hil` | 下行 IMU、双目、深度、机体描述与指令 → 本机话题 |
+| 板端 | `motor --hil` | 本机 `Control`、里程计、姿态与标量 → USB 上行 |
+
+USB 只有一个厂商接口：批量 OUT 承载下行（IMU、双目、深度、机体描述、指令），
+批量 IN 承载上行（控制、里程计、姿态、标量、统计）。`adb` 与本链路共用同一 UDC，
+端点数量不允许两者同时绑定，因此 HIL 期间 `adb` 不可用；部署在切换前完成。
+退出时 `hil-gadget down` 或看门狗先停 HIL 进程集、写回正常进程清单，再重建
+adb-only gadget 并启动正常 `firefly`；只换 gadget 会让 camera/motor 继续持有
+ffs 端点，adb 绑定随端点释放反复失败。真值只留在电脑侧供渲染与评分。
+
+协议版本、会话号与消息序号在 `crates/firefly-hil`：传感器与状态时间戳沿用
+`sim_time`，跨机新鲜度只用板端本机单调时钟的到达时刻。大图像按 16 KiB 分片；
+队列满时图像丢当前帧、IMU 与控制不静默丢；双目只在采集时间戳一致时成对下发。
+会话号变化时板端丢弃旧会话帧。
+
+板端没有 GPU，VIO 是否跟得上由实测决定：320×240 双目在 A733 上单帧约 75–128 ms
+（200–400 特征），后验晚 0.2–0.4 s。深度下行与不成对的双目会先把 `camera` 图像
+队列打满并让 okvis 丢跟踪；关深度、按 1 ms 时间戳成对下发后跟踪可稳定。位置反馈
+延迟会让 1 kHz 速率环在低集合推力下饱和，`airmode=1` 时分配器为保姿态抬高总推力，
+这也是 HIL 下起飞发散的直接原因。HIL 的悬停验证用 `fc --airmode-off`（仅验证用，
+生产仍为 `airmode=1`），结论必须区分“链路连通”“闭环功能”与“实时性能”，
+不能把 HIL 的验证配置当成生产配置。
+
 ### 诊断记录与展示
 
 `firefly-viz` 从 `Firefly/GroundTruth` 记录 `gt/pose` 与 `gt/traj`，从 `okvis/odom`

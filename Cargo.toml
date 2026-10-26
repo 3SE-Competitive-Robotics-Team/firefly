@@ -31,7 +31,8 @@ logcall = "0.2.1"
 logforth = { version = "0.30.1", default-features = false }
 nalgebra = "0.35.0"
 ndarray = "0.17.2"
-nix = { version = "0.31", features = ["signal", "process", "feature", "term"] }
+nusb = "0.2.9"
+nix = { version = "0.31", features = ["signal", "process", "feature", "term", "fs"] }
 ort = { version = "=2.0.0-rc.14" }
 purecv = { git = "https://github.com/XiaoPengYouCode/purecv.git", rev = "e07b882e792a3c7221178d5163d9ed2eaba92a92", default-features = false, features = ["simd", "parallel"] }
 rand = "0.10.3"
@@ -45,6 +46,7 @@ zstd = "0.13"
 firefly-cost = { path = "crates/firefly-cost" }
 firefly-error = { path = "crates/firefly-error" }
 firefly-hal = { path = "crates/firefly-hal" }
+firefly-hil = { path = "crates/firefly-hil" }
 firefly-imu = { path = "crates/firefly-imu" }
 firefly-flight = { path = "crates/firefly-flight" }
 firefly-map = { path = "crates/firefly-map" }

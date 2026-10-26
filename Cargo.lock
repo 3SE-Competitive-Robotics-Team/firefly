@@ -2216,10 +2216,12 @@ dependencies = [
  "firefly-config",
  "firefly-error",
  "firefly-hal",
+ "firefly-hil",
  "firefly-observability",
  "firefly-pubsub",
  "iceoryx2-bb-posix",
  "log",
+ "nix 0.31.3",
  "serde",
  "toml 1.1.8+spec-1.1.0",
  "v4l",
@@ -3152,6 +3154,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "firefly-hil"
+version = "0.1.0"
+dependencies = [
+ "firefly-pubsub",
+ "proptest",
+ "serde",
+]
+
+[[package]]
 name = "firefly-imu"
 version = "0.1.0"
 dependencies = [
@@ -3970,6 +3981,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "hil"
+version = "0.1.0"
+dependencies = [
+ "firefly-config",
+ "firefly-error",
+ "firefly-hil",
+ "firefly-observability",
+ "firefly-pubsub",
+ "log",
+ "nusb",
+ "serde",
+ "signal-hook",
+]
+
+[[package]]
+name = "hil-gadget"
+version = "0.1.0"
+dependencies = [
+ "firefly-hil",
+]
+
+[[package]]
 name = "hmac-sha256"
 version = "1.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4501,6 +4534,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6928282826c822ad91bf1c9a1cb90a30ba1c26770749929b4656cd6be829cd7c"
 dependencies = [
  "rustversion",
+]
+
+[[package]]
+name = "io-kit-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06d3a048d09fbb6597dbf7c69f40d14df4a49487db1487191618c893fc3b1c26"
+dependencies = [
+ "core-foundation-sys",
+ "mach2",
 ]
 
 [[package]]
@@ -5169,10 +5212,12 @@ dependencies = [
  "firefly-config",
  "firefly-error",
  "firefly-hal",
+ "firefly-hil",
  "firefly-observability",
  "firefly-pubsub",
  "iceoryx2-bb-posix",
  "log",
+ "nix 0.31.3",
  "serde",
  "toml 1.1.8+spec-1.1.0",
 ]
@@ -5553,6 +5598,28 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "nusb"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1de8b6d15f559f50760dad6c1b56fde4041f99dc96a08e55c2b41f44c7417ad9"
+dependencies = [
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
+ "futures-core",
+ "io-kit-sys",
+ "js-sys",
+ "linux-raw-sys 0.12.1",
+ "log",
+ "once_cell",
+ "rustix 1.1.5",
+ "slab",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
