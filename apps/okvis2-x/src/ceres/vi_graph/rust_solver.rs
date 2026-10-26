@@ -47,6 +47,14 @@ use faer::sparse::{SparseColMat, Triplet};
 use nalgebra::{DMatrix, DMatrixView, DVector, DVectorView, DVectorViewMut};
 use std::{sync::Arc, time::Instant};
 
+#[path = "schur.rs"]
+mod schur;
+use schur::{Row, SchurSystem};
+
+#[cfg(test)]
+#[path = "schur/tests.rs"]
+mod schur_tests;
+
 #[derive(Default)]
 pub struct RustGraphSolver;
 
@@ -729,10 +737,6 @@ impl Snapshot {
         Ok(model)
     }
 }
-struct Row {
-    residual: DVector<f64>,
-    blocks: Vec<(usize, DMatrix<f64>)>,
-}
 struct Linearization {
     cost: f64,
     fixed_cost: f64,
@@ -742,30 +746,16 @@ struct Linearization {
     eliminated_points: Vec<usize>,
 }
 impl Linearization {
-    /// 法方程下三角（对称存全阵）。逐标量查 `BTreeMap` 比稠密累加慢三成，
-    /// 而变量规模只到数百，直接落稠密矩阵。
+    fn system(&self) -> SchurSystem<'_> {
+        SchurSystem {
+            rows: &self.rows,
+            gradient: &self.gradient,
+            eliminated_points: &self.eliminated_points,
+        }
+    }
+
     fn lower_normal(&self, regularization: &DVector<f64>) -> DMatrix<f64> {
-        let count = self.gradient.len();
-        let mut lower = DMatrix::<f64>::zeros(count, count);
-        for row in &self.rows {
-            for (oa, left_block) in &row.blocks {
-                for (ob, right_block) in &row.blocks {
-                    for ca in 0..left_block.ncols() {
-                        for cb in 0..right_block.ncols() {
-                            let (index, column) = (oa + ca, ob + cb);
-                            if index >= column {
-                                lower[(index, column)] +=
-                                    left_block.column(ca).dot(&right_block.column(cb));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        for index in 0..count {
-            lower[(index, index)] += regularization[index];
-        }
-        lower
+        self.system().lower_normal(regularization)
     }
     fn scaled(&mut self, scale: &DVector<f64>) {
         for row in &mut self.rows {
@@ -815,73 +805,9 @@ impl Linearization {
             -product.dot(&workspace)
         })
     }
-    /// Eliminate independent 3D landmark blocks, solve the reduced normal
-    /// equations by Cholesky, then back-substitute the landmark increments.
+    #[cfg(test)]
     fn solve_schur(&self, lower: &DMatrix<f64>) -> Option<DVector<f64>> {
-        let count = self.gradient.len();
-        let mut point_for_column = vec![None; count];
-        for (point, &offset) in self.eliminated_points.iter().enumerate() {
-            point_for_column[offset..offset + 3].fill(Some(point));
-        }
-        // Coupled landmarks cannot form an independent elimination set. Solve
-        // their complete normal equations without dropping cross terms.
-        if (0..count).any(|index| {
-            (0..=index).any(|column| {
-                lower[(index, column)] != 0.0
-                    && matches!((point_for_column[index], point_for_column[column]),
-                    (Some(a), Some(b)) if a != b)
-            })
-        }) {
-            let matrix = lower.clone();
-            return matrix
-                .cholesky()
-                .map(|factorization| factorization.solve(&(-&self.gradient)))
-                .filter(|velocity| velocity.iter().all(|value_value| value_value.is_finite()));
-        }
-        let retained: Vec<_> = (0..count)
-            .filter(|index| point_for_column[*index].is_none())
-            .collect();
-        let get = |index: usize, column: usize| lower[(index.max(column), index.min(column))];
-        let mut reduced = DMatrix::from_fn(retained.len(), retained.len(), |index, column| {
-            get(retained[index], retained[column])
-        });
-        let mut rhs = DVector::from_iterator(
-            retained.len(),
-            retained.iter().map(|&index| -self.gradient[index]),
-        );
-        let mut points = Vec::new();
-        for &offset in &self.eliminated_points {
-            let point_hessian =
-                Matrix3::from_fn(|index, column| get(offset + index, offset + column));
-            let factor = point_hessian.cholesky()?;
-            let cross = DMatrix::from_fn(3, retained.len(), |index, column| {
-                get(offset + index, retained[column])
-            });
-            let point_rhs = Vector3::from_fn(|index, _| -self.gradient[offset + index]);
-            let solved_cross = factor.solve(&cross);
-            let solved_rhs = factor.solve(&point_rhs);
-            reduced.gemm_tr(-1.0, &cross, &solved_cross, 1.0);
-            rhs.gemv_tr(-1.0, &cross, &solved_rhs, 1.0);
-            points.push((offset, solved_cross, solved_rhs));
-        }
-        let solution = if retained.is_empty() {
-            DVector::zeros(0)
-        } else {
-            reduced.cholesky()?.solve(&rhs)
-        };
-        let mut output = DVector::zeros(count);
-        for (index, &original) in retained.iter().enumerate() {
-            output[original] = solution[index];
-        }
-        for (offset, cross, rhs) in points {
-            output
-                .rows_mut(offset, 3)
-                .copy_from(&(rhs - cross * &solution));
-        }
-        output
-            .iter()
-            .all(|value_value| value_value.is_finite())
-            .then_some(output)
+        self.system().solve_dense_normal(lower)
     }
     fn solve(&self, regularization: &DVector<f64>, kind: &str) -> Option<DVector<f64>> {
         let count = self.gradient.len();
@@ -918,10 +844,10 @@ impl Linearization {
         if !matches!(kind, "SPARSE_NORMAL_CHOLESKY" | "DENSE_SCHUR") {
             return None;
         }
-        let lower = self.lower_normal(regularization);
         if kind == "DENSE_SCHUR" {
-            return self.solve_schur(&lower);
+            return self.system().dense(regularization);
         }
+        let lower = self.lower_normal(regularization);
         let triplet_source = &lower;
         let triplets: Vec<_> = (0..count)
             .flat_map(|index| {

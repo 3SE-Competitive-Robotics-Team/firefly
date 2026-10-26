@@ -17,6 +17,10 @@ path = "src/lib.rs"
 name = "firefly-okvis-x"
 path = "src/main.rs"
 
+[[bench]]
+name = "schur"
+harness = false
+
 [dependencies]
 fastrace.workspace = true
 firefly-base.workspace = true
