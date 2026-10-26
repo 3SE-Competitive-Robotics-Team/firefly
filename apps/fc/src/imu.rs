@@ -90,6 +90,7 @@ fn run(
 ) -> Result<()> {
     let node = create_node().map_err(|e| e.with_operation("FC IMU node"))?;
     let imu = Subscriber::<ImuMessage>::with_options(&node, IMU_TOPIC, IMU_SUBSCRIPTION)?;
+    log::info!("FC IMU 订阅已建立：{IMU_TOPIC}");
     let imu_events = TopicListener::with_topic(&node, IMU_TOPIC)?;
     let waitset = WaitSetBuilder::new()
         .create::<ipc::Service>()
@@ -112,6 +113,7 @@ fn run(
     let mut latest = None;
     let mut count = 0u64;
     let mut rejected = false;
+    let mut last_log = Instant::now();
     let failure = RefCell::new(None::<String>);
     {
         let mut on_event = |_attachment: WaitSetAttachmentId<ipc::Service>| {
@@ -135,6 +137,10 @@ fn run(
                     &mut rejected,
                 )
             };
+            if last_log.elapsed() >= Duration::from_secs(1) {
+                log::debug!("FC IMU worker 已收 {count} 条");
+                last_log = Instant::now();
+            }
             match result {
                 Ok(()) => CallbackProgression::Continue,
                 Err(error) => {

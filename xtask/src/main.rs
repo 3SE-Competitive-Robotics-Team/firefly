@@ -3,6 +3,7 @@
 mod archive;
 mod container;
 mod deploy;
+mod deploy_hil;
 mod release;
 mod target;
 
@@ -13,6 +14,7 @@ const USAGE: &str = "\
 usage:
   cargo xtask release [--target host|board]
   cargo xtask deploy [--device <serial>]
+  cargo xtask deploy-hil [--device <serial>]
   cargo xtask unpack <package> <directory>";
 
 fn main() -> ExitCode {
@@ -33,6 +35,7 @@ fn run() -> Result<(), String> {
     match command.as_str() {
         "release" => release::run(rest),
         "deploy" => deploy::run(rest),
+        "deploy-hil" => deploy_hil::run(rest),
         "unpack" => unpack(rest),
         other => Err(format!("unknown command: {other}")),
     }

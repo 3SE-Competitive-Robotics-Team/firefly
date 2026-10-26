@@ -30,12 +30,27 @@ const MODELS: &[&str] = &[
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let device = parse_device(args)?;
-    release::build(Target::Board)?;
-    let package = package()?;
-    push(&device, &package)?;
-    start(&device)?;
+    deploy(&device)?;
     println!("部署完成");
     Ok(())
+}
+
+/// 构建并部署机载 release，最后拉起 `firefly.service` 并确认 supervisor 就绪。
+pub(crate) fn deploy(device: &str) -> Result<(), String> {
+    release::build(Target::Board)?;
+    let package = package()?;
+    push(device, &package)?;
+    start(device)
+}
+
+/// 在板上执行一条 shell 命令；远端退出码不可靠，调用方按输出判定。
+pub(crate) fn shell(device: &str, command: &str) -> Result<(), String> {
+    adb(device, &["shell", command])
+}
+
+/// 捕获远端输出（板载 `adb shell` 不传递远端退出码）。
+pub(crate) fn adb_output(device: &str, args: &[&str]) -> Result<String, String> {
+    adb_output_inner(device, args)
 }
 
 fn parse_device(args: &[String]) -> Result<String, String> {
@@ -248,8 +263,7 @@ fn check_device(device: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 捕获远端输出。板载 `adb shell` 不传递远端退出码，调用方应检查输出内容而非状态。
-fn adb_output(device: &str, args: &[&str]) -> Result<String, String> {
+fn adb_output_inner(device: &str, args: &[&str]) -> Result<String, String> {
     let output = Command::new("adb")
         .args(["-s", device])
         .args(args)
