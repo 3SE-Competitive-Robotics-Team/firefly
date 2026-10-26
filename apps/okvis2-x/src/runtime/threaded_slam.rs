@@ -293,6 +293,7 @@ struct QueueState<T> {
     items: VecDeque<T>,
     shutdown: bool,
 }
+type CameraMeasurements = Arc<Vec<CameraMeasurement>>;
 /// The nonblocking push drops the oldest value and accepts the newest, as `ThreadsafeQueue` does.
 pub struct ThreadsafeQueue<T> {
     state: Mutex<QueueState<T>>,
@@ -375,6 +376,19 @@ impl<T> ThreadsafeQueue<T> {
             .front()
             .cloned())
     }
+    fn pop_if(&self, matches: impl FnOnce(&T) -> bool) -> Result<Option<T>> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| runtime_error("queue mutex poisoned"))?;
+        if state.items.front().is_some_and(matches) {
+            let result = state.items.pop_front();
+            self.writable.notify_one();
+            Ok(result)
+        } else {
+            Ok(None)
+        }
+    }
     /// # Errors
     /// Returns an error for invalid/missing state, frame or measurement data, or a failed
     /// estimator, graph, mapper, queue, callback or worker operation.
@@ -427,7 +441,7 @@ enum Command {
     Exit,
 }
 struct Shared {
-    cameras: ThreadsafeQueue<Vec<CameraMeasurement>>,
+    cameras: ThreadsafeQueue<CameraMeasurements>,
     imu: ThreadsafeQueue<ImuMeasurement>,
     lidar: ThreadsafeQueue<LidarMeasurement>,
     depth: ThreadsafeQueue<CameraMeasurement>,
@@ -477,6 +491,12 @@ impl Default for Shared {
     }
 }
 impl Shared {
+    fn consume_frame(&self, measurements: &CameraMeasurements) -> Result<()> {
+        // Match allocation identity: timestamps may repeat, and overflow may evict the inspected frame.
+        self.cameras
+            .pop_if(|front| Arc::ptr_eq(front, measurements))?;
+        Ok(())
+    }
     fn error(&self, error: &(impl ToString + ?Sized)) {
         if let Ok(mut errors) = self.errors.lock() {
             errors.push(error.to_string());
@@ -1081,7 +1101,7 @@ impl ViInterface for SensorInputHandle {
             Ok(self
                 .shared
                 .cameras
-                .push(frames, if blocking { 1 } else { 2 }, blocking)?
+                .push(Arc::new(frames), if blocking { 1 } else { 2 }, blocking)?
                 .is_some_and(|dropped| !dropped))
         })();
         sensor_result(&self.shared, result)
@@ -1363,7 +1383,10 @@ where
         }
         Ok(())
     }
-    fn get_next_frame(&self, shared: &Shared) -> Result<Option<MultiFramePtr>> {
+    fn get_next_frame(
+        &self,
+        shared: &Shared,
+    ) -> Result<Option<(MultiFramePtr, CameraMeasurements)>> {
         let Some(frames) = shared.cameras.front()? else {
             return Ok(None);
         };
@@ -1383,7 +1406,7 @@ where
                 frame.set_depth_image(c, depth.clone());
             }
         }
-        Ok(success.then(|| Rc::new(RefCell::new(frame))))
+        Ok(success.then(|| (Rc::new(RefCell::new(frame)), frames)))
     }
     fn detect(&self, frame: &MultiFramePtr, pose: &Transformation) -> Result<()> {
         let n = frame.borrow().num_frames();
@@ -1402,11 +1425,11 @@ where
     fn process_frame(&mut self, shared: &Shared) -> Result<bool> {
         let processing_start = Instant::now();
         self.finish_full_graph(false)?;
-        let Some(frame) = self.get_next_frame(shared)? else {
+        let Some((frame, measurements)) = self.get_next_frame(shared)? else {
             return Ok(false);
         };
         let time = frame.borrow().timestamp();
-        if !self.collect_frame_imu(shared, time)? {
+        if !self.collect_frame_imu(shared, time, &measurements)? {
             return Ok(false);
         }
         if self.first_frame {
@@ -1455,11 +1478,11 @@ where
             self.detect(&frame, &pose)?;
             ran_detection = true;
             if !self.frontend.is_initialized() && frame.borrow().total_keypoints() < 15 {
-                shared.cameras.pop(false)?;
+                shared.consume_frame(&measurements)?;
                 return Ok(false);
             }
         }
-        shared.cameras.pop(false)?;
+        shared.consume_frame(&measurements)?;
         if !ran_detection {
             self.detect(&frame, &pose)?;
             if !self.frontend.is_initialized() && frame.borrow().total_keypoints() < 15 {
@@ -1508,7 +1531,12 @@ where
         Ok(pose)
     }
 
-    fn collect_frame_imu(&mut self, shared: &Shared, time: Timestamp) -> Result<bool> {
+    fn collect_frame_imu(
+        &mut self,
+        shared: &Shared,
+        time: Timestamp,
+        measurements: &CameraMeasurements,
+    ) -> Result<bool> {
         if self.parameters.imu.r#use {
             let before = shift_time(time, -IMU_TEMPORAL_OVERLAP)?;
             let after = shift_time(time, IMU_TEMPORAL_OVERLAP)?;
@@ -1518,7 +1546,7 @@ where
                     return Ok(false);
                 };
                 if before <= first.time_stamp {
-                    shared.cameras.pop(false)?;
+                    shared.consume_frame(measurements)?;
                     return Ok(false);
                 }
                 if shared
@@ -2577,7 +2605,9 @@ mod tests {
             result.recv_timeout(std::time::Duration::from_millis(20)),
             Err(mpsc::RecvTimeoutError::Timeout)
         );
-        assert_eq!(queue.pop(false).unwrap(), Some(1));
+        assert_eq!(queue.pop_if(|value| *value == 2).unwrap(), None);
+        assert_eq!(queue.front().unwrap(), Some(1));
+        assert_eq!(queue.pop_if(|value| *value == 1).unwrap(), Some(1));
         assert_eq!(
             result
                 .recv_timeout(std::time::Duration::from_secs(5))
@@ -2655,6 +2685,97 @@ mod tests {
             },
             shared: Arc::new(Shared::default()),
         }
+    }
+
+    #[test]
+    fn camera_overflow_during_inspection_preserves_next_frame() {
+        let mut core = marginalisation_core();
+        for reject_initial_imu in [false, true] {
+            let mut handle = sensor_handle();
+            let image = Arc::new(DynamicMatrix::new_u8(3, 4, 1, vec![17; 12]).unwrap());
+            let images = BTreeMap::from([(0, image)]);
+            // Equal timestamps must not make distinct submissions interchangeable.
+            for _ in 0..2 {
+                assert!(handle.add_images(
+                    Timestamp::from_millisecond(100).unwrap(),
+                    &images,
+                    &BTreeMap::new()
+                ));
+            }
+            let (frame, inspected) = core.get_next_frame(&handle.shared).unwrap().unwrap();
+            let mut producer = handle.clone();
+            thread::spawn(move || {
+                assert!(!producer.add_images(
+                    Timestamp::from_millisecond(300).unwrap(),
+                    &images,
+                    &BTreeMap::new()
+                ));
+            })
+            .join()
+            .unwrap();
+            let next = handle.shared.cameras.front().unwrap().unwrap();
+            assert!(!Arc::ptr_eq(&next, &inspected));
+            if reject_initial_imu {
+                assert!(handle.add_imu_measurement(
+                    Timestamp::from_millisecond(90).unwrap(),
+                    &Vector3::z(),
+                    &Vector3::zeros()
+                ));
+                assert!(
+                    !core
+                        .collect_frame_imu(&handle.shared, frame.borrow().timestamp(), &inspected)
+                        .unwrap()
+                );
+            } else {
+                handle.shared.consume_frame(&inspected).unwrap();
+            }
+            assert!(Arc::ptr_eq(
+                &handle.shared.cameras.pop(false).unwrap().unwrap(),
+                &next
+            ));
+            assert_eq!(
+                handle.shared.cameras.pop(false).unwrap().unwrap()[0].time_stamp,
+                Timestamp::from_millisecond(295).unwrap()
+            );
+            assert!(handle.shared.cameras.is_empty().unwrap());
+        }
+    }
+
+    #[test]
+    fn camera_waits_for_imu_then_consumes_only_inspected_submission() {
+        let mut core = marginalisation_core();
+        let mut handle = sensor_handle();
+        let image = Arc::new(DynamicMatrix::new_u8(3, 4, 1, vec![17; 12]).unwrap());
+        let images = BTreeMap::from([(0, image)]);
+        assert!(handle.add_images(
+            Timestamp::from_millisecond(100).unwrap(),
+            &images,
+            &BTreeMap::new()
+        ));
+        let (frame, inspected) = core.get_next_frame(&handle.shared).unwrap().unwrap();
+        let time = frame.borrow().timestamp();
+        assert!(
+            !core
+                .collect_frame_imu(&handle.shared, time, &inspected)
+                .unwrap()
+        );
+        assert!(Arc::ptr_eq(
+            &handle.shared.cameras.front().unwrap().unwrap(),
+            &inspected
+        ));
+        for millis in [70, 120] {
+            assert!(handle.add_imu_measurement(
+                Timestamp::from_millisecond(millis).unwrap(),
+                &Vector3::z(),
+                &Vector3::zeros()
+            ));
+        }
+        assert!(
+            core.collect_frame_imu(&handle.shared, time, &inspected)
+                .unwrap()
+        );
+        handle.shared.consume_frame(&inspected).unwrap();
+        assert!(handle.shared.cameras.is_empty().unwrap());
     }
 
     #[test]
