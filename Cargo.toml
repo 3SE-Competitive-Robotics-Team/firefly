@@ -35,6 +35,7 @@ logcall = "0.2.1"
 logforth = { version = "0.30.1", default-features = false }
 nalgebra = "0.35.0"
 ndarray = "0.17.2"
+nusb = "0.2.9"
 nix = { version = "0.31.3", features = ["signal", "process", "feature", "term"] }
 ort = { version = "=2.0.0-rc.15" }
 purecv = { version = "0.12.0", default-features = false, features = ["simd", "parallel"] }
@@ -49,6 +50,7 @@ zstd = "0.14.3"
 firefly-cost = { path = "crates/firefly-cost" }
 firefly-error = { path = "crates/firefly-error" }
 firefly-hal = { path = "crates/firefly-hal" }
+firefly-hil = { path = "crates/firefly-hil" }
 firefly-imu = { path = "crates/firefly-imu" }
 firefly-imu-initialization = { path = "crates/firefly-imu-initialization" }
 firefly-imu-propagation = { path = "crates/firefly-imu-propagation" }
