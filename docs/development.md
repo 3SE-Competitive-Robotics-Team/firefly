@@ -449,6 +449,16 @@ static 预览不进入文件和正常/异常退出时的完整性。构建、单
 
 ### OKVIS 算法与通讯专项
 
+Schur 微基准通过 `cargo bench -p firefly-okvis-x --bench schur --no-run` 预编译；
+待宿主机负载稳定后，先在另一终端运行 `uv run firefly-viz --save logs/schur_bench.rrd`，
+再运行 `RUST_LOG=info cargo bench -p firefly-okvis-x --bench schur`。录制路径必须未存在；
+完成后向记录进程发送 SIGINT 并等待退出。逐批样本及汇总在 `logs/schur-bench`。
+基准源码为 `apps/okvis2-x/benches/schur.rs`，确定性合成窗口、预热、批次数与数值门槛
+均在源码维护。两种求解均包含布局、分配、组装、消元、求解与回代；p95 是批均值的
+分位数，不是单帧尾延迟。生产路径保留稠密组装，按块组装仅编入测试及基准。
+合成线性系统的对比不代表真实 VIO 整帧性能或板端收益。
+`cargo test --all-targets` 下该基准只执行数值自检，不启动 IPC 或计时采样。
+
 ```bash
 cargo test --all-targets -p firefly-okvis-x -p firefly-brisk -p firefly-dbow2 \
   -p firefly-opengv -p firefly-srl-projection -p firefly-supereight2
