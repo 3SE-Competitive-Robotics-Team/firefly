@@ -21,6 +21,10 @@ path = "src/main.rs"
 name = "schur"
 harness = false
 
+[[bench]]
+name = "image_proc"
+harness = false
+
 [dependencies]
 fastrace.workspace = true
 firefly-base.workspace = true

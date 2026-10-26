@@ -1408,21 +1408,13 @@ where
         }
         Ok(success.then(|| (Rc::new(RefCell::new(frame)), frames)))
     }
-    fn detect(&self, frame: &MultiFramePtr, pose: &Transformation) -> Result<()> {
-        let n = frame.borrow().num_frames();
-        for c in 0..n {
-            if frame
-                .borrow()
-                .image(c)
-                .is_some_and(|i| i.rows() > 0 && i.cols() > 0)
-            {
-                let t_wc = pose.compose(frame.borrow().t_sc(c));
-                self.frontend.detect_and_describe(c, frame, &t_wc, None)?;
-            }
-        }
-        Ok(())
+    #[fastrace::trace]
+    fn detect(&mut self, frame: &MultiFramePtr, pose: &Transformation) -> Result<()> {
+        self.frontend.detect_frame(frame, pose)
     }
     fn process_frame(&mut self, shared: &Shared) -> Result<bool> {
+        let span = fastrace::Span::root("okvis-frame", fastrace::prelude::SpanContext::random());
+        let _parent = span.set_local_parent();
         let processing_start = Instant::now();
         self.finish_full_graph(false)?;
         let Some((frame, measurements)) = self.get_next_frame(shared)? else {
@@ -1567,6 +1559,7 @@ where
         Ok(true)
     }
 
+    #[fastrace::trace]
     fn associate_and_optimise_frame(
         &mut self,
         shared: &Shared,
@@ -1883,6 +1876,7 @@ where
         }
         Ok(())
     }
+    #[fastrace::trace]
     fn optimise_publish_marginalise(
         &mut self,
         shared: &Shared,
@@ -2138,6 +2132,7 @@ where
     fn drain(&mut self, shared: &Shared) -> Result<()> {
         while self.process_frame(shared)? {}
         self.frontend.end_cnn_threads()?;
+        self.frontend.end_image_workers()?;
         self.finish_full_graph(true)?;
         if self.graph.is_loop_closure_available() {
             let updated = self.graph.synchronise_realtime_and_full_graph()?;
