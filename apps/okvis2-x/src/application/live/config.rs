@@ -124,6 +124,8 @@ pub struct Config {
     pub num_keypoints: i32,
     pub realtime_iterations: i32,
     pub realtime_time_limit: f64,
+    /// Persistent workers for realtime factor evaluation and independent landmark solves.
+    pub solver_threads: i32,
     pub mapping: bool,
     /// An explicitly started external localization service owns navigation output.
     pub navigation: Navigation,
@@ -145,6 +147,7 @@ impl Default for Config {
             num_keypoints: 2500,
             realtime_iterations: 5,
             realtime_time_limit: 0.03,
+            solver_threads: 4,
             mapping: true,
             navigation: Navigation::Okvis,
             diagnostics: true,
@@ -173,6 +176,7 @@ impl Config {
             || self.stereo_tolerance > 0.01
             || self.num_keypoints <= 0
             || self.realtime_iterations <= 0
+            || self.solver_threads <= 0
             || !self.map_dimension.is_finite()
             || !self.map_resolution.is_finite()
             || self.map_dimension <= 0.0
@@ -276,7 +280,7 @@ impl Config {
                 realtime_min_iterations: 1,
                 realtime_max_iterations: self.realtime_iterations,
                 realtime_time_limit: self.realtime_time_limit,
-                realtime_num_threads: 1,
+                realtime_num_threads: self.solver_threads,
                 full_graph_iterations: 10,
                 full_graph_num_threads: 1,
                 p_dbow: 0.1,

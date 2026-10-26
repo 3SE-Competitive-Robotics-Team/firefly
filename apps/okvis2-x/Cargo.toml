@@ -25,6 +25,10 @@ harness = false
 name = "image_proc"
 harness = false
 
+[[bench]]
+name = "solver"
+harness = false
+
 [dependencies]
 fastrace.workspace = true
 firefly-base.workspace = true
@@ -44,6 +48,7 @@ nalgebra.workspace = true
 png.workspace = true
 purecv.workspace = true
 rand.workspace = true
+rayon.workspace = true
 serde.workspace = true
 toml.workspace = true
 

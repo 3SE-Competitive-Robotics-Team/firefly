@@ -64,7 +64,7 @@ fn anchored_loop_recovers_metric_poses_with_both_trust_region_strategies() {
                 None,
             );
         }
-        let summary = RustGraphSolver
+        let summary = RustGraphSolver::default()
             .solve(
                 &mut graph,
                 &SolverOptions {

@@ -29,6 +29,7 @@
 //! Input Jacobians already include manifold, robust-loss and column scaling.
 //! Regularization is the additive diagonal of the normal equations.
 use nalgebra::{DMatrix, DVector, Matrix3, Vector3};
+use rayon::prelude::*;
 
 pub struct Row {
     pub residual: DVector<f64>,
@@ -47,6 +48,16 @@ impl SchurSystem<'_> {
     /// Assemble only retained normal equations and connected landmark blocks.
     /// Factors connecting distinct landmarks use the complete dense system.
     pub fn block(&self, regularization: &DVector<f64>) -> Option<DVector<f64>> {
+        self.block_with_parallel(regularization, false)
+    }
+
+    /// Parallel calls must run inside the solver-owned pool.
+    #[fastrace::trace]
+    pub fn block_with_parallel(
+        &self,
+        regularization: &DVector<f64>,
+        parallel: bool,
+    ) -> Option<DVector<f64>> {
         let count = self.gradient.len();
         let mut point_for_column = vec![None; count];
         for (point, &offset) in self.eliminated_points.iter().enumerate() {
@@ -103,24 +114,15 @@ impl SchurSystem<'_> {
         for (index, &column) in retained.iter().enumerate() {
             reduced[(index, index)] += regularization[column];
         }
-        let mut solved = Vec::with_capacity(points.len());
-        for (point, &offset) in points.iter_mut().zip(self.eliminated_points) {
-            for i in 0..3 {
-                point.hessian[(i, i)] += regularization[offset + i];
-            }
-            if point.hessian.iter().any(|value| !value.is_finite()) {
-                return None;
-            }
-            let factor = point.hessian.cholesky()?;
-            let solved_cross = factor.solve(&point.cross);
-            let solved_rhs = factor.solve(&Vector3::from_fn(|i, _| -self.gradient[offset + i]));
+        let mut solved = self.eliminate_points(&points, regularization, parallel);
+        for (point, solution) in points.iter().zip(&solved) {
+            let (solved_cross, solved_rhs) = solution.as_ref()?;
             for (i, &row) in point.neighbors.iter().enumerate() {
-                rhs[row] -= point.cross.column(i).dot(&solved_rhs);
+                rhs[row] -= point.cross.column(i).dot(solved_rhs);
                 for (j, &column) in point.neighbors[..=i].iter().enumerate() {
                     reduced[(row, column)] -= point.cross.column(i).dot(&solved_cross.column(j));
                 }
             }
-            solved.push((solved_cross, solved_rhs));
         }
         if reduced.diagonal().iter().any(|value| !value.is_finite()) {
             return None;
@@ -128,24 +130,58 @@ impl SchurSystem<'_> {
         let solution = if retained.is_empty() {
             DVector::zeros(0)
         } else {
-            reduced.cholesky()?.solve(&rhs)
+            solve_reduced(reduced, &rhs)?
         };
         let mut output = DVector::zeros(count);
         for (index, &column) in retained.iter().enumerate() {
             output[column] = solution[index];
         }
-        for ((point, (cross, mut rhs)), &offset) in
-            points.iter().zip(solved).zip(self.eliminated_points)
-        {
-            for (i, &column) in point.neighbors.iter().enumerate() {
-                rhs -= cross.column(i) * solution[column];
-            }
-            output.rows_mut(offset, 3).copy_from(&rhs);
+        back_substitute(&points, &mut solved, &solution, parallel);
+        for (solved, &offset) in solved.into_iter().zip(self.eliminated_points) {
+            output.rows_mut(offset, 3).copy_from(&solved?.1);
         }
         output
             .iter()
             .all(|value| value.is_finite())
             .then_some(output)
+    }
+
+    #[fastrace::trace]
+    fn eliminate_points(
+        &self,
+        points: &[PointBlock],
+        regularization: &DVector<f64>,
+        parallel: bool,
+    ) -> Vec<Option<PointSolution>> {
+        let eliminate = |(point, &offset): (&PointBlock, &usize)| {
+            let mut hessian = point.hessian;
+            for i in 0..3 {
+                hessian[(i, i)] += regularization[offset + i];
+            }
+            if hessian.iter().any(|value| !value.is_finite()) {
+                return None;
+            }
+            let factor = hessian.cholesky()?;
+            Some((
+                factor.solve(&point.cross),
+                factor.solve(&Vector3::from_fn(|i, _| -self.gradient[offset + i])),
+            ))
+        };
+        // Indexed collection preserves landmark order independently of worker scheduling.
+        if parallel {
+            points
+                .par_iter()
+                .zip(self.eliminated_points.par_iter())
+                .with_min_len(32)
+                .map(eliminate)
+                .collect()
+        } else {
+            points
+                .iter()
+                .zip(self.eliminated_points)
+                .map(eliminate)
+                .collect()
+        }
     }
 
     fn point_blocks(
@@ -298,4 +334,35 @@ struct PointBlock {
     hessian: Matrix3<f64>,
     neighbors: Vec<usize>,
     cross: DMatrix<f64>,
+}
+
+type PointSolution = (DMatrix<f64>, Vector3<f64>);
+
+#[fastrace::trace]
+fn solve_reduced(matrix: DMatrix<f64>, rhs: &DVector<f64>) -> Option<DVector<f64>> {
+    Some(matrix.cholesky()?.solve(rhs))
+}
+
+#[fastrace::trace]
+fn back_substitute(
+    points: &[PointBlock],
+    solved: &mut [Option<PointSolution>],
+    solution: &DVector<f64>,
+    parallel: bool,
+) {
+    let apply = |(point, solved): (&PointBlock, &mut Option<PointSolution>)| {
+        let (cross, rhs) = solved.as_mut().expect("validated landmark factorization");
+        for (i, &column) in point.neighbors.iter().enumerate() {
+            *rhs -= cross.column(i) * solution[column];
+        }
+    };
+    if parallel {
+        points
+            .par_iter()
+            .zip(solved.par_iter_mut())
+            .with_min_len(32)
+            .for_each(apply);
+    } else {
+        points.iter().zip(solved).for_each(apply);
+    }
 }

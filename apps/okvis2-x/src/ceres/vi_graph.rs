@@ -481,7 +481,7 @@ impl ViGraph {
     pub fn new() -> Self {
         Self {
             covisibilities_computed: true,
-            solver: Some(Box::new(RustGraphSolver)),
+            solver: Some(Box::new(RustGraphSolver::default())),
             ..Self::default()
         }
     }

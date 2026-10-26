@@ -2761,7 +2761,7 @@ impl<B> LoopPoseSolver for super::frame_absolute_pose_sac_problem::OpenGvSolver<
             trust_region: "LEVENBERG_MARQUARDT",
             ..SolverOptions::default()
         };
-        RustGraphSolver.solve(&mut problem, &options)?;
+        RustGraphSolver::default().solve(&mut problem, &options)?;
         let pose = pose
             .borrow()
             .estimate()

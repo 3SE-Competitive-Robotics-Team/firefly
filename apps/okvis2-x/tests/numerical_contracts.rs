@@ -552,7 +552,7 @@ fn weighted_prior_solver_reaches_analytic_optimum_for_every_backend_and_preserve
                 vec![Parameter::SpeedBias(fixed.clone())],
                 None,
             );
-            let summary = RustGraphSolver
+            let summary = RustGraphSolver::default()
                 .solve(
                     &mut problem,
                     &SolverOptions {
@@ -601,7 +601,7 @@ fn huber_loss_limits_planted_outlier_influence() {
             Some(RobustLoss::Huber(1.0)),
         );
     }
-    let summary = RustGraphSolver
+    let summary = RustGraphSolver::default()
         .solve(
             &mut problem,
             &SolverOptions {
