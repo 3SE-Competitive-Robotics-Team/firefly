@@ -449,6 +449,17 @@ static 预览不进入文件和正常/异常退出时的完整性。构建、单
 
 ### OKVIS 算法与通讯专项
 
+生产求解器基准为 `apps/okvis2-x/benches/solver.rs`：先运行
+`cargo bench -p firefly-okvis-x --bench solver --no-run`，待宿主资源稳定并启动 RRD
+记录进程后运行生成的可执行文件并传 `--bench`。基准固定双目几何，使用生产重投影因子、
+位姿先验和 Schur 求解入口；不包含 IMU 或图像前端，不等同于真实采集窗口。
+每个样本恢复相同参数，轮换线程数，核对参数、代价及迭代次数精确一致；预热排除首次
+线程池启动。零迭代样本包含快照构造和初始线性化，多迭代样本包含完整求解与提交。
+样本、摘要和宿主计数写入 RRD 的 `logs/solver-bench`；规模、线程数和采样数以源码为准。
+计时样本完成后另跑带 trace 的阶段探针，区分求值、Schur、路标消元/回代与约化 Cholesky；
+探针不纳入计时分位数，嵌套 span 不相加当作总耗时。
+默认无 `--bench` 只运行数值自检。在线 `solver_threads = 1` 可用于完整任务串行对照。
+
 Schur 微基准通过 `cargo bench -p firefly-okvis-x --bench schur --no-run` 预编译；
 待宿主机负载稳定后，先在另一终端运行 `uv run firefly-viz --save logs/schur_bench.rrd`，
 再运行 `RUST_LOG=info cargo bench -p firefly-okvis-x --bench schur`。录制路径必须未存在；

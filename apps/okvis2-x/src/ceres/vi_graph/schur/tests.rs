@@ -32,6 +32,7 @@ fn verify(fixture: &Fixture) {
     let expected = DVector::from_iterator(n, (0..n).map(|i| expected[(i, 0)]));
     // Exercise the production dispatch as well as the individual assemblers.
     let model = Linearization {
+        parallel: false,
         cost: 0.0,
         fixed_cost: 0.0,
         rows: fixture
@@ -68,6 +69,45 @@ fn verify(fixture: &Fixture) {
         }
         assert!(normal_residual.amax() <= 1e-9 * (1.0 + fixture.gradient.amax()));
     }
+}
+
+#[test]
+fn parallel_landmark_elimination_and_back_substitution_match_serial_including_coupling() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    for points in [0, 1, 65, 150] {
+        let fixture = Fixture::window(4, points, 3);
+        assert_eq!(
+            fixture.system().block(&fixture.regularization),
+            pool.install(|| fixture
+                .system()
+                .block_with_parallel(&fixture.regularization, true))
+        );
+    }
+    let mut fixture = Fixture::window(2, 3, 2);
+    fixture.rows.push(Row {
+        residual: DVector::from_element(3, 0.7),
+        blocks: vec![
+            (0, DMatrix::identity(3, 3)),
+            (3, DMatrix::identity(3, 3) * 0.4),
+        ],
+    });
+    fixture.update_gradient();
+    assert_eq!(
+        fixture.system().dense(&fixture.regularization),
+        pool.install(|| fixture
+            .system()
+            .block_with_parallel(&fixture.regularization, true))
+    );
+    fixture.rows[0].blocks[0].1.fill(1e200);
+    assert!(
+        pool.install(|| fixture
+            .system()
+            .block_with_parallel(&fixture.regularization, true))
+            .is_none()
+    );
 }
 
 #[test]

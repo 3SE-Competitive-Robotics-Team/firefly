@@ -55,8 +55,18 @@ use schur::{Row, SchurSystem};
 #[path = "schur/tests.rs"]
 mod schur_tests;
 
+#[path = "evaluation.rs"]
+mod evaluation;
+#[path = "execution.rs"]
+mod execution;
+use evaluation::Workspace;
+use execution::Execution;
+
 #[derive(Default)]
-pub struct RustGraphSolver;
+pub struct RustGraphSolver {
+    execution: Execution,
+    workspace: Workspace,
+}
 
 #[derive(Clone)]
 struct Values {
@@ -645,99 +655,18 @@ impl Snapshot {
         disabled: &BTreeSet<ResidualId>,
         jacobians: bool,
     ) -> Result<Linearization> {
-        let linearization_size = if jacobians { size } else { 0 };
-        let mut model = Linearization {
-            cost: 0.0,
-            fixed_cost: 0.0,
-            rows: Vec::new(),
-            gradient: DVector::zeros(linearization_size),
-            diagonal: DVector::zeros(linearization_size),
-            eliminated_points: if jacobians {
-                offsets
-                    .iter()
-                    .filter_map(|(&key, &offset)| {
-                        matches!(values[&key].manifold, ManifoldKind::HomogeneousPoint)
-                            .then_some(offset)
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            },
-        };
-        let mut p = Vec::new();
-        let mut mask = Vec::new();
-        for f in &mut self.factors {
-            if disabled.contains(&f.id) {
-                continue;
-            }
-            p.clear();
-            p.extend(f.keys.iter().map(|k| values[k].data.as_slice()));
-            mask.clear();
-            mask.extend(f.keys.iter().map(|k| offsets.contains_key(k)));
-            let constant = !mask.iter().any(|x| *x);
-            let mut e = f
-                .factor
-                .evaluate(&p, (jacobians && !constant).then_some(mask.as_slice()))?;
-            if e.residuals.iter().any(|x| !x.is_finite()) {
-                return Err(graph_error("non-finite graph residual"));
-            }
-            let s = e.residuals.norm_squared();
-            let rho = f.loss.map_or([s, 1.0, 0.0], |loss| loss.evaluate(s));
-            if rho.iter().any(|x| !x.is_finite()) || rho[1] < 0.0 {
-                return Err(graph_error("invalid robust loss"));
-            }
-            if constant {
-                model.fixed_cost += 0.5 * rho[0];
-                continue;
-            }
-            model.cost += 0.5 * rho[0];
-            if !jacobians {
-                continue;
-            }
-            let mut blocks = Vec::new();
-            for (index, key) in f.keys.iter().enumerate() {
-                let Some(&offset) = offsets.get(key) else {
-                    continue;
-                };
-                let j = e
-                    .jacobians
-                    .get_mut(index)
-                    .and_then(Option::take)
-                    .ok_or_else(|| graph_error("ambient factor Jacobian absent"))?;
-                if j.shape() != (e.residuals.len(), values[key].data.len())
-                    || j.iter().any(|x| !x.is_finite())
-                {
-                    return Err(graph_error("invalid ambient factor Jacobian"));
-                }
-                blocks.push((offset, values[key].apply_plus_jacobian(j)));
-            }
-            // Ceres Corrector disables curvature correction for the three concave losses.
-            let sqrt = rho[1].sqrt();
-            for (_, j) in &mut blocks {
-                *j *= sqrt;
-            }
-            e.residuals *= sqrt;
-            for (offset, j) in &blocks {
-                model
-                    .gradient
-                    .rows_mut(*offset, j.ncols())
-                    .gemv_tr(1.0, j, &e.residuals, 1.0);
-                for c in 0..j.ncols() {
-                    model.diagonal[offset + c] += j.column(c).norm_squared();
-                }
-            }
-            model.rows.push(Row {
-                residual: e.residuals,
-                blocks,
-            });
-        }
-        if !model.cost.is_finite() {
-            return Err(graph_error("graph cost overflow"));
-        }
-        Ok(model)
+        self.evaluate_with(
+            values,
+            offsets,
+            size,
+            disabled,
+            jacobians,
+            &mut Workspace::default(),
+        )
     }
 }
 struct Linearization {
+    parallel: bool,
     cost: f64,
     fixed_cost: f64,
     rows: Vec<Row>,
@@ -845,7 +774,11 @@ impl Linearization {
             return None;
         }
         if kind == "DENSE_SCHUR" {
-            return self.system().block(regularization);
+            return if self.parallel {
+                self.system().block_with_parallel(regularization, true)
+            } else {
+                self.system().block(regularization)
+            };
         }
         let lower = self.lower_normal(regularization);
         let triplet_source = &lower;
@@ -993,15 +926,31 @@ fn ambient_difference(
     (norm.sqrt(), maximum)
 }
 impl Snapshot {
+    #[cfg(test)]
     fn run(
         &mut self,
         options: &SolverOptions,
         disabled: &BTreeSet<ResidualId>,
     ) -> Result<SolverSummary> {
+        let mut execution = Execution::default();
+        execution.configure(options.num_threads)?;
+        let mut workspace = Workspace::default();
+        match execution.pool() {
+            Some(pool) => pool.install(|| self.run_with(options, disabled, &mut workspace)),
+            None => self.run_with(options, disabled, &mut workspace),
+        }
+    }
+    fn run_with(
+        &mut self,
+        options: &SolverOptions,
+        disabled: &BTreeSet<ResidualId>,
+        workspace: &mut Workspace,
+    ) -> Result<SolverSummary> {
+        workspace.parallel = options.num_threads > 1;
         let (offsets, size) = self.variable_offsets(options, disabled)?;
         let start = Instant::now();
         let mut values = self.values.clone();
-        let mut model = self.evaluate(&values, &offsets, size, disabled, true)?;
+        let mut model = self.evaluate_with(&values, &offsets, size, disabled, true, workspace)?;
         let mut summary = Self::initial_summary(&model);
         if size == 0 {
             summary.report = "No varying parameter blocks".into();
@@ -1054,7 +1003,10 @@ impl Snapshot {
             let cost = candidate
                 .as_ref()
                 .ok()
-                .and_then(|x| self.evaluate(x, &offsets, size, disabled, false).ok())
+                .and_then(|x| {
+                    self.evaluate_with(x, &offsets, size, disabled, false, workspace)
+                        .ok()
+                })
                 .map_or(f64::MAX, |m| m.cost);
             if let Ok(candidate) = candidate {
                 let terminate = Self::candidate_termination(
@@ -1079,7 +1031,9 @@ impl Snapshot {
                     values = candidate;
                     had_successful_step = true;
                     strategy.accepted(quality, lm);
-                    model = self.evaluate(&values, &offsets, size, disabled, true)?;
+                    workspace.recycle(model);
+                    model =
+                        self.evaluate_with(&values, &offsets, size, disabled, true, workspace)?;
                     summary.final_cost = Some(model.cost + model.fixed_cost);
                     accepted = true;
                 } else {
@@ -1091,10 +1045,21 @@ impl Snapshot {
             }
             iteration_time = iteration_start.elapsed().as_secs_f64();
         }
+        Ok(self.finish_solve(values, model, summary, report, workspace))
+    }
+    fn finish_solve(
+        &mut self,
+        values: BTreeMap<usize, Values>,
+        model: Linearization,
+        mut summary: SolverSummary,
+        report: &str,
+        workspace: &mut Workspace,
+    ) -> SolverSummary {
         self.values = values;
         summary.report = report.into();
         summary.final_cost = Some(model.cost + model.fixed_cost);
-        Ok(summary)
+        workspace.recycle(model);
+        summary
     }
     fn log_iteration(
         iteration: usize,
@@ -1215,7 +1180,10 @@ impl GraphSolver for RustGraphSolver {
         options: &SolverOptions,
     ) -> Result<SolverSummary> {
         let mut snapshot = Snapshot::capture(problem)?;
-        let summary = snapshot.run(options, &BTreeSet::new())?;
+        self.execution.configure(options.num_threads)?;
+        let summary = self
+            .execution
+            .install(|| snapshot.run_with(options, &BTreeSet::new(), &mut self.workspace))?;
         snapshot.write_values(problem)?;
         snapshot.restore_caches(problem);
         Ok(summary)
@@ -1226,10 +1194,16 @@ impl GraphSolver for RustGraphSolver {
         stages: Vec<SolverStage>,
     ) -> Result<Box<dyn FnOnce() -> Result<SolverUpdate> + Send>> {
         let mut snapshot = Snapshot::capture(problem)?;
+        // Prepared jobs own their workspace and never borrow the live graph.
+        let mut execution = Execution::default();
+        let mut workspace = Workspace::default();
         Ok(Box::new(move || {
             let mut summary = SolverSummary::default();
             for stage in stages {
-                summary = snapshot.run(&stage.options, &stage.disabled_residuals)?;
+                execution.configure(stage.options.num_threads)?;
+                summary = execution.install(|| {
+                    snapshot.run_with(&stage.options, &stage.disabled_residuals, &mut workspace)
+                })?;
             }
             let caches = snapshot
                 .factors
@@ -1288,7 +1262,7 @@ impl GraphSolver for RustGraphSolver {
                 })
                 .collect(),
         };
-        snapshot.run(
+        snapshot.run_with(
             &SolverOptions {
                 max_iterations: iterations,
                 trust_region: "LEVENBERG_MARQUARDT",
@@ -1296,6 +1270,7 @@ impl GraphSolver for RustGraphSolver {
                 ..Default::default()
             },
             &BTreeSet::new(),
+            &mut self.workspace,
         )?;
         let p = &snapshot.values[&0].data;
         Ok(Transformation::new(
@@ -1379,6 +1354,7 @@ mod tests {
         );
         let residual = DVector::from_row_slice(&[1., -2., 0.5, 1., -0.25, 7.]);
         let model = Linearization {
+            parallel: false,
             cost: 0.5 * residual.norm_squared(),
             fixed_cost: 0.,
             rows: vec![
@@ -1436,6 +1412,7 @@ mod tests {
     #[test]
     fn predicted_change_keeps_cancellation_before_multiplication_at_large_magnitudes() {
         let mut model = Linearization {
+            parallel: false,
             cost: 0.,
             fixed_cost: 0.,
             rows: vec![Row {
@@ -1458,6 +1435,7 @@ mod tests {
     #[test]
     fn streamed_product_preserves_small_blocks_when_another_block_cancels() {
         let model = Linearization {
+            parallel: false,
             cost: 0.5,
             fixed_cost: 0.,
             rows: vec![Row {
@@ -1505,6 +1483,7 @@ mod tests {
                 });
             let expected = -owned_product.dot(&(&row.residual + &owned_product * 0.5));
             let model = Linearization {
+                parallel: false,
                 cost: 0.,
                 fixed_cost: 0.,
                 rows: vec![row],
@@ -1756,6 +1735,41 @@ mod tests {
         }
     }
 
+    fn assert_parallel_evaluation(
+        snapshot: &mut Snapshot,
+        values: &BTreeMap<usize, Values>,
+        offsets: &BTreeMap<usize, usize>,
+        size: usize,
+        expected: &Linearization,
+    ) {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        let mut workspace = Workspace::default();
+        workspace.parallel = true;
+        let parallel = pool
+            .install(|| {
+                snapshot.evaluate_with(
+                    values,
+                    offsets,
+                    size,
+                    &BTreeSet::new(),
+                    true,
+                    &mut workspace,
+                )
+            })
+            .unwrap();
+        assert_eq!(parallel.cost, expected.cost);
+        assert_eq!(parallel.fixed_cost, expected.fixed_cost);
+        assert_eq!(parallel.gradient, expected.gradient);
+        assert_eq!(parallel.diagonal, expected.diagonal);
+        for (a, b) in parallel.rows.iter().zip(&expected.rows) {
+            assert_eq!(a.residual, b.residual);
+            assert_eq!(a.blocks, b.blocks);
+        }
+    }
+
     #[test]
     fn imu_cost_only_matches_linearization_for_active_and_fixed_factors() {
         use crate::{
@@ -1840,6 +1854,7 @@ mod tests {
             let full = snapshot
                 .evaluate(&values, &offsets, size, &BTreeSet::new(), true)
                 .unwrap();
+            assert_parallel_evaluation(&mut snapshot, &values, &offsets, size, &full);
             assert_eq!(cost.cost, full.cost);
             assert_eq!(cost.fixed_cost, full.fixed_cost);
             assert!(cost.cost + cost.fixed_cost > 0.);
@@ -2079,6 +2094,7 @@ mod tests {
             let expected = matrix.lu().solve(&(-&gradient)).unwrap();
             for points in [vec![0, 3], vec![]] {
                 let model = Linearization {
+                    parallel: false,
                     cost: 0.,
                     fixed_cost: 0.,
                     rows: vec![],
@@ -2095,6 +2111,7 @@ mod tests {
     #[test]
     fn dense_schur_handles_all_points_and_coupled_landmark_fallback() {
         let model = Linearization {
+            parallel: false,
             cost: 0.,
             fixed_cost: 0.,
             rows: vec![],
