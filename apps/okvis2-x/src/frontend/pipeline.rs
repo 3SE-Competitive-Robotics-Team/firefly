@@ -19,11 +19,11 @@ use super::{
     stereo_triangulation::triangulate_fast,
 };
 use crate::{
-    cameras::camera_base::{CameraBase, ProjectionStatus},
+    cameras::camera_base::ProjectionStatus,
     ceres::{component::MultiFramePtr, imu_error::ImuError},
     config::parameters::{ImuParameters, ViParameters},
     frames::{
-        frame::{DescriptorExtractor, FeatureDetector, Frame, KeyPoint, Network},
+        frame::{Frame, KeyPoint},
         frame_typedefs::{
             KeypointIdentifier, LandmarkId, MapPoint2, MapPoints, SpeedAndBias, StateId,
         },
@@ -42,11 +42,12 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     marker::PhantomData,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
-/// Creates a classification network inside its owning worker thread.
-pub type NetworkInitializer = Box<dyn FnOnce() -> Result<Arc<dyn Network>> + Send>;
+pub use super::image_proc::brisk::{
+    BriskFeatureFactory, BriskSettings, NetworkInitializer, RustBriskFeatureFactory,
+};
 /// Graph primitives used by the matching algorithms; no matching stage is delegated.
 pub trait FrontendGraph {
     fn frame(&self, id: StateId) -> MultiFramePtr;
@@ -163,48 +164,6 @@ pub trait FrontendGraph {
     /// measurement dimensions are invalid, or matching, geometry, graph or file operations fail.
     fn clean_unobserved_landmarks(&mut self) -> Result<()>;
 }
-#[derive(Clone, Debug)]
-pub struct BriskSettings {
-    pub octaves: usize,
-    pub threshold: f64,
-    pub absolute_threshold: f64,
-    pub maximum_keypoints: usize,
-    pub rotation_invariance: bool,
-    pub scale_invariance: bool,
-}
-impl Default for BriskSettings {
-    fn default() -> Self {
-        Self {
-            octaves: 0,
-            threshold: 40.0,
-            absolute_threshold: 200.0,
-            maximum_keypoints: 450,
-            rotation_invariance: true,
-            scale_invariance: false,
-        }
-    }
-}
-/// Camera-aware BRISK constructor and gravity extraction direction. Implementations
-/// configure the supplied camera's ray/Jacobian maps and focal length before extraction.
-pub trait BriskFeatureFactory {
-    /// # Errors
-    /// Returns an error if required frames, cameras, landmarks or vocabulary data are absent,
-    /// measurement dimensions are invalid, or matching, geometry, graph or file operations fail.
-    fn create(
-        &self,
-        camera: &dyn CameraBase,
-        settings: &BriskSettings,
-        direction: Vector3<f32>,
-    ) -> Result<(Arc<dyn FeatureDetector>, Arc<dyn DescriptorExtractor>)>;
-    /// # Errors
-    /// Returns an error if required frames, cameras, landmarks or vocabulary data are absent,
-    /// measurement dimensions are invalid, or matching, geometry, graph or file operations fail.
-    fn classification_network_factory(&self, _camera: usize) -> Result<NetworkInitializer> {
-        Err(frontend_error(
-            "CNN network constructor capability is required",
-        ))
-    }
-}
 /// A fixed landmark/extrinsic reprojection residual for loop-pose Ceres refinement.
 pub struct LoopResidual {
     pub camera: usize,
@@ -275,9 +234,6 @@ struct InitializedMatches {
     reprojection_error: f64,
 }
 
-/// 单相机复用的一组特征检测器/描述子。
-type FeaturePair = (Arc<dyn FeatureDetector>, Arc<dyn DescriptorExtractor>);
-
 pub struct Frontend<G, S, B> {
     pub is_initialized: bool,
     pub tracking_lost: bool,
@@ -286,11 +242,8 @@ pub struct Frontend<G, S, B> {
     pub brisk_matching_threshold: f64,
     pub keyframe_insertion_overlap_threshold: f32,
     solver: S,
-    features: B,
-    detection_mutexes: Vec<Mutex<()>>,
-    /// 每相机只构建一次的 BRISK 检测器/描述子：旋转模式表与相机属性与帧无关，
-    /// 每帧重建要重算约 390 万个旋转项。
-    features_cache: Vec<Mutex<Option<FeaturePair>>>,
+    features: Arc<B>,
+    image_pipeline: super::image_proc::Pipeline,
     bow: BowDatabase,
     components: Vec<ComponentDatabase>,
     graph: PhantomData<G>,
@@ -334,9 +287,8 @@ impl<
             brisk_matching_threshold: 60.0,
             keyframe_insertion_overlap_threshold: 0.55,
             solver,
-            features,
-            detection_mutexes: (0..num_cameras).map(|_| Mutex::new(())).collect(),
-            features_cache: (0..num_cameras).map(|_| Mutex::new(None)).collect(),
+            features: Arc::new(features),
+            image_pipeline: super::image_proc::Pipeline::new(num_cameras),
             bow: BowDatabase::new(vocabulary),
             components: Vec::new(),
             graph: PhantomData,
@@ -377,7 +329,7 @@ impl<
     /// Returns an error if required frames, cameras, landmarks or vocabulary data are absent,
     /// measurement dimensions are invalid, or matching, geometry, graph or file operations fail.
     pub fn detect_and_describe(
-        &self,
+        &mut self,
         camera: usize,
         frame: &MultiFramePtr,
         t_wc: &Transformation,
@@ -386,43 +338,70 @@ impl<
         if keypoints.is_some() {
             return Err(frontend_error("external keypoints currently not supported"));
         }
-        let _guard = self
-            .detection_mutexes
-            .get(camera)
-            .ok_or_else(|| frontend_error("camera index out of range"))?
-            .lock()
-            .map_err(|_| frontend_error("detector mutex poisoned"))?;
-        let direction = t_wc
-            .inverse()
-            .rotate_vector(&Vector3::new(0.0, 0.0, -1.0))
-            .cast::<f32>();
-        let mut frame = frame.borrow_mut();
-        let (detector, extractor) = {
-            let mut cached = self
-                .features_cache
-                .get(camera)
-                .ok_or_else(|| frontend_error("camera index out of range"))?
-                .lock()
-                .map_err(|_| frontend_error("feature cache mutex poisoned"))?;
-            if let Some(pair) = cached.as_ref() {
-                pair.clone()
-            } else {
-                let pair = self.features.create(
-                    frame.geometry(camera).as_ref(),
-                    &self.brisk,
-                    direction,
-                )?;
-                *cached = Some(pair.clone());
-                pair
-            }
-        };
-        extractor.set_extraction_direction(direction);
-        frame.set_detector(camera, detector);
-        frame.set_extractor(camera, extractor);
-        frame.detect(camera)?;
-        frame.describe(camera)?;
-        frame.compute_back_projections(camera);
+        let input = Self::image_input(&frame.borrow(), camera, t_wc)?;
+        self.process_images(frame, vec![input])?;
         Ok(true)
+    }
+
+    /// Extract all nonempty camera images concurrently, then install the complete batch.
+    /// # Errors
+    /// Returns an error on input, initialization or worker failure; installs no partial batch.
+    pub fn detect_frame(&mut self, frame: &MultiFramePtr, pose: &Transformation) -> Result<()> {
+        let inputs = {
+            let frame = frame.borrow();
+            (0..frame.num_frames())
+                .filter(|&camera| {
+                    frame
+                        .image(camera)
+                        .is_some_and(|i| i.rows() > 0 && i.cols() > 0)
+                })
+                .map(|camera| Self::image_input(&frame, camera, &pose.compose(frame.t_sc(camera))))
+                .collect::<Result<Vec<_>>>()?
+        };
+        self.process_images(frame, inputs)
+    }
+
+    fn image_input(
+        frame: &MultiFrame,
+        camera: usize,
+        t_wc: &Transformation,
+    ) -> Result<super::image_proc::Input> {
+        if camera >= frame.num_frames() {
+            return Err(frontend_error("camera index out of range"));
+        }
+        Ok(super::image_proc::Input {
+            camera,
+            image: frame
+                .image(camera)
+                .ok_or_else(|| frontend_error("camera image absent"))?
+                .clone(),
+            geometry: frame.geometry(camera).clone(),
+            direction: t_wc
+                .inverse()
+                .rotate_vector(&Vector3::new(0.0, 0.0, -1.0))
+                .cast::<f32>(),
+        })
+    }
+
+    fn process_images(
+        &mut self,
+        frame: &MultiFramePtr,
+        inputs: Vec<super::image_proc::Input>,
+    ) -> Result<()> {
+        let outputs = self
+            .image_pipeline
+            .process(inputs, &self.features, &self.brisk)?;
+        let mut frame = frame.borrow_mut();
+        for output in outputs {
+            frame
+                .frame_mut(output.camera)
+                .install_features(output.features);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn end_image_workers(&mut self) -> Result<()> {
+        self.image_pipeline.shutdown()
     }
     /// # Errors
     /// Returns an error if required frames, cameras, landmarks or vocabulary data are absent,
@@ -2702,50 +2681,6 @@ fn frontend_bool(result: Result<bool>) -> bool {
             log::error!("{error}");
             false
         }
-    }
-}
-
-/// BRISK2 with camera ray/Jacobian maps and a gravity-aligned extraction direction.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct RustBriskFeatureFactory;
-impl BriskFeatureFactory for RustBriskFeatureFactory {
-    fn create(
-        &self,
-        camera: &dyn CameraBase,
-        settings: &BriskSettings,
-        direction: Vector3<f32>,
-    ) -> Result<(Arc<dyn FeatureDetector>, Arc<dyn DescriptorExtractor>)> {
-        use crate::frames::frame::{BriskDetector, BriskExtractor};
-        use firefly_brisk::brisk_descriptor_extractor::{BriskDescriptorExtractor, BriskVersion};
-        let maps = camera
-            .camera_awareness_maps()
-            .ok_or_else(|| frontend_error("camera awareness maps not initialised"))?;
-        let mut intrinsics = DVector::zeros(camera.num_intrinsics());
-        camera.get_intrinsics(&mut intrinsics);
-        let focal = *intrinsics
-            .get(0)
-            .ok_or_else(|| frontend_error("camera focal length absent"))?
-            as f32;
-        let detector = BriskDetector::new(
-            settings.threshold,
-            settings.octaves,
-            settings.absolute_threshold,
-            settings.maximum_keypoints,
-        )?;
-        let mut extractor = BriskDescriptorExtractor::new(
-            settings.rotation_invariance,
-            settings.scale_invariance,
-            BriskVersion::V2,
-            1.0,
-        )?;
-        extractor.set_camera_properties(maps.rays.clone(), maps.image_jacobians.clone(), focal)?;
-        extractor.set_extraction_direction(direction);
-        Ok((
-            Arc::new(detector),
-            Arc::new(BriskExtractor {
-                extractor: std::sync::Mutex::new(extractor),
-            }),
-        ))
     }
 }
 

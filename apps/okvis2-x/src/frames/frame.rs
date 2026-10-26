@@ -17,6 +17,14 @@ use std::sync::{
 
 pub type Image = Arc<DynamicMatrix>;
 
+/// Owned feature data, in extractor order, without graph or extractor resources.
+pub(crate) struct FrameFeatures {
+    keypoints: Vec<KeyPoint>,
+    descriptors: Option<Arc<Matrix<u8>>>,
+    back_projections: Vec<Option<Vector3<f64>>>,
+    back_projections_valid: Vec<bool>,
+}
+
 /// Detector capability; the implementation supplies the configured detector algorithm.
 pub trait FeatureDetector {
     /// # Errors
@@ -93,6 +101,23 @@ impl Clone for Frame {
     }
 }
 impl Frame {
+    pub(crate) fn take_features(&mut self) -> FrameFeatures {
+        FrameFeatures {
+            keypoints: std::mem::take(&mut self.keypoints),
+            descriptors: self.descriptors.take(),
+            back_projections: std::mem::take(&mut self.back_projections),
+            back_projections_valid: std::mem::take(&mut self.back_projections_valid),
+        }
+    }
+
+    pub(crate) fn install_features(&mut self, features: FrameFeatures) {
+        self.keypoints = features.keypoints;
+        self.descriptors = features.descriptors;
+        self.back_projections = features.back_projections;
+        self.back_projections_valid = features.back_projections_valid;
+        self.reset_landmark_storage();
+    }
+
     pub fn new(
         image: Image,
         geometry: Arc<dyn CameraBase>,

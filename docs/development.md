@@ -460,6 +460,16 @@ Schur 微基准通过 `cargo bench -p firefly-okvis-x --bench schur --no-run` �
 合成线性系统的对比不代表真实 VIO 整帧性能或板端收益。
 `cargo test --all-targets` 下该基准只执行数值自检，不启动 IPC 或计时采样。
 
+双目特征微基准源码为 `apps/okvis2-x/benches/image_proc.rs`，以
+`cargo bench -p firefly-okvis-x --bench image_proc --no-run` 预编译，记录进程启动后
+运行生成的 bench 可执行文件并传 `--bench`。串行路径保留单相机缓存及
+detect/describe/back-project 顺序，并行路径调用生产 `Frontend::detect_frame`。
+计时包含帧装配、分发、计算和结果安装；合成图像、标定 awareness maps 的创建不计入。
+首次提取器初始化单独采样；预热后交替测量单帧，并逐帧核对关键点、描述子及反投影。
+输入、轮数和采样数以基准源码为准；结果写入 RRD 的 `logs/image-proc-bench`。
+合成纹理与空白图像的结果只代表双目特征阶段，不代表整帧 VIO 或嵌入式性能。
+`cargo test --all-targets` 不执行该基准的计时或 IPC 路径。
+
 ```bash
 cargo test --all-targets -p firefly-okvis-x -p firefly-brisk -p firefly-dbow2 \
   -p firefly-opengv -p firefly-srl-projection -p firefly-supereight2
