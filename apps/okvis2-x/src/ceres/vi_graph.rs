@@ -289,6 +289,8 @@ pub struct SolverOptions {
     pub max_iterations: usize,
     pub function_tolerance: f64,
     pub num_threads: usize,
+    /// Reuse fully fixed residual costs within one solve; reset between solve stages.
+    pub cache_fixed_factors: bool,
     pub verbose: bool,
     pub time_limit: Option<f64>,
     pub minimum_iterations: usize,
@@ -301,6 +303,7 @@ impl Default for SolverOptions {
             max_iterations: 50,
             function_tolerance: 1.0e-6,
             num_threads: 1,
+            cache_fixed_factors: true,
             verbose: false,
             time_limit: None,
             minimum_iterations: 0,
@@ -1472,6 +1475,7 @@ impl ViGraph {
         }
         Ok(())
     }
+    #[fastrace::trace]
     pub fn compute_covisibilities(&mut self) -> bool {
         if self.covisibilities_computed {
             return true;
@@ -1647,6 +1651,7 @@ impl ViGraph {
     /// # Errors
     /// Returns an error if required graph states, parameter blocks or measurements are absent,
     /// input dimensions/values are invalid, or evaluation, optimization or graph I/O fails.
+    #[fastrace::trace]
     pub fn update_landmarks(&mut self) -> Result<()> {
         let ids: Vec<_> = self.landmarks.keys().copied().collect();
         for id in ids {
@@ -1704,6 +1709,7 @@ impl ViGraph {
     /// # Errors
     /// Returns an error if required graph states, parameter blocks or measurements are absent,
     /// input dimensions/values are invalid, or evaluation, optimization or graph I/O fails.
+    #[fastrace::trace]
     pub fn optimise(
         &mut self,
         max_iterations: usize,

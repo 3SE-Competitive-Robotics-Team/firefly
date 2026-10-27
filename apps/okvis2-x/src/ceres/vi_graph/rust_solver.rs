@@ -62,6 +62,10 @@ mod execution;
 use evaluation::Workspace;
 use execution::Execution;
 
+#[cfg(feature = "solver-bench")]
+#[path = "fixed_bench.rs"]
+mod fixed_bench;
+
 #[derive(Default)]
 pub struct RustGraphSolver {
     execution: Execution,
@@ -485,6 +489,7 @@ impl Factor {
     }
 }
 impl Snapshot {
+    #[fastrace::trace]
     fn capture(problem: &GraphProblem) -> Result<Self> {
         let values = Self::capture_values(problem)?;
         let mut factors = Vec::new();
@@ -593,6 +598,7 @@ impl Snapshot {
         Ok(values)
     }
 
+    #[fastrace::trace]
     fn restore_caches(&self, problem: &GraphProblem) {
         for f in &self.factors {
             let Some(r) = problem.residuals.get(&f.id) else {
@@ -605,6 +611,7 @@ impl Snapshot {
             }
         }
     }
+    #[fastrace::trace]
     fn write_values(&self, problem: &GraphProblem) -> Result<()> {
         for (&key, v) in &self.values {
             let (p, _) = problem
@@ -946,7 +953,7 @@ impl Snapshot {
         disabled: &BTreeSet<ResidualId>,
         workspace: &mut Workspace,
     ) -> Result<SolverSummary> {
-        workspace.parallel = options.num_threads > 1;
+        workspace.begin(options.num_threads > 1, options.cache_fixed_factors);
         let (offsets, size) = self.variable_offsets(options, disabled)?;
         let start = Instant::now();
         let mut values = self.values.clone();
@@ -1179,13 +1186,36 @@ impl GraphSolver for RustGraphSolver {
         problem: &mut GraphProblem,
         options: &SolverOptions,
     ) -> Result<SolverSummary> {
+        let start =
+            log::log_enabled!(target: "solver-profile", log::Level::Debug).then(Instant::now);
         let mut snapshot = Snapshot::capture(problem)?;
+        let captured = start.map(|s| s.elapsed().as_secs_f64());
         self.execution.configure(options.num_threads)?;
         let summary = self
             .execution
             .install(|| snapshot.run_with(options, &BTreeSet::new(), &mut self.workspace))?;
+        let solved = start.map(|s| s.elapsed().as_secs_f64());
         snapshot.write_values(problem)?;
+        let written = start.map(|s| s.elapsed().as_secs_f64());
         snapshot.restore_caches(problem);
+        if let Some(start) = start {
+            let restored = start.elapsed().as_secs_f64();
+            let (offsets, dimensions) = snapshot.variable_offsets(options, &BTreeSet::new())?;
+            let constant = snapshot
+                .factors
+                .iter()
+                .filter(|f| f.keys.iter().all(|k| !offsets.contains_key(k)))
+                .count();
+            let points = offsets
+                .keys()
+                .filter(|k| matches!(snapshot.values[k].manifold, ManifoldKind::HomogeneousPoint))
+                .count();
+            log::debug!(target: "solver-profile", "factors={} constant={constant} dimensions={dimensions} points={points} iterations={} evaluations={} factor_evaluations={} fixed_cache={} capture_ms={:.6} solve_ms={:.6} write_ms={:.6} caches_ms={:.6}",
+                snapshot.factors.len(), summary.iterations, self.workspace.evaluation_calls,
+                self.workspace.factor_evaluations(), options.cache_fixed_factors,
+                captured.unwrap() * 1000.0, (solved.unwrap() - captured.unwrap()) * 1000.0,
+                (written.unwrap() - solved.unwrap()) * 1000.0, (restored - written.unwrap()) * 1000.0);
+        }
         Ok(summary)
     }
     fn prepare_solve(
@@ -1770,8 +1800,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn imu_cost_only_matches_linearization_for_active_and_fixed_factors() {
+    fn imu_factor_fixture() -> ImuError {
         use crate::{
             config::parameters::ImuParameters,
             sensors::measurements::{ImuMeasurement, ImuSensorReadings},
@@ -1806,13 +1835,18 @@ mod tests {
                 )
             })
             .collect();
-        let factor = ImuError::new(
+        ImuError::new(
             samples,
             parameters,
             Timestamp::UNIX_EPOCH,
             Timestamp::from_millisecond(100).unwrap(),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn imu_cost_only_matches_linearization_for_active_and_fixed_factors() {
+        let factor = imu_factor_fixture();
         for fixed in [false, true] {
             let values = [
                 (vec![0., 0., 0., 0., 0., 0., 1.], ManifoldKind::Pose),
@@ -1848,6 +1882,45 @@ mod tests {
                 BTreeMap::from([(0, 0), (1, 6), (2, 15), (3, 21)])
             };
             let size = if fixed { 0 } else { 30 };
+            let mut cached_snapshot = Snapshot {
+                values: values.clone(),
+                factors: vec![FactorRecord {
+                    id: 1,
+                    factor: Factor::Imu(Box::new(factor.clone())),
+                    keys: vec![0, 1, 2, 3],
+                    loss: Some(RobustLoss::Huber(1.)),
+                }],
+            };
+            let mut workspace = Workspace::default();
+            workspace.begin(false, true);
+            for jacobians in [true, false, true] {
+                let cached = cached_snapshot
+                    .evaluate_with(
+                        &values,
+                        &offsets,
+                        size,
+                        &BTreeSet::new(),
+                        jacobians,
+                        &mut workspace,
+                    )
+                    .unwrap();
+                let repeated = snapshot
+                    .evaluate(&values, &offsets, size, &BTreeSet::new(), jacobians)
+                    .unwrap();
+                assert_eq!(cached.cost, repeated.cost);
+                assert_eq!(cached.fixed_cost, repeated.fixed_cost);
+                assert_eq!(cached.gradient, repeated.gradient);
+                assert_eq!(cached.diagonal, repeated.diagonal);
+                let Factor::Imu(a) = &cached_snapshot.factors[0].factor else {
+                    unreachable!()
+                };
+                let Factor::Imu(b) = &snapshot.factors[0].factor else {
+                    unreachable!()
+                };
+                assert_eq!(a.redo_counter, b.redo_counter);
+                assert_eq!(a.preintegration.reference, b.preintegration.reference);
+            }
+            assert_eq!(workspace.factor_evaluations(), if fixed { 1 } else { 3 });
             let cost = snapshot
                 .evaluate(&values, &offsets, size, &BTreeSet::new(), false)
                 .unwrap();

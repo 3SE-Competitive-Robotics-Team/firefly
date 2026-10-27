@@ -105,6 +105,7 @@ impl ViGraphEstimator {
     /// # Panics
     /// Panics if an internal graph invariant is violated after its validation/insertion checks;
     /// referenced states, blocks and factor caches must remain consistent.
+    #[fastrace::trace]
     pub fn eliminate_state_by_imu_merge(
         &mut self,
         id: StateId,
@@ -530,6 +531,7 @@ impl ViGraphEstimator {
     /// # Panics
     /// Panics if an internal graph invariant is violated after its validation/insertion checks;
     /// referenced states, blocks and factor caches must remain consistent.
+    #[fastrace::trace]
     pub fn convert_to_pose_graph_mst(
         &mut self,
         states: &BTreeSet<StateId>,

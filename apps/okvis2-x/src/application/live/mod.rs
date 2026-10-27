@@ -56,6 +56,7 @@ pub fn run(config: Config, vocabulary: Option<&Path>) -> Result<()> {
         vocabulary,
         maps.clone(),
         config.diagnostics,
+        config.fixed_factor_evaluation.cached(),
     )?;
     let mut mapping = if config.mapping {
         let mut backend = OccupancyMapBackend::new(config.map(), DataConfig::default());
@@ -158,6 +159,7 @@ fn create_estimator(
     vocabulary: Vocabulary,
     maps: SharedOccupancyMaps,
     diagnostics: bool,
+    cache_fixed_factors: bool,
 ) -> Result<ThreadedSlam> {
     let params = parameters.clone();
     let submap_config = submaps.clone();
@@ -173,8 +175,10 @@ fn create_estimator(
                 RustBriskFeatureFactory,
             );
             let image_delay = params.camera.image_delay;
+            let mut backend = ViSlamBackend::default();
+            backend.realtime_graph.options.cache_fixed_factors = cache_fixed_factors;
             let mut core = ProcessingCore::new(
-                ViSlamBackend::default(),
+                backend,
                 frontend,
                 params,
                 submap_config,

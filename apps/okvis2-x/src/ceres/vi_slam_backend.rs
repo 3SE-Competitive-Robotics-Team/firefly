@@ -940,6 +940,7 @@ impl ViSlamBackend {
     /// # Errors
     /// Returns an error if required graph states, parameter blocks or measurements are absent,
     /// input dimensions/values are invalid, or evaluation, optimization or graph I/O fails.
+    #[fastrace::trace]
     pub fn convert_to_pose_graph_mst(
         &mut self,
         convert: &BTreeSet<StateId>,
@@ -1079,6 +1080,7 @@ impl ViSlamBackend {
     /// # Panics
     /// Panics if an internal graph invariant is violated after its validation/insertion checks;
     /// referenced states, blocks and factor caches must remain consistent.
+    #[fastrace::trace]
     pub fn eliminate_imu_frames(&mut self, keep: usize) -> Result<BTreeSet<StateId>> {
         let mut eliminated = BTreeSet::new();
         let ids = self.imu_frames.clone();
@@ -1132,6 +1134,7 @@ impl ViSlamBackend {
     /// # Panics
     /// Panics if an internal graph invariant is violated after its validation/insertion checks;
     /// referenced states, blocks and factor caches must remain consistent.
+    #[fastrace::trace]
     pub fn apply_strategy(
         &mut self,
         num_keyframes: usize,
@@ -1372,6 +1375,7 @@ impl ViSlamBackend {
     /// # Errors
     /// Returns an error if required graph states, parameter blocks or measurements are absent,
     /// input dimensions/values are invalid, or evaluation, optimization or graph I/O fails.
+    #[fastrace::trace]
     pub fn optimise_realtime_graph(
         &mut self,
         iterations: usize,
@@ -1384,7 +1388,14 @@ impl ViSlamBackend {
         let fixation = self.initial_pose_fixation(newest, initialised)?;
         let (unfreeze, frozen) = self.freeze_newest_window(only_newest, newest)?;
         self.realtime_graph.options.linear_solver = "DENSE_SCHUR";
-        let solve = self.realtime_graph.optimise(iterations, threads, verbose);
+        let solve = {
+            let _phase = fastrace::local::LocalSpan::enter_with_local_parent(if only_newest {
+                "newest-state-solve"
+            } else {
+                "window-solve"
+            });
+            self.realtime_graph.optimise(iterations, threads, verbose)
+        };
         if only_newest {
             return self.restore_newest_solve(newest, (unfreeze, frozen), fixation, solve);
         }
@@ -1395,6 +1406,8 @@ impl ViSlamBackend {
             return Err(error);
         }
         self.realtime_graph.update_landmarks()?;
+        let _sync_span =
+            fastrace::local::LocalSpan::enter_with_local_parent("realtime-full-graph-sync");
         let mut updated: Vec<_> = self
             .updated_states_loop_closure_attempt
             .iter()

@@ -329,6 +329,7 @@ fn real_ipc_transports_sensor_inputs_and_publishes_one_consistent_navigation_sna
         super::load_vocabulary(None).unwrap(),
         Arc::default(),
         false,
+        config.fixed_factor_evaluation.cached(),
     )
     .unwrap();
     let handle = estimator.sensor_input_handle();
@@ -554,6 +555,7 @@ fn incomplete_imu_coverage_returns_without_blocking_and_pending_inputs_close_cle
         super::load_vocabulary(None).unwrap(),
         Arc::default(),
         false,
+        config.fixed_factor_evaluation.cached(),
     )
     .unwrap();
     let mut input = estimator.sensor_input_handle();
