@@ -376,10 +376,10 @@ fn sliding_window_merges_imu_factors_and_preserves_endpoints_and_historical_stat
         panic!("IMU link required");
     };
     let mut factor = factor.borrow_mut();
-    assert_eq!(factor.imu_measurements.len(), samples.len());
+    assert_eq!(factor.imu_measurements().len(), samples.len());
     assert!(
         factor
-            .imu_measurements
+            .imu_measurements()
             .iter()
             .map(|m| m.time_stamp)
             .eq(samples.iter().map(|m| m.time_stamp))

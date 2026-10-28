@@ -26,7 +26,10 @@ use crate::{
 };
 use jiff::Timestamp;
 use nalgebra::{DMatrix, Matrix3, Quaternion, SMatrix, SVector, Vector3};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 pub type Covariance = SMatrix<f64, 15, 15>;
 pub type Information = Covariance;
@@ -426,7 +429,8 @@ pub trait ImuErrorBase {
 #[derive(Clone, Debug)]
 pub struct ImuError {
     pub imu_parameters: ImuParameters,
-    pub imu_measurements: ImuMeasurementDeque,
+    /// Immutable input version shared by independent factor caches.
+    imu_measurements: Arc<ImuMeasurementDeque>,
     pub t0: Timestamp,
     pub t1: Timestamp,
     pub(crate) preintegration: Preintegration,
@@ -490,7 +494,7 @@ impl ImuError {
         // Weighting is assigned by preintegration, before any evaluation.
         Ok(Self {
             imu_parameters,
-            imu_measurements,
+            imu_measurements: Arc::new(imu_measurements),
             t0,
             t1,
             preintegration: Preintegration::default(),
@@ -501,7 +505,12 @@ impl ImuError {
         })
     }
     pub fn set_imu_measurements(&mut self, m: ImuMeasurementDeque) {
-        self.imu_measurements = m;
+        self.imu_measurements = Arc::new(m);
+    }
+    /// Read-only input; replacement and append preserve existing snapshot versions.
+    #[must_use]
+    pub fn imu_measurements(&self) -> &ImuMeasurementDeque {
+        &self.imu_measurements
     }
     pub fn set_imu_parameters(&mut self, p: ImuParameters) {
         self.imu_parameters = p;
@@ -566,7 +575,7 @@ impl ImuError {
             .back()
             .ok_or(IntegrationError::MissingMeasurements)?
             .time_stamp;
-        self.imu_measurements.extend(
+        Arc::make_mut(&mut self.imu_measurements).extend(
             measurements
                 .iter()
                 .filter(|m| m.time_stamp > previous_last)

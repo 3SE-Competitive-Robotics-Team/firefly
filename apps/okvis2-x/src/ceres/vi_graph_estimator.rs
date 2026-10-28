@@ -160,7 +160,7 @@ impl ViGraphEstimator {
             (GraphFactor::Imu(left), GraphFactor::Imu(right)) => {
                 let right = right.borrow();
                 let mut left = left.borrow_mut();
-                left.append(&pose, &sb, &right.imu_measurements, right.t1)
+                left.append(&pose, &sb, right.imu_measurements(), right.t1)
                     .map_err(|e| graph_error(&format!("append IMU: {e:?}")))?;
                 let copy = Rc::new(left.clone());
                 self.states

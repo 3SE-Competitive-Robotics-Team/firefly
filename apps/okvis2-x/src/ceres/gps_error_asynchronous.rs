@@ -29,7 +29,10 @@ use crate::{
 };
 use jiff::Timestamp;
 use nalgebra::{Matrix3, Quaternion, SMatrix, SVector, Vector3};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 pub static REDO_PROPAGATION_ALWAYS: AtomicBool = AtomicBool::new(false);
 pub static USE_IMU_COVARIANCE: AtomicBool = AtomicBool::new(true);
 
@@ -48,7 +51,8 @@ pub struct GpsErrorAsynchronous {
     pub gps_information: Matrix3<f64>,
     pub gps_covariance: Matrix3<f64>,
     pub imu_parameters: ImuParameters,
-    pub imu_measurements: ImuMeasurementDeque,
+    /// Immutable input version shared by independent factor caches.
+    imu_measurements: Arc<ImuMeasurementDeque>,
     pub tk: Timestamp,
     pub tg: Timestamp,
     pub square_root_information: Option<Matrix3<f64>>,
@@ -83,7 +87,7 @@ impl GpsErrorAsynchronous {
             gps_information: information,
             gps_covariance: inverse3(&information),
             imu_parameters,
-            imu_measurements,
+            imu_measurements: Arc::new(imu_measurements),
             tk,
             tg,
             square_root_information: None,
@@ -127,7 +131,12 @@ impl GpsErrorAsynchronous {
         self.imu_parameters = x;
     }
     pub fn set_imu_measurements(&mut self, x: ImuMeasurementDeque) {
-        self.imu_measurements = x;
+        self.imu_measurements = Arc::new(x);
+    }
+    /// Read-only input; replacing measurements preserves existing snapshot versions.
+    #[must_use]
+    pub fn imu_measurements(&self) -> &ImuMeasurementDeque {
+        &self.imu_measurements
     }
     pub fn set_tg(&mut self, x: Timestamp) {
         self.tg = x;
