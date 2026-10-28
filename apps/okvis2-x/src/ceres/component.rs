@@ -607,7 +607,7 @@ impl<'a, G: ComponentGraph> Component<'a, G> {
                     .ok_or_else(|| component_error("first state has a previous IMU link"))?;
                 writeln!(file, "EDGE_IMU {} {}", previous, id.value())
                     .map_err(|error| io_error(&error))?;
-                for sample in &imu.imu_measurements {
+                for sample in imu.imu_measurements() {
                     let acc = sample.measurement.accelerometers;
                     let gyr = sample.measurement.gyroscopes;
                     writeln!(

@@ -1845,6 +1845,89 @@ mod tests {
     }
 
     #[test]
+    fn shared_measurements_preserve_complete_inertial_solves() {
+        let original = imu_factor_fixture();
+        let mut reference = None;
+        for threads in [1, 4] {
+            for deep_copy in [true, false] {
+                let mut factor = original.clone();
+                if deep_copy {
+                    factor.set_imu_measurements(original.imu_measurements().clone());
+                }
+                assert_eq!(
+                    std::ptr::eq(factor.imu_measurements(), original.imu_measurements()),
+                    !deep_copy
+                );
+                let values = [
+                    (vec![0., 0., 0., 0., 0., 0., 1.], ManifoldKind::Pose),
+                    (vec![0.; 9], ManifoldKind::Euclidean),
+                    (vec![0.1, 0., 0., 0., 0., 0., 1.], ManifoldKind::Pose),
+                    (vec![0.; 9], ManifoldKind::Euclidean),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(key, (data, manifold))| {
+                    (
+                        key,
+                        Values {
+                            data,
+                            manifold,
+                            fixed: key < 2,
+                        },
+                    )
+                })
+                .collect();
+                let mut snapshot = Snapshot {
+                    values,
+                    factors: vec![FactorRecord {
+                        id: 1,
+                        factor: Factor::Imu(Box::new(factor)),
+                        keys: vec![0, 1, 2, 3],
+                        loss: Some(RobustLoss::Huber(1.)),
+                    }],
+                };
+                let summary = snapshot
+                    .run(
+                        &SolverOptions {
+                            num_threads: threads,
+                            max_iterations: 10,
+                            linear_solver: "DENSE_SCHUR",
+                            ..Default::default()
+                        },
+                        &BTreeSet::new(),
+                    )
+                    .unwrap();
+                assert!(summary.successful);
+                assert!(summary.final_cost.unwrap() < summary.initial_cost.unwrap());
+                let Factor::Imu(cache) = &snapshot.factors[0].factor else {
+                    unreachable!()
+                };
+                let result = (
+                    snapshot
+                        .values
+                        .values()
+                        .map(|v| v.data.clone())
+                        .collect::<Vec<_>>(),
+                    summary.initial_cost,
+                    summary.final_cost,
+                    summary.iterations,
+                    summary.report,
+                    cache.information,
+                    cache.square_root_information,
+                    cache.redo_counter,
+                );
+                if let Some(expected) = &reference {
+                    assert_eq!(&result, expected);
+                } else {
+                    reference = Some(result);
+                }
+            }
+        }
+        assert_eq!(original.redo_counter, 0);
+        assert!(original.information.is_none());
+    }
+
+    #[test]
     fn imu_cost_only_matches_linearization_for_active_and_fixed_factors() {
         let factor = imu_factor_fixture();
         for fixed in [false, true] {

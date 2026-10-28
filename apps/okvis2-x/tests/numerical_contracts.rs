@@ -14,16 +14,18 @@ use firefly_okvis_x::{
     },
     ceres::{
         depth_error::{DepthJacobians, OneSidedDepthError},
+        gps_error_asynchronous::GpsErrorAsynchronous,
         imu_error::{Covariance, ImuError, IntegrationError, Jacobian},
         pose_local_parameterization::PoseManifold,
+        pose_parameter_block::PoseParameterBlock,
         speed_and_bias_error::SpeedAndBiasError,
         speed_and_bias_parameter_block::SpeedAndBiasParameterBlock,
         vi_graph::{
             GraphFactor, GraphProblem, GraphSolver, ManifoldKind, Parameter, RobustLoss,
-            RustGraphSolver, SolverOptions,
+            RustGraphSolver, SolverFactorCache, SolverOptions, SolverStage,
         },
     },
-    config::parameters::ImuParameters,
+    config::parameters::{GpsParameters, ImuParameters},
     kinematics::transformation::{Transformation, delta_q},
     sensors::measurements::{ImuMeasurement, ImuMeasurementDeque, ImuSensorReadings},
 };
@@ -239,6 +241,15 @@ fn imu_residual_only_preserves_cost_and_cache_across_bias_updates() {
         let mut cost_factor =
             ImuError::new(samples, imu_parameters(), time(0), time((count - 1) * 10)).unwrap();
         let mut full_factor = cost_factor.clone();
+        assert!(std::ptr::eq(
+            cost_factor.imu_measurements(),
+            full_factor.imu_measurements()
+        ));
+        full_factor.set_imu_measurements(full_factor.imu_measurements().clone());
+        assert!(!std::ptr::eq(
+            cost_factor.imu_measurements(),
+            full_factor.imu_measurements()
+        ));
         let first = Transformation::new(
             Vector3::new(0.1, -0.2, 0.3),
             delta_q(&Vector3::new(0.2, -0.1, 0.3)),
@@ -300,7 +311,7 @@ fn imu_residual_only_preserves_integration_and_covariance_errors() {
     )
     .unwrap();
     let mut missing = factor.clone();
-    missing.imu_measurements.clear();
+    missing.set_imu_measurements(ImuMeasurementDeque::new());
     assert_eq!(
         missing.evaluate_residual(pose.coeffs(), &sb, pose.coeffs(), &sb),
         Err(IntegrationError::MissingMeasurements)
@@ -325,6 +336,178 @@ fn imu_residual_only_preserves_integration_and_covariance_errors() {
             .unwrap_err(),
         IntegrationError::InvalidCovariance
     );
+}
+
+#[test]
+fn imu_snapshot_input_is_shared_but_append_and_caches_are_isolated() {
+    let all = imu_samples(Vector3::new(0.1, 0.2, -0.1), Vector3::new(0.2, 0.1, 9.81));
+    let mut live = ImuError::new(
+        all.iter().take(21).cloned().collect(),
+        imu_parameters(),
+        time(0),
+        time(200),
+    )
+    .unwrap();
+    let mut snapshot = live.clone();
+    assert!(std::ptr::eq(
+        live.imu_measurements(),
+        snapshot.imu_measurements()
+    ));
+    let pose = Transformation::identity();
+    let bias = SVector::<f64, 9>::zeros();
+    let snapshot_result = snapshot
+        .evaluate(pose.coeffs(), &bias, pose.coeffs(), &bias)
+        .unwrap();
+    assert_eq!(live.redo_counter, 0);
+    assert!(live.information.is_none());
+    live.evaluate(pose.coeffs(), &bias, pose.coeffs(), &bias)
+        .unwrap();
+    let mut deep = live.clone();
+    deep.set_imu_measurements(live.imu_measurements().clone());
+    let tail = all.iter().skip(20).take(21).cloned().collect();
+    live.append(&pose, &bias, &tail, time(400)).unwrap();
+    deep.append(&pose, &bias, &tail, time(400)).unwrap();
+    assert!(!std::ptr::eq(
+        live.imu_measurements(),
+        snapshot.imu_measurements()
+    ));
+    assert_eq!(snapshot.imu_measurements().len(), 21);
+    assert_eq!(snapshot.t1, time(200));
+    assert_eq!(live.imu_measurements().len(), 41);
+    let a = live
+        .evaluate(pose.coeffs(), &bias, pose.coeffs(), &bias)
+        .unwrap();
+    let b = deep
+        .evaluate(pose.coeffs(), &bias, pose.coeffs(), &bias)
+        .unwrap();
+    assert_eq!(a.residual, b.residual);
+    assert_eq!(a.pose0, b.pose0);
+    assert_eq!(a.pose1, b.pose1);
+    assert_eq!(a.speed_bias0, b.speed_bias0);
+    assert_eq!(a.speed_bias1, b.speed_bias1);
+    assert_eq!(live.information, deep.information);
+    assert_eq!(
+        snapshot
+            .evaluate(pose.coeffs(), &bias, pose.coeffs(), &bias)
+            .unwrap()
+            .residual,
+        snapshot_result.residual
+    );
+    live.set_imu_measurements(ImuMeasurementDeque::new());
+    assert_eq!(snapshot.imu_measurements().len(), 21);
+    assert_eq!(deep.imu_measurements().len(), 41);
+}
+
+#[test]
+fn gps_shared_input_matches_deep_copy_across_bias_updates_and_replacement() {
+    let samples = imu_samples(Vector3::new(0.1, 0.2, -0.1), Vector3::new(0.2, 0.1, 9.81));
+    let live = GpsErrorAsynchronous::new(
+        Vector3::new(0.2, 0.3, 0.4),
+        SMatrix::identity(),
+        samples.into_iter().take(21).collect(),
+        imu_parameters(),
+        time(0),
+        time(200),
+        GpsParameters::default(),
+    );
+    let mut shared = live.clone();
+    let mut deep = live.clone();
+    deep.set_imu_measurements(live.imu_measurements().clone());
+    assert!(std::ptr::eq(
+        shared.imu_measurements(),
+        live.imu_measurements()
+    ));
+    assert!(!std::ptr::eq(
+        deep.imu_measurements(),
+        live.imu_measurements()
+    ));
+    let pose = Transformation::identity();
+    let mut bias = SVector::<f64, 9>::zeros();
+    for delta in [0.0, 0.0001, 0.0005, 0.0001] {
+        bias[3] = delta;
+        let a = shared
+            .evaluate(pose.coeffs(), &bias, pose.coeffs())
+            .unwrap();
+        let b = deep.evaluate(pose.coeffs(), &bias, pose.coeffs()).unwrap();
+        assert_eq!(a.residual, b.residual);
+        assert_eq!(a.pose, b.pose);
+        assert_eq!(a.speed_bias, b.speed_bias);
+        assert_eq!(a.gps_world, b.gps_world);
+        assert_eq!(shared.redo_counter, deep.redo_counter);
+        assert_eq!(shared.square_root_information, deep.square_root_information);
+    }
+    assert_eq!(live.redo_counter, 0);
+    assert!(live.square_root_information.is_none());
+    shared.set_imu_measurements(ImuMeasurementDeque::new());
+    assert_eq!(live.imu_measurements().len(), 21);
+    assert_eq!(deep.imu_measurements().len(), 21);
+}
+
+#[test]
+fn prepared_inertial_job_owns_input_version_and_commits_independent_cache() {
+    let original = ImuError::new(
+        imu_samples(Vector3::zeros(), Vector3::z() * 9.81),
+        imu_parameters(),
+        time(0),
+        time(1000),
+    )
+    .unwrap();
+    let live = Rc::new(RefCell::new(original.clone()));
+    let mut graph = GraphProblem::default();
+    let mut parameters = Vec::new();
+    for id in 0..2 {
+        let pose = Parameter::Pose(Rc::new(RefCell::new(PoseParameterBlock::new(
+            &Transformation::identity(),
+            id,
+            time(0),
+        ))));
+        let bias = Parameter::SpeedBias(Rc::new(RefCell::new(SpeedAndBiasParameterBlock::new(
+            SVector::zeros(),
+            id,
+            time(0),
+        ))));
+        graph.register(pose.clone(), ManifoldKind::Pose);
+        graph.register(bias.clone(), ManifoldKind::Euclidean);
+        pose.set_fixed(true);
+        bias.set_fixed(true);
+        parameters.extend([pose, bias]);
+    }
+    let id = graph.add(GraphFactor::Imu(live.clone()), parameters, None);
+    let mut solver = RustGraphSolver::default();
+    let job = solver
+        .prepare_solve(
+            &graph,
+            vec![SolverStage {
+                options: SolverOptions {
+                    num_threads: 4,
+                    ..Default::default()
+                },
+                disabled_residuals: std::collections::BTreeSet::new(),
+            }],
+        )
+        .unwrap();
+    live.borrow_mut()
+        .set_imu_measurements(ImuMeasurementDeque::new());
+    let update = std::thread::spawn(job).join().unwrap().unwrap();
+    let SolverFactorCache::Imu(cache) = &update.caches[&id] else {
+        panic!("IMU cache required")
+    };
+    assert!(std::ptr::eq(
+        cache.imu_measurements(),
+        original.imu_measurements()
+    ));
+    assert_eq!(cache.redo_counter, 1);
+    assert_eq!(live.borrow().redo_counter, 0);
+    assert!(live.borrow().imu_measurements().is_empty());
+    // Cache commit restores the entire captured factor version, including its input.
+    update.restore_factor_caches(&graph).unwrap();
+    assert!(std::ptr::eq(
+        live.borrow().imu_measurements(),
+        original.imu_measurements()
+    ));
+    assert_eq!(live.borrow().redo_counter, cache.redo_counter);
+    assert_eq!(live.borrow().information, cache.information);
+    assert_eq!(original.redo_counter, 0);
 }
 
 #[test]
