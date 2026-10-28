@@ -110,6 +110,21 @@ pub enum Navigation {
     Okvis,
     ExternalLocalization,
 }
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixedFactorEvaluation {
+    Repeated,
+    #[default]
+    OncePerSolve,
+}
+
+impl FixedFactorEvaluation {
+    #[must_use]
+    pub fn cached(self) -> bool {
+        matches!(self, Self::OncePerSolve)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -126,6 +141,8 @@ pub struct Config {
     pub realtime_time_limit: f64,
     /// Persistent workers for realtime factor evaluation and independent landmark solves.
     pub solver_threads: i32,
+    /// Evaluate fully fixed factors once per realtime solve.
+    pub fixed_factor_evaluation: FixedFactorEvaluation,
     pub mapping: bool,
     /// An explicitly started external localization service owns navigation output.
     pub navigation: Navigation,
@@ -148,6 +165,7 @@ impl Default for Config {
             realtime_iterations: 5,
             realtime_time_limit: 0.03,
             solver_threads: 4,
+            fixed_factor_evaluation: FixedFactorEvaluation::OncePerSolve,
             mapping: true,
             navigation: Navigation::Okvis,
             diagnostics: true,

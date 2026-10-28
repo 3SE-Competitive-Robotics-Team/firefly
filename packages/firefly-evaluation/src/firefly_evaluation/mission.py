@@ -98,7 +98,7 @@ class Mission:
         self.reference_goal = None
 
     def start(self, name, command):
-        env = {**os.environ, "RUST_LOG": "info", "FIREFLY_MISSION_SEED": str(self.options.seed), "PYTHONDONTWRITEBYTECODE": "1"}
+        env = {**os.environ, "RUST_LOG": os.environ.get("RUST_LOG", "info"), "FIREFLY_MISSION_SEED": str(self.options.seed), "PYTHONDONTWRITEBYTECODE": "1"}
         if name in self.processes and self.processes[name].process.poll() is None:
             raise RuntimeError(f"process already running: {name}")
 

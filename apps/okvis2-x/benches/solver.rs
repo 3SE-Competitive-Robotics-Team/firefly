@@ -149,8 +149,12 @@ impl Fixture {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let timing = std::env::args().any(|arg| arg == "--bench");
+fn recorder(
+    timing: bool,
+) -> Result<
+    Option<(firefly_observability::LogIpc, firefly_pubsub::node::IpcNode)>,
+    Box<dyn std::error::Error>,
+> {
     let ipc = if timing {
         firefly_observability::init();
         fastrace::set_reporter(PhaseReporter, fastrace::collector::Config::default());
@@ -159,12 +163,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
+    Ok(ipc)
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let timing = std::env::args().any(|arg| arg == "--bench");
+    let ipc = recorder(timing)?;
     for points in if timing {
         vec![150, 500, 1500]
     } else {
         vec![5]
     } {
         let mut fixture = Fixture::new(points);
+        #[cfg(feature = "solver-bench")]
+        if std::env::args().any(|arg| arg == "--fixed-factors") {
+            fixed_benchmark(&fixture, points, timing, ipc.as_ref().map(|(ipc, _)| ipc))?;
+            continue;
+        }
         let mut solvers: Vec<_> = (0..3).map(|_| RustGraphSolver::default()).collect();
         for iterations in [0, 3] {
             let mut reference = None;
@@ -282,5 +297,41 @@ fn probe_phases(
         drop(root);
         firefly_observability::flush();
     }
+    Ok(())
+}
+
+#[cfg(feature = "solver-bench")]
+fn fixed_benchmark(
+    fixture: &Fixture,
+    points: usize,
+    timing: bool,
+    ipc: Option<&firefly_observability::LogIpc>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (parameter, _) in &fixture.initial {
+        let newest = matches!(parameter, Parameter::Pose(p) if p.borrow().id() == 7);
+        parameter.set_fixed(!newest);
+    }
+    for evaluations in [1, 3, 6] {
+        for sample in 0..if timing { 31 } else { 1 } {
+            let (count, repeated, cached) = RustGraphSolver::benchmark_fixed_factors(
+                &fixture.graph,
+                4,
+                evaluations,
+                sample % 2 == 1,
+            )?;
+            if let Some(ipc) = ipc {
+                log::info!(
+                    "fixed points={points} factors={count} evaluations={evaluations} sample={sample} repeated_ms={:.6} cached_ms={:.6} exact_match=true",
+                    repeated * 1000.0,
+                    cached * 1000.0
+                );
+                if sample == 0 || sample == 30 {
+                    common::host_snapshot("fixed_sample");
+                }
+                firefly_observability::pump_log_ipc(ipc);
+            }
+        }
+    }
+
     Ok(())
 }

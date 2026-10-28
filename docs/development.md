@@ -459,6 +459,15 @@ static 预览不进入文件和正常/异常退出时的完整性。构建、单
 计时样本完成后另跑带 trace 的阶段探针，区分求值、Schur、路标消元/回代与约化 Cholesky；
 探针不纳入计时分位数，嵌套 span 不相加当作总耗时。
 默认无 `--bench` 只运行数值自检。在线 `solver_threads = 1` 可用于完整任务串行对照。
+`RUST_LOG=info,solver-profile=debug` 为每次真实求解记录因子数、全冻结因子数、活动维数，
+以及快照构造、求解、参数写回和缓存恢复时间；记录经既有 IPC 日志进入 RRD。
+完整任务中，全冻结因子求值对照使用 `fixed_factor_evaluation = "repeated"` 与
+`"once_per_solve"`，只切换此项。逐次求解日志的 `factor_evaluations` 记录实际因子
+求值次数，`fixed_cache` 标识所用路径；两侧使用相同诊断开关，统计时先按帧聚合三次
+求解再算分位数，不把各阶段的中位数相加当作整帧中位数。
+全冻结因子微基准用 `--features solver-bench` 构建同一 solver bench，再向生成的程序传
+`--bench --fixed-factors`。它只比较固定几何中常量残差的重复求值和单次求值后代价复用，
+交替顺序并校验代价精确一致，排除快照构造与线程池启动；不代表完整求解或整帧加速。
 
 Schur 微基准通过 `cargo bench -p firefly-okvis-x --bench schur --no-run` 预编译；
 待宿主机负载稳定后，先在另一终端运行 `uv run firefly-viz --save logs/schur_bench.rrd`，

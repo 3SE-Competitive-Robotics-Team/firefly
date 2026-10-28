@@ -1993,6 +1993,7 @@ where
         state.t_gw = self.graph.t_gw();
         Ok(state)
     }
+    #[fastrace::trace]
     fn prepare_publication(
         &mut self,
         mut state: State,
@@ -2058,6 +2059,7 @@ where
         }
         Ok(publication)
     }
+    #[fastrace::trace]
     fn publish(shared: &Shared, data: PublicationData) -> Result<()> {
         let blocking = shared.blocking.load(Ordering::Acquire)
             || shared.lossless_publications.load(Ordering::Acquire);

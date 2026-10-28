@@ -10,6 +10,8 @@ const FACTORS_PER_BATCH: usize = 32;
 #[derive(Default)]
 pub(super) struct Workspace {
     pub parallel: bool,
+    pub evaluation_calls: usize,
+    cache_fixed_factors: bool,
     slots: Vec<Slot>,
     recycled: Option<Linearization>,
 }
@@ -18,6 +20,8 @@ pub(super) struct Workspace {
 struct Slot {
     active: bool,
     fixed: bool,
+    cached: bool,
+    evaluations: usize,
     cost: f64,
     mask: Vec<bool>,
     row: Option<Row>,
@@ -26,6 +30,18 @@ struct Slot {
 }
 
 impl Workspace {
+    pub fn begin(&mut self, parallel: bool, cache_fixed_factors: bool) {
+        self.parallel = parallel;
+        self.evaluation_calls = 0;
+        self.cache_fixed_factors = cache_fixed_factors;
+        for slot in &mut self.slots {
+            slot.cached = false;
+            slot.evaluations = 0;
+        }
+    }
+    pub fn factor_evaluations(&self) -> usize {
+        self.slots.iter().map(|slot| slot.evaluations).sum()
+    }
     pub fn recycle(&mut self, mut model: Linearization) {
         model.rows.clear();
         self.recycled = Some(model);
@@ -124,15 +140,20 @@ impl Snapshot {
         jacobians: bool,
         workspace: &mut Workspace,
     ) -> Result<Linearization> {
+        workspace.evaluation_calls += 1;
         workspace
             .slots
             .resize_with(self.factors.len(), Slot::default);
+        let cache_fixed_factors = workspace.cache_fixed_factors;
         let batch = |(factors, slots): (&mut [FactorRecord], &mut [Slot])| {
             for (factor, slot) in factors.iter_mut().zip(slots) {
                 slot.active = !disabled.contains(&factor.id);
                 slot.row = None;
-                slot.outcome = Some(if slot.active {
-                    slot.evaluate(factor, values, offsets, jacobians)
+                slot.outcome = Some(if slot.active && !slot.cached {
+                    slot.evaluations += 1;
+                    let result = slot.evaluate(factor, values, offsets, jacobians);
+                    slot.cached = cache_fixed_factors && slot.fixed && result.is_ok();
+                    result
                 } else {
                     Ok(())
                 });
@@ -207,7 +228,7 @@ impl Snapshot {
                 model.rows.push(row);
             }
         }
-        if !model.cost.is_finite() {
+        if !model.cost.is_finite() || !model.fixed_cost.is_finite() {
             return Err(graph_error("graph cost overflow"));
         }
         Ok(model)
@@ -331,6 +352,122 @@ mod tests {
             })
             .unwrap();
         assert_eq!(recovered.rows.len(), 257);
+    }
+
+    #[test]
+    fn fixed_cost_cache_is_solve_local_and_preserves_full_solver_results() {
+        for threads in [1, 4] {
+            let mut reference = Vec::new();
+            for cache in [false, true] {
+                let mut snapshot = fixture();
+                let mut fixed = snapshot.values[&1].clone();
+                fixed.fixed = true;
+                snapshot.values.insert(2, fixed);
+                for factor in &mut snapshot.factors[..200] {
+                    factor.keys[0] = 2;
+                }
+                let mut workspace = Workspace::default();
+                let mut execution = Execution::default();
+                execution.configure(threads).unwrap();
+                let options = SolverOptions {
+                    num_threads: threads,
+                    cache_fixed_factors: cache,
+                    max_iterations: 5,
+                    ..Default::default()
+                };
+                // Reuse the workspace with changed fixed values and disabled factors.
+                for stage in 0..2 {
+                    snapshot.values.get_mut(&2).unwrap().data.fill(stage as f64);
+                    let disabled = if stage == 0 {
+                        BTreeSet::new()
+                    } else {
+                        BTreeSet::from([0])
+                    };
+                    let summary = execution
+                        .install(|| snapshot.run_with(&options, &disabled, &mut workspace))
+                        .unwrap();
+                    let calls = workspace.evaluation_calls;
+                    assert!(calls > 1);
+                    let fixed = 200 - stage;
+                    assert_eq!(
+                        workspace.factor_evaluations(),
+                        if cache {
+                            fixed + 57 * calls
+                        } else {
+                            (fixed + 57) * calls
+                        }
+                    );
+                    let result = (
+                        snapshot.values[&1].data.clone(),
+                        summary.initial_cost,
+                        summary.final_cost,
+                        summary.iterations,
+                        summary.report,
+                    );
+                    if cache {
+                        assert_eq!(result, reference[stage]);
+                    } else {
+                        reference.push(result);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_cache_resets_masks_and_rejects_invalid_constants() {
+        let mut snapshot = fixture();
+        let mut workspace = Workspace::default();
+        let disabled = BTreeSet::new();
+        for offsets in [BTreeMap::new(), BTreeMap::from([(1, 0)]), BTreeMap::new()] {
+            workspace.begin(false, true);
+            let values = snapshot.values.clone();
+            for _ in 0..3 {
+                let cached = snapshot
+                    .evaluate_with(&values, &offsets, 9, &disabled, true, &mut workspace)
+                    .unwrap();
+                let baseline = snapshot
+                    .evaluate(&values, &offsets, 9, &disabled, true)
+                    .unwrap();
+                assert_eq!(cached.fixed_cost, baseline.fixed_cost);
+                assert_eq!(cached.cost, baseline.cost);
+                assert_eq!(cached.gradient, baseline.gradient);
+                assert_eq!(cached.diagonal, baseline.diagonal);
+            }
+            assert_eq!(
+                workspace.factor_evaluations(),
+                if offsets.is_empty() { 257 } else { 771 }
+            );
+        }
+        workspace.begin(false, true);
+        let mut values = snapshot.values.clone();
+        values.get_mut(&1).unwrap().data[0] = f64::NAN;
+        assert!(
+            snapshot
+                .evaluate_with(
+                    &values,
+                    &BTreeMap::new(),
+                    0,
+                    &disabled,
+                    true,
+                    &mut workspace
+                )
+                .is_err()
+        );
+        assert!(workspace.slots.iter().all(|slot| !slot.cached));
+        values.get_mut(&1).unwrap().data[0] = 0.2;
+        assert!(
+            snapshot
+                .evaluate_with(
+                    &values,
+                    &BTreeMap::new(),
+                    0,
+                    &disabled,
+                    true,
+                    &mut workspace
+                )
+                .is_ok()
+        );
     }
 
     #[test]
