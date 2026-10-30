@@ -1,13 +1,16 @@
-//! planner 进程接入层：Navigation/深度/目标输入 → FSM → 规划管理 → 完整轨迹。
+//! planner 进程接入层：Navigation/占据地图/目标输入 → FSM → 规划管理 → 完整轨迹。
 //! FSM 为 100Hz，安全检查为 20Hz；`--traj-server` 启动独立的 100Hz 轨迹输出进程。
 //! Navigation 失联或无效状态锁存停止输出，坐标修正使旧版本轨迹立即失效。
-//! 深度超时触发急停并禁用 fail-safe；真值不进入规划状态链路。
+//! 地图融合超时触发急停并禁用 fail-safe；真值不进入规划状态链路。
 
 mod config;
+mod map_input;
 mod navigation;
 mod output;
 mod scene;
 mod state_input;
+#[cfg(test)]
+mod tests;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -15,19 +18,14 @@ use std::time::{Duration, Instant};
 
 use fastrace::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_map::{
-    DepthCamera, GridMap, MapFile, Plane, VirtualWall, VoxelState, update_from_depth,
-};
+use firefly_map::{GridMap, MapFile, Plane, VirtualWall, VoxelState};
 use firefly_observability::init as init_observability;
 use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager, ReplanFsm};
-use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage};
 use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
+use firefly_pubsub::map::{MAP_REGION_TOPIC, MAP_TOPIC, MapElement, MapRegion};
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::publish::Publisher;
-use firefly_pubsub::subscriber::{Received, Subscriber};
-
-/// 深度样本句柄：零拷贝持有，tick 消费 `&data` 后释放，无 300KB 全拷贝。
-type ReceivedDepth = Received<DepthImageMessage>;
+use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::viz::{
     ARROWS_MAX, POINTS_MAX, VIZ_TOPIC, VOXELS_MAX, VizMessage, VizPublisher, VoxelMessage, kind,
 };
@@ -40,16 +38,15 @@ use crate::state_input::StateInput;
 
 /// 主循环频率（官方 `exec_timer` 0.01s）。
 const LOOP_PERIOD: Duration = Duration::from_millis(10);
-/// 深度/odom 丢失阈值（秒），对照官方 `grid_map/odom_depth_timeout`
+/// 地图融合新鲜度阈值（秒），沿用官方 `grid_map/odom_depth_timeout`。
 /// 默认值 1.0（`plan_env/src/grid_map.cpp`）。
-const DEPTH_TIMEOUT: f64 = 1.0;
+const MAP_TIMEOUT: f64 = 1.0;
 /// 体素层全量重同步周期（帧；10Hz 循环下 50 帧 = 5s）。增量协议下每拍只发
 /// 变化量，周期性补发全量快照，任一增量消息丢失后消费端可自愈。
 const VOXEL_RESYNC_TICKS: usize = 50;
 /// 实时感知体素的显示半径（米）：以机体为中心的立方窗口。
 ///
-/// 不用 `local_update_range`——它按整段局部更新范围，窗口里连整片地板一起算，
-/// 占用格数仍超 `VOXELS_MAX`；4m @0.15m 约几千格，既不截断又跟得上机体。
+/// 显示按窗口裁剪；密集占据合并为较粗体素，保持完整覆盖并满足消息预算。
 const PERCEIVED_VIEW_RADIUS_M: f64 = 4.0;
 /// `configs/planner.toml` 缺省路径（相对运行目录，通常为仓库根）。
 /// 缺省配置：按安装布局解析，与启动目录无关。
@@ -174,16 +171,16 @@ struct App {
     motion_indices: Vec<[i32; 3]>,
     /// 状态时钟（秒），只由通过校验的地图系里程计推进。
     t_sim: f64,
-    wall_origin: Instant,
     odom: navigation::NavigationReceiver,
-    mapped_frames: usize,
     state_input: StateInput,
     received_state: bool,
     /// 本拍是否拿到新鲜里程计：决定体素快照是否重扫（无状态时不扫）。
     state_fresh: bool,
     state_loss_reported: bool,
     initial_goal: Option<[f64; 3]>,
-    depth: Option<Subscriber<DepthImageMessage>>,
+    map_sub: Subscriber<[MapElement]>,
+    region_pub: Publisher<MapRegion>,
+    map_input: map_input::MapInput,
     goal_sub: Option<Subscriber<GoalMessage>>,
     /// 强制停止订阅（对照官方 `mandatory_stop` topic；单进程仿真下由外部
     /// 工具经 `planner --mandatory-stop` 注入）。
@@ -194,13 +191,6 @@ struct App {
     pending_mandatory_stop: bool,
     /// 最新 odom 携带的 trace 上下文 `(trace_id, span_id, sampled)`（续接用）。
     odom_trace: Option<(u128, u64, bool)>,
-    latest_depth: Option<ReceivedDepth>,
-    last_depth_timestamp: f64,
-    /// 深度流新鲜度监视（超时锁存触发急停）。
-    depth_freshness: DepthFreshness,
-    /// 深度丢失已报错标记（锁存期内不刷屏；新帧到达即复位）。
-    depth_loss_reported: bool,
-    depth_cam: DepthCamera,
     finished: bool,
 }
 
@@ -247,12 +237,8 @@ impl App {
         // 地图系输入是必需端口；局部 VIO 不能替代它。
         let odom = navigation::NavigationReceiver::start(map_file.is_some())
             .map_err(|e| e.with_operation("创建规划器地图系里程计订阅"))?;
-        let depth = open_sub::<DepthImageMessage>(
-            &node,
-            DEPTH_TOPIC,
-            "已订阅深度话题（感知建图输入）",
-            "深度订阅不可用，感知建图停用",
-        );
+        let map_sub = Subscriber::<[MapElement]>::with_slice_topic(&node, MAP_TOPIC)?;
+        let region_pub = Publisher::<MapRegion>::with_topic(&node, MAP_REGION_TOPIC)?;
         let goal_sub = open_sub::<GoalMessage>(
             &node,
             GOAL_TOPIC,
@@ -294,25 +280,20 @@ impl App {
             motion_indices: Vec::new(),
             map_file,
             t_sim: 0.0,
-            wall_origin: Instant::now(),
             state_input: StateInput::default(),
-            mapped_frames: 0,
             received_state: false,
             state_fresh: false,
             state_loss_reported: false,
             initial_goal,
             odom,
-            depth,
+            map_sub,
+            region_pub,
+            map_input: map_input::MapInput::default(),
             goal_sub,
             stop_sub,
             pending_goal: None,
             pending_mandatory_stop: false,
             odom_trace: None,
-            latest_depth: None,
-            last_depth_timestamp: f64::NEG_INFINITY,
-            depth_freshness: DepthFreshness::new(),
-            depth_loss_reported: false,
-            depth_cam: DepthCamera::mujoco_default(),
             finished: false,
         })
     }
@@ -329,23 +310,12 @@ impl App {
         Ok(())
     }
 
-    /// 排空 odom/深度订阅：续接 trace span、锚定 sim 时钟、记录最新快照。
+    /// 排空 odom/地图订阅：续接 trace span、锚定 sim 时钟、记录最新快照。
     #[fastrace::trace]
     fn poll_sensors(&mut self) -> Result<()> {
         self.poll_navigation()?;
-        if let Some(sub) = &self.depth {
-            while let Some(sample) = sub.receive()? {
-                let ctx = *sample.user_header();
-                let _span = ctx.continue_span("recv-depth");
-                // 存样本句柄不拷贝 300KB payload；tick 内联消费后即释放。
-                if sample.timestamp.is_finite()
-                    && sample.timestamp >= 0.0
-                    && sample.timestamp > self.last_depth_timestamp
-                {
-                    self.last_depth_timestamp = sample.timestamp;
-                    self.latest_depth = Some(sample);
-                }
-            }
+        while let Some(sample) = self.map_sub.receive()? {
+            self.map_input.observe(&sample, Instant::now())?;
         }
         if let Some(sub) = &self.goal_sub {
             while let Some(sample) = sub.receive()? {
@@ -376,43 +346,6 @@ impl App {
         Ok(())
     }
 
-    /// 深度帧只融合一次，位姿必须来自同一地图系状态源的时间插值。
-    #[fastrace::trace]
-    fn update_map_from_depth(&mut self, wall_time: f64) {
-        if self
-            .latest_depth
-            .as_ref()
-            .is_some_and(|depth| depth.timestamp > self.t_sim)
-        {
-            return;
-        }
-        let Some(depth) = self.latest_depth.take() else {
-            return;
-        };
-        let Some(pose) = self.state_input.pose_at(depth.timestamp) else {
-            return;
-        };
-        self.perceived_center = pose.translation.vector;
-        if self.map_file.is_none() {
-            self.fsm
-                .manager_mut()
-                .map_mut()
-                .move_ring_buffer(pose.translation.vector);
-        }
-        if update_from_depth(
-            self.fsm.manager_mut().map_mut(),
-            &self.depth_cam,
-            &pose,
-            &depth.data,
-        ) == 0
-        {
-            return;
-        }
-        self.mapped_frames = self.mapped_frames.saturating_add(1);
-        self.depth_freshness.observe(wall_time);
-        self.depth_loss_reported = false;
-    }
-
     /// 动态障碍按仿真时钟插值，增量更新占据地图（静态体素保护）。
     fn update_motion(&mut self) {
         let Some(map_file) = &self.map_file else {
@@ -424,11 +357,12 @@ impl App {
         let dyn_voxels = map_file.motion_voxels(self.t_sim, self.fsm.manager().map());
         let map = self.fsm.manager_mut().map_mut();
         for idx in &self.prev_dyn {
-            map.set_state(*idx, VoxelState::Unknown);
+            map.set_state(*idx, self.map_input.observed_state(map.global_index(*idx)));
         }
         for idx in &dyn_voxels {
             map.set_state(*idx, VoxelState::Occupied);
         }
+        map.inflate_obstacles();
         self.prev_dyn = dyn_voxels;
     }
 
@@ -436,7 +370,7 @@ impl App {
     #[fastrace::trace]
     fn step(&mut self) -> Result<()> {
         self.exec_step()?;
-        // 执行状态独立于轨迹输出门控；地图预热期间仍报告新鲜状态。
+        // 执行状态独立于轨迹输出门控；等待新鲜地图期间仍报告新鲜状态。
         if self.state_fresh {
             self.output.status(
                 self.t_sim,
@@ -477,9 +411,9 @@ impl App {
             self.prev_dyn.clear();
             self.fsm.invalidate_localization(now, snapshot.state)?;
             self.published_trajectory = 0;
-            self.mapped_frames = 0;
+            self.map_input.invalidate();
             self.finished = false;
-            log::info!("地图修正版本变更：清空局部融合并重新规划，任务目标保持地图坐标");
+            log::info!("地图修正版本变更：重建派生栅格并重新规划，任务目标保持地图坐标");
         }
         if !self.received_state {
             self.fsm
@@ -491,18 +425,12 @@ impl App {
             self.received_state = true;
             log::info!("地图系状态就绪，规划从实测位置开始");
         }
-        let wall_time = self.wall_origin.elapsed().as_secs_f64();
-
-        // 深度感知建图 + 动态障碍写入（规划地图更新先于重规划决策）
-        self.update_map_from_depth(wall_time);
-        if self.fsm.manager().map().history_exhausted() {
-            log::error!("会话障碍地图容量耗尽，停止规划；必须建立新会话");
-            self.fsm
-                .trigger_emergency_stop_disable_failsafe(now, measured);
+        let navigation = self.state_input.navigation().unwrap();
+        if !self.synchronize_map(&navigation)? {
             self.output.control(revision, false)?;
             return Ok(());
         }
-        self.update_motion();
+        self.perceived_center = snapshot.state.position.coords;
 
         // 强制停止（官方 mandatoryStopCallback）：置锁存标志、关 fail-safe、
         // 进入急停——此后不自动恢复；先于其他分支处理。
@@ -529,11 +457,6 @@ impl App {
                 }
                 Err(e) => log::warn!("目标 ({target:?}) 不可达，忽略：{e}"),
             }
-        }
-        // 至少四次命中才能从 clamp_min 达到占据阈值；初始化与坐标修正均须重新积累。
-        if self.mapped_frames < 4 {
-            self.output.control(revision, false)?;
-            return Ok(());
         }
         self.output.control(revision, true)?;
         let report = self.fsm.exec_tick(now, measured);
@@ -580,6 +503,17 @@ impl App {
     }
 
     fn handoff_trajectory(&mut self) -> Result<()> {
+        self.poll_navigation()?;
+        if !self.state_input.navigation().is_some_and(|nav| {
+            !self.state_input.has_revision_change()
+                && !self.state_input.stopped()
+                && self
+                    .map_input
+                    .ready(&nav, Instant::now(), Duration::from_secs_f64(MAP_TIMEOUT))
+        }) {
+            self.output.control(None, false)?;
+            return Ok(());
+        }
         if let Some(local) = self.fsm.manager().local()
             && local.traj_id != self.published_trajectory
         {
@@ -590,6 +524,33 @@ impl App {
         Ok(())
     }
 
+    /// Execution and safety callbacks must query the same accepted map snapshot.
+    fn synchronize_map(
+        &mut self,
+        navigation: &firefly_pubsub::navigation::NavigationMessage,
+    ) -> Result<bool> {
+        let region = self.map_input.prepare_region(
+            self.fsm.manager_mut().map_mut(),
+            navigation,
+            self.map_file.is_none(),
+        )?;
+        self.region_pub.publish(region)?;
+        if !self.map_input.ready(
+            navigation,
+            Instant::now(),
+            Duration::from_secs_f64(MAP_TIMEOUT),
+        ) {
+            return Ok(false);
+        }
+        self.map_input.apply(
+            self.fsm.manager_mut().map_mut(),
+            navigation,
+            self.map_file.is_none(),
+        )?;
+        self.update_motion();
+        Ok(true)
+    }
+
     /// 独立安全定时回调，与执行状态机共用单线程事件队列。
     fn safety_step(&mut self) -> Result<()> {
         self.poll_sensors()?;
@@ -597,26 +558,24 @@ impl App {
             self.output.control(None, false)?;
             return Ok(());
         };
-        // 坐标修正和地图预热由执行回调完成，期间不检查旧轨迹。
-        if self.state_input.has_revision_change() || self.mapped_frames < 4 {
+        // 坐标修正和等待新鲜地图由执行回调完成，期间不检查旧轨迹。
+        if self.state_input.has_revision_change() {
+            self.output.control(None, false)?;
             return Ok(());
         }
         let now = self.t_sim;
         let measured = Some(snapshot.state);
-        let wall_time = self.wall_origin.elapsed().as_secs_f64();
-        // 深度/odom 超时急停（官方 checkCollisionCallback：有可执行轨迹且
-        // 未完成才监控深度丢失，命中则关 fail-safe 进急停，随后继续碰撞检查）。
+        // 地图超时急停（对应官方 checkCollisionCallback：有可执行轨迹且
+        // 未完成才触发急停）；等待新鲜地图时禁止碰撞重规划。
         // 禁用 fail-safe 只阻止急停执行分支按低速条件恢复；安全回调仍可重规划。
-        if self.fsm.manager().local().is_some()
-            && !self.fsm.is_finished()
-            && self.depth_freshness.timed_out(wall_time, DEPTH_TIMEOUT)
-        {
-            if !self.depth_loss_reported {
-                log::error!("深度/里程计丢失！进入急停（fail-safe 已禁用）");
-                self.depth_loss_reported = true;
+        let navigation = self.state_input.navigation().unwrap();
+        if !self.synchronize_map(&navigation)? {
+            if self.fsm.manager().local().is_some() && !self.fsm.is_finished() {
+                self.fsm
+                    .trigger_emergency_stop_disable_failsafe(now, measured);
             }
-            self.fsm
-                .trigger_emergency_stop_disable_failsafe(now, measured);
+            self.output.control(None, false)?;
+            return Ok(());
         }
 
         let _ = self.fsm.safety_tick(now, measured);
@@ -677,11 +636,11 @@ impl App {
             let step = self.step();
             drop(guard);
             drop(root);
-            match step {
-                Ok(()) => {}
-                Err(e) => {
-                    // 感知/发布类瞬时错误不终止任务；管理器内部错误透传
-                    log::warn!("tick 失败：{e}");
+            if let Err(error) = step {
+                log::warn!("tick 失败：{error}");
+                if let Err(error) = self.output.control(None, false) {
+                    log::error!("停止规划输出失败：{error}");
+                    return CallbackProgression::Stop;
                 }
             }
             if last_visualization.elapsed() < Duration::from_millis(100) {
@@ -822,6 +781,7 @@ impl App {
         let dims = map.dims();
         let size = [map.resolution() as f32; 3];
         let at = [origin.x as f32, origin.y as f32, origin.z as f32];
+        indices.clear();
         let (lo, hi) = match center {
             Some(c) => match Self::window_bounds(map, c) {
                 Some(bounds) => bounds,
@@ -829,7 +789,6 @@ impl App {
             },
             None => ([0, 0, 0], [dims[0] - 1, dims[1] - 1, dims[2] - 1]),
         };
-        indices.clear();
         for x in lo[0]..=hi[0] {
             for y in lo[1]..=hi[1] {
                 for z in lo[2]..=hi[2] {
@@ -839,7 +798,21 @@ impl App {
                 }
             }
         }
+        let size = Self::coarsen_display_voxels(indices, size);
         (size, at)
+    }
+
+    /// Coalesce occupied display cells without dropping any occupied volume.
+    fn coarsen_display_voxels(indices: &mut Vec<[i32; 3]>, mut size: [f32; 3]) -> [f32; 3] {
+        while indices.len() > VOXELS_MAX {
+            for index in indices.iter_mut() {
+                *index = index.map(|value| value.div_euclid(2));
+            }
+            indices.sort_unstable();
+            indices.dedup();
+            size = size.map(|value| value * 2.);
+        }
+        size
     }
 
     /// 体素层按**增量**发布：与上次发布的集合做差，只发新增/删除。首次发布、
@@ -977,42 +950,6 @@ fn emit_mandatory_stop() -> Result<()> {
     pub_.publish(MandatoryStopMessage { timestamp }).map(|_| ())
 }
 
-/// 感知建图管线新鲜度监视：对照官方 `flag_depth_odom_timeout_` 锁存语义——
-/// 计时基准是管线**实际吃进一帧**（深度+位姿齐备并写入地图）的墙钟时刻，
-/// 深度或位姿任一断流即饥饿，超时置位后锁存，直到管线再次吃进新帧才复位。
-struct DepthFreshness {
-    /// 最近一次实际建图消费的墙钟秒数（相对进程启动）；首帧之前为 `None`。
-    last_frame_ts: Option<f64>,
-    /// 超时锁存位（官方 `flag_depth_odom_timeout_`）。
-    lost: bool,
-}
-
-impl DepthFreshness {
-    const fn new() -> Self {
-        Self {
-            last_frame_ts: None,
-            lost: false,
-        }
-    }
-
-    /// 管线实际吃进一帧：记录时间戳并清除丢失锁存。
-    fn observe(&mut self, ts: f64) {
-        self.last_frame_ts = Some(self.last_frame_ts.map_or(ts, |prev| prev.max(ts)));
-        self.lost = false;
-    }
-
-    /// 首帧之前恒 false；`now - 最新帧ts > timeout` 后置位并锁存
-    /// （后续调用持续返回 true）。
-    fn timed_out(&mut self, now: f64, timeout: f64) -> bool {
-        if let Some(ts) = self.last_frame_ts
-            && now - ts > timeout
-        {
-            self.lost = true;
-        }
-        self.lost
-    }
-}
-
 fn main() {
     let args = match parse_args() {
         Ok(a) => a,
@@ -1096,38 +1033,4 @@ fn main() {
         }
     }
     firefly_observability::flush();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 管线从未吃进帧（首帧之前）不触发。
-    #[test]
-    fn no_trigger_before_first_frame() {
-        let mut f = DepthFreshness::new();
-        assert!(!f.timed_out(100.0, DEPTH_TIMEOUT));
-    }
-
-    /// 管线再次吃进帧清除丢失锁存。
-    #[test]
-    fn new_frame_resets_latch() {
-        let mut f = DepthFreshness::new();
-        f.observe(10.0);
-        assert!(f.timed_out(11.5, DEPTH_TIMEOUT));
-        // 锁存期内持续命中
-        assert!(f.timed_out(12.0, DEPTH_TIMEOUT));
-        f.observe(11.8);
-        assert!(!f.timed_out(12.0, DEPTH_TIMEOUT));
-    }
-
-    /// 超时置位并锁存。
-    #[test]
-    fn timeout_sets_and_latches() {
-        let mut f = DepthFreshness::new();
-        f.observe(10.0);
-        assert!(!f.timed_out(11.0, DEPTH_TIMEOUT));
-        assert!(f.timed_out(11.0 + 1e-3, DEPTH_TIMEOUT));
-        assert!(f.timed_out(20.0, DEPTH_TIMEOUT));
-    }
 }

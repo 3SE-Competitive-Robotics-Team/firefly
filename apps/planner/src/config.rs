@@ -54,15 +54,12 @@ mod tests {
 pub struct MappingOptions {
     pub resolution: f64,
     pub range: [f64; 3],
-    /// 移出局部窗口的观测体素上限；耗尽时停止规划，零禁用历史保留。
-    pub history_capacity: usize,
 }
 impl Default for MappingOptions {
     fn default() -> Self {
         Self {
             resolution: 0.1,
             range: [8., 8., 4.],
-            history_capacity: 500_000,
         }
     }
 }
@@ -80,7 +77,6 @@ impl MappingOptions {
         let mut map = firefly_map::GridMapBuilder::new(self.resolution, [1; 3])
             .with_local_update_range(self.range)
             .with_obstacles_inflation(clearance)
-            .with_observation_history(self.history_capacity)
             .build()?;
         map.move_ring_buffer(nalgebra::Vector3::zeros());
         Ok(map)

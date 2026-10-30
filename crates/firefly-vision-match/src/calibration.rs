@@ -1,5 +1,4 @@
-//! 传感器标定常量（真值，对照 `firefly-map::DepthCamera::mujoco_default` 与
-//! `apps/render/src/rig.rs` 的左目安装位置）。
+//! 传感器标定常量（真值，来源为 `firefly_base::rig` 的相机安装参数）。
 //!
 //! 左目与深度相机同朝向（下倾 20°），仅差 2.5cm 横向基线；`PnP` 解的是左目
 //! 位姿，经 [`cam_pose_to_body`] 转到机体系（VIO/融合状态系）再参与融合。
@@ -81,7 +80,7 @@ pub fn pinhole() -> crate::depth::Pinhole {
     }
 }
 
-/// 深度验证：`rot_cam_to_body` 列向量即相机轴（与 `DepthCamera` 文档一致）。
+/// 深度验证：`rot_cam_to_body` 列向量即相机轴。
 #[cfg(test)]
 mod tests {
     use super::*;

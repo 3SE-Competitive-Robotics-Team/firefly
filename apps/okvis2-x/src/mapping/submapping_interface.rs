@@ -64,6 +64,7 @@ pub struct SiFrameData {
 }
 #[derive(Clone)]
 pub struct SupereightFrames {
+    pub graph_revision: u64,
     pub keyframe_id: u64,
     pub frame_data: BTreeMap<u64, SiFrameData>,
     pub loop_closure: bool,
@@ -169,6 +170,12 @@ pub type SubmapCallback<B> =
 /// Field-slice visualization state: only `State::t_ws` is meaningful.
 /// Other state fields are safe placeholders and must not be published as estimator output.
 pub type FieldCallback<B> = Arc<dyn Fn(&State, &BTreeMap<u64, Transformation>, &B) + Send + Sync>;
+/// A committed map state; time advances only after valid depth was integrated.
+pub type MapSnapshotCallback<B> = Arc<
+    dyn Fn(u64, Option<Timestamp>, &[u64], &BTreeMap<u64, Transformation>, &B) -> io::Result<()>
+        + Send
+        + Sync,
+>;
 pub type TrajectoryAnchoringCallback =
     Arc<dyn Fn(&State, &[Matrix4<f32>], &[u64], usize) + Send + Sync>;
 struct InputQueues {
@@ -205,6 +212,8 @@ pub struct SubmappingState<B: SupereightBackend> {
     pub align_callback: Option<AlignCallback>,
     pub submap_callback: Option<SubmapCallback<B>>,
     pub field_callback: Option<FieldCallback<B>>,
+    pub map_snapshot_callback: Option<MapSnapshotCallback<B>>,
+    last_fused_depth: Option<Timestamp>,
     pub anchored_update_callback: Option<AnchoredTrajectoryUpdateCallback>,
     pub trajectory_anchoring_callback: Option<TrajectoryAnchoringCallback>,
     pub alignment_publish_callback: Option<AlignmentPublishCallback>,
@@ -368,6 +377,8 @@ impl<B: SupereightBackend> SubmappingInterface<B> {
             align_callback: None,
             submap_callback: None,
             field_callback: None,
+            map_snapshot_callback: None,
+            last_fused_depth: None,
             anchored_update_callback: None,
             trajectory_anchoring_callback: None,
             alignment_publish_callback: None,
@@ -1073,10 +1084,12 @@ impl<B: SupereightBackend> SubmappingState<B> {
             })
             .collect();
         if let Some(frame) = &mut self.frame {
+            frame.graph_revision = u.tracking_state.backend.revision;
             frame.loop_closure = u.tracking_state.backend.recognised_place;
             frame.frame_data.extend(new);
         } else {
             self.frame = Some(SupereightFrames {
+                graph_revision: u.tracking_state.backend.revision,
                 keyframe_id: self.latest_keyframe.unwrap_or(u.latest_state.id.value()),
                 frame_data: new,
                 loop_closure: u.tracking_state.backend.recognised_place,
@@ -1953,6 +1966,21 @@ impl<B: SupereightBackend> SubmappingState<B> {
             self.num_integrated_lidar += 1;
         }
         self.integrate_depth_frames(&f, &t_wk, backlog)?;
+        if let Some(callback) = &self.map_snapshot_callback {
+            let changed: Vec<_> = f
+                .frame_data
+                .keys()
+                .copied()
+                .chain(std::iter::once(id))
+                .collect();
+            callback(
+                f.graph_revision,
+                self.last_fused_depth,
+                &changed,
+                &self.poses,
+                &self.object_map.backend,
+            )?;
+        }
         if let Some(cb) = &self.field_callback {
             let pose = self
                 .latest_state
@@ -2063,6 +2091,15 @@ impl<B: SupereightBackend> SubmappingState<B> {
                 )?;
                 self.integration_counter += 1;
                 self.num_integrated_depth += 1;
+                if depth_image
+                    .data
+                    .iter()
+                    .any(|value| value.is_finite() && *value >= sensor.near && *value <= sensor.far)
+                {
+                    let time = depth.1.time_stamp;
+                    self.last_fused_depth =
+                        Some(self.last_fused_depth.map_or(time, |old| old.max(time)));
+                }
                 self.last_integrated_state = f.frame_data.keys().next_back().copied();
                 if self.config.factors.use_map2map_factors {
                     self.update_depth_align_block(depth, t_wk, di)?;

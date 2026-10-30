@@ -3181,10 +3181,7 @@ dependencies = [
 name = "firefly-map"
 version = "0.1.0"
 dependencies = [
- "fastrace",
- "firefly-base",
  "firefly-error",
- "log",
  "nalgebra",
 ]
 
@@ -6258,13 +6255,17 @@ dependencies = [
  "firefly-error",
  "firefly-map",
  "firefly-observability",
+ "firefly-okvis-x",
  "firefly-planner",
  "firefly-pubsub",
  "firefly-search",
+ "firefly-supereight2",
  "firefly-trajectory",
  "iceoryx2",
+ "jiff",
  "log",
  "nalgebra",
+ "purecv",
  "serde",
  "toml 1.1.8+spec-1.1.0",
 ]

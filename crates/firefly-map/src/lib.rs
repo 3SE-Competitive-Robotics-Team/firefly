@@ -3,14 +3,11 @@
 //! 占据栅格地图（局部感知增量更新）+ 平面障碍模型
 //! `(x − s)ᵀ v = 0`（EGO-Planner v2 障碍表示，d = (p − s)ᵀ v）。
 
-mod depth;
 mod format;
 mod grid;
 mod plane;
-mod raycast;
 mod scene;
 
-pub use depth::{DepthCamera, update_from_depth};
 pub use format::{MapFile, Motion, Shape};
 pub use grid::{GridMap, GridMapBuilder, VirtualWall, VoxelState};
 pub use plane::{Plane, PlaneDistance};

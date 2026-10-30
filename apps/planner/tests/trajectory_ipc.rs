@@ -18,6 +18,83 @@ use std::{
 };
 
 struct OutputProcess(Child);
+
+#[test]
+#[ignore = "requires release planner and exclusive Navigation/OccupancyMap/TrajectoryControl IPC topics"]
+fn shared_map_revision_and_fusion_freshness_gate_planning() {
+    use firefly_pubsub::map::{MAP_REGION_TOPIC, MAP_TOPIC, MapElement, MapRegion};
+    let node = create_node().unwrap();
+    let navigation = Publisher::<NavigationMessage>::with_topic(&node, NAVIGATION_TOPIC).unwrap();
+    let maps = Publisher::<[MapElement]>::with_slice_topic(&node, MAP_TOPIC).unwrap();
+    let requests = Subscriber::<MapRegion>::with_topic(&node, MAP_REGION_TOPIC).unwrap();
+    let mut region = MapRegion {
+        min: [-100.; 3],
+        max: [100.; 3],
+    };
+    let controls =
+        Subscriber::<TrajectoryControlMessage>::with_topic(&node, TRAJECTORY_CONTROL_TOPIC)
+            .unwrap();
+    let binary =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/planner");
+    let mut process = OutputProcess(Command::new(binary).spawn().unwrap());
+    let mut timestamp = 1.0;
+    let mut sequence = 0;
+    // Fresh map, new Navigation awaiting its map revision, corrected map, then
+    // repeated complete snapshots whose fusion timestamp never advances.
+    for (revision, map_revision, fresh, expected) in [
+        (0, 0, true, 1),
+        (1, 0, true, 0),
+        (1, 1, true, 1),
+        (1, 1, false, 0),
+    ] {
+        let start = Instant::now();
+        let frozen = timestamp;
+        let mut matching = 0;
+        while matching < 5 {
+            assert!(
+                start.elapsed() < Duration::from_secs(4),
+                "map gate did not settle to {expected}"
+            );
+            assert!(process.0.try_wait().unwrap().is_none());
+            timestamp += 0.01;
+            sequence += 1;
+            while let Some(request) = requests.receive().unwrap() {
+                region = *request;
+            }
+            navigation
+                .publish(NavigationMessage {
+                    odom: OdomMessage {
+                        timestamp,
+                        is_initialized: true,
+                        ..Default::default()
+                    },
+                    revision,
+                    rotation: [0., 0., 0., 1.],
+                    ..Default::default()
+                })
+                .unwrap();
+            maps.publish_slice_with(1, |_| MapElement {
+                session: 1,
+                sequence,
+                revision: map_revision,
+                timestamp: if fresh { timestamp } else { frozen },
+                min: region.min,
+                max: region.max,
+                rotation: [0., 0., 0., 1.],
+                ..Default::default()
+            })
+            .unwrap();
+            while let Some(control) = controls.receive().unwrap() {
+                if control.enabled == expected {
+                    matching += 1;
+                } else {
+                    matching = 0;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
 impl Drop for OutputProcess {
     fn drop(&mut self) {
         let _ = Command::new("kill")

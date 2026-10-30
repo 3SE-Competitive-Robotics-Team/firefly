@@ -449,6 +449,20 @@ static 预览不进入文件和正常/异常退出时的完整性。构建、单
 
 ### OKVIS 算法与通讯专项
 
+共享地图对照基准为 `apps/planner/benches/mapping.rs`，先执行
+`cargo bench -p planner --bench mapping --no-run`，宿主资源稳定且 RRD 记录进程启动后，
+运行生成的 bench 可执行文件并传 `--bench`；加 `--moving` 使用平移相机及滚动窗口，
+`--history=N` 添加远处历史子地图。历史几何使用只读冻结地图，各自持有独立位姿。
+比较全图遍历导出与空间索引局部导出，两侧包括真实 IPC、接收和局部栅格派生，
+共同的 Supereight2 积分只测量一次并计入两侧总耗时，交替测量顺序。
+计时之外逐帧核对局部结果等于全图独立遍历后裁剪的结果；样本、消息大小和宿主计数进入
+`logs/mapping-bench`。这是建图阶段微基准，不包含 VIO 求解、线程调度或完整飞行闭环。
+无 `--bench` 只运行小型功能检查。地图门控的真实进程回归沿用下文的
+`cargo test -p planner --test trajectory_ipc -- --ignored --test-threads=1`，需先重建 release planner。
+OKVIS 请求接收与修订发布的真实 IPC 回归为
+`cargo test -p firefly-okvis-x region_request_and_snapshot_metadata_roundtrip --lib -- --ignored --test-threads=1`，
+同样要求独占地图话题，勿与多次重启 planner 的测试共用同一可视化录制会话。
+
 生产求解器基准为 `apps/okvis2-x/benches/solver.rs`：先运行
 `cargo bench -p firefly-okvis-x --bench solver --no-run`，待宿主资源稳定并启动 RRD
 记录进程后运行生成的可执行文件并传 `--bench`。基准固定双目几何，使用生产重投影因子、

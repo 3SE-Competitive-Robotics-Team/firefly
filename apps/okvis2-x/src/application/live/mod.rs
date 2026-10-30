@@ -3,6 +3,7 @@
 pub mod config;
 mod diagnostics;
 mod input;
+pub mod map_output;
 mod output;
 #[cfg(test)]
 mod tests;
@@ -58,22 +59,8 @@ pub fn run(config: Config, vocabulary: Option<&Path>) -> Result<()> {
         config.diagnostics,
         config.fixed_factor_evaluation.cached(),
     )?;
-    let mut mapping = if config.mapping {
-        let mut backend = OccupancyMapBackend::new(config.map(), DataConfig::default());
-        backend.shared_maps = maps;
-        let mut mapper =
-            SubmappingInterface::new(submaps, &parameters, backend).map_err(invalid)?;
-        mapper.set_t_bs(parameters.imu.t_bs.clone());
-        mapper
-            .state
-            .lock()
-            .map_err(|_| invalid("mapping state poisoned"))?
-            .align_callback = Some(estimator.alignment_callback());
-        mapper.start().map_err(invalid)?;
-        Some(mapper)
-    } else {
-        None
-    };
+    let map_snapshots = map_output::Mailbox::default();
+    let mut mapping = create_mapping(&config, &parameters, maps, &estimator, &map_snapshots)?;
     let map_inputs = mapping.as_ref().map(SubmappingInterface::input_handle);
     let (publications, posterior_rx) = mpsc::sync_channel(8);
     let (depths, depth_rx) = mpsc::sync_channel(4);
@@ -104,6 +91,7 @@ pub fn run(config: Config, vocabulary: Option<&Path>) -> Result<()> {
         }
     }));
     let ports = input::Ports {
+        map_snapshots,
         topics: input::Topics::default(),
         config,
         sensors: estimator.sensor_input_handle(),
@@ -151,6 +139,79 @@ fn latch(failure: &Mutex<Option<String>>, stop: &AtomicBool, message: String) {
         failure.get_or_insert(message);
     }
     stop.store(true, Ordering::Release);
+}
+
+fn create_mapping(
+    config: &Config,
+    parameters: &crate::config::parameters::ViParameters,
+    maps: SharedOccupancyMaps,
+    estimator: &ThreadedSlam,
+    map_snapshots: &map_output::Mailbox,
+) -> Result<Option<SubmappingInterface<OccupancyMapBackend>>> {
+    if config.mapping {
+        let mut backend = OccupancyMapBackend::new(config.map(), DataConfig::default());
+        backend.shared_maps = maps;
+        let mut mapper =
+            SubmappingInterface::new(Config::submaps(), parameters, backend).map_err(invalid)?;
+        mapper.set_t_bs(parameters.imu.t_bs.clone());
+        let mailbox = map_snapshots.clone();
+        let index = Mutex::new(map_output::RegionIndex::default());
+        mapper
+            .state
+            .lock()
+            .map_err(|_| invalid("mapping state poisoned"))?
+            .map_snapshot_callback =
+            Some(Arc::new(move |revision, time, changed, poses, backend| {
+                let mut index = index
+                    .lock()
+                    .map_err(|_| std::io::Error::other("map index poisoned"))?;
+                index
+                    .update(changed, poses, backend)
+                    .map_err(std::io::Error::other)?;
+                let (region, (published_revision, mut header)) = {
+                    let exchange = mailbox
+                        .lock()
+                        .map_err(|_| std::io::Error::other("map mailbox poisoned"))?;
+                    (exchange.region, exchange.metadata)
+                };
+                if let (Some(time), Some(region)) = (time, region)
+                    && revision == published_revision
+                    && header.session != 0
+                {
+                    header.min = region.min;
+                    header.max = region.max;
+                    let buffer = {
+                        let mut exchange = mailbox
+                            .lock()
+                            .map_err(|_| std::io::Error::other("map mailbox poisoned"))?;
+                        // Complete snapshots supersede unsent snapshots without cloning their cells.
+                        exchange
+                            .pending
+                            .take()
+                            .map(|snapshot| snapshot.cells)
+                            .or_else(|| exchange.recycled.take())
+                            .unwrap_or_default()
+                    };
+                    let snapshot = index
+                        .snapshot_with_buffer(revision, time, poses, backend, header, buffer)
+                        .map_err(std::io::Error::other)?;
+                    mailbox
+                        .lock()
+                        .map_err(|_| std::io::Error::other("map mailbox poisoned"))?
+                        .pending = Some(snapshot);
+                }
+                Ok(())
+            }));
+        mapper
+            .state
+            .lock()
+            .map_err(|_| invalid("mapping state poisoned"))?
+            .align_callback = Some(estimator.alignment_callback());
+        mapper.start().map_err(invalid)?;
+        Ok(Some(mapper))
+    } else {
+        Ok(None)
+    }
 }
 
 fn create_estimator(
