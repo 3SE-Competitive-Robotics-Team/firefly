@@ -339,6 +339,7 @@ fn real_ipc_transports_sensor_inputs_and_publishes_one_consistent_navigation_sna
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = stop.clone();
     let ports = super::input::Ports {
+        map_snapshots: super::map_output::Mailbox::default(),
         config,
         sensors: handle.clone(),
         publications,

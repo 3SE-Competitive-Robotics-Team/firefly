@@ -172,6 +172,7 @@ impl Default for Topics {
     }
 }
 pub(super) struct Ports {
+    pub map_snapshots: super::map_output::Mailbox,
     pub topics: Topics,
     pub config: Config,
     pub sensors: SensorInputHandle,
@@ -198,6 +199,8 @@ pub(super) fn run(mut ports: Ports) -> Result<()> {
     let mut publishers = Publishers::open(&node, &ports.config, &ports.topics)?;
     let mut pairs = Pairs::new(ports.config.stereo_tolerance);
     let mut output = Output::new(ports.config.clone(), session())?;
+    let mut map_publisher =
+        super::map_output::PublisherWorker::start(ports.map_snapshots.clone(), ports.stop.clone())?;
     let mut imu_time = None;
     let mut last_depth = None;
 
@@ -205,6 +208,7 @@ pub(super) fn run(mut ports: Ports) -> Result<()> {
         firefly_observability::pump_log_ipc(&log_ipc);
         while let Ok(publication) = ports.publications.try_recv() {
             output.posterior(&publication)?;
+            map_publisher.update(&output)?;
             publishers.posterior(&publication)?;
         }
         while let Some(packet) = imu.receive()? {
@@ -276,6 +280,7 @@ pub(super) fn run(mut ports: Ports) -> Result<()> {
     }
     firefly_observability::pump_log_ipc(&log_ipc);
     ports.stop.store(true, Ordering::Release);
+    map_publisher.finish()?;
     Ok(())
 }
 

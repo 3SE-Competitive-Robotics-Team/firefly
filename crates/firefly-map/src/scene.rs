@@ -193,7 +193,7 @@ mod tests {
     fn voxel_state_unknown_by_default() {
         let scene = sample_scene();
         let grid = scene.to_map_file().unwrap().to_grid_map(0.0).unwrap();
-        // 初始 log-odds 取 clamp_min，对应 Free；Unknown 表示运行期未观测体素。
+        // 未观测体素在规划查询中按自由处理。
         let idx = grid.index_of(Vector3::new(4.5, 4.5, 0.5)).unwrap();
         assert_eq!(grid.state(idx), VoxelState::Free);
     }

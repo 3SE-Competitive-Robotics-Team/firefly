@@ -44,6 +44,17 @@ pub(super) struct Output {
     last_published: Option<Timestamp>,
 }
 impl Output {
+    pub fn graph_revision(&self) -> u64 {
+        self.graph_revision
+    }
+    pub fn stamp_map(&self, header: &mut firefly_pubsub::map::MapElement, sequence: u64) {
+        header.session = self.session;
+        header.sequence = sequence;
+        header.revision = self.revision;
+        header.translation = self.alignment.isometry().translation.vector.into();
+        let q = self.alignment.isometry().rotation.quaternion();
+        header.rotation = [q.i, q.j, q.k, q.w];
+    }
     /// 进程运行标识；只随进程启动变化，跟踪丢失不改变它。
     #[cfg(test)]
     pub fn session_id(&self) -> u64 {
@@ -248,6 +259,6 @@ pub(super) fn time(seconds: f64) -> Result<Timestamp> {
 fn seconds(end: Timestamp, start: Timestamp) -> f64 {
     (end.as_nanosecond() - start.as_nanosecond()) as f64 * 1e-9
 }
-fn timestamp(time: Timestamp) -> f64 {
+pub(super) fn timestamp(time: Timestamp) -> f64 {
     time.as_nanosecond() as f64 * 1e-9
 }
