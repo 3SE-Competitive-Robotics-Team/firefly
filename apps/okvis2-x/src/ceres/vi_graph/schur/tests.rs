@@ -50,6 +50,10 @@ fn verify(fixture: &Fixture) {
     for actual in [
         fixture.system().dense(&fixture.regularization),
         fixture.system().block(&fixture.regularization),
+        fixture
+            .system()
+            .assemble()
+            .solve(&fixture.regularization, false),
         model.solve(&fixture.regularization, "DENSE_SCHUR"),
     ] {
         let actual = actual.unwrap();
@@ -69,6 +73,52 @@ fn verify(fixture: &Fixture) {
         }
         assert!(normal_residual.amax() <= 1e-9 * (1.0 + fixture.gradient.amax()));
     }
+}
+
+#[test]
+fn assembled_normal_reuses_only_undamped_values_after_failed_and_successful_solves() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    for coupled in [false, true] {
+        let mut fixture = Fixture::window(3, 65, 2);
+        if coupled {
+            fixture.rows.push(Row {
+                residual: DVector::from_element(3, 0.7),
+                blocks: vec![
+                    (0, DMatrix::identity(3, 3)),
+                    (3, DMatrix::identity(3, 3) * 0.4),
+                ],
+            });
+            fixture.update_gradient();
+        }
+        let normal = fixture.system().assemble();
+        let invalid = DVector::from_element(fixture.gradient.len(), f64::NAN);
+        assert!(normal.solve(&invalid, false).is_none());
+        for damping in [0.0, 1e-5, 2.0, 0.0, 0.1] {
+            fixture.regularization.fill(damping);
+            verify(&fixture);
+            let expected = fixture.system().block(&fixture.regularization);
+            assert_eq!(normal.solve(&fixture.regularization, false), expected);
+            assert_eq!(
+                pool.install(|| normal.solve(&fixture.regularization, true)),
+                expected
+            );
+        }
+    }
+    let gradient = DVector::from_element(3, 1.0);
+    let normal = SchurSystem {
+        rows: &[],
+        gradient: &gradient,
+        eliminated_points: &[0],
+    }
+    .assemble();
+    assert!(normal.solve(&DVector::zeros(3), false).is_none());
+    assert_eq!(
+        normal.solve(&DVector::from_element(3, 4.0), false),
+        Some(DVector::from_element(3, -0.25))
+    );
 }
 
 #[test]

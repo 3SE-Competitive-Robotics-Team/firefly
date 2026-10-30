@@ -502,6 +502,10 @@ Schur 微基准通过 `cargo bench -p firefly-okvis-x --bench schur --no-run` �
 分位数，不是单帧尾延迟。生产 `DENSE_SCHUR` 使用按块组装；因子连接不同路标时
 自动回退完整稠密系统，保留路标间交叉项。基准中的稠密组装用于对照。
 合成线性系统的对比不代表真实 VIO 整帧性能或板端收益。
+同一基准加 `--retries` 比较重复组装与单次组装后的多次阻尼求解，计时包含首次组装、
+全部尝试与释放；按源码规定的尝试数交替采样，并逐步检查结果精确一致。
+结果记录为 `logs/schur-bench` 的 `retry_sample` / `retry_summary`，不代表在线拒绝率，
+也不能据此推算完整任务的加速比例。
 `cargo test --all-targets` 下该基准只执行数值自检，不启动 IPC 或计时采样。
 
 双目特征微基准源码为 `apps/okvis2-x/benches/image_proc.rs`，以

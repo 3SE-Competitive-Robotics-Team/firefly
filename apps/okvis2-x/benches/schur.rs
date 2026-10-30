@@ -34,6 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (frames, points, views) in [(2, 3, 1), (2, 3, 2), (2, 0, 0)] {
             check_solution(&fixtures::Fixture::window(frames, points, views));
         }
+        check_retries(&fixtures::Fixture::window(2, 3, 2), 4);
         return Ok(());
     }
     firefly_observability::init();
@@ -43,6 +44,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     firefly_observability::pump_log_ipc(&ipc);
     std::thread::sleep(Duration::from_secs(1));
     host_snapshot("idle_end");
+    firefly_observability::pump_log_ipc(&ipc);
+    if std::env::args().any(|arg| arg == "--retries") {
+        for points in [150, 500] {
+            let fixture = fixtures::Fixture::window(8, points, 3);
+            for attempts in [1, 2, 4] {
+                retry_case(&fixture, attempts, || {
+                    firefly_observability::pump_log_ipc(&ipc);
+                });
+            }
+        }
+        firefly_observability::flush();
+        firefly_observability::pump_log_ipc(&ipc);
+        return Ok(());
+    }
     log::info!(
         "Schur benchmark: synthetic inputs; 31 alternating paired batches; release={}; layout and allocation included",
         !cfg!(debug_assertions)
@@ -107,6 +122,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     firefly_observability::flush();
     firefly_observability::pump_log_ipc(&ipc);
     Ok(())
+}
+
+fn retry_case(fixture: &fixtures::Fixture, attempts: usize, mut pump: impl FnMut()) {
+    let points = fixture.points.len();
+    check_retries(fixture, attempts);
+    let warmup = Instant::now();
+    while warmup.elapsed() < Duration::from_millis(300) {
+        retry_batch(fixture, attempts, false);
+        retry_batch(fixture, attempts, true);
+    }
+    host_snapshot("case_start");
+    pump();
+    let mut samples = [Vec::new(), Vec::new()];
+    for sample in 0..31 {
+        for variant in if sample % 2 == 0 { [0, 1] } else { [1, 0] } {
+            let seconds = retry_batch(fixture, attempts, variant == 1);
+            samples[variant].push(seconds);
+            log::info!(
+                "retry_sample points={points} attempts={attempts} sample={sample} cached={} seconds={seconds:.9}",
+                variant == 1
+            );
+        }
+        pump();
+    }
+    for values in &mut samples {
+        values.sort_by(f64::total_cmp);
+    }
+    log::info!(
+        "retry_summary points={points} attempts={attempts} repeated_median_us={:.3} cached_median_us={:.3} repeated_p95_us={:.3} cached_p95_us={:.3} speedup={:.3}",
+        samples[0][15] * 1e6,
+        samples[1][15] * 1e6,
+        samples[0][29] * 1e6,
+        samples[1][29] * 1e6,
+        samples[0][15] / samples[1][15]
+    );
+    host_snapshot("case_end");
+    pump();
+}
+
+fn retry_batch(fixture: &fixtures::Fixture, attempts: usize, cached: bool) -> f64 {
+    let damping: Vec<_> = (0..attempts)
+        .map(|i| &fixture.regularization * 2_f64.powi(i as i32))
+        .collect();
+    let system = fixture.system();
+    let start = Instant::now();
+    let normal = cached.then(|| black_box(&system).assemble());
+    for damping in &damping {
+        let result = match &normal {
+            Some(normal) => normal.solve(black_box(damping), false),
+            None => black_box(&system).block(black_box(damping)),
+        };
+        black_box(result.expect("positive definite retry system"));
+    }
+    drop(normal);
+    start.elapsed().as_secs_f64()
+}
+
+fn check_retries(fixture: &fixtures::Fixture, attempts: usize) {
+    let system = fixture.system();
+    let normal = system.assemble();
+    for i in 0..attempts {
+        let damping = &fixture.regularization * 2_f64.powi(i as i32);
+        let expected = system.block(&damping).unwrap();
+        assert_eq!(normal.solve(&damping, false).unwrap(), expected);
+    }
 }
 
 fn check_solution(fixture: &fixtures::Fixture) -> f64 {

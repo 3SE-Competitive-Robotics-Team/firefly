@@ -808,6 +808,8 @@ impl Linearization {
 }
 
 struct Strategy {
+    // Rejected/invalid steps keep the scaled linearization; acceptance invalidates it.
+    normal: Option<schur::NormalSystem>,
     radius: f64,
     mu: f64,
     decrease: f64,
@@ -820,6 +822,7 @@ struct Strategy {
 impl Strategy {
     fn new(n: usize) -> Self {
         Self {
+            normal: None,
             radius: 1e4,
             mu: 1e-8,
             decrease: 2.0,
@@ -830,10 +833,24 @@ impl Strategy {
             dogleg_norm: 0.0,
         }
     }
+    fn solve(
+        &mut self,
+        model: &Linearization,
+        regularization: &DVector<f64>,
+        kind: &str,
+    ) -> Option<DVector<f64>> {
+        if kind == "DENSE_SCHUR" {
+            self.normal
+                .get_or_insert_with(|| model.system().assemble())
+                .solve(regularization, model.parallel)
+        } else {
+            model.solve(regularization, kind)
+        }
+    }
     fn step(&mut self, m: &Linearization, options: &SolverOptions) -> Option<DVector<f64>> {
         if options.trust_region == "LEVENBERG_MARQUARDT" {
             let regularization = m.diagonal.map(|x| x.clamp(1e-6, 1e32) / self.radius);
-            return m.solve(&regularization, options.linear_solver);
+            return self.solve(m, &regularization, options.linear_solver);
         }
         if self.gn.is_none() {
             self.diagonal = m.diagonal.map(|x| x.clamp(1e-6, 1e32).sqrt());
@@ -843,7 +860,7 @@ impl Strategy {
             self.alpha = self.gradient.norm_squared() / jg_squared;
             while self.mu < 1.0 {
                 let r = self.diagonal.component_mul(&self.diagonal) * self.mu;
-                if let Some(x) = m.solve(&r, options.linear_solver) {
+                if let Some(x) = self.solve(m, &r, options.linear_solver) {
                     self.gn = Some(x.component_mul(&self.diagonal));
                     break;
                 }
@@ -875,6 +892,7 @@ impl Strategy {
         Some(s)
     }
     fn accepted(&mut self, quality: f64, lm: bool) {
+        self.normal = None;
         if lm {
             self.radius =
                 (self.radius / (1.0 / 3.0_f64).max(1.0 - (2.0 * quality - 1.0).powi(3))).min(1e16);
@@ -1372,6 +1390,32 @@ impl RustGraphSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trust_region_reuses_normal_until_acceptance_for_lm_and_dogleg() {
+        for lm in [true, false] {
+            let (mut model, _, _) = block_linearization();
+            let mut strategy = Strategy::new(model.gradient.len());
+            let damping = DVector::from_element(model.gradient.len(), 0.1);
+            for _ in 0..3 {
+                assert_eq!(
+                    strategy.solve(&model, &damping, "DENSE_SCHUR"),
+                    model.solve(&damping, "DENSE_SCHUR")
+                );
+                strategy.rejected(lm);
+                assert!(strategy.normal.is_some());
+                strategy.invalid(lm);
+                assert!(strategy.normal.is_some());
+            }
+            strategy.accepted(0.8, lm);
+            assert!(strategy.normal.is_none());
+            model.scaled(&DVector::from_element(model.gradient.len(), 0.3));
+            assert_eq!(
+                strategy.solve(&model, &damping, "DENSE_SCHUR"),
+                model.solve(&damping, "DENSE_SCHUR")
+            );
+        }
+    }
 
     fn block_linearization() -> (Linearization, DMatrix<f64>, DVector<f64>) {
         let design = DMatrix::from_row_slice(
