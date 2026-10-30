@@ -11,8 +11,8 @@ use crate::planner::{InitSource, PlanResult, Planner, State};
 
 /// 重规划触发阈值（秒，官方 `fsm/thresh_replan_time`）。
 pub const DEFAULT_REPLAN_THRESH: f64 = 1.0;
-/// 急停时限（秒，官方 `fsm/emergency_time`）：碰撞监控命中后重规划失败、
-/// 且剩余碰撞时间小于该值时进入急停。
+/// 急停时限（秒，官方 `fsm/emergency_time`）：同步 FSM 先尝试重规划；异步
+/// 安全回调在剩余碰撞时间小于该值时直接急停，并以此限制求解任务的年龄。
 pub const DEFAULT_EMERGENCY_TIME: f64 = 1.0;
 /// 急停恢复速度阈值（m/s）：fail-safe 允许且测量速度低于该值才从急停
 /// 恢复重规划（官方 `EMERGENCY_STOP` case 的 0.1）。
@@ -50,7 +50,7 @@ impl Default for ManagerOptions {
 }
 
 /// 执行中的局部轨迹（官方 `LocalTrajData`：轨迹 + 起始时刻 + 检查点）。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LocalTraj {
     pub traj: Trajectory,
     /// 轨迹起始时刻（管理器时钟，秒）；检查点/监控的时间原点。
@@ -66,7 +66,7 @@ pub struct LocalTraj {
 }
 
 /// 已登记的其他机轨迹（官方 `swarm_traj` 槽位元素）。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SwarmTraj {
     pub(crate) traj: Trajectory,
     /// 轨迹起始时刻（管理器时钟，秒）：预测对齐用（官方
@@ -103,6 +103,7 @@ impl Horizon {
 /// 全局轨迹与局部目标时间簿记（官方 `GlobalTrajData`，见
 /// `plan_container.hpp:20-31`）：MINCO 时间参数化轨迹 + 管理器时钟锚点 +
 /// 当前/上一局部目标对应的全局轨迹时间。
+#[derive(Clone)]
 pub(crate) struct GlobalTraj {
     /// MINCO 时间参数化轨迹（官方 `planGlobalTrajWaypoints` 产出）：
     /// `eval(t)` 的 t ∈ [0, `duration`]，t=0 起点、t=duration 终点。
@@ -148,6 +149,23 @@ pub struct PlannerManager {
 }
 
 impl PlannerManager {
+    pub(crate) fn snapshot(&self) -> Self {
+        Self {
+            planner: self.planner.snapshot(),
+            options: self.options,
+            global_path: self.global_path.clone(),
+            global: self.global.clone(),
+            goal: self.goal,
+            local: self.local.clone(),
+            traj_id: self.traj_id,
+            last_result: None,
+            touch_goal: self.touch_goal,
+            replans: self.replans,
+            swarm: self.swarm.clone(),
+            have_recv_pre_agent: self.have_recv_pre_agent,
+            consecutive_failures: self.consecutive_failures,
+        }
+    }
     /// 实际构造入口：给定已构建的 [`Planner`]（应用层负责地图来源）。
     ///
     /// # Errors
@@ -284,6 +302,9 @@ impl PlannerManager {
         poly_init: bool,
         random: bool,
     ) -> bool {
+        if self.planner.cancelled() {
+            return false;
+        }
         let horizon = self.horizon(start.position.coords);
         let peers = self.peers_at(now);
         let previous = self

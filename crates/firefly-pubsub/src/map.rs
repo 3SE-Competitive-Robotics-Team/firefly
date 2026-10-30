@@ -1,6 +1,8 @@
-//! Atomic complete regional occupancy snapshots. Element zero is the header; remaining elements
-//! are observed voxel bounds in the source map frame (1 occupied, 2 free).
-//! Absence means unknown, never an incremental deletion. Consumers replace the snapshot.
+//! Atomic complete regional obstacle snapshots. Element zero is the header; production exporters
+//! send occupied voxel bounds in the source map frame (kind 1). Receivers also accept kind 2 free
+//! cells from observed-map exporters, but planning does not distinguish free from unknown.
+//! Absence means no exported obstacle, not proof of free space. Consumers replace the snapshot,
+//! so a removed obstacle disappears even when the new packet contains only its coverage header.
 use iceoryx2::prelude::*;
 
 pub const MAP_TOPIC: &str = "Firefly/OccupancyMap";

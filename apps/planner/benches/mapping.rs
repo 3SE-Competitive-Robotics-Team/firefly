@@ -1,4 +1,4 @@
-//! Full-map export versus indexed local export, including real IPC and grid derivation.
+//! Full observed-map export versus indexed occupied-only export, including real IPC and grid derivation.
 #[path = "../../okvis2-x/benches/common/mod.rs"]
 mod common;
 #[path = "../src/map_input.rs"]
@@ -201,6 +201,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .1
             .iter()
             .skip(1)
+            .filter(|cell| cell.kind == 1)
             .filter(|cell| {
                 (0..3).all(|i| cell.min[i] < region.max[i] && cell.max[i] > region.min[i])
             })

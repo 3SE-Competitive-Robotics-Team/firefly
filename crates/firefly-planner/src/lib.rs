@@ -16,6 +16,7 @@ mod obstacles;
 mod planner;
 pub mod root_finder;
 pub mod traj_server;
+pub mod worker;
 
 pub use config::PlannerConfig;
 pub use fsm::{ExecState, ReplanFsm, TickReport};

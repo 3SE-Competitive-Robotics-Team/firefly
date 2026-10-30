@@ -34,9 +34,16 @@ fn shared_map_revision_and_fusion_freshness_gate_planning() {
     let controls =
         Subscriber::<TrajectoryControlMessage>::with_topic(&node, TRAJECTORY_CONTROL_TOPIC)
             .unwrap();
+    let trajectories =
+        Subscriber::<[TrajectoryPieceMessage]>::with_slice_topic(&node, TRAJECTORY_TOPIC).unwrap();
     let binary =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/planner");
-    let mut process = OutputProcess(Command::new(binary).spawn().unwrap());
+    let mut process = OutputProcess(
+        Command::new(binary)
+            .args(["--goal", "4", "0", "1"])
+            .spawn()
+            .unwrap(),
+    );
     let mut timestamp = 1.0;
     let mut sequence = 0;
     // Fresh map, new Navigation awaiting its map revision, corrected map, then
@@ -50,7 +57,8 @@ fn shared_map_revision_and_fusion_freshness_gate_planning() {
         let start = Instant::now();
         let frozen = timestamp;
         let mut matching = 0;
-        while matching < 5 {
+        let mut planned = false;
+        while matching < 5 || (expected == 1 && !planned) {
             assert!(
                 start.elapsed() < Duration::from_secs(4),
                 "map gate did not settle to {expected}"
@@ -89,6 +97,13 @@ fn shared_map_revision_and_fusion_freshness_gate_planning() {
                     matching += 1;
                 } else {
                     matching = 0;
+                }
+            }
+            while let Some(trajectory) = trajectories.receive().unwrap() {
+                if expected == 1 && trajectory[0].revision == revision {
+                    assert!(trajectory[0].start_time <= timestamp);
+                    assert!(timestamp - trajectory[0].start_time < 1.0);
+                    planned = true;
                 }
             }
             std::thread::sleep(Duration::from_millis(10));

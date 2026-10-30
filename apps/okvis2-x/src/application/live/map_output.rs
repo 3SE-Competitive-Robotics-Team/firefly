@@ -327,6 +327,86 @@ mod tests {
     }
 
     #[test]
+    fn occupancy_pruning_preserves_every_obstacle_from_exhaustive_leaves() {
+        use firefly_supereight2::{
+            iterator::{OctreeIterator, Selection},
+            octant::Octant,
+        };
+        let (mut backend, mut poses) = fixture();
+        // A plane beyond this submap's root produces a fully free observed subtree.
+        backend.create_map(3).unwrap();
+        poses.insert(3, Transformation::identity());
+        let depth = Matrix::from_vec(48, 64, 1, vec![6_f32; 64 * 48]);
+        let sensor = PinholeSensor {
+            fx: 64.,
+            fy: 63.,
+            cx: 31.5,
+            cy: 23.5,
+            width: 64,
+            height: 48,
+            near: 0.1,
+            far: 8.,
+            t_sc: Transformation::identity(),
+        };
+        backend
+            .integrate_depth(
+                3,
+                0,
+                DepthIntegration {
+                    depth: &depth,
+                    sigma: None,
+                    sensor: &sensor,
+                    t_md: Matrix4::identity(),
+                    colour: None,
+                    segments: None,
+                },
+            )
+            .unwrap();
+        let mut expected = 0;
+        let mut free = 0;
+        let mut octants = 0;
+        for handle in backend.maps.values() {
+            let map = handle.read().unwrap();
+            octants += OctreeIterator::new(&map.octree, Selection::All).count();
+            for id in OctreeIterator::new(&map.octree, Selection::Leaves) {
+                let octant = map.octree.get(id).unwrap();
+                let singleton = [octant.data()];
+                let data = match octant {
+                    Octant::Block(block) => block.data_at_scale(block.current_scale).unwrap(),
+                    Octant::Node(_) => &singleton,
+                };
+                for value in data.iter().filter(|v| v.valid()) {
+                    if value.is_inside() {
+                        expected += 1;
+                    } else {
+                        free += 1;
+                    }
+                }
+            }
+        }
+        assert!(expected > 0 && free > 0);
+        let mut index = RegionIndex::default();
+        index.update(&[1, 2, 3], &poses, &backend).unwrap();
+        let result = index
+            .snapshot(
+                0,
+                Timestamp::from_second(2).unwrap(),
+                &poses,
+                &backend,
+                MapElement {
+                    min: [-64.; 3],
+                    max: [64.; 3],
+                    rotation: [0., 0., 0., 1.],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(result.cells.len(), expected + 1);
+        assert!(result.cells[1..].iter().all(|cell| cell.kind == 1));
+        assert!(result.visited_octants < octants);
+    }
+
+    #[test]
     fn loop_revision_moves_each_submap_and_preserves_fusion_time() {
         let (backend, mut poses) = fixture();
         let time = Timestamp::from_second(2).unwrap();
@@ -340,7 +420,7 @@ mod tests {
         };
         let old = index.snapshot(0, time, &poses, &backend, header).unwrap();
         assert!(old.cells.iter().any(|cell| cell.kind == 1));
-        assert!(old.cells.iter().any(|cell| cell.kind == 2));
+        assert!(old.cells[1..].iter().all(|cell| cell.kind == 1));
         poses.insert(
             2,
             Transformation::new(Vector3::new(3., -1., 0.), Quaternion::identity()),

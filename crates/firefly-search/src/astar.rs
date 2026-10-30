@@ -65,6 +65,7 @@ enum NodeState {
 
 /// A* 搜索器：节点池缓冲按需扩容、跨搜索复用（官方 `rounds_` 世代）。
 pub struct Astar {
+    cancelled: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
     config: AstarConfig,
     g_score: Vec<f64>,
     came_from: Vec<Node>,
@@ -89,6 +90,7 @@ impl Astar {
     #[must_use]
     pub fn with_config(config: AstarConfig) -> Self {
         Self {
+            cancelled: None,
             config,
             g_score: Vec::new(),
             came_from: Vec::new(),
@@ -98,6 +100,14 @@ impl Astar {
             heap: Vec::new(),
             heap_pos: Vec::new(),
         }
+    }
+
+    /// Cooperative cancellation, checked every 64 expansions.
+    pub fn set_cancellation(
+        &mut self,
+        cancelled: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    ) {
+        self.cancelled = cancelled;
     }
 
     /// # Errors
@@ -177,6 +187,11 @@ impl Astar {
 
         let mut expansions = 0usize;
         while let Some(Entry { node, g, .. }) = self.heap_pop() {
+            if expansions.is_multiple_of(64)
+                && self.cancelled.as_ref().is_some_and(|cancelled| cancelled())
+            {
+                return Err(Error::temporary(ErrorKind::Convergence, "a* cancelled"));
+            }
             if self.rounds[node.0 as usize] != round
                 || self.state[node.0 as usize] != NodeState::Open
             {

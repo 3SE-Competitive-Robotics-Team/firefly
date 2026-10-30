@@ -44,7 +44,8 @@ impl GridMap {
 
     /// 登记不可由在线观测清除的场地占据体素。
     pub fn set_prior_occupied(&mut self, idx: [usize; 3]) {
-        self.prior.insert(self.global_index(idx));
+        let global = self.global_index(idx);
+        std::sync::Arc::make_mut(&mut self.prior).insert(global);
         self.set_state(idx, VoxelState::Occupied);
     }
 

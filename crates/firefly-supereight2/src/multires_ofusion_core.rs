@@ -10,7 +10,6 @@ use crate::{
     block::Block,
     data::{DataConfig, OccupancyData, up_prop_max, up_prop_mean, up_prop_min},
     data_field::UncertaintyModel,
-    image::invalid,
     octant::OctantId,
     octree::Octree,
     uncertainty::{cpp_clamp, cpp_min},
@@ -93,28 +92,24 @@ pub fn propagate_block_to_coarsest_scale(block: &mut Block) -> Result<()> {
     }
     let first = block.current_scale + 1;
     for parent_scale in first..=block.max_scale {
-        let child_scale = parent_scale - 1;
         let side = block.base.size >> parent_scale;
         let child_side = side * 2;
-        let child_mean = block.data_at_scale(child_scale)?.to_vec();
         let preserve_mean = parent_scale == first && block.buffer_scale() > block.current_scale;
+        let levels = block.propagation_levels(parent_scale)?;
+        let child_mean = levels.child_mean;
         let child_min = if parent_scale == first {
-            child_mean.clone()
+            child_mean
         } else {
-            block.min_data_at_scale(child_scale)?.to_vec()
+            levels.child_min
         };
         let child_max = if parent_scale == first {
-            child_mean.clone()
+            child_mean
         } else {
-            block.max_data_at_scale(child_scale)?.to_vec()
+            levels.child_max
         };
-        let count = (side * side * side) as usize;
-        let mut means = block.data_at_scale(parent_scale)?.to_vec();
-        let mut mins = block.min_data_at_scale(parent_scale)?.to_vec();
-        let mut maxs = block.max_data_at_scale(parent_scale)?.to_vec();
-        if means.len() != count || mins.len() != count || maxs.len() != count {
-            return Err(invalid("block propagation scale storage mismatch"));
-        }
+        let means = levels.parent_mean;
+        let mins = levels.parent_min;
+        let maxs = levels.parent_max;
         for z in 0..side {
             for y in 0..side {
                 for x in 0..side {
@@ -144,17 +139,6 @@ pub fn propagate_block_to_coarsest_scale(block: &mut Block) -> Result<()> {
                 }
             }
         }
-        if !preserve_mean {
-            block
-                .data_at_scale_mut(parent_scale)?
-                .copy_from_slice(&means);
-        }
-        block
-            .min_data_at_scale_mut(parent_scale)?
-            .copy_from_slice(&mins);
-        block
-            .max_data_at_scale_mut(parent_scale)?
-            .copy_from_slice(&maxs);
     }
     Ok(())
 }

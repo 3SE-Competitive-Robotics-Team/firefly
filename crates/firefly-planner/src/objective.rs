@@ -140,6 +140,7 @@ impl<'a> ReboundDetector<'a> {
 }
 
 pub struct MincoObjective<'a> {
+    pub(crate) cancellation: Option<crate::worker::Cancellation>,
     start: Endpoint,
     end: Endpoint,
     pieces: usize,
@@ -166,10 +167,21 @@ pub struct MincoObjective<'a> {
 }
 
 impl<'a> MincoObjective<'a> {
+    pub(crate) fn set_cancellation(&mut self, cancellation: Option<crate::worker::Cancellation>) {
+        if let Some(token) = cancellation.clone()
+            && let Some(detector) = &mut self.detector
+        {
+            detector
+                .astar
+                .set_cancellation(Some(std::sync::Arc::new(move || token.is_cancelled())));
+        }
+        self.cancellation = cancellation;
+    }
     #[must_use]
     pub fn new(start: Endpoint, end: Endpoint, pieces: usize, cost: MincoCost) -> Self {
         Self {
             start,
+            cancellation: None,
             end,
             pieces,
             cost,
@@ -440,6 +452,10 @@ impl Objective for MincoObjective<'_> {
 
     fn early_exit(&self) -> bool {
         self.early_exit
+            || self
+                .cancellation
+                .as_ref()
+                .is_some_and(crate::worker::Cancellation::is_cancelled)
     }
 
     fn gradient(&mut self, x: &DVector<f64>) -> DVector<f64> {
