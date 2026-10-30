@@ -449,13 +449,23 @@ static 预览不进入文件和正常/异常退出时的完整性。构建、单
 
 ### OKVIS 算法与通讯专项
 
+规划异步边界回归运行 `cargo test -p firefly-planner --lib worker`，覆盖取消、过期、地图
+变更、滚动窗口和阻塞求解时的安全决策。实时性对照为 `apps/planner/benches/replanning.rs`：
+先 `cargo bench -p planner --bench replanning --no-run`，启动 RRD 记录并等待宿主稳定后，
+运行生成的可执行文件并传 `--bench`。两轮交替同步/异步顺序，在空图和绕墙场景使用
+真实求解器及 100Hz/20Hz 定时调度，记录回调耗时、到期延迟、任务快照时间、入库数与
+宿主计数到 `logs/replanning-bench`；无入库结果即失败。该基准测进程内规划与调度，
+不包含 IPC 地图接收、渲染、飞控或真实飞行，不能替代闭环验收。
+加 `--updates` 在每个安全周期持有旧快照并移动窗口、增删 128 个体素，将写时复制和
+膨胀同步耗时计入安全回调；用于检查快照优化是否把成本转移到地图写入路径。
+
 共享地图对照基准为 `apps/planner/benches/mapping.rs`，先执行
 `cargo bench -p planner --bench mapping --no-run`，宿主资源稳定且 RRD 记录进程启动后，
 运行生成的 bench 可执行文件并传 `--bench`；加 `--moving` 使用平移相机及滚动窗口，
 `--history=N` 添加远处历史子地图。历史几何使用只读冻结地图，各自持有独立位姿。
-比较全图遍历导出与空间索引局部导出，两侧包括真实 IPC、接收和局部栅格派生，
+比较全图已观测体素遍历导出与空间索引局部障碍导出，两侧包括真实 IPC、接收和局部栅格派生，
 共同的 Supereight2 积分只测量一次并计入两侧总耗时，交替测量顺序。
-计时之外逐帧核对局部结果等于全图独立遍历后裁剪的结果；样本、消息大小和宿主计数进入
+计时之外逐帧核对局部结果等于全图独立遍历后筛选占据并裁剪的结果；样本、消息大小和宿主计数进入
 `logs/mapping-bench`。这是建图阶段微基准，不包含 VIO 求解、线程调度或完整飞行闭环。
 无 `--bench` 只运行小型功能检查。地图门控的真实进程回归沿用下文的
 `cargo test -p planner --test trajectory_ipc -- --ignored --test-threads=1`，需先重建 release planner。

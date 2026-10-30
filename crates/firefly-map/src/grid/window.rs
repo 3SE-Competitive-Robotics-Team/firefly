@@ -261,18 +261,33 @@ impl GridMap {
         let z1 = if case == 5 { bound } else { self.up[2] };
         for x in x0.max(self.low[0])..=x1.min(self.up[0]) {
             for y in y0.max(self.low[1])..=y1.min(self.up[1]) {
-                for z in z0.max(self.low[2])..=z1.min(self.up[2]) {
+                let mut z = z0.max(self.low[2]);
+                let z_end = z1.min(self.up[2]);
+                while z <= z_end {
                     let g = [x, y, z];
                     let a = self.occ_addr(g);
+                    let ia = self.inf_addr(g);
+                    // Skip known-empty page runs, stopping at either ring row's wrap boundary.
+                    let skip = self
+                        .occupancy
+                        .uniform_len(a, false)
+                        .min(self.inflate.uniform_len(ia, 0))
+                        .min(self.dims[2] - a % self.dims[2])
+                        .min(self.inf_dims[2] - ia % self.inf_dims[2])
+                        .min((z_end - z + 1) as usize);
+                    if skip > 0 {
+                        z += skip as i64;
+                        continue;
+                    }
                     let value = self.occupancy[a];
                     if value {
                         self.touch();
+                        self.occupancy[a] = false;
                     }
-                    self.occupancy[a] = false;
-                    let ia = self.inf_addr(g);
                     if self.inflate[ia] >= GRID_MAP_OBS_FLAG {
                         self.change_inf_buf_global(false, g, true);
                     }
+                    z += 1;
                 }
             }
         }

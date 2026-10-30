@@ -41,5 +41,9 @@ toml.workspace = true
 name = "mapping"
 harness = false
 
+[[bench]]
+name = "replanning"
+harness = false
+
 [lints]
 workspace = true

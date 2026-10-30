@@ -5,14 +5,19 @@
 //! 未知和自由状态均采用乐观查询，窗口外也不阻挡；世界系虚拟墙例外。
 //! 膨胀沿用 EGO-Planner-v2 的邻域计数语义，观测更新不在此处重复融合。
 
+mod buffer;
 mod builder;
 mod inflation;
 mod occupancy;
+#[cfg(test)]
+mod snapshot_tests;
 mod window;
 
 pub use builder::GridMapBuilder;
 
+use buffer::Buffer;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use nalgebra::Vector3;
 
@@ -73,11 +78,11 @@ pub struct GridMap {
     /// 上次窗口中心（官方 `center_last3i_`，平移方向判据）。
     center_last: [i64; 3],
     /// 局部快照派生的二值占据；不累计传感器概率。
-    occupancy: Vec<bool>,
+    occupancy: Buffer<bool>,
     /// 世界锚定的场地先验；自由快照与动态障碍移除不能清除。
-    prior: HashSet<[i64; 3]>,
+    prior: Arc<HashSet<[i64; 3]>>,
     /// 膨胀计数缓冲（对照官方 `occupancy_buffer_inflate_`）：障碍体素自身 `±GRID_MAP_OBS_FLAG`，周围 `inf_grid` 格内 `±1`；`>0` 即膨胀。
-    inflate: Vec<u16>,
+    inflate: Buffer<u16>,
     /// 虚拟地面/天花板；None = 不启用（官方 `enable_virtual_wall = false` 默认）。
     virtual_wall: Option<VirtualWall>,
     /// 构造时按 `obstacles_inflation` 计算的膨胀步长（官方 `inf_grid_`，恒 ≤ 4），用于 `change_inf_buf` 增量更新。
@@ -88,7 +93,15 @@ pub struct GridMap {
     inflated_revision: u64,
     /// 占据状态变化的缓冲地址，每次同步前去重，容量不超过占据窗口。
     inflation_dirty: Vec<usize>,
-    inflation_pending: Vec<bool>,
+    inflation_pending: Buffer<bool>,
     /// 清空观测或直接编辑膨胀计数后，按占据层重建。
     inflation_rebuild: bool,
+}
+
+impl GridMap {
+    /// Changes whenever occupancy, inflation inputs, or the rolling window changes.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
 }

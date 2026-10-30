@@ -28,6 +28,7 @@ pub struct TickReport {
 // 保留上游彼此独立的输入和 fail-safe 标志，执行状态由 ExecState 唯一编码。
 #[allow(clippy::struct_excessive_bools)]
 pub struct ReplanFsm {
+    pub(crate) generation: u64,
     pub(crate) manager: PlannerManager,
     state: ExecState,
     state_calls: usize,
@@ -44,6 +45,7 @@ impl ReplanFsm {
     #[must_use]
     pub fn new(manager: PlannerManager) -> Self {
         Self {
+            generation: 0,
             manager,
             state: ExecState::Init,
             state_calls: 1,
@@ -105,6 +107,9 @@ impl ReplanFsm {
         }
         let changed = (goal - self.manager.goal().coords).norm() >= 1e-6;
         self.manager.set_goal(now, measured, goal)?;
+        if changed {
+            self.generation = self.generation.wrapping_add(1);
+        }
         self.have_target = true;
         self.have_trigger = true;
         self.have_new_target |= changed;
@@ -120,6 +125,7 @@ impl ReplanFsm {
     /// # Errors
     /// 新坐标快照无法生成全局引导。
     pub fn invalidate_localization(&mut self, now: f64, measured: State) -> Result<()> {
+        self.generation = self.generation.wrapping_add(1);
         self.manager.invalidate_localization(now, measured)?;
         if !self.mandatory_stop
             && matches!(
@@ -132,6 +138,7 @@ impl ReplanFsm {
         Ok(())
     }
     pub(crate) fn request_emergency(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
         self.change_state(ExecState::EmergencyStop);
     }
     pub fn mandatory_stop(&mut self, _now: f64, _measured: Option<State>) {
@@ -141,11 +148,21 @@ impl ReplanFsm {
     }
     pub fn trigger_emergency_stop_disable_failsafe(&mut self, _now: f64, _measured: Option<State>) {
         self.failsafe_enabled = false;
-        self.change_state(ExecState::EmergencyStop);
+        self.request_emergency();
     }
     /// 对照 execFSMCallback：一次回调只执行当前状态的分支。
     #[must_use]
     pub fn exec_tick(&mut self, now: f64, measured: Option<State>) -> TickReport {
+        self.exec_tick_inner(now, measured, false)
+    }
+
+    /// Advance execution without running the optimizer. Pair with `PlanningWorker::tick`.
+    #[must_use]
+    pub fn exec_tick_deferred(&mut self, now: f64, measured: Option<State>) -> TickReport {
+        self.exec_tick_inner(now, measured, true)
+    }
+
+    fn exec_tick_inner(&mut self, now: f64, measured: Option<State>, deferred: bool) -> TickReport {
         let mut report = TickReport::default();
         match self.state {
             ExecState::Init => {
@@ -159,6 +176,9 @@ impl ReplanFsm {
                 }
             }
             ExecState::SequentialStart | ExecState::GenNewTraj => {
+                if deferred {
+                    return report;
+                }
                 if (self.state == ExecState::GenNewTraj || self.manager.sequential_start_ready())
                     && let Some(measured) = measured
                 {
@@ -176,6 +196,9 @@ impl ReplanFsm {
                 }
             }
             ExecState::ReplanTraj => {
+                if deferred {
+                    return report;
+                }
                 if self.plan_from_local(now) {
                     report.replanned = true;
                     self.change_state(ExecState::ExecTraj);
@@ -186,6 +209,7 @@ impl ReplanFsm {
             ExecState::ExecTraj => {
                 self.manager.refresh_inflation();
                 if self.manager.modify_in_collision_final_goal(now, measured) {
+                    self.generation = self.generation.wrapping_add(1);
                     self.have_new_target = true;
                     self.change_state(ExecState::ReplanTraj);
                 } else if let Some(local) = self.manager.local() {
@@ -232,11 +256,24 @@ impl ReplanFsm {
     /// 对照 checkCollisionCallback，安全检查有独立的 20Hz 调用入口。
     #[must_use]
     pub fn safety_tick(&mut self, now: f64, _measured: Option<State>) -> TickReport {
+        self.safety_tick_inner(now, false)
+    }
+
+    /// Collision decisions never wait for a solve. An imminent collision cancels the task.
+    #[must_use]
+    pub fn safety_tick_deferred(&mut self, now: f64) -> TickReport {
+        self.safety_tick_inner(now, true)
+    }
+
+    fn safety_tick_inner(&mut self, now: f64, deferred: bool) -> TickReport {
         let mut report = TickReport {
             ground_height: self.manager.measure_ground_height(now),
             ..TickReport::default()
         };
-        if self.state == ExecState::WaitTarget || self.manager.traj_id() == 0 {
+        if self.state == ExecState::WaitTarget
+            || self.manager.traj_id() == 0
+            || (deferred && self.is_emergency())
+        {
             return report;
         }
         self.manager.refresh_inflation();
@@ -254,17 +291,40 @@ impl ReplanFsm {
                 .manager
                 .local()
                 .map_or(0.0, |local| now - local.start_time);
-            if self.plan_from_local(now) {
+            if !deferred && self.plan_from_local(now) {
                 report.replanned = true;
                 self.change_state(ExecState::ExecTraj);
             } else if hit - elapsed < self.manager.options.emergency_time {
-                self.change_state(ExecState::EmergencyStop);
+                self.request_emergency();
             } else {
                 self.change_state(ExecState::ReplanTraj);
             }
         }
         report.emergency_stop = self.is_emergency();
         report
+    }
+
+    pub(crate) fn solve_kind(&self, measured: Option<State>) -> Option<crate::worker::SolveKind> {
+        use crate::worker::SolveKind;
+        match self.state {
+            ExecState::SequentialStart | ExecState::GenNewTraj
+                if self.state == ExecState::GenNewTraj || self.manager.sequential_start_ready() =>
+            {
+                measured.map(|state| SolveKind::Global(state, self.state_calls != 1))
+            }
+            ExecState::ReplanTraj => Some(SolveKind::Local(self.have_new_target)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn solve_finished(&mut self, success: bool) {
+        if success {
+            self.have_new_target = false;
+            self.escape_emergency = true;
+            self.change_state(ExecState::ExecTraj);
+        } else {
+            self.change_state(self.state);
+        }
     }
 }
 

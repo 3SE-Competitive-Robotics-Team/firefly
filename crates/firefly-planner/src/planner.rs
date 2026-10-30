@@ -95,6 +95,7 @@ pub struct FormationSpec {
 }
 
 pub struct Planner {
+    pub(crate) cancellation: Option<crate::worker::Cancellation>,
     config: PlannerConfig,
     map: GridMap,
     formation: Option<FormationSpec>,
@@ -113,6 +114,7 @@ impl Planner {
     pub fn new(config: PlannerConfig, mut map: GridMap) -> Self {
         map.inflate_obstacles();
         Self {
+            cancellation: None,
             config,
             map,
             formation: None,
@@ -146,6 +148,45 @@ impl Planner {
     #[must_use]
     pub fn config(&self) -> &PlannerConfig {
         &self.config
+    }
+
+    pub(crate) fn snapshot(&self) -> Self {
+        Self {
+            cancellation: None,
+            config: self.config.clone(),
+            map: self.map.clone(),
+            formation: self.formation.clone(),
+            astar: firefly_search::Astar::default(),
+            last_swarm_weight_mod: self.last_swarm_weight_mod,
+        }
+    }
+
+    pub(crate) fn cancelled(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(crate::worker::Cancellation::is_cancelled)
+    }
+
+    pub(crate) fn set_cancellation(&mut self, cancellation: crate::worker::Cancellation) {
+        let search = cancellation.clone();
+        self.astar
+            .set_cancellation(Some(std::sync::Arc::new(move || search.is_cancelled())));
+        self.cancellation = Some(cancellation);
+    }
+
+    pub(crate) fn exchange_workspace(&mut self, workspace: &mut firefly_search::Astar) {
+        std::mem::swap(&mut self.astar, workspace);
+    }
+
+    fn check_cancelled(&self) -> Result<()> {
+        if self.cancelled() {
+            Err(Error::temporary(
+                ErrorKind::Convergence,
+                "planning task cancelled",
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     /// 规划器持有的地图（可视化等用途）。
@@ -233,6 +274,7 @@ impl Planner {
         source: InitSource<'_>,
         touch_goal: bool,
     ) -> Result<PlanResult> {
+        self.check_cancelled()?;
         // 地图可能已被动态障碍更新：重算膨胀层（官方 clearAndInflateLocalMap）
         self.map.inflate_obstacles();
         let start_endpoint = Endpoint {
@@ -343,6 +385,7 @@ impl Planner {
         // 官方:从最后一个候选到第一个遍历,严格小于才替换(平局保持先评估者);
         // 官方 min_cost 初值 999999,此处以 None 起步等价且避开哨兵值边界
         for candidate in candidates.iter().rev() {
+            self.check_cancelled()?;
             match self.rebound_inner(
                 minco.clone(),
                 candidate.planes.clone(),
@@ -403,6 +446,7 @@ impl Planner {
         let mut iteration = 0usize;
 
         loop {
+            self.check_cancelled()?;
             iteration += 1;
             // 所有 Rebound 和 restart 尝试共享迭代预算。
             if iteration > Self::REBOUND_MAX_ITERATIONS {
@@ -426,6 +470,7 @@ impl Planner {
                 multitopo,
                 gate_latched,
             );
+            objective.set_cancellation(self.cancellation.clone());
             let x0 = Self::pack(&minco);
             // 队形目标是稳定约束（非动态障碍），一次优化到位需要更多迭代
             let config = if self.formation.is_some() {
@@ -438,6 +483,7 @@ impl Planner {
                 LbfgsConfig::default()
             };
             let report = Lbfgs::new(config).minimize(&mut objective, x0)?;
+            self.check_cancelled()?;
             gate_latched = objective.gate_latched();
             let swarm_safe = objective.swarm_safe();
             log::debug!(

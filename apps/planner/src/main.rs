@@ -20,6 +20,7 @@ use fastrace::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_map::{GridMap, MapFile, Plane, VirtualWall, VoxelState};
 use firefly_observability::init as init_observability;
+use firefly_planner::worker::{MapVersion, PlanningWorker};
 use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager, ReplanFsm};
 use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
 use firefly_pubsub::map::{MAP_REGION_TOPIC, MAP_TOPIC, MapElement, MapRegion};
@@ -144,6 +145,7 @@ fn open_sub<T: std::fmt::Debug + ZeroCopySend + 'static>(
 #[allow(clippy::struct_excessive_bools)]
 struct App {
     fsm: ReplanFsm,
+    solver: PlanningWorker,
     output: output::OutputPublisher,
     published_trajectory: u32,
     /// 管理器行为参数（来自配置，启动日志展示）。
@@ -264,6 +266,8 @@ impl App {
         };
         Ok(Self {
             fsm: ReplanFsm::new(manager),
+            solver: PlanningWorker::new()
+                .map_err(|e| Error::new(ErrorKind::Internal, format!("创建求解线程失败: {e}")))?,
             output,
             published_trajectory: 0,
             manager_options,
@@ -389,10 +393,16 @@ impl App {
         // 先消费传感器（更新权威仿真时钟），再取当帧 sim 时刻
         self.poll_sensors()?;
         let now = self.t_sim;
+        if self.pending_mandatory_stop {
+            self.pending_mandatory_stop = false;
+            self.solver.cancel();
+            self.fsm.mandatory_stop(now, None);
+        }
         firefly_observability::set_sim_time(now);
         firefly_observability::pump_log_ipc(&self.log_ipc);
 
         let Some(snapshot) = self.state_input.current(Instant::now()) else {
+            self.solver.cancel();
             if self.state_input.stopped() && !self.state_loss_reported {
                 log::error!("地图系里程计失联或无效，停止发布规划参考；恢复定位后须重启 planner");
                 self.state_loss_reported = true;
@@ -407,6 +417,7 @@ impl App {
             .navigation()
             .map(|navigation| navigation.revision);
         if self.state_input.take_revision_change() {
+            self.solver.cancel();
             self.fsm.manager_mut().map_mut().clear_observations();
             self.prev_dyn.clear();
             self.fsm.invalidate_localization(now, snapshot.state)?;
@@ -427,17 +438,11 @@ impl App {
         }
         let navigation = self.state_input.navigation().unwrap();
         if !self.synchronize_map(&navigation)? {
+            self.solver.cancel();
             self.output.control(revision, false)?;
             return Ok(());
         }
         self.perceived_center = snapshot.state.position.coords;
-
-        // 强制停止（官方 mandatoryStopCallback）：置锁存标志、关 fail-safe、
-        // 进入急停——此后不自动恢复；先于其他分支处理。
-        if self.pending_mandatory_stop {
-            self.pending_mandatory_stop = false;
-            self.fsm.mandatory_stop(now, measured);
-        }
 
         // 动态目标：收到新目标即重目标（重算全局路径 + 重置状态机），
         // 下一 tick 重新规划飞往新目标
@@ -459,7 +464,12 @@ impl App {
             }
         }
         self.output.control(revision, true)?;
-        let report = self.fsm.exec_tick(now, measured);
+        let mut report = self.fsm.exec_tick_deferred(now, measured);
+        let map_version = MapVersion {
+            localization: navigation.revision,
+            geometry: self.fsm.manager().map().revision(),
+        };
+        report.replanned |= self.solver.tick(&mut self.fsm, now, measured, map_version);
         self.handoff_trajectory()?;
 
         // 可视化：新轨迹 / 无人机位姿 / 动态障碍（经 Firefly/Viz 发布）
@@ -511,6 +521,7 @@ impl App {
                     .map_input
                     .ready(&nav, Instant::now(), Duration::from_secs_f64(MAP_TIMEOUT))
         }) {
+            self.solver.cancel();
             self.output.control(None, false)?;
             return Ok(());
         }
@@ -554,12 +565,19 @@ impl App {
     /// 独立安全定时回调，与执行状态机共用单线程事件队列。
     fn safety_step(&mut self) -> Result<()> {
         self.poll_sensors()?;
+        if self.pending_mandatory_stop {
+            self.pending_mandatory_stop = false;
+            self.solver.cancel();
+            self.fsm.mandatory_stop(self.t_sim, None);
+        }
         let Some(snapshot) = self.state_input.current(Instant::now()) else {
+            self.solver.cancel();
             self.output.control(None, false)?;
             return Ok(());
         };
         // 坐标修正和等待新鲜地图由执行回调完成，期间不检查旧轨迹。
         if self.state_input.has_revision_change() {
+            self.solver.cancel();
             self.output.control(None, false)?;
             return Ok(());
         }
@@ -567,9 +585,10 @@ impl App {
         let measured = Some(snapshot.state);
         // 地图超时急停（对应官方 checkCollisionCallback：有可执行轨迹且
         // 未完成才触发急停）；等待新鲜地图时禁止碰撞重规划。
-        // 禁用 fail-safe 只阻止急停执行分支按低速条件恢复；安全回调仍可重规划。
+        // 禁用 fail-safe 后保持急停，不用异步求解结果恢复执行。
         let navigation = self.state_input.navigation().unwrap();
         if !self.synchronize_map(&navigation)? {
+            self.solver.cancel();
             if self.fsm.manager().local().is_some() && !self.fsm.is_finished() {
                 self.fsm
                     .trigger_emergency_stop_disable_failsafe(now, measured);
@@ -578,7 +597,11 @@ impl App {
             return Ok(());
         }
 
-        let _ = self.fsm.safety_tick(now, measured);
+        let report = self.fsm.safety_tick_deferred(now);
+        if report.emergency_stop || self.fsm.is_mandatory_stopped() {
+            self.solver.cancel();
+            let _ = self.fsm.exec_tick_deferred(now, measured);
+        }
         self.handoff_trajectory()
     }
 
@@ -611,6 +634,7 @@ impl App {
             if attachment_id.has_event_from(&safety_guard) {
                 if let Err(error) = self.safety_step() {
                     log::warn!("安全检查失败：{error}");
+                    return self.stop_failed_callback();
                 }
                 return CallbackProgression::Continue;
             }
@@ -638,10 +662,7 @@ impl App {
             drop(root);
             if let Err(error) = step {
                 log::warn!("tick 失败：{error}");
-                if let Err(error) = self.output.control(None, false) {
-                    log::error!("停止规划输出失败：{error}");
-                    return CallbackProgression::Stop;
-                }
+                return self.stop_failed_callback();
             }
             if last_visualization.elapsed() < Duration::from_millis(100) {
                 return CallbackProgression::Continue;
@@ -691,6 +712,15 @@ impl App {
             self.fsm.is_finished()
         );
         Ok(())
+    }
+
+    fn stop_failed_callback(&mut self) -> CallbackProgression {
+        self.solver.cancel();
+        if let Err(error) = self.output.control(None, false) {
+            log::error!("停止规划输出失败：{error}");
+            return CallbackProgression::Stop;
+        }
+        CallbackProgression::Continue
     }
 
     // --- 可视化发布（经 Firefly/Viz 话题，firefly-viz 进程统一写 rerun）---
