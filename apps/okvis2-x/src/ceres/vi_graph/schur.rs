@@ -44,6 +44,22 @@ pub struct SchurSystem<'a> {
     pub eliminated_points: &'a [usize],
 }
 
+/// Immutable normal equations for one linearization, before damping.
+pub struct NormalSystem {
+    gradient: DVector<f64>,
+    eliminated_points: Vec<usize>,
+    blocks: NormalBlocks,
+}
+
+enum NormalBlocks {
+    Independent {
+        retained: Vec<usize>,
+        reduced: DMatrix<f64>,
+        points: Vec<PointBlock>,
+    },
+    Coupled(DMatrix<f64>),
+}
+
 impl SchurSystem<'_> {
     /// Assemble only retained normal equations and connected landmark blocks.
     /// Factors connecting distinct landmarks use the complete dense system.
@@ -58,6 +74,19 @@ impl SchurSystem<'_> {
         regularization: &DVector<f64>,
         parallel: bool,
     ) -> Option<DVector<f64>> {
+        self.assemble().solve(regularization, parallel)
+    }
+
+    #[fastrace::trace]
+    pub fn assemble(&self) -> NormalSystem {
+        NormalSystem {
+            gradient: self.gradient.clone(),
+            eliminated_points: self.eliminated_points.to_vec(),
+            blocks: self.assemble_blocks(),
+        }
+    }
+
+    fn assemble_blocks(&self) -> NormalBlocks {
         let count = self.gradient.len();
         let mut point_for_column = vec![None; count];
         for (point, &offset) in self.eliminated_points.iter().enumerate() {
@@ -73,7 +102,7 @@ impl SchurSystem<'_> {
             retained_index[column] = index;
         }
         let Some(mut points) = self.point_blocks(&point_for_column, &retained_index) else {
-            return self.dense(regularization);
+            return NormalBlocks::Coupled(self.lower_normal(&DVector::zeros(count)));
         };
         let mut reduced = DMatrix::<f64>::zeros(retained.len(), retained.len());
         for row in self.rows {
@@ -109,12 +138,45 @@ impl SchurSystem<'_> {
                 }
             }
         }
+        NormalBlocks::Independent {
+            retained,
+            reduced,
+            points,
+        }
+    }
+}
+
+impl NormalSystem {
+    /// Reapply damping before elimination; never modify the undamped system.
+    #[fastrace::trace]
+    pub fn solve(&self, regularization: &DVector<f64>, parallel: bool) -> Option<DVector<f64>> {
+        let (retained, reduced, points) = match &self.blocks {
+            NormalBlocks::Independent {
+                retained,
+                reduced,
+                points,
+            } => (retained, reduced, points),
+            NormalBlocks::Coupled(lower) => {
+                let mut lower = lower.clone();
+                for i in 0..self.gradient.len() {
+                    lower[(i, i)] += regularization[i];
+                }
+                return SchurSystem {
+                    rows: &[],
+                    gradient: &self.gradient,
+                    eliminated_points: &self.eliminated_points,
+                }
+                .solve_dense_normal(&lower);
+            }
+        };
+        let count = self.gradient.len();
+        let mut reduced = reduced.clone();
         let mut rhs =
             DVector::from_iterator(retained.len(), retained.iter().map(|&c| -self.gradient[c]));
         for (index, &column) in retained.iter().enumerate() {
             reduced[(index, index)] += regularization[column];
         }
-        let mut solved = self.eliminate_points(&points, regularization, parallel);
+        let mut solved = self.eliminate_points(points, regularization, parallel);
         for (point, solution) in points.iter().zip(&solved) {
             let (solved_cross, solved_rhs) = solution.as_ref()?;
             for (i, &row) in point.neighbors.iter().enumerate() {
@@ -136,8 +198,8 @@ impl SchurSystem<'_> {
         for (index, &column) in retained.iter().enumerate() {
             output[column] = solution[index];
         }
-        back_substitute(&points, &mut solved, &solution, parallel);
-        for (solved, &offset) in solved.into_iter().zip(self.eliminated_points) {
+        back_substitute(points, &mut solved, &solution, parallel);
+        for (solved, &offset) in solved.into_iter().zip(&self.eliminated_points) {
             output.rows_mut(offset, 3).copy_from(&solved?.1);
         }
         output
@@ -178,12 +240,14 @@ impl SchurSystem<'_> {
         } else {
             points
                 .iter()
-                .zip(self.eliminated_points)
+                .zip(&self.eliminated_points)
                 .map(eliminate)
                 .collect()
         }
     }
+}
 
+impl SchurSystem<'_> {
     fn point_blocks(
         &self,
         point_for_column: &[Option<(usize, usize)>],
@@ -228,9 +292,6 @@ impl SchurSystem<'_> {
         Some(points)
     }
 
-    pub fn dense(&self, regularization: &DVector<f64>) -> Option<DVector<f64>> {
-        self.solve_dense_normal(&self.lower_normal(regularization))
-    }
     /// Assemble the lower triangle in dense storage for complete-system solvers.
     pub fn lower_normal(&self, regularization: &DVector<f64>) -> DMatrix<f64> {
         let count = self.gradient.len();

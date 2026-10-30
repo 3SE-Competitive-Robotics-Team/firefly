@@ -2,6 +2,12 @@
 //! These exercise graph connectivity, not recorded trajectories or sensor accuracy.
 use super::{DMatrix, DVector, Row, SchurSystem};
 
+impl SchurSystem<'_> {
+    pub fn dense(&self, regularization: &DVector<f64>) -> Option<DVector<f64>> {
+        self.solve_dense_normal(&self.lower_normal(regularization))
+    }
+}
+
 pub struct Fixture {
     pub rows: Vec<Row>,
     pub gradient: DVector<f64>,
