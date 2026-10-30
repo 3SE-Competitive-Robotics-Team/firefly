@@ -140,6 +140,12 @@ impl RegionIndex {
             while let Some(id) = stack.pop() {
                 visited_octants += 1;
                 let octant = map.octree.get(id)?;
+                // Fusion propagates the maximum field to ancestors before this committed read.
+                // Unknown aggregates are not evidence that descendants contain no obstacles.
+                let maximum = octant.max_data();
+                if maximum.valid() && !maximum.is_inside() {
+                    continue;
+                }
                 let low = octant.base().coord.cast::<f64>() * resolution;
                 let high = low + Vector3::repeat(f64::from(octant.base().size) * resolution);
                 if !overlaps(transformed(&transform, low, high), query) {
@@ -161,7 +167,11 @@ impl RegionIndex {
                 };
                 let stride = 1_i32 << scale;
                 let n = (octant.base().size / stride) as usize;
-                for (index, value) in data.iter().enumerate().filter(|(_, value)| value.valid()) {
+                for (index, _) in data
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, value)| value.valid() && value.is_inside())
+                {
                     let offset = Vector3::new(
                         (index % n) as i32,
                         (index / n % n) as i32,
@@ -180,7 +190,7 @@ impl RegionIndex {
                         return Err(invalid("local occupancy snapshot capacity exhausted"));
                     }
                     cells.push(MapElement {
-                        kind: if value.is_inside() { 1 } else { 2 },
+                        kind: 1,
                         min: bounds.0,
                         max: bounds.1,
                         ..Default::default()

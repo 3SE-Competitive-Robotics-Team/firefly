@@ -30,7 +30,60 @@ pub struct Block {
     buffer_scale: i32,
     buffer: Option<Vec<OccupancyData>>,
 }
+
+/// Disjoint parent outputs and child inputs for one committed propagation step.
+pub(crate) struct PropagationLevels<'a> {
+    pub child_mean: &'a [OccupancyData],
+    pub child_min: &'a [OccupancyData],
+    pub child_max: &'a [OccupancyData],
+    pub parent_mean: &'a mut [OccupancyData],
+    pub parent_min: &'a mut [OccupancyData],
+    pub parent_max: &'a mut [OccupancyData],
+}
+
 impl Block {
+    pub(crate) fn propagation_levels(
+        &mut self,
+        parent_scale: i32,
+    ) -> Result<PropagationLevels<'_>> {
+        let parent = self.level(parent_scale)?;
+        let child = parent + 1;
+        if parent_scale <= self.current_scale
+            || child >= self.data.len()
+            || child >= self.min_data.len()
+            || child >= self.max_data.len()
+        {
+            return Err(invalid("propagation levels are not allocated"));
+        }
+        let (means, child_means) = self.data.split_at_mut(child);
+        let (mins, child_mins) = self.min_data.split_at_mut(child);
+        let (maxs, child_maxs) = self.max_data.split_at_mut(child);
+        let levels = PropagationLevels {
+            child_mean: &child_means[0],
+            child_min: child_mins[0].as_deref().unwrap_or(&child_means[0]),
+            child_max: child_maxs[0].as_deref().unwrap_or(&child_means[0]),
+            parent_mean: &mut means[parent],
+            parent_min: mins[parent]
+                .as_deref_mut()
+                .ok_or_else(|| invalid("parent minimum data absent"))?,
+            parent_max: maxs[parent]
+                .as_deref_mut()
+                .ok_or_else(|| invalid("parent maximum data absent"))?,
+        };
+        let side = (self.base.size >> parent_scale) as usize;
+        let count = side * side * side;
+        if levels.parent_mean.len() != count
+            || levels.parent_min.len() != count
+            || levels.parent_max.len() != count
+            || levels.child_mean.len() != count * 8
+            || levels.child_min.len() != count * 8
+            || levels.child_max.len() != count * 8
+        {
+            return Err(invalid("block propagation scale storage mismatch"));
+        }
+        Ok(levels)
+    }
+
     /// # Errors
     /// Returns an error if `size` is not a positive power of two.
     pub fn new(
