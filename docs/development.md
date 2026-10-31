@@ -257,6 +257,137 @@ supervisor 对异常退出按 1s→30s 退避重启；停止等待 5s，超时�
 起飞高度相对起飞点，planner 目标属于当前地图坐标。拒绝原因查看 RRD 的 `logs/fc`。
 上电不自动起飞，未就绪不能绕过初始化。飞控失联行为见架构文档。
 
+### HIL 部署与运行
+
+HIL 用同一根 USB 线把电脑仿真与板端生产进程接起来。构建、部署与链路自检：
+
+```bash
+cargo xtask deploy-hil [--device firefly-0001]
+```
+
+它先执行普通 `deploy`（构建、打包、解包、服务就绪），再把
+`configs/processes-hil.toml` 切为活动进程清单，由板端 `hil-gadget up` 重建
+gadget，最后用 `hil --check` 要求厂商接口与两个端点都在位才算就绪。`--probe`
+只打印 USB 描述符。
+
+板端 gadget 约束（UDC 事实见 [spec.md](hw/spec.md)）：
+
+- 每次 `up`/`down` 整块删除并重建 `g1`；configfs 在绑定失败后会保留
+  `udc_name`，重试写 UDC 只会得到 `EBUSY`，反复失败还会推进接口计数。
+- FunctionFS 描述符写完后必须写 strings 块，内核才创建 `epN`；`fs_count`/
+  `hs_count` 是描述符个数，不是字节数；`ep0` 事件结构是 12 字节。
+- 解绑后 OTG 角色可能退回 host；写回 `usb_device` 会触发厂商驱动的
+  `rmmod/insmod`，仅在角色不对时写。
+- 绑定后通过 UDC `soft_connect` 断开再接入，避免主机在同一 serial 上快速
+  重枚举时拒绝注册新配置。
+- 镜像 `/etc/adb_conf.sh` 的后台 `enable_udc` 循环会抢绑 UDC，重建前必须
+  让它退出（`/etc/.disable_udc` + `pkill -x adb_conf.sh`）。
+
+HIL 期间 `adb` 不可用，`hil-gadget` 的每一步写入
+`/opt/firefly/logs/hil/up.log` 并 `fsync`（TF 卡 `commit=600`，断电会丢未落盘
+写入）。`hil-gadget watchdog` 在 60 s 内没等到绑定完成或主机心跳时恢复 adb：
+先停 HIL 进程集、写回 `processes-normal.toml`，再重建 adb-only gadget 并启动正常
+`firefly`——不能只换 gadget，否则 camera/motor 仍持有 ffs 端点，adb 会时有时无。
+`up` 启动前按 pidfile 结束旧的 `serve`/`watchdog`，多次部署不会留下互相抢 UDC
+的看门狗。板端 HIL 应用收到任意下行帧会刷新
+`/opt/firefly/logs/hil/host_seen`。
+
+主机侧依次启动 `firefly-viz`、`firefly-sim`、`render` 与 `hil`；`configs/hil.toml`
+的 `[link]` 控制 IMU 批大小与图像节流。`imu_batch` 必须为 1：板端估计器的 IMU
+队列有界，成批突发会整批拒绝。`image_period_s` 按板端单帧耗时设置（当前 0.167 s）；
+双目只在时间戳一致时成对下发，否则 okvis 的双目容差会拒绝整帧。桥每秒发布
+`hil/link`、`hil/board` 计数标量并写入 RRD，同时打印控制老化（控制所用 IMU
+时刻相对主机最新下行 IMU 的滞后）。
+
+PoC 步骤（`ARMED_GROUNDED` 不保高，解锁后必须尽快给起飞目标）：
+
+```bash
+./target/release/ffctl fc arm
+./target/release/ffctl fc takeoff 1.0
+./target/release/ffctl fc hold
+uv run python scripts/hil_hover_monitor.py --seconds 40
+```
+
+`scripts/hil_hover_monitor.py` 打印真值高度、里程计高度、位置误差、最大推力
+与模式，只订阅不参与控制。验收仍以本文的任务门槛为准，HIL 不得降低算法门槛。
+
+已验证：USB 传输用 `hil/camera/{left,right}` 回传像素和，与主机下发一致
+（`hil` 日志的“校验ok/校验不一致”，当前 0 不一致）；1 kHz IMU/控制、~1.3 kHz
+里程计上行稳定，控制老化均值 2.5 ms、峰值 8–10 ms；关掉深度并按 1 ms 时间戳
+成对下发双目后，VIO 可连续 55 s 保持新鲜。
+
+**闭环结果**：`configs/okvis2-x-hil.toml` 用 200 特征、送图 6 Hz（飞行时单帧约
+128 ms、后验 0.28–0.40 s），配合 `bin/fc --airmode-off`：解锁 → 起飞 2 s 到 1.40 m
+→ HOLD 保持 20 s（1.39–1.42 m，`gt_vz≈0`）→ LAND（模式 5，0.4 m/s 下降）→ 落地
+自动上锁，记录在 `logs/hil_6hz.rrd`。8 Hz 版本在约 16 s 时 okvis 图像队列溢出、
+里程计断流，FC 判状态估计丢失进入 AttitudeFallback；6 Hz 后不再出现，说明板端
+VIO 的余量只够 6 Hz 量级。`--airmode-off` 只用于 HIL 验证：板端 VIO 后验延迟让
+速率环在低集合推力下饱和，`airmode=1` 会为保姿态抬高总推力（实测 `thrust_z≈-0.5`
+而垂直环在刹车），形成爬升；生产 `configs/fc.toml` 仍保持 `airmode=1`，不带该开关。
+这条偏差必须在结论里单独标注；真正的修法是降低速率环饱和/时延，而不是改生产
+配置。
+
+**30 Hz 供给未达标**：`render` 的采集周期是固定常量
+（`apps/render/src/link.rs` 的 `CAPTURE_PERIOD = 0.1`），仿真位姿也是 10 Hz，所以
+主机当前最多供 10 Hz 图像；HIL 桥又按 6 Hz 节流给板端 VIO 留余量。要满足 30 Hz
+需同时改 render/sim 的节拍并重新压测 USB/板端队列，本次没有做，不能用 6 Hz 的
+悬停结论冒充 30 Hz 实时性。
+
+**遗留**：降级状态（AttitudeFallback）仍没有地面上锁——8 Hz 那次降级后飞机穿过
+停机坪继续下落。正常 LAND 已通过，但估计丢失后的地面保护仍是安全遗留项，需要
+可靠的落地判据。
+
+悬停时分配长期接近力矩上限：`hil_6hz.rrd` 的 HOLD 段（18.3 s）里，
+`torque_sp_frd - allocated_control` 的前三轴范数均值 0.035、p95 0.106、最大
+0.295（归一化），约 60% 的 tick 超过 0.01；逐轴看几乎全在 pitch（std 0.052），
+对应的实测 pitch 角速度 std 0.62、到 ±2.3 rad/s，而 pitch 速率设定只有 ±0.15，
+是 pitch 速率环的极限环。这不是 1e-4 的饱和阈值噪声。
+
+对照与排除：
+- **本地同源悬停**（sim + render + okvis + fc，直连 IPC）`saturated_ticks=0`，
+  而 HIL 是 700–850/1000，说明差异来自 HIL 的 IMU/控制通路，不是 FC 算法本身。
+- 桥的上行优先（控制先于图像下行）把控制老化从均值 2.5 ms、峰值 26 ms 降到
+  均值 1.4 ms、峰值 10 ms，但 pitch 极限环不变（std 0.620 vs 0.618），排除
+  控制回路时延为主因。
+- 内环速率改取 FC 独立 ESKF 的速率后饱和反而升到约 850，因为 ESKF 的 `rate` 是
+  滤波状态、比 VIO 预测的陀螺更滞后；该改动已撤回。
+- `airmode=1` + 独立 ESKF 姿态、以及 `airmode=1` + 上述内环速率改动，都仍在起飞
+  瞬间满推力发散，说明触发在起飞瞬态（HIL 的 IMU 交付抖动），不是姿态源。
+
+结论：HIL 验证仍用 `--airmode-off`；生产 `airmode=1` 在 HIL 下的差异应归因于
+USB 交付的 IMU 时序（真实机体 SPI IMU 不经过这段通路），后续要把 HIL 的 IMU
+通路时延/抖动压到本地水平，或让 FC 内环直接使用最新原始陀螺样本，再验证生产
+分配。
+
+**独立端点的实测结果**：把 HIL 功能扩成「OUT 0x03 IMU/指令 + OUT 0x05 图像 +
+IN 0x84 控制」后，这颗 `sunxi_usb_udc` **能枚举、能绑定**（内核把地址重排成
+0x01/0x02/0x81），但**第二个 OUT 的数据通路不工作**：camera 打开 ep1/ep2 后
+收不到任何 IMU/图像（fc 一直 `IMU 0 Hz`、桥的 `校验ok=0`），同时 IN 的控制
+回传正常。说明厂商 UDC 的多 OUT 端点只有描述符、没有实际投递，方案 2 在这颗
+UDC 上不可用；已回退到单 OUT，下一步只能走「同一 OUT 端点、写线程在图像分片
+之间插 IMU」的软件兜底，或先修厂商 UDC 驱动。
+
+### 图像分块与 IMU 插队（HIL 协议 v2）
+
+单 OUT 端点上，整帧 150 KB 图像会把 1 kHz 的 IMU 压在后面约 5 ms。协议 v2 新增
+`ImageChunk`：每张图按 16 KiB 分块（块头 + 像素，单块不超过一个帧），主机写线程
+先排空 IMU/指令高优先队列，再写一块图像，块间继续插高优先消息；板端 `camera`
+按 `image_id` 重组，收齐后 `publish_with` 直接填进 iceoryx2 共享内存，校验和在同
+一次拷贝里算掉。主机侧不再把整帧 encode 成中间 `Vec`，板端不再 decode 出中间消息。
+
+2026-10-27 实测（firefly-0001，6.7 Hz 双目）：
+
+- 链路：control 1001/s、odom 1.28–1.29 kHz、`校验ok=12/s` 且不一致 0、控制老化
+  均值 1.5–1.6 ms、最大 5–6 ms；
+- `--airmode-off`：起飞 1.0 m、悬停 1.40–1.43 m、自动降落；
+- **速率环饱和仍为 693–779 次/秒（与分块前相同）**；FC 侧 `imu_age` 均值 2.9 ms；
+- 生产 `airmode=1`（不带开关）：起飞瞬间 z=0.84 m、vz=1.71 m/s，仍发散。
+
+结论：分块解决的是**最大阻塞**（整帧 5 ms → 单块约 0.4 ms），没有降低**平均
+延迟**（FC 侧约 2.9 ms），而 airmode 放大的是持续饱和。HIL 仍用 `--airmode-off`；
+要让生产 `airmode=1` 在 HIL 下成立，下一步必须压均值延迟（FC 内环直接用最新
+原始陀螺并按时间戳外推，或换更低延迟的传输），而不是继续减小块。
+
 ### 进程与宿主机
 
 - 启动前核对 PID、可执行文件和工作目录，确认没有其他闭环、采集、录制或验收任务占用。

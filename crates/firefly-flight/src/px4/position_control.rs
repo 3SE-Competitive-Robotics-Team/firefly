@@ -274,6 +274,12 @@ impl PositionControl {
         valid && self.acc_sp.is_all_finite() && self.thr_sp.is_all_finite()
     }
 
+    /// 垂直通道诊断快照（NED）：`[vel_sp_z, vel_z, acc_sp_z, thr_sp_z]`。
+    #[must_use]
+    pub fn debug_vertical(&self) -> [f32; 4] {
+        [self.vel_sp[2], self.vel[2], self.acc_sp[2], self.thr_sp[2]]
+    }
+
     /// 将积分项清零。
     pub fn reset_integral(&mut self) {
         self.vel_int = Vector3f::zeros();
