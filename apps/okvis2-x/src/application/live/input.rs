@@ -30,7 +30,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
         mpsc::{Receiver, SyncSender, TrySendError},
     },
     time::Duration,
@@ -147,6 +147,7 @@ fn depth(packet: &DepthImageMessage) -> Result<Depth> {
         ),
     })
 }
+#[derive(Clone)]
 pub(super) struct Topics {
     pub imu: String,
     pub left: String,
@@ -181,28 +182,93 @@ pub(super) struct Ports {
     pub wake: SyncSender<()>,
     pub stop: Arc<AtomicBool>,
 }
-pub(super) fn run(mut ports: Ports) -> Result<()> {
+
+/// 发送线程输入：IMU 订阅、后验与四路发布所需的状态。
+pub(super) struct SendPorts {
+    map_snapshots: super::map_output::Mailbox,
+    topics: Topics,
+    config: Config,
+    pub(super) sensors: SensorInputHandle,
+    publications: Receiver<PublicationData>,
+    stop: Arc<AtomicBool>,
+    watermark: ImuWatermark,
+}
+
+/// 接收线程输入：双目与深度的订阅和转发通道。
+pub(super) struct IngressPorts {
+    topics: Topics,
+    config: Config,
+    pub(super) sensors: SensorInputHandle,
+    depths: SyncSender<Depth>,
+    wake: SyncSender<()>,
+    stop: Arc<AtomicBool>,
+    watermark: ImuWatermark,
+}
+
+impl Ports {
+    pub fn split(self) -> (SendPorts, IngressPorts) {
+        let watermark = ImuWatermark::default();
+        (
+            SendPorts {
+                map_snapshots: self.map_snapshots,
+                topics: self.topics.clone(),
+                config: self.config.clone(),
+                sensors: self.sensors.clone(),
+                publications: self.publications,
+                stop: self.stop.clone(),
+                watermark: watermark.clone(),
+            },
+            IngressPorts {
+                topics: self.topics,
+                config: self.config,
+                sensors: self.sensors,
+                depths: self.depths,
+                wake: self.wake,
+                stop: self.stop,
+                watermark,
+            },
+        )
+    }
+}
+
+/// 发送线程已入估计器队列的 IMU 时间水位（纳秒）。
+///
+/// 接收线程只在水位覆盖图像时间后才提交双目帧；未收到 IMU 时保持空。
+#[derive(Clone)]
+pub(super) struct ImuWatermark(Arc<AtomicI64>);
+
+impl Default for ImuWatermark {
+    fn default() -> Self {
+        Self(Arc::new(AtomicI64::new(i64::MIN)))
+    }
+}
+
+impl ImuWatermark {
+    pub fn store(&self, time: Timestamp) {
+        if let Ok(nanoseconds) = i64::try_from(time.as_nanosecond()) {
+            self.0.store(nanoseconds, Ordering::Release);
+        }
+    }
+
+    pub fn load(&self) -> Option<Timestamp> {
+        let nanoseconds = self.0.load(Ordering::Acquire);
+        if nanoseconds == i64::MIN {
+            return None;
+        }
+        Timestamp::from_nanosecond(i128::from(nanoseconds)).ok()
+    }
+}
+
+/// 发送线程：IMU 入队、前向预测与四路发布。
+pub(super) fn run_send(mut ports: SendPorts) -> Result<()> {
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "firefly-okvis-x");
     let imu = Subscriber::<ImuMessage>::with_options(&node, &ports.topics.imu, IMU_SUBSCRIPTION)?;
-    let options = SubscriberOptions {
-        buffer_size: 2,
-        ..Default::default()
-    };
-    let left = Subscriber::<GrayImageMessage>::with_options(&node, &ports.topics.left, options)?;
-    let right = Subscriber::<GrayImageMessage>::with_options(&node, &ports.topics.right, options)?;
-    let depths = ports
-        .config
-        .mapping
-        .then(|| Subscriber::<DepthImageMessage>::with_options(&node, &ports.topics.depth, options))
-        .transpose()?;
     let mut publishers = Publishers::open(&node, &ports.config, &ports.topics)?;
-    let mut pairs = Pairs::new(ports.config.stereo_tolerance);
     let mut output = Output::new(ports.config.clone(), session())?;
     let mut map_publisher =
         super::map_output::PublisherWorker::start(ports.map_snapshots.clone(), ports.stop.clone())?;
     let mut imu_time = None;
-    let mut last_depth = None;
 
     while !ports.stop.load(Ordering::Acquire) && node.wait(Duration::from_millis(1)).is_ok() {
         firefly_observability::pump_log_ipc(&log_ipc);
@@ -240,10 +306,36 @@ pub(super) fn run(mut ports: Ports) -> Result<()> {
             if !ports.sensors.add_imu_measurement(time, &alpha, &omega) {
                 return Err(invalid("estimator IMU queue rejected measurement"));
             }
+            ports.watermark.store(time);
             if let Some(sample) = output.imu(time, alpha, omega)? {
                 publishers.publish(&sample, packet.timestamp)?;
             }
         }
+    }
+    firefly_observability::pump_log_ipc(&log_ipc);
+    ports.stop.store(true, Ordering::Release);
+    map_publisher.finish()?;
+    Ok(())
+}
+
+/// 接收线程：双目配对、图像拷贝、深度转换与转发。
+pub(super) fn run_ingress(mut ports: IngressPorts) -> Result<()> {
+    let node = create_node()?;
+    let options = SubscriberOptions {
+        buffer_size: 2,
+        ..Default::default()
+    };
+    let left = Subscriber::<GrayImageMessage>::with_options(&node, &ports.topics.left, options)?;
+    let right = Subscriber::<GrayImageMessage>::with_options(&node, &ports.topics.right, options)?;
+    let depths = ports
+        .config
+        .mapping
+        .then(|| Subscriber::<DepthImageMessage>::with_options(&node, &ports.topics.depth, options))
+        .transpose()?;
+    let mut pairs = Pairs::new(ports.config.stereo_tolerance);
+    let mut last_depth = None;
+
+    while !ports.stop.load(Ordering::Acquire) && node.wait(Duration::from_millis(1)).is_ok() {
         for (camera, subscriber) in [(0, &left), (1, &right)] {
             while let Some(packet) = subscriber.receive()? {
                 let trace = *packet.user_header();
@@ -251,6 +343,7 @@ pub(super) fn run(mut ports: Ports) -> Result<()> {
                 pairs.push(&packet, camera)?;
             }
         }
+        let imu_time = ports.watermark.load();
         while let Some((time, images)) = pairs.next(imu_time, ports.config.image_delay) {
             if !ports.sensors.add_images(time, &images, &ImageMap::new()) {
                 log::warn!("OKVIS camera queue overrun or closed input");
@@ -278,9 +371,7 @@ pub(super) fn run(mut ports: Ports) -> Result<()> {
             }
         }
     }
-    firefly_observability::pump_log_ipc(&log_ipc);
     ports.stop.store(true, Ordering::Release);
-    map_publisher.finish()?;
     Ok(())
 }
 

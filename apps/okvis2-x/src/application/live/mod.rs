@@ -100,7 +100,7 @@ pub fn run(config: Config, vocabulary: Option<&Path>) -> Result<()> {
         wake,
         stop: stop.clone(),
     };
-    let io = spawn_transport(ports, stop.clone())?;
+    let transport_handles = spawn_transport(ports, &stop)?;
     let inputs = HostInputs {
         depth: depth_rx,
         ready,
@@ -109,10 +109,7 @@ pub fn run(config: Config, vocabulary: Option<&Path>) -> Result<()> {
     };
     let result = process(&mut estimator, mapping.as_ref(), &inputs);
     stop.store(true, Ordering::Release);
-    let transport = io
-        .join()
-        .map_err(|_| invalid("IPC worker panicked"))
-        .and_then(|result| result);
+    let transport = transport_handles.join();
     let estimator = estimator.shutdown();
     let mapper = mapping
         .as_mut()
@@ -327,22 +324,71 @@ impl Drop for StopOnDrop {
         self.stop.store(true, Ordering::Release);
     }
 }
-fn spawn_transport(
-    ports: input::Ports,
-    stop: Arc<AtomicBool>,
-) -> Result<std::thread::JoinHandle<Result<()>>> {
-    std::thread::Builder::new()
-        .name("okvis-ipc".into())
+/// 发送与接收线程句柄；任一线程退出都会通过 stop 通知另一条。
+struct Transport {
+    send: std::thread::JoinHandle<Result<()>>,
+    ingress: std::thread::JoinHandle<Result<()>>,
+}
+
+impl Transport {
+    fn join(self) -> Result<()> {
+        let send = self
+            .send
+            .join()
+            .map_err(|_| invalid("okvis-imu worker panicked"))?;
+        let ingress = self
+            .ingress
+            .join()
+            .map_err(|_| invalid("okvis-ingress worker panicked"))?;
+        match (send, ingress) {
+            (Err(send), Err(ingress)) => {
+                log::error!("okvis-ingress worker: {ingress}");
+                Err(send)
+            }
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+}
+
+fn spawn_transport(ports: input::Ports, stop: &Arc<AtomicBool>) -> Result<Transport> {
+    let (send_ports, ingress_ports) = ports.split();
+    let send_stop = stop.clone();
+    let ingress_stop = stop.clone();
+    let send = std::thread::Builder::new()
+        .name("okvis-imu".into())
         .spawn(move || {
             let _stopping = StopOnDrop {
-                stop,
-                sensors: ports.sensors.clone(),
+                stop: send_stop,
+                sensors: send_ports.sensors.clone(),
             };
-            input::run(ports)
+            input::run_send(send_ports)
         })
         .map_err(|error| {
-            firefly_error::Error::new(firefly_error::ErrorKind::Internal, "start IPC worker")
+            firefly_error::Error::new(firefly_error::ErrorKind::Internal, "start okvis-imu worker")
                 .with_source(error)
                 .with_operation("okvis2_x::ipc")
-        })
+        })?;
+    let ingress = match std::thread::Builder::new()
+        .name("okvis-ingress".into())
+        .spawn(move || {
+            let _stopping = StopOnDrop {
+                stop: ingress_stop,
+                sensors: ingress_ports.sensors.clone(),
+            };
+            input::run_ingress(ingress_ports)
+        }) {
+        Ok(handle) => handle,
+        Err(error) => {
+            stop.store(true, Ordering::Release);
+            let _ = send.join();
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::Internal,
+                "start okvis-ingress worker",
+            )
+            .with_source(error)
+            .with_operation("okvis2_x::ipc"));
+        }
+    };
+    Ok(Transport { send, ingress })
 }
