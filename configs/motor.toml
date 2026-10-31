@@ -2,7 +2,7 @@
 # 本进程把 Firefly/Control 的牛顿映射成 sysfs PWM 脉宽，并按 airframe 周期性
 # 发布 Firefly/Airframe（板端被控对象属性的唯一来源）。
 
-rate_hz = 200
+rate_hz = 400
 # Control 断流判定（ms）：超过即四路回到零推力脉宽。
 stale_ms = 100
 # Airframe 重发周期（ms）；晚启动的飞控靠持续重发拿到机体参数。
