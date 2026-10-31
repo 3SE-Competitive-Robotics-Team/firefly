@@ -41,6 +41,7 @@ firefly-error.workspace = true
 firefly-observability.workspace = true
 firefly-opengv.workspace = true
 firefly-supereight2.workspace = true
+iceoryx2.workspace = true
 image.workspace = true
 jiff.workspace = true
 log.workspace = true

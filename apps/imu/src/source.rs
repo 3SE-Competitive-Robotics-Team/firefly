@@ -170,7 +170,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "imu");
-    let publisher = Publisher::<ImuMessage>::with_topic(&node, IMU_TOPIC)?;
+    let publisher = Publisher::<ImuMessage>::with_topic_notify(&node, IMU_TOPIC)?;
     log::info!(
         "IMU：加速度计 {}（±{} g）/ 陀螺 {}（±{} °/s），{} Hz",
         config.accel.device,

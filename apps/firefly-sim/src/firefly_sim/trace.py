@@ -60,8 +60,12 @@ def child_span(cycle: Optional[Span], name: str) -> Optional[Span]:
     return _tracer.start_span(name, context=set_span_in_context(cycle))
 
 
-def fill_header(header: TraceContext, span: Optional[Span], ts: float) -> None:
-    """把 OTel span 的 W3C id 填进 iceoryx2 `TraceContext` header。禁用时无操作。"""
+def fill_header(header: TraceContext, span: Optional[Span], _ts: float) -> None:
+    """把 OTel span 的 W3C id 与墙钟发送时间填进 iceoryx2 `TraceContext`。
+
+    `_ts` 是仿真时刻，不写入 header：header 的发送时间必须与 Rust 侧一致，
+    使用墙钟（Unix 秒）才能计算跨进程的接收年龄。禁用时无操作。
+    """
     if span is None:
         return
     sc = span.get_span_context()
@@ -70,8 +74,9 @@ def fill_header(header: TraceContext, span: Optional[Span], ts: float) -> None:
     header.trace_id_hi = (sc.trace_id >> 64) & 0xFFFFFFFFFFFFFFFF
     header.trace_id_lo = sc.trace_id & 0xFFFFFFFFFFFFFFFF
     header.span_id = sc.span_id
-    header.send_ts_secs = int(ts)
-    header.send_ts_nanos = int((ts - int(ts)) * 1e9)
+    now = time.time()
+    header.send_ts_secs = int(now)
+    header.send_ts_nanos = int((now - int(now)) * 1e9)
     header.send_ts_mono_ns = time.monotonic_ns()
 
 
