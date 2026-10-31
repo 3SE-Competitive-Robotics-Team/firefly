@@ -1,13 +1,14 @@
-//! IPC 接线：真值订阅 → 固定 10Hz 回读 → 工作线程逐像素处理 → 图像发布。
+//! IPC 接线：真值订阅 → 按配置节拍回读 → 工作线程逐像素处理 → 图像发布。
 //!
-//! 时序（对照 `firefly-sim/main.py` 的 10Hz 相机节拍）：
-//! - `poll_pose` 排空真值更新位姿，按**固定 10Hz 节拍**（`CAPTURE_PERIOD`，
-//!   以 sim 时间为轴）发起回读，并激活传感器相机；回读被渲染世界取走后收起
+//! 时序（采集频率由 `configs/render.toml` 的 `[capture] hz` 决定）：
+//! - `poll_pose` 排空真值更新位姿，按 `capture.hz` 的节拍（以 sim 时间为轴）
+//!   发起回读，并激活传感器相机；回读被渲染世界取走后收起
 //!   相机，限制传感器渲染只在有采集请求时执行。
 //! - 三份同 `seq` 回复到齐后装配成 [`CaptureJob`] 交给工作线程；工作线程算完
 //!   立即发布传感器，不向主线程回传像素缓冲。
 //! - 图像走 [`Publisher::publish_with`]，就地填充并注入续接后的 trace 上下文。
 
+use crate::config::RenderConfig;
 use std::collections::HashMap;
 use std::sync::{
     Arc,
@@ -34,13 +35,6 @@ use firefly_pubsub::viz::{ScalarMessage, VizPublisher};
 use crate::capture::{CaptureHub, CaptureReply, CaptureRequest, CapturedFrame, SensorKind};
 use crate::process::{CaptureJob, Latest, ProcessedCapture, run_worker};
 use crate::rig::{Eye, PoseState, apply_pose_to_eyes};
-
-/// 出图节拍（秒，sim 时间轴）：固定 10Hz，与真值到达边沿解耦。
-pub const CAPTURE_PERIOD: f64 = 0.1;
-
-/// 节拍比较容差（秒）：sim 时间戳有浮点抖动，`next_stamp` 精确相等比较会
-/// 偶发漏拍（漏一拍即掉到 5Hz）。取半个周期的 10%。
-const CAPTURE_TOLERANCE: f64 = CAPTURE_PERIOD * 0.1;
 
 /// 主线程订阅端口束（节点最后声明最后释放，对照 `firefly-pubsub/node` 的 Drop 纪律）。
 ///
@@ -212,6 +206,7 @@ impl Drop for CapturePipeline {
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub fn poll_pose(
     ports: NonSend<IpcPorts>,
+    config: Res<RenderConfig>,
     mut pose: ResMut<PoseState>,
     hub: Res<CaptureHub>,
     targets: Option<Res<crate::rig::SensorTargets>>,
@@ -220,6 +215,7 @@ pub fn poll_pose(
     mut eyes: Query<(&Eye, &mut Transform)>,
     mut cameras: Query<&mut Camera, With<Eye>>,
 ) {
+    let period = config.capture.period_seconds();
     let mut newest: Option<(OdomMessage, TraceContext)> = None;
     loop {
         match ports.pose_sub.receive() {
@@ -258,7 +254,7 @@ pub fn poll_pose(
         capture.active = false;
     }
 
-    // 按仿真时间以 10Hz 触发采集；回读双缓冲，
+    // 按仿真时间以配置节拍触发采集；回读双缓冲，
     // 只要还有空闲组就可发起（上一拍在途不阻塞下一拍）。
     if !capture.active
         && hub.can_issue()
@@ -279,7 +275,8 @@ pub fn poll_pose(
         });
         capture.active = true;
         capture.requested_seq = seq;
-        capture.next_stamp = pose.stamp + CAPTURE_PERIOD - CAPTURE_TOLERANCE;
+        // sim 时间戳有浮点抖动，按 10% 周期容差比较，避免漏拍。
+        capture.next_stamp = pose.stamp + period - period * 0.1;
         log::debug!("pose t={:.3} 回读 seq={seq}", pose.stamp);
     }
 

@@ -3,3 +3,7 @@
 # 停机坪不在这里：由场景定义（`firefly_mujoco.scene.PAD` —— 场地表面高度 +
 # `PAD_CLEARANCE`），上电停在地面，起飞由飞控的 `Firefly/Command` 触发
 # （`ffctl takeoff`），清单不起飞。需要临时改起点时才在此加 `start = [x, y, z]`。
+
+[rates]
+# 真值位姿发布频率（Hz）；render 的采集节拍由它驱动。
+pose = 60.0
