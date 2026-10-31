@@ -1,7 +1,8 @@
 //! `sysfs` PWM 输出、`Control` 订阅与 `Airframe` 发布。
 
 use std::error::Error;
-use std::fs;
+use std::fs::{self, File};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -32,6 +33,8 @@ const EXPORT_TIMEOUT: Duration = Duration::from_millis(200);
 const EXPORT_POLL: Duration = Duration::from_millis(10);
 /// 日志推进周期。
 const PUMP_PERIOD: Duration = Duration::from_millis(100);
+/// `u64` 十进制最长位数：脉宽写入的栈上缓冲区大小。
+const MAX_DUTY_DIGITS: usize = 20;
 
 /// 退出标志（信号处理器置位，主循环每拍检查）。
 static RUNNING: AtomicBool = AtomicBool::new(true);
@@ -331,6 +334,8 @@ fn drive(
 struct Channel {
     /// `duty_cycle` 属性路径。
     duty_path: PathBuf,
+    /// 已打开的 `duty_cycle` 文件：每拍只写不 open/close。
+    duty_file: File,
     /// 当前写入的脉宽（ns），用于跳过重复写。
     current: u64,
 }
@@ -353,7 +358,11 @@ impl Channel {
         // 它只在通道被上次运行留在高占空比时才起作用。
         let _ = write_attribute(&duty_path, 0);
         write_attribute(&channel_dir.join("period"), mapping.period_ns())?;
-        write_attribute(&duty_path, mapping.min_duty_ns())?;
+        let duty_file = File::options()
+            .write(true)
+            .open(&duty_path)
+            .map_err(|error| format!("打开 {}: {error}", duty_path.display()))?;
+        write_duty(&duty_file, &duty_path, mapping.min_duty_ns())?;
         write_attribute(&enable, 1).map_err(|error| {
             format!(
                 "{error}；`sysfs` 通道使能需要设备树描述，`pwm-sunxi` 会拒绝未描述的通道\
@@ -362,6 +371,7 @@ impl Channel {
         })?;
         Ok(Self {
             duty_path,
+            duty_file,
             current: mapping.min_duty_ns(),
         })
     }
@@ -371,7 +381,7 @@ impl Channel {
         if self.current == duty_ns {
             return Ok(());
         }
-        write_attribute(&self.duty_path, duty_ns)?;
+        write_duty(&self.duty_file, &self.duty_path, duty_ns)?;
         self.current = duty_ns;
         Ok(())
     }
@@ -392,6 +402,27 @@ fn wait_for(path: &Path) -> Result<(), String> {
 /// 写一个 `sysfs` 属性。
 fn write_attribute(path: &Path, value: impl std::fmt::Display) -> Result<(), String> {
     fs::write(path, value.to_string()).map_err(|error| format!("写 {}: {error}", path.display()))
+}
+
+/// 写入已打开通道的脉宽：一次 `write` 到位，不重新 open，也不分配 `String`。
+fn write_duty(file: &File, path: &Path, duty_ns: u64) -> Result<(), String> {
+    let mut buffer = [0u8; MAX_DUTY_DIGITS];
+    let text = decimal_digits(duty_ns, &mut buffer);
+    file.write_all_at(text, 0)
+        .map_err(|error| format!("写 {}（{duty_ns}）: {error}", path.display()))
+}
+
+/// `u64` 转十进制字节；返回 `buffer` 的尾部切片。
+fn decimal_digits(mut value: u64, buffer: &mut [u8; MAX_DUTY_DIGITS]) -> &[u8] {
+    let mut index = buffer.len();
+    loop {
+        index -= 1;
+        buffer[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            return &buffer[index..];
+        }
+    }
 }
 
 /// `CLOCK_MONOTONIC` 秒：板载各进程共用的时间基准。
@@ -426,5 +457,15 @@ mod tests {
         let mut config: Config = toml::from_str(raw).expect("configs/motor.toml");
         config.channel[1] = ChannelSpec { chip: 0, pwm: 0 };
         assert!(validate(&config).is_err());
+    }
+
+    /// 栈上十进制格式化必须与 `u64::to_string` 一致（`sysfs` 只认纯数字）。
+    #[test]
+    fn decimal_digits_match_to_string() {
+        let mut buffer = [0u8; MAX_DUTY_DIGITS];
+        for value in [0, 1, 9, 10, 1_000_000, 2_000_000, u64::MAX] {
+            let text = std::str::from_utf8(decimal_digits(value, &mut buffer)).expect("ascii");
+            assert_eq!(text, value.to_string(), "脉宽 {value} ns");
+        }
     }
 }
