@@ -229,7 +229,10 @@ P_new = Jr(delta) P_posterior Jr(delta)ᵀ
 ## OKVIS2-X 在线通讯
 
 `firefly-okvis-x` 默认运行在线 IPC 模式，单个应用承载 BRISK/AGAST、视觉惯性图、DBoW2
-回环和 Supereight2 深度子地图。传感器接收/预测线程独立于图求解；各图的所有者仍在线程内
+回环和 Supereight2 深度子地图。传感器接收与预测发布分为 `okvis-ingress`（双目/深度
+接收、配对、拷贝与深度转换）和 `okvis-imu`（IMU 入队、前向预测与四路发布）两条线程，
+IMU 时间水位经原子量传给接收线程做覆盖判定；两者都独立于图求解。`okvis-imu` 与 FC 的
+`fc-imu` 由 IMU 事件经 WaitSet 唤醒、2ms 超时兜底，板端 `imu` 发布端带事件通知。各图的所有者仍在线程内
 持有非 Send 参数块，通过有界队列传递输入和数值快照。在线图发布使用背压保留全部提交，
 线程退出关闭传感器队列并回收估计与地图工作线程。
 

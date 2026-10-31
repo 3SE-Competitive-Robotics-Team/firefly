@@ -15,6 +15,7 @@ use firefly_pubsub::{
         CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DEPTH_TOPIC, DepthImageMessage, GrayImageMessage,
         IMAGE_HEIGHT, IMAGE_WIDTH,
     },
+    event::TopicListener,
     imu::{IMU_SUBSCRIPTION, IMU_TOPIC, ImuMessage},
     navigation::{NAVIGATION_TOPIC, NavigationMessage},
     node::create_node,
@@ -23,14 +24,17 @@ use firefly_pubsub::{
     subscriber::{Subscriber, SubscriberOptions},
     viz::{ScalarMessage, VizMessage, VizPublisher, kind},
 };
+use iceoryx2::prelude::{CallbackProgression, ipc};
+use iceoryx2::waitset::{WaitSetAttachmentId, WaitSetBuilder, WaitSetRunResult};
 use jiff::Timestamp;
 use nalgebra::Vector3;
 use purecv::core::DynamicMatrix;
 use std::{
+    cell::RefCell,
     collections::VecDeque,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
         mpsc::{Receiver, SyncSender, TrySendError},
     },
     time::Duration,
@@ -147,6 +151,7 @@ fn depth(packet: &DepthImageMessage) -> Result<Depth> {
         ),
     })
 }
+#[derive(Clone)]
 pub(super) struct Topics {
     pub imu: String,
     pub left: String,
@@ -181,10 +186,230 @@ pub(super) struct Ports {
     pub wake: SyncSender<()>,
     pub stop: Arc<AtomicBool>,
 }
-pub(super) fn run(mut ports: Ports) -> Result<()> {
+
+/// 发送线程输入：IMU 订阅、后验与四路发布所需的状态。
+pub(super) struct SendPorts {
+    map_snapshots: super::map_output::Mailbox,
+    topics: Topics,
+    config: Config,
+    pub(super) sensors: SensorInputHandle,
+    publications: Receiver<PublicationData>,
+    stop: Arc<AtomicBool>,
+    watermark: ImuWatermark,
+}
+
+/// 接收线程输入：双目与深度的订阅和转发通道。
+pub(super) struct IngressPorts {
+    topics: Topics,
+    config: Config,
+    pub(super) sensors: SensorInputHandle,
+    depths: SyncSender<Depth>,
+    wake: SyncSender<()>,
+    stop: Arc<AtomicBool>,
+    watermark: ImuWatermark,
+}
+
+impl Ports {
+    pub fn split(self) -> (SendPorts, IngressPorts) {
+        let watermark = ImuWatermark::default();
+        (
+            SendPorts {
+                map_snapshots: self.map_snapshots,
+                topics: self.topics.clone(),
+                config: self.config.clone(),
+                sensors: self.sensors.clone(),
+                publications: self.publications,
+                stop: self.stop.clone(),
+                watermark: watermark.clone(),
+            },
+            IngressPorts {
+                topics: self.topics,
+                config: self.config,
+                sensors: self.sensors,
+                depths: self.depths,
+                wake: self.wake,
+                stop: self.stop,
+                watermark,
+            },
+        )
+    }
+}
+
+/// 发送线程已入估计器队列的 IMU 时间水位（纳秒）。
+///
+/// 接收线程只在水位覆盖图像时间后才提交双目帧；未收到 IMU 时保持空。
+#[derive(Clone)]
+pub(super) struct ImuWatermark(Arc<AtomicI64>);
+
+impl Default for ImuWatermark {
+    fn default() -> Self {
+        Self(Arc::new(AtomicI64::new(i64::MIN)))
+    }
+}
+
+impl ImuWatermark {
+    pub fn store(&self, time: Timestamp) {
+        if let Ok(nanoseconds) = i64::try_from(time.as_nanosecond()) {
+            self.0.store(nanoseconds, Ordering::Release);
+        }
+    }
+
+    pub fn load(&self) -> Option<Timestamp> {
+        let nanoseconds = self.0.load(Ordering::Acquire);
+        if nanoseconds == i64::MIN {
+            return None;
+        }
+        Timestamp::from_nanosecond(i128::from(nanoseconds)).ok()
+    }
+}
+
+/// 发送线程：IMU 入队、前向预测与四路发布。
+pub(super) fn run_send(ports: SendPorts) -> Result<()> {
+    let SendPorts {
+        map_snapshots,
+        topics,
+        config,
+        mut sensors,
+        publications,
+        stop,
+        watermark,
+    } = ports;
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "firefly-okvis-x");
-    let imu = Subscriber::<ImuMessage>::with_options(&node, &ports.topics.imu, IMU_SUBSCRIPTION)?;
+    let imu = Subscriber::<ImuMessage>::with_options(&node, &topics.imu, IMU_SUBSCRIPTION)?;
+    let imu_events = TopicListener::with_topic(&node, &topics.imu)?;
+    let mut publishers = Publishers::open(&node, &config, &topics)?;
+    let mut output = Output::new(config.clone(), session())?;
+    let mut map_publisher = super::map_output::PublisherWorker::start(map_snapshots, stop.clone())?;
+    let mut imu_time = None;
+
+    let waitset = WaitSetBuilder::new()
+        .create::<ipc::Service>()
+        .map_err(|error| invalid(format!("create okvis WaitSet: {error:?}")))?;
+    let _imu_guard = waitset
+        .attach_notification(&imu_events)
+        .map_err(|error| invalid(format!("attach IMU event: {error:?}")))?;
+    let _timeout_guard = waitset
+        .attach_interval(Duration::from_millis(2))
+        .map_err(|error| invalid(format!("attach IMU timeout: {error:?}")))?;
+
+    let failure = RefCell::new(None::<String>);
+    let mut ipc_logged = 0u64;
+    {
+        let mut on_event = |_attachment: WaitSetAttachmentId<ipc::Service>| {
+            if stop.load(Ordering::Acquire) {
+                return CallbackProgression::Stop;
+            }
+            let _ = imu_events.drain();
+            firefly_observability::pump_log_ipc(&log_ipc);
+            let result = (|| -> Result<()> {
+                while let Ok(publication) = publications.try_recv() {
+                    output.posterior(&publication)?;
+                    map_publisher.update(&output)?;
+                    publishers.posterior(&publication)?;
+                }
+                while let Some(packet) = imu.receive()? {
+                    handle_imu(
+                        &packet,
+                        *packet.user_header(),
+                        &mut sensors,
+                        &watermark,
+                        &mut output,
+                        &mut publishers,
+                        &mut imu_time,
+                        &mut ipc_logged,
+                    )?;
+                }
+                Ok(())
+            })();
+            match result {
+                Ok(()) => CallbackProgression::Continue,
+                Err(error) => {
+                    *failure.borrow_mut() = Some(error.to_string());
+                    CallbackProgression::Stop
+                }
+            }
+        };
+
+        loop {
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            match waitset.wait_and_process(&mut on_event) {
+                Ok(WaitSetRunResult::AllEventsHandled) => {}
+                Ok(
+                    WaitSetRunResult::StopRequest
+                    | WaitSetRunResult::Interrupt
+                    | WaitSetRunResult::TerminationRequest,
+                ) => break,
+                Err(error) => return Err(invalid(format!("okvis WaitSet: {error:?}"))),
+            }
+        }
+    }
+    firefly_observability::pump_log_ipc(&log_ipc);
+    stop.store(true, Ordering::Release);
+    if let Some(message) = failure.into_inner() {
+        return Err(invalid(message));
+    }
+    map_publisher.finish()?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_imu(
+    packet: &ImuMessage,
+    trace: firefly_pubsub::trace::TraceContext,
+    sensors: &mut SensorInputHandle,
+    watermark: &ImuWatermark,
+    output: &mut Output,
+    publishers: &mut Publishers,
+    imu_time: &mut Option<Timestamp>,
+    ipc_logged: &mut u64,
+) -> Result<()> {
+    let _span = trace.continue_span("okvis-receive-imu");
+    let time = output::time(packet.timestamp)?;
+    let alpha = Vector3::new(
+        packet.linear_acceleration_x,
+        packet.linear_acceleration_y,
+        packet.linear_acceleration_z,
+    );
+    let omega = Vector3::new(
+        packet.angular_velocity_x,
+        packet.angular_velocity_y,
+        packet.angular_velocity_z,
+    );
+    if alpha
+        .iter()
+        .chain(omega.iter())
+        .any(|value| !value.is_finite())
+    {
+        return Err(invalid("nonfinite IMU measurement"));
+    }
+    if imu_time.is_some_and(|last| time <= last) {
+        return Ok(());
+    }
+    firefly_observability::set_sim_time(packet.timestamp);
+    *imu_time = Some(time);
+    if !sensors.add_imu_measurement(time, &alpha, &omega) {
+        return Err(invalid("estimator IMU queue rejected measurement"));
+    }
+    watermark.store(time);
+    if let Some(sample) = output.imu(time, alpha, omega)? {
+        publishers.publish(&sample, packet.timestamp)?;
+        *ipc_logged += 1;
+        if ipc_logged.is_multiple_of(10) && trace.send_ts_secs > 0 {
+            let age_ms = (Timestamp::now().as_nanosecond() - trace.send_timestamp().as_nanosecond())
+                as f64
+                * 1e-6;
+            publishers.ipc(packet.timestamp, age_ms.max(0.0))?;
+        }
+    }
+    Ok(())
+}
+
+/// 接收线程：双目配对、图像拷贝、深度转换与转发。
+pub(super) fn run_ingress(mut ports: IngressPorts) -> Result<()> {
+    let node = create_node()?;
     let options = SubscriberOptions {
         buffer_size: 2,
         ..Default::default()
@@ -196,54 +421,10 @@ pub(super) fn run(mut ports: Ports) -> Result<()> {
         .mapping
         .then(|| Subscriber::<DepthImageMessage>::with_options(&node, &ports.topics.depth, options))
         .transpose()?;
-    let mut publishers = Publishers::open(&node, &ports.config, &ports.topics)?;
     let mut pairs = Pairs::new(ports.config.stereo_tolerance);
-    let mut output = Output::new(ports.config.clone(), session())?;
-    let mut map_publisher =
-        super::map_output::PublisherWorker::start(ports.map_snapshots.clone(), ports.stop.clone())?;
-    let mut imu_time = None;
     let mut last_depth = None;
 
     while !ports.stop.load(Ordering::Acquire) && node.wait(Duration::from_millis(1)).is_ok() {
-        firefly_observability::pump_log_ipc(&log_ipc);
-        while let Ok(publication) = ports.publications.try_recv() {
-            output.posterior(&publication)?;
-            map_publisher.update(&output)?;
-            publishers.posterior(&publication)?;
-        }
-        while let Some(packet) = imu.receive()? {
-            let trace = *packet.user_header();
-            let _span = trace.continue_span("okvis-receive-imu");
-            let time = output::time(packet.timestamp)?;
-            let alpha = Vector3::new(
-                packet.linear_acceleration_x,
-                packet.linear_acceleration_y,
-                packet.linear_acceleration_z,
-            );
-            let omega = Vector3::new(
-                packet.angular_velocity_x,
-                packet.angular_velocity_y,
-                packet.angular_velocity_z,
-            );
-            if alpha
-                .iter()
-                .chain(omega.iter())
-                .any(|value| !value.is_finite())
-            {
-                return Err(invalid("nonfinite IMU measurement"));
-            }
-            if imu_time.is_some_and(|last| time <= last) {
-                continue;
-            }
-            firefly_observability::set_sim_time(packet.timestamp);
-            imu_time = Some(time);
-            if !ports.sensors.add_imu_measurement(time, &alpha, &omega) {
-                return Err(invalid("estimator IMU queue rejected measurement"));
-            }
-            if let Some(sample) = output.imu(time, alpha, omega)? {
-                publishers.publish(&sample, packet.timestamp)?;
-            }
-        }
         for (camera, subscriber) in [(0, &left), (1, &right)] {
             while let Some(packet) = subscriber.receive()? {
                 let trace = *packet.user_header();
@@ -251,6 +432,7 @@ pub(super) fn run(mut ports: Ports) -> Result<()> {
                 pairs.push(&packet, camera)?;
             }
         }
+        let imu_time = ports.watermark.load();
         while let Some((time, images)) = pairs.next(imu_time, ports.config.image_delay) {
             if !ports.sensors.add_images(time, &images, &ImageMap::new()) {
                 log::warn!("OKVIS camera queue overrun or closed input");
@@ -278,9 +460,7 @@ pub(super) fn run(mut ports: Ports) -> Result<()> {
             }
         }
     }
-    firefly_observability::pump_log_ipc(&log_ipc);
     ports.stop.store(true, Ordering::Release);
-    map_publisher.finish()?;
     Ok(())
 }
 
@@ -338,6 +518,16 @@ impl Publishers {
             };
             tracking.scalar_count = 1;
             viz.publish(tracking)?;
+        }
+        Ok(())
+    }
+    /// IMU 从发布端发出到四路发布完成的端到端耗时（毫秒）。
+    fn ipc(&self, stamp: f64, publish_ms: f64) -> Result<()> {
+        if let Some(viz) = &self.viz {
+            let mut message = ScalarMessage::base(stamp, "okvis/ipc/imu_publish_ms");
+            message.scalars[0] = publish_ms;
+            message.scalar_count = 1;
+            viz.publish(message)?;
         }
         Ok(())
     }

@@ -364,6 +364,7 @@ OKVIS 跟踪状态、回环提交次数与单帧处理耗时；FC tick rate 使�
 - `fc/debug/position_target_odom` / `position_error_odom`：odom 系目标与位置误差（10Hz）。
 - `fc/imu/health`：IPC 发布所选姿态可用、VIO 主链路新鲜、VIO 后验测量年龄（秒）；viz 分别记录为 `fc/imu/attitude_ready`、`fc/imu/vio_fresh` 状态时间线与 `fc/imu/posterior_age_s` 数值曲线。验收任务将原始数值保存为 `acceptance/imu_health`。
 - `fc/imu/source`：0 未就绪、1 VIO 预测、2 独立 ESKF 热备（10Hz），viz 记录为状态时间线；验收任务将原始数值保存为 `acceptance/attitude_source`。
+- `okvis/ipc/imu_publish_ms`：IMU 发布端发送时刻到 `okvis-imu` 四路发布完成的端到端耗时（毫秒，100Hz），用于验收事件唤醒与发布尾部；默认视图不显示。
 - `fc/standby_eskf/health`：独立 ESKF 就绪标记（0/1），viz 记录为状态时间线。
 - `fc/standby_eskf/imu_age_s`：IMU 墙钟接收年龄（秒），保留录制，默认视图不显示。
 - `fc/standby_eskf/accel_nis`：三轴加计创新的 NIS 数值。

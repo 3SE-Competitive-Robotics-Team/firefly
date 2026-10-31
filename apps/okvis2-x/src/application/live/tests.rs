@@ -348,12 +348,12 @@ fn real_ipc_transports_sensor_inputs_and_publishes_one_consistent_navigation_sna
         stop: stopping,
         topics,
     };
-    let worker = std::thread::spawn(move || super::input::run(ports));
+    let transport = super::spawn_transport(ports, &stop).expect("transport");
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         clients.exercise(&handle, &posterior, &depth_rx, &ready);
     }));
     stop.store(true, Ordering::Release);
-    let transport = worker.join().unwrap();
+    let transport = transport.join();
     let shutdown = estimator.shutdown();
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
