@@ -193,7 +193,7 @@ impl App {
         let log_ipc = firefly_observability::init_ipc(&node, "localization");
         let odom_sub = Subscriber::with_topic(&node, odom_topic)?;
         let visual_obs = Subscriber::with_topic(&node, POSE_OBS_TOPIC)?;
-        let corrected_pub = Publisher::with_topic_notify(&node, CORRECTED_ODOM_TOPIC)?;
+        let corrected_pub = Publisher::with_topic(&node, CORRECTED_ODOM_TOPIC)?;
         let viz_pub = match VizPublisher::new(&node) {
             Ok(p) => {
                 log::info!(

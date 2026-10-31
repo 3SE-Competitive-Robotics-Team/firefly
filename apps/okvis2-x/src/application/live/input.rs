@@ -299,8 +299,8 @@ impl Publishers {
         config: &Config,
         topics: &Topics,
     ) -> Result<Self> {
-        let odometry = Publisher::<OdomMessage>::with_topic_notify(node, &topics.odometry)?;
-        let corrected = Publisher::<OdomMessage>::with_topic_notify(node, &topics.corrected)?;
+        let odometry = Publisher::<OdomMessage>::with_topic(node, &topics.odometry)?;
+        let corrected = Publisher::<OdomMessage>::with_topic(node, &topics.corrected)?;
         let navigation = Publisher::<NavigationMessage>::with_topic(node, &topics.navigation)?;
         let attitude = Publisher::<AttitudeMessage>::with_topic(node, &topics.attitude)?;
         let viz = config
