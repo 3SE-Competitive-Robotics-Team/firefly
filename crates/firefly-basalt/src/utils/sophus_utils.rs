@@ -171,17 +171,7 @@ pub fn so3_exp<S: BasaltScalar>(omega: &Vector3<S>) -> UnitQuaternion<S> {
     } else {
         let angle = squared_angle.sqrt();
         let half_angle = S::from_f64_lossy(0.5) * angle;
-        let (sin_half, cos_half) = if std::mem::size_of::<S>() == std::mem::size_of::<f32>() {
-            // Platform f32 libm differences are amplified by high spline derivatives.
-            let half_angle_f64 = half_angle.as_f64();
-            (
-                S::from_f64_lossy(half_angle_f64.sin()),
-                S::from_f64_lossy(half_angle_f64.cos()),
-            )
-        } else {
-            (half_angle.sin(), half_angle.cos())
-        };
-        (sin_half / angle, cos_half)
+        (half_angle.sin() / angle, half_angle.cos())
     };
     let quaternion = Quaternion::new(
         real,
@@ -208,16 +198,7 @@ pub fn so3_log<S: BasaltScalar>(rotation: &UnitQuaternion<S>) -> Vector3<S> {
             - S::from_f64_lossy(2.0 / 3.0) * squared_norm / (real * squared_real)
     } else {
         let norm = squared_norm.sqrt();
-        let angle = if std::mem::size_of::<S>() == std::mem::size_of::<f32>() {
-            // Evaluate the branch in f64 and round once back to the requested scalar.
-            let y = norm.as_f64();
-            let x = real.as_f64();
-            S::from_f64_lossy(if real < S::zero() {
-                (-y).atan2(-x)
-            } else {
-                y.atan2(x)
-            })
-        } else if real < S::zero() {
+        let angle = if real < S::zero() {
             (-norm).atan2(-real)
         } else {
             norm.atan2(real)

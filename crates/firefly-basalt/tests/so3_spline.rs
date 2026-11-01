@@ -13,6 +13,14 @@ fn check<S: BasaltScalar, const R: usize, const C: usize>(
     } else {
         1e-10
     };
+    check_with_tolerance(actual, expected, tolerance);
+}
+
+fn check_with_tolerance<S: BasaltScalar, const R: usize, const C: usize>(
+    actual: &SMatrix<S, R, C>,
+    expected: &Value,
+    tolerance: f64,
+) {
     for row in 0..R {
         for column in 0..C {
             let a = actual[(row, column)].as_f64();
@@ -54,7 +62,17 @@ fn run<S: BasaltScalar, const N: usize>(key: &str) {
             &spline.acceleration_body(time, None, None, None),
             &case["acceleration"],
         );
-        check(&spline.jerk_body(time, None, None), &case["jerk"]);
+        // Third derivatives amplify small platform-specific f32 rounding differences.
+        let jerk_tolerance = if std::mem::size_of::<S>() == 4 {
+            1.5e-5
+        } else {
+            1e-10
+        };
+        check_with_tolerance(
+            &spline.jerk_body(time, None, None),
+            &case["jerk"],
+            jerk_tolerance,
+        );
         if !case["velocity_jacobian"].is_null() {
             check(
                 &spline.velocity_body(time, Some(&mut jacobian)),
