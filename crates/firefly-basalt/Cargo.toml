@@ -1,0 +1,40 @@
+[package]
+name = "firefly-basalt"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Original Basalt translated from pinned upstream sources"
+license = "BSD-3-Clause AND MPL-2.0 AND MIT AND BSD-4-Clause"
+repository.workspace = true
+readme = "README.md"
+keywords = ["vision", "robotics", "slam"]
+categories = ["algorithms", "science"]
+
+[features]
+realsense = ["dep:firefly-basalt-realsense"]
+
+[dependencies]
+crossbeam-channel.workspace = true
+firefly-basalt-realsense = { workspace = true, optional = true, features = ["sdk"] }
+image.workspace = true
+webpx.workspace = true
+libwebp-sys.workspace = true
+rosbag.workspace = true
+firefly-error.workspace = true
+firefly-opengv.workspace = true
+purecv.workspace = true
+firefly-basalt-headers.workspace = true
+firefly-calibration.workspace = true
+nalgebra.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+rayon.workspace = true
+rand.workspace = true
+log.workspace = true
+nix = { workspace = true, features = ["resource"] }
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

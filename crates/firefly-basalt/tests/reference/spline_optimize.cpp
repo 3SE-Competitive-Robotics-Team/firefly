@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Official Basalt 0f3b2b52, headers aa441ba3, Eigen 5.0.1.
+#include <basalt/optimization/spline_optimize.h>
+#include <nlohmann/json.hpp>
+#include <iostream>
+using Json=nlohmann::json;
+template<class M>Json values(const M&m){Json result=Json::array();for(int r=0;r<m.rows();++r)for(int c=0;c<m.cols();++c)result.push_back(m(r,c));return result;}
+int main(){basalt::SplineOptimization<4,double>optimizer(20000000,1e-3);optimizer.resetCalib(1,{"pinhole"});optimizer.calib->imu_update_rate=200.;optimizer.calib->gyro_noise_std.setConstant(.01);optimizer.calib->accel_noise_std.setConstant(.1);optimizer.initSpline(Sophus::SE3d(),4);optimizer.setG(Eigen::Vector3d(0,0,-9.81));int index=0;for(int64_t time:{0LL,7000000LL,19000000LL}){optimizer.addPoseMeasurement(time,Sophus::SE3d(Sophus::SO3d::exp(Eigen::Vector3d(.001*index,-.002*index,.003*index)),Eigen::Vector3d(.01*index,-.02*index,.005*index)));optimizer.addAccelMeasurement(time,Eigen::Vector3d(0,0,-9.81));optimizer.addGyroMeasurement(time,Eigen::Vector3d(.01,-.02,.03));++index;}optimizer.init();Json result=Json::array();for(int iteration=0;iteration<3;++iteration){double error=0,reprojection=0;int points=0;bool converged=optimizer.optimize(false,true,false,false,false,false,2.,1e-12,error,points,reprojection,false);Json knots=Json::array();for(int i=0;i<4;++i)knots.push_back(values(optimizer.getSpline().getKnot(i).matrix()));result.push_back({{"error",error},{"reprojection",reprojection},{"points",points},{"converged",converged},{"knots",knots},{"gravity",values(optimizer.getG())},{"accel_bias",values(optimizer.getAccelBias().getParam())},{"gyro_bias",values(optimizer.getGyroBias().getParam())}});}std::cout<<result.dump()<<'\n';}

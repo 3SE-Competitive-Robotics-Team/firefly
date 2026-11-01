@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Official basalt-headers aa441ba3, Eigen 5.0.1.
+#include <basalt/spline/so3_spline.h>
+#include <nlohmann/json.hpp>
+#include <iostream>
+using Json=nlohmann::json;
+template<class M>Json matrix(const M&m){Json out=Json::array();for(int r=0;r<m.rows();++r)for(int c=0;c<m.cols();++c)out.push_back(m(r,c));return out;}
+template<class S,int N>Json run(){basalt::So3Spline<N,S>spline(20000000,1000000000);using V=Eigen::Matrix<S,3,1>;for(int i=0;i<N+3;++i)spline.knotsPushBack(Sophus::SO3<S>::exp(V(S(.025*i),S(-.015*i*i),S(.01*(i%3)))));Json out=Json::array();for(int64_t time:{1000000000LL,1007000000LL,1020000000LL,1079999999LL}){typename basalt::So3Spline<N,S>::JacobianStruct position,velocity,acceleration,velocity2;auto pose=spline.evaluate(time,&position);V v=spline.velocityBody(time);V side;V a=spline.accelerationBody(time,&side);V j=spline.jerkBody(time);Json item={{"time",time},{"rotation",matrix(pose.matrix())},{"velocity",matrix(v)},{"acceleration",matrix(a)},{"jerk",matrix(j)},{"position_jacobian",Json::array()}};for(auto&m:position.d_val_d_knot)item["position_jacobian"].push_back(matrix(m));if constexpr(std::is_same_v<S,double>){V vj=spline.velocityBody(time,&velocity);V aj=spline.accelerationBody(time,&acceleration,&side,&velocity2);item["velocity_jacobian_value"]=matrix(vj);item["acceleration_jacobian_value"]=matrix(aj);for(auto&m:velocity.d_val_d_knot)item["velocity_jacobian"].push_back(matrix(m));for(auto&m:acceleration.d_val_d_knot)item["acceleration_jacobian"].push_back(matrix(m));for(auto&m:velocity2.d_val_d_knot)item["velocity_from_acceleration_jacobian"].push_back(matrix(m));}out.push_back(item);}return out;}
+int main(){std::cout<<Json({{"f64_4",run<double,4>()},{"f64_5",run<double,5>()},{"f32_4",run<float,4>()},{"f32_5",run<float,5>()}}).dump()<<'\n';}

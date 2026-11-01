@@ -1,0 +1,22 @@
+[package]
+name = "firefly-basalt-realsense"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "BSD-3-Clause"
+description = "Isolated callback bridge to the Basalt RealSense SDK"
+repository.workspace = true
+readme = "README.md"
+keywords = ["vision", "robotics", "realsense"]
+categories = ["hardware-support", "science"]
+
+[features]
+default = []
+sdk = ["dep:realsense-sys"]
+
+[dependencies]
+firefly-error.workspace = true
+crossbeam-channel.workspace = true
+realsense-sys = { workspace = true, optional = true }
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

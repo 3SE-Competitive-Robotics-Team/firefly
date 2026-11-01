@@ -1,0 +1,350 @@
+[
+  {
+    "borders": [
+      {
+        "cubic": 100,
+        "cubic_gradient": "unsupported_upstream_float_instantiation",
+        "in_bounds_0": true,
+        "in_bounds_1": false,
+        "in_bounds_2": false,
+        "position": [
+          0,
+          0
+        ]
+      },
+      {
+        "cubic": 107.43212890625,
+        "cubic_gradient": "unsupported_upstream_float_instantiation",
+        "in_bounds_0": true,
+        "in_bounds_1": false,
+        "in_bounds_2": false,
+        "position": [
+          0.25,
+          0.5
+        ]
+      },
+      {
+        "cubic": 1142.824133235611,
+        "cubic_gradient": "unsupported_upstream_float_instantiation",
+        "in_bounds_0": true,
+        "in_bounds_1": false,
+        "in_bounds_2": false,
+        "position": [
+          5.999000072479248,
+          4.999000072479248
+        ]
+      }
+    ],
+    "height": 6,
+    "pixels": [
+      100,
+      113,
+      152,
+      217,
+      308,
+      425,
+      568,
+      65535,
+      65535,
+      65535,
+      117,
+      135,
+      179,
+      249,
+      345,
+      467,
+      615,
+      65535,
+      65535,
+      65535,
+      168,
+      191,
+      240,
+      315,
+      416,
+      543,
+      696,
+      65535,
+      65535,
+      65535,
+      253,
+      281,
+      335,
+      415,
+      521,
+      653,
+      811,
+      65535,
+      65535,
+      65535,
+      372,
+      405,
+      464,
+      549,
+      660,
+      797,
+      960,
+      65535,
+      65535,
+      65535,
+      525,
+      563,
+      627,
+      717,
+      833,
+      975,
+      1143,
+      65535,
+      65535,
+      65535
+    ],
+    "samples": [
+      {
+        "central_gradient": [
+          135,
+          31,
+          39
+        ],
+        "cubic": 135,
+        "cubic_gradient": "unsupported_upstream_float_instantiation",
+        "exact_gradient": [
+          135,
+          44,
+          56
+        ],
+        "interp": 135,
+        "position": [
+          1,
+          1
+        ]
+      },
+      {
+        "central_gradient": [
+          306.875,
+          71,
+          96.25
+        ],
+        "cubic": 300.1875,
+        "cubic_gradient": "unsupported_upstream_float_instantiation",
+        "exact_gradient": [
+          306.875,
+          77.5,
+          96.25
+        ],
+        "interp": 306.875,
+        "position": [
+          2.25,
+          2.5
+        ]
+      },
+      {
+        "central_gradient": [
+          604.6875,
+          132.625,
+          128.75
+        ],
+        "cubic": 599.578125,
+        "cubic_gradient": "unsupported_upstream_float_instantiation",
+        "exact_gradient": [
+          604.6875,
+          132.625,
+          141.5
+        ],
+        "interp": 604.6875,
+        "position": [
+          4.5,
+          3.125
+        ]
+      }
+    ],
+    "scalar": "f32",
+    "stride": 10,
+    "width": 7
+  },
+  {
+    "borders": [
+      {
+        "cubic": 100,
+        "cubic_gradient": [
+          100,
+          6.5,
+          8.5
+        ],
+        "in_bounds_0": true,
+        "in_bounds_1": false,
+        "in_bounds_2": false,
+        "position": [
+          0,
+          0
+        ]
+      },
+      {
+        "cubic": 107.43212890625,
+        "cubic_gradient": [
+          107.43212890625,
+          9.701171875,
+          15.8857421875
+        ],
+        "in_bounds_0": true,
+        "in_bounds_1": false,
+        "in_bounds_2": false,
+        "position": [
+          0.25,
+          0.5
+        ]
+      },
+      {
+        "cubic": 1142.8241204605024,
+        "cubic_gradient": [
+          1142.8241204605024,
+          84.36045149501264,
+          91.89841699501258
+        ],
+        "in_bounds_0": true,
+        "in_bounds_1": false,
+        "in_bounds_2": false,
+        "position": [
+          5.999,
+          4.999
+        ]
+      }
+    ],
+    "height": 6,
+    "pixels": [
+      100,
+      113,
+      152,
+      217,
+      308,
+      425,
+      568,
+      65535,
+      65535,
+      65535,
+      117,
+      135,
+      179,
+      249,
+      345,
+      467,
+      615,
+      65535,
+      65535,
+      65535,
+      168,
+      191,
+      240,
+      315,
+      416,
+      543,
+      696,
+      65535,
+      65535,
+      65535,
+      253,
+      281,
+      335,
+      415,
+      521,
+      653,
+      811,
+      65535,
+      65535,
+      65535,
+      372,
+      405,
+      464,
+      549,
+      660,
+      797,
+      960,
+      65535,
+      65535,
+      65535,
+      525,
+      563,
+      627,
+      717,
+      833,
+      975,
+      1143,
+      65535,
+      65535,
+      65535
+    ],
+    "samples": [
+      {
+        "central_gradient": [
+          135,
+          31,
+          39
+        ],
+        "cubic": 135,
+        "cubic_gradient": [
+          135,
+          31,
+          39
+        ],
+        "exact_gradient": [
+          135,
+          44,
+          56
+        ],
+        "interp": 135,
+        "position": [
+          1,
+          1
+        ]
+      },
+      {
+        "central_gradient": [
+          306.875,
+          71,
+          96.25
+        ],
+        "cubic": 300.1875,
+        "cubic_gradient": [
+          300.1875,
+          71,
+          96.25
+        ],
+        "exact_gradient": [
+          306.875,
+          77.5,
+          96.25
+        ],
+        "interp": 306.875,
+        "position": [
+          2.25,
+          2.5
+        ]
+      },
+      {
+        "central_gradient": [
+          604.6875,
+          132.625,
+          128.75
+        ],
+        "cubic": 599.578125,
+        "cubic_gradient": [
+          599.578125,
+          132.625,
+          128.75
+        ],
+        "exact_gradient": [
+          604.6875,
+          132.625,
+          141.5
+        ],
+        "interp": 604.6875,
+        "position": [
+          4.5,
+          3.125
+        ]
+      }
+    ],
+    "scalar": "f64",
+    "stride": 10,
+    "width": 7
+  }
+]

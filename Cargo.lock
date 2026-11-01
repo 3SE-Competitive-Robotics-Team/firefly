@@ -452,6 +452,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "base16ct"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c7f02d4ea65f2c1853089ffd8d2787bdbc63de2f0d29dedbcf8ccdfa0ccd4cf"
+
+[[package]]
 name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2184,6 +2190,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "bzip2"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdb116a6ef3f6c3698828873ad02c3014b3c85cadb88496095628e3ef1e347f8"
+dependencies = [
+ "bzip2-sys",
+ "libc",
+]
+
+[[package]]
+name = "bzip2-sys"
+version = "0.1.13+1.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "225bff33b2141874fe80d71e07d6eec4f85c5c216453dd96388240f96e1acc14"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
+
+[[package]]
 name = "calloop"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2806,6 +2832,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "enough"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "877362cb7b70d1c617f0cd3c67708bd58d894a86af5104018e2c10ebaee3c02f"
+
+[[package]]
 name = "enum-as-inner"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3079,6 +3111,50 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
+name = "firefly-basalt"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "firefly-basalt-headers",
+ "firefly-basalt-realsense",
+ "firefly-calibration",
+ "firefly-error",
+ "firefly-opengv",
+ "image",
+ "libwebp-sys",
+ "log",
+ "nalgebra",
+ "nix 0.31.3",
+ "proptest",
+ "purecv",
+ "rand",
+ "rayon",
+ "rosbag",
+ "serde",
+ "serde_json",
+ "webpx",
+]
+
+[[package]]
+name = "firefly-basalt-headers"
+version = "0.1.0"
+dependencies = [
+ "nalgebra",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "firefly-basalt-realsense"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "firefly-error",
+ "realsense-sys",
+]
+
+[[package]]
 name = "firefly-base"
 version = "0.1.0"
 dependencies = [
@@ -3095,6 +3171,19 @@ dependencies = [
  "nalgebra",
  "proptest",
  "purecv",
+]
+
+[[package]]
+name = "firefly-calibration"
+version = "0.1.0"
+dependencies = [
+ "firefly-basalt-headers",
+ "firefly-error",
+ "firefly-opengv",
+ "nalgebra",
+ "rayon",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3304,6 +3393,41 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "firefly-config",
+]
+
+[[package]]
+name = "firefly-rootslam"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "firefly-basalt",
+ "firefly-basalt-headers",
+ "firefly-config",
+ "firefly-error",
+ "firefly-observability",
+ "firefly-pubsub",
+ "firefly-rootslam-mapping",
+ "log",
+ "nalgebra",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
+name = "firefly-rootslam-mapping"
+version = "0.1.0"
+dependencies = [
+ "firefly-basalt",
+ "firefly-basalt-headers",
+ "firefly-error",
+ "firefly-opengv",
+ "log",
+ "nalgebra",
+ "rayon",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4431,6 +4555,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "imgref"
+version = "1.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e44b0a4eaa4c82f441d50a963f2d5f05a787240aeee097597033e72accfd22f"
+
+[[package]]
 name = "imu"
 version = "0.1.0"
 dependencies = [
@@ -4861,6 +4991,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "libwebp-sys"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "375ca3fbd6d89769361c5d505c9da676eb4128ee471b9fd763144d377a2d30e6"
+dependencies = [
+ "cc",
+ "glob",
+ "pkg-config",
+]
+
+[[package]]
 name = "lightglue"
 version = "0.1.0"
 dependencies = [
@@ -5089,6 +5230,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "lz4"
+version = "1.28.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a20b523e860d03443e98350ceaac5e71c6ba89aea7d960769ec3ce37f4de5af4"
+dependencies = [
+ "lz4-sys",
+]
+
+[[package]]
+name = "lz4-sys"
+version = "1.11.1+lz4-1.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bd8c0d6c6ed0cd30b3652886bb8711dc4bb01d637a68105a3d5158039b418e6"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
 name = "lzma-rust2"
 version = "0.15.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5249,6 +5409,7 @@ dependencies = [
  "num-complex",
  "num-rational",
  "num-traits",
+ "serde",
  "simba",
  "typenum",
 ]
@@ -5481,6 +5642,7 @@ checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
 dependencies = [
  "bytemuck",
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -6628,6 +6790,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "realsense-sys"
+version = "2.44.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4737656f3194a68b2c96d601bdfedfd9af8c81cab798dbe04f9bd67ad275e755"
+dependencies = [
+ "pkg-config",
+]
+
+[[package]]
 name = "reborrow"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6720,6 +6891,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
+name = "rgb"
+version = "0.8.53"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "rodio"
 version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6745,6 +6925,20 @@ dependencies = [
  "serde_derive",
  "typeid",
  "unicode-ident",
+]
+
+[[package]]
+name = "rosbag"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef77688c2fe3d1a94991e3d7256face190d6b6ea1a1ac60a6e2bad8e2aeabde7"
+dependencies = [
+ "base16ct",
+ "byteorder",
+ "bzip2",
+ "log",
+ "lz4",
+ "memmap2",
 ]
 
 [[package]]
@@ -8098,6 +8292,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "webpx"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86d3649fadcba9449d3d46c698eda9dff6371931b15f9a5fcb6e6891c2470add"
+dependencies = [
+ "enough",
+ "imgref",
+ "libwebp-sys",
+ "rgb",
+ "whereat",
+ "zenpixels",
+]
+
+[[package]]
 name = "wesl"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8334,6 +8542,12 @@ dependencies = [
  "itertools 0.15.0",
  "num-traits",
 ]
+
+[[package]]
+name = "whereat"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab90f361db038ba3135da12c938c328fb43a012992101879e3d6ebccb4d7eba8"
 
 [[package]]
 name = "which"
@@ -8931,6 +9145,16 @@ name = "zeno"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6df3dc4292935e51816d896edcd52aa30bc297907c26167fec31e2b0c6a32524"
+
+[[package]]
+name = "zenpixels"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5851fd39b312749a3c367a0cd3522bd95d43276cfa613e9c18df748447cef3a8"
+dependencies = [
+ "bytemuck",
+ "whereat",
+]
 
 [[package]]
 name = "zerocopy"

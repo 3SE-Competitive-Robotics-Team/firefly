@@ -1,0 +1,12 @@
+# RootSLAM dataset runner. Paths are relative to the workspace root.
+# Numerical defaults are defined by the application and mapping crate.
+dataset_path = "../basalt/build/datasets/tumvi/dataset-room1_512_16.bag"
+dataset_type = "bag"
+camera_calibration = "../basalt/data/tumvi_512_ds_calib.json"
+vio_config = "../basalt/data/tumvi_512_config.json"
+trajectory = "logs/rootslam_trajectory.txt"
+metrics_path = "logs/rootslam_metrics.json"
+global_result_path = "logs/rootslam_global_result.json"
+
+[optimization]
+problem_archive = "logs/rootslam_global_problem.json"

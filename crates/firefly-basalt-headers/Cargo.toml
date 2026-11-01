@@ -1,0 +1,22 @@
+[package]
+name = "firefly-basalt-headers"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Basalt camera, image, inertial and spline primitives translated from pinned upstream sources"
+license = "BSD-3-Clause AND MIT AND MPL-2.0"
+repository.workspace = true
+readme = "README.md"
+keywords = ["vision", "robotics", "slam"]
+categories = ["algorithms", "science"]
+
+[dependencies]
+nalgebra.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

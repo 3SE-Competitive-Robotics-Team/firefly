@@ -45,6 +45,26 @@ flowchart LR
 - GroundTruth 只供合成传感器、评测与可视化；PlantState 只作评测，均不得进入估计或控制。
 - `render` 只生成传感器图像，诊断记录与展示由独立 `firefly-viz` 承担。
 
+### Basalt 与 RootSLAM 独立应用
+
+`apps/rootslam` 提供数据集运行、Basalt 无界面工具和可选 T265 输入；默认飞控链路仍由
+OKVIS 提供。`firefly-basalt-headers` 承载相机、图像、IMU、样条等基础数学类型，
+`firefly-calibration` 承载标定目标检测和初始化基础设施；`firefly-basalt` 承载原版
+Basalt 的光流、局部 VO/VIO、边缘化、离线 mapper 及标定求解控制器。
+`firefly-basalt-realsense` 隔离可选 SDK 与回调生命周期。
+
+`firefly-rootslam-mapping` 在局部估计之上实现持久地图、地点检索、几何回环验证、
+地图融合、位姿图优化及平方根全局 BA。在线 Basalt VO/VIO 本身没有地点识别回环；
+RootSLAM 应用在线运行回环与位姿图修正，在输入结束后运行全局 BA。
+实现依据原版 Basalt 源码及 RootSLAM 论文，不能据此宣称复现论文的精度或性能。
+
+该应用目前通过进程内队列连接估计和建图，未提供飞控导航消息适配。接入现有系统须
+将同一时钟域的相机与 IMU 输入适配到估计器，发布连续 `Odometry` 和新鲜的后验
+IMU 预测 `VioAttitude`；回环修正通过 map←odom 与地图版本表达，不能作为物理运动
+跳变注入里程计。`Navigation` 供 planner 消费，FC 使用里程计及校正里程计维护坐标。
+RootSLAM 稀疏路标不构成避障占据地图；完整规划链路仍需深度融合和带版本、覆盖范围的
+原子地图快照。离线轨迹测试不替代这些消息契约与飞行验收。
+
 ### 板载拓扑
 
 真机由 `camera`、`imu`、`motor` 接替仿真与渲染；算法进程使用相同 IPC 消息。

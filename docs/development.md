@@ -448,6 +448,25 @@ static 预览不进入文件和正常/异常退出时的完整性。构建、单
 - 前端检查已知位移、丢点与双目约束；解析轨迹隔离滤波数学，不能代替实际纹理和飞行。
 - CAD、深度、IPC 分别验证资产一致性、噪声/投票/先验保护和双语言布局、头部、事件往返。
 
+### Basalt 与 RootSLAM
+
+独立数据集应用使用 `configs/rootslam.toml`，相对路径以 workspace 根目录为基准。
+其数据、原版配置与标定文件来自 workspace 旁的原版 Basalt checkout；运行前须准备
+配置所指资产。入口和工具用法见 [RootSLAM README](../apps/rootslam/README.md)，
+职责及飞控接线边界见 [系统架构](architecture.md#basalt-与-rootslam-独立应用)。
+
+```bash
+cargo run --release -p firefly-rootslam
+cargo test -p firefly-calibration -p firefly-basalt-headers -p firefly-basalt -p firefly-rootslam-mapping -p firefly-rootslam --all-targets
+cargo clippy -p firefly-calibration -p firefly-basalt-headers -p firefly-basalt -p firefly-rootslam-mapping -p firefly-rootslam --all-targets -- -D warnings
+uv run python -B -m unittest discover -s apps/rootslam/tests -p test_export_rrd.py
+```
+
+默认测试使用随源码保留的独立 C++ 参考夹具；外部数据集、完整上游程序和设备测试
+各有显式运行条件，忽略项不算通过。可选 `realsense` feature 的 SDK 条件见
+[桥接 crate](../crates/firefly-basalt-realsense/README.md)。数值阈值以测试源码为准，
+局部单测、数据集轨迹等价、论文性能复现与整机验收分别报告。
+
 ### OKVIS 算法与通讯专项
 
 规划异步边界回归运行 `cargo test -p firefly-planner --lib worker`，覆盖取消、过期、地图

@@ -1,0 +1,25 @@
+[package]
+name = "firefly-rootslam-mapping"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Persistent mapping and square-root global optimization from the RootSLAM paper"
+license = "BSD-3-Clause AND MIT"
+repository.workspace = true
+readme = "README.md"
+keywords = ["vision", "robotics", "slam"]
+categories = ["algorithms", "science"]
+
+[dependencies]
+firefly-basalt.workspace = true
+firefly-basalt-headers.workspace = true
+firefly-error.workspace = true
+firefly-opengv.workspace = true
+nalgebra = { workspace = true, features = ["serde-serialize"] }
+serde.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+rayon.workspace = true
+log.workspace = true
+
+[lints]
+workspace = true
