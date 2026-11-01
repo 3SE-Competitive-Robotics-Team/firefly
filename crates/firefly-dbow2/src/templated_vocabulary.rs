@@ -3,13 +3,13 @@
  * License: see docs/licenses/crates/firefly-dbow2/LICENSE.txt.
  */
 //! Hierarchical k-means vocabulary and `OpenCV` `FileStorage` YAML schema.
-//! YAML parsing uses `serde_yaml`; the `OpenCV` `%YAML:1.0` directive is a format envelope.
+//! YAML parsing uses `serde-saphyr`; the `OpenCV` `%YAML:1.0` directive is a format envelope.
 use super::{
     bow_vector::{BowVector, NodeId, ScoringType, WeightingType, WordId, WordValue},
     feature_vector::FeatureVector,
     scoring_object::GeneralScoring,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::BTreeSet,
     fmt,
@@ -590,21 +590,18 @@ impl<F: DescriptorOps> TemplatedVocabulary<F> {
     /// Returns an error if serialization, file creation, compression, writing, or flushing
     /// fails.
     pub fn save(&self, path: impl AsRef<Path>) -> StorageResult<()> {
-        let mut root = serde_yaml::Mapping::new();
-        root.insert(
-            "vocabulary".into(),
-            serde_yaml::to_value(self.to_storage())?,
-        );
+        let root = StorageValue::Map(vec![(
+            "vocabulary".to_string(),
+            StorageValue::from(&self.to_storage()),
+        )]);
         write_storage(path, &root)
     }
     /// # Errors
     /// Returns an error for unreadable or malformed storage, missing vocabulary data, or an
     /// invalid vocabulary.
     pub fn load(path: impl AsRef<Path>) -> StorageResult<Self> {
-        let root = read_storage(path)?;
-        let storage =
-            serde_yaml::from_value(root.get("vocabulary").ok_or("missing vocabulary")?.clone())?;
-        Self::from_storage(storage)
+        let root: VocabularyFile = read_storage(path)?;
+        Self::from_storage(root.vocabulary)
     }
     /// Loads a plain YAML or gzip-compressed vocabulary from an owned/embedded resource.
     /// # Errors
@@ -616,10 +613,8 @@ impl<F: DescriptorOps> TemplatedVocabulary<F> {
         } else {
             std::io::Cursor::new(bytes).read_to_string(&mut input)?;
         }
-        let root = parse_storage(&input)?;
-        let storage =
-            serde_yaml::from_value(root.get("vocabulary").ok_or("missing vocabulary")?.clone())?;
-        Self::from_storage(storage)
+        let root: VocabularyFile = parse_storage(&input)?;
+        Self::from_storage(root.vocabulary)
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -650,10 +645,84 @@ pub struct WordStorage {
     #[serde(rename = "nodeId")]
     pub node_id: u32,
 }
+/// Root document of an `OpenCV` vocabulary file.
+#[derive(Clone, Debug, Deserialize)]
+pub struct VocabularyFile {
+    pub vocabulary: VocabularyStorage,
+}
+/// Value tree used to emit `OpenCV`'s flow-style storage format.
+///
+/// `serde-saphyr` deserializes straight into Rust types and ships no `Value`
+/// counterpart, so the writer keeps its own tree instead of routing the schema
+/// through a generic YAML value.
+#[derive(Clone, Debug)]
+pub enum StorageValue {
+    /// Mapping entries, kept in emission order.
+    Map(Vec<(String, StorageValue)>),
+    /// Sequence items, kept in emission order.
+    Seq(Vec<StorageValue>),
+    /// String scalar, emitted with JSON escaping (valid YAML double-quoted style).
+    Str(String),
+    /// Signed integer scalar.
+    Int(i64),
+    /// Unsigned integer scalar.
+    Uint(u64),
+    /// Floating point scalar, emitted with YAML 1.1 spellings for non-finite values.
+    Float(f64),
+    /// Boolean scalar.
+    Bool(bool),
+    /// Null scalar.
+    Null,
+}
+impl From<&VocabularyStorage> for StorageValue {
+    fn from(storage: &VocabularyStorage) -> Self {
+        Self::Map(vec![
+            ("k".to_string(), Self::Uint(storage.k as u64)),
+            ("L".to_string(), Self::Uint(storage.l as u64)),
+            (
+                "scoringType".to_string(),
+                Self::Int(i64::from(storage.scoring_type)),
+            ),
+            (
+                "weightingType".to_string(),
+                Self::Int(i64::from(storage.weighting_type)),
+            ),
+            (
+                "nodes".to_string(),
+                Self::Seq(storage.nodes.iter().map(Self::from).collect()),
+            ),
+            (
+                "words".to_string(),
+                Self::Seq(storage.words.iter().map(Self::from).collect()),
+            ),
+        ])
+    }
+}
+impl From<&NodeStorage> for StorageValue {
+    fn from(node: &NodeStorage) -> Self {
+        Self::Map(vec![
+            ("nodeId".to_string(), Self::Uint(u64::from(node.node_id))),
+            (
+                "parentId".to_string(),
+                Self::Uint(u64::from(node.parent_id)),
+            ),
+            ("weight".to_string(), Self::Float(node.weight)),
+            ("descriptor".to_string(), Self::Str(node.descriptor.clone())),
+        ])
+    }
+}
+impl From<&WordStorage> for StorageValue {
+    fn from(word: &WordStorage) -> Self {
+        Self::Map(vec![
+            ("wordId".to_string(), Self::Uint(u64::from(word.word_id))),
+            ("nodeId".to_string(), Self::Uint(u64::from(word.node_id))),
+        ])
+    }
+}
 /// # Errors
-/// Returns an error if reading/decompression fails, YAML is invalid, or the document root is
-/// not a mapping.
-pub fn read_storage(path: impl AsRef<Path>) -> StorageResult<serde_yaml::Mapping> {
+/// Returns an error if reading/decompression fails, YAML is invalid, or the document does not
+/// match the requested schema.
+pub fn read_storage<T: DeserializeOwned>(path: impl AsRef<Path>) -> StorageResult<T> {
     let path = path.as_ref();
     let file = std::fs::File::open(path)?;
     let mut input = String::new();
@@ -664,11 +733,11 @@ pub fn read_storage(path: impl AsRef<Path>) -> StorageResult<serde_yaml::Mapping
     }
     parse_storage(&input)
 }
-fn parse_storage(input: &str) -> StorageResult<serde_yaml::Mapping> {
+fn parse_storage<T: DeserializeOwned>(input: &str) -> StorageResult<T> {
     let yaml = input
         .strip_prefix("%YAML:1.0")
         .map_or(input, |s| s.trim_start_matches(['\r', '\n']));
-    Ok(serde_yaml::from_str(&normalize_opencv_flow_keys(yaml))?)
+    Ok(serde_saphyr::from_str(&normalize_opencv_flow_keys(yaml))?)
 }
 /// `OpenCV` emits flow-map separators without YAML's required following space.
 /// Normalize only separators, leaving quoted descriptors and scalar contents intact.
@@ -728,16 +797,11 @@ fn normalize_opencv_flow_keys(yaml: &str) -> String {
 
 /// `OpenCV`'s reader accepts flow containers but rejects indentless block sequences.
 /// Scalar strings use serde's JSON escaping, which is also valid in YAML flow style.
-fn write_opencv_flow(
-    value: &serde_yaml::Value,
-    out: &mut String,
-    depth: usize,
-) -> StorageResult<()> {
-    use serde_yaml::Value;
+fn write_opencv_flow(value: &StorageValue, out: &mut String, depth: usize) -> StorageResult<()> {
     match value {
-        Value::Mapping(map) => {
+        StorageValue::Map(entries) => {
             out.push('{');
-            for (index, (key, value)) in map.iter().enumerate() {
+            for (index, (key, value)) in entries.iter().enumerate() {
                 if index != 0 {
                     out.push(',');
                 }
@@ -747,15 +811,15 @@ fn write_opencv_flow(
                 out.push_str(": ");
                 write_opencv_flow(value, out, depth + 1)?;
             }
-            if !map.is_empty() {
+            if !entries.is_empty() {
                 out.push('\n');
                 out.push_str(&"  ".repeat(depth));
             }
             out.push('}');
         }
-        Value::Sequence(values) => {
+        StorageValue::Seq(items) => {
             out.push('[');
-            for (index, value) in values.iter().enumerate() {
+            for (index, value) in items.iter().enumerate() {
                 if index != 0 {
                     out.push(',');
                 }
@@ -763,30 +827,28 @@ fn write_opencv_flow(
                 out.push_str(&"  ".repeat(depth + 1));
                 write_opencv_flow(value, out, depth + 1)?;
             }
-            if !values.is_empty() {
+            if !items.is_empty() {
                 out.push('\n');
                 out.push_str(&"  ".repeat(depth));
             }
             out.push(']');
         }
-        Value::String(value) => out.push_str(&serde_json::to_string(value)?),
-        Value::Number(value) => match value.as_f64() {
-            Some(v) if v.is_nan() => out.push_str(".Nan"),
-            Some(v) if v == f64::INFINITY => out.push_str(".Inf"),
-            Some(v) if v == f64::NEG_INFINITY => out.push_str("-.Inf"),
-            _ => out.push_str(&value.to_string()),
-        },
-        Value::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
-        Value::Null => out.push('~'),
-        Value::Tagged(_) => {
-            return Err("tagged YAML values are not part of the DBoW2 storage schema".into());
-        }
+        StorageValue::Str(value) => out.push_str(&serde_json::to_string(value)?),
+        StorageValue::Float(value) if value.is_nan() => out.push_str(".Nan"),
+        StorageValue::Float(value) if *value == f64::INFINITY => out.push_str(".Inf"),
+        StorageValue::Float(value) if *value == f64::NEG_INFINITY => out.push_str("-.Inf"),
+        // `serde_json` renders finite floats with `ryu`, matching the shortest
+        // round-trip form `OpenCV` and `serde_yaml` both emit.
+        StorageValue::Float(value) => out.push_str(&serde_json::to_string(value)?),
+        StorageValue::Int(value) => out.push_str(&value.to_string()),
+        StorageValue::Uint(value) => out.push_str(&value.to_string()),
+        StorageValue::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
+        StorageValue::Null => out.push('~'),
     }
     Ok(())
 }
 
-fn write_opencv_key(key: &serde_yaml::Value, out: &mut String) -> StorageResult<()> {
-    let key = key.as_str().ok_or("OpenCV storage keys must be strings")?;
+fn write_opencv_key(key: &str, out: &mut String) -> StorageResult<()> {
     if key.is_empty() || !key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
         return Err("invalid OpenCV storage key".into());
     }
@@ -797,10 +859,13 @@ fn write_opencv_key(key: &serde_yaml::Value, out: &mut String) -> StorageResult<
 /// # Errors
 /// Returns an error for unsupported storage values or keys, or if file creation, compression,
 /// writing, or flushing fails.
-pub fn write_storage(path: impl AsRef<Path>, value: &serde_yaml::Mapping) -> StorageResult<()> {
+pub fn write_storage(path: impl AsRef<Path>, value: &StorageValue) -> StorageResult<()> {
     let path = path.as_ref();
     let mut yaml = String::from("%YAML:1.0\n---\n");
-    for (key, value) in value {
+    let StorageValue::Map(entries) = value else {
+        return Err("OpenCV storage root must be a mapping".into());
+    };
+    for (key, value) in entries {
         write_opencv_key(key, &mut yaml)?;
         yaml.push_str(": ");
         write_opencv_flow(value, &mut yaml, 1)?;
