@@ -45,6 +45,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::thread::sleep(Duration::from_secs(1));
     host_snapshot("idle_end");
     firefly_observability::pump_log_ipc(&ipc);
+    if std::env::args().any(|arg| arg == "--reduced") {
+        reduced_cases(|| firefly_observability::pump_log_ipc(&ipc));
+        firefly_observability::flush();
+        firefly_observability::pump_log_ipc(&ipc);
+        return Ok(());
+    }
     if std::env::args().any(|arg| arg == "--retries") {
         for points in [150, 500] {
             let fixture = fixtures::Fixture::window(8, points, 3);
@@ -122,6 +128,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     firefly_observability::flush();
     firefly_observability::pump_log_ipc(&ipc);
     Ok(())
+}
+
+fn reduced_cases(mut pump: impl FnMut()) {
+    for n in [15, 48, 96, 192, 315, 330, 384] {
+        let basis = DMatrix::from_fn(n, n, |r, c| (((r + 1) * (c + 3)) as f64).sin());
+        let matrix = basis.transpose() * basis + DMatrix::identity(n, n) * 0.5;
+        let expected = DVector::from_fn(n, |i, _| (i as f64).cos());
+        let rhs = &matrix * &expected;
+        for variant in [false, true] {
+            let actual = if variant {
+                schur::solve_reduced(matrix.clone(), &rhs).unwrap()
+            } else {
+                matrix.clone().cholesky().unwrap().solve(&rhs)
+            };
+            assert!((&actual - &expected).amax() < 1e-9);
+            assert!((&matrix * actual - &rhs).amax() < 1e-9 * (1.0 + rhs.amax()));
+        }
+        let run = |variant, count| {
+            let start = Instant::now();
+            for _ in 0..count {
+                let result = if variant {
+                    schur::solve_reduced(black_box(matrix.clone()), black_box(&rhs)).unwrap()
+                } else {
+                    black_box(matrix.clone())
+                        .cholesky()
+                        .unwrap()
+                        .solve(black_box(&rhs))
+                };
+                black_box(result);
+            }
+            start.elapsed().as_secs_f64() / f64::from(count)
+        };
+        let warmup = Instant::now();
+        while warmup.elapsed() < Duration::from_millis(300) {
+            run(false, 1);
+            run(true, 1);
+        }
+        let count = (0.02 / run(false, 1)).ceil().clamp(1.0, 10000.0) as u32;
+        for sample in 0..31 {
+            for variant in if sample % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let seconds = run(variant, count);
+                log::info!(
+                    "reduced_sample dimension={n} sample={sample} optimized={variant} seconds={seconds:.9} iterations={count}"
+                );
+                pump();
+            }
+        }
+        host_snapshot("reduced_case_end");
+        pump();
+    }
 }
 
 fn retry_case(fixture: &fixtures::Fixture, attempts: usize, mut pump: impl FnMut()) {

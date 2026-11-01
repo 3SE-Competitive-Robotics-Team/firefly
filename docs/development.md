@@ -508,6 +508,9 @@ Schur 微基准通过 `cargo bench -p firefly-okvis-x --bench schur --no-run` �
 结果记录为 `logs/schur-bench` 的 `retry_sample` / `retry_summary`，不代表在线拒绝率，
 也不能据此推算完整任务的加速比例。
 `cargo test --all-targets` 下该基准只执行数值自检，不启动 IPC 或计时采样。
+同一 Schur 基准加 `--reduced` 对照 nalgebra 与生产约化求解分派，包含矩阵复制、
+分解、工作区分配与回代；固定正定系统以已知解和法方程残差校验，交替采样写入
+`logs/schur-bench` 的 `reduced_sample`。该测量不包含因子求值、法方程组装或整帧处理。
 
 双目特征微基准源码为 `apps/okvis2-x/benches/image_proc.rs`，以
 `cargo bench -p firefly-okvis-x --bench image_proc --no-run` 预编译，记录进程启动后

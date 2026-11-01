@@ -306,6 +306,46 @@ fn unobserved_points_require_damping_and_preserve_global_order() {
 }
 
 #[test]
+fn reduced_factorization_matches_analytic_solution_and_rejects_invalid_systems() {
+    verify(&Fixture::window(12, 8, 3));
+    for n in [15, 47, 48, 49, 96, 192, 315, 330] {
+        for scale in [1e-6, 1.0, 1e6] {
+            // Symmetric strict diagonal dominance gives an independent SPD construction.
+            let mut matrix = DMatrix::from_fn(n, n, |r, c| (((r + 1) * (c + 1)) as f64).sin());
+            for r in 0..n {
+                matrix[(r, r)] = 0.5
+                    + (0..n)
+                        .filter(|&c| c != r)
+                        .map(|c| matrix[(r, c)].abs())
+                        .sum::<f64>();
+            }
+            matrix *= scale;
+            let expected = DVector::from_fn(n, |i, _| (i as f64).cos());
+            let rhs = &matrix * &expected;
+            let mut lower = matrix.clone();
+            for c in 0..n {
+                for r in 0..c {
+                    lower[(r, c)] = f64::NAN;
+                }
+            }
+            let actual = schur::solve_reduced(lower, &rhs).unwrap();
+            assert!((&actual - &expected).amax() < 1e-9);
+            assert!((&matrix * actual - &rhs).amax() < 1e-9 * (1.0 + rhs.amax()));
+        }
+        for diagonal in [0.0, -1.0, f64::NAN] {
+            let mut matrix = DMatrix::identity(n, n);
+            matrix[(n - 1, n - 1)] = diagonal;
+            assert!(schur::solve_reduced(matrix, &DVector::repeat(n, 1.0)).is_none());
+        }
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut rhs = DVector::repeat(n, 1.0);
+            rhs[n - 1] = invalid;
+            assert!(schur::solve_reduced(DMatrix::identity(n, n), &rhs).is_none());
+        }
+    }
+}
+
+#[test]
 fn singular_reduced_system_is_not_reported_as_a_valid_step() {
     let rows = [Row {
         residual: DVector::zeros(3),

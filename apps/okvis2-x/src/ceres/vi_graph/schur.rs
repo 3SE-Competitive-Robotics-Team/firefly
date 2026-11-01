@@ -400,8 +400,40 @@ struct PointBlock {
 type PointSolution = (DMatrix<f64>, Vector3<f64>);
 
 #[fastrace::trace]
-fn solve_reduced(matrix: DMatrix<f64>, rhs: &DVector<f64>) -> Option<DVector<f64>> {
-    Some(matrix.cholesky()?.solve(rhs))
+pub(super) fn solve_reduced(mut matrix: DMatrix<f64>, rhs: &DVector<f64>) -> Option<DVector<f64>> {
+    use faer::{
+        MatMut, MatRef, Par, Spec,
+        dyn_stack::{MemBuffer, MemStack},
+        linalg::cholesky::llt,
+    };
+    let n = matrix.nrows();
+    if n < 48 {
+        let solution = matrix.cholesky()?.solve(rhs);
+        return solution.iter().all(|x| x.is_finite()).then_some(solution);
+    }
+    // Both libraries consume the lower triangle. Borrow the column-major buffer
+    // and keep the factorization on the caller's thread, independent of faer's global pool.
+    let mut scratch = MemBuffer::new(llt::factor::cholesky_in_place_scratch::<f64>(
+        n,
+        Par::Seq,
+        Spec::default(),
+    ));
+    llt::factor::cholesky_in_place(
+        MatMut::from_column_major_slice_mut(matrix.as_mut_slice(), n, n),
+        llt::factor::LltRegularization::default(),
+        Par::Seq,
+        MemStack::new(&mut scratch),
+        Spec::default(),
+    )
+    .ok()?;
+    let mut solution = rhs.clone();
+    llt::solve::solve_in_place(
+        MatRef::from_column_major_slice(matrix.as_slice(), n, n),
+        MatMut::from_column_major_slice_mut(solution.as_mut_slice(), n, 1),
+        Par::Seq,
+        MemStack::new(&mut scratch),
+    );
+    solution.iter().all(|x| x.is_finite()).then_some(solution)
 }
 
 #[fastrace::trace]
