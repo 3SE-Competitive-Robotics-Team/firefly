@@ -1,6 +1,6 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
-// License notices and conditions are in ../../LICENSE.
+// License notices and conditions are indexed in docs/licenses/README.md.
 //! Original `calibration/vignette.h` and `src/calibration/vignette.cpp`.
 use crate::io::dataset_io::VioDatasetPtr;
 use firefly_calibration::aprilgrid::AprilGrid;

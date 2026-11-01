@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-4-Clause
 // Copyright (c) 2014 Paul Furgale, Jérôme Maye, Jörn Rehder and Thomas Schneider.
-// See LICENSE for the complete notice and advertising acknowledgement.
+// See docs/licenses/README.md for the complete notice and advertising acknowledgement.
 //! Original Gaussian.h/Gaussian.cc.
 #[must_use]
 pub fn make_gaussian_filter(sigma: f32, count: usize) -> Vec<f32> {

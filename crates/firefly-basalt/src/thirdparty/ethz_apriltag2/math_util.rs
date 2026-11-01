@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-4-Clause
 // Copyright (c) 2014 Paul Furgale, Jérôme Maye, Jörn Rehder and Thomas Schneider.
-// See LICENSE for the complete notice and advertising acknowledgement.
+// See docs/licenses/README.md for the complete notice and advertising acknowledgement.
 //! Original MathUtil.h/MathUtil.cc.
 #[must_use]
 pub fn distance_2d(a: (f32, f32), b: (f32, f32)) -> f32 {

@@ -1,6 +1,6 @@
 /*
  * DBoW2 — Copyright (c) 2011–2013 Dorian Galvez-Lopez.
- * License: see LICENSE.txt.
+ * License: see docs/licenses/crates/firefly-dbow2/LICENSE.txt.
  */
 //! `DBoW2` inverted file, direct file, and six database query paths.
 use super::{

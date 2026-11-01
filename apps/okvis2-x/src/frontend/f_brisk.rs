@@ -1,7 +1,7 @@
 /*
  * BRISK descriptor operations corresponding to FBrisk.cpp.
  * Authors: Dorian Galvez-Lopez, Stefan Leutenegger.
- * License: BSD, see external/DBoW2/LICENSE.txt.
+ * License: BSD, see docs/licenses/crates/firefly-dbow2/LICENSE.txt.
  */
 
 use nalgebra::DMatrix;

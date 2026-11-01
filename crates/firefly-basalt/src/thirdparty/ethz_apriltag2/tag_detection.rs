@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-4-Clause
 // Copyright (c) 2014 Paul Furgale, Jérôme Maye, Jörn Rehder and Thomas Schneider.
-// See LICENSE for the complete notice and advertising acknowledgement.
+// See docs/licenses/README.md for the complete notice and advertising acknowledgement.
 //! Original TagDetection.h/TagDetection.cc detection geometry.
 use super::math_util::distance_2d;
 use nalgebra::{Matrix3, Matrix4, Vector3};

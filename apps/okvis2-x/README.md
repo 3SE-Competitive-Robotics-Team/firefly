@@ -33,4 +33,4 @@ cargo run --locked --release -p firefly-okvis-x -- --config <offline-config.toml
 历史源码审计、兼容差异和已知边界保留在 [`AUDIT.md`](AUDIT.md)。
 SE01 窄窗口、S78 ICP cost-only 及其他既定行为选择保持原处理；地图工作线程的错误向上传播。
 当前在线深度后端使用针孔投影，原生窗口、神经网络及硬件 SDK 由外部能力实现。
-许可证及版权声明汇总于仓库主 README 末尾，本包 LICENSE 保留。
+许可证文本与第三方声明见[许可证索引](../../docs/licenses/README.md)。

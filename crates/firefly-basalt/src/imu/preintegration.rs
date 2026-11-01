@@ -1,6 +1,6 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause AND MPL-2.0
-// License notices and conditions are in ../../LICENSE and next to the LDLT helper.
+// License notices and conditions are indexed in docs/licenses/README.md; see also the notice next to the LDLT helper.
 //! Translation of `include/basalt/imu/preintegration.h` at
 //! `aa441ba3e51050c47ba1902537792a2e4db7e43d`.
 

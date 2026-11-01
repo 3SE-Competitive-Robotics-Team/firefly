@@ -1,6 +1,6 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
-// See the crate LICENSE-BSD-3-Clause.
+// See docs/licenses/README.md.
 //! Original Basalt `vi_estimator/ba_base.h` and `ba_base.cpp`, revision
 //! `0f3b2b52c807f70ff4e2973ce253c73329eea7bc`.
 

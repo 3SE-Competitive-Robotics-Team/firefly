@@ -7,7 +7,7 @@
  * Copyright (c) 2025, Mobile Robotics Lab / Technical University of Munich
  * and ETH Zurich
  *
- * SPDX-License-Identifier: BSD-3-Clause, see LICENSE file for details
+ * SPDX-License-Identifier: BSD-3-Clause, see docs/licenses/README.md
  */
 
 //! Distortion and inverse-map formulas corresponding to `RadialTangentialDistortion.hpp`.

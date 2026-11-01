@@ -1,6 +1,6 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
-// License notices and conditions are in ../../LICENSE.
+// License notices and conditions are indexed in docs/licenses/README.md.
 //! Original Basalt `vi_estimator/nfr_mapper.h` and `src/vi_estimator/nfr_mapper.cpp`.
 use super::{
     ba_base::BundleAdjustmentBase,

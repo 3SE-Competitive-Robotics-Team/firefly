@@ -1,6 +1,6 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
-// License notices and conditions are in ../../LICENSE.
+// License notices and conditions are indexed in docs/licenses/README.md.
 //! Translation of `include/basalt/imu/imu_types.h` at
 //! `aa441ba3e51050c47ba1902537792a2e4db7e43d`.
 //! Local increments are `[translation, rotation, velocity, gyro_bias, accel_bias]`.

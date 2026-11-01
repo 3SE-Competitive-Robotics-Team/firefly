@@ -1,6 +1,6 @@
 /*
  * DBoW2 — Copyright (c) 2011–2013 Dorian Galvez-Lopez.
- * License: see LICENSE.txt.
+ * License: see docs/licenses/crates/firefly-dbow2/LICENSE.txt.
  */
 //! Hierarchical k-means vocabulary and `OpenCV` `FileStorage` YAML schema.
 //! YAML parsing uses `serde_yaml`; the `OpenCV` `%YAML:1.0` directive is a format envelope.

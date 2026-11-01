@@ -1,6 +1,6 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
-// Full license: ../../LICENSE.
+// License notices and conditions are indexed in docs/licenses/README.md.
 //! Non-GUI control flow from original `calibration/cam_calib.h/.cpp`.
 //! The original `show_gui=false` path joins corner detection before returning;
 //! this implementation performs that work synchronously. Pangolin rendering,

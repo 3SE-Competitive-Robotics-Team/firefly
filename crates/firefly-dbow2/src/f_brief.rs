@@ -3,7 +3,7 @@
  * Date: November 2011
  * Author: Dorian Galvez-Lopez
  * Description: functions for BRIEF descriptors
- * License: see the LICENSE.txt file
+ * License: see the docs/licenses/crates/firefly-dbow2/LICENSE.txt file
  *
  */
 

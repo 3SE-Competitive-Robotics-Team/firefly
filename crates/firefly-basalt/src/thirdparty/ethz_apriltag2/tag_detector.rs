@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-4-Clause
 // Copyright (c) 2014 Paul Furgale, Jérôme Maye, Jörn Rehder and Thomas Schneider.
-// See LICENSE for the complete notice and advertising acknowledgement.
+// See docs/licenses/README.md for the complete notice and advertising acknowledgement.
 //! Original TagDetector.h/TagDetector.cc nine-stage detector.
 use super::{
     edge::Edge,

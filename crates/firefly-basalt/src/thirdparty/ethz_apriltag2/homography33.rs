@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-4-Clause
 // Copyright (c) 2014 Paul Furgale, Jérôme Maye, Jörn Rehder and Thomas Schneider.
-// See LICENSE for the complete notice and advertising acknowledgement.
+// See docs/licenses/README.md for the complete notice and advertising acknowledgement.
 //! Original `Homography33.h/.cc`, with the upstream enabled `STABLE_H` configuration.
 use nalgebra::Matrix3;
 use purecv::{

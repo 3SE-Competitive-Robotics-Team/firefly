@@ -1,6 +1,6 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
-// See LICENSE-BSD-3-Clause. Native archive order from official imu_types.h.
+// See docs/licenses/README.md. Native archive order from official imu_types.h.
 use super::{PoseStateWithLin, PoseVelBiasStateWithLin};
 use crate::imu::imu_types::PoseState;
 use crate::imu::imu_types::PoseVelBiasState;

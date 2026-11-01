@@ -1,6 +1,6 @@
 // Copyright (c) 2018-2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
-// License notices and conditions are in ../LICENSE.
+// License notices and conditions are indexed in docs/licenses/README.md.
 use nalgebra::{Isometry3, Vector2};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};

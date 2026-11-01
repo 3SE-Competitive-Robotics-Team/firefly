@@ -206,7 +206,7 @@ pub fn search(gyro: RotationSamples, mocap: RotationSamples, max_offset_s: f64) 
 // Eigen JacobiSVD real 3-column specialization, MPL-2.0.
 // Copyright (C) 2009-2010 Benoit Jacob <jacob.benoit.1@gmail.com>
 // Copyright (C) 2013-2016 Gael Guennebaud <gael.guennebaud@inria.fr>
-// See LICENSE-MPL-2.0. The polynomial matrix is always full column rank.
+// See docs/licenses/README.md. The polynomial matrix is always full column rank.
 #[expect(
     clippy::many_single_char_names,
     clippy::too_many_lines,

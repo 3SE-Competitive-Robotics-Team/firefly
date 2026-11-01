@@ -1,6 +1,6 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
-// License notices and conditions are in ../../LICENSE.
+// License notices and conditions are indexed in docs/licenses/README.md.
 //! Original `thirdparty/apriltag/include/basalt/utils/apriltag.h` and wrapper cpp.
 use crate::thirdparty::ethz_apriltag2::{
     tag_detector::TagDetector, tag_family::TagFamily, tag36h11::CODES,

@@ -1,6 +1,6 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
-// License notices and conditions are in ../../LICENSE.
+// License notices and conditions are indexed in docs/licenses/README.md.
 //! Native Cereal overloads from original `calibration_helper.h`.
 use crate::{io::marg_data_io::binary, utils::common_types::CerealBinary};
 use firefly_calibration::observation::{CalibCornerData, CalibInitPoseData};

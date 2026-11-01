@@ -60,7 +60,7 @@ pub fn read_poses(input: impl BufRead) -> io::Result<Vec<Isometry3<f64>>> {
     Ok(poses)
 }
 
-// Eigen Quaternion matrix construction, MPL-2.0; see LICENSE-MPL-2.0.
+// Eigen Quaternion matrix construction, MPL-2.0; see the license index.
 // Copyright (C) 2008-2010 Gael Guennebaud <gael.guennebaud@inria.fr>
 // Copyright (C) 2009 Mathieu Gautier <mathieu.gautier@cea.fr>
 fn matrix_quaternion(matrix: &Matrix3<f64>) -> Quaternion<f64> {

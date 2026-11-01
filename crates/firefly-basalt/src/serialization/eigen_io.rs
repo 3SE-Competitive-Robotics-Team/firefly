@@ -1,6 +1,6 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
-// Full license: ../../LICENSE.
+// License notices and conditions are indexed in docs/licenses/README.md.
 //! Original `serialization/eigen_io.h`: row-major coefficient archives, regardless
 //! of matrix storage order. Cereal native binary uses native scalar byte order.
 //! Fully dynamic matrix JSON intentionally retains the upstream non-roundtrip

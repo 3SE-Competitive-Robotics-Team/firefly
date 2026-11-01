@@ -1,7 +1,7 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause AND MIT
 // Sophus SE(3) adapter: Copyright 2011-2017 Hauke Strasdat,
-// 2012-2017 Steven Lovegrove. See the MIT notice in ../../LICENSE.
+// 2012-2017 Steven Lovegrove. See the MIT notice in the license index.
 //! Typed-knot translation of `spline/ceres_spline_helper.h` at
 //! `aa441ba3e51050c47ba1902537792a2e4db7e43d`.
 use crate::utils::sophus_utils::{hat, so3_exp, so3_inverse, so3_log, so3_matrix, so3_product};

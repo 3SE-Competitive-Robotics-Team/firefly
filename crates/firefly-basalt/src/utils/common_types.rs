@@ -3,7 +3,7 @@
 // Cereal bitset encoding: Copyright (c) 2014, Randolph Voorhies, Shane Grant.
 // Eigen/Sophus archive layout: Copyright (c) 2019, Vladyslav Usenko and Nikolaus Demmel.
 // Source: VladyslavUsenko/basalt 0f3b2b52c807f70ff4e2973ce253c73329eea7bc,
-// include/basalt/utils/common_types.h. See the crate LICENSE-BSD-3-Clause.
+// include/basalt/utils/common_types.h. See docs/licenses/README.md.
 
 use nalgebra::{Isometry3, Vector2, Vector3, Vector4};
 use serde::{Deserialize, Serialize};
