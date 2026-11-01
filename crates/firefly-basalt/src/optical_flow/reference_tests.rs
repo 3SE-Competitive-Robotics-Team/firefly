@@ -1,4 +1,4 @@
-//! Independent C++ oracle: see `tests/reference/optical_flow.cpp`.
+//! Regression fixtures for optical-flow arithmetic and tracker behavior.
 use super::{
     patch::{OpticalFlowPatch, PatchScalar},
     patterns::*,

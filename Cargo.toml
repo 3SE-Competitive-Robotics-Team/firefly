@@ -7,8 +7,6 @@ resolver = "3"
 firefly-calibration = { path = "crates/firefly-calibration" }
 firefly-basalt = { path = "crates/firefly-basalt" }
 firefly-rootslam-mapping = { path = "crates/firefly-rootslam-mapping" }
-crossbeam-channel = "0.5.17"
-rosbag = "0.6.3"
 firefly-okvis-x = { path = "apps/okvis2-x" }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 png = "0.18.1"

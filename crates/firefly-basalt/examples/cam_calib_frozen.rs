@@ -5,24 +5,25 @@ use std::{fs::File, path::Path};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
     assert!(
-        (5..=6).contains(&args.len()),
-        "bag grid source-cache output-directory [initial-calibration]"
+        (6..=7).contains(&args.len()),
+        "dataset-type dataset grid source-cache output-directory [initial-calibration]"
     );
+    let dataset_type = &args[1];
     let mut source = CamCalib::new(
-        Path::new(&args[1]),
-        "bag",
         Path::new(&args[2]),
+        dataset_type,
         Path::new(&args[3]),
+        Path::new(&args[4]),
         "calib-cam",
         1,
         vec!["ds".into(); 2],
     )?;
     source.load_dataset()?;
     let mut target = CamCalib::new(
-        Path::new(&args[1]),
-        "bag",
         Path::new(&args[2]),
-        Path::new(&args[4]),
+        dataset_type,
+        Path::new(&args[3]),
+        Path::new(&args[5]),
         "calib-cam",
         1,
         vec!["ds".into(); 2],
@@ -33,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     target.calib_init_poses = source.calib_init_poses;
     target.init_cam_intrinsics()?;
     target.init_cam_extrinsics()?;
-    if let Some(path) = args.get(5) {
+    if let Some(path) = args.get(6) {
         #[derive(serde::Deserialize)]
         struct Archive {
             value0: firefly_calibration::calibration::Calibration<f64>,
@@ -44,12 +45,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     target.init_optimization()?;
     let initial = target.calib_opt.as_ref().unwrap().calib.as_ref().unwrap();
     serde_json::to_writer(
-        File::create(Path::new(&args[4]).join("initial_calibration.json"))?,
+        File::create(Path::new(&args[5]).join("initial_calibration.json"))?,
         &serde_json::json!({"value0":initial}),
     )?;
     let projections: Vec<_> = target.reprojected_vignette.iter().map(|(id, data)| serde_json::json!({"time":id.frame_id, "camera":id.cam_id, "points":data.corners_proj.iter().map(|p|[p.x,p.y]).collect::<Vec<_>>(), "valid":data.corners_proj_success})).collect();
     serde_json::to_writer(
-        File::create(Path::new(&args[4]).join("initial_vignette_projections.json"))?,
+        File::create(Path::new(&args[5]).join("initial_vignette_projections.json"))?,
         &projections,
     )?;
     while !target.optimize_with_param(false, None)? {}

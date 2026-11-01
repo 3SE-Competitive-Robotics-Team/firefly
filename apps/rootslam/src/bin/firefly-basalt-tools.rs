@@ -864,7 +864,7 @@ mod tests {
     #[test]
     fn zero_imu_noise_is_rejected_before_optimizer_construction() {
         let options: Options = serde_json::from_value(serde_json::json!({
-            "task":"calibrate-imu", "dataset_path":"dataset", "dataset_type":"bag",
+            "task":"calibrate-imu", "dataset_path":"dataset", "dataset_type":"euroc",
             "aprilgrid":"grid.json", "result_path":"calibration",
             "imu_noise":[0.,0.000_282,0.001,0.0001]
         }))
@@ -875,7 +875,7 @@ mod tests {
     #[test]
     fn calibration_configuration_reaches_original_defaults() {
         let options: Options = serde_json::from_value(serde_json::json!({
-            "task":"calibrate-imu", "dataset_path":"dataset", "dataset_type":"bag",
+            "task":"calibrate-imu", "dataset_path":"dataset", "dataset_type":"euroc",
             "aprilgrid":"grid.json", "result_path":"calibration"
         }))
         .unwrap();
@@ -890,7 +890,7 @@ mod tests {
 
     #[test]
     fn time_alignment_requires_paired_calibrations_and_accepts_default_range() {
-        let mut value = serde_json::json!({"task":"time-align", "dataset_path":"dataset", "dataset_type":"bag", "output":"offset.json"});
+        let mut value = serde_json::json!({"task":"time-align", "dataset_path":"dataset", "dataset_type":"euroc", "output":"offset.json"});
         serde_json::from_value::<Options>(value.clone())
             .unwrap()
             .validate()

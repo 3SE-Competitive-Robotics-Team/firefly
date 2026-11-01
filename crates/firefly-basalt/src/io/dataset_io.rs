@@ -121,7 +121,6 @@ impl DatasetIoFactory {
             "euroc" => Ok(Box::new(super::dataset_io_euroc::EurocIo::new(
                 load_mocap_as_gt,
             ))),
-            "bag" => Ok(Box::new(super::dataset_io_rosbag::RosbagIo::default())),
             "uzh" => Ok(Box::new(super::dataset_io_uzh::UzhIo::default())),
             "kitti" => Ok(Box::new(super::dataset_io_kitti::KittiIo::default())),
             _ => Err(firefly_error::Error::new(

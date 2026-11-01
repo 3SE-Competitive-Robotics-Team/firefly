@@ -93,7 +93,7 @@ impl Options {
             )
             .with_operation("rootslam.config.validate"));
         }
-        if !["euroc", "bag", "uzh", "kitti"].contains(&self.dataset_type.as_str()) {
+        if !["euroc", "uzh", "kitti"].contains(&self.dataset_type.as_str()) {
             return Err(
                 Error::new(ErrorKind::InvalidArgument, "Unsupported dataset_type")
                     .with_operation("rootslam.config.validate"),

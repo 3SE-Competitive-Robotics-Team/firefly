@@ -54,7 +54,7 @@ fn setup() -> (CamCalib, Cache) {
     std::fs::create_dir_all(&cache.0).unwrap();
     let mut controller = CamCalib::new(
         Path::new(""),
-        "bag",
+        "euroc",
         &root.join("tests/reference/cam_calib_grid.json"),
         &cache.0,
         "probe",
@@ -215,61 +215,4 @@ fn original_controller_camera_graph_projections_and_stats() {
             .flatten()
             .sum::<usize>()
     );
-}
-
-#[test]
-fn original_controller_cache_and_image_subsampling() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let cache = Cache(root.join("../../logs").join(format!(
-        "basalt-cam-calib-cache-test-{}",
-        std::process::id()
-    )));
-    std::fs::create_dir_all(&cache.0).unwrap();
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("reference/calibration_archive.json")).unwrap();
-    let decode = |key: &str| {
-        fixture[key]
-            .as_str()
-            .unwrap()
-            .as_bytes()
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
-            .collect::<Vec<_>>()
-    };
-    let mut corners = decode("corner_map");
-    corners.extend_from_slice(&0_u64.to_ne_bytes());
-    std::fs::write(cache.0.join("probe_detected_corners.cereal"), corners).unwrap();
-    std::fs::write(cache.0.join("probe_init_poses.cereal"), decode("pose_map")).unwrap();
-    let mut controller = CamCalib::new(
-        &root.join("tests/reference/dataset_rosbag_none.bag"),
-        "bag",
-        &root.join("tests/reference/cam_calib_grid.json"),
-        &cache.0,
-        "probe",
-        2,
-        vec!["pinhole".into(); 2],
-    )
-    .unwrap();
-    controller.load_dataset().unwrap();
-    assert_eq!(
-        controller.calib_corners[&TimeCamId::new(123, 1)].corner_ids,
-        [-1, 321]
-    );
-    assert_eq!(
-        controller.calib_init_poses[&TimeCamId::new(123, 1)].num_inliers,
-        17
-    );
-    assert_eq!(
-        *controller
-            .vio_dataset
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .image_timestamps(),
-        [100_000_000_000, 100_002_000_000]
-    );
-    assert!(controller.calib_corners_rejected.is_empty());
 }

@@ -12,7 +12,6 @@ categories = ["algorithms", "science"]
 
 [dependencies]
 image.workspace = true
-rosbag.workspace = true
 firefly-error.workspace = true
 firefly-opengv.workspace = true
 purecv.workspace = true
