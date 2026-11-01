@@ -2,7 +2,7 @@
 
 uv run pytest tests/system/test_imu_flight.py -q -k imu_hover
 需要图形会话、RMUC 资产和 release render/fc/ffctl 与 VIO；`FIREFLY_VIO_PROCESS`
-可选 `firefly-okvis-x`（默认）或 `firefly-rootslam-live`。运行前须停止其他闭环进程。
+可选 `firefly-okvis-x`（默认）或 `firefly-rootslam`。运行前须停止其他闭环进程。
 """
 from dataclasses import asdict
 import os
@@ -32,7 +32,7 @@ def test_imu_flight(case, flight_directory, flight_report):
         ("estimator_fallback", mission.estimator_fallback), ("degraded_support", mission.degraded_support),
     ])
     vio_process = os.environ.get("FIREFLY_VIO_PROCESS", "firefly-okvis-x")
-    if vio_process not in {"firefly-okvis-x", "firefly-rootslam-live"}:
+    if vio_process not in {"firefly-okvis-x", "firefly-rootslam"}:
         raise ValueError(f"unsupported VIO process: {vio_process}")
     result = mission.run_phases(phases, ("render", vio_process, "fc"))
     if case == "imu_hover":

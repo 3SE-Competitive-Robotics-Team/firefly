@@ -13,28 +13,11 @@ struct Config {
 }
 
 fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
-    let Some(flag) = args.next() else {
-        return Err(cli_error(
-            "Usage: firefly-rootslam-live --config <path.toml>",
-        ));
-    };
-    if flag == "--help" || flag == "-h" {
-        writeln!(std::io::stdout(), "firefly-rootslam-live --config <path.toml>\nSubscribes to Render stereo and Sim IMU, publishes VIO to FC.").map_err(|e| Error::from(e).with_operation("rootslam.live.help"))?;
-        return Ok(());
-    }
-    if flag != "--config" {
-        return Err(cli_error(
-            "Usage: firefly-rootslam-live --config <path.toml>",
-        ));
-    }
-    let path = args
-        .next()
-        .ok_or_else(|| cli_error("Missing config path"))?;
-    if args.next().is_some() {
-        return Err(cli_error("Unexpected argument"));
-    }
-    let config: Config = firefly_config::startup(path, firefly_observability::init, |_| Ok(()))?;
+    let config: Config = firefly_config::startup(
+        firefly_config::paths::config("firefly-rootslam.toml"),
+        firefly_observability::init,
+        |_| Ok(()),
+    )?;
     let stop = Arc::new(AtomicBool::new(false));
     let mut registrations = Vec::new();
     for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
@@ -44,7 +27,7 @@ fn main() -> Result<()> {
         );
     }
     let node = firefly_pubsub::node::create_node()?;
-    let log_ipc = firefly_observability::init_ipc(&node, "rootslam-live");
+    let log_ipc = firefly_observability::init_ipc(&node, "rootslam");
     std::thread::scope(|scope| {
         let worker = scope.spawn(|| run(&config.online, &stop));
         while !worker.is_finished() {
@@ -53,7 +36,10 @@ fn main() -> Result<()> {
         }
         let result = worker
             .join()
-            .map_err(|_| cli_error("Online VIO worker panicked"))
+            .map_err(|_| {
+                Error::new(ErrorKind::Internal, "online VIO worker panicked")
+                    .with_operation("rootslam.live.worker")
+            })
             .and_then(|r| r);
         firefly_observability::pump_log_ipc(&log_ipc);
         if let Err(error) = &result {
@@ -68,8 +54,4 @@ fn main() -> Result<()> {
         signal_hook::low_level::unregister(registration);
     }
     Ok(())
-}
-
-fn cli_error(message: &str) -> Error {
-    Error::new(ErrorKind::InvalidArgument, message).with_operation("rootslam.live.cli")
 }

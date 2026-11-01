@@ -8,11 +8,11 @@ The source baseline and numerical fixtures are described in
 This application is under construction. A complete RootSLAM system, trajectory
 equivalence, and performance reproduction have not been verified.
 
-Run with `cargo run --release -p firefly-rootslam -- --config <path.toml>`.
+Run the dataset pipeline with `cargo run --release -p firefly-rootslam --bin firefly-rootslam-dataset -- --config <path.toml>`.
 The [dataset configuration](../../configs/rootslam.toml) uses an original Basalt checkout beside
 this workspace. After adjusting its dataset path, start
 `uv run firefly-viz --save logs/rootslam.rrd` in another terminal and run
-`RUST_LOG=info cargo run --release -p firefly-rootslam`
+`RUST_LOG=info cargo run --release -p firefly-rootslam --bin firefly-rootslam-dataset`
 from the workspace root.
 Configuration includes `dataset_path`, `dataset_type`, `camera_calibration`, and
 optional `vio_config`, `trajectory`, and `metrics_path`. Calibration uses the
@@ -107,25 +107,13 @@ Export that matching problem, result and optional final trajectory to Rerun with
 This offline recording contains optimized landmarks, keyframes, graph edges and
 convergence metadata; live `firefly-viz` captures runtime diagnostics separately.
 
-`firefly-basalt-live` provides headless T265 acquisition with the optional
-`realsense` feature. Build against the shared SDK 2.51.x installation described
-in [the callback bridge](../../crates/firefly-basalt-realsense/README.md), then run
-`cargo run --release -p firefly-rootslam --features realsense --bin firefly-basalt-live -- --config <path.toml>`.
-Select `task = "vio"` with `trajectory` for the real optical-flow and VO/VIO
-pipeline, or `task = "record"` with `dataset_root` for the original stereo,
-exposure, IMU and optional device-pose dataset layout. Other options and defaults
-are defined by [live Options](src/live.rs); `use_imu = false` selects VO.
-SIGINT/SIGTERM requests producer stop, queue drain and worker joins. Diagnostics
-continue through log IPC during shutdown. Hardware reset is an explicit option.
-The CLI's no-device failure and injected VO/VIO/recording lifecycle tests have
-run, but T265 acquisition itself has not been tested on connected hardware.
-
-For the simulated closed loop, `firefly-rootslam-live` subscribes to Render's
+For the simulated closed loop, `firefly-rootslam` subscribes to Render's
 `Firefly/CameraLeft` and `CameraRight` plus Sim's `Firefly/Imu`. It pairs stereo
 frames within the OKVIS time tolerance and waits for IMU coverage before passing
 them to Basalt. Its rig calibration comes from the shared Firefly rig geometry.
 It publishes `Firefly/Odometry`, `Firefly/CorrectedOdometry`,
 `Firefly/Navigation`, and posterior `Firefly/VioAttitude` for FC using
-[`configs/rootslam-live.toml`](../../configs/rootslam-live.toml). Start it in place
-of `firefly-okvis-x` for simulation; the hover harness accepts
-`FIREFLY_VIO_PROCESS=firefly-rootslam-live` with the same scoring thresholds.
+[`configs/firefly-rootslam.toml`](../../configs/firefly-rootslam.toml). Start it in place
+of `firefly-okvis-x` for simulation with `cargo run --release -p firefly-rootslam`.
+The hover harness accepts `FIREFLY_VIO_PROCESS=firefly-rootslam` with the same
+scoring thresholds.

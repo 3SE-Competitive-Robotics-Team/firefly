@@ -456,15 +456,14 @@ static 预览不进入文件和正常/异常退出时的完整性。构建、单
 职责及飞控接线边界见 [系统架构](architecture.md#basalt-与-rootslam-独立应用)。
 
 ```bash
-cargo run --release -p firefly-rootslam
+cargo run --release -p firefly-rootslam --bin firefly-rootslam-dataset
 cargo test -p firefly-calibration -p firefly-basalt -p firefly-rootslam-mapping -p firefly-rootslam --all-targets
 cargo clippy -p firefly-calibration -p firefly-basalt -p firefly-rootslam-mapping -p firefly-rootslam --all-targets -- -D warnings
 uv run python -B -m unittest discover -s apps/rootslam/tests -p test_export_rrd.py
 ```
 
 默认测试使用随源码保留的独立 C++ 参考夹具；外部数据集、完整上游程序和设备测试
-各有显式运行条件，忽略项不算通过。可选 `realsense` feature 的 SDK 条件见
-[桥接 crate](../crates/firefly-basalt-realsense/README.md)。数值阈值以测试源码为准，
+各有显式运行条件，忽略项不算通过。数值阈值以测试源码为准，
 局部单测、数据集轨迹等价、论文性能复现与整机验收分别报告。
 
 ### OKVIS 算法与通讯专项

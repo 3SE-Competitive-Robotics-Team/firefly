@@ -47,19 +47,18 @@ flowchart LR
 
 ### Basalt 与 RootSLAM 独立应用
 
-`apps/rootslam` 提供数据集运行、Basalt 无界面工具和可选 T265 输入；默认飞控链路仍由
+`apps/rootslam` 提供数据集运行和 Basalt 无界面工具；默认飞控链路仍由
 OKVIS 提供。`firefly-calibration` 承载相机模型、图像缓冲区、标定参数、标定目标检测
 和初始化基础设施；`firefly-basalt` 承载原版 Basalt 的 IMU 预积分、图像金字塔、位姿
 样条、光流、局部 VO/VIO、边缘化、离线 mapper 及标定求解控制器。基础模块按职责归入
 这两个 crate，不再维护独立的 headers crate 或仅作转发的兼容层。
-`firefly-basalt-realsense` 隔离可选 SDK 与回调生命周期。
 
 `firefly-rootslam-mapping` 在局部估计之上实现持久地图、地点检索、几何回环验证、
 地图融合、位姿图优化及平方根全局 BA。在线 Basalt VO/VIO 本身没有地点识别回环；
 RootSLAM 应用在线运行回环与位姿图修正，在输入结束后运行全局 BA。
 实现依据原版 Basalt 源码及 RootSLAM 论文，不能据此宣称复现论文的精度或性能。
 
-`firefly-rootslam-live` 已把 Render 双目和 Sim IMU 接入 Basalt VIO，并向 FC 发布
+`firefly-rootslam` 已把 Render 双目和 Sim IMU 接入 Basalt VIO，并向 FC 发布
 `Odometry`、`CorrectedOdometry`、`Navigation` 和后验 IMU 预测 `VioAttitude`；当前
 `CorrectedOdometry` 与局部里程计相同，导航变换为恒等变换，在线位姿图修正尚未反馈到
 输出。真实板载相机和 IMU 驱动也未接入这条入口。回环修正应通过 map←odom 与地图版本

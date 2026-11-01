@@ -10,15 +10,8 @@ readme = "README.md"
 keywords = ["vision", "robotics", "slam"]
 categories = ["algorithms", "science"]
 
-[features]
-realsense = ["dep:firefly-basalt-realsense"]
-
 [dependencies]
-crossbeam-channel.workspace = true
-firefly-basalt-realsense = { workspace = true, optional = true, features = ["sdk"] }
 image.workspace = true
-webpx.workspace = true
-libwebp-sys.workspace = true
 rosbag.workspace = true
 firefly-error.workspace = true
 firefly-opengv.workspace = true

@@ -443,17 +443,6 @@ file flag. The mapper probe takes its JSON output path; the naive probe takes
 its dedicated fixture directory and output JSON path. The original saver
 recreates that directory, so pass only the dedicated fixture path.
 
-`rs_t265.cpp` is a hardware-free extraction of arithmetic from official
-`device/rs_t265.cpp` at `0f3b2b52`: acceleration interpolation, explicit pose
-normalization followed by Sophus normalization, and column-major camera
-extrinsics conversion. It was compiled with GCC, `-O3 -march=native`, and the
-official release vcpkg Eigen 5 / Sophus headers. Its executable writes
-`rs_t265.json` (one output-path argument). Rust tests additionally check queue
-endpoints, unmatched stereo timestamps, frame skipping, exposure units, image
-conversion and calibration parameter ordering. This is not a device or SDK
-callback oracle. No T265 was connected, and acquisition/lifetime behavior has
-not been hardware-validated.
-
 `mapper.cpp` and `opt_flow.cpp` include the original executable sources at
 `0f3b2b52` with renamed `main`, and invoke their original trajectory writer and
 result collector. Their JSON fixtures were produced by GCC C++17, `-O0
@@ -488,20 +477,6 @@ threshold in intermediate optimization states, so these states are diagnostic
 outputs rather than deterministic numeric oracles. It writes diagnostics to
 `logs/basalt_mapper_frozen_rust.json`; intermediate and final comparisons are
 reported separately without changing the existing unit-test tolerances.
-
-`record_t265.cpp` includes original `rs_t265_record.cpp`, invokes the original
-exposure/image/IMU/pose workers with injected payloads, and uses OpenCV 4.12's
-actual WebP encoder for qualities 0, 90, 100 and 101. Build flags/libraries are
-the same as the mapper probe, additionally including the official `opencv4`
-headers. Run it in `basalt/build/results/record-t265-reference`. The JSON embeds
-CSV payload rows, encoded images and decoded pixels. Rust tests require exact
-CSV rows and exact WebP bytes against this pinned baseline, including the
-lossless case. `webpx` 0.4.1 / `libwebp-sys` 0.14.2 supplies the matching vendored
-libwebp 1.6.0; codec version is asserted. Earlier libwebp 1.3.1 produced a
-different lossless bitstream and was replaced without weakening the assertion.
-Thread tests additionally cover queue draining, concurrent stop, retained input
-handles, manual exposure layout, Drop and write failure. This is payload and
-disk-I/O validation, not validation with connected T265 hardware.
 
 `vio_sim_trajectory.cpp` calls the complete original simulation executable's
 renamed `main` and then exports retained poses at all input timestamps to

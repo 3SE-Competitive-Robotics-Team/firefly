@@ -123,13 +123,13 @@ fn main() -> Result<()> {
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         if argument == "--help" || argument == "-h" {
-            writeln!(std::io::stdout(),"firefly-rootslam --config <path.toml>\nRuns the translated original Basalt dataset pipeline.").map_err(io_error)?;
+            writeln!(std::io::stdout(),"firefly-rootslam-dataset --config <path.toml>\nRuns the translated original Basalt dataset pipeline.").map_err(io_error)?;
             return Ok(());
         }
         if argument != "--config" {
             return Err(Error::new(
                 ErrorKind::InvalidArgument,
-                "Usage: firefly-rootslam --config <path.toml>",
+                "Usage: firefly-rootslam-dataset --config <path.toml>",
             )
             .with_operation("rootslam.cli"));
         }

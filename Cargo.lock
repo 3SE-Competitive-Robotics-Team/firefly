@@ -2832,12 +2832,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "enough"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "877362cb7b70d1c617f0cd3c67708bd58d894a86af5104018e2c10ebaee3c02f"
-
-[[package]]
 name = "enum-as-inner"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3114,13 +3108,10 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 name = "firefly-basalt"
 version = "0.1.0"
 dependencies = [
- "crossbeam-channel",
- "firefly-basalt-realsense",
  "firefly-calibration",
  "firefly-error",
  "firefly-opengv",
  "image",
- "libwebp-sys",
  "log",
  "nalgebra",
  "nix 0.31.3",
@@ -3131,16 +3122,6 @@ dependencies = [
  "rosbag",
  "serde",
  "serde_json",
- "webpx",
-]
-
-[[package]]
-name = "firefly-basalt-realsense"
-version = "0.1.0"
-dependencies = [
- "crossbeam-channel",
- "firefly-error",
- "realsense-sys",
 ]
 
 [[package]]
@@ -3387,7 +3368,6 @@ dependencies = [
 name = "firefly-rootslam"
 version = "0.1.0"
 dependencies = [
- "crossbeam-channel",
  "firefly-basalt",
  "firefly-base",
  "firefly-calibration",
@@ -4544,12 +4524,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "imgref"
-version = "1.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e44b0a4eaa4c82f441d50a963f2d5f05a787240aeee097597033e72accfd22f"
-
-[[package]]
 name = "imu"
 version = "0.1.0"
 dependencies = [
@@ -4976,17 +4950,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c8469b4a23b962c1396b9b451dda50ef5b283e8dd309d69033475fa9b334324"
 dependencies = [
  "libc",
- "pkg-config",
-]
-
-[[package]]
-name = "libwebp-sys"
-version = "0.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "375ca3fbd6d89769361c5d505c9da676eb4128ee471b9fd763144d377a2d30e6"
-dependencies = [
- "cc",
- "glob",
  "pkg-config",
 ]
 
@@ -6779,15 +6742,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "realsense-sys"
-version = "2.44.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4737656f3194a68b2c96d601bdfedfd9af8c81cab798dbe04f9bd67ad275e755"
-dependencies = [
- "pkg-config",
-]
-
-[[package]]
 name = "reborrow"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6878,15 +6832,6 @@ name = "renderdoc-sys"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
-
-[[package]]
-name = "rgb"
-version = "0.8.53"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
-dependencies = [
- "bytemuck",
-]
 
 [[package]]
 name = "rodio"
@@ -8281,20 +8226,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "webpx"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86d3649fadcba9449d3d46c698eda9dff6371931b15f9a5fcb6e6891c2470add"
-dependencies = [
- "enough",
- "imgref",
- "libwebp-sys",
- "rgb",
- "whereat",
- "zenpixels",
-]
-
-[[package]]
 name = "wesl"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8531,12 +8462,6 @@ dependencies = [
  "itertools 0.15.0",
  "num-traits",
 ]
-
-[[package]]
-name = "whereat"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab90f361db038ba3135da12c938c328fb43a012992101879e3d6ebccb4d7eba8"
 
 [[package]]
 name = "which"
@@ -9134,16 +9059,6 @@ name = "zeno"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6df3dc4292935e51816d896edcd52aa30bc297907c26167fec31e2b0c6a32524"
-
-[[package]]
-name = "zenpixels"
-version = "0.2.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5851fd39b312749a3c367a0cd3522bd95d43276cfa613e9c18df748447cef3a8"
-dependencies = [
- "bytemuck",
- "whereat",
-]
 
 [[package]]
 name = "zerocopy"

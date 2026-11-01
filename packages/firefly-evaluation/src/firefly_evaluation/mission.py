@@ -544,8 +544,6 @@ class Mission:
                         command += ["--no-loop-closures", "--no-mapping"]
                     if self.prior_maps:
                         command += ["--external-localization"]
-                if name == "firefly-rootslam-live":
-                    command += ["--config", str(self.root / "configs/rootslam-live.toml")]
                 if name == "localization" and self.localization_config is not None:
                     command += ["--config", str(self.localization_config)]
                 if name == "lightglue" and self.prior_maps:

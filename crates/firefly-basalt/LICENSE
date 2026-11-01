@@ -6,9 +6,6 @@ notices, including BSD-4-Clause code, are retained in the relevant source files.
 Basalt code: Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 See LICENSE-BSD-3-Clause. The upstream MPL files utils/tracks.rs and
 utils/union_find.rs retain their original notices.
-record_t265.rs additionally retains Michael Loipführer as a 2019 copyright
-holder, as stated in the original recording executable.
-
 Eigen algorithms translated under MPL-2.0 (see LICENSE-MPL-2.0):
 
 * utils/complete_orthogonal_decomposition.rs: CompleteOrthogonalDecomposition,

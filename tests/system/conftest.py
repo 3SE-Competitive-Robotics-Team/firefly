@@ -55,7 +55,7 @@ def flight_environment(request):
     if not graphical_session:
         pytest.fail("flight test requires a graphical session (DISPLAY or WAYLAND_DISPLAY)")
     vio_process = os.environ.get("FIREFLY_VIO_PROCESS", "firefly-okvis-x")
-    if vio_process not in {"firefly-okvis-x", "firefly-rootslam-live"}:
+    if vio_process not in {"firefly-okvis-x", "firefly-rootslam"}:
         pytest.fail(f"unsupported FIREFLY_VIO_PROCESS: {vio_process}")
     missing = [name for name in ("render", vio_process, "fc", "ffctl")
                if not (ROOT / f"target/release/{name}").is_file()]
@@ -87,7 +87,11 @@ def flight_report(flight_directory):
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT,
     ).decode().split("\0")
     files = {ROOT / name for name in names if name and (ROOT / name).is_file()}
-    files.update(ROOT / f"target/release/{name}" for name in ("render", "firefly-okvis-x", "fc", "ffctl"))
+    vio_process = os.environ.get("FIREFLY_VIO_PROCESS", "firefly-okvis-x")
+    files.update(
+        ROOT / f"target/release/{name}"
+        for name in ("render", vio_process, "fc", "ffctl")
+    )
     from firefly_mujoco import load_scene_name, resolve_scene
 
     scene = resolve_scene(load_scene_name())
