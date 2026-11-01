@@ -9,8 +9,9 @@ use firefly_basalt::optical_flow::{
     patterns::{Pattern, Pattern51},
 };
 use firefly_basalt::utils::ldlt::Ldlt;
-use firefly_basalt_headers::image::image::Image;
-use firefly_basalt_headers::{calibration::Calibration, camera::generic_camera::GenericCamera};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::camera::generic_camera::GenericCamera;
+use firefly_calibration::image::image::Image;
 use nalgebra::{DMatrix, Matrix2, SMatrix, SVector, Vector2};
 use serde_json::{Value, json};
 use std::{fs::File, io::BufReader};

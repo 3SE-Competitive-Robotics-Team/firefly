@@ -5,7 +5,7 @@
 use crate::thirdparty::ethz_apriltag2::{
     tag_detector::TagDetector, tag_family::TagFamily, tag36h11::CODES,
 };
-use firefly_basalt_headers::image::image::ManagedImage;
+use firefly_calibration::image::image::ManagedImage;
 use firefly_calibration::observation::{AprilTagDetector, CalibCornerData};
 use firefly_error::Result;
 use nalgebra::Vector2;

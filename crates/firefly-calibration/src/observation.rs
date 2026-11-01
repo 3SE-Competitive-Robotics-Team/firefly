@@ -20,8 +20,8 @@ impl TimeCamId {
     #[must_use]
     pub fn hash_value(self) -> usize {
         let mut seed = 0;
-        firefly_basalt_headers::utils::hash::hash_combine(&mut seed, self.frame_id as usize);
-        firefly_basalt_headers::utils::hash::hash_combine(&mut seed, self.cam_id);
+        hash_combine(&mut seed, self.frame_id as usize);
+        hash_combine(&mut seed, self.cam_id);
         seed
     }
 
@@ -67,13 +67,31 @@ pub trait AprilTagDetector: Send {
     /// Returns image or detector errors.
     fn detect_tags(
         &mut self,
-        image: &firefly_basalt_headers::image::image::ManagedImage<u16>,
+        image: &crate::image::image::ManagedImage<u16>,
     ) -> firefly_error::Result<(CalibCornerData, CalibCornerData)>;
 }
 
 /// Narrow image source contract used by calibration corner detection.
-pub type CalibrationImage =
-    Option<std::sync::Arc<firefly_basalt_headers::image::image::ManagedImage<u16>>>;
+pub type CalibrationImage = Option<std::sync::Arc<crate::image::image::ManagedImage<u16>>>;
+
+fn hash_combine(seed: &mut usize, value_hash: usize) {
+    #[cfg(target_pointer_width = "64")]
+    {
+        *seed = (*seed as u64
+            ^ (value_hash as u64)
+                .wrapping_add(0x9e37_79b9_7f4a_7c15)
+                .wrapping_add((*seed as u64) << 12)
+                .wrapping_add((*seed as u64) >> 4)) as usize;
+    }
+    #[cfg(target_pointer_width = "32")]
+    {
+        *seed = (*seed as u32
+            ^ (value_hash as u32)
+                .wrapping_add(0x9e37_79b9)
+                .wrapping_add((*seed as u32) << 6)
+                .wrapping_add((*seed as u32) >> 2)) as usize;
+    }
+}
 
 pub trait CalibrationImageSource: Sync {
     /// # Errors

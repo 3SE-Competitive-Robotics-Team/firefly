@@ -7,18 +7,17 @@ use super::{
     poses_linearize::adjoint,
 };
 use crate::io::dataset_io::{AccelData, AprilgridCornersData, GyroData, MocapPoseData, PoseData};
-use firefly_basalt_headers::{
-    camera::generic_camera::GenericCamera,
-    spline::{
-        se3_spline::{AccelPosSo3Jacobian, PosePosSo3Jacobian, Se3Spline},
-        so3_spline::Jacobian as RotationJacobian,
-        spline_common::Jacobian as PositionJacobian,
-    },
-    utils::sophus_utils::{
-        right_jacobian_inv_se3_decoupled, se3_inverse as inverse, se3_logd, se3_matrix,
-        se3_product as product,
-    },
-};
+use crate::spline::se3_spline::AccelPosSo3Jacobian;
+use crate::spline::se3_spline::PosePosSo3Jacobian;
+use crate::spline::se3_spline::Se3Spline;
+use crate::spline::so3_spline::Jacobian as RotationJacobian;
+use crate::utils::sophus_utils::right_jacobian_inv_se3_decoupled;
+use crate::utils::sophus_utils::se3_inverse as inverse;
+use crate::utils::sophus_utils::se3_logd;
+use crate::utils::sophus_utils::se3_matrix;
+use crate::utils::sophus_utils::se3_product as product;
+use firefly_calibration::camera::generic_camera::GenericCamera;
+use firefly_calibration::spline::spline_common::Jacobian as PositionJacobian;
 use nalgebra::{Matrix3, Matrix4, SMatrix, Vector2, Vector4};
 use rayon::prelude::*;
 

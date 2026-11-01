@@ -1,7 +1,7 @@
+use firefly_basalt::imu::imu_types::PoseVelBiasState;
 use firefly_basalt::utils::imu_types::{PoseStateWithLin, PoseVelBiasStateWithLin};
-use firefly_basalt_headers::{
-    imu::imu_types::PoseVelBiasState, scalar::BasaltScalar, utils::sophus_utils::so3_exp,
-};
+use firefly_basalt::utils::sophus_utils::so3_exp;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{Isometry3, SMatrix, SVector, Translation3, Vector3};
 use serde_json::Value;
 

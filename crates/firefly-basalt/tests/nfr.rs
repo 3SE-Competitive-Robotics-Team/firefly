@@ -1,6 +1,7 @@
 // Nonlinear factor Jacobian checks corresponding to upstream test_nfr.cpp.
+use firefly_basalt::imu::imu_types::PoseState;
 use firefly_basalt::utils::nfr::{abs_position_error, rel_pose_error, roll_pitch_error, yaw_error};
-use firefly_basalt_headers::{imu::imu_types::PoseState, utils::sophus_utils::se3_expd};
+use firefly_basalt::utils::sophus_utils::se3_expd;
 use nalgebra::{SMatrix, SVector, Vector3};
 
 #[test]
@@ -75,7 +76,7 @@ fn mapper_extracts_covariances_and_optimizes_factors() {
         },
         vi_estimator::nfr_mapper::NfrMapper,
     };
-    use firefly_basalt_headers::calibration::Calibration;
+    use firefly_calibration::calibration::Calibration;
     use nalgebra::{DMatrix, DVector, Isometry3};
     let mut data = MargData {
         abs_h: DMatrix::identity(12, 12),

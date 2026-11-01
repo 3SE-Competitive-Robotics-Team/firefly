@@ -35,7 +35,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 //! Translation of `include/basalt/io/dataset_io.h` at official Basalt
 //! revision `0f3b2b52c807f70ff4e2973ce253c73329eea7bc`.
-use firefly_basalt_headers::image::image::ManagedImage;
+use firefly_calibration::image::image::ManagedImage;
 use firefly_error::Result;
 use nalgebra::{Isometry3, Vector2, Vector3};
 use serde::{Deserialize, Serialize};

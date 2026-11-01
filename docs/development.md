@@ -457,8 +457,8 @@ static 预览不进入文件和正常/异常退出时的完整性。构建、单
 
 ```bash
 cargo run --release -p firefly-rootslam
-cargo test -p firefly-calibration -p firefly-basalt-headers -p firefly-basalt -p firefly-rootslam-mapping -p firefly-rootslam --all-targets
-cargo clippy -p firefly-calibration -p firefly-basalt-headers -p firefly-basalt -p firefly-rootslam-mapping -p firefly-rootslam --all-targets -- -D warnings
+cargo test -p firefly-calibration -p firefly-basalt -p firefly-rootslam-mapping -p firefly-rootslam --all-targets
+cargo clippy -p firefly-calibration -p firefly-basalt -p firefly-rootslam-mapping -p firefly-rootslam --all-targets -- -D warnings
 uv run python -B -m unittest discover -s apps/rootslam/tests -p test_export_rrd.py
 ```
 

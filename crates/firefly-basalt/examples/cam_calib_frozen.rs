@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(path) = args.get(5) {
         #[derive(serde::Deserialize)]
         struct Archive {
-            value0: firefly_basalt_headers::calibration::Calibration<f64>,
+            value0: firefly_calibration::calibration::Calibration<f64>,
         }
         let archive: Archive = serde_json::from_reader(File::open(path)?)?;
         target.calib_opt.as_mut().unwrap().calib = Some(archive.value0);

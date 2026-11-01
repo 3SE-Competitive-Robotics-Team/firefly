@@ -6,12 +6,11 @@ use super::{
     poses_linearize::{ComputeErrorPosesOpt, LinearizePosesOpt},
 };
 use crate::io::dataset_io::AprilgridCornersData;
-use firefly_basalt_headers::{
-    calibration::Calibration,
-    camera::generic_camera::GenericCamera,
-    spline::rd_spline::RdSpline,
-    utils::sophus_utils::{se3_expd, se3_product},
-};
+use crate::utils::sophus_utils::se3_expd;
+use crate::utils::sophus_utils::se3_product;
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::camera::generic_camera::GenericCamera;
+use firefly_calibration::spline::rd_spline::RdSpline;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{Isometry3, Vector2, Vector3, Vector4};
 use serde::{Deserialize, Serialize};

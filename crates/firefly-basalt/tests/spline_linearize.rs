@@ -1,3 +1,5 @@
+use firefly_basalt::spline::se3_spline::Se3Spline;
+use firefly_basalt::utils::sophus_utils::so3_exp;
 use firefly_basalt::{
     io::dataset_io::{AccelData, AprilgridCornersData, GyroData, MocapPoseData, PoseData},
     optimization::{
@@ -6,12 +8,9 @@ use firefly_basalt::{
         spline_linearize::{ComputeErrorSplineOpt, LinearizeSplineOpt, SplineMeasurement},
     },
 };
-use firefly_basalt_headers::{
-    calibration::{Calibration, MocapCalibration},
-    camera::generic_camera::GenericCamera,
-    spline::se3_spline::Se3Spline,
-    utils::sophus_utils::so3_exp,
-};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::calibration::MocapCalibration;
+use firefly_calibration::camera::generic_camera::GenericCamera;
 use nalgebra::{DMatrix, Isometry3, Translation3, Vector2, Vector3, Vector4};
 use serde_json::Value;
 use std::collections::BTreeMap;

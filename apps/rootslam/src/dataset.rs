@@ -1,17 +1,16 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
 //! Dataset feeds and state collection corresponding to original `src/vio.cpp`.
+use firefly_basalt::imu::imu_types::ImuData;
+use firefly_basalt::imu::imu_types::PoseVelBiasState;
+use firefly_basalt::serialization::eigen_io::EigenMatrix;
 use firefly_basalt::{
     io::{dataset_io::VioDatasetPtr, marg_data_io::MargDataSaver},
     optical_flow::{OpticalFlowFactory, OpticalFlowInput},
     utils::vio_config::VioConfig,
     vi_estimator::vio_estimator::VioEstimatorBase,
 };
-use firefly_basalt_headers::{
-    calibration::Calibration,
-    imu::imu_types::{ImuData, PoseVelBiasState},
-    serialization::eigen_io::EigenMatrix,
-};
+use firefly_calibration::calibration::Calibration;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::Vector3;
 use std::{

@@ -1,6 +1,12 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
 //! Non-GUI data flow and callbacks from original `src/mapper_sim.cpp`.
+use crate::spline::se3_spline::Se3Spline;
+use crate::utils::sophus_utils::se3_expd;
+use crate::utils::sophus_utils::se3_inverse;
+use crate::utils::sophus_utils::se3_product;
+use crate::utils::sophus_utils::so3_inverse;
+use crate::utils::sophus_utils::so3_product;
 use crate::{
     io::marg_data_io::MargDataLoader,
     utils::{
@@ -13,11 +19,7 @@ use crate::{
     },
     vi_estimator::{marg_helper::MargHelper, nfr_mapper::NfrMapper, vio_estimator::align_svd},
 };
-use firefly_basalt_headers::{
-    calibration::Calibration,
-    spline::se3_spline::Se3Spline,
-    utils::sophus_utils::{se3_expd, se3_inverse, se3_product, so3_inverse, so3_product},
-};
+use firefly_calibration::calibration::Calibration;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{
     DMatrix, Isometry3, Quaternion, SMatrix, SVector, Translation3, UnitQuaternion, Vector3,

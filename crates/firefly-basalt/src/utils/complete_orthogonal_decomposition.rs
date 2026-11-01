@@ -6,7 +6,7 @@
 // one at https://mozilla.org/MPL/2.0/.
 //! Real dynamic specialization of Eigen 5.0.1 `CompleteOrthogonalDecomposition`,
 //! `ColPivHouseholderQR` and Householder operations, preserving rank thresholds.
-use firefly_basalt_headers::scalar::BasaltScalar;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector};
 
 pub(crate) fn machine_epsilon<S: BasaltScalar>() -> S {

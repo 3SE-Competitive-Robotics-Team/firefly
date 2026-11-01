@@ -3,7 +3,8 @@ use super::{
     patch::{OpticalFlowPatch, PatchScalar},
     patterns::*,
 };
-use firefly_basalt_headers::image::image::{Image, ImageScalar};
+use firefly_calibration::image::image::Image;
+use firefly_calibration::image::image::ImageScalar;
 use nalgebra::{Isometry2, SMatrix, SVector, Vector2};
 use serde_json::Value;
 

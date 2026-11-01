@@ -480,7 +480,16 @@ class Mission:
                 failures.append(f"{name} shutdown failed, pid={self.processes[name].pid}: {error}")
         if self.recorder:
             try:
-                self.recorder.event(f"shutdown {results} failures={failures}", self.t, bool(failures))
+                tails = {
+                    name: list(self.processes[name].tail)
+                    for name, result in results.items()
+                    if result.get("exit_code") not in (None, 0)
+                }
+                self.recorder.event(
+                    f"shutdown {results} failures={failures} process_tails={tails}",
+                    self.t,
+                    bool(failures),
+                )
                 self.sleep(0.4)
             except Exception as error:
                 failures.append(f"shutdown recording failed: {error}")
@@ -535,6 +544,8 @@ class Mission:
                         command += ["--no-loop-closures", "--no-mapping"]
                     if self.prior_maps:
                         command += ["--external-localization"]
+                if name == "firefly-rootslam-live":
+                    command += ["--config", str(self.root / "configs/rootslam-live.toml")]
                 if name == "localization" and self.localization_config is not None:
                     command += ["--config", str(self.localization_config)]
                 if name == "lightglue" and self.prior_maps:

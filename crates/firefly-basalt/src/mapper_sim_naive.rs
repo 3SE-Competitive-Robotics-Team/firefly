@@ -1,6 +1,9 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
 //! Original `src/mapper_sim_naive.cpp`: replay simulated keyframes in one VIO window.
+use crate::imu::imu_types::ImuData;
+use crate::imu::imu_types::PoseVelBiasState;
+use crate::spline::se3_spline::Se3Spline;
 use crate::{
     mapper_sim::{Archive, invalid, load_calibration, load_marginalization},
     optical_flow::{AffineCompact2, OpticalFlowResult},
@@ -9,11 +12,7 @@ use crate::{
         VioEstimatorBase, VioEstimatorFactory, VioVisualizationData, VioWorkerOutputs, align_svd,
     },
 };
-use firefly_basalt_headers::{
-    calibration::Calibration,
-    imu::imu_types::{ImuData, PoseVelBiasState},
-    spline::se3_spline::Se3Spline,
-};
+use firefly_calibration::calibration::Calibration;
 use firefly_error::Result;
 use nalgebra::{Isometry3, Vector3};
 use std::{

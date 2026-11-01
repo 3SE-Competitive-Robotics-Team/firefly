@@ -4,14 +4,11 @@
 //! Translation of `include/basalt/utils/imu_types.h`, original Basalt
 //! `0f3b2b52c807f70ff4e2973ce253c73329eea7bc`.
 
+use crate::imu::imu_types::PoseState;
+use crate::imu::imu_types::PoseVelBiasState;
+use crate::imu::preintegration::IntegratedImuMeasurement;
 use crate::optical_flow::OpticalFlowResult;
-use firefly_basalt_headers::{
-    imu::{
-        imu_types::{PoseState, PoseVelBiasState},
-        preintegration::IntegratedImuMeasurement,
-    },
-    scalar::BasaltScalar,
-};
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector, Isometry3, Matrix2, SMatrix, SVector, UnitQuaternion, Vector3};
 use std::{
     collections::{BTreeMap, BTreeSet},

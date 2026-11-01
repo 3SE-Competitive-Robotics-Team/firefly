@@ -7,7 +7,7 @@
 // v. 2.0. If a copy of the MPL was not distributed with this file, You can obtain
 // one at https://mozilla.org/MPL/2.0/.
 //! Real dynamic specialization of Eigen 5.0.1 lower-triangle pivoted LDLT.
-use firefly_basalt_headers::scalar::BasaltScalar;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector};
 
 #[derive(Clone, Debug)]

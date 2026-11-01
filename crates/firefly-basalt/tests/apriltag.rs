@@ -4,7 +4,7 @@ use firefly_basalt::{
     },
     utils::apriltag::ApriltagDetector,
 };
-use firefly_basalt_headers::image::image::ManagedImage;
+use firefly_calibration::image::image::ManagedImage;
 
 #[test]
 fn original_tag_dictionary_rotations_and_one_bit_recovery() {

@@ -119,3 +119,13 @@ SIGINT/SIGTERM requests producer stop, queue drain and worker joins. Diagnostics
 continue through log IPC during shutdown. Hardware reset is an explicit option.
 The CLI's no-device failure and injected VO/VIO/recording lifecycle tests have
 run, but T265 acquisition itself has not been tested on connected hardware.
+
+For the simulated closed loop, `firefly-rootslam-live` subscribes to Render's
+`Firefly/CameraLeft` and `CameraRight` plus Sim's `Firefly/Imu`. It pairs stereo
+frames within the OKVIS time tolerance and waits for IMU coverage before passing
+them to Basalt. Its rig calibration comes from the shared Firefly rig geometry.
+It publishes `Firefly/Odometry`, `Firefly/CorrectedOdometry`,
+`Firefly/Navigation`, and posterior `Firefly/VioAttitude` for FC using
+[`configs/rootslam-live.toml`](../../configs/rootslam-live.toml). Start it in place
+of `firefly-okvis-x` for simulation; the hover harness accepts
+`FIREFLY_VIO_PROCESS=firefly-rootslam-live` with the same scoring thresholds.

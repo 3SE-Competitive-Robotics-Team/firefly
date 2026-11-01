@@ -1,7 +1,7 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
 //! Common types from original Basalt `linearization/landmark_block.hpp`.
-use firefly_basalt_headers::scalar::BasaltScalar;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{Matrix4, SMatrix};
 
 #[derive(Clone, Debug)]

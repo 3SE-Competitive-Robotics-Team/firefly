@@ -8,7 +8,7 @@ pub use super::sc_ba_base::{
     update_points_abs,
 };
 use crate::utils::imu_types::{MargLinData, PoseStateWithLin, PoseVelBiasStateWithLin};
-use firefly_basalt_headers::scalar::BasaltScalar;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector};
 use std::collections::BTreeMap;
 

@@ -1,7 +1,6 @@
-use firefly_basalt_headers::{
-    calibration::Calibration,
-    camera::{generic_camera::GenericCamera, pinhole_camera::PinholeCamera},
-};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::camera::generic_camera::GenericCamera;
+use firefly_calibration::camera::pinhole_camera::PinholeCamera;
 use firefly_rootslam_mapping::{
     global_optimization::{KrylovPrecision, OptimizationOptions, Precision, optimize_global},
     global_problem::GlobalProblem,

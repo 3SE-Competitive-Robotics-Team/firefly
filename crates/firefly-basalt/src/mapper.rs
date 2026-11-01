@@ -1,13 +1,14 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
 //! Original `src/mapper.cpp` offline controller, cache I/O and trajectory export.
+use crate::utils::sophus_utils::so3_inverse;
+use crate::utils::sophus_utils::so3_product;
 use crate::{
     io::marg_data_io::binary,
     mapper_sim::{load_calibration, load_marginalization},
     utils::{imu_types::MargData, vio_config::VioConfig},
     vi_estimator::{nfr_mapper::NfrMapper, vio_estimator::align_svd},
 };
-use firefly_basalt_headers::utils::sophus_utils::{so3_inverse, so3_product};
 use firefly_error::Result;
 use nalgebra::Vector3;
 use std::{

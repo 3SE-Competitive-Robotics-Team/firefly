@@ -2,7 +2,7 @@ use firefly_basalt::{
     io::dataset_io::DatasetIoFactory, utils::vio_config::VioConfig,
     vi_estimator::vio_estimator::VioEstimatorFactory,
 };
-use firefly_basalt_headers::calibration::Calibration;
+use firefly_calibration::calibration::Calibration;
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_rootslam::dataset_output::{
     OriginalResult, TrajectoryFormat, align_ground_truth, write_trajectory,
@@ -321,7 +321,7 @@ fn report_mapping(result: &firefly_rootslam::system::SystemResult) {
 type EvaluationData = (Vec<i64>, Vec<i64>, Vec<nalgebra::Isometry3<f64>>);
 fn save_results(
     options: &Options,
-    states: &[std::sync::Arc<firefly_basalt_headers::imu::imu_types::PoseVelBiasState<f64>>],
+    states: &[std::sync::Arc<firefly_basalt::imu::imu_types::PoseVelBiasState<f64>>],
     mapped: Option<&firefly_rootslam::system::SystemResult>,
     evaluation_data: Option<EvaluationData>,
 ) -> Result<()> {
@@ -381,7 +381,7 @@ fn save_results(
 
 fn save_original_results(
     options: &Options,
-    states: &[std::sync::Arc<firefly_basalt_headers::imu::imu_types::PoseVelBiasState<f64>>],
+    states: &[std::sync::Arc<firefly_basalt::imu::imu_types::PoseVelBiasState<f64>>],
     duration: std::time::Duration,
     data: Option<&EvaluationData>,
 ) -> Result<()> {

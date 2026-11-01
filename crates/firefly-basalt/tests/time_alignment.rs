@@ -124,14 +124,13 @@ impl firefly_basalt::io::dataset_io::VioDataset for Dataset {
 }
 #[test]
 fn calibrated_streams_filter_saturation_gaps_and_write_corrected_poses() {
+    use firefly_basalt::utils::sophus_utils::so3_exp;
     use firefly_basalt::{
         io::dataset_io::GyroData,
         time_alignment::{align, write_aligned_poses},
     };
-    use firefly_basalt_headers::{
-        calibration::{Calibration, MocapCalibration},
-        utils::sophus_utils::so3_exp,
-    };
+    use firefly_calibration::calibration::Calibration;
+    use firefly_calibration::calibration::MocapCalibration;
     use nalgebra::{Isometry3, Translation3};
     let mut dataset = Dataset {
         times: vec![0, 5_000_000, 10_000_000, 15_000_000, 40_000_000],

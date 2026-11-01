@@ -3,11 +3,10 @@
 // License notices and conditions are in ../../LICENSE.
 //! Original `calibration/calibration_helper.h` and `src/calibration/calibraiton_helper.cpp`.
 use crate::{io::dataset_io::VioDatasetPtr, utils::ldlt::Ldlt};
-use firefly_basalt_headers::{
-    calibration::Calibration,
-    camera::{generic_camera::GenericCamera, unified_camera::UnifiedCamera},
-    image::image::ManagedImage,
-};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::camera::generic_camera::GenericCamera;
+use firefly_calibration::camera::unified_camera::UnifiedCamera;
+use firefly_calibration::image::image::ManagedImage;
 pub use firefly_calibration::observation::{
     CalibCornerData, CalibCornerMap, CalibInitPoseData, CalibInitPoseMap, ProjectedCornerData,
 };

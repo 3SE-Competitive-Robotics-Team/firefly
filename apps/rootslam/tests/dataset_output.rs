@@ -1,4 +1,4 @@
-use firefly_basalt_headers::utils::sophus_utils::so3_exp;
+use firefly_basalt::utils::sophus_utils::so3_exp;
 use firefly_rootslam::{
     dataset::write_ground_truth,
     dataset_output::{OriginalResult, TrajectoryFormat, align_ground_truth, write_trajectory},

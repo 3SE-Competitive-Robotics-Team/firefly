@@ -3,6 +3,8 @@
 pub mod calibration;
 pub mod device;
 pub mod hash_bow;
+pub mod image;
+pub mod imu;
 pub mod io;
 pub mod kitti_eval;
 pub mod linearization;
@@ -13,6 +15,8 @@ pub mod opt_flow;
 pub mod optical_flow;
 pub mod optimization;
 pub mod record_t265;
+pub mod serialization;
+pub mod spline;
 pub mod thirdparty;
 pub mod time_alignment;
 pub mod utils;

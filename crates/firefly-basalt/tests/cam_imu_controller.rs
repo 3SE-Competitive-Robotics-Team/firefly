@@ -1,3 +1,7 @@
+use firefly_basalt::utils::sophus_utils::se3_inverse;
+use firefly_basalt::utils::sophus_utils::se3_matrix;
+use firefly_basalt::utils::sophus_utils::se3_product;
+use firefly_basalt::utils::sophus_utils::so3_exp;
 use firefly_basalt::{
     calibration::{
         aprilgrid::AprilGrid,
@@ -8,7 +12,6 @@ use firefly_basalt::{
     optimization::spline_optimize::SplineOptimization,
     utils::common_types::TimeCamId,
 };
-use firefly_basalt_headers::utils::sophus_utils::{se3_inverse, se3_matrix, se3_product, so3_exp};
 use nalgebra::{Isometry3, Translation3, Vector2, Vector3, Vector4};
 use serde_json::Value;
 use std::{

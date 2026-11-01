@@ -1,8 +1,9 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
 //! Original `vi_estimator/vio_estimator.h` and `src/vi_estimator/vio_estimator.cpp`.
+use crate::imu::imu_types::ImuData;
+use crate::imu::imu_types::PoseVelBiasState;
 use crate::{optical_flow::OpticalFlowResult, utils::imu_types::MargData};
-use firefly_basalt_headers::imu::imu_types::{ImuData, PoseVelBiasState};
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{Isometry3, Matrix3, Vector3, Vector4};
 use std::{
@@ -292,7 +293,7 @@ impl VioEstimatorFactory {
     /// Reserved for construction failures reported by the estimator.
     pub fn get_vio_estimator(
         config: &crate::utils::vio_config::VioConfig,
-        calibration: &firefly_basalt_headers::calibration::Calibration<f64>,
+        calibration: &firefly_calibration::calibration::Calibration<f64>,
         gravity: &Vector3<f64>,
         use_imu: bool,
         use_double: bool,

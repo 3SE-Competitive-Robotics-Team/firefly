@@ -1,6 +1,6 @@
 //! Evaluate a frozen square-root system without changing its coefficients,
 //! damping, physical-gradient stopping rule, or the production optimizer.
-use firefly_basalt_headers::scalar::BasaltScalar;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector};
 use serde::Deserialize;
 use serde_json::json;

@@ -9,6 +9,7 @@ use super::{
         VioEstimatorEngine, VioStatus, VioVisualizationData, VioWorkerInputs, VioWorkerOutputs,
     },
 };
+use crate::imu::imu_types::PoseVelBiasState;
 use crate::{
     linearization::linearization_base::{LinearizationBase, Options, is_linearization_sqrt},
     optical_flow::OpticalFlowResult,
@@ -20,10 +21,9 @@ use crate::{
         vio_config::VioConfig,
     },
 };
-use firefly_basalt_headers::{
-    calibration::Calibration, camera::stereographic_param::StereographicParam,
-    imu::imu_types::PoseVelBiasState, scalar::BasaltScalar,
-};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::camera::stereographic_param::StereographicParam;
+use firefly_calibration::scalar::BasaltScalar;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{DMatrix, DVector, Isometry3, Vector3, Vector4};
 use std::{

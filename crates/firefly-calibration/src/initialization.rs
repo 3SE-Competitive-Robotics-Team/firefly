@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // License notices and conditions are in ../LICENSE.
 //! Camera pose initialization from original Basalt calibration helpers.
+use crate::calibration::Calibration;
+use crate::camera::generic_camera::GenericCamera;
 use crate::observation::{CalibCornerData, CalibCornerMap, CalibInitPoseData, CalibInitPoseMap};
-use firefly_basalt_headers::{calibration::Calibration, camera::generic_camera::GenericCamera};
 use firefly_opengv::{
     absolute_pose::central_absolute_adapter::CentralAbsoluteAdapter,
     optimization_functor::RustNumericalBackend,

@@ -1,10 +1,9 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
 //! Translation of `include/basalt/optimization/linearize.h`.
-use firefly_basalt_headers::{
-    calibration::{Calibration, MocapCalibration},
-    scalar::BasaltScalar,
-};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::calibration::MocapCalibration;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{Matrix3, Matrix4, SMatrix, SVector, Vector2, Vector3, Vector4};
 use std::collections::BTreeMap;
 

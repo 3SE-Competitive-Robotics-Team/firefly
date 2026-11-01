@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //! Original `utils/test_utils.h`: central-difference Jacobian diagnostics.
 //! Diagnostics are returned to the caller instead of writing to stderr.
-use firefly_basalt_headers::scalar::BasaltScalar;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector};
 
 #[derive(Clone, Copy, Debug)]

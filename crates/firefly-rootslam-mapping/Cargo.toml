@@ -12,7 +12,7 @@ categories = ["algorithms", "science"]
 
 [dependencies]
 firefly-basalt.workspace = true
-firefly-basalt-headers.workspace = true
+firefly-calibration.workspace = true
 firefly-error.workspace = true
 firefly-opengv.workspace = true
 nalgebra = { workspace = true, features = ["serde-serialize"] }

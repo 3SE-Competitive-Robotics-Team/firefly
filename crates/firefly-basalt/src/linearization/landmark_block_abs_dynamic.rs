@@ -13,7 +13,8 @@ use crate::{
     },
     vi_estimator::landmark_database::Keypoint,
 };
-use firefly_basalt_headers::{calibration::Calibration, scalar::BasaltScalar};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector, SMatrix, Vector2, Vector3};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

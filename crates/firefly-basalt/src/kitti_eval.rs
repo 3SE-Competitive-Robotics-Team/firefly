@@ -1,7 +1,9 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause AND MPL-2.0
 //! Original `src/kitti_eval.cpp`: KITTI segment evaluation and trajectory I/O.
-use firefly_basalt_headers::utils::sophus_utils::{se3_inverse, se3_product, so3_from_quaternion};
+use crate::utils::sophus_utils::se3_inverse;
+use crate::utils::sophus_utils::se3_product;
+use crate::utils::sophus_utils::so3_from_quaternion;
 use nalgebra::{Isometry3, Matrix3, Quaternion, Translation3};
 use serde::Serialize;
 use std::{

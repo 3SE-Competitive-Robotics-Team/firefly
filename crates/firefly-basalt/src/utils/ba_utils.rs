@@ -1,12 +1,14 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
 //! Translation of original Basalt `0f3b2b52` `utils/ba_utils.h`.
+use crate::utils::sophus_utils::hat;
+use crate::utils::sophus_utils::so3_inverse;
+use crate::utils::sophus_utils::so3_matrix;
+use crate::utils::sophus_utils::so3_product;
 use crate::vi_estimator::landmark_database::Keypoint;
-use firefly_basalt_headers::{
-    camera::{generic_camera::GenericCamera, stereographic_param::StereographicParam},
-    scalar::BasaltScalar,
-    utils::sophus_utils::{hat, so3_inverse, so3_matrix, so3_product},
-};
+use firefly_calibration::camera::generic_camera::GenericCamera;
+use firefly_calibration::camera::stereographic_param::StereographicParam;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{Isometry3, Matrix4, SMatrix, Translation3, Vector2, Vector4};
 
 fn inverse<S: BasaltScalar>(pose: &Isometry3<S>) -> Isometry3<S> {

@@ -4,7 +4,7 @@
 //! Eigen 5.0.1 simplicial LDLT numeric elimination with the original AMD order.
 //! Sparse columns grow to their symbolic fill pattern; no dense system is formed.
 use super::amd::minimum_degree_ordering;
-use firefly_basalt_headers::scalar::BasaltScalar;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::DVector;
 use std::collections::BTreeMap;
 

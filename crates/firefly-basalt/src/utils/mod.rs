@@ -9,6 +9,7 @@ pub mod keypoints;
 pub mod ldlt;
 pub mod nfr;
 pub mod sim_utils;
+pub mod sophus_utils;
 pub mod sparse_ldlt;
 pub mod system_utils;
 pub mod test_utils;

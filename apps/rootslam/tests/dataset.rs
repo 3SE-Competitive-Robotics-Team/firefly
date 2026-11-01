@@ -3,9 +3,9 @@ use firefly_basalt::{
     utils::vio_config::VioConfig,
     vi_estimator::vio_estimator::VioEstimatorFactory,
 };
-use firefly_basalt_headers::{
-    calibration::Calibration, camera::generic_camera::GenericCamera, image::image::ManagedImage,
-};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::camera::generic_camera::GenericCamera;
+use firefly_calibration::image::image::ManagedImage;
 use nalgebra::{Isometry3, Vector3, Vector4};
 use std::sync::{Arc, Mutex, mpsc};
 

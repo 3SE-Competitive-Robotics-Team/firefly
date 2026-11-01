@@ -1,4 +1,4 @@
-use firefly_basalt_headers::image::image::ManagedImage;
+use firefly_calibration::image::image::ManagedImage;
 use firefly_calibration::observation::{
     self, AprilTagDetector, CalibCornerData, CalibrationImageSource, TimeCamId,
 };

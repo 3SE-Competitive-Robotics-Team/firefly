@@ -13,7 +13,7 @@ use crate::{
         sc_ba_base::{self, RelLinData},
     },
 };
-use firefly_basalt_headers::scalar::BasaltScalar;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector};
 use rayon::prelude::*;
 use std::collections::{BTreeSet, HashSet};

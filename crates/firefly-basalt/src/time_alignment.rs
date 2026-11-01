@@ -2,14 +2,17 @@
 // SPDX-License-Identifier: BSD-3-Clause AND MPL-2.0
 //! Original `src/time_alignment.cpp`: gyro/mocap alignment, grid search,
 //! Jacobi-SVD quadratic refinement, and output files. Rendering is caller-owned.
+use crate::utils::sophus_utils::se3_inverse;
+use crate::utils::sophus_utils::se3_product;
+use crate::utils::sophus_utils::so3_inverse;
+use crate::utils::sophus_utils::so3_log;
+use crate::utils::sophus_utils::so3_product;
 use crate::{
     io::dataset_io::VioDataset,
     utils::complete_orthogonal_decomposition::CompleteOrthogonalDecomposition,
 };
-use firefly_basalt_headers::{
-    calibration::{Calibration, MocapCalibration},
-    utils::sophus_utils::{se3_inverse, se3_product, so3_inverse, so3_log, so3_product},
-};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::calibration::MocapCalibration;
 use nalgebra::{DMatrix, DVector, Isometry3, Vector3};
 use serde::Serialize;
 use std::{

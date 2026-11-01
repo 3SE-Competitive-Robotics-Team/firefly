@@ -2,14 +2,14 @@
 // include/basalt/linearization/imu_block.hpp; repository BSD-3-Clause license.
 //! Whitened inertial and bias random-walk rows for two adjacent states.
 
+use crate::imu::preintegration::IntegratedImuMeasurement;
+use crate::imu::preintegration::Matrix9;
+use crate::imu::preintegration::Matrix9x3;
 use crate::{
     optimization::accumulator::DenseAccumulator,
     utils::imu_types::{AbsOrderMap, ImuLinData, PoseVelBiasStateWithLin},
 };
-use firefly_basalt_headers::{
-    imu::preintegration::{IntegratedImuMeasurement, Matrix9, Matrix9x3},
-    scalar::BasaltScalar,
-};
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, SVector};
 use std::collections::BTreeMap;
 

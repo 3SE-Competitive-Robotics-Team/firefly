@@ -7,7 +7,7 @@ use super::{
     dataset_common::{self as common, Records},
     dataset_io::{AccelData, DatasetIoInterface, GyroData, ImageData, VioDataset, VioDatasetPtr},
 };
-use firefly_basalt_headers::image::image::ManagedImage;
+use firefly_calibration::image::image::ManagedImage;
 use firefly_error::Result;
 use nalgebra::{Isometry3, Vector3};
 use rosbag::{ChunkRecord, IndexRecord, MessageRecord, RosBag};

@@ -11,7 +11,7 @@ use crate::{
         imu_types::{AbsOrderMap, MargData},
     },
 };
-use firefly_basalt_headers::image::image::ManagedImage;
+use firefly_calibration::image::image::ManagedImage;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{DMatrix, DVector};
 use std::{

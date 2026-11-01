@@ -1,3 +1,6 @@
+use firefly_basalt::imu::imu_types::ImuData;
+use firefly_basalt::imu::imu_types::PoseVelBiasState;
+use firefly_basalt::imu::preintegration::IntegratedImuMeasurement;
 use firefly_basalt::{
     linearization::{
         landmark_block,
@@ -15,13 +18,9 @@ use firefly_basalt::{
         landmark_database::{Keypoint, KeypointObservation},
     },
 };
-use firefly_basalt_headers::imu::{
-    imu_types::{ImuData, PoseVelBiasState},
-    preintegration::IntegratedImuMeasurement,
-};
-use firefly_basalt_headers::{
-    calibration::Calibration, camera::generic_camera::GenericCamera, scalar::BasaltScalar,
-};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::camera::generic_camera::GenericCamera;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector, Isometry3, SVector, Vector2, Vector3, Vector4};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -257,7 +256,7 @@ fn run<S: BasaltScalar>(text: &str, mode: Option<LinearizationType>) {
                     let transform = if host == target {
                         nalgebra::Matrix4::identity()
                     } else {
-                        firefly_basalt_headers::utils::sophus_utils::se3_matrix(
+                        firefly_basalt::utils::sophus_utils::se3_matrix(
                             &firefly_basalt::utils::ba_utils::compute_rel_pose(
                                 ba.get_pose_state_with_lin(host.frame_id).pose(),
                                 &ba.calib.t_i_c[host.cam_id],

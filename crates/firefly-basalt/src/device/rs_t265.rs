@@ -3,14 +3,13 @@
 // Complete license: ../../LICENSE.
 //! Pure frame-processing and calibration portion of original `device/rs_t265.h/.cpp`.
 //! These routines process actual SDK payloads; they do not emulate a device.
+use crate::imu::imu_types::ImuData;
+use crate::utils::sophus_utils::so3_from_quaternion;
 use crate::{io::dataset_io::ImageData, optical_flow::OpticalFlowInput};
-use firefly_basalt_headers::{
-    calibration::Calibration,
-    camera::{generic_camera::GenericCamera, kannala_brandt_camera4::KannalaBrandtCamera4},
-    image::image::ManagedImage,
-    imu::imu_types::ImuData,
-    utils::sophus_utils::so3_from_quaternion,
-};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::camera::generic_camera::GenericCamera;
+use firefly_calibration::camera::kannala_brandt_camera4::KannalaBrandtCamera4;
+use firefly_calibration::image::image::ManagedImage;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{
     Isometry3, Matrix3, Quaternion, Rotation3, SVector, Translation3, UnitQuaternion, Vector2,

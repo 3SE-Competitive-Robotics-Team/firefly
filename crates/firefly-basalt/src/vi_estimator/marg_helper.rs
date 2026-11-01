@@ -8,7 +8,7 @@ use crate::utils::{
     },
     ldlt::Ldlt,
 };
-use firefly_basalt_headers::scalar::BasaltScalar;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector};
 use std::{collections::BTreeSet, marker::PhantomData};
 

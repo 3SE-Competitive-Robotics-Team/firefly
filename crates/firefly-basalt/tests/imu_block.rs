@@ -1,16 +1,13 @@
+use firefly_basalt::imu::imu_types::ImuData;
+use firefly_basalt::imu::imu_types::PoseVelBiasState;
+use firefly_basalt::imu::preintegration::IntegratedImuMeasurement;
+use firefly_basalt::utils::sophus_utils::so3_exp;
 use firefly_basalt::{
     linearization::imu_block::ImuBlock,
     optimization::accumulator::DenseAccumulator,
     utils::imu_types::{AbsOrderMap, ImuLinData, PoseVelBiasStateWithLin},
 };
-use firefly_basalt_headers::{
-    imu::{
-        imu_types::{ImuData, PoseVelBiasState},
-        preintegration::IntegratedImuMeasurement,
-    },
-    scalar::BasaltScalar,
-    utils::sophus_utils::so3_exp,
-};
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector, Isometry3, SVector, Translation3, Vector3};
 use serde_json::Value;
 use std::collections::BTreeMap;

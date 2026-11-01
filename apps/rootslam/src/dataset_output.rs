@@ -118,7 +118,7 @@ pub fn write_trajectory(
                 t.x, t.y, t.z, q.w, q.i, q.j, q.k
             )?,
             TrajectoryFormat::Kitti => {
-                let matrix = firefly_basalt_headers::utils::sophus_utils::se3_matrix(pose);
+                let matrix = firefly_basalt::utils::sophus_utils::se3_matrix(pose);
                 for row in 0..3 {
                     for col in 0..4 {
                         write!(output, "{:.12e} ", matrix[(row, col)])?;

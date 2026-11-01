@@ -6,7 +6,7 @@
 
 use crate::utils::ldlt::Ldlt;
 use crate::utils::sparse_ldlt::{SparseLdlt, SparseMatrix, conjugate_gradient};
-use firefly_basalt_headers::scalar::BasaltScalar;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector, SMatrix, SVector};
 use std::{collections::HashMap, time::Instant};
 

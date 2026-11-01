@@ -6,7 +6,7 @@
 //! `0f3b2b52c807f70ff4e2973ce253c73329eea7bc`.
 
 use crate::utils::common_types::{FrameId, TimeCamId};
-use firefly_basalt_headers::scalar::BasaltScalar;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::Vector2;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

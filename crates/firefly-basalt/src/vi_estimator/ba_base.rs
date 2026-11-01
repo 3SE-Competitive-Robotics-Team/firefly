@@ -5,17 +5,16 @@
 //! `0f3b2b52c807f70ff4e2973ce253c73329eea7bc`.
 
 use super::landmark_database::LandmarkDatabase;
+use crate::utils::sophus_utils::so3_inverse;
+use crate::utils::sophus_utils::so3_product;
 use crate::utils::{
     ba_utils::{compute_rel_pose, linearize_point},
     common_types::TimeCamId,
     imu_types::{AbsOrderMap, MargLinData, PoseStateWithLin, PoseVelBiasStateWithLin},
 };
-use firefly_basalt_headers::{
-    calibration::Calibration,
-    camera::stereographic_param::StereographicParam,
-    scalar::BasaltScalar,
-    utils::sophus_utils::{so3_inverse, so3_product},
-};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::camera::stereographic_param::StereographicParam;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{
     DMatrix, DVector, Isometry3, Matrix4, SMatrix, SVector, Translation3, Vector2, Vector3, Vector4,
 };

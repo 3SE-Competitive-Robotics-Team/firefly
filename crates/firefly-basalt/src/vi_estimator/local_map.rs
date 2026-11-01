@@ -3,7 +3,7 @@
 use super::{ba_base::BundleAdjustmentBase, landmark_database::Keypoint};
 use crate::optical_flow::OpticalFlowResult;
 use crate::utils::common_types::TimeCamId;
-use firefly_basalt_headers::scalar::BasaltScalar;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::Isometry3;
 use std::{
     collections::{BTreeMap, BTreeSet},

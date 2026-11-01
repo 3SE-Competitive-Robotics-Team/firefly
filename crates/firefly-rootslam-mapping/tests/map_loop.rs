@@ -3,13 +3,10 @@ use firefly_basalt::{
     utils::common_types::TimeCamId,
     vi_estimator::{landmark_database::Keypoint, local_map::LocalMapSnapshot},
 };
-use firefly_basalt_headers::{
-    calibration::Calibration,
-    camera::{
-        generic_camera::GenericCamera, pinhole_camera::PinholeCamera,
-        stereographic_param::StereographicParam,
-    },
-};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::camera::generic_camera::GenericCamera;
+use firefly_calibration::camera::pinhole_camera::PinholeCamera;
+use firefly_calibration::camera::stereographic_param::StereographicParam;
 use firefly_rootslam_mapping::{
     loop_closure::{LoopDetector, LoopOptions},
     map::{

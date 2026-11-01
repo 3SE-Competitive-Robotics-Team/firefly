@@ -5,6 +5,9 @@ use super::{
     ba_base::BundleAdjustmentBase,
     landmark_database::{LandmarkDatabase, ObservationIndex},
 };
+use crate::imu::preintegration::IntegratedImuMeasurement;
+use crate::utils::sophus_utils::hat;
+use crate::utils::sophus_utils::se3_matrix;
 use crate::{
     optimization::accumulator::BlockAccumulator,
     utils::{
@@ -14,11 +17,7 @@ use crate::{
         ldlt::Ldlt,
     },
 };
-use firefly_basalt_headers::{
-    imu::preintegration::IntegratedImuMeasurement,
-    scalar::BasaltScalar,
-    utils::sophus_utils::{hat, se3_matrix},
-};
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector, Matrix3, Matrix4, SMatrix, SVector, Vector2, Vector3};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};

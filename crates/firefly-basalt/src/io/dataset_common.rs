@@ -1,6 +1,6 @@
 //! Shared parsing and image-codec adaptation for the original dataset readers.
 use super::dataset_io::{AccelData, GyroData, ImageData};
-use firefly_basalt_headers::image::image::ManagedImage;
+use firefly_calibration::image::image::ManagedImage;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion};
 use std::{fs, path::Path, str::FromStr, sync::Arc};

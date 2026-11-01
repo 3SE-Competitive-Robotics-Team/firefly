@@ -4,7 +4,6 @@ exclude = ["apps/firefly-sim", "apps/firefly-viz"]
 resolver = "3"
 
 [workspace.dependencies]
-firefly-basalt-headers = { path = "crates/firefly-basalt-headers" }
 firefly-calibration = { path = "crates/firefly-calibration" }
 firefly-basalt = { path = "crates/firefly-basalt" }
 firefly-basalt-realsense = { path = "crates/firefly-basalt-realsense" }

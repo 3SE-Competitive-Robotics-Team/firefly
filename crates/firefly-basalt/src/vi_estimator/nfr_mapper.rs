@@ -23,9 +23,8 @@ use crate::{
         vio_config::VioConfig,
     },
 };
-use firefly_basalt_headers::{
-    calibration::Calibration, camera::stereographic_param::StereographicParam,
-};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::camera::stereographic_param::StereographicParam;
 use firefly_error::Result;
 use nalgebra::{DMatrix, SMatrix, Vector3, Vector4};
 use rayon::prelude::*;

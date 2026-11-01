@@ -1,10 +1,9 @@
+use firefly_basalt::imu::imu_types::PoseVelBiasState;
+use firefly_basalt::utils::sophus_utils::se3_expd;
+use firefly_basalt::utils::sophus_utils::se3_matrix;
 use firefly_basalt::{
     mapper_sim::{extract_nonlinear_factors, process_marg_data},
     utils::imu_types::{MargData, PoseStateWithLin, PoseVelBiasStateWithLin},
-};
-use firefly_basalt_headers::{
-    imu::imu_types::PoseVelBiasState,
-    utils::sophus_utils::{se3_expd, se3_matrix},
 };
 use nalgebra::{DMatrix, DVector, SVector, Vector3};
 use serde_json::Value;

@@ -2,7 +2,7 @@ use firefly_basalt::optimization::{
     linearize::ReprojectionStats,
     spline_optimize::{Options, SplineOptimization},
 };
-use firefly_basalt_headers::utils::sophus_utils::so3_exp;
+use firefly_basalt::utils::sophus_utils::so3_exp;
 use nalgebra::{Isometry3, Translation3, Vector3};
 use serde_json::Value;
 fn check(actual: f64, expected: f64, label: &str) {

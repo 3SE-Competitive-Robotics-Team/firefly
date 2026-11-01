@@ -1,6 +1,7 @@
 use super::*;
 use crate::{io::dataset_io::ImageData, optical_flow::OpticalFlowFactory};
-use firefly_basalt_headers::{camera::generic_camera::GenericCamera, image::image::ManagedImage};
+use firefly_calibration::camera::generic_camera::GenericCamera;
+use firefly_calibration::image::image::ManagedImage;
 use nalgebra::{Isometry3, Translation3, UnitQuaternion};
 
 #[test]

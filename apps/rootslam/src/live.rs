@@ -3,6 +3,7 @@
 //! Headless device/estimator and recording paths corresponding to
 //! `rs_t265_vio.cpp` and `rs_t265_record.cpp`. The SDK bridge owns acquisition.
 use crate::dataset::EndMarker;
+use firefly_basalt::imu::imu_types::PoseVelBiasState;
 use firefly_basalt::{
     device::rs_t265_device::{OutputQueues, RsT265Device},
     optical_flow::OpticalFlowFactory,
@@ -10,7 +11,7 @@ use firefly_basalt::{
     utils::vio_config::VioConfig,
     vi_estimator::vio_estimator::VioEstimatorFactory,
 };
-use firefly_basalt_headers::{calibration::Calibration, imu::imu_types::PoseVelBiasState};
+use firefly_calibration::calibration::Calibration;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::Vector3;
 use serde::Deserialize;
@@ -428,12 +429,12 @@ fn run_vio(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use firefly_basalt::imu::imu_types::ImuData;
     use firefly_basalt::{
         device::rs_t265::RsPoseData, io::dataset_io::ImageData, optical_flow::OpticalFlowInput,
     };
-    use firefly_basalt_headers::{
-        camera::generic_camera::GenericCamera, image::image::ManagedImage, imu::imu_types::ImuData,
-    };
+    use firefly_calibration::camera::generic_camera::GenericCamera;
+    use firefly_calibration::image::image::ManagedImage;
     use nalgebra::{Isometry3, Vector2, Vector4};
     use std::sync::{Mutex, atomic::AtomicUsize};
 

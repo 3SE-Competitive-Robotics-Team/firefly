@@ -1,5 +1,6 @@
 use firefly_basalt::{utils::common_types::TimeCamId, vio_sim::Simulation};
-use firefly_basalt_headers::{calibration::Calibration, camera::generic_camera::GenericCamera};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::camera::generic_camera::GenericCamera;
 use nalgebra::{Isometry3, Vector2, Vector3, Vector4};
 use serde_json::Value;
 

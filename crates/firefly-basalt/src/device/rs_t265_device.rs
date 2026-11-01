@@ -7,10 +7,11 @@ use super::rs_t265::{
     CameraProfile, MotionIntrinsics, RsImuData, RsPoseData, RsT265Processor, VideoFrame,
     export_calibration,
 };
+use crate::imu::imu_types::ImuData;
 use crate::optical_flow::OpticalFlowInput;
 use crossbeam_channel::{Sender, TrySendError};
-use firefly_basalt_headers::{calibration::Calibration, imu::imu_types::ImuData};
 use firefly_basalt_realsense::{Device, Payload, PayloadReceiver};
+use firefly_calibration::calibration::Calibration;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::Vector3;
 use std::sync::{Arc, Mutex};

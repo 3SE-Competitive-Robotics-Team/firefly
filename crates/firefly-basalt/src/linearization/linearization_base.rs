@@ -11,7 +11,7 @@ use crate::{
     utils::imu_types::{AbsOrderMap, ImuLinData, MargLinData},
     vi_estimator::ba_base::BundleAdjustmentBase,
 };
-use firefly_basalt_headers::scalar::BasaltScalar;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector};
 use std::collections::{BTreeSet, HashSet};
 

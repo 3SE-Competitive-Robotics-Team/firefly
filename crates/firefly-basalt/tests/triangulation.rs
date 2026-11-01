@@ -1,5 +1,5 @@
 use firefly_basalt::vi_estimator::ba_base::BundleAdjustmentBase;
-use firefly_basalt_headers::scalar::BasaltScalar;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{Isometry3, Quaternion, SVector, Translation3, UnitQuaternion};
 use serde_json::Value;
 

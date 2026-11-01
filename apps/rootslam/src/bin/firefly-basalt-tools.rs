@@ -4,7 +4,8 @@ use firefly_basalt::{
     io::dataset_io::DatasetIoFactory,
     kitti_eval, time_alignment,
 };
-use firefly_basalt_headers::calibration::{Calibration, MocapCalibration};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::calibration::MocapCalibration;
 use firefly_error::{Error, ErrorKind, Result};
 use serde::Deserialize;
 use std::{
@@ -765,9 +766,8 @@ mod tests {
 
     #[test]
     fn optical_flow_task_collects_real_tracks_and_joins_after_read_error_or_panic() {
-        use firefly_basalt_headers::{
-            camera::generic_camera::GenericCamera, image::image::ManagedImage,
-        };
+        use firefly_calibration::camera::generic_camera::GenericCamera;
+        use firefly_calibration::image::image::ManagedImage;
         let mut model = GenericCamera::from_name("pinhole");
         model.set_from_init(nalgebra::Vector4::new(200., 200., 128., 96.));
         let calibration = Calibration {

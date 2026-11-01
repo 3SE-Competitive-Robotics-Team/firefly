@@ -1,4 +1,5 @@
 //! Independent original-controller comparison after freezing random matching.
+use firefly_basalt::utils::sophus_utils::se3_matrix;
 use firefly_basalt::{
     mapper::Mapper,
     utils::{
@@ -6,7 +7,6 @@ use firefly_basalt::{
         vio_config::VioConfig,
     },
 };
-use firefly_basalt_headers::utils::sophus_utils::se3_matrix;
 use nalgebra::Vector2;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs::File, io::BufReader, path::PathBuf};

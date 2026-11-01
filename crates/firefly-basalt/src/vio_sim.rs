@@ -2,18 +2,18 @@
 // SPDX-License-Identifier: BSD-3-Clause AND MPL-2.0
 //! Original `src/vio_sim.cpp` simulation, with drawing and queue consumers owned
 //! by the caller. Random streams reproduce the Linux/glibc/libstdc++ reference.
+use crate::imu::imu_types::ImuData;
+use crate::spline::se3_spline::Se3Spline;
+use crate::utils::sophus_utils::se3_inverse;
+use crate::utils::sophus_utils::se3_product;
+use crate::utils::sophus_utils::so3_inverse;
 use crate::{
     optical_flow::{AffineCompact2, OpticalFlowResult},
     utils::{common_types::TimeCamId, sim_utils::SimObservations, vio_config::VioConfig},
     vi_estimator::vio_estimator::{VioEstimatorBase, VioEstimatorFactory, VioWorkerOutputs},
 };
-use firefly_basalt_headers::{
-    calibration::Calibration,
-    image::image::ManagedImage,
-    imu::imu_types::ImuData,
-    spline::se3_spline::Se3Spline,
-    utils::sophus_utils::{se3_inverse, se3_product, so3_inverse},
-};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::image::image::ManagedImage;
 use nalgebra::{Isometry3, Vector2, Vector3, Vector4};
 use serde::{Serialize, ser::SerializeMap};
 use std::{

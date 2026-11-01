@@ -93,7 +93,7 @@ use super::common_types::{Descriptor, KeypointsData, MatchData};
 #[cfg(test)]
 #[path = "keypoints_tests.rs"]
 mod tests;
-use firefly_basalt_headers::image::image::Image;
+use firefly_calibration::image::image::Image;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{Isometry3, Matrix3, Matrix4, Rotation3, Translation3, UnitQuaternion, Vector2};
 use purecv::{

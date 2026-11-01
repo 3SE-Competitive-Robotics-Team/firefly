@@ -10,6 +10,10 @@ use super::{
         VioEstimatorEngine, VioStatus, VioVisualizationData, VioWorkerInputs, VioWorkerOutputs,
     },
 };
+use crate::imu::imu_types::ImuData;
+use crate::imu::imu_types::PoseState;
+use crate::imu::imu_types::PoseVelBiasState;
+use crate::imu::preintegration::IntegratedImuMeasurement;
 use crate::utils::common_types::TimeCamId;
 use crate::{
     linearization::{
@@ -28,15 +32,9 @@ use crate::{
         vio_config::VioConfig,
     },
 };
-use firefly_basalt_headers::{
-    calibration::Calibration,
-    camera::stereographic_param::StereographicParam,
-    imu::{
-        imu_types::{ImuData, PoseState, PoseVelBiasState},
-        preintegration::IntegratedImuMeasurement,
-    },
-    scalar::BasaltScalar,
-};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::camera::stereographic_param::StereographicParam;
+use firefly_calibration::scalar::BasaltScalar;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{DMatrix, DVector, Isometry3, Quaternion, UnitQuaternion, Vector3, Vector4};
 use std::{
@@ -87,7 +85,7 @@ fn rotation_from_two_vectors<S: BasaltScalar>(
     use crate::utils::complete_orthogonal_decomposition::{
         apply_householder_left, make_householder,
     };
-    use firefly_basalt_headers::utils::sophus_utils::so3_from_quaternion;
+    use crate::utils::sophus_utils::so3_from_quaternion;
     let normalize = |v: &Vector3<S>| {
         let squared = v.norm_squared();
         if squared > S::zero() {
@@ -1190,7 +1188,7 @@ impl<S: BasaltScalar> VioEstimatorEngine for SqrtKeypointVioEstimator<S> {
 mod tests {
     use super::*;
     use crate::{optical_flow::AffineCompact2, utils::vio_config::LinearizationType};
-    use firefly_basalt_headers::camera::generic_camera::GenericCamera;
+    use firefly_calibration::camera::generic_camera::GenericCamera;
     use nalgebra::{Matrix2, Vector2};
 
     fn initialization_oracle<S: BasaltScalar>(key: &str, tolerance: f64) {

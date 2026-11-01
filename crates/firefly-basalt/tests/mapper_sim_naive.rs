@@ -88,9 +88,8 @@ fn mapper_random_callbacks_consume_the_original_eigen_stream() {
     let mut mapper = MapperSimulation::load(&path.join("calibration.json"), &path).unwrap();
     mapper.random_inc();
     mapper.random_yaw_inc();
-    let matrix = firefly_basalt_headers::utils::sophus_utils::se3_matrix(
-        mapper.mapper.base.frame_poses[&0].pose(),
-    );
+    let matrix =
+        firefly_basalt::utils::sophus_utils::se3_matrix(mapper.mapper.base.frame_poses[&0].pose());
     let expected: Value = serde_json::from_str(include_str!("reference/mapper_sim.json")).unwrap();
     for row in 0..4 {
         for column in 0..4 {

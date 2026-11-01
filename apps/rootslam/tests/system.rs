@@ -1,5 +1,5 @@
 use firefly_basalt::{optical_flow::OpticalFlowResult, vi_estimator::local_map::LocalMapSnapshot};
-use firefly_basalt_headers::calibration::Calibration;
+use firefly_calibration::calibration::Calibration;
 use firefly_rootslam::system::{MappingWorker, SystemOptions};
 use nalgebra::Isometry3;
 use std::{

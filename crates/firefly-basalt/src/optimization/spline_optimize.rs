@@ -8,13 +8,17 @@ use super::{
     spline_linearize::{ComputeErrorSplineOpt, LinearizeSplineOpt},
 };
 use crate::io::dataset_io::{AccelData, AprilgridCornersData, GyroData, MocapPoseData, PoseData};
-use firefly_basalt_headers::{
-    calibration::calib_bias::{CalibAccelBias, CalibGyroBias},
-    calibration::{Calibration, MocapCalibration},
-    camera::generic_camera::GenericCamera,
-    spline::se3_spline::Se3Spline,
-    utils::sophus_utils::{se3_expd, se3_inverse, se3_product, so3_exp, so3_product},
-};
+use crate::spline::se3_spline::Se3Spline;
+use crate::utils::sophus_utils::se3_expd;
+use crate::utils::sophus_utils::se3_inverse;
+use crate::utils::sophus_utils::se3_product;
+use crate::utils::sophus_utils::so3_exp;
+use crate::utils::sophus_utils::so3_product;
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::calibration::MocapCalibration;
+use firefly_calibration::calibration::calib_bias::CalibAccelBias;
+use firefly_calibration::calibration::calib_bias::CalibGyroBias;
+use firefly_calibration::camera::generic_camera::GenericCamera;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{DVector, Isometry3, Vector2, Vector3, Vector4};
 use serde::Serialize;

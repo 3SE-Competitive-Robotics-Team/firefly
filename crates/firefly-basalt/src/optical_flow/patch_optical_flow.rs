@@ -41,16 +41,16 @@ use super::{
     AffineCompact2, KeypointId, OpticalFlowInput, OpticalFlowResult, patch::OpticalFlowPatch,
     patterns::Pattern,
 };
+use crate::image::image_pyr::ManagedImagePyr;
+use crate::utils::sophus_utils::so3_inverse;
+use crate::utils::sophus_utils::so3_product;
 use crate::utils::{
     common_types::KeypointsData,
     keypoints::{compute_essential, detect_keypoints},
     vio_config::VioConfig,
 };
-use firefly_basalt_headers::utils::sophus_utils::{so3_inverse, so3_product};
-use firefly_basalt_headers::{
-    calibration::Calibration,
-    image::{image::Image, image_pyr::ManagedImagePyr},
-};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::image::image::Image;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{Matrix4, SVector, Vector2, Vector4};
 use rayon::prelude::*;

@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // See LICENSE-BSD-3-Clause. Native archive order from official imu_types.h.
 use super::{PoseStateWithLin, PoseVelBiasStateWithLin};
+use crate::imu::imu_types::PoseState;
+use crate::imu::imu_types::PoseVelBiasState;
 use crate::{io::marg_data_io::binary as b, utils::common_types::CerealBinary};
-use firefly_basalt_headers::imu::imu_types::{PoseState, PoseVelBiasState};
 use firefly_error::Result;
 use std::io::{Read, Write};
 

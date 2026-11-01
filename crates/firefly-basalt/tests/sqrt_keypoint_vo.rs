@@ -6,11 +6,10 @@ use firefly_basalt::{
         vio_estimator::{VioEstimatorEngine, VioStatus, VioWorkerOutputs},
     },
 };
-use firefly_basalt_headers::{
-    calibration::Calibration,
-    camera::{generic_camera::GenericCamera, pinhole_camera::PinholeCamera},
-    scalar::BasaltScalar,
-};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::camera::generic_camera::GenericCamera;
+use firefly_calibration::camera::pinhole_camera::PinholeCamera;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{Isometry3, Vector2, Vector3, Vector4};
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -42,13 +41,11 @@ fn worker_join_preserves_initialized_state_and_rejects_restart() {
             if use_imu {
                 estimator
                     .imu_data_queue()
-                    .send(Some(Arc::new(
-                        firefly_basalt_headers::imu::imu_types::ImuData {
-                            t_ns: 17,
-                            accel: Vector3::new(0., 0., 9.81),
-                            gyro: Vector3::zeros(),
-                        },
-                    )))
+                    .send(Some(Arc::new(firefly_basalt::imu::imu_types::ImuData {
+                        t_ns: 17,
+                        accel: Vector3::new(0., 0., 9.81),
+                        gyro: Vector3::zeros(),
+                    })))
                     .unwrap();
             }
             estimator.imu_data_queue().send(None).unwrap();

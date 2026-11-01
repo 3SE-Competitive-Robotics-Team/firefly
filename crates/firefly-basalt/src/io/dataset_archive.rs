@@ -3,7 +3,7 @@
 //! Native cereal overloads from official `include/basalt/io/dataset_io.h`.
 use super::dataset_io::{AccelData, GyroData};
 use crate::utils::common_types::CerealBinary;
-use firefly_basalt_headers::image::image::ManagedImage;
+use firefly_calibration::image::image::ManagedImage;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::Vector3;
 use std::io::{Read, Write};

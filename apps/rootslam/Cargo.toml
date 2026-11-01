@@ -19,11 +19,16 @@ name = "firefly-basalt-live"
 path = "src/bin/firefly-basalt-live.rs"
 required-features = ["realsense"]
 
+[[bin]]
+name = "firefly-rootslam-live"
+path = "src/bin/firefly-rootslam-live.rs"
+
 [dependencies]
 crossbeam-channel.workspace = true
+firefly-base.workspace = true
 signal-hook.workspace = true
 firefly-basalt.workspace = true
-firefly-basalt-headers.workspace = true
+firefly-calibration.workspace = true
 firefly-rootslam-mapping.workspace = true
 firefly-error.workspace = true
 firefly-config.workspace = true

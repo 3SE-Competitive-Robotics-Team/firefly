@@ -1,10 +1,11 @@
 //! `RootSLAM` equations (1), (8), and (10). Measurements map body b into body a.
-use firefly_basalt_headers::{
-    scalar::BasaltScalar,
-    utils::sophus_utils::{
-        left_jacobian_inv_so3, left_jacobian_so3, so3_exp, so3_inverse, so3_log, so3_product,
-    },
-};
+use firefly_basalt::utils::sophus_utils::left_jacobian_inv_so3;
+use firefly_basalt::utils::sophus_utils::left_jacobian_so3;
+use firefly_basalt::utils::sophus_utils::so3_exp;
+use firefly_basalt::utils::sophus_utils::so3_inverse;
+use firefly_basalt::utils::sophus_utils::so3_log;
+use firefly_basalt::utils::sophus_utils::so3_product;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{Isometry3, Matrix3, SMatrix, SVector, Translation3, Vector3};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +54,7 @@ pub(crate) fn inverse<S: BasaltScalar>(pose: &Isometry3<S>) -> Isometry3<S> {
     )
 }
 pub(crate) fn cast_pose<S: BasaltScalar, T: BasaltScalar>(pose: &Isometry3<S>) -> Isometry3<T> {
-    firefly_basalt_headers::imu::imu_types::PoseState::new(0, *pose)
+    firefly_basalt::imu::imu_types::PoseState::new(0, *pose)
         .cast::<T>()
         .t_w_i
 }

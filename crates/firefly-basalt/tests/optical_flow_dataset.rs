@@ -3,7 +3,7 @@ use firefly_basalt::{
     optical_flow::{OpticalFlowFactory, OpticalFlowInput},
     utils::vio_config::VioConfig,
 };
-use firefly_basalt_headers::calibration::Calibration;
+use firefly_calibration::calibration::Calibration;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{fs::File, io::BufReader, path::PathBuf, sync::Arc};

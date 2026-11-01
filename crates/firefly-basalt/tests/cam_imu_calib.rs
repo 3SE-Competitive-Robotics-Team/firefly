@@ -1,6 +1,8 @@
 use firefly_basalt::calibration::cam_imu_calib::initialize_rotation;
 use firefly_basalt::io::dataset_io::GyroData;
-use firefly_basalt_headers::utils::sophus_utils::{so3_exp, so3_matrix, so3_product};
+use firefly_basalt::utils::sophus_utils::so3_exp;
+use firefly_basalt::utils::sophus_utils::so3_matrix;
+use firefly_basalt::utils::sophus_utils::so3_product;
 use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3};
 
 #[test]

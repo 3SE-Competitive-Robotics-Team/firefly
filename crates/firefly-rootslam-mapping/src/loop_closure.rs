@@ -11,7 +11,7 @@ use firefly_basalt::{
     hash_bow::HashBow,
     utils::common_types::{Descriptor, HashBowVector, TimeCamId},
 };
-use firefly_basalt_headers::calibration::Calibration;
+use firefly_calibration::calibration::Calibration;
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_opengv::{
     absolute_pose::noncentral_absolute_adapter::NoncentralAbsoluteAdapter,

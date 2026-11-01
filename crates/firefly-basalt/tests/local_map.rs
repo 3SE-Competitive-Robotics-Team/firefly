@@ -6,7 +6,7 @@ use firefly_basalt::{
         local_map::LocalMapSnapshot,
     },
 };
-use firefly_basalt_headers::calibration::Calibration;
+use firefly_calibration::calibration::Calibration;
 use nalgebra::{Isometry3, SVector, Vector2};
 use std::collections::{BTreeMap, BTreeSet};
 

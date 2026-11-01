@@ -54,7 +54,10 @@ def flight_environment(request):
                          or os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     if not graphical_session:
         pytest.fail("flight test requires a graphical session (DISPLAY or WAYLAND_DISPLAY)")
-    missing = [name for name in ("render", "firefly-okvis-x", "fc", "ffctl")
+    vio_process = os.environ.get("FIREFLY_VIO_PROCESS", "firefly-okvis-x")
+    if vio_process not in {"firefly-okvis-x", "firefly-rootslam-live"}:
+        pytest.fail(f"unsupported FIREFLY_VIO_PROCESS: {vio_process}")
+    missing = [name for name in ("render", vio_process, "fc", "ffctl")
                if not (ROOT / f"target/release/{name}").is_file()]
     if missing:
         pytest.fail(f"missing release binaries: {missing}; run cargo xtask release")

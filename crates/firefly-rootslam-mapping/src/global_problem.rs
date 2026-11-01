@@ -8,7 +8,7 @@ use crate::{
     map::{MapKeyframe, MapLandmark, MapObservation, MapSnapshot, ObservationKey},
     pose_graph::{EdgeKind, PoseGraphEdge},
 };
-use firefly_basalt_headers::calibration::Calibration;
+use firefly_calibration::calibration::Calibration;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{Isometry3, Quaternion, SMatrix, Translation3, UnitQuaternion, Vector2, Vector3};
 use serde::{Deserialize, Serialize};

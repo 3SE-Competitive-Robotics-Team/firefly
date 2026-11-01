@@ -1,5 +1,5 @@
 use firefly_basalt::kitti_eval::{eval_kitti, read_poses, write_results};
-use firefly_basalt_headers::utils::sophus_utils::so3_exp;
+use firefly_basalt::utils::sophus_utils::so3_exp;
 use nalgebra::{Isometry3, Translation3, Vector3};
 use serde_json::Value;
 

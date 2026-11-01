@@ -1,9 +1,10 @@
+use firefly_basalt::utils::sophus_utils::so3_exp;
 use firefly_basalt::{
     mapper::{Mapper, read_ground_truth},
     utils::{imu_types::PoseStateWithLin, vio_config::VioConfig},
     vi_estimator::nfr_mapper::NfrMapper,
 };
-use firefly_basalt_headers::{calibration::Calibration, utils::sophus_utils::so3_exp};
+use firefly_calibration::calibration::Calibration;
 use nalgebra::{Isometry3, Translation3, Vector3};
 use std::collections::BTreeMap;
 

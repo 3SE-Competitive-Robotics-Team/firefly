@@ -6,10 +6,11 @@ use super::{
     linearize::{CalibCommonData, PoseCalibH, ReprojectionStats},
 };
 use crate::io::dataset_io::AprilgridCornersData;
-use firefly_basalt_headers::camera::generic_camera::GenericCamera;
-use firefly_basalt_headers::utils::sophus_utils::{
-    se3_inverse, se3_matrix, se3_product, so3_matrix,
-};
+use crate::utils::sophus_utils::se3_inverse;
+use crate::utils::sophus_utils::se3_matrix;
+use crate::utils::sophus_utils::se3_product;
+use crate::utils::sophus_utils::so3_matrix;
+use firefly_calibration::camera::generic_camera::GenericCamera;
 use nalgebra::{Isometry3, Matrix3, SMatrix, Vector2, Vector4};
 use rayon::prelude::*;
 use std::collections::BTreeMap;

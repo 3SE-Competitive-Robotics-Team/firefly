@@ -10,6 +10,12 @@ use super::{
     calibration_helper::{CalibCornerMap, CalibHelper, CalibInitPoseMap, ProjectedCornerData},
 };
 use crate::io::dataset_io::DatasetIoFactory;
+use crate::utils::sophus_utils::se3_inverse;
+use crate::utils::sophus_utils::se3_matrix;
+use crate::utils::sophus_utils::se3_product;
+use crate::utils::sophus_utils::so3_inverse;
+use crate::utils::sophus_utils::so3_log;
+use crate::utils::sophus_utils::so3_product;
 use crate::{
     io::dataset_io::{GyroData, VioDatasetPtr},
     optimization::{
@@ -17,9 +23,6 @@ use crate::{
         spline_optimize::{Options, SplineOptimization},
     },
     utils::common_types::TimeCamId,
-};
-use firefly_basalt_headers::utils::sophus_utils::{
-    se3_inverse, se3_matrix, se3_product, so3_inverse, so3_log, so3_product,
 };
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{Isometry3, Matrix3, Quaternion, Translation3, UnitQuaternion, Vector3};

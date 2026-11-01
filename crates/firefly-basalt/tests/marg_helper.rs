@@ -1,6 +1,6 @@
 use firefly_basalt::utils::complete_orthogonal_decomposition::CompleteOrthogonalDecomposition;
 use firefly_basalt::vi_estimator::marg_helper::MargHelper;
-use firefly_basalt_headers::scalar::BasaltScalar;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector};
 use serde_json::Value;
 use std::collections::BTreeSet;

@@ -2,7 +2,7 @@ use firefly_basalt::{
     io::dataset_io::{AccelData, GyroData},
     utils::common_types::CerealBinary,
 };
-use firefly_basalt_headers::image::image::ManagedImage;
+use firefly_calibration::image::image::ManagedImage;
 use nalgebra::Vector3;
 
 #[test]

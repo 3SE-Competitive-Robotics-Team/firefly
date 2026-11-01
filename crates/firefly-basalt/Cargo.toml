@@ -23,7 +23,6 @@ rosbag.workspace = true
 firefly-error.workspace = true
 firefly-opengv.workspace = true
 purecv.workspace = true
-firefly-basalt-headers.workspace = true
 firefly-calibration.workspace = true
 nalgebra.workspace = true
 serde.workspace = true

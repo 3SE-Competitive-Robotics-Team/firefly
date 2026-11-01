@@ -43,7 +43,7 @@ use super::{
 };
 use crate::io::dataset_io::ImageData;
 use crate::utils::vio_config::VioConfig;
-use firefly_basalt_headers::calibration::Calibration;
+use firefly_calibration::calibration::Calibration;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::DMatrix;
 use nalgebra::{Matrix2, Vector2};

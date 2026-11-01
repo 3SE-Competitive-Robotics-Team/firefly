@@ -1,12 +1,12 @@
+use firefly_basalt::imu::imu_types::ImuData;
+use firefly_basalt::utils::sophus_utils::so3_exp;
 use firefly_basalt::{
     device::rs_t265::RsPoseData,
     io::dataset_io::ImageData,
     optical_flow::OpticalFlowInput,
     record_t265::{RecordingSession, encode_image, scalar, utc_date},
 };
-use firefly_basalt_headers::{
-    image::image::ManagedImage, imu::imu_types::ImuData, utils::sophus_utils::so3_exp,
-};
+use firefly_calibration::image::image::ManagedImage;
 use nalgebra::{Isometry3, Translation3, Vector3};
 use std::{
     path::{Path, PathBuf},

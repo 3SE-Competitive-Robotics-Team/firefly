@@ -4,7 +4,8 @@
 //! Original `calibration/vignette.h` and `src/calibration/vignette.cpp`.
 use super::aprilgrid::AprilGrid;
 use crate::{io::dataset_io::VioDatasetPtr, utils::common_types::TimeCamId};
-use firefly_basalt_headers::spline::{rd_spline::RdSpline, spline_common::Jacobian};
+use firefly_calibration::spline::rd_spline::RdSpline;
+use firefly_calibration::spline::spline_common::Jacobian;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{SVector, Vector2, Vector3};
 use std::{collections::BTreeMap, path::Path};

@@ -52,7 +52,9 @@ impl PatchScalar for f64 {
         (a + b) + c
     }
 }
-use firefly_basalt_headers::image::image::{Image, ImageScalar, Pixel};
+use firefly_calibration::image::image::Image;
+use firefly_calibration::image::image::ImageScalar;
+use firefly_calibration::image::image::Pixel;
 use nalgebra::{Isometry2, Matrix3, Point2, SMatrix, SVector, Vector2, Vector3};
 use std::marker::PhantomData;
 

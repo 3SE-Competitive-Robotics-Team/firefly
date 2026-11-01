@@ -3115,7 +3115,6 @@ name = "firefly-basalt"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
- "firefly-basalt-headers",
  "firefly-basalt-realsense",
  "firefly-calibration",
  "firefly-error",
@@ -3133,16 +3132,6 @@ dependencies = [
  "serde",
  "serde_json",
  "webpx",
-]
-
-[[package]]
-name = "firefly-basalt-headers"
-version = "0.1.0"
-dependencies = [
- "nalgebra",
- "proptest",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -3177,7 +3166,6 @@ dependencies = [
 name = "firefly-calibration"
 version = "0.1.0"
 dependencies = [
- "firefly-basalt-headers",
  "firefly-error",
  "firefly-opengv",
  "nalgebra",
@@ -3401,7 +3389,8 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "firefly-basalt",
- "firefly-basalt-headers",
+ "firefly-base",
+ "firefly-calibration",
  "firefly-config",
  "firefly-error",
  "firefly-observability",
@@ -3420,7 +3409,7 @@ name = "firefly-rootslam-mapping"
 version = "0.1.0"
 dependencies = [
  "firefly-basalt",
- "firefly-basalt-headers",
+ "firefly-calibration",
  "firefly-error",
  "firefly-opengv",
  "log",

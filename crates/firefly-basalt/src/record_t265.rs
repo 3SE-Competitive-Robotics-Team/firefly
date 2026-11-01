@@ -3,9 +3,10 @@
 //! Non-GUI recording workers and dataset layout from `src/rs_t265_record.cpp`.
 //! Input detachment and channel closure form a drain barrier; SDK acquisition is
 //! owned by the caller and must detach its destinations before stopping a session.
+use crate::imu::imu_types::ImuData;
 use crate::{device::rs_t265::RsPoseData, optical_flow::OpticalFlowInput};
 use crossbeam_channel::{self as mpsc, Sender as SyncSender};
-use firefly_basalt_headers::{calibration::Calibration, imu::imu_types::ImuData};
+use firefly_calibration::calibration::Calibration;
 use std::{
     fs::{self, File},
     io::{self, BufWriter, Write},
@@ -368,7 +369,7 @@ impl Drop for RecordingSession {
 /// # Errors
 /// Reports invalid image dimensions or codec failure.
 pub fn encode_image(
-    image: &firefly_basalt_headers::image::image::ManagedImage<u16>,
+    image: &firefly_calibration::image::image::ManagedImage<u16>,
     quality: i32,
 ) -> io::Result<Vec<u8>> {
     let view = image.view();

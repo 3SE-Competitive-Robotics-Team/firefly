@@ -3,9 +3,9 @@
 // License notices and conditions are in ../../LICENSE.
 //! `utils/nfr.h` from Basalt 0f3b2b52c807f70ff4e2973ce253c73329eea7bc.
 //! Nonlinear factor residuals with world-additive translation and left rotation increments.
-use firefly_basalt_headers::utils::sophus_utils::{
-    hat, right_jacobian_inv_se3_decoupled, se3_logd,
-};
+use crate::utils::sophus_utils::hat;
+use crate::utils::sophus_utils::right_jacobian_inv_se3_decoupled;
+use crate::utils::sophus_utils::se3_logd;
 use nalgebra::{Isometry3, SMatrix, SVector, UnitQuaternion, Vector2, Vector3};
 
 #[must_use]

@@ -1,10 +1,10 @@
 //! Headless queue execution of original Basalt `vio_sim.cpp`.
 use crate::dataset::EndMarker;
+use firefly_basalt::imu::imu_types::PoseVelBiasState;
 use firefly_basalt::{
     io::marg_data_io::MargDataSaver, utils::imu_types::MargData, utils::vio_config::VioConfig,
     vi_estimator::vio_estimator::VioWorkerOutputs, vio_sim::Simulation,
 };
-use firefly_basalt_headers::imu::imu_types::PoseVelBiasState;
 use firefly_error::{Error, ErrorKind, Result};
 use std::sync::{Arc, mpsc};
 

@@ -3,7 +3,8 @@
 //! least-squares system is solved by LSQR using only A*x and A^T*y; neither
 //! landmark nor reduced normal equations are formed.
 use crate::{map::MapSnapshot, pose_graph};
-use firefly_basalt_headers::{calibration::Calibration, scalar::BasaltScalar};
+use firefly_calibration::calibration::Calibration;
+use firefly_calibration::scalar::BasaltScalar;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{DMatrix, DVector, Isometry3, SMatrix, Vector2, Vector3, Vector4};
 use std::collections::{BTreeMap, BTreeSet};
@@ -415,7 +416,7 @@ fn camera_factor<S: BasaltScalar>(
     pose: &Isometry3<S>,
     point: &Vector3<S>,
     extrinsic: &Isometry3<S>,
-    camera: &firefly_basalt_headers::camera::generic_camera::GenericCamera<S>,
+    camera: &firefly_calibration::camera::generic_camera::GenericCamera<S>,
     pixel: &Vector2<S>,
 ) -> Option<(Vector2<S>, SMatrix<S, 2, 6>, SMatrix<S, 2, 3>)> {
     let camera_world = pose_graph::product(extrinsic, pose);
@@ -1034,7 +1035,7 @@ mod tests {
         map::{MapKeyframe, MapLandmark, MapObservation, ObservationKey},
         pose_graph::{EdgeKind, PoseGraphEdge},
     };
-    use firefly_basalt_headers::camera::generic_camera::GenericCamera;
+    use firefly_calibration::camera::generic_camera::GenericCamera;
 
     fn scene() -> (MapSnapshot, Calibration<f64>) {
         let mut calibration = Calibration::default();

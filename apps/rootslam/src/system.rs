@@ -1,6 +1,6 @@
 //! Asynchronous persistent-map and loop-closing workers, followed by global BA.
 use firefly_basalt::vi_estimator::local_map::LocalMapSnapshot;
-use firefly_basalt_headers::calibration::Calibration;
+use firefly_calibration::calibration::Calibration;
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_rootslam_mapping::{
     global_optimization::{
@@ -495,9 +495,8 @@ mod tests {
         assert!(invalid.validate().is_err());
     }
     fn correction_map() -> (PersistentMap, firefly_rootslam_mapping::map::ObservationKey) {
-        use firefly_basalt_headers::camera::{
-            generic_camera::GenericCamera, pinhole_camera::PinholeCamera,
-        };
+        use firefly_calibration::camera::generic_camera::GenericCamera;
+        use firefly_calibration::camera::pinhole_camera::PinholeCamera;
         use firefly_rootslam_mapping::map::{
             MapFeature, MapLandmark, MapObservation, ObservationKey,
         };

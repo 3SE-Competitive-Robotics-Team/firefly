@@ -14,7 +14,7 @@ use crate::{
     },
     vi_estimator::ba_base::BundleAdjustmentBase,
 };
-use firefly_basalt_headers::scalar::BasaltScalar;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector, Matrix4, SMatrix};
 use rayon::prelude::*;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -145,7 +145,7 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationAbsQr<'a, S, POSE
                         None,
                     );
                 }
-                relative.t_t_h = firefly_basalt_headers::utils::sophus_utils::se3_matrix(&pose);
+                relative.t_t_h = crate::utils::sophus_utils::se3_matrix(&pose);
             }
         }
         let (mut error, valid) = self

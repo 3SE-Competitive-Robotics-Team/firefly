@@ -5,7 +5,8 @@ use firefly_basalt::{
     },
     vi_estimator::landmark_database::Keypoint,
 };
-use firefly_basalt_headers::{camera::generic_camera::GenericCamera, scalar::BasaltScalar};
+use firefly_calibration::camera::generic_camera::GenericCamera;
+use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{
     Isometry3, Quaternion, SMatrix, SVector, Translation3, UnitQuaternion, Vector2, Vector4,
 };
