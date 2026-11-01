@@ -181,10 +181,12 @@ def decode_config(cfg: dict, *, scene_loader: Callable[[], str] = load_scene_nam
     frequencies = [rates.get("physics", 1000.0), rates.get("imu", 1000.0), rates.get("pose", 10.0)]
     if not np.isfinite(frequencies).all() or any(rate <= 0 for rate in frequencies):
         raise ValueError("物理、IMU 与位姿频率必须有限且为正")
-    for rate in frequencies[1:]:
-        ratio = frequencies[0] / rate
-        if ratio < 1 or abs(ratio - round(ratio)) > 1e-9:
-            raise ValueError("物理频率必须为 IMU 与位姿频率的整数倍")
+    # IMU 必须落在物理步网格上；位姿只是采样最新物理状态，允许非整数倍。
+    imu_ratio = frequencies[0] / frequencies[1]
+    if imu_ratio < 1 or abs(imu_ratio - round(imu_ratio)) > 1e-9:
+        raise ValueError("物理频率必须为 IMU 频率的整数倍")
+    if frequencies[2] > frequencies[0] + 1e-9:
+        raise ValueError("位姿频率不能高于物理频率")
     physics_period, imu_period, pose_period = (1.0 / rate for rate in frequencies)
     # 停机坪：缺配置时按场景定义（`firefly_mujoco.scene.SCENES[].pad`）——上电停在地面
     scene_name = scene_loader()

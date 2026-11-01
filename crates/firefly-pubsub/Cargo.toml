@@ -19,8 +19,5 @@ iceoryx2-bb-posix = { workspace = true }
 jiff = { workspace = true }
 log = { workspace = true }
 
-[dev-dependencies]
-firefly-observability = { workspace = true }
-
 [lints]
 workspace = true

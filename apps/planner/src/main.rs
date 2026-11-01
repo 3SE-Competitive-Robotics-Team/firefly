@@ -148,6 +148,8 @@ struct App {
     solver: PlanningWorker,
     output: output::OutputPublisher,
     published_trajectory: u32,
+    /// 重复目标只更新目标身份，轨迹未变；仍需重发当前轨迹以携带新的 `goal_timestamp`。
+    republish_trajectory: bool,
     /// 管理器行为参数（来自配置，启动日志展示）。
     manager_options: ManagerOptions,
     /// 可视化发布端（经 `Firefly/Viz` 话题，`firefly-viz` 进程统一写 rerun）。
@@ -270,6 +272,7 @@ impl App {
                 .map_err(|e| Error::new(ErrorKind::Internal, format!("创建求解线程失败: {e}")))?,
             output,
             published_trajectory: 0,
+            republish_trajectory: false,
             manager_options,
             viz_pub,
             log_ipc,
@@ -448,10 +451,13 @@ impl App {
         // 下一 tick 重新规划飞往新目标
         if let Some(goal) = self.pending_goal.take() {
             let target = Vector3::new(goal.position_x, goal.position_y, goal.position_z);
+            let repeated = (target - self.fsm.manager().goal().coords).norm() < 1e-6;
             match self.fsm.set_goal(now, measured, target) {
                 Ok(()) => {
                     if !self.fsm.is_mandatory_stopped() {
                         self.output.goal_timestamp = goal.timestamp;
+                        // 重复目标不重建轨迹；重发当前轨迹，让采样端看到同一目标身份。
+                        self.republish_trajectory = repeated;
                     }
                     log::info!(
                         "目标更新 ({:.1},{:.1},{:.1})，重新规划中",
@@ -526,10 +532,11 @@ impl App {
             return Ok(());
         }
         if let Some(local) = self.fsm.manager().local()
-            && local.traj_id != self.published_trajectory
+            && (local.traj_id != self.published_trajectory || self.republish_trajectory)
         {
             self.output.trajectory(local)?;
             self.published_trajectory = local.traj_id;
+            self.republish_trajectory = false;
         }
 
         Ok(())

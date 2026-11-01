@@ -11,7 +11,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-fastrace = { workspace = true, features = ["enable"] }
+fastrace.workspace = true
 firefly-cost = { workspace = true }
 firefly-error = { workspace = true }
 firefly-map = { workspace = true }

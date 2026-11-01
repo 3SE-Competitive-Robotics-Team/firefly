@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 
@@ -48,7 +49,10 @@ def flight_environment(request):
     if not explicitly_selected and not enabled:
         pytest.skip(f"run uv run pytest {request.path.relative_to(ROOT)}")
     require_idle(ROOT)
-    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+    # macOS 的图形会话不导出 DISPLAY/WAYLAND_DISPLAY；渲染本身无窗口。
+    graphical_session = (sys.platform == "darwin"
+                         or os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    if not graphical_session:
         pytest.fail("flight test requires a graphical session (DISPLAY or WAYLAND_DISPLAY)")
     missing = [name for name in ("render", "firefly-okvis-x", "fc", "ffctl")
                if not (ROOT / f"target/release/{name}").is_file()]

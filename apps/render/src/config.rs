@@ -2,6 +2,7 @@
 //! 场景光照本体（唯一一份、所有相机共用）在 [`firefly_render::lighting`]。
 
 use bevy::prelude::*;
+use firefly_error::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 
 /// 配置路径（编译期绝对路径，与运行 `CWD` 无关）。
@@ -16,6 +17,8 @@ pub const DEFAULT_ENV_TOP: [f32; 3] = [0.62, 0.68, 0.78];
 pub const DEFAULT_ENV_MID: [f32; 3] = [0.35, 0.38, 0.44];
 pub const DEFAULT_ENV_BOTTOM: [f32; 3] = [0.09, 0.09, 0.10];
 pub const DEFAULT_ENV_INTENSITY: f32 = 1500.0;
+/// 传感器采集缺省频率（Hz）。
+pub const DEFAULT_CAPTURE_HZ: f64 = 10.0;
 
 /// 场景照明配置。
 #[derive(Deserialize, Serialize, Clone, Copy, Debug)]
@@ -106,7 +109,48 @@ impl Default for EnvConfig {
     }
 }
 
-/// `configs/render.toml` 顶层：场景光照、相机曝光与深度退化。
+/// 传感器采集节拍配置。
+#[derive(Deserialize, Serialize, Clone, Copy, Debug)]
+pub struct CaptureConfig {
+    /// 采集频率（Hz）；上限受 Bevy 120Hz 调度约束。
+    #[serde(default = "default_capture_hz")]
+    pub hz: f64,
+}
+
+fn default_capture_hz() -> f64 {
+    DEFAULT_CAPTURE_HZ
+}
+
+impl Default for CaptureConfig {
+    fn default() -> Self {
+        Self {
+            hz: DEFAULT_CAPTURE_HZ,
+        }
+    }
+}
+
+impl CaptureConfig {
+    /// 采集周期（秒，sim 时间轴）。
+    #[must_use]
+    pub fn period_seconds(self) -> f64 {
+        1.0 / self.hz
+    }
+
+    /// # Errors
+    /// 频率非有限、非正或超过 120Hz 调度上限。
+    pub fn validate(self) -> Result<()> {
+        if !self.hz.is_finite() || self.hz <= 0.0 || self.hz > 120.0 {
+            return Err(Error::new(
+                ErrorKind::InvalidArgument,
+                format!("capture.hz 必须在 (0, 120] Hz 内，当前 {}", self.hz),
+            )
+            .with_operation("render config"));
+        }
+        Ok(())
+    }
+}
+
+/// `configs/render.toml` 顶层：场景光照、相机曝光、采集节拍与深度退化。
 #[derive(Resource, Deserialize, Clone, Debug, Default)]
 pub struct RenderConfig {
     /// 场景照明。
@@ -115,6 +159,9 @@ pub struct RenderConfig {
     /// 相机曝光。
     #[serde(default)]
     pub view: ViewConfig,
+    /// 传感器采集节拍。
+    #[serde(default)]
+    pub capture: CaptureConfig,
     /// 场景环境光贴图。
     #[serde(default)]
     pub env: EnvConfig,
@@ -142,6 +189,13 @@ pub struct AssetContract {
 }
 
 impl RenderConfig {
+    /// # Errors
+    /// 采集频率或深度退化参数越界。
+    pub fn validate(&self) -> Result<()> {
+        self.capture.validate()?;
+        self.depth_noise.validate()
+    }
+
     pub fn asset_contract(&self) -> AssetContract {
         AssetContract {
             schema: 1,

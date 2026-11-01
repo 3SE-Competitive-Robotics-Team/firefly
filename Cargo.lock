@@ -3292,7 +3292,6 @@ dependencies = [
  "fastrace",
  "firefly-base",
  "firefly-error",
- "firefly-observability",
  "iceoryx2",
  "iceoryx2-bb-posix",
  "jiff",
