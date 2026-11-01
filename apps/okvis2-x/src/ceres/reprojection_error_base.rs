@@ -14,7 +14,7 @@ use crate::{
         },
     },
 };
-use nalgebra::{DMatrix, DVector, Matrix2, SMatrix, SVector, Vector2, Vector4};
+use nalgebra::{DMatrixView, DVector, Matrix2, SMatrix, SVector, Vector2, Vector4};
 use std::sync::Arc;
 
 /// Camera identity and the residual/parameter sizes of a reprojection cost.
@@ -92,28 +92,21 @@ impl<G: CameraBase + ?Sized> ErrorInterface for ReprojectionError<G> {
         ) {
             return None;
         }
-        let matrices = [
-            DMatrix::from_column_slice(2, 7, j0.as_slice()),
-            DMatrix::from_column_slice(2, 4, j1.as_slice()),
-            DMatrix::from_column_slice(2, 7, j2.as_slice()),
-        ];
-        let mins = [
-            DMatrix::from_column_slice(2, 6, m0.as_slice()),
-            DMatrix::from_column_slice(2, 3, m1.as_slice()),
-            DMatrix::from_column_slice(2, 6, m2.as_slice()),
-        ];
+        let matrices: [DMatrixView<'_, f64>; 3] = [j0.as_view(), j1.as_view(), j2.as_view()];
+        let mins: [DMatrixView<'_, f64>; 3] = [m0.as_view(), m1.as_view(), m2.as_view()];
         Some(ErrorEvaluation {
             residuals: DVector::from_column_slice(residual.as_slice()),
             jacobians: matrices
                 .into_iter()
                 .enumerate()
-                .map(|(i, m)| jacobians.is_some_and(|x| x[i]).then_some(m))
+                .map(|(i, m)| jacobians.is_some_and(|x| x[i]).then(|| m.into_owned()))
                 .collect(),
             minimal_jacobians: mins
                 .into_iter()
                 .enumerate()
                 .map(|(i, m)| {
-                    (jacobians.is_some_and(|x| x[i]) && minimal.is_some_and(|x| x[i])).then_some(m)
+                    (jacobians.is_some_and(|x| x[i]) && minimal.is_some_and(|x| x[i]))
+                        .then(|| m.into_owned())
                 })
                 .collect(),
         })
