@@ -12,11 +12,11 @@ use crate::{
     optimization::accumulator::BlockAccumulator,
     utils::{
         ba_utils::{compute_rel_pose, linearize_point},
-        common_types::TimeCamId,
         imu_types::{AbsOrderMap, PoseStateWithLin, PoseVelBiasStateWithLin},
         ldlt::Ldlt,
     },
 };
+use firefly_calibration::observation::TimeCamId;
 use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector, Matrix3, Matrix4, SMatrix, SVector, Vector2, Vector3};
 use rayon::prelude::*;

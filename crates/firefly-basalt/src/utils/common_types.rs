@@ -16,7 +16,7 @@ pub type FeatureId = i32;
 pub type FrameId = i64;
 pub type CamId = usize;
 
-pub use firefly_calibration::observation::TimeCamId;
+use firefly_calibration::observation::TimeCamId;
 
 /// Numeric hash of an image pair, matching upstream's four sequential combines.
 #[must_use]

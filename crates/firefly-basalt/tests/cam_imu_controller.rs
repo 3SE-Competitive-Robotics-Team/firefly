@@ -3,15 +3,12 @@ use firefly_basalt::utils::sophus_utils::se3_matrix;
 use firefly_basalt::utils::sophus_utils::se3_product;
 use firefly_basalt::utils::sophus_utils::so3_exp;
 use firefly_basalt::{
-    calibration::{
-        aprilgrid::AprilGrid,
-        calibration_helper::{CalibCornerData, CalibInitPoseData},
-        cam_imu_calib::CamImuCalib,
-    },
+    calibration::cam_imu_calib::CamImuCalib,
     io::dataset_io::{AccelData, GyroData, ImageData, VioDataset},
     optimization::spline_optimize::SplineOptimization,
-    utils::common_types::TimeCamId,
 };
+use firefly_calibration::aprilgrid::AprilGrid;
+use firefly_calibration::observation::{CalibCornerData, CalibInitPoseData, TimeCamId};
 use nalgebra::{Isometry3, Translation3, Vector2, Vector3, Vector4};
 use serde_json::Value;
 use std::{

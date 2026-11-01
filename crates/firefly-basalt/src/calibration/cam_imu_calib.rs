@@ -5,10 +5,7 @@
 // rotation_from_moments includes Eigen Geometry/Quaternion.h's matrix conversion.
 //! Headless control flow from original `calibration/cam_imu_calib.cpp`.
 use super::calibration_archive::{read_map, write_map};
-use super::{
-    aprilgrid::AprilGrid,
-    calibration_helper::{CalibCornerMap, CalibHelper, CalibInitPoseMap, ProjectedCornerData},
-};
+use super::calibration_helper::CalibHelper;
 use crate::io::dataset_io::DatasetIoFactory;
 use crate::utils::sophus_utils::se3_inverse;
 use crate::utils::sophus_utils::se3_matrix;
@@ -22,7 +19,10 @@ use crate::{
         linearize::ReprojectionStats,
         spline_optimize::{Options, SplineOptimization},
     },
-    utils::common_types::TimeCamId,
+};
+use firefly_calibration::aprilgrid::AprilGrid;
+use firefly_calibration::observation::{
+    CalibCornerMap, CalibInitPoseMap, ProjectedCornerData, TimeCamId,
 };
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{Isometry3, Matrix3, Quaternion, Translation3, UnitQuaternion, Vector3};

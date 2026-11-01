@@ -9,11 +9,11 @@ use crate::utils::sophus_utils::so3_inverse;
 use crate::utils::sophus_utils::so3_product;
 use crate::utils::{
     ba_utils::{compute_rel_pose, linearize_point},
-    common_types::TimeCamId,
     imu_types::{AbsOrderMap, MargLinData, PoseStateWithLin, PoseVelBiasStateWithLin},
 };
 use firefly_calibration::calibration::Calibration;
 use firefly_calibration::camera::stereographic_param::StereographicParam;
+use firefly_calibration::observation::TimeCamId;
 use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{
     DMatrix, DVector, Isometry3, Matrix4, SMatrix, SVector, Translation3, Vector2, Vector3, Vector4,

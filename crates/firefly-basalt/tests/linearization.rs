@@ -7,7 +7,6 @@ use firefly_basalt::{
         linearization_base::{LinearizationBase, Options},
     },
     utils::{
-        common_types::TimeCamId,
         imu_types::{
             AbsOrderMap, ImuLinData, MargLinData, PoseStateWithLin, PoseVelBiasStateWithLin,
         },
@@ -20,6 +19,7 @@ use firefly_basalt::{
 };
 use firefly_calibration::calibration::Calibration;
 use firefly_calibration::camera::generic_camera::GenericCamera;
+use firefly_calibration::observation::TimeCamId;
 use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector, Isometry3, SVector, Vector2, Vector3, Vector4};
 use serde_json::Value;

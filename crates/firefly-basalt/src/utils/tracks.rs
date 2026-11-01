@@ -5,9 +5,10 @@
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. https://mozilla.org/MPL/2.0/
 use super::{
-    common_types::{FeatureTracks, ImageFeaturePair, Landmarks, Matches, TimeCamId, TrackId},
+    common_types::{FeatureTracks, ImageFeaturePair, Landmarks, Matches, TrackId},
     union_find::UnionFind,
 };
+use firefly_calibration::observation::TimeCamId;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Builds connected feature tracks from inlier pairwise matches.

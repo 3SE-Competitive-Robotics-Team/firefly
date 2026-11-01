@@ -2,11 +2,9 @@
 use firefly_basalt::utils::sophus_utils::se3_matrix;
 use firefly_basalt::{
     mapper::Mapper,
-    utils::{
-        common_types::{KeypointsData, TimeCamId},
-        vio_config::VioConfig,
-    },
+    utils::{common_types::KeypointsData, vio_config::VioConfig},
 };
+use firefly_calibration::observation::TimeCamId;
 use nalgebra::Vector2;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs::File, io::BufReader, path::PathBuf};

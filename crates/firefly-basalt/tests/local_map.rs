@@ -1,5 +1,5 @@
 use firefly_basalt::{
-    utils::{common_types::TimeCamId, imu_types::PoseStateWithLin},
+    utils::imu_types::PoseStateWithLin,
     vi_estimator::{
         ba_base::BundleAdjustmentBase,
         landmark_database::{Keypoint, KeypointObservation},
@@ -7,6 +7,7 @@ use firefly_basalt::{
     },
 };
 use firefly_calibration::calibration::Calibration;
+use firefly_calibration::observation::TimeCamId;
 use nalgebra::{Isometry3, SVector, Vector2};
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -16,7 +16,7 @@ use crate::ceres::{
     parameter_block::{ParameterBlock, ParameterBlockMetadata},
     parameter_block_sized::ParameterBlockSized,
 };
-pub use crate::frames::frame_typedefs::SpeedAndBias;
+use crate::frames::frame_typedefs::SpeedAndBias;
 use jiff::Timestamp;
 use std::ops::{Deref, DerefMut};
 

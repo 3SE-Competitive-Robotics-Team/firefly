@@ -2,17 +2,17 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // License notices and conditions are in ../../LICENSE.
 //! Native Cereal overloads from original `calibration_helper.h`.
-use super::calibration_helper::{CalibCornerData, CalibInitPoseData};
 use crate::{io::marg_data_io::binary, utils::common_types::CerealBinary};
+use firefly_calibration::observation::{CalibCornerData, CalibInitPoseData};
 use firefly_error::Result;
 use std::io::{Read, Write};
 
 pub(crate) fn read_map<T: CerealBinary>(
     reader: &mut impl Read,
-) -> Result<std::collections::HashMap<crate::utils::common_types::TimeCamId, T>> {
+) -> Result<std::collections::HashMap<firefly_calibration::observation::TimeCamId, T>> {
     let mut output = std::collections::HashMap::new();
     for _ in 0..binary::count(reader)? {
-        let key = crate::utils::common_types::TimeCamId::read_cereal_binary(reader)?;
+        let key = firefly_calibration::observation::TimeCamId::read_cereal_binary(reader)?;
         let value = T::read_cereal_binary(reader)?;
         output.entry(key).or_insert(value);
     }
@@ -20,7 +20,7 @@ pub(crate) fn read_map<T: CerealBinary>(
 }
 pub(crate) fn write_map<T: CerealBinary>(
     writer: &mut impl Write,
-    map: &std::collections::HashMap<crate::utils::common_types::TimeCamId, T>,
+    map: &std::collections::HashMap<firefly_calibration::observation::TimeCamId, T>,
 ) -> Result<()> {
     binary::write_count(writer, map.len())?;
     for (key, value) in map {

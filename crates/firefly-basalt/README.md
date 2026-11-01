@@ -14,7 +14,9 @@ The [license summary](LICENSE) identifies separately licensed algorithms, includ
 files containing both Basalt and Eigen-derived code. Reference C++ programs are used
 for independent comparisons, not as runtime substitutes for the Rust implementation.
 
-The presence of this crate does not establish a complete VIO implementation.
+This crate includes local VO/VIO estimators and mapper implementations; their
+presence does not establish end-to-end equivalence with the upstream applications
+or RootSLAM's reported performance.
 Development and validation conventions: [development guide](../../docs/development.md).
 
 The optional `realsense` feature enables the real T265 SDK callback adapter.

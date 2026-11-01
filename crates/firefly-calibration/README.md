@@ -13,5 +13,5 @@ module responsibilities directly; there is no compatibility facade crate.
 
 The AprilGrid, pose initialization, time-camera keys, camera models, image buffers,
 and calibration parameters originate in Basalt. Each source file retains its
-upstream attribution. See `LICENSE` and `LICENSE-BASALT-PRIMITIVES` for the
+upstream attribution. See `LICENSE` and `LICENSE-MIT-PANGOLIN` for the
 applicable notices.

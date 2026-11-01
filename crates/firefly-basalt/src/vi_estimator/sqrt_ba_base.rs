@@ -1,12 +1,6 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
 //! Original `sqrt_ba_base.h/.cpp`: shared Schur operations and square-root prior diagnostics.
-use super::sc_ba_base;
-pub use super::sc_ba_base::{
-    AbsLinData, FrameAbsLinData, FrameRelLinData, RelLinData, RelLinDataBase, linearize_abs,
-    linearize_helper, linearize_helper_abs, linearize_rel, linearize_rel_to_abs, update_points,
-    update_points_abs,
-};
 use crate::utils::imu_types::{MargLinData, PoseStateWithLin, PoseVelBiasStateWithLin};
 use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector};
@@ -34,7 +28,7 @@ pub fn check_nullspace<S: BasaltScalar>(
 ) -> DVector<f64> {
     assert_eq!(prior.h.ncols(), prior.order.total_size);
     let (h, b) = normal_prior(prior);
-    let directions = sc_ba_base::nullspace_increments(&prior.order, states, poses, random);
+    let directions = super::sc_ba_base::nullspace_increments(&prior.order, states, poses, random);
     DVector::from_fn(7, |i, _| {
         directions[i].dot(&(&h * &directions[i])) + directions[i].dot(&b)
     })
@@ -42,5 +36,5 @@ pub fn check_nullspace<S: BasaltScalar>(
 #[must_use]
 pub fn check_eigenvalues<S: BasaltScalar>(prior: &MargLinData<S>) -> DVector<f64> {
     let (h, _) = normal_prior(prior);
-    sc_ba_base::check_eigenvalues(&h)
+    super::sc_ba_base::check_eigenvalues(&h)
 }

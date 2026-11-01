@@ -1,7 +1,7 @@
-use firefly_basalt::{
-    utils::common_types::TimeCamId,
-    vi_estimator::landmark_database::{Keypoint, KeypointObservation, LandmarkDatabase},
+use firefly_basalt::vi_estimator::landmark_database::{
+    Keypoint, KeypointObservation, LandmarkDatabase,
 };
+use firefly_calibration::observation::TimeCamId;
 use nalgebra::Vector2;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;

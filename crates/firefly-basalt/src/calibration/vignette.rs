@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // License notices and conditions are in ../../LICENSE.
 //! Original `calibration/vignette.h` and `src/calibration/vignette.cpp`.
-use super::aprilgrid::AprilGrid;
-use crate::{io::dataset_io::VioDatasetPtr, utils::common_types::TimeCamId};
+use crate::io::dataset_io::VioDatasetPtr;
+use firefly_calibration::aprilgrid::AprilGrid;
+use firefly_calibration::observation::TimeCamId;
 use firefly_calibration::spline::rd_spline::RdSpline;
 use firefly_calibration::spline::spline_common::Jacobian;
 use firefly_error::{Error, ErrorKind, Result};

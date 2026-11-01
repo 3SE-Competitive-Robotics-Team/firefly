@@ -7,9 +7,7 @@ use firefly_calibration::calibration::Calibration;
 use firefly_calibration::camera::generic_camera::GenericCamera;
 use firefly_calibration::camera::unified_camera::UnifiedCamera;
 use firefly_calibration::image::image::ManagedImage;
-pub use firefly_calibration::observation::{
-    CalibCornerData, CalibCornerMap, CalibInitPoseData, CalibInitPoseMap, ProjectedCornerData,
-};
+use firefly_calibration::observation::{CalibCornerData, CalibCornerMap, CalibInitPoseMap};
 use firefly_calibration::{
     aprilgrid::AprilGrid,
     initialization,

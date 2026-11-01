@@ -1,5 +1,4 @@
 use super::*;
-use crate::frames::frame::KeyPoint;
 use crate::{application::live::config::Config, frontend::pipeline::RustBriskFeatureFactory};
 use crate::{
     ceres::vi_slam_backend::ViSlamBackend,
@@ -8,6 +7,7 @@ use crate::{
     kinematics::transformation::Transformation,
 };
 use purecv::core::{DynamicMatrix, Matrix, types::Point2f};
+use purecv::features2d::KeyPoint;
 use std::{
     cell::Cell,
     sync::{

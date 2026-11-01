@@ -9,11 +9,12 @@ use crate::utils::sophus_utils::se3_product;
 use crate::utils::sophus_utils::so3_inverse;
 use crate::{
     optical_flow::{AffineCompact2, OpticalFlowResult},
-    utils::{common_types::TimeCamId, sim_utils::SimObservations, vio_config::VioConfig},
+    utils::{sim_utils::SimObservations, vio_config::VioConfig},
     vi_estimator::vio_estimator::{VioEstimatorBase, VioEstimatorFactory, VioWorkerOutputs},
 };
 use firefly_calibration::calibration::Calibration;
 use firefly_calibration::image::image::ManagedImage;
+use firefly_calibration::observation::TimeCamId;
 use nalgebra::{Isometry3, Vector2, Vector3, Vector4};
 use serde::{Serialize, ser::SerializeMap};
 use std::{

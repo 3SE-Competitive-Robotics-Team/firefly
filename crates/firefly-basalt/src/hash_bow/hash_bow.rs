@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Source: VladyslavUsenko/basalt 0f3b2b52c807f70ff4e2973ce253c73329eea7bc,
 // include/basalt/hash_bow/hash_bow.h. Basalt project LICENSE-BSD-3-Clause.
-use crate::utils::common_types::{
-    FEATURE_HASH_MAX_SIZE, FeatureHash, FrameId, HashBowVector, TimeCamId,
-};
+use crate::utils::common_types::{FEATURE_HASH_MAX_SIZE, FeatureHash, FrameId, HashBowVector};
+use firefly_calibration::observation::TimeCamId;
 use std::{collections::HashMap, sync::RwLock};
 
 /// Inverted-index histogram retrieval with Basalt's fixed random bit permutation.

@@ -1,12 +1,9 @@
 use firefly_basalt::{
-    calibration::{
-        calibration_helper::{CalibCornerData, CalibInitPoseData},
-        cam_calib::CamCalib,
-    },
+    calibration::cam_calib::CamCalib,
     io::dataset_io::{AccelData, GyroData, ImageData, VioDataset},
     optimization::poses_optimize::PosesOptimization,
-    utils::common_types::TimeCamId,
 };
+use firefly_calibration::observation::{CalibCornerData, CalibInitPoseData, TimeCamId};
 use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector2, Vector3, Vector4};
 use std::{
     collections::BTreeMap,

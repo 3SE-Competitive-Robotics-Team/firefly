@@ -7,13 +7,13 @@ use super::landmark_block::{Options, RelPoseLin, State};
 use crate::{
     utils::{
         ba_utils::linearize_point,
-        common_types::TimeCamId,
         complete_orthogonal_decomposition::{apply_householder_left, make_householder},
         imu_types::AbsOrderMap,
     },
     vi_estimator::landmark_database::Keypoint,
 };
 use firefly_calibration::calibration::Calibration;
+use firefly_calibration::observation::TimeCamId;
 use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector, SMatrix, Vector2, Vector3};
 use std::collections::{BTreeMap, BTreeSet, HashMap};

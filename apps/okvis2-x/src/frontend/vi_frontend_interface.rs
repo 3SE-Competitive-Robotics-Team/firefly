@@ -7,12 +7,13 @@
 
 use crate::{
     config::parameters::{ImuParameters, ViParameters},
-    frames::{frame::KeyPoint, frame_typedefs::SpeedAndBias, multi_frame::MultiFrame},
+    frames::{frame_typedefs::SpeedAndBias, multi_frame::MultiFrame},
     kinematics::transformation::Transformation,
     sensors::measurements::ImuMeasurementDeque,
 };
 use jiff::Timestamp;
 use nalgebra::SMatrix;
+use purecv::features2d::KeyPoint;
 use std::{cell::RefCell, rc::Rc};
 
 /// The concrete SLAM backend is supplied as the frontend's estimator type.

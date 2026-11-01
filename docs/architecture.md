@@ -59,12 +59,12 @@ OKVIS 提供。`firefly-calibration` 承载相机模型、图像缓冲区、标�
 RootSLAM 应用在线运行回环与位姿图修正，在输入结束后运行全局 BA。
 实现依据原版 Basalt 源码及 RootSLAM 论文，不能据此宣称复现论文的精度或性能。
 
-该应用目前通过进程内队列连接估计和建图，未提供飞控导航消息适配。接入现有系统须
-将同一时钟域的相机与 IMU 输入适配到估计器，发布连续 `Odometry` 和新鲜的后验
-IMU 预测 `VioAttitude`；回环修正通过 map←odom 与地图版本表达，不能作为物理运动
-跳变注入里程计。`Navigation` 供 planner 消费，FC 使用里程计及校正里程计维护坐标。
-RootSLAM 稀疏路标不构成避障占据地图；完整规划链路仍需深度融合和带版本、覆盖范围的
-原子地图快照。离线轨迹测试不替代这些消息契约与飞行验收。
+`firefly-rootslam-live` 已把 Render 双目和 Sim IMU 接入 Basalt VIO，并向 FC 发布
+`Odometry`、`CorrectedOdometry`、`Navigation` 和后验 IMU 预测 `VioAttitude`；当前
+`CorrectedOdometry` 与局部里程计相同，导航变换为恒等变换，在线位姿图修正尚未反馈到
+输出。真实板载相机和 IMU 驱动也未接入这条入口。回环修正应通过 map←odom 与地图版本
+表达，不能作为物理运动跳变注入里程计。RootSLAM 稀疏路标不构成避障占据地图；完整规划
+链路仍需深度融合和带版本、覆盖范围的原子地图快照。悬停验收不等同于板端或轨迹精度验收。
 
 ### 板载拓扑
 

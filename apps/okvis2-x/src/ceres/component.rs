@@ -17,7 +17,6 @@ use crate::{
     },
     config::parameters::ImuParameters,
     frames::{
-        frame::KeyPoint,
         frame_typedefs::{KeypointIdentifier, LandmarkId, SpeedAndBias, StateId},
         multi_frame::MultiFrame,
     },
@@ -28,6 +27,7 @@ use firefly_error::{Error, ErrorKind, Result};
 use jiff::Timestamp;
 use nalgebra::{Matrix2, Quaternion, Vector2, Vector3, Vector4};
 use purecv::core::Matrix;
+use purecv::features2d::KeyPoint;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},

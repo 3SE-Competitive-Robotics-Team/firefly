@@ -1,11 +1,9 @@
 use firefly_basalt::{
-    utils::{
-        ba_utils::{compute_rel_pose, linearize_point},
-        common_types::TimeCamId,
-    },
+    utils::ba_utils::{compute_rel_pose, linearize_point},
     vi_estimator::landmark_database::Keypoint,
 };
 use firefly_calibration::camera::generic_camera::GenericCamera;
+use firefly_calibration::observation::TimeCamId;
 use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{
     Isometry3, Quaternion, SMatrix, SVector, Translation3, UnitQuaternion, Vector2, Vector4,

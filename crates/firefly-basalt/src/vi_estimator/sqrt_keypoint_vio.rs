@@ -14,7 +14,6 @@ use crate::imu::imu_types::ImuData;
 use crate::imu::imu_types::PoseState;
 use crate::imu::imu_types::PoseVelBiasState;
 use crate::imu::preintegration::IntegratedImuMeasurement;
-use crate::utils::common_types::TimeCamId;
 use crate::{
     linearization::{
         landmark_block,
@@ -34,6 +33,7 @@ use crate::{
 };
 use firefly_calibration::calibration::Calibration;
 use firefly_calibration::camera::stereographic_param::StereographicParam;
+use firefly_calibration::observation::TimeCamId;
 use firefly_calibration::scalar::BasaltScalar;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{DMatrix, DVector, Isometry3, Quaternion, UnitQuaternion, Vector3, Vector4};

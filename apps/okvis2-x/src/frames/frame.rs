@@ -9,7 +9,7 @@ use crate::cameras::camera_base::CameraBase;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{Vector2, Vector3, Vector4};
 use purecv::core::{DynamicMatrix, Matrix, types::Size};
-pub use purecv::features2d::KeyPoint;
+use purecv::features2d::KeyPoint;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},

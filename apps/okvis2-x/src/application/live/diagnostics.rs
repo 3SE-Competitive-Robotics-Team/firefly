@@ -62,9 +62,12 @@ fn keypoints(frame: &MultiFrame, camera: usize, stamp: f64) -> Option<VizMessage
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{application::live::config::Config, frames::frame::KeyPoint};
+    use crate::application::live::config::Config;
     use jiff::Timestamp;
-    use purecv::core::{DynamicMatrix, types::Point2f};
+    use purecv::{
+        core::{DynamicMatrix, types::Point2f},
+        features2d::KeyPoint,
+    };
     use std::sync::Arc;
 
     #[test]

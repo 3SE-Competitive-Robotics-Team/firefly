@@ -10,7 +10,7 @@ use crate::utils::sophus_utils::so3_product;
 use crate::{
     io::marg_data_io::MargDataLoader,
     utils::{
-        common_types::{KeypointsData, TimeCamId},
+        common_types::KeypointsData,
         imu_types::{AbsOrderMap, MargData, PoseStateWithLin, RelPoseFactor, RollPitchFactor},
         ldlt::Ldlt,
         nfr::{abs_position_error, rel_pose_error, roll_pitch_error, yaw_error},
@@ -20,6 +20,7 @@ use crate::{
     vi_estimator::{marg_helper::MargHelper, nfr_mapper::NfrMapper, vio_estimator::align_svd},
 };
 use firefly_calibration::calibration::Calibration;
+use firefly_calibration::observation::TimeCamId;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{
     DMatrix, Isometry3, Quaternion, SMatrix, SVector, Translation3, UnitQuaternion, Vector3,

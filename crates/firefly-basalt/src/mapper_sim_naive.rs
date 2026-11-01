@@ -7,12 +7,13 @@ use crate::spline::se3_spline::Se3Spline;
 use crate::{
     mapper_sim::{Archive, invalid, load_calibration, load_marginalization},
     optical_flow::{AffineCompact2, OpticalFlowResult},
-    utils::{common_types::TimeCamId, sim_utils::SimObservations, vio_config::VioConfig},
+    utils::{sim_utils::SimObservations, vio_config::VioConfig},
     vi_estimator::vio_estimator::{
         VioEstimatorBase, VioEstimatorFactory, VioVisualizationData, VioWorkerOutputs, align_svd,
     },
 };
 use firefly_calibration::calibration::Calibration;
+use firefly_calibration::observation::TimeCamId;
 use firefly_error::Result;
 use nalgebra::{Isometry3, Vector3};
 use std::{

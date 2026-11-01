@@ -5,7 +5,8 @@
 //! `src/vi_estimator/landmark_database.cpp`, upstream
 //! `0f3b2b52c807f70ff4e2973ce253c73329eea7bc`.
 
-use crate::utils::common_types::{FrameId, TimeCamId};
+use crate::utils::common_types::FrameId;
+use firefly_calibration::observation::TimeCamId;
 use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::Vector2;
 use std::collections::{BTreeMap, BTreeSet, HashMap};

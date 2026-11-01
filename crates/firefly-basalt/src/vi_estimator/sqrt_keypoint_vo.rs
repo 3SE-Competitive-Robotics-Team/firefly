@@ -14,7 +14,6 @@ use crate::{
     linearization::linearization_base::{LinearizationBase, Options, is_linearization_sqrt},
     optical_flow::OpticalFlowResult,
     utils::{
-        common_types::TimeCamId,
         imu_types::{AbsOrderMap, MargData, MargLinData, PoseStateWithLin},
         ldlt::Ldlt,
         time_utils::{ExecutionStats, Timer},
@@ -23,6 +22,7 @@ use crate::{
 };
 use firefly_calibration::calibration::Calibration;
 use firefly_calibration::camera::stereographic_param::StereographicParam;
+use firefly_calibration::observation::TimeCamId;
 use firefly_calibration::scalar::BasaltScalar;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{DMatrix, DVector, Isometry3, Vector3, Vector4};

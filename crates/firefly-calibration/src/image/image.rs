@@ -1,7 +1,7 @@
 // Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 // Copyright (c) 2011 Steven Lovegrove (Pangolin image container).
 // SPDX-License-Identifier: BSD-3-Clause AND MIT
-// License notices and conditions are in ../../LICENSE-BASALT-PRIMITIVES.
+// License notices and conditions are in ../../LICENSE-MIT-PANGOLIN.
 //! Translation of `include/basalt/image/image.h`, headers revision
 //! `aa441ba3e51050c47ba1902537792a2e4db7e43d` (original Basalt dependency).
 //! Borrowed slices replace raw pointers; stride is in pixels rather than bytes.

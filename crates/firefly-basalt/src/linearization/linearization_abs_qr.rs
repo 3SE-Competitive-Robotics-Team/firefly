@@ -9,11 +9,11 @@ use crate::{
     optimization::accumulator::DenseAccumulator,
     utils::{
         ba_utils::compute_rel_pose,
-        common_types::TimeCamId,
         imu_types::{AbsOrderMap, ImuLinData, MargLinData},
     },
     vi_estimator::ba_base::BundleAdjustmentBase,
 };
+use firefly_calibration::observation::TimeCamId;
 use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector, Matrix4, SMatrix};
 use rayon::prelude::*;

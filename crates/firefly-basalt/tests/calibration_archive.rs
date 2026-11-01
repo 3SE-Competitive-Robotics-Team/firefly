@@ -1,7 +1,5 @@
-use firefly_basalt::{
-    calibration::calibration_helper::{CalibCornerData, CalibInitPoseData},
-    utils::common_types::CerealBinary,
-};
+use firefly_basalt::utils::common_types::CerealBinary;
+use firefly_calibration::observation::{CalibCornerData, CalibInitPoseData};
 use nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion, Vector2};
 
 fn bytes(reference: &str) -> Vec<u8> {

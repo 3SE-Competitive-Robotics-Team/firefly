@@ -6,15 +6,17 @@
 //! this implementation performs that work synchronously. Pangolin rendering,
 //! widgets and overlay rasterization are not implemented by this controller.
 use super::{
-    aprilgrid::AprilGrid,
     calibration_archive::{read_map, write_map},
-    calibration_helper::{CalibCornerMap, CalibHelper, CalibInitPoseMap, ProjectedCornerData},
+    calibration_helper::CalibHelper,
     vignette::VignetteEstimator,
 };
 use crate::{
     io::dataset_io::{DatasetIoFactory, VioDatasetPtr},
     optimization::{linearize::ReprojectionStats, poses_optimize::PosesOptimization},
-    utils::common_types::TimeCamId,
+};
+use firefly_calibration::aprilgrid::AprilGrid;
+use firefly_calibration::observation::{
+    CalibCornerMap, CalibInitPoseMap, ProjectedCornerData, TimeCamId,
 };
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{Isometry3, Vector2, Vector3, Vector4};

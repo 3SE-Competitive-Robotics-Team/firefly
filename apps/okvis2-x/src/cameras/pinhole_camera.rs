@@ -12,10 +12,10 @@
 
 //! Pinhole camera model corresponding to `implementation/PinholeCamera.hpp`.
 
-pub use crate::cameras::camera_base::RectifyMaps;
 use crate::cameras::{
     camera_base::{
-        CameraAwarenessMaps, CameraBase, CameraState, ProjectionStatus, make_awareness_maps,
+        CameraAwarenessMaps, CameraBase, CameraState, ProjectionStatus, RectifyMaps,
+        make_awareness_maps,
     },
     distortion_base::DistortionBase,
     no_distortion::NoDistortion,
