@@ -7,7 +7,7 @@
  * Copyright (c) 2025, Mobile Robotics Lab / Technical University of Munich
  * and ETH Zurich
  *
- * SPDX-License-Identifier: BSD-3-Clause, see LICENSE file for details
+ * SPDX-License-Identifier: BSD-3-Clause, see docs/licenses/README.md
  */
 //! Submap configuration corresponding to `config_mapping.hpp` and its impl.
 //! TOML supplies the `general` table using the source configuration keys.

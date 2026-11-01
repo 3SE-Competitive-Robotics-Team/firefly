@@ -8,6 +8,7 @@ const DESKTOP_APPS: &[&str] = &[
     "fc",
     "ffctl",
     "firefly-okvis-x",
+    "firefly-rootslam",
     "lightglue",
     "localization",
     "planner",
@@ -76,4 +77,16 @@ pub fn workspace_root() -> PathBuf {
         .parent()
         .expect("xtask is a workspace member")
         .to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_release_includes_simulation_vio_apps() {
+        let apps = Target::Desktop.apps();
+        assert!(apps.contains(&"firefly-okvis-x"));
+        assert!(apps.contains(&"firefly-rootslam"));
+    }
 }

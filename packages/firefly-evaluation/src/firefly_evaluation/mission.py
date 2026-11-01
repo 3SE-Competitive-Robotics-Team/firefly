@@ -480,7 +480,16 @@ class Mission:
                 failures.append(f"{name} shutdown failed, pid={self.processes[name].pid}: {error}")
         if self.recorder:
             try:
-                self.recorder.event(f"shutdown {results} failures={failures}", self.t, bool(failures))
+                tails = {
+                    name: list(self.processes[name].tail)
+                    for name, result in results.items()
+                    if result.get("exit_code") not in (None, 0)
+                }
+                self.recorder.event(
+                    f"shutdown {results} failures={failures} process_tails={tails}",
+                    self.t,
+                    bool(failures),
+                )
                 self.sleep(0.4)
             except Exception as error:
                 failures.append(f"shutdown recording failed: {error}")

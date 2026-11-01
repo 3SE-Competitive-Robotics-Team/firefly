@@ -1,0 +1,42 @@
+[package]
+name = "firefly-rootslam"
+default-run = "firefly-rootslam"
+autobins = false
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "RootSLAM system and original Basalt dataset runner"
+license = "BSD-3-Clause"
+repository.workspace = true
+readme = "README.md"
+keywords = ["vision", "robotics", "slam"]
+categories = ["algorithms", "science"]
+
+[[bin]]
+name = "firefly-rootslam"
+path = "src/bin/firefly-rootslam.rs"
+
+[[bin]]
+name = "firefly-rootslam-dataset"
+path = "src/main.rs"
+
+[dependencies]
+firefly-base.workspace = true
+signal-hook.workspace = true
+firefly-basalt.workspace = true
+firefly-calibration.workspace = true
+firefly-rootslam-mapping.workspace = true
+firefly-error.workspace = true
+firefly-config.workspace = true
+firefly-observability.workspace = true
+firefly-pubsub.workspace = true
+log.workspace = true
+nalgebra.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+toml.workspace = true
+
+[lints]
+workspace = true

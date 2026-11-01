@@ -1,6 +1,6 @@
 /*
  * DBoW2 — Copyright (c) 2011–2013 Dorian Galvez-Lopez.
- * License: see LICENSE.txt.
+ * License: see docs/licenses/crates/firefly-dbow2/LICENSE.txt.
  */
 //! Direct-index node-to-local-feature associations.
 use super::bow_vector::NodeId;

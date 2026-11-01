@@ -6,15 +6,15 @@ use firefly_okvis_x::{
         no_distortion::NoDistortion,
         pinhole_camera::PinholeCamera,
     },
-    frames::{
-        frame::{Frame, KeyPoint},
-        multi_frame::MultiFrame,
-    },
+    frames::{frame::Frame, multi_frame::MultiFrame},
     kinematics::transformation::Transformation,
 };
 use jiff::Timestamp;
 use nalgebra::{UnitQuaternion, Vector3, Vector4};
-use purecv::core::{DynamicMatrix, types::Point2f};
+use purecv::{
+    core::{DynamicMatrix, types::Point2f},
+    features2d::KeyPoint,
+};
 use std::sync::Arc;
 fn rig() -> NCameraSystem {
     let mut rig = NCameraSystem::new();

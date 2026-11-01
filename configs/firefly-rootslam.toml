@@ -1,0 +1,7 @@
+# Connects simulated Render stereo and Sim IMU to RootSLAM, then publishes to FC.
+# The rig calibration is derived from firefly-base::rig; override the Basalt VIO
+# tuning only when needed for the current simulator scene.
+[online]
+use_double = true
+map = true
+# vio_config = "../basalt/data/tumvi_512_config.json"

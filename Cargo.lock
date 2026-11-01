@@ -3079,6 +3079,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
+name = "firefly-basalt"
+version = "0.1.0"
+dependencies = [
+ "firefly-calibration",
+ "firefly-error",
+ "firefly-opengv",
+ "image",
+ "log",
+ "nalgebra",
+ "nix 0.31.3",
+ "proptest",
+ "purecv",
+ "rand",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "firefly-base"
 version = "0.1.0"
 dependencies = [
@@ -3095,6 +3114,18 @@ dependencies = [
  "nalgebra",
  "proptest",
  "purecv",
+]
+
+[[package]]
+name = "firefly-calibration"
+version = "0.1.0"
+dependencies = [
+ "firefly-error",
+ "firefly-opengv",
+ "nalgebra",
+ "rayon",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3304,6 +3335,41 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "firefly-config",
+]
+
+[[package]]
+name = "firefly-rootslam"
+version = "0.1.0"
+dependencies = [
+ "firefly-basalt",
+ "firefly-base",
+ "firefly-calibration",
+ "firefly-config",
+ "firefly-error",
+ "firefly-observability",
+ "firefly-pubsub",
+ "firefly-rootslam-mapping",
+ "log",
+ "nalgebra",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
+name = "firefly-rootslam-mapping"
+version = "0.1.0"
+dependencies = [
+ "firefly-basalt",
+ "firefly-calibration",
+ "firefly-error",
+ "firefly-opengv",
+ "log",
+ "nalgebra",
+ "rayon",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -5249,6 +5315,7 @@ dependencies = [
  "num-complex",
  "num-rational",
  "num-traits",
+ "serde",
  "simba",
  "typenum",
 ]
@@ -5481,6 +5548,7 @@ checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
 dependencies = [
  "bytemuck",
  "num-traits",
+ "serde",
 ]
 
 [[package]]

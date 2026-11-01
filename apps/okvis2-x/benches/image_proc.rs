@@ -7,7 +7,7 @@ use firefly_okvis_x::{
     },
     ceres::{component::MultiFramePtr, vi_slam_backend::ViSlamBackend},
     frames::{
-        frame::{DescriptorExtractor, FeatureDetector, KeyPoint},
+        frame::{DescriptorExtractor, FeatureDetector},
         multi_frame::MultiFrame,
     },
     frontend::{
@@ -17,7 +17,7 @@ use firefly_okvis_x::{
     kinematics::transformation::Transformation,
 };
 use nalgebra::{UnitQuaternion, Vector3};
-use purecv::core::DynamicMatrix;
+use purecv::{core::DynamicMatrix, features2d::KeyPoint};
 use std::{
     cell::RefCell,
     hint::black_box,

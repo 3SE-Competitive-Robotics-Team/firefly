@@ -7,13 +7,14 @@
 
 use crate::{
     cameras::{camera_base::CameraBase, n_camera_system::NCameraSystem},
-    frames::frame::{DescriptorExtractor, FeatureDetector, Frame, Image, KeyPoint, Network},
+    frames::frame::{DescriptorExtractor, FeatureDetector, Frame, Image, Network},
     kinematics::transformation::Transformation,
 };
 use firefly_error::Result;
 use jiff::Timestamp;
 use nalgebra::{Vector2, Vector3, Vector4};
 use purecv::core::Matrix;
+use purecv::features2d::KeyPoint;
 use std::sync::Arc;
 
 #[derive(Clone)]

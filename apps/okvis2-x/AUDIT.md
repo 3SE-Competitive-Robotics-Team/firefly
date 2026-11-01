@@ -437,7 +437,7 @@ SE01、SE15 及其他已记录的兼容边界也未因清理而解除。
 重复副本、Ceres、GoogleTest、原 C++ 实现/测试/示例/绑定和构建脚本已删除。
 BRISK 外部图片与 `brisk.ptn` 已删除，默认 pattern 使用 Rust 内嵌数据。
 三个地图文本夹具由本项目在移植数值审计时自建，最初由独立 C++ 对照程序生成，
-并非上游自带数据；其 SHA-256 保持不变。版权与许可证声明汇总到仓库主 README 末尾，
+并非上游自带数据；其 SHA-256 保持不变。版权与许可证声明见仓库[许可证索引](../../docs/licenses/README.md)，
 独立包的许可证文件及 Rust 源码署名保留。
 
 基线生成器为 `firefly-supereight2` 的 Cargo example `generate_baseline`，必须显式指定

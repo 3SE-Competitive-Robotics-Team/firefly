@@ -1,6 +1,6 @@
 /*
  * DBoW2 — Copyright (c) 2011–2013 Dorian Galvez-Lopez.
- * License: see LICENSE.txt.
+ * License: see docs/licenses/crates/firefly-dbow2/LICENSE.txt.
  */
 //! Sparse, ordered bag of visual words.
 use std::{

@@ -23,7 +23,7 @@ use crate::{
     ceres::{component::MultiFramePtr, imu_error::ImuError},
     config::parameters::{ImuParameters, ViParameters},
     frames::{
-        frame::{Frame, KeyPoint},
+        frame::Frame,
         frame_typedefs::{
             KeypointIdentifier, LandmarkId, MapPoint2, MapPoints, SpeedAndBias, StateId,
         },
@@ -38,6 +38,7 @@ use firefly_dbow2::{
 use firefly_error::{Error, ErrorKind, Result};
 use jiff::Timestamp;
 use nalgebra::{DVector, Matrix2, SMatrix, Vector2, Vector3, Vector4};
+use purecv::features2d::KeyPoint;
 use std::{
     collections::{BTreeMap, BTreeSet},
     marker::PhantomData,
@@ -2314,11 +2315,13 @@ mod matching_tests {
             pinhole_camera::PinholeCamera,
         },
         ceres::vi_slam_backend::ViSlamBackend,
-        frames::frame::KeyPoint,
         frontend::frame_absolute_pose_sac_problem::OpenGvSolver,
         sensors::measurements::{ImuMeasurement, ImuSensorReadings},
     };
-    use purecv::core::{Matrix, types::Point2f};
+    use purecv::{
+        core::{Matrix, types::Point2f},
+        features2d::KeyPoint,
+    };
     use std::{cell::RefCell, rc::Rc};
 
     fn stereo_merge_graph() -> (ViSlamBackend, ViParameters) {

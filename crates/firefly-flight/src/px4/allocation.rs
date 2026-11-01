@@ -6,7 +6,7 @@
 //! `ControlAllocationSequentialDesaturation.hpp` / `ControlAllocationSequentialDesaturation.cpp`、
 //! `actuator_effectiveness/ActuatorEffectiveness.hpp` / `.cpp` 与
 //! `modules/control_allocator/VehicleActuatorEffectiveness/ActuatorEffectivenessRotors.cpp`，
-//! 许可 BSD-3-Clause（参考仓库 `~/Projects/PX4-Autopilot/LICENSE`）。
+//! BSD-3-Clause 许可来源见仓库 docs/licenses/README.md。
 //!
 //! 约定与单位：控制轴顺序 `[roll, pitch, yaw, thrust_z]`；力矩为非归一化前的控制指令，
 //! 推力按机体最大合推力归一化（`-1` 为满推力方向）；执行器指令 `[0, 1]`，`0` 停车、

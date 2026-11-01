@@ -7,7 +7,7 @@
  * Copyright (c) 2025, Mobile Robotics Lab / Technical University of Munich
  * and ETH Zurich
  *
- * SPDX-License-Identifier: BSD-3-Clause, see LICENSE file for details
+ * SPDX-License-Identifier: BSD-3-Clause, see docs/licenses/README.md
  */
 //! Kruskal minimum spanning forest corresponding to `MstGraph.hpp`.
 //! The source file's title says maximum; its ascending edge sort computes minimum.

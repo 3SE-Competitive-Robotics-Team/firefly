@@ -7,7 +7,7 @@
  * Copyright (c) 2025, Mobile Robotics Lab / Technical University of Munich
  * and ETH Zurich
  *
- * SPDX-License-Identifier: BSD-3-Clause, see LICENSE file for details
+ * SPDX-License-Identifier: BSD-3-Clause, see docs/licenses/README.md
  */
 
 //! Estimate and local update operations corresponding to `SpeedAndBiasParameterBlock.hpp/.cpp`.
@@ -16,7 +16,7 @@ use crate::ceres::{
     parameter_block::{ParameterBlock, ParameterBlockMetadata},
     parameter_block_sized::ParameterBlockSized,
 };
-pub use crate::frames::frame_typedefs::SpeedAndBias;
+use crate::frames::frame_typedefs::SpeedAndBias;
 use jiff::Timestamp;
 use std::ops::{Deref, DerefMut};
 
