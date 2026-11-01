@@ -9,8 +9,8 @@ use super::{
     query_results::{EntryId, QueryResults, Result as QueryResult},
     scoring_object::log_eps,
     templated_vocabulary::{
-        DescriptorOps, StorageResult, TemplatedVocabulary, VocabularyStorage, read_storage,
-        write_storage,
+        DescriptorOps, StorageResult, StorageValue, TemplatedVocabulary, VocabularyStorage,
+        read_storage, write_storage,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -365,45 +365,42 @@ impl<F: DescriptorOps> TemplatedDatabase<F> {
     /// Returns an error if serialization, file creation, compression, writing, or flushing
     /// fails.
     pub fn save(&self, path: impl AsRef<Path>) -> StorageResult<()> {
-        let mut root = serde_yaml::Mapping::new();
-        root.insert(
-            "vocabulary".into(),
-            serde_yaml::to_value(self.vocabulary().to_storage())?,
-        );
-        root.insert(
-            "database".into(),
-            serde_yaml::to_value(DatabaseStorage {
-                n_entries: self.n_entries,
-                using_di: i32::from(self.use_di),
-                di_levels: self.di_levels,
-                inverted_index: self.inverted_file.clone(),
-                direct_index: self
-                    .direct_file
-                    .iter()
-                    .map(|fv| {
-                        fv.iter()
-                            .map(|(&node, features)| DirectStorage {
-                                node_id: node,
-                                features: vec![features.clone()],
-                            })
-                            .collect()
-                    })
-                    .collect(),
-            })?,
-        );
+        let root = StorageValue::Map(vec![
+            (
+                "vocabulary".to_string(),
+                StorageValue::from(&self.vocabulary().to_storage()),
+            ),
+            (
+                "database".to_string(),
+                StorageValue::from(&DatabaseStorage {
+                    n_entries: self.n_entries,
+                    using_di: i32::from(self.use_di),
+                    di_levels: self.di_levels,
+                    inverted_index: self.inverted_file.clone(),
+                    direct_index: self
+                        .direct_file
+                        .iter()
+                        .map(|fv| {
+                            fv.iter()
+                                .map(|(&node, features)| DirectStorage {
+                                    node_id: node,
+                                    features: vec![features.clone()],
+                                })
+                                .collect()
+                        })
+                        .collect(),
+                }),
+            ),
+        ]);
         write_storage(path, &root)
     }
     /// # Errors
     /// Returns an error for unreadable or malformed storage, invalid vocabulary data, or
     /// inconsistent database indices.
     pub fn load(path: impl AsRef<Path>) -> StorageResult<Self> {
-        let root = read_storage(path)?;
-        let vocabulary =
-            TemplatedVocabulary::from_storage(serde_yaml::from_value::<VocabularyStorage>(
-                root.get("vocabulary").ok_or("missing vocabulary")?.clone(),
-            )?)?;
-        let storage: DatabaseStorage =
-            serde_yaml::from_value(root.get("database").ok_or("missing database")?.clone())?;
+        let root: DatabaseFile = read_storage(path)?;
+        let vocabulary = TemplatedVocabulary::from_storage(root.vocabulary)?;
+        let storage = root.database;
         if storage.inverted_index.len() != vocabulary.size() {
             return Err("inverted index size differs from vocabulary".into());
         }
@@ -462,6 +459,77 @@ struct DirectStorage {
     #[serde(rename = "nodeId")]
     node_id: u32,
     features: Vec<Vec<u32>>,
+}
+/// Root document of an `OpenCV` database file.
+#[derive(Deserialize)]
+struct DatabaseFile {
+    vocabulary: VocabularyStorage,
+    database: DatabaseStorage,
+}
+impl From<&DatabaseStorage> for StorageValue {
+    fn from(storage: &DatabaseStorage) -> Self {
+        Self::Map(vec![
+            (
+                "nEntries".to_string(),
+                Self::Uint(u64::from(storage.n_entries)),
+            ),
+            (
+                "usingDI".to_string(),
+                Self::Int(i64::from(storage.using_di)),
+            ),
+            (
+                "diLevels".to_string(),
+                Self::Int(i64::from(storage.di_levels)),
+            ),
+            (
+                "invertedIndex".to_string(),
+                Self::Seq(
+                    storage
+                        .inverted_index
+                        .iter()
+                        .map(|row| Self::Seq(row.iter().map(Self::from).collect()))
+                        .collect(),
+                ),
+            ),
+            (
+                "directIndex".to_string(),
+                Self::Seq(
+                    storage
+                        .direct_index
+                        .iter()
+                        .map(|row| Self::Seq(row.iter().map(Self::from).collect()))
+                        .collect(),
+                ),
+            ),
+        ])
+    }
+}
+impl From<&IfPair> for StorageValue {
+    fn from(pair: &IfPair) -> Self {
+        Self::Map(vec![
+            ("imageId".to_string(), Self::Uint(u64::from(pair.entry_id))),
+            ("weight".to_string(), Self::Float(pair.word_weight)),
+        ])
+    }
+}
+impl From<&DirectStorage> for StorageValue {
+    fn from(entry: &DirectStorage) -> Self {
+        Self::Map(vec![
+            ("nodeId".to_string(), Self::Uint(u64::from(entry.node_id))),
+            (
+                "features".to_string(),
+                Self::Seq(
+                    entry
+                        .features
+                        .iter()
+                        .map(|ids| {
+                            Self::Seq(ids.iter().map(|id| Self::Uint(u64::from(*id))).collect())
+                        })
+                        .collect(),
+                ),
+            ),
+        ])
+    }
 }
 impl<F: DescriptorOps> fmt::Display for TemplatedDatabase<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
