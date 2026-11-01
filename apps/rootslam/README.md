@@ -8,9 +8,9 @@ The source baseline and numerical fixtures are described in
 This application is under construction. A complete RootSLAM system, trajectory
 equivalence, and performance reproduction have not been verified.
 
-Run the dataset pipeline with `cargo run --release -p firefly-rootslam --bin firefly-rootslam-dataset -- --config <path.toml>`.
-The [dataset configuration](../../configs/rootslam.toml) uses an original Basalt checkout beside
-this workspace. After adjusting its dataset path, start
+Run the dataset pipeline with `cargo run --release -p firefly-rootslam --bin firefly-rootslam-dataset`.
+It reads the fixed [dataset configuration](../../configs/firefly-rootslam-dataset.toml), which uses
+an original Basalt checkout beside this workspace. Adjust its dataset path, start
 `uv run firefly-viz --save logs/rootslam.rrd` in another terminal and run
 `RUST_LOG=info cargo run --release -p firefly-rootslam --bin firefly-rootslam-dataset`
 from the workspace root.

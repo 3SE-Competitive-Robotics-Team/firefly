@@ -119,28 +119,22 @@ struct CalibrationArchive {
 }
 
 fn main() -> Result<()> {
-    let mut config = firefly_config::paths::config("rootslam.toml");
-    let mut arguments = std::env::args().skip(1);
-    while let Some(argument) = arguments.next() {
+    if let Some(argument) = std::env::args().nth(1) {
         if argument == "--help" || argument == "-h" {
-            writeln!(std::io::stdout(),"firefly-rootslam-dataset --config <path.toml>\nRuns the translated original Basalt dataset pipeline.").map_err(io_error)?;
+            writeln!(
+                std::io::stdout(),
+                "firefly-rootslam-dataset\nRuns the translated original Basalt dataset pipeline."
+            )
+            .map_err(io_error)?;
             return Ok(());
         }
-        if argument != "--config" {
-            return Err(Error::new(
-                ErrorKind::InvalidArgument,
-                "Usage: firefly-rootslam-dataset --config <path.toml>",
-            )
-            .with_operation("rootslam.cli"));
-        }
-        config = arguments
-            .next()
-            .ok_or_else(|| {
-                Error::new(ErrorKind::InvalidArgument, "Missing --config value")
-                    .with_operation("rootslam.cli")
-            })?
-            .into();
+        return Err(Error::new(
+            ErrorKind::InvalidArgument,
+            "firefly-rootslam-dataset takes no command-line arguments",
+        )
+        .with_operation("rootslam.cli"));
     }
+    let config = firefly_config::paths::config("firefly-rootslam-dataset.toml");
     let options = firefly_config::startup(config, firefly_observability::init, Options::validate)?;
     let node = firefly_pubsub::node::create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "rootslam");

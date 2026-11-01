@@ -450,7 +450,7 @@ static 预览不进入文件和正常/异常退出时的完整性。构建、单
 
 ### Basalt 与 RootSLAM
 
-独立数据集应用使用 `configs/rootslam.toml`，相对路径以 workspace 根目录为基准。
+独立数据集应用使用 `configs/firefly-rootslam-dataset.toml`，相对路径以 workspace 根目录为基准。
 其数据、原版配置与标定文件来自 workspace 旁的原版 Basalt checkout；运行前须准备
 配置所指资产。入口和工具用法见 [RootSLAM README](../apps/rootslam/README.md)，
 职责及飞控接线边界见 [系统架构](architecture.md#basalt-与-rootslam-独立应用)。
