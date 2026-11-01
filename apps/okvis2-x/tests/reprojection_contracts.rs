@@ -4,6 +4,7 @@
 use firefly_okvis_x::{
     cameras::{no_distortion::NoDistortion, pinhole_camera::PinholeCamera},
     ceres::{
+        error_interface::ErrorInterface,
         pose_local_parameterization::PoseManifold,
         reprojection_error::{
             MinimalReprojectionJacobians, ReprojectionError, ReprojectionJacobians,
@@ -69,6 +70,76 @@ fn residual(
             .evaluate((pose, point, extrinsics), &mut value, None)
     );
     value
+}
+
+#[test]
+fn object_safe_adapter_preserves_requested_outputs_for_every_mask() {
+    let s = scene();
+    let mut residuals = Vector2::zeros();
+    let mut j0 = SMatrix::<f64, 2, 7>::zeros();
+    let mut j1 = SMatrix::<f64, 2, 4>::zeros();
+    let mut j2 = SMatrix::<f64, 2, 7>::zeros();
+    let mut m0 = SMatrix::<f64, 2, 6>::zeros();
+    let mut m1 = SMatrix::<f64, 2, 3>::zeros();
+    let mut m2 = SMatrix::<f64, 2, 6>::zeros();
+    assert!(s.factor.evaluate_with_minimal_jacobians(
+        (&s.pose, &s.point, &s.extrinsics),
+        &mut residuals,
+        Some(ReprojectionJacobians {
+            pose: Some(&mut j0),
+            point: Some(&mut j1),
+            extrinsics: Some(&mut j2)
+        }),
+        Some(MinimalReprojectionJacobians {
+            pose: Some(&mut m0),
+            point: Some(&mut m1),
+            extrinsics: Some(&mut m2)
+        }),
+    ));
+    let masks: Vec<_> = std::iter::once(None)
+        .chain((0..8).map(|bits| Some(std::array::from_fn::<_, 3, _>(|i| bits & (1 << i) != 0))))
+        .collect();
+    let adapter: &dyn ErrorInterface = &s.factor;
+    for mask in &masks {
+        for minimal in &masks {
+            let actual = adapter
+                .evaluate_with_minimal_jacobians(
+                    &[
+                        s.pose.as_slice(),
+                        s.point.as_slice(),
+                        s.extrinsics.as_slice(),
+                    ],
+                    mask.as_ref().map(<[bool; 3]>::as_slice),
+                    minimal.as_ref().map(<[bool; 3]>::as_slice),
+                )
+                .unwrap();
+            assert_eq!(actual.residuals.as_slice(), residuals.as_slice());
+            assert_eq!(actual.jacobians.len(), 3);
+            assert_eq!(actual.minimal_jacobians.len(), 3);
+            for i in 0..3 {
+                let requested = mask.is_some_and(|m| m[i]);
+                assert_eq!(actual.jacobians[i].is_some(), requested);
+                assert_eq!(
+                    actual.minimal_jacobians[i].is_some(),
+                    requested && minimal.is_some_and(|m| m[i])
+                );
+                if let Some(j) = &actual.jacobians[i] {
+                    assert_eq!(j.shape(), (2, [7, 4, 7][i]));
+                    assert_eq!(
+                        j.as_slice(),
+                        [j0.as_slice(), j1.as_slice(), j2.as_slice()][i]
+                    );
+                }
+                if let Some(m) = &actual.minimal_jacobians[i] {
+                    assert_eq!(m.shape(), (2, [6, 3, 6][i]));
+                    assert_eq!(
+                        m.as_slice(),
+                        [m0.as_slice(), m1.as_slice(), m2.as_slice()][i]
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
