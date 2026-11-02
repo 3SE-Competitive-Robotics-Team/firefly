@@ -572,6 +572,9 @@ uv run pytest tests/system/test_roundtrip.py -q
   推迟窗口。全过程碰撞、重置和退出检查始终有效。
 - 十轮扰动每次恢复后连续悬停，逐轮真值评分通过才发下一轮，不重发 Hold 改目标。
   失败后的未执行轮次不能记通过。
+- 估计器由 `FIREFLY_VIO_PROCESS` 切换（`firefly-okvis-x` 或 `firefly-rootslam`）；
+  报告的 `frame_processing_ms` 汇总该估计器自报的单帧处理耗时，原始样本在 rrd 的
+  `okvis/frame_processing_ms` / `rootslam/frame_processing_ms`。
 - 22m 往返使用 `configs/acceptance_22m.toml`，默认空地图、在线回环与深度建图；初始化、
   真实到点、跟踪、定位、回环、降落、碰撞和退出必须分别通过。
 
