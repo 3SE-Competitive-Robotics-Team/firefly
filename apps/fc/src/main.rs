@@ -852,6 +852,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let imu_worker = imu::Worker::spawn(cfg.imu)?;
     let mut imu_count = 0u64;
     let mut inputs = Inputs::default();
+    inputs.primary.set_rate_measurement_filter(
+        cfg.rate_measurement_lpf_hz as f32,
+        cfg.rate_measurement_limit_rad_s as f32,
+    );
     let mut controller = Controller::new(cfg.fsm, cfg.control);
     let mut stats = Stats::default();
     let mut window_start = Instant::now();

@@ -208,7 +208,8 @@ def run(args):
         last_stamp = {name: float("-inf") for name, _ in cameras}
         indices = dict.fromkeys(last_stamp, 0)
         map_rate = Rate(10.0)
-        attitude_rate = Rate(1.0)
+        # VIO 零偏按后验更新，后验之间的瞬态只有高频采样才看得见；1 Hz 会整个漏掉。
+        attitude_rate = Rate(100.0)
         logger.info("RRD: %s", path)
         while not stop.is_set():
             for worker in workers:

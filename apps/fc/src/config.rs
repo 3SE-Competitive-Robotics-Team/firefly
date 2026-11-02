@@ -15,6 +15,12 @@ pub struct FcConfig {
     /// 控制环频率（Hz）。指令按此频率发布，被控对象取最新样本。
     #[serde(default = "d_rate_hz")]
     pub rate_hz: f64,
+    /// VIO 测量角速度进速率环前的低通截止频率（Hz）；非正表示不滤波。
+    #[serde(default = "d_rate_lpf_hz")]
+    pub rate_measurement_lpf_hz: f64,
+    /// VIO 测量角速度的幅值上限（rad/s）；非正表示不限幅。
+    #[serde(default = "d_rate_limit_rad_s")]
+    pub rate_measurement_limit_rad_s: f64,
     /// PX4 控制核心参数（角速度/姿态/位置环、分配 airmode）。
     #[serde(default)]
     pub control: Px4Params,
@@ -27,12 +33,33 @@ fn d_rate_hz() -> f64 {
     1000.0
 }
 
+fn d_rate_lpf_hz() -> f64 {
+    10.0
+}
+
+fn d_rate_limit_rad_s() -> f64 {
+    20.0
+}
+
 impl FcConfig {
     pub fn validate(&self) -> firefly_error::Result<()> {
         if !self.rate_hz.is_finite() || self.rate_hz <= 0. {
             return Err(firefly_error::Error::new(
                 firefly_error::ErrorKind::InvalidArgument,
                 "rate_hz must be finite and positive",
+            ));
+        }
+        if !self.rate_measurement_lpf_hz.is_finite() || self.rate_measurement_lpf_hz < 0. {
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                "rate_measurement_lpf_hz must be finite and non-negative",
+            ));
+        }
+        if !self.rate_measurement_limit_rad_s.is_finite() || self.rate_measurement_limit_rad_s < 0.
+        {
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                "rate_measurement_limit_rad_s must be finite and non-negative",
             ));
         }
         Ok(())
@@ -48,6 +75,8 @@ mod tests {
         let config: FcConfig = toml::from_str(include_str!("../../../configs/fc.toml")).unwrap();
         assert!((config.rate_hz - 1000.0).abs() < f64::EPSILON);
         assert_eq!(config.control.allocation.airmode, 1);
+        assert!((config.rate_measurement_lpf_hz - 10.0).abs() < f64::EPSILON);
+        assert!((config.rate_measurement_limit_rad_s - 20.0).abs() < f64::EPSILON);
         assert!((config.control.position.tilt_max_deg - 32.0).abs() < 1e-6);
         assert!((config.control.position.vel_max_horizontal - 3.0).abs() < 1e-6);
         assert!((config.control.position.p[0] - 0.95).abs() < 1e-6);

@@ -537,9 +537,9 @@ OKVIS 跟踪状态、回环提交次数与单帧处理耗时；FC tick rate 使�
 - `fc/standby_eskf/accel_gate`：是否实际应用地面加计校正（0/1），viz 记录为状态时间线。
 - `fc/standby_eskf/gyro_bias`、`quaternion_xyzw`、`attitude_variance`、`bias_variance`：
   独立热备状态；姿态属于备用本地重力系，方差单位 rad² / (rad/s)²。
-- `okvis/gyro_bias`：viz 直接订阅 `Firefly/VioAttitude`，以 1Hz 记录机体系 VIO 陀螺零偏（rad/s）；主链路不发布姿态方差。
+- `okvis/gyro_bias`：viz 直接订阅 `Firefly/VioAttitude`，以 100Hz 记录机体系 VIO 陀螺零偏（rad/s）；主链路不发布姿态方差。零偏按后验更新，低频采样会漏掉后验之间的瞬态。
 - `fc/debug/tilt_deg` 与 `fc/debug/tilt_err_deg`：估计倾角与仅供评测的真值倾角误差。
-- `fc/debug/rate_sp_frd` / `rate_flu`：PX4 角速度设定值（FRD）与实测角速度（FLU）。
+- `fc/debug/rate_sp_frd` / `rate_flu`：PX4 角速度设定值（FRD）与实测角速度（FLU）。实测值是 VIO 测量角速度经 `rate_measurement_lpf_hz` 低通与 `rate_measurement_limit_rad_s` 限幅后的结果，不是原始陀螺。
 - `fc/debug/torque_sp_frd` / `allocated_control`：归一化力矩设定值与分配实际达到的控制量。
 - `fc/debug/saturated`：当前分配饱和状态；`saturated_ticks` 为每秒窗口内的饱和次数。
 - `fc/debug/hover_thrust`：归一化悬停推力。
