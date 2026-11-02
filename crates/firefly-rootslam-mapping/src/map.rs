@@ -68,8 +68,14 @@ pub struct MapPolicy {
     /// The paper supplies no strong-covisibility threshold. `None` keeps all
     /// positive covisibility edges; callers can choose a sparser graph.
     pub essential_min_shared: Option<usize>,
-    /// Scale selection is not specified in the paper; it must be explicit.
-    pub edge_sqrt_information: SMatrix<f64, 6, 6>,
+    /// Scale of the pose-graph residuals, the paper's `S_ab`.
+    ///
+    /// The reprojection residuals of the bundle adjustment are measured in
+    /// pixels and the pose-graph residuals in metres and radians. This scale
+    /// brings both to a common unit; the paper does not publish its values.
+    /// Omitting it derives the scale from the camera model.
+    #[serde(default)]
+    pub edge_information: crate::edge_information::EdgeInformation,
 }
 impl MapPolicy {
     /// # Errors
@@ -79,7 +85,6 @@ impl MapPolicy {
             || self.redundant_observers == 0
             || self.max_keyframes == 0
             || self.cull_batch == 0
-            || !self.edge_sqrt_information.iter().all(|v| v.is_finite())
         {
             return Err(firefly_error::Error::new(
                 firefly_error::ErrorKind::InvalidArgument,
@@ -87,17 +92,18 @@ impl MapPolicy {
             )
             .with_operation("rootslam.map.policy"));
         }
+        self.edge_information.validate()?;
         Ok(())
     }
     #[must_use]
-    pub fn paper_thresholds(edge_sqrt_information: SMatrix<f64, 6, 6>) -> Self {
+    pub fn paper_thresholds() -> Self {
         Self {
             redundancy_fraction: 0.9,
             redundant_observers: 3,
             max_keyframes: 1500,
             cull_batch: 30,
             essential_min_shared: None,
-            edge_sqrt_information,
+            edge_information: crate::edge_information::EdgeInformation::default(),
         }
     }
 }
@@ -106,6 +112,11 @@ pub struct PersistentMap {
     pub snapshot: MapSnapshot,
     pub policy: MapPolicy,
     pub calibration: Calibration<f64>,
+    /// Square root information matrix shared by every edge of the graph.
+    ///
+    /// The map owns the pose-graph scale so that the odometry, covisibility
+    /// and loop edges cannot drift apart from each other.
+    edge_sqrt_information: SMatrix<f64, 6, 6>,
     aliases: BTreeMap<LandmarkId, LandmarkId>,
     removed_keyframes: BTreeSet<KeyframeId>,
     culled_poses: BTreeMap<KeyframeId, (KeyframeId, Isometry3<f64>)>,
@@ -114,19 +125,24 @@ pub struct PersistentMap {
     point_revisions: BTreeMap<LandmarkId, u64>,
 }
 impl PersistentMap {
-    #[must_use]
-    pub fn new(calibration: Calibration<f64>, policy: MapPolicy) -> Self {
-        Self {
+    /// # Errors
+    /// Returns an error for an invalid policy or a camera model that cannot
+    /// be calibrated at the requested reference depth.
+    pub fn new(calibration: Calibration<f64>, policy: MapPolicy) -> firefly_error::Result<Self> {
+        policy.validate()?;
+        let edge_sqrt_information = policy.edge_information.resolve(&calibration)?;
+        Ok(Self {
             snapshot: MapSnapshot::default(),
             policy,
             calibration,
+            edge_sqrt_information,
             aliases: BTreeMap::new(),
             removed_keyframes: BTreeSet::new(),
             culled_poses: BTreeMap::new(),
             last_optimization_revision: 0,
             pose_revisions: BTreeMap::new(),
             point_revisions: BTreeMap::new(),
-        }
+        })
     }
     #[must_use]
     pub fn canonical_landmark(&self, mut id: LandmarkId) -> LandmarkId {
@@ -291,7 +307,7 @@ impl PersistentMap {
                         to: id,
                         measurement: previous_frame.t_w_b.inverse() * pose,
                         kind: EdgeKind::Temporal,
-                        sqrt_information: self.policy.edge_sqrt_information,
+                        sqrt_information: self.edge_sqrt_information,
                     });
                 }
             }
@@ -552,12 +568,18 @@ impl PersistentMap {
                 },
             );
         }
-        if let Some(existing) = self.snapshot.edges.iter_mut().find(|e| {
-            e.kind == EdgeKind::Loop && e.from == closure.edge.from && e.to == closure.edge.to
-        }) {
-            *existing = closure.edge.clone();
+        // The map owns the pose-graph scale: the loop detector only performs the
+        // geometric validation, so the edge it proposes is weighted here.
+        let mut loop_edge = closure.edge.clone();
+        loop_edge.sqrt_information = self.edge_sqrt_information;
+        if let Some(existing) =
+            self.snapshot.edges.iter_mut().find(|e| {
+                e.kind == EdgeKind::Loop && e.from == loop_edge.from && e.to == loop_edge.to
+            })
+        {
+            *existing = loop_edge;
         } else {
-            self.snapshot.edges.push(closure.edge.clone());
+            self.snapshot.edges.push(loop_edge);
         }
         self.snapshot.revision += 1;
         self.rebuild_essential_graph();
@@ -744,7 +766,7 @@ impl PersistentMap {
                     } else {
                         EdgeKind::Covisibility
                     },
-                    sqrt_information: self.policy.edge_sqrt_information,
+                    sqrt_information: self.edge_sqrt_information,
                 });
             }
         }

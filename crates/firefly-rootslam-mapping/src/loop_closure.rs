@@ -42,7 +42,6 @@ pub struct LoopOptions {
     /// `OpenGV`'s angular distance: 1 - dot(normalized rays).
     pub angular_threshold: f64,
     pub reprojection_radius: f64,
-    pub edge_sqrt_information: SMatrix<f64, 6, 6>,
 }
 impl Default for LoopOptions {
     fn default() -> Self {
@@ -59,7 +58,6 @@ impl Default for LoopOptions {
             ransac_probability: 0.99,
             angular_threshold: 1e-4,
             reprojection_radius: 3.,
-            edge_sqrt_information: SMatrix::identity(),
         }
     }
 }
@@ -84,10 +82,9 @@ impl LoopOptions {
             || self.angular_threshold >= 2.
             || !self.reprojection_radius.is_finite()
             || self.reprojection_radius <= 0.
-            || !self.edge_sqrt_information.iter().all(|v| v.is_finite())
         {
             return Err(failure(
-                "Invalid loop retrieval, matching, RANSAC, pose-graph budget, or edge information controls",
+                "Invalid loop retrieval, matching, RANSAC, or pose-graph budget controls",
             ));
         }
         Ok(())
@@ -432,7 +429,9 @@ impl LoopDetector {
             to: query,
             measurement: target.t_w_b.inverse() * pose,
             kind: EdgeKind::Loop,
-            sqrt_information: self.options.edge_sqrt_information,
+            // The persistent map owns the pose-graph scale and overwrites this
+            // placeholder when it accepts the loop.
+            sqrt_information: SMatrix::identity(),
         };
         Ok(Some(LoopCandidate {
             source_revision: map.revision,

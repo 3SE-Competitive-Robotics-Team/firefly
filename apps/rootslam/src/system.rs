@@ -29,7 +29,7 @@ pub struct SystemOptions {
 impl Default for SystemOptions {
     fn default() -> Self {
         Self {
-            map: MapPolicy::paper_thresholds(nalgebra::SMatrix::identity()),
+            map: MapPolicy::paper_thresholds(),
             loops: LoopOptions::default(),
             optimization: OptimizationOptions::default(),
             global_optimization: true,
@@ -418,7 +418,7 @@ fn run(
     let mut state = MapWorkerState {
         input,
         latest,
-        map: PersistentMap::new(calibration, options.map),
+        map: PersistentMap::new(calibration, options.map)?,
         seen: BTreeSet::new(),
         anchors: BTreeMap::new(),
         original_poses: BTreeMap::new(),
@@ -513,10 +513,7 @@ mod tests {
             t_i_c: vec![Isometry3::identity()],
             ..Default::default()
         };
-        let mut map = PersistentMap::new(
-            calibration,
-            MapPolicy::paper_thresholds(nalgebra::SMatrix::identity()),
-        );
+        let mut map = PersistentMap::new(calibration, MapPolicy::paper_thresholds()).unwrap();
         let key = ObservationKey {
             keyframe: 1,
             camera: 0,
