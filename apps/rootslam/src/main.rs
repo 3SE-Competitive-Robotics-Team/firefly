@@ -218,6 +218,7 @@ fn run(options: &Options) -> Result<()> {
             global_optimization: options.global_optimization,
             optimization: options.optimization.clone(),
             loops: options.loops.clone(),
+            loop_closures: true,
             map: options
                 .map_policy
                 .clone()
