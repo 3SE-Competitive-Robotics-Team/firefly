@@ -1,0 +1,37 @@
+# HIL 模式板端进程集：仿真传感器经 USB 进入 camera，控制经 motor 回传主机。
+# `hil-gadget up` 把它切换成活动的 processes.toml，`down`/看门狗恢复原文件。
+# 悬停阶段不需要 planner，先不启动；接入规划时把 autostart 打开。
+
+[[process]]
+name = "camera"
+command = ["bin/camera", "--hil"]
+autostart = true
+
+[[process]]
+name = "motor"
+command = ["bin/motor", "--hil"]
+autostart = true
+
+[[process]]
+name = "firefly-okvis-x"
+# HIL 先验证估计/控制闭环：关掉回环与建图，避免板端初始化阻塞 IMU 队列。
+# okvis 不绑核（可用全部核）；FC 与 IMU 工作线程独占两颗 A76 大核。
+command = ["bin/firefly-okvis-x", "--no-loop-closures", "--no-mapping", "--config", "configs/okvis2-x-hil.toml"]
+autostart = true
+
+[[process]]
+name = "fc"
+# `--airmode-off`：HIL 验证用，避免速率环在低集合推力下饱和时抬高总推力。
+# 生产配置不带该开关，airmode 由 configs/fc.toml 决定。
+command = ["taskset", "-c", "6,7", "bin/fc", "--airmode-off"]
+autostart = true
+
+[[process]]
+name = "traj-server"
+command = ["bin/planner", "--traj-server"]
+autostart = false
+
+[[process]]
+name = "planner"
+command = ["bin/planner"]
+autostart = false

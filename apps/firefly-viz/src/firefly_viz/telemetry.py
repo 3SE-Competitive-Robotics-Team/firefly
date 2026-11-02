@@ -15,6 +15,7 @@ SCALAR_FIELDS = {
     "fc/debug/position_target_odom": ("x_m", "y_m", "z_m"),
     "fc/debug/position_error_odom": ("x_m", "y_m", "z_m"),
     "fc/debug/motors": MOTORS,
+    "fc/debug/vertical_ned": ("vel_sp_z", "vel_z", "acc_sp_z", "thr_sp_z"),
     "fc/debug/rate_sp_frd": ("roll_rad_s", "pitch_rad_s", "yaw_rad_s"),
     "fc/debug/rate_flu": ("x_rad_s", "y_rad_s", "z_rad_s"),
     "fc/debug/torque_sp_frd": ("roll_normalized", "pitch_normalized", "yaw_normalized"),
@@ -34,6 +35,10 @@ SCALAR_FIELDS = {
     "acceptance/hover_failure/state": ("flight_mode", "has_odometry", "has_control_origin"),
     "acceptance/hover_failure/freshness": ("measurement_age_s", "receive_age_s", "initialized"),
     "acceptance/hover_failure/error": ("horizontal_m", "vertical_m", "speed_m_s"),
+    "hil/link": ("control", "odometry", "telemetry", "dropped_images"),
+    "hil/camera/left": ("timestamp_s", "pixel_sum", "width", "height"),
+    "hil/camera/right": ("timestamp_s", "pixel_sum", "width", "height"),
+    "hil/board": ("imu_gap_s",),
     "viz/queues": ("telemetry_pending", "media_pending", "telemetry_high_water", "dropped_frames"),
     "viz/telemetry/overflow": ("overflow", "high_water"),
 }

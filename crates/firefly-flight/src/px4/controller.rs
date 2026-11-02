@@ -320,6 +320,12 @@ impl Controller {
     pub fn hover_thrust(&self) -> f32 {
         self.hover_thrust
     }
+
+    /// 位置控制垂直通道诊断快照（NED）：`[vel_sp_z, vel_z, acc_sp_z, thr_sp_z]`。
+    #[must_use]
+    pub fn debug_vertical(&self) -> [f32; 4] {
+        self.position.debug_vertical()
+    }
 }
 
 /// 机体参数签名：内容不变就不重建效能矩阵。

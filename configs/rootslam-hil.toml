@@ -1,0 +1,11 @@
+# HIL 板端配置：RootSLAM 只跑估计/控制闭环。
+# 回环与建图由命令行开关 --no-loop-closures / --no-mapping 关闭，避免板端
+# 初始化阻塞 IMU 队列；`configs/processes-hil-rootslam.toml` 已经在命令行里
+# 带上这两个开关。
+[online]
+# 单精度路径没有在板端验证过，保持双精度。
+use_double = true
+# VIO 参数预设：rig 按 320×240 双目重选光流网格边长，特征点数与 OKVIS2-X
+# 在板端实测可用的 200 点对齐。Basalt 自带的默认参数是按 512×512 TUM-VI
+# 调的，在 rig 上只剩约 24 个特征点。
+vio_preset = "rig"

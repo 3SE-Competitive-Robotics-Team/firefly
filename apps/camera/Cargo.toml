@@ -25,6 +25,8 @@ log.workspace = true
 serde.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+firefly-hil.workspace = true
+nix.workspace = true
 v4l.workspace = true
 
 [dev-dependencies]

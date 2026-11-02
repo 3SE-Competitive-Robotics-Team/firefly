@@ -41,6 +41,8 @@ use std::{
 #[serde(default, deny_unknown_fields)]
 pub struct Options {
     pub vio_config: Option<PathBuf>,
+    /// VIO 参数预设；`vio_config` 指定的文件在预设之后整体覆盖。
+    pub vio_preset: VioPreset,
     pub stats_directory: Option<PathBuf>,
     pub use_double: bool,
     pub map: bool,
@@ -52,10 +54,43 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             vio_config: None,
+            vio_preset: VioPreset::default(),
             stats_directory: None,
             use_double: false,
             map: true,
             loops: true,
+        }
+    }
+}
+
+/// Basalt VIO 的参数预设。
+///
+/// Basalt 自带的默认参数是按 512×512 的 TUM-VI 调的。本仓库的 rig 是 320×240,
+/// 同样的像素网格在 rig 上只剩约四分之一的特征点,光流跟踪密度不足以支撑
+/// 悬停。`Rig` 预设按 rig 的分辨率重选网格边长,特征点数与 OKVIS2-X 在板端
+/// 实测可用的 200 点对齐。
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VioPreset {
+    /// Basalt 默认参数,按 512×512 TUM-VI 调。
+    Basalt,
+    /// 按 320×240 双目 rig 选定的参数。
+    #[default]
+    Rig,
+}
+
+impl VioPreset {
+    /// 构造该预设的 Basalt 配置。
+    #[must_use]
+    pub fn vio_config(self) -> VioConfig {
+        match self {
+            Self::Basalt => VioConfig::default(),
+            Self::Rig => VioConfig {
+                // 网格边长 50 px 在 320×240 上只有 6×4 个单元（约 24 个特征点）,
+                // 20 px 得到 16×12 个单元（约 192 个特征点）。
+                optical_flow_detection_grid_size: 20,
+                ..VioConfig::default()
+            },
         }
     }
 }
@@ -216,7 +251,7 @@ struct LiveSession {
 impl LiveSession {
     fn new(options: &Options) -> Result<Self> {
         let calibration = render_calibration();
-        let mut vio = VioConfig::default();
+        let mut vio = options.vio_preset.vio_config();
         if let Some(path) = &options.vio_config {
             vio.load(path)?;
         }
@@ -607,5 +642,67 @@ fn render_calibration() -> Calibration<f64> {
         intrinsics: vec![camera.clone(), camera],
         resolution: vec![Vector2::new(IMAGE_WIDTH as i32, IMAGE_HEIGHT as i32); 2],
         ..Calibration::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 光流检测的网格单元数；每单元最多取一个角点。
+    fn detection_cells(grid_size: i32) -> usize {
+        let grid = grid_size as usize;
+        let columns = (IMAGE_WIDTH - IMAGE_WIDTH % grid) / grid;
+        let rows = (IMAGE_HEIGHT - IMAGE_HEIGHT % grid) / grid;
+        columns * rows
+    }
+
+    #[test]
+    fn the_basalt_preset_matches_the_upstream_defaults() {
+        let preset = VioPreset::Basalt.vio_config();
+        let upstream = VioConfig::default();
+        assert_eq!(
+            preset.optical_flow_detection_grid_size,
+            upstream.optical_flow_detection_grid_size
+        );
+        assert_eq!(preset.optical_flow_levels, upstream.optical_flow_levels);
+    }
+
+    #[test]
+    fn the_rig_preset_keeps_the_feature_count_of_the_board_tested_estimator() {
+        let preset = VioPreset::Rig.vio_config();
+        // 320×240 上 50 px 网格只剩 24 个单元；20 px 网格给到 192 个。
+        assert_eq!(detection_cells(50), 24);
+        assert_eq!(detection_cells(20), 192);
+        assert_eq!(
+            preset.optical_flow_detection_grid_size, 20,
+            "rig 预设的光流网格边长"
+        );
+        assert_eq!(
+            detection_cells(preset.optical_flow_detection_grid_size),
+            192
+        );
+    }
+
+    #[test]
+    fn the_rig_preset_is_the_default_of_the_live_session() {
+        assert_eq!(Options::default().vio_preset, VioPreset::Rig);
+    }
+
+    #[test]
+    fn the_board_hil_configuration_selects_the_rig_preset() {
+        #[derive(serde::Deserialize)]
+        struct Document {
+            online: Options,
+        }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../configs/rootslam-hil.toml");
+        let document = std::fs::read_to_string(&path).expect("板端 HIL 配置随仓库发布");
+        let parsed: Document = toml::from_str(&document).expect("板端 HIL 配置可解析");
+        assert_eq!(parsed.online.vio_preset, VioPreset::Rig);
+        assert!(
+            parsed.online.use_double,
+            "单精度路径没有板端验证，保持双精度"
+        );
     }
 }

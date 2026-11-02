@@ -1,0 +1,21 @@
+# 主机侧 USB HIL 桥（apps/hil）；默认值见 src/config.rs。
+# 板端 gadget 由 `hil-gadget up` 建立，接口/端点按描述符自动发现。
+
+[usb]
+# HIL gadget 沿用镜像预置的 adb VID/PID 与序列号，便于 `adb`/nusb 同时匹配。
+vendor = 0x18d1
+product = 0x0002
+serial = "firefly-0001"
+subclass = 1
+
+[link]
+# 单次 USB 传输量：图像按 16KiB 分片，避免一张图挡住 IMU/控制。
+read_buffer = 65536
+write_buffer = 16384
+# 逐样本下发：板端估计器的 IMU 队列有界，成批突发会被拒绝并触发 OKVIS 退出。
+imu_batch = 1
+image_queue = 4
+# 板端 VIO 飞行时单帧约 128ms；按 6Hz 送图，给优化线程留余量，避免里程计断流。
+image_period_s = 0.167
+# 悬停与纯 VIO 不需要深度；开启会额外占板端图像队列（规划阶段再打开）。
+depth = false

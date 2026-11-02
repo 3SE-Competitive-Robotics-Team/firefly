@@ -43,6 +43,11 @@ max_iterations` controls final global BA (50 by default); increasing its budget
 does not change online PGO's iteration budget. Other optimizer settings remain
 shared between these paths.
 
+`[online] vio_preset` selects the Basalt VIO parameters of the live entry:
+`"rig"` (default) uses the 320×240 rig grid, `"basalt"` keeps the upstream
+defaults that are tuned for 512×512 TUM-VI. `vio_config` names a Basalt JSON
+archive and replaces the preset wholesale.
+
 `metrics_path` writes evaluation data, including SE(3)-aligned ATE, RTE separated
 by six original camera frames, and success over requested input frames. Missing
 estimates remain in the denominator. When `max_frames` limits an experimental
