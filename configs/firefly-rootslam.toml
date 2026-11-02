@@ -4,4 +4,8 @@
 [online]
 use_double = true
 map = true
+# 桌面验收用 Basalt 预设（320×240 上约 24 个特征点）：开发机没有 GPU，
+# `rig` 预设的 192 个特征点在这里要 200 ms 以上一帧，姿态直接发散。
+# 板端 HIL 走 `configs/rootslam-hil.toml`，那里用 `rig` 对齐 OKVIS2-X 的 200 点。
+vio_preset = "basalt"
 # vio_config = "../basalt/data/tumvi_512_config.json"

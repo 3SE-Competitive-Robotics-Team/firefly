@@ -481,6 +481,20 @@ VIO 传播使用实际 IMU 样本及其时间间隔；独立 ESKF 对超限 IMU 
 自身的时间戳**推进——测量变慢时截止频率不会被悄悄改掉。真实飞行运动在 0–5 Hz，
 低通只压振动。独立 ESKF 的角速度自带平滑，不经这条滤波。
 
+### RootSLAM 的预积分与里程计发布
+
+RootSLAM 的 live 入口把 VIO 后验当**传播锚点**：后验给出位姿、速度与零偏，锚点
+落在后验自己的时刻上；每条 IMU 把姿态、位置与速度向前积分，以 1 kHz 发布
+`Firefly/VioAttitude`、`Firefly/Odometry`、`Firefly/CorrectedOdometry` 与
+`Firefly/Navigation`。位置环与速度环因此拿到 1 kHz 的连续反馈，而不是按图像速率
+跳变的后验。
+
+积分约定与上游 Basalt 一致：加速度计读机体系比力 `f_b = Rᵀ(a_world − g_world)`，
+重力取世界系 `[0, 0, −9.81]`，故世界系真实加速度是 `a_world = R·f_b + g_world`；
+半步姿态把比力换到世界系，位置按匀加速闭式更新。锚点落在 IMU 历史之外时，
+锚点之后的第一段观测空缺不参与积分，单步积分时长上限 50 ms。发布时刻始终是 IMU
+时刻，单调递增。
+
 ### 控制核心（PX4 1:1 移植）
 
 控制律是 PX4-Autopilot `4dbd2e069a5c30c2e53e47e842095d2576dc38c4` 的 1:1 Rust 移植：

@@ -1,4 +1,5 @@
 //! Online IPC adapter for the simulated camera and IMU topics.
+use crate::propagation::{Anchor, ImuSample, Propagator};
 use firefly_basalt::imu::imu_types::{ImuData, PoseVelBiasState};
 use firefly_basalt::{
     io::dataset_io::ImageData,
@@ -238,9 +239,8 @@ struct LiveSession {
     pending_imu: VecDeque<Arc<ImuData<f64>>>,
     frame_started: BTreeMap<i64, std::time::Instant>,
     session: u64,
-    last_gyro: Vector3<f64>,
-    gyro_bias: Vector3<f64>,
-    predicted_attitude: Option<(nalgebra::UnitQuaternion<f64>, f64, f64)>,
+    propagator: Propagator,
+    alignment: firefly_base::RigidTransform,
     imu_count: u64,
     image_count: u64,
     pair_count: u64,
@@ -309,6 +309,13 @@ impl LiveSession {
             .unwrap_or_default()
             .as_nanos() as u64)
             .max(1);
+        // RootSLAM 的世界系就是 odom 系，地图系与它同轴；这里固定单位对齐。
+        let alignment = firefly_base::RigidTransform::from_parts(
+            firefly_base::FrameId::MAP,
+            firefly_base::FrameId::ODOM,
+            [0.; 3],
+            [0., 0., 0., 1.],
+        )?;
         Ok(Self {
             node,
             imu,
@@ -334,9 +341,8 @@ impl LiveSession {
             pending_imu: VecDeque::new(),
             frame_started: BTreeMap::new(),
             session,
-            last_gyro: Vector3::zeros(),
-            gyro_bias: Vector3::zeros(),
-            predicted_attitude: None,
+            propagator: Propagator::default(),
+            alignment,
             imu_count: 0,
             image_count: 0,
             pair_count: 0,
@@ -398,7 +404,6 @@ impl LiveSession {
                 continue;
             }
             self.update_initialization_window(stamp, &accel, &gyro);
-            self.last_gyro = gyro;
             self.imu_watermark = stamp;
             if self.pending_imu.len() >= 10_000 {
                 return Err(error("VIO IMU backlog exceeded 10 seconds"));
@@ -408,7 +413,7 @@ impl LiveSession {
                 accel,
                 gyro,
             }));
-            self.publish_prediction(packet.timestamp, gyro)?;
+            self.publish_prediction(packet.timestamp, gyro, accel)?;
         }
         flush_imu(&self.imu_tx, &mut self.pending_imu, &mut self.imu_count)
     }
@@ -439,28 +444,54 @@ impl LiveSession {
         }
     }
 
-    fn publish_prediction(&mut self, timestamp: f64, gyro: Vector3<f64>) -> Result<()> {
-        let Some((rotation, posterior_time, previous_time)) = self.predicted_attitude.as_mut()
-        else {
+    /// 每条 IMU 都把传播状态推到该时刻，并以 1 kHz 发布姿态与里程计。
+    ///
+    /// 位置与速度由后验锚点经 IMU 历史积分得到；后验本身只作锚，不直接发布——
+    /// 飞控的位置环与速度环需要连续的高频反馈，而不是按图像速率跳变的后验。
+    fn publish_prediction(
+        &mut self,
+        timestamp: f64,
+        gyro: Vector3<f64>,
+        accel: Vector3<f64>,
+    ) -> Result<()> {
+        let corrected_gyro = self.propagator.corrected_gyro(gyro);
+        let Some(state) = self.propagator.push(ImuSample {
+            timestamp,
+            gyro,
+            accel,
+        }) else {
             return Ok(());
         };
-        if timestamp <= *previous_time {
+        let Some(posterior_time) = self.propagator.posterior_time() else {
             return Ok(());
-        }
-        let corrected_gyro = gyro - self.gyro_bias;
-        *rotation *= nalgebra::UnitQuaternion::from_scaled_axis(
-            corrected_gyro * (timestamp - *previous_time),
-        );
-        *previous_time = timestamp;
-        let q = rotation.quaternion();
+        };
+        let q = state.rotation.quaternion();
         self.attitude_pub.publish(AttitudeMessage {
             timestamp,
-            posterior_time: *posterior_time,
+            posterior_time,
             session: self.session,
             quat_xyzw: [q.i, q.j, q.k, q.w],
             angular_velocity: corrected_gyro.into(),
-            gyro_bias: self.gyro_bias.into(),
+            gyro_bias: self.propagator.gyro_bias().into(),
         })?;
+        let odom = OdomMessage {
+            timestamp,
+            position_x: state.position.x,
+            position_y: state.position.y,
+            position_z: state.position.z,
+            velocity_x: state.velocity.x,
+            velocity_y: state.velocity.y,
+            velocity_z: state.velocity.z,
+            quat_x: q.i,
+            quat_y: q.j,
+            quat_z: q.k,
+            quat_w: q.w,
+            is_initialized: true,
+        };
+        self.odom_pub.publish(odom)?;
+        self.corrected_pub.publish(odom)?;
+        self.nav_pub
+            .publish(NavigationMessage::new(odom, &self.alignment, 0))?;
         Ok(())
     }
 
@@ -512,17 +543,16 @@ impl LiveSession {
                 break;
             };
             let state = state.ok_or_else(|| error("VIO state stream ended"))?;
-            self.publish_state(&state)?;
+            self.publish_state(&state);
         }
         Ok(())
     }
 
-    fn publish_state(&mut self, state: &Arc<PoseVelBiasState<f64>>) -> Result<()> {
+    /// 后验只作传播锚点：位姿、速度与零偏在这里落到锚上，
+    /// 之后的位姿由 IMU 积分给出，不按后验速率跳变。
+    fn publish_state(&mut self, state: &Arc<PoseVelBiasState<f64>>) {
         let state = state.cast::<f64>();
         let pose = &state.state.pose.t_w_i;
-        let p = pose.translation.vector;
-        let q = pose.rotation.quaternion();
-        let vel = state.state.vel_w_i;
         let stamp = state.state.pose.t_ns as f64 * 1e-9;
         if let Some(started) = self.frame_started.remove(&state.state.pose.t_ns) {
             let mut timing = ScalarMessage::base(stamp, "rootslam/frame_processing_ms");
@@ -530,43 +560,14 @@ impl LiveSession {
             timing.scalar_count = 1;
             let _ = self.viz.publish(timing);
         }
-        self.gyro_bias = state.bias_gyro;
-        let corrected_gyro = self.last_gyro - self.gyro_bias;
-        let odom = OdomMessage {
-            timestamp: stamp,
-            position_x: p.x,
-            position_y: p.y,
-            position_z: p.z,
-            velocity_x: vel.x,
-            velocity_y: vel.y,
-            velocity_z: vel.z,
-            quat_x: q.i,
-            quat_y: q.j,
-            quat_z: q.k,
-            quat_w: q.w,
-            is_initialized: true,
-        };
-        self.odom_pub.publish(odom)?;
-        self.corrected_pub.publish(odom)?;
-        let alignment = firefly_base::RigidTransform::from_parts(
-            firefly_base::FrameId::MAP,
-            firefly_base::FrameId::ODOM,
-            [0.; 3],
-            [0., 0., 0., 1.],
-        )?;
-        self.nav_pub
-            .publish(NavigationMessage::new(odom, &alignment, 0))?;
-        self.predicted_attitude = Some((pose.rotation, stamp, stamp));
-        self.attitude_pub.publish(AttitudeMessage {
-            timestamp: stamp,
+        self.propagator.set_bias(state.bias_gyro, state.bias_accel);
+        self.propagator.set_anchor(Anchor {
             posterior_time: stamp,
-            session: self.session,
-            quat_xyzw: [q.i, q.j, q.k, q.w],
-            angular_velocity: corrected_gyro.into(),
-            gyro_bias: state.bias_gyro.into(),
-        })?;
+            rotation: pose.rotation,
+            position: pose.translation.vector,
+            velocity: state.state.vel_w_i,
+        });
         self.state_count += 1;
-        Ok(())
     }
 
     fn report_counts(&mut self) {
