@@ -37,7 +37,7 @@ fn worker_join_preserves_initialized_state_and_rejects_restart() {
                 )
                 .unwrap();
             assert!(estimator.engine().is_err());
-            estimator.vision_data_queue().send(None).unwrap();
+            // VIO worker 启动时阻塞在第一条 IMU 测量上,所以测量必须先于 vision 的结束标记送达。
             if use_imu {
                 estimator
                     .imu_data_queue()
@@ -48,7 +48,10 @@ fn worker_join_preserves_initialized_state_and_rejects_restart() {
                     })))
                     .unwrap();
             }
-            estimator.imu_data_queue().send(None).unwrap();
+            estimator.vision_data_queue().send(None).unwrap();
+            // worker 取到 vision 的结束标记后立即退出,并随之丢弃 IMU 接收端;
+            // 这一发是否送达取决于调度,IMU 的结束标记不参与 worker 契约。
+            let _ = estimator.imu_data_queue().send(None);
             estimator.maybe_join().unwrap();
             let engine = estimator.engine().unwrap();
             assert_eq!(engine.get_state_at(17).state.pose.t_w_i, pose);
