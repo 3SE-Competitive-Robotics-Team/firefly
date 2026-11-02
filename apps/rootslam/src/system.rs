@@ -598,6 +598,9 @@ mod tests {
             converged: true,
             linear_iterations: 1,
             peak_linear_storage_bytes: 0,
+            precision: firefly_rootslam_mapping::global_optimization::Precision::Float64,
+            krylov_precision:
+                firefly_rootslam_mapping::global_optimization::KrylovPrecision::Float64,
         };
         let (_, input) = mpsc::channel();
         let latest = Arc::new(RwLock::new(Arc::new(map.snapshot.clone())));

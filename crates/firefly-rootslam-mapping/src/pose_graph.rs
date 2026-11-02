@@ -289,6 +289,10 @@ fn graph_cost(
 /// replaced by the equivalent Rust factor assembly and sparse factorization.
 /// # Errors
 /// Rejects invalid optimizer damping, tolerances or iteration limits.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Levenberg-Marquardt loop, damping schedule and result assembly stay together"
+)]
 pub fn optimize(
     snapshot: &crate::map::MapSnapshot,
     options: &crate::global_optimization::OptimizationOptions,
@@ -391,6 +395,11 @@ pub fn optimize(
         converged,
         linear_iterations: iterations,
         peak_linear_storage_bytes: peak,
+        // The pose-graph optimizer always works in double precision; the
+        // paper's single precision claim concerns the global bundle
+        // adjustment, which uses the square-root factor.
+        precision: crate::global_optimization::Precision::Float64,
+        krylov_precision: crate::global_optimization::KrylovPrecision::Float64,
     })
 }
 

@@ -18,8 +18,11 @@ Configuration includes `dataset_path`, `dataset_type`, `camera_calibration`, and
 optional `vio_config`, `trajectory`, and `metrics_path`. Calibration uses the
 original Basalt cereal JSON archive (`value0`). `use_double` selects the local
 estimator precision; `[optimization] precision = "float64"` independently selects
-global bundle-adjustment precision (`"float64"` by default); `"float32"` is an
-explicit experimental comparison. `[loop_options]`
+global bundle-adjustment precision (`"float64"` by default). `"float32"`
+together with `krylov_precision = "native"` reproduces the entirely
+single-precision configuration of the paper; the default stays double precision
+because the single-precision path could not be validated against a dataset in
+this repository. `[loop_options]`
 overrides retrieval and verification parameters. Optional `[map_policy]` supplies
 all map policy fields, including the pose-graph residual scale, whose values
 were not published in the paper. These parameters are defined in the mapping
@@ -27,10 +30,13 @@ crate. The scale is owned by the persistent map and shared by every edge, so
 `[loop_options] edge_sqrt_information` no longer exists; a configuration that
 still carries that key is rejected instead of silently ignored.
 
-`[optimization] krylov_precision = "float64"` is the default for LSQR work
-vectors and accumulation; matrix storage and landmark QR retain `precision`.
-Use `"native"` for the corresponding native-scalar iteration. Single-precision
-matrices with double-precision LSQR constitute mixed precision.
+`[optimization] krylov_precision = "native"` is the default, so the Krylov
+work vectors follow the matrix precision and a single-precision run is a
+complete single-precision solve. Use `"float64"` for the mixed-precision
+comparison, in which single-precision matrices are paired with double-precision
+LSQR accumulation; the solver warns when that combination is selected. The
+matrix precision, the landmark elimination and the Krylov accumulation are
+reported with every result, and the run log states which combination was used.
 `[loop_options] pose_graph_max_iterations` independently limits online
 loop-closing PGO to 20 outer iterations by default. `[optimization]
 max_iterations` controls final global BA (50 by default); increasing its budget
