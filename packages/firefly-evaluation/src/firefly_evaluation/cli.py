@@ -71,7 +71,7 @@ def save_report(directory, report):
 def provenance(root, *, allow_map_rig_translation=False, vio_only=False, prior_maps=False):
     files = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=root).decode().split("\0")
     source = {name: digest(root / name) for name in files if name and (root / name).is_file()}
-    names = ["firefly-okvis-x", "render", "fc", "ffctl", "planner"]
+    names = [os.environ.get("FIREFLY_VIO_PROCESS", "firefly-okvis-x"), "render", "fc", "ffctl", "planner"]
     if prior_maps:
         names += ["localization", "aliked", "lightglue"]
     binaries = {name: digest(root / "target/release" / name) for name in names}

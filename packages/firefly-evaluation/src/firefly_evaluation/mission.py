@@ -63,15 +63,16 @@ class MissionFailure(RuntimeError):
 
 
 class Mission:
-    def __init__(self, directory, case, options, *, vio_only=False, prior_maps=False, localization_config=None, workspace=None, sleep: Callable[[float], None] = time.sleep):
+    def __init__(self, directory, case, options, *, vio_only=False, prior_maps=False, localization_config=None, workspace=None, vio_process=None, sleep: Callable[[float], None] = time.sleep):
         self.sleep = sleep
         self.root = workspace_root(workspace)
         self.options, self.case = options, case
         self.vio_only = vio_only
         self.prior_maps = prior_maps
         self.localization_config = localization_config
+        self.vio_process = vio_process or os.environ.get("FIREFLY_VIO_PROCESS", "firefly-okvis-x")
         self.recording = directory / f"{case}.rrd"
-        self.result = {"case": case, "status": "running", "recording": str(self.recording), "stages": {}, "localization_mode": "vio_only" if vio_only else "visual" if prior_maps else "online_slam"}
+        self.result = {"case": case, "status": "running", "recording": str(self.recording), "stages": {}, "localization_mode": "vio_only" if vio_only else "visual" if prior_maps else "online_slam", "estimator": self.vio_process}
         self.result["map_frame"] = "external" if prior_maps else "startup_session"
         self.processes = {}
         self.diagnostics = queue.Queue(maxsize=8192)
@@ -96,6 +97,7 @@ class Mission:
         self.visual_updates = 0
         self.planner_status = None
         self.reference_goal = None
+        self.frame_processing_ms = []
 
     def start(self, name, command):
         env = {**os.environ, "RUST_LOG": os.environ.get("RUST_LOG", "info"), "FIREFLY_MISSION_SEED": str(self.options.seed), "PYTHONDONTWRITEBYTECODE": "1"}
@@ -199,6 +201,10 @@ class Mission:
                         self.recorder.scalars("acceptance/visual_update", msg.timestamp, list(msg.scalars[:4]))
                     elif entity == "okvis/loop_commits":
                         self.recorder.scalars("acceptance/loop_backend", msg.timestamp, list(msg.scalars[:msg.scalar_count]))
+                    elif entity in ("okvis/frame_processing_ms", "rootslam/frame_processing_ms"):
+                        # 单帧处理耗时：从帧入队到状态发布的墙钟时间。
+                        # 原始实体由 firefly-viz 直接落 rrd，这里只做统计。
+                        self.frame_processing_ms.append(float(msg.scalars[0]))
                     elif entity == "fc/imu/quaternion_xyzw":
                         self.recorder.scalars("acceptance/imu_attitude", msg.timestamp, list(msg.scalars[:msg.scalar_count]))
                     elif entity == "acceptance/physics":
@@ -452,7 +458,7 @@ class Mission:
     def estimator_fallback(self):
         self.recorder.event("fault inject: stop VIO with SIGINT", self.t)
         start = time.monotonic()
-        self.stop("firefly-okvis-x")
+        self.stop(self.vio_process)
         self.wait(lambda: self.standby_active() and min(self.last_motors) > 0., wall=max(0.01, self.options.estimator_fallback_wall_s - (time.monotonic() - start)))
         latency = time.monotonic() - start
         if latency > self.options.estimator_fallback_wall_s:
@@ -503,7 +509,25 @@ class Mission:
         self.result["stages"]["shutdown"] = {"status": "failed" if failures else "passed", "processes": results, "failures": failures}
         self.result["live_counts"] = self.counts
         self.result["last_physics_counters"] = self.physics
+        self.result["frame_processing_ms"] = self.frame_processing_summary()
         self.result["remaining_pids"] = [child.pid for child in self.processes.values() if child.process.poll() is None]
+
+    def frame_processing_summary(self):
+        """汇总估计器自报的单帧处理耗时；样本缺失时返回空字典而不是伪造零值。"""
+        samples = np.asarray(self.frame_processing_ms, dtype=float)
+        if samples.size == 0:
+            return {"estimator": self.vio_process, "count": 0}
+        return {
+            "estimator": self.vio_process,
+            "count": int(samples.size),
+            "mean": float(samples.mean()),
+            "min": float(samples.min()),
+            "p50": float(np.percentile(samples, 50)),
+            "p95": float(np.percentile(samples, 95)),
+            "p99": float(np.percentile(samples, 99)),
+            "max": float(samples.max()),
+            "std": float(samples.std()),
+        }
 
     def run(self):
         phases = [("initialization", self.initialized), ("takeoff", self.takeoff), ("hover", self.hover)]
@@ -517,7 +541,7 @@ class Mission:
             phases.extend([("reference_loss", self.reference_loss), ("failure_hold", self.failure_hold), ("landing", self.landing)])
         else:
             phases.extend([("estimator_fallback", self.estimator_fallback), ("degraded_support", self.degraded_support)])
-        applications = ["render", "firefly-okvis-x", "fc"]
+        applications = ["render", self.vio_process, "fc"]
         if self.prior_maps and self.case != "estimator_loss":
             applications.extend(("localization", "aliked", "lightglue"))
         result = self.run_phases(phases, applications)
@@ -544,6 +568,8 @@ class Mission:
                         command += ["--no-loop-closures", "--no-mapping"]
                     if self.prior_maps:
                         command += ["--external-localization"]
+                if name == "firefly-rootslam" and self.vio_only:
+                    command += ["--no-loop-closures", "--no-mapping"]
                 if name == "localization" and self.localization_config is not None:
                     command += ["--config", str(self.localization_config)]
                 if name == "lightglue" and self.prior_maps:
