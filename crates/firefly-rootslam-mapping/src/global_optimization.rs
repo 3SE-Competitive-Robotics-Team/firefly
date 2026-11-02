@@ -570,6 +570,9 @@ fn append_graph_factors<S: BasaltScalar>(
 ) -> f64 {
     let mut cost = 0.0;
     for edge in &snapshot.edges {
+        if !edge.kind.is_measurement_bearing() {
+            continue;
+        }
         let (Some(first), Some(second)) = (state.poses.get(&edge.from), state.poses.get(&edge.to))
         else {
             continue;
@@ -682,6 +685,9 @@ fn trial_cost<S: BasaltScalar>(
     if options.pose_graph_terms {
         let mut graph_cost = 0.0;
         for edge in &snapshot.edges {
+            if !edge.kind.is_measurement_bearing() {
+                continue;
+            }
             let (Some(a), Some(b)) = (state.poses.get(&edge.from), state.poses.get(&edge.to))
             else {
                 continue;
@@ -1229,6 +1235,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn covisibility_edges_do_not_enter_the_global_pose_graph_term() {
+        let (mut snapshot, calibration) = scene();
+        let options = OptimizationOptions {
+            pose_graph_terms: true,
+            ..Default::default()
+        };
+        let plain = optimize_global(&snapshot, &calibration, &options).unwrap();
+        // A covisibility edge restates the current relative estimate, so it
+        // carries no measurement. If it entered Equation (9) it would add
+        // stiffness that pins the map to its present shape.
+        snapshot.edges.push(PoseGraphEdge {
+            from: 0,
+            to: 2,
+            measurement: Isometry3::translation(5., 0., 0.),
+            kind: EdgeKind::Covisibility,
+            sqrt_information: nalgebra::SMatrix::identity(),
+        });
+        let with_covisibility = optimize_global(&snapshot, &calibration, &options).unwrap();
+        assert_eq!(plain.initial_cost, with_covisibility.initial_cost);
+        assert_eq!(plain.final_cost, with_covisibility.final_cost);
+        for id in 0..3 {
+            assert_eq!(plain.poses[&id], with_covisibility.poses[&id]);
+        }
+    }
+    #[test]
+    fn the_edge_residual_is_the_papers_left_relative_error() {
+        // Equation (8) is e_ab = log(T_bar_ab * T_hat_ab^-1) with
+        // T_hat_ab = T_aw * T_wb. The residual lives in the world-to-body
+        // chart, so its translation part is the measurement minus the current
+        // relative estimate and its rotation part is the relative rotation
+        // error.
+        let (mut snapshot, _calibration) = scene();
+        for edge in &mut snapshot.edges {
+            edge.measurement *= Isometry3::translation(0.1, 0., 0.);
+            edge.sqrt_information = Matrix6::identity();
+        }
+        let state = state_from_snapshot::<f64>(&snapshot).unwrap();
+        let edge = &snapshot.edges[0];
+        let (residual, _, _) = pose_graph::linearize_edge(
+            state.poses.get(&edge.from).unwrap(),
+            state.poses.get(&edge.to).unwrap(),
+            &pose_graph::cast_pose(&edge.measurement),
+            &edge.sqrt_information,
+        );
+        // Keyframe 1 sits at (0.33, -0.02, 0.01) while the measurement claims
+        // (0.40, 0, 0), and the scene carries no rotation, so the residual is
+        // exactly their difference.
+        let expected = crate::pose_graph::Vector6::new(0.07, 0.02, -0.01, 0., 0., 0.);
+        assert!(
+            (residual - expected).norm() < 1e-12,
+            "residual {residual:?} differs from {expected:?}"
+        );
+    }
     #[test]
     fn landmark_qr_and_lsqr_match_independent_full_damped_svd() {
         let (snapshot, calibration) = scene();
