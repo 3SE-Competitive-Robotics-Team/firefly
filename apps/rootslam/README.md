@@ -124,5 +124,7 @@ It publishes `Firefly/Odometry`, `Firefly/CorrectedOdometry`,
 `Firefly/Navigation`, and posterior `Firefly/VioAttitude` for FC using
 [`configs/firefly-rootslam.toml`](../../configs/firefly-rootslam.toml). Start it in place
 of `firefly-okvis-x` for simulation with `cargo run --release -p firefly-rootslam`.
+`--no-loop-closures` disables loop detection and `--no-mapping` disables the persistent
+map; both match the `firefly-okvis-x` switches of the same name.
 The hover harness accepts `FIREFLY_VIO_PROCESS=firefly-rootslam` with the same
 scoring thresholds.

@@ -3,8 +3,11 @@ use firefly_rootslam::online::{Options, run};
 use serde::Deserialize;
 use std::{
     io::Write,
+    path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
 };
+
+const USAGE: &str = "firefly-rootslam [--config <path>] [--no-loop-closures] [--no-mapping]";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -12,12 +15,69 @@ struct Config {
     online: Options,
 }
 
+/// 运行时开关；与 `firefly-okvis-x` 的同名选项语义一致。
+struct Arguments {
+    config: PathBuf,
+    loop_closures: bool,
+    mapping: bool,
+}
+
+fn argument_error(message: impl Into<String>) -> Error {
+    Error::new(ErrorKind::InvalidArgument, message).with_operation("rootslam::arguments")
+}
+
+fn parse() -> Result<Option<Arguments>> {
+    let mut args = std::env::args_os();
+    let _executable = args.next().unwrap_or_else(|| "firefly-rootslam".into());
+    let mut config = firefly_config::paths::config("firefly-rootslam.toml");
+    let mut loop_closures = true;
+    let mut mapping = true;
+    while let Some(argument) = args.next() {
+        if argument == "--help" || argument == "-h" {
+            return Ok(None);
+        }
+        if argument == "--no-loop-closures" {
+            loop_closures = false;
+            continue;
+        }
+        if argument == "--no-mapping" {
+            mapping = false;
+            continue;
+        }
+        if argument == "--config" {
+            config = args
+                .next()
+                .ok_or_else(|| argument_error("missing --config value"))?
+                .into();
+            continue;
+        }
+        return Err(argument_error(format!(
+            "unknown argument: {}",
+            argument.to_string_lossy()
+        )));
+    }
+    Ok(Some(Arguments {
+        config,
+        loop_closures,
+        mapping,
+    }))
+}
+
 fn main() -> Result<()> {
-    let config: Config = firefly_config::startup(
-        firefly_config::paths::config("firefly-rootslam.toml"),
-        firefly_observability::init,
-        |_| Ok(()),
-    )?;
+    let Some(arguments) = parse()? else {
+        let mut stdout = std::io::stdout();
+        writeln!(stdout, "{USAGE}")
+            .map_err(|error| Error::new(ErrorKind::Internal, "write help").with_source(error))?;
+        return Ok(());
+    };
+    let mut config: Config =
+        firefly_config::startup(&arguments.config, firefly_observability::init, |_| Ok(()))?;
+    if !arguments.loop_closures {
+        config.online.loops = false;
+    }
+    if !arguments.mapping {
+        config.online.map = false;
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let mut registrations = Vec::new();
     for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
