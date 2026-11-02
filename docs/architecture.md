@@ -53,6 +53,12 @@ PGO 和平方根全局 BA。在线默认运行局部 VIO。数据集示例启用
 全局矩阵与迭代向量使用所选精度，递推标量与代价累加使用 FP64。
 光流补丁使用 FP32，地图存储、回环几何、PGO 和公开状态接口使用 FP64。
 
+板端 HIL 链路用同一套 IPC 话题：`camera --hil` 把主机仿真图像与 IMU 经 USB 收进板端
+再发布，RootSLAM 与 OKVIS2-X 消费同样的双目与 IMU 话题、发布同样的里程计与姿态话题，
+因此估计器可按验收需要在两者之间切换，话题层不需要适配。板端 HIL 只跑一个估计器，
+两份进程清单由 `xtask deploy-hil --estimator` 选择；RootSLAM 侧的 VIO 参数按 320×240
+rig 重选光流网格，详见 [开发指南](development.md#rootslam-的-hil-配置)。
+
 ### 板载拓扑
 
 `camera` 的 V4L2、`imu` 的 SPI BMI088、`motor` 的 sysfs PWM 接入同一 IPC。

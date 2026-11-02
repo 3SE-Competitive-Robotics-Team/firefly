@@ -14,7 +14,7 @@ const USAGE: &str = "\
 usage:
   cargo xtask release [--target host|board]
   cargo xtask deploy [--device <serial>]
-  cargo xtask deploy-hil [--device <serial>]
+  cargo xtask deploy-hil [--device <serial>] [--estimator okvis2-x|rootslam]
   cargo xtask unpack <package> <directory>";
 
 fn main() -> ExitCode {

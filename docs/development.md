@@ -377,6 +377,34 @@ UDC 上不可用；已回退到单 OUT，下一步只能走「同一 OUT 端点�
 要让生产 `airmode=1` 在 HIL 下成立，下一步必须压均值延迟（FC 内环直接用最新
 原始陀螺并按时间戳外推，或换更低延迟的传输），而不是继续减小块。
 
+### RootSLAM 的 HIL 配置
+
+板端 HIL 同时只跑一个估计器：两个估计器都订阅同一批 IMU 与双目话题，同时跑
+会抢队列。`cargo xtask deploy-hil --estimator` 选估计器，`okvis2-x` 用
+`configs/processes-hil.toml`，`rootslam` 用 `configs/processes-hil-rootslam.toml`；
+板端 `hil-gadget up [manifest]` 接受同一份清单名，省略时用默认清单。
+
+RootSLAM 侧与 OKVIS2-X 的差别：
+
+- 估计器用 `bin/firefly-rootslam` 的 live 入口，`--no-loop-closures
+  --no-mapping` 关掉回环与建图，理由与 OKVIS2-X 相同：板端初始化不能阻塞
+  IMU 队列。
+- RootSLAM 只用双目 + IMU，不消费深度，与 HIL 的 `depth = false` 一致。
+- 话题层不需要适配：RootSLAM 订阅 `Firefly/Camera/Left`、
+  `Firefly/Camera/Right` 与 `Firefly/Imu`，与 `camera --hil` 发布的完全相同；
+  它向 FC 发布的 `Firefly/Odometry`、`Firefly/Navigation`、
+  `Firefly/VioAttitude` 也与 FC 订阅的话题一致。
+- VIO 参数用 `VioPreset::Rig` 预设：Basalt 自带的默认参数是按 512×512 TUM-VI
+  调的，在 320×240 的 rig 上光流网格只剩 6×4 = 24 个单元（约 24 个特征点）；
+  预设把网格边长改成 20 px，得到 16×12 = 192 个单元，特征点数与 OKVIS2-X 在
+  板端实测可用的 200 点对齐。`configs/rootslam-hil.toml` 里用
+  `vio_preset = "rig"` 显式声明；`vio_config` 指向的文件在预设之后整体覆盖。
+
+**未验证**：板端没有 RootSLAM 的实测数据。网格边长 20 px 是按特征点数对齐推
+出来的，不是按板端单帧耗时或跟踪质量实测；板端的单帧耗时、核分配与送图节流
+都还没有数据。首次上板需要记录 `rootslam/frame_processing_ms`、里程计连续性与
+悬停高度，再回头调 `vio_preset` 与 `image_period_s`。
+
 ### 进程与宿主机
 
 - 启动前核对 PID、可执行文件和工作目录，确认闭环、采集、录制与验收资源可用。

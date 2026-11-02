@@ -54,8 +54,10 @@ const BIND_TIMEOUT: Duration = Duration::from_secs(3);
 const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(60);
 /// 活动进程清单。
 const PROCESSES: &str = "/opt/firefly/configs/processes.toml";
-/// HIL 进程清单（deploy 随 configs 一起发布）。
-const PROCESSES_HIL: &str = "/opt/firefly/configs/processes-hil.toml";
+/// 进程清单位于 configs 目录，文件名由调用方给出。
+const PROCESSES_DIR: &str = "/opt/firefly/configs";
+/// 默认 HIL 进程清单（deploy 随 configs 一起发布）。
+const PROCESSES_HIL: &str = "processes-hil.toml";
 /// 切换前的进程清单备份，恢复时原样写回。
 const PROCESSES_BACKUP: &str = "/opt/firefly/configs/processes-normal.toml";
 /// 主机心跳文件：板端 HIL 应用收到任意上行数据后刷新。
@@ -66,11 +68,11 @@ const HOST_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// 所有可能出现的功能实例名。
 const FUNCTIONS: [&str; 2] = [ADB, HIL.name];
 
-pub fn up() -> Result<(), String> {
+pub fn up(manifest: Option<&str>) -> Result<(), String> {
     let _ = fs::create_dir_all(STATE_DIR);
     reset_log();
     note("开始：停止 firefly 与 adbd，整块重建 gadget");
-    if let Err(error) = up_inner() {
+    if let Err(error) = up_inner(manifest) {
         note(&format!("up 失败：{error}"));
         eprintln!("hil-gadget up 失败：{error}；尝试恢复 adb");
         if let Err(restore) = restore_adb() {
@@ -81,7 +83,7 @@ pub fn up() -> Result<(), String> {
     Ok(())
 }
 
-fn up_inner() -> Result<(), String> {
+fn up_inner(manifest: Option<&str>) -> Result<(), String> {
     remove_file(READY)?;
     remove_file(UP_MARKER)?;
     remove_file(RESTORE_MARKER)?;
@@ -91,7 +93,7 @@ fn up_inner() -> Result<(), String> {
     kill_serve();
     kill_adbd();
     set_device_role();
-    switch_processes(true)?;
+    switch_processes_to_hil(manifest.unwrap_or(PROCESSES_HIL))?;
     rebuild(true)?;
     start_firefly();
     fs::write(UP_MARKER, format!("{}\n", now_seconds()))
@@ -470,7 +472,7 @@ fn restore_adb() -> Result<(), String> {
     kill_serve();
     kill_adbd();
     set_device_role();
-    switch_processes(false)?;
+    restore_processes()?;
     rebuild(false)?;
     start_firefly();
     note("adb gadget 已恢复");
@@ -586,20 +588,28 @@ fn stop_adb_rebind_loop() {
     thread::sleep(Duration::from_millis(500));
 }
 
-/// 切换活动进程清单；HIL 文件缺失时明确失败，不静默沿用真机进程集。
-fn switch_processes(hil: bool) -> Result<(), String> {
-    if hil {
-        if !Path::new(PROCESSES_HIL).is_file() {
-            return Err(format!("缺少 {PROCESSES_HIL}（deploy 未带上）"));
-        }
-        if !Path::new(PROCESSES_BACKUP).exists() {
-            fs::copy(PROCESSES, PROCESSES_BACKUP)
-                .map_err(|error| format!("backup {PROCESSES}: {error}"))?;
-        }
-        fs::copy(PROCESSES_HIL, PROCESSES)
-            .map_err(|error| format!("switch {PROCESSES}: {error}"))?;
-        note("进程清单已切到 HIL");
-    } else if Path::new(PROCESSES_BACKUP).exists() {
+/// 切换活动进程清单到指定 HIL 清单；清单缺失时明确失败，不静默沿用真机进程集。
+fn switch_processes_to_hil(manifest: &str) -> Result<(), String> {
+    if manifest.is_empty() || manifest.contains('/') {
+        return Err(format!("进程清单名非法：{manifest}"));
+    }
+    let source = format!("{PROCESSES_DIR}/{manifest}");
+    if !Path::new(&source).is_file() {
+        return Err(format!("缺少 {source}（deploy 未带上）"));
+    }
+    if !Path::new(PROCESSES_BACKUP).exists() {
+        fs::copy(PROCESSES, PROCESSES_BACKUP)
+            .map_err(|error| format!("backup {PROCESSES}: {error}"))?;
+    }
+    fs::copy(&source, PROCESSES).map_err(|error| format!("switch {PROCESSES}: {error}"))?;
+    note(&format!("进程清单已切到 {manifest}"));
+    sync_disk();
+    Ok(())
+}
+
+/// 恢复真机进程清单。
+fn restore_processes() -> Result<(), String> {
+    if Path::new(PROCESSES_BACKUP).exists() {
         fs::copy(PROCESSES_BACKUP, PROCESSES)
             .map_err(|error| format!("restore {PROCESSES}: {error}"))?;
         note("进程清单已恢复为真机");

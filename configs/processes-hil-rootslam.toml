@@ -1,0 +1,40 @@
+# HIL 模式板端进程集：仿真传感器经 USB 进入 camera，控制经 motor 回传主机。
+# 与 processes-hil.toml 的差别只在估计器：这里用 RootSLAM 替换 OKVIS2-X。
+# 两个估计器都订阅同一批 IMU 与双目话题，不能同时跑，所以用独立清单切换。
+# `hil-gadget up` 把它切换成活动的 processes.toml，`down`/看门狗恢复原文件。
+# 悬停阶段不需要 planner，先不启动；接入规划时把 autostart 打开。
+
+[[process]]
+name = "camera"
+command = ["bin/camera", "--hil"]
+autostart = true
+
+[[process]]
+name = "motor"
+command = ["bin/motor", "--hil"]
+autostart = true
+
+[[process]]
+name = "firefly-rootslam"
+# HIL 先验证估计/控制闭环：关掉回环与建图，避免板端初始化阻塞 IMU 队列。
+# RootSLAM 只用双目 + IMU，不消费深度，与 HIL 的 depth=false 一致。
+# 核分配与 OKVIS2-X 保持一致（不绑核），待板端实测后再定。
+command = ["bin/firefly-rootslam", "--no-loop-closures", "--no-mapping", "--config", "configs/rootslam-hil.toml"]
+autostart = true
+
+[[process]]
+name = "fc"
+# `--airmode-off`：HIL 验证用，避免速率环在低集合推力下饱和时抬高总推力。
+# 生产配置不带该开关，airmode 由 configs/fc.toml 决定。
+command = ["taskset", "-c", "6,7", "bin/fc", "--airmode-off"]
+autostart = true
+
+[[process]]
+name = "traj-server"
+command = ["bin/planner", "--traj-server"]
+autostart = false
+
+[[process]]
+name = "planner"
+command = ["bin/planner"]
+autostart = false
