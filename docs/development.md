@@ -175,6 +175,13 @@ cargo xtask deploy
 没运行”的中间态。板载 adbd 走 legacy shell 协议，`adb shell` 不传递远端退出码，所以
 这两项都靠远端输出判定。
 
+板端构建按机载应用名单逐包编译，依赖的 feature 只在这些包之间统一；全 workspace
+构建（`cargo test --all-targets --release`）把所有成员拉进来，一个包启用的 feature
+会掩盖另一个包缺失的声明。所以**全 workspace 编译通过不代表板端构建通过**：`nix` 的
+`fs` feature 就是这样暴露的——板端 `camera --hil` 用 `nix::fcntl` 设 O_NONBLOCK，
+全 workspace 构建时 feature 被别的包统一打开，板端逐包构建却报找不到该函数。依赖被
+门控的 feature 时要在 workspace 依赖里显式列出。
+
 二进制按安装布局定位配置与模型，与启动目录无关；解析顺序（越显式越优先）：
 
 1. `FIREFLY_ROOT` 环境变量；
