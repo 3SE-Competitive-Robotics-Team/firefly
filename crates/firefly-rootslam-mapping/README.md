@@ -23,6 +23,18 @@ so their residual is zero by construction. They keep the graph connected and
 group retrieval candidates into islands; as optimization constraints they would
 only add stiffness that pins the map to its present shape.
 
+## Pose-graph residual scale
+
+`S_ab`, the square root information matrix of Equation (9), is the scale that
+brings the metre- and radian-valued pose-graph residuals onto the same unit as
+the pixel-valued reprojection residuals. The paper does not publish its
+values. `EdgeInformation` therefore derives them from the camera model: the
+image-plane displacement of one metre of rigid body translation and of one
+radian of rigid body rotation at a configurable reference depth, which for a
+pinhole camera is `focal / depth` pixels per metre and `focal` pixels per
+radian. The scale is owned by the persistent map, so the odometry, covisibility
+and loop edges cannot drift apart from each other.
+
 ## References
 
 - [RootSLAM paper](https://arxiv.org/abs/2610.15157)

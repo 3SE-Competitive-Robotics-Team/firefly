@@ -1290,6 +1290,46 @@ mod tests {
         );
     }
     #[test]
+    fn the_pose_graph_term_scales_with_the_edge_information() {
+        let (mut snapshot, calibration) = scene();
+        // Move the odometry measurements away from the current estimates so
+        // that the pose-graph term is not zero at the initial state.
+        for edge in &mut snapshot.edges {
+            edge.measurement *= Isometry3::translation(0.1, 0., 0.);
+            edge.sqrt_information = Matrix6::identity();
+        }
+        let visual = OptimizationOptions {
+            pose_graph_terms: false,
+            ..Default::default()
+        };
+        let plain = OptimizationOptions {
+            pose_graph_terms: true,
+            ..Default::default()
+        };
+        let visual_cost = optimize_global(&snapshot, &calibration, &visual)
+            .unwrap()
+            .initial_cost;
+        let plain_cost = optimize_global(&snapshot, &calibration, &plain)
+            .unwrap()
+            .initial_cost;
+        let mut scaled = snapshot.clone();
+        for edge in &mut scaled.edges {
+            edge.sqrt_information = Matrix6::identity() * 10.0;
+        }
+        let scaled_cost = optimize_global(&scaled, &calibration, &plain)
+            .unwrap()
+            .initial_cost;
+        let plain_graph = plain_cost - visual_cost;
+        let scaled_graph = scaled_cost - visual_cost;
+        assert!(plain_graph > 0.0);
+        // The square root of the information scales the weighted residual by
+        // ten, so its square scales the pose-graph term by a hundred.
+        assert!(
+            (scaled_graph - 100.0 * plain_graph).abs() < 1e-9 * scaled_graph,
+            "plain graph {plain_graph}, scaled graph {scaled_graph}"
+        );
+    }
+    #[test]
     fn landmark_qr_and_lsqr_match_independent_full_damped_svd() {
         let (snapshot, calibration) = scene();
         let state = State {

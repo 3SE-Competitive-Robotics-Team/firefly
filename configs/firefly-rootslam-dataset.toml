@@ -10,3 +10,17 @@ global_result_path = "logs/rootslam_global_result.json"
 
 [optimization]
 problem_archive = "logs/rootslam_global_problem.json"
+
+# Optional map policy. All fields are required when the section is present.
+# The pose-graph residual scale is the paper's `S_ab`, whose values were not
+# published; leaving it unset derives it from the camera model.
+# [map_policy]
+# redundancy_fraction = 0.9
+# redundant_observers = 3
+# max_keyframes = 1500
+# cull_batch = 30
+# The paper leaves the strong-covisibility threshold unspecified; this example
+# keeps the edges shared by at least four keyframes.
+# essential_min_shared = 4
+# [map_policy.edge_information]
+# reference_depth_m = 5.0

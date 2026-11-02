@@ -245,7 +245,7 @@ impl LiveSession {
             let worker = crate::system::MappingWorker::spawn(
                 calibration.clone(),
                 crate::system::SystemOptions {
-                    map: MapPolicy::paper_thresholds(nalgebra::SMatrix::identity()),
+                    map: MapPolicy::paper_thresholds(),
                     loops: LoopOptions::default(),
                     global_optimization: false,
                     ..Default::default()

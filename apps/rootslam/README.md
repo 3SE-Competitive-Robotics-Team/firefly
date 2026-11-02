@@ -21,8 +21,11 @@ estimator precision; `[optimization] precision = "float64"` independently select
 global bundle-adjustment precision (`"float64"` by default); `"float32"` is an
 explicit experimental comparison. `[loop_options]`
 overrides retrieval and verification parameters. Optional `[map_policy]` supplies
-all map policy fields, including edge information scaling, whose values were not
-published in the paper. These parameters are defined in the mapping crate.
+all map policy fields, including the pose-graph residual scale, whose values
+were not published in the paper. These parameters are defined in the mapping
+crate. The scale is owned by the persistent map and shared by every edge, so
+`[loop_options] edge_sqrt_information` no longer exists; a configuration that
+still carries that key is rejected instead of silently ignored.
 
 `[optimization] krylov_precision = "float64"` is the default for LSQR work
 vectors and accumulation; matrix storage and landmark QR retain `precision`.
