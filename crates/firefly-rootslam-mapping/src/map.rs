@@ -434,9 +434,18 @@ impl PersistentMap {
             return;
         };
         let relative = frame.t_w_b.inverse() * self.snapshot.keyframes[&id].t_w_b;
-        // Graph-contraction choice: reconnect retained temporal/loop neighbors
-        // to the trajectory parent using their current relative estimates.
-        // This preserves graph connectivity when a bridge keyframe is culled.
+        // Graph contraction: reconnect retained temporal/loop neighbors to the
+        // trajectory parent by folding the removed keyframe into the edge.
+        // `T_parent<-neighbor = T_parent<-removed * T_removed<-neighbor` keeps
+        // the original measurement alive. Using the current estimate of
+        // `T_parent<-neighbor` instead would produce an edge that is satisfied
+        // by construction, which silently discards a validated loop closure:
+        // its measurement is the gP3P estimate and not a function of the
+        // current poses.
+        // The removed keyframe enters the fold through its current estimate
+        // because that estimate already carries the correction of the closed
+        // loops. Folding the raw odometry measurement instead would drag the
+        // map back towards the drifted chain.
         let neighbors: Vec<_> = self
             .snapshot
             .edges
@@ -452,10 +461,15 @@ impl PersistentMap {
                 } else {
                     return None;
                 };
-                (neighbor != parent).then_some((neighbor, edge.kind, edge.sqrt_information))
+                (neighbor != parent).then_some((
+                    neighbor,
+                    edge.kind,
+                    edge.sqrt_information,
+                    edge.measurement,
+                    edge.from == id,
+                ))
             })
             .collect();
-        let parent_pose = frame.t_w_b;
         self.culled_poses.insert(id, (parent, relative));
         self.snapshot.keyframes.remove(&id);
         self.removed_keyframes.insert(id);
@@ -475,22 +489,31 @@ impl PersistentMap {
         self.snapshot
             .edges
             .retain(|edge| edge.from != id && edge.to != id);
-        for (neighbor, kind, sqrt_information) in neighbors {
+        for (neighbor, kind, sqrt_information, measurement, forward) in neighbors {
             if self.snapshot.edges.iter().any(|edge| {
                 (edge.from == parent && edge.to == neighbor)
                     || (edge.from == neighbor && edge.to == parent)
             }) {
                 continue;
             }
-            if let Some(frame) = self.snapshot.keyframes.get(&neighbor) {
-                self.snapshot.edges.push(PoseGraphEdge {
-                    from: parent,
-                    to: neighbor,
-                    measurement: parent_pose.inverse() * frame.t_w_b,
-                    kind,
-                    sqrt_information,
-                });
+            if !self.snapshot.keyframes.contains_key(&neighbor) {
+                continue;
             }
+            // `relative` is the current estimate of the removed keyframe in the
+            // parent frame, so folding it into the original measurement keeps
+            // the edge constraint instead of restating the current estimate.
+            let folded = if forward {
+                relative * measurement
+            } else {
+                relative * measurement.inverse()
+            };
+            self.snapshot.edges.push(PoseGraphEdge {
+                from: parent,
+                to: neighbor,
+                measurement: folded,
+                kind,
+                sqrt_information,
+            });
         }
     }
     #[must_use]

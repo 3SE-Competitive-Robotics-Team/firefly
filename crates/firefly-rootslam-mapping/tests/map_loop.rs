@@ -13,8 +13,9 @@ use firefly_rootslam_mapping::{
         MapFeature, MapKeyframe, MapLandmark, MapObservation, MapPolicy, MapSnapshot,
         ObservationKey, PersistentMap,
     },
+    pose_graph::PoseGraphEdge,
 };
-use nalgebra::{Isometry3, Vector2, Vector3, Vector4};
+use nalgebra::{Isometry3, SMatrix, Vector2, Vector3, Vector4};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -456,6 +457,55 @@ fn culling_preserves_chained_full_trajectory_anchors() {
     ));
     assert_eq!(map.resolved_pose(0).unwrap().translation.vector.x, 5.);
     assert_eq!(map.resolved_pose(1).unwrap().translation.vector.x, 6.);
+}
+#[test]
+fn culling_folds_the_original_measurement_into_the_contracted_edge() {
+    use firefly_rootslam_mapping::pose_graph::EdgeKind;
+    let mut policy = MapPolicy::paper_thresholds();
+    policy.max_keyframes = 2;
+    policy.cull_batch = 1;
+    let mut map = PersistentMap::new(calibration(), policy).unwrap();
+    let frame = |id| MapKeyframe {
+        id,
+        t_w_b: Isometry3::translation(id as f64, 0., 0.),
+        active: false,
+        features: Vec::new(),
+        images: None,
+    };
+    for id in 0..3 {
+        map.snapshot.keyframes.insert(id, frame(id));
+    }
+    // The validated loop claims the two ends are 3 m apart while the current
+    // estimates say 2 m. Its measurement is a gP3P estimate, not a function of
+    // the current poses, so contracting the graph must fold it, not restate it.
+    map.snapshot.edges.push(PoseGraphEdge {
+        from: 0,
+        to: 2,
+        measurement: Isometry3::translation(3., 0., 0.),
+        kind: EdgeKind::Loop,
+        sqrt_information: SMatrix::identity(),
+    });
+    let empty = LocalMapSnapshot {
+        t_ns: 0,
+        poses: BTreeMap::new(),
+        keyframes: BTreeSet::new(),
+        landmarks: BTreeMap::new(),
+        frames: BTreeMap::new(),
+        rejected_landmarks: BTreeSet::new(),
+        rejected_observations: BTreeSet::new(),
+    };
+    map.ingest(&empty);
+    assert!(!map.snapshot.keyframes.contains_key(&0));
+    let folded = map
+        .snapshot
+        .edges
+        .iter()
+        .find(|edge| edge.from == 1 && edge.to == 2)
+        .expect("contracted loop edge");
+    assert_eq!(folded.kind, EdgeKind::Loop);
+    // T_1<-2 = T_1<-0 (current estimate) * T_0<-2 (gP3P) = 2 m, not the 1 m
+    // that the current estimates alone would state.
+    assert!((folded.measurement.translation.vector - Vector3::new(2., 0., 0.)).norm() < 1e-12);
 }
 #[test]
 fn fixed_rig_stereo_landmarks_continue_until_their_own_steps_converge() {
