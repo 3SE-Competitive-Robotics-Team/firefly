@@ -322,6 +322,23 @@ fn solve_lsqr<S: BasaltScalar>(
     }
 }
 
+/// Relative gradient reduction the solver may demand from the working precision.
+///
+/// The criterion compares the gradient of the damped system with its initial
+/// value. The working precision bounds how small that ratio can become, so a
+/// criterion below the precision's own resolution is unreachable by
+/// construction: the iteration then spends its whole budget without reducing
+/// the cost, and the outer Levenberg-Marquardt loop retries with more damping
+/// instead of making progress. Flooring the criterion at the precision's
+/// resolution keeps the single-precision configuration usable.
+///
+/// The floor follows the Krylov working precision, not the matrix precision:
+/// with double-precision work vectors the accumulation is exact enough for the
+/// requested criterion even when the matrices are single precision.
+fn effective_lsqr_tolerance<W: BasaltScalar>(requested: f64) -> f64 {
+    requested.max(W::epsilon_sqrt().as_f64())
+}
+
 fn solve_lsqr_with_workspace<S: BasaltScalar, W: BasaltScalar>(
     system: &SquareRootSystem<S>,
     options: &OptimizationOptions,
@@ -350,7 +367,7 @@ fn solve_lsqr_with_workspace<S: BasaltScalar, W: BasaltScalar>(
     let mut w = v.clone();
     let mut phi_bar = beta;
     let mut rho_bar = alpha;
-    let tolerance = options.lsqr_tolerance;
+    let tolerance = effective_lsqr_tolerance::<W>(options.lsqr_tolerance);
     let initial_gradient = system.physical_gradient_norm(None);
     for iteration in 1..=options.lsqr_max_iterations {
         u = system.multiply(&v.component_mul(&scaling)) - u * alpha;
@@ -1150,6 +1167,118 @@ mod tests {
             .translation
             .vector += Vector3::new(-0.02, 0.01, -0.02);
         (snapshot, calibration)
+    }
+
+    /// A scene whose initial residual is small.
+    ///
+    /// The relative gradient criterion of the damped normal equations then
+    /// demands a step below the resolution of the working precision, which is
+    /// the regime where a single-precision Krylov solve cannot converge.
+    fn nearly_converged_scene() -> (MapSnapshot, Calibration<f64>) {
+        let mut calibration = Calibration::default();
+        let mut camera = GenericCamera::from_name("pinhole");
+        camera.set_from_init(Vector4::new(300.0, 310.0, 320.0, 240.0));
+        calibration.intrinsics = vec![camera.clone(), camera];
+        calibration.t_i_c = vec![Isometry3::identity(), Isometry3::translation(0.2, 0.0, 0.0)];
+        let mut snapshot = MapSnapshot::default();
+        for id in 0..20_i64 {
+            snapshot.keyframes.insert(
+                id,
+                MapKeyframe {
+                    id,
+                    t_w_b: Isometry3::translation(id as f64 * 0.3, 0.0, 0.0),
+                    active: id == 0,
+                    features: vec![],
+                    images: None,
+                },
+            );
+        }
+        for id in 0..100_u64 {
+            let point = Vector3::new(
+                (id % 6) as f64 * 0.3 - 0.7,
+                (id / 6) as f64 * 0.3 - 0.3,
+                3.0 + (id % 3) as f64 * 0.5,
+            );
+            let host = (id % 20) as i64;
+            let mut observations = BTreeMap::new();
+            for keyframe in host..(host + 4).min(20) {
+                for camera in 0..2 {
+                    let position = point
+                        - snapshot.keyframes[&keyframe].t_w_b.translation.vector
+                        - calibration.t_i_c[camera].translation.vector;
+                    observations.insert(
+                        ObservationKey {
+                            keyframe,
+                            camera,
+                            feature: id as usize,
+                        },
+                        MapObservation {
+                            pixel: Vector2::new(
+                                300.0 * position.x / position.z + 320.0,
+                                310.0 * position.y / position.z + 240.0,
+                            ),
+                        },
+                    );
+                }
+            }
+            snapshot.landmarks.insert(
+                id,
+                MapLandmark {
+                    id,
+                    host,
+                    position: point + Vector3::new(0.02, -0.01, 0.03) * 0.01,
+                    observations,
+                },
+            );
+        }
+        for id in 0..19_i64 {
+            snapshot.edges.push(PoseGraphEdge {
+                from: id,
+                to: id + 1,
+                measurement: Isometry3::translation(0.3, 0.0, 0.0),
+                kind: EdgeKind::Temporal,
+                sqrt_information: Matrix6::identity() * 60.0,
+            });
+        }
+        (snapshot, calibration)
+    }
+
+    #[test]
+    fn the_krylov_tolerance_follows_the_working_precision() {
+        // Double-precision work vectors resolve the requested criterion.
+        assert_eq!(effective_lsqr_tolerance::<f64>(1e-5), 1e-5);
+        // Single-precision work vectors cannot resolve it, so the criterion is
+        // floored at the resolution of the working precision.
+        assert_eq!(
+            effective_lsqr_tolerance::<f32>(1e-5),
+            f64::from(1e-5_f32.sqrt())
+        );
+        // An already loose criterion is not tightened.
+        assert_eq!(effective_lsqr_tolerance::<f32>(1e-2), 1e-2);
+    }
+
+    #[test]
+    fn single_precision_does_not_spend_the_krylov_budget_on_an_unreachable_criterion() {
+        let (snapshot, calibration) = nearly_converged_scene();
+        let options = OptimizationOptions {
+            precision: Precision::Float32,
+            krylov_precision: KrylovPrecision::Native,
+            lsqr_tolerance: 1e-5,
+            max_iterations: 12,
+            ..Default::default()
+        };
+        let result = optimize_global(&snapshot, &calibration, &options).unwrap();
+        // Demanding the requested criterion spends the whole Krylov budget on an
+        // unreachable target and leaves the outer loop without a usable step.
+        assert!(
+            result.linear_iterations < 1_000,
+            "single precision spent {} Krylov iterations",
+            result.linear_iterations
+        );
+        assert!(
+            result.final_cost < result.initial_cost,
+            "single precision did not reduce the cost"
+        );
     }
 
     #[test]
