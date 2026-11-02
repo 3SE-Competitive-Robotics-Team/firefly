@@ -13,6 +13,7 @@ use firefly_rootslam_mapping::{
         MapFeature, MapKeyframe, MapLandmark, MapObservation, MapPolicy, MapSnapshot,
         ObservationKey, PersistentMap,
     },
+    pose_graph::PoseGraphEdge,
 };
 use nalgebra::{Isometry3, SMatrix, Vector2, Vector3, Vector4};
 use std::{
@@ -131,10 +132,7 @@ fn hashbow_to_generalized_p3p_verifies_real_multicamera_loop() {
     assert!((closure.drift_m - 0.25).abs() < 1e-6);
     assert_eq!(closure.landmark_pairs.len(), 20);
     assert_eq!(closure.associations.len(), 40);
-    let mut persistent = PersistentMap::new(
-        calibration(),
-        MapPolicy::paper_thresholds(SMatrix::identity()),
-    );
+    let mut persistent = PersistentMap::new(calibration(), MapPolicy::paper_thresholds()).unwrap();
     persistent.snapshot = map;
     assert!(persistent.apply_updates(
         0,
@@ -158,10 +156,7 @@ fn stale_loop_geometry_is_revalidated_before_map_mutation() {
         .unwrap()
         .candidate
         .unwrap();
-    let mut map = PersistentMap::new(
-        calibration(),
-        MapPolicy::paper_thresholds(SMatrix::identity()),
-    );
+    let mut map = PersistentMap::new(calibration(), MapPolicy::paper_thresholds()).unwrap();
     map.snapshot = initial;
     for point in map.snapshot.landmarks.values_mut().filter(|p| p.host == 0) {
         point.position.y += 1.;
@@ -185,10 +180,7 @@ fn corrected_loop_replaces_existing_measurement_with_same_endpoints() {
         .unwrap()
         .candidate
         .unwrap();
-    let mut map = PersistentMap::new(
-        calibration(),
-        MapPolicy::paper_thresholds(SMatrix::identity()),
-    );
+    let mut map = PersistentMap::new(calibration(), MapPolicy::paper_thresholds()).unwrap();
     map.snapshot = initial;
     let mut existing = closure.edge.clone();
     existing.measurement = Isometry3::translation(0.4, 0., 0.);
@@ -252,10 +244,7 @@ fn local(translation: f64) -> LocalMapSnapshot {
 
 #[test]
 fn local_outlier_removal_retracts_active_observation_but_retains_marginalized_geometry() {
-    let mut map = PersistentMap::new(
-        calibration(),
-        MapPolicy::paper_thresholds(SMatrix::identity()),
-    );
+    let mut map = PersistentMap::new(calibration(), MapPolicy::paper_thresholds()).unwrap();
     let mut input = local(0.);
     input.keyframes.insert(1);
     input.poses.insert(1, Isometry3::identity());
@@ -312,10 +301,7 @@ fn local_outlier_removal_retracts_active_observation_but_retains_marginalized_ge
 
 #[test]
 fn local_outlier_point_removal_does_not_leave_a_persistent_active_point() {
-    let mut map = PersistentMap::new(
-        calibration(),
-        MapPolicy::paper_thresholds(SMatrix::identity()),
-    );
+    let mut map = PersistentMap::new(calibration(), MapPolicy::paper_thresholds()).unwrap();
     let mut input = local(0.);
     map.ingest(&input);
     let previous = input
@@ -336,10 +322,7 @@ fn local_outlier_point_removal_does_not_leave_a_persistent_active_point() {
 
 #[test]
 fn lost_landmark_marginalization_keeps_geometry_with_an_active_host() {
-    let mut map = PersistentMap::new(
-        calibration(),
-        MapPolicy::paper_thresholds(SMatrix::identity()),
-    );
+    let mut map = PersistentMap::new(calibration(), MapPolicy::paper_thresholds()).unwrap();
     let mut input = local(0.);
     map.ingest(&input);
     input.landmarks.clear();
@@ -350,10 +333,7 @@ fn lost_landmark_marginalization_keeps_geometry_with_an_active_host() {
 
 #[test]
 fn local_triangulation_reassigns_single_observation_owner() {
-    let mut map = PersistentMap::new(
-        calibration(),
-        MapPolicy::paper_thresholds(SMatrix::identity()),
-    );
+    let mut map = PersistentMap::new(calibration(), MapPolicy::paper_thresholds()).unwrap();
     let input = local(0.);
     let mut untriangulated = input.clone();
     untriangulated.landmarks.clear();
@@ -385,10 +365,7 @@ fn local_triangulation_reassigns_single_observation_owner() {
 }
 #[test]
 fn stale_results_cannot_overwrite_local_geometry_or_a_newer_optimizer() {
-    let mut map = PersistentMap::new(
-        calibration(),
-        MapPolicy::paper_thresholds(SMatrix::identity()),
-    );
+    let mut map = PersistentMap::new(calibration(), MapPolicy::paper_thresholds()).unwrap();
     map.ingest(&local(0.));
     let source = map.snapshot.revision;
     map.ingest(&local(1.));
@@ -420,10 +397,7 @@ fn stale_results_cannot_overwrite_local_geometry_or_a_newer_optimizer() {
 }
 #[test]
 fn pose_graph_correction_moves_hosted_geometry_but_preserves_active_window() {
-    let mut map = PersistentMap::new(
-        calibration(),
-        MapPolicy::paper_thresholds(SMatrix::identity()),
-    );
+    let mut map = PersistentMap::new(calibration(), MapPolicy::paper_thresholds()).unwrap();
     map.snapshot = closure_map();
     let original = map.snapshot.landmarks[&0].position;
     assert!(map.apply_updates(
@@ -446,10 +420,10 @@ fn pose_graph_correction_moves_hosted_geometry_but_preserves_active_window() {
 }
 #[test]
 fn culling_preserves_chained_full_trajectory_anchors() {
-    let mut policy = MapPolicy::paper_thresholds(SMatrix::identity());
+    let mut policy = MapPolicy::paper_thresholds();
     policy.max_keyframes = 2;
     policy.cull_batch = 1;
-    let mut map = PersistentMap::new(calibration(), policy);
+    let mut map = PersistentMap::new(calibration(), policy).unwrap();
     let frame = |id| MapKeyframe {
         id,
         t_w_b: Isometry3::translation(id as f64, 0., 0.),
@@ -483,6 +457,55 @@ fn culling_preserves_chained_full_trajectory_anchors() {
     ));
     assert_eq!(map.resolved_pose(0).unwrap().translation.vector.x, 5.);
     assert_eq!(map.resolved_pose(1).unwrap().translation.vector.x, 6.);
+}
+#[test]
+fn culling_folds_the_original_measurement_into_the_contracted_edge() {
+    use firefly_rootslam_mapping::pose_graph::EdgeKind;
+    let mut policy = MapPolicy::paper_thresholds();
+    policy.max_keyframes = 2;
+    policy.cull_batch = 1;
+    let mut map = PersistentMap::new(calibration(), policy).unwrap();
+    let frame = |id| MapKeyframe {
+        id,
+        t_w_b: Isometry3::translation(id as f64, 0., 0.),
+        active: false,
+        features: Vec::new(),
+        images: None,
+    };
+    for id in 0..3 {
+        map.snapshot.keyframes.insert(id, frame(id));
+    }
+    // The validated loop claims the two ends are 3 m apart while the current
+    // estimates say 2 m. Its measurement is a gP3P estimate, not a function of
+    // the current poses, so contracting the graph must fold it, not restate it.
+    map.snapshot.edges.push(PoseGraphEdge {
+        from: 0,
+        to: 2,
+        measurement: Isometry3::translation(3., 0., 0.),
+        kind: EdgeKind::Loop,
+        sqrt_information: SMatrix::identity(),
+    });
+    let empty = LocalMapSnapshot {
+        t_ns: 0,
+        poses: BTreeMap::new(),
+        keyframes: BTreeSet::new(),
+        landmarks: BTreeMap::new(),
+        frames: BTreeMap::new(),
+        rejected_landmarks: BTreeSet::new(),
+        rejected_observations: BTreeSet::new(),
+    };
+    map.ingest(&empty);
+    assert!(!map.snapshot.keyframes.contains_key(&0));
+    let folded = map
+        .snapshot
+        .edges
+        .iter()
+        .find(|edge| edge.from == 1 && edge.to == 2)
+        .expect("contracted loop edge");
+    assert_eq!(folded.kind, EdgeKind::Loop);
+    // T_1<-2 = T_1<-0 (current estimate) * T_0<-2 (gP3P) = 2 m, not the 1 m
+    // that the current estimates alone would state.
+    assert!((folded.measurement.translation.vector - Vector3::new(2., 0., 0.)).norm() < 1e-12);
 }
 #[test]
 fn fixed_rig_stereo_landmarks_continue_until_their_own_steps_converge() {

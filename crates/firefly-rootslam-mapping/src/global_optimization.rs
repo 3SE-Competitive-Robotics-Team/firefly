@@ -45,7 +45,11 @@ impl Default for OptimizationOptions {
     fn default() -> Self {
         Self {
             precision: Precision::Float64,
-            krylov_precision: KrylovPrecision::Float64,
+            // The Krylov work vectors follow the matrix precision unless the
+            // caller asks for the mixed precision comparison explicitly. The
+            // paper runs the whole global optimization in single precision, so
+            // `precision = "float32"` is a complete single precision solve.
+            krylov_precision: KrylovPrecision::Native,
             max_iterations: 50,
             initial_damping: 1e-3,
             minimum_damping: 1e-8,
@@ -100,6 +104,10 @@ pub struct OptimizationResult {
     pub converged: bool,
     pub linear_iterations: usize,
     pub peak_linear_storage_bytes: usize,
+    /// Precision of the matrix storage and the landmark elimination.
+    pub precision: Precision,
+    /// Precision of the Krylov work vectors and accumulation.
+    pub krylov_precision: KrylovPrecision,
 }
 
 struct RowBlock<S: BasaltScalar> {
@@ -570,6 +578,9 @@ fn append_graph_factors<S: BasaltScalar>(
 ) -> f64 {
     let mut cost = 0.0;
     for edge in &snapshot.edges {
+        if !edge.kind.is_measurement_bearing() {
+            continue;
+        }
         let (Some(first), Some(second)) = (state.poses.get(&edge.from), state.poses.get(&edge.to))
         else {
             continue;
@@ -682,6 +693,9 @@ fn trial_cost<S: BasaltScalar>(
     if options.pose_graph_terms {
         let mut graph_cost = 0.0;
         for edge in &snapshot.edges {
+            if !edge.kind.is_measurement_bearing() {
+                continue;
+            }
             let (Some(a), Some(b)) = (state.poses.get(&edge.from), state.poses.get(&edge.to))
             else {
                 continue;
@@ -807,6 +821,10 @@ fn pose_order(snapshot: &MapSnapshot) -> BTreeMap<i64, usize> {
         .map(|(i, &id)| (id, i * 6))
         .collect()
 }
+#[expect(
+    clippy::too_many_lines,
+    reason = "Linearization, trial step and result assembly stay in one function"
+)]
 fn optimize<S: BasaltScalar>(
     snapshot: &MapSnapshot,
     calibration: &Calibration<f64>,
@@ -913,6 +931,8 @@ fn optimize<S: BasaltScalar>(
         converged,
         linear_iterations,
         peak_linear_storage_bytes: peak,
+        precision: options.precision,
+        krylov_precision: options.krylov_precision,
     })
 }
 
@@ -936,6 +956,19 @@ pub fn optimize_global(
     calibration: &Calibration<f64>,
     options: &OptimizationOptions,
 ) -> Result<OptimizationResult> {
+    match (options.precision, options.krylov_precision) {
+        (Precision::Float32, KrylovPrecision::Native) => {
+            log::info!("Global bundle adjustment runs entirely in single precision");
+        }
+        (Precision::Float32, KrylovPrecision::Float64) => {
+            log::warn!(
+                "Global bundle adjustment mixes single precision matrices with double precision Krylov work vectors; this is not the entirely single precision configuration of the paper"
+            );
+        }
+        (Precision::Float64, _) => {
+            log::info!("Global bundle adjustment runs in double precision");
+        }
+    }
     match options.precision {
         Precision::Float32 => optimize::<f32>(snapshot, calibration, options),
         Precision::Float64 => optimize::<f64>(snapshot, calibration, options),
@@ -1229,6 +1262,143 @@ mod tests {
         }
     }
 
+    #[test]
+    fn covisibility_edges_do_not_enter_the_global_pose_graph_term() {
+        let (mut snapshot, calibration) = scene();
+        let options = OptimizationOptions {
+            pose_graph_terms: true,
+            ..Default::default()
+        };
+        let plain = optimize_global(&snapshot, &calibration, &options).unwrap();
+        // A covisibility edge restates the current relative estimate, so it
+        // carries no measurement. If it entered Equation (9) it would add
+        // stiffness that pins the map to its present shape.
+        snapshot.edges.push(PoseGraphEdge {
+            from: 0,
+            to: 2,
+            measurement: Isometry3::translation(5., 0., 0.),
+            kind: EdgeKind::Covisibility,
+            sqrt_information: nalgebra::SMatrix::identity(),
+        });
+        let with_covisibility = optimize_global(&snapshot, &calibration, &options).unwrap();
+        assert_eq!(plain.initial_cost, with_covisibility.initial_cost);
+        assert_eq!(plain.final_cost, with_covisibility.final_cost);
+        for id in 0..3 {
+            assert_eq!(plain.poses[&id], with_covisibility.poses[&id]);
+        }
+    }
+    #[test]
+    fn single_precision_and_double_precision_agree_on_the_paper_scene() {
+        let (snapshot, calibration) = scene();
+        let mut reference: Vec<Vector3<f64>> = Vec::new();
+        for (precision, krylov) in [
+            (Precision::Float64, KrylovPrecision::Native),
+            (Precision::Float32, KrylovPrecision::Native),
+        ] {
+            let options = OptimizationOptions {
+                precision,
+                krylov_precision: krylov,
+                lsqr_tolerance: if precision == Precision::Float32 {
+                    1e-5
+                } else {
+                    1e-10
+                },
+                max_iterations: 30,
+                ..Default::default()
+            };
+            let result = optimize_global(&snapshot, &calibration, &options).unwrap();
+            assert_eq!(result.precision, precision);
+            assert_eq!(result.krylov_precision, krylov);
+            assert!(
+                result.final_cost < result.initial_cost * 1e-4,
+                "{precision:?}: {} -> {}",
+                result.initial_cost,
+                result.final_cost
+            );
+            let poses: Vec<Vector3<f64>> = (0..3)
+                .map(|id| result.poses[&id].translation.vector)
+                .collect();
+            if reference.is_empty() {
+                reference = poses;
+            } else {
+                for (id, (expected, actual)) in reference.iter().zip(poses.iter()).enumerate() {
+                    assert!(
+                        (expected - actual).norm() < 1e-3,
+                        "single and double precision disagree for keyframe {id}"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn the_edge_residual_is_the_papers_left_relative_error() {
+        // Equation (8) is e_ab = log(T_bar_ab * T_hat_ab^-1) with
+        // T_hat_ab = T_aw * T_wb. The residual lives in the world-to-body
+        // chart, so its translation part is the measurement minus the current
+        // relative estimate and its rotation part is the relative rotation
+        // error.
+        let (mut snapshot, _calibration) = scene();
+        for edge in &mut snapshot.edges {
+            edge.measurement *= Isometry3::translation(0.1, 0., 0.);
+            edge.sqrt_information = Matrix6::identity();
+        }
+        let state = state_from_snapshot::<f64>(&snapshot).unwrap();
+        let edge = &snapshot.edges[0];
+        let (residual, _, _) = pose_graph::linearize_edge(
+            state.poses.get(&edge.from).unwrap(),
+            state.poses.get(&edge.to).unwrap(),
+            &pose_graph::cast_pose(&edge.measurement),
+            &edge.sqrt_information,
+        );
+        // Keyframe 1 sits at (0.33, -0.02, 0.01) while the measurement claims
+        // (0.40, 0, 0), and the scene carries no rotation, so the residual is
+        // exactly their difference.
+        let expected = crate::pose_graph::Vector6::new(0.07, 0.02, -0.01, 0., 0., 0.);
+        assert!(
+            (residual - expected).norm() < 1e-12,
+            "residual {residual:?} differs from {expected:?}"
+        );
+    }
+    #[test]
+    fn the_pose_graph_term_scales_with_the_edge_information() {
+        let (mut snapshot, calibration) = scene();
+        // Move the odometry measurements away from the current estimates so
+        // that the pose-graph term is not zero at the initial state.
+        for edge in &mut snapshot.edges {
+            edge.measurement *= Isometry3::translation(0.1, 0., 0.);
+            edge.sqrt_information = Matrix6::identity();
+        }
+        let visual = OptimizationOptions {
+            pose_graph_terms: false,
+            ..Default::default()
+        };
+        let plain = OptimizationOptions {
+            pose_graph_terms: true,
+            ..Default::default()
+        };
+        let visual_cost = optimize_global(&snapshot, &calibration, &visual)
+            .unwrap()
+            .initial_cost;
+        let plain_cost = optimize_global(&snapshot, &calibration, &plain)
+            .unwrap()
+            .initial_cost;
+        let mut scaled = snapshot.clone();
+        for edge in &mut scaled.edges {
+            edge.sqrt_information = Matrix6::identity() * 10.0;
+        }
+        let scaled_cost = optimize_global(&scaled, &calibration, &plain)
+            .unwrap()
+            .initial_cost;
+        let plain_graph = plain_cost - visual_cost;
+        let scaled_graph = scaled_cost - visual_cost;
+        assert!(plain_graph > 0.0);
+        // The square root of the information scales the weighted residual by
+        // ten, so its square scales the pose-graph term by a hundred.
+        assert!(
+            (scaled_graph - 100.0 * plain_graph).abs() < 1e-9 * scaled_graph,
+            "plain graph {plain_graph}, scaled graph {scaled_graph}"
+        );
+    }
     #[test]
     fn landmark_qr_and_lsqr_match_independent_full_damped_svd() {
         let (snapshot, calibration) = scene();

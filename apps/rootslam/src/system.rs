@@ -29,7 +29,7 @@ pub struct SystemOptions {
 impl Default for SystemOptions {
     fn default() -> Self {
         Self {
-            map: MapPolicy::paper_thresholds(nalgebra::SMatrix::identity()),
+            map: MapPolicy::paper_thresholds(),
             loops: LoopOptions::default(),
             optimization: OptimizationOptions::default(),
             global_optimization: true,
@@ -141,7 +141,13 @@ fn correction_snapshot(
     let mut snapshot = map.clone();
     // Section III-B: existing graph edges are measured from the current
     // estimates for this PGO request; only the new loop uses its gP3P estimate.
+    // Only the measurement-bearing edges take part in Equation (1); the
+    // covisibility graph and its spanning forest restate the current
+    // estimates and would only pin the map to its present shape.
     snapshot.edges.retain_mut(|edge| {
+        if !edge.kind.is_measurement_bearing() {
+            return true;
+        }
         let (Some(first), Some(second)) = (
             snapshot.keyframes.get(&edge.from),
             snapshot.keyframes.get(&edge.to),
@@ -412,7 +418,7 @@ fn run(
     let mut state = MapWorkerState {
         input,
         latest,
-        map: PersistentMap::new(calibration, options.map),
+        map: PersistentMap::new(calibration, options.map)?,
         seen: BTreeSet::new(),
         anchors: BTreeMap::new(),
         original_poses: BTreeMap::new(),
@@ -507,10 +513,7 @@ mod tests {
             t_i_c: vec![Isometry3::identity()],
             ..Default::default()
         };
-        let mut map = PersistentMap::new(
-            calibration,
-            MapPolicy::paper_thresholds(nalgebra::SMatrix::identity()),
-        );
+        let mut map = PersistentMap::new(calibration, MapPolicy::paper_thresholds()).unwrap();
         let key = ObservationKey {
             keyframe: 1,
             camera: 0,
@@ -595,6 +598,9 @@ mod tests {
             converged: true,
             linear_iterations: 1,
             peak_linear_storage_bytes: 0,
+            precision: firefly_rootslam_mapping::global_optimization::Precision::Float64,
+            krylov_precision:
+                firefly_rootslam_mapping::global_optimization::KrylovPrecision::Float64,
         };
         let (_, input) = mpsc::channel();
         let latest = Arc::new(RwLock::new(Arc::new(map.snapshot.clone())));

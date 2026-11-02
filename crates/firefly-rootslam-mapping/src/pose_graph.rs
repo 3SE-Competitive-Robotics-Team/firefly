@@ -15,6 +15,23 @@ pub enum EdgeKind {
     Loop,
     SpanningTree,
 }
+impl EdgeKind {
+    /// Whether the edge carries a relative pose measurement that may be used
+    /// as an optimization constraint.
+    ///
+    /// The paper relates keyframes through the odometry and through the
+    /// previously closed loops (section III-C), so only those two kinds enter
+    /// Equation (1) and Equation (9). The covisibility graph and its spanning
+    /// forest are derived from the current estimates: their measurement is the
+    /// relative pose the map holds right now, so their residual is zero by
+    /// construction and they contribute stiffness only. Treating them as
+    /// constraints would pin the map to its current shape and suppress the
+    /// loop correction the pose-graph optimizer exists to distribute.
+    #[must_use]
+    pub fn is_measurement_bearing(self) -> bool {
+        matches!(self, Self::Temporal | Self::Loop)
+    }
+}
 #[derive(Clone, Debug)]
 pub struct PoseGraphEdge {
     pub from: i64,
@@ -216,6 +233,9 @@ fn linearize_graph(
     accumulator.reset(order.len() * 6);
     let mut factors = Vec::new();
     for edge in &snapshot.edges {
+        if !edge.kind.is_measurement_bearing() {
+            continue;
+        }
         let (Some(a), Some(b)) = (poses.get(&edge.from), poses.get(&edge.to)) else {
             continue;
         };
@@ -249,6 +269,7 @@ fn graph_cost(
     snapshot
         .edges
         .iter()
+        .filter(|edge| edge.kind.is_measurement_bearing())
         .filter_map(|edge| {
             Some(
                 0.5 * linearize_pose_graph_edge(
@@ -268,6 +289,10 @@ fn graph_cost(
 /// replaced by the equivalent Rust factor assembly and sparse factorization.
 /// # Errors
 /// Rejects invalid optimizer damping, tolerances or iteration limits.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Levenberg-Marquardt loop, damping schedule and result assembly stay together"
+)]
 pub fn optimize(
     snapshot: &crate::map::MapSnapshot,
     options: &crate::global_optimization::OptimizationOptions,
@@ -370,6 +395,11 @@ pub fn optimize(
         converged,
         linear_iterations: iterations,
         peak_linear_storage_bytes: peak,
+        // The pose-graph optimizer always works in double precision; the
+        // paper's single precision claim concerns the global bundle
+        // adjustment, which uses the square-root factor.
+        precision: crate::global_optimization::Precision::Float64,
+        krylov_precision: crate::global_optimization::KrylovPrecision::Float64,
     })
 }
 
