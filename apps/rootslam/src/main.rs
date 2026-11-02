@@ -222,6 +222,7 @@ fn run(options: &Options) -> Result<()> {
                 .map_policy
                 .clone()
                 .unwrap_or_else(|| firefly_rootslam::system::SystemOptions::default().map),
+            ..Default::default()
         };
         let worker =
             firefly_rootslam::system::MappingWorker::spawn(calibration.clone(), system_options)?;

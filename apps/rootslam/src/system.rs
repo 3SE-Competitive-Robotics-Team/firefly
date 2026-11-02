@@ -25,6 +25,8 @@ pub struct SystemOptions {
     pub loops: LoopOptions,
     pub optimization: OptimizationOptions,
     pub global_optimization: bool,
+    /// 回环检测开关；关闭后只保留局部建图与关键帧共视图。
+    pub loop_closures: bool,
 }
 impl Default for SystemOptions {
     fn default() -> Self {
@@ -33,6 +35,7 @@ impl Default for SystemOptions {
             loops: LoopOptions::default(),
             optimization: OptimizationOptions::default(),
             global_optimization: true,
+            loop_closures: true,
         }
     }
 }
@@ -227,6 +230,7 @@ struct MapWorkerState {
     candidates: VecDeque<LoopCandidate>,
     loops_verified: usize,
     pose_graph_optimizations: usize,
+    loop_closures: bool,
 }
 impl MapWorkerState {
     fn handle_event(&mut self, event: LoopEvent) {
@@ -298,6 +302,9 @@ impl MapWorkerState {
         }
         self.map.ingest(local);
         publish_map(&self.latest, &self.map.snapshot)?;
+        if !self.loop_closures {
+            return Ok(());
+        }
         for &keyframe in &local.keyframes {
             if self.seen.insert(keyframe) && self.map.snapshot.keyframes.contains_key(&keyframe) {
                 jobs.send(LoopJob::Detect(Arc::new(
@@ -427,6 +434,7 @@ fn run(
         candidates: VecDeque::new(),
         loops_verified: 0,
         pose_graph_optimizations: 0,
+        loop_closures: options.loop_closures,
     };
     let processing = state.process(&loops);
     drop(loops.jobs);
@@ -442,6 +450,72 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 建图 worker 的最小夹具；地图里预置一个关键帧，使回环检测有候选。
+    fn ingest_fixture(loop_closures: bool) -> (MapWorkerState, Sender<LoopJob>, Receiver<LoopJob>) {
+        let (_, input) = mpsc::channel();
+        let mut map =
+            PersistentMap::new(Calibration::default(), MapPolicy::paper_thresholds()).unwrap();
+        map.snapshot.keyframes.insert(
+            3,
+            MapKeyframe {
+                id: 3,
+                t_w_b: Isometry3::identity(),
+                active: true,
+                features: vec![],
+                images: None,
+            },
+        );
+        let latest = Arc::new(RwLock::new(Arc::new(map.snapshot.clone())));
+        let (jobs, detected) = mpsc::channel();
+        let state = MapWorkerState {
+            input,
+            latest,
+            map,
+            seen: BTreeSet::new(),
+            anchors: BTreeMap::new(),
+            original_poses: BTreeMap::new(),
+            pending: 0,
+            correction_pending: false,
+            candidates: VecDeque::new(),
+            loops_verified: 0,
+            pose_graph_optimizations: 0,
+            loop_closures,
+        };
+        (state, jobs, detected)
+    }
+
+    fn keyframe_snapshot() -> LocalMapSnapshot {
+        LocalMapSnapshot {
+            t_ns: 1,
+            poses: BTreeMap::from([(3, Isometry3::identity())]),
+            keyframes: BTreeSet::from([3]),
+            landmarks: BTreeMap::new(),
+            frames: BTreeMap::new(),
+            rejected_landmarks: BTreeSet::new(),
+            rejected_observations: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn disabled_loop_closures_keep_the_local_map_without_detecting_loops() {
+        let (mut state, jobs, detected) = ingest_fixture(false);
+        state.ingest(&keyframe_snapshot(), &jobs).unwrap();
+        assert!(
+            detected.try_recv().is_err(),
+            "disabled loop closures must not enqueue detection jobs"
+        );
+        assert_eq!(state.map.snapshot.keyframes.len(), 1);
+        assert_eq!(state.pending, 0);
+    }
+
+    #[test]
+    fn enabled_loop_closures_enqueue_detection_for_new_keyframes() {
+        let (mut state, jobs, detected) = ingest_fixture(true);
+        state.ingest(&keyframe_snapshot(), &jobs).unwrap();
+        assert!(matches!(detected.try_recv(), Ok(LoopJob::Detect(_))));
+        assert_eq!(state.pending, 1);
+    }
 
     #[test]
     fn loop_worker_uses_separate_default_and_explicit_pose_graph_budgets() {
@@ -617,6 +691,7 @@ mod tests {
                 candidates: VecDeque::new(),
                 loops_verified: 1,
                 pose_graph_optimizations: 0,
+                loop_closures: true,
             },
             candidate,
             result,

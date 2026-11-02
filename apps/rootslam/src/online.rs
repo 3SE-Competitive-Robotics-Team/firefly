@@ -44,6 +44,8 @@ pub struct Options {
     pub stats_directory: Option<PathBuf>,
     pub use_double: bool,
     pub map: bool,
+    /// 回环检测开关；关闭后只保留局部建图与关键帧共视图。
+    pub loops: bool,
 }
 
 impl Default for Options {
@@ -53,6 +55,7 @@ impl Default for Options {
             stats_directory: None,
             use_double: false,
             map: true,
+            loops: true,
         }
     }
 }
@@ -248,6 +251,7 @@ impl LiveSession {
                     map: MapPolicy::paper_thresholds(),
                     loops: LoopOptions::default(),
                     global_optimization: false,
+                    loop_closures: options.loops,
                     ..Default::default()
                 },
             )?;
