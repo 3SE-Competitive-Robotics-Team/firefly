@@ -408,10 +408,10 @@ RootSLAM 侧与 OKVIS2-X 的差别：
   --no-mapping` 关掉回环与建图，理由与 OKVIS2-X 相同：板端初始化不能阻塞
   IMU 队列。
 - RootSLAM 只用双目 + IMU，不消费深度，与 HIL 的 `depth = false` 一致。
-- 话题层不需要适配：RootSLAM 订阅 `Firefly/Camera/Left`、
-  `Firefly/Camera/Right` 与 `Firefly/Imu`，与 `camera --hil` 发布的完全相同；
-  它向 FC 发布的 `Firefly/Odometry`、`Firefly/Navigation`、
-  `Firefly/VioAttitude` 也与 FC 订阅的话题一致。
+- 话题层不需要适配：RootSLAM 订阅 `Firefly/CameraLeft`、`Firefly/CameraRight`
+  与 `Firefly/Imu`，与 `camera --hil` 发布的完全相同；它向 FC 发布的
+  `Firefly/Odometry`、`Firefly/Navigation`、`Firefly/VioAttitude` 也与 FC 订阅的
+  话题一致。
 - VIO 参数用 `VioPreset::Rig` 预设：Basalt 自带的默认参数是按 512×512 TUM-VI
   调的，在 320×240 的 rig 上光流网格只剩 6×4 = 24 个单元（约 24 个特征点）；
   预设把网格边长改成 20 px，得到 16×12 = 192 个单元，特征点数与 OKVIS2-X 在

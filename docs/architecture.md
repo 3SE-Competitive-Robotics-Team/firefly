@@ -61,7 +61,8 @@ RootSLAM 应用在线运行回环与位姿图修正，在输入结束后运行�
 `firefly-rootslam` 已把 Render 双目和 Sim IMU 接入 Basalt VIO，并向 FC 发布
 `Odometry`、`CorrectedOdometry`、`Navigation` 和后验 IMU 预测 `VioAttitude`；当前
 `CorrectedOdometry` 与局部里程计相同，导航变换为恒等变换，在线位姿图修正尚未反馈到
-输出。真实板载相机和 IMU 驱动也未接入这条入口。回环修正应通过 map←odom 与地图版本
+输出。真实板载相机和 IMU 驱动也未接入这条入口；板端 HIL 链路进板的是主机仿真
+图像与 IMU，不是真实传感器。回环修正应通过 map←odom 与地图版本
 表达，不能作为物理运动跳变注入里程计。RootSLAM 稀疏路标不构成避障占据地图；完整规划
 链路仍需深度融合和带版本、覆盖范围的原子地图快照。悬停验收不等同于板端或轨迹精度验收。
 
