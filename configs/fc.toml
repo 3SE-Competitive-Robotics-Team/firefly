@@ -13,8 +13,11 @@ vel_max_horizontal = 3.0
 tilt_max_deg = 32.0
 
 [control.allocation]
-# 1 = 滚转/俯仰 airmode：垂直推力饱和时保留姿态权限。
-airmode = 1
+# 0 = 关闭 airmode：推力饱和时裁掉姿态力矩、优先总推力。
+# 1 = 滚转/俯仰 airmode：垂直推力饱和时保留姿态权限，但会把总推力顶到悬停值之上。
+# HIL 实测：速率环力矩需求越过满量程后，airmode=1 把总推力从悬停 2.15 N 顶到
+# 3.22 N（+50%），起飞直接撞 3 m 围栏；关掉后推力峰 2.40 N，悬停稳在 1.0 m。
+airmode = 0
 
 # [fsm]
 # 起降垂直参考由 VelocitySmoothing 生成；以下为覆盖默认值的示例。

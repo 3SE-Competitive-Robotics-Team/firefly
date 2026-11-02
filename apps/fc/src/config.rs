@@ -47,7 +47,7 @@ mod tests {
     fn shipped_config_parses_and_keeps_product_envelope() {
         let config: FcConfig = toml::from_str(include_str!("../../../configs/fc.toml")).unwrap();
         assert!((config.rate_hz - 1000.0).abs() < f64::EPSILON);
-        assert_eq!(config.control.allocation.airmode, 1);
+        assert_eq!(config.control.allocation.airmode, 0);
         assert!((config.control.position.tilt_max_deg - 32.0).abs() < 1e-6);
         assert!((config.control.position.vel_max_horizontal - 3.0).abs() < 1e-6);
         assert!((config.control.position.p[0] - 0.95).abs() < 1e-6);
