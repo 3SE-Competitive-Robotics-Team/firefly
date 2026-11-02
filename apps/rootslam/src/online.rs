@@ -629,4 +629,21 @@ mod config_tests {
             );
         }
     }
+
+    #[test]
+    fn the_board_hil_configuration_selects_the_rig_preset() {
+        #[derive(serde::Deserialize)]
+        struct Document {
+            online: Options,
+        }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../configs/rootslam-hil.toml");
+        let document = std::fs::read_to_string(&path).expect("板端 HIL 配置随仓库发布");
+        let parsed: Document = toml::from_str(&document).expect("板端 HIL 配置可解析");
+        assert_eq!(parsed.online.vio_preset, VioPreset::Rig);
+        assert!(
+            parsed.online.use_double,
+            "单精度路径没有板端验证，保持双精度"
+        );
+    }
 }
