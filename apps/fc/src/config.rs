@@ -75,8 +75,6 @@ mod tests {
         let config: FcConfig = toml::from_str(include_str!("../../../configs/fc.toml")).unwrap();
         assert!((config.rate_hz - 1000.0).abs() < f64::EPSILON);
         assert_eq!(config.control.allocation.airmode, 1);
-        assert!((config.rate_measurement_lpf_hz - 10.0).abs() < f64::EPSILON);
-        assert!((config.rate_measurement_limit_rad_s - 20.0).abs() < f64::EPSILON);
         assert!((config.control.position.tilt_max_deg - 32.0).abs() < 1e-6);
         assert!((config.control.position.vel_max_horizontal - 3.0).abs() < 1e-6);
         assert!((config.control.position.p[0] - 0.95).abs() < 1e-6);
@@ -84,5 +82,8 @@ mod tests {
         assert!((config.control.rate.p[0] - 0.15).abs() < 1e-6);
         assert!((config.control.attitude.p[0] - 4.0).abs() < 1e-6);
         assert!((config.control.position.vel_i[0] - 0.4).abs() < 1e-6);
+        // 测量角速度滤波的默认截止频率与幅值上限。
+        assert!((config.rate_measurement_lpf_hz - 10.0).abs() < f64::EPSILON);
+        assert!((config.rate_measurement_limit_rad_s - 20.0).abs() < f64::EPSILON);
     }
 }
