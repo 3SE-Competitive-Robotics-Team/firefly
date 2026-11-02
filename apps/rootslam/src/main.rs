@@ -309,6 +309,11 @@ fn report_mapping(result: &firefly_rootslam::system::SystemResult) {
             global.linear_iterations,
             global.peak_linear_storage_bytes
         );
+        log::info!(
+            "Global BA numerics: matrix precision {:?}, Krylov precision {:?}",
+            global.precision,
+            global.krylov_precision
+        );
     }
 }
 

@@ -45,7 +45,11 @@ impl Default for OptimizationOptions {
     fn default() -> Self {
         Self {
             precision: Precision::Float64,
-            krylov_precision: KrylovPrecision::Float64,
+            // The Krylov work vectors follow the matrix precision unless the
+            // caller asks for the mixed precision comparison explicitly. The
+            // paper runs the whole global optimization in single precision, so
+            // `precision = "float32"` is a complete single precision solve.
+            krylov_precision: KrylovPrecision::Native,
             max_iterations: 50,
             initial_damping: 1e-3,
             minimum_damping: 1e-8,
@@ -100,6 +104,10 @@ pub struct OptimizationResult {
     pub converged: bool,
     pub linear_iterations: usize,
     pub peak_linear_storage_bytes: usize,
+    /// Precision of the matrix storage and the landmark elimination.
+    pub precision: Precision,
+    /// Precision of the Krylov work vectors and accumulation.
+    pub krylov_precision: KrylovPrecision,
 }
 
 struct RowBlock<S: BasaltScalar> {
@@ -813,6 +821,10 @@ fn pose_order(snapshot: &MapSnapshot) -> BTreeMap<i64, usize> {
         .map(|(i, &id)| (id, i * 6))
         .collect()
 }
+#[expect(
+    clippy::too_many_lines,
+    reason = "Linearization, trial step and result assembly stay in one function"
+)]
 fn optimize<S: BasaltScalar>(
     snapshot: &MapSnapshot,
     calibration: &Calibration<f64>,
@@ -919,6 +931,8 @@ fn optimize<S: BasaltScalar>(
         converged,
         linear_iterations,
         peak_linear_storage_bytes: peak,
+        precision: options.precision,
+        krylov_precision: options.krylov_precision,
     })
 }
 
@@ -942,6 +956,19 @@ pub fn optimize_global(
     calibration: &Calibration<f64>,
     options: &OptimizationOptions,
 ) -> Result<OptimizationResult> {
+    match (options.precision, options.krylov_precision) {
+        (Precision::Float32, KrylovPrecision::Native) => {
+            log::info!("Global bundle adjustment runs entirely in single precision");
+        }
+        (Precision::Float32, KrylovPrecision::Float64) => {
+            log::warn!(
+                "Global bundle adjustment mixes single precision matrices with double precision Krylov work vectors; this is not the entirely single precision configuration of the paper"
+            );
+        }
+        (Precision::Float64, _) => {
+            log::info!("Global bundle adjustment runs in double precision");
+        }
+    }
     match options.precision {
         Precision::Float32 => optimize::<f32>(snapshot, calibration, options),
         Precision::Float64 => optimize::<f64>(snapshot, calibration, options),
@@ -1258,6 +1285,49 @@ mod tests {
         assert_eq!(plain.final_cost, with_covisibility.final_cost);
         for id in 0..3 {
             assert_eq!(plain.poses[&id], with_covisibility.poses[&id]);
+        }
+    }
+    #[test]
+    fn single_precision_and_double_precision_agree_on_the_paper_scene() {
+        let (snapshot, calibration) = scene();
+        let mut reference: Vec<Vector3<f64>> = Vec::new();
+        for (precision, krylov) in [
+            (Precision::Float64, KrylovPrecision::Native),
+            (Precision::Float32, KrylovPrecision::Native),
+        ] {
+            let options = OptimizationOptions {
+                precision,
+                krylov_precision: krylov,
+                lsqr_tolerance: if precision == Precision::Float32 {
+                    1e-5
+                } else {
+                    1e-10
+                },
+                max_iterations: 30,
+                ..Default::default()
+            };
+            let result = optimize_global(&snapshot, &calibration, &options).unwrap();
+            assert_eq!(result.precision, precision);
+            assert_eq!(result.krylov_precision, krylov);
+            assert!(
+                result.final_cost < result.initial_cost * 1e-4,
+                "{precision:?}: {} -> {}",
+                result.initial_cost,
+                result.final_cost
+            );
+            let poses: Vec<Vector3<f64>> = (0..3)
+                .map(|id| result.poses[&id].translation.vector)
+                .collect();
+            if reference.is_empty() {
+                reference = poses;
+            } else {
+                for (id, (expected, actual)) in reference.iter().zip(poses.iter()).enumerate() {
+                    assert!(
+                        (expected - actual).norm() < 1e-3,
+                        "single and double precision disagree for keyframe {id}"
+                    );
+                }
+            }
         }
     }
     #[test]

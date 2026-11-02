@@ -10,6 +10,12 @@ global_result_path = "logs/rootslam_global_result.json"
 
 [optimization]
 problem_archive = "logs/rootslam_global_problem.json"
+# The paper runs the whole global optimization in single precision. Uncomment
+# both lines to reproduce that configuration; the default stays double
+# precision because the single-precision path could not be validated against a
+# dataset in this repository.
+# precision = "float32"
+# krylov_precision = "native"
 
 # Optional map policy. All fields are required when the section is present.
 # The pose-graph residual scale is the paper's `S_ab`, whose values were not
