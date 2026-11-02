@@ -65,6 +65,12 @@ RootSLAM 应用在线运行回环与位姿图修正，在输入结束后运行�
 表达，不能作为物理运动跳变注入里程计。RootSLAM 稀疏路标不构成避障占据地图；完整规划
 链路仍需深度融合和带版本、覆盖范围的原子地图快照。悬停验收不等同于板端或轨迹精度验收。
 
+板端 HIL 链路用同一套 IPC 话题：`camera --hil` 把主机仿真图像与 IMU 经 USB 收进板端
+再发布，RootSLAM 与 OKVIS2-X 消费同样的双目与 IMU 话题、发布同样的里程计与姿态话题，
+因此估计器可按验收需要在两者之间切换，话题层不需要适配。板端 HIL 只跑一个估计器，
+两份进程清单由 `xtask deploy-hil --estimator` 选择；RootSLAM 侧的 VIO 参数按 320×240
+rig 重选光流网格，详见 [开发指南](development.md#rootslam-的-hil-配置)。
+
 ### 板载拓扑
 
 真机由 `camera`、`imu`、`motor` 接替仿真与渲染；算法进程使用相同 IPC 消息。
