@@ -33,7 +33,7 @@ def test_sim_uses_injected_factory_with_configured_rates_and_scene(tmp_path, sce
     scene_loader.assert_called_once_with()
     factory.assert_called_once()
     args = factory.call_args.kwargs
-    assert set(args) == {"timestep", "imu_period", "scene_factory"}
+    assert set(args) == {"timestep", "imu_period", "scene_factory", "rng"}
     assert args["timestep"] == .005
     assert args["imu_period"] == .01
     assert args["scene_factory"].func is build_scene
