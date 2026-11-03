@@ -2425,7 +2425,8 @@ mod tests {
                 time,
                 index as u64,
             )));
-            let imu = (-1..=index * 10)
+            // 初始化要求 100 ms 连续静止窗口，夹具保留首帧前 105 ms 的静止采样。
+            let imu = (-21..=index * 10)
                 .map(|i| {
                     ImuMeasurement::new(
                         Timestamp::from_millisecond(i * 5).unwrap(),
@@ -2523,11 +2524,18 @@ mod tests {
             Timestamp::UNIX_EPOCH,
             id.value(),
         )));
-        let imu = VecDeque::from([ImuMeasurement::new(
-            Timestamp::UNIX_EPOCH,
-            ImuSensorReadings::new(Vector3::zeros(), Vector3::z() * 9.81),
-            -1,
-        )]);
+        // 初始化要求 100 ms 连续静止窗口，夹具保留首帧前 105 ms 的静止采样。
+        let imu = VecDeque::from(
+            (-21..=0)
+                .map(|i| {
+                    ImuMeasurement::new(
+                        Timestamp::from_millisecond(i * 5).unwrap(),
+                        ImuSensorReadings::new(Vector3::zeros(), Vector3::z() * 9.81),
+                        -1,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
         assert!(core.graph.add_states(frame, &imu, true).unwrap());
         core.imu_by_frame.insert(id, imu);
         let landmark_id = LandmarkId::new(1);
