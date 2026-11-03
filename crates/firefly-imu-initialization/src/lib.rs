@@ -71,12 +71,11 @@ impl StationaryGravitySampler {
             return None;
         }
 
-        self.start_ns.get_or_insert(sample.timestamp_ns);
+        let start_ns = *self.start_ns.get_or_insert(sample.timestamp_ns);
         self.last_ns = Some(sample.timestamp_ns);
         self.sample_count += 1;
         self.sum_specific_force += sample.accel;
 
-        let start_ns = self.start_ns.expect("stationary sample sets window start");
         if sample.timestamp_ns - start_ns < MIN_DURATION_NS || self.sample_count < 2 {
             return None;
         }
@@ -101,9 +100,9 @@ impl StationaryGravitySampler {
 pub fn sample_stationary_gravity(
     samples: impl IntoIterator<Item = ImuSample>,
 ) -> Option<GravityEstimate> {
-    let mut sampler = StationaryGravitySampler::new();
+    let mut window = StationaryGravitySampler::new();
     for sample in samples {
-        if let Some(estimate) = sampler.push(sample) {
+        if let Some(estimate) = window.push(sample) {
             return Some(estimate);
         }
     }
