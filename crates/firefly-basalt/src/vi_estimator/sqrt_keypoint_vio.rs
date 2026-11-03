@@ -802,7 +802,13 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         };
         let nullspace = prior.clone();
         for (indices, weight) in [
-            (vec![0, 1, 2, 5], config.vio_init_pose_weight),
+            (vec![0, 1, 2], config.vio_init_pose_weight),
+            (
+                vec![5],
+                config
+                    .vio_init_yaw_weight
+                    .unwrap_or(config.vio_init_pose_weight),
+            ),
             (vec![9, 10, 11], config.vio_init_ba_weight),
             (vec![12, 13, 14], config.vio_init_bg_weight),
         ] {

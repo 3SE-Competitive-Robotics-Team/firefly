@@ -1424,6 +1424,16 @@ where
         if !self.collect_frame_imu(shared, time, &measurements)? {
             return Ok(false);
         }
+        let initial_pose = if self.last_optimised.is_none() && self.parameters.imu.r#use {
+            let mut pose = Transformation::identity();
+            if !ImuError::init_pose(&self.imu, &mut pose) {
+                shared.consume_frame(&measurements)?;
+                return Ok(false);
+            }
+            Some(pose)
+        } else {
+            None
+        };
         if self.first_frame {
             while shared.lidar.front()?.is_some_and(|m| m.time_stamp < time) {
                 shared.lidar.pop(false)?;
@@ -1436,7 +1446,7 @@ where
             }
             self.first_frame = false;
         }
-        let mut pose = Transformation::identity();
+        let pose;
         let mut ran_detection = false;
         if let Some(last) = &self.last_optimised {
             pose = self.predicted_frame_pose(last, time)?;
@@ -1457,11 +1467,8 @@ where
             }
         } else {
             if self.parameters.imu.r#use {
-                if !ImuError::init_pose(&self.imu, &mut pose) {
-                    return Err(runtime_error(
-                        "pose could not be initialized from IMU measurements",
-                    ));
-                }
+                pose = initial_pose
+                    .ok_or_else(|| runtime_error("stationary gravity estimate is absent"))?;
             } else {
                 let s = 2.0f64.sqrt();
                 let t_wc = Transformation::new(Vector3::zeros(), Quaternion::new(-s, s, 0.0, 0.0));
@@ -2418,7 +2425,8 @@ mod tests {
                 time,
                 index as u64,
             )));
-            let imu = (-1..=index * 10)
+            // 初始化要求 100 ms 连续静止窗口，夹具保留首帧前 105 ms 的静止采样。
+            let imu = (-21..=index * 10)
                 .map(|i| {
                     ImuMeasurement::new(
                         Timestamp::from_millisecond(i * 5).unwrap(),
@@ -2516,11 +2524,18 @@ mod tests {
             Timestamp::UNIX_EPOCH,
             id.value(),
         )));
-        let imu = VecDeque::from([ImuMeasurement::new(
-            Timestamp::UNIX_EPOCH,
-            ImuSensorReadings::new(Vector3::zeros(), Vector3::z() * 9.81),
-            -1,
-        )]);
+        // 初始化要求 100 ms 连续静止窗口，夹具保留首帧前 105 ms 的静止采样。
+        let imu = VecDeque::from(
+            (-21..=0)
+                .map(|i| {
+                    ImuMeasurement::new(
+                        Timestamp::from_millisecond(i * 5).unwrap(),
+                        ImuSensorReadings::new(Vector3::zeros(), Vector3::z() * 9.81),
+                        -1,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
         assert!(core.graph.add_states(frame, &imu, true).unwrap());
         core.imu_by_frame.insert(id, imu);
         let landmark_id = LandmarkId::new(1);

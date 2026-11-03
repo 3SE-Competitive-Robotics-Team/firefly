@@ -3224,6 +3224,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "firefly-imu-initialization"
+version = "0.1.0"
+dependencies = [
+ "nalgebra",
+]
+
+[[package]]
 name = "firefly-imu-propagation"
 version = "0.1.0"
 dependencies = [
@@ -3292,6 +3299,7 @@ dependencies = [
  "firefly-config",
  "firefly-dbow2",
  "firefly-error",
+ "firefly-imu-initialization",
  "firefly-imu-propagation",
  "firefly-observability",
  "firefly-opengv",
@@ -3383,6 +3391,7 @@ dependencies = [
  "firefly-calibration",
  "firefly-config",
  "firefly-error",
+ "firefly-imu-initialization",
  "firefly-imu-propagation",
  "firefly-observability",
  "firefly-pubsub",
