@@ -24,6 +24,9 @@ use crate::{
     },
     sensors::measurements::ImuMeasurementDeque,
 };
+use firefly_imu_propagation::{
+    Bias, ImuSample as SharedImuSample, State as SharedState, propagate,
+};
 use jiff::Timestamp;
 use nalgebra::{DMatrix, Matrix3, Quaternion, SMatrix, SVector, Vector3};
 use std::sync::{
@@ -45,6 +48,7 @@ pub enum IntegrationError {
     StartNotCovered,
     EndNotCovered,
     NoIntegrationSteps,
+    InvalidMeasurements,
     InvalidCovariance,
 }
 
@@ -131,6 +135,58 @@ fn integrate_measurements(
     Ok((steps, total))
 }
 
+pub(crate) fn propagate_state(
+    measurements: &ImuMeasurementDeque,
+    params: &ImuParameters,
+    pose: &mut Transformation,
+    sb: &mut SpeedAndBias,
+    (start, end): (Timestamp, Timestamp),
+) -> Result<firefly_imu_propagation::Prediction, IntegrationError> {
+    let shared_state = SharedState {
+        timestamp_ns: start.as_nanosecond(),
+        rotation: pose.quaternion(),
+        position: pose.translation(),
+        velocity: sb.fixed_rows::<3>(0).into_owned(),
+    };
+    let shared_measurements = measurements
+        .iter()
+        .map(|measurement| SharedImuSample {
+            timestamp_ns: measurement.time_stamp.as_nanosecond(),
+            gyro: measurement.measurement.gyroscopes,
+            accel: measurement.measurement.accelerometers,
+        })
+        .collect::<Vec<_>>();
+    let prediction = propagate(
+        shared_state,
+        &shared_measurements,
+        end.as_nanosecond(),
+        Bias {
+            gyro: sb.fixed_rows::<3>(3).into_owned(),
+            accel: sb.fixed_rows::<3>(6).into_owned(),
+        },
+        Vector3::new(0.0, 0.0, -params.g),
+    )
+    .map_err(|error| match error {
+        firefly_imu_propagation::PropagationError::MissingMeasurements => {
+            IntegrationError::MissingMeasurements
+        }
+        firefly_imu_propagation::PropagationError::StartNotCovered => {
+            IntegrationError::StartNotCovered
+        }
+        firefly_imu_propagation::PropagationError::EndNotCovered => IntegrationError::EndNotCovered,
+        firefly_imu_propagation::PropagationError::NoIntegrationSteps => {
+            IntegrationError::NoIntegrationSteps
+        }
+        firefly_imu_propagation::PropagationError::InvalidMeasurements => {
+            IntegrationError::InvalidMeasurements
+        }
+    })?;
+    pose.set(prediction.state.position, prediction.state.rotation);
+    sb.fixed_rows_mut::<3>(0)
+        .copy_from(&prediction.state.velocity);
+    Ok(prediction)
+}
+
 /// Motion increments without covariance or bias derivatives.
 struct MotionDelta {
     delta_q: Quaternion<f64>,
@@ -138,33 +194,6 @@ struct MotionDelta {
     acc_doubleintegral: Vector3<f64>,
 }
 impl MotionDelta {
-    fn integrate(
-        measurements: &ImuMeasurementDeque,
-        params: &ImuParameters,
-        sb: &SpeedAndBias,
-        interval: (Timestamp, Timestamp),
-    ) -> Result<(Self, usize, f64), IntegrationError> {
-        let mut motion = Self {
-            delta_q: Quaternion::identity(),
-            acc_integral: Vector3::zeros(),
-            acc_doubleintegral: Vector3::zeros(),
-        };
-        let (steps, total) = integrate_measurements(measurements, interval, |w, a, dt| {
-            saturation_multipliers(params, w, a);
-            let angular_velocity = 0.5 * (w.0 + w.1) - sb.fixed_rows::<3>(3);
-            let dq = delta_q(&(angular_velocity * dt));
-            let q1 = motion.delta_q * dq;
-            let rotation = raw_rotation_matrix(&motion.delta_q);
-            let c1 = raw_rotation_matrix(&q1);
-            let acceleration = 0.5 * (a.0 + a.1) - sb.fixed_rows::<3>(6);
-            let ai1 = motion.acc_integral + 0.5 * (rotation + c1) * acceleration * dt;
-            motion.acc_doubleintegral +=
-                motion.acc_integral * dt + 0.25 * (rotation + c1) * acceleration * dt * dt;
-            motion.delta_q = q1;
-            motion.acc_integral = ai1;
-        })?;
-        Ok((motion, steps, total))
-    }
     fn apply(
         &self,
         params: &ImuParameters,
@@ -608,10 +637,7 @@ impl ImuError {
         (covariance, jacobian): (Option<&mut Covariance>, Option<&mut Jacobian>),
     ) -> Result<usize, IntegrationError> {
         if covariance.is_none() && jacobian.is_none() {
-            let (motion, steps, dt) =
-                MotionDelta::integrate(measurements, params, sb, (start, end))?;
-            motion.apply(params, pose, sb, dt);
-            return Ok(steps);
+            return Ok(propagate_state(measurements, params, pose, sb, (start, end))?.steps);
         }
         let mut p = Preintegration::default();
         let noise = if covariance.is_some() {

@@ -50,6 +50,7 @@ firefly-cost = { path = "crates/firefly-cost" }
 firefly-error = { path = "crates/firefly-error" }
 firefly-hal = { path = "crates/firefly-hal" }
 firefly-imu = { path = "crates/firefly-imu" }
+firefly-imu-propagation = { path = "crates/firefly-imu-propagation" }
 firefly-flight = { path = "crates/firefly-flight" }
 firefly-map = { path = "crates/firefly-map" }
 firefly-observability = { path = "crates/firefly-observability" }
