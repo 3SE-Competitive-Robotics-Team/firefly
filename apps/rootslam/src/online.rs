@@ -416,9 +416,8 @@ impl LiveSession {
         gyro: Vector3<f64>,
         accel: Vector3<f64>,
     ) -> Result<()> {
-        let corrected_gyro = self.propagator.corrected_gyro(gyro);
-        let Some(state) = self.propagator.push(ImuSample {
-            timestamp_ns,
+        let Some(prediction) = self.propagator.push(ImuSample {
+            timestamp_ns: i128::from(timestamp_ns),
             gyro,
             accel,
         }) else {
@@ -429,13 +428,14 @@ impl LiveSession {
         };
         let timestamp = timestamp_ns as f64 * 1e-9;
         let posterior_time = posterior_time_ns as f64 * 1e-9;
-        let q = state.rotation.quaternion();
+        let state = prediction.state;
+        let q = &state.rotation;
         self.attitude_pub.publish(AttitudeMessage {
             timestamp,
             posterior_time,
             session: self.session,
             quat_xyzw: [q.i, q.j, q.k, q.w],
-            angular_velocity: corrected_gyro.into(),
+            angular_velocity: prediction.angular_velocity.into(),
             gyro_bias: self.propagator.gyro_bias().into(),
         })?;
         let odom = OdomMessage {
@@ -527,13 +527,13 @@ impl LiveSession {
         if self
             .propagator
             .posterior_time_ns()
-            .is_some_and(|latest| stamp_ns < latest)
+            .is_some_and(|latest| i128::from(stamp_ns) < latest)
         {
             return;
         }
         self.propagator.set_bias(state.bias_gyro, state.bias_accel);
         self.propagator.set_anchor(Anchor {
-            posterior_time_ns: stamp_ns,
+            posterior_time_ns: i128::from(stamp_ns),
             rotation: pose.rotation,
             position: pose.translation.vector,
             velocity: state.state.vel_w_i,

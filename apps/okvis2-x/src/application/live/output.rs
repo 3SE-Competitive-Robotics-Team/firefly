@@ -2,7 +2,7 @@
 //! Bounded IMU replay and coordinate adaptation of committed estimator posteriors.
 use super::config::{Config, invalid};
 use crate::{
-    ceres::imu_error::ImuError,
+    ceres::imu_error::propagate_state,
     config::parameters::ImuParameters,
     frames::frame_typedefs::StateId,
     kinematics::transformation::Transformation,
@@ -176,18 +176,16 @@ impl Output {
         if measurements.len() < 2 {
             return Ok(None);
         }
-        ImuError::propagation(
+        let predicted = propagate_state(
             measurements,
             &self.imu_parameters,
             &mut prediction.pose,
             &mut prediction.speed_bias,
             (prediction.time, time),
-            (None, None),
         )
         .map_err(|error| invalid(format!("IMU prediction: {error:?}")))?;
         prediction.time = time;
-        let omega = self.imu.back().unwrap().measurement.gyroscopes
-            - prediction.speed_bias.fixed_rows::<3>(3).into_owned();
+        let omega = predicted.angular_velocity;
         let body_from_imu = &self.imu_parameters.t_bs;
         let sensor_from_body = &self.sensor_from_body;
         let map_from_body = prediction.pose.compose(sensor_from_body);

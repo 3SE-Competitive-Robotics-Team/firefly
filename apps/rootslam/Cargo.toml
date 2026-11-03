@@ -30,6 +30,7 @@ firefly-error.workspace = true
 firefly-config.workspace = true
 firefly-observability.workspace = true
 firefly-pubsub.workspace = true
+firefly-imu-propagation.workspace = true
 log.workspace = true
 nalgebra.workspace = true
 serde.workspace = true
