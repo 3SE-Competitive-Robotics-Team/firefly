@@ -221,15 +221,7 @@ struct LiveSession {
 impl LiveSession {
     fn new(options: &Options) -> Result<Self> {
         let calibration = render_calibration();
-        let mut vio = VioConfig::default();
-        // OKVIS stores these initial bias priors as variances; Basalt stores their precisions.
-        vio.vio_init_ba_weight = 1.0 / 0.1_f64.powi(2);
-        vio.vio_init_bg_weight = 1.0 / 0.01_f64.powi(2);
-        if let Some(path) = &options.vio_config {
-            vio.load(path)?;
-        }
-        // Match OKVIS's initial yaw information while retaining Basalt's translation prior.
-        vio.vio_init_yaw_weight = Some(1e2);
+        let vio = initial_vio_config(options)?;
         let node = create_node()?;
         let imu = Subscriber::<ImuMessage>::with_options(&node, IMU_TOPIC, IMU_SUBSCRIPTION)?;
         let image_options = SubscriberOptions {
@@ -703,6 +695,27 @@ fn publish_scalar_diagnostic<const N: usize>(
     let _ = viz.publish(message);
 }
 
+/// Builds the Basalt VIO configuration with the initialization priors shared with OKVIS2-X.
+///
+/// The upstream archive replaces every field on load and skips the yaw prior, so the yaw
+/// information is applied after the archive is read.
+#[expect(
+    clippy::field_reassign_with_default,
+    reason = "The yaw prior must be applied after the archive load replaces every field"
+)]
+fn initial_vio_config(options: &Options) -> Result<VioConfig> {
+    let mut vio = VioConfig::default();
+    // OKVIS stores these initial bias priors as variances; Basalt stores their precisions.
+    vio.vio_init_ba_weight = 1.0 / 0.1_f64.powi(2);
+    vio.vio_init_bg_weight = 1.0 / 0.01_f64.powi(2);
+    if let Some(path) = &options.vio_config {
+        vio.load(path)?;
+    }
+    // Match OKVIS's initial yaw information while retaining Basalt's translation prior.
+    vio.vio_init_yaw_weight = Some(1e2);
+    Ok(vio)
+}
+
 fn render_calibration() -> Calibration<f64> {
     use firefly_base::{FrameId, rig};
     use firefly_calibration::camera::generic_camera::GenericCamera;
@@ -723,7 +736,7 @@ fn render_calibration() -> Calibration<f64> {
         imu_update_rate: 1_000.0,
         gyro_noise_std: Vector3::repeat(0.0002),
         accel_noise_std: Vector3::repeat(0.002),
-        gyro_bias_std: Vector3::repeat(0.000019),
+        gyro_bias_std: Vector3::repeat(0.000_019),
         accel_bias_std: Vector3::repeat(0.003),
         ..Calibration::default()
     }
