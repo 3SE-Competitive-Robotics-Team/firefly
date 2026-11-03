@@ -1,6 +1,4 @@
 """只读物理观测夹具：每步累计接触，固定 IMU 噪声种子，禁止静默物理重置。"""
-import os
-
 import iceoryx2 as iox2
 import numpy as np
 from firefly_sim.main import main as run_sim
@@ -23,7 +21,7 @@ def permitted_pad_contact(position, velocity, normal, origin=None):
 
 class ObservedEnv(DroneEnv):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, rng=np.random.default_rng(int(os.environ["FIREFLY_MISSION_SEED"])), **kwargs)
+        super().__init__(*args, **kwargs)
         self.pad = np.asarray(drone_pad(load_scene_name()))
         self.node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
         self.recorder = Recorder(self.node)

@@ -471,6 +471,7 @@ struct Publishers {
     attitude: Publisher<AttitudeMessage>,
     viz: Option<VizPublisher>,
     last_viz: f64,
+    last_diagnostic: f64,
     external_localization: bool,
 }
 impl Publishers {
@@ -494,6 +495,7 @@ impl Publishers {
             attitude,
             viz,
             last_viz: -1.0,
+            last_diagnostic: -1.0,
             external_localization: matches!(
                 config.navigation,
                 super::config::Navigation::ExternalLocalization
@@ -504,6 +506,34 @@ impl Publishers {
     fn posterior(&self, publication: &PublicationData) -> Result<()> {
         if let Some(viz) = &self.viz {
             let stamp = publication.state.timestamp.as_nanosecond() as f64 * 1e-9;
+            let pose = &publication.state.t_ws;
+            let q = pose.quaternion();
+            publish_pose_diagnostic(
+                viz,
+                stamp,
+                "vio/posterior/pose_imu_world",
+                pose.translation().into(),
+                [q.i, q.j, q.k, q.w],
+            );
+            let speed_bias = publication.state.speed_and_bias();
+            publish_scalar_diagnostic(
+                viz,
+                stamp,
+                "vio/posterior/velocity_world",
+                speed_bias.fixed_rows::<3>(0).into(),
+            );
+            publish_scalar_diagnostic(
+                viz,
+                stamp,
+                "vio/posterior/gyro_bias_imu",
+                speed_bias.fixed_rows::<3>(3).into(),
+            );
+            publish_scalar_diagnostic(
+                viz,
+                stamp,
+                "vio/posterior/accel_bias_imu",
+                speed_bias.fixed_rows::<3>(6).into(),
+            );
             let mut loops = ScalarMessage::base(stamp, "okvis/loop_commits");
             loops.scalars[0] = publication.tracking_state.backend.revision as f64;
             loops.scalar_count = 1;
@@ -540,6 +570,51 @@ impl Publishers {
         if let Some(message) = sample.attitude {
             self.attitude.publish(message)?;
         }
+        if stamp - self.last_diagnostic >= 0.02 {
+            if let Some(viz) = &self.viz {
+                publish_pose_diagnostic(
+                    viz,
+                    stamp,
+                    "vio/prediction/pose_body_odom",
+                    [
+                        sample.odom.position_x,
+                        sample.odom.position_y,
+                        sample.odom.position_z,
+                    ],
+                    [
+                        sample.odom.quat_x,
+                        sample.odom.quat_y,
+                        sample.odom.quat_z,
+                        sample.odom.quat_w,
+                    ],
+                );
+                publish_scalar_diagnostic(
+                    viz,
+                    stamp,
+                    "vio/prediction/velocity_body_odom",
+                    [
+                        sample.odom.velocity_x,
+                        sample.odom.velocity_y,
+                        sample.odom.velocity_z,
+                    ],
+                );
+                if let Some(attitude) = sample.attitude {
+                    publish_scalar_diagnostic(
+                        viz,
+                        stamp,
+                        "vio/prediction/angular_velocity_body",
+                        attitude.angular_velocity,
+                    );
+                    publish_scalar_diagnostic(
+                        viz,
+                        stamp,
+                        "vio/prediction/posterior_age_s",
+                        [attitude.timestamp - attitude.posterior_time],
+                    );
+                }
+            }
+            self.last_diagnostic = stamp;
+        }
         if stamp - self.last_viz >= 0.1 {
             let mut message = VizMessage::base(kind::POSE, stamp, "okvis/odom");
             message.xyz = [
@@ -560,6 +635,31 @@ impl Publishers {
         }
         Ok(())
     }
+}
+
+fn publish_pose_diagnostic(
+    viz: &VizPublisher,
+    stamp: f64,
+    entity: &str,
+    position: [f64; 3],
+    quaternion_xyzw: [f64; 4],
+) {
+    let mut message = VizMessage::base(kind::POSE, stamp, entity);
+    message.xyz = position;
+    message.quat_xyzw = quaternion_xyzw;
+    let _ = viz.publish(message);
+}
+
+fn publish_scalar_diagnostic<const N: usize>(
+    viz: &VizPublisher,
+    stamp: f64,
+    entity: &str,
+    values: [f64; N],
+) {
+    let mut message = ScalarMessage::base(stamp, entity);
+    message.scalars[..N].copy_from_slice(&values);
+    message.scalar_count = N as u32;
+    let _ = viz.publish(message);
 }
 
 fn session() -> u64 {

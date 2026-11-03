@@ -34,6 +34,7 @@ fastrace.workspace = true
 firefly-base.workspace = true
 firefly-pubsub.workspace = true
 firefly-imu-propagation.workspace = true
+firefly-imu-initialization.workspace = true
 faer.workspace = true
 firefly-brisk.workspace = true
 firefly-config.workspace = true

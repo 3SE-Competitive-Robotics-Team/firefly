@@ -372,6 +372,8 @@ OKVIS 跟踪状态、回环提交次数与单帧处理耗时；FC tick rate 使�
 - `fc/standby_eskf/gyro_bias`、`quaternion_xyzw`、`attitude_variance`、`bias_variance`：
   独立热备状态；姿态属于备用本地重力系，方差单位 rad² / (rad/s)²。
 - `okvis/gyro_bias`：viz 直接订阅 `Firefly/VioAttitude`，以 1Hz 记录机体系 VIO 陀螺零偏（rad/s）；主链路不发布姿态方差。
+- `vio/posterior/pose_imu_world`、`velocity_world`、`gyro_bias_imu`、`accel_bias_imu`：每次 VIO 后验的 IMU 世界位姿、世界速度及传感器系零偏。
+- `vio/prediction/pose_body_odom`、`velocity_body_odom`、`angular_velocity_body`、`posterior_age_s`：50Hz 的预测输出与对应后验年龄，用于和 GroundTruth 按 `sim_time` 对齐。
 - `fc/debug/tilt_deg` 与 `fc/debug/tilt_err_deg`：估计倾角与仅供评测的真值倾角误差。
 - `fc/debug/rate_sp_frd` / `rate_flu`：PX4 角速度设定值（FRD）与实测角速度（FLU）。
 - `fc/debug/torque_sp_frd` / `allocated_control`：归一化力矩设定值与分配实际达到的控制量。

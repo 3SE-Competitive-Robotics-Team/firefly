@@ -13,6 +13,9 @@ use firefly_basalt::{
 use firefly_calibration::calibration::Calibration;
 use firefly_calibration::image::image::ManagedImage;
 use firefly_error::{Error, ErrorKind, Result};
+use firefly_imu_initialization::{
+    GravityEstimate, ImuSample as GravityImuSample, StationaryGravitySampler,
+};
 use firefly_pubsub::{
     attitude::{ATTITUDE_TOPIC, AttitudeMessage},
     camera::{CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, GrayImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH},
@@ -23,10 +26,10 @@ use firefly_pubsub::{
     odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC, OdomMessage},
     publish::Publisher,
     subscriber::{Subscriber, SubscriberOptions},
-    viz::{ScalarMessage, VizPublisher},
+    viz::{ScalarMessage, VizMessage, VizPublisher, kind},
 };
 use firefly_rootslam_mapping::{loop_closure::LoopOptions, map::MapPolicy};
-use nalgebra::Vector3;
+use nalgebra::{Isometry3, Translation3, Vector3};
 use std::{
     collections::{BTreeMap, VecDeque},
     path::PathBuf,
@@ -106,7 +109,7 @@ impl Pairing {
         let stamp = (packet.timestamp * 1e9).round() as i64;
         let mut image = ManagedImage::new(IMAGE_WIDTH, IMAGE_HEIGHT);
         for (destination, source) in image.data_mut().iter_mut().zip(packet.data) {
-            *destination = u16::from(source) * 257;
+            *destination = u16::from(source) << 8;
         }
         let queue = if camera == 0 {
             &mut self.left
@@ -199,8 +202,9 @@ struct LiveSession {
     stats_directory: Option<PathBuf>,
     pairing: Pairing,
     imu_watermark: i64,
-    stationary_since: Option<i64>,
-    initialization_ready_at: Option<i64>,
+    gravity_sampler: StationaryGravitySampler,
+    gravity_estimate: Option<GravityEstimate>,
+    estimator_initialized: bool,
     pending_imu: VecDeque<Arc<ImuData<f64>>>,
     frame_started: BTreeMap<i64, std::time::Instant>,
     session: u64,
@@ -211,15 +215,21 @@ struct LiveSession {
     pair_count: u64,
     state_count: u64,
     last_report: std::time::Instant,
+    last_prediction_diagnostic_ns: Option<i64>,
 }
 
 impl LiveSession {
     fn new(options: &Options) -> Result<Self> {
         let calibration = render_calibration();
         let mut vio = VioConfig::default();
+        // OKVIS stores these initial bias priors as variances; Basalt stores their precisions.
+        vio.vio_init_ba_weight = 1.0 / 0.1_f64.powi(2);
+        vio.vio_init_bg_weight = 1.0 / 0.01_f64.powi(2);
         if let Some(path) = &options.vio_config {
             vio.load(path)?;
         }
+        // Match OKVIS's initial yaw information while retaining Basalt's translation prior.
+        vio.vio_init_yaw_weight = Some(1e2);
         let node = create_node()?;
         let imu = Subscriber::<ImuMessage>::with_options(&node, IMU_TOPIC, IMU_SUBSCRIPTION)?;
         let image_options = SubscriberOptions {
@@ -261,7 +271,6 @@ impl LiveSession {
         } else {
             (None, None)
         };
-        estimator.initialize(Vector3::zeros(), Vector3::zeros())?;
         let flow = OpticalFlowFactory::get_optical_flow_with_output(
             &vio,
             &calibration,
@@ -301,8 +310,9 @@ impl LiveSession {
             stats_directory: options.stats_directory.clone(),
             pairing: Pairing::default(),
             imu_watermark: i64::MIN,
-            stationary_since: None,
-            initialization_ready_at: None,
+            gravity_sampler: StationaryGravitySampler::new(),
+            gravity_estimate: None,
+            estimator_initialized: false,
             pending_imu: VecDeque::new(),
             frame_started: BTreeMap::new(),
             session,
@@ -313,6 +323,7 @@ impl LiveSession {
             pair_count: 0,
             state_count: 0,
             last_report: std::time::Instant::now(),
+            last_prediction_diagnostic_ns: None,
         })
     }
 
@@ -389,22 +400,18 @@ impl LiveSession {
         accel: &Vector3<f64>,
         gyro: &Vector3<f64>,
     ) {
-        let quiet_on_ground = (8.0..=11.5).contains(&accel.norm()) && gyro.norm() < 0.2;
-        if quiet_on_ground {
-            self.stationary_since.get_or_insert(stamp);
-        } else {
-            self.stationary_since = None;
-        }
-        if self.initialization_ready_at.is_none()
-            && self
-                .stationary_since
-                .is_some_and(|since| stamp - since >= 100_000_000)
+        if self.gravity_estimate.is_none()
+            && let Some(estimate) = self.gravity_sampler.push(GravityImuSample {
+                timestamp_ns: i128::from(stamp),
+                gyro: *gyro,
+                accel: *accel,
+            })
         {
-            self.initialization_ready_at = Some(stamp);
-            self.pairing.discard_before(stamp);
+            self.gravity_estimate = Some(estimate);
             log::info!(
-                "RootSLAM VIO initialization enabled after stable IMU window at {:.3}s",
-                stamp as f64 * 1e-9
+                "RootSLAM VIO gravity initialized from {} stationary IMU samples over {:.3}s",
+                estimate.sample_count,
+                (estimate.end_ns - estimate.start_ns) as f64 * 1e-9
             );
         }
     }
@@ -456,6 +463,37 @@ impl LiveSession {
         self.corrected_pub.publish(odom)?;
         self.nav_pub
             .publish(NavigationMessage::new(odom, &self.alignment, 0))?;
+        if self
+            .last_prediction_diagnostic_ns
+            .is_none_or(|last| timestamp_ns - last >= 20_000_000)
+        {
+            self.last_prediction_diagnostic_ns = Some(timestamp_ns);
+            publish_pose_diagnostic(
+                &self.viz,
+                timestamp,
+                "vio/prediction/pose_body_odom",
+                [odom.position_x, odom.position_y, odom.position_z],
+                [odom.quat_x, odom.quat_y, odom.quat_z, odom.quat_w],
+            );
+            publish_scalar_diagnostic(
+                &self.viz,
+                timestamp,
+                "vio/prediction/velocity_body_odom",
+                [odom.velocity_x, odom.velocity_y, odom.velocity_z],
+            );
+            publish_scalar_diagnostic(
+                &self.viz,
+                timestamp,
+                "vio/prediction/angular_velocity_body",
+                prediction.angular_velocity.into(),
+            );
+            publish_scalar_diagnostic(
+                &self.viz,
+                timestamp,
+                "vio/prediction/posterior_age_s",
+                [(i128::from(timestamp_ns) - posterior_time_ns) as f64 * 1e-9],
+            );
+        }
         Ok(())
     }
 
@@ -478,10 +516,28 @@ impl LiveSession {
     }
 
     fn enqueue_stereo(&mut self) -> Result<()> {
-        while let Some((t_ns, img_data)) = self.initialization_ready_at.and_then(|ready_at| {
-            self.pairing.discard_before(ready_at);
+        while let Some((t_ns, img_data)) = self.gravity_estimate.and_then(|estimate| {
+            self.pairing
+                .discard_before(i64::try_from(estimate.end_ns).ok()?);
             self.pairing.next(self.imu_watermark)
         }) {
+            if !self.estimator_initialized {
+                let estimate = self
+                    .gravity_estimate
+                    .ok_or_else(|| error("stationary gravity estimate is absent"))?;
+                let rotation = estimate
+                    .rotation_body_to_world()
+                    .ok_or_else(|| error("stationary gravity estimate is invalid"))?;
+                let pose = Isometry3::from_parts(Translation3::identity(), rotation);
+                self.estimator.initialize_state(
+                    t_ns,
+                    pose,
+                    Vector3::zeros(),
+                    Vector3::zeros(),
+                    Vector3::zeros(),
+                )?;
+                self.estimator_initialized = true;
+            }
             match self
                 .flow_tx
                 .try_send(Some(Arc::new(OpticalFlowInput { t_ns, img_data })))
@@ -532,6 +588,32 @@ impl LiveSession {
             return;
         }
         self.propagator.set_bias(state.bias_gyro, state.bias_accel);
+        let q = pose.rotation.quaternion();
+        publish_pose_diagnostic(
+            &self.viz,
+            stamp,
+            "vio/posterior/pose_imu_world",
+            pose.translation.vector.into(),
+            [q.i, q.j, q.k, q.w],
+        );
+        publish_scalar_diagnostic(
+            &self.viz,
+            stamp,
+            "vio/posterior/velocity_world",
+            state.state.vel_w_i.into(),
+        );
+        publish_scalar_diagnostic(
+            &self.viz,
+            stamp,
+            "vio/posterior/gyro_bias_imu",
+            state.bias_gyro.into(),
+        );
+        publish_scalar_diagnostic(
+            &self.viz,
+            stamp,
+            "vio/posterior/accel_bias_imu",
+            state.bias_accel.into(),
+        );
         self.propagator.set_anchor(Anchor {
             posterior_time_ns: i128::from(stamp_ns),
             rotation: pose.rotation,
@@ -596,10 +678,35 @@ impl LiveSession {
     }
 }
 
+fn publish_pose_diagnostic(
+    viz: &VizPublisher,
+    stamp: f64,
+    entity: &str,
+    position: [f64; 3],
+    quaternion_xyzw: [f64; 4],
+) {
+    let mut message = VizMessage::base(kind::POSE, stamp, entity);
+    message.xyz = position;
+    message.quat_xyzw = quaternion_xyzw;
+    let _ = viz.publish(message);
+}
+
+fn publish_scalar_diagnostic<const N: usize>(
+    viz: &VizPublisher,
+    stamp: f64,
+    entity: &str,
+    values: [f64; N],
+) {
+    let mut message = ScalarMessage::base(stamp, entity);
+    message.scalars[..N].copy_from_slice(&values);
+    message.scalar_count = N as u32;
+    let _ = viz.publish(message);
+}
+
 fn render_calibration() -> Calibration<f64> {
     use firefly_base::{FrameId, rig};
     use firefly_calibration::camera::generic_camera::GenericCamera;
-    use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector2, Vector4};
+    use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector2, Vector3, Vector4};
     let focal = IMAGE_HEIGHT as f64 * 0.5 / (rig::FOV_Y_DEG.to_radians() * 0.5).tan();
     let center = rig::principal_point(IMAGE_WIDTH, IMAGE_HEIGHT);
     let mut camera = GenericCamera::from_name("pinhole");
@@ -613,6 +720,11 @@ fn render_calibration() -> Calibration<f64> {
         t_i_c: vec![pose(FrameId::LEFT_CAMERA), pose(FrameId::RIGHT_CAMERA)],
         intrinsics: vec![camera.clone(), camera],
         resolution: vec![Vector2::new(IMAGE_WIDTH as i32, IMAGE_HEIGHT as i32); 2],
+        imu_update_rate: 1_000.0,
+        gyro_noise_std: Vector3::repeat(0.0002),
+        accel_noise_std: Vector3::repeat(0.002),
+        gyro_bias_std: Vector3::repeat(0.000019),
+        accel_bias_std: Vector3::repeat(0.003),
         ..Calibration::default()
     }
 }

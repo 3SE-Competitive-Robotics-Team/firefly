@@ -8,6 +8,12 @@ MOTORS = ("motor_1_N", "motor_2_N", "motor_3_N", "motor_4_N")
 IMU_HEALTH = ("attitude_available", "vio_fresh", "posterior_age_s")
 SCALAR_FIELDS = {
     "okvis/gyro_bias": ("x_rad_s", "y_rad_s", "z_rad_s"),
+    "vio/posterior/velocity_world": ("x_m_s", "y_m_s", "z_m_s"),
+    "vio/posterior/gyro_bias_imu": ("x_rad_s", "y_rad_s", "z_rad_s"),
+    "vio/posterior/accel_bias_imu": ("x_m_s2", "y_m_s2", "z_m_s2"),
+    "vio/prediction/velocity_body_odom": ("x_m_s", "y_m_s", "z_m_s"),
+    "vio/prediction/angular_velocity_body": ("x_rad_s", "y_rad_s", "z_rad_s"),
+    "vio/prediction/posterior_age_s": ("age_s",),
     "fc/standby_eskf/gyro_bias": ("x_rad_s", "y_rad_s", "z_rad_s"),
     "fc/standby_eskf/quaternion_xyzw": QUATERNION,
     "fc/standby_eskf/attitude_variance": ("x_rad2", "y_rad2", "z_rad2"),

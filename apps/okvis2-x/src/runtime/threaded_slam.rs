@@ -1424,6 +1424,16 @@ where
         if !self.collect_frame_imu(shared, time, &measurements)? {
             return Ok(false);
         }
+        let initial_pose = if self.last_optimised.is_none() && self.parameters.imu.r#use {
+            let mut pose = Transformation::identity();
+            if !ImuError::init_pose(&self.imu, &mut pose) {
+                shared.consume_frame(&measurements)?;
+                return Ok(false);
+            }
+            Some(pose)
+        } else {
+            None
+        };
         if self.first_frame {
             while shared.lidar.front()?.is_some_and(|m| m.time_stamp < time) {
                 shared.lidar.pop(false)?;
@@ -1436,7 +1446,7 @@ where
             }
             self.first_frame = false;
         }
-        let mut pose = Transformation::identity();
+        let pose;
         let mut ran_detection = false;
         if let Some(last) = &self.last_optimised {
             pose = self.predicted_frame_pose(last, time)?;
@@ -1457,11 +1467,8 @@ where
             }
         } else {
             if self.parameters.imu.r#use {
-                if !ImuError::init_pose(&self.imu, &mut pose) {
-                    return Err(runtime_error(
-                        "pose could not be initialized from IMU measurements",
-                    ));
-                }
+                pose = initial_pose
+                    .ok_or_else(|| runtime_error("stationary gravity estimate is absent"))?;
             } else {
                 let s = 2.0f64.sqrt();
                 let t_wc = Transformation::new(Vector3::zeros(), Quaternion::new(-s, s, 0.0, 0.0));

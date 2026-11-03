@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable, Sequence
 from functools import partial
+import os
 from typing import Protocol
 
 import time
@@ -171,7 +172,8 @@ class EnvironmentFactory(Protocol):
     """创建仿真环境；运行器依赖 DroneEnv 的物理、传感器和状态接口。"""
 
     def __call__(self, *, timestep: float, imu_period: float,
-                 scene_factory: Callable[[], str]) -> DroneEnv: ...
+                 scene_factory: Callable[[], str],
+                 rng: np.random.Generator | None = None) -> DroneEnv: ...
 
 
 def decode_config(cfg: dict, *, scene_loader: Callable[[], str] = load_scene_name
@@ -204,8 +206,10 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
     trace_enabled = not args.no_trace
     physics_period, imu_period, pose_period, start_pos, scene_name = startup(
         args.config, partial(decode_config, scene_loader=scene_loader))
+    seed = os.environ.get("FIREFLY_MISSION_SEED")
+    rng = np.random.default_rng(int(seed)) if seed is not None else None
     env = env_factory(timestep=physics_period, imu_period=imu_period,
-                      scene_factory=partial(build_scene, name=scene_name))
+                      scene_factory=partial(build_scene, name=scene_name), rng=rng)
     env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))  # xyzw 单位四元数
     ftrace.init(enabled=trace_enabled)
     airframe = env.airframe()

@@ -24,6 +24,7 @@ use crate::{
     },
     sensors::measurements::ImuMeasurementDeque,
 };
+use firefly_imu_initialization::{ImuSample as GravityImuSample, sample_stationary_gravity};
 use firefly_imu_propagation::{
     Bias, ImuSample as SharedImuSample, State as SharedState, propagate,
 };
@@ -662,26 +663,19 @@ impl ImuError {
         Ok(steps)
     }
     pub fn init_pose(measurements: &ImuMeasurementDeque, pose: &mut Transformation) -> bool {
-        pose.set_identity();
-        if measurements.is_empty() {
+        let Some(estimate) =
+            sample_stationary_gravity(measurements.iter().map(|m| GravityImuSample {
+                timestamp_ns: m.time_stamp.as_nanosecond(),
+                gyro: m.measurement.gyroscopes,
+                accel: m.measurement.accelerometers,
+            }))
+        else {
             return false;
-        }
-        let a = measurements
-            .iter()
-            .fold(Vector3::zeros(), |s, m| s + m.measurement.accelerometers)
-            / measurements.len() as f64;
-        let normalize = |x: Vector3<f64>| {
-            let n = x.norm_squared();
-            if n > 0.0 { x / n.sqrt() } else { x }
         };
-        let e = normalize(a);
-        let z = Vector3::new(0.0, 0.0, 1.0);
-        let angle = z.dot(&e).acos();
-        let mut increment = SVector::<f64, 6>::zeros();
-        increment
-            .fixed_rows_mut::<3>(3)
-            .copy_from(&(normalize(z.cross(&e)) * angle));
-        pose.oplus(&-increment);
+        let Some(rotation) = estimate.rotation_body_to_world() else {
+            return false;
+        };
+        *pose = Transformation::new(Vector3::zeros(), *rotation.quaternion());
         true
     }
     fn unweighted(
