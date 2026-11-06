@@ -9,32 +9,31 @@ use crate::runtime::{
     vi_interface::{ImageMap, TrackingQuality, ViInterface},
 };
 use firefly_error::Result;
+use firefly_imu_propagation::ImuSample;
 use firefly_pubsub::{
-    attitude::{ATTITUDE_TOPIC, AttitudeMessage},
+    attitude::ATTITUDE_TOPIC,
     camera::{
         CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DEPTH_TOPIC, DepthImageMessage, GrayImageMessage,
         IMAGE_HEIGHT, IMAGE_WIDTH,
     },
-    event::TopicListener,
-    imu::{IMU_SUBSCRIPTION, IMU_TOPIC, ImuMessage},
-    navigation::{NAVIGATION_TOPIC, NavigationMessage},
+    imu::IMU_TOPIC,
+    navigation::NAVIGATION_TOPIC,
     node::create_node,
-    odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC, OdomMessage},
-    publish::Publisher,
+    odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC},
     subscriber::{Subscriber, SubscriberOptions},
-    viz::{ScalarMessage, VizMessage, VizPublisher, kind},
+    viz::ScalarMessage,
 };
-use iceoryx2::prelude::{CallbackProgression, ipc};
-use iceoryx2::waitset::{WaitSetAttachmentId, WaitSetBuilder, WaitSetRunResult};
+pub(super) use firefly_vio_runtime::ImuWatermark;
+use firefly_vio_runtime::{
+    ImuAdapter, Publishers, publish_pose_diagnostic, publish_scalar_diagnostic,
+};
 use jiff::Timestamp;
-use nalgebra::Vector3;
 use purecv::core::DynamicMatrix;
 use std::{
-    cell::RefCell,
     collections::VecDeque,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, SyncSender, TrySendError},
     },
     time::Duration,
@@ -235,174 +234,119 @@ impl Ports {
     }
 }
 
-/// 发送线程已入估计器队列的 IMU 时间水位（纳秒）。
-///
-/// 接收线程只在水位覆盖图像时间后才提交双目帧；未收到 IMU 时保持空。
-#[derive(Clone)]
-pub(super) struct ImuWatermark(Arc<AtomicI64>);
-
-impl Default for ImuWatermark {
-    fn default() -> Self {
-        Self(Arc::new(AtomicI64::new(i64::MIN)))
-    }
-}
-
-impl ImuWatermark {
-    pub fn store(&self, time: Timestamp) {
-        if let Ok(nanoseconds) = i64::try_from(time.as_nanosecond()) {
-            self.0.store(nanoseconds, Ordering::Release);
-        }
-    }
-
-    pub fn load(&self) -> Option<Timestamp> {
-        let nanoseconds = self.0.load(Ordering::Acquire);
-        if nanoseconds == i64::MIN {
-            return None;
-        }
-        Timestamp::from_nanosecond(i128::from(nanoseconds)).ok()
-    }
-}
-
-/// 发送线程：IMU 入队、前向预测与四路发布。
+/// The common runtime owns IMU events, validation, watermark and all four publishers.
 pub(super) fn run_send(ports: SendPorts) -> Result<()> {
-    let SendPorts {
-        map_snapshots,
-        topics,
-        config,
-        mut sensors,
-        publications,
-        stop,
-        watermark,
-    } = ports;
-    let node = create_node()?;
-    let log_ipc = firefly_observability::init_ipc(&node, "firefly-okvis-x");
-    let imu = Subscriber::<ImuMessage>::with_options(&node, &topics.imu, IMU_SUBSCRIPTION)?;
-    let imu_events = TopicListener::with_topic(&node, &topics.imu)?;
-    let mut publishers = Publishers::open(&node, &config, &topics)?;
-    let mut output = Output::new(config.clone(), session())?;
-    let mut map_publisher = super::map_output::PublisherWorker::start(map_snapshots, stop.clone())?;
-    let mut imu_time = None;
-
-    let waitset = WaitSetBuilder::new()
-        .create::<ipc::Service>()
-        .map_err(|error| invalid(format!("create okvis WaitSet: {error:?}")))?;
-    let _imu_guard = waitset
-        .attach_notification(&imu_events)
-        .map_err(|error| invalid(format!("attach IMU event: {error:?}")))?;
-    let _timeout_guard = waitset
-        .attach_interval(Duration::from_millis(2))
-        .map_err(|error| invalid(format!("attach IMU timeout: {error:?}")))?;
-
-    let failure = RefCell::new(None::<String>);
-    let mut ipc_logged = 0u64;
-    {
-        let mut on_event = |_attachment: WaitSetAttachmentId<ipc::Service>| {
-            if stop.load(Ordering::Acquire) {
-                return CallbackProgression::Stop;
-            }
-            let _ = imu_events.drain();
-            firefly_observability::pump_log_ipc(&log_ipc);
-            let result = (|| -> Result<()> {
-                while let Ok(publication) = publications.try_recv() {
-                    output.posterior(&publication)?;
-                    map_publisher.update(&output)?;
-                    publishers.posterior(&publication)?;
-                }
-                while let Some(packet) = imu.receive()? {
-                    handle_imu(
-                        &packet,
-                        *packet.user_header(),
-                        &mut sensors,
-                        &watermark,
-                        &mut output,
-                        &mut publishers,
-                        &mut imu_time,
-                        &mut ipc_logged,
-                    )?;
-                }
-                Ok(())
-            })();
-            match result {
-                Ok(()) => CallbackProgression::Continue,
-                Err(error) => {
-                    *failure.borrow_mut() = Some(error.to_string());
-                    CallbackProgression::Stop
-                }
-            }
-        };
-
-        loop {
-            if stop.load(Ordering::Acquire) {
-                break;
-            }
-            match waitset.wait_and_process(&mut on_event) {
-                Ok(WaitSetRunResult::AllEventsHandled) => {}
-                Ok(
-                    WaitSetRunResult::StopRequest
-                    | WaitSetRunResult::Interrupt
-                    | WaitSetRunResult::TerminationRequest,
-                ) => break,
-                Err(error) => return Err(invalid(format!("okvis WaitSet: {error:?}"))),
-            }
-        }
-    }
-    firefly_observability::pump_log_ipc(&log_ipc);
-    stop.store(true, Ordering::Release);
-    if let Some(message) = failure.into_inner() {
-        return Err(invalid(message));
-    }
-    map_publisher.finish()?;
-    Ok(())
+    let options = firefly_vio_runtime::Options {
+        process: "firefly-okvis-x",
+        topics: firefly_vio_runtime::Topics {
+            imu: ports.topics.imu,
+            odometry: ports.topics.odometry,
+            corrected: ports.topics.corrected,
+            navigation: ports.topics.navigation,
+            attitude: ports.topics.attitude,
+        },
+        diagnostics: ports.config.diagnostics,
+        external_localization: matches!(
+            ports.config.navigation,
+            super::config::Navigation::ExternalLocalization
+        ),
+        imu_latency_entity: "okvis/ipc/imu_publish_ms",
+    };
+    firefly_vio_runtime::run_imu(&options, &ports.watermark, &ports.stop, || {
+        Ok(Adapter {
+            sensors: ports.sensors,
+            publications: ports.publications,
+            output: Output::new(&ports.config, session())?,
+            map_publisher: super::map_output::PublisherWorker::start(
+                ports.map_snapshots,
+                ports.stop.clone(),
+            )?,
+        })
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn handle_imu(
-    packet: &ImuMessage,
-    trace: firefly_pubsub::trace::TraceContext,
-    sensors: &mut SensorInputHandle,
-    watermark: &ImuWatermark,
-    output: &mut Output,
-    publishers: &mut Publishers,
-    imu_time: &mut Option<Timestamp>,
-    ipc_logged: &mut u64,
-) -> Result<()> {
-    let _span = trace.continue_span("okvis-receive-imu");
-    let time = output::time(packet.timestamp)?;
-    let alpha = Vector3::new(
-        packet.linear_acceleration_x,
-        packet.linear_acceleration_y,
-        packet.linear_acceleration_z,
-    );
-    let omega = Vector3::new(
-        packet.angular_velocity_x,
-        packet.angular_velocity_y,
-        packet.angular_velocity_z,
-    );
-    if alpha
-        .iter()
-        .chain(omega.iter())
-        .any(|value| !value.is_finite())
-    {
-        return Err(invalid("nonfinite IMU measurement"));
-    }
-    if imu_time.is_some_and(|last| time <= last) {
-        return Ok(());
-    }
-    firefly_observability::set_sim_time(packet.timestamp);
-    *imu_time = Some(time);
-    if !sensors.add_imu_measurement(time, &alpha, &omega) {
-        return Err(invalid("estimator IMU queue rejected measurement"));
-    }
-    watermark.store(time);
-    if let Some(sample) = output.imu(time, alpha, omega)? {
-        publishers.publish(&sample, packet.timestamp)?;
-        *ipc_logged += 1;
-        if ipc_logged.is_multiple_of(10) && trace.send_ts_secs > 0 {
-            let age_ms = (Timestamp::now().as_nanosecond() - trace.send_timestamp().as_nanosecond())
-                as f64
-                * 1e-6;
-            publishers.ipc(packet.timestamp, age_ms.max(0.0))?;
+struct Adapter {
+    sensors: SensorInputHandle,
+    publications: Receiver<PublicationData>,
+    output: Output,
+    map_publisher: super::map_output::PublisherWorker,
+}
+impl ImuAdapter for Adapter {
+    fn posteriors(&mut self, publishers: &Publishers) -> Result<()> {
+        while let Ok(publication) = self.publications.try_recv() {
+            self.output.posterior(&publication)?;
+            self.map_publisher.update(&self.output)?;
+            posterior_diagnostics(publishers, &publication)?;
         }
+        Ok(())
+    }
+    fn enqueue(&mut self, sample: ImuSample) -> Result<()> {
+        let time = Timestamp::from_nanosecond(sample.timestamp_ns).map_err(invalid)?;
+        if !self
+            .sensors
+            .add_imu_measurement(time, &sample.accel, &sample.gyro)
+        {
+            return Err(invalid("estimator IMU queue rejected measurement"));
+        }
+        Ok(())
+    }
+    fn predict(&mut self, sample: ImuSample) -> Result<Option<output::Sample>> {
+        self.output.imu(
+            Timestamp::from_nanosecond(sample.timestamp_ns).map_err(invalid)?,
+            sample.accel,
+            sample.gyro,
+        )
+    }
+    fn finish(mut self) -> Result<()> {
+        self.map_publisher.finish()
+    }
+}
+
+fn posterior_diagnostics(publishers: &Publishers, publication: &PublicationData) -> Result<()> {
+    if let Some(viz) = publishers.viz() {
+        let stamp = publication.state.timestamp.as_nanosecond() as f64 * 1e-9;
+        let pose = &publication.state.t_ws;
+        let q = pose.quaternion();
+        publish_pose_diagnostic(
+            viz,
+            stamp,
+            "vio/posterior/pose_imu_world",
+            pose.translation().into(),
+            [q.i, q.j, q.k, q.w],
+        );
+        let speed_bias = publication.state.speed_and_bias();
+        publish_scalar_diagnostic(
+            viz,
+            stamp,
+            "vio/posterior/velocity_world",
+            speed_bias.fixed_rows::<3>(0).into(),
+        );
+        publish_scalar_diagnostic(
+            viz,
+            stamp,
+            "vio/posterior/gyro_bias_imu",
+            speed_bias.fixed_rows::<3>(3).into(),
+        );
+        publish_scalar_diagnostic(
+            viz,
+            stamp,
+            "vio/posterior/accel_bias_imu",
+            speed_bias.fixed_rows::<3>(6).into(),
+        );
+        let mut loops = ScalarMessage::base(stamp, "okvis/loop_commits");
+        loops.scalars[0] = publication.tracking_state.backend.revision as f64;
+        loops.scalar_count = 1;
+        viz.publish(loops)?;
+
+        // 跟踪质量用于诊断；IMU 传播的发布条件与上游 Trajectory 一致。
+        let mut tracking = ScalarMessage::base(stamp, "okvis/tracking");
+        tracking.scalars[0] = match publication.tracking_state.tracking_quality {
+            TrackingQuality::Lost => 0.0,
+            TrackingQuality::Marginal => 1.0,
+            TrackingQuality::Good => 2.0,
+        };
+        tracking.scalar_count = 1;
+        viz.publish(tracking)?;
     }
     Ok(())
 }
@@ -462,204 +406,6 @@ pub(super) fn run_ingress(mut ports: IngressPorts) -> Result<()> {
     }
     ports.stop.store(true, Ordering::Release);
     Ok(())
-}
-
-struct Publishers {
-    odometry: Publisher<OdomMessage>,
-    corrected: Publisher<OdomMessage>,
-    navigation: Publisher<NavigationMessage>,
-    attitude: Publisher<AttitudeMessage>,
-    viz: Option<VizPublisher>,
-    last_viz: f64,
-    last_diagnostic: f64,
-    external_localization: bool,
-}
-impl Publishers {
-    fn open(
-        node: &firefly_pubsub::node::IpcNode,
-        config: &Config,
-        topics: &Topics,
-    ) -> Result<Self> {
-        let odometry = Publisher::<OdomMessage>::with_topic(node, &topics.odometry)?;
-        let corrected = Publisher::<OdomMessage>::with_topic(node, &topics.corrected)?;
-        let navigation = Publisher::<NavigationMessage>::with_topic(node, &topics.navigation)?;
-        let attitude = Publisher::<AttitudeMessage>::with_topic(node, &topics.attitude)?;
-        let viz = config
-            .diagnostics
-            .then(|| VizPublisher::new(node))
-            .transpose()?;
-        Ok(Self {
-            odometry,
-            corrected,
-            navigation,
-            attitude,
-            viz,
-            last_viz: -1.0,
-            last_diagnostic: -1.0,
-            external_localization: matches!(
-                config.navigation,
-                super::config::Navigation::ExternalLocalization
-            ),
-        })
-    }
-
-    fn posterior(&self, publication: &PublicationData) -> Result<()> {
-        if let Some(viz) = &self.viz {
-            let stamp = publication.state.timestamp.as_nanosecond() as f64 * 1e-9;
-            let pose = &publication.state.t_ws;
-            let q = pose.quaternion();
-            publish_pose_diagnostic(
-                viz,
-                stamp,
-                "vio/posterior/pose_imu_world",
-                pose.translation().into(),
-                [q.i, q.j, q.k, q.w],
-            );
-            let speed_bias = publication.state.speed_and_bias();
-            publish_scalar_diagnostic(
-                viz,
-                stamp,
-                "vio/posterior/velocity_world",
-                speed_bias.fixed_rows::<3>(0).into(),
-            );
-            publish_scalar_diagnostic(
-                viz,
-                stamp,
-                "vio/posterior/gyro_bias_imu",
-                speed_bias.fixed_rows::<3>(3).into(),
-            );
-            publish_scalar_diagnostic(
-                viz,
-                stamp,
-                "vio/posterior/accel_bias_imu",
-                speed_bias.fixed_rows::<3>(6).into(),
-            );
-            let mut loops = ScalarMessage::base(stamp, "okvis/loop_commits");
-            loops.scalars[0] = publication.tracking_state.backend.revision as f64;
-            loops.scalar_count = 1;
-            viz.publish(loops)?;
-
-            // 跟踪质量用于诊断；IMU 传播的发布条件与上游 Trajectory 一致。
-            let mut tracking = ScalarMessage::base(stamp, "okvis/tracking");
-            tracking.scalars[0] = match publication.tracking_state.tracking_quality {
-                TrackingQuality::Lost => 0.0,
-                TrackingQuality::Marginal => 1.0,
-                TrackingQuality::Good => 2.0,
-            };
-            tracking.scalar_count = 1;
-            viz.publish(tracking)?;
-        }
-        Ok(())
-    }
-    /// IMU 从发布端发出到四路发布完成的端到端耗时（毫秒）。
-    fn ipc(&self, stamp: f64, publish_ms: f64) -> Result<()> {
-        if let Some(viz) = &self.viz {
-            let mut message = ScalarMessage::base(stamp, "okvis/ipc/imu_publish_ms");
-            message.scalars[0] = publish_ms;
-            message.scalar_count = 1;
-            viz.publish(message)?;
-        }
-        Ok(())
-    }
-    fn publish(&mut self, sample: &output::Sample, stamp: f64) -> Result<()> {
-        self.odometry.publish(sample.odom)?;
-        if !self.external_localization {
-            self.corrected.publish(sample.corrected)?;
-            self.navigation.publish(sample.navigation)?;
-        }
-        if let Some(message) = sample.attitude {
-            self.attitude.publish(message)?;
-        }
-        if stamp - self.last_diagnostic >= 0.02 {
-            if let Some(viz) = &self.viz {
-                publish_pose_diagnostic(
-                    viz,
-                    stamp,
-                    "vio/prediction/pose_body_odom",
-                    [
-                        sample.odom.position_x,
-                        sample.odom.position_y,
-                        sample.odom.position_z,
-                    ],
-                    [
-                        sample.odom.quat_x,
-                        sample.odom.quat_y,
-                        sample.odom.quat_z,
-                        sample.odom.quat_w,
-                    ],
-                );
-                publish_scalar_diagnostic(
-                    viz,
-                    stamp,
-                    "vio/prediction/velocity_body_odom",
-                    [
-                        sample.odom.velocity_x,
-                        sample.odom.velocity_y,
-                        sample.odom.velocity_z,
-                    ],
-                );
-                if let Some(attitude) = sample.attitude {
-                    publish_scalar_diagnostic(
-                        viz,
-                        stamp,
-                        "vio/prediction/angular_velocity_body",
-                        attitude.angular_velocity,
-                    );
-                    publish_scalar_diagnostic(
-                        viz,
-                        stamp,
-                        "vio/prediction/posterior_age_s",
-                        [attitude.timestamp - attitude.posterior_time],
-                    );
-                }
-            }
-            self.last_diagnostic = stamp;
-        }
-        if stamp - self.last_viz >= 0.1 {
-            let mut message = VizMessage::base(kind::POSE, stamp, "okvis/odom");
-            message.xyz = [
-                sample.odom.position_x,
-                sample.odom.position_y,
-                sample.odom.position_z,
-            ];
-            message.quat_xyzw = [
-                sample.odom.quat_x,
-                sample.odom.quat_y,
-                sample.odom.quat_z,
-                sample.odom.quat_w,
-            ];
-            if let Some(viz) = &self.viz {
-                viz.publish(message)?;
-            }
-            self.last_viz = stamp;
-        }
-        Ok(())
-    }
-}
-
-fn publish_pose_diagnostic(
-    viz: &VizPublisher,
-    stamp: f64,
-    entity: &str,
-    position: [f64; 3],
-    quaternion_xyzw: [f64; 4],
-) {
-    let mut message = VizMessage::base(kind::POSE, stamp, entity);
-    message.xyz = position;
-    message.quat_xyzw = quaternion_xyzw;
-    let _ = viz.publish(message);
-}
-
-fn publish_scalar_diagnostic<const N: usize>(
-    viz: &VizPublisher,
-    stamp: f64,
-    entity: &str,
-    values: [f64; N],
-) {
-    let mut message = ScalarMessage::base(stamp, entity);
-    message.scalars[..N].copy_from_slice(&values);
-    message.scalar_count = N as u32;
-    let _ = viz.publish(message);
 }
 
 fn session() -> u64 {

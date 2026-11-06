@@ -3305,6 +3305,7 @@ dependencies = [
  "firefly-opengv",
  "firefly-pubsub",
  "firefly-supereight2",
+ "firefly-vio-runtime",
  "iceoryx2",
  "image",
  "jiff",
@@ -3396,6 +3397,7 @@ dependencies = [
  "firefly-observability",
  "firefly-pubsub",
  "firefly-rootslam-mapping",
+ "firefly-vio-runtime",
  "log",
  "nalgebra",
  "serde",
@@ -3463,6 +3465,19 @@ dependencies = [
  "firefly-error",
  "log",
  "logcall",
+ "nalgebra",
+]
+
+[[package]]
+name = "firefly-vio-runtime"
+version = "0.1.0"
+dependencies = [
+ "firefly-error",
+ "firefly-imu-propagation",
+ "firefly-observability",
+ "firefly-pubsub",
+ "iceoryx2",
+ "jiff",
  "nalgebra",
 ]
 

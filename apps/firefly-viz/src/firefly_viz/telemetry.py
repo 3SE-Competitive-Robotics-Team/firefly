@@ -7,6 +7,20 @@ QUATERNION = ("x", "y", "z", "w")
 MOTORS = ("motor_1_N", "motor_2_N", "motor_3_N", "motor_4_N")
 IMU_HEALTH = ("attitude_available", "vio_fresh", "posterior_age_s")
 SCALAR_FIELDS = {
+    "vio/diagnostics/tracks": ("left_detected", "continued_ids", "stereo_ids", "landmark_ids"),
+    "vio/diagnostics/graph": ("landmarks", "observations", "states", "keyframe_poses"),
+    "vio/diagnostics/keyframes": ("is_keyframe", "continued_landmarks", "new_landmarks", "window_span_s"),
+    "vio/diagnostics/residual_before_px": ("count", "rms_px", "mean_x_px", "mean_y_px"),
+    "vio/diagnostics/residual_after_px": ("count", "rms_px", "mean_x_px", "mean_y_px"),
+    "vio/diagnostics/residual_rms_px": ("before_px", "after_px"),
+    "vio/diagnostics/position_delta_m": ("x_m", "y_m", "z_m"),
+    "vio/diagnostics/velocity_delta_m_s": ("x_m_s", "y_m_s", "z_m_s"),
+    "vio/diagnostics/rotation_delta_rad": ("x_rad", "y_rad", "z_rad"),
+    "fc/loop/timing": ("tick", "feedback_age_ms", "receive_age_ms", "tick_interval_ms"),
+    "fc/loop/roll": ("target_rad_s", "feedback_rad_s", "raw_gyro_rad_s", "torque_normalized"),
+    "fc/loop/pitch": ("target_rad_s", "feedback_rad_s", "raw_gyro_rad_s", "torque_normalized"),
+    "fc/loop/control": ("thrust_N", "saturated", "allocated_roll_normalized", "attitude_source"),
+    "fc/loop/motors": MOTORS,
     "okvis/gyro_bias": ("x_rad_s", "y_rad_s", "z_rad_s"),
     "vio/posterior/velocity_world": ("x_m_s", "y_m_s", "z_m_s"),
     "vio/posterior/gyro_bias_imu": ("x_rad_s", "y_rad_s", "z_rad_s"),
@@ -65,4 +79,5 @@ def scalar_labels(name, size):
 
 def log_scalars(recording, name, values):
     """显式命名曲线，保留原始数组供验收读取。"""
-    recording.log(name, rr.Scalars(values), rr.SeriesLines(names=scalar_labels(name, len(values))), strict=True)
+    visible = [False, True, True, True] if name == "fc/loop/timing" else None
+    recording.log(name, rr.Scalars(values), rr.SeriesLines(names=scalar_labels(name, len(values)), visible_series=visible), strict=True)

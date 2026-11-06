@@ -2,46 +2,28 @@
 //! Bounded IMU replay and coordinate adaptation of committed estimator posteriors.
 use super::config::{Config, invalid};
 use crate::{
-    ceres::imu_error::propagate_state,
-    config::parameters::ImuParameters,
-    frames::frame_typedefs::StateId,
-    kinematics::transformation::Transformation,
-    runtime::threaded_slam::PublicationData,
-    sensors::measurements::{ImuMeasurement, ImuMeasurementDeque, ImuSensorReadings},
+    config::parameters::ImuParameters, frames::frame_typedefs::StateId,
+    kinematics::transformation::Transformation, runtime::threaded_slam::PublicationData,
 };
 use firefly_base::{FrameId, RigidTransform};
 use firefly_error::Result;
+use firefly_imu_propagation::{Bias, ImuSample, Predictor, State};
 use firefly_pubsub::{attitude::AttitudeMessage, navigation::NavigationMessage, odom::OdomMessage};
+pub(super) use firefly_vio_runtime::Sample;
 use jiff::Timestamp;
-use nalgebra::{SVector, Vector3};
-use std::collections::{BTreeMap, VecDeque};
+use nalgebra::Vector3;
+use std::collections::BTreeMap;
 
-pub(super) struct Sample {
-    pub odom: OdomMessage,
-    pub corrected: OdomMessage,
-    pub navigation: NavigationMessage,
-    pub attitude: Option<AttitudeMessage>,
-}
-struct Prediction {
-    posterior: Timestamp,
-    time: Timestamp,
-    pose: Transformation,
-    speed_bias: SVector<f64, 9>,
-}
 pub(super) struct Output {
-    config: Config,
-    imu: ImuMeasurementDeque,
-    prediction_measurements: ImuMeasurementDeque,
     imu_parameters: ImuParameters,
     sensor_from_body: Transformation,
-    prediction: Option<Prediction>,
+    predictor: Predictor,
     anchors: BTreeMap<StateId, Transformation>,
     odom_from_map: Transformation,
     alignment: RigidTransform,
     graph_revision: u64,
     revision: u64,
     session: u64,
-    last_published: Option<Timestamp>,
 }
 impl Output {
     pub fn graph_revision(&self) -> u64 {
@@ -60,25 +42,24 @@ impl Output {
     pub fn session_id(&self) -> u64 {
         self.session
     }
-    pub fn new(config: Config, session: u64) -> Result<Self> {
+    pub fn new(config: &Config, session: u64) -> Result<Self> {
         let imu_parameters = config.imu_parameters()?;
         let sensor_from_body = imu_parameters.t_bs.inverse();
         let map_from_odom = Transformation::identity();
         let alignment = rigid(&map_from_odom)?;
         Ok(Self {
-            config,
-            imu: VecDeque::new(),
-            prediction_measurements: VecDeque::new(),
+            predictor: Predictor::new(
+                config.imu_history_seconds,
+                Vector3::new(0., 0., -imu_parameters.g),
+            ),
             imu_parameters,
             sensor_from_body,
-            prediction: None,
             anchors: BTreeMap::new(),
             odom_from_map: Transformation::identity(),
             alignment,
             graph_revision: 0,
             revision: 0,
             session,
-            last_published: None,
         })
     }
     pub fn imu(
@@ -87,29 +68,22 @@ impl Output {
         alpha: Vector3<f64>,
         omega: Vector3<f64>,
     ) -> Result<Option<Sample>> {
-        if self.imu.back().is_some_and(|m| m.time_stamp >= time) {
-            return Ok(None);
-        }
-        let alpha = alpha.component_mul(&self.imu_parameters.s_a);
-        self.imu.push_back(ImuMeasurement::new(
-            time,
-            ImuSensorReadings::new(omega, alpha),
-            -1,
-        ));
-        while self.imu.len() > 2
-            && (self.imu.len() > 10000
-                || seconds(time, self.imu[1].time_stamp) > self.config.imu_history_seconds)
-        {
-            self.imu.pop_front();
-        }
-        self.predict(time)
+        let prediction = self
+            .predictor
+            .imu(ImuSample {
+                timestamp_ns: time.as_nanosecond(),
+                accel: alpha.component_mul(&self.imu_parameters.s_a),
+                gyro: omega,
+            })
+            .map_err(|e| invalid(format!("IMU prediction: {e:?}")))?;
+        prediction.map(|p| self.sample(time, p)).transpose()
     }
     pub fn posterior(&mut self, publication: &PublicationData) -> Result<()> {
         let state = &publication.state;
         if self
-            .prediction
-            .as_ref()
-            .is_some_and(|p| state.timestamp < p.posterior)
+            .predictor
+            .posterior_time_ns()
+            .is_some_and(|p| state.timestamp.as_nanosecond() < p)
         {
             return Ok(());
         }
@@ -142,57 +116,33 @@ impl Output {
         while self.anchors.len() > 512 {
             self.anchors.pop_first();
         }
-        self.prediction = Some(Prediction {
-            posterior: state.timestamp,
-            time: state.timestamp,
-            pose: state.t_ws.clone(),
-            speed_bias: state.speed_and_bias(),
-        });
+        let speed_bias = state.speed_and_bias();
+        self.predictor.posterior(
+            State {
+                timestamp_ns: state.timestamp.as_nanosecond(),
+                rotation: state.t_ws.quaternion(),
+                position: state.t_ws.translation(),
+                velocity: speed_bias.fixed_rows::<3>(0).into_owned(),
+            },
+            Bias {
+                gyro: speed_bias.fixed_rows::<3>(3).into_owned(),
+                accel: speed_bias.fixed_rows::<3>(6).into_owned(),
+            },
+        );
         Ok(())
     }
-    fn predict(&mut self, time: Timestamp) -> Result<Option<Sample>> {
-        let Some(prediction) = self.prediction.as_mut() else {
-            return Ok(None);
-        };
-        if time <= prediction.time || self.last_published.is_some_and(|last| time <= last) {
-            return Ok(None);
-        }
-        let start = self
-            .imu
-            .iter()
-            .rposition(|m| m.time_stamp <= prediction.time);
-        let Some(start) = start else {
-            return Ok(None);
-        };
-        self.prediction_measurements.clear();
-        self.prediction_measurements.extend(
-            self.imu
-                .iter()
-                .skip(start)
-                .take_while(|m| m.time_stamp <= time)
-                .cloned(),
-        );
-        let measurements = &self.prediction_measurements;
-        if measurements.len() < 2 {
-            return Ok(None);
-        }
-        let predicted = propagate_state(
-            measurements,
-            &self.imu_parameters,
-            &mut prediction.pose,
-            &mut prediction.speed_bias,
-            (prediction.time, time),
-        )
-        .map_err(|error| invalid(format!("IMU prediction: {error:?}")))?;
-        prediction.time = time;
+    fn sample(
+        &self,
+        time: Timestamp,
+        predicted: firefly_imu_propagation::Prediction,
+    ) -> Result<Sample> {
+        let pose = Transformation::new(predicted.state.position, predicted.state.rotation);
         let omega = predicted.angular_velocity;
         let body_from_imu = &self.imu_parameters.t_bs;
         let sensor_from_body = &self.sensor_from_body;
-        let map_from_body = prediction.pose.compose(sensor_from_body);
-        let velocity_map = prediction.speed_bias.fixed_rows::<3>(0).into_owned()
-            + prediction
-                .pose
-                .rotate_vector(&omega.cross(&sensor_from_body.translation()));
+        let map_from_body = pose.compose(sensor_from_body);
+        let velocity_map = predicted.state.velocity
+            + pose.rotate_vector(&omega.cross(&sensor_from_body.translation()));
         let odom_from_map = &self.odom_from_map;
         let local = odom_from_map.compose(&map_from_body);
         let odom = message(time, &local, &odom_from_map.rotate_vector(&velocity_map));
@@ -203,22 +153,26 @@ impl Output {
             let q = local.quaternion();
             AttitudeMessage {
                 timestamp: timestamp(time),
-                posterior_time: timestamp(prediction.posterior),
+                posterior_time: self
+                    .predictor
+                    .posterior_time_ns()
+                    .ok_or_else(|| invalid("missing posterior time"))?
+                    as f64
+                    * 1e-9,
                 session: self.session,
                 quat_xyzw: [q.i, q.j, q.k, q.w],
                 angular_velocity: body_from_imu.rotate_vector(&omega).into(),
                 gyro_bias: body_from_imu
-                    .rotate_vector(&prediction.speed_bias.fixed_rows::<3>(3).into_owned())
+                    .rotate_vector(&self.predictor.bias().gyro)
                     .into(),
             }
         });
-        self.last_published = Some(time);
-        Ok(Some(Sample {
+        Ok(Sample {
             odom,
             corrected,
             navigation,
             attitude,
-        }))
+        })
     }
 }
 fn message(time: Timestamp, pose: &Transformation, velocity: &Vector3<f64>) -> OdomMessage {
@@ -254,9 +208,7 @@ pub(super) fn time(seconds: f64) -> Result<Timestamp> {
     }
     Timestamp::from_nanosecond((seconds * 1e9).round() as i128).map_err(invalid)
 }
-fn seconds(end: Timestamp, start: Timestamp) -> f64 {
-    (end.as_nanosecond() - start.as_nanosecond()) as f64 * 1e-9
-}
+
 pub(super) fn timestamp(time: Timestamp) -> f64 {
     time.as_nanosecond() as f64 * 1e-9
 }

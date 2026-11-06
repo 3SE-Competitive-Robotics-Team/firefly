@@ -383,6 +383,7 @@ struct Controller {
     altitude: f32,
     /// 上次可视化时刻（仿真时间）。
     last_viz: f64,
+    last_tick_diagnostic: Option<Instant>,
     /// 最近一次控制使用的机体系角速度（FLU，rad/s），供诊断。
     ang_vel: Vector3<f32>,
     /// PX4 控制链（位置 → 姿态 → 角速度 → 分配）。
@@ -408,6 +409,7 @@ impl Controller {
             last_command_seq: 0,
             altitude: 0.0,
             last_viz: f64::NEG_INFINITY,
+            last_tick_diagnostic: None,
             ang_vel: Vector3::zeros(),
             px4: Px4Controller::new(params),
             arming_failed: 0,
@@ -520,6 +522,9 @@ impl Controller {
             tick,
         })?;
         stats.published += 1;
+        if log::log_enabled!(target: "fc::diagnostics", log::Level::Debug) {
+            self.publish_tick_diagnostic(ports, inputs, tick, &motors, saturated);
+        }
         let truth = inputs.plant.map(|(plant, _)| {
             UnitQuaternion::new_normalize(Quaternion::new(
                 plant.quat_w as f32,
@@ -530,6 +535,70 @@ impl Controller {
         });
         self.publish_viz(ports, inputs.imu_time, self.attitude, truth, &motors);
         Ok(())
+    }
+
+    /// One sample per control tick; raw IMU is diagnostic-only and never replaces feedback.
+    fn publish_tick_diagnostic(
+        &mut self,
+        ports: &Ports,
+        inputs: &Inputs,
+        tick: u64,
+        motors: &[f32; 4],
+        saturated: bool,
+    ) {
+        let now = Instant::now();
+        let wall_dt = self
+            .last_tick_diagnostic
+            .map_or(0., |last| now.duration_since(last).as_secs_f64());
+        self.last_tick_diagnostic = Some(now);
+        let sample = inputs.primary.latest;
+        let raw_rate = inputs.attitude.map_or(Vector3::zeros(), |s| s.raw_rate);
+        let stamp = inputs.imu_time;
+        publish_scalars(
+            &ports.viz,
+            stamp,
+            "fc/loop/timing",
+            &[
+                tick as f64,
+                sample.map_or(-1., |s| (stamp - s.message.timestamp) * 1e3),
+                sample.map_or(-1., |s| now.duration_since(s.received).as_secs_f64() * 1e3),
+                wall_dt * 1e3,
+            ],
+        );
+        publish_scalars(
+            &ports.viz,
+            stamp,
+            "fc/loop/roll",
+            &[
+                f64::from(self.px4.rates_setpoint.roll),
+                f64::from(self.ang_vel.x),
+                raw_rate.x,
+                f64::from(self.px4.torque_setpoint.xyz.x),
+            ],
+        );
+        publish_scalars(
+            &ports.viz,
+            stamp,
+            "fc/loop/pitch",
+            &[
+                f64::from(self.px4.rates_setpoint.pitch),
+                -f64::from(self.ang_vel.y),
+                -raw_rate.y,
+                f64::from(self.px4.torque_setpoint.xyz.y),
+            ],
+        );
+        publish_scalars(
+            &ports.viz,
+            stamp,
+            "fc/loop/control",
+            &[
+                motors.iter().map(|&v| f64::from(v)).sum(),
+                f64::from(saturated),
+                f64::from(self.px4.allocated_control[0]),
+                self.source.code(),
+            ],
+        );
+        publish_scalars(&ports.viz, stamp, "fc/loop/motors", &motors.map(f64::from));
     }
 
     /// 执行最新指令一次：按序号去重（一次性 CLI 为打通信道会重复投递），
@@ -1002,6 +1071,7 @@ mod tests {
                 count: 1,
                 rotation: UnitQuaternion::identity(),
                 rate: Vector3::zeros(),
+                raw_rate: Vector3::zeros(),
                 ready: true,
                 nis: 0.,
                 accel_accepted: false,

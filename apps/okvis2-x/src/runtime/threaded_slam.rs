@@ -1252,7 +1252,16 @@ pub struct ProcessingCore<G: ThreadedGraph, S, B, M> {
     full_graph: Option<JoinHandle<Result<G::FullGraphResult>>>,
     frame_diagnostics: Option<FrameDiagnosticCallback>,
 }
-type FrameDiagnosticCallback = Box<dyn FnMut(&MultiFrame, Duration)>;
+/// Current-frame raw pixel residuals and changes made by realtime optimization.
+#[derive(Default)]
+pub struct FrameDiagnostics {
+    pub residual_before: [f64; 4],
+    pub residual_after: [f64; 4],
+    pub position_delta: [f64; 3],
+    pub velocity_delta: [f64; 3],
+    pub rotation_delta: [f64; 3],
+}
+type FrameDiagnosticCallback = Box<dyn FnMut(&MultiFrame, Duration, &FrameDiagnostics)>;
 impl<G, S, B, M> ProcessingCore<G, S, B, M>
 where
     G: ThreadedGraph,
@@ -1298,7 +1307,10 @@ where
     }
     /// Runs on the graph owner after frame publication and marginalization.
     /// Duration covers frame processing, including detection, matching and optimization.
-    pub fn set_frame_diagnostics(&mut self, callback: impl FnMut(&MultiFrame, Duration) + 'static) {
+    pub fn set_frame_diagnostics(
+        &mut self,
+        callback: impl FnMut(&MultiFrame, Duration, &FrameDiagnostics) + 'static,
+    ) {
         self.frame_diagnostics = Some(Box::new(callback));
     }
     /// # Errors
@@ -1891,11 +1903,36 @@ where
         gyro: Vector3<f64>,
         processing_start: Instant,
     ) -> Result<()> {
+        let id = StateId::new(frame.borrow().id());
+        let before = if self.frame_diagnostics.is_some() {
+            Some((
+                self.graph.pose(id),
+                self.graph.speed_and_bias(id)?,
+                self.frame_residuals(&frame.borrow())?,
+            ))
+        } else {
+            None
+        };
         let updated = self.graph.optimise_realtime_graph(
             self.parameters.estimator.realtime_max_iterations,
             self.parameters.estimator.realtime_num_threads,
             self.frontend.is_initialized(),
         )?;
+        let metrics = if let Some((pose, speed, residual_before)) = before {
+            let after = self.graph.pose(id);
+            let rotation = pose.quaternion().conjugate() * after.quaternion();
+            FrameDiagnostics {
+                residual_before,
+                residual_after: self.frame_residuals(&frame.borrow())?,
+                position_delta: (after.translation() - pose.translation()).into(),
+                velocity_delta: (self.graph.speed_and_bias(id)?.fixed_rows::<3>(0)
+                    - speed.fixed_rows::<3>(0))
+                .into(),
+                rotation_delta: crate::ceres::vi_graph::quaternion_angle_axis(&rotation).into(),
+            }
+        } else {
+            FrameDiagnostics::default()
+        };
         self.finish_full_graph(false)?;
         let updated = if self.graph.is_loop_closure_available() {
             if self.graph.is_loop_closing() {
@@ -1960,9 +1997,46 @@ where
             self.imu_by_frame.remove(&id);
         }
         if let Some(diagnostics) = &mut self.frame_diagnostics {
-            diagnostics(&frame.borrow(), processing_start.elapsed());
+            diagnostics(&frame.borrow(), processing_start.elapsed(), &metrics);
         }
         Ok(())
+    }
+    fn frame_residuals(&self, frame: &MultiFrame) -> Result<[f64; 4]> {
+        use crate::cameras::camera_base::ProjectionStatus;
+        let id = StateId::new(frame.id());
+        let pose = self.graph.pose(id);
+        let mut sums = [0.; 4];
+        for camera in 0..frame.num_frames() {
+            let camera_from_world = pose.compose(&self.graph.extrinsics(id, camera)?).inverse();
+            for index in 0..frame.num_keypoints(camera) {
+                let landmark = LandmarkId::new(frame.landmark_id(camera, index));
+                if !landmark.is_initialised() || !self.graph.is_landmark_added(landmark) {
+                    continue;
+                }
+                let point = self.graph.landmark(landmark)?;
+                let mut predicted = Vector2::zeros();
+                if frame.geometry(camera).project_homogeneous(
+                    &camera_from_world.transform_homogeneous(&point),
+                    &mut predicted,
+                ) != ProjectionStatus::Successful
+                {
+                    continue;
+                }
+                let mut observed = Vector2::zeros();
+                frame.get_keypoint(camera, index, &mut observed);
+                let residual = observed - predicted;
+                sums[0] += 1.;
+                sums[1] += residual.norm_squared();
+                sums[2] += residual.x;
+                sums[3] += residual.y;
+            }
+        }
+        if sums[0] > 0. {
+            sums[1] = (sums[1] / sums[0]).sqrt();
+            sums[2] /= sums[0];
+            sums[3] /= sums[0];
+        }
+        Ok(sums)
     }
     fn make_state(&self, id: StateId, changed: bool) -> Result<State> {
         let pose = self.graph.pose(id);

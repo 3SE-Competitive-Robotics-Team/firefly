@@ -386,7 +386,7 @@ impl<S: BasaltScalar> SqrtKeypointVoEstimator<S> {
             let _ = queue.send(Some(Arc::new(snapshot)));
         }
         self.marginalize(&connected, &lost, outputs);
-        if let Some(queue) = &outputs.state {
+        if outputs.state.is_some() || outputs.state_bounded.is_some() {
             let p = self.base.frame_poses[&self.last_state_t_ns].cast::<f64>();
             let state = PoseVelBiasState::new(
                 p.t_ns(),
@@ -395,7 +395,7 @@ impl<S: BasaltScalar> SqrtKeypointVoEstimator<S> {
                 Vector3::zeros(),
                 Vector3::zeros(),
             );
-            let _ = queue.send(Some(Arc::new(state)));
+            outputs.send_state(Arc::new(state));
         }
         if let Some(queue) = &outputs.vis {
             let mut points = Vec::new();

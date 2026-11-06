@@ -8,7 +8,7 @@ pub struct Snapshot {
     pub message: AttitudeMessage,
     pub rotation: UnitQuaternion<f32>,
     pub rate: Vector3<f32>,
-    received: Instant,
+    pub received: Instant,
     posterior_received: Instant,
 }
 

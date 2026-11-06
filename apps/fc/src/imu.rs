@@ -25,6 +25,8 @@ pub struct Snapshot {
     pub count: u64,
     pub rotation: UnitQuaternion<f32>,
     pub rate: Vector3<f32>,
+    /// Latest unfiltered gyro measurement, retained only for diagnostics.
+    pub raw_rate: Vector3<f64>,
     pub ready: bool,
     pub nis: f64,
     pub accel_accepted: bool,
@@ -223,6 +225,7 @@ fn observe_batch(
                 count: *count,
                 rotation,
                 rate: estimator.rate().cast::<f32>(),
+                raw_rate: sample.gyro,
                 ready: state.is_some(),
                 nis: estimator.gate().nis,
                 accel_accepted: estimator.gate().accepted,

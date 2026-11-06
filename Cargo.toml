@@ -52,6 +52,7 @@ firefly-hal = { path = "crates/firefly-hal" }
 firefly-imu = { path = "crates/firefly-imu" }
 firefly-imu-initialization = { path = "crates/firefly-imu-initialization" }
 firefly-imu-propagation = { path = "crates/firefly-imu-propagation" }
+firefly-vio-runtime = { path = "crates/firefly-vio-runtime" }
 firefly-flight = { path = "crates/firefly-flight" }
 firefly-map = { path = "crates/firefly-map" }
 firefly-observability = { path = "crates/firefly-observability" }

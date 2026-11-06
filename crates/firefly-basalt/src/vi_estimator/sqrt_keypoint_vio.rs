@@ -7,7 +7,8 @@ use super::{
     landmark_database::{Keypoint, KeypointObservation},
     marg_helper::MargHelper,
     vio_estimator::{
-        VioEstimatorEngine, VioStatus, VioVisualizationData, VioWorkerInputs, VioWorkerOutputs,
+        VioEstimatorEngine, VioFrameDiagnostics, VioStatus, VioVisualizationData, VioWorkerInputs,
+        VioWorkerOutputs,
     },
 };
 use crate::imu::imu_types::ImuData;
@@ -472,7 +473,24 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         } else {
             BTreeMap::new()
         };
+        let diagnostic_before = outputs
+            .diagnostics
+            .as_ref()
+            .map(|_| (self.get_state().cast::<f64>(), self.frame_diagnostics()));
         self.optimize()?;
+        if let (Some(queue), Some((before, mut data))) = (&outputs.diagnostics, diagnostic_before) {
+            let after = self.get_state().cast::<f64>();
+            data.residual_after = self.frame_residuals();
+            data.position_delta = (after.state.pose.t_w_i.translation.vector
+                - before.state.pose.t_w_i.translation.vector)
+                .into();
+            data.velocity_delta = (after.state.vel_w_i - before.state.vel_w_i).into();
+            data.rotation_delta = (before.state.pose.t_w_i.rotation.inverse()
+                * after.state.pose.t_w_i.rotation)
+                .scaled_axis()
+                .into();
+            let _ = queue.send(data);
+        }
         if let Some(queue) = &outputs.local_map {
             let mut snapshot = super::local_map::LocalMapSnapshot::capture(
                 self.last_state_t_ns,
@@ -485,6 +503,88 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         }
         self.marginalize(connected, lost, outputs);
         Ok(())
+    }
+
+    fn frame_residuals(&self) -> [f64; 4] {
+        let flow = &self.prev_opt_flow_res[&self.last_state_t_ns];
+        let mut projections = vec![Vec::<Vector4<f64>>::new(); flow.observations.len()];
+        self.ba
+            .compute_projections(&mut projections, self.last_state_t_ns);
+        let mut sums = [0.; 4];
+        for (camera, points) in projections.iter().enumerate() {
+            for point in points {
+                if let Some(observation) = flow.observations[camera].get(&(point[3] as usize))
+                    && point[0].is_finite()
+                    && point[1].is_finite()
+                {
+                    let x = f64::from(observation.translation.x) - point[0];
+                    let y = f64::from(observation.translation.y) - point[1];
+                    sums[0] += 1.;
+                    sums[1] += x * x + y * y;
+                    sums[2] += x;
+                    sums[3] += y;
+                }
+            }
+        }
+        if sums[0] > 0. {
+            sums[1] = (sums[1] / sums[0]).sqrt();
+            sums[2] /= sums[0];
+            sums[3] /= sums[0];
+        }
+        sums
+    }
+
+    fn frame_diagnostics(&self) -> VioFrameDiagnostics {
+        let flow = &self.prev_opt_flow_res[&self.last_state_t_ns];
+        let left = &flow.observations[0];
+        let stereo = flow.observations.get(1).map_or(0, |right| {
+            left.keys().filter(|id| right.contains_key(id)).count()
+        });
+        let previous = self
+            .prev_opt_flow_res
+            .range(..self.last_state_t_ns)
+            .next_back();
+        let tracked = previous.map_or(0, |(_, previous)| {
+            left.keys()
+                .filter(|id| previous.observations[0].contains_key(id))
+                .count()
+        });
+        let active_ids: Vec<_> = left
+            .keys()
+            .filter(|&&id| self.ba.lmdb.landmark_exists(id as i32))
+            .copied()
+            .collect();
+        let added = active_ids
+            .iter()
+            .filter(|&&id| self.ba.lmdb.landmark(id).host_kf_id.frame_id == self.last_state_t_ns)
+            .count();
+        VioFrameDiagnostics {
+            t_ns: self.last_state_t_ns,
+            tracks: [
+                left.len() as f64,
+                tracked as f64,
+                stereo as f64,
+                active_ids.len() as f64,
+            ],
+            graph: [
+                self.ba.lmdb.num_landmarks() as f64,
+                self.ba.lmdb.num_observations() as f64,
+                self.ba.frame_states.len() as f64,
+                self.ba.frame_poses.len() as f64,
+            ],
+            keyframes: [
+                f64::from(self.kf_ids.contains(&self.last_state_t_ns)),
+                (active_ids.len() - added) as f64,
+                added as f64,
+                self.kf_ids
+                    .first()
+                    .map_or(0., |first| (self.last_state_t_ns - first) as f64 * 1e-9),
+            ],
+            active_ids,
+            residual_before: self.frame_residuals(),
+            flow: Some(Arc::clone(flow)),
+            ..Default::default()
+        }
     }
 
     #[expect(
@@ -1110,8 +1210,8 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         self.max_states = status.max_states.load(Ordering::Relaxed);
         self.max_kfs = status.max_kfs.load(Ordering::Relaxed);
         self.optimize_and_marg(&connected, &lost, outputs)?;
-        if let Some(queue) = &outputs.state {
-            let _ = queue.send(Some(Arc::new(self.get_state().cast::<f64>())));
+        if outputs.state.is_some() || outputs.state_bounded.is_some() {
+            outputs.send_state(Arc::new(self.get_state().cast::<f64>()));
         }
         if let Some(queue) = &outputs.vis {
             let mut data = VioVisualizationData {
@@ -1233,6 +1333,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Analytic stereo/IMU fixture checks state and diagnostic outputs together"
+    )]
     fn stationary_stereo_imu_runs_optimization_and_marginalization() {
         for kind in [
             LinearizationType::AbsQr,
@@ -1266,7 +1370,11 @@ mod tests {
                 Vector3::zeros(),
             );
             let status = VioStatus::new(3, 3);
-            let outputs = VioWorkerOutputs::default();
+            let (diagnostics, recorded) = std::sync::mpsc::channel();
+            let outputs = VioWorkerOutputs {
+                diagnostics: Some(diagnostics),
+                ..Default::default()
+            };
             for frame in 0..9 {
                 let time = start + frame * 20_000_000;
                 let observations = (0..2)
@@ -1323,6 +1431,18 @@ mod tests {
                 estimator
                     .measure(&flow, measurement, &outputs, &status)
                     .unwrap();
+                let data = recorded.try_recv().unwrap();
+                assert_eq!(data.t_ns, time);
+                assert_eq!(
+                    data.tracks,
+                    [24., if frame == 0 { 0. } else { 24. }, 24., 24.]
+                );
+                assert_eq!(data.residual_before[0], 48.);
+                assert_eq!(data.residual_after[0], 48.);
+                assert!(data.residual_before[1] < 1e-3);
+                assert!(data.residual_after[1] < 1e-3);
+                assert!(Vector3::from(data.position_delta).norm() < 1e-5);
+                assert!(Vector3::from(data.velocity_delta).norm() < 1e-4);
             }
             assert!(estimator.opt_started);
             assert!(estimator.ba.frame_states.len() < 3);
