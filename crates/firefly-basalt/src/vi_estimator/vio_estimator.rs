@@ -31,6 +31,11 @@ pub struct VioVisualizationData {
 pub struct VioFrameDiagnostics {
     pub t_ns: i64,
     pub tracks: [f64; 4],
+    /// Associated left IDs, current graph observations, effective observations, depth-ready effective observations.
+    pub support: [f64; 4],
+    pub stereo_effective: usize,
+    pub points_before: Vec<VioPointDiagnostics>,
+    pub points_after: Vec<VioPointDiagnostics>,
     pub graph: [f64; 4],
     /// Current keyframe flag, continued landmarks, newly hosted landmarks, retained span (seconds).
     pub keyframes: [f64; 4],
@@ -42,6 +47,26 @@ pub struct VioFrameDiagnostics {
     pub velocity_delta: [f64; 3],
     pub rotation_delta: [f64; 3],
     pub flow: Option<Arc<OpticalFlowResult>>,
+}
+
+/// One frontend observation with its actual optimizer factor and geometry state.
+#[derive(Clone, Debug)]
+pub struct VioPointDiagnostics {
+    pub track_id: u64,
+    pub camera: u32,
+    pub keypoint_index: u32,
+    /// GRAPH=1, `DEPTH_READY=2`, PROJECTABLE=4, EFFECTIVE=8.
+    pub flags: u32,
+    pub pixel: [f64; 2],
+    pub depth_z: f64,
+    pub range: f64,
+    pub inverse_range: f64,
+    /// Observed minus predicted pixels, matching the live diagnostic convention.
+    pub residual: [f64; 2],
+    pub whitened_squared: f64,
+    pub sqrt_information: [[f64; 2]; 2],
+    pub robust_derivative: f64,
+    pub robust_cost: f64,
 }
 pub struct VioWorkerInputs {
     pub vision: Receiver<Option<Arc<OpticalFlowResult>>>,

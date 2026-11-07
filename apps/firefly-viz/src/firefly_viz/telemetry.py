@@ -7,7 +7,9 @@ QUATERNION = ("x", "y", "z", "w")
 MOTORS = ("motor_1_N", "motor_2_N", "motor_3_N", "motor_4_N")
 IMU_HEALTH = ("attitude_available", "vio_fresh", "posterior_age_s")
 SCALAR_FIELDS = {
-    "vio/diagnostics/tracks": ("left_detected", "continued_ids", "stereo_ids", "landmark_ids"),
+    "vio/diagnostics/tracks": ("left_detected", "continued_ids", "stereo_ids", "effective_left_ids"),
+    "vio/diagnostics/support": ("associated_left_ids", "graph_left_ids", "effective_left_ids", "depth_ready_effective_left_ids"),
+    "vio/diagnostics/stereo_effective": ("shared_effective_ids", "fraction_of_effective_left"),
     "vio/diagnostics/graph": ("landmarks", "observations", "states", "keyframe_poses"),
     "vio/diagnostics/keyframes": ("is_keyframe", "continued_landmarks", "new_landmarks", "window_span_s"),
     "vio/diagnostics/residual_before_px": ("count", "rms_px", "mean_x_px", "mean_y_px"),

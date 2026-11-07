@@ -1,5 +1,6 @@
 """IPC 诊断的严格解码与 Rerun 写入；体素增量先折叠，再按预算写快照。"""
 
+import json
 import math
 import time
 
@@ -11,7 +12,7 @@ from firefly_mujoco import IMAGE_HEIGHT, IMAGE_WIDTH
 from .messages import (
     VIZ_KIND_POSE, VIZ_KIND_KEYPOINTS_2D, VIZ_KIND_LINE_STRIP,
     VIZ_KIND_VOXELS, VIZ_KIND_VOXELS_ADD, VIZ_KIND_VOXELS_REMOVE, VIZ_KIND_SCALARS,
-    VIZ_KIND_BAR_CHART, VIZ_KIND_ARROWS, VIZ_KIND_CLEAR, VIZ_KIND_CAMERA,
+    VIZ_KIND_BAR_CHART, VIZ_KIND_ARROWS, VIZ_KIND_CLEAR, VIZ_KIND_CAMERA, VIZ_KIND_VIO_POINTS,
 )
 from .recording import RecordingOutputs, PIXEL_CENTER_OFFSET, at
 from .telemetry import log_scalars
@@ -57,6 +58,18 @@ def count(value, capacity):
     return value
 
 
+def record_partition(pending, key, index, size, metadata=()):
+    """Track interleaved groups independently; only finalization requires completion."""
+    expected, fields, seen = pending.setdefault(key, (size, metadata, set()))
+    if expected != size or fields != metadata:
+        raise ValueError(f"inconsistent diagnostic partition metadata: {key}")
+    if index in seen:
+        raise ValueError(f"duplicate diagnostic partition {index}: {key}")
+    seen.add(index)
+    if len(seen) == size:
+        del pending[key]
+
+
 class Writer:
     def __init__(self, recordings: RecordingOutputs, options):
         self.recordings, self.options = recordings, options
@@ -64,6 +77,8 @@ class Writer:
         self.voxels = {}
         self.voxel_sequence = None
         self.voxel_pending = None
+        self.vio_pending = {}
+        self.optimization_pending = {}
         self.calibrations = {}
         self.previous_poses = {}
         self.states = {}
@@ -183,6 +198,8 @@ class Writer:
                 self.rec.log(name, rr.Points2D(points, colors=list(msg.color), radii=2),
                              rr.AnyValues(track_id=pa.array(ids, type=pa.uint64()),
                                           image_width=int(width), image_height=int(height), total_keypoints=int(total)), strict=True)
+        elif kind == VIZ_KIND_VIO_POINTS:
+            self._vio_points(name, msg)
         elif kind == VIZ_KIND_LINE_STRIP:
             n = count(msg.point_count, len(msg.points))
             self.rec.log(name, rr.LineStrips3D([list(map(list, msg.points[:n]))], colors=list(msg.color)), strict=True)
@@ -219,6 +236,37 @@ class Writer:
         else:
             raise ValueError(f"unsupported viz kind {kind}")
 
+    def _vio_points(self, name, msg):
+        n = count(msg.point_count, len(msg.points))
+        part, parts, total, schema = msg.scalars
+        if (msg.scalar_count != 4 or schema != 1 or n % 6
+                or not np.isfinite([part, parts, total]).all()
+                or any(value != int(value) for value in (part, parts, total))
+                or not 0 <= part < parts or total < n // 6
+                or parts != max(1, math.ceil(total / (len(msg.points) // 6)))
+                or name not in (f"vio/diagnostics/observations/before/part{int(part)}",
+                                f"vio/diagnostics/observations/after/part{int(part)}")):
+            raise ValueError(f"invalid VIO observation partition {name}")
+        expected = min(len(msg.points) // 6, int(total) - int(part) * (len(msg.points) // 6))
+        if n // 6 != expected:
+            raise ValueError(f"incomplete VIO observation partition {name}")
+        rows = np.asarray(msg.points[:n], dtype=np.float64).reshape(-1, 18)
+        ids = rows[:, :4]
+        if (not np.isfinite(ids).all() or np.any(ids < 0) or np.any(ids != np.floor(ids))
+                or np.any(rows[:, 0] > 2**53) or np.any(rows[:, 3] > 15)
+                or not np.isfinite(rows[:, 4:6]).all()):
+            raise ValueError(f"invalid VIO observation identity or pixel {name}")
+        stage = name.rsplit("/", 2)[1]
+        record_partition(self.vio_pending, (msg.timestamp, stage), int(part), int(parts), int(total))
+        columns = ("track_id", "camera", "keypoint_index", "flags", "u_px", "v_px",
+                   "depth_z_m", "range_m", "inverse_range_m_inv", "residual_x_px", "residual_y_px",
+                   "whitened_squared", "sqrt_info_00", "sqrt_info_01", "sqrt_info_10", "sqrt_info_11",
+                   "robust_derivative", "robust_cost")
+        values = {column: pa.array(rows[:, i], type=pa.uint64() if i < 4 else pa.float64())
+                  for i, column in enumerate(columns)}
+        values.update(part_index=int(part), part_count=int(parts), total_observations=int(total), schema_version=1)
+        self.rec.log(name, rr.Points2D(rows[:, 4:6], radii=2), rr.AnyValues(**values), strict=True)
+
     def _enum_state(self, name, value, labels):
         state = labels.get(value)
         if state is None:
@@ -241,6 +289,50 @@ class Writer:
         else:
             self.rec.set_time("wall_time", timestamp=float(msg.wall_secs) + float(msg.wall_nanos) * 1e-9)
         self.rec.log(f"logs/{tag}", rr.TextLog(text, level={1: "ERROR", 2: "WARN", 3: "INFO", 4: "DEBUG", 5: "TRACE"}.get(msg.log_level, "INFO")), strict=True)
+        if text.startswith('{') and '"frame_ns"' in text:
+            record = json.loads(text)
+            backend = record.get("backend", record.get("solver"))
+            kind = record.get("kind", "")
+            if backend in ("rootslam", "okvis") and kind in (
+                    "cost", "iteration", "stop", "solver_cost", "solver_iteration", "solver_pose_step", "solver_stop",
+                    "state_pose", "state_inertial", "iteration_pose"):
+                self._optimization_record(record, backend, kind.removeprefix("solver_"))
+
+    def _optimization_record(self, record, backend, kind):
+        frame_ns = record["frame_ns"]
+        if not isinstance(frame_ns, int) or frame_ns < 0:
+            raise ValueError("invalid optimization frame timestamp")
+        index, size = record.get("ri"), record.get("rn")
+        if type(index) is not int or type(size) is not int or not 0 <= index < size:
+            raise ValueError("invalid optimization record partition")
+        solve = record.get("solve", "window")
+        stage = record.get("stage", "result")
+        if solve not in ("window", "newest") or stage not in (
+                "initial", "before", "trial", "after", "final", "result", "prediction",
+                "before_opt", "after_opt", "after_frontend", "after_newest", "after_window"):
+            raise ValueError("invalid optimization diagnostic stage")
+        record_partition(self.optimization_pending, (backend, frame_ns), index, size)
+        self.rec.reset_time()
+        self.rec.set_time("sim_time", duration=np.timedelta64(frame_ns, "ns"))
+        iteration = record.get("iteration", record.get("iterations", 0))
+        self.rec.set_time("optimization_iteration", sequence=iteration)
+        if "solve_index" in record:
+            self.rec.set_time("optimization_solve", sequence=record["solve_index"])
+        if "sequence" in record:
+            self.rec.set_time("optimization_stage", sequence=record["sequence"])
+        path = f"vio/optimization/{backend}/{solve}/{kind}/{stage}"
+        values = {key: value for key, value in record.items() if value is not None}
+        self.rec.log(path, rr.AnyValues(**values), strict=True)
+        if kind == "state_pose":
+            self.rec.log(f"{path}/pose", rr.Transform3D(
+                translation=record["position"], quaternion=record["quaternion_xyzw"]), strict=True)
+        if kind == "stop":
+            self.rec.log(f"{path}/reason", rr.TextLog(record["reason"]), strict=True)
+        for key, value in values.items():
+            if key in ("frame_ns", "schema", "iteration", "iterations", "ri", "rn") or isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                log_scalars(self.rec, f"{path}/{key}", [value])
 
     def _calibration(self, name, msg):
         if name not in ("cameras/left", "cameras/right"):
@@ -332,3 +424,7 @@ class Writer:
             self.last_flush = now
         if final and self.voxel_pending is not None:
             raise ValueError("recording ended during a voxel update")
+        if final and self.vio_pending:
+            raise ValueError(f"recording ended with incomplete VIO observation partitions: {list(self.vio_pending)}")
+        if final and self.optimization_pending:
+            raise ValueError(f"recording ended with incomplete optimization records: {list(self.optimization_pending)}")

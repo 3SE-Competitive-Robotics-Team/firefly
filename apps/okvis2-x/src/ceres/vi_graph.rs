@@ -58,6 +58,8 @@ use std::{
 };
 
 pub type ResidualId = u64;
+#[path = "vi_graph/diagnostics.rs"]
+pub mod diagnostics;
 pub type SharedSpeedBias = Rc<RefCell<SpeedAndBiasParameterBlock>>;
 pub type SharedReprojection = Rc<RefCell<Box<dyn ReprojectionError2dBase>>>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -319,6 +321,9 @@ pub struct SolverSummary {
     pub final_cost: Option<f64>,
     pub successful: bool,
     pub report: String,
+    pub diagnostics: Vec<diagnostics::SolverIteration>,
+    pub diagnostic_initial: Option<diagnostics::FactorCosts>,
+    pub diagnostic_final: Option<diagnostics::FactorCosts>,
 }
 /// The Ceres engine consumes the complete registered graph and updates shared blocks.
 /// The adapter must honor each manifold, fixed block, loss and stopping condition.
