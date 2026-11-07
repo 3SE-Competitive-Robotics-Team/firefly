@@ -68,7 +68,8 @@ def test_vio_observation_fields_survive_rrd_roundtrip(tmp_path, recordings_facto
     for chunk in RrdReader(path).stream():
         batch = chunk.to_record_batch()
         if 'track_id' in batch.schema.names:
-            observations.extend(batch.to_pylist())
+            components = [name for name in batch.column_names if name not in chunk.timeline_names]
+            observations.extend(batch.select(components).to_pylist())
     assert len(observations) == 1
     record = observations[0]
     assert record['track_id'] == [0]
