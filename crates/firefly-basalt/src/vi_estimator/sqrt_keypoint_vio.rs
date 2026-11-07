@@ -28,7 +28,7 @@ use crate::{
             PoseVelBiasStateWithLin,
         },
         ldlt::Ldlt,
-        time_utils::{ExecutionStats, Timer},
+        time_utils::{ExecutionStats, Timer, profile_clock_ns, profile_stage},
         vio_config::VioConfig,
     },
 };
@@ -219,6 +219,7 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
             let Some(frame) = incoming else {
                 break;
             };
+            let backend_begin = profile_clock_ns();
             if !self.initialized {
                 while data.t_ns < frame.t_ns {
                     let Some(next) = self.pop_imu(&inputs) else {
@@ -278,7 +279,9 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
             } else {
                 None
             };
+            let imu_end = profile_stage(frame.t_ns, "imu_preintegrate", backend_begin);
             self.measure(&frame, measurement, &outputs, &status)?;
+            profile_stage(frame.t_ns, "measure", imu_end);
             previous = Some(frame);
             if imu_finished {
                 break;
@@ -455,6 +458,19 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         stats
             .add("num_it_rejected", f64::from(rejected))
             .format("count");
+        if log::log_enabled!(target: "basalt-profile", log::Level::Debug) {
+            let sum_ms = |name| match stats.get(name).map(|meta| &meta.data) {
+                Some(crate::utils::time_utils::Samples::Scalars(values)) => {
+                    values.iter().sum::<f64>() * 1000.
+                }
+                _ => 0.,
+            };
+            log::debug!(target: "basalt-profile",
+                "frame_ns={} solver linearize_ms={} qr_ms={} assemble_ms={} solve_ms={} backsub_ms={} error_ms={} iterations={} rejected={}",
+                self.last_state_t_ns, sum_ms("linearizeProblem"), sum_ms("performQR"),
+                sum_ms("get_dense_H_b"), sum_ms("solve"), sum_ms("backSubstitute"),
+                sum_ms("computerError2"), iteration, rejected);
+        }
         self.stats_all.merge_all(&stats);
         self.stats_sums.merge_sums(&stats);
         Ok(())
@@ -477,7 +493,9 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
             .diagnostics
             .as_ref()
             .map(|_| (self.get_state().cast::<f64>(), self.frame_diagnostics()));
+        let optimize_begin = profile_clock_ns();
         self.optimize()?;
+        let optimize_end = profile_stage(self.last_state_t_ns, "optimize", optimize_begin);
         if let (Some(queue), Some((before, mut data))) = (&outputs.diagnostics, diagnostic_before) {
             let after = self.get_state().cast::<f64>();
             data.residual_after = self.frame_residuals();
@@ -501,7 +519,10 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
             snapshot.record_rejections(&previous);
             let _ = queue.send(Some(Arc::new(snapshot)));
         }
+        let marginalize_begin =
+            profile_stage(self.last_state_t_ns, "diagnostics_map", optimize_end);
         self.marginalize(connected, lost, outputs);
+        profile_stage(self.last_state_t_ns, "marginalize", marginalize_begin);
         Ok(())
     }
 
@@ -1210,9 +1231,11 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         self.max_states = status.max_states.load(Ordering::Relaxed);
         self.max_kfs = status.max_kfs.load(Ordering::Relaxed);
         self.optimize_and_marg(&connected, &lost, outputs)?;
+        let publish_begin = profile_clock_ns();
         if outputs.state.is_some() || outputs.state_bounded.is_some() {
             outputs.send_state(Arc::new(self.get_state().cast::<f64>()));
         }
+        profile_stage(flow.t_ns, "state_send", publish_begin);
         if let Some(queue) = &outputs.vis {
             let mut data = VioVisualizationData {
                 t_ns: self.last_state_t_ns,

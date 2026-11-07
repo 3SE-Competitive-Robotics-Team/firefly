@@ -98,6 +98,12 @@ impl ImuAdapter for Adapter {
             };
             let pose = &state.state.pose.t_w_i;
             let stamp_ns = state.state.pose.t_ns;
+            let received = firefly_basalt::utils::time_utils::profile_clock_ns();
+            firefly_basalt::utils::time_utils::profile_stage(
+                stamp_ns,
+                "posterior_receive",
+                received,
+            );
             let stamp = stamp_ns as f64 * 1e-9;
             let started = self
                 .inputs

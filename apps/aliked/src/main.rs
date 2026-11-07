@@ -487,17 +487,6 @@ mod tests {
         path.is_file().then_some(path)
     }
 
-    /// 端到端冒烟：权重缺失时跳过。
-    #[test]
-    fn onnx_smoke_or_skip() {
-        let Some(path) = test_model_path() else {
-            log::warn!("skip: 无权重 {}", default_model().display());
-            return;
-        };
-        let mut model = super::load_model(&path).unwrap();
-        super::smoke_inference(&mut model).unwrap();
-    }
-
     #[test]
     fn reused_input_matches_fresh_tensor_across_frames_or_skip() {
         let Some(path) = test_model_path() else {
@@ -505,6 +494,8 @@ mod tests {
             return;
         };
         let mut model = load_model(&path).unwrap();
+        // ort 只允许一个进程级环境；冒烟与缓冲区回归共用一次初始化。
+        smoke_inference(&mut model).unwrap();
         let input_ptr = model.input.extract_tensor().1.as_ptr();
         let mut frame = GrayImageMessage {
             width: WIDTH as u32,

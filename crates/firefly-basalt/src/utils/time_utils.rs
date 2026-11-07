@@ -3,6 +3,27 @@
 //! Timers and execution statistics from original Basalt `utils/time_utils.hpp`.
 use std::{collections::HashMap, time::Instant};
 
+/// Process-local monotonic clock for joining frame stages across worker threads.
+#[must_use]
+pub fn profile_clock_ns() -> u64 {
+    static ORIGIN: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+    ORIGIN.elapsed().as_nanos().try_into().unwrap_or(u64::MAX)
+}
+
+/// Emit a frame interval through the existing RRD `TextLog` transport.
+/// Intervals sharing a frame timestamp use the same monotonic clock; nested
+/// intervals describe subdivisions and must not be added to their parent.
+#[expect(
+    clippy::must_use_candidate,
+    reason = "Logging is the primary effect; the next interval boundary is optional"
+)]
+pub fn profile_stage(frame_ns: i64, stage: &str, begin_ns: u64) -> u64 {
+    let end_ns = profile_clock_ns();
+    log::debug!(target: "basalt-profile",
+        "frame_ns={frame_ns} stage={stage} begin_ns={begin_ns} end_ns={end_ns}");
+    end_ns
+}
+
 #[derive(Debug)]
 pub struct Timer(Instant);
 impl Default for Timer {

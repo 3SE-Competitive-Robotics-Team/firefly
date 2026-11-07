@@ -70,8 +70,11 @@ fn main() -> Result<()> {
             .map_err(|error| Error::new(ErrorKind::Internal, "write help").with_source(error))?;
         return Ok(());
     };
-    let mut config: Config =
-        firefly_config::startup(&arguments.config, firefly_observability::init, |_| Ok(()))?;
+    let mut config: Config = firefly_config::startup(
+        &arguments.config,
+        firefly_observability::init,
+        |config: &Config| config.online.validate(),
+    )?;
     if !arguments.loop_closures {
         config.online.loops = false;
     }
