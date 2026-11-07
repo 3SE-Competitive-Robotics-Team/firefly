@@ -120,7 +120,7 @@ fn detection_cell_scheduling_preserves_corner_order_and_occupancy() {
                 points.corners
             };
             let expected = serial.install(detect);
-            assert!(!expected.is_empty());
+            assert_ne!(expected, [] as [Vector2<f64>; 0]);
             let xs = (image.w % size) / 2;
             let ys = (image.h % size) / 2;
             let cell = |p: &Vector2<f64>| {
