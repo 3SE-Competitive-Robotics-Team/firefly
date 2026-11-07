@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //! Bounded current-frame feature diagnostics on the graph owner.
+use crate::ceres::vi_graph::diagnostics::{DEPTH_READY, EFFECTIVE, GRAPH, ObservationDiagnostic};
 use crate::frames::multi_frame::MultiFrame;
 use crate::runtime::threaded_slam::FrameDiagnostics;
 use firefly_error::Result;
 use firefly_pubsub::{
     node::{IpcNode, create_node},
-    viz::{OKVIS_KEYPOINT_ENTITIES, POINTS_MAX, ScalarMessage, VizMessage, VizPublisher, kind},
+    viz::{
+        OKVIS_KEYPOINT_ENTITIES, POINTS_MAX, ScalarMessage, VioPointDiagnostics, VizMessage,
+        VizPublisher, kind,
+    },
 };
 use nalgebra::Vector2;
 use std::collections::BTreeSet;
@@ -30,28 +34,33 @@ impl Diagnostics {
     pub fn publish(&mut self, frame: &MultiFrame, duration: Duration, metrics: &FrameDiagnostics) {
         let stamp = frame.timestamp().as_nanosecond() as f64 * 1e-9 + self.image_delay;
         let _ = self.publisher.publish(frame_timing(stamp, duration));
-        let ids = |camera| {
-            (0..frame.num_keypoints(camera))
-                .map(|i| frame.landmark_id(camera, i))
-                .filter(|&id| id != 0)
-                .collect::<BTreeSet<_>>()
-        };
-        let left = ids(0);
+        let left = associated_ids(frame, 0);
         let right = if frame.num_frames() > 1 {
-            ids(1)
+            associated_ids(frame, 1)
         } else {
             BTreeSet::new()
         };
         let stereo = left.intersection(&right).count() as f64;
+        let supported = |camera, flags| {
+            metrics
+                .observations_after
+                .iter()
+                .filter(|p| p.camera == camera && p.track_id != 0 && p.flags & flags == flags)
+                .map(|p| p.track_id)
+                .collect::<BTreeSet<_>>()
+        };
+        let effective = supported(0, EFFECTIVE);
+        let effective_right = supported(1, EFFECTIVE);
+        let stereo_effective = effective.intersection(&effective_right).count() as f64;
         let total = frame.num_keypoints(0) as f64;
         self.scalars(
             stamp,
             "vio/diagnostics/tracks",
             &[
                 total,
-                left.intersection(&self.previous_ids).count() as f64,
+                effective.intersection(&self.previous_ids).count() as f64,
                 stereo,
-                left.len() as f64,
+                effective.len() as f64,
             ],
         );
         self.scalars(
@@ -59,7 +68,31 @@ impl Diagnostics {
             "vio/diagnostics/stereo_ratio",
             &[if total > 0. { stereo / total } else { 0. }],
         );
-        self.previous_ids = left;
+        self.scalars(
+            stamp,
+            "vio/diagnostics/support",
+            &[
+                left.len() as f64,
+                supported(0, GRAPH).len() as f64,
+                effective.len() as f64,
+                supported(0, EFFECTIVE | DEPTH_READY).len() as f64,
+            ],
+        );
+        self.scalars(
+            stamp,
+            "vio/diagnostics/stereo_effective",
+            &[
+                stereo_effective,
+                if effective.is_empty() {
+                    0.0
+                } else {
+                    stereo_effective / effective.len() as f64
+                },
+            ],
+        );
+        self.previous_ids = effective;
+        self.publish_points(stamp, "before", &metrics.observations_before);
+        self.publish_points(stamp, "after", &metrics.observations_after);
         self.scalars(
             stamp,
             "vio/diagnostics/residual_rms_px",
@@ -100,6 +133,40 @@ impl Diagnostics {
         message.scalars[..values.len()].copy_from_slice(values);
         message.scalar_count = values.len() as u32;
         let _ = self.publisher.publish(message);
+    }
+    fn publish_points(&self, stamp: f64, stage: &str, observations: &[ObservationDiagnostic]) {
+        if !log::log_enabled!(target: "vio-diagnostics", log::Level::Debug) {
+            return;
+        }
+        let points: Vec<_> = observations.iter().map(point_message).collect();
+        if let Err(error) = self.publisher.publish_vio_points(stamp, stage, &points) {
+            log::warn!("VIO point diagnostics publication failed: {error}");
+        }
+    }
+}
+
+fn associated_ids(frame: &MultiFrame, camera: usize) -> BTreeSet<u64> {
+    (0..frame.num_keypoints(camera))
+        .map(|i| frame.landmark_id(camera, i))
+        .filter(|&id| id != 0)
+        .collect()
+}
+
+fn point_message(p: &ObservationDiagnostic) -> VioPointDiagnostics {
+    VioPointDiagnostics {
+        track_id: p.track_id,
+        camera: p.camera,
+        keypoint_index: p.keypoint_index,
+        flags: p.flags,
+        pixel: p.pixel,
+        depth_z: p.depth_z,
+        range: p.range,
+        inverse_range: p.inverse_range,
+        residual: p.residual,
+        whitened_squared: p.whitened_squared,
+        sqrt_information: p.sqrt_information,
+        robust_derivative: p.robust_derivative,
+        robust_cost: p.robust_cost,
     }
 }
 

@@ -7,6 +7,21 @@ use rayon::prelude::*;
 
 const FACTORS_PER_BATCH: usize = 32;
 
+fn add_diagnostic_cost(
+    costs: &mut super::super::diagnostics::FactorCosts,
+    factor: &super::Factor,
+    cost: f64,
+) {
+    use super::Factor;
+    let group = match factor {
+        Factor::Reprojection(_) | Factor::Depth(_) => &mut costs.visual,
+        Factor::Imu(_) | Factor::PseudoImu(_) => &mut costs.imu,
+        Factor::Visual { .. } | Factor::VisualConst(_) => &mut costs.marginalization,
+        _ => &mut costs.prior,
+    };
+    *group += cost;
+}
+
 #[derive(Default)]
 pub(super) struct Workspace {
     pub parallel: bool,
@@ -14,6 +29,8 @@ pub(super) struct Workspace {
     cache_fixed_factors: bool,
     slots: Vec<Slot>,
     recycled: Option<Linearization>,
+    pub costs: super::super::diagnostics::FactorCosts,
+    diagnostic_enabled: bool,
 }
 
 #[derive(Default)]
@@ -34,6 +51,7 @@ impl Workspace {
         self.parallel = parallel;
         self.evaluation_calls = 0;
         self.cache_fixed_factors = cache_fixed_factors;
+        self.diagnostic_enabled = log::log_enabled!(target: "vio-diagnostics", log::Level::Debug);
         for slot in &mut self.slots {
             slot.cached = false;
             slot.evaluations = 0;
@@ -208,10 +226,14 @@ impl Snapshot {
                 }));
         }
         // Scheduling cannot change the first reported error or floating-point sum order.
-        for slot in &mut workspace.slots {
+        workspace.costs = super::super::diagnostics::FactorCosts::default();
+        for (factor, slot) in self.factors.iter().zip(&mut workspace.slots) {
             slot.outcome.take().expect("completed factor task")?;
             if !slot.active {
                 continue;
+            }
+            if workspace.diagnostic_enabled {
+                add_diagnostic_cost(&mut workspace.costs, &factor.factor, slot.cost);
             }
             if slot.fixed {
                 model.fixed_cost += slot.cost;
@@ -263,6 +285,39 @@ mod tests {
                     loss: Some(RobustLoss::Huber(1.0)),
                 })
                 .collect(),
+        }
+    }
+
+    #[test]
+    fn diagnostic_cost_collection_preserves_factor_evaluations_and_linearization() {
+        let mut snapshot = fixture();
+        let values = snapshot.values.clone();
+        for offsets in [BTreeMap::from([(1, 0)]), BTreeMap::new()] {
+            let mut baseline = Workspace::default();
+            let mut diagnostic = Workspace {
+                diagnostic_enabled: true,
+                ..Default::default()
+            };
+            let disabled = BTreeSet::from([0, 256]);
+            let expected = snapshot
+                .evaluate_with(&values, &offsets, 9, &disabled, true, &mut baseline)
+                .unwrap();
+            let actual = snapshot
+                .evaluate_with(&values, &offsets, 9, &disabled, true, &mut diagnostic)
+                .unwrap();
+            assert_eq!(actual.cost.to_bits(), expected.cost.to_bits());
+            assert_eq!(actual.fixed_cost.to_bits(), expected.fixed_cost.to_bits());
+            assert_eq!(actual.gradient, expected.gradient);
+            assert_eq!(actual.diagonal, expected.diagonal);
+            assert_eq!(
+                diagnostic.factor_evaluations(),
+                baseline.factor_evaluations()
+            );
+            assert_eq!(diagnostic.costs.prior, actual.cost + actual.fixed_cost);
+            assert_eq!(
+                diagnostic.costs.visual + diagnostic.costs.imu + diagnostic.costs.marginalization,
+                0.0
+            );
         }
     }
 

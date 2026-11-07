@@ -32,6 +32,94 @@ pub mod kind {
     pub const KEYPOINTS_2D: u32 = 10;
     /// 固定相机标定：scalars=[fx,fy,cx,cy]，points[0]=[width,height,0]，pose 为 body←CV camera。
     pub const CAMERA: u32 = 12;
+    /// VIO observations: six consecutive triples per point; metadata is
+    /// [part index, part count, total observations, schema version].
+    pub const VIO_POINTS: u32 = 13;
+}
+
+/// Per-observation diagnostics in the current camera, before or after a solve.
+/// Missing geometry or factor quantities are NaN, never fabricated zeros.
+#[derive(Clone, Debug)]
+pub struct VioPointDiagnostics {
+    pub track_id: u64,
+    pub camera: u32,
+    pub keypoint_index: u32,
+    /// `GRAPH=1`, `DEPTH_READY=2`, `PROJECTABLE=4`, `EFFECTIVE=8`. Effective means
+    /// an actual current-frame factor with valid projection and nonzero weight;
+    /// it includes direction constraints without initialized finite depth.
+    pub flags: u32,
+    pub pixel: [f64; 2],
+    pub depth_z: f64,
+    pub range: f64,
+    pub inverse_range: f64,
+    /// Observed minus predicted, in pixels.
+    pub residual: [f64; 2],
+    pub whitened_squared: f64,
+    /// Actual factor whitening before robust influence, row-major.
+    pub sqrt_information: [[f64; 2]; 2],
+    pub robust_derivative: f64,
+    /// Actual robust objective contribution, including the one-half convention.
+    pub robust_cost: f64,
+}
+
+impl VioPointDiagnostics {
+    fn packed(&self) -> [[f64; 3]; 6] {
+        [
+            [
+                self.track_id as f64,
+                f64::from(self.camera),
+                f64::from(self.keypoint_index),
+            ],
+            [f64::from(self.flags), self.pixel[0], self.pixel[1]],
+            [self.depth_z, self.range, self.inverse_range],
+            [self.residual[0], self.residual[1], self.whitened_squared],
+            [
+                self.sqrt_information[0][0],
+                self.sqrt_information[0][1],
+                self.sqrt_information[1][0],
+            ],
+            [
+                self.sqrt_information[1][1],
+                self.robust_derivative,
+                self.robust_cost,
+            ],
+        ]
+    }
+}
+
+fn vio_point_messages(
+    timestamp: f64,
+    stage: &str,
+    points: &[VioPointDiagnostics],
+) -> Result<Vec<VizMessage>, firefly_error::Error> {
+    if !matches!(stage, "before" | "after")
+        || points.iter().any(|point| point.track_id > (1_u64 << 53))
+    {
+        return Err(firefly_error::Error::new(
+            firefly_error::ErrorKind::InvalidArgument,
+            "invalid VIO diagnostic stage or inexact point identifier",
+        ));
+    }
+    let per_part = POINTS_MAX / 6;
+    let part_count = points.len().div_ceil(per_part).max(1);
+    let mut messages = Vec::with_capacity(part_count);
+    for part in 0..part_count {
+        let first = part * per_part;
+        let end = (first + per_part).min(points.len());
+        let mut message = VizMessage::base(
+            kind::VIO_POINTS,
+            timestamp,
+            &format!("vio/diagnostics/observations/{stage}/part{part}"),
+        );
+        message.scalars = [part as f64, part_count as f64, points.len() as f64, 1.0];
+        message.scalar_count = 4;
+        message.point_count = ((end - first) * 6) as u32;
+        for (index, point) in points[first..end].iter().enumerate() {
+            message.points[index * 6..index * 6 + 6].copy_from_slice(&point.packed());
+        }
+        messages.push(message);
+    }
+    Ok(messages)
 }
 
 /// OKVIS 左/右相机当前关键点；时间戳为原始相机时钟。
@@ -270,6 +358,27 @@ pub struct VizPublisher {
 }
 
 impl VizPublisher {
+    /// Publish every observation with explicit partition counts, without truncation.
+    /// # Errors
+    /// Invalid stage/identifier or an IPC publication failure.
+    pub fn publish_vio_points(
+        &self,
+        timestamp: f64,
+        stage: &str,
+        points: &[VioPointDiagnostics],
+    ) -> Result<(), firefly_error::Error> {
+        let messages = vio_point_messages(timestamp, stage, points)?;
+        self.publish(VizMessage::base(
+            kind::CLEAR,
+            timestamp,
+            &format!("vio/diagnostics/observations/{stage}"),
+        ))?;
+        for message in messages {
+            self.publish(message)?;
+        }
+        Ok(())
+    }
+
     /// # Errors
     /// 任一服务或发布端创建失败。
     pub fn new(node: &crate::node::IpcNode) -> Result<Self, firefly_error::Error> {
@@ -388,6 +497,54 @@ fn subscribe_with_topic(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vio_observations_partition_without_truncation() {
+        let points: Vec<_> = (0..171)
+            .map(|id| VioPointDiagnostics {
+                track_id: id,
+                camera: 1,
+                keypoint_index: id as u32,
+                flags: 15,
+                pixel: [12.0, 34.0],
+                depth_z: 2.0,
+                range: 2.5,
+                inverse_range: 0.4,
+                residual: [-0.2, 0.3],
+                whitened_squared: 0.52,
+                sqrt_information: [[2.0, 0.0], [0.0, 2.0]],
+                robust_derivative: 1.0,
+                robust_cost: 0.26,
+            })
+            .collect();
+        let messages = vio_point_messages(4.5, "after", &points).unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(
+            messages.iter().map(|m| m.point_count).collect::<Vec<_>>(),
+            [510, 510, 6]
+        );
+        assert_eq!(
+            messages[2].entity(),
+            "vio/diagnostics/observations/after/part2"
+        );
+        assert_eq!(messages[2].scalars, [2.0, 3.0, 171.0, 1.0]);
+        assert_eq!(
+            &messages[2].points[..6],
+            &[
+                [170.0, 1.0, 170.0],
+                [15.0, 12.0, 34.0],
+                [2.0, 2.5, 0.4],
+                [-0.2, 0.3, 0.52],
+                [2.0, 0.0, 0.0],
+                [2.0, 1.0, 0.26],
+            ]
+        );
+        let empty = vio_point_messages(5.0, "before", &[]).unwrap();
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].point_count, 0);
+        assert_eq!(empty[0].scalars, [0.0, 1.0, 0.0, 1.0]);
+        assert!(vio_point_messages(1.0, "unknown", &points).is_err());
+    }
 
     /// 编译期断言：满足 iceoryx2 零拷贝约束。
     fn assert_zero_copy_send<T: ZeroCopySend>() {}

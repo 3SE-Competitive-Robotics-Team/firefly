@@ -43,6 +43,189 @@ def okvis_pose(stamp, xyz):
     return msg
 
 
+def test_vio_observation_fields_survive_rrd_roundtrip(tmp_path, recordings_factory):
+    import math
+    import rerun as rr
+    from rerun.chunk import RrdReader
+    from firefly_viz.messages import VIZ_KIND_VIO_POINTS
+
+    path = tmp_path / 'vio_observations.rrd'
+    archive = rr.RecordingStream('vio-observation-contract')
+    archive.save(path)
+    writer = Writer(recordings_factory(archive=archive), Options())
+    msg = VizMessage(kind=VIZ_KIND_VIO_POINTS, timestamp=4.5, point_count=6, scalar_count=4)
+    entity = b'vio/diagnostics/observations/after/part0'
+    msg.entity_len, msg.entity[:len(entity)] = len(entity), entity
+    msg.scalars[:] = [0., 1., 1., 1.]
+    rows = [[0., 1., 7.], [13., 12., 34.], [math.nan, math.inf, 0.],
+            [-.2, .3, .52], [2., 0., 0.], [2., 1., .26]]
+    for destination, row in zip(msg.points, rows):
+        destination[:] = row
+    writer.handle(msg)
+    archive.flush()
+    archive.disconnect()
+    observations = []
+    for chunk in RrdReader(path).stream():
+        batch = chunk.to_record_batch()
+        if 'track_id' in batch.schema.names:
+            observations.extend(batch.to_pylist())
+    assert len(observations) == 1
+    record = observations[0]
+    assert record['track_id'] == [0]
+    assert record['flags'] == [13]
+    assert record['camera'] == [1]
+    assert record['residual_x_px'] == [-.2]
+    assert record['robust_cost'] == [.26]
+    assert math.isnan(record['depth_z_m'][0])
+    assert math.isinf(record['range_m'][0])
+
+
+def test_vio_observations_reject_incomplete_partition(recordings_factory):
+    from firefly_viz.messages import VIZ_KIND_VIO_POINTS
+
+    writer = Writer(recordings_factory(archive=Recording()), Options())
+    msg = VizMessage(kind=VIZ_KIND_VIO_POINTS, timestamp=1., point_count=6, scalar_count=4)
+    entity = b'vio/diagnostics/observations/before/part0'
+    msg.entity_len, msg.entity[:len(entity)] = len(entity), entity
+    msg.scalars[:] = [0., 1., 2., 1.]
+    with pytest.raises(ValueError, match='incomplete VIO'):
+        writer.handle(msg)
+
+
+def test_optimizer_records_use_frame_time_and_keep_cost_categories(recordings_factory):
+    import json
+    import numpy as np
+    from firefly_mujoco import LogMessage
+
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options())
+    record = {"backend": "rootslam", "kind": "cost", "frame_ns": 4_500_000_000,
+              "ri": 0, "rn": 1,
+              "stage": "trial", "iteration": 2, "accepted": False,
+              "visual": 3., "imu": 2., "marginalization": -1., "total": 4.}
+    msg = LogMessage(sim_time=7., wall_secs=0, wall_nanos=0, log_level=4)
+    text = json.dumps(record).encode()
+    msg.text_len, msg.text[:len(text)] = len(text), text
+    tag = b'firefly-rootslam'
+    msg.tag_len, msg.tag[:len(tag)] = len(tag), tag
+    writer.log_text(msg)
+    assert ('sim_time', {'duration': np.timedelta64(4_500_000_000, 'ns')}) in archive.times
+    assert ('optimization_iteration', {'sequence': 2}) in archive.times
+    costs = {args[0]: args[1].scalars.as_arrow_array().to_pylist()
+             for args, _ in archive.calls if '/cost/trial/' in args[0]}
+    assert costs['vio/optimization/rootslam/window/cost/trial/marginalization'] == [-1.]
+    assert costs['vio/optimization/rootslam/window/cost/trial/total'] == [4.]
+    assert not any(path.endswith(('/ri', '/rn')) for path in costs)
+    assert not writer.optimization_pending
+
+
+def observation_part(stamp, stage, part, total):
+    import math
+    from firefly_viz.messages import VIZ_KIND_VIO_POINTS
+
+    per_part = 512 // 6
+    size = min(per_part, total - part * per_part)
+    msg = VizMessage(kind=VIZ_KIND_VIO_POINTS, timestamp=stamp, point_count=size * 6, scalar_count=4)
+    path = f'vio/diagnostics/observations/{stage}/part{part}'.encode()
+    msg.entity_len, msg.entity[:len(path)] = len(path), path
+    msg.scalars[:] = [part, max(1, math.ceil(total / per_part)), total, 1]
+    return msg
+
+
+def test_vio_partitions_allow_interleaved_frames_and_stages(recordings_factory):
+    writer = Writer(recordings_factory(archive=Recording()), Options())
+    writer.handle(observation_part(1., 'before', 0, 86))
+    writer.handle(observation_part(2., 'after', 1, 86))
+    writer.tick()
+    writer.handle(observation_part(1., 'after', 0, 0))
+    writer.handle(observation_part(2., 'after', 0, 86))
+    writer.handle(observation_part(1., 'before', 1, 86))
+    assert not writer.vio_pending
+    writer.tick(final=True)
+
+
+@pytest.mark.parametrize('part', [0, 1])
+def test_vio_partition_missing_head_or_tail_fails_at_shutdown(recordings_factory, part):
+    writer = Writer(recordings_factory(archive=Recording()), Options())
+    writer.handle(observation_part(1., 'before', part, 86))
+    writer.tick()
+    with pytest.raises(ValueError, match='incomplete VIO observation partitions'):
+        writer.tick(final=True)
+
+
+def test_vio_partition_duplicate_and_changed_metadata_fail(recordings_factory):
+    writer = Writer(recordings_factory(archive=Recording()), Options())
+    writer.handle(observation_part(1., 'before', 0, 86))
+    with pytest.raises(ValueError, match='duplicate diagnostic partition'):
+        writer.handle(observation_part(1., 'before', 0, 86))
+    with pytest.raises(ValueError, match='inconsistent diagnostic partition metadata'):
+        writer.handle(observation_part(1., 'before', 1, 87))
+    with pytest.raises(ValueError, match='inconsistent diagnostic partition metadata'):
+        writer.handle(observation_part(1., 'before', 2, 171))
+
+
+def optimization_record(writer, frame, index, size, backend='rootslam'):
+    writer._optimization_record({'frame_ns': frame, 'kind': 'cost', 'ri': index, 'rn': size,
+                                 'stage': 'before', 'total': 1.}, backend, 'cost')
+
+
+def test_optimization_groups_complete_independently_and_do_not_depend_on_viz_order(recordings_factory):
+    writer = Writer(recordings_factory(archive=Recording()), Options())
+    optimization_record(writer, 1, 1, 2)
+    optimization_record(writer, 2, 0, 1)
+    optimization_record(writer, 1, 0, 1, backend='okvis')
+    writer.handle(observation_part(1., 'after', 0, 86))
+    writer.tick()
+    optimization_record(writer, 1, 0, 2)
+    assert not writer.optimization_pending
+    writer.handle(observation_part(1., 'after', 1, 86))
+    writer.tick(final=True)
+
+
+@pytest.mark.parametrize('index', [0, 1])
+def test_optimization_missing_head_or_tail_fails_at_shutdown(recordings_factory, index):
+    writer = Writer(recordings_factory(archive=Recording()), Options())
+    optimization_record(writer, 1, index, 2)
+    writer.tick()
+    with pytest.raises(ValueError, match='incomplete optimization records'):
+        writer.tick(final=True)
+
+
+def test_optimization_partition_rejects_duplicates_and_inconsistent_counts(recordings_factory):
+    writer = Writer(recordings_factory(archive=Recording()), Options())
+    optimization_record(writer, 1, 0, 2)
+    with pytest.raises(ValueError, match='duplicate diagnostic partition'):
+        optimization_record(writer, 1, 0, 2)
+    with pytest.raises(ValueError, match='inconsistent diagnostic partition metadata'):
+        optimization_record(writer, 1, 1, 3)
+
+
+@pytest.mark.parametrize(('index', 'size'), [(None, 1), (0, None), (0, 0), (-1, 2), (2, 2), (True, 2), (0, 1.5)])
+def test_optimization_partition_metadata_is_required_and_integral(recordings_factory, index, size):
+    writer = Writer(recordings_factory(archive=Recording()), Options())
+    with pytest.raises(ValueError, match='invalid optimization record partition'):
+        optimization_record(writer, 1, index, size)
+
+
+@pytest.mark.parametrize(('entity', 'values'), [
+    ('vio/diagnostics/tracks', [100., 90., 30., 35.]),
+    ('vio/diagnostics/support', [100., 40., 35., 30.]),
+    ('vio/diagnostics/stereo_effective', [20., 20. / 35.]),
+])
+def test_vio_support_curves_have_semantic_channels(recordings_factory, entity, values):
+    from firefly_viz.messages import ScalarMessage
+
+    archive = Recording()
+    writer = Writer(recordings_factory(archive=archive), Options())
+    msg = ScalarMessage(kind=VIZ_KIND_SCALARS, timestamp=1., scalar_count=len(values))
+    encoded = entity.encode()
+    msg.entity_len, msg.entity[:len(encoded)] = len(encoded), encoded
+    msg.scalars[:len(values)] = values
+    writer.handle(msg)
+    assert archive.calls[0][0][0] == entity
+    assert archive.calls[0][0][1].scalars.as_arrow_array().to_pylist() == values
+
+
 def test_vio_bias_is_recorded_directly_under_okvis(recordings_factory):
     from firefly_viz.messages import AttitudeMessage
 

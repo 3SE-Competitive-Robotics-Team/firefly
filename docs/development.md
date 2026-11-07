@@ -412,6 +412,51 @@ OKVIS 的位姿使用 `okvis/odom` 实体。
 优化另含线性化、QR、组装、求解、回代、误差评估耗时与迭代/拒绝次数。
 按帧连接边界，分别计算入队到光流开始、光流完成到后端取帧、后验发送到消费的等待；
 嵌套阶段不能重复相加，跨帧分位数不能相加当作端到端分位数。
+`vio/diagnostics/tracks` 的第四列统一为当前帧左目有效轨迹：有真实优化观测、
+投影合法、白化信息非零且鲁棒影响权重为正；未初始化有限深度的方向约束也计入。
+`support` 分别记录关联身份、真实图观测、有效轨迹、深度就绪的有效轨迹数；
+`stereo_effective` 记录两目有效 ID 交集及其占有效左目轨迹的比例。
+几何初始化状态由各算法提供，与是否实际参与优化分别记录，不能以非零路标 ID
+替代有效性，也不能将两套算法的初始化标志当作相同的深度置信度。
+
+`RUST_LOG=info,vio-diagnostics=debug` 开启逐点及求解诊断。每点数据以有界批次进入
+`vio/diagnostics/observations/{before,after}/partN`，保留相机时间、ID、像素位置、
+相机 z 深度、距离/逆距离、observed-minus-predicted 像素残差、白化矩阵、
+白化残差平方、鲁棒影响权重和实际目标贡献；缺失量为 NaN。批次数与总点数用于
+检查完整性，不能把缺失批次计成零点。每帧求解记录携带 `ri/rn` 序号与总数，
+记录结束时未收齐的分组使录制失败。求解日志同时解析到 `vio/optimization/`，
+含阶段状态、各次试步代价、接受/拒绝及停止原因。Basalt 边缘化先验省略常数，
+可能为负；OKVIS 压缩视觉约束单列为 `condensed_visual`，不能跨算法比较这些
+目标绝对值。对同一求解内的代价变化和状态修正作归因。
+
+诊断保持算法参数不变，但会增加计算与记录开销。OKVIS 的实时预算包含墙钟时间，
+同输入实验需同时检查诊断开关对停止原因和后验的影响；慢速传感器回放不等于
+消除了求解器内部计时的影响，诊断回放不能当成板端实时性基准。
+
+原始传感器捕获使用 `python -m firefly_evaluation.sensor_replay capture`，在生产源
+之前启动、生产源退出后发 SIGINT；完整原始双目/IMU 字节和传感器时间戳进入独立
+RRD，真值只作离线评分。`inspect` 校验源计数、摘要和时间间隔；压缩视频不能替代
+原始灰度图。`replay` 只重发传感器话题，以固定顺序先发覆盖相机时刻的 IMU 再发
+双目，不重采样、不改像素、不发布真值。`--until-sim` 明确选择输入段，所需尾部 IMU、
+源与所选段的计数/摘要、排除的样本数都进入回放 RRD。必须确认两估计器消费了同一
+段输入及末帧后验，再对齐相机时刻比较，发布完成本身不代表估计完成。
+
+```bash
+uv run python -m firefly_evaluation.sensor_replay capture logs/replay_source.rrd --expected-imu-rate 1000
+uv run python -m firefly_evaluation.sensor_replay inspect logs/replay_source.rrd
+uv run python -m firefly_evaluation.sensor_replay run logs/replay_source.rrd --output-dir logs/replay_rootslam --estimator firefly-rootslam --speed 0.25 --until-sim 14 --diagnostics
+```
+
+`--expected-imu-rate` 填本次传感器配置频率；接收序号连续不代表源传感器无缺口。
+capture 收到 `raw capture ready` 后再启动生产源。run 复用验收互斥锁，自动启动
+viz、release 估计器和 replay，等待最后 IMU 与已接受末帧后验，再 SIGINT 回收并核对
+退出。默认保留末帧之后 20 ms 的原始 IMU，满足 OKVIS 的时间重叠要求；覆盖不足
+时失败。停机后核对全部相机后验，只允许首后验之前的初始化前缀，内部缺帧、重复
+或外来帧均失败；该检查不等同于逐条 IMU 消费证明。另一轮换估计器及新输出目录，
+保持同一 source、速度和时间段。结果目录的
+`vio.rrd`、`delivery.rrd`、`run.rrd` 和 `result.json` 保存消费水位、进程输出、
+输入/源码/配置/二进制指纹及退出结果；回放验证不替代真实闭环悬停。
+
 `okvis/loop_commits` 是后端已提交全图修订次数，任务评分记录为 `acceptance/loop_backend`；
 候选检索和几何验证不单独计为提交。外部库图模式的融合诊断位于 `corr/debug/*`。
 通讯测试和修订计数不替代完整轨迹精度验证。

@@ -43,6 +43,9 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
+#[path = "sqrt_keypoint_vio_diagnostics.rs"]
+mod diagnostics;
+
 pub struct SqrtKeypointVioEstimator<S: BasaltScalar> {
     pub ba: BundleAdjustmentBase<S>,
     pub marg_data: MargLinData<S>,
@@ -71,6 +74,7 @@ pub struct SqrtKeypointVioEstimator<S: BasaltScalar> {
     lambda_vee: S,
     pub stats_all: ExecutionStats,
     pub stats_sums: ExecutionStats,
+    diagnostic_prediction: Option<PoseVelBiasState<f64>>,
 }
 
 // Eigen Quaternion::setFromTwoVectors and the needed column of its 2x3
@@ -328,11 +332,32 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         reason = "Preserves the original nested LM acceptance and retry control flow"
     )]
     pub fn optimize(&mut self) -> Result<()> {
+        let mut diagnostic = diagnostics::SolverDiagnostics::new(self.last_state_t_ns);
+        if let Some(diagnostic) = &mut diagnostic {
+            if let Some(prediction) = self.diagnostic_prediction.take() {
+                diagnostic.push_state("prediction", &prediction);
+            }
+            diagnostic.push_state("before_opt", &self.get_state().cast::<f64>());
+        }
         if !self.opt_started && self.ba.frame_states.len() <= 4 {
+            if let Some(mut diagnostic) = diagnostic {
+                let mut cost = self.diagnostic_cost(&self.full_order());
+                cost["stage"] = serde_json::json!("before");
+                diagnostic.push("cost", cost.clone());
+                cost["stage"] = serde_json::json!("after");
+                diagnostic.push("cost", cost);
+                diagnostic.push_state("after_opt", &self.get_state().cast::<f64>());
+                diagnostic.finish("warmup", 0, 0);
+            }
             return Ok(());
         }
         self.opt_started = true;
         let order = self.full_order();
+        if let Some(diagnostic) = &mut diagnostic {
+            let mut cost = self.diagnostic_cost(&order);
+            cost["stage"] = serde_json::json!("before");
+            diagnostic.push("cost", cost);
+        }
         self.lambda = S::from_f64_lossy(self.config.vio_lm_lambda_initial);
         let timer = Timer::default();
         let mut stats = ExecutionStats::default();
@@ -364,10 +389,14 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         let mut iteration = 0;
         let mut rejected = 0;
         let mut terminated = false;
+        let mut stop_reason = "max_iterations";
         while iteration <= self.config.vio_max_iterations && !terminated {
             let mut stage = Timer::default();
             let (before, valid) = linearization.linearize_problem(&self.ba);
             if !valid {
+                if let Some(diagnostic) = diagnostic {
+                    diagnostic.finish("numerical_failure", iteration, rejected);
+                }
                 return Err(Error::new(
                     ErrorKind::Internal,
                     "numerical failure during VIO linearization",
@@ -394,6 +423,9 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
                     self.lambda *= self.lambda_vee;
                     self.lambda_vee *= S::from_f64_lossy(2.0);
                 }
+                let previous_position = diagnostic
+                    .as_ref()
+                    .map(|_| self.get_state().state.pose.t_w_i.translation.vector);
                 self.ba.backup();
                 inc = -inc;
                 let model_decrease = linearization.back_substitute(&mut self.ba, &inc);
@@ -423,11 +455,9 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
                         .component_mul(&self.accel_bias_sqrt_weight),
                     &self.g,
                 );
-                let after = self.ba.compute_error(None, S::zero())
-                    + self.ba.compute_marg_prior_error(&self.marg_data)
-                    + inertial
-                    + gyro
-                    + accel;
+                let visual = self.ba.compute_error(None, S::zero());
+                let marginalization = self.ba.compute_marg_prior_error(&self.marg_data);
+                let after = visual + marginalization + inertial + gyro + accel;
                 stats.add("computerError2", stage.reset()).format("ms");
                 let decrease = before - after;
                 let quality = decrease / model_decrease;
@@ -435,6 +465,39 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
                     .add("iteration", iteration_timer.elapsed())
                     .format("ms");
                 iteration += 1;
+                if let (Some(diagnostic), Some(previous_position)) =
+                    (&mut diagnostic, previous_position)
+                {
+                    let position_delta: [f64; 3] =
+                        (self.get_state().state.pose.t_w_i.translation.vector - previous_position)
+                            .map(BasaltScalar::as_f64)
+                            .into();
+                    diagnostic.push("iteration_pose", serde_json::json!({
+                        "iteration":iteration, "accepted":model_decrease > S::zero() && quality > S::zero(),
+                        "position_delta":position_delta,
+                    }));
+                    diagnostic.push(
+                        "cost",
+                        serde_json::json!({
+                            "stage": "trial", "iteration": iteration,
+                            "accepted": model_decrease > S::zero() && quality > S::zero(),
+                            "visual": visual.as_f64(), "imu": inertial.as_f64(),
+                            "gyro_bias": gyro.as_f64(), "accel_bias": accel.as_f64(),
+                            "marginalization": marginalization.as_f64(), "total": after.as_f64(),
+                        }),
+                    );
+                    diagnostic.push(
+                        "iteration",
+                        serde_json::json!({
+                            "iteration": iteration,
+                            "accepted": model_decrease > S::zero() && quality > S::zero(),
+                            "linearized_before": before.as_f64(), "cost_after": after.as_f64(),
+                            "model_decrease": model_decrease.as_f64(),
+                            "actual_decrease": decrease.as_f64(), "step_inf": step.as_f64(),
+                            "lambda": self.lambda.as_f64(),
+                        }),
+                    );
+                }
                 if model_decrease > S::zero() && quality > S::zero() {
                     self.lambda *= (S::one() / S::from_f64_lossy(3.0))
                         .max(S::one() - (S::from_f64_lossy(2.0) * quality - S::one()).powi(3));
@@ -442,6 +505,14 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
                     self.lambda_vee = S::from_f64_lossy(2.0);
                     terminated = (decrease > S::zero() && decrease < S::from_f64_lossy(1e-6))
                         || step < S::from_f64_lossy(1e-4);
+                    if terminated {
+                        stop_reason = if decrease > S::zero() && decrease < S::from_f64_lossy(1e-6)
+                        {
+                            "cost_tolerance"
+                        } else {
+                            "step_tolerance"
+                        };
+                    }
                     break;
                 }
                 self.lambda *= self.lambda_vee;
@@ -450,6 +521,7 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
                 rejected += 1;
                 if self.lambda > self.max_lambda {
                     terminated = true;
+                    stop_reason = "max_lambda";
                 }
             }
         }
@@ -473,6 +545,13 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         }
         self.stats_all.merge_all(&stats);
         self.stats_sums.merge_sums(&stats);
+        if let Some(mut diagnostic) = diagnostic {
+            let mut cost = self.diagnostic_cost(&order);
+            cost["stage"] = serde_json::json!("after");
+            diagnostic.push("cost", cost);
+            diagnostic.push_state("after_opt", &self.get_state().cast::<f64>());
+            diagnostic.finish(stop_reason, iteration, rejected);
+        }
         Ok(())
     }
 
@@ -498,7 +577,15 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         let optimize_end = profile_stage(self.last_state_t_ns, "optimize", optimize_begin);
         if let (Some(queue), Some((before, mut data))) = (&outputs.diagnostics, diagnostic_before) {
             let after = self.get_state().cast::<f64>();
-            data.residual_after = self.frame_residuals();
+            let observations = self.observation_diagnostics(diagnostics::enabled());
+            data.residual_after = observations.residual;
+            data.support = observations.support;
+            data.stereo_effective = observations.stereo_effective;
+            data.tracks[3] = observations.effective_left.len() as f64;
+            data.active_ids = observations.effective_left;
+            if diagnostics::enabled() {
+                data.points_after = observations.points;
+            }
             data.position_delta = (after.state.pose.t_w_i.translation.vector
                 - before.state.pose.t_w_i.translation.vector)
                 .into();
@@ -526,35 +613,6 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         Ok(())
     }
 
-    fn frame_residuals(&self) -> [f64; 4] {
-        let flow = &self.prev_opt_flow_res[&self.last_state_t_ns];
-        let mut projections = vec![Vec::<Vector4<f64>>::new(); flow.observations.len()];
-        self.ba
-            .compute_projections(&mut projections, self.last_state_t_ns);
-        let mut sums = [0.; 4];
-        for (camera, points) in projections.iter().enumerate() {
-            for point in points {
-                if let Some(observation) = flow.observations[camera].get(&(point[3] as usize))
-                    && point[0].is_finite()
-                    && point[1].is_finite()
-                {
-                    let x = f64::from(observation.translation.x) - point[0];
-                    let y = f64::from(observation.translation.y) - point[1];
-                    sums[0] += 1.;
-                    sums[1] += x * x + y * y;
-                    sums[2] += x;
-                    sums[3] += y;
-                }
-            }
-        }
-        if sums[0] > 0. {
-            sums[1] = (sums[1] / sums[0]).sqrt();
-            sums[2] /= sums[0];
-            sums[3] /= sums[0];
-        }
-        sums
-    }
-
     fn frame_diagnostics(&self) -> VioFrameDiagnostics {
         let flow = &self.prev_opt_flow_res[&self.last_state_t_ns];
         let left = &flow.observations[0];
@@ -570,23 +628,26 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
                 .filter(|id| previous.observations[0].contains_key(id))
                 .count()
         });
-        let active_ids: Vec<_> = left
+        let landmark_ids: Vec<_> = left
             .keys()
             .filter(|&&id| self.ba.lmdb.landmark_exists(id as i32))
             .copied()
             .collect();
-        let added = active_ids
+        let added = landmark_ids
             .iter()
             .filter(|&&id| self.ba.lmdb.landmark(id).host_kf_id.frame_id == self.last_state_t_ns)
             .count();
+        let observations = self.observation_diagnostics(diagnostics::enabled());
         VioFrameDiagnostics {
             t_ns: self.last_state_t_ns,
             tracks: [
                 left.len() as f64,
                 tracked as f64,
                 stereo as f64,
-                active_ids.len() as f64,
+                observations.effective_left.len() as f64,
             ],
+            support: observations.support,
+            stereo_effective: observations.stereo_effective,
             graph: [
                 self.ba.lmdb.num_landmarks() as f64,
                 self.ba.lmdb.num_observations() as f64,
@@ -595,14 +656,19 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
             ],
             keyframes: [
                 f64::from(self.kf_ids.contains(&self.last_state_t_ns)),
-                (active_ids.len() - added) as f64,
+                (landmark_ids.len() - added) as f64,
                 added as f64,
                 self.kf_ids
                     .first()
                     .map_or(0., |first| (self.last_state_t_ns - first) as f64 * 1e-9),
             ],
-            active_ids,
-            residual_before: self.frame_residuals(),
+            active_ids: observations.effective_left,
+            residual_before: observations.residual,
+            points_before: if diagnostics::enabled() {
+                observations.points
+            } else {
+                Vec::new()
+            },
             flow: Some(Arc::clone(flow)),
             ..Default::default()
         }
@@ -970,6 +1036,7 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
             lambda_vee: S::from_f64_lossy(2.0),
             stats_all: ExecutionStats::default(),
             stats_sums: ExecutionStats::default(),
+            diagnostic_prediction: None,
         }
     }
 
@@ -1085,6 +1152,7 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
                 .insert(flow.t_ns, PoseVelBiasStateWithLin::new(next, false));
             self.imu_meas.insert(measurement.start_t_ns(), measurement);
         }
+        self.diagnostic_prediction = diagnostics::enabled().then(|| self.get_state().cast::<f64>());
         self.prev_opt_flow_res.insert(flow.t_ns, Arc::clone(flow));
         let mut connected0 = 0;
         let mut connected = BTreeMap::<i64, i32>::new();

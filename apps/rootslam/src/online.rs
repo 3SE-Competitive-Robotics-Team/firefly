@@ -320,7 +320,7 @@ impl LiveSession {
             }
             self.receive_images()?;
             self.enqueue_stereo()?;
-            self.publish_diagnostics();
+            self.publish_diagnostics()?;
         }
         Ok(())
     }
@@ -393,11 +393,12 @@ impl LiveSession {
         Ok(())
     }
 
-    fn publish_diagnostics(&mut self) {
+    fn publish_diagnostics(&mut self) -> Result<()> {
         while let Ok(data) = self.diagnostics_rx.try_recv() {
             let stamp = data.t_ns as f64 * 1e-9;
             for (name, values) in [
                 ("vio/diagnostics/tracks", data.tracks),
+                ("vio/diagnostics/support", data.support),
                 ("vio/diagnostics/graph", data.graph),
                 ("vio/diagnostics/keyframes", data.keyframes),
                 ("vio/diagnostics/residual_before_px", data.residual_before),
@@ -405,6 +406,7 @@ impl LiveSession {
             ] {
                 publish_scalar_diagnostic(&self.viz, stamp, name, values);
             }
+            publish_observation_diagnostics(&self.viz, stamp, &data)?;
             publish_scalar_diagnostic(
                 &self.viz,
                 stamp,
@@ -483,6 +485,7 @@ impl LiveSession {
                 }
             }
         }
+        Ok(())
     }
 
     fn shutdown(self) -> Result<()> {
@@ -525,6 +528,56 @@ impl LiveSession {
             })?;
         }
         Ok(())
+    }
+}
+
+fn publish_observation_diagnostics(
+    viz: &VizPublisher,
+    stamp: f64,
+    data: &VioFrameDiagnostics,
+) -> Result<()> {
+    publish_scalar_diagnostic(
+        viz,
+        stamp,
+        "vio/diagnostics/stereo_effective",
+        [
+            data.stereo_effective as f64,
+            if data.support[2] > 0. {
+                data.stereo_effective as f64 / data.support[2]
+            } else {
+                0.
+            },
+        ],
+    );
+    if log::log_enabled!(target: "vio-diagnostics", log::Level::Debug) {
+        for (stage, points) in [
+            ("before", &data.points_before),
+            ("after", &data.points_after),
+        ] {
+            let points = points.iter().map(point_diagnostic).collect::<Vec<_>>();
+            viz.publish_vio_points(stamp, stage, &points)?;
+        }
+    }
+    Ok(())
+}
+
+fn point_diagnostic(
+    point: &firefly_basalt::vi_estimator::vio_estimator::VioPointDiagnostics,
+) -> firefly_pubsub::viz::VioPointDiagnostics {
+    firefly_pubsub::viz::VioPointDiagnostics {
+        track_id: point.track_id,
+        camera: point.camera,
+        keypoint_index: point.keypoint_index,
+        flags: point.flags,
+        pixel: point.pixel,
+        depth_z: point.depth_z,
+        range: point.range,
+        inverse_range: point.inverse_range,
+        residual: point.residual,
+        whitened_squared: point.whitened_squared,
+        sqrt_information: point.sqrt_information,
+        robust_derivative: point.robust_derivative,
+        robust_cost: point.robust_cost,
     }
 }
 
@@ -582,6 +635,36 @@ fn render_calibration() -> Calibration<f64> {
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[test]
+    fn calibrated_stereo_baseline_passes_triangulation_gate_at_any_pose() {
+        use firefly_basalt::utils::ba_utils::compute_rel_pose;
+        use nalgebra::{Isometry3, Translation3, UnitQuaternion};
+
+        let calibration = render_calibration();
+        let config = initial_vio_config(&Options::default()).unwrap();
+        let minimum_squared = config.vio_min_triangulation_dist.powi(2);
+        for index in 0..1000 {
+            let angle = f64::from(index) * 0.001;
+            let pose = Isometry3::from_parts(
+                Translation3::new(0.3, -0.4, 1.2),
+                UnitQuaternion::from_euler_angles(angle * 0.1, -angle * 0.2, angle),
+            );
+            let relative = compute_rel_pose(
+                &pose,
+                &calibration.t_i_c[1],
+                &pose,
+                &calibration.t_i_c[0],
+                None,
+                None,
+            );
+            assert!(
+                relative.translation.vector.norm_squared() >= minimum_squared,
+                "pose {index}: squared stereo baseline {:?} < {minimum_squared:?}",
+                relative.translation.vector.norm_squared()
+            );
+        }
+    }
 
     #[test]
     fn detection_override_preserves_all_other_online_parameters() {

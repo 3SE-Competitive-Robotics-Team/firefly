@@ -194,6 +194,7 @@ pub struct ViSlamBackend {
     pub t_ai_s: BTreeMap<StateId, BTreeMap<u64, Transformation>>,
     pub raster: Option<Box<dyn GraphRaster>>,
     pending_full_graph_residuals: Vec<(StateId, StateId)>,
+    pending_diagnostics: Vec<crate::ceres::vi_graph::diagnostics::FrameEvent>,
 }
 impl Default for ViSlamBackend {
     fn default() -> Self {
@@ -226,6 +227,7 @@ impl Default for ViSlamBackend {
             t_ai_s: BTreeMap::new(),
             raster: None,
             pending_full_graph_residuals: Vec::new(),
+            pending_diagnostics: Vec::new(),
         }
     }
 }
@@ -1396,6 +1398,9 @@ impl ViSlamBackend {
             });
             self.realtime_graph.optimise(iterations, threads, verbose)
         };
+        if solve.is_ok() {
+            self.collect_solve_diagnostics(newest, only_newest);
+        }
         if only_newest {
             return self.restore_newest_solve(newest, (unfreeze, frozen), fixation, solve);
         }
@@ -1476,6 +1481,59 @@ impl ViSlamBackend {
         }
         Ok(updated)
     }
+    fn collect_solve_diagnostics(&mut self, newest: StateId, only_newest: bool) {
+        if log::log_enabled!(target: "vio-diagnostics", log::Level::Debug)
+            && let (Ok(timestamp), Ok(pose)) = (
+                self.timestamp(newest),
+                self.realtime_graph.pose_block(newest),
+            )
+        {
+            let source = &mut self.realtime_graph.summary;
+            let diagnostics = std::mem::take(&mut source.diagnostics);
+            let summary = SolverSummary {
+                diagnostics,
+                ..source.clone()
+            };
+            self.pending_diagnostics
+                .push(crate::ceres::vi_graph::diagnostics::FrameEvent::Solve {
+                    frame_ns: timestamp.as_nanosecond(),
+                    solve: if only_newest { "newest" } else { "window" },
+                    pose_key: Parameter::Pose(pose).key(),
+                    summary,
+                });
+            self.collect_state_diagnostics(
+                newest,
+                if only_newest {
+                    "after_newest"
+                } else {
+                    "after_window"
+                },
+            );
+        }
+    }
+
+    fn collect_state_diagnostics(&mut self, id: StateId, stage: &'static str) {
+        if !log::log_enabled!(target: "vio-diagnostics", log::Level::Debug) {
+            return;
+        }
+        if stage == "prediction" {
+            self.pending_diagnostics.clear();
+        }
+        if let (Ok(timestamp), Ok(pose), Ok(speed_bias)) =
+            (self.timestamp(id), self.pose(id), self.speed_and_bias(id))
+        {
+            let q = pose.quaternion();
+            self.pending_diagnostics
+                .push(crate::ceres::vi_graph::diagnostics::FrameEvent::State {
+                    frame_ns: timestamp.as_nanosecond(),
+                    stage,
+                    position: pose.translation().into(),
+                    quaternion_xyzw: [q.i, q.j, q.k, q.w],
+                    speed_bias: speed_bias.into(),
+                });
+        }
+    }
+
     fn freeze_newest_window(
         &mut self,
         only_newest: bool,
@@ -3668,6 +3726,19 @@ impl crate::runtime::threaded_slam::ThreadedGraph for ViSlamBackend {
     }
     fn timestamp(&self, id: StateId) -> Result<Timestamp> {
         ViSlamBackend::timestamp(self, id)
+    }
+    fn frame_observations(
+        &self,
+        frame: &crate::frames::multi_frame::MultiFrame,
+    ) -> Result<Vec<crate::ceres::vi_graph::diagnostics::ObservationDiagnostic>> {
+        self.realtime_graph.frame_observations(frame)
+    }
+    fn record_diagnostic_state(&mut self, id: StateId, stage: &'static str) {
+        self.collect_state_diagnostics(id, stage);
+    }
+    fn publish_frame_diagnostics(&mut self) {
+        crate::ceres::vi_graph::diagnostics::log_frame_events(&self.pending_diagnostics);
+        self.pending_diagnostics.clear();
     }
     fn optimise_realtime_graph(
         &mut self,

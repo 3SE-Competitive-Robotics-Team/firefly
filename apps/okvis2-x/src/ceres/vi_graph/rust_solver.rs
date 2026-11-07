@@ -191,6 +191,27 @@ struct Snapshot {
     factors: Vec<FactorRecord>,
 }
 
+fn diagnostic_pose_steps(
+    before: &BTreeMap<usize, Values>,
+    after: &BTreeMap<usize, Values>,
+) -> Vec<super::diagnostics::PoseStep> {
+    before
+        .iter()
+        .filter(|(_, value)| !value.fixed && matches!(value.manifold, ManifoldKind::Pose))
+        .map(|(&key, value)| {
+            let a = &value.data;
+            let b = &after[&key].data;
+            let qa = Quaternion::new(a[6], a[3], a[4], a[5]);
+            let qb = Quaternion::new(b[6], b[3], b[4], b[5]);
+            super::diagnostics::PoseStep {
+                key,
+                translation: [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+                rotation: super::quaternion_angle_axis(&(qa.conjugate() * qb)).into(),
+            }
+        })
+        .collect()
+}
+
 fn output<const N: usize>(
     residuals: DVector<f64>,
     jacobians: [DMatrixView<'_, f64>; N],
@@ -965,6 +986,10 @@ impl Snapshot {
             None => self.run_with(options, disabled, &mut workspace),
         }
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Diagnostic events stay beside the unchanged trust-region transitions they describe"
+    )]
     fn run_with(
         &mut self,
         options: &SolverOptions,
@@ -976,7 +1001,13 @@ impl Snapshot {
         let start = Instant::now();
         let mut values = self.values.clone();
         let mut model = self.evaluate_with(&values, &offsets, size, disabled, true, workspace)?;
+        let diagnostic_enabled = log::log_enabled!(target: "vio-diagnostics", log::Level::Debug);
+        let mut current_costs = workspace.costs;
         let mut summary = Self::initial_summary(&model);
+        if diagnostic_enabled {
+            summary.diagnostic_initial = Some(current_costs);
+            summary.diagnostic_final = Some(current_costs);
+        }
         if size == 0 {
             summary.report = "No varying parameter blocks".into();
             return Ok(summary);
@@ -1021,6 +1052,20 @@ impl Snapshot {
             let Some((delta, predicted)) =
                 Self::propose_step(&mut strategy, &model, options, &mut invalid_steps, &scale)?
             else {
+                if diagnostic_enabled {
+                    summary
+                        .diagnostics
+                        .push(super::diagnostics::SolverIteration {
+                            iteration: iteration + 1,
+                            before: current_costs,
+                            candidate: None,
+                            accepted: false,
+                            reason: "invalid_step",
+                            predicted_decrease: None,
+                            quality: None,
+                            pose_steps: Vec::new(),
+                        });
+                }
                 iteration_time = iteration_start.elapsed().as_secs_f64();
                 continue;
             };
@@ -1033,6 +1078,20 @@ impl Snapshot {
                         .ok()
                 })
                 .map_or(f64::MAX, |m| m.cost);
+            let candidate_costs = (cost < f64::MAX).then_some(workspace.costs);
+            let mut diagnostic = diagnostic_enabled.then(|| super::diagnostics::SolverIteration {
+                iteration: iteration + 1,
+                before: current_costs,
+                candidate: candidate_costs,
+                accepted: false,
+                reason: "invalid_candidate",
+                predicted_decrease: Some(predicted),
+                quality: None,
+                pose_steps: candidate.as_ref().map_or_else(
+                    |_| Vec::new(),
+                    |candidate| diagnostic_pose_steps(&values, candidate),
+                ),
+            });
             if let Ok(candidate) = candidate {
                 let terminate = Self::candidate_termination(
                     &values,
@@ -1043,6 +1102,10 @@ impl Snapshot {
                     (had_successful_step, options.function_tolerance),
                 );
                 if let Some(reason) = terminate {
+                    if let Some(mut diagnostic) = diagnostic.take() {
+                        diagnostic.reason = reason;
+                        summary.diagnostics.push(diagnostic);
+                    }
                     summary.iterations = iteration;
                     report = reason;
                     break;
@@ -1059,14 +1122,26 @@ impl Snapshot {
                     workspace.recycle(model);
                     model =
                         self.evaluate_with(&values, &offsets, size, disabled, true, workspace)?;
+                    current_costs = workspace.costs;
+                    if diagnostic_enabled {
+                        summary.diagnostic_final = Some(current_costs);
+                    }
                     summary.final_cost = Some(model.cost + model.fixed_cost);
                     accepted = true;
                 } else {
                     strategy.rejected(lm);
                 }
+                if let Some(diagnostic) = diagnostic.as_mut() {
+                    diagnostic.accepted = accepted;
+                    diagnostic.reason = if accepted { "accepted" } else { "rejected" };
+                    diagnostic.quality = Some(quality);
+                }
                 Self::log_iteration(iteration, &model, cost, quality, &strategy, options.verbose);
             } else {
                 strategy.rejected(lm);
+            }
+            if let Some(diagnostic) = diagnostic {
+                summary.diagnostics.push(diagnostic);
             }
             iteration_time = iteration_start.elapsed().as_secs_f64();
         }

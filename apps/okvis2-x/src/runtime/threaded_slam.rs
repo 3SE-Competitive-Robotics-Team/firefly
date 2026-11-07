@@ -9,6 +9,7 @@ use crate::{
     ceres::{
         component::MultiFramePtr,
         imu_error::{ImuError, seconds},
+        vi_graph::diagnostics::{ObservationDiagnostic, residual_summary},
         vi_slam_backend::StrategyResult,
     },
     config::parameters::{CameraParameters, GpsParameters, ImuParameters, ViParameters},
@@ -117,6 +118,14 @@ pub trait ThreadedGraph: FrontendGraph {
     /// Returns an error for invalid/missing state, frame or measurement data, or a failed
     /// estimator, graph, mapper, queue, callback or worker operation.
     fn timestamp(&self, id: StateId) -> Result<Timestamp>;
+    /// Read-only current-frame factor support; adapters without factor access return no samples.
+    /// # Errors
+    /// Returns an error if a referenced graph estimate is absent or invalid.
+    fn frame_observations(&self, _frame: &MultiFrame) -> Result<Vec<ObservationDiagnostic>> {
+        Ok(Vec::new())
+    }
+    fn record_diagnostic_state(&mut self, _id: StateId, _stage: &'static str) {}
+    fn publish_frame_diagnostics(&mut self) {}
     /// # Errors
     /// Returns an error for invalid/missing state, frame or measurement data, or a failed
     /// estimator, graph, mapper, queue, callback or worker operation.
@@ -1260,6 +1269,8 @@ pub struct FrameDiagnostics {
     pub position_delta: [f64; 3],
     pub velocity_delta: [f64; 3],
     pub rotation_delta: [f64; 3],
+    pub observations_before: Vec<ObservationDiagnostic>,
+    pub observations_after: Vec<ObservationDiagnostic>,
 }
 type FrameDiagnosticCallback = Box<dyn FnMut(&MultiFrame, Duration, &FrameDiagnostics)>;
 impl<G, S, B, M> ProcessingCore<G, S, B, M>
@@ -1591,6 +1602,7 @@ where
             return Ok(true);
         }
         let id = StateId::new(frame.borrow().id());
+        self.graph.record_diagnostic_state(id, "prediction");
         if self.use_alignment_factors {
             self.add_live_factors(shared, id, time)?;
         }
@@ -1610,10 +1622,12 @@ where
             &mut as_keyframe,
         )? && !self.frontend.is_initialized()
         {
+            self.graph.publish_frame_diagnostics();
             self.frontend.clear()?;
             self.graph.clear()?;
             return Ok(false);
         }
+        self.graph.record_diagnostic_state(id, "after_frontend");
         self.graph.set_keyframe(id, as_keyframe)?;
         self.graph.add_gps_measurements(&self.gps, &self.imu)?;
         while self.gps.front().is_some_and(|m| m.time_stamp < time) {
@@ -1896,6 +1910,10 @@ where
         Ok(())
     }
     #[fastrace::trace]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Frame optimization, publication and marginalization retain their existing ordering"
+    )]
     fn optimise_publish_marginalise(
         &mut self,
         shared: &Shared,
@@ -1908,7 +1926,7 @@ where
             Some((
                 self.graph.pose(id),
                 self.graph.speed_and_bias(id)?,
-                self.frame_residuals(&frame.borrow())?,
+                self.graph.frame_observations(&frame.borrow())?,
             ))
         } else {
             None
@@ -1918,12 +1936,15 @@ where
             self.parameters.estimator.realtime_num_threads,
             self.frontend.is_initialized(),
         )?;
-        let metrics = if let Some((pose, speed, residual_before)) = before {
+        let metrics = if let Some((pose, speed, observations_before)) = before {
             let after = self.graph.pose(id);
             let rotation = pose.quaternion().conjugate() * after.quaternion();
+            let observations_after = self.graph.frame_observations(&frame.borrow())?;
             FrameDiagnostics {
-                residual_before,
-                residual_after: self.frame_residuals(&frame.borrow())?,
+                residual_before: residual_summary(&observations_before),
+                residual_after: residual_summary(&observations_after),
+                observations_before,
+                observations_after,
                 position_delta: (after.translation() - pose.translation()).into(),
                 velocity_delta: (self.graph.speed_and_bias(id)?.fixed_rows::<3>(0)
                     - speed.fixed_rows::<3>(0))
@@ -1999,44 +2020,8 @@ where
         if let Some(diagnostics) = &mut self.frame_diagnostics {
             diagnostics(&frame.borrow(), processing_start.elapsed(), &metrics);
         }
+        self.graph.publish_frame_diagnostics();
         Ok(())
-    }
-    fn frame_residuals(&self, frame: &MultiFrame) -> Result<[f64; 4]> {
-        use crate::cameras::camera_base::ProjectionStatus;
-        let id = StateId::new(frame.id());
-        let pose = self.graph.pose(id);
-        let mut sums = [0.; 4];
-        for camera in 0..frame.num_frames() {
-            let camera_from_world = pose.compose(&self.graph.extrinsics(id, camera)?).inverse();
-            for index in 0..frame.num_keypoints(camera) {
-                let landmark = LandmarkId::new(frame.landmark_id(camera, index));
-                if !landmark.is_initialised() || !self.graph.is_landmark_added(landmark) {
-                    continue;
-                }
-                let point = self.graph.landmark(landmark)?;
-                let mut predicted = Vector2::zeros();
-                if frame.geometry(camera).project_homogeneous(
-                    &camera_from_world.transform_homogeneous(&point),
-                    &mut predicted,
-                ) != ProjectionStatus::Successful
-                {
-                    continue;
-                }
-                let mut observed = Vector2::zeros();
-                frame.get_keypoint(camera, index, &mut observed);
-                let residual = observed - predicted;
-                sums[0] += 1.;
-                sums[1] += residual.norm_squared();
-                sums[2] += residual.x;
-                sums[3] += residual.y;
-            }
-        }
-        if sums[0] > 0. {
-            sums[1] = (sums[1] / sums[0]).sqrt();
-            sums[2] /= sums[0];
-            sums[3] /= sums[0];
-        }
-        Ok(sums)
     }
     fn make_state(&self, id: StateId, changed: bool) -> Result<State> {
         let pose = self.graph.pose(id);

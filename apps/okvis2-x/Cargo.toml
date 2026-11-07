@@ -54,6 +54,7 @@ purecv.workspace = true
 rand.workspace = true
 rayon.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 
 [features]
