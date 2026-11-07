@@ -4,4 +4,6 @@
 [online]
 use_double = true
 map = true
+# Detection cells in pixels for the 320x240 stereo stream.
+optical_flow_detection_grid_size = 20
 # vio_config = "../basalt/data/tumvi_512_config.json"

@@ -42,6 +42,7 @@ use super::{
     patterns::{Pattern, Pattern24, Pattern50, Pattern51, Pattern52},
 };
 use crate::io::dataset_io::ImageData;
+use crate::utils::time_utils::{profile_clock_ns, profile_stage};
 use crate::utils::vio_config::VioConfig;
 use firefly_calibration::calibration::Calibration;
 use firefly_error::{Error, ErrorKind, Result};
@@ -287,7 +288,7 @@ impl OpticalFlowFactory {
         output: Option<Receiver<Option<Arc<OpticalFlowResult>>>>,
     ) -> Result<OpticalFlowBase> {
         let patch_coord = engine.patch_coord();
-        let (input, input_receiver) = mpsc::sync_channel(10);
+        let (input, input_receiver) = mpsc::sync_channel::<Option<Arc<OpticalFlowInput>>>(10);
         let thread = std::thread::Builder::new()
             .name("basalt-optical-flow".into())
             .spawn(move || {
@@ -298,11 +299,16 @@ impl OpticalFlowFactory {
                     let Some(input) = input else {
                         break;
                     };
-                    match engine.process(input) {
+                    let frame_ns = input.t_ns;
+                    let begin = profile_clock_ns();
+                    let processed = engine.process(input);
+                    let end = profile_stage(frame_ns, "flow", begin);
+                    match processed {
                         Ok(Some(result)) => {
                             if output_sender.send(Some(result)).is_err() {
                                 break;
                             }
+                            profile_stage(frame_ns, "flow_send", end);
                         }
                         Ok(None) => {}
                         Err(error) => {

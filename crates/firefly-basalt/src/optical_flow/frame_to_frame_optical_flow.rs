@@ -43,6 +43,7 @@ use super::{
 use crate::image::image_pyr::ManagedImagePyr;
 use crate::utils::sophus_utils::so3_inverse;
 use crate::utils::sophus_utils::so3_product;
+use crate::utils::time_utils::{profile_clock_ns, profile_stage};
 use crate::utils::{
     common_types::KeypointsData,
     keypoints::{compute_essential, detect_keypoints},
@@ -132,11 +133,13 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> FrameToFrameOpticalFlow<P, N> {
             ));
         }
         let levels = usize::try_from(self.config.optical_flow_levels).unwrap();
+        let begin = profile_clock_ns();
         let pyramid: Vec<_> = input
             .img_data
             .par_iter()
             .map(|v| ManagedImagePyr::new(v.img.as_ref().unwrap(), levels))
             .collect();
+        let pyramid_end = profile_stage(input.t_ns, "pyramid", begin);
         let mut next = OpticalFlowResult {
             t_ns: input.t_ns,
             observations: vec![BTreeMap::new(); self.calib.intrinsics.len()],
@@ -152,8 +155,11 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> FrameToFrameOpticalFlow<P, N> {
         }
         self.t_ns = next.t_ns;
         self.pyramid = pyramid;
+        let temporal_end = profile_stage(next.t_ns, "temporal_track", pyramid_end);
         self.add_points(&mut next)?;
+        let add_end = profile_stage(next.t_ns, "add_points", temporal_end);
         self.filter_points(&mut next);
+        profile_stage(next.t_ns, "epipolar_filter", add_end);
         let next = Arc::new(next);
         self.transforms = Some(Arc::clone(&next));
         let publish = self
@@ -250,6 +256,7 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> FrameToFrameOpticalFlow<P, N> {
     }
 
     fn add_points(&mut self, result: &mut OpticalFlowResult) -> Result<()> {
+        let begin = profile_clock_ns();
         let existing: Vec<Vector2<f64>> = result.observations[0]
             .values()
             .map(|t| t.translation.map(f64::from))
@@ -262,6 +269,7 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> FrameToFrameOpticalFlow<P, N> {
             1,
             &existing,
         )?;
+        let detection_end = profile_stage(result.t_ns, "detect_keypoints", begin);
         let mut new_points = BTreeMap::new();
         for p in keypoints.corners {
             let transform = AffineCompact2 {
@@ -278,6 +286,7 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> FrameToFrameOpticalFlow<P, N> {
                 result.observations[1].entry(id).or_insert(transform);
             }
         }
+        profile_stage(result.t_ns, "stereo_new", detection_end);
         Ok(())
     }
 

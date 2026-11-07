@@ -94,6 +94,55 @@ fn detection_matches_cpp() {
 }
 
 #[test]
+fn detection_cell_scheduling_preserves_corner_order_and_occupancy() {
+    let pixels: Vec<u16> = (0..240)
+        .flat_map(|y| {
+            (0..324).map(move |x| (1000 + (17 * x * x + 31 * y * y + 7 * x * y) % 64000) as u16)
+        })
+        .collect();
+    let image = Image::new(&pixels, 320, 240, 324);
+    let serial = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let parallel = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    for size in [20, 32, 50] {
+        for occupied in [
+            vec![],
+            vec![Vector2::new(45.2, 44.7), Vector2::new(159.5, 119.5)],
+        ] {
+            let detect = || {
+                let mut points = KeypointsData::default();
+                detect_keypoints(&image, &mut points, size, 1, &occupied).unwrap();
+                points.corners
+            };
+            let expected = serial.install(detect);
+            assert!(!expected.is_empty());
+            let xs = (image.w % size) / 2;
+            let ys = (image.h % size) / 2;
+            let cell = |p: &Vector2<f64>| {
+                (
+                    ((p.x - xs as f64) / size as f64) as usize,
+                    ((p.y - ys as f64) / size as f64) as usize,
+                )
+            };
+            assert!(expected.windows(2).all(|p| cell(&p[0]) < cell(&p[1])));
+            assert!(
+                expected
+                    .iter()
+                    .all(|p| occupied.iter().all(|q| cell(p) != cell(q)))
+            );
+            for _ in 0..3 {
+                assert_eq!(parallel.install(detect), expected);
+            }
+        }
+    }
+}
+
+#[test]
 fn angles_and_descriptor_bits_match_cpp() {
     for scenario in ["normal", "checker", "black", "occupied", "pitched"] {
         let reference = fixture(scenario);

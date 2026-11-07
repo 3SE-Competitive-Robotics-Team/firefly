@@ -404,6 +404,14 @@ OKVIS 的位姿使用 `okvis/odom` 实体。
 `okvis/frame_processing_ms` 在独立二维曲线显示每个成功提交帧的处理墙钟耗时（毫秒），
 覆盖取帧、特征提取、匹配、优化、发布和边缘化，不包含进入处理线程前的排队与传感器延迟；
 曲线时间戳为图像测量时刻，后验测量年龄使用 `fc/imu/posterior_age_s`。
+`rootslam/frame_processing_ms` 则从双目入队计时到 IMU 线程消费后验，包含排队。
+`RUST_LOG=info,basalt-profile=debug` 将 RootSLAM 分段计时写入 RRD 的
+`logs/firefly-rootslam`：`frame_ns` 为图像测量时间，`begin_ns/end_ns` 为同一进程
+单调时钟边界。阶段覆盖入队、金字塔、时序跟踪、FAST 补点、新点双目匹配、
+光流输出背压、后端取帧后的 IMU 预积分、优化、诊断/地图、边缘化、后验发送与接收；
+优化另含线性化、QR、组装、求解、回代、误差评估耗时与迭代/拒绝次数。
+按帧连接边界，分别计算入队到光流开始、光流完成到后端取帧、后验发送到消费的等待；
+嵌套阶段不能重复相加，跨帧分位数不能相加当作端到端分位数。
 `okvis/loop_commits` 是后端已提交全图修订次数，任务评分记录为 `acceptance/loop_backend`；
 候选检索和几何验证不单独计为提交。外部库图模式的融合诊断位于 `corr/debug/*`。
 通讯测试和修订计数不替代完整轨迹精度验证。

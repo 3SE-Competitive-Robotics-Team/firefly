@@ -160,6 +160,7 @@ pub fn detect_keypoints(
     num_points_cell: usize,
     current_points: &[Vector2<f64>],
 ) -> Result<()> {
+    use rayon::prelude::*;
     clear_features(kd);
     if patch_size == 0 || image.w < patch_size || image.h < patch_size {
         return Err(Error::new(
@@ -184,11 +185,21 @@ pub fn detect_keypoints(
             cells[y * width + x] += 1;
         }
     }
+    let mut vacant = Vec::new();
     for x in (xs..=xe).step_by(patch_size) {
         for y in (ys..=ye).step_by(patch_size) {
-            if cells[(y - ys) / patch_size * width + (x - xs) / patch_size] > 0 {
-                continue;
+            if cells[(y - ys) / patch_size * width + (x - xs) / patch_size] == 0 {
+                vacant.push((x, y));
             }
+        }
+    }
+    // FAST parallelizes each small cell internally. Submit the independent cells
+    // together so those nested jobs stay on workers instead of waking the pool
+    // from the caller for every threshold. Indexed collection preserves IDs.
+    let detected: Result<Vec<_>> = vacant
+        .into_par_iter()
+        .map(|(x, y)| {
+            let mut corners = Vec::new();
             let mut pixels = Vec::with_capacity(patch_size * patch_size);
             for sy in y..y + patch_size {
                 for sx in x..x + patch_size {
@@ -210,13 +221,17 @@ pub fn detect_keypoints(
                     let position =
                         Vector2::new(x as f64 + f64::from(p.pt.x), y as f64 + f64::from(p.pt.y));
                     if image.in_bounds(&position, EDGE_THRESHOLD) {
-                        kd.corners.push(position);
+                        corners.push(position);
                         added += 1;
                     }
                 }
                 threshold /= 2;
             }
-        }
+            Ok(corners)
+        })
+        .collect();
+    for corners in detected? {
+        kd.corners.extend(corners);
     }
     Ok(())
 }

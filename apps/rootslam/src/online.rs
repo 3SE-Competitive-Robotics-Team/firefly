@@ -38,6 +38,8 @@ use std::{
 #[serde(default, deny_unknown_fields)]
 pub struct Options {
     pub vio_config: Option<PathBuf>,
+    /// Detection cell width in pixels; overrides the Basalt archive when present.
+    pub optical_flow_detection_grid_size: Option<i32>,
     pub stats_directory: Option<PathBuf>,
     pub use_double: bool,
     pub map: bool,
@@ -49,11 +51,29 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             vio_config: None,
+            optical_flow_detection_grid_size: None,
             stats_directory: None,
             use_double: false,
             map: true,
             loops: true,
         }
+    }
+}
+
+impl Options {
+    /// # Errors
+    /// Rejects detection cells that cannot fit the calibrated image.
+    pub fn validate(&self) -> Result<()> {
+        if self.optical_flow_detection_grid_size.is_some_and(|size| {
+            size <= 0
+                || usize::try_from(size).map_or(true, |size| size > IMAGE_WIDTH.min(IMAGE_HEIGHT))
+        }) {
+            return Err(Error::new(
+                ErrorKind::InvalidArgument,
+                "optical_flow_detection_grid_size must fit the calibrated image",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -349,12 +369,18 @@ impl LiveSession {
                 .frame_started
                 .lock()
                 .map_err(|_| error("frame timing mutex poisoned"))?;
+            let enqueue_begin = firefly_basalt::utils::time_utils::profile_clock_ns();
             match self
                 .flow_tx
                 .try_send(Some(Arc::new(OpticalFlowInput { t_ns, img_data })))
             {
                 Ok(()) => {
                     frame_started.insert(t_ns, std::time::Instant::now());
+                    firefly_basalt::utils::time_utils::profile_stage(
+                        t_ns,
+                        "enqueue",
+                        enqueue_begin,
+                    );
                 }
                 Err(mpsc::TrySendError::Full(_)) => {
                     log::warn!("RootSLAM live dropped stereo frame: optical flow queue full");
@@ -511,12 +537,16 @@ impl LiveSession {
     reason = "The yaw prior must be applied after the archive load replaces every field"
 )]
 fn initial_vio_config(options: &Options) -> Result<VioConfig> {
+    options.validate()?;
     let mut vio = VioConfig::default();
     // OKVIS stores these initial bias priors as variances; Basalt stores their precisions.
     vio.vio_init_ba_weight = 1.0 / 0.1_f64.powi(2);
     vio.vio_init_bg_weight = 1.0 / 0.01_f64.powi(2);
     if let Some(path) = &options.vio_config {
         vio.load(path)?;
+    }
+    if let Some(size) = options.optical_flow_detection_grid_size {
+        vio.optical_flow_detection_grid_size = size;
     }
     // Match OKVIS's initial yaw information while retaining Basalt's translation prior.
     vio.vio_init_yaw_weight = Some(1e2);
@@ -546,5 +576,31 @@ fn render_calibration() -> Calibration<f64> {
         gyro_bias_std: Vector3::repeat(0.000_019),
         accel_bias_std: Vector3::repeat(0.003),
         ..Calibration::default()
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn detection_override_preserves_all_other_online_parameters() {
+        let options: Options = toml::from_str("optical_flow_detection_grid_size = 20").unwrap();
+        let mut expected = initial_vio_config(&Options::default()).unwrap();
+        assert_eq!(expected.optical_flow_detection_grid_size, 50);
+        expected.optical_flow_detection_grid_size = 20;
+        assert_eq!(initial_vio_config(&options).unwrap(), expected);
+    }
+
+    #[test]
+    fn invalid_detection_cells_fail_before_runtime_creation() {
+        for size in [-1, 0, 241] {
+            let options = Options {
+                optical_flow_detection_grid_size: Some(size),
+                ..Options::default()
+            };
+            assert!(options.validate().is_err());
+            assert!(initial_vio_config(&options).is_err());
+        }
     }
 }
