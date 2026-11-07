@@ -442,10 +442,43 @@ VIO 传播使用实际 IMU 样本及其时间间隔；独立 ESKF 对超限 IMU 
 
 RootSLAM 在线适配层按同一约定工作：后验只更新传播锚点，不直接发布低频里程计；每条
 IMU 触发一次预测，并从该预测状态生成姿态、里程计和导航消息。它与 OKVIS 在线预测共用
-`firefly-imu-propagation` 的状态、时间覆盖、端点插值、偏置处理和运动积分 API。RootSLAM 使用
-Basalt 后验给出的陀螺与加速度计零偏，在整数纳秒时间轴上保留有界 IMU 历史。只有
-历史覆盖锚点时刻和目标 IMU 时刻时才发布预测。该路径目前接入 Sim/Render，不代表已完成
-板载驱动或悬停精度验证。
+`firefly-vio-runtime::run_imu` 的事件接收、校验去重、入队后水位更新和四路发布，及
+`firefly-imu-propagation::Predictor` 的有界历史、后验替换、重放和增量传播。
+两套应用分别在 `okvis-imu`、`rootslam-imu` 线程创建并持有 IPC 端口，通过同一 WaitSet
+接收 IMU 通知并以超时兜底；每次唤醒先排空后验，再按测量顺序处理 IMU。
+图像配对、拷贝、视觉优化和原始特征诊断在该线程之外执行。
+
+每个 SLAM 进程使用下图同一条管线；灰度图/深度入口和后端的算法结构由各系统适配。
+
+```mermaid
+flowchart LR
+    S[IMU 数据与事件] --> W[独立 IMU 线程：共同 run_imu]
+    W --> V[校验、去重、估计器入队]
+    V --> Q[SLAM IMU 输入队列]
+    V --> H[已接收 IMU 原子水位]
+    V --> P[共同 Predictor：历史与传播]
+    I[独立图像入口：配对与拷贝] --> C[水位覆盖检查]
+    H --> C
+    C --> G[SLAM 前端与优化线程]
+    Q --> G
+    G --> B[有界后验队列]
+    B --> A[适配后验状态、偏置与坐标修订]
+    A --> P
+    P --> T[适配 IMU 到 body、map 到 odom]
+    T --> O[共同 Publishers]
+    O --> F[Odometry / CorrectedOdometry / Navigation / VioAttitude]
+```
+
+`ImuAdapter` 只负责算法队列、后验转换和坐标适配。OKVIS 保留加计尺度、IMU/body 杠杆臂、
+回环修订与外部定位模式；RootSLAM 使用 Basalt 后验的位姿、速度和两种偏置，当前 IMU/body
+及 map/odom 适配均为恒等。RootSLAM 的静止初始化仍由共享重力采样器产生；Basalt 在首帧
+初始化后才消费 IMU，因此适配器保留有界启动积压并以非阻塞发送排空，避免卡住 IMU 线程。
+后验通道使用与 OKVIS 相同的有界背压，全部提交按序消费；重放不回写 SLAM 后端。
+
+退出先设置公共停止标志并 join IMU 线程，释放其后验接收端和 IMU 发送端；RootSLAM 随后
+关闭估计器自身持有的输入发送端，再回收光流、估计和地图线程，避免等待永不关闭的 IMU 队列。
+只有历史覆盖后验起点和目标时刻才发布预测；真实后验时间不会随高频输出刷新。
+该路径目前接入 Sim/Render，板载驱动和飞行精度以各自实测验收为准。
 
 ### 控制核心（PX4 1:1 移植）
 

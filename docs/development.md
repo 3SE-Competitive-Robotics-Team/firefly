@@ -374,6 +374,16 @@ OKVIS 跟踪状态、回环提交次数与单帧处理耗时；FC tick rate 使�
 - `okvis/gyro_bias`：viz 直接订阅 `Firefly/VioAttitude`，以 1Hz 记录机体系 VIO 陀螺零偏（rad/s）；主链路不发布姿态方差。
 - `vio/posterior/pose_imu_world`、`velocity_world`、`gyro_bias_imu`、`accel_bias_imu`：每次 VIO 后验的 IMU 世界位姿、世界速度及传感器系零偏。
 - `vio/prediction/pose_body_odom`、`velocity_body_odom`、`angular_velocity_body`、`posterior_age_s`：50Hz 的预测输出与对应后验年龄，用于和 GroundTruth 按 `sim_time` 对齐。
+- `vio/diagnostics/*`：逐视觉帧的左目点数、延续 ID 数、双目共有 ID 数、路标 ID 数，
+  双目共有 ID / 左目点数，以及当前帧优化前后的未加权像素重投影残差（有效投影数、
+  二维残差范数 RMS、横纵残差均值）。修正量为本次局部优化后减优化前的位置、速度，
+  旋转为前姿态到后姿态的旋转向量；不包含前端关联/绝对位姿初始化或回环同步。
+  零有效投影时残差占位为零，分析必须同时检查计数。RootSLAM 另保留逐帧原始像素点、
+  有效左目路标点与 ID，以及关键帧创建标志、延续/新建路标数和保留关键帧时间跨度。
+- `RUST_LOG=info,fc::diagnostics=debug` 开启 `fc/loop/*` 每控制 tick 观测，记录 tick 编号、
+  IMU 测量时间减 VIO 反馈测量时间、反馈墙钟接收年龄、tick 墙钟间隔、FRD 横滚/俯仰的
+  目标与反馈/未滤波原始陀螺角速度、力矩请求和分配、电机推力、饱和和姿态来源。
+  原始陀螺仅用于诊断；所有样本沿用 `sim_time`，重复时间由 tick 区分。该开关不改变控制参数。
 - `fc/debug/tilt_deg` 与 `fc/debug/tilt_err_deg`：估计倾角与仅供评测的真值倾角误差。
 - `fc/debug/rate_sp_frd` / `rate_flu`：PX4 角速度设定值（FRD）与实测角速度（FLU）。
 - `fc/debug/torque_sp_frd` / `allocated_control`：归一化力矩设定值与分配实际达到的控制量。

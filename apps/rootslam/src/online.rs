@@ -1,40 +1,33 @@
 //! Online IPC adapter for the simulated camera and IMU topics.
-use crate::propagation::{Anchor, ImuSample, Propagator};
-use firefly_basalt::imu::imu_types::{ImuData, PoseVelBiasState};
+mod imu;
 use firefly_basalt::{
     io::dataset_io::ImageData,
     optical_flow::{OpticalFlowBase, OpticalFlowFactory, OpticalFlowInput},
     utils::vio_config::VioConfig,
     vi_estimator::{
         local_map::LocalMapSnapshot,
-        vio_estimator::{VioEstimatorBase, VioEstimatorFactory},
+        vio_estimator::{VioEstimatorBase, VioEstimatorFactory, VioFrameDiagnostics},
     },
 };
 use firefly_calibration::calibration::Calibration;
 use firefly_calibration::image::image::ManagedImage;
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_imu_initialization::{
-    GravityEstimate, ImuSample as GravityImuSample, StationaryGravitySampler,
-};
+use firefly_imu_initialization::GravityEstimate;
 use firefly_pubsub::{
-    attitude::{ATTITUDE_TOPIC, AttitudeMessage},
     camera::{CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, GrayImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH},
-    imu::{IMU_SUBSCRIPTION, IMU_TOPIC, ImuMessage},
-    navigation::{NAVIGATION_TOPIC, NavigationMessage},
     node::IpcNode,
     node::create_node,
-    odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC, OdomMessage},
-    publish::Publisher,
     subscriber::{Subscriber, SubscriberOptions},
-    viz::{ScalarMessage, VizMessage, VizPublisher, kind},
+    viz::{VizMessage, VizPublisher, kind},
 };
 use firefly_rootslam_mapping::{loop_closure::LoopOptions, map::MapPolicy};
+use firefly_vio_runtime::{ImuWatermark, publish_pose_diagnostic, publish_scalar_diagnostic};
 use nalgebra::{Isometry3, Translation3, Vector3};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -68,24 +61,11 @@ fn error(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::Internal, message).with_operation("rootslam.online")
 }
 
-fn flush_imu(
-    sender: &mpsc::SyncSender<Option<Arc<ImuData<f64>>>>,
-    pending: &mut VecDeque<Arc<ImuData<f64>>>,
-    sent: &mut u64,
-) -> Result<()> {
-    while let Some(data) = pending.front().cloned() {
-        match sender.try_send(Some(data)) {
-            Ok(()) => {
-                pending.pop_front();
-                *sent += 1;
-            }
-            Err(mpsc::TrySendError::Full(_)) => break,
-            Err(mpsc::TrySendError::Disconnected(_)) => {
-                return Err(error("VIO IMU input closed"));
-            }
-        }
+struct StopOnDrop<'a>(&'a AtomicBool);
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
     }
-    Ok(())
 }
 
 #[derive(Default)]
@@ -184,38 +164,23 @@ pub fn run(options: &Options, stop: &AtomicBool) -> Result<()> {
 
 struct LiveSession {
     node: IpcNode,
-    imu: Subscriber<ImuMessage>,
     left: Subscriber<GrayImageMessage>,
     right: Subscriber<GrayImageMessage>,
-    odom_pub: Publisher<OdomMessage>,
-    corrected_pub: Publisher<OdomMessage>,
-    nav_pub: Publisher<NavigationMessage>,
-    attitude_pub: Publisher<AttitudeMessage>,
     viz: VizPublisher,
     estimator: VioEstimatorBase,
     flow: OpticalFlowBase,
     map_worker: Option<crate::system::MappingWorker>,
     map_input: Option<std::sync::mpsc::Sender<Option<Arc<LocalMapSnapshot>>>>,
-    imu_tx: std::sync::mpsc::SyncSender<Option<Arc<ImuData<f64>>>>,
+    imu_inputs: Option<imu::Inputs>,
+    gravity_rx: mpsc::Receiver<GravityEstimate>,
     flow_tx: std::sync::mpsc::SyncSender<Option<Arc<OpticalFlowInput>>>,
-    states_rx: mpsc::Receiver<Option<Arc<PoseVelBiasState<f64>>>>,
+    diagnostics_rx: mpsc::Receiver<VioFrameDiagnostics>,
     stats_directory: Option<PathBuf>,
     pairing: Pairing,
-    imu_watermark: i64,
-    gravity_sampler: StationaryGravitySampler,
+    imu_watermark: ImuWatermark,
     gravity_estimate: Option<GravityEstimate>,
     estimator_initialized: bool,
-    pending_imu: VecDeque<Arc<ImuData<f64>>>,
-    frame_started: BTreeMap<i64, std::time::Instant>,
-    session: u64,
-    propagator: Propagator,
-    alignment: firefly_base::RigidTransform,
-    imu_count: u64,
-    image_count: u64,
-    pair_count: u64,
-    state_count: u64,
-    last_report: std::time::Instant,
-    last_prediction_diagnostic_ns: Option<i64>,
+    frame_started: imu::FrameStarts,
 }
 
 impl LiveSession {
@@ -223,7 +188,6 @@ impl LiveSession {
         let calibration = render_calibration();
         let vio = initial_vio_config(options)?;
         let node = create_node()?;
-        let imu = Subscriber::<ImuMessage>::with_options(&node, IMU_TOPIC, IMU_SUBSCRIPTION)?;
         let image_options = SubscriberOptions {
             buffer_size: 2,
             ..Default::default()
@@ -232,10 +196,6 @@ impl LiveSession {
             Subscriber::<GrayImageMessage>::with_options(&node, CAMERA_LEFT_TOPIC, image_options)?;
         let right =
             Subscriber::<GrayImageMessage>::with_options(&node, CAMERA_RIGHT_TOPIC, image_options)?;
-        let odom_pub = Publisher::<OdomMessage>::with_topic(&node, ODOM_TOPIC)?;
-        let corrected_pub = Publisher::<OdomMessage>::with_topic(&node, CORRECTED_ODOM_TOPIC)?;
-        let nav_pub = Publisher::<NavigationMessage>::with_topic(&node, NAVIGATION_TOPIC)?;
-        let attitude_pub = Publisher::<AttitudeMessage>::with_topic(&node, ATTITUDE_TOPIC)?;
         let viz = VizPublisher::new(&node)?;
         let mut estimator = VioEstimatorFactory::get_vio_estimator(
             &vio,
@@ -244,8 +204,10 @@ impl LiveSession {
             true,
             options.use_double,
         )?;
-        let (states_tx, states_rx) = mpsc::channel();
-        estimator.outputs.state = Some(states_tx);
+        let (states_tx, states_rx) = mpsc::sync_channel(8);
+        estimator.outputs.state_bounded = Some(states_tx);
+        let (diagnostics_tx, diagnostics_rx) = mpsc::channel();
+        estimator.outputs.diagnostics = Some(diagnostics_tx);
         let (map_worker, map_input) = if options.map {
             let worker = crate::system::MappingWorker::spawn(
                 calibration.clone(),
@@ -270,221 +232,75 @@ impl LiveSession {
         )?;
         let imu_tx = estimator.imu_data_queue().clone();
         let flow_tx = flow.input_queue().clone();
-        let session = (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64)
-            .max(1);
-        // RootSLAM's current world frame is also its odom frame.
-        let alignment = firefly_base::RigidTransform::from_parts(
-            firefly_base::FrameId::MAP,
-            firefly_base::FrameId::ODOM,
-            [0.; 3],
-            [0., 0., 0., 1.],
-        )?;
+        let frame_started = Arc::new(Mutex::new(BTreeMap::new()));
+        let imu_watermark = ImuWatermark::default();
+        let (gravity_tx, gravity_rx) = mpsc::sync_channel(1);
+        let imu_inputs = Some(imu::Inputs {
+            imu: imu_tx,
+            posteriors: states_rx,
+            gravity: gravity_tx,
+            frame_started: frame_started.clone(),
+            watermark: imu_watermark.clone(),
+        });
         Ok(Self {
             node,
-            imu,
             left,
             right,
-            odom_pub,
-            corrected_pub,
-            nav_pub,
-            attitude_pub,
             viz,
             estimator,
             flow,
             map_worker,
             map_input,
-            imu_tx,
+            imu_inputs,
+            gravity_rx,
             flow_tx,
-            states_rx,
+            diagnostics_rx,
             stats_directory: options.stats_directory.clone(),
             pairing: Pairing::default(),
-            imu_watermark: i64::MIN,
-            gravity_sampler: StationaryGravitySampler::new(),
+            imu_watermark,
             gravity_estimate: None,
             estimator_initialized: false,
-            pending_imu: VecDeque::new(),
-            frame_started: BTreeMap::new(),
-            session,
-            propagator: Propagator::default(),
-            alignment,
-            imu_count: 0,
-            image_count: 0,
-            pair_count: 0,
-            state_count: 0,
-            last_report: std::time::Instant::now(),
-            last_prediction_diagnostic_ns: None,
+            frame_started,
         })
     }
 
     fn run(mut self, stop: &AtomicBool) -> Result<()> {
-        let process_result = self.process(stop);
+        let inputs = self
+            .imu_inputs
+            .take()
+            .ok_or_else(|| error("IMU worker already started"))?;
+        let process_result = std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("rootslam-imu".into())
+                .spawn_scoped(scope, move || imu::run(inputs, stop))
+                .map_err(|e| error("Cannot start rootslam-imu").with_source(e))?;
+            let process = {
+                let _stopping = StopOnDrop(stop);
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.process(stop)))
+                    .map_err(|_| error("RootSLAM image ingress panicked"))
+                    .and_then(|result| result)
+            };
+            let transport = worker
+                .join()
+                .map_err(|_| error("rootslam-imu panicked"))
+                .and_then(|r| r);
+            process.and(transport)
+        });
         let shutdown_result = self.shutdown();
-        process_result?;
-        shutdown_result
+        process_result.and(shutdown_result)
     }
 
     fn process(&mut self, stop: &AtomicBool) -> Result<()> {
-        while !stop.load(Ordering::Acquire) {
-            if self.node.wait(Duration::from_millis(2)).is_err() {
-                break;
+        while !stop.load(Ordering::Acquire) && self.node.wait(Duration::from_millis(1)).is_ok() {
+            if self.estimator.status.finished.load(Ordering::Acquire) {
+                return Err(error("VIO estimator stopped"));
             }
-            self.receive_imu()?;
+            if let Ok(estimate) = self.gravity_rx.try_recv() {
+                self.gravity_estimate = Some(estimate);
+            }
             self.receive_images()?;
             self.enqueue_stereo()?;
-            self.publish_states()?;
-            flush_imu(&self.imu_tx, &mut self.pending_imu, &mut self.imu_count)?;
-            self.report_counts();
-        }
-        Ok(())
-    }
-
-    fn receive_imu(&mut self) -> Result<()> {
-        for _ in 0..128 {
-            let Some(packet) = self.imu.receive()? else {
-                break;
-            };
-            let packet = &*packet;
-            if !packet.timestamp.is_finite() || packet.timestamp < 0.0 {
-                continue;
-            }
-            let stamp = (packet.timestamp * 1e9).round() as i64;
-            if stamp <= self.imu_watermark {
-                continue;
-            }
-            let gyro = Vector3::new(
-                packet.angular_velocity_x,
-                packet.angular_velocity_y,
-                packet.angular_velocity_z,
-            );
-            let accel = Vector3::new(
-                packet.linear_acceleration_x,
-                packet.linear_acceleration_y,
-                packet.linear_acceleration_z,
-            );
-            if gyro
-                .iter()
-                .chain(accel.iter())
-                .any(|value| !value.is_finite())
-            {
-                continue;
-            }
-            self.update_initialization_window(stamp, &accel, &gyro);
-            self.imu_watermark = stamp;
-            if self.pending_imu.len() >= 10_000 {
-                return Err(error("VIO IMU backlog exceeded 10 seconds"));
-            }
-            self.pending_imu.push_back(Arc::new(ImuData {
-                t_ns: stamp,
-                accel,
-                gyro,
-            }));
-            self.publish_prediction(stamp, gyro, accel)?;
-        }
-        flush_imu(&self.imu_tx, &mut self.pending_imu, &mut self.imu_count)
-    }
-
-    fn update_initialization_window(
-        &mut self,
-        stamp: i64,
-        accel: &Vector3<f64>,
-        gyro: &Vector3<f64>,
-    ) {
-        if self.gravity_estimate.is_none()
-            && let Some(estimate) = self.gravity_sampler.push(GravityImuSample {
-                timestamp_ns: i128::from(stamp),
-                gyro: *gyro,
-                accel: *accel,
-            })
-        {
-            self.gravity_estimate = Some(estimate);
-            log::info!(
-                "RootSLAM VIO gravity initialized from {} stationary IMU samples over {:.3}s",
-                estimate.sample_count,
-                (estimate.end_ns - estimate.start_ns) as f64 * 1e-9
-            );
-        }
-    }
-
-    /// 将最近的后验传播到当前 IMU 时刻，并发布同一份预测状态。
-    fn publish_prediction(
-        &mut self,
-        timestamp_ns: i64,
-        gyro: Vector3<f64>,
-        accel: Vector3<f64>,
-    ) -> Result<()> {
-        let Some(prediction) = self.propagator.push(ImuSample {
-            timestamp_ns: i128::from(timestamp_ns),
-            gyro,
-            accel,
-        }) else {
-            return Ok(());
-        };
-        let Some(posterior_time_ns) = self.propagator.posterior_time_ns() else {
-            return Ok(());
-        };
-        let timestamp = timestamp_ns as f64 * 1e-9;
-        let posterior_time = posterior_time_ns as f64 * 1e-9;
-        let state = prediction.state;
-        let q = &state.rotation;
-        self.attitude_pub.publish(AttitudeMessage {
-            timestamp,
-            posterior_time,
-            session: self.session,
-            quat_xyzw: [q.i, q.j, q.k, q.w],
-            angular_velocity: prediction.angular_velocity.into(),
-            gyro_bias: self.propagator.gyro_bias().into(),
-        })?;
-        let odom = OdomMessage {
-            timestamp,
-            position_x: state.position.x,
-            position_y: state.position.y,
-            position_z: state.position.z,
-            velocity_x: state.velocity.x,
-            velocity_y: state.velocity.y,
-            velocity_z: state.velocity.z,
-            quat_x: q.i,
-            quat_y: q.j,
-            quat_z: q.k,
-            quat_w: q.w,
-            is_initialized: true,
-        };
-        self.odom_pub.publish(odom)?;
-        self.corrected_pub.publish(odom)?;
-        self.nav_pub
-            .publish(NavigationMessage::new(odom, &self.alignment, 0))?;
-        if self
-            .last_prediction_diagnostic_ns
-            .is_none_or(|last| timestamp_ns - last >= 20_000_000)
-        {
-            self.last_prediction_diagnostic_ns = Some(timestamp_ns);
-            publish_pose_diagnostic(
-                &self.viz,
-                timestamp,
-                "vio/prediction/pose_body_odom",
-                [odom.position_x, odom.position_y, odom.position_z],
-                [odom.quat_x, odom.quat_y, odom.quat_z, odom.quat_w],
-            );
-            publish_scalar_diagnostic(
-                &self.viz,
-                timestamp,
-                "vio/prediction/velocity_body_odom",
-                [odom.velocity_x, odom.velocity_y, odom.velocity_z],
-            );
-            publish_scalar_diagnostic(
-                &self.viz,
-                timestamp,
-                "vio/prediction/angular_velocity_body",
-                prediction.angular_velocity.into(),
-            );
-            publish_scalar_diagnostic(
-                &self.viz,
-                timestamp,
-                "vio/prediction/posterior_age_s",
-                [(i128::from(timestamp_ns) - posterior_time_ns) as f64 * 1e-9],
-            );
+            self.publish_diagnostics();
         }
         Ok(())
     }
@@ -495,14 +311,12 @@ impl LiveSession {
                 break;
             };
             self.pairing.insert(&packet, 0)?;
-            self.image_count += 1;
         }
         for _ in 0..4 {
             let Some(packet) = self.right.receive()? else {
                 break;
             };
             self.pairing.insert(&packet, 1)?;
-            self.image_count += 1;
         }
         Ok(())
     }
@@ -511,7 +325,8 @@ impl LiveSession {
         while let Some((t_ns, img_data)) = self.gravity_estimate.and_then(|estimate| {
             self.pairing
                 .discard_before(i64::try_from(estimate.end_ns).ok()?);
-            self.pairing.next(self.imu_watermark)
+            self.pairing
+                .next(i64::try_from(self.imu_watermark.load()?.as_nanosecond()).ok()?)
         }) {
             if !self.estimator_initialized {
                 let estimate = self
@@ -530,13 +345,16 @@ impl LiveSession {
                 )?;
                 self.estimator_initialized = true;
             }
+            let mut frame_started = self
+                .frame_started
+                .lock()
+                .map_err(|_| error("frame timing mutex poisoned"))?;
             match self
                 .flow_tx
                 .try_send(Some(Arc::new(OpticalFlowInput { t_ns, img_data })))
             {
                 Ok(()) => {
-                    self.frame_started.insert(t_ns, std::time::Instant::now());
-                    self.pair_count += 1;
+                    frame_started.insert(t_ns, std::time::Instant::now());
                 }
                 Err(mpsc::TrySendError::Full(_)) => {
                     log::warn!("RootSLAM live dropped stereo frame: optical flow queue full");
@@ -549,82 +367,95 @@ impl LiveSession {
         Ok(())
     }
 
-    fn publish_states(&mut self) -> Result<()> {
-        for _ in 0..64 {
-            let Ok(state) = self.states_rx.try_recv() else {
-                break;
-            };
-            let state = state.ok_or_else(|| error("VIO state stream ended"))?;
-            self.publish_state(&state);
-        }
-        Ok(())
-    }
-
-    /// VIO 后验只重置预测起点，不直接作为里程计发布。
-    fn publish_state(&mut self, state: &Arc<PoseVelBiasState<f64>>) {
-        let state = state.cast::<f64>();
-        let pose = &state.state.pose.t_w_i;
-        let stamp_ns = state.state.pose.t_ns;
-        let stamp = stamp_ns as f64 * 1e-9;
-        if let Some(started) = self.frame_started.remove(&state.state.pose.t_ns) {
-            let mut timing = ScalarMessage::base(stamp, "rootslam/frame_processing_ms");
-            timing.scalars[0] = started.elapsed().as_secs_f64() * 1000.0;
-            timing.scalar_count = 1;
-            let _ = self.viz.publish(timing);
-        }
-        if self
-            .propagator
-            .posterior_time_ns()
-            .is_some_and(|latest| i128::from(stamp_ns) < latest)
-        {
-            return;
-        }
-        self.propagator.set_bias(state.bias_gyro, state.bias_accel);
-        let q = pose.rotation.quaternion();
-        publish_pose_diagnostic(
-            &self.viz,
-            stamp,
-            "vio/posterior/pose_imu_world",
-            pose.translation.vector.into(),
-            [q.i, q.j, q.k, q.w],
-        );
-        publish_scalar_diagnostic(
-            &self.viz,
-            stamp,
-            "vio/posterior/velocity_world",
-            state.state.vel_w_i.into(),
-        );
-        publish_scalar_diagnostic(
-            &self.viz,
-            stamp,
-            "vio/posterior/gyro_bias_imu",
-            state.bias_gyro.into(),
-        );
-        publish_scalar_diagnostic(
-            &self.viz,
-            stamp,
-            "vio/posterior/accel_bias_imu",
-            state.bias_accel.into(),
-        );
-        self.propagator.set_anchor(Anchor {
-            posterior_time_ns: i128::from(stamp_ns),
-            rotation: pose.rotation,
-            position: pose.translation.vector,
-            velocity: state.state.vel_w_i,
-        });
-        self.state_count += 1;
-    }
-
-    fn report_counts(&mut self) {
-        if self.last_report.elapsed() >= Duration::from_secs(2) {
-            log::info!(
-                "RootSLAM live input/output counts: IMU={}, images={}, stereo={}, states={}",
-                self.imu_count,
-                self.image_count,
-                self.pair_count,
-                self.state_count
+    fn publish_diagnostics(&mut self) {
+        while let Ok(data) = self.diagnostics_rx.try_recv() {
+            let stamp = data.t_ns as f64 * 1e-9;
+            for (name, values) in [
+                ("vio/diagnostics/tracks", data.tracks),
+                ("vio/diagnostics/graph", data.graph),
+                ("vio/diagnostics/keyframes", data.keyframes),
+                ("vio/diagnostics/residual_before_px", data.residual_before),
+                ("vio/diagnostics/residual_after_px", data.residual_after),
+            ] {
+                publish_scalar_diagnostic(&self.viz, stamp, name, values);
+            }
+            publish_scalar_diagnostic(
+                &self.viz,
+                stamp,
+                "vio/diagnostics/stereo_ratio",
+                [if data.tracks[0] > 0. {
+                    data.tracks[2] / data.tracks[0]
+                } else {
+                    0.
+                }],
             );
-            self.last_report = std::time::Instant::now();
+            publish_scalar_diagnostic(
+                &self.viz,
+                stamp,
+                "vio/diagnostics/residual_rms_px",
+                [data.residual_before[1], data.residual_after[1]],
+            );
+            for (name, values) in [
+                ("vio/diagnostics/position_delta_m", data.position_delta),
+                ("vio/diagnostics/velocity_delta_m_s", data.velocity_delta),
+                ("vio/diagnostics/rotation_delta_rad", data.rotation_delta),
+            ] {
+                publish_scalar_diagnostic(&self.viz, stamp, name, values);
+            }
+            if let Some(flow) = data.flow {
+                for (camera, points) in flow.observations.iter().enumerate().take(2) {
+                    let name = if camera == 0 {
+                        "vio/diagnostics/keypoints/left"
+                    } else {
+                        "vio/diagnostics/keypoints/right"
+                    };
+                    let mut message = VizMessage::base(kind::KEYPOINTS_2D, stamp, name);
+                    message.color = [64, 255, 128];
+                    message.scalars[..3].copy_from_slice(&[
+                        IMAGE_WIDTH as f64,
+                        IMAGE_HEIGHT as f64,
+                        points.len() as f64,
+                    ]);
+                    message.scalar_count = 3;
+                    for (index, (&id, point)) in
+                        points.iter().take(message.points.len()).enumerate()
+                    {
+                        message.points[index] = [
+                            f64::from(point.translation.x),
+                            f64::from(point.translation.y),
+                            id as f64,
+                        ];
+                        message.point_count += 1;
+                    }
+                    let _ = self.viz.publish(message);
+                    if camera == 0 {
+                        let mut active = VizMessage::base(
+                            kind::KEYPOINTS_2D,
+                            stamp,
+                            "vio/diagnostics/keypoints/active_left",
+                        );
+                        active.color = [255, 128, 64];
+                        active.scalars[..3].copy_from_slice(&[
+                            IMAGE_WIDTH as f64,
+                            IMAGE_HEIGHT as f64,
+                            data.active_ids.len() as f64,
+                        ]);
+                        active.scalar_count = 3;
+                        for (index, id) in
+                            data.active_ids.iter().take(active.points.len()).enumerate()
+                        {
+                            let point = &points[id];
+                            active.points[index] = [
+                                f64::from(point.translation.x),
+                                f64::from(point.translation.y),
+                                *id as f64,
+                            ];
+                            active.point_count += 1;
+                        }
+                        let _ = self.viz.publish(active);
+                    }
+                }
+            }
         }
     }
 
@@ -632,7 +463,7 @@ impl LiveSession {
         let Self {
             map_worker,
             map_input,
-            imu_tx,
+            imu_inputs,
             flow_tx,
             flow,
             mut estimator,
@@ -640,8 +471,9 @@ impl LiveSession {
             ..
         } = self;
         drop(map_input);
-        drop(imu_tx);
+        drop(imu_inputs);
         drop(flow_tx);
+        estimator.close_inputs();
         let flow_result = flow.shutdown();
         let estimator_result = estimator.maybe_join();
         if let Some(directory) = &stats_directory {
@@ -668,31 +500,6 @@ impl LiveSession {
         }
         Ok(())
     }
-}
-
-fn publish_pose_diagnostic(
-    viz: &VizPublisher,
-    stamp: f64,
-    entity: &str,
-    position: [f64; 3],
-    quaternion_xyzw: [f64; 4],
-) {
-    let mut message = VizMessage::base(kind::POSE, stamp, entity);
-    message.xyz = position;
-    message.quat_xyzw = quaternion_xyzw;
-    let _ = viz.publish(message);
-}
-
-fn publish_scalar_diagnostic<const N: usize>(
-    viz: &VizPublisher,
-    stamp: f64,
-    entity: &str,
-    values: [f64; N],
-) {
-    let mut message = ScalarMessage::base(stamp, entity);
-    message.scalars[..N].copy_from_slice(&values);
-    message.scalar_count = N as u32;
-    let _ = viz.publish(message);
 }
 
 /// Builds the Basalt VIO configuration with the initialization priors shared with OKVIS2-X.

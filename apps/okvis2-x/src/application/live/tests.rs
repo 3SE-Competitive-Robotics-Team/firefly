@@ -101,6 +101,75 @@ fn pairing_uses_owned_images_and_requires_both_cameras_and_imu_coverage() {
         output::time(2.05).unwrap()
     );
 }
+
+#[test]
+fn shared_replay_matches_okvis_motion_path_with_delayed_posteriors() {
+    use crate::ceres::imu_error::propagate_state;
+    use crate::sensors::measurements::{ImuMeasurement, ImuMeasurementDeque, ImuSensorReadings};
+    let config = Config::default();
+    let parameters = config.imu_parameters().unwrap();
+    let mut output = Output::new(&config, 7).unwrap();
+    let mut history = ImuMeasurementDeque::new();
+    let mut reference_pose = Transformation::identity();
+    let mut reference_bias = nalgebra::SVector::<f64, 9>::zeros();
+    let mut reference_time = output::time(0.).unwrap();
+    for i in 0..=250 {
+        let t = f64::from(i) * 0.001;
+        let time = output::time(t).unwrap();
+        let accel = Vector3::new(0.3 * t.cos(), 0.2 * t.sin(), 9.81);
+        let gyro = Vector3::new(0.2, -0.1 * t.cos(), 0.3 * t.sin());
+        if i == 20 || i == 150 {
+            let posterior_time = t - 0.0105;
+            let rotation = UnitQuaternion::from_euler_angles(0.02, -0.03, 0.04);
+            let mut publication = publication(
+                posterior_time,
+                i as u64,
+                Transformation::new(Vector3::new(0.01, -0.02, 0.03), rotation.into_inner()),
+                0,
+            );
+            publication.state.v_w = Vector3::new(0.1, -0.2, 0.05);
+            output.posterior(&publication).unwrap();
+            reference_pose = publication.state.t_ws.clone();
+            reference_bias = publication.state.speed_and_bias();
+            reference_time = publication.state.timestamp;
+        }
+        history.push_back(ImuMeasurement::new(
+            time,
+            ImuSensorReadings::new(gyro, accel),
+            -1,
+        ));
+        let actual = output.imu(time, accel, gyro).unwrap();
+        if i < 20 {
+            assert!(actual.is_none());
+            continue;
+        }
+        propagate_state(
+            &history,
+            &parameters,
+            &mut reference_pose,
+            &mut reference_bias,
+            (reference_time, time),
+        )
+        .unwrap();
+        reference_time = time;
+        let actual = actual.unwrap().corrected;
+        assert!(
+            (Vector3::new(actual.position_x, actual.position_y, actual.position_z)
+                - reference_pose.translation())
+            .norm()
+                < 1e-12
+        );
+        assert!(
+            (Vector3::new(actual.velocity_x, actual.velocity_y, actual.velocity_z)
+                - reference_bias.fixed_rows::<3>(0))
+            .norm()
+                < 1e-12
+        );
+        let q =
+            nalgebra::Quaternion::new(actual.quat_w, actual.quat_x, actual.quat_y, actual.quat_z);
+        assert!((q.coords - reference_pose.quaternion().coords).norm() < 1e-12);
+    }
+}
 #[test]
 fn sensor_configuration_rejects_unknown_fields_nonfinite_geometry_and_invalid_noise() {
     assert!(Config::default().validate().is_ok());
@@ -122,7 +191,7 @@ fn sensor_configuration_rejects_unknown_fields_nonfinite_geometry_and_invalid_no
 }
 #[test]
 fn posterior_imu_prediction_continues_past_three_hundred_ms_without_renewing_posterior_time() {
-    let mut predictor = Output::new(Config::default(), 7).unwrap();
+    let mut predictor = Output::new(&Config::default(), 7).unwrap();
     assert!(imu(&mut predictor, 1.0).is_none());
     predictor
         .posterior(&publication(1.0, 1, Transformation::identity(), 0))
@@ -145,7 +214,7 @@ fn posterior_imu_prediction_continues_past_three_hundred_ms_without_renewing_pos
 }
 #[test]
 fn loop_commit_changes_map_coordinates_atomically_without_moving_local_odometry() {
-    let mut predictor = Output::new(Config::default(), 1).unwrap();
+    let mut predictor = Output::new(&Config::default(), 1).unwrap();
     imu(&mut predictor, 1.0);
     predictor
         .posterior(&publication(1.0, 1, Transformation::identity(), 0))
@@ -191,7 +260,7 @@ fn loop_commit_changes_map_coordinates_atomically_without_moving_local_odometry(
 }
 #[test]
 fn prediction_uses_committed_states_and_available_imu_intervals_like_upstream() {
-    let mut predictor = Output::new(Config::default(), 1).unwrap();
+    let mut predictor = Output::new(&Config::default(), 1).unwrap();
     imu(&mut predictor, 1.0);
     let mut posterior = publication(1.0, 1, Transformation::identity(), 0);
     predictor.posterior(&posterior).unwrap();
@@ -227,7 +296,7 @@ fn prediction_reuses_calibration_across_samples_and_posterior_replay() {
         .inverse()
         .rotate_vector(&Vector3::new(0., 0., config.imu.gravity))
         .component_div(&Vector3::from(config.imu.accelerometer_scale));
-    let mut predictor = Output::new(config, 3).unwrap();
+    let mut predictor = Output::new(&config, 3).unwrap();
     for index in 0..=40 {
         let time = 1. + index as f64 * 0.001;
         if index == 10 || index == 30 {
@@ -256,7 +325,7 @@ fn prediction_reuses_calibration_across_samples_and_posterior_replay() {
     }
     let mut invalid = Config::default();
     invalid.imu.extrinsic.rotation = [0.; 4];
-    assert!(Output::new(invalid, 1).is_err());
+    assert!(Output::new(&invalid, 1).is_err());
 }
 #[test]
 fn marginal_covariance_matches_analytic_independent_priors_and_rejects_unobserved_parameters() {

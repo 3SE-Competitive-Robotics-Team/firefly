@@ -10,6 +10,7 @@ import signal
 import subprocess
 import threading
 import time
+import psutil
 
 
 class ManagedProcess:
@@ -56,18 +57,24 @@ class ManagedProcess:
 
 def active_processes(root: Path) -> list[int]:
     """识别本仓库进程；依赖可执行路径与 argv，禁止模糊匹配命令行全文。"""
+    root = root.resolve()
     found = []
     binaries = {"firefly-okvis-x", "firefly-rootslam", "render", "fc", "localization", "planner", "aliked", "lightglue"}
     scripts = {"firefly-sim", "firefly-viz", "rerun", "collect_vision_map.py"}
     modules = {"firefly_sim", "firefly_sim.main", "firefly_viz", "firefly_viz.main",
                "firefly_evaluation.mission_sim", "firefly_evaluation.disturbance_sim"}
-    for path in Path("/proc").glob("[0-9]*"):
-        if int(path.name) == os.getpid():
+    for process in psutil.process_iter():
+        if process.pid == os.getpid():
             continue
         try:
-            args = path.joinpath("cmdline").read_bytes().decode().strip("\0").split("\0")
-            exe = path.joinpath("exe").resolve(strict=True)
-            cwd = path.joinpath("cwd").resolve(strict=True)
+            with process.oneshot():
+                args = process.cmdline()
+                executable = process.exe()
+                directory = process.cwd()
+            if not executable or not directory:
+                continue
+            exe = Path(executable).resolve()
+            cwd = Path(directory).resolve()
             native = exe.is_relative_to(root / "target") and exe.name in binaries
             python_entry = any(Path(arg).name in scripts for arg in args[:2])
             if args[1:2] == ["-m"]:
@@ -77,8 +84,8 @@ def active_processes(root: Path) -> list[int]:
                 python_entry |= any(f"import_module({module!r})" in code for module in modules)
             python = cwd.is_relative_to(root) and python_entry
             if native or python:
-                found.append(int(path.name))
-        except (OSError, UnicodeError):
+                found.append(process.pid)
+        except (psutil.Error, OSError, UnicodeError):
             continue
     return sorted(found)
 

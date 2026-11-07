@@ -244,8 +244,8 @@ fn create_estimator(
             );
             if diagnostics {
                 let mut publisher = diagnostics::Diagnostics::new(image_delay)?;
-                core.set_frame_diagnostics(move |frame, duration| {
-                    publisher.publish(frame, duration);
+                core.set_frame_diagnostics(move |frame, duration, metrics| {
+                    publisher.publish(frame, duration, metrics);
                 });
             }
             Ok(core)

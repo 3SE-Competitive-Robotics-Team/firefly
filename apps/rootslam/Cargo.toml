@@ -31,6 +31,7 @@ firefly-config.workspace = true
 firefly-observability.workspace = true
 firefly-pubsub.workspace = true
 firefly-imu-propagation.workspace = true
+firefly-vio-runtime.workspace = true
 firefly-imu-initialization.workspace = true
 log.workspace = true
 nalgebra.workspace = true

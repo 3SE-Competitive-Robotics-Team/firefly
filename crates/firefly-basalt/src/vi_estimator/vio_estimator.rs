@@ -25,19 +25,47 @@ pub struct VioVisualizationData {
     pub opt_flow_res: Option<Arc<OpticalFlowResult>>,
     pub projections: Vec<Vec<Vector4<f64>>>,
 }
+
+/// Current-frame, unweighted pixel residuals and optimizer changes before marginalization.
+#[derive(Clone, Debug, Default)]
+pub struct VioFrameDiagnostics {
+    pub t_ns: i64,
+    pub tracks: [f64; 4],
+    pub graph: [f64; 4],
+    /// Current keyframe flag, continued landmarks, newly hosted landmarks, retained span (seconds).
+    pub keyframes: [f64; 4],
+    pub active_ids: Vec<usize>,
+    /// Count, RMS norm, mean horizontal residual, mean vertical residual.
+    pub residual_before: [f64; 4],
+    pub residual_after: [f64; 4],
+    pub position_delta: [f64; 3],
+    pub velocity_delta: [f64; 3],
+    pub rotation_delta: [f64; 3],
+    pub flow: Option<Arc<OpticalFlowResult>>,
+}
 pub struct VioWorkerInputs {
     pub vision: Receiver<Option<Arc<OpticalFlowResult>>>,
     pub imu: Receiver<Option<Arc<ImuData<f64>>>>,
 }
 #[derive(Clone, Default)]
 pub struct VioWorkerOutputs {
+    pub diagnostics: Option<Sender<VioFrameDiagnostics>>,
     pub local_map: Option<Sender<Option<Arc<super::local_map::LocalMapSnapshot>>>>,
     pub state: Option<Sender<Option<Arc<PoseVelBiasState<f64>>>>>,
+    pub state_bounded: Option<SyncSender<Option<Arc<PoseVelBiasState<f64>>>>>,
     pub marg: Option<Sender<Option<Arc<MargData>>>>,
     pub marg_bounded: Option<SyncSender<Option<Arc<MargData>>>>,
     pub vis: Option<Sender<Option<Arc<VioVisualizationData>>>>,
 }
 impl VioWorkerOutputs {
+    pub(crate) fn send_state(&self, state: Arc<PoseVelBiasState<f64>>) {
+        if let Some(queue) = &self.state {
+            let _ = queue.send(Some(Arc::clone(&state)));
+        }
+        if let Some(queue) = &self.state_bounded {
+            let _ = queue.send(Some(state));
+        }
+    }
     #[must_use]
     pub(crate) fn has_marginalization_output(&self) -> bool {
         self.marg.is_some() || self.marg_bounded.is_some()
@@ -64,6 +92,9 @@ impl VioWorkerOutputs {
             let _ = q.send(None);
         }
         if let Some(q) = &self.state {
+            let _ = q.send(None);
+        }
+        if let Some(q) = &self.state_bounded {
             let _ = q.send(None);
         }
     }
@@ -267,9 +298,14 @@ impl VioEstimatorBase {
     /// # Errors
     /// Returns worker errors. External queue clones must be dropped first.
     pub fn shutdown(mut self) -> Result<()> {
+        self.close_inputs();
+        self.maybe_join()
+    }
+
+    /// Close local producers before joining the optical-flow/estimator workers.
+    pub fn close_inputs(&mut self) {
         self.vision.take();
         self.imu.take();
-        self.maybe_join()
     }
 }
 fn already_started() -> Error {
@@ -395,11 +431,13 @@ mod worker_end_tests {
     fn normal_and_panicking_worker_send_one_end_to_each_output() {
         for panic in [false, true] {
             let (state, estimates) = mpsc::channel();
+            let (bounded_state, bounded_estimates) = mpsc::sync_channel(1);
             let (vis, visuals) = mpsc::channel();
             let (marg, margins) = mpsc::sync_channel(1);
             let (map, maps) = mpsc::channel();
             let outputs = VioWorkerOutputs {
                 state: Some(state),
+                state_bounded: Some(bounded_state),
                 vis: Some(vis),
                 marg_bounded: Some(marg),
                 local_map: Some(map),
@@ -416,10 +454,12 @@ mod worker_end_tests {
             assert_eq!(result.is_err(), panic);
             assert!(status.finished.load(Ordering::Acquire));
             assert!(estimates.try_recv().unwrap().is_none());
+            assert!(bounded_estimates.try_recv().unwrap().is_none());
             assert!(visuals.try_recv().unwrap().is_none());
             assert!(margins.try_recv().unwrap().is_none());
             assert!(maps.try_recv().unwrap().is_none());
             assert!(estimates.try_recv().is_err());
+            assert!(bounded_estimates.try_recv().is_err());
             assert!(visuals.try_recv().is_err());
             assert!(margins.try_recv().is_err());
             assert!(maps.try_recv().is_err());

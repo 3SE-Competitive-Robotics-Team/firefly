@@ -1,18 +1,21 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //! Bounded current-frame feature diagnostics on the graph owner.
 use crate::frames::multi_frame::MultiFrame;
+use crate::runtime::threaded_slam::FrameDiagnostics;
 use firefly_error::Result;
 use firefly_pubsub::{
     node::{IpcNode, create_node},
     viz::{OKVIS_KEYPOINT_ENTITIES, POINTS_MAX, ScalarMessage, VizMessage, VizPublisher, kind},
 };
 use nalgebra::Vector2;
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 pub(super) struct Diagnostics {
     publisher: VizPublisher,
     _node: IpcNode,
     image_delay: f64,
+    previous_ids: BTreeSet<u64>,
 }
 impl Diagnostics {
     pub fn new(image_delay: f64) -> Result<Self> {
@@ -21,16 +24,82 @@ impl Diagnostics {
             publisher: VizPublisher::new(&node)?,
             _node: node,
             image_delay,
+            previous_ids: BTreeSet::new(),
         })
     }
-    pub fn publish(&mut self, frame: &MultiFrame, duration: Duration) {
+    pub fn publish(&mut self, frame: &MultiFrame, duration: Duration, metrics: &FrameDiagnostics) {
         let stamp = frame.timestamp().as_nanosecond() as f64 * 1e-9 + self.image_delay;
         let _ = self.publisher.publish(frame_timing(stamp, duration));
+        let ids = |camera| {
+            (0..frame.num_keypoints(camera))
+                .map(|i| frame.landmark_id(camera, i))
+                .filter(|&id| id != 0)
+                .collect::<BTreeSet<_>>()
+        };
+        let left = ids(0);
+        let right = if frame.num_frames() > 1 {
+            ids(1)
+        } else {
+            BTreeSet::new()
+        };
+        let stereo = left.intersection(&right).count() as f64;
+        let total = frame.num_keypoints(0) as f64;
+        self.scalars(
+            stamp,
+            "vio/diagnostics/tracks",
+            &[
+                total,
+                left.intersection(&self.previous_ids).count() as f64,
+                stereo,
+                left.len() as f64,
+            ],
+        );
+        self.scalars(
+            stamp,
+            "vio/diagnostics/stereo_ratio",
+            &[if total > 0. { stereo / total } else { 0. }],
+        );
+        self.previous_ids = left;
+        self.scalars(
+            stamp,
+            "vio/diagnostics/residual_rms_px",
+            &[metrics.residual_before[1], metrics.residual_after[1]],
+        );
+        for (name, values) in [
+            (
+                "vio/diagnostics/residual_before_px",
+                &metrics.residual_before[..],
+            ),
+            (
+                "vio/diagnostics/residual_after_px",
+                &metrics.residual_after[..],
+            ),
+            (
+                "vio/diagnostics/position_delta_m",
+                &metrics.position_delta[..],
+            ),
+            (
+                "vio/diagnostics/velocity_delta_m_s",
+                &metrics.velocity_delta[..],
+            ),
+            (
+                "vio/diagnostics/rotation_delta_rad",
+                &metrics.rotation_delta[..],
+            ),
+        ] {
+            self.scalars(stamp, name, values);
+        }
         for camera in 0..frame.num_frames().min(OKVIS_KEYPOINT_ENTITIES.len()) {
             if let Some(message) = keypoints(frame, camera, stamp) {
                 let _ = self.publisher.publish(message);
             }
         }
+    }
+    fn scalars(&self, stamp: f64, name: &str, values: &[f64]) {
+        let mut message = ScalarMessage::base(stamp, name);
+        message.scalars[..values.len()].copy_from_slice(values);
+        message.scalar_count = values.len() as u32;
+        let _ = self.publisher.publish(message);
     }
 }
 

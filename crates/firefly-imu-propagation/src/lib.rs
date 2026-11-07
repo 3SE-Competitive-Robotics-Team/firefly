@@ -6,6 +6,9 @@
 
 use nalgebra::{Matrix3, Quaternion, Vector3};
 
+mod predictor;
+pub use predictor::Predictor;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImuSample {
     pub timestamp_ns: i128,
