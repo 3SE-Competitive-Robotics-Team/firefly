@@ -1,4 +1,4 @@
-//! Run with a firefly-viz recorder and `RUST_LOG=info` to retain samples in RRD.
+//! Run with a mimir recorder and `RUST_LOG=info` to retain samples in RRD.
 //! Timings include layout, allocation, assembly, elimination, solve and back substitution.
 use std::{
     hint::black_box,

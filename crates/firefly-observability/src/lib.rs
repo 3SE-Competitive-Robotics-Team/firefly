@@ -9,7 +9,7 @@
 //! `init()` 在 stderr 链路旁常驻一个 dormant 的 [`IpcAppend`]，`init_ipc`
 //! 在进程共享节点就绪后同线程建端并返回 [`LogIpc`] 句柄（调用方在主循环
 //! 作用域持有）；此后每条日志同时写 stderr（原链路保留）与 IPC（聚合端
-//! `firefly-viz` 统一写 rerun `TextLog`，持久可检索）。IPC 不可用/未初始化
+//! `mimir` 统一写 rerun `TextLog`，持久可检索）。IPC 不可用/未初始化
 //! 时静默降级为纯 stderr，不阻断进程。
 //!
 //! 线程模型（对照 logforth 官方 `appenders/async`：`Async` + `DropIncoming`）：
@@ -19,7 +19,7 @@
 //! channel、零拷贝发送）。iceoryx2 发布端不出 [`LogIpc`] 句柄的作用域——
 //! 调用方持有句柄、主循环线程 pump，从构造上不可能跨线程触碰，无 `unsafe`。
 //!
-//! 背压语义：channel 有界（128），满即丢——日志永不阻塞计算线程。
+//! 背压语义：channel 有界，满时累计缺失数并由 pump 发出完整性故障；日志不阻塞计算线程。
 //!
 //! 用法：
 //! ```
@@ -37,6 +37,7 @@
 //! // firefly_observability::pump_log_ipc(&log_ipc);
 //! ```
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -53,7 +54,11 @@ pub fn init() {
                 .diagnostic(logforth::diagnostic::FastraceDiagnostic::default())
                 .append(logforth::append::Stderr::default())
         })
-        .dispatch(|d| d.append(logforth::append::FastraceEvent::default()))
+        .dispatch(|d| {
+            // Every dispatch participates in log_enabled!, including span events.
+            d.filter(RustLogFilterBuilder::from_default_env().build())
+                .append(logforth::append::FastraceEvent::default())
+        })
         // 聚合器在 `init_ipc` 接通前保持 dormant；无发布端时 append 不执行发布。
         .dispatch(|d| {
             d.filter(RustLogFilterBuilder::from_default_env().build())
@@ -85,7 +90,7 @@ impl fastrace::collector::Reporter for CompactReporter {
 /// 当前 sim 时钟（秒）的位表示；负值表示尚无 sim 时钟（聚合端回落墙钟轴）。
 static SIM_TIME_BITS: AtomicU64 = AtomicU64::new((-1.0_f64).to_bits());
 
-/// 更新本进程的 sim 时钟（主循环每 tick 调用一次；`firefly-viz` 聚合端除外）。
+/// 更新本进程的 sim 时钟（主循环每 tick 调用一次；`mimir` 聚合端除外）。
 pub fn set_sim_time(t: f64) {
     SIM_TIME_BITS.store(t.to_bits(), Ordering::Relaxed);
 }
@@ -103,6 +108,8 @@ static TAG: Mutex<String> = Mutex::new(String::new());
 /// `None` = 纯 stderr 模式（`init_ipc` 建端失败时）。
 pub struct LogIpc {
     publisher: Option<Publisher<LogMessage>>,
+    sequence: Cell<u64>,
+    reported_loss: Cell<u64>,
 }
 
 /// 聚合链路是否已武装（`init_ipc` 置位；`IpcAppend` 的 dormant 判定；
@@ -121,8 +128,9 @@ struct QueuedLog {
     trace_id_lo: u64,
 }
 
-/// 有界 channel 容量：日志低频，128 足够突发；满即丢（见 [`IpcAppend`]）。
+/// 有界 channel 容量；超载必须成为录制完整性故障。
 const QUEUE_CAP: usize = 128;
+static DROPPED_RECORDS: AtomicU64 = AtomicU64::new(0);
 
 /// 跨线程队列（`append` 入队 → 主循环 `pump_log_ipc` 出队；标准库 mpsc 足够）。
 static LOG_QUEUE: OnceLock<Queue> = OnceLock::new();
@@ -152,7 +160,6 @@ fn log_queue() -> &'static Queue {
 pub fn init_ipc(node: &IpcNode, tag: &str) -> LogIpc {
     tag.clone_into(&mut TAG.lock().expect("log tag mutex"));
     let _ = log_queue();
-    *IPC_ARMED.lock().expect("ipc armed mutex") = true;
     match Publisher::with_topic_buffer_publishers(
         node,
         LOG_TOPIC,
@@ -160,14 +167,21 @@ pub fn init_ipc(node: &IpcNode, tag: &str) -> LogIpc {
         Some(LOG_MAX_PUBLISHERS),
     ) {
         Ok(publisher) => {
-            log::info!("日志聚合已挂载（tag={tag}，Firefly/Log → firefly-viz）");
+            *IPC_ARMED.lock().expect("ipc armed mutex") = true;
+            log::info!("日志聚合已挂载（tag={tag}，Firefly/Log → mimir）");
             LogIpc {
                 publisher: Some(publisher),
+                sequence: Cell::new(0),
+                reported_loss: Cell::new(0),
             }
         }
         Err(e) => {
             log::warn!("日志聚合挂载失败（降级纯 stderr）：{e}");
-            LogIpc { publisher: None }
+            LogIpc {
+                publisher: None,
+                sequence: Cell::new(0),
+                reported_loss: Cell::new(0),
+            }
         }
     }
 }
@@ -177,9 +191,9 @@ pub fn init_ipc(node: &IpcNode, tag: &str) -> LogIpc {
 /// # Panics
 /// 内部队列锁中毒时。
 pub fn pump_log_ipc(log_ipc: &LogIpc) {
-    let Some(publisher) = log_ipc.publisher.as_ref() else {
+    if log_ipc.publisher.is_none() {
         return;
-    };
+    }
     let queue = log_queue();
     let rx = queue.rx.lock().expect("log queue rx mutex");
     while let Ok(queued) = rx.try_recv() {
@@ -194,8 +208,37 @@ pub fn pump_log_ipc(log_ipc: &LogIpc) {
         };
         msg.set_tag(&queued.tag);
         msg.set_text(&queued.text);
-        // 聚合失败静默丢弃：可视化不阻断计算链路
-        let _ = publisher.publish(msg);
+        log_ipc.publish(msg);
+    }
+    // Report even a lost final record; do not depend on a later application log.
+    if DROPPED_RECORDS.load(Ordering::Relaxed) > log_ipc.reported_loss.get() {
+        let now = jiff::Timestamp::now();
+        let mut msg = LogMessage {
+            log_level: level::ERROR,
+            sim_time: f64::from_bits(sim_time_bits()),
+            wall_secs: now.as_second(),
+            wall_nanos: now.subsec_nanosecond() as u32,
+            ..LogMessage::default()
+        };
+        msg.set_tag(&TAG.lock().expect("log tag mutex"));
+        msg.set_text("log delivery failed; recording is incomplete");
+        log_ipc.publish(msg);
+    }
+}
+
+impl LogIpc {
+    fn publish(&self, mut msg: LogMessage) {
+        let Some(publisher) = &self.publisher else {
+            return;
+        };
+        msg.sequence = self.sequence.get();
+        self.sequence.set(msg.sequence.wrapping_add(1));
+        msg.dropped_records = DROPPED_RECORDS.load(Ordering::Relaxed);
+        if publisher.publish(msg).is_ok() {
+            self.reported_loss.set(msg.dropped_records);
+        } else {
+            DROPPED_RECORDS.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -203,7 +246,7 @@ pub fn pump_log_ipc(log_ipc: &LogIpc) {
 ///
 /// 每条 `Record` 先在调用线程内格式化为 [`QueuedLog`]（含 trace 链与
 /// sim 时钟快照——调用线程的 fastrace 上下文，事后不可追补），再
-/// `try_send` 进有界队列；队列满时静默丢弃，永不阻塞计算线程。
+/// `try_send` 进有界队列；队列满时累计完整性故障，永不阻塞计算线程。
 /// `target` 丢弃：实体检索走进程 `tag`，不走模块 `target`。
 #[derive(Debug, Default)]
 pub struct IpcAppend;
@@ -240,12 +283,15 @@ impl logforth::append::Append for IpcAppend {
             trace_id_hi,
             trace_id_lo,
         };
-        // 队列满时丢弃该记录。
-        let _ = log_queue()
+        if log_queue()
             .tx
             .lock()
             .expect("log queue tx mutex")
-            .try_send(queued);
+            .try_send(queued)
+            .is_err()
+        {
+            DROPPED_RECORDS.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -261,6 +307,66 @@ pub fn flush() {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use firefly_pubsub::subscriber::{Subscriber, SubscriberOptions};
+    use logforth::append::Append;
+
+    #[test]
+    fn queue_overload_and_lost_tail_are_visible_over_ipc() {
+        let node = firefly_pubsub::node::create_node().unwrap();
+        let topic = format!(
+            "Firefly/Test/Log/{}",
+            jiff::Timestamp::now().as_nanosecond()
+        );
+        let subscriber = Subscriber::<LogMessage>::with_options(
+            &node,
+            &topic,
+            SubscriberOptions {
+                buffer_size: LOG_BUFFER_SIZE,
+                service_max_buffer_size: Some(LOG_BUFFER_SIZE),
+                max_publishers: Some(LOG_MAX_PUBLISHERS),
+            },
+        )
+        .unwrap();
+        let log_ipc = LogIpc {
+            publisher: Some(
+                Publisher::with_topic_buffer_publishers(
+                    &node,
+                    &topic,
+                    Some(LOG_BUFFER_SIZE),
+                    Some(LOG_MAX_PUBLISHERS),
+                )
+                .unwrap(),
+            ),
+            sequence: Cell::new(0),
+            reported_loss: Cell::new(0),
+        };
+        *IPC_ARMED.lock().unwrap() = true;
+        let record = logforth::record::RecordBuilder::default()
+            .payload(format_args!("bounded queue probe"))
+            .build();
+        for _ in 0..=QUEUE_CAP {
+            IpcAppend.append(&record, &[]).unwrap();
+        }
+        assert_eq!(DROPPED_RECORDS.load(Ordering::Relaxed), 1);
+        pump_log_ipc(&log_ipc);
+        for sequence in 0..QUEUE_CAP as u64 {
+            let msg = subscriber.receive().unwrap().expect("queued log");
+            assert_eq!(msg.sequence, sequence);
+            assert_eq!(msg.dropped_records, 1);
+        }
+        assert!(subscriber.receive().unwrap().is_none());
+        DROPPED_RECORDS.fetch_add(1, Ordering::Relaxed);
+        pump_log_ipc(&log_ipc);
+        let tail = subscriber
+            .receive()
+            .unwrap()
+            .expect("loss without a later application log");
+        assert_eq!(tail.sequence, QUEUE_CAP as u64);
+        assert_eq!(tail.dropped_records, 2);
+        assert_eq!(tail.log_level, level::ERROR);
+    }
+
     #[test]
     fn startup_log_clock_satisfies_wire_timestamp_contract() {
         let time = f64::from_bits(super::sim_time_bits());

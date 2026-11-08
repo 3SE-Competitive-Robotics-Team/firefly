@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 
 [manifest]
@@ -9,7 +9,6 @@ members = [
     "firefly-evaluation",
     "firefly-mujoco",
     "firefly-sim",
-    "firefly-viz",
     "firefly-workspace",
 ]
 
@@ -97,7 +96,6 @@ dependencies = [
     { name = "firefly-evaluation" },
     { name = "firefly-mujoco" },
     { name = "firefly-sim" },
-    { name = "firefly-viz" },
     { name = "firefly-workspace" },
 ]
 
@@ -114,7 +112,6 @@ requires-dist = [
     { name = "firefly-evaluation", editable = "packages/firefly-evaluation" },
     { name = "firefly-mujoco", editable = "packages/firefly-mujoco" },
     { name = "firefly-sim", editable = "apps/firefly-sim" },
-    { name = "firefly-viz", editable = "apps/firefly-viz" },
     { name = "firefly-workspace", editable = "packages/firefly-workspace" },
 ]
 
@@ -152,7 +149,6 @@ source = { editable = "packages/firefly-evaluation" }
 dependencies = [
     { name = "firefly-mujoco" },
     { name = "firefly-sim" },
-    { name = "firefly-viz" },
     { name = "firefly-workspace" },
     { name = "iceoryx2" },
     { name = "numpy" },
@@ -165,7 +161,6 @@ dependencies = [
 requires-dist = [
     { name = "firefly-mujoco", editable = "packages/firefly-mujoco" },
     { name = "firefly-sim", editable = "apps/firefly-sim" },
-    { name = "firefly-viz", editable = "apps/firefly-viz" },
     { name = "firefly-workspace", editable = "packages/firefly-workspace" },
     { name = "iceoryx2", specifier = "==0.10.0" },
     { name = "numpy", specifier = ">=2.5.4,<3" },
@@ -222,29 +217,6 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=1.4" },
 ]
 provides-extras = ["test"]
-
-[[package]]
-name = "firefly-viz"
-version = "0.1.0"
-source = { editable = "apps/firefly-viz" }
-dependencies = [
-    { name = "firefly-mujoco" },
-    { name = "firefly-workspace" },
-    { name = "iceoryx2" },
-    { name = "numpy" },
-    { name = "pyarrow" },
-    { name = "rerun-sdk" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "firefly-mujoco", editable = "packages/firefly-mujoco" },
-    { name = "firefly-workspace", editable = "packages/firefly-workspace" },
-    { name = "iceoryx2", specifier = "==0.10.0" },
-    { name = "numpy", specifier = ">=2.5.4,<3" },
-    { name = "pyarrow", specifier = ">=26.0.0" },
-    { name = "rerun-sdk", specifier = ">=0.38.1,<0.39" },
-]
 
 [[package]]
 name = "firefly-workspace"

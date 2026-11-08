@@ -12,7 +12,7 @@ import pytest
 from firefly_evaluation.process_lifecycle import ManagedProcess, active_processes, isolated_run
 
 
-@pytest.mark.parametrize("entry", ["firefly-sim", "firefly-viz",
+@pytest.mark.parametrize("entry", ["firefly-sim", "mimir",
                                   "firefly_evaluation.mission_sim",
                                   "firefly_evaluation.disturbance_sim"])
 def test_stop_reaps_child_and_output_thread(tmp_path, entry):

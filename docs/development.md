@@ -2,7 +2,7 @@
 
 开发、运行、记录和验证统一在本文；系统职责、坐标、算法及能力边界见
 [architecture.md](architecture.md)。路径和命令均相对仓库根目录。
-跨模块约定只维护这两份文档；README 只提供介绍和入口。参数以代码默认值和配置为准，测试用例与门槛以测试源码为准。
+观测契约统一见 [observability.md](observability.md)；README 只提供介绍和入口。参数以代码默认值和配置为准，测试用例与门槛以测试源码为准。
 历史排查和试飞结果留在 Git 历史及 `logs/` 证据中，不另建平行规范。
 
 ## 实现约定
@@ -115,8 +115,7 @@ PR 标题描述整个 PR 的最终结果，不写 WIP、阶段编号或“后续
 `<赛季>_collision.json`），另需 `models/drone/drone.glb`。未注册版本或缺失资产报错，不回退场景。
 停机坪定义来自 `firefly_mujoco.scene.SCENES[].pad` 与 `PAD_CLEARANCE`，不在文档复制坐标。
 render 使用无窗口 GPU 渲染；Rerun 原生 Viewer 需要图形会话。Rust/Python 版本和依赖
-以 workspace 配置为准。视频记录依赖外部 FFmpeg、所选编码器和 GPU 用户态驱动；
-编码器按平台选择（macOS 用系统 VideoToolbox，其余用 Intel VA-API），设备与编码选项见 `configs/viz.toml`。仅列出编码器并不证明驱动可用。
+以 workspace 配置为准。mimir 直接将左右目无损灰度图和结构化诊断写入 RRD，配置见 `configs/mimir.toml`。
 
 ```bash
 uv sync --all-packages --extra test
@@ -127,7 +126,7 @@ cargo xtask release
 分别在终端启动，记录进程最先启动、最后退出：
 
 ```bash
-uv run firefly-viz --save logs/rmuc_run.rrd
+./target/release/mimir --save logs/rmuc_run.rrd
 uv run firefly-sim
 cargo run --release -p render
 cargo run --release -p firefly-okvis-x
@@ -136,7 +135,7 @@ cargo run --release -p planner -- --traj-server
 cargo run --release -p planner
 ```
 
-最小闭环只需 viz/sim/render/firefly-okvis-x/fc；规划同时启动 planner 与 `planner --traj-server`
+最小闭环只需 mimir/sim/render/firefly-okvis-x/fc；规划同时启动 planner 与 `planner --traj-server`
 两个独立进程，前者规划并发布心跳，后者采样并发布飞控参考。
 纯 VIO 对照用 `firefly-okvis-x --no-loop-closures --no-mapping`。
 可选库图定位先填写 `configs/localization.toml [origin]`，并用
@@ -312,109 +311,8 @@ T16 为 64 维，无法直接使用官方 ALIKED LightGlue 权重。导出保留
 
 ## 记录与性能
 
-正式运行原始证据只写 `logs/*.rrd`，不写文本日志或 `/tmp`；JSON/HTML 只存配置、
-内容指纹和汇总。Rust 计算线程经 `Firefly/VizScalars` 发标量，经 `Firefly/Viz` 发空间诊断，
-planner 经 `Firefly/VizVoxels` 发地图更新，经 `Firefly/Log` 发 log 宏诊断，
-由 firefly-viz 统一落盘；stderr 仅作进程诊断的双 sink，不作第二份录制。
-
-各进程以测量时刻设置 `sim_time`；无仿真时刻的进程日志回落 `wall_time`。
-常用实体为 `okvis/odom`、`okvis/traj`、`gt/pose`、`gt/traj`、`okvis/debug/*`、`fc/debug/*`、
-`plan/*`、`logs/<app>`。左右目 H.265 视频进入 RRD，VIO 点只按原图时间配对叠加在
-各自录制视图中，不把标记烧进视频，不额外保存独立关键点副本或 `/live/**` 预览。
-
-`configs/viz.toml` 控制视频、地图历史记录频率与队列容量；配置键和默认值见 `firefly_viz.config`。
-所有输入先复制到自有内存再释放 IPC loan，队列与环形缓存有界。体素分块完整后才更新地图；
-标量不携带体素数组。队列丢帧、编码耗时、输出 sample 大小与退出状态在 `viz/**` 查看。
-
-传感器延迟按原始采集 `sim_time` 记录墙钟耗时（秒）：
-`render/capture/stages_s` 为请求→提交、提交→回读、回读→装配、装配→处理；
-`render/capture/publish_s` 为像素处理、处理结束→发布、请求→发布。
-这些诊断不改图像时间戳；`fc/imu/posterior_age_s` 的后验年龄还包含视觉更新与等待下一拍的时间。
-
-实时查看先启动 `rerun`，再运行 `uv run firefly-viz`：默认连接 `127.0.0.1:9876` 并创建
-`logs/` 下唯一 RRD。`--save logs/run.rrd` 单独使用为离线录制；加 `--serve` 同时启动原生
-Viewer，或加 `--connect rerun+http://127.0.0.1:9876/proxy` 连接已有 Viewer。仅实时查看须
-显式加 `--no-save`。既有 RRD 路径拒绝覆盖，recording ID 每次运行独立。
-离线回放 `rerun logs/rmuc_run.rrd`；数值可用 `rerun rrd print`、`rerun rrd stats` 或
-Python RrdReader，读取方法见仓库 `.agents/skills/rerun/SKILL.md`。
-
-H.265 走当前 workspace Rerun SDK 的 `VideoStream` API，原生 Viewer 解码也需要 FFmpeg；
-浏览器端的 HEVC 能力不能替代原生回放验收。macOS 的 VideoToolbox 允许使用系统软件实现；
-编码器初始化失败会结束录制并保留错误证据。IPC 布局升级后须同批重建、重启所有生产者
-与消费者，不能混用不同版本的消息类型。
-
-文件录制固定启用完整 footer/manifest，正常关闭后供 Viewer 与随机访问工具直接打开；
-不提供关闭索引的配置项。索引内存随 chunk 数增长，独立于 Viewer、图像缓存和编码队列预算。
-异常中断或历史文件缺少 footer 时，可用标准 `rerun rrd optimize` 生成带索引副本。
-
-性能只认相同构建、硬件、输入与环境下的 trace 实测。主循环建 root span、设置 local parent、
-结束 flush；热路径不使用无条件格式化大对象的 `#[logcall]`。ConsoleReporter span 树
-经记录进程进入 RRD；先直接读输出，不为简单查看另造解析脚本。推理微基准不代表全栈吞吐或功耗。
-
-### 姿态与 VIO 诊断
-
-默认 blueprint 只展示飞行模式与安全状态、主备姿态状态、高度与位置误差、总推力、
-OKVIS 跟踪状态、回环提交次数与单帧处理耗时；FC tick rate 使用独立尺度。零偏、方差、四元数、
-底层控制量、录制队列与传感器耗时保留录制，按需手动添加视图。
-状态由 viz 转成 `StateChange`；数值曲线用 `SeriesLines.names` 标明分量及单位，
-多分量诊断必须在 `firefly_viz.telemetry` 声明含义，禁止依赖自动生成的数字下标。
-验收专用原始数组保留数值顺序和评分门槛，并使用同样的曲线命名规则。
-
-- `fc/imu/quaternion_xyzw`：控制实际使用的 Hamilton 姿态（主链路为 body→odom，备用为 body→本地重力系）（10Hz），供验收订阅；普通 Recorder 不录制，验收任务保存为 `acceptance/imu_attitude`。
-- `fc/debug/position_target_odom` / `position_error_odom`：odom 系目标与位置误差（10Hz）。
-- `fc/imu/health`：IPC 发布所选姿态可用、VIO 主链路新鲜、VIO 后验测量年龄（秒）；viz 分别记录为 `fc/imu/attitude_ready`、`fc/imu/vio_fresh` 状态时间线与 `fc/imu/posterior_age_s` 数值曲线。验收任务将原始数值保存为 `acceptance/imu_health`。
-- `fc/imu/source`：0 未就绪、1 VIO 预测、2 独立 ESKF 热备（10Hz），viz 记录为状态时间线；验收任务将原始数值保存为 `acceptance/attitude_source`。
-- `okvis/ipc/imu_publish_ms`：IMU 发布端发送时刻到 `okvis-imu` 四路发布完成的端到端耗时（毫秒，100Hz），用于验收事件唤醒与发布尾部；默认视图不显示。
-- `fc/standby_eskf/health`：独立 ESKF 就绪标记（0/1），viz 记录为状态时间线。
-- `fc/standby_eskf/imu_age_s`：IMU 墙钟接收年龄（秒），保留录制，默认视图不显示。
-- `fc/standby_eskf/accel_nis`：三轴加计创新的 NIS 数值。
-- `fc/standby_eskf/accel_gate`：是否实际应用地面加计校正（0/1），viz 记录为状态时间线。
-- `fc/standby_eskf/gyro_bias`、`quaternion_xyzw`、`attitude_variance`、`bias_variance`：
-  独立热备状态；姿态属于备用本地重力系，方差单位 rad² / (rad/s)²。
-- `okvis/gyro_bias`：viz 直接订阅 `Firefly/VioAttitude`，以 1Hz 记录机体系 VIO 陀螺零偏（rad/s）；主链路不发布姿态方差。
-- `vio/posterior/pose_imu_world`、`velocity_world`、`gyro_bias_imu`、`accel_bias_imu`：每次 VIO 后验的 IMU 世界位姿、世界速度及传感器系零偏。
-- `vio/prediction/pose_body_odom`、`velocity_body_odom`、`angular_velocity_body`、`posterior_age_s`：50Hz 的预测输出与对应后验年龄，用于和 GroundTruth 按 `sim_time` 对齐。
-- `vio/diagnostics/*`：逐视觉帧的左目点数、延续 ID 数、双目共有 ID 数、路标 ID 数，
-  双目共有 ID / 左目点数，以及当前帧优化前后的未加权像素重投影残差（有效投影数、
-  二维残差范数 RMS、横纵残差均值）。修正量为本次局部优化后减优化前的位置、速度，
-  旋转为前姿态到后姿态的旋转向量；不包含前端关联/绝对位姿初始化或回环同步。
-  零有效投影时残差占位为零，分析必须同时检查计数。RootSLAM 另保留逐帧原始像素点、
-  有效左目路标点与 ID，以及关键帧创建标志、延续/新建路标数和保留关键帧时间跨度。
-- `RUST_LOG=info,fc::diagnostics=debug` 开启 `fc/loop/*` 每控制 tick 观测，记录 tick 编号、
-  IMU 测量时间减 VIO 反馈测量时间、反馈墙钟接收年龄、tick 墙钟间隔、FRD 横滚/俯仰的
-  目标与反馈/未滤波原始陀螺角速度、力矩请求和分配、电机推力、饱和和姿态来源。
-  原始陀螺仅用于诊断；所有样本沿用 `sim_time`，重复时间由 tick 区分。该开关不改变控制参数。
-- `fc/debug/tilt_deg` 与 `fc/debug/tilt_err_deg`：估计倾角与仅供评测的真值倾角误差。
-- `fc/debug/rate_sp_frd` / `rate_flu`：PX4 角速度设定值（FRD）与实测角速度（FLU）。
-- `fc/debug/torque_sp_frd` / `allocated_control`：归一化力矩设定值与分配实际达到的控制量。
-- `fc/debug/saturated`：当前分配饱和状态；`saturated_ticks` 为每秒窗口内的饱和次数。
-- `fc/debug/hover_thrust`：归一化悬停推力。
-- `fc/arming/failed`：未解锁时首个失败解锁检查的位掩码（定义见 `firefly-flight::ArmingCheck`）。
-  VIO 已初始化后位 1 仍可能置位，表示独立 ESKF 热备尚未完成静止初始化；等待清零后重试
-  `ffctl fc arm`。viz 记录为具名状态，不显示位掩码曲线。
-- `fc/failsafe/flags` / `fc/failsafe/action`：失效条件位掩码与动作编码（定义见
-  `firefly-flight::safety`）；viz 记录为具名状态，1Hz 日志同时输出名字。
-- `fc/debug/state`：飞行模式状态时间线；验收任务将原始编码保存为 `acceptance/fc_state`。
-
-运行记录由 `firefly-viz` 写入 `logs/*.rrd`。
-
-#### 估计与回环诊断
-
-OKVIS 的位姿使用 `okvis/odom` 实体。
-`okvis/frame_processing_ms` 在独立二维曲线显示每个成功提交帧的处理墙钟耗时（毫秒），
-覆盖取帧、特征提取、匹配、优化、发布和边缘化，不包含进入处理线程前的排队与传感器延迟；
-曲线时间戳为图像测量时刻，后验测量年龄使用 `fc/imu/posterior_age_s`。
-`rootslam/frame_processing_ms` 则从双目入队计时到 IMU 线程消费后验，包含排队。
-`RUST_LOG=info,basalt-profile=debug` 将 RootSLAM 分段计时写入 RRD 的
-`logs/firefly-rootslam`：`frame_ns` 为图像测量时间，`begin_ns/end_ns` 为同一进程
-单调时钟边界。阶段覆盖入队、金字塔、时序跟踪、FAST 补点、新点双目匹配、
-光流输出背压、后端取帧后的 IMU 预积分、优化、诊断/地图、边缘化、后验发送与接收；
-优化另含线性化、QR、组装、求解、回代、误差评估耗时与迭代/拒绝次数。
-按帧连接边界，分别计算入队到光流开始、光流完成到后端取帧、后验发送到消费的等待；
-嵌套阶段不能重复相加，跨帧分位数不能相加当作端到端分位数。
-`okvis/loop_commits` 是后端已提交全图修订次数，任务评分记录为 `acceptance/loop_backend`；
-候选检索和几何验证不单独计为提交。外部库图模式的融合诊断位于 `corr/debug/*`。
-通讯测试和修订计数不替代完整轨迹精度验证。
+观测登记、topic 清单、开关、录制及完整性验收统一见 [可观测性](observability.md)。
+新增或修改诊断必须先遵循该文档的登记与添加流程。
 
 <a id="tests"></a>
 
@@ -444,7 +342,7 @@ cargo test --all-targets
 cargo test -p firefly-planner --test planner_contracts
 uv run --all-packages --extra test pytest -q -p no:cacheprovider
 FIREFLY_TEST_PYTHON="$PWD/.venv/bin/python" cargo test -p firefly-pubsub --test python_interop -- --ignored
-FIREFLY_RUN_VIDEO_ENCODER=1 uv run --all-packages --extra test pytest apps/firefly-viz/tests/test_video_integration.py -q
+FIREFLY_RUN_TELEMETRY_LOAD=1 uv run --all-packages --extra test pytest tests/system/test_mimir.py -q
 ```
 
 独立轨迹输出的真实 IPC 验证：先运行 `cargo build --release -p planner`，停止占用
@@ -452,9 +350,7 @@ Navigation/Trajectory/Reference 话题的进程，再运行
 `cargo test -p planner --test trajectory_ipc -- --ignored`。该用例启动 release 输出进程，
 验证多项式传输、心跳超时当拍发布顺序、恢复条件和坐标版本门控；不代表飞行验收。
 
-视频集成用例使用当前 `configs/viz.toml` 指定的真实编码器，检查帧数、采集时间关联和
-FFmpeg 解码后的画面；默认跳过不代表通过。Rerun 回放还需检查视频跳转、逐帧点集匹配、
-static 预览不进入文件和正常/异常退出时的完整性。构建、单测与实际 Viewer 回放分别记录结果。
+mimir 集成用例使用真实 IPC 与 release 录制器，读回 RRD 检查每条时间戳、数值、图像和退出完整性。默认跳过不代表通过；构建、单测、Viewer 检查和飞行验收分别记录。
 
 数学测试同时包含独立公式/解析值、中心差分和最终输出契约，不能只让代价与梯度互证。
 确定性任务必须成功；随机安全属性允许明确有界拒绝，但拒绝不计成功，不用整体成功率
@@ -533,7 +429,7 @@ OKVIS 请求接收与修订发布的真实 IPC 回归为
 交替顺序并校验代价精确一致，排除快照构造与线程池启动；不代表完整求解或整帧加速。
 
 Schur 微基准通过 `cargo bench -p firefly-okvis-x --bench schur --no-run` 预编译；
-待宿主机负载稳定后，先在另一终端运行 `uv run firefly-viz --save logs/schur_bench.rrd`，
+待宿主机负载稳定后，先在另一终端运行 `./target/release/mimir --save logs/schur_bench.rrd`，
 再运行 `RUST_LOG=info cargo bench -p firefly-okvis-x --bench schur`。录制路径必须未存在；
 完成后向记录进程发送 SIGINT 并等待退出。逐批样本及汇总在 `logs/schur-bench`。
 基准源码为 `apps/okvis2-x/benches/schur.rs`，确定性合成窗口、预热、批次数与数值门槛
@@ -638,7 +534,7 @@ cargo test --release -p firefly-planner --test rmuc_asset -- --ignored
 cargo test --release -p firefly-planner rmuc_22m_initial_trajectory_is_executable -- --ignored
 ```
 
-库图独立视角验收先启动 `uv run firefly-viz --save logs/map_validation.rrd`，再执行：
+库图独立视角验收先启动 `./target/release/mimir --save logs/map_validation.rrd`，再执行：
 
 ```bash
 RUST_LOG=info FIREFLY_QUERY_MAP=<独立查询.ffvmap> FIREFLY_QUERY_COUNT=20 \

@@ -7,7 +7,6 @@ dependencies = [
     "firefly-workspace",
     "firefly-mujoco",
     "firefly-sim",
-    "firefly-viz",
     "iceoryx2==0.10.0",
     "numpy>=2.5.4,<3",
     "pyarrow>=26.0.0",
@@ -19,7 +18,6 @@ dependencies = [
 firefly-workspace = { workspace = true }
 firefly-mujoco = { workspace = true }
 firefly-sim = { workspace = true }
-firefly-viz = { workspace = true }
 
 [project.scripts]
 firefly-evaluate = "firefly_evaluation.cli:main"

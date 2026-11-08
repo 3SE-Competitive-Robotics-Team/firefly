@@ -4,7 +4,7 @@ import sys
 import time
 
 import numpy as np
-from firefly_viz.messages import ScalarMessage, VizMessage
+from firefly_mujoco.messages import ScalarMessage, VizMessage
 
 from .disturbance_metrics import round_checks, score_disturbance
 from .disturbance_sim import ForcePulse, TOPIC

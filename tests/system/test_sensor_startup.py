@@ -43,7 +43,7 @@ def _sensor_startup() -> None:
     mesh = scene.visual
     if not mesh.is_file():
         raise FileNotFoundError(f"RMUC 视觉资产缺失：{mesh}")
-    for name in ("firefly-okvis-x", "fc", "render"):
+    for name in ("firefly-okvis-x", "fc", "render", "mimir"):
         if not (ROOT / "target" / "release" / name).is_file():
             raise RuntimeError(f"missing release binary: {name}")
     output = ROOT / "logs" / f"vio_sensor_startup_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.rrd"
@@ -61,7 +61,7 @@ def _sensor_startup() -> None:
                 raise RuntimeError(f"{name} exited ({child.process.returncode}):\n" + "\n".join(child.tail))
 
     try:
-        start("viz", [sys.executable, "-m", "firefly_viz.main", "--save", str(output)])
+        start("viz", [str(ROOT / "target/release/mimir"), "--save", str(output)])
         time.sleep(2)
         check_alive()
         start("render", [str(ROOT / "target/release/render")])
@@ -157,13 +157,19 @@ def _verify_recording(path: Path) -> None:
 
     reader = RrdReader(path)
     counts = Counter()
-    matched = Counter()
+    image_times = {camera: set() for camera in ("left", "right")}
+    point_times = {camera: set() for camera in ("left", "right")}
     for chunk in reader.store(store=reader.recordings()[0]).stream():
         name = chunk.entity_path
         counts[name] += chunk.num_rows
+        batch = chunk.to_record_batch()
         for camera in ("left", "right"):
-            if name == f"/cameras/{camera}/annotation":
-                matched[camera] += sum(any(row or []) for row in chunk.to_record_batch().column("matched").to_pylist())
+            if name == f"/cameras/{camera}/image":
+                image_times[camera].update(batch.column("sim_time").cast("int64").to_pylist())
+            if name == f"/cameras/{camera}/points" and "track_id" in batch.schema.names:
+                point_times[camera].update(
+                    stamp for stamp, ids in zip(batch.column("sim_time").cast("int64").to_pylist(),
+                                               batch.column("track_id").to_pylist()) if ids)
         if name == "/render/capture/publish_s":
             for values in chunk.to_record_batch().column("Scalars:scalars").to_pylist():
                 assert len(values) == 3
@@ -175,7 +181,7 @@ def _verify_recording(path: Path) -> None:
                  "render/capture/publish_s"):
         assert counts[f"/{name}"], f"missing recording entity: {name}"
     for camera in ("left", "right"):
-        assert matched[camera] > 0, f"OKVIS keypoints must match at least one recorded {camera} image"
+        assert image_times[camera] & point_times[camera], f"OKVIS keypoints must match at least one recorded {camera} image"
     assert not any(name.startswith("/world/") for name in counts), "field mesh included in recording"
     assert not any(name.startswith(("/cameras/depth", "/snapshots/", "/live/", "/okvis/debug/keypoints/"))
                    for name in counts), "extra camera recording included"

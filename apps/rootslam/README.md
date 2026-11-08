@@ -11,7 +11,7 @@ equivalence, and performance reproduction have not been verified.
 Run the dataset pipeline with `cargo run --release -p firefly-rootslam --bin firefly-rootslam-dataset`.
 It reads the fixed [dataset configuration](../../configs/firefly-rootslam-dataset.toml), which uses
 an original Basalt checkout beside this workspace. Adjust its dataset path, start
-`uv run firefly-viz --save logs/rootslam.rrd` in another terminal and run
+`./target/release/mimir --save logs/rootslam.rrd` in another terminal and run
 `RUST_LOG=info cargo run --release -p firefly-rootslam --bin firefly-rootslam-dataset`
 from the workspace root.
 Configuration includes `dataset_path`, `dataset_type`, `camera_calibration`, and
@@ -93,7 +93,7 @@ optical-flow worker and reports frame counts, track counts, and mean track lengt
 through the existing diagnostics channel. Producer errors and panics terminate
 the input queue and join the worker before returning an error.
 Pangolin GUI and live device capture are not provided by these headless entries.
-Run with `RUST_LOG=info` and the workspace `firefly-viz` recorder to capture
+Run with `RUST_LOG=info` and the workspace `mimir` recorder to capture
 iteration diagnostics in RRD.
 
 The `"global-ba"` task replays a frozen global problem captured with
@@ -114,7 +114,7 @@ from one run. Both archive destinations must be new files.
 Export that matching problem, result and optional final trajectory to Rerun with
 `uv run python apps/rootslam/export_rrd.py --problem logs/rootslam_global_problem.json --replay logs/rootslam_global_result.json --trajectory logs/rootslam_trajectory.txt --output logs/rootslam_map.rrd`.
 This offline recording contains optimized landmarks, keyframes, graph edges and
-convergence metadata; live `firefly-viz` captures runtime diagnostics separately.
+convergence metadata; live `mimir` captures runtime diagnostics separately.
 
 For the simulated closed loop, `firefly-rootslam` subscribes to Render's
 `Firefly/CameraLeft` and `CameraRight` plus Sim's `Firefly/Imu`. It pairs stereo

@@ -12,6 +12,7 @@ use firefly_pubsub::subscriber::Subscriber;
 #[test]
 #[ignore = "requires FIREFLY_TEST_PYTHON pointing to the synced workspace Python"]
 fn viz_python_layout_matches_rust_offsets_and_sizes() {
+    use firefly_pubsub::log::LogMessage;
     use firefly_pubsub::trajectory::PlannerStatusMessage;
     use firefly_pubsub::viz::{SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage};
     use std::mem::{offset_of, size_of};
@@ -19,13 +20,15 @@ fn viz_python_layout_matches_rust_offsets_and_sizes() {
     let python = std::env::var("FIREFLY_TEST_PYTHON").expect("workspace Python path");
     let script = r"
 import ctypes
-from firefly_viz.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage
+from firefly_mujoco.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage
 from firefly_evaluation.mission_io import PlannerStatusMessage
+from firefly_mujoco import LogMessage
 for cls, fields in [
     (ScalarMessage, ['timestamp', 'scalars', 'sequence']),
     (VizMessage, ['timestamp', 'points', 'sequence']),
     (VoxelMessage, ['voxels', 'sequence', 'chunk_index', 'chunk_count']),
     (PlannerStatusMessage, ['timestamp', 'goal_timestamp', 'finished']),
+    (LogMessage, ['sim_time', 'sequence', 'dropped_records']),
 ]:
     print(ctypes.sizeof(cls), *(getattr(cls, name).offset for name in fields))
 print(SCALAR_BUFFER_SIZE)
@@ -61,6 +64,10 @@ print(SCALAR_BUFFER_SIZE)
             offset_of!(PlannerStatusMessage, timestamp),
             offset_of!(PlannerStatusMessage, goal_timestamp),
             offset_of!(PlannerStatusMessage, finished),
+            size_of::<LogMessage>(),
+            offset_of!(LogMessage, sim_time),
+            offset_of!(LogMessage, sequence),
+            offset_of!(LogMessage, dropped_records),
             SCALAR_BUFFER_SIZE,
         ]
     );

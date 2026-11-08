@@ -11,6 +11,7 @@ const DESKTOP_APPS: &[&str] = &[
     "firefly-rootslam",
     "lightglue",
     "localization",
+    "mimir",
     "planner",
     "quad",
     "render",
@@ -28,6 +29,7 @@ const BOARD_APPS: &[&str] = &[
     "firefly-okvis-x",
     "lightglue",
     "localization",
+    "mimir",
     "motor",
     "planner",
 ];

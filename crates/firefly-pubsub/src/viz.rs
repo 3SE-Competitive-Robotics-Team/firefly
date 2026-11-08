@@ -1,13 +1,13 @@
 //! Rerun 数据出口：小型标量、空间诊断和体素分别使用有界 IPC 话题。
-//! 计算进程只发布测量时间与数值，录制策略及显示由 firefly-viz 持有。
+//! 计算进程只发布测量时间与数值，录制策略及显示由 mimir 持有。
 
 use iceoryx2::prelude::*;
 use std::cell::Cell;
 
-/// 统一可视化话题（Rust 发布端 → Python `firefly-viz` 订阅端）。
+/// 统一可视化话题（Rust/Python 发布端 → Rust `mimir` 订阅端）。
 pub const VIZ_TOPIC: &str = "Firefly/Viz";
 
-/// 消息类型（`VizMessage::kind` 取值，与 `firefly_viz/messages.py` 一致）。
+/// 消息类型（`VizMessage::kind` 取值，与 `firefly_mujoco/messages.py` 一致）。
 pub mod kind {
     /// 位姿（`okvis/odom`、`gt/pose` 等刚体变换实体）。
     pub const POSE: u32 = 1;
@@ -58,7 +58,7 @@ pub const SCALARS_MAX: usize = 4;
 /// 可视化消息（扁平 tagged-union：`kind` 区分类型，其余字段按类型取用）。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
-#[type_name("FireflyVizMessageV2")]
+#[type_name("FireflyVizMessage")]
 pub struct VizMessage {
     /// 消息类型（[`kind`] 常量）。
     pub kind: u32,

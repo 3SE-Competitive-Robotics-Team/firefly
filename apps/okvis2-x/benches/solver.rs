@@ -1,4 +1,4 @@
-//! Production graph solves on repeatable stereo geometry; record samples through firefly-viz.
+//! Production graph solves on repeatable stereo geometry; record samples through mimir.
 use firefly_okvis_x::{
     cameras::{no_distortion::NoDistortion, pinhole_camera::PinholeCamera},
     ceres::{

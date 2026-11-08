@@ -1,5 +1,5 @@
 //! 结构化日志消息（iceoryx2 zero-copy）：各进程经 `Firefly/Log` 话题向
-//! `firefly-viz` 聚合，统一写 rerun `TextLog`（持久可检索）；stderr 只作
+//! `mimir` 聚合，统一写 rerun `TextLog`（持久可检索）；stderr 只作
 //! 进程级诊断，不作记录载体。
 //!
 //! 设计约束：
@@ -14,9 +14,9 @@
 
 use iceoryx2::prelude::*;
 
-/// 统一日志话题（各进程发布端 → `firefly-viz` 聚合端）。
+/// 统一日志话题（各进程发布端 → `mimir` 聚合端）。
 pub const LOG_TOPIC: &str = "Firefly/Log";
-/// 突发事件与 trace 诊断的订阅队列上限；Python 聚合端使用同值。
+/// 突发事件与 trace 诊断的订阅队列上限；mimir 使用同值。
 pub const LOG_BUFFER_SIZE: usize = 256;
 
 /// 日志级别（`log::Level` 的数值镜像，聚合端映射到 rerun `TextLogLevel`）。
@@ -66,6 +66,10 @@ pub struct LogMessage {
     pub trace_id_hi: u64,
     /// trace-id 低 64 位。
     pub trace_id_lo: u64,
+    /// Per-publisher send sequence, including failed sends.
+    pub sequence: u64,
+    /// Cumulative records lost before IPC, including queue and publish failures.
+    pub dropped_records: u64,
 }
 
 impl Default for LogMessage {
@@ -82,6 +86,8 @@ impl Default for LogMessage {
             wall_nanos: 0,
             trace_id_hi: 0,
             trace_id_lo: 0,
+            sequence: 0,
+            dropped_records: 0,
         }
     }
 }
@@ -151,9 +157,7 @@ mod tests {
     #[test]
     fn log_message_is_plain_old_data() {
         assert_zero_copy_send::<LogMessage>();
-        // 定长布局（8 字节对齐）：1(level)+1(tag_len)+2(reserved)+4(text_len)+
-        // 64(tag)+512(text)+8(sim)+8(wall_secs)+4(wall_nanos)+4(pad)+8+8(trace) = 624
-        assert_eq!(std::mem::size_of::<LogMessage>(), 624);
+        assert_eq!(std::mem::size_of::<LogMessage>(), 640);
         let m = LogMessage::default();
         assert_eq!(m.log_level, level::INFO);
         assert!(m.sim_time < 0.0);

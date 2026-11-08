@@ -27,6 +27,7 @@ use firefly_pubsub::map::{MAP_REGION_TOPIC, MAP_TOPIC, MapElement, MapRegion};
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::Subscriber;
+use firefly_pubsub::trajectory::{MANDATORY_STOP_TOPIC, MandatoryStopMessage};
 use firefly_pubsub::viz::{
     ARROWS_MAX, POINTS_MAX, VIZ_TOPIC, VOXELS_MAX, VizMessage, VizPublisher, VoxelMessage, kind,
 };
@@ -53,25 +54,6 @@ const PERCEIVED_VIEW_RADIUS_M: f64 = 4.0;
 /// 缺省配置：按安装布局解析，与启动目录无关。
 fn default_config() -> PathBuf {
     firefly_config::paths::config("planner.toml")
-}
-
-/// 强制停止话题（外部工具 → 规划进程；对照官方 `mandatory_stop` topic）。
-const MANDATORY_STOP_TOPIC: &str = "Firefly/MandatoryStop";
-
-/// 强制停止消息：无载荷，收到即停（对照官方 `std_msgs::Empty`；timestamp
-/// 仅诊断用）。
-#[repr(C)]
-#[derive(Debug, Clone, Copy, ZeroCopySend)]
-#[type_name("FireflyMandatoryStop")]
-pub struct MandatoryStopMessage {
-    /// 发送时刻（墙钟秒，仅诊断用）。
-    pub timestamp: f64,
-}
-
-impl Default for MandatoryStopMessage {
-    fn default() -> Self {
-        Self { timestamp: -1.0 }
-    }
 }
 
 struct Args {
@@ -152,7 +134,7 @@ struct App {
     republish_trajectory: bool,
     /// 管理器行为参数（来自配置，启动日志展示）。
     manager_options: ManagerOptions,
-    /// 可视化发布端（经 `Firefly/Viz` 话题，`firefly-viz` 进程统一写 rerun）。
+    /// 可视化发布端（经 `Firefly/Viz` 话题，`mimir` 进程统一写 rerun）。
     viz_pub: Option<VizPublisher>,
     /// 日志聚合句柄（主循环作用域持有，每 tick 传给 `pump_log_ipc`；
     /// 发布端只活在创建线程，无跨线程触碰，见 `firefly-observability`）。
@@ -730,7 +712,7 @@ impl App {
         CallbackProgression::Continue
     }
 
-    // --- 可视化发布（经 Firefly/Viz 话题，firefly-viz 进程统一写 rerun）---
+    // --- 可视化发布（经 Firefly/Viz 话题，mimir 进程统一写 rerun）---
 
     /// 发布一条可视化消息；无发布端或发布失败时静默降级（可视化不阻断规划）。
     fn viz_publish(&self, msg: &VizMessage) {
@@ -1039,7 +1021,7 @@ fn main() {
             std::process::exit(1);
         });
     // 可视化发布端在 App::new 内随进程共享节点创建（经 Firefly/Viz 话题，
-    // firefly-viz 进程统一写 rerun）
+    // mimir 进程统一写 rerun）
     match App::new(
         map_file,
         toml_cfg.config,
