@@ -12,10 +12,8 @@ rust-version.workspace = true
 
 [dependencies]
 fastrace = { workspace = true }
-firefly-error = { workspace = true }
 firefly-map = { workspace = true }
 firefly-trajectory = { workspace = true }
-log = { workspace = true }
 nalgebra = { workspace = true }
 
 [lints]

@@ -118,12 +118,6 @@ impl TraceContext {
         jiff::Timestamp::from_nanosecond(nanos).unwrap_or(jiff::Timestamp::UNIX_EPOCH)
     }
 
-    /// 单调发送时间（纳秒，`CLOCK_MONOTONIC` 自启动）。
-    #[must_use]
-    pub fn send_ts_mono_ns(&self) -> u64 {
-        self.send_ts_mono_ns
-    }
-
     /// 采集当前墙钟（jiff）+ 单调（`CLOCK_MONOTONIC`）时间戳。
     ///
     /// 单调时钟失败时（如 macOS：iceoryx2-pal 的 `CLOCK_MONOTONIC` 常量误写为

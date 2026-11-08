@@ -6,7 +6,7 @@
 默认从空会话地图启动，使用 RootSLAM 视觉惯性估计与稀疏建图，planner 独立执行 EGO 深度融合和规划，不依赖已知世界起点、
 预建地图或神经网络权重。ALIKED/LightGlue 库图定位和静态地图是显式可选增强。
 真值只供传感器生成、评测和可视化，不参与估计或控制。
-当前部署用于仿真研究与算法验证，能力边界和飞行结果须分别验收。
+稀疏地图优化尚未反馈到在线导航；设备同步、标定、实时性和飞行能力须分别验收。
 
 ## 文档
 
@@ -24,7 +24,8 @@
 | `apps/rootslam` | RootSLAM 在线双目/IMU、稀疏建图及离线数据集入口 |
 | `crates/firefly-{basalt,calibration,opengv,rootslam-mapping}` | 局部 VIO、标定、几何求解与稀疏地图优化 |
 | `crates/firefly-ego-map` | EGO 局部概率占据、射线融合与障碍膨胀 |
-| `crates/firefly-{map,search,trajectory,optimize,cost,obstacle,planner}` | 占据地图、A*、MINCO、L-BFGS、代价、动态障碍与重规划 |
+| `crates/firefly-{map,search,trajectory,optimize,cost,planner}` | 占据地图、动态障碍体素化、A*、MINCO、L-BFGS、代价与重规划 |
+| `crates/firefly-cost/src/{swarm,formation}.rs` | 库级集群间距与队形代价；应用集群通信未接入 |
 | `crates/firefly-{localization,vision-map,vision-match}` | 定位融合、视觉库图与匹配 |
 | `crates/firefly-flight` | 飞行模式、安全条件、姿态/位置控制与电机分配 |
 | `crates/firefly-imu` | 独立备用姿态/陀螺零偏 ESKF、静止初始化与加计 NIS |
@@ -50,6 +51,7 @@
 | `render` | 视觉传感器进程：订阅真值位姿渲染双目与深度并发布 IPC，`--offline` 供离线建库 |
 | `quad` | 独立微无人机第三人称飞行游戏，不接 IPC/VIO |
 | `ffctl` | 地面站 CLI：把操作员意图发成 IPC 消息，命令为 `<域> <动词>` 两层 |
+| `camera`、`imu`、`motor` | 板载 V4L2 相机、SPI BMI088、sysfs PWM；通过标准 IPC 连接算法进程 |
 
 ### Python 进程（`apps/`）
 
@@ -74,22 +76,15 @@ cargo build
 cargo test --all-targets
 ```
 
-Rust 应用的 release 构建统一走 xtask（`.cargo/config.toml` 已把 `cargo xtask` 指向
-`xtask` 包）：
+Rust 应用的 release 构建入口：
 
 ```bash
 cargo xtask release
 ```
 
-`release` 为全部 Rust 应用执行 release 构建；`--target host`（默认）在本机编译，
-`--target board` 在 Apple container 的 Debian trixie 里原生编译机载进程。应用名单只在
-`xtask/src/target.rs` 维护，不要在脚本、CI 或文档里复制第二份；新增 xtask 子命令时同步
-`usage` 文本与本说明。`cargo xtask deploy` 把 aarch64 构建、配置和默认模型打成 zstd 包，
-经 adb 部署到 `firefly-0001:/opt/firefly`，结束后重新启动 `firefly.service` 并确认
-supervisor 应答。`firefly.service` 由镜像构建 `orangepi-build` 默认启动；进程清单在
-`configs/processes.toml`，用 `ffctl process status/start/stop/restart/enable/disable` 管理。
-实际运行须准备 RMUC 场地资产、图形会话和 release 构建，按开发指南检查宿主机、启动与清理
-进程。CI 绿色不代表真实进程悬停、22m 往返或回环验收通过。
+`--target host`（默认）构建桌面应用，`--target board` 在 Apple container 中原生构建
+机载进程；应用名单由 `xtask/src/target.rs` 维护。部署、进程管理、场地资产与验收步骤见
+[开发指南](docs/development.md#run)。构建与单测通过只覆盖各自验证范围。
 
 ## References
 

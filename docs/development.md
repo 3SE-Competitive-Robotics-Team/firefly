@@ -2,8 +2,18 @@
 
 开发、运行、记录和验证统一在本文；系统职责、坐标、算法及能力边界见
 [architecture.md](architecture.md)。路径和命令均相对仓库根目录。
-观测契约统一见 [observability.md](observability.md)；README 只提供介绍和入口。参数以代码默认值和配置为准，测试用例与门槛以测试源码为准。
-历史排查和试飞结果留在 Git 历史及 `logs/` 证据中，不另建平行规范。
+观测契约统一见 [observability.md](observability.md)；README 提供介绍和入口。
+
+## 维护与收敛
+
+- 文档描述当前职责、契约、操作入口和验收边界；同一规则只维护一处，其余位置链接到该处。
+- 调整职责时，同步清理旧接口、配置、依赖与文档。删除前全仓追踪生产、测试、工具和部署
+  消费者，确认保留路径仍可构建、运行和验证。
+- 参数、默认值与单位归对应类型及配置，测试条件与门槛归测试源码；文档只解释来源和使用边界。
+- 注释写用途、不变量、边界条件和仍成立的原因；过程、修复对比和计划分别归 Git 历史、
+  运行证据与 issue。运行诊断归 RRD，配置、指纹和评分摘要归 `logs/` 的 JSON/HTML。
+- 编译、类型检查、单测、真实 IPC、数据集与飞行分别验证和报告；未运行、跳过、失败分别说明，
+  不放宽门槛，也不把局部通过扩展为整机能力。
 
 ## 实现约定
 
@@ -12,7 +22,7 @@
 - 错误用 firefly-error：kind/status 分类，操作名统一 `.with_operation(...)`，其他诊断字段
   用 `.with_context(...)`；不得以 `"operation"` 上下文键绕过结构化字段。
   `Permanent` 表示不可重试，`Temporary` 表示允许重试。
-- 可观测性：关键函数 `#[fastrace::trace]`，日志用 log 宏，禁 println!。
+- 运行诊断：关键函数 `#[fastrace::trace]`，日志用 log 宏；CLI 的帮助、结果和导出内容可写 stdout。
 - 场景光照唯一一份（`firefly-render::lighting`），所有相机共用；视角差异只写相机
   配置（曝光/色调映射），禁止给单个相机加专属可聚簇光源（`PointLight`/`SpotLight`）
   ——Bevy GPU 聚簇在多视图同帧渲染时不按 `RenderLayers` 隔离，会渗进别的视角。
@@ -30,24 +40,12 @@
 框架用法见官方 [Rust 框架文档](https://usage.jdx.dev/rust/) 的 quickstart、subcommands、
 args-and-flags、validation。
 
-### 注释规范
-
-- **禁止过程叙事**：注释只描述现在的设计与约束，不写「曾/旧版/之前/原来/不再/
-  修复了/从 X 改为 Y/当时」等演变史——历史归 git log 与 commit message。
-- **禁止 bug 战争故事**：现象、复现步骤、排查过程、修复日期、新旧实测对比一律不进
-  注释。背后有仍成立的陷阱时，改写成祈使句约束（「必须 X，否则 Y」），只留结论。
-- **禁止阶段/计划叙事**：「wave N」「待移植」「尚未接入」「后续将」等不进代码——
-  代码只陈述已存在的事实，计划放 issue。
-- doc 注释（///、//!）：写用途、单位、不变量、边界条件；与参考实现的对应关系
-  （如「对照 OpenVINS xxx」）保留。
-- 行内注释（//）：只在代码无法自解释时解释「为什么」，不复述代码；注释掉的死代码
-  直接删除。
-
 ### 配置
 
 - **TOML、一应用一份**：统一放仓库顶层 `configs/`（`sim.toml` / `firefly-rootslam.toml` / `planner.toml`），
   启动时加载（Rust 支持 `--config` 换文件）。配置文件可选：缺文件记录一行 INFO 并使用
   代码默认值；文件存在但不可读、格式或参数无效仍报错，不静默回落。
+- **拒绝未知键**：配置解析检查嵌套字段，避免拼写错误静默使用默认值；复合配置保留各部分的校验。
 - **最小化**：保留必填键，只对有默认值的键写差异覆盖；无覆盖项时保留仅含用途和
   默认值来源注释的配置文件。缺失键使用代码默认值；
   纯数据 Options 直接 `serde::Deserialize` + `#[serde(default)]`，Python 用标准库
@@ -61,14 +59,14 @@ args-and-flags、validation。
 - Rust 主配置通过 `firefly_config::startup(path, init_logging, validate)` 加载。
   普通进程传入 `firefly_observability::init`；校验函数返回 `firefly_error::Result<()>`。
   无额外参数约束时传入 `|_| Ok(())`。配置类型只描述字段、默认值和参数约束，
-  不再包装文件读取、安装日志或调用 `process::exit`；启动错误交给 `main` 返回或处理。
+  文件读取、日志安装和退出处理分别由公共入口及 `main` 负责。
 - Python 主配置通过 `firefly_workspace.startup(path, decode)` 加载。
   `decode` 将字典转换为应用配置并校验，不创建运行资源；默认安装标准库 INFO 日志。
   宿主需要特殊日志格式时通过 `init_logging` 参数提供初始化函数。
 - 公共入口成功返回后才创建 IPC、模型、工作线程、窗口等资源。辅助配置在此之后使用
   `firefly_config::load` / `firefly_workspace.load_toml`，不重复初始化进程日志。
   领域对象构造时仍保留自己的不变量校验。
-- 配置来源由公共加载模块记录，调用方不再重复打印“已加载配置”。缺文件与空文件
+- 配置来源由公共加载模块记录，调用方不重复打印。缺文件与空文件
   使用相同默认值；缺文件仅在转换、校验成功后提示回落。INFO 的显示尊重日志过滤设置，
   Rust 可用 `RUST_LOG=info` 查看。
 - Bevy 先独立安装日志设施，在配置通过后安装其余插件。使用 `LogPlugin` 时，
@@ -76,9 +74,8 @@ args-and-flags、validation。
 
 新应用以可编译的 [Rust 最小应用](../crates/firefly-config/examples/minimal.rs) 和
 [Python 最小应用](../packages/firefly-workspace/examples/minimal.py) 为入口示例；
-Bevy 日志接线参考 [quad](../apps/quad/src/main.rs)。示例调用公共实现，配置默认值
-仍归各应用自己的类型。Rust 示例随 `cargo check --workspace --all-targets` 编译，
-不维护第二份示例代码或独立应用名单。
+Bevy 日志接线参考 [quad](../apps/quad/src/main.rs)。Rust 示例随
+`cargo check --workspace --all-targets` 编译。
 
 标定与噪声改对应 Options 默认值，doc 注释写单位和来源；部署覆盖同步 `configs/`。
 升级视觉依赖必须运行相关前端、投影及匹配回归，不放宽容差；依赖统一在根 Cargo/uv workspace 和锁文件。
@@ -88,23 +85,9 @@ purecv 的来源与固定版本以 workspace 依赖及 Cargo.lock 为准，发�
 
 ## 提交与 PR
 
-commit message 沿用 `<type>(<scope>): <摘要>`。**PR 标题用 `<type>: <中文摘要>`，不写括号**
-（中英文括号都不用）：括号里的补充说明改成逗号分隔的短句，保证在 PR 列表和合并提交里
-一行可读。
-
-- `feat: 切换到 PX4 控制核心，补起降平滑、安全标志与 VIO 验收`
-- `fix: 修正悬停参考的速度前馈`
-- `perf: 共用约束点采样，单次规划 2.08→0.98ms`
-- `docs: 补充 PR 标题约定`
-- `refactor: 删除旧角度模式与 mixer，quad 切到 PX4 链`
-
-反例：
-
-- `feat(fc): 切换到 PX4 控制核心（起降平滑）`：PR 标题不写 scope 括号
-- `feat: 切换到 PX4 控制核心 (VIO 验收)`：不写英文括号
-- `feat: 切换到 PX4 控制核心（WIP，后续补安全标志）`：不写阶段或计划叙事
-
-PR 标题描述整个 PR 的最终结果，不写 WIP、阶段编号或“后续再做”；同一条规则只维护在本节。
+commit message 使用 `<type>(<scope>): <摘要>`；PR 标题使用 `<type>: <中文摘要>`，
+描述整个 PR 的最终结果，不写中英文括号、WIP 或阶段编号。补充信息用逗号分隔，
+例如 `fix: 修正悬停参考的速度前馈`。PR 说明交代行为变化、依据和实际验证结果。
 
 <a id="run"></a>
 
@@ -146,33 +129,30 @@ cargo run --release -p planner
 
 ### 机载部署
 
-板载计算是 Orange Pi Zero 3W（aarch64 Debian 13，glibc 2.41）。`--target board` 在
-Apple container 的 `rust:1.98.1-trixie` 里原生构建，镜像按 digest 固定，产物在
-`target/container/aarch64/release`；不维护交叉 sysroot。首次构建前运行
-`container system start`，需要拉取镜像并编译依赖。构建镜像是在基础镜像上
-加装 `libclang-dev` 的派生镜像（`v4l2-sys-mit` 用 bindgen 生成 V4L2 绑定），
-`xtask` 首次运行会 `container build` 并复用缓存。
+板载平台为 Orange Pi Zero 3W，系统与硬件见 [硬件规格](hw/spec.md)。
+`--target board` 在 Apple container 的 Debian trixie 镜像中原生构建；镜像 digest、
+工具链及 bindgen 依赖由 [`xtask/src/container.rs`](../xtask/src/container.rs) 固定，
+产物在 `target/container/aarch64/release`。首次运行前启动 `container system start`；
+xtask 自动构建派生镜像并复用缓存，不维护交叉 sysroot。
 
-产物固定放 `/opt/firefly/{bin,configs,models}`，进程必须从 `/opt/firefly` 启动，
-默认的相对配置和模型路径才成立：
+产物固定放 `/opt/firefly/{bin,configs,models}`：
 
 ```bash
 cargo xtask release --target board
 cargo xtask deploy
 ```
 
-`release --target board` 只构建机载应用（不含 render/quad），并在容器内构建设备端
-`xtask` 解包器；`deploy` 把二进制、`configs/*.toml` 与默认视觉模型打成
+板载应用名单由 [`xtask/src/target.rs`](../xtask/src/target.rs) 维护。
+`deploy` 把二进制、`configs/*.toml` 与默认视觉模型打成
 `dist/firefly-aarch64.zst`（zstd 容器，不是 tar），推到设备后由同一 xtask 的 `unpack`
 解包，`--device` 默认 `firefly-0001`。解包前会停掉 `firefly.service` 并清空
 `/opt/firefly/{bin,configs,models}`，退役的进程与配置不会残留在板上；`logs` 与镜像
 预置的 `systemd` 保留。解包后把每个二进制软链到 `/usr/local/bin`，因此 `ffctl`、
 `fc` 等在任意目录、非交互 `adb shell` 下都可直接调用，不需要改镜像的 shell 配置。
-最后重新 `systemctl start firefly`，并以 `ffctl process status` 能在超时内应答为就绪
-判据——`systemd` 的 active 状态早于 supervisor 的 socket 就绪，只看 `is-active` 会把
-“起来了但不应答”判成成功。启动失败或解包缺文件时 `deploy` 以非零退出，不留“已部署但
-没运行”的中间态。板载 adbd 走 legacy shell 协议，`adb shell` 不传递远端退出码，所以
-这两项都靠远端输出判定。
+最后重新 `systemctl start firefly`，以 `ffctl process status` 在超时内应答为就绪判据。
+systemd active 只表示服务已启动；socket 应答才证明 supervisor 可管理进程。
+启动失败或解包缺文件时 `deploy` 非零退出。板载 adbd 使用 legacy shell 协议，
+远端退出结果通过输出判定，不能依赖 `adb shell` 的本地退出码。
 
 二进制按安装布局定位配置与模型，与启动目录无关；解析顺序（越显式越优先）：
 
@@ -180,27 +160,28 @@ cargo xtask deploy
 2. 可执行文件的上两级（部署布局下 `bin/<app>` → 安装根；仅当该前缀下存在 `configs/`）；
 3. 编译期默认：板载 `/opt/firefly`，开发机构建为仓库根。
 
-`--config <path>` 仍可显式覆盖单个配置文件。运行 `firefly` 前若使用非标准前缀，
-设 `FIREFLY_ROOT` 即可，不需要改任何配置文件。可复现性由固定镜像 digest、Rust 1.98.1、`--locked`
-和 `Cargo.lock` 保证；升级 Rust 或 Debian 时只需更新 `xtask/src/container.rs` 的
-基础镜像 digest，派生构建镜像的标签由工具链与 digest 前缀拼出，会自动重建。
-干净构建先删除 `target/container/`，再执行上面的命令。
+解析由 [`firefly-config::paths`](../crates/firefly-config/src/lib.rs) 实现。
+`--config <path>` 可覆盖单个配置文件。非标准安装前缀使用 `FIREFLY_ROOT`。
+supervisor 的相对命令 `bin/<app>` 和 `logs/process` 仍依赖工作目录；运行
+`ffctl process supervise` 必须以安装根为 cwd。安装根定位不替代这项进程运行约束。
+可复现输入为镜像 digest、Rust 工具链、`--locked` 和 `Cargo.lock`。
+升级基础镜像时同步更新容器配置，派生镜像按工具链与 digest 生成标签。
 
 板侧传感器与执行器由三个独占进程接替仿真侧的 `render` 与 `firefly-sim`：
 
 | 进程 | 设备 | 话题 |
 |---|---|---|
-| `camera` | `V4L2` 节点（MIPI-CSI） | 发布 `Firefly/CameraLeft`、`CameraRight`、可选 `Depth` |
+| `camera` | `V4L2` 节点 | 发布 `Firefly/CameraLeft`、`CameraRight`、可选 `Depth` |
 | `imu` | `spidev`（`BMI088` 两片） | 发布 `Firefly/Imu` |
 | `motor` | `sysfs` PWM | 订阅 `Firefly/Control`，发布 `Firefly/Airframe` |
 
-三者都只在板侧构建，宿主机上不参与构建矩阵。上板前按配置文件核对：
+三者纳入 xtask 的 board release 清单，host release 清单不包含它们。上板前按配置核对：
 
 - `configs/camera.toml`：`/dev/videoN` 编号随内核与接线变化，先用
   `v4l2-ctl --list-devices` 核对。分辨率由 IPC 定长消息定死（320×240），
   驱动不接受该组合时进程直接报错，不静默换成别的分辨率。删掉 `[depth]`
-  就不发布深度。**USB `D430` 不是 `V4L2` 设备**（需 librealsense），
-  当前实现只覆盖走内核 `V4L2` 的相机。
+  就不发布深度。当前实现只覆盖配置指定的 `V4L2` 流，具体相机的格式、同步、
+  时间戳和标定须在实机验证，不能从设备名称推断兼容性。
 - `configs/imu.toml`：目前只实现 `BMI088`，`WHO_AM_I` 不匹配直接退出，
   不会在错型号上继续跑。寄存器初始化值取自数据手册，首次上板须核对
   `Firefly/Imu` 的读数是否落在量程内的合理重力/静止零偏。
@@ -211,18 +192,17 @@ cargo xtask deploy
   `can't parse pwm device`），所以上板前必须先补 PWM 通道的 DT 节点，否则
   `sysfs` 只能写周期和占空比、`enable` 永远失败。
 
-三个驱动默认 `autostart = false`：板上还没有相机与 IMU，SPI 控制器也需要先在设备树
-启用才有 `/dev/spidev*`。硬件到位后逐个 `ffctl process enable camera`、`imu`、`motor`
-打开并单独验证，不要一次性全开——失败原因会互相掩盖。`processes.toml` 是烧录语义，
-`deploy` 会覆盖它，所以在设备上手动改的结果不持久。
+三个驱动默认 `autostart = false`。先核对设备节点与设备树，再逐个
+`ffctl process enable camera`、`imu`、`motor` 并独立验证。`processes.toml`
+随部署覆盖，设备上的手动修改不会跨部署保留。
 
 `camera` 与 `imu` 的时间戳都用 `CLOCK_MONOTONIC` 秒，与仿真侧 `sim_time`
 语义不同，同一份录制里不要混用。三个进程都可以单独起停：`bin/camera`、
 `bin/imu`、`bin/motor` 接 `--config <path>`，`Ctrl-C` 正常退出。
 
 `firefly.service` 由镜像构建 [`orangepi-build`](https://github.com/3SE-Competitive-Robotics-Team/orangepi-build)
-预置并默认启动；`deploy` 只发布二进制、配置和模型。systemd 按 `configs/processes.toml`
-的数组顺序拉起 `autostart = true` 的进程。`processes.toml` 被 `deploy` 覆盖（烧录语义）；
+预置并默认启动；服务执行 `ffctl process supervise`。supervisor 按 `configs/processes.toml`
+的数组顺序拉起 `autostart = true` 的进程。`processes.toml` 被 `deploy` 覆盖；
 `lightglue` 在生产 `.ffvmap` 部署前保持 `autostart = false`。运行期管理：
 
 ```bash
@@ -237,9 +217,11 @@ cd /opt/firefly
 systemctl stop firefly                  # supervisor 逆序 SIGINT 所有进程
 ```
 
-supervisor 对异常退出按 1s→30s 退避重启；停止等待 5s，超时只报错、不 SIGKILL；
-进程日志在 `logs/process/<name>.log`。板载的 MIPI 相机、IMU 和飞控串口数据入口尚未接入
-生产二进制，当前部署只验证启动、链接、配置加载和 IPC 节点创建，不能当作飞行验收。
+supervisor 对异常退出退避重启，停止超时只报错、不 SIGKILL；具体时限由
+[`supervisor.rs`](../apps/ffctl/src/process/supervisor.rs) 维护。
+子进程 stdout/stderr 在 `logs/process/<name>.log`，运行诊断的归档证据仍以 RRD 为准。
+`camera`、`imu`、`motor` 已实现标准 IPC 并纳入板载构建；设备同步、标定、实时性和飞行
+均须实机验收。部署成功只证明发布和 supervisor 应答。
 
 静止初始化就绪后，按任务顺序发送指令（不要一次执行整组）：
 
@@ -276,11 +258,13 @@ supervisor 对异常退出按 1s→30s 退避重启；停止等待 5s，超时�
 脚本、CAD 与验收共用 `firefly-workspace` 的工作区定位和流式 SHA-256；该包只依赖标准库。
 
 ```bash
-uv run --package firefly-cad firefly-cad-build <场地.stp>
+uv run --package firefly-cad firefly-cad-build <场地.stp> --scene <赛季>@<版本>
 ```
 
 `firefly-cad-build` 构建并验收几何资产，配置为 `configs/cad.toml`。GLB、碰撞盒、FFMap 必须来自
-同一归一化几何，通过内容 hash、坐标和占据检查；细节见 `packages/firefly-cad/README.md`。
+同一归一化几何，通过内容 hash、坐标和占据检查；细节见
+[CAD README](../packages/firefly-cad/README.md)。在线运行、离线采集、建库与验收资产指纹
+共同使用 `configs/scene.toml` 所选场景；采集与库图默认输出位于该版本的资产目录及地图路径。
 
 `scripts/collect_vision_map.py` 使用 `render --offline` 和隔离的 `Firefly/Offline/*`，
 按同一时间戳配对左图、理想深度与位姿标签，不启动在线估计器/飞控，不把标签发布到在线话题。
@@ -318,17 +302,13 @@ T16 为 64 维，无法直接使用官方 ALIKED LightGlue 权重。导出保留
 
 ## 验证
 
-测试依赖通过构造函数或函数参数显式注入（环境工厂、时钟、证据读取器、进程/录制接口），
-不得通过 importlib 后修改生产模块全局变量、替换类或改写 `sys.argv` 接管运行。
-数据夹具使用真实 dataclass/消息类型；行为替身使用实现生产接口的测试类，或
-`create_autospec(..., spec_set=True)` 检查成员和调用签名。禁止 `SimpleNamespace` 和无规格
-mock 拼接接口。测试子类只覆盖外部交互边界，执行和评分逻辑仍使用生产实现；环境变量、
-工作目录等进程环境可用 pytest 的 monkeypatch 夹具隔离并恢复。
+测试依赖通过构造函数或参数注入，替身只覆盖外部交互边界，执行与评分使用生产实现。
+数据夹具使用真实 dataclass/消息；行为替身实现生产接口，或使用
+`create_autospec(..., spec_set=True)`。禁止通过改模块全局变量、类或 `sys.argv` 接管生产
+执行，禁止 `SimpleNamespace` 和无规格 mock 拼接口；进程环境可用 monkeypatch 隔离恢复。
 
-运行 `pytest tests/system` 时，session fixture 会在系统用例启动前执行
-`cargo xtask release`，重建所有 Rust 应用的 release 二进制，避免端到端测试使用旧产物。
-该命令是全部 Rust 应用 release 构建的统一入口，应用列表只在 xtask 维护；
-并行度使用 Cargo 默认值或 `CARGO_BUILD_JOBS`。Python 依赖通过 `uv sync` 安装。
+`tests/system` 的 session fixture 先执行 `cargo xtask release`，再启动真实进程。
+构建并行度使用 Cargo 默认值或 `CARGO_BUILD_JOBS`，Python 依赖通过 `uv sync` 安装。
 
 `packages/firefly-evaluation` 提供任务编排、进程管理、物理观测、RRD 评分与报告。
 CLI 和系统测试都通过 uv workspace 导入该包；`tests/` 仅保留测试和 pytest fixtures。
@@ -345,24 +325,15 @@ FIREFLY_TEST_PYTHON="$PWD/.venv/bin/python" cargo test -p firefly-pubsub --test 
 FIREFLY_RUN_TELEMETRY_LOAD=1 uv run --all-packages --extra test pytest tests/system/test_mimir.py -q
 ```
 
-独立轨迹输出的真实 IPC 验证：先运行 `cargo build --release -p planner`，停止占用
-Navigation/Trajectory/Reference 话题的进程，再运行
-`cargo test -p planner --test trajectory_ipc -- --ignored`。该用例启动 release 输出进程，
-验证多项式传输、心跳超时当拍发布顺序、恢复条件和坐标版本门控；不代表飞行验收。
+mimir 的真实 IPC 与 RRD 读回要求见 [可观测性验证](observability.md#validation)。
+数学回归使用独立公式/解析值、中心差分和最终输出契约，避免生产实现自证：
 
-mimir 集成用例使用真实 IPC 与 release 录制器，读回 RRD 检查每条时间戳、数值、图像和退出完整性。默认跳过不代表通过；构建、单测、Viewer 检查和飞行验收分别记录。
+- 规划：端点 PVA、C2 连续、避障/集群场景、轨迹时钟与软惩罚梯度；输出能力边界见架构文档。
+- 坐标/姿态/回环：解析变换、残差与重置差分、相关信息计权、会话与时间拒绝。
+- 前端/资产/IPC：已知位移与双目约束、几何一致性、深度投票与先验保护、双语言布局及事件往返。
 
-数学测试同时包含独立公式/解析值、中心差分和最终输出契约，不能只让代价与梯度互证。
-确定性任务必须成功；随机安全属性允许明确有界拒绝，但拒绝不计成功，不用整体成功率
-掩盖指定任务失败，不用机器相关耗时作正确性门槛。参考版本见架构文档。
-
-- 规划检查端点 PVA、分段 C2 连续性、具体避障/集群场景、时钟与输出轨迹一致性；
-  V/A/J 按固定上游的软惩罚公式与梯度验收，不要求输出满足额外的硬上限或工程超限容差。
-  测试侧独立公式、极值求根和几何采样不用生产实现验证自身；具体场景的避障回归不等于
-  所有输出都满足连续曲线无碰撞保证。A* 连边与 Bernstein 检查不等于动态安全证明。
-- 坐标、姿态、回环检查解析变换、残差/重置差分、相关信息不重复计权、会话与时间拒绝。
-- 前端检查已知位移、丢点与双目约束；解析轨迹隔离滤波数学，不能代替实际纹理和飞行。
-- CAD、深度、IPC 分别验证资产一致性、噪声/投票/先验保护和双语言布局、头部、事件往返。
+指定的确定性任务必须成功；随机安全属性可明确有界拒绝，拒绝不计成功。
+正确性门槛不使用机器相关耗时。解析、采样与性质回归只证明测试覆盖的契约。
 
 ### Basalt 与 RootSLAM
 
@@ -378,21 +349,17 @@ cargo clippy -p firefly-calibration -p firefly-basalt -p firefly-rootslam-mappin
 uv run python -B -m unittest discover -s apps/rootslam/tests -p test_export_rrd.py
 ```
 
-默认测试使用随源码保留的独立 C++ 参考夹具；外部数据集、完整上游程序和设备测试
-各有显式运行条件，忽略项不算通过。数值阈值以测试源码为准，
+默认测试使用独立 C++ 参考夹具；外部数据集、完整上游程序与设备用例须满足各自运行条件。
 局部单测、数据集轨迹等价、论文性能复现与整机验收分别报告。
 
 ### 规划与深度建图专项
 
-规划异步边界回归运行 `cargo test -p firefly-planner --lib worker`，覆盖取消、过期、地图
-变更、滚动窗口和阻塞求解时的安全决策。实时性对照为 `apps/planner/benches/replanning.rs`：
-先 `cargo bench -p planner --bench replanning --no-run`，启动 RRD 记录并等待宿主稳定后，
-运行生成的可执行文件并传 `--bench`。两轮交替同步/异步顺序，在空图和绕墙场景使用
-真实求解器及 100Hz/20Hz 定时调度，记录回调耗时、到期延迟、任务快照时间、入库数与
-宿主计数到 `logs/replanning-bench`；无入库结果即失败。该基准测进程内规划与调度，
-不包含 IPC 地图接收、渲染、飞控或真实飞行，不能替代闭环验收。
-加 `--updates` 在每个安全周期持有旧快照并移动窗口、增删 128 个体素，将写时复制和
-膨胀同步耗时计入安全回调；用于检查快照优化是否把成本转移到地图写入路径。
+`cargo test -p firefly-planner --lib worker` 检查取消、过期、地图/窗口变化与阻塞求解时的安全决策。
+实时性基准源码为 [`replanning.rs`](../apps/planner/benches/replanning.rs)：
+先 `cargo bench -p planner --bench replanning --no-run`，启动 RRD 并等待宿主稳定，
+再运行生成的可执行文件并传 `--bench`；加 `--updates` 测地图写入及快照同步开销。
+按源码场景交替同步/异步顺序，证据写入 `logs/replanning-bench`，无入库结果即失败。
+该基准覆盖进程内规划与调度，闭环 IPC、渲染、飞控和飞行另行验收。
 
 本地深度输入、地图新鲜度与坐标修订回归运行 `cargo test -p planner --bin planner`。
 真实 IPC 回归须独占话题，先完成 release 构建，再执行：
@@ -402,8 +369,7 @@ cargo test -p planner --bin planner -- --ignored --test-threads=1
 cargo test -p planner --test trajectory_ipc -- --ignored --test-threads=1
 ```
 
-数值夹具、Rust 自身基线和独立算法性质测试分别说明来源；无输入启动与退出、编译和单测
-不等于实际数据集或飞行验收。
+IPC 用例独占 Navigation/Trajectory/Reference，覆盖完整多项式、心跳超时发布顺序、恢复与坐标版本门控。
 
 <a id="system-tests"></a>
 
@@ -429,21 +395,17 @@ uv run pytest tests/system/test_roundtrip.py -q
 ```
 
 - 启动检查屏蔽 PlantState，保留 render 所需 GroundTruth；未启用飞行时只证明初始化与零推力。
-- IMU 三例分别检查飞行、持续悬停与 VIO 失联后的有限姿态支持。持续悬停保持原目标 20 秒，
-  独立评分整段真值、姿态与主链路健康；上锁后固定等待再评分固定静止窗口，不能按真值自适应
-  推迟窗口。全过程碰撞、重置和退出检查始终有效。
-- 十轮扰动每次恢复后连续悬停，逐轮真值评分通过才发下一轮，不重发 Hold 改目标。
-  失败后的未执行轮次不能记通过。
-- 估计器固定为 `firefly-rootslam`。`frame_processing_ms` 汇总立体帧入队至 IMU 线程消费后验
-  的墙钟耗时，原始样本为 RRD 的 `rootslam/frame_processing_ms`。
+- IMU 用例分别检查飞行、持续悬停与 VIO 失联后的有限姿态支持。保持原目标，独立评分整段
+  真值、姿态和主链路健康；静止评分使用固定等待与窗口，全程检查碰撞、重置和退出。
+- 扰动用例逐轮恢复并持续悬停，评分通过才发下一轮；禁止重发 Hold 改目标或将未执行轮次计通过。
+- 估计器为 `firefly-rootslam`，处理时延证据来自 RRD 的 `rootslam/frame_processing_ms`。
 - 22m 往返使用 `configs/acceptance_22m.toml`，默认空地图、在线回环与深度建图；初始化、
   真实到点、跟踪、定位、回环、降落、碰撞和退出必须分别通过。RootSLAM 当前在线导航没有
   接入回环修正；该项缺少证据仍判失败，不能以建图后端检出回环替代。
 
-门槛唯一来源为 `firefly_evaluation.mission.Options`、`firefly_evaluation.hover_metrics.HoverLimits`、
-`firefly_evaluation.disturbance_metrics.DisturbanceLimits` 及 `configs/acceptance*.toml`；
-运行前固定并随报告保存，不能按失败结果放宽。新增门控须用当前固定配置独立启动三次，
-三次全通过才建立基线，不以重试通过覆盖失败。
+任务配置和门槛由 `firefly_evaluation` 的 `mission.Options`、`hover_metrics.HoverLimits`、
+`disturbance_metrics.DisturbanceLimits` 及 `configs/acceptance*.toml` 维护，运行前固定并存入报告。
+新增门控须以固定配置独立启动三次、全部通过才建立基线，保留每次失败。
 
 姿态融合、初始化、坐标、视觉前端或仿真传感器改动后，必须运行 `imu_hover`；
 悬停不替代往返/回环。显式指定系统用例缺运行条件时报错；普通 CI 全仓收集中的 skip

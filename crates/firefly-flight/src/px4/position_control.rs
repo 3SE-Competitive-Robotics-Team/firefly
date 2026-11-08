@@ -262,7 +262,7 @@ impl PositionControl {
             } else {
                 0.0
             };
-            // TODO: 更合适的方式是显式禁用偏航控制
+            // 航向目标缺省时保持当前航向。
             self.yaw_sp = if is_finite(self.yaw_sp) {
                 self.yaw_sp
             } else {

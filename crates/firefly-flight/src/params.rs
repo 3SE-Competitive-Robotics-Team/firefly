@@ -9,6 +9,7 @@ use serde::Deserialize;
 /// `linear_drag`/`angular_drag` 是**被控对象的气动阻尼**，由 [`crate::integrate`] 施加；
 /// 无气动模型的对象（如 `MuJoCo`）在 [`crate::Airframe`] 消息里发布 0。
 #[derive(Deserialize, Clone, Copy, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct QuadParams {
     /// 质量（kg）。
     #[serde(default = "d_mass")]
@@ -57,7 +58,7 @@ impl Default for QuadParams {
 /// （219g、32° 倾角、3m/s 水平速度）的差异在下方注释中标出。
 /// 归一化约定与 PX4 一致：力矩 `[-1,1]`、推力 `[0,1]`、执行器 `[0,1]`。
 #[derive(Deserialize, Clone, Copy, Debug, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Px4Params {
     /// 角速度环。
     pub rate: RateParams,
@@ -71,9 +72,66 @@ pub struct Px4Params {
     pub hover_thrust: Option<f32>,
 }
 
+impl Px4Params {
+    /// # Errors
+    /// Rejects non-finite gains and values outside their documented domains.
+    pub fn validate(&self) -> firefly_error::Result<()> {
+        let gains = [
+            self.rate.k,
+            self.rate.p,
+            self.rate.i,
+            self.rate.d,
+            self.rate.ff,
+            self.rate.int_lim,
+            self.attitude.p,
+            self.position.p,
+            self.position.vel_p,
+            self.position.vel_i,
+            self.position.vel_d,
+        ];
+        let limits = [
+            self.rate.max_deg_s[0],
+            self.rate.max_deg_s[1],
+            self.rate.max_deg_s[2],
+            self.position.vel_max_horizontal,
+            self.position.vel_max_up,
+            self.position.vel_max_down,
+            self.attitude.ref_model_freq,
+        ];
+        let unit = [
+            self.attitude.yaw_weight,
+            self.attitude.ff_gain,
+            self.position.thrust_min,
+            self.position.thrust_max,
+            self.position.horizontal_thrust_margin,
+        ];
+        if gains.iter().flatten().any(|v| !v.is_finite() || *v < 0.)
+            || limits.iter().any(|v| !v.is_finite() || *v < 0.)
+            || unit
+                .iter()
+                .any(|v| !v.is_finite() || !(0. ..=1.).contains(v))
+            || !self.attitude.ff_limit.is_finite()
+            || self.attitude.ff_limit < 0.
+            || !self.position.tilt_max_deg.is_finite()
+            || !(0. ..90.).contains(&self.position.tilt_max_deg)
+            || self.position.thrust_min >= self.position.thrust_max
+            || self.allocation.airmode > 2
+            || self
+                .hover_thrust
+                .is_some_and(|v| !v.is_finite() || !(0.1..=0.9).contains(&v))
+        {
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                "invalid PX4 control parameters",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// 角速度环参数（PX4 `MC_*RATE_*`）。
 #[derive(Deserialize, Clone, Copy, Debug)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RateParams {
     /// 全局增益 K：P/I/D 的公共缩放。
     pub k: [f32; 3],
@@ -107,7 +165,7 @@ impl Default for RateParams {
 
 /// 姿态环参数（PX4 `MC_ROLL_P` / `MC_PITCH_P` / `MC_YAW_P` 等）。
 #[derive(Deserialize, Clone, Copy, Debug)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AttitudeParams {
     /// 姿态误差 → 角速度设定值（1/s）。
     pub p: [f32; 3],
@@ -135,7 +193,7 @@ impl Default for AttitudeParams {
 
 /// 位置/速度环参数（PX4 `MPC_*`）。
 #[derive(Deserialize, Clone, Copy, Debug)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PositionParams {
     /// 位置误差 → 速度设定值（1/s）。
     pub p: [f32; 3],
@@ -183,7 +241,7 @@ impl Default for PositionParams {
 
 /// 控制分配参数。
 #[derive(Deserialize, Clone, Copy, Debug)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AllocationParams {
     /// 0 关闭；1 滚转/俯仰 airmode；2 滚转/俯仰/偏航 airmode。
     ///

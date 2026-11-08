@@ -15,6 +15,7 @@ use crate::state::Wrench;
 
 /// 单个旋翼：机体系安装位置 + 旋向。
 #[derive(Deserialize, Clone, Copy, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Rotor {
     /// 机体系安装位置（m）。
     #[serde(default)]
@@ -32,6 +33,7 @@ fn d_spin() -> f32 {
 ///
 /// 默认值按 219g 级 2.5~3 寸微型机取（轴距 ~127mm 对角、X 布局、推重比 ≈ 3）。
 #[derive(Deserialize, Clone, Copy, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Airframe {
     /// 4 个旋翼的安装位置与旋向。
     #[serde(default = "d_rotors")]

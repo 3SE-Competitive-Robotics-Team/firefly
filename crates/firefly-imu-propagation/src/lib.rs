@@ -1,8 +1,7 @@
 //! IMU forward propagation for the online `RootSLAM` state prediction.
 //!
 //! The integration order and endpoint interpolation are derived from OKVIS2-X's
-//! no-covariance `ImuError::propagation` path. This retained numerical implementation
-//! is independent of the removed OKVIS2-X application; attribution is preserved in
+//! no-covariance `ImuError::propagation` path. Attribution is recorded in
 //! `docs/licenses/third-party-notices.md`.
 
 use nalgebra::{Matrix3, Quaternion, Vector3};

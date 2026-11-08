@@ -5,7 +5,7 @@ import pytest
 
 from firefly_evaluation import disturbance_sim, mission_sim
 from firefly_mujoco import DroneEnv, build_scene, load_scene_name
-from firefly_sim.main import main as run_sim
+from firefly_sim.main import decode_config, main as run_sim
 
 
 @pytest.mark.parametrize(("entry", "environment"), [
@@ -39,3 +39,20 @@ def test_sim_uses_injected_factory_with_configured_rates_and_scene(tmp_path, sce
     assert args["scene_factory"].func is build_scene
     assert args["scene_factory"].args == ()
     assert args["scene_factory"].keywords == {"name": scene_name}
+
+
+@pytest.mark.parametrize("config", [
+    {"ratess": {}}, {"rates": {"physic": 1000.}}, {"rates": 1000.},
+    {"start": [1., 2.]}, {"start": [0., 0., float("nan")]},
+])
+def test_invalid_sim_config_fails_before_environment_creation(config):
+    with pytest.raises(ValueError):
+        decode_config(config)
+
+
+@pytest.mark.parametrize("contents", ['scnee = "rmuc2026@2.0.0"', 'scene = 2026'])
+def test_scene_config_rejects_unknown_keys_and_invalid_types(tmp_path, contents):
+    path = tmp_path / "scene.toml"
+    path.write_text(contents)
+    with pytest.raises(ValueError):
+        load_scene_name(path)

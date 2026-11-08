@@ -131,18 +131,8 @@ impl Planner {
     }
 
     /// 设置队形规格（论文 Formation expectation + 官方 formationGradCostP 动态推断）。
-    #[must_use]
-    pub fn with_formation(mut self, spec: FormationSpec) -> Self {
-        self.formation = Some(spec);
-        self
-    }
-
     pub fn set_formation(&mut self, spec: FormationSpec) {
         self.formation = Some(spec);
-    }
-
-    pub fn clear_formation(&mut self) {
-        self.formation = None;
     }
 
     #[must_use]

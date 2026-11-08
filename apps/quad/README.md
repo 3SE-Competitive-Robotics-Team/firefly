@@ -35,9 +35,9 @@ cargo run --release -p quad
 
 ## 参数
 
-`configs/quad.toml` 的 `[control]` 是 PX4 控制参数（角速度/姿态环、airmode），
-`[manual]` 是手柄映射；质量、推重比、阻尼、相机距离和场地路径也在同一文件。
-改完直接重跑，不需要重编译。缺键回落代码默认值。
+`configs/quad.toml` 的 `[control]` 是 PX4 控制参数，`[manual]` 是手柄映射；
+`[drone]` 配置质量、惯量与阻尼，`[airframe]` 配置旋翼与推力上限，`field` 和 `start`
+指定场地及起点。默认值来自配置类型；改 TOML 后重新运行即可。
 
 ## 说明
 
@@ -45,4 +45,3 @@ cargo run --release -p quad
 - 模型朝向：glb 为 glTF Y-up、机头 `+Z`；挂载时转成世界 Z-up、机头 `+X`
   （`main.rs` 的 `model_rot`）。模型子节点旁挂一个绿色前向标记便于校对。
 - 与 `apps/render` 的分工：`render` 是 VIO 的渲染 worker；本 app 是纯手动飞行。
-  后续要把动态接进 `firefly-sim` / VIO 时再统一，不在本 app 里做接线。

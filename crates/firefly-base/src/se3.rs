@@ -171,29 +171,6 @@ pub fn vee(w_x: &Matrix3<f64>) -> Vector3<f64> {
     Vector3::new(w_x[(2, 1)], w_x[(0, 2)], w_x[(1, 0)])
 }
 
-/// `R6 -> se(3)` hat 算子。
-#[must_use]
-pub fn hat_se3(vec: &Vector6<f64>) -> Matrix4<f64> {
-    let w = Vector3::new(vec[0], vec[1], vec[2]);
-    let u = Vector3::new(vec[3], vec[4], vec[5]);
-    let mut mat = Matrix4::<f64>::zeros();
-    mat.fixed_view_mut::<3, 3>(0, 0).copy_from(&skew(&w));
-    mat.fixed_view_mut::<3, 1>(0, 3).copy_from(&u);
-    mat
-}
-
-/// `SE(3)` 解析逆（避免数值逆）。
-#[must_use]
-pub fn inv_se3(t: &Matrix4<f64>) -> Matrix4<f64> {
-    let mut tinv = Matrix4::<f64>::identity();
-    let r = t.fixed_view::<3, 3>(0, 0).into_owned();
-    let p = Vector3::new(t[(0, 3)], t[(1, 3)], t[(2, 3)]);
-    let r_t = r.transpose();
-    tinv.fixed_view_mut::<3, 3>(0, 0).copy_from(&r_t);
-    tinv.fixed_view_mut::<3, 1>(0, 3).copy_from(&(-r_t * p));
-    tinv
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -25,14 +25,12 @@ firefly-vision-match = { workspace = true }
 iceoryx2 = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }
-ndarray = { workspace = true }
 ort = { workspace = true }
 
 fastrace.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
-firefly-localization.workspace = true
 serde_json.workspace = true
 
 [lints]

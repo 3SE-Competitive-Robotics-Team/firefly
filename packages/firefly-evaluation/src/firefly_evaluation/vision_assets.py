@@ -1,26 +1,30 @@
 """离线库图的资产指纹、采集缓存与运行时兼容检查。"""
 import json
+from pathlib import Path
 import subprocess
 import tomllib
 
 import numpy as np
 
-from firefly_workspace import digest, load_toml, workspace_root
+from firefly_mujoco import load_scene_name
+from firefly_workspace import digest, load_toml, parse_scene, workspace_root
 
 
-def capture_assets(root=None):
+def capture_assets(root=None, *, run=subprocess.run):
     """场地/传感器兼容条件与采集选择；二进制只作为生成来源保存。"""
     root = workspace_root(root)
-    contract = root / "models/rmuc2026/v2.0.0/derived/render_contract.toml"
+    scene = parse_scene(load_scene_name(root / "configs/scene.toml"))
+    paths = [scene.dir / "field.glb", scene.dir / scene.collision]
+    if (root / "configs/scene.toml").exists():
+        paths.append(Path("configs/scene.toml"))
+    files = {str(path): digest(root / path) for path in paths}
+    contract = root / scene.dir / "derived/render_contract.toml"
     contract.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run([str(root / "target/release/render"), "--export-asset-contract", str(contract)], check=True, cwd=root)
+    run([str(root / "target/release/render"), "--export-asset-contract", str(contract)], check=True, cwd=root)
     with contract.open("rb") as stream:
         sensor = tomllib.load(stream)
     selection = load_toml(root / "configs/vision_map.toml")
-    return {"schema": 2, "files": {name: digest(root / name) for name in [
-        "models/rmuc2026/v2.0.0/field.glb", "models/rmuc2026/v2.0.0/rmuc2026_collision.json",
-        *(["configs/scene.toml"] if (root / "configs/scene.toml").exists() else []),
-    ]}, "sensor": sensor, "selection": selection}
+    return {"schema": 2, "files": files, "sensor": sensor, "selection": selection}
 
 
 def verify_map_compatibility(assets, *, root=None, allow_rig_translation=False, capture=capture_assets):
