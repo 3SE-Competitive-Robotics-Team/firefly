@@ -1,4 +1,5 @@
 //! 独立接收地图系状态；重规划耗时不能改变状态流的存活判定。
+use std::collections::VecDeque;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -18,8 +19,32 @@ use firefly_pubsub::{
 #[derive(Default)]
 struct Shared {
     input: StateInput,
+    history: VecDeque<NavigationMessage>,
     trace: TraceContext,
     error: Option<String>,
+}
+
+/// Bounded measurement-time history shared with the depth worker, never the solver.
+#[derive(Clone)]
+pub struct NavigationHistory {
+    shared: Arc<Mutex<Shared>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl NavigationHistory {
+    pub fn snapshot(&self) -> Result<VecDeque<NavigationMessage>> {
+        let mut state = self
+            .shared
+            .lock()
+            .map_err(|_| internal("navigation state poisoned"))?;
+        if let Some(error) = &state.error {
+            return Err(internal(error.clone()));
+        }
+        if self.stop.load(Ordering::Relaxed) || state.input.current(Instant::now()).is_none() {
+            return Ok(VecDeque::new());
+        }
+        Ok(state.history.clone())
+    }
 }
 
 pub struct NavigationReceiver {
@@ -58,6 +83,21 @@ impl NavigationReceiver {
                                 .lock()
                                 .map_err(|_| internal("navigation state poisoned"))?;
                             if state.input.observe_navigation(&message, Instant::now()) {
+                                if state
+                                    .history
+                                    .back()
+                                    .is_some_and(|old| old.revision != message.revision)
+                                {
+                                    state.history.clear();
+                                }
+                                state.history.push_back(*message);
+                                while state.history.len() > 512
+                                    || state.history.front().is_some_and(|old| {
+                                        message.odom.timestamp - old.odom.timestamp > 2.
+                                    })
+                                {
+                                    state.history.pop_front();
+                                }
                                 state.trace = trace;
                             }
                         }
@@ -112,6 +152,13 @@ impl NavigationReceiver {
 
     pub fn terminated(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+    }
+
+    pub fn history(&self) -> NavigationHistory {
+        NavigationHistory {
+            shared: Arc::clone(&self.shared),
+            stop: Arc::clone(&self.stop),
+        }
     }
 
     fn shutdown(&mut self) {

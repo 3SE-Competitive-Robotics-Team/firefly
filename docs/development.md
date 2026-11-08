@@ -45,7 +45,7 @@ args-and-flags、validation。
 
 ### 配置
 
-- **TOML、一应用一份**：统一放仓库顶层 `configs/`（`sim.toml` / `okvis2-x.toml` / `planner.toml`），
+- **TOML、一应用一份**：统一放仓库顶层 `configs/`（`sim.toml` / `firefly-rootslam.toml` / `planner.toml`），
   启动时加载（Rust 支持 `--config` 换文件）。配置文件可选：缺文件记录一行 INFO 并使用
   代码默认值；文件存在但不可读、格式或参数无效仍报错，不静默回落。
 - **最小化**：保留必填键，只对有默认值的键写差异覆盖；无覆盖项时保留仅含用途和
@@ -129,17 +129,17 @@ cargo xtask release
 ./target/release/mimir --save logs/rmuc_run.rrd
 uv run firefly-sim
 cargo run --release -p render
-cargo run --release -p firefly-okvis-x
+cargo run --release -p firefly-rootslam
 cargo run --release -p fc
 cargo run --release -p planner -- --traj-server
 cargo run --release -p planner
 ```
 
-最小闭环只需 mimir/sim/render/firefly-okvis-x/fc；规划同时启动 planner 与 `planner --traj-server`
+最小闭环只需 mimir/sim/render/firefly-rootslam/fc；规划同时启动 planner 与 `planner --traj-server`
 两个独立进程，前者规划并发布心跳，后者采样并发布飞控参考。
-纯 VIO 对照用 `firefly-okvis-x --no-loop-closures --no-mapping`。
+纯 VIO 对照用 `firefly-rootslam --no-loop-closures --no-mapping`。
 可选库图定位先填写 `configs/localization.toml [origin]`，并用
-`firefly-okvis-x --external-localization`，再启动 localization、aliked 和
+`firefly-rootslam --external-localization`，再启动 localization、aliked 和
 `lightglue --map <地图.ffvmap>`。默认进程清单不自动启动这些可选服务。
 静态规划图用 `planner --map <地图.ffmap>`，同样要求明确外部对齐。
 禁止把场地真值作为默认定位或规划先验。
@@ -382,7 +382,7 @@ uv run python -B -m unittest discover -s apps/rootslam/tests -p test_export_rrd.
 各有显式运行条件，忽略项不算通过。数值阈值以测试源码为准，
 局部单测、数据集轨迹等价、论文性能复现与整机验收分别报告。
 
-### OKVIS 算法与通讯专项
+### 规划与深度建图专项
 
 规划异步边界回归运行 `cargo test -p firefly-planner --lib worker`，覆盖取消、过期、地图
 变更、滚动窗口和阻塞求解时的安全决策。实时性对照为 `apps/planner/benches/replanning.rs`：
@@ -394,82 +394,28 @@ uv run python -B -m unittest discover -s apps/rootslam/tests -p test_export_rrd.
 加 `--updates` 在每个安全周期持有旧快照并移动窗口、增删 128 个体素，将写时复制和
 膨胀同步耗时计入安全回调；用于检查快照优化是否把成本转移到地图写入路径。
 
-共享地图对照基准为 `apps/planner/benches/mapping.rs`，先执行
-`cargo bench -p planner --bench mapping --no-run`，宿主资源稳定且 RRD 记录进程启动后，
-运行生成的 bench 可执行文件并传 `--bench`；加 `--moving` 使用平移相机及滚动窗口，
-`--history=N` 添加远处历史子地图。历史几何使用只读冻结地图，各自持有独立位姿。
-比较全图已观测体素遍历导出与空间索引局部障碍导出，两侧包括真实 IPC、接收和局部栅格派生，
-共同的 Supereight2 积分只测量一次并计入两侧总耗时，交替测量顺序。
-计时之外逐帧核对局部结果等于全图独立遍历后筛选占据并裁剪的结果；样本、消息大小和宿主计数进入
-`logs/mapping-bench`。这是建图阶段微基准，不包含 VIO 求解、线程调度或完整飞行闭环。
-无 `--bench` 只运行小型功能检查。地图门控的真实进程回归沿用下文的
-`cargo test -p planner --test trajectory_ipc -- --ignored --test-threads=1`，需先重建 release planner。
-OKVIS 请求接收与修订发布的真实 IPC 回归为
-`cargo test -p firefly-okvis-x region_request_and_snapshot_metadata_roundtrip --lib -- --ignored --test-threads=1`，
-同样要求独占地图话题，勿与多次重启 planner 的测试共用同一可视化录制会话。
-
-生产求解器基准为 `apps/okvis2-x/benches/solver.rs`：先运行
-`cargo bench -p firefly-okvis-x --bench solver --no-run`，待宿主资源稳定并启动 RRD
-记录进程后运行生成的可执行文件并传 `--bench`。基准固定双目几何，使用生产重投影因子、
-位姿先验和 Schur 求解入口；不包含 IMU 或图像前端，不等同于真实采集窗口。
-每个样本恢复相同参数，轮换线程数，核对参数、代价及迭代次数精确一致；预热排除首次
-线程池启动。零迭代样本包含快照构造和初始线性化，多迭代样本包含完整求解与提交。
-样本、摘要和宿主计数写入 RRD 的 `logs/solver-bench`；规模、线程数和采样数以源码为准。
-计时样本完成后另跑带 trace 的阶段探针，区分求值、Schur、路标消元/回代与约化 Cholesky；
-探针不纳入计时分位数，嵌套 span 不相加当作总耗时。
-默认无 `--bench` 只运行数值自检。在线 `solver_threads = 1` 可用于完整任务串行对照。
-`RUST_LOG=info,solver-profile=debug` 为每次真实求解记录因子数、全冻结因子数、活动维数，
-以及快照构造、求解、参数写回和缓存恢复时间；记录经既有 IPC 日志进入 RRD。
-完整任务中，全冻结因子求值对照使用 `fixed_factor_evaluation = "repeated"` 与
-`"once_per_solve"`，只切换此项。逐次求解日志的 `factor_evaluations` 记录实际因子
-求值次数，`fixed_cache` 标识所用路径；两侧使用相同诊断开关，统计时先按帧聚合三次
-求解再算分位数，不把各阶段的中位数相加当作整帧中位数。
-全冻结因子微基准用 `--features solver-bench` 构建同一 solver bench，再向生成的程序传
-`--bench --fixed-factors`。它只比较固定几何中常量残差的重复求值和单次求值后代价复用，
-交替顺序并校验代价精确一致，排除快照构造与线程池启动；不代表完整求解或整帧加速。
-
-Schur 微基准通过 `cargo bench -p firefly-okvis-x --bench schur --no-run` 预编译；
-待宿主机负载稳定后，先在另一终端运行 `./target/release/mimir --save logs/schur_bench.rrd`，
-再运行 `RUST_LOG=info cargo bench -p firefly-okvis-x --bench schur`。录制路径必须未存在；
-完成后向记录进程发送 SIGINT 并等待退出。逐批样本及汇总在 `logs/schur-bench`。
-基准源码为 `apps/okvis2-x/benches/schur.rs`，确定性合成窗口、预热、批次数与数值门槛
-均在源码维护。两种求解均包含布局、分配、组装、消元、求解与回代；p95 是批均值的
-分位数，不是单帧尾延迟。生产 `DENSE_SCHUR` 使用按块组装；因子连接不同路标时
-自动回退完整稠密系统，保留路标间交叉项。基准中的稠密组装用于对照。
-合成线性系统的对比不代表真实 VIO 整帧性能或板端收益。
-同一基准加 `--retries` 比较重复组装与单次组装后的多次阻尼求解，计时包含首次组装、
-全部尝试与释放；按源码规定的尝试数交替采样，并逐步检查结果精确一致。
-结果记录为 `logs/schur-bench` 的 `retry_sample` / `retry_summary`，不代表在线拒绝率，
-也不能据此推算完整任务的加速比例。
-`cargo test --all-targets` 下该基准只执行数值自检，不启动 IPC 或计时采样。
-同一 Schur 基准加 `--reduced` 对照 nalgebra 与生产约化求解分派，包含矩阵复制、
-分解、工作区分配与回代；固定正定系统以已知解和法方程残差校验，交替采样写入
-`logs/schur-bench` 的 `reduced_sample`。该测量不包含因子求值、法方程组装或整帧处理。
-
-双目特征微基准源码为 `apps/okvis2-x/benches/image_proc.rs`，以
-`cargo bench -p firefly-okvis-x --bench image_proc --no-run` 预编译，记录进程启动后
-运行生成的 bench 可执行文件并传 `--bench`。串行路径保留单相机缓存及
-detect/describe/back-project 顺序，并行路径调用生产 `Frontend::detect_frame`。
-计时包含帧装配、分发、计算和结果安装；合成图像、标定 awareness maps 的创建不计入。
-首次提取器初始化单独采样；预热后交替测量单帧，并逐帧核对关键点、描述子及反投影。
-输入、轮数和采样数以基准源码为准；结果写入 RRD 的 `logs/image-proc-bench`。
-合成纹理与空白图像的结果只代表双目特征阶段，不代表整帧 VIO 或嵌入式性能。
-`cargo test --all-targets` 不执行该基准的计时或 IPC 路径。
+本地深度输入、地图新鲜度与坐标修订回归运行 `cargo test -p planner --bin planner`。
+真实 IPC 回归须独占话题，先完成 release 构建，再执行：
 
 ```bash
-cargo test --all-targets -p firefly-okvis-x -p firefly-brisk -p firefly-dbow2 \
-  -p firefly-opengv -p firefly-srl-projection -p firefly-supereight2
-cargo test -p firefly-okvis-x application::live::tests
+cargo test -p planner --bin planner -- --ignored --test-threads=1
+cargo test -p planner --test trajectory_ipc -- --ignored --test-threads=1
 ```
 
-算法测试覆盖独立解析值、几何退化、差分与数值边界；通讯测试覆盖配对、测量覆盖、
-丢失与过期状态、回环坐标修订、协方差与真实 iceoryx2 消息往返。
-夹具回归、Rust 自身基线和独立算法性质测试分别说明来源，不将自身基线当作跨语言等价证明。
-无输入启动与退出、编译和单测不等于实际数据集或飞行验收。
+数值夹具、Rust 自身基线和独立算法性质测试分别说明来源；无输入启动与退出、编译和单测
+不等于实际数据集或飞行验收。
 
 <a id="system-tests"></a>
 
 ### 无 mock 系统验收
+
+本地深度融合的数值对照使用固定上游 C++ 函数，生成器校验 checkout 修订号。
+`--eigen` 指向包含 `Eigen/` 的头文件目录；生成产物位于 `target/ego-map-reference`：
+
+```bash
+uv run python crates/firefly-ego-map/tests/reference/generate.py --upstream ~/Projects/EGO-Planner-v2 --eigen /path/to/eigen
+FIREFLY_EGO_MAP_REFERENCE="$PWD/target/ego-map-reference/reference" cargo test -p firefly-ego-map --test cpp_reference -- --ignored
+```
 
 先完成 release 构建，准备 RMUC 资产与图形会话，按运行章节确认宿主机和 IPC 干净。
 以下用例自行启动生产进程、用本次 RRD 评分并清理退出，不依赖聊天会话或手动启动的进程：
@@ -488,11 +434,11 @@ uv run pytest tests/system/test_roundtrip.py -q
   推迟窗口。全过程碰撞、重置和退出检查始终有效。
 - 十轮扰动每次恢复后连续悬停，逐轮真值评分通过才发下一轮，不重发 Hold 改目标。
   失败后的未执行轮次不能记通过。
-- 估计器由 `FIREFLY_VIO_PROCESS` 切换（`firefly-okvis-x` 或 `firefly-rootslam`）；
-  报告的 `frame_processing_ms` 汇总该估计器自报的单帧处理耗时，原始样本在 rrd 的
-  `okvis/frame_processing_ms` / `rootslam/frame_processing_ms`。
+- 估计器固定为 `firefly-rootslam`。`frame_processing_ms` 汇总立体帧入队至 IMU 线程消费后验
+  的墙钟耗时，原始样本为 RRD 的 `rootslam/frame_processing_ms`。
 - 22m 往返使用 `configs/acceptance_22m.toml`，默认空地图、在线回环与深度建图；初始化、
-  真实到点、跟踪、定位、回环、降落、碰撞和退出必须分别通过。
+  真实到点、跟踪、定位、回环、降落、碰撞和退出必须分别通过。RootSLAM 当前在线导航没有
+  接入回环修正；该项缺少证据仍判失败，不能以建图后端检出回环替代。
 
 门槛唯一来源为 `firefly_evaluation.mission.Options`、`firefly_evaluation.hover_metrics.HoverLimits`、
 `firefly_evaluation.disturbance_metrics.DisturbanceLimits` 及 `configs/acceptance*.toml`；

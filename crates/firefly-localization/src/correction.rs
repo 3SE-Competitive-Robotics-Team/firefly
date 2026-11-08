@@ -3,8 +3,8 @@ use firefly_error::{Error, ErrorKind, Result};
 
 /// 对齐修正的提交门限，长度为米，角度为弧度。
 ///
-/// 低于门限的修正只更新 map←odom 对齐，不递增修订号：下游按旧修订号复用的
-/// 局部深度地图与在途参考误差保持有界，避免为厘米级修正清空融合、重建地图。
+/// 低于门限只更新融合器内部的候选；发布端保持已提交的 map←odom 和修订号。
+/// 候选相对已提交变换在当前机体位姿处超限时，提交变换并递增修订号。
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CorrectionOptions {

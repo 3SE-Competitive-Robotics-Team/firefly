@@ -1,9 +1,10 @@
-//! planner 进程接入层：Navigation/占据地图/目标输入 → FSM → 规划管理 → 完整轨迹。
+//! planner 接入：Navigation + 深度/目标 → 自持占据地图 + FSM → 完整轨迹。
 //! FSM 为 100Hz，安全检查为 20Hz；`--traj-server` 启动独立的 100Hz 轨迹输出进程。
 //! Navigation 失联或无效状态锁存停止输出，坐标修正使旧版本轨迹立即失效。
 //! 地图融合超时触发急停并禁用 fail-safe；真值不进入规划状态链路。
 
 mod config;
+mod depth_mapping;
 mod map_input;
 mod navigation;
 mod output;
@@ -23,7 +24,6 @@ use firefly_observability::init as init_observability;
 use firefly_planner::worker::{MapVersion, PlanningWorker};
 use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager, ReplanFsm};
 use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
-use firefly_pubsub::map::{MAP_REGION_TOPIC, MAP_TOPIC, MapElement, MapRegion};
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::Subscriber;
@@ -140,9 +140,8 @@ struct App {
     /// 发布端只活在创建线程，无跨线程触碰，见 `firefly-observability`）。
     log_ipc: firefly_observability::LogIpc,
     map_file: Option<MapFile>,
-    /// 静态占据体素（动态障碍不得清掉它们）。
-    /// 上一帧动态障碍占据体素。
-    prev_dyn: Vec<[usize; 3]>,
+    /// 上一帧动态障碍的全局格索引，窗口平移后仍指向原位置。
+    prev_dyn: Vec<[i64; 3]>,
     /// 当前机体位置（地图系，米）：感知地图只发它附近的局部窗口。
     perceived_center: Vector3<f64>,
     /// 各体素实体**上次发布的集合**：与当前集合做差得到增量（新增/删除）。
@@ -164,8 +163,8 @@ struct App {
     state_fresh: bool,
     state_loss_reported: bool,
     initial_goal: Option<[f64; 3]>,
-    map_sub: Subscriber<[MapElement]>,
-    region_pub: Publisher<MapRegion>,
+    depth: depth_mapping::DepthReceiver,
+    clearance: f64,
     map_input: map_input::MapInput,
     goal_sub: Option<Subscriber<GoalMessage>>,
     /// 强制停止订阅（对照官方 `mandatory_stop` topic；单进程仿真下由外部
@@ -199,7 +198,10 @@ impl App {
             Some(map) => map.to_grid_map(config.obstacle_clearance)?,
             None => mapping.build(config.obstacle_clearance)?,
         };
-        // 保存心跳超时阈值，供应用层发布门控使用。
+        let depth_fusion =
+            depth_mapping::DepthFusion::new(&grid, mapping.depth, config.obstacle_clearance)?;
+        grid = depth_mapping::collision_grid(grid, map_file.is_some())?;
+        let clearance = config.obstacle_clearance;
         // 虚拟地面/天花板（对照官方 enable_virtual_wall）：任一配置存在即单独生效
         if config.virtual_ground.is_some() || config.virtual_ceiling.is_some() {
             grid.set_virtual_wall(VirtualWall {
@@ -223,8 +225,7 @@ impl App {
         // 地图系输入是必需端口；局部 VIO 不能替代它。
         let odom = navigation::NavigationReceiver::start(map_file.is_some())
             .map_err(|e| e.with_operation("创建规划器地图系里程计订阅"))?;
-        let map_sub = Subscriber::<[MapElement]>::with_slice_topic(&node, MAP_TOPIC)?;
-        let region_pub = Publisher::<MapRegion>::with_topic(&node, MAP_REGION_TOPIC)?;
+        let depth = depth_mapping::DepthReceiver::start(depth_fusion, odom.history())?;
         let goal_sub = open_sub::<GoalMessage>(
             &node,
             GOAL_TOPIC,
@@ -275,8 +276,8 @@ impl App {
             state_loss_reported: false,
             initial_goal,
             odom,
-            map_sub,
-            region_pub,
+            depth,
+            clearance,
             map_input: map_input::MapInput::default(),
             goal_sub,
             stop_sub,
@@ -303,8 +304,8 @@ impl App {
     #[fastrace::trace]
     fn poll_sensors(&mut self) -> Result<()> {
         self.poll_navigation()?;
-        while let Some(sample) = self.map_sub.receive()? {
-            self.map_input.observe(&sample, Instant::now())?;
+        if let Some(snapshot) = self.depth.take_snapshot()? {
+            self.map_input.observe_local(snapshot)?;
         }
         if let Some(sub) = &self.goal_sub {
             while let Some(sample) = sub.receive()? {
@@ -343,16 +344,40 @@ impl App {
         if map_file.motions.is_empty() {
             return;
         }
-        let dyn_voxels = map_file.motion_voxels(self.t_sim, self.fsm.manager().map());
+        let mut dyn_voxels = map_file.motion_voxels(self.t_sim, self.fsm.manager().map());
         let map = self.fsm.manager_mut().map_mut();
-        for idx in &self.prev_dyn {
-            map.set_state(*idx, self.map_input.observed_state(map.global_index(*idx)));
+        for global in &self.prev_dyn {
+            if let Some(index) = map.window_index(*global) {
+                map.set_state(index, self.map_input.observed_state(*global));
+            }
+        }
+        {
+            let step = ((self.clearance - 1e-5) / map.resolution()).ceil().max(0.) as i64;
+            let mut expanded = HashSet::new();
+            for index in &dyn_voxels {
+                let global = map.global_index(*index);
+                for x in -step..=step {
+                    for y in -step..=step {
+                        for z in -step..=step {
+                            if let Some(index) =
+                                map.window_index([global[0] + x, global[1] + y, global[2] + z])
+                            {
+                                expanded.insert(index);
+                            }
+                        }
+                    }
+                }
+            }
+            dyn_voxels = expanded.into_iter().collect();
         }
         for idx in &dyn_voxels {
             map.set_state(*idx, VoxelState::Occupied);
         }
         map.inflate_obstacles();
-        self.prev_dyn = dyn_voxels;
+        self.prev_dyn = dyn_voxels
+            .into_iter()
+            .map(|index| map.global_index(index))
+            .collect();
     }
 
     /// 执行回调：传感器 → 感知/动态地图 → 状态机 → 完整轨迹交付与可视化。
@@ -505,6 +530,7 @@ impl App {
         if !self.state_input.navigation().is_some_and(|nav| {
             !self.state_input.has_revision_change()
                 && !self.state_input.stopped()
+                && !self.depth.terminated()
                 && self
                     .map_input
                     .ready(&nav, Instant::now(), Duration::from_secs_f64(MAP_TIMEOUT))
@@ -529,24 +555,19 @@ impl App {
         &mut self,
         navigation: &firefly_pubsub::navigation::NavigationMessage,
     ) -> Result<bool> {
-        let region = self.map_input.prepare_region(
-            self.fsm.manager_mut().map_mut(),
-            navigation,
-            self.map_file.is_none(),
-        )?;
-        self.region_pub.publish(region)?;
-        if !self.map_input.ready(
-            navigation,
-            Instant::now(),
-            Duration::from_secs_f64(MAP_TIMEOUT),
-        ) {
+        self.map_input
+            .prepare_region(self.fsm.manager_mut().map_mut(), navigation, true)?;
+        if self.depth.terminated()
+            || !self.map_input.ready(
+                navigation,
+                Instant::now(),
+                Duration::from_secs_f64(MAP_TIMEOUT),
+            )
+        {
             return Ok(false);
         }
-        self.map_input.apply(
-            self.fsm.manager_mut().map_mut(),
-            navigation,
-            self.map_file.is_none(),
-        )?;
+        self.map_input
+            .apply(self.fsm.manager_mut().map_mut(), navigation, true)?;
         self.update_motion();
         Ok(true)
     }
@@ -631,7 +652,8 @@ impl App {
                 return CallbackProgression::Continue;
             }
             // 接收线程可能先消费进程终止信号，主循环必须同步检查停止标志。
-            if self.odom.terminated() {
+            if self.odom.terminated() || self.depth.terminated() {
+                self.stop_failed_callback();
                 return CallbackProgression::Stop;
             }
             // 动态目标工作流：轨迹结束后保持运行并等待新目标，
@@ -658,25 +680,7 @@ impl App {
             }
             last_visualization = Instant::now();
             frame += 1;
-            // 感知占据地图：每拍只发变化量，周期性全量重同步。
-            // 窗口以机体位置为中心，仅在有新鲜里程计时扫描。
-            if self.state_fresh {
-                let mut indices = std::mem::take(&mut self.voxel_indices);
-                let (size, origin) = Self::occupied_indices(
-                    self.fsm.manager().map(),
-                    Some(self.perceived_center),
-                    &mut indices,
-                );
-                self.publish_voxel_delta(
-                    "plan/perceived",
-                    &indices,
-                    size,
-                    origin,
-                    self.t_sim,
-                    frame.is_multiple_of(VOXEL_RESYNC_TICKS),
-                );
-                self.voxel_indices = indices;
-            }
+            self.publish_collision_map(frame);
             CallbackProgression::Continue
         };
 
@@ -693,6 +697,11 @@ impl App {
             }
         }
         self.odom.snapshot()?;
+        if let Some(snapshot) = self.depth.take_snapshot()? {
+            self.map_input.observe_local(snapshot)?;
+        }
+        self.solver.cancel();
+        self.output.control(None, false)?;
         log::info!(
             "进程退出：当前目标 {} 次重规划，仿真时长 {:.1}s，规划状态 {:?}，轨迹正常结束 {}",
             self.fsm.manager().replans(),
@@ -701,6 +710,28 @@ impl App {
             self.fsm.is_finished()
         );
         Ok(())
+    }
+
+    /// Publish changes around fresh navigation, with periodic full resynchronization.
+    fn publish_collision_map(&mut self, frame: usize) {
+        if !self.state_fresh {
+            return;
+        }
+        let mut indices = std::mem::take(&mut self.voxel_indices);
+        let (size, origin) = Self::occupied_indices(
+            self.fsm.manager().map(),
+            Some(self.perceived_center),
+            &mut indices,
+        );
+        self.publish_voxel_delta(
+            "plan/collision",
+            &indices,
+            size,
+            origin,
+            self.t_sim,
+            frame.is_multiple_of(VOXEL_RESYNC_TICKS),
+        );
+        self.voxel_indices = indices;
     }
 
     fn stop_failed_callback(&mut self) -> CallbackProgression {

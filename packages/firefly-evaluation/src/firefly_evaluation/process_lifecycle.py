@@ -59,7 +59,7 @@ def active_processes(root: Path) -> list[int]:
     """识别本仓库进程；依赖可执行路径与 argv，禁止模糊匹配命令行全文。"""
     root = root.resolve()
     found = []
-    binaries = {"firefly-okvis-x", "firefly-rootslam", "render", "mimir", "fc", "localization", "planner", "aliked", "lightglue"}
+    binaries = {"firefly-rootslam", "render", "mimir", "fc", "localization", "planner", "aliked", "lightglue"}
     scripts = {"firefly-sim", "mimir", "rerun", "collect_vision_map.py"}
     modules = {"firefly_sim", "firefly_sim.main",
                "firefly_evaluation.mission_sim", "firefly_evaluation.disturbance_sim"}

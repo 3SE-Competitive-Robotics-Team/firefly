@@ -1,4 +1,4 @@
-//! One IMU scheduling and publication contract for online SLAM adapters.
+//! Event-driven IMU scheduling and publication for the online `RootSLAM` adapter.
 mod publish;
 pub use publish::{Publishers, Sample, publish_pose_diagnostic, publish_scalar_diagnostic};
 

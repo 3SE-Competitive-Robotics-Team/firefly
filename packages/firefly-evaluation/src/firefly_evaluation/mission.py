@@ -63,14 +63,14 @@ class MissionFailure(RuntimeError):
 
 
 class Mission:
-    def __init__(self, directory, case, options, *, vio_only=False, prior_maps=False, localization_config=None, workspace=None, vio_process=None, sleep: Callable[[float], None] = time.sleep):
+    def __init__(self, directory, case, options, *, vio_only=False, prior_maps=False, localization_config=None, workspace=None, sleep: Callable[[float], None] = time.sleep):
         self.sleep = sleep
         self.root = workspace_root(workspace)
         self.options, self.case = options, case
         self.vio_only = vio_only
         self.prior_maps = prior_maps
         self.localization_config = localization_config
-        self.vio_process = vio_process or os.environ.get("FIREFLY_VIO_PROCESS", "firefly-okvis-x")
+        self.vio_process = "firefly-rootslam"
         self.recording = directory / f"{case}.rrd"
         self.result = {"case": case, "status": "running", "recording": str(self.recording), "stages": {}, "localization_mode": "vio_only" if vio_only else "visual" if prior_maps else "online_slam", "estimator": self.vio_process}
         self.result["map_frame"] = "external" if prior_maps else "startup_session"
@@ -199,9 +199,7 @@ class Mission:
                     elif entity == "corr/debug/gate" and msg.scalar_count == 4 and msg.scalars[3] == 1:
                         self.visual_updates += 1
                         self.recorder.scalars("acceptance/visual_update", msg.timestamp, list(msg.scalars[:4]))
-                    elif entity == "okvis/loop_commits":
-                        self.recorder.scalars("acceptance/loop_backend", msg.timestamp, list(msg.scalars[:msg.scalar_count]))
-                    elif entity in ("okvis/frame_processing_ms", "rootslam/frame_processing_ms"):
+                    elif entity == "rootslam/frame_processing_ms":
                         # 单帧处理耗时：从帧入队到状态发布的墙钟时间。
                         # 原始实体由 mimir 直接落 rrd，这里只做统计。
                         self.frame_processing_ms.append(float(msg.scalars[0]))
@@ -563,13 +561,11 @@ class Mission:
             self.connect()
             for name in applications:
                 command = [str(self.root / f"target/release/{name}")]
-                if name == "firefly-okvis-x":
+                if name == "firefly-rootslam":
                     if self.vio_only:
                         command += ["--no-loop-closures", "--no-mapping"]
                     if self.prior_maps:
                         command += ["--external-localization"]
-                if name == "firefly-rootslam" and self.vio_only:
-                    command += ["--no-loop-closures", "--no-mapping"]
                 if name == "localization" and self.localization_config is not None:
                     command += ["--config", str(self.localization_config)]
                 if name == "lightglue" and self.prior_maps:

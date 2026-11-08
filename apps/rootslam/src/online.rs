@@ -36,6 +36,10 @@ use std::{
 
 #[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Independent precision, mapping, loop and output-ownership options"
+)]
 pub struct Options {
     pub vio_config: Option<PathBuf>,
     /// Detection cell width in pixels; overrides the Basalt archive when present.
@@ -45,6 +49,8 @@ pub struct Options {
     pub map: bool,
     /// 回环检测开关；关闭后只保留局部建图与关键帧共视图。
     pub loops: bool,
+    /// Let localization exclusively publish corrected odometry and navigation.
+    pub external_localization: bool,
 }
 
 impl Default for Options {
@@ -56,6 +62,7 @@ impl Default for Options {
             use_double: false,
             map: true,
             loops: true,
+            external_localization: false,
         }
     }
 }
@@ -256,6 +263,7 @@ impl LiveSession {
         let imu_watermark = ImuWatermark::default();
         let (gravity_tx, gravity_rx) = mpsc::sync_channel(1);
         let imu_inputs = Some(imu::Inputs {
+            external_localization: options.external_localization,
             imu: imu_tx,
             posteriors: states_rx,
             gravity: gravity_tx,
@@ -430,11 +438,7 @@ impl LiveSession {
             }
             if let Some(flow) = data.flow {
                 for (camera, points) in flow.observations.iter().enumerate().take(2) {
-                    let name = if camera == 0 {
-                        "vio/diagnostics/keypoints/left"
-                    } else {
-                        "vio/diagnostics/keypoints/right"
-                    };
+                    let name = firefly_pubsub::viz::VIO_KEYPOINT_ENTITIES[camera];
                     let mut message = VizMessage::base(kind::KEYPOINTS_2D, stamp, name);
                     message.color = [64, 255, 128];
                     message.scalars[..3].copy_from_slice(&[
@@ -530,7 +534,7 @@ impl LiveSession {
     }
 }
 
-/// Builds the Basalt VIO configuration with the initialization priors shared with OKVIS2-X.
+/// Builds the Basalt VIO configuration with bias and yaw initialization priors.
 ///
 /// The upstream archive replaces every field on load and skips the yaw prior, so the yaw
 /// information is applied after the archive is read.
@@ -541,7 +545,7 @@ impl LiveSession {
 fn initial_vio_config(options: &Options) -> Result<VioConfig> {
     options.validate()?;
     let mut vio = VioConfig::default();
-    // OKVIS stores these initial bias priors as variances; Basalt stores their precisions.
+    // Basalt stores precision: invert the squared standard deviations.
     vio.vio_init_ba_weight = 1.0 / 0.1_f64.powi(2);
     vio.vio_init_bg_weight = 1.0 / 0.01_f64.powi(2);
     if let Some(path) = &options.vio_config {
@@ -550,7 +554,7 @@ fn initial_vio_config(options: &Options) -> Result<VioConfig> {
     if let Some(size) = options.optical_flow_detection_grid_size {
         vio.optical_flow_detection_grid_size = size;
     }
-    // Match OKVIS's initial yaw information while retaining Basalt's translation prior.
+    // Keep yaw information independent of the translation prior.
     vio.vio_init_yaw_weight = Some(1e2);
     Ok(vio)
 }

@@ -9,5 +9,4 @@ cargo build --locked -p firefly-opengv
 cargo test --locked -p firefly-opengv
 ```
 
-算法审计与兼容边界保留在 `apps/okvis2-x/AUDIT.md`；
 许可证文本与第三方声明见[许可证索引](../../docs/licenses/README.md)。

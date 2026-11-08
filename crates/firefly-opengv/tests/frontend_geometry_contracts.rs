@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
-//! Known multi-camera scenes exercise the solvers selected by the OKVIS frontend.
+//! Known multi-camera scenes exercise absolute and relative pose solvers.
 use firefly_opengv::{
     absolute_pose::{methods as absolute, noncentral_absolute_adapter::NoncentralAbsoluteAdapter},
     optimization_functor::RustNumericalBackend,

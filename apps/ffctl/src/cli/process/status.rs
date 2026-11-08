@@ -265,10 +265,10 @@ mod tests {
     #[test]
     fn name_column_holds_the_longest_process_name() {
         assert_eq!(name_width(&config_with(&["camera"])), 6);
-        assert_eq!(name_width(&config_with(&["firefly-okvis-x"])), 15);
+        assert_eq!(name_width(&config_with(&["firefly-rootslam"])), 16);
         assert_eq!(
-            name_width(&config_with(&["camera", "firefly-okvis-x", "imu"])),
-            15
+            name_width(&config_with(&["camera", "firefly-rootslam", "imu"])),
+            16
         );
         assert_eq!(name_width(&config_with(&[])), 4, "空清单用表头宽度");
     }

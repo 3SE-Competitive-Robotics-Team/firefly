@@ -61,7 +61,7 @@ This catalog covers all production topic constants; test topics use isolated nam
 | `Firefly/VioAttitude` | VIO prediction → FC, mimir | Bias summary; control consumers remain independent |
 | `Firefly/CameraLeft`, `Firefly/CameraRight` | render/sensors → VIO, mimir | Lossless grayscale samples when images are enabled |
 | `Firefly/CameraPair` | render → image consumers | Pair notification, not separately recorded |
-| `Firefly/Depth` | render/sensors → mapping/planner | No duplicate depth display |
+| `Firefly/Depth` | render/sensors → planner-owned EGO mapper | No duplicate depth display |
 | `Firefly/Imu` | sim/sensors → VIO, FC | Not subscribed by the ordinary recorder |
 | `Firefly/Odometry` | VIO → control, planning, evaluation | Pose diagnostics; evaluation explicitly subscribes |
 | `Firefly/Navigation` | VIO/localization → planner, FC | Business state, not a duplicate plotting topic |
@@ -72,7 +72,6 @@ This catalog covers all production topic constants; test topics use isolated nam
 | `Firefly/Goal` | ffctl/evaluation → planner | Planning goal, not a plotting topic |
 | `Firefly/MandatoryStop` | external tools → planner | Stop command; outcome in planner state and logs |
 | `Firefly/Trajectory`, `Firefly/PlannerHeartbeat`, `Firefly/TrajectoryControl`, `Firefly/PlannerStatus` | planner/FSM ↔ trajectory output/evaluation | Business lifecycle; visualization uses plan entities |
-| `Firefly/OccupancyMap`, `Firefly/MapRegion` | map service ↔ consumers | Business map requests/responses; visualization uses voxel diagnostics |
 | `Firefly/Features`, `Firefly/PoseObservation` | feature/matching → localization | Business localization input, not duplicated by mimir |
 
 Latest-value business channels are not complete raw sensor archives. Start mimir first and stop it last.
@@ -90,12 +89,14 @@ business log. Known loss makes the recording fail.
 | `vio/posterior/*` | Each VIO posterior pose, world velocity and IMU biases |
 | `vio/prediction/*` | Shared IMU prediction pose, velocity, angular rate and posterior age |
 | `vio/diagnostics/*` | Per-frame identity counts, stereo ratio, pixel residuals and optimization deltas |
-| `vio/diagnostics/keypoints/{left,right}`, `okvis/debug/keypoints/{left,right}` | Camera overlays; one recorded point representation |
+| `vio/diagnostics/keypoints/{left,right}` | Camera overlays; one recorded point representation |
 | `vio/diagnostics/keypoints/active_left` | Additional associated-landmark overlay, only `vio-diagnostics=debug` |
-| `okvis/*`, `rootslam/*` | Tracking, loop commits and processing/publishing timing |
+| `rootslam/*` | Stereo enqueue-to-posterior and IMU publishing timing |
+| `vio/odom`, `vio/traj`, `vio/map/{pose,traj}`, `vio/gyro_bias` | Local and map poses at measurement time, derived trajectories and IMU bias summary; original frames are retained |
 | `render/capture/*` | Capture-to-publish stage timing at the original capture timestamp |
 | `corr/*`, `vision/debug/map_query_wall_s` | External localization gates, disagreement, correction and query timing |
 | `plan/*` | Paths, poses, obstacle planes and maps for display |
+| `plan/collision` | Planner-owned depth map after obstacle inflation, in map coordinates at the planner simulation timestamp; bounded voxel snapshots/deltas for checking collision geometry, using the existing map display cadence and budgets |
 | `acceptance/*` | Scoring evidence; display simplification must preserve it and all acceptance thresholds |
 | `mimir/*`, `logs/*` | Configuration, queue high-water, lifecycle, failures and process events |
 
@@ -112,15 +113,14 @@ Zero-count placeholders must not be interpreted as zero error. Position/velocity
 optimization after-minus-before; rotation is the corresponding rotation vector. They exclude frontend
 initialization and loop synchronization. RootSLAM also reports graph and keyframe summaries.
 
-`okvis/frame_processing_ms` covers dequeue, extraction, matching, optimization, publication and
-marginalization for successfully submitted frames; it excludes waiting before the processing thread.
 `rootslam/frame_processing_ms` starts at stereo enqueue and ends at posterior consumption in the IMU
-thread, so it includes queuing. These are different timing boundaries.
+thread, including queue time.
 `RUST_LOG=info,basalt-profile=debug` records stage events in `logs/firefly-rootslam`.
 Join by frame timestamp and process-monotonic boundaries; do not add nested durations or percentiles.
 `render/capture/stages_s` records submit/readback/assembly/queue timing; `publish_s` records processing,
 publication and total timing. Posterior age also includes visual processing and propagation scheduling.
-`okvis/loop_commits` counts committed full-graph updates, not retrieval candidates.
+RootSLAM does not currently feed sparse-map corrections into online navigation. There is no committed
+navigation-loop diagnostic; missing evidence must not be substituted with loop candidate counts.
 
 ## Recorder architecture and operation
 

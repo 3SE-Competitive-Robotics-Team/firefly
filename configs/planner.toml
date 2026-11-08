@@ -1,5 +1,7 @@
 # planner 配置（EGO-Planner-v2 对齐；缺键回落代码默认值，`--config` 可换文件）
 # 顶层 = PlannerConfig（论文 Table S6），[manager] = 管理器行为参数
+# [mapping]：planner 独立融合 Depth + Navigation，维护局部概率占据图。
+# [mapping.depth] 标定默认取 firefly_base::rig，部署可覆盖光学内参和 body←camera 外参。
 
 yaw_hold = true
 # 障碍净距（米）：地图膨胀、A*、轨迹细检和障碍代价硬阈值共用。

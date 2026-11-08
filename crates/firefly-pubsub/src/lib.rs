@@ -35,7 +35,6 @@ pub mod event;
 pub mod goal;
 pub mod imu;
 pub mod log;
-pub mod map;
 pub mod navigation;
 pub mod node;
 pub mod odom;

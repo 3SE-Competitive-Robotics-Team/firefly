@@ -275,7 +275,7 @@ def test_online_frontend_runs_during_takeoff_and_initial_hover(tmp_path, vio_onl
     class PhaseMission(Mission):
         def run_phases(self, phases, applications):
             assert [name for name, _ in phases][:3] == ["initialization", "takeoff", "hover"]
-            assert "firefly-okvis-x" in applications
+            assert "firefly-rootslam" in applications
             assert "slam" not in applications
             assert ("localization" in applications) == prior_maps
             assert ("aliked" in applications) == prior_maps

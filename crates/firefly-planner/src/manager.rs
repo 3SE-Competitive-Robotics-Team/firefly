@@ -179,7 +179,15 @@ impl PlannerManager {
     ) -> Result<Self> {
         let global_path = global_waypoints(start, goal)?;
         let max_vel = planner.config().max_velocity;
-        let global_traj = plan_global_traj_waypoints(start, &global_path, max_vel)?;
+        let global_traj = plan_global_traj_waypoints(
+            Endpoint {
+                position: start,
+                velocity: Vector3::zeros(),
+                acceleration: Vector3::zeros(),
+            },
+            &global_path,
+            max_vel,
+        )?;
         // 初始全局轨迹锚点取管理器时钟原点（0.0）：glb_t 簿记是相对游标，
         // 与绝对时钟无关（官方 setGlobalTraj 以规划时刻锚定，此处等义）
         let global = GlobalTraj::new(global_traj, 0.0);
@@ -215,8 +223,8 @@ impl PlannerManager {
         if (goal - self.goal.coords).norm() < 1e-6 {
             return Ok(());
         }
-        let start = self.estimated_position(now, measured);
-        let global_path = global_waypoints(start, goal)?;
+        let start = self.global_start(now, measured);
+        let global_path = global_waypoints(start.position, goal)?;
         let max_vel = self.planner.config().max_velocity;
         let global_traj = plan_global_traj_waypoints(start, &global_path, max_vel)?;
         log::info!(
@@ -244,8 +252,8 @@ impl PlannerManager {
         self.local = None;
         self.last_result = None;
         self.touch_goal = false;
-        let start = measured.position.coords;
-        let path = global_waypoints(start, self.goal.coords)?;
+        let start = self.global_start(now, Some(measured));
+        let path = global_waypoints(start.position, self.goal.coords)?;
         let trajectory =
             plan_global_traj_waypoints(start, &path, self.planner.config().max_velocity)?;
         self.global_path = path;
@@ -484,16 +492,13 @@ impl PlannerManager {
             return false;
         }
         let orig_goal = self.goal.coords;
-        let reso = self.planner.map_ref().resolution();
-        // 任务航点连线，克隆避开后续 &mut 借用冲突
-        let path = self.global_path.clone();
-        let cum = cumulative_arcs(&path);
-        let mut s = cum.last().copied().unwrap_or(0.0);
-        while s > 0.0 {
-            let pt = point_at_arc(&path, &cum, s);
+        let step = self.planner.map_ref().resolution() / self.planner.config().max_velocity;
+        let mut t = self.global.traj.duration();
+        while t > 0.0 {
+            let pt = self.global.traj.eval(t).position;
             if !self.planner.map_ref().is_occupied_inflated(pt) {
-                let start = self.estimated_position(now, measured);
-                match global_waypoints(start, pt) {
+                let start = self.global_start(now, measured);
+                match global_waypoints(start.position, pt) {
                     Ok(new_path) => {
                         let max_vel = self.planner.config().max_velocity;
                         if let Ok(new_global_traj) =
@@ -519,7 +524,7 @@ impl PlannerManager {
                     Err(e) => log::debug!("候选修正点不可达（{e}），继续回扫"),
                 }
             }
-            if s <= reso {
+            if t <= step {
                 log::error!(
                     "全局路径上找不到任何无碰点，保持障碍内目标 ({:.2},{:.2},{:.2})",
                     orig_goal.x,
@@ -528,22 +533,27 @@ impl PlannerManager {
                 );
                 break;
             }
-            s -= reso;
+            t -= step;
         }
         false
     }
 
-    /// 位置估计：实测优先（odom），否则沿当前轨迹参考推进。
-    pub(crate) fn estimated_position(&self, now: f64, measured: Option<State>) -> Vector3<f64> {
-        if let Some(s) = measured {
-            return s.position.coords;
-        }
-        match &self.local {
-            Some(local) => {
-                let t_cur = (now - local.start_time).clamp(0.0, local.traj.duration());
-                local.traj.eval(t_cur).position
-            }
-            None => self.global_path.first().copied().unwrap_or_default(),
+    /// 上游 planNextWaypoint 使用 odom P/V 和零加速度；离线无观测时沿执行轨迹取 P/V。
+    fn global_start(&self, now: f64, measured: Option<State>) -> Endpoint {
+        let (position, velocity) = if let Some(state) = measured {
+            (state.position.coords, state.velocity)
+        } else if let Some(local) = &self.local {
+            let t = (now - local.start_time).clamp(0.0, local.traj.duration());
+            let sample = local.traj.eval(t);
+            (sample.position, sample.velocity)
+        } else {
+            let sample = self.global.traj.eval(0.);
+            (sample.position, sample.velocity)
+        };
+        Endpoint {
+            position,
+            velocity,
+            acceleration: Vector3::zeros(),
         }
     }
 
@@ -843,30 +853,30 @@ pub(crate) fn emergency_stop_traj(stop_pos: Vector3<f64>) -> Result<Trajectory> 
 }
 
 /// 官方 `EGOPlannerManager::planGlobalTrajWaypoints`（`planner_manager.cpp:425`）：
-/// 以任务航点生成时间参数化全局引导；不施加障碍约束。首末状态完整（起点/
-/// 终点，零速零加速），内点为任务航点（`path[0]` 即起点、末端即终点），
+/// 以任务航点生成时间参数化全局引导；不施加障碍约束。保留起点 PVA，终点
+/// 零速零加速；内点为任务航点（`path[0]` 即起点、末端即终点），
 /// 段数 = `path.len() - 1`；段时间 = 段长 `/des_vel`（`des_vel = max_vel/1.5`），
 /// 迭代 2 次：首轮最大速度超标（> `max_vel`）时 `des_vel /= 1.5` 重生成，
-/// 达标即提前退出。
+/// 达标或起始速度已超过限值时提前退出。
 ///
 /// # Errors
 ///
-/// 折线退化（`len < 2`，`goal == start` 悬停）时产出单段常值轨迹不报错；
+/// 同位置目标使用一秒单段引导，保留起始状态并在终点静止；
 /// MINCO 系统奇异才报错。
 pub(crate) fn plan_global_traj_waypoints(
-    start: Vector3<f64>,
+    start: Endpoint,
     path: &[Vector3<f64>],
     max_vel: f64,
 ) -> Result<Trajectory> {
-    // 退化（goal == start 悬停）：单段常值轨迹，无时间推进
+    // 同位置目标没有可用于分配时间的路径长度。
     if path.len() < 2 {
         let endpoint = Endpoint {
-            position: start,
+            position: start.position,
             velocity: Vector3::zeros(),
             acceleration: Vector3::zeros(),
         };
         let minco =
-            MincoBuilder::new(SolverOrder::MinimumJerk, endpoint, endpoint).build(&[], &[1.0])?;
+            MincoBuilder::new(SolverOrder::MinimumJerk, start, endpoint).build(&[], &[1.0])?;
         return minco.solve();
     }
     // 内点 = path[1..len-1]（排除起点与终点）：段数 = path.len() - 1
@@ -874,11 +884,6 @@ pub(crate) fn plan_global_traj_waypoints(
         .iter()
         .map(|p| nalgebra::Point3::from(*p))
         .collect();
-    let start_end = Endpoint {
-        position: start,
-        velocity: Vector3::zeros(),
-        acceleration: Vector3::zeros(),
-    };
     let goal_end = Endpoint {
         position: *path.last().expect("len >= 2"),
         velocity: Vector3::zeros(),
@@ -888,15 +893,17 @@ pub(crate) fn plan_global_traj_waypoints(
     let mut traj = None;
     for _ in 0..2 {
         let mut durations = Vec::with_capacity(path.len() - 1);
-        let mut prev = start;
+        let mut prev = start.position;
         for wp in &path[1..] {
             durations.push((*wp - prev).norm() / des_vel.max(1e-9));
             prev = *wp;
         }
-        let minco = MincoBuilder::new(SolverOrder::MinimumJerk, start_end, goal_end)
+        let minco = MincoBuilder::new(SolverOrder::MinimumJerk, start, goal_end)
             .build(&inner, &durations)?;
         let t = minco.solve()?;
-        if crate::planner::Planner::trajectory_max_vel(&t) < max_vel {
+        if crate::planner::Planner::trajectory_max_vel(&t) < max_vel
+            || start.velocity.norm() > max_vel
+        {
             traj = Some(t);
             break;
         }
@@ -965,34 +972,6 @@ pub(crate) fn piece_index_at(traj: &Trajectory, t: f64) -> usize {
 /// 路径累计长度。
 pub(crate) fn path_length(points: &[Vector3<f64>]) -> f64 {
     points.windows(2).map(|w| (w[1] - w[0]).norm()).sum()
-}
-
-/// 折线各顶点距起点的累计弧长（与 `points` 等长）。
-pub(crate) fn cumulative_arcs(points: &[Vector3<f64>]) -> Vec<f64> {
-    let mut cum = Vec::with_capacity(points.len());
-    let mut acc = 0.0;
-    for w in points.windows(2) {
-        cum.push(acc);
-        acc += (w[1] - w[0]).norm();
-    }
-    cum.push(acc);
-    cum
-}
-
-/// 折线上距起点弧长 `s` 的插值点（`s` 超出总长取末端；退化段取段首）。
-pub(crate) fn point_at_arc(points: &[Vector3<f64>], cum: &[f64], s: f64) -> Vector3<f64> {
-    for i in 1..points.len() {
-        if cum[i] >= s {
-            let len = cum[i] - cum[i - 1];
-            let t = if len < 1e-12 {
-                0.0
-            } else {
-                (s - cum[i - 1]) / len
-            };
-            return points[i - 1] + (points[i] - points[i - 1]) * t;
-        }
-    }
-    points.last().copied().unwrap_or_default()
 }
 
 /// 官方 `planNextWaypoint` 的单目标输入：全局引导不承担碰撞验收，

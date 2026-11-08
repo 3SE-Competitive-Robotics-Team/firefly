@@ -1,4 +1,4 @@
-//! Basalt queue/posterior adaptation for the same IMU runtime used by OKVIS2-X.
+//! Basalt queue and posterior adaptation for the event-driven IMU runtime.
 use super::{error, publish_pose_diagnostic, publish_scalar_diagnostic};
 use firefly_basalt::imu::imu_types::{ImuData, PoseVelBiasState};
 use firefly_error::Result;
@@ -18,6 +18,7 @@ use std::{
 pub(super) type FrameStarts = Arc<Mutex<BTreeMap<i64, Instant>>>;
 
 pub(super) struct Inputs {
+    pub external_localization: bool,
     pub imu: mpsc::SyncSender<Option<Arc<ImuData<f64>>>>,
     pub posteriors: mpsc::Receiver<Option<Arc<PoseVelBiasState<f64>>>>,
     pub gravity: mpsc::SyncSender<GravityEstimate>,
@@ -31,7 +32,7 @@ pub(super) fn run(inputs: Inputs, stop: &AtomicBool) -> Result<()> {
         process: "firefly-rootslam",
         topics: firefly_vio_runtime::Topics::default(),
         diagnostics: true,
-        external_localization: false,
+        external_localization: inputs.external_localization,
         imu_latency_entity: "rootslam/ipc/imu_publish_ms",
     };
     firefly_vio_runtime::run_imu(&options, &watermark, stop, || {

@@ -71,7 +71,7 @@ def save_report(directory, report):
 def provenance(root, *, allow_map_rig_translation=False, vio_only=False, prior_maps=False):
     files = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=root).decode().split("\0")
     source = {name: digest(root / name) for name in files if name and (root / name).is_file()}
-    names = [os.environ.get("FIREFLY_VIO_PROCESS", "firefly-okvis-x"), "render", "fc", "ffctl", "planner", "mimir"]
+    names = ["firefly-rootslam", "render", "fc", "ffctl", "planner", "mimir"]
     if prior_maps:
         names += ["localization", "aliked", "lightglue"]
     binaries = {name: digest(root / "target/release" / name) for name in names}
@@ -119,7 +119,7 @@ def main(argv=None, *, resolve_workspace=workspace_root, check_idle=require_idle
     parser.add_argument("--workspace", type=Path, help="firefly 工作区目录；默认从当前目录向上查找")
     parser.add_argument("--config", type=Path)
     parser.add_argument("--case", choices=["all", "nominal", "reference_loss", "estimator_loss"], default="all")
-    parser.add_argument("--vio-only", action="store_true", help="纯 VIO + 会话坐标系；关闭在线回环与子地图，不启动 ALIKED/LightGlue")
+    parser.add_argument("--vio-only", action="store_true", help="纯 VIO + 会话坐标系；关闭在线回环与持久稀疏地图，不启动 ALIKED/LightGlue")
     parser.add_argument("--prior-maps", action="store_true", help="显式加载 RMUC 离线视觉地图与规划地图")
     parser.add_argument("--localization-config", type=Path, help="外部地图模式所需的显式启动先验配置")
     parser.add_argument("--repeat", type=int, default=1, help="每种任务独立启动次数；全部使用固定配置")

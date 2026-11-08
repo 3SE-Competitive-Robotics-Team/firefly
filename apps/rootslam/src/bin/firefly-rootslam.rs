@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-const USAGE: &str = "firefly-rootslam [--config <path>] [--no-loop-closures] [--no-mapping]";
+const USAGE: &str = "firefly-rootslam [--config <path>] [--no-loop-closures] [--no-mapping] [--external-localization]";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,11 +15,12 @@ struct Config {
     online: Options,
 }
 
-/// 运行时开关；与 `firefly-okvis-x` 的同名选项语义一致。
+/// Online mapping and navigation ownership switches.
 struct Arguments {
     config: PathBuf,
     loop_closures: bool,
     mapping: bool,
+    external_localization: bool,
 }
 
 fn argument_error(message: impl Into<String>) -> Error {
@@ -32,6 +33,7 @@ fn parse() -> Result<Option<Arguments>> {
     let mut config = firefly_config::paths::config("firefly-rootslam.toml");
     let mut loop_closures = true;
     let mut mapping = true;
+    let mut external_localization = false;
     while let Some(argument) = args.next() {
         if argument == "--help" || argument == "-h" {
             return Ok(None);
@@ -51,6 +53,10 @@ fn parse() -> Result<Option<Arguments>> {
                 .into();
             continue;
         }
+        if argument == "--external-localization" {
+            external_localization = true;
+            continue;
+        }
         return Err(argument_error(format!(
             "unknown argument: {}",
             argument.to_string_lossy()
@@ -60,6 +66,7 @@ fn parse() -> Result<Option<Arguments>> {
         config,
         loop_closures,
         mapping,
+        external_localization,
     }))
 }
 
@@ -81,6 +88,7 @@ fn main() -> Result<()> {
     if !arguments.mapping {
         config.online.map = false;
     }
+    config.online.external_localization |= arguments.external_localization;
     let stop = Arc::new(AtomicBool::new(false));
     let mut registrations = Vec::new();
     for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {

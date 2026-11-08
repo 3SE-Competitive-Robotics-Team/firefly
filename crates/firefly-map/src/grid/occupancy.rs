@@ -45,8 +45,16 @@ impl GridMap {
     /// 登记不可由在线观测清除的场地占据体素。
     pub fn set_prior_occupied(&mut self, idx: [usize; 3]) {
         let global = self.global_index(idx);
+        self.set_prior_global_occupied(global);
+    }
+
+    /// Register world-anchored prior cells, including cells outside the current window.
+    /// Rolling the window restores those cells through the same protected prior layer.
+    pub fn set_prior_global_occupied(&mut self, global: [i64; 3]) {
         std::sync::Arc::make_mut(&mut self.prior).insert(global);
-        self.set_state(idx, VoxelState::Occupied);
+        if let Some(index) = self.window_index(global) {
+            self.set_state(index, VoxelState::Occupied);
+        }
     }
 
     /// 为已构建实例注入虚拟墙（覆盖已有配置，影响膨胀查询语义）。
