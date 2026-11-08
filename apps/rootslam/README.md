@@ -118,13 +118,14 @@ convergence metadata; live `mimir` captures runtime diagnostics separately.
 
 For the simulated closed loop, `firefly-rootslam` subscribes to Render's
 `Firefly/CameraLeft` and `CameraRight` plus Sim's `Firefly/Imu`. It pairs stereo
-frames within the OKVIS time tolerance and waits for IMU coverage before passing
+frames within the configured timestamp tolerance and waits for IMU coverage before passing
 them to Basalt. Its rig calibration comes from the shared Firefly rig geometry.
 It publishes `Firefly/Odometry`, `Firefly/CorrectedOdometry`,
 `Firefly/Navigation`, and posterior `Firefly/VioAttitude` for FC using
-[`configs/firefly-rootslam.toml`](../../configs/firefly-rootslam.toml). Start it in place
-of `firefly-okvis-x` for simulation with `cargo run --release -p firefly-rootslam`.
+[`configs/firefly-rootslam.toml`](../../configs/firefly-rootslam.toml). Start the default
+estimator with `cargo run --release -p firefly-rootslam`.
 `--no-loop-closures` disables loop detection and `--no-mapping` disables the persistent
-map; both match the `firefly-okvis-x` switches of the same name.
-The hover harness accepts `FIREFLY_VIO_PROCESS=firefly-rootslam` with the same
-scoring thresholds.
+sparse map. Dense depth fusion belongs to planner's EGO map.
+`--external-localization` delegates corrected odometry and navigation publishing to
+localization while preserving local odometry and attitude output. The default online
+navigation uses the VIO frame; sparse-map corrections are not fed back to that output.

@@ -54,13 +54,138 @@ mod tests {
 pub struct MappingOptions {
     pub resolution: f64,
     pub range: [f64; 3],
+    pub depth: DepthOptions,
 }
 impl Default for MappingOptions {
     fn default() -> Self {
         Self {
             resolution: 0.1,
             range: [8., 8., 4.],
+            depth: DepthOptions::default(),
         }
+    }
+}
+
+/// Deployment calibration and launch overrides. Image filtering/probabilities use upstream
+/// `advanced_param.xml` defaults; the numerical crate itself keeps the ROS parameter defaults.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DepthOptions {
+    /// CV pinhole fx, fy, cx, cy for the axial depth image.
+    pub intrinsics: [f64; 4],
+    pub translation: [f64; 3],
+    /// body <- depth optical camera, Hamilton xyzw.
+    pub rotation: [f64; 4],
+    pub use_depth_filter: bool,
+    pub depth_filter_mindist: f64,
+    pub depth_filter_margin: i32,
+    pub k_depth_scaling_factor: f64,
+    pub skip_pixel: i32,
+    pub p_hit: f64,
+    pub p_miss: f64,
+    pub p_min: f64,
+    pub p_max: f64,
+    pub p_occ: f64,
+    pub fading_time: f64,
+    /// Maximum timestamp gap between the two odometry samples used for interpolation.
+    pub max_pose_gap: f64,
+    /// Extra fusion extent around the planning grid; coverage is still checked at runtime.
+    pub window_margin: f64,
+}
+
+impl Default for DepthOptions {
+    fn default() -> Self {
+        use firefly_base::{FrameId, rig};
+        use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_WIDTH};
+        let rotation =
+            nalgebra::UnitQuaternion::from_matrix(&(rig::cam_axes_in_body() * rig::CV_FROM_RENDER));
+        let q = rotation.quaternion();
+        let focal = IMAGE_HEIGHT as f64 * 0.5 / (rig::FOV_Y_DEG.to_radians() * 0.5).tan();
+        let center = rig::principal_point(IMAGE_WIDTH, IMAGE_HEIGHT);
+        Self {
+            intrinsics: [focal, focal, center[0], center[1]],
+            translation: rig::position_in_body(FrameId::DEPTH_CAMERA).into(),
+            rotation: [q.i, q.j, q.k, q.w],
+            use_depth_filter: true,
+            depth_filter_mindist: 0.2,
+            depth_filter_margin: 2,
+            k_depth_scaling_factor: 1000.,
+            skip_pixel: 2,
+            p_hit: 0.65,
+            p_miss: 0.35,
+            p_min: 0.12,
+            p_max: 0.90,
+            p_occ: 0.80,
+            fading_time: 1000.,
+            max_pose_gap: 0.05,
+            window_margin: 1.,
+        }
+    }
+}
+
+impl DepthOptions {
+    pub fn extrinsic(&self) -> Result<nalgebra::Isometry3<f64>> {
+        Ok(*firefly_base::RigidTransform::from_parts(
+            firefly_base::FrameId::BODY,
+            firefly_base::FrameId::DEPTH_CAMERA,
+            self.translation,
+            self.rotation,
+        )?
+        .isometry())
+    }
+
+    pub fn parameters(
+        &self,
+        grid: &firefly_map::GridMap,
+        clearance: f64,
+    ) -> Result<firefly_ego_map::MappingParameters> {
+        let extrinsic = self.extrinsic()?;
+        if !self.max_pose_gap.is_finite()
+            || self.max_pose_gap <= 0.
+            || self.max_pose_gap > super::MAP_TIMEOUT
+            || !self.window_margin.is_finite()
+            || self.window_margin <= 0.
+            || self.depth_filter_margin < 0
+            || self.depth_filter_margin as usize * 2 >= firefly_pubsub::camera::IMAGE_HEIGHT
+            || !self.depth_filter_mindist.is_finite()
+            || self.depth_filter_mindist <= 0.
+            || !self.k_depth_scaling_factor.is_finite()
+            || self.k_depth_scaling_factor <= 0.
+            || self.k_depth_scaling_factor > f64::from(f32::MAX)
+            || self.skip_pixel <= 0
+            || self.skip_pixel as usize >= firefly_pubsub::camera::IMAGE_HEIGHT
+            || !clearance.is_finite()
+            || clearance < 0.
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidArgument,
+                "invalid depth mapping options",
+            ));
+        }
+        let [fx, fy, cx, cy] = self.intrinsics;
+        let padding = self.window_margin + extrinsic.translation.vector.norm();
+        Ok(firefly_ego_map::MappingParameters {
+            resolution: grid.resolution(),
+            local_update_range: (grid.size() * 0.5 + nalgebra::Vector3::repeat(padding)).into(),
+            obstacles_inflation: clearance,
+            fx,
+            fy,
+            cx,
+            cy,
+            odom_depth_timeout: super::MAP_TIMEOUT,
+            use_depth_filter: self.use_depth_filter,
+            depth_filter_mindist: self.depth_filter_mindist,
+            depth_filter_margin: self.depth_filter_margin,
+            k_depth_scaling_factor: self.k_depth_scaling_factor,
+            skip_pixel: self.skip_pixel,
+            p_hit: self.p_hit,
+            p_miss: self.p_miss,
+            p_min: self.p_min,
+            p_max: self.p_max,
+            p_occ: self.p_occ,
+            fading_time: self.fading_time,
+            ..Default::default()
+        })
     }
 }
 impl MappingOptions {
@@ -68,6 +193,8 @@ impl MappingOptions {
         if !self.resolution.is_finite()
             || self.resolution <= 0.
             || self.range.iter().any(|v| !v.is_finite() || *v <= 0.)
+            || !clearance.is_finite()
+            || clearance < 0.
         {
             return Err(Error::new(
                 ErrorKind::InvalidArgument,

@@ -14,8 +14,8 @@ command = ["bin/motor"]
 autostart = false
 
 [[process]]
-name = "firefly-okvis-x"
-command = ["bin/firefly-okvis-x"]
+name = "firefly-rootslam"
+command = ["bin/firefly-rootslam"]
 autostart = true
 
 [[process]]

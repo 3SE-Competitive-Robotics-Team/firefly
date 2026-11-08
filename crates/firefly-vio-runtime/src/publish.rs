@@ -123,7 +123,7 @@ impl Publishers {
             self.last_diagnostic = stamp;
         }
         if stamp - self.last_viz >= 0.1 {
-            let mut message = VizMessage::base(kind::POSE, stamp, "okvis/odom");
+            let mut message = VizMessage::base(kind::POSE, stamp, "vio/odom");
             message.xyz = [
                 sample.odom.position_x,
                 sample.odom.position_y,
@@ -167,4 +167,76 @@ pub fn publish_scalar_diagnostic<const N: usize>(
     message.scalars[..N].copy_from_slice(&values);
     message.scalar_count = N as u32;
     let _ = viz.publish(message);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use firefly_pubsub::{node::create_node, subscriber::Subscriber};
+
+    #[test]
+    fn external_localization_exclusively_owns_map_outputs() {
+        let node = create_node().unwrap();
+        for external in [false, true] {
+            let prefix = format!(
+                "Firefly/Test/VioOwnership/{}/{external}",
+                std::process::id()
+            );
+            let topics = crate::Topics {
+                imu: format!("{prefix}/Imu"),
+                odometry: format!("{prefix}/Odometry"),
+                corrected: format!("{prefix}/Corrected"),
+                navigation: format!("{prefix}/Navigation"),
+                attitude: format!("{prefix}/Attitude"),
+            };
+            let odometry = Subscriber::<OdomMessage>::with_topic(&node, &topics.odometry).unwrap();
+            let corrected =
+                Subscriber::<OdomMessage>::with_topic(&node, &topics.corrected).unwrap();
+            let navigation =
+                Subscriber::<NavigationMessage>::with_topic(&node, &topics.navigation).unwrap();
+            let attitude =
+                Subscriber::<AttitudeMessage>::with_topic(&node, &topics.attitude).unwrap();
+            let mut publishers = Publishers::open(
+                &node,
+                &crate::Options {
+                    process: "vio-ownership-test",
+                    topics,
+                    diagnostics: false,
+                    external_localization: external,
+                    imu_latency_entity: "rootslam/ipc/imu_publish_ms",
+                },
+            )
+            .unwrap();
+            let odom = OdomMessage {
+                timestamp: 2.,
+                is_initialized: true,
+                ..Default::default()
+            };
+            publishers
+                .publish(
+                    &Sample {
+                        odom,
+                        corrected: odom,
+                        navigation: NavigationMessage {
+                            odom,
+                            ..Default::default()
+                        },
+                        attitude: Some(AttitudeMessage {
+                            timestamp: 2.,
+                            posterior_time: 1.9,
+                            session: 1,
+                            quat_xyzw: [0., 0., 0., 1.],
+                            angular_velocity: [0.; 3],
+                            gyro_bias: [0.; 3],
+                        }),
+                    },
+                    2.,
+                )
+                .unwrap();
+            assert_eq!(odometry.receive().unwrap().unwrap().timestamp, 2.);
+            assert_eq!(attitude.receive().unwrap().unwrap().timestamp, 2.);
+            assert_eq!(corrected.receive().unwrap().is_some(), !external);
+            assert_eq!(navigation.receive().unwrap().is_some(), !external);
+        }
+    }
 }

@@ -1,7 +1,7 @@
 """从 .rrd 统计实体更新率（间隔分布），用于验证"实时层刷新够不够快"。
 
 用法（仓库根目录）：
-    uv run python .agents/skills/rerun/scripts/read_rates.py logs/run1.rrd plan/perceived gt/pose
+    uv run python .agents/skills/rerun/scripts/read_rates.py logs/run1.rrd plan/collision gt/pose
 
 输出每个实体的点数、时间跨度，以及间隔的中位/均值/p90/最大和 ≤150ms、>1s 占比。
 "是否以目标频率在刷新"只看中位间隔；长尾（>1s）通常代表该实体本就无变化。
@@ -12,7 +12,7 @@ import numpy as np
 import pyarrow as pa
 from rerun.chunk import RrdReader
 
-DEFAULT_ENTITIES = ("gt/pose", "okvis/odom")
+DEFAULT_ENTITIES = ("gt/pose", "vio/odom")
 
 
 def rates(reader, store, entity):

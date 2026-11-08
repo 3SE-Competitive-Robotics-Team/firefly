@@ -1,0 +1,19 @@
+[package]
+name = "firefly-ego-map"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "EGO-Planner-v2 local probabilistic occupancy mapping"
+license = "GPL-3.0-only"
+repository.workspace = true
+readme.workspace = true
+keywords = ["robotics", "mapping", "occupancy"]
+categories = ["science", "algorithms"]
+
+[dependencies]
+firefly-error.workspace = true
+fastrace.workspace = true
+nalgebra.workspace = true
+
+[lints]
+workspace = true

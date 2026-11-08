@@ -1,7 +1,7 @@
 """发布构建的传感器启动检查；运行记录仅写 logs/ 下的 rrd。
 
 从仓库根运行：FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/system/test_sensor_startup.py -q
-需要 RMUC 资产、图形会话与 release 构建的 firefly-okvis-x / fc / render，且没有其他闭环进程。
+需要 RMUC 资产、图形会话与 release 构建的 firefly-rootslam / fc / render，且没有其他闭环进程。
 GroundTruth 供 render 合成图像及 viz 对照记录；屏蔽 PlantState，算法只使用 IMU 与图像。
 """
 from __future__ import annotations
@@ -43,7 +43,7 @@ def _sensor_startup() -> None:
     mesh = scene.visual
     if not mesh.is_file():
         raise FileNotFoundError(f"RMUC 视觉资产缺失：{mesh}")
-    for name in ("firefly-okvis-x", "fc", "render", "mimir"):
+    for name in ("firefly-rootslam", "fc", "render", "mimir"):
         if not (ROOT / "target" / "release" / name).is_file():
             raise RuntimeError(f"missing release binary: {name}")
     output = ROOT / "logs" / f"vio_sensor_startup_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.rrd"
@@ -65,7 +65,7 @@ def _sensor_startup() -> None:
         time.sleep(2)
         check_alive()
         start("render", [str(ROOT / "target/release/render")])
-        start("firefly-okvis-x", [str(ROOT / "target/release/firefly-okvis-x")])
+        start("firefly-rootslam", [str(ROOT / "target/release/firefly-rootslam")])
         start("fc", [str(ROOT / "target/release/fc")])
         iox2.set_log_level(iox2.LogLevel.Error)
         node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
@@ -160,6 +160,8 @@ def _verify_recording(path: Path) -> None:
     image_times = {camera: set() for camera in ("left", "right")}
     point_times = {camera: set() for camera in ("left", "right")}
     for chunk in reader.store(store=reader.recordings()[0]).stream():
+        if chunk.is_static:
+            continue
         name = chunk.entity_path
         counts[name] += chunk.num_rows
         batch = chunk.to_record_batch()
@@ -174,16 +176,16 @@ def _verify_recording(path: Path) -> None:
             for values in chunk.to_record_batch().column("Scalars:scalars").to_pylist():
                 assert len(values) == 3
                 assert np.isfinite(values).all()
-    for name in ("gt/pose", "okvis/odom", "okvis/map/pose"):
+    for name in ("gt/pose", "vio/odom", "vio/map/pose"):
         assert counts[f"/{name}"] >= 2, f"missing pose history: {name}"
-    for name in ("gt/traj", "okvis/traj", "okvis/map/traj", "okvis/tracking", "okvis/loop_commits",
+    for name in ("gt/traj", "vio/traj", "vio/map/traj", "vio/diagnostics/tracks", "rootslam/frame_processing_ms",
                  "cameras/left/image", "cameras/right/image", "cameras/left/points", "cameras/right/points",
                  "render/capture/publish_s"):
         assert counts[f"/{name}"], f"missing recording entity: {name}"
     for camera in ("left", "right"):
-        assert image_times[camera] & point_times[camera], f"OKVIS keypoints must match at least one recorded {camera} image"
+        assert image_times[camera] & point_times[camera], f"VIO keypoints must match at least one recorded {camera} image"
     assert not any(name.startswith("/world/") for name in counts), "field mesh included in recording"
-    assert not any(name.startswith(("/cameras/depth", "/snapshots/", "/live/", "/okvis/debug/keypoints/"))
+    assert not any(name.startswith(("/cameras/depth", "/snapshots/", "/live/"))
                    for name in counts), "extra camera recording included"
 
 

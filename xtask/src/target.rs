@@ -7,7 +7,6 @@ const DESKTOP_APPS: &[&str] = &[
     "aliked",
     "fc",
     "ffctl",
-    "firefly-okvis-x",
     "firefly-rootslam",
     "lightglue",
     "localization",
@@ -26,7 +25,7 @@ const BOARD_APPS: &[&str] = &[
     "fc",
     "ffctl",
     "imu",
-    "firefly-okvis-x",
+    "firefly-rootslam",
     "lightglue",
     "localization",
     "mimir",
@@ -88,7 +87,6 @@ mod tests {
     #[test]
     fn desktop_release_includes_simulation_vio_apps() {
         let apps = Target::Desktop.apps();
-        assert!(apps.contains(&"firefly-okvis-x"));
         assert!(apps.contains(&"firefly-rootslam"));
     }
 }

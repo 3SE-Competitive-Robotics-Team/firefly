@@ -309,12 +309,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d62b7694a562cdf5a74227903507c56ab2cc8bdd1f781ed5cb4cf9c9f810bfc"
 
 [[package]]
-name = "arraydeque"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
-
-[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3245,29 +3239,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "encoding_rs"
-version = "0.8.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89253175e704ab869b04f9db224d38630e0211a53841a79181deae0889e169f5"
-dependencies = [
- "cfg-if",
- "core_detect",
- "multiversion_no_op",
- "rustversion",
- "scopeguard",
- "simdutf8",
-]
-
-[[package]]
-name = "encoding_rs_io"
-version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fba3fe847045ecff794b9c138293a80db914678c453ad63fbf0c6a9eb6e00b22"
-dependencies = [
- "encoding_rs",
-]
-
-[[package]]
 name = "enum-as-inner"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3569,16 +3540,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "firefly-brisk"
-version = "0.1.0"
-dependencies = [
- "firefly-error",
- "nalgebra",
- "proptest",
- "purecv",
-]
-
-[[package]]
 name = "firefly-calibration"
 version = "0.1.0"
 dependencies = [
@@ -3614,16 +3575,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "firefly-dbow2"
+name = "firefly-ego-map"
 version = "0.1.0"
 dependencies = [
- "flate2",
+ "fastrace",
+ "firefly-error",
  "nalgebra",
- "proptest",
- "rand 0.10.3",
- "serde",
- "serde-saphyr",
- "serde_json",
 ]
 
 [[package]]
@@ -3719,38 +3676,6 @@ dependencies = [
  "log",
  "logcall",
  "nalgebra",
-]
-
-[[package]]
-name = "firefly-okvis-x"
-version = "0.1.0"
-dependencies = [
- "faer",
- "fastrace",
- "firefly-base",
- "firefly-brisk",
- "firefly-config",
- "firefly-dbow2",
- "firefly-error",
- "firefly-imu-initialization",
- "firefly-imu-propagation",
- "firefly-observability",
- "firefly-opengv",
- "firefly-pubsub",
- "firefly-supereight2",
- "firefly-vio-runtime",
- "iceoryx2",
- "image",
- "jiff",
- "log",
- "nalgebra",
- "png",
- "proptest",
- "purecv",
- "rand 0.10.3",
- "rayon",
- "serde",
- "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]
@@ -3865,29 +3790,6 @@ dependencies = [
  "log",
  "logcall",
  "nalgebra",
-]
-
-[[package]]
-name = "firefly-srl-projection"
-version = "0.1.0"
-dependencies = [
- "firefly-error",
- "nalgebra",
- "proptest",
- "purecv",
-]
-
-[[package]]
-name = "firefly-supereight2"
-version = "0.1.0"
-dependencies = [
- "firefly-error",
- "firefly-srl-projection",
- "log",
- "nalgebra",
- "proptest",
- "purecv",
- "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]
@@ -4501,16 +4403,6 @@ dependencies = [
  "presser",
  "thiserror 2.0.21",
  "windows",
-]
-
-[[package]]
-name = "granit-parser"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da55feca5d1625466bae068f9fd4b87892caeae70c3fe671ddb0f50d41aebf37"
-dependencies = [
- "arraydeque",
- "smallvec",
 ]
 
 [[package]]
@@ -6065,12 +5957,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "multiversion_no_op"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
-
-[[package]]
 name = "mutants"
 version = "0.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7258,20 +7144,17 @@ dependencies = [
  "fastrace",
  "firefly-base",
  "firefly-config",
+ "firefly-ego-map",
  "firefly-error",
  "firefly-map",
  "firefly-observability",
- "firefly-okvis-x",
  "firefly-planner",
  "firefly-pubsub",
  "firefly-search",
- "firefly-supereight2",
  "firefly-trajectory",
  "iceoryx2",
- "jiff",
  "log",
  "nalgebra",
- "purecv",
  "serde",
  "toml 1.1.8+spec-1.1.0",
 ]
@@ -8523,20 +8406,6 @@ checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
  "serde_derive",
-]
-
-[[package]]
-name = "serde-saphyr"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a253edfdea34032da21af84e16fcc94f4c7a6ba237f9f3bc2dbf43cea8535c44"
-dependencies = [
- "annotate-snippets",
- "encoding_rs_io",
- "granit-parser",
- "num-traits",
- "serde_core",
- "smallvec",
 ]
 
 [[package]]

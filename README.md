@@ -3,7 +3,7 @@
 自主无人机的 Rust / Python monorepo：视觉惯性里程计、在线路标回环、深度建图、
 轨迹规划、四旋翼飞控、MuJoCo 仿真与 Rerun 可视化。
 
-默认从空会话地图启动，使用 OKVIS2-X 视觉惯性估计、DBoW2 在线回环与深度建图规划，不依赖已知世界起点、
+默认从空会话地图启动，使用 RootSLAM 视觉惯性估计与稀疏建图，planner 独立执行 EGO 深度融合和规划，不依赖已知世界起点、
 预建地图或神经网络权重。ALIKED/LightGlue 库图定位和静态地图是显式可选增强。
 真值只供传感器生成、评测和可视化，不参与估计或控制。
 当前部署用于仿真研究与算法验证，能力边界和飞行结果须分别验收。
@@ -21,8 +21,9 @@
 
 | 位置 | 内容 |
 |---|---|
-| `apps/okvis2-x` | OKVIS2-X 视觉惯性图、在线回环、深度子地图及 IPC/离线入口 |
-| `crates/firefly-{brisk,dbow2,opengv,srl-projection,supereight2}` | 特征、词袋、几何求解、投影与深度融合 |
+| `apps/rootslam` | RootSLAM 在线双目/IMU、稀疏建图及离线数据集入口 |
+| `crates/firefly-{basalt,calibration,opengv,rootslam-mapping}` | 局部 VIO、标定、几何求解与稀疏地图优化 |
+| `crates/firefly-ego-map` | EGO 局部概率占据、射线融合与障碍膨胀 |
 | `crates/firefly-{map,search,trajectory,optimize,cost,obstacle,planner}` | 占据地图、A*、MINCO、L-BFGS、代价、动态障碍与重规划 |
 | `crates/firefly-{localization,vision-map,vision-match}` | 定位融合、视觉库图与匹配 |
 | `crates/firefly-flight` | 飞行模式、安全条件、姿态/位置控制与电机分配 |
@@ -39,10 +40,11 @@
 
 | 应用 | 职责 |
 |---|---|
+| `mimir` | RRD 录制：列式数值诊断、左右目无损灰度图、事件与完整性检查 |
 | `fc` | 1kHz 飞控环：飞行模式与安全条件、姿态/位置控制、电机分配 |
-| `planner` | 任务执行：全局/局部规划、参考发布与可视化，状态源为已对齐地图系 |
+| `planner` | 独占深度融合与局部避障地图、全局/局部规划、参考发布与可视化 |
 | `localization` | 可选外部库图 ESKF：时间配对、map←odom 修正与导航发布，要求显式启动对齐 |
-| `firefly-okvis-x` | 默认 IPC 入口：双目/IMU、在线回环、深度占用建图、里程计/姿态/导航发布；保留离线数据集入口 |
+| `firefly-rootslam` | 默认双目/IMU 状态估计、稀疏建图、里程计/姿态/导航发布；地图优化结果不反馈到在线导航 |
 | `aliked` | ALIKED-N16 特征提取：在线发布特征，`--build-map` 离线建 `ffvmap` 库图 |
 | `lightglue` | ALIKED/LightGlue 离线库图定位：`--map <地图.ffvmap>` 解算视觉位姿 |
 | `render` | 视觉传感器进程：订阅真值位姿渲染双目与深度并发布 IPC，`--offline` 供离线建库 |
@@ -54,7 +56,6 @@
 | 应用 | 职责 |
 |---|---|
 | `firefly-sim` | MuJoCo 物理进程：物理与 IMU 各 1kHz，接收电机推力，无有效控制时暂停 |
-| `mimir` | Rust RRD 录制进程：列式数值诊断、左右目无损灰度图、事件与完整性检查 |
 
 ### Python 库（`packages/`）
 
@@ -93,14 +94,8 @@ supervisor 应答。`firefly.service` 由镜像构建 `orangepi-build` 默认启
 ## References
 
 - [RootSLAM](https://arxiv.org/abs/2610.15157)
+- [EGO-Planner-v2](https://github.com/ZJU-FAST-Lab/EGO-Planner-v2)
 - [Basalt](https://gitlab.com/VladyslavUsenko/basalt)
-- [OKVIS2-X paper](https://arxiv.org/abs/2510.04612)
-- [OKVIS2 source](https://github.com/ethz-mrl/okvis2)
-- [BRISK: Binary Robust Invariant Scalable Keypoints](https://doi.org/10.1109/ICCV.2011.6126542)
-- [DBoW2: Bags of Binary Words for Fast Place Recognition in Image Sequences](https://doi.org/10.1109/TRO.2012.2197158)
 - [OpenGV: A Unified and Generalized Approach to Calibrated Geometric Vision](https://doi.org/10.1109/ICRA.2014.6907291)
-- [Supereight2](https://bitbucket.org/smartroboticslab/supereight2)
 - [Ceres Solver](http://ceres-solver.org/)
 - [Eigen](https://eigen.tuxfamily.org/)
-- [KISS-ICP](https://github.com/PRBonn/kiss-icp)
-- [tinycolormap](https://github.com/yuki-koyama/tinycolormap)

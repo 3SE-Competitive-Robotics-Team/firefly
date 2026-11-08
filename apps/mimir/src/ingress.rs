@@ -99,7 +99,7 @@ impl Event {
                     [msg.quat_x, msg.quat_y, msg.quat_z, msg.quat_w],
                 )
             }
-            Self::Attitude(msg) => archive.scalar("okvis/gyro_bias", msg.timestamp, &msg.gyro_bias),
+            Self::Attitude(msg) => archive.scalar("vio/gyro_bias", msg.timestamp, &msg.gyro_bias),
             Self::Image(msg) => {
                 if msg.width as usize != IMAGE_WIDTH || msg.height as usize != IMAGE_HEIGHT {
                     return Err(invalid("camera dimensions"));
@@ -262,7 +262,7 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
             }
             sender.send(Event::Log(Box::new(*sample)))?;
         }
-        for (name, subscriber) in [("gt/pose", &gt), ("okvis/map/pose", &map)] {
+        for (name, subscriber) in [("gt/pose", &gt), ("vio/map/pose", &map)] {
             if let Some(sample) = subscriber.receive()? {
                 sender.send(Event::Odom(name, *sample))?;
             }

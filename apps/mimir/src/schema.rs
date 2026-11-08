@@ -3,8 +3,8 @@ use firefly_error::Result;
 use firefly_pubsub::viz::kind;
 
 const SPATIAL: &[(&str, &[u32])] = &[
-    ("okvis/odom", &[kind::POSE]),
-    ("okvis/map/pose", &[kind::POSE]),
+    ("vio/odom", &[kind::POSE]),
+    ("vio/map/pose", &[kind::POSE]),
     ("gt/pose", &[kind::POSE]),
     ("corr/odom", &[kind::POSE]),
     ("plan/drone", &[kind::POSE]),
@@ -14,8 +14,8 @@ const SPATIAL: &[(&str, &[u32])] = &[
     ("acceptance/gt", &[kind::POSE]),
     ("acceptance/corrected", &[kind::POSE]),
     ("acceptance/reference", &[kind::POSE]),
-    ("okvis/traj", &[kind::LINE_STRIP]),
-    ("okvis/map/traj", &[kind::LINE_STRIP]),
+    ("vio/traj", &[kind::LINE_STRIP]),
+    ("vio/map/traj", &[kind::LINE_STRIP]),
     ("gt/traj", &[kind::LINE_STRIP]),
     ("corr/traj", &[kind::LINE_STRIP]),
     ("plan/global_path", &[kind::LINE_STRIP]),
@@ -25,7 +25,7 @@ const SPATIAL: &[(&str, &[u32])] = &[
         &[kind::VOXELS, kind::VOXELS_ADD, kind::VOXELS_REMOVE],
     ),
     (
-        "plan/perceived",
+        "plan/collision",
         &[kind::VOXELS, kind::VOXELS_ADD, kind::VOXELS_REMOVE],
     ),
     (
@@ -34,8 +34,6 @@ const SPATIAL: &[(&str, &[u32])] = &[
     ),
     ("plan/local_traj/velocity", &[kind::ARROWS]),
     ("plan/planes", &[kind::ARROWS]),
-    ("okvis/debug/keypoints/left", &[kind::KEYPOINTS_2D]),
-    ("okvis/debug/keypoints/right", &[kind::KEYPOINTS_2D]),
     ("vio/diagnostics/keypoints/left", &[kind::KEYPOINTS_2D]),
     ("vio/diagnostics/keypoints/right", &[kind::KEYPOINTS_2D]),
     (
@@ -53,10 +51,8 @@ pub fn spatial(name: &str, payload: u32) -> Result<()> {
     let accepted = if payload == kind::SCALARS {
         fields(name).is_ok()
     } else if payload == kind::CLEAR {
-        matches!(
-            name,
-            "okvis" | "okvis/map" | "gt" | "corr" | "plan" | "vio" | "acceptance"
-        ) || SPATIAL.iter().any(|(path, _)| *path == name)
+        matches!(name, "gt" | "corr" | "plan" | "vio" | "acceptance")
+            || SPATIAL.iter().any(|(path, _)| *path == name)
             || fields(name).is_ok()
     } else {
         SPATIAL
@@ -129,7 +125,7 @@ pub fn fields(name: &str) -> Result<&'static [&'static str]> {
         "vio/diagnostics/rotation_delta_rad" => &["x_rad", "y_rad", "z_rad"],
         "vio/posterior/gyro_bias_imu"
         | "vio/prediction/angular_velocity_body"
-        | "okvis/gyro_bias"
+        | "vio/gyro_bias"
         | "fc/standby_eskf/gyro_bias"
         | "fc/debug/rate_flu" => &["x_rad_s", "y_rad_s", "z_rad_s"],
         "vio/posterior/accel_bias_imu" => &["x_m_s2", "y_m_s2", "z_m_s2"],
@@ -185,11 +181,9 @@ pub fn fields(name: &str) -> Result<&'static [&'static str]> {
             &["measurement_age_s", "receive_age_s", "initialized"]
         }
         "acceptance/hover_failure/error" => &["horizontal_m", "vertical_m", "speed_m_s"],
-        "okvis/frame_processing_ms"
-        | "rootslam/frame_processing_ms"
-        | "okvis/ipc/imu_publish_ms"
-        | "rootslam/ipc/imu_publish_ms"
-        | "fc/debug/late_max_ms" => &["duration_ms"],
+        "rootslam/frame_processing_ms" | "rootslam/ipc/imu_publish_ms" | "fc/debug/late_max_ms" => {
+            &["duration_ms"]
+        }
         "fc/debug/altitude" | "acceptance/penetration" => &["distance_m"],
         "fc/debug/tilt_deg" | "fc/debug/tilt_err_deg" => &["angle_deg"],
         "fc/debug/thrust_total" => &["thrust_N"],
@@ -197,7 +191,7 @@ pub fn fields(name: &str) -> Result<&'static [&'static str]> {
         "fc/debug/tick_rate" => &["rate_Hz"],
         "vision/debug/map_query_wall_s" => &["query_s"],
         "fc/standby_eskf/accel_nis" => &["nis"],
-        "fc/debug/saturated_ticks" | "okvis/loop_commits" | "acceptance/loop_backend" => &["count"],
+        "fc/debug/saturated_ticks" | "acceptance/loop_backend" => &["count"],
         "fc/arming/failed" | "fc/failsafe/flags" => &["mask"],
         "fc/debug/state"
         | "fc/debug/saturated"
@@ -205,7 +199,6 @@ pub fn fields(name: &str) -> Result<&'static [&'static str]> {
         | "fc/imu/source"
         | "fc/standby_eskf/accel_gate"
         | "fc/standby_eskf/health"
-        | "okvis/tracking"
         | "acceptance/fc_state"
         | "acceptance/attitude_source" => &["state"],
         _ if name
@@ -246,6 +239,15 @@ mod tests {
         assert!(spatial("vio/prediction/pose_body_odom", kind::ARROWS).is_err());
         assert!(spatial("unknown", kind::CLEAR).is_err());
         assert!(spatial("plan", kind::CLEAR).is_ok());
+        for payload in [
+            kind::VOXELS,
+            kind::VOXELS_ADD,
+            kind::VOXELS_REMOVE,
+            kind::CLEAR,
+        ] {
+            assert!(spatial("plan/collision", payload).is_ok());
+        }
+        assert!(spatial("plan/collision", kind::POSE).is_err());
         assert!(fields("acceptance/disturbance_force/01").is_ok());
         assert!(fields("acceptance/disturbance_force/1234").is_err());
         assert!(entity(b"../invalid", 10).is_err());

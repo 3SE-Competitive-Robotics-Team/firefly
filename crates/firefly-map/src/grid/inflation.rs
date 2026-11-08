@@ -17,6 +17,12 @@ fn wrap_offset(coord: usize, delta: i32, size: usize) -> usize {
 }
 
 impl GridMap {
+    /// Constructed clearance in voxel steps (0..=4), after resolution adjustment.
+    #[must_use]
+    pub fn inflation_steps(&self) -> i32 {
+        self.inf_grid
+    }
+
     /// 占据/膨胀状态版本号加一。占据状态或虚拟墙发生变化时调用。
     pub(super) fn touch(&mut self) {
         self.revision = self.revision.wrapping_add(1);

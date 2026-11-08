@@ -291,12 +291,8 @@ impl Archive {
                     .iter()
                     .map(|p| [p[0] as f32 + 0.5, p[1] as f32 + 0.5]);
                 let output = match name {
-                    "okvis/debug/keypoints/left" | "vio/diagnostics/keypoints/left" => {
-                        "cameras/left/points"
-                    }
-                    "okvis/debug/keypoints/right" | "vio/diagnostics/keypoints/right" => {
-                        "cameras/right/points"
-                    }
+                    "vio/diagnostics/keypoints/left" => "cameras/left/points",
+                    "vio/diagnostics/keypoints/right" => "cameras/right/points",
                     _ => name,
                 };
                 self.point_times.insert(output.to_owned(), msg.timestamp);
@@ -384,8 +380,8 @@ impl Archive {
         self.write(name, Some(stamp), &transform(xyz, quat)?)?;
         let trajectory = match name {
             "gt/pose" => "gt/traj",
-            "okvis/odom" => "okvis/traj",
-            "okvis/map/pose" => "okvis/map/traj",
+            "vio/odom" => "vio/traj",
+            "vio/map/pose" => "vio/map/traj",
             _ => return Ok(()),
         };
         let point = xyz.map(|v| v as f32);

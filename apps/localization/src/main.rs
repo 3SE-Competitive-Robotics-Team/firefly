@@ -424,13 +424,12 @@ impl App {
         }
         let alignment =
             RigidTransform::from_matrix(FrameId::MAP, FrameId::ODOM, self.fusion.drift())?;
-        let msg = corrected_odom(odom, &alignment)?;
-        let status = self.quality.status(msg.timestamp, &self.quality_options);
+        let status = self.quality.status(odom.timestamp, &self.quality_options);
         if let Some(viz) = &self.viz_pub {
-            let mut metric = ScalarMessage::base(msg.timestamp, "corr/debug/map_observation");
+            let mut metric = ScalarMessage::base(odom.timestamp, "corr/debug/map_observation");
             metric.scalars[..3].copy_from_slice(&[
                 if status.visual_timestamp >= 0. {
-                    msg.timestamp - status.visual_timestamp
+                    odom.timestamp - status.visual_timestamp
                 } else {
                     -1.
                 },
@@ -440,8 +439,7 @@ impl App {
             metric.scalar_count = 3;
             let _ = viz.publish(metric);
         }
-        // 低于门限的修正只更新对齐：下游按同一修订号复用局部地图与在途参考，
-        // 误差不超过门限，避免为厘米级修正清空融合并重建地图。
+        // 同一修订必须发布同一变换；融合候选累计超过门限后再提交。
         match self.commit_alignment(&alignment, odom)? {
             None => self.revision_alignment = Some(alignment),
             Some(true) => {
@@ -453,6 +451,10 @@ impl App {
             }
             Some(false) => {}
         }
+        let alignment = self
+            .revision_alignment
+            .expect("alignment is committed above");
+        let msg = corrected_odom(odom, &alignment)?;
         let mut navigation = NavigationMessage::new(msg, &alignment, self.alignment_revision);
         navigation.external_map = 1;
         self.navigation_pub.publish(navigation)?;
@@ -618,7 +620,7 @@ mod tests {
     use nalgebra::Vector6;
 
     #[test]
-    fn corrections_below_the_drift_threshold_keep_the_revision() {
+    fn corrections_below_the_drift_threshold_keep_the_published_alignment() {
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(|| {
@@ -628,8 +630,14 @@ mod tests {
                 let mut app = App::new(toml::from_str("[origin]").unwrap(), &topic).unwrap();
                 let node = create_node().unwrap();
                 let _raw = Publisher::<OdomMessage>::with_topic(&node, &topic).unwrap();
-                let _corrected =
-                    Subscriber::<OdomMessage>::with_topic(&node, CORRECTED_ODOM_TOPIC).unwrap();
+                let corrected_topic = format!("{topic}/Corrected");
+                let navigation_topic = format!("{topic}/Navigation");
+                app.corrected_pub = Publisher::with_topic(&node, &corrected_topic).unwrap();
+                app.navigation_pub = Publisher::with_topic(&node, &navigation_topic).unwrap();
+                let corrected =
+                    Subscriber::<OdomMessage>::with_topic(&node, &corrected_topic).unwrap();
+                let navigation =
+                    Subscriber::<NavigationMessage>::with_topic(&node, &navigation_topic).unwrap();
                 let shifted = |x: f64| {
                     RigidTransform::from_parts(
                         FrameId::MAP,
@@ -651,18 +659,32 @@ mod tests {
                 app.latest_odom = Some(sample);
                 app.publish_corrected().unwrap();
                 assert_eq!(app.alignment_revision, 0);
-                // 9 cm 修正低于 10 cm 漂移门限：对齐更新但不切换坐标系。
+                let initial = *navigation.receive().unwrap().unwrap();
+                assert_eq!(initial.translation, [0.; 3]);
+                assert_eq!(corrected.receive().unwrap().unwrap().position_x, 0.);
+                // 9 cm 候选留在融合器内，发布坐标系保持已提交版本。
                 app.fusion.set_alignment(shifted(0.09)).unwrap();
                 sample.timestamp = 4.;
                 app.latest_odom = Some(sample);
                 app.publish_corrected().unwrap();
                 assert_eq!(app.alignment_revision, 0);
+                let small = *navigation.receive().unwrap().unwrap();
+                assert_eq!(small.revision, initial.revision);
+                assert_eq!(small.translation, initial.translation);
+                assert_eq!(small.rotation, initial.rotation);
+                assert_eq!(small.odom.position_x, 0.);
+                assert_eq!(corrected.receive().unwrap().unwrap().position_x, 0.);
                 // 11 cm 超过门限：下游废弃局部地图与在途参考。
                 app.fusion.set_alignment(shifted(0.11)).unwrap();
                 sample.timestamp = 5.;
                 app.latest_odom = Some(sample);
                 app.publish_corrected().unwrap();
                 assert_eq!(app.alignment_revision, 1);
+                let committed = *navigation.receive().unwrap().unwrap();
+                assert_eq!(committed.revision, 1);
+                assert_eq!(committed.translation[0], 0.11);
+                assert_eq!(committed.odom.position_x, 0.11);
+                assert_eq!(corrected.receive().unwrap().unwrap().position_x, 0.11);
             })
             .unwrap()
             .join()

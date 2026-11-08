@@ -1,5 +1,5 @@
 # 可选外部库图定位 ESKF；启动时必须显式填写 [origin]。
-# OKVIS 配置 navigation = "external_localization" 后由本进程独占导航发布。
+# RootSLAM 使用 --external-localization 后由本进程独占导航发布。
 
 [fusion.visual]
 max_innovation_trans = 20.0 # m，VINS-Fusion 特征验证后的门限

@@ -1,5 +1,4 @@
 //! Real solver versus a bounded worker under 100 Hz execution / 20 Hz safety scheduling.
-#[path = "../../okvis2-x/benches/common/mod.rs"]
 mod common;
 use firefly_map::{GridMapBuilder, VoxelState};
 use firefly_planner::worker::{MapVersion, PlanningWorker};
