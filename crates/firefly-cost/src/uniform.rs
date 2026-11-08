@@ -94,7 +94,7 @@ impl Penalty for UniformPenalty {
             return;
         }
         // 唯一约束点序列:第 m 个点的位置(段边界只保留一次)。
-        // 供逐点梯度就地取相邻两条边,不再物化 dps/r/gdp 三份整数组。
+        // 逐点梯度就地取相邻两条边。
         let pieces = traj.pieces();
         let unique = |m: usize| -> Vector3<f64> {
             if m == n {

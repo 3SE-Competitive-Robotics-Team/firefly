@@ -15,5 +15,4 @@ expressions remain in their Cargo manifests.
 | `firefly-imu-propagation` | BSD-3-Clause | [OKVIS-derived propagation attribution](third-party-notices.md#okvis2-x) |
 | Other translated or derived components | Component-specific notices | [Additional license texts and attributions](third-party-notices.md) |
 
-The consolidated notice document preserves the license texts and attribution
-material previously listed in the repository README.
+The notice document includes full license texts and component attributions.

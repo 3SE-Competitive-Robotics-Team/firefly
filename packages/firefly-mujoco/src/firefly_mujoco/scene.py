@@ -181,6 +181,11 @@ def config_path() -> Path:
 
 def load_scene_name(path: Path | None = None) -> str:
     """读取可选场景配置并校验已注册；缺文件使用默认场景。"""
-    name = load_toml(path or config_path()).get("scene", DEFAULT_SCENE)
+    values = load_toml(path or config_path())
+    if unknown := values.keys() - {"scene"}:
+        raise ValueError(f"未知场景配置项: {', '.join(sorted(unknown))}")
+    name = values.get("scene", DEFAULT_SCENE)
+    if not isinstance(name, str):
+        raise ValueError("scene 必须是已注册的场景名称")
     resolve(name)
     return name

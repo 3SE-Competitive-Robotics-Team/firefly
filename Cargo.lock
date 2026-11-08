@@ -136,7 +136,6 @@ dependencies = [
  "iceoryx2",
  "log",
  "nalgebra",
- "ndarray 0.17.2",
  "ort",
 ]
 
@@ -3567,10 +3566,8 @@ name = "firefly-cost"
 version = "0.1.0"
 dependencies = [
  "fastrace",
- "firefly-error",
  "firefly-map",
  "firefly-trajectory",
- "log",
  "nalgebra",
 ]
 
@@ -3591,6 +3588,7 @@ version = "0.1.0"
 name = "firefly-flight"
 version = "0.1.0"
 dependencies = [
+ "firefly-error",
  "nalgebra",
  "serde",
 ]
@@ -3655,27 +3653,10 @@ name = "firefly-observability"
 version = "0.1.0"
 dependencies = [
  "fastrace",
- "firefly-error",
  "firefly-pubsub",
  "jiff",
  "log",
  "logforth",
-]
-
-[[package]]
-name = "firefly-obstacle"
-version = "0.1.0"
-dependencies = [
- "fastrace",
- "firefly-cost",
- "firefly-error",
- "firefly-map",
- "firefly-observability",
- "firefly-planner",
- "firefly-trajectory",
- "log",
- "logcall",
- "nalgebra",
 ]
 
 [[package]]
@@ -3696,7 +3677,6 @@ version = "0.1.0"
 dependencies = [
  "fastrace",
  "firefly-error",
- "firefly-observability",
  "log",
  "logcall",
  "nalgebra",
@@ -3714,7 +3694,6 @@ dependencies = [
  "firefly-search",
  "firefly-trajectory",
  "log",
- "logcall",
  "nalgebra",
  "rand 0.10.3",
  "serde",
@@ -3774,7 +3753,6 @@ dependencies = [
  "firefly-opengv",
  "log",
  "nalgebra",
- "rayon",
  "serde",
  "serde_json",
  "toml 1.1.8+spec-1.1.0",
@@ -3787,8 +3765,6 @@ dependencies = [
  "fastrace",
  "firefly-error",
  "firefly-map",
- "log",
- "logcall",
  "nalgebra",
 ]
 
@@ -3798,8 +3774,6 @@ version = "0.1.0"
 dependencies = [
  "fastrace",
  "firefly-error",
- "log",
- "logcall",
  "nalgebra",
 ]
 
@@ -5572,7 +5546,6 @@ dependencies = [
  "firefly-base",
  "firefly-config",
  "firefly-error",
- "firefly-localization",
  "firefly-observability",
  "firefly-pubsub",
  "firefly-vision-map",
@@ -5580,7 +5553,6 @@ dependencies = [
  "iceoryx2",
  "log",
  "nalgebra",
- "ndarray 0.17.2",
  "ort",
  "serde",
  "serde_json",
@@ -5630,7 +5602,6 @@ dependencies = [
  "iceoryx2",
  "log",
  "nalgebra",
- "serde",
  "toml 1.1.8+spec-1.1.0",
 ]
 
@@ -7152,7 +7123,6 @@ dependencies = [
  "firefly-observability",
  "firefly-planner",
  "firefly-pubsub",
- "firefly-search",
  "firefly-trajectory",
  "iceoryx2",
  "log",
@@ -7440,12 +7410,14 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "firefly-config",
+ "firefly-error",
  "firefly-flight",
  "firefly-render",
  "log",
  "nalgebra",
  "serde",
  "toml 1.1.8+spec-1.1.0",
+ "usage-rs",
 ]
 
 [[package]]
@@ -8188,6 +8160,7 @@ dependencies = [
  "rand 0.10.3",
  "serde",
  "toml 1.1.8+spec-1.1.0",
+ "usage-rs",
 ]
 
 [[package]]

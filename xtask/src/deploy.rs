@@ -155,13 +155,7 @@ fn push(device: &str, package: &Path) -> Result<(), String> {
             &format!("rm -rf {DESTINATION}/bin {DESTINATION}/configs {DESTINATION}/models"),
         ],
     )?;
-    adb(
-        device,
-        &[
-            "shell",
-            &format!("{REMOTE_UNPACKER} unpack {REMOTE_PACKAGE} {DESTINATION}"),
-        ],
-    )?;
+    unpack_with(|args| adb_output(device, args))?;
     check_unpacked(device)?;
     adb(device, &["shell", "sync"])?;
     link(device)?;
@@ -172,6 +166,17 @@ fn push(device: &str, package: &Path) -> Result<(), String> {
             &format!("rm -f {REMOTE_PACKAGE} {REMOTE_UNPACKER}"),
         ],
     )?;
+    Ok(())
+}
+
+fn unpack_with(mut output: impl FnMut(&[&str]) -> Result<String, String>) -> Result<(), String> {
+    const COMPLETE: &str = "FIREFLY_UNPACK_COMPLETE";
+    let command =
+        format!("{REMOTE_UNPACKER} unpack {REMOTE_PACKAGE} {DESTINATION} && echo {COMPLETE}");
+    let result = output(&["shell", &command])?;
+    if !result.lines().any(|line| line.trim() == COMPLETE) {
+        return Err(format!("远端解包未完成：\n{result}"));
+    }
     Ok(())
 }
 
@@ -276,4 +281,32 @@ fn adb(device: &str, args: &[&str]) -> Result<(), String> {
         return Err(format!("adb {} failed: {status}", args.join(" ")));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unpack_with;
+
+    #[test]
+    fn legacy_shell_requires_unpack_completion_before_start() {
+        for tail in [
+            "configs/fc.toml: permission denied",
+            "models/model.onnx: no space left",
+        ] {
+            let mut started = false;
+            let result: Result<(), String> = (|| {
+                unpack_with(|args| {
+                    assert_eq!(args[0], "shell");
+                    assert!(args[1].contains(" && echo FIREFLY_UNPACK_COMPLETE"));
+                    // Legacy adb succeeds even when the remote unpacker fails.
+                    Ok(format!("bin/fc\n{tail}\n"))
+                })?;
+                started = true;
+                Ok(())
+            })();
+            assert!(result.is_err());
+            assert!(!started);
+        }
+        assert!(unpack_with(|_| Ok("unpacked\nFIREFLY_UNPACK_COMPLETE\n".into())).is_ok());
+    }
 }

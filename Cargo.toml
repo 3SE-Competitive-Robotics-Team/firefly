@@ -66,7 +66,7 @@ firefly-render = { path = "crates/firefly-render" }
 [workspace.package]
 edition = "2024"
 rust-version = "1.97.1"
-description = "EGO 规划器 Rust 实现：MINCO 后端 + Rebound 主循环 + 集群避碰"
+description = "RoboMaster 无人机自主导航：视觉惯性定位、建图、轨迹规划与飞行控制"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/3SE-Competitive-Robotics-Team/firefly"
 readme = "README.md"

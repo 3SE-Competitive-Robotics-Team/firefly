@@ -19,7 +19,8 @@ from .process_lifecycle import require_idle
 from .mission_metrics import score
 from .mission_sim import CONTACT_POLICY
 from .vision_assets import verify_map_compatibility
-from firefly_workspace import digest, startup, workspace_root
+from firefly_mujoco import load_scene_name
+from firefly_workspace import digest, parse_scene, startup, workspace_root
 
 log = logging.getLogger("acceptance")
 
@@ -76,21 +77,25 @@ def provenance(root, *, allow_map_rig_translation=False, vio_only=False, prior_m
         names += ["localization", "aliked", "lightglue"]
     binaries = {name: digest(root / "target/release" / name) for name in names}
     models = {} if vio_only or not prior_maps else {name: digest(root / "models" / name) for name in ("aliked-n16-k512.onnx", "lightglue-aliked-k512.onnx")}
-    manifest_path = root / "models/rmuc2026/v2.0.0/asset_manifest.json"
+    scene = parse_scene(load_scene_name(root / "configs/scene.toml"))
+    manifest_path = root / scene.dir / "asset_manifest.json"
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("status") != "passed":
         raise ValueError("geometry has not passed acceptance")
+    if manifest.get("scene") != scene.name:
+        raise ValueError("geometry manifest belongs to another scene")
     for path, expected in manifest["artifacts"].items():
         if not prior_maps and Path(path).suffix == ".ffmap":
             continue
-        if digest(Path(path)) != expected:
+        if digest(root / path) != expected:
             raise ValueError(f"asset content changed: {path}")
     visual = None
     compatibility = {"status": "not_used_empty_map"}
     if prior_maps:
-        visual_manifest = root / "apps/planner/maps/rmuc2026.manifest.json"
+        visual_map = (root / "apps/planner/maps" / scene.map).with_suffix(".ffvmap")
+        visual_manifest = visual_map.with_suffix(".manifest.json")
         visual = json.loads(visual_manifest.read_text())
-        if digest(root / "apps/planner/maps/rmuc2026-2.0.0.ffvmap") != visual["map_sha256"]:
+        if digest(visual_map) != visual["map_sha256"]:
             raise ValueError("visual map content changed")
         for name, expected in visual["models"]["artifacts"].items():
             if digest(root / "models" / name) != expected:

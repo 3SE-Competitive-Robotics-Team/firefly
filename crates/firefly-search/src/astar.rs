@@ -322,7 +322,7 @@ impl Astar {
         self.heap.clear();
     }
 
-    /// 与旧 `BinaryHeap` 的 `Ord` 平局规则一致：f 相同取 node 较大者先出。
+    /// f 相同时取 node 较大者先出。
     fn heap_less(a: &Entry, b: &Entry) -> bool {
         match a.f.total_cmp(&b.f) {
             std::cmp::Ordering::Less => true,

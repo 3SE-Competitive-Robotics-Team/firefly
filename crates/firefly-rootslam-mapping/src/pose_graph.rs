@@ -16,17 +16,8 @@ pub enum EdgeKind {
     SpanningTree,
 }
 impl EdgeKind {
-    /// Whether the edge carries a relative pose measurement that may be used
-    /// as an optimization constraint.
-    ///
-    /// The paper relates keyframes through the odometry and through the
-    /// previously closed loops (section III-C), so only those two kinds enter
-    /// Equation (1) and Equation (9). The covisibility graph and its spanning
-    /// forest are derived from the current estimates: their measurement is the
-    /// relative pose the map holds right now, so their residual is zero by
-    /// construction and they contribute stiffness only. Treating them as
-    /// constraints would pin the map to its current shape and suppress the
-    /// loop correction the pose-graph optimizer exists to distribute.
+    /// Selects temporal and loop edges as relative-pose optimization constraints.
+    /// Covisibility and spanning-tree edges describe graph topology.
     #[must_use]
     pub fn is_measurement_bearing(self) -> bool {
         matches!(self, Self::Temporal | Self::Loop)

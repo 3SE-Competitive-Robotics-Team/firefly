@@ -3,7 +3,7 @@
 //! sim 负责 `MuJoCo` 物理和 IMU；本进程从 `Firefly/GroundTruth` 摆放传感器，
 //! 发布 `Firefly/CameraLeft`、`Firefly/CameraRight`、`Firefly/Depth`，
 //! 通过 `Firefly/CameraPair` 唤醒订阅端。真值只用于生成仿真测量。
-//! 视觉资产必须存在于 `models/rmuc2026/v2.0.0/field.glb`。
+//! 视觉资产由 `configs/scene.toml` 选择。
 //!
 //! 传感器相机按 `configs/render.toml` 的采集节拍激活，逐像素处理与传感器发布在工作线程完成。
 //! 日志经 `firefly-observability` 汇入统一 rrd 记录。
@@ -39,17 +39,30 @@ use link::{
 use rig::{PoseState, spawn_rig};
 use scene::SceneSpec;
 
+/// 渲染仿真传感器图像
+#[derive(usage_rs::Cli)]
+#[usage(bin = "render")]
+struct Arguments {
+    /// 应用配置文件
+    #[usage(long)]
+    config: Option<std::path::PathBuf>,
+    /// 使用离线话题与理想几何深度
+    #[usage(long)]
+    offline: bool,
+    /// 导出离线资产契约后退出
+    #[usage(long)]
+    export_asset_contract: Option<std::path::PathBuf>,
+}
+
 /// 以 RMUC 资产和初始摆位启动 Bevy；仿真位姿到达后更新机体与传感器。
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<_> = std::env::args().collect();
-    let export_path = args
-        .iter()
-        .position(|arg| arg == "--export-asset-contract")
-        .map(|index| args.get(index + 1).ok_or("missing asset contract path"))
-        .transpose()?;
-    let offline = args.iter().any(|arg| arg == "--offline");
+    let args = Arguments::parse();
+    let path = args
+        .config
+        .unwrap_or_else(|| firefly_config::paths::config("render.toml"));
+    let offline = args.offline;
     let render_config = firefly_config::startup::<RenderConfig>(
-        config::RENDER_CONFIG,
+        &path,
         || {
             firefly_observability::init();
             if let Err(e) = trace_bridge::init() {
@@ -58,14 +71,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         RenderConfig::validate,
     )?;
-    let spec = scene::selected();
-    if let Some(path) = export_path {
+    if let Some(path) = args.export_asset_contract {
         std::fs::write(
             path,
             toml::to_string_pretty(&render_config.asset_contract())?,
         )?;
         return Ok(());
     }
+    let spec = scene::selected();
 
     log::info!(
         "场景 {}：asset root {}，视觉 {}，起点 {:?}",

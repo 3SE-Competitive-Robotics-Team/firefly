@@ -3,9 +3,6 @@
 use bevy::prelude::*;
 use serde::Deserialize;
 
-/// 世界观配置（与 `sim` / `viz` 共用）。
-const SCENE_CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/scene.toml");
-
 /// 一个已注册的场地版本。
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct SceneSpec {
@@ -52,6 +49,7 @@ fn resolve(name: &str) -> Option<SceneSpec> {
 
 /// `configs/scene.toml` 的反序列化形态。
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SceneConfig {
     #[serde(default = "default_scene")]
     scene: String,
@@ -63,7 +61,7 @@ fn default_scene() -> String {
 
 /// 读取场景；缺配置使用默认场景，读取/解析失败报错退出。
 fn load_scene_name() -> String {
-    firefly_config::load::<SceneConfig>(SCENE_CONFIG)
+    firefly_config::load::<SceneConfig>(firefly_config::paths::config("scene.toml"))
         .unwrap_or_else(|e| {
             log::error!("加载 configs/scene.toml 失败：{e}");
             std::process::exit(1);

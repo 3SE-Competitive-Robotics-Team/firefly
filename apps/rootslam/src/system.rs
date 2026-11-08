@@ -144,9 +144,8 @@ fn correction_snapshot(
     let mut snapshot = map.clone();
     // Section III-B: existing graph edges are measured from the current
     // estimates for this PGO request; only the new loop uses its gP3P estimate.
-    // Only the measurement-bearing edges take part in Equation (1); the
-    // covisibility graph and its spanning forest restate the current
-    // estimates and would only pin the map to its present shape.
+    // Temporal and loop edges supply PGO constraints; covisibility and
+    // spanning-tree edges remain in the snapshot as graph topology.
     snapshot.edges.retain_mut(|edge| {
         if !edge.kind.is_measurement_bearing() {
             return true;

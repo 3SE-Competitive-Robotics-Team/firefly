@@ -224,7 +224,8 @@ RRD records lifecycle and high-water statistics in `logs/mimir`. Index memory gr
 it is separate from the bounded pending-data budget.
 
 Raw runtime evidence belongs in `logs/*.rrd`; JSON/HTML may hold configuration, fingerprints and summaries.
-Do not create parallel text recordings. Stderr is a diagnostic sink, not archived evidence.
+Do not create parallel text recordings of runtime diagnostics. CLI help, command results and exported
+artifacts may use stdout; this does not replace runtime evidence. Stderr is a diagnostic sink, not archived evidence.
 The current CompactReporter writes span summaries to stderr; use RRD stage diagnostics for archived timing.
 
 ## Validation

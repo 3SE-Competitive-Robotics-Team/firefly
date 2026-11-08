@@ -110,21 +110,6 @@ pub fn tree() -> FrameTree {
     tree
 }
 
-/// 估计器用的机体→相机旋转 `R_ItoC`（CV 光学约定）。
-#[must_use]
-pub fn rot_ito_c() -> Matrix3<f64> {
-    CV_FROM_RENDER * cam_axes_in_body().transpose()
-}
-
-/// 估计器用的 `p_IinC = −R_ItoC · p_CinI`（IMU 原点在相机系，CV 光学约定）。
-///
-/// # Panics
-/// `camera` 不是 rig 相机坐标系。
-#[must_use]
-pub fn p_i_in_c(camera: FrameId) -> Vector3<f64> {
-    -rot_ito_c() * position_in_body(camera)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,30 +144,6 @@ mod tests {
             let back = tree.lookup(camera, FrameId::BODY).unwrap();
             assert!((back.matrix() - direct.inverse().matrix()).norm() < 1e-12);
         }
-    }
-
-    /// `p_IinC` 必须能还原出 render 安装位置（这是 10-07 漏改的那一项）。
-    #[test]
-    fn p_i_in_c_roundtrip_restores_mounting_position() {
-        for camera in CAMERAS {
-            let p_c_in_i = position_in_body(camera);
-            let restored = -rot_ito_c().transpose() * p_i_in_c(camera);
-            assert!(
-                (restored - p_c_in_i).norm() < 1e-12,
-                "{camera:?}: {restored} != {p_c_in_i}"
-            );
-        }
-    }
-
-    #[test]
-    fn rot_ito_c_matches_optical_convention() {
-        // 图右 = 机体 −y；光轴 = 机体 +x 下倾 20°。
-        let r = rot_ito_c();
-        let right = r.row(0).transpose();
-        assert!((right - Vector3::new(0.0, -1.0, 0.0)).norm() < 1e-12);
-        let forward = r.row(2).transpose();
-        let tilt = DOWNTILT_DEG.to_radians();
-        assert!((forward - Vector3::new(tilt.cos(), 0.0, -tilt.sin())).norm() < 1e-12);
     }
 
     /// 双目基线在机体系仍落在横向（立体视差来源）。

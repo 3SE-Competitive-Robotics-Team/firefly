@@ -11,10 +11,10 @@
 //! - `Firefly/Command`（地面站指令：解锁/上锁/起飞/保持/跟踪/降落）。
 //!
 //! 输出：`Firefly/Control`（4 电机推力，1kHz；被控对象每步取最新）——**每个** tick 都发，
-//! 上锁时发零推力：被控对象按指令新鲜度决定物理是否推进，飞控停发等于世界停转。
+//! 上锁时发零推力。仿真按指令新鲜度决定物理是否推进，板载执行器断流时输出零推力脉宽。
 //!
 //! [`FlightFsm`] 根据估计状态和健康条件生成参考与电机使能信号。
-//! [`firefly_flight::Controller`] 是 PX4 控制核心的 1:1 移植：
+//! [`firefly_flight::Controller`] 移植 PX4 的控制与分配算法：
 //! 位置 → 姿态 → 角速度 → 分配；本进程只做坐标/单位边界与主备姿态选择。
 //! 内环正常读取 VIO 预测，降级读取独立 ESKF 的姿态与去偏角速度，位置/速度来自局部里程计。
 //! 真值只用于评测。姿态主备选择约定见 `docs/architecture.md#imu`。
@@ -58,7 +58,6 @@ use firefly_pubsub::viz::{SCALARS_MAX, ScalarMessage, VizPublisher};
 use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 
-/// `configs/fc.toml` 缺省路径（相对运行目录，通常为仓库根）。
 /// 缺省配置：按安装布局解析，与启动目录无关。
 fn default_config() -> PathBuf {
     firefly_config::paths::config("fc.toml")
@@ -893,8 +892,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log_ipc = firefly_observability::init_ipc(&node, "fc");
     log::info!(
         "飞控进程启动：{} Hz 控制环，配置 {}；初始 DISARMED，等 `Firefly/Command`",
-        config_path.display(),
-        cfg.rate_hz
+        cfg.rate_hz,
+        config_path.display()
     );
 
     let imu_worker = imu::Worker::spawn(cfg.imu)?;

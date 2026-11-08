@@ -11,13 +11,13 @@ import time
 
 import iceoryx2 as iox2
 import numpy as np
-from firefly_mujoco import ControlMessage, OdomMessage
+from firefly_mujoco import ControlMessage, OdomMessage, load_scene_name
 from firefly_mujoco.messages import SCALAR_BUFFER_SIZE, ScalarMessage
 
 from .process_lifecycle import ManagedProcess, isolated_run
 from .mission_io import PlannerStatusMessage, Recorder, ReferenceMessage, pose_values, service
 
-from firefly_workspace import workspace_root
+from firefly_workspace import parse_scene, workspace_root
 
 
 @dataclass(frozen=True)
@@ -66,6 +66,7 @@ class Mission:
     def __init__(self, directory, case, options, *, vio_only=False, prior_maps=False, localization_config=None, workspace=None, sleep: Callable[[float], None] = time.sleep):
         self.sleep = sleep
         self.root = workspace_root(workspace)
+        self.scene = parse_scene(load_scene_name(self.root / "configs/scene.toml"))
         self.options, self.case = options, case
         self.vio_only = vio_only
         self.prior_maps = prior_maps
@@ -339,7 +340,7 @@ class Mission:
         self.wait(lambda: "corrected" in self.latest and self.latest["corrected"][4], wall=30.)
         command = [str(self.root / "target/release/planner"), "--goal", *map(str, self.options.waypoints[0])]
         if self.prior_maps:
-            command += ["--map", str(self.root / "apps/planner/maps/rmuc2026-2.0.0.ffmap")]
+            command += ["--map", str(self.root / "apps/planner/maps" / self.scene.map)]
         self.start("traj-server", [str(self.root / "target/release/planner"), "--traj-server"])
         self.start("planner", command)
         self.wait(lambda: "reference" in self.latest, wall=30.)
@@ -569,7 +570,7 @@ class Mission:
                 if name == "localization" and self.localization_config is not None:
                     command += ["--config", str(self.localization_config)]
                 if name == "lightglue" and self.prior_maps:
-                    command += ["--map", str(self.root / "apps/planner/maps/rmuc2026-2.0.0.ffvmap")]
+                    command += ["--map", str((self.root / "apps/planner/maps" / self.scene.map).with_suffix(".ffvmap"))]
                 self.start(name, command)
             self.start("sim", [sys.executable, "-m", "firefly_evaluation.mission_sim"])
             for name, action in phases:

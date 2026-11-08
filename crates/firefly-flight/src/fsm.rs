@@ -146,6 +146,7 @@ pub struct Health {
 
 /// 状态机参数（缺键回落默认值；单位与来源见各字段）。
 #[derive(Deserialize, Clone, Copy, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct FsmParams {
     /// 缺省起飞高度（相对起飞点，m）：`Takeoff` 不带高度时用它（对照 `MAVLink`
     /// `NAV_TAKEOFF` 的 param7 缺省语义——两家飞控都有对应参数）。

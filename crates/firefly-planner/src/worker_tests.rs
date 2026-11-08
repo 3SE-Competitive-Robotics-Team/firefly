@@ -99,7 +99,7 @@ fn retarget_localization_stop_and_expiry_revoke_results() {
                 .set_goal(now, Some(state()), Vector3::new(4., 2., 1.))
                 .unwrap(),
             1 => fsm.invalidate_localization(now, state()).unwrap(),
-            2 => fsm.mandatory_stop(now, Some(state())),
+            2 => fsm.mandatory_stop(),
             3 => result.ticket.cancellation.cancel(),
             4 => now = result.ticket.max_age.as_secs_f64() + 0.001,
             5 => map.localization += 1,

@@ -5,9 +5,6 @@ use bevy::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 
-/// 配置路径（编译期绝对路径，与运行 `CWD` 无关）。
-pub const RENDER_CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/render.toml");
-
 /// 场景三方向光缺省照度（lux）。
 pub const DEFAULT_DIRECTIONAL: [f32; 3] = firefly_render::lighting::ILLUMINANCE;
 /// 传感器相机曝光缺省（EV100）。
@@ -22,6 +19,7 @@ pub const DEFAULT_CAPTURE_HZ: f64 = 10.0;
 
 /// 场景照明配置。
 #[derive(Deserialize, Serialize, Clone, Copy, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct LightConfig {
     /// 场景三方向光照度（lux）。
     #[serde(default = "default_directional")]
@@ -42,6 +40,7 @@ impl Default for LightConfig {
 
 /// 传感器相机曝光配置。
 #[derive(Deserialize, Serialize, Clone, Copy, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct ViewConfig {
     /// 传感器相机曝光 EV100（越大越暗）。
     #[serde(default = "default_sensor_ev100")]
@@ -67,6 +66,7 @@ impl Default for ViewConfig {
 /// （镜面），是黑亮面读得出形体的关键。颜色为 sRGB 0~1，`intensity` 缩放后
 /// 单位 cd/m²。
 #[derive(Deserialize, Serialize, Clone, Copy, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct EnvConfig {
     /// 顶色（sRGB 0~1）。
     #[serde(default = "default_env_top")]
@@ -111,6 +111,7 @@ impl Default for EnvConfig {
 
 /// 传感器采集节拍配置。
 #[derive(Deserialize, Serialize, Clone, Copy, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct CaptureConfig {
     /// 采集频率（Hz）；上限受 Bevy 120Hz 调度约束。
     #[serde(default = "default_capture_hz")]
@@ -152,6 +153,7 @@ impl CaptureConfig {
 
 /// `configs/render.toml` 顶层：场景光照、相机曝光、采集节拍与深度退化。
 #[derive(Resource, Deserialize, Clone, Debug, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RenderConfig {
     /// 场景照明。
     #[serde(default)]
@@ -221,6 +223,19 @@ impl RenderConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rejects_unknown_fields_at_each_config_level() {
+        for source in [
+            "ligth = {}",
+            "[light]\ndirectionall = [1, 2, 3]",
+            "[view]\nsensor_ev10 = 12",
+            "[capture]\nhzz = 60",
+            "[env]\nintensitty = 1500",
+            "[depth_noise]\nenabld = false",
+        ] {
+            assert!(toml::from_str::<RenderConfig>(source).is_err(), "{source}");
+        }
+    }
     #[test]
     fn asset_contract_excludes_online_noise_but_tracks_sensor_exposure() {
         let mut config = RenderConfig::default();
