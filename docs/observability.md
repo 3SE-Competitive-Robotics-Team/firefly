@@ -149,7 +149,8 @@ cargo build --release -p mimir
 rerun logs/run.rrd
 ```
 
-Output paths must be new. SIGINT/SIGTERM stops reception, drains the owned channel, flushes scalar batches,
+Output paths must be new. After producers stop, SIGINT/SIGTERM drains diagnostic subscriptions until empty
+(including disconnected publishers), drains the owned channel, flushes scalar batches,
 writes the full RRD footer and syncs the file. Queue overflow, sequence gaps, declared producer loss,
 invalid payloads, incomplete maps and writer/close failures return errors and preserve failure evidence
 where disk access remains possible. Closing does not consume a queue slot.

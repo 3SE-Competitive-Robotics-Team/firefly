@@ -205,11 +205,14 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
     log::info!("mimir subscriptions ready");
     loop {
         let stopping = stop.load(Ordering::Acquire);
-        // One final bounded sweep drains messages already delivered when shutdown began.
+        // Producers stop first. Repeat bounded sweeps until all diagnostic subscriptions
+        // are empty, including buffers belonging to multiple or disconnected publishers.
+        let mut received_diagnostics = false;
         for _ in 0..VIZ_BUFFER_SIZE {
             let Some(sample) = scalars.receive()? else {
                 break;
             };
+            received_diagnostics = true;
             continuity.observe(
                 sample.header().publisher_id().value(),
                 sample.sequence,
@@ -221,6 +224,7 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
             let Some(sample) = geometry.receive()? else {
                 break;
             };
+            received_diagnostics = true;
             continuity.observe(
                 sample.header().publisher_id().value(),
                 sample.sequence,
@@ -232,6 +236,7 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
             let Some(sample) = voxels.receive()? else {
                 break;
             };
+            received_diagnostics = true;
             continuity.observe(
                 sample.header().publisher_id().value(),
                 sample.sequence,
@@ -243,6 +248,7 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
             let Some(sample) = logs.receive()? else {
                 break;
             };
+            received_diagnostics = true;
             continuity.observe(
                 sample.header().publisher_id().value(),
                 sample.sequence,
@@ -272,7 +278,7 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
                 sender.send(Event::Image(Box::new(*sample)))?;
             }
         }
-        if stopping {
+        if stopping && !received_diagnostics {
             break;
         }
         std::thread::sleep(Duration::from_millis(1));

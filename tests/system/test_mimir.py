@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 import os
+import signal
 import threading
 import time
 
@@ -157,6 +158,58 @@ def test_incomplete_recording_is_an_error(fault):
         _, logs = read(path)
         assert "recording complete" not in logs
         assert any(("sequence gap" in entry or "lost 1 log" in entry or "unregistered" in entry) for entry in logs)
+
+
+@pytest.mark.parametrize("stream", ["scalars", "logs"])
+def test_shutdown_drains_delivered_backlog(stream):
+    with isolated_run(ROOT):
+        process, path = recording()
+        node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
+        ports = []
+        try:
+            if stream == "scalars":
+                ports = [publisher(node, "Firefly/VizScalars", ScalarMessage, 1024, 8)]
+                count = 600
+            else:
+                ports = [publisher(node, "Firefly/Log", LogMessage, 256, 10) for _ in range(3)]
+                count = 200
+            pid = process.process.pid
+            os.kill(pid, signal.SIGSTOP)
+            stopped_pid, status = os.waitpid(pid, os.WUNTRACED)
+            assert stopped_pid == pid and os.WIFSTOPPED(status)
+            for port_index, port in enumerate(ports):
+                for index in range(count):
+                    if stream == "scalars":
+                        port.loan_uninit().write_payload(
+                            scalar("fc/debug/altitude", index / 1024, index, [index])
+                        ).send()
+                    else:
+                        event(port, index, f"shutdown backlog {port_index}:{index}")
+            # All sends have completed; no producer writes after the stop request.
+            os.kill(pid, signal.SIGINT)
+            os.kill(pid, signal.SIGCONT)
+            assert process.process.wait(timeout=10.) == 0
+        finally:
+            if process.process.poll() is None:
+                os.kill(process.process.pid, signal.SIGCONT)
+            code = process.stop()
+            ports.clear()
+            assert code == 0, list(process.tail)
+        actual, logs = read(path)
+        assert "recording complete" in logs
+        if stream == "scalars":
+            assert actual["fc/debug/altitude"] == [
+                (int(index / 1024 * 1e9 + .5), [float(index)]) for index in range(count)
+            ]
+        else:
+            recorded = []
+            for chunk in RrdReader(path).stream():
+                if chunk.entity_path == "/logs/test-mimir":
+                    recorded.extend(text for row in chunk.to_record_batch().column("TextLog:text").to_pylist()
+                                    for text in row)
+            assert sorted(recorded) == sorted(
+                f"shutdown backlog {port_index}:{index}" for port_index in range(3) for index in range(count)
+            )
 
 
 def test_stereo_images_and_keypoint_ids_survive_recording():
