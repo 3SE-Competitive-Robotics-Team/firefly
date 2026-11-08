@@ -6,12 +6,19 @@ use std::path::Path;
 
 use firefly_error::Result;
 use firefly_pubsub::viz::{VizMessage, VoxelMessage, kind};
+use firefly_pubsub::{navigation::NavigationMessage, odom::OdomMessage};
 use re_chunk::{Chunk, RowId, TimeColumn, TimePoint, Timeline};
-use re_log_encoding::{Encoder, EncodingOptions};
+use re_log_encoding::{DecoderApp, Encoder, EncodingOptions};
 use re_log_types::{LogMsg, SetStoreInfo, StoreId, StoreInfo, StoreKind, StoreSource};
 use re_sdk_types::{AsComponents, archetypes as rr, datatypes::Quaternion};
 
-use crate::{config::Options, failure, invalid, schema};
+use crate::{
+    config::Options,
+    failure,
+    frames::{Anchor, Frames},
+    invalid, schema,
+    status::Status,
+};
 
 #[derive(Default)]
 struct Scalars {
@@ -48,6 +55,8 @@ pub struct Archive {
     pending_voxels: Option<PendingVoxels>,
     previous_positions: BTreeMap<String, [f32; 3]>,
     point_times: BTreeMap<String, f64>,
+    frames: Frames,
+    status: Status,
     pub samples: u64,
     pub chunks: u64,
 }
@@ -74,6 +83,19 @@ impl Archive {
         )
         .map_err(|e| failure("initialize RRD", e))?;
         let store = StoreId::random(StoreKind::Recording, "firefly");
+        for message in
+            DecoderApp::decode_lazy(include_bytes!("../../../configs/firefly.rbl").as_slice())
+        {
+            let mut message = message.map_err(|e| failure("decode default blueprint", e))?;
+            if let LogMsg::BlueprintActivationCommand(command) = &mut message {
+                // Saved user layouts remain selectable; reset restores this recording's default.
+                command.make_active = false;
+                command.make_default = true;
+            }
+            encoder
+                .append(&message)
+                .map_err(|e| failure("write default blueprint", e))?;
+        }
         encoder
             .append(&LogMsg::SetStoreInfo(SetStoreInfo {
                 row_id: *RowId::new(),
@@ -90,10 +112,19 @@ impl Archive {
             pending_voxels: None,
             previous_positions: BTreeMap::new(),
             point_times: BTreeMap::new(),
+            frames: Frames::default(),
+            status: Status::default(),
             samples: 0,
             chunks: 0,
         };
         archive.write("/", None, &rr::ViewCoordinates::RIGHT_HAND_Z_UP())?;
+        archive.write(
+            "frames/map",
+            None,
+            &rr::Transform3D::IDENTITY
+                .with_parent_frame("tf#/")
+                .with_child_frame("map"),
+        )?;
         archive.write(
             "mimir/config",
             None,
@@ -147,6 +178,59 @@ impl Archive {
         self.append(&chunk)
     }
 
+    fn spatial(&mut self, name: &str, stamp: f64, value: &dyn AsComponents) -> Result<()> {
+        let frame = schema::frame(name).ok_or_else(|| invalid(format!("missing frame: {name}")))?;
+        // Attach the frame in the same row, including after recursive clears.
+        self.write(
+            name,
+            Some(stamp),
+            &[value, &rr::CoordinateFrame::new(frame)] as &[&dyn AsComponents; 2],
+        )
+    }
+
+    /// Record the atomic map←odom relation only when it changes.
+    /// # Errors
+    /// Invalid or reset navigation state, or serialization/I/O failure.
+    pub fn navigation(&mut self, msg: NavigationMessage) -> Result<()> {
+        if !msg.odom.is_initialized {
+            return Ok(());
+        }
+        let (changed, anchor) = self.frames.navigation(msg)?;
+        if changed {
+            self.write(
+                "frames/odom",
+                Some(msg.odom.timestamp),
+                &transform(msg.translation, msg.rotation)?
+                    .with_parent_frame("map")
+                    .with_child_frame("odom"),
+            )?;
+        }
+        self.anchor(anchor)
+    }
+
+    /// Match truth to an initialization sample without changing either recorded pose.
+    /// # Errors
+    /// Invalid pose/time or serialization/I/O failure.
+    pub fn truth(&mut self, msg: OdomMessage) -> Result<()> {
+        let anchor = self.frames.truth(msg)?;
+        self.anchor(anchor)
+    }
+
+    fn anchor(&mut self, anchor: Option<Anchor>) -> Result<()> {
+        if let Some(anchor) = anchor {
+            self.write(
+                "frames/world",
+                None,
+                &transform(anchor.translation, anchor.rotation)?
+                    .with_parent_frame("map")
+                    .with_child_frame("world"),
+            )?;
+            self.log("mimir", anchor.stamp, wall_time_ns(),
+                "display world aligned to map using one exact-time stationary startup pair (yaw and translation only)", "INFO")?;
+        }
+        Ok(())
+    }
+
     /// Preserve every scalar row, including repeated measurement timestamps.
     /// # Errors
     /// Unregistered entity, invalid width/time, exhausted entity budget, or encoding/I/O failure.
@@ -156,6 +240,11 @@ impl Archive {
             return Err(invalid(format!("wrong scalar width: {name}")));
         }
         let time = schema::timestamp(stamp)?;
+        if let Some(texts) = self.status.observe(name, stamp, values) {
+            for (entity, text) in schema::STATUS_ENTITIES.into_iter().zip(texts) {
+                self.write(entity, Some(stamp), &rr::TextDocument::from_markdown(text))?;
+            }
+        }
         if !self.scalars.contains_key(name) {
             let names = fields.iter().map(|field| format!("{name}/{field}"));
             self.write(name, None, &rr::SeriesLines::new().with_names(names))?;
@@ -270,9 +359,9 @@ impl Archive {
                     .iter()
                     .map(|p| p.map(|v| v as f32))
                     .collect::<Vec<_>>();
-                self.write(
+                self.spatial(
                     name,
-                    stamp,
+                    msg.timestamp,
                     &rr::LineStrips3D::new([points]).with_colors([msg.color]),
                 )
             }
@@ -325,9 +414,9 @@ impl Archive {
                     .arrow_vectors
                     .get(..n)
                     .ok_or_else(|| invalid("arrow count"))?;
-                self.write(
+                self.spatial(
                     name,
-                    stamp,
+                    msg.timestamp,
                     &rr::Arrows3D::from_vectors(vectors.iter().map(|p| p.map(|v| v as f32)))
                         .with_origins(origins.iter().map(|p| p.map(|v| v as f32)))
                         .with_colors([msg.color]),
@@ -365,9 +454,16 @@ impl Archive {
                         [0., msg.scalars[1] as f32, 0.],
                         [msg.scalars[2] as f32 + 0.5, msg.scalars[3] as f32 + 0.5, 1.],
                     ])
-                    .with_resolution([msg.points[0][0] as f32, msg.points[0][1] as f32]),
+                    .with_resolution([msg.points[0][0] as f32, msg.points[0][1] as f32])
+                    .with_parent_frame(schema::frame(name).ok_or_else(|| invalid("camera frame"))?),
                 )?;
-                self.write(name, None, &transform(msg.xyz, msg.quat_xyzw)?)
+                self.write(
+                    name,
+                    None,
+                    &transform(msg.xyz, msg.quat_xyzw)?.with_parent_frame(
+                        schema::frame(name).ok_or_else(|| invalid("camera frame"))?,
+                    ),
+                )
             }
             _ => Err(invalid(format!("unsupported geometry kind {}", msg.kind))),
         }
@@ -377,7 +473,12 @@ impl Archive {
     /// # Errors
     /// Nonfinite translation, invalid quaternion/time, or file failure.
     pub fn pose(&mut self, name: &str, stamp: f64, xyz: [f64; 3], quat: [f64; 4]) -> Result<()> {
-        self.write(name, Some(stamp), &transform(xyz, quat)?)?;
+        let frame = schema::frame(name).ok_or_else(|| invalid(format!("pose frame: {name}")))?;
+        self.write(
+            name,
+            Some(stamp),
+            &transform(xyz, quat)?.with_parent_frame(frame),
+        )?;
         let trajectory = match name {
             "gt/pose" => "gt/traj",
             "vio/odom" => "vio/traj",
@@ -386,9 +487,9 @@ impl Archive {
         };
         let point = xyz.map(|v| v as f32);
         if let Some(previous) = self.previous_positions.insert(name.to_owned(), point) {
-            self.write(
+            self.spatial(
                 trajectory,
-                Some(stamp),
+                stamp,
                 &rr::LineStrips3D::new([[previous, point]]),
             )?;
         }
@@ -511,7 +612,7 @@ impl Archive {
         }
         let map = rr::VoxelGridMap::new(state.cells.iter().copied(), state.size)
             .with_translation(state.origin);
-        self.write(name, Some(msg.timestamp), &map)
+        self.spatial(name, msg.timestamp, &map)
     }
 
     /// Finish pending data and write the complete RRD footer before syncing the file.
@@ -519,6 +620,10 @@ impl Archive {
     /// Incomplete voxel update or any serialization/flush/sync failure.
     pub fn finish(mut self, error: Option<&str>) -> Result<()> {
         self.flush()?;
+        if self.frames.truth_unaligned() {
+            self.log("mimir", -1., wall_time_ns(),
+                "world display frame is disconnected: no exact-time stationary session-start pair; inspect truth in a world-frame view", "WARN")?;
+        }
         let incomplete = error.or_else(|| {
             self.pending_voxels
                 .is_some()

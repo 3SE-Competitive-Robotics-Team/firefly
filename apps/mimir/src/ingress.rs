@@ -14,6 +14,7 @@ use firefly_pubsub::{
     attitude::{ATTITUDE_TOPIC, AttitudeMessage},
     camera::{CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, GrayImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH},
     log::{LOG_BUFFER_SIZE, LOG_MAX_PUBLISHERS, LOG_TOPIC, LogMessage},
+    navigation::{NAVIGATION_TOPIC, NavigationMessage},
     node::{IpcNode, create_node},
     odom::{CORRECTED_ODOM_TOPIC, GROUND_TRUTH_TOPIC, OdomMessage},
     subscriber::{Subscriber, SubscriberOptions},
@@ -36,6 +37,7 @@ enum Event {
     Voxel(Box<VoxelMessage>),
     Log(Box<LogMessage>),
     Odom(&'static str, OdomMessage),
+    Navigation(Box<NavigationMessage>),
     Attitude(AttitudeMessage),
     Image(Box<GrayImageMessage>),
 }
@@ -48,6 +50,7 @@ impl Event {
                 Self::Voxel(_) => size_of::<VoxelMessage>(),
                 Self::Log(_) => size_of::<LogMessage>(),
                 Self::Image(_) => size_of::<GrayImageMessage>(),
+                Self::Navigation(_) => size_of::<NavigationMessage>(),
                 _ => 0,
             }
     }
@@ -92,6 +95,9 @@ impl Event {
                 if !msg.is_initialized {
                     return Ok(());
                 }
+                if name == "gt/pose" {
+                    archive.truth(msg)?;
+                }
                 archive.pose(
                     name,
                     msg.timestamp,
@@ -99,6 +105,7 @@ impl Event {
                     [msg.quat_x, msg.quat_y, msg.quat_z, msg.quat_w],
                 )
             }
+            Self::Navigation(msg) => archive.navigation(*msg),
             Self::Attitude(msg) => archive.scalar("vio/gyro_bias", msg.timestamp, &msg.gyro_bias),
             Self::Image(msg) => {
                 if msg.width as usize != IMAGE_WIDTH || msg.height as usize != IMAGE_HEIGHT {
@@ -182,6 +189,7 @@ fn buffered<T: std::fmt::Debug + iceoryx2::prelude::ZeroCopySend>(
     )
 }
 
+#[allow(clippy::too_many_lines)] // Keep subscription ownership and shutdown draining in one loop.
 fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> {
     let node = create_node()?;
     let scalars =
@@ -191,6 +199,7 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
     let logs = buffered::<LogMessage>(&node, LOG_TOPIC, LOG_BUFFER_SIZE, LOG_MAX_PUBLISHERS)?;
     let gt = Subscriber::<OdomMessage>::with_topic(&node, GROUND_TRUTH_TOPIC)?;
     let map = Subscriber::<OdomMessage>::with_topic(&node, CORRECTED_ODOM_TOPIC)?;
+    let navigation = Subscriber::<NavigationMessage>::with_topic(&node, NAVIGATION_TOPIC)?;
     let attitude = Subscriber::<AttitudeMessage>::with_topic(&node, ATTITUDE_TOPIC)?;
     let cameras = if options.images {
         vec![
@@ -266,6 +275,9 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
             if let Some(sample) = subscriber.receive()? {
                 sender.send(Event::Odom(name, *sample))?;
             }
+        }
+        if let Some(sample) = navigation.receive()? {
+            sender.send(Event::Navigation(Box::new(*sample)))?;
         }
         if let Some(sample) = attitude.receive()?
             && sample.timestamp - last_attitude >= 1.

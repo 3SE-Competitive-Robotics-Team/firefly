@@ -2,6 +2,16 @@
 use firefly_error::Result;
 use firefly_pubsub::viz::kind;
 
+/// Recorder-derived display documents; no additional IPC topics or raw-series filtering.
+pub(crate) const STATUS_ENTITIES: [&str; 6] = [
+    "mimir/status/fc/tick_rate",
+    "mimir/status/vio/processing",
+    "mimir/status/vio/posterior_age",
+    "mimir/status/camera/publish_rate",
+    "mimir/status/camera/publish_latency",
+    "mimir/status/vio/landmarks",
+];
+
 const SPATIAL: &[(&str, &[u32])] = &[
     ("vio/odom", &[kind::POSE]),
     ("vio/map/pose", &[kind::POSE]),
@@ -43,6 +53,34 @@ const SPATIAL: &[(&str, &[u32])] = &[
     ("cameras/left", &[kind::CAMERA]),
     ("cameras/right", &[kind::CAMERA]),
 ];
+
+/// Parent frame for registered 3D observations; pixel overlays keep camera coordinates.
+pub(crate) fn frame(name: &str) -> Option<&'static str> {
+    match name {
+        "gt/pose" | "gt/traj" | "acceptance/gt" => Some("world"),
+        "vio/odom"
+        | "vio/traj"
+        | "vio/posterior/pose_imu_world"
+        | "vio/prediction/pose_body_odom"
+        | "acceptance/odom" => Some("odom"),
+        "vio/map/pose"
+        | "vio/map/traj"
+        | "corr/odom"
+        | "corr/traj"
+        | "plan/drone"
+        | "plan/global_path"
+        | "plan/local_traj"
+        | "plan/map"
+        | "plan/collision"
+        | "plan/motions"
+        | "plan/local_traj/velocity"
+        | "plan/planes"
+        | "acceptance/corrected"
+        | "acceptance/reference" => Some("map"),
+        "cameras/left" | "cameras/right" => Some("tf#/vio/prediction/pose_body_odom"),
+        _ => None,
+    }
+}
 
 /// Validate the registered entity and payload before serialization.
 /// # Errors
@@ -231,6 +269,22 @@ pub fn timestamp(stamp: f64) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_registered_3d_payloads_have_explicit_frames() {
+        for (name, kinds) in SPATIAL {
+            if kinds.iter().any(|kind| {
+                matches!(
+                    *kind,
+                    kind::POSE | kind::LINE_STRIP | kind::ARROWS | kind::VOXELS | kind::CAMERA
+                )
+            }) {
+                assert!(frame(name).is_some(), "{name}");
+            }
+        }
+        assert_ne!(frame("acceptance/gt"), frame("acceptance/odom"));
+        assert_eq!(frame("plan/local_traj/velocity"), Some("map"));
+    }
 
     #[test]
     fn unknown_entities_and_wrong_payloads_fail_closed() {
