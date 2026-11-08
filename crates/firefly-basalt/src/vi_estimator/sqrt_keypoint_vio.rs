@@ -930,8 +930,8 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
                     .vio_init_yaw_weight
                     .unwrap_or(config.vio_init_pose_weight),
             ),
-            (vec![9, 10, 11], config.vio_init_ba_weight),
-            (vec![12, 13, 14], config.vio_init_bg_weight),
+            (vec![9, 10, 11], config.vio_init_bg_weight),
+            (vec![12, 13, 14], config.vio_init_ba_weight),
         ] {
             let weight = S::from_f64_lossy(weight);
             for i in indices {
