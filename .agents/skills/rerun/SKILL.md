@@ -53,7 +53,7 @@ description: Rerun 基础认知与 .rrd 录制文件的阅读方法。当需要�
 记录进程从 sim 的 `Firefly/GroundTruth` 写 `gt/pose` + `gt/traj`（蓝），从 VIO 位姿诊断写 `okvis/odom` + `okvis/traj`（橙），统一 `sim_time`。
 
 1. 录制：按仓库 `docs/development.md` 的「构建与运行」启动统一记录进程与闭环；
-   使用 `firefly-viz --save logs/run1.rrd` 保存本次证据。
+   使用 `./target/release/mimir --save logs/run1.rrd` 保存本次证据。
 2. 看：`rerun logs/run1.rrd`；数值快查 `rerun rrd print --entity gt/pose --entity okvis/odom -vvv`。
 3. 读出原始数据：`uv run python .agents/skills/rerun/scripts/read_poses.py logs/run1.rrd`
    （rerun-sdk 是根项目 dev 依赖，`uv add --dev rerun-sdk` 后 uv run 直接可用，

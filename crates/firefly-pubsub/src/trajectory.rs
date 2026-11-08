@@ -5,6 +5,22 @@ pub const TRAJECTORY_TOPIC: &str = "Firefly/Trajectory";
 pub const PLANNER_HEARTBEAT_TOPIC: &str = "Firefly/PlannerHeartbeat";
 pub const TRAJECTORY_CONTROL_TOPIC: &str = "Firefly/TrajectoryControl";
 pub const PLANNER_STATUS_TOPIC: &str = "Firefly/PlannerStatus";
+/// 外部工具向规划进程发送强制停止请求。
+pub const MANDATORY_STOP_TOPIC: &str = "Firefly/MandatoryStop";
+
+/// 收到即停；timestamp 为诊断用墙钟秒，不改变停止语义。
+#[repr(C)]
+#[derive(Debug, Clone, Copy, ZeroCopySend)]
+#[type_name("FireflyMandatoryStop")]
+pub struct MandatoryStopMessage {
+    pub timestamp: f64,
+}
+
+impl Default for MandatoryStopMessage {
+    fn default() -> Self {
+        Self { timestamp: -1.0 }
+    }
+}
 
 /// 目标执行快照；finished 只表示规划轨迹正常结束，不表示实测到点。
 /// `goal_timestamp` 回显 `GoalMessage` 的发送时刻，作为同一会话内的目标身份。

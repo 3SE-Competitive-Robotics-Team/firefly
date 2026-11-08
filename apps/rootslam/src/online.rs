@@ -454,7 +454,9 @@ impl LiveSession {
                         message.point_count += 1;
                     }
                     let _ = self.viz.publish(message);
-                    if camera == 0 {
+                    if camera == 0
+                        && log::log_enabled!(target: "vio-diagnostics", log::Level::Debug)
+                    {
                         let mut active = VizMessage::base(
                             kind::KEYPOINTS_2D,
                             stamp,

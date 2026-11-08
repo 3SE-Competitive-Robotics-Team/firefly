@@ -5,7 +5,7 @@ import time
 
 import iceoryx2 as iox2
 from firefly_mujoco import LogMessage, TraceContext, ReferenceMessage
-from firefly_viz.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage
+from firefly_mujoco.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage
 
 
 class PlannerStatusMessage(ctypes.Structure):
@@ -33,6 +33,7 @@ class Recorder:
         self.scalar_pub = service(node, "Firefly/VizScalars", ScalarMessage, SCALAR_BUFFER_SIZE, 8).publisher_builder().create()
         self.logs = service(node, "Firefly/Log", LogMessage, capacity=256, publishers=10).publisher_builder().create()
         self.sequence = {4: 0, 1: 0}
+        self.log_sequence = 0
 
     def message(self, kind, entity, stamp):
         msg = ScalarMessage() if kind == 4 else VizMessage()
@@ -57,6 +58,8 @@ class Recorder:
 
     def event(self, text, stamp=-1., error=False):
         msg = LogMessage()
+        msg.sequence = self.log_sequence
+        self.log_sequence += 1
         wall = time.time()
         msg.sim_time, msg.wall_secs, msg.wall_nanos = stamp, int(wall), int(wall % 1 * 1e9)
         msg.log_level = 1 if error else 3

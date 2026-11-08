@@ -1,0 +1,2 @@
+# Defaults and bounds are defined by apps/mimir/src/config.rs::Options.
+# Native grayscale images are lossless; disable images explicitly for telemetry-only runs.

@@ -12,7 +12,7 @@ import time
 import iceoryx2 as iox2
 import numpy as np
 from firefly_mujoco import ControlMessage, OdomMessage
-from firefly_viz.messages import SCALAR_BUFFER_SIZE, ScalarMessage
+from firefly_mujoco.messages import SCALAR_BUFFER_SIZE, ScalarMessage
 
 from .process_lifecycle import ManagedProcess, isolated_run
 from .mission_io import PlannerStatusMessage, Recorder, ReferenceMessage, pose_values, service
@@ -203,7 +203,7 @@ class Mission:
                         self.recorder.scalars("acceptance/loop_backend", msg.timestamp, list(msg.scalars[:msg.scalar_count]))
                     elif entity in ("okvis/frame_processing_ms", "rootslam/frame_processing_ms"):
                         # 单帧处理耗时：从帧入队到状态发布的墙钟时间。
-                        # 原始实体由 firefly-viz 直接落 rrd，这里只做统计。
+                        # 原始实体由 mimir 直接落 rrd，这里只做统计。
                         self.frame_processing_ms.append(float(msg.scalars[0]))
                     elif entity == "fc/imu/quaternion_xyzw":
                         self.recorder.scalars("acceptance/imu_attitude", msg.timestamp, list(msg.scalars[:msg.scalar_count]))
@@ -558,7 +558,7 @@ class Mission:
     def _run_phases(self, phases, applications):
         self.result["stages"] = {name: {"status": "blocked", "reason": "preceding phase not completed"} for name, _ in phases}
         try:
-            self.start("viz", [sys.executable, "-m", "firefly_viz.main", "--save", str(self.recording)])
+            self.start("viz", [str(self.root / "target/release/mimir"), "--save", str(self.recording)])
             self.sleep(2.)
             self.connect()
             for name in applications:

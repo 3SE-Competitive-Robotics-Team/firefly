@@ -30,6 +30,10 @@ def build_release_apps(request):
     if not selected_system_tests:
         return
 
+    if all(item.path.name == "test_mimir.py" for item in request.session.items):
+        subprocess.run(["cargo", "build", "--release", "-p", "mimir"], cwd=ROOT, check=True)
+        return
+
     subprocess.run(
         ["cargo", "xtask", "release"],
         cwd=ROOT,
@@ -90,7 +94,7 @@ def flight_report(flight_directory):
     vio_process = os.environ.get("FIREFLY_VIO_PROCESS", "firefly-okvis-x")
     files.update(
         ROOT / f"target/release/{name}"
-        for name in ("render", vio_process, "fc", "ffctl")
+        for name in ("render", vio_process, "fc", "ffctl", "mimir")
     )
     from firefly_mujoco import load_scene_name, resolve_scene
 

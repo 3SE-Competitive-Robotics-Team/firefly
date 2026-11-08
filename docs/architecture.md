@@ -23,7 +23,7 @@ flowchart LR
     L -->|外部地图模式独占 Navigation| P
     V -->|原子占据地图快照| P
     P -->|携带坐标变换的 Reference| F
-    R -->|图像| D[firefly-viz]
+    R -->|图像| D[mimir]
     SIM -->|真值位姿| D
     V -->|诊断 IPC| D
     P -->|诊断 IPC| D
@@ -43,7 +43,7 @@ flowchart LR
   再按实测位置、速度和稳定时间确认到点。轨迹结束本身不是到点证明。
   异常断流仍由飞控失联保护处理，收到参考不会自动解除 Hold。
 - GroundTruth 只供合成传感器、评测与可视化；PlantState 只作评测，均不得进入估计或控制。
-- `render` 只生成传感器图像，诊断记录与展示由独立 `firefly-viz` 承担。
+- `render` 只生成传感器图像，诊断记录与展示由独立 `mimir` 承担。
 
 ### Basalt 与 RootSLAM 独立应用
 
@@ -90,48 +90,8 @@ flowchart LR
 
 ### 诊断记录与展示
 
-`firefly-viz` 从 `Firefly/GroundTruth` 记录 `gt/pose` 与 `gt/traj`，从 `okvis/odom`
-位姿诊断生成 `okvis/traj`，从 OKVIS 发布的 `Firefly/CorrectedOdometry` 按 10Hz
-记录 `okvis/map/pose` 与 `okvis/map/traj`。轨迹按测量时刻记录相邻两点构成的线段，记录进程为每条轨迹
-保留一个前序点，Viewer 按时间范围展示历史。
-
-OKVIS 跟踪质量以 `StateChange` 写入 `okvis/tracking`，仅在 Lost、Marginal、Good
-之间变化时记录，由 `StateTimelineView` 展示离散状态；回环更新次数与视觉查询耗时保留数值曲线。
-
-OKVIS 的帧诊断回调读取当前帧的二维关键点与路标 ID，
-在 `okvis/debug` 下发布有界诊断。关键点时间恢复为相机采集时刻；记录端按采集时间容差配对
-图像与关键点，保留原始像素坐标和路标 ID，显示时应用像素中心偏移。
-
-`Firefly/VizScalars` 使用小型定长消息长期保存数值；`Firefly/Viz` 保存位姿、点集、
-标定等空间诊断；`Firefly/VizVoxels` 单独传输 planner 的地图更新。体素更新分块连续发送，
-接收端检查序号、完整性和容量后更新集合，再按录制频率保存完整快照。缺块、乱序或未知
-基线上的增量使录制明确失败；不能把截断地图当作完整证据。planner 的显示体素在密集区域
-按二倍尺度合并，直到单次快照满足消息容量；所有原占据体积均被覆盖，消息携带实际显示
-分辨率，规划栅格分辨率不受影响。
-
-左右目灰度原图分别经 FFmpeg 编成无 B 帧的低码率 H.265，Annex B access unit 逐帧写入
-`cameras/left/image` 与 `cameras/right/image` 的 `VideoStream`。codec、双目标定与无人机模型按 static 记录；
-视频 sample 属于原始采集 `sim_time`。编码输入只有有界缓冲，允许编码前丢帧，
-已经编码的依赖帧不能丢弃。视频是有损调试背景，不作为像素精度评测或算法输入。
-Rerun 绘制特征点，点集按 `MatchedPoints` 定义的容差匹配最近的已保存图像，
-叠加使用图像的采集时间与视频帧索引；每张已保存图像
-先写空点集，避免沿用上一张图的标记。点集与 track_id 只保存在各相机的 `points` 叠加层，
-不另外保存 `okvis/debug/keypoints/**` 副本。
-算法与 IPC 使用整数像素中心；[Rerun 0.38.1 图像边界从零开始](https://github.com/rerun-io/rerun/blob/0.38.1/crates/views/re_view_spatial/src/visualizers/video/mod.rs#L574)，
-展示层的主点与叠加点统一加半个像素，原始诊断坐标保持不变。
-
-图像区仅有左右目 recorded 视图，在 Horizontal 容器中并排展示视频和同帧关键点；深度图的业务话题由估计与
-建图进程消费。左右目关键点由 OKVIS 当前帧诊断提供。视频队列丢帧和退出状态写入 RRD。
-
-Viewer 和文件 sink 使用同一个 recording stream，只展示视频、关键点和地图的历史记录。
-不创建 `/live/**` static 预览流；录制和实时查看可以同时启用。
-单个 3D 视图同时展示真值、VSLAM odom、VSLAM map 与规划轨迹，保留各来源的原始
-坐标，不添加对齐变换。不同来源的原点可能不同，视图中的间距不能直接解释为定位误差。
-接收、诊断写入和媒体处理独立调度；小型诊断队列溢出、编码失败、部分体素更新或退出
-清理失败都报告录制不完整，不静默切换编码器。配置与具体预算见 `configs/viz.toml`
-及 `firefly_viz.config`，不在此复制参数表。
-退出先停止接收，再排空诊断，随后排空媒体与编码器，最后 flush
-并关闭 Rerun sinks。关闭信号不占队列槽位；超时残留须报告，仍有写入线程时不提前断开 sink。
+诊断 topic、实体、录制线程及 Rerun 数据契约统一见 [可观测性](observability.md)。
+观测生产与控制、估计解耦；开关不能改变算法参数或业务消息。
 
 <a id="frames"></a>
 

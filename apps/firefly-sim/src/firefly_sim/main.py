@@ -373,9 +373,11 @@ def log(msg: str, level: int = LOG_LEVEL_INFO, sim_time: float = -1.0) -> None:
     publish_log(level, msg, sim_time)
 
 
-#: 日志聚合发布端（`Firefly/Log` → `firefly-viz`；stderr 双 sink 保留，
+#: 日志聚合发布端（`Firefly/Log` → `mimir`；stderr 双 sink 保留，
 #: 见 `firefly_observability::IpcAppend` 的双 sink 语义）。
 _log_pub = None
+_log_sequence = 0
+_log_dropped = 0
 
 
 def _init_log_ipc(node) -> None:
@@ -386,7 +388,8 @@ def _init_log_ipc(node) -> None:
     viz 同早启动，谁先创建服务谁定上限——必须显式调大，默认 2 只够
     sim+viz，Rust 发布端随后 open 即 `DoesNotSupportRequestedAmountOfPublishers`。
     """
-    global _log_pub
+    global _log_pub, _log_sequence, _log_dropped
+    _log_sequence = _log_dropped = 0
     try:
         service = (
             node.service_builder(iox2.ServiceName.new(LOG_TOPIC))
@@ -397,7 +400,7 @@ def _init_log_ipc(node) -> None:
             .open_or_create()
         )
         _log_pub = service.publisher_builder().create()
-        log("日志聚合已挂载（tag=sim，Firefly/Log → firefly-viz）")
+        log("日志聚合已挂载（tag=sim，Firefly/Log → mimir）")
     except Exception as exc:  # noqa: BLE001 - 聚合缺席不阻断仿真
         log(f"日志聚合挂载失败（降级纯 stderr）：{exc}")
 
@@ -406,16 +409,20 @@ def publish_log(level: int, text: str, sim_time: float = -1.0) -> None:
     """结构化日志发布（stderr + IPC 双 sink；调用点保持 `log()` 不变）。
 
     `sim_time < 0` 表示尚无 sim 时钟（聚合端回落墙钟轴，可检索）。
-    发布失败静默丢弃：可视化不阻断物理循环。
+    发布失败累计缺失数，下一条日志使录制明确失败；不阻断物理循环。
     """
     if _log_pub is None:
         return
+    global _log_sequence, _log_dropped
+    sequence = _log_sequence
+    _log_sequence += 1
     try:
         import time as _time
 
         wall = _time.time()
         sample = _log_pub.loan_uninit()
         msg = LogMessage()
+        msg.sequence, msg.dropped_records = sequence, _log_dropped
         msg.log_level = level
         tag = b"sim"
         msg.tag[: len(tag)] = tag
@@ -428,4 +435,4 @@ def publish_log(level: int, text: str, sim_time: float = -1.0) -> None:
         msg.wall_nanos = int((wall % 1.0) * 1e9)
         sample.write_payload(msg).send()
     except Exception:  # noqa: BLE001 - 日志路径永不抛异常
-        pass
+        _log_dropped += 1

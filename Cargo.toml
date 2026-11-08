@@ -1,9 +1,14 @@
 [workspace]
 members = ["crates/*", "apps/*", "xtask"]
-exclude = ["apps/firefly-sim", "apps/firefly-viz"]
+exclude = ["apps/firefly-sim"]
 resolver = "3"
 
 [workspace.dependencies]
+re_build_info = "=0.38.1"
+re_chunk = "=0.38.1"
+re_log_encoding = { version = "=0.38.1", features = ["encoder", "decoder"] }
+re_log_types = "=0.38.1"
+re_sdk_types = { version = "=0.38.1", default-features = false }
 firefly-calibration = { path = "crates/firefly-calibration" }
 firefly-basalt = { path = "crates/firefly-basalt" }
 firefly-rootslam-mapping = { path = "crates/firefly-rootslam-mapping" }

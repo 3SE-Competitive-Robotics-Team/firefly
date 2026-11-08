@@ -54,7 +54,7 @@
 | 应用 | 职责 |
 |---|---|
 | `firefly-sim` | MuJoCo 物理进程：物理与 IMU 各 1kHz，接收电机推力，无有效控制时暂停 |
-| `firefly-viz` | 独立 Rerun 调试进程：标量、H.265 左目视频、采样与事件无损窗口 |
+| `mimir` | Rust RRD 录制进程：列式数值诊断、左右目无损灰度图、事件与完整性检查 |
 
 ### Python 库（`packages/`）
 

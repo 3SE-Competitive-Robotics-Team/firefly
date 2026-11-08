@@ -8,7 +8,7 @@
 //! - [`odom`]：`OdomMessage`——`#[repr(C)]` 定长零拷贝消息（`ZeroCopySend`）；
 //! - [`imu`]：`ImuMessage`——原始 IMU（角速度 + 比力）；
 //! - [`log`]: `LogMessage`——结构化日志（各进程经 `Firefly/Log` 向
-//!   `firefly-viz` 聚合，统一写 rerun `TextLog`，持久可检索）；
+//!   `mimir` 聚合，统一写 rerun `TextLog`，持久可检索）；
 //! - [`camera`]：`GrayImageMessage`/`DepthImageMessage`——双目灰度 + 深度图；
 //! - [`reference`]：`ReferenceMessage`——规划轨迹的参考状态（闭环控制回传）；
 //! - [`plant`]：`PlantStateMessage`/`AirframeMessage`——被控对象状态与机体描述
@@ -18,7 +18,7 @@
 //! - [`command`]：`CommandMessage`——外部工具发布的地面站指令（解锁/起飞/保持/
 //!   跟踪/降落/上锁，按序号去重）；
 //! - [`viz`]：标量、空间诊断与体素分流，Rust 计算线程经 IPC 发布，
-//!   `firefly-viz` Python 进程统一写入 Rerun；
+//!   `mimir` Rust 进程统一写入 Rerun；
 //! - [`vision`]：`FeatureMessage`/`PoseObservation`——视觉定位消息
 //!   （特征与位姿观测分离，融合核保持传感器无关）；
 //! - [`publish`]/[`subscriber`]：泛型发布/订阅端（自动注入/续接 trace 上下文）；
