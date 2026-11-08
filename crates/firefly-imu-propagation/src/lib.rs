@@ -1,8 +1,9 @@
-//! Shared OKVIS2-X motion integration for online IMU state prediction.
+//! IMU forward propagation for the online `RootSLAM` state prediction.
 //!
-//! The integration order and endpoint interpolation mirror the no-covariance
-//! `ImuError::propagation` path. Both online VIO adapters use this API so their
-//! IMU predictions cannot drift into separate numerical implementations.
+//! The integration order and endpoint interpolation are derived from OKVIS2-X's
+//! no-covariance `ImuError::propagation` path. This retained numerical implementation
+//! is independent of the removed OKVIS2-X application; attribution is preserved in
+//! `docs/licenses/third-party-notices.md`.
 
 use nalgebra::{Matrix3, Quaternion, Vector3};
 

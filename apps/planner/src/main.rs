@@ -1,4 +1,4 @@
-//! planner 接入：Navigation + 深度（或共享占据地图）/目标 → FSM → 完整轨迹。
+//! planner 接入：Navigation + 深度/目标 → 自持占据地图 + FSM → 完整轨迹。
 //! FSM 为 100Hz，安全检查为 20Hz；`--traj-server` 启动独立的 100Hz 轨迹输出进程。
 //! Navigation 失联或无效状态锁存停止输出，坐标修正使旧版本轨迹立即失效。
 //! 地图融合超时触发急停并禁用 fail-safe；真值不进入规划状态链路。
