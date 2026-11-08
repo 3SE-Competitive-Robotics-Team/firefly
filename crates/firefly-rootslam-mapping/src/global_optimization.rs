@@ -395,7 +395,11 @@ fn solve_lsqr_with_workspace<S: BasaltScalar, W: BasaltScalar>(
         phi_bar *= sine;
         x += &w * (phi / rho);
         w = &v - w * (theta / rho);
-        if iteration % 8 == 0 || alpha == W::zero() || beta == W::zero() {
+        if iteration % 8 == 0
+            || iteration == options.lsqr_max_iterations
+            || alpha == W::zero()
+            || beta == W::zero()
+        {
             let physical = physical_step(&x);
             let gradient = system.physical_gradient_norm(Some(&physical));
             if gradient <= tolerance * initial_gradient {
@@ -1684,6 +1688,54 @@ mod tests {
             "iterations={iterations}, gradient={gradient}, threshold={}",
             options.lsqr_tolerance * initial_gradient
         );
+    }
+
+    #[test]
+    fn lsqr_checks_convergence_at_the_iteration_limit() {
+        let system = SquareRootSystem {
+            columns: 2,
+            blocks: vec![RowBlock {
+                columns: vec![0, 1],
+                matrix: DMatrix::from_row_slice(3, 2, &[1.0_f64, 2.0, 3.0, 4.0, 5.0, 7.0]),
+                residual: DVector::from_vec(vec![0.2, -0.3, 0.7]),
+            }],
+            landmarks: Vec::new(),
+            damping: 0.1,
+        };
+        let options = OptimizationOptions {
+            lsqr_tolerance: 1e-10,
+            lsqr_max_iterations: 3,
+            ..Default::default()
+        };
+        let (step, iterations, converged) = solve_lsqr(&system, &options);
+        // Independently expand AᵀA + 0.01 I and Aᵀr for this small fixture.
+        let hessian = nalgebra::Matrix2::new(35.01, 49.0, 49.0, 69.01);
+        let gradient = Vector2::new(2.8, 4.1);
+        let expected = Vector2::new(
+            (-69.01 * 2.8 + 49.0 * 4.1) / (35.01 * 69.01 - 49.0 * 49.0),
+            (49.0 * 2.8 - 35.01 * 4.1) / (35.01 * 69.01 - 49.0 * 49.0),
+        );
+        assert!((step.fixed_rows::<2>(0) - expected).norm() < 1e-12);
+        let relative_gradient =
+            (hessian * step.fixed_rows::<2>(0) + gradient).norm() / gradient.norm();
+        assert!(relative_gradient <= options.lsqr_tolerance);
+        assert!(
+            converged,
+            "iteration {iterations}: relative gradient {relative_gradient} satisfies the tolerance"
+        );
+
+        let (unfinished, _, converged) = solve_lsqr(
+            &system,
+            &OptimizationOptions {
+                lsqr_max_iterations: 1,
+                ..options
+            },
+        );
+        assert!(
+            (hessian * unfinished.fixed_rows::<2>(0) + gradient).norm()
+                > options.lsqr_tolerance * gradient.norm()
+        );
+        assert!(!converged);
     }
 
     #[test]
