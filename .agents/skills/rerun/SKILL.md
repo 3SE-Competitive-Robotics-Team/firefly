@@ -9,7 +9,7 @@ description: Rerun 基础认知与 .rrd 录制文件的阅读方法。当需要�
 
 - The Data Layer for Physical AI：log + visualize + query 一体，Python/C++/Rust SDK。
 - `.rrd` = Rerun 持久化格式；`.rbl` = 仅 blueprint 的变体（字节格式相同）。
-- 本机工具：`rerun` CLI（`rerun rrd` 子命令组）、Python `rerun` 包（`rerun.experimental`）。
+- 本机工具：`rerun` CLI（`rerun rrd` 子命令组）、Python `rerun` 包（读取与处理使用 `rerun.chunk`）。
 
 ## 2. RRD 文件格式
 
@@ -43,7 +43,7 @@ description: Rerun 基础认知与 .rrd 录制文件的阅读方法。当需要�
 ## 6. 读 .rrd 的路径
 
 - **CLI**：`rerun rrd print`（`-v` 到 `-vvv` 逐级展开，`--entity` 过滤，`--footers` 看索引）、`rerun rrd stats`（`--no-decode` 快速版）、`verify / migrate / optimize / split / merge / filter / compare`
-- **Python**：`rerun.experimental.RrdReader(path)` → `.recordings()/.blueprints()`（StoreEntry: kind/application_id/recording_id）→ `.stream()/.store()`（索引访问）；`Chunk.format()` 直接打表
+- **Python**：`rerun.chunk.RrdReader(path)` → `.recordings()/.blueprints()`（StoreEntry: kind/application_id/recording_id）→ `.stream()/.store()`（索引访问）；`Chunk.format()` 直接打表
 - **Chunk Processing API**：`LazyChunkStream` + lenses（MutateLens/DeriveLens/Selector jq 语法）；`write_rrd(application_id, recording_id)` 写文件，存储/查询场景用 `OptimizationProfile.OBJECT_STORE`
 - **Viewer MCP**：`rerun viewer-mcp` 起 MCP server 控制 viewer（含截图）
 - 坑：查询组件列是 `ListArray`，DataFrame 0-based 索引 vs SQL 1-based

@@ -277,8 +277,8 @@ uv run --package firefly-cad firefly-cad-build <场地.stp> --scene <赛季>@<�
 ```bash
 uv venv models/vision-export/.venv --python 3.12
 uv pip install --python models/vision-export/.venv/bin/python -e packages/firefly-workspace
-uv pip install --python models/vision-export/.venv/bin/python torch==2.14.1 torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cpu
-uv pip install --python models/vision-export/.venv/bin/python onnxscript==0.7.2 onnx==1.23.1 onnxruntime==1.30.0 kornia==0.8.3 opencv-python==5.0.0.93 matplotlib==3.11.2
+uv pip install --python models/vision-export/.venv/bin/python torch==2.15.0 torchvision==0.29.2 --index-url https://download.pytorch.org/whl/cpu
+uv pip install --python models/vision-export/.venv/bin/python onnxscript==0.7.2 onnx==1.23.2 onnxruntime==1.31.1 kornia==0.9.0 opencv-python==5.0.0.93 matplotlib==3.11.2
 models/vision-export/.venv/bin/python scripts/export_vision_models.py
 uv run --all-packages python scripts/build_vision_map.py <通过内容校验的采集目录>
 ```

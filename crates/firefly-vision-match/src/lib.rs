@@ -247,11 +247,9 @@ fn camera_matrix(intrinsics: CameraIntrinsics) -> Matrix<f64> {
     cam
 }
 
-/// 全量内点精化（对照 `OpenCV solvePnPGeneric` 的 `ITERATIVE` 段与
-/// `VINS-Fusion KeyFrame::PnPRANSAC`：`ransac` 输出作初值再 `LM` 精化；
-/// `purecv::solve_pnp(use_extrinsic_guess=true)` 当前对初值返回
-/// `NotImplemented`，此处用 `false` 重跑一轮 `DLT + Gauss-Newton`
-/// 全量内点精化，等价于初值落在内点共识域时的 `LM` 收敛）。
+/// 对全部 RANSAC 内点执行 DLT 初始化与 LM 精化。
+/// `purecv::solve_pnp` 尚不支持 `use_extrinsic_guess=true`，因此重新估计初值，
+/// 不保证与从 RANSAC 位姿开始的精化收敛到同一解。
 fn refine_with_inliers(
     object: &[Point3f],
     image: &[Point2f],

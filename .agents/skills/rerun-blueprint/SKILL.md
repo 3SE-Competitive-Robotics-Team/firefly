@@ -98,6 +98,11 @@ the main 3D content sits in, and exclude entities in unconnected frames.
 Spawn the viewer and load the recording once, then re-send blueprints into the
 same viewer; each send + screenshot is one cheap iteration. Render, look, revise.
 
+Indexed RRDs load chunks on demand after `open()` returns. `get_state().loading`
+tracks initial sources, while latest-at views can still await their chunks.
+Inspect the expected images and values in successive screenshots before judging
+the layout; a saved screenshot only confirms that a frame was painted.
+
 The blueprint binds to the data by store identity, **both application id and
 recording id**. A loaded `.rrd` keeps its own identity, so build the stream from
 the rrd's values (set both; `recording_id` otherwise defaults to a random one).
@@ -108,7 +113,8 @@ and never applies the blueprint.
 import time
 import rerun as rr
 import rerun.blueprint as rrb
-from rerun.experimental import ViewerClient, RrdReader
+from rerun.chunk import RrdReader
+from rerun.experimental import ViewerClient
 
 store = RrdReader("segment.rrd").recordings()[0]  # the rrd's application id + recording id
 

@@ -22,6 +22,7 @@ nalgebra.workspace = true
 re_build_info.workspace = true
 re_chunk.workspace = true
 re_log_encoding.workspace = true
+re_log_msg.workspace = true
 re_log_types.workspace = true
 re_sdk_types.workspace = true
 serde.workspace = true

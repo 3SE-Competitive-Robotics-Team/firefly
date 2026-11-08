@@ -1,6 +1,6 @@
 ---
 name: rerun-chunk-processing
-description: "Core mechanics of the Rerun Chunk Processing API (rerun.experimental) — LazyChunkStream pipelines, Chunk, lenses (MutateLens/DeriveLens/Selector), RrdReader, writing optimized RRDs. Read BEFORE writing any ingestion/conversion/preprocessing code (convert an MCAP, build a recording from a dataset, preprocess an .rrd, port an old converter): it mandates reader+lens pipelines and steers away from hand-built chunks — no Chunk.from_columns for data a reader/lens can produce, no per-message rr.log, no manual pa.array assembly. Source-specific knowledge lives in the importer skills (rerun-mcap, rerun-urdf, rerun-parquet, rerun-mp4, rerun-lerobot); read rerun-data-model first to decide what the data should become."
+description: "Core mechanics of the Rerun Chunk Processing API (rerun.chunk) — LazyChunkStream pipelines, Chunk, lenses (MutateLens/DeriveLens/Selector), RrdReader, writing optimized RRDs. Read BEFORE writing any ingestion/conversion/preprocessing code (convert an MCAP, build a recording from a dataset, preprocess an .rrd, port an old converter): it mandates reader+lens pipelines and steers away from hand-built chunks — no Chunk.from_columns for data a reader/lens can produce, no per-message rr.log, no manual pa.array assembly. Source-specific knowledge lives in the importer skills (rerun-mcap, rerun-urdf, rerun-parquet, rerun-mp4, rerun-lerobot); read rerun-data-model first to decide what the data should become."
 user_invocable: true
 allowed-tools: Read, Grep, Bash, WebFetch
 ---
@@ -22,9 +22,9 @@ importer skill for each source:
 | Existing RRD                              | `RrdReader(path)`                       | here, below     |
 | Sidecar files (JSON calib, metadata)      | `Chunk.from_columns` + `from_iter`      | here, below     |
 
-The API is `rerun.experimental`; when
+The chunk API is `rerun.chunk`; when
 behavior matters, check the installed surface:
-`python -c "from rerun.experimental import LazyChunkStream; help(LazyChunkStream)"`.
+`python -c "from rerun.chunk import LazyChunkStream; help(LazyChunkStream)"`.
 
 ## Decision rule: where does each component come from?
 
@@ -106,7 +106,7 @@ check every `Chunk.from_columns` / for-loop against this list before copying.
 ## Stream composition
 
 ```python
-from rerun.experimental import Chunk, LazyChunkStream, OptimizationProfile
+from rerun.chunk import Chunk, LazyChunkStream, OptimizationProfile
 ```
 
 - `stream.filter(content=, has_timeline=, is_static=, components=)` keeps the
@@ -250,7 +250,7 @@ Rerun catalog or Hub, unless explicitly asked otherwise.
   `RrdReader(path)` lists `recordings()` / `blueprints()` (each a `StoreEntry`
   with `kind`, `application_id`, `recording_id`); `.stream(store=entry)` for
   sequential passes, `.store(store=entry)` for indexed access.
-- Chunks → logging: `rerun.experimental.send_chunks(chunks, recording=...)`
+- Chunks → logging: `rerun.send_chunks(chunks, recording=...)`
   accepts a `Chunk`, `LazyChunkStream`, `LazyStore`, `ChunkStore`, or any
   iterable of chunks. The source store's `application_id`/`recording_id` are
   **not** preserved; the active recording's identity wins.
@@ -264,7 +264,7 @@ Rerun catalog or Hub, unless explicitly asked otherwise.
   many entities.
 - Preserve Arrow array type and length in `MutateLens` transforms.
 - For catalog layers, the layer `recording_id` must equal the segment id.
-- This is `rerun.experimental`; pin-check signatures when upgrading.
+- Check installed signatures when upgrading; some readers and viewer APIs remain experimental.
 
 ## References
 
