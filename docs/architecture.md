@@ -510,6 +510,10 @@ planner 从空滚动地图开始；仅显式 `--map` 加载场地先验，且要
 `PlannerManager` 对应 `planner_manager.cpp`，`Planner` 对应 `poly_traj_optimizer.cpp`，
 `firefly-search` 的 A* 对应 `dyn_a_star.cpp`。管理器负责全局引导、局部目标、种子选择和
 轨迹入库，状态机负责启动、重规划、执行、完成与急停状态转换。
+全局引导重建使用当前实测位置与速度，起始加速度和终点速度、加速度取零，
+与上游 `planNextWaypoint` 一致。障碍内终点沿全局多项式从尾部按
+`resolution / max_velocity` 时间步回扫，选择首个可生成引导的自由点。
+同位置目标保留一秒单段引导以处理零路径长度；生产规划仍要求有效导航输入。
 
 执行状态机 100Hz 与安全检查 20Hz 使用同一线程的两个定时回调，耗时求解由独立的
 单 worker 执行。回调不等待求解结果，也不获取求解器锁；最多一个在途任务，取消后等待

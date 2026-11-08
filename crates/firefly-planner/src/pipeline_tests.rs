@@ -375,6 +375,46 @@ fn global_traj_time_parameterization() {
 }
 
 #[test]
+fn global_guidance_preserves_measured_velocity_on_rebuild() {
+    for speed in [0.6, 2.0] {
+        let mut m = open_manager();
+        let measured = State {
+            position: Point3::new(2., 2., 1.),
+            velocity: Vector3::new(0., speed, 0.),
+            acceleration: Vector3::new(0.3, 0.2, 0.1),
+        };
+        let goal = Vector3::new(12., 2., 1.);
+        m.set_goal(2., Some(measured), goal).unwrap();
+        let head = m.global.traj.eval(0.);
+        assert!((head.position - measured.position.coords).norm() < 1e-9);
+        assert!((head.velocity - measured.velocity).norm() < 1e-9);
+        // 上游 planNextWaypoint 使用 odom P/V，起始加速度为零。
+        assert!(head.acceleration.norm() < 1e-9);
+        if speed > PlannerConfig::default().max_velocity {
+            // 上游对已经超速的边界不执行第二次时间缩放。
+            assert!((m.global.traj.duration() - 10.).abs() < 1e-9);
+        }
+        let corrected = State {
+            position: Point3::new(3., 2., 1.),
+            velocity: Vector3::new(0.2, -0.4, 0.1),
+            ..measured
+        };
+        m.invalidate_localization(3., corrected).unwrap();
+        let head = m.global.traj.eval(0.);
+        assert!((head.velocity - corrected.velocity).norm() < 1e-9);
+        assert!(head.acceleration.norm() < 1e-9);
+        m.set_goal(4., Some(corrected), corrected.position.coords)
+            .unwrap();
+        let head = m.global.traj.eval(0.);
+        let tail = m.global.traj.eval(m.global.traj.duration());
+        assert!((head.velocity - corrected.velocity).norm() < 1e-9);
+        assert!((tail.position - corrected.position.coords).norm() < 1e-9);
+        assert!(tail.velocity.norm() < 1e-9 && tail.acceleration.norm() < 1e-9);
+        assert!(m.global.traj.coefficients().iter().all(|v| v.is_finite()));
+    }
+}
+
+#[test]
 fn glb_t_of_lc_tgt_advances_and_resets_on_retarget() {
     let mut m = open_manager();
     // 构造/重目标后按官方 setGlobalTraj 初始化：glb = 锚点、last = -1
@@ -1051,7 +1091,8 @@ fn emergency_recovers_when_failsafe_enabled_and_slow() {
 fn in_collision_goal_modified_to_nearest_free_point() {
     let mut m = open_manager();
     let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
-    let old_path = m.global_path().to_vec();
+    let old_start = m.global_path()[0];
+    let duration = m.global.traj.duration();
     let old_goal = m.goal();
     // 目标附近整块占据（res 0.5，goal=(10,1,1) → 体素 [20,2,2] 及邻域），
     // 使回扫从末端起至少跨过一个步长才碰到自由点
@@ -1079,17 +1120,19 @@ fn in_collision_goal_modified_to_nearest_free_point() {
         !m.map().is_occupied_inflated(new_goal.coords),
         "修正后的目标必须无碰"
     );
-    // 修正点 = 沿旧全局路径末端回扫的首个自由点：用测试预言机独立复算期望值
-    let reso = m.map().resolution();
+    // 单段零速零加速 MINCO 的解析位置，不调用被测轨迹采样实现。
+    let step = m.map().resolution() / PlannerConfig::default().max_velocity;
     let mut expected = None;
-    let mut s = path_length(&old_path);
-    while s > 0.0 {
-        let pt = arc_point(&old_path, old_path[0], s);
+    let mut t = duration;
+    while t > 0.0 {
+        let u = t / duration;
+        let pt = old_start
+            + (old_goal.coords - old_start) * (10. * u.powi(3) - 15. * u.powi(4) + 6. * u.powi(5));
         if !m.map().is_occupied_inflated(pt) {
             expected = Some(pt);
             break;
         }
-        s -= reso;
+        t -= step;
     }
     let expected = expected.expect("场景前提：回扫必能找到自由点");
     assert!(
@@ -1098,6 +1141,41 @@ fn in_collision_goal_modified_to_nearest_free_point() {
     );
     assert!(!r.finished);
     assert!(!r.emergency_stop);
+}
+
+#[test]
+fn in_collision_goal_follows_curved_global_trajectory() {
+    let mut m = open_manager();
+    let measured = State {
+        velocity: Vector3::new(0., 1., 0.),
+        ..state_at(Vector3::new(1., 1., 1.))
+    };
+    let goal = Vector3::new(10., 2., 1.);
+    m.set_goal(1., Some(measured), goal).unwrap();
+    let duration = m.global.traj.duration();
+    for i in 18..=21 {
+        for j in 0..m.map().dims()[1] {
+            m.map_mut().set_state([i, j, 2], VoxelState::Occupied);
+        }
+    }
+    m.map_mut().inflate_obstacles();
+    let delta = goal - measured.position.coords;
+    let step = m.map().resolution() / PlannerConfig::default().max_velocity;
+    let mut t = duration;
+    let expected = loop {
+        assert!(t > 0.);
+        let u = t / duration;
+        let point = measured.position.coords
+            + delta * (10. * u.powi(3) - 15. * u.powi(4) + 6. * u.powi(5))
+            + measured.velocity * duration * (u - 6. * u.powi(3) + 8. * u.powi(4) - 3. * u.powi(5));
+        if !m.map().is_occupied_inflated(point) {
+            break point;
+        }
+        t -= step;
+    };
+    assert!(m.modify_in_collision_final_goal(2., Some(measured)));
+    assert!((m.goal().coords - expected).norm() < 1e-8);
+    assert!((m.global.traj.eval(0.).velocity - measured.velocity).norm() < 1e-9);
 }
 
 #[test]
