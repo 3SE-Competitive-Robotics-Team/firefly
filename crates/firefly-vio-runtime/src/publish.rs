@@ -123,6 +123,16 @@ impl Publishers {
             self.last_diagnostic = stamp;
         }
         if stamp - self.last_viz >= 0.1 {
+            if !self.external_localization
+                && let Some(viz) = &self.viz
+            {
+                publish_scalar_diagnostic(
+                    viz,
+                    stamp,
+                    "vio/navigation/revision",
+                    [sample.navigation.revision as f64],
+                );
+            }
             let mut message = VizMessage::base(kind::POSE, stamp, "vio/odom");
             message.xyz = [
                 sample.odom.position_x,

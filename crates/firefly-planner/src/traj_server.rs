@@ -1,6 +1,6 @@
 //! 轨迹执行输出：接收完整轨迹与心跳，独立采样并计算航向。
 use firefly_trajectory::Trajectory;
-use nalgebra::Vector3;
+use nalgebra::{Isometry3, Point3, Vector3};
 const TIME_FORWARD: f64 = 1.0;
 const YAW_DOT_MAX: f64 = 2.0 * std::f64::consts::PI;
 const YAW_DOT_DOT_MAX: f64 = 5.0 * std::f64::consts::PI;
@@ -63,6 +63,14 @@ impl TrajectoryServer {
     pub fn invalidate(&mut self) {
         self.trajectory = None;
         self.received = false;
+    }
+    /// Re-express execution memory in a revised gravity-aligned map frame.
+    /// Trajectory validity is managed separately by its navigation revision.
+    pub fn rebase_frame(&mut self, new_from_old: &Isometry3<f64>) {
+        self.last_position = (new_from_old * Point3::from(self.last_position)).coords;
+        let heading =
+            new_from_old.rotation * Vector3::new(self.last_yaw.cos(), self.last_yaw.sin(), 0.0);
+        self.last_yaw = heading.y.atan2(heading.x);
     }
     #[must_use]
     pub const fn yaw_state(&self) -> (f64, f64) {
@@ -213,6 +221,19 @@ mod tests {
             start_time: 1.0,
             traj_id: 1,
         }
+    }
+    #[test]
+    fn map_revision_preserves_physical_heading_and_hold_position() {
+        let mut server = TrajectoryServer::new(true, 0.5);
+        server.receive(command());
+        server.heartbeat(0.0);
+        let old = server.sample(2.0, 0.2)[1].unwrap();
+        let change = Isometry3::new(Vector3::new(2., -1., 0.), Vector3::z() * 0.7);
+        server.rebase_frame(&change);
+        let hold = server.sample(2.1, 0.6)[0].unwrap();
+        assert!((hold.position - (change * Point3::from(old.position)).coords).norm() < 1e-12);
+        assert!((hold.yaw - old.yaw - 0.7).abs() < 1e-12);
+        assert_eq!(hold.yaw_dot, old.yaw_dot);
     }
     #[test]
     fn heartbeat_without_trajectory_never_publishes() {

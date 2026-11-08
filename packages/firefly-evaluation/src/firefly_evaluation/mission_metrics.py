@@ -10,7 +10,8 @@ def read_evidence(path):
     reader = RrdReader(path)
     rows = {}
     aliases = {"fc/imu/health": "imu_health", "fc/imu/quaternion_xyzw": "imu_attitude",
-                   "fc/debug/state": "fc_state", "fc/imu/source": "attitude_source"}
+                   "fc/debug/state": "fc_state", "fc/imu/source": "attitude_source",
+                   "rootslam/mapping/state": "mapping_state", "vio/navigation/revision": "navigation_revision"}
     for store in reader.recordings():
         for chunk in reader.stream(store=store):
             entity = chunk.entity_path.lstrip("/")
@@ -245,11 +246,15 @@ def score(case, options, *, evidence_reader=read_evidence):
         else:
             check("tracking_error", tracking)
     truth = data.get("gt", np.empty((0, 8)))
-    backend = data.get("loop_backend", np.empty((0, 2)))
-    committed_updates = int(backend[:, 1].max()) if len(backend) else None
+    backend = data.get("mapping_state", np.empty((0, 5)))
+    committed_updates = int(backend[:, 3].max()) if len(backend) else None
+    navigation = data.get("navigation_revision", np.empty((0, 2)))
+    published_revision = int(navigation[:, 1].max()) if len(navigation) else None
+    online_commit = bool(committed_updates and published_revision and published_revision <= committed_updates)
     if case.get("localization_mode") == "online_slam" and case["case"] == "nominal":
-        stages["online_loop"] = {"status": "passed" if committed_updates else "failed",
-                                 "metrics": {"committed_full_graph_updates": committed_updates, "required": 1}}
+        stages["online_loop"] = {"status": "passed" if online_commit else "failed",
+                                 "metrics": {"committed_full_graph_updates": committed_updates,
+                                             "published_navigation_revision": published_revision, "required": 1}}
     case["mission_summary"] = {
         "waypoint_arrivals": case.get("waypoint_arrivals", []),
         "waypoints_required": len(options.waypoints) if case["case"] == "nominal" else 0,
@@ -259,7 +264,8 @@ def score(case, options, *, evidence_reader=read_evidence):
         "horizontal_path_length_m": float(np.linalg.norm(np.diff(truth[:, 1:3], axis=0), axis=1).sum()) if len(truth) else None,
         "last_horizontal_distance_from_start_m": float(np.linalg.norm(truth[-1, 1:3] - truth[0, 1:3])) if len(truth) else None,
         "committed_full_graph_updates": committed_updates,
-        "loop_evidence": "disabled_vio_only" if case.get("localization_mode") == "vio_only" else "accepted" if committed_updates else "no_committed_update_observed" if len(backend) else "missing",
+        "published_navigation_revision": published_revision,
+        "loop_evidence": "disabled_vio_only" if case.get("localization_mode") == "vio_only" else "accepted" if online_commit else "no_committed_update_observed" if len(backend) else "missing",
         "measurement_source": "RRD; ground truth only for route scoring; no post-hoc map alignment",
     }
     case["evidence_entities"] = {entity: {"samples": len(rows), "first_sim_s": float(rows[0, 0]),

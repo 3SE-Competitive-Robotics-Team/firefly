@@ -101,15 +101,23 @@ impl MapInput {
         Ok(())
     }
     pub fn ready(&self, navigation: &NavigationMessage, now: Instant, timeout: Duration) -> bool {
-        !self.fault
+        !self.expired(navigation, now, timeout)
             && self.snapshot.as_ref().is_some_and(|snapshot| {
                 snapshot.matches(navigation)
                     && self
                         .required
                         .is_some_and(|required| snapshot.bounds.contains(&required))
                     && snapshot.timestamp <= navigation.odom.timestamp
-                    && navigation.odom.timestamp - snapshot.timestamp <= timeout.as_secs_f64()
-                    && now.saturating_duration_since(snapshot.fused_at) <= timeout
+            })
+    }
+
+    /// Coverage and revision handoffs can wait for the next fused snapshot.
+    /// Only actual age expiry or a latched input fault disables recovery.
+    pub fn expired(&self, navigation: &NavigationMessage, now: Instant, timeout: Duration) -> bool {
+        self.fault
+            || self.snapshot.as_ref().is_some_and(|snapshot| {
+                navigation.odom.timestamp - snapshot.timestamp > timeout.as_secs_f64()
+                    || now.saturating_duration_since(snapshot.fused_at) > timeout
             })
     }
 
@@ -314,6 +322,7 @@ mod tests {
         away.odom.position_x = 6.;
         input.prepare_region(&mut map, &away, true).unwrap();
         assert!(!input.ready(&away, Instant::now(), Duration::from_secs(1)));
+        assert!(!input.expired(&away, Instant::now(), Duration::from_secs(1)));
         input.prepare_region(&mut map, &nav, true).unwrap();
         assert!(!map.is_occupied_inflated(point));
         input.apply(&mut map, &nav, true).unwrap();
@@ -360,6 +369,7 @@ mod tests {
         input.prepare_region(&mut map, &nav, true).unwrap();
         input.observe_local(snapshot(1, vec![])).unwrap();
         assert!(!input.ready(&nav, Instant::now(), Duration::from_secs(1)));
+        assert!(input.expired(&nav, Instant::now(), Duration::from_secs(1)));
         input.observe_local(snapshot(2, vec![])).unwrap();
         assert!(input.ready(&nav, Instant::now(), Duration::from_secs(1)));
         let mut invalid = snapshot(3, vec![]);

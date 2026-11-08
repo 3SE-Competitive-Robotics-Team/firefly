@@ -1,4 +1,5 @@
 //! Online IPC adapter for the simulated camera and IMU topics.
+mod correction;
 mod imu;
 use firefly_basalt::{
     io::dataset_io::ImageData,
@@ -264,6 +265,9 @@ impl LiveSession {
         let (gravity_tx, gravity_rx) = mpsc::sync_channel(1);
         let imu_inputs = Some(imu::Inputs {
             external_localization: options.external_localization,
+            mapping: map_worker
+                .as_ref()
+                .map(crate::system::MappingWorker::updates),
             imu: imu_tx,
             posteriors: states_rx,
             gravity: gravity_tx,
@@ -322,6 +326,9 @@ impl LiveSession {
         while !stop.load(Ordering::Acquire) && self.node.wait(Duration::from_millis(1)).is_ok() {
             if self.estimator.status.finished.load(Ordering::Acquire) {
                 return Err(error("VIO estimator stopped"));
+            }
+            if let Some(worker) = &mut self.map_worker {
+                worker.check_running()?;
             }
             if let Ok(estimate) = self.gravity_rx.try_recv() {
                 self.gravity_estimate = Some(estimate);

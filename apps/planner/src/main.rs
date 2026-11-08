@@ -303,6 +303,7 @@ impl App {
     /// 排空 odom/地图订阅：续接 trace span、锚定 sim 时钟、记录最新快照。
     #[fastrace::trace]
     fn poll_sensors(&mut self) -> Result<()> {
+        let started = Instant::now();
         self.poll_navigation()?;
         if let Some(snapshot) = self.depth.take_snapshot()? {
             self.map_input.observe_local(snapshot)?;
@@ -333,6 +334,7 @@ impl App {
                 self.pending_mandatory_stop = true;
             }
         }
+        log_slow_stage("sensors", started);
         Ok(())
     }
 
@@ -434,7 +436,9 @@ impl App {
             self.published_trajectory = 0;
             self.map_input.invalidate();
             self.finished = false;
-            log::info!("地图修正版本变更：重建派生栅格并重新规划，任务目标保持地图坐标");
+            log::info!(
+                "地图修正版本变更 revision={revision:?}：重建派生栅格并重新规划，任务目标保持地图坐标"
+            );
         }
         if !self.received_state {
             self.fsm
@@ -543,6 +547,14 @@ impl App {
             && (local.traj_id != self.published_trajectory || self.republish_trajectory)
         {
             self.output.trajectory(local)?;
+            if self.published_trajectory == 0 {
+                log::info!(
+                    "planner trajectory committed: revision={} trajectory={} goal_timestamp={}",
+                    self.state_input.navigation().unwrap().revision,
+                    local.traj_id,
+                    self.output.goal_timestamp
+                );
+            }
             self.published_trajectory = local.traj_id;
             self.republish_trajectory = false;
         }
@@ -555,6 +567,7 @@ impl App {
         &mut self,
         navigation: &firefly_pubsub::navigation::NavigationMessage,
     ) -> Result<bool> {
+        let started = Instant::now();
         self.map_input
             .prepare_region(self.fsm.manager_mut().map_mut(), navigation, true)?;
         if self.depth.terminated()
@@ -569,6 +582,7 @@ impl App {
         self.map_input
             .apply(self.fsm.manager_mut().map_mut(), navigation, true)?;
         self.update_motion();
+        log_slow_stage("map", started);
         Ok(true)
     }
 
@@ -599,7 +613,21 @@ impl App {
         let navigation = self.state_input.navigation().unwrap();
         if !self.synchronize_map(&navigation)? {
             self.solver.cancel();
-            if self.fsm.manager().local().is_some() && !self.fsm.is_finished() {
+            if (self.depth.terminated()
+                || self.map_input.expired(
+                    &navigation,
+                    Instant::now(),
+                    Duration::from_secs_f64(MAP_TIMEOUT),
+                ))
+                && self.fsm.manager().local().is_some()
+                && !self.fsm.is_finished()
+            {
+                if !self.fsm.is_emergency() {
+                    log::warn!(
+                        "深度输入过期或停止：锁存急停 t={now} revision={}",
+                        navigation.revision
+                    );
+                }
                 self.fsm
                     .trigger_emergency_stop_disable_failsafe(now, measured);
             }
@@ -642,7 +670,10 @@ impl App {
             .map_err(|e| Error::new(ErrorKind::Internal, format!("挂载安全定时器失败: {e:?}")))?;
         let on_tick = |attachment_id: WaitSetAttachmentId<ipc::Service>| {
             if attachment_id.has_event_from(&safety_guard) {
-                if let Err(error) = self.safety_step() {
+                let started = Instant::now();
+                let result = self.safety_step();
+                log_slow_stage("safety", started);
+                if let Err(error) = result {
                     log::warn!("安全检查失败：{error}");
                     return self.stop_failed_callback();
                 }
@@ -668,7 +699,9 @@ impl App {
                 None => Span::root("planner", SpanContext::random().sampled(false)),
             };
             let guard = root.set_local_parent();
+            let started = Instant::now();
             let step = self.step();
+            log_slow_stage("execution", started);
             drop(guard);
             drop(root);
             if let Err(error) = step {
@@ -680,7 +713,9 @@ impl App {
             }
             last_visualization = Instant::now();
             frame += 1;
+            let started = Instant::now();
             self.publish_collision_map(frame);
+            log_slow_stage("display", started);
             CallbackProgression::Continue
         };
 
@@ -998,6 +1033,13 @@ fn emit_mandatory_stop() -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(f64::NAN, |d| d.as_secs_f64());
     pub_.publish(MandatoryStopMessage { timestamp }).map(|_| ())
+}
+
+fn log_slow_stage(stage: &str, started: Instant) {
+    let elapsed = started.elapsed();
+    if elapsed >= Duration::from_millis(10) {
+        log::debug!(target: "planner-profile", "stage={stage} elapsed_ms={}", elapsed.as_secs_f64() * 1000.);
+    }
 }
 
 fn main() {

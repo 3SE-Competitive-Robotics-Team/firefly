@@ -317,20 +317,26 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationAbsQr<'a, S, POSE
     /// Requires an unscaled marginalization prior.
     pub fn get_dense_h_b(&self, estimator: &BundleAdjustmentBase<S>) -> (DMatrix<S>, DVector<S>) {
         let size = self.order.total_size;
+        // Bound full-size dense accumulators by the worker count. A Rayon fold
+        // initializes per split job, which can otherwise allocate one Hessian
+        // per landmark plus identities for the reduction tree.
+        let chunk_size = self
+            .landmark_blocks
+            .len()
+            .div_ceil(rayon::current_num_threads())
+            .max(1);
         let (mut hessian, mut rhs) = self
             .landmark_blocks
-            .par_iter()
-            .fold(
-                || (DMatrix::zeros(size, size), DVector::zeros(size)),
-                |(mut h, mut b), block| {
+            .par_chunks(chunk_size)
+            .map(|blocks| {
+                let (mut h, mut b) = (DMatrix::zeros(size, size), DVector::zeros(size));
+                for block in blocks {
                     block.add_dense_h_b(&mut h, &mut b);
-                    (h, b)
-                },
-            )
-            .reduce(
-                || (DMatrix::zeros(size, size), DVector::zeros(size)),
-                |(h, b), (other_h, other_b)| (h + other_h, b + other_b),
-            );
+                }
+                (h, b)
+            })
+            .reduce_with(|(h, b), (other_h, other_b)| (h + other_h, b + other_b))
+            .unwrap_or_else(|| (DMatrix::zeros(size, size), DVector::zeros(size)));
         let mut accumulator = DenseAccumulator::default();
         accumulator.reset(size);
         for block in &self.imu_blocks {

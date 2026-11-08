@@ -229,7 +229,9 @@ pub fn fields(name: &str) -> Result<&'static [&'static str]> {
         "fc/debug/tick_rate" => &["rate_Hz"],
         "vision/debug/map_query_wall_s" => &["query_s"],
         "fc/standby_eskf/accel_nis" => &["nis"],
-        "fc/debug/saturated_ticks" | "acceptance/loop_backend" => &["count"],
+        "rootslam/mapping/state" => &["detected", "verified", "accepted", "rejected"],
+        "vio/navigation/revision" => &["revision"],
+        "fc/debug/saturated_ticks" => &["count"],
         "fc/arming/failed" | "fc/failsafe/flags" => &["mask"],
         "fc/debug/state"
         | "fc/debug/saturated"

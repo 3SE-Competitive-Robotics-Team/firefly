@@ -1,4 +1,5 @@
 //! Asynchronous persistent-map and loop-closing workers, followed by global BA.
+pub mod navigation;
 use firefly_basalt::vi_estimator::local_map::LocalMapSnapshot;
 use firefly_calibration::calibration::Calibration;
 use firefly_error::{Error, ErrorKind, Result};
@@ -10,6 +11,7 @@ use firefly_rootslam_mapping::{
     map::{MapKeyframe, MapPolicy, MapSnapshot, PersistentMap},
 };
 use nalgebra::Isometry3;
+use navigation::MappingUpdates;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
@@ -49,6 +51,7 @@ pub struct SystemResult {
 pub struct MappingWorker {
     input: Option<Sender<Option<Arc<LocalMapSnapshot>>>>,
     thread: Option<JoinHandle<Result<SystemResult>>>,
+    updates: MappingUpdates,
 }
 fn error(message: &str) -> Error {
     Error::new(ErrorKind::Internal, message).with_operation("rootslam.mapping.worker")
@@ -59,13 +62,16 @@ impl MappingWorker {
     /// Returns thread creation errors.
     pub fn spawn(calibration: Calibration<f64>, options: SystemOptions) -> Result<Self> {
         let (input, receiver) = mpsc::channel();
+        let updates = MappingUpdates::default();
+        let output = updates.clone();
         let thread = std::thread::Builder::new()
             .name("rootslam-map".into())
-            .spawn(move || run(receiver, calibration, options))
+            .spawn(move || run(receiver, calibration, options, output))
             .map_err(|source| error("Cannot start map worker").with_source(source))?;
         Ok(Self {
             input: Some(input),
             thread: Some(thread),
+            updates,
         })
     }
     /// # Panics
@@ -73,6 +79,23 @@ impl MappingWorker {
     #[must_use]
     pub fn input(&self) -> Sender<Option<Arc<LocalMapSnapshot>>> {
         self.input.as_ref().expect("map worker joined").clone()
+    }
+    #[must_use]
+    pub fn updates(&self) -> MappingUpdates {
+        self.updates.clone()
+    }
+    /// # Errors
+    /// Reports a worker failure before the online session publishes stale state.
+    pub fn check_running(&mut self) -> Result<()> {
+        if self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
+            self.thread
+                .take()
+                .ok_or_else(|| error("Map worker has already been joined"))?
+                .join()
+                .map_err(|_| error("Map worker panicked"))??;
+            return Err(error("Map worker stopped before end of input"));
+        }
+        Ok(())
     }
     /// Signals end of input and waits for loop processing and final global BA.
     /// # Errors
@@ -144,9 +167,9 @@ fn correction_snapshot(
     let mut snapshot = map.clone();
     // Section III-B: existing graph edges are measured from the current
     // estimates for this PGO request; only the new loop uses its gP3P estimate.
-    // Only the measurement-bearing edges take part in Equation (1); the
-    // covisibility graph and its spanning forest restate the current
-    // estimates and would only pin the map to its present shape.
+    // The solver selects temporal and loop edges. Covisibility and spanning
+    // edges remain map topology; distinct additional constraints would change
+    // the optimized objective even with current-pose relative measurements.
     snapshot.edges.retain_mut(|edge| {
         if !edge.kind.is_measurement_bearing() {
             return true;
@@ -231,11 +254,18 @@ struct MapWorkerState {
     loops_verified: usize,
     pose_graph_optimizations: usize,
     loop_closures: bool,
+    updates: MappingUpdates,
+    navigation_origin: Option<(i64, Isometry3<f64>)>,
+    latest_local_ns: i64,
+    corrections_rejected: usize,
+    detections_processed: usize,
 }
 impl MapWorkerState {
-    fn handle_event(&mut self, event: LoopEvent) {
+    fn handle_event(&mut self, event: LoopEvent) -> Result<()> {
+        let mut accepted_revision = None;
         match event {
             LoopEvent::Detected(result) => {
+                self.detections_processed += 1;
                 self.map
                     .apply_descriptors(result.keyframe, &result.descriptors);
                 if let Some(candidate) = result
@@ -252,16 +282,22 @@ impl MapWorkerState {
             }
             LoopEvent::Corrected(result, candidate) => {
                 self.correction_pending = false;
-                if self.map.apply_loop_correction(
-                    result.revision,
-                    &result.poses,
-                    &result.points,
-                    &candidate,
-                ) {
+                if usable_correction(&result)
+                    && self.map.apply_loop_correction(
+                        result.revision,
+                        &result.poses,
+                        &result.points,
+                        &candidate,
+                    )
+                {
                     self.pose_graph_optimizations += 1;
+                    accepted_revision = Some(result.revision);
+                } else {
+                    self.corrections_rejected += 1;
                 }
             }
         }
+        self.publish_navigation(accepted_revision)
     }
     fn dispatch_correction(&mut self, jobs: &Sender<LoopJob>) -> Result<()> {
         if self.correction_pending {
@@ -287,6 +323,18 @@ impl MapWorkerState {
         Ok(())
     }
     fn ingest(&mut self, local: &LocalMapSnapshot, jobs: &Sender<LoopJob>) -> Result<()> {
+        if local.t_ns < self.latest_local_ns {
+            return Err(error("local map timestamp regressed"));
+        }
+        self.latest_local_ns = local.t_ns;
+        if self.navigation_origin.is_none()
+            && let Some((&id, pose)) = local
+                .keyframes
+                .iter()
+                .find_map(|id| local.poses.get(id).map(|pose| (id, pose)))
+        {
+            self.navigation_origin = Some((id, *pose));
+        }
         for (&time, pose) in &local.poses {
             self.original_poses.insert(time, *pose);
             if let Some(&anchor) = local
@@ -325,7 +373,7 @@ impl MapWorkerState {
                     .pending
                     .checked_sub(1)
                     .ok_or_else(|| error("Unexpected loop worker event"))?;
-                self.handle_event(event?);
+                self.handle_event(event?)?;
                 changed = true;
             }
             if changed {
@@ -414,6 +462,7 @@ fn run(
     input: Receiver<Option<Arc<LocalMapSnapshot>>>,
     calibration: Calibration<f64>,
     options: SystemOptions,
+    updates: MappingUpdates,
 ) -> Result<SystemResult> {
     let latest = Arc::new(RwLock::new(Arc::new(MapSnapshot::default())));
     let loops = LoopWorker::spawn(
@@ -435,6 +484,11 @@ fn run(
         loops_verified: 0,
         pose_graph_optimizations: 0,
         loop_closures: options.loop_closures,
+        updates,
+        navigation_origin: None,
+        latest_local_ns: i64::MIN,
+        corrections_rejected: 0,
+        detections_processed: 0,
     };
     let processing = state.process(&loops);
     drop(loops.jobs);
@@ -447,9 +501,47 @@ fn run(
     state.finish(options.global_optimization, &options.optimization)
 }
 
+fn usable_correction(result: &OptimizationResult) -> bool {
+    result.initial_cost.is_finite()
+        && result.final_cost.is_finite()
+        && result.final_cost >= 0.
+        && result.final_cost <= result.initial_cost
+        && (result.converged
+            || (result.accepted_steps > 0 && result.final_cost < result.initial_cost))
+        && result
+            .poses
+            .values()
+            .all(|pose| pose.to_homogeneous().iter().all(|v| v.is_finite()))
+        && result
+            .points
+            .values()
+            .all(|point| point.iter().all(|v| v.is_finite()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn online_poll_reports_a_failed_mapping_worker_before_shutdown() {
+        let (input, _receiver) = mpsc::channel();
+        let thread = std::thread::spawn(|| Err(error("missing navigation anchor")));
+        while !thread.is_finished() {
+            std::thread::yield_now();
+        }
+        let mut worker = MappingWorker {
+            input: Some(input),
+            thread: Some(thread),
+            updates: MappingUpdates::default(),
+        };
+        assert!(
+            worker
+                .check_running()
+                .unwrap_err()
+                .to_string()
+                .contains("missing navigation anchor")
+        );
+    }
 
     /// 建图 worker 的最小夹具；地图里预置一个关键帧，使回环检测有候选。
     fn ingest_fixture(loop_closures: bool) -> (MapWorkerState, Sender<LoopJob>, Receiver<LoopJob>) {
@@ -481,6 +573,11 @@ mod tests {
             loops_verified: 0,
             pose_graph_optimizations: 0,
             loop_closures,
+            updates: MappingUpdates::default(),
+            navigation_origin: None,
+            latest_local_ns: i64::MIN,
+            corrections_rejected: 0,
+            detections_processed: 0,
         };
         (state, jobs, detected)
     }
@@ -692,6 +789,11 @@ mod tests {
                 loops_verified: 1,
                 pose_graph_optimizations: 0,
                 loop_closures: true,
+                updates: MappingUpdates::default(),
+                navigation_origin: None,
+                latest_local_ns: i64::MIN,
+                corrections_rejected: 0,
+                detections_processed: 0,
             },
             candidate,
             result,
@@ -701,7 +803,9 @@ mod tests {
     fn rejected_post_correction_geometry_does_not_partially_commit_pose_graph() {
         let (mut state, candidate, result) = correction_fixture();
         assert!(state.map.revalidate_loop(&candidate).is_some());
-        state.handle_event(LoopEvent::Corrected(result, Box::new(candidate)));
+        state
+            .handle_event(LoopEvent::Corrected(result, Box::new(candidate)))
+            .unwrap();
         assert_eq!(
             state.map.snapshot.keyframes[&0].t_w_b,
             Isometry3::identity()
@@ -713,8 +817,15 @@ mod tests {
     #[test]
     fn accepted_correction_commits_geometry_and_loop_edge_together() {
         let (mut state, candidate, result) = correction_fixture();
+        state.navigation_origin = Some((0, Isometry3::identity()));
+        state.latest_local_ns = 2;
+        state
+            .original_poses
+            .insert(1, state.map.snapshot.keyframes[&1].t_w_b);
         state.map.snapshot.landmarks.get_mut(&7).unwrap().host = 0;
-        state.handle_event(LoopEvent::Corrected(result, Box::new(candidate)));
+        state
+            .handle_event(LoopEvent::Corrected(result, Box::new(candidate)))
+            .unwrap();
         assert_eq!(
             state.map.snapshot.keyframes[&0].t_w_b.translation.vector.x,
             0.2
@@ -722,6 +833,42 @@ mod tests {
         assert_eq!(state.map.snapshot.landmarks[&7].position.x, 0.2);
         assert_eq!(state.map.snapshot.edges.len(), 1);
         assert_eq!(state.pose_graph_optimizations, 1);
+        let correction = state.updates.snapshot().unwrap().correction.unwrap();
+        assert_eq!(correction.revision, 1);
+        assert!((correction.map_from_odom.translation.vector.x + 0.2).abs() < 1e-12);
+        assert_eq!(
+            state.map.snapshot.keyframes[&1].t_w_b,
+            state.original_poses[&1]
+        );
+        state.map.snapshot.keyframes.get_mut(&0).unwrap().t_w_b =
+            Isometry3::translation(0.4, 0., 0.);
+        state.publish_navigation(Some(1)).unwrap();
+        let next = state.updates.snapshot().unwrap().correction.unwrap();
+        assert_eq!(next.revision, 2);
+        assert!((next.map_from_odom.translation.vector.x + 0.4).abs() < 1e-12);
+        assert_eq!(next.anchor_ns, correction.anchor_ns);
+    }
+    #[test]
+    fn failed_solver_never_commits_a_map_or_navigation_revision() {
+        for invalid_cost in [false, true] {
+            let (mut state, candidate, mut result) = correction_fixture();
+            state.map.snapshot.landmarks.get_mut(&7).unwrap().host = 0;
+            result.accepted_steps = 0;
+            result.converged = false;
+            result.final_cost = if invalid_cost {
+                f64::NAN
+            } else {
+                result.initial_cost
+            };
+            state
+                .handle_event(LoopEvent::Corrected(result, Box::new(candidate)))
+                .unwrap();
+            assert_eq!(state.map.snapshot.revision, 0);
+            let update = state.updates.snapshot().unwrap();
+            assert_eq!(update.accepted, 0);
+            assert_eq!(update.rejected, 1);
+            assert!(update.correction.is_none());
+        }
     }
     #[test]
     fn pgo_uses_current_edges_and_only_new_loop_keeps_measurement() {

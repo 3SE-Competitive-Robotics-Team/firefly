@@ -187,7 +187,7 @@ def test_roundtrip_distance_summary_does_not_override_failed_acceptance():
     truth = np.array([[0., -13., 0., 2.2, 0., 0., 0., 1.],
                       [10., -3., 0., 2.2, 0., 0., 0., 1.],
                       [20., -13., 0., 2.2, 0., 0., 0., 1.]])
-    evidence = {"gt": truth, "loop_backend": np.array([[20., 0.]])}
+    evidence = {"gt": truth, "mapping_state": np.array([[20., 0., 0., 0., 0.]])}
     case = {"case": "nominal", "recording": "unused", "waypoint_arrivals": [{}, {}],
             "stages": {"tracking": {"status": "blocked"}}}
     mission_metrics.score(case, Options(), evidence_reader=lambda _: evidence)
@@ -330,12 +330,15 @@ def test_online_slam_requires_loop_constraint_even_without_prior_map():
     assert "visual_localization" not in case["stages"]
 
 
-@pytest.mark.parametrize("updates, expected", [(0., "failed"), (1., "passed"), (3., "passed")])
-def test_online_loop_requires_a_committed_full_graph_update(updates, expected):
+@pytest.mark.parametrize("updates, revision, expected", [
+    (0., 0., "failed"), (1., 0., "failed"), (0., 1., "failed"),
+    (1., 2., "failed"), (1., 1., "passed"), (3., 3., "passed")])
+def test_online_loop_requires_backend_acceptance_and_navigation_publication(updates, revision, expected):
     from firefly_evaluation import mission_metrics
     case = {"case": "nominal", "localization_mode": "online_slam", "recording": "unused",
             "waypoint_arrivals": [], "stages": {"tracking": {"status": "blocked"}}}
-    evidence = {"loop_backend": np.array([[1., 0.], [2., updates]])}
+    evidence = {"mapping_state": np.array([[1., 0., 0., 0., 0.], [2., 10., 5., updates, 0.]]),
+                "navigation_revision": np.array([[1., 0.], [2., revision]])}
     mission_metrics.score(case, Options(), evidence_reader=lambda _: evidence)
     assert case["stages"]["online_loop"]["status"] == expected
     assert case["stages"]["online_loop"]["metrics"]["committed_full_graph_updates"] == updates

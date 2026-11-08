@@ -317,6 +317,10 @@ impl ReplanFsm {
         }
     }
 
+    pub(crate) fn replan_from_measured(&mut self) {
+        self.change_state(ExecState::GenNewTraj);
+    }
+
     pub(crate) fn solve_finished(&mut self, success: bool) {
         if success {
             self.have_new_target = false;

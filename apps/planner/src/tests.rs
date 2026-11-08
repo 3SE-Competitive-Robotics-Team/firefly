@@ -3,6 +3,28 @@ use crate::map_input::{Bounds, LocalSnapshot};
 use firefly_pubsub::navigation::{NAVIGATION_TOPIC, NavigationMessage};
 use firefly_pubsub::odom::OdomMessage;
 
+fn publish_navigation(
+    publisher: &Publisher<NavigationMessage>,
+    timestamp: f64,
+    revision: u64,
+    shift: f64,
+) {
+    publisher
+        .publish(NavigationMessage {
+            odom: OdomMessage {
+                timestamp,
+                position_x: shift,
+                is_initialized: true,
+                ..Default::default()
+            },
+            rotation: [0., 0., 0., 1.],
+            translation: [shift, 0., 0.],
+            revision,
+            ..Default::default()
+        })
+        .unwrap();
+}
+
 #[test]
 #[ignore = "requires exclusive planner IPC topics"]
 fn local_depth_source_reaches_planner_without_an_occupancy_publisher() {
@@ -34,47 +56,50 @@ fn local_depth_source_reaches_planner_without_an_occupancy_publisher() {
     )
     .unwrap();
     let epoch = Instant::now();
-    let mut mapped = false;
-    while epoch.elapsed() < Duration::from_secs(2) {
-        let stamp = 1. + epoch.elapsed().as_secs_f64();
-        navigation
-            .publish(NavigationMessage {
-                odom: OdomMessage {
-                    timestamp: stamp,
-                    is_initialized: true,
-                    ..Default::default()
-                },
-                rotation: [0., 0., 0., 1.],
-                ..Default::default()
-            })
-            .unwrap();
-        depth
-            .publish_with(|image| {
-                image.timestamp = stamp;
-                image.sensor_id = 0;
-                image.width = IMAGE_WIDTH as u32;
-                image.height = IMAGE_HEIGHT as u32;
-                image.data.fill(1.);
-            })
-            .unwrap();
-        std::thread::sleep(Duration::from_millis(20));
-        app.poll_sensors().unwrap();
-        if let Some(nav) = app.state_input.navigation()
-            && app.synchronize_map(&nav).unwrap()
-            && app
-                .fsm
-                .manager()
-                .map()
-                .is_occupied_inflated(Vector3::new(0.125, 0.125, 1.125))
-        {
-            mapped = true;
-            break;
+    for (revision, shift) in [(0, 0.), (1, 0.5)] {
+        let started = Instant::now();
+        let mut mapped = false;
+        while started.elapsed() < Duration::from_secs(2) {
+            let stamp = 1. + epoch.elapsed().as_secs_f64();
+            publish_navigation(&navigation, stamp, revision, shift);
+            depth
+                .publish_with(|image| {
+                    image.timestamp = stamp;
+                    image.sensor_id = 0;
+                    image.width = IMAGE_WIDTH as u32;
+                    image.height = IMAGE_HEIGHT as u32;
+                    image.data.fill(if revision == 0 { 1. } else { 1.5 });
+                })
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            app.poll_sensors().unwrap();
+            if let Some(nav) = app.state_input.navigation()
+                && nav.revision == revision
+                && app.synchronize_map(&nav).unwrap()
+                && app.fsm.manager().map().is_occupied_inflated(Vector3::new(
+                    shift + 0.125,
+                    0.125,
+                    if revision == 0 { 1.125 } else { 1.625 },
+                ))
+            {
+                mapped = true;
+                break;
+            }
+        }
+        assert!(
+            mapped,
+            "Depth + Navigation must create the collision grid from its own depth fusion"
+        );
+        if revision == 1 {
+            assert!(
+                !app.fsm
+                    .manager()
+                    .map()
+                    .is_occupied_inflated(Vector3::new(0.125, 0.125, 1.125)),
+                "old-revision depth must be removed"
+            );
         }
     }
-    assert!(
-        mapped,
-        "Depth + Navigation must create the collision grid from its own depth fusion"
-    );
     // Continue valid odometry while withholding depth: the independently published map
     // cannot stay ready merely because execution callbacks are still running.
     let lost_depth = Instant::now();
@@ -83,17 +108,7 @@ fn local_depth_source_reaches_planner_without_an_occupancy_publisher() {
             lost_depth.elapsed() < Duration::from_secs(2),
             "stale depth must disable planning"
         );
-        navigation
-            .publish(NavigationMessage {
-                odom: OdomMessage {
-                    timestamp: 1. + epoch.elapsed().as_secs_f64(),
-                    is_initialized: true,
-                    ..Default::default()
-                },
-                rotation: [0., 0., 0., 1.],
-                ..Default::default()
-            })
-            .unwrap();
+        publish_navigation(&navigation, 1. + epoch.elapsed().as_secs_f64(), 1, 0.5);
         std::thread::sleep(Duration::from_millis(20));
         app.poll_navigation().unwrap();
         let nav = app.state_input.navigation().unwrap();
@@ -194,4 +209,35 @@ fn safety_callback_applies_new_obstacles_and_deletions_without_exec_tick() {
     app.map_input.observe_local(snapshot(3, vec![])).unwrap();
     app.safety_step().unwrap();
     assert!(!app.fsm.manager().map().is_occupied_inflated(point));
+
+    let measured = app.state_input.current(Instant::now()).unwrap().state;
+    app.fsm
+        .set_goal(app.t_sim, Some(measured), Vector3::new(2., 0., 1.))
+        .unwrap();
+    for _ in 0..4 {
+        let _ = app.fsm.exec_tick(app.t_sim, Some(measured));
+    }
+    assert!(app.fsm.manager().local().is_some());
+    let mut uncovered = snapshot(4, vec![]);
+    uncovered.bounds = Bounds {
+        min: [-0.1; 3],
+        max: [0.1; 3],
+    };
+    app.map_input.observe_local(uncovered).unwrap();
+    app.safety_step().unwrap();
+    assert!(
+        !app.fsm.is_emergency(),
+        "temporary coverage must not latch a timeout"
+    );
+    app.map_input.observe_local(snapshot(5, vec![])).unwrap();
+    app.safety_step().unwrap();
+    assert!(!app.fsm.is_emergency());
+    let mut expired = snapshot(6, vec![]);
+    expired.fused_at -= Duration::from_secs(2);
+    app.map_input.observe_local(expired).unwrap();
+    app.safety_step().unwrap();
+    assert!(
+        app.fsm.is_emergency(),
+        "actual depth expiry still latches emergency stop"
+    );
 }

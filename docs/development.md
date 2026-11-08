@@ -437,8 +437,8 @@ uv run pytest tests/system/test_roundtrip.py -q
 - 估计器固定为 `firefly-rootslam`。`frame_processing_ms` 汇总立体帧入队至 IMU 线程消费后验
   的墙钟耗时，原始样本为 RRD 的 `rootslam/frame_processing_ms`。
 - 22m 往返使用 `configs/acceptance_22m.toml`，默认空地图、在线回环与深度建图；初始化、
-  真实到点、跟踪、定位、回环、降落、碰撞和退出必须分别通过。RootSLAM 当前在线导航没有
-  接入回环修正；该项缺少证据仍判失败，不能以建图后端检出回环替代。
+  真实到点、跟踪、定位、回环、降落、碰撞和退出必须分别通过。回环项要求后端接受 PGO
+  且实际发布正导航修订；缺少证据仍判失败，不能以检出回环或仅准备变换替代。
 
 门槛唯一来源为 `firefly_evaluation.mission.Options`、`firefly_evaluation.hover_metrics.HoverLimits`、
 `firefly_evaluation.disturbance_metrics.DisturbanceLimits` 及 `configs/acceptance*.toml`；

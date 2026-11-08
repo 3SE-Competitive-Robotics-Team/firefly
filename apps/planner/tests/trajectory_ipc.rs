@@ -19,6 +19,98 @@ use std::{
 
 struct OutputProcess(Child);
 
+#[test]
+#[ignore = "requires release planner and exclusive navigation/depth/trajectory IPC topics"]
+#[allow(clippy::too_many_lines)]
+fn map_revision_stops_old_trajectory_and_resumes_after_new_depth() {
+    use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH};
+    let node = create_node().unwrap();
+    let navigation = Publisher::<NavigationMessage>::with_topic(&node, NAVIGATION_TOPIC).unwrap();
+    let depth = Publisher::<DepthImageMessage>::with_topic(&node, DEPTH_TOPIC).unwrap();
+    let controls =
+        Subscriber::<TrajectoryControlMessage>::with_topic(&node, TRAJECTORY_CONTROL_TOPIC)
+            .unwrap();
+    let trajectories =
+        Subscriber::<[TrajectoryPieceMessage]>::with_slice_topic(&node, TRAJECTORY_TOPIC).unwrap();
+    let references = Subscriber::<ReferenceMessage>::with_topic(&node, REFERENCE_TOPIC).unwrap();
+    let binary =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/planner");
+    let mut planner = OutputProcess(
+        Command::new(&binary)
+            .args(["--goal", "3", "0", "1"])
+            .spawn()
+            .unwrap(),
+    );
+    let mut output = OutputProcess(Command::new(binary).arg("--traj-server").spawn().unwrap());
+    let epoch = Instant::now();
+    for phase in 0..3 {
+        let started = Instant::now();
+        let revision = u64::from(phase != 0);
+        let shift = if phase == 0 { 0. } else { 0.5 };
+        let mut disabled = false;
+        let mut trajectory = false;
+        let mut reference = false;
+        loop {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "revision handoff phase {phase} stalled"
+            );
+            assert!(planner.0.try_wait().unwrap().is_none());
+            assert!(output.0.try_wait().unwrap().is_none());
+            let timestamp = 1. + epoch.elapsed().as_secs_f64();
+            navigation
+                .publish(NavigationMessage {
+                    odom: OdomMessage {
+                        timestamp,
+                        position_x: shift,
+                        position_z: 1.,
+                        is_initialized: true,
+                        ..Default::default()
+                    },
+                    translation: [shift, 0., 0.],
+                    rotation: [0., 0., 0., 1.],
+                    revision,
+                    ..Default::default()
+                })
+                .unwrap();
+            if phase != 1 {
+                depth
+                    .publish_with(|image| {
+                        image.timestamp = timestamp;
+                        image.sensor_id = 0;
+                        image.width = IMAGE_WIDTH as u32;
+                        image.height = IMAGE_HEIGHT as u32;
+                        image.data.fill(4.);
+                    })
+                    .unwrap();
+            }
+            while let Some(message) = controls.receive().unwrap() {
+                disabled |= message.revision == revision && message.enabled == 0;
+            }
+            while let Some(message) = trajectories.receive().unwrap() {
+                trajectory |= message
+                    .first()
+                    .is_some_and(|piece| piece.revision == revision);
+            }
+            while let Some(message) = references.receive().unwrap() {
+                assert!(
+                    phase != 1 || started.elapsed() <= Duration::from_millis(100),
+                    "old trajectory published while new-revision map is absent"
+                );
+                reference |= message.alignment_translation == [shift, 0., 0.];
+            }
+            if phase == 1 {
+                if disabled && started.elapsed() >= Duration::from_millis(250) {
+                    break;
+                }
+            } else if trajectory && reference {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
 impl Drop for OutputProcess {
     fn drop(&mut self) {
         let _ = Command::new("kill")

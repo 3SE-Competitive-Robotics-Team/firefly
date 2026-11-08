@@ -284,7 +284,13 @@ fn adopt(completion: Completion, fsm: &mut ReplanFsm, now: f64, measured: Option
     if measured.is_none_or(|state| {
         (local.traj.eval(elapsed).position - state.position.coords).norm()
             > fsm.manager.map().resolution()
-    }) || elapsed >= local.traj.duration()
+    }) {
+        // Repeating a warm start from the old trajectory preserves the same offset.
+        // Keep the handoff bound and retry from the measured state instead.
+        fsm.replan_from_measured();
+        return false;
+    }
+    if elapsed >= local.traj.duration()
         || local
             .points_to_check
             .last()

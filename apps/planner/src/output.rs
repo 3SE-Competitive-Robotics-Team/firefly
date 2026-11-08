@@ -15,7 +15,7 @@ use firefly_pubsub::{
 };
 use firefly_trajectory::Trajectory;
 use iceoryx2::prelude::*;
-use nalgebra::{DMatrix, DVector};
+use nalgebra::{DMatrix, DVector, Isometry3};
 use std::time::{Duration, Instant};
 
 pub struct OutputPublisher {
@@ -124,6 +124,7 @@ pub fn run(yaw_hold: bool, timeout: f64) -> Result<()> {
     let mut server = TrajectoryServer::new(yaw_hold, timeout);
     let mut control = TrajectoryControlMessage::default();
     let mut trajectory_revision = None;
+    let mut alignment = Isometry3::identity();
     let mut goal_timestamp = 0.0;
     let origin = Instant::now();
     let waitset = WaitSetBuilder::new()
@@ -170,6 +171,11 @@ pub fn run(yaw_hold: bool, timeout: f64) -> Result<()> {
             let Some(transform) = input.navigation() else {
                 return Ok(());
             };
+            let next_alignment = *transform.alignment()?.isometry();
+            if next_alignment != alignment {
+                server.rebase_frame(&(next_alignment * alignment.inverse()));
+                alignment = next_alignment;
+            }
             if control.enabled == 0 || transform.revision != control.revision {
                 return Ok(());
             }

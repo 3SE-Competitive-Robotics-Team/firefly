@@ -101,6 +101,14 @@ business log. Known loss makes the recording fail.
 | `mimir/*`, `logs/*` | Configuration, queue high-water, lifecycle, failures and process events |
 | `mimir/status/{fc/tick_rate,vio/processing,vio/posterior_age,vio/landmarks,camera/publish_rate,camera/publish_latency}` | Six independent recorder-derived numeric documents from existing scalar observations; at most 2 Hz per entity in measurement time, six cached values and one constant-space publication counter, no additional IPC topic |
 | `frames/{map,odom,world}` | Recorder-owned display transforms: root←map identity, temporal map←odom from Navigation, and optional constant map←world startup alignment; never estimation or control inputs |
+| `rootslam/mapping/state` | Four cumulative counters: processed detection queries, geometrically verified loops, accepted PGO transactions, rejected PGO results; 1 Hz at the current IMU measurement time, constant-size state, existing scalar IPC and diagnostic switch |
+| `vio/navigation/revision` | Revision actually published by the VIO navigation owner; 10 Hz at the same IMU measurement timestamp, one scalar; absent for external-localization ownership |
+
+Online map-correction acceptance requires both an accepted PGO transaction and a positive published
+navigation revision. A verified loop, solver return, or prepared transform alone is insufficient.
+Mapping source/anchor times and revisions are logged once per prepared correction; planner logs the
+revision when invalidating geometry and handing off a replacement trajectory. These bounded lifecycle
+events use the existing log budget. No new IPC topics, raw depth archive, or per-landmark streams are added.
 
 ### Spatial frames
 
@@ -149,10 +157,21 @@ initialization and loop synchronization. RootSLAM also reports graph and keyfram
 thread, including queue time.
 `RUST_LOG=info,basalt-profile=debug` records stage events in `logs/firefly-rootslam`.
 Join by frame timestamp and process-monotonic boundaries; do not add nested durations or percentiles.
+`RUST_LOG=info,planner-profile=debug` records planner callbacks taking at least 10 ms in
+`logs/planner`, including sensor polling, map synchronization, execution, safety and voxel display.
+Each event contains the stage and elapsed wall time; nested stages must not be summed.
+Production is off by default, bounded by the existing 100/20/10 Hz callback rates and 512-byte log limit.
+Depth-input expiry/termination logs one warning when planner enters the latched emergency state,
+including navigation time and revision, in the existing `logs/planner` stream (512-byte limit).
+`rootslam-loop=debug` adds one retrieval summary per keyframe and one rejection/acceptance event
+per tested loop candidate to `logs/firefly-rootslam`. Fields are frame IDs, descriptor/match/inlier
+counts and rejection stage; no images or per-feature arrays. At most `1 + max_candidates` events
+per detection job, bounded by the configured keyframe/image rate and the existing 512-byte log limit.
 `render/capture/stages_s` records submit/readback/assembly/queue timing; `publish_s` records processing,
 publication and total timing. Posterior age also includes visual processing and propagation scheduling.
-RootSLAM does not currently feed sparse-map corrections into online navigation. There is no committed
-navigation-loop diagnostic; missing evidence must not be substituted with loop candidate counts.
+Accepted RootSLAM pose-graph corrections update online navigation in the startup map gauge.
+`rootslam/mapping/state` counts backend outcomes; `vio/navigation/revision` confirms publication.
+Loop candidate counts alone do not prove an online navigation correction.
 
 ## Recorder architecture and operation
 
