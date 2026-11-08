@@ -6,6 +6,7 @@ import os
 import signal
 import threading
 import time
+import ctypes
 
 import iceoryx2 as iox2
 import psutil
@@ -14,7 +15,7 @@ from rerun.chunk import RrdReader
 
 from firefly_evaluation.process_lifecycle import ManagedProcess, isolated_run
 from firefly_mujoco import TraceContext
-from firefly_mujoco.messages import ScalarMessage, LogMessage, GrayImageMessage, VizMessage
+from firefly_mujoco.messages import ScalarMessage, LogMessage, GrayImageMessage, VizMessage, OdomMessage
 from firefly_workspace import digest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,6 +23,18 @@ pytestmark = pytest.mark.skipif(
     os.environ.get("FIREFLY_RUN_TELEMETRY_LOAD") != "1",
     reason="explicit native recorder test on an idle host with release mimir",
 )
+
+
+class NavigationMessage(ctypes.Structure):
+    """Test publisher for firefly_pubsub::navigation::NavigationMessage; IPC verifies the ABI."""
+
+    _fields_ = [("odom", OdomMessage), ("translation", ctypes.c_double * 3),
+                ("rotation", ctypes.c_double * 4), ("revision", ctypes.c_uint64),
+                ("external_map", ctypes.c_uint64)]
+
+    @staticmethod
+    def type_name():
+        return "FireflyNavigationMessage"
 
 
 def publisher(node, topic, payload, capacity=None, publishers=None):
@@ -68,6 +81,8 @@ def recording():
 
 def read(path):
     reader = RrdReader(path)
+    assert len(reader.blueprints()) == 1
+    assert reader.blueprints()[0].application_id == "firefly"
     # Indexed access requires the completed footer, independently of sequential decoding.
     assert reader.store(store=reader.recordings()[0]).schema() is not None
     result, logs = {}, []
@@ -91,13 +106,14 @@ def test_ipc_recording_retains_every_sample(rate, repeat):
     with isolated_run(ROOT):
         iox2.set_log_level(iox2.LogLevel.Error)
         process, path = recording()
-        node = port = events = camera_port = None
+        node = port = events = camera_port = navigation_port = None
         cameras = []
         try:
             node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
             port = publisher(node, "Firefly/VizScalars", ScalarMessage, 1024, 8)
             cameras = [publisher(node, "Firefly/Camera" + side, GrayImageMessage) for side in ("Left", "Right")]
             events = publisher(node, "Firefly/Log", LogMessage, 256, 10)
+            navigation_port = publisher(node, "Firefly/Navigation", NavigationMessage)
             event(events, 0, f"rate={rate} repeat={repeat} cpu_percent={psutil.cpu_percent(interval=.1)} "
                   f"mimir_sha256={digest(ROOT / 'target/release/mimir')} "
                   "GPU/temperature/throttling counters unavailable in this portable test")
@@ -110,6 +126,9 @@ def test_ipc_recording_retains_every_sample(rate, repeat):
                 while time.monotonic() < deadline:
                     time.sleep(min(.0005, max(0., deadline - time.monotonic())))
                 assert process.process.poll() is None, list(process.tail)
+                navigation = NavigationMessage(odom=OdomMessage(timestamp=first / rate, quat_w=1., is_initialized=True))
+                navigation.rotation[:] = (0., 0., 0., 1.)
+                navigation_port.loan_uninit().write_payload(navigation).send()
                 if first % (rate // 10) == 0:
                     for camera, camera_port in enumerate(cameras):
                         frame = GrayImageMessage(timestamp=first / rate, sensor_id=camera, width=320, height=240)
@@ -127,7 +146,7 @@ def test_ipc_recording_retains_every_sample(rate, repeat):
         finally:
             code = process.stop()
             cameras.clear()
-            node = port = events = camera_port = None
+            node = port = events = camera_port = navigation_port = None
             assert code == 0, list(process.tail)
         actual, logs = read(path)
         assert {name: sorted(actual.get(name, [])) for name in names} == expected
@@ -246,3 +265,125 @@ def test_stereo_images_and_keypoint_ids_survive_recording():
                     assert batch.column("track_id").to_pylist() == [[42., 43.]]
                     found_points.add(side)
         assert found_images == found_points == {"left", "right"}
+
+
+def test_spatial_frames_preserve_raw_poses_and_follow_navigation():
+    with isolated_run(ROOT):
+        process, path = recording()
+        node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
+        truth_port = publisher(node, "Firefly/GroundTruth", OdomMessage)
+        navigation_port = publisher(node, "Firefly/Navigation", NavigationMessage)
+        geometry = publisher(node, "Firefly/Viz", VizMessage, 256, 8)
+        sequence = 0
+
+        def spatial(name, kind, stamp, xyz=(0., 0., 0.)):
+            nonlocal sequence
+            msg = VizMessage(kind=kind, timestamp=stamp, sequence=sequence)
+            encoded = name.encode()
+            msg.entity_len, msg.entity[:len(encoded)] = len(encoded), encoded
+            msg.xyz[:], msg.quat_xyzw[:] = xyz, (0., 0., 0., 1.)
+            sequence += 1
+            return msg
+
+        try:
+            truth = OdomMessage(timestamp=1., position_x=-13., position_z=.4, quat_w=1., is_initialized=True)
+            navigation = NavigationMessage(odom=OdomMessage(timestamp=1., quat_w=1., is_initialized=True))
+            navigation.rotation[:] = (0., 0., 0., 1.)
+            truth_port.loan_uninit().write_payload(truth).send()
+            time.sleep(.03)
+            navigation_port.loan_uninit().write_payload(navigation).send()
+            for name in ("vio/odom", "vio/prediction/pose_body_odom", "acceptance/odom", "acceptance/reference"):
+                geometry.loan_uninit().write_payload(spatial(name, 1, 1.)).send()
+            camera = spatial("cameras/left", 12, 1., (.1, .05, 0.))
+            camera.scalar_count, camera.point_count = 4, 1
+            camera.scalars[:] = (200., 200., 159.5, 119.5)
+            camera.points[0][:] = (320., 240., 0.)
+            geometry.loan_uninit().write_payload(camera).send()
+            time.sleep(.03)
+            # A map correction moves odom, while the startup truth anchor stays fixed.
+            navigation.odom.timestamp = 2.
+            navigation.translation[:] = (2., 3., 0.)
+            navigation.rotation[:] = (0., 0., 2 ** -.5, 2 ** -.5)
+            navigation.revision = 1
+            navigation_port.loan_uninit().write_payload(navigation).send()
+            geometry.loan_uninit().write_payload(spatial("vio/odom", 1, 2., (1., 0., .026))).send()
+            geometry.loan_uninit().write_payload(spatial("vio/prediction/pose_body_odom", 1, 2., (1., 0., .026))).send()
+            geometry.loan_uninit().write_payload(spatial("plan", 7, 2.)).send()
+            line = spatial("plan/local_traj", 2, 2.)
+            line.point_count = 2
+            line.points[0][:], line.points[1][:] = (2., 4., .026), (2., 5., .026)
+            geometry.loan_uninit().write_payload(line).send()
+            time.sleep(.1)
+        finally:
+            assert process.stop() == 0, list(process.tail)
+
+        _, logs = read(path)
+        assert "recording complete" in logs
+        components = {}
+        for chunk in RrdReader(path).stream():
+            batch = chunk.to_record_batch()
+            for name in batch.schema.names:
+                if name.startswith(("Transform3D:", "CoordinateFrame:", "Pinhole:")):
+                    components.setdefault((chunk.entity_path, name), []).extend(batch.column(name).to_pylist())
+        def component(entity, name):
+            return components[(entity, name)]
+        assert component("/frames/world", "Transform3D:translation") == [[pytest.approx([13., 0., -.4])]]
+        assert component("/frames/world", "Transform3D:parent_frame") == [["map"]]
+        assert component("/frames/odom", "Transform3D:translation") == [[[0., 0., 0.]], [[2., 3., 0.]]]
+        assert component("/frames/odom", "Transform3D:quaternion")[1][0] == pytest.approx([0., 0., 2 ** -.5, 2 ** -.5])
+        assert component("/vio/odom", "Transform3D:translation") == [[[0., 0., 0.]], [pytest.approx([1., 0., .026])]]
+        assert component("/vio/prediction/pose_body_odom", "Transform3D:translation") == component("/vio/odom", "Transform3D:translation")
+        assert component("/gt/pose", "Transform3D:translation") == [[pytest.approx([-13., 0., .4])]]
+        assert component("/gt/pose", "Transform3D:parent_frame") == [["world"]]
+        assert component("/vio/odom", "Transform3D:parent_frame") == [["odom"], ["odom"]]
+        assert component("/acceptance/odom", "Transform3D:parent_frame") == [["odom"]]
+        assert component("/acceptance/reference", "Transform3D:parent_frame") == [["map"]]
+        assert component("/cameras/left", "Transform3D:parent_frame") == [["tf#/vio/prediction/pose_body_odom"]]
+        assert component("/cameras/left", "Pinhole:parent_frame") == component("/cameras/left", "Transform3D:parent_frame")
+        assert component("/plan/local_traj", "CoordinateFrame:frame") == [["map"]]
+        print({"rrd": str(path), "statistics": logs})
+
+
+def test_metric_cards_use_measurement_time_and_preserve_sources():
+    with isolated_run(ROOT):
+        process, path = recording()
+        node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
+        port = publisher(node, "Firefly/VizScalars", ScalarMessage, 1024, 8)
+        samples = [("fc/debug/tick_rate", 1., [999.5]),
+                   ("rootslam/frame_processing_ms", 1.1, [6.5]),
+                   ("vio/prediction/posterior_age_s", 1.2, [.012]),
+                   ("vio/diagnostics/tracks", 1.3, [90., 80., 70., 60.]),
+                   ("fc/debug/state", 1.5, [1.]), ("fc/debug/state", 4.1, [1.])]
+        samples.extend(("render/capture/publish_s", 1. + frame / 60., [0., 0., .008])
+                       for frame in range(61))
+        samples.sort(key=lambda sample: sample[1])
+        try:
+            for seq, (name, stamp, values) in enumerate(samples):
+                port.loan_uninit().write_payload(scalar(name, stamp, seq, values)).send()
+            time.sleep(.1)
+        finally:
+            assert process.stop() == 0, list(process.tail)
+        actual, logs = read(path)
+        expected = {}
+        for name, stamp, values in samples:
+            expected.setdefault(name, []).append((int(stamp * 1e9 + .5), values))
+        for name, rows in expected.items():
+            assert actual[name] == rows
+        texts = {}
+        for chunk in RrdReader(path).stream().filter(content="/mimir/status/**"):
+            batch = chunk.to_record_batch()
+            texts.setdefault(chunk.entity_path.removeprefix("/mimir/status/"), []).extend(
+                zip(batch["sim_time"].cast("int64").to_pylist(),
+                    [row[0] for row in batch["TextDocument:text"].to_pylist()]))
+        assert len(texts) == 6
+        for rows in texts.values():
+            assert [stamp for stamp, _ in rows] == [1_000_000_000, 1_500_000_000, 2_000_000_000, 4_100_000_000]
+            assert "—" in rows[-1][1]
+        assert texts["fc/tick_rate"][1][1] == "**999.5 Hz**"
+        assert texts["vio/processing"][1][1] == "**6.5 ms**"
+        assert texts["vio/posterior_age"][1][1] == "**12.0 ms**"
+        assert texts["vio/landmarks"][1][1] == "**60 IDs**"
+        assert texts["camera/publish_rate"][2][1] == "**60.0 FPS**"
+        assert texts["camera/publish_latency"][2][1] == "**8.0 ms**"
+        assert "recording complete" in logs
+        print({"rrd": str(path), "statistics": logs})

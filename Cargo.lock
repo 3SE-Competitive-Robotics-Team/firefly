@@ -5879,12 +5879,14 @@ dependencies = [
 name = "mimir"
 version = "0.1.0"
 dependencies = [
+ "firefly-base",
  "firefly-config",
  "firefly-error",
  "firefly-observability",
  "firefly-pubsub",
  "iceoryx2",
  "log",
+ "nalgebra",
  "re_build_info",
  "re_chunk",
  "re_log_encoding",

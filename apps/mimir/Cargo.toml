@@ -11,12 +11,14 @@ keywords = ["robotics", "telemetry", "rerun"]
 categories = ["science::robotics"]
 
 [dependencies]
+firefly-base.workspace = true
 firefly-config.workspace = true
 firefly-error.workspace = true
 firefly-observability.workspace = true
 firefly-pubsub.workspace = true
 iceoryx2.workspace = true
 log.workspace = true
+nalgebra.workspace = true
 re_build_info.workspace = true
 re_chunk.workspace = true
 re_log_encoding.workspace = true

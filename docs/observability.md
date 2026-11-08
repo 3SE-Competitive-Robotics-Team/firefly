@@ -64,7 +64,7 @@ This catalog covers all production topic constants; test topics use isolated nam
 | `Firefly/Depth` | render/sensors → planner-owned EGO mapper | No duplicate depth display |
 | `Firefly/Imu` | sim/sensors → VIO, FC | Not subscribed by the ordinary recorder |
 | `Firefly/Odometry` | VIO → control, planning, evaluation | Pose diagnostics; evaluation explicitly subscribes |
-| `Firefly/Navigation` | VIO/localization → planner, FC | Business state, not a duplicate plotting topic |
+| `Firefly/Navigation` | VIO/localization → planner, FC, mimir | Atomic map←odom relation; mimir records changes only and uses bounded startup matching, without duplicating the pose stream |
 | `Firefly/Reference` | trajectory output → FC, evaluation | Evaluation records target pose and velocity |
 | `Firefly/Control` | FC → actuators/sim, evaluation | Motor evidence and FC summaries |
 | `Firefly/PlantState`, `Firefly/Airframe` | sim/airframe → FC, system consumers | Independent evaluation evidence; never VIO input |
@@ -99,6 +99,38 @@ business log. Known loss makes the recording fail.
 | `plan/collision` | Planner-owned depth map after obstacle inflation, in map coordinates at the planner simulation timestamp; bounded voxel snapshots/deltas for checking collision geometry, using the existing map display cadence and budgets |
 | `acceptance/*` | Scoring evidence; display simplification must preserve it and all acceptance thresholds |
 | `mimir/*`, `logs/*` | Configuration, queue high-water, lifecycle, failures and process events |
+| `mimir/status/{fc/tick_rate,vio/processing,vio/posterior_age,vio/landmarks,camera/publish_rate,camera/publish_latency}` | Six independent recorder-derived numeric documents from existing scalar observations; at most 2 Hz per entity in measurement time, six cached values and one constant-space publication counter, no additional IPC topic |
+| `frames/{map,odom,world}` | Recorder-owned display transforms: root←map identity, temporal map←odom from Navigation, and optional constant map←world startup alignment; never estimation or control inputs |
+
+### Spatial frames
+
+All registered 3D payloads declare their source frame in `mimir/schema.rs`; adding a spatial entity
+requires registering both its payload kind and its frame. `Transform3D.parent_frame` labels raw poses;
+`CoordinateFrame` labels lines, arrows and voxels in the same row, so recursive clears cannot lose
+the association. Raw positions, orientations, timestamps and acceptance evidence remain unchanged.
+
+| Entities | Frame |
+|---|---|
+| `gt/{pose,traj}`, `acceptance/gt` | Simulator `world` |
+| `vio/{odom,traj}`, `vio/posterior/pose_imu_world`, `vio/prediction/pose_body_odom`, `acceptance/odom` | Local estimator `odom`; posterior “world” means the estimator's local world |
+| `vio/map/*`, `corr/*`, spatial `plan/*`, `acceptance/{corrected,reference}` | Navigation `map` |
+| `cameras/{left,right}` | Extrinsics relative to the moving `tf#/vio/prediction/pose_body_odom` body frame; intrinsics and pixel overlays retain camera coordinates |
+
+The Viewer root connects to `map`. `map←odom` is recorded at the Navigation measurement time on
+alignment/revision changes. A backward timestamp/revision, changed alignment without a revision, or
+changed external-map mode ends the recording as incomplete; start a new recording for a new session.
+
+For autonomous simulation, mimir can connect `world` to `map` using one pair of truth and Navigation
+poses with exactly equal source timestamps during stationary initialization near the odom origin.
+Only yaw and translation are aligned, once; roll/pitch disagreement, scale error and subsequent drift
+remain visible. This display convention removes the arbitrary initial origin/heading and is not an
+absolute localization accuracy claim. Matching storage is bounded in code; it does not enlarge IPC
+or writer queues, discard diagnostic samples, interpolate timestamps, or fit the full trajectory.
+Observed motion or a pose away from the local origin closes the startup window. Missing matches and
+external-map sessions leave `world` disconnected, with a warning in `logs/mimir`; inspect it with a
+separate world-frame 3D view. This is a startup heuristic: Navigation carries no session-start marker,
+so starting the recorder after a return to the estimated origin can still qualify for alignment.
+Start recording before producers; do not use this display anchor to score absolute drift.
 
 Hover evidence includes truth, posterior, prediction, targets/errors, velocity, bias, posterior age,
 attitude source, safety state, per-frame residuals and optimization corrections.
@@ -143,11 +175,45 @@ Viewer history selection must respect image timestamps; a visually adjacent poin
 that it belongs to the current image. No depth display, field mesh or live static preview is recorded.
 Mimir writes files; inspect them with the standard Rerun viewer.
 
+### Default viewer layout
+
+[configs/firefly.rbl](../configs/firefly.rbl) is the shared layout for application ID `firefly`.
+Mimir embeds it as the default in each new RRD. Rerun may restore an application-specific user layout;
+load the checked-in RBL explicitly to select the shared layout, or use **Reset to default blueprint**
+on a new recording. Use the workspace viewer to match the recording SDK version:
+
 ```bash
 cargo build --release -p mimir
 ./target/release/mimir --save logs/run.rrd
-rerun logs/run.rrd
+uv run rerun logs/run.rrd configs/firefly.rbl
 ```
+
+The main area shows the map/trajectories and recorded stereo images. Small independent numeric cards
+show FC control frequency (Hz), VIO processing and posterior age (ms), associated landmark IDs,
+camera publication rate (FPS) and capture-to-publication latency (ms). Each card has its own entity and
+view; values are not concatenated into one document. Ordinary bold text keeps the numbers compact.
+The timeline cursor selects the measurement-time snapshot; a stopped recording holds its last snapshot.
+Missing/nonfinite or more-than-two-second-old values display `—`.
+
+Camera FPS counts strictly increasing `render/capture/publish_s` timestamps over at least one second
+of measurement time, using the number of intervals divided by elapsed time. Duplicate/out-of-order
+timestamps do not increment the counter; a gap longer than two seconds restarts the window. This is
+the simulated stereo publication cadence, not wall-clock throughput, recorder receipt rate or the
+inverse of VIO processing time. It works with image recording disabled; physical camera sources that
+do not emit this observation display `—`. Publication latency uses `publish_s.total_s`; landmarks use
+`vio/diagnostics/tracks.landmark_ids`. Other cards show the latest source value.
+The display adds at most twelve small document rows per measurement second after its initial snapshot,
+with constant-size state. Full source series and images remain recorded unchanged; load tests verify
+queue budgets, source continuity and final recording completion with these derived cards enabled.
+Tracking/control charts show track IDs, reprojection RMS and controller tracking error; the latter
+is target-versus-estimated-position error, not ground-truth drift. Timing, estimator details and logs
+are tabs. Thrust and other raw observations remain available in the entity tree.
+
+Edit the layout in the Viewer and save its blueprint back to `configs/firefly.rbl`; rebuild mimir to
+embed it. There is one layout artifact and no separate Python recorder. Before accepting a layout,
+check every selected entity against the observation registry and inspect a real recording screenshot.
+Old recordings without `mimir/status/*` need a derived display layer for the numeric cards; changing the
+layout alone cannot create missing data. Preserve the original recording when producing such a layer.
 
 Output paths must be new. After producers stop, SIGINT/SIGTERM drains diagnostic subscriptions until empty
 (including disconnected publishers), drains the owned channel, flushes scalar batches,
