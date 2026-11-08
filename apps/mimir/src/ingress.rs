@@ -127,7 +127,7 @@ impl Sender {
         let size = event.bytes();
         let previous = self
             .bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(size).filter(|&total| total <= self.limit)
             })
             .map_err(|_| {
