@@ -13,7 +13,7 @@ pub use stream::{Estimator, Sample};
 
 /// 噪声密度为连续时间标准差；方差按实际测量间隔离散化。
 #[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Options {
     /// rad/s/√Hz，采样标准差为 density/√Δt。
     pub gyro_density: f64,

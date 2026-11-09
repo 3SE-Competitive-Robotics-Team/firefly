@@ -26,7 +26,7 @@ const GROUND_LOOKAHEAD_DIST: f64 = 2.0;
 
 /// 管理器行为参数。
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ManagerOptions {
     /// 重规划触发阈值（秒）。
     pub replan_thresh: f64,

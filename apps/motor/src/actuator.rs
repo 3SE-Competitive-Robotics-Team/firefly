@@ -18,7 +18,6 @@ use iceoryx2_bb_posix::clock::{ClockType, Time};
 use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 use serde::Deserialize;
 
-/// `configs/motor.toml` 缺省路径（相对运行目录，板上是 `/opt/firefly`）。
 /// 缺省配置：按安装布局解析，与启动目录无关。
 fn default_config() -> PathBuf {
     firefly_config::paths::config("motor.toml")

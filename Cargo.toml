@@ -4,11 +4,12 @@ exclude = ["apps/firefly-sim"]
 resolver = "3"
 
 [workspace.dependencies]
-re_build_info = "=0.38.1"
-re_chunk = "=0.38.1"
-re_log_encoding = { version = "=0.38.1", features = ["encoder", "decoder"] }
-re_log_types = "=0.38.1"
-re_sdk_types = { version = "=0.38.1", default-features = false }
+re_build_info = "=0.42.0"
+re_chunk = "=0.42.0"
+re_log_encoding = { version = "=0.42.0", features = ["encoder", "decoder"] }
+re_log_msg = "=0.42.0"
+re_log_types = "=0.42.0"
+re_sdk_types = { version = "=0.42.0", default-features = false }
 firefly-ego-map = { path = "crates/firefly-ego-map" }
 firefly-calibration = { path = "crates/firefly-calibration" }
 firefly-basalt = { path = "crates/firefly-basalt" }
@@ -26,7 +27,7 @@ bevy = "0.20.1"
 fastrace = { version = "0.7.19", default-features = false }
 iceoryx2 = "0.10.0"
 iceoryx2-bb-posix = "0.10.0"
-jiff = "0.2.38"
+jiff = "0.2.41"
 log = "0.4.35"
 logcall = "0.2.1"
 logforth = { version = "0.30.1", default-features = false }
@@ -34,13 +35,13 @@ nalgebra = "0.35.0"
 ndarray = "0.17.2"
 nix = { version = "0.31.3", features = ["signal", "process", "feature", "term"] }
 ort = { version = "=2.0.0-rc.15" }
-purecv = { version = "0.11.1", default-features = false, features = ["simd", "parallel"] }
+purecv = { version = "0.12.0", default-features = false, features = ["simd", "parallel"] }
 rand = "0.10.3"
 rayon = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
 spidev = "0.7.1"
-toml = "1.1.8"
-usage-rs = "7.1.5"
+toml = "1.2.1"
+usage-rs = "7.3.0"
 v4l = "0.14.0"
 zstd = "0.14.3"
 firefly-cost = { path = "crates/firefly-cost" }
@@ -65,8 +66,8 @@ firefly-render = { path = "crates/firefly-render" }
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.97.1"
-description = "EGO 规划器 Rust 实现：MINCO 后端 + Rebound 主循环 + 集群避碰"
+rust-version = "1.99.1"
+description = "RoboMaster 无人机自主导航：视觉惯性定位、建图、轨迹规划与飞行控制"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/3SE-Competitive-Robotics-Team/firefly"
 readme = "README.md"

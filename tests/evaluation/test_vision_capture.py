@@ -2,16 +2,83 @@
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
+from unittest.mock import create_autospec
 
 import numpy as np
 import pytest
 from firefly_mujoco import GrayImageMessage, DepthImageMessage
 from firefly_evaluation import vision_assets
 from firefly_workspace import digest
+from firefly_workspace import parse_scene
 
 spec = importlib.util.spec_from_file_location("capture", Path(__file__).resolve().parents[2] / "scripts/collect_vision_map.py")
 capture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(capture)
+
+
+def workspace_at(root):
+    (root / "Cargo.toml").write_text("[workspace]\n")
+    (root / "pyproject.toml").write_text('[project]\nname = "firefly"\n[tool.uv.workspace]\nmembers = []\n')
+    (root / "configs").mkdir()
+
+
+@pytest.mark.parametrize("selected", ["rmuc2026@2.0.0", "rmuc2027@1.0.0", None])
+def test_asset_fingerprint_uses_selected_scene_and_detects_geometry_changes(tmp_path, selected):
+    workspace_at(tmp_path)
+    if selected:
+        (tmp_path / "configs/scene.toml").write_text(f'scene = "{selected}"\n')
+    scene = parse_scene(selected or "rmuc2027@1.0.0")
+    directory = tmp_path / scene.dir
+    directory.mkdir(parents=True)
+    (directory / "field.glb").write_bytes(b"selected geometry")
+    (directory / scene.collision).write_bytes(b"selected collision")
+
+    def export(command, *, check, cwd):
+        assert check and cwd == tmp_path
+        assert command[:2] == [str(tmp_path / "target/release/render"), "--export-asset-contract"]
+        assert command[2] == str(directory / "derived/render_contract.toml")
+        Path(command[2]).write_text("schema = 1\nfocal = 100.0\n")
+
+    runner = create_autospec(subprocess.run, side_effect=export, spec_set=True)
+    assets = vision_assets.capture_assets(tmp_path, run=runner)
+    assert str(scene.dir / "field.glb") in assets["files"]
+    assert str(scene.dir / scene.collision) in assets["files"]
+    assert len(assets["files"]) == (3 if selected else 2)
+    assert assets["sensor"] == {"schema": 1, "focal": 100.}
+    (directory / "field.glb").write_bytes(b"modified selected geometry")
+    with pytest.raises(ValueError, match="contract"):
+        vision_assets.verify_map_compatibility(
+            assets, root=tmp_path, capture=lambda root: vision_assets.capture_assets(root, run=runner))
+
+
+def test_acceptance_reads_selected_geometry_manifest_and_checks_its_scene(tmp_path):
+    from firefly_evaluation.cli import provenance
+
+    workspace_at(tmp_path)
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=Test", "-c",
+                    "user.email=test@example.invalid", "commit", "--quiet", "--allow-empty", "-m", "fixture"], check=True)
+    scene = parse_scene("rmuc2027@1.0.0")
+    (tmp_path / "configs/scene.toml").write_text(f'scene = "{scene.name}"\n')
+    binaries = tmp_path / "target/release"
+    binaries.mkdir(parents=True)
+    for name in ["firefly-rootslam", "render", "fc", "ffctl", "planner", "mimir"]:
+        (binaries / name).write_bytes(b"fingerprint fixture")
+    directory = tmp_path / scene.dir
+    directory.mkdir(parents=True)
+    field = directory / "field.glb"
+    field.write_bytes(b"selected geometry")
+    manifest = {"status": "passed", "scene": scene.name,
+                "artifacts": {str(field.relative_to(tmp_path)): digest(field)}}
+    path = directory / "asset_manifest.json"
+    path.write_text(json.dumps(manifest))
+    result = provenance(tmp_path)
+    assert result["assets"] == manifest
+    assert result["asset_manifest_sha256"] == digest(path)
+    path.write_text(json.dumps(manifest | {"scene": "rmuc2026@2.0.0"}))
+    with pytest.raises(ValueError, match="another scene"):
+        provenance(tmp_path)
 
 
 def test_same_stamp_required():

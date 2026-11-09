@@ -40,7 +40,7 @@ pub struct Minco {
     t: DVector<f64>,
     /// 不可变 LU 只依赖段时长；正向与伴随求解共用。
     solver: Arc<BandedSolver>,
-    /// 带形系统的复用缓冲：时长变化时原地重填，不再每次新建。
+    /// 带形系统的复用缓冲：时长变化时原地重填。
     banded: BandedMatrix,
 }
 

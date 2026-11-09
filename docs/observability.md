@@ -129,7 +129,9 @@ alignment/revision changes. A backward timestamp/revision, changed alignment wit
 changed external-map mode ends the recording as incomplete; start a new recording for a new session.
 
 For autonomous simulation, mimir can connect `world` to `map` using one pair of truth and Navigation
-poses with exactly equal source timestamps during stationary initialization near the odom origin.
+poses at the same measurement nanosecond during stationary initialization near the odom origin.
+Both source timestamps are converted to integer nanoseconds, matching VIO and the RRD timeline;
+floating-point seconds may differ after VIO's integer-clock round-trip. Different nanoseconds do not match.
 Only yaw and translation are aligned, once; roll/pitch disagreement, scale error and subsequent drift
 remain visible. This display convention removes the arbitrary initial origin/heading and is not an
 absolute localization accuracy claim. Matching storage is bounded in code; it does not enlarge IPC
@@ -228,6 +230,10 @@ Tracking/control charts show track IDs, reprojection RMS and controller tracking
 is target-versus-estimated-position error, not ground-truth drift. Timing, estimator details and logs
 are tabs. Thrust and other raw observations remain available in the entity tree.
 
+In the default 3D view, green is the global guide path, coral red is the local planned trajectory
+and its velocity arrows, blue is ground truth, yellow is local odometry, and purple is map-frame
+navigation. The odometry and navigation histories overlap when the navigation correction is identity.
+
 Edit the layout in the Viewer and save its blueprint back to `configs/firefly.rbl`; rebuild mimir to
 embed it. There is one layout artifact and no separate Python recorder. Before accepting a layout,
 check every selected entity against the observation registry and inspect a real recording screenshot.
@@ -243,7 +249,8 @@ RRD records lifecycle and high-water statistics in `logs/mimir`. Index memory gr
 it is separate from the bounded pending-data budget.
 
 Raw runtime evidence belongs in `logs/*.rrd`; JSON/HTML may hold configuration, fingerprints and summaries.
-Do not create parallel text recordings. Stderr is a diagnostic sink, not archived evidence.
+Do not create parallel text recordings of runtime diagnostics. CLI help, command results and exported
+artifacts may use stdout; this does not replace runtime evidence. Stderr is a diagnostic sink, not archived evidence.
 The current CompactReporter writes span summaries to stderr; use RRD stage diagnostics for archived timing.
 
 ## Validation

@@ -118,7 +118,7 @@ impl PlannerManager {
         self.fsm.invalidate_localization(now, measured)
     }
     fn mandatory_stop(&mut self, now: f64, measured: Option<State>) {
-        self.fsm.mandatory_stop(now, measured);
+        self.fsm.mandatory_stop();
         let _ = self.fsm.exec_tick(now, measured);
     }
     fn enter_emergency_stop(&mut self, now: f64, measured: Option<State>) {
@@ -126,8 +126,7 @@ impl PlannerManager {
         let _ = self.fsm.exec_tick(now, measured);
     }
     fn trigger_emergency_stop_disable_failsafe(&mut self, now: f64, measured: Option<State>) {
-        self.fsm
-            .trigger_emergency_stop_disable_failsafe(now, measured);
+        self.fsm.trigger_emergency_stop_disable_failsafe();
         let _ = self.fsm.exec_tick(now, measured);
     }
     fn initial_plan(&mut self, now: f64, measured: Option<State>) {
@@ -722,7 +721,7 @@ fn depth_timeout_keeps_upstream_collision_replanning_order() {
     let obstacle = local.traj.eval(local.traj.duration() * 0.45).position;
     let voxel = m.map().index_of(obstacle).unwrap();
     m.map_mut().set_state(voxel, VoxelState::Occupied);
-    m.fsm.trigger_emergency_stop_disable_failsafe(0.5, None);
+    m.fsm.trigger_emergency_stop_disable_failsafe();
     assert!(m.fsm.is_emergency());
     let report = m.fsm.safety_tick(0.5, None);
     assert!(report.collision && report.replanned);

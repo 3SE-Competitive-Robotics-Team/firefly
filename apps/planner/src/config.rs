@@ -5,13 +5,51 @@ use firefly_planner::{ManagerOptions, PlannerConfig};
 use serde::Deserialize;
 
 /// 顶层：平铺键 = [`PlannerConfig`]，`[manager]` = [`ManagerOptions`]。
-#[derive(Debug, Deserialize, Default)]
-#[serde(default)]
+#[derive(Debug, Default)]
 pub struct PlannerToml {
-    #[serde(flatten)]
     pub config: PlannerConfig,
     pub manager: ManagerOptions,
     pub mapping: MappingOptions,
+}
+
+impl<'de> Deserialize<'de> for PlannerToml {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let mut table = toml::Table::deserialize(deserializer)?;
+        let manager = table
+            .remove("manager")
+            .map(toml::Value::try_into)
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .unwrap_or_default();
+        let mapping = table
+            .remove("mapping")
+            .map(toml::Value::try_into)
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .unwrap_or_default();
+        let config = toml::Value::Table(table)
+            .try_into()
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            config,
+            manager,
+            mapping,
+        })
+    }
+}
+
+impl PlannerToml {
+    pub fn validate(&self) -> Result<()> {
+        if !self.config.heartbeat_timeout.is_finite() || self.config.heartbeat_timeout <= 0. {
+            return Err(Error::new(
+                ErrorKind::InvalidArgument,
+                "heartbeat_timeout must be finite and positive",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -45,6 +83,31 @@ mod tests {
         // 缺键 = 不启用虚拟墙（官方 enable_virtual_wall 默认 false）
         assert_eq!(cfg.config.virtual_ground, None);
         assert_eq!(cfg.config.virtual_ceiling, None);
+    }
+
+    #[test]
+    fn rejects_unknown_fields_without_changing_flattened_layout() {
+        for source in [
+            "max_velocty = 2.0",
+            "[manager]\nplanning_horizonn = 5",
+            "[mapping]\nresoluton = 0.1",
+            "[mapping.depth]\nmax_pose_gapp = 0.1",
+        ] {
+            assert!(toml::from_str::<PlannerToml>(source).is_err(), "{source}");
+        }
+        let cfg: PlannerToml =
+            toml::from_str("max_velocity = 2\n[manager]\nplanning_horizon = 5").unwrap();
+        assert!((cfg.config.max_velocity - 2.).abs() < f64::EPSILON);
+        assert!((cfg.manager.planning_horizon - 5.).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn rejects_non_finite_and_non_positive_heartbeat_timeout() {
+        for value in ["nan", "inf", "-inf", "0", "-1"] {
+            let cfg: PlannerToml = toml::from_str(&format!("heartbeat_timeout = {value}")).unwrap();
+            assert!(cfg.validate().is_err(), "{value}");
+        }
+        PlannerToml::default().validate().unwrap();
     }
 }
 

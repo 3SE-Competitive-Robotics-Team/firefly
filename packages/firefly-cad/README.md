@@ -12,8 +12,8 @@ RMUC STEP 资产构建。源文件只读，统一归一化为米、Z 向上、XY
 uv run --package firefly-cad firefly-cad-build <场地.stp> --scene <赛季>@<版本>
 ```
 
-数值配置统一在 `configs/cad.toml`，默认三角化偏差 2mm，碰撞/规划分辨率
-0.15m，地图边距 1m、顶界至少 6m。`--blender` 指定 Blender 可执行文件。
+数值配置在 `configs/cad.toml`，默认值与单位由配置类型维护。
+`--blender` 指定 Blender 可执行文件。
 若发行版 Blender 缺 NumPy，构建器使用 `uv` 将匹配 Python ABI 的 NumPy
 安装到 `derived/blender-python-*`，仅给导出子进程设置路径，不修改系统 Python。
 
@@ -59,5 +59,4 @@ uv run --all-packages --extra test pytest packages/firefly-cad/tests/ tests/eval
 FIREFLY_RUN_RMUC_ASSETS=1 uv run --all-packages --extra test pytest tests/system/test_rmuc_assets.py -q -p no:cacheprovider
 ```
 
-实际转换记录见 [CONVERSION.md](CONVERSION.md)，系统验收边界见
-[测试契约](../../docs/development.md#tests)。
+系统验收边界见 [测试契约](../../docs/development.md#tests)。

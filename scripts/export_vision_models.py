@@ -25,7 +25,7 @@ import torchvision
 from firefly_workspace import digest, workspace_root
 
 ROOT = workspace_root(Path(__file__))
-REVISION = "eb42fee2d71449efb0aa5c10549752b5d75384d8"
+REVISION = "5a650c444718caffc2669dc0094cde908f42dd73"
 K = 512
 log = logging.getLogger(__name__)
 

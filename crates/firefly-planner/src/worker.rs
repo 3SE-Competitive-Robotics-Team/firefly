@@ -190,7 +190,7 @@ impl PlanningWorker {
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.cancel();
-                fsm.trigger_emergency_stop_disable_failsafe(now, measured);
+                fsm.trigger_emergency_stop_disable_failsafe();
                 return false;
             }
             Err(mpsc::TryRecvError::Empty) => {}
@@ -204,7 +204,7 @@ impl PlanningWorker {
                 .checked_add(max_age)
                 .filter(|_| !max_age.is_zero())
             else {
-                fsm.trigger_emergency_stop_disable_failsafe(now, measured);
+                fsm.trigger_emergency_stop_disable_failsafe();
                 return false;
             };
             let ticket = Ticket {
@@ -239,7 +239,7 @@ impl PlanningWorker {
                 self.stats.submitted += 1;
                 self.active = Some(ticket);
             } else {
-                fsm.trigger_emergency_stop_disable_failsafe(now, measured);
+                fsm.trigger_emergency_stop_disable_failsafe();
             }
         }
         adopted

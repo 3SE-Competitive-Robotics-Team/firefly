@@ -56,18 +56,15 @@ impl Run for Status {
         if self.watch {
             watch(&config, Duration::from_secs_f64(seconds))
         } else {
-            once(&config)
+            once(&config, query())
         }
     }
 }
 
-fn once(config: &Config) -> ExitCode {
-    let statuses = match query() {
+fn once(config: &Config, result: Result<Vec<ProcessStatus>, String>) -> ExitCode {
+    let statuses = match result {
         Ok(statuses) => statuses,
-        Err(error) => {
-            eprintln!("ffctl: {error}");
-            Vec::new()
-        }
+        Err(error) => return crate::process::report(Err(error)),
     };
     let previous = collect(&statuses);
     let started = Instant::now();
@@ -248,6 +245,14 @@ fn name_width(config: &Config) -> usize {
 mod tests {
     use super::name_width;
     use crate::process::config::Config;
+
+    #[test]
+    fn missing_supervisor_is_a_failure() {
+        assert_eq!(
+            super::once(&config_with(&[]), Err("missing socket".into())),
+            std::process::ExitCode::FAILURE
+        );
+    }
 
     fn config_with(names: &[&str]) -> Config {
         use std::fmt::Write;

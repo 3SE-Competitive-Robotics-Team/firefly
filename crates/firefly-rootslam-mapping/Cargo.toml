@@ -18,7 +18,6 @@ firefly-opengv.workspace = true
 nalgebra = { workspace = true, features = ["serde-serialize"] }
 serde.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip"] }
-rayon.workspace = true
 log.workspace = true
 
 [dev-dependencies]

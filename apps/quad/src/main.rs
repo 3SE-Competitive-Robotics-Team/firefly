@@ -26,14 +26,25 @@ fn config_path() -> std::path::PathBuf {
     firefly_config::paths::config("quad.toml")
 }
 
+/// 第三人称四旋翼飞行
+#[derive(usage_rs::Cli)]
+#[usage(bin = "quad")]
+struct Arguments {
+    /// 应用配置文件
+    #[usage(long)]
+    config: Option<std::path::PathBuf>,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Arguments::parse();
+    let path = args.config.unwrap_or_else(config_path);
     let mut app = App::new();
     let cfg = firefly_config::startup::<QuadConfig>(
-        &config_path(),
+        &path,
         || {
             app.add_plugins(LogPlugin::default());
         },
-        |_| Ok(()),
+        QuadConfig::validate,
     )?;
     app.add_plugins(
         DefaultPlugins

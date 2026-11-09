@@ -5,8 +5,9 @@ through bounded queues, with independent image and IMU producers and state colle
 The source baseline and numerical fixtures are described in
 [firefly-basalt](../../crates/firefly-basalt/README.md).
 
-This application is under construction. A complete RootSLAM system, trajectory
-equivalence, and performance reproduction have not been verified.
+The online entry provides stereo/IMU estimation and sparse mapping; the dataset
+and headless tools expose offline workflows. Dataset trajectory equivalence,
+paper performance reproduction and flight acceptance require separate evidence.
 
 Run the dataset pipeline with `cargo run --release -p firefly-rootslam --bin firefly-rootslam-dataset`.
 It reads the fixed [dataset configuration](../../configs/firefly-rootslam-dataset.toml), which uses
@@ -26,9 +27,7 @@ this repository. `[loop_options]`
 overrides retrieval and verification parameters. Optional `[map_policy]` supplies
 all map policy fields, including the pose-graph residual scale, whose values
 were not published in the paper. These parameters are defined in the mapping
-crate. The scale is owned by the persistent map and shared by every edge, so
-`[loop_options] edge_sqrt_information` no longer exists; a configuration that
-still carries that key is rejected instead of silently ignored.
+crate. The persistent map owns the scale shared by its pose-graph edges.
 
 `[optimization] krylov_precision = "native"` is the default, so the Krylov
 work vectors follow the matrix precision and a single-precision run is a

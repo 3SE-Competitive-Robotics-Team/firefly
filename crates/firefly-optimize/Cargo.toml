@@ -19,6 +19,3 @@ nalgebra = { workspace = true }
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-firefly-observability = { workspace = true }

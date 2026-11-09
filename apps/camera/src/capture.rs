@@ -21,7 +21,6 @@ use v4l::prelude::MmapStream;
 use v4l::video::Capture;
 use v4l::{Format, FourCC};
 
-/// `configs/camera.toml` 缺省路径（相对运行目录，板上是 `/opt/firefly`）。
 /// 缺省配置：按安装布局解析，与启动目录无关。
 fn default_config() -> PathBuf {
     firefly_config::paths::config("camera.toml")

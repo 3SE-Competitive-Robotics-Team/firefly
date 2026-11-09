@@ -67,7 +67,6 @@ fn add_order(order: &mut AbsOrderMap, time: i64) {
 }
 impl<S: BasaltScalar> SqrtKeypointVoEstimator<S> {
     pub fn get_state(&self) -> &PoseVelBiasState<S> {
-        // Original legacy getter indexes IMU states even for VO.
         self.base.frame_states[&self.last_state_t_ns].state()
     }
     pub fn get_t_ns(&self) -> i64 {

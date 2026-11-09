@@ -33,7 +33,6 @@ pub struct ReplanFsm {
     state: ExecState,
     state_calls: usize,
     have_target: bool,
-    have_trigger: bool,
     have_new_target: bool,
     pub(crate) failsafe_enabled: bool,
     pub(crate) mandatory_stop: bool,
@@ -50,7 +49,6 @@ impl ReplanFsm {
             state: ExecState::Init,
             state_calls: 1,
             have_target: false,
-            have_trigger: false,
             have_new_target: false,
             failsafe_enabled: true,
             mandatory_stop: false,
@@ -93,7 +91,7 @@ impl ReplanFsm {
         };
         self.state = state;
     }
-    /// 接入层将单个交互目标视作已有启动触发；预置航点可独立调用 trigger。
+    /// 设置目标并触发规划任务。
     /// # Errors
     /// 全局引导生成失败时保持当前任务。
     pub fn set_goal(
@@ -111,16 +109,12 @@ impl ReplanFsm {
             self.generation = self.generation.wrapping_add(1);
         }
         self.have_target = true;
-        self.have_trigger = true;
         self.have_new_target |= changed;
         self.finished = false;
         if changed && matches!(self.state, ExecState::ExecTraj) {
             self.change_state(ExecState::ReplanTraj);
         }
         Ok(())
-    }
-    pub fn trigger(&mut self) {
-        self.have_trigger = true;
     }
     /// # Errors
     /// 新坐标快照无法生成全局引导。
@@ -141,12 +135,12 @@ impl ReplanFsm {
         self.generation = self.generation.wrapping_add(1);
         self.change_state(ExecState::EmergencyStop);
     }
-    pub fn mandatory_stop(&mut self, _now: f64, _measured: Option<State>) {
+    pub fn mandatory_stop(&mut self) {
         self.mandatory_stop = true;
         self.failsafe_enabled = false;
         self.request_emergency();
     }
-    pub fn trigger_emergency_stop_disable_failsafe(&mut self, _now: f64, _measured: Option<State>) {
+    pub fn trigger_emergency_stop_disable_failsafe(&mut self) {
         self.failsafe_enabled = false;
         self.request_emergency();
     }
@@ -171,7 +165,7 @@ impl ReplanFsm {
                 }
             }
             ExecState::WaitTarget => {
-                if self.have_target && self.have_trigger {
+                if self.have_target {
                     self.change_state(ExecState::SequentialStart);
                 }
             }
@@ -216,7 +210,6 @@ impl ReplanFsm {
                     let elapsed = (now - local.start_time).min(local.traj.duration());
                     if elapsed > local.traj.duration() - 1e-2 && self.manager.touch_goal {
                         self.have_target = false;
-                        self.have_trigger = false;
                         self.finished = true;
                         report.finished = true;
                         self.change_state(ExecState::WaitTarget);
@@ -390,7 +383,7 @@ mod tests {
         fsm.finished = true;
         fsm.invalidate_localization(0.04, measured()).unwrap();
         assert!(fsm.is_finished());
-        fsm.trigger_emergency_stop_disable_failsafe(0.05, Some(measured()));
+        fsm.trigger_emergency_stop_disable_failsafe();
         fsm.invalidate_localization(0.06, measured()).unwrap();
         assert_eq!(fsm.state(), ExecState::EmergencyStop);
     }

@@ -15,6 +15,8 @@ name = "quad"
 path = "src/main.rs"
 
 [dependencies]
+firefly-error.workspace = true
+usage-rs.workspace = true
 firefly-config.workspace = true
 bevy = { workspace = true }
 firefly-flight = { workspace = true }

@@ -93,14 +93,7 @@ impl FormationPenalty {
         ))
     }
 
-    /// 队形轴与进度（官方：`a` 归一化，`l`/`dl_dt` 从其他机推断）。
-    #[must_use]
-    #[allow(clippy::many_single_char_names)]
-    pub fn formation_state(&self, t_abs: f64) -> (Vector3<f64>, Vector3<f64>, f64, f64) {
-        self.formation_state_with(t_abs, &self.frame())
-    }
-
-    /// 复用预计算的逐样本投影；取值与 [`Self::formation_state`] 逐位一致。
+    /// 复用预计算的队形轴，从其他机轨迹推断进度 `l` 与速度 `dl_dt`。
     #[allow(clippy::many_single_char_names)]
     fn formation_state_with(
         &self,

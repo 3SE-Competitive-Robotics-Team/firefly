@@ -85,10 +85,8 @@ impl Frames {
         let (Some(truth), Some(map)) = (self.truth.get(&time), self.map.get(&time)) else {
             return Ok(None);
         };
-        // Exact source times, not merely the same rounded RRD tick or receive time.
-        if truth.timestamp != map.timestamp {
-            return Ok(None);
-        }
+        // Both histories use measurement nanoseconds, matching VIO's clock precision.
+        // The simulator's accumulated f64 seconds need not survive the ns round-trip.
         let truth_pose = truth.body_pose(WORLD)?;
         let map_pose = map.body_pose(FrameId::MAP)?;
         let yaw = map_pose.isometry().rotation.euler_angles().2
@@ -143,6 +141,49 @@ mod tests {
             },
             rotation: [0., 0., 0., 1.],
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn startup_anchor_matches_nanoseconds_after_vio_time_conversion() {
+        // Simulator time accumulates physics steps; VIO round-trips through integer ns.
+        let physics_time: f64 = (0..350).map(|_| 0.001).sum();
+        let navigation_time = schema::timestamp(physics_time).unwrap() as f64 * 1e-9;
+        assert_ne!(physics_time, navigation_time);
+        assert_eq!(schema::timestamp(physics_time).unwrap(), 350_000_000);
+        for truth_first in [true, false] {
+            let mut frames = Frames::default();
+            let truth = OdomMessage {
+                position_x: -13.,
+                position_z: 0.4,
+                ..nav(physics_time).odom
+            };
+            let anchor = if truth_first {
+                assert!(frames.truth(truth).unwrap().is_none());
+                // A genuinely different nanosecond must still not match.
+                assert!(
+                    frames
+                        .navigation(nav(navigation_time - 1e-9))
+                        .unwrap()
+                        .1
+                        .is_none()
+                );
+                frames.navigation(nav(navigation_time)).unwrap().1
+            } else {
+                assert!(frames.navigation(nav(navigation_time)).unwrap().1.is_none());
+                assert!(
+                    frames
+                        .truth(OdomMessage {
+                            timestamp: physics_time - 1e-9,
+                            ..truth
+                        })
+                        .unwrap()
+                        .is_none()
+                );
+                frames.truth(truth).unwrap()
+            };
+            assert_eq!(anchor.unwrap().translation, [13., 0., -0.4]);
+            assert!(!frames.truth_unaligned());
         }
     }
 

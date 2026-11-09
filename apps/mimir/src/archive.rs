@@ -9,7 +9,8 @@ use firefly_pubsub::viz::{VizMessage, VoxelMessage, kind};
 use firefly_pubsub::{navigation::NavigationMessage, odom::OdomMessage};
 use re_chunk::{Chunk, RowId, TimeColumn, TimePoint, Timeline};
 use re_log_encoding::{DecoderApp, Encoder, EncodingOptions};
-use re_log_types::{LogMsg, SetStoreInfo, StoreId, StoreInfo, StoreKind, StoreSource};
+use re_log_msg::{LogMsg, SetStoreInfo, StoreInfo, StoreSource};
+use re_log_types::{StoreId, StoreKind};
 use re_sdk_types::{AsComponents, archetypes as rr, datatypes::Quaternion};
 
 use crate::{
@@ -165,11 +166,11 @@ impl Archive {
     ) -> Result<()> {
         self.register(name)?;
         let time = match stamp {
-            Some(stamp) => TimePoint::default().with(
+            Some(stamp) => TimePoint::STATIC.with(
                 Timeline::new_duration("sim_time"),
                 schema::timestamp(stamp)?,
             ),
-            None => TimePoint::default(),
+            None => TimePoint::STATIC,
         };
         let chunk = Chunk::builder(name)
             .with_archetype(RowId::new(), time, value)
@@ -318,12 +319,12 @@ impl Archive {
         schema::entity(name.as_bytes(), name.len() as u32)?;
         self.register(&name)?;
         let time = if stamp >= 0. {
-            TimePoint::default().with(
+            TimePoint::STATIC.with(
                 Timeline::new_duration("sim_time"),
                 schema::timestamp(stamp)?,
             )
         } else {
-            TimePoint::default().with(Timeline::new_timestamp("wall_time"), wall_ns)
+            TimePoint::STATIC.with(Timeline::new_timestamp("wall_time"), wall_ns)
         };
         let chunk = Chunk::builder(name)
             .with_archetype_auto_row(time, &rr::TextLog::new(text).with_level(level))

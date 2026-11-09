@@ -9,8 +9,8 @@ use std::{
 
 const USAGE: &str = "firefly-rootslam [--config <path>] [--no-loop-closures] [--no-mapping] [--external-localization]";
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 struct Config {
     online: Options,
 }
@@ -125,4 +125,38 @@ fn main() -> Result<()> {
         signal_hook::low_level::unregister(registration);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn missing_empty_and_partial_configs_share_online_defaults() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../logs")
+            .join(format!(
+                "test_rootslam_config_{}_{stamp}",
+                std::process::id()
+            ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("online.toml");
+        let missing: Config = firefly_config::load(&path).unwrap();
+        std::fs::write(&path, "").unwrap();
+        let empty: Config = firefly_config::load(&path).unwrap();
+        let partial: Config = toml::from_str("[online]\nuse_double = true").unwrap();
+        assert_eq!(missing.online.map, empty.online.map);
+        assert_eq!(missing.online.loops, empty.online.loops);
+        assert_eq!(missing.online.use_double, empty.online.use_double);
+        assert_eq!(missing.online.map, partial.online.map);
+        assert!(partial.online.use_double);
+        assert!(missing.online.validate().is_ok());
+        assert!(empty.online.validate().is_ok());
+        assert!(toml::from_str::<Config>("onlne = {}").is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

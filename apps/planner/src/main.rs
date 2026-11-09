@@ -50,7 +50,6 @@ const VOXEL_RESYNC_TICKS: usize = 50;
 ///
 /// 显示按窗口裁剪；密集占据合并为较粗体素，保持完整覆盖并满足消息预算。
 const PERCEIVED_VIEW_RADIUS_M: f64 = 4.0;
-/// `configs/planner.toml` 缺省路径（相对运行目录，通常为仓库根）。
 /// 缺省配置：按安装布局解析，与启动目录无关。
 fn default_config() -> PathBuf {
     firefly_config::paths::config("planner.toml")
@@ -408,7 +407,7 @@ impl App {
         if self.pending_mandatory_stop {
             self.pending_mandatory_stop = false;
             self.solver.cancel();
-            self.fsm.mandatory_stop(now, None);
+            self.fsm.mandatory_stop();
         }
         firefly_observability::set_sim_time(now);
         firefly_observability::pump_log_ipc(&self.log_ipc);
@@ -592,7 +591,7 @@ impl App {
         if self.pending_mandatory_stop {
             self.pending_mandatory_stop = false;
             self.solver.cancel();
-            self.fsm.mandatory_stop(self.t_sim, None);
+            self.fsm.mandatory_stop();
         }
         let Some(snapshot) = self.state_input.current(Instant::now()) else {
             self.solver.cancel();
@@ -628,8 +627,7 @@ impl App {
                         navigation.revision
                     );
                 }
-                self.fsm
-                    .trigger_emergency_stop_disable_failsafe(now, measured);
+                self.fsm.trigger_emergency_stop_disable_failsafe();
             }
             self.output.control(None, false)?;
             return Ok(());
@@ -813,10 +811,10 @@ impl App {
             pts.push(s.position);
             arrows.push([s.velocity.x, s.velocity.y, s.velocity.z]);
         }
-        self.log_line_strip(entity, &pts, (80, 160, 255), t);
+        self.log_line_strip(entity, &pts, (255, 96, 96), t);
         // 速度箭头挂在子实体，随轨迹同时间戳更新
         let mut msg = VizMessage::base(kind::ARROWS, t, &format!("{entity}/velocity"));
-        msg.color = [255, 200, 80];
+        msg.color = [255, 96, 96];
         msg.arrow_count = SAMPLES.min(ARROWS_MAX) as u32;
         for (i, (p, v)) in pts.iter().zip(&arrows).take(ARROWS_MAX).enumerate() {
             msg.arrow_origins[i] = [p.x, p.y, p.z];
@@ -848,8 +846,7 @@ impl App {
         self.viz_publish(&msg);
     }
 
-    /// 占据体素索引 → voxels 消息（体素中心 = 原点 + (idx+0.5)·尺寸，
-    /// Python 端在完整更新到达后构造 `VoxelGridMap`）。
+    /// 占据体素索引 → voxels 消息（体素中心 = 原点 + (idx+0.5)·尺寸）。
     fn log_voxels(&mut self, entity: &str, indices: &[[i32; 3]], t: f64) {
         self.publish_voxel_delta(entity, indices, [0.1, 0.1, 0.1], [0.0, 0.0, 0.0], t, false);
     }
@@ -1066,7 +1063,7 @@ fn main() {
     let toml_cfg = match firefly_config::startup::<config::PlannerToml>(
         &args.config,
         init_observability,
-        |_| Ok(()),
+        config::PlannerToml::validate,
     ) {
         Ok(c) => c,
         Err(e) => {

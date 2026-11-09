@@ -12,7 +12,6 @@ rust-version.workspace = true
 
 [dependencies]
 fastrace.workspace = true
-firefly-error = { workspace = true }
 firefly-pubsub = { workspace = true }
 jiff = { workspace = true }
 log = { workspace = true }

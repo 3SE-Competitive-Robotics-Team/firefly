@@ -7,12 +7,15 @@ import subprocess
 import shutil
 
 from firefly_evaluation.vision_assets import capture_assets, reusable_capture
-from firefly_workspace import digest, workspace_root
+from firefly_mujoco import load_scene_name
+from firefly_workspace import digest, parse_scene, workspace_root
 
 ROOT = workspace_root(Path(__file__))
 
 
-def build(frames, output):
+def build(frames, output=None):
+    scene = parse_scene(load_scene_name(ROOT / "configs/scene.toml"))
+    output = output or (ROOT / "apps/planner/maps" / scene.map).with_suffix(".ffvmap")
     assets = capture_assets(ROOT)
     if not reusable_capture(frames, assets):
         raise ValueError("captures do not match current scene, camera, renderer or per-frame hashes")
@@ -27,12 +30,13 @@ def build(frames, output):
         if (existing["map_sha256"] == digest(output) and existing["assets"] == assets
                 and existing["models"] == models):
             return
-        archive = ROOT / "models/rmuc2026/v2.0.0/derived/vision_maps" / digest(output)
+        archive = ROOT / scene.dir / "derived/vision_maps" / digest(output)
         archive.mkdir(parents=True, exist_ok=True)
         shutil.copy2(output, archive / output.name)
         shutil.copy2(manifest_path, archive / manifest_path.name)
     binary = ROOT / "target/release/aliked"
     builder_sha256 = digest(binary)
+    output.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run([str(binary), "--build-map", str(frames), "--out", str(output)], check=True, cwd=ROOT)
     manifest = {"map_sha256": digest(output), "models": models,
                 "builder_sha256": builder_sha256, "capture_manifest": str(frames / "capture_manifest.json"),
@@ -43,6 +47,6 @@ def build(frames, output):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("frames", type=Path)
-    parser.add_argument("--out", type=Path, default=ROOT / "apps/planner/maps/rmuc2026-2.0.0.ffvmap")
+    parser.add_argument("--out", type=Path)
     args = parser.parse_args()
     build(args.frames, args.out)

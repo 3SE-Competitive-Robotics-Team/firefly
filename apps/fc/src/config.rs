@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 /// 顶层配置。
 #[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct FcConfig {
     /// 独立备用姿态估计器的噪声、静止窗口与创新门限。
     #[serde(default)]
@@ -35,7 +36,8 @@ impl FcConfig {
                 "rate_hz must be finite and positive",
             ));
         }
-        Ok(())
+        self.imu.validate()?;
+        self.control.validate()
     }
 }
 
@@ -55,5 +57,40 @@ mod tests {
         assert!((config.control.rate.p[0] - 0.15).abs() < 1e-6);
         assert!((config.control.attitude.p[0] - 4.0).abs() < 1e-6);
         assert!((config.control.position.vel_i[0] - 0.4).abs() < 1e-6);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_unknown_fields_and_invalid_control_values() {
+        for source in [
+            "rate_hzz = 1000",
+            "[control]\npositon = {}",
+            "[control.rate]\npp = [1, 1, 1]",
+            "[control.attitude]\nyaw_weigth = 0.4",
+            "[control.position]\nvel_pp = [1, 1, 1]",
+            "[control.allocation]\nairmod = 1",
+            "[fsm]\nreference_timout = 1",
+            "[imu]\ngyro_densitty = 0.1",
+        ] {
+            assert!(toml::from_str::<FcConfig>(source).is_err(), "{source}");
+        }
+        for source in [
+            "[control.allocation]\nairmode = 255",
+            "[control.rate]\np = [nan, 1, 1]",
+            "[control.attitude]\nyaw_weight = 2",
+            "[imu]\nmax_dt = nan",
+        ] {
+            assert!(
+                toml::from_str::<FcConfig>(source)
+                    .unwrap()
+                    .validate()
+                    .is_err(),
+                "{source}"
+            );
+        }
+        let zero_limits: FcConfig = toml::from_str(
+            "[control.rate]\nmax_deg_s = [0, 0, 0]\n[control.position]\nvel_max_horizontal = 0\nvel_max_up = 0\nvel_max_down = 0\n[control.attitude]\nref_model_freq = 0",
+        ).unwrap();
+        zero_limits.validate().unwrap();
     }
 }

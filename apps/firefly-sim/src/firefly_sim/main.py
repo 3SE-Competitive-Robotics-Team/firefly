@@ -179,7 +179,13 @@ class EnvironmentFactory(Protocol):
 def decode_config(cfg: dict, *, scene_loader: Callable[[], str] = load_scene_name
                   ) -> tuple[float, float, float, np.ndarray, str]:
     """将 TOML 覆盖项转换为已校验的周期和初始位置。"""
+    if unknown := cfg.keys() - {"rates", "start"}:
+        raise ValueError(f"未知仿真配置项: {', '.join(sorted(unknown))}")
     rates = cfg.get("rates", {})
+    if not isinstance(rates, dict):
+        raise ValueError("rates 必须是配置表")
+    if unknown := rates.keys() - {"physics", "imu", "pose"}:
+        raise ValueError(f"未知 rates 配置项: {', '.join(sorted(unknown))}")
     frequencies = [rates.get("physics", 1000.0), rates.get("imu", 1000.0), rates.get("pose", 10.0)]
     if not np.isfinite(frequencies).all() or any(rate <= 0 for rate in frequencies):
         raise ValueError("物理、IMU 与位姿频率必须有限且为正")
@@ -192,7 +198,9 @@ def decode_config(cfg: dict, *, scene_loader: Callable[[], str] = load_scene_nam
     physics_period, imu_period, pose_period = (1.0 / rate for rate in frequencies)
     # 停机坪：缺配置时按场景定义（`firefly_mujoco.scene.SCENES[].pad`）——上电停在地面
     scene_name = scene_loader()
-    start_pos = np.array(cfg.get("start", drone_pad(scene_name)))
+    start_pos = np.asarray(cfg.get("start", drone_pad(scene_name)), dtype=float)
+    if start_pos.shape != (3,) or not np.isfinite(start_pos).all():
+        raise ValueError("start 必须是三个有限坐标值")
     return physics_period, imu_period, pose_period, start_pos, scene_name
 
 

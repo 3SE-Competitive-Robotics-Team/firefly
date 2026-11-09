@@ -20,7 +20,6 @@ firefly-search = { workspace = true }
 firefly-trajectory = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
-logcall = { workspace = true }
 nalgebra = { workspace = true }
 rand = { workspace = true }
 

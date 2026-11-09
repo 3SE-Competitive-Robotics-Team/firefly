@@ -31,9 +31,9 @@ members = ["packages/*", "apps/firefly-sim"]
 
 [dependency-groups]
 dev = [
-    "pytest>=9.1.1",
-    "rerun-sdk>=0.38.1,<0.39",
-    "trimesh>=5.1.1",
+    "pytest>=9.2.0",
+    "rerun-sdk>=0.42.0,<0.43",
+    "trimesh>=5.2.0",
     "scipy>=1.18.1",
 ]
 
