@@ -12,8 +12,8 @@ from firefly_mujoco import scene
 
 def test_scene_config_requires_rmuc(tmp_path):
     config = tmp_path / "scene.toml"
-    config.write_text('scene = "rmuc2026@2.0.0"\n')
-    assert scene.load_scene_name(config) == "rmuc2026@2.0.0"
+    config.write_text('scene = "rmuc2027@1.0.0"\n')
+    assert scene.load_scene_name(config) == "rmuc2027@1.0.0"
     config.write_text('scene = "unsupported"\n')
     with pytest.raises(ValueError, match="未注册的场景"):
         scene.load_scene_name(config)
@@ -23,20 +23,20 @@ def test_scene_config_requires_rmuc(tmp_path):
 
 def test_collision_asset_is_required(tmp_path):
     with pytest.raises(FileNotFoundError, match="RMUC 碰撞资产缺失"):
-        scene.build_scene(name="rmuc2026@2.0.0", asset_dir=tmp_path)
-    (tmp_path / "rmuc2026_collision.json").write_text('{"boxes": []}')
+        scene.build_scene(name="rmuc2027@1.0.0", asset_dir=tmp_path)
+    (tmp_path / "rmuc2027_collision.json").write_text('{"boxes": []}')
     with pytest.raises(ValueError, match="RMUC 碰撞资产为空"):
-        scene.build_scene(name="rmuc2026@2.0.0", asset_dir=tmp_path)
+        scene.build_scene(name="rmuc2027@1.0.0", asset_dir=tmp_path)
 
 
 @pytest.mark.parametrize("rate", [200, 1000])
 def test_physics_and_imu_without_renderer(tmp_path, rate):
     # 测试台阶顶面与停机坪同高，足够覆盖机体；不表示完整 RMUC 场地。
-    (tmp_path / "rmuc2026_collision.json").write_text(json.dumps({
+    (tmp_path / "rmuc2027_collision.json").write_text(json.dumps({
         "boxes": [[-13.0, 0.0, 0.1875, 0.5, 0.5, 0.1875]],
     }))
-    env = DroneEnv(scene_factory=partial(scene.build_scene, name="rmuc2026@2.0.0", asset_dir=tmp_path), timestep=1.0 / rate, gyro_density=0.0, accel_density=0.0)
-    np.testing.assert_allclose(env.state()[0], scene.drone_pad("rmuc2026@2.0.0"))
+    env = DroneEnv(scene_factory=partial(scene.build_scene, name="rmuc2027@1.0.0", asset_dir=tmp_path), timestep=1.0 / rate, gyro_density=0.0, accel_density=0.0)
+    np.testing.assert_allclose(env.state()[0], scene.drone_pad("rmuc2027@1.0.0"))
     assert env.data.ncon == 0
     assert env.model.nu == 4
     assert env.model.ncam == 0
@@ -48,7 +48,7 @@ def test_physics_and_imu_without_renderer(tmp_path, rate):
     gyro, accel = env.imu()
     np.testing.assert_allclose(gyro, 0.0, atol=1e-5)
     np.testing.assert_allclose(accel, [0.0, 0.0, 9.81], atol=1e-3)
-    assert env.state()[0][2] > scene.resolve("rmuc2026@2.0.0").pad[2]
+    assert env.state()[0][2] > scene.resolve("rmuc2027@1.0.0").pad[2]
     env.apply_motor_thrusts(np.full(4, env.airframe()["max_thrust_per_motor"]))
     for _ in range(round(0.2 * rate)):
         env.step()
@@ -57,10 +57,10 @@ def test_physics_and_imu_without_renderer(tmp_path, rate):
 
 @pytest.mark.parametrize("buffered", [False, True])
 def test_sensor_snapshot_uses_integrated_state(tmp_path, buffered):
-    (tmp_path / "rmuc2026_collision.json").write_text(json.dumps({
+    (tmp_path / "rmuc2027_collision.json").write_text(json.dumps({
         "boxes": [[-13.0, 0.0, 0.1875, 0.5, 0.5, 0.1875]],
     }))
-    env = DroneEnv(scene_factory=partial(scene.build_scene, name="rmuc2026@2.0.0", asset_dir=tmp_path), gyro_density=0.0, accel_density=0.0)
+    env = DroneEnv(scene_factory=partial(scene.build_scene, name="rmuc2027@1.0.0", asset_dir=tmp_path), gyro_density=0.0, accel_density=0.0)
     origin = np.array([0.0, 0.0, 5.0])
     env.reset(origin, np.array([0.0, 0.0, 0.0, 1.0]))
     env.data.qvel[:3] = [1.0, 0.0, 0.0]
@@ -99,12 +99,12 @@ def test_sensor_snapshot_uses_integrated_state(tmp_path, buffered):
 @pytest.mark.parametrize("gyro_density,accel_density", [(2e-4, 2e-3), (2e-4, 0), (0, 2e-3), (0, 0)])
 @pytest.mark.parametrize("buffered", [False, True])
 def test_imu_batches_preserve_seeded_samples_and_snapshots(tmp_path, gyro_density, accel_density, buffered):
-    (tmp_path / "rmuc2026_collision.json").write_text(json.dumps({
+    (tmp_path / "rmuc2027_collision.json").write_text(json.dumps({
         "boxes": [[-13.0, 0.0, 0.1875, 0.5, 0.5, 0.1875]],
     }))
     rng = np.random.default_rng(20260930)
     expected_rng = np.random.default_rng(20260930)
-    env = DroneEnv(scene_factory=partial(scene.build_scene, name="rmuc2026@2.0.0", asset_dir=tmp_path),
+    env = DroneEnv(scene_factory=partial(scene.build_scene, name="rmuc2027@1.0.0", asset_dir=tmp_path),
                    gyro_density=gyro_density, accel_density=accel_density, rng=rng)
     sensor_data = env.data.sensordata.copy()
     snapshot = env.imu()
@@ -134,10 +134,10 @@ def test_imu_batches_preserve_seeded_samples_and_snapshots(tmp_path, gyro_densit
 @pytest.mark.parametrize("imu_rate", [100, 1000])
 @pytest.mark.parametrize("buffered", [False, True])
 def test_imu_noise_preserves_continuous_density(tmp_path, imu_rate, buffered):
-    (tmp_path / "rmuc2026_collision.json").write_text(json.dumps({
+    (tmp_path / "rmuc2027_collision.json").write_text(json.dumps({
         "boxes": [[-13.0, 0.0, 0.1875, 0.5, 0.5, 0.1875]],
     }))
-    env = DroneEnv(scene_factory=partial(scene.build_scene, name="rmuc2026@2.0.0", asset_dir=tmp_path),
+    env = DroneEnv(scene_factory=partial(scene.build_scene, name="rmuc2027@1.0.0", asset_dir=tmp_path),
                    imu_period=1.0 / imu_rate, rng=np.random.default_rng(20260930))
     imu_out = (np.empty(3), np.empty(3)) if buffered else None
     samples = np.array([np.concatenate(env.imu(out=imu_out)) for _ in range(20000)])

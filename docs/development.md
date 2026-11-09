@@ -94,7 +94,7 @@ commit message 使用 `<type>(<scope>): <摘要>`；PR 标题使用 `<type>: <�
 ## 构建与运行
 
 场景由 `configs/scene.toml` 的 `scene = "<赛季>@<版本>"` 唯一选择，已注册
-`rmuc2026@2.0.0` / `rmuc2027@1.0.0`；资产在 `models/<赛季>/v<版本>/`（`field.glb`、
+`rmuc2027@1.0.0`；资产在 `models/<赛季>/v<版本>/`（`field.glb`、
 `<赛季>_collision.json`），另需 `models/drone/drone.glb`。未注册版本或缺失资产报错，不回退场景。
 停机坪定义来自 `firefly_mujoco.scene.SCENES[].pad` 与 `PAD_CLEARANCE`，不在文档复制坐标。
 render 使用无窗口 GPU 渲染；Rerun 原生 Viewer 需要图形会话。Rust/Python 版本和依赖

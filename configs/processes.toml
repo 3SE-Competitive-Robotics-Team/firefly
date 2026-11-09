@@ -45,5 +45,5 @@ autostart = false
 
 [[process]]
 name = "lightglue"
-command = ["bin/lightglue", "--map", "maps/rmuc2026-2.0.0.ffvmap"]
+command = ["bin/lightglue", "--map", "maps/rmuc2027-1.0.0.ffvmap"]
 autostart = false

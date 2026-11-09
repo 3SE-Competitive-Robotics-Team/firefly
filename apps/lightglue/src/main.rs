@@ -731,7 +731,7 @@ mod tests {
         use super::*;
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let map =
-            firefly_vision_map::load_map(&root.join("apps/planner/maps/rmuc2026-2.0.0.ffvmap"))
+            firefly_vision_map::load_map(&root.join("apps/planner/maps/rmuc2027-1.0.0.ffvmap"))
                 .unwrap();
         let mut session = load_session(&test_model_path().expect("model required")).unwrap();
         let frame = map

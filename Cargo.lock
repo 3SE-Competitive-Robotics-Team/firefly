@@ -3765,6 +3765,7 @@ dependencies = [
  "firefly-pubsub",
  "iceoryx2",
  "jiff",
+ "log",
  "nalgebra",
 ]
 

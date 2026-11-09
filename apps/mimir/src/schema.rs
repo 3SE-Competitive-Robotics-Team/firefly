@@ -149,12 +149,25 @@ pub fn fields(name: &str) -> Result<&'static [&'static str]> {
         | "acceptance/corrected_velocity"
         | "acceptance/reference_velocity" => &["x_m_s", "y_m_s", "z_m_s"],
         "vio/diagnostics/rotation_delta_rad" => &["x_rad", "y_rad", "z_rad"],
-        "vio/posterior/gyro_bias_imu"
+        "vio/diagnostics/costs_before" | "vio/diagnostics/costs_after" => {
+            &["vision", "inertial", "bias_random_walk", "marginal_prior"]
+        }
+        "vio/diagnostics/solver_termination" => {
+            &["attempts", "rejected", "reason", "last_step_inf_norm"]
+        }
+        "vio/diagnostics/yaw_updates_rad" => &[
+            "latest_world_z_rad",
+            "oldest_world_z_rad",
+            "window_mean_world_z_rad",
+            "window_stddev_world_z_rad",
+        ],
+        "vio/input/gyro_rad_s"
+        | "vio/posterior/gyro_bias_imu"
         | "vio/prediction/angular_velocity_body"
         | "vio/gyro_bias"
         | "fc/standby_eskf/gyro_bias"
         | "fc/debug/rate_flu" => &["x_rad_s", "y_rad_s", "z_rad_s"],
-        "vio/posterior/accel_bias_imu" => &["x_m_s2", "y_m_s2", "z_m_s2"],
+        "vio/input/accel_m_s2" | "vio/posterior/accel_bias_imu" => &["x_m_s2", "y_m_s2", "z_m_s2"],
         "vio/prediction/posterior_age_s"
         | "fc/imu/posterior_age_s"
         | "fc/standby_eskf/imu_age_s" => &["age_s"],

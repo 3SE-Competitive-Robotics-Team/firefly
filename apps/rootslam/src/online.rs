@@ -390,6 +390,17 @@ impl LiveSession {
     fn publish_diagnostics(&mut self) {
         while let Ok(data) = self.diagnostics_rx.try_recv() {
             let stamp = data.t_ns as f64 * 1e-9;
+            if let Some(solver) = data.solver {
+                self.publish_solver_diagnostics(stamp, &solver);
+            }
+            if let Some(updates) = data.yaw_updates {
+                publish_scalar_diagnostic(
+                    &self.viz,
+                    stamp,
+                    "vio/diagnostics/yaw_updates_rad",
+                    updates,
+                );
+            }
             for (name, values) in [
                 ("vio/diagnostics/tracks", data.tracks),
                 ("vio/diagnostics/graph", data.graph),
@@ -474,6 +485,20 @@ impl LiveSession {
                     }
                 }
             }
+        }
+    }
+
+    fn publish_solver_diagnostics(
+        &self,
+        stamp: f64,
+        solver: &firefly_basalt::vi_estimator::vio_estimator::VioSolverDiagnostics,
+    ) {
+        for (name, values) in [
+            ("vio/diagnostics/costs_before", solver.costs_before),
+            ("vio/diagnostics/costs_after", solver.costs_after),
+            ("vio/diagnostics/solver_termination", solver.termination),
+        ] {
+            publish_scalar_diagnostic(&self.viz, stamp, name, values);
         }
     }
 
@@ -593,6 +618,34 @@ mod config_tests {
             };
             assert!(options.validate().is_err());
             assert!(initial_vio_config(&options).is_err());
+        }
+    }
+
+    #[test]
+    fn stereo_baseline_gate_is_independent_of_body_attitude() {
+        use firefly_basalt::utils::ba_utils::compute_rel_pose;
+        use nalgebra::UnitQuaternion;
+        let calibration = render_calibration();
+        let minimum = VioConfig::default().vio_min_triangulation_dist.powi(2);
+        for step in 0..360 {
+            let t = f64::from(step) * 0.01;
+            let body = Isometry3::from_parts(
+                Translation3::new(t, -t, t),
+                UnitQuaternion::from_euler_angles(0.01 * t, -0.02 * t, 0.03 * t),
+            );
+            let relative = compute_rel_pose(
+                &body,
+                &calibration.t_i_c[1],
+                &body,
+                &calibration.t_i_c[0],
+                None,
+                None,
+            );
+            assert!(
+                relative.translation.vector.norm_squared() >= minimum,
+                "step={step}, baseline2={:.18}, minimum2={minimum:.18}",
+                relative.translation.vector.norm_squared()
+            );
         }
     }
 }

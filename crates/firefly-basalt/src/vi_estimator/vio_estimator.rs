@@ -41,7 +41,19 @@ pub struct VioFrameDiagnostics {
     pub position_delta: [f64; 3],
     pub velocity_delta: [f64; 3],
     pub rotation_delta: [f64; 3],
+    /// World-Z rotation increments: latest, oldest, window mean and population stddev.
+    pub yaw_updates: Option<[f64; 4]>,
+    pub solver: Option<VioSolverDiagnostics>,
     pub flow: Option<Arc<OpticalFlowResult>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VioSolverDiagnostics {
+    /// Weighted vision, inertial, bias random walk, and marginal prior costs.
+    pub costs_before: [f64; 4],
+    pub costs_after: [f64; 4],
+    /// Attempts, rejected attempts, termination code, last attempted step infinity norm.
+    pub termination: [f64; 4],
 }
 pub struct VioWorkerInputs {
     pub vision: Receiver<Option<Arc<OpticalFlowResult>>>,

@@ -52,7 +52,13 @@ Rust 应用统一用 `cargo xtask release` 构建；物理资产检查、离线�
 
 普查工具 `firefly-cad-census <stp>` 输出产品、包围盒、颜色与源 hash；
 `firefly-cad-tessellate`、`firefly-cad-collide` 支持单阶段运行。
-视觉导出脚本是 `scripts/blender_field.py`。
+视觉导出脚本是 `scripts/blender_field.py`。基础材质保留 CAD 近纯白与彩色面，其他中性色
+沿用体色映射。`scripts/field_surfaces/*.json` 定义地胶与平台材质，绑定原始网格 SHA-256
+和已核对的零件 ID，修改后会使视觉导出缓存失效。纹理只覆盖中性体面，CAD 明确标白或
+着色的标线保持原有几何与颜色；表面涂装不作为灯具自发光。不根据三角形形状分类标线，
+不增加悬浮几何，不把参考渲染图的阴影烘入基色。
+当前材质参考 2027 规则手册图 4-1～4-3，地胶纹理与粗糙度属于近似外观，
+不代表实测光学参数。VIO 验证须记录实际资产指纹。
 
 ```bash
 uv run --all-packages --extra test pytest packages/firefly-cad/tests/ tests/evaluation/ -q -p no:cacheprovider

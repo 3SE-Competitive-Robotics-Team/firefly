@@ -156,7 +156,8 @@ def build(source: Path, scene: SceneId, output: Path, map_path: Path, options: O
           lambda: write_collision(collide([raw], options.resolution_m), collision))
     export_script = ROOT / "scripts" / "blender_field.py"
     environment = blender_environment(executable, output / "derived", versions["numpy"])
-    stage("visual", cache, {"raw": raw_hash, "script": digest(export_script), "blender": blender_version}, [visual],
+    surface_profiles = {p.name: digest(p) for p in sorted((export_script.parent / "field_surfaces").glob("*.json"))}
+    stage("visual", cache, {"raw": raw_hash, "script": digest(export_script), "surface_profiles": surface_profiles, "blender": blender_version}, [visual],
           lambda: subprocess.run([executable, "--background", "--python-use-system-env", "--python-exit-code", "1", "--python", str(export_script),
                                   "--", str(raw.resolve()), str(visual.resolve())], check=True, env=environment))
     stage("map", cache, {**common, "code": code["map_export.py"], "collision": digest(collision), "padding": options.padding_m, "ceiling": options.ceiling_m}, [map_path],
@@ -166,6 +167,7 @@ def build(source: Path, scene: SceneId, output: Path, map_path: Path, options: O
         raise ValueError("source STP changed during build")
     summary.update({"status": "passed", "scene": scene.name, "source": {"path": str(source), "sha256": source_hash, "bytes": source.stat().st_size},
                     "options": asdict(options), "dependencies": versions, "blender": blender_version,
+                    "surface_profiles": surface_profiles,
                     "world_frame": {"units": "m", "up": "Z", "normalization": json.loads((raw_dir / "_manifest.json").read_text())["shift_mm"]},
                     "artifacts": {str(p.resolve()): digest(p) for p in [raw, visual, collision, map_path]}})
     save_json(output / "asset_manifest.json", summary)

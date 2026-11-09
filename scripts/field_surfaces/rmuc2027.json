@@ -1,0 +1,46 @@
+{
+  "scene": "rmuc2027@1.0.0",
+  "raw_sha256": "a3257397838e76cb130545d13cb77e8f612377af147af5deea5e6a38c2880bd0",
+  "reference": "RoboMaster 2027 Super Competition Rules V1.0.0, figures 4-1 to 4-3, printed pages 29-30",
+  "scope": "2027 CAD colors and marking geometry preserved; procedural PVC appearance inspired by rulebook figures, not measured optical properties.",
+  "bounds_xy_m": [
+    -15.5,
+    -8.5,
+    15.5,
+    8.5
+  ],
+  "ground_parts": [
+    2
+  ],
+  "platform_parts": [
+    5,
+    11,
+    12,
+    13,
+    22,
+    24,
+    25,
+    39,
+    41,
+    42,
+    46,
+    47,
+    50,
+    51,
+    54,
+    59,
+    61
+  ],
+  "palette_srgb": {
+    "ground": [
+      0.23,
+      0.24,
+      0.25
+    ],
+    "platform": [
+      0.53,
+      0.54,
+      0.55
+    ]
+  }
+}

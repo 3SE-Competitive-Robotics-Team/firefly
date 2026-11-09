@@ -139,14 +139,71 @@ Hover evidence includes truth, posterior, prediction, targets/errors, velocity, 
 attitude source, safety state, per-frame residuals and optimization corrections.
 The fourth `vio/diagnostics/tracks` field counts associated landmark IDs; it is not the number of
 whitened, robustly weighted effective constraints. Identity/initialization differences between estimators
-must not be presented as equivalent accuracy evidence. Full per-point depth/weight, objective-component
-costs and optimization stop reasons do not currently have a complete mainline contract; additions must
+must not be presented as equivalent accuracy evidence. Full per-point depth/weight
+does not currently have a complete mainline contract; additions must
 follow the registration process with bounded structured payloads.
 
 Residuals are unweighted pixel residuals of valid projections: count, norm RMS and mean x/y residual.
 Zero-count placeholders must not be interpreted as zero error. Position/velocity deltas are local
 optimization after-minus-before; rotation is the corresponding rotation vector. They exclude frontend
 initialization and loop synchronization. RootSLAM also reports graph and keyframe summaries.
+
+`RUST_LOG=info,vio-gauge=debug` enables `vio/diagnostics/yaw_updates_rad` in RootSLAM.
+It distinguishes a shared window rotation from a relative attitude correction: world-Z components
+of `Log(R_after * R_before.inverse())` for the latest and oldest retained poses, followed by the
+window mean and population standard deviation. These are rotation-vector components, not Euler yaw.
+The consumer is RRD odometry diagnosis, with the image measurement `sim_time` and odom axes.
+The producer gate precedes the bounded pose snapshot (at most the configured VIO window);
+one four-scalar row is emitted per processed frame, bounded by the camera rate, with no extra topic
+or queue capacity. Production is off by default; retain every enabled row through shutdown.
+
+`RUST_LOG=info,vio-solver=debug` enables RootSLAM's `vio/diagnostics/costs_before`,
+`costs_after`, and `solver_termination` for RRD convergence diagnosis. Costs cover the complete
+active optimization problem before and after optimization: weighted robust vision, inertial,
+bias random walk, and marginal prior. The prior omits its constant term and may be negative;
+compare before/after within one frame, not absolute totals between different windows.
+Termination contains attempted steps, rejected steps, reason (1: cost decrease tolerance,
+2: step tolerance, 3: iteration budget, 4: damping limit), and last attempted step infinity norm.
+Warmup frames without optimization emit none. The producer gate precedes the two extra objective
+evaluations; each optimized image emits three four-scalar rows at its `sim_time`, bounded by the
+camera rate, with no extra topic or queue capacity. Production is off by default; retain every
+enabled row through shutdown. Costs are dimensionless and the step mixes the solver's state units.
+
+`RUST_LOG=info,vio-input=debug` records every IMU measurement admitted by the VIO runtime as
+`vio/input/gyro_rad_s` and `vio/input/accel_m_s2`, in IMU axes at the original measurement
+`sim_time`. Together with the complete timestamped left/right keypoint IDs and positions, these
+are inputs for backend replay; they are not predictor outputs or corrected IMU measurements.
+The runtime owns the producer and gates publication before constructing either row. Production
+is off by default. The simulated 1 kHz IMU adds two three-scalar rows per sample (2,000 rows/s);
+no subscriber, queue capacity, or retention policy changes. A diagnostic run must verify matching
+gyro/accel timestamps, the expected IMU sampling intervals, coverage of every processed image,
+publisher continuity, and recording completion before treating its inputs as replayable.
+
+Offline backend comparisons retain derived states in a separate RRD at the source image
+`sim_time`: `{rust,upstream}/pose` is the IMU pose in odom, `p` and `q` preserve its
+float64 position and XYZW quaternion, and `v`, `bg`, `ba` are world velocity, IMU gyroscope
+bias and IMU accelerometer bias respectively. `rust/active_ids` retains current-frame IDs
+associated with landmarks, with the same semantics as the online active-keypoint diagnostic. There is one row
+per processed image, no live IPC producer. Record both implementations' configuration adapters;
+reconstructed viewer keypoints and the initial pose carry float32 rounding and must not be
+described as bit-exact reproduction of the original online run.
+GT-based offline ablations use separate `backend_matched_raw.rrd` and
+`backend_matched_ideal.rrd` recordings with the same state entities. Both retain exactly the same
+track IDs, camera memberships and timestamps; only the ideal arm replaces pixels with projections
+of fitted static points through GT camera poses. These are diagnostic counterfactual inputs,
+never a production estimator input or flight acceptance result. Report selection counts and
+keep the unmodified recording for comparison.
+Offline temporal-flow reference comparisons use `flow/counts` (source points, common accepted
+IDs, online-only IDs, reference-only IDs) and `flow/error_px` (median, p90, maximum location
+difference on common IDs), one row per compared image pair at the target image `sim_time`.
+They compare identical recorded images and source points and do not include corner detection.
+Offline render counterfactuals reuse `cameras/{left,right}/image` in separate RRDs, indexed by
+the original pose timestamp; transport request timestamps are only used to pair replies.
+Record the renderer and scene hashes, requested/received frame counts and process exit codes.
+The bounded offline backend probe may include `rust/landmarks` as a JSON TextDocument per
+selected frame: landmark ID, host timestamp, inverse distance, and each retained observation's
+timestamp, camera, residual and Huber weight. This has no online producer; keep the probe time
+windows explicit and never enable full per-landmark payloads in production recordings.
 
 `rootslam/frame_processing_ms` starts at stereo enqueue and ends at posterior consumption in the IMU
 thread, including queue time.
