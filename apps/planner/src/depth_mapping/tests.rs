@@ -120,6 +120,61 @@ fn metric_depth_conversion_rounds_even_saturates_and_rejects_missing_values() {
 }
 
 #[test]
+fn ground_depth_does_not_observe_air_above_the_camera() {
+    let mapping = crate::config::MappingOptions::default();
+    let source = mapping.build(0.4).unwrap();
+    let options = mapping.depth;
+    let mut fusion = DepthFusion::new(&source, options, 0.4).unwrap();
+    // A level vehicle above a perfectly measured plane, using the deployed rig.
+    // Returning ground rays cannot certify air above their camera origin.
+    let body = Isometry3::translation(0.0177, -0.0071, 0.9888);
+    let camera = body * options.extrinsic().unwrap();
+    let [fx, fy, cx, cy] = options.intrinsics;
+    let pixels = (0..IMAGE_WIDTH * IMAGE_HEIGHT)
+        .map(|i| {
+            let direction = camera.rotation
+                * Vector3::new(
+                    (i % IMAGE_WIDTH) as f64 / fx - cx / fx,
+                    (i / IMAGE_WIDTH) as f64 / fy - cy / fy,
+                    1.,
+                );
+            let depth = -camera.translation.vector.z / direction.z;
+            if (0.2..=8.).contains(&depth) {
+                depth_units(depth as f32, options.k_depth_scaling_factor)
+            } else {
+                0
+            }
+        })
+        .collect::<Vec<_>>();
+    assert!(pixels.iter().any(|&depth| depth > 0));
+    let image = DepthImage::new(IMAGE_WIDTH, IMAGE_HEIGHT, pixels).unwrap();
+    for i in 0..4 {
+        let stamp = 10. + f64::from(i) * 0.032;
+        fusion
+            .integrate(
+                DepthFrame {
+                    timestamp: stamp,
+                    received: Instant::now(),
+                    image: image.clone(),
+                    trace: TraceContext::default(),
+                },
+                body,
+                stamp,
+            )
+            .unwrap();
+    }
+    let snapshot = fusion.snapshot().unwrap().unwrap();
+    assert!(snapshot.observed.is_free(camera.translation.vector));
+    assert!(snapshot.observed.is_free(Vector3::new(0.5, -0.0071, 0.8)));
+    // This crosses the same 1.0 m voxel boundary as the stalled flight's climb.
+    let above = Vector3::new(0.0454, -0.0075, 1.0011);
+    assert!(!snapshot.observed.is_free(above));
+    assert_eq!(fusion.map.inflated_occupancy_at(above), 0);
+    let (native, _, _) = fusion.map.observed_free_buffer();
+    assert!(!native[fusion.map.buffer_index(above).unwrap()]);
+}
+
+#[test]
 fn full_depth_to_collision_path_preserves_native_inflation_and_clears_obstacles() {
     let source = source();
     let mut fusion = DepthFusion::new(&source, options(), 0.25).unwrap();

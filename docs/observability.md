@@ -69,12 +69,17 @@ This catalog covers all production topic constants; test topics use isolated nam
 | `Firefly/Control` | FC → actuators/sim, evaluation | Motor evidence and FC summaries |
 | `Firefly/PlantState`, `Firefly/Airframe` | sim/airframe → FC, system consumers | Independent evaluation evidence; never VIO input |
 | `Firefly/Command` | ffctl/evaluation → FC | Results and rejection reasons in event logs |
-| `Firefly/Goal` | ffctl/evaluation → planner | Goal in local odom coordinates, not a plotting topic |
+| `Firefly/Goal` | ffctl/evaluation → planner | Position and optional terminal yaw in local odom coordinates; yaw in radians, CLI in degrees |
 | `Firefly/MandatoryStop` | external tools → planner | Stop command; outcome in planner state and logs |
-| `Firefly/Trajectory`, `Firefly/PlannerHeartbeat`, `Firefly/TrajectoryControl`, `Firefly/PlannerStatus` | planner/FSM ↔ trajectory output/evaluation | Business lifecycle; visualization uses plan entities |
+| `Firefly/Trajectory`, `Firefly/PlannerHeartbeat`, `Firefly/TrajectoryControl`, `Firefly/PlannerStatus` | planner/FSM ↔ trajectory output/evaluation | Atomic xyz/yaw polynomials with shared piece times and a stationary endpoint; heartbeat loss finishes the committed stop; status means scheduled completion, not measured arrival |
 | `Firefly/Features`, `Firefly/PoseObservation` | feature/matching → localization | Business localization input, not duplicated by mimir |
 
 Latest-value business channels are not complete raw sensor archives. Start mimir first and stop it last.
+`RUST_LOG=info,planner-motion=debug` adds one bounded proposal-summary log per motion coordination
+attempt: initial state, heading decision, first sampled rejection (window, occupied or V/A/J), and
+first unobserved sample as a separate coverage diagnostic. Unknown space is not a rejection under
+EGO's optimistic obstacle policy. It uses `logs/planner` and the existing log budgets; it does not record per-voxel masks or
+per-sample checks. Leave it disabled for ordinary operation; incomplete log recording fails validation.
 Sequence checks cover the subscription interval, not data before startup or the unknown tail of a crashed producer.
 Rust log queue/send loss is counted in `LogMessage.dropped_records`; the pump reports loss even without a later
 business log. Known loss makes the recording fail.
@@ -95,7 +100,7 @@ business log. Known loss makes the recording fail.
 | `vio/odom`, `vio/traj`, `vio/map/{pose,traj}`, `vio/gyro_bias` | Local and map poses at measurement time, derived trajectories and IMU bias summary; original frames are retained |
 | `render/capture/*` | Capture-to-publish stage timing at the original capture timestamp |
 | `corr/*`, `vision/debug/map_query_wall_s` | External localization gates, disagreement, correction and query timing |
-| `plan/*` | Paths, poses, obstacle planes and maps for display |
+| `plan/*` | Global guides, accepted executable local paths including their stopping tail, poses, obstacle planes and maps for display |
 | `plan/collision` | Planner-owned depth map after obstacle inflation, in odom coordinates at the planner simulation timestamp; bounded voxel snapshots/deltas for checking collision geometry, using the existing map display cadence and budgets |
 | `acceptance/*` | Scoring evidence; display simplification must preserve it and all acceptance thresholds |
 | `mimir/*`, `logs/*` | Configuration, queue high-water, lifecycle, failures and process events |

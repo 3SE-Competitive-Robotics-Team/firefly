@@ -20,6 +20,9 @@ pub(crate) struct Goal {
     y: Meters,
     /// 目标 z（odom 系，米）
     z: Meters,
+    /// 终点航向（度，odom +X 为零，逆时针为正）；省略则由路径决定
+    #[usage(long)]
+    yaw: Option<f64>,
 }
 
 impl Run for Goal {
@@ -35,6 +38,12 @@ impl Run for Goal {
 /// # Errors
 /// 端口创建失败，或投递期限内无订阅端（planner 未启动）。
 fn publish(goal: &Goal) -> Result<(), Error> {
+    if goal.yaw.is_some_and(|yaw| !yaw.is_finite()) {
+        return Err(Error::new(
+            firefly_error::ErrorKind::InvalidArgument,
+            "yaw must be finite",
+        ));
+    }
     let (x, y, z) = (goal.x.get(), goal.y.get(), goal.z.get());
     let publisher = new_publisher::<GoalMessage>(GOAL_TOPIC)?;
     let msg = GoalMessage {
@@ -42,6 +51,8 @@ fn publish(goal: &Goal) -> Result<(), Error> {
         position_x: x,
         position_y: y,
         position_z: z,
+        yaw: goal.yaw.unwrap_or(0.).to_radians(),
+        has_yaw: u64::from(goal.yaw.is_some()),
     };
     let receivers = deliver(&publisher, msg, GOAL_TOPIC)?;
     println!("已投递目标 ({x:.2}, {y:.2}, {z:.2}) → {GOAL_TOPIC}（{receivers} 个订阅端）");

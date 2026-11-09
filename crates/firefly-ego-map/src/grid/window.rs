@@ -106,6 +106,7 @@ impl GridMap {
                     self.flag_traverse[address] = self.raycast_num;
                     self.flag_rayend[address] = self.raycast_num;
                     self.occupancy[address] = self.clamp_min_log;
+                    self.observed_free[address] = false;
                     if self.inflate[self.inf_address(id)] > OBSTACLE_FLAG {
                         self.change_inf_buf(false, id);
                     }

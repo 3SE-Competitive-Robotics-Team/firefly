@@ -44,6 +44,8 @@ pub struct TrajectoryPieceMessage {
     pub traj_id: u64,
     pub duration: f64,
     pub coefficients: [[f64; 6]; 3],
+    /// Yaw polynomial in radians, with the same start, duration and ascending powers.
+    pub yaw_coefficients: [f64; 6],
 }
 
 #[repr(C)]

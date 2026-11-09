@@ -65,7 +65,6 @@ mod tests {
             "/../../configs/planner.toml"
         ))
         .expect("shipped configs/planner.toml must parse");
-        assert!(cfg.config.yaw_hold);
         assert!((cfg.config.obstacle_clearance - 0.4).abs() < 1e-12);
         assert!((cfg.config.max_velocity - 1.5).abs() < 1e-12);
         assert!((cfg.config.weight_obstacle - 10_000.0).abs() < 1e-9);

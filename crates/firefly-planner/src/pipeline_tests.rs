@@ -1,8 +1,6 @@
 use crate::InitSource;
 use crate::config::PlannerConfig;
 use crate::manager::*;
-const YAW_DOT_MAX: f64 = 2.0 * std::f64::consts::PI;
-const YAW_DOT_DOT_MAX: f64 = 5.0 * std::f64::consts::PI;
 const GROUND_LOOKAHEAD_DIST: f64 = 2.0;
 const STOP_PIECE_DURATION: f64 = 1.0;
 use crate::{
@@ -48,10 +46,7 @@ impl PlannerManager {
         start: Vector3<f64>,
         goal: Vector3<f64>,
     ) -> Result<Self> {
-        let server = TrajectoryServer::new(
-            planner.config().yaw_hold,
-            planner.config().heartbeat_timeout,
-        );
+        let server = TrajectoryServer::new(planner.config().heartbeat_timeout);
         let mut fsm = ReplanFsm::new(crate::PlannerManager::with_planner(
             planner, options, start, goal,
         )?);
@@ -70,6 +65,7 @@ impl PlannerManager {
             if self.accepted != Some(identity) {
                 self.server.receive(TrajectoryCommand {
                     trajectory: local.traj.clone(),
+                    yaw: local.yaw.clone(),
                     start_time: local.start_time,
                     traj_id: local.traj_id,
                 });
@@ -96,7 +92,7 @@ impl PlannerManager {
         event.emergency_stop = self.fsm.is_emergency();
         self.synchronize();
         self.server.heartbeat(now);
-        let reference = self.server.sample(now, now).into_iter().flatten().last();
+        let reference = self.server.sample(now, now);
         Report { event, reference }
     }
     fn is_finished(&self) -> bool {
@@ -104,12 +100,6 @@ impl PlannerManager {
     }
     fn is_mandatory_stopped(&self) -> bool {
         self.fsm.is_mandatory_stopped()
-    }
-    fn yaw_state(&self) -> (f64, f64) {
-        self.server.yaw_state()
-    }
-    fn update_yaw(&mut self, pos: Vector3<f64>, target: Vector3<f64>, now: f64) -> (f64, f64) {
-        self.server.update_yaw(pos, target, now)
     }
     fn set_goal(&mut self, now: f64, measured: Option<State>, goal: Vector3<f64>) -> Result<()> {
         self.fsm.set_goal(now, measured, goal)
@@ -182,6 +172,72 @@ fn open_manager_with_wall(virtual_wall: Option<(f64, f64)>) -> PlannerManager {
 
 fn open_manager() -> PlannerManager {
     open_manager_with_wall(None)
+}
+
+#[test]
+fn coordinated_stopping_prefixes_progress_through_unknown_air_without_reversing_heading() {
+    let mut m = open_manager();
+    m.update_motion_context(crate::motion::MotionContext {
+        observed: firefly_map::ObservedSpace::from_buffer(
+            0.5,
+            [0; 3],
+            [40, 24, 16],
+            [0; 3],
+            &vec![false; 40 * 24 * 16],
+        ),
+        measured_yaw: 0.,
+        view_half_angle: 0.6,
+    });
+    let mut state = state_at(Vector3::new(1., 1., 1.));
+    for i in 0..=180 {
+        let now = f64::from(i) * 0.1;
+        if let Some(local) = m.local() {
+            let sample = local
+                .traj
+                .eval((now - local.start_time).clamp(0., local.traj.duration()));
+            state = State {
+                position: sample.position.into(),
+                velocity: sample.velocity,
+                acceleration: sample.acceleration,
+            };
+        }
+        let report = m.cycle(now, Some(state));
+        let reference = report
+            .reference
+            .expect("a feasible open corridor must keep producing references");
+        assert!(reference.yaw.abs() < 0.01, "{now}: {}", reference.yaw);
+        assert!(reference.velocity.x >= -1e-6, "{now}: backwards command");
+        if m.is_finished() {
+            break;
+        }
+    }
+    assert!(m.is_finished(), "stopping tails must not prevent arrival");
+    assert!((state.position.coords - Vector3::new(10., 1., 1.)).norm() < 0.01);
+}
+
+#[test]
+fn expired_stopping_tail_replans_from_rest_without_extrapolation() {
+    let mut m = open_manager();
+    m.update_motion_context(crate::motion::MotionContext {
+        observed: firefly_map::ObservedSpace::from_buffer(
+            0.5,
+            [0; 3],
+            [40, 24, 16],
+            [0; 3],
+            &vec![true; 40 * 24 * 16],
+        ),
+        measured_yaw: 0.,
+        view_half_angle: 0.6,
+    });
+    m.cycle(0., Some(state_at(Vector3::new(1., 1., 1.))));
+    let local = m.local().unwrap();
+    let end = local.traj.eval(local.traj.duration());
+    let now = local.start_time + local.traj.duration() + 100.;
+    let report = m.cycle(now, Some(state_at(end.position)));
+    assert!(report.replanned);
+    let new = m.local().unwrap().traj.eval(0.);
+    assert!((new.position - end.position).norm() < 1e-9);
+    assert!(new.velocity.norm() < 1e-9 && new.acceleration.norm() < 1e-9);
 }
 
 #[test]
@@ -798,151 +854,6 @@ fn collision_monitor_ignores_already_flown_part() {
     assert_eq!(m.replans(), 0);
 }
 
-/// 沿 +y 方向直飞的管理器（起点 (1,1,1)，终点 (1,10,1)）：航向恒为 π/2。
-fn northbound_manager() -> PlannerManager {
-    let map = GridMapBuilder::new(0.5, [24, 40, 16]).build().unwrap();
-    let planner = Planner::new(PlannerConfig::default(), map);
-    PlannerManager::with_planner(
-        planner,
-        ManagerOptions::default(),
-        Vector3::new(1.0, 1.0, 1.0),
-        Vector3::new(1.0, 10.0, 1.0),
-    )
-    .unwrap()
-}
-
-// yaw_hold（本项目扩展）：锁定起飞朝向横飞，不跟速度方向，角速度恒零。
-#[test]
-fn yaw_hold_keeps_takeoff_heading() {
-    let map = GridMapBuilder::new(0.5, [24, 40, 16]).build().unwrap();
-    let cfg = PlannerConfig {
-        yaw_hold: true,
-        ..Default::default()
-    };
-    let planner = Planner::new(cfg, map);
-    let mut m = PlannerManager::with_planner(
-        planner,
-        ManagerOptions::default(),
-        Vector3::new(1.0, 1.0, 1.0),
-        Vector3::new(1.0, 10.0, 1.0),
-    )
-    .unwrap();
-    for t in [0.0, 0.5, 1.0, 2.0] {
-        let r = m.cycle(t, Some(state_at(Vector3::new(1.0, 1.0 + t, 1.0))));
-        let reference = r.reference.expect("应有参考指令");
-        assert!(
-            reference.yaw.abs() < 1e-12,
-            "hold 下偏航应锁定 0，实际 {}",
-            reference.yaw
-        );
-        assert!(reference.yaw_dot.abs() < 1e-12);
-    }
-}
-
-#[test]
-fn yaw_tracks_straight_line_heading() {
-    let mut m = northbound_manager();
-    // 首帧仅初始化 yaw 状态（官方首帧行为：last_yaw_=0 起）
-    let r0 = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
-    let ref0 = r0.reference.expect("首帧应有参考指令");
-    assert!(ref0.yaw.abs() < 1e-12);
-    assert!(ref0.yaw_dot.abs() < 1e-12);
-    // 第二帧（低于重规划阈值，不扰动轨迹）：前视方向沿 +y → yaw = π/2
-    let r1 = m.cycle(0.5, None);
-    let ref1 = r1.reference.expect("第二帧应有参考指令");
-    assert!(
-        (ref1.yaw - std::f64::consts::FRAC_PI_2).abs() < 1e-6,
-        "直线轨迹 yaw 应为航向角 π/2，实际 {}",
-        ref1.yaw
-    );
-    // 首帧 yaw 从初值 0 出发，本帧一步内完成对准（dt=0.5 的限幅剖面
-    // 容许 π/2），角速度为实际变化率且不超限幅
-    assert!(
-        ref1.yaw_dot.abs() <= YAW_DOT_MAX + 1e-9,
-        "角速度超限幅: {}",
-        ref1.yaw_dot
-    );
-    // 第三帧已对准航向：yaw 保持 π/2，角速度归零
-    let r2 = m.cycle(1.0, None);
-    let ref2 = r2.reference.expect("第三帧应有参考指令");
-    assert!((ref2.yaw - std::f64::consts::FRAC_PI_2).abs() < 1e-6);
-    assert!(ref2.yaw_dot.abs() < 1e-9, "已对准航向后角速度应≈0");
-    // 包装不变量：yaw 始终在 [-π,π]
-    assert!(ref1.yaw.abs() <= std::f64::consts::PI + 1e-12);
-}
-
-#[test]
-fn yaw_wraps_across_pi_without_jumping() {
-    let mut m = open_manager();
-    // 上一帧 yaw=3.0，期望航向 -3.0：原始差 -6.0，包装后应沿 +0.283 方向
-    // 小步推进（穿过 ±π 边界），而不是反向跳转到 -3.0
-    m.server.last_yaw = 3.0;
-    m.server.last_yaw_dot = 0.0;
-    m.server.last_yaw_time = Some(0.0);
-    let pos = Vector3::zeros();
-    let target = Vector3::new((-3.0f64).cos() * 5.0, (-3.0f64).sin() * 5.0, 0.0);
-    let (yaw, yaw_dot) = m.update_yaw(pos, target, 0.1);
-    // dt=0.1、零初速：梯形剖面首步位移 = 0.5·(5π)·dt² = 0.0785398...
-    let expect_step = 0.5 * YAW_DOT_DOT_MAX * 0.01;
-    assert!(
-        (yaw - (3.0 + expect_step)).abs() < 1e-9,
-        "yaw 应从 3.0 沿正向小步推进到 {}，实际 {yaw}",
-        3.0 + expect_step
-    );
-    assert!((yaw_dot - expect_step / 0.1).abs() < 1e-9);
-    assert!((m.server.last_yaw - yaw).abs() < 1e-12, "状态应同步更新");
-}
-
-#[test]
-fn yaw_rate_capped_under_large_turn() {
-    let mut m = open_manager();
-    // 大转向：期望航向与当前 yaw 相差 π，逐步积分整条限幅剖面
-    m.server.last_yaw = 0.0;
-    m.server.last_yaw_dot = 0.0;
-    m.server.last_yaw_time = Some(0.0);
-    let pos = Vector3::zeros();
-    let target = Vector3::new(-5.0, 0.0, 0.0); // 航向 π（与 0 反向）
-    let mut now = 0.0;
-    let mut converged = false;
-    for _ in 0..400 {
-        now += 0.02;
-        let (yaw, yaw_dot) = m.update_yaw(pos, target, now);
-        assert!(
-            yaw_dot.abs() <= YAW_DOT_MAX + 1e-9,
-            "|yaw_dot|={} 超出限幅 {}",
-            yaw_dot.abs(),
-            YAW_DOT_MAX
-        );
-        assert!(yaw.abs() <= std::f64::consts::PI + 1e-12, "包装越界: {yaw}");
-        // 到达期望航向（±π 同义）即收敛
-        if (yaw.abs() - std::f64::consts::PI).abs() < 1e-3 {
-            converged = true;
-            break;
-        }
-    }
-    assert!(converged, "限幅剖面应在有限时间内转过 π");
-}
-
-#[test]
-fn yaw_holds_last_on_deadzone() {
-    let mut m = open_manager();
-    m.server.last_yaw = 0.7;
-    m.server.last_yaw_dot = -0.3;
-    m.server.last_yaw_time = Some(1.0);
-    // 前视方向模长 ≤ 0.1（悬停/末端）：保持 last_yaw，角速度归零
-    let pos = Vector3::new(2.0, 2.0, 1.0);
-    let target = pos + Vector3::new(0.05, 0.0, 0.0);
-    let (yaw, yaw_dot) = m.update_yaw(pos, target, 1.1);
-    assert!((yaw - 0.7).abs() < 1e-12, "死区应保持 last_yaw，实际 {yaw}");
-    assert!(yaw_dot.abs() < 1e-12);
-    let state = m.yaw_state();
-    assert!((state.0 - 0.7).abs() < 1e-12 && state.1.abs() < 1e-12);
-    // 首帧初始化：不计算方向，保持初值 (0, 0)
-    let mut m2 = open_manager();
-    let (yaw2, dot2) = m2.update_yaw(pos, target, 5.0);
-    assert!(yaw2.abs() < 1e-12 && dot2.abs() < 1e-12);
-}
-
 #[test]
 fn ground_height_measures_flat_floor() {
     let mut m = open_manager();
@@ -1059,7 +970,10 @@ fn emergency_stop_survives_trajectory_exhaustion() {
     assert!(m.fsm.is_emergency(), "轨迹耗尽不得退出急停");
     assert!(!r.replanned, "急停中轨迹耗尽不得常规重规划");
     assert_eq!(m.replans(), replans_before);
-    assert!(r.reference.is_none(), "上游默认末端分支不发布参考");
+    let reference = r.reference.expect("有效心跳下保持停车终点");
+    assert!((reference.position - stop_pos).norm() < 1e-9);
+    assert!(reference.velocity.norm() < 1e-9);
+    assert!(reference.yaw_dot.abs() < 1e-9);
 }
 
 #[test]

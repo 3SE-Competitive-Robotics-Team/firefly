@@ -279,6 +279,16 @@ fn adopt(completion: Completion, fsm: &mut ReplanFsm, now: f64, measured: Option
         return false;
     };
     let elapsed = now - local.start_time;
+    if fsm.manager.motion_context.is_some()
+        && !crate::motion::executable(
+            fsm.manager.map(),
+            &local.traj,
+            elapsed,
+            fsm.manager.planner.config(),
+        )
+    {
+        return false;
+    }
     // A delayed candidate must still start near the vehicle at its original time origin.
     // Bound the handoff displacement by the existing map discretization, not solver duration.
     if measured.is_none_or(|state| {

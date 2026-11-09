@@ -12,12 +12,90 @@ use firefly_pubsub::{
         TrajectoryPieceMessage,
     },
 };
+use firefly_trajectory::{Endpoint, MincoBuilder, SolverOrder};
+use nalgebra::{Point3, Vector3};
 use std::{
     process::{Child, Command},
     time::{Duration, Instant},
 };
 
 struct OutputProcess(Child);
+
+#[test]
+#[ignore = "requires release planner/ffctl and exclusive odometry/depth/goal/trajectory IPC topics"]
+fn cli_heading_only_goal_reaches_output_without_translating() {
+    use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH};
+    let node = create_node().unwrap();
+    let odometry = Publisher::<OdomMessage>::with_topic(&node, ODOM_TOPIC).unwrap();
+    let depth = Publisher::<DepthImageMessage>::with_topic(&node, DEPTH_TOPIC).unwrap();
+    let references = Subscriber::<ReferenceMessage>::with_topic(&node, REFERENCE_TOPIC).unwrap();
+    let release = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release");
+    let mut planner = OutputProcess(
+        Command::new(release.join("planner"))
+            .args(["--goal", "0", "0", "1"])
+            .spawn()
+            .unwrap(),
+    );
+    let mut output = OutputProcess(
+        Command::new(release.join("planner"))
+            .arg("--traj-server")
+            .spawn()
+            .unwrap(),
+    );
+    let origin = Instant::now();
+    let mut goal_command: Option<OutputProcess> = None;
+    let mut saw_rotation = false;
+    loop {
+        let t = origin.elapsed().as_secs_f64();
+        assert!(t < 6., "heading-only goal did not finish");
+        assert!(planner.0.try_wait().unwrap().is_none());
+        assert!(output.0.try_wait().unwrap().is_none());
+        odometry
+            .publish(OdomMessage {
+                timestamp: 1. + t,
+                position_z: 1.,
+                is_initialized: true,
+                ..Default::default()
+            })
+            .unwrap();
+        depth
+            .publish_with(|image| {
+                image.timestamp = 1. + t;
+                image.sensor_id = 0;
+                image.width = IMAGE_WIDTH as u32;
+                image.height = IMAGE_HEIGHT as u32;
+                image.data.fill(4.);
+            })
+            .unwrap();
+        if t > 0.5 && goal_command.is_none() {
+            let command = Command::new(release.join("ffctl"))
+                .args(["planner", "goal", "0", "0", "1", "--yaw", "90"])
+                .spawn()
+                .unwrap();
+            goal_command = Some(OutputProcess(command));
+        }
+        if let Some(command) = &mut goal_command
+            && let Some(status) = command.0.try_wait().unwrap()
+        {
+            assert!(status.success(), "goal CLI failed: {status}");
+        }
+        while let Some(reference) = references.receive().unwrap() {
+            if reference.goal_timestamp == 0. {
+                continue;
+            }
+            assert!(reference.position_x.abs() < 1e-6 && reference.position_y.abs() < 1e-6);
+            assert!((reference.position_z - 1.).abs() < 1e-6);
+            saw_rotation |= reference.yaw_dot > 0.1;
+            if (reference.yaw - std::f64::consts::FRAC_PI_2).abs() < 1e-3
+                && reference.yaw_dot.abs() < 1e-3
+            {
+                assert!(saw_rotation);
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 #[test]
 #[ignore = "requires release planner and exclusive odometry/navigation/depth/trajectory IPC topics"]
@@ -97,9 +175,11 @@ fn local_planning_uses_odometry_and_ignores_map_corrections() {
 
 impl Drop for OutputProcess {
     fn drop(&mut self) {
-        let _ = Command::new("kill")
-            .args(["-INT", &self.0.id().to_string()])
-            .status();
+        if self.0.try_wait().unwrap().is_none() {
+            let _ = Command::new("kill")
+                .args(["-INT", &self.0.id().to_string()])
+                .status();
+        }
         let _ = self.0.wait();
     }
 }
@@ -153,7 +233,7 @@ fn planner_status_continues_during_map_warmup() {
 #[test]
 #[ignore = "requires release planner and exclusive Odometry/Trajectory/Reference IPC topics"]
 #[allow(clippy::too_many_lines)]
-fn independent_output_preserves_coefficients_and_upstream_timeout_publish_order() {
+fn independent_output_samples_position_yaw_and_finishes_stop_after_heartbeat_loss() {
     let node = create_node().unwrap();
     let odometry = Publisher::<OdomMessage>::with_topic(&node, ODOM_TOPIC).unwrap();
     let control =
@@ -168,23 +248,32 @@ fn independent_output_preserves_coefficients_and_upstream_timeout_publish_order(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/planner");
     let mut process = OutputProcess(Command::new(binary).arg("--traj-server").spawn().unwrap());
     let origin = Instant::now();
-    let mut first_reference = None;
-    let mut timeout_pair = None;
-    let mut previous: Option<ReferenceMessage> = None;
-    let mut references_after_timeout = 0;
-    let mut resumed = false;
+    let start = Endpoint {
+        position: Vector3::new(0., 2., 3.),
+        velocity: Vector3::zeros(),
+        acceleration: Vector3::zeros(),
+    };
+    let end = Endpoint {
+        position: Vector3::new(1., 2., 3.),
+        ..start
+    };
+    let position = MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
+        .build(&[Point3::new(0.5, 2., 3.)], &[1., 1.])
+        .unwrap()
+        .solve()
+        .unwrap();
+    let mut command_start = 1.;
+    let mut first_reference = false;
+    let mut continued_after_loss = false;
     let mut quiet_after_heartbeat = false;
-    let mut first_resumed_at = None;
+    let mut resumed = false;
     loop {
-        assert!(
-            origin.elapsed() < Duration::from_secs(6),
-            "output IPC deadline"
-        );
+        let elapsed = origin.elapsed().as_secs_f64();
+        assert!(elapsed < 6., "output IPC deadline");
         assert!(
             process.0.try_wait().unwrap().is_none(),
             "output process exited"
         );
-        let elapsed = origin.elapsed().as_secs_f64();
         odometry
             .publish(OdomMessage {
                 timestamp: 1. + elapsed,
@@ -195,81 +284,66 @@ fn independent_output_preserves_coefficients_and_upstream_timeout_publish_order(
         control
             .publish(TrajectoryControlMessage { enabled: 1 })
             .unwrap();
-        let lost_for = first_reference.map_or(0., |t: f64| elapsed - t);
-        if first_reference.is_none() || lost_for < 0.1 || lost_for > 0.9 {
+        if elapsed < 0.5 || elapsed > 2.2 {
             heartbeat
                 .publish(PlannerHeartbeatMessage { sequence: 1 })
                 .unwrap();
         }
-        // 两段 p(t)=(t,2,3)，完整系数直接跨进程传输。
-        if (first_reference.is_none() && elapsed > 0.15) || lost_for > 1.05 {
+        let restart = elapsed > 2.6 && command_start == 1.;
+        if restart {
+            command_start = 1. + elapsed;
+        }
+        if (!first_reference && elapsed > 0.15) || restart {
             trajectory
                 .publish_slice_with(2, |piece| TrajectoryPieceMessage {
-                    start_time: 1.,
+                    start_time: command_start,
                     goal_timestamp: 123.,
                     traj_id: 1,
-                    duration: 10.,
-                    coefficients: [
-                        [piece as f64 * 10., 1., 0., 0., 0., 0.],
-                        [2., 0., 0., 0., 0., 0.],
-                        [3., 0., 0., 0., 0., 0.],
-                    ],
+                    duration: 1.,
+                    coefficients: std::array::from_fn(|axis| {
+                        std::array::from_fn(|power| {
+                            position.coefficients()[(piece * 6 + power, axis)]
+                        })
+                    }),
+                    yaw_coefficients: std::array::from_fn(|power| {
+                        position.coefficients()[(piece * 6 + power, 0)]
+                    }),
                 })
                 .unwrap();
         }
         let mut received = false;
         while let Some(message) = references.receive().unwrap() {
+            received = true;
             assert!(
                 elapsed > 0.15,
-                "control and heartbeat alone must not publish a reference"
+                "heartbeat alone must not publish references"
             );
-            received = true;
-            if message.velocity_x == 0. {
-                previous = Some(*message);
-                continue;
-            }
-            assert!((message.position_x - (message.timestamp - 1.)).abs() < 1e-10);
-            assert_eq!(message.position_y, 2.);
-            assert_eq!(message.position_z, 3.);
-            assert_eq!(message.velocity_x, 1.);
-            assert_eq!(message.goal_timestamp, 123.);
-            assert_eq!(message.acceleration_x, 0.);
-            first_reference.get_or_insert(elapsed);
-            if let Some(hold) = previous.take() {
-                assert_eq!(
-                    hold.timestamp, message.timestamp,
-                    "hold must precede tracking in same callback"
-                );
-                timeout_pair = Some(elapsed);
-            } else if timeout_pair.is_some() && lost_for < 1.05 {
-                references_after_timeout += 1;
-            }
-            if lost_for > 1.05 {
-                resumed = true;
-                first_resumed_at = Some(elapsed);
-            }
+            let sample = position.eval((message.timestamp - command_start).clamp(0., 2.));
+            assert!((message.position_x - sample.position.x).abs() < 1e-9);
+            assert!((message.velocity_x - sample.velocity.x).abs() < 1e-9);
+            assert!((message.acceleration_x - sample.acceleration.x).abs() < 1e-9);
+            assert!((message.yaw - sample.position.x).abs() < 1e-9);
+            assert!((message.yaw_dot - sample.velocity.x).abs() < 1e-9);
+            assert!((message.position_y - 2.).abs() < 1e-9);
+            assert!((message.position_z - 3.).abs() < 1e-9);
+            assert!((message.goal_timestamp - 123.).abs() < 1e-9);
+            first_reference = true;
+            continued_after_loss |= elapsed > 1.2 && elapsed < 1.9;
+            resumed |= command_start > 1.;
         }
-        if lost_for > 0.95 && lost_for < 1.05 {
+        if elapsed > 2.3 && elapsed < 2.55 {
             assert!(
                 !received,
-                "heartbeats alone must not resume an expired trajectory"
+                "heartbeat alone must not restart a completed stopping tail"
             );
             quiet_after_heartbeat = true;
         }
-        if resumed && first_resumed_at.is_some() {
+        if resumed {
             break;
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert!(
-        timeout_pair.is_some(),
-        "expected hold then tracking on timeout callback"
-    );
-    assert_eq!(
-        references_after_timeout, 0,
-        "output must stop after timeout callback"
-    );
-    assert!(quiet_after_heartbeat && resumed);
+    assert!(first_reference && continued_after_loss && quiet_after_heartbeat && resumed);
     // A live global navigation stream cannot keep output alive after local odometry stops.
     let navigation = Publisher::<NavigationMessage>::with_topic(&node, NAVIGATION_TOPIC).unwrap();
     let stopped_at = Instant::now();

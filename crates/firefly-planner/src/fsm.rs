@@ -116,6 +116,21 @@ impl ReplanFsm {
         }
         Ok(())
     }
+
+    /// A heading-only retarget is a new solve even when the position is unchanged.
+    pub fn set_goal_yaw(&mut self, yaw: Option<f64>) -> bool {
+        if self.mandatory_stop || !self.manager.set_goal_yaw(yaw) {
+            return false;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        self.have_target = true;
+        self.finished = false;
+        self.have_new_target = true;
+        if matches!(self.state, ExecState::ExecTraj | ExecState::WaitTarget) {
+            self.change_state(ExecState::GenNewTraj);
+        }
+        true
+    }
     /// # Errors
     /// 新坐标快照无法生成全局引导。
     pub fn invalidate_localization(&mut self, now: f64, measured: State) -> Result<()> {
@@ -223,7 +238,7 @@ impl ReplanFsm {
             ExecState::EmergencyStop => {
                 if self.escape_emergency {
                     if let Some(measured) = measured {
-                        self.manager.emergency_stop(now, measured.position.coords);
+                        self.manager.emergency_stop(now, measured);
                         report.replanned = true;
                     }
                 } else if self.failsafe_enabled

@@ -22,6 +22,9 @@ pub struct GoalMessage {
     pub position_x: f64,
     pub position_y: f64,
     pub position_z: f64,
+    /// Optional terminal heading in odom radians. `has_yaw` must be 0 or 1.
+    pub yaw: f64,
+    pub has_yaw: u64,
 }
 
 impl Default for GoalMessage {
@@ -31,6 +34,8 @@ impl Default for GoalMessage {
             position_x: 0.0,
             position_y: 0.0,
             position_z: 0.0,
+            yaw: 0.0,
+            has_yaw: 0,
         }
     }
 }

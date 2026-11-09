@@ -10,6 +10,7 @@ mod config;
 pub mod fsm;
 pub mod init;
 pub mod manager;
+pub mod motion;
 pub mod multitopo;
 pub mod objective;
 mod obstacles;

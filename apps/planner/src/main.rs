@@ -126,6 +126,7 @@ struct App {
     republish_trajectory: bool,
     /// 管理器行为参数（来自配置，启动日志展示）。
     manager_options: ManagerOptions,
+    view_half_angle: f64,
     /// 可视化发布端（经 `Firefly/Viz` 话题，`mimir` 进程统一写 rerun）。
     viz_pub: Option<VizPublisher>,
     /// 日志聚合句柄（主循环作用域持有，每 tick 传给 `pump_log_ipc`；
@@ -181,6 +182,9 @@ impl App {
         goal: Option<[f64; 3]>,
     ) -> Result<Self> {
         let mut grid = mapping.build(config.obstacle_clearance)?;
+        let [fx, _, cx, _] = mapping.depth.intrinsics;
+        let view_half_angle =
+            (cx.min(firefly_pubsub::camera::IMAGE_WIDTH as f64 - 1. - cx) / fx).atan();
         let depth_fusion =
             depth_mapping::DepthFusion::new(&grid, mapping.depth, config.obstacle_clearance)?;
         grid = depth_mapping::collision_grid(&grid)?;
@@ -240,6 +244,7 @@ impl App {
             republish_trajectory: false,
             manager_options,
             viz_pub,
+            view_half_angle,
             log_ipc,
             perceived_center: Vector3::zeros(),
             voxel_state: HashMap::new(),
@@ -375,18 +380,35 @@ impl App {
             return Ok(());
         }
         self.perceived_center = snapshot.state.position.coords;
+        self.fsm
+            .manager_mut()
+            .update_motion_context(firefly_planner::motion::MotionContext {
+                observed: self
+                    .map_input
+                    .observed()
+                    .expect("ready map has observation mask"),
+                measured_yaw: snapshot.orientation.euler_angles().2,
+                view_half_angle: self.view_half_angle,
+            });
 
         // 动态目标：收到新目标即重目标（重算全局路径 + 重置状态机），
         // 下一 tick 重新规划飞往新目标
         if let Some(goal) = self.pending_goal.take() {
+            if goal.has_yaw > 1 || !goal.yaw.is_finite() {
+                log::warn!("invalid goal heading");
+                return Ok(());
+            }
             let target = Vector3::new(goal.position_x, goal.position_y, goal.position_z);
             let repeated = (target - self.fsm.manager().goal().coords).norm() < 1e-6;
             match self.fsm.set_goal(now, measured, target) {
                 Ok(()) => {
+                    let heading_changed = self
+                        .fsm
+                        .set_goal_yaw((goal.has_yaw == 1).then_some(goal.yaw));
                     if !self.fsm.is_mandatory_stopped() {
                         self.output.goal_timestamp = goal.timestamp;
                         // 重复目标不重建轨迹；重发当前轨迹，让采样端看到同一目标身份。
-                        self.republish_trajectory = repeated;
+                        self.republish_trajectory = repeated && !heading_changed;
                     }
                     log::info!(
                         "目标更新 ({:.1},{:.1},{:.1})，重新规划中",
@@ -528,6 +550,16 @@ impl App {
             return Ok(());
         }
 
+        self.fsm
+            .manager_mut()
+            .update_motion_context(firefly_planner::motion::MotionContext {
+                observed: self
+                    .map_input
+                    .observed()
+                    .expect("ready map has observation mask"),
+                measured_yaw: snapshot.orientation.euler_angles().2,
+                view_half_angle: self.view_half_angle,
+            });
         let report = self.fsm.safety_tick_deferred(now);
         if report.emergency_stop || self.fsm.is_mandatory_stopped() {
             self.solver.cancel();
@@ -962,8 +994,7 @@ fn main() {
         }
     };
     if args.traj_server {
-        if let Err(error) = output::run(toml_cfg.config.yaw_hold, toml_cfg.config.heartbeat_timeout)
-        {
+        if let Err(error) = output::run(toml_cfg.config.heartbeat_timeout) {
             log::error!("轨迹输出失败：{error}");
             firefly_observability::flush();
             std::process::exit(1);

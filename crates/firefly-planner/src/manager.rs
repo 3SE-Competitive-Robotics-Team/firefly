@@ -53,6 +53,8 @@ impl Default for ManagerOptions {
 #[derive(Debug, Clone)]
 pub struct LocalTraj {
     pub traj: Trajectory,
+    /// Yaw is stored in x, with the same piece durations as position.
+    pub yaw: Trajectory,
     /// 轨迹起始时刻（管理器时钟，秒）；检查点/监控的时间原点。
     pub start_time: f64,
     /// 带时间戳检查点（官方 `PtsChk_t`，规划成功后生成一次）：执行期
@@ -146,9 +148,39 @@ pub struct PlannerManager {
     pub(crate) swarm: Vec<Option<SwarmTraj>>,
     pub(crate) have_recv_pre_agent: bool,
     pub(crate) consecutive_failures: u32,
+    pub(crate) motion_context: Option<crate::motion::MotionContext>,
+    goal_yaw: Option<f64>,
 }
 
 impl PlannerManager {
+    pub fn update_motion_context(&mut self, context: crate::motion::MotionContext) {
+        self.motion_context = Some(context);
+    }
+
+    pub(crate) fn set_goal_yaw(&mut self, yaw: Option<f64>) -> bool {
+        if self.goal_yaw == yaw {
+            return false;
+        }
+        self.goal_yaw = yaw;
+        true
+    }
+
+    fn initial_yaw(&self, now: f64) -> Vector3<f64> {
+        if let Some(local) = &self.local {
+            let state = local
+                .yaw
+                .eval((now - local.start_time).clamp(0., local.yaw.duration()));
+            return Vector3::new(state.position.x, state.velocity.x, state.acceleration.x);
+        }
+        Vector3::new(
+            self.motion_context
+                .as_ref()
+                .map_or(0., |ctx| ctx.measured_yaw),
+            0.,
+            0.,
+        )
+    }
+
     pub(crate) fn snapshot(&self) -> Self {
         Self {
             planner: self.planner.snapshot(),
@@ -164,6 +196,8 @@ impl PlannerManager {
             swarm: self.swarm.clone(),
             have_recv_pre_agent: self.have_recv_pre_agent,
             consecutive_failures: self.consecutive_failures,
+            motion_context: self.motion_context.clone(),
+            goal_yaw: self.goal_yaw,
         }
     }
     /// 实际构造入口：给定已构建的 [`Planner`]（应用层负责地图来源）。
@@ -209,6 +243,8 @@ impl PlannerManager {
             // 短路为真，直接置 true 等价
             have_recv_pre_agent,
             consecutive_failures: 0,
+            motion_context: None,
+            goal_yaw: None,
         })
     }
     /// # Errors
@@ -287,7 +323,9 @@ impl PlannerManager {
         let Some(local) = &self.local else {
             return false;
         };
-        let sample = local.traj.eval(now - local.start_time);
+        let sample = local
+            .traj
+            .eval((now - local.start_time).clamp(0., local.traj.duration()));
         let start = State {
             position: Point3::from(sample.position),
             velocity: sample.velocity,
@@ -323,7 +361,10 @@ impl PlannerManager {
             InitSource::RandomStart {
                 mid: self.random_mid(start.position.coords, horizon.target, &mut rand::rng()),
             }
-        } else if !poly_init && let Some((previous, elapsed)) = &previous {
+        } else if !poly_init
+            && self.motion_context.is_none()
+            && let Some((previous, elapsed)) = &previous
+        {
             InitSource::WarmStart {
                 prev: previous,
                 elapsed: *elapsed,
@@ -332,6 +373,9 @@ impl PlannerManager {
                 global_end: self.global.glb_t_of_lc_tgt - self.global.start_time,
             }
         } else {
+            // A committed stopping prefix no longer ends at the global cursor.
+            // Rebuild the seed from its current PVA instead of splicing that tail
+            // to an unrelated point on the global guide.
             InitSource::ColdStart
         };
         match self.planner.plan_in_swarm_with_init(
@@ -356,8 +400,34 @@ impl PlannerManager {
         }
     }
 
-    pub(crate) fn emergency_stop(&mut self, now: f64, stop_pos: Vector3<f64>) {
-        match emergency_stop_traj(stop_pos) {
+    pub(crate) fn emergency_stop(&mut self, now: f64, measured: State) {
+        if self.motion_context.is_some() {
+            let start = Endpoint {
+                position: measured.position.coords,
+                velocity: measured.velocity,
+                acceleration: measured.acceleration,
+            };
+            if let Some(motion) = crate::motion::stopping_motion(
+                start,
+                self.map(),
+                self.initial_yaw(now),
+                self.planner.config(),
+            ) {
+                let result = PlanResult {
+                    trajectory: motion.position.clone(),
+                    iterations: 0,
+                    planes: vec![],
+                };
+                if self.install_local(motion.position, motion.yaw, now, false, self.traj_id + 1) {
+                    self.traj_id += 1;
+                    self.last_result = Some(result);
+                }
+            } else {
+                log::error!("no feasible emergency stop; retaining committed stopping tail");
+            }
+            return;
+        }
+        match emergency_stop_traj(measured.position.coords) {
             Ok(traj) => {
                 if self.set_local_traj(traj, now, false, self.traj_id + 1) {
                     self.traj_id += 1;
@@ -600,13 +670,19 @@ impl PlannerManager {
     /// （稠密采样退化）视同规划失败——无监控覆盖的轨迹不得进入执行。
     /// 返回是否入库成功。序号递增（官方 `setLocalTraj` 的 `traj_id++`，
     /// `plan_container.hpp:78`）：仅成功入库才消耗——入库失败不占序号。
-    pub(crate) fn adopt_plan(&mut self, result: PlanResult, now: f64, touch_goal: bool) -> bool {
+    pub(crate) fn adopt_plan(
+        &mut self,
+        mut result: PlanResult,
+        now: f64,
+        touch_goal: bool,
+    ) -> bool {
         if !self.set_local_traj(result.trajectory.clone(), now, touch_goal, self.traj_id + 1) {
             // 无监控覆盖的轨迹不入执行，视同本次重规划失败（官方
             // setLocalTrajFromOpt 失败时同样不更新局部轨迹）
             return false;
         }
         self.traj_id += 1;
+        result.trajectory = self.local.as_ref().unwrap().traj.clone();
         self.last_result = Some(result);
         true
     }
@@ -618,7 +694,48 @@ impl PlannerManager {
     /// （不消耗新序号）。返回是否入库成功。
     pub(crate) fn set_local_traj(
         &mut self,
+        mut traj: Trajectory,
+        now: f64,
+        mut touch_goal: bool,
+        traj_id: u32,
+    ) -> bool {
+        let initial_yaw = self.initial_yaw(now);
+        let yaw = if let Some(context) = &self.motion_context {
+            let Some(motion) = crate::motion::coordinate(
+                &traj,
+                self.map(),
+                context,
+                initial_yaw,
+                self.goal_yaw.filter(|_| touch_goal),
+                self.planner.config(),
+                2. * self.options.replan_thresh,
+                touch_goal,
+            ) else {
+                log::debug!(
+                    "position/yaw proposal has no collision-free, dynamically feasible stopping continuation"
+                );
+                return false;
+            };
+            traj = motion.position;
+            touch_goal = motion.reaches_goal;
+            motion.yaw
+        } else {
+            let Some(yaw) = crate::motion::yaw_trajectory(
+                &traj,
+                initial_yaw,
+                self.goal_yaw.filter(|_| touch_goal),
+            ) else {
+                return false;
+            };
+            yaw
+        };
+        self.install_local(traj, yaw, now, touch_goal, traj_id)
+    }
+
+    fn install_local(
+        &mut self,
         traj: Trajectory,
+        yaw: Trajectory,
         now: f64,
         touch_goal: bool,
         traj_id: u32,
@@ -630,12 +747,15 @@ impl PlannerManager {
         let scanner = ObstacleScanner::new(self.planner.map_ref())
             .with_samples(samples)
             .with_max_vel(max_vel);
-        let Some(points_to_check) = scanner.compute_points_to_check(&traj, touch_goal) else {
+        let Some(points_to_check) =
+            scanner.compute_points_to_check(&traj, touch_goal || self.motion_context.is_some())
+        else {
             log::warn!("检查点生成失败（采样退化），丢弃本次轨迹");
             return false;
         };
         self.local = Some(LocalTraj {
             traj,
+            yaw,
             start_time: now,
             points_to_check,
             traj_id,
@@ -684,8 +804,12 @@ impl PlannerManager {
             return None;
         }
         let t_cur = now - local.start_time;
-        let (i_start, j_start, scan_end) =
-            future_scan_range(&local.points_to_check, &local.traj, t_cur, self.touch_goal)?;
+        let (i_start, j_start, scan_end) = future_scan_range(
+            &local.points_to_check,
+            &local.traj,
+            t_cur,
+            self.touch_goal || self.motion_context.is_some(),
+        )?;
         let map = self.planner.map_ref();
         for (i, bucket) in local
             .points_to_check
@@ -696,7 +820,7 @@ impl PlannerManager {
         {
             let skip = if i == i_start { j_start } else { 0 };
             for (t, p) in bucket.iter().skip(skip) {
-                if map.is_occupied_inflated(*p) {
+                if map.index_of(*p).is_none() || map.is_occupied_inflated(*p) {
                     return Some(*t);
                 }
             }

@@ -368,6 +368,10 @@ impl DepthFusion {
         }
         Ok(Some(LocalSnapshot {
             cells,
+            observed: {
+                let (free, dims, origin) = self.map.observed_free_buffer();
+                firefly_map::ObservedSpace::from_buffer(resolution, low, dims, origin, free)
+            },
             bounds,
             sequence: self.sequence,
             timestamp,

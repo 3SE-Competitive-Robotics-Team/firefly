@@ -161,6 +161,13 @@ fn safety_callback_applies_new_obstacles_and_deletions_without_exec_tick() {
         std::thread::sleep(Duration::from_millis(2));
     }
     let snapshot = |sequence, cells| LocalSnapshot {
+        observed: firefly_map::ObservedSpace::from_buffer(
+            0.5,
+            [-10; 3],
+            [20; 3],
+            [-10; 3],
+            &[true; 8000],
+        ),
         sequence,
         cells,
         timestamp: 1.,

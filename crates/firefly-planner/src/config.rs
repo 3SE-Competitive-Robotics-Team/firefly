@@ -22,8 +22,7 @@ pub struct PlannerConfig {
     /// 初始规划无需等待；≥1 必须收齐 `0..drone_id` 全部前序机轨迹才允许起飞
     /// （官方 `SEQUENTIAL_START` 态语义）。
     pub drone_id: i32,
-    /// 心跳超时（秒，官方 `traj_server::cmdCallback` 硬编码 0.5）：超过该时长
-    /// 未收到心跳时，本拍先发布保持再发布轨迹指令，后续停止采样。
+    /// 心跳超时（秒）：失联后完成已检查的停车尾段，再停止采样。
     pub heartbeat_timeout: f64,
     pub max_velocity: f64,
     pub max_acceleration: f64,
@@ -43,10 +42,6 @@ pub struct PlannerConfig {
     pub virtual_ground: Option<f64>,
     /// 虚拟天花板 z（米，规划地图坐标；官方 `grid_map/virtual_ceil`，None = 不启用）。
     pub virtual_ceiling: Option<f64>,
-    /// 偏航保持（本项目扩展，官方只有朝速度方向）：true 时参考偏航锁定
-    /// 起飞朝向、偏航角速度恒零，多旋翼侧飞，视角稳定以利视觉定位；
-    /// false 为官方行为。
-    pub yaw_hold: bool,
 }
 
 impl Default for PlannerConfig {
@@ -75,7 +70,6 @@ impl Default for PlannerConfig {
             use_multitopology_trajs: false,
             virtual_ground: None,
             virtual_ceiling: None,
-            yaw_hold: false,
         }
     }
 }

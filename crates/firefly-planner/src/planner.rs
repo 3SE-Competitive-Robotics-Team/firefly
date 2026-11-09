@@ -588,8 +588,7 @@ impl Planner {
         m
     }
 
-    #[cfg(test)]
-    fn trajectory_max_acc(traj: &Trajectory) -> f64 {
+    pub(crate) fn trajectory_max_acc(traj: &Trajectory) -> f64 {
         let mut m = 0.0_f64;
         for i in 0..traj.pieces() {
             let dur = traj.durations()[i];
@@ -598,8 +597,7 @@ impl Planner {
         m
     }
 
-    #[cfg(test)]
-    fn trajectory_max_jerk(traj: &Trajectory) -> f64 {
+    pub(crate) fn trajectory_max_jerk(traj: &Trajectory) -> f64 {
         let mut m = 0.0_f64;
         for i in 0..traj.pieces() {
             let dur = traj.durations()[i];
@@ -650,7 +648,6 @@ impl Planner {
 
     #[allow(clippy::many_single_char_names)]
     /// 单段最大加速度（对照 `poly_traj_utils.hpp:263`，但保留全程驻点求根而非仅端点）。
-    #[cfg(test)]
     fn piece_max_acc(traj: &Trajectory, piece: usize, dur: f64) -> f64 {
         // nAcc = T²·acc(Tu) = 2c2T²+6c3T³u+12c4T⁴u²+20c5T⁵u³，降幂 [20c5T⁵,12c4T⁴,6c3T³,2c2T²]
         let coeffs = traj.coefficients();
@@ -682,7 +679,6 @@ impl Planner {
 
     #[allow(clippy::many_single_char_names)]
     /// 单段最大加加速度（jerk），同范式扩展。
-    #[cfg(test)]
     fn piece_max_jerk(traj: &Trajectory, piece: usize, dur: f64) -> f64 {
         // nJer = T³·jer(Tu)=6c3T³+24c4T⁴u+60c5T⁵u²，降幂 [60c5T⁵,24c4T⁴,6c3T³]
         let coeffs = traj.coefficients();

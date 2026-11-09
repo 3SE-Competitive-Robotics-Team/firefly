@@ -28,6 +28,7 @@ impl Bounds {
 /// Complete collision geometry passed between threads in this planner process.
 pub struct LocalSnapshot {
     pub cells: Vec<Bounds>,
+    pub observed: firefly_map::ObservedSpace,
     pub bounds: Bounds,
     pub sequence: u64,
     pub timestamp: f64,
@@ -47,6 +48,9 @@ pub struct MapInput {
     window_moved: bool,
 }
 impl MapInput {
+    pub fn observed(&self) -> Option<firefly_map::ObservedSpace> {
+        self.snapshot.as_ref().map(|s| s.observed.clone())
+    }
     pub fn observe_local(&mut self, snapshot: LocalSnapshot) -> Result<()> {
         let result = self.accept(snapshot);
         self.fault |= result.is_err();
@@ -236,6 +240,13 @@ mod tests {
     fn snapshot(sequence: u64, cells: Vec<Bounds>) -> LocalSnapshot {
         LocalSnapshot {
             cells,
+            observed: firefly_map::ObservedSpace::from_buffer(
+                1.,
+                [0; 3],
+                [4; 3],
+                [0; 3],
+                &[false; 64],
+            ),
             bounds: Bounds {
                 min: [0.; 3],
                 max: [4.; 3],

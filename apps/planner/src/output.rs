@@ -76,6 +76,9 @@ impl OutputPublisher {
                         command.traj.coefficients()[(6 * piece + power, axis)]
                     })
                 }),
+                yaw_coefficients: std::array::from_fn(|power| {
+                    command.yaw.coefficients()[(6 * piece + power, 0)]
+                }),
             })?;
         Ok(())
     }
@@ -98,16 +101,72 @@ fn decode(pieces: &[TrajectoryPieceMessage]) -> Result<TrajectoryCommand> {
         pieces[row / 6].coefficients[axis][row % 6]
     });
     let durations = DVector::from_iterator(pieces.len(), pieces.iter().map(|p| p.duration));
-    Ok(TrajectoryCommand {
+    let command = TrajectoryCommand {
+        yaw: Trajectory::from_coefficients(
+            DMatrix::from_fn(6 * pieces.len(), 3, |row, axis| {
+                if axis == 0 {
+                    pieces[row / 6].yaw_coefficients[row % 6]
+                } else {
+                    0.
+                }
+            }),
+            durations.clone(),
+        )?,
         trajectory: Trajectory::from_coefficients(coefficients, durations)?,
         start_time: first.start_time,
         traj_id,
-    })
+    };
+    let end = command.trajectory.eval(command.trajectory.duration());
+    let yaw = command.yaw.eval(command.yaw.duration());
+    if !command.trajectory.duration().is_finite()
+        || end
+            .position
+            .iter()
+            .chain(end.velocity.iter())
+            .chain(end.acceleration.iter())
+            .chain(yaw.position.iter())
+            .chain(yaw.velocity.iter())
+            .chain(yaw.acceleration.iter())
+            .any(|v| !v.is_finite())
+        || end.velocity.norm() > 1e-6
+        || end.acceleration.norm() > 1e-6
+        || yaw.velocity.norm() > 1e-6
+        || yaw.acceleration.norm() > 1e-6
+    {
+        return Err(invalid("trajectory must finish at rest"));
+    }
+    for pair in pieces.windows(2) {
+        for (left, right) in pair[0]
+            .coefficients
+            .iter()
+            .chain([&pair[0].yaw_coefficients])
+            .zip(
+                pair[1]
+                    .coefficients
+                    .iter()
+                    .chain([&pair[1].yaw_coefficients]),
+            )
+        {
+            let t = pair[0].duration;
+            let p = ((((left[5] * t + left[4]) * t + left[3]) * t + left[2]) * t + left[1]) * t
+                + left[0];
+            let v = (((5. * left[5] * t + 4. * left[4]) * t + 3. * left[3]) * t + 2. * left[2]) * t
+                + left[1];
+            let a = ((20. * left[5] * t + 12. * left[4]) * t + 6. * left[3]) * t + 2. * left[2];
+            if [p - right[0], v - right[1], a - 2. * right[2]]
+                .iter()
+                .any(|d| !d.is_finite() || d.abs() > 1e-6)
+            {
+                return Err(invalid("trajectory pieces must be C2 continuous"));
+            }
+        }
+    }
+    Ok(command)
 }
 
 /// 独立轨迹输出进程入口，对应上游 `traj_server` 节点。
 #[allow(clippy::too_many_lines)]
-pub fn run(yaw_hold: bool, timeout: f64) -> Result<()> {
+pub fn run(timeout: f64) -> Result<()> {
     let node = create_node()?;
     let publisher = Publisher::<ReferenceMessage>::with_topic(&node, REFERENCE_TOPIC)?;
     let trajectories =
@@ -118,7 +177,7 @@ pub fn run(yaw_hold: bool, timeout: f64) -> Result<()> {
         Subscriber::<TrajectoryControlMessage>::with_topic(&node, TRAJECTORY_CONTROL_TOPIC)?;
     let odometry = OdometryReceiver::start()?;
     let log_ipc = firefly_observability::init_ipc(&node, "traj-server");
-    let mut server = TrajectoryServer::new(yaw_hold, timeout);
+    let mut server = TrajectoryServer::new(timeout);
     let mut control = TrajectoryControlMessage::default();
     let mut goal_timestamp = 0.0;
     let origin = Instant::now();
@@ -155,10 +214,10 @@ pub fn run(yaw_hold: bool, timeout: f64) -> Result<()> {
                 return Ok(());
             };
             if control.enabled == 0 {
-                return Ok(());
+                server.finish();
             }
             let references = server.sample(snapshot.timestamp, origin.elapsed().as_secs_f64());
-            for reference in references.into_iter().flatten() {
+            if let Some(reference) = references {
                 publisher.publish(ReferenceMessage {
                     timestamp: snapshot.timestamp,
                     position_x: reference.position.x,
@@ -198,4 +257,32 @@ fn invalid(message: &str) -> Error {
 }
 fn internal(message: String) -> Error {
     Error::new(ErrorKind::Internal, message).with_operation("trajectory output")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_discontinuities_nonfinite_evaluation_and_nonstopping_commands() {
+        let hold = TrajectoryPieceMessage {
+            start_time: 1.,
+            goal_timestamp: 1.,
+            traj_id: 1,
+            duration: 1.,
+            coefficients: [[0.; 6]; 3],
+            yaw_coefficients: [0.; 6],
+        };
+        assert!(decode(&[hold, hold]).is_ok());
+        let mut moving = hold;
+        moving.coefficients[0][1] = 1.;
+        assert!(decode(&[moving]).is_err());
+        let mut discontinuous = hold;
+        discontinuous.yaw_coefficients[0] = 1.;
+        assert!(decode(&[hold, discontinuous]).is_err());
+        let mut overflow = hold;
+        overflow.duration = f64::MAX;
+        overflow.coefficients[0][5] = 1.;
+        assert!(decode(&[overflow]).is_err());
+    }
 }
