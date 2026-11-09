@@ -68,7 +68,7 @@ class TrackingMission(Mission):
         self.latest["reference"] = (self.t, np.zeros(3), np.zeros(3), None, True, time.monotonic())
         # 接近目标不代表轨迹结束；轨迹结束也不替代实际到点。
         position = self.goal + (1. if 3 <= self.steps < 6 else 0.)
-        self.latest["corrected"] = (self.t, position, np.zeros(3), None, True, time.monotonic())
+        self.latest["odom"] = (self.t, position, np.zeros(3), None, True, time.monotonic())
         if self.steps == 3:
             if self.interruption == "hold":
                 self.mode = 3

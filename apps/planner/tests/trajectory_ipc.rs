@@ -2,7 +2,7 @@
 use firefly_pubsub::{
     navigation::{NAVIGATION_TOPIC, NavigationMessage},
     node::create_node,
-    odom::OdomMessage,
+    odom::{ODOM_TOPIC, OdomMessage},
     publish::Publisher,
     reference::{REFERENCE_TOPIC, ReferenceMessage},
     subscriber::Subscriber,
@@ -20,18 +20,14 @@ use std::{
 struct OutputProcess(Child);
 
 #[test]
-#[ignore = "requires release planner and exclusive navigation/depth/trajectory IPC topics"]
+#[ignore = "requires release planner and exclusive odometry/navigation/depth/trajectory IPC topics"]
 #[allow(clippy::too_many_lines)]
-fn map_revision_stops_old_trajectory_and_resumes_after_new_depth() {
+fn local_planning_uses_odometry_and_ignores_map_corrections() {
     use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH};
     let node = create_node().unwrap();
+    let odometry = Publisher::<OdomMessage>::with_topic(&node, ODOM_TOPIC).unwrap();
     let navigation = Publisher::<NavigationMessage>::with_topic(&node, NAVIGATION_TOPIC).unwrap();
     let depth = Publisher::<DepthImageMessage>::with_topic(&node, DEPTH_TOPIC).unwrap();
-    let controls =
-        Subscriber::<TrajectoryControlMessage>::with_topic(&node, TRAJECTORY_CONTROL_TOPIC)
-            .unwrap();
-    let trajectories =
-        Subscriber::<[TrajectoryPieceMessage]>::with_slice_topic(&node, TRAJECTORY_TOPIC).unwrap();
     let references = Subscriber::<ReferenceMessage>::with_topic(&node, REFERENCE_TOPIC).unwrap();
     let binary =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/planner");
@@ -43,68 +39,56 @@ fn map_revision_stops_old_trajectory_and_resumes_after_new_depth() {
     );
     let mut output = OutputProcess(Command::new(binary).arg("--traj-server").spawn().unwrap());
     let epoch = Instant::now();
-    for phase in 0..3 {
+    for phase in 0..2 {
         let started = Instant::now();
-        let revision = u64::from(phase != 0);
-        let shift = if phase == 0 { 0. } else { 0.5 };
-        let mut disabled = false;
-        let mut trajectory = false;
-        let mut reference = false;
-        loop {
+        let mut samples = 0;
+        while samples < 10 {
             assert!(
                 started.elapsed() < Duration::from_secs(5),
-                "revision handoff phase {phase} stalled"
+                "odom planning phase {phase} stalled"
             );
             assert!(planner.0.try_wait().unwrap().is_none());
             assert!(output.0.try_wait().unwrap().is_none());
             let timestamp = 1. + epoch.elapsed().as_secs_f64();
-            navigation
-                .publish(NavigationMessage {
-                    odom: OdomMessage {
-                        timestamp,
-                        position_x: shift,
-                        position_z: 1.,
-                        is_initialized: true,
-                        ..Default::default()
-                    },
-                    translation: [shift, 0., 0.],
-                    rotation: [0., 0., 0., 1.],
-                    revision,
+            odometry
+                .publish(OdomMessage {
+                    timestamp,
+                    position_z: 1.,
+                    is_initialized: true,
                     ..Default::default()
                 })
                 .unwrap();
-            if phase != 1 {
-                depth
-                    .publish_with(|image| {
-                        image.timestamp = timestamp;
-                        image.sensor_id = 0;
-                        image.width = IMAGE_WIDTH as u32;
-                        image.height = IMAGE_HEIGHT as u32;
-                        image.data.fill(4.);
+            // No Navigation at startup. Later, unrelated map jumps must not move local references.
+            if phase == 1 {
+                navigation
+                    .publish(NavigationMessage {
+                        odom: OdomMessage {
+                            timestamp,
+                            position_x: 100.,
+                            is_initialized: true,
+                            ..Default::default()
+                        },
+                        translation: [100., 0., 0.],
+                        rotation: [0., 0., 0., 1.],
+                        revision: 7,
+                        ..Default::default()
                     })
                     .unwrap();
             }
-            while let Some(message) = controls.receive().unwrap() {
-                disabled |= message.revision == revision && message.enabled == 0;
-            }
-            while let Some(message) = trajectories.receive().unwrap() {
-                trajectory |= message
-                    .first()
-                    .is_some_and(|piece| piece.revision == revision);
-            }
-            while let Some(message) = references.receive().unwrap() {
-                assert!(
-                    phase != 1 || started.elapsed() <= Duration::from_millis(100),
-                    "old trajectory published while new-revision map is absent"
-                );
-                reference |= message.alignment_translation == [shift, 0., 0.];
-            }
-            if phase == 1 {
-                if disabled && started.elapsed() >= Duration::from_millis(250) {
-                    break;
-                }
-            } else if trajectory && reference {
-                break;
+            depth
+                .publish_with(|image| {
+                    image.timestamp = timestamp;
+                    image.sensor_id = 0;
+                    image.width = IMAGE_WIDTH as u32;
+                    image.height = IMAGE_HEIGHT as u32;
+                    image.data.fill(4.);
+                })
+                .unwrap();
+            while let Some(reference) = references.receive().unwrap() {
+                assert_eq!(reference.alignment_translation, [0.; 3]);
+                assert_eq!(reference.alignment_rotation, [0., 0., 0., 1.]);
+                assert!(reference.position_x.abs() < 10.);
+                samples += 1;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -121,10 +105,10 @@ impl Drop for OutputProcess {
 }
 
 #[test]
-#[ignore = "requires release planner and exclusive Navigation/PlannerStatus/TrajectoryControl IPC topics"]
-fn planner_status_continues_during_map_warmup_and_coordinate_revision() {
+#[ignore = "requires release planner and exclusive Odometry/PlannerStatus/TrajectoryControl IPC topics"]
+fn planner_status_continues_during_map_warmup() {
     let node = create_node().unwrap();
-    let navigation = Publisher::<NavigationMessage>::with_topic(&node, NAVIGATION_TOPIC).unwrap();
+    let odometry = Publisher::<OdomMessage>::with_topic(&node, ODOM_TOPIC).unwrap();
     let statuses =
         Subscriber::<PlannerStatusMessage>::with_topic(&node, PLANNER_STATUS_TOPIC).unwrap();
     let controls =
@@ -134,27 +118,22 @@ fn planner_status_continues_during_map_warmup_and_coordinate_revision() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/planner");
     let mut process = OutputProcess(Command::new(binary).spawn().unwrap());
     let mut stamp = 1.;
-    for revision in [0, 1] {
+    for _ in 0..2 {
         let start = Instant::now();
         let mut received = 0;
         let mut disabled = false;
         while received < 5 || !disabled {
             assert!(
                 start.elapsed() < Duration::from_secs(3),
-                "status stopped during map warmup, revision={revision}"
+                "status stopped during map warmup"
             );
             assert!(process.0.try_wait().unwrap().is_none());
             stamp += 0.01;
-            navigation
-                .publish(NavigationMessage {
-                    odom: OdomMessage {
-                        timestamp: stamp,
-                        is_initialized: true,
-                        ..OdomMessage::default()
-                    },
-                    revision,
-                    rotation: [0., 0., 0., 1.],
-                    ..NavigationMessage::default()
+            odometry
+                .publish(OdomMessage {
+                    timestamp: stamp,
+                    is_initialized: true,
+                    ..Default::default()
                 })
                 .unwrap();
             while let Some(status) = statuses.receive().unwrap() {
@@ -163,10 +142,8 @@ fn planner_status_continues_during_map_warmup_and_coordinate_revision() {
                 received += 1;
             }
             while let Some(control) = controls.receive().unwrap() {
-                if control.revision == revision {
-                    assert_eq!(control.enabled, 0, "depth-free map cannot enable output");
-                    disabled = true;
-                }
+                assert_eq!(control.enabled, 0, "depth-free map cannot enable output");
+                disabled = true;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -174,11 +151,11 @@ fn planner_status_continues_during_map_warmup_and_coordinate_revision() {
 }
 
 #[test]
-#[ignore = "requires release planner and exclusive Navigation/Trajectory/Reference IPC topics"]
+#[ignore = "requires release planner and exclusive Odometry/Trajectory/Reference IPC topics"]
 #[allow(clippy::too_many_lines)]
 fn independent_output_preserves_coefficients_and_upstream_timeout_publish_order() {
     let node = create_node().unwrap();
-    let navigation = Publisher::<NavigationMessage>::with_topic(&node, NAVIGATION_TOPIC).unwrap();
+    let odometry = Publisher::<OdomMessage>::with_topic(&node, ODOM_TOPIC).unwrap();
     let control =
         Publisher::<TrajectoryControlMessage>::with_topic(&node, TRAJECTORY_CONTROL_TOPIC).unwrap();
     let heartbeat =
@@ -208,22 +185,15 @@ fn independent_output_preserves_coefficients_and_upstream_timeout_publish_order(
             "output process exited"
         );
         let elapsed = origin.elapsed().as_secs_f64();
-        navigation
-            .publish(NavigationMessage {
-                odom: OdomMessage {
-                    timestamp: 1. + elapsed,
-                    is_initialized: true,
-                    ..OdomMessage::default()
-                },
-                rotation: [0., 0., 0., 1.],
-                ..NavigationMessage::default()
+        odometry
+            .publish(OdomMessage {
+                timestamp: 1. + elapsed,
+                is_initialized: true,
+                ..Default::default()
             })
             .unwrap();
         control
-            .publish(TrajectoryControlMessage {
-                enabled: 1,
-                ..TrajectoryControlMessage::default()
-            })
+            .publish(TrajectoryControlMessage { enabled: 1 })
             .unwrap();
         let lost_for = first_reference.map_or(0., |t: f64| elapsed - t);
         if first_reference.is_none() || lost_for < 0.1 || lost_for > 0.9 {
@@ -238,7 +208,6 @@ fn independent_output_preserves_coefficients_and_upstream_timeout_publish_order(
                     start_time: 1.,
                     goal_timestamp: 123.,
                     traj_id: 1,
-                    revision: 0,
                     duration: 10.,
                     coefficients: [
                         [piece as f64 * 10., 1., 0., 0., 0., 0.],
@@ -301,63 +270,29 @@ fn independent_output_preserves_coefficients_and_upstream_timeout_publish_order(
         "output must stop after timeout callback"
     );
     assert!(quiet_after_heartbeat && resumed);
-    // 新版本轨迹可以先于门控消息到达；匹配版本前静默，匹配后执行该轨迹。
-    while references.receive().unwrap().is_some() {}
-    trajectory
-        .publish_slice_with(1, |_| TrajectoryPieceMessage {
-            start_time: 1.,
-            goal_timestamp: 124.,
-            traj_id: 2,
-            revision: 1,
-            duration: 10.,
-            coefficients: [
-                [100., 2., 0., 0., 0., 0.],
-                [2., 0., 0., 0., 0., 0.],
-                [3., 0., 0., 0., 0., 0.],
-            ],
-        })
-        .unwrap();
-    let revision_start = Instant::now();
-    loop {
-        let now = origin.elapsed().as_secs_f64();
+    // A live global navigation stream cannot keep output alive after local odometry stops.
+    let navigation = Publisher::<NavigationMessage>::with_topic(&node, NAVIGATION_TOPIC).unwrap();
+    let stopped_at = Instant::now();
+    let mut last_reference = Instant::now();
+    while stopped_at.elapsed() < Duration::from_millis(900) {
         navigation
             .publish(NavigationMessage {
                 odom: OdomMessage {
-                    timestamp: 1. + now,
+                    timestamp: 10. + stopped_at.elapsed().as_secs_f64(),
                     is_initialized: true,
-                    ..OdomMessage::default()
+                    ..Default::default()
                 },
                 rotation: [0., 0., 0., 1.],
-                revision: 1,
-                ..NavigationMessage::default()
+                ..Default::default()
             })
             .unwrap();
         heartbeat
-            .publish(PlannerHeartbeatMessage { sequence: 2 })
+            .publish(PlannerHeartbeatMessage { sequence: 3 })
             .unwrap();
-        if revision_start.elapsed() > Duration::from_millis(50) {
-            control
-                .publish(TrajectoryControlMessage {
-                    revision: 1,
-                    enabled: 1,
-                })
-                .unwrap();
-            if let Some(reference) = references.receive().unwrap() {
-                assert_eq!(reference.goal_timestamp, 124.);
-                assert!(
-                    (reference.position_x - (100. + 2. * (reference.timestamp - 1.))).abs() < 1e-10
-                );
-                break;
-            }
-        } else if revision_start.elapsed() > Duration::from_millis(20) {
-            assert!(
-                references.receive().unwrap().is_none(),
-                "coordinate versions must match"
-            );
-        } else {
-            while references.receive().unwrap().is_some() {}
+        while references.receive().unwrap().is_some() {
+            last_reference = Instant::now();
         }
-        assert!(revision_start.elapsed() < Duration::from_secs(1));
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(Duration::from_millis(10));
     }
+    assert!(last_reference.duration_since(stopped_at) < Duration::from_millis(650));
 }

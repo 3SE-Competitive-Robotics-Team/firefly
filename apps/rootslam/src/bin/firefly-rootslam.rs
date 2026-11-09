@@ -132,6 +132,17 @@ mod tests {
     use super::Config;
 
     #[test]
+    fn default_and_shipped_config_use_vio_only() {
+        let shipped: Config =
+            toml::from_str(include_str!("../../../../configs/firefly-rootslam.toml")).unwrap();
+        for config in [Config::default(), shipped] {
+            assert!(
+                !config.online.map && !config.online.loops && !config.online.external_localization
+            );
+        }
+    }
+
+    #[test]
     fn missing_empty_and_partial_configs_share_online_defaults() {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

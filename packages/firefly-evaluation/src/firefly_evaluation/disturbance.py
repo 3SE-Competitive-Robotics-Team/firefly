@@ -111,7 +111,7 @@ def run_disturbance(directory, options, limits, hover_limits, *, workspace=None,
         magnitude = rng.uniform(limits.min_force_n, limits.max_force_n)
         forces.append([magnitude * np.cos(angle), magnitude * np.sin(angle), 0.])
     forces = np.asarray(forces)
-    mission = mission_factory(directory, "hover_disturbance", options, vio_only=True, workspace=workspace)
+    mission = mission_factory(directory, "hover_disturbance", options, workspace=workspace)
 
     def disturb(index, force):
         if index > 1 and mission.result["stages"][f"assess_{index - 1:02d}"]["status"] != "passed":

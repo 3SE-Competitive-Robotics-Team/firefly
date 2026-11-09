@@ -1,4 +1,4 @@
-//! 地图系里程计输入：校验、墙钟存活检测。
+//! 局部里程计输入：校验、墙钟存活检测。
 //!
 //! 对照 EGO-Planner-v2 的 `have_odom_` 门控；状态源由上游估计服务封装。
 //! 不依赖观测算法或地图匹配成功频率。
@@ -7,7 +7,6 @@
 use std::time::{Duration, Instant};
 
 use firefly_planner::State;
-use firefly_pubsub::navigation::NavigationMessage;
 use firefly_pubsub::odom::OdomMessage;
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 
@@ -39,7 +38,7 @@ impl Snapshot {
         if !m.is_initialized || m.timestamp < 0.0 || !values.iter().all(|v| v.is_finite()) {
             return None;
         }
-        let pose = m.body_pose(firefly_base::FrameId::MAP).ok()?;
+        let pose = m.body_pose(firefly_base::FrameId::ODOM).ok()?;
         Some(Self {
             timestamp: m.timestamp,
             state: State {
@@ -57,64 +56,18 @@ pub struct StateInput {
     latest: Option<Snapshot>,
     last_receive: Option<Instant>,
     stopped: bool,
-    navigation: Option<NavigationMessage>,
-    revised: bool,
+    odom: Option<OdomMessage>,
 }
 
 impl StateInput {
-    /// 接收快照保留规划线程尚未处理的坐标版本变更。
-    pub fn replace_snapshot(&mut self, mut snapshot: Self) {
-        snapshot.revised |= self.revised;
+    pub fn replace_snapshot(&mut self, snapshot: Self) {
         *self = snapshot;
     }
-
     pub fn stop(&mut self) {
         self.stopped = true;
     }
-
-    /// 版本与位姿原子接收；坐标版本变更使规划缓存失效。
-    pub fn observe_navigation(&mut self, message: &NavigationMessage, now: Instant) -> bool {
-        self.check_timeout(now);
-        if message.alignment().is_err() {
-            self.stopped |= self.last_receive.is_some();
-            return false;
-        }
-        if let Some(old) = self.navigation {
-            if message.odom.timestamp <= old.odom.timestamp || message.revision < old.revision {
-                return false;
-            }
-            if message.revision == old.revision
-                && (message.alignment().unwrap().matrix() - old.alignment().unwrap().matrix())
-                    .norm()
-                    > 1e-9
-            {
-                self.stopped = true;
-                return false;
-            }
-        }
-        if !self.observe(&message.odom, now) {
-            return false;
-        }
-        if self
-            .navigation
-            .is_some_and(|old| old.revision != message.revision)
-        {
-            self.revised = true;
-        }
-        self.navigation = Some(*message);
-        true
-    }
-
-    pub const fn has_revision_change(&self) -> bool {
-        self.revised
-    }
-
-    pub fn take_revision_change(&mut self) -> bool {
-        std::mem::take(&mut self.revised)
-    }
-
-    pub fn navigation(&self) -> Option<NavigationMessage> {
-        self.navigation
+    pub fn odometry(&self) -> Option<OdomMessage> {
+        self.odom
     }
 
     /// 有效状态建立后，失联或无效状态锁存停止；接收新包不能掩盖已发生的超时。
@@ -126,7 +79,7 @@ impl StateInput {
         let Some(snapshot) = Snapshot::from_message(message) else {
             if self.last_receive.is_some() && !self.stopped {
                 log::warn!(
-                    "收到无效地图系里程计（is_initialized={} t={:.3}），锁存停止规划",
+                    "收到无效局部里程计（is_initialized={} t={:.3}），锁存停止规划",
                     message.is_initialized,
                     message.timestamp
                 );
@@ -143,6 +96,7 @@ impl StateInput {
         }
         self.last_receive = Some(now);
         self.latest = Some(snapshot);
+        self.odom = Some(*message);
         true
     }
 
@@ -153,7 +107,7 @@ impl StateInput {
         {
             if !self.stopped {
                 log::warn!(
-                    "地图系里程计墙钟中断 ≥{}ms，锁存停止规划",
+                    "局部里程计墙钟中断 ≥{}ms，锁存停止规划",
                     MAX_AGE.as_millis()
                 );
             }
@@ -181,38 +135,6 @@ mod tests {
             is_initialized: true,
             ..OdomMessage::default()
         }
-    }
-
-    fn navigation(t: f64, revision: u64, shift: f64) -> NavigationMessage {
-        let alignment = firefly_base::RigidTransform::from_parts(
-            firefly_base::FrameId::MAP,
-            firefly_base::FrameId::ODOM,
-            [shift, 0., 0.],
-            [0., 0., 0., 1.],
-        )
-        .unwrap();
-        NavigationMessage::new(message(t), &alignment, revision)
-    }
-
-    #[test]
-    fn revision_change_invalidates_planning() {
-        let mut input = StateInput::default();
-        let now = Instant::now();
-        assert!(input.observe_navigation(&navigation(1., 0, 0.), now));
-        assert!(input.observe_navigation(&navigation(1.1, 0, 0.), now));
-        assert!(input.observe_navigation(&navigation(1.2, 1, 2.), now));
-        assert!(input.take_revision_change());
-        assert!(!input.observe_navigation(&navigation(1.3, 0, 0.), now));
-        assert!(!input.take_revision_change());
-    }
-
-    #[test]
-    fn unversioned_transform_change_stops_planning() {
-        let mut input = StateInput::default();
-        let now = Instant::now();
-        input.observe_navigation(&navigation(1., 0, 0.), now);
-        assert!(!input.observe_navigation(&navigation(1.1, 0, 1.), now));
-        assert!(input.stopped());
     }
 
     #[test]
@@ -257,11 +179,11 @@ mod tests {
     fn slow_planning_does_not_expire_continuously_received_state() {
         let now = Instant::now();
         let mut receiver = StateInput::default();
-        receiver.observe_navigation(&navigation(1., 0, 0.), now);
+        receiver.observe(&message(1.), now);
         let mut planner = receiver.clone();
         for i in 1..=100 {
-            assert!(receiver.observe_navigation(
-                &navigation(1. + f64::from(i) / 100., 0, 0.),
+            assert!(receiver.observe(
+                &message(1. + f64::from(i) / 100.),
                 now + Duration::from_millis(i as u64 * 10),
             ));
         }
@@ -277,21 +199,6 @@ mod tests {
         planner.replace_snapshot(receiver);
         assert!(planner.current(now + Duration::from_secs(2)).is_none());
         assert!(planner.stopped());
-    }
-
-    #[test]
-    fn repeated_snapshots_preserve_unhandled_coordinate_revision() {
-        let now = Instant::now();
-        let mut receiver = StateInput::default();
-        receiver.observe_navigation(&navigation(1., 0, 0.), now);
-        let mut planner = receiver.clone();
-        receiver.observe_navigation(&navigation(1.1, 1, 2.), now);
-        planner.replace_snapshot(receiver.clone());
-        receiver.take_revision_change();
-        planner.replace_snapshot(receiver.clone());
-        assert!(planner.take_revision_change());
-        planner.replace_snapshot(receiver);
-        assert!(!planner.take_revision_change());
     }
 
     #[test]

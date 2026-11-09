@@ -44,7 +44,7 @@ class Options:
     waypoint_sim_s: float = 25.0
     # 单程任务可在目标点悬停结束；仅 land 验收返回停机坪后的降落。
     finish_action: str = "land"
-    # 会话地图系米；启动位置为零、启动航向为 +X。
+    # 局部 odom 系米；启动位置为零、启动航向为 +X。
     waypoints: tuple = ((2.0, 0.0, 1.595), (0.0, 0.0, 1.0))
 
     def validate(self):
@@ -63,18 +63,15 @@ class MissionFailure(RuntimeError):
 
 
 class Mission:
-    def __init__(self, directory, case, options, *, vio_only=False, prior_maps=False, localization_config=None, workspace=None, sleep: Callable[[float], None] = time.sleep):
+    def __init__(self, directory, case, options, *, workspace=None, sleep: Callable[[float], None] = time.sleep):
         self.sleep = sleep
         self.root = workspace_root(workspace)
         self.scene = parse_scene(load_scene_name(self.root / "configs/scene.toml"))
         self.options, self.case = options, case
-        self.vio_only = vio_only
-        self.prior_maps = prior_maps
-        self.localization_config = localization_config
         self.vio_process = "firefly-rootslam"
         self.recording = directory / f"{case}.rrd"
-        self.result = {"case": case, "status": "running", "recording": str(self.recording), "stages": {}, "localization_mode": "vio_only" if vio_only else "visual" if prior_maps else "online_slam", "estimator": self.vio_process}
-        self.result["map_frame"] = "external" if prior_maps else "startup_session"
+        self.result = {"case": case, "status": "running", "recording": str(self.recording), "stages": {}, "localization_mode": "vio_only", "estimator": self.vio_process}
+        self.result["map_frame"] = "startup_session"
         self.processes = {}
         self.diagnostics = queue.Queue(maxsize=8192)
         self.diagnostic_drops = 0
@@ -95,7 +92,6 @@ class Mission:
         self.sequence_errors = 0
         self.recorder = None
         self.control_origin = None
-        self.visual_updates = 0
         self.planner_status = None
         self.reference_goal = None
         self.frame_processing_ms = []
@@ -151,7 +147,6 @@ class Mission:
         for name, topic, cls, capacity, publishers in [
             ("gt", "GroundTruth", OdomMessage, None, None),
             ("odom", "Odometry", OdomMessage, None, None),
-            ("corrected", "CorrectedOdometry", OdomMessage, None, None),
             ("reference", "Reference", ReferenceMessage, None, None),
             ("planner_status", "PlannerStatus", PlannerStatusMessage, None, None),
             ("control", "Control", ControlMessage, 32, None),
@@ -197,9 +192,6 @@ class Mission:
                         self.recorder.scalars("acceptance/imu_health", msg.timestamp, list(msg.scalars[:msg.scalar_count]))
                     elif entity == "fc/arming/failed" and msg.scalar_count == 1:
                         self.arming_health = (msg.timestamp, msg.scalars[0] == 0., time.monotonic())
-                    elif entity == "corr/debug/gate" and msg.scalar_count == 4 and msg.scalars[3] == 1:
-                        self.visual_updates += 1
-                        self.recorder.scalars("acceptance/visual_update", msg.timestamp, list(msg.scalars[:4]))
                     elif entity == "rootslam/frame_processing_ms":
                         # 单帧处理耗时：从帧入队到状态发布的墙钟时间。
                         # 原始实体由 mimir 直接落 rrd，这里只做统计。
@@ -336,17 +328,14 @@ class Mission:
         self.wait(self.hover_ok, stable=self.options.hover_seconds, sim=15.)
         return {"stable_seconds": self.options.hover_seconds}
 
-    def map_ready(self):
-        self.wait(lambda: "corrected" in self.latest and self.latest["corrected"][4], wall=30.)
+    def local_map_ready(self):
+        self.wait(lambda: "odom" in self.latest and self.latest["odom"][4], wall=30.)
         command = [str(self.root / "target/release/planner"), "--goal", *map(str, self.options.waypoints[0])]
-        if self.prior_maps:
-            command += ["--map", str(self.root / "apps/planner/maps" / self.scene.map)]
         self.start("traj-server", [str(self.root / "target/release/planner"), "--traj-server"])
         self.start("planner", command)
         self.wait(lambda: "reference" in self.latest, wall=30.)
-        return {"source": "VIO + external map alignment" if self.prior_maps else "VIO + startup session frame; online depth mapping",
-                "visual_frontend": "disabled" if self.vio_only else "enabled",
-                "accepted_visual_updates_at_start": self.visual_updates}
+        return {"source": "VIO odometry + depth + calibrated body-camera extrinsics",
+                "visual_frontend": "VIO stereo"}
 
     def planner_status_fresh(self):
         status = self.planner_status
@@ -395,10 +384,10 @@ class Mission:
                     self.command("fc", "hold")
                     holding = True
                 return (holding and self.mode == 3
-                        and self.estimated_near("corrected", goal, self.options.goal_tolerance_m, self.options.goal_speed_mps))
+                        and self.estimated_near("odom", goal, self.options.goal_tolerance_m, self.options.goal_speed_mps))
 
             self.wait(arrived, stable=1., sim=self.options.waypoint_sim_s)
-            arrivals.append({"goal_map_m": list(waypoint), "arrived_sim_s": self.t, "decision_source": "corrected"})
+            arrivals.append({"goal_odom_m": list(waypoint), "arrived_sim_s": self.t, "decision_source": "odom"})
             self.recorder.event(f"waypoint reached {list(waypoint)}", self.t)
         return {"arrivals": arrivals}
 
@@ -424,10 +413,10 @@ class Mission:
     def terminal_hold(self):
         goal = np.asarray(self.options.waypoints[-1])
         self.wait(lambda: self.mode == 3 and self.estimated_near(
-            "corrected", goal, self.options.goal_tolerance_m, self.options.goal_speed_mps),
+            "odom", goal, self.options.goal_tolerance_m, self.options.goal_speed_mps),
             stable=self.options.hover_seconds, sim=15.)
-        return {"goal_map_m": goal.tolist(), "stable_seconds": self.options.hover_seconds,
-                "completion_source": "fresh_corrected_odometry_and_fc_hold"}
+        return {"goal_odom_m": goal.tolist(), "stable_seconds": self.options.hover_seconds,
+                "completion_source": "fresh_odometry_and_fc_hold"}
 
     def reference_loss(self):
         self.command("fc", "track")
@@ -531,7 +520,7 @@ class Mission:
     def run(self):
         phases = [("initialization", self.initialized), ("takeoff", self.takeoff), ("hover", self.hover)]
         if self.case != "estimator_loss":
-            phases.append(("map_alignment", self.map_ready))
+            phases.append(("local_mapping", self.local_map_ready))
         if self.case == "nominal":
             phases.extend([("tracking", self.tracking),
                            ("landing", self.landing) if self.options.finish_action == "land"
@@ -541,8 +530,6 @@ class Mission:
         else:
             phases.extend([("estimator_fallback", self.estimator_fallback), ("degraded_support", self.degraded_support)])
         applications = ["render", self.vio_process, "fc"]
-        if self.prior_maps and self.case != "estimator_loss":
-            applications.extend(("localization", "aliked", "lightglue"))
         result = self.run_phases(phases, applications)
         if self.case == "estimator_loss":
             result["stages"]["failure_terminal"] = {"status": "not_supported", "reason": "No independent position/altitude estimate: IMU attitude support cannot guarantee hover or safe landing"}
@@ -563,14 +550,7 @@ class Mission:
             for name in applications:
                 command = [str(self.root / f"target/release/{name}")]
                 if name == "firefly-rootslam":
-                    if self.vio_only:
-                        command += ["--no-loop-closures", "--no-mapping"]
-                    if self.prior_maps:
-                        command += ["--external-localization"]
-                if name == "localization" and self.localization_config is not None:
-                    command += ["--config", str(self.localization_config)]
-                if name == "lightglue" and self.prior_maps:
-                    command += ["--map", str((self.root / "apps/planner/maps" / self.scene.map).with_suffix(".ffvmap"))]
+                    command += ["--no-loop-closures", "--no-mapping"]
                 self.start(name, command)
             self.start("sim", [sys.executable, "-m", "firefly_evaluation.mission_sim"])
             for name, action in phases:

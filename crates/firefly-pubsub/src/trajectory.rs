@@ -42,7 +42,6 @@ pub struct TrajectoryPieceMessage {
     pub start_time: f64,
     pub goal_timestamp: f64,
     pub traj_id: u64,
-    pub revision: u64,
     pub duration: f64,
     pub coefficients: [[f64; 6]; 3],
 }
@@ -54,11 +53,10 @@ pub struct PlannerHeartbeatMessage {
     pub sequence: u64,
 }
 
-/// 输出门控与地图坐标版本；参考仅由已接收轨迹产生。
+/// 输出门控；轨迹与参考均在局部 odom 坐标系。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, ZeroCopySend)]
 #[type_name("FireflyTrajectoryControlMessage")]
 pub struct TrajectoryControlMessage {
-    pub revision: u64,
     pub enabled: u64,
 }

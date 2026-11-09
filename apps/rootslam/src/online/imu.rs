@@ -6,7 +6,7 @@ use firefly_imu_initialization::{
     GravityEstimate, ImuSample as GravitySample, StationaryGravitySampler,
 };
 use firefly_imu_propagation::{Bias, ImuSample, Predictor, State};
-use firefly_pubsub::{attitude::AttitudeMessage, odom::OdomMessage};
+use firefly_pubsub::{attitude::AttitudeMessage, navigation::NavigationMessage, odom::OdomMessage};
 use firefly_vio_runtime::{ImuAdapter, ImuWatermark, Publishers, Sample};
 use nalgebra::Vector3;
 use std::{
@@ -19,7 +19,6 @@ pub(super) type FrameStarts = Arc<Mutex<BTreeMap<i64, Instant>>>;
 
 pub(super) struct Inputs {
     pub external_localization: bool,
-    pub mapping: Option<crate::system::navigation::MappingUpdates>,
     pub imu: mpsc::SyncSender<Option<Arc<ImuData<f64>>>>,
     pub posteriors: mpsc::Receiver<Option<Arc<PoseVelBiasState<f64>>>>,
     pub gravity: mpsc::SyncSender<GravityEstimate>,
@@ -37,24 +36,23 @@ pub(super) fn run(inputs: Inputs, stop: &AtomicBool) -> Result<()> {
         imu_latency_entity: "rootslam/ipc/imu_publish_ms",
     };
     firefly_vio_runtime::run_imu(&options, &watermark, stop, || {
-        let session = if let Some(mapping) = &inputs.mapping {
-            mapping.snapshot()?.session
-        } else {
-            (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64)
-                .max(1)
-        };
         Ok(Adapter {
             inputs,
             pending: VecDeque::new(),
             sampler: StationaryGravitySampler::new(),
             initialized: false,
             predictor: Predictor::new(5., Vector3::new(0., 0., -9.81)),
-            session,
-            navigation: super::correction::Navigation::new(session)?,
-            last_mapping_diagnostic: -1.,
+            session: (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64)
+                .max(1),
+            alignment: firefly_base::RigidTransform::from_parts(
+                firefly_base::FrameId::MAP,
+                firefly_base::FrameId::ODOM,
+                [0.; 3],
+                [0., 0., 0., 1.],
+            )?,
         })
     })
 }
@@ -68,8 +66,7 @@ struct Adapter {
     initialized: bool,
     predictor: Predictor,
     session: u64,
-    navigation: super::correction::Navigation,
-    last_mapping_diagnostic: f64,
+    alignment: firefly_base::RigidTransform,
 }
 
 impl Adapter {
@@ -87,44 +84,11 @@ impl Adapter {
         }
         Ok(())
     }
-    fn mapping(&mut self, publishers: &Publishers) -> Result<()> {
-        if let Some(mapping) = &self.inputs.mapping {
-            let update = mapping.snapshot()?;
-            if !self.inputs.external_localization
-                && let Some(correction) = update.correction
-            {
-                self.navigation.observe(correction)?;
-            }
-            let stamp = self
-                .inputs
-                .watermark
-                .load()
-                .map_or(-1., |t| t.as_nanosecond() as f64 * 1e-9);
-            if stamp - self.last_mapping_diagnostic >= 1. {
-                if let Some(viz) = publishers.viz() {
-                    publish_scalar_diagnostic(
-                        viz,
-                        stamp,
-                        "rootslam/mapping/state",
-                        [
-                            update.detected as f64,
-                            update.verified as f64,
-                            update.accepted as f64,
-                            update.rejected as f64,
-                        ],
-                    );
-                }
-                self.last_mapping_diagnostic = stamp;
-            }
-        }
-        Ok(())
-    }
 }
 
 impl ImuAdapter for Adapter {
     fn posteriors(&mut self, publishers: &Publishers) -> Result<()> {
         self.flush()?;
-        self.mapping(publishers)?;
         loop {
             let state = match self.inputs.posteriors.try_recv() {
                 Ok(Some(state)) => state,
@@ -258,11 +222,10 @@ impl ImuAdapter for Adapter {
             quat_w: q.w,
             is_initialized: true,
         };
-        let navigation = self.navigation.output(&odom, state.timestamp_ns)?;
         Ok(Some(Sample {
             odom,
-            corrected: navigation.odom,
-            navigation,
+            corrected: odom,
+            navigation: NavigationMessage::new(odom, &self.alignment, 0),
             attitude: Some(AttitudeMessage {
                 timestamp: stamp,
                 posterior_time: self

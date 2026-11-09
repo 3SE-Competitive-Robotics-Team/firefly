@@ -120,11 +120,11 @@ cargo run --release -p planner
 
 最小闭环只需 mimir/sim/render/firefly-rootslam/fc；规划同时启动 planner 与 `planner --traj-server`
 两个独立进程，前者规划并发布心跳，后者采样并发布飞控参考。
-纯 VIO 对照用 `firefly-rootslam --no-loop-closures --no-mapping`。
+RootSLAM 默认关闭建图与回环，作为局部 VIO 使用。
 可选库图定位先填写 `configs/localization.toml [origin]`，并用
 `firefly-rootslam --external-localization`，再启动 localization、aliked 和
 `lightglue --map <地图.ffvmap>`。默认进程清单不自动启动这些可选服务。
-静态规划图用 `planner --map <地图.ffmap>`，同样要求明确外部对齐。
+planner 只消费机体 Odometry 与深度；相机外参见 planner 配置，不消费可选库图定位输出。
 禁止把场地真值作为默认定位或规划先验。
 
 ### 机载部署
@@ -235,7 +235,7 @@ supervisor 对异常退出退避重启，停止超时只报错、不 SIGKILL；�
 ./target/release/ffctl fc land
 ```
 
-起飞高度相对起飞点，planner 目标属于当前地图坐标。拒绝原因查看 RRD 的 `logs/fc`。
+起飞高度相对起飞点，planner 目标属于当前 odom 坐标。拒绝原因查看 RRD 的 `logs/fc`。
 上电不自动起飞，未就绪不能绕过初始化。飞控失联行为见架构文档。
 
 ### 进程与宿主机
@@ -369,7 +369,8 @@ cargo test -p planner --bin planner -- --ignored --test-threads=1
 cargo test -p planner --test trajectory_ipc -- --ignored --test-threads=1
 ```
 
-IPC 用例独占 Navigation/Trajectory/Reference，覆盖完整多项式、心跳超时发布顺序、恢复与坐标版本门控。
+IPC 用例独占 Odometry/Depth/Trajectory/Reference，覆盖完整多项式、心跳超时发布顺序、
+里程计失联锁存及 Navigation 跳变不影响局部地图与参考。
 
 <a id="system-tests"></a>
 
@@ -399,9 +400,8 @@ uv run pytest tests/system/test_roundtrip.py -q
   真值、姿态和主链路健康；静止评分使用固定等待与窗口，全程检查碰撞、重置和退出。
 - 扰动用例逐轮恢复并持续悬停，评分通过才发下一轮；禁止重发 Hold 改目标或将未执行轮次计通过。
 - 估计器为 `firefly-rootslam`，处理时延证据来自 RRD 的 `rootslam/frame_processing_ms`。
-- 22m 往返使用 `configs/acceptance_22m.toml`，默认空地图、在线回环与深度建图；初始化、
-  真实到点、跟踪、定位、回环、降落、碰撞和退出必须分别通过。回环项要求后端接受 PGO
-  且实际发布正导航修订；缺少证据仍判失败，不能以检出回环或仅准备变换替代。
+- 22m 往返使用 `configs/acceptance_22m.toml`，默认空局部地图与 RootSLAM VIO；
+  初始化、真实到点、跟踪、定位、降落、碰撞和退出必须分别通过。在线回环不属于该任务链路。
 
 任务配置和门槛由 `firefly_evaluation` 的 `mission.Options`、`hover_metrics.HoverLimits`、
 `disturbance_metrics.DisturbanceLimits` 及 `configs/acceptance*.toml` 维护，运行前固定并存入报告。
@@ -418,13 +418,11 @@ CLI 使用已构建的 release 程序，运行前执行统一构建命令：
 ```bash
 cargo xtask release
 uv run firefly-evaluate
-uv run firefly-evaluate --case nominal --config configs/acceptance_22m.toml --vio-only
+uv run firefly-evaluate --case nominal --config configs/acceptance_22m.toml
 ```
 
-`--case nominal|reference_loss|estimator_loss` 选择任务；纯 VIO 仅改变进程部署和回环证据项，
-不改变飞行误差、碰撞或时间阈值。`--prior-maps --localization-config <含 origin 的配置>`
-启用外部地图，航点和高度边界须使用外部坐标。`--allow-map-rig-translation` 仅允许库图
-左目/深度相机相同机体内平移，其余契约必须相同；例外记入报告，不改历史清单。
+`--case nominal|reference_loss|estimator_loss` 选择任务。所有任务使用 RootSLAM VIO 与局部深度规划，
+不加载场地先验或库图定位；飞行误差、碰撞和时间门槛由验收配置固定。
 
 正常阶段流转只用新鲜估计状态和 FC 模式；真值仅独立评分及碰撞/越界中止，不能驱动
 到点或恢复。局部 VIO 可固定尺度航向/平移对齐，地图定位与参考跟踪禁止事后拟合。

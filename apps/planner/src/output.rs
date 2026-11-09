@@ -1,5 +1,5 @@
 //! 规划进程只发布完整轨迹与心跳；输出模式在独立进程中以 100Hz 采样。
-use crate::navigation::NavigationReceiver;
+use crate::odometry::OdometryReceiver;
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_planner::{TrajectoryCommand, TrajectoryServer};
 use firefly_pubsub::{
@@ -15,7 +15,7 @@ use firefly_pubsub::{
 };
 use firefly_trajectory::Trajectory;
 use iceoryx2::prelude::*;
-use nalgebra::{DMatrix, DVector, Isometry3};
+use nalgebra::{DMatrix, DVector};
 use std::time::{Duration, Instant};
 
 pub struct OutputPublisher {
@@ -24,7 +24,7 @@ pub struct OutputPublisher {
     control: Publisher<TrajectoryControlMessage>,
     status: Publisher<PlannerStatusMessage>,
     pub goal_timestamp: f64,
-    revision: Option<u64>,
+    enabled: bool,
     sequence: u64,
 }
 impl OutputPublisher {
@@ -35,7 +35,7 @@ impl OutputPublisher {
             control: Publisher::with_topic(node, TRAJECTORY_CONTROL_TOPIC)?,
             status: Publisher::with_topic(node, PLANNER_STATUS_TOPIC)?,
             goal_timestamp: 0.0,
-            revision: None,
+            enabled: false,
             sequence: 0,
         })
     }
@@ -54,24 +54,22 @@ impl OutputPublisher {
         })?;
         Ok(())
     }
-    pub fn control(&mut self, revision: Option<u64>, enabled: bool) -> Result<()> {
-        self.revision = revision;
+    pub fn control(&mut self, enabled: bool) -> Result<()> {
+        self.enabled = enabled;
         self.control.publish(TrajectoryControlMessage {
-            revision: revision.unwrap_or_default(),
-            enabled: u64::from(enabled && revision.is_some()),
+            enabled: u64::from(enabled),
         })?;
         Ok(())
     }
     pub fn trajectory(&self, command: &firefly_planner::LocalTraj) -> Result<()> {
-        let Some(revision) = self.revision else {
+        if !self.enabled {
             return Ok(());
-        };
+        }
         self.trajectory
             .publish_slice_with(command.traj.pieces(), |piece| TrajectoryPieceMessage {
                 start_time: command.start_time,
                 goal_timestamp: self.goal_timestamp,
                 traj_id: u64::from(command.traj_id),
-                revision,
                 duration: command.traj.durations()[piece],
                 coefficients: std::array::from_fn(|axis| {
                     std::array::from_fn(|power| {
@@ -92,7 +90,6 @@ fn decode(pieces: &[TrajectoryPieceMessage]) -> Result<TrajectoryCommand> {
             piece.start_time != first.start_time
                 || piece.goal_timestamp != first.goal_timestamp
                 || piece.traj_id != first.traj_id
-                || piece.revision != first.revision
         })
     {
         return Err(invalid("inconsistent trajectory metadata"));
@@ -119,12 +116,10 @@ pub fn run(yaw_hold: bool, timeout: f64) -> Result<()> {
         Subscriber::<PlannerHeartbeatMessage>::with_topic(&node, PLANNER_HEARTBEAT_TOPIC)?;
     let controls =
         Subscriber::<TrajectoryControlMessage>::with_topic(&node, TRAJECTORY_CONTROL_TOPIC)?;
-    let navigation = NavigationReceiver::start(false)?;
+    let odometry = OdometryReceiver::start()?;
     let log_ipc = firefly_observability::init_ipc(&node, "traj-server");
     let mut server = TrajectoryServer::new(yaw_hold, timeout);
     let mut control = TrajectoryControlMessage::default();
-    let mut trajectory_revision = None;
-    let mut alignment = Isometry3::identity();
     let mut goal_timestamp = 0.0;
     let origin = Instant::now();
     let waitset = WaitSetBuilder::new()
@@ -136,7 +131,7 @@ pub fn run(yaw_hold: bool, timeout: f64) -> Result<()> {
     let mut error = None;
     log::info!("独立轨迹输出启动：100Hz，心跳超时 {timeout}s");
     let result = waitset.wait_and_process(|event: WaitSetAttachmentId<ipc::Service>| {
-        if navigation.terminated() {
+        if odometry.terminated() {
             return CallbackProgression::Stop;
         }
         if !event.has_event_from(&tick) {
@@ -144,46 +139,25 @@ pub fn run(yaw_hold: bool, timeout: f64) -> Result<()> {
         }
         let step = (|| -> Result<()> {
             while let Some(message) = controls.receive()? {
-                if control.revision != message.revision
-                    && trajectory_revision != Some(message.revision)
-                {
-                    server.invalidate();
-                }
                 control = *message;
             }
             while heartbeat.receive()?.is_some() {
                 server.heartbeat(origin.elapsed().as_secs_f64());
             }
             while let Some(message) = trajectories.receive()? {
-                if let Some(first) = message.first()
-                    && first.revision >= control.revision
-                {
-                    let revision = first.revision;
+                if let Some(first) = message.first() {
                     server.receive(decode(&message)?);
-                    trajectory_revision = Some(revision);
                     goal_timestamp = first.goal_timestamp;
                 }
             }
-            let (mut input, _) = navigation.snapshot()?;
+            let (mut input, _) = odometry.snapshot()?;
             let Some(snapshot) = input.current(Instant::now()) else {
                 return Ok(());
             };
-            let Some(transform) = input.navigation() else {
-                return Ok(());
-            };
-            let next_alignment = *transform.alignment()?.isometry();
-            if next_alignment != alignment {
-                server.rebase_frame(&(next_alignment * alignment.inverse()));
-                alignment = next_alignment;
-            }
-            if control.enabled == 0 || transform.revision != control.revision {
+            if control.enabled == 0 {
                 return Ok(());
             }
-            let references = if trajectory_revision == Some(control.revision) {
-                server.sample(snapshot.timestamp, origin.elapsed().as_secs_f64())
-            } else {
-                [None, None]
-            };
+            let references = server.sample(snapshot.timestamp, origin.elapsed().as_secs_f64());
             for reference in references.into_iter().flatten() {
                 publisher.publish(ReferenceMessage {
                     timestamp: snapshot.timestamp,
@@ -198,8 +172,8 @@ pub fn run(yaw_hold: bool, timeout: f64) -> Result<()> {
                     acceleration_z: reference.acceleration.z,
                     yaw: reference.yaw,
                     yaw_dot: reference.yaw_dot,
-                    alignment_translation: transform.translation,
-                    alignment_rotation: transform.rotation,
+                    alignment_translation: [0.; 3],
+                    alignment_rotation: [0., 0., 0., 1.],
                     has_alignment: 1,
                     goal_timestamp,
                 })?;

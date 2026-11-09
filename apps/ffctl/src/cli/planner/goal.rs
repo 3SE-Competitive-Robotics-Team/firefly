@@ -7,18 +7,18 @@ use usage_rs::{Args, Run};
 use crate::cli::Meters;
 use crate::ipc::{deliver, new_publisher, report, wall_seconds};
 
-/// 发布规划目标点（地图系，米）：planner 重算全局路径并重新规划
+/// 发布规划目标点（odom 系，米）：planner 重算全局路径并重新规划
 ///
 /// 只是给规划侧的目标输入，不直接动飞机：要让飞机跟过去，还需 `fc track`
 /// （飞控在 `TRACK` 下才消费 planner 的参考流）。
 #[derive(Args)]
 #[usage(effect = "write")]
 pub(crate) struct Goal {
-    /// 目标 x（地图系，米）
+    /// 目标 x（odom 系，米）
     x: Meters,
-    /// 目标 y（地图系，米）
+    /// 目标 y（odom 系，米）
     y: Meters,
-    /// 目标 z（地图系，米）
+    /// 目标 z（odom 系，米）
     z: Meters,
 }
 

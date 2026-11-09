@@ -31,15 +31,7 @@ const SPATIAL: &[(&str, &[u32])] = &[
     ("plan/global_path", &[kind::LINE_STRIP]),
     ("plan/local_traj", &[kind::LINE_STRIP]),
     (
-        "plan/map",
-        &[kind::VOXELS, kind::VOXELS_ADD, kind::VOXELS_REMOVE],
-    ),
-    (
         "plan/collision",
-        &[kind::VOXELS, kind::VOXELS_ADD, kind::VOXELS_REMOVE],
-    ),
-    (
-        "plan/motions",
         &[kind::VOXELS, kind::VOXELS_ADD, kind::VOXELS_REMOVE],
     ),
     ("plan/local_traj/velocity", &[kind::ARROWS]),
@@ -62,21 +54,17 @@ pub(crate) fn frame(name: &str) -> Option<&'static str> {
         | "vio/traj"
         | "vio/posterior/pose_imu_world"
         | "vio/prediction/pose_body_odom"
-        | "acceptance/odom" => Some("odom"),
-        "vio/map/pose"
-        | "vio/map/traj"
-        | "corr/odom"
-        | "corr/traj"
+        | "acceptance/odom"
         | "plan/drone"
         | "plan/global_path"
         | "plan/local_traj"
-        | "plan/map"
         | "plan/collision"
-        | "plan/motions"
         | "plan/local_traj/velocity"
         | "plan/planes"
-        | "acceptance/corrected"
-        | "acceptance/reference" => Some("map"),
+        | "acceptance/reference" => Some("odom"),
+        "vio/map/pose" | "vio/map/traj" | "corr/odom" | "corr/traj" | "acceptance/corrected" => {
+            Some("map")
+        }
         "cameras/left" | "cameras/right" => Some("tf#/vio/prediction/pose_body_odom"),
         _ => None,
     }
@@ -229,9 +217,7 @@ pub fn fields(name: &str) -> Result<&'static [&'static str]> {
         "fc/debug/tick_rate" => &["rate_Hz"],
         "vision/debug/map_query_wall_s" => &["query_s"],
         "fc/standby_eskf/accel_nis" => &["nis"],
-        "rootslam/mapping/state" => &["detected", "verified", "accepted", "rejected"],
-        "vio/navigation/revision" => &["revision"],
-        "fc/debug/saturated_ticks" => &["count"],
+        "fc/debug/saturated_ticks" | "acceptance/loop_backend" => &["count"],
         "fc/arming/failed" | "fc/failsafe/flags" => &["mask"],
         "fc/debug/state"
         | "fc/debug/saturated"
@@ -285,7 +271,7 @@ mod tests {
             }
         }
         assert_ne!(frame("acceptance/gt"), frame("acceptance/odom"));
-        assert_eq!(frame("plan/local_traj/velocity"), Some("map"));
+        assert_eq!(frame("plan/local_traj/velocity"), Some("odom"));
     }
 
     #[test]

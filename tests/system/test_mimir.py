@@ -342,10 +342,10 @@ def test_spatial_frames_preserve_raw_poses_and_follow_navigation():
         assert component("/gt/pose", "Transform3D:parent_frame") == [["world"]]
         assert component("/vio/odom", "Transform3D:parent_frame") == [["odom"], ["odom"]]
         assert component("/acceptance/odom", "Transform3D:parent_frame") == [["odom"]]
-        assert component("/acceptance/reference", "Transform3D:parent_frame") == [["map"]]
+        assert component("/acceptance/reference", "Transform3D:parent_frame") == [["odom"]]
         assert component("/cameras/left", "Transform3D:parent_frame") == [["tf#/vio/prediction/pose_body_odom"]]
         assert component("/cameras/left", "Pinhole:parent_frame") == component("/cameras/left", "Transform3D:parent_frame")
-        assert component("/plan/local_traj", "CoordinateFrame:frame") == [["map"]]
+        assert component("/plan/local_traj", "CoordinateFrame:frame") == [["odom"]]
         print({"rrd": str(path), "statistics": logs})
 
 

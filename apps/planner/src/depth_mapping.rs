@@ -13,21 +13,21 @@ use std::{
 };
 
 use firefly_base::FrameId;
-use firefly_ego_map::{DepthImage, GridMap, MappingParameters};
+use firefly_ego_map::{DepthImage, GridMap};
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_pubsub::{
     camera::{DEPTH_TOPIC, DepthImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH},
-    navigation::NavigationMessage,
     node::create_node,
+    odom::OdomMessage,
     subscriber::Subscriber,
     trace::TraceContext,
 };
-use nalgebra::{Isometry3, Translation3, Vector3};
+use nalgebra::{Isometry3, Translation3};
 
 use crate::{
     config::DepthOptions,
     map_input::{Bounds, LocalSnapshot},
-    navigation::NavigationHistory,
+    odometry::OdometryHistory,
 };
 
 const OCCUPANCY_PERIOD: Duration = Duration::from_millis(32);
@@ -48,7 +48,7 @@ pub struct DepthReceiver {
 }
 
 impl DepthReceiver {
-    pub fn start(fusion: DepthFusion, history: NavigationHistory) -> Result<Self> {
+    pub fn start(fusion: DepthFusion, history: OdometryHistory) -> Result<Self> {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let (state, stopping) = (Arc::clone(&shared), Arc::clone(&stop));
@@ -118,7 +118,7 @@ impl Drop for DepthReceiver {
 
 fn run_mapping(
     mut fusion: DepthFusion,
-    history: &NavigationHistory,
+    history: &OdometryHistory,
     stop: &AtomicBool,
     shared: &Mutex<Shared>,
     ready: &SyncSender<std::result::Result<(), String>>,
@@ -156,8 +156,7 @@ fn run_mapping(
         let mut changed = false;
         if timer_due(&mut next_occupancy, OCCUPANCY_PERIOD, now) {
             let poses = history.snapshot()?;
-            if let Some(latest) = poses.back() {
-                fusion.align(latest)?;
+            if !poses.is_empty() {
                 // The upstream timer treats times below one second as uninitialized.
                 let timer_time = 1. + now.duration_since(epoch).as_secs_f64();
                 if let Some((frame, pose)) =
@@ -206,11 +205,11 @@ fn timer_due(deadline: &mut Instant, period: Duration, now: Instant) -> bool {
 /// Consume the newest bracketed frame and discard older frames, retaining future images.
 fn take_pair(
     pending: &mut VecDeque<DepthFrame>,
-    poses: &VecDeque<NavigationMessage>,
+    poses: &VecDeque<OdomMessage>,
     now: Instant,
     max_pose_gap: f64,
 ) -> Option<(DepthFrame, Isometry3<f64>)> {
-    let first_stamp = poses.front()?.odom.timestamp;
+    let first_stamp = poses.front()?.timestamp;
     let timeout = Duration::from_secs_f64(crate::MAP_TIMEOUT);
     while pending.front().is_some_and(|frame| {
         frame.timestamp < first_stamp || now.saturating_duration_since(frame.received) > timeout
@@ -268,25 +267,25 @@ fn depth_units(metres: f32, scale: f64) -> u16 {
 }
 
 fn interpolate_pose(
-    history: &VecDeque<NavigationMessage>,
+    history: &VecDeque<OdomMessage>,
     timestamp: f64,
     max_gap: f64,
 ) -> Option<Isometry3<f64>> {
-    let mut previous: Option<&NavigationMessage> = None;
+    let mut previous: Option<&OdomMessage> = None;
     for message in history {
-        let stamp = message.odom.timestamp;
+        let stamp = message.timestamp;
         if stamp == timestamp {
-            return Some(*message.odom.body_pose(FrameId::MAP).ok()?.isometry());
+            return Some(*message.body_pose(FrameId::ODOM).ok()?.isometry());
         }
         if stamp > timestamp {
             let before = previous?;
-            let gap = stamp - before.odom.timestamp;
-            if before.revision != message.revision || gap > max_gap || gap <= 0. {
+            let gap = stamp - before.timestamp;
+            if gap > max_gap || gap <= 0. {
                 return None;
             }
-            let alpha = (timestamp - before.odom.timestamp) / gap;
-            let a = before.odom.body_pose(FrameId::MAP).ok()?;
-            let b = message.odom.body_pose(FrameId::MAP).ok()?;
+            let alpha = (timestamp - before.timestamp) / gap;
+            let a = before.body_pose(FrameId::ODOM).ok()?;
+            let b = message.body_pose(FrameId::ODOM).ok()?;
             let position = a
                 .isometry()
                 .translation
@@ -306,9 +305,7 @@ fn interpolate_pose(
 /// Numerical state is private to the mapping worker. Construct before opening IPC.
 pub struct DepthFusion {
     map: GridMap,
-    parameters: MappingParameters,
     options: DepthOptions,
-    alignment: Option<NavigationMessage>,
     last_fused: Option<(f64, Instant)>,
     sequence: u64,
 }
@@ -316,34 +313,14 @@ pub struct DepthFusion {
 impl DepthFusion {
     pub fn new(grid: &firefly_map::GridMap, options: DepthOptions, clearance: f64) -> Result<Self> {
         let parameters = options.parameters(grid, clearance)?;
-        let mut map = GridMap::new(parameters.clone())?;
+        let mut map = GridMap::new(parameters)?;
         map.extrinsic_callback(options.extrinsic()?)?;
         Ok(Self {
             map,
-            parameters,
             options,
-            alignment: None,
             last_fused: None,
             sequence: 0,
         })
-    }
-
-    fn align(&mut self, navigation: &NavigationMessage) -> Result<()> {
-        navigation.alignment()?;
-        if self
-            .alignment
-            .is_some_and(|old| old.revision != navigation.revision)
-        {
-            self.map = GridMap::new(self.parameters.clone())?;
-            self.map.extrinsic_callback(self.options.extrinsic()?)?;
-            self.last_fused = None;
-            log::info!(
-                "depth map reset for navigation revision {}",
-                navigation.revision
-            );
-        }
-        self.alignment = Some(*navigation);
-        Ok(())
     }
 
     fn integrate(
@@ -368,9 +345,6 @@ impl DepthFusion {
         let Some((low, high)) = self.map.bounds() else {
             return Ok(None);
         };
-        let nav = self
-            .alignment
-            .ok_or_else(|| invalid("depth map has no navigation alignment"))?;
         let resolution = self.map.resolution();
         let bounds = Bounds {
             min: low.map(|v| f64::from(v) * resolution),
@@ -396,44 +370,18 @@ impl DepthFusion {
             cells,
             bounds,
             sequence: self.sequence,
-            revision: nav.revision,
-            translation: nav.translation,
-            rotation: nav.rotation,
             timestamp,
             fused_at,
         }))
     }
 }
 
-/// Bake static prior clearance once. Local snapshots already contain upstream inflation,
-/// so the receiving collision grid has zero additional inflation. Prior cells stay protected.
-pub fn collision_grid(
-    mut source: firefly_map::GridMap,
-    has_prior: bool,
-) -> Result<firefly_map::GridMap> {
-    source.inflate_obstacles();
-    let dims = source.dims();
-    let mut target = firefly_map::GridMapBuilder::new(source.resolution(), dims)
+/// Local snapshots already contain upstream inflation; never inflate them twice.
+pub fn collision_grid(source: &firefly_map::GridMap) -> Result<firefly_map::GridMap> {
+    firefly_map::GridMapBuilder::new(source.resolution(), source.dims())
         .with_origin(source.origin())
         .with_obstacles_inflation(0.)
-        .build()?;
-    if has_prior {
-        let halo = i64::from(source.inflation_steps());
-        for x in -halo..dims[0] as i64 + halo {
-            for y in -halo..dims[1] as i64 + halo {
-                for z in -halo..dims[2] as i64 + halo {
-                    let point = source.origin()
-                        + Vector3::new(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5)
-                            * source.resolution();
-                    if source.is_occupied_inflated(point) {
-                        target.set_prior_global_occupied([x, y, z]);
-                    }
-                }
-            }
-        }
-    }
-    target.inflate_obstacles();
-    Ok(target)
+        .build()
 }
 
 fn invalid(message: &str) -> Error {

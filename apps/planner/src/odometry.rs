@@ -1,4 +1,4 @@
-//! 独立接收地图系状态；重规划耗时不能改变状态流的存活判定。
+//! 独立接收局部状态；重规划耗时不能改变状态流的存活判定。
 use std::collections::VecDeque;
 use std::sync::{
     Arc, Mutex,
@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use crate::state_input::StateInput;
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_pubsub::{
-    navigation::{NAVIGATION_TOPIC, NavigationMessage},
     node::create_node,
+    odom::{ODOM_TOPIC, OdomMessage},
     subscriber::Subscriber,
     trace::TraceContext,
 };
@@ -19,24 +19,24 @@ use firefly_pubsub::{
 #[derive(Default)]
 struct Shared {
     input: StateInput,
-    history: VecDeque<NavigationMessage>,
+    history: VecDeque<OdomMessage>,
     trace: TraceContext,
     error: Option<String>,
 }
 
 /// Bounded measurement-time history shared with the depth worker, never the solver.
 #[derive(Clone)]
-pub struct NavigationHistory {
+pub struct OdometryHistory {
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
 }
 
-impl NavigationHistory {
-    pub fn snapshot(&self) -> Result<VecDeque<NavigationMessage>> {
+impl OdometryHistory {
+    pub fn snapshot(&self) -> Result<VecDeque<OdomMessage>> {
         let mut state = self
             .shared
             .lock()
-            .map_err(|_| internal("navigation state poisoned"))?;
+            .map_err(|_| internal("odometry state poisoned"))?;
         if let Some(error) = &state.error {
             return Err(internal(error.clone()));
         }
@@ -47,54 +47,41 @@ impl NavigationHistory {
     }
 }
 
-pub struct NavigationReceiver {
+pub struct OdometryReceiver {
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
-impl NavigationReceiver {
-    pub fn start(external_map: bool) -> Result<Self> {
+impl OdometryReceiver {
+    pub fn start() -> Result<Self> {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let (state, stopping) = (Arc::clone(&shared), Arc::clone(&stop));
         let (ready, startup) = std::sync::mpsc::sync_channel(1);
         let thread = std::thread::Builder::new()
-            .name("planner-navigation".into())
+            .name("planner-odometry".into())
             .spawn(move || {
                 let result = (|| -> Result<()> {
                     let node = create_node()?;
-                    let subscriber =
-                        Subscriber::<NavigationMessage>::with_topic(&node, NAVIGATION_TOPIC)?;
+                    let subscriber = Subscriber::<OdomMessage>::with_topic(&node, ODOM_TOPIC)?;
                     let _ = ready.send(Ok(()));
                     while !stopping.load(Ordering::Relaxed)
                         && node.wait(Duration::from_millis(2)).is_ok()
                     {
                         while let Some(message) = subscriber.receive()? {
-                            if external_map && message.external_map != 1 {
-                                return Err(Error::new(
-                                    ErrorKind::InvalidArgument,
-                                    "static map requires explicit external map alignment",
-                                ));
-                            }
                             let trace = *message.user_header();
-                            let _span = trace.continue_span("recv-map-odom");
+                            let _span = trace.continue_span("recv-odom");
                             let mut state = state
                                 .lock()
-                                .map_err(|_| internal("navigation state poisoned"))?;
-                            if state.input.observe_navigation(&message, Instant::now()) {
-                                if state
-                                    .history
-                                    .back()
-                                    .is_some_and(|old| old.revision != message.revision)
-                                {
-                                    state.history.clear();
-                                }
+                                .map_err(|_| internal("odometry state poisoned"))?;
+                            if state.input.observe(&message, Instant::now()) {
                                 state.history.push_back(*message);
                                 while state.history.len() > 512
-                                    || state.history.front().is_some_and(|old| {
-                                        message.odom.timestamp - old.odom.timestamp > 2.
-                                    })
+                                    || state
+                                        .history
+                                        .front()
+                                        .is_some_and(|old| message.timestamp - old.timestamp > 2.)
                                 {
                                     state.history.pop_front();
                                 }
@@ -103,7 +90,7 @@ impl NavigationReceiver {
                         }
                         state
                             .lock()
-                            .map_err(|_| internal("navigation state poisoned"))?
+                            .map_err(|_| internal("odometry state poisoned"))?
                             .input
                             .current(Instant::now());
                     }
@@ -115,7 +102,7 @@ impl NavigationReceiver {
                     if let Err(error) = result {
                         state.error = Some(error.to_string());
                         let _ = ready.send(Err(error.to_string()));
-                        log::error!("navigation receiver: {error}");
+                        log::error!("odometry receiver: {error}");
                     }
                 }
             })
@@ -127,17 +114,17 @@ impl NavigationReceiver {
         };
         if let Err(error) = startup.recv().map_err(|e| e.to_string()).and_then(|v| v) {
             receiver.shutdown();
-            return Err(internal(error).with_operation("start navigation receiver"));
+            return Err(internal(error).with_operation("start odometry receiver"));
         }
         Ok(receiver)
     }
 
-    /// 原子读取状态、坐标版本和 trace；版本变更只在交给规划线程后确认。
+    /// 原子读取局部状态和 trace。
     pub fn snapshot(&self) -> Result<(StateInput, TraceContext)> {
         let mut state = self
             .shared
             .lock()
-            .map_err(|_| internal("navigation state poisoned"))?;
+            .map_err(|_| internal("odometry state poisoned"))?;
         if let Some(error) = &state.error {
             return Err(internal(error.clone()));
         }
@@ -146,7 +133,6 @@ impl NavigationReceiver {
         }
         state.input.current(Instant::now());
         let snapshot = state.input.clone();
-        state.input.take_revision_change();
         Ok((snapshot, state.trace))
     }
 
@@ -154,8 +140,8 @@ impl NavigationReceiver {
         self.stop.load(Ordering::Relaxed)
     }
 
-    pub fn history(&self) -> NavigationHistory {
-        NavigationHistory {
+    pub fn history(&self) -> OdometryHistory {
+        OdometryHistory {
             shared: Arc::clone(&self.shared),
             stop: Arc::clone(&self.stop),
         }
@@ -166,12 +152,12 @@ impl NavigationReceiver {
         if let Some(thread) = self.thread.take()
             && thread.join().is_err()
         {
-            log::error!("navigation receiver panicked");
+            log::error!("odometry receiver panicked");
         }
     }
 }
 
-impl Drop for NavigationReceiver {
+impl Drop for OdometryReceiver {
     fn drop(&mut self) {
         self.shutdown();
     }

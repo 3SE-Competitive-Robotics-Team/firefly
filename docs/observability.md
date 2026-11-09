@@ -64,12 +64,12 @@ This catalog covers all production topic constants; test topics use isolated nam
 | `Firefly/Depth` | render/sensors → planner-owned EGO mapper | No duplicate depth display |
 | `Firefly/Imu` | sim/sensors → VIO, FC | Not subscribed by the ordinary recorder |
 | `Firefly/Odometry` | VIO → control, planning, evaluation | Pose diagnostics; evaluation explicitly subscribes |
-| `Firefly/Navigation` | VIO/localization → planner, FC, mimir | Atomic map←odom relation; mimir records changes only and uses bounded startup matching, without duplicating the pose stream |
+| `Firefly/Navigation` | VIO/localization → optional consumers, mimir | Atomic map←odom relation; mimir records changes only and uses bounded startup matching, without duplicating the pose stream |
 | `Firefly/Reference` | trajectory output → FC, evaluation | Evaluation records target pose and velocity |
 | `Firefly/Control` | FC → actuators/sim, evaluation | Motor evidence and FC summaries |
 | `Firefly/PlantState`, `Firefly/Airframe` | sim/airframe → FC, system consumers | Independent evaluation evidence; never VIO input |
 | `Firefly/Command` | ffctl/evaluation → FC | Results and rejection reasons in event logs |
-| `Firefly/Goal` | ffctl/evaluation → planner | Planning goal, not a plotting topic |
+| `Firefly/Goal` | ffctl/evaluation → planner | Goal in local odom coordinates, not a plotting topic |
 | `Firefly/MandatoryStop` | external tools → planner | Stop command; outcome in planner state and logs |
 | `Firefly/Trajectory`, `Firefly/PlannerHeartbeat`, `Firefly/TrajectoryControl`, `Firefly/PlannerStatus` | planner/FSM ↔ trajectory output/evaluation | Business lifecycle; visualization uses plan entities |
 | `Firefly/Features`, `Firefly/PoseObservation` | feature/matching → localization | Business localization input, not duplicated by mimir |
@@ -96,19 +96,11 @@ business log. Known loss makes the recording fail.
 | `render/capture/*` | Capture-to-publish stage timing at the original capture timestamp |
 | `corr/*`, `vision/debug/map_query_wall_s` | External localization gates, disagreement, correction and query timing |
 | `plan/*` | Paths, poses, obstacle planes and maps for display |
-| `plan/collision` | Planner-owned depth map after obstacle inflation, in map coordinates at the planner simulation timestamp; bounded voxel snapshots/deltas for checking collision geometry, using the existing map display cadence and budgets |
+| `plan/collision` | Planner-owned depth map after obstacle inflation, in odom coordinates at the planner simulation timestamp; bounded voxel snapshots/deltas for checking collision geometry, using the existing map display cadence and budgets |
 | `acceptance/*` | Scoring evidence; display simplification must preserve it and all acceptance thresholds |
 | `mimir/*`, `logs/*` | Configuration, queue high-water, lifecycle, failures and process events |
 | `mimir/status/{fc/tick_rate,vio/processing,vio/posterior_age,vio/landmarks,camera/publish_rate,camera/publish_latency}` | Six independent recorder-derived numeric documents from existing scalar observations; at most 2 Hz per entity in measurement time, six cached values and one constant-space publication counter, no additional IPC topic |
 | `frames/{map,odom,world}` | Recorder-owned display transforms: root←map identity, temporal map←odom from Navigation, and optional constant map←world startup alignment; never estimation or control inputs |
-| `rootslam/mapping/state` | Four cumulative counters: processed detection queries, geometrically verified loops, accepted PGO transactions, rejected PGO results; 1 Hz at the current IMU measurement time, constant-size state, existing scalar IPC and diagnostic switch |
-| `vio/navigation/revision` | Revision actually published by the VIO navigation owner; 10 Hz at the same IMU measurement timestamp, one scalar; absent for external-localization ownership |
-
-Online map-correction acceptance requires both an accepted PGO transaction and a positive published
-navigation revision. A verified loop, solver return, or prepared transform alone is insufficient.
-Mapping source/anchor times and revisions are logged once per prepared correction; planner logs the
-revision when invalidating geometry and handing off a replacement trajectory. These bounded lifecycle
-events use the existing log budget. No new IPC topics, raw depth archive, or per-landmark streams are added.
 
 ### Spatial frames
 
@@ -121,7 +113,8 @@ the association. Raw positions, orientations, timestamps and acceptance evidence
 |---|---|
 | `gt/{pose,traj}`, `acceptance/gt` | Simulator `world` |
 | `vio/{odom,traj}`, `vio/posterior/pose_imu_world`, `vio/prediction/pose_body_odom`, `acceptance/odom` | Local estimator `odom`; posterior “world” means the estimator's local world |
-| `vio/map/*`, `corr/*`, spatial `plan/*`, `acceptance/{corrected,reference}` | Navigation `map` |
+| `vio/map/*`, `corr/*`, `acceptance/corrected` | Navigation `map` |
+| Spatial `plan/*`, `acceptance/reference` | Local planner `odom`; independent of optional Navigation corrections |
 | `cameras/{left,right}` | Extrinsics relative to the moving `tf#/vio/prediction/pose_body_odom` body frame; intrinsics and pixel overlays retain camera coordinates |
 
 The Viewer root connects to `map`. `map←odom` is recorded at the Navigation measurement time on
@@ -164,16 +157,15 @@ Join by frame timestamp and process-monotonic boundaries; do not add nested dura
 Each event contains the stage and elapsed wall time; nested stages must not be summed.
 Production is off by default, bounded by the existing 100/20/10 Hz callback rates and 512-byte log limit.
 Depth-input expiry/termination logs one warning when planner enters the latched emergency state,
-including navigation time and revision, in the existing `logs/planner` stream (512-byte limit).
+including odometry measurement time, in the existing `logs/planner` stream (512-byte limit).
 `rootslam-loop=debug` adds one retrieval summary per keyframe and one rejection/acceptance event
 per tested loop candidate to `logs/firefly-rootslam`. Fields are frame IDs, descriptor/match/inlier
 counts and rejection stage; no images or per-feature arrays. At most `1 + max_candidates` events
 per detection job, bounded by the configured keyframe/image rate and the existing 512-byte log limit.
 `render/capture/stages_s` records submit/readback/assembly/queue timing; `publish_s` records processing,
 publication and total timing. Posterior age also includes visual processing and propagation scheduling.
-Accepted RootSLAM pose-graph corrections update online navigation in the startup map gauge.
-`rootslam/mapping/state` counts backend outcomes; `vio/navigation/revision` confirms publication.
-Loop candidate counts alone do not prove an online navigation correction.
+Default RootSLAM runs as VIO. Planner consumes raw body odometry and depth; global map corrections
+are not applied to its occupancy or trajectories. No online loop-commit observations are registered.
 
 ## Recorder architecture and operation
 

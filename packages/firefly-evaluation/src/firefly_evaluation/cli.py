@@ -11,14 +11,12 @@ from pathlib import Path
 import platform
 import subprocess
 import sys
-import tomllib
 import uuid
 
 from .mission import Mission, Options
 from .process_lifecycle import require_idle
 from .mission_metrics import score
 from .mission_sim import CONTACT_POLICY
-from .vision_assets import verify_map_compatibility
 from firefly_mujoco import load_scene_name
 from firefly_workspace import digest, parse_scene, startup, workspace_root
 
@@ -29,8 +27,8 @@ def save_report(directory, report):
     categories = {
         "初始化": ["initialization"], "起飞": ["takeoff"], "悬停": ["hover", "hover_accuracy", "terminal_hold", "terminal_hold_accuracy"],
         "降落": ["landing", "landing_accuracy"],
-        "路径跟踪": ["tracking", "tracking_error", "waypoint_accuracy"], "定位误差": ["vio_accuracy", "map_accuracy"], "库图观测": ["visual_localization"],
-        "在线回环": ["online_loop"], "碰撞": ["collision"], "失联安全响应": ["reference_loss", "failure_hold", "failure_hold_accuracy", "estimator_fallback", "degraded_support", "failure_terminal"],
+        "路径跟踪": ["tracking", "tracking_error", "waypoint_accuracy"], "定位误差": ["vio_accuracy", "map_accuracy"],
+        "碰撞": ["collision"], "失联安全响应": ["reference_loss", "failure_hold", "failure_hold_accuracy", "estimator_fallback", "degraded_support", "failure_terminal"],
         "进程退出": ["shutdown"],
     }
     summary = {}
@@ -54,13 +52,13 @@ def save_report(directory, report):
             rows.append(f"<tr><td>{escape(name)}</td><td class='{escape(stage['status'])}'>{escape(stage['status'])}</td><td><pre>{escape(details)}</pre></td></tr>")
         rows.append("</table>")
         if "mission_summary" in case:
-            rows.append("<h3>往返与回环证据</h3><pre>" + escape(json.dumps(case["mission_summary"], ensure_ascii=False, indent=2)) + "</pre>")
+            rows.append("<h3>往返任务证据</h3><pre>" + escape(json.dumps(case["mission_summary"], ensure_ascii=False, indent=2)) + "</pre>")
     document = ("<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>RMUC 自动任务验收</title>"
                 "<style>body{font:16px system-ui;max-width:1200px;margin:40px auto;padding:0 24px;color:#202a34}table{border-collapse:collapse;width:100%}td,th{border:1px solid #d2d8de;padding:10px;text-align:left;vertical-align:top}pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font-size:13px}.passed{color:#176a37}.failed{color:#b02020}.blocked{color:#8a6000}h2{margin-top:36px}</style>"
                 f"<h1>RMUC 自动任务验收：{escape(report['status'])}</h1><p>运行 ID：{escape(report['run_id'])}</p>"
                 f"<p>运行范围：{escape(report.get('scope', ''))}</p>"
-                "<p>真实 sim / render / VIO / FC；路径任务另启 localization / planner。定位模式见运行范围。真值仅供评分。局部 VIO 误差允许固定尺度航向和平移对齐，地图定位与路径跟踪不对齐。正常起降接触与碰撞分开统计。</p>"
-                "<p>默认空地图模式要求已接受的在线回环；外部地图模式要求已接受的库图观测。纯 VIO 模式关闭回环。会话地图评分只用首次真值定义固定坐标变换，不拟合估计轨迹，也不反馈在线系统。回环与库图观测分别验收。操作系统与 GPU 调度不是确定性的，单次通过不代表可靠性概率。</p>"
+                "<p>真实 sim / render / VIO / FC；路径任务另启 planner 与独立轨迹输出进程。真值仅供评分。局部 VIO 误差允许固定尺度航向和平移对齐，地图定位与路径跟踪不对齐。正常起降接触与碰撞分开统计。</p>"
+                "<p>RootSLAM 只提供 VIO；规划器使用机体里程计、深度和相机外参维护局部地图。会话地图评分只用首次真值定义固定坐标变换，不拟合估计轨迹，也不反馈在线系统。操作系统与 GPU 调度不是确定性的，单次通过不代表可靠性概率。</p>"
                 "<p><a href='report.json'>完整机器报告（配置、源码、二进制、资产及 RRD 的 SHA-256）</a></p>"
                 + "<table><tr><th>汇总项</th><th>结果</th></tr>" + "".join(
                     f"<tr><td>{escape(label)}</td><td class='{value['status']}'>{value['status']}</td></tr>" for label, value in summary.items()) + "</table>"
@@ -69,14 +67,12 @@ def save_report(directory, report):
     (directory / "report.html").write_text(document)
 
 
-def provenance(root, *, allow_map_rig_translation=False, vio_only=False, prior_maps=False):
+def provenance(root):
     files = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=root).decode().split("\0")
     source = {name: digest(root / name) for name in files if name and (root / name).is_file()}
     names = ["firefly-rootslam", "render", "fc", "ffctl", "planner", "mimir"]
-    if prior_maps:
-        names += ["localization", "aliked", "lightglue"]
     binaries = {name: digest(root / "target/release" / name) for name in names}
-    models = {} if vio_only or not prior_maps else {name: digest(root / "models" / name) for name in ("aliked-n16-k512.onnx", "lightglue-aliked-k512.onnx")}
+    models = {}
     scene = parse_scene(load_scene_name(root / "configs/scene.toml"))
     manifest_path = root / scene.dir / "asset_manifest.json"
     manifest = json.loads(manifest_path.read_text())
@@ -85,22 +81,12 @@ def provenance(root, *, allow_map_rig_translation=False, vio_only=False, prior_m
     if manifest.get("scene") != scene.name:
         raise ValueError("geometry manifest belongs to another scene")
     for path, expected in manifest["artifacts"].items():
-        if not prior_maps and Path(path).suffix == ".ffmap":
+        if Path(path).suffix == ".ffmap":
             continue
         if digest(root / path) != expected:
             raise ValueError(f"asset content changed: {path}")
     visual = None
     compatibility = {"status": "not_used_empty_map"}
-    if prior_maps:
-        visual_map = (root / "apps/planner/maps" / scene.map).with_suffix(".ffvmap")
-        visual_manifest = visual_map.with_suffix(".manifest.json")
-        visual = json.loads(visual_manifest.read_text())
-        if digest(visual_map) != visual["map_sha256"]:
-            raise ValueError("visual map content changed")
-        for name, expected in visual["models"]["artifacts"].items():
-            if digest(root / "models" / name) != expected:
-                raise ValueError(f"visual model content changed: {name}")
-        compatibility = verify_map_compatibility(visual["assets"], root=root, allow_rig_translation=allow_map_rig_translation)
     return {"visual_map": visual, "visual_map_compatibility": compatibility, "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
             "git_status": subprocess.check_output(["git", "status", "--short"], cwd=root, text=True),
             "source_sha256": source, "binary_sha256": binaries, "model_sha256": models,
@@ -124,13 +110,8 @@ def main(argv=None, *, resolve_workspace=workspace_root, check_idle=require_idle
     parser.add_argument("--workspace", type=Path, help="firefly 工作区目录；默认从当前目录向上查找")
     parser.add_argument("--config", type=Path)
     parser.add_argument("--case", choices=["all", "nominal", "reference_loss", "estimator_loss"], default="all")
-    parser.add_argument("--vio-only", action="store_true", help="纯 VIO + 会话坐标系；关闭在线回环与持久稀疏地图，不启动 ALIKED/LightGlue")
-    parser.add_argument("--prior-maps", action="store_true", help="显式加载 RMUC 离线视觉地图与规划地图")
-    parser.add_argument("--localization-config", type=Path, help="外部地图模式所需的显式启动先验配置")
     parser.add_argument("--repeat", type=int, default=1, help="每种任务独立启动次数；全部使用固定配置")
     parser.add_argument("--output-dir", type=Path, help="logs/ 下不存在的报告目录；默认使用唯一运行 ID")
-    parser.add_argument("--allow-map-rig-translation", action="store_true",
-                        help="显式允许冻结地图与当前 rig 的共同安装平移差异；记录差异，仍校验其他标定与资产")
     args = parser.parse_args(argv)
     try:
         root = resolve_workspace(args.workspace)
@@ -138,12 +119,6 @@ def main(argv=None, *, resolve_workspace=workspace_root, check_idle=require_idle
         parser.error(str(error))
     if args.config is None:
         args.config = root / "configs/acceptance.toml"
-    if args.vio_only and args.prior_maps:
-        parser.error("--vio-only and --prior-maps are mutually exclusive")
-    if args.allow_map_rig_translation and not args.prior_maps:
-        parser.error("--allow-map-rig-translation requires --prior-maps")
-    if args.prior_maps != (args.localization_config is not None):
-        parser.error("--prior-maps requires --localization-config with explicit [origin]")
     if not 1 <= args.repeat <= 100:
         parser.error("--repeat must be in 1..100")
     startup_error = None
@@ -151,38 +126,27 @@ def main(argv=None, *, resolve_workspace=workspace_root, check_idle=require_idle
         options = startup(args.config, decode_options)
     except (OSError, ValueError, TypeError) as error:
         startup_error = error
-    if args.localization_config:
-        with args.localization_config.open("rb") as stream:
-            if "origin" not in tomllib.load(stream):
-                parser.error("external maps require explicit [origin]")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     directory = args.output_dir.resolve() if args.output_dir else root / "logs/acceptance" / run_id
     if not directory.is_relative_to(root / "logs"):
         parser.error("acceptance evidence must be stored under repository logs/")
     directory.mkdir(parents=True)
     report = {"schema_version": 2, "mission_decisions": "fresh estimated state; independent ground-truth scoring", "run_id": run_id, "status": "running", "cases": [],
-              "repeat": args.repeat, "scope": "RMUC mission; empty session map + VIO + online loops + depth mapping/planning; simulator geometry is evaluation infrastructure"}
-    if args.vio_only:
-        report["scope"] = "RMUC mission; empty session map + VIO + depth mapping/planning; loop closure disabled"
-    elif args.prior_maps:
-        report["scope"] = "RMUC mission; VIO + explicit external map alignment + offline visual map localization + online loops + prior/depth mapping"
+              "repeat": args.repeat, "scope": "RMUC mission; VIO odometry + depth/extrinsics + local planning; simulator geometry is evaluation infrastructure"}
     try:
         if startup_error is not None:
             raise startup_error
         check_idle(root)
         report["options"] = asdict(options)
         report["contact_policy"] = CONTACT_POLICY
-        report["provenance"] = (collect_provenance(root, vio_only=True) if args.vio_only else
-                                collect_provenance(root, prior_maps=True, allow_map_rig_translation=args.allow_map_rig_translation) if args.prior_maps else collect_provenance(root))
+        report["provenance"] = collect_provenance(root)
         cases = ["nominal", "reference_loss", "estimator_loss"] if args.case == "all" else [args.case]
         save_report(directory, report)
         for attempt, name in [(attempt, name) for attempt in range(1, args.repeat + 1) for name in cases]:
             case_directory = directory if args.repeat == 1 else directory / f"attempt_{attempt:02d}"
             case_directory.mkdir(exist_ok=True)
             log.info("开始任务验收 %s，证据目录 %s", name, directory)
-            mission = (mission_factory(case_directory, name, options, workspace=root, vio_only=True) if args.vio_only
-                       else mission_factory(case_directory, name, options, workspace=root, prior_maps=True, localization_config=args.localization_config) if args.prior_maps
-                       else mission_factory(case_directory, name, options, workspace=root))
+            mission = mission_factory(case_directory, name, options, workspace=root)
             case = mission.run()
             case["attempt"] = attempt
             try:
