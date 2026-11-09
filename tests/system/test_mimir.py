@@ -286,8 +286,13 @@ def test_spatial_frames_preserve_raw_poses_and_follow_navigation():
             return msg
 
         try:
-            truth = OdomMessage(timestamp=1., position_x=-13., position_z=.4, quat_w=1., is_initialized=True)
-            navigation = NavigationMessage(odom=OdomMessage(timestamp=1., quat_w=1., is_initialized=True))
+            physics_time = 0.
+            for _ in range(1000):
+                physics_time += .001
+            navigation_time = round(physics_time * 1e9) * 1e-9
+            assert physics_time != navigation_time
+            truth = OdomMessage(timestamp=physics_time, position_x=-13., position_z=.4, quat_w=1., is_initialized=True)
+            navigation = NavigationMessage(odom=OdomMessage(timestamp=navigation_time, quat_w=1., is_initialized=True))
             navigation.rotation[:] = (0., 0., 0., 1.)
             truth_port.loan_uninit().write_payload(truth).send()
             time.sleep(.03)

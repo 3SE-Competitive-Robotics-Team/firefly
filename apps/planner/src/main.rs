@@ -776,10 +776,10 @@ impl App {
             pts.push(s.position);
             arrows.push([s.velocity.x, s.velocity.y, s.velocity.z]);
         }
-        self.log_line_strip(entity, &pts, (80, 160, 255), t);
+        self.log_line_strip(entity, &pts, (255, 96, 96), t);
         // 速度箭头挂在子实体，随轨迹同时间戳更新
         let mut msg = VizMessage::base(kind::ARROWS, t, &format!("{entity}/velocity"));
-        msg.color = [255, 200, 80];
+        msg.color = [255, 96, 96];
         msg.arrow_count = SAMPLES.min(ARROWS_MAX) as u32;
         for (i, (p, v)) in pts.iter().zip(&arrows).take(ARROWS_MAX).enumerate() {
             msg.arrow_origins[i] = [p.x, p.y, p.z];
