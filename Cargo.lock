@@ -5836,6 +5836,7 @@ dependencies = [
  "log",
  "nalgebra",
  "re_build_info",
+ "re_byte_size",
  "re_chunk",
  "re_log_encoding",
  "re_log_msg",

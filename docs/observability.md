@@ -170,11 +170,16 @@ are not applied to its occupancy or trajectories. No online loop-commit observat
 ## Recorder architecture and operation
 
 Mimir owns IPC subscriptions in one receive thread, copies each loan once into a bounded channel,
-then releases the loan. A single writer groups scalar rows by entity into columnar Rerun chunks.
+then releases the loan. A single writer groups scalar and typed observation rows by entity into
+columnar Rerun chunks. Typed rows use Rerun's `PendingRow::many_into_chunks` so images, poses,
+trajectories and metric cards do not each create a chunk per sample.
 Count, byte, entity, publisher and voxel budgets are bounded in
 [Options](../apps/mimir/src/config.rs); [mimir.toml](../configs/mimir.toml) contains overrides.
-Scalar batches flush by row limit or periodic deadline. Repeated timestamps, order within an entity,
-field order and values are retained. Clear flushes previous numeric rows before clearing entities.
+All batches flush by row limit or periodic deadline. Typed rows also share the `batch_bytes` memory
+budget; reaching it flushes pending rows synchronously. A single oversized row is written directly
+after flushing, without retaining it in the batch. Static metadata is written directly.
+Repeated timestamps, order within an entity, field order and values are retained. Clear flushes
+previous rows before clearing entities. Batching must not resample or discard observations.
 Synchronous RRD encoding writes directly to disk without an extra unbounded SDK queue.
 
 Voxel chunks must arrive in order and form a complete update before a map snapshot is written.
@@ -233,7 +238,7 @@ Old recordings without `mimir/status/*` need a derived display layer for the num
 layout alone cannot create missing data. Preserve the original recording when producing such a layer.
 
 Output paths must be new. After producers stop, SIGINT/SIGTERM drains diagnostic subscriptions until empty
-(including disconnected publishers), drains the owned channel, flushes scalar batches,
+(including disconnected publishers), drains the owned channel, flushes all batches,
 writes the full RRD footer and syncs the file. Queue overflow, sequence gaps, declared producer loss,
 invalid payloads, incomplete maps and writer/close failures return errors and preserve failure evidence
 where disk access remains possible. Closing does not consume a queue slot.

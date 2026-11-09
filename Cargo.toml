@@ -5,6 +5,7 @@ resolver = "3"
 
 [workspace.dependencies]
 re_build_info = "=0.42.0"
+re_byte_size = "=0.42.0"
 re_chunk = "=0.42.0"
 re_log_encoding = { version = "=0.42.0", features = ["encoder", "decoder"] }
 re_log_msg = "=0.42.0"

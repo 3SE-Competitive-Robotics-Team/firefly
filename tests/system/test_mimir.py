@@ -267,6 +267,39 @@ def test_stereo_images_and_keypoint_ids_survive_recording():
         assert found_images == found_points == {"left", "right"}
 
 
+def test_spatial_batches_retain_repeated_and_out_of_order_times():
+    with isolated_run(ROOT):
+        process, path = recording()
+        node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
+        geometry = publisher(node, "Firefly/Viz", VizMessage, 256, 8)
+        expected = []
+        try:
+            for index in range(129):
+                # Delayed measurements and equal timestamps remain separate observations.
+                stamp = (index // 2 if index < 96 else index - 96) / 1024
+                msg = VizMessage(kind=1, timestamp=stamp, sequence=index)
+                name = b"vio/odom"
+                msg.entity_len, msg.entity[:len(name)] = len(name), name
+                msg.xyz[:], msg.quat_xyzw[:] = (float(index), 0., .25), (0., 0., 0., 1.)
+                geometry.loan_uninit().write_payload(msg).send()
+                expected.append((int(stamp * 1e9 + .5), [[float(index), 0., .25]]))
+                if index % 32 == 31:
+                    time.sleep(.02)
+        finally:
+            assert process.stop() == 0, list(process.tail)
+        _, logs = read(path)
+        assert "recording complete" in logs
+        chunks = list(RrdReader(path).stream().filter(content="/vio/odom"))
+        actual = []
+        for chunk in chunks:
+            batch = chunk.to_record_batch()
+            assert batch["Transform3D:parent_frame"].to_pylist() == [["odom"]] * len(batch)
+            actual.extend(zip(batch["sim_time"].cast("int64").to_pylist(),
+                              batch["Transform3D:translation"].to_pylist()))
+        assert actual == expected
+        assert len(chunks) < len(expected) // 4, "spatial samples must be batched, not one chunk per row"
+
+
 def test_spatial_frames_preserve_raw_poses_and_follow_navigation():
     with isolated_run(ROOT):
         process, path = recording()

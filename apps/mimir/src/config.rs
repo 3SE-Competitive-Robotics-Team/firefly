@@ -7,6 +7,8 @@ pub struct Options {
     pub queue_messages: usize,
     pub queue_bytes: usize,
     pub batch_rows: usize,
+    /// Total pending typed-row memory, independent of the IPC ingress queue.
+    pub batch_bytes: usize,
     pub flush_ms: u64,
     pub max_entities: usize,
     pub max_publishers: usize,
@@ -20,6 +22,7 @@ impl Default for Options {
             queue_messages: 1024,
             queue_bytes: 8 * 1024 * 1024,
             batch_rows: 64,
+            batch_bytes: 2 * 1024 * 1024,
             flush_ms: 200,
             max_entities: 256,
             max_publishers: 64,
@@ -37,6 +40,7 @@ impl Options {
         if self.queue_messages == 0
             || self.queue_bytes < 256 * 1024
             || !(1..=4096).contains(&self.batch_rows)
+            || self.batch_bytes == 0
             || !(1..=1000).contains(&self.flush_ms)
             || self.max_entities == 0
             || self.max_publishers == 0

@@ -20,6 +20,7 @@ iceoryx2.workspace = true
 log.workspace = true
 nalgebra.workspace = true
 re_build_info.workspace = true
+re_byte_size.workspace = true
 re_chunk.workspace = true
 re_log_encoding.workspace = true
 re_log_msg.workspace = true

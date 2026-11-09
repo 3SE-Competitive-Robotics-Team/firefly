@@ -119,8 +119,8 @@ fn rust_python_payload_header_and_event_roundtrip() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let request = format!("Firefly/Test/Interop/{unique}/Request");
-    let response = format!("Firefly/Test/Interop/{unique}/Response");
+    let request = format!("Firefly/Test/Interop/Odom/{unique}/Request");
+    let response = format!("Firefly/Test/Interop/Odom/{unique}/Response");
     let node = create_node().unwrap();
     let publisher = Publisher::<OdomMessage>::with_topic_notify(&node, &request).unwrap();
     let subscriber = Subscriber::<OdomMessage>::with_topic(&node, &response).unwrap();
@@ -175,8 +175,8 @@ fn reference_alignment_snapshot_roundtrip() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let request = format!("Firefly/Test/Interop/{unique}/Request");
-    let response = format!("Firefly/Test/Interop/{unique}/Response");
+    let request = format!("Firefly/Test/Interop/Reference/{unique}/Request");
+    let response = format!("Firefly/Test/Interop/Reference/{unique}/Response");
     let node = create_node().unwrap();
     let publisher = firefly_pubsub::publish::Publisher::<firefly_pubsub::reference::ReferenceMessage>::with_topic(&node, &request).unwrap();
     let subscriber = firefly_pubsub::subscriber::Subscriber::<
