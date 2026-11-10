@@ -17,7 +17,7 @@ use std::{
 pub struct EurocVioDataset {
     path: PathBuf,
     records: Records,
-    image_path: HashMap<i64, String>,
+    image_path: [HashMap<i64, String>; 2],
     exposure_times: [HashMap<i64, f64>; 2],
 }
 impl VioDataset for EurocVioDataset {
@@ -43,16 +43,13 @@ impl VioDataset for EurocVioDataset {
         0
     }
     fn image_data(&mut self, timestamp_ns: i64) -> Result<Vec<ImageData>> {
-        let filename = self.image_path.get(&timestamp_ns).ok_or_else(|| {
-            common::failure(&self.path, "Unknown image timestamp")
-                .with_context("timestamp_ns", timestamp_ns)
-        })?;
         let mut result = Vec::with_capacity(2);
         for camera in 0..2 {
-            let path = self
-                .path
-                .join(format!("mav0/cam{camera}/data"))
-                .join(filename);
+            let filename = self.image_path[camera].get(&timestamp_ns).ok_or_else(|| {
+                common::failure(&self.path, "Unknown image timestamp")
+                    .with_context("timestamp_ns", timestamp_ns)
+            })?;
+            let path = self.path.join(format!("cam{camera}/data")).join(filename);
             let mut image = common::image(&path, false)?;
             if image.img.is_some() {
                 image.exposure = *self.exposure_times[camera]
@@ -78,20 +75,47 @@ impl EurocIo {
         }
     }
 }
-impl DatasetIoInterface for EurocIo {
-    fn read(&mut self, path: &Path) -> Result<()> {
+impl EurocIo {
+    /// Reads an ASL sensor directory directly, retaining native camera dimensions.
+    /// # Errors
+    /// Rejects malformed metadata and unmatched stereo indices.
+    pub fn read_asl(&mut self, path: &Path) -> Result<()> {
+        self.data = None;
+        let mut data = self.read_root(path)?;
+        let file = path.join("cam1/data.csv");
+        data.image_path[1].clear();
+        let mut right_times = Vec::new();
+        for (number, line) in common::lines(&file)? {
+            let fields = common::fields(&line, &file, number, 2, true)?;
+            let timestamp = common::parse(fields[0], &file, number)?;
+            right_times.push(timestamp);
+            data.image_path[1].insert(timestamp, fields[1].to_owned());
+        }
+        if right_times != data.records.image_timestamps
+            || right_times.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(common::failure(
+                path,
+                "ASL stereo timestamps must match and increase strictly",
+            ));
+        }
+        self.data = Some(Arc::new(Mutex::new(data)));
+        Ok(())
+    }
+
+    fn read_root(&self, path: &Path) -> Result<EurocVioDataset> {
         let mut data = EurocVioDataset {
             path: path.to_owned(),
             records: Records::default(),
-            image_path: HashMap::new(),
+            image_path: std::array::from_fn(|_| HashMap::new()),
             exposure_times: std::array::from_fn(|_| HashMap::new()),
         };
-        let file = path.join("mav0/cam0/data.csv");
+        let file = path.join("cam0/data.csv");
         for (number, line) in common::lines(&file)? {
             let values = common::fields(&line, &file, number, 2, true)?;
             let timestamp = common::parse(values[0], &file, number)?;
             data.records.image_timestamps.push(timestamp);
-            data.image_path.insert(
+            data.image_path[0].insert(
                 timestamp,
                 values[1]
                     .split_whitespace()
@@ -100,7 +124,9 @@ impl DatasetIoInterface for EurocIo {
                     .to_owned(),
             );
         }
-        let file = path.join("mav0/imu0/data.csv");
+        let [left_paths, right_paths] = &mut data.image_path;
+        right_paths.clone_from(left_paths);
+        let file = path.join("imu0/data.csv");
         for (number, line) in common::lines(&file)? {
             let values = common::fields(&line, &file, number, 7, true)?;
             let timestamp = common::parse::<u64>(values[0], &file, number)? as i64;
@@ -115,9 +141,9 @@ impl DatasetIoInterface for EurocIo {
                 data: accel,
             });
         }
-        let state = path.join("mav0/state_groundtruth_estimate0/data.csv");
-        let gt = path.join("mav0/gt/data.csv");
-        let mocap = path.join("mav0/mocap0/data.csv");
+        let state = path.join("state_groundtruth_estimate0/data.csv");
+        let gt = path.join("gt/data.csv");
+        let mocap = path.join("mocap0/data.csv");
         let groundtruth = if !self.load_mocap_as_gt && state.exists() {
             Some(state)
         } else if !self.load_mocap_as_gt && gt.exists() {
@@ -140,7 +166,7 @@ impl DatasetIoInterface for EurocIo {
             }
         }
         for camera in 0..2 {
-            let file = path.join(format!("mav0/cam{camera}/exposure.csv"));
+            let file = path.join(format!("cam{camera}/exposure.csv"));
             if file.exists() {
                 for (number, line) in common::lines(&file)? {
                     let values = common::fields(&line, &file, number, 2, true)?;
@@ -150,7 +176,12 @@ impl DatasetIoInterface for EurocIo {
                 }
             }
         }
-        self.data = Some(Arc::new(Mutex::new(data)));
+        Ok(data)
+    }
+}
+impl DatasetIoInterface for EurocIo {
+    fn read(&mut self, path: &Path) -> Result<()> {
+        self.data = Some(Arc::new(Mutex::new(self.read_root(&path.join("mav0"))?)));
         Ok(())
     }
     fn reset(&mut self) {

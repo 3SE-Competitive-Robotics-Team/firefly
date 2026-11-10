@@ -1,0 +1,20 @@
+# Full sequence; run from the workspace root after extracting MH_01_easy.
+precision = "float64"
+
+[input]
+type = "dataset"
+format = "euroc"
+path = "logs/datasets/euroc/MH_01_easy"
+calibration = "../../basalt/data/euroc_ds_calib.json"
+
+[vio]
+optical_flow_detection_grid_size = 20
+map = true
+loops = true
+
+[dataset]
+trajectory = "logs/euroc_trajectory.txt"
+local_trajectory = "logs/euroc_local_trajectory.txt"
+metrics_path = "logs/euroc_metrics.json"
+global_result_path = "logs/euroc_global_result.json"
+global_optimization = true

@@ -1,34 +1,30 @@
-use firefly_basalt::{
-    io::dataset_io::DatasetIoFactory, utils::vio_config::VioConfig,
-    vi_estimator::vio_estimator::VioEstimatorFactory,
-};
-use firefly_calibration::calibration::Calibration;
-use firefly_error::{Error, ErrorKind, Result};
-use firefly_rootslam::dataset_output::{
+use crate::dataset_output::{
     OriginalResult, TrajectoryFormat, align_ground_truth, write_trajectory,
 };
+use crate::{
+    config,
+    input::{SensorModel, Source},
+};
+use firefly_basalt::vi_estimator::vio_estimator::VioEstimatorFactory;
+use firefly_error::{Error, ErrorKind, Result};
 use firefly_rootslam_mapping::{
-    global_optimization::OptimizationOptions, loop_closure::LoopOptions, map::MapPolicy,
+    global_optimization::{KrylovPrecision, OptimizationOptions, Precision},
+    loop_closure::LoopOptions,
+    map::MapPolicy,
 };
 use serde::Deserialize;
 use std::{
     fs::File,
-    io::{BufReader, BufWriter, Write},
+    io::{BufWriter, Write},
     path::PathBuf,
 };
 
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Independent original estimator and mapping configuration switches"
-)]
-struct Options {
-    dataset_path: PathBuf,
-    dataset_type: String,
-    camera_calibration: PathBuf,
-    vio_config: Option<PathBuf>,
+pub struct Options {
     trajectory: Option<PathBuf>,
+    /// Causal local posterior, before persistent-map and final BA corrections.
+    local_trajectory: Option<PathBuf>,
     trajectory_format: TrajectoryFormat,
     groundtruth: Option<PathBuf>,
     marg_data: Option<PathBuf>,
@@ -39,9 +35,8 @@ struct Options {
     /// Basalt's alignment association limit; not specified by `RootSLAM`.
     max_ground_truth_gap_ns: i64,
     use_imu: bool,
-    use_double: bool,
-    mapping: bool,
     global_optimization: bool,
+    #[serde(deserialize_with = "deserialize_optimization")]
     optimization: OptimizationOptions,
     #[serde(rename = "loop_options")]
     loops: LoopOptions,
@@ -51,11 +46,8 @@ struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            dataset_path: PathBuf::new(),
-            dataset_type: "euroc".into(),
-            camera_calibration: PathBuf::new(),
-            vio_config: None,
             trajectory: None,
+            local_trajectory: None,
             trajectory_format: TrajectoryFormat::default(),
             groundtruth: None,
             marg_data: None,
@@ -65,8 +57,6 @@ impl Default for Options {
             global_result_path: None,
             max_ground_truth_gap_ns: 110_000_000,
             use_imu: true,
-            use_double: false,
-            mapping: true,
             global_optimization: true,
             optimization: OptimizationOptions::default(),
             loops: LoopOptions::default(),
@@ -76,28 +66,28 @@ impl Default for Options {
     }
 }
 impl Options {
-    fn validate(&self) -> Result<()> {
-        if self.global_result_path.is_some() && !(self.mapping && self.global_optimization) {
+    fn resolved_optimization(&self, precision: Precision) -> OptimizationOptions {
+        OptimizationOptions {
+            precision,
+            krylov_precision: KrylovPrecision::Native,
+            ..self.optimization.clone()
+        }
+    }
+    /// # Errors
+    /// Rejects invalid export and global optimization settings.
+    pub fn validate(&self, mapping: bool) -> Result<()> {
+        if self.local_trajectory.is_some() && self.local_trajectory == self.trajectory {
+            return Err(Error::new(
+                ErrorKind::InvalidArgument,
+                "local_trajectory and trajectory must use different paths",
+            ));
+        }
+        if self.global_result_path.is_some() && !(mapping && self.global_optimization) {
             return Err(Error::new(
                 ErrorKind::InvalidArgument,
                 "global_result_path requires mapping and global_optimization",
             )
             .with_operation("rootslam.config.validate"));
-        }
-        if self.dataset_path.as_os_str().is_empty()
-            || self.camera_calibration.as_os_str().is_empty()
-        {
-            return Err(Error::new(
-                ErrorKind::InvalidArgument,
-                "dataset_path and camera_calibration are required",
-            )
-            .with_operation("rootslam.config.validate"));
-        }
-        if !["euroc", "uzh", "kitti"].contains(&self.dataset_type.as_str()) {
-            return Err(
-                Error::new(ErrorKind::InvalidArgument, "Unsupported dataset_type")
-                    .with_operation("rootslam.config.validate"),
-            );
         }
         self.optimization.validate()?;
         self.loops.validate()?;
@@ -113,82 +103,44 @@ impl Options {
         Ok(())
     }
 }
-#[derive(Deserialize)]
-struct CalibrationArchive {
-    value0: Calibration<f64>,
-}
 
-fn main() -> Result<()> {
-    if let Some(argument) = std::env::args().nth(1) {
-        if argument == "--help" || argument == "-h" {
-            writeln!(
-                std::io::stdout(),
-                "firefly-rootslam-dataset\nRuns the translated original Basalt dataset pipeline."
-            )
-            .map_err(io_error)?;
-            return Ok(());
+// Frozen-problem tools retain independent arithmetic controls. The application
+// accepts only the top-level precision, so conflicting settings fail at startup.
+fn deserialize_optimization<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<OptimizationOptions, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    for key in ["precision", "krylov_precision"] {
+        if value.get(key).is_some() {
+            return Err(serde::de::Error::custom(format!(
+                "dataset.optimization.{key} is not supported; set top-level precision to float32 or float64"
+            )));
         }
-        return Err(Error::new(
-            ErrorKind::InvalidArgument,
-            "firefly-rootslam-dataset takes no command-line arguments",
-        )
-        .with_operation("rootslam.cli"));
     }
-    let config = firefly_config::paths::config("firefly-rootslam-dataset.toml");
-    let options = firefly_config::startup(config, firefly_observability::init, Options::validate)?;
-    let node = firefly_pubsub::node::create_node()?;
-    let log_ipc = firefly_observability::init_ipc(&node, "rootslam");
-    std::thread::scope(|scope| {
-        let worker = scope.spawn(|| run(&options));
-        while !worker.is_finished() {
-            firefly_observability::pump_log_ipc(&log_ipc);
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let result = worker
-            .join()
-            .map_err(|_| {
-                Error::new(ErrorKind::Internal, "RootSLAM application worker panicked")
-                    .with_operation("rootslam.run")
-            })
-            .and_then(|result| result);
-        if let Err(error) = &result {
-            log::error!("{error}");
-        }
-        firefly_observability::pump_log_ipc(&log_ipc);
-        result
-    })
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 fn io_error(error: std::io::Error) -> Error {
     Error::new(ErrorKind::Internal, "Dataset application I/O failed")
         .with_operation("rootslam.dataset.io")
         .with_source(error)
 }
-fn run(options: &Options) -> Result<()> {
+/// # Errors
+/// Propagates dataset input, estimation, mapping and output failures.
+pub fn run(
+    options: &Options,
+    source: &Source,
+    model: &SensorModel,
+    vio: &config::Options,
+    precision: Precision,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Result<()> {
     let started = std::time::Instant::now();
-    let calibration = serde_json::from_reader::<_, CalibrationArchive>(BufReader::new(
-        File::open(&options.camera_calibration).map_err(io_error)?,
-    ))
-    .map_err(|source| {
-        Error::new(
-            ErrorKind::InvalidArgument,
-            "Invalid Basalt calibration archive",
-        )
-        .with_operation("rootslam.calibration.load")
-        .with_source(source)
-    })?
-    .value0;
-    let mut config = VioConfig::default();
-    if let Some(path) = &options.vio_config {
-        config.load(path)?;
-    }
-    let mut reader = DatasetIoFactory::get_dataset_io(&options.dataset_type, false)?;
-    reader.read(&options.dataset_path)?;
-    let dataset = reader.data().ok_or_else(|| {
-        Error::new(ErrorKind::Internal, "Dataset reader returned no data")
-            .with_operation("rootslam.dataset.load")
-    })?;
-    // Readers already provide their reference timestamp convention. The
-    // original vio.cpp uses these GT arrays directly, without a second offset.
+    let calibration = &model.calibration;
+    let config = config::initial_vio_config(vio)?;
+    let optimization = options.resolved_optimization(precision);
+    let dataset = source.dataset()?;
+    // Ground truth and raw IMU retain their supplied timestamps. Camera timestamps
+    // receive the same calibration offset as the estimator ingress.
     let evaluation_data = if options.metrics_path.is_some()
         || options.result_path.is_some()
         || options.groundtruth.is_some()
@@ -197,7 +149,13 @@ fn run(options: &Options) -> Result<()> {
         let mut dataset = dataset
             .lock()
             .map_err(|_| Error::new(ErrorKind::Internal, "Dataset mutex poisoned"))?;
-        let times = dataset.image_timestamps().clone();
+        let times = dataset
+            .image_timestamps()
+            .iter()
+            .map(|&time| {
+                crate::input::camera_time_in_imu_clock(time, calibration.cam_time_offset_ns)
+            })
+            .collect::<Result<Vec<_>>>()?;
         Some((
             times,
             dataset.gt_timestamps().to_vec(),
@@ -208,49 +166,56 @@ fn run(options: &Options) -> Result<()> {
     };
     let mut estimator = VioEstimatorFactory::get_vio_estimator(
         &config,
-        &calibration,
-        &nalgebra::Vector3::new(0.0, 0.0, -9.81),
+        calibration,
+        &model.gravity,
         options.use_imu,
-        options.use_double,
+        precision == Precision::Float64,
     )?;
-    let mapping = if options.mapping {
-        let system_options = firefly_rootslam::system::SystemOptions {
+    let mapping = if vio.map {
+        let system_options = crate::system::SystemOptions {
             global_optimization: options.global_optimization,
-            optimization: options.optimization.clone(),
+            loop_closures: vio.loops,
+            optimization: optimization.clone(),
             loops: options.loops.clone(),
             map: options
                 .map_policy
                 .clone()
-                .unwrap_or_else(|| firefly_rootslam::system::SystemOptions::default().map),
-            ..Default::default()
+                .unwrap_or_else(|| crate::system::SystemOptions::default().map),
         };
-        let worker =
-            firefly_rootslam::system::MappingWorker::spawn(calibration.clone(), system_options)?;
+        let worker = crate::system::MappingWorker::spawn(calibration.clone(), system_options)?;
         estimator.outputs.local_map = Some(worker.input());
         Some(worker)
     } else {
         None
     };
-    let report = firefly_rootslam::dataset::run_with_options(
+    let report = crate::dataset::run_with_options(
         dataset,
-        &calibration,
+        calibration,
         &config,
         estimator,
-        &firefly_rootslam::dataset::RunOptions {
+        &crate::dataset::RunOptions {
             max_frames: options.max_frames,
+            stop: Some(stop),
             marg_data: options.marg_data.as_deref(),
             debug_directory: options.debug_directory.as_deref(),
         },
     )?;
     let states = report.states;
+    if let Some(path) = &options.local_trajectory {
+        let estimates: Vec<_> = states
+            .iter()
+            .map(|state| (state.state.pose.t_ns, state.state.pose.t_w_i))
+            .collect();
+        save_trajectory(path, &estimates, options.trajectory_format)?;
+    }
     save_original_results(options, &states, report.duration, evaluation_data.as_ref())?;
     let mapped = mapping
-        .map(firefly_rootslam::system::MappingWorker::finish)
+        .map(crate::system::MappingWorker::finish)
         .transpose()?;
     if let Some(result) = &mapped {
         report_mapping(result);
     }
-    save_global_result(options, mapped.as_ref())?;
+    save_global_result(options, mapped.as_ref(), optimization)?;
     save_results(options, &states, mapped.as_ref(), evaluation_data)?;
     let mut memory = firefly_basalt::utils::system_utils::MemoryInfo::default();
     if firefly_basalt::utils::system_utils::get_memory_info(&mut memory) {
@@ -265,12 +230,17 @@ fn run(options: &Options) -> Result<()> {
         states.len(),
         started.elapsed().as_secs_f64()
     );
+    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(Error::new(ErrorKind::Internal, "Dataset run interrupted")
+            .with_operation("rootslam.dataset.run"));
+    }
     Ok(())
 }
 
 fn save_global_result(
     options: &Options,
-    mapped: Option<&firefly_rootslam::system::SystemResult>,
+    mapped: Option<&crate::system::SystemResult>,
+    optimization: OptimizationOptions,
 ) -> Result<()> {
     let Some(path) = &options.global_result_path else {
         return Ok(());
@@ -284,14 +254,11 @@ fn save_global_result(
             )
             .with_operation("rootslam.global_result.save")
         })?;
-    firefly_rootslam_mapping::global_problem::ReplayResult::from_result(
-        global,
-        options.optimization.clone(),
-    )
-    .write_new(path)
+    firefly_rootslam_mapping::global_problem::ReplayResult::from_result(global, optimization)
+        .write_new(path)
 }
 
-fn report_mapping(result: &firefly_rootslam::system::SystemResult) {
+fn report_mapping(result: &crate::system::SystemResult) {
     log::info!(
         "RootSLAM map: {} keyframes, {} landmarks, {} verified loops, {} pose-graph optimizations",
         result.map.snapshot.keyframes.len(),
@@ -319,14 +286,23 @@ fn report_mapping(result: &firefly_rootslam::system::SystemResult) {
 }
 
 type EvaluationData = (Vec<i64>, Vec<i64>, Vec<nalgebra::Isometry3<f64>>);
+fn save_trajectory(
+    path: &std::path::Path,
+    estimates: &[(i64, nalgebra::Isometry3<f64>)],
+    format: TrajectoryFormat,
+) -> Result<()> {
+    let mut output = BufWriter::new(File::create(path).map_err(io_error)?);
+    write_trajectory(&mut output, estimates, format).map_err(io_error)?;
+    output.flush().map_err(io_error)
+}
+
 fn save_results(
     options: &Options,
     states: &[std::sync::Arc<firefly_basalt::imu::imu_types::PoseVelBiasState<f64>>],
-    mapped: Option<&firefly_rootslam::system::SystemResult>,
+    mapped: Option<&crate::system::SystemResult>,
     evaluation_data: Option<EvaluationData>,
 ) -> Result<()> {
     if let Some(path) = &options.trajectory {
-        let mut output = BufWriter::new(File::create(path).map_err(io_error)?);
         let estimates: Vec<_> = states
             .iter()
             .map(|state| {
@@ -338,8 +314,7 @@ fn save_results(
                 (pose.t_ns, *corrected)
             })
             .collect();
-        write_trajectory(&mut output, &estimates, options.trajectory_format).map_err(io_error)?;
-        output.flush().map_err(io_error)?;
+        save_trajectory(path, &estimates, options.trajectory_format)?;
     }
     if let (Some(path), Some((mut times, gt_times, ground_truth))) =
         (&options.metrics_path, evaluation_data)
@@ -361,7 +336,7 @@ fn save_results(
                 )
             })
             .collect();
-        let metrics = firefly_rootslam::evaluation::evaluate(
+        let metrics = crate::evaluation::evaluate(
             &times,
             &estimates,
             &gt_times,
@@ -410,7 +385,7 @@ fn save_original_results(
         let mut memory = firefly_basalt::utils::system_utils::MemoryInfo::default();
         let peak = firefly_basalt::utils::system_utils::get_memory_info(&mut memory)
             .then_some(memory.resident_memory_peak);
-        firefly_rootslam::dataset_output::original_statistics(
+        crate::dataset_output::original_statistics(
             duration,
             rms_ate,
             states.len(),
@@ -454,19 +429,49 @@ mod global_result_tests {
     use super::Options;
 
     #[test]
-    fn export_cannot_silently_run_without_a_global_solver() {
+    fn application_precision_controls_the_actual_solver_and_exported_options() {
+        use super::{KrylovPrecision, Precision};
+        use firefly_calibration::calibration::Calibration;
+        use firefly_rootslam_mapping::{
+            global_optimization::optimize_global, global_problem::ReplayResult, map::MapSnapshot,
+        };
+        let options: Options = toml::from_str("[optimization]\nmax_iterations = 7").unwrap();
+        for precision in [Precision::Float32, Precision::Float64] {
+            let resolved = options.resolved_optimization(precision);
+            assert_eq!(resolved.max_iterations, 7);
+            let result =
+                optimize_global(&MapSnapshot::default(), &Calibration::default(), &resolved)
+                    .unwrap();
+            assert_eq!(result.precision, precision);
+            assert_eq!(result.krylov_precision, KrylovPrecision::Native);
+            let replay = ReplayResult::from_result(&result, resolved);
+            assert_eq!(replay.options.precision, result.precision);
+            assert_eq!(replay.options.krylov_precision, result.krylov_precision);
+        }
+    }
+
+    #[test]
+    fn local_output_cannot_be_overwritten_by_final_trajectory() {
         let mut options = Options {
-            dataset_path: "dataset".into(),
-            camera_calibration: "calibration.json".into(),
-            global_result_path: Some("global_result.json".into()),
-            mapping: false,
+            trajectory: Some("trajectory.txt".into()),
+            local_trajectory: Some("trajectory.txt".into()),
             ..Options::default()
         };
-        assert!(options.validate().is_err());
-        options.mapping = true;
+        assert!(options.validate(true).is_err());
+        options.local_trajectory = Some("local_trajectory.txt".into());
+        assert!(options.validate(true).is_ok());
+    }
+
+    #[test]
+    fn export_cannot_silently_run_without_a_global_solver() {
+        let mut options = Options {
+            global_result_path: Some("global_result.json".into()),
+            ..Options::default()
+        };
+        assert!(options.validate(false).is_err());
         options.global_optimization = false;
-        assert!(options.validate().is_err());
+        assert!(options.validate(true).is_err());
         options.global_optimization = true;
-        assert!(options.validate().is_ok());
+        assert!(options.validate(true).is_ok());
     }
 }

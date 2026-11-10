@@ -136,6 +136,33 @@ fn euroc_loads_stereo_imu_exposure_and_selects_groundtruth() {
         &[110]
     );
 }
+
+#[test]
+fn asl_preserves_camera_filenames_and_rejects_unpaired_timestamps() {
+    let fixture = Fixture::new();
+    fixture.text("aria/cam0/data.csv", "100,left.png\n");
+    fixture.text("aria/cam1/data.csv", "100,right.png\n");
+    fixture.text("aria/imu0/data.csv", "90,1,2,3,4,5,6\n110,2,3,4,5,6,7\n");
+    fixture.gray("aria/cam0/data/left.png");
+    fixture.gray("aria/cam1/data/right.png");
+    let mut reader = EurocIo::new(false);
+    reader.read_asl(&fixture.0.join("aria")).unwrap();
+    let shared = reader.data().unwrap();
+    let mut data = shared.lock().unwrap();
+    assert_eq!(data.image_timestamps(), &[100]);
+    assert!(
+        data.image_data(100)
+            .unwrap()
+            .iter()
+            .all(|image| image.img.is_some())
+    );
+    assert_eq!(data.gt_timestamps(), &[] as &[i64]);
+    drop(data);
+    reader.reset();
+    fixture.text("aria/cam1/data.csv", "101,right.png\n");
+    assert!(reader.read_asl(&fixture.0.join("aria")).is_err());
+    assert!(reader.data().is_none());
+}
 #[test]
 fn uzh_preserves_blue_channel_seconds_and_xyzw_quaternion() {
     let f = Fixture::new();
@@ -169,6 +196,31 @@ fn uzh_preserves_blue_channel_seconds_and_xyzw_quaternion() {
     assert_eq!(data.gt_pose_data()[0].rotation.quaternion().k.abs(), 1.);
     drop(data);
     cpp_reference("uzh", &f, &reader);
+    f.text("groundtruth.txt", "1.25 7 8 9 0 0 1 0\n");
+    reader.read(&f.0).unwrap();
+    let shared = reader.data().unwrap();
+    let data = shared.lock().unwrap();
+    assert_eq!(data.gt_timestamps(), &[1_250_000_000]);
+    assert_eq!(
+        data.gt_pose_data()[0].translation.vector.as_slice(),
+        &[7., 8., 9.]
+    );
+    assert_eq!(data.gt_pose_data()[0].rotation.quaternion().k.abs(), 1.);
+}
+#[test]
+fn uzh_rejects_unpaired_and_duplicate_images_before_loading_pixels() {
+    let f = Fixture::new();
+    f.text("left_images.txt", "0 1.25 left.png\n");
+    f.text("right_images.txt", "0 1.26 right.png\n");
+    let mut reader = UzhIo::default();
+    assert!(reader.read(&f.0).is_err());
+    assert!(reader.data().is_none());
+    f.text(
+        "right_images.txt",
+        "0 1.25 right.png\n1 1.25 duplicate.png\n",
+    );
+    assert!(reader.read(&f.0).is_err());
+    assert!(reader.data().is_none());
 }
 #[test]
 fn kitti_reads_indexed_images_and_row_major_poses() {

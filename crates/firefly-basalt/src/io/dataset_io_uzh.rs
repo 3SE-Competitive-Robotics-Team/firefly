@@ -60,6 +60,7 @@ pub struct UzhIo {
 }
 impl DatasetIoInterface for UzhIo {
     fn read(&mut self, path: &Path) -> Result<()> {
+        self.data = None;
         let mut data = UzhVioDataset {
             path: path.to_owned(),
             records: Records::default(),
@@ -77,8 +78,23 @@ impl DatasetIoInterface for UzhIo {
                 if camera == 0 {
                     data.records.image_timestamps.push(timestamp);
                 }
-                data.image_path[camera].insert(timestamp, values[2].to_owned());
+                if data.image_path[camera]
+                    .insert(timestamp, values[2].to_owned())
+                    .is_some()
+                {
+                    return Err(common::failure(&file, "Duplicate camera timestamp"));
+                }
             }
+        }
+        if data.image_path[0].len() != data.image_path[1].len()
+            || data.image_path[0]
+                .keys()
+                .any(|time| !data.image_path[1].contains_key(time))
+        {
+            return Err(common::failure(
+                path,
+                "UZH stereo timestamps must match exactly",
+            ));
         }
         let file = path.join("imu.txt");
         for (number, line) in common::lines(&file)? {
@@ -97,11 +113,23 @@ impl DatasetIoInterface for UzhIo {
         let file = path.join("groundtruth.txt");
         if file.exists() {
             for (number, line) in common::lines(&file)? {
-                let values = common::fields(&line, &file, number, 9, false)?;
+                let fields = common::fields(&line, &file, number, 8, false)?;
+                // Current public GT is TUM; older archives prepend a sample ID.
+                let values = match fields.len() {
+                    8 => &fields[..],
+                    9 => &fields[1..],
+                    _ => {
+                        return Err(common::failure(
+                            &file,
+                            "Expected TUM pose with an optional sample ID",
+                        )
+                        .with_context("line", number));
+                    }
+                };
                 let timestamp =
-                    common::seconds_ns(common::parse(values[1], &file, number)?, &file, number)?;
-                let position = common::numbers::<3>(&values[2..], &file, number)?;
-                let xyzw = common::numbers::<4>(&values[5..], &file, number)?;
+                    common::seconds_ns(common::parse(values[0], &file, number)?, &file, number)?;
+                let position = common::numbers::<3>(&values[1..], &file, number)?;
+                let xyzw = common::numbers::<4>(&values[4..], &file, number)?;
                 data.records.gt_timestamps.push(timestamp);
                 data.records.gt_poses.push(common::pose(
                     position,

@@ -49,7 +49,8 @@ args-and-flags、validation。
 - **最小化**：保留必填键，只对有默认值的键写差异覆盖；无覆盖项时保留仅含用途和
   默认值来源注释的配置文件。缺失键使用代码默认值；
   纯数据 Options 直接 `serde::Deserialize` + `#[serde(default)]`，Python 用标准库
-  `tomllib`；不引 YAML。
+  `tomllib`；应用配置不引 YAML。数据集适配器可读取官方原始传感器格式，如 Kalibr YAML，
+  转换到统一标定类型后使用。
 
 #### 应用启动入口
 
@@ -339,13 +340,14 @@ mimir 的真实 IPC 与 RRD 读回要求见 [可观测性验证](observability.m
 
 ### Basalt 与 RootSLAM
 
-独立数据集应用使用 `configs/firefly-rootslam-dataset.toml`，相对路径以 workspace 根目录为基准。
-其数据、原版配置与标定文件来自 workspace 旁的原版 Basalt checkout；运行前须准备
-配置所指资产。入口和工具用法见 [RootSLAM README](../apps/rootslam/README.md)，
+在线与数据集共用 `firefly-rootslam --config <path>`；默认读取 IPC，数据集示例为
+`configs/firefly-rootslam-dataset.toml`。相对路径以进程工作目录为基准，示例从 workspace 根运行。
+运行前准备配置指定的数据和标定。输入契约、LaMAria 下载及评分边界见
+[RootSLAM README](../apps/rootslam/README.md)，
 职责及飞控接线边界见 [系统架构](architecture.md#basalt-与-rootslam-独立应用)。
 
 ```bash
-cargo run --release -p firefly-rootslam --bin firefly-rootslam-dataset
+cargo run --release -p firefly-rootslam -- --config configs/firefly-rootslam-dataset.toml
 cargo test -p firefly-calibration -p firefly-basalt -p firefly-rootslam-mapping -p firefly-rootslam --all-targets
 cargo clippy -p firefly-calibration -p firefly-basalt -p firefly-rootslam-mapping -p firefly-rootslam --all-targets -- -D warnings
 uv run python -B -m unittest discover -s apps/rootslam/tests -p test_export_rrd.py

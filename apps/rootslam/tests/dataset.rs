@@ -38,8 +38,12 @@ impl VioDataset for StationaryDataset {
     fn mocap_to_imu_offset_ns(&self) -> i64 {
         0
     }
-    fn image_data(&mut self, _time: i64) -> firefly_error::Result<Vec<ImageData>> {
+    fn image_data(&mut self, time: i64) -> firefly_error::Result<Vec<ImageData>> {
         assert!(!self.panic_images, "injected image reader panic");
+        assert!(
+            self.times.contains(&time),
+            "file lookup must use the source camera clock"
+        );
         Ok(self.images.clone())
     }
 }
@@ -51,12 +55,18 @@ impl VioDataset for StationaryDataset {
     reason = "Bounded positive synthetic grayscale intensity"
 )]
 fn full_image_imu_pipeline_outputs_states_and_shuts_down() {
-    let mut calibration = Calibration::default();
+    let mut calibration = Calibration {
+        cam_time_offset_ns: -2_000_000,
+        ..Calibration::default()
+    };
     let mut images = Vec::new();
     for camera in 0..2 {
         let mut model = GenericCamera::from_name("pinhole");
         model.set_from_init(Vector4::new(200.0, 200.0, 128.0, 96.0));
         calibration.intrinsics.push(model);
+        calibration
+            .resolution
+            .push(nalgebra::Vector2::new(256, 192));
         calibration
             .t_i_c
             .push(Isometry3::translation(f64::from(camera) * 0.1, 0.0, 0.0));
@@ -135,7 +145,7 @@ fn full_image_imu_pipeline_outputs_states_and_shuts_down() {
         "Stereo images must produce optimized landmarks"
     );
     for (state, time) in states.iter().zip(times) {
-        assert_eq!(state.state.pose.t_ns, time);
+        assert_eq!(state.state.pose.t_ns, time - 2_000_000);
         assert!(state.state.pose.t_w_i.translation.vector.norm() < 1e-4);
         assert!(state.state.vel_w_i.norm() < 1e-4);
     }

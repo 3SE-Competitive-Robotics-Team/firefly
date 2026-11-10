@@ -38,13 +38,24 @@ render 生成图像，mimir 记录诊断；观测开关不能改变算法参数�
 ### Basalt 与 RootSLAM 独立应用
 
 `apps/rootslam` 提供在线 VIO、数据集运行和 Basalt 无界面工具。
+在线与数据集共用 `firefly-rootslam`，由 `input` 选择 IPC、LaMAria ASL 或
+EuRoC/UZH/KITTI 文件源。适配器负责相机模型、外参、噪声与时钟转换；
+图像保留原始尺寸，输入同一光流和估计器。数据集相机时刻加标定偏移后进入 IMU 时钟，
+真值仅用于评分。在线保留静止初始化及高频 IMU 预测，数据集输出图像时刻后验。
 `firefly-calibration` 提供相机、图像、标定与初始化基础设施；`firefly-basalt`
 提供光流、IMU 预积分、局部 VO/VIO、边缘化、离线 mapper 与标定求解。
 
 `firefly-rootslam-mapping` 在局部估计之上实现持久地图、地点检索、几何回环验证、
 地图融合、位姿图优化及平方根全局 BA。在线 Basalt VO/VIO 本身没有地点识别回环；
-在线入口默认关闭建图与回环；数据集入口可在输入结束后运行全局 BA。
+在线入口默认关闭建图与回环；LaMAria 和 UZH 数据集示例开启持久地图、回环与位姿图优化，
+排空输入和回环工作后运行全局 BA，同时导出因果 VIO 后验与最终地图轨迹。
 实现依据原版 Basalt 源码及 RootSLAM 论文，不能据此宣称复现论文的精度或性能。
+
+应用顶层 `precision` 统一选择局部 VO/VIO BA、IMU 预积分、边缘化先验和全局 BA
+的 float32/float64 算术；全局 BA 的矩阵与迭代向量使用同一精度。
+RootBA 的标量递推系数与代价求和保留 float64。光流补丁使用 float32，持久地图、
+回环几何、位姿图优化和公共状态接口保留 float64。配置入口与数值回放工具的边界见
+[RootSLAM README](../apps/rootslam/README.md)。
 
 ### 板载拓扑
 
@@ -173,7 +184,14 @@ P_new = Jr(delta) P_posterior Jr(delta)ᵀ
 
 ## RootSLAM 在线通讯与估计
 
-入口为 [`online.rs`](../apps/rootslam/src/online.rs)。图像入口负责双目配对与拷贝，
+统一入口为 `firefly-rootslam --config <path>`。`input::Source` 选择 IPC 或数据集，
+提供传感器标定与重力；两者通过相同的 `[vio]` 配置构造器、`OpticalFlowInput` 和
+`ImuData` 进入 Basalt 光流与估计器。输入层保留整数纳秒、各相机原始尺寸和传感器外参，
+不通过缩图或重贴时间戳适配固定 IPC 消息。数据集生产器有界读取、验证左右目索引及 IMU
+配对，结束后排空队列；不会发布飞控状态。数据集使用 Basalt 输入初始化，IPC 使用机体
+静止初始化与高频预测，这两个运行生命周期分别维护。
+
+IPC 适配为 [`online.rs`](../apps/rootslam/src/online.rs)。图像入口负责双目配对与拷贝，
 IMU 时间水位覆盖图像测量时间后才提交 Basalt。光流、窗口优化、稀疏地图与 IMU 预测
 使用各自的线程和有界队列。光流产生时间及双目关联，IMU 预积分与视觉残差共同优化，
 边缘化保留历史信息。标定来自公共 rig，静止重力初始化来自 `firefly-imu-initialization`；
@@ -196,6 +214,12 @@ IMU/body 外参保持恒等。在线默认关闭建图与回环，局部 VIO 不
 RootSLAM 同时发布恒等 map←odom、零修订的 Navigation 和对应校正位姿，供记录与可选消费者使用。
 `--external-localization` 将这些可选输出的发布权交给 localization，局部里程计和姿态继续发布。
 planner 仅消费局部 Odometry；深度直接进入 planner，RootSLAM 不维护稠密占据地图。
+
+离线全局 BA 的 rig 适配遵循 RootSLAM 的固定外参和位姿图项，求解器采用 RootBA 的
+列缩放、地标 QR、Schur-Jacobi 块预条件 PCG 与分阶段 LM 重试。默认不构造完整的
+约化 Hessian；原始稀疏观测和正交变换用于隐式乘法。数值参考、来源和投影目标的
+约定见 [mapping README](../crates/firefly-rootslam-mapping/README.md)。
+作者实现未公开的配置与地图管理细节不视为已经复现；论文性能须由完整数据集验证。
 
 <a id="imu"></a>
 

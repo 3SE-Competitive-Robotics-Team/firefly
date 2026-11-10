@@ -1,7 +1,7 @@
 //! Rig square-root bundle adjustment, `RootSLAM` equations (2)-(11).
 //! Landmark blocks retain their sparse pose-column incidence. The reduced
-//! least-squares system is solved by LSQR using only A*x and A^T*y; neither
-//! landmark nor reduced normal equations are formed.
+//! camera operator is applied implicitly after landmark QR elimination.
+mod rootba;
 use crate::{map::MapSnapshot, pose_graph};
 use firefly_calibration::calibration::Calibration;
 use firefly_calibration::scalar::BasaltScalar;
@@ -9,10 +9,11 @@ use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{DMatrix, DVector, Isometry3, SMatrix, Vector2, Vector3, Vector4};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Precision {
     Float32,
+    #[default]
     Float64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -21,9 +22,33 @@ pub enum KrylovPrecision {
     Native,
     Float64,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinearSolver {
+    #[default]
+    Rootba,
+    /// Slow, independent numerical reference with physical-coordinate damping.
+    LsqrReference,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DampingCoordinates {
+    /// Preserve the rig's physical-coordinate trust region under column scaling.
+    #[default]
+    Physical,
+    /// `RootBA`'s default trust region on Jacobian-scaled coordinates.
+    Scaled,
+}
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OptimizationOptions {
+    pub linear_solver: LinearSolver,
+    pub damping_coordinates: DampingCoordinates,
+    /// `RootBA`'s truncated-Newton quadratic-model stopping criterion.
+    pub linear_solver_eta: f64,
+    /// Additional physical-gradient accuracy guard; zero selects only `RootBA`'s model test.
+    pub linear_solver_gradient_tolerance: f64,
+    pub linear_solver_max_iterations: usize,
     pub precision: Precision,
     pub krylov_precision: KrylovPrecision,
     pub max_iterations: usize,
@@ -35,7 +60,7 @@ pub struct OptimizationOptions {
     pub lsqr_tolerance: f64,
     pub lsqr_max_iterations: usize,
     pub pose_graph_terms: bool,
-    /// Optional numerical fixture of the first linear solve that misses its
+    /// LSQR reference only: numerical fixture of the first linear solve that misses its
     /// convergence criterion. The archive includes the quantized matrix and RHS.
     pub linear_system_archive: Option<std::path::PathBuf>,
     /// Optional frozen geometry, observations, calibration and solver settings.
@@ -44,11 +69,15 @@ pub struct OptimizationOptions {
 impl Default for OptimizationOptions {
     fn default() -> Self {
         Self {
+            linear_solver: LinearSolver::Rootba,
+            damping_coordinates: DampingCoordinates::Physical,
+            linear_solver_eta: 0.1,
+            linear_solver_gradient_tolerance: 1e-5,
+            linear_solver_max_iterations: 500,
             precision: Precision::Float64,
-            // The Krylov work vectors follow the matrix precision unless the
-            // caller asks for the mixed precision comparison explicitly. The
-            // paper runs the whole global optimization in single precision, so
-            // `precision = "float32"` is a complete single precision solve.
+            // Matrix products and work vectors follow the storage precision.
+            // RootBA's recurrence coefficients and objective sums use f64;
+            // Float64 below additionally promotes the Krylov work vectors.
             krylov_precision: KrylovPrecision::Native,
             max_iterations: 50,
             initial_damping: 1e-3,
@@ -73,6 +102,7 @@ impl OptimizationOptions {
             self.minimum_damping,
             self.maximum_damping,
             self.lsqr_tolerance,
+            self.linear_solver_eta,
         ];
         if positive.iter().any(|x| !x.is_finite() || *x <= 0.0)
             || self.initial_damping < self.minimum_damping
@@ -80,9 +110,12 @@ impl OptimizationOptions {
             || !self.step_tolerance.is_finite()
             || self.step_tolerance < 0.0
             || !self.relative_cost_tolerance.is_finite()
+            || !self.linear_solver_gradient_tolerance.is_finite()
+            || self.linear_solver_gradient_tolerance < 0.0
             || self.relative_cost_tolerance < 0.0
             || self.max_iterations == 0
             || self.lsqr_max_iterations == 0
+            || self.linear_solver_max_iterations == 0
         {
             return Err(Error::new(
                 ErrorKind::InvalidArgument,
@@ -96,6 +129,8 @@ impl OptimizationOptions {
 pub struct OptimizationResult {
     pub revision: u64,
     pub poses: BTreeMap<i64, Isometry3<f64>>,
+    /// Optimized points only; deferred landmarks follow their host correction
+    /// when these updates are applied to the persistent map.
     pub points: BTreeMap<u64, Vector3<f64>>,
     pub initial_cost: f64,
     pub final_cost: f64,
@@ -448,17 +483,54 @@ fn camera_factor<S: BasaltScalar>(
     camera: &firefly_calibration::camera::generic_camera::GenericCamera<S>,
     pixel: &Vector2<S>,
 ) -> Option<(Vector2<S>, SMatrix<S, 2, 6>, SMatrix<S, 2, 3>)> {
+    camera_factor_impl(pose, point, extrinsic, camera, pixel, false)
+}
+
+fn camera_factor_on_unit_ray<S: BasaltScalar>(
+    pose: &Isometry3<S>,
+    point: &Vector3<S>,
+    extrinsic: &Isometry3<S>,
+    camera: &firefly_calibration::camera::generic_camera::GenericCamera<S>,
+    pixel: &Vector2<S>,
+) -> Option<(Vector2<S>, SMatrix<S, 2, 6>, SMatrix<S, 2, 3>)> {
+    camera_factor_impl(pose, point, extrinsic, camera, pixel, true)
+}
+
+fn camera_factor_impl<S: BasaltScalar>(
+    pose: &Isometry3<S>,
+    point: &Vector3<S>,
+    extrinsic: &Isometry3<S>,
+    camera: &firefly_calibration::camera::generic_camera::GenericCamera<S>,
+    pixel: &Vector2<S>,
+    unit_ray: bool,
+) -> Option<(Vector2<S>, SMatrix<S, 2, 6>, SMatrix<S, 2, 3>)> {
     let camera_world = pose_graph::product(extrinsic, pose);
     let camera_point = camera_world.rotation * point + camera_world.translation.vector;
-    let homogeneous = Vector4::new(camera_point.x, camera_point.y, camera_point.z, S::one());
+    // Basalt's optical-axis fallbacks use a geometric epsilon. Supplying a unit
+    // ray makes that threshold angular rather than dependent on landmark depth.
+    let scale = if unit_ray {
+        S::one() / camera_point.x.hypot(camera_point.y).hypot(camera_point.z)
+    } else {
+        S::one()
+    };
+    let homogeneous = Vector4::new(
+        camera_point.x * scale,
+        camera_point.y * scale,
+        camera_point.z * scale,
+        S::one(),
+    );
     let mut prediction = Vector2::zeros();
     let mut projection = SMatrix::<S, 2, 4>::zeros();
-    if !camera.project(&homogeneous, &mut prediction, Some(&mut projection))
+    let in_domain = camera.project(&homogeneous, &mut prediction, Some(&mut projection));
+    if !in_domain
         || !prediction.iter().all(nalgebra::ComplexField::is_finite)
+        || !projection.iter().all(nalgebra::ComplexField::is_finite)
     {
         return None;
     }
-    let projection = projection.fixed_columns::<3>(0).into_owned();
+    // Central projection is homogeneous: J(unit_ray) * unit_ray = 0, so the
+    // normalization chain rule reduces to J(unit_ray) / |camera_point|.
+    let projection = projection.fixed_columns::<3>(0).into_owned() * scale;
     let mut motion = SMatrix::<S, 3, 6>::zeros();
     motion
         .fixed_view_mut::<3, 3>(0, 0)
@@ -977,13 +1049,21 @@ pub fn optimize_global(
     calibration: &Calibration<f64>,
     options: &OptimizationOptions,
 ) -> Result<OptimizationResult> {
+    if options.linear_solver == LinearSolver::LsqrReference
+        && options.damping_coordinates != DampingCoordinates::Physical
+    {
+        return Err(Error::new(
+            ErrorKind::InvalidArgument,
+            "lsqr_reference requires physical damping coordinates",
+        ));
+    }
     match (options.precision, options.krylov_precision) {
         (Precision::Float32, KrylovPrecision::Native) => {
-            log::info!("Global bundle adjustment runs entirely in single precision");
+            log::info!("Global bundle adjustment uses float32 matrices and Krylov vectors");
         }
         (Precision::Float32, KrylovPrecision::Float64) => {
             log::warn!(
-                "Global bundle adjustment mixes single precision matrices with double precision Krylov work vectors; this is not the entirely single precision configuration of the paper"
+                "Global bundle adjustment uses float32 matrices with float64 Krylov vectors"
             );
         }
         (Precision::Float64, _) => {
@@ -991,8 +1071,14 @@ pub fn optimize_global(
         }
     }
     match options.precision {
-        Precision::Float32 => optimize::<f32>(snapshot, calibration, options),
-        Precision::Float64 => optimize::<f64>(snapshot, calibration, options),
+        Precision::Float32 => match options.linear_solver {
+            LinearSolver::Rootba => rootba::optimize::<f32>(snapshot, calibration, options),
+            LinearSolver::LsqrReference => optimize::<f32>(snapshot, calibration, options),
+        },
+        Precision::Float64 => match options.linear_solver {
+            LinearSolver::Rootba => rootba::optimize::<f64>(snapshot, calibration, options),
+            LinearSolver::LsqrReference => optimize::<f64>(snapshot, calibration, options),
+        },
     }
 }
 /// # Errors

@@ -192,6 +192,15 @@ associated with landmarks, with the same semantics as the online active-keypoint
 per processed image, no live IPC producer. Record both implementations' configuration adapters;
 reconstructed viewer keypoints and the initial pose carry float32 rounding and must not be
 described as bit-exact reproduction of the original online run.
+The unified dataset entry uses the existing RootSLAM log IPC and diagnostics registry;
+it does not publish flight odometry topics. Its `sim_time` is the dataset measurement
+time in seconds, without a host-time offset. Dataset camera times are converted
+to the IMU clock with the calibration offset before estimation; exported trajectories
+retain these integer nanoseconds (TUM serializes seconds). Raw IMU and GT retain
+their supplied timestamps; record the GT alignment assumptions separately.
+Benchmark evidence includes the clock offset, source/calibration fingerprints,
+configuration, requested/produced frame counts, process exit and RRD completion.
+Native trajectory files are algorithm outputs; runtime diagnostics still belong in RRD.
 GT-based offline ablations use separate `backend_matched_raw.rrd` and
 `backend_matched_ideal.rrd` recordings with the same state entities. Both retain exactly the same
 track IDs, camera memberships and timestamps; only the ideal arm replaces pixels with projections
@@ -214,6 +223,17 @@ windows explicit and never enable full per-landmark payloads in production recor
 thread, including queue time.
 `RUST_LOG=info,basalt-profile=debug` records stage events in `logs/firefly-rootslam`.
 Join by frame timestamp and process-monotonic boundaries; do not add nested durations or percentiles.
+`rootslam-global-profile=debug` records offline global BA stage times in milliseconds:
+linearization, damping, preconditioner, linear solve including preconditioner,
+back substitution and trial cost. The solver owns these events; benchmark analysis consumes
+them from `logs/firefly-rootslam` on the process wall clock. There are at most six events per
+LM attempt plus the initial linearization, each below 512 bytes. Timing is disabled at the
+producer by default. The preconditioner is nested in the solve and must not be summed twice.
+No matrices or per-landmark arrays are logged. Retain the recording with the frozen problem,
+configuration and result; verify complete stage events and clean RRD shutdown after replay.
+Global BA reports optimized and deferred landmark counts once at INFO level (below
+512 bytes). Deferred landmarks lack two distinct camera views; they remain in the map.
+Use these counts to distinguish the map size from the actual optimization problem.
 `RUST_LOG=info,planner-profile=debug` records planner callbacks taking at least 10 ms in
 `logs/planner`, including sensor polling, map synchronization, execution, safety and voxel display.
 Each event contains the stage and elapsed wall time; nested stages must not be summed.
