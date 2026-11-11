@@ -5,9 +5,7 @@
 //! 这块 UDC 的端点不足以同时承载 adb 与 HIL。主机侧用 nusb 直接认领两个
 //! 厂商接口；`hil --probe` 通过即视为链路就绪。
 //!
-//! 板端 HIL 同时只跑一个估计器，`--estimator` 决定用哪份进程清单：
-//! `okvis2-x` 跑 `processes-hil.toml`，`rootslam` 跑
-//! `processes-hil-rootslam.toml`。
+//! 板端 HIL 使用 RootSLAM，进程清单为 `processes-hil.toml`。
 
 use std::process::Command;
 use std::thread;
@@ -20,10 +18,7 @@ const DEFAULT_DEVICE: &str = "firefly-0001";
 /// 等待 HIL 设备枚举的上限。
 const ENUMERATION_TIMEOUT: Duration = Duration::from_secs(20);
 /// 板端 HIL 可选的估计器及其进程清单。
-const ESTIMATORS: [(&str, &str); 2] = [
-    ("okvis2-x", "processes-hil.toml"),
-    ("rootslam", "processes-hil-rootslam.toml"),
-];
+const ESTIMATORS: [(&str, &str); 1] = [("rootslam", "processes-hil.toml")];
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let (device, estimator) = parse_arguments(args)?;

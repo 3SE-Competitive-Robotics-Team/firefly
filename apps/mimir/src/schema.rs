@@ -119,6 +119,22 @@ pub fn entity(bytes: &[u8], length: u32) -> Result<&str> {
 #[allow(clippy::too_many_lines)] // Keep the field registry in one table.
 pub fn fields(name: &str) -> Result<&'static [&'static str]> {
     let fields: &[&str] = match name {
+        "hil/link" => &[
+            "control_messages",
+            "odometry_messages",
+            "telemetry_messages",
+            "dropped_images",
+        ],
+        "hil/board" => &["imu_gap_s"],
+        "hil/camera/left" | "hil/camera/right" => {
+            &["capture_s", "pixel_sum", "width_px", "height_px"]
+        }
+        "fc/debug/vertical_ned" => &[
+            "velocity_sp_m_s",
+            "velocity_m_s",
+            "acceleration_sp_m_s2",
+            "thrust_sp",
+        ],
         "vio/diagnostics/tracks" => &[
             "left_detected",
             "continued_ids",

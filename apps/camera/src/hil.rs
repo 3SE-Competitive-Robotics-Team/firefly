@@ -22,7 +22,7 @@ use firefly_pubsub::imu::{IMU_TOPIC, ImuMessage};
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::plant::{AIRFRAME_TOPIC, AirframeMessage};
 use firefly_pubsub::publish::Publisher;
-use firefly_pubsub::viz::{SCALAR_BUFFER_SIZE, SCALAR_TOPIC, ScalarMessage, VIZ_MAX_PUBLISHERS};
+use firefly_pubsub::viz::{ScalarMessage, VizPublisher};
 use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 
@@ -50,7 +50,7 @@ struct Ports {
     command: Publisher<CommandMessage>,
     goal: Publisher<GoalMessage>,
     /// 图像校验和回传：主机据此确认 USB 传输没有损坏像素。
-    scalars: Publisher<ScalarMessage>,
+    scalars: VizPublisher,
 }
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -60,7 +60,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         &|_signal| RUNNING.store(false, Ordering::Relaxed),
     )?;
     let node = create_node()?;
-    let _log_ipc = firefly_observability::init_ipc(&node, "camera");
+    let log_ipc = firefly_observability::init_ipc(&node, "camera");
     let ports = Ports {
         imu: Publisher::with_topic_and_buffer(&node, IMU_TOPIC, Some(IMU_SUBSCRIPTION_MAX))?,
         left: Publisher::with_topic_and_buffer(&node, CAMERA_LEFT_TOPIC, Some(IMAGE_SUBSCRIPTION))?,
@@ -73,12 +73,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         airframe: Publisher::with_topic_and_buffer(&node, AIRFRAME_TOPIC, Some(4))?,
         command: Publisher::with_topic_and_buffer(&node, COMMAND_TOPIC, Some(4))?,
         goal: Publisher::with_topic_and_buffer(&node, GOAL_TOPIC, Some(4))?,
-        scalars: Publisher::with_topic_buffer_publishers(
-            &node,
-            SCALAR_TOPIC,
-            Some(SCALAR_BUFFER_SIZE),
-            Some(VIZ_MAX_PUBLISHERS),
-        )?,
+        scalars: VizPublisher::new(&node)?,
     };
     let path = endpoint_file_at(HIL_INSTANCE, DOWNLINK_ENDPOINT)?;
     let file = OpenOptions::new().read(true).open(&path)?;
@@ -92,6 +87,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut imu_published = 0_u64;
     let mut last_imu_log = Instant::now();
     while RUNNING.load(Ordering::Relaxed) {
+        firefly_observability::pump_log_ipc(&log_ipc);
         match reader.read_raw() {
             Ok((header, body)) => {
                 if last_imu_log.elapsed() >= Duration::from_secs(1) {

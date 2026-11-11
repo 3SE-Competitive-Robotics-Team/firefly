@@ -13,7 +13,7 @@ import time
 
 import iceoryx2 as iox2
 from firefly_mujoco import ControlMessage, OdomMessage, TraceContext
-from firefly_viz.messages import ScalarMessage
+from firefly_mujoco.messages import ScalarMessage
 
 MODE_NAMES = {
     0: "DISARMED",

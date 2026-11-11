@@ -100,6 +100,9 @@ of subsequent business events. Known loss makes the recording fail.
 | `rootslam/*` | Stereo enqueue-to-posterior and IMU publishing timing |
 | `vio/odom`, `vio/traj`, `vio/map/{pose,traj}`, `vio/gyro_bias` | Local and map poses at measurement time, derived trajectories and IMU bias summary; original frames are retained |
 | `render/capture/*` | Capture-to-publish stage timing at the original capture timestamp |
+| `hil/link`, `hil/board` | Host USB bridge: per-wall-second traffic counts and board freshness, stamped with the latest simulated IMU time; enabled during HIL, two rows per second |
+| `hil/camera/{left,right}` | Board camera bridge: capture timestamp, pixel checksum and dimensions for transport verification, one row per admitted image at its original capture time |
+| `fc/debug/vertical_ned` | FC vertical velocity target/measurement, acceleration target and thrust target in NED, at the existing FC diagnostic cadence; retained for HIL and simulation control diagnosis |
 | `corr/*`, `vision/debug/map_query_wall_s` | External localization gates, disagreement, correction and query timing |
 | `plan/*` | Global guides, accepted executable local paths including their stopping tail, poses, obstacle planes and maps for display |
 | `plan/collision` | Planner-owned depth map after obstacle inflation, in odom coordinates at the planner simulation timestamp; bounded voxel snapshots/deltas for checking collision geometry, using the existing map display cadence and budgets |
@@ -109,6 +112,13 @@ of subsequent business events. Known loss makes the recording fail.
 | `frames/{map,odom,world}` | Recorder-owned display transforms: root←map identity, temporal map←odom from Navigation, and optional constant map←world startup alignment; display-layer data |
 
 ### Spatial frames
+
+HIL forwards numeric diagnostics and process logs to the host recorder using the existing scalar
+and log queue budgets. The board validates each IPC publisher's sequence before USB forwarding;
+the host assigns one continuous sequence per forwarded topic. Log trace IDs and producer loss
+counts survive transport. A source gap or known producer loss fails the run. HIL traffic summaries
+use simulation timestamps; heartbeat deadlines use local monotonic wall time. Retain the complete
+RRD through shutdown and verify transport, posterior coverage and hover limits independently.
 
 All registered 3D payloads declare their source frame in `mimir/schema.rs`; adding a spatial entity
 requires registering both its payload kind and its frame. `Transform3D.parent_frame` labels raw poses;

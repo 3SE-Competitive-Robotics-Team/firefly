@@ -16,8 +16,7 @@
 //! ```
 //!
 //! `manifest` 是 `configs/` 下的进程清单文件名，省略时用 `processes-hil.toml`。
-//! 板端 HIL 同时只跑一个估计器，换估计器就换清单：`processes-hil.toml` 跑
-//! OKVIS2-X，`processes-hil-rootslam.toml` 跑 `RootSLAM`。
+//! `processes-hil.toml` 启动板端 RootSLAM、FC 和 USB 传感器/执行器桥接。
 
 #[cfg(target_os = "linux")]
 mod setup;

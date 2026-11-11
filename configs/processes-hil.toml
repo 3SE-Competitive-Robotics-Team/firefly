@@ -1,6 +1,4 @@
-# HIL 模式板端进程集：仿真传感器经 USB 进入 camera，控制经 motor 回传主机。
-# `hil-gadget up` 把它切换成活动的 processes.toml，`down`/看门狗恢复原文件。
-# 悬停阶段不需要 planner，先不启动；接入规划时把 autostart 打开。
+# USB HIL：板端 RootSLAM 与 FC 计算，执行器推力回传主机仿真。
 
 [[process]]
 name = "camera"
@@ -13,17 +11,15 @@ command = ["bin/motor", "--hil"]
 autostart = true
 
 [[process]]
-name = "firefly-okvis-x"
+name = "firefly-rootslam"
 # HIL 先验证估计/控制闭环：关掉回环与建图，避免板端初始化阻塞 IMU 队列。
-# okvis 不绑核（可用全部核）；FC 与 IMU 工作线程独占两颗 A76 大核。
-command = ["bin/firefly-okvis-x", "--no-loop-closures", "--no-mapping", "--config", "configs/okvis2-x-hil.toml"]
+# RootSLAM 只用双目 + IMU，不消费深度，与 HIL 的 depth=false 一致。
+command = ["bin/firefly-rootslam", "--no-loop-closures", "--no-mapping", "--config", "configs/rootslam-hil.toml"]
 autostart = true
 
 [[process]]
 name = "fc"
-# `--airmode-off`：HIL 验证用，避免速率环在低集合推力下饱和时抬高总推力。
-# 生产配置不带该开关，airmode 由 configs/fc.toml 决定。
-command = ["taskset", "-c", "6,7", "bin/fc", "--airmode-off"]
+command = ["taskset", "-c", "6,7", "bin/fc", "--config", "configs/fc-hil.toml"]
 autostart = true
 
 [[process]]

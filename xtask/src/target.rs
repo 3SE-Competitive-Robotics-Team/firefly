@@ -99,12 +99,9 @@ mod tests {
     }
 
     #[test]
-    fn board_release_includes_both_estimators_and_the_gadget() {
-        // 板端 HIL 要能跑 RootSLAM 与 OKVIS2-X 两种估计器，以及管理 UDC 的
-        // hil-gadget；少一个都会让 deploy 打包缺文件。
+    fn board_release_includes_rootslam_and_the_gadget() {
         let apps = Target::Board.apps();
         assert!(apps.contains(&"firefly-rootslam"));
-        assert!(apps.contains(&"firefly-okvis-x"));
         assert!(apps.contains(&"hil-gadget"));
     }
 }

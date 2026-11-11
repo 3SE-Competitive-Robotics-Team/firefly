@@ -1,0 +1,9 @@
+# USB HIL 飞控配置；其余字段使用 FcConfig 与 firefly-flight 默认值。
+
+[control.position]
+# 与正常部署 configs/fc.toml 保持相同的水平速度环增益。
+vel_p = [2.4, 2.4, 4.0]
+
+[control.allocation]
+# 保留 HIL 的集合推力优先分配；速率环饱和时限制姿态力矩。
+airmode = 0

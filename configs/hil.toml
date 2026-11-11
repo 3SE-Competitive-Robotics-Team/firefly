@@ -12,10 +12,10 @@ subclass = 1
 # 单次 USB 传输量：图像按 16KiB 分片，避免一张图挡住 IMU/控制。
 read_buffer = 65536
 write_buffer = 16384
-# 逐样本下发：板端估计器的 IMU 队列有界，成批突发会被拒绝并触发 OKVIS 退出。
+# 逐样本下发，控制板端 IMU 队列的突发量。
 imu_batch = 1
 image_queue = 4
-# 板端 VIO 飞行时单帧约 128ms；按 6Hz 送图，给优化线程留余量，避免里程计断流。
+# 最多按 6Hz 送图，板端处理时延与后验连续性由悬停验收检查。
 image_period_s = 0.167
 # 悬停与纯 VIO 不需要深度；开启会额外占板端图像队列（规划阶段再打开）。
 depth = false

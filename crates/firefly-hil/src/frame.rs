@@ -351,6 +351,50 @@ mod tests {
     }
 
     #[test]
+    fn old_protocol_frames_are_rejected_before_decoding() {
+        let mut writer = FrameWriter::new(Vec::new());
+        writer.write_message(&Message::Ping(123)).unwrap();
+        let mut bytes = writer.into_inner();
+        bytes[4..6].copy_from_slice(&(crate::protocol::VERSION - 1).to_le_bytes());
+        let error = FrameReader::new(bytes.as_slice()).read_frame().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn goal_heading_survives_usb_framing() {
+        let message = Message::Goal(firefly_pubsub::goal::GoalMessage {
+            timestamp: 12.5,
+            position_x: 1.0,
+            position_y: -2.0,
+            position_z: 3.0,
+            yaw: 1.25,
+            has_yaw: 1,
+        });
+        let Message::Goal(decoded) = roundtrip(&message, 42) else {
+            panic!("goal")
+        };
+        assert_eq!(decoded.yaw, 1.25);
+        assert_eq!(decoded.has_yaw, 1);
+    }
+
+    #[test]
+    fn log_integrity_and_trace_survive_usb_framing() {
+        let message = firefly_pubsub::log::LogMessage {
+            sequence: 23,
+            dropped_records: 7,
+            trace_id_hi: 123,
+            trace_id_lo: 456,
+            ..Default::default()
+        };
+        let Message::Log(decoded) = roundtrip(&Message::Log(message), 42) else {
+            panic!("log")
+        };
+        assert_eq!(decoded.sequence, 23);
+        assert_eq!(decoded.dropped_records, 7);
+        assert_eq!((decoded.trace_id_hi, decoded.trace_id_lo), (123, 456));
+    }
+
+    #[test]
     fn large_gray_image_is_fragmented_and_reassembled() {
         let mut image = GrayImageMessage {
             timestamp: 3.25,

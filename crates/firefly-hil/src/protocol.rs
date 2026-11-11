@@ -1,6 +1,6 @@
 //! 版本化消息协议：固定 48 字节帧头 + 按类型编码的消息体。
 //!
-//! 三个方向独占端点，消息类型与端点绑定：
+//! 两个方向各自独占端点，消息类型与端点绑定：
 //!
 //! | 端点 | 方向 | 消息 |
 //! |---|---|---|
@@ -31,8 +31,8 @@ use firefly_pubsub::viz::{ENTITY_MAX, SCALARS_MAX, ScalarMessage, kind as viz_ki
 
 /// 帧头魔数（ASCII `FHL1`）。
 pub const MAGIC: [u8; 4] = *b"FHL1";
-/// 当前协议版本；版本不一致时只允许 `Hello`/`HelloAck` 用于协商失败原因。
-pub const VERSION: u16 = 2;
+/// 当前协议版本；接收端拒绝版本不一致的帧，主机与板端同步部署。
+pub const VERSION: u16 = 3;
 /// 固定帧头长度（字节）。
 pub const HEADER_LEN: usize = 48;
 /// 单帧负载上限（字节）；大消息按此分片，限制单次 USB 传输的排队时延。
@@ -569,6 +569,8 @@ impl Message {
                 put_f64(&mut out, message.position_x);
                 put_f64(&mut out, message.position_y);
                 put_f64(&mut out, message.position_z);
+                put_f64(&mut out, message.yaw);
+                put_u64(&mut out, message.has_yaw);
             }
             Self::Scalar(message) => {
                 put_u32(&mut out, message.kind);
@@ -591,6 +593,10 @@ impl Message {
                 out.extend_from_slice(&message.text);
                 put_i64(&mut out, message.wall_secs);
                 put_u32(&mut out, message.wall_nanos);
+                put_u64(&mut out, message.trace_id_hi);
+                put_u64(&mut out, message.trace_id_lo);
+                put_u64(&mut out, message.sequence);
+                put_u64(&mut out, message.dropped_records);
             }
             Self::Stats(stats) => {
                 put_u64(&mut out, stats.sensor_messages);
@@ -832,6 +838,8 @@ impl Message {
                 position_x: input.f64()?,
                 position_y: input.f64()?,
                 position_z: input.f64()?,
+                yaw: input.f64()?,
+                has_yaw: input.u64()?,
             }),
             Kind::Scalar => {
                 let message_kind = input.u32()?;
@@ -888,8 +896,10 @@ impl Message {
                     sim_time,
                     wall_secs: input.i64()?,
                     wall_nanos: input.u32()?,
-                    trace_id_hi: 0,
-                    trace_id_lo: 0,
+                    trace_id_hi: input.u64()?,
+                    trace_id_lo: input.u64()?,
+                    sequence: input.u64()?,
+                    dropped_records: input.u64()?,
                 })
             }
             Kind::Stats => Self::Stats(Stats {

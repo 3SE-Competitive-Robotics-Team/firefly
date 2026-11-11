@@ -6368,7 +6368,7 @@ dependencies = [
  "linux-raw-sys 0.12.1",
  "log",
  "once_cell",
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "slab",
  "wasm-bindgen",
  "wasm-bindgen-futures",

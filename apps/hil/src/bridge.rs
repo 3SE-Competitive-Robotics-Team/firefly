@@ -25,6 +25,7 @@ use firefly_pubsub::command::{COMMAND_TOPIC, CommandMessage};
 use firefly_pubsub::control::{CONTROL_BUFFER_SIZE, CONTROL_TOPIC, ControlMessage};
 use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
 use firefly_pubsub::imu::{IMU_TOPIC, ImuMessage};
+use firefly_pubsub::log::{LOG_BUFFER_SIZE, LOG_MAX_PUBLISHERS, LOG_TOPIC, LogMessage};
 use firefly_pubsub::node::{IpcNode, create_node};
 use firefly_pubsub::odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC, OdomMessage};
 use firefly_pubsub::plant::{AIRFRAME_TOPIC, AirframeMessage};
@@ -37,7 +38,7 @@ use nusb::transfer::Bulk;
 use crate::config::Config;
 use crate::host::HostLink;
 
-/// 主机下行订阅容量（IMU 覆盖 100Hz 下约 1s 排空停顿）。
+/// 主机下行订阅容量（1kHz IMU 下覆盖约 100ms 排空停顿）。
 const IMU_SUBSCRIPTION: usize = 100;
 /// 图像订阅容量：只关心最新帧。
 const IMAGE_SUBSCRIPTION: usize = 2;
@@ -49,7 +50,7 @@ const UPLINK_QUEUE: usize = 1024;
 const POLL: Duration = Duration::from_millis(1);
 /// 统计标量发布周期。
 const STATS_PERIOD: Duration = Duration::from_secs(1);
-/// 双目配对的采集时间容差（秒）：与 okvis `stereo_tolerance` 一致。
+/// 双目配对的采集时间容差（秒）。
 const STEREO_TOLERANCE_S: f64 = 0.001;
 
 struct Downlink {
@@ -68,6 +69,7 @@ struct Uplink {
     corrected: Publisher<OdomMessage>,
     attitude: Publisher<AttitudeMessage>,
     scalar: Publisher<ScalarMessage>,
+    log: Publisher<LogMessage>,
 }
 
 /// 运行双向桥，直到收到退出信号或 USB 断开。
@@ -106,8 +108,10 @@ pub fn run(config: &Config) -> Result<(), String> {
         &stop,
         &config.link,
     );
+    stop.store(true, Ordering::Relaxed);
     drop(priority_tx);
     drop(image_tx);
+    drop(up_rx);
     let writer = writer.join().map_err(|_| "USB 写线程 panic".to_owned())?;
     let reader = reader.join().map_err(|_| "USB 读线程 panic".to_owned())?;
     writer?;
@@ -174,6 +178,13 @@ fn open_ports(node: &IpcNode) -> Result<(Downlink, Uplink), String> {
         corrected: Publisher::with_topic(node, CORRECTED_ODOM_TOPIC)
             .map_err(|error| error.to_string())?,
         attitude: Publisher::with_topic(node, ATTITUDE_TOPIC).map_err(|error| error.to_string())?,
+        log: Publisher::with_topic_buffer_publishers(
+            node,
+            LOG_TOPIC,
+            Some(LOG_BUFFER_SIZE),
+            Some(LOG_MAX_PUBLISHERS),
+        )
+        .map_err(|error| error.to_string())?,
         scalar: Publisher::with_topic_buffer_publishers(
             node,
             SCALAR_TOPIC,
@@ -423,10 +434,7 @@ fn ipc_loop(
         }
         if last_heartbeat.elapsed() >= Duration::from_millis(500) {
             // 主机在线但暂无 IMU 时也要让板端心跳新鲜，避免看门狗误恢复 adb。
-            send_blocking(
-                priority_tx,
-                Message::Ping(now_seconds().to_bits().wrapping_add(stats.heartbeat)),
-            )?;
+            send_blocking(priority_tx, Message::Ping(stats.heartbeat))?;
             stats.heartbeat = stats.heartbeat.wrapping_add(1);
             last_heartbeat = Instant::now();
         }
@@ -456,7 +464,7 @@ fn ipc_loop(
                 stats.image_unmatched,
                 stats.control_age_max * 1000.0
             );
-            publish_stats(&up.scalar, &mut stats);
+            publish_stats(&up.scalar, &mut stats, last_imu_stamp.max(0.0));
             last_stats = Instant::now();
         }
         if !activity {
@@ -545,6 +553,7 @@ struct StatsCounters {
     control_age_max: f64,
     control_age_count: u64,
     scalar_sequence: u64,
+    log_sequence: u64,
     heartbeat: u64,
     /// 已下发图像的 `(side, 时间戳位, 像素和)`，用于和板端回传校验和比对。
     sent_images: VecDeque<(u8, u64, u64)>,
@@ -619,6 +628,15 @@ fn dispatch_uplink(
                 .map_err(|error| format!("发布 scalar: {error}"))?;
             stats.telemetry += 1;
         }
+        Message::Log(mut message) => {
+            // 板端已按原发布者检查连续性；主机单一发布者使用连续聚合序号。
+            message.sequence = stats.log_sequence;
+            stats.log_sequence = stats.log_sequence.wrapping_add(1);
+            ports
+                .log
+                .publish(message)
+                .map_err(|error| format!("发布 board log: {error}"))?;
+        }
         Message::Stats(board) => {
             stats.board_dropped_images = board.dropped_images;
             stats.board_imu_gap_seconds = board.imu_gap_seconds;
@@ -637,8 +655,8 @@ fn dispatch_uplink(
     Ok(())
 }
 
-fn publish_stats(ports: &Publisher<ScalarMessage>, stats: &mut StatsCounters) {
-    let mut link = ScalarMessage::base(now_seconds(), "hil/link");
+fn publish_stats(ports: &Publisher<ScalarMessage>, stats: &mut StatsCounters, timestamp: f64) {
+    let mut link = ScalarMessage::base(timestamp, "hil/link");
     link.sequence = stats.scalar_sequence;
     stats.scalar_sequence = stats.scalar_sequence.wrapping_add(1);
     link.scalars = [
@@ -651,7 +669,7 @@ fn publish_stats(ports: &Publisher<ScalarMessage>, stats: &mut StatsCounters) {
     if let Err(error) = ports.publish(link) {
         log::warn!("发布 hil/link 失败：{error}");
     }
-    let mut board = ScalarMessage::base(now_seconds(), "hil/board");
+    let mut board = ScalarMessage::base(timestamp, "hil/board");
     board.sequence = stats.scalar_sequence;
     stats.scalar_sequence = stats.scalar_sequence.wrapping_add(1);
     board.scalars = [stats.board_imu_gap_seconds, 0.0, 0.0, 0.0];
@@ -676,10 +694,4 @@ fn session_id() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos());
     (nanos as u64) ^ (u64::from(std::process::id()) << 32)
-}
-
-fn now_seconds() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0.0, |elapsed| elapsed.as_secs_f64())
 }
