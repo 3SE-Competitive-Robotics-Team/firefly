@@ -51,6 +51,7 @@ impl Drop for StopOnDrop<'_> {
 struct Pairing {
     left: BTreeMap<i64, Arc<ManagedImage<u16>>>,
     right: BTreeMap<i64, Arc<ManagedImage<u16>>>,
+    emitted: Option<i64>,
 }
 
 impl Pairing {
@@ -66,6 +67,9 @@ impl Pairing {
             ));
         }
         let stamp = (packet.timestamp * 1e9).round() as i64;
+        if self.emitted.is_some_and(|last| stamp <= last) {
+            return Ok(());
+        }
         let mut image = ManagedImage::new(IMAGE_WIDTH, IMAGE_HEIGHT);
         for (destination, source) in image.data_mut().iter_mut().zip(packet.data) {
             *destination = u16::from(source) << 8;
@@ -95,11 +99,17 @@ impl Pairing {
                 continue;
             }
             let time = left_time.max(right_time);
+            if self.emitted.is_some_and(|last| time <= last) {
+                self.left.pop_first();
+                self.right.pop_first();
+                continue;
+            }
             if watermark < time {
                 return None;
             }
             let left = self.left.pop_first()?.1;
             let right = self.right.pop_first()?.1;
+            self.emitted = Some(time);
             return Some((
                 time,
                 vec![
@@ -163,9 +173,24 @@ struct LiveSession {
     stats_directory: Option<PathBuf>,
     pairing: Pairing,
     imu_watermark: ImuWatermark,
-    gravity_estimate: Option<GravityEstimate>,
-    estimator_initialized: bool,
+    startup: Startup,
     frame_started: imu::FrameStarts,
+}
+
+#[derive(Clone, Copy)]
+enum Startup {
+    WaitingGravity,
+    WaitingStereo(GravityEstimate),
+    Running(GravityEstimate),
+}
+
+impl Startup {
+    fn gravity(self) -> Option<GravityEstimate> {
+        match self {
+            Self::WaitingGravity => None,
+            Self::WaitingStereo(estimate) | Self::Running(estimate) => Some(estimate),
+        }
+    }
 }
 
 impl LiveSession {
@@ -248,8 +273,7 @@ impl LiveSession {
             stats_directory: options.stats_directory.clone(),
             pairing: Pairing::default(),
             imu_watermark,
-            gravity_estimate: None,
-            estimator_initialized: false,
+            startup: Startup::WaitingGravity,
             frame_started,
         })
     }
@@ -286,7 +310,12 @@ impl LiveSession {
                 return Err(error("VIO estimator stopped"));
             }
             if let Ok(estimate) = self.gravity_rx.try_recv() {
-                self.gravity_estimate = Some(estimate);
+                self.startup = match self.startup {
+                    Startup::Running(_) => Startup::Running(estimate),
+                    Startup::WaitingGravity | Startup::WaitingStereo(_) => {
+                        Startup::WaitingStereo(estimate)
+                    }
+                };
             }
             self.receive_images()?;
             self.enqueue_stereo()?;
@@ -312,16 +341,13 @@ impl LiveSession {
     }
 
     fn enqueue_stereo(&mut self) -> Result<()> {
-        while let Some((t_ns, img_data)) = self.gravity_estimate.and_then(|estimate| {
+        while let Some((t_ns, img_data)) = self.startup.gravity().and_then(|estimate| {
             self.pairing
                 .discard_before(i64::try_from(estimate.end_ns).ok()?);
             self.pairing
                 .next(i64::try_from(self.imu_watermark.load()?.as_nanosecond()).ok()?)
         }) {
-            if !self.estimator_initialized {
-                let estimate = self
-                    .gravity_estimate
-                    .ok_or_else(|| error("stationary gravity estimate is absent"))?;
+            if let Startup::WaitingStereo(estimate) = self.startup {
                 let rotation = estimate
                     .rotation_body_to_world()
                     .ok_or_else(|| error("stationary gravity estimate is invalid"))?;
@@ -333,7 +359,7 @@ impl LiveSession {
                     Vector3::zeros(),
                     Vector3::zeros(),
                 )?;
-                self.estimator_initialized = true;
+                self.startup = Startup::Running(estimate);
             }
             let mut frame_started = self
                 .frame_started
@@ -528,6 +554,32 @@ impl LiveSession {
 mod config_tests {
     use super::*;
     use firefly_basalt::utils::vio_config::VioConfig;
+
+    #[test]
+    fn stereo_waits_for_imu_and_never_replays_consumed_frames() {
+        let mut pairing = Pairing::default();
+        let mut packet = GrayImageMessage {
+            width: IMAGE_WIDTH as _,
+            height: IMAGE_HEIGHT as _,
+            ..Default::default()
+        };
+        for stamp in [1., 1., 0.9, 2.] {
+            packet.timestamp = stamp;
+            for camera in 0..2 {
+                packet.sensor_id = camera as _;
+                pairing.insert(&packet, camera).unwrap();
+            }
+            if stamp == 1. && pairing.emitted.is_none() {
+                assert!(pairing.next(999_999_999).is_none());
+                assert_eq!(pairing.next(1_000_000_000).unwrap().0, 1_000_000_000);
+            } else if stamp <= 1. {
+                assert!(pairing.next(i64::MAX).is_none());
+                assert!(pairing.left.is_empty() && pairing.right.is_empty());
+            } else {
+                assert_eq!(pairing.next(i64::MAX).unwrap().0, 2_000_000_000);
+            }
+        }
+    }
 
     #[test]
     fn detection_override_preserves_all_other_online_parameters() {

@@ -37,6 +37,7 @@ impl FcConfig {
             ));
         }
         self.imu.validate()?;
+        self.fsm.validate()?;
         self.control.validate()
     }
 }
@@ -92,5 +93,26 @@ mod tests {
             "[control.rate]\nmax_deg_s = [0, 0, 0]\n[control.position]\nvel_max_horizontal = 0\nvel_max_up = 0\nvel_max_down = 0\n[control.attitude]\nref_model_freq = 0",
         ).unwrap();
         zero_limits.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_landing_limits_that_cannot_confirm_contact() {
+        for name in [
+            "land_descent_rate",
+            "land_accel",
+            "land_jerk",
+            "on_ground_velocity",
+            "land_complete_hold",
+        ] {
+            for value in ["0", "-0.1", "nan", "inf"] {
+                let config: FcConfig = toml::from_str(&format!("[fsm]\n{name} = {value}")).unwrap();
+                assert!(config.validate().is_err(), "{name}={value}");
+            }
+        }
+        for value in ["-0.1", "nan", "inf"] {
+            let config: FcConfig =
+                toml::from_str(&format!("[fsm]\non_ground_altitude = {value}")).unwrap();
+            assert!(config.validate().is_err());
+        }
     }
 }

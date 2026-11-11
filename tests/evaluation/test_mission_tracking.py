@@ -9,6 +9,29 @@ from firefly_evaluation.mission import Mission, MissionFailure, Options
 from firefly_evaluation.mission_io import Recorder
 
 
+def test_completed_phase_cannot_overwrite_evidence(tmp_path):
+    mission = Mission(tmp_path, "nominal", Options())
+    mission.recorder = create_autospec(Recorder, instance=True, spec_set=True)
+    mission.result["stages"]["hover"] = {"status": "blocked"}
+    mission.phase("hover", lambda: {"height": 1.})
+    previous = dict(mission.result["stages"]["hover"])
+    with pytest.raises(MissionFailure, match="already passed"):
+        mission.phase("hover", lambda: pytest.fail("duplicate stage ran"))
+    assert mission.result["stages"]["hover"] == previous
+
+
+def test_phase_start_failure_has_terminal_evidence(tmp_path):
+    mission = Mission(tmp_path, "nominal", Options())
+    mission.recorder = create_autospec(Recorder, instance=True, spec_set=True)
+    mission.recorder.event.side_effect = [RuntimeError("recorder unavailable"), None]
+    with pytest.raises(RuntimeError, match="recorder unavailable"):
+        mission.phase("hover", lambda: pytest.fail("action must wait for stage start"))
+    stage = mission.result["stages"]["hover"]
+    assert stage["status"] == "failed"
+    assert stage["reason"] == "recorder unavailable"
+    assert "end_sim_s" in stage
+
+
 def ready(mission, goal=100.):
     mission.t = 10.
     mission.planner_status = (10., goal, False, time.monotonic())

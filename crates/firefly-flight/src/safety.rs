@@ -228,6 +228,7 @@ mod tests {
             odometry_alive: true,
             imu_alive: true,
             attitude_session_ok: true,
+            landing_thrust_low: true,
         }
     }
 

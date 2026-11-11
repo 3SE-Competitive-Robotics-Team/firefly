@@ -1,11 +1,40 @@
 """验收入口显式选择环境与发布策略，不启动 IPC 或物理循环。"""
 from unittest.mock import create_autospec
+from types import SimpleNamespace
+import numpy as np
 
 import pytest
 
 from firefly_evaluation import disturbance_sim, mission_sim
 from firefly_mujoco import DroneEnv, build_scene, load_scene_name
 from firefly_sim.main import decode_config, main as run_sim
+
+
+def test_pulse_applies_then_clears_before_accepting_the_next(monkeypatch):
+    env = object.__new__(disturbance_sim.DisturbedEnv)
+    pulse = disturbance_sim.ForcePulse(timestamp=0., seconds=.002, index=1)
+    pulse.force[:] = [1., 0., 0.]
+    messages = [SimpleNamespace(payload=lambda: SimpleNamespace(contents=pulse))]
+    env.pulses = SimpleNamespace(receive=lambda: messages.pop(0) if messages else None)
+    env.model = SimpleNamespace(opt=SimpleNamespace(timestep=.001))
+    env.data = SimpleNamespace(xfrc_applied=np.zeros((1, 6)), time=0.)
+    env._drone_id = 0
+    env.force = np.zeros(3)
+    env.index = env.remaining_steps = 0
+    env.pulse_phase = disturbance_sim.PulsePhase.IDLE
+    records = []
+    env.recorder = SimpleNamespace(event=lambda *a: None, scalars=lambda *a: records.append(a))
+    monkeypatch.setattr(mission_sim.ObservedEnv, "step", lambda _: None)
+    env.step()
+    assert env.remaining_steps == 1
+    assert env.pulse_phase == disturbance_sim.PulsePhase.APPLYING
+    env.step()
+    assert env.pulse_phase == disturbance_sim.PulsePhase.CLEARING
+    assert env.data.xfrc_applied[0, 0] == 1.
+    env.step()
+    assert env.pulse_phase == disturbance_sim.PulsePhase.IDLE
+    assert not env.data.xfrc_applied.any()
+    assert [r[2] for r in records] == [[1., 0., 0., .001], [1., 0., 0., .001], [0., 0., 0., 0.]]
 
 
 @pytest.mark.parametrize(("entry", "environment"), [

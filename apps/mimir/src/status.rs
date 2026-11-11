@@ -10,31 +10,38 @@ pub(crate) struct Status {
 /// Count publication intervals over at least one second of measurement time.
 #[derive(Default)]
 struct Rate {
-    start: Option<f64>,
-    latest: Option<f64>,
+    window: Option<RateWindow>,
+}
+
+struct RateWindow {
+    start: f64,
+    latest: f64,
     intervals: u32,
 }
 
 impl Rate {
     fn observe(&mut self, stamp: f64) -> Option<f64> {
-        if self.latest.is_some_and(|previous| stamp <= previous) {
+        if !stamp.is_finite() || self.window.as_ref().is_some_and(|w| stamp <= w.latest) {
             return None;
         }
-        let gap = self.latest.map_or(0., |previous| stamp - previous);
-        self.latest = Some(stamp);
-        if self.start.is_none() || gap > 2. {
-            self.start = Some(stamp);
-            self.intervals = 0;
+        if self.window.as_ref().is_none_or(|w| stamp - w.latest > 2.) {
+            self.window = Some(RateWindow {
+                start: stamp,
+                latest: stamp,
+                intervals: 0,
+            });
             return None;
         }
-        self.intervals += 1;
-        let elapsed = stamp - self.start?;
+        let window = self.window.as_mut()?;
+        window.latest = stamp;
+        window.intervals += 1;
+        let elapsed = stamp - window.start;
         if elapsed < 1. {
             return None;
         }
-        let rate = f64::from(self.intervals) / elapsed;
-        self.start = Some(stamp);
-        self.intervals = 0;
+        let rate = f64::from(window.intervals) / elapsed;
+        window.start = stamp;
+        window.intervals = 0;
         Some(rate)
     }
 }

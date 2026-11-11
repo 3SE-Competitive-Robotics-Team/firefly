@@ -133,10 +133,8 @@ pub struct CaptureStats {
 pub struct SensorCapture {
     /// 下一个允许触发的 sim 时刻（秒）。
     next_stamp: f64,
-    /// 传感器相机是否处于出图窗口（激活中）。
-    active: bool,
     /// 当前出图窗口对应的请求序号（渲染世界取走它即收起相机）。
-    requested_seq: u64,
+    requested_seq: Option<u64>,
 }
 
 /// 逐像素处理与发布；待处理任务只保留最新一拍。
@@ -250,13 +248,16 @@ pub fn poll_pose(
     }
 
     // 渲染世界已取走本窗口的请求（拷贝已编码）→ 收起传感器相机，停止空转。
-    if capture.active && hub.taken_seq() >= capture.requested_seq {
-        capture.active = false;
+    if capture
+        .requested_seq
+        .is_some_and(|seq| hub.taken_seq() >= seq)
+    {
+        capture.requested_seq = None;
     }
 
     // 按仿真时间以配置节拍触发采集；回读双缓冲，
     // 只要还有空闲组就可发起（上一拍在途不阻塞下一拍）。
-    if !capture.active
+    if capture.requested_seq.is_none()
         && hub.can_issue()
         && !hub.has_pending()
         && pose.has_pose
@@ -273,8 +274,7 @@ pub fn poll_pose(
             left: targets.left.id(),
             right: targets.right.id(),
         });
-        capture.active = true;
-        capture.requested_seq = seq;
+        capture.requested_seq = Some(seq);
         // sim 时间戳有浮点抖动，按 10% 周期容差比较，避免漏拍。
         capture.next_stamp = pose.stamp + period - period * 0.1;
         log::debug!("pose t={:.3} 回读 seq={seq}", pose.stamp);
@@ -282,7 +282,7 @@ pub fn poll_pose(
 
     // rig 摆位与激活同系统内完成：本帧渲染即用新变换、且只在出图窗口渲染。
     apply_pose_to_eyes(&pose, &mut eyes);
-    let active = capture.active;
+    let active = capture.requested_seq.is_some();
     for mut camera in &mut cameras {
         if camera.is_active != active {
             camera.is_active = active;

@@ -265,12 +265,15 @@ class Mission:
         raise MissionFailure("wall-clock deadline exceeded")
 
     def phase(self, name, action):
+        previous = self.result["stages"].get(name)
+        if previous is not None and previous["status"] != "blocked":
+            raise MissionFailure(f"phase {name} already {previous['status']}")
         stage = {"status": "running", "start_sim_s": self.t}
         self.result["stages"][name] = stage
         start = time.monotonic()
-        self.recorder.event(f"phase begin {name}", self.t)
-        logging.getLogger("acceptance").info("%s/%s begin t=%.3f", self.case, name, self.t)
         try:
+            self.recorder.event(f"phase begin {name}", self.t)
+            logging.getLogger("acceptance").info("%s/%s begin t=%.3f", self.case, name, self.t)
             metrics = action()
             stage.update(status="passed", metrics=metrics or {})
         except BaseException as error:

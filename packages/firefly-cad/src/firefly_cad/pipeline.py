@@ -148,31 +148,37 @@ def build(source: Path, scene: SceneId, output: Path, map_path: Path, options: O
     code = {p.name: digest(p) for p in Path(__file__).parent.glob("*.py")}
     versions = {p: version(p) for p in ["cadquery-ocp-novtk", "numpy", "trimesh", "scipy"]}
     common = {"dependencies": versions}
-    save_json(output / "asset_manifest.json", {"status": "building", "scene": scene.name, "source_sha256": source_hash})
-    stage("tessellate", cache, {**common, "code": code["tessellate.py"], "source_sha256": source_hash, "deflection_mm": options.deflection_mm},
-          [raw, raw_dir / "_manifest.json"], lambda: tessellate(source, raw_dir, options.deflection_mm))
-    raw_hash = digest(raw)
-    stage("collision", cache, {**common, "code": code["collide.py"], "raw": raw_hash, "resolution": options.resolution_m}, [collision],
-          lambda: write_collision(collide([raw], options.resolution_m), collision))
-    export_script = ROOT / "scripts" / "blender_field.py"
-    environment = blender_environment(executable, output / "derived", versions["numpy"])
-    surface_profiles = {p.name: digest(p) for p in sorted((export_script.parent / "field_surfaces").glob("*.json"))}
-    stage("visual", cache, {"raw": raw_hash, "script": digest(export_script), "surface_profiles": surface_profiles, "blender": blender_version}, [visual],
-          lambda: subprocess.run([executable, "--background", "--python-use-system-env", "--python-exit-code", "1", "--python", str(export_script),
-                                  "--", str(raw.resolve()), str(visual.resolve())], check=True, env=environment))
-    stage("map", cache, {**common, "code": code["map_export.py"], "collision": digest(collision), "padding": options.padding_m, "ceiling": options.ceiling_m}, [map_path],
-          lambda: export_map(json.loads(collision.read_text()), map_path, options.padding_m, options.ceiling_m))
-    summary = validate_assets(raw, visual, collision, map_path)
-    if digest(source) != source_hash:
-        raise ValueError("source STP changed during build")
-    summary.update({"status": "passed", "scene": scene.name, "source": {"path": str(source), "sha256": source_hash, "bytes": source.stat().st_size},
-                    "options": asdict(options), "dependencies": versions, "blender": blender_version,
-                    "surface_profiles": surface_profiles,
-                    "world_frame": {"units": "m", "up": "Z", "normalization": json.loads((raw_dir / "_manifest.json").read_text())["shift_mm"]},
-                    "artifacts": {str(p.resolve()): digest(p) for p in [raw, visual, collision, map_path]}})
-    save_json(output / "asset_manifest.json", summary)
-    log.info("资产一致性验收通过：%d 碰撞盒，%d 占据格", summary["collision_boxes"], summary["occupied_voxels"])
-    return summary
+    manifest = {"status": "building", "scene": scene.name, "source_sha256": source_hash}
+    save_json(output / "asset_manifest.json", manifest)
+    try:
+        stage("tessellate", cache, {**common, "code": code["tessellate.py"], "source_sha256": source_hash, "deflection_mm": options.deflection_mm},
+              [raw, raw_dir / "_manifest.json"], lambda: tessellate(source, raw_dir, options.deflection_mm))
+        raw_hash = digest(raw)
+        stage("collision", cache, {**common, "code": code["collide.py"], "raw": raw_hash, "resolution": options.resolution_m}, [collision],
+              lambda: write_collision(collide([raw], options.resolution_m), collision))
+        export_script = ROOT / "scripts" / "blender_field.py"
+        environment = blender_environment(executable, output / "derived", versions["numpy"])
+        surface_profiles = {p.name: digest(p) for p in sorted((export_script.parent / "field_surfaces").glob("*.json"))}
+        stage("visual", cache, {"raw": raw_hash, "script": digest(export_script), "surface_profiles": surface_profiles, "blender": blender_version}, [visual],
+              lambda: subprocess.run([executable, "--background", "--python-use-system-env", "--python-exit-code", "1", "--python", str(export_script),
+                                      "--", str(raw.resolve()), str(visual.resolve())], check=True, env=environment))
+        stage("map", cache, {**common, "code": code["map_export.py"], "collision": digest(collision), "padding": options.padding_m, "ceiling": options.ceiling_m}, [map_path],
+              lambda: export_map(json.loads(collision.read_text()), map_path, options.padding_m, options.ceiling_m))
+        summary = validate_assets(raw, visual, collision, map_path)
+        if digest(source) != source_hash:
+            raise ValueError("source STP changed during build")
+        summary.update({"status": "passed", "scene": scene.name, "source": {"path": str(source), "sha256": source_hash, "bytes": source.stat().st_size},
+                        "options": asdict(options), "dependencies": versions, "blender": blender_version,
+                        "surface_profiles": surface_profiles,
+                        "world_frame": {"units": "m", "up": "Z", "normalization": json.loads((raw_dir / "_manifest.json").read_text())["shift_mm"]},
+                        "artifacts": {str(p.resolve()): digest(p) for p in [raw, visual, collision, map_path]}})
+        save_json(output / "asset_manifest.json", summary)
+        log.info("资产一致性验收通过：%d 碰撞盒，%d 占据格", summary["collision_boxes"], summary["occupied_voxels"])
+        return summary
+    except BaseException as error:
+        manifest.update(status="failed", reason=str(error) or type(error).__name__)
+        save_json(output / "asset_manifest.json", manifest)
+        raise
 
 
 def decode_options(values: dict) -> Options:

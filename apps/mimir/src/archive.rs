@@ -53,6 +53,23 @@ struct PendingVoxels {
     cells: BTreeSet<[i32; 3]>,
 }
 
+impl PendingVoxels {
+    fn append(&mut self, incoming: &[[i32; 3]], limit: usize) -> Result<()> {
+        // Validate the next state before advancing chunk ownership.
+        let additions: BTreeSet<_> = incoming
+            .iter()
+            .copied()
+            .filter(|cell| !self.cells.contains(cell))
+            .collect();
+        if additions.len() > limit.saturating_sub(self.cells.len()) {
+            return Err(invalid("voxel update budget exceeded"));
+        }
+        self.cells.extend(additions);
+        self.next += 1;
+        Ok(())
+    }
+}
+
 pub struct Archive {
     encoder: Encoder<BufWriter<File>>,
     store: StoreId,
@@ -612,11 +629,7 @@ impl Archive {
         {
             return Err(invalid("mismatched voxel chunk"));
         }
-        pending.cells.extend(incoming);
-        if pending.cells.len() > self.options.max_voxels {
-            return Err(invalid("voxel update budget exceeded"));
-        }
-        pending.next += 1;
+        pending.append(incoming, self.options.max_voxels)?;
         if pending.next < pending.chunks {
             return Ok(());
         }
@@ -724,4 +737,32 @@ pub(crate) fn wall_time_ns() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos().min(i64::MAX as u128) as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejected_chunk_does_not_advance_or_mutate_the_pending_update() {
+        let mut pending = PendingVoxels {
+            name: "test".into(),
+            stamp: 1.,
+            kind: kind::VOXELS,
+            chunks: 3,
+            next: 0,
+            size: [1.; 3],
+            origin: [0.; 3],
+            cells: BTreeSet::new(),
+        };
+        pending.append(&[[1, 0, 0], [1, 0, 0]], 2).unwrap();
+        assert_eq!(pending.next, 1);
+        assert_eq!(pending.cells.len(), 1);
+        assert!(pending.append(&[[2, 0, 0], [3, 0, 0]], 2).is_err());
+        assert_eq!(pending.next, 1);
+        assert_eq!(pending.cells, BTreeSet::from([[1, 0, 0]]));
+        pending.append(&[[1, 0, 0], [2, 0, 0]], 2).unwrap();
+        assert_eq!(pending.next, 2);
+        assert_eq!(pending.cells.len(), 2);
+    }
 }

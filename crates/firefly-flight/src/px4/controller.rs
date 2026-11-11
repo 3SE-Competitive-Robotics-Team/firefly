@@ -54,6 +54,17 @@ pub struct Controller {
 }
 
 impl Controller {
+    /// Ground-contact thrust gate: minimum plus 30% of the minimum-to-hover range.
+    /// A valid previous control output is required; hover alone never confirms contact.
+    #[must_use]
+    pub fn landing_thrust_low(&self) -> bool {
+        let minimum = self.params.position.thrust_min;
+        let threshold = minimum + 0.3 * (self.hover_thrust - minimum);
+        self.airframe_signature.is_some()
+            && !self.input_invalid
+            && self.allocated_control[3].abs() <= threshold
+    }
+
     /// 以参数构造；机体参数在收到 `Airframe` 后通过 [`Self::set_airframe`] 注入。
     #[must_use]
     pub fn new(params: Px4Params) -> Self {
@@ -154,7 +165,7 @@ impl Controller {
     /// 位置模式：位置/速度/加速度/偏航参考 → 4 电机推力（N）。
     ///
     /// `landed` 为真时冻结角速度积分（PX4 `RateControl::update(..., landed)`）。
-    /// 位置设定值无效时返回 `None`，调用方必须零推力保护。
+    /// 位置设定值无效时保留上一次有效姿态与推力；内环输出无效时返回 `None`。
     pub fn update(
         &mut self,
         state: &QuadState,

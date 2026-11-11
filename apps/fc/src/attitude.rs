@@ -15,19 +15,25 @@ pub struct Snapshot {
 #[derive(Default)]
 pub struct Input {
     pub latest: Option<Snapshot>,
-    session: Option<u64>,
-    session_fault: bool,
-    valid: bool,
+    validity: Validity,
+}
+
+#[derive(Default)]
+enum Validity {
+    #[default]
+    Waiting,
+    Valid,
+    Invalid,
+    SessionFault,
 }
 
 impl Input {
     pub fn observe(&mut self, m: AttitudeMessage, now: Instant) -> bool {
-        if m.session == 0 || self.session_fault {
+        if m.session == 0 || matches!(self.validity, Validity::SessionFault) {
             return false;
         }
-        if self.session.is_some_and(|s| s != m.session) {
-            self.session_fault = true;
-            self.valid = false;
+        if self.latest.is_some_and(|s| s.message.session != m.session) {
+            self.validity = Validity::SessionFault;
             log::error!("VIO 会话改变，禁止恢复位置控制；需重启 FC");
             return false;
         }
@@ -57,7 +63,7 @@ impl Input {
                 .all(|x| (*x as f32).is_finite())
             || pose.is_err()
         {
-            self.valid = false;
+            self.validity = Validity::Invalid;
             return false;
         }
         let posterior_received = self
@@ -71,20 +77,18 @@ impl Input {
             received: now,
             posterior_received,
         });
-        self.session = Some(m.session);
-        self.valid = true;
+        self.validity = Validity::Valid;
         true
     }
 
     /// VIO 会话是否仍然有效（会话改变后不可恢复，需重启 FC）。
     #[must_use]
     pub fn session_ok(&self) -> bool {
-        !self.session_fault
+        !matches!(self.validity, Validity::SessionFault)
     }
 
     pub fn fresh(&self, imu_time: f64) -> bool {
-        self.valid
-            && !self.session_fault
+        matches!(self.validity, Validity::Valid)
             && self.latest.is_some_and(|s| {
                 s.received.elapsed() <= super::IMU_STALE_LIMIT
                     && s.posterior_received.elapsed() <= super::ODOM_STALE_LIMIT

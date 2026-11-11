@@ -39,7 +39,7 @@ pub struct LocalSnapshot {
 pub struct MapInput {
     required: Option<Bounds>,
     snapshot: Option<LocalSnapshot>,
-    fault: bool,
+    fault: Option<String>,
     occupied: HashMap<[i64; 3], u32>,
     boxes: HashSet<([i64; 3], [i64; 3])>,
     next_boxes: HashSet<([i64; 3], [i64; 3])>,
@@ -53,7 +53,9 @@ impl MapInput {
     }
     pub fn observe_local(&mut self, snapshot: LocalSnapshot) -> Result<()> {
         let result = self.accept(snapshot);
-        self.fault |= result.is_err();
+        if let Err(error) = &result {
+            self.fault.get_or_insert_with(|| error.to_string());
+        }
         result
     }
     fn accept(&mut self, snapshot: LocalSnapshot) -> Result<()> {
@@ -91,7 +93,7 @@ impl MapInput {
     /// Coverage gaps can wait for the next fused snapshot.
     /// Only actual age expiry or a latched input fault disables recovery.
     pub fn expired(&self, odometry: &OdomMessage, now: Instant, timeout: Duration) -> bool {
-        self.fault
+        self.fault.is_some()
             || self.snapshot.as_ref().is_some_and(|snapshot| {
                 odometry.timestamp - snapshot.timestamp > timeout.as_secs_f64()
                     || now.saturating_duration_since(snapshot.fused_at) > timeout
@@ -131,11 +133,14 @@ impl MapInput {
         rolling: bool,
     ) -> Result<()> {
         let required = self.prepare_region(map, odometry, rolling);
+        if let Some(reason) = &self.fault {
+            return Err(invalid("depth map input fault").with_context("reason", reason.clone()));
+        }
         let snapshot = self
             .snapshot
             .as_ref()
             .ok_or_else(|| invalid("depth map absent"))?;
-        if self.fault || !snapshot.bounds.contains(&required) {
+        if !snapshot.bounds.contains(&required) {
             return Err(invalid("depth map coverage mismatch"));
         }
         let key = (self.geometry_version, map.global_index([0; 3]));

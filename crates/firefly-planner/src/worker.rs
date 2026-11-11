@@ -98,8 +98,14 @@ pub struct PlanningWorker {
     sender: Option<mpsc::SyncSender<Job>>,
     receiver: mpsc::Receiver<Completion>,
     thread: Option<JoinHandle<()>>,
-    active: Option<Ticket>,
+    lane: Lane,
     stats: WorkerStats,
+}
+
+enum Lane {
+    Idle,
+    Solving(Ticket),
+    Unavailable,
 }
 
 /// Counters and snapshot cost measured on the execution thread.
@@ -139,7 +145,7 @@ impl PlanningWorker {
             sender: Some(sender),
             receiver,
             thread: Some(thread),
-            active: None,
+            lane: Lane::Idle,
             stats: WorkerStats::default(),
         })
     }
@@ -151,7 +157,7 @@ impl PlanningWorker {
 
     /// Revoke eligibility immediately, including when navigation/map freshness is lost.
     pub fn cancel(&mut self) {
-        if let Some(ticket) = &self.active {
+        if let Lane::Solving(ticket) = &self.lane {
             ticket.cancellation.cancel();
         }
     }
@@ -165,17 +171,17 @@ impl PlanningWorker {
         measured: Option<State>,
         map: MapVersion,
     ) -> bool {
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|ticket| !eligible(ticket, fsm, now, map))
-        {
+        if matches!(self.lane, Lane::Unavailable) {
+            fsm.trigger_emergency_stop_disable_failsafe();
+            return false;
+        }
+        if matches!(&self.lane, Lane::Solving(ticket) if !eligible(ticket, fsm, now, map)) {
             self.cancel();
         }
         let mut adopted = false;
         match self.receiver.try_recv() {
             Ok(completion) => {
-                self.active = None;
+                self.lane = Lane::Idle;
                 if eligible(&completion.ticket, fsm, now, map) {
                     if completion.ticket.map.geometry != map.geometry {
                         self.stats.revalidated += 1;
@@ -190,12 +196,13 @@ impl PlanningWorker {
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.cancel();
+                self.lane = Lane::Unavailable;
                 fsm.trigger_emergency_stop_disable_failsafe();
                 return false;
             }
             Err(mpsc::TryRecvError::Empty) => {}
         }
-        if self.active.is_none()
+        if matches!(self.lane, Lane::Idle)
             && let Some(kind) = fsm.solve_kind(measured)
         {
             let max_age =
@@ -237,8 +244,9 @@ impl PlanningWorker {
                 .is_some_and(|sender| sender.try_send(job).is_ok())
             {
                 self.stats.submitted += 1;
-                self.active = Some(ticket);
+                self.lane = Lane::Solving(ticket);
             } else {
+                self.lane = Lane::Unavailable;
                 fsm.trigger_emergency_stop_disable_failsafe();
             }
         }

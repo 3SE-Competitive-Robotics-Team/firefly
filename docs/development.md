@@ -209,6 +209,7 @@ supervisor 的相对命令 `bin/<app>` 和 `logs/process` 仍依赖工作目录�
 cd /opt/firefly
 ./bin/ffctl process status                      # 一次性，含 CPU%/MEM
 ./bin/ffctl process status --watch --interval 1 # top 式刷新，Ctrl-C 退出
+./bin/ffctl process status --json      # 单次 JSON 数组，供脚本与 agent 读取
 ./bin/ffctl process start [name...]     # 省略 = 所有 autostart；显式名字忽略 autostart
 ./bin/ffctl process stop [name...]      # 省略 = 全部，逆序
 ./bin/ffctl process restart [name...]
@@ -219,6 +220,11 @@ systemctl stop firefly                  # supervisor 逆序 SIGINT 所有进程
 
 supervisor 对异常退出退避重启；停止使用 SIGINT，超时返回错误并保留进程状态。具体时限由
 [`supervisor.rs`](../apps/ffctl/src/process/supervisor.rs) 维护。
+`status` 的 `STATE` 列显示 `stopped / running / backoff / stopping`；`RUNNING` 和 PID
+仍表示 supervisor 持有的子进程。`--json` 输出相同进程的 `name / running / pid / restarts / state`，
+成功退出码为 0，查询失败为 1，`--json --watch` 参数冲突为 2。JSON 使用 supervisor 的进程
+快照，CPU/MEM 与本地清单的 AUTOSTART 在表格模式显示。连接旧 supervisor 时 `state`
+可能缺失；完整转换与兼容契约见[进程状态契约](architecture.md#进程状态契约)。
 子进程 stdout/stderr 在 `logs/process/<name>.log`，运行诊断的归档证据仍以 RRD 为准。
 `camera`、`imu`、`motor` 已实现标准 IPC 并纳入板载构建；设备同步、标定、实时性和飞行
 均须实机验收。部署成功只证明发布和 supervisor 应答。

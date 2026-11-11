@@ -12,8 +12,40 @@ pub struct ControlFrames {
     tree: FrameTree,
     history: VecDeque<(f64, RigidTransform, Instant)>,
     corrected: Option<(OdomMessage, Instant)>,
-    alignment_at: Option<Instant>,
-    alignment_time: Option<f64>,
+    alignment: Alignment,
+}
+
+#[derive(Default)]
+enum Alignment {
+    #[default]
+    Waiting,
+    Valid {
+        time: f64,
+        received: Instant,
+    },
+    Invalid {
+        time: f64,
+    },
+}
+
+impl Alignment {
+    fn time(&self) -> Option<f64> {
+        match *self {
+            Self::Waiting => None,
+            Self::Valid { time, .. } | Self::Invalid { time } => Some(time),
+        }
+    }
+    fn received(&self) -> Option<Instant> {
+        match *self {
+            Self::Valid { received, .. } => Some(received),
+            Self::Waiting | Self::Invalid { .. } => None,
+        }
+    }
+    fn invalidate(&mut self) {
+        if let Some(time) = self.time() {
+            *self = Self::Invalid { time };
+        }
+    }
 }
 impl ControlFrames {
     pub fn observe_odom(&mut self, msg: &OdomMessage, now: Instant) -> bool {
@@ -45,7 +77,7 @@ impl ControlFrames {
     }
     pub fn observe_corrected(&mut self, msg: OdomMessage, now: Instant) {
         if !valid(&msg) || !msg.is_initialized || msg.body_pose(FrameId::MAP).is_err() {
-            self.alignment_at = None;
+            self.alignment.invalidate();
             return;
         }
         if self
@@ -62,7 +94,8 @@ impl ControlFrames {
             return;
         };
         if self
-            .alignment_time
+            .alignment
+            .time()
             .is_some_and(|time| msg.timestamp <= time)
         {
             return;
@@ -81,8 +114,10 @@ impl ControlFrames {
             return;
         };
         if self.tree.set(map_odom).is_ok() {
-            self.alignment_at = Some(received.min(*raw_received));
-            self.alignment_time = Some(msg.timestamp);
+            self.alignment = Alignment::Valid {
+                received: received.min(*raw_received),
+                time: msg.timestamp,
+            };
         }
     }
     /// `dt`：参考时刻到当前时刻的**仿真秒**差（调用方由 IMU 时刻给出），用于把
@@ -110,7 +145,7 @@ impl ControlFrames {
                 .inverse()
             }
             0 => {
-                if now.duration_since(self.alignment_at?) > max_age {
+                if now.duration_since(self.alignment.received()?) > max_age {
                     return None;
                 }
                 self.tree.lookup(FrameId::ODOM, FrameId::MAP).ok()?
@@ -300,10 +335,10 @@ mod tests {
         let mut frames = ControlFrames::default();
         frames.observe_corrected(raw(2.), now);
         frames.observe_odom(&raw(1.), now);
-        assert!(frames.alignment_at.is_none());
+        assert!(frames.alignment.received().is_none());
         frames.observe_odom(&raw(2.), now);
-        assert_eq!(frames.alignment_at, Some(now));
+        assert_eq!(frames.alignment.received(), Some(now));
         frames.observe_corrected(raw(2.), now + Duration::from_secs(1));
-        assert_eq!(frames.alignment_at, Some(now));
+        assert_eq!(frames.alignment.received(), Some(now));
     }
 }

@@ -11,6 +11,21 @@ fn state() -> State {
         acceleration: Vector3::zeros(),
     }
 }
+
+#[test]
+fn disconnected_solver_retires_the_lane_and_never_resubmits() {
+    let mut fsm = fsm();
+    let map = version(&fsm);
+    let mut worker = PlanningWorker::with_solver(|_| panic!("solver failed")).unwrap();
+    assert!(!worker.tick(&mut fsm, 0., Some(state()), map));
+    assert!(worker.thread.take().unwrap().join().is_err());
+    for _ in 0..3 {
+        assert!(!worker.tick(&mut fsm, 0., Some(state()), map));
+        assert!(matches!(worker.lane, Lane::Unavailable));
+    }
+    assert_eq!(worker.stats().submitted, 1);
+    assert_eq!(worker.stats().adopted, 0);
+}
 fn fsm() -> ReplanFsm {
     let manager = PlannerManager::with_planner(
         Planner::new(
@@ -229,7 +244,7 @@ fn stalled_solver_cannot_block_safety_or_queue_snapshots() {
     let report = fsm.safety_tick_deferred(0.01);
     assert!(report.collision && report.emergency_stop);
     worker.cancel();
-    assert!(worker.active.as_ref().unwrap().cancellation.is_cancelled());
+    assert!(matches!(&worker.lane, Lane::Solving(ticket) if ticket.cancellation.is_cancelled()));
     let _ = fsm.exec_tick_deferred(0.01, Some(state()));
     let stopped_id = fsm.manager.traj_id();
     release.send(()).unwrap();

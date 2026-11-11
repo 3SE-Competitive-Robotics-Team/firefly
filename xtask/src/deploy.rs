@@ -142,31 +142,49 @@ fn push(device: &str, package: &Path) -> Result<(), String> {
 
     adb(device, &["push", &package_arg, REMOTE_PACKAGE])?;
     adb(device, &["push", &unpacker_arg, REMOTE_UNPACKER])?;
-    adb(device, &["shell", &format!("chmod 755 {REMOTE_UNPACKER}")])?;
+    remote_step(device, &format!("chmod 755 {REMOTE_UNPACKER}"))?;
 
     // 部署是覆盖语义会留下已退役的二进制与配置，解包前先停服务并清空受管目录；
     // `logs` 与镜像预置的 `systemd` 不动。包已推到设备，这一步之后解包失败才会
     // 留下空的受管目录，所以清理放在推送之后。
-    adb(device, &["shell", "systemctl stop firefly || true"])?;
-    adb(
-        device,
-        &[
-            "shell",
-            &format!("rm -rf {DESTINATION}/bin {DESTINATION}/configs {DESTINATION}/models"),
-        ],
-    )?;
+    prepare_destination_with(|args| adb_output(device, args))?;
     unpack_with(|args| adb_output(device, args))?;
     check_unpacked(device)?;
-    adb(device, &["shell", "sync"])?;
+    remote_step(device, "sync")?;
     link(device)?;
-    adb(
-        device,
-        &[
-            "shell",
-            &format!("rm -f {REMOTE_PACKAGE} {REMOTE_UNPACKER}"),
-        ],
-    )?;
+    remote_step(device, &format!("rm -f {REMOTE_PACKAGE} {REMOTE_UNPACKER}"))?;
     Ok(())
+}
+
+fn prepare_destination_with(
+    mut output: impl FnMut(&[&str]) -> Result<String, String>,
+) -> Result<(), String> {
+    remote_step_with("systemctl stop firefly", &mut output)?;
+    remote_step_with(
+        &format!("rm -rf {DESTINATION}/bin {DESTINATION}/configs {DESTINATION}/models"),
+        &mut output,
+    )
+}
+
+fn remote_step(device: &str, command: &str) -> Result<(), String> {
+    remote_step_with(command, |args| adb_output(device, args))
+}
+
+fn remote_step_with(
+    command: &str,
+    mut output: impl FnMut(&[&str]) -> Result<String, String>,
+) -> Result<(), String> {
+    const COMPLETE: &str = "FIREFLY_STEP_COMPLETE";
+    let script = format!("({command}) && echo {COMPLETE}");
+    let result = output(&["shell", &script])?;
+    if !has_marker(&result, COMPLETE) {
+        return Err(format!("远端步骤未完成（{command}）：\n{result}"));
+    }
+    Ok(())
+}
+
+fn has_marker(output: &str, marker: &str) -> bool {
+    output.lines().any(|line| line.trim() == marker)
 }
 
 fn unpack_with(mut output: impl FnMut(&[&str]) -> Result<String, String>) -> Result<(), String> {
@@ -174,7 +192,7 @@ fn unpack_with(mut output: impl FnMut(&[&str]) -> Result<String, String>) -> Res
     let command =
         format!("{REMOTE_UNPACKER} unpack {REMOTE_PACKAGE} {DESTINATION} && echo {COMPLETE}");
     let result = output(&["shell", &command])?;
-    if !result.lines().any(|line| line.trim() == COMPLETE) {
+    if !has_marker(&result, COMPLETE) {
         return Err(format!("远端解包未完成：\n{result}"));
     }
     Ok(())
@@ -207,14 +225,14 @@ fn check_unpacked(device: &str) -> Result<(), String> {
 /// `systemd` 的 active 状态早于 supervisor 的 socket 就绪，只看 `is-active` 会把
 /// “起来了但不应答”判成成功，所以以 `ffctl process status` 在超时内应答为就绪判据。
 fn start(device: &str) -> Result<(), String> {
-    adb(device, &["shell", "systemctl start firefly"])?;
+    remote_step(device, "systemctl start firefly")?;
     let probe = concat!(
         "for attempt in $(seq 1 20); do ",
         "if ffctl process status >/dev/null 2>&1; then echo SUPERVISOR_READY; break; fi; ",
         "sleep 0.5; ",
         "done"
     );
-    if !adb_output(device, &["shell", probe])?.contains("SUPERVISOR_READY") {
+    if !has_marker(&adb_output(device, &["shell", probe])?, "SUPERVISOR_READY") {
         let status = adb_output(
             device,
             &["shell", "systemctl status firefly --no-pager -l | head -20"],
@@ -235,7 +253,7 @@ fn link(device: &str) -> Result<(), String> {
             "ln -sf {DESTINATION}/bin/{app} /usr/local/bin/{app}"
         ));
     }
-    adb(device, &["shell", &commands.join(" && ")])?;
+    remote_step(device, &commands.join(" && "))?;
     Ok(())
 }
 
@@ -285,7 +303,50 @@ fn adb(device: &str, args: &[&str]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::unpack_with;
+    use super::{has_marker, prepare_destination_with, remote_step_with, unpack_with};
+
+    #[test]
+    fn failed_remote_stop_preserves_installed_files() {
+        let mut commands = Vec::new();
+        let result = prepare_destination_with(|args| {
+            commands.push(args[1].to_owned());
+            Ok("Failed to stop firefly.service".into())
+        });
+        assert!(result.is_err());
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].contains("systemctl stop firefly"));
+        assert!(!commands[0].contains("rm -rf"));
+    }
+
+    #[test]
+    fn remote_transitions_require_exact_success_markers() {
+        assert!(!has_marker("NOT_SUPERVISOR_READY", "SUPERVISOR_READY"));
+        assert!(!has_marker("echo SUPERVISOR_READY", "SUPERVISOR_READY"));
+        assert!(has_marker(
+            "starting\r\nSUPERVISOR_READY\r\n",
+            "SUPERVISOR_READY"
+        ));
+        assert!(
+            remote_step_with("false", |args| {
+                let output = std::process::Command::new("sh")
+                    .args(["-c", args[1]])
+                    .output()
+                    .unwrap();
+                Ok(String::from_utf8(output.stdout).unwrap())
+            })
+            .is_err()
+        );
+        assert!(
+            remote_step_with("true", |args| {
+                let output = std::process::Command::new("sh")
+                    .args(["-c", args[1]])
+                    .output()
+                    .unwrap();
+                Ok(String::from_utf8(output.stdout).unwrap())
+            })
+            .is_ok()
+        );
+    }
 
     #[test]
     fn legacy_shell_requires_unpack_completion_before_start() {

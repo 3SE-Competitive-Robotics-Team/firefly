@@ -168,7 +168,7 @@ impl Lbfgs {
         }
         let gnorm = g.norm();
         if gnorm / xnorm <= cfg.gradient_epsilon {
-            return Ok(report(0, fx, &g, true, false, x, evaluations));
+            return Ok(report(0, fx, &g, Termination::Converged, x, evaluations));
         }
 
         // k/end 与官方一致：k 从 1 起、每次有效更新 ++k；end 为环形缓冲写指针
@@ -258,11 +258,30 @@ impl Lbfgs {
         };
 
         match ret {
-            ERR_CANCELED => Ok(report(iterations, fx, &g, false, true, x, evaluations)),
-            ERR_MAXIMUMITERATION => Ok(report(iterations, fx, &g, false, false, x, evaluations)),
-            CONVERGENCE | STOP | ALREADY_MINIMIZED => {
-                Ok(report(iterations, fx, &g, true, false, x, evaluations))
-            }
+            ERR_CANCELED => Ok(report(
+                iterations,
+                fx,
+                &g,
+                Termination::Cancelled,
+                x,
+                evaluations,
+            )),
+            ERR_MAXIMUMITERATION => Ok(report(
+                iterations,
+                fx,
+                &g,
+                Termination::IterationLimit,
+                x,
+                evaluations,
+            )),
+            CONVERGENCE | STOP | ALREADY_MINIMIZED => Ok(report(
+                iterations,
+                fx,
+                &g,
+                Termination::Converged,
+                x,
+                evaluations,
+            )),
             code => Err(Error::new(ErrorKind::Convergence, strerror(code))),
         }
     }
@@ -343,13 +362,18 @@ fn strerror(code: i32) -> &'static str {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(Clone, Copy)]
+enum Termination {
+    Converged,
+    Cancelled,
+    IterationLimit,
+}
+
 fn report(
     iterations: usize,
     final_cost: f64,
     g: &DVector<f64>,
-    converged: bool,
-    early_exit: bool,
+    termination: Termination,
     final_x: DVector<f64>,
     evaluations: usize,
 ) -> LbfgsReport {
@@ -359,8 +383,8 @@ fn report(
         line_search_steps: evaluations - 1,
         final_cost,
         gradient_norm: g.norm(),
-        converged,
-        early_exit,
+        converged: matches!(termination, Termination::Converged),
+        early_exit: matches!(termination, Termination::Cancelled),
         final_x,
     }
 }

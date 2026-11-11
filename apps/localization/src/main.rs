@@ -139,18 +139,24 @@ fn gate_diag(gate: &RelocGate, max_innovation_trans: f64) -> Option<[f64; 4]> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AlignmentState {
+    Waiting,
+    Ready,
+    Reset,
+}
+
 struct App {
     fusion: FusionFilter,
     quality: Quality,
     quality_options: QualityOptions,
     origin: firefly_localization::config::InitialAlignment,
-    alignment_ready: bool,
+    alignment: AlignmentState,
     navigation_pub: Publisher<NavigationMessage>,
     /// 最近一次提交坐标系时的对齐；修订号只随超过门限的修正递增。
     revision_alignment: Option<RigidTransform>,
     correction: CorrectionOptions,
     alignment_revision: u64,
-    estimator_reset: bool,
     odom_sub: Subscriber<OdomMessage>,
     corrected_pub: Publisher<OdomMessage>,
     viz_pub: Option<VizPublisher>,
@@ -212,12 +218,11 @@ impl App {
             quality: Quality::default(),
             quality_options: cfg.quality,
             origin,
-            alignment_ready: false,
+            alignment: AlignmentState::Waiting,
             navigation_pub: Publisher::with_topic(&node, NAVIGATION_TOPIC)?,
             revision_alignment: None,
             correction: cfg.correction,
             alignment_revision: 0,
-            estimator_reset: false,
             odom_sub,
             visual_obs,
             corrected_pub,
@@ -242,11 +247,11 @@ impl App {
             let mut odom_arrived = false;
             while let Some(sample) = sub.receive()? {
                 let m: OdomMessage = *sample;
-                if self.alignment_ready && !m.is_initialized {
-                    self.estimator_reset = true;
+                if self.alignment == AlignmentState::Ready && !m.is_initialized {
+                    self.alignment = AlignmentState::Reset;
                     log::error!("VIO 初始化状态丢失，地图输出锁存停止；须重启会话");
                 }
-                if self.estimator_reset {
+                if self.alignment == AlignmentState::Reset {
                     continue;
                 }
                 if !m.is_initialized
@@ -262,12 +267,12 @@ impl App {
                 let Ok(pose) = m.body_pose(FrameId::ODOM) else {
                     continue;
                 };
-                if !self.alignment_ready {
+                if self.alignment == AlignmentState::Waiting {
                     let Ok(alignment) = self.origin.at_start(&m) else {
                         continue;
                     };
                     self.fusion.set_alignment(alignment)?;
-                    self.alignment_ready = true;
+                    self.alignment = AlignmentState::Ready;
                     log::info!("启动坐标系与静止 VIO 对齐，地图里程计就绪");
                 }
                 self.t_sim = self.t_sim.max(m.timestamp);
@@ -411,7 +416,7 @@ impl App {
     }
 
     fn publish_corrected(&mut self) -> Result<()> {
-        if !self.alignment_ready || self.estimator_reset {
+        if self.alignment != AlignmentState::Ready {
             return Ok(());
         }
         let Some(odom) = &self.latest_odom else {
@@ -614,8 +619,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        App, CORRECTED_ODOM_TOPIC, LocalizationConfig, OdomMessage, Publisher, RelocGate,
-        Subscriber, create_node, gate_diag,
+        AlignmentState, App, CORRECTED_ODOM_TOPIC, LocalizationConfig, OdomMessage, Publisher,
+        RelocGate, Subscriber, create_node, gate_diag,
     };
     use nalgebra::Vector6;
 
@@ -648,7 +653,7 @@ mod tests {
                     .unwrap()
                 };
                 let base = shifted(0.);
-                app.alignment_ready = true;
+                app.alignment = AlignmentState::Ready;
                 app.revision_alignment = Some(base);
                 app.fusion.set_alignment(base).unwrap();
                 let mut sample = OdomMessage {
@@ -705,7 +710,7 @@ mod tests {
         };
         raw.publish(sample).unwrap();
         app.step().unwrap();
-        assert!(app.alignment_ready);
+        assert_eq!(app.alignment, AlignmentState::Ready);
         assert!(corrected.receive().unwrap().is_some());
         sample.timestamp = 3.0;
         sample.position_x = 2.0;
@@ -723,7 +728,7 @@ mod tests {
         sample.is_initialized = false;
         raw.publish(sample).unwrap();
         app.step().unwrap();
-        assert!(app.estimator_reset);
+        assert_eq!(app.alignment, AlignmentState::Reset);
         sample.timestamp = 5.0;
         sample.is_initialized = true;
         raw.publish(sample).unwrap();

@@ -266,18 +266,17 @@ fn drive(
     let stale = Duration::from_millis(config.stale_ms);
     let airframe_period = Duration::from_millis(config.airframe_ms);
     let mut deadline = Instant::now();
-    let mut last_control: Option<Instant> = None;
+    let mut control_state = ControlState::default();
     let mut last_airframe: Option<Instant> = None;
-    let mut thrust = [0.0f64; MOTORS];
     let mut stale_reported = false;
     let mut last_pump = Instant::now();
 
     while RUNNING.load(Ordering::Relaxed) {
         while let Some(sample) = control.receive()? {
-            thrust = sample.thrust;
-            last_control = Some(Instant::now());
+            control_state.observe(sample.thrust, Instant::now());
         }
-        let fresh = last_control.is_some_and(|at| at.elapsed() <= stale);
+        let output = control_state.output(Instant::now(), stale);
+        let fresh = output.is_some();
         if fresh {
             stale_reported = false;
         } else if !stale_reported {
@@ -289,7 +288,7 @@ fn drive(
         }
 
         for (index, channel) in channels.iter_mut().enumerate() {
-            let wanted = if fresh { thrust[index] } else { 0.0 };
+            let wanted = output.map_or(0., |thrust| thrust[index]);
             channel
                 .set_duty(mapping.duty_ns(wanted))
                 .map_err(|error| format!("电机 {index}: {error}"))?;
@@ -327,6 +326,22 @@ fn drive(
     }
     log::info!("收到终止信号，电调输出复位");
     Ok(())
+}
+
+/// 一次控制观测与其墙钟寿命共同拥有，过期输出由调用方归零。
+#[derive(Default)]
+struct ControlState(Option<([f64; MOTORS], Instant)>);
+
+impl ControlState {
+    fn observe(&mut self, thrust: [f64; MOTORS], received: Instant) {
+        self.0 = Some((thrust, received));
+    }
+
+    fn output(&self, now: Instant, lifetime: Duration) -> Option<[f64; MOTORS]> {
+        self.0
+            .filter(|(_, at)| now.duration_since(*at) <= lifetime)
+            .map(|(thrust, _)| thrust)
+    }
 }
 
 /// 一路 `sysfs` PWM 通道。
@@ -434,6 +449,23 @@ fn monotonic_seconds() -> Result<f64, Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_value_and_receipt_expire_together_and_resume() {
+        let now = Instant::now();
+        let lifetime = Duration::from_millis(100);
+        let mut state = ControlState::default();
+        assert!(state.output(now, lifetime).is_none());
+        state.observe([1.; MOTORS], now);
+        assert_eq!(state.output(now + lifetime, lifetime), Some([1.; MOTORS]));
+        assert!(
+            state
+                .output(now + lifetime + Duration::from_nanos(1), lifetime)
+                .is_none()
+        );
+        state.observe([2.; MOTORS], now + lifetime);
+        assert_eq!(state.output(now + lifetime, lifetime), Some([2.; MOTORS]));
+    }
 
     /// 仓库里的配置必须能被本进程解析并通过校验：板端启动才发现漂移太晚。
     #[test]

@@ -37,8 +37,13 @@ impl GravityEstimate {
 
 #[derive(Clone, Debug, Default)]
 pub struct StationaryGravitySampler {
-    start_ns: Option<i128>,
-    last_ns: Option<i128>,
+    window: Option<StationaryWindow>,
+}
+
+#[derive(Clone, Debug)]
+struct StationaryWindow {
+    start_ns: i128,
+    last_ns: i128,
     sample_count: usize,
     sum_specific_force: Vector3<f64>,
 }
@@ -64,34 +69,37 @@ impl StationaryGravitySampler {
             && sample.gyro.norm() < MAX_GYRO_NORM;
         if !stationary
             || self
-                .last_ns
-                .is_some_and(|previous| sample.timestamp_ns <= previous)
+                .window
+                .as_ref()
+                .is_some_and(|window| sample.timestamp_ns <= window.last_ns)
         {
             self.reset();
             return None;
         }
 
-        let start_ns = *self.start_ns.get_or_insert(sample.timestamp_ns);
-        self.last_ns = Some(sample.timestamp_ns);
-        self.sample_count += 1;
-        self.sum_specific_force += sample.accel;
+        let window = self.window.get_or_insert_with(|| StationaryWindow {
+            start_ns: sample.timestamp_ns,
+            last_ns: sample.timestamp_ns,
+            sample_count: 0,
+            sum_specific_force: Vector3::zeros(),
+        });
+        window.last_ns = sample.timestamp_ns;
+        window.sample_count += 1;
+        window.sum_specific_force += sample.accel;
 
-        if sample.timestamp_ns - start_ns < MIN_DURATION_NS || self.sample_count < 2 {
+        if sample.timestamp_ns - window.start_ns < MIN_DURATION_NS || window.sample_count < 2 {
             return None;
         }
         Some(GravityEstimate {
-            start_ns,
+            start_ns: window.start_ns,
             end_ns: sample.timestamp_ns,
-            sample_count: self.sample_count,
-            mean_specific_force: self.sum_specific_force / self.sample_count as f64,
+            sample_count: window.sample_count,
+            mean_specific_force: window.sum_specific_force / window.sample_count as f64,
         })
     }
 
     pub fn reset(&mut self) {
-        self.start_ns = None;
-        self.last_ns = None;
-        self.sample_count = 0;
-        self.sum_specific_force = Vector3::zeros();
+        self.window = None;
     }
 }
 
