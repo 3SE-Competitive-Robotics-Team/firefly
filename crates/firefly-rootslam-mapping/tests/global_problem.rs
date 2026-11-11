@@ -123,6 +123,60 @@ fn assert_numbers_equal_bits(a: &serde_json::Value, b: &serde_json::Value) {
         _ => assert_eq!(a, b),
     }
 }
+
+#[test]
+fn version_one_archives_preserve_their_original_preconditioner() {
+    use firefly_rootslam_mapping::{
+        global_optimization::Preconditioner, global_problem::ReplayResult,
+    };
+    let (map, calibration, options) = scene();
+    assert_eq!(options.preconditioner, Preconditioner::ClusterJacobi);
+    let problem = GlobalProblem::capture(&map, &calibration, &options).unwrap();
+    let result = optimize_global(&map, &calibration, &options).unwrap();
+    let result = ReplayResult::from_result(&result, options);
+    let mut problem_json = serde_json::to_value(&problem).unwrap();
+    let mut result_json = serde_json::to_value(&result).unwrap();
+    assert_eq!(
+        serde_json::from_value::<GlobalProblem>(problem_json.clone())
+            .unwrap()
+            .options
+            .preconditioner,
+        Preconditioner::ClusterJacobi
+    );
+    assert_eq!(
+        serde_json::from_value::<ReplayResult>(result_json.clone())
+            .unwrap()
+            .options
+            .preconditioner,
+        Preconditioner::ClusterJacobi
+    );
+    problem_json["options"]
+        .as_object_mut()
+        .unwrap()
+        .remove("preconditioner");
+    result_json["options"]
+        .as_object_mut()
+        .unwrap()
+        .remove("preconditioner");
+    assert_eq!(
+        serde_json::from_value::<GlobalProblem>(problem_json.clone())
+            .unwrap()
+            .restore()
+            .unwrap()
+            .2
+            .preconditioner,
+        Preconditioner::SchurJacobi
+    );
+    assert_eq!(
+        serde_json::from_value::<ReplayResult>(result_json)
+            .unwrap()
+            .options
+            .preconditioner,
+        Preconditioner::SchurJacobi
+    );
+    problem_json["options"]["preconditioner"] = serde_json::json!("typo");
+    assert!(serde_json::from_value::<GlobalProblem>(problem_json).is_err());
+}
 #[test]
 fn archive_preserves_f64_bits_and_refuses_overwrites() {
     let directory = Directory::new("bits");

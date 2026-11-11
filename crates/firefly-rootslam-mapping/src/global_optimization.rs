@@ -39,11 +39,21 @@ pub enum DampingCoordinates {
     /// `RootBA`'s default trust region on Jacobian-scaled coordinates.
     Scaled,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Preconditioner {
+    /// `RootBA`'s independent 6x6 pose blocks.
+    SchurJacobi,
+    /// Bounded contiguous pose clusters, reused during LM damping retries.
+    #[default]
+    ClusterJacobi,
+}
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OptimizationOptions {
     pub linear_solver: LinearSolver,
     pub damping_coordinates: DampingCoordinates,
+    pub preconditioner: Preconditioner,
     /// `RootBA`'s truncated-Newton quadratic-model stopping criterion.
     pub linear_solver_eta: f64,
     /// Additional physical-gradient accuracy guard; zero selects only `RootBA`'s model test.
@@ -71,6 +81,7 @@ impl Default for OptimizationOptions {
         Self {
             linear_solver: LinearSolver::Rootba,
             damping_coordinates: DampingCoordinates::Physical,
+            preconditioner: Preconditioner::ClusterJacobi,
             linear_solver_eta: 0.1,
             linear_solver_gradient_tolerance: 1e-5,
             linear_solver_max_iterations: 500,

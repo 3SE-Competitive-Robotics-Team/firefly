@@ -1,4 +1,4 @@
-//! `RootBA`'s staged QR / Schur-Jacobi PCG, adapted to fixed-calibration rigs.
+//! `RootBA`'s staged QR / PCG, adapted to fixed-calibration rigs and pose clusters.
 //! Reference: `rootba/solver/linearizor_qr.cpp` and `qr/impl/landmark_block_base.ipp`.
 //! Pose-graph factors enter the same square-root operator (`RootSLAM` eq. 11).
 // SPDX-License-Identifier: BSD-3-Clause
@@ -8,14 +8,65 @@
 // License: docs/licenses/crates/firefly-rootslam-mapping/LICENSE
 use super::{
     BTreeMap, BTreeSet, BasaltScalar, Calibration, DMatrix, DVector, DampingCoordinates, Error,
-    ErrorKind, KrylovPrecision, MapSnapshot, OptimizationOptions, OptimizationResult, Result,
-    SMatrix, SquareRootSystem, State, Vector2, Vector3, Vector4, append_graph_factors,
-    calibrated_rig, camera_factor_on_unit_ray, pose_graph, pose_order, save_problem,
-    state_from_snapshot, validate_scalar_inputs,
+    ErrorKind, KrylovPrecision, MapSnapshot, OptimizationOptions, OptimizationResult,
+    Preconditioner, Result, SMatrix, SquareRootSystem, State, Vector2, Vector3, Vector4,
+    append_graph_factors, calibrated_rig, camera_factor_on_unit_ray, pose_graph, pose_order,
+    save_problem, state_from_snapshot, validate_scalar_inputs,
 };
+use faer::prelude::Solve;
 use rayon::prelude::*;
 
 type Matrix6<S> = SMatrix<S, 6, 6>;
+const MAX_CLUSTER_POSES: usize = 512;
+const CLUSTER_STORAGE_BYTES: usize = 64 * 1024 * 1024;
+
+fn cluster_width(columns: usize) -> usize {
+    (CLUSTER_STORAGE_BYTES / std::mem::size_of::<f64>() / columns.max(1) / 6)
+        .clamp(1, MAX_CLUSTER_POSES)
+        * 6
+}
+
+fn apply_clusters<W: BasaltScalar>(
+    clusters: &[faer::linalg::solvers::Llt<f64>],
+    width: usize,
+    residual: &DVector<W>,
+    output: &mut DVector<W>,
+) {
+    for (i, factor) in clusters.iter().enumerate() {
+        let offset = i * width;
+        let rhs = faer::Mat::from_fn(factor.L().nrows(), 1, |j, _| residual[offset + j].as_f64());
+        let solved = factor.solve(rhs.as_ref());
+        for j in 0..solved.nrows() {
+            output[offset + j] = W::from_f64_lossy(solved[(j, 0)]);
+        }
+    }
+}
+
+fn add_short_normal_rows<S: BasaltScalar, W: BasaltScalar, const ROWS: usize>(
+    matrix: nalgebra::DMatrixView<'_, S>,
+    columns: &[usize],
+    input: &DVector<W>,
+    output: &mut DVector<W>,
+) {
+    let mut values = [W::zero(); ROWS];
+    for (j, &global) in columns.iter().enumerate() {
+        let column = matrix.column(j);
+        let coefficients: &[S; ROWS] = column.as_slice().try_into().expect("fixed row count");
+        let value = input[global];
+        for i in 0..ROWS {
+            values[i] += W::from_f64_lossy(coefficients[i].as_f64()) * value;
+        }
+    }
+    for (j, &global) in columns.iter().enumerate() {
+        let column = matrix.column(j);
+        let coefficients: &[S; ROWS] = column.as_slice().try_into().expect("fixed row count");
+        let mut sum = W::zero();
+        for i in 0..ROWS {
+            sum += W::from_f64_lossy(coefficients[i].as_f64()) * values[i];
+        }
+        output[global] += sum;
+    }
+}
 
 fn add_normal_rows<S: BasaltScalar, W: BasaltScalar>(
     matrix: nalgebra::DMatrixView<'_, S>,
@@ -24,6 +75,12 @@ fn add_normal_rows<S: BasaltScalar, W: BasaltScalar>(
     output: &mut DVector<W>,
     scratch: &mut Vec<W>,
 ) {
+    match matrix.nrows() {
+        1 => return add_short_normal_rows::<S, W, 1>(matrix, columns, input, output),
+        3 => return add_short_normal_rows::<S, W, 3>(matrix, columns, input, output),
+        5 => return add_short_normal_rows::<S, W, 5>(matrix, columns, input, output),
+        _ => {}
+    }
     scratch.resize(matrix.nrows(), W::zero());
     scratch.fill(W::zero());
     for (j, &global) in columns.iter().enumerate() {
@@ -165,20 +222,30 @@ impl<S: BasaltScalar> Block<S> {
         scratch.resize(observation_rows + 3, W::zero());
         scratch.fill(W::zero());
         for &(row, local, ref jacobian) in &self.pose_rows {
-            for column in 0..6 {
-                let value = input[self.columns[local + column]];
-                scratch[row] += W::from_f64_lossy(jacobian[(0, column)].as_f64()) * value;
-                scratch[row + 1] += W::from_f64_lossy(jacobian[(1, column)].as_f64()) * value;
+            let global = self.columns[local];
+            let values = &input.as_slice()[global..global + 6];
+            let mut sums = [W::zero(); 2];
+            for (coefficient, &value) in jacobian.as_slice().as_chunks::<2>().0.iter().zip(values) {
+                sums[0] += W::from_f64_lossy(coefficient[0].as_f64()) * value;
+                sums[1] += W::from_f64_lossy(coefficient[1].as_f64()) * value;
             }
+            scratch[row] = sums[0];
+            scratch[row + 1] = sums[1];
         }
         let reflect = |scratch: &mut [W], start: usize, vector: &DVector<S>, tau: S| {
             let slice = &mut scratch[start..start + vector.len()];
-            let dot = slice
-                .iter()
-                .zip(vector.iter())
-                .fold(W::zero(), |sum, (&a, &b)| {
-                    sum + a * W::from_f64_lossy(b.as_f64())
-                });
+            let (values, value_tail) = slice.as_chunks::<4>();
+            let (coefficients, coefficient_tail) = vector.as_slice().as_chunks::<4>();
+            let mut sums = [W::zero(); 4];
+            for (value, coefficient) in values.iter().zip(coefficients) {
+                for i in 0..4 {
+                    sums[i] += value[i] * W::from_f64_lossy(coefficient[i].as_f64());
+                }
+            }
+            let mut dot = (sums[0] + sums[1]) + (sums[2] + sums[3]);
+            for (&value, &coefficient) in value_tail.iter().zip(coefficient_tail) {
+                dot += value * W::from_f64_lossy(coefficient.as_f64());
+            }
             let factor = dot * W::from_f64_lossy(tau.as_f64());
             for (value, &coefficient) in slice.iter_mut().zip(vector.iter()) {
                 *value -= factor * W::from_f64_lossy(coefficient.as_f64());
@@ -206,10 +273,13 @@ impl<S: BasaltScalar> Block<S> {
             reflect(scratch, *start, vector, *tau);
         }
         for &(row, local, ref jacobian) in &self.pose_rows {
-            for column in 0..6 {
-                output[self.columns[local + column]] +=
-                    W::from_f64_lossy(jacobian[(0, column)].as_f64()) * scratch[row]
-                        + W::from_f64_lossy(jacobian[(1, column)].as_f64()) * scratch[row + 1];
+            let global = self.columns[local];
+            let values = &mut output.as_mut_slice()[global..global + 6];
+            let x = scratch[row];
+            let y = scratch[row + 1];
+            for (coefficient, value) in jacobian.as_slice().as_chunks::<2>().0.iter().zip(values) {
+                *value += W::from_f64_lossy(coefficient[0].as_f64()) * x
+                    + W::from_f64_lossy(coefficient[1].as_f64()) * y;
             }
         }
     }
@@ -272,6 +342,7 @@ struct System<S: BasaltScalar> {
     damping_scale: DVector<S>,
     lambda: S,
     cost: S,
+    preconditioner: Option<Vec<faer::linalg::solvers::Llt<f64>>>,
 }
 
 fn machine_epsilon<S: BasaltScalar>() -> S {
@@ -502,10 +573,36 @@ fn linearize<S: BasaltScalar>(
         scaling,
         lambda: S::zero(),
         cost,
+        preconditioner: None,
     })
 }
 
 impl<S: BasaltScalar> System<S> {
+    fn storage_bytes(&self) -> usize {
+        let blocks: usize = self
+            .blocks
+            .iter()
+            .map(|b| {
+                (b.matrix.len()
+                    + b.short_reduced.as_ref().map_or(0, DMatrix::len)
+                    + b.landmark_rows.len()
+                    + 12 * b.pose_rows.len()
+                    + b.reflectors.iter().map(|(_, v, _)| v.len()).sum::<usize>()
+                    + b.undamped_rhs.len()
+                    + 36 * b.undamped_diagonal.len())
+                    * std::mem::size_of::<S>()
+            })
+            .sum();
+        blocks
+            + self.preconditioner.as_ref().map_or(0, |clusters| {
+                clusters
+                    .iter()
+                    .map(|factor| {
+                        factor.L().nrows() * factor.L().ncols() * std::mem::size_of::<f64>()
+                    })
+                    .sum::<usize>()
+            })
+    }
     fn damp(&mut self, lambda: S) {
         let started = profile_start();
         self.lambda = lambda;
@@ -555,7 +652,7 @@ impl<S: BasaltScalar> System<S> {
         }
         output
     }
-    fn prepare<W: BasaltScalar>(&self) -> Option<(DVector<W>, Vec<Matrix6<W>>)> {
+    fn prepare<W: BasaltScalar>(&self) -> (DVector<W>, Vec<Matrix6<W>>) {
         let columns = self.scaling.len();
         let (rhs, diagonal) = self
             .blocks
@@ -602,25 +699,145 @@ impl<S: BasaltScalar> System<S> {
                     (a + b, x)
                 },
             );
-        let mut inverse = Vec::with_capacity(diagonal.len());
-        for (i, mut block) in diagonal.into_iter().enumerate() {
+        let mut diagonal = diagonal;
+        for (i, block) in diagonal.iter_mut().enumerate() {
             for j in 0..6 {
                 block[(j, j)] += W::from_f64_lossy(
                     (self.lambda * self.damping_scale[6 * i + j].powi(2)).as_f64(),
                 );
             }
-            inverse.push(block.cholesky()?.inverse());
         }
-        Some((rhs, inverse))
+        (rhs, diagonal)
+    }
+    fn cluster_preconditioner<W: BasaltScalar>(
+        &self,
+        diagonal: &[Matrix6<W>],
+        width: usize,
+    ) -> Option<Vec<faer::linalg::solvers::Llt<f64>>> {
+        // Off-diagonal pose blocks are -B_i^T B_j, where B is the first three
+        // rows after damped landmark QR: distinct poses share no original row.
+        // This approximate Hessian is used only as an SPD preconditioner.
+        // The operator, residual certificate and LM acceptance retain QR arithmetic.
+        let zero = || {
+            (0..self.scaling.len().div_ceil(width))
+                .map(|i| {
+                    DMatrix::<f64>::zeros(
+                        width.min(self.scaling.len() - width * i),
+                        width.min(self.scaling.len() - width * i),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut clusters = self
+            .blocks
+            .par_iter()
+            // Four partial reductions bound construction storage to four times
+            // the cluster budget, independently of the Rayon worker count.
+            .with_min_len(self.blocks.len().div_ceil(4))
+            .fold(zero, |mut clusters, block| {
+                let rows = if block.id.is_some() {
+                    3
+                } else {
+                    block.matrix.nrows()
+                };
+                let sign = if block.id.is_some() { -1.0 } else { 1.0 };
+                let top = block
+                    .matrix
+                    .view((0, block.start()), (rows, block.columns.len()))
+                    .map(BasaltScalar::as_f64);
+                for i in (0..block.columns.len()).step_by(6) {
+                    for j in (0..i).step_by(6).rev() {
+                        let a = block.columns[i];
+                        let b = block.columns[j];
+                        if a / width != b / width {
+                            break;
+                        }
+                        let cross = if block.id.is_some() {
+                            top.fixed_view::<3, 6>(0, i).transpose() * top.fixed_view::<3, 6>(0, j)
+                        } else {
+                            Matrix6::from_column_slice(
+                                (top.columns(i, 6).transpose() * top.columns(j, 6)).as_slice(),
+                            )
+                        };
+                        for r in 0..6 {
+                            for c in 0..6 {
+                                clusters[a / width][(a % width + r, b % width + c)] +=
+                                    sign * cross[(r, c)];
+                                clusters[a / width][(b % width + c, a % width + r)] +=
+                                    sign * cross[(r, c)];
+                            }
+                        }
+                    }
+                }
+                clusters
+            })
+            .reduce_with(|mut left, right| {
+                for (a, b) in left.iter_mut().zip(right) {
+                    *a += b;
+                }
+                left
+            })
+            .unwrap_or_else(zero);
+        for (i, block) in diagonal.iter().enumerate() {
+            clusters[6 * i / width]
+                .fixed_view_mut::<6, 6>(6 * i % width, 6 * i % width)
+                .copy_from(&block.map(BasaltScalar::as_f64));
+        }
+        clusters
+            .into_par_iter()
+            .map(|mut block| {
+                if !block.iter().all(|value| value.is_finite()) {
+                    return None;
+                }
+                // A roundoff-scale ridge protects the approximate cross terms.
+                // It belongs only to the preconditioner, not the solved system.
+                let ridge = block.diagonal().amax() * 8.0 * machine_epsilon::<S>().as_f64();
+                for i in 0..block.nrows() {
+                    block[(i, i)] += ridge;
+                }
+                faer::Mat::from_fn(block.nrows(), block.ncols(), |i, j| block[(i, j)])
+                    .llt(faer::Side::Lower)
+                    .ok()
+            })
+            .collect()
     }
     #[expect(
         clippy::many_single_char_names,
         reason = "Standard PCG recurrence notation"
     )]
-    fn solve<W: BasaltScalar>(&self, options: &OptimizationOptions) -> (DVector<S>, usize, bool) {
+    fn solve<W: BasaltScalar>(
+        &mut self,
+        options: &OptimizationOptions,
+    ) -> (DVector<S>, usize, bool) {
         let prepared = profile_start();
         let mut x = DVector::<W>::zeros(self.scaling.len());
-        let Some((b, inverse)) = self.prepare::<W>() else {
+        let (b, diagonal) = self.prepare::<W>();
+        if b.norm_squared() == W::zero() {
+            profile_end(prepared, "preconditioner");
+            return (x.map(|v| S::from_f64_lossy(v.as_f64())), 0, true);
+        }
+        let width = cluster_width(self.scaling.len());
+        if options.preconditioner == Preconditioner::ClusterJacobi
+            && self.preconditioner.is_none()
+            && self.scaling.len() >= 96
+        {
+            // Every accepted step constructs a new System. Rejected LM steps
+            // reuse this SPD factor while testing the current damped QR operator.
+            self.preconditioner = self.cluster_preconditioner(&diagonal, width);
+        }
+        let clusters = self
+            .preconditioner
+            .as_ref()
+            .filter(|_| options.preconditioner == Preconditioner::ClusterJacobi);
+        let inverse: Option<Vec<_>> = if clusters.is_some() {
+            Some(Vec::new())
+        } else {
+            diagonal
+                .into_iter()
+                .map(|block| block.cholesky().map(|factor| factor.inverse()))
+                .collect()
+        };
+        let Some(inverse) = inverse else {
             return (x.map(|v| S::from_f64_lossy(v.as_f64())), 0, false);
         };
         profile_end(prepared, "preconditioner");
@@ -637,9 +854,6 @@ impl<S: BasaltScalar> System<S> {
         let gradient_tolerance = options
             .linear_solver_gradient_tolerance
             .max(machine_epsilon::<W>().as_f64().sqrt());
-        if r.norm_squared() == W::zero() {
-            return (x.map(|v| S::from_f64_lossy(v.as_f64())), 0, true);
-        }
         let mut p = x.clone();
         // RootBA/Ceres keeps recurrence coefficients in double precision even
         // when matrix products and work vectors use float storage.
@@ -647,9 +861,13 @@ impl<S: BasaltScalar> System<S> {
         let mut model_previous = 0.0;
         for iteration in 1..=options.linear_solver_max_iterations {
             let mut z = DVector::<W>::zeros(x.len());
-            for (i, block) in inverse.iter().enumerate() {
-                z.fixed_rows_mut::<6>(6 * i)
-                    .copy_from(&(block * r.fixed_rows::<6>(6 * i)));
+            if let Some(clusters) = clusters {
+                apply_clusters(clusters, width, &r, &mut z);
+            } else {
+                for (i, block) in inverse.iter().enumerate() {
+                    z.fixed_rows_mut::<6>(6 * i)
+                        .copy_from(&(block * r.fixed_rows::<6>(6 * i)));
+                }
             }
             let rho = r.dot(&z).as_f64();
             if !rho.is_finite() || rho <= 0.0 {
@@ -899,22 +1117,6 @@ pub(super) fn optimize<S: BasaltScalar>(
             changed = false;
         }
         cost = system.cost;
-        peak = peak.max(
-            system
-                .blocks
-                .iter()
-                .map(|b| {
-                    (b.matrix.len()
-                        + b.short_reduced.as_ref().map_or(0, DMatrix::len)
-                        + b.landmark_rows.len()
-                        + 12 * b.pose_rows.len()
-                        + b.reflectors.iter().map(|(_, v, _)| v.len()).sum::<usize>()
-                        + b.undamped_rhs.len()
-                        + 36 * b.undamped_diagonal.len())
-                        * std::mem::size_of::<S>()
-                })
-                .sum(),
-        );
         system.damp(lambda);
         let started = profile_start();
         let (step, count, valid) = match options.krylov_precision {
@@ -922,6 +1124,7 @@ pub(super) fn optimize<S: BasaltScalar>(
             KrylovPrecision::Float64 => system.solve::<f64>(options),
         };
         profile_end(started, "linear_solve_including_preconditioner");
+        peak = peak.max(system.storage_bytes());
         linear_iterations += count;
         if valid {
             let (next, prediction) = system.apply(&state, &order, &step);
@@ -1132,6 +1335,7 @@ mod tests {
                 damping_scale: DVector::repeat(6, 1.0),
                 lambda: 0.0,
                 cost: 0.0,
+                preconditioner: None,
             };
             system.damp(0.1);
             let options = OptimizationOptions {
@@ -1219,6 +1423,7 @@ mod tests {
             damping_scale: DVector::repeat(12, S::one()),
             lambda: S::zero(),
             cost: S::zero(),
+            preconditioner: None,
         };
         // The independent oracle projects through the thin SVD of the augmented
         // landmark Jacobian, without using the production QR or compressed rows.
@@ -1235,7 +1440,11 @@ mod tests {
                 pose.transpose() * &projection * &pose + DMatrix::<f64>::identity(12, 12) * lambda;
             let expected_rhs = -pose.transpose() * projection * &residual;
             system.damp(S::from_f64_lossy(lambda));
-            let (rhs, inverse_blocks) = system.prepare::<S>().unwrap();
+            let (rhs, diagonal_blocks) = system.prepare::<S>();
+            let inverse_blocks: Vec<_> = diagonal_blocks
+                .into_iter()
+                .map(|b| b.cholesky().unwrap().inverse())
+                .collect();
             assert!((rhs.map(BasaltScalar::as_f64) - expected_rhs).amax() < tolerance);
             for axis in 0..12 {
                 let mut input = DVector::zeros(12);
@@ -1279,6 +1488,236 @@ mod tests {
         check_implicit_operator::<f32>(1e-4);
     }
 
+    fn check_cluster_preconditioner<S: BasaltScalar>(tolerance: f64) {
+        let original = fixture(24);
+        let block = Block {
+            id: Some(1),
+            observations: vec![],
+            columns: [0, 6, 18, 36]
+                .into_iter()
+                .flat_map(|start| start..start + 6)
+                .collect(),
+            matrix: original.matrix.map(S::from_f64_lossy),
+            landmark_scale: Vector3::repeat(S::one()),
+            damping_scale: Vector3::repeat(S::one()),
+            rotations: vec![],
+            pose_rows: original
+                .pose_rows
+                .into_iter()
+                .enumerate()
+                .map(|(i, (row, _, matrix))| (row, 6 * (i % 4), matrix.map(S::from_f64_lossy)))
+                .collect(),
+            reflectors: vec![],
+            landmark_rows: DMatrix::zeros(0, 4),
+            undamped_rhs: DVector::zeros(0),
+            undamped_diagonal: vec![],
+            short_reduced: None,
+        };
+        let mut system = System {
+            blocks: vec![block],
+            scaling: DVector::repeat(42, S::one()),
+            damping_scale: DVector::repeat(42, S::one()),
+            lambda: S::zero(),
+            cost: S::zero(),
+            preconditioner: None,
+        };
+        system.blocks[0].compress();
+        for columns in [[12, 6], [18, 12]] {
+            system.blocks.push(Block {
+                id: None,
+                observations: vec![],
+                columns: columns
+                    .into_iter()
+                    .flat_map(|start| start..start + 6)
+                    .collect(),
+                matrix: DMatrix::from_fn(6, 13, |r, c| {
+                    S::from_f64_lossy(((r * 13 + c * 7 + 1) as f64).cos())
+                }),
+                landmark_scale: Vector3::zeros(),
+                damping_scale: Vector3::zeros(),
+                rotations: vec![],
+                pose_rows: vec![],
+                reflectors: vec![],
+                landmark_rows: DMatrix::zeros(0, 4),
+                undamped_rhs: DVector::zeros(0),
+                undamped_diagonal: vec![],
+                short_reduced: None,
+            });
+        }
+        for lambda in [0.001, 0.1, 10.0, 0.01] {
+            system.damp(S::from_f64_lossy(lambda));
+            let (_, diagonal) = system.prepare::<S>();
+            let factors = system.cluster_preconditioner(&diagonal, 18).unwrap();
+            let normal = DMatrix::from_columns(
+                &(0..42)
+                    .map(|i| {
+                        let mut input = DVector::<S>::zeros(42);
+                        input[i] = S::one();
+                        system.normal_product(&input).map(BasaltScalar::as_f64)
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            for (i, factor) in factors.iter().enumerate() {
+                let rows = factor.L().nrows();
+                let lower =
+                    DMatrix::from_fn(
+                        rows,
+                        rows,
+                        |r, c| if r >= c { factor.L()[(r, c)] } else { 0.0 },
+                    );
+                let mut expected = normal.view((18 * i, 18 * i), (rows, rows)).into_owned();
+                let ridge = expected.diagonal().amax() * 8.0 * machine_epsilon::<S>().as_f64();
+                for j in 0..rows {
+                    expected[(j, j)] += ridge;
+                }
+                assert!(
+                    (&lower * lower.transpose() - &expected).amax()
+                        < tolerance * expected.amax().max(1.0)
+                );
+            }
+            // Reversed graph endpoints, cluster boundaries and a short final
+            // cluster are all represented in the independently applied operator.
+            assert_eq!(factors.len(), 3);
+            assert_eq!(factors[2].L().nrows(), 6);
+        }
+        let (_, mut diagonal) = system.prepare::<S>();
+        diagonal[0].fill(S::from_f64_lossy(f64::NAN));
+        assert!(system.cluster_preconditioner(&diagonal, 18).is_none());
+    }
+
+    #[test]
+    fn clustered_preconditioner_matches_qr_blocks_in_both_precisions() {
+        check_cluster_preconditioner::<f64>(1e-12);
+        check_cluster_preconditioner::<f32>(3e-6);
+        for columns in [6, 96, 2376, 6000, 60000] {
+            let width = cluster_width(columns);
+            assert!((6..=6 * MAX_CLUSTER_POSES).contains(&width) && width.is_multiple_of(6));
+            let bytes: usize = (0..columns)
+                .step_by(width)
+                .map(|i| (columns - i).min(width).pow(2) * 8)
+                .sum();
+            assert!(bytes <= CLUSTER_STORAGE_BYTES);
+        }
+    }
+
+    fn check_cached_cluster_solve<S: BasaltScalar>(tolerance: f64) {
+        let columns = 96;
+        let matrix = DMatrix::from_fn(columns + 8, columns + 1, |row, column| {
+            S::from_f64_lossy(
+                ((row * 13 + column * 7 + 1) as f64).sin() + if row == column { 2.0 } else { 0.0 },
+            )
+        });
+        let mut system = System {
+            blocks: vec![Block {
+                id: None,
+                observations: vec![],
+                columns: (0..columns).collect(),
+                matrix,
+                landmark_scale: Vector3::zeros(),
+                damping_scale: Vector3::zeros(),
+                rotations: vec![],
+                pose_rows: vec![],
+                reflectors: vec![],
+                landmark_rows: DMatrix::zeros(0, 4),
+                undamped_rhs: DVector::zeros(0),
+                undamped_diagonal: vec![],
+                short_reduced: None,
+            }],
+            scaling: DVector::repeat(columns, S::one()),
+            damping_scale: DVector::repeat(columns, S::one()),
+            lambda: S::zero(),
+            cost: S::zero(),
+            preconditioner: None,
+        };
+        let mut cached_pointer = None;
+        for lambda in [0.001, 10.0, 0.01] {
+            system.damp(S::from_f64_lossy(lambda));
+            let (step, _, valid) = system.solve::<S>(&OptimizationOptions {
+                linear_solver_gradient_tolerance: 1e-10,
+                ..Default::default()
+            });
+            assert!(valid);
+            let factor = &system.preconditioner.as_ref().unwrap()[0];
+            let pointer = factor.L().as_ptr();
+            assert_eq!(*cached_pointer.get_or_insert(pointer), pointer);
+            let rows = system.blocks[0].matrix.nrows();
+            let mut full = DMatrix::<f64>::zeros(rows + columns, columns);
+            full.rows_mut(0, rows).copy_from(
+                &system.blocks[0]
+                    .matrix
+                    .columns(0, columns)
+                    .map(BasaltScalar::as_f64),
+            );
+            for i in 0..columns {
+                full[(rows + i, i)] = lambda.sqrt();
+            }
+            let mut rhs = DVector::<f64>::zeros(rows + columns);
+            rhs.rows_mut(0, rows).copy_from(
+                &(-system.blocks[0]
+                    .matrix
+                    .column(columns)
+                    .map(BasaltScalar::as_f64)),
+            );
+            let gradient = full.transpose() * (&full * step.map(BasaltScalar::as_f64) - &rhs);
+            let initial = (full.transpose() * &rhs).norm();
+            assert!(
+                gradient.norm() / initial
+                    < 1.05 * 1e-10_f64.max(machine_epsilon::<S>().as_f64().sqrt())
+            );
+            let expected = full.svd(true, true).solve(&rhs, 1e-12).unwrap();
+            let error = (step.map(BasaltScalar::as_f64) - &expected).norm() / expected.norm();
+            assert!(
+                error < tolerance,
+                "precision={} lambda={lambda} relative step error={error}, tolerance={tolerance}",
+                std::mem::size_of::<S>()
+            );
+        }
+        let (step, _, valid) = system.solve::<S>(&OptimizationOptions {
+            preconditioner: Preconditioner::SchurJacobi,
+            ..Default::default()
+        });
+        assert!(valid && step.iter().all(nalgebra::ComplexField::is_finite));
+    }
+
+    #[test]
+    fn cached_cluster_factor_survives_damping_retries_with_svd_accuracy() {
+        check_cached_cluster_solve::<f64>(2e-5);
+        check_cached_cluster_solve::<f32>(2e-3);
+    }
+
+    fn check_row_kernels<S: BasaltScalar, W: BasaltScalar>(tolerance: f64) {
+        for rows in [0, 1, 2, 3, 4, 5, 6, 9, 16] {
+            let matrix = DMatrix::from_fn(rows, 12, |r, c| {
+                S::from_f64_lossy(((r * 13 + c * 7 + 1) as f64).sin())
+            });
+            let columns: Vec<_> = (6..12).chain(18..24).collect();
+            let input = DVector::from_fn(30, |i, _| W::from_f64_lossy((i as f64).cos()));
+            let mut output = DVector::repeat(30, W::from_f64_lossy(2.0));
+            add_normal_rows(
+                matrix.as_view(),
+                &columns,
+                &input,
+                &mut output,
+                &mut Vec::new(),
+            );
+            let local = DVector::from_iterator(12, columns.iter().map(|&i| input[i].as_f64()));
+            let matrix = matrix.map(BasaltScalar::as_f64);
+            let normal = matrix.transpose() * (&matrix * local);
+            let mut expected = DVector::repeat(30, 2.0);
+            for (i, &global) in columns.iter().enumerate() {
+                expected[global] += normal[i];
+            }
+            assert!((output.map(BasaltScalar::as_f64) - expected).amax() < tolerance);
+        }
+    }
+
+    #[test]
+    fn fixed_and_dynamic_row_kernels_preserve_scattered_accumulation() {
+        check_row_kernels::<f64, f64>(1e-12);
+        check_row_kernels::<f32, f32>(1e-5);
+        check_row_kernels::<f32, f64>(1e-12);
+    }
+
     fn check_upstream_cg<S: BasaltScalar>(reference: &serde_json::Value, tolerance: f64) {
         let matrix = DMatrix::from_fn(18, 13, |i, j| {
             S::from_f64_lossy(if j == 12 {
@@ -1302,14 +1741,16 @@ mod tests {
             undamped_diagonal: vec![],
             short_reduced: None,
         };
-        let system = System {
+        let mut system = System {
             blocks: vec![block],
             scaling: DVector::repeat(12, S::one()),
             damping_scale: DVector::repeat(12, S::one()),
             lambda: S::from_f64_lossy(0.01),
             cost: S::zero(),
+            preconditioner: None,
         };
         let (step, iterations, valid) = system.solve::<S>(&OptimizationOptions {
+            preconditioner: Preconditioner::SchurJacobi,
             linear_solver_gradient_tolerance: 0.0,
             ..Default::default()
         });

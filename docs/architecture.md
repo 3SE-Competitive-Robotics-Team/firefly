@@ -288,7 +288,7 @@ planner 使用局部 Odometry，独占稠密深度占据；稀疏映射服务维
 取消请求在工作边界回收资源。已经进入同步 BA 的取消等待该次调用返回。
 局部轨迹、映射完成、全局优化与文件导出分别保留结果状态。
 
-全局 BA 使用固定相机外参、位姿图项、列缩放、路标 QR、Schur-Jacobi PCG 和 LM。
+全局 BA 使用固定相机外参、位姿图项、列缩放、路标 QR、簇预条件 PCG 和 LM。
 每次接受步更新状态并重新线性化，拒绝步复用 QR 并调整阻尼。
 数值契约与测评边界见 [mapping README](../crates/firefly-rootslam-mapping/README.md)。
 
