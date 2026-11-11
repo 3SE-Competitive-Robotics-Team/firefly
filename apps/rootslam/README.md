@@ -1,252 +1,268 @@
 # RootSLAM
 
-Dataset execution connects the translated original Basalt optical flow and estimator
-through bounded queues, with independent image and IMU producers and state collection.
-The source baseline and numerical fixtures are described in
-[firefly-basalt](../../crates/firefly-basalt/README.md).
+RootSLAM provides calibrated stereo/IMU odometry through one application:
+`firefly-rootslam --config <path>`. IPC sources serve the flight stack; recorded
+sources run public datasets through the same Basalt estimator. Persistent mapping,
+loop closure and final global BA are available for dataset evaluation.
 
-The single application entry is `firefly-rootslam --config <path>`.
-The default [configuration](../../configs/firefly-rootslam.toml) consumes IPC from
-render/cameras and IMU. The [dataset example](../../configs/firefly-rootslam-dataset.toml)
-selects a recorded source:
+## Public-dataset evaluation
+
+Run commands from the workspace root. Prepare the dataset and its matching
+calibration, build the release applications, and give each sequence/precision/run
+its own directory under `logs/`.
 
 ```bash
-./target/release/mimir --save logs/rootslam.rrd
-RUST_LOG=info ./target/release/firefly-rootslam --config configs/firefly-rootslam-dataset.toml
+uv sync --locked --all-packages --extra test
+cargo build --locked --release -p firefly-rootslam -p mimir
+mkdir -p logs/tumvi_room2/float64
 ```
 
-Start the recorder first in another terminal and stop it last. Paths are relative
-to the process working directory; run the example from the workspace root.
+### Inputs and calibration
 
-- `[input]`: `type = "ipc"` (default), or `type = "dataset"` with `format`,
-  `path` and `calibration`. Formats are `euroc`, `uzh`, `kitti` and `lamaria`.
-- Top-level `precision = "float64"` (default) or `"float32"`: shared arithmetic
-  for local VO/VIO BA, IMU preintegration, marginalization and final global BA.
-- `[vio]`: common estimator options, including optional
-  `vio_config` (Basalt archive), `optical_flow_detection_grid_size`, `map`
-  and `loops`. Both sources use the same bias/yaw prior construction.
-  Mapping and loop closure default off; the dataset examples explicitly enable both.
-- `[dataset]`: optional outputs and offline execution controls described below.
-  Supplying this section with IPC is an error. `vio.stats_directory` and
-  `external_localization` are IPC-only.
+| Dataset | Input layout | Calibration | Example |
+|---|---|---|---|
+| [LaMAria](https://lamaria.inf.ethz.ch/slam_datasets) | ASL sequence containing `aria/` | Matching `pinhole_calibrations/<sequence>.json` | [LaMAria config](../../configs/firefly-rootslam-dataset.toml) |
+| [UZH FPV](https://fpv.ifi.uzh.ch/datasets/) | Snapdragon archive with `left_images.txt`, `right_images.txt`, `imu.txt` | Matching Kalibr directory or Basalt JSON | [UZH config](../../configs/firefly-rootslam-uzh.toml) |
+| [EuRoC](https://projects.asl.ethz.ch/datasets/doku.php?id=kmavvisualinertialdatasets) | Sequence containing `mav0/` | Basalt `euroc_ds_calib.json` | [EuRoC config](../../configs/firefly-rootslam-euroc.toml) |
+| [TUM-VI](https://cvg.cit.tum.de/data/datasets/visual-inertial-dataset) | Calibrated 512×512, 16-bit EuRoC export | Basalt `tumvi_512_eucm_calib.json` | [TUM-VI config](../../configs/firefly-rootslam-tumvi.toml) |
+| KITTI | Native sequence accepted by the Basalt KITTI reader | Matching Basalt cereal JSON | Select `input.format = "kitti"` |
 
-The input boundary uses integer nanosecond timestamps, native per-camera
-dimensions, sensor-to-IMU extrinsics and calibrated noise densities. Images must
-match calibration; stereo indices and gyro/accelerometer timestamps must pair.
-IPC retains its independent event-driven IMU thread and stationary flight
-initialization. Dataset producers use bounded queues and Basalt initialization;
-they drain on completion or interruption. Interrupted runs return failure.
-Dataset camera times are shifted into the IMU clock using calibration
-`cam_time_offset_ns` (`t_imu = t_camera + offset`). File lookup retains the original
-camera times; raw IMU and ground truth keep their supplied timestamps. Ground-truth
-time alignment must be verified against the dataset's evaluation protocol. The offset is applied
-once before optical flow and also to the requested-frame coverage denominator.
-Dataset output is the posterior trajectory at these calibrated exposure times, without the live
-high-rate IMU prediction used by flight control.
+The Basalt calibration reference is commit
+`0f3b2b52c807f70ff4e2973ce253c73329eea7bc`. Example paths point to a sibling
+Basalt checkout; set them to the actual calibration location on your machine.
 
-### LaMAria
+Use the official [LaMAria downloader](https://github.com/cvg/lamaria/blob/main/tools/download_lamaria.py)
+with `--sequences R_01_easy --type asl`. ASL images use the exported pinhole
+calibration. Its XYZW body transforms are converted to IMU-from-camera; noise
+densities, IMU rate and gravity come from the same file.
 
-Use the official [ASL download tool](https://github.com/cvg/lamaria/blob/main/tools/download_lamaria.py)
-with `--sequences R_01_easy --type asl`. Point `input.path` at the extracted
-directory containing `aria/`, and `input.calibration` at the corresponding
-official `pinhole_calibrations/*.json`. The ASL images are already undistorted;
-the raw VRS fisheye calibration is incompatible. Camera sizes may differ.
-`T_b_s` uses XYZW quaternions and is converted to IMU-from-camera using the
-IMU's body transform. Noise, sampling rate and gravity come from that file.
-EuRoC/KITTI use the original Basalt cereal calibration (`value0`).
+UZH imports `camchain-imucam-*.yaml` and `imu.yaml`, converts Kalibr
+pinhole/equidistant to Kannala–Brandt4, and inverts `T_cam_imu`.
+The stereo frame uses the left exposure time; the accepted difference between
+camera offsets is at most 1 ms. Ground truth is used by evaluation.
 
-Set `dataset.trajectory_format = "lamaria"` to export integer nanoseconds and
-`tx ty tz qx qy qz qw` for the official evaluator. Controlled sequences use
-MPS pseudo-ground-truth and the official evaluator fits scale. Report its score
-alongside an SE(3)-only score, fitted scale and input/output coverage; a single
-controlled VIO run does not establish leaderboard or full-SLAM performance.
-LaMAria pGT is evaluated externally; it is never supplied as an estimator prior.
+TUM-VI's calibrated exports already contain aligned clocks, calibrated IMU
+measurements and IMU-frame ground truth. The reader consumes these exported values
+directly. EuRoC uses the archive ground truth; the original V1_01 reference has a
+[documented orientation issue](https://docs.openvins.com/gs-datasets), which belongs
+in comparisons involving relative pose error.
 
-### UZH FPV
+Keep downloaded inputs, download manifests, hashes and run artifacts locally.
+Verify the publisher's checksum when available and record the source revision and
+checksum for mirrors. Plan space for the archive, extraction and outputs; sequential
+sequence pairs allow raw inputs to be released after both precision results are verified.
 
-The [UZH example](../../configs/firefly-rootslam-uzh.toml) consumes the official
-[Snapdragon text/image archives](https://fpv.ifi.uzh.ch/datasets/) directly.
-Extract the sequence into `input.path` (containing `left_images.txt`,
-`right_images.txt`, `imu.txt`, and optional `groundtruth.txt`). Point
-`input.calibration` to the matching extracted calibration directory, containing
-one `camchain-imucam-*.yaml` and `imu.yaml`. YAML is a native sensor import format;
-application configuration remains TOML. An existing Basalt calibration JSON file
-is also accepted instead of a directory.
+### Configure a run
 
-The importer converts Kalibr pinhole/equidistant parameters to Kannala–Brandt4,
-inverts `T_cam_imu`, and preserves the published continuous noise densities.
-Kalibr's [time convention](https://github.com/ethz-asl/kalibr/wiki/yaml-formats)
-sets the camera-to-IMU clock offset. Stereo uses the left exposure time; the
-right calibration offset must differ by at most 1 ms (93 microseconds in the
-indoor-forward bundle). Per-camera exposure-time optimization is not implemented.
-Only Snapdragon stereo is supported by this adapter; DAVIS event data is not.
+Save the following as `logs/tumvi_room2/float64/config.toml`, adjusting the input
+and calibration paths to your installation:
 
-TUM trajectory timestamps are seconds in the IMU clock, with IMU poses and XYZW
-quaternions. Ground truth is scoring-only. Native `metrics_path` reports our
-SE(3) ATE/coverage metrics, not the UZH leaderboard score. For the latter use
-the official [RPG evaluator](https://github.com/uzh-rpg/rpg_trajectory_evaluation)
-with relative errors over 40/60/80/100/120 m segments and no scale correction;
-report association coverage and each segment length separately. Public-GT
-sequences provide local benchmarks, not a held-out leaderboard submission.
+```toml
+precision = "float64"
 
-### Paper benchmark catalog
+[input]
+type = "dataset"
+format = "euroc"
+path = "logs/datasets/tumvi/dataset-room2_512_16"
+calibration = "../../basalt/data/tumvi_512_eucm_calib.json"
 
-[benchmarks.json](benchmarks.json) catalogs the 103 evaluation sequences in
-[RootSLAM, Section IV](https://arxiv.org/html/2610.15157v1): 64 MSD, 11 EuRoC
-and 28 TUM-VI sequences. It records paper groups, camera counts, official sources
-and the scoring protocol. MSD downloads are pinned to a dataset revision with
-archive sizes and SHA-256 hashes; multi-volume archives require every listed part.
-The catalog is an inventory, not a download or execution record.
+[vio]
+optical_flow_detection_grid_size = 20
+map = true
+loops = true
 
-Use the existing dataset entry with matching public calibration. The examples are
-[EuRoC](../../configs/firefly-rootslam-euroc.toml) and
-[TUM-VI](../../configs/firefly-rootslam-tumvi.toml), referencing the public
-calibrations in Basalt revision `0f3b2b52c807f70ff4e2973ce253c73329eea7bc`.
-Keep each run's outputs in a separate directory and record calibration hashes.
-TUM-VI's
-512×512, 16-bit EuRoC exports already contain calibrated IMU measurements,
-aligned clocks and IMU-frame ground truth; do not reapply raw-data corrections.
-The current EuRoC reader handles two cameras. MSD's 15 MG sequences need a
-four-camera adapter before they can contribute to the paper benchmark.
+[dataset]
+trajectory_format = "tum"
+trajectory = "logs/tumvi_room2/float64/trajectory.txt"
+local_trajectory = "logs/tumvi_room2/float64/local_trajectory.txt"
+metrics_path = "logs/tumvi_room2/float64/metrics.json"
+global_result_path = "logs/tumvi_room2/float64/global_result.json"
+global_optimization = true
 
-Evaluate complete sequences with rigid SE(3) alignment and six-original-frame
-RTE, retaining input coverage and both local VIO and final smoothed trajectories.
-Paper table values are group means in centimetres; native metrics are metres.
-The paper's aggregate excludes the eight TUM-VI outdoors sequences. Report
-partial batches separately, and do not compare one sequence to a group mean as
-evidence of reproduction. Run artifacts and completion status belong in `logs/`.
+[dataset.optimization]
+problem_archive = "logs/tumvi_room2/float64/global_problem.json"
+```
 
-### Dataset outputs and mapping
+Omitting `max_frames` processes the full input. Each output file and optional
+statistics/archive directory has its own fresh path, separate from input data.
+The startup checks resolve path aliases and validate output ownership; writers
+create new files. Existing runs remain available for comparison.
 
-All options in this section belong to `[dataset]`. Nested tables are
-`[dataset.optimization]`, `[dataset.loop_options]` and `[dataset.map_policy]`.
-Top-level `precision` selects both local and global BA arithmetic. Global BA's
-matrices and Krylov vectors always use that same precision. Set it before any
-TOML table, for example `precision = "float32"` before `[input]`.
-`vio.use_double`, `optimization.precision` and `optimization.krylov_precision`
-are rejected by the application; there are no per-stage precision overrides.
-As in RootBA, scalar recurrence coefficients and objective sums retain float64.
-The selected combination is recorded in results and frozen problems.
-This setting covers BA arithmetic, not every numeric field in the process:
-optical-flow patches remain float32; map storage, loop geometry, pose-graph
-optimization and public state interfaces remain float64. The separate frozen-problem
-diagnostic tool retains mixed-precision controls for numerical comparisons.
+Start Mimir in one terminal:
 
-The default `linear_solver = "rootba"` uses staged landmark QR, Jacobian column
-scaling, Schur-Jacobi block-preconditioned CG and RootBA's quadratic-model stopping
-criterion. Damping retries reuse the linearization. `linear_solver_eta` and
-`linear_solver_max_iterations` control PCG. The rig keeps its physical-coordinate
-trust region (`damping_coordinates = "physical"`) and checks
-`linear_solver_gradient_tolerance` before allowing the model test to stop PCG early.
-This retains the previous physical-gradient accuracy criterion for early termination.
-At the linear iteration cap, finite truncated steps still go through LM acceptance,
-as in RootBA; a completed linear solve does not certify that criterion.
-`damping_coordinates = "scaled"` and
-`linear_solver_gradient_tolerance = 0` select RootBA's scaled damping and model-only
-stopping policy for explicit numerical comparisons. These policies can converge
-to different minima even at equal damping values. `linear_solver = "lsqr_reference"`
-selects the slow independent reference with its original `lsqr_*` settings.
+```bash
+./target/release/mimir --save logs/tumvi_room2/float64/nominal.rrd
+```
 
-`loop_options.pose_graph_max_iterations` limits online loop PGO;
-`optimization.max_iterations` limits final global BA. `map_policy` supplies
-the complete map policy, including the shared pose-graph residual scale.
-The paper does not publish that scale. Final global optimization requires
-`vio.map = true`; enabling only local VIO does not run global BA.
+Run the estimator in another terminal:
 
-The shipped LaMAria and UZH configurations run persistent mapping, loop detection
-and PGO during input, drain the loop worker, and then run final global BA.
-`trajectory` contains the final map-corrected trajectory; `local_trajectory`
-retains the causal VIO posterior at the same timestamps and in the same format.
-Use different output paths. Compare both against the same reference and report
-verified loops, applied PGO updates and global convergence from the recording
-and `global_result_path`. A successful process exit alone does not establish
-solver convergence or improved accuracy. The application defaults to float64
-BA; the paper's single-precision performance needs separate validation.
-The IPC flight configuration continues to use local VIO and planner-owned depth.
+```bash
+RUST_LOG=info ./target/release/firefly-rootslam --config logs/tumvi_room2/float64/config.toml
+```
 
-`metrics_path` writes evaluation data, including SE(3)-aligned ATE, RTE separated
-by six original camera frames, and success over requested input frames. Missing
-estimates remain in the denominator. When `max_frames` limits an experimental
-run, the evaluation input is truncated to the same prefix. GT timestamps and
-poses use the dataset reader's convention directly. `max_ground_truth_gap_ns`
-defaults to 110000000 ns for GT interpolation, following the Basalt association
-limit; this limit is not specified by the RootSLAM paper.
+After the estimator exits, stop Mimir with Ctrl-C so it drains and closes the
+recording. Check the exit status, RRD integrity, trajectory coverage and optimization
+result together:
 
-The dataset runner also accepts `marg_data` (a new cache directory containing
-original binary marginalization records and the entire dataset's `gt.cereal`),
-`debug_directory` (original estimator statistics and `stats_vio.json` runtime/ATE
-samples), and `result_path` (original
-`rms_ate`, `num_frames`, `exec_time_ns` JSON). The original result uses local
-Basalt states and its fixed SVD association rules; `num_frames` counts the full
-dataset even when `max_frames` truncates processing. Its timer excludes input
-loading, final global optimization, and result writing. `trajectory_format`
-selects `"tum"` (default), `"euroc"`, `"kitti"`, or `"lamaria"`. Optional `groundtruth` writes
-the full GT translation stream aligned to local states in TUM format with identity
-orientations, following the original export. Ground-truth exports and original
-results require timestamp associations; requests without them return an error.
+```bash
+uv run rerun rrd verify logs/tumvi_room2/float64/nominal.rrd
+uv run rerun logs/tumvi_room2/float64/nominal.rrd configs/firefly.rbl
+```
 
-The additional `firefly-basalt-tools --config <path.toml>` binary connects the
-original headless calibration and evaluation workflows. Select `task` as
-`"calibrate"`, `"calibrate-imu"`, `"kitti-eval"`, or `"time-align"`.
-Calibration inputs are `dataset_path`, `dataset_type`, `aprilgrid`, and
-`result_path`; camera calibration also requires `camera_types`. IMU calibration
-loads `calibration.json` from `result_path` and runs the original three-stage
-optimization. KITTI evaluation takes `ground_truth`, `estimate`, and `output`;
-time alignment takes `dataset_path`, `dataset_type`, and `output`, with optional
-paired `calibration` and `mocap_calibration` and `output_ground_truth`.
-The `"vio-sim"` task takes `calibration`, `output` (TUM trajectory), and optional
-`vio_config` and `archive` (original simulation Cereal JSON). It generates and
-feeds the original noisy simulation into the estimator; `use_imu` and
-`use_double` default to the original simulator's enabled settings.
-Optional `marg_data` creates a new marginalization cache, including
-`gt_spline.cereal`. The `"mapper-sim"` and `"mapper-sim-naive"` tasks consume
-`calibration` and `cache`; optional `output` requests the original aligned RMSE
-result. Existing cache directories are refused rather than deleted.
-The `"mapper"` task consumes an original dataset marginalization `cache`
-(including `gt.cereal`) and `calibration`, with optional `vio_config`. It runs
-the original detect/match/tracks/optimize/filter/optimize sequence. Optional
-`trajectory` writes TUM format (`tum = false` selects EuRoC CSV), and
-`result_path` writes the original JSON fields `rms_ate`, `num_frames` (retained
-mapper poses), and `exec_time_ns` (the mapping stages, excluding loading and
-alignment). The `"opt-flow"` task takes `calibration`,
-`dataset_path`, `dataset_type`, and optional `vio_config`; it runs the original
-optical-flow worker and reports frame counts, track counts, and mean track length
-through the existing diagnostics channel. Producer errors and panics terminate
-the input queue and join the worker before returning an error.
-Pangolin GUI and live device capture are not provided by these headless entries.
-Run with `RUST_LOG=info` and the workspace `mimir` recorder to capture
-iteration diagnostics in RRD.
+The dataset pipeline feeds image and IMU producers, collects posterior states,
+drains the mapping worker, runs final BA when enabled, then exports results.
+The local trajectory is available before final BA, supporting diagnosis of a
+global-stage failure. Cancellation requests join owned workers; final optimization
+already in progress completes at its existing synchronous boundary.
 
-The `"global-ba"` task replays a frozen global problem captured with
-`[dataset.optimization] problem_archive`. Supply `problem`, a new `output` JSON path,
-`precision` (`"float32"` or `"float64"`), and `krylov_precision` (`"native"` or
-`"float64"`). It restores identical poses, landmarks, observations, calibration,
-and solver settings before applying the requested precision. Optional
-`max_iterations` changes the outer iteration budget; `linear_system_archive` (LSQR reference only)
-captures the first failed linear solve for independent numerical analysis.
-Replay preserves the archived linear tolerance and linear iteration budget.
-The output contains optimized geometry and convergence metrics; a completed
-replay does not imply convergence. Existing result files are not overwritten.
-The dataset application's optional `global_result_path` exports this same result
-format from its actual final global solve, without repeating optimization. Pair
-it with `[optimization] problem_archive` to retain input and optimized geometry
-from one run. Both archive destinations must be new files.
+### Score and reproduce
 
-Export that matching problem, result and optional final trajectory to Rerun with
-`uv run python apps/rootslam/export_rrd.py --problem logs/rootslam_global_problem.json --replay logs/rootslam_global_result.json --trajectory logs/rootslam_trajectory.txt --output logs/rootslam_map.rrd`.
-This offline recording contains optimized landmarks, keyframes, graph edges and
-convergence metadata; live `mimir` captures runtime diagnostics separately.
+| Artifact | Meaning |
+|---|---|
+| `local_trajectory` | Causal VIO posterior at calibrated camera times |
+| `trajectory` | Final map-corrected trajectory, or local trajectory in VIO mode |
+| `metrics_path` | Final SE(3) ATE RMSE in metres, six-input-frame RTE, associations and frame coverage |
+| `global_result_path` | Optimized geometry, arithmetic settings, costs, iteration counts and convergence |
+| `problem_archive` | Frozen calibration, poses, points, observations and solver settings for replay |
+| RRD | Runtime stages, errors, mapping events and recorder completion |
 
-For the simulated closed loop, `firefly-rootslam` subscribes to Render's
-`Firefly/CameraLeft` and `CameraRight` plus Sim's `Firefly/Imu`. It pairs stereo
-frames within the configured timestamp tolerance and waits for IMU coverage before passing
-them to Basalt. Its rig calibration comes from the shared Firefly rig geometry.
-It publishes `Firefly/Odometry`, `Firefly/CorrectedOdometry`,
-`Firefly/Navigation`, and posterior `Firefly/VioAttitude` for FC using
-[`configs/firefly-rootslam.toml`](../../configs/firefly-rootslam.toml). Start the default
-estimator with `cargo run --release -p firefly-rootslam`.
-`--no-loop-closures` disables loop detection and `--no-mapping` disables the persistent
-sparse map. Dense depth fusion belongs to planner's EGO map.
-`--external-localization` delegates corrected odometry and navigation publishing to
-localization while preserving local odometry and attitude output. The default online
-navigation uses the VIO frame; sparse-map corrections are not fed back to that output.
+Native trajectory metrics use rigid alignment and the configured GT interpolation
+gap, defaulting to 110 ms. Coverage counts estimates against requested input camera
+timestamps. RTE separates poses by six original input frames. Report export status,
+coverage and numerical convergence as separate fields.
+
+For LaMAria, export `trajectory_format = "lamaria"` and evaluate with the
+[official evaluation tools](https://github.com/cvg/lamaria). Its challenge scores,
+recall and scale-aligned controlled-data evaluation have their own protocols;
+SE(3) ATE against pGT is a useful separate diagnostic.
+For UZH, the [RPG evaluator](https://github.com/uzh-rpg/rpg_trajectory_evaluation)
+provides the competition's 40/60/80/100/120 m relative errors. Record associations
+and results by segment length alongside native ATE. Leaderboard comparisons use
+the same sequences, sensors and metric.
+
+For each run, retain the resolved configuration, commit and dirty-tree status,
+release-binary hash, calibration hash, input version/checksums, tool versions,
+hardware and runtime conditions. Standard commands include `git rev-parse HEAD`,
+`git status --porcelain` and `shasum -a 256 <file>`. Keep these fingerprints and
+scoring summaries with the local run artifacts. RRD contains runtime diagnostics.
+
+For an FP32 pair, use a fresh directory, set top-level `precision = "float32"`,
+and update every output path. This selects local BA, IMU preintegration,
+marginalization and global BA arithmetic together. Map storage, loop geometry,
+PGO and public state interfaces use FP64; optical flow uses FP32. Full-system
+precision runs compare independently generated maps.
+
+To isolate global solver arithmetic, replay one frozen problem with
+`firefly-basalt-tools --config <replay.toml>`:
+
+```toml
+task = "global-ba"
+problem = "logs/tumvi_room2/float64/global_problem.json"
+output = "logs/tumvi_room2/float64/replay_result.json"
+precision = "float64"
+krylov_precision = "native"
+```
+
+The replay restores the archived solver settings. Its optional `max_iterations`
+sets the diagnostic outer budget. Use a fresh output for every experiment and
+compare costs, geometry, convergence and timing. Runtime stage timing and total
+application duration describe separate workloads.
+
+### Reference measurements
+
+The 2026-11-10–11 M5 measurements use commit `ecf5cbd`, full sequences, grid size
+20, mapping/loops/global BA enabled, and one run per precision. Values below are
+final SE(3) ATE RMSE in centimetres, FP64 / FP32.
+
+| Dataset | Measured sequences | Final ATE and completion |
+|---|---|---|
+| LaMAria | R_01_easy | Initial global linearization error in both runs; local ATE 74.82 / 83.52 |
+| UZH FPV, official calibration | indoor_forward_3; indoor_forward_6 | 36.28 / 31.65; 135.35 / 136.08 |
+| UZH FPV, per-sequence candidate calibration | Same two sequences | 30.13 / 25.17; 21.65 / 20.84; in-sample calibration diagnostics |
+| TUM-VI | room1–6 | room2–6: 0.84–1.40 / 0.82–1.30; room1 initial global linearization error |
+| EuRoC | V1_01, V1_02, V1_03 | 4.19 / 4.39; 4.80 / 4.35; 6.01 / 6.16 |
+
+Across 28 formal runs, local frame coverage is complete: 9 global solves converged,
+15 exported a complete trajectory at the iteration limit, and 4 stopped at initial
+linearization. Both EuRoC medium/difficult runs reached the iteration limit.
+[Issue #149](https://github.com/3SE-Competitive-Robotics-Team/firefly/issues/149)
+contains per-condition status, performance evidence and the precision work items.
+
+The [RootSLAM paper](https://arxiv.org/html/2610.15157v1) reports EuRoC V1 mean ATE
+3.8 cm and TUM room mean 0.9 cm. Our V1 means are 5.00 / 4.97 cm; the room group
+currently has five final trajectories per precision. The measured V1 global BA
+means are 40.62 / 27.82 s; the paper reports 2.34 / 1.20 s on an i5-13600.
+Hardware, map inputs, stopping policy and timing boundaries accompany these values.
+
+## Configuration and clocks
+
+`input.type` selects `ipc` or `dataset`; dataset `format` selects `euroc`,
+`uzh`, `kitti` or `lamaria`. `vio.vio_config` loads a Basalt configuration
+archive; `optical_flow_detection_grid_size` overrides its detection cell width.
+Dataset-specific options belong in `[dataset]`; IPC statistics use
+`vio.stats_directory`, and optional external localization belongs to IPC.
+
+The ingress preserves native image dimensions, integer nanosecond timestamps and
+calibrated noise densities. Camera times follow
+`t_imu = t_camera + cam_time_offset_ns`; file lookup retains the camera clock,
+and estimation/export use the IMU clock. Raw IMU and GT retain their supplied
+timestamps. Dataset output is the exposure-time posterior; live flight additionally
+uses high-rate IMU prediction.
+
+`dataset.use_imu` selects VIO (default) or VO. Mapping follows `vio.map`,
+loop closure follows `vio.loops`, and final optimization follows
+`dataset.global_optimization` when mapping is enabled. `dataset.loop_options`
+and `dataset.map_policy` configure those modules. The global solver controls and
+factor contracts are described in the [mapping crate](../../crates/firefly-rootslam-mapping/README.md).
+
+Optional Basalt-compatible exports are `marg_data` (binary marginalization records
+and `gt.cereal`), `debug_directory` (statistics), `result_path` (local alignment
+RMSE, full input frame count and estimator duration), and `groundtruth` (aligned
+GT translations with identity orientations). Native `metrics_path` describes
+the requested frame range and final trajectory. Formats are `tum` (seconds/XYZW),
+`euroc` (nanoseconds/WXYZ), `kitti` (3×4 matrices), and `lamaria`
+(integer nanoseconds/XYZW).
+
+## Additional tools
+
+`firefly-basalt-tools --config <path.toml>` selects a task using `task`.
+Each task validates its own inputs and writes the requested outputs.
+
+| Task | Main inputs and outputs |
+|---|---|
+| `calibrate`, `calibrate-imu` | `dataset_path`, `dataset_type`, `aprilgrid`, `result_path`; camera task also takes `camera_types` |
+| `kitti-eval` | `ground_truth`, `estimate`, `output` |
+| `time-align` | `dataset_path`, `dataset_type`, `output`; optional paired `calibration`/`mocap_calibration`, `output_ground_truth` |
+| `opt-flow` | `calibration`, `dataset_path`, `dataset_type`, optional `vio_config` |
+| `mapper` | `calibration`, marginalization `cache`, optional `vio_config`, `trajectory`, `result_path` |
+| `global-ba` | Frozen `problem`, new `output`, arithmetic and optional iteration budget |
+| `vio-sim` | `calibration`, `output`, optional `vio_config`, `archive`, `marg_data`, `use_imu`, `use_double` |
+| `mapper-sim`, `mapper-sim-naive` | `calibration`, `cache`, optional `output` |
+
+The tools provide headless calibration and numerical workflows. Production dataset
+benchmarks use the dataset application above. Original mapper cache consumers expect
+the Basalt archive schema, including `gt.cereal`.
+
+To view optimized geometry, pair a frozen problem with its matching result:
+
+```bash
+uv run python apps/rootslam/export_rrd.py --problem logs/tumvi_room2/float64/global_problem.json --replay logs/tumvi_room2/float64/global_result.json --trajectory logs/tumvi_room2/float64/trajectory.txt --output logs/tumvi_room2/float64/map.rrd
+```
+
+## Online operation and validation
+
+The default IPC configuration provides local VIO to flight control and planner.
+Optional sparse mapping maintains its own posterior map; planner owns dense depth
+fusion. `--external-localization` assigns corrected-odometry and navigation
+publication to the localization process. Data flow and state ownership are in
+[architecture](../../docs/architecture.md#basalt-与-rootslam-独立应用).
+
+```bash
+cargo test -p firefly-calibration -p firefly-basalt -p firefly-rootslam-mapping -p firefly-rootslam --all-targets
+cargo clippy -p firefly-calibration -p firefly-basalt -p firefly-rootslam-mapping -p firefly-rootslam --all-targets -- -D warnings
+uv run python -B -m unittest discover -s apps/rootslam/tests -p test_export_rrd.py
+```
+
+Full-workspace checks, process cleanup and flight validation are described in
+[development](../../docs/development.md#tests). Observation ownership and recorder
+budgets are described in [observability](../../docs/observability.md).

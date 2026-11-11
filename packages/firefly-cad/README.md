@@ -1,7 +1,7 @@
 # firefly-cad
 
 RMUC STEP 资产构建。源文件只读，统一归一化为米、Z 向上、XY 居中、最低点 Z=0。
-视觉、物理碰撞和规划地图从同一份几何生成；全部生成资产留在本机，不进 Git。
+视觉、物理碰撞和规划地图从同一份几何生成；全部生成资产保存在本地产物目录。
 
 ## 入口
 
@@ -15,19 +15,19 @@ uv run --package firefly-cad firefly-cad-build <场地.stp> --scene <赛季>@<�
 数值配置在 `configs/cad.toml`，默认值与单位由配置类型维护。
 `--blender` 指定 Blender 可执行文件。
 若发行版 Blender 缺 NumPy，构建器使用 `uv` 将匹配 Python ABI 的 NumPy
-安装到 `derived/blender-python-*`，仅给导出子进程设置路径，不修改系统 Python。
+安装到 `derived/blender-python-*`，由导出子进程的路径配置使用。
 
 Rust 应用统一用 `cargo xtask release` 构建；物理资产检查、离线图像采集、
 建库和任务验收各自使用 [开发指南](../../docs/development.md#assets) 中的入口。
 任务、碰撞和故障验收由 `firefly-evaluation` 包的 `uv run firefly-evaluate` 执行，
-报告保存在 `logs/acceptance/<运行ID>/`。几何验收与建库完成不能替代飞行或在线定位验收。
+报告保存在 `logs/acceptance/<运行ID>/`。几何、建库、飞行和在线定位各自保留验收结果。
 
 ## 产物
 
 | 文件 | 消费者与契约 |
 |---|---|
 | `models/<赛季>/v<版本>/derived/raw/field_raw.npz` | 归一化顶点、三角形、逐面颜色、零件 tag |
-| `models/<赛季>/v<版本>/field.glb` | Bevy / Rerun；CAD 颜色与程序化材质，不减面、不焊接 |
+| `models/<赛季>/v<版本>/field.glb` | Bevy / Rerun；保留三角面与顶点的 CAD 颜色和程序化材质 |
 | `models/<赛季>/v<版本>/<赛季>_collision.json` | MuJoCo；米制 `[cx,cy,cz,hx,hy,hz]` 碰撞盒 |
 | `apps/planner/maps/<赛季>-<版本>.ffmap` | planner；与物理碰撞同一体素格，未额外膨胀 |
 | `models/<赛季>/v<版本>/asset_manifest.json` | 源 SHA-256、转换参数、依赖版本、坐标变换、产物 hash 与几何验收 |
@@ -35,7 +35,7 @@ Rust 应用统一用 `cargo xtask release` 构建；物理资产检查、离线�
 `derived/stages/` 保存阶段输入与产物内容 hash；二者都匹配才复用。
 离线采集也检查输入及逐帧内容 hash；损坏或未完成的采集保留，重试时通过 `--frames-dir` 指定新目录。
 总清单只有 `status=passed` 才代表本次几何验收完成。图像采集与飞行记录分别放在
-独立资产目录和 `logs/*.rrd`，不把原始传感器数据写成文本日志。
+独立资产目录和 `logs/*.rrd`；RRD 承载原始传感器证据。
 
 ## 算法约束
 
@@ -43,10 +43,10 @@ Rust 应用统一用 `cargo xtask release` 构建；物理资产检查、离线�
 - 三角形朝向组合 OCCT 面的 `TopAbs_REVERSED` 与实例变换手性；解析长方体测试
   以几何叉积验证外法线。
 - 网格体素化后填充封闭内部，贪心合并仅合并占据格；开放通道与薄结构需要针对
-  实际分辨率核验。盒合并本身不跨越空格。
+  实际分辨率核验。每个合并盒完整覆盖连续占据格。
 - FFMap 保留相同占据格；独立读回检查格心、唯一性、物理盒覆盖与体积。
 - GLB 读回包围盒须与归一化网格在 `1e-4m` 内一致；碰撞边界误差上限为一个体素。
-  这些检查不证明每处 CAD 空腔都适合当前体素分辨率。
+  CAD 空腔与窄通道另按实际体素分辨率检查。
 
 ## 单独运行与测试
 
@@ -55,10 +55,10 @@ Rust 应用统一用 `cargo xtask release` 构建；物理资产检查、离线�
 视觉导出脚本是 `scripts/blender_field.py`。基础材质保留 CAD 近纯白与彩色面，其他中性色
 沿用体色映射。`scripts/field_surfaces/*.json` 定义地胶与平台材质，绑定原始网格 SHA-256
 和已核对的零件 ID，修改后会使视觉导出缓存失效。纹理只覆盖中性体面，CAD 明确标白或
-着色的标线保持原有几何与颜色；表面涂装不作为灯具自发光。不根据三角形形状分类标线，
-不增加悬浮几何，不把参考渲染图的阴影烘入基色。
-当前材质参考 2027 规则手册图 4-1～4-3，地胶纹理与粗糙度属于近似外观，
-不代表实测光学参数。VIO 验证须记录实际资产指纹。
+着色的标线保持原有几何与颜色；标线身份来自 CAD 颜色及核对后的零件，表面涂装使用
+非自发光材质，光照与阴影由渲染器生成。
+材质参考 2027 规则手册图 4-1～4-3，地胶纹理与粗糙度描述近似外观。
+光学参数标定和 VIO 验证分别记录实测依据与实际资产指纹。
 
 ```bash
 uv run --all-packages --extra test pytest packages/firefly-cad/tests/ tests/evaluation/ -q -p no:cacheprovider

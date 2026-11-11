@@ -526,9 +526,8 @@ impl App {
         };
         let now = self.t_sim;
         let measured = Some(snapshot.state);
-        // 地图超时急停（对应官方 checkCollisionCallback：有可执行轨迹且
-        // 未完成才触发急停）；等待新鲜地图时禁止碰撞重规划。
-        // 禁用 fail-safe 后保持急停，不用异步求解结果恢复执行。
+        // 地图超时使正在执行的轨迹进入急停；等待地图期间保持停止锁存，
+        // 撤销异步结果资格；深度超时或线程结束保持急停锁存。
         let odometry = self.state_input.odometry().unwrap();
         if !self.synchronize_map(&odometry)? {
             self.solver.cancel();

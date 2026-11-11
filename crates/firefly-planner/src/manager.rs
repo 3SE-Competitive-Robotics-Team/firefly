@@ -373,9 +373,8 @@ impl PlannerManager {
                 global_end: self.global.glb_t_of_lc_tgt - self.global.start_time,
             }
         } else {
-            // A committed stopping prefix no longer ends at the global cursor.
-            // Rebuild the seed from its current PVA instead of splicing that tail
-            // to an unrelated point on the global guide.
+            // A stopping prefix has its own endpoint. Seed from its current PVA
+            // toward the current local target.
             InitSource::ColdStart
         };
         match self.planner.plan_in_swarm_with_init(

@@ -29,7 +29,7 @@ pub struct PoseGraphEdge {
     pub to: i64,
     pub measurement: Isometry3<f64>,
     pub kind: EdgeKind,
-    /// Paper `S_ab`; its numerical values are not supplied in the paper.
+    /// Square-root information `S_ab`, supplied by the map's edge-information policy.
     pub sqrt_information: SMatrix<f64, 6, 6>,
 }
 pub type Vector6<S> = SVector<S, 6>;
@@ -93,7 +93,7 @@ pub fn adjoint<S: BasaltScalar>(pose: &Isometry3<S>) -> Matrix6<S> {
     out
 }
 
-/// Coupled SE(3) inverse right Jacobian (not Basalt's decoupled pose Jacobian).
+/// Coupled SE(3) inverse right Jacobian, including translation/rotation coupling.
 /// Upper-right formula follows Sophus SE3, copyright Hauke Strasdat and
 /// contributors, MIT licensed. Small-angle series avoids coefficient cancellation.
 pub fn right_jacobian_inverse<S: BasaltScalar>(tangent: &Vector6<S>) -> Matrix6<S> {
@@ -199,8 +199,7 @@ pub fn linearize_pose_graph_edge(
     let residual = se3_log(&product(&inverse_predicted, measurement));
     // E = P^-1 M. In the inverse-pose left charts,
     // dE_left = db - Ad(P^-1) da; J_l^-1(e) = J_r^-1(-e).
-    // Equation (1) is a right relative error, whereas equation (8) is a
-    // left relative error. Negating the latter does not convert between them.
+    // Equation (1) uses a right relative error and its corresponding tangent chart.
     let left_inverse = right_jacobian_inverse(&-residual);
     (
         residual,

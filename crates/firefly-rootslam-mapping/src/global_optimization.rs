@@ -359,17 +359,9 @@ fn solve_lsqr<S: BasaltScalar>(
 
 /// Relative gradient reduction the solver may demand from the working precision.
 ///
-/// The criterion compares the gradient of the damped system with its initial
-/// value. The working precision bounds how small that ratio can become, so a
-/// criterion below the precision's own resolution is unreachable by
-/// construction: the iteration then spends its whole budget without reducing
-/// the cost, and the outer Levenberg-Marquardt loop retries with more damping
-/// instead of making progress. Flooring the criterion at the precision's
-/// resolution keeps the single-precision configuration usable.
-///
-/// The floor follows the Krylov working precision, not the matrix precision:
-/// with double-precision work vectors the accumulation is exact enough for the
-/// requested criterion even when the matrices are single precision.
+/// The damped-system gradient reduction uses a square-root-epsilon floor from
+/// the Krylov working precision. Matrix storage and Krylov arithmetic may have
+/// separate precisions in frozen-problem numerical comparisons.
 fn effective_lsqr_tolerance<W: BasaltScalar>(requested: f64) -> f64 {
     requested.max(W::epsilon_sqrt().as_f64())
 }
@@ -758,8 +750,7 @@ fn trial_cost<S: BasaltScalar>(
     options: &OptimizationOptions,
 ) -> S {
     let mut cost = 0.0;
-    // Compare exactly the observations linearized for this LM proposal. A
-    // disappearing projection cannot be exchanged for another valid one.
+    // Evaluate this LM proposal on the exact observation set used by linearization.
     for block in &system.landmarks {
         for key in &block.observations {
             let transform = pose_graph::product(

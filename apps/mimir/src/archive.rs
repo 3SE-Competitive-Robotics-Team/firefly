@@ -1,4 +1,4 @@
-//! Synchronous RRD encoding: disk backpressure cannot accumulate in an SDK queue.
+//! Synchronous RRD encoding with direct disk backpressure.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::BufWriter;

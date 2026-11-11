@@ -300,7 +300,7 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
 
 /// Run the recorder until stopped, then drain the owned queue and close the RRD.
 /// # Errors
-/// IPC, data-contract, queue-budget, writer-thread, or disk failures. Failures are never converted to success.
+/// Reports IPC, data-contract, queue-budget, writer-thread and disk failures after cleanup.
 pub fn run(path: &Path, options: &Options, stop: &Arc<AtomicBool>) -> Result<()> {
     let mut archive = Archive::create(path, options.clone())?;
     archive.log("mimir", -1., wall_time_ns(), "recording started", "INFO")?;

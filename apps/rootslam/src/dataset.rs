@@ -36,8 +36,8 @@ fn error(message: &str) -> Error {
     Error::new(ErrorKind::Internal, message).with_operation("rootslam.dataset.run")
 }
 
-/// A producer panic must still terminate its downstream worker: the optical
-/// flow handle owns another sender, so sender disconnection alone is insufficient.
+/// Sends the terminal marker on completion and unwind while the optical-flow
+/// handle retains its own sender.
 pub(crate) struct EndMarker<T>(pub Option<mpsc::SyncSender<Option<Arc<T>>>>);
 impl<T> EndMarker<T> {
     pub(crate) fn finish(&mut self) -> Result<()> {
@@ -82,7 +82,7 @@ pub fn run(
 }
 
 /// Runs with original optional native marginalization archives and statistics.
-/// The cache must not already exist. Default options preserve the plain runner.
+/// Marginalization archives and statistics use new output directories.
 /// # Errors
 /// Propagates setup, processing, writer, worker-panic and finalization errors.
 pub fn run_with_options(
@@ -251,10 +251,20 @@ fn run_inner(
     image_result?;
     imu_result?;
     if let Some(directory) = options.debug_directory {
-        std::fs::create_dir_all(directory).map_err(archive_error)?;
-        estimator.debug_finalize(directory)?;
+        save_debug_statistics(&estimator, directory)?;
     }
     Ok(RunReport { states, duration })
+}
+
+fn save_debug_statistics(estimator: &VioEstimatorBase, directory: &Path) -> Result<()> {
+    if let Some(parent) = directory
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(archive_error)?;
+    }
+    std::fs::create_dir(directory).map_err(archive_error)?;
+    estimator.debug_finalize(directory)
 }
 
 fn collect_states(

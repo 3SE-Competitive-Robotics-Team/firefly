@@ -5,8 +5,8 @@ serialization, and calibration-control modules. Shared camera and calibration
 primitives live in `firefly-calibration`.
 
 The source baseline is Basalt commit
-`0f3b2b52c807f70ff4e2973ce253c73329eea7bc`. The implementation does not claim
-end-to-end equivalence with the upstream applications.
+`0f3b2b52c807f70ff4e2973ce253c73329eea7bc`. Numerical fixtures verify individual
+contracts; [dataset evaluation](../../apps/rootslam/README.md) measures application behavior.
 
 ## References
 

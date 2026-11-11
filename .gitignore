@@ -25,6 +25,10 @@ apps/planner/maps/*.manifest.json
 # 录制产物（rrd/rbl）与运行时日志
 /logs/
 
+# 本地数据集目录与下载清单
+/datasets/
+/apps/rootslam/benchmarks.json
+
 # 神经网络权重（大二进制，离线下载进 models/，不进 git）
 /models/
 

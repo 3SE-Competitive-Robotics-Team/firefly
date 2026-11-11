@@ -14,6 +14,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
         Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
     },
     thread::JoinHandle,
@@ -25,7 +26,7 @@ pub struct SystemOptions {
     pub loops: LoopOptions,
     pub optimization: OptimizationOptions,
     pub global_optimization: bool,
-    /// 回环检测开关；关闭后只保留局部建图与关键帧共视图。
+    /// Enables keyframe loop detection and geometric correction.
     pub loop_closures: bool,
 }
 impl Default for SystemOptions {
@@ -48,7 +49,13 @@ pub struct SystemResult {
 }
 pub struct MappingWorker {
     input: Option<Sender<Option<Arc<LocalMapSnapshot>>>>,
-    thread: Option<JoinHandle<Result<SystemResult>>>,
+    finalization: Sender<Finalization>,
+    cancelled: Arc<AtomicBool>,
+    thread: Option<JoinHandle<Result<Option<SystemResult>>>>,
+}
+enum Finalization {
+    Finish,
+    Cancel,
 }
 fn error(message: &str) -> Error {
     Error::new(ErrorKind::Internal, message).with_operation("rootslam.mapping.worker")
@@ -59,17 +66,30 @@ impl MappingWorker {
     /// Returns thread creation errors.
     pub fn spawn(calibration: Calibration<f64>, options: SystemOptions) -> Result<Self> {
         let (input, receiver) = mpsc::channel();
+        let (finalization, completion) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
         let thread = std::thread::Builder::new()
             .name("rootslam-map".into())
-            .spawn(move || run(receiver, calibration, options))
+            .spawn(move || {
+                run(
+                    receiver,
+                    calibration,
+                    options,
+                    &completion,
+                    &worker_cancelled,
+                )
+            })
             .map_err(|source| error("Cannot start map worker").with_source(source))?;
         Ok(Self {
             input: Some(input),
+            finalization,
+            cancelled,
             thread: Some(thread),
         })
     }
     /// # Panics
-    /// Requires the worker not to have been joined.
+    /// Requires an active mapping worker.
     #[must_use]
     pub fn input(&self) -> Sender<Option<Arc<LocalMapSnapshot>>> {
         self.input.as_ref().expect("map worker joined").clone()
@@ -77,10 +97,60 @@ impl MappingWorker {
     /// Signals end of input and waits for loop processing and final global BA.
     /// # Errors
     /// Propagates processing and worker panic errors.
-    pub fn finish(mut self) -> Result<SystemResult> {
+    pub fn finish(self) -> Result<SystemResult> {
+        self.finalize(None)
+    }
+    /// Drains mapping with cooperative cancellation. Cancellation is
+    /// checked between jobs and before final BA; an active solve completes before joining.
+    /// # Errors
+    /// Returns cancellation, processing or worker panic errors.
+    pub fn finish_with_stop(self, stop: &AtomicBool) -> Result<SystemResult> {
+        self.finalize(Some(stop))
+    }
+    fn finalize(mut self, stop: Option<&AtomicBool>) -> Result<SystemResult> {
+        if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
+            self.request_cancel();
+            self.join()?;
+            return Err(error("Mapping run cancelled"));
+        }
+        let _ = self.finalization.send(Finalization::Finish);
         if let Some(input) = self.input.take() {
             let _ = input.send(None);
         }
+        if let Some(stop) = stop {
+            while self
+                .thread
+                .as_ref()
+                .is_some_and(|thread| !thread.is_finished())
+            {
+                if stop.load(Ordering::Acquire) {
+                    self.request_cancel();
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        let result = self.join()?;
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err(error("Mapping run cancelled"));
+        }
+        result.ok_or_else(|| error("Mapping run cancelled"))
+    }
+    /// Cancels queued work and joins the current job at its completion boundary.
+    /// # Errors
+    /// Propagates processing and worker panic errors.
+    pub fn cancel(mut self) -> Result<()> {
+        self.request_cancel();
+        self.join().map(|_| ())
+    }
+    fn request_cancel(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        let _ = self.finalization.send(Finalization::Cancel);
+        if let Some(input) = self.input.take() {
+            let _ = input.send(None);
+        }
+    }
+    fn join(&mut self) -> Result<Option<SystemResult>> {
         self.thread
             .take()
             .ok_or_else(|| error("Map worker has already been joined"))?
@@ -90,11 +160,9 @@ impl MappingWorker {
 }
 impl Drop for MappingWorker {
     fn drop(&mut self) {
-        if let Some(input) = self.input.take() {
-            let _ = input.send(None);
-        }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        if self.thread.is_some() {
+            self.request_cancel();
+            let _ = self.join();
         }
     }
 }
@@ -166,8 +234,8 @@ fn correction_snapshot(
     } else {
         snapshot.edges.push(loop_edge.clone());
     }
-    // Do not insert a tentative constraint into the live map before the
-    // optimization succeeds. Its result keeps the source geometry revision.
+    // The optimization snapshot owns tentative constraints until validation
+    // commits them to the live map. Results retain the source geometry revision.
     Arc::new(snapshot)
 }
 enum LoopEvent {
@@ -185,6 +253,7 @@ impl LoopWorker {
         loops: LoopOptions,
         mut optimization: OptimizationOptions,
         latest: LatestMap,
+        cancelled: Arc<AtomicBool>,
     ) -> Result<Self> {
         loops.validate()?;
         optimization.max_iterations = loops.pose_graph_max_iterations;
@@ -195,6 +264,9 @@ impl LoopWorker {
             .spawn(move || {
                 let mut detector = LoopDetector::new(calibration, loops);
                 while let Ok(job) = receiver.recv() {
+                    if cancelled.load(Ordering::Acquire) {
+                        break;
+                    }
                     let result = match job {
                         LoopJob::Detect(query) => detect_latest(&mut detector, &latest, &query)
                             .map(|result| LoopEvent::Detected(Box::new(result))),
@@ -315,9 +387,12 @@ impl MapWorkerState {
         }
         Ok(())
     }
-    fn process(&mut self, loops: &LoopWorker) -> Result<()> {
+    fn process(&mut self, loops: &LoopWorker, cancelled: &AtomicBool) -> Result<()> {
         let mut ended = false;
         while !ended || self.pending > 0 || !self.candidates.is_empty() {
+            if cancelled.load(Ordering::Acquire) {
+                return Ok(());
+            }
             let mut changed = false;
             while let Ok(event) = loops.events.try_recv() {
                 self.pending = self
@@ -331,7 +406,8 @@ impl MapWorkerState {
                 publish_map(&self.latest, &self.map.snapshot)?;
             }
             self.dispatch_correction(&loops.jobs)?;
-            if loops.thread.is_finished() && self.pending > 0 {
+            if loops.thread.is_finished() && self.pending > 0 && !cancelled.load(Ordering::Acquire)
+            {
                 return Err(error("Loop worker exited before completing queued work"));
             }
             if ended {
@@ -366,8 +442,12 @@ impl MapWorkerState {
         mut self,
         global_enabled: bool,
         options: &OptimizationOptions,
-    ) -> Result<SystemResult> {
+        cancelled: &AtomicBool,
+    ) -> Result<Option<SystemResult>> {
         self.map.finish_local();
+        if cancelled.load(Ordering::Acquire) {
+            return Ok(None);
+        }
         let global = if global_enabled && !self.map.snapshot.keyframes.is_empty() {
             log::info!(
                 "RootSLAM starting final global BA: keyframes={} landmarks={}",
@@ -399,13 +479,13 @@ impl MapWorkerState {
                 (time, corrected)
             })
             .collect();
-        Ok(SystemResult {
+        Ok(Some(SystemResult {
             map: self.map,
             trajectory,
             loops_verified: self.loops_verified,
             pose_graph_optimizations: self.pose_graph_optimizations,
             global,
-        })
+        }))
     }
 }
 
@@ -413,13 +493,16 @@ fn run(
     input: Receiver<Option<Arc<LocalMapSnapshot>>>,
     calibration: Calibration<f64>,
     options: SystemOptions,
-) -> Result<SystemResult> {
+    finalization: &Receiver<Finalization>,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<Option<SystemResult>> {
     let latest = Arc::new(RwLock::new(Arc::new(MapSnapshot::default())));
     let loops = LoopWorker::spawn(
         calibration.clone(),
         options.loops,
         options.optimization.clone(),
         Arc::clone(&latest),
+        Arc::clone(cancelled),
     )?;
     let mut state = MapWorkerState {
         input,
@@ -435,7 +518,10 @@ fn run(
         pose_graph_optimizations: 0,
         loop_closures: options.loop_closures,
     };
-    let processing = state.process(&loops);
+    let processing = state.process(&loops, cancelled);
+    if processing.is_err() {
+        cancelled.store(true, Ordering::Release);
+    }
     drop(loops.jobs);
     let joined = loops
         .thread
@@ -443,7 +529,17 @@ fn run(
         .map_err(|_| error("Loop worker panicked"));
     processing?;
     joined?;
-    state.finish(options.global_optimization, &options.optimization)
+    if cancelled.load(Ordering::Acquire)
+        || !matches!(finalization.recv(), Ok(Finalization::Finish))
+        || cancelled.load(Ordering::Acquire)
+    {
+        return Ok(None);
+    }
+    state.finish(
+        options.global_optimization,
+        &options.optimization,
+        cancelled,
+    )
 }
 
 #[cfg(test)]
@@ -551,9 +647,14 @@ mod tests {
         for (configuration, expected) in [("{}", 20), (r#"{"pose_graph_max_iterations":1}"#, 1)] {
             let loops: LoopOptions = serde_json::from_str(configuration).unwrap();
             let latest = Arc::new(RwLock::new(Arc::new(map.clone())));
-            let worker =
-                LoopWorker::spawn(Calibration::default(), loops, optimization.clone(), latest)
-                    .unwrap();
+            let worker = LoopWorker::spawn(
+                Calibration::default(),
+                loops,
+                optimization.clone(),
+                latest,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
             let (_, candidate, _) = correction_fixture();
             worker
                 .jobs

@@ -284,7 +284,7 @@ fn machine_epsilon<S: BasaltScalar>() -> S {
 
 fn column_scale<S: BasaltScalar>(norm: S) -> S {
     // RootBA LinearizorBase::get_effective_jacobi_scaling_epsilon uses
-    // Sophus epsilonSqrt for the default regularizer, not machine epsilon.
+    // RootBA's default column regularizer uses Sophus epsilonSqrt.
     S::one() / (S::epsilon_sqrt() + norm)
 }
 
@@ -866,9 +866,8 @@ pub(super) fn optimize<S: BasaltScalar>(
         }
     }
     // RootBA's landmark blocks require at least two camera observations.
-    // A single view leaves depth unobservable; LM damping must not invent that
-    // constraint. Deferred points remain in the map and follow their host's
-    // correction through PersistentMap::apply_updates.
+    // Depth requires distinct camera views. Deferred points stay in the map
+    // and follow their host correction through PersistentMap::apply_updates.
     state.points.retain(|id, _| {
         let mut observations = snapshot.landmarks[id]
             .observations

@@ -3,10 +3,8 @@
 //! The paper weights every edge of the pose graph with `S_ab`, the square root
 //! of the edge information matrix, so that the metre- and radian-valued
 //! pose-graph residuals of Equation (9) can be summed with the pixel-valued
-//! reprojection residuals of the bundle adjustment. The paper does not
-//! publish the numerical values of `S_ab`; this module derives a
-//! dimensionally consistent scale from the camera model instead of assuming
-//! one.
+//! reprojection residuals of the bundle adjustment. This implementation derives
+//! the numerical scale from the camera model as a project calibration policy.
 //!
 //! The scale is expressed in pixel equivalents: a pose-graph translation
 //! residual of one metre is multiplied by `translation_pixels_per_meter`, and
@@ -130,17 +128,12 @@ impl EdgeInformation {
 
 /// Image-plane displacement per unit rigid body error, in pixel equivalents.
 ///
-/// The camera model is differentiated analytically, so no assumed focal
-/// length is needed and every supported model is handled the same way. The
-/// reference point lies on the optical axis at the reference depth and the
-/// largest of the six body-frame directions is taken, which is the operator
-/// norm of the pixel response: inside a 45 degree half field of view no
-/// rigid body error shifts the image further than that bound.
+/// Analytic projection derivatives give the pixel response at an optical-axis
+/// point at the reference depth. Translation and rotation scales use the largest
+/// column norm in their respective three body-frame axes, across all cameras.
 fn calibrate(calibration: &Calibration<f64>, reference_depth_m: f64) -> Result<(f64, f64)> {
     if calibration.intrinsics.is_empty() {
-        // Without a camera model no bundle adjustment can run, so the
-        // pose-graph scale is never used. Keep the unscaled unit weight and
-        // say so instead of refusing to build a map that has no geometry.
+        // Empty maps retain unit information until calibrated geometry is available.
         log::warn!(
             "Calibration has no camera model; the pose-graph residuals keep the unscaled unit weight"
         );

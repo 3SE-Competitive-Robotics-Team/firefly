@@ -1,4 +1,4 @@
-//! 独立接收局部状态；重规划耗时不能改变状态流的存活判定。
+//! 独立接收局部状态，按真实接收时间维护状态流的存活期。
 use std::collections::VecDeque;
 use std::sync::{
     Arc, Mutex,
@@ -24,7 +24,7 @@ struct Shared {
     error: Option<String>,
 }
 
-/// Bounded measurement-time history shared with the depth worker, never the solver.
+/// Bounded measurement-time history shared with the depth worker.
 #[derive(Clone)]
 pub struct OdometryHistory {
     shared: Arc<Mutex<Shared>>,

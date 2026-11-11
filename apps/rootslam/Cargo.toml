@@ -16,6 +16,10 @@ categories = ["algorithms", "science"]
 name = "firefly-rootslam"
 path = "src/bin/firefly-rootslam.rs"
 
+[[bin]]
+name = "firefly-basalt-tools"
+path = "src/bin/firefly-basalt-tools.rs"
+
 [dependencies]
 firefly-base.workspace = true
 signal-hook.workspace = true

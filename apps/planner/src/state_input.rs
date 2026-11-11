@@ -1,8 +1,7 @@
 //! 局部里程计输入：校验、墙钟存活检测。
 //!
 //! 对照 EGO-Planner-v2 的 `have_odom_` 门控；状态源由上游估计服务封装。
-//! 不依赖观测算法或地图匹配成功频率。
-//! 失联锁存须重启进程解除，轨迹参考不能充当状态观测。
+//! 只使用真实里程计观测推进健康状态；失联锁存通过重启进程解除。
 
 use std::time::{Duration, Instant};
 
@@ -10,7 +9,7 @@ use firefly_planner::State;
 use firefly_pubsub::odom::OdomMessage;
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 
-/// 100Hz 里程计允许 500ms 墙钟中断；消息重复不能延长这个期限。
+/// 100Hz 里程计的墙钟存活期为 500ms，由严格递增的有效测量刷新。
 const MAX_AGE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy)]
@@ -70,7 +69,7 @@ impl StateInput {
         self.odom
     }
 
-    /// 有效状态建立后，失联或无效状态锁存停止；接收新包不能掩盖已发生的超时。
+    /// 接收前先检查墙钟存活期；有效状态的失联或无效观测进入停止锁存。
     pub fn observe(&mut self, message: &OdomMessage, now: Instant) -> bool {
         self.check_timeout(now);
         if self.stopped {

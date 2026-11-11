@@ -231,8 +231,8 @@ impl GlobalProblem {
         archive.validate()?;
         Ok(archive)
     }
-    /// Restores a solver-only snapshot. Empty feature/image fields must not be
-    /// fed into a persistent-map lifecycle or a loop-detection pipeline.
+    /// Restores a snapshot for global optimization. Feature and image fields are
+    /// empty; persistent mapping and loop detection use live map snapshots.
     /// # Errors
     /// Rejects unsupported versions, invalid numeric inputs and duplicate keys.
     pub fn restore(&self) -> Result<(MapSnapshot, Calibration<f64>, OptimizationOptions)> {

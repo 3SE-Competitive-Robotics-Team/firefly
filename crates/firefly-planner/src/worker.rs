@@ -93,7 +93,7 @@ impl Job {
     }
 }
 
-/// At most one outstanding snapshot. Cancelling never waits or queues another stale snapshot.
+/// Owns one outstanding snapshot; cancellation revokes its result immediately.
 pub struct PlanningWorker {
     sender: Option<mpsc::SyncSender<Job>>,
     receiver: mpsc::Receiver<Completion>,
@@ -290,13 +290,12 @@ fn adopt(completion: Completion, fsm: &mut ReplanFsm, now: f64, measured: Option
         return false;
     }
     // A delayed candidate must still start near the vehicle at its original time origin.
-    // Bound the handoff displacement by the existing map discretization, not solver duration.
+    // Bound the handoff displacement by the map discretization.
     if measured.is_none_or(|state| {
         (local.traj.eval(elapsed).position - state.position.coords).norm()
             > fsm.manager.map().resolution()
     }) {
-        // Repeating a warm start from the old trajectory preserves the same offset.
-        // Keep the handoff bound and retry from the measured state instead.
+        // Retry from the measured state within the same handoff bound.
         fsm.replan_from_measured();
         return false;
     }

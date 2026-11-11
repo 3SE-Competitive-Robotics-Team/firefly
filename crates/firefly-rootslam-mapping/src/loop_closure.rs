@@ -1,7 +1,6 @@
 //! `HashBoW`, ORB matching, map reprojection and generalized P3P loop validation.
-//! Only the 10 cm correction branch is specified numerically by `RootSLAM`.
-//! Retrieval, matching and RANSAC controls below are explicit implementation
-//! choices; they are not claimed to be the unpublished author's defaults.
+//! The 10 cm correction branch follows `RootSLAM`; retrieval, matching and
+//! RANSAC controls are explicit project policies.
 use crate::{
     descriptor::{compute_keyframe_descriptors, hamming},
     map::{FeatureId, KeyframeId, LandmarkId, MapSnapshot, ObservationKey},
@@ -335,8 +334,7 @@ impl LoopDetector {
                 }
             }
         }
-        // A landmark may legitimately appear once per camera, but repeated
-        // features in one camera must not inflate the geometric consensus.
+        // Count each landmark once per camera in the geometric consensus.
         let mut unique: BTreeMap<(usize, LandmarkId), Correspondence> = BTreeMap::new();
         for value in correspondences.into_values() {
             let key = (value.key.camera, value.point);

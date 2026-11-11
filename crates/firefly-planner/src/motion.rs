@@ -5,7 +5,7 @@ use nalgebra::{DMatrix, DVector, Point3, Vector3};
 
 use crate::{Planner, PlannerConfig};
 
-/// The angular envelope previously used by EGO's trajectory server, in rad/s and rad/s².
+/// EGO-derived angular envelope, in rad/s and rad/s².
 pub const MAX_YAW_RATE: f64 = 2. * std::f64::consts::PI;
 pub const MAX_YAW_ACCELERATION: f64 = 5. * std::f64::consts::PI;
 
@@ -92,8 +92,8 @@ fn append(first: &Trajectory, second: &Trajectory) -> Option<Trajectory> {
     .ok()
 }
 
-/// Sample at at most half a voxel of travel and at least 100 Hz. This is a bounded
-/// discretized check, not a continuous swept-volume proof. Inflation covers known obstacles.
+/// Discrete centerline check at at most half a voxel of travel and at least 100 Hz.
+/// Inflation covers known obstacles; continuous swept-volume validation is separate.
 /// Unknown space remains traversable, matching the position optimizer and EGO map queries.
 pub(crate) fn executable(
     map: &GridMap,
@@ -338,8 +338,7 @@ fn log_proposal(
     }
 }
 
-/// Use spatial lookahead so a short braking warm start cannot turn the camera
-/// toward a millimetre-scale local reversal while the route continues forward.
+/// Orient the camera along the spatial lookahead beyond short braking transients.
 fn look_direction(trajectory: &Trajectory, from: f64, distance: f64) -> Vector3<f64> {
     let origin = trajectory.eval(from).position;
     let mut direction = Vector3::zeros();
@@ -355,7 +354,7 @@ fn look_direction(trajectory: &Trajectory, from: f64, distance: f64) -> Vector3<
 
 /// Soft optimization penalties may exceed the envelope slightly. Refit shared
 /// MINCO knots with longer times while preserving boundary PVA, then collision-check
-/// the resulting curve. This is not coefficient rescaling of a moving boundary.
+/// the resulting curve.
 fn retime(proposed: &Trajectory, config: &PlannerConfig) -> Option<Trajectory> {
     if !proposed.duration().is_finite()
         || proposed.duration() <= 0.

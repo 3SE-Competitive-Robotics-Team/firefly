@@ -1,6 +1,7 @@
 use crate::dataset_output::{
     OriginalResult, TrajectoryFormat, align_ground_truth, write_trajectory,
 };
+mod outputs;
 use crate::{
     config,
     input::{SensorModel, Source},
@@ -32,7 +33,7 @@ pub struct Options {
     result_path: Option<PathBuf>,
     metrics_path: Option<PathBuf>,
     global_result_path: Option<PathBuf>,
-    /// Basalt's alignment association limit; not specified by `RootSLAM`.
+    /// Ground-truth interpolation gap, using Basalt's association limit.
     max_ground_truth_gap_ns: i64,
     use_imu: bool,
     global_optimization: bool,
@@ -104,8 +105,8 @@ impl Options {
     }
 }
 
-// Frozen-problem tools retain independent arithmetic controls. The application
-// accepts only the top-level precision, so conflicting settings fail at startup.
+// Top-level precision selects application arithmetic. Frozen-problem tools
+// expose independent controls for numerical comparisons.
 fn deserialize_optimization<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<OptimizationOptions, D::Error> {
@@ -134,36 +135,14 @@ pub fn run(
     precision: Precision,
     stop: &std::sync::atomic::AtomicBool,
 ) -> Result<()> {
+    options.validate(vio.map)?;
+    outputs::validate(options, source, vio.vio_config.as_deref())?;
     let started = std::time::Instant::now();
     let calibration = &model.calibration;
     let config = config::initial_vio_config(vio)?;
     let optimization = options.resolved_optimization(precision);
     let dataset = source.dataset()?;
-    // Ground truth and raw IMU retain their supplied timestamps. Camera timestamps
-    // receive the same calibration offset as the estimator ingress.
-    let evaluation_data = if options.metrics_path.is_some()
-        || options.result_path.is_some()
-        || options.groundtruth.is_some()
-        || options.debug_directory.is_some()
-    {
-        let mut dataset = dataset
-            .lock()
-            .map_err(|_| Error::new(ErrorKind::Internal, "Dataset mutex poisoned"))?;
-        let times = dataset
-            .image_timestamps()
-            .iter()
-            .map(|&time| {
-                crate::input::camera_time_in_imu_clock(time, calibration.cam_time_offset_ns)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Some((
-            times,
-            dataset.gt_timestamps().to_vec(),
-            dataset.gt_pose_data().to_vec(),
-        ))
-    } else {
-        None
-    };
+    let evaluation_data = evaluation_data(options, &dataset, calibration.cam_time_offset_ns)?;
     let mut estimator = VioEstimatorFactory::get_vio_estimator(
         &config,
         calibration,
@@ -199,7 +178,18 @@ pub fn run(
             marg_data: options.marg_data.as_deref(),
             debug_directory: options.debug_directory.as_deref(),
         },
-    )?;
+    );
+    let report = match report {
+        Ok(report) => report,
+        Err(failure) => {
+            if let Some(worker) = mapping
+                && let Err(cleanup) = worker.cancel()
+            {
+                return Err(failure.with_context("mapping_cleanup", cleanup));
+            }
+            return Err(failure);
+        }
+    };
     let states = report.states;
     if let Some(path) = &options.local_trajectory {
         let estimates: Vec<_> = states
@@ -208,9 +198,19 @@ pub fn run(
             .collect();
         save_trajectory(path, &estimates, options.trajectory_format)?;
     }
+    if stop.load(std::sync::atomic::Ordering::Acquire) {
+        let interrupted = Error::new(ErrorKind::Internal, "Dataset run interrupted")
+            .with_operation("rootslam.dataset.run");
+        if let Some(worker) = mapping
+            && let Err(cleanup) = worker.cancel()
+        {
+            return Err(interrupted.with_context("mapping_cleanup", cleanup));
+        }
+        return Err(interrupted);
+    }
     save_original_results(options, &states, report.duration, evaluation_data.as_ref())?;
     let mapped = mapping
-        .map(crate::system::MappingWorker::finish)
+        .map(|worker| worker.finish_with_stop(stop))
         .transpose()?;
     if let Some(result) = &mapped {
         report_mapping(result);
@@ -286,12 +286,39 @@ fn report_mapping(result: &crate::system::SystemResult) {
 }
 
 type EvaluationData = (Vec<i64>, Vec<i64>, Vec<nalgebra::Isometry3<f64>>);
+fn evaluation_data(
+    options: &Options,
+    dataset: &firefly_basalt::io::dataset_io::VioDatasetPtr,
+    camera_offset_ns: i64,
+) -> Result<Option<EvaluationData>> {
+    if options.metrics_path.is_none()
+        && options.result_path.is_none()
+        && options.groundtruth.is_none()
+        && options.debug_directory.is_none()
+    {
+        return Ok(None);
+    }
+    let mut dataset = dataset
+        .lock()
+        .map_err(|_| Error::new(ErrorKind::Internal, "Dataset mutex poisoned"))?;
+    // Evaluation uses the estimator's calibrated camera clock and the supplied GT clock.
+    let times = dataset
+        .image_timestamps()
+        .iter()
+        .map(|&time| crate::input::camera_time_in_imu_clock(time, camera_offset_ns))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Some((
+        times,
+        dataset.gt_timestamps().to_vec(),
+        dataset.gt_pose_data().to_vec(),
+    )))
+}
 fn save_trajectory(
     path: &std::path::Path,
     estimates: &[(i64, nalgebra::Isometry3<f64>)],
     format: TrajectoryFormat,
 ) -> Result<()> {
-    let mut output = BufWriter::new(File::create(path).map_err(io_error)?);
+    let mut output = BufWriter::new(File::create_new(path).map_err(io_error)?);
     write_trajectory(&mut output, estimates, format).map_err(io_error)?;
     output.flush().map_err(io_error)
 }
@@ -343,7 +370,7 @@ fn save_results(
             &ground_truth,
             options.max_ground_truth_gap_ns,
         )?;
-        let mut output = BufWriter::new(File::create(path).map_err(io_error)?);
+        let mut output = BufWriter::new(File::create_new(path).map_err(io_error)?);
         serde_json::to_writer_pretty(&mut output, &metrics).map_err(|source| {
             Error::new(ErrorKind::Internal, "Cannot serialize trajectory metrics")
                 .with_source(source)
@@ -400,7 +427,7 @@ fn save_original_results(
             num_frames: times.len(),
             exec_time_ns: duration.as_nanos(),
         };
-        let mut output = BufWriter::new(File::create(path).map_err(io_error)?);
+        let mut output = BufWriter::new(File::create_new(path).map_err(io_error)?);
         serde_json::to_writer_pretty(&mut output, &result).map_err(|source| {
             Error::new(ErrorKind::Internal, "Cannot serialize original result").with_source(source)
         })?;
@@ -417,7 +444,7 @@ fn save_original_results(
                 )
             })
             .collect();
-        let mut output = BufWriter::new(File::create(path).map_err(io_error)?);
+        let mut output = BufWriter::new(File::create_new(path).map_err(io_error)?);
         write_trajectory(&mut output, &poses, TrajectoryFormat::Tum).map_err(io_error)?;
         output.flush().map_err(io_error)?;
     }
