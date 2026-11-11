@@ -1,4 +1,4 @@
-//! Synchronous RRD encoding: disk backpressure cannot accumulate in an SDK queue.
+//! Synchronous RRD encoding with direct disk backpressure.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::BufWriter;
@@ -7,7 +7,8 @@ use std::path::Path;
 use firefly_error::Result;
 use firefly_pubsub::viz::{VizMessage, VoxelMessage, kind};
 use firefly_pubsub::{navigation::NavigationMessage, odom::OdomMessage};
-use re_chunk::{Chunk, RowId, TimeColumn, TimePoint, Timeline};
+use re_byte_size::SizeBytes as _;
+use re_chunk::{Chunk, PendingRow, RowId, TimeColumn, TimePoint, Timeline};
 use re_log_encoding::{DecoderApp, Encoder, EncodingOptions};
 use re_log_msg::{LogMsg, SetStoreInfo, StoreInfo, StoreSource};
 use re_log_types::{StoreId, StoreKind};
@@ -26,6 +27,12 @@ struct Scalars {
     times: Vec<i64>,
     values: Vec<f64>,
     width: usize,
+}
+
+#[derive(Default)]
+struct Rows {
+    values: Vec<PendingRow>,
+    bytes: u64,
 }
 
 struct Voxels {
@@ -51,6 +58,8 @@ pub struct Archive {
     store: StoreId,
     options: Options,
     scalars: BTreeMap<String, Scalars>,
+    rows: BTreeMap<String, Rows>,
+    row_bytes: u64,
     entities: BTreeSet<String>,
     voxels: BTreeMap<String, Voxels>,
     pending_voxels: Option<PendingVoxels>,
@@ -108,6 +117,8 @@ impl Archive {
             store,
             options,
             scalars: BTreeMap::new(),
+            rows: BTreeMap::new(),
+            row_bytes: 0,
             entities: BTreeSet::new(),
             voxels: BTreeMap::new(),
             pending_voxels: None,
@@ -172,11 +183,46 @@ impl Archive {
             ),
             None => TimePoint::STATIC,
         };
-        let chunk = Chunk::builder(name)
-            .with_archetype(RowId::new(), time, value)
-            .build()
-            .map_err(|e| failure("build chunk", e))?;
-        self.append(&chunk)
+        let row = PendingRow::from_iter(time, value.as_serialized_batches());
+        let bytes = row.total_size_bytes();
+        if stamp.is_none() || bytes >= self.options.batch_bytes as u64 {
+            self.flush_rows()?;
+            let chunk = row
+                .into_chunk(name.into())
+                .map_err(|e| failure("build chunk", e))?;
+            return self.append(&chunk);
+        }
+        if self.row_bytes + bytes > self.options.batch_bytes as u64 {
+            self.flush_rows()?;
+        }
+        let batch = self.rows.entry(name.to_owned()).or_default();
+        batch.values.push(row);
+        batch.bytes += bytes;
+        self.row_bytes += bytes;
+        if batch.values.len() >= self.options.batch_rows {
+            self.flush_entity_rows(name)?;
+        }
+        Ok(())
+    }
+
+    fn flush_entity_rows(&mut self, name: &str) -> Result<()> {
+        let Some(batch) = self.rows.remove(name) else {
+            return Ok(());
+        };
+        self.row_bytes -= batch.bytes;
+        for chunk in
+            PendingRow::many_into_chunks(name.into(), self.options.batch_rows as u64, batch.values)
+        {
+            self.append(&chunk.map_err(|e| failure("build typed columns", e))?)?;
+        }
+        Ok(())
+    }
+
+    fn flush_rows(&mut self) -> Result<()> {
+        while let Some(name) = self.rows.keys().next().cloned() {
+            self.flush_entity_rows(&name)?;
+        }
+        Ok(())
     }
 
     fn spatial(&mut self, name: &str, stamp: f64, value: &dyn AsComponents) -> Result<()> {
@@ -299,6 +345,7 @@ impl Archive {
         for name in names {
             self.flush_scalar(&name)?;
         }
+        self.flush_rows()?;
         self.encoder
             .flush_blocking()
             .map_err(|e| failure("flush RRD", e))

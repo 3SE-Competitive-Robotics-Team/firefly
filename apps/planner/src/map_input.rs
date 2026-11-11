@@ -1,14 +1,14 @@
 //! Derive a collision grid from the planner-owned, already inflated depth map.
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_map::{GridMap, VoxelState};
-use firefly_pubsub::navigation::NavigationMessage;
+use firefly_pubsub::odom::OdomMessage;
 use nalgebra::Vector3;
 use std::{
     collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
-/// Half-open metric bounds in the navigation map frame.
+/// Half-open metric bounds in the local odom frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bounds {
     pub min: [f64; 3],
@@ -28,21 +28,11 @@ impl Bounds {
 /// Complete collision geometry passed between threads in this planner process.
 pub struct LocalSnapshot {
     pub cells: Vec<Bounds>,
+    pub observed: firefly_map::ObservedSpace,
     pub bounds: Bounds,
     pub sequence: u64,
-    pub revision: u64,
-    pub translation: [f64; 3],
-    pub rotation: [f64; 4],
     pub timestamp: f64,
     pub fused_at: Instant,
-}
-
-impl LocalSnapshot {
-    fn matches(&self, navigation: &NavigationMessage) -> bool {
-        self.revision == navigation.revision
-            && self.translation == navigation.translation
-            && self.rotation == navigation.rotation
-    }
 }
 
 #[derive(Default)]
@@ -53,11 +43,14 @@ pub struct MapInput {
     occupied: HashMap<[i64; 3], u32>,
     boxes: HashSet<([i64; 3], [i64; 3])>,
     next_boxes: HashSet<([i64; 3], [i64; 3])>,
-    applied: Option<(u64, u64, [i64; 3])>,
+    applied: Option<(u64, [i64; 3])>,
     geometry_version: u64,
     window_moved: bool,
 }
 impl MapInput {
+    pub fn observed(&self) -> Option<firefly_map::ObservedSpace> {
+        self.snapshot.as_ref().map(|s| s.observed.clone())
+    }
     pub fn observe_local(&mut self, snapshot: LocalSnapshot) -> Result<()> {
         let result = self.accept(snapshot);
         self.fault |= result.is_err();
@@ -71,24 +64,10 @@ impl MapInput {
         {
             return Err(invalid("invalid local collision snapshot"));
         }
-        firefly_base::RigidTransform::from_parts(
-            firefly_base::FrameId::MAP,
-            firefly_base::FrameId::ODOM,
-            snapshot.translation,
-            snapshot.rotation,
-        )?;
-        if let Some(old) = &self.snapshot {
-            if snapshot.sequence <= old.sequence
-                || snapshot.revision < old.revision
-                || snapshot.timestamp < old.timestamp
-            {
-                return Ok(());
-            }
-            if snapshot.revision == old.revision
-                && (snapshot.translation != old.translation || snapshot.rotation != old.rotation)
-            {
-                return Err(invalid("unversioned depth map alignment change"));
-            }
+        if let Some(old) = &self.snapshot
+            && (snapshot.sequence <= old.sequence || snapshot.timestamp < old.timestamp)
+        {
+            return Ok(());
         }
         if self
             .snapshot
@@ -100,16 +79,22 @@ impl MapInput {
         self.snapshot = Some(snapshot);
         Ok(())
     }
-    pub fn ready(&self, navigation: &NavigationMessage, now: Instant, timeout: Duration) -> bool {
-        !self.fault
+    pub fn ready(&self, odometry: &OdomMessage, now: Instant, timeout: Duration) -> bool {
+        !self.expired(odometry, now, timeout)
             && self.snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot.matches(navigation)
-                    && self
-                        .required
-                        .is_some_and(|required| snapshot.bounds.contains(&required))
-                    && snapshot.timestamp <= navigation.odom.timestamp
-                    && navigation.odom.timestamp - snapshot.timestamp <= timeout.as_secs_f64()
-                    && now.saturating_duration_since(snapshot.fused_at) <= timeout
+                self.required
+                    .is_some_and(|required| snapshot.bounds.contains(&required))
+                    && snapshot.timestamp <= odometry.timestamp
+            })
+    }
+
+    /// Coverage gaps can wait for the next fused snapshot.
+    /// Only actual age expiry or a latched input fault disables recovery.
+    pub fn expired(&self, odometry: &OdomMessage, now: Instant, timeout: Duration) -> bool {
+        self.fault
+            || self.snapshot.as_ref().is_some_and(|snapshot| {
+                odometry.timestamp - snapshot.timestamp > timeout.as_secs_f64()
+                    || now.saturating_duration_since(snapshot.fused_at) > timeout
             })
     }
 
@@ -117,16 +102,15 @@ impl MapInput {
     pub fn prepare_region(
         &mut self,
         map: &mut GridMap,
-        navigation: &NavigationMessage,
+        odometry: &OdomMessage,
         rolling: bool,
-    ) -> Result<Bounds> {
-        navigation.alignment()?;
+    ) -> Bounds {
         if rolling {
             let before = map.global_index([0; 3]);
             map.move_ring_buffer(Vector3::new(
-                navigation.odom.position_x,
-                navigation.odom.position_y,
-                navigation.odom.position_z,
+                odometry.position_x,
+                odometry.position_y,
+                odometry.position_z,
             ));
             self.window_moved |= map.global_index([0; 3]) != before;
         }
@@ -137,41 +121,24 @@ impl MapInput {
             max: high.into(),
         };
         self.required = Some(required);
-        Ok(required)
+        required
     }
-    pub fn invalidate(&mut self) {
-        self.applied = None;
-        self.occupied.clear();
-        self.boxes.clear();
-    }
-    pub fn observed_state(&self, global: [i64; 3]) -> VoxelState {
-        if self.occupied.contains_key(&global) {
-            VoxelState::Occupied
-        } else {
-            VoxelState::Unknown
-        }
-    }
-
     #[fastrace::trace]
     pub fn apply(
         &mut self,
         map: &mut GridMap,
-        navigation: &NavigationMessage,
+        odometry: &OdomMessage,
         rolling: bool,
     ) -> Result<()> {
-        let required = self.prepare_region(map, navigation, rolling)?;
+        let required = self.prepare_region(map, odometry, rolling);
         let snapshot = self
             .snapshot
             .as_ref()
             .ok_or_else(|| invalid("depth map absent"))?;
-        if self.fault || !snapshot.matches(navigation) || !snapshot.bounds.contains(&required) {
-            return Err(invalid("depth map version or coverage mismatch"));
+        if self.fault || !snapshot.bounds.contains(&required) {
+            return Err(invalid("depth map coverage mismatch"));
         }
-        let key = (
-            self.geometry_version,
-            navigation.revision,
-            map.global_index([0; 3]),
-        );
+        let key = (self.geometry_version, map.global_index([0; 3]));
         if self.applied == Some(key) && !self.window_moved {
             return Ok(());
         }
@@ -259,17 +226,13 @@ mod tests {
     use firefly_map::GridMapBuilder;
     use firefly_pubsub::odom::OdomMessage;
 
-    fn navigation() -> NavigationMessage {
-        NavigationMessage {
-            odom: OdomMessage {
-                timestamp: 1.,
-                position_x: 2.,
-                position_y: 2.,
-                position_z: 2.,
-                is_initialized: true,
-                ..Default::default()
-            },
-            rotation: [0., 0., 0., 1.],
+    fn odometry() -> OdomMessage {
+        OdomMessage {
+            timestamp: 1.,
+            position_x: 2.,
+            position_y: 2.,
+            position_z: 2.,
+            is_initialized: true,
             ..Default::default()
         }
     }
@@ -277,14 +240,18 @@ mod tests {
     fn snapshot(sequence: u64, cells: Vec<Bounds>) -> LocalSnapshot {
         LocalSnapshot {
             cells,
+            observed: firefly_map::ObservedSpace::from_buffer(
+                1.,
+                [0; 3],
+                [4; 3],
+                [0; 3],
+                &[false; 64],
+            ),
             bounds: Bounds {
                 min: [0.; 3],
                 max: [4.; 3],
             },
             sequence,
-            revision: 0,
-            translation: [0.; 3],
-            rotation: [0., 0., 0., 1.],
             timestamp: 1.,
             fused_at: Instant::now(),
         }
@@ -297,7 +264,7 @@ mod tests {
             .build()
             .unwrap();
         let mut input = MapInput::default();
-        let nav = navigation();
+        let nav = odometry();
         input
             .observe_local(snapshot(
                 1,
@@ -311,10 +278,11 @@ mod tests {
         let point = Vector3::new(0.5, 1.5, 1.5);
         assert!(map.is_occupied_inflated(point));
         let mut away = nav;
-        away.odom.position_x = 6.;
-        input.prepare_region(&mut map, &away, true).unwrap();
+        away.position_x = 6.;
+        input.prepare_region(&mut map, &away, true);
         assert!(!input.ready(&away, Instant::now(), Duration::from_secs(1)));
-        input.prepare_region(&mut map, &nav, true).unwrap();
+        assert!(!input.expired(&away, Instant::now(), Duration::from_secs(1)));
+        input.prepare_region(&mut map, &nav, true);
         assert!(!map.is_occupied_inflated(point));
         input.apply(&mut map, &nav, true).unwrap();
         assert!(map.is_occupied_inflated(point));
@@ -328,7 +296,7 @@ mod tests {
             .unwrap();
         map.set_prior_occupied([1, 1, 1]);
         let mut input = MapInput::default();
-        let nav = navigation();
+        let nav = odometry();
         let a = Bounds {
             min: [0., 1., 1.],
             max: [2., 2., 2.],
@@ -350,20 +318,21 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_snapshots_cannot_refresh_age_and_invalid_alignment_latches_fault() {
+    fn duplicate_snapshots_cannot_refresh_age_and_invalid_geometry_latches_fault() {
         let mut input = MapInput::default();
         let mut map = GridMapBuilder::new(1., [4; 3]).build().unwrap();
-        let nav = navigation();
+        let nav = odometry();
         let mut stale = snapshot(1, vec![]);
         stale.fused_at -= Duration::from_secs(2);
         input.observe_local(stale).unwrap();
-        input.prepare_region(&mut map, &nav, true).unwrap();
+        input.prepare_region(&mut map, &nav, true);
         input.observe_local(snapshot(1, vec![])).unwrap();
         assert!(!input.ready(&nav, Instant::now(), Duration::from_secs(1)));
+        assert!(input.expired(&nav, Instant::now(), Duration::from_secs(1)));
         input.observe_local(snapshot(2, vec![])).unwrap();
         assert!(input.ready(&nav, Instant::now(), Duration::from_secs(1)));
         let mut invalid = snapshot(3, vec![]);
-        invalid.translation[0] = 0.01;
+        invalid.bounds.min[0] = f64::NAN;
         assert!(input.observe_local(invalid).is_err());
         input.observe_local(snapshot(4, vec![])).unwrap();
         assert!(!input.ready(&nav, Instant::now(), Duration::from_secs(1)));

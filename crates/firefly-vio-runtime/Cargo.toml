@@ -17,6 +17,7 @@ firefly-observability.workspace = true
 firefly-pubsub.workspace = true
 iceoryx2.workspace = true
 jiff.workspace = true
+log.workspace = true
 nalgebra.workspace = true
 
 [lints]

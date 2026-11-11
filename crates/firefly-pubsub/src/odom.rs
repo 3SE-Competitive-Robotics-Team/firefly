@@ -10,7 +10,7 @@ use iceoryx2::prelude::*;
 /// 里程计话题（对照 `docs/architecture.md` 的 `topic: odom`）。
 pub const ODOM_TOPIC: &str = "Firefly/Odometry";
 
-/// 校正后里程计话题（localization 进程发布，planner 订阅，低频全局矫正 VIO 漂移）。
+/// 地图系里程计：RootSLAM 默认发布，外部地图模式由 localization 独占发布。
 pub const CORRECTED_ODOM_TOPIC: &str = "Firefly/CorrectedOdometry";
 
 /// 仿真真值：仅供传感器图像生成、评测与可视化对照。
@@ -62,6 +62,42 @@ impl Default for OdomMessage {
 }
 
 impl OdomMessage {
+    /// Transform local odometry into map coordinates without differentiating map jumps.
+    /// # Errors
+    /// Rejects an invalid pose, velocity, or a transform other than map←odom.
+    pub fn in_map(&self, alignment: &firefly_base::RigidTransform) -> firefly_error::Result<Self> {
+        use firefly_base::FrameId;
+        if alignment.target() != FrameId::MAP || alignment.source() != FrameId::ODOM {
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                "expected map<-odom alignment",
+            ));
+        }
+        let pose = alignment.compose(&self.body_pose(FrameId::ODOM)?)?;
+        let velocity = alignment.vector([self.velocity_x, self.velocity_y, self.velocity_z].into());
+        if !velocity.iter().all(|v| v.is_finite()) {
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                "non-finite odometry velocity",
+            ));
+        }
+        let p = pose.isometry().translation.vector;
+        let q = pose.isometry().rotation.quaternion();
+        Ok(Self {
+            position_x: p.x,
+            position_y: p.y,
+            position_z: p.z,
+            velocity_x: velocity.x,
+            velocity_y: velocity.y,
+            velocity_z: velocity.z,
+            quat_x: q.i,
+            quat_y: q.j,
+            quat_z: q.k,
+            quat_w: q.w,
+            ..*self
+        })
+    }
+
     /// 将消息解释为 parent←body。原始里程计 parent=ODOM，校正里程计 parent=MAP。
     /// 四元数采用 Hamilton body→parent 的 xyzw 分量。
     ///

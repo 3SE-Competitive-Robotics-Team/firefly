@@ -3,15 +3,17 @@
 自主无人机的 Rust / Python monorepo：视觉惯性里程计、在线路标回环、深度建图、
 轨迹规划、四旋翼飞控、MuJoCo 仿真与 Rerun 可视化。
 
-默认从空会话地图启动，使用 RootSLAM 视觉惯性估计与稀疏建图，planner 独立执行 EGO 深度融合和规划，不依赖已知世界起点、
-预建地图或神经网络权重。ALIKED/LightGlue 库图定位和静态地图是显式可选增强。
-真值只供传感器生成、评测和可视化，不参与估计或控制。
-稀疏地图优化尚未反馈到在线导航；设备同步、标定、实时性和飞行能力须分别验收。
+RootSLAM 默认只提供 VIO；planner 使用机体里程计、深度和相机外参，独立执行 EGO 局部建图与规划。
+目标、占据地图和轨迹统一在 odom 系，从传感器输入和空局部地图启动。
+ALIKED/LightGlue 库图定位作为独立可选工具运行。
+真值用于传感器生成、评测和可视化；估计与控制使用传感器观测。
+稀疏地图优化结果用于离线轨迹评估，在线导航使用 VIO。设备同步、标定、实时性和飞行能力分别验收。
 
 ## 文档
 
 - [开发指南](docs/development.md)：实现约定、构建运行、资产、诊断与测试入口。
 - [系统架构](docs/architecture.md)：数据流、坐标、VIO、姿态融合、回环与规划边界。
+- [公开数据集测评](apps/rootslam/README.md)：输入准备、单双精度配置、运行与评分、已有数据集结果。
 - [硬件规格](docs/hw/spec.md)：板卡算力、接口与项目约束。
 - [协作原则](AGENTS.md)：agent 的工作约定。
 
@@ -25,7 +27,7 @@
 | `crates/firefly-{basalt,calibration,opengv,rootslam-mapping}` | 局部 VIO、标定、几何求解与稀疏地图优化 |
 | `crates/firefly-ego-map` | EGO 局部概率占据、射线融合与障碍膨胀 |
 | `crates/firefly-{map,search,trajectory,optimize,cost,planner}` | 占据地图、动态障碍体素化、A*、MINCO、L-BFGS、代价与重规划 |
-| `crates/firefly-cost/src/{swarm,formation}.rs` | 库级集群间距与队形代价；应用集群通信未接入 |
+| `crates/firefly-cost/src/{swarm,formation}.rs` | 库级集群间距与队形代价，由库调用方提供集群轨迹 |
 | `crates/firefly-{localization,vision-map,vision-match}` | 定位融合、视觉库图与匹配 |
 | `crates/firefly-flight` | 飞行模式、安全条件、姿态/位置控制与电机分配 |
 | `crates/firefly-imu` | 独立备用姿态/陀螺零偏 ESKF、静止初始化与加计 NIS |
@@ -45,11 +47,11 @@
 | `fc` | 1kHz 飞控环：飞行模式与安全条件、姿态/位置控制、电机分配 |
 | `planner` | 独占深度融合与局部避障地图、全局/局部规划、参考发布与可视化 |
 | `localization` | 可选外部库图 ESKF：时间配对、map←odom 修正与导航发布，要求显式启动对齐 |
-| `firefly-rootslam` | 默认双目/IMU 状态估计、稀疏建图、里程计/姿态/导航发布；地图优化结果不反馈到在线导航 |
+| `firefly-rootslam` | 默认双目/IMU VIO、连续机体里程计与预测姿态；默认关闭建图与回环 |
 | `aliked` | ALIKED-N16 特征提取：在线发布特征，`--build-map` 离线建 `ffvmap` 库图 |
 | `lightglue` | ALIKED/LightGlue 离线库图定位：`--map <地图.ffvmap>` 解算视觉位姿 |
 | `render` | 视觉传感器进程：订阅真值位姿渲染双目与深度并发布 IPC，`--offline` 供离线建库 |
-| `quad` | 独立微无人机第三人称飞行游戏，不接 IPC/VIO |
+| `quad` | 独立微无人机第三人称飞行游戏，使用本地输入与动力学 |
 | `ffctl` | 地面站 CLI：把操作员意图发成 IPC 消息，命令为 `<域> <动词>` 两层 |
 | `camera`、`imu`、`motor` | 板载 V4L2 相机、SPI BMI088、sysfs PWM；通过标准 IPC 连接算法进程 |
 
@@ -84,7 +86,7 @@ cargo xtask release
 
 `--target host`（默认）构建桌面应用，`--target board` 在 Apple container 中原生构建
 机载进程；应用名单由 `xtask/src/target.rs` 维护。部署、进程管理、场地资产与验收步骤见
-[开发指南](docs/development.md#run)。构建与单测通过只覆盖各自验证范围。
+[开发指南](docs/development.md#run)。构建、单测、设备和飞行验证分别报告。
 
 ## References
 

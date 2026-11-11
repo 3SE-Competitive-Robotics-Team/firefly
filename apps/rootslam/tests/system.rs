@@ -112,3 +112,64 @@ fn queued_keyframes_can_be_culled_while_loop_worker_drains() {
         assert!((result.trajectory[&time].translation.vector.x - time as f64).abs() < 1e-12);
     }
 }
+
+#[test]
+fn finalization_owns_the_global_archive_and_cancellation_joins_workers() {
+    use std::sync::atomic::AtomicBool;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../logs")
+        .join(format!(
+            "test_rootslam_finalization_{}_{stamp}",
+            std::process::id()
+        ));
+    std::fs::create_dir_all(&directory).unwrap();
+    for mode in ["finish", "cancel", "drop", "signal"] {
+        let archive = directory.join(format!("{mode}.json"));
+        let mut options = SystemOptions {
+            loop_closures: false,
+            ..SystemOptions::default()
+        };
+        options.optimization.problem_archive = Some(archive.clone());
+        let worker = MappingWorker::spawn(Calibration::default(), options).unwrap();
+        let input = worker.input();
+        input
+            .send(Some(Arc::new(LocalMapSnapshot {
+                t_ns: 10,
+                poses: BTreeMap::from([(10, Isometry3::identity())]),
+                keyframes: BTreeSet::from([10]),
+                landmarks: BTreeMap::new(),
+                frames: BTreeMap::from([(
+                    10,
+                    Arc::new(OpticalFlowResult {
+                        t_ns: 10,
+                        ..OpticalFlowResult::default()
+                    }),
+                )]),
+                rejected_landmarks: BTreeSet::new(),
+                rejected_observations: BTreeSet::new(),
+            })))
+            .unwrap();
+        input.send(None).unwrap();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            match mode {
+                "finish" => assert!(worker.finish().unwrap().global.is_some()),
+                "cancel" => worker.cancel().unwrap(),
+                "drop" => drop(worker),
+                "signal" => assert!(worker.finish_with_stop(&AtomicBool::new(true)).is_err()),
+                _ => unreachable!(),
+            }
+            sender.send(()).unwrap();
+        });
+        receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("mapping finalization joins with an input handle retained by the caller");
+        assert_eq!(archive.exists(), mode == "finish", "{mode}");
+        drop(input);
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}

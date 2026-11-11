@@ -12,6 +12,8 @@ pub enum TrajectoryFormat {
     Tum,
     Euroc,
     Kitti,
+    /// Integer nanoseconds followed by translation and XYZW quaternion.
+    Lamaria,
 }
 
 /// Original result fields; frame count includes the entire input dataset.
@@ -94,12 +96,17 @@ pub fn write_trajectory(
             output,
             "#timestamp [ns],p_RS_R_x [m],p_RS_R_y [m],p_RS_R_z [m],q_RS_w [],q_RS_x [],q_RS_y [],q_RS_z []"
         )?,
-        TrajectoryFormat::Kitti => {}
+        TrajectoryFormat::Kitti | TrajectoryFormat::Lamaria => {}
     }
     for (time, pose) in estimates {
         let t = pose.translation.vector;
         let q = pose.rotation.quaternion();
         match format {
+            TrajectoryFormat::Lamaria => writeln!(
+                output,
+                "{time} {:.18e} {:.18e} {:.18e} {:.18e} {:.18e} {:.18e} {:.18e}",
+                t.x, t.y, t.z, q.i, q.j, q.k, q.w
+            )?,
             TrajectoryFormat::Tum => writeln!(
                 output,
                 "{:.18e} {:.18e} {:.18e} {:.18e} {:.18e} {:.18e} {:.18e} {:.18e}",

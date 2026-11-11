@@ -6,7 +6,7 @@ use firefly_basalt::imu::imu_types::PoseVelBiasState;
 use firefly_basalt::serialization::eigen_io::EigenMatrix;
 use firefly_basalt::{
     io::{dataset_io::VioDatasetPtr, marg_data_io::MargDataSaver},
-    optical_flow::{OpticalFlowFactory, OpticalFlowInput},
+    optical_flow::OpticalFlowFactory,
     utils::vio_config::VioConfig,
     vi_estimator::vio_estimator::VioEstimatorBase,
 };
@@ -23,6 +23,7 @@ use std::{
 #[derive(Default)]
 pub struct RunOptions<'a> {
     pub max_frames: usize,
+    pub stop: Option<&'a std::sync::atomic::AtomicBool>,
     pub marg_data: Option<&'a Path>,
     pub debug_directory: Option<&'a Path>,
 }
@@ -35,8 +36,8 @@ fn error(message: &str) -> Error {
     Error::new(ErrorKind::Internal, message).with_operation("rootslam.dataset.run")
 }
 
-/// A producer panic must still terminate its downstream worker: the optical
-/// flow handle owns another sender, so sender disconnection alone is insufficient.
+/// Sends the terminal marker on completion and unwind while the optical-flow
+/// handle retains its own sender.
 pub(crate) struct EndMarker<T>(pub Option<mpsc::SyncSender<Option<Arc<T>>>>);
 impl<T> EndMarker<T> {
     pub(crate) fn finish(&mut self) -> Result<()> {
@@ -81,7 +82,7 @@ pub fn run(
 }
 
 /// Runs with original optional native marginalization archives and statistics.
-/// The cache must not already exist. Default options preserve the plain runner.
+/// Marginalization archives and statistics use new output directories.
 /// # Errors
 /// Propagates setup, processing, writer, worker-panic and finalization errors.
 pub fn run_with_options(
@@ -157,28 +158,16 @@ fn run_inner(
     options: &RunOptions<'_>,
 ) -> Result<RunReport> {
     let max_frames = options.max_frames;
-    let (timestamps, gyro, accel) = {
-        let mut data = dataset
-            .lock()
-            .map_err(|_| error("Dataset mutex poisoned"))?;
-        (
-            data.image_timestamps().clone(),
-            data.gyro_data().to_vec(),
-            data.accel_data().to_vec(),
-        )
-    };
-    let requested_frames = if max_frames == 0 {
-        timestamps.len()
-    } else {
-        max_frames.min(timestamps.len())
-    };
-    log::info!(
-        "Dataset input: {requested_frames} camera frames, {} IMU samples",
-        gyro.len()
-    );
-    if gyro.len() != accel.len() {
-        return Err(error("Gyroscope and accelerometer counts differ"));
+    let inputs = DatasetInputs::read(&dataset, max_frames)?;
+    for &time in &inputs.timestamps {
+        crate::input::camera_time_in_imu_clock(time, calibration.cam_time_offset_ns)?;
     }
+    let requested_frames = inputs.timestamps.len();
+    let DatasetInputs {
+        timestamps,
+        gyro,
+        accel,
+    } = inputs;
     let (states_tx, states_rx) = mpsc::channel();
     estimator.outputs.state = Some(states_tx);
     let flow = OpticalFlowFactory::get_optical_flow_with_output(
@@ -196,8 +185,11 @@ fn run_inner(
         let image_thread = scope.spawn(move || -> Result<()> {
             let mut ending = EndMarker(Some(images.clone()));
             let result = (|| {
-                for (index, t_ns) in timestamps.into_iter().enumerate() {
-                    if max_frames > 0 && index >= max_frames {
+                for t_ns in timestamps {
+                    if options
+                        .stop
+                        .is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Acquire))
+                    {
                         break;
                     }
                     let img_data = dataset
@@ -205,7 +197,14 @@ fn run_inner(
                         .map_err(|_| error("Dataset mutex poisoned"))?
                         .image_data(t_ns)?;
                     images
-                        .send(Some(Arc::new(OpticalFlowInput { t_ns, img_data })))
+                        .send(Some(Arc::new(crate::input::image_frame(
+                            calibration,
+                            crate::input::camera_time_in_imu_clock(
+                                t_ns,
+                                calibration.cam_time_offset_ns,
+                            )?,
+                            img_data,
+                        )?)))
                         .map_err(|_| error("Optical flow input disconnected"))?;
                 }
                 Ok(())
@@ -252,10 +251,20 @@ fn run_inner(
     image_result?;
     imu_result?;
     if let Some(directory) = options.debug_directory {
-        std::fs::create_dir_all(directory).map_err(archive_error)?;
-        estimator.debug_finalize(directory)?;
+        save_debug_statistics(&estimator, directory)?;
     }
     Ok(RunReport { states, duration })
+}
+
+fn save_debug_statistics(estimator: &VioEstimatorBase, directory: &Path) -> Result<()> {
+    if let Some(parent) = directory
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(archive_error)?;
+    }
+    std::fs::create_dir(directory).map_err(archive_error)?;
+    estimator.debug_finalize(directory)
 }
 
 fn collect_states(
@@ -278,4 +287,119 @@ fn collect_states(
         }
     }
     states
+}
+
+struct DatasetInputs {
+    timestamps: Vec<i64>,
+    gyro: Vec<firefly_basalt::io::dataset_io::GyroData>,
+    accel: Vec<firefly_basalt::io::dataset_io::AccelData>,
+}
+impl DatasetInputs {
+    fn read(dataset: &VioDatasetPtr, max_frames: usize) -> Result<Self> {
+        let (mut timestamps, gyro, accel) = {
+            let mut data = dataset
+                .lock()
+                .map_err(|_| error("Dataset mutex poisoned"))?;
+            (
+                data.image_timestamps().clone(),
+                data.gyro_data().to_vec(),
+                data.accel_data().to_vec(),
+            )
+        };
+        if max_frames > 0 {
+            timestamps.truncate(max_frames);
+        }
+        let requested_frames = timestamps.len();
+        log::info!(
+            "Dataset input: {requested_frames} camera frames, {} IMU samples",
+            gyro.len()
+        );
+        if gyro.len() != accel.len() {
+            return Err(error("Gyroscope and accelerometer counts differ"));
+        }
+        if timestamps.is_empty()
+            || timestamps.windows(2).any(|t| t[0] >= t[1])
+            || gyro
+                .windows(2)
+                .any(|g| g[0].timestamp_ns >= g[1].timestamp_ns)
+            || gyro.iter().zip(&accel).any(|(g, a)| {
+                g.timestamp_ns != a.timestamp_ns
+                    || !g.data.iter().chain(a.data.iter()).all(|v| v.is_finite())
+            })
+        {
+            return Err(error(
+                "Dataset measurements must be finite, paired and strictly ordered",
+            ));
+        }
+        Ok(Self {
+            timestamps,
+            gyro,
+            accel,
+        })
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    use firefly_basalt::io::dataset_io::{AccelData, GyroData, ImageData, VioDataset};
+    use nalgebra::Isometry3;
+    use std::sync::Mutex;
+
+    struct Measurements {
+        times: Vec<i64>,
+        gyro: Vec<GyroData>,
+        accel: Vec<AccelData>,
+    }
+    impl VioDataset for Measurements {
+        fn num_cams(&self) -> usize {
+            2
+        }
+        fn image_timestamps(&mut self) -> &mut Vec<i64> {
+            &mut self.times
+        }
+        fn gyro_data(&self) -> &[GyroData] {
+            &self.gyro
+        }
+        fn accel_data(&self) -> &[AccelData] {
+            &self.accel
+        }
+        fn gt_timestamps(&self) -> &[i64] {
+            &[]
+        }
+        fn gt_pose_data(&self) -> &[Isometry3<f64>] {
+            &[]
+        }
+        fn mocap_to_imu_offset_ns(&self) -> i64 {
+            0
+        }
+        fn image_data(&mut self, _: i64) -> Result<Vec<ImageData>> {
+            panic!("metadata validation must precede image loading")
+        }
+    }
+    fn data(times: Vec<i64>, accel_time: i64) -> VioDatasetPtr {
+        Arc::new(Mutex::new(Measurements {
+            times,
+            gyro: vec![GyroData {
+                timestamp_ns: 10,
+                data: Vector3::zeros(),
+            }],
+            accel: vec![AccelData {
+                timestamp_ns: accel_time,
+                data: Vector3::zeros(),
+            }],
+        }))
+    }
+    #[test]
+    fn metadata_requires_matching_imu_times_and_ordered_images() {
+        assert!(DatasetInputs::read(&data(vec![10, 20], 11), 0).is_err());
+        assert!(DatasetInputs::read(&data(vec![20, 10], 10), 0).is_err());
+        assert!(DatasetInputs::read(&data(vec![10, 10], 10), 0).is_err());
+        assert_eq!(
+            DatasetInputs::read(&data(vec![10, 20], 10), 1)
+                .unwrap()
+                .timestamps,
+            vec![10]
+        );
+    }
 }

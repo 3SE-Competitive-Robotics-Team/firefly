@@ -1,4 +1,4 @@
-"""进程所有权、退出回收和验收互斥；无需 IPC 或场景资产。"""
+"""使用本地子进程验证所有权、退出回收和验收互斥。"""
 
 import os
 import signal
@@ -77,6 +77,37 @@ def test_shutdown_timeout_does_not_report_success():
     with pytest.raises(subprocess.TimeoutExpired):
         child.stop()
     assert child.process.signals == [signal.SIGINT]
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_output_callback_failure_drains_child_and_surfaces_after_cleanup(tmp_path, exit_code):
+    callback_error = ValueError("recording unavailable")
+    calls = []
+
+    def record(line):
+        calls.append(line)
+        raise callback_error
+
+    command = [sys.executable, "-c", (
+        "import sys\n"
+        "print('first', flush=True)\n"
+        "for _ in range(256): print('x' * 8192)\n"
+        "print('complete', flush=True)\n"
+        f"sys.exit({exit_code})\n"
+    )]
+    child = ManagedProcess(command, cwd=tmp_path, env=dict(os.environ), on_line=record)
+    try:
+        child.process.wait(timeout=5.)
+    finally:
+        with pytest.raises(RuntimeError, match="output reader failed") as raised:
+            child.stop()
+
+    assert raised.value.__cause__ is callback_error
+    assert child.process.returncode == exit_code
+    assert child.process.stdout.closed
+    assert not child.reader.is_alive()
+    assert calls == ["first"]
+    assert child.tail[-1] == "complete"
 
 
 def test_mission_cleans_remaining_children_after_one_stop_times_out(tmp_path):

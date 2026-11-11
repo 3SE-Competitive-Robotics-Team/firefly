@@ -14,7 +14,7 @@ import psutil
 
 
 class ManagedProcess:
-    """拥有一个直接启动的子进程及其输出线程；stop 必须完成两者的回收。"""
+    """拥有一个子进程及输出线程；stop 回收两者后报告退出结果与输出错误。"""
 
     def __init__(self, command: Sequence[str], *, cwd: Path, env: dict[str, str],
                  on_line: Callable[[str], None] | None = None, tail_size: int = 30):
@@ -22,6 +22,7 @@ class ManagedProcess:
                                         stderr=subprocess.STDOUT, text=True,
                                         encoding="utf-8", errors="replace")
         self.tail: deque[str] = deque(maxlen=tail_size)
+        self._reader_error: BaseException | None = None
         self.reader = threading.Thread(target=self._drain, args=(on_line,),
                                        name=f"output-{self.process.pid}", daemon=True)
         try:
@@ -33,12 +34,20 @@ class ManagedProcess:
             raise
 
     def _drain(self, on_line):
-        with self.process.stdout as stream:
-            for line in stream:
-                line = line.rstrip()
-                self.tail.append(line)
-                if on_line is not None:
-                    on_line(line)
+        try:
+            with self.process.stdout as stream:
+                for line in stream:
+                    line = line.rstrip()
+                    self.tail.append(line)
+                    if on_line is not None:
+                        try:
+                            on_line(line)
+                        except BaseException as error:
+                            self._reader_error = error
+                            on_line = None
+        except BaseException as error:
+            if self._reader_error is None:
+                self._reader_error = error
 
     @property
     def pid(self) -> int:
@@ -52,11 +61,15 @@ class ManagedProcess:
         self.reader.join(timeout=max(0., deadline - time.monotonic()))
         if self.reader.is_alive():
             raise RuntimeError(f"output pipe still open after process exit, PID={self.pid}")
+        if self._reader_error is not None:
+            raise RuntimeError(
+                f"output reader failed after child exit {code}, PID={self.pid}"
+            ) from self._reader_error
         return code
 
 
 def active_processes(root: Path) -> list[int]:
-    """识别本仓库进程；依赖可执行路径与 argv，禁止模糊匹配命令行全文。"""
+    """按可执行路径、工作目录与 argv 识别本仓库进程。"""
     root = root.resolve()
     found = []
     binaries = {"firefly-rootslam", "render", "mimir", "fc", "localization", "planner", "aliked", "lightglue"}
@@ -97,7 +110,7 @@ def require_idle(root: Path) -> None:
 
 @contextmanager
 def isolated_run(root: Path):
-    """同仓库运行验收互斥；进程残留必须在创建下一轮子进程之前报错。"""
+    """独占验收锁，并在确认仓库进程空闲后启动一轮验收。"""
     directory = root / "logs"
     directory.mkdir(exist_ok=True)
     with (directory / "acceptance.lock").open("a") as lock:

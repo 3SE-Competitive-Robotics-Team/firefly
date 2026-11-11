@@ -1,12 +1,12 @@
 # quad（微无人机第三人称飞行游戏）
 
 250g 级四旋翼的 **6-DOF 动力学 + 第三人称 `WASD` 飞行**，在我们自己的场地里飞。
-独立进程，**不接 IPC / VIO / planner**；飞控与 `apps/fc` 使用同一套 PX4 控制核心。
+独立进程，使用本地手动输入与动力学；飞控与 `apps/fc` 使用同一套 PX4 控制核心。
 
 ## 运行
 
 ```sh
-# 模型不入 git，先拉一次（Poly Pizza，CC-BY-4.0）
+# 下载本地模型资产（Poly Pizza，CC-BY-4.0）
 uv run python scripts/fetch_drone_model.py
 cargo run --release -p quad
 ```
@@ -21,7 +21,7 @@ cargo run --release -p quad
 | `Q` / `E` | 左偏航 / 右偏航 |
 | `R` | 复位到起点 |
 
-相机为第三人称追踪（机头后方偏上），只用偏航取向，不随俯仰/横滚翻滚。
+相机从机头后方偏上跟踪位置与偏航，保持画面竖直。
 
 ## 动力学（`src/quad.rs`）
 

@@ -166,6 +166,11 @@ fn delayed_candidate_must_match_current_measured_position() {
     );
     assert!(!adopt(result, &mut fsm, 0.9, Some(state())));
     assert!(fsm.manager.local().is_none());
+    assert_eq!(fsm.state(), ExecState::GenNewTraj);
+    match fsm.solve_kind(Some(state())).unwrap() {
+        SolveKind::Global(measured, _) => assert_eq!(measured.position, state().position),
+        SolveKind::Local(_) => panic!("handoff rejection must recover from measured position"),
+    }
 }
 
 #[test]

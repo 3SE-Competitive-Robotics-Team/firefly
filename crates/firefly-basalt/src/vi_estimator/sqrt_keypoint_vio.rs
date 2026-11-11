@@ -71,6 +71,7 @@ pub struct SqrtKeypointVioEstimator<S: BasaltScalar> {
     lambda_vee: S,
     pub stats_all: ExecutionStats,
     pub stats_sums: ExecutionStats,
+    solver_diagnostics: Option<super::vio_estimator::VioSolverDiagnostics>,
 }
 
 // Eigen Quaternion::setFromTwoVectors and the needed column of its 2x3
@@ -328,11 +329,14 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         reason = "Preserves the original nested LM acceptance and retry control flow"
     )]
     pub fn optimize(&mut self) -> Result<()> {
+        self.solver_diagnostics = None;
         if !self.opt_started && self.ba.frame_states.len() <= 4 {
             return Ok(());
         }
         self.opt_started = true;
         let order = self.full_order();
+        let costs_before = log::log_enabled!(target: "vio-solver", log::Level::Debug)
+            .then(|| self.objective_costs(&order));
         self.lambda = S::from_f64_lossy(self.config.vio_lm_lambda_initial);
         let timer = Timer::default();
         let mut stats = ExecutionStats::default();
@@ -364,6 +368,8 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         let mut iteration = 0;
         let mut rejected = 0;
         let mut terminated = false;
+        let mut termination_code = 3.;
+        let mut last_step = 0.;
         while iteration <= self.config.vio_max_iterations && !terminated {
             let mut stage = Timer::default();
             let (before, valid) = linearization.linearize_problem(&self.ba);
@@ -411,6 +417,7 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
                     );
                 }
                 let step = inc.iter().fold(S::zero(), |m, v| m.max(v.abs()));
+                last_step = step.as_f64();
                 let (inertial, gyro, accel) = super::sc_ba_base::compute_imu_error(
                     &order,
                     &self.ba.frame_states,
@@ -442,6 +449,13 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
                     self.lambda_vee = S::from_f64_lossy(2.0);
                     terminated = (decrease > S::zero() && decrease < S::from_f64_lossy(1e-6))
                         || step < S::from_f64_lossy(1e-4);
+                    if terminated {
+                        termination_code = if step < S::from_f64_lossy(1e-4) {
+                            2.
+                        } else {
+                            1.
+                        };
+                    }
                     break;
                 }
                 self.lambda *= self.lambda_vee;
@@ -450,10 +464,23 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
                 rejected += 1;
                 if self.lambda > self.max_lambda {
                     terminated = true;
+                    termination_code = 4.;
                 }
             }
         }
         stats.add("optimize", timer.elapsed()).format("ms");
+        if let Some(costs_before) = costs_before {
+            self.solver_diagnostics = Some(super::vio_estimator::VioSolverDiagnostics {
+                costs_before,
+                costs_after: self.objective_costs(&order),
+                termination: [
+                    f64::from(iteration),
+                    f64::from(rejected),
+                    termination_code,
+                    last_step,
+                ],
+            });
+        }
         stats.add("num_it", f64::from(iteration)).format("count");
         stats
             .add("num_it_rejected", f64::from(rejected))
@@ -476,6 +503,28 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         Ok(())
     }
 
+    fn objective_costs(&self, order: &AbsOrderMap) -> [f64; 4] {
+        let (inertial, gyro, accel) = super::sc_ba_base::compute_imu_error(
+            order,
+            &self.ba.frame_states,
+            &self.imu_meas,
+            &self
+                .gyro_bias_sqrt_weight
+                .component_mul(&self.gyro_bias_sqrt_weight),
+            &self
+                .accel_bias_sqrt_weight
+                .component_mul(&self.accel_bias_sqrt_weight),
+            &self.g,
+        );
+        [
+            self.ba.compute_error(None, S::zero()),
+            inertial,
+            gyro + accel,
+            self.ba.compute_marg_prior_error(&self.marg_data),
+        ]
+        .map(BasaltScalar::as_f64)
+    }
+
     /// # Errors
     /// Propagates numerical linearization failures from the optimizer.
     pub fn optimize_and_marg(
@@ -493,12 +542,23 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
             .diagnostics
             .as_ref()
             .map(|_| (self.get_state().cast::<f64>(), self.frame_diagnostics()));
+        let yaw_before = (diagnostic_before.is_some()
+            && log::log_enabled!(target: "vio-gauge", log::Level::Debug))
+        .then(|| {
+            self.ba
+                .frame_poses
+                .keys()
+                .chain(self.ba.frame_states.keys())
+                .map(|&time| (time, self.ba.get_pose_state_with_lin(time).pose().rotation))
+                .collect::<BTreeMap<_, _>>()
+        });
         let optimize_begin = profile_clock_ns();
         self.optimize()?;
         let optimize_end = profile_stage(self.last_state_t_ns, "optimize", optimize_begin);
         if let (Some(queue), Some((before, mut data))) = (&outputs.diagnostics, diagnostic_before) {
             let after = self.get_state().cast::<f64>();
             data.residual_after = self.frame_residuals();
+            data.solver = self.solver_diagnostics.take();
             data.position_delta = (after.state.pose.t_w_i.translation.vector
                 - before.state.pose.t_w_i.translation.vector)
                 .into();
@@ -507,6 +567,26 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
                 * after.state.pose.t_w_i.rotation)
                 .scaled_axis()
                 .into();
+            data.yaw_updates = yaw_before.map(|poses| {
+                let updates: Vec<_> = poses
+                    .into_iter()
+                    .map(|(time, rotation)| {
+                        (self.ba.get_pose_state_with_lin(time).pose().rotation * rotation.inverse())
+                            .scaled_axis()
+                            .z
+                            .as_f64()
+                    })
+                    .collect();
+                let mean = updates.iter().sum::<f64>() / updates.len() as f64;
+                let variance =
+                    updates.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / updates.len() as f64;
+                [
+                    updates[updates.len() - 1],
+                    updates[0],
+                    mean,
+                    variance.sqrt(),
+                ]
+            });
             let _ = queue.send(data);
         }
         if let Some(queue) = &outputs.local_map {
@@ -970,6 +1050,7 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
             lambda_vee: S::from_f64_lossy(2.0),
             stats_all: ExecutionStats::default(),
             stats_sums: ExecutionStats::default(),
+            solver_diagnostics: None,
         }
     }
 
@@ -1466,6 +1547,8 @@ mod tests {
                 assert!(data.residual_after[1] < 1e-3);
                 assert!(Vector3::from(data.position_delta).norm() < 1e-5);
                 assert!(Vector3::from(data.velocity_delta).norm() < 1e-4);
+                assert!(data.yaw_updates.is_none());
+                assert!(data.solver.is_none());
             }
             assert!(estimator.opt_started);
             assert!(estimator.ba.frame_states.len() < 3);

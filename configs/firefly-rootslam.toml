@@ -1,7 +1,8 @@
 # Connects simulated Render stereo and Sim IMU to RootSLAM, then publishes to FC.
 # The rig calibration is derived from firefly-base::rig; override the Basalt VIO
 # tuning only when needed for the current simulator scene.
-[online]
-use_double = true
+precision = "float64"
+
+[vio]
 # Detection cells in pixels for the 320x240 stereo stream.
 optical_flow_detection_grid_size = 20

@@ -44,6 +44,7 @@ pub struct GridMap {
     clamp_max_log: f64,
     min_occupancy_log: f64,
     occupancy: Vec<f64>,
+    observed_free: Vec<bool>,
     inflate: Vec<u16>,
     count_hit: Vec<i16>,
     count_hit_and_miss: Vec<i16>,
@@ -123,6 +124,7 @@ impl GridMap {
             center_last: Index::zeros(),
             initialized: false,
             occupancy: vec![clamp_min_log; capacity],
+            observed_free: vec![false; capacity],
             inflate: vec![0; inf_capacity],
             count_hit: vec![0; capacity],
             count_hit_and_miss: vec![0; capacity],
@@ -368,6 +370,10 @@ impl GridMap {
             };
             self.count_hit[address] = 0;
             self.count_hit_and_miss[address] = 0;
+            // Occupancy starts at p_min upstream, so its numeric value alone cannot
+            // distinguish an unobserved cell from one traversed by a depth ray.
+            self.observed_free[address] =
+                hit == 0 && all > 0 && self.occupancy[address] < self.min_occupancy_log;
             if (update >= 0. && self.occupancy[address] >= self.clamp_max_log)
                 || (update <= 0. && self.occupancy[address] <= self.clamp_min_log)
             {
@@ -376,6 +382,14 @@ impl GridMap {
             self.occupancy[address] = (self.occupancy[address] + update)
                 .max(self.clamp_min_log)
                 .min(self.clamp_max_log);
+        }
+        // Rays start at the sensor, but upstream's reverse iterator excludes that
+        // cell. Retain this free-space evidence separately from its probability votes.
+        if !self.projected.is_empty() {
+            let address = self.address(self.position_to_index(self.camera_position));
+            if self.occupancy[address] < self.min_occupancy_log {
+                self.observed_free[address] = true;
+            }
         }
     }
 
@@ -412,6 +426,7 @@ impl GridMap {
             let id = self.position_to_index(point);
             let address = self.address(id);
             self.occupancy[address] = self.clamp_max_log;
+            self.observed_free[address] = false;
             if self.inflate[self.inf_address(id)] < OBSTACLE_FLAG
                 && self.occupancy[address] >= self.min_occupancy_log
             {
@@ -458,6 +473,7 @@ impl GridMap {
                         // Upstream's unsigned underflow recovery, with the same reset scope.
                         if self.inflate[address] > 65000 {
                             self.occupancy.fill(self.clamp_min_log);
+                            self.observed_free.fill(false);
                             self.inflate.fill(0);
                         }
                     }
@@ -520,6 +536,12 @@ impl GridMap {
     #[must_use]
     pub fn occupancy_buffer(&self) -> &[f64] {
         &self.occupancy
+    }
+
+    /// Free ray evidence in x-fastest ring-buffer order. Fading never creates evidence.
+    #[must_use]
+    pub fn observed_free_buffer(&self) -> (&[bool], [i32; 3], [i32; 3]) {
+        (&self.observed_free, self.size.into(), self.origin.into())
     }
     #[must_use]
     pub fn inflation_buffer(&self) -> &[u16] {

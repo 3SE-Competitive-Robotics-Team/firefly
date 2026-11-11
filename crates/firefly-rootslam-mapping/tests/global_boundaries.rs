@@ -2,7 +2,9 @@ use firefly_calibration::calibration::Calibration;
 use firefly_calibration::camera::generic_camera::GenericCamera;
 use firefly_calibration::camera::pinhole_camera::PinholeCamera;
 use firefly_rootslam_mapping::{
-    global_optimization::{OptimizationOptions, Precision, optimize_global},
+    global_optimization::{
+        DampingCoordinates, LinearSolver, OptimizationOptions, Precision, optimize_global,
+    },
     map::{MapKeyframe, MapLandmark, MapObservation, MapSnapshot, ObservationKey},
 };
 use nalgebra::{DMatrix, DVector, Isometry3, Vector2, Vector3, Vector4};
@@ -61,7 +63,15 @@ fn scene() -> (MapSnapshot, Calibration<f64>) {
 fn one_global_landmark_step_matches_independent_augmented_svd() {
     let (map, calibration) = scene();
     let initial = map.landmarks[&10].position;
-    for lambda in [1e-6_f64, 1e-2, 10., 1e4] {
+    for (linear_solver, damping_coordinates, lambda) in [
+        (LinearSolver::Rootba, DampingCoordinates::Physical),
+        (LinearSolver::Rootba, DampingCoordinates::Scaled),
+        (LinearSolver::LsqrReference, DampingCoordinates::Physical),
+    ]
+    .into_iter()
+    .flat_map(|(solver, coordinates)| {
+        [1e-6_f64, 1e-2, 10., 1e4].map(|lambda| (solver, coordinates, lambda))
+    }) {
         let mut jacobian = DMatrix::zeros(7, 3);
         let mut residual = DVector::zeros(7);
         for camera in 0..2 {
@@ -81,8 +91,18 @@ fn one_global_landmark_step_matches_independent_augmented_svd() {
             jacobian[(camera * 2 + 1, 1)] = 300. / z;
             jacobian[(camera * 2 + 1, 2)] = -300. * y / (z * z);
         }
+        let mut scaling = Vector3::repeat(1.0);
         for axis in 0..3 {
-            jacobian[(4 + axis, axis)] = lambda.sqrt();
+            if linear_solver == LinearSolver::Rootba {
+                scaling[axis] = 1.0 / (1e-5 + jacobian.column(axis).norm());
+                jacobian.column_mut(axis).scale_mut(scaling[axis]);
+            }
+            jacobian[(4 + axis, axis)] = lambda.sqrt()
+                * if damping_coordinates == DampingCoordinates::Physical {
+                    scaling[axis]
+                } else {
+                    1.0
+                };
         }
         let svd = jacobian.clone().svd(true, true);
         let mut reference = svd.solve(&(-&residual), 1e-14).unwrap();
@@ -94,6 +114,8 @@ fn one_global_landmark_step_matches_independent_augmented_svd() {
         }
         assert!((jacobian.transpose() * (&jacobian * &reference + &residual)).norm() < 1e-10);
         let options = OptimizationOptions {
+            linear_solver,
+            damping_coordinates,
             precision: Precision::Float64,
             max_iterations: 1,
             initial_damping: lambda,
@@ -103,13 +125,14 @@ fn one_global_landmark_step_matches_independent_augmented_svd() {
         };
         let result = optimize_global(&map, &calibration, &options).unwrap();
         assert_eq!(result.accepted_steps, 1);
-        let difference = result.points[&10] - initial - reference.fixed_rows::<3>(0);
+        let returned = (result.points[&10] - initial).component_div(&scaling);
+        let difference =
+            result.points[&10] - initial - reference.fixed_rows::<3>(0).component_mul(&scaling);
         assert!(
             difference.norm() < 1e-10,
             "lambda={lambda}, difference={difference:?}, svd_gradient={}, returned_gradient={}",
             (jacobian.transpose() * (&jacobian * &reference + &residual)).norm(),
-            (jacobian.transpose() * (&jacobian * (result.points[&10] - initial) + &residual))
-                .norm()
+            (jacobian.transpose() * (&jacobian * returned + &residual)).norm()
         );
     }
 }
@@ -131,6 +154,38 @@ fn positive_damping_that_rounds_to_zero_in_storage_precision_is_rejected() {
 }
 
 #[test]
+fn objective_overflow_in_solver_precision_is_rejected() {
+    let (mut map, calibration) = scene();
+    for observation in map
+        .landmarks
+        .get_mut(&10)
+        .unwrap()
+        .observations
+        .values_mut()
+    {
+        observation.pixel = Vector2::repeat(1e20);
+    }
+    let options = OptimizationOptions {
+        precision: Precision::Float32,
+        max_iterations: 1,
+        pose_graph_terms: false,
+        ..OptimizationOptions::default()
+    };
+    assert!(optimize_global(&map, &calibration, &options).is_err());
+    let double = optimize_global(
+        &map,
+        &calibration,
+        &OptimizationOptions {
+            precision: Precision::Float64,
+            ..options
+        },
+    )
+    .unwrap();
+    assert!(double.initial_cost.is_finite());
+    assert!(double.initial_cost > f64::from(f32::MAX));
+}
+
+#[test]
 fn nonfinite_measurement_is_not_returned_as_a_successful_optimization() {
     let (mut map, calibration) = scene();
     map.landmarks
@@ -146,7 +201,7 @@ fn nonfinite_measurement_is_not_returned_as_a_successful_optimization() {
 }
 
 #[test]
-fn proposal_crossing_pinhole_projection_domain_is_rejected_without_committing() {
+fn cost_increasing_step_is_rejected_without_committing() {
     let (mut map, calibration) = scene();
     for observation in map
         .landmarks
@@ -172,6 +227,84 @@ fn proposal_crossing_pinhole_projection_domain_is_rejected_without_committing() 
     assert_eq!(result.points[&10], map.landmarks[&10].position);
     assert_eq!(result.initial_cost, result.final_cost);
     assert!(!result.converged);
+}
+
+#[test]
+fn invalid_initial_camera_domain_is_an_error_instead_of_a_dropped_factor() {
+    let (mut map, calibration) = scene();
+    map.landmarks.get_mut(&10).unwrap().position.z = -4.0;
+    assert!(optimize_global(&map, &calibration, &OptimizationOptions::default()).is_err());
+}
+
+#[test]
+fn singular_projection_is_an_error_instead_of_a_dropped_factor() {
+    let (mut map, calibration) = scene();
+    map.landmarks.get_mut(&10).unwrap().position.z = 0.0;
+    assert!(optimize_global(&map, &calibration, &OptimizationOptions::default()).is_err());
+}
+
+#[test]
+fn single_view_landmarks_are_deferred_and_follow_their_host_correction() {
+    use firefly_rootslam_mapping::map::{MapPolicy, PersistentMap};
+    use firefly_rootslam_mapping::pose_graph::{EdgeKind, PoseGraphEdge};
+    let (mut map, calibration) = scene();
+    let mut moving = map.keyframes[&0].clone();
+    moving.id = 1;
+    moving.t_w_b = Isometry3::translation(0.5, 0.0, 0.0);
+    map.keyframes.insert(1, moving);
+    map.edges.push(PoseGraphEdge {
+        from: 0,
+        to: 1,
+        measurement: Isometry3::translation(1.0, 0.0, 0.0),
+        kind: EdgeKind::Temporal,
+        sqrt_information: nalgebra::SMatrix::identity(),
+    });
+    let expected = optimize_global(&map, &calibration, &OptimizationOptions::default()).unwrap();
+    let position = Vector3::new(0.5, 0.0, 1e-5);
+    map.landmarks.insert(
+        20,
+        MapLandmark {
+            id: 20,
+            host: 1,
+            position,
+            observations: BTreeMap::from([(
+                ObservationKey {
+                    keyframe: 1,
+                    camera: 0,
+                    feature: 20,
+                },
+                MapObservation {
+                    pixel: Vector2::new(100.0, 50.0),
+                },
+            )]),
+        },
+    );
+    let result = optimize_global(&map, &calibration, &OptimizationOptions::default()).unwrap();
+    assert!(
+        !result.points.contains_key(&20),
+        "single-view depth is unobservable"
+    );
+    assert_eq!(result.initial_cost, expected.initial_cost);
+    assert_eq!(result.final_cost, expected.final_cost);
+    assert_eq!(result.poses, expected.poses);
+    assert!(
+        result.points.contains_key(&10),
+        "same-rig stereo remains observable"
+    );
+    let mut invalid = map.clone();
+    let landmark = invalid.landmarks.get_mut(&20).unwrap();
+    let (mut key, observation) = landmark.observations.pop_first().unwrap();
+    key.camera = calibration.intrinsics.len();
+    landmark.observations.insert(key, observation);
+    assert!(optimize_global(&invalid, &calibration, &OptimizationOptions::default()).is_err());
+    let before = map.keyframes[&1].t_w_b.inverse() * nalgebra::Point3::from(position);
+    let mut persistent = PersistentMap::new(calibration, MapPolicy::paper_thresholds()).unwrap();
+    persistent.snapshot = map;
+    assert!(persistent.apply_updates(result.revision, &result.poses, &result.points));
+    let after = persistent.snapshot.keyframes[&1].t_w_b.inverse()
+        * nalgebra::Point3::from(persistent.snapshot.landmarks[&20].position);
+    assert!((before - after).norm() < 1e-12);
+    assert_eq!(persistent.snapshot.landmarks[&20].observations.len(), 1);
 }
 
 #[test]

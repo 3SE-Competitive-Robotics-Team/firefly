@@ -28,20 +28,12 @@ impl SceneSpec {
 pub const DEFAULT_SCENE: &str = "rmuc2027@1.0.0";
 
 /// 已接入的场地版本。新增版本：目录 `models/<赛季>/v<版本>/` 加一行。
-const SCENES: &[SceneSpec] = &[
-    SceneSpec {
-        name: "rmuc2026@2.0.0",
-        dir: "rmuc2026/v2.0.0",
-        visual: "field.glb",
-        start: [-13.0, 0.0, 0.405],
-    },
-    SceneSpec {
-        name: "rmuc2027@1.0.0",
-        dir: "rmuc2027/v1.0.0",
-        visual: "field.glb",
-        start: [-13.0, 0.0, 0.405],
-    },
-];
+const SCENES: &[SceneSpec] = &[SceneSpec {
+    name: "rmuc2027@1.0.0",
+    dir: "rmuc2027/v1.0.0",
+    visual: "field.glb",
+    start: [-13.0, 0.0, 0.405],
+}];
 
 fn resolve(name: &str) -> Option<SceneSpec> {
     SCENES.iter().find(|spec| spec.name == name).copied()

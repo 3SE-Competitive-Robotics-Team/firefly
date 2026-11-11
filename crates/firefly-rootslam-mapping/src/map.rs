@@ -1,5 +1,4 @@
-//! Persistent map from `RootSLAM` §III-A. This is an independent implementation:
-//! the paper has not released the map code or its quality-ranking formula.
+//! Persistent map based on `RootSLAM` §III-A, with explicit culling and fusion policies.
 use crate::pose_graph::{EdgeKind, PoseGraphEdge};
 use firefly_basalt::{
     optical_flow::{OpticalFlowInput, OpticalFlowResult},
@@ -65,15 +64,15 @@ pub struct MapPolicy {
     pub redundant_observers: usize,
     pub max_keyframes: usize,
     pub cull_batch: usize,
-    /// The paper supplies no strong-covisibility threshold. `None` keeps all
-    /// positive covisibility edges; callers can choose a sparser graph.
+    /// Minimum shared observations for strong covisibility. `None` keeps all
+    /// positive edges; this threshold is a project policy.
     pub essential_min_shared: Option<usize>,
     /// Scale of the pose-graph residuals, the paper's `S_ab`.
     ///
     /// The reprojection residuals of the bundle adjustment are measured in
     /// pixels and the pose-graph residuals in metres and radians. This scale
-    /// brings both to a common unit; the paper does not publish its values.
-    /// Omitting it derives the scale from the camera model.
+    /// brings both to pixel-equivalent units. The default derives the scale
+    /// from the camera model.
     #[serde(default)]
     pub edge_information: crate::edge_information::EdgeInformation,
 }
@@ -114,8 +113,7 @@ pub struct PersistentMap {
     pub calibration: Calibration<f64>,
     /// Square root information matrix shared by every edge of the graph.
     ///
-    /// The map owns the pose-graph scale so that the odometry, covisibility
-    /// and loop edges cannot drift apart from each other.
+    /// The map owns a common scale for odometry, covisibility and loop edges.
     edge_sqrt_information: SMatrix<f64, 6, 6>,
     aliases: BTreeMap<LandmarkId, LandmarkId>,
     removed_keyframes: BTreeSet<KeyframeId>,
@@ -434,18 +432,9 @@ impl PersistentMap {
             return;
         };
         let relative = frame.t_w_b.inverse() * self.snapshot.keyframes[&id].t_w_b;
-        // Graph contraction: reconnect retained temporal/loop neighbors to the
-        // trajectory parent by folding the removed keyframe into the edge.
-        // `T_parent<-neighbor = T_parent<-removed * T_removed<-neighbor` keeps
-        // the original measurement alive. Using the current estimate of
-        // `T_parent<-neighbor` instead would produce an edge that is satisfied
-        // by construction, which silently discards a validated loop closure:
-        // its measurement is the gP3P estimate and not a function of the
-        // current poses.
-        // The removed keyframe enters the fold through its current estimate
-        // because that estimate already carries the correction of the closed
-        // loops. Folding the raw odometry measurement instead would drag the
-        // map back towards the drifted chain.
+        // Contract through the corrected parent-to-removed estimate while
+        // preserving each temporal/loop measurement:
+        // T_parent_neighbor = T_parent_removed * T_removed_neighbor.
         let neighbors: Vec<_> = self
             .snapshot
             .edges
@@ -795,7 +784,7 @@ impl PersistentMap {
         }
     }
     /// Fusion retains the point with most observations, tie-broken by ID.
-    /// This deterministic tie-break is an implementation choice, not paper text.
+    /// The ID tie-break gives deterministic fusion across equal observation counts.
     pub fn fuse_landmarks(&mut self, first: LandmarkId, second: LandmarkId) -> Option<LandmarkId> {
         let first = self.canonical_landmark(first);
         let second = self.canonical_landmark(second);

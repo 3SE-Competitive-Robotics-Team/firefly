@@ -153,6 +153,22 @@ pub fn run_imu<A: ImuAdapter>(
                     firefly_observability::set_sim_time(packet.timestamp);
                     last_time = Some(time);
                     adapter.enqueue(sample)?;
+                    if log::log_enabled!(target: "vio-input", log::Level::Debug)
+                        && let Some(viz) = publishers.viz()
+                    {
+                        publish_scalar_diagnostic(
+                            viz,
+                            packet.timestamp,
+                            "vio/input/gyro_rad_s",
+                            sample.gyro.into(),
+                        );
+                        publish_scalar_diagnostic(
+                            viz,
+                            packet.timestamp,
+                            "vio/input/accel_m_s2",
+                            sample.accel.into(),
+                        );
+                    }
                     watermark.store(time);
                     if let Some(output) = adapter.predict(sample)? {
                         publishers.publish(&output, packet.timestamp)?;

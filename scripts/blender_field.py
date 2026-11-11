@@ -3,7 +3,7 @@
 headless 调用：
 ```sh
 /Applications/Blender.app/Contents/MacOS/Blender --background --python scripts/blender_field.py -- \
-  models/rmuc2026/v2.0.0/derived/raw/field_raw.npz models/rmuc2026/v2.0.0/field.glb
+  models/rmuc2027/v1.0.0/derived/raw/field_raw.npz models/rmuc2027/v1.0.0/field.glb
 ```
 
 几何：**不做减面、不做焊接**。CAD 逐 solid 三角化时顶点只在单个 BRep 面内共享
@@ -11,11 +11,15 @@ headless 调用：
 不粘连。建面前剔除零面积退化三角（渲染不产生像素，只会污染法线），其余拓扑原样
 进入 glb。
 
-材质：CAD 逐面色（无颜色记默认灰）；低饱和（灰/白）厚面保留相对明度、线性映射进
-冷石板蓝灰 [`BODY_DARK`, `BODY_LIGHT`]（对照现场取色 `#3D4867`），细长面（划线/
-棱边）与近纯白面保持 [`LINE_RGB`] 白；饱和色（标线/灯饰）原样保留并按
+材质：CAD 逐面色（无颜色记默认灰）；低饱和（灰/白）表面保留相对明度、线性映射进
+冷石板蓝灰 [`BODY_DARK`, `BODY_LIGHT`]（对照现场取色 `#3D4867`），CAD 近纯白面
+保持 [`WHITE_RGB`] 白；饱和色（标线/灯饰）原样保留并按
 [`is_emissive`] 标自发光。调色板取
 全部去重色，不做量化丢色。
+
+已登记的场地表面配置绑定原始网格 SHA-256 与零件 ID：地面和平台的中性体面使用
+独立 PVC 纹理，明确标白和彩色的 CAD 面保留原有几何与颜色，并按普通涂装反射光线。
+这些涂装不参与灯具自发光；纹理和粗糙度是外观近似，不是实测光学材质。
 
 微表面纹理：程序化可平铺噪声（[`DETAIL_SIZE`]²，np.roll 环绕无缝）按世界空间三
 平面投影生成 UV（[`UV_TILE`] 米一周期），进体面的 Base Color（乘性微变化）与
@@ -30,6 +34,8 @@ Roughness（[`ROUGH_LO`, `ROUGH_HI`]）表现大平面的粗糙度变化。灯�
 from __future__ import annotations
 
 import sys
+import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -41,15 +47,9 @@ BODY_DARK = (0.040, 0.045, 0.060)
 BODY_LIGHT = (0.150, 0.165, 0.200)
 #: 饱和度阈值（max-min 小于此值按灰/白体处理）。
 SAT_THRESHOLD = 0.15
-#: 细长比低于此值的低饱和面判为划线候选（面积 / 最长边²）。
-LINE_SLENDERNESS = 0.02
-#: 划线还必须近水平（|法线 z| 下限）且贴近地面（z 上限，米）：否则建筑竖棱、
-#: 管道上的细长面也会被判为划线变白（并出现白斑/破面观感）。
-LINE_NZ_MIN = 0.7
-LINE_Z_MAX = 0.7
-#: 划线与纯白面的体色（线性 sRGB）。
-LINE_RGB = (0.9, 0.9, 0.9)
-#: 近纯白判据（饱和度、明度上限）。
+#: CAD 近纯白面的体色（线性 sRGB）；颜色分类不依赖三角剖分。
+WHITE_RGB = (0.9, 0.9, 0.9)
+#: 近纯白判据（饱和度上限、明度下限）。
 WHITE_SAT = 0.03
 WHITE_LUM = 0.95
 #: 未着色面（CAD 无 Surf 色，装配匿名副本）的体色。
@@ -76,6 +76,127 @@ ROUGH_LO = 0.16
 ROUGH_HI = 0.60
 
 
+def surface_profile(raw_path: Path) -> dict | None:
+    """Resolve authored surface paint only for the exact reviewed CAD mesh."""
+    with raw_path.open("rb") as stream:
+        fingerprint = hashlib.file_digest(stream, "sha256").hexdigest()
+    for path in sorted((Path(__file__).parent / "field_surfaces").glob("*.json")):
+        profile = json.loads(path.read_text())
+        if profile["raw_sha256"] == fingerprint:
+            return profile
+    return None
+
+
+def surface_atlas(profile: dict, surface: str, width: int = 4096) -> np.ndarray:
+    """World-XY PVC albedo; actual markings remain in the CAD surface colors."""
+    xmin, ymin, xmax, ymax = profile["bounds_xy_m"]
+    height = round(width * (ymax - ymin) / (xmax - xmin))
+    x = xmin + (np.arange(width, dtype=np.float32) + 0.5) * (xmax - xmin) / width
+    y = ymin + (np.arange(height, dtype=np.float32) + 0.5) * (ymax - ymin) / height
+    rng = np.random.default_rng(DETAIL_SEED)
+    noise = np.zeros((height, width), dtype=np.float32)
+    # Broad PVC mottling remains visible at sensor resolution; fine grain has
+    # low contrast and is not used to manufacture point features.
+    for cells, weight in [(24, 0.16), (96, 0.09), (384, 0.025)]:
+        low = rng.random((cells, cells)).astype(np.float32) - 0.5
+        horizontal = np.array(
+            [
+                np.interp(np.linspace(0, cells - 1, width), np.arange(cells), row)
+                for row in low
+            ],
+            dtype=np.float32,
+        )
+        layer = np.array(
+            [
+                np.interp(np.linspace(0, cells - 1, height), np.arange(cells), col)
+                for col in horizontal.T
+            ],
+            dtype=np.float32,
+        ).T
+        noise += weight * layer * (1.0 if surface == "platform" else 0.35)
+    color = np.asarray(profile["palette_srgb"][surface], dtype=np.float32)
+    atlas = np.clip(color[None, None, :] + noise[:, :, None], 0, 1)
+    if surface == "platform":
+        joints = (np.mod(x - xmin, 1.2)[None, :] < 0.012) | (
+            np.mod(y - ymin, 1.2)[:, None] < 0.012
+        )
+        atlas[joints] *= 0.92
+
+    return atlas
+
+
+def textured_faces(vertices, faces, parts, colors, profile):
+    """Texture only upward neutral body surfaces; preserve explicit white and colored paint."""
+    tri = vertices[faces]
+    normal = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    upward = normal[:, 2] > 0.5 * np.linalg.norm(normal, axis=1)
+    white = (np.ptp(colors, axis=1) < WHITE_SAT) & (colors.mean(axis=1) > WHITE_LUM)
+    neutral = (np.ptp(colors, axis=1) < SAT_THRESHOLD) & (colors[:, 0] >= 0) & ~white
+    return {
+        kind: np.isin(parts, profile[kind + "_parts"]) & upward & neutral
+        for kind in ("ground", "platform")
+    }
+
+
+def add_surface_materials(mesh, vertices, faces, parts, colors, profile):
+    import bpy
+
+    masks = textured_faces(vertices, faces, parts, colors, profile)
+    xmin, ymin, xmax, ymax = profile["bounds_xy_m"]
+    surface_uv = (vertices[faces][..., :2] - np.array([xmin, ymin])) / np.array(
+        [xmax - xmin, ymax - ymin]
+    )
+    # Reuse the existing UV channel; unrelated CAD geometry needs no second
+    # per-vertex attribute merely because the floor has a different texture.
+    layer = mesh.attributes["UVMap"]
+    uv = np.empty((len(faces), 3, 2), dtype=np.float32)
+    layer.data.foreach_get("vector", uv.ravel())
+    selected = masks["ground"] | masks["platform"]
+    uv[selected] = surface_uv[selected]
+    layer.data.foreach_set("vector", uv.ravel())
+    indices = np.empty(len(faces), dtype=np.int32)
+    mesh.polygons.foreach_get("material_index", indices)
+    for kind, mask in masks.items():
+        atlas = surface_atlas(profile, kind)
+        h, w, _ = atlas.shape
+        rgba = np.ones((h, w, 4), dtype=np.float32)
+        rgba[:, :, :3] = atlas
+        img = bpy.data.images.new("field_" + kind, width=w, height=h, alpha=False)
+        img.colorspace_settings.name = "sRGB"
+        img.pixels.foreach_set(rgba.ravel())
+        img.pack()
+        mat = bpy.data.materials.new("painted_" + kind)
+        mat.use_nodes = True
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+        bsdf = nodes.get("Principled BSDF")
+        bsdf.inputs["Roughness"].default_value = 0.72 if kind == "ground" else 0.62
+        tex = nodes.new("ShaderNodeTexImage")
+        tex.image = img
+        tex.extension = "EXTEND"
+        coords = nodes.new("ShaderNodeUVMap")
+        coords.uv_map = "UVMap"
+        links.new(coords.outputs["UV"], tex.inputs["Vector"])
+        links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+        indices[mask] = len(mesh.materials)
+        mesh.materials.append(mat)
+    # Painted CAD markings reflect light; only the separate fixture materials
+    # use the original emissive classification.
+    region = np.isin(parts, profile["ground_parts"] + profile["platform_parts"])
+    white = (np.ptp(colors, axis=1) < WHITE_SAT) & (colors.mean(axis=1) > WHITE_LUM)
+    marks = region & (white | (np.ptp(colors, axis=1) >= SAT_THRESHOLD))
+    for i, color in enumerate(np.unique(colors[marks], axis=0)):
+        mat = bpy.data.materials.new("surface_paint_" + str(i))
+        mat.use_nodes = True
+        bsdf = mat.node_tree.nodes.get("Principled BSDF")
+        rgb = remap_body(color[None, :])[0]
+        bsdf.inputs["Base Color"].default_value = (*rgb, 1.0)
+        bsdf.inputs["Roughness"].default_value = 0.7
+        indices[marks & np.all(colors == color, axis=1)] = len(mesh.materials)
+        mesh.materials.append(mat)
+    mesh.polygons.foreach_set("material_index", indices)
+
+
 def is_emissive(rgb: tuple[float, float, float]) -> bool:
     """高饱和且以单通道为主（红/蓝/绿灯饰）。"""
     r, g, b = (float(c) for c in rgb)
@@ -84,12 +205,12 @@ def is_emissive(rgb: tuple[float, float, float]) -> bool:
     return r > 1.5 * max(g, b) or b > 1.5 * max(r, g) or g > 1.5 * max(r, b)
 
 
-def remap_body(colors: np.ndarray, line: np.ndarray) -> np.ndarray:
+def remap_body(colors: np.ndarray) -> np.ndarray:
     """逐面颜色 → 体色。
 
-    - 低饱和厚面（面板/地面）：保留相对明度，映射进冷石板蓝灰 [`BODY_DARK`,
+    - 低饱和面（面板/地面）：保留相对明度，映射进冷石板蓝灰 [`BODY_DARK`,
       `BODY_LIGHT`]；饱和色（标线/灯饰）原样保留。
-    - 低饱和贴地划线（`line`，见 [`line_mask`]）与近纯白面：保持 [`LINE_RGB`]。
+    - CAD 近纯白面：保持 [`WHITE_RGB`]；同色表面使用同一材质。
     - 无颜色面：默认体色。
 
     必须在建调色板之前做——否则大片 off-white 会落到最近的饱和色项上。
@@ -103,33 +224,10 @@ def remap_body(colors: np.ndarray, line: np.ndarray) -> np.ndarray:
     dark = np.asarray(BODY_DARK)
     body = dark + t[:, None] * (np.asarray(BODY_LIGHT) - dark)
     out[low] = body[low]
-    white = low & (line | ((sat < WHITE_SAT) & (lum > WHITE_LUM)))
-    out[white] = LINE_RGB
+    white = (sat < WHITE_SAT) & (lum > WHITE_LUM)
+    out[white] = WHITE_RGB
     out[uncolored] = DEFAULT_RGB
     return out
-
-
-def line_mask(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
-    """划线掩码：细长（`面积/最长边² < LINE_SLENDERNESS`）**且**近水平
-    （`|nz| > LINE_NZ_MIN`）**且**贴近地面（`z < LINE_Z_MAX`）的面。
-
-    三个条件缺一不可——只按细长判会把建筑竖棱/管道细面也变白。
-    """
-    tri = vertices[faces]
-    e = np.stack(
-        (
-            np.linalg.norm(tri[:, 1] - tri[:, 0], axis=1),
-            np.linalg.norm(tri[:, 2] - tri[:, 1], axis=1),
-            np.linalg.norm(tri[:, 0] - tri[:, 2], axis=1),
-        ),
-        axis=1,
-    )
-    n = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
-    area = 0.5 * np.linalg.norm(n, axis=1)
-    slender = area / (e.max(axis=1) ** 2 + 1e-12) < LINE_SLENDERNESS
-    nz = np.abs(n[:, 2]) / (np.linalg.norm(n, axis=1) + 1e-12)
-    z = tri[:, :, 2].mean(axis=1)
-    return slender & (nz > LINE_NZ_MIN) & (z < LINE_Z_MAX)
 
 
 def build_palette(colors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -274,11 +372,12 @@ def main() -> None:
         flush=True,
     )
 
-    line = line_mask(vertices, faces)
-    body = remap_body(face_colors, line)
+    body = remap_body(face_colors)
     palette, face_palette = build_palette(body)
     n_emissive = sum(1 for rgb in palette if is_emissive(tuple(rgb)))
-    print(f"[blender_field] palette {len(palette)}（emissive {n_emissive}）", flush=True)
+    print(
+        f"[blender_field] palette {len(palette)}（emissive {n_emissive}）", flush=True
+    )
 
     bpy.ops.wm.read_factory_settings(use_empty=True)
 
@@ -309,6 +408,15 @@ def main() -> None:
 
     add_materials(mesh, palette, base_img, rough_img)
     mesh.polygons.foreach_set("material_index", face_palette)
+    profile = surface_profile(npz_path)
+    if profile is not None:
+        add_surface_materials(
+            mesh, vertices, faces, data["part"][~degenerate], face_colors, profile
+        )
+        print(
+            f"[blender_field] surface profile: {profile['scene']} ({profile['scope']})",
+            flush=True,
+        )
     mesh.update()
 
     obj = bpy.data.objects.new("field", mesh)

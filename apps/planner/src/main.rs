@@ -1,12 +1,12 @@
-//! planner 接入：Navigation + 深度/目标 → 自持占据地图 + FSM → 完整轨迹。
+//! planner 接入：Odometry + 深度/目标 → 自持占据地图 + FSM → 完整轨迹。
 //! FSM 为 100Hz，安全检查为 20Hz；`--traj-server` 启动独立的 100Hz 轨迹输出进程。
-//! Navigation 失联或无效状态锁存停止输出，坐标修正使旧版本轨迹立即失效。
+//! Odometry 失联或无效状态锁存停止输出。
 //! 地图融合超时触发急停并禁用 fail-safe；真值不进入规划状态链路。
 
 mod config;
 mod depth_mapping;
 mod map_input;
-mod navigation;
+mod odometry;
 mod output;
 mod scene;
 mod state_input;
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use fastrace::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_map::{GridMap, MapFile, Plane, VirtualWall, VoxelState};
+use firefly_map::{GridMap, Plane, VirtualWall, VoxelState};
 use firefly_observability::init as init_observability;
 use firefly_planner::worker::{MapVersion, PlanningWorker};
 use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager, ReplanFsm};
@@ -35,7 +35,7 @@ use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetRunResult;
 use nalgebra::Vector3;
 
-use crate::scene::{human_voxels, parse_vec3};
+use crate::scene::parse_vec3;
 use crate::state_input::StateInput;
 
 /// 主循环频率（官方 `exec_timer` 0.01s）。
@@ -56,7 +56,6 @@ fn default_config() -> PathBuf {
 }
 
 struct Args {
-    map: Option<PathBuf>,
     config: PathBuf,
     start: [f64; 3],
     goal: Option<[f64; 3]>,
@@ -68,7 +67,6 @@ struct Args {
 fn parse_args() -> Result<Args> {
     let mut it = std::env::args().skip(1);
     let mut args = Args {
-        map: None,
         config: default_config(),
         start: [0.0; 3],
         // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
@@ -78,11 +76,6 @@ fn parse_args() -> Result<Args> {
     };
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--map" => {
-                args.map = Some(PathBuf::from(it.next().ok_or_else(|| {
-                    Error::new(ErrorKind::InvalidArgument, "missing --map value")
-                })?));
-            }
             "--config" => {
                 args.config = PathBuf::from(it.next().ok_or_else(|| {
                     Error::new(ErrorKind::InvalidArgument, "missing --config value")
@@ -133,15 +126,13 @@ struct App {
     republish_trajectory: bool,
     /// 管理器行为参数（来自配置，启动日志展示）。
     manager_options: ManagerOptions,
+    view_half_angle: f64,
     /// 可视化发布端（经 `Firefly/Viz` 话题，`mimir` 进程统一写 rerun）。
     viz_pub: Option<VizPublisher>,
     /// 日志聚合句柄（主循环作用域持有，每 tick 传给 `pump_log_ipc`；
     /// 发布端只活在创建线程，无跨线程触碰，见 `firefly-observability`）。
     log_ipc: firefly_observability::LogIpc,
-    map_file: Option<MapFile>,
-    /// 上一帧动态障碍的全局格索引，窗口平移后仍指向原位置。
-    prev_dyn: Vec<[i64; 3]>,
-    /// 当前机体位置（地图系，米）：感知地图只发它附近的局部窗口。
+    /// 当前机体位置（odom 系，米）：感知地图只发它附近的局部窗口。
     perceived_center: Vector3<f64>,
     /// 各体素实体**上次发布的集合**：与当前集合做差得到增量（新增/删除）。
     voxel_state: HashMap<String, HashSet<[i32; 3]>>,
@@ -150,12 +141,11 @@ struct App {
     voxel_current: HashSet<[i32; 3]>,
     voxel_added: Vec<[i32; 3]>,
     voxel_removed: Vec<[i32; 3]>,
-    /// 待发布的占据索引缓冲（感知窗口 / 动态障碍共用各自的 Vec）。
+    /// 待发布的占据索引缓冲（感知窗口复用 Vec）。
     voxel_indices: Vec<[i32; 3]>,
-    motion_indices: Vec<[i32; 3]>,
-    /// 状态时钟（秒），只由通过校验的地图系里程计推进。
+    /// 状态时钟（秒），只由通过校验的局部里程计推进。
     t_sim: f64,
-    odom: navigation::NavigationReceiver,
+    odom: odometry::OdometryReceiver,
     state_input: StateInput,
     received_state: bool,
     /// 本拍是否拿到新鲜里程计：决定体素快照是否重扫（无状态时不扫）。
@@ -163,7 +153,6 @@ struct App {
     state_loss_reported: bool,
     initial_goal: Option<[f64; 3]>,
     depth: depth_mapping::DepthReceiver,
-    clearance: f64,
     map_input: map_input::MapInput,
     goal_sub: Option<Subscriber<GoalMessage>>,
     /// 强制停止订阅（对照官方 `mandatory_stop` topic；单进程仿真下由外部
@@ -186,21 +175,19 @@ impl App {
     /// 地图体素化 / 全局引导构造 / IPC 端口创建失败。
     #[allow(clippy::too_many_lines)]
     fn new(
-        map_file: Option<MapFile>,
         config: PlannerConfig,
         mapping: config::MappingOptions,
         manager_options: ManagerOptions,
         start: [f64; 3],
         goal: Option<[f64; 3]>,
     ) -> Result<Self> {
-        let mut grid = match &map_file {
-            Some(map) => map.to_grid_map(config.obstacle_clearance)?,
-            None => mapping.build(config.obstacle_clearance)?,
-        };
+        let mut grid = mapping.build(config.obstacle_clearance)?;
+        let [fx, _, cx, _] = mapping.depth.intrinsics;
+        let view_half_angle =
+            (cx.min(firefly_pubsub::camera::IMAGE_WIDTH as f64 - 1. - cx) / fx).atan();
         let depth_fusion =
             depth_mapping::DepthFusion::new(&grid, mapping.depth, config.obstacle_clearance)?;
-        grid = depth_mapping::collision_grid(grid, map_file.is_some())?;
-        let clearance = config.obstacle_clearance;
+        grid = depth_mapping::collision_grid(&grid)?;
         // 虚拟地面/天花板（对照官方 enable_virtual_wall）：任一配置存在即单独生效
         if config.virtual_ground.is_some() || config.virtual_ceiling.is_some() {
             grid.set_virtual_wall(VirtualWall {
@@ -221,9 +208,9 @@ impl App {
         // 进程共享节点：所有端口由它派生，进程退出时统一 Drop 释放 IPC 资源
         let node = create_node()?;
         let log_ipc = firefly_observability::init_ipc(&node, "planner");
-        // 地图系输入是必需端口；局部 VIO 不能替代它。
-        let odom = navigation::NavigationReceiver::start(map_file.is_some())
-            .map_err(|e| e.with_operation("创建规划器地图系里程计订阅"))?;
+        // 局部 VIO 是建图、规划与输出计时的唯一状态输入。
+        let odom = odometry::OdometryReceiver::start()
+            .map_err(|e| e.with_operation("创建规划器局部里程计订阅"))?;
         let depth = depth_mapping::DepthReceiver::start(depth_fusion, odom.history())?;
         let goal_sub = open_sub::<GoalMessage>(
             &node,
@@ -257,8 +244,8 @@ impl App {
             republish_trajectory: false,
             manager_options,
             viz_pub,
+            view_half_angle,
             log_ipc,
-            prev_dyn: Vec::new(),
             perceived_center: Vector3::zeros(),
             voxel_state: HashMap::new(),
             voxel_geometry: HashMap::new(),
@@ -266,8 +253,6 @@ impl App {
             voxel_added: Vec::new(),
             voxel_removed: Vec::new(),
             voxel_indices: Vec::new(),
-            motion_indices: Vec::new(),
-            map_file,
             t_sim: 0.0,
             state_input: StateInput::default(),
             received_state: false,
@@ -276,7 +261,6 @@ impl App {
             initial_goal,
             odom,
             depth,
-            clearance,
             map_input: map_input::MapInput::default(),
             goal_sub,
             stop_sub,
@@ -287,11 +271,11 @@ impl App {
         })
     }
 
-    fn poll_navigation(&mut self) -> Result<()> {
+    fn poll_odometry(&mut self) -> Result<()> {
         let (state, ctx) = self.odom.snapshot()?;
         self.state_input.replace_snapshot(state);
-        if let Some(navigation) = self.state_input.navigation() {
-            self.t_sim = navigation.odom.timestamp;
+        if let Some(odometry) = self.state_input.odometry() {
+            self.t_sim = odometry.timestamp;
             self.odom_trace = ctx
                 .is_traced()
                 .then(|| (ctx.trace_id(), ctx.span_id, ctx.sampled()));
@@ -302,7 +286,8 @@ impl App {
     /// 排空 odom/地图订阅：续接 trace span、锚定 sim 时钟、记录最新快照。
     #[fastrace::trace]
     fn poll_sensors(&mut self) -> Result<()> {
-        self.poll_navigation()?;
+        let started = Instant::now();
+        self.poll_odometry()?;
         if let Some(snapshot) = self.depth.take_snapshot()? {
             self.map_input.observe_local(snapshot)?;
         }
@@ -332,54 +317,11 @@ impl App {
                 self.pending_mandatory_stop = true;
             }
         }
+        log_slow_stage("sensors", started);
         Ok(())
     }
 
-    /// 动态障碍按仿真时钟插值，增量更新占据地图（静态体素保护）。
-    fn update_motion(&mut self) {
-        let Some(map_file) = &self.map_file else {
-            return;
-        };
-        if map_file.motions.is_empty() {
-            return;
-        }
-        let mut dyn_voxels = map_file.motion_voxels(self.t_sim, self.fsm.manager().map());
-        let map = self.fsm.manager_mut().map_mut();
-        for global in &self.prev_dyn {
-            if let Some(index) = map.window_index(*global) {
-                map.set_state(index, self.map_input.observed_state(*global));
-            }
-        }
-        {
-            let step = ((self.clearance - 1e-5) / map.resolution()).ceil().max(0.) as i64;
-            let mut expanded = HashSet::new();
-            for index in &dyn_voxels {
-                let global = map.global_index(*index);
-                for x in -step..=step {
-                    for y in -step..=step {
-                        for z in -step..=step {
-                            if let Some(index) =
-                                map.window_index([global[0] + x, global[1] + y, global[2] + z])
-                            {
-                                expanded.insert(index);
-                            }
-                        }
-                    }
-                }
-            }
-            dyn_voxels = expanded.into_iter().collect();
-        }
-        for idx in &dyn_voxels {
-            map.set_state(*idx, VoxelState::Occupied);
-        }
-        map.inflate_obstacles();
-        self.prev_dyn = dyn_voxels
-            .into_iter()
-            .map(|index| map.global_index(index))
-            .collect();
-    }
-
-    /// 执行回调：传感器 → 感知/动态地图 → 状态机 → 完整轨迹交付与可视化。
+    /// 执行回调：传感器 → 局部深度地图 → 状态机 → 完整轨迹交付与可视化。
     #[fastrace::trace]
     fn step(&mut self) -> Result<()> {
         self.exec_step()?;
@@ -413,28 +355,14 @@ impl App {
         let Some(snapshot) = self.state_input.current(Instant::now()) else {
             self.solver.cancel();
             if self.state_input.stopped() && !self.state_loss_reported {
-                log::error!("地图系里程计失联或无效，停止发布规划参考；恢复定位后须重启 planner");
+                log::error!("局部里程计失联或无效，停止发布规划参考；恢复定位后须重启 planner");
                 self.state_loss_reported = true;
             }
-            self.output.control(None, false)?;
+            self.output.control(false)?;
             return Ok(());
         };
         self.state_fresh = true;
         let measured = Some(snapshot.state);
-        let revision = self
-            .state_input
-            .navigation()
-            .map(|navigation| navigation.revision);
-        if self.state_input.take_revision_change() {
-            self.solver.cancel();
-            self.fsm.manager_mut().map_mut().clear_observations();
-            self.prev_dyn.clear();
-            self.fsm.invalidate_localization(now, snapshot.state)?;
-            self.published_trajectory = 0;
-            self.map_input.invalidate();
-            self.finished = false;
-            log::info!("地图修正版本变更：重建派生栅格并重新规划，任务目标保持地图坐标");
-        }
         if !self.received_state {
             self.fsm
                 .manager_mut()
@@ -443,27 +371,44 @@ impl App {
                 self.fsm.set_goal(now, measured, Vector3::from(goal))?;
             }
             self.received_state = true;
-            log::info!("地图系状态就绪，规划从实测位置开始");
+            log::info!("局部状态就绪，规划从实测位置开始");
         }
-        let navigation = self.state_input.navigation().unwrap();
-        if !self.synchronize_map(&navigation)? {
+        let odometry = self.state_input.odometry().unwrap();
+        if !self.synchronize_map(&odometry)? {
             self.solver.cancel();
-            self.output.control(revision, false)?;
+            self.output.control(false)?;
             return Ok(());
         }
         self.perceived_center = snapshot.state.position.coords;
+        self.fsm
+            .manager_mut()
+            .update_motion_context(firefly_planner::motion::MotionContext {
+                observed: self
+                    .map_input
+                    .observed()
+                    .expect("ready map has observation mask"),
+                measured_yaw: snapshot.orientation.euler_angles().2,
+                view_half_angle: self.view_half_angle,
+            });
 
         // 动态目标：收到新目标即重目标（重算全局路径 + 重置状态机），
         // 下一 tick 重新规划飞往新目标
         if let Some(goal) = self.pending_goal.take() {
+            if goal.has_yaw > 1 || !goal.yaw.is_finite() {
+                log::warn!("invalid goal heading");
+                return Ok(());
+            }
             let target = Vector3::new(goal.position_x, goal.position_y, goal.position_z);
             let repeated = (target - self.fsm.manager().goal().coords).norm() < 1e-6;
             match self.fsm.set_goal(now, measured, target) {
                 Ok(()) => {
+                    let heading_changed = self
+                        .fsm
+                        .set_goal_yaw((goal.has_yaw == 1).then_some(goal.yaw));
                     if !self.fsm.is_mandatory_stopped() {
                         self.output.goal_timestamp = goal.timestamp;
                         // 重复目标不重建轨迹；重发当前轨迹，让采样端看到同一目标身份。
-                        self.republish_trajectory = repeated;
+                        self.republish_trajectory = repeated && !heading_changed;
                     }
                     log::info!(
                         "目标更新 ({:.1},{:.1},{:.1})，重新规划中",
@@ -475,16 +420,16 @@ impl App {
                 Err(e) => log::warn!("目标 ({target:?}) 不可达，忽略：{e}"),
             }
         }
-        self.output.control(revision, true)?;
+        self.output.control(true)?;
         let mut report = self.fsm.exec_tick_deferred(now, measured);
         let map_version = MapVersion {
-            localization: navigation.revision,
+            localization: 0,
             geometry: self.fsm.manager().map().revision(),
         };
         report.replanned |= self.solver.tick(&mut self.fsm, now, measured, map_version);
         self.handoff_trajectory()?;
 
-        // 可视化：新轨迹 / 无人机位姿 / 动态障碍（经 Firefly/Viz 发布）
+        // 可视化：新轨迹 / 无人机位姿（经 Firefly/Viz 发布）
         if report.replanned
             && let Some(result) = self.fsm.manager().last_result()
         {
@@ -509,15 +454,6 @@ impl App {
             [q.i, q.j, q.k, q.w],
             now,
         );
-        if let Some(map_file) = &self.map_file {
-            let mut indices = std::mem::take(&mut self.motion_indices);
-            for m in &map_file.motions {
-                let p = m.position_at(now);
-                indices.extend(human_voxels(p[0], p[1]));
-            }
-            self.log_voxels("plan/motions", &indices, now);
-            self.motion_indices = indices;
-        }
         if report.finished {
             self.finished = true;
         }
@@ -525,23 +461,29 @@ impl App {
     }
 
     fn handoff_trajectory(&mut self) -> Result<()> {
-        self.poll_navigation()?;
-        if !self.state_input.navigation().is_some_and(|nav| {
-            !self.state_input.has_revision_change()
-                && !self.state_input.stopped()
+        self.poll_odometry()?;
+        if !self.state_input.odometry().is_some_and(|nav| {
+            !self.state_input.stopped()
                 && !self.depth.terminated()
                 && self
                     .map_input
                     .ready(&nav, Instant::now(), Duration::from_secs_f64(MAP_TIMEOUT))
         }) {
             self.solver.cancel();
-            self.output.control(None, false)?;
+            self.output.control(false)?;
             return Ok(());
         }
         if let Some(local) = self.fsm.manager().local()
             && (local.traj_id != self.published_trajectory || self.republish_trajectory)
         {
             self.output.trajectory(local)?;
+            if self.published_trajectory == 0 {
+                log::info!(
+                    "planner trajectory committed: trajectory={} goal_timestamp={}",
+                    local.traj_id,
+                    self.output.goal_timestamp
+                );
+            }
             self.published_trajectory = local.traj_id;
             self.republish_trajectory = false;
         }
@@ -550,15 +492,13 @@ impl App {
     }
 
     /// Execution and safety callbacks must query the same accepted map snapshot.
-    fn synchronize_map(
-        &mut self,
-        navigation: &firefly_pubsub::navigation::NavigationMessage,
-    ) -> Result<bool> {
+    fn synchronize_map(&mut self, odometry: &firefly_pubsub::odom::OdomMessage) -> Result<bool> {
+        let started = Instant::now();
         self.map_input
-            .prepare_region(self.fsm.manager_mut().map_mut(), navigation, true)?;
+            .prepare_region(self.fsm.manager_mut().map_mut(), odometry, true);
         if self.depth.terminated()
             || !self.map_input.ready(
-                navigation,
+                odometry,
                 Instant::now(),
                 Duration::from_secs_f64(MAP_TIMEOUT),
             )
@@ -566,8 +506,8 @@ impl App {
             return Ok(false);
         }
         self.map_input
-            .apply(self.fsm.manager_mut().map_mut(), navigation, true)?;
-        self.update_motion();
+            .apply(self.fsm.manager_mut().map_mut(), odometry, true)?;
+        log_slow_stage("map", started);
         Ok(true)
     }
 
@@ -581,30 +521,44 @@ impl App {
         }
         let Some(snapshot) = self.state_input.current(Instant::now()) else {
             self.solver.cancel();
-            self.output.control(None, false)?;
+            self.output.control(false)?;
             return Ok(());
         };
-        // 坐标修正和等待新鲜地图由执行回调完成，期间不检查旧轨迹。
-        if self.state_input.has_revision_change() {
-            self.solver.cancel();
-            self.output.control(None, false)?;
-            return Ok(());
-        }
         let now = self.t_sim;
         let measured = Some(snapshot.state);
-        // 地图超时急停（对应官方 checkCollisionCallback：有可执行轨迹且
-        // 未完成才触发急停）；等待新鲜地图时禁止碰撞重规划。
-        // 禁用 fail-safe 后保持急停，不用异步求解结果恢复执行。
-        let navigation = self.state_input.navigation().unwrap();
-        if !self.synchronize_map(&navigation)? {
+        // 地图超时使正在执行的轨迹进入急停；等待地图期间保持停止锁存，
+        // 撤销异步结果资格；深度超时或线程结束保持急停锁存。
+        let odometry = self.state_input.odometry().unwrap();
+        if !self.synchronize_map(&odometry)? {
             self.solver.cancel();
-            if self.fsm.manager().local().is_some() && !self.fsm.is_finished() {
+            if (self.depth.terminated()
+                || self.map_input.expired(
+                    &odometry,
+                    Instant::now(),
+                    Duration::from_secs_f64(MAP_TIMEOUT),
+                ))
+                && self.fsm.manager().local().is_some()
+                && !self.fsm.is_finished()
+            {
+                if !self.fsm.is_emergency() {
+                    log::warn!("深度输入过期或停止：锁存急停 t={now}");
+                }
                 self.fsm.trigger_emergency_stop_disable_failsafe();
             }
-            self.output.control(None, false)?;
+            self.output.control(false)?;
             return Ok(());
         }
 
+        self.fsm
+            .manager_mut()
+            .update_motion_context(firefly_planner::motion::MotionContext {
+                observed: self
+                    .map_input
+                    .observed()
+                    .expect("ready map has observation mask"),
+                measured_yaw: snapshot.orientation.euler_angles().2,
+                view_half_angle: self.view_half_angle,
+            });
         let report = self.fsm.safety_tick_deferred(now);
         if report.emergency_stop || self.fsm.is_mandatory_stopped() {
             self.solver.cancel();
@@ -640,7 +594,10 @@ impl App {
             .map_err(|e| Error::new(ErrorKind::Internal, format!("挂载安全定时器失败: {e:?}")))?;
         let on_tick = |attachment_id: WaitSetAttachmentId<ipc::Service>| {
             if attachment_id.has_event_from(&safety_guard) {
-                if let Err(error) = self.safety_step() {
+                let started = Instant::now();
+                let result = self.safety_step();
+                log_slow_stage("safety", started);
+                if let Err(error) = result {
                     log::warn!("安全检查失败：{error}");
                     return self.stop_failed_callback();
                 }
@@ -666,7 +623,9 @@ impl App {
                 None => Span::root("planner", SpanContext::random().sampled(false)),
             };
             let guard = root.set_local_parent();
+            let started = Instant::now();
             let step = self.step();
+            log_slow_stage("execution", started);
             drop(guard);
             drop(root);
             if let Err(error) = step {
@@ -678,7 +637,9 @@ impl App {
             }
             last_visualization = Instant::now();
             frame += 1;
+            let started = Instant::now();
             self.publish_collision_map(frame);
+            log_slow_stage("display", started);
             CallbackProgression::Continue
         };
 
@@ -699,7 +660,7 @@ impl App {
             self.map_input.observe_local(snapshot)?;
         }
         self.solver.cancel();
-        self.output.control(None, false)?;
+        self.output.control(false)?;
         log::info!(
             "进程退出：当前目标 {} 次重规划，仿真时长 {:.1}s，规划状态 {:?}，轨迹正常结束 {}",
             self.fsm.manager().replans(),
@@ -710,7 +671,7 @@ impl App {
         Ok(())
     }
 
-    /// Publish changes around fresh navigation, with periodic full resynchronization.
+    /// Publish changes around fresh odometry, with periodic full resynchronization.
     fn publish_collision_map(&mut self, frame: usize) {
         if !self.state_fresh {
             return;
@@ -734,7 +695,7 @@ impl App {
 
     fn stop_failed_callback(&mut self) -> CallbackProgression {
         self.solver.cancel();
-        if let Err(error) = self.output.control(None, false) {
+        if let Err(error) = self.output.control(false) {
             log::error!("停止规划输出失败：{error}");
             return CallbackProgression::Stop;
         }
@@ -809,11 +770,6 @@ impl App {
         msg.xyz = pos;
         msg.quat_xyzw = quat_xyzw;
         self.viz_publish(&msg);
-    }
-
-    /// 占据体素索引 → voxels 消息（体素中心 = 原点 + (idx+0.5)·尺寸）。
-    fn log_voxels(&mut self, entity: &str, indices: &[[i32; 3]], t: f64) {
-        self.publish_voxel_delta(entity, indices, [0.1, 0.1, 0.1], [0.0, 0.0, 0.0], t, false);
     }
 
     /// 局部窗口内的占据体素索引（`center` 为空则全量栅格），附带网格尺寸与原点。
@@ -997,12 +953,19 @@ fn emit_mandatory_stop() -> Result<()> {
     pub_.publish(MandatoryStopMessage { timestamp }).map(|_| ())
 }
 
+fn log_slow_stage(stage: &str, started: Instant) {
+    let elapsed = started.elapsed();
+    if elapsed >= Duration::from_millis(10) {
+        log::debug!(target: "planner-profile", "stage={stage} elapsed_ms={}", elapsed.as_secs_f64() * 1000.);
+    }
+}
+
 fn main() {
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
             eprintln!(
-                "{e}\n用法：planner [--traj-server] [--map <map.ffmap>] [--config configs/planner.toml] [--start x y z] [--goal x y z] [--mandatory-stop]\n\n--goal 可省略（悬停等待 `ffctl planner goal X Y Z` 动态目标）；--mandatory-stop 向 {MANDATORY_STOP_TOPIC} 发一条强制停止指令后退出"
+                "{e}\n用法：planner [--traj-server] [--config configs/planner.toml] [--start x y z] [--goal x y z] [--mandatory-stop]\n\n--goal 可省略（悬停等待 `ffctl planner goal X Y Z` 动态目标）；--mandatory-stop 向 {MANDATORY_STOP_TOPIC} 发一条强制停止指令后退出"
             );
             std::process::exit(2);
         }
@@ -1030,8 +993,7 @@ fn main() {
         }
     };
     if args.traj_server {
-        if let Err(error) = output::run(toml_cfg.config.yaw_hold, toml_cfg.config.heartbeat_timeout)
-        {
+        if let Err(error) = output::run(toml_cfg.config.heartbeat_timeout) {
             log::error!("轨迹输出失败：{error}");
             firefly_observability::flush();
             std::process::exit(1);
@@ -1039,19 +1001,9 @@ fn main() {
         firefly_observability::flush();
         return;
     }
-    let map_file = args
-        .map
-        .as_ref()
-        .map(MapFile::from_file)
-        .transpose()
-        .unwrap_or_else(|e| {
-            log::error!("加载显式场地地图失败：{e}");
-            std::process::exit(1);
-        });
     // 可视化发布端在 App::new 内随进程共享节点创建（经 Firefly/Viz 话题，
     // mimir 进程统一写 rerun）
     match App::new(
-        map_file,
         toml_cfg.config,
         toml_cfg.mapping,
         toml_cfg.manager,
@@ -1059,11 +1011,6 @@ fn main() {
         args.goal,
     ) {
         Ok(mut app) => {
-            // 静态先验一次性记录（体素索引收集在发布端完成）
-            let grid = app.fsm.manager().map().clone();
-            let mut indices = Vec::new();
-            let (size, origin) = App::occupied_indices(&grid, None, &mut indices);
-            app.publish_voxel_delta("plan/map", &indices, size, origin, 0.0, true);
             if let Err(e) = app.run() {
                 log::error!("planner 失败：{e}");
                 firefly_observability::pump_log_ipc(&app.log_ipc);

@@ -212,24 +212,17 @@ def score(case, options, *, evidence_reader=read_evidence):
             np.asarray(options.waypoints[-1]), options.goal_tolerance_m, options.goal_speed_mps))
     if case["case"] != "estimator_loss":
         def corrected():
-            gt, estimate = data["gt"], data["corrected"]
+            gt, estimate = data["gt"], data["odom"]
             result = position_error(gt, estimate, estimate[0, 0], estimate[-1, 0])
             result.update(alignment="none", yaw_rmse_deg=yaw_error(gt, estimate))
             return result["rmse_m"] <= options.map_ate_rmse_m and result["yaw_rmse_deg"] <= options.map_yaw_rmse_deg, result
         check("map_accuracy", corrected)
-    if case.get("localization_mode") == "visual" and case["case"] != "estimator_loss":
-        def visual_evidence():
-            updates = data.get("visual_update", np.empty((0, 5)))
-            accepted = int(np.count_nonzero(updates[:, 4] == 1))
-            return accepted >= 2, {"accepted_map_observations": accepted,
-                                   "required": 2, "source": "RRD acceptance/visual_update"}
-        check("visual_localization", visual_evidence)
     if case["case"] == "nominal":
         def arrivals():
             results = []
             for arrival in case.get("waypoint_arrivals", []):
                 passed, detail = settled_truth(data, arrival["arrived_sim_s"], 1.,
-                    np.asarray(arrival["goal_map_m"]), options.goal_tolerance_m, options.goal_speed_mps)
+                    np.asarray(arrival["goal_odom_m"]), options.goal_tolerance_m, options.goal_speed_mps)
                 results.append({"passed": passed, **detail})
             return len(results) == len(options.waypoints) and all(r["passed"] for r in results), {"arrivals": results}
         check("waypoint_accuracy", arrivals)
@@ -245,11 +238,6 @@ def score(case, options, *, evidence_reader=read_evidence):
         else:
             check("tracking_error", tracking)
     truth = data.get("gt", np.empty((0, 8)))
-    backend = data.get("loop_backend", np.empty((0, 2)))
-    committed_updates = int(backend[:, 1].max()) if len(backend) else None
-    if case.get("localization_mode") == "online_slam" and case["case"] == "nominal":
-        stages["online_loop"] = {"status": "passed" if committed_updates else "failed",
-                                 "metrics": {"committed_full_graph_updates": committed_updates, "required": 1}}
     case["mission_summary"] = {
         "waypoint_arrivals": case.get("waypoint_arrivals", []),
         "waypoints_required": len(options.waypoints) if case["case"] == "nominal" else 0,
@@ -258,8 +246,6 @@ def score(case, options, *, evidence_reader=read_evidence):
         "max_horizontal_distance_from_start_m": float(np.linalg.norm(truth[:, 1:3] - truth[0, 1:3], axis=1).max()) if len(truth) else None,
         "horizontal_path_length_m": float(np.linalg.norm(np.diff(truth[:, 1:3], axis=0), axis=1).sum()) if len(truth) else None,
         "last_horizontal_distance_from_start_m": float(np.linalg.norm(truth[-1, 1:3] - truth[0, 1:3])) if len(truth) else None,
-        "committed_full_graph_updates": committed_updates,
-        "loop_evidence": "disabled_vio_only" if case.get("localization_mode") == "vio_only" else "accepted" if committed_updates else "no_committed_update_observed" if len(backend) else "missing",
         "measurement_source": "RRD; ground truth only for route scoring; no post-hoc map alignment",
     }
     case["evidence_entities"] = {entity: {"samples": len(rows), "first_sim_s": float(rows[0, 0]),

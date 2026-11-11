@@ -18,7 +18,7 @@ def test_acceptance_injects_environment_and_disables_plant_state(entry, environm
     runner.assert_called_once_with(["--no-trace"], env_factory=environment, publish_plant_state=False)
 
 
-@pytest.mark.parametrize("scene_name", ["rmuc2026@2.0.0", "rmuc2027@1.0.0"])
+@pytest.mark.parametrize("scene_name", ["rmuc2027@1.0.0"])
 def test_sim_uses_injected_factory_with_configured_rates_and_scene(tmp_path, scene_name):
     class FactoryReached(Exception):
         pass
@@ -50,7 +50,7 @@ def test_invalid_sim_config_fails_before_environment_creation(config):
         decode_config(config)
 
 
-@pytest.mark.parametrize("contents", ['scnee = "rmuc2026@2.0.0"', 'scene = 2026'])
+@pytest.mark.parametrize("contents", ['scnee = "rmuc2027@1.0.0"', 'scene = 2027'])
 def test_scene_config_rejects_unknown_keys_and_invalid_types(tmp_path, contents):
     path = tmp_path / "scene.toml"
     path.write_text(contents)

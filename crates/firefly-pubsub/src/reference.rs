@@ -1,11 +1,12 @@
-//! 地图系规划参考消息（规划 → 飞控）。
+//! 规划参考消息（规划 → 飞控）。
 //!
 //! 轨迹输出进程把执行中轨迹的参考状态（位置/速度）发布到 `Firefly/Reference`，
-//! 飞控经 map←odom 变换转换到连续 odom 系。`#[repr(C)]` 定长零拷贝。
+//! 默认局部规划器直接输出 odom 参考，携带恒等变换快照。
+//! 通用外部参考可携带参考系←odom 快照，飞控将其转换到 odom。`#[repr(C)]` 定长零拷贝。
 
 use iceoryx2::prelude::*;
 
-/// 地图系参考话题（规划 → 飞控）。
+/// 参考话题（规划 → 飞控）。
 pub const REFERENCE_TOPIC: &str = "Firefly/Reference";
 
 /// 参考状态消息：轨迹在当前时刻的目标位置/速度。
@@ -15,7 +16,7 @@ pub const REFERENCE_TOPIC: &str = "Firefly/Reference";
 pub struct ReferenceMessage {
     /// 仿真时钟时间戳（秒）。
     pub timestamp: f64,
-    /// 参考位置 `p`（地图系，米）。
+    /// 参考位置 `p`（参考系，米）。
     pub position_x: f64,
     pub position_y: f64,
     pub position_z: f64,
@@ -31,7 +32,7 @@ pub struct ReferenceMessage {
     pub yaw: f64,
     /// 参考偏航角速度（rad/s）。
     pub yaw_dot: f64,
-    /// 与参考原子发布的 map←odom 快照，禁止使用较新回环修正解释旧参考。
+    /// 与参考原子发布的参考系←odom 快照；局部 planner 固定恒等且 `has_alignment=1`。
     pub alignment_translation: [f64; 3],
     pub alignment_rotation: [f64; 4],
     /// 1 使用消息快照；0 使用同刻配对的外部地图变换。

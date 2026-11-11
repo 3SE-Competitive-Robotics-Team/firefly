@@ -81,9 +81,9 @@ pub(crate) fn run(path: &Path) -> Result<(), String> {
         thread::sleep(TICK);
     }
 
-    stop_all(&mut managed);
+    let stopped = stop(&mut managed, &[]);
     let _ = fs::remove_file(SOCKET);
-    Ok(())
+    stopped.map(|_| ())
 }
 
 /// 按清单顺序拉起 `autostart = true` 的进程；遇到失败立即停止继续，返回失败的描述。
@@ -237,11 +237,15 @@ fn stop(managed: &mut [Managed], names: &[String]) -> Result<String, String> {
     let mut errors = Vec::new();
     for index in indices.into_iter().rev() {
         let entry = &mut managed[index];
-        if entry.child.is_none() {
-            continue;
-        }
+        let scheduled = entry.desired || entry.restart_at.is_some();
         entry.desired = false;
         entry.restart_at = None;
+        if entry.child.is_none() {
+            if scheduled {
+                stopped.push(entry.process.name.clone());
+            }
+            continue;
+        }
         match stop_child(entry) {
             Ok(()) => stopped.push(entry.process.name.clone()),
             Err(error) => errors.push(error),
@@ -268,20 +272,6 @@ fn restart(managed: &mut [Managed], names: &[String]) -> Result<String, String> 
             stop.unwrap_or_else(|error| error),
             start.unwrap_or_else(|error| error)
         )),
-    }
-}
-
-fn stop_all(managed: &mut [Managed]) {
-    for index in (0..managed.len()).rev() {
-        let entry = &mut managed[index];
-        if entry.child.is_none() {
-            continue;
-        }
-        entry.desired = false;
-        entry.restart_at = None;
-        if let Err(error) = stop_child(entry) {
-            eprintln!("ffctl: {error}");
-        }
     }
 }
 
@@ -509,6 +499,48 @@ fn error_response(message: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending_restart(name: &str) -> Managed {
+        Managed {
+            process: Process {
+                name: name.to_owned(),
+                command: vec!["pending-restart-fixture".to_owned()],
+                autostart: true,
+            },
+            child: None,
+            desired: true,
+            restarts: 1,
+            started_at: None,
+            restart_at: Some(Instant::now()),
+        }
+    }
+
+    #[test]
+    fn stop_cancels_a_selected_pending_restart() {
+        let mut managed = [pending_restart("selected"), pending_restart("other")];
+
+        let message = stop(&mut managed, &["selected".to_owned()]).unwrap();
+
+        assert!(!managed[0].desired);
+        assert!(managed[0].restart_at.is_none());
+        assert!(managed[0].child.is_none());
+        assert!(message.contains("selected"));
+        assert!(managed[1].desired);
+        assert!(managed[1].restart_at.is_some());
+    }
+
+    #[test]
+    fn stop_without_names_cancels_pending_restarts() {
+        let mut managed = [pending_restart("first"), pending_restart("second")];
+
+        stop(&mut managed, &[]).unwrap();
+        monitor(&mut managed);
+
+        assert!(managed.iter().all(|entry| !entry.desired));
+        assert!(managed.iter().all(|entry| entry.restart_at.is_none()));
+        assert!(managed.iter().all(|entry| entry.child.is_none()));
+        assert!(managed.iter().all(|entry| entry.restarts == 1));
+    }
 
     #[test]
     fn backoff_is_bounded() {

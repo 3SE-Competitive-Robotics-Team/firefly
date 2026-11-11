@@ -187,7 +187,7 @@ def test_roundtrip_distance_summary_does_not_override_failed_acceptance():
     truth = np.array([[0., -13., 0., 2.2, 0., 0., 0., 1.],
                       [10., -3., 0., 2.2, 0., 0., 0., 1.],
                       [20., -13., 0., 2.2, 0., 0., 0., 1.]])
-    evidence = {"gt": truth, "loop_backend": np.array([[20., 0.]])}
+    evidence = {"gt": truth}
     case = {"case": "nominal", "recording": "unused", "waypoint_arrivals": [{}, {}],
             "stages": {"tracking": {"status": "blocked"}}}
     mission_metrics.score(case, Options(), evidence_reader=lambda _: evidence)
@@ -197,8 +197,6 @@ def test_roundtrip_distance_summary_does_not_override_failed_acceptance():
     assert summary["last_horizontal_distance_from_start_m"] == pytest.approx(0.)
     assert summary["estimated_waypoints_completed"]
     assert not summary["all_waypoints_reached"]
-    assert summary["committed_full_graph_updates"] == 0
-    assert summary["loop_evidence"] == "no_committed_update_observed"
     assert case["status"] == "failed"
 
 
@@ -209,8 +207,8 @@ def test_estimated_arrival_does_not_require_truth_and_false_arrival_fails_scorin
     mission = Mission.__new__(Mission)
     mission.t = 3.
     goal = np.array([1., 0., 2.])
-    mission.latest = {"corrected": (3., goal.copy(), np.zeros(3), None, True, time.monotonic())}
-    assert mission.estimated_near("corrected", goal, .35, .3)
+    mission.latest = {"odom": (3., goal.copy(), np.zeros(3), None, True, time.monotonic())}
+    assert mission.estimated_near("odom", goal, .35, .3)
     gt = poses()
     gt[:, 1:4] = goal + [1., 0., 0.]
     velocity = np.column_stack([gt[:, 0], np.zeros((len(gt), 3))])
@@ -221,10 +219,10 @@ def test_estimated_arrival_does_not_require_truth_and_false_arrival_fails_scorin
     with pytest.raises(ValueError, match="incomplete"):
         settled_truth({"gt": gt[:-5], "gt_velocity": velocity}, 3., 1., goal, .35, .3)
     mission.t = 3.5
-    assert not mission.estimated_near("corrected", goal, .35, .3)
+    assert not mission.estimated_near("odom", goal, .35, .3)
 
 
-def test_vio_only_map_stage_starts_planner_and_output_and_labels_fixed_prior(tmp_path):
+def test_map_stage_uses_raw_odometry_without_map_navigation(tmp_path):
     from firefly_evaluation.mission import Mission
     launched = []
 
@@ -235,15 +233,14 @@ def test_vio_only_map_stage_starts_planner_and_output_and_labels_fixed_prior(tmp
         def wait(self, predicate, **kwargs):
             assert predicate(), "not ready"
 
-    mission = MapMission(tmp_path, "nominal", Options(), vio_only=True)
-    mission.latest["corrected"] = (2., None, None, None, True)
+    mission = MapMission(tmp_path, "nominal", Options())
+    mission.latest["odom"] = (2., None, None, None, True)
     mission.latest["reference"] = None
-    result = mission.map_ready()
+    result = mission.local_map_ready()
     assert [name for name, _ in launched] == ["traj-server", "planner"]
     assert "--traj-server" in launched[0][1]
     assert "--vio-only" not in launched[1][1]
-    assert result["accepted_visual_updates_at_start"] == 0
-    assert result["visual_frontend"] == "disabled"
+    assert result["visual_frontend"] == "VIO stereo"
     assert mission.result["localization_mode"] == "vio_only"
 
 
@@ -259,49 +256,27 @@ def test_default_map_stage_uses_running_visual_frontend(tmp_path):
             assert predicate(), "not ready"
 
     mission = MapMission(tmp_path, "nominal", Options())
-    mission.latest["corrected"] = (2., None, None, None, True)
+    mission.latest["odom"] = (2., None, None, None, True)
     mission.latest["reference"] = None
-    mission.visual_updates = 0
-    result = mission.map_ready()
+    result = mission.local_map_ready()
     assert [name for name, _ in launched] == ["traj-server", "planner"]
     assert all("--vio-only" not in command and "--map" not in command for _, command in launched)
-    assert result["accepted_visual_updates_at_start"] == 0
-    assert result["visual_frontend"] == "enabled"
+    assert result["visual_frontend"] == "VIO stereo"
 
 
-@pytest.mark.parametrize(("vio_only", "prior_maps"), [(False, False), (False, True), (True, False)])
-def test_online_frontend_runs_during_takeoff_and_initial_hover(tmp_path, vio_only, prior_maps):
+def test_online_frontend_runs_during_takeoff_and_initial_hover(tmp_path):
     from firefly_evaluation.mission import Mission
     class PhaseMission(Mission):
         def run_phases(self, phases, applications):
             assert [name for name, _ in phases][:3] == ["initialization", "takeoff", "hover"]
             assert "firefly-rootslam" in applications
             assert "slam" not in applications
-            assert ("localization" in applications) == prior_maps
-            assert ("aliked" in applications) == prior_maps
-            assert ("lightglue" in applications) == prior_maps
+            assert "localization" not in applications
+            assert "aliked" not in applications
+            assert "lightglue" not in applications
             return self.result
 
-    PhaseMission(tmp_path, "nominal", Options(), vio_only=vio_only, prior_maps=prior_maps).run()
-
-
-@pytest.mark.parametrize("observations,passed", [(0, False), (1, False), (2, True)])
-def test_visual_evidence_is_scored_independently_of_navigation(observations, passed):
-    from firefly_evaluation import mission_metrics
-    evidence = {"gt": poses(), "visual_update": np.array(
-        [[float(i + 1), 0., 3., .1, 1.] for i in range(observations)]).reshape(-1, 5)}
-    if not observations:
-        evidence.pop("visual_update")
-    case = {"case": "nominal", "localization_mode": "visual", "recording": "unused",
-            "stages": {"tracking": {"status": "blocked"}}}
-    mission_metrics.score(case, Options(), evidence_reader=lambda _: evidence)
-    assert (case["stages"]["visual_localization"]["status"] == "passed") == passed
-    assert case["stages"]["visual_localization"]["metrics"]["accepted_map_observations"] == observations
-    case["localization_mode"] = "vio_only"
-    case["stages"] = {"tracking": {"status": "blocked"}}
-    mission_metrics.score(case, Options(), evidence_reader=lambda _: evidence)
-    assert "visual_localization" not in case["stages"]
-    assert case["mission_summary"]["loop_evidence"] == "disabled_vio_only"
+    PhaseMission(tmp_path, "nominal", Options()).run()
 
 
 def test_session_scoring_uses_only_initial_truth_gauge_and_preserves_drift():
@@ -320,24 +295,14 @@ def test_session_scoring_uses_only_initial_truth_gauge_and_preserves_drift():
     assert not frame["trajectory_fitting"] and not frame["feedback_to_algorithms"]
 
 
-def test_online_slam_requires_loop_constraint_even_without_prior_map():
+def test_startup_accuracy_scores_raw_odometry_without_map_outputs():
     from firefly_evaluation import mission_metrics
-    evidence = {"gt": poses()}
-    case = {"case": "nominal", "localization_mode": "online_slam", "recording": "unused",
+    truth, odom = poses(), poses()
+    odom[:, 1] += 2.
+    case = {"case": "nominal", "recording": "unused", "localization_mode": "vio_only",
             "stages": {"tracking": {"status": "blocked"}}}
-    mission_metrics.score(case, Options(), evidence_reader=lambda _: evidence)
-    assert case["stages"]["online_loop"]["status"] == "failed"
+    mission_metrics.score(case, Options(), evidence_reader=lambda _: {"gt": truth, "odom": odom})
+    assert case["stages"]["map_accuracy"]["status"] == "failed"
+    assert case["stages"]["map_accuracy"]["metrics"]["rmse_m"] == pytest.approx(2.)
+    assert "online_loop" not in case["stages"]
     assert "visual_localization" not in case["stages"]
-
-
-@pytest.mark.parametrize("updates, expected", [(0., "failed"), (1., "passed"), (3., "passed")])
-def test_online_loop_requires_a_committed_full_graph_update(updates, expected):
-    from firefly_evaluation import mission_metrics
-    case = {"case": "nominal", "localization_mode": "online_slam", "recording": "unused",
-            "waypoint_arrivals": [], "stages": {"tracking": {"status": "blocked"}}}
-    evidence = {"loop_backend": np.array([[1., 0.], [2., updates]])}
-    mission_metrics.score(case, Options(), evidence_reader=lambda _: evidence)
-    assert case["stages"]["online_loop"]["status"] == expected
-    assert case["stages"]["online_loop"]["metrics"]["committed_full_graph_updates"] == updates
-    # A loop commit alone cannot pass route, landing and lifecycle acceptance.
-    assert case["status"] == "failed"

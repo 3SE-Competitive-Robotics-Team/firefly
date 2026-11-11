@@ -142,6 +142,7 @@ fn build_app(
     .insert_non_send(ports)
     .insert_non_send(log_ipc)
     .add_plugins(CapturePlugin)
+    .add_plugins(firefly_render::textures::MaterialMipmapPlugin)
     .add_plugins(grayscale::GrayscalePlugin)
     .add_systems(Startup, (setup_scene, spawn_rig))
     .add_systems(PreUpdate, poll_pose)

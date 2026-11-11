@@ -1,7 +1,6 @@
 //! `HashBoW`, ORB matching, map reprojection and generalized P3P loop validation.
-//! Only the 10 cm correction branch is specified numerically by `RootSLAM`.
-//! Retrieval, matching and RANSAC controls below are explicit implementation
-//! choices; they are not claimed to be the unpublished author's defaults.
+//! The 10 cm correction branch follows `RootSLAM`; retrieval, matching and
+//! RANSAC controls are explicit project policies.
 use crate::{
     descriptor::{compute_keyframe_descriptors, hamming},
     map::{FeatureId, KeyframeId, LandmarkId, MapSnapshot, ObservationKey},
@@ -173,6 +172,7 @@ impl LoopDetector {
             Some(keyframe.saturating_sub(self.options.min_separation_ns)),
         );
         retrieved.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        let best_score = retrieved.first().map_or(0., |value| value.1);
         let candidates: BTreeMap<_, _> = retrieved
             .into_iter()
             .filter_map(|(id, score)| {
@@ -186,6 +186,7 @@ impl LoopDetector {
             .take(self.options.max_candidates)
             .collect();
         let islands = candidate_islands(map, &candidates);
+        log::debug!(target: "rootslam-loop", "query={keyframe} descriptors={} database={} candidates={} map_keyframes={} best_score={best_score}", descriptors.len(), self.histograms.len(), candidates.len(), map.keyframes.len());
         let mut result = None;
         for island in islands {
             for candidate in island {
@@ -333,8 +334,7 @@ impl LoopDetector {
                 }
             }
         }
-        // A landmark may legitimately appear once per camera, but repeated
-        // features in one camera must not inflate the geometric consensus.
+        // Count each landmark once per camera in the geometric consensus.
         let mut unique: BTreeMap<(usize, LandmarkId), Correspondence> = BTreeMap::new();
         for value in correspondences.into_values() {
             let key = (value.key.camera, value.point);
@@ -360,6 +360,7 @@ impl LoopDetector {
             }
         }
         if matches.len() < self.options.min_inliers.max(4) {
+            log::debug!(target: "rootslam-loop", "query={query} candidate={candidate} rejected=matches target_points={} matches={}", target_descriptors.len(), matches.len());
             return Ok(None);
         }
         let offsets: Vec<_> = self
@@ -386,6 +387,7 @@ impl LoopDetector {
             self.options.ransac_probability,
         );
         if !consensus.compute_model(0) || consensus.inliers.len() < self.options.min_inliers {
+            log::debug!(target: "rootslam-loop", "query={query} candidate={candidate} rejected=ransac matches={} inliers={}", matches.len(), consensus.inliers.len());
             return Ok(None);
         }
         let initial = *consensus.model_coefficients.as_ref().unwrap();
@@ -412,8 +414,10 @@ impl LoopDetector {
             })
             .collect();
         if verified.len() < self.options.min_inliers {
+            log::debug!(target: "rootslam-loop", "query={query} candidate={candidate} rejected=pixels inliers={} verified={}", inliers.len(), verified.len());
             return Ok(None);
         }
+        log::debug!(target: "rootslam-loop", "query={query} candidate={candidate} verified={} drift_m={}", verified.len(), (pose.translation.vector - current.t_w_b.translation.vector).norm());
         let mut pairs = BTreeSet::new();
         let mut associations = Vec::new();
         for m in verified {

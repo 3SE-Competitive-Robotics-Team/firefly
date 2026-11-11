@@ -6,6 +6,28 @@ use firefly_rootslam::{
 use nalgebra::{Isometry3, Translation3, Vector3};
 
 #[test]
+fn lamaria_preserves_integer_nanoseconds_and_xyzw() {
+    let mut output = Vec::new();
+    write_trajectory(
+        &mut output,
+        &[(9_007_199_254_740_993, Isometry3::translation(1., 2., 3.))],
+        TrajectoryFormat::Lamaria,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    let fields: Vec<_> = text.split_whitespace().collect();
+    assert_eq!(fields[0], "9007199254740993");
+    assert_eq!(
+        fields[1..]
+            .iter()
+            .map(|v| v.parse::<f64>().unwrap())
+            .collect::<Vec<_>>(),
+        [1., 2., 3., 0., 0., 0., 1.]
+    );
+    assert_eq!(text.lines().count(), 1);
+}
+
+#[test]
 fn native_ground_truth_bytes_and_original_trajectory_oracle() {
     let reference: serde_json::Value = serde_json::from_str(include_str!(
         "../../../crates/firefly-basalt/tests/reference/mapper.json"

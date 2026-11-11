@@ -17,8 +17,8 @@ name = "firefly-rootslam"
 path = "src/bin/firefly-rootslam.rs"
 
 [[bin]]
-name = "firefly-rootslam-dataset"
-path = "src/main.rs"
+name = "firefly-basalt-tools"
+path = "src/bin/firefly-basalt-tools.rs"
 
 [dependencies]
 firefly-base.workspace = true
@@ -37,6 +37,7 @@ log.workspace = true
 nalgebra.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml_ng.workspace = true
 
 [dev-dependencies]
 toml.workspace = true

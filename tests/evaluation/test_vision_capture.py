@@ -23,7 +23,7 @@ def workspace_at(root):
     (root / "configs").mkdir()
 
 
-@pytest.mark.parametrize("selected", ["rmuc2026@2.0.0", "rmuc2027@1.0.0", None])
+@pytest.mark.parametrize("selected", ["rmuc2027@1.0.0", None])
 def test_asset_fingerprint_uses_selected_scene_and_detects_geometry_changes(tmp_path, selected):
     workspace_at(tmp_path)
     if selected:
@@ -76,7 +76,7 @@ def test_acceptance_reads_selected_geometry_manifest_and_checks_its_scene(tmp_pa
     result = provenance(tmp_path)
     assert result["assets"] == manifest
     assert result["asset_manifest_sha256"] == digest(path)
-    path.write_text(json.dumps(manifest | {"scene": "rmuc2026@2.0.0"}))
+    path.write_text(json.dumps(manifest | {"scene": "rmuc2028@1.0.0"}))
     with pytest.raises(ValueError, match="another scene"):
         provenance(tmp_path)
 

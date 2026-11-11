@@ -55,6 +55,12 @@ fn single_ray_updates_endpoint_and_traversed_cells() {
     assert_eq!(map.occupancy_at(hit), 1);
     assert_eq!(map.inflated_occupancy_at(hit), 32768);
     assert_eq!(map.inflated_occupancy_at(free), 1);
+    let (observed, _, _) = map.observed_free_buffer();
+    assert!(observed[map.buffer_index(free).unwrap()]);
+    assert!(observed[map.buffer_index(camera).unwrap()]);
+    assert!(!observed[map.buffer_index(hit).unwrap()]);
+    let unseen = Vector3::new(2.25, 0.25, 1.25);
+    assert!(!observed[map.buffer_index(unseen).unwrap()]);
 }
 
 #[test]

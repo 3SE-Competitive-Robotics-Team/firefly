@@ -63,7 +63,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .disable::<LogPlugin>(),
     );
     log::info!("quad：场地 {}，起点 {:?}", cfg.field, cfg.start);
-    app.insert_resource(cfg)
+    app.add_plugins(firefly_render::textures::MaterialMipmapPlugin)
+        .insert_resource(cfg)
         .insert_resource(QuadInput::default())
         // 动力学定步长 240Hz（显式积分稳定）。
         .insert_resource(Time::<Fixed>::from_hz(240.0))

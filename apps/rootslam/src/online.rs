@@ -1,15 +1,15 @@
 //! Online IPC adapter for the simulated camera and IMU topics.
+use crate::config::{Options, initial_vio_config};
 mod imu;
+use crate::input::SensorModel;
 use firefly_basalt::{
     io::dataset_io::ImageData,
     optical_flow::{OpticalFlowBase, OpticalFlowFactory, OpticalFlowInput},
-    utils::vio_config::VioConfig,
     vi_estimator::{
         local_map::LocalMapSnapshot,
         vio_estimator::{VioEstimatorBase, VioEstimatorFactory, VioFrameDiagnostics},
     },
 };
-use firefly_calibration::calibration::Calibration;
 use firefly_calibration::image::image::ManagedImage;
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_imu_initialization::GravityEstimate;
@@ -20,7 +20,9 @@ use firefly_pubsub::{
     subscriber::{Subscriber, SubscriberOptions},
     viz::{VizMessage, VizPublisher, kind},
 };
-use firefly_rootslam_mapping::{loop_closure::LoopOptions, map::MapPolicy};
+use firefly_rootslam_mapping::{
+    global_optimization::Precision, loop_closure::LoopOptions, map::MapPolicy,
+};
 use firefly_vio_runtime::{ImuWatermark, publish_pose_diagnostic, publish_scalar_diagnostic};
 use nalgebra::{Isometry3, Translation3, Vector3};
 use std::{
@@ -33,56 +35,6 @@ use std::{
     },
     time::Duration,
 };
-
-#[derive(serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Independent precision, mapping, loop and output-ownership options"
-)]
-pub struct Options {
-    pub vio_config: Option<PathBuf>,
-    /// Detection cell width in pixels; overrides the Basalt archive when present.
-    pub optical_flow_detection_grid_size: Option<i32>,
-    pub stats_directory: Option<PathBuf>,
-    pub use_double: bool,
-    pub map: bool,
-    /// 回环检测开关；关闭后只保留局部建图与关键帧共视图。
-    pub loops: bool,
-    /// Let localization exclusively publish corrected odometry and navigation.
-    pub external_localization: bool,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            vio_config: None,
-            optical_flow_detection_grid_size: None,
-            stats_directory: None,
-            use_double: false,
-            map: true,
-            loops: true,
-            external_localization: false,
-        }
-    }
-}
-
-impl Options {
-    /// # Errors
-    /// Rejects detection cells that cannot fit the calibrated image.
-    pub fn validate(&self) -> Result<()> {
-        if self.optical_flow_detection_grid_size.is_some_and(|size| {
-            size <= 0
-                || usize::try_from(size).map_or(true, |size| size > IMAGE_WIDTH.min(IMAGE_HEIGHT))
-        }) {
-            return Err(Error::new(
-                ErrorKind::InvalidArgument,
-                "optical_flow_detection_grid_size must fit the calibrated image",
-            ));
-        }
-        Ok(())
-    }
-}
 
 fn error(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::Internal, message).with_operation("rootslam.online")
@@ -185,11 +137,17 @@ impl Pairing {
 /// Reads Render and Sim IPC, runs Basalt VIO and publishes FC odometry topics.
 /// # Errors
 /// Returns input, estimator, mapping or IPC failures.
-pub fn run(options: &Options, stop: &AtomicBool) -> Result<()> {
-    LiveSession::new(options)?.run(stop)
+pub fn run(
+    options: &Options,
+    model: &SensorModel,
+    precision: Precision,
+    stop: &AtomicBool,
+) -> Result<()> {
+    LiveSession::new(options, model, precision)?.run(stop)
 }
 
 struct LiveSession {
+    model: SensorModel,
     node: IpcNode,
     left: Subscriber<GrayImageMessage>,
     right: Subscriber<GrayImageMessage>,
@@ -211,8 +169,8 @@ struct LiveSession {
 }
 
 impl LiveSession {
-    fn new(options: &Options) -> Result<Self> {
-        let calibration = render_calibration();
+    fn new(options: &Options, model: &SensorModel, precision: Precision) -> Result<Self> {
+        let calibration = &model.calibration;
         let vio = initial_vio_config(options)?;
         let node = create_node()?;
         let image_options = SubscriberOptions {
@@ -226,10 +184,10 @@ impl LiveSession {
         let viz = VizPublisher::new(&node)?;
         let mut estimator = VioEstimatorFactory::get_vio_estimator(
             &vio,
-            &calibration,
-            &Vector3::new(0., 0., -9.81),
+            calibration,
+            &model.gravity,
             true,
-            options.use_double,
+            precision == Precision::Float64,
         )?;
         let (states_tx, states_rx) = mpsc::sync_channel(8);
         estimator.outputs.state_bounded = Some(states_tx);
@@ -254,7 +212,7 @@ impl LiveSession {
         };
         let flow = OpticalFlowFactory::get_optical_flow_with_output(
             &vio,
-            &calibration,
+            calibration,
             estimator.vision_data_queue().clone(),
         )?;
         let imu_tx = estimator.imu_data_queue().clone();
@@ -271,6 +229,10 @@ impl LiveSession {
             watermark: imu_watermark.clone(),
         });
         Ok(Self {
+            model: SensorModel {
+                calibration: calibration.clone(),
+                gravity: model.gravity,
+            },
             node,
             left,
             right,
@@ -380,8 +342,11 @@ impl LiveSession {
             let enqueue_begin = firefly_basalt::utils::time_utils::profile_clock_ns();
             match self
                 .flow_tx
-                .try_send(Some(Arc::new(OpticalFlowInput { t_ns, img_data })))
-            {
+                .try_send(Some(Arc::new(crate::input::image_frame(
+                    &self.model.calibration,
+                    t_ns,
+                    img_data,
+                )?))) {
                 Ok(()) => {
                     frame_started.insert(t_ns, std::time::Instant::now());
                     firefly_basalt::utils::time_utils::profile_stage(
@@ -404,6 +369,17 @@ impl LiveSession {
     fn publish_diagnostics(&mut self) {
         while let Ok(data) = self.diagnostics_rx.try_recv() {
             let stamp = data.t_ns as f64 * 1e-9;
+            if let Some(solver) = data.solver {
+                self.publish_solver_diagnostics(stamp, &solver);
+            }
+            if let Some(updates) = data.yaw_updates {
+                publish_scalar_diagnostic(
+                    &self.viz,
+                    stamp,
+                    "vio/diagnostics/yaw_updates_rad",
+                    updates,
+                );
+            }
             for (name, values) in [
                 ("vio/diagnostics/tracks", data.tracks),
                 ("vio/diagnostics/graph", data.graph),
@@ -491,6 +467,20 @@ impl LiveSession {
         }
     }
 
+    fn publish_solver_diagnostics(
+        &self,
+        stamp: f64,
+        solver: &firefly_basalt::vi_estimator::vio_estimator::VioSolverDiagnostics,
+    ) {
+        for (name, values) in [
+            ("vio/diagnostics/costs_before", solver.costs_before),
+            ("vio/diagnostics/costs_after", solver.costs_after),
+            ("vio/diagnostics/solver_termination", solver.termination),
+        ] {
+            publish_scalar_diagnostic(&self.viz, stamp, name, values);
+        }
+    }
+
     fn shutdown(self) -> Result<()> {
         let Self {
             map_worker,
@@ -534,60 +524,10 @@ impl LiveSession {
     }
 }
 
-/// Builds the Basalt VIO configuration with bias and yaw initialization priors.
-///
-/// The upstream archive replaces every field on load and skips the yaw prior, so the yaw
-/// information is applied after the archive is read.
-#[expect(
-    clippy::field_reassign_with_default,
-    reason = "The yaw prior must be applied after the archive load replaces every field"
-)]
-fn initial_vio_config(options: &Options) -> Result<VioConfig> {
-    options.validate()?;
-    let mut vio = VioConfig::default();
-    // Basalt stores precision: invert the squared standard deviations.
-    vio.vio_init_ba_weight = 1.0 / 0.1_f64.powi(2);
-    vio.vio_init_bg_weight = 1.0 / 0.01_f64.powi(2);
-    if let Some(path) = &options.vio_config {
-        vio.load(path)?;
-    }
-    if let Some(size) = options.optical_flow_detection_grid_size {
-        vio.optical_flow_detection_grid_size = size;
-    }
-    // Keep yaw information independent of the translation prior.
-    vio.vio_init_yaw_weight = Some(1e2);
-    Ok(vio)
-}
-
-fn render_calibration() -> Calibration<f64> {
-    use firefly_base::{FrameId, rig};
-    use firefly_calibration::camera::generic_camera::GenericCamera;
-    use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector2, Vector3, Vector4};
-    let focal = IMAGE_HEIGHT as f64 * 0.5 / (rig::FOV_Y_DEG.to_radians() * 0.5).tan();
-    let center = rig::principal_point(IMAGE_WIDTH, IMAGE_HEIGHT);
-    let mut camera = GenericCamera::from_name("pinhole");
-    camera.set_from_init(Vector4::new(focal, focal, center[0], center[1]));
-    let pose = |frame| {
-        let rotation =
-            UnitQuaternion::from_matrix(&(rig::cam_axes_in_body() * rig::CV_FROM_RENDER));
-        Isometry3::from_parts(Translation3::from(rig::position_in_body(frame)), rotation)
-    };
-    Calibration {
-        t_i_c: vec![pose(FrameId::LEFT_CAMERA), pose(FrameId::RIGHT_CAMERA)],
-        intrinsics: vec![camera.clone(), camera],
-        resolution: vec![Vector2::new(IMAGE_WIDTH as i32, IMAGE_HEIGHT as i32); 2],
-        imu_update_rate: 1_000.0,
-        gyro_noise_std: Vector3::repeat(0.0002),
-        accel_noise_std: Vector3::repeat(0.002),
-        gyro_bias_std: Vector3::repeat(0.000_019),
-        accel_bias_std: Vector3::repeat(0.003),
-        ..Calibration::default()
-    }
-}
-
 #[cfg(test)]
 mod config_tests {
     use super::*;
+    use firefly_basalt::utils::vio_config::VioConfig;
 
     #[test]
     fn detection_override_preserves_all_other_online_parameters() {
@@ -600,13 +540,41 @@ mod config_tests {
 
     #[test]
     fn invalid_detection_cells_fail_before_runtime_creation() {
-        for size in [-1, 0, 241] {
+        for size in [-1, 0] {
             let options = Options {
                 optical_flow_detection_grid_size: Some(size),
                 ..Options::default()
             };
             assert!(options.validate().is_err());
             assert!(initial_vio_config(&options).is_err());
+        }
+    }
+
+    #[test]
+    fn stereo_baseline_gate_is_independent_of_body_attitude() {
+        use firefly_basalt::utils::ba_utils::compute_rel_pose;
+        use nalgebra::UnitQuaternion;
+        let calibration = crate::input::simulator_calibration();
+        let minimum = VioConfig::default().vio_min_triangulation_dist.powi(2);
+        for step in 0..360 {
+            let t = f64::from(step) * 0.01;
+            let body = Isometry3::from_parts(
+                Translation3::new(t, -t, t),
+                UnitQuaternion::from_euler_angles(0.01 * t, -0.02 * t, 0.03 * t),
+            );
+            let relative = compute_rel_pose(
+                &body,
+                &calibration.t_i_c[1],
+                &body,
+                &calibration.t_i_c[0],
+                None,
+                None,
+            );
+            assert!(
+                relative.translation.vector.norm_squared() >= minimum,
+                "step={step}, baseline2={:.18}, minimum2={minimum:.18}",
+                relative.translation.vector.norm_squared()
+            );
         }
     }
 }

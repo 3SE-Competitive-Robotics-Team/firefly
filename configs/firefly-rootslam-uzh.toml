@@ -1,0 +1,20 @@
+# Native UZH FPV Snapdragon text/image archive and its matching calibration bundle.
+precision = "float64"
+
+[input]
+type = "dataset"
+format = "uzh"
+path = "../../uzh_fpv_open/datasets/indoor_forward_6_snapdragon"
+calibration = "../../uzh_fpv_open/datasets/calibration/indoor_forward_calib_snapdragon"
+
+[vio]
+optical_flow_detection_grid_size = 20
+map = true
+loops = true
+
+[dataset]
+trajectory = "logs/rootslam_trajectory.txt"
+local_trajectory = "logs/rootslam_local_trajectory.txt"
+metrics_path = "logs/rootslam_metrics.json"
+global_result_path = "logs/rootslam_global_result.json"
+global_optimization = true

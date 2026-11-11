@@ -7,10 +7,10 @@ use firefly_trajectory::Endpoint;
 use nalgebra::{Point3, Vector3};
 
 #[test]
-#[ignore = "requires generated RMUC2026 assets"]
+#[ignore = "requires generated RMUC2027 assets"]
 fn exported_rmuc_map_supports_pad_departure() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../apps/planner/maps/rmuc2026-2.0.0.ffmap");
+        .join("../../apps/planner/maps/rmuc2027-1.0.0.ffmap");
     let map = MapFile::from_file(path).unwrap().to_grid_map(0.0).unwrap();
     let config = PlannerConfig::default();
     let mut planner = Planner::new(config, map);
