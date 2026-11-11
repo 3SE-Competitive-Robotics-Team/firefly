@@ -154,6 +154,38 @@ fn positive_damping_that_rounds_to_zero_in_storage_precision_is_rejected() {
 }
 
 #[test]
+fn objective_overflow_in_solver_precision_is_rejected() {
+    let (mut map, calibration) = scene();
+    for observation in map
+        .landmarks
+        .get_mut(&10)
+        .unwrap()
+        .observations
+        .values_mut()
+    {
+        observation.pixel = Vector2::repeat(1e20);
+    }
+    let options = OptimizationOptions {
+        precision: Precision::Float32,
+        max_iterations: 1,
+        pose_graph_terms: false,
+        ..OptimizationOptions::default()
+    };
+    assert!(optimize_global(&map, &calibration, &options).is_err());
+    let double = optimize_global(
+        &map,
+        &calibration,
+        &OptimizationOptions {
+            precision: Precision::Float64,
+            ..options
+        },
+    )
+    .unwrap();
+    assert!(double.initial_cost.is_finite());
+    assert!(double.initial_cost > f64::from(f32::MAX));
+}
+
+#[test]
 fn nonfinite_measurement_is_not_returned_as_a_successful_optimization() {
     let (mut map, calibration) = scene();
     map.landmarks

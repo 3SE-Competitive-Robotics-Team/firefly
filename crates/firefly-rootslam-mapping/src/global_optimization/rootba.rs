@@ -480,6 +480,7 @@ fn linearize<S: BasaltScalar>(
             block.compress();
         }
     });
+    let cost = S::from_f64_lossy(cost);
     if !cost.is_finite()
         || blocks
             .iter()
@@ -500,7 +501,7 @@ fn linearize<S: BasaltScalar>(
         },
         scaling,
         lambda: S::zero(),
-        cost: S::from_f64_lossy(cost),
+        cost,
     })
 }
 
