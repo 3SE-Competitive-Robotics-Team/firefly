@@ -163,7 +163,10 @@ precision = "float64"
 krylov_precision = "native"
 ```
 
-The replay restores the archived solver settings. Its optional `max_iterations`
+The replay restores the archived solver settings. Version 1 archives without a
+preconditioner selector retain Schur-Jacobi. Set `preconditioner = "cluster_jacobi"`
+in the replay TOML to compare the current clustered method explicitly; the
+selected method is included in the result. Its optional `max_iterations`
 sets the diagnostic outer budget. Use a fresh output for every experiment and
 compare costs, geometry, convergence and timing. Runtime stage timing and total
 application duration describe separate workloads.

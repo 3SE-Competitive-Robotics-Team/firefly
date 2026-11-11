@@ -20,6 +20,7 @@ serde.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 log.workspace = true
 rayon.workspace = true
+faer.workspace = true
 
 [dev-dependencies]
 toml.workspace = true

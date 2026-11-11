@@ -36,6 +36,18 @@ fn has_null(value: &serde_json::Value) -> bool {
     }
 }
 
+// Version 1 archives without a selector denote RootBA's Schur-Jacobi method.
+// Application configurations use OptimizationOptions' current defaults.
+fn archive_options<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<OptimizationOptions, D::Error> {
+    let mut fields = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+    fields
+        .entry("preconditioner")
+        .or_insert_with(|| serde_json::Value::String("schur_jacobi".into()));
+    serde_json::from_value(serde_json::Value::Object(fields)).map_err(serde::de::Error::custom)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pose {
@@ -109,6 +121,7 @@ pub struct GlobalProblem {
     pub version: u32,
     pub revision: u64,
     pub calibration: Calibration<f64>,
+    #[serde(deserialize_with = "archive_options")]
     pub options: OptimizationOptions,
     pub keyframes: Vec<Keyframe>,
     pub landmarks: Vec<Landmark>,
@@ -334,6 +347,7 @@ impl GlobalProblem {
 #[serde(deny_unknown_fields)]
 pub struct ReplayResult {
     pub revision: u64,
+    #[serde(deserialize_with = "archive_options")]
     pub options: OptimizationOptions,
     pub poses: Vec<(i64, Pose)>,
     pub points: Vec<(u64, [f64; 3])>,

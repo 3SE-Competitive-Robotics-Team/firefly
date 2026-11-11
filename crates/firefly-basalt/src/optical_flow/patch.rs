@@ -64,22 +64,39 @@ pub(super) fn patch_increment<const N: usize>(
     inverse_jacobian: &SMatrix<f32, 3, N>,
     residual: &SVector<f32, N>,
 ) -> Vector3<f32> {
-    fn sum<const N: usize>(
-        matrix: &SMatrix<f32, 3, N>,
-        residual: &SVector<f32, N>,
-        row: usize,
+    const fn tree<const N: usize>() -> [(usize, usize); N] {
+        let mut pairs = [(0, 0); N];
+        append(&mut pairs, &mut 0, 0, N);
+        pairs
+    }
+    const fn append<const N: usize>(
+        pairs: &mut [(usize, usize); N],
+        next: &mut usize,
         start: usize,
         length: usize,
-    ) -> f32 {
-        if length == 1 {
-            -matrix[(row, start)] * residual[start]
-        } else {
+    ) {
+        if length > 1 {
             let half = length / 2;
-            sum(matrix, residual, row, start, half)
-                + sum(matrix, residual, row, start + half, length - half)
+            append(pairs, next, start, half);
+            append(pairs, next, start + half, length - half);
+            pairs[*next] = (start, start + half);
+            *next += 1;
         }
     }
-    Vector3::from_fn(|row, _| sum(inverse_jacobian, residual, row, 0, N))
+    // Compile the exact Eigen reduction tree once per pattern. Each node adds
+    // all three pose coordinates, retaining the original floating-point order.
+    assert!(N > 0, "optical-flow patterns contain samples");
+    let pairs = &const { tree::<N>() };
+    let mut values: [[f32; 3]; N] = std::array::from_fn(|column| {
+        std::array::from_fn(|row| -inverse_jacobian[(row, column)] * residual[column])
+    });
+    for &(left, right) in &pairs[..N - 1] {
+        let other = values[right];
+        for (value, addend) in values[left].iter_mut().zip(other) {
+            *value += addend;
+        }
+    }
+    Vector3::from(values[0])
 }
 
 /// Image operations used by the upstream templated patch helpers.
@@ -356,6 +373,42 @@ pub(super) fn ldlt_inverse<S: ImageScalar>(mut a: Matrix3<S>) -> Matrix3<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn check_increment_order<const N: usize>() {
+        fn reference(matrix: &[f32], residual: &[f32], row: usize) -> f32 {
+            if residual.len() == 1 {
+                -matrix[row] * residual[0]
+            } else {
+                let half = residual.len() / 2;
+                reference(&matrix[..3 * half], &residual[..half], row)
+                    + reference(&matrix[3 * half..], &residual[half..], row)
+            }
+        }
+        let mut bits = 17_u32;
+        let mut scalar = || {
+            bits = bits.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            f32::from_bits((bits & 0x807f_ffff) | ((100 + bits % 50) << 23))
+        };
+        for _ in 0..1024 {
+            let matrix = SMatrix::<f32, 3, N>::from_fn(|_, _| scalar());
+            let residual = SVector::<f32, N>::from_fn(|_, _| scalar());
+            let actual = patch_increment(&matrix, &residual);
+            for row in 0..3 {
+                assert_eq!(
+                    actual[row].to_bits(),
+                    reference(matrix.as_slice(), residual.as_slice(), row).to_bits()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compiled_reduction_tree_preserves_eigen_order_bit_for_bit() {
+        check_increment_order::<1>();
+        check_increment_order::<3>();
+        check_increment_order::<24>();
+        check_increment_order::<52>();
+    }
     use crate::optical_flow::patterns::Pattern52;
 
     // Port of test/src/test_patch.cpp: analytic image avoids testing a numerical

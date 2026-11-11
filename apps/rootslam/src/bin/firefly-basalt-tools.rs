@@ -41,6 +41,7 @@ enum Options {
         output: PathBuf,
         precision: firefly_rootslam_mapping::global_optimization::Precision,
         krylov_precision: firefly_rootslam_mapping::global_optimization::KrylovPrecision,
+        preconditioner: Option<firefly_rootslam_mapping::global_optimization::Preconditioner>,
         max_iterations: Option<usize>,
         linear_system_archive: Option<PathBuf>,
     },
@@ -235,6 +236,10 @@ impl Options {
         }
         Ok(())
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Dispatch over the supported offline tasks"
+    )]
     fn run(&self) -> Result<()> {
         match self {
             Self::Mapper {
@@ -268,6 +273,7 @@ impl Options {
                 output,
                 precision,
                 krylov_precision,
+                preconditioner,
                 max_iterations,
                 linear_system_archive,
             } => run_global_replay(
@@ -275,6 +281,7 @@ impl Options {
                 output,
                 *precision,
                 *krylov_precision,
+                *preconditioner,
                 *max_iterations,
                 linear_system_archive.as_deref(),
             ),
@@ -503,6 +510,7 @@ fn run_global_replay(
     output: &std::path::Path,
     precision: firefly_rootslam_mapping::global_optimization::Precision,
     krylov_precision: firefly_rootslam_mapping::global_optimization::KrylovPrecision,
+    preconditioner: Option<firefly_rootslam_mapping::global_optimization::Preconditioner>,
     max_iterations: Option<usize>,
     linear_system_archive: Option<&std::path::Path>,
 ) -> Result<()> {
@@ -510,6 +518,9 @@ fn run_global_replay(
     let (snapshot, calibration, mut options) = problem.restore()?;
     options.precision = precision;
     options.krylov_precision = krylov_precision;
+    if let Some(preconditioner) = preconditioner {
+        options.preconditioner = preconditioner;
+    }
     if let Some(budget) = max_iterations {
         options.max_iterations = budget;
     }
