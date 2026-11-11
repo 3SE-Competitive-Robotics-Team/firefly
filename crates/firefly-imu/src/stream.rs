@@ -18,10 +18,17 @@ pub struct Estimator {
     options: Options,
     window: VecDeque<Sample>,
     latest: Option<Sample>,
-    state: Option<AttitudeState>,
+    phase: Phase,
     rate: Vector3<f64>,
-    continuous: bool,
     gate: Gate,
+}
+
+// One estimator owns one filter; keep the filter inline in its active phase.
+#[allow(clippy::large_enum_variant)]
+enum Phase {
+    Initializing,
+    Tracking(AttitudeState),
+    Discontinuous,
 }
 impl Estimator {
     /// # Errors
@@ -32,15 +39,17 @@ impl Estimator {
             options,
             window: VecDeque::with_capacity(STATIONARY_CAPACITY),
             latest: None,
-            state: None,
+            phase: Phase::Initializing,
             rate: Vector3::zeros(),
-            continuous: true,
             gate: Gate::default(),
         })
     }
     #[must_use]
     pub fn state(&self) -> Option<&AttitudeState> {
-        self.state.as_ref().filter(|_| self.continuous)
+        match &self.phase {
+            Phase::Tracking(state) => Some(state),
+            Phase::Initializing | Phase::Discontinuous => None,
+        }
     }
     #[must_use]
     pub const fn rate(&self) -> Vector3<f64> {
@@ -69,8 +78,10 @@ impl Estimator {
             return Ok(false);
         }
         let dt = self.latest.map_or(0., |s| sample.timestamp - s.timestamp);
-        if !self.continuous || (self.state.is_some() && dt > self.options.max_dt + 1e-9) {
-            self.continuous = false;
+        if matches!(self.phase, Phase::Discontinuous)
+            || (matches!(self.phase, Phase::Tracking(_)) && dt > self.options.max_dt + 1e-9)
+        {
+            self.phase = Phase::Discontinuous;
             return Err(Error::new(
                 ErrorKind::Timeout,
                 "IMU time gap; estimator restart required",
@@ -81,7 +92,7 @@ impl Estimator {
         }
         self.latest = Some(sample);
         let stationary = self.stationary(sample, grounded);
-        if self.state.is_none() {
+        if matches!(self.phase, Phase::Initializing) {
             if !stationary {
                 return Ok(true);
             }
@@ -102,13 +113,13 @@ impl Estimator {
             covariance
                 .fixed_view_mut::<3, 3>(0, 0)
                 .copy_from(&(nalgebra::Matrix3::identity() * 1e-4));
-            self.state = Some(AttitudeState {
+            self.phase = Phase::Tracking(AttitudeState {
                 rotation,
                 bias: gyro,
                 covariance,
             });
             self.rate = sample.gyro - gyro;
-        } else if let Some(state) = &mut self.state {
+        } else if let Phase::Tracking(state) = &mut self.phase {
             state.predict(sample.gyro, dt, &self.options)?;
             self.gate = state.correct_accel(sample.accel, dt, stationary, &self.options)?;
             let alpha = 1. - (-std::f64::consts::TAU * self.options.rate_cutoff_hz * dt).exp();

@@ -182,33 +182,29 @@ pub fn run(
     let report = match report {
         Ok(report) => report,
         Err(failure) => {
-            if let Some(worker) = mapping
-                && let Err(cleanup) = worker.cancel()
-            {
-                return Err(failure.with_context("mapping_cleanup", cleanup));
-            }
-            return Err(failure);
+            return Err(cancel_mapping(mapping, failure));
         }
     };
     let states = report.states;
-    if let Some(path) = &options.local_trajectory {
-        let estimates: Vec<_> = states
-            .iter()
-            .map(|state| (state.state.pose.t_ns, state.state.pose.t_w_i))
-            .collect();
-        save_trajectory(path, &estimates, options.trajectory_format)?;
-    }
-    if stop.load(std::sync::atomic::Ordering::Acquire) {
-        let interrupted = Error::new(ErrorKind::Internal, "Dataset run interrupted")
-            .with_operation("rootslam.dataset.run");
-        if let Some(worker) = mapping
-            && let Err(cleanup) = worker.cancel()
-        {
-            return Err(interrupted.with_context("mapping_cleanup", cleanup));
+    let export = (|| {
+        if let Some(path) = &options.local_trajectory {
+            let estimates: Vec<_> = states
+                .iter()
+                .map(|state| (state.state.pose.t_ns, state.state.pose.t_w_i))
+                .collect();
+            save_trajectory(path, &estimates, options.trajectory_format)?;
         }
-        return Err(interrupted);
+        if stop.load(std::sync::atomic::Ordering::Acquire) {
+            let interrupted = Error::new(ErrorKind::Internal, "Dataset run interrupted")
+                .with_operation("rootslam.dataset.run");
+            return Err(interrupted);
+        }
+        save_original_results(options, &states, report.duration, evaluation_data.as_ref())?;
+        Ok(())
+    })();
+    if let Err(failure) = export {
+        return Err(cancel_mapping(mapping, failure));
     }
-    save_original_results(options, &states, report.duration, evaluation_data.as_ref())?;
     let mapped = mapping
         .map(|worker| worker.finish_with_stop(stop))
         .transpose()?;
@@ -235,6 +231,15 @@ pub fn run(
             .with_operation("rootslam.dataset.run"));
     }
     Ok(())
+}
+
+fn cancel_mapping(mapping: Option<crate::system::MappingWorker>, failure: Error) -> Error {
+    if let Some(worker) = mapping
+        && let Err(cleanup) = worker.cancel()
+    {
+        return failure.with_context("mapping_cleanup", cleanup);
+    }
+    failure
 }
 
 fn save_global_result(
@@ -454,6 +459,24 @@ fn save_original_results(
 #[cfg(test)]
 mod global_result_tests {
     use super::Options;
+
+    #[test]
+    fn export_failure_cancels_and_joins_mapping_before_returning() {
+        let worker = crate::system::MappingWorker::spawn(
+            crate::input::simulator_calibration(),
+            crate::system::SystemOptions::default(),
+        )
+        .unwrap();
+        let input = worker.input();
+        let failure =
+            super::Error::new(super::ErrorKind::Internal, "local trajectory write failed");
+        let error = super::cancel_mapping(Some(worker), failure);
+        assert!(error.to_string().contains("local trajectory write failed"));
+        assert!(
+            input.send(None).is_err(),
+            "mapping receiver must be retired on return"
+        );
+    }
 
     #[test]
     fn application_precision_controls_the_actual_solver_and_exported_options() {

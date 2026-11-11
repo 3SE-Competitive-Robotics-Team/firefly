@@ -7,10 +7,14 @@ pub struct Predictor {
     history: VecDeque<ImuSample>,
     history_ns: i128,
     gravity: Vector3<f64>,
-    posterior: Option<i128>,
-    state: Option<State>,
-    bias: Bias,
+    anchor: Option<Anchor>,
     last_published: Option<i128>,
+}
+
+struct Anchor {
+    posterior: i128,
+    state: State,
+    bias: Bias,
 }
 
 impl Predictor {
@@ -20,35 +24,41 @@ impl Predictor {
             history: VecDeque::new(),
             history_ns: (history_seconds * 1e9).round() as i128,
             gravity,
-            posterior: None,
-            state: None,
-            bias: Bias {
-                gyro: Vector3::zeros(),
-                accel: Vector3::zeros(),
-            },
+            anchor: None,
             last_published: None,
         }
     }
 
     /// Accept the entire posterior atomically, including its biases; older commits are ignored.
     pub fn posterior(&mut self, state: State, bias: Bias) -> bool {
-        if self.posterior.is_some_and(|time| state.timestamp_ns < time) {
+        if self
+            .posterior_time_ns()
+            .is_some_and(|time| state.timestamp_ns < time)
+        {
             return false;
         }
-        self.posterior = Some(state.timestamp_ns);
-        self.state = Some(state);
-        self.bias = bias;
+        self.anchor = Some(Anchor {
+            posterior: state.timestamp_ns,
+            state,
+            bias,
+        });
         true
     }
 
     #[must_use]
     pub fn posterior_time_ns(&self) -> Option<i128> {
-        self.posterior
+        self.anchor.as_ref().map(|anchor| anchor.posterior)
     }
 
     #[must_use]
     pub fn bias(&self) -> Bias {
-        self.bias
+        self.anchor.as_ref().map_or(
+            Bias {
+                gyro: Vector3::zeros(),
+                accel: Vector3::zeros(),
+            },
+            |anchor| anchor.bias,
+        )
     }
 
     /// Append a fresh sample, replay after a posterior commit, then advance incrementally.
@@ -70,9 +80,10 @@ impl Predictor {
         {
             self.history.pop_front();
         }
-        let Some(state) = self.state else {
+        let Some(anchor) = &mut self.anchor else {
             return Ok(None);
         };
+        let state = anchor.state;
         if time <= state.timestamp_ns || self.last_published.is_some_and(|last| time <= last) {
             return Ok(None);
         }
@@ -85,7 +96,7 @@ impl Predictor {
             state,
             &measurements[after - 1..],
             time,
-            self.bias,
+            anchor.bias,
             self.gravity,
         )?;
         // OKVIS Transformation::set normalizes the propagated quaternion before the next step.
@@ -93,7 +104,7 @@ impl Predictor {
         if norm2 > 0.0 {
             prediction.state.rotation.coords /= norm2.sqrt();
         }
-        self.state = Some(prediction.state);
+        anchor.state = prediction.state;
         self.last_published = Some(time);
         Ok(Some(prediction))
     }

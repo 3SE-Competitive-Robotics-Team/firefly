@@ -9,6 +9,27 @@ from firefly_cad.map_export import collision_grid, export_map
 from firefly_cad.pipeline import Options, stage, validate_assets
 
 
+def test_build_failure_publishes_terminal_manifest(tmp_path, monkeypatch):
+    from firefly_cad import pipeline
+    from firefly_workspace import parse_scene
+    source = tmp_path / "field.stp"
+    source.write_text("input")
+    monkeypatch.setattr(pipeline.shutil, "which", lambda _: "blender")
+    monkeypatch.setattr(pipeline.subprocess, "check_output", lambda *a, **k: "Blender test\n")
+    monkeypatch.setattr(pipeline, "version", lambda _: "test")
+    def fail(*args):
+        raise RuntimeError("tessellation failed")
+    monkeypatch.setattr(pipeline, "tessellate", fail)
+    output = tmp_path / "assets"
+    with pytest.raises(RuntimeError, match="tessellation failed"):
+        pipeline.build(source, parse_scene("rmuc2027@1.0.0"), output,
+                       output / "map.ffmap", Options(), "blender")
+    manifest = json.loads((output / "asset_manifest.json").read_text())
+    assert manifest["status"] == "failed"
+    assert manifest["reason"] == "tessellation failed"
+    assert manifest["source_sha256"] == pipeline.digest(source)
+
+
 def test_map_preserves_negative_origin_gap_and_volume(tmp_path):
     report = {"res": 0.5, "boxes": [[-2., 1., 0., 0.5, 1., 0.5], [2., 1., 0., 0.5, 1., 0.5]]}
     path = tmp_path / "map.ffmap"

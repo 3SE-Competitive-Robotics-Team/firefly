@@ -205,7 +205,7 @@ fn accelerating_stereo_preserves_pose_and_bias_through_marginalization() {
         );
         assert!((state.state.pose.t_w_i.rotation * attitude(t).inverse()).angle() < 1e-3);
     }
-    assert!(estimator.opt_started);
+    assert!(estimator.optimization_started());
     assert!(estimator.ba.frame_states.len() < config.vio_max_states as usize);
     assert!(
         estimator

@@ -43,6 +43,12 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
+enum EstimationPhase {
+    Waiting,
+    Tracking,
+    Optimizing,
+}
+
 pub struct SqrtKeypointVioEstimator<S: BasaltScalar> {
     pub ba: BundleAdjustmentBase<S>,
     pub marg_data: MargLinData<S>,
@@ -59,8 +65,7 @@ pub struct SqrtKeypointVioEstimator<S: BasaltScalar> {
     pub max_states: usize,
     pub max_kfs: usize,
     pub t_w_i_init: Isometry3<S>,
-    pub initialized: bool,
-    pub opt_started: bool,
+    phase: EstimationPhase,
     take_kf: bool,
     frames_after_kf: i32,
     bg_init: Vector3<S>,
@@ -152,6 +157,11 @@ fn rotation_from_two_vectors<S: BasaltScalar>(
 }
 
 impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
+    #[must_use]
+    pub fn optimization_started(&self) -> bool {
+        matches!(self.phase, EstimationPhase::Optimizing)
+    }
+
     /// The first six diagnostic directions are deterministic; the seventh uses
     /// Rust's RNG rather than Eigen's process-global C `rand()` sequence.
     pub fn check_marg_nullspace(&self) -> DVector<f64> {
@@ -221,7 +231,7 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
                 break;
             };
             let backend_begin = profile_clock_ns();
-            if !self.initialized {
+            if matches!(self.phase, EstimationPhase::Waiting) {
                 while data.t_ns < frame.t_ns {
                     let Some(next) = self.pop_imu(&inputs) else {
                         return Ok(());
@@ -330,10 +340,10 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
     )]
     pub fn optimize(&mut self) -> Result<()> {
         self.solver_diagnostics = None;
-        if !self.opt_started && self.ba.frame_states.len() <= 4 {
+        if !self.optimization_started() && self.ba.frame_states.len() <= 4 {
             return Ok(());
         }
-        self.opt_started = true;
+        self.phase = EstimationPhase::Optimizing;
         let order = self.full_order();
         let costs_before = log::log_enabled!(target: "vio-solver", log::Level::Debug)
             .then(|| self.objective_costs(&order));
@@ -764,7 +774,7 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         lost: &HashSet<usize>,
         outputs: &VioWorkerOutputs,
     ) {
-        if !self.opt_started {
+        if !self.optimization_started() {
             return;
         }
         let timer = Timer::default();
@@ -1038,8 +1048,7 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
             max_states: config.vio_max_states as usize,
             max_kfs: config.vio_max_kfs as usize,
             t_w_i_init: Isometry3::identity(),
-            initialized: false,
-            opt_started: false,
+            phase: EstimationPhase::Waiting,
             take_kf: true,
             frames_after_kf: 0,
             bg_init: Vector3::zeros(),
@@ -1062,7 +1071,9 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         bg: Vector3<S>,
         ba: Vector3<S>,
     ) {
-        self.initialized = true;
+        if matches!(self.phase, EstimationPhase::Waiting) {
+            self.phase = EstimationPhase::Tracking;
+        }
         self.t_w_i_init = pose;
         self.last_state_t_ns = time;
         self.imu_meas
@@ -1550,7 +1561,7 @@ mod tests {
                 assert!(data.yaw_updates.is_none());
                 assert!(data.solver.is_none());
             }
-            assert!(estimator.opt_started);
+            assert!(estimator.optimization_started());
             assert!(estimator.ba.frame_states.len() < 3);
             assert_eq!(estimator.ba.lmdb.num_landmarks(), 24);
             assert!(estimator.get_t_w_i().translation.vector.norm() < 1e-5);

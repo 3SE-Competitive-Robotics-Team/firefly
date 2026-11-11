@@ -183,13 +183,32 @@ def collect(poses, directory, timeout):
             start_stamp = stamp
         complete = any(row["accepted"] for row in results)
     finally:
-        if child.poll() is None:
-            child.send_signal(signal.SIGINT)
-            child.wait(timeout=30)
-        (directory / "capture_manifest.json").write_text(json.dumps({"status": "complete" if complete else "incomplete", "assets": assets, "producer": producer, "requested": len(poses), "frames": results}, indent=2) + "\n")
+        finish_capture(child, directory, complete, {"assets": assets, "producer": producer,
+                                                   "requested": len(poses), "frames": results})
     if not any(row["accepted"] for row in results):
         raise RuntimeError("no usable synchronized frames")
     return results
+
+
+def finish_capture(child, directory: Path, complete: bool, manifest: dict):
+    """回收 renderer 后提交完成状态；退出失败仍保存可追溯的未完成清单。"""
+    manifest = {**manifest, "status": "incomplete"}
+    try:
+        if child.poll() is None:
+            child.send_signal(signal.SIGINT)
+        code = child.wait(timeout=30)
+        if code not in (0, -signal.SIGINT):
+            raise RuntimeError(f"offline render exited: {code}")
+        if complete:
+            manifest["status"] = "complete"
+    except BaseException as error:
+        manifest["cleanup_error"] = str(error) or type(error).__name__
+        raise
+    finally:
+        path = directory / "capture_manifest.json"
+        partial = path.with_suffix(".json.partial")
+        partial.write_text(json.dumps(manifest, indent=2) + "\n")
+        partial.replace(path)
 
 
 def main():

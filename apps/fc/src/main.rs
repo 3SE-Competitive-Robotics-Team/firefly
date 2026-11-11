@@ -305,6 +305,7 @@ fn health_of(inputs: &Inputs) -> Health {
             && inputs.primary.fresh(inputs.imu_time),
         airframe_ready: inputs.vehicle.is_some(),
         attitude_session_ok: inputs.primary.session_ok(),
+        landing_thrust_low: false,
         odometry_alive: inputs
             .estimate
             .is_some_and(|e| e.received_at.elapsed() <= ODOM_STALE_LIMIT),
@@ -365,6 +366,25 @@ fn report_event(event: Event) {
     }
 }
 
+/// 已消费命令的单调序号；拒绝执行的命令同样只消费一次。
+#[derive(Default)]
+struct CommandSequence(u64);
+
+impl CommandSequence {
+    fn is_new(&self, sequence: u64) -> bool {
+        sequence > self.0
+    }
+
+    /// Consume each sequence once, including commands that are subsequently rejected.
+    fn consume(&mut self, sequence: u64) -> bool {
+        if !self.is_new(sequence) {
+            return false;
+        }
+        self.0 = sequence;
+        true
+    }
+}
+
 /// 控制环的跨 tick 状态。
 struct Controller {
     /// 最近一次控制使用的姿态；所属航向系由 source 决定。
@@ -377,7 +397,7 @@ struct Controller {
     /// 飞行状态机（模式与安全层）。
     fsm: FlightFsm,
     /// 已执行的最大指令序号（重复投递去重）。
-    last_command_seq: u64,
+    commands: CommandSequence,
     /// 相对起飞点高度（m；最近一 tick 的估计高度，进日志与 rrd）。
     altitude: f32,
     /// 上次可视化时刻（仿真时间）。
@@ -405,7 +425,7 @@ impl Controller {
             position_error: Vector3::zeros(),
             position_target: Vector3::zeros(),
             fsm: FlightFsm::new(fsm),
-            last_command_seq: 0,
+            commands: CommandSequence::default(),
             altitude: 0.0,
             last_viz: f64::NEG_INFINITY,
             last_tick_diagnostic: None,
@@ -419,12 +439,13 @@ impl Controller {
 
     /// 空中失联只用 IMU 维持姿态支持；禁止陈旧位置进入控制律。
     fn motor_output(&mut self, inputs: &Inputs, dt: f32) -> ([f32; 4], bool) {
-        let health = health_of(inputs);
+        let mut health = health_of(inputs);
+        health.landing_thrust_low = self.px4.landing_thrust_low();
         let recovering = self.fsm.state() == firefly_flight::FlightState::AttitudeFallback
             && health.estimator_ready
             && health.odometry_alive
             && inputs.command.is_some_and(|m| {
-                m.sequence > self.last_command_seq
+                self.commands.is_new(m.sequence)
                     && matches!(m.kind, command_kind::HOLD | command_kind::LAND)
             });
         let standby = !health.estimator_ready
@@ -604,10 +625,9 @@ impl Controller {
     /// 未知编码忽略，拒绝原因逐项记日志（进 rrd `logs/fc`）。
     fn apply_command(&mut self, msg: Option<CommandMessage>, health: Health, state: &QuadState) {
         let Some(msg) = msg else { return };
-        if msg.sequence <= self.last_command_seq {
+        if !self.commands.consume(msg.sequence) {
             return;
         }
-        self.last_command_seq = msg.sequence;
         let Some(cmd) = command_of(&msg) else {
             log::warn!("未知指令编码 {}（已忽略）", msg.kind);
             return;
@@ -1026,6 +1046,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn command_sequences_are_consumed_once_even_at_the_limit() {
+        let mut sequence = super::CommandSequence::default();
+        assert!(!sequence.consume(0));
+        assert!(sequence.consume(3));
+        assert!(!sequence.consume(3));
+        assert!(!sequence.consume(2));
+        assert!(sequence.consume(u64::MAX));
+        assert!(!sequence.consume(u64::MAX));
+        assert!(!sequence.consume(1));
+    }
     use super::*;
 
     #[test]

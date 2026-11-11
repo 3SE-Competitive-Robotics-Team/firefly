@@ -60,10 +60,16 @@ pub struct GridMap {
     depth: Option<DepthImage>,
     has_first_depth: bool,
     has_odom: bool,
-    ever_received_depth: bool,
-    occupancy_needs_update: bool,
+    depth_phase: DepthPhase,
     last_occupancy_update_time: f64,
     depth_odom_timeout: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DepthPhase {
+    Waiting,
+    Pending,
+    Integrated,
 }
 
 impl GridMap {
@@ -140,8 +146,7 @@ impl GridMap {
             depth: None,
             has_first_depth: false,
             has_odom: false,
-            ever_received_depth: false,
-            occupancy_needs_update: false,
+            depth_phase: DepthPhase::Waiting,
             last_occupancy_update_time: 0.,
             depth_odom_timeout: false,
         })
@@ -162,8 +167,7 @@ impl GridMap {
         self.camera_position = pose.translation.vector;
         self.camera_rotation = pose.rotation.to_rotation_matrix().into_inner();
         self.depth = Some(depth);
-        self.occupancy_needs_update = true;
-        self.ever_received_depth = true;
+        self.depth_phase = DepthPhase::Pending;
         Ok(())
     }
 
@@ -179,8 +183,7 @@ impl GridMap {
         self.camera_position = position;
         self.camera_rotation = rotation;
         self.depth = Some(depth);
-        self.occupancy_needs_update = true;
-        self.ever_received_depth = true;
+        self.depth_phase = DepthPhase::Pending;
         Ok(())
     }
 
@@ -198,7 +201,7 @@ impl GridMap {
     /// # Errors
     /// Rejects invalid poses before depth reception.
     pub fn odom_callback(&mut self, body_pose: Isometry3<f64>) -> Result<()> {
-        if self.ever_received_depth {
+        if self.depth_phase != DepthPhase::Waiting {
             return Ok(());
         }
         let (position, rotation) = self.camera_pose_from_body(&body_pose)?;
@@ -250,8 +253,8 @@ impl GridMap {
         if self.last_occupancy_update_time < 1. {
             self.last_occupancy_update_time = now;
         }
-        if !self.occupancy_needs_update {
-            if self.ever_received_depth
+        if self.depth_phase != DepthPhase::Pending {
+            if self.depth_phase == DepthPhase::Integrated
                 && now - self.last_occupancy_update_time > self.parameters.odom_depth_timeout
             {
                 self.depth_odom_timeout = true;
@@ -265,7 +268,7 @@ impl GridMap {
             self.raycast_process();
             self.clear_and_inflate_local_map();
         }
-        self.occupancy_needs_update = false;
+        self.depth_phase = DepthPhase::Integrated;
         Ok(true)
     }
 

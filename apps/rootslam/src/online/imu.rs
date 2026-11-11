@@ -39,8 +39,7 @@ pub(super) fn run(inputs: Inputs, stop: &AtomicBool) -> Result<()> {
         Ok(Adapter {
             inputs,
             pending: VecDeque::new(),
-            sampler: StationaryGravitySampler::new(),
-            initialized: false,
+            sampler: Some(StationaryGravitySampler::new()),
             predictor: Predictor::new(5., Vector3::new(0., 0., -9.81)),
             session: (std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -62,8 +61,8 @@ struct Adapter {
     // Basalt starts consuming IMU only after the first initialized image. Preserve
     // that startup backlog without blocking the event thread on its 300-entry queue.
     pending: VecDeque<Arc<ImuData<f64>>>,
-    sampler: StationaryGravitySampler,
-    initialized: bool,
+    /// Owned only while collecting gravity; successful delivery retires the sampler.
+    sampler: Option<StationaryGravitySampler>,
     predictor: Predictor,
     session: u64,
     alignment: firefly_base::RigidTransform,
@@ -167,8 +166,8 @@ impl ImuAdapter for Adapter {
     }
 
     fn enqueue(&mut self, sample: ImuSample) -> Result<()> {
-        if !self.initialized
-            && let Some(estimate) = self.sampler.push(GravitySample {
+        if let Some(sampler) = &mut self.sampler
+            && let Some(estimate) = sampler.push(GravitySample {
                 timestamp_ns: sample.timestamp_ns,
                 gyro: sample.gyro,
                 accel: sample.accel,
@@ -178,7 +177,7 @@ impl ImuAdapter for Adapter {
                 .gravity
                 .send(estimate)
                 .map_err(|_| error("gravity receiver stopped"))?;
-            self.initialized = true;
+            self.sampler = None;
             log::info!(
                 "RootSLAM VIO gravity initialized from {} stationary IMU samples over {:.3}s",
                 estimate.sample_count,

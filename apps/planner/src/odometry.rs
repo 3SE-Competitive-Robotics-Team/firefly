@@ -53,6 +53,13 @@ pub struct OdometryReceiver {
     thread: Option<JoinHandle<()>>,
 }
 
+struct StopOnDrop(Arc<AtomicBool>);
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 impl OdometryReceiver {
     pub fn start() -> Result<Self> {
         let shared = Arc::new(Mutex::new(Shared::default()));
@@ -62,6 +69,7 @@ impl OdometryReceiver {
         let thread = std::thread::Builder::new()
             .name("planner-odometry".into())
             .spawn(move || {
+                let _termination = StopOnDrop(Arc::clone(&stopping));
                 let result = (|| -> Result<()> {
                     let node = create_node()?;
                     let subscriber = Subscriber::<OdomMessage>::with_topic(&node, ODOM_TOPIC)?;
@@ -128,7 +136,7 @@ impl OdometryReceiver {
         if let Some(error) = &state.error {
             return Err(internal(error.clone()));
         }
-        if self.stop.load(Ordering::Relaxed) {
+        if self.terminated() {
             state.input.stop();
         }
         state.input.current(Instant::now());
@@ -138,6 +146,7 @@ impl OdometryReceiver {
 
     pub fn terminated(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+            || self.thread.as_ref().is_some_and(JoinHandle::is_finished)
     }
 
     pub fn history(&self) -> OdometryHistory {
@@ -165,4 +174,36 @@ impl Drop for OdometryReceiver {
 
 fn internal(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::Internal, message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panicking_receiver_retires_shared_history() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let message = OdomMessage {
+            timestamp: 1.,
+            is_initialized: true,
+            ..Default::default()
+        };
+        {
+            let mut state = shared.lock().unwrap();
+            assert!(state.input.observe(&message, Instant::now()));
+            state.history.push_back(message);
+        }
+        let history = OdometryHistory {
+            shared,
+            stop: Arc::clone(&stop),
+        };
+        assert_eq!(history.snapshot().unwrap().len(), 1);
+        let handle = std::thread::spawn(move || {
+            let _termination = StopOnDrop(stop);
+            panic!("receiver failure outside the state mutex");
+        });
+        assert!(handle.join().is_err());
+        assert!(history.snapshot().unwrap().is_empty());
+    }
 }

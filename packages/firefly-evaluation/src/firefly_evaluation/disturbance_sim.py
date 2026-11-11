@@ -1,5 +1,6 @@
 """RMUC 外力验收夹具：世界系质心力脉冲，仅供测试，不修改状态或飞控目标。"""
 import ctypes
+from enum import Enum, auto
 
 import numpy as np
 from firefly_sim.main import main as run_sim
@@ -20,6 +21,12 @@ class ForcePulse(ctypes.Structure):
         return "FireflyTestHoverForcePulse"
 
 
+class PulsePhase(Enum):
+    IDLE = auto()
+    APPLYING = auto()
+    CLEARING = auto()
+
+
 class DisturbedEnv(ObservedEnv):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -27,13 +34,13 @@ class DisturbedEnv(ObservedEnv):
         self.force = np.zeros(3)
         self.remaining_steps = 0
         self.index = 0
-        self.clear_pending = False
+        self.pulse_phase = PulsePhase.IDLE
 
     def step(self):
         while (sample := self.pulses.receive()) is not None:
             pulse = sample.payload().contents
             force = np.array(pulse.force)
-            if (pulse.index != self.index + 1 or self.remaining_steps or self.clear_pending
+            if (pulse.index != self.index + 1 or self.pulse_phase != PulsePhase.IDLE
                     or not np.isfinite([pulse.timestamp, pulse.seconds, *force]).all()
                     or not -.1 <= self.time - pulse.timestamp <= .3
                     or not 0 < pulse.seconds <= 1. or not 0 < np.linalg.norm(force) <= 2.
@@ -41,20 +48,22 @@ class DisturbedEnv(ObservedEnv):
                 raise RuntimeError("invalid, stale, overlapping or out-of-order test force pulse")
             self.index = int(pulse.index)
             self.force = force
-            self.remaining_steps = int(np.ceil(pulse.seconds / self.model.opt.timestep - 1e-9))
+            self.remaining_steps = max(1, int(np.ceil(pulse.seconds / self.model.opt.timestep - 1e-9)))
+            self.pulse_phase = PulsePhase.APPLYING
             self.recorder.event(f"test force pulse {self.index} accepted: world-frame force at body COM", self.time)
         dt = float(self.model.opt.timestep)
         wrench = self.data.xfrc_applied[self._drone_id]
         wrench[:] = 0.
-        if self.remaining_steps:
+        if self.pulse_phase == PulsePhase.APPLYING:
             # MuJoCo xfrc_applied 为世界系质心 wrench；前三维是力，后三维是力矩。
             wrench[:3] = self.force
             self.recorder.scalars(f"acceptance/disturbance_force/{self.index:02d}", self.time, [*self.force, dt])
             self.remaining_steps -= 1
-            self.clear_pending = True
-        elif self.clear_pending:
+            if self.remaining_steps == 0:
+                self.pulse_phase = PulsePhase.CLEARING
+        elif self.pulse_phase == PulsePhase.CLEARING:
             self.recorder.scalars(f"acceptance/disturbance_force/{self.index:02d}", self.time, [0., 0., 0., 0.])
-            self.clear_pending = False
+            self.pulse_phase = PulsePhase.IDLE
         super().step()
 
 

@@ -71,7 +71,11 @@ impl Worker {
         })
     }
     pub fn snapshot(&self) -> Option<Snapshot> {
-        self.latest.try_lock().ok().and_then(|v| *v)
+        let mut snapshot = self.latest.try_lock().ok().and_then(|v| *v)?;
+        if self.handle.as_ref().is_none_or(JoinHandle::is_finished) {
+            snapshot.ready = false;
+        }
+        Some(snapshot)
     }
 }
 impl Drop for Worker {

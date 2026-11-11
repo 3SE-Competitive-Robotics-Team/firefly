@@ -52,6 +52,23 @@ fn status_exposes_watch_and_interval() {
     let stdout = out.stdout_text();
     assert!(stdout.contains("--watch"), "{stdout}");
     assert!(stdout.contains("--interval"), "{stdout}");
+    assert!(stdout.contains("--json"), "{stdout}");
+}
+
+#[test]
+fn json_status_rejects_watch_before_connecting() {
+    let out = usage_rs::test::command!("ffctl", "process", "status", "--json", "--watch");
+    assert_eq!(out.status.code(), Some(2), "{}", out.stderr_text());
+    assert!(
+        out.stderr_text().contains("--json"),
+        "{}",
+        out.stderr_text()
+    );
+    assert!(
+        out.stderr_text().contains("--watch"),
+        "{}",
+        out.stderr_text()
+    );
 }
 
 /// 未知子命令：clap 风格错误 + 退出码 2。

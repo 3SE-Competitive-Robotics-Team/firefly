@@ -169,11 +169,18 @@ pub trait VioEstimatorEngine: Send {
 pub struct VioEstimatorBase {
     vision: Option<SyncSender<Option<Arc<OpticalFlowResult>>>>,
     imu: Option<SyncSender<Option<Arc<ImuData<f64>>>>>,
-    inputs: Option<VioWorkerInputs>,
-    engine: Option<Box<dyn VioEstimatorEngine>>,
-    thread: Option<JoinHandle<WorkerCompletion>>,
+    worker: Worker,
     pub outputs: VioWorkerOutputs,
     pub status: Arc<VioStatus>,
+}
+enum Worker {
+    Ready {
+        inputs: VioWorkerInputs,
+        engine: Box<dyn VioEstimatorEngine>,
+    },
+    Running(JoinHandle<WorkerCompletion>),
+    Joined(Box<dyn VioEstimatorEngine>),
+    Unavailable,
 }
 struct WorkerCompletion {
     engine: Box<dyn VioEstimatorEngine>,
@@ -187,12 +194,13 @@ impl VioEstimatorBase {
         Self {
             vision: Some(vision),
             imu: Some(imu),
-            inputs: Some(VioWorkerInputs {
-                vision: vision_rx,
-                imu: imu_rx,
-            }),
-            engine: Some(engine),
-            thread: None,
+            worker: Worker::Ready {
+                inputs: VioWorkerInputs {
+                    vision: vision_rx,
+                    imu: imu_rx,
+                },
+                engine,
+            },
             outputs: VioWorkerOutputs::default(),
             status: Arc::new(VioStatus::new(max_states, max_kfs)),
         }
@@ -219,13 +227,10 @@ impl VioEstimatorBase {
         bg: Vector3<f64>,
         ba: Vector3<f64>,
     ) -> Result<()> {
-        if self.inputs.is_none() {
+        let Worker::Ready { engine, .. } = &mut self.worker else {
             return Err(already_started());
-        }
-        self.engine
-            .as_mut()
-            .ok_or_else(already_started)?
-            .initialize_state(t_ns, pose, velocity, bg, ba);
+        };
+        engine.initialize_state(t_ns, pose, velocity, bg, ba);
         *self
             .status
             .initial_pose
@@ -236,21 +241,21 @@ impl VioEstimatorBase {
     /// # Errors
     /// Returns an error if already initialized or thread creation fails.
     pub fn initialize(&mut self, bg: Vector3<f64>, ba: Vector3<f64>) -> Result<()> {
-        if self.inputs.is_none() {
+        let Worker::Ready { engine, .. } = &mut self.worker else {
             return Err(already_started());
-        }
-        self.engine
-            .as_mut()
-            .ok_or_else(already_started)?
-            .initialize_bias(bg, ba);
+        };
+        engine.initialize_bias(bg, ba);
         self.start()
     }
     fn start(&mut self) -> Result<()> {
-        let mut engine = self.engine.take().ok_or_else(already_started)?;
-        let inputs = self.inputs.take().ok_or_else(already_started)?;
+        let worker = std::mem::replace(&mut self.worker, Worker::Unavailable);
+        let Worker::Ready { mut engine, inputs } = worker else {
+            self.worker = worker;
+            return Err(already_started());
+        };
         let outputs = self.outputs.clone();
         let status = self.status.clone();
-        self.thread = Some(
+        self.worker = Worker::Running(
             std::thread::Builder::new()
                 .name("basalt-estimator".into())
                 .spawn(move || {
@@ -268,12 +273,15 @@ impl VioEstimatorBase {
     /// # Errors
     /// Returns the worker's processing error or a panic error.
     pub fn maybe_join(&mut self) -> Result<()> {
-        if let Some(thread) = self.thread.take() {
+        let worker = std::mem::replace(&mut self.worker, Worker::Unavailable);
+        if let Worker::Running(thread) = worker {
             let WorkerCompletion { engine, result } = thread
                 .join()
                 .map_err(|_| worker_error("Estimator worker panicked"))?;
-            self.engine = Some(engine);
+            self.worker = Worker::Joined(engine);
             result?;
+        } else {
+            self.worker = worker;
         }
         Ok(())
     }
@@ -281,9 +289,12 @@ impl VioEstimatorBase {
     /// # Errors
     /// Returns an error while the worker owns the algorithm, or after a panic.
     pub fn engine(&self) -> Result<&dyn VioEstimatorEngine> {
-        self.engine
-            .as_deref()
-            .ok_or_else(|| worker_error("Join estimator before accessing algorithm state"))
+        match &self.worker {
+            Worker::Ready { engine, .. } | Worker::Joined(engine) => Ok(engine.as_ref()),
+            Worker::Running(_) | Worker::Unavailable => Err(worker_error(
+                "Join estimator before accessing algorithm state",
+            )),
+        }
     }
     /// # Errors
     /// Returns an error before joining or if statistics cannot be written.

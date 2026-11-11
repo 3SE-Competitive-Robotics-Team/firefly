@@ -297,14 +297,14 @@ struct MapWorkerState {
     anchors: BTreeMap<i64, (i64, Isometry3<f64>)>,
     original_poses: BTreeMap<i64, Isometry3<f64>>,
     pending: usize,
-    correction_pending: bool,
+    correction_pending: Option<u64>,
     candidates: VecDeque<LoopCandidate>,
     loops_verified: usize,
     pose_graph_optimizations: usize,
     loop_closures: bool,
 }
 impl MapWorkerState {
-    fn handle_event(&mut self, event: LoopEvent) {
+    fn handle_event(&mut self, event: LoopEvent) -> Result<()> {
         match event {
             LoopEvent::Detected(result) => {
                 self.map
@@ -322,7 +322,12 @@ impl MapWorkerState {
                 }
             }
             LoopEvent::Corrected(result, candidate) => {
-                self.correction_pending = false;
+                if self.correction_pending != Some(result.revision) {
+                    return Err(error(
+                        "Correction result does not match the in-flight revision",
+                    ));
+                }
+                self.correction_pending = None;
                 if self.map.apply_loop_correction(
                     result.revision,
                     &result.poses,
@@ -333,9 +338,10 @@ impl MapWorkerState {
                 }
             }
         }
+        Ok(())
     }
     fn dispatch_correction(&mut self, jobs: &Sender<LoopJob>) -> Result<()> {
-        if self.correction_pending {
+        if self.correction_pending.is_some() {
             return Ok(());
         }
         while let Some(candidate) = self.candidates.pop_front() {
@@ -349,10 +355,11 @@ impl MapWorkerState {
                 continue;
             }
             let snapshot = correction_snapshot(&self.map.snapshot, &candidate.edge);
+            let revision = snapshot.revision;
             jobs.send(LoopJob::Correct(snapshot, Box::new(candidate)))
                 .map_err(|_| error("Loop worker disconnected"))?;
             self.pending += 1;
-            self.correction_pending = true;
+            self.correction_pending = Some(revision);
             break;
         }
         Ok(())
@@ -399,7 +406,7 @@ impl MapWorkerState {
                     .pending
                     .checked_sub(1)
                     .ok_or_else(|| error("Unexpected loop worker event"))?;
-                self.handle_event(event?);
+                self.handle_event(event?)?;
                 changed = true;
             }
             if changed {
@@ -512,7 +519,7 @@ fn run(
         anchors: BTreeMap::new(),
         original_poses: BTreeMap::new(),
         pending: 0,
-        correction_pending: false,
+        correction_pending: None,
         candidates: VecDeque::new(),
         loops_verified: 0,
         pose_graph_optimizations: 0,
@@ -571,7 +578,7 @@ mod tests {
             anchors: BTreeMap::new(),
             original_poses: BTreeMap::new(),
             pending: 0,
-            correction_pending: false,
+            correction_pending: None,
             candidates: VecDeque::new(),
             loops_verified: 0,
             pose_graph_optimizations: 0,
@@ -787,7 +794,7 @@ mod tests {
                 anchors: BTreeMap::new(),
                 original_poses: BTreeMap::new(),
                 pending: 0,
-                correction_pending: true,
+                correction_pending: Some(result.revision),
                 candidates: VecDeque::new(),
                 loops_verified: 1,
                 pose_graph_optimizations: 0,
@@ -801,7 +808,9 @@ mod tests {
     fn rejected_post_correction_geometry_does_not_partially_commit_pose_graph() {
         let (mut state, candidate, result) = correction_fixture();
         assert!(state.map.revalidate_loop(&candidate).is_some());
-        state.handle_event(LoopEvent::Corrected(result, Box::new(candidate)));
+        state
+            .handle_event(LoopEvent::Corrected(result, Box::new(candidate)))
+            .unwrap();
         assert_eq!(
             state.map.snapshot.keyframes[&0].t_w_b,
             Isometry3::identity()
@@ -811,10 +820,27 @@ mod tests {
         assert_eq!(state.pose_graph_optimizations, 0);
     }
     #[test]
+    fn unrelated_correction_keeps_the_outstanding_revision_and_map() {
+        let (mut state, candidate, mut result) = correction_fixture();
+        let expected = state.correction_pending;
+        result.revision += 1;
+        assert!(
+            state
+                .handle_event(LoopEvent::Corrected(result, Box::new(candidate)))
+                .is_err()
+        );
+        assert_eq!(state.correction_pending, expected);
+        assert_eq!(state.map.snapshot.revision, 0);
+        assert!(state.map.snapshot.edges.is_empty());
+        assert_eq!(state.pose_graph_optimizations, 0);
+    }
+    #[test]
     fn accepted_correction_commits_geometry_and_loop_edge_together() {
         let (mut state, candidate, result) = correction_fixture();
         state.map.snapshot.landmarks.get_mut(&7).unwrap().host = 0;
-        state.handle_event(LoopEvent::Corrected(result, Box::new(candidate)));
+        state
+            .handle_event(LoopEvent::Corrected(result, Box::new(candidate)))
+            .unwrap();
         assert_eq!(
             state.map.snapshot.keyframes[&0].t_w_b.translation.vector.x,
             0.2

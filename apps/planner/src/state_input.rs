@@ -52,10 +52,21 @@ impl Snapshot {
 
 #[derive(Clone, Default)]
 pub struct StateInput {
-    latest: Option<Snapshot>,
-    last_receive: Option<Instant>,
-    stopped: bool,
-    odom: Option<OdomMessage>,
+    phase: InputPhase,
+}
+
+#[derive(Clone, Default)]
+enum InputPhase {
+    #[default]
+    Waiting,
+    Active {
+        snapshot: Snapshot,
+        received: Instant,
+        odom: OdomMessage,
+    },
+    Stopped {
+        odom: Option<OdomMessage>,
+    },
 }
 
 impl StateInput {
@@ -63,64 +74,68 @@ impl StateInput {
         *self = snapshot;
     }
     pub fn stop(&mut self) {
-        self.stopped = true;
+        self.phase = InputPhase::Stopped {
+            odom: self.odometry(),
+        };
     }
     pub fn odometry(&self) -> Option<OdomMessage> {
-        self.odom
+        match &self.phase {
+            InputPhase::Waiting => None,
+            InputPhase::Active { odom, .. } => Some(*odom),
+            InputPhase::Stopped { odom } => *odom,
+        }
     }
 
     /// 接收前先检查墙钟存活期；有效状态的失联或无效观测进入停止锁存。
     pub fn observe(&mut self, message: &OdomMessage, now: Instant) -> bool {
         self.check_timeout(now);
-        if self.stopped {
+        if self.stopped() {
             return false;
         }
         let Some(snapshot) = Snapshot::from_message(message) else {
-            if self.last_receive.is_some() && !self.stopped {
+            if matches!(self.phase, InputPhase::Active { .. }) {
                 log::warn!(
                     "收到无效局部里程计（is_initialized={} t={:.3}），锁存停止规划",
                     message.is_initialized,
                     message.timestamp
                 );
+                self.stop();
             }
-            self.stopped = self.last_receive.is_some();
             return false;
         };
-        if self
-            .latest
-            .as_ref()
-            .is_some_and(|last| snapshot.timestamp <= last.timestamp)
+        if matches!(&self.phase, InputPhase::Active { snapshot: last, .. } if snapshot.timestamp <= last.timestamp)
         {
             return false;
         }
-        self.last_receive = Some(now);
-        self.latest = Some(snapshot);
-        self.odom = Some(*message);
+        self.phase = InputPhase::Active {
+            snapshot,
+            received: now,
+            odom: *message,
+        };
         true
     }
 
     fn check_timeout(&mut self, now: Instant) {
-        if self
-            .last_receive
-            .is_some_and(|last| now.duration_since(last) >= MAX_AGE)
+        if matches!(&self.phase, InputPhase::Active { received, .. } if now.duration_since(*received) >= MAX_AGE)
         {
-            if !self.stopped {
-                log::warn!(
-                    "局部里程计墙钟中断 ≥{}ms，锁存停止规划",
-                    MAX_AGE.as_millis()
-                );
-            }
-            self.stopped = true;
+            log::warn!(
+                "局部里程计墙钟中断 ≥{}ms，锁存停止规划",
+                MAX_AGE.as_millis()
+            );
+            self.stop();
         }
     }
 
     pub fn current(&mut self, now: Instant) -> Option<Snapshot> {
         self.check_timeout(now);
-        if self.stopped { None } else { self.latest }
+        match self.phase {
+            InputPhase::Active { snapshot, .. } => Some(snapshot),
+            _ => None,
+        }
     }
 
     pub const fn stopped(&self) -> bool {
-        self.stopped
+        matches!(self.phase, InputPhase::Stopped { .. })
     }
 }
 

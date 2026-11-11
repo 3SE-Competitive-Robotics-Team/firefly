@@ -320,6 +320,12 @@ fn fallback_support_is_level_and_hovering() {
 /// 产品级闭环：起飞 → 保持 → 降落，状态机与 PX4 控制链一起跑。
 #[test]
 fn arm_takeoff_hold_land_closes_the_loop() {
+    for altitude_bias in [-0.04, 0.0, 0.04] {
+        takeoff_and_land_with_altitude_bias(altitude_bias);
+    }
+}
+
+fn takeoff_and_land_with_altitude_bias(altitude_bias: f32) {
     let (quad, air) = (plant(), Airframe::default());
     let mut ctrl = controller();
     let mut fsm = FlightFsm::new(FsmParams::default());
@@ -333,39 +339,92 @@ fn arm_takeoff_hold_land_closes_the_loop() {
         odometry_alive: true,
         imu_alive: true,
         attitude_session_ok: true,
+        landing_thrust_low: true,
     };
     fsm.update(DT, &state, None, health);
     fsm.command(Command::Arm, health, &state).unwrap();
     fsm.command(Command::Takeoff { altitude: 1.0 }, health, &state)
         .unwrap();
 
-    let fly = |state: &mut QuadState, fsm: &mut FlightFsm, ctrl: &mut Controller, steps: usize| {
+    let fly = |state: &mut QuadState,
+               fsm: &mut FlightFsm,
+               ctrl: &mut Controller,
+               steps: usize,
+               bias: f32| {
         for _ in 0..steps {
-            let out = fsm.update(DT, state, None, health);
+            let mut measured = *state;
+            measured.position.z += bias;
+            let health = Health {
+                landing_thrust_low: ctrl.landing_thrust_low(),
+                ..health
+            };
+            let out = fsm.update(DT, &measured, None, health);
             let motors = if out.motors_enabled {
-                ctrl.update(state, &out.setpoint, &quad, &air, DT, fsm.on_ground(state))
-                    .expect("valid setpoint")
+                ctrl.update(
+                    &measured,
+                    &out.setpoint,
+                    &quad,
+                    &air,
+                    DT,
+                    fsm.on_ground(&measured),
+                )
+                .expect("valid setpoint")
             } else {
+                assert!(
+                    state.position.z <= 0.0201,
+                    "airborne disarm at {} with bias {bias}",
+                    state.position.z
+                );
                 [0.0; 4]
             };
             let realized = air.realize(state.attitude, &motors);
             integrate(state, &realized, &quad, DT);
+            // A rigid launch pad supplies the contact force once the body reaches it.
+            if state.position.z < 0.02 {
+                state.position.z = 0.02;
+                state.velocity.z = state.velocity.z.max(0.0);
+            }
         }
     };
 
-    fly(&mut state, &mut fsm, &mut ctrl, 12_000);
+    fly(&mut state, &mut fsm, &mut ctrl, 12_000, 0.0);
     assert_eq!(fsm.state(), FlightState::Hold);
     let altitude = fsm.altitude_above_origin(&state);
     assert!((altitude - 1.0).abs() < 0.12, "起飞高度 {altitude:.3} m");
 
     fsm.command(Command::Land, health, &state).unwrap();
-    fly(&mut state, &mut fsm, &mut ctrl, 12_000);
+    fly(&mut state, &mut fsm, &mut ctrl, 12_000, altitude_bias);
     assert_eq!(fsm.state(), FlightState::Disarmed);
     assert!(
         fsm.altitude_above_origin(&state) < 0.1,
         "落地高度 {:.3}",
         fsm.altitude_above_origin(&state)
     );
+}
+
+#[test]
+fn landing_thrust_gate_requires_valid_low_output() {
+    let (quad, air) = (plant(), Airframe::default());
+    let mut ctrl = controller();
+    assert!(!ctrl.landing_thrust_low());
+    let state = QuadState::default();
+    ctrl.update(&state, &PositionSetpoint::default(), &quad, &air, DT, false)
+        .unwrap();
+    assert!(
+        !ctrl.landing_thrust_low(),
+        "hover thrust cannot confirm contact"
+    );
+    let downward = PositionSetpoint {
+        position: Vector3::new(0.0, 0.0, -1.0),
+        ..Default::default()
+    };
+    for _ in 0..1000 {
+        ctrl.update(&state, &downward, &quad, &air, DT, true)
+            .unwrap();
+    }
+    assert!(ctrl.landing_thrust_low());
+    ctrl.input_invalid = true;
+    assert!(!ctrl.landing_thrust_low());
 }
 
 /// 瞬时无效位置设定值保留上一次有效推力，不能把电机切零。

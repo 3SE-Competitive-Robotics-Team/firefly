@@ -30,6 +30,9 @@ pub(crate) struct Status {
     /// 持续刷新（类似 top；q 或 Ctrl-C 退出）
     #[usage(short, long)]
     watch: bool,
+    /// 输出单次 JSON 状态快照，供脚本与 agent 读取
+    #[usage(long, conflicts = "--watch")]
+    json: bool,
     /// 刷新间隔（秒）
     #[usage(
         short,
@@ -55,9 +58,24 @@ impl Run for Status {
         }
         if self.watch {
             watch(&config, Duration::from_secs_f64(seconds))
+        } else if self.json {
+            json(query())
         } else {
             once(&config, query())
         }
+    }
+}
+
+fn json(result: Result<Vec<ProcessStatus>, String>) -> ExitCode {
+    let result = result.and_then(|statuses| {
+        serde_json::to_string(&statuses).map_err(|error| format!("编码进程状态: {error}"))
+    });
+    match result {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => crate::process::report(Err(error)),
     }
 }
 
@@ -170,7 +188,12 @@ impl Drop for RawMode {
 }
 
 fn query() -> Result<Vec<ProcessStatus>, String> {
-    client::send(&Request::Status).map(|response| response.processes)
+    let response = client::send(&Request::Status)?;
+    if response.ok {
+        Ok(response.processes)
+    } else {
+        Err(response.message)
+    }
 }
 
 fn collect(statuses: &[ProcessStatus]) -> HashMap<u32, Sample> {
@@ -192,13 +215,14 @@ fn render(
 ) {
     let width = name_width(config);
     println!(
-        "{:<width$} {:<8} {:<8} {:<7} {:<9} {:<9} AUTOSTART",
+        "{:<width$} {:<8} {:<8} {:<7} {:<9} {:<9} {:<9} STATE",
         "NAME",
         "RUNNING",
         "PID",
         "CPU%",
         "MEM(MiB)",
         "RESTARTS",
+        "AUTOSTART",
         width = width
     );
     for process in &config.processes {
@@ -216,7 +240,7 @@ fn render(
         );
         let memory = usage.map_or_else(|| "-".to_owned(), |usage| format!("{:.1}", usage.rss_mib));
         println!(
-            "{:<width$} {:<8} {:<8} {:<7} {:<9} {:<9} {}",
+            "{:<width$} {:<8} {:<8} {:<7} {:<9} {:<9} {:<9} {}",
             process.name,
             if running { "yes" } else { "no" },
             pid.map_or_else(|| "-".to_owned(), |pid| pid.to_string()),
@@ -224,6 +248,7 @@ fn render(
             memory,
             status.map_or(0, |status| status.restarts),
             if process.autostart { "yes" } else { "no" },
+            status.map_or("unknown", ProcessStatus::state_name),
             width = width
         );
     }
@@ -251,6 +276,42 @@ mod tests {
         assert_eq!(
             super::once(&config_with(&[]), Err("missing socket".into())),
             std::process::ExitCode::FAILURE
+        );
+        assert_eq!(
+            super::json(Err("missing socket".into())),
+            std::process::ExitCode::FAILURE
+        );
+    }
+
+    #[test]
+    fn status_outputs_include_retry_and_stop_progress() {
+        use crate::process::protocol::{ProcessState, ProcessStatus};
+        let states = [
+            ProcessState::Stopped,
+            ProcessState::Running,
+            ProcessState::Backoff,
+            ProcessState::Stopping,
+        ];
+        let statuses: Vec<_> = states
+            .into_iter()
+            .enumerate()
+            .map(|(index, state)| ProcessStatus {
+                name: format!("fixture-{index}"),
+                running: matches!(state, ProcessState::Running | ProcessState::Stopping),
+                pid: matches!(state, ProcessState::Running | ProcessState::Stopping)
+                    .then_some(std::process::id()),
+                restarts: 2,
+                state: Some(state),
+            })
+            .collect();
+        let config = config_with(&["fixture-0", "fixture-1", "fixture-2", "fixture-3"]);
+        assert_eq!(
+            super::json(Ok(statuses.clone())),
+            std::process::ExitCode::SUCCESS
+        );
+        assert_eq!(
+            super::once(&config, Ok(statuses)),
+            std::process::ExitCode::SUCCESS
         );
     }
 

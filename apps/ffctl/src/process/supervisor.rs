@@ -22,7 +22,7 @@ use signal_hook::flag;
 
 use crate::process::SOCKET;
 use crate::process::config::{Config, Process};
-use crate::process::protocol::{ProcessStatus, Request, Response};
+use crate::process::protocol::{ProcessState, ProcessStatus, Request, Response};
 
 const LOG_DIR: &str = "logs/process";
 const START_DELAY: Duration = Duration::from_millis(300);
@@ -36,11 +36,52 @@ const MAX_REQUEST: usize = 64 * 1024;
 
 struct Managed {
     process: Process,
-    child: Option<Child>,
-    desired: bool,
+    lifecycle: Lifecycle,
     restarts: u32,
-    started_at: Option<Instant>,
-    restart_at: Option<Instant>,
+}
+
+/// Running owns a child with restart permission; Stopping retains it until reaped.
+/// Backoff owns only a retry deadline. Stopped owns neither resource.
+enum Lifecycle {
+    Stopped,
+    Running { child: Child, started_at: Instant },
+    Backoff { restart_at: Instant },
+    Stopping { child: Child, started_at: Instant },
+}
+
+impl Lifecycle {
+    fn child(&self) -> Option<&Child> {
+        match self {
+            Self::Running { child, .. } | Self::Stopping { child, .. } => Some(child),
+            Self::Stopped | Self::Backoff { .. } => None,
+        }
+    }
+
+    fn child_mut(&mut self) -> Option<&mut Child> {
+        match self {
+            Self::Running { child, .. } | Self::Stopping { child, .. } => Some(child),
+            Self::Stopped | Self::Backoff { .. } => None,
+        }
+    }
+
+    fn state(&self) -> ProcessState {
+        match self {
+            Self::Stopped => ProcessState::Stopped,
+            Self::Running { .. } => ProcessState::Running,
+            Self::Backoff { .. } => ProcessState::Backoff,
+            Self::Stopping { .. } => ProcessState::Stopping,
+        }
+    }
+
+    /// Revoke restart permission before signaling; repeated stops retain the child.
+    fn request_stop(&mut self) {
+        *self = match std::mem::replace(self, Self::Stopped) {
+            Self::Running { child, started_at } | Self::Stopping { child, started_at } => {
+                Self::Stopping { child, started_at }
+            }
+            Self::Stopped | Self::Backoff { .. } => Self::Stopped,
+        };
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -61,11 +102,8 @@ pub(crate) fn run(path: &Path) -> Result<(), String> {
         .into_iter()
         .map(|process| Managed {
             process,
-            child: None,
-            desired: false,
+            lifecycle: Lifecycle::Stopped,
             restarts: 0,
-            started_at: None,
-            restart_at: None,
         })
         .collect();
 
@@ -95,26 +133,25 @@ fn bring_up(managed: &mut [Managed]) -> Option<String> {
         let name = entry.process.name.clone();
         match spawn(&entry.process) {
             Ok(child) => {
-                entry.child = Some(child);
-                entry.desired = true;
-                entry.started_at = Some(Instant::now());
+                entry.lifecycle = Lifecycle::Running {
+                    child,
+                    started_at: Instant::now(),
+                };
                 entry.restarts = 0;
                 thread::sleep(START_DELAY);
                 let exited = entry
-                    .child
-                    .as_mut()
+                    .lifecycle
+                    .child_mut()
                     .and_then(|child| child.try_wait().ok())
                     .flatten();
                 if let Some(status) = exited {
-                    entry.child = None;
-                    entry.desired = false;
-                    entry.started_at = None;
+                    entry.lifecycle = Lifecycle::Stopped;
                     eprintln!("ffctl: {name} 启动后立即退出（{status}）");
                     return Some(format!("{name}（{status}）"));
                 }
             }
             Err(error) => {
-                entry.desired = false;
+                entry.lifecycle = Lifecycle::Stopped;
                 eprintln!("ffctl: {name} 启动失败：{error}");
                 return Some(format!("{name}（{error}）"));
             }
@@ -126,7 +163,7 @@ fn bring_up(managed: &mut [Managed]) -> Option<String> {
 fn monitor(managed: &mut [Managed]) {
     let now = Instant::now();
     for entry in &mut *managed {
-        let exited = match entry.child.as_mut() {
+        let exited = match entry.lifecycle.child_mut() {
             Some(child) => match child.try_wait() {
                 Ok(status) => status,
                 Err(error) => {
@@ -138,9 +175,7 @@ fn monitor(managed: &mut [Managed]) {
         };
 
         if let Some(status) = exited {
-            entry.child = None;
-            entry.started_at = None;
-            if entry.desired {
+            if matches!(entry.lifecycle, Lifecycle::Running { .. }) {
                 entry.restarts = entry.restarts.saturating_add(1);
                 let delay = backoff(entry.restarts);
                 eprintln!(
@@ -148,24 +183,28 @@ fn monitor(managed: &mut [Managed]) {
                     entry.process.name,
                     delay.as_secs()
                 );
-                entry.restart_at = Some(now + delay);
+                entry.lifecycle = Lifecycle::Backoff {
+                    restart_at: now + delay,
+                };
             } else {
+                entry.lifecycle = Lifecycle::Stopped;
                 eprintln!("ffctl: {} 已停止（{status}）", entry.process.name);
             }
         } else if entry.restarts > 0
-            && entry
-                .started_at
-                .is_some_and(|started| now.saturating_duration_since(started) >= STABLE_RESET)
+            && matches!(entry.lifecycle,
+                Lifecycle::Running { started_at, .. } | Lifecycle::Stopping { started_at, .. }
+                    if now.saturating_duration_since(started_at) >= STABLE_RESET)
         {
             entry.restarts = 0;
         }
 
-        if entry.child.is_none() && entry.desired && entry.restart_at.is_some_and(|at| now >= at) {
-            entry.restart_at = None;
+        if matches!(entry.lifecycle, Lifecycle::Backoff { restart_at } if now >= restart_at) {
             match spawn(&entry.process) {
                 Ok(child) => {
-                    entry.child = Some(child);
-                    entry.started_at = Some(now);
+                    entry.lifecycle = Lifecycle::Running {
+                        child,
+                        started_at: now,
+                    };
                 }
                 Err(error) => {
                     entry.restarts = entry.restarts.saturating_add(1);
@@ -175,7 +214,9 @@ fn monitor(managed: &mut [Managed]) {
                         entry.process.name,
                         delay.as_secs()
                     );
-                    entry.restart_at = Some(now + delay);
+                    entry.lifecycle = Lifecycle::Backoff {
+                        restart_at: now + delay,
+                    };
                 }
             }
         }
@@ -208,15 +249,15 @@ fn start(managed: &mut [Managed], names: &[String]) -> Result<String, String> {
     indices.sort_unstable();
     let mut started = Vec::new();
     for index in indices {
-        if managed[index].child.is_some() {
+        if managed[index].lifecycle.child().is_some() {
             continue;
         }
         match spawn(&managed[index].process) {
             Ok(child) => {
-                managed[index].child = Some(child);
-                managed[index].desired = true;
-                managed[index].started_at = Some(Instant::now());
-                managed[index].restart_at = None;
+                managed[index].lifecycle = Lifecycle::Running {
+                    child,
+                    started_at: Instant::now(),
+                };
                 managed[index].restarts = 0;
                 started.push(managed[index].process.name.clone());
             }
@@ -237,16 +278,15 @@ fn stop(managed: &mut [Managed], names: &[String]) -> Result<String, String> {
     let mut errors = Vec::new();
     for index in indices.into_iter().rev() {
         let entry = &mut managed[index];
-        let scheduled = entry.desired || entry.restart_at.is_some();
-        entry.desired = false;
-        entry.restart_at = None;
-        if entry.child.is_none() {
+        let scheduled = matches!(entry.lifecycle, Lifecycle::Backoff { .. });
+        entry.lifecycle.request_stop();
+        if entry.lifecycle.child().is_none() {
             if scheduled {
                 stopped.push(entry.process.name.clone());
             }
             continue;
         }
-        match stop_child(entry) {
+        match stop_child(entry, STOP_TIMEOUT) {
             Ok(()) => stopped.push(entry.process.name.clone()),
             Err(error) => errors.push(error),
         }
@@ -275,9 +315,9 @@ fn restart(managed: &mut [Managed], names: &[String]) -> Result<String, String> 
     }
 }
 
-fn stop_child(entry: &mut Managed) -> Result<(), String> {
+fn stop_child(entry: &mut Managed, timeout: Duration) -> Result<(), String> {
     let name = entry.process.name.clone();
-    let Some(pid) = entry.child.as_ref().map(Child::id) else {
+    let Some(pid) = entry.lifecycle.child().map(Child::id) else {
         return Ok(());
     };
     let pid = i32::try_from(pid).map_err(|_| format!("{name} 的 pid 超出范围"))?;
@@ -286,12 +326,12 @@ fn stop_child(entry: &mut Managed) -> Result<(), String> {
         Err(error) => return Err(format!("{name} 发送 SIGINT 失败：{error}")),
     }
 
-    let deadline = Instant::now() + STOP_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     loop {
         let exited = {
             let child = entry
-                .child
-                .as_mut()
+                .lifecycle
+                .child_mut()
                 .ok_or_else(|| format!("{name} 状态不一致"))?;
             match child.try_wait() {
                 Ok(status) => status,
@@ -299,13 +339,12 @@ fn stop_child(entry: &mut Managed) -> Result<(), String> {
             }
         };
         if let Some(status) = exited {
-            entry.child = None;
-            entry.started_at = None;
+            entry.lifecycle = Lifecycle::Stopped;
             eprintln!("ffctl: {name} 已停止（{status}）");
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(format!("{name} 在 {}s 内未退出", STOP_TIMEOUT.as_secs()));
+            return Err(format!("{name} 在 {}s 内未退出", timeout.as_secs()));
         }
         thread::sleep(Duration::from_millis(50));
     }
@@ -351,9 +390,10 @@ fn statuses(managed: &[Managed]) -> Vec<ProcessStatus> {
         .iter()
         .map(|entry| ProcessStatus {
             name: entry.process.name.clone(),
-            running: entry.child.is_some(),
-            pid: entry.child.as_ref().map(Child::id),
+            running: entry.lifecycle.child().is_some(),
+            pid: entry.lifecycle.child().map(Child::id),
             restarts: entry.restarts,
+            state: Some(entry.lifecycle.state()),
         })
         .collect()
 }
@@ -500,6 +540,45 @@ fn error_response(message: &str) -> Response {
 mod tests {
     use super::*;
 
+    /// stdin keeps the child alive; closing it lets every test reap its own process.
+    struct Fixture(Managed);
+
+    impl Fixture {
+        fn running() -> Self {
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", "trap '' INT; printf 'ready\\n'; read -r line"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut ready = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut ready)
+                .unwrap();
+            assert_eq!(ready, "ready\n");
+            let mut entry = pending_restart("fixture");
+            entry.lifecycle = Lifecycle::Running {
+                child,
+                started_at: Instant::now(),
+            };
+            Self(entry)
+        }
+
+        fn exit(&mut self) {
+            if let Some(child) = self.0.lifecycle.child_mut() {
+                drop(child.stdin.take());
+                child.wait().unwrap();
+            }
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.exit();
+        }
+    }
+
     fn pending_restart(name: &str) -> Managed {
         Managed {
             process: Process {
@@ -507,11 +586,10 @@ mod tests {
                 command: vec!["pending-restart-fixture".to_owned()],
                 autostart: true,
             },
-            child: None,
-            desired: true,
+            lifecycle: Lifecycle::Backoff {
+                restart_at: Instant::now(),
+            },
             restarts: 1,
-            started_at: None,
-            restart_at: Some(Instant::now()),
         }
     }
 
@@ -521,12 +599,9 @@ mod tests {
 
         let message = stop(&mut managed, &["selected".to_owned()]).unwrap();
 
-        assert!(!managed[0].desired);
-        assert!(managed[0].restart_at.is_none());
-        assert!(managed[0].child.is_none());
+        assert!(matches!(managed[0].lifecycle, Lifecycle::Stopped));
         assert!(message.contains("selected"));
-        assert!(managed[1].desired);
-        assert!(managed[1].restart_at.is_some());
+        assert!(matches!(managed[1].lifecycle, Lifecycle::Backoff { .. }));
     }
 
     #[test]
@@ -536,10 +611,155 @@ mod tests {
         stop(&mut managed, &[]).unwrap();
         monitor(&mut managed);
 
-        assert!(managed.iter().all(|entry| !entry.desired));
-        assert!(managed.iter().all(|entry| entry.restart_at.is_none()));
-        assert!(managed.iter().all(|entry| entry.child.is_none()));
+        assert!(
+            managed
+                .iter()
+                .all(|entry| matches!(entry.lifecycle, Lifecycle::Stopped))
+        );
         assert!(managed.iter().all(|entry| entry.restarts == 1));
+    }
+
+    #[test]
+    fn repeated_stop_is_idle_and_unknown_names_leave_backoff_intact() {
+        let mut managed = [pending_restart("selected")];
+        assert!(stop(&mut managed, &["unknown".to_owned()]).is_err());
+        assert!(matches!(managed[0].lifecycle, Lifecycle::Backoff { .. }));
+        stop(&mut managed, &[]).unwrap();
+        assert_eq!(stop(&mut managed, &[]).unwrap(), "没有运行中的进程");
+        monitor(&mut managed);
+        assert_eq!(statuses(&managed)[0].state, Some(ProcessState::Stopped));
+    }
+
+    #[test]
+    fn unexpected_exit_schedules_one_retry_and_stop_cancels_it() {
+        let mut fixture = Fixture::running();
+        fixture.exit();
+        monitor(std::slice::from_mut(&mut fixture.0));
+        assert_eq!(fixture.0.restarts, 2);
+        assert!(
+            matches!(fixture.0.lifecycle, Lifecycle::Backoff { restart_at }
+            if restart_at > Instant::now())
+        );
+        let status = statuses(std::slice::from_ref(&fixture.0)).remove(0);
+        assert_eq!(status.state, Some(ProcessState::Backoff));
+        assert!(!status.running);
+        assert!(status.pid.is_none());
+        stop(std::slice::from_mut(&mut fixture.0), &[]).unwrap();
+        monitor(std::slice::from_mut(&mut fixture.0));
+        assert!(matches!(fixture.0.lifecycle, Lifecycle::Stopped));
+        assert_eq!(fixture.0.restarts, 2);
+    }
+
+    #[test]
+    fn stop_timeout_retains_child_and_prevents_restart_after_exit() {
+        let mut fixture = Fixture::running();
+        let pid = fixture.0.lifecycle.child().unwrap().id();
+        fixture.0.lifecycle.request_stop();
+        assert!(stop_child(&mut fixture.0, Duration::ZERO).is_err());
+        fixture.0.lifecycle.request_stop();
+        assert!(stop_child(&mut fixture.0, Duration::ZERO).is_err());
+        assert_eq!(
+            start(std::slice::from_mut(&mut fixture.0), &[]).unwrap(),
+            "没有需要启动的进程"
+        );
+        let status = statuses(std::slice::from_ref(&fixture.0)).remove(0);
+        assert_eq!(status.state, Some(ProcessState::Stopping));
+        assert_eq!(status.pid, Some(pid));
+        assert!(status.running);
+        fixture.exit();
+        monitor(std::slice::from_mut(&mut fixture.0));
+        assert!(matches!(fixture.0.lifecycle, Lifecycle::Stopped));
+        assert_eq!(fixture.0.restarts, 1);
+    }
+
+    #[test]
+    fn stable_running_child_resets_restart_count() {
+        let mut fixture = Fixture::running();
+        if let Lifecycle::Running { started_at, .. } = &mut fixture.0.lifecycle {
+            *started_at = Instant::now().checked_sub(STABLE_RESET).unwrap();
+        }
+        monitor(std::slice::from_mut(&mut fixture.0));
+        assert_eq!(fixture.0.restarts, 0);
+        assert!(matches!(fixture.0.lifecycle, Lifecycle::Running { .. }));
+    }
+
+    #[test]
+    fn failed_manual_start_preserves_retry_and_failed_retry_advances_backoff() {
+        let mut managed = [pending_restart("empty-command")];
+        managed[0].process.command.clear();
+        assert!(start(&mut managed, &[]).is_err());
+        assert!(matches!(managed[0].lifecycle, Lifecycle::Backoff { .. }));
+        assert_eq!(managed[0].restarts, 1);
+        monitor(&mut managed);
+        assert_eq!(managed[0].restarts, 2);
+        assert!(
+            matches!(managed[0].lifecycle, Lifecycle::Backoff { restart_at }
+            if restart_at > Instant::now())
+        );
+        monitor(&mut managed);
+        assert_eq!(managed[0].restarts, 2);
+    }
+
+    #[test]
+    fn start_and_retry_reap_children_and_preserve_restart_policy() {
+        let name = format!("ffctl-lifecycle-test-{}", std::process::id());
+        let log_path = Path::new(LOG_DIR).join(format!("{name}.log"));
+        assert!(!log_path.exists());
+        let mut fixture = Fixture(pending_restart(&name));
+        fixture.0.lifecycle = Lifecycle::Stopped;
+        fixture.0.process.command = vec!["/bin/sh".into(), "-c".into(), "exit 0".into()];
+
+        start(std::slice::from_mut(&mut fixture.0), &[]).unwrap();
+        assert_eq!(fixture.0.restarts, 0);
+        let pid = fixture.0.lifecycle.child().unwrap().id();
+        start(std::slice::from_mut(&mut fixture.0), &[]).unwrap();
+        assert_eq!(fixture.0.lifecycle.child().unwrap().id(), pid);
+        fixture.exit();
+        monitor(std::slice::from_mut(&mut fixture.0));
+        assert_eq!(fixture.0.restarts, 1);
+        assert!(matches!(fixture.0.lifecycle, Lifecycle::Backoff { .. }));
+
+        fixture.0.lifecycle = Lifecycle::Backoff {
+            restart_at: Instant::now(),
+        };
+        monitor(std::slice::from_mut(&mut fixture.0));
+        assert!(matches!(fixture.0.lifecycle, Lifecycle::Running { .. }));
+        assert_eq!(fixture.0.restarts, 1);
+        fixture.exit();
+        monitor(std::slice::from_mut(&mut fixture.0));
+        assert_eq!(fixture.0.restarts, 2);
+        start(std::slice::from_mut(&mut fixture.0), &[]).unwrap();
+        assert_eq!(fixture.0.restarts, 0);
+        fixture.exit();
+        stop(std::slice::from_mut(&mut fixture.0), &[]).unwrap();
+        assert!(matches!(fixture.0.lifecycle, Lifecycle::Stopped));
+
+        assert!(bring_up(std::slice::from_mut(&mut fixture.0)).is_some());
+        assert!(matches!(fixture.0.lifecycle, Lifecycle::Stopped));
+        fs::remove_file(log_path).unwrap();
+    }
+
+    #[test]
+    fn unix_socket_status_preserves_lifecycle_and_legacy_fields() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let serving = thread::spawn(move || serve(server, &sender));
+        client.write_all(b"{\"cmd\":\"status\"}\n").unwrap();
+        let (request, reply) = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        reply
+            .send(handle(request, &mut [pending_restart("fixture")]))
+            .unwrap();
+        let mut text = String::new();
+        BufReader::new(client).read_line(&mut text).unwrap();
+        serving.join().unwrap();
+        let response: Response = serde_json::from_str(&text).unwrap();
+        assert!(response.ok);
+        assert_eq!(response.processes[0].state, Some(ProcessState::Backoff));
+        assert!(!response.processes[0].running);
+        assert!(response.processes[0].pid.is_none());
     }
 
     #[test]

@@ -17,6 +17,26 @@ capture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(capture)
 
 
+@pytest.mark.parametrize("outcome", [0, -2, 1, "timeout"])
+def test_capture_completion_requires_renderer_cleanup(tmp_path, outcome):
+    child = create_autospec(subprocess.Popen, instance=True)
+    child.poll.return_value = None
+    if outcome == "timeout":
+        child.wait.side_effect = subprocess.TimeoutExpired("render", 30)
+    else:
+        child.wait.return_value = outcome
+    if outcome in (0, -2):
+        capture.finish_capture(child, tmp_path, True, {"frames": [{"accepted": True}]})
+    else:
+        with pytest.raises((RuntimeError, subprocess.TimeoutExpired)):
+            capture.finish_capture(child, tmp_path, True, {"frames": [{"accepted": True}]})
+    manifest = json.loads((tmp_path / "capture_manifest.json").read_text())
+    assert manifest["status"] == ("complete" if outcome in (0, -2) else "incomplete")
+    assert bool(manifest.get("cleanup_error")) == (outcome not in (0, -2))
+    assert manifest["frames"] == [{"accepted": True}]
+    assert not (tmp_path / "capture_manifest.json.partial").exists()
+
+
 def workspace_at(root):
     (root / "Cargo.toml").write_text("[workspace]\n")
     (root / "pyproject.toml").write_text('[project]\nname = "firefly"\n[tool.uv.workspace]\nmembers = []\n')

@@ -128,7 +128,7 @@ impl FlightState {
 }
 
 /// 上层每 tick 汇报的健康电平（飞控自己算，不由被控对象喂）。
-// 四个布尔是四条独立电平，不是状态编码，故不打包成位域
+// 健康条件是独立电平，各自保持输入语义。
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Health {
@@ -142,6 +142,8 @@ pub struct Health {
     pub imu_alive: bool,
     /// VIO 姿态会话未改变（会话改变后不可恢复）。
     pub attitude_session_ok: bool,
+    /// 最近控制输出低于最小推力到悬停推力区间的触地门限。
+    pub landing_thrust_low: bool,
 }
 
 /// 状态机参数（缺键回落默认值；单位与来源见各字段）。
@@ -265,6 +267,34 @@ impl Default for FsmParams {
     }
 }
 
+impl FsmParams {
+    /// # Errors
+    /// Rejects landing limits that cannot produce a descending trajectory and timed contact confirmation.
+    pub fn validate(&self) -> firefly_error::Result<()> {
+        for (name, value) in [
+            ("land_descent_rate", self.land_descent_rate),
+            ("land_accel", self.land_accel),
+            ("land_jerk", self.land_jerk),
+            ("on_ground_velocity", self.on_ground_velocity),
+            ("land_complete_hold", self.land_complete_hold),
+        ] {
+            if !value.is_finite() || value <= 0. {
+                return Err(firefly_error::Error::new(
+                    firefly_error::ErrorKind::InvalidArgument,
+                    format!("fsm.{name} must be finite and positive"),
+                ));
+            }
+        }
+        if !self.on_ground_altitude.is_finite() || self.on_ground_altitude < 0. {
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                "fsm.on_ground_altitude must be finite and non-negative",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// 每 tick 的输出：当前模式该飞的参考 + 电机使能。
 #[derive(Clone, Copy, Debug)]
 pub struct Output {
@@ -315,16 +345,23 @@ pub struct FlightFsm {
     vertical: VelocitySmoothing,
     /// 起飞目标高度（相对起飞点，m）。
     takeoff_target: f32,
-    /// 连续满足落地判据的时长（s）。
-    ground_time: f32,
+    /// 接近、缓降与持续触地确认；确认态拥有连续满足判据的时长（s）。
+    landing: LandingProgress,
     /// 最近一次 `update` 是否拿到参考流（`Track` 的准入条件）。
     reference_fresh: bool,
     /// `Track` 下参考流连续缺席的时长（s）。
-    reference_lost: f32,
+    reference_lost: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LandingProgress {
+    Approach,
+    Crawl,
+    Confirming(f32),
 }
 
 impl FlightFsm {
-    /// 以参数建状态机（初始 [`FlightState::Disarmed`]）。
+    /// 以通过 [`FsmParams::validate`] 的参数建状态机（初始 [`FlightState::Disarmed`]）。
     #[must_use]
     pub fn new(params: FsmParams) -> Self {
         Self {
@@ -336,9 +373,9 @@ impl FlightFsm {
             ramp_z: 0.0,
             vertical: VelocitySmoothing::default(),
             takeoff_target: params.takeoff_altitude,
-            ground_time: 0.0,
+            landing: LandingProgress::Approach,
             reference_fresh: false,
-            reference_lost: 0.0,
+            reference_lost: None,
         }
     }
 
@@ -433,7 +470,9 @@ impl FlightFsm {
                 || (self.state == FlightState::Track && reference.is_none()),
             matches!(event, Event::FailsafeReferenceLost)
                 || (self.state == FlightState::Track
-                    && self.reference_lost >= self.params.reference_timeout),
+                    && self
+                        .reference_lost
+                        .is_some_and(|elapsed| elapsed >= self.params.reference_timeout)),
         );
         let failsafe = if matches!(event, Event::FailsafeEstimatorLost)
             && self.state == FlightState::Disarmed
@@ -499,28 +538,42 @@ impl FlightFsm {
             }
             FlightState::Track => {
                 if reference.is_none() {
-                    if self.reference_lost == 0. {
+                    if self.reference_lost.is_none() {
                         self.target = state.position;
                         self.ramp_z = state.position.z;
                         self.target_yaw = crate::state::yaw_of(state.attitude);
                     }
-                    self.reference_lost += dt;
-                    if self.reference_lost >= self.params.reference_timeout {
+                    let elapsed = self.reference_lost.get_or_insert(0.);
+                    *elapsed += dt;
+                    if *elapsed >= self.params.reference_timeout {
                         self.state = FlightState::Hold;
                         return Event::FailsafeReferenceLost;
                     }
                 } else {
-                    self.reference_lost = 0.0;
+                    self.reference_lost = None;
                 }
             }
             FlightState::Land => {
-                if self.on_ground(state) {
-                    self.ground_time += dt;
-                    if self.ground_time >= self.params.land_complete_hold {
+                if matches!(self.landing, LandingProgress::Approach)
+                    && self.altitude_above_origin(state) <= self.params.on_ground_altitude
+                {
+                    self.landing = LandingProgress::Crawl;
+                }
+                if !matches!(self.landing, LandingProgress::Approach)
+                    && self.on_ground(state)
+                    && state.velocity.norm() <= self.params.on_ground_velocity
+                    && health.landing_thrust_low
+                {
+                    let elapsed = match self.landing {
+                        LandingProgress::Confirming(elapsed) => elapsed + dt,
+                        _ => dt,
+                    };
+                    self.landing = LandingProgress::Confirming(elapsed);
+                    if elapsed >= self.params.land_complete_hold {
                         self.state = FlightState::Disarmed;
                     }
-                } else {
-                    self.ground_time = 0.0;
+                } else if matches!(self.landing, LandingProgress::Confirming(_)) {
+                    self.landing = LandingProgress::Crawl;
                 }
             }
         }
@@ -548,7 +601,16 @@ impl FlightFsm {
             }
             FlightState::Land => {
                 let goal = self.origin_z.unwrap_or(0.0);
-                let target = self.vertical_target(goal, self.params.land_descent_rate, false);
+                let target = if matches!(self.landing, LandingProgress::Approach) {
+                    self.vertical_target(goal, self.params.land_descent_rate, false)
+                } else {
+                    // Keep descending until low thrust and arrested motion confirm contact.
+                    // PX4 uses crawl speed above the vertical-motion threshold (factor 1.2).
+                    -self
+                        .params
+                        .land_descent_rate
+                        .min(1.2 * self.params.on_ground_velocity)
+                };
                 self.vertical.update(dt, target);
                 self.vertical_setpoint()
             }
@@ -661,7 +723,7 @@ impl FlightFsm {
             return Err(Reject::Arming(ArmingCheck::OnGround));
         }
         self.state = FlightState::Disarmed;
-        self.ground_time = 0.0;
+        self.landing = LandingProgress::Approach;
         Ok(())
     }
 
@@ -720,7 +782,7 @@ impl FlightFsm {
             return Err(Reject::ReferenceNotReady);
         }
         self.state = FlightState::Track;
-        self.reference_lost = 0.0;
+        self.reference_lost = None;
         Ok(())
     }
 
@@ -748,7 +810,7 @@ impl FlightFsm {
         self.vertical.set_max_jerk(self.params.land_jerk);
         self.vertical.set_max_accel(self.params.land_accel);
         self.vertical.set_max_vel(self.params.land_descent_rate);
-        self.ground_time = 0.0;
+        self.landing = LandingProgress::Approach;
     }
 }
 
@@ -792,6 +854,7 @@ mod tests {
             odometry_alive: true,
             imu_alive: true,
             attitude_session_ok: true,
+            landing_thrust_low: true,
         }
     }
 
@@ -1017,6 +1080,53 @@ mod tests {
     }
 
     #[test]
+    fn landing_requires_continuous_low_thrust_and_low_motion() {
+        let mut rig = Rig::new();
+        rig.cmd(Command::Arm).unwrap();
+        rig.state.position.z += 0.04;
+        rig.cmd(Command::Land).unwrap();
+        let hovering = Health {
+            landing_thrust_low: false,
+            ..ok_health()
+        };
+        let mut output = rig.fsm.update(DT, &rig.state, None, hovering);
+        for _ in 0..1000 {
+            output = rig.fsm.update(DT, &rig.state, None, hovering);
+        }
+        assert_eq!(rig.fsm.state(), FlightState::Land);
+        assert!(output.setpoint.position.z < rig.fsm.origin_z.expect("initialized origin"));
+        assert!(output.setpoint.velocity.z < 0.0);
+
+        for _ in 0..100 {
+            rig.fsm.update(DT, &rig.state, None, ok_health());
+        }
+        rig.state.velocity.x = 0.3;
+        rig.fsm.update(DT, &rig.state, None, ok_health());
+        rig.state.velocity.x = 0.0;
+        for _ in 0..100 {
+            rig.fsm.update(DT, &rig.state, None, ok_health());
+        }
+        assert_eq!(
+            rig.fsm.state(),
+            FlightState::Land,
+            "motion resets contact confirmation"
+        );
+        rig.fsm.update(DT, &rig.state, None, hovering);
+        for _ in 0..100 {
+            rig.fsm.update(DT, &rig.state, None, ok_health());
+        }
+        assert_eq!(
+            rig.fsm.state(),
+            FlightState::Land,
+            "thrust resets contact confirmation"
+        );
+        for _ in 0..102 {
+            rig.fsm.update(DT, &rig.state, None, ok_health());
+        }
+        assert_eq!(rig.fsm.state(), FlightState::Disarmed);
+    }
+
+    #[test]
     fn track_needs_fresh_reference() {
         let mut rig = Rig::new();
         rig.cmd(Command::Arm).unwrap();
@@ -1091,6 +1201,46 @@ mod tests {
             out.setpoint.position
         );
         assert!(out.setpoint.velocity.norm() < 1e-6);
+    }
+
+    #[test]
+    fn zero_duration_loss_latches_once_and_recovery_starts_a_new_episode() {
+        let mut rig = Rig::new();
+        rig.cmd(Command::Arm).unwrap();
+        rig.cmd(Command::Takeoff { altitude: 1.0 }).unwrap();
+        rig.ticks(1000);
+        rig.fsm.reference_fresh = true;
+        rig.cmd(Command::Track).unwrap();
+        let held = rig.state.position;
+        assert_eq!(
+            rig.fsm
+                .update(0., &rig.state, None, ok_health())
+                .setpoint
+                .position,
+            held
+        );
+        rig.state.position.x += 1.;
+        assert_eq!(
+            rig.fsm
+                .update(0., &rig.state, None, ok_health())
+                .setpoint
+                .position,
+            held
+        );
+        let reference = PositionSetpoint {
+            position: rig.state.position,
+            ..Default::default()
+        };
+        rig.fsm
+            .update(DT, &rig.state, Some(&reference), ok_health());
+        assert!(rig.fsm.reference_lost.is_none());
+        assert_eq!(
+            rig.fsm
+                .update(0., &rig.state, None, ok_health())
+                .setpoint
+                .position,
+            rig.state.position
+        );
     }
 
     /// 失联降级锁存，恢复消息不能自动接管；无有效位置时不推断落地。
