@@ -1,4 +1,4 @@
-//! Display-only frame relations. No truth-derived value leaves the recorder.
+//! Frame relations used exclusively by the recording display.
 use std::collections::BTreeMap;
 
 use firefly_base::FrameId;
@@ -21,15 +21,30 @@ pub(crate) struct Anchor {
 #[derive(Default)]
 pub(crate) struct Frames {
     navigation: Option<NavigationMessage>,
-    truth: BTreeMap<i64, OdomMessage>,
-    map: BTreeMap<i64, OdomMessage>,
-    closed: bool,
+    alignment: Alignment,
     saw_truth: bool,
-    anchored: bool,
+}
+
+enum Alignment {
+    Matching {
+        truth: BTreeMap<i64, OdomMessage>,
+        map: BTreeMap<i64, OdomMessage>,
+    },
+    Anchored,
+    Unavailable,
+}
+
+impl Default for Alignment {
+    fn default() -> Self {
+        Self::Matching {
+            truth: BTreeMap::new(),
+            map: BTreeMap::new(),
+        }
+    }
 }
 
 impl Frames {
-    /// Store atomic map←odom; reject a session reset instead of joining incompatible origins.
+    /// Store atomic map←odom within one chronological navigation session.
     pub fn navigation(&mut self, msg: NavigationMessage) -> Result<(bool, Option<Anchor>)> {
         schema::timestamp(msg.odom.timestamp)?;
         let alignment = msg.alignment()?;
@@ -51,9 +66,9 @@ impl Frames {
             true
         };
         self.navigation = Some(msg);
-        if self.closed {
+        let Alignment::Matching { map, .. } = &mut self.alignment else {
             return Ok((changed, None));
-        }
+        };
         let local = alignment.inverse().compose(&pose)?;
         // Restrict anchoring to stationary samples near the local origin. Observed motion
         // closes this window; without a session-start marker a late return is indistinguishable.
@@ -61,10 +76,10 @@ impl Frames {
             || !stationary(&msg.odom)
             || local.isometry().translation.vector.norm() > 0.1
         {
-            self.close();
+            self.alignment = Alignment::Unavailable;
             return Ok((changed, None));
         }
-        insert(&mut self.map, msg.odom)?;
+        insert(map, msg.odom)?;
         Ok((
             changed,
             self.match_at(schema::timestamp(msg.odom.timestamp)?)?,
@@ -73,16 +88,22 @@ impl Frames {
 
     pub fn truth(&mut self, msg: OdomMessage) -> Result<Option<Anchor>> {
         self.saw_truth |= msg.is_initialized;
-        if self.closed || !msg.is_initialized || !stationary(&msg) {
+        if !msg.is_initialized || !stationary(&msg) {
             return Ok(None);
         }
+        let Alignment::Matching { truth, .. } = &mut self.alignment else {
+            return Ok(None);
+        };
         msg.body_pose(WORLD)?;
-        insert(&mut self.truth, msg)?;
+        insert(truth, msg)?;
         self.match_at(schema::timestamp(msg.timestamp)?)
     }
 
     fn match_at(&mut self, time: i64) -> Result<Option<Anchor>> {
-        let (Some(truth), Some(map)) = (self.truth.get(&time), self.map.get(&time)) else {
+        let Alignment::Matching { truth, map } = &self.alignment else {
+            return Ok(None);
+        };
+        let (Some(truth), Some(map)) = (truth.get(&time), map.get(&time)) else {
             return Ok(None);
         };
         // Both histories use measurement nanoseconds, matching VIO's clock precision.
@@ -100,19 +121,12 @@ impl Frames {
             translation: translation.into(),
             rotation: [q.i, q.j, q.k, q.w],
         };
-        self.close();
-        self.anchored = true;
+        self.alignment = Alignment::Anchored;
         Ok(Some(anchor))
     }
 
     pub fn truth_unaligned(&self) -> bool {
-        self.saw_truth && !self.anchored
-    }
-
-    fn close(&mut self) {
-        self.closed = true;
-        self.truth.clear();
-        self.map.clear();
+        self.saw_truth && !matches!(self.alignment, Alignment::Anchored)
     }
 }
 
@@ -279,7 +293,7 @@ mod tests {
             }
             frames.navigation(message).unwrap();
             assert!(frames.truth(nav(1.).odom).unwrap().is_none());
-            assert!(frames.closed);
+            assert!(matches!(frames.alignment, Alignment::Unavailable));
         }
         let mut frames = Frames::default();
         frames.navigation(nav(1.)).unwrap();
@@ -298,6 +312,38 @@ mod tests {
         for i in 0..1024 {
             frames.truth(nav(f64::from(i)).odom).unwrap();
         }
-        assert_eq!(frames.truth.len(), MATCH_CAPACITY);
+        let Alignment::Matching { truth, .. } = &frames.alignment else {
+            panic!("stationary truth keeps the matching window open");
+        };
+        assert_eq!(truth.len(), MATCH_CAPACITY);
+    }
+
+    #[test]
+    fn closed_matching_window_preserves_later_navigation_and_truth_warning() {
+        for external in [false, true] {
+            let mut frames = Frames::default();
+            assert!(!frames.truth_unaligned());
+            let mut message = nav(1.);
+            if external {
+                message.external_map = 1;
+            } else {
+                message.odom.velocity_x = 1.;
+            }
+            frames.navigation(message).unwrap();
+            assert!(!frames.truth_unaligned());
+
+            let mut stationary = nav(2.);
+            stationary.external_map = message.external_map;
+            assert!(frames.truth(stationary.odom).unwrap().is_none());
+            assert!(frames.navigation(stationary).unwrap().1.is_none());
+            assert!(frames.truth_unaligned());
+
+            stationary.odom.timestamp = 3.;
+            stationary.revision = 1;
+            stationary.translation[0] = 2.;
+            assert!(frames.navigation(stationary).unwrap().0);
+            stationary.revision = 0;
+            assert!(frames.navigation(stationary).is_err());
+        }
     }
 }

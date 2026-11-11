@@ -54,14 +54,19 @@ pub struct ProcessedCapture<'a> {
 
 /// 有界最新值邮箱：生产者不等待消费者；关闭唤醒接收端并丢弃未处理任务。
 pub struct Latest<T> {
-    state: Mutex<(Option<T>, bool)>,
+    state: Mutex<Mailbox<T>>,
     ready: Condvar,
+}
+
+enum Mailbox<T> {
+    Open(Option<T>),
+    Closed,
 }
 
 impl<T> Default for Latest<T> {
     fn default() -> Self {
         Self {
-            state: Mutex::new((None, false)),
+            state: Mutex::new(Mailbox::Open(None)),
             ready: Condvar::new(),
         }
     }
@@ -70,32 +75,34 @@ impl<T> Default for Latest<T> {
 impl<T> Latest<T> {
     pub fn replace(&self, value: T) {
         let mut state = self.state.lock().expect("capture mailbox poisoned");
-        if !state.1 {
-            state.0 = Some(value);
+        if let Mailbox::Open(pending) = &mut *state {
+            *pending = Some(value);
             self.ready.notify_one();
         }
     }
 
     #[cfg(test)]
     pub fn take(&self) -> Option<T> {
-        self.state
-            .lock()
-            .expect("capture mailbox poisoned")
-            .0
-            .take()
+        match &mut *self.state.lock().expect("capture mailbox poisoned") {
+            Mailbox::Open(pending) => pending.take(),
+            Mailbox::Closed => None,
+        }
     }
 
     pub fn recv(&self) -> Option<T> {
         let state = self.state.lock().expect("capture mailbox poisoned");
         let mut state = self
             .ready
-            .wait_while(state, |s| s.0.is_none() && !s.1)
+            .wait_while(state, |state| matches!(state, Mailbox::Open(None)))
             .expect("capture mailbox poisoned");
-        state.0.take()
+        match &mut *state {
+            Mailbox::Open(pending) => pending.take(),
+            Mailbox::Closed => None,
+        }
     }
 
     pub fn close(&self) {
-        *self.state.lock().expect("capture mailbox poisoned") = (None, true);
+        *self.state.lock().expect("capture mailbox poisoned") = Mailbox::Closed;
         self.ready.notify_all();
     }
 }
@@ -226,6 +233,30 @@ mod tests {
         drop((first, second));
         jobs.replace(pool.take().unwrap());
         assert!(pool.take().is_some());
+    }
+
+    #[test]
+    fn closing_releases_all_waiters_and_stays_closed() {
+        let jobs = Latest::<u32>::default();
+        let started = std::sync::Barrier::new(5);
+        std::thread::scope(|scope| {
+            let waiters: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        started.wait();
+                        jobs.recv()
+                    })
+                })
+                .collect();
+            started.wait();
+            jobs.close();
+            jobs.close();
+            jobs.replace(1);
+            for waiter in waiters {
+                assert_eq!(waiter.join().unwrap(), None);
+            }
+        });
+        assert_eq!(jobs.recv(), None);
     }
 
     #[test]

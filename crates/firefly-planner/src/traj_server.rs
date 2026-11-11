@@ -20,49 +20,61 @@ pub struct TrajectoryCommand {
 }
 
 pub struct TrajectoryServer {
-    trajectory: Option<TrajectoryCommand>,
+    execution: Execution,
     heartbeat: Option<f64>,
     timeout: f64,
-    finishing: bool,
+}
+
+enum Execution {
+    Idle,
+    Sampling(TrajectoryCommand),
+    Finishing(TrajectoryCommand),
 }
 
 impl TrajectoryServer {
     #[must_use]
     pub fn new(timeout: f64) -> Self {
         Self {
-            trajectory: None,
+            execution: Execution::Idle,
             heartbeat: None,
             timeout,
-            finishing: false,
         }
     }
     pub fn receive(&mut self, command: TrajectoryCommand) {
-        self.trajectory = Some(command);
-        self.finishing = false;
+        self.execution = Execution::Sampling(command);
     }
     pub fn heartbeat(&mut self, now: f64) {
         self.heartbeat = Some(now);
     }
     pub fn invalidate(&mut self) {
-        self.trajectory = None;
+        self.execution = Execution::Idle;
     }
     /// Retain the already committed stopping tail when further planning is unavailable.
     pub fn finish(&mut self) {
-        self.finishing = true;
+        self.execution = match std::mem::replace(&mut self.execution, Execution::Idle) {
+            Execution::Idle => Execution::Idle,
+            Execution::Sampling(command) | Execution::Finishing(command) => {
+                Execution::Finishing(command)
+            }
+        };
     }
 
     #[must_use]
     pub fn sample(&mut self, now: f64, heartbeat_now: f64) -> Option<Reference> {
         let heartbeat = self.heartbeat?;
         if heartbeat_now - heartbeat > self.timeout {
-            self.finishing = true;
+            self.finish();
         }
-        let command = self.trajectory.as_ref()?;
+        let (command, finishing) = match &self.execution {
+            Execution::Idle => return None,
+            Execution::Sampling(command) => (command, false),
+            Execution::Finishing(command) => (command, true),
+        };
         let elapsed = now - command.start_time;
         if elapsed < 0. || !elapsed.is_finite() {
             return None;
         }
-        if self.finishing && elapsed >= command.trajectory.duration() {
+        if finishing && elapsed >= command.trajectory.duration() {
             return None;
         }
         let t = elapsed.min(command.trajectory.duration());
@@ -129,6 +141,30 @@ mod tests {
         assert!(server.sample(3., 0.7).is_none());
         server.receive(command());
         let hold = server.sample(3., 0.7).unwrap();
+        assert!(hold.velocity.norm() < 1e-12);
+    }
+
+    #[test]
+    fn explicit_finish_invalidation_and_new_command_preserve_execution_boundaries() {
+        let mut server = TrajectoryServer::new(0.5);
+        server.finish();
+        server.heartbeat(0.);
+        server.receive(command());
+        assert!(server.sample(3., 0.1).is_some());
+
+        server.finish();
+        server.finish();
+        assert!(server.sample(2., 0.1).is_some());
+        assert!(server.sample(3., 0.1).is_none());
+        server.heartbeat(0.2);
+        assert!(server.sample(3., 0.2).is_none());
+
+        server.invalidate();
+        server.invalidate();
+        assert!(server.sample(2., 0.2).is_none());
+        server.receive(command());
+        let hold = server.sample(4., 0.2).unwrap();
+        assert!((hold.position - Vector3::x()).norm() < 1e-12);
         assert!(hold.velocity.norm() < 1e-12);
     }
 }
