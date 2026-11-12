@@ -69,13 +69,13 @@ const HOST_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const FUNCTIONS: [&str; 2] = [ADB, HIL.name];
 
 pub fn up(manifest: Option<&str>) -> Result<(), String> {
-    let _ = fs::create_dir_all(STATE_DIR);
+    let _transition = crate::transition::lock(Path::new(STATE_DIR))?;
     reset_log();
     note("开始：停止 firefly 与 adbd，整块重建 gadget");
     if let Err(error) = up_inner(manifest) {
         note(&format!("up 失败：{error}"));
         eprintln!("hil-gadget up 失败：{error}；尝试恢复 adb");
-        if let Err(restore) = restore_adb() {
+        if let Err(restore) = restore_adb_inner() {
             eprintln!("恢复 adb 失败：{restore}；需要重启板子");
         }
         return Err(error);
@@ -123,6 +123,7 @@ pub fn diag(mode: &str) -> Result<(), String> {
     if mode != "hil" {
         return Err(format!("diag 只支持 hil，实际 {mode}"));
     }
+    let _transition = crate::transition::lock(Path::new(STATE_DIR))?;
     reset_log();
     note("diag：单个 hil 功能");
     stop_firefly();
@@ -134,7 +135,7 @@ pub fn diag(mode: &str) -> Result<(), String> {
         note(&format!("diag 失败：{error}"));
     }
     note("diag：恢复 adb-only gadget");
-    let restore = restore_adb();
+    let restore = restore_adb_inner();
     result.and(restore)
 }
 
@@ -190,10 +191,11 @@ fn describe_dir(path: &Path) -> String {
 }
 
 pub fn down() -> Result<(), String> {
+    let _transition = crate::transition::lock(Path::new(STATE_DIR))?;
     note("down：停止 firefly，恢复 adb-only gadget");
     stop_firefly();
     kill_serve();
-    restore_adb()?;
+    restore_adb_inner()?;
     remove_file(UP_MARKER)?;
     println!("HIL gadget 已移除，adb gadget 已恢复");
     Ok(())
@@ -489,6 +491,12 @@ fn link_function(name: &str) -> Result<(), String> {
 }
 
 fn restore_adb() -> Result<(), String> {
+    let _transition = crate::transition::lock(Path::new(STATE_DIR))?;
+    restore_adb_inner()
+}
+
+/// Caller holds the transition lock through service startup and the final marker.
+fn restore_adb_inner() -> Result<(), String> {
     note("restore：停止 HIL 进程，重建 adb-only gadget");
     // 先停 HIL 应用再撤 gadget：camera/motor 还持有 ffs 端点时重建 UDC，
     // 会让 adb 绑定随端点释放反复失败（表现为 adb 设备时有时无）。
