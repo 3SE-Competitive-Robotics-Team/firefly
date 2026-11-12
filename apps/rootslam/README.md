@@ -63,7 +63,7 @@ precision = "float64"
 [input]
 type = "dataset"
 format = "euroc"
-path = "logs/datasets/tumvi/dataset-room2_512_16"
+path = "datasets/tumvi/dataset-room2_512_16"
 calibration = "../../basalt/data/tumvi_512_eucm_calib.json"
 
 [vio]

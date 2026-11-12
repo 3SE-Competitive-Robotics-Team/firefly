@@ -4,7 +4,7 @@ precision = "float64"
 [input]
 type = "dataset"
 format = "euroc"
-path = "logs/datasets/euroc/MH_01_easy"
+path = "datasets/euroc/MH_01_easy"
 calibration = "../../basalt/data/euroc_ds_calib.json"
 
 [vio]
