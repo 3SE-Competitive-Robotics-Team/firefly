@@ -992,16 +992,31 @@ impl<S: BasaltScalar> System<S> {
     }
     fn trial_cost(&self, snapshot: &MapSnapshot, state: &State<S>, calib: &Calibration<S>) -> S {
         let extrinsics: Vec<_> = calib.t_i_c.iter().map(pose_graph::inverse).collect();
+        // Each trial has one camera transform per pose, shared by all landmarks.
+        let camera_poses: BTreeMap<_, Vec<_>> = state
+            .poses
+            .iter()
+            .map(|(&time, pose)| {
+                (
+                    time,
+                    extrinsics
+                        .iter()
+                        .map(|extrinsic| pose_graph::product(extrinsic, pose))
+                        .collect(),
+                )
+            })
+            .collect();
         let visual: f64 = self
             .blocks
             .par_iter()
             .filter_map(|block| block.id.map(|id| (block, id)))
             .map(|(block, id)| {
                 let mut cost = 0.0;
+                let point = &state.points[&id];
+                let observations = &snapshot.landmarks[&id].observations;
                 for key in &block.observations {
-                    let transform =
-                        pose_graph::product(&extrinsics[key.camera], &state.poses[&key.keyframe]);
-                    let p = transform.rotation * state.points[&id] + transform.translation.vector;
+                    let transform = &camera_poses[&key.keyframe][key.camera];
+                    let p = transform.rotation * point + transform.translation.vector;
                     let p = p / p.x.hypot(p.y).hypot(p.z);
                     let mut pixel = Vector2::zeros();
                     // Generalized rig cameras can have finite projections on a
@@ -1015,13 +1030,10 @@ impl<S: BasaltScalar> System<S> {
                     if !valid || !pixel.iter().all(nalgebra::ComplexField::is_finite) {
                         return f64::INFINITY;
                     }
-                    cost += (pixel
-                        - snapshot.landmarks[&id].observations[key]
-                            .pixel
-                            .map(S::from_f64_lossy))
-                    .iter()
-                    .map(|v| v.as_f64().powi(2))
-                    .sum::<f64>();
+                    cost += (pixel - observations[key].pixel.map(S::from_f64_lossy))
+                        .iter()
+                        .map(|v| v.as_f64().powi(2))
+                        .sum::<f64>();
                 }
                 cost * 0.5
             })
