@@ -305,7 +305,15 @@ impl<R: Read> FrameReader<R> {
             // FunctionFS 端点要求读缓冲不小于端点最大包长（512B），否则返回
             // EOVERFLOW；按 64 KiB 读，顺便省掉「临时块 + extend」的第二次拷贝。
             self.buffer.resize(start + need.max(64 * 1024), 0);
-            let read = self.inner.read(&mut self.buffer[start..])?;
+            let read = match self.inner.read(&mut self.buffer[start..]) {
+                Ok(read) => read,
+                Err(error) => {
+                    // Only bytes returned by a successful read belong to the stream.
+                    // Keep the prior prefix intact when callers retry a transient error.
+                    self.buffer.truncate(start);
+                    return Err(error);
+                }
+            };
             self.buffer.truncate(start + read);
             if read == 0 {
                 return Err(io::Error::new(
@@ -348,6 +356,77 @@ mod tests {
             tick: 7,
         });
         roundtrip(&message, 42);
+    }
+
+    struct PauseOnce {
+        bytes: io::Cursor<Vec<u8>>,
+        offset: usize,
+        error: Option<io::ErrorKind>,
+    }
+
+    impl Read for PauseOnce {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let position = self.bytes.position() as usize;
+            if position == self.offset
+                && let Some(error) = self.error.take()
+            {
+                return Err(io::Error::from(error));
+            }
+            let limit = if self.error.is_some() {
+                buffer.len().min(self.offset - position)
+            } else {
+                buffer.len()
+            };
+            self.bytes.read(&mut buffer[..limit])
+        }
+    }
+
+    fn retry_after_pause(message: &Message, offset: usize) {
+        for error in [
+            io::ErrorKind::WouldBlock,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::Interrupted,
+        ] {
+            let mut writer = FrameWriter::new(Vec::new());
+            writer.set_session(42);
+            writer.write_message(message).unwrap();
+            writer.write_message(&Message::Ping(123)).unwrap();
+            let mut reader = FrameReader::new(PauseOnce {
+                bytes: io::Cursor::new(writer.into_inner()),
+                offset,
+                error: Some(error),
+            });
+            assert_eq!(reader.read_frame().unwrap_err().kind(), error);
+            let frame = reader.read_frame().expect("resume the interrupted frame");
+            assert_eq!(&frame.message, message, "{error:?} at byte {offset}");
+            assert_eq!(frame.header.session, 42);
+            assert_eq!(reader.read_frame().unwrap().message, Message::Ping(123));
+            assert_eq!(reader.dropped(), 0);
+        }
+    }
+
+    #[test]
+    fn retryable_errors_preserve_partial_headers() {
+        retry_after_pause(&Message::Ping(456), 17);
+    }
+
+    #[test]
+    fn retryable_errors_preserve_partial_bodies() {
+        retry_after_pause(&Message::Ping(456), crate::protocol::HEADER_LEN + 3);
+    }
+
+    #[test]
+    fn retryable_errors_preserve_pending_fragments() {
+        let mut image = Box::new(GrayImageMessage {
+            timestamp: 3.25,
+            sensor_id: 1,
+            width: 320,
+            height: 240,
+            ..GrayImageMessage::default()
+        });
+        image.data.fill(17);
+        let message = Message::Gray(image);
+        retry_after_pause(&message, crate::protocol::HEADER_LEN * 2 + MAX_FRAGMENT + 3);
     }
 
     #[test]

@@ -202,9 +202,16 @@ pub fn down() -> Result<(), String> {
 pub fn watchdog() -> Result<(), String> {
     thread::sleep(WATCHDOG_TIMEOUT);
     loop {
-        if !Path::new(UP_MARKER).is_file() || Path::new(RESTORE_MARKER).is_file() {
-            note("watchdog：未完成绑定，重建 adb-only gadget");
-            return restore_adb();
+        match watchdog_state(
+            Path::new(UP_MARKER).is_file(),
+            Path::new(RESTORE_MARKER).is_file(),
+        ) {
+            WatchdogState::Restored => return Ok(()),
+            WatchdogState::BindingIncomplete => {
+                note("watchdog：未完成绑定，重建 adb-only gadget");
+                return restore_adb();
+            }
+            WatchdogState::Active => {}
         }
         let idle = fs::metadata(HOST_SEEN)
             .and_then(|meta| meta.modified())
@@ -218,6 +225,23 @@ pub fn watchdog() -> Result<(), String> {
             return restore_adb();
         }
         thread::sleep(Duration::from_secs(5));
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum WatchdogState {
+    Restored,
+    BindingIncomplete,
+    Active,
+}
+
+fn watchdog_state(up: bool, restored: bool) -> WatchdogState {
+    if restored {
+        WatchdogState::Restored
+    } else if !up {
+        WatchdogState::BindingIncomplete
+    } else {
+        WatchdogState::Active
     }
 }
 
@@ -597,11 +621,11 @@ fn switch_processes_to_hil(manifest: &str) -> Result<(), String> {
     if !Path::new(&source).is_file() {
         return Err(format!("缺少 {source}（deploy 未带上）"));
     }
-    if !Path::new(PROCESSES_BACKUP).exists() {
-        fs::copy(PROCESSES, PROCESSES_BACKUP)
-            .map_err(|error| format!("backup {PROCESSES}: {error}"))?;
-    }
-    fs::copy(&source, PROCESSES).map_err(|error| format!("switch {PROCESSES}: {error}"))?;
+    switch_process_manifest(
+        Path::new(&source),
+        Path::new(PROCESSES),
+        Path::new(PROCESSES_BACKUP),
+    )?;
     note(&format!("进程清单已切到 {manifest}"));
     sync_disk();
     Ok(())
@@ -609,13 +633,29 @@ fn switch_processes_to_hil(manifest: &str) -> Result<(), String> {
 
 /// 恢复真机进程清单。
 fn restore_processes() -> Result<(), String> {
-    if Path::new(PROCESSES_BACKUP).exists() {
-        fs::copy(PROCESSES_BACKUP, PROCESSES)
-            .map_err(|error| format!("restore {PROCESSES}: {error}"))?;
+    if restore_process_manifest(Path::new(PROCESSES_BACKUP), Path::new(PROCESSES))? {
         note("进程清单已恢复为真机");
     }
     sync_disk();
     Ok(())
+}
+
+fn switch_process_manifest(source: &Path, active: &Path, backup: &Path) -> Result<(), String> {
+    if !backup.exists() {
+        fs::copy(active, backup)
+            .map_err(|error| format!("backup {}: {error}", active.display()))?;
+    }
+    fs::copy(source, active).map_err(|error| format!("switch {}: {error}", active.display()))?;
+    Ok(())
+}
+
+fn restore_process_manifest(backup: &Path, active: &Path) -> Result<bool, String> {
+    if !backup.exists() {
+        return Ok(false);
+    }
+    fs::copy(backup, active).map_err(|error| format!("restore {}: {error}", active.display()))?;
+    remove_file(backup)?;
+    Ok(true)
 }
 
 /// 绑定后强制断开再接入：主机在同一 serial 上快速重枚举时常拒绝注册新配置。
@@ -814,4 +854,46 @@ fn now_seconds() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |elapsed| elapsed.as_secs_f64())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watchdog_exits_after_manual_or_failed_start_restoration() {
+        assert_eq!(watchdog_state(false, true), WatchdogState::Restored);
+        assert_eq!(watchdog_state(true, true), WatchdogState::Restored);
+        assert_eq!(
+            watchdog_state(false, false),
+            WatchdogState::BindingIncomplete
+        );
+        assert_eq!(watchdog_state(true, false), WatchdogState::Active);
+    }
+
+    #[test]
+    fn next_hil_session_restores_latest_normal_manifest() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../logs")
+            .join(format!("test_hil_gadget_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let active = dir.join("processes.toml");
+        let backup = dir.join("processes-normal.toml");
+        let hil = dir.join("processes-hil.toml");
+        fs::write(&active, "normal-v1").unwrap();
+        fs::write(&hil, "hil").unwrap();
+        switch_process_manifest(&hil, &active, &backup).unwrap();
+        assert!(restore_process_manifest(&backup, &active).unwrap());
+        assert_eq!(fs::read_to_string(&active).unwrap(), "normal-v1");
+        assert!(!restore_process_manifest(&backup, &active).unwrap());
+
+        fs::write(&active, "normal-v2").unwrap();
+        switch_process_manifest(&hil, &active, &backup).unwrap();
+        assert!(restore_process_manifest(&backup, &dir).is_err());
+        assert!(backup.is_file());
+        assert!(restore_process_manifest(&backup, &active).unwrap());
+        let restored = fs::read_to_string(&active).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(restored, "normal-v2");
+    }
 }

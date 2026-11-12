@@ -102,7 +102,8 @@ impl HostLink {
             .interface
             .endpoint::<Bulk, Out>(self.out_endpoint)
             .map_err(|error| format!("下行端点 0x{:02x}: {error}", self.out_endpoint))?
-            .writer(write_buffer);
+            .writer(write_buffer)
+            .with_write_timeout(Duration::from_millis(100));
         let reader = self
             .interface
             .endpoint::<Bulk, In>(self.in_endpoint)

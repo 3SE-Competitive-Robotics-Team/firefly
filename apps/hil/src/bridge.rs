@@ -7,7 +7,7 @@
 //! 把 1 kHz 的 IMU 压在后面。
 
 use std::collections::VecDeque;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
@@ -32,8 +32,6 @@ use firefly_pubsub::plant::{AIRFRAME_TOPIC, AirframeMessage};
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::{Subscriber, SubscriberOptions};
 use firefly_pubsub::viz::{SCALAR_BUFFER_SIZE, SCALAR_TOPIC, ScalarMessage};
-use nusb::io::{EndpointRead, EndpointWrite};
-use nusb::transfer::Bulk;
 
 use crate::config::Config;
 use crate::host::HostLink;
@@ -72,6 +70,21 @@ struct Uplink {
     log: Publisher<LogMessage>,
 }
 
+/// A queue entry admits both stereo views together; depth is independently optional.
+enum ImageBatch {
+    Stereo(Box<GrayImageMessage>, Box<GrayImageMessage>),
+    Depth(Box<DepthImageMessage>),
+}
+
+/// A worker finishing or unwinding ends the shared bridge session.
+struct StopOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 /// 运行双向桥，直到收到退出信号或 USB 断开。
 ///
 /// # Errors
@@ -91,7 +104,8 @@ pub fn run(config: &Config) -> Result<(), String> {
             .map_err(|error| format!("register signal: {error}"))?;
     }
     let (priority_tx, priority_rx) = sync_channel(DOWNLINK_QUEUE);
-    let (image_tx, image_rx) = sync_channel(config.link.image_queue);
+    // Each entry owns at most two images, preserving the configured image budget.
+    let (image_tx, image_rx) = sync_channel(config.link.image_queue / 2);
     let (up_tx, up_rx) = sync_channel(UPLINK_QUEUE);
     let writer_stop = Arc::clone(&stop);
     let writer =
@@ -112,10 +126,10 @@ pub fn run(config: &Config) -> Result<(), String> {
     drop(priority_tx);
     drop(image_tx);
     drop(up_rx);
-    let writer = writer.join().map_err(|_| "USB 写线程 panic".to_owned())?;
-    let reader = reader.join().map_err(|_| "USB 读线程 panic".to_owned())?;
-    writer?;
-    reader?;
+    let writer = writer.join().map_err(|_| "USB 写线程 panic".to_owned());
+    let reader = reader.join().map_err(|_| "USB 读线程 panic".to_owned());
+    writer??;
+    reader??;
     result?;
     log::info!("HIL 链路已退出");
     Ok(())
@@ -199,12 +213,13 @@ fn open_ports(node: &IpcNode) -> Result<(Downlink, Uplink), String> {
 // 线程入口按值取得端口与停止标志；所有权随 `move` 闭包转移。
 #[allow(clippy::needless_pass_by_value)]
 fn usb_writer(
-    writer: EndpointWrite<Bulk>,
+    writer: impl Write,
     priority: Receiver<Message>,
-    images: Receiver<Message>,
+    images: Receiver<ImageBatch>,
     session: u64,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    let _stop_on_exit = StopOnDrop(&stop);
     let mut writer = FrameWriter::new(writer);
     writer.set_session(session);
     writer
@@ -218,14 +233,16 @@ fn usb_writer(
     while !stop.load(Ordering::Relaxed) {
         let mut wrote = false;
         // 高优先队列优先：IMU/指令最多等一个图像块的传输时间。
-        while let Ok(message) = priority.try_recv() {
+        while !stop.load(Ordering::Relaxed)
+            && let Ok(message) = priority.try_recv()
+        {
             writer
                 .write_message(&message)
                 .map_err(|error| format!("写 {}: {error}", message.kind().name()))?;
             wrote = true;
         }
         if let Ok(message) = images.try_recv() {
-            write_image(&mut writer, &message, &priority, &mut next_image_id)?;
+            write_image(&mut writer, &message, &priority, &mut next_image_id, &stop)?;
             continue;
         }
         if wrote {
@@ -244,47 +261,62 @@ fn usb_writer(
 
 /// 把一张完整图像按块写出；每块之间排空高优先队列。
 fn write_image(
-    writer: &mut FrameWriter<EndpointWrite<Bulk>>,
-    message: &Message,
+    writer: &mut FrameWriter<impl Write>,
+    message: &ImageBatch,
     priority: &Receiver<Message>,
     next_image_id: &mut u32,
+    stop: &AtomicBool,
 ) -> Result<(), String> {
     match message {
-        Message::Gray(image) => {
-            let sensor = u8::try_from(image.sensor_id).unwrap_or(0);
-            write_chunks(
-                writer,
-                priority,
-                image.timestamp,
-                sensor,
-                &image.data,
-                next_image_id,
-            )
+        ImageBatch::Stereo(left, right) => {
+            for (sensor, image) in [(0, left), (1, right)] {
+                write_chunks(
+                    writer,
+                    priority,
+                    image.timestamp,
+                    sensor,
+                    &image.data,
+                    next_image_id,
+                    stop,
+                )?;
+            }
+            Ok(())
         }
-        Message::Depth(image) => {
+        ImageBatch::Depth(image) => {
             let mut raw = Vec::with_capacity(image.data.len() * 4);
             for value in image.data {
                 raw.extend_from_slice(&value.to_le_bytes());
             }
-            write_chunks(writer, priority, image.timestamp, 2, &raw, next_image_id)
+            write_chunks(
+                writer,
+                priority,
+                image.timestamp,
+                2,
+                &raw,
+                next_image_id,
+                stop,
+            )
         }
-        other => Err(format!("图像通道收到 {}", other.kind().name())),
     }
 }
 
 fn write_chunks(
-    writer: &mut FrameWriter<EndpointWrite<Bulk>>,
+    writer: &mut FrameWriter<impl Write>,
     priority: &Receiver<Message>,
     timestamp: f64,
     sensor_id: u8,
     data: &[u8],
     next_image_id: &mut u32,
+    stop: &AtomicBool,
 ) -> Result<(), String> {
     let count = u16::try_from(data.len().div_ceil(IMAGE_CHUNK_DATA_MAX).max(1))
         .map_err(|_| "图像块数过多".to_owned())?;
     let image_id = *next_image_id;
     *next_image_id = next_image_id.wrapping_add(1);
     for (index, chunk) in data.chunks(IMAGE_CHUNK_DATA_MAX).enumerate() {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         let header = ImageChunkHeader {
             timestamp,
             sensor_id,
@@ -297,7 +329,9 @@ fn write_chunks(
             .write_parts(Kind::ImageChunk, timestamp, &[&encoded, chunk])
             .map_err(|error| format!("写图像块: {error}"))?;
         // 一块最多挡住 IMU 约 0.4ms；这里把积压的 IMU/指令立刻插出去。
-        while let Ok(message) = priority.try_recv() {
+        while !stop.load(Ordering::Relaxed)
+            && let Ok(message) = priority.try_recv()
+        {
             writer
                 .write_message(&message)
                 .map_err(|error| format!("写 {}: {error}", message.kind().name()))?;
@@ -308,10 +342,11 @@ fn write_chunks(
 
 #[allow(clippy::needless_pass_by_value)]
 fn usb_reader(
-    reader: EndpointRead<Bulk>,
+    reader: impl Read,
     queue: SyncSender<Message>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    let _stop_on_exit = StopOnDrop(&stop);
     let mut reader = FrameReader::new(reader);
     while !stop.load(Ordering::Relaxed) {
         match reader.read_frame() {
@@ -337,7 +372,7 @@ fn ipc_loop(
     down: Downlink,
     up: Uplink,
     priority_tx: &SyncSender<Message>,
-    image_tx: &SyncSender<Message>,
+    image_tx: &SyncSender<ImageBatch>,
     up_rx: &Receiver<Message>,
     stop: &AtomicBool,
     options: &crate::config::Link,
@@ -421,12 +456,9 @@ fn ipc_loop(
             } else if Instant::now() >= image_deadline {
                 let left = pending_left.take().expect("已检查非空");
                 let right = pending_right.take().expect("已检查非空");
-                record_image_checksum(&mut stats, &left);
-                record_image_checksum(&mut stats, &right);
-                try_image(image_tx, Message::Gray(Box::new(left)), &mut stats);
-                try_image(image_tx, Message::Gray(Box::new(right)), &mut stats);
+                enqueue_stereo(image_tx, &left, &right, &mut stats)?;
                 if let Some(depth) = pending_depth.take() {
-                    try_image(image_tx, Message::Depth(Box::new(depth)), &mut stats);
+                    try_image(image_tx, ImageBatch::Depth(Box::new(depth)), &mut stats)?;
                 }
                 last_image_stamp = left.timestamp;
                 image_deadline = next_image_deadline(image_deadline, Instant::now(), image_period);
@@ -531,10 +563,39 @@ fn check_image_checksum(stats: &mut StatsCounters, scalar: &ScalarMessage) {
     }
 }
 
-fn try_image(tx: &SyncSender<Message>, message: Message, stats: &mut StatsCounters) {
+fn enqueue_stereo(
+    tx: &SyncSender<ImageBatch>,
+    left: &GrayImageMessage,
+    right: &GrayImageMessage,
+    stats: &mut StatsCounters,
+) -> Result<(), String> {
+    if try_image(
+        tx,
+        ImageBatch::Stereo(Box::new(*left), Box::new(*right)),
+        stats,
+    )? {
+        record_image_checksum(stats, left);
+        record_image_checksum(stats, right);
+    }
+    Ok(())
+}
+
+fn try_image(
+    tx: &SyncSender<ImageBatch>,
+    message: ImageBatch,
+    stats: &mut StatsCounters,
+) -> Result<bool, String> {
+    let image_count = match message {
+        ImageBatch::Stereo(..) => 2,
+        ImageBatch::Depth(_) => 1,
+    };
     match tx.try_send(message) {
-        Ok(()) | Err(TrySendError::Disconnected(_)) => {}
-        Err(TrySendError::Full(_)) => stats.dropped_images += 1,
+        Ok(()) => Ok(true),
+        Err(TrySendError::Disconnected(_)) => Err("USB 写线程已退出".to_owned()),
+        Err(TrySendError::Full(_)) => {
+            stats.dropped_images += image_count;
+            Ok(false)
+        }
     }
 }
 
@@ -706,6 +767,91 @@ fn next_image_deadline(deadline: Instant, now: Instant, period: Duration) -> Ins
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uplink_read_failure_stops_the_other_workers() {
+        let (tx, rx) = sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let result = usb_reader(
+            std::io::Cursor::new(vec![0; firefly_hil::protocol::HEADER_LEN]),
+            tx,
+            Arc::clone(&stop),
+        );
+        assert!(result.is_err());
+        assert!(stop.load(Ordering::Relaxed));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn writer_failure_stops_the_other_workers() {
+        struct FailingWriter;
+        impl Write for FailingWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    ErrorKind::BrokenPipe,
+                    "injected endpoint failure",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (_priority, priority_rx) = sync_channel(1);
+        let (_images, image_rx) = sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        assert!(usb_writer(FailingWriter, priority_rx, image_rx, 1, Arc::clone(&stop)).is_err());
+        assert!(stop.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn worker_panic_stops_the_other_workers() {
+        struct PanickingReader;
+        impl Read for PanickingReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                panic!("injected endpoint panic")
+            }
+        }
+        let (tx, _rx) = sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let task_stop = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || usb_reader(PanickingReader, tx, task_stop));
+        assert!(worker.join().is_err());
+        assert!(stop.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn stereo_admission_never_leaves_half_a_pair() {
+        let (tx, rx) = sync_channel(1);
+        let mut stats = StatsCounters::default();
+        let left = GrayImageMessage {
+            timestamp: 1.,
+            sensor_id: 0,
+            ..Default::default()
+        };
+        let right = GrayImageMessage {
+            timestamp: 1.,
+            sensor_id: 1,
+            ..Default::default()
+        };
+        enqueue_stereo(&tx, &left, &right, &mut stats).unwrap();
+        enqueue_stereo(&tx, &left, &right, &mut stats).unwrap();
+        assert_eq!(stats.dropped_images, 2);
+        assert_eq!(
+            stats.sent_images.len(),
+            2,
+            "only admitted images await checksums"
+        );
+        let ImageBatch::Stereo(left, right) = rx.try_recv().unwrap() else {
+            panic!("expected stereo")
+        };
+        assert_eq!((left.sensor_id, right.sensor_id), (0, 1));
+        assert_eq!(left.timestamp, right.timestamp);
+        assert!(rx.try_recv().is_err());
+        enqueue_stereo(&tx, &left, &right, &mut stats).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(ImageBatch::Stereo(..))));
+        drop(rx);
+        assert!(enqueue_stereo(&tx, &left, &right, &mut stats).is_err());
+    }
 
     #[test]
     fn image_cadence_preserves_phase_and_skips_stalled_periods() {

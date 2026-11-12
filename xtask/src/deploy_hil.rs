@@ -28,7 +28,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     build_host_bridge()?;
     println!("切换 HIL gadget（adb 将临时消失）");
     let command = format!(
-        "rm -f /opt/firefly/logs/hil/up.pid /opt/firefly/logs/hil/watchdog.pid; \
+        "rm -f /opt/firefly/logs/hil/up.pid; \
          /usr/sbin/start-stop-daemon --start --background --make-pidfile \
          --pidfile /opt/firefly/logs/hil/up.pid \
          --startas /opt/firefly/bin/hil-gadget -- up {manifest}"

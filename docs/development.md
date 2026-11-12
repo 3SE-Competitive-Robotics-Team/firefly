@@ -279,6 +279,8 @@ FC 使用 `configs/fc-hil.toml`：水平速度环增益与正常部署一致，
 
 `configs/hil.toml` 管理 USB 身份、队列与送图节拍。`imu_batch = 1`；
 双目按采集时间配对，图像分为最多 16 KiB 的块，块间先发送 IMU 与指令。
+`image_queue` 是待发图像预算，至少为 2；双目对原子入队，每个队列位置最多占两张图，
+可选深度图独占一个位置。上行每条遥测和日志发送前优先排空控制队列。
 `image_period_s` 是板端视觉负载预算，图像、控制和后验的实际频率分别验收。
 HIL 默认送图预算为 30 Hz。`configs/processes-hil.toml` 为 A733 设置以下亲和性：
 

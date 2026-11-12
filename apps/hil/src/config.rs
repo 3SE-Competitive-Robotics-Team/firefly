@@ -63,7 +63,7 @@ pub struct Link {
     /// 单个 IMU 批次的最大样本数。
     #[serde(default = "default_imu_batch")]
     pub imu_batch: usize,
-    /// 图像待发队列深度（帧）。
+    /// 待发图像预算（至少两张）；队列按双目对占位，深度独占一个位置。
     #[serde(default = "default_image_queue")]
     pub image_queue: usize,
     /// 下行图像节流周期（秒）；板端 VIO 跟不上时用它压低送帧率。
@@ -127,7 +127,7 @@ impl Config {
     /// 参数边界检查。
     ///
     /// # Errors
-    /// 队列为零或缓冲小于协议上限时返回错误。
+    /// 队列容不下一对双目或缓冲小于协议帧头时返回错误。
     pub fn validate(&self) -> firefly_error::Result<()> {
         if self.link.read_buffer < firefly_hil::protocol::HEADER_LEN {
             return Err(firefly_error::Error::new(
@@ -153,12 +153,33 @@ impl Config {
                 "image_period_s must be positive",
             ));
         }
-        if self.link.image_queue == 0 {
+        if self.link.image_queue < 2 {
             return Err(firefly_error::Error::new(
                 firefly_error::ErrorKind::InvalidArgument,
-                "image_queue must be positive",
+                "image_queue must hold at least two stereo images",
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_budget_must_hold_one_stereo_pair() {
+        let mut config = Config {
+            usb: Usb::default(),
+            link: Link::default(),
+        };
+        for budget in [0, 1] {
+            config.link.image_queue = budget;
+            assert!(config.validate().is_err());
+        }
+        for budget in [2, 3, 4] {
+            config.link.image_queue = budget;
+            assert!(config.validate().is_ok());
+        }
     }
 }

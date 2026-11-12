@@ -17,6 +17,7 @@ use firefly_pubsub::camera::{
     IMAGE_HEIGHT, IMAGE_SIZE, IMAGE_WIDTH,
 };
 use firefly_pubsub::command::{COMMAND_TOPIC, CommandMessage};
+use firefly_pubsub::event::TopicNotifier;
 use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
 use firefly_pubsub::imu::{IMU_TOPIC, ImuMessage};
 use firefly_pubsub::node::create_node;
@@ -43,6 +44,7 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 
 struct Ports {
     imu: Publisher<ImuMessage>,
+    imu_notify: TopicNotifier,
     left: Publisher<GrayImageMessage>,
     right: Publisher<GrayImageMessage>,
     depth: Publisher<DepthImageMessage>,
@@ -63,6 +65,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let log_ipc = firefly_observability::init_ipc(&node, "camera");
     let ports = Ports {
         imu: Publisher::with_topic_and_buffer(&node, IMU_TOPIC, Some(IMU_SUBSCRIPTION_MAX))?,
+        imu_notify: TopicNotifier::with_topic(&node, IMU_TOPIC)?,
         left: Publisher::with_topic_and_buffer(&node, CAMERA_LEFT_TOPIC, Some(IMAGE_SUBSCRIPTION))?,
         right: Publisher::with_topic_and_buffer(
             &node,
@@ -272,10 +275,7 @@ fn dispatch(message: &Message, ports: &Ports) -> Result<usize, Box<dyn std::erro
     let mut imu = 0;
     match message {
         Message::Imu(samples) => {
-            for sample in samples {
-                ports.imu.publish(*sample)?;
-                imu += 1;
-            }
+            imu = publish_imu(samples, &ports.imu, &ports.imu_notify)?;
         }
         Message::Gray(image) => {
             if image.sensor_id == 0 {
@@ -307,4 +307,85 @@ fn dispatch(message: &Message, ports: &Ports) -> Result<usize, Box<dyn std::erro
         other => log::warn!("camera --hil 忽略 {}", other.kind().name()),
     }
     Ok(imu)
+}
+
+fn publish_imu(
+    samples: &[ImuMessage],
+    publisher: &Publisher<ImuMessage>,
+    notifier: &TopicNotifier,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    for sample in samples {
+        publisher.publish(*sample)?;
+    }
+    // FC and VIO drain the whole batch after this event; retain the 2 ms timer as fallback.
+    if !samples.is_empty() {
+        notifier.notify_sent_sample();
+    }
+    Ok(samples.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use firefly_pubsub::{
+        event::TopicListener,
+        subscriber::{Subscriber, SubscriberOptions},
+    };
+
+    #[test]
+    fn hil_imu_batch_wakes_consumers_and_preserves_capacity() {
+        let node = create_node().unwrap();
+        let topic = format!(
+            "Test/HilImu/{}/{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        // HIL starts the publisher before FC and VIO; preserve their 128-slot contract.
+        let publisher =
+            Publisher::with_topic_and_buffer(&node, &topic, Some(IMU_SUBSCRIPTION_MAX)).unwrap();
+        let notifier = TopicNotifier::with_topic(&node, &topic).unwrap();
+        let events = TopicListener::with_topic(&node, &topic).unwrap();
+        let subscriber = Subscriber::<ImuMessage>::with_options(
+            &node,
+            &topic,
+            SubscriberOptions {
+                buffer_size: IMU_SUBSCRIPTION_MAX,
+                service_max_buffer_size: Some(IMU_SUBSCRIPTION_MAX),
+                max_publishers: None,
+            },
+        )
+        .unwrap();
+        let samples = [
+            ImuMessage {
+                timestamp: 1.,
+                ..ImuMessage::default()
+            },
+            ImuMessage {
+                timestamp: 1.001,
+                ..ImuMessage::default()
+            },
+        ];
+        assert_eq!(publish_imu(&samples, &publisher, &notifier).unwrap(), 2);
+        for sample in samples {
+            assert_eq!(
+                subscriber.receive().unwrap().unwrap().timestamp,
+                sample.timestamp
+            );
+        }
+        assert!(subscriber.receive().unwrap().is_none());
+        assert_eq!(
+            events.drain().unwrap(),
+            1,
+            "one wakeup follows each admitted IMU batch"
+        );
+        assert_eq!(publish_imu(&[], &publisher, &notifier).unwrap(), 0);
+        assert_eq!(
+            events.drain().unwrap(),
+            0,
+            "empty batches do not wake consumers"
+        );
+    }
 }

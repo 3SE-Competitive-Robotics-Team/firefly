@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -14,7 +15,7 @@ use firefly_hil::protocol::{Message, Stats};
 use firefly_pubsub::attitude::{ATTITUDE_TOPIC, AttitudeMessage};
 use firefly_pubsub::control::{CONTROL_BUFFER_SIZE, CONTROL_TOPIC, ControlMessage};
 use firefly_pubsub::log::{LOG_BUFFER_SIZE, LOG_MAX_PUBLISHERS, LOG_TOPIC, LogMessage};
-use firefly_pubsub::node::create_node;
+use firefly_pubsub::node::{IpcNode, create_node};
 use firefly_pubsub::odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC, OdomMessage};
 use firefly_pubsub::subscriber::{Subscriber, SubscriberOptions};
 use firefly_pubsub::viz::{
@@ -50,13 +51,18 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "motor");
-    let ports = Ports {
-        control: Subscriber::with_topic_and_buffer(&node, CONTROL_TOPIC, CONTROL_BUFFER_SIZE)?,
-        odom: Subscriber::with_topic(&node, ODOM_TOPIC)?,
-        corrected: Subscriber::with_topic(&node, CORRECTED_ODOM_TOPIC)?,
-        attitude: Subscriber::with_topic(&node, ATTITUDE_TOPIC)?,
+    let ports = open_ports(&node)?;
+    forward(&ports, &log_ipc)
+}
+
+fn open_ports(node: &IpcNode) -> Result<Ports, Box<dyn std::error::Error>> {
+    Ok(Ports {
+        control: Subscriber::with_topic_and_buffer(node, CONTROL_TOPIC, CONTROL_BUFFER_SIZE)?,
+        odom: Subscriber::with_topic(node, ODOM_TOPIC)?,
+        corrected: Subscriber::with_topic(node, CORRECTED_ODOM_TOPIC)?,
+        attitude: Subscriber::with_topic(node, ATTITUDE_TOPIC)?,
         log: Subscriber::with_options(
-            &node,
+            node,
             LOG_TOPIC,
             SubscriberOptions {
                 buffer_size: LOG_BUFFER_SIZE,
@@ -66,7 +72,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         )?,
         // 使用 VizPublisher 的完整发布端和队列预算。
         scalar: Subscriber::with_options(
-            &node,
+            node,
             SCALAR_TOPIC,
             SubscriberOptions {
                 buffer_size: SCALAR_BUFFER_SIZE,
@@ -74,7 +80,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 max_publishers: Some(VIZ_MAX_PUBLISHERS),
             },
         )?,
-    };
+    })
+}
+
+fn forward(
+    ports: &Ports,
+    log_ipc: &firefly_observability::LogIpc,
+) -> Result<(), Box<dyn std::error::Error>> {
     let path = endpoint_file_at(HIL_INSTANCE, UPLINK_ENDPOINT)?;
     let file = OpenOptions::new().write(true).open(&path)?;
     log::info!("HIL 执行器端点 {}", path.display());
@@ -85,17 +97,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut scalar_sequences = BTreeMap::new();
     let mut log_sequences = BTreeMap::new();
     while RUNNING.load(Ordering::Relaxed) {
-        firefly_observability::pump_log_ipc(&log_ipc);
-        let mut wrote = false;
-        // 控制优先：上行链路被遥测堵住时不能拖慢控制回传。
-        while let Ok(Some(sample)) = ports.control.receive() {
-            writer.write_message(&Message::Control(*sample.payload()))?;
-            stats.control_messages += 1;
-            wrote = true;
-        }
+        firefly_observability::pump_log_ipc(log_ipc);
+        let mut wrote = drain_control(&mut writer, &ports.control, &mut stats)?;
         while let Ok(Some(sample)) = ports.odom.receive() {
             if write_telemetry(
                 &mut writer,
+                &ports.control,
                 &Message::Odometry(*sample.payload()),
                 &mut stats,
             )? {
@@ -105,6 +112,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         while let Ok(Some(sample)) = ports.corrected.receive() {
             if write_telemetry(
                 &mut writer,
+                &ports.control,
                 &Message::CorrectedOdometry(*sample.payload()),
                 &mut stats,
             )? {
@@ -114,6 +122,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         while let Ok(Some(sample)) = ports.attitude.receive() {
             if write_telemetry(
                 &mut writer,
+                &ports.control,
                 &Message::VioAttitude(*sample.payload()),
                 &mut stats,
             )? {
@@ -131,7 +140,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             if message.scalar_count as usize > SCALARS_MAX {
                 continue;
             }
-            if write_telemetry(&mut writer, &Message::Scalar(message), &mut stats)? {
+            if write_telemetry(
+                &mut writer,
+                &ports.control,
+                &Message::Scalar(message),
+                &mut stats,
+            )? {
                 wrote = true;
             }
         }
@@ -142,10 +156,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 sample.sequence,
                 LOG_MAX_PUBLISHERS,
             )?;
-            writer.write_message(&Message::Log(*sample.payload()))?;
+            write_with_control_priority(
+                &mut writer,
+                &ports.control,
+                &Message::Log(*sample.payload()),
+                &mut stats,
+            )?;
             wrote = true;
         }
         if last_stats.elapsed() >= STATS_PERIOD {
+            wrote |= drain_control(&mut writer, &ports.control, &mut stats)?;
             stats.uplink_backlog = 0;
             writer.write_message(&Message::Stats(stats))?;
             last_stats = Instant::now();
@@ -179,20 +199,147 @@ fn observe_sequence(
     Ok(())
 }
 
-fn write_telemetry(
-    writer: &mut FrameWriter<std::fs::File>,
+fn write_telemetry<W: Write>(
+    writer: &mut FrameWriter<W>,
+    control: &Subscriber<ControlMessage>,
     message: &Message,
     stats: &mut Stats,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    writer.write_message(message)?;
+    write_with_control_priority(writer, control, message, stats)?;
     stats.telemetry_messages += 1;
     Ok(true)
 }
 
+fn write_with_control_priority<W: Write>(
+    writer: &mut FrameWriter<W>,
+    control: &Subscriber<ControlMessage>,
+    message: &Message,
+    stats: &mut Stats,
+) -> std::io::Result<()> {
+    // Check between individual messages, including messages from the same queue.
+    drain_control(writer, control, stats)?;
+    writer.write_message(message)
+}
+
+fn drain_control<W: Write>(
+    writer: &mut FrameWriter<W>,
+    control: &Subscriber<ControlMessage>,
+    stats: &mut Stats,
+) -> std::io::Result<bool> {
+    let mut wrote = false;
+    while let Ok(Some(sample)) = control.receive() {
+        writer.write_message(&Message::Control(*sample.payload()))?;
+        stats.control_messages += 1;
+        wrote = true;
+    }
+    Ok(wrote)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::observe_sequence;
+    use super::*;
+    use firefly_hil::frame::FrameReader;
+    use firefly_hil::protocol::{HEADER_LEN, Kind, decode_header};
+    use firefly_pubsub::publish::Publisher;
     use std::collections::BTreeMap;
+
+    struct ControlDuringWrite {
+        bytes: Vec<u8>,
+        frame_start: usize,
+        control: Publisher<ControlMessage>,
+        tick: u64,
+    }
+
+    impl Write for ControlDuringWrite {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            let header = decode_header(
+                self.bytes[self.frame_start..self.frame_start + HEADER_LEN]
+                    .try_into()
+                    .unwrap(),
+            )?;
+            self.frame_start = self.bytes.len();
+            if header.kind != Kind::Control {
+                self.tick += 1;
+                assert_eq!(
+                    self.control
+                        .publish_counted(ControlMessage {
+                            tick: self.tick,
+                            ..Default::default()
+                        })
+                        .unwrap()
+                        .0,
+                    1
+                );
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn arriving_control_precedes_each_pending_scalar_and_log() {
+        let node = create_node().unwrap();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let topic = format!(
+            "Firefly/Test/HilControlPriority/{}/{unique}",
+            std::process::id()
+        );
+        let control =
+            Subscriber::with_topic_and_buffer(&node, &topic, CONTROL_BUFFER_SIZE).unwrap();
+        let publisher =
+            Publisher::with_topic_and_buffer(&node, &topic, Some(CONTROL_BUFFER_SIZE)).unwrap();
+        let mut writer = FrameWriter::new(ControlDuringWrite {
+            bytes: Vec::new(),
+            frame_start: 0,
+            control: publisher,
+            tick: 0,
+        });
+        let mut stats = Stats::default();
+        let mut expected = Vec::new();
+        for sequence in 0..2 {
+            let mut scalar = ScalarMessage::base(1., "hil/board");
+            scalar.sequence = sequence;
+            let message = Message::Scalar(scalar);
+            write_telemetry(&mut writer, &control, &message, &mut stats).unwrap();
+            if sequence > 0 {
+                expected.push(Message::Control(ControlMessage {
+                    tick: sequence,
+                    ..Default::default()
+                }));
+            }
+            expected.push(message);
+        }
+        for sequence in 0..2 {
+            let message = Message::Log(LogMessage {
+                sequence,
+                ..Default::default()
+            });
+            write_with_control_priority(&mut writer, &control, &message, &mut stats).unwrap();
+            expected.push(Message::Control(ControlMessage {
+                tick: sequence + 2,
+                ..Default::default()
+            }));
+            expected.push(message);
+        }
+        let output = writer.into_inner();
+        let mut reader = FrameReader::new(output.bytes.as_slice());
+        let mut actual = Vec::new();
+        while let Ok(frame) = reader.read_frame() {
+            actual.push(frame.message);
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(stats.control_messages, 3);
+        assert_eq!(stats.telemetry_messages, 2);
+        // The control produced by the final write remains queued for the next turn.
+        assert_eq!(control.receive().unwrap().unwrap().tick, 4);
+    }
 
     #[test]
     fn sequences_are_checked_per_publisher_including_wraparound() {

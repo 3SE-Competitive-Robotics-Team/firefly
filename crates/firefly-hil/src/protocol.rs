@@ -264,10 +264,10 @@ impl ImageChunkHeader {
         out
     }
 
-    /// 从消息体前缀解析；校验块号、块数与传感器号。
+    /// 从完整块体解析；限制每块长度和每张图的块数，使快速重组路径有界。
     ///
     /// # Errors
-    /// 长度不足、块数为零、块号越界或传感器号非法。
+    /// 长度不足、块数越界、块号越界、传感器号非法、块体过大或深度像素不完整。
     pub fn decode(body: &[u8]) -> io::Result<Self> {
         let raw: [u8; Self::LEN] = body
             .get(..Self::LEN)
@@ -288,6 +288,13 @@ impl ImageChunkHeader {
                 io::ErrorKind::InvalidData,
                 "image chunk header",
             ));
+        }
+        let image_bytes = IMAGE_SIZE * if header.sensor_id == 2 { 4 } else { 1 };
+        if usize::from(header.chunk_count) > image_bytes.div_ceil(IMAGE_CHUNK_DATA_MAX)
+            || body.len() - Self::LEN > IMAGE_CHUNK_DATA_MAX
+            || (header.sensor_id == 2 && !(body.len() - Self::LEN).is_multiple_of(4))
+        {
+            return Err(invalid("image chunk exceeds reassembly budget"));
         }
         Ok(header)
     }
@@ -717,11 +724,9 @@ impl Message {
                 Self::Depth(message)
             }
             Kind::ImageChunk => {
+                let body = input.bytes(body.len())?;
                 let header = ImageChunkHeader::decode(body)?;
                 let data = body[IMAGE_CHUNK_HEADER_LEN..].to_vec();
-                if data.len() > IMAGE_CHUNK_DATA_MAX {
-                    return Err(invalid("image chunk payload"));
-                }
                 Self::ImageChunk(ImageChunk { header, data })
             }
             Kind::Airframe => {
@@ -1074,4 +1079,71 @@ fn put_i64(out: &mut Vec<u8>, value: i64) {
 
 fn put_f64(out: &mut Vec<u8>, value: f64) {
     out.extend_from_slice(&value.to_le_bytes());
+}
+
+#[cfg(test)]
+mod image_chunk_tests {
+    use super::*;
+
+    fn message(sensor_id: u8, chunk_index: u16, chunk_count: u16, len: usize) -> Message {
+        Message::ImageChunk(ImageChunk {
+            header: ImageChunkHeader {
+                timestamp: 1.0,
+                sensor_id,
+                image_id: 42,
+                chunk_index,
+                chunk_count,
+            },
+            data: vec![7; len],
+        })
+    }
+
+    #[test]
+    fn typed_image_chunks_roundtrip_at_gray_and_depth_boundaries() {
+        for sensor in 0..=2 {
+            let size = IMAGE_SIZE * if sensor == 2 { 4 } else { 1 };
+            let chunks = size.div_ceil(IMAGE_CHUNK_DATA_MAX) as u16;
+            for index in 0..chunks {
+                let len =
+                    (size - usize::from(index) * IMAGE_CHUNK_DATA_MAX).min(IMAGE_CHUNK_DATA_MAX);
+                let original = message(sensor, index, chunks, len);
+                assert_eq!(
+                    Message::decode(Kind::ImageChunk, &original.encode()).unwrap(),
+                    original
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn raw_image_chunk_decoder_enforces_reassembly_memory_bounds() {
+        for sensor in 0..=2 {
+            let size = IMAGE_SIZE * if sensor == 2 { 4 } else { 1 };
+            let chunks = size.div_ceil(IMAGE_CHUNK_DATA_MAX) as u16;
+            for (count, len) in [
+                (u16::MAX, 1),
+                (chunks + 1, 1),
+                (chunks, IMAGE_CHUNK_DATA_MAX + 1),
+            ] {
+                let body = message(sensor, 0, count, len).encode();
+                assert!(
+                    ImageChunkHeader::decode(&body).is_err(),
+                    "sensor={sensor} count={count} len={len}"
+                );
+                assert!(Message::decode(Kind::ImageChunk, &body).is_err());
+            }
+            let valid = message(sensor, 0, chunks, IMAGE_CHUNK_DATA_MAX).encode();
+            assert!(ImageChunkHeader::decode(&valid).is_ok());
+        }
+    }
+
+    #[test]
+    fn depth_chunks_preserve_whole_float_pixels() {
+        let chunks = (IMAGE_SIZE * 4).div_ceil(IMAGE_CHUNK_DATA_MAX) as u16;
+        let malformed = message(2, 0, chunks, IMAGE_CHUNK_DATA_MAX - 1).encode();
+        assert!(ImageChunkHeader::decode(&malformed).is_err());
+        assert!(Message::decode(Kind::ImageChunk, &malformed).is_err());
+        let valid = message(2, 0, chunks, IMAGE_CHUNK_DATA_MAX).encode();
+        assert!(ImageChunkHeader::decode(&valid).is_ok());
+    }
 }
