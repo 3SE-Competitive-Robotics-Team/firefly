@@ -1,0 +1,36 @@
+# USB HIL：板端 RootSLAM 与 FC 计算，执行器推力回传主机仿真。
+# A733 HIL 核分配：6、7 为视觉，5 为 FC，其余应用共享 0–4。
+
+[[process]]
+name = "camera"
+command = ["taskset", "-c", "0-4", "bin/camera", "--hil"]
+autostart = true
+
+[[process]]
+name = "motor"
+command = ["taskset", "-c", "0-4", "bin/motor", "--hil"]
+autostart = true
+
+[[process]]
+name = "firefly-rootslam"
+# HIL 先验证估计/控制闭环：关掉回环与建图，避免板端初始化阻塞 IMU 队列。
+# RootSLAM 只用双目 + IMU，不消费深度，与 HIL 的 depth=false 一致。
+# A733 的两个 A76 核运行视觉流水线，Rayon 并行度与可用大核数一致。
+command = ["taskset", "-c", "6,7", "env", "RAYON_NUM_THREADS=2", "bin/firefly-rootslam", "--no-loop-closures", "--no-mapping", "--config", "configs/rootslam-hil.toml"]
+autostart = true
+
+[[process]]
+name = "fc"
+# FC 固定在 A55 核 5，与视觉计算分开调度。
+command = ["taskset", "-c", "5", "bin/fc", "--config", "configs/fc-hil.toml"]
+autostart = true
+
+[[process]]
+name = "traj-server"
+command = ["taskset", "-c", "0-4", "bin/planner", "--traj-server"]
+autostart = false
+
+[[process]]
+name = "planner"
+command = ["taskset", "-c", "0-4", "bin/planner"]
+autostart = false

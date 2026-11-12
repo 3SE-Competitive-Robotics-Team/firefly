@@ -11,7 +11,13 @@
 //! 运行：`motor --config configs/motor.toml`
 
 mod actuator;
+#[cfg(target_os = "linux")]
+mod hil;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    if std::env::args().any(|arg| arg == "--hil") {
+        return hil::run();
+    }
     actuator::run()
 }

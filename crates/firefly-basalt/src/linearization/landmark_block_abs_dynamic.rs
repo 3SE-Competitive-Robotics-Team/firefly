@@ -17,6 +17,7 @@ use firefly_calibration::observation::TimeCamId;
 use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector, SMatrix, Vector2, Vector3};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::AddAssign;
 
 #[derive(Clone, Debug)]
 struct Observation<S: BasaltScalar> {
@@ -222,9 +223,8 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
                     .into_owned();
                 let (tau, _) = make_householder(&mut reflector);
                 let essential = reflector.rows(1, remaining - 1).into_owned();
-                let mut block = self.storage.rows(column, remaining).into_owned();
+                let mut block = self.storage.rows_mut(column, remaining);
                 apply_householder_left(&mut block, 0, 0, &essential, tau);
-                self.storage.rows_mut(column, remaining).copy_from(&block);
             }
         } else {
             for column in 0..3 {
@@ -354,8 +354,37 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
         let rows = self.num_q2_rows();
         let jacobian = self.storage.view((3, 0), (rows, self.padding_index));
         let residual = self.storage.view((3, self.residual_index), (rows, 1));
-        *hessian += jacobian.transpose() * jacobian;
-        *rhs += jacobian.transpose() * residual;
+        // QR mixes rows, so only columns belonging to observed poses can become
+        // nonzero. Accumulate those blocks directly into the caller's buffers;
+        // velocity, bias and unrelated pose columns remain untouched.
+        for &column in self.residuals_by_pose.keys() {
+            let right = jacobian.columns(column, POSE_SIZE);
+            rhs.rows_mut(column, POSE_SIZE)
+                .gemm_tr(S::one(), &right, &residual, S::one());
+            for (&row, _) in self.residuals_by_pose.range(column..) {
+                if row == column {
+                    hessian
+                        .view_mut((row, column), (POSE_SIZE, POSE_SIZE))
+                        .gemm_tr(S::one(), &right, &right, S::one());
+                } else {
+                    // One stack-sized product serves both symmetric blocks.
+                    // Add each contribution so existing asymmetric contents survive.
+                    let mut product = SMatrix::<S, POSE_SIZE, POSE_SIZE>::zeros();
+                    product.gemm_tr(
+                        S::one(),
+                        &jacobian.columns(row, POSE_SIZE),
+                        &right,
+                        S::zero(),
+                    );
+                    hessian
+                        .view_mut((row, column), (POSE_SIZE, POSE_SIZE))
+                        .add_assign(&product);
+                    hessian
+                        .view_mut((column, row), (POSE_SIZE, POSE_SIZE))
+                        .add_assign(product.transpose());
+                }
+            }
+        }
     }
     /// # Panics
     /// Requires a marginalized block, matching landmark and full pose increment.

@@ -742,6 +742,18 @@ impl Controller {
             "fc/debug/motors",
             &motors.map(f64::from),
         );
+        let vertical = self.px4.debug_vertical();
+        publish_scalars(
+            ports.viz_ref(),
+            sim_time,
+            "fc/debug/vertical_ned",
+            &[
+                f64::from(vertical[0]),
+                f64::from(vertical[1]),
+                f64::from(vertical[2]),
+                f64::from(vertical[3]),
+            ],
+        );
         publish_scalars(
             ports.viz_ref(),
             sim_time,

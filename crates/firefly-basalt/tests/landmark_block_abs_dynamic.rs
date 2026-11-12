@@ -141,6 +141,7 @@ fn run<S: BasaltScalar>(text: &str, tolerance: f64) {
             &case["h"],
             &case["b"],
         );
+        check_sparse_accumulation(&point, &relative, &calibration, options);
         let increment = DVector::from_fn(18, |i, _| s(i as f64 - 8.) * s(0.000_125));
         let mut decrease = s(0.125);
         block.back_substitute(&mut point, &increment, &mut decrease);
@@ -164,6 +165,64 @@ fn run<S: BasaltScalar>(text: &str, tolerance: f64) {
             (decrease.as_f64() - number(&case["model_decrease"])).abs()
                 <= tolerance * (1. + number(&case["model_decrease"]).abs())
         );
+    }
+}
+// Exercise mixed pose/state ordering, unobserved poses and accumulation into
+// nonzero outputs. The independent dense product includes every padded column.
+fn check_sparse_accumulation<S: BasaltScalar>(
+    point: &Keypoint<S>,
+    relative: &HashMap<(TimeCamId, TimeCamId), RelPoseLin<S>>,
+    calibration: &Calibration<S>,
+    options: Options<S>,
+) {
+    let mut order = AbsOrderMap::default();
+    order
+        .abs_order_map
+        .extend([(10, (15, 15)), (20, (30, 15)), (30, (0, 15)), (40, (45, 6))]);
+    order.total_size = 51;
+    order.items = 4;
+    let mut block = LandmarkBlockAbsDynamic::<S, 6>::new(1, point, relative, &order, options);
+    block.linearize_landmark(point, calibration);
+    block.perform_qr();
+    let mut jacobian = DMatrix::zeros(block.num_q2_rows(), order.total_size);
+    let mut residual = DVector::zeros(block.num_q2_rows());
+    block.get_dense_q2jp_q2r(&mut jacobian, &mut residual, 0);
+    let initial_h =
+        |row: usize, col: usize| S::from_f64_lossy(0.25 + row as f64 * 0.003 - col as f64 * 0.007);
+    let mut h = DMatrix::from_fn(51, 51, initial_h);
+    let mut b = DVector::repeat(51, S::from_f64_lossy(-0.5));
+    block.add_dense_h_b(&mut h, &mut b);
+    block.add_dense_h_b(&mut h, &mut b);
+    let operations = (2 * jacobian.nrows() + 4) as f64;
+    let unit_roundoff = S::default_epsilon().as_f64() / 2.;
+    let gamma = operations * unit_roundoff / (1. - operations * unit_roundoff);
+    for row in 0..51 {
+        for col in 0..=51 {
+            let (initial, actual) = if col == 51 {
+                (-0.5_f64, b[row])
+            } else {
+                (initial_h(row, col).as_f64(), h[(row, col)])
+            };
+            let mut expected = initial;
+            let mut magnitude = initial.abs();
+            for k in 0..jacobian.nrows() {
+                let right = if col == 51 {
+                    residual[k]
+                } else {
+                    jacobian[(k, col)]
+                };
+                let product = jacobian[(k, row)].as_f64() * right.as_f64() * 2.;
+                expected += product;
+                magnitude += product.abs();
+            }
+            // Bound both the accumulation and the independent f64 oracle.
+            let bound = 2. * gamma * magnitude;
+            assert!(
+                (actual.as_f64() - expected).abs() <= bound,
+                "sparse accumulation [{row},{col}]: {} != {expected}, bound {bound}",
+                actual.as_f64()
+            );
+        }
     }
 }
 // The componentwise dot-product forward-error theorem, with explicit input

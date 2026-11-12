@@ -24,6 +24,10 @@ iceoryx2-bb-posix.workspace = true
 log.workspace = true
 serde.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+firefly-hil.workspace = true
+nix.workspace = true
+
 [dev-dependencies]
 toml.workspace = true
 

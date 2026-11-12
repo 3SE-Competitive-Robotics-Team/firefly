@@ -157,6 +157,11 @@ systemd active 只表示服务已启动；socket 应答才证明 supervisor 可�
 启动失败或解包缺文件时 `deploy` 非零退出。板载 adbd 使用 legacy shell 协议，
 远端退出结果通过输出判定，本地 `adb shell` 退出码描述传输状态。
 
+板端构建按机载应用名单编译，依赖的 feature 只在这些包之间统一。
+上板前执行 `cargo xtask release --target board`，独立验证 Linux 代码和实际部署的
+feature 组合。依赖被门控的 API 时，在 workspace 依赖中显式声明 feature；例如
+`camera --hil` 使用 `nix::fcntl` 设置 O_NONBLOCK，需要 `nix` 的 `fs` feature。
+
 二进制按安装布局定位配置与模型，与启动目录无关；解析顺序（越显式越优先）：
 
 1. `FIREFLY_ROOT` 环境变量；
@@ -245,6 +250,69 @@ supervisor 对异常退出退避重启；停止使用 SIGINT，超时返回错�
 `ffctl planner goal X Y Z --yaw 90` 可指定终点航向（度，odom +X 为零、逆时针为正）；
 省略时随规划路径定向。roll/pitch 由飞控实现推力方向。
 上电后先完成静止初始化与解锁检查，再接受起飞指令。飞控失联行为见架构文档。
+
+### HIL 部署与运行
+
+HIL 用 USB 把电脑上的 MuJoCo 物理仿真与板端生产计算连接起来。电脑运行
+`mimir`、`render`、`hil` 和仿真；板端运行 `camera --hil`、
+`motor --hil`、RootSLAM 与 FC。电机指令经 USB 返回仿真，HIL 驱动访问
+FunctionFS 端点，不访问实体相机、IMU 或 PWM。
+
+先构建主机验收程序，再部署板端，最后立即运行验收：
+
+```bash
+cargo build --locked --release -p render -p mimir -p hil -p ffctl
+cargo xtask deploy-hil --estimator rootslam
+uv run python scripts/hil_hover.py
+```
+
+`deploy-hil` 沿用普通 `deploy` 的构建、替换、服务就绪检查，然后以
+`configs/processes-hil.toml` 切换 USB gadget；`hil --check` 成功认领接口
+和两个数据端点后才报告链路就绪。板端与主机使用同次构建的协议版本。
+
+`configs/rootslam-hil.toml` 使用顶层 `precision = "float32"` 和
+`[vio] optical_flow_detection_grid_size = 20`，关闭建图与回环。
+SIL 的 `configs/firefly-rootslam.toml` 使用 FP64 后端；两条路径的光流补丁均为 FP32。
+FC 使用 `configs/fc-hil.toml`：水平速度环增益与正常部署一致，
+`control.allocation.airmode = 0` 使用集合推力优先分配，其余字段沿用代码默认值。
+普通部署的 airmode 默认值由 `firefly-flight::AllocationParams` 定义。
+
+`configs/hil.toml` 管理 USB 身份、队列与送图节拍。`imu_batch = 1`；
+双目按采集时间配对，图像分为最多 16 KiB 的块，块间先发送 IMU 与指令。
+`image_queue` 是待发图像预算，至少为 2；双目对原子入队，每个队列位置最多占两张图，
+可选深度图独占一个位置。上行每条遥测和日志发送前优先排空控制队列。
+`image_period_s` 是板端视觉负载预算，图像、控制和后验的实际频率分别验收。
+HIL 默认送图预算为 30 Hz。`configs/processes-hil.toml` 为 A733 设置以下亲和性：
+
+| CPU | HIL 应用 | 调度约束 |
+|---|---|---|
+| 6、7（A76） | RootSLAM | 两个 Rayon worker，所有线程在这两个大核内调度 |
+| 5（A55） | FC | 主循环和 IMU worker 固定在同一个小核 |
+| 0–4（A55） | camera、motor、可选 planner 与 traj-server | 共享小核池，按运行负载调度 |
+
+亲和性由 `taskset` 在应用启动前设置，新线程继承该集合；Rayon 并行度由
+同一命令中的 `RAYON_NUM_THREADS` 设置。普通进程清单和 x86 运行沿用系统调度。
+HIL 亲和性约束应用线程，内核中断、系统服务和 supervisor 仍按系统策略调度。
+更换 HIL 板型时按实际 CPU 拓扑调整清单，并重新验证控制周期和完整悬停验收。
+用 `taskset -apc <pid>` 核对所有线程；修改清单后重启 supervisor 才会重新读取。
+
+硬件约束：
+
+- 单个厂商接口使用一个 OUT 与一个 IN；板载 UDC 的可用端点由实际设备决定。
+  HIL 期间 ADB 不可用，配置和二进制在切换前部署。
+- `hil-gadget up` 重建 gadget，写完 FunctionFS 描述符和 strings 后再绑定；
+  只有 OTG 角色不匹配时才切换角色，绑定后执行 soft-connect。
+- 60 秒未建立绑定或收到主机心跳时，看门狗先停 HIL 进程集，恢复正常清单，
+  再重建 ADB gadget 和正常服务。主机退出后等待恢复，并用
+  `adb -s firefly-0001 shell ffctl process status --json` 核对收尾。
+- gadget 重建期间 IPC 尚不可用，设备启动诊断由既有
+  `/opt/firefly/logs/hil/up.log` 保留；运行遥测与板端日志经 USB 进入主机 RRD。
+
+`scripts/hil_hover.py` 复用系统任务的起飞、20 秒持续悬停、落地与姿态评分，
+输出新的 `logs/test_hil_hover_*/hil_hover.rrd` 和 `report.json`；
+报告包含源码、配置和两端二进制指纹。真值只用于主机评分。
+`scripts/hil_hover_monitor.py` 可独立查看状态，不发送控制命令。
+链路就绪、悬停功能、精度和实时性分别报告，阈值沿用系统验收定义。
 
 ### 进程与宿主机
 

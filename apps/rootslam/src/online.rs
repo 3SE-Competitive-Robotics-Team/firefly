@@ -629,4 +629,23 @@ mod config_tests {
             );
         }
     }
+
+    #[test]
+    fn the_board_hil_configuration_preserves_live_vio_settings() {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Document {
+            precision: Precision,
+            vio: Options,
+        }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../configs/rootslam-hil.toml");
+        let document = std::fs::read_to_string(&path).expect("板端 HIL 配置随仓库发布");
+        let parsed: Document = toml::from_str(&document).expect("板端 HIL 配置可解析");
+        assert_eq!(parsed.precision, Precision::Float32);
+        assert!(!parsed.vio.map && !parsed.vio.loops);
+        let mut expected = initial_vio_config(&Options::default()).unwrap();
+        expected.optical_flow_detection_grid_size = 20;
+        assert_eq!(initial_vio_config(&parsed.vio).unwrap(), expected);
+    }
 }

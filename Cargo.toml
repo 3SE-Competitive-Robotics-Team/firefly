@@ -35,7 +35,10 @@ logcall = "0.2.1"
 logforth = { version = "0.30.1", default-features = false }
 nalgebra = "0.35.0"
 ndarray = "0.17.2"
-nix = { version = "0.31.3", features = ["signal", "process", "feature", "term"] }
+nusb = "0.2.9"
+# `fs` 是 `nix::fcntl` 的门控 feature，板端 `camera --hil` 用它设 O_NONBLOCK；
+# 少了它只有全 workspace 构建（feature 被别的 crate 统一打开）能过，单包构建会失败。
+nix = { version = "0.31.3", features = ["signal", "process", "feature", "term", "fs"] }
 ort = { version = "=2.0.0-rc.15" }
 purecv = { version = "0.12.0", default-features = false, features = ["simd", "parallel"] }
 rand = "0.10.3"
@@ -49,6 +52,7 @@ zstd = "0.14.3"
 firefly-cost = { path = "crates/firefly-cost" }
 firefly-error = { path = "crates/firefly-error" }
 firefly-hal = { path = "crates/firefly-hal" }
+firefly-hil = { path = "crates/firefly-hil" }
 firefly-imu = { path = "crates/firefly-imu" }
 firefly-imu-initialization = { path = "crates/firefly-imu-initialization" }
 firefly-imu-propagation = { path = "crates/firefly-imu-propagation" }

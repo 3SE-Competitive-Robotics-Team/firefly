@@ -8,6 +8,7 @@ const DESKTOP_APPS: &[&str] = &[
     "fc",
     "ffctl",
     "firefly-rootslam",
+    "hil",
     "lightglue",
     "localization",
     "mimir",
@@ -18,12 +19,14 @@ const DESKTOP_APPS: &[&str] = &[
 
 /// 机载应用：Orange Pi Zero 3W 上运行的进程，不含 Bevy 仿真/演示程序。
 /// `camera`/`imu`/`motor` 是板侧独占的传感器与执行器驱动，替代仿真侧的
-/// `render` 与 `firefly-sim`。
+/// `render` 与 `firefly-sim`。`firefly-rootslam` 是 live 入口，板端 HIL
+/// 用它替换 `firefly-okvis-x` 跑估计/控制闭环。
 const BOARD_APPS: &[&str] = &[
     "aliked",
     "camera",
     "fc",
     "ffctl",
+    "hil-gadget",
     "imu",
     "firefly-rootslam",
     "lightglue",
@@ -88,5 +91,17 @@ mod tests {
     fn desktop_release_includes_simulation_vio_apps() {
         let apps = Target::Desktop.apps();
         assert!(apps.contains(&"firefly-rootslam"));
+    }
+
+    #[test]
+    fn desktop_release_includes_the_host_side_hil_bridge() {
+        assert!(Target::Desktop.apps().contains(&"hil"));
+    }
+
+    #[test]
+    fn board_release_includes_rootslam_and_the_gadget() {
+        let apps = Target::Board.apps();
+        assert!(apps.contains(&"firefly-rootslam"));
+        assert!(apps.contains(&"hil-gadget"));
     }
 }

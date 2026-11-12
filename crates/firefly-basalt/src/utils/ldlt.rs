@@ -24,6 +24,7 @@ impl<S: BasaltScalar> Ldlt<S> {
         assert!(matrix.is_square());
         let size = matrix.nrows();
         let mut transpositions: Vec<_> = (0..size).collect();
+        let mut temp = DVector::zeros(size);
         for k in 0..size {
             let mut pivot = k;
             for i in k + 1..size {
@@ -44,7 +45,9 @@ impl<S: BasaltScalar> Ldlt<S> {
                     matrix.swap((i, k), (pivot, i));
                 }
             }
-            let temp = DVector::from_fn(k, |j, _| matrix[(j, j)] * matrix[(k, j)]);
+            for j in 0..k {
+                temp[j] = matrix[(j, j)] * matrix[(k, j)];
+            }
             let mut update = S::zero();
             for j in 0..k {
                 update += matrix[(k, j)] * temp[j];
