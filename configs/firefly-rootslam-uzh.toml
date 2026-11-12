@@ -4,8 +4,8 @@ precision = "float64"
 [input]
 type = "dataset"
 format = "uzh"
-path = "../../uzh_fpv_open/datasets/indoor_forward_6_snapdragon"
-calibration = "../../uzh_fpv_open/datasets/calibration/indoor_forward_calib_snapdragon"
+path = "datasets/uzh/indoor_forward_6_snapdragon"
+calibration = "datasets/uzh/calibration/indoor_forward_calib_snapdragon"
 
 [vio]
 optical_flow_detection_grid_size = 20

@@ -5,8 +5,8 @@ precision = "float64"
 [input]
 type = "dataset"
 format = "lamaria"
-path = "../../lamaria/datasets/training/R_01_easy/asl_folder/R_01_easy"
-calibration = "../../lamaria/datasets/training/R_01_easy/pinhole_calibrations/R_01_easy.json"
+path = "datasets/lamaria/training/R_01_easy/asl_folder/R_01_easy"
+calibration = "datasets/lamaria/training/R_01_easy/pinhole_calibrations/R_01_easy.json"
 
 [vio]
 optical_flow_detection_grid_size = 20
