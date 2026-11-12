@@ -7,7 +7,7 @@ use super::landmark_block::{Options, RelPoseLin, State};
 use crate::{
     utils::{
         ba_utils::linearize_point,
-        complete_orthogonal_decomposition::{apply_householder_left, make_householder},
+        complete_orthogonal_decomposition::{apply_householder_left_columns, make_householder},
         imu_types::AbsOrderMap,
     },
     vi_estimator::landmark_database::Keypoint,
@@ -37,6 +37,13 @@ pub struct LandmarkBlockAbsDynamic<S: BasaltScalar, const POSE_SIZE: usize> {
     damping_rotations: Vec<(S, S)>,
     observations: Vec<Observation<S>>,
     residuals_by_pose: BTreeMap<usize, BTreeSet<usize>>,
+    /// Ascending storage columns that can be nonzero after `linearize_landmark`.
+    ///
+    /// A landmark contributes to the six pose columns of the frames that observe
+    /// it plus the three point columns and the residual column. All other pose,
+    /// velocity, bias and padding columns stay zero because the QR step only
+    /// mixes rows.
+    nonzero_columns: Vec<usize>,
     padding_index: usize,
     landmark_index: usize,
     residual_index: usize,
@@ -82,6 +89,12 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
         let landmark_index = padding_index + (4 - padding_index % 4) % 4;
         let residual_index = landmark_index + 3;
         let storage = DMatrix::zeros(observations.len() * 2 + 3, residual_index + 1);
+        let mut nonzero_columns = Vec::with_capacity(residuals_by_pose.len() * POSE_SIZE + 4);
+        for &offset in residuals_by_pose.keys() {
+            nonzero_columns.extend(offset..offset + POSE_SIZE);
+        }
+        nonzero_columns.extend(landmark_index..landmark_index + 3);
+        nonzero_columns.push(residual_index);
         Self {
             landmark_id,
             host: point.host_kf_id,
@@ -92,6 +105,7 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
             damping_rotations: Vec::with_capacity(6),
             observations,
             residuals_by_pose,
+            nonzero_columns,
             padding_index,
             landmark_index,
             residual_index,
@@ -223,8 +237,19 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
                     .into_owned();
                 let (tau, _) = make_householder(&mut reflector);
                 let essential = reflector.rows(1, remaining - 1).into_owned();
-                let mut block = self.storage.rows_mut(column, remaining);
-                apply_householder_left(&mut block, 0, 0, &essential, tau);
+                let Self {
+                    storage,
+                    nonzero_columns,
+                    ..
+                } = self;
+                let mut block = storage.rows_mut(column, remaining);
+                apply_householder_left_columns(
+                    &mut block,
+                    0,
+                    nonzero_columns.iter().copied(),
+                    &essential,
+                    tau,
+                );
             }
         } else {
             for column in 0..3 {
@@ -233,7 +258,13 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
                         self.storage[(row - 1, self.landmark_index + column)],
                         self.storage[(row, self.landmark_index + column)],
                     );
-                    rotate(&mut self.storage, row, row - 1, rotation);
+                    rotate(
+                        &mut self.storage,
+                        row,
+                        row - 1,
+                        rotation,
+                        &self.nonzero_columns,
+                    );
                 }
             }
         }
@@ -250,7 +281,13 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
             for n in (0..3).rev() {
                 for m in (0..=n).rev() {
                     let (c, s) = self.damping_rotations.pop().unwrap();
-                    rotate(&mut self.storage, start + n - m, n, (c, -s));
+                    rotate(
+                        &mut self.storage,
+                        start + n - m,
+                        n,
+                        (c, -s),
+                        &self.nonzero_columns,
+                    );
                 }
             }
         }
@@ -274,7 +311,13 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
                         self.storage[(start + n - m, self.landmark_index + n)],
                     );
                     self.damping_rotations.push(rotation);
-                    rotate(&mut self.storage, start + n - m, n, rotation);
+                    rotate(
+                        &mut self.storage,
+                        start + n - m,
+                        n,
+                        rotation,
+                        &self.nonzero_columns,
+                    );
                 }
             }
         }
@@ -305,9 +348,13 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
         assert_eq!(self.state, State::Marginalized);
         assert!(!self.has_landmark_damping());
         assert_eq!(scaling.len(), self.padding_index);
-        for c in 0..self.padding_index {
-            for r in 0..self.num_q2_rows() {
-                self.storage[(r, c)] *= scaling[c];
+        let rows = self.num_q2_rows();
+        for &offset in self.residuals_by_pose.keys() {
+            for column in offset..offset + POSE_SIZE {
+                let scale = scaling[column];
+                for row in 0..rows {
+                    self.storage[(row, column)] *= scale;
+                }
             }
         }
     }
@@ -398,8 +445,21 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
         assert_eq!(point.host_kf_id, self.host);
         assert_eq!(pose_increment.len(), self.padding_index);
         let mut increment = Vector3::zeros();
-        let rhs = self.storage.view((0, self.residual_index), (3, 1))
-            + self.storage.view((0, 0), (3, self.padding_index)) * pose_increment;
+        // The dense reference product is `storage * increment`; adding the
+        // residual afterwards keeps this column-wise reduction identical.
+        let mut rhs = DVector::zeros(3);
+        for &offset in self.residuals_by_pose.keys() {
+            for column in offset..offset + POSE_SIZE {
+                rhs.axpy(
+                    pose_increment[column],
+                    &self.storage.view((0, column), (3, 1)).column(0),
+                    S::one(),
+                );
+            }
+        }
+        for row in 0..3 {
+            rhs[row] += self.storage[(row, self.residual_index)];
+        }
         for r in (0..3).rev() {
             let mut sum = S::zero();
             for c in r + 1..3 {
@@ -410,7 +470,16 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
         increment = -increment;
         self.set_landmark_damping(S::zero());
         let rows = self.num_q2_rows();
-        let mut projected = self.storage.view((0, 0), (rows, self.padding_index)) * pose_increment;
+        let mut projected = DVector::zeros(rows);
+        for &offset in self.residuals_by_pose.keys() {
+            for column in offset..offset + POSE_SIZE {
+                projected.axpy(
+                    pose_increment[column],
+                    &self.storage.view((0, column), (rows, 1)).column(0),
+                    S::one(),
+                );
+            }
+        }
         for r in 0..3 {
             let mut sum = S::zero();
             for c in r..3 {
@@ -471,8 +540,14 @@ fn givens<S: BasaltScalar>(p: S, q: S) -> (S, S) {
         (-t * s, s)
     }
 }
-fn rotate<S: BasaltScalar>(matrix: &mut DMatrix<S>, first: usize, second: usize, (c, s): (S, S)) {
-    for col in 0..matrix.ncols() {
+fn rotate<S: BasaltScalar>(
+    matrix: &mut DMatrix<S>,
+    first: usize,
+    second: usize,
+    (c, s): (S, S),
+    columns: &[usize],
+) {
+    for &col in columns {
         let x = matrix[(first, col)];
         let y = matrix[(second, col)];
         matrix[(first, col)] = c * x + s * y;

@@ -49,13 +49,33 @@ pub(crate) fn apply_householder_left<S: BasaltScalar, R: Dim, C: Dim, M: Storage
     essential: &DVector<S>,
     tau: S,
 ) {
+    let columns = column..matrix.ncols();
+    apply_householder_left_columns(matrix, row, columns, essential, tau);
+}
+
+/// Applies the same reflector to an explicit, ascending column set.
+///
+/// Callers that store a block densely but only fill a subset of columns can
+/// skip structurally zero columns without changing any live value.
+pub(crate) fn apply_householder_left_columns<
+    S: BasaltScalar,
+    R: Dim,
+    C: Dim,
+    M: StorageMut<S, R, C>,
+>(
+    matrix: &mut Matrix<S, R, C, M>,
+    row: usize,
+    columns: impl IntoIterator<Item = usize>,
+    essential: &DVector<S>,
+    tau: S,
+) {
     assert_eq!(matrix.nrows() - row, essential.len() + 1);
     if essential.is_empty() {
-        for c in column..matrix.ncols() {
+        for c in columns {
             matrix[(row, c)] *= S::one() - tau;
         }
     } else if tau != S::zero() {
-        for c in column..matrix.ncols() {
+        for c in columns {
             let mut temporary = S::zero();
             for r in 0..essential.len() {
                 temporary += essential[r] * matrix[(row + 1 + r, c)];
