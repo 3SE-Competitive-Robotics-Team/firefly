@@ -2,7 +2,7 @@
 # 回环与建图由命令行开关 --no-loop-closures / --no-mapping 关闭，避免板端
 # 初始化阻塞 IMU 队列；`configs/processes-hil.toml` 已经在命令行里
 # 带上这两个开关。
-precision = "float64"
+precision = "float32"
 
 [vio]
 # 320×240 双目流使用 20 px 检测网格。

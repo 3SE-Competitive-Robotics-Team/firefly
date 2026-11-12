@@ -218,6 +218,7 @@ mod tests {
             toml::from_str(include_str!("../../../../configs/firefly-rootslam.toml")).unwrap();
         for config in [Config::default(), shipped] {
             assert!(!config.vio.map && !config.vio.loops && !config.vio.external_localization);
+            assert_eq!(config.precision, super::Precision::Float64);
         }
     }
 

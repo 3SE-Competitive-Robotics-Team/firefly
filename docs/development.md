@@ -270,8 +270,9 @@ uv run python scripts/hil_hover.py
 `configs/processes-hil.toml` 切换 USB gadget；`hil --check` 成功认领接口
 和两个数据端点后才报告链路就绪。板端与主机使用同次构建的协议版本。
 
-`configs/rootslam-hil.toml` 使用顶层 `precision = "float64"` 和
+`configs/rootslam-hil.toml` 使用顶层 `precision = "float32"` 和
 `[vio] optical_flow_detection_grid_size = 20`，关闭建图与回环。
+SIL 的 `configs/firefly-rootslam.toml` 使用 FP64 后端；两条路径的光流补丁均为 FP32。
 FC 使用 `configs/fc-hil.toml`：水平速度环增益与正常部署一致，
 `control.allocation.airmode = 0` 使用集合推力优先分配，其余字段沿用代码默认值。
 普通部署的 airmode 默认值由 `firefly-flight::AllocationParams` 定义。

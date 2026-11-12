@@ -642,7 +642,7 @@ mod config_tests {
             .join("../../configs/rootslam-hil.toml");
         let document = std::fs::read_to_string(&path).expect("板端 HIL 配置随仓库发布");
         let parsed: Document = toml::from_str(&document).expect("板端 HIL 配置可解析");
-        assert_eq!(parsed.precision, Precision::Float64);
+        assert_eq!(parsed.precision, Precision::Float32);
         assert!(!parsed.vio.map && !parsed.vio.loops);
         let mut expected = initial_vio_config(&Options::default()).unwrap();
         expected.optical_flow_detection_grid_size = 20;
