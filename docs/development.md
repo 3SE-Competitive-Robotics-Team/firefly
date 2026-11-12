@@ -310,6 +310,8 @@ HIL 亲和性约束应用线程，内核中断、系统服务和 supervisor 仍�
   `adb -s firefly-0001 shell ffctl process status --json` 核对收尾。
 - gadget 重建期间 IPC 尚不可用，设备启动诊断由既有
   `/opt/firefly/logs/hil/up.log` 保留；运行遥测与板端日志经 USB 进入主机 RRD。
+- USB 模式转换通过 `/opt/firefly/logs/hil/transition.lock` 跨进程互斥，覆盖服务启动、
+  完成标记与落盘；ADB 刚枚举时发起的新会话会等待上一轮恢复完成。
 
 `scripts/hil_hover.py` 复用系统任务的起飞、20 秒持续悬停、落地与姿态评分，
 输出新的 `logs/test_hil_hover_*/hil_hover.rrd` 和 `report.json`；
