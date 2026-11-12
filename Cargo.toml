@@ -3,6 +3,17 @@ members = ["crates/*", "apps/*", "xtask"]
 exclude = ["apps/firefly-sim"]
 resolver = "3"
 
+# RootSLAM 的逐帧数值循环依赖跨函数内联。单代码生成单元让 LLVM 在整 crate
+# 范围内内联；其他应用保持默认并行代码生成，避免拖慢各自的 release 构建。
+[profile.release.package.firefly-calibration]
+codegen-units = 1
+[profile.release.package.firefly-basalt]
+codegen-units = 1
+[profile.release.package.firefly-rootslam-mapping]
+codegen-units = 1
+[profile.release.package.firefly-rootslam]
+codegen-units = 1
+
 [workspace.dependencies]
 re_build_info = "=0.42.0"
 re_byte_size = "=0.42.0"

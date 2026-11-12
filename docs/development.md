@@ -109,6 +109,9 @@ cargo xtask release
 ```
 
 运行进程一律 release；普通 `cargo test` 用 debug。源码改动后先完成构建，再做运行验收。
+RootSLAM 的 `firefly-calibration`、`firefly-basalt`、`firefly-rootslam-mapping` 和
+`firefly-rootslam` 在 release 下使用单个代码生成单元，让 LLVM 在整个 crate 内内联
+逐帧数值循环；这四个包的 release 构建时间相应增加，其他应用保持默认并行代码生成。
 分别在终端启动，记录进程最先启动、最后退出：
 
 ```bash
