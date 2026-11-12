@@ -152,7 +152,19 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
         assert_ne!(self.state, State::Uninitialized);
         assert_eq!(point.host_kf_id, self.host);
         assert_eq!(point.obs.len(), self.observations.len());
-        self.storage.fill(S::zero());
+        // The landmark, QR and damping steps only read or accumulate into
+        // `nonzero_columns`. Padding, velocity and bias columns are never
+        // written, so they keep the zeroes from allocation.
+        let nrows = self.storage.nrows();
+        let Self {
+            storage,
+            nonzero_columns,
+            ..
+        } = self;
+        let data = storage.as_mut_slice();
+        for &column in nonzero_columns.iter() {
+            data[column * nrows..(column + 1) * nrows].fill(S::zero());
+        }
         self.damping_rotations.clear();
         let mut numerically_valid = true;
         let mut error_sum = S::zero();
