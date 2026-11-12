@@ -7,7 +7,7 @@
 //! Real dynamic specialization of Eigen 5.0.1 `CompleteOrthogonalDecomposition`,
 //! `ColPivHouseholderQR` and Householder operations, preserving rank thresholds.
 use firefly_calibration::scalar::BasaltScalar;
-use nalgebra::{DMatrix, DVector};
+use nalgebra::{DMatrix, DVector, Dim, Matrix, StorageMut};
 
 pub(crate) fn machine_epsilon<S: BasaltScalar>() -> S {
     S::from_f64_lossy(if size_of::<S>() == 4 {
@@ -42,8 +42,8 @@ pub(crate) fn make_householder<S: BasaltScalar>(vector: &mut DVector<S>) -> (S, 
     }
 }
 
-pub(crate) fn apply_householder_left<S: BasaltScalar>(
-    matrix: &mut DMatrix<S>,
+pub(crate) fn apply_householder_left<S: BasaltScalar, R: Dim, C: Dim, M: StorageMut<S, R, C>>(
+    matrix: &mut Matrix<S, R, C, M>,
     row: usize,
     column: usize,
     essential: &DVector<S>,

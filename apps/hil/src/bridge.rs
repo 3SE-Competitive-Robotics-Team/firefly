@@ -343,7 +343,7 @@ fn ipc_loop(
     options: &crate::config::Link,
 ) -> Result<(), String> {
     let image_period = Duration::from_secs_f64(options.image_period_s);
-    let mut last_image = Instant::now();
+    let mut image_deadline = Instant::now() + image_period;
     let mut pending_left: Option<GrayImageMessage> = None;
     let mut pending_right: Option<GrayImageMessage> = None;
     let mut pending_depth: Option<DepthImageMessage> = None;
@@ -418,7 +418,7 @@ fn ipc_loop(
                     pending_right = None;
                 }
                 stats.dropped_images += 1;
-            } else if last_image.elapsed() >= image_period {
+            } else if Instant::now() >= image_deadline {
                 let left = pending_left.take().expect("已检查非空");
                 let right = pending_right.take().expect("已检查非空");
                 record_image_checksum(&mut stats, &left);
@@ -429,7 +429,7 @@ fn ipc_loop(
                     try_image(image_tx, Message::Depth(Box::new(depth)), &mut stats);
                 }
                 last_image_stamp = left.timestamp;
-                last_image = Instant::now();
+                image_deadline = next_image_deadline(image_deadline, Instant::now(), image_period);
             }
         }
         if last_heartbeat.elapsed() >= Duration::from_millis(500) {
@@ -694,4 +694,37 @@ fn session_id() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos());
     (nanos as u64) ^ (u64::from(std::process::id()) << 32)
+}
+
+/// Preserve the periodic schedule through ordinary polling jitter. After a full
+/// missed period, resume from now so a stalled link never emits catch-up bursts.
+fn next_image_deadline(deadline: Instant, now: Instant, period: Duration) -> Instant {
+    let next = deadline + period;
+    if next > now { next } else { now + period }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_cadence_preserves_phase_and_skips_stalled_periods() {
+        let start = Instant::now();
+        let period = Duration::from_secs_f64(1. / 30.);
+        let mut deadline = start + period;
+        for frame in 1..=600 {
+            let now = start + period * frame + Duration::from_millis(1);
+            deadline = next_image_deadline(deadline, now, period);
+            assert_eq!(deadline, start + period * (frame + 1));
+        }
+        let resumed = deadline + period * 10;
+        assert_eq!(
+            next_image_deadline(deadline, resumed, period),
+            resumed + period
+        );
+        assert_eq!(
+            next_image_deadline(deadline, deadline + period, period),
+            deadline + period * 2
+        );
+    }
 }

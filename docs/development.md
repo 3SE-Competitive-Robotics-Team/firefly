@@ -279,6 +279,10 @@ FC 使用 `configs/fc-hil.toml`：水平速度环增益与正常部署一致，
 `configs/hil.toml` 管理 USB 身份、队列与送图节拍。`imu_batch = 1`；
 双目按采集时间配对，图像分为最多 16 KiB 的块，块间先发送 IMU 与指令。
 `image_period_s` 是板端视觉负载预算，图像、控制和后验的实际频率分别验收。
+HIL 默认送图预算为 30 Hz。Orange Pi Zero 3W 的 A733 上，RootSLAM 固定在
+A76 核 6、7，Rayon 使用两个 worker；FC 固定在 A55 核 5，保持独立的调度资源。
+`taskset` 与 `RAYON_NUM_THREADS` 由 HIL 进程清单设置；更换板型时按实际核拓扑
+重新验证亲和性、控制周期与完整悬停验收。
 
 硬件约束：
 
