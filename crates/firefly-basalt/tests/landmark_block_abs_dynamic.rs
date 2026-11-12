@@ -187,7 +187,9 @@ fn check_sparse_accumulation<S: BasaltScalar>(
     let mut jacobian = DMatrix::zeros(block.num_q2_rows(), order.total_size);
     let mut residual = DVector::zeros(block.num_q2_rows());
     block.get_dense_q2jp_q2r(&mut jacobian, &mut residual, 0);
-    let mut h = DMatrix::repeat(51, 51, S::from_f64_lossy(0.25));
+    let initial_h =
+        |row: usize, col: usize| S::from_f64_lossy(0.25 + row as f64 * 0.003 - col as f64 * 0.007);
+    let mut h = DMatrix::from_fn(51, 51, initial_h);
     let mut b = DVector::repeat(51, S::from_f64_lossy(-0.5));
     block.add_dense_h_b(&mut h, &mut b);
     block.add_dense_h_b(&mut h, &mut b);
@@ -199,7 +201,7 @@ fn check_sparse_accumulation<S: BasaltScalar>(
             let (initial, actual) = if col == 51 {
                 (-0.5_f64, b[row])
             } else {
-                (0.25_f64, h[(row, col)])
+                (initial_h(row, col).as_f64(), h[(row, col)])
             };
             let mut expected = initial;
             let mut magnitude = initial.abs();

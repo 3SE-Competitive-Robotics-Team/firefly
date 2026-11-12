@@ -17,6 +17,7 @@ use firefly_calibration::observation::TimeCamId;
 use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector, SMatrix, Vector2, Vector3};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::AddAssign;
 
 #[derive(Clone, Debug)]
 struct Observation<S: BasaltScalar> {
@@ -360,15 +361,28 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
             let right = jacobian.columns(column, POSE_SIZE);
             rhs.rows_mut(column, POSE_SIZE)
                 .gemm_tr(S::one(), &right, &residual, S::one());
-            for &row in self.residuals_by_pose.keys() {
-                hessian
-                    .view_mut((row, column), (POSE_SIZE, POSE_SIZE))
-                    .gemm_tr(
+            for (&row, _) in self.residuals_by_pose.range(column..) {
+                if row == column {
+                    hessian
+                        .view_mut((row, column), (POSE_SIZE, POSE_SIZE))
+                        .gemm_tr(S::one(), &right, &right, S::one());
+                } else {
+                    // One stack-sized product serves both symmetric blocks.
+                    // Add each contribution so existing asymmetric contents survive.
+                    let mut product = SMatrix::<S, POSE_SIZE, POSE_SIZE>::zeros();
+                    product.gemm_tr(
                         S::one(),
                         &jacobian.columns(row, POSE_SIZE),
                         &right,
-                        S::one(),
+                        S::zero(),
                     );
+                    hessian
+                        .view_mut((row, column), (POSE_SIZE, POSE_SIZE))
+                        .add_assign(&product);
+                    hessian
+                        .view_mut((column, row), (POSE_SIZE, POSE_SIZE))
+                        .add_assign(product.transpose());
+                }
             }
         }
     }

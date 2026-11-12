@@ -279,10 +279,19 @@ FC 使用 `configs/fc-hil.toml`：水平速度环增益与正常部署一致，
 `configs/hil.toml` 管理 USB 身份、队列与送图节拍。`imu_batch = 1`；
 双目按采集时间配对，图像分为最多 16 KiB 的块，块间先发送 IMU 与指令。
 `image_period_s` 是板端视觉负载预算，图像、控制和后验的实际频率分别验收。
-HIL 默认送图预算为 30 Hz。Orange Pi Zero 3W 的 A733 上，RootSLAM 固定在
-A76 核 6、7，Rayon 使用两个 worker；FC 固定在 A55 核 5，保持独立的调度资源。
-`taskset` 与 `RAYON_NUM_THREADS` 由 HIL 进程清单设置；更换板型时按实际核拓扑
-重新验证亲和性、控制周期与完整悬停验收。
+HIL 默认送图预算为 30 Hz。`configs/processes-hil.toml` 为 A733 设置以下亲和性：
+
+| CPU | HIL 应用 | 调度约束 |
+|---|---|---|
+| 6、7（A76） | RootSLAM | 两个 Rayon worker，所有线程在这两个大核内调度 |
+| 5（A55） | FC | 主循环和 IMU worker 固定在同一个小核 |
+| 0–4（A55） | camera、motor、可选 planner 与 traj-server | 共享小核池，按运行负载调度 |
+
+亲和性由 `taskset` 在应用启动前设置，新线程继承该集合；Rayon 并行度由
+同一命令中的 `RAYON_NUM_THREADS` 设置。普通进程清单和 x86 运行沿用系统调度。
+HIL 亲和性约束应用线程，内核中断、系统服务和 supervisor 仍按系统策略调度。
+更换 HIL 板型时按实际 CPU 拓扑调整清单，并重新验证控制周期和完整悬停验收。
+用 `taskset -apc <pid>` 核对所有线程；修改清单后重启 supervisor 才会重新读取。
 
 硬件约束：
 

@@ -1,13 +1,14 @@
 # USB HIL：板端 RootSLAM 与 FC 计算，执行器推力回传主机仿真。
+# A733 HIL 核分配：6、7 为视觉，5 为 FC，其余应用共享 0–4。
 
 [[process]]
 name = "camera"
-command = ["bin/camera", "--hil"]
+command = ["taskset", "-c", "0-4", "bin/camera", "--hil"]
 autostart = true
 
 [[process]]
 name = "motor"
-command = ["bin/motor", "--hil"]
+command = ["taskset", "-c", "0-4", "bin/motor", "--hil"]
 autostart = true
 
 [[process]]
@@ -26,10 +27,10 @@ autostart = true
 
 [[process]]
 name = "traj-server"
-command = ["bin/planner", "--traj-server"]
+command = ["taskset", "-c", "0-4", "bin/planner", "--traj-server"]
 autostart = false
 
 [[process]]
 name = "planner"
-command = ["bin/planner"]
+command = ["taskset", "-c", "0-4", "bin/planner"]
 autostart = false
