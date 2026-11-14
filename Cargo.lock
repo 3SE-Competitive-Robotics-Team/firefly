@@ -5942,7 +5942,6 @@ dependencies = [
  "firefly-pubsub",
  "iceoryx2-bb-posix",
  "log",
- "nix 0.31.3",
  "serde",
  "toml 1.2.1+spec-1.1.0",
 ]

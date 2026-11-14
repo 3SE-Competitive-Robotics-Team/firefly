@@ -223,13 +223,11 @@ impl Sturm {
     }
     #[must_use]
     pub fn compute_lagrangian_bound(&self) -> f64 {
-        let mut coefficients: Vec<_> = (0..self.dimension - 1)
-            .map(|i| {
-                (self.c[(0, i + 1)] / self.c[(0, 0)])
-                    .abs()
-                    .powf(1.0 / (i + 1) as f64)
-            })
-            .collect();
+        let mut coefficients: Vec<_> = Vec::from_fn(self.dimension - 1, |i| {
+            (self.c[(0, i + 1)] / self.c[(0, 0)])
+                .abs()
+                .powf(1.0 / (i + 1) as f64)
+        });
         let mut j = 0;
         let mut max1 = -1.0;
         for (i, v) in coefficients.iter().enumerate() {

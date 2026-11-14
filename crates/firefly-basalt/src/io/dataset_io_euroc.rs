@@ -165,14 +165,14 @@ impl EurocIo {
                     .push(common::pose(position, quaternion, &file, number)?);
             }
         }
-        for camera in 0..2 {
+        for (camera, exposures) in data.exposure_times.iter_mut().enumerate() {
             let file = path.join(format!("cam{camera}/exposure.csv"));
             if file.exists() {
                 for (number, line) in common::lines(&file)? {
                     let values = common::fields(&line, &file, number, 2, true)?;
                     let timestamp = common::parse(values[0], &file, number)?;
                     let exposure = common::parse::<i64>(values[1], &file, number)? as f64 * 1e-9;
-                    data.exposure_times[camera].insert(timestamp, exposure);
+                    exposures.insert(timestamp, exposure);
                 }
             }
         }

@@ -15,9 +15,9 @@ fn original_result_collection_counts_each_camera_and_duplicate_time() {
             input_images: Some(Arc::new(OpticalFlowInput::default())),
             ..Default::default()
         };
-        for camera in 0..2 {
-            result.observations[camera].insert(7, AffineCompact2::default());
-            result.observations[camera].insert(10 + frame + camera, AffineCompact2::default());
+        for (camera, observations) in result.observations.iter_mut().enumerate() {
+            observations.insert(7, AffineCompact2::default());
+            observations.insert(10 + frame + camera, AffineCompact2::default());
         }
         stats.read_result(result);
     }

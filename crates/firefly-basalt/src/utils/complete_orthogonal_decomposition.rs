@@ -315,10 +315,8 @@ impl<S: BasaltScalar> CompleteOrthogonalDecomposition<S> {
             }
         }
         let mut result = DMatrix::zeros(cols, rhs.ncols());
-        for i in 0..cols {
-            result
-                .row_mut(self.permutation[i])
-                .copy_from(&solution.row(i));
+        for (i, &row) in self.permutation.iter().take(cols).enumerate() {
+            result.row_mut(row).copy_from(&solution.row(i));
         }
         result
     }

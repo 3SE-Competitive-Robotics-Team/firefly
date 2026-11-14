@@ -1206,10 +1206,9 @@ mod tests {
             );
             let mut observations = BTreeMap::new();
             for (&time, keyframe) in &snapshot.keyframes {
-                for camera in 0..2 {
-                    let position = point
-                        - keyframe.t_w_b.translation.vector
-                        - calibration.t_i_c[camera].translation.vector;
+                for (camera, t_i_c) in calibration.t_i_c.iter().enumerate() {
+                    let position =
+                        point - keyframe.t_w_b.translation.vector - t_i_c.translation.vector;
                     observations.insert(
                         ObservationKey {
                             keyframe: time,
@@ -1294,10 +1293,10 @@ mod tests {
             let host = (id % 20) as i64;
             let mut observations = BTreeMap::new();
             for keyframe in host..(host + 4).min(20) {
-                for camera in 0..2 {
+                for (camera, t_i_c) in calibration.t_i_c.iter().enumerate() {
                     let position = point
                         - snapshot.keyframes[&keyframe].t_w_b.translation.vector
-                        - calibration.t_i_c[camera].translation.vector;
+                        - t_i_c.translation.vector;
                     observations.insert(
                         ObservationKey {
                             keyframe,

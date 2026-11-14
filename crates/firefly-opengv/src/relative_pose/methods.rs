@@ -191,7 +191,7 @@ pub fn sevenpt(
         constant[2].im.abs(),
     ];
     if val.iter().all(|x| *x < eps) {
-        Some((0..3).map(|i| f1 - constant[i].re * f2).collect())
+        Some(Vec::from_fn(3, |i| f1 - constant[i].re * f2))
     } else {
         let (mut min, mut root_product) = (val[0], 0);
         if val[1] < min {

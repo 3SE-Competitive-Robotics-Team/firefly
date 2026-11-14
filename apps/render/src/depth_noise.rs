@@ -156,13 +156,11 @@ impl Field {
         let mut left = StdRng::seed_from_u64(seed(epoch));
         let mut right = StdRng::seed_from_u64(seed(epoch.wrapping_add(1)));
         let mut fixed = StdRng::seed_from_u64(seed(u64::MAX));
-        let values = (0..cols * rows)
-            .map(|_| {
-                let dynamic = ((1.0 - a) * gaussian(&mut left) + a * gaussian(&mut right)) / norm;
-                (1.0 - options.temporal_fraction).sqrt() * gaussian(&mut fixed)
-                    + options.temporal_fraction.sqrt() * dynamic
-            })
-            .collect();
+        let values = Vec::from_fn(cols * rows, |_| {
+            let dynamic = ((1.0 - a) * gaussian(&mut left) + a * gaussian(&mut right)) / norm;
+            (1.0 - options.temporal_fraction).sqrt() * gaussian(&mut fixed)
+                + options.temporal_fraction.sqrt() * dynamic
+        });
         let norm = (0..scale * scale)
             .map(|k| {
                 let (u, v) = (

@@ -11,10 +11,10 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-/// Rust 1.99.1 + Debian trixie。升级镜像必须同时更新 digest。
+/// Rust 1.100.0 + Debian trixie。升级镜像必须同时更新 digest。
 pub const IMAGE: &str =
-    "rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07";
-const TOOLCHAIN: &str = "1.99.1";
+    "rust:1.100.0-trixie@sha256:e19840879045c951c905d0eaa9887f3439c62000e429963371b376bac8d38c31";
+const TOOLCHAIN: &str = "1.100.0";
 /// Apple container 默认只给约 1GB，release 并行编译会被 OOM kill。
 const MEMORY: &str = "8G";
 /// 派生构建镜像的仓库名。

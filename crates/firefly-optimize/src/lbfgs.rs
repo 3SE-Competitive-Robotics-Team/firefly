@@ -145,14 +145,12 @@ impl Lbfgs {
 
         // 官方工作区：环形缓冲 lm[m]（end 指针推进）、过去 past 次目标值 pf
         let m = cfg.memory;
-        let mut lm: Vec<IterationData> = (0..m)
-            .map(|_| IterationData {
-                alpha: 0.0,
-                s: DVector::zeros(n),
-                y: DVector::zeros(n),
-                ys: 0.0,
-            })
-            .collect();
+        let mut lm: Vec<IterationData> = Vec::from_fn(m, |_| IterationData {
+            alpha: 0.0,
+            s: DVector::zeros(n),
+            y: DVector::zeros(n),
+            ys: 0.0,
+        });
         let mut pf: Vec<f64> = vec![0.0; cfg.past];
         if cfg.past > 0 {
             pf[0] = fx;

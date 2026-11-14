@@ -45,7 +45,6 @@ log = "0.4.35"
 logcall = "0.2.1"
 logforth = { version = "0.30.1", default-features = false }
 nalgebra = "0.35.0"
-ndarray = "0.17.2"
 nusb = "0.2.9"
 # `fs` 是 `nix::fcntl` 的门控 feature，板端 `camera --hil` 用它设 O_NONBLOCK；
 # 少了它只有全 workspace 构建（feature 被别的 crate 统一打开）能过，单包构建会失败。
@@ -83,7 +82,7 @@ firefly-render = { path = "crates/firefly-render" }
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.99.1"
+rust-version = "1.100.0"
 description = "RoboMaster 无人机自主导航：视觉惯性定位、建图、轨迹规划与飞行控制"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/3SE-Competitive-Robotics-Team/firefly"

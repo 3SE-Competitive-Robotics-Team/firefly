@@ -101,10 +101,8 @@ impl FullPivHouseholderQr {
                 transformed[(r, c)] = value / self.qr[(r, r)];
             }
         }
-        for r in 0..self.rank {
-            output
-                .row_mut(self.permutation[r])
-                .copy_from(&transformed.row(r));
+        for (r, &row) in self.permutation.iter().take(self.rank).enumerate() {
+            output.row_mut(row).copy_from(&transformed.row(r));
         }
         output
     }
