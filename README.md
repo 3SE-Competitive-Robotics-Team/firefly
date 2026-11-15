@@ -67,7 +67,7 @@ ALIKED/LightGlue 库图定位作为独立可选工具运行。
 |---|---|
 | `firefly-mujoco` | MuJoCo 物理库：RMUC 无人机场景与 IMU 提取 |
 | `firefly-cad` | RMUC 场地 STEP→glTF 资产管线：普查/三角化/分组/碰撞聚合 |
-| `firefly-evaluation` | 任务验收编排、进程生命周期、RRD 证据评分与报告 |
+| `firefly-evaluation` | 任务验收编排、进程生命周期与 RRD 证据评分 |
 | `firefly-workspace` | 工作区定位与文件内容指纹，仅依赖标准库 |
 
 ## 开始开发

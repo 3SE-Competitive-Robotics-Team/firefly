@@ -1,12 +1,13 @@
 """Real IPC → release mimir → indexed RRD; requires an idle workspace."""
 
-from datetime import datetime, timezone
 from pathlib import Path
 import os
 import signal
 import threading
 import time
 import ctypes
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import iceoryx2 as iox2
 import psutil
@@ -63,20 +64,60 @@ def event(port, sequence, text):
     port.loan_uninit().write_payload(message).send()
 
 
-def recording():
+def recording(*, env=None):
     binary = ROOT / "target/release/mimir"
     assert binary.is_file(), "build release mimir first"
-    path = ROOT / "logs" / f"test_mimir_{datetime.now(timezone.utc):%Y%m%dT%H%M%S%fZ}.rrd"
     ready = threading.Event()
-    process = ManagedProcess([str(binary), "--save", str(path)], cwd=ROOT,
-                             env={**os.environ, "RUST_LOG": "info"},
+    process = ManagedProcess([str(binary)], cwd=ROOT,
+                             env={**os.environ, "RUST_LOG": "info", **(env or {})},
                              on_line=lambda line: ready.set() if "mimir subscriptions ready" in line else None)
     try:
         assert ready.wait(10.), list(process.tail)
     except BaseException:
         process.stop()
         raise
-    return process, path
+    return process, process.wait_recording()
+
+
+@pytest.mark.parametrize("zone", ["Asia/Shanghai", "America/New_York"])
+def test_recording_path_uses_local_time_and_only_writes_log_rrd(zone):
+    with isolated_run(ROOT):
+        start = datetime.now(ZoneInfo(zone)).strftime("%Y%m%d_%H%M%S")
+        process, path = recording(env={"TZ": zone})
+        try:
+            end = datetime.now(ZoneInfo(zone)).strftime("%Y%m%d_%H%M%S")
+            assert path.parent.parent == ROOT / "logs"
+            assert start <= path.parent.name <= end
+            assert len(path.parent.name) == 15
+            assert path.name == "log.rrd"
+        finally:
+            assert process.stop() == 0, list(process.tail)
+        assert list(path.parent.iterdir()) == [path]
+        _, logs = read(path)
+        assert "recording complete" in logs
+
+
+def test_consecutive_recordings_preserve_existing_files():
+    with isolated_run(ROOT):
+        process, first = recording()
+        assert process.stop() == 0
+        fingerprint = digest(first)
+        process, second = recording()
+        assert process.stop() == 0
+        assert second != first
+        assert digest(first) == fingerprint
+        for path in (first, second):
+            _, logs = read(path)
+            assert "recording complete" in logs
+
+
+@pytest.mark.parametrize("argument", ["--save", "--output", "--output-dir"])
+def test_output_path_overrides_are_rejected(argument):
+    import subprocess
+    result = subprocess.run([str(ROOT / "target/release/mimir"), argument, "alternate.rrd"],
+                            cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "unknown argument" in result.stderr
 
 
 def read(path):

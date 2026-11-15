@@ -20,6 +20,9 @@ def test_disturbance_sequence_is_fail_fast(tmp_path, failed_round):
         def start(self, name, command):
             pass
 
+        def start_recording(self):
+            pass
+
         def __init__(self, *args, **kwargs):
             super().__init__(*args, sleep=lambda _: None, **kwargs)
 
@@ -62,7 +65,7 @@ def test_disturbance_sequence_is_fail_fast(tmp_path, failed_round):
             return self._run_phases(phases, applications)
 
     result, _ = disturbance.run_disturbance(
-        tmp_path / "flight", Options(hover_xy_error_m=.2), DisturbanceLimits(), HoverLimits(),
+        Options(hover_xy_error_m=.2), DisturbanceLimits(), HoverLimits(),
         mission_factory=FakeMission, hover_scorer=lambda *args, **kwargs: None,
         disturbance_scorer=lambda *args, **kwargs: None,
     )

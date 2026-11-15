@@ -22,6 +22,8 @@ class ManagedProcess:
                                         stderr=subprocess.STDOUT, text=True,
                                         encoding="utf-8", errors="replace")
         self.tail: deque[str] = deque(maxlen=tail_size)
+        self.recording: Path | None = None
+        self._recording_ready = threading.Event()
         self._reader_error: BaseException | None = None
         self.reader = threading.Thread(target=self._drain, args=(on_line,),
                                        name=f"output-{self.process.pid}", daemon=True)
@@ -39,6 +41,9 @@ class ManagedProcess:
                 for line in stream:
                     line = line.rstrip()
                     self.tail.append(line)
+                    if line.startswith("recording: "):
+                        self.recording = Path(line.removeprefix("recording: "))
+                        self._recording_ready.set()
                     if on_line is not None:
                         try:
                             on_line(line)
@@ -66,6 +71,15 @@ class ManagedProcess:
                 f"output reader failed after child exit {code}, PID={self.pid}"
             ) from self._reader_error
         return code
+
+    def wait_recording(self, timeout: float = 10.) -> Path:
+        """读取 Mimir 返回的路径；启动失败和超时保留子进程输出。"""
+        deadline = time.monotonic() + timeout
+        while not self._recording_ready.wait(.01):
+            if self.process.poll() is not None or time.monotonic() >= deadline:
+                raise RuntimeError("recorder did not return a recording path: " + " | ".join(self.tail))
+        assert self.recording is not None
+        return self.recording
 
 
 def active_processes(root: Path) -> list[int]:

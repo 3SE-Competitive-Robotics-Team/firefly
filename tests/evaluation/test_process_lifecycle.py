@@ -127,7 +127,7 @@ def test_mission_cleans_remaining_children_after_one_stop_times_out(tmp_path):
                 raise subprocess.TimeoutExpired(self.name, 15.)
             return 0
 
-    mission = Mission(tmp_path, "nominal", Options())
+    mission = Mission("nominal", Options())
     mission.processes = {name: Child(name, pid) for pid, name in
                          enumerate(("viz", "render", "extra", "sim"))}
     mission.shutdown()

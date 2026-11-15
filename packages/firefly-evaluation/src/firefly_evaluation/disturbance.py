@@ -99,7 +99,7 @@ class DisturbanceMission(Mission):
         return {name: metrics for name, (_, metrics) in checks.items()}
 
 
-def run_disturbance(directory, options, limits, hover_limits, *, workspace=None,
+def run_disturbance(options, limits, hover_limits, *, workspace=None,
                     mission_factory: type[DisturbanceMission] = DisturbanceMission,
                     hover_scorer=score_hover, disturbance_scorer=score_disturbance):
     """执行固定种子的外力序列；任何轮次失败均阻止下一次注入，返回评分与外力数组。"""
@@ -111,7 +111,7 @@ def run_disturbance(directory, options, limits, hover_limits, *, workspace=None,
         magnitude = rng.uniform(limits.min_force_n, limits.max_force_n)
         forces.append([magnitude * np.cos(angle), magnitude * np.sin(angle), 0.])
     forces = np.asarray(forces)
-    mission = mission_factory(directory, "hover_disturbance", options, workspace=workspace)
+    mission = mission_factory("hover_disturbance", options, workspace=workspace)
 
     def disturb(index, force):
         if index > 1 and mission.result["stages"][f"assess_{index - 1:02d}"]["status"] != "passed":

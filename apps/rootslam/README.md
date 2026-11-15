@@ -88,10 +88,11 @@ statistics/archive directory has its own fresh path, separate from input data.
 The startup checks resolve path aliases and validate output ownership; writers
 create new files. Existing runs remain available for comparison.
 
-Start Mimir in one terminal:
+Start Mimir in one terminal. It prints the recording path, following the
+[shared local-time naming contract](../../docs/mimir.md):
 
 ```bash
-./target/release/mimir --save logs/tumvi_room2/float64/nominal.rrd
+./target/release/mimir
 ```
 
 Run the estimator in another terminal:
@@ -102,11 +103,11 @@ RUST_LOG=info ./target/release/firefly-rootslam --config logs/tumvi_room2/float6
 
 After the estimator exits, stop Mimir with Ctrl-C so it drains and closes the
 recording. Check the exit status, RRD integrity, trajectory coverage and optimization
-result together:
+result together; substitute the directory returned by Mimir:
 
 ```bash
-uv run rerun rrd verify logs/tumvi_room2/float64/nominal.rrd
-uv run rerun logs/tumvi_room2/float64/nominal.rrd configs/firefly.rbl
+uv run rerun rrd verify 'logs/<yyyymmdd_hhmmss>/log.rrd'
+uv run rerun 'logs/<yyyymmdd_hhmmss>/log.rrd' configs/firefly.rbl
 ```
 
 The dataset pipeline feeds image and IMU producers, collects posterior states,

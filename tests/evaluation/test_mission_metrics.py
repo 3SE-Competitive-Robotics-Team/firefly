@@ -27,7 +27,7 @@ def test_command_keeps_observation_pump_running(tmp_path):
         def pump(self, guard=True):
             pump()
 
-    subject = PumpMission(tmp_path, "nominal", Options())
+    subject = PumpMission("nominal", Options())
     subject.root = tmp_path
     subject.recorder = create_autospec(Recorder, instance=True, spec_set=True)
     subject.command("fc", "hold")
@@ -133,53 +133,40 @@ def test_terminal_hold_requires_independent_truth_accuracy():
 
 @pytest.mark.parametrize("contents", ["altitude_m = [", "altitude_m = -1", "unknown = 1"],
                          ids=["invalid_toml", "invalid_threshold", "unknown_option"])
-def test_preflight_failure_returns_nonzero_and_keeps_report(tmp_path, contents):
-    import json
+def test_preflight_failure_returns_nonzero_before_creating_resources(tmp_path, contents):
     from firefly_evaluation import cli
     config = tmp_path / "invalid.toml"
     config.write_text(contents)
     resource_calls = []
     assert cli.main(["--config", str(config)], resolve_workspace=lambda _: tmp_path,
-                    check_idle=lambda _: resource_calls.append("check_idle"),
-                    collect_provenance=lambda _: resource_calls.append("provenance")) == 1
+                    check_idle=lambda _: resource_calls.append("check_idle")) == 1
     assert resource_calls == []
-    reports = list((tmp_path / "logs/acceptance").glob("*/report.json"))
-    assert len(reports) == 1
-    report = json.loads(reports[0].read_text())
-    assert report["status"] == "failed" and report["cases"] == []
-    assert report["error"] and reports[0].with_suffix(".html").is_file()
+    assert not (tmp_path / "logs").exists()
 
 
-def test_repeated_failures_keep_four_distinct_recordings(tmp_path):
-    import json
+def test_repeated_failures_run_all_attempts_without_reports(tmp_path):
     from firefly_evaluation import cli
+    cases = []
 
     class FailedMission:
-        def __init__(self, directory, name, options, *, workspace):
-            self.recording = directory / f"{name}.rrd"
+        def __init__(self, name, options, *, workspace):
             self.name = name
 
         def run(self):
-            self.recording.write_bytes(b"unit test evidence placeholder")
-            return {"case": self.name, "status": "failed", "recording": str(self.recording),
-                    "remaining_pids": [], "stages": {"tracking": {"status": "failed"}}}
+            result = {"case": self.name, "status": "failed", "remaining_pids": [],
+                      "stages": {"tracking": {"status": "failed"}}}
+            cases.append(result)
+            return result
 
     config = tmp_path / "acceptance.toml"
     config.write_text("")
     assert cli.main(["--config", str(config), "--case", "nominal", "--repeat", "4"],
                     resolve_workspace=lambda _: tmp_path, check_idle=lambda _: None,
-                    collect_provenance=lambda _: {}, mission_factory=FailedMission,
+                    check_assets=lambda _: None, mission_factory=FailedMission,
                     score_case=lambda case, options: case) == 1
-    report_path, = (tmp_path / "logs/acceptance").glob("*/report.json")
-    report = json.loads(report_path.read_text())
-    assert report["status"] == "failed"
-    assert [case["attempt"] for case in report["cases"]] == [1, 2, 3, 4]
-    assert len({case["recording"] for case in report["cases"]}) == 4
-    html = report_path.with_suffix(".html").read_text()
-    for attempt in range(1, 5):
-        relative = f"attempt_{attempt:02d}/nominal.rrd"
-        assert (report_path.parent / relative).is_file()
-        assert f"href='{relative}'" in html
+    assert len(cases) == 4
+    assert all(case["case"] == "nominal" and case["status"] == "failed" for case in cases)
+    assert not (tmp_path / "logs").exists()
 
 
 def test_roundtrip_distance_summary_does_not_override_failed_acceptance():
@@ -233,7 +220,7 @@ def test_map_stage_uses_raw_odometry_without_map_navigation(tmp_path):
         def wait(self, predicate, **kwargs):
             assert predicate(), "not ready"
 
-    mission = MapMission(tmp_path, "nominal", Options())
+    mission = MapMission("nominal", Options())
     mission.latest["odom"] = (2., None, None, None, True)
     mission.latest["reference"] = None
     result = mission.local_map_ready()
@@ -255,7 +242,7 @@ def test_default_map_stage_uses_running_visual_frontend(tmp_path):
         def wait(self, predicate, **kwargs):
             assert predicate(), "not ready"
 
-    mission = MapMission(tmp_path, "nominal", Options())
+    mission = MapMission("nominal", Options())
     mission.latest["odom"] = (2., None, None, None, True)
     mission.latest["reference"] = None
     result = mission.local_map_ready()
@@ -276,7 +263,7 @@ def test_online_frontend_runs_during_takeoff_and_initial_hover(tmp_path):
             assert "lightglue" not in applications
             return self.result
 
-    PhaseMission(tmp_path, "nominal", Options()).run()
+    PhaseMission("nominal", Options()).run()
 
 
 def test_session_scoring_uses_only_initial_truth_gauge_and_preserves_drift():

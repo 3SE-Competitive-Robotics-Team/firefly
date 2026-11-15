@@ -20,7 +20,8 @@ uv run --package firefly-cad firefly-cad-build <场地.stp> --scene <赛季>@<�
 Rust 应用统一用 `cargo xtask release` 构建；物理资产检查、离线图像采集、
 建库和任务验收各自使用 [开发指南](../../docs/development.md#assets) 中的入口。
 任务、碰撞和故障验收由 `firefly-evaluation` 包的 `uv run firefly-evaluate` 执行，
-报告保存在 `logs/acceptance/<运行ID>/`。几何、建库、飞行和在线定位各自保留验收结果。
+运行证据遵循 [Mimir 录制规则](../../docs/mimir.md)，保存为本地时间的
+`logs/yyyymmdd_hhmmss/log.rrd`。几何、建库、飞行和在线定位各自验收。
 
 ## 产物
 
@@ -35,7 +36,7 @@ Rust 应用统一用 `cargo xtask release` 构建；物理资产检查、离线�
 `derived/stages/` 保存阶段输入与产物内容 hash；二者都匹配才复用。
 离线采集也检查输入及逐帧内容 hash；损坏或未完成的采集保留，重试时通过 `--frames-dir` 指定新目录。
 总清单只有 `status=passed` 才代表本次几何验收完成。图像采集与飞行记录分别放在
-独立资产目录和 `logs/*.rrd`；RRD 承载原始传感器证据。
+独立资产目录和 Mimir 的时间目录；RRD 承载原始传感器证据。
 
 ## 算法约束
 

@@ -2,7 +2,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::BufWriter;
-use std::path::Path;
 
 use firefly_error::Result;
 use firefly_pubsub::viz::{VizMessage, VoxelMessage, kind};
@@ -89,19 +88,28 @@ pub struct Archive {
 }
 
 impl Archive {
-    /// Create a new file without overwriting existing evidence.
+    /// Create `logs/<local YYYYMMDD_HHMMSS>/log.rrd` under the installation root.
     /// # Errors
-    /// Invalid budgets, an existing path, or encoder/file initialization failure.
-    pub fn create(path: &Path, options: Options) -> Result<Self> {
+    /// Invalid budgets or directory/encoder/file initialization failure.
+    pub fn create(options: Options) -> Result<Self> {
         options.validate()?;
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| failure("create recording directory", e))?;
-        }
+        let logs = firefly_config::paths::root().join("logs");
+        std::fs::create_dir_all(&logs).map_err(|e| failure("create logs directory", e))?;
+        let directory = loop {
+            let directory = logs.join(recording_stamp(&jiff::Zoned::now()));
+            match std::fs::create_dir(&directory) {
+                Ok(()) => break directory,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(error) => return Err(failure("create recording directory", error)),
+            }
+        };
+        let path = directory.join("log.rrd");
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(path)
+            .open(&path)
             .map_err(|e| failure("create recording", e))?;
         let mut encoder = Encoder::new_eager(
             re_build_info::CrateVersion::LOCAL,
@@ -159,6 +167,7 @@ impl Archive {
             None,
             &rr::TextDocument::new(format!("{:?}", archive.options)),
         )?;
+        println!("recording: {}", path.display());
         Ok(archive)
     }
 
@@ -721,6 +730,10 @@ impl Archive {
     }
 }
 
+fn recording_stamp(now: &jiff::Zoned) -> String {
+    now.strftime("%Y%m%d_%H%M%S").to_string()
+}
+
 fn transform(xyz: [f64; 3], quat: [f64; 4]) -> Result<rr::Transform3D> {
     if xyz.iter().chain(&quat).any(|v| !v.is_finite())
         || (quat.iter().map(|v| v * v).sum::<f64>() - 1.).abs() > 1e-5
@@ -742,6 +755,17 @@ pub(crate) fn wall_time_ns() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_stamp_uses_local_date_and_seconds() {
+        let instant: jiff::Timestamp = "2026-11-14T16:05:06Z".parse().unwrap();
+        let local = instant.in_tz("Asia/Shanghai").unwrap();
+        assert_eq!(recording_stamp(&local), "20261115_000506");
+        assert_eq!(
+            recording_stamp(&instant.in_tz("America/New_York").unwrap()),
+            "20261114_110506"
+        );
+    }
 
     #[test]
     fn rejected_chunk_does_not_advance_or_mutate_the_pending_update() {

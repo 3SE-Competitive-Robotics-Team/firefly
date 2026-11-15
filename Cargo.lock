@@ -5880,6 +5880,7 @@ dependencies = [
  "firefly-observability",
  "firefly-pubsub",
  "iceoryx2",
+ "jiff",
  "log",
  "nalgebra",
  "re_build_info",

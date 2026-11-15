@@ -1,7 +1,6 @@
 //! One IPC owner copies loans once into a bounded writer channel.
 use std::collections::BTreeMap;
 use std::mem::size_of;
-use std::path::Path;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -301,8 +300,8 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
 /// Run the recorder until stopped, then drain the owned queue and close the RRD.
 /// # Errors
 /// Reports IPC, data-contract, queue-budget, writer-thread and disk failures after cleanup.
-pub fn run(path: &Path, options: &Options, stop: &Arc<AtomicBool>) -> Result<()> {
-    let mut archive = Archive::create(path, options.clone())?;
+pub fn run(options: &Options, stop: &Arc<AtomicBool>) -> Result<()> {
+    let mut archive = Archive::create(options.clone())?;
     archive.log("mimir", -1., wall_time_ns(), "recording started", "INFO")?;
     let (tx, rx) = mpsc::sync_channel(options.queue_messages);
     let bytes = Arc::new(AtomicUsize::new(0));

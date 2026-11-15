@@ -6,7 +6,6 @@ GroundTruth 供 render 合成图像及 viz 对照记录；屏蔽 PlantState，�
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import os
 from pathlib import Path
 import subprocess
@@ -46,8 +45,7 @@ def _sensor_startup() -> None:
     for name in ("firefly-rootslam", "fc", "render", "mimir"):
         if not (ROOT / "target" / "release" / name).is_file():
             raise RuntimeError(f"missing release binary: {name}")
-    output = ROOT / "logs" / f"vio_sensor_startup_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.rrd"
-    output.parent.mkdir(exist_ok=True)
+    output = None
     env = os.environ.copy()
     env.update(RUST_LOG="info")
     processes: dict[str, ManagedProcess] = {}
@@ -61,7 +59,8 @@ def _sensor_startup() -> None:
                 raise RuntimeError(f"{name} exited ({child.process.returncode}):\n" + "\n".join(child.tail))
 
     try:
-        start("viz", [str(ROOT / "target/release/mimir"), "--save", str(output)])
+        start("viz", [str(ROOT / "target/release/mimir")])
+        output = processes["viz"].wait_recording()
         time.sleep(2)
         check_alive()
         start("render", [str(ROOT / "target/release/render")])
@@ -148,6 +147,7 @@ main(["--no-trace"], publish_plant_state=False)
         print(f"recording: {output}")
         if failures:
             raise RuntimeError("; ".join(failures))
+    assert output is not None
     _verify_recording(output)
 
 

@@ -258,6 +258,9 @@ and depth. Global map optimization is evaluated through the dataset observations
 
 ## Recorder architecture and operation
 
+All production, script, CLI, test and dataset callers follow the [Mimir recording contract](mimir.md).
+Mimir alone creates `logs/<local YYYYMMDD_HHMMSS>/log.rrd` and returns its absolute path on stdout.
+
 Mimir owns IPC subscriptions in one receive thread, copies each loan once into a bounded channel,
 then releases the loan. A single writer groups scalar and typed observation rows by entity into
 columnar Rerun chunks. Typed rows use Rerun's `PendingRow::many_into_chunks` to group images, poses,
@@ -291,8 +294,8 @@ on a new recording. Use the workspace viewer to match the recording SDK version:
 
 ```bash
 cargo build --release -p mimir
-./target/release/mimir --save logs/run.rrd
-uv run rerun logs/run.rrd configs/firefly.rbl
+./target/release/mimir
+uv run rerun 'logs/<yyyymmdd_hhmmss>/log.rrd' configs/firefly.rbl
 ```
 
 The main area shows the map/trajectories and recorded stereo images. Small independent numeric cards
@@ -334,7 +337,8 @@ where disk access remains possible. Closing uses an independent control path.
 RRD records lifecycle and high-water statistics in `logs/mimir`. Index memory grows with chunk count;
 it is separate from the bounded pending-data budget.
 
-Raw runtime evidence belongs in `logs/*.rrd`; JSON/HTML hold configuration, fingerprints and summaries.
+Runtime archives contain only `log.rrd`; acceptance scores use the recorded evidence and return
+through the terminal and exit status.
 CLI help, command results and exported artifacts may use stdout. Stderr supplies immediate diagnostics;
 RRD retains archived evidence. CompactReporter writes span summaries to stderr, and RRD stage diagnostics
 provide archived timing.

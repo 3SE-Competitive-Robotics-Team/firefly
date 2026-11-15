@@ -73,18 +73,11 @@ def test_asset_fingerprint_uses_selected_scene_and_detects_geometry_changes(tmp_
 
 
 def test_acceptance_reads_selected_geometry_manifest_and_checks_its_scene(tmp_path):
-    from firefly_evaluation.cli import provenance
+    from firefly_evaluation.cli import validate_assets
 
     workspace_at(tmp_path)
-    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
-    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=Test", "-c",
-                    "user.email=test@example.invalid", "commit", "--quiet", "--allow-empty", "-m", "fixture"], check=True)
     scene = parse_scene("rmuc2027@1.0.0")
     (tmp_path / "configs/scene.toml").write_text(f'scene = "{scene.name}"\n')
-    binaries = tmp_path / "target/release"
-    binaries.mkdir(parents=True)
-    for name in ["firefly-rootslam", "render", "fc", "ffctl", "planner", "mimir"]:
-        (binaries / name).write_bytes(b"fingerprint fixture")
     directory = tmp_path / scene.dir
     directory.mkdir(parents=True)
     field = directory / "field.glb"
@@ -93,12 +86,10 @@ def test_acceptance_reads_selected_geometry_manifest_and_checks_its_scene(tmp_pa
                 "artifacts": {str(field.relative_to(tmp_path)): digest(field)}}
     path = directory / "asset_manifest.json"
     path.write_text(json.dumps(manifest))
-    result = provenance(tmp_path)
-    assert result["assets"] == manifest
-    assert result["asset_manifest_sha256"] == digest(path)
+    validate_assets(tmp_path)
     path.write_text(json.dumps(manifest | {"scene": "rmuc2028@1.0.0"}))
     with pytest.raises(ValueError, match="another scene"):
-        provenance(tmp_path)
+        validate_assets(tmp_path)
 
 
 def test_same_stamp_required():

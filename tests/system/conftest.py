@@ -1,8 +1,4 @@
 """真实飞行测试的运行条件、证据目录和进程退出契约。"""
-from dataclasses import asdict
-from datetime import datetime, timezone
-import hashlib
-import json
 import os
 from pathlib import Path
 import subprocess
@@ -11,7 +7,6 @@ import sys
 import pytest
 
 from firefly_evaluation.process_lifecycle import require_idle
-from firefly_workspace import digest
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -73,46 +68,3 @@ def flight_environment(request):
         yield
     finally:
         require_idle(ROOT)
-
-
-@pytest.fixture
-def flight_directory(request, flight_environment):
-    """每次用例独占的 logs 路径；由报告写入方创建目录。"""
-    name = request.node.name.replace("[", "_").replace("]", "")
-    return ROOT / "logs" / f"{name}_{datetime.now(timezone.utc):%Y%m%dT%H%M%S%fZ}"
-
-
-@pytest.fixture
-def flight_report(flight_directory):
-    """运行前冻结指纹，退出后保存评分并使失败成为 pytest 失败。"""
-    names = subprocess.check_output(
-        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT,
-    ).decode().split("\0")
-    files = {ROOT / name for name in names if name and (ROOT / name).is_file()}
-    vio_process = "firefly-rootslam"
-    files.update(
-        ROOT / f"target/release/{name}"
-        for name in ("render", vio_process, "fc", "ffctl", "mimir")
-    )
-    from firefly_mujoco import load_scene_name, resolve_scene
-
-    scene = resolve_scene(load_scene_name())
-    files.update((scene.visual, scene.collision))
-    hashes = {}
-    for path in sorted(files):
-        hashes[str(path.relative_to(ROOT))] = digest(path)
-    provenance = {
-        "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-        "working_tree_diff_sha256": hashlib.sha256(subprocess.check_output(["git", "diff", "HEAD"], cwd=ROOT)).hexdigest(),
-        "files_sha256": hashes,
-    }
-
-    def finish(result, options, **metadata):
-        result["provenance"] = {**provenance, "options": asdict(options), **metadata}
-        path = flight_directory / "report.json"
-        path.write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
-        if result.get("interrupted"):
-            raise KeyboardInterrupt
-        assert result["status"] == "passed", f"see {path}"
-
-    return finish

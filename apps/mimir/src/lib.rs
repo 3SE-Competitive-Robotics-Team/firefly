@@ -1,9 +1,9 @@
 //! Native IPC recording with bounded ingress and synchronous, columnar RRD writes.
-pub mod archive;
+mod archive;
 pub mod config;
 mod frames;
 pub mod ingress;
-pub mod schema;
+mod schema;
 mod status;
 
 use firefly_error::{Error, ErrorKind};

@@ -31,7 +31,7 @@ def test_initialization_waits_for_fresh_arming_check(tmp_path, arming):
                     "future": (self.t + .1, True, now),
                 }[arming]
 
-    mission = StartupMission(tmp_path, "startup", Options(), sleep=lambda _: None)
+    mission = StartupMission("startup", Options(), sleep=lambda _: None)
     metrics = mission.initialized()
     assert mission.pumps == 2
     assert metrics["ready_sim_s"] == 2.2

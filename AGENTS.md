@@ -13,6 +13,7 @@
 
 ## 按任务必读
 
+- 运行日志与录制产物统一遵循 [Mimir 录制规则](docs/mimir.md)：由 Mimir 创建本地时间的 `logs/yyyymmdd_hhmmss/log.rrd`，所有调用方使用同一入口。
 - 修改、构建、运行或验证项目：阅读并遵守 [开发指南](docs/development.md) 的相关章节。
 - 修改系统职责、坐标或算法：同时阅读 [系统架构](docs/architecture.md)。
 - 新增、修改、删除 topic、日志、trace、诊断或 RRD 实体：先读 [可观测性](docs/observability.md)，完成登记、生产开关、预算与完整性验证；超载修复以生产和消费成本为依据，保持已登记数据及队列预算。

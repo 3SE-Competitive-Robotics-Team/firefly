@@ -1,81 +1,23 @@
-"""运行真实 RMUC 任务与失联故障验收；RRD 原始证据 + 内容指纹 + JSON/HTML 报告。"""
+"""运行真实 RMUC 任务与失联故障验收；原始证据统一由 Mimir 写入 log.rrd。"""
 import argparse
-from dataclasses import asdict
-from datetime import datetime, timezone
-from html import escape
-from importlib.metadata import version
 import json
 import logging
-import os
 from pathlib import Path
-import platform
-import subprocess
 import sys
-import uuid
 
 from .mission import Mission, Options
 from .process_lifecycle import require_idle
 from .mission_metrics import score
-from .mission_sim import CONTACT_POLICY
 from firefly_mujoco import load_scene_name
 from firefly_workspace import digest, parse_scene, startup, workspace_root
 
 log = logging.getLogger("acceptance")
 
 
-def save_report(directory, report):
-    categories = {
-        "初始化": ["initialization"], "起飞": ["takeoff"], "悬停": ["hover", "hover_accuracy", "terminal_hold", "terminal_hold_accuracy"],
-        "降落": ["landing", "landing_accuracy"],
-        "路径跟踪": ["tracking", "tracking_error", "waypoint_accuracy"], "定位误差": ["vio_accuracy", "map_accuracy"],
-        "碰撞": ["collision"], "失联安全响应": ["reference_loss", "failure_hold", "failure_hold_accuracy", "estimator_fallback", "degraded_support", "failure_terminal"],
-        "进程退出": ["shutdown"],
-    }
-    summary = {}
-    for label, names in categories.items():
-        evidence = [{"case": case["case"], "attempt": case.get("attempt", 1), "stage": name, "status": case["stages"][name]["status"]}
-                    for case in report["cases"] for name in names if name in case["stages"]]
-        statuses = [row["status"] for row in evidence]
-        status = ("failed" if "failed" in statuses else "passed"
-                  if statuses and all(s == "passed" for s in statuses) else "incomplete")
-        summary[label] = {"status": status, "evidence": evidence}
-    report["summary"] = summary
-    payload = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False)
-    temporary = directory / "report.json.partial"
-    temporary.write_text(payload + "\n")
-    temporary.replace(directory / "report.json")
-    rows = []
-    for case in report["cases"]:
-        rows.append(f"<h2>{escape(case['case'])} / attempt {case.get('attempt', 1)}: {escape(case['status'])}</h2><p><a href='{escape(str(Path(case['recording']).relative_to(directory)))}'>原始 RRD</a></p><pre>{escape(case.get('error', ''))} {escape(case.get('evidence_error', ''))}</pre><table><tr><th>验收项</th><th>状态</th><th>证据 / 原因</th></tr>")
-        for name, stage in case["stages"].items():
-            details = json.dumps({k: v for k, v in stage.items() if k != "status"}, ensure_ascii=False, indent=2)
-            rows.append(f"<tr><td>{escape(name)}</td><td class='{escape(stage['status'])}'>{escape(stage['status'])}</td><td><pre>{escape(details)}</pre></td></tr>")
-        rows.append("</table>")
-        if "mission_summary" in case:
-            rows.append("<h3>往返任务证据</h3><pre>" + escape(json.dumps(case["mission_summary"], ensure_ascii=False, indent=2)) + "</pre>")
-    document = ("<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>RMUC 自动任务验收</title>"
-                "<style>body{font:16px system-ui;max-width:1200px;margin:40px auto;padding:0 24px;color:#202a34}table{border-collapse:collapse;width:100%}td,th{border:1px solid #d2d8de;padding:10px;text-align:left;vertical-align:top}pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font-size:13px}.passed{color:#176a37}.failed{color:#b02020}.blocked{color:#8a6000}h2{margin-top:36px}</style>"
-                f"<h1>RMUC 自动任务验收：{escape(report['status'])}</h1><p>运行 ID：{escape(report['run_id'])}</p>"
-                f"<p>运行范围：{escape(report.get('scope', ''))}</p>"
-                "<p>真实 sim / render / VIO / FC；路径任务另启 planner 与独立轨迹输出进程。真值仅供评分。局部 VIO 误差允许固定尺度航向和平移对齐，地图定位与路径跟踪不对齐。正常起降接触与碰撞分开统计。</p>"
-                "<p>RootSLAM 只提供 VIO；规划器使用机体里程计、深度和相机外参维护局部地图。会话地图评分只用首次真值定义固定坐标变换，不拟合估计轨迹，也不反馈在线系统。操作系统与 GPU 调度不是确定性的，单次通过不代表可靠性概率。</p>"
-                "<p><a href='report.json'>完整机器报告（配置、源码、二进制、资产及 RRD 的 SHA-256）</a></p>"
-                + "<table><tr><th>汇总项</th><th>结果</th></tr>" + "".join(
-                    f"<tr><td>{escape(label)}</td><td class='{value['status']}'>{value['status']}</td></tr>" for label, value in summary.items()) + "</table>"
-                + "".join(rows) + f"<h2>运行前固定的阈值</h2><pre>{escape(json.dumps(report.get('options', {}), ensure_ascii=False, indent=2))}</pre>"
-                + f"<h2>执行错误</h2><pre>{escape(report.get('error', '无'))}</pre></html>")
-    (directory / "report.html").write_text(document)
-
-
-def provenance(root):
-    files = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=root).decode().split("\0")
-    source = {name: digest(root / name) for name in files if name and (root / name).is_file()}
-    names = ["firefly-rootslam", "render", "fc", "ffctl", "planner", "mimir"]
-    binaries = {name: digest(root / "target/release" / name) for name in names}
-    models = {}
+def validate_assets(root):
+    """校验当前场景的验收清单及资产内容。"""
     scene = parse_scene(load_scene_name(root / "configs/scene.toml"))
-    manifest_path = root / scene.dir / "asset_manifest.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads((root / scene.dir / "asset_manifest.json").read_text())
     if manifest.get("status") != "passed":
         raise ValueError("geometry has not passed acceptance")
     if manifest.get("scene") != scene.name:
@@ -85,16 +27,6 @@ def provenance(root):
             continue
         if digest(root / path) != expected:
             raise ValueError(f"asset content changed: {path}")
-    visual = None
-    compatibility = {"status": "not_used_empty_map"}
-    return {"visual_map": visual, "visual_map_compatibility": compatibility, "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
-            "git_status": subprocess.check_output(["git", "status", "--short"], cwd=root, text=True),
-            "source_sha256": source, "binary_sha256": binaries, "model_sha256": models,
-            "configs": {str(p.relative_to(root)): p.read_text() for p in (root / "configs").glob("*.toml")},
-            "assets": manifest, "asset_manifest_sha256": digest(manifest_path),
-            "platform": platform.platform(), "python": sys.version,
-            "display_environment": {key: os.environ.get(key) for key in ["DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "WGPU_BACKEND"]},
-            "dependencies": {name: version(name) for name in ["numpy", "mujoco", "iceoryx2", "rerun-sdk"]}}
 
 
 def decode_options(values: dict) -> Options:
@@ -105,13 +37,12 @@ def decode_options(values: dict) -> Options:
 
 
 def main(argv=None, *, resolve_workspace=workspace_root, check_idle=require_idle,
-         collect_provenance=provenance, mission_factory=Mission, score_case=score):
+         check_assets=validate_assets, mission_factory=Mission, score_case=score):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path, help="firefly 工作区目录；默认从当前目录向上查找")
     parser.add_argument("--config", type=Path)
     parser.add_argument("--case", choices=["all", "nominal", "reference_loss", "estimator_loss"], default="all")
     parser.add_argument("--repeat", type=int, default=1, help="每种任务独立启动次数；全部使用固定配置")
-    parser.add_argument("--output-dir", type=Path, help="logs/ 下不存在的报告目录；默认使用唯一运行 ID")
     args = parser.parse_args(argv)
     try:
         root = resolve_workspace(args.workspace)
@@ -121,56 +52,33 @@ def main(argv=None, *, resolve_workspace=workspace_root, check_idle=require_idle
         args.config = root / "configs/acceptance.toml"
     if not 1 <= args.repeat <= 100:
         parser.error("--repeat must be in 1..100")
-    startup_error = None
+    passed = True
     try:
         options = startup(args.config, decode_options)
-    except (OSError, ValueError, TypeError) as error:
-        startup_error = error
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
-    directory = args.output_dir.resolve() if args.output_dir else root / "logs/acceptance" / run_id
-    if not directory.is_relative_to(root / "logs"):
-        parser.error("acceptance evidence must be stored under repository logs/")
-    directory.mkdir(parents=True)
-    report = {"schema_version": 2, "mission_decisions": "fresh estimated state; independent ground-truth scoring", "run_id": run_id, "status": "running", "cases": [],
-              "repeat": args.repeat, "scope": "RMUC mission; VIO odometry + depth/extrinsics + local planning; simulator geometry is evaluation infrastructure"}
-    try:
-        if startup_error is not None:
-            raise startup_error
         check_idle(root)
-        report["options"] = asdict(options)
-        report["contact_policy"] = CONTACT_POLICY
-        report["provenance"] = collect_provenance(root)
+        check_assets(root)
         cases = ["nominal", "reference_loss", "estimator_loss"] if args.case == "all" else [args.case]
-        save_report(directory, report)
         for attempt, name in [(attempt, name) for attempt in range(1, args.repeat + 1) for name in cases]:
-            case_directory = directory if args.repeat == 1 else directory / f"attempt_{attempt:02d}"
-            case_directory.mkdir(exist_ok=True)
-            log.info("开始任务验收 %s，证据目录 %s", name, directory)
-            mission = mission_factory(case_directory, name, options, workspace=root)
+            log.info("开始任务验收 %s，轮次 %s", name, attempt)
+            mission = mission_factory(name, options, workspace=root)
             case = mission.run()
-            case["attempt"] = attempt
             try:
-                case["recording_sha256"] = digest(Path(case["recording"]))
                 score_case(case, options)
             except Exception as error:
                 case["status"] = "failed"
                 case["evidence_error"] = str(error)
-            report["cases"].append(case)
-            save_report(directory, report)
-            log.info("%s: %s %s", name, case["status"], case.get("error", ""))
+            passed &= case["status"] == "passed"
+            log.info("%s: %s recording=%s error=%s evidence_error=%s", name, case["status"],
+                     case.get("recording"), case.get("error", ""), case.get("evidence_error", ""))
             if case["remaining_pids"]:
                 raise RuntimeError(f"processes did not exit: {case['remaining_pids']}")
             if case.get("interrupted"):
                 raise KeyboardInterrupt("acceptance interrupted")
             del mission
-        report["status"] = "passed" if all(case["status"] == "passed" for case in report["cases"]) else "failed"
     except BaseException as error:
-        report.update(status="failed", error=str(error))
         log.error("验收中断：%s", error)
-    finally:
-        save_report(directory, report)
-        log.info("可追溯报告：%s", directory / "report.html")
-    return 0 if report["status"] == "passed" else 1
+        return 1
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@
 - 生命周期由拥有资源的类型维护：用具名状态表达互斥阶段，转换函数检查前置条件，
   完成、取消、失败及清理分别返回明确结果。测试覆盖正常转换、重复事件和退出路径。
 - 可复现运行固定源码、二进制、配置、输入与标定指纹，为每轮选择新的产物路径。
-  运行诊断归 RRD，配置、指纹和评分摘要归 `logs/` 的 JSON/HTML。
+  运行日志与原始验收证据统一归 [Mimir 的 `log.rrd`](mimir.md)，评分通过终端与退出码返回。
 - 编译、类型检查、单测、真实 IPC、数据集与飞行按各自原定门槛验证，分别报告通过、
   未运行、跳过和失败。
 
@@ -115,7 +115,7 @@ RootSLAM 的 `firefly-calibration`、`firefly-basalt`、`firefly-rootslam-mappin
 分别在终端启动，记录进程最先启动、最后退出：
 
 ```bash
-./target/release/mimir --save logs/rmuc_run.rrd
+./target/release/mimir
 uv run firefly-sim
 cargo run --release -p render
 cargo run --release -p firefly-rootslam
@@ -314,8 +314,8 @@ HIL 亲和性约束应用线程，内核中断、系统服务和 supervisor 仍�
   完成标记与落盘；ADB 刚枚举时发起的新会话会等待上一轮恢复完成。
 
 `scripts/hil_hover.py` 复用系统任务的起飞、20 秒持续悬停、落地与姿态评分，
-输出新的 `logs/test_hil_hover_*/hil_hover.rrd` 和 `report.json`；
-报告包含源码、配置和两端二进制指纹。真值只用于主机评分。
+由 Mimir 输出新的 `logs/yyyymmdd_hhmmss/log.rrd`，目录使用系统本地时间；
+真值只用于主机评分，评分结果通过终端和退出码返回。
 `scripts/hil_hover_monitor.py` 可独立查看状态，不发送控制命令。
 链路就绪、悬停功能、精度和实时性分别报告，阈值沿用系统验收定义。
 
@@ -391,10 +391,10 @@ uv run --all-packages python scripts/build_vision_map.py <通过内容校验的�
 `tests/system` 的 session fixture 先执行 `cargo xtask release`，再启动真实进程。
 构建并行度使用 Cargo 默认值或 `CARGO_BUILD_JOBS`，Python 依赖通过 `uv sync` 安装。
 
-`packages/firefly-evaluation` 提供任务编排、进程管理、物理观测、RRD 评分与报告。
+`packages/firefly-evaluation` 提供任务编排、进程管理、物理观测与 RRD 评分。
 CLI 和系统测试都通过 uv workspace 导入该包；`tests/` 仅保留测试和 pytest fixtures。
 包从当前目录向上定位工作区，CLI 可用 `--workspace` 指定目录。
-纯评分、报告与进程管理单元测试：`uv run pytest tests/evaluation -q`。
+纯评分与进程管理单元测试：`uv run pytest tests/evaluation -q`。
 
 ```bash
 cargo fmt --all --check
@@ -486,7 +486,7 @@ uv run pytest tests/system/test_roundtrip.py -q
   分别验证初始化、真实到点、跟踪、定位、降落、碰撞和退出；在线回环使用独立验收。
 
 任务配置和门槛由 `firefly_evaluation` 的 `mission.Options`、`hover_metrics.HoverLimits`、
-`disturbance_metrics.DisturbanceLimits` 及 `configs/acceptance*.toml` 维护，运行前固定并存入报告。
+`disturbance_metrics.DisturbanceLimits` 及 `configs/acceptance*.toml` 维护，运行前固定。原始阶段事件与观测保存于 RRD。
 新增门控须以固定配置独立启动三次、全部通过才建立基线，保留每次失败。
 
 姿态融合、初始化、坐标、视觉前端或仿真传感器改动后，必须运行 `imu_hover`；
@@ -509,10 +509,11 @@ uv run firefly-evaluate --case nominal --config configs/acceptance_22m.toml
 正常阶段流转使用新鲜估计状态和 FC 模式；真值用于独立评分及碰撞/越界中止。
 局部 VIO 采用固定尺度的航向/平移对齐，地图定位与参考跟踪直接使用各自坐标契约评分。
 会话地图评分以首个真值样本确定固定换基，原始数据保留在独立评估链路。
-完整任务报告逐项列出覆盖、断流、完成状态、碰撞、重置和退出清理结果。
+任务评分逐项检查覆盖、断流、完成状态、碰撞、重置和退出清理结果。
 
-证据落 `logs/`：RRD 保存原始观测/事件，JSON/HTML 保存配置、源码/二进制/资产指纹、
-阶段、实际指标与退出码。依赖失败的阶段标 blocked，未执行阶段单列，所有原始证据保留。
+运行产物遵循 [Mimir 录制规则](mimir.md)，统一保存到本地时间的
+`logs/yyyymmdd_hhmmss/log.rrd`。依赖失败的阶段标 blocked，未执行阶段单列，
+原始观测和阶段事件保留在 RRD；评分通过终端和退出码返回。
 
 ### 可选资产检查
 
@@ -522,7 +523,7 @@ cargo test --release -p firefly-planner --test rmuc_asset -- --ignored
 cargo test --release -p firefly-planner rmuc_22m_initial_trajectory_is_executable -- --ignored
 ```
 
-库图独立视角验收先启动 `./target/release/mimir --save logs/map_validation.rrd`，再执行：
+库图独立视角验收先启动 `./target/release/mimir`，再执行：
 
 ```bash
 RUST_LOG=info FIREFLY_QUERY_MAP=<独立查询.ffvmap> FIREFLY_QUERY_COUNT=20 \

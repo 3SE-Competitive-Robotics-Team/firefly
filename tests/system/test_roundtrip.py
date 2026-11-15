@@ -7,10 +7,9 @@ from firefly_evaluation.cli import main
 from firefly_workspace import workspace_root
 
 
-def test_roundtrip_22m(flight_directory):
+def test_roundtrip_22m(flight_environment):
     code = main([
         "--case", "nominal",
         "--config", str(workspace_root() / "configs/acceptance_22m.toml"),
-        "--output-dir", str(flight_directory),
     ])
-    assert code == 0, f"see {flight_directory / 'report.html'}"
+    assert code == 0, "inspect the Mimir recording path in the captured output"

@@ -3,8 +3,6 @@
 uv run pytest tests/system/test_imu_flight.py -q -k imu_hover
 需要图形会话、RMUC 资产和 release render/fc/ffctl 与 `firefly-rootslam`。运行前须停止其他闭环进程。
 """
-from dataclasses import asdict
-
 import pytest
 
 from firefly_evaluation.mission import Mission, Options
@@ -12,12 +10,10 @@ from firefly_evaluation.hover_metrics import HoverLimits, score_hover
 
 
 @pytest.mark.parametrize("case", ["imu_landing", "imu_vio_loss", "imu_hover"])
-def test_imu_flight(case, flight_directory, flight_report):
-    directory = flight_directory
-    directory.mkdir(parents=True)
+def test_imu_flight(case, flight_environment):
     options = Options()
     options.validate()
-    mission = Mission(directory, case, options)
+    mission = Mission(case, options)
     phases = [("initialization", mission.initialized), ("takeoff", mission.takeoff), ("hover", mission.hover)]
     limits = HoverLimits()
     if case == "imu_hover":
@@ -35,4 +31,6 @@ def test_imu_flight(case, flight_directory, flight_report):
         score_hover(result, options, limits)
     if case == "imu_vio_loss":
         result["capability_limit"] = "Attitude support only; no guaranteed position hold, altitude hold or landing."
-    flight_report(result, options, **({"hover_limits": asdict(limits)} if case == "imu_hover" else {}))
+    if result.get("interrupted"):
+        raise KeyboardInterrupt
+    assert result["status"] == "passed", result

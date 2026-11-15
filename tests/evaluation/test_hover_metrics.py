@@ -124,7 +124,7 @@ def test_landing_observes_fixed_window_without_truth(tmp_path):
                 self.t = 15.
             assert predicate()
 
-    mission = LandingMission(tmp_path, "imu_hover", Options())
+    mission = LandingMission("imu_hover", Options())
     mission.t, mission.mode = 10., 5
     metrics = mission.landing()
     assert metrics["disarmed_sim_s"] == 13.

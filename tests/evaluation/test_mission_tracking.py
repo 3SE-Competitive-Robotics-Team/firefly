@@ -9,8 +9,8 @@ from firefly_evaluation.mission import Mission, MissionFailure, Options
 from firefly_evaluation.mission_io import Recorder
 
 
-def test_completed_phase_cannot_overwrite_evidence(tmp_path):
-    mission = Mission(tmp_path, "nominal", Options())
+def test_completed_phase_cannot_overwrite_evidence():
+    mission = Mission("nominal", Options())
     mission.recorder = create_autospec(Recorder, instance=True, spec_set=True)
     mission.result["stages"]["hover"] = {"status": "blocked"}
     mission.phase("hover", lambda: {"height": 1.})
@@ -20,8 +20,8 @@ def test_completed_phase_cannot_overwrite_evidence(tmp_path):
     assert mission.result["stages"]["hover"] == previous
 
 
-def test_phase_start_failure_has_terminal_evidence(tmp_path):
-    mission = Mission(tmp_path, "nominal", Options())
+def test_phase_start_failure_has_terminal_evidence():
+    mission = Mission("nominal", Options())
     mission.recorder = create_autospec(Recorder, instance=True, spec_set=True)
     mission.recorder.event.side_effect = [RuntimeError("recorder unavailable"), None]
     with pytest.raises(RuntimeError, match="recorder unavailable"):
@@ -40,8 +40,8 @@ def ready(mission, goal=100.):
 
 
 @pytest.mark.parametrize("invalid", ["old_goal", "old_reference", "finished", "stale_status", "stale_reference"])
-def test_new_leg_rejects_unrelated_or_stale_reference(tmp_path, invalid):
-    mission = Mission(tmp_path, "nominal", Options())
+def test_new_leg_rejects_unrelated_or_stale_reference(invalid):
+    mission = Mission("nominal", Options())
     ready(mission)
     assert mission.leg_reference_ready(100.)
     if invalid == "old_goal":
@@ -58,8 +58,8 @@ def test_new_leg_rejects_unrelated_or_stale_reference(tmp_path, invalid):
 
 
 class TrackingMission(Mission):
-    def __init__(self, directory, interruption=None):
-        super().__init__(directory, "nominal", Options(), sleep=lambda _: None)
+    def __init__(self, interruption=None):
+        super().__init__("nominal", Options(), sleep=lambda _: None)
         self.commands = []
         self.recorder = create_autospec(Recorder, instance=True, spec_set=True)
         self.steps = 0
@@ -101,8 +101,8 @@ class TrackingMission(Mission):
                 self.planner_status = (self.t - 1., stamp, True, time.monotonic())
 
 
-def test_each_leg_tracks_new_reference_and_holds_on_normal_completion(tmp_path):
-    mission = TrackingMission(tmp_path)
+def test_each_leg_tracks_new_reference_and_holds_on_normal_completion():
+    mission = TrackingMission()
     assert len(mission.tracking()["arrivals"]) == 2
     assert mission.steps >= 16, "actual arrival must remain stable for one second"
     assert [cmd[:2] for cmd in mission.commands] == [
@@ -112,8 +112,8 @@ def test_each_leg_tracks_new_reference_and_holds_on_normal_completion(tmp_path):
 
 
 @pytest.mark.parametrize("interruption", ["hold", "replaced", "stale"])
-def test_abnormal_interruption_is_not_normal_completion(tmp_path, interruption):
-    mission = TrackingMission(tmp_path, interruption)
+def test_abnormal_interruption_is_not_normal_completion(interruption):
+    mission = TrackingMission(interruption)
     with pytest.raises(MissionFailure):
         mission.tracking()
     assert ("fc", "hold") not in mission.commands
