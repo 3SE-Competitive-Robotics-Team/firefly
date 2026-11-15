@@ -5,7 +5,7 @@
 //! | 端点 | 方向 | 消息 |
 //! |---|---|---|
 //! | 传感器 | 主机 → 板端 | `Imu`、`GrayLeft`、`GrayRight`、`Depth`、`Airframe`、`Hello`、`Command`、`Goal`、`Ping`、`Bye` |
-//! | 执行器 | 板端 → 主机 | `HelloAck`、`Control`、`Odometry`、`CorrectedOdometry`、`VioAttitude`、`Scalar`、`Log`、`Stats`、`Pong` |
+//! | 执行器 | 板端 → 主机 | `HelloAck`、`Control`、`Odometry`、`CorrectedOdometry`、`VioAttitude`、`Reference`、`PlannerStatus`、`Navigation`、`Viz`、`Voxels`、`Scalar`、`Log`、`Stats`、`Pong` |
 //!
 //! 所有多字节字段为小端。大消息在 [`crate::frame`] 层按
 //! [`MAX_FRAGMENT`] 分片，接收端按序号重组；任一分片缺失或次序异常即丢弃
@@ -25,14 +25,20 @@ use firefly_pubsub::control::ControlMessage;
 use firefly_pubsub::goal::GoalMessage;
 use firefly_pubsub::imu::ImuMessage;
 use firefly_pubsub::log::{LogMessage, TAG_MAX, TEXT_MAX};
+use firefly_pubsub::navigation::NavigationMessage;
 use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::plant::AirframeMessage;
-use firefly_pubsub::viz::{ENTITY_MAX, SCALARS_MAX, ScalarMessage, kind as viz_kind};
+use firefly_pubsub::reference::ReferenceMessage;
+use firefly_pubsub::trajectory::PlannerStatusMessage;
+use firefly_pubsub::viz::{
+    ARROWS_MAX, BINS_MAX, ENTITY_MAX, POINTS_MAX, SCALARS_MAX, ScalarMessage, VOXELS_MAX,
+    VizMessage, VoxelMessage, kind as viz_kind,
+};
 
 /// 帧头魔数（ASCII `FHL1`）。
 pub const MAGIC: [u8; 4] = *b"FHL1";
 /// 当前协议版本；接收端拒绝版本不一致的帧，主机与板端同步部署。
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 5;
 /// 固定帧头长度（字节）。
 pub const HEADER_LEN: usize = 48;
 /// 单帧负载上限（字节）；大消息按此分片，限制单次 USB 传输的排队时延。
@@ -99,6 +105,16 @@ pub enum Kind {
     Bye = 19,
     /// 图像分块（大图按块传输，块间可插高优先消息）。
     ImageChunk = 20,
+    /// 板端规划参考，供主机独立评分。
+    Reference = 21,
+    /// 板端规划目标身份和正常完成状态。
+    PlannerStatus = 22,
+    /// 原子导航与显示坐标关系。
+    Navigation = 23,
+    /// 有界空间诊断。
+    Viz = 24,
+    /// 有序体素更新分块。
+    Voxels = 25,
 }
 
 impl Kind {
@@ -132,6 +148,11 @@ impl Kind {
             18 => Self::Pong,
             19 => Self::Bye,
             20 => Self::ImageChunk,
+            21 => Self::Reference,
+            22 => Self::PlannerStatus,
+            23 => Self::Navigation,
+            24 => Self::Viz,
+            25 => Self::Voxels,
             _ => return None,
         })
     }
@@ -152,6 +173,11 @@ impl Kind {
             | Self::Ping
             | Self::Bye => Link::Sensor,
             Self::HelloAck
+            | Self::Navigation
+            | Self::Viz
+            | Self::Voxels
+            | Self::Reference
+            | Self::PlannerStatus
             | Self::Control
             | Self::Odometry
             | Self::CorrectedOdometry
@@ -169,6 +195,11 @@ impl Kind {
         match self {
             Self::Hello => "hello",
             Self::HelloAck => "hello_ack",
+            Self::Reference => "reference",
+            Self::PlannerStatus => "planner_status",
+            Self::Navigation => "navigation",
+            Self::Viz => "viz",
+            Self::Voxels => "voxels",
             Self::Imu => "imu",
             Self::GrayLeft => "gray_left",
             Self::GrayRight => "gray_right",
@@ -342,6 +373,16 @@ pub enum Message {
     Command(CommandMessage),
     /// 规划目标。
     Goal(GoalMessage),
+    /// 板端规划参考。
+    Reference(ReferenceMessage),
+    /// 板端规划执行快照。
+    PlannerStatus(PlannerStatusMessage),
+    /// 原子导航快照。
+    Navigation(NavigationMessage),
+    /// 空间诊断，仅编码有效数组元素。
+    Viz(Box<VizMessage>),
+    /// 体素分块，仅编码有效索引。
+    Voxels(Box<VoxelMessage>),
     /// 遥测标量。
     Scalar(ScalarMessage),
     /// 结构化日志。
@@ -416,6 +457,11 @@ impl Message {
             Self::VioAttitude(_) => Kind::VioAttitude,
             Self::Command(_) => Kind::Command,
             Self::Goal(_) => Kind::Goal,
+            Self::Reference(_) => Kind::Reference,
+            Self::PlannerStatus(_) => Kind::PlannerStatus,
+            Self::Navigation(_) => Kind::Navigation,
+            Self::Viz(_) => Kind::Viz,
+            Self::Voxels(_) => Kind::Voxels,
             Self::Scalar(_) => Kind::Scalar,
             Self::Log(_) => Kind::Log,
             Self::Stats(_) => Kind::Stats,
@@ -439,6 +485,11 @@ impl Message {
             Self::VioAttitude(m) => m.timestamp,
             Self::Command(m) => m.timestamp,
             Self::Goal(m) => m.timestamp,
+            Self::Reference(m) => m.timestamp,
+            Self::PlannerStatus(m) => m.timestamp,
+            Self::Navigation(m) => m.odom.timestamp,
+            Self::Viz(m) => m.timestamp,
+            Self::Voxels(m) => m.timestamp,
             Self::Scalar(m) => m.timestamp,
             Self::Log(m) => m.sim_time,
             Self::Hello(_)
@@ -578,6 +629,97 @@ impl Message {
                 put_f64(&mut out, message.position_z);
                 put_f64(&mut out, message.yaw);
                 put_u64(&mut out, message.has_yaw);
+            }
+            Self::Reference(message) => {
+                for value in [
+                    message.timestamp,
+                    message.position_x,
+                    message.position_y,
+                    message.position_z,
+                    message.velocity_x,
+                    message.velocity_y,
+                    message.velocity_z,
+                    message.acceleration_x,
+                    message.acceleration_y,
+                    message.acceleration_z,
+                    message.yaw,
+                    message.yaw_dot,
+                ] {
+                    put_f64(&mut out, value);
+                }
+                for value in message
+                    .alignment_translation
+                    .into_iter()
+                    .chain(message.alignment_rotation)
+                {
+                    put_f64(&mut out, value);
+                }
+                put_u64(&mut out, message.has_alignment);
+                put_f64(&mut out, message.goal_timestamp);
+            }
+            Self::PlannerStatus(message) => {
+                put_f64(&mut out, message.timestamp);
+                put_f64(&mut out, message.goal_timestamp);
+                put_u64(&mut out, message.finished);
+            }
+            Self::Navigation(message) => {
+                out.extend(Self::Odometry(message.odom).encode());
+                put_f64s(&mut out, &message.translation);
+                put_f64s(&mut out, &message.rotation);
+                put_u64(&mut out, message.revision);
+                put_u64(&mut out, message.external_map);
+            }
+            Self::Viz(message) => {
+                put_u32(&mut out, message.kind);
+                put_u32(&mut out, message.entity_len);
+                out.extend_from_slice(&message.entity);
+                put_f64(&mut out, message.timestamp);
+                put_u64(&mut out, message.sequence);
+                out.extend_from_slice(&message.color);
+                put_f64s(&mut out, &message.xyz);
+                put_f64s(&mut out, &message.quat_xyzw);
+                put_u32(&mut out, message.point_count);
+                for point in &message.points[..(message.point_count as usize).min(POINTS_MAX)] {
+                    put_f64s(&mut out, point);
+                }
+                put_u32(&mut out, message.arrow_count);
+                for (origin, vector) in message.arrow_origins
+                    [..(message.arrow_count as usize).min(ARROWS_MAX)]
+                    .iter()
+                    .zip(&message.arrow_vectors[..(message.arrow_count as usize).min(ARROWS_MAX)])
+                {
+                    put_f64s(&mut out, origin);
+                    put_f64s(&mut out, vector);
+                }
+                put_u32(&mut out, message.scalar_count);
+                put_f64s(
+                    &mut out,
+                    &message.scalars[..(message.scalar_count as usize).min(SCALARS_MAX)],
+                );
+                put_u32(&mut out, message.bin_count);
+                for value in &message.bins[..(message.bin_count as usize).min(BINS_MAX)] {
+                    put_u64(&mut out, *value);
+                }
+                put_i64(&mut out, message.bin_start);
+                put_i64(&mut out, message.bin_width);
+            }
+            Self::Voxels(message) => {
+                put_u32(&mut out, message.kind);
+                put_u32(&mut out, message.entity_len);
+                out.extend_from_slice(&message.entity);
+                put_f64(&mut out, message.timestamp);
+                put_u64(&mut out, message.sequence);
+                put_u32(&mut out, message.chunk_index);
+                put_u32(&mut out, message.chunk_count);
+                for value in message.voxel_size.into_iter().chain(message.voxel_origin) {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+                put_u32(&mut out, message.voxel_count);
+                for index in &message.voxels[..(message.voxel_count as usize).min(VOXELS_MAX)] {
+                    for value in index {
+                        put_i32(&mut out, *value);
+                    }
+                }
             }
             Self::Scalar(message) => {
                 put_u32(&mut out, message.kind);
@@ -775,26 +917,7 @@ impl Message {
                 })
             }
             Kind::Odometry | Kind::CorrectedOdometry => {
-                let timestamp = input.f64()?;
-                let mut values = [0.0; 10];
-                for value in &mut values {
-                    *value = input.f64()?;
-                }
-                let is_initialized = input.u8()? != 0;
-                let message = OdomMessage {
-                    timestamp,
-                    position_x: values[0],
-                    position_y: values[1],
-                    position_z: values[2],
-                    velocity_x: values[3],
-                    velocity_y: values[4],
-                    velocity_z: values[5],
-                    quat_x: values[6],
-                    quat_y: values[7],
-                    quat_z: values[8],
-                    quat_w: values[9],
-                    is_initialized,
-                };
+                let message = input.odom()?;
                 if kind == Kind::Odometry {
                     Self::Odometry(message)
                 } else {
@@ -846,6 +969,105 @@ impl Message {
                 yaw: input.f64()?,
                 has_yaw: input.u64()?,
             }),
+            Kind::Reference => Self::Reference(ReferenceMessage {
+                timestamp: input.f64()?,
+                position_x: input.f64()?,
+                position_y: input.f64()?,
+                position_z: input.f64()?,
+                velocity_x: input.f64()?,
+                velocity_y: input.f64()?,
+                velocity_z: input.f64()?,
+                acceleration_x: input.f64()?,
+                acceleration_y: input.f64()?,
+                acceleration_z: input.f64()?,
+                yaw: input.f64()?,
+                yaw_dot: input.f64()?,
+                alignment_translation: [input.f64()?, input.f64()?, input.f64()?],
+                alignment_rotation: [input.f64()?, input.f64()?, input.f64()?, input.f64()?],
+                has_alignment: input.u64()?,
+                goal_timestamp: input.f64()?,
+            }),
+            Kind::PlannerStatus => Self::PlannerStatus(PlannerStatusMessage {
+                timestamp: input.f64()?,
+                goal_timestamp: input.f64()?,
+                finished: input.u64()?,
+            }),
+            Kind::Navigation => Self::Navigation(NavigationMessage {
+                odom: input.odom()?,
+                translation: input.f64s()?,
+                rotation: input.f64s()?,
+                revision: input.u64()?,
+                external_map: input.u64()?,
+            }),
+            Kind::Viz => {
+                let mut message = Box::<VizMessage>::default();
+                message.kind = input.u32()?;
+                message.entity_len = input.count(ENTITY_MAX)?;
+                message.entity.copy_from_slice(input.bytes(ENTITY_MAX)?);
+                message.timestamp = input.f64()?;
+                message.sequence = input.u64()?;
+                message.color.copy_from_slice(input.bytes(3)?);
+                message.xyz = input.f64s()?;
+                message.quat_xyzw = input.f64s()?;
+                message.point_count = input.count(POINTS_MAX)?;
+                for point in &mut message.points[..message.point_count as usize] {
+                    *point = input.f64s()?;
+                }
+                message.arrow_count = input.count(ARROWS_MAX)?;
+                for (origin, vector) in message.arrow_origins[..message.arrow_count as usize]
+                    .iter_mut()
+                    .zip(&mut message.arrow_vectors[..message.arrow_count as usize])
+                {
+                    *origin = input.f64s()?;
+                    *vector = input.f64s()?;
+                }
+                message.scalar_count = input.count(SCALARS_MAX)?;
+                for value in &mut message.scalars[..message.scalar_count as usize] {
+                    *value = input.f64()?;
+                }
+                message.bin_count = input.count(BINS_MAX)?;
+                for value in &mut message.bins[..message.bin_count as usize] {
+                    *value = input.u64()?;
+                }
+                message.bin_start = input.i64()?;
+                message.bin_width = input.i64()?;
+                Self::Viz(message)
+            }
+            Kind::Voxels => {
+                let kind = input.u32()?;
+                if !matches!(
+                    kind,
+                    viz_kind::VOXELS | viz_kind::VOXELS_ADD | viz_kind::VOXELS_REMOVE
+                ) {
+                    return Err(invalid("voxel kind"));
+                }
+                let entity_len = input.count(ENTITY_MAX)?;
+                let mut message = Box::new(VoxelMessage::base(kind, -1.0, ""));
+                message.entity_len = entity_len;
+                message.entity.copy_from_slice(input.bytes(ENTITY_MAX)?);
+                message.timestamp = input.f64()?;
+                message.sequence = input.u64()?;
+                message.chunk_index = input.u32()?;
+                message.chunk_count = input.u32()?;
+                if message.chunk_count == 0 || message.chunk_index >= message.chunk_count {
+                    return Err(invalid("voxel chunk index"));
+                }
+                for value in message
+                    .voxel_size
+                    .iter_mut()
+                    .chain(&mut message.voxel_origin)
+                {
+                    *value =
+                        f32::from_le_bytes(input.bytes(4)?.try_into().map_err(|_| invalid("f32"))?);
+                }
+                message.voxel_count = input.count(VOXELS_MAX)?;
+                for index in &mut message.voxels[..message.voxel_count as usize] {
+                    for value in index {
+                        *value = input.i32()?;
+                    }
+                }
+                Self::Voxels(message)
+            }
             Kind::Scalar => {
                 let message_kind = input.u32()?;
                 let entity_len = input.u32()?;
@@ -958,7 +1180,10 @@ pub fn decode_header(raw: &[u8; HEADER_LEN]) -> io::Result<Header> {
     }
     let version = u16::from_le_bytes([raw[4], raw[5]]);
     if version != VERSION {
-        return Err(invalid("frame version"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("frame version {version}; expected {VERSION}; rebuild and deploy both peers"),
+        ));
     }
     let kind =
         Kind::from_id(u16::from_le_bytes([raw[6], raw[7]])).ok_or_else(|| invalid("frame kind"))?;
@@ -1055,6 +1280,45 @@ impl<'a> Input<'a> {
             self.bytes(8)?.try_into().map_err(|_| invalid("f64"))?,
         ))
     }
+
+    fn f64s<const N: usize>(&mut self) -> io::Result<[f64; N]> {
+        let mut values = [0.; N];
+        for value in &mut values {
+            *value = self.f64()?;
+        }
+        Ok(values)
+    }
+
+    fn count(&mut self, maximum: usize) -> io::Result<u32> {
+        let count = self.u32()?;
+        if count as usize > maximum {
+            return Err(invalid("diagnostic count exceeds budget"));
+        }
+        Ok(count)
+    }
+
+    fn odom(&mut self) -> io::Result<OdomMessage> {
+        Ok(OdomMessage {
+            timestamp: self.f64()?,
+            position_x: self.f64()?,
+            position_y: self.f64()?,
+            position_z: self.f64()?,
+            velocity_x: self.f64()?,
+            velocity_y: self.f64()?,
+            velocity_z: self.f64()?,
+            quat_x: self.f64()?,
+            quat_y: self.f64()?,
+            quat_z: self.f64()?,
+            quat_w: self.f64()?,
+            is_initialized: self.u8()? != 0,
+        })
+    }
+}
+
+fn put_f64s(out: &mut Vec<u8>, values: &[f64]) {
+    for value in values {
+        put_f64(out, *value);
+    }
 }
 
 fn put_u16(out: &mut Vec<u8>, value: u16) {
@@ -1079,6 +1343,104 @@ fn put_i64(out: &mut Vec<u8>, value: i64) {
 
 fn put_f64(out: &mut Vec<u8>, value: f64) {
     out.extend_from_slice(&value.to_le_bytes());
+}
+
+#[cfg(test)]
+mod visualization_tests {
+    use super::*;
+    use crate::frame::{FrameReader, FrameWriter};
+
+    fn roundtrip(message: &Message) {
+        assert_eq!(message.kind().link(), Link::Actuator);
+        let mut writer = FrameWriter::new(Vec::new());
+        writer.write_message(message).unwrap();
+        let bytes = writer.into_inner();
+        let frame = FrameReader::new(bytes.as_slice()).read_frame().unwrap();
+        assert_eq!(&frame.message, message);
+        assert_eq!(frame.header.capture_time, message.capture_time());
+        let body = message.encode();
+        assert!(Message::decode(message.kind(), &body[..body.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn navigation_keeps_atomic_alignment_and_session_metadata() {
+        roundtrip(&Message::Navigation(NavigationMessage {
+            odom: OdomMessage {
+                timestamp: 7.25,
+                position_x: 12.,
+                quat_w: 1.,
+                is_initialized: true,
+                ..OdomMessage::default()
+            },
+            translation: [2., 3., 4.],
+            rotation: [0., 0., 0.6, 0.8],
+            revision: 42,
+            external_map: 1,
+        }));
+    }
+
+    #[test]
+    fn spatial_diagnostics_keep_every_active_field_at_capacity() {
+        for kind in [
+            viz_kind::POSE,
+            viz_kind::LINE_STRIP,
+            viz_kind::ARROWS,
+            viz_kind::KEYPOINTS_2D,
+            viz_kind::CAMERA,
+            viz_kind::BAR_CHART,
+            viz_kind::CLEAR,
+        ] {
+            let mut message =
+                Box::new(VizMessage::base(kind, 3.5, "vio/prediction/pose_body_odom"));
+            message.sequence = 923;
+            message.color = [19, 83, 254];
+            message.xyz = [1., 2., 3.];
+            message.quat_xyzw = [0., 0., 0.6, 0.8];
+            message.point_count = POINTS_MAX as u32;
+            message.points.fill([17., -23., 42.]);
+            message.arrow_count = ARROWS_MAX as u32;
+            message.arrow_origins.fill([1., 2., 3.]);
+            message.arrow_vectors.fill([-4., 5., -6.]);
+            message.scalar_count = SCALARS_MAX as u32;
+            message.scalars = [4., 5., 6., 7.];
+            message.bin_count = BINS_MAX as u32;
+            message.bins.fill(u64::MAX);
+            message.bin_start = -23;
+            message.bin_width = 17;
+            roundtrip(&Message::Viz(message));
+        }
+        assert!(Message::Viz(Box::<VizMessage>::default()).encode().len() < 256);
+    }
+
+    #[test]
+    fn voxel_chunks_keep_indices_geometry_and_order_at_capacity() {
+        for kind in [
+            viz_kind::VOXELS,
+            viz_kind::VOXELS_ADD,
+            viz_kind::VOXELS_REMOVE,
+        ] {
+            let mut message = Box::new(VoxelMessage::base(kind, 23.7, "plan/collision"));
+            message.sequence = 123;
+            message.chunk_index = 2;
+            message.chunk_count = 3;
+            message.voxel_size = [0.1, 0.2, 0.3];
+            message.voxel_origin = [-13., 7., 9.];
+            message.voxel_count = VOXELS_MAX as u32;
+            message.voxels.fill([i32::MIN, 123, i32::MAX]);
+            assert_eq!(Message::Voxels(message.clone()).encode().len(), 196_732);
+            roundtrip(&Message::Voxels(message));
+        }
+    }
+
+    #[test]
+    fn diagnostic_decoders_reject_counts_beyond_ipc_budgets() {
+        let mut geometry = Box::<VizMessage>::default();
+        geometry.point_count = POINTS_MAX as u32 + 1;
+        assert!(Message::decode(Kind::Viz, &Message::Viz(geometry).encode()).is_err());
+        let mut voxels = Box::new(VoxelMessage::base(viz_kind::VOXELS, 1., "plan/collision"));
+        voxels.voxel_count = VOXELS_MAX as u32 + 1;
+        assert!(Message::decode(Kind::Voxels, &Message::Voxels(voxels).encode()).is_err());
+    }
 }
 
 #[cfg(test)]

@@ -19,7 +19,7 @@ uv run --package firefly-cad firefly-cad-build <场地.stp> --scene <赛季>@<�
 
 Rust 应用统一用 `cargo xtask release` 构建；物理资产检查、离线图像采集、
 建库和任务验收各自使用 [开发指南](../../docs/development.md#assets) 中的入口。
-任务、碰撞和故障验收由 `firefly-evaluation` 包的 `uv run firefly-evaluate` 执行，
+飞行指令由 scripts/flight.py 执行，命令结果与飞行质量分别核对；
 运行证据遵循 [Mimir 录制规则](../../docs/mimir.md)，保存为本地时间的
 `logs/yyyymmdd_hhmmss/log.rrd`。几何、建库、飞行和在线定位各自验收。
 
@@ -62,7 +62,7 @@ Rust 应用统一用 `cargo xtask release` 构建；物理资产检查、离线�
 光学参数标定和 VIO 验证分别记录实测依据与实际资产指纹。
 
 ```bash
-uv run --all-packages --extra test pytest packages/firefly-cad/tests/ tests/evaluation/ -q -p no:cacheprovider
+uv run --all-packages --extra test pytest packages/firefly-cad/tests/ packages/firefly-mujoco/tests/ -q -p no:cacheprovider
 FIREFLY_RUN_RMUC_ASSETS=1 uv run --all-packages --extra test pytest tests/system/test_rmuc_assets.py -q -p no:cacheprovider
 ```
 

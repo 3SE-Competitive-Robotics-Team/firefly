@@ -358,6 +358,64 @@ mod tests {
         roundtrip(&message, 42);
     }
 
+    #[test]
+    fn board_planner_evidence_preserves_goal_alignment_and_completion() {
+        use firefly_pubsub::{reference::ReferenceMessage, trajectory::PlannerStatusMessage};
+        for message in [
+            Message::Reference(ReferenceMessage {
+                timestamp: 12.5,
+                position_x: 22.,
+                position_y: -1.,
+                position_z: 1.595,
+                velocity_x: 2.,
+                velocity_y: 3.,
+                velocity_z: 4.,
+                acceleration_x: 5.,
+                acceleration_y: 6.,
+                acceleration_z: 7.,
+                yaw: 0.5,
+                yaw_dot: -0.25,
+                alignment_translation: [1., 2., 3.],
+                alignment_rotation: [0., 0., 0.6, 0.8],
+                has_alignment: 1,
+                goal_timestamp: 1_794_740_646.245_043,
+            }),
+            Message::PlannerStatus(PlannerStatusMessage {
+                timestamp: 12.5,
+                goal_timestamp: 1_794_740_646.245_043,
+                finished: 1,
+            }),
+        ] {
+            assert_eq!(message.kind().link(), crate::protocol::Link::Actuator);
+            assert_eq!(message.capture_time(), 12.5);
+            assert!(
+                Message::decode(
+                    message.kind(),
+                    &message.encode()[..message.encode().len() - 1]
+                )
+                .is_err()
+            );
+            roundtrip(&message, 42);
+        }
+    }
+
+    #[test]
+    fn incompatible_peer_reports_received_and_expected_versions() {
+        let mut bytes = Vec::new();
+        FrameWriter::new(&mut bytes)
+            .write_message(&Message::Ping(7))
+            .unwrap();
+        bytes[4..6].copy_from_slice(&(crate::protocol::VERSION - 1).to_le_bytes());
+        let error = FrameReader::new(bytes.as_slice()).read_frame().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("expected {}", crate::protocol::VERSION))
+        );
+        assert!(error.to_string().contains("deploy both peers"));
+    }
+
     struct PauseOnce {
         bytes: io::Cursor<Vec<u8>>,
         offset: usize,

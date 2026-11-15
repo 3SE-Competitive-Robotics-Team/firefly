@@ -20,10 +20,6 @@ const SPATIAL: &[(&str, &[u32])] = &[
     ("plan/drone", &[kind::POSE]),
     ("vio/posterior/pose_imu_world", &[kind::POSE]),
     ("vio/prediction/pose_body_odom", &[kind::POSE]),
-    ("acceptance/odom", &[kind::POSE]),
-    ("acceptance/gt", &[kind::POSE]),
-    ("acceptance/corrected", &[kind::POSE]),
-    ("acceptance/reference", &[kind::POSE]),
     ("vio/traj", &[kind::LINE_STRIP]),
     ("vio/map/traj", &[kind::LINE_STRIP]),
     ("gt/traj", &[kind::LINE_STRIP]),
@@ -49,22 +45,18 @@ const SPATIAL: &[(&str, &[u32])] = &[
 /// Parent frame for registered 3D observations; pixel overlays keep camera coordinates.
 pub(crate) fn frame(name: &str) -> Option<&'static str> {
     match name {
-        "gt/pose" | "gt/traj" | "acceptance/gt" => Some("world"),
+        "gt/pose" | "gt/traj" => Some("world"),
         "vio/odom"
         | "vio/traj"
         | "vio/posterior/pose_imu_world"
         | "vio/prediction/pose_body_odom"
-        | "acceptance/odom"
         | "plan/drone"
         | "plan/global_path"
         | "plan/local_traj"
         | "plan/collision"
         | "plan/local_traj/velocity"
-        | "plan/planes"
-        | "acceptance/reference" => Some("odom"),
-        "vio/map/pose" | "vio/map/traj" | "corr/odom" | "corr/traj" | "acceptance/corrected" => {
-            Some("map")
-        }
+        | "plan/planes" => Some("odom"),
+        "vio/map/pose" | "vio/map/traj" | "corr/odom" | "corr/traj" => Some("map"),
         "cameras/left" | "cameras/right" => Some("tf#/vio/prediction/pose_body_odom"),
         _ => None,
     }
@@ -77,7 +69,7 @@ pub fn spatial(name: &str, payload: u32) -> Result<()> {
     let accepted = if payload == kind::SCALARS {
         fields(name).is_ok()
     } else if payload == kind::CLEAR {
-        matches!(name, "gt" | "corr" | "plan" | "vio" | "acceptance")
+        matches!(name, "gt" | "corr" | "plan" | "vio")
             || SPATIAL.iter().any(|(path, _)| *path == name)
             || fields(name).is_ok()
     } else {
@@ -159,11 +151,7 @@ pub fn fields(name: &str) -> Result<&'static [&'static str]> {
         | "corr/debug/drift" => &["x_m", "y_m", "z_m"],
         "vio/diagnostics/velocity_delta_m_s"
         | "vio/posterior/velocity_world"
-        | "vio/prediction/velocity_body_odom"
-        | "acceptance/odom_velocity"
-        | "acceptance/gt_velocity"
-        | "acceptance/corrected_velocity"
-        | "acceptance/reference_velocity" => &["x_m_s", "y_m_s", "z_m_s"],
+        | "vio/prediction/velocity_body_odom" => &["x_m_s", "y_m_s", "z_m_s"],
         "vio/diagnostics/rotation_delta_rad" => &["x_rad", "y_rad", "z_rad"],
         "vio/diagnostics/costs_before" | "vio/diagnostics/costs_after" => {
             &["vision", "inertial", "bias_random_walk", "marginal_prior"]
@@ -205,15 +193,11 @@ pub fn fields(name: &str) -> Result<&'static [&'static str]> {
             "allocated_roll_normalized",
             "attitude_source",
         ],
-        "fc/loop/motors" | "fc/debug/motors" | "acceptance/motors" => {
+        "fc/loop/motors" | "fc/debug/motors" => {
             &["motor_1_N", "motor_2_N", "motor_3_N", "motor_4_N"]
         }
-        "fc/imu/quaternion_xyzw"
-        | "fc/standby_eskf/quaternion_xyzw"
-        | "acceptance/imu_attitude" => &["x", "y", "z", "w"],
-        "fc/imu/health" | "acceptance/imu_health" => {
-            &["attitude_available", "vio_fresh", "posterior_age_s"]
-        }
+        "fc/imu/quaternion_xyzw" | "fc/standby_eskf/quaternion_xyzw" => &["x", "y", "z", "w"],
+        "fc/imu/health" => &["attitude_available", "vio_fresh", "posterior_age_s"],
         "fc/standby_eskf/attitude_variance" => &["x_rad2", "y_rad2", "z_rad2"],
         "fc/standby_eskf/bias_variance" => &["x_rad2_s2", "y_rad2_s2", "z_rad2_s2"],
         "fc/debug/rate_sp_frd" => &["roll_rad_s", "pitch_rad_s", "yaw_rad_s"],
@@ -226,44 +210,26 @@ pub fn fields(name: &str) -> Result<&'static [&'static str]> {
         ],
         "render/capture/stages_s" => &["submit_s", "readback_s", "assemble_s", "queue_s"],
         "render/capture/publish_s" => &["process_s", "publish_s", "total_s"],
-        "corr/debug/gate" | "acceptance/visual_update" => {
-            &["metric", "limit", "applied_translation_m", "accepted"]
-        }
+        "corr/debug/gate" => &["metric", "limit", "applied_translation_m", "accepted"],
         "corr/debug/map_observation" => &["visual_age_s", "position_disagreement_m", "consistent"],
-        "acceptance/physics" => &["physics_steps", "contact_steps", "collisions", "resets"],
-        "acceptance/hover_failure/state" => &["flight_mode", "has_odometry", "has_control_origin"],
-        "acceptance/hover_failure/freshness" => {
-            &["measurement_age_s", "receive_age_s", "initialized"]
-        }
-        "acceptance/hover_failure/error" => &["horizontal_m", "vertical_m", "speed_m_s"],
         "rootslam/frame_processing_ms" | "rootslam/ipc/imu_publish_ms" | "fc/debug/late_max_ms" => {
             &["duration_ms"]
         }
-        "fc/debug/altitude" | "acceptance/penetration" => &["distance_m"],
+        "fc/debug/altitude" => &["distance_m"],
         "fc/debug/tilt_deg" | "fc/debug/tilt_err_deg" => &["angle_deg"],
         "fc/debug/thrust_total" => &["thrust_N"],
         "fc/debug/hover_thrust" => &["normalized"],
         "fc/debug/tick_rate" => &["rate_Hz"],
         "vision/debug/map_query_wall_s" => &["query_s"],
         "fc/standby_eskf/accel_nis" => &["nis"],
-        "fc/debug/saturated_ticks" | "acceptance/loop_backend" => &["count"],
+        "fc/debug/saturated_ticks" => &["count"],
         "fc/arming/failed" | "fc/failsafe/flags" => &["mask"],
         "fc/debug/state"
         | "fc/debug/saturated"
         | "fc/failsafe/action"
         | "fc/imu/source"
         | "fc/standby_eskf/accel_gate"
-        | "fc/standby_eskf/health"
-        | "acceptance/fc_state"
-        | "acceptance/attitude_source" => &["state"],
-        _ if name
-            .strip_prefix("acceptance/disturbance_force/")
-            .is_some_and(|suffix| {
-                (2..=3).contains(&suffix.len()) && suffix.bytes().all(|v| v.is_ascii_digit())
-            }) =>
-        {
-            &["world_x_N", "world_y_N", "world_z_N", "duration_s"]
-        }
+        | "fc/standby_eskf/health" => &["state"],
         _ => {
             return Err(super::invalid(format!(
                 "unregistered scalar entity: {name}"
@@ -299,7 +265,7 @@ mod tests {
                 assert!(frame(name).is_some(), "{name}");
             }
         }
-        assert_ne!(frame("acceptance/gt"), frame("acceptance/odom"));
+        assert_ne!(frame("gt/pose"), frame("vio/odom"));
         assert_eq!(frame("plan/local_traj/velocity"), Some("odom"));
     }
 
@@ -319,8 +285,6 @@ mod tests {
             assert!(spatial("plan/collision", payload).is_ok());
         }
         assert!(spatial("plan/collision", kind::POSE).is_err());
-        assert!(fields("acceptance/disturbance_force/01").is_ok());
-        assert!(fields("acceptance/disturbance_force/1234").is_err());
         assert!(entity(b"../invalid", 10).is_err());
         assert!(entity(b"valid", 9).is_err());
     }

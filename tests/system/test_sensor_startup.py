@@ -19,7 +19,7 @@ import pytest
 
 from firefly_mujoco import ControlMessage, DepthImageMessage, OdomMessage, TraceContext
 
-from firefly_evaluation.process_lifecycle import ManagedProcess, isolated_run
+from firefly_workspace.process import ManagedProcess, isolated_run
 
 ROOT = Path(__file__).resolve().parents[2]
 

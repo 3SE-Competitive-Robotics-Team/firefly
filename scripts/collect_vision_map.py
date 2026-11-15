@@ -18,7 +18,7 @@ import time
 import iceoryx2 as iox2
 import numpy as np
 
-from firefly_evaluation.vision_assets import capture_assets
+from firefly_mujoco.vision_assets import capture_assets
 from firefly_mujoco import DepthImageMessage, GrayImageMessage, OdomMessage, TraceContext
 from firefly_mujoco import load_scene_name
 from firefly_workspace import digest, parse_scene, startup, workspace_root

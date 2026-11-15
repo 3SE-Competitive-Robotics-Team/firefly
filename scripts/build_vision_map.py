@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import shutil
 
-from firefly_evaluation.vision_assets import capture_assets, reusable_capture
+from firefly_mujoco.vision_assets import capture_assets, reusable_capture
 from firefly_mujoco import load_scene_name
 from firefly_workspace import digest, parse_scene, workspace_root
 

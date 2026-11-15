@@ -14,7 +14,7 @@ import psutil
 import pytest
 from rerun.chunk import RrdReader
 
-from firefly_evaluation.process_lifecycle import ManagedProcess, isolated_run
+from firefly_workspace.process import ManagedProcess, isolated_run
 from firefly_mujoco import TraceContext
 from firefly_mujoco.messages import ScalarMessage, LogMessage, GrayImageMessage, VizMessage, OdomMessage
 from firefly_workspace import digest
@@ -371,7 +371,7 @@ def test_spatial_frames_preserve_raw_poses_and_follow_navigation():
             truth_port.loan_uninit().write_payload(truth).send()
             time.sleep(.03)
             navigation_port.loan_uninit().write_payload(navigation).send()
-            for name in ("vio/odom", "vio/prediction/pose_body_odom", "acceptance/odom", "acceptance/reference"):
+            for name in ("vio/odom", "vio/prediction/pose_body_odom", "vio/posterior/pose_imu_world", "plan/drone"):
                 geometry.loan_uninit().write_payload(spatial(name, 1, 1.)).send()
             camera = spatial("cameras/left", 12, 1., (.1, .05, 0.))
             camera.scalar_count, camera.point_count = 4, 1
@@ -415,8 +415,8 @@ def test_spatial_frames_preserve_raw_poses_and_follow_navigation():
         assert component("/gt/pose", "Transform3D:translation") == [[pytest.approx([-13., 0., .4])]]
         assert component("/gt/pose", "Transform3D:parent_frame") == [["world"]]
         assert component("/vio/odom", "Transform3D:parent_frame") == [["odom"], ["odom"]]
-        assert component("/acceptance/odom", "Transform3D:parent_frame") == [["odom"]]
-        assert component("/acceptance/reference", "Transform3D:parent_frame") == [["odom"]]
+        assert component("/vio/posterior/pose_imu_world", "Transform3D:parent_frame") == [["odom"]]
+        assert component("/plan/drone", "Transform3D:parent_frame") == [["odom"]]
         assert component("/cameras/left", "Transform3D:parent_frame") == [["tf#/vio/prediction/pose_body_odom"]]
         assert component("/cameras/left", "Pinhole:parent_frame") == component("/cameras/left", "Transform3D:parent_frame")
         assert component("/plan/local_traj", "CoordinateFrame:frame") == [["odom"]]

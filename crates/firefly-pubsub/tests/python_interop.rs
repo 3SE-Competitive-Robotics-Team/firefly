@@ -21,7 +21,7 @@ fn viz_python_layout_matches_rust_offsets_and_sizes() {
     let script = r"
 import ctypes
 from firefly_mujoco.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage
-from firefly_evaluation.mission_io import PlannerStatusMessage
+from firefly_mujoco.messages import PlannerStatusMessage
 from firefly_mujoco import LogMessage
 for cls, fields in [
     (ScalarMessage, ['timestamp', 'scalars', 'sequence']),

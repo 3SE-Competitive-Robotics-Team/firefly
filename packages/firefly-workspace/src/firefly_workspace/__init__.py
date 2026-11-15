@@ -1,4 +1,4 @@
-"""工具共用的工作区定位、可选配置、场景标识与文件内容指纹；仅使用标准库。"""
+"""工具共用的工作区定位、可选配置、场景标识与文件内容指纹。"""
 from collections.abc import Callable
 from typing import TypeVar
 

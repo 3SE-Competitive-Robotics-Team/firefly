@@ -6,7 +6,7 @@ import tomllib
 
 import numpy as np
 
-from firefly_mujoco import load_scene_name
+from .scene import load_scene_name
 from firefly_workspace import digest, load_toml, parse_scene, workspace_root
 
 

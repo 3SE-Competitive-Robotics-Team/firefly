@@ -8,11 +8,11 @@ from unittest.mock import create_autospec
 import numpy as np
 import pytest
 from firefly_mujoco import GrayImageMessage, DepthImageMessage
-from firefly_evaluation import vision_assets
+from firefly_mujoco import vision_assets
 from firefly_workspace import digest
-from firefly_workspace import parse_scene
+from firefly_workspace import parse_scene, workspace_root
 
-spec = importlib.util.spec_from_file_location("capture", Path(__file__).resolve().parents[2] / "scripts/collect_vision_map.py")
+spec = importlib.util.spec_from_file_location("capture", workspace_root(Path(__file__)) / "scripts/collect_vision_map.py")
 capture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(capture)
 
@@ -70,26 +70,6 @@ def test_asset_fingerprint_uses_selected_scene_and_detects_geometry_changes(tmp_
     with pytest.raises(ValueError, match="contract"):
         vision_assets.verify_map_compatibility(
             assets, root=tmp_path, capture=lambda root: vision_assets.capture_assets(root, run=runner))
-
-
-def test_acceptance_reads_selected_geometry_manifest_and_checks_its_scene(tmp_path):
-    from firefly_evaluation.cli import validate_assets
-
-    workspace_at(tmp_path)
-    scene = parse_scene("rmuc2027@1.0.0")
-    (tmp_path / "configs/scene.toml").write_text(f'scene = "{scene.name}"\n')
-    directory = tmp_path / scene.dir
-    directory.mkdir(parents=True)
-    field = directory / "field.glb"
-    field.write_bytes(b"selected geometry")
-    manifest = {"status": "passed", "scene": scene.name,
-                "artifacts": {str(field.relative_to(tmp_path)): digest(field)}}
-    path = directory / "asset_manifest.json"
-    path.write_text(json.dumps(manifest))
-    validate_assets(tmp_path)
-    path.write_text(json.dumps(manifest | {"scene": "rmuc2028@1.0.0"}))
-    with pytest.raises(ValueError, match="another scene"):
-        validate_assets(tmp_path)
 
 
 def test_same_stamp_required():

@@ -29,6 +29,7 @@ from .messages import (
     LogMessage,
     OdomMessage,
     PlantStateMessage,
+    PlannerStatusMessage,
     ReferenceMessage,
     TraceContext,
 )
@@ -57,6 +58,7 @@ __all__ = [
     "ReferenceMessage",
     "OdomMessage",
     "PlantStateMessage",
+    "PlannerStatusMessage",
     "AirframeMessage",
     "ControlMessage",
     "LogMessage",

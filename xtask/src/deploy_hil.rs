@@ -21,8 +21,17 @@ const ENUMERATION_TIMEOUT: Duration = Duration::from_secs(20);
 const ESTIMATORS: [(&str, &str); 1] = [("rootslam", "processes-hil.toml")];
 
 pub fn run(args: &[String]) -> Result<(), String> {
-    let (device, estimator) = parse_arguments(args)?;
-    let manifest = manifest_for(&estimator)?;
+    let (device, estimator, mission) = parse_arguments(args)?;
+    let estimator_manifest = manifest_for(&estimator)?;
+    let (manifest, host_config) = match mission.as_str() {
+        "hover" => (estimator_manifest, "configs/hil.toml"),
+        "roundtrip" => ("processes-hil-roundtrip.toml", "configs/hil-roundtrip.toml"),
+        other => {
+            return Err(format!(
+                "unknown HIL mission {other}: expected hover or roundtrip"
+            ));
+        }
+    };
     deploy::deploy(&device)?;
     ensure_hil_processes(&device, manifest)?;
     build_host_bridge()?;
@@ -35,12 +44,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
     );
     // 切换会杀掉 adbd，adb 的返回状态不可靠；以主机枚举为准。
     let _ = deploy::shell(&device, &command);
-    wait_for_enumeration()
+    wait_for_enumeration(host_config)
 }
 
-fn parse_arguments(args: &[String]) -> Result<(String, String), String> {
+fn parse_arguments(args: &[String]) -> Result<(String, String, String), String> {
     let mut device = DEFAULT_DEVICE.to_owned();
     let mut estimator = ESTIMATORS[0].0.to_owned();
+    let mut mission = "hover".to_owned();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -52,10 +62,11 @@ fn parse_arguments(args: &[String]) -> Result<(String, String), String> {
                 it.next()
                     .ok_or_else(|| "missing --estimator value".to_owned())?,
             ),
+            "--mission" => mission.clone_from(it.next().ok_or("missing --mission value")?),
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    Ok((device, estimator))
+    Ok((device, estimator, mission))
 }
 
 /// 估计器名到板端进程清单的映射；未知估计器直接报错，不透传到板端命令。
@@ -103,13 +114,13 @@ fn build_host_bridge() -> Result<(), String> {
     Ok(())
 }
 
-fn wait_for_enumeration() -> Result<(), String> {
+fn wait_for_enumeration(host_config: &str) -> Result<(), String> {
     let probe = target::workspace_root().join("target/release/hil");
     let deadline = Instant::now() + ENUMERATION_TIMEOUT;
     while Instant::now() < deadline {
         let output = Command::new(&probe)
             .current_dir(target::workspace_root())
-            .args(["--check", "--config", "configs/hil.toml"])
+            .args(["--check", "--config", host_config])
             .output();
         if let Ok(output) = output
             && output.status.success()

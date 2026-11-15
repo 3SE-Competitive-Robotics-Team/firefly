@@ -41,8 +41,7 @@ Every observation change must include these steps in the same review:
 
 Numeric state codes remain available for scoring; labels and enum meanings come from the producer definitions
 in `firefly-flight`. Mimir records states in the numeric observation stream.
-Ground truth, local odometry and map odometry retain their original frames. Position-error scoring
-uses the evaluation protocol's explicit frame alignment.
+Ground truth, local odometry and map odometry retain their original frames. Offline comparisons state their frame alignment explicitly.
 
 ## IPC topic catalog
 
@@ -52,26 +51,26 @@ This catalog covers all production topic constants; test topics use isolated nam
 
 | Topic | Producers → consumers; purpose | Recording policy |
 |---|---|---|
-| `Firefly/VizScalars` | FC, VIO, render, localization, evaluation → mimir | Every registered numeric row; publisher sequence checked |
-| `Firefly/Viz` | VIO, render, planner, localization, evaluation → mimir | Registered spatial observations; sequence checked |
+| `Firefly/VizScalars` | FC, VIO, render, localization → mimir | Every registered numeric row; publisher sequence checked |
+| `Firefly/Viz` | VIO, render, planner, localization → mimir | Registered spatial observations; sequence checked |
 | `Firefly/VizVoxels` | planner → mimir | Complete ordered map updates; missing chunks fail |
-| `Firefly/Log` | Rust applications, sim, evaluation → mimir | Sequence and producer loss count checked |
-| `Firefly/GroundTruth` | sim → render, mimir, evaluation | Pose and trajectory; independent scoring samples |
-| `Firefly/CorrectedOdometry` | VIO/localization → mimir, evaluation | Map-frame pose and trajectory |
+| `Firefly/Log` | Rust applications, sim, flight scripts → mimir | Sequence and producer loss count checked |
+| `Firefly/GroundTruth` | sim → render, mimir, tools | Pose and trajectory; independent scoring samples |
+| `Firefly/CorrectedOdometry` | VIO/localization → mimir, tools | Map-frame pose and trajectory |
 | `Firefly/VioAttitude` | VIO prediction → FC, mimir | Bias summary; control consumers remain independent |
 | `Firefly/CameraLeft`, `Firefly/CameraRight` | render/sensors → VIO, mimir | Lossless grayscale samples when images are enabled |
 | `Firefly/CameraPair` | render → image consumers | Pair notification; image topics carry the recording |
 | `Firefly/Depth` | render/sensors → planner-owned EGO mapper | Planning input; voxel observations provide map display |
 | `Firefly/Imu` | sim/sensors → VIO, FC | Optional replay observations use the registered `vio/input/*` diagnostic gate |
-| `Firefly/Odometry` | VIO → control, planning, evaluation | Pose diagnostics; evaluation explicitly subscribes |
+| `Firefly/Odometry` | VIO → control, planning, flight scripts | Pose diagnostics; flight scripts subscribe to native state |
 | `Firefly/Navigation` | VIO/localization → optional consumers, mimir | Atomic map←odom relation; mimir records changes only and uses bounded startup matching, with poses supplied by their existing observation streams |
-| `Firefly/Reference` | trajectory output → FC, evaluation | Evaluation records target pose and velocity |
-| `Firefly/Control` | FC → actuators/sim, evaluation | Motor evidence and FC summaries |
-| `Firefly/PlantState`, `Firefly/Airframe` | sim/airframe → FC, system consumers | Independent evaluation evidence; VIO uses camera and IMU observations |
-| `Firefly/Command` | ffctl/evaluation → FC | Results and rejection reasons in event logs |
-| `Firefly/Goal` | ffctl/evaluation → planner | Position and optional terminal yaw in local odom coordinates; yaw in radians, CLI in degrees |
+| `Firefly/Reference` | trajectory output → FC, flight scripts | Flight scripts observe reference goal identity |
+| `Firefly/Control` | FC → actuators/sim | Motor evidence and FC summaries |
+| `Firefly/PlantState`, `Firefly/Airframe` | sim/airframe → FC, system consumers | Optional physical-state evidence; VIO uses camera and IMU observations |
+| `Firefly/Command` | ffctl → FC | Results and rejection reasons in event logs |
+| `Firefly/Goal` | ffctl → planner | Position and optional terminal yaw in local odom coordinates; yaw in radians, CLI in degrees |
 | `Firefly/MandatoryStop` | external tools → planner | Stop command; outcome in planner state and logs |
-| `Firefly/Trajectory`, `Firefly/PlannerHeartbeat`, `Firefly/TrajectoryControl`, `Firefly/PlannerStatus` | planner/FSM ↔ trajectory output/evaluation | Atomic xyz/yaw polynomials with shared piece times and a stationary endpoint; heartbeat loss finishes the committed stop; status reports scheduled completion; task evaluation checks measured arrival |
+| `Firefly/Trajectory`, `Firefly/PlannerHeartbeat`, `Firefly/TrajectoryControl`, `Firefly/PlannerStatus` | planner/FSM ↔ trajectory output/flight scripts | Atomic xyz/yaw polynomials with shared piece times and a stationary endpoint; heartbeat loss finishes the committed stop; status reports scheduled completion; flight scripts observe native completion |
 | `Firefly/Features`, `Firefly/PoseObservation` | feature/matching → localization | Business localization input; localization emits registered result diagnostics |
 
 Latest-value business channels retain the newest available sample. Complete replay uses the dedicated
@@ -106,30 +105,44 @@ of subsequent business events. Known loss makes the recording fail.
 | `corr/*`, `vision/debug/map_query_wall_s` | External localization gates, disagreement, correction and query timing |
 | `plan/*` | Global guides, accepted executable local paths including their stopping tail, poses, obstacle planes and maps for display |
 | `plan/collision` | Planner-owned depth map after obstacle inflation, in odom coordinates at the planner simulation timestamp; bounded voxel snapshots/deltas for checking collision geometry, using the existing map display cadence and budgets |
-| `acceptance/*` | Scoring evidence; display simplification must preserve it and all acceptance thresholds |
 | `mimir/*`, `logs/*` | Configuration, queue high-water, lifecycle, failures and process events |
 | `mimir/status/{fc/tick_rate,vio/processing,vio/posterior_age,vio/landmarks,camera/publish_rate,camera/publish_latency}` | Six independent recorder-derived numeric documents from existing scalar observations; at most 2 Hz per entity in measurement time, six cached values and one constant-space publication counter on existing observations |
 | `frames/{map,odom,world}` | Recorder-owned display transforms: root←map identity, temporal map←odom from Navigation, and optional constant map←world startup alignment; display-layer data |
 
 ### Spatial frames
 
-HIL forwards numeric diagnostics and process logs to the host recorder using the existing scalar
-and log queue budgets. The board validates each IPC publisher's sequence before USB forwarding;
-the host assigns one continuous sequence per forwarded topic. Log trace IDs and producer loss
-counts survive transport. A source gap or known producer loss fails the run. HIL traffic summaries
+HIL forwards Navigation, spatial/voxel diagnostics, numeric diagnostics and process logs to the
+host recorder. Navigation retains its atomic odometry, alignment, revision and external-map fields,
+so the recorder applies the same frame construction as local simulation. Spatial and voxel payloads
+retain their source entity, measurement timestamp, active array values and voxel chunk identity.
+Source production gates and cadences remain unchanged; wire encoding carries active elements only.
+The board uses the existing 256-message spatial and 32-message voxel IPC budgets, with at most
+8 spatial publishers and one voxel publisher. Control is drained before each diagnostic message;
+a maximum-size voxel message occupies up to 196,732 payload bytes (13 USB fragments). The existing
+16 KiB fragment, 512 KiB message and bounded USB queue limits apply. Sequence validation covers
+each source publisher; the host assigns one continuous sequence per forwarded topic.
+Log trace IDs and producer loss counts survive transport. A source gap or known producer loss
+fails the run. HIL traffic summaries
 use simulation timestamps; heartbeat deadlines use local monotonic wall time. Retain the complete
 RRD through shutdown and verify transport, posterior coverage and hover limits independently.
+For roundtrip acceptance, the board forwards `Firefly/Reference` and `Firefly/PlannerStatus` on
+the existing bounded USB uplink. Motor owns their latest-value subscriptions and checks control
+before every telemetry write. Their producer rates remain the planner/trajectory server's existing
+cadence (at most 100 Hz each); the two payloads add at most 28.8 kB/s including frame headers.
+Flight scripts observe original measurement and goal timestamps, alignment fields and completion
+values. Native completion and measured arrival are distinct facts. Command events use logs/flight,
+with at most one 512-byte message per command or transition on the existing Log queue budget.
 
 All registered 3D payloads declare their source frame in `mimir/schema.rs`; adding a spatial entity
 requires registering both its payload kind and its frame. `Transform3D.parent_frame` labels raw poses;
-`CoordinateFrame` labels lines, arrows and voxels in the same row, preserving their association across recursive clears. Raw positions, orientations, timestamps and acceptance evidence remain unchanged.
+`CoordinateFrame` labels lines, arrows and voxels in the same row, preserving their association across recursive clears. Raw positions, orientations, timestamps remain unchanged.
 
 | Entities | Frame |
 |---|---|
-| `gt/{pose,traj}`, `acceptance/gt` | Simulator `world` |
-| `vio/{odom,traj}`, `vio/posterior/pose_imu_world`, `vio/prediction/pose_body_odom`, `acceptance/odom` | Local estimator `odom`; posterior “world” means the estimator's local world |
-| `vio/map/*`, `corr/*`, `acceptance/corrected` | Navigation `map` |
-| Spatial `plan/*`, `acceptance/reference` | Local planner `odom`; independent of optional Navigation corrections |
+| `gt/{pose,traj}` | Simulator `world` |
+| `vio/{odom,traj}`, `vio/posterior/pose_imu_world`, `vio/prediction/pose_body_odom` | Local estimator `odom`; posterior “world” means the estimator's local world |
+| `vio/map/*`, `corr/*` | Navigation `map` |
+| Spatial `plan/*` | Local planner `odom`; independent of optional Navigation corrections |
 | `cameras/{left,right}` | Extrinsics relative to the moving `tf#/vio/prediction/pose_body_odom` body frame; intrinsics and pixel overlays retain camera coordinates |
 
 The Viewer root connects to `map`. `map←odom` is recorded at the Navigation measurement time on
@@ -316,7 +329,7 @@ The display adds at most twelve small document rows per measurement second after
 with constant-size state. Full source series and images remain recorded unchanged; load tests verify
 queue budgets, source continuity and final recording completion with these derived cards enabled.
 Tracking/control charts show track IDs, reprojection RMS and controller tracking error; the latter
-is target-versus-estimated-position error. Ground-truth drift uses the evaluation observations. Timing, estimator details and logs
+is target-versus-estimated-position error. Ground-truth drift is compared from the original GT and VIO trajectories with explicit frame alignment. Timing, estimator details and logs
 are tabs. Thrust and other raw observations remain available in the entity tree.
 
 In the default 3D view, green is the global guide path, coral red is the local planned trajectory
@@ -337,8 +350,7 @@ where disk access remains possible. Closing uses an independent control path.
 RRD records lifecycle and high-water statistics in `logs/mimir`. Index memory grows with chunk count;
 it is separate from the bounded pending-data budget.
 
-Runtime archives contain only `log.rrd`; acceptance scores use the recorded evidence and return
-through the terminal and exit status.
+Runtime archives contain only log.rrd; command outcomes and diagnostics are retained there.
 CLI help, command results and exported artifacts may use stdout. Stderr supplies immediate diagnostics;
 RRD retains archived evidence. CompactReporter writes span summaries to stderr, and RRD stage diagnostics
 provide archived timing.
@@ -348,7 +360,7 @@ provide archived timing.
 ```bash
 cargo test -p mimir -p firefly-observability -p firefly-pubsub --all-targets
 FIREFLY_TEST_PYTHON="$PWD/.venv/bin/python" cargo test -p firefly-pubsub --test python_interop -- --ignored
-uv run pytest tests/evaluation -q
+uv run pytest packages/firefly-workspace/tests packages/firefly-mujoco/tests tests/test_observability_contract.py -q
 FIREFLY_RUN_TELEMETRY_LOAD=1 uv run pytest tests/system/test_mimir.py -q -s
 ```
 

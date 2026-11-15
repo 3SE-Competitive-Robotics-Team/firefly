@@ -1,4 +1,4 @@
-"""闭环测试进程的身份检查、输出消费与 SIGINT 收尾。"""
+"""工作区进程的身份检查、输出消费与 SIGINT 收尾。"""
 
 from collections import deque
 from collections.abc import Callable, Sequence
@@ -87,9 +87,9 @@ def active_processes(root: Path) -> list[int]:
     root = root.resolve()
     found = []
     binaries = {"firefly-rootslam", "render", "mimir", "fc", "hil", "localization", "planner", "aliked", "lightglue"}
-    scripts = {"firefly-sim", "mimir", "rerun", "collect_vision_map.py"}
-    modules = {"firefly_sim", "firefly_sim.main",
-               "firefly_evaluation.mission_sim", "firefly_evaluation.disturbance_sim"}
+    scripts = {"firefly-sim", "mimir", "rerun", "collect_vision_map.py", "flight.py",
+               "hil_hover.py", "hil_roundtrip.py"}
+    modules = {"firefly_sim", "firefly_sim.main"}
     for process in psutil.process_iter():
         if process.pid == os.getpid():
             continue
@@ -108,7 +108,7 @@ def active_processes(root: Path) -> list[int]:
                 python_entry = len(args) > 2 and args[2] in modules
             elif args[1:2] == ["-c"]:
                 code = next(iter(args[2:3]), "")
-                python_entry |= any(f"import_module({module!r})" in code for module in modules)
+                python_entry |= any(module in code for module in modules)
             python = cwd.is_relative_to(root) and python_entry
             if native or python:
                 found.append(process.pid)
@@ -124,10 +124,10 @@ def require_idle(root: Path) -> None:
 
 @contextmanager
 def isolated_run(root: Path):
-    """独占验收锁，并在确认仓库进程空闲后启动一轮验收。"""
+    """独占运行锁，并在确认仓库进程空闲后启动一轮验收。"""
     directory = root / "logs"
     directory.mkdir(exist_ok=True)
-    with (directory / "acceptance.lock").open("a") as lock:
+    with (directory / "run.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         require_idle(root)
         yield

@@ -15,11 +15,15 @@ use firefly_hil::protocol::{Message, Stats};
 use firefly_pubsub::attitude::{ATTITUDE_TOPIC, AttitudeMessage};
 use firefly_pubsub::control::{CONTROL_BUFFER_SIZE, CONTROL_TOPIC, ControlMessage};
 use firefly_pubsub::log::{LOG_BUFFER_SIZE, LOG_MAX_PUBLISHERS, LOG_TOPIC, LogMessage};
+use firefly_pubsub::navigation::{NAVIGATION_TOPIC, NavigationMessage};
 use firefly_pubsub::node::{IpcNode, create_node};
 use firefly_pubsub::odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC, OdomMessage};
+use firefly_pubsub::reference::{REFERENCE_TOPIC, ReferenceMessage};
 use firefly_pubsub::subscriber::{Subscriber, SubscriberOptions};
+use firefly_pubsub::trajectory::{PLANNER_STATUS_TOPIC, PlannerStatusMessage};
 use firefly_pubsub::viz::{
-    SCALAR_BUFFER_SIZE, SCALAR_TOPIC, SCALARS_MAX, ScalarMessage, VIZ_MAX_PUBLISHERS,
+    SCALAR_BUFFER_SIZE, SCALAR_TOPIC, SCALARS_MAX, ScalarMessage, VIZ_BUFFER_SIZE,
+    VIZ_MAX_PUBLISHERS, VIZ_TOPIC, VOXEL_BUFFER_SIZE, VOXEL_TOPIC, VizMessage, VoxelMessage,
 };
 use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 
@@ -39,6 +43,11 @@ struct Ports {
     odom: Subscriber<OdomMessage>,
     corrected: Subscriber<OdomMessage>,
     attitude: Subscriber<AttitudeMessage>,
+    reference: Subscriber<ReferenceMessage>,
+    planner_status: Subscriber<PlannerStatusMessage>,
+    navigation: Subscriber<NavigationMessage>,
+    geometry: Subscriber<VizMessage>,
+    voxels: Subscriber<VoxelMessage>,
     scalar: Subscriber<ScalarMessage>,
     log: Subscriber<LogMessage>,
 }
@@ -61,6 +70,27 @@ fn open_ports(node: &IpcNode) -> Result<Ports, Box<dyn std::error::Error>> {
         odom: Subscriber::with_topic(node, ODOM_TOPIC)?,
         corrected: Subscriber::with_topic(node, CORRECTED_ODOM_TOPIC)?,
         attitude: Subscriber::with_topic(node, ATTITUDE_TOPIC)?,
+        reference: Subscriber::with_topic(node, REFERENCE_TOPIC)?,
+        planner_status: Subscriber::with_topic(node, PLANNER_STATUS_TOPIC)?,
+        navigation: Subscriber::with_topic(node, NAVIGATION_TOPIC)?,
+        geometry: Subscriber::with_options(
+            node,
+            VIZ_TOPIC,
+            SubscriberOptions {
+                buffer_size: VIZ_BUFFER_SIZE,
+                service_max_buffer_size: Some(VIZ_BUFFER_SIZE),
+                max_publishers: Some(VIZ_MAX_PUBLISHERS),
+            },
+        )?,
+        voxels: Subscriber::with_options(
+            node,
+            VOXEL_TOPIC,
+            SubscriberOptions {
+                buffer_size: VOXEL_BUFFER_SIZE,
+                service_max_buffer_size: Some(VOXEL_BUFFER_SIZE),
+                max_publishers: Some(1),
+            },
+        )?,
         log: Subscriber::with_options(
             node,
             LOG_TOPIC,
@@ -96,6 +126,8 @@ fn forward(
     let mut last_stats = Instant::now();
     let mut scalar_sequences = BTreeMap::new();
     let mut log_sequences = BTreeMap::new();
+    let mut geometry_sequences = BTreeMap::new();
+    let mut voxel_sequences = BTreeMap::new();
     while RUNNING.load(Ordering::Relaxed) {
         firefly_observability::pump_log_ipc(log_ipc);
         let mut wrote = drain_control(&mut writer, &ports.control, &mut stats)?;
@@ -128,6 +160,58 @@ fn forward(
             )? {
                 wrote = true;
             }
+        }
+        while let Ok(Some(sample)) = ports.reference.receive() {
+            wrote |= write_telemetry(
+                &mut writer,
+                &ports.control,
+                &Message::Reference(*sample.payload()),
+                &mut stats,
+            )?;
+        }
+        while let Ok(Some(sample)) = ports.planner_status.receive() {
+            wrote |= write_telemetry(
+                &mut writer,
+                &ports.control,
+                &Message::PlannerStatus(*sample.payload()),
+                &mut stats,
+            )?;
+        }
+        while let Ok(Some(sample)) = ports.navigation.receive() {
+            wrote |= write_telemetry(
+                &mut writer,
+                &ports.control,
+                &Message::Navigation(*sample.payload()),
+                &mut stats,
+            )?;
+        }
+        while let Ok(Some(sample)) = ports.geometry.receive() {
+            observe_sequence(
+                &mut geometry_sequences,
+                sample.header().publisher_id().value(),
+                sample.sequence,
+                VIZ_MAX_PUBLISHERS,
+            )?;
+            wrote |= write_telemetry(
+                &mut writer,
+                &ports.control,
+                &Message::Viz(Box::new(*sample.payload())),
+                &mut stats,
+            )?;
+        }
+        while let Ok(Some(sample)) = ports.voxels.receive() {
+            observe_sequence(
+                &mut voxel_sequences,
+                sample.header().publisher_id().value(),
+                sample.sequence,
+                1,
+            )?;
+            wrote |= write_telemetry(
+                &mut writer,
+                &ports.control,
+                &Message::Voxels(Box::new(*sample.payload())),
+                &mut stats,
+            )?;
         }
         while let Ok(Some(sample)) = ports.scalar.receive() {
             observe_sequence(

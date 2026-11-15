@@ -84,6 +84,20 @@ class DepthImageMessage(ctypes.Structure):
         return "FireflyDepthImageMessage"
 
 
+class PlannerStatusMessage(ctypes.Structure):
+    """规划目标执行快照，与 Rust trajectory::PlannerStatusMessage 一致。"""
+
+    _fields_ = [("timestamp", ctypes.c_double), ("goal_timestamp", ctypes.c_double),
+                ("finished", ctypes.c_uint64)]
+
+    @staticmethod
+    def type_name():
+        return "FireflyPlannerStatusMessage"
+
+
+assert ctypes.sizeof(PlannerStatusMessage) == 24
+
+
 class ReferenceMessage(ctypes.Structure):
     """参考状态：与 Rust `ReferenceMessage`（`FireflyReferenceMessage`）一致。"""
 

@@ -2,7 +2,7 @@
 from pathlib import Path
 import re
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_every_production_topic_is_documented():

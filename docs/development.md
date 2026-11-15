@@ -15,7 +15,7 @@
 - 生命周期由拥有资源的类型维护：用具名状态表达互斥阶段，转换函数检查前置条件，
   完成、取消、失败及清理分别返回明确结果。测试覆盖正常转换、重复事件和退出路径。
 - 可复现运行固定源码、二进制、配置、输入与标定指纹，为每轮选择新的产物路径。
-  运行日志与原始验收证据统一归 [Mimir 的 `log.rrd`](mimir.md)，评分通过终端与退出码返回。
+  运行日志与原始验证证据统一归 [Mimir 的 `log.rrd`](mimir.md)，命令结果通过终端与退出码返回。
 - 编译、类型检查、单测、真实 IPC、数据集与飞行按各自原定门槛验证，分别报告通过、
   未运行、跳过和失败。
 
@@ -313,11 +313,23 @@ HIL 亲和性约束应用线程，内核中断、系统服务和 supervisor 仍�
 - USB 模式转换通过 `/opt/firefly/logs/hil/transition.lock` 跨进程互斥，覆盖服务启动、
   完成标记与落盘；ADB 刚枚举时发起的新会话会等待上一轮恢复完成。
 
-`scripts/hil_hover.py` 复用系统任务的起飞、20 秒持续悬停、落地与姿态评分，
-由 Mimir 输出新的 `logs/yyyymmdd_hhmmss/log.rrd`，目录使用系统本地时间；
-真值只用于主机评分，评分结果通过终端和退出码返回。
-`scripts/hil_hover_monitor.py` 可独立查看状态，不发送控制命令。
-链路就绪、悬停功能、精度和实时性分别报告，阈值沿用系统验收定义。
+scripts/hil_hover.py 发送起飞、20 秒 Hold 和降落命令，记录 FC 原生模式。
+scripts/hil_hover_monitor.py 可独立查看状态，不发送控制命令。
+命令流程完成、录制完整性、飞行精度和实时性分别报告。
+
+22m 往返使用板端 RootSLAM、planner、traj-server 与 FC，主机下发双目、IMU 和深度：
+
+```bash
+cargo build --locked --release -p render -p mimir -p hil -p ffctl
+cargo xtask deploy-hil --estimator rootslam --mission roundtrip
+uv run python scripts/hil_roundtrip.py
+```
+
+`processes-hil-roundtrip.toml` 启用板端规划进程；`hil-roundtrip.toml` 启用深度下发。
+任务发送 odom 系 (22, 0, 1.595) 和 (0, 0, 1) 两个目标，以原生轨迹完成状态切换航段。
+飞控自身保护保持启用；两端使用同次构建并部署。
+`hil --check` 核对 USB 接口和端点；实际传输及协议一致性由运行验证。
+帧版本不匹配会结束会话，错误包含收到版本和当前版本；重新部署两端后再运行。
 
 ### 进程与宿主机
 
@@ -391,10 +403,9 @@ uv run --all-packages python scripts/build_vision_map.py <通过内容校验的�
 `tests/system` 的 session fixture 先执行 `cargo xtask release`，再启动真实进程。
 构建并行度使用 Cargo 默认值或 `CARGO_BUILD_JOBS`，Python 依赖通过 `uv sync` 安装。
 
-`packages/firefly-evaluation` 提供任务编排、进程管理、物理观测与 RRD 评分。
-CLI 和系统测试都通过 uv workspace 导入该包；`tests/` 仅保留测试和 pytest fixtures。
-包从当前目录向上定位工作区，CLI 可用 `--workspace` 指定目录。
-纯评分与进程管理单元测试：`uv run pytest tests/evaluation -q`。
+firefly_workspace.process 提供子进程回收、输出排空和运行互斥；
+firefly_mujoco.messages 统一 Python IPC 定义，firefly_mujoco.vision_assets 维护建图库图的资产契约。
+对应单元测试随各自包运行。
 
 ```bash
 cargo fmt --all --check
@@ -467,53 +478,28 @@ FIREFLY_EGO_MAP_REFERENCE="$PWD/target/ego-map-reference/reference" cargo test -
 ```
 
 先完成 release 构建，准备 RMUC 资产与图形会话，按运行章节确认宿主机和 IPC 干净。
-以下用例自行启动生产进程、用本次 RRD 评分并清理退出：
+真实 IPC 启动检查独立运行：
 
-```bash
+~~~bash
 FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/system/test_sensor_startup.py -q
-uv run pytest tests/system/test_imu_flight.py -q
-uv run pytest tests/system/test_imu_flight.py -q -k imu_hover
-uv run pytest tests/system/test_hover_disturbance.py::test_hover_disturbance -q
-uv run pytest tests/system/test_roundtrip.py -q
-```
+~~~
 
-- 启动检查屏蔽 PlantState，保留 render 所需 GroundTruth；未启用飞行时只证明初始化与零推力。
-- IMU 用例分别检查飞行、持续悬停与 VIO 失联后的有限姿态支持。保持原目标，独立评分整段
-  真值、姿态和主链路健康；静止评分使用固定等待与窗口，全程检查碰撞、重置和退出。
-- 扰动用例保持同一个 Hold 目标，逐轮恢复并持续悬停，评分通过后发送下一轮，按实际执行轮次报告。
-- 估计器为 `firefly-rootslam`，处理时延证据来自 RRD 的 `rootslam/frame_processing_ms`。
-- 22m 往返使用 `configs/acceptance_22m.toml`，默认空局部地图与 RootSLAM VIO；
-  分别验证初始化、真实到点、跟踪、定位、降落、碰撞和退出；在线回环使用独立验收。
+启动检查屏蔽 PlantState，保留 render 所需 GroundTruth；未启用飞行时只证明初始化与零推力。
 
-任务配置和门槛由 `firefly_evaluation` 的 `mission.Options`、`hover_metrics.HoverLimits`、
-`disturbance_metrics.DisturbanceLimits` 及 `configs/acceptance*.toml` 维护，运行前固定。原始阶段事件与观测保存于 RRD。
-新增门控须以固定配置独立启动三次、全部通过才建立基线，保留每次失败。
+### 飞行指令脚本
 
-姿态融合、初始化、坐标、视觉前端或仿真传感器改动后，必须运行 `imu_hover`；
-悬停、往返与回环分别验收。显式指定系统用例缺运行条件时报错；普通 CI 的 skip
-单独列出。`tests/evaluation/test_hover_metrics.py` 使用纯数据检验评分规则。
+scripts/flight.py 负责启动 release 进程、发送起降和航点指令以及回收进程。
+阶段切换使用 FC 模式与 PlannerStatus 正常完成状态；运行事件通过 Firefly/Log 交给 Mimir。
+脚本退出码表示命令流程与清理结果。精度、碰撞和实时性需从录制证据独立核对。
 
-### 任务验收与可选地图
+~~~bash
+uv run python scripts/flight.py --mission hover
+uv run python scripts/flight.py --mission roundtrip
+uv run python scripts/hil_hover.py
+uv run python scripts/hil_roundtrip.py
+~~~
 
-CLI 使用已构建的 release 程序，运行前执行统一构建命令：
-
-```bash
-cargo xtask release
-uv run firefly-evaluate
-uv run firefly-evaluate --case nominal --config configs/acceptance_22m.toml
-```
-
-`--case nominal|reference_loss|estimator_loss` 选择任务。所有任务使用 RootSLAM VIO 与从空地图
-启动的局部深度规划；飞行误差、碰撞和时间门槛由验收配置固定。
-
-正常阶段流转使用新鲜估计状态和 FC 模式；真值用于独立评分及碰撞/越界中止。
-局部 VIO 采用固定尺度的航向/平移对齐，地图定位与参考跟踪直接使用各自坐标契约评分。
-会话地图评分以首个真值样本确定固定换基，原始数据保留在独立评估链路。
-任务评分逐项检查覆盖、断流、完成状态、碰撞、重置和退出清理结果。
-
-运行产物遵循 [Mimir 录制规则](mimir.md)，统一保存到本地时间的
-`logs/yyyymmdd_hhmmss/log.rrd`。依赖失败的阶段标 blocked，未执行阶段单列，
-原始观测和阶段事件保留在 RRD；评分通过终端和退出码返回。
+原生 FC/planner 保护始终由运行进程执行。运行产物遵循 [Mimir 录制规则](mimir.md)。
 
 ### 可选资产检查
 

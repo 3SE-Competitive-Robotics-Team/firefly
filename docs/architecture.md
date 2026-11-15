@@ -76,7 +76,7 @@ IMU 发布角速度与比力，备用姿态解算位于 FC 内。
 
 | 侧 | 进程 | 职责 |
 |---|---|---|
-| 电脑 | `hil` | 下行传感器、机体描述和指令；上行控制、里程计、姿态、标量与日志 |
+| 电脑 | `hil` | 下行传感器、机体描述和指令；上行控制、导航、规划状态、参考与已登记诊断 |
 | 板端 | `hil-gadget` | 管理 configfs、FunctionFS、UDC 与超时恢复 |
 | 板端 | `camera --hil` | 将 USB 输入发布为本机传感器与指令话题 |
 | 板端 | `motor --hil` | 将本机控制与遥测回传电脑，执行器由主机仿真实现 |
@@ -86,9 +86,13 @@ IMU 发布角速度与比力，备用姿态解算位于 FC 内。
 深度像素对齐。每条上行遥测或日志之间重新检查控制队列，IMU 批次发布后唤醒消费者。
 暂时无数据的读取保留有效前缀；主机端点读写等待均有 100 ms 上限，任一 USB worker
 结束或 panic 都结束整次会话并回收两个 worker。
-队列、单帧与重组大小均有固定上限。HIL 协议 v3 保留目标航向、日志 trace、
+队列、单帧与重组大小均有固定上限。HIL 协议 v5 保留目标航向、日志 trace、
 序号与丢失计数，两端版本不一致时拒绝处理帧。板端按发布者检查诊断连续性，
 主机桥为聚合 IPC 发布者分配连续序号。
+板端 `Navigation` 原子快照、`Viz` 空间诊断与 `VizVoxels` 有序分块回传到同名话题；
+Mimir 据此建立 `map←odom` 与启动时 `map←world`，并沿用各实体登记的原始坐标。
+板端 `Reference` 和 `PlannerStatus` 原样回传至同名主机 IPC 话题，供任务验收核对
+目标身份、参考覆盖和正常轨迹完成；飞控仍消费板端本地规划参考。
 
 传感器与状态时间沿用 `sim_time`，链路超时使用各端本机单调时钟。
 HIL 与 ADB 互斥；看门狗恢复时先停 HIL 进程，再恢复正常进程清单和 USB 功能。
@@ -208,7 +212,7 @@ Mimir 原点匹配的 `Matching / Anchored / Unavailable`、轨迹执行的
 | [Mimir ingress](../apps/mimir/src/ingress.rs)、[archive](../apps/mimir/src/archive.rs) | 接收 → 排空诊断 → 通道关闭 → archive finish / sync → join | 体素分块完整后提交基线或增量；未完成组装返回错误 |
 | [Mimir frames](../apps/mimir/src/frames.rs)、[status](../apps/mimir/src/status.rs) | 原点匹配开放 → 已对齐 / 已结束匹配；指标采样 → 有效 / 过期 | 导航会话、真值与显示刷新分别持有状态 |
 | [进程 supervisor](../apps/ffctl/src/process/supervisor.rs) | Stopped → Running → Backoff → Running；Running → Stopping → Stopped | Stop 取消重启资格；Stopping 持有子进程直到回收，超时保留 PID；逆序 SIGINT |
-| [测评进程](../packages/firefly-evaluation/src/firefly_evaluation/process_lifecycle.py)、[任务编排](../packages/firefly-evaluation/src/firefly_evaluation/mission.py) | 进程运行 → 停止 → 输出排空 → 结果；阶段 blocked → running → passed / failed | 输出回调错误在排空和回收后传播；运行锁隔离任务，录制最后退出 |
+| [进程工具](../packages/firefly-workspace/src/firefly_workspace/process.py)、[飞行指令](../scripts/flight.py) | 进程运行 → 停止 → 输出排空 | 运行锁隔离任务，录制最后退出；命令结果与飞行质量分别报告 |
 | [渲染 mailbox](../apps/render/src/process.rs)、[GPU capture](../apps/render/src/capture.rs)、[帧链路](../apps/render/src/link.rs) | 空 / 有值 / 关闭；提交 → GPU 映射 → 应答；帧组装 → 完成 / 退休 | 通道关闭结束等待；请求与 GPU 槽位分别回收 |
 | [仿真](../apps/firefly-sim/src/firefly_sim/main.py)、[电机](../apps/motor/src/actuator.rs) | 等待新鲜控制 → 运行 → 控制超时 | 仿真暂停推进时间；执行器回到零输出，退出时归零 |
 | [相机](../apps/camera/src/capture.rs)、[IMU 设备](../apps/imu/src/source.rs) | 打开设备 → 发布循环 → 停止 | 进程拥有设备句柄和退出流程 |
@@ -250,12 +254,11 @@ ALIKED 的离线 / 在线模式在启动时确定；quad 使用 Bevy startup / u
 | 21 | [渲染 capture](../apps/render/src/capture.rs)、[帧组装](../apps/render/src/link.rs) | 可选 `requested_seq` 表示出图窗口；GPU 在途计数与帧退休序号 | 回调归还 GPU 槽位；三传感器成组发布；退休序号拒绝迟到回复并回收缓冲 |
 | 22 | [仿真](../apps/firefly-sim/src/firefly_sim/main.py)、[电机](../apps/motor/src/actuator.rs) | 仿真接收时钟与暂停标志；电机 `ControlState` 共同拥有推力与收到时刻 | 超时暂停物理推进或归零电机；退出执行清理 |
 | 23 | [可选定位](../apps/localization/src/main.rs)、[匹配历史](../apps/lightglue/src/sensors.rs)、[融合门控](../crates/firefly-localization/src/filter.rs) | `AlignmentState::{Waiting, Ready, Reset}`；匹配历史与融合门控独立 | 对齐与历史就绪后处理观测；会话重置锁存；观测有等待、拒绝、过期与接受结果 |
-| 24 | [测评任务](../packages/firefly-evaluation/src/firefly_evaluation/mission.py)、[子进程](../packages/firefly-evaluation/src/firefly_evaluation/process_lifecycle.py) | 阶段仅从缺省或 `blocked` 进入 `running`，保留终态证据；子进程退出与 reader 排空 | 阶段结果完整记录；轨迹完成后验证实际到点；进程退出与输出排空分别验证 |
-| 25 | [测评仿真](../packages/firefly-evaluation/src/firefly_evaluation/mission_sim.py)、[外力脉冲](../packages/firefly-evaluation/src/firefly_evaluation/disturbance_sim.py) | 首次重置标志；`PulsePhase::{IDLE, APPLYING, CLEARING}` 和剩余物理步数 | 首次重置与运行期重置分开；脉冲按序执行，清零后才接收下一轮 |
-| 26 | [离线采集](../scripts/collect_vision_map.py)、[库图复用](../packages/firefly-evaluation/src/firefly_evaluation/vision_assets.py)、[建库](../scripts/build_vision_map.py) | 逐帧质量门控；`finish_capture` 回收 renderer 后原子提交清单，清理失败写入原因 | 配对与质量门控后接受帧；完整清单和指纹一致才复用；失败结果保留不完整状态 |
-| 27 | [CAD 资产流水线](../packages/firefly-cad/src/firefly_cad/pipeline.py) | 内容缓存与 manifest 的 `building / passed / failed`；失败保留源指纹与原因 | 生成、几何验收、资产指纹完成后发布通过状态 |
-| 28 | [数据集导出](../apps/rootslam/src/dataset_app.rs)、[产物预检](../apps/rootslam/src/dataset_app/outputs.rs) | 输入与输出预检、生产、EOF、导出；导出失败通过 `cancel_mapping` 回收并保留清理错误 | 预检本轮新产物路径；生产器、估计器、映射分别完成后导出对应结果 |
-| 29 | [部署](../xtask/src/deploy.rs)、[解包](../xtask/src/archive.rs) | 逐步骤检查远端完成标记；停服成功后替换，启动并收到 supervisor 应答后完成 | 发布成功要求 supervisor socket 应答；远端传输与远端执行结果分别检查 |
+| 24 | [飞行指令](../scripts/flight.py)、[子进程](../packages/firefly-workspace/src/firefly_workspace/process.py) | 指令发送 → 原生完成状态 → 降落 → 进程回收 | 事件进入 Mimir；命令结果与飞行质量分别核对 |
+| 25 | [离线采集](../scripts/collect_vision_map.py)、[库图复用](../packages/firefly-mujoco/src/firefly_mujoco/vision_assets.py)、[建库](../scripts/build_vision_map.py) | 逐帧质量门控；`finish_capture` 回收 renderer 后原子提交清单，清理失败写入原因 | 配对与质量门控后接受帧；完整清单和指纹一致才复用；失败结果保留不完整状态 |
+| 26 | [CAD 资产流水线](../packages/firefly-cad/src/firefly_cad/pipeline.py) | 内容缓存与 manifest 的 `building / passed / failed`；失败保留源指纹与原因 | 生成、几何验收、资产指纹完成后发布通过状态 |
+| 27 | [数据集导出](../apps/rootslam/src/dataset_app.rs)、[产物预检](../apps/rootslam/src/dataset_app/outputs.rs) | 输入与输出预检、生产、EOF、导出；导出失败通过 `cancel_mapping` 回收并保留清理错误 | 预检本轮新产物路径；生产器、估计器、映射分别完成后导出对应结果 |
+| 28 | [部署](../xtask/src/deploy.rs)、[解包](../xtask/src/archive.rs) | 逐步骤检查远端完成标记；停服成功后替换，启动并收到 supervisor 应答后完成 | 发布成功要求 supervisor socket 应答；远端传输与远端执行结果分别检查 |
 
 显式状态的入口为 `FlightState`、`ExecState`、轨迹 `Execution`、渲染 `Mailbox`、
 Mimir `Alignment`、supervisor `Lifecycle`、A* `NodeState` 与 Basalt 路标块 `State`。

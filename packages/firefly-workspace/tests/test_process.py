@@ -1,23 +1,21 @@
-"""使用本地子进程验证所有权、退出回收和验收互斥。"""
+"""使用本地子进程验证所有权、退出回收和运行互斥。"""
 
 import os
 import signal
 import subprocess
 import sys
 import threading
-from unittest.mock import create_autospec
 
 import pytest
 
-from firefly_evaluation.process_lifecycle import ManagedProcess, active_processes, isolated_run
+from firefly_workspace.process import ManagedProcess, active_processes, isolated_run
 
 
 @pytest.mark.parametrize("entry", ["firefly-sim", "mimir",
-                                  "firefly_evaluation.mission_sim",
-                                  "firefly_evaluation.disturbance_sim"])
+                                  "firefly_sim.main"])
 def test_stop_reaps_child_and_output_thread(tmp_path, entry):
-    if entry.startswith("firefly_evaluation."):
-        package = tmp_path / "firefly_evaluation"
+    if entry.startswith("firefly_sim."):
+        package = tmp_path / "firefly_sim"
         package.mkdir()
         (package / "__init__.py").write_text("")
         script = package / (entry.rsplit(".", 1)[1] + ".py")
@@ -108,29 +106,3 @@ def test_output_callback_failure_drains_child_and_surfaces_after_cleanup(tmp_pat
     assert not child.reader.is_alive()
     assert calls == ["first"]
     assert child.tail[-1] == "complete"
-
-
-def test_mission_cleans_remaining_children_after_one_stop_times_out(tmp_path):
-    from firefly_evaluation.mission import Mission, Options
-
-    stopped = []
-
-    class Child:
-        def __init__(self, name, pid):
-            self.name, self.pid = name, pid
-            self.process = create_autospec(subprocess.Popen, instance=True, spec_set=True)
-            self.process.poll.return_value = None if name == "extra" else 0
-
-        def stop(self):
-            stopped.append(self.name)
-            if self.name == "extra":
-                raise subprocess.TimeoutExpired(self.name, 15.)
-            return 0
-
-    mission = Mission("nominal", Options())
-    mission.processes = {name: Child(name, pid) for pid, name in
-                         enumerate(("viz", "render", "extra", "sim"))}
-    mission.shutdown()
-    assert stopped == ["sim", "extra", "render", "viz"]
-    assert mission.result["stages"]["shutdown"]["status"] == "failed"
-    assert mission.result["remaining_pids"] == [2]

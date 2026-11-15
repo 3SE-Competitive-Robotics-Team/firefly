@@ -26,12 +26,18 @@ use firefly_pubsub::control::{CONTROL_BUFFER_SIZE, CONTROL_TOPIC, ControlMessage
 use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
 use firefly_pubsub::imu::{IMU_TOPIC, ImuMessage};
 use firefly_pubsub::log::{LOG_BUFFER_SIZE, LOG_MAX_PUBLISHERS, LOG_TOPIC, LogMessage};
+use firefly_pubsub::navigation::{NAVIGATION_TOPIC, NavigationMessage};
 use firefly_pubsub::node::{IpcNode, create_node};
 use firefly_pubsub::odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC, OdomMessage};
 use firefly_pubsub::plant::{AIRFRAME_TOPIC, AirframeMessage};
 use firefly_pubsub::publish::Publisher;
+use firefly_pubsub::reference::{REFERENCE_TOPIC, ReferenceMessage};
 use firefly_pubsub::subscriber::{Subscriber, SubscriberOptions};
-use firefly_pubsub::viz::{SCALAR_BUFFER_SIZE, SCALAR_TOPIC, ScalarMessage};
+use firefly_pubsub::trajectory::{PLANNER_STATUS_TOPIC, PlannerStatusMessage};
+use firefly_pubsub::viz::{
+    SCALAR_BUFFER_SIZE, SCALAR_TOPIC, ScalarMessage, VIZ_BUFFER_SIZE, VIZ_MAX_PUBLISHERS,
+    VIZ_TOPIC, VOXEL_BUFFER_SIZE, VOXEL_TOPIC, VizMessage, VoxelMessage,
+};
 
 use crate::config::Config;
 use crate::host::HostLink;
@@ -66,6 +72,11 @@ struct Uplink {
     odom: Publisher<OdomMessage>,
     corrected: Publisher<OdomMessage>,
     attitude: Publisher<AttitudeMessage>,
+    reference: Publisher<ReferenceMessage>,
+    planner_status: Publisher<PlannerStatusMessage>,
+    navigation: Publisher<NavigationMessage>,
+    geometry: Publisher<VizMessage>,
+    voxels: Publisher<VoxelMessage>,
     scalar: Publisher<ScalarMessage>,
     log: Publisher<LogMessage>,
 }
@@ -192,6 +203,26 @@ fn open_ports(node: &IpcNode) -> Result<(Downlink, Uplink), String> {
         corrected: Publisher::with_topic(node, CORRECTED_ODOM_TOPIC)
             .map_err(|error| error.to_string())?,
         attitude: Publisher::with_topic(node, ATTITUDE_TOPIC).map_err(|error| error.to_string())?,
+        reference: Publisher::with_topic(node, REFERENCE_TOPIC)
+            .map_err(|error| error.to_string())?,
+        planner_status: Publisher::with_topic(node, PLANNER_STATUS_TOPIC)
+            .map_err(|error| error.to_string())?,
+        navigation: Publisher::with_topic(node, NAVIGATION_TOPIC)
+            .map_err(|error| error.to_string())?,
+        geometry: Publisher::with_topic_buffer_publishers(
+            node,
+            VIZ_TOPIC,
+            Some(VIZ_BUFFER_SIZE),
+            Some(VIZ_MAX_PUBLISHERS),
+        )
+        .map_err(|error| error.to_string())?,
+        voxels: Publisher::with_topic_buffer_publishers(
+            node,
+            VOXEL_TOPIC,
+            Some(VOXEL_BUFFER_SIZE),
+            Some(1),
+        )
+        .map_err(|error| error.to_string())?,
         log: Publisher::with_topic_buffer_publishers(
             node,
             LOG_TOPIC,
@@ -615,6 +646,8 @@ struct StatsCounters {
     control_age_count: u64,
     scalar_sequence: u64,
     log_sequence: u64,
+    geometry_sequence: u64,
+    voxel_sequence: u64,
     heartbeat: u64,
     /// 已下发图像的 `(side, 时间戳位, 像素和)`，用于和板端回传校验和比对。
     sent_images: VecDeque<(u8, u64, u64)>,
@@ -623,6 +656,7 @@ struct StatsCounters {
     image_unmatched: u64,
 }
 
+#[allow(clippy::too_many_lines)] // 按上行类型平铺转发，统一维护计数和序号。
 fn dispatch_uplink(
     ports: &Uplink,
     stats: &mut StatsCounters,
@@ -676,6 +710,45 @@ fn dispatch_uplink(
                 .attitude
                 .publish(attitude)
                 .map_err(|error| format!("发布 vio attitude: {error}"))?;
+            stats.telemetry += 1;
+        }
+        Message::Reference(reference) => {
+            ports
+                .reference
+                .publish(reference)
+                .map_err(|error| format!("publish reference: {error}"))?;
+            stats.telemetry += 1;
+        }
+        Message::PlannerStatus(planner) => {
+            ports
+                .planner_status
+                .publish(planner)
+                .map_err(|error| format!("publish planner status: {error}"))?;
+            stats.telemetry += 1;
+        }
+        Message::Navigation(navigation) => {
+            ports
+                .navigation
+                .publish(navigation)
+                .map_err(|error| format!("publish navigation: {error}"))?;
+            stats.telemetry += 1;
+        }
+        Message::Viz(mut geometry) => {
+            geometry.sequence = stats.geometry_sequence;
+            stats.geometry_sequence = stats.geometry_sequence.wrapping_add(1);
+            ports
+                .geometry
+                .publish(*geometry)
+                .map_err(|error| format!("publish geometry: {error}"))?;
+            stats.telemetry += 1;
+        }
+        Message::Voxels(mut voxels) => {
+            voxels.sequence = stats.voxel_sequence;
+            stats.voxel_sequence = stats.voxel_sequence.wrapping_add(1);
+            ports
+                .voxels
+                .publish(*voxels)
+                .map_err(|error| format!("publish voxels: {error}"))?;
             stats.telemetry += 1;
         }
         Message::Scalar(mut scalar) => {

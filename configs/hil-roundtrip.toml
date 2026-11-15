@@ -1,0 +1,6 @@
+# 22m HIL：双目和深度下发，规划器与轨迹输出运行在板端。
+# USB 身份、缓冲和队列沿用 apps/hil/src/config.rs 的默认值。
+[link]
+imu_batch = 1
+image_period_s = 0.03333333333333333
+depth = true
