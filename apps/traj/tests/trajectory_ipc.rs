@@ -1,4 +1,4 @@
-//! 独立 release 输出进程的真实 IPC 验证，需要独占规划相关话题。
+//! planner 与独立 traj release 应用的真实 IPC 验证，需要独占规划相关话题。
 use firefly_pubsub::{
     navigation::{NAVIGATION_TOPIC, NavigationMessage},
     node::create_node,
@@ -21,8 +21,24 @@ use std::{
 
 struct OutputProcess(Child);
 
+/// 等待实际接收端就绪后再推进有效里程计，覆盖应用启动耗时的差异。
+fn wait_for_odometry_receivers(odometry: &Publisher<OdomMessage>, count: usize) {
+    let started = Instant::now();
+    loop {
+        let (received, _) = odometry.publish_counted(OdomMessage::default()).unwrap();
+        if received >= count {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "odometry subscribers not ready"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
-#[ignore = "requires release planner/ffctl and exclusive odometry/depth/goal/trajectory IPC topics"]
+#[ignore = "requires release planner/traj/ffctl and exclusive odometry/depth/goal/trajectory IPC topics"]
 fn cli_heading_only_goal_reaches_output_without_translating() {
     use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH};
     let node = create_node().unwrap();
@@ -36,12 +52,8 @@ fn cli_heading_only_goal_reaches_output_without_translating() {
             .spawn()
             .unwrap(),
     );
-    let mut output = OutputProcess(
-        Command::new(release.join("planner"))
-            .arg("--traj-server")
-            .spawn()
-            .unwrap(),
-    );
+    let mut output = OutputProcess(Command::new(release.join("traj")).spawn().unwrap());
+    wait_for_odometry_receivers(&odometry, 2);
     let origin = Instant::now();
     let mut goal_command: Option<OutputProcess> = None;
     let mut saw_rotation = false;
@@ -98,7 +110,7 @@ fn cli_heading_only_goal_reaches_output_without_translating() {
 }
 
 #[test]
-#[ignore = "requires release planner and exclusive odometry/navigation/depth/trajectory IPC topics"]
+#[ignore = "requires release planner/traj and exclusive odometry/navigation/depth/trajectory IPC topics"]
 #[allow(clippy::too_many_lines)]
 fn local_planning_uses_odometry_and_ignores_map_corrections() {
     use firefly_pubsub::camera::{DEPTH_TOPIC, DepthImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH};
@@ -115,7 +127,8 @@ fn local_planning_uses_odometry_and_ignores_map_corrections() {
             .spawn()
             .unwrap(),
     );
-    let mut output = OutputProcess(Command::new(binary).arg("--traj-server").spawn().unwrap());
+    let mut output = OutputProcess(Command::new(binary.with_file_name("traj")).spawn().unwrap());
+    wait_for_odometry_receivers(&odometry, 2);
     let epoch = Instant::now();
     for phase in 0..2 {
         let started = Instant::now();
@@ -197,6 +210,7 @@ fn planner_status_continues_during_map_warmup() {
     let binary =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/planner");
     let mut process = OutputProcess(Command::new(binary).spawn().unwrap());
+    wait_for_odometry_receivers(&odometry, 1);
     let mut stamp = 1.;
     for _ in 0..2 {
         let start = Instant::now();
@@ -231,7 +245,7 @@ fn planner_status_continues_during_map_warmup() {
 }
 
 #[test]
-#[ignore = "requires release planner and exclusive Odometry/Trajectory/Reference IPC topics"]
+#[ignore = "requires release traj and exclusive Odometry/Trajectory/Reference IPC topics"]
 #[allow(clippy::too_many_lines)]
 fn independent_output_samples_position_yaw_and_finishes_stop_after_heartbeat_loss() {
     let node = create_node().unwrap();
@@ -244,9 +258,9 @@ fn independent_output_samples_position_yaw_and_finishes_stop_after_heartbeat_los
         Publisher::<[TrajectoryPieceMessage]>::with_slice_topic(&node, TRAJECTORY_TOPIC).unwrap();
     let references =
         Subscriber::<ReferenceMessage>::with_topic_and_buffer(&node, REFERENCE_TOPIC, 32).unwrap();
-    let binary =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/planner");
-    let mut process = OutputProcess(Command::new(binary).arg("--traj-server").spawn().unwrap());
+    let binary = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/traj");
+    let mut process = OutputProcess(Command::new(binary).spawn().unwrap());
+    wait_for_odometry_receivers(&odometry, 1);
     let origin = Instant::now();
     let start = Endpoint {
         position: Vector3::new(0., 2., 3.),

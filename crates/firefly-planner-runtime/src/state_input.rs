@@ -1,4 +1,4 @@
-//! 局部里程计输入：校验、墙钟存活检测。
+//! planner 与 traj 共用的局部里程计校验和墙钟存活检测。
 //!
 //! 对照 EGO-Planner-v2 的 `have_odom_` 门控；状态源由上游估计服务封装。
 //! 只使用真实里程计观测推进健康状态；失联锁存通过重启进程解除。
@@ -78,6 +78,7 @@ impl StateInput {
             odom: self.odometry(),
         };
     }
+    #[must_use]
     pub fn odometry(&self) -> Option<OdomMessage> {
         match &self.phase {
             InputPhase::Waiting => None,
@@ -95,7 +96,7 @@ impl StateInput {
         let Some(snapshot) = Snapshot::from_message(message) else {
             if matches!(self.phase, InputPhase::Active { .. }) {
                 log::warn!(
-                    "收到无效局部里程计（is_initialized={} t={:.3}），锁存停止规划",
+                    "收到无效局部里程计（is_initialized={} t={:.3}），锁存停止输入",
                     message.is_initialized,
                     message.timestamp
                 );
@@ -119,7 +120,7 @@ impl StateInput {
         if matches!(&self.phase, InputPhase::Active { received, .. } if now.duration_since(*received) >= MAX_AGE)
         {
             log::warn!(
-                "局部里程计墙钟中断 ≥{}ms，锁存停止规划",
+                "局部里程计墙钟中断 ≥{}ms，锁存停止输入",
                 MAX_AGE.as_millis()
             );
             self.stop();
@@ -134,6 +135,7 @@ impl StateInput {
         }
     }
 
+    #[must_use]
     pub const fn stopped(&self) -> bool {
         matches!(self.phase, InputPhase::Stopped { .. })
     }

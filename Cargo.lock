@@ -3689,6 +3689,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "firefly-planner-runtime"
+version = "0.1.0"
+dependencies = [
+ "firefly-base",
+ "firefly-error",
+ "firefly-planner",
+ "firefly-pubsub",
+ "log",
+ "nalgebra",
+]
+
+[[package]]
 name = "firefly-pubsub"
 version = "0.1.0"
 dependencies = [
@@ -7202,6 +7214,7 @@ dependencies = [
  "firefly-map",
  "firefly-observability",
  "firefly-planner",
+ "firefly-planner-runtime",
  "firefly-pubsub",
  "firefly-trajectory",
  "iceoryx2",
@@ -9502,6 +9515,24 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "traj"
+version = "0.1.0"
+dependencies = [
+ "firefly-config",
+ "firefly-error",
+ "firefly-observability",
+ "firefly-planner",
+ "firefly-planner-runtime",
+ "firefly-pubsub",
+ "firefly-trajectory",
+ "iceoryx2",
+ "log",
+ "nalgebra",
+ "serde",
+ "toml 1.2.1+spec-1.1.0",
 ]
 
 [[package]]

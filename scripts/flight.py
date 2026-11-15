@@ -124,7 +124,7 @@ def main(argv=None, *, hil=None, mission=None):
                 start("vio", [str(root/"target/release/firefly-rootslam"), "--no-loop-closures", "--no-mapping"])
                 start("fc", [str(root/"target/release/fc")])
                 if args.mission == "roundtrip":
-                    start("traj-server", [str(root/"target/release/planner"), "--traj-server"])
+                    start("traj", [str(root/"target/release/traj")])
                     start("planner", [str(root/"target/release/planner")])
             wait(lambda: "odom" in latest and latest["odom"].is_initialized and stamp >= 4., wall=40.)
             command("fc", "arm")

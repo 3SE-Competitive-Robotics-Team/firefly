@@ -120,12 +120,13 @@ uv run firefly-sim
 cargo run --release -p render
 cargo run --release -p firefly-rootslam
 cargo run --release -p fc
-cargo run --release -p planner -- --traj-server
+cargo run --release -p traj
 cargo run --release -p planner
 ```
 
-最小闭环只需 mimir/sim/render/firefly-rootslam/fc；规划同时启动 planner 与 `planner --traj-server`
-两个独立进程，前者规划并发布心跳，后者采样并发布飞控参考。
+最小闭环只需 mimir/sim/render/firefly-rootslam/fc；规划同时启动 planner 与 traj
+两个独立应用，前者规划并发布心跳，后者采样并发布飞控参考。
+planner 使用 `configs/planner.toml`，traj 使用 `configs/traj.toml`；轨迹心跳失联门限由 traj 配置。
 RootSLAM 默认关闭建图与回环，作为局部 VIO 使用。
 可选库图定位先填写 `configs/localization.toml [origin]`，并用
 `firefly-rootslam --external-localization`，再启动 localization、aliked 和
@@ -258,7 +259,7 @@ supervisor 对异常退出退避重启；停止使用 SIGINT，超时返回错�
 
 HIL 用 USB 把电脑上的 MuJoCo 物理仿真与板端生产计算连接起来。电脑运行
 `mimir`、`render`、`hil` 和仿真；板端运行 `camera --hil`、
-`motor --hil`、RootSLAM、planner、traj-server 与 FC。电机指令经 USB 返回仿真，HIL 驱动访问
+`motor --hil`、RootSLAM、planner、traj 与 FC。电机指令经 USB 返回仿真，HIL 驱动访问
 FunctionFS 端点，不访问实体相机、IMU 或 PWM。
 
 先构建主机验收程序，再部署板端，最后立即运行验收：
@@ -291,7 +292,7 @@ HIL 默认送图预算为 30 Hz。`configs/processes-hil.toml` 为 A733 设置�
 |---|---|---|
 | 6、7（A76） | RootSLAM | 两个 Rayon worker，所有线程在这两个大核内调度 |
 | 5（A55） | FC | 主循环和 IMU worker 固定在同一个小核 |
-| 0–4（A55） | camera、motor、planner 与 traj-server | 共享小核池，按运行负载调度 |
+| 0–4（A55） | camera、motor、planner 与 traj | 共享小核池，按运行负载调度 |
 
 亲和性由 `taskset` 在应用启动前设置，新线程继承该集合；Rayon 并行度由
 同一命令中的 `RAYON_NUM_THREADS` 设置。普通进程清单和 x86 运行沿用系统调度。
@@ -317,7 +318,7 @@ scripts/hil_hover.py 发送起飞、20 秒 Hold 和降落命令，记录 FC 原�
 scripts/hil_hover_monitor.py 可独立查看状态，不发送控制命令。
 命令流程完成、录制完整性、飞行精度和实时性分别报告。
 
-22m 往返使用板端 RootSLAM、planner、traj-server 与 FC，主机下发双目、IMU 和深度：
+22m 往返使用板端 RootSLAM、planner、traj 与 FC，主机下发双目、IMU 和深度：
 
 ```bash
 cargo build --locked --release -p render -p mimir -p hil -p ffctl
@@ -461,7 +462,7 @@ uv run python -B -m unittest discover -s apps/rootslam/tests -p test_export_rrd.
 
 ```bash
 cargo test -p planner --bin planner -- --ignored --test-threads=1
-cargo test -p planner --test trajectory_ipc -- --ignored --test-threads=1
+cargo test -p traj --test trajectory_ipc -- --ignored --test-threads=1
 ```
 
 IPC 用例独占 Odometry/Depth/Trajectory/Reference，覆盖完整多项式、心跳超时发布顺序、

@@ -46,7 +46,7 @@ impl PlannerManager {
         start: Vector3<f64>,
         goal: Vector3<f64>,
     ) -> Result<Self> {
-        let server = TrajectoryServer::new(planner.config().heartbeat_timeout);
+        let server = TrajectoryServer::new(crate::traj_server::DEFAULT_HEARTBEAT_TIMEOUT);
         let mut fsm = ReplanFsm::new(crate::PlannerManager::with_planner(
             planner, options, start, goal,
         )?);

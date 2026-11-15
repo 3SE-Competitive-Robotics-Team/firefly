@@ -15,7 +15,7 @@
 //! hil-gadget status         # 打印接口/端点状态
 //! ```
 //!
-//! `processes-hil.toml` 统一启动板端 RootSLAM、planner、traj-server、FC 和 USB 桥接。
+//! `processes-hil.toml` 统一启动板端 RootSLAM、planner、traj、FC 和 USB 桥接。
 
 #[cfg(target_os = "linux")]
 mod setup;

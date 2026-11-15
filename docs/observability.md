@@ -64,13 +64,13 @@ This catalog covers all production topic constants; test topics use isolated nam
 | `Firefly/Imu` | sim/sensors → VIO, FC | Optional replay observations use the registered `vio/input/*` diagnostic gate |
 | `Firefly/Odometry` | VIO → control, planning, flight scripts | Pose diagnostics; flight scripts subscribe to native state |
 | `Firefly/Navigation` | VIO/localization → optional consumers, mimir | Atomic map←odom relation; mimir records changes only and uses bounded startup matching, with poses supplied by their existing observation streams |
-| `Firefly/Reference` | trajectory output → FC, flight scripts | Flight scripts observe reference goal identity |
+| `Firefly/Reference` | traj → FC, flight scripts | Flight scripts observe reference goal identity |
 | `Firefly/Control` | FC → actuators/sim | Motor evidence and FC summaries |
 | `Firefly/PlantState`, `Firefly/Airframe` | sim/airframe → FC, system consumers | Optional physical-state evidence; VIO uses camera and IMU observations |
 | `Firefly/Command` | ffctl → FC | Results and rejection reasons in event logs |
 | `Firefly/Goal` | ffctl → planner | Position and optional terminal yaw in local odom coordinates; yaw in radians, CLI in degrees |
 | `Firefly/MandatoryStop` | external tools → planner | Stop command; outcome in planner state and logs |
-| `Firefly/Trajectory`, `Firefly/PlannerHeartbeat`, `Firefly/TrajectoryControl`, `Firefly/PlannerStatus` | planner/FSM ↔ trajectory output/flight scripts | Atomic xyz/yaw polynomials with shared piece times and a stationary endpoint; heartbeat loss finishes the committed stop; status reports scheduled completion; flight scripts observe native completion |
+| `Firefly/Trajectory`, `Firefly/PlannerHeartbeat`, `Firefly/TrajectoryControl`, `Firefly/PlannerStatus` | planner → traj (trajectory, heartbeat, control), flight scripts (status) | Atomic xyz/yaw polynomials with shared piece times and a stationary endpoint; heartbeat loss finishes the committed stop; status reports scheduled completion; flight scripts observe native completion |
 | `Firefly/Features`, `Firefly/PoseObservation` | feature/matching → localization | Business localization input; localization emits registered result diagnostics |
 
 Latest-value business channels retain the newest available sample. Complete replay uses the dedicated
@@ -81,6 +81,9 @@ first unobserved sample as a separate coverage diagnostic. EGO's optimistic obst
 space. The summary uses `logs/planner` and its existing log budgets; masks and individual sample checks remain local. Leave it disabled for ordinary operation; incomplete log recording fails validation.
 Sequence checks cover the subscription interval. Earlier data and the tail of a crashed producer require
 independent input coverage evidence.
+The traj application publishes its existing startup and odometry lifecycle events as `logs/traj`.
+It uses the existing Log queue, severity filters and 512-byte message limit; sampling and IPC rates
+remain 100 Hz. Mimir retains every enabled event through shutdown and validates source continuity.
 Rust log queue/send loss is counted in `LogMessage.dropped_records`; the pump reports loss independently
 of subsequent business events. Known loss makes the recording fail.
 
@@ -127,7 +130,7 @@ use simulation timestamps; heartbeat deadlines use local monotonic wall time. Re
 RRD through shutdown and verify transport, posterior coverage and hover limits independently.
 For roundtrip acceptance, the board forwards `Firefly/Reference` and `Firefly/PlannerStatus` on
 the existing bounded USB uplink. Motor owns their latest-value subscriptions and checks control
-before every telemetry write. Their producer rates remain the planner/trajectory server's existing
+before every telemetry write. Their producer rates remain the planner/traj applications' existing
 cadence (at most 100 Hz each); the two payloads add at most 28.8 kB/s including frame headers.
 Flight scripts observe original measurement and goal timestamps, alignment fields and completion
 values. Native completion and measured arrival are distinct facts. Command events use logs/flight,

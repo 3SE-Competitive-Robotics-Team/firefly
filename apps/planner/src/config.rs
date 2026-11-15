@@ -40,18 +40,6 @@ impl<'de> Deserialize<'de> for PlannerToml {
     }
 }
 
-impl PlannerToml {
-    pub fn validate(&self) -> Result<()> {
-        if !self.config.heartbeat_timeout.is_finite() || self.config.heartbeat_timeout <= 0. {
-            return Err(Error::new(
-                ErrorKind::InvalidArgument,
-                "heartbeat_timeout must be finite and positive",
-            ));
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::PlannerToml;
@@ -91,6 +79,7 @@ mod tests {
             "[manager]\nplanning_horizonn = 5",
             "[mapping]\nresoluton = 0.1",
             "[mapping.depth]\nmax_pose_gapp = 0.1",
+            "heartbeat_timeout = 1",
         ] {
             assert!(toml::from_str::<PlannerToml>(source).is_err(), "{source}");
         }
@@ -98,15 +87,6 @@ mod tests {
             toml::from_str("max_velocity = 2\n[manager]\nplanning_horizon = 5").unwrap();
         assert!((cfg.config.max_velocity - 2.).abs() < f64::EPSILON);
         assert!((cfg.manager.planning_horizon - 5.).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn rejects_non_finite_and_non_positive_heartbeat_timeout() {
-        for value in ["nan", "inf", "-inf", "0", "-1"] {
-            let cfg: PlannerToml = toml::from_str(&format!("heartbeat_timeout = {value}")).unwrap();
-            assert!(cfg.validate().is_err(), "{value}");
-        }
-        PlannerToml::default().validate().unwrap();
     }
 }
 

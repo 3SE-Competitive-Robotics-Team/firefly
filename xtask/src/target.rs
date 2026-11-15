@@ -15,6 +15,7 @@ const DESKTOP_APPS: &[&str] = &[
     "planner",
     "quad",
     "render",
+    "traj",
 ];
 
 /// 机载应用：Orange Pi Zero 3W 上运行的进程，不含 Bevy 仿真/演示程序。
@@ -34,6 +35,7 @@ const BOARD_APPS: &[&str] = &[
     "mimir",
     "motor",
     "planner",
+    "traj",
 ];
 
 /// `--target` 的可选值。
@@ -91,6 +93,8 @@ mod tests {
     fn desktop_release_includes_simulation_vio_apps() {
         let apps = Target::Desktop.apps();
         assert!(apps.contains(&"firefly-rootslam"));
+        assert!(apps.contains(&"planner"));
+        assert!(apps.contains(&"traj"));
     }
 
     #[test]
@@ -103,5 +107,7 @@ mod tests {
         let apps = Target::Board.apps();
         assert!(apps.contains(&"firefly-rootslam"));
         assert!(apps.contains(&"hil-gadget"));
+        assert!(apps.contains(&"planner"));
+        assert!(apps.contains(&"traj"));
     }
 }

@@ -8,7 +8,8 @@
 ## 数据流与职责
 
 默认自主链路从空滚动地图启动：RootSLAM 提供连续 VIO，planner 融合机体里程计和深度，
-生成 odom 系轨迹，FC 跟踪参考并输出电机推力。离线库图定位是可选的独立服务。
+生成 odom 系轨迹，独立 traj 应用采样为参考，FC 跟踪参考并输出电机推力。
+离线库图定位是可选的独立服务。
 
 ```mermaid
 flowchart LR
@@ -21,7 +22,9 @@ flowchart LR
     F -->|四电机推力| SIM
     V -->|机体 Odometry| P[planner]
     R -->|深度| P
-    P -->|odom 系 Reference| F
+    P -->|完整轨迹 / 心跳 / 门控| T[traj]
+    V -->|机体 Odometry| T
+    T -->|odom 系 Reference| F
     V -->|原始 odom| L[可选 localization]
     A[可选 ALIKED / LightGlue] -->|地图位姿| L
     L -->|校正诊断| D[mimir]
@@ -70,7 +73,7 @@ IMU 发布角速度与比力，备用姿态解算位于 FC 内。
 
 ### HIL 闭环（USB）
 
-电脑运行仿真、render、mimir 和主机 USB 桥；板端运行 RootSLAM、planner、traj-server、
+电脑运行仿真、render、mimir 和主机 USB 桥；板端运行 RootSLAM、planner、traj、
 FC 与 HIL 输入输出驱动。两端算法使用现有 IPC，真值保留在主机用于渲染与独立评分。
 
 | 侧 | 进程 | 职责 |
@@ -204,8 +207,8 @@ Mimir 原点匹配的 `Matching / Anchored / Unavailable`、轨迹执行的
 | [映射 worker](../apps/rootslam/src/system.rs) | 接收 → 排空局部更新 / 回环 → 等待 Finish 或 Cancel → 最终 BA / 回收 | Finish 授权最终 BA；Cancel 在同步工作边界停止；Drop 回收资源 |
 | [全局 BA](../crates/firefly-rootslam-mapping/src/global_optimization.rs) | 线性化 → 求解 → 接受 / 拒绝 → 收敛 / 达到预算 / 数值失败 | 接受步重线性化；拒绝步复用因子并更新阻尼；终态进入结果 |
 | [规划 FSM](../crates/firefly-planner/src/fsm.rs) | Init → WaitTarget → GenNewTraj / SequentialStart → ExecTraj ↔ ReplanTraj → EmergencyStop | 目标版本使过期任务失效；故障类型决定恢复资格 |
-| [规划里程计](../apps/planner/src/state_input.rs)、[地图输入](../apps/planner/src/map_input.rs) | 等待 → 新鲜且覆盖 / 过期或覆盖不足 / 故障锁存 | 新快照恢复临时覆盖；里程计和地图几何故障通过重启恢复 |
-| [深度建图](../apps/planner/src/depth_mapping.rs)、[位姿接收](../apps/planner/src/odometry.rs) | 启动确认 → 运行 → 停止 / 失败 → join | 深度等待位姿插值区间；拥有者传播错误并回收线程 |
+| [规划与轨迹里程计](../crates/firefly-planner-runtime/src/state_input.rs)、[地图输入](../apps/planner/src/map_input.rs) | 等待 → 新鲜且覆盖 / 过期或覆盖不足 / 故障锁存 | 新快照恢复临时覆盖；里程计和地图几何故障通过重启恢复 |
+| [深度建图](../apps/planner/src/depth_mapping.rs)、[位姿接收](../crates/firefly-planner-runtime/src/odometry.rs) | 启动确认 → 运行 → 停止 / 失败 → join | 深度等待位姿插值区间；拥有者传播错误并回收线程 |
 | [规划 worker](../crates/firefly-planner/src/worker.rs) | 空闲 → 单个任务在途 → 完成 / 取消 → 采用 / 丢弃过期结果 | 任务票据绑定目标、地图与窗口；Drop 取消并 join |
 | [轨迹执行器](../crates/firefly-planner/src/traj_server.rs) | 等待命令 → 采样 → 末端保持；失联 / 门控 → 收尾 → 停止 | 新命令建立新执行状态；心跳恢复保持已承诺收尾 |
 | [Mimir ingress](../apps/mimir/src/ingress.rs)、[archive](../apps/mimir/src/archive.rs) | 接收 → 排空诊断 → 通道关闭 → archive finish / sync → join | 体素分块完整后提交基线或增量；未完成组装返回错误 |
@@ -243,11 +246,11 @@ ALIKED 的离线 / 在线模式在启动时确定；quad 使用 Bevy startup / u
 | 11 | [局部 VIO](../crates/firefly-basalt/src/vi_estimator/sqrt_keypoint_vio.rs)、[VO](../crates/firefly-basalt/src/vi_estimator/sqrt_keypoint_vo.rs) | VIO `EstimationPhase::{Waiting, Tracking, Optimizing}`；VO 的初始化标志与窗口集合 | 初始化、开始优化、选关键帧、边缘化按算法顺序执行 |
 | 12 | [映射调度](../apps/rootslam/src/system.rs) | `correction_pending: Option<revision>` 绑定在途地图版本；`Finalization` 授权收尾 | 输入结束、回环排空、最终 BA 授权、取消属于不同事件 |
 | 13 | [全局优化](../crates/firefly-rootslam-mapping/src/global_optimization.rs)、[L-BFGS](../crates/firefly-optimize/src/lbfgs.rs) | L-BFGS `Termination::{Converged, Cancelled, IterationLimit}`；全局优化接受步与阻尼控制流 | 仅接受步提交状态；取消、预算耗尽与收敛分别报告；路标块另有显式 `State` |
-| 14 | [规划里程计](../apps/planner/src/state_input.rs) | `InputPhase::{Waiting, Active, Stopped}`，有效态共同拥有测量与接收时钟 | 启动等待可继续；有效流之后的超时或无效观测锁存；重复时间戳不续命 |
+| 14 | [规划与轨迹里程计](../crates/firefly-planner-runtime/src/state_input.rs) | `InputPhase::{Waiting, Active, Stopped}`，有效态共同拥有测量与接收时钟 | 启动等待可继续；有效流之后的超时或无效观测锁存；重复时间戳不续命 |
 | 15 | [规划地图输入](../apps/planner/src/map_input.rs) | `fault: Option<reason>` 保留首次失败；覆盖、应用版本与窗口缓存各自维护 | 覆盖不足可恢复；几何故障锁存；窗口移动使应用缓存失效 |
 | 16 | [EGO 地图](../crates/firefly-ego-map/src/grid.rs) | `DepthPhase::{Waiting, Pending, Integrated}`；首帧、缓冲初始化与超时独立 | 首帧、缓冲区初始化、待融合、输入超时各自推进；占据与膨胀缓冲按地图更新流程提交 |
 | 17 | [规划 worker](../crates/firefly-planner/src/worker.rs)、[应用](../apps/planner/src/main.rs) | `Lane::{Idle, Solving, Unavailable}`、Ticket 取消标志与目标世代 | 取消立即撤销采用资格，任务返回后才释放槽位；轨迹到时与实际到点分别判断 |
-| 18 | [深度 worker](../apps/planner/src/depth_mapping.rs)、[里程计 worker](../apps/planner/src/odometry.rs)、[FC IMU worker](../apps/fc/src/imu.rs) | 启动应答、线程句柄与终止守卫；线程退出撤销快照和共享历史资格 | 就绪应答后消费；停止传播给拥有者；join 后报告线程错误 |
+| 18 | [深度 worker](../apps/planner/src/depth_mapping.rs)、[里程计 worker](../crates/firefly-planner-runtime/src/odometry.rs)、[FC IMU worker](../apps/fc/src/imu.rs) | 启动应答、线程句柄与终止守卫；线程退出撤销快照和共享历史资格 | 就绪应答后消费；停止传播给拥有者；join 后报告线程错误 |
 | 19 | [Mimir ingress](../apps/mimir/src/ingress.rs)、[archive](../apps/mimir/src/archive.rs) | `PendingVoxels::append` 预算通过后提交块；writer 的 `finish(self)` 消费所有权 | 完整体素批次才提交；缺块、丢失和排空失败进入归档结果；`finish(self)` 消费 writer |
 | 20 | [日志发送](../crates/firefly-observability/src/lib.rs)、[状态采样](../apps/mimir/src/status.rs) | 发送序号与丢失计数；可选 `RateWindow` 共同拥有起止时刻与间隔计数 | 丢失计数持续报告到成功发布；频率和新鲜度由各自时间窗口派生 |
 | 21 | [渲染 capture](../apps/render/src/capture.rs)、[帧组装](../apps/render/src/link.rs) | 可选 `requested_seq` 表示出图窗口；GPU 在途计数与帧退休序号 | 回调归还 GPU 槽位；三传感器成组发布；退休序号拒绝迟到回复并回收缓冲 |
@@ -498,7 +501,9 @@ worker 使用分块写时复制快照。重目标期间继续持有已提交轨�
 修改后的执行段重新验证。采样中心线验证覆盖已知障碍，
 连续扫掠体积、未观测障碍及动态环境的保证需要独立证明。
 
-`planner --traj-server` 独立以 100Hz 采样原子 xyz/yaw 多项式消息。
+[`planner`](../apps/planner/src/main.rs) 独立发布完整轨迹、心跳、门控和完成状态；
+[`traj`](../apps/traj/src/main.rs) 独立以 100Hz 采样原子 xyz/yaw 多项式消息。
+两个应用通过 `firefly-planner-runtime` 共用里程计接收与失联校验，各自拥有接收线程和状态。
 采样要求轨迹末端静止、心跳有效、Odometry 新鲜。
 正常结束保持末端零速参考；心跳失联或门控关闭时完成已提交停车尾段后停止输出，
 恢复采样需要新轨迹。Odometry 失联立即停止参考。

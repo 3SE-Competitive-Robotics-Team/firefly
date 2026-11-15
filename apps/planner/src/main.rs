@@ -1,15 +1,13 @@
 //! planner 接入：Odometry + 深度/目标 → 自持占据地图 + FSM → 完整轨迹。
-//! FSM 为 100Hz，安全检查为 20Hz；`--traj-server` 启动独立的 100Hz 轨迹输出进程。
+//! FSM 为 100Hz，安全检查为 20Hz；完整轨迹交给独立 traj app 采样输出。
 //! Odometry 失联或无效状态锁存停止输出。
 //! 地图融合超时触发急停并禁用 fail-safe；真值不进入规划状态链路。
 
 mod config;
 mod depth_mapping;
 mod map_input;
-mod odometry;
 mod output;
 mod scene;
-mod state_input;
 #[cfg(test)]
 mod tests;
 
@@ -23,6 +21,7 @@ use firefly_map::{GridMap, Plane, VirtualWall, VoxelState};
 use firefly_observability::init as init_observability;
 use firefly_planner::worker::{MapVersion, PlanningWorker};
 use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager, ReplanFsm};
+use firefly_planner_runtime::{odometry, state_input::StateInput};
 use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::publish::Publisher;
@@ -36,7 +35,6 @@ use iceoryx2::waitset::WaitSetRunResult;
 use nalgebra::Vector3;
 
 use crate::scene::parse_vec3;
-use crate::state_input::StateInput;
 
 /// 主循环频率（官方 `exec_timer` 0.01s）。
 const LOOP_PERIOD: Duration = Duration::from_millis(10);
@@ -61,7 +59,6 @@ struct Args {
     goal: Option<[f64; 3]>,
     /// 仅向 `Firefly/MandatoryStop` 发一条强制停止指令后退出。
     mandatory_stop: bool,
-    traj_server: bool,
 }
 
 fn parse_args() -> Result<Args> {
@@ -72,7 +69,6 @@ fn parse_args() -> Result<Args> {
         // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
         goal: None,
         mandatory_stop: false,
-        traj_server: false,
     };
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -84,7 +80,6 @@ fn parse_args() -> Result<Args> {
             "--start" => args.start = parse_vec3(&mut it, "--start")?,
             "--goal" => args.goal = Some(parse_vec3(&mut it, "--goal")?),
             "--mandatory-stop" => args.mandatory_stop = true,
-            "--traj-server" => args.traj_server = true,
             other => {
                 return Err(Error::new(
                     ErrorKind::InvalidArgument,
@@ -577,7 +572,7 @@ impl App {
             self.t_sim,
         );
         log::info!(
-            "主循环启动：状态机 100Hz / 安全检查 20Hz / 轨迹输出 100Hz，重规划阈值 {:.1}s，规划视界 {:.0}m",
+            "主循环启动：状态机 100Hz / 安全检查 20Hz，重规划阈值 {:.1}s，规划视界 {:.0}m",
             self.manager_options.replan_thresh,
             self.manager_options.planning_horizon,
         );
@@ -965,7 +960,7 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!(
-                "{e}\n用法：planner [--traj-server] [--config configs/planner.toml] [--start x y z] [--goal x y z] [--mandatory-stop]\n\n--goal 可省略（悬停等待 `ffctl planner goal X Y Z` 动态目标）；--mandatory-stop 向 {MANDATORY_STOP_TOPIC} 发一条强制停止指令后退出"
+                "{e}\n用法：planner [--config configs/planner.toml] [--start x y z] [--goal x y z] [--mandatory-stop]\n\n--goal 可省略（悬停等待 `ffctl planner goal X Y Z` 动态目标）；--mandatory-stop 向 {MANDATORY_STOP_TOPIC} 发一条强制停止指令后退出"
             );
             std::process::exit(2);
         }
@@ -984,7 +979,7 @@ fn main() {
     let toml_cfg = match firefly_config::startup::<config::PlannerToml>(
         &args.config,
         init_observability,
-        config::PlannerToml::validate,
+        |_| Ok(()),
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -992,15 +987,6 @@ fn main() {
             std::process::exit(1);
         }
     };
-    if args.traj_server {
-        if let Err(error) = output::run(toml_cfg.config.heartbeat_timeout) {
-            log::error!("轨迹输出失败：{error}");
-            firefly_observability::flush();
-            std::process::exit(1);
-        }
-        firefly_observability::flush();
-        return;
-    }
     // 可视化发布端在 App::new 内随进程共享节点创建（经 Firefly/Viz 话题，
     // mimir 进程统一写 rerun）
     match App::new(

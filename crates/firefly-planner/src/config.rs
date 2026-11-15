@@ -22,8 +22,6 @@ pub struct PlannerConfig {
     /// 初始规划无需等待；≥1 必须收齐 `0..drone_id` 全部前序机轨迹才允许起飞
     /// （官方 `SEQUENTIAL_START` 态语义）。
     pub drone_id: i32,
-    /// 心跳超时（秒）：失联后完成已检查的停车尾段，再停止采样。
-    pub heartbeat_timeout: f64,
     pub max_velocity: f64,
     pub max_acceleration: f64,
     pub max_jerk: f64,
@@ -56,7 +54,6 @@ impl Default for PlannerConfig {
             weight_obstacle_soft: 5000.0,
             swarm_clearance: 0.5,
             drone_id: 0,
-            heartbeat_timeout: 0.5,
             max_velocity: 1.5,
             max_acceleration: 6.0,
             max_jerk: 10.0,
@@ -87,9 +84,8 @@ mod tests {
         assert_eq!(c.obstacle_clearance_soft, 0.5);
         assert_eq!(c.weight_obstacle_soft, 5000.0);
         assert_eq!(c.swarm_clearance, 0.5);
-        // 官方 manager/drone_id launch 默认 0；traj_server 心跳超时硬编码 0.5s
+        // 官方 manager/drone_id launch 默认 0。
         assert_eq!(c.drone_id, 0);
-        assert_eq!(c.heartbeat_timeout, 0.5);
         assert_eq!(c.max_velocity, 1.5);
         assert_eq!(c.max_acceleration, 6.0);
         assert_eq!(c.max_jerk, 10.0);

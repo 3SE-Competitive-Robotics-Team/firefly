@@ -2,6 +2,9 @@
 use firefly_trajectory::Trajectory;
 use nalgebra::Vector3;
 
+/// 上游轨迹输出节点的心跳超时默认值（秒）。
+pub const DEFAULT_HEARTBEAT_TIMEOUT: f64 = 0.5;
+
 #[derive(Debug, Clone, Copy)]
 pub struct Reference {
     pub position: Vector3<f64>,

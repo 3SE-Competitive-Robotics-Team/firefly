@@ -1,4 +1,4 @@
-//! 独立接收局部状态，按真实接收时间维护状态流的存活期。
+//! planner 与 traj 独立接收局部状态，按真实接收时间维护状态流的存活期。
 use std::collections::VecDeque;
 use std::mem::DropGuard;
 use std::sync::{
@@ -33,6 +33,10 @@ pub struct OdometryHistory {
 }
 
 impl OdometryHistory {
+    /// 读取仍有效的有界里程计历史；停止或过期时返回空历史。
+    ///
+    /// # Errors
+    /// 接收线程失败或共享状态锁中毒。
     pub fn snapshot(&self) -> Result<VecDeque<OdomMessage>> {
         let mut state = self
             .shared
@@ -55,13 +59,17 @@ pub struct OdometryReceiver {
 }
 
 impl OdometryReceiver {
+    /// 启动独立里程计线程，并等待 IPC 订阅就绪。
+    ///
+    /// # Errors
+    /// 线程创建、IPC 订阅或启动握手失败。
     pub fn start() -> Result<Self> {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let (state, stopping) = (Arc::clone(&shared), Arc::clone(&stop));
         let (ready, startup) = std::sync::mpsc::sync_channel(1);
         let thread = std::thread::Builder::new()
-            .name("planner-odometry".into())
+            .name("odometry".into())
             .spawn(move || {
                 let _termination = DropGuard::new(Arc::clone(&stopping), |stop| {
                     stop.store(true, Ordering::Relaxed);
@@ -124,6 +132,9 @@ impl OdometryReceiver {
     }
 
     /// 原子读取局部状态和 trace。
+    ///
+    /// # Errors
+    /// 接收线程失败或共享状态锁中毒。
     pub fn snapshot(&self) -> Result<(StateInput, TraceContext)> {
         let mut state = self
             .shared
@@ -145,6 +156,7 @@ impl OdometryReceiver {
             || self.thread.as_ref().is_some_and(JoinHandle::is_finished)
     }
 
+    #[must_use]
     pub fn history(&self) -> OdometryHistory {
         OdometryHistory {
             shared: Arc::clone(&self.shared),
