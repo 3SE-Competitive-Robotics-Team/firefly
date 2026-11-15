@@ -15,13 +15,13 @@ codegen-units = 1
 codegen-units = 1
 
 [workspace.dependencies]
-re_build_info = "=0.42.0"
-re_byte_size = "=0.42.0"
-re_chunk = "=0.42.0"
-re_log_encoding = { version = "=0.42.0", features = ["encoder", "decoder"] }
-re_log_msg = "=0.42.0"
-re_log_types = "=0.42.0"
-re_sdk_types = { version = "=0.42.0", default-features = false }
+re_build_info = "=0.43.2"
+re_byte_size = "=0.43.2"
+re_chunk = "=0.43.2"
+re_log_encoding = { version = "=0.43.2", features = ["encoder", "decoder"] }
+re_log_msg = "=0.43.2"
+re_log_types = "=0.43.2"
+re_sdk_types = { version = "=0.43.2", default-features = false }
 firefly-ego-map = { path = "crates/firefly-ego-map" }
 firefly-calibration = { path = "crates/firefly-calibration" }
 firefly-basalt = { path = "crates/firefly-basalt" }
@@ -48,7 +48,7 @@ nalgebra = "0.35.0"
 nusb = "0.2.9"
 # `fs` 是 `nix::fcntl` 的门控 feature，板端 `camera --hil` 用它设 O_NONBLOCK；
 # 少了它只有全 workspace 构建（feature 被别的 crate 统一打开）能过，单包构建会失败。
-nix = { version = "0.31.3", features = ["signal", "process", "feature", "term", "fs"] }
+nix = { version = "0.32.0", features = ["signal", "process", "feature", "term", "fs"] }
 ort = { version = "=2.0.0-rc.15" }
 purecv = { version = "0.12.0", default-features = false, features = ["simd", "parallel"] }
 rand = "0.10.3"
