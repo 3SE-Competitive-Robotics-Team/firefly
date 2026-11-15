@@ -254,13 +254,11 @@ pub fn status() {
     );
     for name in FUNCTIONS {
         let mount = Path::new(FFS_ROOT).join(name);
-        let entries: Vec<String> = fs::read_dir(&mount)
-            .map(|dir| {
-                dir.filter_map(std::result::Result::ok)
-                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let entries: Vec<String> = fs::read_dir(&mount).map_or_default(|dir| {
+            dir.filter_map(std::result::Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        });
         println!("{}: {entries:?}", mount.display());
     }
 }
