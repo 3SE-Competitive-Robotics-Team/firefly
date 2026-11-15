@@ -1,5 +1,6 @@
 //! 独立接收局部状态，按真实接收时间维护状态流的存活期。
 use std::collections::VecDeque;
+use std::mem::DropGuard;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -53,13 +54,6 @@ pub struct OdometryReceiver {
     thread: Option<JoinHandle<()>>,
 }
 
-struct StopOnDrop(Arc<AtomicBool>);
-impl Drop for StopOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
-}
-
 impl OdometryReceiver {
     pub fn start() -> Result<Self> {
         let shared = Arc::new(Mutex::new(Shared::default()));
@@ -69,7 +63,9 @@ impl OdometryReceiver {
         let thread = std::thread::Builder::new()
             .name("planner-odometry".into())
             .spawn(move || {
-                let _termination = StopOnDrop(Arc::clone(&stopping));
+                let _termination = DropGuard::new(Arc::clone(&stopping), |stop| {
+                    stop.store(true, Ordering::Relaxed);
+                });
                 let result = (|| -> Result<()> {
                     let node = create_node()?;
                     let subscriber = Subscriber::<OdomMessage>::with_topic(&node, ODOM_TOPIC)?;
@@ -200,7 +196,9 @@ mod tests {
         };
         assert_eq!(history.snapshot().unwrap().len(), 1);
         let handle = std::thread::spawn(move || {
-            let _termination = StopOnDrop(stop);
+            let _termination = DropGuard::new(stop, |stop| {
+                stop.store(true, Ordering::Relaxed);
+            });
             panic!("receiver failure outside the state mutex");
         });
         assert!(handle.join().is_err());

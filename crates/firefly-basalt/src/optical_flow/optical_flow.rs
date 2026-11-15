@@ -48,7 +48,7 @@ use firefly_calibration::calibration::Calibration;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::DMatrix;
 use nalgebra::{Matrix2, Vector2};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, mem::DropGuard, sync::Arc};
 use std::{
     sync::mpsc::{self, Receiver, SyncSender},
     thread::JoinHandle,
@@ -102,12 +102,6 @@ impl OutputQueue {
             Self::Unbounded(queue) => queue.send(value),
             Self::Bounded(queue) => queue.send(value),
         }
-    }
-}
-struct OutputEndMarker<'a>(&'a OutputQueue);
-impl Drop for OutputEndMarker<'_> {
-    fn drop(&mut self) {
-        let _ = self.0.send(None);
     }
 }
 macro_rules! engine {
@@ -294,7 +288,9 @@ impl OpticalFlowFactory {
             .spawn(move || {
                 // Also releases a connected estimator on an engine panic or
                 // an input-channel disconnect, not only on explicit EOS/errors.
-                let _ending = OutputEndMarker(&output_sender);
+                let _ending = DropGuard::new(&output_sender, |queue| {
+                    let _ = queue.send(None);
+                });
                 while let Ok(input) = input_receiver.recv() {
                     let Some(input) = input else {
                         break;

@@ -58,12 +58,10 @@ fn parse_device(args: &[String]) -> Result<String, String> {
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--device" => {
-                device = it
-                    .next()
-                    .ok_or_else(|| "missing --device value".to_owned())?
-                    .clone();
-            }
+            "--device" => device.clone_from(
+                it.next()
+                    .ok_or_else(|| "missing --device value".to_owned())?,
+            ),
             other => return Err(format!("unknown argument {other}")),
         }
     }

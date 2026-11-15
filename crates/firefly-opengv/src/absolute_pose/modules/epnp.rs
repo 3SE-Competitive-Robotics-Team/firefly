@@ -118,8 +118,8 @@ impl Epnp {
                 self.cws[0][j] += self.pws[3 * i + j];
             }
         }
-        for j in 0..3 {
-            self.cws[0][j] /= n as f64;
+        for c in &mut self.cws[0] {
+            *c /= n as f64;
         }
         let pw0 = DMatrix::from_fn(n, 3, |i, j| self.pws[3 * i + j] - self.cws[0][j]);
         let svd = (pw0.transpose() * pw0).svd(true, true);
@@ -317,9 +317,9 @@ impl Epnp {
             return None;
         }
         if (self.pcs[2] < 0.0 && self.signs[0] > 0) || (self.pcs[2] > 0.0 && self.signs[0] < 0) {
-            for i in 0..4 {
-                for j in 0..3 {
-                    self.ccs[i][j] = -self.ccs[i][j];
+            for row in &mut self.ccs {
+                for c in row {
+                    *c = -*c;
                 }
             }
             for i in 0..self.number_of_correspondences {

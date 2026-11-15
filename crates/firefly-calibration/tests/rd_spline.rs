@@ -138,12 +138,11 @@ fn integral_reference<const N: usize>(case: &Value) {
             matrix(&baseline, &row["value"], tol);
             for axis in 0..3 {
                 let mut propagated = 0.;
-                for i in 0..N {
+                for (i, jacobian) in j.d_val_d_knot.iter().enumerate() {
                     let delta = (bezier.knot(i)[axis] - same_input.knot(i)[axis])
                         .abs()
                         .next_up();
-                    propagated =
-                        (propagated + (delta * j.d_val_d_knot[i].abs()).next_up()).next_up();
+                    propagated = (propagated + (delta * jacobian.abs()).next_up()).next_up();
                 }
                 let expected_value = row["value"][axis].as_f64().unwrap();
                 assert!(
@@ -281,7 +280,7 @@ fn bezier_integral_jacobians_match_independent_central_differences() {
             };
         let mut jacobian = BezierIntegral::default();
         let _ = evaluate(&curve, Some(&mut jacobian));
-        for knot in 0..4 {
+        for (knot, d_int_d_knot) in jacobian.d_int_d_knot.iter().enumerate() {
             for axis in 0..3 {
                 let mut plus = curve.clone();
                 let mut minus = curve.clone();
@@ -289,7 +288,7 @@ fn bezier_integral_jacobians_match_independent_central_differences() {
                 plus.knot_mut(knot)[axis] += step;
                 minus.knot_mut(knot)[axis] -= step;
                 let numerical = (evaluate(&plus, None) - evaluate(&minus, None)) / (2. * step);
-                close(numerical, jacobian.d_int_d_knot[knot][axis], 1e-8);
+                close(numerical, d_int_d_knot[axis], 1e-8);
             }
         }
     }

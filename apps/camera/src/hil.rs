@@ -147,7 +147,7 @@ fn handle_chunk(
             image_id: header.image_id,
             sensor_id: header.sensor_id,
             timestamp: header.timestamp,
-            chunks: (0..header.chunk_count).map(|_| None).collect(),
+            chunks: Vec::from_fn(usize::from(header.chunk_count), |_| None),
             received: 0,
         });
     }

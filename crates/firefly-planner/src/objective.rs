@@ -329,9 +329,7 @@ impl<'a> MincoObjective<'a> {
             q.push(Vector3::new(x[i * 3], x[i * 3 + 1], x[i * 3 + 2]));
         }
         // 对照官方 `VirtualT2RealT`：无 clamp，分段有理映射本身不会溢出。
-        let t = (0..self.pieces)
-            .map(|i| virtual_to_real(x[n_q + i]))
-            .collect();
+        let t = Vec::from_fn(self.pieces, |i| virtual_to_real(x[n_q + i]));
         (q, t)
     }
 

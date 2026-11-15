@@ -168,8 +168,8 @@ impl<S: BasaltScalar, const DIM: usize, const N: usize> RdBezier<S, DIM, N> {
             self.pow_inv_dt[D] * self.pow_inv_dt[D - 1]
         };
         if let Some(j) = jacobian {
-            for i in 0..N {
-                j.d_int_d_knot[i] = tmp.column(i).into_owned() * scaling;
+            for (i, slot) in j.d_int_d_knot.iter_mut().enumerate() {
+                *slot = tmp.column(i).into_owned() * scaling;
             }
         }
         S::from_f64_lossy(0.5) * scaling * tmp.component_mul(&knots).sum()

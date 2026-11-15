@@ -369,16 +369,16 @@ mod tests {
         assert_eq!(cands.len(), 2, "单段 → 两候选");
 
         // 候选 0(全原侧)= 输入
-        for j in span.0..=span.1 {
-            assert!((cands[0].planes[j][0].normal() - Vector3::new(-1.0, 0.0, 0.0)).norm() < 1e-12);
+        for plane in &cands[0].planes[span.0..=span.1] {
+            assert!((plane[0].normal() - Vector3::new(-1.0, 0.0, 0.0)).norm() < 1e-12);
         }
         // 候选 1:段外复制输入(此处无平面)
         assert!(cands[1].planes[0].is_empty());
         assert!(cands[1].planes[7].is_empty());
 
         // 候选 1(翻侧):段内方向相反(+x),基点在自由侧(x ≥ 12.0)
-        for j in span.0..=span.1 {
-            let pl = &cands[1].planes[j][0];
+        for plane in &cands[1].planes[span.0..=span.1] {
+            let pl = &plane[0];
             assert!(
                 pl.normal().dot(&Vector3::new(-1.0, 0.0, 0.0)) < 0.0,
                 "翻侧方向必为 +x"
@@ -405,10 +405,10 @@ mod tests {
         let cands = distinctive_candidates(&map, &points, &planes, &[span]);
         // 段被丢弃后回落单候选(官方 seg_upbound==0 分支),且等于输入
         assert_eq!(cands.len(), 1);
-        for j in span.0..=span.1 {
-            assert_eq!(cands[0].planes[j].len(), 1);
+        for plane in &cands[0].planes[span.0..=span.1] {
+            assert_eq!(plane.len(), 1);
             assert!(
-                (cands[0].planes[j][0].normal() - Vector3::new(-1.0, 0.0, 0.0)).norm() < 1e-12,
+                (plane[0].normal() - Vector3::new(-1.0, 0.0, 0.0)).norm() < 1e-12,
                 "回落候选应保持原侧"
             );
         }

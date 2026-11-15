@@ -16,6 +16,7 @@ use jiff::Timestamp;
 use nalgebra::Vector3;
 use std::{
     cell::RefCell,
+    mem::DropGuard,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicI64, Ordering},
@@ -99,13 +100,6 @@ pub trait ImuAdapter {
     }
 }
 
-struct StopOnDrop<'a>(&'a AtomicBool);
-impl Drop for StopOnDrop<'_> {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
-
 /// Run on a dedicated thread; all IPC endpoints are created and dropped on that thread.
 /// # Errors
 /// Returns IPC, adapter, input validation or shutdown failures.
@@ -115,7 +109,7 @@ pub fn run_imu<A: ImuAdapter>(
     stop: &AtomicBool,
     build: impl FnOnce() -> Result<A>,
 ) -> Result<()> {
-    let _stopping = StopOnDrop(stop);
+    let _stopping = DropGuard::new(stop, |stop| stop.store(true, Ordering::Release));
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, options.process);
     let imu = Subscriber::<ImuMessage>::with_options(&node, &options.topics.imu, IMU_SUBSCRIPTION)?;

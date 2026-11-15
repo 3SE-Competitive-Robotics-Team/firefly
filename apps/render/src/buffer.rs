@@ -11,7 +11,7 @@ pub struct BufferPool {
 impl BufferPool {
     pub fn new(count: usize, bytes: usize) -> Self {
         Self {
-            free: Arc::new(Mutex::new((0..count).map(|_| vec![0; bytes]).collect())),
+            free: Arc::new(Mutex::new(Vec::from_fn(count, |_| vec![0; bytes]))),
         }
     }
 

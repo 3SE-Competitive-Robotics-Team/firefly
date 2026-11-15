@@ -162,8 +162,5 @@ fn square_distances(distances: &mut [f64]) -> bool {
         }
         *d *= *d;
     }
-    if distances.iter().any(|d| d.is_nan()) {
-        return false;
-    }
-    true
+    !distances.iter().any(|d| d.is_nan())
 }

@@ -44,18 +44,14 @@ fn parse_arguments(args: &[String]) -> Result<(String, String), String> {
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--device" => {
-                device = it
-                    .next()
-                    .ok_or_else(|| "missing --device value".to_owned())?
-                    .clone();
-            }
-            "--estimator" => {
-                estimator = it
-                    .next()
-                    .ok_or_else(|| "missing --estimator value".to_owned())?
-                    .clone();
-            }
+            "--device" => device.clone_from(
+                it.next()
+                    .ok_or_else(|| "missing --device value".to_owned())?,
+            ),
+            "--estimator" => estimator.clone_from(
+                it.next()
+                    .ok_or_else(|| "missing --estimator value".to_owned())?,
+            ),
             other => return Err(format!("unknown argument {other}")),
         }
     }

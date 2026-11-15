@@ -215,19 +215,14 @@ impl PersistentMap {
         let mut affected = BTreeSet::new();
         for &track in &local.rejected_landmarks {
             let id = self.canonical_landmark(track as u64);
-            let keys: Vec<_> = self
-                .snapshot
-                .landmarks
-                .get(&id)
-                .map(|point| {
-                    point
-                        .observations
-                        .keys()
-                        .filter(|key| key.feature == track)
-                        .copied()
-                        .collect()
-                })
-                .unwrap_or_default();
+            let keys: Vec<_> = self.snapshot.landmarks.get(&id).map_or_default(|point| {
+                point
+                    .observations
+                    .keys()
+                    .filter(|key| key.feature == track)
+                    .copied()
+                    .collect()
+            });
             for key in keys {
                 self.detach_observation(id, key);
             }

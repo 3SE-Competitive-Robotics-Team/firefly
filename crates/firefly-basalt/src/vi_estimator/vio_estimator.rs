@@ -7,6 +7,7 @@ use crate::{optical_flow::OpticalFlowResult, utils::imu_types::MargData};
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{Isometry3, Matrix3, Vector3, Vector4};
 use std::{
+    mem::DropGuard,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
@@ -109,16 +110,6 @@ impl VioWorkerOutputs {
         if let Some(q) = &self.state_bounded {
             let _ = q.send(None);
         }
-    }
-}
-struct WorkerEnd<'a> {
-    outputs: &'a VioWorkerOutputs,
-    status: &'a VioStatus,
-}
-impl Drop for WorkerEnd<'_> {
-    fn drop(&mut self) {
-        self.outputs.finish();
-        self.status.finished.store(true, Ordering::Release);
     }
 }
 pub struct VioStatus {
@@ -259,10 +250,10 @@ impl VioEstimatorBase {
             std::thread::Builder::new()
                 .name("basalt-estimator".into())
                 .spawn(move || {
-                    let _ending = WorkerEnd {
-                        outputs: &outputs,
-                        status: &status,
-                    };
+                    let _ending = DropGuard::new((&outputs, &status), |(outputs, status)| {
+                        outputs.finish();
+                        status.finished.store(true, Ordering::Release);
+                    });
                     let result = engine.run(inputs, outputs.clone(), status.clone());
                     WorkerCompletion { engine, result }
                 })
@@ -468,10 +459,10 @@ mod worker_end_tests {
             };
             let status = VioStatus::new(3, 7);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _end = WorkerEnd {
-                    outputs: &outputs,
-                    status: &status,
-                };
+                let _end = DropGuard::new((&outputs, &status), |(outputs, status)| {
+                    outputs.finish();
+                    status.finished.store(true, Ordering::Release);
+                });
                 assert!(!panic, "injected estimator panic");
             }));
             assert_eq!(result.is_err(), panic);
@@ -501,10 +492,10 @@ mod worker_end_tests {
             };
             let status = VioStatus::new(3, 7);
             {
-                let _end = WorkerEnd {
-                    outputs: &outputs,
-                    status: &status,
-                };
+                let _end = DropGuard::new((&outputs, &status), |(outputs, status)| {
+                    outputs.finish();
+                    status.finished.store(true, Ordering::Release);
+                });
             }
             completed
                 .send(status.finished.load(Ordering::Acquire))

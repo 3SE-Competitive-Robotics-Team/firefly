@@ -335,9 +335,7 @@ pub fn gpnp_evaluate(
     if c.len() < 4 {
         return None;
     }
-    let ccam: Vec<Vector3<f64>> = (0..4)
-        .map(|i| solution.fixed_rows::<3>(i * 3).into_owned())
-        .collect();
+    let ccam: Vec<Vector3<f64>> = Vec::from_fn(4, |i| solution.fixed_rows::<3>(i * 3).into_owned());
     let transformation = arun::arun_complete(c, &ccam);
     let t = transformation.column(3);
     let r = transformation.fixed_view::<3, 3>(0, 0);
@@ -371,9 +369,8 @@ pub fn gpnp_optimize(
             for i in 0..dim {
                 solution += x[i] * v.column(12 - dim + i);
             }
-            let ccam: Vec<Vector3<f64>> = (0..4)
-                .map(|i| solution.fixed_rows::<3>(3 * i).into_owned())
-                .collect();
+            let ccam: Vec<Vector3<f64>> =
+                Vec::from_fn(4, |i| solution.fixed_rows::<3>(3 * i).into_owned());
             let mut index = 0;
             for i in 0..3 {
                 for j in i + 1..4 {

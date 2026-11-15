@@ -88,11 +88,9 @@ pub fn fivept_stewenius_main(
             evec[(r, c)] /= norm;
         }
     }
-    Some(
-        (0..10)
-            .map(|c| Matrix3::from_fn(|r, k| evec[(3 * r + k, c)]))
-            .collect(),
-    )
+    Some(Vec::from_fn(10, |c| {
+        Matrix3::from_fn(|r, k| evec[(3 * r + k, c)])
+    }))
 }
 fn b<const C: usize>(a: &SMatrix<f64, 10, 10>, row: usize, col: usize) -> SMatrix<f64, 1, C> {
     let mut p = SMatrix::<f64, 1, C>::zeros();
@@ -374,14 +372,10 @@ pub fn sixpt_main(
     if ev.shape() != (64, 64) {
         return None;
     }
-    Some(
-        (0..64)
-            .map(|c| {
-                let solution = Vector3::from_fn(|r, _| (ev[(60 + r, c)] / ev[(63, c)]).re);
-                cayley2rot(&solution).transpose()
-            })
-            .collect(),
-    )
+    Some(Vec::from_fn(64, |c| {
+        let solution = Vector3::from_fn(|r, _| (ev[(60 + r, c)] / ev[(63, c)]).re);
+        cayley2rot(&solution).transpose()
+    }))
 }
 #[derive(Clone, Debug)]
 pub struct GeTerms {

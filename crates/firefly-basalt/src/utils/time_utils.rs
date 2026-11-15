@@ -1,7 +1,7 @@
 // Copyright (c) 2020-2021 Vladyslav Usenko and Nikolaus Demmel.
 // SPDX-License-Identifier: BSD-3-Clause
 //! Timers and execution statistics from original Basalt `utils/time_utils.hpp`.
-use std::{collections::HashMap, time::Instant};
+use std::{collections::HashMap, mem::DropGuard, time::Instant};
 
 /// Process-local monotonic clock for joining frame stages across worker threads.
 #[must_use]
@@ -44,43 +44,16 @@ impl Timer {
     }
 }
 
-pub struct ScopedTimer<'a> {
-    destination: &'a mut f64,
-    timer: Timer,
-    add: bool,
-}
-impl<'a> ScopedTimer<'a> {
-    pub fn new(destination: &'a mut f64) -> Self {
-        Self {
-            destination,
-            timer: Timer::default(),
-            add: false,
-        }
-    }
-    pub fn adding(destination: &'a mut f64) -> Self {
-        Self {
-            destination,
-            timer: Timer::default(),
-            add: true,
-        }
-    }
-}
-impl Drop for ScopedTimer<'_> {
-    fn drop(&mut self) {
-        if self.add {
-            *self.destination += self.timer.elapsed();
-        } else {
-            *self.destination = self.timer.elapsed();
-        }
-    }
-}
-
 pub fn log_timing<T>(time: &mut f64, function: impl FnOnce() -> T) -> T {
-    let _timer = ScopedTimer::new(time);
+    let _timer = DropGuard::new((time, Timer::default()), |(time, timer)| {
+        *time = timer.elapsed();
+    });
     function()
 }
 pub fn log_timing_add<T>(time: &mut f64, function: impl FnOnce() -> T) -> T {
-    let _timer = ScopedTimer::adding(time);
+    let _timer = DropGuard::new((time, Timer::default()), |(time, timer)| {
+        *time += timer.elapsed();
+    });
     function()
 }
 
