@@ -54,10 +54,9 @@ PGO 和平方根全局 BA。在线默认运行局部 VIO。数据集示例启用
 光流补丁使用 FP32，地图存储、回环几何、PGO 和公开状态接口使用 FP64。
 
 板端 HIL 链路用同一套 IPC 话题：`camera --hil` 把主机仿真图像与 IMU 经 USB 收进板端
-再发布，RootSLAM 与 OKVIS2-X 消费同样的双目与 IMU 话题、发布同样的里程计与姿态话题，
-因此估计器可按验收需要在两者之间切换，话题层不需要适配。板端 HIL 只跑一个估计器，
-两份进程清单由 `xtask deploy-hil --estimator` 选择；RootSLAM 侧的 VIO 参数按 320×240
-rig 重选光流网格，详见 [开发指南](development.md#rootslam-的-hil-配置)。
+再发布，RootSLAM 消费双目与 IMU，planner 消费深度与机体里程计。
+板端使用统一的 `processes-hil.toml`，全部 HIL 进程自启动；主机持续转发双目、深度与 IMU。
+RootSLAM 的 320×240 rig 与光流网格配置见 [开发指南](development.md#hil-部署与运行)。
 
 ### 板载拓扑
 
@@ -71,8 +70,8 @@ IMU 发布角速度与比力，备用姿态解算位于 FC 内。
 
 ### HIL 闭环（USB）
 
-电脑运行仿真、render、mimir 和主机 USB 桥；板端运行 RootSLAM、FC 与 HIL
-输入输出驱动。两端算法使用现有 IPC，真值保留在主机用于渲染与独立评分。
+电脑运行仿真、render、mimir 和主机 USB 桥；板端运行 RootSLAM、planner、traj-server、
+FC 与 HIL 输入输出驱动。两端算法使用现有 IPC，真值保留在主机用于渲染与独立评分。
 
 | 侧 | 进程 | 职责 |
 |---|---|---|

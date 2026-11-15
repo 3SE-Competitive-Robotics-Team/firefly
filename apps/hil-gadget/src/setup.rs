@@ -68,11 +68,11 @@ const HOST_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// 所有可能出现的功能实例名。
 const FUNCTIONS: [&str; 2] = [ADB, HIL.name];
 
-pub fn up(manifest: Option<&str>) -> Result<(), String> {
+pub fn up() -> Result<(), String> {
     let _transition = crate::transition::lock(Path::new(STATE_DIR))?;
     reset_log();
     note("开始：停止 firefly 与 adbd，整块重建 gadget");
-    if let Err(error) = up_inner(manifest) {
+    if let Err(error) = up_inner() {
         note(&format!("up 失败：{error}"));
         eprintln!("hil-gadget up 失败：{error}；尝试恢复 adb");
         if let Err(restore) = restore_adb_inner() {
@@ -83,7 +83,7 @@ pub fn up(manifest: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-fn up_inner(manifest: Option<&str>) -> Result<(), String> {
+fn up_inner() -> Result<(), String> {
     remove_file(READY)?;
     remove_file(UP_MARKER)?;
     remove_file(RESTORE_MARKER)?;
@@ -93,7 +93,7 @@ fn up_inner(manifest: Option<&str>) -> Result<(), String> {
     kill_serve();
     kill_adbd();
     set_device_role();
-    switch_processes_to_hil(manifest.unwrap_or(PROCESSES_HIL))?;
+    switch_processes_to_hil()?;
     rebuild(true)?;
     start_firefly();
     fs::write(UP_MARKER, format!("{}\n", now_seconds()))
@@ -618,12 +618,9 @@ fn stop_adb_rebind_loop() {
     thread::sleep(Duration::from_millis(500));
 }
 
-/// 切换活动进程清单到指定 HIL 清单；清单缺失时明确失败，不静默沿用真机进程集。
-fn switch_processes_to_hil(manifest: &str) -> Result<(), String> {
-    if manifest.is_empty() || manifest.contains('/') {
-        return Err(format!("进程清单名非法：{manifest}"));
-    }
-    let source = format!("{PROCESSES_DIR}/{manifest}");
+/// 切换到完整 HIL 进程清单；源文件必须由部署提供。
+fn switch_processes_to_hil() -> Result<(), String> {
+    let source = format!("{PROCESSES_DIR}/{PROCESSES_HIL}");
     if !Path::new(&source).is_file() {
         return Err(format!("缺少 {source}（deploy 未带上）"));
     }
@@ -632,7 +629,7 @@ fn switch_processes_to_hil(manifest: &str) -> Result<(), String> {
         Path::new(PROCESSES),
         Path::new(PROCESSES_BACKUP),
     )?;
-    note(&format!("进程清单已切到 {manifest}"));
+    note(&format!("进程清单已切到 {PROCESSES_HIL}"));
     sync_disk();
     Ok(())
 }

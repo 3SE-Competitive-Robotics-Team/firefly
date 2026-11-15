@@ -9,14 +9,13 @@
 //! 用法（板端 root）：
 //!
 //! ```text
-//! hil-gadget up [manifest]  # 重建 gadget，启动描述符守护进程并绑定
+//! hil-gadget up             # 重建 gadget，启动描述符守护进程并绑定
 //! hil-gadget serve          # 仅写描述符并保持 ep0（由 up 派生）
 //! hil-gadget down           # 解绑、移除 HIL 功能并恢复 adb
 //! hil-gadget status         # 打印接口/端点状态
 //! ```
 //!
-//! `manifest` 是 `configs/` 下的进程清单文件名，省略时用 `processes-hil.toml`。
-//! `processes-hil.toml` 启动板端 RootSLAM、FC 和 USB 传感器/执行器桥接。
+//! `processes-hil.toml` 统一启动板端 RootSLAM、planner、traj-server、FC 和 USB 桥接。
 
 #[cfg(target_os = "linux")]
 mod setup;
@@ -28,7 +27,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = "\
 usage:
-  hil-gadget up [manifest]
+  hil-gadget up
   hil-gadget serve
   hil-gadget down
   hil-gadget watchdog
@@ -41,7 +40,7 @@ fn main() -> ExitCode {
         eprintln!("missing command\n{USAGE}");
         return ExitCode::FAILURE;
     };
-    let takes_argument = matches!(command.as_str(), "up" | "diag");
+    let takes_argument = command == "diag";
     if args.len() > 2 || (args.len() == 2 && !takes_argument) {
         eprintln!("unexpected argument\n{USAGE}");
         return ExitCode::FAILURE;
@@ -60,11 +59,7 @@ fn main() -> ExitCode {
 #[cfg(target_os = "linux")]
 fn dispatch(command: &str, argument: &str) -> Result<(), String> {
     match command {
-        "up" => setup::up(if argument.is_empty() {
-            None
-        } else {
-            Some(argument)
-        }),
+        "up" => setup::up(),
         "serve" => setup::serve(),
         "down" => setup::down(),
         "watchdog" => setup::watchdog(),

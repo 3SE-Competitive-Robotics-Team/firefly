@@ -258,19 +258,19 @@ supervisor 对异常退出退避重启；停止使用 SIGINT，超时返回错�
 
 HIL 用 USB 把电脑上的 MuJoCo 物理仿真与板端生产计算连接起来。电脑运行
 `mimir`、`render`、`hil` 和仿真；板端运行 `camera --hil`、
-`motor --hil`、RootSLAM 与 FC。电机指令经 USB 返回仿真，HIL 驱动访问
+`motor --hil`、RootSLAM、planner、traj-server 与 FC。电机指令经 USB 返回仿真，HIL 驱动访问
 FunctionFS 端点，不访问实体相机、IMU 或 PWM。
 
 先构建主机验收程序，再部署板端，最后立即运行验收：
 
 ```bash
 cargo build --locked --release -p render -p mimir -p hil -p ffctl
-cargo xtask deploy-hil --estimator rootslam
+cargo xtask deploy-hil
 uv run python scripts/hil_hover.py
 ```
 
 `deploy-hil` 沿用普通 `deploy` 的构建、替换、服务就绪检查，然后以
-`configs/processes-hil.toml` 切换 USB gadget；`hil --check` 成功认领接口
+`configs/processes-hil.toml` 启动完整进程集并切换 USB gadget；`hil --check` 成功认领接口
 和两个数据端点后才报告链路就绪。板端与主机使用同次构建的协议版本。
 
 `configs/rootslam-hil.toml` 使用顶层 `precision = "float32"` 和
@@ -283,7 +283,7 @@ FC 使用 `configs/fc-hil.toml`：水平速度环增益与正常部署一致，
 `configs/hil.toml` 管理 USB 身份、队列与送图节拍。`imu_batch = 1`；
 双目按采集时间配对，图像分为最多 16 KiB 的块，块间先发送 IMU 与指令。
 `image_queue` 是待发图像预算，至少为 2；双目对原子入队，每个队列位置最多占两张图，
-可选深度图独占一个位置。上行每条遥测和日志发送前优先排空控制队列。
+深度图独占一个位置。上行每条遥测和日志发送前优先排空控制队列。
 `image_period_s` 是板端视觉负载预算，图像、控制和后验的实际频率分别验收。
 HIL 默认送图预算为 30 Hz。`configs/processes-hil.toml` 为 A733 设置以下亲和性：
 
@@ -291,7 +291,7 @@ HIL 默认送图预算为 30 Hz。`configs/processes-hil.toml` 为 A733 设置�
 |---|---|---|
 | 6、7（A76） | RootSLAM | 两个 Rayon worker，所有线程在这两个大核内调度 |
 | 5（A55） | FC | 主循环和 IMU worker 固定在同一个小核 |
-| 0–4（A55） | camera、motor、可选 planner 与 traj-server | 共享小核池，按运行负载调度 |
+| 0–4（A55） | camera、motor、planner 与 traj-server | 共享小核池，按运行负载调度 |
 
 亲和性由 `taskset` 在应用启动前设置，新线程继承该集合；Rayon 并行度由
 同一命令中的 `RAYON_NUM_THREADS` 设置。普通进程清单和 x86 运行沿用系统调度。
@@ -321,11 +321,13 @@ scripts/hil_hover_monitor.py 可独立查看状态，不发送控制命令。
 
 ```bash
 cargo build --locked --release -p render -p mimir -p hil -p ffctl
-cargo xtask deploy-hil --estimator rootslam --mission roundtrip
+cargo xtask deploy-hil
 uv run python scripts/hil_roundtrip.py
 ```
 
-`processes-hil-roundtrip.toml` 启用板端规划进程；`hil-roundtrip.toml` 启用深度下发。
+悬停和往返使用同一份 `processes-hil.toml` 与 `hil.toml`，全部进程自启动并持续下发深度。
+部署仅选择设备；任务脚本决定发送哪些飞行指令。固定的 HIL 脚本仅提供任务相关参数，
+例如悬停入口的 `--hover-seconds` 和所有入口的 `--seed`。
 任务发送 odom 系 (22, 0, 1.595) 和 (0, 0, 1) 两个目标，以原生轨迹完成状态切换航段。
 飞控自身保护保持启用；两端使用同次构建并部署。
 `hil --check` 核对 USB 接口和端点；实际传输及协议一致性由运行验证。

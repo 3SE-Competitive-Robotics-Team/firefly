@@ -69,9 +69,6 @@ pub struct Link {
     /// 下行图像节流周期（秒）；板端 VIO 跟不上时用它压低送帧率。
     #[serde(default = "default_image_period")]
     pub image_period_s: f64,
-    /// 是否下深度图；悬停与纯 VIO 阶段关闭，减少板端图像队列突发。
-    #[serde(default)]
-    pub depth: bool,
 }
 
 impl Default for Link {
@@ -82,7 +79,6 @@ impl Default for Link {
             imu_batch: default_imu_batch(),
             image_queue: default_image_queue(),
             image_period_s: default_image_period(),
-            depth: false,
         }
     }
 }

@@ -14,13 +14,26 @@ from firefly_workspace import workspace_root
 from firefly_workspace.process import ManagedProcess, isolated_run
 
 
-def main(argv=None):
+def main(argv=None, *, hil=None, mission=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--hil", action="store_true")
-    parser.add_argument("--mission", choices=["hover", "roundtrip"], default="roundtrip")
-    parser.add_argument("--hover-seconds", type=float, default=20.)
+    if hil is None:
+        parser.add_argument("--hil", action="store_true")
+    else:
+        parser.set_defaults(hil=hil)
+    if mission is None:
+        parser.add_argument("--mission", choices=["hover", "roundtrip"], default="roundtrip")
+    else:
+        parser.set_defaults(mission=mission)
+    if mission != "roundtrip":
+        parser.add_argument("--hover-seconds", type=float, help="hover duration in seconds (default: 20)")
+    else:
+        parser.set_defaults(hover_seconds=None)
     parser.add_argument("--seed", type=int, default=20260930)
     args = parser.parse_args(argv)
+    if args.hover_seconds is not None and args.mission != "hover":
+        parser.error("--hover-seconds requires --mission hover")
+    if args.hover_seconds is None:
+        args.hover_seconds = 20.
     if not 0 < args.hover_seconds <= 600:
         parser.error("--hover-seconds must be in (0, 600]")
     root = workspace_root(Path(__file__))
@@ -106,8 +119,7 @@ def main(argv=None):
             start("sim", [sys.executable, "-c", "from firefly_sim.main import main; main(['--no-trace'], publish_plant_state=False)"])
             start("render", [str(root/"target/release/render")])
             if args.hil:
-                config = "hil-roundtrip.toml" if args.mission == "roundtrip" else "hil.toml"
-                start("hil", [str(root/"target/release/hil"), "--config", str(root/"configs"/config)])
+                start("hil", [str(root/"target/release/hil")])
             else:
                 start("vio", [str(root/"target/release/firefly-rootslam"), "--no-loop-closures", "--no-mapping"])
                 start("fc", [str(root/"target/release/fc")])

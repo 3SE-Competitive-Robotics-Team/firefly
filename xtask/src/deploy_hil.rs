@@ -3,7 +3,7 @@
 //! 部署沿用普通 `deploy`（含服务就绪检查）；之后把活动进程清单切到 HIL、
 //! 由 `hil-gadget up` 重建 gadget。切换后 `adb` 会消失，这是设计使然：
 //! 这块 UDC 的端点不足以同时承载 adb 与 HIL。主机侧用 nusb 直接认领两个
-//! 厂商接口；`hil --probe` 通过即视为链路就绪。
+//! 厂商接口；`hil --check` 通过即视为链路就绪。
 //!
 //! 板端 HIL 使用 RootSLAM，进程清单为 `processes-hil.toml`。
 
@@ -17,40 +17,26 @@ use crate::target;
 const DEFAULT_DEVICE: &str = "firefly-0001";
 /// 等待 HIL 设备枚举的上限。
 const ENUMERATION_TIMEOUT: Duration = Duration::from_secs(20);
-/// 板端 HIL 可选的估计器及其进程清单。
-const ESTIMATORS: [(&str, &str); 1] = [("rootslam", "processes-hil.toml")];
+/// 完整 HIL 进程清单。
+const MANIFEST: &str = "processes-hil.toml";
 
 pub fn run(args: &[String]) -> Result<(), String> {
-    let (device, estimator, mission) = parse_arguments(args)?;
-    let estimator_manifest = manifest_for(&estimator)?;
-    let (manifest, host_config) = match mission.as_str() {
-        "hover" => (estimator_manifest, "configs/hil.toml"),
-        "roundtrip" => ("processes-hil-roundtrip.toml", "configs/hil-roundtrip.toml"),
-        other => {
-            return Err(format!(
-                "unknown HIL mission {other}: expected hover or roundtrip"
-            ));
-        }
-    };
+    let device = parse_arguments(args)?;
     deploy::deploy(&device)?;
-    ensure_hil_processes(&device, manifest)?;
+    ensure_hil_processes(&device)?;
     build_host_bridge()?;
     println!("切换 HIL gadget（adb 将临时消失）");
-    let command = format!(
-        "rm -f /opt/firefly/logs/hil/up.pid; \
+    let command = "rm -f /opt/firefly/logs/hil/up.pid; \
          /usr/sbin/start-stop-daemon --start --background --make-pidfile \
          --pidfile /opt/firefly/logs/hil/up.pid \
-         --startas /opt/firefly/bin/hil-gadget -- up {manifest}"
-    );
+         --startas /opt/firefly/bin/hil-gadget -- up";
     // 切换会杀掉 adbd，adb 的返回状态不可靠；以主机枚举为准。
-    let _ = deploy::shell(&device, &command);
-    wait_for_enumeration(host_config)
+    let _ = deploy::shell(&device, command);
+    wait_for_enumeration()
 }
 
-fn parse_arguments(args: &[String]) -> Result<(String, String, String), String> {
+fn parse_arguments(args: &[String]) -> Result<String, String> {
     let mut device = DEFAULT_DEVICE.to_owned();
-    let mut estimator = ESTIMATORS[0].0.to_owned();
-    let mut mission = "hover".to_owned();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -58,46 +44,23 @@ fn parse_arguments(args: &[String]) -> Result<(String, String, String), String> 
                 it.next()
                     .ok_or_else(|| "missing --device value".to_owned())?,
             ),
-            "--estimator" => estimator.clone_from(
-                it.next()
-                    .ok_or_else(|| "missing --estimator value".to_owned())?,
-            ),
-            "--mission" => mission.clone_from(it.next().ok_or("missing --mission value")?),
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    Ok((device, estimator, mission))
-}
-
-/// 估计器名到板端进程清单的映射；未知估计器直接报错，不透传到板端命令。
-fn manifest_for(estimator: &str) -> Result<&'static str, String> {
-    ESTIMATORS
-        .iter()
-        .find(|(name, _)| *name == estimator)
-        .map(|(_, manifest)| *manifest)
-        .ok_or_else(|| {
-            format!(
-                "unknown estimator {estimator}: expected {}",
-                ESTIMATORS
-                    .iter()
-                    .map(|(name, _)| *name)
-                    .collect::<Vec<_>>()
-                    .join(" or ")
-            )
-        })
+    Ok(device)
 }
 
 /// `deploy` 会把 `configs/*.toml` 一起发布，这里只确认 HIL 清单确实在位。
-fn ensure_hil_processes(device: &str, manifest: &str) -> Result<(), String> {
+fn ensure_hil_processes(device: &str) -> Result<(), String> {
     let output = deploy::adb_output(
         device,
         &[
             "shell",
-            &format!("test -f /opt/firefly/configs/{manifest} && echo HIL_PROCESSES_OK"),
+            &format!("test -f /opt/firefly/configs/{MANIFEST} && echo HIL_PROCESSES_OK"),
         ],
     )?;
     if !output.contains("HIL_PROCESSES_OK") {
-        return Err(format!("板上缺少 configs/{manifest}；检查 deploy 包"));
+        return Err(format!("板上缺少 configs/{MANIFEST}；检查 deploy 包"));
     }
     Ok(())
 }
@@ -114,13 +77,13 @@ fn build_host_bridge() -> Result<(), String> {
     Ok(())
 }
 
-fn wait_for_enumeration(host_config: &str) -> Result<(), String> {
+fn wait_for_enumeration() -> Result<(), String> {
     let probe = target::workspace_root().join("target/release/hil");
     let deadline = Instant::now() + ENUMERATION_TIMEOUT;
     while Instant::now() < deadline {
         let output = Command::new(&probe)
             .current_dir(target::workspace_root())
-            .args(["--check", "--config", host_config])
+            .arg("--check")
             .output();
         if let Ok(output) = output
             && output.status.success()

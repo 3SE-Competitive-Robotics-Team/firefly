@@ -470,9 +470,7 @@ fn ipc_loop(
             activity = true;
         }
         while let Ok(Some(sample)) = down.depth.receive() {
-            if options.depth {
-                pending_depth = Some(*sample.payload());
-            }
+            pending_depth = Some(*sample.payload());
             activity = true;
         }
         if let (Some(left), Some(right)) = (&pending_left, &pending_right) {
