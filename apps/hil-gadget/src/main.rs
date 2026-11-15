@@ -21,6 +21,9 @@
 #[cfg(target_os = "linux")]
 mod setup;
 
+#[cfg(any(target_os = "linux", test))]
+mod transition;
+
 use std::process::ExitCode;
 
 const USAGE: &str = "\
