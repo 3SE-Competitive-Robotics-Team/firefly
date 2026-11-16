@@ -51,7 +51,7 @@ This catalog covers all production topic constants; test topics use isolated nam
 
 | Topic | Producers → consumers; purpose | Recording policy |
 |---|---|---|
-| `Firefly/VizScalars` | FC, VIO, render, localization → mimir | Every registered numeric row; publisher sequence checked |
+| `Firefly/VizScalars` | FC, VIO, render, localization, planner, traj → mimir | Every registered numeric row; publisher sequence checked |
 | `Firefly/Viz` | VIO, render, planner, localization → mimir | Registered spatial observations; sequence checked |
 | `Firefly/VizVoxels` | planner → mimir | Complete ordered map updates; missing chunks fail |
 | `Firefly/Log` | Rust applications, sim, flight scripts → mimir | Sequence and producer loss count checked |
@@ -108,9 +108,48 @@ of subsequent business events. Known loss makes the recording fail.
 | `corr/*`, `vision/debug/map_query_wall_s` | External localization gates, disagreement, correction and query timing |
 | `plan/*` | Global guides, accepted executable local paths including their stopping tail, poses, obstacle planes and maps for display |
 | `plan/collision` | Planner-owned depth map after obstacle inflation, in odom coordinates at the planner simulation timestamp; bounded voxel snapshots/deltas for checking collision geometry, using the existing map display cadence and budgets |
+| `planner/loop_hz`, `planner/fsm_hz` | Completed execution callbacks and actual FSM executions per wall second; FSM executions require fresh odometry and a ready map |
+| `planner/replan_submitted_hz`, `planner/replan_hz` | Worker jobs submitted and candidates actually adopted per wall second |
+| `planner/replan_ms` | Per completed job: `latency_ms` from submission/snapshot through main-thread adoption/discard, solver-thread `solve_ms`, and `adopted` (0/1) |
+| `planner/fsm_timing_ms` | Per execution callback: `fsm_ms` for the FSM call, `step_ms` for input/map/FSM/worker handoff/status work, and start-to-start `period_ms` |
+| `traj/sample_hz`, `traj/reference_hz` | Actual trajectory sample calls with valid odometry and successful Reference publications per wall second; zero while the corresponding work is idle |
+| `traj/timing_ms` | Per timer callback: `tick_ms` for inputs/decoding/sampling/publication, sampler `sample_ms`, local Reference IPC `publish_ms`, and start-to-start `period_ms` |
 | `mimir/*`, `logs/*` | Configuration, queue high-water, lifecycle, failures and process events |
 | `mimir/status/{fc/tick_rate,vio/processing,vio/posterior_age,vio/landmarks,camera/publish_rate,camera/publish_latency}` | Six independent recorder-derived numeric documents from existing scalar observations; at most 2 Hz per entity in measurement time, six cached values and one constant-space publication counter on existing observations |
 | `frames/{map,odom,world}` | Recorder-owned display transforms: root←map identity, temporal map←odom from Navigation, and optional constant map←world startup alignment; display-layer data |
+
+The planner/traj performance consumers are the default Viewer Planner and Traj tabs and offline RRD checks.
+These bounded observations are always produced and are independent of log severity filters.
+Six frequency rows use actual monotonic elapsed time, including callback stalls, and emit at most once
+per wall second. Planner adoption excludes discarded/failed jobs and synchronous stationary or emergency
+trajectories. Zero adoption while waiting for a goal is normal. All nine entities are temporal Scalars
+on the latest odometry `sim_time`; their values measure process wall time. `replan_thresh` is elapsed
+trajectory measurement time, so a one-second threshold is not a fixed one-Hz wall-clock schedule in
+accelerated or slowed simulation. Compare accepted-result cadence as well as individual result latency.
+
+`replan_ms.latency_ms` includes snapshot, queue, solve and final main-thread decision.
+`solve_ms` includes only work in the solver thread; both include OS scheduling and are not CPU-time counters.
+`adopted` distinguishes a fast rejected result from an executable accepted result.
+FSM core timing excludes worker execution, diagnostic production and voxel display; `step_ms` includes
+sensor polling, map synchronization, worker result adoption and normal trajectory visualization, but
+excludes performance publication and voxel-display handoff. `period_ms` includes intervening
+safety work, display handoff, diagnostic publication, scheduler waits and preemption. The first period is zero.
+Voxel scanning, coarsening, differencing and publication run on an independent display worker.
+At most 10 map views per wall second are offered through one pending, unrendered view slot;
+a newer view replaces pending rendering work and preserves any full-resync request.
+Every produced full/delta update and chunk is retained under the existing voxel budgets.
+Traj `tick_ms` excludes performance publication and log pumping. A zero FSM/sample/publish duration
+means that operation was not executed in the callback; reports of computation latency use executed operations.
+Reference publication timing ends when the local IPC send returns; it excludes FC consumption and USB transport.
+
+Each callback timing row is retained (nominally 100 Hz per app), plus one row per completed worker job
+(at most the existing 100-Hz execution callback cadence). Existing ScalarMessage (128 bytes),
+publisher/queue limits and complete-retention checks apply. Normal one-Hz replanning adds about 26.5 kB/s
+before HIL framing; the nominal 100-Hz completion bound gives 39.2 kB/s, with a maximum nine-row burst.
+The existing HIL scalar path forwards these observations without additional topics or queue budgets.
+Validation checks production with log output disabled, field order/units, clock separation, result/sample/send
+counts, observed queue high-water, source continuity and RRD shutdown integrity. Performance run environment
+and resource snapshots use bounded `logs/performance` events on the existing Log channel (512-byte limit).
 
 ### Spatial frames
 
@@ -258,7 +297,8 @@ Global BA reports optimized and deferred landmark counts once at INFO level (bel
 512 bytes). Deferred landmarks lack two distinct camera views; they remain in the map.
 Use these counts to distinguish the map size from the actual optimization problem.
 `RUST_LOG=info,planner-profile=debug` records planner callbacks taking at least 10 ms in
-`logs/planner`, including sensor polling, map synchronization, execution, safety and voxel display.
+`logs/planner`, including sensor polling, map synchronization, execution, safety, display handoff
+(`display-submit`) and the independent display worker (`display`).
 Each event contains the stage and elapsed wall time; aggregation accounts for nested stages once.
 Production is off by default, bounded by the existing 100/20/10 Hz callback rates and 512-byte log limit.
 Depth-input expiry/termination logs one warning when planner enters the latched emergency state,
@@ -320,6 +360,14 @@ camera publication rate (FPS) and capture-to-publication latency (ms). Each card
 view. Ordinary bold text keeps the numbers compact.
 The timeline cursor selects the measurement-time snapshot; a stopped recording holds its last snapshot.
 Missing/nonfinite or more-than-two-second-old values display `—`.
+
+The lower tab container has one Planner tab and one Traj tab. Planner groups callback/FSM Hz,
+FSM/callback/period milliseconds, submitted/adopted planning Hz, and result/solver milliseconds.
+The result plot hides `adopted` (0/1), which remains available in the entity for outcome checks.
+Traj groups sample/publication Hz, sampler/local-IPC latency, and total callback/period milliseconds.
+Different units and scales use separate plots. Timing plots retain the min/max envelope when multiple
+samples occupy one pixel, so callback latency spikes remain visible. The one-second replan threshold uses measurement time.
+Existing camera, VIO and FC panels retain their source observations.
 
 Camera FPS counts strictly increasing `render/capture/publish_s` timestamps over at least one second
 of measurement time, using the number of intervals divided by elapsed time. Duplicate/out-of-order

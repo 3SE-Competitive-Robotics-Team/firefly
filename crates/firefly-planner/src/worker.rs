@@ -38,6 +38,7 @@ pub struct MapVersion {
 
 #[derive(Clone)]
 struct Ticket {
+    submitted_at: Instant,
     generation: u64,
     trajectory: u32,
     map: MapVersion,
@@ -51,6 +52,7 @@ struct Job {
     kind: SolveKind,
 }
 struct Completion {
+    solve_time: Duration,
     ticket: Ticket,
     candidate: Option<(LocalTraj, PlanResult, bool)>,
     global: GlobalTraj,
@@ -59,6 +61,7 @@ struct Completion {
 }
 impl Job {
     fn solve(mut self, workspace: &mut firefly_search::Astar) -> Completion {
+        let started = Instant::now();
         self.manager.planner.exchange_workspace(workspace);
         self.manager
             .planner
@@ -84,6 +87,7 @@ impl Job {
             None
         };
         Completion {
+            solve_time: started.elapsed(),
             ticket: self.ticket,
             candidate,
             global: self.manager.global,
@@ -118,6 +122,10 @@ pub struct WorkerStats {
     pub snapshot_time: Duration,
     pub first_snapshot_time: Duration,
     pub max_snapshot_time: Duration,
+    /// 最近一次任务从建立快照到主线程完成采用/丢弃决策的墙钟耗时。
+    pub completion_time: Duration,
+    /// 最近一次任务在求解线程中的墙钟耗时；不含快照、排队和主线程采用等待。
+    pub solve_time: Duration,
 }
 impl PlanningWorker {
     /// # Errors
@@ -181,6 +189,8 @@ impl PlanningWorker {
         let mut adopted = false;
         match self.receiver.try_recv() {
             Ok(completion) => {
+                let submitted_at = completion.ticket.submitted_at;
+                self.stats.solve_time = completion.solve_time;
                 self.lane = Lane::Idle;
                 if eligible(&completion.ticket, fsm, now, map) {
                     if completion.ticket.map.geometry != map.geometry {
@@ -193,6 +203,7 @@ impl PlanningWorker {
                 } else {
                     self.stats.discarded += 1;
                 }
+                self.stats.completion_time = submitted_at.elapsed();
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.cancel();
@@ -215,6 +226,7 @@ impl PlanningWorker {
                 return false;
             };
             let ticket = Ticket {
+                submitted_at: Instant::now(),
                 generation: fsm.generation,
                 trajectory: fsm.manager.traj_id(),
                 map,

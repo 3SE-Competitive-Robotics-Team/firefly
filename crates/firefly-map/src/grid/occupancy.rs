@@ -4,6 +4,37 @@ use super::{GridMap, VirtualWall, VoxelState};
 use nalgebra::Vector3;
 
 impl GridMap {
+    /// Install an immutable, already-inflated sensor snapshot in this map's global lattice.
+    /// Local edits and fixed priors remain additive; moving the view does not erase the source.
+    ///
+    /// # Errors
+    /// A sensor collision snapshot requires zero additional obstacle inflation.
+    pub fn set_collision_snapshot(
+        &mut self,
+        snapshot: crate::CollisionSnapshot,
+    ) -> firefly_error::Result<()> {
+        if self.inf_grid != 0 {
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                "collision snapshot requires zero additional inflation",
+            ));
+        }
+        if self
+            .collision
+            .as_ref()
+            .is_none_or(|old| !old.shares_data(&snapshot))
+        {
+            self.collision = Some(snapshot);
+            self.touch();
+        }
+        Ok(())
+    }
+
+    pub(super) fn sensor_occupied(&self, global: [i64; 3]) -> bool {
+        self.collision
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.is_occupied(global))
+    }
     /// 写入派生占据状态；自由或未知不能覆盖固定先验。
     pub fn set_state(&mut self, idx: [usize; 3], state: VoxelState) {
         let g = self.global_index(idx);
@@ -17,7 +48,8 @@ impl GridMap {
     /// 二值占据查询；未知状态按自由处理。
     #[must_use]
     pub fn state(&self, idx: [usize; 3]) -> VoxelState {
-        let occ = self.occupancy[self.occ_addr(self.global_index(idx))];
+        let global = self.global_index(idx);
+        let occ = self.sensor_occupied(global) || self.occupancy[self.occ_addr(global)];
         if occ {
             VoxelState::Occupied
         } else {
@@ -27,6 +59,7 @@ impl GridMap {
 
     /// 清除当前派生占据，保留世界锚定先验与虚拟墙。
     pub fn clear_observations(&mut self) {
+        self.collision = None;
         self.occupancy.fill(false);
         self.inflate.fill(0);
         self.inflation_rebuild = true;
@@ -78,7 +111,7 @@ impl GridMap {
         let Some(g) = self.window_global(p) else {
             return false;
         };
-        self.occupancy[self.occ_addr(g)]
+        self.sensor_occupied(g) || self.occupancy[self.occ_addr(g)]
     }
 }
 
@@ -86,6 +119,76 @@ impl GridMap {
 mod tests {
     use super::*;
     use crate::grid::{GridMapBuilder, VoxelState};
+
+    #[test]
+    fn sensor_snapshot_replaces_observations_and_preserves_prior_and_solver_view() {
+        use crate::CollisionSnapshot;
+        let mut map = GridMapBuilder::new(1., [6; 3])
+            .with_obstacles_inflation(0.)
+            .build()
+            .unwrap();
+        map.set_prior_occupied([1; 3]);
+        let source = CollisionSnapshot::from_runs([0; 3], [6; 3], [([2; 3], [4; 3])]);
+        map.set_collision_snapshot(source.clone()).unwrap();
+        map.inflate_obstacles();
+        let revision = map.revision();
+        map.set_collision_snapshot(source).unwrap();
+        assert_eq!(map.revision(), revision);
+        let solver = map.clone();
+        for x in 0..6 {
+            for y in 0..6 {
+                for z in 0..6 {
+                    let index = [x, y, z];
+                    let occupied = index == [1; 3] || index.iter().all(|v| (2..4).contains(v));
+                    let point = Vector3::from(index.map(|v| v as f64 + 0.5));
+                    assert_eq!(map.is_occupied(point), occupied);
+                    assert_eq!(map.is_occupied_inflated(point), occupied);
+                    assert_eq!(map.is_inflated(index), occupied);
+                    assert_eq!(map.inflate_at(index) > 0, occupied);
+                    let mask = map.inflated_neighborhood_mask(index);
+                    for dx in -1..=1 {
+                        for dy in -1..=1 {
+                            for dz in -1..=1 {
+                                let near = [x as i32 + dx, y as i32 + dy, z as i32 + dz];
+                                let expected = near.iter().all(|v| (0..6).contains(v))
+                                    && map.is_occupied_inflated(Vector3::from(
+                                        near.map(|v| f64::from(v) + 0.5),
+                                    ));
+                                let bit = ((dx + 1) * 3 + (dy + 1)) * 3 + (dz + 1);
+                                assert_eq!(mask & (1 << bit) != 0, expected);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        map.set_collision_snapshot(CollisionSnapshot::from_runs([0; 3], [6; 3], []))
+            .unwrap();
+        assert!(!map.is_occupied_inflated(Vector3::repeat(2.5)));
+        assert!(map.is_occupied_inflated(Vector3::repeat(1.5)));
+        assert!(solver.is_occupied_inflated(Vector3::repeat(2.5)));
+        map.set_collision_snapshot(solver.collision.clone().unwrap())
+            .unwrap();
+        map.move_ring_buffer(Vector3::new(12., 3., 3.));
+        map.move_ring_buffer(Vector3::repeat(3.));
+        assert!(map.is_occupied_inflated(Vector3::repeat(2.5)));
+        map.clear_observations();
+        assert!(!map.is_occupied_inflated(Vector3::repeat(2.5)));
+        assert!(map.is_occupied_inflated(Vector3::repeat(1.5)));
+        assert!(solver.is_occupied_inflated(Vector3::repeat(2.5)));
+    }
+
+    #[test]
+    fn already_inflated_sensor_source_requires_zero_additional_inflation() {
+        let mut map = GridMapBuilder::new(1., [6; 3])
+            .with_obstacles_inflation(1.)
+            .build()
+            .unwrap();
+        assert!(
+            map.set_collision_snapshot(crate::CollisionSnapshot::from_runs([0; 3], [6; 3], []))
+                .is_err()
+        );
+    }
 
     #[test]
     fn correction_clears_sensor_obstacles_but_preserves_world_prior() {

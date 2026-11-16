@@ -80,7 +80,9 @@ fn completion(fsm: &ReplanFsm) -> Completion {
         true
     ));
     Completion {
+        solve_time: Duration::from_millis(2),
         ticket: Ticket {
+            submitted_at: Instant::now(),
             generation: fsm.generation,
             trajectory: fsm.manager.traj_id(),
             map: version(fsm),
@@ -124,6 +126,25 @@ fn retarget_localization_stop_and_expiry_revoke_results() {
         assert!(!eligible(&result.ticket, &fsm, now, map), "change {change}");
         assert_eq!(fsm.manager.traj_id(), 0);
     }
+}
+
+#[test]
+fn completed_job_measures_submission_to_adoption_on_wall_clock() {
+    let mut fsm = fsm();
+    let map = version(&fsm);
+    let mut result = completion(&fsm);
+    result.ticket.submitted_at = Instant::now()
+        .checked_sub(Duration::from_millis(25))
+        .unwrap();
+    let mut worker = PlanningWorker::new().unwrap();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    worker.receiver = receiver;
+    worker.lane = Lane::Solving(result.ticket.clone());
+    sender.send(result).unwrap();
+    assert!(worker.tick(&mut fsm, 0., Some(state()), map));
+    assert_eq!(worker.stats().adopted, 1);
+    assert!(worker.stats().completion_time >= Duration::from_millis(25));
+    assert_eq!(worker.stats().solve_time, Duration::from_millis(2));
 }
 
 #[test]

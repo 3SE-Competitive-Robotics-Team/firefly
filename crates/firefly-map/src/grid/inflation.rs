@@ -96,6 +96,11 @@ impl GridMap {
                     }
                     let index = ((di + 1) * 3 + (dj + 1)) as usize * 3 + (dk + 1) as usize;
                     if wall_blocked[(dk + 1) as usize]
+                        || self.sensor_occupied([
+                            g[0] + i64::from(di),
+                            g[1] + i64::from(dj),
+                            g[2] + i64::from(dk),
+                        ])
                         || self.inflate[row + sz[(dk + 1) as usize]] > 0
                     {
                         out |= 1 << index;
@@ -109,7 +114,13 @@ impl GridMap {
     /// 直接读取膨胀计数（测试用，对照官方 `occupancy_buffer_inflate_`）。
     #[must_use]
     pub fn inflate_at(&self, idx: [usize; 3]) -> u16 {
-        self.inflate[self.inf_addr(self.global_index(idx))]
+        let global = self.global_index(idx);
+        let count = self.inflate[self.inf_addr(global)];
+        if self.sensor_occupied(global) {
+            count.max(GRID_MAP_OBS_FLAG + 1)
+        } else {
+            count
+        }
     }
 
     /// 索引是否落在膨胀层内（对照官方 `getInflateOccupancy` 下游 `>0` 判膨胀）。
@@ -122,7 +133,7 @@ impl GridMap {
                 return true;
             }
         }
-        self.inflate[self.inf_addr(g)] > 0
+        self.sensor_occupied(g) || self.inflate[self.inf_addr(g)] > 0
     }
 
     /// 位置是否落在膨胀层内（官方 `getInflateOccupancy(pos)`：虚拟墙命中视为
@@ -136,7 +147,7 @@ impl GridMap {
         if !self.in_inf_window(g) {
             return false;
         }
-        self.inflate[self.inf_addr(g)] > 0
+        self.sensor_occupied(g) || self.inflate[self.inf_addr(g)] > 0
     }
 
     /// 膨胀计数缓冲增量更新（对照 `grid_map.h:259-300` `changeInfBuf`）。

@@ -1,7 +1,7 @@
 //! traj 消费完整轨迹和心跳，独立以 100Hz 发布飞控参考。
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_planner::{TrajectoryCommand, TrajectoryServer};
-use firefly_planner_runtime::odometry::OdometryReceiver;
+use firefly_planner_runtime::{odometry::OdometryReceiver, rate::Rate};
 use firefly_pubsub::{
     node::create_node,
     publish::Publisher,
@@ -11,6 +11,7 @@ use firefly_pubsub::{
         PLANNER_HEARTBEAT_TOPIC, PlannerHeartbeatMessage, TRAJECTORY_CONTROL_TOPIC,
         TRAJECTORY_TOPIC, TrajectoryControlMessage, TrajectoryPieceMessage,
     },
+    viz::{ScalarMessage, VizPublisher},
 };
 use firefly_trajectory::Trajectory;
 use iceoryx2::prelude::*;
@@ -110,6 +111,17 @@ pub fn run(timeout: f64) -> Result<()> {
         Subscriber::<TrajectoryControlMessage>::with_topic(&node, TRAJECTORY_CONTROL_TOPIC)?;
     let odometry = OdometryReceiver::start()?;
     let log_ipc = firefly_observability::init_ipc(&node, "traj");
+    let viz = match VizPublisher::new(&node) {
+        Ok(publisher) => Some(publisher),
+        Err(error) => {
+            log::warn!("性能观测发布不可用：{error}");
+            None
+        }
+    };
+    let mut rate = Rate::default();
+    let mut sample_rate = Rate::default();
+    let mut previous_tick: Option<Instant> = None;
+    let mut stamp = 0.;
     let mut server = TrajectoryServer::new(timeout);
     let mut control = TrajectoryControlMessage::default();
     let mut goal_timestamp = 0.0;
@@ -129,6 +141,14 @@ pub fn run(timeout: f64) -> Result<()> {
         if !event.has_event_from(&tick) {
             return CallbackProgression::Continue;
         }
+        let started = Instant::now();
+        let interval = previous_tick
+            .replace(started)
+            .map_or(Duration::ZERO, |previous| started.duration_since(previous));
+        let mut sent = false;
+        let mut sampled = false;
+        let mut sample_ms = 0.;
+        let mut publish_ms = 0.;
         let step = (|| -> Result<()> {
             while let Some(message) = controls.receive()? {
                 control = *message;
@@ -146,11 +166,16 @@ pub fn run(timeout: f64) -> Result<()> {
             let Some(snapshot) = input.current(Instant::now()) else {
                 return Ok(());
             };
+            stamp = snapshot.timestamp;
             if control.enabled == 0 {
                 server.finish();
             }
+            let sample_started = Instant::now();
             let references = server.sample(snapshot.timestamp, origin.elapsed().as_secs_f64());
+            sample_ms = sample_started.elapsed().as_secs_f64() * 1000.;
+            sampled = true;
             if let Some(reference) = references {
+                let publish_started = Instant::now();
                 publisher.publish(ReferenceMessage {
                     timestamp: snapshot.timestamp,
                     position_x: reference.position.x,
@@ -169,10 +194,39 @@ pub fn run(timeout: f64) -> Result<()> {
                     has_alignment: 1,
                     goal_timestamp,
                 })?;
+                publish_ms = publish_started.elapsed().as_secs_f64() * 1000.;
+                sent = true;
             }
-            firefly_observability::pump_log_ipc(&log_ipc);
             Ok(())
         })();
+        if let Some(viz) = &viz {
+            let tick_ms = started.elapsed().as_secs_f64() * 1000.;
+            let now = Instant::now();
+            for (entity, value) in [
+                ("traj/reference_hz", rate.observe(now, u64::from(sent))),
+                (
+                    "traj/sample_hz",
+                    sample_rate.observe(now, u64::from(sampled)),
+                ),
+            ] {
+                if let Some(value) = value {
+                    let mut message = ScalarMessage::base(stamp, entity);
+                    message.scalar_count = 1;
+                    message.scalars[0] = value;
+                    let _ = viz.publish(message);
+                }
+            }
+            let mut message = ScalarMessage::base(stamp, "traj/timing_ms");
+            message.scalar_count = 4;
+            message.scalars.copy_from_slice(&[
+                tick_ms,
+                sample_ms,
+                publish_ms,
+                interval.as_secs_f64() * 1000.,
+            ]);
+            let _ = viz.publish(message);
+        }
+        firefly_observability::pump_log_ipc(&log_ipc);
         if let Err(e) = step {
             error = Some(e);
             return CallbackProgression::Stop;

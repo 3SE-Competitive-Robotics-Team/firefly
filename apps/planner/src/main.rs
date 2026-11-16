@@ -10,25 +10,25 @@ mod output;
 mod scene;
 #[cfg(test)]
 mod tests;
+mod voxel_display;
 
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use fastrace::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_map::{GridMap, Plane, VirtualWall, VoxelState};
+use firefly_map::{Plane, VirtualWall};
 use firefly_observability::init as init_observability;
-use firefly_planner::worker::{MapVersion, PlanningWorker};
+use firefly_planner::worker::{MapVersion, PlanningWorker, WorkerStats};
 use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager, ReplanFsm};
-use firefly_planner_runtime::{odometry, state_input::StateInput};
+use firefly_planner_runtime::{odometry, rate::Rate, state_input::StateInput};
 use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::trajectory::{MANDATORY_STOP_TOPIC, MandatoryStopMessage};
 use firefly_pubsub::viz::{
-    ARROWS_MAX, POINTS_MAX, VIZ_TOPIC, VOXELS_MAX, VizMessage, VizPublisher, VoxelMessage, kind,
+    ARROWS_MAX, POINTS_MAX, ScalarMessage, VIZ_TOPIC, VizMessage, VizPublisher, kind,
 };
 use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetRunResult;
@@ -41,13 +41,6 @@ const LOOP_PERIOD: Duration = Duration::from_millis(10);
 /// 地图融合新鲜度阈值（秒），沿用官方 `grid_map/odom_depth_timeout`。
 /// 默认值 1.0（`plan_env/src/grid_map.cpp`）。
 const MAP_TIMEOUT: f64 = 1.0;
-/// 体素层全量重同步周期（帧；10Hz 循环下 50 帧 = 5s）。增量协议下每拍只发
-/// 变化量，周期性补发全量快照，任一增量消息丢失后消费端可自愈。
-const VOXEL_RESYNC_TICKS: usize = 50;
-/// 实时感知体素的显示半径（米）：以机体为中心的立方窗口。
-///
-/// 显示按窗口裁剪；密集占据合并为较粗体素，保持完整覆盖并满足消息预算。
-const PERCEIVED_VIEW_RADIUS_M: f64 = 4.0;
 /// 缺省配置：按安装布局解析，与启动目录无关。
 fn default_config() -> PathBuf {
     firefly_config::paths::config("planner.toml")
@@ -129,15 +122,7 @@ struct App {
     log_ipc: firefly_observability::LogIpc,
     /// 当前机体位置（odom 系，米）：感知地图只发它附近的局部窗口。
     perceived_center: Vector3<f64>,
-    /// 各体素实体**上次发布的集合**：与当前集合做差得到增量（新增/删除）。
-    voxel_state: HashMap<String, HashSet<[i32; 3]>>,
-    voxel_geometry: HashMap<String, ([f32; 3], [f32; 3])>,
-    /// 体素增量发布的复用缓冲（每 tick 都要用，避免反复分配）。
-    voxel_current: HashSet<[i32; 3]>,
-    voxel_added: Vec<[i32; 3]>,
-    voxel_removed: Vec<[i32; 3]>,
-    /// 待发布的占据索引缓冲（感知窗口复用 Vec）。
-    voxel_indices: Vec<[i32; 3]>,
+    display: voxel_display::DisplayWorker,
     /// 状态时钟（秒），只由通过校验的局部里程计推进。
     t_sim: f64,
     odom: odometry::OdometryReceiver,
@@ -160,6 +145,12 @@ struct App {
     /// 最新 odom 携带的 trace 上下文 `(trace_id, span_id, sampled)`（续接用）。
     odom_trace: Option<(u128, u64, bool)>,
     finished: bool,
+    loop_rate: Rate,
+    fsm_rate: Rate,
+    submitted_rate: Rate,
+    replan_rate: Rate,
+    previous_step: Option<Instant>,
+    fsm_time: Option<Duration>,
 }
 
 impl App {
@@ -220,7 +211,7 @@ impl App {
             "强制停止订阅不可用",
         );
         let output = output::OutputPublisher::new(&node)?;
-        let viz_pub = match VizPublisher::with_voxels(&node) {
+        let viz_pub = match VizPublisher::new(&node) {
             Ok(p) => {
                 log::info!("已打开话题 {VIZ_TOPIC}");
                 Some(p)
@@ -242,12 +233,7 @@ impl App {
             view_half_angle,
             log_ipc,
             perceived_center: Vector3::zeros(),
-            voxel_state: HashMap::new(),
-            voxel_geometry: HashMap::new(),
-            voxel_current: HashSet::new(),
-            voxel_added: Vec::new(),
-            voxel_removed: Vec::new(),
-            voxel_indices: Vec::new(),
+            display: voxel_display::DisplayWorker::start()?,
             t_sim: 0.0,
             state_input: StateInput::default(),
             received_state: false,
@@ -263,6 +249,12 @@ impl App {
             pending_mandatory_stop: false,
             odom_trace: None,
             finished: false,
+            loop_rate: Rate::default(),
+            fsm_rate: Rate::default(),
+            submitted_rate: Rate::default(),
+            replan_rate: Rate::default(),
+            previous_step: None,
+            fsm_time: None,
         })
     }
 
@@ -319,6 +311,13 @@ impl App {
     /// 执行回调：传感器 → 局部深度地图 → 状态机 → 完整轨迹交付与可视化。
     #[fastrace::trace]
     fn step(&mut self) -> Result<()> {
+        let started = Instant::now();
+        let interval = self
+            .previous_step
+            .replace(started)
+            .map_or(Duration::ZERO, |previous| started.duration_since(previous));
+        self.fsm_time = None;
+        let before = self.solver.stats();
         self.exec_step()?;
         // 执行状态独立于轨迹输出门控；等待新鲜地图期间仍报告新鲜状态。
         if self.state_fresh {
@@ -329,7 +328,63 @@ impl App {
                     && !self.fsm.is_mandatory_stopped(),
             )?;
         }
+        self.publish_performance(before, started, interval);
         Ok(())
+    }
+
+    fn publish_performance(&mut self, before: WorkerStats, started: Instant, interval: Duration) {
+        if let Some(viz) = &self.viz_pub {
+            let after = self.solver.stats();
+            let now = Instant::now();
+            let step_ms = now.duration_since(started).as_secs_f64() * 1000.;
+            let publish = |entity: &str, values: &[f64]| {
+                let mut message = ScalarMessage::base(self.t_sim, entity);
+                message.scalar_count = values.len() as u32;
+                message.scalars[..values.len()].copy_from_slice(values);
+                let _ = viz.publish(message);
+            };
+            for (entity, rate) in [
+                ("planner/loop_hz", self.loop_rate.observe(now, 1)),
+                (
+                    "planner/fsm_hz",
+                    self.fsm_rate
+                        .observe(now, u64::from(self.fsm_time.is_some())),
+                ),
+                (
+                    "planner/replan_submitted_hz",
+                    self.submitted_rate
+                        .observe(now, after.submitted - before.submitted),
+                ),
+                (
+                    "planner/replan_hz",
+                    self.replan_rate
+                        .observe(now, after.adopted - before.adopted),
+                ),
+            ] {
+                if let Some(rate) = rate {
+                    publish(entity, &[rate]);
+                }
+            }
+            publish(
+                "planner/fsm_timing_ms",
+                &[
+                    self.fsm_time
+                        .map_or(0., |duration| duration.as_secs_f64() * 1000.),
+                    step_ms,
+                    interval.as_secs_f64() * 1000.,
+                ],
+            );
+            if after.adopted + after.discarded > before.adopted + before.discarded {
+                publish(
+                    "planner/replan_ms",
+                    &[
+                        after.completion_time.as_secs_f64() * 1000.,
+                        after.solve_time.as_secs_f64() * 1000.,
+                        f64::from(after.adopted > before.adopted),
+                    ],
+                );
+            }
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -416,7 +471,9 @@ impl App {
             }
         }
         self.output.control(true)?;
+        let fsm_started = Instant::now();
         let mut report = self.fsm.exec_tick_deferred(now, measured);
+        self.fsm_time = Some(fsm_started.elapsed());
         let map_version = MapVersion {
             localization: 0,
             geometry: self.fsm.manager().map().revision(),
@@ -633,8 +690,12 @@ impl App {
             last_visualization = Instant::now();
             frame += 1;
             let started = Instant::now();
-            self.publish_collision_map(frame);
-            log_slow_stage("display", started);
+            if let Err(error) = self.publish_collision_map(frame) {
+                log::error!("voxel display failed: {error}");
+                self.stop_failed_callback();
+                return CallbackProgression::Stop;
+            }
+            log_slow_stage("display-submit", started);
             CallbackProgression::Continue
         };
 
@@ -666,26 +727,17 @@ impl App {
         Ok(())
     }
 
-    /// Publish changes around fresh odometry, with periodic full resynchronization.
-    fn publish_collision_map(&mut self, frame: usize) {
-        if !self.state_fresh {
-            return;
+    /// Hand off an immutable view for display outside the FSM thread.
+    fn publish_collision_map(&self, frame: usize) -> Result<()> {
+        if self.state_fresh {
+            self.display.submit(voxel_display::Request {
+                map: self.fsm.manager().map().clone(),
+                center: self.perceived_center,
+                timestamp: self.t_sim,
+                force_full: frame.is_multiple_of(voxel_display::VOXEL_RESYNC_TICKS),
+            })?;
         }
-        let mut indices = std::mem::take(&mut self.voxel_indices);
-        let (size, origin) = Self::occupied_indices(
-            self.fsm.manager().map(),
-            Some(self.perceived_center),
-            &mut indices,
-        );
-        self.publish_voxel_delta(
-            "plan/collision",
-            &indices,
-            size,
-            origin,
-            self.t_sim,
-            frame.is_multiple_of(VOXEL_RESYNC_TICKS),
-        );
-        self.voxel_indices = indices;
+        Ok(())
     }
 
     fn stop_failed_callback(&mut self) -> CallbackProgression {
@@ -765,171 +817,6 @@ impl App {
         msg.xyz = pos;
         msg.quat_xyzw = quat_xyzw;
         self.viz_publish(&msg);
-    }
-
-    /// 局部窗口内的占据体素索引（`center` 为空则全量栅格），附带网格尺寸与原点。
-    ///
-    /// 局部窗口以 `center` 为中心取 `local_update_range` 内的格子，限制传输量。
-    fn occupied_indices(
-        map: &GridMap,
-        center: Option<Vector3<f64>>,
-        indices: &mut Vec<[i32; 3]>,
-    ) -> ([f32; 3], [f32; 3]) {
-        let origin = map.origin();
-        let dims = map.dims();
-        let size = [map.resolution() as f32; 3];
-        let at = [origin.x as f32, origin.y as f32, origin.z as f32];
-        indices.clear();
-        let (lo, hi) = match center {
-            Some(c) => match Self::window_bounds(map, c) {
-                Some(bounds) => bounds,
-                None => return (size, at),
-            },
-            None => ([0, 0, 0], [dims[0] - 1, dims[1] - 1, dims[2] - 1]),
-        };
-        for x in lo[0]..=hi[0] {
-            for y in lo[1]..=hi[1] {
-                for z in lo[2]..=hi[2] {
-                    if map.state([x, y, z]) == VoxelState::Occupied {
-                        indices.push([x as i32, y as i32, z as i32]);
-                    }
-                }
-            }
-        }
-        let size = Self::coarsen_display_voxels(indices, size);
-        (size, at)
-    }
-
-    /// Coalesce occupied display cells without dropping any occupied volume.
-    fn coarsen_display_voxels(indices: &mut Vec<[i32; 3]>, mut size: [f32; 3]) -> [f32; 3] {
-        while indices.len() > VOXELS_MAX {
-            for index in indices.iter_mut() {
-                *index = index.map(|value| value.div_euclid(2));
-            }
-            indices.sort_unstable();
-            indices.dedup();
-            size = size.map(|value| value * 2.);
-        }
-        size
-    }
-
-    /// 体素层按**增量**发布：与上次发布的集合做差，只发新增/删除。首次发布、
-    /// `force_full` 或差集超单条消息上限时发分块全量快照；消费端原子替换集合。
-    fn publish_voxel_delta(
-        &mut self,
-        entity: &str,
-        indices: &[[i32; 3]],
-        size: [f32; 3],
-        origin: [f32; 3],
-        t: f64,
-        force_full: bool,
-    ) {
-        let force_full = force_full
-            || self
-                .voxel_geometry
-                .insert(entity.to_owned(), (size, origin))
-                != Some((size, origin));
-        self.voxel_current.clear();
-        self.voxel_current.extend(indices.iter().copied());
-        let (first, full) = {
-            match self.voxel_state.get(entity) {
-                None => (true, true),
-                Some(prev) => {
-                    self.voxel_added.clear();
-                    self.voxel_removed.clear();
-                    self.voxel_added
-                        .extend(self.voxel_current.difference(prev).copied());
-                    self.voxel_removed
-                        .extend(prev.difference(&self.voxel_current).copied());
-                    (
-                        false,
-                        force_full
-                            || self.voxel_added.len() > VOXELS_MAX
-                            || self.voxel_removed.len() > VOXELS_MAX,
-                    )
-                }
-            }
-        };
-        if first || full {
-            self.publish_voxels(kind::VOXELS, entity, indices, size, origin, t);
-        } else {
-            if !self.voxel_added.is_empty() {
-                self.publish_voxels(kind::VOXELS_ADD, entity, &self.voxel_added, size, origin, t);
-            }
-            if !self.voxel_removed.is_empty() {
-                self.publish_voxels(
-                    kind::VOXELS_REMOVE,
-                    entity,
-                    &self.voxel_removed,
-                    size,
-                    origin,
-                    t,
-                );
-            }
-        }
-        // 换入新集合：复用缓冲拿到上一 tick 的集合，下轮直接清空重填（不克隆）。
-        match self.voxel_state.get_mut(entity) {
-            Some(prev) => std::mem::swap(prev, &mut self.voxel_current),
-            None => {
-                self.voxel_state
-                    .insert(entity.to_string(), std::mem::take(&mut self.voxel_current));
-            }
-        }
-    }
-
-    /// 连续发布完整更新的所有分块；空快照通过一个空块表达。
-    fn publish_voxels(
-        &self,
-        kind: u32,
-        entity: &str,
-        indices: &[[i32; 3]],
-        size: [f32; 3],
-        origin: [f32; 3],
-        t: f64,
-    ) {
-        let Some(publisher) = &self.viz_pub else {
-            return;
-        };
-        let chunks = indices.len().div_ceil(VOXELS_MAX).max(1);
-        for chunk in 0..chunks {
-            let begin = chunk * VOXELS_MAX;
-            let end = (begin + VOXELS_MAX).min(indices.len());
-            let mut msg = VoxelMessage::base(kind, t, entity);
-            msg.voxel_count = (end - begin) as u32;
-            msg.voxels[..end - begin].copy_from_slice(&indices[begin..end]);
-            msg.voxel_size = size;
-            msg.voxel_origin = origin;
-            msg.chunk_index = chunk as u32;
-            msg.chunk_count = chunks as u32;
-            let _ = publisher.publish(msg);
-        }
-    }
-
-    /// `center` 周围 `local_update_range` 对应的窗口索引范围（闭区间，已裁剪
-    /// 到栅格内）；越界返回 `None`。
-    fn window_bounds(map: &GridMap, center: Vector3<f64>) -> Option<([usize; 3], [usize; 3])> {
-        let range = Vector3::new(
-            PERCEIVED_VIEW_RADIUS_M,
-            PERCEIVED_VIEW_RADIUS_M,
-            PERCEIVED_VIEW_RADIUS_M,
-        );
-        let origin = map.origin();
-        let res = map.resolution();
-        let dims = map.dims();
-        let mut lo = [0usize; 3];
-        let mut hi = [0usize; 3];
-        for axis in 0..3 {
-            let min = ((center[axis] - range[axis] - origin[axis]) / res).floor();
-            let max = ((center[axis] + range[axis] - origin[axis]) / res).ceil();
-            let min = min.max(0.0) as usize;
-            let max = (max.max(0.0) as usize).min(dims[axis].saturating_sub(1));
-            if min > max || dims[axis] == 0 {
-                return None;
-            }
-            lo[axis] = min;
-            hi[axis] = max;
-        }
-        Some((lo, hi))
     }
 }
 

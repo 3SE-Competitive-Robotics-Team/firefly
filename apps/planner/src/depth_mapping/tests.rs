@@ -176,9 +176,17 @@ fn ground_depth_does_not_observe_air_above_the_camera() {
 
 #[test]
 fn full_depth_to_collision_path_preserves_native_inflation_and_clears_obstacles() {
-    let source = source();
+    let source = crate::config::MappingOptions {
+        resolution: 0.25,
+        range: [2.; 3],
+        ..Default::default()
+    }
+    .build(0.25)
+    .unwrap();
     let mut fusion = DepthFusion::new(&source, options(), 0.25).unwrap();
     let mut collision = collision_grid(&source).unwrap();
+    assert_eq!(collision.origin(), source.origin());
+    assert_eq!(collision.global_index([0; 3]), source.global_index([0; 3]));
     let mut input = MapInput::default();
     let now = Instant::now();
     for i in 0..4 {

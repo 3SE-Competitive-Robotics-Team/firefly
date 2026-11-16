@@ -305,6 +305,9 @@ fn interpolate_pose(
 /// Numerical state is private to the mapping worker. Construct before opening IPC.
 pub struct DepthFusion {
     map: GridMap,
+    collision_resolution: f64,
+    collision_origin: nalgebra::Vector3<f64>,
+    collision_cache: Option<firefly_map::CollisionSnapshot>,
     options: DepthOptions,
     last_fused: Option<(f64, Instant)>,
     sequence: u64,
@@ -317,6 +320,11 @@ impl DepthFusion {
         map.extrinsic_callback(options.extrinsic()?)?;
         Ok(Self {
             map,
+            collision_resolution: grid.resolution(),
+            collision_origin: grid.origin()
+                - nalgebra::Vector3::from(grid.global_index([0; 3]).map(|v| v as f64))
+                    * grid.resolution(),
+            collision_cache: None,
             options,
             last_fused: None,
             sequence: 0,
@@ -366,8 +374,24 @@ impl DepthFusion {
         if overflow {
             return Err(invalid("local collision snapshot capacity exceeded"));
         }
+        let (collision_low, collision_high) =
+            bounds.voxel_bounds(self.collision_origin, self.collision_resolution);
+        let collision = firefly_map::CollisionSnapshot::from_runs(
+            collision_low,
+            std::array::from_fn(|i| (collision_high[i] - collision_low[i]) as usize),
+            cells
+                .iter()
+                .map(|cell| cell.voxel_bounds(self.collision_origin, self.collision_resolution)),
+        );
+        if self.collision_cache.as_ref() != Some(&collision) {
+            self.collision_cache = Some(collision);
+        }
         Ok(Some(LocalSnapshot {
-            cells,
+            collision: self
+                .collision_cache
+                .as_ref()
+                .expect("collision snapshot prepared")
+                .clone(),
             observed: {
                 let (free, dims, origin) = self.map.observed_free_buffer();
                 firefly_map::ObservedSpace::from_buffer(resolution, low, dims, origin, free)
@@ -382,10 +406,15 @@ impl DepthFusion {
 
 /// Local snapshots already contain upstream inflation; never inflate them twice.
 pub fn collision_grid(source: &firefly_map::GridMap) -> Result<firefly_map::GridMap> {
-    firefly_map::GridMapBuilder::new(source.resolution(), source.dims())
-        .with_origin(source.origin())
+    let world_origin = source.origin()
+        - nalgebra::Vector3::from(source.global_index([0; 3]).map(|v| v as f64))
+            * source.resolution();
+    let mut map = firefly_map::GridMapBuilder::new(source.resolution(), source.dims())
+        .with_origin(world_origin)
         .with_obstacles_inflation(0.)
-        .build()
+        .build()?;
+    map.move_ring_buffer(source.origin() + source.size() * 0.5);
+    Ok(map)
 }
 
 fn invalid(message: &str) -> Error {

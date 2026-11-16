@@ -247,7 +247,7 @@ ALIKED 的离线 / 在线模式在启动时确定；quad 使用 Bevy startup / u
 | 12 | [映射调度](../apps/rootslam/src/system.rs) | `correction_pending: Option<revision>` 绑定在途地图版本；`Finalization` 授权收尾 | 输入结束、回环排空、最终 BA 授权、取消属于不同事件 |
 | 13 | [全局优化](../crates/firefly-rootslam-mapping/src/global_optimization.rs)、[L-BFGS](../crates/firefly-optimize/src/lbfgs.rs) | L-BFGS `Termination::{Converged, Cancelled, IterationLimit}`；全局优化接受步与阻尼控制流 | 仅接受步提交状态；取消、预算耗尽与收敛分别报告；路标块另有显式 `State` |
 | 14 | [规划与轨迹里程计](../crates/firefly-planner-runtime/src/state_input.rs) | `InputPhase::{Waiting, Active, Stopped}`，有效态共同拥有测量与接收时钟 | 启动等待可继续；有效流之后的超时或无效观测锁存；重复时间戳不续命 |
-| 15 | [规划地图输入](../apps/planner/src/map_input.rs) | `fault: Option<reason>` 保留首次失败；覆盖、应用版本与窗口缓存各自维护 | 覆盖不足可恢复；几何故障锁存；窗口移动使应用缓存失效 |
+| 15 | [规划地图输入](../apps/planner/src/map_input.rs) | `fault: Option<reason>` 保留首次失败；覆盖与不可变碰撞快照各自维护 | 覆盖不足可恢复；输入故障锁存；世界锚定快照供滚动窗口查询 |
 | 16 | [EGO 地图](../crates/firefly-ego-map/src/grid.rs) | `DepthPhase::{Waiting, Pending, Integrated}`；首帧、缓冲初始化与超时独立 | 首帧、缓冲区初始化、待融合、输入超时各自推进；占据与膨胀缓冲按地图更新流程提交 |
 | 17 | [规划 worker](../crates/firefly-planner/src/worker.rs)、[应用](../apps/planner/src/main.rs) | `Lane::{Idle, Solving, Unavailable}`、Ticket 取消标志与目标世代 | 取消立即撤销采用资格，任务返回后才释放槽位；轨迹到时与实际到点分别判断 |
 | 18 | [深度 worker](../apps/planner/src/depth_mapping.rs)、[里程计 worker](../crates/firefly-planner-runtime/src/odometry.rs)、[FC IMU worker](../apps/fc/src/imu.rs) | 启动应答、线程句柄与终止守卫；线程退出撤销快照和共享历史资格 | 就绪应答后消费；停止传播给拥有者；join 后报告线程错误 |
@@ -449,8 +449,11 @@ ESKF 修正提交规则由 `firefly_localization::CorrectionOptions` 维护。
 
 深度配对采用前后里程计插值及最大间隔检查，待配对队列和历史有界。
 输入采用最新值语义，融合和衰减各有定时器。
-快照在进程内共享覆盖范围、已膨胀障碍和射线空闲位图；
-接收端直接使用已有膨胀，重叠障碍通过贡献计数维护。
+快照在进程内共享覆盖范围、已膨胀障碍和射线空闲位图。
+建图线程将障碍游程投影到规划栅格的全局晶格，打包为不可变位图；
+重叠游程按并集处理。主线程、求解与显示共享位图，查询叠加固定先验，
+接收端直接使用已有膨胀。快照替换传感器占据，滚动窗口按世界索引查询；
+相同占据复用位图，几何变化才推进占据版本。
 
 规划采用 EGO 的乐观占据查询：窗口内未知格可作为候选空间，
 碰撞检查使用已知膨胀障碍。射线空闲位图描述感知覆盖，作为独立诊断。
@@ -478,6 +481,10 @@ raycastProcess、fadingCallback 和 clearAndInflateLocalMap。
 障碍内终点沿全局曲线反向寻找自由点，零长度目标仍保留有效引导。
 
 执行回调 100Hz、安全回调 20Hz，共用主线程；单独 worker 承担求解。
+体素显示线程接收最多 10Hz 的写时复制地图视图，独立扫描、合并、求差与发布。
+待绘制槽位只保留最新视图，并保留待执行的全量同步请求；
+每个已生成的体素更新完整发布，IPC 分块、保留与预算沿用观测契约。
+线程启动确认发布端就绪，错误传回主线程，拥有者在退出时唤醒并 join。
 最多一个在途任务。取消撤销提交资格，worker 归还槽位后接纳最新任务。
 任务记录目标世代、定位版本、地图几何版本、执行轨迹序号与原始起始时间。
 目标变化、急停、输入失效和地图检查失败撤销资格；优化和搜索合作式取消。

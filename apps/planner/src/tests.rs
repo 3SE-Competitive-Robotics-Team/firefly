@@ -2,6 +2,7 @@ use super::*;
 use crate::map_input::{Bounds, LocalSnapshot};
 use firefly_pubsub::navigation::{NAVIGATION_TOPIC, NavigationMessage};
 use firefly_pubsub::odom::{ODOM_TOPIC, OdomMessage};
+use firefly_pubsub::viz::VOXELS_MAX;
 
 fn publish_odometry(publisher: &Publisher<OdomMessage>, timestamp: f64, shift: f64) {
     publisher
@@ -123,7 +124,7 @@ fn dense_display_preserves_all_occupied_volume_within_message_budget() {
         .flat_map(|x| (-40..=40).flat_map(move |y| (-40..=40).map(move |z| [x, y, z])))
         .collect();
     let mut coarse = fine.clone();
-    let size = App::coarsen_display_voxels(&mut coarse, [0.1; 3]);
+    let size = crate::voxel_display::Renderer::coarsen_display_voxels(&mut coarse, [0.1; 3]);
     assert!(coarse.len() <= VOXELS_MAX);
     let scale = (size[0] / 0.1).round() as i32;
     assert!(scale > 1);
@@ -160,7 +161,7 @@ fn safety_callback_applies_new_obstacles_and_deletions_without_exec_tick() {
         app.poll_odometry().unwrap();
         std::thread::sleep(Duration::from_millis(2));
     }
-    let snapshot = |sequence, cells| LocalSnapshot {
+    let snapshot = |sequence, cells: Vec<Bounds>| LocalSnapshot {
         observed: firefly_map::ObservedSpace::from_buffer(
             0.5,
             [-10; 3],
@@ -169,7 +170,13 @@ fn safety_callback_applies_new_obstacles_and_deletions_without_exec_tick() {
             &[true; 8000],
         ),
         sequence,
-        cells,
+        collision: firefly_map::CollisionSnapshot::from_runs(
+            [-10; 3],
+            [20; 3],
+            cells
+                .iter()
+                .map(|cell: &Bounds| cell.voxel_bounds(Vector3::zeros(), 0.5)),
+        ),
         timestamp: 1.,
         fused_at: Instant::now(),
         bounds: Bounds {

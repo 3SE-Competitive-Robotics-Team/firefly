@@ -1,12 +1,9 @@
 //! Derive a collision grid from the planner-owned, already inflated depth map.
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_map::{GridMap, VoxelState};
+use firefly_map::{CollisionSnapshot, GridMap};
 use firefly_pubsub::odom::OdomMessage;
 use nalgebra::Vector3;
-use std::{
-    collections::{HashMap, HashSet},
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 /// Half-open metric bounds in the local odom frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -20,6 +17,15 @@ impl Bounds {
             self.min[i].is_finite() && self.max[i].is_finite() && self.min[i] < self.max[i]
         })
     }
+    pub fn voxel_bounds(&self, origin: Vector3<f64>, resolution: f64) -> ([i64; 3], [i64; 3]) {
+        let low = std::array::from_fn(|i| {
+            lattice_coordinate((self.min[i] - origin[i]) / resolution).floor() as i64
+        });
+        let high = std::array::from_fn(|i| {
+            lattice_coordinate((self.max[i] - origin[i]) / resolution).ceil() as i64
+        });
+        (low, high)
+    }
     pub fn contains(&self, other: &Self) -> bool {
         (0..3).all(|i| self.min[i] <= other.min[i] && self.max[i] >= other.max[i])
     }
@@ -27,7 +33,7 @@ impl Bounds {
 
 /// Complete collision geometry passed between threads in this planner process.
 pub struct LocalSnapshot {
-    pub cells: Vec<Bounds>,
+    pub collision: CollisionSnapshot,
     pub observed: firefly_map::ObservedSpace,
     pub bounds: Bounds,
     pub sequence: u64,
@@ -40,12 +46,6 @@ pub struct MapInput {
     required: Option<Bounds>,
     snapshot: Option<LocalSnapshot>,
     fault: Option<String>,
-    occupied: HashMap<[i64; 3], u32>,
-    boxes: HashSet<([i64; 3], [i64; 3])>,
-    next_boxes: HashSet<([i64; 3], [i64; 3])>,
-    applied: Option<(u64, [i64; 3])>,
-    geometry_version: u64,
-    window_moved: bool,
 }
 impl MapInput {
     pub fn observed(&self) -> Option<firefly_map::ObservedSpace> {
@@ -59,24 +59,13 @@ impl MapInput {
         result
     }
     fn accept(&mut self, snapshot: LocalSnapshot) -> Result<()> {
-        if !snapshot.timestamp.is_finite()
-            || snapshot.timestamp < 0.
-            || !snapshot.bounds.valid()
-            || snapshot.cells.iter().any(|cell| !cell.valid())
-        {
+        if !snapshot.timestamp.is_finite() || snapshot.timestamp < 0. || !snapshot.bounds.valid() {
             return Err(invalid("invalid local collision snapshot"));
         }
         if let Some(old) = &self.snapshot
             && (snapshot.sequence <= old.sequence || snapshot.timestamp < old.timestamp)
         {
             return Ok(());
-        }
-        if self
-            .snapshot
-            .as_ref()
-            .is_none_or(|old| old.cells != snapshot.cells)
-        {
-            self.geometry_version = self.geometry_version.wrapping_add(1);
         }
         self.snapshot = Some(snapshot);
         Ok(())
@@ -108,13 +97,11 @@ impl MapInput {
         rolling: bool,
     ) -> Bounds {
         if rolling {
-            let before = map.global_index([0; 3]);
             map.move_ring_buffer(Vector3::new(
                 odometry.position_x,
                 odometry.position_y,
                 odometry.position_z,
             ));
-            self.window_moved |= map.global_index([0; 3]) != before;
         }
         let low = map.origin();
         let high = low + Vector3::from(map.dims().map(|d| d as f64 * map.resolution()));
@@ -143,68 +130,7 @@ impl MapInput {
         if !snapshot.bounds.contains(&required) {
             return Err(invalid("depth map coverage mismatch"));
         }
-        let key = (self.geometry_version, map.global_index([0; 3]));
-        if self.applied == Some(key) && !self.window_moved {
-            return Ok(());
-        }
-        let origin = map.origin();
-        let resolution = map.resolution();
-        let dims = map.dims();
-        self.next_boxes.clear();
-        let boxes = &mut self.next_boxes;
-        for cell in &snapshot.cells {
-            let start: [usize; 3] = std::array::from_fn(|i| {
-                lattice_coordinate((cell.min[i] - origin[i]) / resolution)
-                    .floor()
-                    .clamp(0., dims[i] as f64) as usize
-            });
-            let end: [usize; 3] = std::array::from_fn(|i| {
-                lattice_coordinate((cell.max[i] - origin[i]) / resolution)
-                    .ceil()
-                    .clamp(0., dims[i] as f64) as usize
-            });
-            if (0..3).all(|i| start[i] < end[i]) {
-                boxes.insert((map.global_index(start), map.global_index(end)));
-            }
-        }
-        for bounds in self.boxes.difference(boxes) {
-            for global in voxel_indices(*bounds) {
-                let count = self
-                    .occupied
-                    .get_mut(&global)
-                    .expect("source contribution exists");
-                *count -= 1;
-                if *count == 0 {
-                    self.occupied.remove(&global);
-                    if let Some(index) = map.window_index(global) {
-                        map.set_state(index, VoxelState::Free);
-                    }
-                }
-            }
-        }
-        for bounds in boxes.difference(&self.boxes) {
-            for global in voxel_indices(*bounds) {
-                let count = self.occupied.entry(global).or_default();
-                *count += 1;
-                if *count == 1
-                    && let Some(index) = map.window_index(global)
-                {
-                    map.set_state(index, VoxelState::Occupied);
-                }
-            }
-        }
-        // A ring shift clears boundary strips even when a source box survives.
-        if self.window_moved {
-            for global in self.occupied.keys() {
-                if let Some(index) = map.window_index(*global) {
-                    map.set_state(index, VoxelState::Occupied);
-                }
-            }
-        }
-        map.inflate_obstacles();
-        std::mem::swap(&mut self.boxes, &mut self.next_boxes);
-        self.applied = Some(key);
-        self.window_moved = false;
+        map.set_collision_snapshot(snapshot.collision.clone())?;
         Ok(())
     }
 }
@@ -215,11 +141,6 @@ fn lattice_coordinate(value: f64) -> f64 {
     } else {
         value
     }
-}
-fn voxel_indices((start, end): ([i64; 3], [i64; 3])) -> impl Iterator<Item = [i64; 3]> {
-    (start[0]..end[0]).flat_map(move |x| {
-        (start[1]..end[1]).flat_map(move |y| (start[2]..end[2]).map(move |z| [x, y, z]))
-    })
 }
 fn invalid(message: &str) -> Error {
     Error::new(ErrorKind::InvalidArgument, message)
@@ -244,7 +165,13 @@ mod tests {
 
     fn snapshot(sequence: u64, cells: Vec<Bounds>) -> LocalSnapshot {
         LocalSnapshot {
-            cells,
+            collision: CollisionSnapshot::from_runs(
+                [0; 3],
+                [4; 3],
+                cells
+                    .into_iter()
+                    .map(|cell| cell.voxel_bounds(Vector3::zeros(), 1.)),
+            ),
             observed: firefly_map::ObservedSpace::from_buffer(
                 1.,
                 [0; 3],
@@ -288,7 +215,7 @@ mod tests {
         assert!(!input.ready(&away, Instant::now(), Duration::from_secs(1)));
         assert!(!input.expired(&away, Instant::now(), Duration::from_secs(1)));
         input.prepare_region(&mut map, &nav, true);
-        assert!(!map.is_occupied_inflated(point));
+        assert!(map.is_occupied_inflated(point));
         input.apply(&mut map, &nav, true).unwrap();
         assert!(map.is_occupied_inflated(point));
     }

@@ -219,7 +219,16 @@ pub fn fields(name: &str) -> Result<&'static [&'static str]> {
         "fc/debug/tilt_deg" | "fc/debug/tilt_err_deg" => &["angle_deg"],
         "fc/debug/thrust_total" => &["thrust_N"],
         "fc/debug/hover_thrust" => &["normalized"],
-        "fc/debug/tick_rate" => &["rate_Hz"],
+        "fc/debug/tick_rate"
+        | "planner/loop_hz"
+        | "planner/fsm_hz"
+        | "planner/replan_submitted_hz"
+        | "planner/replan_hz"
+        | "traj/reference_hz"
+        | "traj/sample_hz" => &["rate_Hz"],
+        "planner/replan_ms" => &["latency_ms", "solve_ms", "adopted"],
+        "planner/fsm_timing_ms" => &["fsm_ms", "step_ms", "period_ms"],
+        "traj/timing_ms" => &["tick_ms", "sample_ms", "publish_ms", "period_ms"],
         "vision/debug/map_query_wall_s" => &["query_s"],
         "fc/standby_eskf/accel_nis" => &["nis"],
         "fc/debug/saturated_ticks" => &["count"],

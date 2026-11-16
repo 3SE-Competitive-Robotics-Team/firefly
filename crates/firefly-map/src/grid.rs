@@ -80,6 +80,8 @@ pub struct GridMap {
     center_last: [i64; 3],
     /// 局部快照派生的二值占据；不累计传感器概率。
     occupancy: Buffer<bool>,
+    /// Already-inflated sensor observations, immutable and shared with planner workers.
+    collision: Option<crate::CollisionSnapshot>,
     /// 世界锚定的场地先验；自由快照与动态障碍移除不能清除。
     prior: Arc<HashSet<[i64; 3]>>,
     /// 膨胀计数缓冲（对照官方 `occupancy_buffer_inflate_`）：障碍体素自身 `±GRID_MAP_OBS_FLAG`，周围 `inf_grid` 格内 `±1`；`>0` 即膨胀。

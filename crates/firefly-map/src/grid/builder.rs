@@ -134,6 +134,7 @@ impl GridMapBuilder {
             inf_ring_origin: [0; 3],
             center_last: [dims_i64[0] / 2, dims_i64[1] / 2, dims_i64[2] / 2],
             occupancy: super::Buffer::new(false, capacity),
+            collision: None,
             prior: std::sync::Arc::new(HashSet::new()),
             inflate: super::Buffer::new(0, inf_capacity),
             virtual_wall: self.virtual_wall,
