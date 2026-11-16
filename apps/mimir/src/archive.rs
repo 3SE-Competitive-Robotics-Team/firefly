@@ -96,7 +96,7 @@ impl Archive {
         let logs = firefly_config::paths::root().join("logs");
         std::fs::create_dir_all(&logs).map_err(|e| failure("create logs directory", e))?;
         let directory = loop {
-            let directory = logs.join(recording_stamp(&jiff::Zoned::now()));
+            let directory = logs.join(recording_stamp(&jiff::ZonedDateTime::now()));
             match std::fs::create_dir(&directory) {
                 Ok(()) => break directory,
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -730,7 +730,7 @@ impl Archive {
     }
 }
 
-fn recording_stamp(now: &jiff::Zoned) -> String {
+fn recording_stamp(now: &jiff::ZonedDateTime) -> String {
     now.strftime("%Y%m%d_%H%M%S").to_string()
 }
 
