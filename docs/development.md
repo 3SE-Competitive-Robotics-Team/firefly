@@ -109,6 +109,7 @@ commit message 使用 `<type>(<scope>): <摘要>`；PR 标题使用 `<type>: <�
 `rmuc2027@1.0.0`；资产在 `models/<赛季>/v<版本>/`（`field.glb`、
 `<赛季>_collision.json`），另需 `models/drone/drone.glb`。启动时检查版本注册和资产完整性，错误指向具体场景。
 停机坪定义统一由 `firefly_mujoco.scene.SCENES[].pad` 与 `PAD_CLEARANCE` 提供。
+Python 仿真使用 `mujoco-core` 提供核心物理接口，导入名为 `mujoco`；
 render 使用无窗口 GPU 渲染；Rerun 原生 Viewer 需要图形会话。Rust/Python 版本和依赖
 以 workspace 配置为准。mimir 直接将左右目无损灰度图和结构化诊断写入 RRD，配置见 `configs/mimir.toml`。
 
@@ -116,6 +117,11 @@ render 使用无窗口 GPU 渲染；Rerun 原生 Viewer 需要图形会话。Rus
 uv sync --all-packages --extra test
 cargo xtask release
 ```
+
+已有环境包含 `mujoco` 元包时，使用
+`uv sync --all-packages --extra test --reinstall-package mujoco-core` 同步环境。
+元包与核心包共同提供 `mujoco/__init__.py`，重装核心包可完整恢复该导入入口；
+包拆分与切换方式见 [MuJoCo 官方说明](https://github.com/google-deepmind/mujoco/blob/4.0.1/doc/changelog.rst)。
 
 运行进程一律 release；普通 `cargo test` 用 debug。源码改动后先完成构建，再做运行验收。
 RootSLAM 的 `firefly-calibration`、`firefly-basalt`、`firefly-rootslam-mapping` 和
@@ -384,7 +390,7 @@ uv run --package firefly-cad firefly-cad-build <场地.stp> --scene <赛季>@<�
 uv venv models/vision-export/.venv --python 3.12
 uv pip install --python models/vision-export/.venv/bin/python -e packages/firefly-workspace
 uv pip install --python models/vision-export/.venv/bin/python torch==2.15.0 torchvision==0.29.2 --index-url https://download.pytorch.org/whl/cpu
-uv pip install --python models/vision-export/.venv/bin/python onnxscript==0.7.2 onnx==1.23.2 onnxruntime==1.31.1 kornia==0.9.0 opencv-python==5.0.0.93 matplotlib==3.11.2
+uv pip install --python models/vision-export/.venv/bin/python onnxscript==0.7.2 onnx==1.23.2 onnxruntime==1.32.0 kornia==0.9.2 opencv-python==5.0.0.93 matplotlib==3.11.2
 models/vision-export/.venv/bin/python scripts/export_vision_models.py
 uv run --all-packages python scripts/build_vision_map.py <通过内容校验的采集目录>
 ```

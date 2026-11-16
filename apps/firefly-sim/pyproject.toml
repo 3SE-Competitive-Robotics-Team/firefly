@@ -8,7 +8,7 @@ dependencies = [
     "firefly-workspace",
     "firefly-mujoco",
     "iceoryx2==0.10.0",
-    "numpy>=2.5.4,<3",
+    "numpy>=2.5.5,<3",
     "opentelemetry-api>=1.45.2,<2",
     "opentelemetry-sdk>=1.45.2,<2",
 ]
@@ -18,7 +18,7 @@ firefly-workspace = { workspace = true }
 firefly-mujoco = { workspace = true }
 
 [build-system]
-requires = ["uv_build>=0.13.7,<0.14"]
+requires = ["uv_build>=0.13.8,<0.14"]
 build-backend = "uv_build"
 
 [project.scripts]
@@ -27,5 +27,5 @@ firefly-sim = "firefly_sim.main:main"
 [project.optional-dependencies]
 test = [
     "pytest>=9.2.0",
-    "pytest-asyncio>=1.4.1.post1",
+    "pytest-asyncio>=1.5.0",
 ]

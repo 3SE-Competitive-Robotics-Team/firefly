@@ -1595,7 +1595,7 @@ dependencies = [
  "derive_more",
  "glam 0.33.12",
  "libm",
- "rand 0.10.3",
+ "rand 0.10.4",
  "serde",
  "thiserror 2.0.21",
  "variadics_please",
@@ -1938,7 +1938,7 @@ dependencies = [
  "bevy_math",
  "bevy_reflect",
  "derive_more",
- "rand 0.10.3",
+ "rand 0.10.4",
  "rand_distr",
  "serde",
  "thiserror 2.0.21",
@@ -3417,7 +3417,7 @@ dependencies = [
  "fastrace-macro",
  "parking_lot",
  "pin-project",
- "rand 0.10.3",
+ "rand 0.10.4",
  "rtrb",
  "serde",
 ]
@@ -3503,7 +3503,7 @@ dependencies = [
  "nix 0.32.0",
  "proptest",
  "purecv",
- "rand 0.10.3",
+ "rand 0.10.4",
  "rayon",
  "serde",
  "serde_json",
@@ -3640,7 +3640,7 @@ version = "0.1.0"
 dependencies = [
  "fastrace",
  "firefly-pubsub",
- "jiff",
+ "jiff 1.0.0",
  "log",
  "logforth",
 ]
@@ -3654,7 +3654,7 @@ dependencies = [
  "nalgebra",
  "num-complex",
  "proptest",
- "rand 0.10.3",
+ "rand 0.10.4",
 ]
 
 [[package]]
@@ -3681,7 +3681,7 @@ dependencies = [
  "firefly-trajectory",
  "log",
  "nalgebra",
- "rand 0.10.3",
+ "rand 0.10.4",
  "serde",
 ]
 
@@ -3706,7 +3706,7 @@ dependencies = [
  "firefly-error",
  "iceoryx2",
  "iceoryx2-bb-posix",
- "jiff",
+ "jiff 1.0.0",
  "log",
 ]
 
@@ -3787,7 +3787,7 @@ dependencies = [
  "firefly-observability",
  "firefly-pubsub",
  "iceoryx2",
- "jiff",
+ "jiff 1.0.0",
  "log",
  "nalgebra",
 ]
@@ -4300,7 +4300,7 @@ dependencies = [
  "bytemuck",
  "encase",
  "libm",
- "rand 0.10.3",
+ "rand 0.10.4",
  "serde_core",
 ]
 
@@ -5256,13 +5256,13 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "jiff"
-version = "0.2.45"
+version = "0.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34e6d07feb763c647199bd9072192b9639da3b5ffde49afd73c08b1d5ceb1469"
+checksum = "175dc66334db3b9ab9985bf8b61cfed50dc16d20964bb47f9e479adcae984a7f"
 dependencies = [
- "jiff-core",
- "jiff-static",
- "jiff-tzdb-platform",
+ "jiff-core 0.1.8",
+ "jiff-static 0.2.46",
+ "jiff-tzdb-platform 0.1.3",
  "js-sys",
  "log",
  "portable-atomic",
@@ -5273,24 +5273,61 @@ dependencies = [
 ]
 
 [[package]]
-name = "jiff-core"
-version = "0.1.7"
+name = "jiff"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c0dfb57e3485bee979b355302992ea9c38331a94f6ccce72c2bf0077d6c9310"
+checksum = "9cc767b5763de45e810109520123bb2829a653f3a7ed9be40b2bc4f81158f595"
+dependencies = [
+ "jiff-core 1.0.0",
+ "jiff-static 1.0.0",
+ "jiff-tzdb-platform 1.0.0",
+ "log",
+ "portable-atomic",
+ "portable-atomic-util",
+ "serde_core",
+ "windows-link",
+]
+
+[[package]]
+name = "jiff-core"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e599b80292e597019b8b3e392de3f4bea2959ddfb8c7dff60e035e9e311a2c1b"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "jiff-core"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "894f7ac42105f584100691b3bf6e6b92dd12fcfa225f6c397f95c8a94b47b68f"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "jiff-static"
-version = "0.2.45"
+version = "0.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d93b8289f811027d18f228ae410cbadc766419d50b79185fa0084b10cc172d03"
+checksum = "c7b1af7547d47354bc438d797e3854601bde8f8d185780c5ba4ab27afa54f1ba"
 dependencies = [
- "jiff-core",
+ "jiff-core 0.1.8",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "jiff-static"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "955491488dc99b572ea6d67b172dcd98787d00744b1fb44a5689b4e6413695a6"
+dependencies = [
+ "jiff-core 1.0.0",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -5300,12 +5337,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0980fca2cc272465bd60e82397607ba9f33add9e48defd77923301bbd03808f2"
 
 [[package]]
+name = "jiff-tzdb"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12e71a1b68a875a44a33bb7a1dd84392cb77145a3367a552a3cfe6a4f5cf3afc"
+
+[[package]]
 name = "jiff-tzdb-platform"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "875a5a69ac2bab1a891711cf5eccbec1ce0341ea805560dcd90b7a2e925132e8"
 dependencies = [
- "jiff-tzdb",
+ "jiff-tzdb 0.1.10",
+]
+
+[[package]]
+name = "jiff-tzdb-platform"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc65b284afcfa8f6cf189c7274c805505314a7ab975c60e1f548bff56525420e"
+dependencies = [
+ "jiff-tzdb 1.0.0",
 ]
 
 [[package]]
@@ -5689,7 +5741,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "107b4296c4dfbdca6eb3a29a0414e374d1f06e7e7738f16e28dd6b8079cb59ec"
 dependencies = [
  "fastrace",
- "jiff",
+ "jiff 0.2.46",
  "logforth-core",
 ]
 
@@ -5699,7 +5751,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "80f4ed78a03a30c12285135d98330f0f5d53cb0019bd1ac6d66863dae72d8d52"
 dependencies = [
- "jiff",
+ "jiff 0.2.46",
  "logforth-core",
 ]
 
@@ -5748,7 +5800,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d86a105f8f32151ca1e0a6d4097d478badb02d5715239ba0fa431a188a5d966"
 dependencies = [
- "jiff",
+ "jiff 0.2.46",
  "logforth-core",
  "serde",
  "serde_json",
@@ -5761,7 +5813,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4eafe007ac55293d807e8c7f5a23002e2518d32e476e195443cde23e7845416a"
 dependencies = [
  "colored",
- "jiff",
+ "jiff 0.2.46",
  "logforth-core",
 ]
 
@@ -5889,7 +5941,7 @@ dependencies = [
  "firefly-observability",
  "firefly-pubsub",
  "iceoryx2",
- "jiff",
+ "jiff 1.0.0",
  "log",
  "nalgebra",
  "re_build_info",
@@ -7368,7 +7420,7 @@ dependencies = [
  "chacha20",
  "core_detect",
  "num-traits",
- "rand 0.10.3",
+ "rand 0.10.4",
  "rand_xorshift",
  "regex-syntax",
  "unarray",
@@ -7671,9 +7723,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.3"
+version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
+checksum = "8f6fa277c67e6ea590466f04c3fe82cb509f0864fe470643e5570de9514a9b11"
 dependencies = [
  "chacha20",
  "getrandom 0.4.3",
@@ -7718,7 +7770,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d431c2703ccf129de4d45253c03f49ebb22b97d6ad79ee3ecfc7e3f4862c1d8"
 dependencies = [
  "num-traits",
- "rand 0.10.3",
+ "rand 0.10.4",
 ]
 
 [[package]]
@@ -7951,7 +8003,7 @@ checksum = "967dba20065111e5d9b2701c9160a8763ac9917cd7578291a77250f41ca7eed0"
 dependencies = [
  "half",
  "itertools 0.15.0",
- "jiff",
+ "jiff 0.2.46",
  "num-traits",
  "re_int",
  "re_log",
@@ -8008,7 +8060,7 @@ dependencies = [
  "crossbeam",
  "futures",
  "itertools 0.15.0",
- "jiff",
+ "jiff 0.2.46",
  "lz4_flex",
  "parking_lot",
  "quiver",
@@ -8065,7 +8117,7 @@ dependencies = [
  "fixed",
  "half",
  "itertools 0.15.0",
- "jiff",
+ "jiff 0.2.46",
  "natord",
  "nohash-hasher",
  "num-derive",
@@ -8099,7 +8151,7 @@ dependencies = [
  "arrow",
  "http",
  "itertools 0.15.0",
- "jiff",
+ "jiff 0.2.46",
  "lz4_flex",
  "opentelemetry",
  "prost",
@@ -8400,7 +8452,7 @@ dependencies = [
  "firefly-pubsub",
  "firefly-render",
  "log",
- "rand 0.10.3",
+ "rand 0.10.4",
  "serde",
  "toml 1.2.1+spec-1.1.0",
  "usage-rs",
@@ -9682,15 +9734,15 @@ dependencies = [
 
 [[package]]
 name = "usage-argv"
-version = "7.3.0"
+version = "7.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4876429514ea5b79a0a41546c5087db5c19d502405321098868874ea940ebab"
+checksum = "51fc682d8ac95747f481ff946858096472ed72cb987613b28dbc2807084ab8d8"
 
 [[package]]
 name = "usage-derive"
-version = "7.3.0"
+version = "7.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ccf026069d7f6a6cc0e691a277906829279e702c1b73c8666f9931928be5a8bf"
+checksum = "26f9843856349327a6219fe20187f29304860527f05178d65f7bb5d0c2116f63"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9699,9 +9751,9 @@ dependencies = [
 
 [[package]]
 name = "usage-rs"
-version = "7.3.0"
+version = "7.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d8a33544b3cf4d61ee879878737cb8baca7ffbcf149631ff611447c9aa83bec"
+checksum = "45d66c7e40399fa69c0b963f265a307ddb7d59ca75b092387dca07b808f7b3ba"
 dependencies = [
  "usage-argv",
  "usage-derive",
@@ -9711,18 +9763,18 @@ dependencies = [
 
 [[package]]
 name = "usage-test"
-version = "7.3.0"
+version = "7.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "300900090803c08c8f04456302ed54aa2f32da5caa4cdbbeb1607a9ec7dd313d"
+checksum = "4094b4ba1048141045ccdf02edf56154e8c18dfd5beb6ecb9fc4799c57cd8d2a"
 dependencies = [
  "usage-argv",
 ]
 
 [[package]]
 name = "usage-validation"
-version = "7.3.0"
+version = "7.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e15f5d1ebacb03ee30f8c9b632dfb78fd18c6775c395e9661acb184ce6651a19"
+checksum = "0d3899e9917f7f99fe826338bb9a752eba108b926bfe525de83c933dfec040b6"
 dependencies = [
  "expr-lang",
 ]
@@ -10881,9 +10933,9 @@ dependencies = [
 
 [[package]]
 name = "xxhash-rust"
-version = "0.8.19"
+version = "0.8.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "550a2b930b62486a393c52d5c3b84bff264b28aa437ed64694d31e93b1757af7"
+checksum = "40de123dbb523ebcc00d61ec01840ad192578afc378d859f3429caa38308fad5"
 
 [[package]]
 name = "yazi"
