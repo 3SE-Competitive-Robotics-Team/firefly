@@ -1,5 +1,4 @@
 pub mod amd;
-pub mod apriltag;
 pub mod ba_utils;
 pub mod common_types;
 pub mod complete_orthogonal_decomposition;

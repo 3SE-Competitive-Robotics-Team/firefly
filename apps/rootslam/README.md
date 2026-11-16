@@ -234,7 +234,6 @@ Each task validates its own inputs and writes the requested outputs.
 
 | Task | Main inputs and outputs |
 |---|---|
-| `calibrate`, `calibrate-imu` | `dataset_path`, `dataset_type`, `aprilgrid`, `result_path`; camera task also takes `camera_types` |
 | `kitti-eval` | `ground_truth`, `estimate`, `output` |
 | `time-align` | `dataset_path`, `dataset_type`, `output`; optional paired `calibration`/`mocap_calibration`, `output_ground_truth` |
 | `opt-flow` | `calibration`, `dataset_path`, `dataset_type`, optional `vio_config` |
@@ -243,7 +242,7 @@ Each task validates its own inputs and writes the requested outputs.
 | `vio-sim` | `calibration`, `output`, optional `vio_config`, `archive`, `marg_data`, `use_imu`, `use_double` |
 | `mapper-sim`, `mapper-sim-naive` | `calibration`, `cache`, optional `output` |
 
-The tools provide headless calibration and numerical workflows. Production dataset
+The tools provide headless alignment, mapping and numerical workflows. Production dataset
 benchmarks use the dataset application above. Original mapper cache consumers expect
 the Basalt archive schema, including `gt.cereal`.
 

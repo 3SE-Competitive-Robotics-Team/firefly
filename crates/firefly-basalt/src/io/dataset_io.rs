@@ -75,14 +75,6 @@ pub struct MocapPoseData {
     pub timestamp_ns: i64,
     pub data: Isometry3<f64>,
 }
-#[derive(Clone, Debug, Default)]
-pub struct AprilgridCornersData {
-    pub timestamp_ns: i64,
-    pub cam_id: i32,
-    pub corner_pos: Vec<Vector2<f64>>,
-    pub corner_id: Vec<i32>,
-}
-
 /// Dataset metadata and image loading in the source camera clock.
 pub trait VioDataset: Send {
     fn num_cams(&self) -> usize;
