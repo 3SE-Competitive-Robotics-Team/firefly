@@ -8,7 +8,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "firefly-workspace",
-    "mujoco>=4.0.1,<5",
+    "mujoco-core>=4.0.1,<5",
     "numpy>=2.5.5,<3",
 ]
 
