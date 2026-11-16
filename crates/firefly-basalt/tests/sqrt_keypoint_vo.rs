@@ -38,6 +38,12 @@ fn retained_queries<S: BasaltScalar>() {
         base.frame_poses
             .insert(23, PoseStateWithLin::new(23, pose_only, false).cast::<S>());
     }
+    vio.ba.frame_poses.insert(
+        17,
+        PoseStateWithLin::new(17, Isometry3::translation(9., 9., 9.), false).cast::<S>(),
+    );
+    assert_eq!(vio.collect_poses()[&17].translation.vector[0].as_f64(), 1.);
+    assert_eq!(vo.collect_poses()[&17].translation.vector[0].as_f64(), 1.);
     let state = VioEstimatorEngine::state_at(&vio, 17).unwrap();
     assert_eq!(state.state.pose.t_ns, 17);
     assert_eq!(state.state.pose.t_w_i, pose);

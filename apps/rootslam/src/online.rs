@@ -392,7 +392,7 @@ impl LiveSession {
         Ok(())
     }
 
-    fn publish_diagnostics(&mut self) {
+    fn publish_diagnostics(&self) {
         while let Ok(data) = self.diagnostics_rx.try_recv() {
             let stamp = data.t_ns as f64 * 1e-9;
             if let Some(solver) = data.solver {

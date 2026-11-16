@@ -147,11 +147,11 @@ impl CamImuCalib {
     /// Rejects mismatched IMU arrays or a poisoned dataset lock.
     pub fn recompute_data_log(&self) -> Result<CalibrationDiagnostics> {
         let mut output = CalibrationDiagnostics::default();
-        let mut data = self
+        let data = self
             .dataset
             .lock()
             .map_err(|_| invalid("Dataset lock poisoned"))?;
-        let times = data.image_timestamps().clone();
+        let times = data.image_timestamps();
         let Some(first) = data.accel_data().first() else {
             return Ok(output);
         };
@@ -194,7 +194,7 @@ impl CamImuCalib {
                 .map(|value| value as f32),
             );
         }
-        for time in times {
+        for &time in times {
             let spline = if self.optimizer.initialized() {
                 self.optimizer.t_w_i(time)
             } else {
@@ -311,7 +311,7 @@ impl CamImuCalib {
             let mut data = dataset
                 .lock()
                 .map_err(|_| invalid("Dataset lock poisoned"))?;
-            let times = data.image_timestamps();
+            let times = data.image_timestamps_mut();
             *times = times.iter().copied().step_by(skip_images).collect();
         }
         let mut optimizer = SplineOptimization::default();
@@ -456,11 +456,11 @@ impl CamImuCalib {
             .t_i_c
             .first()
             .ok_or_else(|| invalid("No calibrated cameras"))?;
-        let mut dataset = self
+        let dataset = self
             .dataset
             .lock()
             .map_err(|_| invalid("Dataset lock poisoned"))?;
-        let timestamps = dataset.image_timestamps().clone();
+        let timestamps = dataset.image_timestamps();
         // Only adjacent input frames with both camera poses contribute.
         let mut gram = Matrix3::zeros();
         let mut cross = Matrix3::zeros();
@@ -513,11 +513,11 @@ impl CamImuCalib {
             .t_i_c
             .first()
             .ok_or_else(|| invalid("No calibrated cameras"))?;
-        let mut dataset = self
+        let dataset = self
             .dataset
             .lock()
             .map_err(|_| invalid("Dataset lock poisoned"))?;
-        let timestamps = dataset.image_timestamps().clone();
+        let timestamps = dataset.image_timestamps();
         let accel = dataset.accel_data();
         let gyro = dataset.gyro_data();
         if accel.len() != gyro.len() || gyro.len() < 101 {
@@ -645,7 +645,7 @@ impl CamImuCalib {
             .lock()
             .map_err(|_| invalid("Dataset lock poisoned"))?
             .image_timestamps()
-            .clone();
+            .to_vec();
         for time in timestamps {
             let corrected = time + self.optimizer.cam_time_offset_ns();
             if corrected < self.optimizer.min_time_ns() || corrected >= self.optimizer.max_time_ns()

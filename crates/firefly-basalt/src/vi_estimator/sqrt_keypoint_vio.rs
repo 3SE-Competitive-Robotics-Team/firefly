@@ -1131,19 +1131,19 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
     }
     /// Allocate a timestamp-indexed pose snapshot of the retained local window.
     pub fn collect_poses(&self) -> BTreeMap<i64, Isometry3<S>> {
-        let mut poses: BTreeMap<_, _> = self
-            .ba
+        self.poses().collect()
+    }
+    fn poses(&self) -> impl Iterator<Item = (i64, Isometry3<S>)> + '_ {
+        self.ba
             .frame_poses
             .iter()
             .map(|(&t, s)| (t, *s.pose()))
-            .collect();
-        poses.extend(
-            self.ba
-                .frame_states
-                .iter()
-                .map(|(&t, s)| (t, s.state().state.pose.t_w_i)),
-        );
-        poses
+            .chain(
+                self.ba
+                    .frame_states
+                    .iter()
+                    .map(|(&t, s)| (t, s.state().state.pose.t_w_i)),
+            )
     }
 
     /// # Errors
@@ -1378,8 +1378,7 @@ impl<S: BasaltScalar> VioEstimatorEngine for SqrtKeypointVioEstimator<S> {
         })
     }
     fn collect_poses(&self) -> BTreeMap<i64, Isometry3<f64>> {
-        Self::collect_poses(self)
-            .into_iter()
+        self.poses()
             .map(|(time, pose)| (time, PoseState::new(time, pose).cast::<f64>().t_w_i))
             .collect()
     }

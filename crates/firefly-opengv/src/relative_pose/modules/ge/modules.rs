@@ -342,7 +342,7 @@ pub fn compose_g_with_jacobians(
         &r,
         &rotation_differentials,
         &mut derivatives,
-        &mut layout,
+        &layout,
     );
     compose_g_derivatives_section_12(
         &mut g,
@@ -350,7 +350,7 @@ pub fn compose_g_with_jacobians(
         &r,
         &rotation_differentials,
         &mut derivatives,
-        &mut layout,
+        &layout,
     );
     *g_jac1 = derivatives[0];
     *g_jac2 = derivatives[1];
@@ -1772,7 +1772,7 @@ fn compose_g_derivatives_stage_136(
     g: &mut Matrix4<f64>,
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(2) * moments.y1_p * layout.cols)[(0, 0)];
     g[(0, 3)] = temp;
@@ -1782,7 +1782,7 @@ fn compose_g_derivatives_stage_137(
     g: &mut Matrix4<f64>,
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(2) * moments.y2_p * layout.rows.transpose())[(0, 0)];
     g[(0, 3)] += temp;
@@ -1792,7 +1792,7 @@ fn compose_g_derivatives_stage_138(
     g: &mut Matrix4<f64>,
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(1) * moments.z1_p * layout.cols)[(0, 0)];
     g[(0, 3)] += temp;
@@ -1802,7 +1802,7 @@ fn compose_g_derivatives_stage_139(
     g: &mut Matrix4<f64>,
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(1) * moments.z2_p * layout.rows.transpose())[(0, 0)];
     g[(0, 3)] += temp;
@@ -1812,7 +1812,7 @@ fn compose_g_derivatives_stage_140(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[0].row(2) * moments.y1_p * layout.cols)[(0, 0)];
     derivatives[0][(0, 3)] = temp;
@@ -1822,7 +1822,7 @@ fn compose_g_derivatives_stage_141(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(2) * moments.y1_p * layout.cols_jac1)[(0, 0)];
     derivatives[0][(0, 3)] += temp;
@@ -1832,7 +1832,7 @@ fn compose_g_derivatives_stage_142(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[0].row(2) * moments.y2_p * layout.rows.transpose())[(0, 0)];
     derivatives[0][(0, 3)] += temp;
@@ -1842,7 +1842,7 @@ fn compose_g_derivatives_stage_143(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(2) * moments.y2_p * layout.rows_jac1.transpose())[(0, 0)];
     derivatives[0][(0, 3)] += temp;
@@ -1852,7 +1852,7 @@ fn compose_g_derivatives_stage_144(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[0].row(1) * moments.z1_p * layout.cols)[(0, 0)];
@@ -1863,7 +1863,7 @@ fn compose_g_derivatives_stage_145(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(1) * moments.z1_p * layout.cols_jac1)[(0, 0)];
     derivatives[0][(0, 3)] += temp;
@@ -1873,7 +1873,7 @@ fn compose_g_derivatives_stage_146(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[0].row(1) * moments.z2_p * layout.rows.transpose())
@@ -1885,7 +1885,7 @@ fn compose_g_derivatives_stage_147(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(1) * moments.z2_p * layout.rows_jac1.transpose())[(0, 0)];
     derivatives[0][(0, 3)] += temp;
@@ -1895,7 +1895,7 @@ fn compose_g_derivatives_stage_148(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[1].row(2) * moments.y1_p * layout.cols)[(0, 0)];
     derivatives[1][(0, 3)] = temp;
@@ -1905,7 +1905,7 @@ fn compose_g_derivatives_stage_149(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(2) * moments.y1_p * layout.cols_jac2)[(0, 0)];
     derivatives[1][(0, 3)] += temp;
@@ -1915,7 +1915,7 @@ fn compose_g_derivatives_stage_150(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[1].row(2) * moments.y2_p * layout.rows.transpose())[(0, 0)];
     derivatives[1][(0, 3)] += temp;
@@ -1925,7 +1925,7 @@ fn compose_g_derivatives_stage_151(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(2) * moments.y2_p * layout.rows_jac2.transpose())[(0, 0)];
     derivatives[1][(0, 3)] += temp;
@@ -1935,7 +1935,7 @@ fn compose_g_derivatives_stage_152(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[1].row(1) * moments.z1_p * layout.cols)[(0, 0)];
@@ -1946,7 +1946,7 @@ fn compose_g_derivatives_stage_153(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(1) * moments.z1_p * layout.cols_jac2)[(0, 0)];
     derivatives[1][(0, 3)] += temp;
@@ -1956,7 +1956,7 @@ fn compose_g_derivatives_stage_154(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[1].row(1) * moments.z2_p * layout.rows.transpose())
@@ -1968,7 +1968,7 @@ fn compose_g_derivatives_stage_155(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(1) * moments.z2_p * layout.rows_jac2.transpose())[(0, 0)];
     derivatives[1][(0, 3)] += temp;
@@ -1978,7 +1978,7 @@ fn compose_g_derivatives_stage_156(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[2].row(2) * moments.y1_p * layout.cols)[(0, 0)];
     derivatives[2][(0, 3)] = temp;
@@ -1988,7 +1988,7 @@ fn compose_g_derivatives_stage_157(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(2) * moments.y1_p * layout.cols_jac3)[(0, 0)];
     derivatives[2][(0, 3)] += temp;
@@ -1998,7 +1998,7 @@ fn compose_g_derivatives_stage_158(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[2].row(2) * moments.y2_p * layout.rows.transpose())[(0, 0)];
     derivatives[2][(0, 3)] += temp;
@@ -2008,7 +2008,7 @@ fn compose_g_derivatives_stage_159(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(2) * moments.y2_p * layout.rows_jac3.transpose())[(0, 0)];
     derivatives[2][(0, 3)] += temp;
@@ -2018,7 +2018,7 @@ fn compose_g_derivatives_stage_160(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[2].row(1) * moments.z1_p * layout.cols)[(0, 0)];
@@ -2029,7 +2029,7 @@ fn compose_g_derivatives_stage_161(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(1) * moments.z1_p * layout.cols_jac3)[(0, 0)];
     derivatives[2][(0, 3)] += temp;
@@ -2039,7 +2039,7 @@ fn compose_g_derivatives_stage_162(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[2].row(1) * moments.z2_p * layout.rows.transpose())
@@ -2051,7 +2051,7 @@ fn compose_g_derivatives_stage_163(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(1) * moments.z2_p * layout.rows_jac3.transpose())[(0, 0)];
     derivatives[2][(0, 3)] += temp;
@@ -2061,7 +2061,7 @@ fn compose_g_derivatives_stage_164(
     g: &mut Matrix4<f64>,
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(0) * moments.z1_p * layout.cols)[(0, 0)];
     g[(1, 3)] = temp;
@@ -2071,7 +2071,7 @@ fn compose_g_derivatives_stage_165(
     g: &mut Matrix4<f64>,
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(0) * moments.z2_p * layout.rows.transpose())[(0, 0)];
     g[(1, 3)] += temp;
@@ -2081,7 +2081,7 @@ fn compose_g_derivatives_stage_166(
     g: &mut Matrix4<f64>,
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(2) * moments.x1_p * layout.cols)[(0, 0)];
     g[(1, 3)] += temp;
@@ -2091,7 +2091,7 @@ fn compose_g_derivatives_stage_167(
     g: &mut Matrix4<f64>,
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(2) * moments.x2_p * layout.rows.transpose())[(0, 0)];
     g[(1, 3)] += temp;
@@ -2101,7 +2101,7 @@ fn compose_g_derivatives_stage_168(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[0].row(0) * moments.z1_p * layout.cols)[(0, 0)];
     derivatives[0][(1, 3)] = temp;
@@ -2111,7 +2111,7 @@ fn compose_g_derivatives_stage_169(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(0) * moments.z1_p * layout.cols_jac1)[(0, 0)];
     derivatives[0][(1, 3)] += temp;
@@ -2121,7 +2121,7 @@ fn compose_g_derivatives_stage_170(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[0].row(0) * moments.z2_p * layout.rows.transpose())[(0, 0)];
     derivatives[0][(1, 3)] += temp;
@@ -2131,7 +2131,7 @@ fn compose_g_derivatives_stage_171(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(0) * moments.z2_p * layout.rows_jac1.transpose())[(0, 0)];
     derivatives[0][(1, 3)] += temp;
@@ -2141,7 +2141,7 @@ fn compose_g_derivatives_stage_172(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[0].row(2) * moments.x1_p * layout.cols)[(0, 0)];
@@ -2152,7 +2152,7 @@ fn compose_g_derivatives_stage_173(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(2) * moments.x1_p * layout.cols_jac1)[(0, 0)];
     derivatives[0][(1, 3)] += temp;
@@ -2162,7 +2162,7 @@ fn compose_g_derivatives_stage_174(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[0].row(2) * moments.x2_p * layout.rows.transpose())
@@ -2174,7 +2174,7 @@ fn compose_g_derivatives_stage_175(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(2) * moments.x2_p * layout.rows_jac1.transpose())[(0, 0)];
     derivatives[0][(1, 3)] += temp;
@@ -2184,7 +2184,7 @@ fn compose_g_derivatives_stage_176(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[1].row(0) * moments.z1_p * layout.cols)[(0, 0)];
     derivatives[1][(1, 3)] = temp;
@@ -2194,7 +2194,7 @@ fn compose_g_derivatives_stage_177(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(0) * moments.z1_p * layout.cols_jac2)[(0, 0)];
     derivatives[1][(1, 3)] += temp;
@@ -2204,7 +2204,7 @@ fn compose_g_derivatives_stage_178(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[1].row(0) * moments.z2_p * layout.rows.transpose())[(0, 0)];
     derivatives[1][(1, 3)] += temp;
@@ -2214,7 +2214,7 @@ fn compose_g_derivatives_stage_179(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(0) * moments.z2_p * layout.rows_jac2.transpose())[(0, 0)];
     derivatives[1][(1, 3)] += temp;
@@ -2224,7 +2224,7 @@ fn compose_g_derivatives_stage_180(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[1].row(2) * moments.x1_p * layout.cols)[(0, 0)];
@@ -2235,7 +2235,7 @@ fn compose_g_derivatives_stage_181(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(2) * moments.x1_p * layout.cols_jac2)[(0, 0)];
     derivatives[1][(1, 3)] += temp;
@@ -2245,7 +2245,7 @@ fn compose_g_derivatives_stage_182(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[1].row(2) * moments.x2_p * layout.rows.transpose())
@@ -2257,7 +2257,7 @@ fn compose_g_derivatives_stage_183(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(2) * moments.x2_p * layout.rows_jac2.transpose())[(0, 0)];
     derivatives[1][(1, 3)] += temp;
@@ -2267,7 +2267,7 @@ fn compose_g_derivatives_stage_184(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[2].row(0) * moments.z1_p * layout.cols)[(0, 0)];
     derivatives[2][(1, 3)] = temp;
@@ -2277,7 +2277,7 @@ fn compose_g_derivatives_stage_185(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(0) * moments.z1_p * layout.cols_jac3)[(0, 0)];
     derivatives[2][(1, 3)] += temp;
@@ -2287,7 +2287,7 @@ fn compose_g_derivatives_stage_186(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[2].row(0) * moments.z2_p * layout.rows.transpose())[(0, 0)];
     derivatives[2][(1, 3)] += temp;
@@ -2297,7 +2297,7 @@ fn compose_g_derivatives_stage_187(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(0) * moments.z2_p * layout.rows_jac3.transpose())[(0, 0)];
     derivatives[2][(1, 3)] += temp;
@@ -2307,7 +2307,7 @@ fn compose_g_derivatives_stage_188(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[2].row(2) * moments.x1_p * layout.cols)[(0, 0)];
@@ -2318,7 +2318,7 @@ fn compose_g_derivatives_stage_189(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(2) * moments.x1_p * layout.cols_jac3)[(0, 0)];
     derivatives[2][(1, 3)] += temp;
@@ -2328,7 +2328,7 @@ fn compose_g_derivatives_stage_190(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[2].row(2) * moments.x2_p * layout.rows.transpose())
@@ -2340,7 +2340,7 @@ fn compose_g_derivatives_stage_191(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(2) * moments.x2_p * layout.rows_jac3.transpose())[(0, 0)];
     derivatives[2][(1, 3)] += temp;
@@ -2350,7 +2350,7 @@ fn compose_g_derivatives_stage_192(
     g: &mut Matrix4<f64>,
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(1) * moments.x1_p * layout.cols)[(0, 0)];
     g[(2, 3)] = temp;
@@ -2360,7 +2360,7 @@ fn compose_g_derivatives_stage_193(
     g: &mut Matrix4<f64>,
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(1) * moments.x2_p * layout.rows.transpose())[(0, 0)];
     g[(2, 3)] += temp;
@@ -2370,7 +2370,7 @@ fn compose_g_derivatives_stage_194(
     g: &mut Matrix4<f64>,
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(0) * moments.y1_p * layout.cols)[(0, 0)];
     g[(2, 3)] += temp;
@@ -2380,7 +2380,7 @@ fn compose_g_derivatives_stage_195(
     g: &mut Matrix4<f64>,
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(0) * moments.y2_p * layout.rows.transpose())[(0, 0)];
     g[(2, 3)] += temp;
@@ -2390,7 +2390,7 @@ fn compose_g_derivatives_stage_196(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[0].row(1) * moments.x1_p * layout.cols)[(0, 0)];
     derivatives[0][(2, 3)] = temp;
@@ -2400,7 +2400,7 @@ fn compose_g_derivatives_stage_197(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(1) * moments.x1_p * layout.cols_jac1)[(0, 0)];
     derivatives[0][(2, 3)] += temp;
@@ -2410,7 +2410,7 @@ fn compose_g_derivatives_stage_198(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[0].row(1) * moments.x2_p * layout.rows.transpose())[(0, 0)];
     derivatives[0][(2, 3)] += temp;
@@ -2420,7 +2420,7 @@ fn compose_g_derivatives_stage_199(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(1) * moments.x2_p * layout.rows_jac1.transpose())[(0, 0)];
     derivatives[0][(2, 3)] += temp;
@@ -2430,7 +2430,7 @@ fn compose_g_derivatives_stage_200(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[0].row(0) * moments.y1_p * layout.cols)[(0, 0)];
@@ -2441,7 +2441,7 @@ fn compose_g_derivatives_stage_201(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(0) * moments.y1_p * layout.cols_jac1)[(0, 0)];
     derivatives[0][(2, 3)] += temp;
@@ -2451,7 +2451,7 @@ fn compose_g_derivatives_stage_202(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[0].row(0) * moments.y2_p * layout.rows.transpose())
@@ -2463,7 +2463,7 @@ fn compose_g_derivatives_stage_203(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(0) * moments.y2_p * layout.rows_jac1.transpose())[(0, 0)];
     derivatives[0][(2, 3)] += temp;
@@ -2473,7 +2473,7 @@ fn compose_g_derivatives_stage_204(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[1].row(1) * moments.x1_p * layout.cols)[(0, 0)];
     derivatives[1][(2, 3)] = temp;
@@ -2483,7 +2483,7 @@ fn compose_g_derivatives_stage_205(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(1) * moments.x1_p * layout.cols_jac2)[(0, 0)];
     derivatives[1][(2, 3)] += temp;
@@ -2493,7 +2493,7 @@ fn compose_g_derivatives_stage_206(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[1].row(1) * moments.x2_p * layout.rows.transpose())[(0, 0)];
     derivatives[1][(2, 3)] += temp;
@@ -2503,7 +2503,7 @@ fn compose_g_derivatives_stage_207(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(1) * moments.x2_p * layout.rows_jac2.transpose())[(0, 0)];
     derivatives[1][(2, 3)] += temp;
@@ -2513,7 +2513,7 @@ fn compose_g_derivatives_stage_208(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[1].row(0) * moments.y1_p * layout.cols)[(0, 0)];
@@ -2524,7 +2524,7 @@ fn compose_g_derivatives_stage_209(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(0) * moments.y1_p * layout.cols_jac2)[(0, 0)];
     derivatives[1][(2, 3)] += temp;
@@ -2534,7 +2534,7 @@ fn compose_g_derivatives_stage_210(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[1].row(0) * moments.y2_p * layout.rows.transpose())
@@ -2546,7 +2546,7 @@ fn compose_g_derivatives_stage_211(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(0) * moments.y2_p * layout.rows_jac2.transpose())[(0, 0)];
     derivatives[1][(2, 3)] += temp;
@@ -2556,7 +2556,7 @@ fn compose_g_derivatives_stage_212(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[2].row(1) * moments.x1_p * layout.cols)[(0, 0)];
     derivatives[2][(2, 3)] = temp;
@@ -2566,7 +2566,7 @@ fn compose_g_derivatives_stage_213(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(1) * moments.x1_p * layout.cols_jac3)[(0, 0)];
     derivatives[2][(2, 3)] += temp;
@@ -2576,7 +2576,7 @@ fn compose_g_derivatives_stage_214(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (rotation_differentials[2].row(1) * moments.x2_p * layout.rows.transpose())[(0, 0)];
     derivatives[2][(2, 3)] += temp;
@@ -2586,7 +2586,7 @@ fn compose_g_derivatives_stage_215(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (r.row(1) * moments.x2_p * layout.rows_jac3.transpose())[(0, 0)];
     derivatives[2][(2, 3)] += temp;
@@ -2596,7 +2596,7 @@ fn compose_g_derivatives_stage_216(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[2].row(0) * moments.y1_p * layout.cols)[(0, 0)];
@@ -2607,7 +2607,7 @@ fn compose_g_derivatives_stage_217(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(0) * moments.y1_p * layout.cols_jac3)[(0, 0)];
     derivatives[2][(2, 3)] += temp;
@@ -2617,7 +2617,7 @@ fn compose_g_derivatives_stage_218(
     moments: &GeneralizedMoments<'_>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp =
         (NEGATIVE_UNIT * rotation_differentials[2].row(0) * moments.y2_p * layout.rows.transpose())
@@ -2629,7 +2629,7 @@ fn compose_g_derivatives_stage_219(
     moments: &GeneralizedMoments<'_>,
     r: &Matrix3<f64>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * r.row(0) * moments.y2_p * layout.rows_jac3.transpose())[(0, 0)];
     derivatives[2][(2, 3)] += temp;
@@ -2638,7 +2638,7 @@ fn compose_g_derivatives_stage_219(
 fn compose_g_derivatives_stage_220(
     g: &mut Matrix4<f64>,
     moments: &GeneralizedMoments<'_>,
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * layout.cols.transpose() * moments.m11_p * layout.cols)[(0, 0)];
     g[(3, 3)] = temp;
@@ -2647,7 +2647,7 @@ fn compose_g_derivatives_stage_220(
 fn compose_g_derivatives_stage_221(
     g: &mut Matrix4<f64>,
     moments: &GeneralizedMoments<'_>,
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (NEGATIVE_UNIT * layout.rows * moments.m22_p * layout.rows.transpose())[(0, 0)];
     g[(3, 3)] += temp;
@@ -2656,7 +2656,7 @@ fn compose_g_derivatives_stage_221(
 fn compose_g_derivatives_stage_222(
     g: &mut Matrix4<f64>,
     moments: &GeneralizedMoments<'_>,
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (-2.0 * layout.rows * moments.m12_p * layout.cols)[(0, 0)];
     g[(3, 3)] += temp;
@@ -2665,7 +2665,7 @@ fn compose_g_derivatives_stage_222(
 fn compose_g_derivatives_stage_223(
     moments: &GeneralizedMoments<'_>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (-2.0 * layout.cols.transpose() * moments.m11_p * layout.cols_jac1)[(0, 0)];
     derivatives[0][(3, 3)] = temp;
@@ -2674,7 +2674,7 @@ fn compose_g_derivatives_stage_223(
 fn compose_g_derivatives_stage_224(
     moments: &GeneralizedMoments<'_>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (-2.0 * layout.rows_jac1 * moments.m22_p * layout.rows.transpose())[(0, 0)];
     derivatives[0][(3, 3)] += temp;
@@ -2683,7 +2683,7 @@ fn compose_g_derivatives_stage_224(
 fn compose_g_derivatives_stage_225(
     moments: &GeneralizedMoments<'_>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (-2.0 * layout.rows_jac1 * moments.m12_p * layout.cols)[(0, 0)];
     derivatives[0][(3, 3)] += temp;
@@ -2692,7 +2692,7 @@ fn compose_g_derivatives_stage_225(
 fn compose_g_derivatives_stage_226(
     moments: &GeneralizedMoments<'_>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (-2.0 * layout.rows * moments.m12_p * layout.cols_jac1)[(0, 0)];
     derivatives[0][(3, 3)] += temp;
@@ -2701,7 +2701,7 @@ fn compose_g_derivatives_stage_226(
 fn compose_g_derivatives_stage_227(
     moments: &GeneralizedMoments<'_>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (-2.0 * layout.cols.transpose() * moments.m11_p * layout.cols_jac2)[(0, 0)];
     derivatives[1][(3, 3)] = temp;
@@ -2710,7 +2710,7 @@ fn compose_g_derivatives_stage_227(
 fn compose_g_derivatives_stage_228(
     moments: &GeneralizedMoments<'_>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (-2.0 * layout.rows_jac2 * moments.m22_p * layout.rows.transpose())[(0, 0)];
     derivatives[1][(3, 3)] += temp;
@@ -2719,7 +2719,7 @@ fn compose_g_derivatives_stage_228(
 fn compose_g_derivatives_stage_229(
     moments: &GeneralizedMoments<'_>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (-2.0 * layout.rows_jac2 * moments.m12_p * layout.cols)[(0, 0)];
     derivatives[1][(3, 3)] += temp;
@@ -2728,7 +2728,7 @@ fn compose_g_derivatives_stage_229(
 fn compose_g_derivatives_stage_230(
     moments: &GeneralizedMoments<'_>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (-2.0 * layout.rows * moments.m12_p * layout.cols_jac2)[(0, 0)];
     derivatives[1][(3, 3)] += temp;
@@ -2737,7 +2737,7 @@ fn compose_g_derivatives_stage_230(
 fn compose_g_derivatives_stage_231(
     moments: &GeneralizedMoments<'_>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (-2.0 * layout.cols.transpose() * moments.m11_p * layout.cols_jac3)[(0, 0)];
     derivatives[2][(3, 3)] = temp;
@@ -2746,7 +2746,7 @@ fn compose_g_derivatives_stage_231(
 fn compose_g_derivatives_stage_232(
     moments: &GeneralizedMoments<'_>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (-2.0 * layout.rows_jac3 * moments.m22_p * layout.rows.transpose())[(0, 0)];
     derivatives[2][(3, 3)] += temp;
@@ -2755,7 +2755,7 @@ fn compose_g_derivatives_stage_232(
 fn compose_g_derivatives_stage_233(
     moments: &GeneralizedMoments<'_>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (-2.0 * layout.rows_jac3 * moments.m12_p * layout.cols)[(0, 0)];
     derivatives[2][(3, 3)] += temp;
@@ -2765,7 +2765,7 @@ fn compose_g_derivatives_stage_234(
     g: &mut Matrix4<f64>,
     moments: &GeneralizedMoments<'_>,
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     let temp = (-2.0 * layout.rows * moments.m12_p * layout.cols_jac3)[(0, 0)];
     derivatives[2][(3, 3)] += temp;
@@ -2993,7 +2993,7 @@ fn compose_g_derivatives_section_11(
     r: &Matrix3<f64>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     compose_g_derivatives_stage_175(moments, r, derivatives, layout);
     compose_g_derivatives_stage_176(moments, rotation_differentials, derivatives, layout);
@@ -3042,7 +3042,7 @@ fn compose_g_derivatives_section_12(
     r: &Matrix3<f64>,
     rotation_differentials: &[Matrix3<f64>; 3],
     derivatives: &mut [Matrix4<f64>; 3],
-    layout: &mut RotationLayout,
+    layout: &RotationLayout,
 ) {
     compose_g_derivatives_stage_215(moments, r, derivatives, layout);
     compose_g_derivatives_stage_216(moments, rotation_differentials, derivatives, layout);

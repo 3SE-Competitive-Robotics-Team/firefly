@@ -28,7 +28,7 @@ impl CalibrationImageSource for BasaltImageSource<'_> {
             .lock()
             .expect("dataset poisoned")
             .image_timestamps()
-            .clone())
+            .to_vec())
     }
 
     fn images_at(&self, timestamp: i64) -> Result<Vec<Option<std::sync::Arc<ManagedImage<u16>>>>> {

@@ -111,11 +111,8 @@ pub fn p3p_kneip(
     indices: &[usize],
 ) -> Option<Vec<Transformation>> {
     valid(adapter, indices.get(..3)?, 3)?;
-    let f: Vec<_> = indices[..3]
-        .iter()
-        .map(|&i| adapter.bearing_vector(i))
-        .collect();
-    let p: Vec<_> = indices[..3].iter().map(|&i| adapter.point(i)).collect();
+    let f = [0, 1, 2].map(|i| adapter.bearing_vector(indices[i]));
+    let p = [0, 1, 2].map(|i| adapter.point(indices[i]));
     let mut solutions = vec![];
     modules::p3p_kneip_main(&f, &p, &mut solutions)?;
     Some(solutions)
@@ -125,11 +122,8 @@ pub fn p3p_gao(
     indices: &[usize],
 ) -> Option<Vec<Transformation>> {
     valid(adapter, indices.get(..3)?, 3)?;
-    let f: Vec<_> = indices[..3]
-        .iter()
-        .map(|&i| adapter.bearing_vector(i))
-        .collect();
-    let p: Vec<_> = indices[..3].iter().map(|&i| adapter.point(i)).collect();
+    let f = [0, 1, 2].map(|i| adapter.bearing_vector(indices[i]));
+    let p = [0, 1, 2].map(|i| adapter.point(indices[i]));
     let mut solutions = vec![];
     modules::p3p_gao_main(&f, &p, &mut solutions)?;
     Some(solutions)

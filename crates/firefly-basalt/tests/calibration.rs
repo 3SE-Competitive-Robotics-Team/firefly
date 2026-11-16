@@ -16,7 +16,10 @@ impl firefly_basalt::io::dataset_io::VioDataset for TestDataset {
     fn num_cams(&self) -> usize {
         2
     }
-    fn image_timestamps(&mut self) -> &mut Vec<i64> {
+    fn image_timestamps(&self) -> &[i64] {
+        &self.times
+    }
+    fn image_timestamps_mut(&mut self) -> &mut Vec<i64> {
         &mut self.times
     }
     fn accel_data(&self) -> &[firefly_basalt::io::dataset_io::AccelData] {
@@ -35,7 +38,7 @@ impl firefly_basalt::io::dataset_io::VioDataset for TestDataset {
         0
     }
     fn image_data(
-        &mut self,
+        &self,
         _: i64,
     ) -> firefly_error::Result<Vec<firefly_basalt::io::dataset_io::ImageData>> {
         Ok(Vec::new())

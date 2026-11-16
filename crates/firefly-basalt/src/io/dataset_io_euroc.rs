@@ -24,7 +24,10 @@ impl VioDataset for EurocVioDataset {
     fn num_cams(&self) -> usize {
         2
     }
-    fn image_timestamps(&mut self) -> &mut Vec<i64> {
+    fn image_timestamps(&self) -> &[i64] {
+        &self.records.image_timestamps
+    }
+    fn image_timestamps_mut(&mut self) -> &mut Vec<i64> {
         &mut self.records.image_timestamps
     }
     fn accel_data(&self) -> &[AccelData] {
@@ -42,7 +45,7 @@ impl VioDataset for EurocVioDataset {
     fn mocap_to_imu_offset_ns(&self) -> i64 {
         0
     }
-    fn image_data(&mut self, timestamp_ns: i64) -> Result<Vec<ImageData>> {
+    fn image_data(&self, timestamp_ns: i64) -> Result<Vec<ImageData>> {
         let mut result = Vec::with_capacity(2);
         for camera in 0..2 {
             let filename = self.image_path[camera].get(&timestamp_ns).ok_or_else(|| {

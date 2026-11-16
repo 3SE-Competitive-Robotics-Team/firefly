@@ -14,7 +14,7 @@ fn snapshot(database: &LandmarkDatabase<f64>) -> Value {
         let observations: Vec<_> = landmark.obs.iter().map(|(target, pixel)| json!([target.frame_id, target.cam_id, pixel.x, pixel.y])).collect();
         json!({"id":id, "host":[landmark.host_kf_id.frame_id,landmark.host_kf_id.cam_id], "direction":[landmark.direction.x,landmark.direction.y], "inv_dist":landmark.inv_dist, "observations":observations})
     }).collect();
-    let mut hosts = database.host_kfs();
+    let mut hosts: Vec<_> = database.host_kfs().collect();
     hosts.sort_unstable();
     let hosts: Vec<_> = hosts
         .into_iter()
@@ -22,7 +22,7 @@ fn snapshot(database: &LandmarkDatabase<f64>) -> Value {
             json!([
                 host.frame_id,
                 host.cam_id,
-                database.landmarks_for_host(host).len()
+                database.landmarks_for_host(host).count()
             ])
         })
         .collect();
@@ -82,6 +82,48 @@ fn official_cpp_database_lifecycle() {
 }
 
 #[test]
+fn host_queries_preserve_observation_order_and_repeated_landmarks() {
+    let host = TimeCamId::new(1, 0);
+    let other_host = TimeCamId::new(2, 0);
+    let mut database = LandmarkDatabase::<f64>::default();
+    assert_eq!(database.host_kfs().len(), 0);
+    for id in 1..=3 {
+        database.add_landmark(
+            id,
+            &Keypoint::new(
+                Vector2::zeros(),
+                id as f64,
+                if id == 3 { other_host } else { host },
+            ),
+        );
+    }
+    for (frame, id) in [(9, 2), (5, 2), (5, 1), (9, 1), (5, 3)] {
+        database.add_observation(
+            TimeCamId::new(frame, 0),
+            &KeypointObservation {
+                kpt_id: id,
+                pos: Vector2::zeros(),
+            },
+        );
+    }
+    assert_eq!(
+        database.host_kfs().collect::<BTreeSet<_>>(),
+        BTreeSet::from([host, other_host])
+    );
+    assert_eq!(
+        database
+            .landmarks_for_host(host)
+            .map(|p| p.inv_dist)
+            .collect::<Vec<_>>(),
+        [1., 2., 1., 2.]
+    );
+    assert!(std::ptr::eq(
+        database.landmarks_for_host(other_host).next().unwrap(),
+        database.landmark(3)
+    ));
+}
+
+#[test]
 fn geometry_updates_preserve_observations_and_host_index_counts() {
     let host = TimeCamId::new(1, 0);
     let mut database = LandmarkDatabase::<f32>::default();
@@ -101,7 +143,7 @@ fn geometry_updates_preserve_observations_and_host_index_counts() {
     point.direction = Vector2::new(3.0, 4.0);
     database.add_landmark(1, &point);
     assert_eq!(database.num_landmark_observations(1), 3);
-    assert_eq!(database.landmarks_for_host(host).len(), 3);
+    assert_eq!(database.landmarks_for_host(host).count(), 3);
     assert_eq!(database.landmark(1).direction, point.direction);
     database.remove_observations(
         1,

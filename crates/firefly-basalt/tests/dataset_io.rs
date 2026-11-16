@@ -1,5 +1,7 @@
 use firefly_basalt::io::{
-    dataset_io::DatasetIoInterface, dataset_io_euroc::EurocIo, dataset_io_kitti::KittiIo,
+    dataset_io::{DatasetIoInterface, VioDataset},
+    dataset_io_euroc::EurocIo,
+    dataset_io_kitti::KittiIo,
     dataset_io_uzh::UzhIo,
 };
 use std::{
@@ -63,8 +65,8 @@ fn cpp_reference(kind: &str, fixture: &Fixture, reader: &dyn DatasetIoInterface)
     )
     .unwrap();
     let shared = reader.data().unwrap();
-    let mut data = shared.lock().unwrap();
-    let timestamps = data.image_timestamps().clone();
+    let data = shared.lock().unwrap();
+    let timestamps = data.image_timestamps();
     let gyro: Vec<_> = data
         .gyro_data()
         .iter()
@@ -114,7 +116,7 @@ fn euroc_loads_stereo_imu_exposure_and_selects_groundtruth() {
     let mut reader = EurocIo::new(false);
     reader.read(&f.0).unwrap();
     let shared = reader.data().unwrap();
-    let mut data = shared.lock().unwrap();
+    let data = shared.lock().unwrap();
     assert_eq!(data.image_timestamps(), &[100, 200]);
     assert_eq!(data.gyro_data()[0].data.as_slice(), &[1., 2., 3.]);
     assert_eq!(data.accel_data()[0].data.as_slice(), &[4., 5., 6.]);
@@ -126,6 +128,19 @@ fn euroc_loads_stereo_imu_exposure_and_selects_groundtruth() {
     assert!(data.image_data(200).unwrap()[1].img.is_none());
     drop(data);
     cpp_reference("euroc", &f, &reader);
+    {
+        let mut data = shared.lock().unwrap();
+        data.image_timestamps_mut().retain(|&time| time == 200);
+        let source: &dyn VioDataset = &*data;
+        assert_eq!(source.image_timestamps(), &[200]);
+        assert_eq!(
+            firefly_basalt::opt_flow::feed_images(source)
+                .map(|frame| frame.unwrap().t_ns)
+                .collect::<Vec<_>>(),
+            [200]
+        );
+        assert!(source.image_data(100).unwrap()[0].img.is_some());
+    }
     reader.reset();
     assert!(reader.data().is_none());
     let mut mocap = EurocIo::new(true);
@@ -148,7 +163,7 @@ fn asl_preserves_camera_filenames_and_rejects_unpaired_timestamps() {
     let mut reader = EurocIo::new(false);
     reader.read_asl(&fixture.0.join("aria")).unwrap();
     let shared = reader.data().unwrap();
-    let mut data = shared.lock().unwrap();
+    let data = shared.lock().unwrap();
     assert_eq!(data.image_timestamps(), &[100]);
     assert!(
         data.image_data(100)
@@ -178,7 +193,7 @@ fn uzh_preserves_blue_channel_seconds_and_xyzw_quaternion() {
     let mut reader = UzhIo::default();
     reader.read(&f.0).unwrap();
     let shared = reader.data().unwrap();
-    let mut data = shared.lock().unwrap();
+    let data = shared.lock().unwrap();
     assert_eq!(data.image_timestamps(), &[1_250_000_000]);
     assert_eq!(data.gyro_data()[0].timestamp_ns, 1_200_000_000);
     assert_eq!(
@@ -232,7 +247,7 @@ fn kitti_reads_indexed_images_and_row_major_poses() {
     let mut reader = KittiIo::default();
     reader.read(&f.0).unwrap();
     let shared = reader.data().unwrap();
-    let mut data = shared.lock().unwrap();
+    let data = shared.lock().unwrap();
     assert_eq!(data.image_timestamps(), &[0, 100_000_000]);
     assert_eq!(
         data.gt_pose_data()[0].translation.vector.as_slice(),

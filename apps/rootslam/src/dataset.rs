@@ -297,11 +297,11 @@ struct DatasetInputs {
 impl DatasetInputs {
     fn read(dataset: &VioDatasetPtr, max_frames: usize) -> Result<Self> {
         let (mut timestamps, gyro, accel) = {
-            let mut data = dataset
+            let data = dataset
                 .lock()
                 .map_err(|_| error("Dataset mutex poisoned"))?;
             (
-                data.image_timestamps().clone(),
+                data.image_timestamps().to_vec(),
                 data.gyro_data().to_vec(),
                 data.accel_data().to_vec(),
             )
@@ -355,7 +355,10 @@ mod input_tests {
         fn num_cams(&self) -> usize {
             2
         }
-        fn image_timestamps(&mut self) -> &mut Vec<i64> {
+        fn image_timestamps(&self) -> &[i64] {
+            &self.times
+        }
+        fn image_timestamps_mut(&mut self) -> &mut Vec<i64> {
             &mut self.times
         }
         fn gyro_data(&self) -> &[GyroData] {
@@ -373,7 +376,7 @@ mod input_tests {
         fn mocap_to_imu_offset_ns(&self) -> i64 {
             0
         }
-        fn image_data(&mut self, _: i64) -> Result<Vec<ImageData>> {
+        fn image_data(&self, _: i64) -> Result<Vec<ImageData>> {
             panic!("metadata validation must precede image loading")
         }
     }

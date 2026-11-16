@@ -745,7 +745,10 @@ mod tests {
         fn num_cams(&self) -> usize {
             1
         }
-        fn image_timestamps(&mut self) -> &mut Vec<i64> {
+        fn image_timestamps(&self) -> &[i64] {
+            &self.timestamps
+        }
+        fn image_timestamps_mut(&mut self) -> &mut Vec<i64> {
             &mut self.timestamps
         }
         fn accel_data(&self) -> &[firefly_basalt::io::dataset_io::AccelData] {
@@ -763,10 +766,7 @@ mod tests {
         fn mocap_to_imu_offset_ns(&self) -> i64 {
             0
         }
-        fn image_data(
-            &mut self,
-            time: i64,
-        ) -> Result<Vec<firefly_basalt::io::dataset_io::ImageData>> {
+        fn image_data(&self, time: i64) -> Result<Vec<firefly_basalt::io::dataset_io::ImageData>> {
             if time == 2 && self.failure == 1 {
                 return Err(invalid("Injected image failure"));
             }

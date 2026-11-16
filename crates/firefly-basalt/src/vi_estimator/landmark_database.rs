@@ -110,22 +110,19 @@ impl<S: BasaltScalar> LandmarkDatabase<S> {
         self.kpts.get_mut(&id).expect("unknown landmark")
     }
 
-    #[must_use]
-    pub fn host_kfs(&self) -> Vec<TimeCamId> {
-        self.observations.keys().copied().collect()
+    pub fn host_kfs(&self) -> impl ExactSizeIterator<Item = TimeCamId> + '_ {
+        self.observations.keys().copied()
     }
 
     /// Returns one entry per indexed observation, retaining upstream duplicates.
     /// # Panics
     /// Requires an indexed host and consistent landmark topology.
-    #[must_use]
-    pub fn landmarks_for_host(&self, host: TimeCamId) -> Vec<&Keypoint<S>> {
+    pub fn landmarks_for_host(&self, host: TimeCamId) -> impl Iterator<Item = &Keypoint<S>> {
         self.observations
             .get(&host)
             .expect("unknown host")
             .values()
             .flat_map(|ids| ids.iter().map(|id| &self.kpts[id]))
-            .collect()
     }
 
     #[must_use]

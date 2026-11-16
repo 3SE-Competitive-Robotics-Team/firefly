@@ -31,8 +31,7 @@ impl<T: Copy> Gridder<T> {
             self.cells[iy as usize * self.width + ix as usize].push(object);
         }
     }
-    #[must_use]
-    pub fn find(&self, x: f32, y: f32, range: f32) -> Vec<T> {
+    pub fn find(&self, x: f32, y: f32, range: f32) -> impl Iterator<Item = T> + '_ {
         let ix0 = (((x - range - self.x0) / self.cell_size) as i32).clamp(0, self.width as i32 - 1)
             as usize;
         let ix1 = (((x + range - self.x0) / self.cell_size) as i32).clamp(0, self.width as i32 - 1)
@@ -41,12 +40,8 @@ impl<T: Copy> Gridder<T> {
             as usize;
         let iy1 = (((y + range - self.y0) / self.cell_size) as i32).clamp(0, self.height as i32 - 1)
             as usize;
-        let mut result = Vec::new();
-        for iy in iy0..=iy1 {
-            for ix in ix0..=ix1 {
-                result.extend(self.cells[iy * self.width + ix].iter().rev().copied());
-            }
-        }
-        result
+        (iy0..=iy1).flat_map(move |iy| {
+            (ix0..=ix1).flat_map(move |ix| self.cells[iy * self.width + ix].iter().rev().copied())
+        })
     }
 }

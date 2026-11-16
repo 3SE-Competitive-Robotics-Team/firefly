@@ -129,7 +129,7 @@ impl CamCalib {
         if self.skip_images > 1 {
             let dataset = self.dataset()?;
             let mut data = dataset.lock().map_err(|_| failure("Dataset poisoned"))?;
-            let times = data.image_timestamps();
+            let times = data.image_timestamps_mut();
             *times = times
                 .iter()
                 .step_by(self.skip_images as usize)
@@ -177,9 +177,9 @@ impl CamCalib {
             return Ok(());
         }
         let dataset = self.dataset()?;
-        let mut data = dataset.lock().map_err(|_| failure("Dataset poisoned"))?;
+        let data = dataset.lock().map_err(|_| failure("Dataset poisoned"))?;
         let count = data.num_cams();
-        let timestamps = data.image_timestamps().clone();
+        let timestamps = data.image_timestamps();
         if count != self.cam_types.len() {
             return Err(failure("Expected one camera type per camera"));
         }
@@ -302,9 +302,9 @@ impl CamCalib {
             return Ok(());
         }
         let dataset = self.dataset()?;
-        let mut data = dataset.lock().map_err(|_| failure("Dataset poisoned"))?;
+        let data = dataset.lock().map_err(|_| failure("Dataset poisoned"))?;
         let count = data.num_cams();
-        let times = data.image_timestamps().clone();
+        let times = data.image_timestamps().to_vec();
         drop(data);
         let Some(calibration) = self.calib_opt.as_mut().and_then(|o| o.calib.as_mut()) else {
             return Ok(());
@@ -377,7 +377,7 @@ impl CamCalib {
             .lock()
             .map_err(|_| failure("Dataset poisoned"))?
             .image_timestamps()
-            .clone();
+            .to_vec();
         let opt = self
             .calib_opt
             .as_mut()
@@ -447,7 +447,7 @@ impl CamCalib {
             .lock()
             .map_err(|_| failure("Dataset poisoned"))?
             .image_timestamps()
-            .clone();
+            .to_vec();
         let count = calibration.intrinsics.len();
         let mut stats = AngleStatistics {
             polar_sum: vec![vec![0.; 90]; count],
@@ -595,7 +595,7 @@ impl CamCalib {
     /// Reports dataset sampling and vignette PNG output failures.
     pub fn compute_vign(&mut self) -> Result<()> {
         let dataset = self.dataset()?;
-        let mut data = dataset.lock().map_err(|_| failure("Dataset poisoned"))?;
+        let data = dataset.lock().map_err(|_| failure("Dataset poisoned"))?;
         let calibration = self
             .calib_opt
             .as_ref()
@@ -610,7 +610,7 @@ impl CamCalib {
             })
             .collect();
         let mut samples = BTreeMap::new();
-        for time in data.image_timestamps().clone() {
+        for &time in data.image_timestamps() {
             let images = data.image_data(time)?;
             for (camera, image) in images.iter().enumerate().take(calibration.intrinsics.len()) {
                 let id = TimeCamId::new(time, camera);

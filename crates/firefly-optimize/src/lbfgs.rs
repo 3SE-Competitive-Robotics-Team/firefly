@@ -497,13 +497,13 @@ fn update_trial_interval(
     fy: &mut f64,
     dy: &mut f64,
     t: &mut f64,
-    ft: &mut f64,
-    dt: &mut f64,
+    ft: f64,
+    dt: f64,
     tmin: f64,
     tmax: f64,
     brackt: &mut bool,
 ) -> i32 {
-    let dsign = *dt * (*dx / dx.abs()) < 0.0;
+    let dsign = dt * (*dx / dx.abs()) < 0.0;
     let bound: bool;
 
     if *brackt {
@@ -522,12 +522,12 @@ fn update_trial_interval(
 
     // 试探值选择：4 种 case 的 cubic/quadratic 插值取舍
     let newt;
-    if *fx < *ft {
+    if *fx < ft {
         // Case 1：函数值更高，最小值被夹住；cubic 极小点更近取 cubic，否则取两者均值
         *brackt = true;
         bound = true;
-        let mc = cubic_minimizer(*x, *fx, *dx, *t, *ft, *dt);
-        let mq = quad_minimizer(*x, *fx, *dx, *t, *ft);
+        let mc = cubic_minimizer(*x, *fx, *dx, *t, ft, dt);
+        let mq = quad_minimizer(*x, *fx, *dx, *t, ft);
         newt = if (mc - *x).abs() < (mq - *x).abs() {
             mc
         } else {
@@ -537,8 +537,8 @@ fn update_trial_interval(
         // Case 2：函数值更低且导数变号；cubic 极小点更远取 cubic，否则取割线二次
         *brackt = true;
         bound = false;
-        let mc = cubic_minimizer(*x, *fx, *dx, *t, *ft, *dt);
-        let mq = quad_minimizer2(*x, *dx, *t, *dt);
+        let mc = cubic_minimizer(*x, *fx, *dx, *t, ft, dt);
+        let mq = quad_minimizer2(*x, *dx, *t, dt);
         newt = if (mc - *t).abs() > (mq - *t).abs() {
             mc
         } else {
@@ -548,8 +548,8 @@ fn update_trial_interval(
         // Case 3：函数值更低、导数同号且幅值减小；
         // brackt 时取离 t 近的极小点，否则取远的
         bound = true;
-        let mc = cubic_minimizer2(*x, *fx, *dx, *t, *ft, *dt, tmin, tmax);
-        let mq = quad_minimizer2(*x, *dx, *t, *dt);
+        let mc = cubic_minimizer2(*x, *fx, *dx, *t, ft, dt, tmin, tmax);
+        let mq = quad_minimizer2(*x, *dx, *t, dt);
         newt = if *brackt {
             if (*t - mc).abs() < (*t - mq).abs() {
                 mc
@@ -568,7 +568,7 @@ fn update_trial_interval(
         // 未夹住时直接取区间端点，已夹住时取对端点的 cubic 极小点
         bound = false;
         newt = if *brackt {
-            cubic_minimizer(*t, *ft, *dt, *y, *fy, *dy)
+            cubic_minimizer(*t, ft, dt, *y, *fy, *dy)
         } else if *x < *t {
             tmax
         } else {
@@ -579,10 +579,10 @@ fn update_trial_interval(
     // 区间更新（与试探值选择无关）：
     // Case a: f(x) < f(t) → y ← t；Case c: 导数变号 → y ← x；
     // 随后一律 x ← t
-    if *fx < *ft {
+    if *fx < ft {
         *y = *t;
-        *fy = *ft;
-        *dy = *dt;
+        *fy = ft;
+        *dy = dt;
     } else {
         if dsign {
             *y = *x;
@@ -590,8 +590,8 @@ fn update_trial_interval(
             *dy = *dx;
         }
         *x = *t;
-        *fx = *ft;
-        *dx = *dt;
+        *fx = ft;
+        *dx = dt;
     }
 
     // clip 到 [tmin, tmax]
@@ -704,7 +704,7 @@ fn line_search_morethuente(
         x.axpy(*stp, s, 1.0);
         *evaluations += 1;
         *f = objective.evaluate_gradient(x, g);
-        let mut dg = g.dot(s);
+        let dg = g.dot(s);
 
         let ftest1 = finit + *stp * dgtest;
         count += 1;
@@ -742,10 +742,10 @@ fn line_search_morethuente(
 
         // 修正函数预测仅在「下降不足但函数值更低」时启用
         if stage1 && ftest1 < *f && *f <= fx {
-            let mut fm = *f - *stp * dgtest;
+            let fm = *f - *stp * dgtest;
             let mut fxm = fx - stx * dgtest;
             let mut fym = fy - sty * dgtest;
-            let mut dgm = dg - dgtest;
+            let dgm = dg - dgtest;
             let mut dgxm = dgx - dgtest;
             let mut dgym = dgy - dgtest;
 
@@ -757,8 +757,8 @@ fn line_search_morethuente(
                 &mut fym,
                 &mut dgym,
                 stp,
-                &mut fm,
-                &mut dgm,
+                fm,
+                dgm,
                 stmin,
                 stmax,
                 &mut brackt,
@@ -778,8 +778,8 @@ fn line_search_morethuente(
                 &mut fy,
                 &mut dgy,
                 stp,
-                f,
-                &mut dg,
+                *f,
+                dg,
                 stmin,
                 stmax,
                 &mut brackt,

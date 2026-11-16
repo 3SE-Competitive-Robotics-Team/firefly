@@ -83,10 +83,12 @@ pub struct AprilgridCornersData {
     pub corner_id: Vec<i32>,
 }
 
-/// The upstream dataset abstraction, retaining mutable timestamp access.
+/// Dataset metadata and image loading in the source camera clock.
 pub trait VioDataset: Send {
     fn num_cams(&self) -> usize;
-    fn image_timestamps(&mut self) -> &mut Vec<i64>;
+    fn image_timestamps(&self) -> &[i64];
+    /// Mutable frame selection; image records remain available by timestamp.
+    fn image_timestamps_mut(&mut self) -> &mut Vec<i64>;
     fn accel_data(&self) -> &[AccelData];
     fn gyro_data(&self) -> &[GyroData];
     fn gt_timestamps(&self) -> &[i64];
@@ -94,7 +96,7 @@ pub trait VioDataset: Send {
     fn mocap_to_imu_offset_ns(&self) -> i64;
     /// # Errors
     /// Returns an error when requested image data cannot be loaded.
-    fn image_data(&mut self, timestamp_ns: i64) -> Result<Vec<ImageData>>;
+    fn image_data(&self, timestamp_ns: i64) -> Result<Vec<ImageData>>;
 }
 pub type VioDatasetPtr = Arc<std::sync::Mutex<dyn VioDataset>>;
 

@@ -303,7 +303,7 @@ fn evaluation_data(
     {
         return Ok(None);
     }
-    let mut dataset = dataset
+    let dataset = dataset
         .lock()
         .map_err(|_| Error::new(ErrorKind::Internal, "Dataset mutex poisoned"))?;
     // Evaluation uses the estimator's calibrated camera clock and the supplied GT clock.

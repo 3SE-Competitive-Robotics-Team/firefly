@@ -103,6 +103,9 @@ impl<S: BasaltScalar> SqrtKeypointVoEstimator<S> {
     }
     /// Allocate a timestamp-indexed pose snapshot of the retained local window.
     pub fn collect_poses(&self) -> BTreeMap<i64, Isometry3<S>> {
+        self.poses().collect()
+    }
+    fn poses(&self) -> impl Iterator<Item = (i64, Isometry3<S>)> + '_ {
         self.base
             .frame_poses
             .iter()
@@ -113,7 +116,6 @@ impl<S: BasaltScalar> SqrtKeypointVoEstimator<S> {
                     .iter()
                     .map(|(&t, s)| (t, s.state().state.pose.t_w_i)),
             )
-            .collect()
     }
     pub fn check_marg_nullspace(&self) -> DVector<f64> {
         let random = DVector::from_fn(self.nullspace_marg_data.order.total_size, |_, _| {
@@ -807,8 +809,7 @@ impl<S: BasaltScalar> VioEstimatorEngine for SqrtKeypointVoEstimator<S> {
         })
     }
     fn collect_poses(&self) -> BTreeMap<i64, Isometry3<f64>> {
-        Self::collect_poses(self)
-            .into_iter()
+        self.poses()
             .map(|(time, pose)| {
                 (
                     time,

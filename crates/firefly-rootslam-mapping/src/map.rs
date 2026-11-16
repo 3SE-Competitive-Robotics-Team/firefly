@@ -355,11 +355,10 @@ impl PersistentMap {
             }
         }
         self.snapshot.revision += 1;
-        let newly_inactive: Vec<_> = formerly_active
+        for id in formerly_active
             .into_iter()
             .filter(|id| !local.keyframes.contains(id))
-            .collect();
-        for id in newly_inactive {
+        {
             if self.is_redundant(id) {
                 self.remove_keyframe(id);
             }
@@ -372,9 +371,9 @@ impl PersistentMap {
         let mut counts = BTreeMap::new();
         for point in self.snapshot.landmarks.values() {
             let frames: BTreeSet<_> = point.observations.keys().map(|o| o.keyframe).collect();
-            let frames: Vec<_> = frames.into_iter().collect();
-            for (i, &a) in frames.iter().enumerate() {
-                for &b in &frames[i + 1..] {
+            let mut frames = frames.iter();
+            while let Some(&a) = frames.next() {
+                for &b in frames.clone() {
                     *counts.entry((a, b)).or_insert(0) += 1;
                 }
             }

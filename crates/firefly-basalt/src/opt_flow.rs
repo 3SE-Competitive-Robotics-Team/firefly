@@ -35,9 +35,9 @@ impl FlowStatistics {
 /// The caller feeds these images to the existing optical-flow worker and sends
 /// its end-of-stream sentinel after this iterator is exhausted.
 pub fn feed_images(
-    dataset: &mut dyn VioDataset,
+    dataset: &dyn VioDataset,
 ) -> impl Iterator<Item = firefly_error::Result<Arc<OpticalFlowInput>>> + '_ {
-    dataset.image_timestamps().clone().into_iter().map(|t_ns| {
+    dataset.image_timestamps().iter().map(move |&t_ns| {
         Ok(Arc::new(OpticalFlowInput {
             t_ns,
             img_data: dataset.image_data(t_ns)?,

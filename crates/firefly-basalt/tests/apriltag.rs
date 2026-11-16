@@ -1,10 +1,23 @@
 use firefly_basalt::{
     thirdparty::ethz_apriltag2::{
-        tag_detector::TagDetector, tag_family::TagFamily, tag36h11::CODES,
+        gridder::Gridder, tag_detector::TagDetector, tag_family::TagFamily, tag36h11::CODES,
     },
     utils::apriltag::ApriltagDetector,
 };
 use firefly_calibration::image::image::ManagedImage;
+
+#[test]
+fn grid_query_preserves_cell_order_and_newest_first_within_each_cell() {
+    let mut grid = Gridder::new(0., 0., 20., 20., 10.);
+    assert_eq!(grid.find(5., 5., 10.).count(), 0);
+    for (x, y, id) in [(1., 1., 1), (2., 2., 2), (11., 1., 3), (1., 11., 4)] {
+        grid.add(x, y, id);
+    }
+    assert_eq!(grid.find(5., 5., 10.).collect::<Vec<_>>(), [2, 1, 3, 4]);
+    assert_eq!(grid.find(1., 1., 0.).collect::<Vec<_>>(), [2, 1]);
+    assert_eq!(grid.find(-20., -20., 0.).collect::<Vec<_>>(), [2, 1]);
+    assert_eq!(grid.find(20., 20., 0.).count(), 0);
+}
 
 #[test]
 fn original_tag_dictionary_rotations_and_one_bit_recovery() {
