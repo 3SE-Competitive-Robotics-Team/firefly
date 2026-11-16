@@ -131,60 +131,7 @@ fn forward(
     while RUNNING.load(Ordering::Relaxed) {
         firefly_observability::pump_log_ipc(log_ipc);
         let mut wrote = drain_control(&mut writer, &ports.control, &mut stats)?;
-        while let Ok(Some(sample)) = ports.odom.receive() {
-            if write_telemetry(
-                &mut writer,
-                &ports.control,
-                &Message::Odometry(*sample.payload()),
-                &mut stats,
-            )? {
-                wrote = true;
-            }
-        }
-        while let Ok(Some(sample)) = ports.corrected.receive() {
-            if write_telemetry(
-                &mut writer,
-                &ports.control,
-                &Message::CorrectedOdometry(*sample.payload()),
-                &mut stats,
-            )? {
-                wrote = true;
-            }
-        }
-        while let Ok(Some(sample)) = ports.attitude.receive() {
-            if write_telemetry(
-                &mut writer,
-                &ports.control,
-                &Message::VioAttitude(*sample.payload()),
-                &mut stats,
-            )? {
-                wrote = true;
-            }
-        }
-        while let Ok(Some(sample)) = ports.reference.receive() {
-            wrote |= write_telemetry(
-                &mut writer,
-                &ports.control,
-                &Message::Reference(*sample.payload()),
-                &mut stats,
-            )?;
-        }
-        while let Ok(Some(sample)) = ports.planner_status.receive() {
-            wrote |= write_telemetry(
-                &mut writer,
-                &ports.control,
-                &Message::PlannerStatus(*sample.payload()),
-                &mut stats,
-            )?;
-        }
-        while let Ok(Some(sample)) = ports.navigation.receive() {
-            wrote |= write_telemetry(
-                &mut writer,
-                &ports.control,
-                &Message::Navigation(*sample.payload()),
-                &mut stats,
-            )?;
-        }
+        wrote |= drain_state(&mut writer, ports, &mut stats)?;
         while let Ok(Some(sample)) = ports.geometry.receive() {
             observe_sequence(
                 &mut geometry_sequences,
@@ -260,6 +207,69 @@ fn forward(
     }
     log::info!("motor --hil 退出");
     Ok(())
+}
+
+fn drain_state<W: Write>(
+    writer: &mut FrameWriter<W>,
+    ports: &Ports,
+    stats: &mut Stats,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut wrote = false;
+    while let Ok(Some(sample)) = ports.odom.receive() {
+        if write_telemetry(
+            writer,
+            &ports.control,
+            &Message::Odometry(*sample.payload()),
+            stats,
+        )? {
+            wrote = true;
+        }
+    }
+    while let Ok(Some(sample)) = ports.corrected.receive() {
+        if write_telemetry(
+            writer,
+            &ports.control,
+            &Message::CorrectedOdometry(*sample.payload()),
+            stats,
+        )? {
+            wrote = true;
+        }
+    }
+    while let Ok(Some(sample)) = ports.attitude.receive() {
+        if write_telemetry(
+            writer,
+            &ports.control,
+            &Message::VioAttitude(*sample.payload()),
+            stats,
+        )? {
+            wrote = true;
+        }
+    }
+    while let Ok(Some(sample)) = ports.reference.receive() {
+        wrote |= write_telemetry(
+            writer,
+            &ports.control,
+            &Message::Reference(*sample.payload()),
+            stats,
+        )?;
+    }
+    while let Ok(Some(sample)) = ports.planner_status.receive() {
+        wrote |= write_telemetry(
+            writer,
+            &ports.control,
+            &Message::PlannerStatus(*sample.payload()),
+            stats,
+        )?;
+    }
+    while let Ok(Some(sample)) = ports.navigation.receive() {
+        wrote |= write_telemetry(
+            writer,
+            &ports.control,
+            &Message::Navigation(*sample.payload()),
+            stats,
+        )?;
+    }
+    Ok(wrote)
 }
 
 fn observe_sequence(
