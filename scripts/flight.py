@@ -8,7 +8,7 @@ import sys
 import time
 
 import iceoryx2 as iox2
-from firefly_mujoco import LogMessage, OdomMessage, PlannerStatusMessage, ReferenceMessage, TraceContext
+from firefly_mujoco import LandingTargetMessage, LogMessage, OdomMessage, PlannerStatusMessage, ReferenceMessage, TraceContext
 from firefly_mujoco.messages import ScalarMessage
 from firefly_workspace import workspace_root
 from firefly_workspace.process import ManagedProcess, isolated_run
@@ -28,8 +28,11 @@ def main(argv=None, *, hil=None, mission=None):
         parser.add_argument("--hover-seconds", type=float, help="hover duration in seconds (default: 20)")
     else:
         parser.set_defaults(hover_seconds=None)
+    parser.add_argument("--precision-land", action="store_true", help="finish hover with down-camera precision landing")
     parser.add_argument("--seed", type=int, default=20260930)
     args = parser.parse_args(argv)
+    if args.precision_land and args.mission != "hover":
+        parser.error("--precision-land requires --mission hover")
     if args.hover_seconds is not None and args.mission != "hover":
         parser.error("--hover-seconds requires --mission hover")
     if args.hover_seconds is None:
@@ -109,6 +112,7 @@ def main(argv=None, *, hil=None, mission=None):
                 return builder.open_or_create()
             logs = service("Log", LogMessage, 256, 10).publisher_builder().create()
             for name, topic, payload, capacity, publishers in [
+                ("landing", "LandingTarget", LandingTargetMessage, 2, None),
                 ("odom", "Odometry", OdomMessage, 2, None),
                 ("planner", "PlannerStatus", PlannerStatusMessage, 2, None),
                 ("reference", "Reference", ReferenceMessage, 2, None),
@@ -123,6 +127,8 @@ def main(argv=None, *, hil=None, mission=None):
             else:
                 start("vio", [str(root/"target/release/firefly-rootslam"), "--no-loop-closures", "--no-mapping"])
                 start("fc", [str(root/"target/release/fc")])
+                if args.precision_land:
+                    start("landing", [str(root/"target/release/landing"), "--simulation"])
                 if args.mission == "roundtrip":
                     start("traj", [str(root/"target/release/traj")])
                     start("planner", [str(root/"target/release/planner")])
@@ -152,6 +158,13 @@ def main(argv=None, *, hil=None, mission=None):
                     command("fc", "hold")
                     wait(lambda: mode == 3)
                     hold(2.)
+            if args.precision_land:
+                wait(lambda: "landing" in latest and latest["landing"].valid == 1
+                     and 0 <= stamp-latest["landing"].timestamp < .25)
+                command("fc", "land", "--precision")
+                wait(lambda: mode == 5)
+                wait(lambda: mode == 0, wall=45.)
+                event("precision landing completed and DISARMED")
             event("flight commands completed")
         except (Exception, KeyboardInterrupt) as failure:
             error = str(failure) or type(failure).__name__

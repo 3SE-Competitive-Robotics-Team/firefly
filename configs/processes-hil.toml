@@ -26,6 +26,11 @@ command = ["taskset", "-c", "5", "bin/fc", "--config", "configs/fc-hil.toml"]
 autostart = true
 
 [[process]]
+name = "landing"
+command = ["taskset", "-c", "0-4", "bin/landing"]
+autostart = true
+
+[[process]]
 name = "traj"
 command = ["taskset", "-c", "0-4", "bin/traj"]
 autostart = true

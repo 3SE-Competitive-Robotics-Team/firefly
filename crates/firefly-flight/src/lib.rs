@@ -31,6 +31,7 @@ mod airframe;
 mod control;
 mod fsm;
 mod params;
+pub mod precision;
 pub mod px4;
 mod safety;
 mod state;

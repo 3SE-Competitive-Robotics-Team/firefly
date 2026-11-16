@@ -1,12 +1,12 @@
-//! 图像消息（双目灰度 + 深度）与话题。
+//! 图像消息（双目灰度、下视灰度与深度）及话题。
 //!
 //! `#[repr(C)]` 定长结构，满足 `ZeroCopySend` 约束（自包含、无堆指针、
 //! 统一内存布局、`'static`、无 `Drop`）。图像数据内嵌定长数组，
 //! iceoryx2 共享内存零拷贝传输；trace 上下文由发布中间件写入
 //! **User Header**（见 [`crate::trace`]）。
 //!
-//! 图像分辨率统一（[`IMAGE_WIDTH`] × [`IMAGE_HEIGHT`]），由合成/物理环境
-//! （Bevy `render`）渲染后发布；订阅端转换成领域层 `GrayImage`/`CameraData`。
+//! 双目/深度使用 [`IMAGE_WIDTH`] × [`IMAGE_HEIGHT`]，下视使用
+//! [`DOWN_WIDTH`] × [`DOWN_HEIGHT`]；订阅端按对应的定长消息接收。
 
 use iceoryx2::prelude::*;
 
@@ -16,6 +16,40 @@ pub const IMAGE_WIDTH: usize = 320;
 pub const IMAGE_HEIGHT: usize = 240;
 /// 灰度/深度图像素总数（320×240）。
 pub const IMAGE_SIZE: usize = IMAGE_WIDTH * IMAGE_HEIGHT;
+
+/// 下视相机原始灰度图宽度（像素）。
+pub const DOWN_WIDTH: usize = 352;
+/// 下视相机原始灰度图高度（像素）。
+pub const DOWN_HEIGHT: usize = 288;
+pub const DOWN_SIZE: usize = DOWN_WIDTH * DOWN_HEIGHT;
+pub const CAMERA_DOWN_TOPIC: &str = "Firefly/CameraDown";
+/// 下视相机保留 id；2 为现有深度源。
+pub const DOWN_SENSOR_ID: i32 = 3;
+
+/// 下视原图，独立于双目的分辨率与消息签名。
+#[repr(C)]
+#[derive(Debug, Clone, Copy, ZeroCopySend)]
+#[type_name("FireflyDownImageMessage")]
+pub struct DownImageMessage {
+    pub timestamp: f64,
+    pub sensor_id: i32,
+    pub width: u32,
+    pub height: u32,
+    pub data: [u8; DOWN_SIZE],
+}
+
+impl Default for DownImageMessage {
+    #[allow(clippy::large_stack_arrays)]
+    fn default() -> Self {
+        Self {
+            timestamp: -1.0,
+            sensor_id: DOWN_SENSOR_ID,
+            width: DOWN_WIDTH as u32,
+            height: DOWN_HEIGHT as u32,
+            data: [0; DOWN_SIZE],
+        }
+    }
+}
 
 /// 左目灰度话题（`sensor_id = 0`）。
 pub const CAMERA_LEFT_TOPIC: &str = "Firefly/CameraLeft";
@@ -89,6 +123,18 @@ impl Default for DepthImageMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn down_image_has_cif_layout_and_independent_sensor_identity() {
+        let message = DownImageMessage::default();
+        assert_eq!(std::mem::size_of::<DownImageMessage>(), 101_400);
+        assert_eq!(std::mem::offset_of!(DownImageMessage, data), 20);
+        assert_eq!(
+            (message.width, message.height, message.sensor_id),
+            (352, 288, 3)
+        );
+        assert_eq!(message.data.len(), 101_376);
+    }
 
     #[test]
     fn gray_image_is_plain_old_data() {

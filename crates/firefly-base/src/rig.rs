@@ -28,6 +28,14 @@ pub const LEFT_IN_BODY: [f64; 3] = [CAMERA_FORWARD_M, -BASELINE / 2.0, 0.0];
 pub const RIGHT_IN_BODY: [f64; 3] = [CAMERA_FORWARD_M, BASELINE / 2.0, 0.0];
 /// 深度相机在机体系位置（米，与双目前脸齐平）。
 pub const DEPTH_IN_BODY: [f64; 3] = [CAMERA_FORWARD_M, 0.0, 0.0];
+/// 下视光心后移 3 cm；仿真标称高度与机体原点相同，实机外参以标定为准。
+pub const DOWN_IN_BODY: [f64; 3] = [-0.03, 0.0, 0.0];
+
+/// 下视相机 render 轴：图右朝机体右，图上朝机头，−z 光轴朝下。
+#[must_use]
+pub fn down_axes_in_body() -> Matrix3<f64> {
+    Matrix3::new(0., 1., 0., -1., 0., 0., 0., 0., 1.)
+}
 
 /// 对称透视投影的主点，使用左上像素中心为 `(0, 0)` 的图像坐标。
 /// GPU 帧缓冲原点在像素边界，读取到图像数组后必须减去半个像素。
@@ -36,11 +44,12 @@ pub fn principal_point(width: usize, height: usize) -> [f64; 2] {
     [(width as f64 - 1.0) / 2.0, (height as f64 - 1.0) / 2.0]
 }
 
-/// rig 的三个相机坐标系。
-pub const CAMERAS: [FrameId; 3] = [
+/// rig 的四个相机坐标系。
+pub const CAMERAS: [FrameId; 4] = [
     FrameId::LEFT_CAMERA,
     FrameId::RIGHT_CAMERA,
     FrameId::DEPTH_CAMERA,
+    FrameId::DOWN_CAMERA,
 ];
 
 /// CV 光学约定 ← 相机约定（绕 x 轴 180°）。
@@ -72,6 +81,8 @@ pub fn position_in_body(camera: FrameId) -> Vector3<f64> {
         RIGHT_IN_BODY
     } else if camera == FrameId::DEPTH_CAMERA {
         DEPTH_IN_BODY
+    } else if camera == FrameId::DOWN_CAMERA {
+        DOWN_IN_BODY
     } else {
         panic!("not a rig camera frame");
     };
@@ -84,7 +95,11 @@ pub fn position_in_body(camera: FrameId) -> Vector3<f64> {
 /// `camera` 不是 rig 相机坐标系。
 #[must_use]
 pub fn body_from_camera(camera: FrameId) -> RigidTransform {
-    let axes = cam_axes_in_body();
+    let axes = if camera == FrameId::DOWN_CAMERA {
+        down_axes_in_body()
+    } else {
+        cam_axes_in_body()
+    };
     let uq = UnitQuaternion::from_matrix(&axes);
     let q = uq.quaternion();
     RigidTransform::from_parts(
@@ -96,7 +111,7 @@ pub fn body_from_camera(camera: FrameId) -> RigidTransform {
     .expect("finite unit rig calibration")
 }
 
-/// rig 坐标树（机体系 + 三个相机，同一时刻快照）。
+/// rig 坐标树（机体系 + 四个相机，同一时刻快照）。
 ///
 /// # Panics
 /// rig 边构成环（编译期常量下不可能）。

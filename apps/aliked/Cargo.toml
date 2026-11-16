@@ -27,5 +27,8 @@ log = { workspace = true }
 nalgebra = { workspace = true }
 ort = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ort = { workspace = true, features = ["load-dynamic"] }
+
 [lints]
 workspace = true

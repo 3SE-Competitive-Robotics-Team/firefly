@@ -101,12 +101,7 @@ impl Controller {
         position.set_thrust_limits(params.position.thrust_min, params.position.thrust_max);
         position.set_horizontal_thrust_margin(params.position.horizontal_thrust_margin);
 
-        let mut allocation = ControlAllocationSequentialDesaturation::new();
-        allocation.set_airmode(match params.allocation.airmode {
-            1 => Airmode::RollPitch,
-            2 => Airmode::RollPitchYaw,
-            _ => Airmode::Disabled,
-        });
+        let allocation = ControlAllocationSequentialDesaturation::new();
 
         Self {
             params,
@@ -164,7 +159,7 @@ impl Controller {
 
     /// 位置模式：位置/速度/加速度/偏航参考 → 4 电机推力（N）。
     ///
-    /// `landed` 为真时冻结角速度积分（PX4 `RateControl::update(..., landed)`）。
+    /// `landed` 表示触地候选：冻结角速度积分、清零水平推力并优先分配集合推力。
     /// 位置设定值无效时保留上一次有效姿态与推力；内环输出无效时返回 `None`。
     pub fn update(
         &mut self,
@@ -203,6 +198,15 @@ impl Controller {
         self.input_invalid = false;
 
         self.attitude_setpoint = self.position.attitude_setpoint();
+        if landed {
+            let local = self.position.local_position_setpoint();
+            self.position.reset_integral_xy();
+            self.attitude_setpoint = VehicleAttitudeSetpoint {
+                q_d: nalgebra::UnitQuaternion::from_axis_angle(&Vector3::z_axis(), local.yaw),
+                thrust_body: Vector3::new(0., 0., local.thrust.z),
+                yaw_sp_move_rate: 0.,
+            };
+        }
         self.run_inner_loop(state, airframe, dt, landed, false)
     }
 
@@ -292,6 +296,15 @@ impl Controller {
             torque.z,
             self.attitude_setpoint.thrust_body.z,
         ]);
+        self.allocation.set_airmode(if landed {
+            Airmode::Disabled
+        } else {
+            match self.params.allocation.airmode {
+                1 => Airmode::RollPitch,
+                2 => Airmode::RollPitchYaw,
+                _ => Airmode::Disabled,
+            }
+        });
         self.allocation.set_control_setpoint(control);
         self.allocation.allocate();
         let actuator_sp = self

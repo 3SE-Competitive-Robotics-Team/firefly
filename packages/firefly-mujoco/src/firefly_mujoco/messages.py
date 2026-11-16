@@ -12,6 +12,10 @@ import ctypes
 IMAGE_WIDTH = 320
 IMAGE_HEIGHT = 240
 IMAGE_SIZE = IMAGE_WIDTH * IMAGE_HEIGHT
+DOWN_WIDTH = 352
+DOWN_HEIGHT = 288
+DOWN_SIZE = DOWN_WIDTH * DOWN_HEIGHT
+DOWN_SENSOR_ID = 3
 
 
 class TraceContext(ctypes.Structure):
@@ -66,6 +70,40 @@ class GrayImageMessage(ctypes.Structure):
     @staticmethod
     def type_name() -> str:
         return "FireflyGrayImageMessage"
+
+
+class DownImageMessage(ctypes.Structure):
+    """OV2640 CIF 352×288 下视图像，与 Rust DownImageMessage 布局一致。"""
+
+    _fields_ = [
+        ("timestamp", ctypes.c_double),
+        ("sensor_id", ctypes.c_int32),
+        ("width", ctypes.c_uint32),
+        ("height", ctypes.c_uint32),
+        ("data", ctypes.c_uint8 * DOWN_SIZE),
+    ]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflyDownImageMessage"
+
+
+class LandingTargetMessage(ctypes.Structure):
+    """视觉降落目标，odom 系机体触地位置，与 Rust LandingTargetMessage 一致。"""
+
+    _fields_ = [
+        ("timestamp", ctypes.c_double), ("session", ctypes.c_uint64),
+        ("position", ctypes.c_double * 3), ("reprojection_px", ctypes.c_double),
+        ("confidence", ctypes.c_double), ("team", ctypes.c_uint32),
+        ("valid", ctypes.c_uint32),
+    ]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflyLandingTargetMessage"
+
+
+assert ctypes.sizeof(LandingTargetMessage) == 64
 
 
 class DepthImageMessage(ctypes.Structure):

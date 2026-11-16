@@ -21,7 +21,8 @@ use bevy::ecs::system::NonSend;
 use bevy::prelude::*;
 use fastrace::prelude::*;
 use firefly_pubsub::camera::{
-    CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DEPTH_TOPIC, DepthImageMessage, GrayImageMessage,
+    CAMERA_DOWN_TOPIC, CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DEPTH_TOPIC, DOWN_HEIGHT,
+    DOWN_SENSOR_ID, DOWN_WIDTH, DepthImageMessage, DownImageMessage, GrayImageMessage,
     IMAGE_HEIGHT, IMAGE_WIDTH,
 };
 use firefly_pubsub::event::{CAMERA_PAIR_TOPIC, TopicNotifier};
@@ -71,6 +72,7 @@ struct SensorPublishers {
     left_pub: Publisher<GrayImageMessage>,
     right_pub: Publisher<GrayImageMessage>,
     depth_pub: Publisher<DepthImageMessage>,
+    down_pub: Publisher<DownImageMessage>,
     pair_notify: TopicNotifier,
     viz_pub: VizPublisher,
     calibration_stamp: std::cell::Cell<f64>,
@@ -91,6 +93,7 @@ impl SensorPublishers {
             left_pub: Publisher::with_topic(&node, &topic(CAMERA_LEFT_TOPIC))?,
             right_pub: Publisher::with_topic(&node, &topic(CAMERA_RIGHT_TOPIC))?,
             depth_pub: Publisher::with_topic(&node, &topic(DEPTH_TOPIC))?,
+            down_pub: Publisher::with_topic(&node, &topic(CAMERA_DOWN_TOPIC))?,
             pair_notify: TopicNotifier::with_topic(&node, &topic(CAMERA_PAIR_TOPIC))?,
             viz_pub: VizPublisher::new(&node)?,
             calibration_stamp: std::cell::Cell::new(f64::NEG_INFINITY),
@@ -99,7 +102,7 @@ impl SensorPublishers {
     }
 }
 
-/// 待发布帧（三份同 `seq` 回复在此集合）。
+/// 待发布帧（四份同 `seq` 回复在此集合）。
 #[derive(Resource)]
 pub struct PendingFrames {
     /// `seq` → 已到回复。
@@ -273,6 +276,7 @@ pub fn poll_pose(
             trace: pose.trace,
             left: targets.left.id(),
             right: targets.right.id(),
+            down: targets.down.id(),
         });
         capture.requested_seq = Some(seq);
         // sim 时间戳有浮点抖动，按 10% 周期容差比较，避免漏拍。
@@ -322,7 +326,7 @@ impl PendingFrames {
         let seq = self
             .frames
             .iter()
-            .filter(|(_, frames)| frames.len() >= 3)
+            .filter(|(_, frames)| frames.len() >= 4)
             .map(|(seq, _)| *seq)
             .max()?;
         let frames = self.frames.remove(&seq).expect("complete frame");
@@ -330,6 +334,7 @@ impl PendingFrames {
         let mut left_gray = None;
         let mut right_gray = None;
         let mut depth_raw = None;
+        let mut down_gray = None;
         let mut stamp = 0.0;
         let mut trace = TraceContext::default();
         let mut timing = frames[0].timing;
@@ -341,6 +346,7 @@ impl PendingFrames {
                 SensorKind::Left => left_gray = Some(frame.bytes),
                 SensorKind::Right => right_gray = Some(frame.bytes),
                 SensorKind::Depth => depth_raw = Some(frame.bytes),
+                SensorKind::Down => down_gray = Some(frame.bytes),
             }
         }
         let (Some(left_gray), Some(right_gray), Some(depth_raw)) =
@@ -359,6 +365,7 @@ impl PendingFrames {
             left_gray,
             right_gray,
             depth_raw,
+            down_gray,
         })
     }
 }
@@ -399,6 +406,17 @@ fn publish(ports: &SensorPublishers, result: &ProcessedCapture) {
     publish_gray(&ports.left_pub, &result.left_gray, result.stamp, 0);
     publish_gray(&ports.right_pub, &result.right_gray, result.stamp, 1);
     publish_depth(&ports.depth_pub, result.depth, result.stamp);
+    if let Some(image) = &result.down_gray
+        && let Err(error) = ports.down_pub.publish_with(|message| {
+            message.timestamp = result.stamp;
+            message.sensor_id = DOWN_SENSOR_ID;
+            message.width = DOWN_WIDTH as u32;
+            message.height = DOWN_HEIGHT as u32;
+            message.data.copy_from_slice(image);
+        })
+    {
+        log::error!("down image publication: {error}");
+    }
     ports.pair_notify.notify_sent_sample();
     let t = result.timing;
     for (entity, values) in [
@@ -470,6 +488,7 @@ mod tests {
         left: BufferPool,
         right: BufferPool,
         depth: BufferPool,
+        down: BufferPool,
     }
 
     impl Replies {
@@ -478,6 +497,7 @@ mod tests {
                 left: BufferPool::new(2, GRAY_BYTES),
                 right: BufferPool::new(2, GRAY_BYTES),
                 depth: BufferPool::new(2, FRAME_BYTES),
+                down: BufferPool::new(2, firefly_pubsub::camera::DOWN_SIZE),
             }
         }
 
@@ -486,6 +506,7 @@ mod tests {
                 SensorKind::Left => &self.left,
                 SensorKind::Right => &self.right,
                 SensorKind::Depth => &self.depth,
+                SensorKind::Down => &self.down,
             };
             CaptureReply::Frame(CapturedFrame {
                 seq,
@@ -497,11 +518,12 @@ mod tests {
             })
         }
 
-        fn complete(&self, seq: u64) -> [CaptureReply; 3] {
+        fn complete(&self, seq: u64) -> [CaptureReply; 4] {
             [
                 self.frame(seq, SensorKind::Left),
                 self.frame(seq, SensorKind::Right),
                 self.frame(seq, SensorKind::Depth),
+                self.frame(seq, SensorKind::Down),
             ]
         }
     }
@@ -522,6 +544,7 @@ mod tests {
             .assemble([
                 replies.frame(2, SensorKind::Depth),
                 replies.frame(2, SensorKind::Right),
+                replies.frame(2, SensorKind::Down),
             ])
             .unwrap();
         assert_eq!(second.seq, 2);

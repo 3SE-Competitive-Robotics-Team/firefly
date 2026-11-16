@@ -108,9 +108,11 @@ commit message 使用 `<type>(<scope>): <摘要>`；PR 标题使用 `<type>: <�
 场景由 `configs/scene.toml` 的 `scene = "<赛季>@<版本>"` 唯一选择，已注册
 `rmuc2027@1.0.0`；资产在 `models/<赛季>/v<版本>/`（`field.glb`、
 `<赛季>_collision.json`），另需 `models/drone/drone.glb`。启动时检查版本注册和资产完整性，错误指向具体场景。
-停机坪定义统一由 `firefly_mujoco.scene.SCENES[].pad` 与 `PAD_CLEARANCE` 提供。
+`configs/game.toml` 的 `team = "red"` / `"blue"` 选择己方机库；默认 red。
+停机坪定义由 `firefly_mujoco.scene.SCENES[].hangars` 与 `PAD_CLEARANCE` 提供，出生点在
+所选 H 标记中心正上方。物理代理按 CAD 甲板的八边形轮廓切分凸棱柱，保留轮廓外的碰撞体积，支撑面高度与图案一致。
 render 使用无窗口 GPU 渲染；Rerun 原生 Viewer 需要图形会话。Rust/Python 版本和依赖
-以 workspace 配置为准。mimir 直接将左右目无损灰度图和结构化诊断写入 RRD，配置见 `configs/mimir.toml`。
+以 workspace 配置为准。mimir 直接将左右目和下视无损灰度图和结构化诊断写入 RRD，配置见 `configs/mimir.toml`。
 
 ```bash
 uv sync --all-packages --extra test
@@ -192,7 +194,7 @@ supervisor 的相对命令 `bin/<app>` 和 `logs/process` 仍依赖工作目录�
 
 | 进程 | 设备 | 话题 |
 |---|---|---|
-| `camera` | `V4L2` 节点 | 发布 `Firefly/CameraLeft`、`CameraRight`、可选 `Depth` |
+| `camera` | `V4L2` 节点 | 发布 `Firefly/CameraLeft`、`CameraRight`、可选 `Depth` 和 `CameraDown` |
 | `imu` | `spidev`（`BMI088` 两片） | 发布 `Firefly/Imu` |
 | `motor` | `sysfs` PWM | 订阅 `Firefly/Control`，发布 `Firefly/Airframe` |
 
@@ -200,7 +202,8 @@ supervisor 的相对命令 `bin/<app>` 和 `logs/process` 仍依赖工作目录�
 
 - `configs/camera.toml`：`/dev/videoN` 编号随内核与接线变化，先用
   `v4l2-ctl --list-devices` 核对。分辨率由 IPC 定长消息定死（320×240），
-  驱动按该组合启动；格式协商失败时返回错误。`[depth]` 控制深度发布。
+  双目和深度使用该组合；`[down]` 独立固定为 352×288，驱动必须原样接受格式。
+  `[depth]` 控制深度发布，下视使用独立工作线程、V4L2 单调采集时间戳与行跨度。
   具体相机的格式、同步、时间戳和标定按配置指定的 `V4L2` 流做实机验证。
 - `configs/imu.toml`：实现 `BMI088`，启动通过 `WHO_AM_I` 核验设备身份。
   寄存器初始化值取自数据手册，首次上板须核对
@@ -264,6 +267,71 @@ supervisor 对异常退出退避重启；停止使用 SIGINT，超时返回错�
 省略时随规划路径定向。roll/pitch 由飞控实现推力方向。
 上电后先完成静止初始化与解锁检查，再接受起飞指令。飞控失联行为见架构文档。
 
+### 下视精确降落
+
+模型目录使用版本化名称，由 manifest 固定模型、源权重、校准集摘要及输入输出形状。
+训练权重来自 `se3_yolo/runs/h_marker/yolo26n_sim/weights/best.pt`；用训练仓库的
+导出环境运行（依赖由该仓库锁定）：
+
+```bash
+../se3_yolo/.venv/bin/python scripts/export_landing.py \
+  --checkpoint ../se3_yolo/runs/h_marker/yolo26n_sim/weights/best.pt \
+  --dataset ../se3_yolo/datasets/h_marker --output models/h-marker-yolo26n-cif-v1
+```
+
+相机输出 352×288；默认网络 NCHW 为 `[1,3,288,352]`。静态 INT8 QDQ 使用 train
+分组校准，val/test 保持独立。灰度复制为三通道，原分辨率角点用于米制定位。
+现有合成校准先重采样为 CIF；装机后使用真实镜头、曝光和运动图重新校准与测评。
+`configs/landing.toml` 配置内参、畸变、H 尺寸、安装位置与触地原点偏移；默认几何匹配仿真 CAD，
+实机参数须由标定/测量替换。下视光心位于机体后方 3cm。
+
+生产 `landing` 通过 ort-rs 的 `VSINPU` EP 运行，加载
+`models/npu/libonnxruntime.so`，禁止 CPU 回退。原生库必须提供 C API 31 和
+`OrtSessionOptionsAppendExecutionProvider_VSINPU`；标准 CPU 发行包不提供该 EP。
+官方 [ORT VSINPU 实现](https://github.com/microsoft/onnxruntime/tree/main/onnxruntime/core/providers/vsinpu)
+依赖 TIM-VX；TIM-VX 与 A733 SDK/内核驱动的兼容性、INT8 算子放置和时延由实机启动验证。
+
+在 aarch64 Linux 上，准备与板端驱动匹配的 SDK、已安装的 TIM-VX 和固定到完整 commit
+的干净 ORT 源码后，使用 `scripts/build_npu_runtime.py --help` 所列参数构建运行库。
+脚本验证源码 C API、构建 VSINPU、打包共享库、设置同目录 RPATH 并记录指纹；
+构建完成不代表模型已经通过 NPU 验收。运行库目录、INT8 ONNX 和模型 manifest 随
+`xtask deploy` 部署；发布缺少运行库时明确失败。可选 ALIKED/LightGlue 共用该 Linux 原生库。
+第三路相机与 NPU 就绪后可用 `ffctl process enable landing` 开机启动；HIL 清单默认启用。
+
+```bash
+cargo xtask release
+./target/release/landing --simulation
+./target/release/ffctl fc land --precision
+uv run python scripts/validate_landing.py --output target/landing-validation/cif-v1
+uv run python scripts/flight.py --mission hover --hover-seconds 3 --precision-land
+```
+
+`--simulation` 显式选择 CPU，用于桌面仿真；生产默认后端始终为 NPU。
+离线 `landing --image <352x288.png> --simulation` 输出检测、优化角点、米制平移和重投影残差。
+图像验收在两队机库上方 1m/1.5m、中心及偏置位置检验识别和米制误差，并导出 PNG；
+运行与飞行原始证据由最先启动、最后退出的 Mimir 保存。初次识别建议在 1m 高度完成，
+近距离由连续 H 角点跟踪维持观测；超时后重新经过 YOLO 确认。
+
+### 下视训练数据整理
+
+`scripts/collect_landing_dataset.py` 保留过程 PNG 和 RRD 的原始下视像素，按像素去重，
+从同时间的 GroundTruth 获取标签相机位姿，再用固定 CAD 的语义发光掩码独立生成
+完整 H 平台的 YOLO 框；检测模型的预测不作为标签。原始截图路径、录制指纹、
+采集时刻、位姿及插值标记写入 manifest。语义掩码保留其他几何的遮挡。
+
+```bash
+uv run python scripts/collect_landing_dataset.py --images target/landing-validation \
+  --recordings logs/<录制目录>/log.rrd logs/<另一录制目录>/log.rrd logs/<第三录制目录>/log.rrd \
+  --output datasets/h_marker_cif_v1 --sample-period 1 --max-samples 24
+```
+
+每个飞行录制归属同一划分，重复出现在不同划分的相同图像进入 quarantine；
+相同静态相机验收属于固定姿态组。微小、无 H 涂层或位姿缺失的样本保持待复核状态，
+按 `images/quarantine` 隔离，避免生成错误负样本。输出包含 `data.yaml`、
+images/labels/masks 的 train/val/test 目录及带框 review 图片；标注契约与
+`se3_yolo` 的完整平台可见范围一致。使用新的输出目录保留每版数据，
+检查 review 后再交给训练仓库；实际 OV2640 图像另行采集与标注。
+
 ### HIL 部署与运行
 
 HIL 用 USB 把电脑上的 MuJoCo 物理仿真与板端生产计算连接起来。电脑运行
@@ -293,7 +361,7 @@ FC 使用 `configs/fc-hil.toml`：水平速度环增益与正常部署一致，
 `configs/hil.toml` 管理 USB 身份、队列与送图节拍。`imu_batch = 1`；
 双目按采集时间配对，图像分为最多 16 KiB 的块，块间先发送 IMU 与指令。
 `image_queue` 是待发图像预算，至少为 2；双目对原子入队，每个队列位置最多占两张图，
-深度图独占一个位置。上行每条遥测和日志发送前优先排空控制队列。
+深度图和 CIF 下视图各独占一个位置，下视有独立同周期节流。上行每条遥测和日志发送前优先排空控制队列。
 `image_period_s` 是板端视觉负载预算，图像、控制和后验的实际频率分别验收。
 HIL 默认送图预算为 30 Hz。`configs/processes-hil.toml` 为 A733 设置以下亲和性：
 

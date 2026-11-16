@@ -34,6 +34,7 @@ pub mod control;
 pub mod event;
 pub mod goal;
 pub mod imu;
+pub mod landing;
 pub mod log;
 pub mod navigation;
 pub mod node;

@@ -16,6 +16,7 @@ use nalgebra::Vector3;
 use serde::Deserialize;
 
 use crate::control::PositionSetpoint;
+use crate::precision::{PrecisionLanding, PrecisionParams};
 use crate::px4::velocity_smoothing::VelocitySmoothing;
 use crate::safety::{ArmingCheck, FailsafeAction, FailsafeFlags};
 use crate::state::QuadState;
@@ -41,6 +42,8 @@ pub enum Command {
     Track,
     /// 自动降落（下降 → 落地 → 自动上锁）。
     Land,
+    /// 在新鲜视觉平台观测上精确降落。
+    PrecisionLand,
 }
 
 /// 指令被拒绝的原因（逐项上报，对照 `PX4` `HealthAndArmingChecks` 的"为什么不能解锁"）。
@@ -56,6 +59,7 @@ pub enum Reject {
     ReferenceNotReady,
     /// 起飞高度超范围。
     AltitudeOutOfRange,
+    LandingTargetNotReady,
 }
 
 impl Reject {
@@ -68,6 +72,7 @@ impl Reject {
             Self::WrongState => "当前状态不允许",
             Self::ReferenceNotReady => "参考流未就绪",
             Self::AltitudeOutOfRange => "起飞高度超范围",
+            Self::LandingTargetNotReady => "降落目标未就绪",
         }
     }
 }
@@ -144,12 +149,16 @@ pub struct Health {
     pub attitude_session_ok: bool,
     /// 最近控制输出低于最小推力到悬停推力区间的触地门限。
     pub landing_thrust_low: bool,
+    /// Fresh IMU indicates gravity support (specific force near g) and low angular rate.
+    pub landing_motion_low: bool,
 }
 
 /// 状态机参数（缺键回落默认值；单位与来源见各字段）。
 #[derive(Deserialize, Clone, Copy, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct FsmParams {
+    #[serde(default)]
+    pub precision: PrecisionParams,
     /// 缺省起飞高度（相对起飞点，m）：`Takeoff` 不带高度时用它（对照 `MAVLink`
     /// `NAV_TAKEOFF` 的 param7 缺省语义——两家飞控都有对应参数）。
     #[serde(default = "d_takeoff_altitude")]
@@ -248,6 +257,7 @@ fn d_reference_timeout() -> f32 {
 impl Default for FsmParams {
     fn default() -> Self {
         Self {
+            precision: PrecisionParams::default(),
             takeoff_altitude: d_takeoff_altitude(),
             takeoff_climb_rate: d_takeoff_climb_rate(),
             takeoff_accel: d_takeoff_accel(),
@@ -271,6 +281,7 @@ impl FsmParams {
     /// # Errors
     /// Rejects landing limits that cannot produce a descending trajectory and timed contact confirmation.
     pub fn validate(&self) -> firefly_error::Result<()> {
+        self.precision.validate()?;
         for (name, value) in [
             ("land_descent_rate", self.land_descent_rate),
             ("land_accel", self.land_accel),
@@ -351,6 +362,8 @@ pub struct FlightFsm {
     reference_fresh: bool,
     /// `Track` 下参考流连续缺席的时长（s）。
     reference_lost: Option<f32>,
+    precision: Option<PrecisionLanding>,
+    landing_target: Option<Vector3<f32>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -376,6 +389,8 @@ impl FlightFsm {
             landing: LandingProgress::Approach,
             reference_fresh: false,
             reference_lost: None,
+            precision: None,
+            landing_target: None,
         }
     }
 
@@ -383,6 +398,26 @@ impl FlightFsm {
     #[must_use]
     pub fn state(&self) -> FlightState {
         self.state
+    }
+
+    /// 调用方按采集时间、接收时间、会话和队伍校验后提交目标。
+    pub fn observe_landing_target(&mut self, target: Option<Vector3<f32>>) {
+        self.landing_target = target.filter(|p| p.iter().all(|v| v.is_finite()));
+        if let (Some(precision), Some(target)) = (&mut self.precision, self.landing_target) {
+            precision.observe(target);
+        }
+    }
+
+    #[must_use]
+    pub fn precision_stage(&self) -> Option<crate::precision::PrecisionStage> {
+        self.precision.map(|p| p.stage)
+    }
+
+    /// 控制器的触地候选：精确降落保留已确认的近地低运动阶段。
+    #[must_use]
+    pub fn ground_contact_candidate(&self, state: &QuadState) -> bool {
+        self.precision
+            .map_or_else(|| self.on_ground(state), |p| p.contact_candidate())
     }
 
     /// 起飞点高度（世界 z；尚未锁存时为 `None`）。
@@ -400,7 +435,11 @@ impl FlightFsm {
     /// 地面判定：贴近起飞点高度且垂向速度小。
     #[must_use]
     pub fn on_ground(&self, state: &QuadState) -> bool {
-        self.altitude_above_origin(state) <= self.params.on_ground_altitude
+        (state.position.z
+            - self
+                .precision
+                .map_or(self.origin_z.unwrap_or(state.position.z), |p| p.target.z))
+            <= self.params.on_ground_altitude
             && state.velocity.z.abs() <= self.params.on_ground_velocity
     }
 
@@ -443,6 +482,21 @@ impl FlightFsm {
             Command::Hold => self.hold(state),
             Command::Track => self.track(),
             Command::Land => self.land(state),
+            Command::PrecisionLand => {
+                if !matches!(self.state, FlightState::Hold | FlightState::Track) {
+                    return Err(Reject::WrongState);
+                }
+                let target = self.landing_target.ok_or(Reject::LandingTargetNotReady)?;
+                if !target.iter().all(|v| v.is_finite())
+                    || (target - state.position).xy().norm() > 0.8
+                    || state.position.z - target.z < 0.05
+                {
+                    return Err(Reject::LandingTargetNotReady);
+                }
+                self.enter_land(state);
+                self.precision = Some(PrecisionLanding::new(self.params.precision, target, state));
+                Ok(())
+            }
         }?;
         Ok(event_of(from, self.state))
     }
@@ -554,14 +608,35 @@ impl FlightFsm {
                 }
             }
             FlightState::Land => {
+                if let Some(precision) = self.precision.as_mut()
+                    && !precision.advance(
+                        dt,
+                        state,
+                        state.position.z - precision.target.z <= self.params.on_ground_altitude
+                            && state.velocity.norm() <= self.params.on_ground_velocity,
+                    )
+                {
+                    self.enter_hold(state);
+                    return Event::FailsafeReferenceLost;
+                }
+                let altitude = state.position.z
+                    - self
+                        .precision
+                        .map_or(self.origin_z.unwrap_or(0.), |p| p.target.z);
                 if matches!(self.landing, LandingProgress::Approach)
-                    && self.altitude_above_origin(state) <= self.params.on_ground_altitude
+                    && altitude <= self.params.on_ground_altitude
+                    && self.precision.is_none_or(|p| p.may_descend(state))
                 {
                     self.landing = LandingProgress::Crawl;
                 }
                 if !matches!(self.landing, LandingProgress::Approach)
-                    && self.on_ground(state)
-                    && state.velocity.norm() <= self.params.on_ground_velocity
+                    && self.precision.map_or_else(
+                        || {
+                            altitude <= self.params.on_ground_altitude
+                                && state.velocity.norm() <= self.params.on_ground_velocity
+                        },
+                        |p| p.contact_candidate() && health.landing_motion_low,
+                    )
                     && health.landing_thrust_low
                 {
                     let elapsed = match self.landing {
@@ -570,7 +645,11 @@ impl FlightFsm {
                     };
                     self.landing = LandingProgress::Confirming(elapsed);
                     if elapsed >= self.params.land_complete_hold {
+                        if self.precision.is_some() {
+                            self.origin_z = Some(state.position.z);
+                        }
                         self.state = FlightState::Disarmed;
+                        self.precision = None;
                     }
                 } else if matches!(self.landing, LandingProgress::Confirming(_)) {
                     self.landing = LandingProgress::Crawl;
@@ -600,8 +679,12 @@ impl FlightFsm {
                 self.vertical_setpoint()
             }
             FlightState::Land => {
-                let goal = self.origin_z.unwrap_or(0.0);
-                let target = if matches!(self.landing, LandingProgress::Approach) {
+                let goal = self
+                    .precision
+                    .map_or(self.origin_z.unwrap_or(0.), |p| p.target.z);
+                let target = if self.precision.is_some_and(|p| !p.may_descend(state)) {
+                    0.
+                } else if matches!(self.landing, LandingProgress::Approach) {
                     self.vertical_target(goal, self.params.land_descent_rate, false)
                 } else {
                     // Keep descending until low thrust and arrested motion confirm contact.
@@ -612,7 +695,16 @@ impl FlightFsm {
                         .min(1.2 * self.params.on_ground_velocity)
                 };
                 self.vertical.update(dt, target);
-                self.vertical_setpoint()
+                let mut setpoint = self.vertical_setpoint();
+                if let Some(precision) = self.precision {
+                    let (position, velocity, acceleration) = precision.horizontal_reference();
+                    for i in 0..2 {
+                        setpoint.position[i] = position[i];
+                        setpoint.velocity[i] = velocity[i];
+                        setpoint.acceleration[i] = acceleration[i];
+                    }
+                }
+                setpoint
             }
             FlightState::Hold => self.ramp_setpoint(0.0),
             FlightState::AttitudeFallback => PositionSetpoint {
@@ -679,6 +771,7 @@ impl FlightFsm {
         self.target = state.position;
         self.ramp_z = state.position.z;
         self.target_yaw = crate::state::yaw_of(state.attitude);
+        self.precision = None;
         self.state = FlightState::ArmedGrounded;
         Ok(())
     }
@@ -722,6 +815,10 @@ impl FlightFsm {
         if !self.on_ground(state) {
             return Err(Reject::Arming(ArmingCheck::OnGround));
         }
+        if self.precision.is_some() {
+            self.origin_z = Some(state.position.z);
+        }
+        self.precision = None;
         self.state = FlightState::Disarmed;
         self.landing = LandingProgress::Approach;
         Ok(())
@@ -795,6 +892,7 @@ impl FlightFsm {
     }
 
     fn enter_hold(&mut self, state: &QuadState) {
+        self.precision = None;
         self.state = FlightState::Hold;
         self.target = state.position;
         self.ramp_z = state.position.z;
@@ -802,6 +900,7 @@ impl FlightFsm {
     }
 
     fn enter_land(&mut self, state: &QuadState) {
+        self.precision = None;
         self.state = FlightState::Land;
         // 降在起飞点正上方（x/y 取起飞点；我们的 origin 只存了高度，故取当前水平位置）
         self.target = state.position;
@@ -855,6 +954,7 @@ mod tests {
             imu_alive: true,
             attitude_session_ok: true,
             landing_thrust_low: true,
+            landing_motion_low: true,
         }
     }
 
@@ -1395,6 +1495,93 @@ mod tests {
     }
 
     /// 悬停平衡点自检：状态机在 Hold 下给出"停在原地"的参考，位置模式不产生水平力。
+    #[test]
+    fn precision_landing_requires_target_and_missing_target_returns_hold() {
+        let mut rig = Rig::new();
+        rig.cmd(Command::Arm).unwrap();
+        rig.cmd(Command::Takeoff { altitude: 1. }).unwrap();
+        rig.ticks(1000);
+        assert_eq!(
+            rig.cmd(Command::PrecisionLand),
+            Err(Reject::LandingTargetNotReady)
+        );
+        let target = Vector3::new(rig.state.position.x, rig.state.position.y, 0.3);
+        rig.fsm.observe_landing_target(Some(target));
+        rig.cmd(Command::PrecisionLand).unwrap();
+        rig.ticks(
+            ((rig.fsm.params.precision.target_timeout
+                + rig.fsm.params.precision.reacquire_timeout
+                + 0.1)
+                / DT)
+                .ceil() as usize,
+        );
+        assert_eq!(rig.fsm.state(), FlightState::Hold);
+        assert!(rig.state.position.z > 0.5);
+    }
+
+    #[test]
+    fn precision_contact_requires_imu_support_despite_odometry_drift() {
+        let mut rig = Rig::new();
+        rig.cmd(Command::Arm).unwrap();
+        rig.cmd(Command::Takeoff { altitude: 1. }).unwrap();
+        rig.ticks(1000);
+        let target = Vector3::new(rig.state.position.x, rig.state.position.y, 0.3);
+        rig.fsm.observe_landing_target(Some(target));
+        rig.cmd(Command::PrecisionLand).unwrap();
+        let mut health = ok_health();
+        health.landing_thrust_low = false;
+        for _ in 0..1500 {
+            rig.fsm.observe_landing_target(Some(target));
+            let out = rig.fsm.update(DT, &rig.state, None, health);
+            rig.state.position = out.setpoint.position;
+            rig.state.position.z = rig.state.position.z.max(target.z);
+            if rig.fsm.ground_contact_candidate(&rig.state) {
+                break;
+            }
+        }
+        assert!(rig.fsm.ground_contact_candidate(&rig.state));
+        rig.state.position += Vector3::new(0.2, 0., 0.1);
+        rig.state.velocity = Vector3::new(0.3, 0., 0.02);
+        health.landing_thrust_low = true;
+        health.landing_motion_low = false;
+        for _ in 0..150 {
+            rig.fsm.update(DT, &rig.state, None, health);
+        }
+        assert_eq!(rig.fsm.state(), FlightState::Land);
+        health.landing_motion_low = true;
+        for _ in 0..250 {
+            rig.fsm.update(DT, &rig.state, None, health);
+        }
+        assert_eq!(rig.fsm.state(), FlightState::Disarmed);
+    }
+
+    #[test]
+    fn precision_contact_uses_observed_platform_height() {
+        let mut rig = Rig::new();
+        rig.cmd(Command::Arm).unwrap();
+        rig.cmd(Command::Takeoff { altitude: 1. }).unwrap();
+        rig.ticks(1000);
+        let target = Vector3::new(rig.state.position.x, rig.state.position.y, 0.3);
+        rig.fsm.observe_landing_target(Some(target));
+        rig.cmd(Command::PrecisionLand).unwrap();
+        for _ in 0..1500 {
+            rig.fsm.observe_landing_target(Some(target));
+            let mut health = ok_health();
+            health.landing_thrust_low = rig.state.position.z <= target.z;
+            let out = rig.fsm.update(DT, &rig.state, None, health);
+            rig.state.position = out.setpoint.position;
+            rig.state.position.z = rig.state.position.z.max(target.z);
+            rig.state.velocity = Vector3::zeros();
+            if rig.fsm.state() == FlightState::Disarmed {
+                break;
+            }
+        }
+        assert_eq!(rig.fsm.state(), FlightState::Disarmed);
+        assert!((rig.state.position.z - target.z).abs() < 0.001);
+        assert!(rig.fsm.precision_stage().is_none());
+        assert_eq!(rig.cmd(Command::Arm), Ok(()));
+    }
+
     #[test]
     fn hold_setpoint_is_stationary() {
         let mut rig = Rig::new();

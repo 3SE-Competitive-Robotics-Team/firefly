@@ -45,6 +45,7 @@ use firefly_flight::{
 use firefly_pubsub::attitude::{ATTITUDE_TOPIC, AttitudeMessage};
 use firefly_pubsub::command::{COMMAND_TOPIC, CommandMessage, kind as command_kind};
 use firefly_pubsub::control::{CONTROL_BUFFER_SIZE, CONTROL_TOPIC, ControlMessage};
+use firefly_pubsub::landing::{LANDING_TARGET_TOPIC, LandingTargetMessage};
 use firefly_pubsub::node::{IpcNode, create_node};
 use firefly_pubsub::odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC, OdomMessage};
 use firefly_pubsub::plant::{
@@ -117,6 +118,7 @@ struct Estimate {
 /// 运行期输入快照（每 tick 排空到最新）。
 #[derive(Default)]
 struct Inputs {
+    landing: Option<(LandingTargetMessage, Instant)>,
     /// 真值评测样本；控制与健康判据不得读取。
     plant: Option<(PlantStateMessage, Instant)>,
     /// 机体/执行器（装配成 `firefly-flight` 的参数）。
@@ -137,6 +139,7 @@ struct Inputs {
 
 /// 控制输入、指令输出与评测端口。
 struct Ports {
+    landing: Subscriber<LandingTargetMessage>,
     plant: Subscriber<PlantStateMessage>,
     airframe: Subscriber<AirframeMessage>,
     odom: Subscriber<OdomMessage>,
@@ -151,6 +154,7 @@ struct Ports {
 impl Ports {
     fn open(node: &IpcNode) -> Result<Self, firefly_error::Error> {
         Ok(Self {
+            landing: Subscriber::with_topic(node, LANDING_TARGET_TOPIC)?,
             plant: Subscriber::with_topic_and_buffer(
                 node,
                 PLANT_STATE_TOPIC,
@@ -183,6 +187,15 @@ impl Ports {
     /// 非阻塞排空控制输入，保留每个话题的最新有效消息。
     #[allow(clippy::too_many_lines)]
     fn drain(&self, inputs: &mut Inputs) -> Result<(), firefly_error::Error> {
+        while let Some(sample) = self.landing.receive()? {
+            if sample.timestamp.is_finite()
+                && inputs
+                    .landing
+                    .is_none_or(|(old, _)| sample.timestamp > old.timestamp)
+            {
+                inputs.landing = Some((*sample, Instant::now()));
+            }
+        }
         while let Some(sample) = self.attitude.receive()? {
             inputs.primary.observe(*sample, Instant::now());
         }
@@ -306,6 +319,12 @@ fn health_of(inputs: &Inputs) -> Health {
         airframe_ready: inputs.vehicle.is_some(),
         attitude_session_ok: inputs.primary.session_ok(),
         landing_thrust_low: false,
+        landing_motion_low: inputs.attitude.is_some_and(|s| {
+            s.ready
+                && s.received.elapsed() <= IMU_STALE_LIMIT
+                && (s.specific_force - f64::from(firefly_flight::G)).abs() < 1.
+                && s.rate.norm() < 0.15
+        }),
         odometry_alive: inputs
             .estimate
             .is_some_and(|e| e.received_at.elapsed() <= ODOM_STALE_LIMIT),
@@ -348,6 +367,7 @@ fn command_of(msg: &CommandMessage) -> Option<Command> {
         command_kind::HOLD => Some(Command::Hold),
         command_kind::TRACK => Some(Command::Track),
         command_kind::LAND => Some(Command::Land),
+        command_kind::PRECISION_LAND => Some(Command::PrecisionLand),
         _ => None,
     }
 }
@@ -361,7 +381,7 @@ fn report_event(event: Event) {
             log::error!("失效保护：状态估计丢失：空中仅姿态稳定，地面上锁；无法保证保高或定点");
         }
         Event::FailsafeReferenceLost => {
-            log::warn!("失效保护：参考流失联 → 位置保持");
+            log::warn!("失效保护：参考流或降落目标失效 → 位置保持");
         }
     }
 }
@@ -387,6 +407,8 @@ impl CommandSequence {
 
 /// 控制环的跨 tick 状态。
 struct Controller {
+    team: u32,
+    landing_identity: Option<(u64, f64)>,
     /// 最近一次控制使用的姿态；所属航向系由 source 决定。
     attitude: UnitQuaternion<f32>,
     attitude_ready: bool,
@@ -418,6 +440,8 @@ struct Controller {
 impl Controller {
     fn new(fsm: FsmParams, params: Px4Params) -> Self {
         Self {
+            team: firefly_config::game::Team::Red.code(),
+            landing_identity: None,
             attitude: UnitQuaternion::identity(),
             attitude_ready: false,
             source: attitude::Source::Unavailable,
@@ -484,6 +508,7 @@ impl Controller {
                 .attitude
                 .is_some_and(|s| s.ready && s.received.elapsed() <= IMU_STALE_LIMIT);
         }
+        self.observe_landing(inputs);
         self.apply_command(inputs.command, command_health, &state);
         let reference = fresh_reference(inputs);
         let out = self.fsm.update(dt, &state, reference.as_ref(), health);
@@ -515,7 +540,7 @@ impl Controller {
                         &quad,
                         &airframe,
                         dt,
-                        self.fsm.on_ground(&state),
+                        self.fsm.ground_contact_candidate(&state),
                     )
                     .map_or(([0.0; 4], true), |m| (m, self.px4.saturated))
             };
@@ -523,6 +548,32 @@ impl Controller {
             self.px4.reset();
         }
         (motors, saturated)
+    }
+
+    fn observe_landing(&mut self, inputs: &Inputs) {
+        let landing = inputs.landing.and_then(|(message, received)| {
+            let age = inputs.imu_time - message.timestamp;
+            (message.valid == 1
+                && message.team == self.team
+                && received.elapsed() <= Duration::from_millis(250)
+                && (0.0..=0.25).contains(&age)
+                && message.reprojection_px.is_finite()
+                && (0.0..=2.).contains(&message.reprojection_px)
+                && message.confidence.is_finite()
+                && (0.5..=1.0).contains(&message.confidence)
+                && inputs
+                    .primary
+                    .latest
+                    .is_some_and(|primary| primary.message.session == message.session))
+            .then_some(Vector3::from(message.position).cast::<f32>())
+        });
+        let identity = inputs
+            .landing
+            .map(|(message, _)| (message.session, message.timestamp));
+        if landing.is_none() || identity != self.landing_identity {
+            self.fsm.observe_landing_target(landing);
+            self.landing_identity = identity;
+        }
     }
 
     /// 每 tick 发布控制；启动等待期的零推力允许仿真推进并产生初始化测量。
@@ -694,6 +745,19 @@ impl Controller {
             return;
         }
         self.last_viz = sim_time;
+        let precision = match self.fsm.precision_stage() {
+            None => 0.,
+            Some(firefly_flight::precision::PrecisionStage::Align) => 1.,
+            Some(firefly_flight::precision::PrecisionStage::Descend) => 2.,
+            Some(firefly_flight::precision::PrecisionStage::Final) => 3.,
+            Some(firefly_flight::precision::PrecisionStage::Reacquire) => 4.,
+        };
+        publish_scalars(
+            ports.viz_ref(),
+            sim_time,
+            "fc/debug/precision",
+            &[precision],
+        );
         publish_scalars(
             ports.viz_ref(),
             sim_time,
@@ -907,6 +971,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         firefly_observability::init,
         config::FcConfig::validate,
     )?;
+    let team = firefly_config::game::load()?.team.code();
     let period = Duration::from_secs_f64(1.0 / cfg.rate_hz);
     let dt = (1.0 / cfg.rate_hz) as f32;
 
@@ -932,6 +997,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut imu_count = 0u64;
     let mut inputs = Inputs::default();
     let mut controller = Controller::new(cfg.fsm, cfg.control);
+    controller.team = team;
     let mut stats = Stats::default();
     let mut window_start = Instant::now();
     let mut sim_time = 0.0f64;
@@ -1114,6 +1180,7 @@ mod tests {
                 rotation: UnitQuaternion::identity(),
                 rate: Vector3::zeros(),
                 raw_rate: Vector3::zeros(),
+                specific_force: f64::from(firefly_flight::G),
                 ready: true,
                 nis: 0.,
                 accel_accepted: false,
@@ -1130,6 +1197,20 @@ mod tests {
             }),
             ..Inputs::default()
         }
+    }
+
+    #[test]
+    fn contact_support_requires_fresh_gravity_force_and_low_rotation() {
+        let mut inputs = sensor_inputs();
+        assert!(health_of(&inputs).landing_motion_low);
+        inputs.attitude.as_mut().unwrap().specific_force = 0.;
+        assert!(!health_of(&inputs).landing_motion_low);
+        inputs.attitude.as_mut().unwrap().specific_force = f64::from(firefly_flight::G);
+        inputs.attitude.as_mut().unwrap().rate.x = 0.3;
+        assert!(!health_of(&inputs).landing_motion_low);
+        inputs.attitude.as_mut().unwrap().rate.x = 0.;
+        inputs.attitude.as_mut().unwrap().received -= IMU_STALE_LIMIT * 2;
+        assert!(!health_of(&inputs).landing_motion_low);
     }
 
     #[test]

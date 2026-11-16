@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from firefly_workspace import load_toml, parse_scene, workspace_root
+from firefly_workspace.game import load_team
 
 ROOT = workspace_root(Path(__file__))
 
@@ -44,10 +45,19 @@ PAD_CLEARANCE = 0.03
 
 @dataclass(frozen=True)
 class Scene:
-    """一个已注册的场地版本；`pad` 是起飞点 `(x, y, 场地表面高度)`，米。"""
+    """已注册场地；机库位置为 `(x, y, 支撑面高度)`，米。"""
 
     name: str
-    pad: tuple[float, float, float]
+    hangars: dict[str, tuple[float, float, float]]
+
+    def hangar(self, team: str) -> tuple[float, float, float]:
+        if team not in self.hangars:
+            raise ValueError("team 必须为 red 或 blue")
+        return self.hangars[team]
+
+    @property
+    def pad(self) -> tuple[float, float, float]:
+        return self.hangar(load_team())
 
     @property
     def id(self):
@@ -69,7 +79,11 @@ class Scene:
 
 #: 已接入的场地版本。新增版本：目录 `models/<赛季>/v<版本>/` 加一行。
 SCENES = {
-    "rmuc2027@1.0.0": Scene("rmuc2027@1.0.0", (-13.0, 0.0, 0.375)),
+    # CAD part=10，H 图案中心；板面 z=1.900，涂层 z=1.901。
+    "rmuc2027@1.0.0": Scene("rmuc2027@1.0.0", {
+        "red": (-1.032376, -1.032376, 1.9),
+        "blue": (1.032376, 1.032376, 1.9),
+    }),
 }
 
 
@@ -84,9 +98,9 @@ def resolve(name: str | None = None) -> Scene:
         ) from None
 
 
-def drone_pad(name: str | None = None) -> tuple[float, float, float]:
+def drone_pad(name: str | None = None, *, team: str | None = None) -> tuple[float, float, float]:
     """机体原点（世界系米）：场景停机坪表面加离地余量。"""
-    x, y, surface = resolve(name).pad
+    x, y, surface = resolve(name).hangar(team or load_team())
     return (x, y, surface + PAD_CLEARANCE)
 
 
@@ -130,37 +144,107 @@ def _rotor_actuators_xml() -> str:
   </actuator>"""
 
 
-def _collision_xml(asset_dir: Path, filename: str) -> str:
-    """聚合碰撞盒 MJCF（视觉归 Bevy，此处只放透明碰撞体）。
+# CAD part=10 的 z=1.900 甲板：旋转 45°、边长 0.4m、四角各切 0.04m。
+# |x|,|y| <= 0.25455844，|x±y| <= 0.28284271；坐标相对机库中心。
+_HANGAR_PLANES = (
+    (1.,0.,0.25455844),(-1.,0.,0.25455844),
+    (0.,1.,0.25455844),(0.,-1.,0.25455844),
+    (1.,1.,0.28284271),(1.,-1.,0.28284271),
+    (-1.,1.,0.28284271),(-1.,-1.,0.28284271),
+)
 
-    盒集合来自 `firefly-cad-collide`（实心体素 + 贪心 AABB，保留凹结构）。
-    """
-    path = asset_dir / filename
+
+def _polygon_area(points):
+    return abs(sum(a[0]*b[1]-a[1]*b[0] for a,b in zip(points,points[1:]+points[:1])))/2
+
+
+def _clip_polygon(points, nx, ny, bound):
+    """凸多边形与 nx*x+ny*y <= bound 的闭半平面相交。"""
+    if not points:
+        return []
+    output=[]
+    previous=points[-1]
+    before=nx*previous[0]+ny*previous[1]-bound
+    for current in points:
+        after=nx*current[0]+ny*current[1]-bound
+        if (before<=0)!=(after<=0):
+            fraction=before/(before-after)
+            output.append(tuple(previous[i]+fraction*(current[i]-previous[i]) for i in range(2)))
+        if after<=0:
+            output.append(current)
+        previous,before=current,after
+    return output
+
+
+def _cut_platform(polygon, low, high, x, y, surface):
+    """去掉真实八边形甲板上方的体素余量；其余体积保持不变。"""
+    original=[(polygon,low,high)]
+    if high<=surface:
+        return original,False
+    planes=[(nx,ny,d+nx*x+ny*y) for nx,ny,d in _HANGAR_PLANES]
+    intersection=polygon
+    for nx,ny,bound in planes:
+        intersection=_clip_polygon(intersection,nx,ny,bound)
+    if _polygon_area(intersection)<1e-10:
+        return original,False
+    pieces=[]
+    if low<surface:
+        pieces.append((polygon,low,surface))
+    remaining=polygon
+    for nx,ny,bound in planes:
+        outside=_clip_polygon(remaining,-nx,-ny,-bound)
+        if _polygon_area(outside)>1e-10:
+            pieces.append((outside,max(low,surface),high))
+        remaining=_clip_polygon(remaining,nx,ny,bound)
+    return pieces,True
+
+
+def _collision_xml(asset_dir: Path, filename: str, scene: Scene) -> tuple[str,str]:
+    """场地体素代理；甲板轮廓用凸棱柱差集保持 CAD 的支撑面。"""
+    path=asset_dir/filename
     if not path.is_file():
         raise FileNotFoundError(f"RMUC 碰撞资产缺失：{path}；请先运行 firefly-cad-build 生成资产")
-    report = json.loads(path.read_text(encoding="utf-8"))
+    report=json.loads(path.read_text(encoding="utf-8"))
     if not report["boxes"]:
         raise ValueError(f"RMUC 碰撞资产为空：{path}")
-    return "\n".join(
-        f'    <geom type="box" pos="{cx} {cy} {cz}" size="{hx} {hy} {hz}" rgba="0 0 0 0"/>'
-        for cx, cy, cz, hx, hy, hz in report["boxes"]
-    )
+    assets,geometries=[],[]
+    for cx,cy,cz,hx,hy,hz in report["boxes"]:
+        polygon=[(cx-hx,cy-hy),(cx+hx,cy-hy),(cx+hx,cy+hy),(cx-hx,cy+hy)]
+        pieces=[(polygon,cz-hz,cz+hz)]
+        changed=False
+        for x,y,surface in scene.hangars.values():
+            next_pieces=[]
+            for footprint,low,high in pieces:
+                clipped,cut=_cut_platform(footprint,low,high,x,y,surface)
+                next_pieces.extend(clipped);changed|=cut
+            pieces=next_pieces
+        if not changed:
+            geometries.append(f'    <geom type="box" pos="{cx} {cy} {cz}" size="{hx} {hy} {hz}" rgba="0 0 0 0"/>')
+            continue
+        for footprint,low,high in pieces:
+            name=f"hangar_cut_{len(assets)}"
+            vertices=" ".join(f"{px:.9g} {py:.9g} {z:.9g}" for z in (low,high) for px,py in footprint)
+            assets.append(f'<mesh name="{name}" vertex="{vertices}"/>')
+            geometries.append(f'    <geom type="mesh" mesh="{name}" rgba="0 0 0 0"/>')
+    return "\n".join(assets),"\n".join(geometries)
 
 
-def build_scene(*, name: str | None = None, asset_dir: Path | None = None) -> str:
-    """场地：Bevy 负责视觉（`field.glb`），MuJoCo 只加载聚合碰撞盒。"""
+def build_scene(*, name: str | None = None, asset_dir: Path | None = None, team: str | None = None) -> str:
+    """场地：Bevy 负责视觉（`field.glb`），MuJoCo 加载体素盒和甲板凸棱柱。"""
     scene = resolve(name)
     directory = asset_dir or scene.dir
-    collision = _collision_xml(directory, scene.id.collision)
+    selected_team = team or load_team()
+    collision_assets, collision = _collision_xml(directory, scene.id.collision, scene)
     return rf"""<mujoco model="firefly-{scene.id.season}">
   <option timestep="0.001" gravity="0 0 -9.81"/>
+  <asset>{collision_assets}</asset>
 
   <worldbody>
-    <!-- 视觉：Bevy 载 {scene.id.dir / "field.glb"}；物理只有下面的透明碰撞盒 -->
+    <!-- 视觉：Bevy 载 {scene.id.dir / "field.glb"}；物理使用下面的透明碰撞体 -->
 {collision}
 
     <!-- 无人机（freejoint 六自由度，停机坪上电） -->
-{_drone_xml("%g %g %g" % drone_pad(scene.name))}
+{_drone_xml("%.9g %.9g %.9g" % drone_pad(scene.name, team=selected_team))}
   </worldbody>
 
 {_rotor_actuators_xml()}

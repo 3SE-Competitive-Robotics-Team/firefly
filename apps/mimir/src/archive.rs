@@ -577,6 +577,7 @@ impl Archive {
         let side = match camera {
             0 => "left",
             1 => "right",
+            3 => "down",
             _ => return Err(invalid("camera id")),
         };
         let points = format!("cameras/{side}/points");

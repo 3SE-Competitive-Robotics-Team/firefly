@@ -1,7 +1,7 @@
-//! RMUC 视觉进程：订阅仿真位姿，渲染双目与深度，发布 IPC；调试展示由独立 mimir 承担。
+//! RMUC 视觉进程：订阅仿真位姿，渲染双目、下视与深度，发布 IPC；调试展示由独立 mimir 承担。
 //!
 //! sim 负责 `MuJoCo` 物理和 IMU；本进程从 `Firefly/GroundTruth` 摆放传感器，
-//! 发布 `Firefly/CameraLeft`、`Firefly/CameraRight`、`Firefly/Depth`，
+//! 发布 `Firefly/CameraLeft`、`Firefly/CameraRight`、`Firefly/CameraDown`、`Firefly/Depth`，
 //! 通过 `Firefly/CameraPair` 唤醒订阅端。真值只用于生成仿真测量。
 //! 视觉资产由 `configs/scene.toml` 选择。
 //!

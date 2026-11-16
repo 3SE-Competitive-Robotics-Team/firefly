@@ -35,7 +35,7 @@ Every observation change must include these steps in the same review:
 | Numeric diagnostics, enums and bit masks | Scalars plus named SeriesLines | Original measurement `sim_time`; preserve every row, including duplicate timestamps |
 | Poses, keypoints and maps | Transform3D, Points2D, VoxelGridMap | Explicit source coordinates; conversions belong to the display layer |
 | Process events | `logs/<app>` TextLog | `sim_time` if available, otherwise `wall_time` |
-| Stereo images | `cameras/{left,right}/image` Image | Lossless grayscale at capture time; business camera subscriptions are latest-value |
+| Camera images | `cameras/{left,right,down}/image` Image | Lossless grayscale at capture time; business camera subscriptions are latest-value |
 | Keypoints | `cameras/{left,right}/points` Points2D and `track_id` | Original image timestamp, IDs and detected count retained; display coordinates add half a pixel |
 | Configuration and calibration | `mimir/config`, static camera components | Only data constant for the recording is static |
 
@@ -59,6 +59,8 @@ This catalog covers all production topic constants; test topics use isolated nam
 | `Firefly/CorrectedOdometry` | VIO/localization → mimir, tools | Map-frame pose and trajectory |
 | `Firefly/VioAttitude` | VIO prediction → FC, mimir | Bias summary; control consumers remain independent |
 | `Firefly/CameraLeft`, `Firefly/CameraRight` | render/sensors → VIO, mimir | Lossless grayscale samples when images are enabled |
+| `Firefly/CameraDown` | render/camera → landing, mimir; OV2640 CIF 352×288, sensor id 3 | Latest-value 101400-byte grayscale input; lossless samples when images are enabled |
+| `Firefly/LandingTarget` | landing → FC, mimir, HIL uplink; odom-frame body contact position | Latest-value 64-byte message; capture time, VIO session, team and validity; recorded as `landing/target` and `landing/quality` |
 | `Firefly/CameraPair` | render → image consumers | Pair notification; image topics carry the recording |
 | `Firefly/Depth` | render/sensors → planner-owned EGO mapper | Planning input; voxel observations provide map display |
 | `Firefly/Imu` | sim/sensors → VIO, FC | Optional replay observations use the registered `vio/input/*` diagnostic gate |
@@ -101,9 +103,13 @@ of subsequent business events. Known loss makes the recording fail.
 | `vio/diagnostics/keypoints/active_left` | Additional associated-landmark overlay, only `vio-diagnostics=debug` |
 | `rootslam/*` | Stereo enqueue-to-posterior and IMU publishing timing |
 | `vio/odom`, `vio/traj`, `vio/map/{pose,traj}`, `vio/gyro_bias` | Local and map poses at measurement time, derived trajectories and IMU bias summary; original frames are retained |
+| `fc/debug/precision` | FC at its existing diagnostic cadence: 0 ordinary mode, 1 Align, 2 Descend, 3 Final, 4 Reacquire; one scalar; always recorded |
+| `landing/target`, `landing/quality` | Native landing observations, at most 10 Hz by default, four scalars per row; always recorded. Position xyz metres + valid; session/team/reprojection pixels/confidence. Session identity remains exact in the native u64 message; scalar session is display-only. |
+| `logs/landing` with `RUST_LOG=landing::gates=debug` | Optional per-inference corner/plane/position gate counts or missing capture-time odometry; at most configured 30 Hz, one bounded TextLog per inference, off by default |
+| `landing/vision` | Optional `landing.toml diagnostics=true`: detections/valid/reprojection pixels/processing milliseconds, four scalars per inference, at most the configured 30 Hz; disabled by default |
 | `render/capture/*` | Capture-to-publish stage timing at the original capture timestamp |
 | `hil/link`, `hil/board` | Host USB bridge: per-wall-second traffic counts and board freshness, stamped with the latest simulated IMU time; enabled during HIL, two rows per second |
-| `hil/camera/{left,right}` | Board camera bridge: capture timestamp, pixel checksum and dimensions for transport verification, one row per admitted image at its original capture time |
+| `hil/camera/{left,right,down}` | Board camera bridge: capture timestamp, pixel checksum and dimensions for transport verification, one row per admitted image at its original capture time |
 | `fc/debug/vertical_ned` | FC vertical velocity target/measurement, acceleration target and thrust target in NED, at the existing FC diagnostic cadence; retained for HIL and simulation control diagnosis |
 | `corr/*`, `vision/debug/map_query_wall_s` | External localization gates, disagreement, correction and query timing |
 | `plan/*` | Global guides, accepted executable local paths including their stopping tail, poses, obstacle planes and maps for display |

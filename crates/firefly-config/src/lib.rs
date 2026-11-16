@@ -4,6 +4,7 @@ use std::path::Path;
 
 use firefly_error::{Error, ErrorKind, Result};
 use serde::de::DeserializeOwned;
+pub mod game;
 
 /// 应用启动入口：初始化基础日志、读取并校验配置、报告来源。
 ///

@@ -14,6 +14,7 @@ use firefly_hil::gadget::endpoint_file_at;
 use firefly_hil::protocol::{Message, Stats};
 use firefly_pubsub::attitude::{ATTITUDE_TOPIC, AttitudeMessage};
 use firefly_pubsub::control::{CONTROL_BUFFER_SIZE, CONTROL_TOPIC, ControlMessage};
+use firefly_pubsub::landing::{LANDING_TARGET_TOPIC, LandingTargetMessage};
 use firefly_pubsub::log::{LOG_BUFFER_SIZE, LOG_MAX_PUBLISHERS, LOG_TOPIC, LogMessage};
 use firefly_pubsub::navigation::{NAVIGATION_TOPIC, NavigationMessage};
 use firefly_pubsub::node::{IpcNode, create_node};
@@ -46,6 +47,7 @@ struct Ports {
     reference: Subscriber<ReferenceMessage>,
     planner_status: Subscriber<PlannerStatusMessage>,
     navigation: Subscriber<NavigationMessage>,
+    landing: Subscriber<LandingTargetMessage>,
     geometry: Subscriber<VizMessage>,
     voxels: Subscriber<VoxelMessage>,
     scalar: Subscriber<ScalarMessage>,
@@ -73,6 +75,7 @@ fn open_ports(node: &IpcNode) -> Result<Ports, Box<dyn std::error::Error>> {
         reference: Subscriber::with_topic(node, REFERENCE_TOPIC)?,
         planner_status: Subscriber::with_topic(node, PLANNER_STATUS_TOPIC)?,
         navigation: Subscriber::with_topic(node, NAVIGATION_TOPIC)?,
+        landing: Subscriber::with_topic(node, LANDING_TARGET_TOPIC)?,
         geometry: Subscriber::with_options(
             node,
             VIZ_TOPIC,
@@ -132,6 +135,14 @@ fn forward(
         firefly_observability::pump_log_ipc(log_ipc);
         let mut wrote = drain_control(&mut writer, &ports.control, &mut stats)?;
         wrote |= drain_state(&mut writer, ports, &mut stats)?;
+        while let Some(sample) = ports.landing.receive()? {
+            wrote |= write_telemetry(
+                &mut writer,
+                &ports.control,
+                &Message::LandingTarget(*sample),
+                &mut stats,
+            )?;
+        }
         while let Ok(Some(sample)) = ports.geometry.receive() {
             observe_sequence(
                 &mut geometry_sequences,

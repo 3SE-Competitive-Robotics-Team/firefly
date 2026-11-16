@@ -1,0 +1,4 @@
+# OV2640 CIF 352×288 下视图像，网络 NCHW 输入为 [1, 3, 288, 352]。
+# 默认使用 models/h-marker-yolo26n-cif-v1/manifest.json。
+# 生产后端 VSINPU 要求与驱动匹配的自编译 ONNX Runtime / TIM-VX。
+# 字段与默认值见 apps/landing/src/main.rs。

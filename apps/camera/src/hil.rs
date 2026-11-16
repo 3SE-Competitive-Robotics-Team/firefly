@@ -48,6 +48,7 @@ struct Ports {
     left: Publisher<GrayImageMessage>,
     right: Publisher<GrayImageMessage>,
     depth: Publisher<DepthImageMessage>,
+    down: Publisher<firefly_pubsub::camera::DownImageMessage>,
     airframe: Publisher<AirframeMessage>,
     command: Publisher<CommandMessage>,
     goal: Publisher<GoalMessage>,
@@ -64,6 +65,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "camera");
     let ports = Ports {
+        down: Publisher::with_topic(&node, firefly_pubsub::camera::CAMERA_DOWN_TOPIC)?,
         imu: Publisher::with_topic_and_buffer(&node, IMU_TOPIC, Some(IMU_SUBSCRIPTION_MAX))?,
         imu_notify: TopicNotifier::with_topic(&node, IMU_TOPIC)?,
         left: Publisher::with_topic_and_buffer(&node, CAMERA_LEFT_TOPIC, Some(IMAGE_SUBSCRIPTION))?,
@@ -242,6 +244,31 @@ fn publish_assembled(
                     }
                 }
             })?;
+        }
+        3 => {
+            use firefly_pubsub::camera::{DOWN_HEIGHT, DOWN_SENSOR_ID, DOWN_SIZE, DOWN_WIDTH};
+            if total != DOWN_SIZE {
+                return Err("down image chunk length mismatch".into());
+            }
+            let mut sum = 0_u64;
+            ports.down.publish_with(|message| {
+                message.timestamp = timestamp;
+                message.sensor_id = DOWN_SENSOR_ID;
+                message.width = DOWN_WIDTH as u32;
+                message.height = DOWN_HEIGHT as u32;
+                let mut offset = 0;
+                for body in chunks.iter().flatten() {
+                    let payload = &body[IMAGE_CHUNK_HEADER_LEN..];
+                    let end = offset + payload.len();
+                    message.data[offset..end].copy_from_slice(payload);
+                    offset = end;
+                    sum += payload.iter().map(|&v| u64::from(v)).sum::<u64>();
+                }
+            })?;
+            let mut scalar = ScalarMessage::base(timestamp, "hil/camera/down");
+            scalar.scalar_count = 4;
+            scalar.scalars = [timestamp, sum as f64, DOWN_WIDTH as f64, DOWN_HEIGHT as f64];
+            ports.scalars.publish(scalar)?;
         }
         other => log::warn!("未知图像传感器 {other}"),
     }

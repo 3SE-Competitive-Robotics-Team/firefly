@@ -80,6 +80,10 @@ fn load_session(model: &std::path::Path) -> Result<Session, Box<dyn std::error::
         )
         .into());
     }
+    #[cfg(target_os = "linux")]
+    let environment =
+        ort::init_from(firefly_config::paths::models("npu/libonnxruntime.so"))?.build()?;
+    #[cfg(not(target_os = "linux"))]
     let environment = ort::init().build()?;
     let session = Session::builder(&environment)?
         .with_intra_threads(6)?

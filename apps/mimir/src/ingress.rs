@@ -11,7 +11,11 @@ use std::time::{Duration, Instant};
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_pubsub::{
     attitude::{ATTITUDE_TOPIC, AttitudeMessage},
-    camera::{CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, GrayImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH},
+    camera::{
+        CAMERA_DOWN_TOPIC, CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DOWN_HEIGHT, DOWN_SENSOR_ID,
+        DOWN_WIDTH, DownImageMessage, GrayImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH,
+    },
+    landing::{LANDING_TARGET_TOPIC, LandingTargetMessage},
     log::{LOG_BUFFER_SIZE, LOG_MAX_PUBLISHERS, LOG_TOPIC, LogMessage},
     navigation::{NAVIGATION_TOPIC, NavigationMessage},
     node::{IpcNode, create_node},
@@ -38,7 +42,9 @@ enum Event {
     Odom(&'static str, OdomMessage),
     Navigation(Box<NavigationMessage>),
     Attitude(AttitudeMessage),
+    Landing(LandingTargetMessage),
     Image(Box<GrayImageMessage>),
+    Down(Box<DownImageMessage>),
 }
 
 impl Event {
@@ -49,6 +55,7 @@ impl Event {
                 Self::Voxel(_) => size_of::<VoxelMessage>(),
                 Self::Log(_) => size_of::<LogMessage>(),
                 Self::Image(_) => size_of::<GrayImageMessage>(),
+                Self::Down(_) => size_of::<DownImageMessage>(),
                 Self::Navigation(_) => size_of::<NavigationMessage>(),
                 _ => 0,
             }
@@ -105,7 +112,42 @@ impl Event {
                 )
             }
             Self::Navigation(msg) => archive.navigation(*msg),
+            Self::Landing(msg) => {
+                archive.scalar(
+                    "landing/target",
+                    msg.timestamp,
+                    &[
+                        msg.position[0],
+                        msg.position[1],
+                        msg.position[2],
+                        f64::from(msg.valid),
+                    ],
+                )?;
+                archive.scalar(
+                    "landing/quality",
+                    msg.timestamp,
+                    &[
+                        msg.session as f64,
+                        f64::from(msg.team),
+                        msg.reprojection_px,
+                        msg.confidence,
+                    ],
+                )
+            }
             Self::Attitude(msg) => archive.scalar("vio/gyro_bias", msg.timestamp, &msg.gyro_bias),
+            Self::Down(msg) => {
+                if msg.width as usize != DOWN_WIDTH
+                    || msg.height as usize != DOWN_HEIGHT
+                    || msg.sensor_id != DOWN_SENSOR_ID
+                {
+                    return Err(invalid("down camera dimensions/id"));
+                }
+                archive.image(
+                    DOWN_SENSOR_ID as usize,
+                    msg.timestamp,
+                    &rr::Image::from_l8(msg.data.to_vec(), [msg.width, msg.height]),
+                )
+            }
             Self::Image(msg) => {
                 if msg.width as usize != IMAGE_WIDTH || msg.height as usize != IMAGE_HEIGHT {
                     return Err(invalid("camera dimensions"));
@@ -199,6 +241,7 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
     let gt = Subscriber::<OdomMessage>::with_topic(&node, GROUND_TRUTH_TOPIC)?;
     let map = Subscriber::<OdomMessage>::with_topic(&node, CORRECTED_ODOM_TOPIC)?;
     let navigation = Subscriber::<NavigationMessage>::with_topic(&node, NAVIGATION_TOPIC)?;
+    let landing = Subscriber::<LandingTargetMessage>::with_topic(&node, LANDING_TARGET_TOPIC)?;
     let attitude = Subscriber::<AttitudeMessage>::with_topic(&node, ATTITUDE_TOPIC)?;
     let cameras = if options.images {
         vec![
@@ -207,6 +250,14 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
         ]
     } else {
         Vec::new()
+    };
+    let down = if options.images {
+        Some(Subscriber::<DownImageMessage>::with_topic(
+            &node,
+            CAMERA_DOWN_TOPIC,
+        )?)
+    } else {
+        None
     };
     let mut continuity = Continuity::default();
     let mut last_attitude = f64::NEG_INFINITY;
@@ -284,10 +335,18 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
             last_attitude = sample.timestamp;
             sender.send(Event::Attitude(*sample))?;
         }
+        if let Some(sample) = landing.receive()? {
+            sender.send(Event::Landing(*sample))?;
+        }
         for subscriber in &cameras {
             if let Some(sample) = subscriber.receive()? {
                 sender.send(Event::Image(Box::new(*sample)))?;
             }
+        }
+        if let Some(subscriber) = &down
+            && let Some(sample) = subscriber.receive()?
+        {
+            sender.send(Event::Down(Box::new(*sample)))?;
         }
         if stopping && !received_diagnostics {
             break;

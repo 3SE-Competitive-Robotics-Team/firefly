@@ -1,6 +1,6 @@
 # firefly-camera 配置；缺键回落代码默认值（apps/camera/src/capture.rs）。
 # 设备节点随内核与接线变化，上板先核对：v4l2-ctl --list-devices。
-# 板载相机走 MIPI-CSI（docs/hw/spec.md），在 Linux 上表现为 /dev/videoN。
+# 双目与下视均通过 V4L2 节点采集；OV2640 的 DVP 接口需要适配的采集桥。
 
 [left]
 device = "/dev/video0"
@@ -11,3 +11,8 @@ device = "/dev/video1"
 # 深度可选：删掉这一节就不发布 Firefly/Depth，planner 按无深度源等待。
 [depth]
 device = "/dev/video2"
+
+# OV2640 CIF 352×288，内核/桥接驱动须提供 YUYV 与单调采集时间戳。
+[down]
+device = "/dev/video3"
+format = "yuyv"

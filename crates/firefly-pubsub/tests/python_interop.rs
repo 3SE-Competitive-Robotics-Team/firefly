@@ -12,6 +12,7 @@ use firefly_pubsub::subscriber::Subscriber;
 #[test]
 #[ignore = "requires FIREFLY_TEST_PYTHON pointing to the synced workspace Python"]
 fn viz_python_layout_matches_rust_offsets_and_sizes() {
+    use firefly_pubsub::landing::LandingTargetMessage;
     use firefly_pubsub::log::LogMessage;
     use firefly_pubsub::trajectory::PlannerStatusMessage;
     use firefly_pubsub::viz::{SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage};
@@ -21,13 +22,14 @@ fn viz_python_layout_matches_rust_offsets_and_sizes() {
     let script = r"
 import ctypes
 from firefly_mujoco.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage
-from firefly_mujoco.messages import PlannerStatusMessage
+from firefly_mujoco.messages import PlannerStatusMessage, LandingTargetMessage
 from firefly_mujoco import LogMessage
 for cls, fields in [
     (ScalarMessage, ['timestamp', 'scalars', 'sequence']),
     (VizMessage, ['timestamp', 'points', 'sequence']),
     (VoxelMessage, ['voxels', 'sequence', 'chunk_index', 'chunk_count']),
     (PlannerStatusMessage, ['timestamp', 'goal_timestamp', 'finished']),
+    (LandingTargetMessage, ['timestamp', 'session', 'position', 'confidence', 'team', 'valid']),
     (LogMessage, ['sim_time', 'sequence', 'dropped_records']),
 ]:
     print(ctypes.sizeof(cls), *(getattr(cls, name).offset for name in fields))
@@ -64,6 +66,13 @@ print(SCALAR_BUFFER_SIZE)
             offset_of!(PlannerStatusMessage, timestamp),
             offset_of!(PlannerStatusMessage, goal_timestamp),
             offset_of!(PlannerStatusMessage, finished),
+            size_of::<LandingTargetMessage>(),
+            offset_of!(LandingTargetMessage, timestamp),
+            offset_of!(LandingTargetMessage, session),
+            offset_of!(LandingTargetMessage, position),
+            offset_of!(LandingTargetMessage, confidence),
+            offset_of!(LandingTargetMessage, team),
+            offset_of!(LandingTargetMessage, valid),
             size_of::<LogMessage>(),
             offset_of!(LogMessage, sim_time),
             offset_of!(LogMessage, sequence),
@@ -110,6 +119,72 @@ while time.monotonic() < deadline:
         sent = True
 raise RuntimeError('IPC roundtrip timed out')
 ";
+
+#[test]
+#[ignore = "requires FIREFLY_TEST_PYTHON pointing to the synced workspace Python"]
+fn cif_down_image_roundtrip_preserves_every_pixel_and_dimensions() {
+    use firefly_pubsub::camera::{DOWN_HEIGHT, DOWN_SENSOR_ID, DOWN_WIDTH, DownImageMessage};
+    let python = std::env::var("FIREFLY_TEST_PYTHON").expect("workspace Python path");
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let request = format!("Firefly/Test/Interop/Down/{unique}/Request");
+    let response = format!("Firefly/Test/Interop/Down/{unique}/Response");
+    let node = create_node().unwrap();
+    let publisher = Publisher::<DownImageMessage>::with_topic(&node, &request).unwrap();
+    let subscriber = Subscriber::<DownImageMessage>::with_topic(&node, &response).unwrap();
+    let peer = PEER.replace("OdomMessage", "DownImageMessage")
+        .replace("assert msg.timestamp == 12.5 and msg.position_x == 2.5", "assert msg.timestamp == 12.5 and (msg.width, msg.height, msg.sensor_id) == (352, 288, 3)")
+        .replace("assert msg.velocity_y == -3.25 and msg.is_initialized", "assert bytes(msg.data) == bytes(range(256)) * 396");
+    let mut child = Command::new(python)
+        .args(["-c", &peer, &request, &response])
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut received = false;
+    while Instant::now() < deadline {
+        publisher
+            .publish_with(|message| {
+                message.timestamp = if received { 14.5 } else { 12.5 };
+                message.width = DOWN_WIDTH as u32;
+                message.height = DOWN_HEIGHT as u32;
+                message.sensor_id = DOWN_SENSOR_ID;
+                for (index, pixel) in message.data.iter_mut().enumerate() {
+                    *pixel = (index % 256) as u8;
+                }
+            })
+            .unwrap();
+        if let Some(sample) = subscriber.receive().unwrap() {
+            assert_eq!(
+                (sample.width, sample.height, sample.sensor_id),
+                (352, 288, 3)
+            );
+            assert_eq!(sample.timestamp, 13.5);
+            assert!(
+                sample
+                    .data
+                    .iter()
+                    .enumerate()
+                    .all(|(index, &pixel)| pixel == (index % 256) as u8)
+            );
+            received = true;
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if child.try_wait().unwrap().is_none() {
+        child.kill().unwrap();
+    }
+    assert!(
+        child.wait().unwrap().success(),
+        "Python CIF peer failed or timed out"
+    );
+    assert!(received, "CIF reply missing");
+}
 
 #[test]
 #[ignore = "requires FIREFLY_TEST_PYTHON pointing to the synced workspace Python"]

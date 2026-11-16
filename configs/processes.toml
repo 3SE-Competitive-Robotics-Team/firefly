@@ -24,6 +24,11 @@ command = ["bin/fc"]
 autostart = true
 
 [[process]]
+name = "landing"
+command = ["bin/landing"]
+autostart = false
+
+[[process]]
 name = "localization"
 command = ["bin/localization"]
 autostart = false

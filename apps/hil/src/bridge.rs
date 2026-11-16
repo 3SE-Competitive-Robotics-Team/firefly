@@ -19,12 +19,14 @@ use firefly_hil::protocol::{
 };
 use firefly_pubsub::attitude::{ATTITUDE_TOPIC, AttitudeMessage};
 use firefly_pubsub::camera::{
-    CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DEPTH_TOPIC, DepthImageMessage, GrayImageMessage,
+    CAMERA_DOWN_TOPIC, CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DEPTH_TOPIC, DepthImageMessage,
+    DownImageMessage, GrayImageMessage,
 };
 use firefly_pubsub::command::{COMMAND_TOPIC, CommandMessage};
 use firefly_pubsub::control::{CONTROL_BUFFER_SIZE, CONTROL_TOPIC, ControlMessage};
 use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
 use firefly_pubsub::imu::{IMU_TOPIC, ImuMessage};
+use firefly_pubsub::landing::{LANDING_TARGET_TOPIC, LandingTargetMessage};
 use firefly_pubsub::log::{LOG_BUFFER_SIZE, LOG_MAX_PUBLISHERS, LOG_TOPIC, LogMessage};
 use firefly_pubsub::navigation::{NAVIGATION_TOPIC, NavigationMessage};
 use firefly_pubsub::node::{IpcNode, create_node};
@@ -62,6 +64,7 @@ struct Downlink {
     left: Subscriber<GrayImageMessage>,
     right: Subscriber<GrayImageMessage>,
     depth: Subscriber<DepthImageMessage>,
+    down: Subscriber<DownImageMessage>,
     airframe: Subscriber<AirframeMessage>,
     command: Subscriber<CommandMessage>,
     goal: Subscriber<GoalMessage>,
@@ -75,6 +78,7 @@ struct Uplink {
     reference: Publisher<ReferenceMessage>,
     planner_status: Publisher<PlannerStatusMessage>,
     navigation: Publisher<NavigationMessage>,
+    landing: Publisher<LandingTargetMessage>,
     geometry: Publisher<VizMessage>,
     voxels: Publisher<VoxelMessage>,
     scalar: Publisher<ScalarMessage>,
@@ -85,6 +89,7 @@ struct Uplink {
 enum ImageBatch {
     Stereo(Box<GrayImageMessage>, Box<GrayImageMessage>),
     Depth(Box<DepthImageMessage>),
+    Down(Box<DownImageMessage>),
 }
 
 /// A worker finishing or unwinding ends the shared bridge session.
@@ -148,6 +153,7 @@ pub fn run(config: &Config) -> Result<(), String> {
 
 fn open_ports(node: &IpcNode) -> Result<(Downlink, Uplink), String> {
     let down = Downlink {
+        down: Subscriber::with_topic(node, CAMERA_DOWN_TOPIC).map_err(|e| e.to_string())?,
         imu: Subscriber::with_options(
             node,
             IMU_TOPIC,
@@ -197,6 +203,7 @@ fn open_ports(node: &IpcNode) -> Result<(Downlink, Uplink), String> {
         .map_err(|error| error.to_string())?,
     };
     let up = Uplink {
+        landing: Publisher::with_topic(node, LANDING_TARGET_TOPIC).map_err(|e| e.to_string())?,
         control: Publisher::with_topic_and_buffer(node, CONTROL_TOPIC, Some(CONTROL_BUFFER_SIZE))
             .map_err(|error| error.to_string())?,
         odom: Publisher::with_topic(node, ODOM_TOPIC).map_err(|error| error.to_string())?,
@@ -313,6 +320,15 @@ fn write_image(
             }
             Ok(())
         }
+        ImageBatch::Down(image) => write_chunks(
+            writer,
+            priority,
+            image.timestamp,
+            3,
+            &image.data,
+            next_image_id,
+            stop,
+        ),
         ImageBatch::Depth(image) => {
             let mut raw = Vec::with_capacity(image.data.len() * 4);
             for value in image.data {
@@ -413,6 +429,8 @@ fn ipc_loop(
     let mut pending_left: Option<GrayImageMessage> = None;
     let mut pending_right: Option<GrayImageMessage> = None;
     let mut pending_depth: Option<DepthImageMessage> = None;
+    let mut pending_down = None;
+    let mut down_deadline = Instant::now() + image_period;
     let mut last_imu_stamp = f64::NAN;
     let mut last_image_stamp = f64::NAN;
     let mut last_timestamp_log = Instant::now();
@@ -468,6 +486,20 @@ fn ipc_loop(
         while let Ok(Some(sample)) = down.right.receive() {
             pending_right = Some(*sample.payload());
             activity = true;
+        }
+        while let Ok(Some(sample)) = down.down.receive() {
+            pending_down = Some(Box::new(*sample));
+            activity = true;
+        }
+        if Instant::now() >= down_deadline {
+            if let Some(image) = pending_down.take() {
+                let stamp = image.timestamp;
+                let sum = image.data.iter().map(|&pixel| u64::from(pixel)).sum();
+                if try_image(image_tx, ImageBatch::Down(image), &mut stats)? {
+                    record_checksum(&mut stats, 3, stamp, sum);
+                }
+            }
+            down_deadline = next_image_deadline(down_deadline, Instant::now(), image_period);
         }
         while let Ok(Some(sample)) = down.depth.receive() {
             pending_depth = Some(*sample.payload());
@@ -541,14 +573,14 @@ fn send_blocking(tx: &SyncSender<Message>, message: Message) -> Result<(), Strin
 
 fn record_image_checksum(stats: &mut StatsCounters, image: &GrayImageMessage) {
     let sum: u64 = image.data.iter().map(|&pixel| u64::from(pixel)).sum();
+    record_checksum(stats, u8::from(image.sensor_id != 0), image.timestamp, sum);
+}
+
+fn record_checksum(stats: &mut StatsCounters, side: u8, stamp: f64, sum: u64) {
     if stats.sent_images.len() >= 64 {
         stats.sent_images.pop_front();
     }
-    stats.sent_images.push_back((
-        u8::from(image.sensor_id != 0),
-        image.timestamp.to_bits(),
-        sum,
-    ));
+    stats.sent_images.push_back((side, stamp.to_bits(), sum));
 }
 
 /// 板端回传的像素和必须与主机下发的完全一致；不一致说明 USB 传输损坏。
@@ -562,6 +594,7 @@ fn check_image_checksum(stats: &mut StatsCounters, scalar: &ScalarMessage) {
         .and_then(|side| match side {
             "left" => Some(0_u8),
             "right" => Some(1_u8),
+            "down" => Some(3_u8),
             _ => None,
         })
     else {
@@ -616,7 +649,7 @@ fn try_image(
 ) -> Result<bool, String> {
     let image_count = match message {
         ImageBatch::Stereo(..) => 2,
-        ImageBatch::Depth(_) => 1,
+        ImageBatch::Depth(_) | ImageBatch::Down(_) => 1,
     };
     match tx.try_send(message) {
         Ok(()) => Ok(true),
@@ -722,6 +755,10 @@ fn dispatch_uplink(
                 .planner_status
                 .publish(planner)
                 .map_err(|error| format!("publish planner status: {error}"))?;
+            stats.telemetry += 1;
+        }
+        Message::LandingTarget(target) => {
+            ports.landing.publish(target).map_err(|e| e.to_string())?;
             stats.telemetry += 1;
         }
         Message::Navigation(navigation) => {
