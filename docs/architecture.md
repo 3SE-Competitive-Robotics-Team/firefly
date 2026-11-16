@@ -44,13 +44,12 @@ planner 的状态、目标、占据地图和轨迹都属于 odom。可选 Naviga
 `apps/rootslam` 的统一入口通过 `input::Source` 选择 IPC 或
 LaMAria/EuRoC/UZH/KITTI 文件源。适配器提供相机模型、传感器外参、噪声与时钟转换，
 保留原始图像尺寸，并将 `OpticalFlowInput`、`ImuData` 交给同一 Basalt 实现。
-`firefly-calibration` 维护相机、图像、标定与初始化基础设施；
-`firefly-basalt` 维护光流、IMU 预积分、局部 VO/VIO、边缘化、mapper 与标定求解。
+`firefly-calibration` 维护相机模型、图像、标定参数及其文件格式与公共样条；
+`firefly-basalt` 维护光流、IMU 预积分、局部 VO/VIO、边缘化与 mapper。
 
 估计器查询区分完整状态与仅位姿帧：`state_at` 只返回窗口内保留的完整位置、速度和偏置，
 `pose_at` 同时支持完整状态和仅位姿帧；不存在的条目返回 `None`。
-`collect_poses` 分配当前局部窗口的位姿快照。相机标定的位姿查询同样显式表达缺失，
-重投影仅处理已初始化位姿的帧。
+`collect_poses` 分配当前局部窗口的位姿快照。
 
 `firefly-rootslam-mapping` 维护持久稀疏地图、地点检索、几何验证、路标融合、
 PGO 和平方根全局 BA。在线默认运行局部 VIO。数据集示例启用持久地图和回环，

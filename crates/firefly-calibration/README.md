@@ -1,7 +1,7 @@
 # firefly-calibration
 
-Shared calibration primitives: camera models, image buffers, calibration data,
-AprilGrid observations, initialization, and Euclidean splines.
+Shared primitives: camera models, image buffers, calibration data,
+frame/camera identifiers, and Euclidean splines.
 
 ## References
 

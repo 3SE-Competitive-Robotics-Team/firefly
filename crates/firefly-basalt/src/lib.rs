@@ -1,6 +1,5 @@
 //! Rust translations of upstream Basalt, preserving source-file boundaries.
 
-pub mod calibration;
 pub mod hash_bow;
 pub mod image;
 pub mod imu;
@@ -15,7 +14,6 @@ pub mod optical_flow;
 pub mod optimization;
 pub mod serialization;
 pub mod spline;
-pub mod thirdparty;
 pub mod time_alignment;
 pub mod utils;
 pub mod vi_estimator;

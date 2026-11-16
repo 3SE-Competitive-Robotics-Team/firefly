@@ -1,15 +1,10 @@
-//! Original Basalt headless calibration, alignment and evaluation entry points.
-use firefly_basalt::{
-    calibration::{cam_calib::CamCalib, cam_imu_calib::CamImuCalib},
-    io::dataset_io::DatasetIoFactory,
-    kitti_eval, time_alignment,
-};
+//! Original Basalt headless alignment, mapping and evaluation entry points.
+use firefly_basalt::{io::dataset_io::DatasetIoFactory, kitti_eval, time_alignment};
 use firefly_calibration::calibration::Calibration;
 use firefly_calibration::calibration::MocapCalibration;
 use firefly_error::{Error, ErrorKind, Result};
 use serde::Deserialize;
 use std::{
-    collections::BTreeMap,
     fs::File,
     io::{BufReader, BufWriter, Write},
     path::PathBuf,
@@ -74,17 +69,6 @@ enum Options {
         #[serde(default = "max_offset")]
         max_offset_s: f64,
     },
-    Calibrate {
-        #[serde(flatten)]
-        input: CalibrationInput,
-        camera_types: Vec<String>,
-    },
-    CalibrateImu {
-        #[serde(flatten)]
-        input: CalibrationInput,
-        #[serde(default = "imu_noise")]
-        imu_noise: [f64; 4],
-    },
 }
 #[derive(Deserialize)]
 struct SimulationInput {
@@ -103,16 +87,6 @@ struct SimulationInput {
     marg_data: Option<PathBuf>,
     result_path: Option<PathBuf>,
 }
-#[derive(Deserialize)]
-struct CalibrationInput {
-    dataset_path: PathBuf,
-    dataset_type: String,
-    aprilgrid: PathBuf,
-    result_path: PathBuf,
-    cache_name: Option<String>,
-    #[serde(default = "skip_images")]
-    skip_images: usize,
-}
 fn max_offset() -> f64 {
     10.
 }
@@ -124,12 +98,6 @@ fn simulation_distance() -> f64 {
 }
 fn enabled() -> bool {
     true
-}
-fn skip_images() -> usize {
-    1
-}
-fn imu_noise() -> [f64; 4] {
-    [0.016, 0.000_282, 0.001, 0.0001]
 }
 fn invalid(message: &str) -> Error {
     Error::new(ErrorKind::InvalidArgument, message).with_operation("basalt.tools")
@@ -178,15 +146,6 @@ fn load<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T> {
 }
 impl Options {
     fn validate(&self) -> Result<()> {
-        if let Self::CalibrateImu { imu_noise, .. } = self
-            && imu_noise
-                .iter()
-                .any(|value| !value.is_finite() || *value <= 0.)
-        {
-            return Err(invalid(
-                "IMU noise and random-walk standard deviations must be finite and positive",
-            ));
-        }
         match self {
             Self::GlobalBa {
                 max_iterations: Some(0),
@@ -222,11 +181,6 @@ impl Options {
                     ));
                 }
             }
-            Self::Calibrate { input, .. } | Self::CalibrateImu { input, .. } => {
-                if input.skip_images == 0 || i32::try_from(input.skip_images).is_err() {
-                    return Err(invalid("skip_images must be positive and fit i32"));
-                }
-            }
             Self::GlobalBa { .. }
             | Self::Mapper { .. }
             | Self::OptFlow { .. }
@@ -236,10 +190,6 @@ impl Options {
         }
         Ok(())
     }
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Dispatch over the supported offline tasks"
-    )]
     fn run(&self) -> Result<()> {
         match self {
             Self::Mapper {
@@ -336,11 +286,6 @@ impl Options {
                     mocap.as_ref(),
                 )
             }
-            Self::Calibrate {
-                input,
-                camera_types,
-            } => input.calibrate(camera_types),
-            Self::CalibrateImu { input, imu_noise } => input.calibrate_imu(*imu_noise),
         }
     }
 }
@@ -646,60 +591,11 @@ fn run_simulation(input: &SimulationInput) -> Result<()> {
     }
     writer.flush().map_err(io_error)
 }
-impl CalibrationInput {
-    fn calibrate(&self, camera_types: &[String]) -> Result<()> {
-        let mut controller = CamCalib::new(
-            &self.dataset_path,
-            &self.dataset_type,
-            &self.aprilgrid,
-            &self.result_path,
-            self.cache_name.as_deref().unwrap_or("calib-cam"),
-            i32::try_from(self.skip_images).map_err(|_| invalid("skip_images exceeds i32"))?,
-            camera_types.to_vec(),
-        )?;
-        controller.load_dataset()?;
-        controller.detect_corners()?;
-        controller.init_cam_intrinsics()?;
-        controller.init_cam_poses()?;
-        controller.init_cam_extrinsics()?;
-        controller.init_optimization()?;
-        while !controller.optimize_with_param(true, None)? {}
-        controller.compute_vign()?;
-        controller.save_calib()
-    }
-    fn calibrate_imu(&self, imu_noise: [f64; 4]) -> Result<()> {
-        let cache_name = self.cache_name.as_deref().unwrap_or("calib-cam-imu");
-        let mut controller = CamImuCalib::load_dataset(
-            &self.dataset_path,
-            &self.dataset_type,
-            &self.aprilgrid,
-            &self.result_path,
-            cache_name,
-            self.skip_images,
-            imu_noise,
-        )?;
-        controller.detect_corners()?;
-        controller.init_cam_poses()?;
-        controller.save_preprocessing(&self.result_path, cache_name)?;
-        controller.init_cam_imu_transform()?;
-        controller.init_optimization()?;
-        let mut stats = BTreeMap::new();
-        while !controller.optimize_with_param(true, &mut stats) {}
-        controller.options.opt_cam_time_offset = true;
-        controller.options.opt_imu_scale = true;
-        while !controller.optimize_with_param(true, &mut stats) {}
-        controller.init_mocap()?;
-        controller.options.use_mocap = true;
-        while !controller.optimize_with_param(true, &mut stats) {}
-        controller.save_calib(&self.result_path)?;
-        controller.save_mocap_calib(&self.result_path)
-    }
-}
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let first = args.next();
     if first.as_deref() == Some("--help") || first.as_deref() == Some("-h") {
-        writeln!(std::io::stdout(),"firefly-basalt-tools --config <path.toml>\nTasks: kitti-eval, time-align, calibrate, calibrate-imu, vio-sim, mapper, mapper-sim, mapper-sim-naive, opt-flow, global-ba").map_err(io_error)?;
+        writeln!(std::io::stdout(),"firefly-basalt-tools --config <path.toml>\nTasks: kitti-eval, time-align, vio-sim, mapper, mapper-sim, mapper-sim-naive, opt-flow, global-ba").map_err(io_error)?;
         return Ok(());
     }
     if first.as_deref() != Some("--config") {
@@ -873,30 +769,13 @@ mod tests {
     }
 
     #[test]
-    fn zero_imu_noise_is_rejected_before_optimizer_construction() {
-        let options: Options = serde_json::from_value(serde_json::json!({
-            "task":"calibrate-imu", "dataset_path":"dataset", "dataset_type":"euroc",
-            "aprilgrid":"grid.json", "result_path":"calibration",
-            "imu_noise":[0.,0.000_282,0.001,0.0001]
-        }))
-        .unwrap();
-        assert!(options.validate().is_err());
-    }
-
-    #[test]
-    fn calibration_configuration_reaches_original_defaults() {
-        let options: Options = serde_json::from_value(serde_json::json!({
-            "task":"calibrate-imu", "dataset_path":"dataset", "dataset_type":"euroc",
-            "aprilgrid":"grid.json", "result_path":"calibration"
-        }))
-        .unwrap();
-        options.validate().unwrap();
-        let Options::CalibrateImu { input, imu_noise } = options else {
-            panic!("wrong task")
-        };
-        assert_eq!(input.skip_images, 1);
-        assert_eq!(imu_noise, [0.016, 0.000_282, 0.001, 0.0001]);
-        assert!(input.cache_name.is_none());
+    fn device_calibration_tasks_are_not_offered_by_basalt_tools() {
+        for task in ["calibrate", "calibrate-imu"] {
+            let error = serde_json::from_value::<Options>(serde_json::json!({"task":task}))
+                .err()
+                .expect("device calibration belongs to a separate tool");
+            assert!(error.to_string().contains("unknown variant"), "{error}");
+        }
     }
 
     #[test]

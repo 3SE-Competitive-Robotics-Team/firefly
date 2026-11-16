@@ -1,7 +1,7 @@
 This crate contains translations of Basalt and separately attributed algorithms.
 The per-file notices identify the applicable terms. Full license texts are in
 LICENSE-BSD-3-Clause, LICENSE-MPL-2.0, and LICENSE-MIT; additional third-party
-notices, including BSD-4-Clause code, are retained in the relevant source files.
+notices are retained in the relevant source files.
 
 Basalt code: Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
 See LICENSE-BSD-3-Clause. The upstream MPL files utils/tracks.rs and
@@ -27,7 +27,7 @@ Eigen algorithms translated under MPL-2.0 (see LICENSE-MPL-2.0):
 * vio_sim.rs: RandomImpl floating-point mantissa construction.
   Copyright (C) 2024 Charles Schlosser.
 
-Other Eigen-derived helpers in utils/full_piv_householder_qr.rs,
-vi_estimator/ba_base.rs and calibration/cam_imu_calib.rs retain their own
+Other Eigen-derived helpers in utils/full_piv_householder_qr.rs and
+vi_estimator/ba_base.rs retain their own
 copyright notices. Files containing both Basalt and Eigen-derived code identify
 both licenses; their Eigen-derived portions are not relicensed as BSD.

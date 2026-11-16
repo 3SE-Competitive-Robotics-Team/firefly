@@ -3522,10 +3522,7 @@ dependencies = [
 name = "firefly-calibration"
 version = "0.1.0"
 dependencies = [
- "firefly-error",
- "firefly-opengv",
  "nalgebra",
- "rayon",
  "serde",
  "serde_json",
 ]

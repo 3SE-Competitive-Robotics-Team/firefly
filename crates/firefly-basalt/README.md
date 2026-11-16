@@ -1,7 +1,7 @@
 # firefly-basalt
 
 Rust translation of the original Basalt estimator, IMU, optical-flow, mapping,
-serialization, and calibration-control modules. Shared camera and calibration
+and serialization modules. Shared camera and calibration
 primitives live in `firefly-calibration`.
 
 The source baseline is Basalt commit
