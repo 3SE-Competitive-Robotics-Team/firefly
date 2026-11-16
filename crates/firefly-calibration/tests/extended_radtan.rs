@@ -78,7 +78,8 @@ fn extended<S: BasaltScalar>(fixtures: &Value, tolerance: f64) {
             compare(&ji, &case["j_param"], tolerance);
         }
         let mut initialized = ExtendedUnifiedCamera::<S>::default();
-        initialized.set_from_init(Vector4::from([100., 120., 50., 60.].map(S::from_f64_lossy)));
+        initialized
+            .initialize_intrinsics(Vector4::from([100., 120., 50., 60.].map(S::from_f64_lossy)));
         compare(initialized.param(), &f["init"], tolerance);
         let mut inc = SVector::zeros();
         inc[4] = S::from_f64_lossy(1.5);
@@ -119,7 +120,8 @@ fn radtan<S: BasaltScalar>(fixtures: &Value, tolerance: f64) {
             compare(&j, &case["jacobian"], tolerance);
         }
         let mut initialized = PinholeRadtan8Camera::<S>::default();
-        initialized.set_from_init(Vector4::from([100., 120., 50., 60.].map(S::from_f64_lossy)));
+        initialized
+            .initialize_intrinsics(Vector4::from([100., 120., 50., 60.].map(S::from_f64_lossy)));
         compare(initialized.param(), &f["init"], tolerance);
         assert_eq!(initialized.rpmax(), S::zero());
         let mut inc = SVector::zeros();

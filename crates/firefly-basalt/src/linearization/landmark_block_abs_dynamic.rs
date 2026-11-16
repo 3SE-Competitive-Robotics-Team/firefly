@@ -392,9 +392,10 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
             }
         }
     }
+    /// Write `Q₂ᵀ J_p` and `Q₂ᵀ r` into caller buffers starting at row `start`.
     /// # Panics
     /// Requires output space for the reduced rows at `start`.
-    pub fn get_dense_q2jp_q2r(
+    pub fn write_reduced_system(
         &self,
         jacobian: &mut DMatrix<S>,
         residual: &mut DVector<S>,

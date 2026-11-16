@@ -166,7 +166,10 @@ impl<S: BasaltScalar> BundleAdjustmentBase<S> {
         }
     }
 
-    pub fn get_pose_state_with_lin(&self, time: i64) -> PoseStateWithLin<S> {
+    /// Clone a pose linearization state, deriving its pose block from an IMU state when needed.
+    /// # Panics
+    /// Requires a retained pose or IMU state at the supplied measurement timestamp.
+    pub fn pose_linearization_at(&self, time: i64) -> PoseStateWithLin<S> {
         self.frame_poses
             .get(&time)
             .cloned()
@@ -178,9 +181,9 @@ impl<S: BasaltScalar> BundleAdjustmentBase<S> {
             return Matrix4::identity();
         }
         compute_rel_pose(
-            self.get_pose_state_with_lin(host.frame_id).pose(),
+            self.pose_linearization_at(host.frame_id).pose(),
             &self.calib.t_i_c[host.cam_id],
-            self.get_pose_state_with_lin(target.frame_id).pose(),
+            self.pose_linearization_at(target.frame_id).pose(),
             &self.calib.t_i_c[target.cam_id],
             None,
             None,
@@ -325,13 +328,15 @@ impl<S: BasaltScalar> BundleAdjustmentBase<S> {
         }
     }
 
-    pub fn get_current_points<T: BasaltScalar>(
+    /// Replace visualization buffers with current landmark positions in world coordinates.
+    /// Labels retain the upstream constant class `1`; they are not persistent landmark identities.
+    pub fn write_landmark_visualization<T: BasaltScalar>(
         &self,
         points: &mut Vec<Vector3<T>>,
-        ids: &mut Vec<i32>,
+        labels: &mut Vec<i32>,
     ) {
         points.clear();
-        ids.clear();
+        labels.clear();
         for host in self.lmdb.host_kfs() {
             let pose = if let Some(state) = self.frame_states.get(&host.frame_id) {
                 state.state().state.pose.t_w_i
@@ -353,7 +358,7 @@ impl<S: BasaltScalar> BundleAdjustmentBase<S> {
                 points.push(Vector3::from_fn(|i, _| {
                     T::from_f64_lossy((global[i] / global[3]).as_f64())
                 }));
-                ids.push(1);
+                labels.push(1);
             }
         }
     }

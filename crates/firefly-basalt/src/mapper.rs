@@ -164,7 +164,7 @@ impl Mapper {
     fn refresh_points(&mut self) {
         self.mapper
             .base
-            .get_current_points(&mut self.points, &mut self.point_ids);
+            .write_landmark_visualization(&mut self.points, &mut self.point_ids);
     }
     pub fn align(&mut self) -> f64 {
         let times: Vec<_> = self.mapper.base.frame_poses.keys().copied().collect();

@@ -103,7 +103,7 @@ impl TrackBuilder {
     }
 }
 
-pub fn get_tracks_in_images(
+pub fn collect_tracks_in_images(
     images: &BTreeSet<TimeCamId>,
     tracks: &FeatureTracks,
     shared: &mut Vec<TrackId>,
@@ -117,18 +117,18 @@ pub fn get_tracks_in_images(
     !shared.is_empty()
 }
 
-pub fn get_tracks_in_image(
+pub fn collect_tracks_in_image(
     image: TimeCamId,
     tracks: &FeatureTracks,
     shared: &mut Vec<TrackId>,
 ) -> bool {
-    get_tracks_in_images(&BTreeSet::from([image]), tracks, shared)
+    collect_tracks_in_images(&BTreeSet::from([image]), tracks, shared)
 }
 
 /// Intersects a map's landmarks with tracks observed in the supplied image.
 /// # Panics
 /// Panics if a landmark's track is absent, matching the source's checked lookup.
-pub fn get_shared_tracks(
+pub fn collect_shared_tracks(
     image: TimeCamId,
     tracks: &FeatureTracks,
     landmarks: &Landmarks,
@@ -243,16 +243,20 @@ mod tests {
             ])
         );
         let mut found = vec![-1];
-        assert!(get_tracks_in_images(&BTreeSet::new(), &tracks, &mut found));
+        assert!(collect_tracks_in_images(
+            &BTreeSet::new(),
+            &tracks,
+            &mut found
+        ));
         assert_eq!(found.len(), 2);
-        assert!(!get_tracks_in_image(
+        assert!(!collect_tracks_in_image(
             TimeCamId::new(999, 0),
             &tracks,
             &mut found
         ));
         assert_eq!(found, Vec::<TrackId>::new());
         let (&id, _) = tracks.iter().next().unwrap();
-        assert!(get_shared_tracks(
+        assert!(collect_shared_tracks(
             images[0],
             &tracks,
             &HashMap::from([(id, Landmark::default())]),

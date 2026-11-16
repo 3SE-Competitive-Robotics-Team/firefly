@@ -66,7 +66,7 @@ impl<P: MultiSampleConsensusProblem> MultiRansac<P> {
         while f64::from(state.iterations) < root_product && skipped < max_skip {
             state
                 .sac_model
-                .get_samples(&mut state.iterations, &mut selection);
+                .draw_samples(&mut state.iterations, &mut selection);
             if selection.is_empty() {
                 log::error!("No samples could be selected");
                 break;

@@ -304,7 +304,7 @@ pub fn eigensolver_main(
         }
         let linear = Vector3::from_column_slice(x.as_slice());
         let mut jac = SMatrix::<f64, 1, 3>::zeros();
-        eigen::get_smallest_ev_with_jacobian(
+        eigen::smallest_eigenvalue_with_jacobian(
             &eigen::BearingMoments {
                 xx_f: &translation_value.xx,
                 yy_f: &translation_value.yy,
@@ -431,7 +431,7 @@ impl GeTerms {
     }
     #[must_use]
     pub fn cost(&self, c: &Vector3<f64>, step: i32) -> f64 {
-        ge::get_cost(
+        ge::cost(
             &ge::GeneralizedMoments {
                 xx_f: &self.central.xx,
                 yy_f: &self.central.yy,
@@ -454,9 +454,9 @@ impl GeTerms {
         )
     }
     #[must_use]
-    pub fn jacobian(&self, c: &Vector3<f64>) -> SMatrix<f64, 1, 3> {
+    pub fn central_cost_differences(&self, c: &Vector3<f64>) -> SMatrix<f64, 1, 3> {
         let mut jac = SMatrix::zeros();
-        ge::get_cost_with_jacobian(
+        ge::cost_with_central_differences(
             &ge::GeneralizedMoments {
                 xx_f: &self.central.xx,
                 yy_f: &self.central.yy,
@@ -481,9 +481,9 @@ impl GeTerms {
         jac
     }
     #[must_use]
-    pub fn quick_jacobian(&self, c: &Vector3<f64>, current: f64) -> SMatrix<f64, 1, 3> {
+    pub fn forward_cost_differences(&self, c: &Vector3<f64>, current: f64) -> SMatrix<f64, 1, 3> {
         let mut jac = SMatrix::zeros();
-        ge::get_quick_jacobian(
+        ge::forward_cost_differences(
             &ge::GeneralizedMoments {
                 xx_f: &self.central.xx,
                 yy_f: &self.central.yy,
@@ -532,7 +532,7 @@ pub fn ge_main(
             return None;
         }
         let c = Vector3::from_column_slice(x.as_slice());
-        out.copy_from(&t.jacobian(&c).transpose());
+        out.copy_from(&t.central_cost_differences(&c).transpose());
         Some(())
     };
     backend.levenberg_marquardt(
@@ -573,7 +573,7 @@ pub fn ge_main2(
         let mut iterations = 0;
         let mut smallest = t.cost(&c, 1);
         while iterations < 50 {
-            let jac = t.quick_jacobian(&c, smallest);
+            let jac = t.forward_cost_differences(&c, smallest);
             let norm = (jac[0].powf(2.0) + jac[1].powf(2.0) + jac[2].powf(2.0)).sqrt();
             let normalized = (1.0 / norm) * jac.transpose();
             let mut sample = c - lambda * normalized;
@@ -615,7 +615,7 @@ pub fn ge_main2(
 }
 pub fn ge_plot(t: &GeTerms, output: &mut GeOutput) {
     let c = rot2cayley(&output.rotation);
-    ge::get_ev(
+    ge::write_eigenvalue_pair(
         &ge::GeneralizedMoments {
             xx_f: &t.central.xx,
             yy_f: &t.central.yy,

@@ -153,8 +153,12 @@ pub trait VioEstimatorEngine: Send {
     /// # Errors
     /// Returns an error if statistics cannot be written.
     fn debug_finalize(&self, directory: &std::path::Path) -> Result<()>;
-    fn get_state_at(&self, time: i64) -> PoseVelBiasState<f64>;
-    fn get_all_poses_map(&self) -> std::collections::BTreeMap<i64, Isometry3<f64>>;
+    /// Complete retained state, converted to FP64; absent and pose-only frames return `None`.
+    fn state_at(&self, timestamp_ns: i64) -> Option<PoseVelBiasState<f64>>;
+    /// Retained world-from-IMU pose, including pose-only frames; absent timestamps return `None`.
+    fn pose_at(&self, timestamp_ns: i64) -> Option<Isometry3<f64>>;
+    /// Allocate a timestamp-indexed snapshot of all poses retained in the local window.
+    fn collect_poses(&self) -> std::collections::BTreeMap<i64, Isometry3<f64>>;
 }
 /// Bounded inputs preserve the original capacities and `None` end markers.
 pub struct VioEstimatorBase {
@@ -341,7 +345,7 @@ impl VioEstimatorFactory {
     /// Selects the original VO/VIO and float/double implementations.
     /// # Errors
     /// Reserved for construction failures reported by the estimator.
-    pub fn get_vio_estimator(
+    pub fn create(
         config: &crate::utils::vio_config::VioConfig,
         calibration: &firefly_calibration::calibration::Calibration<f64>,
         gravity: &Vector3<f64>,

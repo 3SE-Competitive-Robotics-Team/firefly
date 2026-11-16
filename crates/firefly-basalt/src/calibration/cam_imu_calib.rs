@@ -302,7 +302,7 @@ impl CamImuCalib {
         skip_images: usize,
         imu_noise: [f64; 4],
     ) -> Result<Self> {
-        let mut reader = DatasetIoFactory::get_dataset_io(dataset_type, false)?;
+        let mut reader = DatasetIoFactory::create(dataset_type, false)?;
         reader.read(dataset_path)?;
         let dataset = reader
             .data()

@@ -200,8 +200,8 @@ pub fn add_if_not_nan_vector3f(setpoint: &mut Vector3f, addition: Vector3f) {
     }
 }
 
-/// 将向量中的 NAN 分量写为零。
-pub fn set_zero_if_nan_vector3f(vector: &mut Vector3f) {
+/// 将向量中的 NaN、正无穷和负无穷分量写为零，保留其余分量。
+pub fn replace_nonfinite_with_zero(vector: &mut Vector3f) {
     // 叠加零向量即可把 NAN 分量覆盖为零
     add_if_not_nan_vector3f(vector, Vector3f::zeros());
 }
@@ -211,6 +211,16 @@ mod tests {
     use core::f32::consts::FRAC_PI_2;
 
     use super::*;
+
+    #[test]
+    fn nonfinite_replacement_handles_infinities_and_preserves_finite_components() {
+        let mut extremes = Vector3f::new(f32::NAN, f32::INFINITY, f32::NEG_INFINITY);
+        replace_nonfinite_with_zero(&mut extremes);
+        assert_eq!(extremes, Vector3f::zeros());
+        let mut mixed = Vector3f::new(-2., f32::INFINITY, 3.5);
+        replace_nonfinite_with_zero(&mut mixed);
+        assert_eq!(mixed, Vector3f::new(-2., 0., 3.5));
+    }
 
     fn assert_close(actual: f32, expected: f32, eps: f32) {
         assert!(
@@ -366,7 +376,7 @@ mod tests {
         assert_close(vector[2], 2.0, 1e-6);
 
         let mut vector = Vector3f::new(f32::NAN, f32::NAN, f32::NAN);
-        set_zero_if_nan_vector3f(&mut vector);
+        replace_nonfinite_with_zero(&mut vector);
         assert_eq!(vector, Vector3f::zeros());
     }
 }

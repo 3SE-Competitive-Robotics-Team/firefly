@@ -34,7 +34,8 @@ impl<S: BasaltScalar> KannalaBrandtCamera4<S> {
     pub fn cast<T: BasaltScalar>(&self) -> KannalaBrandtCamera4<T> {
         KannalaBrandtCamera4::new(self.param.map(|v| T::from_f64_lossy(v.as_f64())))
     }
-    pub fn set_from_init(&mut self, init: Vector4<S>) {
+    /// Initialize `[fx, fy, cx, cy]` and clear all four distortion coefficients.
+    pub fn initialize_intrinsics(&mut self, init: Vector4<S>) {
         self.param.fill(S::zero());
         self.param.fixed_rows_mut::<4>(0).copy_from(&init);
     }

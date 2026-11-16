@@ -14,7 +14,9 @@ use crate::{
     linearization::linearization_base::{LinearizationBase, Options, is_linearization_sqrt},
     optical_flow::OpticalFlowResult,
     utils::{
-        imu_types::{AbsOrderMap, MargData, MargLinData, PoseStateWithLin},
+        imu_types::{
+            AbsOrderMap, MargData, MargLinData, PoseStateWithLin, PoseVelBiasStateWithLin,
+        },
         ldlt::Ldlt,
         time_utils::{ExecutionStats, Timer},
         vio_config::VioConfig,
@@ -66,45 +68,41 @@ fn add_order(order: &mut AbsOrderMap, time: i64) {
     }
 }
 impl<S: BasaltScalar> SqrtKeypointVoEstimator<S> {
-    pub fn get_state(&self) -> &PoseVelBiasState<S> {
-        self.base.frame_states[&self.last_state_t_ns].state()
+    /// Measurement timestamp of the latest initialized pose, in nanoseconds.
+    /// # Panics
+    /// Requires an initialized estimator retaining its latest pose.
+    pub fn latest_timestamp_ns(&self) -> i64 {
+        self.base.frame_poses[&self.last_state_t_ns].t_ns()
     }
-    pub fn get_t_ns(&self) -> i64 {
-        self.get_state().state.pose.t_ns
+    /// World-from-IMU pose of the latest initialized frame.
+    /// # Panics
+    /// Requires an initialized estimator retaining its latest pose.
+    pub fn latest_pose(&self) -> &Isometry3<S> {
+        self.base.frame_poses[&self.last_state_t_ns].pose()
     }
-    pub fn get_t_w_i(&self) -> &Isometry3<S> {
-        &self.get_state().state.pose.t_w_i
-    }
-    pub fn get_vel_w_i(&self) -> &Vector3<S> {
-        &self.get_state().state.vel_w_i
-    }
-    pub fn get_state_at(&self, time: i64) -> PoseVelBiasState<S> {
-        if let Some(state) = self.base.frame_states.get(&time) {
-            return state.state().clone();
-        }
-        let mut state = PoseVelBiasState::new(
-            0,
-            Isometry3::identity(),
-            Vector3::zeros(),
-            Vector3::zeros(),
-            Vector3::zeros(),
-        );
-        if let Some(pose) = self.base.frame_poses.get(&time) {
-            state.state.pose.t_w_i = *pose.pose();
-        }
-        state
-    }
-    pub fn get_frame_states(&self) -> Vec<Isometry3<S>> {
+    /// Borrow a complete pose/velocity/bias state retained in the local window.
+    /// Pose-only frames and absent timestamps return `None`.
+    #[must_use]
+    pub fn state_at(&self, timestamp_ns: i64) -> Option<&PoseVelBiasState<S>> {
         self.base
             .frame_states
-            .values()
-            .map(|s| s.state().state.pose.t_w_i)
-            .collect()
+            .get(&timestamp_ns)
+            .map(PoseVelBiasStateWithLin::state)
     }
-    pub fn get_frame_poses(&self) -> Vec<Isometry3<S>> {
-        self.base.frame_poses.values().map(|s| *s.pose()).collect()
+    /// World-from-IMU pose from either a complete state or a pose-only frame.
+    #[must_use]
+    pub fn pose_at(&self, timestamp_ns: i64) -> Option<Isometry3<S>> {
+        self.state_at(timestamp_ns)
+            .map(|state| state.state.pose.t_w_i)
+            .or_else(|| {
+                self.base
+                    .frame_poses
+                    .get(&timestamp_ns)
+                    .map(|pose| *pose.pose())
+            })
     }
-    pub fn get_all_poses_map(&self) -> BTreeMap<i64, Isometry3<S>> {
+    /// Allocate a timestamp-indexed pose snapshot of the retained local window.
+    pub fn collect_poses(&self) -> BTreeMap<i64, Isometry3<S>> {
         self.base
             .frame_poses
             .iter()
@@ -319,10 +317,10 @@ impl<S: BasaltScalar> SqrtKeypointVoEstimator<S> {
                     }
                     let relative = self
                         .base
-                        .get_pose_state_with_lin(host.frame_id)
+                        .pose_linearization_at(host.frame_id)
                         .pose()
                         .inverse()
-                        * self.base.get_pose_state_with_lin(target.frame_id).pose();
+                        * self.base.pose_linearization_at(target.frame_id).pose();
                     let transform = self.base.calib.t_i_c[0].inverse()
                         * relative
                         * self.base.calib.t_i_c[target.cam_id];
@@ -400,7 +398,7 @@ impl<S: BasaltScalar> SqrtKeypointVoEstimator<S> {
             let mut points = Vec::new();
             let mut point_ids = Vec::new();
             self.base
-                .get_current_points::<f64>(&mut points, &mut point_ids);
+                .write_landmark_visualization::<f64>(&mut points, &mut point_ids);
             let mut projections = vec![Vec::new(); measurement.observations.len()];
             self.base
                 .compute_projections(&mut projections, self.last_state_t_ns);
@@ -549,9 +547,9 @@ impl<S: BasaltScalar> SqrtKeypointVoEstimator<S> {
             let _ = l.linearize_problem(&self.base);
             l.perform_qr();
             let (mut h, mut b) = if square_root {
-                l.get_dense_q2jp_q2r(&self.base)
+                l.assemble_square_root_system(&self.base)
             } else {
-                l.get_dense_h_b(&self.base)
+                l.assemble_normal_equations(&self.base)
             };
             drop(l);
             self.stats_sums
@@ -624,9 +622,9 @@ impl<S: BasaltScalar> SqrtKeypointVoEstimator<S> {
                 let _ = l.linearize_problem(&self.base);
                 l.perform_qr();
                 let (mut nh, mut nb) = if square_root {
-                    l.get_dense_q2jp_q2r(&self.base)
+                    l.assemble_square_root_system(&self.base)
                 } else {
-                    l.get_dense_h_b(&self.base)
+                    l.assemble_normal_equations(&self.base)
                 };
                 drop(l);
                 (self.nullspace_marg_data.h, self.nullspace_marg_data.b) = reduce(&mut nh, &mut nb);
@@ -638,7 +636,7 @@ impl<S: BasaltScalar> SqrtKeypointVoEstimator<S> {
                 .format("ms");
             for (&time, state) in &mut self.base.frame_poses {
                 if order.abs_order_map.contains_key(&time) && !state.is_linearized() {
-                    state.set_lin_true();
+                    state.freeze_linearization_point();
                 }
             }
             for time in &removed {
@@ -730,7 +728,7 @@ impl<S: BasaltScalar> SqrtKeypointVoEstimator<S> {
             linearization.perform_qr();
             stats.add("performQR", timer.reset()).format("ms");
             while iteration <= self.config.vio_max_iterations && !terminated {
-                let (h, b) = linearization.get_dense_h_b(&self.base);
+                let (h, b) = linearization.assemble_normal_equations(&self.base);
                 stats.add("get_dense_H_b", timer.reset()).format("ms");
                 let mut increment = DVector::zeros(b.len());
                 for _ in 0..3 {
@@ -798,11 +796,18 @@ impl<S: BasaltScalar> VioEstimatorEngine for SqrtKeypointVoEstimator<S> {
     fn debug_finalize(&self, directory: &std::path::Path) -> Result<()> {
         Self::debug_finalize(self, directory)
     }
-    fn get_state_at(&self, time: i64) -> PoseVelBiasState<f64> {
-        Self::get_state_at(self, time).cast::<f64>()
+    fn state_at(&self, timestamp_ns: i64) -> Option<PoseVelBiasState<f64>> {
+        Self::state_at(self, timestamp_ns).map(PoseVelBiasState::cast::<f64>)
     }
-    fn get_all_poses_map(&self) -> BTreeMap<i64, Isometry3<f64>> {
-        Self::get_all_poses_map(self)
+    fn pose_at(&self, timestamp_ns: i64) -> Option<Isometry3<f64>> {
+        Self::pose_at(self, timestamp_ns).map(|pose| {
+            crate::imu::imu_types::PoseState::new(timestamp_ns, pose)
+                .cast::<f64>()
+                .t_w_i
+        })
+    }
+    fn collect_poses(&self) -> BTreeMap<i64, Isometry3<f64>> {
+        Self::collect_poses(self)
             .into_iter()
             .map(|(time, pose)| {
                 (

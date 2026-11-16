@@ -392,7 +392,7 @@ impl Simulation {
         use_double: bool,
         outputs: VioWorkerOutputs,
     ) -> firefly_error::Result<VioEstimatorBase> {
-        let mut estimator = VioEstimatorFactory::get_vio_estimator(
+        let mut estimator = VioEstimatorFactory::create(
             config,
             &self.calibration,
             &Vector3::new(0., 0., -9.81),

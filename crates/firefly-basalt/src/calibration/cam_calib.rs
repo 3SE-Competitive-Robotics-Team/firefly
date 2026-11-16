@@ -117,13 +117,13 @@ impl CamCalib {
     pub fn has_corners(&self) -> bool {
         !self.calib_corners.is_empty()
     }
-    pub fn set_opt_intrinsics(&mut self, opt: bool) {
-        self.opt_intr = opt;
+    pub fn set_intrinsics_optimization_enabled(&mut self, enabled: bool) {
+        self.opt_intr = enabled;
     }
     /// # Errors
     /// Reports dataset and native cache archive errors.
     pub fn load_dataset(&mut self) -> Result<()> {
-        let mut reader = DatasetIoFactory::get_dataset_io(&self.dataset_type, false)?;
+        let mut reader = DatasetIoFactory::create(&self.dataset_type, false)?;
         reader.read(&self.dataset_path)?;
         self.vio_dataset = reader.data();
         if self.skip_images > 1 {
@@ -207,7 +207,7 @@ impl CamCalib {
                             .as_mut()
                             .ok_or_else(|| failure("Calibration missing"))?
                             .intrinsics[camera]
-                            .set_from_init(intrinsics);
+                            .initialize_intrinsics(intrinsics);
                         break;
                     }
                 }
@@ -247,7 +247,7 @@ impl CamCalib {
                     .as_mut()
                     .ok_or_else(|| failure("Calibration missing"))?
                     .intrinsics[camera]
-                    .set_from_init(intrinsics);
+                    .initialize_intrinsics(intrinsics);
             }
         }
         // Original starts at index one. Exhaustion is reported instead of its
@@ -458,9 +458,12 @@ impl CamCalib {
             azimuth_log: vec![Vec::new(); count],
         };
         for time in times {
+            let Some(pose) = opt.pose_at(time) else {
+                continue;
+            };
             for camera in 0..count {
                 let id = TimeCamId::new(time, camera);
-                let transform = (opt.get_t_w_i(time) * calibration.t_i_c[camera])
+                let transform = (pose * calibration.t_i_c[camera])
                     .inverse()
                     .to_homogeneous();
                 let mut corners = ProjectedCornerData::default();

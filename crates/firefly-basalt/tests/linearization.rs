@@ -90,7 +90,7 @@ fn run<S: BasaltScalar>(text: &str, mode: Option<LinearizationType>) {
             continue;
         }
         let mut camera = GenericCamera::from_name("pinhole");
-        camera.set_from_init(Vector4::new(320., 315., 320., 240.).map(scalar));
+        camera.initialize_intrinsics(Vector4::new(320., 315., 320., 240.).map(scalar));
         let calibration = Calibration {
             intrinsics: vec![camera.clone(), camera],
             t_i_c: vec![
@@ -258,9 +258,9 @@ fn run<S: BasaltScalar>(text: &str, mode: Option<LinearizationType>) {
                     } else {
                         firefly_basalt::utils::sophus_utils::se3_matrix(
                             &firefly_basalt::utils::ba_utils::compute_rel_pose(
-                                ba.get_pose_state_with_lin(host.frame_id).pose(),
+                                ba.pose_linearization_at(host.frame_id).pose(),
                                 &ba.calib.t_i_c[host.cam_id],
-                                ba.get_pose_state_with_lin(target.frame_id).pose(),
+                                ba.pose_linearization_at(target.frame_id).pose(),
                                 &ba.calib.t_i_c[target.cam_id],
                                 None,
                                 None,
@@ -409,7 +409,7 @@ fn run<S: BasaltScalar>(text: &str, mode: Option<LinearizationType>) {
         linearization.perform_qr();
         let mut root_pairs = None;
         if kind == LinearizationType::AbsQr && !expected["root"].is_null() {
-            let (jacobian, residual) = linearization.get_dense_q2jp_q2r(&ba);
+            let (jacobian, residual) = linearization.assemble_square_root_system(&ba);
             let root = &expected["root"];
             let mut unmatched: Vec<_> = (0..jacobian.nrows()).collect();
             let mut columns = vec![Vec::new(); jacobian.ncols() + 1];
@@ -453,7 +453,7 @@ fn run<S: BasaltScalar>(text: &str, mode: Option<LinearizationType>) {
             }
             root_pairs = Some(columns);
         }
-        let (h, b) = linearization.get_dense_h_b(&ba);
+        let (h, b) = linearization.assemble_normal_equations(&ba);
         let size = order.total_size;
         for row in 0..size {
             for col in 0..size {

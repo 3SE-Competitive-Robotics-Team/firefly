@@ -35,7 +35,8 @@ impl<S: BasaltScalar> UnifiedCamera<S> {
     pub fn cast<T: BasaltScalar>(&self) -> UnifiedCamera<T> {
         UnifiedCamera::new(self.param.map(|v| T::from_f64_lossy(v.as_f64())))
     }
-    pub fn set_from_init(&mut self, init: Vector4<S>) {
+    /// Initialize `[fx, fy, cx, cy]`, resetting xi to 0.5.
+    pub fn initialize_intrinsics(&mut self, init: Vector4<S>) {
         self.param.fixed_rows_mut::<4>(0).copy_from(&init);
         self.param[4] = S::from_f64_lossy(0.5);
     }

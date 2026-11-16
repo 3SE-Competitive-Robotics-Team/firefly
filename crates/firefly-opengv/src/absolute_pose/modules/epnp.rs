@@ -72,7 +72,10 @@ impl Epnp {
             fv: 1.0,
         }
     }
-    pub fn set_maximum_number_of_correspondences(&mut self, n: usize) {
+    /// Ensure storage for at least `n` correspondences. A larger allocation clears its
+    /// buffers; callers reset and populate correspondences after preparing capacity.
+    /// Smaller requests keep the existing allocation.
+    pub fn ensure_correspondence_capacity(&mut self, n: usize) {
         if self.maximum_number_of_correspondences < n {
             self.maximum_number_of_correspondences = n;
             self.pws = vec![0.0; 3 * n];

@@ -66,13 +66,15 @@ impl<S: BasaltScalar> PoseVelBiasStateWithLin<S> {
             backup: None,
         }
     }
-    pub fn set_lin_false(&mut self) {
+    /// Discard the accumulated increment and resume updating the linearization point itself.
+    pub fn reset_to_linearization_point(&mut self) {
         self.linearized = false;
         self.delta.fill(S::zero());
     }
+    /// Freeze the current linearization point; subsequent increments update a separate state.
     /// # Panics
     /// Requires a zero accumulated increment.
-    pub fn set_lin_true(&mut self) {
+    pub fn freeze_linearization_point(&mut self) {
         self.linearized = true;
         assert!(self.delta.iter().all(|value| *value == S::zero()));
         self.state_current = self.state_linearized.clone();
@@ -177,9 +179,10 @@ impl<S: BasaltScalar> PoseStateWithLin<S> {
             backup: None,
         }
     }
+    /// Freeze the current linearization point; subsequent increments update a separate pose.
     /// # Panics
     /// Requires a zero accumulated increment.
-    pub fn set_lin_true(&mut self) {
+    pub fn freeze_linearization_point(&mut self) {
         self.linearized = true;
         assert!(self.delta.iter().all(|value| *value == S::zero()));
         self.pose_current = self.pose_linearized.t_w_i;

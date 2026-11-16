@@ -214,7 +214,7 @@ impl NfrMapper {
         }
         true
     }
-    pub fn get_frame_poses(&mut self) -> &mut BTreeMap<i64, PoseStateWithLin<f64>> {
+    pub fn frame_poses_mut(&mut self) -> &mut BTreeMap<i64, PoseStateWithLin<f64>> {
         &mut self.base.frame_poses
     }
     pub fn compute_rel_pose(&self) -> f64 {

@@ -94,16 +94,22 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationBase<'a, S, POSE_
     ) -> S {
         dispatch!(self, back_substitute, estimator, increment)
     }
+    /// Allocate and assemble dense `(H, b)` normal equations, including damping and prior terms.
     #[must_use]
-    pub fn get_dense_h_b(&self, estimator: &BundleAdjustmentBase<S>) -> (DMatrix<S>, DVector<S>) {
-        dispatch!(self, get_dense_h_b, estimator)
-    }
-    #[must_use]
-    pub fn get_dense_q2jp_q2r(
+    pub fn assemble_normal_equations(
         &self,
         estimator: &BundleAdjustmentBase<S>,
     ) -> (DMatrix<S>, DVector<S>) {
-        dispatch!(self, get_dense_q2jp_q2r, estimator)
+        dispatch!(self, assemble_normal_equations, estimator)
+    }
+    /// Allocate and assemble a reduced `(J, r)` square-root system.
+    /// Schur backends factor the assembled normal equations.
+    #[must_use]
+    pub fn assemble_square_root_system(
+        &self,
+        estimator: &BundleAdjustmentBase<S>,
+    ) -> (DMatrix<S>, DVector<S>) {
+        dispatch!(self, assemble_square_root_system, estimator)
     }
     pub fn set_pose_damping(&mut self, lambda: S) {
         dispatch!(self, set_pose_damping, lambda);
@@ -121,9 +127,12 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationBase<'a, S, POSE_
     pub fn scale_jp_cols(&mut self, scaling: &DVector<S>) {
         dispatch!(self, scale_jp_cols, scaling);
     }
+    /// Compute squared state-Jacobian column norms for column scaling.
+    /// # Panics
+    /// Only the absolute QR backend implements column scaling; Schur backends abort this query.
     #[must_use]
-    pub fn get_jp_diag2(&self) -> DVector<S> {
-        dispatch!(self, get_jp_diag2)
+    pub fn jacobian_column_squared_norms(&self) -> DVector<S> {
+        dispatch!(self, jacobian_column_squared_norms)
     }
 }
 

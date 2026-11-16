@@ -14,7 +14,7 @@
 //! 不移植：文件内联的 `qmul` / `qinv` / `qzaxis` 包装——直接用 `nalgebra` 的 `*`、
 //! `inverse()` 与 [`quat_dcm_z`]。
 //!
-//! 辅助函数：[`quat_canonical_px4`] 与 [`quat_from_two_vectors_px4`] 分别复刻 PX4
+//! 辅助函数：`quat_canonical_px4` 与 `quat_from_two_vectors_px4` 分别复刻 PX4
 //! `Quatf::canonical()`（按首个非零分量定符号）与 `Quatf(v0, v1)`（反向平行时取正交轴
 //! 180° 旋转）。`types::quat_canonical` / `types::quat_from_two_vectors` 在 180° 边界上
 //! 分别退化为按标量符号/单位四元数，因此在本模块内私有补齐。
@@ -125,12 +125,12 @@ impl AttitudeControl {
         self._rate_limit = rate_limit;
     }
 
-    /// 设置新的姿态设定点。
+    /// 根据姿态设定点和时间步长推进参考模型，并更新角速率前馈。
     ///
     /// - `qd`：期望姿态
     /// - `yawspeed_setpoint` [rad/s]：世界系偏航角速率前馈
-    /// - `dt` [s]：距上一个设定点的时间；`dt <= 0` 或首次调用时把参考姿态直接对齐到 `qd`
-    pub fn set_attitude_setpoint(&mut self, qd: Quatf, yawspeed_setpoint: f32, dt: f32) {
+    /// - `dt`（秒）：距上一个设定点的时间；`dt <= 0` 或首次调用时把参考姿态直接对齐到 `qd`
+    pub fn update_reference(&mut self, qd: Quatf, yawspeed_setpoint: f32, dt: f32) {
         let qd_normalized = quat_normalize(qd);
 
         if self._ref_initialized && dt > 0.0 {
@@ -229,7 +229,7 @@ impl AttitudeControl {
     ///
     /// C++ 返回 `const Quatf&`；`Quatf` 在 Rust 中是 `Copy`，按值返回。
     #[must_use]
-    pub fn get_reference_attitude(&self) -> Quatf {
+    pub fn reference_attitude(&self) -> Quatf {
         self._q_ref
     }
 
@@ -241,7 +241,7 @@ impl AttitudeControl {
     ///
     /// - `qd`：归一化期望姿态
     /// - `yawspeed_setpoint` [rad/s]：世界系偏航角速率前馈
-    /// - `dt` [s]：距上一个设定点的时间（> 0）
+    /// - `dt`（秒）：距上一个设定点的时间（> 0）
     fn propagate_reference_model(&mut self, qd: Quatf, yawspeed_setpoint: f32, dt: f32) {
         // 切空间输入：解析偏航角速率转换到 q_ref 机体系；误差向量由 q_ref 到 qd
         let q_ref_inv = self._q_ref.inverse();
@@ -333,7 +333,7 @@ fn quat_from_two_vectors_px4(src: Vector3f, dst: Vector3f) -> Quatf {
 mod tests {
     use super::*;
 
-    /// 参考实现的设定点频率 [Hz] 对应的周期 [s]。
+    /// 参考实现的设定点频率（Hz）对应的周期（秒）。
     const K_DT: f32 = 0.004;
     /// 参考模型收敛所需的仿真步数。
     const K_SETTLE_STEPS: usize = 500;
@@ -366,7 +366,7 @@ mod tests {
         for i in 0..steps {
             q_d = q_d * quat_from_rotation_vector(body_rate * K_DT);
             let dt = if i == 0 { -1.0 } else { K_DT };
-            attitude_control.set_attitude_setpoint(q_d, yawspeed_sp, dt);
+            attitude_control.update_reference(q_d, yawspeed_sp, dt);
         }
 
         q_d
@@ -389,7 +389,7 @@ mod tests {
         let mut attitude_control = AttitudeControl::default();
         attitude_control.set_proportional_gain(Vector3f::new(6.5, 6.5, yaw_gain), 0.4);
         attitude_control.set_rate_limit(Vector3f::new(1000.0, 1000.0, 1000.0));
-        attitude_control.set_attitude_setpoint(pure_yaw_attitude, 0.0, -1.0);
+        attitude_control.update_reference(pure_yaw_attitude, 0.0, -1.0);
 
         let rate_setpoint = attitude_control.update(Quatf::identity());
 
@@ -412,7 +412,7 @@ mod tests {
         attitude_control.set_rate_limit(Vector3f::new(0.2, 0.3, 0.4));
 
         let qd = quat_from_rotation_vector(Vector3f::new(0.5, 0.0, 0.0));
-        attitude_control.set_attitude_setpoint(qd, 0.0, -1.0);
+        attitude_control.update_reference(qd, 0.0, -1.0);
 
         let rate_setpoint = attitude_control.update(Quatf::identity());
         assert_near(rate_setpoint[0], 0.2, 1e-6);
@@ -428,7 +428,7 @@ mod tests {
             attitude_control.set_rate_limit(Vector3f::new(10.0, 10.0, 10.0));
 
             let qd = quat_from_rotation_vector(Vector3f::new(angle, 0.0, 0.0));
-            attitude_control.set_attitude_setpoint(qd, 0.0, -1.0);
+            attitude_control.update_reference(qd, 0.0, -1.0);
 
             let rate_setpoint = attitude_control.update(Quatf::identity());
             // 误差四元数虚部为 +x（或 -x），输出滚转速率与旋转角同号
@@ -459,7 +459,7 @@ mod tests {
                 let mut attitude_control = AttitudeControl::default();
                 attitude_control.set_proportional_gain(Vector3f::new(0.5, 0.6, 0.3), 0.4);
                 attitude_control.set_rate_limit(Vector3f::new(100.0, 100.0, 100.0));
-                attitude_control.set_attitude_setpoint(goal, 0.0, -1.0);
+                attitude_control.update_reference(goal, 0.0, -1.0);
 
                 let mut state = state0;
                 let mut rate_setpoint = Vector3f::new(1000.0, 1000.0, 1000.0);
@@ -495,7 +495,7 @@ mod tests {
 
         for i in 0..K_SETTLE_STEPS {
             let dt = if i == 0 { -1.0 } else { K_DT };
-            attitude_control.set_attitude_setpoint(q_d, 0.0, dt);
+            attitude_control.update_reference(q_d, 0.0, dt);
         }
 
         // 车辆已在设定点：无位置误差，模型也不产生速率输出
@@ -515,7 +515,7 @@ mod tests {
         );
 
         // 在参考姿态处评估：P 项为零，只剩前馈
-        let rate_setpoint = attitude_control.update(attitude_control.get_reference_attitude());
+        let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         assert_near(rate_setpoint[0], omega, 1e-3);
         assert_near(rate_setpoint[1], 0.0, 1e-3);
         assert_near(rate_setpoint[2], 0.0, 1e-3);
@@ -532,7 +532,7 @@ mod tests {
             K_SETTLE_STEPS,
         );
 
-        let rate_setpoint = attitude_control.update(attitude_control.get_reference_attitude());
+        let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         assert_near(rate_setpoint[0], 0.0, 1e-3);
         assert_near(rate_setpoint[1], omega, 1e-3);
         assert_near(rate_setpoint[2], 0.0, 1e-3);
@@ -549,7 +549,7 @@ mod tests {
             K_SETTLE_STEPS,
         );
 
-        let rate_setpoint = attitude_control.update(attitude_control.get_reference_attitude());
+        let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         assert_near(rate_setpoint[0], 0.0, 1e-3);
         assert_near(rate_setpoint[1], omega, 1e-3);
         assert_near(rate_setpoint[2], 0.0, 1e-3);
@@ -566,7 +566,7 @@ mod tests {
             K_SETTLE_STEPS,
         );
 
-        let rate_setpoint = attitude_control.update(attitude_control.get_reference_attitude());
+        let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         assert_near(rate_setpoint[0], 0.0, 1e-3);
         assert_near(rate_setpoint[1], 0.0, 1e-3);
         assert_near(rate_setpoint[2], omega, 1e-3);
@@ -585,10 +585,10 @@ mod tests {
                 quat_from_rotation_vector(Vector3f::new(0.0, 0.0, yaw_rate * K_DT * i as f32));
             let q_d = q_yaw * q_pitch;
             let dt = if i == 0 { -1.0 } else { K_DT };
-            attitude_control.set_attitude_setpoint(q_d, yaw_rate, dt);
+            attitude_control.update_reference(q_d, yaw_rate, dt);
         }
 
-        let rate_setpoint = attitude_control.update(attitude_control.get_reference_attitude());
+        let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         assert_near(rate_setpoint[0], -tilt.sin() * yaw_rate, 1e-3);
         assert_near(rate_setpoint[1], 0.0, 1e-3);
         assert_near(rate_setpoint[2], tilt.cos() * yaw_rate, 1e-3);
@@ -607,12 +607,12 @@ mod tests {
 
         // 增益 0：P 项为零时输出为零
         attitude_control.set_feed_forward_gain(0.0);
-        let rate_setpoint = attitude_control.update(attitude_control.get_reference_attitude());
+        let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         assert_near(rate_setpoint.norm(), 0.0, 1e-3);
 
         // 恢复增益：参考模型状态保留，前馈立即恢复
         attitude_control.set_feed_forward_gain(1.0);
-        let rate_setpoint = attitude_control.update(attitude_control.get_reference_attitude());
+        let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         assert_near(rate_setpoint[0], omega, 1e-3);
         assert_near(rate_setpoint[1], 0.0, 1e-3);
         assert_near(rate_setpoint[2], 0.0, 1e-3);
@@ -631,7 +631,7 @@ mod tests {
             K_SETTLE_STEPS,
         );
 
-        let rate_setpoint = attitude_control.update(attitude_control.get_reference_attitude());
+        let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         // 偏航前馈只跟踪解析指令，不锁存被测偏航
         assert_near(rate_setpoint[2], commanded, 1e-3);
         assert!(rate_setpoint[2].abs() < 0.2);
@@ -651,7 +651,7 @@ mod tests {
             K_SETTLE_STEPS,
         );
 
-        let rate_setpoint = attitude_control.update(attitude_control.get_reference_attitude());
+        let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         assert_near(rate_setpoint[2], omega, 1e-3);
         assert_near(rate_setpoint[0], 0.0, 1e-3);
         assert_near(rate_setpoint[1], 0.0, 1e-3);
@@ -670,10 +670,10 @@ mod tests {
                 quat_from_rotation_vector(Vector3f::new(0.0, 0.0, slaved_rate * K_DT * i as f32));
             let q_d = q_yaw * q_pitch;
             let dt = if i == 0 { -1.0 } else { K_DT };
-            attitude_control.set_attitude_setpoint(q_d, commanded, dt);
+            attitude_control.update_reference(q_d, commanded, dt);
         }
 
-        let rate_setpoint = attitude_control.update(attitude_control.get_reference_attitude());
+        let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         // 前馈是解析世界系偏航角速率在机体系的投影，不是被跟随的航向斜坡
         assert_near(rate_setpoint[0], -tilt.sin() * commanded, 1e-3);
         assert_near(rate_setpoint[1], 0.0, 1e-3);
@@ -693,7 +693,7 @@ mod tests {
 
         // 解析偏航速率绕过参考模型，以单位增益前馈
         attitude_control.set_feed_forward_gain(0.0);
-        let rate_setpoint = attitude_control.update(attitude_control.get_reference_attitude());
+        let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         assert_near(rate_setpoint[2], commanded, 1e-3);
         assert_near(rate_setpoint[0], 0.0, 1e-3);
         assert_near(rate_setpoint[1], 0.0, 1e-3);
@@ -711,7 +711,7 @@ mod tests {
             K_SETTLE_STEPS,
         );
 
-        let rate_setpoint = attitude_control.update(attitude_control.get_reference_attitude());
+        let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         // 指令偏航不受前馈增益缩放
         assert_near(rate_setpoint[2], commanded, 1e-3);
         assert_near(rate_setpoint[0], 0.0, 1e-3);
@@ -730,7 +730,7 @@ mod tests {
             K_SETTLE_STEPS,
         );
 
-        let rate_setpoint = attitude_control.update(attitude_control.get_reference_attitude());
+        let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         // 误差驱动预判按增益缩放，与解析指令不同
         assert_near(rate_setpoint[0], 0.1 * omega, 1e-3);
         assert_near(rate_setpoint[1], 0.0, 1e-3);
@@ -749,7 +749,7 @@ mod tests {
             K_SETTLE_STEPS,
         );
 
-        let rate_setpoint = attitude_control.update(attitude_control.get_reference_attitude());
+        let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         assert_near(rate_setpoint[0], 0.2, 1e-3);
 
         // 解析指令不受前馈限幅影响
@@ -761,7 +761,7 @@ mod tests {
             0.5,
             K_SETTLE_STEPS,
         );
-        let rate_setpoint = attitude_control.update(attitude_control.get_reference_attitude());
+        let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         assert_near(rate_setpoint[2], 0.5, 1e-3);
     }
 
@@ -769,27 +769,27 @@ mod tests {
     fn reference_model_converges_to_constant_setpoint() {
         let mut attitude_control = feedforward_controller();
         let q_d = quat_from_rotation_vector(Vector3f::new(-0.3, 0.2, 0.4));
-        attitude_control.set_attitude_setpoint(q_d, 0.0, -1.0);
+        attitude_control.update_reference(q_d, 0.0, -1.0);
 
         // 常值设定点：参考模型无误差、保持不动
         for _ in 0..K_SETTLE_STEPS {
-            attitude_control.set_attitude_setpoint(q_d, 0.0, K_DT);
+            attitude_control.update_reference(q_d, 0.0, K_DT);
         }
 
-        assert!((attitude_control.get_reference_attitude().inverse() * q_d).angle() < 1e-6);
+        assert!((attitude_control.reference_attitude().inverse() * q_d).angle() < 1e-6);
     }
 
     #[test]
     fn adapt_attitude_setpoint_applies_world_delta() {
         let mut attitude_control = AttitudeControl::default();
         let q_d = quat_from_rotation_vector(Vector3f::new(0.1, 0.0, 0.0));
-        attitude_control.set_attitude_setpoint(q_d, 0.0, -1.0);
+        attitude_control.update_reference(q_d, 0.0, -1.0);
 
         let q_delta = quat_from_rotation_vector(Vector3f::new(0.0, 0.0, 0.2));
         attitude_control.adapt_attitude_setpoint(q_delta);
 
         let expected = q_delta * q_d;
-        let error = (attitude_control.get_reference_attitude().inverse() * expected).angle();
+        let error = (attitude_control.reference_attitude().inverse() * expected).angle();
         assert!(error < 1e-6);
     }
 }

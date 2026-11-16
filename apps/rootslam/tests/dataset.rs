@@ -62,7 +62,7 @@ fn full_image_imu_pipeline_outputs_states_and_shuts_down() {
     let mut images = Vec::new();
     for camera in 0..2 {
         let mut model = GenericCamera::from_name("pinhole");
-        model.set_from_init(Vector4::new(200.0, 200.0, 128.0, 96.0));
+        model.initialize_intrinsics(Vector4::new(200.0, 200.0, 128.0, 96.0));
         calibration.intrinsics.push(model);
         calibration
             .resolution
@@ -110,7 +110,7 @@ fn full_image_imu_pipeline_outputs_states_and_shuts_down() {
         optical_flow_skip_frames: 1,
         ..VioConfig::default()
     };
-    let mut estimator = VioEstimatorFactory::get_vio_estimator(
+    let mut estimator = VioEstimatorFactory::create(
         &config,
         &calibration,
         &Vector3::new(0.0, 0.0, -9.81),
@@ -156,7 +156,7 @@ fn image_reader_panic_terminates_downstream_workers() {
     let mut calibration = Calibration::default();
     for camera in 0..2 {
         let mut model = GenericCamera::from_name("pinhole");
-        model.set_from_init(Vector4::new(200.0, 200.0, 128.0, 96.0));
+        model.initialize_intrinsics(Vector4::new(200.0, 200.0, 128.0, 96.0));
         calibration.intrinsics.push(model);
         calibration
             .t_i_c
@@ -176,7 +176,7 @@ fn image_reader_panic_terminates_downstream_workers() {
         panic_images: true,
     }));
     let config = VioConfig::default();
-    let estimator = VioEstimatorFactory::get_vio_estimator(
+    let estimator = VioEstimatorFactory::create(
         &config,
         &calibration,
         &Vector3::new(0.0, 0.0, -9.81),

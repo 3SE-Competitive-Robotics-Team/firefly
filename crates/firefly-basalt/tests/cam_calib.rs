@@ -68,7 +68,7 @@ fn setup() -> (CamCalib, Cache) {
     let mut opt = PosesOptimization::new();
     opt.reset_calib(3, &vec!["pinhole".into(); 3]);
     for camera in &mut opt.calib.as_mut().unwrap().intrinsics {
-        camera.set_from_init(Vector4::new(350., 370., 320., 240.));
+        camera.initialize_intrinsics(Vector4::new(350., 370., 320., 240.));
     }
     for frame in 0..3 {
         let time = (frame + 1) * 100;
@@ -170,7 +170,12 @@ fn original_controller_camera_graph_projections_and_stats() {
     controller.init_optimization().unwrap();
     for (i, time) in [100, 200, 300].into_iter().enumerate() {
         compare_pose(
-            controller.calib_opt.as_ref().unwrap().get_t_w_i(time),
+            controller
+                .calib_opt
+                .as_ref()
+                .unwrap()
+                .pose_at(time)
+                .unwrap(),
             &reference["poses"][i],
         );
     }
@@ -215,4 +220,42 @@ fn original_controller_camera_graph_projections_and_stats() {
             .flatten()
             .sum::<usize>()
     );
+    assert_missing_pose_is_not_projected(&mut controller);
+}
+
+fn assert_missing_pose_is_not_projected(controller: &mut CamCalib) {
+    controller
+        .vio_dataset
+        .as_ref()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .image_timestamps()
+        .push(400);
+    assert!(
+        controller
+            .calib_opt
+            .as_ref()
+            .unwrap()
+            .pose_at(400)
+            .is_none()
+    );
+    controller.compute_projections().unwrap();
+    for camera in 0..3 {
+        assert!(
+            !controller
+                .reprojected_corners
+                .contains_key(&TimeCamId::new(400, camera))
+        );
+        assert!(
+            !controller
+                .reprojected_vignette
+                .contains_key(&TimeCamId::new(400, camera))
+        );
+        assert!(
+            controller
+                .reprojected_corners
+                .contains_key(&TimeCamId::new(100, camera))
+        );
+    }
 }

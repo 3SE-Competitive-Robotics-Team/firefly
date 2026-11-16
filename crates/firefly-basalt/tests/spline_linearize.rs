@@ -85,7 +85,7 @@ fn all_five_measurement_families_match_original() {
         ));
     }
     let mut camera = GenericCamera::from_name("pinhole");
-    camera.set_from_init(Vector4::new(320., 315., 320., 240.));
+    camera.initialize_intrinsics(Vector4::new(320., 315., 320., 240.));
     let calibration = Calibration {
         intrinsics: vec![camera],
         t_i_c: vec![Isometry3::translation(0.125, 0., 0.)],

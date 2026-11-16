@@ -348,7 +348,7 @@ fn read_dataset(
     path: &std::path::Path,
     kind: &str,
 ) -> Result<firefly_basalt::io::dataset_io::VioDatasetPtr> {
-    let mut reader = DatasetIoFactory::get_dataset_io(kind, false)?;
+    let mut reader = DatasetIoFactory::create(kind, false)?;
     reader.read(path)?;
     reader
         .data()
@@ -476,7 +476,7 @@ fn collect_opt_flow(
             let _ = self.0.send(None);
         }
     }
-    let flow = OpticalFlowFactory::get_optical_flow(config, calibration)?;
+    let flow = OpticalFlowFactory::create(config, calibration)?;
     let sender = flow.input_queue().clone();
     let (producer, statistics) = std::thread::scope(|scope| {
         let producer = scope.spawn(move || -> Result<()> {
@@ -780,7 +780,7 @@ mod tests {
         use firefly_calibration::camera::generic_camera::GenericCamera;
         use firefly_calibration::image::image::ManagedImage;
         let mut model = GenericCamera::from_name("pinhole");
-        model.set_from_init(nalgebra::Vector4::new(200., 200., 128., 96.));
+        model.initialize_intrinsics(nalgebra::Vector4::new(200., 200., 128., 96.));
         let calibration = Calibration {
             intrinsics: vec![model],
             t_i_c: vec![nalgebra::Isometry3::identity()],

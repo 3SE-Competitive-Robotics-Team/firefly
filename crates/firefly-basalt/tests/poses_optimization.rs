@@ -12,13 +12,27 @@ use firefly_calibration::camera::generic_camera::GenericCamera;
 use nalgebra::{Isometry3, Vector2, Vector3, Vector4};
 use std::collections::BTreeMap;
 
+#[test]
+fn camera_principal_points_are_pixels_and_missing_frame_poses_are_explicit() {
+    let mut optimizer = PosesOptimization::new();
+    let models = ["eucm", "ds", "kb4", "ucm", "pinhole", "pinhole-radtan8"];
+    optimizer.reset_calib(models.len(), &models.map(String::from));
+    for camera in &mut optimizer.calib.as_mut().unwrap().intrinsics {
+        camera.initialize_intrinsics(Vector4::new(200., 210., 123., 87.));
+    }
+    for camera in 0..models.len() {
+        assert_eq!(optimizer.principal_point(camera), Vector2::new(123., 87.));
+    }
+    assert!(optimizer.pose_at(123).is_none());
+}
+
 fn calibration() -> Calibration<f64> {
     Calibration {
         intrinsics: ["pinhole", "ds"]
             .into_iter()
             .map(|name| {
                 let mut c = GenericCamera::from_name(name);
-                c.set_from_init(Vector4::new(200.0, 205.0, 160.0, 120.0));
+                c.initialize_intrinsics(Vector4::new(200.0, 205.0, 160.0, 120.0));
                 c
             })
             .collect(),

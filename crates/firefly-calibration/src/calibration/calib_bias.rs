@@ -64,7 +64,7 @@ impl<S: BasaltScalar> CalibAccelBias<S> {
         self.param += inc;
     }
     /// Upstream test helper, with the Eigen uniform [-1,1] sample stream supplied by the caller.
-    pub fn set_random_with(&mut self, mut sample: impl FnMut() -> S) {
+    pub fn randomize_with(&mut self, mut sample: impl FnMut() -> S) {
         self.param = SVector::from_fn(|_, _| sample());
         for i in 0..3 {
             self.param[i] /= S::from_f64_lossy(10.0);
@@ -124,7 +124,7 @@ impl<S: BasaltScalar> CalibGyroBias<S> {
         self.param += inc;
     }
     /// Upstream test helper, with the Eigen uniform [-1,1] sample stream supplied by the caller.
-    pub fn set_random_with(&mut self, mut sample: impl FnMut() -> S) {
+    pub fn randomize_with(&mut self, mut sample: impl FnMut() -> S) {
         self.param = SVector::from_fn(|_, _| sample());
         for i in 0..3 {
             self.param[i] /= S::from_f64_lossy(10.0);

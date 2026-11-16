@@ -72,7 +72,7 @@ impl<P: SampleConsensusProblem> Lmeds<P> {
             );
         }
         while s.iterations < s.max_iterations && skipped < max_skip {
-            s.sac_model.get_samples(&mut s.iterations, &mut selection);
+            s.sac_model.draw_samples(&mut s.iterations, &mut selection);
             if selection.is_empty() {
                 log::error!("No samples could be selected");
                 break;

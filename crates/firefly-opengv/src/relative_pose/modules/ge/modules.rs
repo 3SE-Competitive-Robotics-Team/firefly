@@ -64,7 +64,11 @@ fn cos(x: f64) -> f64 {
     x.cos()
 }
 /// Writes eigenvalue entries 2 and 3, preserving the other output entries.
-pub fn get_ev(moments: &GeneralizedMoments<'_>, cayley: &Vector3<f64>, roots: &mut Vector4<f64>) {
+pub fn write_eigenvalue_pair(
+    moments: &GeneralizedMoments<'_>,
+    cayley: &Vector3<f64>,
+    roots: &mut Vector4<f64>,
+) {
     let gram: Matrix4<f64> = compose_g(moments, cayley);
 
     let g01_2: f64 = gram[(0, 1)] * gram[(0, 1)];
@@ -147,9 +151,9 @@ pub fn get_ev(moments: &GeneralizedMoments<'_>, cayley: &Vector3<f64>, roots: &m
     roots[3] = temp1 - temp2;
 }
 #[must_use]
-pub fn get_cost(moments: &GeneralizedMoments<'_>, cayley: &Vector3<f64>, step: i32) -> f64 {
+pub fn cost(moments: &GeneralizedMoments<'_>, cayley: &Vector3<f64>, step: i32) -> f64 {
     let mut roots: Vector4<f64> = Vector4::<f64>::zeros();
-    get_ev(moments, cayley, &mut roots);
+    write_eigenvalue_pair(moments, cayley, &mut roots);
 
     let mut cost: f64 = 0.0;
 
@@ -162,29 +166,32 @@ pub fn get_cost(moments: &GeneralizedMoments<'_>, cayley: &Vector3<f64>, step: i
 
     cost
 }
-pub fn get_cost_with_jacobian(
+/// Return the cost and write unscaled differences `f(x + eps) - f(x - eps)`.
+/// The upstream solver consumes these values without division by `2 * eps`.
+pub fn cost_with_central_differences(
     moments: &GeneralizedMoments<'_>,
     cayley: &Vector3<f64>,
     jacobian: &mut SMatrix<f64, 1, 3>,
     step: i32,
 ) -> f64 {
     let eps: f64 = 0.000_000_01;
-    let cost: f64 = get_cost(moments, cayley, step);
+    let base_cost: f64 = cost(moments, cayley, step);
 
     for j in 0..3 {
         let mut cayley_j: Vector3<f64> = *cayley;
         cayley_j[j] += eps;
-        let cost_j: f64 = get_cost(moments, &cayley_j, step);
+        let cost_j: f64 = cost(moments, &cayley_j, step);
 
         cayley_j = *cayley;
         cayley_j[j] -= eps;
-        let cost_jm: f64 = get_cost(moments, &cayley_j, step);
+        let cost_jm: f64 = cost(moments, &cayley_j, step);
         jacobian[(0, j)] = cost_j - cost_jm;
     }
 
-    cost
+    base_cost
 }
-pub fn get_quick_jacobian(
+/// Write unscaled differences `f(x + eps) - current_value`, preserving the upstream solver scale.
+pub fn forward_cost_differences(
     moments: &GeneralizedMoments<'_>,
     cayley: &Vector3<f64>,
     current_value: f64,
@@ -196,7 +203,7 @@ pub fn get_quick_jacobian(
     for j in 0..3 {
         let mut cayley_j: Vector3<f64> = *cayley;
         cayley_j[j] += eps;
-        let cost_j: f64 = get_cost(moments, &cayley_j, step);
+        let cost_j: f64 = cost(moments, &cayley_j, step);
         jacobian[(0, j)] = cost_j - current_value;
     }
 }

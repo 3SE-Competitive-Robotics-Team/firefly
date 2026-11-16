@@ -61,7 +61,7 @@ fn calibration(cameras: i32) -> Calibration<f64> {
     let mut calibration = Calibration::default();
     for camera in 0..cameras {
         let mut model = GenericCamera::from_name("pinhole");
-        model.set_from_init(Vector4::new(200.0, 200.0, 128.0, 96.0));
+        model.initialize_intrinsics(Vector4::new(200.0, 200.0, 128.0, 96.0));
         calibration.intrinsics.push(model);
         calibration.t_i_c.push(Isometry3::from_parts(
             Translation3::new(f64::from(camera) * 0.1, 0.0, 0.0),
@@ -110,7 +110,7 @@ fn all_three_tracking_modes_and_queues_match_cpp() {
                 optical_flow_skip_frames: 2,
                 ..VioConfig::default()
             };
-            let tracker = OpticalFlowFactory::get_optical_flow(&config, &calibration).unwrap();
+            let tracker = OpticalFlowFactory::create(&config, &calibration).unwrap();
             let reference: serde_json::Value = serde_json::from_str(
                 &std::fs::read_to_string(format!(
                     "{}/tests/reference/{mode}_{cameras}.json",
@@ -191,7 +191,7 @@ fn factory_supports_every_original_pattern_and_propagates_termination() {
                 optical_flow_pattern: pattern,
                 ..VioConfig::default()
             };
-            let tracker = OpticalFlowFactory::get_optical_flow(&config, &calibration).unwrap();
+            let tracker = OpticalFlowFactory::create(&config, &calibration).unwrap();
             assert_eq!(
                 tracker.patch_coord.ncols(),
                 if pattern == 24 { 24 } else { 52 }
@@ -207,12 +207,9 @@ fn factory_supports_every_original_pattern_and_propagates_termination() {
 fn worker_connects_backend_queue_and_reports_processing_errors() {
     let calibration = calibration(2);
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    let tracker = OpticalFlowFactory::get_optical_flow_with_output(
-        &VioConfig::default(),
-        &calibration,
-        sender,
-    )
-    .unwrap();
+    let tracker =
+        OpticalFlowFactory::create_with_output(&VioConfig::default(), &calibration, sender)
+            .unwrap();
     tracker.input_queue().send(Some(input(2, 0))).unwrap();
     tracker.input_queue().send(Some(input(2, 1))).unwrap();
     tracker.input_queue().send(None).unwrap();
@@ -221,8 +218,7 @@ fn worker_connects_backend_queue_and_reports_processing_errors() {
     assert!(receiver.recv().unwrap().is_none());
     tracker.shutdown().unwrap();
 
-    let tracker =
-        OpticalFlowFactory::get_optical_flow(&VioConfig::default(), &calibration).unwrap();
+    let tracker = OpticalFlowFactory::create(&VioConfig::default(), &calibration).unwrap();
     tracker
         .input_queue()
         .send(Some(Arc::new(OpticalFlowInput::default())))
@@ -230,5 +226,5 @@ fn worker_connects_backend_queue_and_reports_processing_errors() {
     assert!(tracker.output_queue().recv().unwrap().is_none());
     assert!(tracker.shutdown().is_err());
     // Drop must also stop a worker waiting for its first input.
-    drop(OpticalFlowFactory::get_optical_flow(&VioConfig::default(), &calibration).unwrap());
+    drop(OpticalFlowFactory::create(&VioConfig::default(), &calibration).unwrap());
 }

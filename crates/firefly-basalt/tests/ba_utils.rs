@@ -78,7 +78,7 @@ fn run<S: BasaltScalar>(text: &str, tolerance: f64) {
     );
     for case in data["points"].as_array().unwrap() {
         let mut camera = GenericCamera::<S>::from_name(case["camera"].as_str().unwrap());
-        camera.set_from_init(SVector::<S, 4>::from_row_slice(
+        camera.initialize_intrinsics(SVector::<S, 4>::from_row_slice(
             &[320., 315., 320., 240.].map(scalar),
         ));
         let point = Keypoint::new(

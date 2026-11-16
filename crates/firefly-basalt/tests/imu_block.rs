@@ -156,7 +156,7 @@ fn reference<S: BasaltScalar>(fixture: &Value, tolerance: f64) {
     ]);
     let increment = SVector::<S, 15>::from_fn(|i, _| S::from_f64_lossy((i as f64 - 7.0) * 0.0001));
     for (timestamp, state) in &mut states {
-        state.set_lin_true();
+        state.freeze_linearization_point();
         state.apply_inc(
             &(if *timestamp == 1_000_000_000 {
                 increment

@@ -76,7 +76,7 @@ fn reference<S: BasaltScalar>(fixtures: &Value, tolerance: f64) {
     check(&state, &fixtures[0], tolerance);
     state.apply_inc(&increment);
     check(&state, &fixtures[1], tolerance);
-    state.set_lin_true();
+    state.freeze_linearization_point();
     state.backup();
     state.apply_inc(&increment);
     state.apply_inc(&increment);
@@ -84,7 +84,7 @@ fn reference<S: BasaltScalar>(fixtures: &Value, tolerance: f64) {
     state.restore();
     check(&state, &fixtures[3], tolerance);
     state.apply_inc(&increment);
-    state.set_lin_false();
+    state.reset_to_linearization_point();
     check(&state, &fixtures[4], tolerance);
     state.apply_inc(&increment);
     check(&state, &fixtures[5], tolerance);
@@ -103,7 +103,7 @@ fn pose_only_accumulates_at_fixed_linearization_and_restores() {
     let increment = SVector::<f64, 6>::from_row_slice(&[1.0, 2.0, 3.0, 0.1, -0.2, 0.3]);
     pose.apply_inc(&increment);
     let linearization = *pose.pose();
-    pose.set_lin_true();
+    pose.freeze_linearization_point();
     pose.backup();
     pose.apply_inc(&increment);
     pose.apply_inc(&increment);

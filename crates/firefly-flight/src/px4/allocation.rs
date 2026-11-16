@@ -172,7 +172,7 @@ impl ControlAllocation {
 
     /// 执行器指令 `[0, 1]`。
     #[must_use]
-    pub fn get_actuator_setpoint(&self) -> ActuatorVector {
+    pub fn actuator_setpoint(&self) -> ActuatorVector {
         self.actuator_sp
     }
 
@@ -183,7 +183,7 @@ impl ControlAllocation {
 
     /// 当前控制指令 `[roll, pitch, yaw, thrust_z]`。
     #[must_use]
-    pub fn get_control_setpoint(&self) -> ControlVector {
+    pub fn control_setpoint(&self) -> ControlVector {
         self.control_sp
     }
 
@@ -191,7 +191,7 @@ impl ControlAllocation {
     ///
     /// `actuator_sp` 中的 NaN（停桨）按 0 推力参与计算。
     #[must_use]
-    pub fn get_allocated_control(&self) -> ControlVector {
+    pub fn allocated_control(&self) -> ControlVector {
         let actuator_sp = self
             .actuator_sp
             .map(|value| if value.is_finite() { value } else { 0.0 });
@@ -201,7 +201,7 @@ impl ControlAllocation {
 
     /// 效能矩阵：控制轴 × 执行器。
     #[must_use]
-    pub fn get_effectiveness_matrix(&self) -> EffectivenessMatrix {
+    pub fn effectiveness_matrix(&self) -> EffectivenessMatrix {
         self.effectiveness
     }
 
@@ -212,7 +212,7 @@ impl ControlAllocation {
 
     /// 执行器指令下限，`[0, 1]`。
     #[must_use]
-    pub fn get_actuator_min(&self) -> ActuatorVector {
+    pub fn actuator_min(&self) -> ActuatorVector {
         self.actuator_min
     }
 
@@ -223,7 +223,7 @@ impl ControlAllocation {
 
     /// 执行器指令上限，`[0, 1]`。
     #[must_use]
-    pub fn get_actuator_max(&self) -> ActuatorVector {
+    pub fn actuator_max(&self) -> ActuatorVector {
         self.actuator_max
     }
 
@@ -322,7 +322,7 @@ impl ControlAllocation {
 
     /// 被清零的轴位掩码，位上移量等于轴索引（PX4 `getDroppedAxes`）。
     #[must_use]
-    pub fn get_dropped_axes(&self) -> u8 {
+    pub fn dropped_axes(&self) -> u8 {
         self.dropped_axes
     }
 
@@ -446,7 +446,7 @@ impl ControlAllocationPseudoInverse {
     /// 按优先级 `[thrust_z, roll, pitch, yaw]` 清零（近）线性相关的轴行（PX4 `dropDependentAxes`）。
     ///
     /// 用已接受单位轴行 Gram 矩阵的 Cholesky 因子做 Gram-Schmidt：轴行去掉高优先级轴投影后
-    /// 的范数平方小于 [`MIN_AXIS_INDEPENDENCE`] 时整行清零，避免求近奇异矩阵的伪逆。
+    /// 的范数平方小于 `MIN_AXIS_INDEPENDENCE` 时整行清零，避免求近奇异矩阵的伪逆。
     ///
     /// 返回被清零轴的位掩码，位上移量等于轴索引。
     #[must_use]
@@ -932,7 +932,7 @@ mod tests {
         control[AXIS_THRUST_Z] = thrust_z;
         allocation.set_control_setpoint(control);
         allocation.allocate();
-        allocation.get_actuator_setpoint()
+        allocation.actuator_setpoint()
     }
 
     fn assert_actuator_equals(actual: ActuatorVector, expected: [f32; 4], context: &str) {
@@ -1419,7 +1419,7 @@ mod tests {
         allocation.allocate();
 
         // B * mix * control == control
-        let allocated = allocation.get_allocated_control();
+        let allocated = allocation.allocated_control();
 
         for axis in 0..NUM_AXES {
             assert!(
@@ -1475,19 +1475,19 @@ mod tests {
         );
         allocation.set_control_setpoint(ControlVector::zeros());
         allocation.allocate();
-        let clipped = allocation.clip_actuator_setpoint(allocation.get_actuator_setpoint());
+        let clipped = allocation.clip_actuator_setpoint(allocation.actuator_setpoint());
         allocation.set_actuator_setpoint(clipped);
 
         for i in 0..NUM_ACTUATORS {
             assert!(
-                (allocation.get_actuator_setpoint()[i]).abs() <= 1e-6,
+                (allocation.actuator_setpoint()[i]).abs() <= 1e-6,
                 "执行器 {i}"
             );
         }
 
         for axis in 0..NUM_AXES {
             assert!(
-                allocation.get_allocated_control()[axis].abs() <= 1e-6,
+                allocation.allocated_control()[axis].abs() <= 1e-6,
                 "轴 {axis}"
             );
         }
@@ -1581,7 +1581,7 @@ mod tests {
 
         for i in 0..NUM_ACTUATORS {
             assert!(
-                (allocation.get_actuator_setpoint()[i] - 0.5).abs() <= 1e-6,
+                (allocation.actuator_setpoint()[i] - 0.5).abs() <= 1e-6,
                 "执行器 {i} 应等于配平值"
             );
         }
@@ -1605,7 +1605,7 @@ mod tests {
 
         for i in 0..NUM_ACTUATORS {
             assert!(
-                (allocation.get_actuator_setpoint()[i] - 0.5).abs() <= 1e-5,
+                (allocation.actuator_setpoint()[i] - 0.5).abs() <= 1e-5,
                 "执行器 {i} 应回到线性化点"
             );
         }
@@ -1623,7 +1623,7 @@ mod tests {
 
         for i in 0..NUM_ACTUATORS {
             assert!(
-                (allocation.get_actuator_setpoint()[i] - 0.1).abs() <= 1e-6,
+                (allocation.actuator_setpoint()[i] - 0.1).abs() <= 1e-6,
                 "执行器 {i} 单步应走 0.1"
             );
         }
@@ -1634,7 +1634,7 @@ mod tests {
 
         for i in 0..NUM_ACTUATORS {
             assert!(
-                allocation.get_actuator_setpoint()[i].is_nan(),
+                allocation.actuator_setpoint()[i].is_nan(),
                 "执行器 {i} 应保持停桨"
             );
         }

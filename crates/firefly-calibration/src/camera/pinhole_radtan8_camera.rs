@@ -62,7 +62,8 @@ impl<S: BasaltScalar> PinholeRadtan8Camera<S> {
     pub fn cast<T: BasaltScalar>(&self) -> PinholeRadtan8Camera<T> {
         PinholeRadtan8Camera::new(self.param.map(|v| T::from_f64_lossy(v.as_f64())))
     }
-    pub fn set_from_init(&mut self, init: Vector4<S>) {
+    /// Initialize `[fx, fy, cx, cy]`, clearing distortion and the cached valid-radius limit.
+    pub fn initialize_intrinsics(&mut self, init: Vector4<S>) {
         self.param.fill(S::zero());
         self.param.fixed_rows_mut::<4>(0).copy_from(&init);
         self.rpmax = S::zero();

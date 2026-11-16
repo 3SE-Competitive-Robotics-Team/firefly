@@ -126,7 +126,7 @@ impl NaiveMapperSimulation {
             vio_debug: true,
             ..VioConfig::default()
         };
-        let mut vio = VioEstimatorFactory::get_vio_estimator(
+        let mut vio = VioEstimatorFactory::create(
             &config,
             &self.calibration,
             &Vector3::new(0., 0., -9.81),

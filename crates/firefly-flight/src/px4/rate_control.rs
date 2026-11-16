@@ -4,8 +4,8 @@
 //! 的 `src/lib/rate_control/rate_control.hpp` 与 `src/lib/rate_control/rate_control.cpp`
 //! （BSD-3-Clause）。保持 PX4 的 NED 世界系 / FRD 机体系约定；力矩指令按各轴最大力矩归一化。
 //!
-//! 不移植：`rate_ctrl_status_s` 的 uORB 话题定义与发布——[`RateControl::get_rate_control_status`]
-//! 把三个积分项写入调用方提供的 [`RateCtrlStatus`]。
+//! 不移植：`rate_ctrl_status_s` 的 uORB 话题定义与发布——[`RateControl::rate_control_status`]
+//! 返回包含三个积分项的 [`RateCtrlStatus`]。
 //! 不移植：`RateControl() = default` / `~RateControl()`——Rust 用 [`Default`] 零初始化并由编译器析构。
 //! 不移植：`using namespace matrix`——改用 `nalgebra` 类型。
 
@@ -25,12 +25,12 @@ pub struct RateControl {
     _gain_i: Vector3f,
     /// 微分增益 [归一化力矩/(rad/s²)]。
     _gain_d: Vector3f,
-    /// 积分项绝对值上限 [归一化力矩]。
+    /// 积分项绝对值上限（归一化力矩）。
     _lim_int: Vector3f,
     /// 角速率到力矩的直接前馈增益 [归一化力矩/(rad/s)]。
     _gain_ff: Vector3f,
 
-    /// 积分项状态 [归一化力矩]。
+    /// 积分项状态（归一化力矩）。
     _rate_int: Vector3f,
 
     /// 控制分配反馈的负向饱和标志，轴序 roll/pitch/yaw。
@@ -51,7 +51,7 @@ impl RateControl {
         self._gain_d = d;
     }
 
-    /// 设置所有轴的积分项上限 [归一化力矩]。
+    /// 设置所有轴的积分项上限（归一化力矩）。
     pub fn set_integrator_limit(&mut self, integrator_limit: Vector3f) {
         self._lim_int = integrator_limit;
     }
@@ -94,7 +94,7 @@ impl RateControl {
     /// - `rate` [rad/s]：当前机体角速率估计
     /// - `rate_sp` [rad/s]：期望机体角速率
     /// - `angular_accel` [rad/s²]：机体角加速度
-    /// - `dt` [s]：控制周期
+    /// - `dt`（秒）：控制周期
     /// - `landed`：着陆时冻结积分
     ///
     /// 返回归一化力矩指令 [−1, 1]。
@@ -138,10 +138,13 @@ impl RateControl {
     }
 
     /// 读取积分项状态，供日志/诊断使用。
-    pub fn get_rate_control_status(&self, rate_ctrl_status: &mut RateCtrlStatus) {
-        rate_ctrl_status.rollspeed_integ = self._rate_int[0];
-        rate_ctrl_status.pitchspeed_integ = self._rate_int[1];
-        rate_ctrl_status.yawspeed_integ = self._rate_int[2];
+    #[must_use]
+    pub fn rate_control_status(&self) -> RateCtrlStatus {
+        RateCtrlStatus {
+            rollspeed_integ: self._rate_int[0],
+            pitchspeed_integ: self._rate_int[1],
+            yawspeed_integ: self._rate_int[2],
+        }
     }
 
     /// 一阶积分更新，含抗饱和与随误差衰减的 `i_factor`。
@@ -186,12 +189,6 @@ mod tests {
                 expected[i]
             );
         }
-    }
-
-    fn status(rc: &RateControl) -> RateCtrlStatus {
-        let mut status = RateCtrlStatus::default();
-        rc.get_rate_control_status(&mut status);
-        status
     }
 
     #[test]
@@ -248,7 +245,7 @@ mod tests {
             );
         }
 
-        let state = status(&rate_control);
+        let state = rate_control.rate_control_status();
         assert!((state.rollspeed_integ - 0.05).abs() < 1e-7);
         assert!((state.pitchspeed_integ - 0.05).abs() < 1e-7);
         assert!((state.yawspeed_integ - 0.05).abs() < 1e-7);
@@ -282,7 +279,7 @@ mod tests {
             0.01,
             false,
         );
-        let state = status(&rate_control);
+        let state = rate_control.rate_control_status();
         assert!(state.rollspeed_integ.abs() < 1e-9);
         assert!(state.pitchspeed_integ > 0.0);
         assert!(state.yawspeed_integ > 0.0);
@@ -303,7 +300,7 @@ mod tests {
             0.01,
             false,
         );
-        let state = status(&rate_control);
+        let state = rate_control.rate_control_status();
         assert!(state.pitchspeed_integ.abs() < 1e-9);
         assert!(state.rollspeed_integ > 0.0);
         assert!(state.yawspeed_integ < 0.0);
@@ -327,7 +324,7 @@ mod tests {
             0.01,
             false,
         );
-        let state = status(&rate_control);
+        let state = rate_control.rate_control_status();
         assert!(state.rollspeed_integ.abs() < 1e-9);
         assert!(state.pitchspeed_integ > 0.0);
         assert!(state.yawspeed_integ.abs() < 1e-9);
@@ -352,7 +349,7 @@ mod tests {
             1.0,
             false,
         );
-        let state = status(&rate_control);
+        let state = rate_control.rate_control_status();
         assert!((state.rollspeed_integ - 0.9375 * error_100).abs() < 1e-6);
 
         // 200 °/s：i_factor = 0.75
@@ -365,7 +362,7 @@ mod tests {
             1.0,
             false,
         );
-        let state = status(&rate_control);
+        let state = rate_control.rate_control_status();
         assert!((state.rollspeed_integ - 0.75 * error_200).abs() < 1e-6);
 
         // 400 °/s：i_factor = 0，不再积分
@@ -378,7 +375,7 @@ mod tests {
             1.0,
             false,
         );
-        let state = status(&rate_control);
+        let state = rate_control.rate_control_status();
         assert!(state.rollspeed_integ.abs() < 1e-9);
     }
 
@@ -399,7 +396,7 @@ mod tests {
             0.01,
             true,
         );
-        let state = status(&rate_control);
+        let state = rate_control.rate_control_status();
         assert!(state.rollspeed_integ.abs() < 1e-12);
 
         let _ = rate_control.update(
@@ -409,7 +406,7 @@ mod tests {
             0.01,
             false,
         );
-        let state = status(&rate_control);
+        let state = rate_control.rate_control_status();
         assert!(state.rollspeed_integ > 0.0);
     }
 
@@ -431,7 +428,7 @@ mod tests {
             f32::INFINITY,
             false,
         );
-        let state = status(&rate_control);
+        let state = rate_control.rate_control_status();
         assert!(state.rollspeed_integ.abs() < 1e-12);
     }
 
@@ -453,13 +450,13 @@ mod tests {
         );
 
         rate_control.reset_integral_axis(1);
-        let state = status(&rate_control);
+        let state = rate_control.rate_control_status();
         assert!(state.rollspeed_integ > 0.0);
         assert!(state.pitchspeed_integ.abs() < 1e-12);
         assert!(state.yawspeed_integ > 0.0);
 
         rate_control.reset_integral();
-        let state = status(&rate_control);
+        let state = rate_control.rate_control_status();
         assert!(state.rollspeed_integ.abs() < 1e-12);
         assert!(state.pitchspeed_integ.abs() < 1e-12);
         assert!(state.yawspeed_integ.abs() < 1e-12);

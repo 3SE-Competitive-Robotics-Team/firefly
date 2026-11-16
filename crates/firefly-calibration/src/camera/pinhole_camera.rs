@@ -35,7 +35,8 @@ impl<S: BasaltScalar> PinholeCamera<S> {
         &self.param
     }
 
-    pub fn set_from_init(&mut self, param: Vector4<S>) {
+    /// Initialize pinhole intrinsics from `[fx, fy, cx, cy]`.
+    pub fn initialize_intrinsics(&mut self, param: Vector4<S>) {
         self.param = param;
     }
 

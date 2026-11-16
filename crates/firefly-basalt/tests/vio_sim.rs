@@ -7,7 +7,7 @@ use serde_json::Value;
 
 fn calibration() -> Calibration<f64> {
     let mut camera = GenericCamera::from_name("pinhole");
-    camera.set_from_init(Vector4::new(320., 315., 320., 240.));
+    camera.initialize_intrinsics(Vector4::new(320., 315., 320., 240.));
     Calibration {
         intrinsics: vec![camera.clone(), camera],
         t_i_c: vec![Isometry3::identity(), Isometry3::translation(0.125, 0., 0.)],

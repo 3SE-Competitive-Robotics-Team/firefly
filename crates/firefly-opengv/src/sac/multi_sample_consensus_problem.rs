@@ -109,7 +109,7 @@ pub trait MultiSampleConsensusProblem {
     fn draw_index_sample(&mut self, sample: &mut [Vec<usize>]) {
         self.state_mut().draw_index_sample(sample);
     }
-    fn get_samples(&mut self, iterations: &mut i32, samples: &mut Vec<Vec<usize>>) {
+    fn draw_samples(&mut self, iterations: &mut i32, samples: &mut Vec<Vec<usize>>) {
         let sizes = self.sample_sizes();
         samples.resize_with(sizes.len(), Vec::new);
         for (g, &n) in sizes.iter().enumerate() {

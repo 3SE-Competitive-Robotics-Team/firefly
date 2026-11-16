@@ -207,7 +207,7 @@ impl LiveSession {
         let right =
             Subscriber::<GrayImageMessage>::with_options(&node, CAMERA_RIGHT_TOPIC, image_options)?;
         let viz = VizPublisher::new(&node)?;
-        let mut estimator = VioEstimatorFactory::get_vio_estimator(
+        let mut estimator = VioEstimatorFactory::create(
             &vio,
             calibration,
             &model.gravity,
@@ -235,7 +235,7 @@ impl LiveSession {
         } else {
             (None, None)
         };
-        let flow = OpticalFlowFactory::get_optical_flow_with_output(
+        let flow = OpticalFlowFactory::create_with_output(
             &vio,
             calibration,
             estimator.vision_data_queue().clone(),

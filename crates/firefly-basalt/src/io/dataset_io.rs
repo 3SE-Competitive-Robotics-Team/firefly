@@ -113,10 +113,7 @@ pub struct DatasetIoFactory;
 impl DatasetIoFactory {
     /// # Errors
     /// Returns an error for an unsupported dataset type.
-    pub fn get_dataset_io(
-        dataset_type: &str,
-        load_mocap_as_gt: bool,
-    ) -> Result<DatasetIoInterfacePtr> {
+    pub fn create(dataset_type: &str, load_mocap_as_gt: bool) -> Result<DatasetIoInterfacePtr> {
         match dataset_type {
             "euroc" => Ok(Box::new(super::dataset_io_euroc::EurocIo::new(
                 load_mocap_as_gt,

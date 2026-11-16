@@ -33,7 +33,9 @@ impl<S: BasaltScalar> BalCamera<S> {
     pub fn cast<T: BasaltScalar>(&self) -> BalCamera<T> {
         BalCamera::new(self.param.map(|v| T::from_f64_lossy(v.as_f64())))
     }
-    pub fn set_from_init(&mut self, init: Vector4<S>) {
+    /// Initialize focal length from `init[0]` and clear radial distortion.
+    /// BAL uses a single focal length and centered image coordinates.
+    pub fn initialize_intrinsics(&mut self, init: Vector4<S>) {
         self.param = Vector3::new(init[0], S::zero(), S::zero());
     }
     pub fn increment(&mut self, inc: &Vector3<S>) {

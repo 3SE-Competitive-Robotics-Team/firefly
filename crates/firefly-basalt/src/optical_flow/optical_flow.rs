@@ -178,10 +178,7 @@ pub struct OpticalFlowFactory;
 impl OpticalFlowFactory {
     /// # Errors
     /// Rejects unknown type/pattern names, invalid calibration or thread creation failure.
-    pub fn get_optical_flow(
-        config: &VioConfig,
-        calib: &Calibration<f64>,
-    ) -> Result<OpticalFlowBase> {
+    pub fn create(config: &VioConfig, calib: &Calibration<f64>) -> Result<OpticalFlowBase> {
         let engine = Self::create_engine(config, calib)?;
         let (sender, receiver) = mpsc::channel();
         Self::start(engine, OutputQueue::Unbounded(sender), Some(receiver))
@@ -190,7 +187,7 @@ impl OpticalFlowFactory {
     /// Attach the caller's existing backend vision queue directly, preserving its backpressure.
     /// # Errors
     /// Rejects invalid tracker configuration or thread creation failure.
-    pub fn get_optical_flow_with_output(
+    pub fn create_with_output(
         config: &VioConfig,
         calib: &Calibration<f64>,
         output: SyncSender<Option<Arc<OpticalFlowResult>>>,

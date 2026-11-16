@@ -101,7 +101,7 @@ fn setup() -> CamImuCalib {
     let calibration = optimizer.calib.as_mut().unwrap();
     for camera in 0..2 {
         let x = camera as f64;
-        calibration.intrinsics[camera].set_from_init(Vector4::new(350., 370., 320., 240.));
+        calibration.intrinsics[camera].initialize_intrinsics(Vector4::new(350., 370., 320., 240.));
         calibration.t_i_c[camera] = Isometry3::from_parts(
             Translation3::new(0.1 * x, 0.02, -0.01),
             so3_exp(&Vector3::new(0.01, -0.02 * x, 0.03)),

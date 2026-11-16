@@ -261,14 +261,14 @@ impl MapperSimulation {
         self.mapper.setup_opt();
         self.mapper
             .base
-            .get_current_points(&mut self.points, &mut self.point_ids);
+            .write_landmark_visualization(&mut self.points, &mut self.point_ids);
         Ok(())
     }
     pub fn optimize(&mut self) {
         self.mapper.optimize(10);
         self.mapper
             .base
-            .get_current_points(&mut self.points, &mut self.point_ids);
+            .write_landmark_visualization(&mut self.points, &mut self.point_ids);
         self.compute_edge_vis();
     }
     pub fn compute_edge_vis(&mut self) {

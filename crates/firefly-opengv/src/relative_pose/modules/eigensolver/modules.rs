@@ -57,7 +57,7 @@ fn cos(x: f64) -> f64 {
 fn sin(x: f64) -> f64 {
     x.sin()
 }
-pub fn get_smallest_ev(
+pub fn smallest_eigenvalue(
     moments: &BearingMoments<'_>,
     cayley: &Vector3<f64>,
     matrix: &mut Matrix3<f64>,
@@ -90,7 +90,7 @@ pub fn get_smallest_ev(
     let smallest_ev: f64 = (-quadratic - 2.0 * root_product) / 3.0;
     smallest_ev
 }
-pub fn get_smallest_ev_with_jacobian(
+pub fn smallest_eigenvalue_with_jacobian(
     moments: &BearingMoments<'_>,
     cayley: &Vector3<f64>,
     jacobian: &mut SMatrix<f64, 1, 3>,

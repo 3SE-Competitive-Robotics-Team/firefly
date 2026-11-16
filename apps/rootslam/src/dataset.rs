@@ -170,7 +170,7 @@ fn run_inner(
     } = inputs;
     let (states_tx, states_rx) = mpsc::channel();
     estimator.outputs.state = Some(states_tx);
-    let flow = OpticalFlowFactory::get_optical_flow_with_output(
+    let flow = OpticalFlowFactory::create_with_output(
         config,
         calibration,
         estimator.vision_data_queue().clone(),

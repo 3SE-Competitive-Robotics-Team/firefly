@@ -72,7 +72,7 @@ impl Meta {
         format.clone_into(&mut self.format);
         self
     }
-    pub fn set_meta(&mut self, other: &Self) {
+    pub fn copy_format_from(&mut self, other: &Self) {
         self.format.clone_from(&other.format);
     }
 }
@@ -132,7 +132,7 @@ impl ExecutionStats {
                 }
             }
             self.entry(name, matches!(meta.data, Samples::Vectors(_)))
-                .set_meta(meta);
+                .copy_format_from(meta);
         }
     }
     /// Vector statistics are not summed, matching the upstream implementation.
@@ -140,9 +140,9 @@ impl ExecutionStats {
         for name in &other.order {
             let meta = &other.stats[name];
             if let Samples::Scalars(values) = &meta.data {
-                self.add(name, values.iter().sum()).set_meta(meta);
+                self.add(name, values.iter().sum()).copy_format_from(meta);
             } else if let Some(destination) = self.stats.get_mut(name) {
-                destination.set_meta(meta);
+                destination.copy_format_from(meta);
             }
         }
     }

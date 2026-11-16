@@ -32,7 +32,7 @@ fn check_initial_bias_prior(is_sqrt: bool, gyro: bool) {
     );
 
     // Name the physical state being changed; do not repeat its increment indices.
-    let initial = estimator.get_state().clone();
+    let initial = estimator.latest_state().clone();
     let mut changed = initial.clone();
     let perturbation = Vector3::new(0.01, -0.02, 0.03);
     let information = if gyro {
@@ -95,7 +95,7 @@ fn accelerating_stereo_preserves_pose_and_bias_through_marginalization() {
 
     let focal = 120.0 / (70.88_f64.to_radians() * 0.5).tan();
     let mut camera = GenericCamera::from_name("pinhole");
-    camera.set_from_init(Vector4::new(focal, focal, 159.5, 119.5));
+    camera.initialize_intrinsics(Vector4::new(focal, focal, 159.5, 119.5));
     let calibration = Calibration::<f64> {
         intrinsics: vec![camera.clone(), camera],
         t_i_c: vec![Isometry3::identity(), Isometry3::translation(0.05, 0., 0.)],
@@ -166,7 +166,7 @@ fn accelerating_stereo_preserves_pose_and_bias_through_marginalization() {
             ..OpticalFlowResult::default()
         });
         let measurement = (frame > 0).then(|| {
-            let state = estimator.get_state();
+            let state = estimator.latest_state();
             let mut measurement =
                 IntegratedImuMeasurement::new(time - 20_000_000, state.bias_gyro, state.bias_accel);
             for sample in 1..=20 {
@@ -187,7 +187,7 @@ fn accelerating_stereo_preserves_pose_and_bias_through_marginalization() {
         estimator
             .measure(&flow, measurement, &outputs, &status)
             .unwrap();
-        let state = estimator.get_state();
+        let state = estimator.latest_state();
         assert!(
             (state.state.pose.t_w_i.translation.vector - position(t)).norm() < 1e-3,
             "frame {frame}: position {:?}, expected {:?}, bias {:?}, velocity {:?}, rotation {:?}",

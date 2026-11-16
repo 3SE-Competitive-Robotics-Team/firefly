@@ -73,8 +73,9 @@ impl<S: BasaltScalar> GenericCamera<S> {
             DVector::from_column_slice(camera.param().as_slice())
         )
     }
-    pub fn set_from_init(&mut self, init: Vector4<S>) {
-        visit!(self, camera, camera.set_from_init(init));
+    /// Initialize from `[fx, fy, cx, cy]`, resetting model-specific parameters to their defaults.
+    pub fn initialize_intrinsics(&mut self, init: Vector4<S>) {
+        visit!(self, camera, camera.initialize_intrinsics(init));
     }
     /// # Panics
     /// Panics if the increment length differs from the camera's parameter count.

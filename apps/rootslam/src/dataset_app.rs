@@ -143,7 +143,7 @@ pub fn run(
     let optimization = options.resolved_optimization(precision);
     let dataset = source.dataset()?;
     let evaluation_data = evaluation_data(options, &dataset, calibration.cam_time_offset_ns)?;
-    let mut estimator = VioEstimatorFactory::get_vio_estimator(
+    let mut estimator = VioEstimatorFactory::create(
         &config,
         calibration,
         &model.gravity,
@@ -214,7 +214,7 @@ pub fn run(
     save_global_result(options, mapped.as_ref(), optimization)?;
     save_results(options, &states, mapped.as_ref(), evaluation_data)?;
     let mut memory = firefly_basalt::utils::system_utils::MemoryInfo::default();
-    if firefly_basalt::utils::system_utils::get_memory_info(&mut memory) {
+    if firefly_basalt::utils::system_utils::read_memory_info(&mut memory) {
         log::info!(
             "Process memory: {} resident bytes, {} peak resident bytes (including mapped input pages)",
             memory.resident_memory,
@@ -415,7 +415,7 @@ fn save_original_results(
     let rms_ate = align_ground_truth(&estimates, gt_times, &mut positions)?;
     if let Some(directory) = &options.debug_directory {
         let mut memory = firefly_basalt::utils::system_utils::MemoryInfo::default();
-        let peak = firefly_basalt::utils::system_utils::get_memory_info(&mut memory)
+        let peak = firefly_basalt::utils::system_utils::read_memory_info(&mut memory)
             .then_some(memory.resident_memory_peak);
         crate::dataset_output::original_statistics(
             duration,

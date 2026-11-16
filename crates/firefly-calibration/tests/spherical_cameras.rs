@@ -76,7 +76,8 @@ macro_rules! reference {
                     }
                 }
                 let mut initialized = $camera::<S>::default();
-                initialized.set_from_init(Vector4::from([1., 2., 3., 4.].map(S::from_f64_lossy)));
+                initialized
+                    .initialize_intrinsics(Vector4::from([1., 2., 3., 4.].map(S::from_f64_lossy)));
                 compare(initialized.param(), &f["init"], tolerance);
                 initialized.increment(&SVector::repeat(S::from_f64_lossy(2.)));
                 compare(initialized.param(), &f["increment_high"], tolerance);

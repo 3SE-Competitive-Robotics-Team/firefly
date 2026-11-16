@@ -102,7 +102,7 @@ pub trait SampleConsensusProblem {
     fn draw_index_sample(&mut self, sample: &mut [usize]) {
         self.state_mut().draw_index_sample(sample);
     }
-    fn get_samples(&mut self, iterations: &mut i32, samples: &mut Vec<usize>) {
+    fn draw_samples(&mut self, iterations: &mut i32, samples: &mut Vec<usize>) {
         let n = self.sample_size();
         if self.state().indices.len() < n {
             log::error!(

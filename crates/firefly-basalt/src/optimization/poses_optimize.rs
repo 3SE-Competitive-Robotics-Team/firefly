@@ -94,17 +94,17 @@ impl PosesOptimization {
     pub fn new() -> Self {
         Self::default()
     }
+    /// Pixel principal point `(cx, cy)` of one calibrated camera.
     /// # Panics
     /// Requires initialized calibration and a valid camera index.
     #[must_use]
-    pub fn get_optical_center(&self, camera: usize) -> Vector2<f64> {
-        self.calib
+    pub fn principal_point(&self, camera: usize) -> Vector2<f64> {
+        let model = &self
+            .calib
             .as_ref()
             .expect("calibration initialized")
-            .intrinsics[camera]
-            .param()
-            .fixed_rows::<2>(2)
-            .into_owned()
+            .intrinsics[camera];
+        model.param().fixed_rows::<2>(2).into_owned()
     }
     /// # Panics
     /// Requires one camera type per camera.
@@ -177,11 +177,9 @@ impl PosesOptimization {
         self.recompute_size();
     }
     #[must_use]
-    pub fn get_t_w_i(&self, time: i64) -> Isometry3<f64> {
-        self.timestamp_to_pose
-            .get(&time)
-            .copied()
-            .unwrap_or_default()
+    /// World-from-IMU pose for an initialized calibration frame.
+    pub fn pose_at(&self, timestamp_ns: i64) -> Option<Isometry3<f64>> {
+        self.timestamp_to_pose.get(&timestamp_ns).copied()
     }
     pub fn set_aprilgrid_corners_3d(&mut self, corners: &[Vector4<f64>]) {
         self.aprilgrid_corner_pos_3d = corners.to_vec();

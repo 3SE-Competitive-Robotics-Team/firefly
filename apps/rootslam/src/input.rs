@@ -115,9 +115,9 @@ impl Source {
                     .data()
                     .ok_or_else(|| error("Dataset reader returned no data"));
             }
-            Format::Euroc => DatasetIoFactory::get_dataset_io("euroc", false)?,
-            Format::Uzh => DatasetIoFactory::get_dataset_io("uzh", false)?,
-            Format::Kitti => DatasetIoFactory::get_dataset_io("kitti", false)?,
+            Format::Euroc => DatasetIoFactory::create("euroc", false)?,
+            Format::Uzh => DatasetIoFactory::create("uzh", false)?,
+            Format::Kitti => DatasetIoFactory::create("kitti", false)?,
         };
         reader.read(path)?;
         reader
@@ -261,7 +261,7 @@ impl AriaCalibration {
             }
             let mut model =
                 firefly_calibration::camera::generic_camera::GenericCamera::from_name("pinhole");
-            model.set_from_init(Vector4::from(camera.params));
+            model.initialize_intrinsics(Vector4::from(camera.params));
             c.intrinsics.push(model);
             c.resolution.push(Vector2::new(
                 camera.resolution.width,
@@ -284,7 +284,7 @@ pub(crate) fn simulator_calibration() -> Calibration<f64> {
     let focal = IMAGE_HEIGHT as f64 * 0.5 / (rig::FOV_Y_DEG.to_radians() * 0.5).tan();
     let center = rig::principal_point(IMAGE_WIDTH, IMAGE_HEIGHT);
     let mut camera = GenericCamera::from_name("pinhole");
-    camera.set_from_init(Vector4::new(focal, focal, center[0], center[1]));
+    camera.initialize_intrinsics(Vector4::new(focal, focal, center[0], center[1]));
     let pose = |frame| {
         let rotation =
             UnitQuaternion::from_matrix(&(rig::cam_axes_in_body() * rig::CV_FROM_RENDER));

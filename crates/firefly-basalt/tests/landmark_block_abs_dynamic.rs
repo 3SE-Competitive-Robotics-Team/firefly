@@ -88,7 +88,7 @@ fn run<S: BasaltScalar>(text: &str, tolerance: f64) {
         order.total_size = 18;
         order.items = 3;
         let mut camera = GenericCamera::from_name("pinhole");
-        camera.set_from_init(Vector4::new(s(320.), s(315.), s(320.), s(240.)));
+        camera.initialize_intrinsics(Vector4::new(s(320.), s(315.), s(320.), s(240.)));
         let calibration = Calibration {
             intrinsics: vec![camera.clone(), camera],
             ..Calibration::default()
@@ -186,7 +186,7 @@ fn check_sparse_accumulation<S: BasaltScalar>(
     block.perform_qr();
     let mut jacobian = DMatrix::zeros(block.num_q2_rows(), order.total_size);
     let mut residual = DVector::zeros(block.num_q2_rows());
-    block.get_dense_q2jp_q2r(&mut jacobian, &mut residual, 0);
+    block.write_reduced_system(&mut jacobian, &mut residual, 0);
     let initial_h =
         |row: usize, col: usize| S::from_f64_lossy(0.25 + row as f64 * 0.003 - col as f64 * 0.007);
     let mut h = DMatrix::from_fn(51, 51, initial_h);

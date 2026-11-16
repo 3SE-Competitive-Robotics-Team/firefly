@@ -125,8 +125,8 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationAbsQr<'a, S, POSE
                 relative.d_rel_d_h.fill(S::zero());
                 relative.d_rel_d_t.fill(S::zero());
             } else {
-                let host_state = estimator.get_pose_state_with_lin(host.frame_id);
-                let target_state = estimator.get_pose_state_with_lin(target.frame_id);
+                let host_state = estimator.pose_linearization_at(host.frame_id);
+                let target_state = estimator.pose_linearization_at(target.frame_id);
                 let mut pose = compute_rel_pose(
                     host_state.pose_lin(),
                     &estimator.calib.t_i_c[host.cam_id],
@@ -213,7 +213,7 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationAbsQr<'a, S, POSE
         decrease
     }
     #[must_use]
-    pub fn get_jp_diag2(&self) -> DVector<S> {
+    pub fn jacobian_column_squared_norms(&self) -> DVector<S> {
         let mut result = self
             .landmark_blocks
             .par_iter()
@@ -267,7 +267,7 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationAbsQr<'a, S, POSE
     #[must_use]
     /// # Panics
     /// Requires a square-root marginalization prior and valid block dimensions.
-    pub fn get_dense_q2jp_q2r(
+    pub fn assemble_square_root_system(
         &self,
         estimator: &BundleAdjustmentBase<S>,
     ) -> (DMatrix<S>, DVector<S>) {
@@ -283,7 +283,7 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationAbsQr<'a, S, POSE
         let mut jacobian = DMatrix::zeros(rows, self.order.total_size);
         let mut residual = DVector::zeros(rows);
         for (block, &offset) in self.landmark_blocks.iter().zip(&self.landmark_offsets) {
-            block.get_dense_q2jp_q2r(&mut jacobian, &mut residual, offset);
+            block.write_reduced_system(&mut jacobian, &mut residual, offset);
         }
         for (index, block) in self.imu_blocks.iter().enumerate() {
             block.add_dense_q2jp_q2r(&mut jacobian, &mut residual, imu_start + index * 15);
@@ -315,7 +315,10 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationAbsQr<'a, S, POSE
     #[must_use]
     /// # Panics
     /// Requires an unscaled marginalization prior.
-    pub fn get_dense_h_b(&self, estimator: &BundleAdjustmentBase<S>) -> (DMatrix<S>, DVector<S>) {
+    pub fn assemble_normal_equations(
+        &self,
+        estimator: &BundleAdjustmentBase<S>,
+    ) -> (DMatrix<S>, DVector<S>) {
         let size = self.order.total_size;
         // Bound full-size dense accumulators by the worker count. A Rayon fold
         // initializes per split job, which can otherwise allocate one Hessian

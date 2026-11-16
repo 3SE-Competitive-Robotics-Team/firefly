@@ -123,7 +123,10 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationRelSc<'a, S, POSE
         decrease
     }
     #[must_use]
-    pub fn get_dense_h_b(&self, estimator: &BundleAdjustmentBase<S>) -> (DMatrix<S>, DVector<S>) {
+    pub fn assemble_normal_equations(
+        &self,
+        estimator: &BundleAdjustmentBase<S>,
+    ) -> (DMatrix<S>, DVector<S>) {
         let create = || {
             let mut accumulator = DenseAccumulator::default();
             accumulator.reset(self.order.total_size);
@@ -157,16 +160,16 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationRelSc<'a, S, POSE
         (hessian, rhs)
     }
     #[must_use]
-    pub fn get_dense_q2jp_q2r(
+    pub fn assemble_square_root_system(
         &self,
         estimator: &BundleAdjustmentBase<S>,
     ) -> (DMatrix<S>, DVector<S>) {
-        let (h, b) = self.get_dense_h_b(estimator);
+        let (h, b) = self.assemble_normal_equations(estimator);
         normal_to_square_root(h, &b)
     }
     /// # Panics
     /// This operation aborts in the original Schur implementation.
-    pub fn get_jp_diag2(&self) -> DVector<S> {
+    pub fn jacobian_column_squared_norms(&self) -> DVector<S> {
         panic!("Original rel SC does not implement Jacobian scaling")
     }
     /// # Panics

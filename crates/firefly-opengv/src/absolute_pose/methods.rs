@@ -163,7 +163,7 @@ pub fn epnp(
 ) -> Option<Transformation> {
     valid(adapter, indices, 6)?;
     let mut pnp = Epnp::new();
-    pnp.set_maximum_number_of_correspondences(indices.len());
+    pnp.ensure_correspondence_capacity(indices.len());
     pnp.reset_correspondences();
     for &i in indices {
         let p = adapter.point(i);

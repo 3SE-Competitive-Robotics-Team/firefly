@@ -202,7 +202,7 @@ impl Controller {
         }
         self.input_invalid = false;
 
-        self.attitude_setpoint = self.position.get_attitude_setpoint();
+        self.attitude_setpoint = self.position.attitude_setpoint();
         self.run_inner_loop(state, airframe, dt, landed, false)
     }
 
@@ -266,7 +266,7 @@ impl Controller {
         snap_attitude_reference: bool,
     ) -> Option<[f32; 4]> {
         let q_frd_ned = attitude_to_frd_ned(state.attitude);
-        self.attitude.set_attitude_setpoint(
+        self.attitude.update_reference(
             self.attitude_setpoint.q_d,
             self.attitude_setpoint.yaw_sp_move_rate,
             if snap_attitude_reference { -1.0 } else { dt },
@@ -296,9 +296,9 @@ impl Controller {
         self.allocation.allocate();
         let actuator_sp = self
             .allocation
-            .clip_actuator_setpoint(self.allocation.get_actuator_setpoint());
+            .clip_actuator_setpoint(self.allocation.actuator_setpoint());
         self.allocation.set_actuator_setpoint(actuator_sp);
-        self.allocated_control = self.allocation.get_allocated_control();
+        self.allocated_control = self.allocation.allocated_control();
 
         // 下一 tick 的抗饱和反馈：未分配到的力矩（PX4 `control_allocator_status`）。
         let unallocated = control - self.allocated_control;

@@ -13,12 +13,76 @@ use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{Isometry3, Vector2, Vector3, Vector4};
 use std::{collections::BTreeMap, sync::Arc};
 
+fn retained_queries<S: BasaltScalar>() {
+    use firefly_basalt::{
+        utils::imu_types::PoseStateWithLin,
+        vi_estimator::sqrt_keypoint_vio::SqrtKeypointVioEstimator,
+    };
+    let config = VioConfig::default();
+    let calibration = Calibration::default();
+    let mut vo = SqrtKeypointVoEstimator::<S>::new(&calibration, &config);
+    let mut vio =
+        SqrtKeypointVioEstimator::<S>::new(&Vector3::new(0., 0., -9.81), &calibration, &config);
+    let pose = Isometry3::translation(1., 2., 3.);
+    for engine in [&mut vo as &mut dyn VioEstimatorEngine, &mut vio] {
+        engine.initialize_state(
+            17,
+            pose,
+            Vector3::repeat(0.5),
+            Vector3::repeat(0.25),
+            Vector3::repeat(0.125),
+        );
+    }
+    let pose_only = Isometry3::translation(4., 5., 6.);
+    for base in [&mut vo.base, &mut vio.ba] {
+        base.frame_poses
+            .insert(23, PoseStateWithLin::new(23, pose_only, false).cast::<S>());
+    }
+    let state = VioEstimatorEngine::state_at(&vio, 17).unwrap();
+    assert_eq!(state.state.pose.t_ns, 17);
+    assert_eq!(state.state.pose.t_w_i, pose);
+    assert_eq!(state.state.vel_w_i, Vector3::repeat(0.5));
+    assert_eq!(state.bias_gyro, Vector3::repeat(0.25));
+    assert_eq!(state.bias_accel, Vector3::repeat(0.125));
+    assert!(
+        vo.state_at(17).is_none(),
+        "VO does not estimate velocity or IMU biases"
+    );
+    for engine in [&vo as &dyn VioEstimatorEngine, &vio] {
+        assert_eq!(engine.pose_at(17), Some(pose));
+        assert_eq!(engine.pose_at(23), Some(pose_only));
+        assert!(
+            engine.state_at(23).is_none(),
+            "a pose-only frame has no velocity or bias estimate"
+        );
+        assert!(engine.state_at(99).is_none());
+        assert!(
+            engine.pose_at(99).is_none(),
+            "an absent pose must not become an identity pose"
+        );
+        assert_eq!(
+            engine.collect_poses(),
+            BTreeMap::from([(17, pose), (23, pose_only)])
+        );
+    }
+    assert_eq!(vo.latest_timestamp_ns(), 17);
+    assert_eq!(vio.latest_timestamp_ns(), 17);
+    assert_eq!(vo.latest_pose().translation.vector[0].as_f64(), 1.);
+    assert_eq!(vio.latest_velocity()[0].as_f64(), 0.5);
+}
+
+#[test]
+fn retained_queries_distinguish_complete_pose_only_and_absent_frames_in_both_precisions() {
+    retained_queries::<f32>();
+    retained_queries::<f64>();
+}
+
 #[test]
 fn worker_join_preserves_initialized_state_and_rejects_restart() {
     use firefly_basalt::vi_estimator::vio_estimator::VioEstimatorFactory;
     for use_imu in [false, true] {
         for use_double in [false, true] {
-            let mut estimator = VioEstimatorFactory::get_vio_estimator(
+            let mut estimator = VioEstimatorFactory::create(
                 &VioConfig::default(),
                 &Calibration::default(),
                 &Vector3::new(0., 0., -9.81),
@@ -54,8 +118,15 @@ fn worker_join_preserves_initialized_state_and_rejects_restart() {
             let _ = estimator.imu_data_queue().send(None);
             estimator.maybe_join().unwrap();
             let engine = estimator.engine().unwrap();
-            assert_eq!(engine.get_state_at(17).state.pose.t_w_i, pose);
-            assert_eq!(engine.get_all_poses_map()[&17], pose);
+            if use_imu {
+                assert_eq!(engine.state_at(17).unwrap().state.pose.t_w_i, pose);
+            } else {
+                assert!(engine.state_at(17).is_none());
+            }
+            assert_eq!(engine.pose_at(17), Some(pose));
+            assert!(engine.state_at(18).is_none());
+            assert!(engine.pose_at(18).is_none());
+            assert_eq!(engine.collect_poses()[&17], pose);
             assert!(
                 estimator
                     .initialize(Vector3::zeros(), Vector3::zeros())

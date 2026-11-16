@@ -1182,7 +1182,7 @@ mod tests {
     fn scene() -> (MapSnapshot, Calibration<f64>) {
         let mut calibration = Calibration::default();
         let mut camera = GenericCamera::from_name("pinhole");
-        camera.set_from_init(Vector4::new(300.0, 310.0, 320.0, 240.0));
+        camera.initialize_intrinsics(Vector4::new(300.0, 310.0, 320.0, 240.0));
         calibration.intrinsics = vec![camera.clone(), camera];
         calibration.t_i_c = vec![Isometry3::identity(), Isometry3::translation(0.2, 0.0, 0.0)];
         let mut snapshot = MapSnapshot::default();
@@ -1268,7 +1268,7 @@ mod tests {
     fn nearly_converged_scene() -> (MapSnapshot, Calibration<f64>) {
         let mut calibration = Calibration::default();
         let mut camera = GenericCamera::from_name("pinhole");
-        camera.set_from_init(Vector4::new(300.0, 310.0, 320.0, 240.0));
+        camera.initialize_intrinsics(Vector4::new(300.0, 310.0, 320.0, 240.0));
         calibration.intrinsics = vec![camera.clone(), camera];
         calibration.t_i_c = vec![Isometry3::identity(), Isometry3::translation(0.2, 0.0, 0.0)];
         let mut snapshot = MapSnapshot::default();

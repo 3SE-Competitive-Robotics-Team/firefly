@@ -21,7 +21,7 @@ pub struct MemoryInfo {
 
 /// Samples process resident memory using the original Linux sources. Returns
 /// false on unavailable counters; unsupported platforms leave `info` unchanged.
-pub fn get_memory_info(info: &mut MemoryInfo) -> bool {
+pub fn read_memory_info(info: &mut MemoryInfo) -> bool {
     #[cfg(target_os = "linux")]
     {
         use nix::{
@@ -65,7 +65,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn process_memory_uses_byte_units() {
         let mut info = MemoryInfo::default();
-        assert!(get_memory_info(&mut info));
+        assert!(read_memory_info(&mut info));
         // getrusage can retain the pre-exec high-water mark; VmHWM describes
         // the current address space and is not an upper bound on that counter.
         let subsequent_peak = u64::try_from(

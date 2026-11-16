@@ -21,7 +21,8 @@
 //! 不移植：`empty_trajectory_setpoint` 的 timestamp 字段，本 crate 的消息结构不含时间戳。
 
 use super::control_math::{
-    add_if_not_nan_vector3f, constrain_xy, limit_tilt, set_zero_if_nan_vector3f, thrust_to_attitude,
+    add_if_not_nan_vector3f, constrain_xy, limit_tilt, replace_nonfinite_with_zero,
+    thrust_to_attitude,
 };
 // 共享类型统一从 types 引入，与 PX4 的 `using namespace` 对应
 #[allow(clippy::wildcard_imports)]
@@ -292,13 +293,13 @@ impl PositionControl {
     }
 
     /// 若为 true，则计算倾角设定值时假设垂直加速度为零。
-    pub fn decouple_horizontal_and_vectical_acceleration(&mut self, val: bool) {
-        self.decouple_horizontal_and_vertical_acceleration = val;
+    pub fn set_acceleration_decoupling(&mut self, enabled: bool) {
+        self.decouple_horizontal_and_vertical_acceleration = enabled;
     }
 
     /// 返回控制器输出的局部位置设定值，含 PID 输出与前馈。
     #[must_use]
-    pub fn get_local_position_setpoint(&self) -> LocalPositionSetpoint {
+    pub fn local_position_setpoint(&self) -> LocalPositionSetpoint {
         LocalPositionSetpoint {
             position: self.pos_sp,
             velocity: self.vel_sp,
@@ -311,7 +312,7 @@ impl PositionControl {
 
     /// 返回由位置/速度控制结果生成的期望姿态设定值。
     #[must_use]
-    pub fn get_attitude_setpoint(&self) -> VehicleAttitudeSetpoint {
+    pub fn attitude_setpoint(&self) -> VehicleAttitudeSetpoint {
         let mut attitude_setpoint = VehicleAttitudeSetpoint::default();
         thrust_to_attitude(self.thr_sp, self.yaw_sp, &mut attitude_setpoint);
         attitude_setpoint.yaw_sp_move_rate = self.yawspeed_sp;
@@ -356,7 +357,7 @@ impl PositionControl {
         // 位置设定值或状态为 NAN 时，该分量不影响速度设定值
         add_if_not_nan_vector3f(&mut self.vel_sp, vel_sp_position);
         // 约束前先清除 NAN，保证后续引用安全
-        set_zero_if_nan_vector3f(&mut vel_sp_position);
+        replace_nonfinite_with_zero(&mut vel_sp_position);
 
         // 水平速度约束：优先满足期望位置方向的速度分量，其次才是前馈项
         let vel_sp_xy = constrain_xy(
@@ -440,7 +441,7 @@ impl PositionControl {
         }
 
         // 保证积分项不出现 NAN
-        set_zero_if_nan_vector3f(&mut vel_error);
+        replace_nonfinite_with_zero(&mut vel_error);
         // 更新速度控制积分项
         self.vel_int += vel_error.component_mul(&self.gain_vel_i) * dt;
     }
@@ -527,8 +528,8 @@ mod tests {
         fn run(&mut self) -> bool {
             self.control.set_input_setpoint(&self.input);
             let ret = self.control.update(DT);
-            self.output = self.control.get_local_position_setpoint();
-            self.attitude = self.control.get_attitude_setpoint();
+            self.output = self.control.local_position_setpoint();
+            self.attitude = self.control.attitude_setpoint();
             ret
         }
     }
@@ -536,7 +537,7 @@ mod tests {
     #[test]
     fn empty_setpoint() {
         let control = PositionControl::new();
-        let output = control.get_local_position_setpoint();
+        let output = control.local_position_setpoint();
         assert_eq!(output.position, Vector3f::zeros());
         assert_eq!(output.velocity, Vector3f::zeros());
         assert_eq!(output.acceleration, Vector3f::zeros());
@@ -544,7 +545,7 @@ mod tests {
         assert_close(output.yaw, 0.0, 1e-6);
         assert_close(output.yawspeed, 0.0, 1e-6);
 
-        let attitude = control.get_attitude_setpoint();
+        let attitude = control.attitude_setpoint();
         assert_eq!(attitude.q_d, Quatf::identity());
         assert_eq!(attitude.thrust_body, Vector3f::zeros());
         assert_close(attitude.yaw_sp_move_rate, 0.0, 1e-6);

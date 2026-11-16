@@ -51,7 +51,7 @@ fn reference<S: BasaltScalar>(fixtures: &Value, tol: f64) {
         let mut camera = GenericCamera::<S>::from_name(f["requested_name"].as_str().unwrap());
         assert_eq!(camera.name(), f["name"].as_str().unwrap());
         assert_eq!(camera.num_parameters(), f["n"].as_u64().unwrap() as usize);
-        camera.set_from_init(Vector4::from(
+        camera.initialize_intrinsics(Vector4::from(
             [200., 220., 100., 90.].map(S::from_f64_lossy),
         ));
         let increment = DVector::from_fn(camera.num_parameters(), |r, _| {

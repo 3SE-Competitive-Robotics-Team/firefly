@@ -152,8 +152,8 @@ fn relative_pose<S: BasaltScalar>(
     if host == target {
         return (Matrix4::identity(), Mat6::zeros(), Mat6::zeros());
     }
-    let h = estimator.get_pose_state_with_lin(host.frame_id);
-    let t = estimator.get_pose_state_with_lin(target.frame_id);
+    let h = estimator.pose_linearization_at(host.frame_id);
+    let t = estimator.pose_linearization_at(target.frame_id);
     let mut dh = Mat6::zeros();
     let mut dt = Mat6::zeros();
     let mut pose = compute_rel_pose(

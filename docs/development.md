@@ -29,6 +29,12 @@
 - 场景光照由 `firefly-render::lighting` 统一维护，所有相机共用。视角差异通过相机的
   曝光与色调映射表达；Bevy 的聚簇光源跨多视图共享，因此光源属于场景级资源。
 - 依赖统一在根 `[workspace.dependencies]`。
+- Rust API 遵循 [Rust API Guidelines 的命名规则](https://rust-lang.github.io/api-guidelines/naming.html#c-getter)：
+  属性读取用 `state()`，可变借用用 `state_mut()`，属性设置用 `set_state(...)`。
+  构造、采样、读取外部资源与填充缓冲区使用 `create`、`draw_*`、`read_*`、`write_*`
+  等明确操作名。上游移植保留数学符号与数值契约，公开 Rust 接口及全部调用方采用本仓库命名。
+  命名前核对实现与消费者：区分借用、分配、组装和状态推进，名称表达实际返回内容与副作用。
+  查询可能缺失的数据使用 `Option` 或 `Result`；调用方明确选择缺失分支。
 - IPC 发布/订阅使用 `firefly-pubsub` 的 `Publisher<T>` / `Subscriber<T>`，话题名与容量
   由消息模块导出；独立接收深度和服务容量用 `SubscriberOptions`。需要事件唤醒的发布端
   显式使用 `with_topic_notify`，trace 用户头由泛型端口统一处理。
