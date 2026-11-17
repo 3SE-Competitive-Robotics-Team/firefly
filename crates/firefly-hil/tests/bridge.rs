@@ -65,7 +65,6 @@ fn downlink_requests_use_the_same_native_ipc_contract() {
             owner: 4,
             sequence: 1,
             mask: LANDING,
-            rate_hz: 15,
             lease_ms: 2000,
         }),
         Message::Command(CommandMessage {
@@ -101,11 +100,10 @@ fn downlink_requests_use_the_same_native_ipc_contract() {
         .unwrap();
     assert_eq!(actual, requests);
     let invalid = Message::Activity(ActivityMessage {
-        rate_hz: 60,
         timestamp: 3.,
         owner: 4,
         sequence: 2,
-        mask: LANDING,
+        mask: 4,
         lease_ms: 2000,
     });
     assert!(

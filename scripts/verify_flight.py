@@ -25,7 +25,8 @@ def read_recording(path):
     # Indexed access requires a completed footer; live/truncated runs cannot pass.
     reader.store(store=recording).schema()
     data = Evidence()
-    scalar_paths = {"/fc/debug/state", "/fc/debug/precision", "/landing/target", "/landing/quality", "/landing/runtime"}
+    scalar_paths = {"/fc/debug/state", "/fc/debug/precision", "/landing/target", "/landing/quality", "/landing/runtime",
+                    "/fc/imu/source", "/fc/imu/health", "/fc/imu/quaternion_xyzw"}
     for chunk in reader.stream(store=recording):
         entity = str(chunk.entity_path)
         if entity not in scalar_paths | {"/gt/pose", "/logs/flight", "/logs/mimir", "/cameras/down/image"}:
@@ -131,12 +132,14 @@ def evaluate(data):
     if images:
         image_times = [row[0] for row in images]
         metrics["down_frames"] = len(images)
+        gaps = np.diff(image_times)
+        metrics["max_down_gap_s"] = float(max(gaps, default=0.))
+        metrics["down_fps"] = (len(image_times) - 1) / (image_times[-1] - image_times[0]) if len(image_times) > 1 else 0.
+        check(image_times[0] <= start + .5 and image_times[-1] >= end - .5
+              and metrics["max_down_gap_s"] <= .5,
+              "continuous down-camera recording does not cover the mission")
         rate = settings.get("down_rate_hz")
-        if rate is None:
-            check(image_times[0] <= start + .5 and image_times[-1] >= end - .5
-                  and max(np.diff(image_times), default=0.) <= .5,
-                  "down-camera recording does not cover the mission")
-        else:
+        if rate is not None:
             check(rate in (15, 30), "invalid requested down-camera rate")
             check(min(np.diff(image_times), default=1.) >= 1. / rate - .001000001,
                   "down-camera exceeds the requested capture rate")
@@ -155,13 +158,8 @@ def evaluate(data):
                 intervals.append((since, end, enabled))
             windows = [(begin, finish) for begin, finish, active in intervals if active]
             check(len(windows) >= 2, "takeoff and landing require separate activations")
-            for begin, finish in windows:
-                stamps = [t for t in image_times if begin <= t <= finish]
-                check(len(stamps) < 2 or len(stamps) - 1 <= (stamps[-1] - stamps[0] + .002) * rate,
-                      "down-camera long-term rate exceeds the request")
-                check(len(stamps) >= 3 and stamps[0] <= begin + .5 and stamps[-1] >= finish - .5
-                      and max(np.diff(stamps), default=0.) <= .5,
-                      "active down-camera recording has missing coverage")
+            check(len(image_times) - 1 <= (image_times[-1] - image_times[0] + .002) * rate,
+                  "down-camera long-term rate exceeds the configured rate")
             runtime = data.scalars.get("/landing/runtime", [])
             check(bool(runtime), "landing lifecycle evidence is missing")
             check(all(row[3] == float(settings.get("transport") == "hil") for _, row in runtime),
@@ -171,7 +169,6 @@ def evaluate(data):
                       "landing pipeline was not active during a requested window")
             check(any(row[0] == 0 for t, row in runtime if end <= t <= end + .5),
                   "landing resources were not released at mission completion")
-            idle_frames = 0
             for begin, finish, active in intervals:
                 if active or finish - begin <= .5:
                     continue
@@ -182,9 +179,6 @@ def evaluate(data):
                       "landing pipeline did not suspend during idle time")
                 check(len({row[1] for _, row in idle}) <= 1,
                       "landing inference continued during idle time")
-                idle_frames += sum(begin <= t < finish for t in image_times)
-            metrics["idle_down_frames"] = idle_frames
-            check(idle_frames == 0, "down-camera kept producing frames during idle time")
             metrics["down_rate_limit_hz"] = rate
             metrics["landing_inferences"] = max((row[1] for _, row in runtime), default=0.)
     check(all(phases[i + 1][0] > phases[i][0] for i in range(len(phases) - 1)), "phase timestamps must increase")
@@ -203,7 +197,8 @@ def evaluate(data):
     if failures:
         return result()
     home_world = np.array([np.interp(start, times, positions[:, i]) for i in range(3)])
-    gt_rotation = Slerp(times, Rotation.from_quat([row[2] for row in poses]))([start])[0]
+    gt_rotations = Slerp(times, Rotation.from_quat([row[2] for row in poses]))
+    gt_rotation = gt_rotations([start])[0]
     alignment = gt_rotation * Rotation.from_quat(home["quaternion"]).inv()
 
     def world_goal(point):
@@ -225,6 +220,29 @@ def evaluate(data):
     check(height.max() >= settings["altitude"] - .2, "takeoff height was not reached")
     check(height.max() <= settings["altitude"] + .4, "flight exceeded the altitude envelope")
     metrics["max_height_m"] = float(height.max())
+    takeoff_begin = next((t for t, mode in modes if mode == 2), None)
+    takeoff_end = next((t for t, mode in modes if takeoff_begin is not None and t > takeoff_begin and mode == 3), None)
+    if takeoff_begin is not None and takeoff_end is not None:
+        selected = (times >= takeoff_begin) & (times <= takeoff_end)
+        wrap = lambda angles: (angles + np.pi) % (2*np.pi) - np.pi
+        if selected.any():
+            yaw = gt_rotations(times[selected]).as_euler("xyz")[:, 2]
+            metrics["takeoff_actual_yaw_change_deg"] = float(np.abs(wrap(yaw - gt_rotation.as_euler("xyz")[2])).max() * 180 / np.pi)
+            metrics["takeoff_xy_displacement_m"] = float(np.linalg.norm(positions[selected, :2] - home_world[:2], axis=1).max())
+        sources = [int(row[0]) for t, row in data.scalars.get("/fc/imu/source", []) if takeoff_begin <= t <= takeoff_end]
+        if sources:
+            metrics["takeoff_attitude_sources"] = sorted(set(sources))
+            check(all(source == 1 for source in sources), "takeoff did not continuously use VIO attitude")
+        health = [row for t, row in data.scalars.get("/fc/imu/health", []) if takeoff_begin <= t <= takeoff_end]
+        if health:
+            metrics["takeoff_posterior_max_age_s"] = max(row[2] for row in health)
+            check(all(row[0] == row[1] == 1 for row in health), "takeoff VIO attitude or posterior became unavailable")
+        attitude = [(t, row) for t, row in data.scalars.get("/fc/imu/quaternion_xyzw", []) if takeoff_begin <= t <= takeoff_end]
+        if attitude:
+            stamps, quaternions = zip(*attitude)
+            estimated = alignment * Rotation.from_quat(quaternions)
+            error = wrap(estimated.as_euler("xyz")[:, 2] - gt_rotations(stamps).as_euler("xyz")[:, 2])
+            metrics["takeoff_heading_error_deg"] = float(np.abs(error).max() * 180 / np.pi)
     velocities = np.gradient(positions, times, axis=0)
     if roundtrip:
         check(4 in phase_modes("return", "acquire"), "return leg requires native TRACK state")

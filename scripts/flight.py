@@ -13,7 +13,7 @@ from firefly_mujoco import LandingTargetMessage, LogMessage, OdomMessage, Planne
 from firefly_mujoco.messages import AttitudeMessage, ScalarMessage
 from firefly_mujoco.activity import ActivityLease, LANDING
 from firefly_mujoco.scene import load_scene_name
-from firefly_workspace import digest, workspace_root
+from firefly_workspace import digest, load_toml, workspace_root
 from firefly_workspace.game import load_team
 from firefly_workspace.process import ManagedProcess, isolated_run
 
@@ -41,7 +41,6 @@ def parse_args(argv=None, *, hil=None, mission=None):
                         help="return near takeoff before visual alignment, in odom metres")
     parser.add_argument("--precision-land", action="store_true", help="finish with fresh down-camera acquisition and precision landing")
     parser.add_argument("--acquire-timeout", type=float, default=12., help="visual reacquisition deadline, in wall seconds")
-    parser.add_argument("--down-rate", type=int, choices=(15, 30), default=15, help="active down-camera FPS")
     parser.add_argument("--seed", type=int, default=20260930)
     args = parser.parse_args(argv)
     if args.hover_seconds is None:
@@ -117,6 +116,7 @@ def main(argv=None, *, hil=None, mission=None):
     root = workspace_root(Path(__file__))
     team = load_team()
     waypoints = route_points(args, team)
+    down_rate = load_toml(root / "configs/render.toml").get("capture", {}).get("down_hz", 15)
     processes, latest, received, subs = {}, {}, {}, {}
     mode, stamp, sequence, logs = None, 0., 0, None
     armed_session = None
@@ -150,7 +150,7 @@ def main(argv=None, *, hil=None, mission=None):
     def request_activity(enabled):
         if activity is not None:
             activity.set(LANDING if enabled else 0, stamp)
-            mission_event("activity", enabled=enabled, rate_hz=args.down_rate)
+            mission_event("activity", enabled=enabled)
 
     def phase(name, **fields):
         nonlocal phase_name
@@ -251,7 +251,7 @@ def main(argv=None, *, hil=None, mission=None):
 
             logs = service("Log", LogMessage, 256, 10).publisher_builder().create()
             if args.precision_land:
-                activity = ActivityLease(node, rate_hz=args.down_rate)
+                activity = ActivityLease(node)
             event(f"flight recording={recording}")
             revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
             dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=root))
@@ -268,7 +268,7 @@ def main(argv=None, *, hil=None, mission=None):
             mission_event("settings", mission=args.mission, precision_land=args.precision_land,
                           team=team, scene=load_scene_name(), waypoint_count=len(waypoints),
                           shape=args.shape, altitude=args.altitude, return_offset=args.return_offset,
-                          hover_seconds=args.hover_seconds, down_rate_hz=args.down_rate, seed=args.seed, transport="hil" if args.hil else "sil")
+                          hover_seconds=args.hover_seconds, down_rate_hz=down_rate, seed=args.seed, transport="hil" if args.hil else "sil")
             for index, offset in enumerate(waypoints):
                 mission_event("waypoint", index=index, offset=offset)
             binaries = ["render", "mimir", "ffctl"] + (["hil"] if args.hil else ["fc", "firefly-rootslam"])

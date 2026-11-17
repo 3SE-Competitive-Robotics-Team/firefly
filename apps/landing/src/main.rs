@@ -208,7 +208,6 @@ impl Worker {
     fn tick(
         &mut self,
         config: &Config,
-        rate: u32,
         team: u32,
         session: u64,
         session_start: f64,
@@ -278,9 +277,8 @@ impl Worker {
             viz.publish(row)?;
         }
         // Schedule start-to-start, without a catch-up burst after a slow inference.
-        self.next_inference = (started
-            + Duration::from_secs_f64(1. / config.rate_hz.min(f64::from(rate))))
-        .max(Instant::now());
+        self.next_inference =
+            (started + Duration::from_secs_f64(1. / config.rate_hz)).max(Instant::now());
         Ok(true)
     }
 }
@@ -318,9 +316,9 @@ fn run(config: &Config, team: u32) -> Result<()> {
                 pipeline = Pipeline::Dormant;
             }
         }
-        let rate = activity.poll(LANDING)?;
-        match (&pipeline, rate) {
-            (Pipeline::Dormant, Some(_)) => {
+        let requested = activity.poll(LANDING)?;
+        match (&pipeline, requested) {
+            (Pipeline::Dormant, true) => {
                 log::info!("landing pipeline starting: backend={:?}", config.backend);
                 if environment.is_none() {
                     environment = Some(model::environment(config.runtime.as_deref()).inspect_err(
@@ -346,7 +344,7 @@ fn run(config: &Config, team: u32) -> Result<()> {
                 // Native model compilation may outlive a lease; recheck demand before the first inference.
                 continue;
             }
-            (Pipeline::Active(_), None) => {
+            (Pipeline::Active(_), false) => {
                 pipeline = Pipeline::Dormant;
                 targets.publish(LandingTargetMessage {
                     timestamp: stamp,
@@ -361,10 +359,9 @@ fn run(config: &Config, team: u32) -> Result<()> {
             }
             _ => {}
         }
-        if let (Pipeline::Active(worker), Some(rate)) = (&mut pipeline, rate) {
+        if let (Pipeline::Active(worker), true) = (&mut pipeline, requested) {
             inferences += u64::from(worker.tick(
                 config,
-                rate,
                 team,
                 session,
                 session_start,
@@ -379,7 +376,7 @@ fn run(config: &Config, team: u32) -> Result<()> {
             row.scalars = [
                 f64::from(matches!(pipeline, Pipeline::Active(_))),
                 inferences as f64,
-                f64::from(rate.unwrap_or(0)),
+                f64::from(requested),
                 f64::from(config.backend == model::Backend::Vsinpu),
             ];
             status.publish(row)?;

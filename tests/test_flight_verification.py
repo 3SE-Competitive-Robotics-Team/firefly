@@ -62,22 +62,20 @@ def test_visual_span_uses_rrd_nanosecond_precision(last, passed):
     assert evaluate(data)["passed"] == passed
 
 
-@pytest.mark.parametrize("fault", [None, "cruise_images", "cruise_compute", "missing_runtime", "rate", "rate_drift", "not_released", "cpu_hil"])
-def test_on_demand_resources_are_independently_scored(fault):
+@pytest.mark.parametrize("fault", [None, "cruise_gap", "cruise_compute", "missing_runtime", "rate", "rate_drift", "not_released", "cpu_hil"])
+def test_continuous_video_and_on_demand_inference_are_independently_scored(fault):
     data = successful_evidence()
     data.events[0][1].update(down_rate_hz=15, transport="sil")
-    data.events += [(t, {"kind": "activity", "enabled": enabled, "rate_hz": 15})
+    data.events += [(t, {"kind": "activity", "enabled": enabled})
                     for t, enabled in [(1.1, True), (3., False), (12., True), (19., False)]]
     data.events.sort(key=lambda row: row[0])
-    data.down_frames = [(float(t), 352, 288, 352 * 288) for t in np.arange(1.1, 19., 1/15)
-                        if t < 3. or t >= 12.]
-    runtime = [(1.1, [1., 0., 15., 0.]), (2., [1., 10., 15., 0.])]
+    data.down_frames = [(float(t), 352, 288, 352 * 288) for t in np.arange(1.1, 19., 1/15)]
+    runtime = [(1.1, [1., 0., 1., 0.]), (2., [1., 10., 1., 0.])]
     runtime += [(float(t), [0., 20., 0., 0.]) for t in np.arange(3., 12.)]
-    runtime += [(12., [1., 20., 15., 0.]), (16., [1., 70., 15., 0.]), (19., [0., 100., 0., 0.])]
+    runtime += [(12., [1., 20., 1., 0.]), (16., [1., 70., 1., 0.]), (19., [0., 100., 0., 0.])]
     data.scalars["/landing/runtime"] = runtime
-    if fault == "cruise_images":
-        data.down_frames.insert(35, (5., 352, 288, 352 * 288))
-        data.down_frames.sort()
+    if fault == "cruise_gap":
+        data.down_frames = [row for row in data.down_frames if not 4. < row[0] < 6.]
     elif fault == "cruise_compute":
         runtime[5][1][1] += 1
     elif fault == "missing_runtime":
@@ -85,8 +83,7 @@ def test_on_demand_resources_are_independently_scored(fault):
     elif fault == "rate":
         data.down_frames.insert(1, (1.11, 352, 288, 352 * 288))
     elif fault == "rate_drift":
-        data.down_frames = [(float(t), 352, 288, 352 * 288) for t in np.arange(1.1, 19., 1/15.1)
-                            if t < 3. or t >= 12.]
+        data.down_frames = [(float(t), 352, 288, 352 * 288) for t in np.arange(1.1, 19., 1/15.1)]
     elif fault == "not_released":
         runtime[-1][1][0] = 1.
     elif fault == "cpu_hil":
@@ -103,6 +100,23 @@ def test_scoring_uses_initial_full_coordinate_alignment():
     data.poses = [(t, (center + rotation.apply(np.array(p) - center)).tolist(), rotation.as_quat().tolist())
                   for t, p, _ in data.poses]
     assert evaluate(data)["passed"]
+
+
+@pytest.mark.parametrize("fault", [None, "standby", "stale"])
+def test_takeoff_audit_distinguishes_vio_participation_from_heading_drift(fault):
+    from scipy.spatial.transform import Rotation
+    data = successful_evidence()
+    data.poses = [(t, p, Rotation.from_euler("z", min(max(t-1.5, 0.), 1.)*.1).as_quat().tolist())
+                  for t, p, _ in data.poses]
+    stamps = np.arange(1., 19., .1)
+    data.scalars["/fc/imu/source"] = [(float(t), [2. if fault == "standby" else 1.]) for t in stamps]
+    data.scalars["/fc/imu/health"] = [(float(t), [1., 0. if fault == "stale" else 1., .05]) for t in stamps]
+    data.scalars["/fc/imu/quaternion_xyzw"] = [(float(t), [0., 0., 0., 1.]) for t in stamps]
+    report = evaluate(data)
+    assert report["passed"] == (fault is None), report
+    assert report["metrics"]["takeoff_actual_yaw_change_deg"] == pytest.approx(np.degrees(.1))
+    assert report["metrics"]["takeoff_heading_error_deg"] == pytest.approx(np.degrees(.1))
+    assert report["metrics"]["takeoff_posterior_max_age_s"] == .05
 
 
 @pytest.mark.parametrize("fault", ["no_truth", "never_left", "stale_vision", "wrong_team", "wrong_height", "early_disarm", "no_return", "truth_gap", "wrong_xy", "short_hover", "wrong_precision_order", "left_land", "recorder_loss", "no_down", "down_gap", "down_size"])

@@ -40,7 +40,7 @@ use firefly_pubsub::viz::{
 /// 帧头魔数（ASCII `FHL1`）。
 pub const MAGIC: [u8; 4] = *b"FHL1";
 /// 当前协议版本；接收端拒绝版本不一致的帧，主机与板端同步部署。
-pub const VERSION: u16 = 7;
+pub const VERSION: u16 = 8;
 /// 固定帧头长度（字节）。
 pub const HEADER_LEN: usize = 48;
 /// 单帧负载上限（字节）；大消息按此分片，限制单次 USB 传输的排队时延。
@@ -750,7 +750,6 @@ impl Message {
                 put_u64(&mut out, message.owner);
                 put_u64(&mut out, message.sequence);
                 put_u32(&mut out, message.mask);
-                put_u32(&mut out, message.rate_hz);
                 put_u32(&mut out, message.lease_ms);
             }
             Self::LandingTarget(message) => {
@@ -1117,7 +1116,6 @@ impl Message {
                     owner: input.u64()?,
                     sequence: input.u64()?,
                     mask: input.u32()?,
-                    rate_hz: input.u32()?,
                     lease_ms: input.u32()?,
                 };
                 if !message.valid() {

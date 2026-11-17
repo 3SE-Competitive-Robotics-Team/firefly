@@ -69,7 +69,7 @@ pub struct Link {
     /// 下行图像节流周期（秒）；板端 VIO 跟不上时用它压低送帧率。
     #[serde(default = "default_image_period")]
     pub image_period_s: f64,
-    /// 下视独立上界；实际由任务的资源租约选择 15/30 FPS。
+    /// 连续下视传输频率上界；允许 15/30 FPS，独立于双目节流周期。
     #[serde(default = "default_down_rate")]
     pub down_rate_hz: u32,
 }

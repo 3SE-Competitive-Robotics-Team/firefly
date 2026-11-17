@@ -153,3 +153,75 @@ mod tests {
         assert!(m.data.iter().all(|&v| v == 0.0));
     }
 }
+
+/// 采集时间域的节拍；容纳 1ms 测量时钟量化，保留相位并跳过停顿后的积压拍。
+#[derive(Default)]
+pub struct FrameCadence {
+    last: Option<f64>,
+    next: f64,
+    rate: u32,
+}
+
+impl FrameCadence {
+    pub fn admit(&mut self, timestamp: f64, rate: u32) -> bool {
+        if rate == 0 || !timestamp.is_finite() {
+            return false;
+        }
+        let period = 1. / f64::from(rate);
+        if self.rate != rate {
+            self.next = self.last.map_or(timestamp, |last| last + period);
+            self.rate = rate;
+        }
+        let quantum = 0.001 + 1e-9;
+        if timestamp + quantum < self.next
+            || self
+                .last
+                .is_some_and(|last| timestamp <= last || timestamp - last + quantum < period)
+        {
+            return false;
+        }
+        self.last = Some(timestamp);
+        self.next += period;
+        if self.next <= timestamp {
+            self.next = timestamp + period;
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod cadence_tests {
+    use super::FrameCadence;
+    #[test]
+    fn cadence_caps_30_hz_source_at_15_without_catchup() {
+        let mut cadence = FrameCadence::default();
+        assert_eq!(
+            (0..300)
+                .filter(|i| cadence.admit(f64::from(*i) / 30., 15))
+                .count(),
+            150
+        );
+        assert!(!cadence.admit(0., 15));
+        assert!(cadence.admit(100., 15));
+        assert!(!cadence.admit(100., 15));
+    }
+
+    #[test]
+    fn millisecond_capture_clock_preserves_15_and_30_fps() {
+        for rate in [15, 30] {
+            let mut cadence = FrameCadence::default();
+            let count = (0..600)
+                .filter(|i| {
+                    let timestamp = (f64::from(*i) / 30. * 1000.).round() / 1000.;
+                    cadence.admit(timestamp, rate)
+                })
+                .count();
+            assert_eq!(count, rate as usize * 20);
+        }
+        let mut cadence = FrameCadence::default();
+        let count = (0..6000)
+            .filter(|i| cadence.admit(f64::from(*i) / 300., 15))
+            .count();
+        assert!(count <= 300, "fast sources obey the same long-term rate");
+    }
+}

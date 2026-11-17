@@ -1,4 +1,4 @@
-# 往返使用 30Hz 双目/深度供给；下视由独立租约限到 15/30 FPS。
+# 往返使用 30Hz 双目/深度供给；下视按 render.capture.down_hz 连续采集。
 # 物理与 IMU 沿用 1000Hz 默认值；下视推理独立按 landing.rate_hz 调度。
 [rates]
 pose = 30.0

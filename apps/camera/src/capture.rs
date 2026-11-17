@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use firefly_hal::pixel::{FrameFormat, gray_from_yuyv, meters_from_z16};
-use firefly_pubsub::activity::{ACTIVITY_TOPIC, ActivityReceiver, DOWN_CAMERA, FrameCadence};
+use firefly_pubsub::camera::FrameCadence;
 use firefly_pubsub::camera::{
     CAMERA_DOWN_TOPIC, CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DEPTH_TOPIC, DOWN_HEIGHT,
     DOWN_SENSOR_ID, DOWN_SIZE, DOWN_WIDTH, DepthImageMessage, DownImageMessage, GrayImageMessage,
@@ -63,17 +63,9 @@ fn start_down(source: &DownSource) -> Result<DownWorker, Box<dyn Error>> {
     let worker = std::thread::spawn(move || {
         let result = (|| -> Result<(), Box<dyn Error>> {
             let node = create_node()?;
-            let mut activity = ActivityReceiver::open(&node, ACTIVITY_TOPIC)?;
             let publisher = Publisher::<DownImageMessage>::with_topic(&node, CAMERA_DOWN_TOPIC)?;
             let _ = ready.send(Ok(()));
-            while RUNNING.load(Ordering::Relaxed) {
-                let Some(rate) = activity.poll(DOWN_CAMERA)? else {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    continue;
-                };
-                let rate = rate.min(source.rate_hz);
-                capture_down(&source, rate, &mut activity, &publisher)?;
-            }
+            capture_down(&source, &publisher)?;
             Ok(())
         })();
         match result {
@@ -94,13 +86,12 @@ fn start_down(source: &DownSource) -> Result<DownWorker, Box<dyn Error>> {
     Ok(guard)
 }
 
-/// Active 持有设备和 mmap 流；租约释放/过期离开作用域，Drop 执行 STREAMOFF。
+/// 下视采集流随进程持续运行，退出作用域时 Drop 执行 STREAMOFF。
 fn capture_down(
     source: &DownSource,
-    rate: u32,
-    activity: &mut ActivityReceiver,
     publisher: &Publisher<DownImageMessage>,
 ) -> Result<(), Box<dyn Error>> {
+    let rate = source.rate_hz;
     let device = Device::with_path(&source.device)?;
     configure(&device, source.format, DOWN_WIDTH, DOWN_HEIGHT)?;
     let format = device.format()?;
@@ -122,13 +113,6 @@ fn capture_down(
     let mut gray = vec![0; DOWN_SIZE];
     let mut last_stamp = f64::NEG_INFINITY;
     while RUNNING.load(Ordering::Relaxed) {
-        if activity
-            .poll(DOWN_CAMERA)?
-            .map(|requested| requested.min(source.rate_hz))
-            != Some(rate)
-        {
-            break;
-        }
         let (bytes, metadata) = match stream.next() {
             Ok(frame) => frame,
             Err(error)
@@ -186,7 +170,6 @@ fn capture_down(
             message.data.copy_from_slice(&gray);
         })?;
     }
-    log::info!("down camera suspended: capture stream released");
     Ok(())
 }
 

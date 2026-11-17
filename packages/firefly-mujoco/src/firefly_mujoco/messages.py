@@ -78,7 +78,7 @@ class ActivityMessage(ctypes.Structure):
     _fields_ = [
         ("timestamp", ctypes.c_double), ("owner", ctypes.c_uint64),
         ("sequence", ctypes.c_uint64), ("mask", ctypes.c_uint32),
-        ("rate_hz", ctypes.c_uint32), ("lease_ms", ctypes.c_uint32),
+        ("lease_ms", ctypes.c_uint32),
     ]
 
     @staticmethod

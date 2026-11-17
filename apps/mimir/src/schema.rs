@@ -215,7 +215,7 @@ pub fn fields(name: &str) -> Result<&'static [&'static str]> {
         "fc/debug/precision" => &["stage"],
         "landing/target" => &["x", "y", "z", "valid"],
         "landing/quality" => &["session", "team", "reprojection_px", "confidence"],
-        "landing/runtime" => &["active", "inferences", "requested_fps", "npu"],
+        "landing/runtime" => &["active", "inferences", "requested", "npu"],
         "landing/vision" => &["detections", "valid", "reprojection_px", "processing_ms"],
         "hil/camera/down" => &["capture_time_s", "pixel_sum", "width_px", "height_px"],
         "render/capture/publish_s" => &["process_s", "publish_s", "total_s"],

@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 use fastrace::prelude::*;
-use firefly_pubsub::activity::{ACTIVITY_TOPIC, ActivityReceiver, DOWN_CAMERA, FrameCadence};
+use firefly_pubsub::camera::FrameCadence;
 use firefly_pubsub::camera::{
     CAMERA_DOWN_TOPIC, CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DEPTH_TOPIC, DOWN_HEIGHT,
     DOWN_SENSOR_ID, DOWN_WIDTH, DepthImageMessage, DownImageMessage, GrayImageMessage,
@@ -45,8 +45,6 @@ use crate::rig::{Eye, PoseState, apply_pose_to_eyes};
 pub struct IpcPorts {
     /// 位姿订阅（`Firefly/GroundTruth`，只保留最新）。
     pub pose_sub: Subscriber<OdomMessage>,
-    activity: ActivityReceiver,
-    offline: bool,
     /// 进程共享节点，必须在全部端口之后释放。
     pub node: IpcNode,
 }
@@ -66,12 +64,7 @@ pub fn open_ports(offline: bool) -> Result<IpcPorts, firefly_error::Error> {
     };
     let pose_sub = Subscriber::with_topic(&node, &topic(GROUND_TRUTH_TOPIC))?;
     log::info!("IPC 就绪：订阅位姿，offline={offline}");
-    Ok(IpcPorts {
-        pose_sub,
-        activity: ActivityReceiver::open(&node, &topic(ACTIVITY_TOPIC))?,
-        offline,
-        node,
-    })
+    Ok(IpcPorts { pose_sub, node })
 }
 
 /// 传感器发布端口只在像素工作线程构造和使用，节点最后释放。
@@ -215,7 +208,7 @@ impl Drop for CapturePipeline {
 /// 位姿轮询 + 出图节拍：排空真值保留最新 → 按固定节拍发起回读并按需激活相机。
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub fn poll_pose(
-    mut ports: NonSendMut<IpcPorts>,
+    ports: NonSend<IpcPorts>,
     config: Res<RenderConfig>,
     mut pose: ResMut<PoseState>,
     hub: Res<CaptureHub>,
@@ -226,14 +219,6 @@ pub fn poll_pose(
     mut cameras: Query<(&Eye, &mut Camera)>,
 ) {
     let period = config.capture.period_seconds();
-    let down_rate = if ports.offline {
-        Some(15)
-    } else {
-        ports.activity.poll(DOWN_CAMERA).unwrap_or_else(|error| {
-            log::error!("down camera activity: {error}");
-            None
-        })
-    };
     let mut newest: Option<(OdomMessage, TraceContext)> = None;
     loop {
         match ports.pose_sub.receive() {
@@ -286,7 +271,9 @@ pub fn poll_pose(
     {
         let seq = pending.next_seq;
         pending.next_seq += 1;
-        let down = down_rate.is_some_and(|rate| capture.down_cadence.admit(pose.stamp, rate));
+        let down = capture
+            .down_cadence
+            .admit(pose.stamp, config.capture.down_hz);
         hub.request(CaptureRequest {
             seq,
             timing: crate::capture::CaptureTiming::default(),

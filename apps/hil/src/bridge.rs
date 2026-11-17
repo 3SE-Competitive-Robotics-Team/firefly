@@ -18,7 +18,6 @@ use firefly_hil::protocol::{
     Hello, IMAGE_CHUNK_DATA_MAX, ImageChunkHeader, Kind, Message, ROLE_HOST, VERSION,
 };
 use firefly_hil::topics::{SensorSubscribers as Downlink, TelemetryPublishers as Uplink};
-use firefly_pubsub::activity::{Activity, DOWN_CAMERA};
 use firefly_pubsub::camera::{DepthImageMessage, DownImageMessage, GrayImageMessage};
 use firefly_pubsub::imu::ImuMessage;
 use firefly_pubsub::node::{IpcNode, create_node};
@@ -290,7 +289,6 @@ fn ipc_loop(
     let mut pending_depth: Option<DepthImageMessage> = None;
     let mut pending_down = None;
     let mut down_deadline = Instant::now();
-    let mut demand = Activity::default();
     let mut last_imu_stamp = f64::NAN;
     let mut last_image_stamp = f64::NAN;
     let mut last_timestamp_log = Instant::now();
@@ -309,9 +307,6 @@ fn ipc_loop(
         activity |= down
             .requests
             .drain(None, |message| {
-                if let Message::Activity(request) = &message {
-                    demand.observe(*request, Instant::now());
-                }
                 send_blocking(priority_tx, message).map_err(std::io::Error::other)
             })
             .map_err(|e| e.to_string())?;
@@ -342,13 +337,7 @@ fn ipc_loop(
             pending_down = Some(Box::new(*sample));
             activity = true;
         }
-        let down_rate = demand.rate(DOWN_CAMERA, Instant::now());
-        if down_rate.is_none() {
-            pending_down = None;
-        }
-        if let Some(rate) = down_rate
-            && Instant::now() >= down_deadline
-        {
+        if Instant::now() >= down_deadline {
             if let Some(image) = pending_down.take() {
                 let stamp = image.timestamp;
                 let sum = image.data.iter().map(|&pixel| u64::from(pixel)).sum();
@@ -359,7 +348,7 @@ fn ipc_loop(
             down_deadline = next_image_deadline(
                 down_deadline,
                 Instant::now(),
-                Duration::from_secs_f64(1. / f64::from(rate.min(options.down_rate_hz))),
+                Duration::from_secs_f64(1. / f64::from(options.down_rate_hz)),
             );
         }
         while let Ok(Some(sample)) = down.depth.receive() {

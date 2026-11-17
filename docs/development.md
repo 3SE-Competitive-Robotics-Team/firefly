@@ -204,8 +204,8 @@ supervisor 的相对命令 `bin/<app>` 和 `logs/process` 仍依赖工作目录�
   `v4l2-ctl --list-devices` 核对。分辨率由 IPC 定长消息定死（320×240），
   双目和深度使用该组合；`[down]` 独立固定为 352×288，驱动必须原样接受格式。
   `[depth]` 控制深度发布，下视使用独立工作线程、V4L2 单调采集时间戳与行跨度。
-  下视 `rate_hz` 只接受 15/30，上界与任务租约取较小值；先用 S_PARM 请求驱动帧间隔，
-  发布前再按采集时间限频。未持有租约时释放 mmap 流并 STREAMOFF。
+  下视 `rate_hz` 只接受 15/30，采集流随相机进程持续运行；先用 S_PARM 请求驱动帧间隔，
+  发布前再按采集时间限频，退出进程时释放 mmap 流并 STREAMOFF。
   具体相机的格式、同步、时间戳和标定按配置指定的 `V4L2` 流做实机验证。
 - `configs/imu.toml`：实现 `BMI088`，启动通过 `WHO_AM_I` 核验设备身份。
   寄存器初始化值取自数据手册，首次上板须核对
@@ -313,10 +313,11 @@ uv run python scripts/flight.py --mission hover --hover-seconds 3 --precision-la
 
 `--simulation` 显式选择 CPU，用于桌面仿真；生产默认后端始终为 NPU。
 在线进程按 `Firefly/Activity` 租约在 Dormant/Active 之间切换，Dormant 释放模型会话、图像订阅和里程计线程。
-任务每 200ms 续租，2s 未续租自动休眠；多个拥有者只释放自己的请求，LANDING 同时请求下视相机。
-默认下视 15 FPS，`flight.py --down-rate 30` 可选择 30 FPS，推理另受 `landing.rate_hz` 上界控制，默认保持 10 Hz。
+任务每 200ms 续租，2s 未续租自动释放推理工作资源；多个拥有者只释放自己的推理请求。
+下视全程连续采集和录制，帧率由 `render.toml capture.down_hz` 或 `camera.toml down.rate_hz` 设置为 15/30 FPS。
+推理按 `landing.rate_hz` 调度，默认保持 10 Hz。
 任务通过统一资源 API 续租和释放请求；FC 独立判定精降命令资格，推理失败通过正常进程错误路径报告。
-`landing/runtime` 在 RRD 中记录实际活跃状态、累计推理数、请求帧率和 NPU 标志。
+`landing/runtime` 在 RRD 中记录实际活跃状态、累计推理数、推理请求状态和 NPU 标志。
 离线 `landing --image <352x288.png> --simulation` 输出检测、优化角点、米制平移和重投影残差。
 图像验收在两队机库上方 1m/1.5m、中心及偏置位置检验识别和米制误差，并导出 PNG；
 运行与飞行原始证据由最先启动、最后退出的 Mimir 保存。初次识别建议在 1m 高度完成，
@@ -371,7 +372,7 @@ FC 使用 `configs/fc-hil.toml`：水平速度环增益与正常部署一致，
 `configs/hil.toml` 管理 USB 身份、队列与送图节拍。`imu_batch = 1`；
 双目按采集时间配对，图像分为最多 16 KiB 的块，块间先发送 IMU 与指令。
 `image_queue` 是待发图像预算，至少为 2；双目对原子入队，每个队列位置最多占两张图，
-深度图和 CIF 下视图各独占一个位置；下视按独立资源租约启停和节流，
+深度图和 CIF 下视图各独占一个位置；下视持续传输并独立节流，
 `down_rate_hz` 为下视 15/30 FPS 上界，双目/深度继续沿用 `image_period_s`。上行每条遥测和日志发送前优先排空控制队列。
 `image_period_s` 是板端视觉负载预算，图像、控制和后验的实际频率分别验收。
 HIL 默认送图预算为 30 Hz。`configs/processes-hil.toml` 为 A733 设置以下亲和性：
@@ -418,8 +419,8 @@ uv run python scripts/hil_roundtrip.py --precision-land
 悬停和往返使用同一份 `processes-hil.toml` 与 `hil.toml`，全部进程自启动并持续下发深度。
 主机/板端驱动共享 `firefly-hil::topics` 路由表和 `open / drain / publish` API；
 `SensorIngress::accept_raw` 统一解码、图像重组、校验和与 IMU 唤醒。
-新增载荷维护协议编码和该路由表，应用层保持通用转发。协议 v7 的资源请求走高优先队列，
-下视只在有效租约期传输；控制优先级、诊断连续性与队列预算在共享实现中维护。
+新增载荷维护协议编码和该路由表，应用层保持通用转发。协议 v8 的推理请求走高优先队列，
+下视传输独立于任务阶段；控制优先级、诊断连续性与队列预算在共享实现中维护。
 `cargo test -p firefly-hil --test bridge --release` 用真实 IPC 和字节流验证全部上行路由、
 下行请求、CIF 分片以及穿插 IMU；USB 实机验收仍由同一生产驱动执行。
 部署仅选择设备；任务脚本决定发送哪些飞行指令。HIL 与 SIL 共用 `flight.py` 的
@@ -603,7 +604,7 @@ FIREFLY_RUN_PRECISION_MISSION=1 uv run pytest tests/system/test_flight_mission.p
 uv run python scripts/verify_flight.py logs/<本轮目录>/log.rrd
 ~~~
 
-完整往返使用 `configs/sim-mission.toml`，使用 30Hz 双目/深度供给；下视独立按租约选入 15/30 FPS，
+完整往返使用 `configs/sim-mission.toml`，使用 30Hz 双目/深度供给；下视按 `render.capture.down_hz` 以 15/30 FPS 连续采集，
 物理和 IMU 保持 1000Hz；HIL 的同周期送图预算见前文。悬停沿用 `configs/sim.toml`。
 `--goal DX DY` 相对解锁前保存的 odom 起飞点；RMUC 示例默认朝场地中部，red 为 (4,0)m、blue 为 (-4,0)m；
 `--shape square|triangle` 先向场地飞一个边长，再从该入口飞闭合的正方形或等边三角形，
@@ -624,8 +625,9 @@ uv run python scripts/verify_flight.py logs/<本轮目录>/log.rrd
 
 Mimir 先启动、最后关闭；任务设置、阶段、起飞坐标锚点和所用输入的指纹进入 `logs/flight`。
 精降任务关闭 RRD 后自动运行 `scripts/verify_flight.py`，也可以用上面的独立命令复核。
-评分器要求完整 footer、时序覆盖、原生模式与精降阶段顺序，以及激活窗口的 352×288 下视灰度图像；
-同时检查下视帧率上界（含 1ms 采集时钟量化和长期频率约束）、空闲期无送图/推理，以及任务结束后的资源释放；旧录制沿用其原有全程图像契约。
+评分器要求完整 footer、时序覆盖、原生模式与精降阶段顺序，以及全程连续的 352×288 下视灰度图像；
+同时检查下视帧率上界（含 1ms 采集时钟量化和长期频率约束）、推理空闲期计数保持不变，以及任务结束后的推理资源释放。
+起飞报告包含 FC 姿态源、后验新鲜度、实际横向位移、实际偏航和相对真值的航向估计误差；航向比较使用起飞前的固定坐标对齐。
 视觉闭环验收须保持 `mimir.images = true`。真值仅在评分阶段使用，
 以起飞时刻的 GT/odom 姿态固定坐标对齐，不使用全程拟合抵消漂移。
 航点停留按声明顺序逐点检查目标身份、原生 TRACK/HOLD 模式、实际位置、速度与持续时间；

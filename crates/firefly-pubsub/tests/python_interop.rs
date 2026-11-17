@@ -25,19 +25,19 @@ import ctypes
 from firefly_mujoco.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage
 from firefly_mujoco.messages import PlannerStatusMessage, LandingTargetMessage, ActivityMessage
 from firefly_mujoco import LogMessage
-from firefly_mujoco.activity import DOWN_CAMERA, LANDING
+from firefly_mujoco.activity import LANDING
 for cls, fields in [
     (ScalarMessage, ['timestamp', 'scalars', 'sequence']),
     (VizMessage, ['timestamp', 'points', 'sequence']),
     (VoxelMessage, ['voxels', 'sequence', 'chunk_index', 'chunk_count']),
     (PlannerStatusMessage, ['timestamp', 'goal_timestamp', 'finished']),
     (LandingTargetMessage, ['timestamp', 'session', 'position', 'confidence', 'team', 'valid']),
-    (ActivityMessage, ['timestamp', 'owner', 'sequence', 'mask', 'rate_hz', 'lease_ms']),
+    (ActivityMessage, ['timestamp', 'owner', 'sequence', 'mask', 'lease_ms']),
     (LogMessage, ['sim_time', 'sequence', 'dropped_records']),
 ]:
     print(ctypes.sizeof(cls), *(getattr(cls, name).offset for name in fields))
 print(SCALAR_BUFFER_SIZE)
-print(DOWN_CAMERA, LANDING)
+print(LANDING)
 ";
     let output = Command::new(python).args(["-c", script]).output().unwrap();
     assert!(
@@ -82,14 +82,12 @@ print(DOWN_CAMERA, LANDING)
             offset_of!(ActivityMessage, owner),
             offset_of!(ActivityMessage, sequence),
             offset_of!(ActivityMessage, mask),
-            offset_of!(ActivityMessage, rate_hz),
             offset_of!(ActivityMessage, lease_ms),
             size_of::<LogMessage>(),
             offset_of!(LogMessage, sim_time),
             offset_of!(LogMessage, sequence),
             offset_of!(LogMessage, dropped_records),
             SCALAR_BUFFER_SIZE,
-            firefly_pubsub::activity::DOWN_CAMERA as usize,
             firefly_pubsub::activity::LANDING as usize,
         ]
     );
