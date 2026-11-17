@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn voxel_state_unknown_by_default() {
+    fn unoccupied_scene_voxel_is_free() {
         let scene = sample_scene();
         let grid = scene.to_map_file().unwrap().to_grid_map(0.0).unwrap();
         let idx = grid.index_of(Vector3::new(4.5, 4.5, 0.5)).unwrap();

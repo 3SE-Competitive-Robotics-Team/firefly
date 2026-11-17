@@ -31,8 +31,7 @@
 use crate::relative_pose::relative_adapter_base::RelativeAdapterBase;
 use nalgebra::{Matrix3, Vector3};
 
-/// Borrowed storage adapter with world/viewpoint priors.
-/// Access indices must satisfy the source assertions; constructors validate storage bounds.
+/// Borrowed weighted bearing pairs with a relative pose prior.
 pub struct CentralRelativeWeightingAdapter<'a> {
     pub bearing_vectors1: &'a [Vector3<f64>],
     pub bearing_vectors2: &'a [Vector3<f64>],
@@ -42,8 +41,7 @@ pub struct CentralRelativeWeightingAdapter<'a> {
 }
 impl<'a> CentralRelativeWeightingAdapter<'a> {
     /// # Errors
-    /// Returns an error if correspondence counts, coordinate storage, camera assignments,
-    /// or camera calibration arrays have incompatible bounds.
+    /// Bearing or weight arrays have different lengths.
     pub fn new(
         bearing_vectors1: &'a [Vector3<f64>],
         bearing_vectors2: &'a [Vector3<f64>],

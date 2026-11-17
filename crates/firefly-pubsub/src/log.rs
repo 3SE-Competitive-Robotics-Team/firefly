@@ -114,7 +114,7 @@ impl LogMessage {
     }
 }
 
-/// 同话题发布端上限（7 进程 + 工具链余量），服务首次创建时生效，
+/// 同话题发布端上限，服务首次创建时生效，
 /// 见 [`crate::publish::Publisher::with_topic_buffer_publishers`]。
 /// 发布端与聚合端都使用相同容量；先启动聚合端才能记录启动阶段日志。
 pub const LOG_MAX_PUBLISHERS: usize = 10;

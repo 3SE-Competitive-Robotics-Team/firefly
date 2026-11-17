@@ -38,12 +38,11 @@ fn default_config() -> PathBuf {
 }
 /// 每拍末尾用于对齐截止时间的自旋窗口。
 const SPIN_MARGIN: Duration = Duration::from_micros(150);
-/// 里程计陈旧阈值（墙钟秒）：覆盖 10Hz 视觉更新间隔，触发姿态降级。
+/// 里程计到达新鲜窗口（墙钟）；超时触发姿态降级。
 const ODOM_STALE_LIMIT: Duration = Duration::from_millis(500);
 /// IMU 陈旧阈值（墙钟）；陈旧则不得解锁。
 const IMU_STALE_LIMIT: Duration = Duration::from_millis(50);
-/// 参考流新鲜窗口（墙钟）：独立轨迹输出以 100Hz 发布，窗口内未到即视为流断（断开后由
-/// 状态机的 `reference_timeout` 计时回落位置保持）。
+/// 参考流到达新鲜窗口（墙钟）；断流后由状态机的 `reference_timeout` 计时回落位置保持。
 const REFERENCE_STALE_LIMIT: Duration = Duration::from_millis(500);
 /// 落后节拍上限：连续落后超过这么多个周期就重新对齐（避免越追越紧）。
 const MAX_LAG_TICKS: u32 = 10;

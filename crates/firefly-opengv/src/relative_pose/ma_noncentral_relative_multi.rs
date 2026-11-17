@@ -47,8 +47,7 @@ pub struct MaNoncentralRelativeMulti<'a> {
 }
 impl<'a> MaNoncentralRelativeMulti<'a> {
     /// # Errors
-    /// Returns an error if correspondence counts, coordinate storage, camera assignments,
-    /// or camera calibration arrays have incompatible bounds.
+    /// Group counts differ, camera offsets are missing, or a bearing count exceeds its XYZ storage.
     pub fn new(
         bearing_vectors1: &'a [&'a [f64]],
         bearing_vectors2: &'a [&'a [f64]],

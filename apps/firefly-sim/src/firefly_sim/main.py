@@ -196,7 +196,7 @@ def decode_config(cfg: dict, *, scene_loader: Callable[[], str] = load_scene_nam
     if frequencies[2] > frequencies[0] + 1e-9:
         raise ValueError("位姿频率不能高于物理频率")
     physics_period, imu_period, pose_period = (1.0 / rate for rate in frequencies)
-    # 停机坪：缺配置时按场景定义（`firefly_mujoco.scene.SCENES[].pad`）——上电停在地面
+    # 出生点由 drone_pad 提供，包含所选机库表面的离地余量。
     scene_name = scene_loader()
     start_pos = np.asarray(cfg.get("start", drone_pad(scene_name)), dtype=float)
     if start_pos.shape != (3,) or not np.isfinite(start_pos).all():
@@ -239,12 +239,10 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
     node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
     imu_pub = _publisher(node, TOPIC_IMU, ImuMessage, IMU_SERVICE_MAX)
     gt_pub = _publisher(node, TOPIC_GT, OdomMessage)
-    # 被控对象状态供评测；机体描述以 1Hz 发布给飞控
     plant_pub = (_publisher(node, PLANT_STATE_TOPIC, PlantStateMessage, PLANT_STATE_SERVICE_MAX)
                  if publish_plant_state else None)
     airframe_pub = _publisher(node, AIRFRAME_TOPIC, AirframeMessage, AIRFRAME_SERVICE_MAX)
     # 飞控指令订阅（闭环模式）：位置/速度反馈由飞控消费，本进程只做被控对象。
-    # 服务订阅端上限须与 Rust 侧同值：先创建方定上限，否则飞控发布端声明 32 会被拒。
     control_sub = _subscriber(node, CONTROL_TOPIC, ControlMessage, CONTROL_SERVICE_MAX)
     imu_notify = _notifier(node, TOPIC_IMU)
     _init_log_ipc(node)
@@ -253,9 +251,7 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
     motor_thrusts = np.empty(4)
     state_out = (np.empty(3), np.empty(3), np.empty(4), np.empty(3))
     imu_out = (np.empty(3), np.empty(3))
-    # 飞控指令的墙钟到达时刻（锁步下 sim 时间由指令推进，指令陈旧只能按墙钟判）
     control_rx_wall = None
-    # 物理是否处于暂停（无有效飞控指令；告警一次，恢复时告知）
     physics_paused = False
 
     cycle = None
@@ -275,18 +271,13 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
                 control_rx_wall is not None
                 and time.monotonic() - control_rx_wall <= CONTROL_STALE
             ):
-                # 闭环模式：施加飞控下发的 4 电机推力（被控对象按机体几何合成 wrench）
                 if physics_paused:
                     physics_paused = False
                     log("飞控指令恢复，物理继续推进")
                 env.apply_motor_thrusts(motor_thrusts)
                 env.step()
             else:
-                # 无有效指令（飞控未启动/停发）：物理不推进——锁步语义，对照
-                # ArduPilot SITL（仿真与飞控同进程）与 PX4 lockstep（物理由飞控
-                # 传感器节拍驱动）：两家都没有被控对象侧兜底。状态/传感器仍按节拍
-                # 发布冻结内容，飞控一起就能续上；本循环的暂停时长不计入实时节奏
-                # （t_start 后移），恢复后不追赶。
+                # 暂停期间仿真时间和传感器节拍冻结，恢复后从当前步继续。
                 if not physics_paused:
                     physics_paused = True
                     log(
@@ -302,7 +293,7 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
                 env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))
             t = env.time
 
-            # 被控对象状态供评测（每个物理步），机体描述供飞控（1Hz）
+            # 被控对象状态供评测；机体描述按 AIRFRAME_PERIOD 发布。
             if plant_pub is not None:
                 _publish_plant_state(plant_pub, env, t, out=state_out)
             if t + 1e-12 >= next_airframe:
@@ -315,7 +306,6 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
                     ftrace.end_cycle(cycle)
                 cycle = ftrace.start_cycle()
 
-            # IMU（当前周期的子 span）
             if t + 1e-12 >= next_imu:
                 gyro, accel = env.imu(out=imu_out)
                 msg = ImuMessage()
@@ -324,11 +314,8 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
                 msg.linear_acceleration_x, msg.linear_acceleration_y, msg.linear_acceleration_z = accel
                 _publish_traced(imu_pub, cycle, "publish-imu", msg, t)
                 _notify(imu_notify)
-                # 推进到 t 之后的网格点（防止 t 越过后下一步重复发布，
-                # 保证传感器时间戳落在各自的采样网格上）
                 next_imu, skipped = advance_grid(next_imu, t, imu_period)
                 if skipped >= 1:
-                    # 物理不可倒带：跳过的采样永久丢失（VIO 断流告警的对端证据）。
                     log(
                         "IMU 追赶跳过 {} 采样（{:.2f}s 数据丢失）".format(
                             skipped, skipped * imu_period

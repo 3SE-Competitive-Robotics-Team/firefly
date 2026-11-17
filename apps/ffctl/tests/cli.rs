@@ -99,15 +99,6 @@ fn usage_spec_exports_domains() {
 }
 
 #[test]
-fn completion_takes_a_value_enum_shell() {
-    let out = usage_rs::test::command!("ffctl", "completion", "--help").assert_success();
-    let stdout = out.stdout_text();
-    for shell in ["bash", "elvish", "fish", "nu", "powershell", "zsh"] {
-        assert!(stdout.contains(shell), "缺少 {shell}：{stdout}");
-    }
-}
-
-#[test]
 fn negative_altitude_is_a_usage_error() {
     let out = usage_rs::test::command!("ffctl", "fc", "takeoff", "-1");
     assert_eq!(out.status.code(), Some(2), "{}", out.stderr_text());

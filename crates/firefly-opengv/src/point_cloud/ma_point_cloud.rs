@@ -31,8 +31,7 @@
 use crate::point_cloud::point_cloud_adapter_base::PointCloudAdapterBase;
 use nalgebra::{Matrix3, Vector3};
 
-/// Borrowed storage adapter with world/viewpoint priors.
-/// Access indices must satisfy the source assertions; constructors validate storage bounds.
+/// Borrowed XYZ point clouds with independent declared counts.
 pub struct MaPointCloud<'a> {
     pub points1: &'a [f64],
     pub points2: &'a [f64],
@@ -43,8 +42,7 @@ pub struct MaPointCloud<'a> {
 }
 impl<'a> MaPointCloud<'a> {
     /// # Errors
-    /// Returns an error if correspondence counts, coordinate storage, camera assignments,
-    /// or camera calibration arrays have incompatible bounds.
+    /// A declared point count exceeds its XYZ backing storage.
     pub fn new(
         points1: &'a [f64],
         points2: &'a [f64],

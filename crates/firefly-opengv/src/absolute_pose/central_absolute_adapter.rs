@@ -31,8 +31,7 @@
 use crate::absolute_pose::absolute_adapter_base::AbsoluteAdapterBase;
 use nalgebra::{Matrix3, Vector3};
 
-/// Borrowed storage adapter with world/viewpoint priors.
-/// Access indices must satisfy the source assertions; constructors validate storage bounds.
+/// Borrowed bearing/point pairs with a pose prior.
 pub struct CentralAbsoluteAdapter<'a> {
     pub points: &'a [Vector3<f64>],
     pub bearing_vectors: &'a [Vector3<f64>],
@@ -41,8 +40,7 @@ pub struct CentralAbsoluteAdapter<'a> {
 }
 impl<'a> CentralAbsoluteAdapter<'a> {
     /// # Errors
-    /// Returns an error if correspondence counts, coordinate storage, camera assignments,
-    /// or camera calibration arrays have incompatible bounds.
+    /// Bearing and point counts differ.
     pub fn new(
         bearing_vectors: &'a [Vector3<f64>],
         points: &'a [Vector3<f64>],

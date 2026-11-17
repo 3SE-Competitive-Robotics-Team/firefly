@@ -1,7 +1,4 @@
 # HIL 板端配置：RootSLAM 只跑估计/控制闭环。
-# 回环与建图由命令行开关 --no-loop-closures / --no-mapping 关闭，避免板端
-# 初始化阻塞 IMU 队列；`configs/processes-hil.toml` 已经在命令行里
-# 带上这两个开关。
 precision = "float32"
 
 [vio]

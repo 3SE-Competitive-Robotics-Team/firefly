@@ -2,8 +2,6 @@
 use super::*;
 
 /// 执行一次地图查询：建绑定 → 填查询侧 → 推理 → 返回（耗时秒，观测）。
-///
-/// 抽出来是为了让契约测试主体只保留断言与判定（否则超出 clippy 行数上限）。
 fn run_query(
     session: &mut Session,
     bindings: &mut MatchBindings,

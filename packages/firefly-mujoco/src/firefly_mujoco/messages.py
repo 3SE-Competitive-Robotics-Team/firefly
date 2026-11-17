@@ -259,7 +259,7 @@ class AirframeMessage(ctypes.Structure):
 class ControlMessage(ctypes.Structure):
     """飞控指令（1kHz，plant 取最新）：与 Rust `ControlMessage`（`FireflyControlMessage`）一致。
 
-    `state_time` 是飞控用于本指令的状态采样时刻（plant 据此判陈旧）；`thrust` 是
+    `state_time` 是飞控用于本指令的状态采样时刻（传感器时钟，秒）；`thrust` 是
     4 电机推力（N，与 `scene.ROTORS` 同序），plant 按机体几何合成 wrench。
     """
 

@@ -66,7 +66,7 @@ pub struct Link {
     /// 待发图像预算（至少两张）；队列按双目对占位，深度独占一个位置。
     #[serde(default = "default_image_queue")]
     pub image_queue: usize,
-    /// 下行图像节流周期（秒）；板端 VIO 跟不上时用它压低送帧率。
+    /// 双目与深度节流周期（秒）；下视使用独立的 `down_rate_hz`。
     #[serde(default = "default_image_period")]
     pub image_period_s: f64,
     /// 连续下视传输频率上界；允许 15/30 FPS，独立于双目节流周期。

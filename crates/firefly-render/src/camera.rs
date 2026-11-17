@@ -1,5 +1,4 @@
-//! 第三人称追踪相机：机头方向后方偏上，平滑跟随。参数是全局唯一的一套硬编码，
-//! 两个可视化应用共用，无按应用覆盖。
+//! render 与 quad 共用的第三人称追踪相机。
 
 use bevy::prelude::*;
 
@@ -20,8 +19,7 @@ pub struct FollowTarget;
 #[derive(Component)]
 pub struct FollowCamera;
 
-/// 第三人称追踪（`Update`）：只用**偏航**取向摆位（不随俯仰/横滚翻滚），指数平滑跟随。
-// 系统参数按值传递（`SystemParam` 契约）。
+/// 第三人称追踪（`Update`）：按偏航摆位，按帧间隔线性插值位置。
 #[allow(clippy::needless_pass_by_value)]
 pub fn follow_camera(
     time: Res<Time>,

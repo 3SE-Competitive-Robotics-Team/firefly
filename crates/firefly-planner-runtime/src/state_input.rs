@@ -9,7 +9,7 @@ use firefly_planner::State;
 use firefly_pubsub::odom::OdomMessage;
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 
-/// 100Hz 里程计的墙钟存活期为 500ms，由严格递增的有效测量刷新。
+/// 里程计墙钟存活期，由严格递增的有效测量刷新。
 const MAX_AGE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy)]

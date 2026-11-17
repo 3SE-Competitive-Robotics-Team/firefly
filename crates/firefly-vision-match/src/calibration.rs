@@ -1,6 +1,6 @@
 //! 传感器标定常量（真值，来源为 `firefly_base::rig` 的相机安装参数）。
 //!
-//! 左目与深度相机同朝向（下倾 20°），仅差 2.5cm 横向基线；`PnP` 解的是左目
+//! 左目与深度相机同朝向；`PnP` 解的是左目
 //! 位姿，经 [`cam_pose_to_body`] 转到机体系（VIO/融合状态系）再参与融合。
 
 use firefly_base::{FrameId, RigidTransform};
@@ -55,7 +55,7 @@ pub fn body_pose_to_cam(t_body: &Matrix4<f64>) -> Matrix4<f64> {
         .matrix()
 }
 
-/// 左目←前置深度相机，两者同朝向（仅差 2.5cm 横向基线）；来源 [`firefly_base::rig`]。
+/// 左目←前置深度相机；来源 [`firefly_base::rig`]。
 ///
 /// # Panics
 /// 编译时标定常量不是有限刚体变换。
@@ -80,24 +80,15 @@ pub fn pinhole() -> crate::depth::Pinhole {
     }
 }
 
-/// 深度验证：`rot_cam_to_body` 列向量即相机轴。
 #[cfg(test)]
 mod tests {
     use super::*;
     use nalgebra::Isometry3;
 
     #[test]
-    fn cam_axes_match_depth_camera() {
-        let r = rot_cam_to_body();
-        let x = r.column(0);
-        assert!((x.x).abs() < 1e-12 && (x.y + 1.0).abs() < 1e-12 && x.z.abs() < 1e-12);
-    }
-
-    #[test]
     fn body_cam_extrinsics_match_mujoco_truth() {
         use nalgebra::Matrix4;
-        // 外参真值断言（`render::rig::LEFT_OFFSET`）：`T_body @ T_cb` 必须等于下式，
-        // 求逆版整体错位——`body_pose_to_cam` 必须直接右乘。
+        // 机体无旋转时，世界相机位姿由标称下倾外参与机体平移直接组成。
         let t_body = Isometry3::from_parts(
             nalgebra::Translation3::new(1.0, 4.0, 1.0),
             nalgebra::UnitQuaternion::identity(),
@@ -115,8 +106,6 @@ mod tests {
 
     #[test]
     fn focal_matches_formula() {
-        // 钉住派生值：FOV_Y=70.88°、H=240 时 focal ≈ 168.60699394364997，
-        // 与离线建库/发布一致；改动 `rig::FOV_Y_DEG` 会在此处暴露。
         assert!((focal() - 168.606_993_943_649_97).abs() < 1e-9);
         let camera = pinhole();
         assert!((camera.cx - 159.5).abs() < 1e-12 && (camera.cy - 119.5).abs() < 1e-12);

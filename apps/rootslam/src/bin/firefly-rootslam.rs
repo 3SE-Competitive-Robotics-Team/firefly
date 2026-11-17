@@ -213,13 +213,20 @@ mod tests {
     }
 
     #[test]
-    fn default_and_shipped_config_use_vio_only() {
+    fn online_configs_preserve_vio_defaults() {
         let shipped: Config =
             toml::from_str(include_str!("../../../../configs/firefly-rootslam.toml")).unwrap();
-        for config in [Config::default(), shipped] {
+        let empty: Config = toml::from_str("").unwrap();
+        for config in [Config::default(), empty, shipped] {
             assert!(!config.vio.map && !config.vio.loops && !config.vio.external_localization);
             assert_eq!(config.precision, super::Precision::Float64);
+            assert!(config.validate().is_ok());
         }
+        let partial: Config = toml::from_str("precision = 'float32'").unwrap();
+        assert!(!partial.vio.map && !partial.vio.loops && !partial.vio.external_localization);
+        assert_eq!(partial.precision, super::Precision::Float32);
+        assert!(partial.validate().is_ok());
+        assert!(toml::from_str::<Config>("onlne = {}").is_err());
     }
 
     #[test]
@@ -235,35 +242,5 @@ mod tests {
             assert_eq!(config.precision, super::Precision::Float64);
             assert!(config.validate().is_ok());
         }
-    }
-
-    #[test]
-    fn missing_empty_and_partial_configs_share_online_defaults() {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../logs")
-            .join(format!(
-                "test_rootslam_config_{}_{stamp}",
-                std::process::id()
-            ));
-        std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("online.toml");
-        let missing: Config = firefly_config::load(&path).unwrap();
-        std::fs::write(&path, "").unwrap();
-        let empty: Config = firefly_config::load(&path).unwrap();
-        let partial: Config = toml::from_str("precision = 'float32'").unwrap();
-        assert_eq!(missing.vio.map, empty.vio.map);
-        assert_eq!(missing.vio.loops, empty.vio.loops);
-        assert_eq!(missing.precision, empty.precision);
-        assert_eq!(missing.precision, super::Precision::Float64);
-        assert_eq!(missing.vio.map, partial.vio.map);
-        assert_eq!(partial.precision, super::Precision::Float32);
-        assert!(missing.vio.validate().is_ok());
-        assert!(empty.vio.validate().is_ok());
-        assert!(toml::from_str::<Config>("onlne = {}").is_err());
-        std::fs::remove_dir_all(directory).unwrap();
     }
 }

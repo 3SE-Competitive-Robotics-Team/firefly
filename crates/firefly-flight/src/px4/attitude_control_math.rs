@@ -4,13 +4,10 @@
 //! 的 `src/modules/mc_att_control/AttitudeControl/AttitudeControlMath.hpp`（BSD-3-Clause）。
 //! 保持 NED 世界系 / FRD 机体系约定。
 //!
-//! 不移植：`namespace AttitudeControlMath`——Rust 模块本身就是命名空间。
-//!
 //! 倾斜修正只在世界系中重定向推力轴，不改变期望倾角大小；`q_sp_tilt` 必须是不含偏航的
 //! 纯倾斜四元数。反向平行时 PX4 `Quatf(v0, v1)` 取正交轴 180° 旋转，`types` 中的
 //! 同名助手会退化为单位四元数，故此处私有补齐。
 
-// 按要求使用 `types` 的 glob 导入。
 #![allow(clippy::wildcard_imports)]
 
 use super::types::*;
@@ -25,7 +22,6 @@ use super::types::*;
 pub fn correct_tilt_setpoint_for_yaw_error(q_sp_tilt: &mut Quatf, q_att: Quatf, q_sp_yaw: Quatf) {
     let z_unit = Vector3f::z();
 
-    // 从当前姿态提取偏航
     let att_z = quat_dcm_z(q_att);
     let q_tilt = quat_from_two_vectors_px4(z_unit, att_z);
     let q_yaw = q_tilt.inverse() * q_att; // 不是欧拉偏航角
@@ -33,7 +29,6 @@ pub fn correct_tilt_setpoint_for_yaw_error(q_sp_tilt: &mut Quatf, q_att: Quatf, 
     // 求使 q_yaw * q_tilt_new = q_sp_yaw * q_sp_rp_compensated 的倾斜方向
     let q_sp_rp_compensated = q_sp_yaw.inverse() * q_yaw * *q_sp_tilt;
 
-    // 提取修正后的倾斜
     let att_sp_z = quat_dcm_z(q_sp_rp_compensated);
     *q_sp_tilt = quat_from_two_vectors_px4(z_unit, att_sp_z);
 }
@@ -97,7 +92,6 @@ mod tests {
         let q_sp_yaw = quat_from_rotation_vector(Vector3f::new(0.0, 0.0, 0.8));
         let q_sp_tilt = quat_from_rotation_vector(Vector3f::new(0.2, 0.15, 0.0));
 
-        // 期望:q_sp_yaw * q_tilt_new 与按当前偏航旋转原倾斜的世界系推力方向一致
         let q_yaw_att = {
             let att_z = quat_dcm_z(q_att);
             let q_tilt = quat_from_two_vectors_px4(Vector3f::z(), att_z);

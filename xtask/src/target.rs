@@ -20,9 +20,6 @@ const DESKTOP_APPS: &[&str] = &[
 ];
 
 /// 机载应用：Orange Pi Zero 3W 上运行的进程，不含 Bevy 仿真/演示程序。
-/// `camera`/`imu`/`motor` 是板侧独占的传感器与执行器驱动，替代仿真侧的
-/// `render` 与 `firefly-sim`。`firefly-rootslam` 是 live 入口，板端 HIL
-/// 用它替换 `firefly-okvis-x` 跑估计/控制闭环。
 const BOARD_APPS: &[&str] = &[
     "aliked",
     "camera",
@@ -92,16 +89,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn desktop_release_includes_simulation_vio_apps() {
+    fn desktop_release_includes_vio_planning_and_hil() {
         let apps = Target::Desktop.apps();
         assert!(apps.contains(&"firefly-rootslam"));
         assert!(apps.contains(&"planner"));
         assert!(apps.contains(&"traj"));
-    }
-
-    #[test]
-    fn desktop_release_includes_the_host_side_hil_bridge() {
-        assert!(Target::Desktop.apps().contains(&"hil"));
+        assert!(apps.contains(&"hil"));
     }
 
     #[test]

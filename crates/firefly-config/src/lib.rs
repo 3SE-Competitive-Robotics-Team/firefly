@@ -116,21 +116,8 @@ mod tests {
     }
 }
 
-/// 运行期路径约定：安装根 + 其下的 `configs/`、`models/`。
-///
-/// 部署布局是 `bin/`、`configs/`、`models/` 三个同级目录。资源定位遵循
-/// "越显式越优先"的惯例，不依赖启动目录：
-///
-/// 1. `FIREFLY_ROOT` 环境变量；
-/// 2. 可执行文件所在前缀 `<exe>/../..`（部署布局下即安装根）；
-/// 3. 编译期默认：板载 `/opt/firefly`，开发机构建为仓库根。
-///
-/// 不用 `env!("CARGO_MANIFEST_DIR")` 作为**运行时**路径：它是构建机路径，
-/// 二进制被安装到别处（`cargo install`、打包、部署到板子）后就失效。这里的
-/// 编译期常量只作最后回退，开发机构建保留了仓库内直接运行的能力。
-///
-/// 也不使用 `directories`/XDG 的用户配置目录：`configs/`、`models/` 是随程序
-/// 一起安装的只读资源，不是用户数据，按安装前缀定位才符合 FHS 与部署语义。
+/// 随程序安装的 `configs/` 与 `models/` 资源定位。
+/// 安装根依次取非空环境覆盖、含 `configs/` 的可执行文件前缀、编译期默认值。
 pub mod paths {
     use std::{
         ffi::OsStr,
@@ -175,7 +162,6 @@ pub mod paths {
         root().join("models").join(name)
     }
 
-    /// 按优先级解析安装根；纯函数，便于覆盖各分支。
     fn resolve(override_root: Option<&OsStr>, exe: Option<&Path>, default: &Path) -> PathBuf {
         if let Some(dir) = override_root.filter(|dir| !dir.is_empty()) {
             return normalize(Path::new(dir));

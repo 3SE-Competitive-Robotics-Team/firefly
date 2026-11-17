@@ -130,14 +130,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn baseline_is_lateral_and_symmetric() {
-        assert!((RIGHT_IN_BODY[1] - LEFT_IN_BODY[1] - BASELINE).abs() < 1e-12);
-        assert!((LEFT_IN_BODY[0] - RIGHT_IN_BODY[0]).abs() < 1e-12);
-        assert!((DEPTH_IN_BODY[1]).abs() < 1e-12);
-        assert!((DEPTH_IN_BODY[0] - CAMERA_FORWARD_M).abs() < 1e-12);
-    }
-
-    #[test]
     fn axes_are_orthonormal_right_handed() {
         let r = cam_axes_in_body();
         assert!((r.transpose() * r - Matrix3::identity()).norm() < 1e-12);
@@ -147,7 +139,6 @@ mod tests {
         assert!((view.z + DOWNTILT_DEG.to_radians().sin()).abs() < 1e-12);
     }
 
-    /// 树查询与直接变换一致，且可反向查。
     #[test]
     fn tree_lookup_matches_direct_transform() {
         let tree = tree();
@@ -160,13 +151,14 @@ mod tests {
         }
     }
 
-    /// 双目基线在机体系仍落在横向（立体视差来源）。
     #[test]
-    fn stereo_baseline_is_lateral_in_body_frame() {
+    fn camera_positions_preserve_lateral_baseline_and_centered_depth() {
         let l = body_from_camera(FrameId::LEFT_CAMERA).point(nalgebra::Point3::origin());
         let r = body_from_camera(FrameId::RIGHT_CAMERA).point(nalgebra::Point3::origin());
         let delta = r - l;
         assert!(delta.x.abs() < 1e-12 && delta.z.abs() < 1e-12);
-        assert!((delta.y.abs() - BASELINE).abs() < 1e-12);
+        assert!((delta.y - BASELINE).abs() < 1e-12);
+        assert!(DEPTH_IN_BODY[1].abs() < 1e-12);
+        assert!((DEPTH_IN_BODY[0] - CAMERA_FORWARD_M).abs() < 1e-12);
     }
 }

@@ -18,7 +18,7 @@ pub enum Shape {
 }
 
 impl Shape {
-    /// 障碍在 `t` 时刻的占据体素索引集合（形状中心在 `pos`）。
+    /// 形状中心在 `pos` 时覆盖的体素索引集合。
     pub(crate) fn voxels_at(&self, pos: Vector3<f64>, map: &GridMap) -> Vec<[usize; 3]> {
         let mut out = Vec::new();
         let (lo, hi) = match *self {
@@ -77,7 +77,6 @@ impl Motion {
     pub fn position_at(&self, t: f64) -> [f64; 3] {
         let wp = &self.waypoints;
         let t_last = wp[wp.len() - 1].0;
-        // 循环运动先取模（rem_euclid 保证负时间也安全），再按段插值
         let t = if self.loop_back {
             t.rem_euclid(t_last)
         } else {

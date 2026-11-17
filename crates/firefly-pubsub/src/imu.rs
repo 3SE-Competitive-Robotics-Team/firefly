@@ -34,7 +34,7 @@ impl Default for ImuMessage {
 }
 
 /// IMU 服务容量与接收队列；Python 发布端声明相同服务容量。
-/// 接收队列覆盖 100Hz 下约 1s 排空停顿，溢出会丢失测量。
+/// 队列按样本数预算，可覆盖时长取决于发布频率；溢出会丢失测量。
 pub const IMU_SUBSCRIPTION: crate::subscriber::SubscriberOptions =
     crate::subscriber::SubscriberOptions {
         buffer_size: 100,

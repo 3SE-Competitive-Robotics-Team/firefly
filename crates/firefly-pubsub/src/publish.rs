@@ -11,8 +11,7 @@ use crate::event::TopicNotifier;
 use crate::node::IpcNode;
 use crate::trace::TraceContext;
 
-/// 节点由调用方持有（进程共享单节点，见 [`crate::node`]），端口只借用其
-/// 创建服务；Drop 顺序由调用方作用域保证（节点最后释放）。
+/// 使用调用方的共享节点创建端口；线程与退出约定见 [`crate::node`]。
 pub struct Publisher<T: Debug + IceoryxSend + ?Sized + 'static> {
     publisher: Iox2Publisher<ipc::Service, T, TraceContext>,
     /// 事件唤醒端：`Some` 时 publish 成功后自动通知（订阅端 `WaitSet` 即到即醒）。
@@ -26,14 +25,9 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
         Self::with_topic_and_buffer(node, topic, None)
     }
 
-    /// 以进程共享节点 + 自定义话题名创建发布器，并指定服务的
-    /// `subscriber_max_buffer_size`（订阅端环形缓冲历史上限；`None` 用
-    /// iceoryx2 默认 2，适用于 odom/相机等单消费者低频话题）与
-    /// `max_publishers`（同话题发布端上限；`None` 用默认 2——`Firefly/Log`
-    /// 7 进程同话题发布，须显式调大，见 [`crate::log::LOG_MAX_PUBLISHERS`]）。
-    ///
-    /// 服务首次创建时生效（后续 open 的端口必须 ≤ 该值）；高频突发话题
-    ///（如 [`crate::viz::VIZ_TOPIC`] 多实体 10Hz）显式调大防溢出丢帧。
+    /// 使用共享节点创建发布器，按需指定订阅缓冲上限；`None` 沿用 iceoryx2 默认值。
+    /// 同话题端口的容量须与首次创建的服务兼容；多发布者使用
+    /// [`Self::with_topic_buffer_publishers`]。
     ///
     /// # Errors
     /// Service/Publisher 创建失败（IPC 资源不可用等）。
@@ -45,11 +39,8 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
         Self::with_topic_buffer_publishers(node, topic, subscriber_max_buffer_size, None)
     }
 
-    /// [`with_topic_and_buffer`](Self::with_topic_and_buffer) + `max_publishers`
-    /// 指定（多发布端同话题，如 `Firefly/Log` 7 进程聚合，须 ≥ 发布端数）。
-    /// 注：`max_publishers` 只在服务创建时生效；`open_or_create` 对已存在
-    /// 服务做上限校验（后建 ≤ 先建，否则 `DoesNotSupportRequestedAmountOfPublishers`），
-    /// 聚合服务由先启动的 `mimir` 使用全量容量创建。
+    /// 创建发布器并指定订阅缓冲与发布者上限；`None` 沿用 iceoryx2 默认值。
+    /// 已有服务须支持所请求的容量；日志话题容量见 [`crate::log::LOG_MAX_PUBLISHERS`]。
     ///
     /// # Errors
     /// Service/Publisher 创建失败（IPC 资源不可用等）。

@@ -31,8 +31,7 @@
 use crate::relative_pose::relative_adapter_base::RelativeAdapterBase;
 use nalgebra::{Matrix3, Vector3};
 
-/// Borrowed storage adapter with world/viewpoint priors.
-/// Access indices must satisfy the source assertions; constructors validate storage bounds.
+/// Borrowed XYZ bearing arrays with independent declared counts.
 pub struct MaCentralRelative<'a> {
     pub bearing_vectors1: &'a [f64],
     pub bearing_vectors2: &'a [f64],
@@ -43,8 +42,7 @@ pub struct MaCentralRelative<'a> {
 }
 impl<'a> MaCentralRelative<'a> {
     /// # Errors
-    /// Returns an error if correspondence counts, coordinate storage, camera assignments,
-    /// or camera calibration arrays have incompatible bounds.
+    /// A declared bearing count exceeds its XYZ backing storage.
     pub fn new(
         bearing_vectors1: &'a [f64],
         bearing_vectors2: &'a [f64],

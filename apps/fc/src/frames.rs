@@ -120,8 +120,7 @@ impl ControlFrames {
             };
         }
     }
-    /// `dt`：参考时刻到当前时刻的**仿真秒**差（调用方由 IMU 时刻给出），用于把
-    /// 10Hz 的阶跃参考外推到当前时刻；限幅由调用方负责。
+    /// `dt` 为参考到 IMU 时刻的传感器时间差（秒），用于外推参考；调用方负责限幅。
     pub fn reference(
         &self,
         msg: &ReferenceMessage,

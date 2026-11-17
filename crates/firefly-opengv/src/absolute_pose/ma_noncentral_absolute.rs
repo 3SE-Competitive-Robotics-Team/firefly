@@ -31,8 +31,7 @@
 use crate::absolute_pose::absolute_adapter_base::AbsoluteAdapterBase;
 use nalgebra::{Matrix3, Vector3};
 
-/// Borrowed storage adapter with world/viewpoint priors.
-/// Access indices must satisfy the source assertions; constructors validate storage bounds.
+/// Borrowed XYZ points and bearing/offset records with independent declared counts.
 pub struct MaNoncentralAbsolute<'a> {
     pub points: &'a [f64],
     pub bearing_vectors: &'a [f64],
@@ -43,8 +42,7 @@ pub struct MaNoncentralAbsolute<'a> {
 }
 impl<'a> MaNoncentralAbsolute<'a> {
     /// # Errors
-    /// Returns an error if correspondence counts, coordinate storage, camera assignments,
-    /// or camera calibration arrays have incompatible bounds.
+    /// A declared count exceeds the point XYZ or bearing/offset backing storage.
     pub fn new(
         points: &'a [f64],
         bearing_vectors: &'a [f64],

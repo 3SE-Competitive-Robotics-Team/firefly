@@ -1,5 +1,4 @@
-//! 被控对象消息：状态（`Firefly/PlantState`，200Hz）与机体/执行器描述
-//! （`Firefly/Airframe`，1Hz 电平）。
+//! 被控对象真值状态（`Firefly/PlantState`）与机体/执行器描述（`Firefly/Airframe`）。
 //!
 //! 机体参数由被控对象统一发布，飞控订阅后装配控制器。
 
@@ -9,7 +8,7 @@ pub const PLANT_STATE_TOPIC: &str = "Firefly/PlantState";
 /// 机体/执行器描述话题（sim → 飞控，持续重发，晚订阅必收）。
 pub const AIRFRAME_TOPIC: &str = "Firefly/Airframe";
 
-/// 状态订阅缓冲区深度与服务容量（Python 侧同值）：40ms（飞控 1kHz 排空，覆盖短促停顿后仍拿最新样本）。
+/// 评测状态的订阅缓冲深度与服务容量；Python 侧使用同值。
 pub const PLANT_STATE_BUFFER_SIZE: usize = 8;
 /// 机体描述订阅缓冲深度与服务容量（1Hz 电平，Python 侧同值）。
 pub const AIRFRAME_BUFFER_SIZE: usize = 4;

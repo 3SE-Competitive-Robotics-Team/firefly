@@ -31,8 +31,7 @@ impl Default for SubscriberOptions {
     }
 }
 
-/// 节点由调用方持有（进程共享单节点，见 [`crate::node`]），端口只借用其
-/// 创建服务；Drop 顺序由调用方作用域保证（节点最后释放）。
+/// 使用调用方的共享节点创建端口；线程与退出约定见 [`crate::node`]。
 pub struct Subscriber<T: Debug + IceoryxSend + ?Sized + 'static> {
     subscriber: Iox2Subscriber<ipc::Service, T, TraceContext>,
 }

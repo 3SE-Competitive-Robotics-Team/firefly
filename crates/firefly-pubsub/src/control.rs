@@ -2,14 +2,14 @@ use iceoryx2::prelude::*;
 
 pub const CONTROL_TOPIC: &str = "Firefly/Control";
 
-/// 指令服务容量与订阅缓冲区深度（Python 侧同值）：32 条（1kHz 发布、被控对象 200Hz 排空——留 ~32ms 抖动余量）。
+/// 指令服务容量与订阅缓冲深度；Python 侧使用同值以兼容服务创建顺序。
 pub const CONTROL_BUFFER_SIZE: usize = 32;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
 #[type_name("FireflyControlMessage")]
 pub struct ControlMessage {
-    /// 飞控本次控制所用的状态采样时刻（仿真秒；被控对象据此判陈旧）。
+    /// 飞控本次控制所用的状态采样时刻（传感器时钟，秒）。
     pub state_time: f64,
     /// 4 电机推力（N，顺序与机体旋翼编号一致；已由飞控侧限幅）。
     pub thrust: [f64; 4],

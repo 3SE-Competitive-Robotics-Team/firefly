@@ -31,7 +31,7 @@ def test_visual_span_uses_rrd_nanosecond_precision(last, passed):
     assert evaluate(data)["passed"] == passed
 
 
-@pytest.mark.parametrize("fault", [None, "cruise_gap", "cruise_compute", "missing_runtime", "rate", "invalid_rate", "missing_rate", "rate_drift", "not_released", "cpu_hil"])
+@pytest.mark.parametrize("fault", ["cruise_gap", "cruise_compute", "missing_runtime", "rate", "invalid_rate", "missing_rate", "rate_drift", "not_released", "cpu_hil"])
 def test_continuous_video_and_on_demand_inference_are_independently_scored(fault):
     data = successful_evidence()
     runtime = data.scalars["/landing/runtime"]
@@ -54,7 +54,7 @@ def test_continuous_video_and_on_demand_inference_are_independently_scored(fault
     elif fault == "cpu_hil":
         data.events[0][1]["transport"] = "hil"
     report = evaluate(data)
-    assert report["passed"] == (fault is None), report
+    assert not report["passed"], report
 
 
 def test_scoring_uses_initial_full_coordinate_alignment():

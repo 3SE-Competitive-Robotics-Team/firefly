@@ -47,8 +47,7 @@ pub struct NoncentralRelativeMultiAdapter<'a> {
 }
 impl<'a> NoncentralRelativeMultiAdapter<'a> {
     /// # Errors
-    /// Returns an error if correspondence counts, coordinate storage, camera assignments,
-    /// or camera calibration arrays have incompatible bounds.
+    /// Camera group counts, per-group bearing counts, or calibration counts differ.
     pub fn new(
         bearing_vectors1: Vec<std::sync::Arc<Vec<Vector3<f64>>>>,
         bearing_vectors2: Vec<std::sync::Arc<Vec<Vector3<f64>>>>,

@@ -31,8 +31,7 @@
 use crate::point_cloud::point_cloud_adapter_base::PointCloudAdapterBase;
 use nalgebra::{Matrix3, Vector3};
 
-/// Borrowed storage adapter with world/viewpoint priors.
-/// Access indices must satisfy the source assertions; constructors validate storage bounds.
+/// Borrowed point pairs with a relative pose prior.
 pub struct PointCloudAdapter<'a> {
     pub points1: &'a [Vector3<f64>],
     pub points2: &'a [Vector3<f64>],
@@ -41,8 +40,7 @@ pub struct PointCloudAdapter<'a> {
 }
 impl<'a> PointCloudAdapter<'a> {
     /// # Errors
-    /// Returns an error if correspondence counts, coordinate storage, camera assignments,
-    /// or camera calibration arrays have incompatible bounds.
+    /// The two point clouds have different lengths.
     pub fn new(points1: &'a [Vector3<f64>], points2: &'a [Vector3<f64>]) -> Result<Self, String> {
         if points1.len() != points2.len() {
             return Err("adapter storage shape violates correspondence bounds".into());

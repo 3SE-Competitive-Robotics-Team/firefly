@@ -188,7 +188,6 @@ class DroneEnv:
         self.data.qvel[:] = 0.0
         mujoco.mj_forward(self.model, self.data)
 
-    # ---- 控制 ----
 
     def apply_motor_thrusts(self, thrusts: np.ndarray) -> None:
         """4 电机推力（N，顺序 = rotor0..3）→ 模型执行器的 `ctrl`。
@@ -208,7 +207,6 @@ class DroneEnv:
         # mj_step 最后才积分 qpos/qvel；发布前必须刷新依赖状态的派生量。
         mujoco.mj_forward(self.model, self.data)
 
-    # ---- 传感器 ----
 
     def imu(
         self, *, out: tuple[np.ndarray, np.ndarray] | None = None,
