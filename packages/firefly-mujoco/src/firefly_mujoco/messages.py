@@ -72,6 +72,20 @@ class GrayImageMessage(ctypes.Structure):
         return "FireflyGrayImageMessage"
 
 
+class ActivityMessage(ctypes.Structure):
+    """有界资源租约；与 Rust activity::ActivityMessage 一致。"""
+
+    _fields_ = [
+        ("timestamp", ctypes.c_double), ("owner", ctypes.c_uint64),
+        ("sequence", ctypes.c_uint64), ("mask", ctypes.c_uint32),
+        ("rate_hz", ctypes.c_uint32), ("lease_ms", ctypes.c_uint32),
+    ]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflyActivityMessage"
+
+
 class DownImageMessage(ctypes.Structure):
     """OV2640 CIF 352×288 下视图像，与 Rust DownImageMessage 布局一致。"""
 

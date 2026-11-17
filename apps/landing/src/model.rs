@@ -66,8 +66,30 @@ pub struct Model {
     transform: Letterbox,
 }
 
+/// ORT 环境由进程宿主持有；工作周期仅创建和释放 Session。
+pub fn environment(runtime: Option<&Path>) -> Result<ort::environment::Environment> {
+    #[cfg(target_os = "linux")]
+    let environment = if let Some(runtime) = runtime {
+        ort::init_from(runtime)?.build()?
+    } else {
+        ort::init().build()?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let environment = {
+        if runtime.is_some() {
+            return Err("runtime path is supported by the Linux build".into());
+        }
+        ort::init().build()?
+    };
+    Ok(environment)
+}
+
 impl Model {
-    pub fn load(manifest_path: &Path, backend: Backend, runtime: Option<&Path>) -> Result<Self> {
+    pub fn load(
+        manifest_path: &Path,
+        backend: Backend,
+        environment: &ort::environment::Environment,
+    ) -> Result<Self> {
         let manifest: Manifest = serde_json::from_slice(&std::fs::read(manifest_path)?)?;
         manifest.validate()?;
         let model_path = manifest_path
@@ -78,20 +100,7 @@ impl Model {
         if format!("{:x}", Sha256::digest(&bytes)) != manifest.sha256 {
             return Err("landing model SHA256 mismatch".into());
         }
-        #[cfg(target_os = "linux")]
-        let environment = if let Some(runtime) = runtime {
-            ort::init_from(runtime)?.build()?
-        } else {
-            ort::init().build()?
-        };
-        #[cfg(not(target_os = "linux"))]
-        let environment = {
-            if runtime.is_some() {
-                return Err("runtime path is supported by the Linux build".into());
-            }
-            ort::init().build()?
-        };
-        let builder = Session::builder(&environment)?
+        let builder = Session::builder(environment)?
             .with_intra_threads(1)?
             .with_intra_op_spinning(false)?
             .with_auto_device(ort::session::builder::AutoDevicePolicy::PreferCPU)?;

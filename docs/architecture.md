@@ -61,6 +61,15 @@ planner 的状态、目标、占据地图和轨迹都属于 odom。可选 Naviga
 观测包含图像时间、VIO 会话、队伍、odom 系机体触地点、置信度、像素残差与有效标志，
 供 FC 独占控制状态与最终安全判断。此版本下视作为降落输入，原始 topic 可供后续光流/VIO 使用。
 
+任务通过统一的 `Firefly/Activity` 租约请求下视/识别，默认 15 FPS，可选择 30 FPS。
+每个拥有者独立续租，LANDING 同时请求 DOWN_CAMERA；显式释放和到达时间租约过期均撤销需求。
+`landing` 顶层 `Pipeline::{Dormant, Active}` 管理工作资源：Active 拥有 INT8 推理会话、
+图像订阅、里程计历史线程和跟踪身份；Dormant 只保留轻量控制/姿态订阅。
+重新激活创建全新跟踪器，重新确认 YOLO 身份；生产始终要求 VSINPU，加载/推理失败结束进程。
+板端相机仅在需求期持有 V4L2 采集流，休眠时 STREAMOFF；render 休眠时跳过下视渲染、GPU 回读和像素处理。
+起飞期和识别/降落期开启，巡航及任务悬停期关闭。新功能可独立拥有租约，共享资源取仍有效请求的最大帧率。
+`landing/runtime` 提供实际活跃状态与累计推理数，完整证据由 Mimir 保存。
+
 `ffctl fc land --precision` 在 Hold/Track 且目标新鲜、质量合格、距离可达时进入 Land。
 FC 使用限速度/加速度/jerk 的水平参考，依次经过 Align、Descend、Final：
 对准并稳定停留后下降，偏离目标时停止下降；观测间断先进入有时限的 Reacquire，
@@ -132,11 +141,16 @@ FC 与 HIL 输入输出驱动。两端算法使用现有 IPC，真值保留在�
 深度像素对齐。每条上行遥测或日志之间重新检查控制队列，IMU 批次发布后唤醒消费者。
 暂时无数据的读取保留有效前缀；主机端点读写等待均有 100 ms 上限，任一 USB worker
 结束或 panic 都结束整次会话并回收两个 worker。
-队列、单帧与重组大小均有固定上限。HIL 协议 v6 保留目标航向、日志 trace、
+队列、单帧与重组大小均有固定上限。HIL 协议 v7 保留目标航向、日志 trace、
 序号与丢失计数，两端版本不一致时拒绝处理帧。板端按发布者检查诊断连续性，
 主机桥为聚合 IPC 发布者分配连续序号。
 板端 `Navigation` 原子快照、`Viz` 空间诊断与 `VizVoxels` 有序分块回传到同名话题；
 Mimir 据此建立 `map←odom` 与启动时 `map←world`，并沿用各实体登记的原始坐标。
+所有 HIL IPC 路由由 `firefly-hil::topics` 唯一登记，主机与板端共用
+`open / drain / publish` 接口、话题常量、队列预算和诊断连续性策略。
+`SensorIngress::accept_raw` 统一处理下行协议、图像重组与 IMU 唤醒；驱动只维护端点生命周期。
+新增业务载荷定义线上编码后在路由表登记，接收端与发送端自动获得对应端口；
+图像分片和控制/IMU 优先级仍由传输调度器拥有，与任务种类无关。
 板端 `Reference` 和 `PlannerStatus` 原样回传至同名主机 IPC 话题，供任务验收核对
 目标身份、参考覆盖和正常轨迹完成；飞控仍消费板端本地规划参考。
 
@@ -297,7 +311,7 @@ ALIKED 的离线 / 在线模式在启动时确定；quad 使用 Bevy startup / u
 | 18 | [深度 worker](../apps/planner/src/depth_mapping.rs)、[里程计 worker](../crates/firefly-planner-runtime/src/odometry.rs)、[FC IMU worker](../apps/fc/src/imu.rs) | 启动应答、线程句柄与终止守卫；线程退出撤销快照和共享历史资格 | 就绪应答后消费；停止传播给拥有者；join 后报告线程错误 |
 | 19 | [Mimir ingress](../apps/mimir/src/ingress.rs)、[archive](../apps/mimir/src/archive.rs) | `PendingVoxels::append` 预算通过后提交块；writer 的 `finish(self)` 消费所有权 | 完整体素批次才提交；缺块、丢失和排空失败进入归档结果；`finish(self)` 消费 writer |
 | 20 | [日志发送](../crates/firefly-observability/src/lib.rs)、[状态采样](../apps/mimir/src/status.rs) | 发送序号与丢失计数；可选 `RateWindow` 共同拥有起止时刻与间隔计数 | 丢失计数持续报告到成功发布；频率和新鲜度由各自时间窗口派生 |
-| 21 | [渲染 capture](../apps/render/src/capture.rs)、[帧组装](../apps/render/src/link.rs) | 可选 `requested_seq` 表示出图窗口；GPU 在途计数与帧退休序号 | 回调归还 GPU 槽位；三传感器成组发布；退休序号拒绝迟到回复并回收缓冲 |
+| 21 | [渲染 capture](../apps/render/src/capture.rs)、[帧组装](../apps/render/src/link.rs) | 可选 `requested_seq` 表示出图窗口；GPU 在途计数与帧退休序号 | 回调归还 GPU 槽位；双目/深度成组，下视按租约选入；退休序号拒绝迟到回复并回收缓冲 |
 | 22 | [仿真](../apps/firefly-sim/src/firefly_sim/main.py)、[电机](../apps/motor/src/actuator.rs) | 仿真接收时钟与暂停标志；电机 `ControlState` 共同拥有推力与收到时刻 | 超时暂停物理推进或归零电机；退出执行清理 |
 | 23 | [可选定位](../apps/localization/src/main.rs)、[匹配历史](../apps/lightglue/src/sensors.rs)、[融合门控](../crates/firefly-localization/src/filter.rs) | `AlignmentState::{Waiting, Ready, Reset}`；匹配历史与融合门控独立 | 对齐与历史就绪后处理观测；会话重置锁存；观测有等待、拒绝、过期与接受结果 |
 | 24 | [飞行指令](../scripts/flight.py)、[独立评分](../scripts/verify_flight.py)、[子进程](../packages/firefly-workspace/src/firefly_workspace/process.py) | 起飞 → 去程/停留 → 返航/重捕获 → 精降/上锁 → 回收/评分 | 目标身份、实际到位和新鲜视觉门控；关闭 RRD 后独立核对真值，失败非零退出 |
@@ -305,6 +319,7 @@ ALIKED 的离线 / 在线模式在启动时确定；quad 使用 Bevy startup / u
 | 26 | [CAD 资产流水线](../packages/firefly-cad/src/firefly_cad/pipeline.py) | 内容缓存与 manifest 的 `building / passed / failed`；失败保留源指纹与原因 | 生成、几何验收、资产指纹完成后发布通过状态 |
 | 27 | [数据集导出](../apps/rootslam/src/dataset_app.rs)、[产物预检](../apps/rootslam/src/dataset_app/outputs.rs) | 输入与输出预检、生产、EOF、导出；导出失败通过 `cancel_mapping` 回收并保留清理错误 | 预检本轮新产物路径；生产器、估计器、映射分别完成后导出对应结果 |
 | 28 | [部署](../xtask/src/deploy.rs)、[解包](../xtask/src/archive.rs) | 逐步骤检查远端完成标记；停服成功后替换，启动并收到 supervisor 应答后完成 | 发布成功要求 supervisor socket 应答；远端传输与远端执行结果分别检查 |
+| 29 | [下视宿主](../apps/landing/src/main.rs)、[资源租约](../crates/firefly-pubsub/src/activity.rs) | `Pipeline::{Dormant, Active}`、有界 owner 租约；ORT 环境归进程、推理 Session 归 Active | 释放/到达时间过期后回收图像订阅、里程计线程和 Session；重复序号不续命，重新激活重新识别 |
 
 显式状态的入口为 `FlightState`、`ExecState`、轨迹 `Execution`、渲染 `Mailbox`、
 Mimir `Alignment`、supervisor `Lifecycle`、A* `NodeState` 与 Basalt 路标块 `State`。

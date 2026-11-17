@@ -59,6 +59,7 @@ This catalog covers all production topic constants; test topics use isolated nam
 | `Firefly/CorrectedOdometry` | VIO/localization → mimir, tools | Map-frame pose and trajectory |
 | `Firefly/VioAttitude` | VIO prediction → FC, mimir | Bias summary; control consumers remain independent |
 | `Firefly/CameraLeft`, `Firefly/CameraRight` | render/sensors → VIO, mimir | Lossless grayscale samples when images are enabled |
+| `Firefly/Activity` | Task → camera, render, landing; HIL priority downlink | 40-byte owner/sequence resource lease, 5 Hz per owner, 8 receive slots and up to 8 owners/publishers; 15/30 FPS, local arrival expiry ≤2s; LANDING implies DOWN_CAMERA. Release/expiry suspends work. Phase requests are retained in `logs/flight`; actual resources in `landing/runtime`. |
 | `Firefly/CameraDown` | render/camera → landing, mimir; OV2640 CIF 352×288, sensor id 3 | Latest-value 101400-byte grayscale input; lossless samples when images are enabled |
 | `Firefly/LandingTarget` | landing → FC, mimir, HIL uplink; odom-frame body contact position | Latest-value 64-byte message; capture time, VIO session, team and validity; recorded as `landing/target` and `landing/quality` |
 | `Firefly/CameraPair` | render → image consumers | Pair notification; image topics carry the recording |
@@ -106,6 +107,7 @@ of subsequent business events. Known loss makes the recording fail.
 | `fc/debug/precision` | FC at its existing diagnostic cadence: 0 ordinary mode, 1 Align, 2 Descend, 3 Final, 4 Reacquire; one scalar; always recorded |
 | `landing/target`, `landing/quality` | Native landing observations, at most 10 Hz by default, four scalars per row; always recorded. Position xyz metres + valid; session/team/reprojection pixels/confidence. Session identity remains exact in the native u64 message; scalar session is display-only. |
 | `logs/landing` with `RUST_LOG=landing::gates=debug` | Optional per-inference corner/plane/position gate counts or missing capture-time odometry; at most configured 30 Hz, one bounded TextLog per inference, off by default |
+| `landing/runtime` | Always-on lifecycle evidence: active (0/1), cumulative inferences, requested FPS, NPU (0/1); at most 1 Hz plus transitions, four scalars per row. Dormant releases the model/session, down subscription and odometry worker; inference count stays constant. Timestamp follows the latest VIO attitude, including during cruise. |
 | `landing/vision` | Optional `landing.toml diagnostics=true`: detections/valid/reprojection pixels/processing milliseconds, four scalars per inference, at most the configured 30 Hz; disabled by default |
 | `render/capture/*` | Capture-to-publish stage timing at the original capture timestamp |
 | `hil/link`, `hil/board` | Host USB bridge: per-wall-second traffic counts and board freshness, stamped with the latest simulated IMU time; enabled during HIL, two rows per second |
@@ -364,8 +366,10 @@ uv run rerun 'logs/<yyyymmdd_hhmmss>/log.rrd' configs/firefly.rbl
 The main area shows the map/trajectories and the recorded down camera by default. The neighbouring
 Stereo tab retains the left/right images and track overlays. Down frames live at `cameras/down/image`
 with their capture-time `sim_time`; camera calibration lives at `cameras/down`. With `images=true`,
-Mimir records the same lossless CIF input used by landing. The mission verifier checks its dimensions,
-payload size and time coverage independently of the Viewer layout. Small independent numeric cards
+Mimir records the same lossless CIF input used by landing during active takeoff/acquisition/landing windows.
+Cruise suspends the down source and inference; the Viewer holds the latest image at an idle cursor.
+The mission verifier checks dimensions, payload size, active-window coverage, frame-rate cap and
+zero cruise production independently of the Viewer layout. Small independent numeric cards
 show FC control frequency (Hz), VIO processing and posterior age (ms), associated landmark IDs,
 camera publication rate (FPS) and capture-to-publication latency (ms). Each card has its own entity and
 view. Ordinary bold text keeps the numbers compact.

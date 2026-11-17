@@ -1,5 +1,5 @@
 //! 板载相机源：`V4L2` 采集双目与深度 → `Firefly/CameraLeft`、`Firefly/CameraRight`、
-//! `Firefly/Depth`。
+//! `Firefly/Depth` 与按需的 `Firefly/CameraDown`。
 //!
 //! 板载相机走 `MIPI-CSI`（见 `docs/hw/spec.md`），在 Linux 上表现为 `/dev/videoN`；
 //! 本进程只做格式协商、帧取回与消息发布，标定与算法留在消费者侧。深度可选：

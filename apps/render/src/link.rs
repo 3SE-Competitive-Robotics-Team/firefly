@@ -17,9 +17,9 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use bevy::ecs::system::NonSend;
 use bevy::prelude::*;
 use fastrace::prelude::*;
+use firefly_pubsub::activity::{ACTIVITY_TOPIC, ActivityReceiver, DOWN_CAMERA, FrameCadence};
 use firefly_pubsub::camera::{
     CAMERA_DOWN_TOPIC, CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DEPTH_TOPIC, DOWN_HEIGHT,
     DOWN_SENSOR_ID, DOWN_WIDTH, DepthImageMessage, DownImageMessage, GrayImageMessage,
@@ -45,6 +45,8 @@ use crate::rig::{Eye, PoseState, apply_pose_to_eyes};
 pub struct IpcPorts {
     /// 位姿订阅（`Firefly/GroundTruth`，只保留最新）。
     pub pose_sub: Subscriber<OdomMessage>,
+    activity: ActivityReceiver,
+    offline: bool,
     /// 进程共享节点，必须在全部端口之后释放。
     pub node: IpcNode,
 }
@@ -64,7 +66,12 @@ pub fn open_ports(offline: bool) -> Result<IpcPorts, firefly_error::Error> {
     };
     let pose_sub = Subscriber::with_topic(&node, &topic(GROUND_TRUTH_TOPIC))?;
     log::info!("IPC 就绪：订阅位姿，offline={offline}");
-    Ok(IpcPorts { pose_sub, node })
+    Ok(IpcPorts {
+        pose_sub,
+        activity: ActivityReceiver::open(&node, &topic(ACTIVITY_TOPIC))?,
+        offline,
+        node,
+    })
 }
 
 /// 传感器发布端口只在像素工作线程构造和使用，节点最后释放。
@@ -138,6 +145,8 @@ pub struct SensorCapture {
     next_stamp: f64,
     /// 当前出图窗口对应的请求序号（渲染世界取走它即收起相机）。
     requested_seq: Option<u64>,
+    requested_down: bool,
+    down_cadence: FrameCadence,
 }
 
 /// 逐像素处理与发布；待处理任务只保留最新一拍。
@@ -206,7 +215,7 @@ impl Drop for CapturePipeline {
 /// 位姿轮询 + 出图节拍：排空真值保留最新 → 按固定节拍发起回读并按需激活相机。
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub fn poll_pose(
-    ports: NonSend<IpcPorts>,
+    mut ports: NonSendMut<IpcPorts>,
     config: Res<RenderConfig>,
     mut pose: ResMut<PoseState>,
     hub: Res<CaptureHub>,
@@ -214,9 +223,17 @@ pub fn poll_pose(
     mut capture: ResMut<SensorCapture>,
     mut pending: ResMut<PendingFrames>,
     mut eyes: Query<(&Eye, &mut Transform)>,
-    mut cameras: Query<&mut Camera, With<Eye>>,
+    mut cameras: Query<(&Eye, &mut Camera)>,
 ) {
     let period = config.capture.period_seconds();
+    let down_rate = if ports.offline {
+        Some(15)
+    } else {
+        ports.activity.poll(DOWN_CAMERA).unwrap_or_else(|error| {
+            log::error!("down camera activity: {error}");
+            None
+        })
+    };
     let mut newest: Option<(OdomMessage, TraceContext)> = None;
     loop {
         match ports.pose_sub.receive() {
@@ -269,6 +286,7 @@ pub fn poll_pose(
     {
         let seq = pending.next_seq;
         pending.next_seq += 1;
+        let down = down_rate.is_some_and(|rate| capture.down_cadence.admit(pose.stamp, rate));
         hub.request(CaptureRequest {
             seq,
             timing: crate::capture::CaptureTiming::default(),
@@ -276,9 +294,10 @@ pub fn poll_pose(
             trace: pose.trace,
             left: targets.left.id(),
             right: targets.right.id(),
-            down: targets.down.id(),
+            down: down.then(|| targets.down.id()),
         });
         capture.requested_seq = Some(seq);
+        capture.requested_down = down;
         // sim 时间戳有浮点抖动，按 10% 周期容差比较，避免漏拍。
         capture.next_stamp = pose.stamp + period - period * 0.1;
         log::debug!("pose t={:.3} 回读 seq={seq}", pose.stamp);
@@ -287,9 +306,10 @@ pub fn poll_pose(
     // rig 摆位与激活同系统内完成：本帧渲染即用新变换、且只在出图窗口渲染。
     apply_pose_to_eyes(&pose, &mut eyes);
     let active = capture.requested_seq.is_some();
-    for mut camera in &mut cameras {
-        if camera.is_active != active {
-            camera.is_active = active;
+    for (eye, mut camera) in &mut cameras {
+        let enabled = active && (*eye != Eye::Down || capture.requested_down);
+        if camera.is_active != enabled {
+            camera.is_active = enabled;
         }
     }
 }
@@ -326,7 +346,7 @@ impl PendingFrames {
         let seq = self
             .frames
             .iter()
-            .filter(|(_, frames)| frames.len() >= 4)
+            .filter(|(_, frames)| frames.len() >= if frames[0].down_requested { 4 } else { 3 })
             .map(|(seq, _)| *seq)
             .max()?;
         let frames = self.frames.remove(&seq).expect("complete frame");
@@ -335,6 +355,7 @@ impl PendingFrames {
         let mut right_gray = None;
         let mut depth_raw = None;
         let mut down_gray = None;
+        let down_requested = frames[0].down_requested;
         let mut stamp = 0.0;
         let mut trace = TraceContext::default();
         let mut timing = frames[0].timing;
@@ -356,6 +377,10 @@ impl PendingFrames {
             return None;
         };
 
+        if down_requested != down_gray.is_some() {
+            log::warn!("seq={seq} down-camera reply does not match the capture request");
+            return None;
+        }
         timing.assembled = Instant::now();
         Some(CaptureJob {
             seq,
@@ -511,6 +536,7 @@ mod tests {
             CaptureReply::Frame(CapturedFrame {
                 seq,
                 timing: CaptureTiming::default(),
+                down_requested: true,
                 kind,
                 stamp: seq as f64,
                 trace: TraceContext::default(),

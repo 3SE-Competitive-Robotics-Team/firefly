@@ -53,6 +53,48 @@ def test_physical_roundtrip_passes_for_either_team(team):
     assert result["passed"], result
 
 
+@pytest.mark.parametrize("last, passed", [(12.934, True), (12.933999, False)])
+def test_visual_span_uses_rrd_nanosecond_precision(last, passed):
+    data = successful_evidence()
+    stamps = (12.784, 12.867, last)
+    data.scalars["/landing/target"] = [(t, [0., 0., 0., 1.]) for t in stamps]
+    data.scalars["/landing/quality"] = [(t, [7., 0., .2, .9]) for t in stamps]
+    assert evaluate(data)["passed"] == passed
+
+
+@pytest.mark.parametrize("fault", [None, "cruise_images", "cruise_compute", "missing_runtime", "rate", "rate_drift", "not_released", "cpu_hil"])
+def test_on_demand_resources_are_independently_scored(fault):
+    data = successful_evidence()
+    data.events[0][1].update(down_rate_hz=15, transport="sil")
+    data.events += [(t, {"kind": "activity", "enabled": enabled, "rate_hz": 15})
+                    for t, enabled in [(1.1, True), (3., False), (12., True), (19., False)]]
+    data.events.sort(key=lambda row: row[0])
+    data.down_frames = [(float(t), 352, 288, 352 * 288) for t in np.arange(1.1, 19., 1/15)
+                        if t < 3. or t >= 12.]
+    runtime = [(1.1, [1., 0., 15., 0.]), (2., [1., 10., 15., 0.])]
+    runtime += [(float(t), [0., 20., 0., 0.]) for t in np.arange(3., 12.)]
+    runtime += [(12., [1., 20., 15., 0.]), (16., [1., 70., 15., 0.]), (19., [0., 100., 0., 0.])]
+    data.scalars["/landing/runtime"] = runtime
+    if fault == "cruise_images":
+        data.down_frames.insert(35, (5., 352, 288, 352 * 288))
+        data.down_frames.sort()
+    elif fault == "cruise_compute":
+        runtime[5][1][1] += 1
+    elif fault == "missing_runtime":
+        data.scalars.pop("/landing/runtime")
+    elif fault == "rate":
+        data.down_frames.insert(1, (1.11, 352, 288, 352 * 288))
+    elif fault == "rate_drift":
+        data.down_frames = [(float(t), 352, 288, 352 * 288) for t in np.arange(1.1, 19., 1/15.1)
+                            if t < 3. or t >= 12.]
+    elif fault == "not_released":
+        runtime[-1][1][0] = 1.
+    elif fault == "cpu_hil":
+        data.events[0][1]["transport"] = "hil"
+    report = evaluate(data)
+    assert report["passed"] == (fault is None), report
+
+
 def test_scoring_uses_initial_full_coordinate_alignment():
     data = successful_evidence()
     from scipy.spatial.transform import Rotation

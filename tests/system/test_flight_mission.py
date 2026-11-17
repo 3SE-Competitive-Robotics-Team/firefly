@@ -15,7 +15,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_roundtrip_reacquires_pad_and_physically_lands():
+@pytest.mark.parametrize("down_rate", [15, 30])
+def test_roundtrip_reacquires_pad_and_physically_lands(down_rate):
     reports = []
 
     def observe(line):
@@ -23,7 +24,7 @@ def test_roundtrip_reacquires_pad_and_physically_lands():
             reports.append(json.loads(line))
 
     process = ManagedProcess(
-        [str(ROOT / ".venv/bin/python"), "scripts/flight.py", "--mission", "roundtrip", "--precision-land"],
+        [str(ROOT / ".venv/bin/python"), "scripts/flight.py", "--mission", "roundtrip", "--precision-land", "--down-rate", str(down_rate)],
         cwd=ROOT, env={**os.environ, "RUST_LOG": "info"}, on_line=observe,
     )
     try:
@@ -39,6 +40,8 @@ def test_roundtrip_reacquires_pad_and_physically_lands():
     assert report["commands_completed"] and not report["cleanup_errors"], report
     assert report["verification"]["passed"], report
     assert report["verification"]["metrics"]["down_frames"] > 30
+    assert report["verification"]["metrics"]["down_rate_limit_hz"] == down_rate
+    assert report["verification"]["metrics"]["idle_down_frames"] == 0
     assert Path(report["recording"]).is_file()
     from rerun.chunk import RrdReader
     reader = RrdReader(report["recording"])

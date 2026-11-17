@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use firefly_hal::pixel::{FrameFormat, gray_from_yuyv, meters_from_z16};
+use firefly_pubsub::activity::{ACTIVITY_TOPIC, ActivityReceiver, DOWN_CAMERA, FrameCadence};
 use firefly_pubsub::camera::{
     CAMERA_DOWN_TOPIC, CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DEPTH_TOPIC, DOWN_HEIGHT,
     DOWN_SENSOR_ID, DOWN_SIZE, DOWN_WIDTH, DepthImageMessage, DownImageMessage, GrayImageMessage,
@@ -34,7 +35,19 @@ const DEFAULT_DEPTH_SCALE: f64 = 0.001;
 /// 退出标志（信号处理器置位，主循环每帧检查）。
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-struct DownWorker(Option<std::thread::JoinHandle<()>>);
+struct DownWorker(Option<std::thread::JoinHandle<Result<(), String>>>);
+impl DownWorker {
+    fn finish(mut self) -> Result<(), Box<dyn Error>> {
+        if let Some(worker) = self.0.take() {
+            worker
+                .join()
+                .map_err(|_| "down camera worker panicked")?
+                .map_err(Into::into)
+        } else {
+            Ok(())
+        }
+    }
+}
 impl Drop for DownWorker {
     fn drop(&mut self) {
         RUNNING.store(false, Ordering::Relaxed);
@@ -44,84 +57,33 @@ impl Drop for DownWorker {
     }
 }
 
-fn start_down(source: &Source) -> Result<DownWorker, Box<dyn Error>> {
+fn start_down(source: &DownSource) -> Result<DownWorker, Box<dyn Error>> {
     let source = source.clone();
     let (ready, started) = std::sync::mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
         let result = (|| -> Result<(), Box<dyn Error>> {
-            let device = Device::with_path(&source.device)?;
-            configure(&device, source.format, DOWN_WIDTH, DOWN_HEIGHT)?;
-            let format = device.format()?;
-            let row_bytes = DOWN_WIDTH * source.format.bytes_per_pixel();
-            let stride = (format.stride as usize).max(row_bytes);
-            let mut stream = MmapStream::with_buffers(&device, Type::VideoCapture, source.buffers)?;
-            stream.set_timeout(std::time::Duration::from_millis(100));
             let node = create_node()?;
+            let mut activity = ActivityReceiver::open(&node, ACTIVITY_TOPIC)?;
             let publisher = Publisher::<DownImageMessage>::with_topic(&node, CAMERA_DOWN_TOPIC)?;
             let _ = ready.send(Ok(()));
-            let mut gray = vec![0; DOWN_SIZE];
-            let mut last_stamp = f64::NEG_INFINITY;
             while RUNNING.load(Ordering::Relaxed) {
-                let (bytes, metadata) = match stream.next() {
-                    Ok(frame) => frame,
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                        ) =>
-                    {
-                        continue;
-                    }
-                    Err(error) => return Err(error.into()),
-                };
-                if metadata.flags.contains(v4l::buffer::Flags::ERROR) {
-                    continue;
-                }
-                if !metadata
-                    .flags
-                    .contains(v4l::buffer::Flags::TIMESTAMP_MONOTONIC)
-                {
-                    return Err(
-                        "down camera requires V4L2 CLOCK_MONOTONIC capture timestamps".into(),
-                    );
-                }
-                let stamp = metadata.timestamp.sec as f64 + metadata.timestamp.usec as f64 * 1e-6;
-                let Some(bytes) = bytes.get(..metadata.bytesused as usize) else {
+                let Some(rate) = activity.poll(DOWN_CAMERA)? else {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                     continue;
                 };
-                if !stamp.is_finite()
-                    || stamp <= last_stamp
-                    || bytes.len() < (DOWN_HEIGHT - 1) * stride + row_bytes
-                {
-                    continue;
-                }
-                for y in 0..DOWN_HEIGHT {
-                    let row = &bytes[y * stride..y * stride + row_bytes];
-                    let destination = &mut gray[y * DOWN_WIDTH..(y + 1) * DOWN_WIDTH];
-                    if source.format == FrameFormat::Grey {
-                        destination.copy_from_slice(row);
-                    } else {
-                        let written = gray_from_yuyv(row, destination);
-                        if written != DOWN_WIDTH {
-                            return Err("incomplete down YUYV row".into());
-                        }
-                    }
-                }
-                last_stamp = stamp;
-                publisher.publish_with(|message| {
-                    message.timestamp = stamp;
-                    message.sensor_id = DOWN_SENSOR_ID;
-                    message.width = DOWN_WIDTH as u32;
-                    message.height = DOWN_HEIGHT as u32;
-                    message.data.copy_from_slice(&gray);
-                })?;
+                let rate = rate.min(source.rate_hz);
+                capture_down(&source, rate, &mut activity, &publisher)?;
             }
             Ok(())
         })();
-        if let Err(error) = result {
-            log::error!("down camera: {error}");
-            let _ = ready.send(Err(error.to_string()));
-            RUNNING.store(false, Ordering::Relaxed);
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                log::error!("down camera: {error}");
+                let _ = ready.send(Err(error.to_string()));
+                RUNNING.store(false, Ordering::Relaxed);
+                Err(error.to_string())
+            }
         }
     });
     let guard = DownWorker(Some(worker));
@@ -130,6 +92,102 @@ fn start_down(source: &Source) -> Result<DownWorker, Box<dyn Error>> {
         .map_err(|e| e.to_string())?
         .map_err(|e| -> Box<dyn Error> { e.into() })?;
     Ok(guard)
+}
+
+/// Active 持有设备和 mmap 流；租约释放/过期离开作用域，Drop 执行 STREAMOFF。
+fn capture_down(
+    source: &DownSource,
+    rate: u32,
+    activity: &mut ActivityReceiver,
+    publisher: &Publisher<DownImageMessage>,
+) -> Result<(), Box<dyn Error>> {
+    let device = Device::with_path(&source.device)?;
+    configure(&device, source.format, DOWN_WIDTH, DOWN_HEIGHT)?;
+    let format = device.format()?;
+    let row_bytes = DOWN_WIDTH * source.format.bytes_per_pixel();
+    let stride = (format.stride as usize).max(row_bytes);
+    let params = v4l::video::capture::Parameters::with_fps(rate);
+    match device.set_params(&params) {
+        Ok(actual) => log::info!(
+            "down camera requested {rate} FPS, driver interval {}",
+            actual.interval
+        ),
+        Err(error) => log::warn!(
+            "down camera frame interval unavailable: {error}; capture-time rate gate remains active"
+        ),
+    }
+    let mut stream = MmapStream::with_buffers(&device, Type::VideoCapture, source.buffers)?;
+    stream.set_timeout(std::time::Duration::from_millis(100));
+    let mut cadence = FrameCadence::default();
+    let mut gray = vec![0; DOWN_SIZE];
+    let mut last_stamp = f64::NEG_INFINITY;
+    while RUNNING.load(Ordering::Relaxed) {
+        if activity
+            .poll(DOWN_CAMERA)?
+            .map(|requested| requested.min(source.rate_hz))
+            != Some(rate)
+        {
+            break;
+        }
+        let (bytes, metadata) = match stream.next() {
+            Ok(frame) => frame,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.flags.contains(v4l::buffer::Flags::ERROR) {
+            continue;
+        }
+        if !metadata
+            .flags
+            .contains(v4l::buffer::Flags::TIMESTAMP_MONOTONIC)
+        {
+            return Err("down camera requires V4L2 CLOCK_MONOTONIC capture timestamps".into());
+        }
+        let stamp = metadata.timestamp.sec as f64 + metadata.timestamp.usec as f64 * 1e-6;
+        let Some(bytes) = bytes.get(..metadata.bytesused as usize) else {
+            continue;
+        };
+        if !stamp.is_finite()
+            || stamp <= last_stamp
+            || bytes.len() < (DOWN_HEIGHT - 1) * stride + row_bytes
+        {
+            continue;
+        }
+        if !cadence.admit(stamp, rate) {
+            continue;
+        }
+        for y in 0..DOWN_HEIGHT {
+            let row = &bytes[y * stride..y * stride + row_bytes];
+            let destination = &mut gray[y * DOWN_WIDTH..(y + 1) * DOWN_WIDTH];
+            if source.format == FrameFormat::Grey {
+                destination.copy_from_slice(row);
+            } else {
+                let written = gray_from_yuyv(row, destination);
+                if written != DOWN_WIDTH {
+                    return Err("incomplete down YUYV row".into());
+                }
+            }
+        }
+        last_stamp = stamp;
+        publisher.publish_with(|message| {
+            message.timestamp = stamp;
+            message.sensor_id = DOWN_SENSOR_ID;
+            message.width = DOWN_WIDTH as u32;
+            message.height = DOWN_HEIGHT as u32;
+            message.data.copy_from_slice(&gray);
+        })?;
+    }
+    log::info!("down camera suspended: capture stream released");
+    Ok(())
 }
 
 /// 相机配置。
@@ -150,7 +208,7 @@ struct Config {
     #[serde(default)]
     depth: Option<Depth>,
     #[serde(default)]
-    down: Option<Source>,
+    down: Option<DownSource>,
 }
 
 /// 灰度相机设备。
@@ -165,6 +223,23 @@ struct Source {
     /// 采集缓冲数。
     #[serde(default = "default_buffers")]
     buffers: u32,
+}
+
+/// OV2640 下视采集与请求帧率上界。
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DownSource {
+    device: String,
+    #[serde(default = "default_format")]
+    format: FrameFormat,
+    #[serde(default = "default_buffers")]
+    buffers: u32,
+    #[serde(default = "default_down_rate")]
+    rate_hz: u32,
+}
+
+const fn default_down_rate() -> u32 {
+    15
 }
 
 /// 深度相机设备。
@@ -242,7 +317,10 @@ fn validate(config: &Config) -> firefly_error::Result<()> {
         }
     }
     if let Some(source) = &config.down
-        && (source.format == FrameFormat::Z16 || source.buffers == 0 || source.device.is_empty())
+        && (source.format == FrameFormat::Z16
+            || source.buffers == 0
+            || source.device.is_empty()
+            || !matches!(source.rate_hz, 15 | 30))
     {
         return invalid("invalid OV2640 down source".into());
     }
@@ -275,7 +353,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "camera");
-    let _down = config.down.as_ref().map(start_down).transpose()?;
+    let down = config.down.as_ref().map(start_down).transpose()?;
     let left_pub = Publisher::<GrayImageMessage>::with_topic(&node, CAMERA_LEFT_TOPIC)?;
     let right_pub = Publisher::<GrayImageMessage>::with_topic(&node, CAMERA_RIGHT_TOPIC)?;
     log::info!(
@@ -353,6 +431,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             pump_depth(stream, publisher, scale, width, height, stamp)?;
         }
         firefly_observability::pump_log_ipc(&log_ipc);
+    }
+    if let Some(down) = down {
+        let result = down.finish();
+        firefly_observability::pump_log_ipc(&log_ipc);
+        result?;
     }
     log::info!("收到终止信号，相机源退出");
     firefly_observability::pump_log_ipc(&log_ipc);

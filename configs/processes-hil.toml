@@ -27,7 +27,7 @@ autostart = true
 
 [[process]]
 name = "landing"
-command = ["taskset", "-c", "0-4", "bin/landing"]
+command = ["taskset", "-c", "4", "bin/landing"]
 autostart = true
 
 [[process]]

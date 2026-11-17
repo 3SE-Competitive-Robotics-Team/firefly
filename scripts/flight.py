@@ -11,6 +11,7 @@ import time
 import iceoryx2 as iox2
 from firefly_mujoco import LandingTargetMessage, LogMessage, OdomMessage, PlannerStatusMessage, ReferenceMessage, TraceContext
 from firefly_mujoco.messages import AttitudeMessage, ScalarMessage
+from firefly_mujoco.activity import ActivityLease, LANDING
 from firefly_mujoco.scene import load_scene_name
 from firefly_workspace import digest, workspace_root
 from firefly_workspace.game import load_team
@@ -35,6 +36,7 @@ def parse_args(argv=None, *, hil=None, mission=None):
                         help="return near takeoff before visual alignment, in odom metres")
     parser.add_argument("--precision-land", action="store_true", help="finish with fresh down-camera acquisition and precision landing")
     parser.add_argument("--acquire-timeout", type=float, default=12., help="visual reacquisition deadline, in wall seconds")
+    parser.add_argument("--down-rate", type=int, choices=(15, 30), default=15, help="active down-camera FPS")
     parser.add_argument("--seed", type=int, default=20260930)
     args = parser.parse_args(argv)
     if args.hover_seconds is None:
@@ -81,6 +83,7 @@ def main(argv=None, *, hil=None, mission=None):
     processes, latest, received, subs = {}, {}, {}, {}
     mode, stamp, sequence, logs = None, 0., 0, None
     armed_session = None
+    activity = None
     phase_name = "startup"
 
     def start(name, command):
@@ -107,13 +110,21 @@ def main(argv=None, *, hil=None, mission=None):
     def mission_event(kind, **fields):
         event("mission " + json.dumps({"kind": kind, **fields}, separators=(",", ":")))
 
+    def request_activity(enabled):
+        if activity is not None:
+            activity.set(LANDING if enabled else 0, stamp)
+            mission_event("activity", enabled=enabled, rate_hz=args.down_rate)
+
     def phase(name, **fields):
         nonlocal phase_name
         phase_name = name
         mission_event("phase", name=name, **fields)
+        request_activity(name in {"takeoff", "acquire", "land"})
 
     def pump(landing=False):
         nonlocal mode, stamp
+        if activity is not None:
+            activity.pump(stamp)
         for name, child in processes.items():
             if child.process.poll() is not None and not (landing and name == "mimir"):
                 raise RuntimeError(f"{name} exited {child.process.returncode}: {' | '.join(child.tail)}")
@@ -148,7 +159,10 @@ def main(argv=None, *, hil=None, mission=None):
     def command(*values):
         event("command ffctl " + " ".join(map(str, values)))
         result = subprocess.run([str(root / "target/release/ffctl"), *map(str, values)],
-                                cwd=root, capture_output=True, text=True, check=True, timeout=5.)
+                                cwd=root, capture_output=True, text=True, check=False, timeout=5.)
+        if result.returncode:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(f"ffctl {values[0]} {values[1]} failed ({result.returncode}): {detail[:240]}")
         event(result.stdout.strip())
 
     def hold(seconds, *, modes=(3,)):
@@ -199,6 +213,8 @@ def main(argv=None, *, hil=None, mission=None):
                 return builder.open_or_create()
 
             logs = service("Log", LogMessage, 256, 10).publisher_builder().create()
+            if args.precision_land:
+                activity = ActivityLease(node, rate_hz=args.down_rate)
             event(f"flight recording={recording}")
             revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
             dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=root))
@@ -214,7 +230,7 @@ def main(argv=None, *, hil=None, mission=None):
                 subs[name] = service(topic, payload, capacity, publishers).subscriber_builder().buffer_size(capacity).create()
             mission_event("settings", mission=args.mission, precision_land=args.precision_land,
                           team=team, scene=load_scene_name(), goal=args.goal, altitude=args.altitude, return_offset=args.return_offset,
-                          hover_seconds=args.hover_seconds, seed=args.seed, transport="hil" if args.hil else "sil")
+                          hover_seconds=args.hover_seconds, down_rate_hz=args.down_rate, seed=args.seed, transport="hil" if args.hil else "sil")
             binaries = ["render", "mimir", "ffctl"] + (["hil"] if args.hil else ["fc", "firefly-rootslam"])
             sim_config = "sim-mission" if args.mission == "roundtrip" else "sim"
             configs = ["game", "scene", sim_config, "render", "mimir"]
@@ -233,7 +249,9 @@ def main(argv=None, *, hil=None, mission=None):
             paths += [Path(__file__).resolve(), root / "scripts/verify_flight.py",
                       root / "apps/firefly-sim/src/firefly_sim/main.py",
                       root / "packages/firefly-mujoco/src/firefly_mujoco/scene.py",
-                      root / "packages/firefly-mujoco/src/firefly_mujoco/env.py"]
+                      root / "packages/firefly-mujoco/src/firefly_mujoco/env.py",
+                      root / "packages/firefly-mujoco/src/firefly_mujoco/activity.py",
+                      root / "packages/firefly-mujoco/src/firefly_mujoco/messages.py"]
             if args.precision_land:
                 paths += [root / "models/h-marker-yolo26n-cif-v1/manifest.json"]
             for path in paths:
@@ -266,6 +284,8 @@ def main(argv=None, *, hil=None, mission=None):
             wait(lambda: mode == 1, modes={0, 1})
             command("fc", "takeoff", args.altitude)
             wait(lambda: mode == 3, modes={1, 2, 3})
+            if args.mission == "hover":
+                request_activity(False)
             hold(1. if args.mission == "roundtrip" else args.hover_seconds)
             if args.mission == "roundtrip":
                 waypoint = [home[0] + args.goal[0], home[1] + args.goal[1], home[2] + args.altitude]
@@ -306,6 +326,11 @@ def main(argv=None, *, hil=None, mission=None):
                 wait(lambda: mode == 0, wall=45., modes={0, 5})
                 hold(.75, modes=(0,))
             phase("complete")
+            if activity is not None:
+                # Let both native and USB receivers observe release before stopping their processes.
+                deadline = time.monotonic() + .3
+                while time.monotonic() < deadline:
+                    pump()
             completed = True
         except (Exception, KeyboardInterrupt) as failure:
             error = str(failure) or type(failure).__name__
@@ -322,6 +347,8 @@ def main(argv=None, *, hil=None, mission=None):
                         event("native FC landed and DISARMED")
             except Exception as failure:
                 cleanup.append(f"landing: {failure}")
+            if activity is not None:
+                activity.set(0, stamp)
             for name, child in reversed(processes.items()):
                 try:
                     code = child.stop()

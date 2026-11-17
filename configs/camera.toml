@@ -16,3 +16,4 @@ device = "/dev/video2"
 [down]
 device = "/dev/video3"
 format = "yuyv"
+rate_hz = 15

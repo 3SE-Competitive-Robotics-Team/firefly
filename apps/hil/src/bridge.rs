@@ -7,7 +7,7 @@
 //! 把 1 kHz 的 IMU 压在后面。
 
 use std::collections::VecDeque;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
@@ -17,37 +17,16 @@ use firefly_hil::frame::{FrameReader, FrameWriter};
 use firefly_hil::protocol::{
     Hello, IMAGE_CHUNK_DATA_MAX, ImageChunkHeader, Kind, Message, ROLE_HOST, VERSION,
 };
-use firefly_pubsub::attitude::{ATTITUDE_TOPIC, AttitudeMessage};
-use firefly_pubsub::camera::{
-    CAMERA_DOWN_TOPIC, CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DEPTH_TOPIC, DepthImageMessage,
-    DownImageMessage, GrayImageMessage,
-};
-use firefly_pubsub::command::{COMMAND_TOPIC, CommandMessage};
-use firefly_pubsub::control::{CONTROL_BUFFER_SIZE, CONTROL_TOPIC, ControlMessage};
-use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
-use firefly_pubsub::imu::{IMU_TOPIC, ImuMessage};
-use firefly_pubsub::landing::{LANDING_TARGET_TOPIC, LandingTargetMessage};
-use firefly_pubsub::log::{LOG_BUFFER_SIZE, LOG_MAX_PUBLISHERS, LOG_TOPIC, LogMessage};
-use firefly_pubsub::navigation::{NAVIGATION_TOPIC, NavigationMessage};
+use firefly_hil::topics::{SensorSubscribers as Downlink, TelemetryPublishers as Uplink};
+use firefly_pubsub::activity::{Activity, DOWN_CAMERA};
+use firefly_pubsub::camera::{DepthImageMessage, DownImageMessage, GrayImageMessage};
+use firefly_pubsub::imu::ImuMessage;
 use firefly_pubsub::node::{IpcNode, create_node};
-use firefly_pubsub::odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC, OdomMessage};
-use firefly_pubsub::plant::{AIRFRAME_TOPIC, AirframeMessage};
-use firefly_pubsub::publish::Publisher;
-use firefly_pubsub::reference::{REFERENCE_TOPIC, ReferenceMessage};
-use firefly_pubsub::subscriber::{Subscriber, SubscriberOptions};
-use firefly_pubsub::trajectory::{PLANNER_STATUS_TOPIC, PlannerStatusMessage};
-use firefly_pubsub::viz::{
-    SCALAR_BUFFER_SIZE, SCALAR_TOPIC, ScalarMessage, VIZ_BUFFER_SIZE, VIZ_MAX_PUBLISHERS,
-    VIZ_TOPIC, VOXEL_BUFFER_SIZE, VOXEL_TOPIC, VizMessage, VoxelMessage,
-};
+use firefly_pubsub::viz::ScalarMessage;
 
 use crate::config::Config;
 use crate::host::HostLink;
 
-/// 主机下行订阅容量（1kHz IMU 下覆盖约 100ms 排空停顿）。
-const IMU_SUBSCRIPTION: usize = 100;
-/// 图像订阅容量：只关心最新帧。
-const IMAGE_SUBSCRIPTION: usize = 2;
 /// 下行发送队列深度；满时图像丢帧、IMU/指令阻塞。
 const DOWNLINK_QUEUE: usize = 64;
 /// 上行接收队列深度。
@@ -58,32 +37,6 @@ const POLL: Duration = Duration::from_millis(1);
 const STATS_PERIOD: Duration = Duration::from_secs(1);
 /// 双目配对的采集时间容差（秒）。
 const STEREO_TOLERANCE_S: f64 = 0.001;
-
-struct Downlink {
-    imu: Subscriber<ImuMessage>,
-    left: Subscriber<GrayImageMessage>,
-    right: Subscriber<GrayImageMessage>,
-    depth: Subscriber<DepthImageMessage>,
-    down: Subscriber<DownImageMessage>,
-    airframe: Subscriber<AirframeMessage>,
-    command: Subscriber<CommandMessage>,
-    goal: Subscriber<GoalMessage>,
-}
-
-struct Uplink {
-    control: Publisher<ControlMessage>,
-    odom: Publisher<OdomMessage>,
-    corrected: Publisher<OdomMessage>,
-    attitude: Publisher<AttitudeMessage>,
-    reference: Publisher<ReferenceMessage>,
-    planner_status: Publisher<PlannerStatusMessage>,
-    navigation: Publisher<NavigationMessage>,
-    landing: Publisher<LandingTargetMessage>,
-    geometry: Publisher<VizMessage>,
-    voxels: Publisher<VoxelMessage>,
-    scalar: Publisher<ScalarMessage>,
-    log: Publisher<LogMessage>,
-}
 
 /// A queue entry admits both stereo views together; depth is independently optional.
 enum ImageBatch {
@@ -152,100 +105,10 @@ pub fn run(config: &Config) -> Result<(), String> {
 }
 
 fn open_ports(node: &IpcNode) -> Result<(Downlink, Uplink), String> {
-    let down = Downlink {
-        down: Subscriber::with_topic(node, CAMERA_DOWN_TOPIC).map_err(|e| e.to_string())?,
-        imu: Subscriber::with_options(
-            node,
-            IMU_TOPIC,
-            SubscriberOptions {
-                buffer_size: IMU_SUBSCRIPTION,
-                service_max_buffer_size: Some(128),
-                // sim 是唯一发布者；显式声明避免先建服务时把上限压到默认值。
-                max_publishers: Some(2),
-            },
-        )
-        .map_err(|error| error.to_string())?,
-        left: Subscriber::with_topic_and_buffer(node, CAMERA_LEFT_TOPIC, IMAGE_SUBSCRIPTION)
-            .map_err(|error| error.to_string())?,
-        right: Subscriber::with_topic_and_buffer(node, CAMERA_RIGHT_TOPIC, IMAGE_SUBSCRIPTION)
-            .map_err(|error| error.to_string())?,
-        depth: Subscriber::with_topic_and_buffer(node, DEPTH_TOPIC, IMAGE_SUBSCRIPTION)
-            .map_err(|error| error.to_string())?,
-        airframe: Subscriber::with_options(
-            node,
-            AIRFRAME_TOPIC,
-            SubscriberOptions {
-                buffer_size: 4,
-                service_max_buffer_size: Some(4),
-                max_publishers: Some(2),
-            },
-        )
-        .map_err(|error| error.to_string())?,
-        command: Subscriber::with_options(
-            node,
-            COMMAND_TOPIC,
-            SubscriberOptions {
-                buffer_size: 8,
-                service_max_buffer_size: Some(8),
-                max_publishers: Some(2),
-            },
-        )
-        .map_err(|error| error.to_string())?,
-        goal: Subscriber::with_options(
-            node,
-            GOAL_TOPIC,
-            SubscriberOptions {
-                buffer_size: 4,
-                service_max_buffer_size: Some(4),
-                max_publishers: Some(2),
-            },
-        )
-        .map_err(|error| error.to_string())?,
-    };
-    let up = Uplink {
-        landing: Publisher::with_topic(node, LANDING_TARGET_TOPIC).map_err(|e| e.to_string())?,
-        control: Publisher::with_topic_and_buffer(node, CONTROL_TOPIC, Some(CONTROL_BUFFER_SIZE))
-            .map_err(|error| error.to_string())?,
-        odom: Publisher::with_topic(node, ODOM_TOPIC).map_err(|error| error.to_string())?,
-        corrected: Publisher::with_topic(node, CORRECTED_ODOM_TOPIC)
-            .map_err(|error| error.to_string())?,
-        attitude: Publisher::with_topic(node, ATTITUDE_TOPIC).map_err(|error| error.to_string())?,
-        reference: Publisher::with_topic(node, REFERENCE_TOPIC)
-            .map_err(|error| error.to_string())?,
-        planner_status: Publisher::with_topic(node, PLANNER_STATUS_TOPIC)
-            .map_err(|error| error.to_string())?,
-        navigation: Publisher::with_topic(node, NAVIGATION_TOPIC)
-            .map_err(|error| error.to_string())?,
-        geometry: Publisher::with_topic_buffer_publishers(
-            node,
-            VIZ_TOPIC,
-            Some(VIZ_BUFFER_SIZE),
-            Some(VIZ_MAX_PUBLISHERS),
-        )
-        .map_err(|error| error.to_string())?,
-        voxels: Publisher::with_topic_buffer_publishers(
-            node,
-            VOXEL_TOPIC,
-            Some(VOXEL_BUFFER_SIZE),
-            Some(1),
-        )
-        .map_err(|error| error.to_string())?,
-        log: Publisher::with_topic_buffer_publishers(
-            node,
-            LOG_TOPIC,
-            Some(LOG_BUFFER_SIZE),
-            Some(LOG_MAX_PUBLISHERS),
-        )
-        .map_err(|error| error.to_string())?,
-        scalar: Publisher::with_topic_buffer_publishers(
-            node,
-            SCALAR_TOPIC,
-            Some(SCALAR_BUFFER_SIZE),
-            Some(8),
-        )
-        .map_err(|error| error.to_string())?,
-    };
-    Ok((down, up))
+    Ok((
+        Downlink::open(node, "Firefly").map_err(|e| e.to_string())?,
+        Uplink::open(node, "Firefly").map_err(|e| e.to_string())?,
+    ))
 }
 
 // 线程入口按值取得端口与停止标志；所有权随 `move` 闭包转移。
@@ -402,11 +265,7 @@ fn usb_reader(
                     break;
                 }
             }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::Interrupted
-                ) => {}
+            Err(error) if firefly_hil::frame::is_retryable(&error) => {}
             Err(error) => return Err(format!("读执行器端点: {error}")),
         }
     }
@@ -430,7 +289,8 @@ fn ipc_loop(
     let mut pending_right: Option<GrayImageMessage> = None;
     let mut pending_depth: Option<DepthImageMessage> = None;
     let mut pending_down = None;
-    let mut down_deadline = Instant::now() + image_period;
+    let mut down_deadline = Instant::now();
+    let mut demand = Activity::default();
     let mut last_imu_stamp = f64::NAN;
     let mut last_image_stamp = f64::NAN;
     let mut last_timestamp_log = Instant::now();
@@ -446,24 +306,15 @@ fn ipc_loop(
             dispatch_uplink(&up, &mut stats, &mut session, message, last_imu_stamp)?;
             activity = true;
         }
-        while let Ok(Some(sample)) = down.command.receive() {
-            let command = *sample.payload();
-            log::info!(
-                "hil 转发指令 kind={} seq={}",
-                command.kind,
-                command.sequence
-            );
-            send_blocking(priority_tx, Message::Command(command))?;
-            activity = true;
-        }
-        while let Ok(Some(sample)) = down.goal.receive() {
-            send_blocking(priority_tx, Message::Goal(*sample.payload()))?;
-            activity = true;
-        }
-        while let Ok(Some(sample)) = down.airframe.receive() {
-            send_blocking(priority_tx, Message::Airframe(*sample.payload()))?;
-            activity = true;
-        }
+        activity |= down
+            .requests
+            .drain(None, |message| {
+                if let Message::Activity(request) = &message {
+                    demand.observe(*request, Instant::now());
+                }
+                send_blocking(priority_tx, message).map_err(std::io::Error::other)
+            })
+            .map_err(|e| e.to_string())?;
         while imu_batch.len() < options.imu_batch {
             match down.imu.receive() {
                 Ok(Some(sample)) => imu_batch.push(*sample.payload()),
@@ -491,7 +342,13 @@ fn ipc_loop(
             pending_down = Some(Box::new(*sample));
             activity = true;
         }
-        if Instant::now() >= down_deadline {
+        let down_rate = demand.rate(DOWN_CAMERA, Instant::now());
+        if down_rate.is_none() {
+            pending_down = None;
+        }
+        if let Some(rate) = down_rate
+            && Instant::now() >= down_deadline
+        {
             if let Some(image) = pending_down.take() {
                 let stamp = image.timestamp;
                 let sum = image.data.iter().map(|&pixel| u64::from(pixel)).sum();
@@ -499,7 +356,11 @@ fn ipc_loop(
                     record_checksum(&mut stats, 3, stamp, sum);
                 }
             }
-            down_deadline = next_image_deadline(down_deadline, Instant::now(), image_period);
+            down_deadline = next_image_deadline(
+                down_deadline,
+                Instant::now(),
+                Duration::from_secs_f64(1. / f64::from(rate.min(options.down_rate_hz))),
+            );
         }
         while let Ok(Some(sample)) = down.depth.receive() {
             pending_depth = Some(*sample.payload());
@@ -557,7 +418,7 @@ fn ipc_loop(
                 stats.image_unmatched,
                 stats.control_age_max * 1000.0
             );
-            publish_stats(&up.scalar, &mut stats, last_imu_stamp.max(0.0));
+            publish_stats(&up, &mut stats, last_imu_stamp.max(0.0));
             last_stats = Instant::now();
         }
         if !activity {
@@ -675,10 +536,6 @@ struct StatsCounters {
     control_age_sum: f64,
     control_age_max: f64,
     control_age_count: u64,
-    scalar_sequence: u64,
-    log_sequence: u64,
-    geometry_sequence: u64,
-    voxel_sequence: u64,
     heartbeat: u64,
     /// 已下发图像的 `(side, 时间戳位, 像素和)`，用于和板端回传校验和比对。
     sent_images: VecDeque<(u8, u64, u64)>,
@@ -687,7 +544,6 @@ struct StatsCounters {
     image_unmatched: u64,
 }
 
-#[allow(clippy::too_many_lines)] // 按上行类型平铺转发，统一维护计数和序号。
 fn dispatch_uplink(
     ports: &Uplink,
     stats: &mut StatsCounters,
@@ -698,136 +554,47 @@ fn dispatch_uplink(
     if *session == 0 {
         *session = 1;
     }
-    match message {
+    match &message {
         Message::Control(control) => {
-            if stats.last_control_time > 0.0 {
+            if stats.last_control_time > 0. {
                 stats.max_imu_gap = stats
                     .max_imu_gap
                     .max(control.state_time - stats.last_control_time);
             }
-            // 控制基于 `state_time` 的 IMU；与主机刚下发的最新 IMU 比较，
-            // 得到「传感器下行 + FC 处理 + 控制上行」的整圈滞后。
             if latest_imu_stamp.is_finite() {
                 let age = latest_imu_stamp - control.state_time;
                 if age.is_finite() && age > -0.005 {
-                    stats.control_age_sum += age.max(0.0);
+                    stats.control_age_sum += age.max(0.);
                     stats.control_age_max = stats.control_age_max.max(age);
                     stats.control_age_count += 1;
                 }
             }
             stats.last_control_time = control.state_time;
-            ports
-                .control
-                .publish(control)
-                .map_err(|error| format!("发布 control: {error}"))?;
             stats.control += 1;
         }
-        Message::Odometry(odometry) => {
-            ports
-                .odom
-                .publish(odometry)
-                .map_err(|error| format!("发布 odometry: {error}"))?;
-            stats.odometry += 1;
-        }
-        Message::CorrectedOdometry(odometry) => {
-            ports
-                .corrected
-                .publish(odometry)
-                .map_err(|error| format!("发布 corrected odometry: {error}"))?;
-            stats.odometry += 1;
-        }
-        Message::VioAttitude(attitude) => {
-            ports
-                .attitude
-                .publish(attitude)
-                .map_err(|error| format!("发布 vio attitude: {error}"))?;
+        Message::Odometry(_) | Message::CorrectedOdometry(_) => stats.odometry += 1,
+        Message::Scalar(scalar) => {
+            check_image_checksum(stats, scalar);
             stats.telemetry += 1;
         }
-        Message::Reference(reference) => {
-            ports
-                .reference
-                .publish(reference)
-                .map_err(|error| format!("publish reference: {error}"))?;
-            stats.telemetry += 1;
-        }
-        Message::PlannerStatus(planner) => {
-            ports
-                .planner_status
-                .publish(planner)
-                .map_err(|error| format!("publish planner status: {error}"))?;
-            stats.telemetry += 1;
-        }
-        Message::LandingTarget(target) => {
-            ports.landing.publish(target).map_err(|e| e.to_string())?;
-            stats.telemetry += 1;
-        }
-        Message::Navigation(navigation) => {
-            ports
-                .navigation
-                .publish(navigation)
-                .map_err(|error| format!("publish navigation: {error}"))?;
-            stats.telemetry += 1;
-        }
-        Message::Viz(mut geometry) => {
-            geometry.sequence = stats.geometry_sequence;
-            stats.geometry_sequence = stats.geometry_sequence.wrapping_add(1);
-            ports
-                .geometry
-                .publish(*geometry)
-                .map_err(|error| format!("publish geometry: {error}"))?;
-            stats.telemetry += 1;
-        }
-        Message::Voxels(mut voxels) => {
-            voxels.sequence = stats.voxel_sequence;
-            stats.voxel_sequence = stats.voxel_sequence.wrapping_add(1);
-            ports
-                .voxels
-                .publish(*voxels)
-                .map_err(|error| format!("publish voxels: {error}"))?;
-            stats.telemetry += 1;
-        }
-        Message::Scalar(mut scalar) => {
-            check_image_checksum(stats, &scalar);
-            // 板端各进程的序号在主机侧无法区分发布者，桥统一重编号。
-            scalar.sequence = stats.scalar_sequence;
-            stats.scalar_sequence = stats.scalar_sequence.wrapping_add(1);
-            ports
-                .scalar
-                .publish(scalar)
-                .map_err(|error| format!("发布 scalar: {error}"))?;
-            stats.telemetry += 1;
-        }
-        Message::Log(mut message) => {
-            // 板端已按原发布者检查连续性；主机单一发布者使用连续聚合序号。
-            message.sequence = stats.log_sequence;
-            stats.log_sequence = stats.log_sequence.wrapping_add(1);
-            ports
-                .log
-                .publish(message)
-                .map_err(|error| format!("发布 board log: {error}"))?;
-        }
+        Message::Log(_) => {}
         Message::Stats(board) => {
             stats.board_dropped_images = board.dropped_images;
             stats.board_imu_gap_seconds = board.imu_gap_seconds;
+            return Ok(());
         }
         Message::HelloAck(ack) => {
-            log::info!(
-                "板端握手：version={} status={} board_session={:#x} uptime={:.1}s",
-                ack.version,
-                ack.status,
-                ack.board_session,
-                ack.uptime_s
-            );
+            log::info!("board handshake: {ack:?}");
+            return Ok(());
         }
-        other => log::warn!("hil 主机忽略 {}", other.kind().name()),
+        Message::Pong(_) => return Ok(()),
+        _ => stats.telemetry += 1,
     }
-    Ok(())
+    ports.publish(message).map_err(|error| error.to_string())
 }
 
-fn publish_stats(ports: &Publisher<ScalarMessage>, stats: &mut StatsCounters, timestamp: f64) {
+fn publish_stats(ports: &Uplink, stats: &mut StatsCounters, timestamp: f64) {
     let mut link = ScalarMessage::base(timestamp, "hil/link");
-    link.sequence = stats.scalar_sequence;
-    stats.scalar_sequence = stats.scalar_sequence.wrapping_add(1);
     link.scalars = [
         stats.control as f64,
         stats.odometry as f64,
@@ -835,15 +602,13 @@ fn publish_stats(ports: &Publisher<ScalarMessage>, stats: &mut StatsCounters, ti
         stats.dropped_images as f64,
     ];
     link.scalar_count = 4;
-    if let Err(error) = ports.publish(link) {
+    if let Err(error) = ports.publish(Message::Scalar(link)) {
         log::warn!("发布 hil/link 失败：{error}");
     }
     let mut board = ScalarMessage::base(timestamp, "hil/board");
-    board.sequence = stats.scalar_sequence;
-    stats.scalar_sequence = stats.scalar_sequence.wrapping_add(1);
     board.scalars = [stats.board_imu_gap_seconds, 0.0, 0.0, 0.0];
     board.scalar_count = 1;
-    if let Err(error) = ports.publish(board) {
+    if let Err(error) = ports.publish(Message::Scalar(board)) {
         log::warn!("发布 hil/board 失败：{error}");
     }
     stats.control = 0;
@@ -875,6 +640,7 @@ fn next_image_deadline(deadline: Instant, now: Instant, period: Duration) -> Ins
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::ErrorKind;
 
     #[test]
     fn uplink_read_failure_stops_the_other_workers() {

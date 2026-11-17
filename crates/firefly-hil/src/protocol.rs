@@ -4,8 +4,8 @@
 //!
 //! | 端点 | 方向 | 消息 |
 //! |---|---|---|
-//! | 传感器 | 主机 → 板端 | `Imu`、`GrayLeft`、`GrayRight`、`Depth`、`Airframe`、`Hello`、`Command`、`Goal`、`Ping`、`Bye` |
-//! | 执行器 | 板端 → 主机 | `HelloAck`、`Control`、`Odometry`、`CorrectedOdometry`、`VioAttitude`、`Reference`、`PlannerStatus`、`Navigation`、`Viz`、`Voxels`、`Scalar`、`Log`、`Stats`、`Pong` |
+//! | 传感器 | 主机 → 板端 | `Imu`、`GrayLeft`、`GrayRight`、`Depth`、`Airframe`、`Hello`、`Command`、`Goal`、`Activity`、`ImageChunk`、`Ping`、`Bye` |
+//! | 执行器 | 板端 → 主机 | `HelloAck`、`Control`、`Odometry`、`CorrectedOdometry`、`VioAttitude`、`Reference`、`PlannerStatus`、`LandingTarget`、`Navigation`、`Viz`、`Voxels`、`Scalar`、`Log`、`Stats`、`Pong` |
 //!
 //! 所有多字节字段为小端。大消息在 [`crate::frame`] 层按
 //! [`MAX_FRAGMENT`] 分片，接收端按序号重组；任一分片缺失或次序异常即丢弃
@@ -16,6 +16,7 @@
 
 use std::io;
 
+use firefly_pubsub::activity::ActivityMessage;
 use firefly_pubsub::attitude::AttitudeMessage;
 use firefly_pubsub::camera::{
     DOWN_SIZE, DepthImageMessage, GrayImageMessage, IMAGE_HEIGHT, IMAGE_SIZE, IMAGE_WIDTH,
@@ -39,7 +40,7 @@ use firefly_pubsub::viz::{
 /// 帧头魔数（ASCII `FHL1`）。
 pub const MAGIC: [u8; 4] = *b"FHL1";
 /// 当前协议版本；接收端拒绝版本不一致的帧，主机与板端同步部署。
-pub const VERSION: u16 = 6;
+pub const VERSION: u16 = 7;
 /// 固定帧头长度（字节）。
 pub const HEADER_LEN: usize = 48;
 /// 单帧负载上限（字节）；大消息按此分片，限制单次 USB 传输的排队时延。
@@ -118,6 +119,8 @@ pub enum Kind {
     Voxels = 25,
     /// 视觉降落目标。
     LandingTarget = 26,
+    /// 有时限的资源请求；SIL/HIL 共用同一消息。
+    Activity = 27,
 }
 
 impl Kind {
@@ -157,6 +160,7 @@ impl Kind {
             24 => Self::Viz,
             25 => Self::Voxels,
             26 => Self::LandingTarget,
+            27 => Self::Activity,
             _ => return None,
         })
     }
@@ -174,6 +178,7 @@ impl Kind {
             | Self::Hello
             | Self::Command
             | Self::Goal
+            | Self::Activity
             | Self::Ping
             | Self::Bye => Link::Sensor,
             Self::HelloAck
@@ -218,6 +223,7 @@ impl Kind {
             Self::Command => "command",
             Self::Goal => "goal",
             Self::LandingTarget => "landing_target",
+            Self::Activity => "activity",
             Self::Scalar => "scalar",
             Self::Log => "log",
             Self::Stats => "stats",
@@ -397,6 +403,8 @@ pub enum Message {
     Scalar(ScalarMessage),
     /// 视觉降落目标，保持采集时间和 VIO 会话。
     LandingTarget(LandingTargetMessage),
+    /// 任务资源租约。
+    Activity(ActivityMessage),
     /// 结构化日志。
     Log(LogMessage),
     /// 传输统计。
@@ -475,6 +483,7 @@ impl Message {
             Self::Viz(_) => Kind::Viz,
             Self::Voxels(_) => Kind::Voxels,
             Self::LandingTarget(_) => Kind::LandingTarget,
+            Self::Activity(_) => Kind::Activity,
             Self::Scalar(_) => Kind::Scalar,
             Self::Log(_) => Kind::Log,
             Self::Stats(_) => Kind::Stats,
@@ -504,6 +513,7 @@ impl Message {
             Self::Viz(m) => m.timestamp,
             Self::Voxels(m) => m.timestamp,
             Self::LandingTarget(m) => m.timestamp,
+            Self::Activity(m) => m.timestamp,
             Self::Scalar(m) => m.timestamp,
             Self::Log(m) => m.sim_time,
             Self::Hello(_)
@@ -734,6 +744,14 @@ impl Message {
                         put_i32(&mut out, *value);
                     }
                 }
+            }
+            Self::Activity(message) => {
+                put_f64(&mut out, message.timestamp);
+                put_u64(&mut out, message.owner);
+                put_u64(&mut out, message.sequence);
+                put_u32(&mut out, message.mask);
+                put_u32(&mut out, message.rate_hz);
+                put_u32(&mut out, message.lease_ms);
             }
             Self::LandingTarget(message) => {
                 put_f64(&mut out, message.timestamp);
@@ -1092,6 +1110,20 @@ impl Message {
                     }
                 }
                 Self::Voxels(message)
+            }
+            Kind::Activity => {
+                let message = ActivityMessage {
+                    timestamp: input.f64()?,
+                    owner: input.u64()?,
+                    sequence: input.u64()?,
+                    mask: input.u32()?,
+                    rate_hz: input.u32()?,
+                    lease_ms: input.u32()?,
+                };
+                if !message.valid() {
+                    return Err(invalid("activity lease"));
+                }
+                Self::Activity(message)
             }
             Kind::LandingTarget => {
                 let timestamp = input.f64()?;

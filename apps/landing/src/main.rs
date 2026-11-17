@@ -3,6 +3,7 @@ mod model;
 mod tracking;
 
 use firefly_pubsub::{
+    activity::{ACTIVITY_TOPIC, ActivityReceiver, LANDING},
     attitude::{ATTITUDE_TOPIC, AttitudeMessage},
     camera::{CAMERA_DOWN_TOPIC, DOWN_HEIGHT, DOWN_SENSOR_ID, DOWN_WIDTH, DownImageMessage},
     landing::{LANDING_TARGET_TOPIC, LandingTargetMessage},
@@ -119,13 +120,16 @@ fn main() -> Result<()> {
     if simulation {
         config.backend = model::Backend::Cpu;
     }
+    if config.backend != model::Backend::Vsinpu && !simulation && image.is_none() {
+        return Err("live CPU inference requires explicit --simulation".into());
+    }
     if let Some(path) = image {
+        let environment = model::environment(config.runtime.as_deref())?;
         let image = image::open(path)?.to_luma8();
         if image.dimensions() != (DOWN_WIDTH as u32, DOWN_HEIGHT as u32) {
             return Err("offline input must be 352x288".into());
         }
-        let mut model =
-            model::Model::load(&config.manifest, config.backend, config.runtime.as_deref())?;
+        let mut model = model::Model::load(&config.manifest, config.backend, &environment)?;
         let mut results = Vec::new();
         let q = config.camera_rotation_xyzw;
         let camera = nalgebra::Isometry3::from_parts(
@@ -165,10 +169,120 @@ fn main() -> Result<()> {
         println!("{}", serde_json::to_string(&results)?);
         return Ok(());
     }
-    if config.backend != model::Backend::Vsinpu && !simulation {
-        return Err("live CPU inference requires explicit --simulation".into());
-    }
     run(&config, game.team.code())
+}
+
+/// 工作资源只在 Active 中存在；Dormant 保留控制与姿态订阅。
+enum Pipeline {
+    Dormant,
+    Active(Box<Worker>),
+}
+
+struct Worker {
+    model: model::Model,
+    camera: Subscriber<DownImageMessage>,
+    odometry: firefly_planner_runtime::odometry::OdometryReceiver,
+    tracker: tracking::Tracker,
+    last_frame: f64,
+    next_inference: Instant,
+}
+
+impl Worker {
+    fn start(
+        config: &Config,
+        node: &firefly_pubsub::node::IpcNode,
+        not_before: f64,
+        environment: &ort::environment::Environment,
+    ) -> Result<Self> {
+        Ok(Self {
+            model: model::Model::load(&config.manifest, config.backend, environment)?,
+            camera: Subscriber::with_topic(node, CAMERA_DOWN_TOPIC)?,
+            odometry: firefly_planner_runtime::odometry::OdometryReceiver::start()?,
+            tracker: tracking::Tracker::default(),
+            last_frame: not_before,
+            next_inference: Instant::now(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tick(
+        &mut self,
+        config: &Config,
+        rate: u32,
+        team: u32,
+        session: u64,
+        session_start: f64,
+        mounting: &nalgebra::Isometry3<f64>,
+        targets: &Publisher<LandingTargetMessage>,
+        viz: Option<&VizPublisher>,
+    ) -> Result<bool> {
+        if Instant::now() < self.next_inference {
+            return Ok(false);
+        }
+        let mut latest = None;
+        while let Some(sample) = self.camera.receive()? {
+            latest = Some(sample);
+        }
+        let Some(sample) = latest else {
+            return Ok(false);
+        };
+        if sample.sensor_id != DOWN_SENSOR_ID
+            || sample.width as usize != DOWN_WIDTH
+            || sample.height as usize != DOWN_HEIGHT
+            || !sample.timestamp.is_finite()
+        {
+            return Err("invalid down camera message".into());
+        }
+        if sample.timestamp <= self.last_frame {
+            return Ok(false);
+        }
+        self.last_frame = sample.timestamp;
+        let started = Instant::now();
+        let detections = self.model.detect(&sample.data, config.confidence)?;
+        let deadline = Instant::now() + Duration::from_millis(150);
+        let pose = loop {
+            if sample.timestamp < session_start || !RUNNING.load(Ordering::Relaxed) {
+                break None;
+            }
+            let history = self.odometry.history().snapshot()?;
+            if let Some(pose) = tracking::pose_at(&history, sample.timestamp) {
+                break Some(pose);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        let target = self.tracker.process(
+            session,
+            team,
+            sample.timestamp,
+            &sample.data,
+            &detections,
+            pose,
+            &config.geometry,
+            mounting,
+            config.target_radius_m,
+            config.contact_offset_m,
+        );
+        targets.publish(target)?;
+        if let Some(viz) = viz {
+            let mut row = ScalarMessage::base(sample.timestamp, "landing/vision");
+            row.scalar_count = 4;
+            row.scalars = [
+                detections.len() as f64,
+                f64::from(target.valid),
+                target.reprojection_px,
+                started.elapsed().as_secs_f64() * 1000.,
+            ];
+            viz.publish(row)?;
+        }
+        // Schedule start-to-start, without a catch-up burst after a slow inference.
+        self.next_inference = (started
+            + Duration::from_secs_f64(1. / config.rate_hz.min(f64::from(rate))))
+        .max(Instant::now());
+        Ok(true)
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -181,100 +295,100 @@ fn run(config: &Config, team: u32) -> Result<()> {
     )?;
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "landing");
-    let mut model =
-        model::Model::load(&config.manifest, config.backend, config.runtime.as_deref())?;
-    let camera = Subscriber::<DownImageMessage>::with_topic(&node, CAMERA_DOWN_TOPIC)?;
+    let mut activity = ActivityReceiver::open(&node, ACTIVITY_TOPIC)?;
     let targets = Publisher::<LandingTargetMessage>::with_topic(&node, LANDING_TARGET_TOPIC)?;
     let attitude = Subscriber::<AttitudeMessage>::with_topic(&node, ATTITUDE_TOPIC)?;
-    let odometry = firefly_planner_runtime::odometry::OdometryReceiver::start()?;
-    let mut tracker = tracking::Tracker::default();
-    let (mut session, mut session_start) = (0, f64::INFINITY);
+    let status = VizPublisher::new(&node)?;
+    let q = config.camera_rotation_xyzw;
     let mounting = nalgebra::Isometry3::from_parts(
         nalgebra::Translation3::from(nalgebra::Vector3::from(config.camera_position)),
-        nalgebra::UnitQuaternion::new_normalize(nalgebra::Quaternion::new(
-            config.camera_rotation_xyzw[3],
-            config.camera_rotation_xyzw[0],
-            config.camera_rotation_xyzw[1],
-            config.camera_rotation_xyzw[2],
-        )),
+        nalgebra::UnitQuaternion::new_normalize(nalgebra::Quaternion::new(q[3], q[0], q[1], q[2])),
     );
-    let viz = config
-        .diagnostics
-        .then(|| VizPublisher::new(&node))
-        .transpose()?;
-    let period = Duration::from_secs_f64(1. / config.rate_hz);
-    let (mut last_frame, mut next_inference) = (f64::NEG_INFINITY, Instant::now());
+    let mut pipeline = Pipeline::Dormant;
+    let mut environment = None;
+    let (mut session, mut session_start, mut stamp) = (0, f64::INFINITY, 0.);
+    let (mut inferences, mut next_status) = (0_u64, Instant::now());
     while RUNNING.load(Ordering::Relaxed) {
         while let Some(sample) = attitude.receive()? {
+            stamp = sample.timestamp;
             if sample.session != session && sample.session != 0 {
                 session = sample.session;
                 session_start = sample.timestamp;
+                // A new estimator session always requires a new detector/tracker acquisition.
+                pipeline = Pipeline::Dormant;
             }
         }
-        if Instant::now() >= next_inference {
-            let mut latest = None;
-            while let Some(sample) = camera.receive()? {
-                latest = Some(sample);
-            }
-            if let Some(sample) = latest {
-                if sample.sensor_id != DOWN_SENSOR_ID
-                    || sample.width as usize != DOWN_WIDTH
-                    || sample.height as usize != DOWN_HEIGHT
-                    || !sample.timestamp.is_finite()
-                {
-                    return Err("invalid down camera message".into());
+        let rate = activity.poll(LANDING)?;
+        match (&pipeline, rate) {
+            (Pipeline::Dormant, Some(_)) => {
+                log::info!("landing pipeline starting: backend={:?}", config.backend);
+                if environment.is_none() {
+                    environment = Some(model::environment(config.runtime.as_deref()).inspect_err(
+                        |error| {
+                            log::error!("landing runtime activation failed: {error}");
+                            firefly_observability::pump_log_ipc(&log_ipc);
+                        },
+                    )?);
                 }
-                if sample.timestamp > last_frame {
-                    last_frame = sample.timestamp;
-                    let started = Instant::now();
-                    let detections = model.detect(&sample.data, config.confidence)?;
-                    // A camera frame can arrive before its VIO posterior. Wait
-                    // within the FC freshness budget for a bracketing pose.
-                    let deadline = Instant::now() + Duration::from_millis(150);
-                    let pose = loop {
-                        if sample.timestamp < session_start || !RUNNING.load(Ordering::Relaxed) {
-                            break None;
-                        }
-                        let history = odometry.history().snapshot()?;
-                        if let Some(pose) = tracking::pose_at(&history, sample.timestamp) {
-                            break Some(pose);
-                        }
-                        if Instant::now() >= deadline {
-                            break None;
-                        }
-                        std::thread::sleep(Duration::from_millis(2));
-                    };
-                    let target = tracker.process(
-                        session,
-                        team,
-                        sample.timestamp,
-                        &sample.data,
-                        &detections,
-                        pose,
-                        &config.geometry,
-                        &mounting,
-                        config.target_radius_m,
-                        config.contact_offset_m,
-                    );
-                    targets.publish(target)?;
-                    if let Some(viz) = &viz {
-                        let mut row = ScalarMessage::base(sample.timestamp, "landing/vision");
-                        row.scalar_count = 4;
-                        row.scalars = [
-                            detections.len() as f64,
-                            f64::from(target.valid),
-                            target.reprojection_px,
-                            started.elapsed().as_secs_f64() * 1000.,
-                        ];
-                        viz.publish(row)?;
-                    }
-                    next_inference = Instant::now() + period;
-                }
+                let worker = Worker::start(
+                    config,
+                    &node,
+                    stamp,
+                    environment.as_ref().expect("runtime initialized"),
+                )
+                .inspect_err(|error| {
+                    log::error!("landing pipeline activation failed: {error}");
+                    firefly_observability::pump_log_ipc(&log_ipc);
+                })?;
+                pipeline = Pipeline::Active(Box::new(worker));
+                log::info!("landing pipeline active");
+                next_status = Instant::now();
+                // Native model compilation may outlive a lease; recheck demand before the first inference.
+                continue;
             }
+            (Pipeline::Active(_), None) => {
+                pipeline = Pipeline::Dormant;
+                targets.publish(LandingTargetMessage {
+                    timestamp: stamp,
+                    session,
+                    team,
+                    ..Default::default()
+                })?;
+                log::info!(
+                    "landing pipeline dormant: camera subscription, odometry worker and inference session released"
+                );
+                next_status = Instant::now();
+            }
+            _ => {}
+        }
+        if let (Pipeline::Active(worker), Some(rate)) = (&mut pipeline, rate) {
+            inferences += u64::from(worker.tick(
+                config,
+                rate,
+                team,
+                session,
+                session_start,
+                &mounting,
+                &targets,
+                config.diagnostics.then_some(&status),
+            )?);
+        }
+        if stamp.is_finite() && Instant::now() >= next_status {
+            let mut row = ScalarMessage::base(stamp, "landing/runtime");
+            row.scalar_count = 4;
+            row.scalars = [
+                f64::from(matches!(pipeline, Pipeline::Active(_))),
+                inferences as f64,
+                f64::from(rate.unwrap_or(0)),
+                f64::from(config.backend == model::Backend::Vsinpu),
+            ];
+            status.publish(row)?;
+            next_status = Instant::now() + Duration::from_secs(1);
         }
         firefly_observability::pump_log_ipc(&log_ipc);
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(10));
     }
+    drop(pipeline);
     firefly_observability::pump_log_ipc(&log_ipc);
     Ok(())
 }

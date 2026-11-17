@@ -25,7 +25,7 @@ def read_recording(path):
     # Indexed access requires a completed footer; live/truncated runs cannot pass.
     reader.store(store=recording).schema()
     data = Evidence()
-    scalar_paths = {"/fc/debug/state", "/fc/debug/precision", "/landing/target", "/landing/quality"}
+    scalar_paths = {"/fc/debug/state", "/fc/debug/precision", "/landing/target", "/landing/quality", "/landing/runtime"}
     for chunk in reader.stream(store=recording):
         entity = str(chunk.entity_path)
         if entity not in scalar_paths | {"/gt/pose", "/logs/flight", "/logs/mimir", "/cameras/down/image"}:
@@ -97,9 +97,62 @@ def evaluate(data):
     if images:
         image_times = [row[0] for row in images]
         metrics["down_frames"] = len(images)
-        check(image_times[0] <= start + .5 and image_times[-1] >= end - .5
-              and max(np.diff(image_times), default=0.) <= .5,
-              "down-camera recording does not cover the mission")
+        rate = settings.get("down_rate_hz")
+        if rate is None:
+            check(image_times[0] <= start + .5 and image_times[-1] >= end - .5
+                  and max(np.diff(image_times), default=0.) <= .5,
+                  "down-camera recording does not cover the mission")
+        else:
+            check(rate in (15, 30), "invalid requested down-camera rate")
+            check(min(np.diff(image_times), default=1.) >= 1. / rate - .001000001,
+                  "down-camera exceeds the requested capture rate")
+            # Intent comes from the shared resource API; actual work comes from native counters/images.
+            intervals = []
+            enabled, since = False, start
+            requests = [(t, row["enabled"]) for t, row in data.events
+                        if row["kind"] == "activity" and start <= t <= end]
+            check(bool(requests), "resource lifecycle requests are missing")
+            for t, requested in requests:
+                if requested != enabled:
+                    if t > since:
+                        intervals.append((since, t, enabled))
+                    since, enabled = t, requested
+            if since < end:
+                intervals.append((since, end, enabled))
+            windows = [(begin, finish) for begin, finish, active in intervals if active]
+            check(len(windows) >= 2, "takeoff and landing require separate activations")
+            for begin, finish in windows:
+                stamps = [t for t in image_times if begin <= t <= finish]
+                check(len(stamps) < 2 or len(stamps) - 1 <= (stamps[-1] - stamps[0] + .002) * rate,
+                      "down-camera long-term rate exceeds the request")
+                check(len(stamps) >= 3 and stamps[0] <= begin + .5 and stamps[-1] >= finish - .5
+                      and max(np.diff(stamps), default=0.) <= .5,
+                      "active down-camera recording has missing coverage")
+            runtime = data.scalars.get("/landing/runtime", [])
+            check(bool(runtime), "landing lifecycle evidence is missing")
+            check(all(row[3] == float(settings.get("transport") == "hil") for _, row in runtime),
+                  "landing backend does not match SIL/HIL execution")
+            for begin, finish in windows:
+                check(any(row[0] == 1 for t, row in runtime if begin <= t <= finish),
+                      "landing pipeline was not active during a requested window")
+            check(any(row[0] == 0 for t, row in runtime if end <= t <= end + .5),
+                  "landing resources were not released at mission completion")
+            idle_frames = 0
+            for begin, finish, active in intervals:
+                if active or finish - begin <= .5:
+                    continue
+                begin += .5  # Drain the bounded in-flight capture/inference work.
+                idle = [(t, row) for t, row in runtime if begin <= t < finish]
+                minimum = 3 if finish - begin >= 3 else int(finish - begin >= 1)
+                check(len(idle) >= minimum and all(row[0] == 0 and row[2] == 0 for _, row in idle),
+                      "landing pipeline did not suspend during idle time")
+                check(len({row[1] for _, row in idle}) <= 1,
+                      "landing inference continued during idle time")
+                idle_frames += sum(begin <= t < finish for t in image_times)
+            metrics["idle_down_frames"] = idle_frames
+            check(idle_frames == 0, "down-camera kept producing frames during idle time")
+            metrics["down_rate_limit_hz"] = rate
+            metrics["landing_inferences"] = max((row[1] for _, row in runtime), default=0.)
     check(all(phases[i + 1][0] > phases[i][0] for i in range(len(phases) - 1)), "phase timestamps must increase")
     poses = [row for row in data.poses if start - .05 <= row[0] <= end + .05]
     modes = [(t, int(row[0])) for t, row in data.scalars.get("/fc/debug/state", []) if start <= t <= end]
@@ -166,7 +219,7 @@ def evaluate(data):
     valid = [(t, row) for t, row in acquisition if t in quality and quality[t][0] == float(home["session"])
              and quality[t][1] == int(settings["team"] == "blue") and 0 <= quality[t][2] <= 2.
              and .5 <= quality[t][3] <= 1.]
-    check(len({t for t, _ in valid}) >= 3 and valid[-1][0] - valid[0][0] >= .15,
+    check(len({t for t, _ in valid}) >= 3 and round((valid[-1][0] - valid[0][0]) * 1e9) >= 150_000_000,
           "three fresh, same-session/team visual observations over 0.15s required after return")
     check(bool(valid) and 0 <= phase["land"][0] - valid[-1][0] <= .25, "landing began with a stale visual target")
     precision = [int(row[0]) for _, row in rows_between("/fc/debug/precision", ("land", "complete"))]

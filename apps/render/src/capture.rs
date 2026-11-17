@@ -94,7 +94,7 @@ pub struct CaptureRequest {
     pub left: AssetId<Image>,
     /// 右目灰度目标。
     pub right: AssetId<Image>,
-    pub down: AssetId<Image>,
+    pub down: Option<AssetId<Image>>,
 }
 
 /// 回读回复（渲染世界→主世界）。
@@ -103,6 +103,7 @@ pub struct CapturedFrame {
     /// 对应请求的序号。
     pub seq: u64,
     pub timing: CaptureTiming,
+    pub down_requested: bool,
     /// 传感器种类。
     pub kind: SensorKind,
     /// 时间戳（透传自请求）。
@@ -309,9 +310,10 @@ fn copy_sensors(
         log::debug!("右目 GPU 纹理尚未就绪，下帧重试");
         return;
     };
-    let Some(down) = images.get(req.down) else {
+    let down = req.down.and_then(|id| images.get(id));
+    if req.down.is_some() && down.is_none() {
         return;
-    };
+    }
     let mut depth_tex = None;
     for (_, eye, view) in &depth_cams {
         if *eye == Eye::Depth {
@@ -323,17 +325,25 @@ fn copy_sensors(
         log::debug!("深度预通道纹理尚未就绪，下帧重试");
         return;
     };
-    let (Some(left_bytes), Some(right_bytes), Some(depth_bytes), Some(down_bytes)) = (
+    let (Some(left_bytes), Some(right_bytes), Some(depth_bytes)) = (
         buffers.left.take(),
         buffers.right.take(),
         buffers.depth.take(),
-        buffers.down.take(),
     ) else {
         return;
     };
 
     // 请求被真正消费（拷贝已编码）：主世界以 `taken_seq` 判据收起相机。
-    set.pending.store(4, Ordering::SeqCst);
+    let down_bytes = if down.is_some() {
+        buffers.down.take()
+    } else {
+        None
+    };
+    if down.is_some() && down_bytes.is_none() {
+        return;
+    }
+    set.pending
+        .store(if down.is_some() { 4 } else { 3 }, Ordering::SeqCst);
     hub.inner.inflight_sets.fetch_add(1, Ordering::SeqCst);
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("sensor-capture"),
@@ -352,13 +362,15 @@ fn copy_sensors(
         &set.right_packed,
         &set.right,
     );
-    gray.encode(
-        &device,
-        &mut encoder,
-        &down.texture_view,
-        &set.down_packed,
-        &set.down,
-    );
+    if let Some(down) = down {
+        gray.encode(
+            &device,
+            &mut encoder,
+            &down.texture_view,
+            &set.down_packed,
+            &set.down,
+        );
+    }
     encode_copy(&mut encoder, depth_tex, &set.depth);
     queue.submit(std::iter::once(encoder.finish()));
     req.timing.submitted = Instant::now();
@@ -393,15 +405,17 @@ fn copy_sensors(
         req,
         depth_bytes,
     );
-    map_for_readback(
-        &set.down,
-        "down",
-        &hub,
-        set.pending.clone(),
-        SensorKind::Down,
-        req,
-        down_bytes,
-    );
+    if let Some(down_bytes) = down_bytes {
+        map_for_readback(
+            &set.down,
+            "down",
+            &hub,
+            set.pending.clone(),
+            SensorKind::Down,
+            req,
+            down_bytes,
+        );
+    }
 }
 
 /// 单份纹理拷贝编码（只编码不映射，映射见 `map_for_readback`）。
@@ -466,6 +480,7 @@ fn map_for_readback(
                     .expect("hub poisoned")
                     .push_back(CaptureReply::Frame(CapturedFrame {
                         seq: req.seq,
+                        down_requested: req.down.is_some(),
                         timing: CaptureTiming {
                             readback: Instant::now(),
                             ..req.timing
@@ -525,7 +540,7 @@ mod tests {
             trace: TraceContext::default(),
             left: Handle::<Image>::default().id(),
             right: Handle::<Image>::default().id(),
-            down: Handle::<Image>::default().id(),
+            down: Some(Handle::<Image>::default().id()),
         };
         hub.request(request);
         let mut frame = ExtractedRequest(*hub.inner.request.lock().unwrap());

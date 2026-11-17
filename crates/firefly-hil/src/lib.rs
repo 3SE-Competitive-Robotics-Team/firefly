@@ -1,7 +1,6 @@
 //! USB HIL 链路：主机与板端之间的版本化帧协议、分片与 `FunctionFS` 端点描述。
 //!
-//! 链路分三个方向独占的端点：传感器下行（主机 → 板端）、执行器上行
-//! （板端 → 主机）与指令下行（主机 → 板端）。主机侧用 `nusb` 访问 USB
+//! 单个厂商接口包含 OUT 下行（传感器与指令）和 IN 上行（控制与遥测）。主机侧用 `nusb` 访问 USB
 //! 设备，板端用 Linux `FunctionFS` 暴露功能接口；两侧共用本 crate 的帧编解码，
 //! 算法进程只看到既有 IPC 话题，不感知 USB。
 //!
@@ -14,7 +13,9 @@ pub const INTERFACE_CLASS: u8 = 0xFF;
 pub const HIL_SUBCLASS: u8 = 1;
 
 pub mod frame;
+pub mod ingress;
 pub mod protocol;
+pub mod topics;
 
 #[cfg(target_os = "linux")]
 pub mod gadget;

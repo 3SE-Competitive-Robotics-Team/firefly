@@ -28,6 +28,7 @@
 //! 消息设计约束（iceoryx2 `ZeroCopySend` 要求）：自包含、无堆指针、
 //! 统一内存布局、`'static`、不实现 `Drop`。
 
+pub mod activity;
 pub mod camera;
 pub mod command;
 pub mod control;
