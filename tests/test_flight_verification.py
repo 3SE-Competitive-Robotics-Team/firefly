@@ -8,8 +8,10 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from flight import at_goal, default_goal, fresh_target, parse_args, route_points
-from verify_flight import Evidence, evaluate
+from flight_mission.config import default_goal, parse_args, route_points
+from flight_mission.gates import at_goal, fresh_target
+from flight_mission.recording import Evidence
+from flight_mission.verification import evaluate
 from firefly_mujoco import LandingTargetMessage, OdomMessage
 from firefly_mujoco.scene import resolve
 
@@ -62,7 +64,7 @@ def test_visual_span_uses_rrd_nanosecond_precision(last, passed):
     assert evaluate(data)["passed"] == passed
 
 
-@pytest.mark.parametrize("fault", [None, "cruise_gap", "cruise_compute", "missing_runtime", "rate", "rate_drift", "not_released", "cpu_hil"])
+@pytest.mark.parametrize("fault", [None, "cruise_gap", "cruise_compute", "missing_runtime", "rate", "invalid_rate", "rate_drift", "not_released", "cpu_hil"])
 def test_continuous_video_and_on_demand_inference_are_independently_scored(fault):
     data = successful_evidence()
     data.events[0][1].update(down_rate_hz=15, transport="sil")
@@ -82,6 +84,8 @@ def test_continuous_video_and_on_demand_inference_are_independently_scored(fault
         data.scalars.pop("/landing/runtime")
     elif fault == "rate":
         data.down_frames.insert(1, (1.11, 352, 288, 352 * 288))
+    elif fault == "invalid_rate":
+        data.events[0][1]["down_rate_hz"] = 0
     elif fault == "rate_drift":
         data.down_frames = [(float(t), 352, 288, 352 * 288) for t in np.arange(1.1, 19., 1/15.1)]
     elif fault == "not_released":
@@ -180,7 +184,7 @@ def test_arrival_requires_stopping_and_roundtrip_accepts_precision_land():
     args = parse_args(["--precision-land", "--goal", "2", "1"])
     assert args.mission == "roundtrip" and args.precision_land and args.hover_seconds == 3. and args.altitude == 2.
     assert parse_args([], hil=True, mission="hover").hover_seconds == 20.
-    assert default_goal("red") == [8., 0.] and default_goal("blue") == [-8., 0.]
+    assert default_goal("red") == (8., 0.) and default_goal("blue") == (-8., 0.)
     for argv in (["--goal", "nan", "0"], ["--goal", "0", "0"], ["--return-offset", "1", "0"], ["--altitude", "0"]):
         with pytest.raises(SystemExit):
             parse_args(argv)
@@ -210,9 +214,9 @@ def test_presets_close_with_equal_sides_and_mirror_for_blue(shape, count):
 
 def test_custom_waypoints_keep_order_and_initial_odom_axes_for_hil():
     args = parse_args(["--waypoint", "2", "0", "--waypoint", "2", "2", "--waypoint", "0", "0"], hil=True, mission="roundtrip")
-    assert args.hil and route_points(args, "blue") == [[2., 0.], [2., 2.], [0., 0.]]
-    assert route_points(parse_args([]), "red") == [[8., 0.]]
-    assert route_points(parse_args(["--mission", "hover"]), "red") == []
+    assert args.hil and route_points(args, "blue") == ((2., 0.), (2., 2.), (0., 0.))
+    assert route_points(parse_args([]), "red") == ((8., 0.),)
+    assert route_points(parse_args(["--mission", "hover"]), "red") == ()
 
 
 @pytest.mark.parametrize("argv", [

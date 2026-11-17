@@ -594,6 +594,9 @@ FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/sys
 ### 飞行指令脚本
 
 `scripts/flight.py` 启动 release 进程、编排起降/航点并回收进程。
+入口参数与合法阶段转换由 `scripts/flight_mission/config.py` 定义；
+`runtime.py` 拥有进程、IPC 和退出清理，`gates.py` 维护到位与视觉连续确认窗口。
+独立评分通过 `recording.py` 读取已关闭的 RRD，由 `verification.py` 核对阶段和物理证据。
 完整任务使用 `--mission roundtrip --precision-land`：从所选机库起飞，飞往航点并悬停，
 返回起飞点附近，等待新的下视识别，最后精确降落、上锁并记录静止保持。
 多途经点沿用同一任务入口：每点完成规划、到位停稳和悬停，再提交下一点，最终返航精降。

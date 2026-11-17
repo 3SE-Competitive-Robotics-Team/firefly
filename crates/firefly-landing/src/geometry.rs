@@ -31,6 +31,13 @@ impl Default for Geometry {
     }
 }
 
+/// 标记中心位于输入相机位姿的参考系中；残差单位为像素。
+#[derive(Clone, Copy, Debug)]
+pub struct PlaneTarget {
+    pub center: Vector3<f64>,
+    pub reprojection_px: f64,
+}
+
 impl Geometry {
     /// Fit the rectangle on a horizontal support plane using odometry gravity.
     /// Orthogonal Procrustes keeps front-facing planar depth stable under pixel noise.
@@ -41,7 +48,7 @@ impl Geometry {
         &self,
         corners: [[f64; 2]; 4],
         world_camera: &Isometry3<f64>,
-    ) -> Option<(Vector3<f64>, f64)> {
+    ) -> Option<PlaneTarget> {
         let [w, h] = self.marker_size;
         let object = [
             Vector2::new(-w / 2., -h / 2.),
@@ -60,7 +67,7 @@ impl Geometry {
         }
         let center = rays.iter().copied().sum::<Vector2<f64>>() / 4.;
         let origin = world_camera.translation.vector;
-        let mut best: Option<(Vector3<f64>, f64)> = None;
+        let mut best: Option<PlaneTarget> = None;
         for shift in 0..2 {
             let mut covariance = nalgebra::Matrix2::zeros();
             for i in 0..4 {
@@ -89,8 +96,15 @@ impl Geometry {
                     + ((camera.y / camera.z - measured.y) * self.intrinsics[1]).powi(2);
             }
             let rms = (squared / 4.).sqrt();
-            if rms <= self.max_reprojection_px && best.as_ref().is_none_or(|(_, old)| rms < *old) {
-                best = Some((position, rms));
+            if rms <= self.max_reprojection_px
+                && best
+                    .as_ref()
+                    .is_none_or(|old: &PlaneTarget| rms < old.reprojection_px)
+            {
+                best = Some(PlaneTarget {
+                    center: position,
+                    reprojection_px: rms,
+                });
             }
         }
         best
@@ -367,7 +381,10 @@ mod tests {
                     geometry.intrinsics[1] * p.y / p.z + geometry.intrinsics[3],
                 ]
             });
-            let (position, error) = geometry.horizontal_target(corners, &camera).unwrap();
+            let PlaneTarget {
+                center: position,
+                reprojection_px: error,
+            } = geometry.horizontal_target(corners, &camera).unwrap();
             assert!(position.norm() < 1e-8);
             assert!(error < 1e-8);
             let noisy = std::array::from_fn(|i| {
@@ -376,7 +393,10 @@ mod tests {
                     corners[i][1] + if i < 2 { 0.08 } else { -0.1 },
                 ]
             });
-            let (position, error) = geometry.horizontal_target(noisy, &camera).unwrap();
+            let PlaneTarget {
+                center: position,
+                reprojection_px: error,
+            } = geometry.horizontal_target(noisy, &camera).unwrap();
             assert!(position.norm() < 0.005);
             assert!(error < 0.2);
             assert!(

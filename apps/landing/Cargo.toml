@@ -11,6 +11,7 @@ repository.workspace = true
 readme.workspace = true
 
 [dependencies]
+usage-rs.workspace = true
 image.workspace = true
 firefly-base.workspace = true
 firefly-config.workspace = true

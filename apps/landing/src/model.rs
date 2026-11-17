@@ -7,7 +7,7 @@ use ort::{session::Session, value::Tensor};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+use crate::{Result, external, invalid};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -54,7 +54,7 @@ impl Manifest {
                 .components()
                 .all(|part| matches!(part, std::path::Component::Normal(_)))
         {
-            return Err("invalid quantized landing model manifest".into());
+            return Err(invalid("invalid quantized landing model manifest"));
         }
         Ok(())
     }
@@ -70,16 +70,23 @@ pub struct Model {
 pub fn environment(runtime: Option<&Path>) -> Result<ort::environment::Environment> {
     #[cfg(target_os = "linux")]
     let environment = if let Some(runtime) = runtime {
-        ort::init_from(runtime)?.build()?
+        ort::init_from(runtime)
+            .map_err(|e| external("landing.runtime.load", e))?
+            .build()
+            .map_err(|e| external("landing.runtime.create", e))?
     } else {
-        ort::init().build()?
+        ort::init()
+            .build()
+            .map_err(|e| external("landing.runtime.create", e))?
     };
     #[cfg(not(target_os = "linux"))]
     let environment = {
         if runtime.is_some() {
-            return Err("runtime path is supported by the Linux build".into());
+            return Err(invalid("runtime path is supported by the Linux build"));
         }
-        ort::init().build()?
+        ort::init()
+            .build()
+            .map_err(|e| external("landing.runtime.create", e))?
     };
     Ok(environment)
 }
@@ -90,20 +97,34 @@ impl Model {
         backend: Backend,
         environment: &ort::environment::Environment,
     ) -> Result<Self> {
-        let manifest: Manifest = serde_json::from_slice(&std::fs::read(manifest_path)?)?;
+        let manifest: Manifest =
+            serde_json::from_slice(&std::fs::read(manifest_path).map_err(|e| {
+                firefly_error::Error::from(e)
+                    .with_operation("landing.manifest.read")
+                    .with_context("path", manifest_path.display())
+            })?)
+            .map_err(|e| invalid("invalid model manifest JSON").with_source(e))?;
         manifest.validate()?;
         let model_path = manifest_path
             .parent()
-            .ok_or("manifest parent missing")?
+            .ok_or_else(|| invalid("manifest parent missing"))?
             .join(&manifest.model);
-        let bytes = std::fs::read(&model_path)?;
+        let bytes = std::fs::read(&model_path).map_err(|e| {
+            firefly_error::Error::from(e)
+                .with_operation("landing.model.read")
+                .with_context("path", model_path.display())
+        })?;
         if format!("{:x}", Sha256::digest(&bytes)) != manifest.sha256 {
-            return Err("landing model SHA256 mismatch".into());
+            return Err(invalid("landing model SHA256 mismatch"));
         }
-        let builder = Session::builder(environment)?
-            .with_intra_threads(1)?
-            .with_intra_op_spinning(false)?
-            .with_auto_device(ort::session::builder::AutoDevicePolicy::PreferCPU)?;
+        let builder = Session::builder(environment)
+            .map_err(|e| external("landing.session.create", e))?
+            .with_intra_threads(1)
+            .map_err(|e| external("landing.session.configure", e))?
+            .with_intra_op_spinning(false)
+            .map_err(|e| external("landing.session.configure", e))?
+            .with_auto_device(ort::session::builder::AutoDevicePolicy::PreferCPU)
+            .map_err(|e| external("landing.session.configure", e))?;
         let mut builder = match backend {
             Backend::Cpu => builder,
             Backend::Vsinpu => {
@@ -112,18 +133,22 @@ impl Model {
                     builder
                         .with_execution_providers([ort::ep::VSINPU::default()
                             .build()
-                            .error_on_failure()])?
-                        .with_disable_cpu_fallback()?
+                            .error_on_failure()])
+                        .map_err(|e| external("landing.vsinpu.register", e))?
+                        .with_disable_cpu_fallback()
+                        .map_err(|e| external("landing.vsinpu.configure", e))?
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
-                    return Err("VSINPU requires the A733 Linux runtime; use CPU only for explicit offline comparison".into());
+                    return Err(firefly_error::Error::new(firefly_error::ErrorKind::Unsupported, "VSINPU requires the A733 Linux runtime; use CPU only for explicit offline comparison").with_operation("landing.vsinpu.register"));
                 }
             }
         };
-        let session = builder.commit_from_memory(&bytes)?;
-        let input =
-            Tensor::from_array((manifest.input, vec![0.; manifest.input.iter().product()]))?;
+        let session = builder
+            .commit_from_memory(&bytes)
+            .map_err(|e| external("landing.model.compile", e))?;
+        let input = Tensor::from_array((manifest.input, vec![0.; manifest.input.iter().product()]))
+            .map_err(|e| external("landing.tensor.create", e))?;
         let transform = Letterbox::new(manifest.camera, [manifest.input[3], manifest.input[2]])?;
         log::info!(
             "landing model ready: backend={backend:?}, sha256={}, input={:?}",
@@ -138,19 +163,24 @@ impl Model {
     }
 
     pub fn detect(&mut self, gray: &[u8], threshold: f32) -> Result<Vec<Detection>> {
-        self.transform
-            .write_gray(gray, self.input.try_extract_tensor_mut::<f32>()?.1)?;
-        let outputs = self.session.run(ort::inputs!["images" => &self.input])?;
+        self.transform.write_gray(
+            gray,
+            self.input
+                .try_extract_tensor_mut::<f32>()
+                .map_err(|e| external("landing.tensor.input", e))?
+                .1,
+        )?;
+        let outputs = self
+            .session
+            .run(ort::inputs!["images" => &self.input])
+            .map_err(|e| external("landing.inference", e))?;
         if outputs.len() != 1 {
-            return Err("landing model must have one output".into());
+            return Err(invalid("landing model must have one output"));
         }
-        let (shape, values) = outputs[0].try_extract_tensor::<f32>()?;
-        Ok(decode_raw_detections(
-            shape,
-            values,
-            &self.transform,
-            threshold,
-        )?)
+        let (shape, values) = outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| external("landing.tensor.output", e))?;
+        decode_raw_detections(shape, values, &self.transform, threshold)
     }
 }
 

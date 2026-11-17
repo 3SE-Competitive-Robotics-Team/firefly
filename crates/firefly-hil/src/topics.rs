@@ -89,7 +89,7 @@ impl Sequences {
 macro_rules! routes {
     ($sub:ident, $pub:ident; $( $field:ident: $payload:ty => $variant:ident ($topic:expr, $capacity:expr, $publishers:expr) ),+ $(,)?) => {
         pub struct $sub {
-            $(pub $field: Subscriber<$payload>,)+
+            $($field: Subscriber<$payload>,)+
             sequences: RefCell<Sequences>,
         }
         impl $sub {
@@ -100,12 +100,12 @@ macro_rules! routes {
                     buffer_size: $capacity, service_max_buffer_size: Some($capacity), max_publishers: Some($publishers),
                 }).map_err(error)?,)+ sequences: RefCell::default() })
             }
-            /// 排空已登记流；except 供调度器独占高优先消息，sink 错误结束会话。
+            /// 排空已登记流；only 指定单个消息种类，None 处理全部，sink 错误结束会话。
             /// # Errors
             /// IPC、连续性或 sink 写入错误。
-            pub fn drain(&self, except: Option<Kind>, mut sink: impl FnMut(Message) -> io::Result<()>) -> io::Result<bool> {
+            pub fn drain(&self, only: Option<Kind>, mut sink: impl FnMut(Message) -> io::Result<()>) -> io::Result<bool> {
                 let mut any = false;
-                $(if except != Some(Kind::$variant) {
+                $(if only.is_none_or(|kind| kind == Kind::$variant) {
                     while let Some(sample) = self.$field.receive().map_err(error)? {
                         let mut message = Message::$variant((*sample).into());
                         self.sequences.borrow_mut().observe(&mut message, sample.header().publisher_id().value(), $publishers)?;
@@ -116,7 +116,7 @@ macro_rules! routes {
             }
         }
         pub struct $pub {
-            $(pub $field: Publisher<$payload>,)+
+            $($field: Publisher<$payload>,)+
             sequences: RefCell<Sequences>,
         }
         impl $pub {

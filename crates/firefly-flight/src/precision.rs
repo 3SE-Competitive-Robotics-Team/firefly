@@ -69,8 +69,8 @@ pub enum PrecisionStage {
 #[derive(Clone, Copy, Debug)]
 pub struct PrecisionLanding {
     params: PrecisionParams,
-    pub target: Vector3<f32>,
-    pub stage: PrecisionStage,
+    target: Vector3<f32>,
+    stage: PrecisionStage,
     age: f32,
     aligned: f32,
     final_elapsed: f32,
@@ -99,6 +99,16 @@ impl PrecisionLanding {
             horizontal,
         }
     }
+    #[must_use]
+    pub const fn target(&self) -> &Vector3<f32> {
+        &self.target
+    }
+
+    #[must_use]
+    pub const fn stage(&self) -> PrecisionStage {
+        self.stage
+    }
+
     pub fn observe(&mut self, target: Vector3<f32>) {
         if self.stage != PrecisionStage::Final && (target - self.target).norm() <= 0.15 {
             self.target = target;

@@ -410,7 +410,7 @@ impl FlightFsm {
 
     #[must_use]
     pub fn precision_stage(&self) -> Option<crate::precision::PrecisionStage> {
-        self.precision.map(|p| p.stage)
+        self.precision.as_ref().map(PrecisionLanding::stage)
     }
 
     /// 控制器的触地候选：精确降落保留已确认的近地低运动阶段。
@@ -438,7 +438,7 @@ impl FlightFsm {
         (state.position.z
             - self
                 .precision
-                .map_or(self.origin_z.unwrap_or(state.position.z), |p| p.target.z))
+                .map_or(self.origin_z.unwrap_or(state.position.z), |p| p.target().z))
             <= self.params.on_ground_altitude
             && state.velocity.z.abs() <= self.params.on_ground_velocity
     }
@@ -612,7 +612,7 @@ impl FlightFsm {
                     && !precision.advance(
                         dt,
                         state,
-                        state.position.z - precision.target.z <= self.params.on_ground_altitude
+                        state.position.z - precision.target().z <= self.params.on_ground_altitude
                             && state.velocity.norm() <= self.params.on_ground_velocity,
                     )
                 {
@@ -622,7 +622,7 @@ impl FlightFsm {
                 let altitude = state.position.z
                     - self
                         .precision
-                        .map_or(self.origin_z.unwrap_or(0.), |p| p.target.z);
+                        .map_or(self.origin_z.unwrap_or(0.), |p| p.target().z);
                 if matches!(self.landing, LandingProgress::Approach)
                     && altitude <= self.params.on_ground_altitude
                     && self.precision.is_none_or(|p| p.may_descend(state))
@@ -681,7 +681,7 @@ impl FlightFsm {
             FlightState::Land => {
                 let goal = self
                     .precision
-                    .map_or(self.origin_z.unwrap_or(0.), |p| p.target.z);
+                    .map_or(self.origin_z.unwrap_or(0.), |p| p.target().z);
                 let target = if self.precision.is_some_and(|p| !p.may_descend(state)) {
                     0.
                 } else if matches!(self.landing, LandingProgress::Approach) {

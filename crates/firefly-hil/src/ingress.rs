@@ -1,7 +1,7 @@
 //! 统一 HIL 传感器入口：分块重组、校验、零拷贝发布和 IMU 批次唤醒。
 use crate::{
     protocol::{IMAGE_CHUNK_HEADER_LEN, ImageChunkHeader, Kind, Link, Message},
-    topics::SensorPublishers,
+    topics::{SensorPublishers, error},
 };
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_SIZE, IMAGE_WIDTH};
 use firefly_pubsub::{
@@ -9,9 +9,13 @@ use firefly_pubsub::{
     publish::Publisher,
     viz::{SCALAR_BUFFER_SIZE, ScalarMessage, VIZ_MAX_PUBLISHERS},
 };
-use std::cell::Cell;
+use std::{cell::Cell, io};
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+type Result<T> = io::Result<T>;
+
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
 
 struct Checksums {
     publisher: Publisher<ScalarMessage>,
@@ -20,7 +24,7 @@ struct Checksums {
 impl Checksums {
     fn publish(&self, mut message: ScalarMessage) -> Result<()> {
         message.sequence = self.sequence.get();
-        self.publisher.publish(message)?;
+        self.publisher.publish(message).map_err(error)?;
         self.sequence.set(message.sequence.wrapping_add(1));
         Ok(())
     }
@@ -28,12 +32,6 @@ impl Checksums {
 struct IngressPorts {
     sensors: SensorPublishers,
     scalars: Checksums,
-}
-impl std::ops::Deref for IngressPorts {
-    type Target = SensorPublishers;
-    fn deref(&self) -> &Self::Target {
-        &self.sensors
-    }
 }
 
 /// 同一入口处理所有下行数据；USB、字节流回归测试共用此实现。
@@ -54,7 +52,8 @@ impl SensorIngress {
                         &crate::topics::topic(prefix, firefly_pubsub::viz::SCALAR_TOPIC),
                         Some(SCALAR_BUFFER_SIZE),
                         Some(VIZ_MAX_PUBLISHERS),
-                    )?,
+                    )
+                    .map_err(error)?,
                     sequence: Cell::new(0),
                 },
             },
@@ -66,7 +65,7 @@ impl SensorIngress {
     /// 协议、图像重组或 IPC 发布失败。
     pub fn accept_raw(&mut self, kind: Kind, body: Vec<u8>) -> Result<usize> {
         if kind.link() != Link::Sensor {
-            return Err("uplink message received on sensor endpoint".into());
+            return Err(invalid("uplink message received on sensor endpoint"));
         }
         if kind == Kind::ImageChunk {
             let header = ImageChunkHeader::decode(&body)?;
@@ -75,24 +74,24 @@ impl SensorIngress {
         }
         let message = Message::decode(kind, &body)?;
         match message {
-            Message::Imu(samples) => Ok(self.ports.publish_imu(&samples)?),
+            Message::Imu(samples) => Ok(self.ports.sensors.publish_imu(&samples)?),
             Message::Gray(image) => {
                 let publisher = if image.sensor_id == 0 {
-                    &self.ports.left
+                    &self.ports.sensors.left
                 } else {
-                    &self.ports.right
+                    &self.ports.sensors.right
                 };
-                publisher.publish(*image)?;
+                publisher.publish(*image).map_err(error)?;
                 publish_image_checksum(&self.ports, &image)?;
                 Ok(0)
             }
             Message::Depth(image) => {
-                self.ports.depth.publish(*image)?;
+                self.ports.sensors.depth.publish(*image).map_err(error)?;
                 Ok(0)
             }
             Message::Hello(_) | Message::Ping(_) | Message::Bye(_) => Ok(0),
             request => {
-                self.ports.requests.publish(request)?;
+                self.ports.sensors.requests.publish(request)?;
                 Ok(0)
             }
         }
@@ -135,7 +134,7 @@ fn handle_chunk(
     if usize::from(header.chunk_count) != current.chunks.len()
         || header.timestamp != current.timestamp
     {
-        return Err("inconsistent image chunk metadata".into());
+        return Err(invalid("inconsistent image chunk metadata"));
     }
     let index = usize::from(header.chunk_index);
     if current.chunks[index].is_none() {
@@ -172,27 +171,29 @@ fn publish_assembled(ports: &IngressPorts, image: ChunkAssembly) -> Result<()> {
             }
             let mut sum = 0_u64;
             let publisher = if sensor_id == 0 {
-                &ports.left
+                &ports.sensors.left
             } else {
-                &ports.right
+                &ports.sensors.right
             };
-            publisher.publish_with(|message| {
-                message.timestamp = timestamp;
-                message.sensor_id = i32::from(sensor_id);
-                message.width = width;
-                message.height = height;
-                let mut offset = 0;
-                for chunk in &chunks {
-                    let Some(body) = chunk.as_ref() else { continue };
-                    let payload = &body[IMAGE_CHUNK_HEADER_LEN..];
-                    let end = offset + payload.len();
-                    message.data[offset..end].copy_from_slice(payload);
-                    offset = end;
-                    for &byte in payload {
-                        sum += u64::from(byte);
+            publisher
+                .publish_with(|message| {
+                    message.timestamp = timestamp;
+                    message.sensor_id = i32::from(sensor_id);
+                    message.width = width;
+                    message.height = height;
+                    let mut offset = 0;
+                    for chunk in &chunks {
+                        let Some(body) = chunk.as_ref() else { continue };
+                        let payload = &body[IMAGE_CHUNK_HEADER_LEN..];
+                        let end = offset + payload.len();
+                        message.data[offset..end].copy_from_slice(payload);
+                        offset = end;
+                        for &byte in payload {
+                            sum += u64::from(byte);
+                        }
                     }
-                }
-            })?;
+                })
+                .map_err(error)?;
             let side = if sensor_id == 0 { "left" } else { "right" };
             let mut scalar = ScalarMessage::base(timestamp, &format!("hil/camera/{side}"));
             scalar.scalars = [timestamp, sum as f64, f64::from(width), f64::from(height)];
@@ -206,47 +207,63 @@ fn publish_assembled(ports: &IngressPorts, image: ChunkAssembly) -> Result<()> {
                 return Ok(());
             }
             let mut offset = 0_usize;
-            ports.depth.publish_with(|message| {
-                message.timestamp = timestamp;
-                message.sensor_id = 0;
-                message.width = width;
-                message.height = height;
-                for chunk in &chunks {
-                    let Some(body) = chunk.as_ref() else { continue };
-                    for value in body[IMAGE_CHUNK_HEADER_LEN..].as_chunks::<4>().0 {
-                        message.data[offset] = f32::from_le_bytes(*value);
-                        offset += 1;
+            ports
+                .sensors
+                .depth
+                .publish_with(|message| {
+                    message.timestamp = timestamp;
+                    message.sensor_id = 0;
+                    message.width = width;
+                    message.height = height;
+                    for chunk in &chunks {
+                        let Some(body) = chunk.as_ref() else { continue };
+                        for value in body[IMAGE_CHUNK_HEADER_LEN..].as_chunks::<4>().0 {
+                            message.data[offset] = f32::from_le_bytes(*value);
+                            offset += 1;
+                        }
                     }
-                }
-            })?;
+                })
+                .map_err(error)?;
         }
-        3 => {
-            use firefly_pubsub::camera::{DOWN_HEIGHT, DOWN_SENSOR_ID, DOWN_SIZE, DOWN_WIDTH};
-            if total != DOWN_SIZE {
-                return Err("down image chunk length mismatch".into());
-            }
-            let mut sum = 0_u64;
-            ports.down.publish_with(|message| {
-                message.timestamp = timestamp;
-                message.sensor_id = DOWN_SENSOR_ID;
-                message.width = DOWN_WIDTH as u32;
-                message.height = DOWN_HEIGHT as u32;
-                let mut offset = 0;
-                for body in chunks.iter().flatten() {
-                    let payload = &body[IMAGE_CHUNK_HEADER_LEN..];
-                    let end = offset + payload.len();
-                    message.data[offset..end].copy_from_slice(payload);
-                    offset = end;
-                    sum += payload.iter().map(|&v| u64::from(v)).sum::<u64>();
-                }
-            })?;
-            let mut scalar = ScalarMessage::base(timestamp, "hil/camera/down");
-            scalar.scalar_count = 4;
-            scalar.scalars = [timestamp, sum as f64, DOWN_WIDTH as f64, DOWN_HEIGHT as f64];
-            ports.scalars.publish(scalar)?;
-        }
+        3 => publish_down(ports, timestamp, &chunks, total)?,
         other => log::warn!("未知图像传感器 {other}"),
     }
+    Ok(())
+}
+
+fn publish_down(
+    ports: &IngressPorts,
+    timestamp: f64,
+    chunks: &[Option<Vec<u8>>],
+    total: usize,
+) -> Result<()> {
+    use firefly_pubsub::camera::{DOWN_HEIGHT, DOWN_SENSOR_ID, DOWN_SIZE, DOWN_WIDTH};
+    if total != DOWN_SIZE {
+        return Err(invalid("down image chunk length mismatch"));
+    }
+    let mut sum = 0_u64;
+    ports
+        .sensors
+        .down
+        .publish_with(|message| {
+            message.timestamp = timestamp;
+            message.sensor_id = DOWN_SENSOR_ID;
+            message.width = DOWN_WIDTH as u32;
+            message.height = DOWN_HEIGHT as u32;
+            let mut offset = 0;
+            for body in chunks.iter().flatten() {
+                let payload = &body[IMAGE_CHUNK_HEADER_LEN..];
+                let end = offset + payload.len();
+                message.data[offset..end].copy_from_slice(payload);
+                offset = end;
+                sum += payload.iter().map(|&v| u64::from(v)).sum::<u64>();
+            }
+        })
+        .map_err(error)?;
+    let mut scalar = ScalarMessage::base(timestamp, "hil/camera/down");
+    scalar.scalar_count = 4;
+    scalar.scalars = [timestamp, sum as f64, DOWN_WIDTH as f64, DOWN_HEIGHT as f64];
+    ports.scalars.publish(scalar)?;
     Ok(())
 }
 

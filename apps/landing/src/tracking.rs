@@ -37,43 +37,118 @@ pub fn pose_at(history: &VecDeque<OdomMessage>, stamp: f64) -> Option<Isometry3<
     ))
 }
 
+/// 本次激活周期持有的标定与几何门限。
+pub(crate) struct Settings {
+    pub geometry: Geometry,
+    pub camera_in_body: Isometry3<f64>,
+    pub acquisition_radius_m: f64,
+    pub contact_offset_m: f64,
+}
+
+/// 同一幅图像的身份、测量时刻、检测和插值位姿。
+#[derive(Clone, Copy)]
+pub(crate) struct Observation<'a> {
+    pub session: u64,
+    pub team: u32,
+    pub timestamp: f64,
+    pub image: &'a [u8],
+    pub detections: &'a [Detection],
+    pub pose: Option<Isometry3<f64>>,
+}
+
+#[derive(Clone, Copy)]
+struct Accepted {
+    target: Vector3<f64>,
+    timestamp: f64,
+    confidence: f64,
+}
+
 #[derive(Default)]
-pub struct Tracker {
+enum Acquisition {
+    #[default]
+    Searching,
+    Confirming {
+        accepted: Accepted,
+        consecutive: u8,
+    },
+    Tracking(Accepted),
+}
+
+impl Acquisition {
+    fn accepted(&self) -> Option<&Accepted> {
+        match self {
+            Self::Searching => None,
+            Self::Confirming { accepted, .. } | Self::Tracking(accepted) => Some(accepted),
+        }
+    }
+
+    fn missed(&mut self) {
+        if let Self::Confirming { consecutive, .. } = self {
+            *consecutive = 0;
+        }
+    }
+
+    fn accept(&mut self, accepted: Accepted) -> bool {
+        let consecutive = match self {
+            Self::Searching => 1,
+            Self::Confirming { consecutive, .. } => *consecutive + 1,
+            Self::Tracking(_) => 3,
+        };
+        let confirmed = consecutive >= 3;
+        *self = if confirmed {
+            Self::Tracking(accepted)
+        } else {
+            Self::Confirming {
+                accepted,
+                consecutive,
+            }
+        };
+        confirmed
+    }
+}
+
+struct Candidate {
+    target: Vector3<f64>,
+    reprojection_px: f64,
+    confidence: f64,
+}
+
+pub(crate) struct Tracker {
+    settings: Settings,
     session: u64,
     stamp: Option<f64>,
-    target: Option<Vector3<f64>>,
-    accepted: usize,
-    confirmed: bool,
-    last_accepted: Option<f64>,
-    last_confidence: f64,
+    acquisition: Acquisition,
 }
+
 impl Tracker {
+    pub fn new(settings: Settings) -> Self {
+        Self {
+            settings,
+            session: 0,
+            stamp: None,
+            acquisition: Acquisition::Searching,
+        }
+    }
+
     /// 每幅图发布一条完整有效/无效观测，采集时间保持原值。
-    #[allow(clippy::too_many_arguments)]
-    pub fn process(
-        &mut self,
-        session: u64,
-        team: u32,
-        stamp: f64,
-        image: &[u8],
-        detections: &[Detection],
-        pose: Option<Isometry3<f64>>,
-        geometry: &Geometry,
-        mounting: &Isometry3<f64>,
-        radius: f64,
-        contact_offset: f64,
-    ) -> LandingTargetMessage {
+    pub fn process(&mut self, observation: Observation<'_>) -> LandingTargetMessage {
+        let Observation {
+            session,
+            team,
+            timestamp: stamp,
+            pose,
+            ..
+        } = observation;
         if session != self.session {
-            *self = Self {
-                session,
-                ..Self::default()
-            };
+            self.session = session;
+            self.stamp = None;
+            self.acquisition = Acquisition::Searching;
         }
         let mut message = LandingTargetMessage {
             timestamp: stamp,
             session,
             team,
-            ..LandingTargetMessage::default()
+            ..Default::default()
         };
         if session == 0
             || !stamp.is_finite()
@@ -82,32 +157,65 @@ impl Tracker {
             return message;
         }
         if self
-            .last_accepted
-            .is_some_and(|previous| stamp - previous > 2.)
+            .acquisition
+            .accepted()
+            .is_some_and(|previous| stamp - previous.timestamp > 2.)
         {
-            self.accepted = 0;
-            self.target = None;
-            self.confirmed = false;
+            self.acquisition = Acquisition::Searching;
         }
         self.stamp = Some(stamp);
         let Some(body) = pose else {
-            log::debug!(target:"landing::gates","stamp={stamp:.3} no capture-time odometry");
-            self.accepted = 0;
+            log::debug!(target: "landing::gates", "stamp={stamp:.3} no capture-time odometry");
+            self.acquisition.missed();
             return message;
         };
-        let camera = body * mounting;
-        let mut best: Option<(Vector3<f64>, f64, f64)> = None;
+        let Some(candidate) = self.select_candidate(observation, &body) else {
+            self.acquisition.missed();
+            return message;
+        };
+        let target = self
+            .acquisition
+            .accepted()
+            .map_or(candidate.target, |value| {
+                value.target.lerp(&candidate.target, 0.35)
+            });
+        let confirmed = self.acquisition.accept(Accepted {
+            target,
+            timestamp: stamp,
+            confidence: candidate.confidence,
+        });
+        message.position = target.into();
+        message.reprojection_px = candidate.reprojection_px;
+        message.confidence = candidate.confidence;
+        message.valid = u32::from(confirmed);
+        message
+    }
+
+    fn select_candidate(
+        &self,
+        observation: Observation<'_>,
+        body: &Isometry3<f64>,
+    ) -> Option<Candidate> {
+        let Observation {
+            image,
+            detections,
+            timestamp: stamp,
+            ..
+        } = observation;
+        let camera = body * self.settings.camera_in_body;
+        let previous = self.acquisition.accepted().copied();
+        let reference = previous.map_or_else(Vector3::zeros, |value| value.target);
+        let mut best: Option<Candidate> = None;
         let mut gates = [0; 3];
-        // Acquired H geometry remains observable when the growing board leaves
-        // the detector's training scale. Tracking uses the same metric gates.
-        let tracked = self.target.map(|_| Detection {
+        // 已获得的 H 几何可在全图延续身份，检测与跟踪共用米制门控。
+        let tracked = previous.map(|value| Detection {
             bounds: [
                 0.,
                 0.,
                 firefly_pubsub::camera::DOWN_WIDTH as f32,
                 firefly_pubsub::camera::DOWN_HEIGHT as f32,
             ],
-            confidence: self.last_confidence as f32,
+            confidence: value.confidence as f32,
         });
         for detection in detections.iter().copied().take(8).chain(tracked) {
             let Ok(candidates) = corner_candidates(
@@ -120,53 +228,59 @@ impl Tracker {
             };
             for corners in candidates {
                 gates[0] += 1;
-                let Some((mut target, reprojection)) = geometry.horizontal_target(corners, &camera)
-                else {
+                let Some(plane) = self.settings.geometry.horizontal_target(corners, &camera) else {
                     continue;
                 };
                 gates[1] += 1;
-                target.z += contact_offset;
-                if target.xy().norm() > radius
+                let mut target = plane.center;
+                target.z += self.settings.contact_offset_m;
+                if target.xy().norm() > self.settings.acquisition_radius_m
                     || !(0.03..=3.).contains(&(body.translation.vector.z - target.z))
+                    || previous.is_some() && (target - reference).norm() > 0.15
                 {
                     continue;
                 }
-                let reference = self.target.unwrap_or_else(Vector3::zeros);
-                if self.target.is_some() && (target - reference).norm() > 0.15 {
-                    continue;
-                }
                 gates[2] += 1;
-                if best.as_ref().is_none_or(|(previous, _, _)| {
-                    (target - reference).norm() < (previous - reference).norm()
-                }) {
-                    best = Some((target, reprojection, f64::from(detection.confidence)));
+                if best
+                    .as_ref()
+                    .is_none_or(|old| (target - reference).norm() < (old.target - reference).norm())
+                {
+                    best = Some(Candidate {
+                        target,
+                        reprojection_px: plane.reprojection_px,
+                        confidence: f64::from(detection.confidence),
+                    });
                 }
             }
         }
         log::debug!(target:"landing::gates","stamp={stamp:.3} detections={} corners={} plane={} accepted={}",detections.len(),gates[0],gates[1],gates[2]);
-        let Some((target, error, confidence)) = best else {
-            self.accepted = 0;
-            return message;
-        };
-        let target = self
-            .target
-            .map_or(target, |previous| previous.lerp(&target, 0.35));
-        self.target = Some(target);
-        self.accepted += 1;
-        self.last_accepted = Some(stamp);
-        self.last_confidence = confidence;
-        message.position = target.into();
-        message.reprojection_px = error;
-        message.confidence = confidence;
-        self.confirmed |= self.accepted >= 3;
-        message.valid = u32::from(self.confirmed);
-        message
+        best
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acquisition_requires_consecutive_confirmation_and_retains_tracked_identity() {
+        let accepted = Accepted {
+            target: Vector3::zeros(),
+            timestamp: 1.,
+            confidence: 0.9,
+        };
+        let mut acquisition = Acquisition::Searching;
+        assert!(!acquisition.accept(accepted));
+        assert!(!acquisition.accept(accepted));
+        acquisition.missed();
+        assert!(!acquisition.accept(accepted));
+        assert!(!acquisition.accept(accepted));
+        assert!(acquisition.accept(accepted));
+        acquisition.missed();
+        assert!(matches!(acquisition, Acquisition::Tracking(_)));
+        assert!(acquisition.accept(accepted));
+    }
+
     #[test]
     fn acquired_geometry_tracks_without_detector_and_session_reset_requires_detection() {
         use firefly_pubsub::camera::{DOWN_HEIGHT, DOWN_WIDTH};
@@ -190,11 +304,21 @@ mod tests {
             bounds: [145., 109., 206., 178.],
             confidence: 0.9,
         };
-        let mut tracker = Tracker::default();
+        let mut tracker = Tracker::new(Settings {
+            geometry,
+            camera_in_body: mounting,
+            acquisition_radius_m: 0.8,
+            contact_offset_m: 0.02,
+        });
         let mut process = |session, stamp, detections: &[Detection]| {
-            tracker.process(
-                session, 0, stamp, &image, detections, pose, &geometry, &mounting, 0.8, 0.02,
-            )
+            tracker.process(Observation {
+                session,
+                team: 0,
+                timestamp: stamp,
+                image: &image,
+                detections,
+                pose,
+            })
         };
         for i in 0..3 {
             assert_eq!(

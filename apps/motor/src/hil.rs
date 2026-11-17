@@ -13,9 +13,7 @@ use firefly_hil::gadget::endpoint_file_at;
 use firefly_hil::protocol::Kind;
 use firefly_hil::protocol::{Message, Stats};
 use firefly_hil::topics::TelemetrySubscribers as Ports;
-use firefly_pubsub::control::ControlMessage;
 use firefly_pubsub::node::create_node;
-use firefly_pubsub::subscriber::Subscriber;
 use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 
 /// HIL 功能实例名。
@@ -54,17 +52,20 @@ fn forward(
     let mut last_stats = Instant::now();
     while RUNNING.load(Ordering::Relaxed) {
         firefly_observability::pump_log_ipc(log_ipc);
-        let mut wrote = drain_control(&mut writer, &ports.control, &mut stats)?;
-        wrote |= ports.drain(Some(Kind::Control), |message| {
-            if matches!(message, Message::Log(_)) {
-                write_with_control_priority(&mut writer, &ports.control, &message, &mut stats)?;
+        let mut wrote = drain_control(&mut writer, ports, &mut stats)?;
+        wrote |= ports.drain(None, |message| {
+            if matches!(message, Message::Control(_)) {
+                writer.write_message(&message)?;
+                stats.control_messages += 1;
+            } else if matches!(message, Message::Log(_)) {
+                write_with_control_priority(&mut writer, ports, &message, &mut stats)?;
             } else {
-                write_telemetry(&mut writer, &ports.control, &message, &mut stats)?;
+                write_telemetry(&mut writer, ports, &message, &mut stats)?;
             }
             Ok(())
         })?;
         if last_stats.elapsed() >= STATS_PERIOD {
-            wrote |= drain_control(&mut writer, &ports.control, &mut stats)?;
+            wrote |= drain_control(&mut writer, ports, &mut stats)?;
             stats.uplink_backlog = 0;
             writer.write_message(&Message::Stats(stats))?;
             last_stats = Instant::now();
@@ -79,38 +80,36 @@ fn forward(
 
 fn write_telemetry<W: Write>(
     writer: &mut FrameWriter<W>,
-    control: &Subscriber<ControlMessage>,
+    ports: &Ports,
     message: &Message,
     stats: &mut Stats,
 ) -> std::io::Result<()> {
-    write_with_control_priority(writer, control, message, stats)?;
+    write_with_control_priority(writer, ports, message, stats)?;
     stats.telemetry_messages += 1;
     Ok(())
 }
 
 fn write_with_control_priority<W: Write>(
     writer: &mut FrameWriter<W>,
-    control: &Subscriber<ControlMessage>,
+    ports: &Ports,
     message: &Message,
     stats: &mut Stats,
 ) -> std::io::Result<()> {
     // Check between individual messages, including messages from the same queue.
-    drain_control(writer, control, stats)?;
+    drain_control(writer, ports, stats)?;
     writer.write_message(message)
 }
 
 fn drain_control<W: Write>(
     writer: &mut FrameWriter<W>,
-    control: &Subscriber<ControlMessage>,
+    ports: &Ports,
     stats: &mut Stats,
 ) -> std::io::Result<bool> {
-    let mut wrote = false;
-    while let Ok(Some(sample)) = control.receive() {
-        writer.write_message(&Message::Control(*sample.payload()))?;
+    ports.drain(Some(Kind::Control), |message| {
+        writer.write_message(&message)?;
         stats.control_messages += 1;
-        wrote = true;
-    }
-    Ok(wrote)
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -118,8 +117,8 @@ mod tests {
     use super::*;
     use firefly_hil::frame::FrameReader;
     use firefly_hil::protocol::{HEADER_LEN, Kind, decode_header};
-    use firefly_pubsub::publish::Publisher;
     use firefly_pubsub::{control::CONTROL_BUFFER_SIZE, log::LogMessage, viz::ScalarMessage};
+    use firefly_pubsub::{control::ControlMessage, publish::Publisher};
 
     struct ControlDuringWrite {
         bytes: Vec<u8>,
@@ -165,12 +164,9 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let topic = format!(
-            "Firefly/Test/HilControlPriority/{}/{unique}",
-            std::process::id()
-        );
-        let control =
-            Subscriber::with_topic_and_buffer(&node, &topic, CONTROL_BUFFER_SIZE).unwrap();
+        let prefix = format!("Test/HilControlPriority/{}/{unique}", std::process::id());
+        let topic = format!("{prefix}/Control");
+        let control = Ports::open(&node, &prefix).unwrap();
         let publisher =
             Publisher::with_topic_and_buffer(&node, &topic, Some(CONTROL_BUFFER_SIZE)).unwrap();
         let mut writer = FrameWriter::new(ControlDuringWrite {
@@ -216,6 +212,19 @@ mod tests {
         assert_eq!(stats.control_messages, 3);
         assert_eq!(stats.telemetry_messages, 2);
         // The control produced by the final write remains queued for the next turn.
-        assert_eq!(control.receive().unwrap().unwrap().tick, 4);
+        let mut pending = Vec::new();
+        control
+            .drain(Some(Kind::Control), |message| {
+                pending.push(message);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            pending,
+            [Message::Control(ControlMessage {
+                tick: 4,
+                ..Default::default()
+            })]
+        );
     }
 }
