@@ -38,4 +38,11 @@ def test_roundtrip_reacquires_pad_and_physically_lands():
     report = reports[0]
     assert report["commands_completed"] and not report["cleanup_errors"], report
     assert report["verification"]["passed"], report
+    assert report["verification"]["metrics"]["down_frames"] > 30
     assert Path(report["recording"]).is_file()
+    from rerun.chunk import RrdReader
+    reader = RrdReader(report["recording"])
+    [blueprint] = reader.blueprints()
+    assert any("ViewBlueprint:space_origin" in (batch := chunk.to_record_batch()).schema.names
+               and ["/cameras/down"] in batch.column("ViewBlueprint:space_origin").to_pylist()
+               for chunk in reader.stream(store=blueprint)), "embedded blueprint must expose the recorded down camera"

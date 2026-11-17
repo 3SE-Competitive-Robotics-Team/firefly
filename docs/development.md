@@ -574,7 +574,7 @@ FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/sys
 
 ~~~bash
 uv run python scripts/flight.py --mission roundtrip --precision-land
-uv run python scripts/flight.py --mission roundtrip --precision-land --goal 2 0 --hover-seconds 3
+uv run python scripts/flight.py --mission roundtrip --precision-land --goal 4 0 --hover-seconds 3
 uv run python scripts/flight.py --mission hover --precision-land
 uv run python scripts/hil_roundtrip.py --precision-land
 FIREFLY_RUN_PRECISION_MISSION=1 uv run pytest tests/system/test_flight_mission.py -q
@@ -583,7 +583,7 @@ uv run python scripts/verify_flight.py logs/<本轮目录>/log.rrd
 
 完整往返使用 `configs/sim-mission.toml`，以 30Hz 真值驱动双目、深度与下视，
 物理和 IMU 保持 1000Hz；HIL 的同周期送图预算见前文。悬停沿用 `configs/sim.toml`。
-`--goal DX DY` 相对解锁前保存的 odom 起飞点；RMUC 示例默认朝场地中部，red 为 (2,0)m、blue 为 (-2,0)m；
+`--goal DX DY` 相对解锁前保存的 odom 起飞点；RMUC 示例默认朝场地中部，red 为 (4,0)m、blue 为 (-4,0)m；
 `--altitude` 为相对起飞高度，往返缺省 2m、悬停缺省 1m。机库附近存在立柱，
 往返高度需要同时满足已知障碍净距和配置的规划高度边界；planner 保留原有碰撞门控。
 `--hover-seconds` 为航点停留时长，往返缺省 3s、悬停缺省 20s。
@@ -597,7 +597,8 @@ uv run python scripts/verify_flight.py logs/<本轮目录>/log.rrd
 
 Mimir 先启动、最后关闭；任务设置、阶段、起飞坐标锚点和所用输入的指纹进入 `logs/flight`。
 精降任务关闭 RRD 后自动运行 `scripts/verify_flight.py`，也可以用上面的独立命令复核。
-评分器要求完整 footer、时序覆盖、原生模式与精降阶段顺序；真值仅在评分阶段使用，
+评分器要求完整 footer、时序覆盖、原生模式与精降阶段顺序，以及全程 352×288 下视灰度图像；
+视觉闭环验收须保持 `mimir.images = true`。真值仅在评分阶段使用，
 以起飞时刻的 GT/odom 姿态固定坐标对齐，不使用全程拟合抵消漂移。
 航点停留检查实际位置、速度与持续时间；返航分别检查水平/高度误差和机库邻域；
 落地检查实际落点、原停机坪高度、上锁时机和上锁后的静止保持。误差门槛与失败原因由

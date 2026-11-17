@@ -29,7 +29,7 @@ def parse_args(argv=None, *, hil=None, mission=None):
         parser.set_defaults(mission=mission)
     parser.add_argument("--hover-seconds", type=float, help="hover duration (hover: 20s; roundtrip waypoint: 3s)")
     parser.add_argument("--goal", type=float, nargs=2, metavar=("DX", "DY"),
-                        help="waypoint offset in odom metres (red: 2,0; blue: -2,0)")
+                        help="waypoint offset in odom metres (red: 4,0; blue: -4,0)")
     parser.add_argument("--altitude", type=float, help="height above takeoff (hover: 1m; roundtrip: 2m)")
     parser.add_argument("--return-offset", type=float, nargs=2, default=[.12, -.08], metavar=("DX", "DY"),
                         help="return near takeoff before visual alignment, in odom metres")
@@ -55,7 +55,7 @@ def parse_args(argv=None, *, hil=None, mission=None):
 
 def default_goal(team):
     """RMUC demonstration routes head towards the central field from either hangar."""
-    return [2., 0.] if team == "red" else [-2., 0.]
+    return [4., 0.] if team == "red" else [-4., 0.]
 
 
 def at_goal(message, goal):

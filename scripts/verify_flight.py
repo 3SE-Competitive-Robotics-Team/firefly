@@ -14,6 +14,7 @@ class Evidence:
     poses: list = field(default_factory=list)
     scalars: dict = field(default_factory=dict)
     recording_complete: bool = False
+    down_frames: list = field(default_factory=list)
 
 
 def read_recording(path):
@@ -27,7 +28,7 @@ def read_recording(path):
     scalar_paths = {"/fc/debug/state", "/fc/debug/precision", "/landing/target", "/landing/quality"}
     for chunk in reader.stream(store=recording):
         entity = str(chunk.entity_path)
-        if entity not in scalar_paths | {"/gt/pose", "/logs/flight", "/logs/mimir"}:
+        if entity not in scalar_paths | {"/gt/pose", "/logs/flight", "/logs/mimir", "/cameras/down/image"}:
             continue
         batch = chunk.to_record_batch()
         if entity == "/logs/mimir" and "TextLog:text" in batch.schema.names:
@@ -36,6 +37,10 @@ def read_recording(path):
         if "sim_time" not in batch.schema.names:
             continue
         stamps = [value / 1e9 for value in batch.column("sim_time").cast("int64").to_pylist()]
+        if entity == "/cameras/down/image" and "Image:buffer" in batch.schema.names:
+            for stamp, image, formats in zip(stamps, batch.column("Image:buffer"), batch.column("Image:format").to_pylist()):
+                if image.is_valid and len(image) == 1 and formats:
+                    data.down_frames.append((stamp, formats[0]["width"], formats[0]["height"], len(image[0])))
         if entity == "/gt/pose" and "Transform3D:translation" in batch.schema.names:
             for stamp, position, quaternion in zip(stamps, batch.column("Transform3D:translation").to_pylist(),
                                                    batch.column("Transform3D:quaternion").to_pylist()):
@@ -53,6 +58,7 @@ def read_recording(path):
     data.poses.sort(key=lambda row: row[0])
     for values in data.scalars.values():
         values.sort(key=lambda row: row[0])
+    data.down_frames.sort()
     return data
 
 
@@ -85,6 +91,15 @@ def evaluate(data):
     phase = {row["name"]: (stamp, row) for stamp, row in phases}
     start, home = homes[0]
     end = phase["complete"][0]
+    images = [row for row in data.down_frames if start <= row[0] <= end]
+    check(len(images) >= 3, "down-camera images were not recorded; enable mimir.images")
+    check(all(row[1:] == (352, 288, 352 * 288) for row in images), "recorded down-camera images must be lossless CIF grayscale")
+    if images:
+        image_times = [row[0] for row in images]
+        metrics["down_frames"] = len(images)
+        check(image_times[0] <= start + .5 and image_times[-1] >= end - .5
+              and max(np.diff(image_times), default=0.) <= .5,
+              "down-camera recording does not cover the mission")
     check(all(phases[i + 1][0] > phases[i][0] for i in range(len(phases) - 1)), "phase timestamps must increase")
     poses = [row for row in data.poses if start - .05 <= row[0] <= end + .05]
     modes = [(t, int(row[0])) for t, row in data.scalars.get("/fc/debug/state", []) if start <= t <= end]

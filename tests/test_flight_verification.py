@@ -36,6 +36,7 @@ def successful_evidence(team="red"):
         f = (t - knots[i]) / (knots[i + 1] - knots[i])
         f = f*f*(3 - 2*f)
         data.poses.append((float(t), (pad + offsets[i]*(1-f) + offsets[i+1]*f).tolist(), [0., 0., 0., 1.]))
+        data.down_frames.append((float(t), 352, 288, 352 * 288))
     for t in np.arange(1., 19.01, .1):
         mode = 0 if t >= 18. else 5 if t >= 13. else 3 if t >= 12. else 4 if t >= 9. else 3 if t >= 6. else 4 if t >= 3.1 else 3 if t >= 2.9 else 2 if t >= 1.5 else 1
         data.scalars.setdefault("/fc/debug/state", []).append((float(t), [mode]))
@@ -62,7 +63,7 @@ def test_scoring_uses_initial_full_coordinate_alignment():
     assert evaluate(data)["passed"]
 
 
-@pytest.mark.parametrize("fault", ["no_truth", "never_left", "stale_vision", "wrong_team", "wrong_height", "early_disarm", "no_return", "truth_gap", "wrong_xy", "short_hover", "wrong_precision_order", "left_land", "recorder_loss"])
+@pytest.mark.parametrize("fault", ["no_truth", "never_left", "stale_vision", "wrong_team", "wrong_height", "early_disarm", "no_return", "truth_gap", "wrong_xy", "short_hover", "wrong_precision_order", "left_land", "recorder_loss", "no_down", "down_gap", "down_size"])
 def test_command_completion_cannot_hide_physical_or_protocol_failure(fault):
     data = successful_evidence()
     if fault == "no_truth":
@@ -94,6 +95,12 @@ def test_command_completion_cannot_hide_physical_or_protocol_failure(fault):
         data.scalars["/fc/debug/state"] = [(t, [3] if 15 < t < 16 else row) for t, row in data.scalars["/fc/debug/state"]]
     elif fault == "recorder_loss":
         data.recording_complete = False
+    elif fault == "no_down":
+        data.down_frames = []
+    elif fault == "down_gap":
+        data.down_frames = [row for row in data.down_frames if not 10 < row[0] < 11]
+    elif fault == "down_size":
+        data.down_frames = [(t, 320, 240, size) for t, _, _, size in data.down_frames]
     assert not evaluate(data)["passed"], fault
 
 
@@ -117,7 +124,7 @@ def test_arrival_requires_stopping_and_roundtrip_accepts_precision_land():
     args = parse_args(["--precision-land", "--goal", "2", "1"])
     assert args.mission == "roundtrip" and args.precision_land and args.hover_seconds == 3. and args.altitude == 2.
     assert parse_args([], hil=True, mission="hover").hover_seconds == 20.
-    assert default_goal("red") == [2., 0.] and default_goal("blue") == [-2., 0.]
+    assert default_goal("red") == [4., 0.] and default_goal("blue") == [-4., 0.]
     for argv in (["--goal", "nan", "0"], ["--goal", "0", "0"], ["--return-offset", "1", "0"], ["--altitude", "0"]):
         with pytest.raises(SystemExit):
             parse_args(argv)

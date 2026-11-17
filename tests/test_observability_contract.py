@@ -48,10 +48,33 @@ def test_default_blueprint_only_selects_registered_observations():
                         found_status.add(path)
     assert found_status == {path for path in registered if path.startswith("mimir/status/")}
     assert len(found_status) == 6
-    assert {"Planner", "Traj"} <= containers
+    assert {"Planner", "Traj", "Landing", "Cameras", "Stereo"} <= containers
     assert "Performance" not in containers
     assert {
         "planner/loop_hz", "planner/fsm_hz", "planner/fsm_timing_ms",
         "planner/replan_submitted_hz", "planner/replan_hz", "planner/replan_ms",
         "traj/sample_hz", "traj/reference_hz", "traj/timing_ms",
     } <= selected
+    assert {"cameras/down", "landing/target", "landing/quality", "fc/debug/precision"} <= selected
+
+
+def test_down_camera_is_active_and_quality_keeps_session_off_the_axis():
+    from rerun.chunk import RrdReader
+
+    reader = RrdReader(ROOT / "configs/firefly.rbl")
+    values = {}
+    for chunk in reader.stream(store=reader.blueprints()[0]):
+        batch = chunk.to_record_batch()
+        for name in batch.schema.names:
+            if name.startswith(("ContainerBlueprint:", "ViewBlueprint:", "SeriesLines:")):
+                for row in batch.column(name).to_pylist():
+                    if row is not None:
+                        values.setdefault(str(chunk.entity_path), {})[name] = row
+    [down] = [path.lstrip("/") for path, fields in values.items()
+              if fields.get("ViewBlueprint:space_origin") == ["/cameras/down"]]
+    [cameras] = [fields for fields in values.values() if fields.get("ContainerBlueprint:display_name") == ["Cameras"]]
+    assert down in cameras["ContainerBlueprint:contents"]
+    assert cameras["ContainerBlueprint:active_tab"] == [down]
+    assert any("/landing/quality/visualizers/" in path
+               and fields.get("SeriesLines:visible_series") == [False, False, True, True]
+               for path, fields in values.items())

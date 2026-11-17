@@ -361,14 +361,20 @@ cargo build --release -p mimir
 uv run rerun 'logs/<yyyymmdd_hhmmss>/log.rrd' configs/firefly.rbl
 ```
 
-The main area shows the map/trajectories and recorded stereo images. Small independent numeric cards
+The main area shows the map/trajectories and the recorded down camera by default. The neighbouring
+Stereo tab retains the left/right images and track overlays. Down frames live at `cameras/down/image`
+with their capture-time `sim_time`; camera calibration lives at `cameras/down`. With `images=true`,
+Mimir records the same lossless CIF input used by landing. The mission verifier checks its dimensions,
+payload size and time coverage independently of the Viewer layout. Small independent numeric cards
 show FC control frequency (Hz), VIO processing and posterior age (ms), associated landmark IDs,
 camera publication rate (FPS) and capture-to-publication latency (ms). Each card has its own entity and
 view. Ordinary bold text keeps the numbers compact.
 The timeline cursor selects the measurement-time snapshot; a stopped recording holds its last snapshot.
 Missing/nonfinite or more-than-two-second-old values display `—`.
 
-The lower tab container has one Planner tab and one Traj tab. Planner groups callback/FSM Hz,
+The lower tab container opens on Landing, with FC/precision state codes, odom-frame target xyz,
+and reprojection error/confidence. Session/team are hidden in the quality plot to keep the numeric
+session identifier off its axis; the original series remain recorded. Planner and Traj have separate tabs. Planner groups callback/FSM Hz,
 FSM/callback/period milliseconds, submitted/adopted planning Hz, and result/solver milliseconds.
 The result plot hides `adopted` (0/1), which remains available in the entity for outcome checks.
 Traj groups sample/publication Hz, sampler/local-IPC latency, and total callback/period milliseconds.
@@ -394,8 +400,9 @@ In the default 3D view, green is the global guide path, coral red is the local p
 and its velocity arrows, blue is ground truth, yellow is local odometry, and purple is map-frame
 navigation. The odometry and navigation histories overlap when the navigation correction is identity.
 
-Edit the layout in the Viewer and save its blueprint back to `configs/firefly.rbl`; rebuild mimir to
-embed it. Mimir and the Viewer share this single layout artifact. Before accepting a layout,
+The layout definition is `scripts/build_blueprint.py`. Regenerate `configs/firefly.rbl` with
+`uv run python scripts/build_blueprint.py`, then rebuild mimir to embed it. Mimir and the Viewer
+share this generated layout artifact; shared changes belong in the definition. Before accepting a layout,
 check every selected entity against the observation registry and inspect a real recording screenshot.
 Recordings with source series and missing `mimir/status/*` use a derived display layer for the numeric cards.
 Preserve the original recording when producing that layer.
