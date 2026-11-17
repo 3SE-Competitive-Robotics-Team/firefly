@@ -1,4 +1,4 @@
-"""`python -m firefly_sim` 兼容入口（与 CLI `firefly-sim` 等价）。"""
+"""通过 `python -m firefly_sim` 启动物理进程。"""
 
 from .main import main
 

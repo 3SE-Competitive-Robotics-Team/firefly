@@ -63,4 +63,12 @@ def test_collide_cli_roundtrip(tmp_path) -> None:
     out = tmp_path / "collision.json"
     assert main([str(obj), "--out", str(out), "--res", "0.2"]) == 0
     payload = json.loads(out.read_text(encoding="utf-8"))
-    assert payload["boxes"] and payload["res"] == 0.2
+    assert payload["res"] == 0.2
+    boxes = np.asarray(payload["boxes"])
+    assert boxes.ndim == 2 and boxes.shape[1] == 6
+    assert np.isfinite(boxes).all() and (boxes[:, 3:] > 0).all()
+    low = (boxes[:, :3] - boxes[:, 3:]).min(axis=0)
+    high = (boxes[:, :3] + boxes[:, 3:]).max(axis=0)
+    expected = np.array([.5, .5, .25])
+    assert ((-expected - .2 <= low) & (low <= -expected)).all()
+    assert ((expected <= high) & (high <= expected + .2)).all()

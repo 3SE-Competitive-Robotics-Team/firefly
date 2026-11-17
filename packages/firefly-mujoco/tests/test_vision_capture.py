@@ -67,9 +67,11 @@ def test_asset_fingerprint_uses_selected_scene_and_detects_geometry_changes(tmp_
     assert len(assets["files"]) == (3 if selected else 2)
     assert assets["sensor"] == {"schema": 1, "focal": 100.}
     (directory / "field.glb").write_bytes(b"modified selected geometry")
-    with pytest.raises(ValueError, match="contract"):
-        vision_assets.verify_map_compatibility(
-            assets, root=tmp_path, capture=lambda root: vision_assets.capture_assets(root, run=runner))
+    changed_assets = vision_assets.capture_assets(tmp_path, run=runner)
+    geometry = str(scene.dir / "field.glb")
+    assert changed_assets["files"][geometry] == digest(directory / "field.glb")
+    assert changed_assets["files"][geometry] != assets["files"][geometry]
+    assert changed_assets["sensor"] == assets["sensor"]
 
 
 def test_same_stamp_required():
@@ -143,33 +145,3 @@ def test_visibility_rejects_outward_views_and_parallel_rays():
     wall = np.array([[3., 0., 1., .1, 5., 5.]])
     assert capture.visible_fraction(wall, [0., 0., 1.], 0.) == 1.
     assert capture.visible_fraction(wall, [0., 0., 1.], 180.) == 0.
-
-
-def test_runtime_compatibility_ignores_capture_selection_but_not_calibration():
-    assets = {"schema": 2, "files": {"field": "hash"}, "sensor": {"focal": 100}, "selection": {"step": 2}}
-    vision_assets.verify_map_compatibility(assets | {"selection": {"step": 1}}, capture=lambda _: assets)
-    with pytest.raises(ValueError, match="contract"):
-        vision_assets.verify_map_compatibility(assets | {"sensor": {"focal": 200}}, capture=lambda _: assets)
-
-
-def test_explicit_rig_translation_exception_preserves_other_contracts():
-    from copy import deepcopy
-    old = {"schema": 2, "files": {"field": "hash"}, "sensor": {
-        "focal": 100, "left_offset": [0., -.025, 0.], "depth_offset": [0., 0., 0.]}}
-    current = deepcopy(old)
-    for key in ["left_offset", "depth_offset"]:
-        current["sensor"][key][0] = .06
-    with pytest.raises(ValueError, match="contract"):
-        vision_assets.verify_map_compatibility(old, capture=lambda _: current)
-    result = vision_assets.verify_map_compatibility(old, allow_rig_translation=True, capture=lambda _: current)
-    assert result["rig_translation_body_m"] == pytest.approx([.06, 0., 0.])
-    for changed in ["focal", "depth_offset", "field"]:
-        incompatible = deepcopy(current)
-        if changed == "field":
-            incompatible["files"]["field"] = "different"
-        elif changed == "focal":
-            incompatible["sensor"]["focal"] = 200
-        else:
-            incompatible["sensor"]["depth_offset"][0] = .07
-        with pytest.raises(ValueError, match="contract"):
-            vision_assets.verify_map_compatibility(old, allow_rig_translation=True, capture=lambda _: incompatible)

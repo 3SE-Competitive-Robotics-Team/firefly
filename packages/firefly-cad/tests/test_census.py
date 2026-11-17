@@ -1,13 +1,9 @@
-"""census 合成往返测试（不依赖 1.2G 真文件）。
-
-约定：fixture 用 OCP 现场造两零件（含名字/颜色/位移），census 读回断言。
-OCP 8 绑定形态以本文件为准（`_s` 后缀静态方法等）。合成 STEP 往返不保留
-装配发生（往返后组件被展平、装配标记丢失），故 fixture 只造平坦零件；
-装配路径由官方场的真 STEP 覆盖。
-"""
+"""用两个带颜色和位移的平坦 STEP 零件验证普查结果与 CLI 产物。"""
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 from firefly_cad.census import main, read_census
@@ -35,7 +31,7 @@ def _build_sample_stp(path: Path) -> None:
         base, Quantity_Color(1.0, 0.0, 0.0, Quantity_TOC_RGB), XCAFDoc_ColorGen
     )
 
-    # 位移直接用放置点体现，不经装配发生（见模块 docstring）。
+    # 两个独立零件用放置点表达相对位置。
     pillar = shape_tool.AddShape(
         BRepPrimAPI_MakeBox(gp_Pnt(100, 0, 0), 5, 5, 50).Shape(), False
     )
@@ -66,8 +62,8 @@ def test_census_roundtrip(tmp_path: Path) -> None:
     pillar = next(p for p in products if p["bbox_mm"][0] == 100.0)
     assert pillar["color_rgb"] == [0.0, 0.0, 1.0]
 
-    assert report["summary"]["bbox_m"][3] >= 0.1
-    assert len(report["input"]["sha256"]) == 64
+    assert report["summary"]["bbox_m"] == [0., 0., 0., .105, .02, .05]
+    assert report["input"]["sha256"] == hashlib.sha256(stp.read_bytes()).hexdigest()
 
 
 def test_census_cli_writes_outputs(tmp_path: Path) -> None:
@@ -75,6 +71,10 @@ def test_census_cli_writes_outputs(tmp_path: Path) -> None:
     _build_sample_stp(stp)
     out = tmp_path / "out"
     assert main([str(stp), "--out-dir", str(out), "--top", "5"]) == 0
-    assert (out / "products.json").is_file()
+    report = json.loads((out / "products.json").read_text())
+    assert report["summary"]["n_products"] == 2
+    assert report["summary"]["n_solids"] == 2
     summary = (out / "SUMMARY.md").read_text(encoding="utf-8")
-    assert "tag_1" in summary or "tag_2" in summary
+    rows = [line.split("|") for line in summary.splitlines() if line.startswith("| tag_")]
+    assert {row[1].strip() for row in rows} == {p["name"] for p in report["products"]}
+    assert {row[6].strip() for row in rows} == {"10×20×30", "5×5×50"}

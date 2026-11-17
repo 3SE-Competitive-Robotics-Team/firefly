@@ -59,7 +59,7 @@ planner 的状态、目标、占据地图和轨迹都属于 odom。可选 Naviga
 机体位姿从独立接收线程的有界 Odometry 历史插值到采集时刻，不外推；
 历史间隔过大、会话不符、图案残缺或初次识别未连续确认均发布无效观测。世界真值只用于渲染与评分。
 观测包含图像时间、VIO 会话、队伍、odom 系机体触地点、置信度、像素残差与有效标志，
-供 FC 独占控制状态与最终安全判断。此版本下视作为降落输入，原始 topic 可供后续光流/VIO 使用。
+供 FC 独占控制状态与最终安全判断。下视观测作为降落输入。
 
 下视采集与识别推理拥有独立生命周期。板端下视采集流随相机进程持续运行；
 render 按 `capture.down_hz` 连续采集，HIL 按 `link.down_rate_hz` 连续传输，允许 15/30 FPS。
@@ -281,53 +281,15 @@ Mimir 原点匹配的 `Matching / Anchored / Unavailable`、轨迹执行的
 | [仿真](../apps/firefly-sim/src/firefly_sim/main.py)、[电机](../apps/motor/src/actuator.rs) | 等待新鲜控制 → 运行 → 控制超时 | 仿真暂停推进时间；执行器回到零输出，退出时归零 |
 | [相机](../apps/camera/src/capture.rs)、[IMU 设备](../apps/imu/src/source.rs) | 打开设备 → 发布循环 → 停止 | 进程拥有设备句柄和退出流程 |
 | [可选定位](../apps/localization/src/main.rs)、[门控](../crates/firefly-localization/src/filter.rs)、[匹配历史](../apps/lightglue/src/sensors.rs) | 等待对齐 / 历史 → 就绪 → 重置锁存；观测等待 → 接受 / 拒绝 / 过期 | 观测等待里程计区间；拒绝计数归门控，会话重置结束当前定位 |
+| [任务编排](../scripts/flight_mission/runtime.py)、[独立评分](../scripts/flight_mission/verification.py) | 起飞 → 逐航点飞行/停留 → 返航/重捕获 → 降落/上锁 → 完成 | 失败和取消进入回收；关闭 RRD 后核对声明航点、物理证据和资源生命周期 |
+| [降落识别](../apps/landing/src/runtime.rs)、[跟踪](../apps/landing/src/tracking.rs) | Dormant ↔ Active；Searching → Confirming → Tracking | 租约失效释放图像、里程计线程与推理 Session；重新激活或会话变化重新识别 |
+| [离线采集](../scripts/collect_vision_map.py)、[资产缓存](../packages/firefly-mujoco/src/firefly_mujoco/vision_assets.py)、[CAD 构建](../packages/firefly-cad/src/firefly_cad/pipeline.py) | 生成 → 验收 → 提交清单；完整且内容匹配才复用 | 失败保留未完成状态；采集提交前回收 renderer |
+| [数据集导出](../apps/rootslam/src/dataset_app.rs)、[部署](../xtask/src/deploy.rs) | 前置校验 → 执行 → 完成确认 | 导出失败回收生产器和映射线程；部署以 supervisor socket 应答确认就绪 |
 
 ALIKED 的离线 / 在线模式在启动时确定；quad 使用 Bevy startup / update 生命周期。
 上述状态的操作入口见 [开发指南](development.md)，输入与归档契约见
 [可观测性](observability.md)。
 
-### 状态转换的源码导航
-
-状态盘点覆盖应用、领域库、测评包、资产脚本与部署工具。上表给出组件间的生命周期，
-下表定位 29 组子状态的所有者、表示与转换边界；互斥阶段使用具名状态，相关数据共同拥有。
-数值向量、配置开关和逐帧测量按数据处理；影响后续事件资格、资源所有权或恢复条件的
-历史才属于这里的状态。独立条件可以同时成立，按各自语义保存。
-
-| 组 | 所有者 / 源码 | 状态表示与转换入口 | 必须保留的边界 |
-|---|---|---|---|
-| 1 | [FC 命令处理](../apps/fc/src/main.rs) | `CommandSequence::consume` 单调消费序号 | 序号只向前推进；重复或乱序命令不重复执行 |
-| 2 | [飞控 FSM](../crates/firefly-flight/src/fsm.rs) | `FlightState`、可选失联计时与 `LandingProgress::{Approach, Crawl, Confirming}` | 首次失联锁定保持点；降落接近原点后缓降，低推力与低运动持续满足才自动上锁 |
-| 3 | [VIO 姿态输入](../apps/fc/src/attitude.rs) | `Validity::{Waiting, Valid, Invalid, SessionFault}`；会话取自最新观测 | 无效数据可恢复；会话改变锁存；预测刷新与后验刷新使用独立时钟 |
-| 4 | [控制坐标](../apps/fc/src/frames.rs) | `Alignment::{Waiting, Valid, Invalid}` 同时保存对齐时刻与新鲜度 | 等待同时间戳配对；失效清除对齐新鲜度；历史对齐时刻保持单调 |
-| 5 | [静止初始化](../crates/firefly-imu-initialization/src/lib.rs) | 可选 `StationaryWindow` 共同拥有起止时间、计数与统计 | 有序静止窗口积累、失效重置，满足时间和样本数条件后输出重力估计 |
-| 6 | [备用 IMU](../crates/firefly-imu/src/stream.rs) | `Phase::{Initializing, Tracking, Discontinuous}`，跟踪态拥有滤波状态 | 初始化前间隙清空窗口；初始化后间隙锁存连续性故障 |
-| 7 | [IMU 预测](../crates/firefly-imu-propagation/src/predictor.rs) | 可选 `Anchor` 原子保存后验时刻、状态与零偏；历史重放 | 历史完整覆盖后才发布；新后验重放且发布时钟单调 |
-| 8 | [在线 VIO](../apps/rootslam/src/online.rs)、[IMU 适配](../apps/rootslam/src/online/imu.rs) | `Startup::{WaitingGravity, WaitingStereo, Running}`；IMU 采样器成功后移交 | 静止初始化、双目与 IMU 水位分别就绪；输入所有权只移交一次 |
-| 9 | [双目配对](../apps/rootslam/src/online.rs) | `Pairing` 左右帧队列、水位与已发序号 `emitted` | 等待配对与 IMU 覆盖；旧帧淘汰；光流队列满时丢弃本次提交 |
-| 10 | [估计器宿主](../crates/firefly-basalt/src/vi_estimator/vio_estimator.rs)、[光流宿主](../crates/firefly-basalt/src/optical_flow/optical_flow.rs)、[边缘化 I/O](../crates/firefly-basalt/src/io/marg_data_io.rs) | 估计器 `Worker::{Ready, Running, Joined, Unavailable}` 拥有输入、engine 或线程；光流与 I/O 各自持有 join 句柄 | 启动转移资源，关闭输入与 join 分开；完成通知和处理结果分别传播 |
-| 11 | [局部 VIO](../crates/firefly-basalt/src/vi_estimator/sqrt_keypoint_vio.rs)、[VO](../crates/firefly-basalt/src/vi_estimator/sqrt_keypoint_vo.rs) | VIO `EstimationPhase::{Waiting, Tracking, Optimizing}`；VO 的初始化标志与窗口集合 | 初始化、开始优化、选关键帧、边缘化按算法顺序执行 |
-| 12 | [映射调度](../apps/rootslam/src/system.rs) | `correction_pending: Option<revision>` 绑定在途地图版本；`Finalization` 授权收尾 | 输入结束、回环排空、最终 BA 授权、取消属于不同事件 |
-| 13 | [全局优化](../crates/firefly-rootslam-mapping/src/global_optimization.rs)、[L-BFGS](../crates/firefly-optimize/src/lbfgs.rs) | L-BFGS `Termination::{Converged, Cancelled, IterationLimit}`；全局优化接受步与阻尼控制流 | 仅接受步提交状态；取消、预算耗尽与收敛分别报告；路标块另有显式 `State` |
-| 14 | [规划与轨迹里程计](../crates/firefly-planner-runtime/src/state_input.rs) | `InputPhase::{Waiting, Active, Stopped}`，有效态共同拥有测量与接收时钟 | 启动等待可继续；有效流之后的超时或无效观测锁存；重复时间戳不续命 |
-| 15 | [规划地图输入](../apps/planner/src/map_input.rs) | `fault: Option<reason>` 保留首次失败；覆盖与不可变碰撞快照各自维护 | 覆盖不足可恢复；输入故障锁存；世界锚定快照供滚动窗口查询 |
-| 16 | [EGO 地图](../crates/firefly-ego-map/src/grid.rs) | `DepthPhase::{Waiting, Pending, Integrated}`；首帧、缓冲初始化与超时独立 | 首帧、缓冲区初始化、待融合、输入超时各自推进；占据与膨胀缓冲按地图更新流程提交 |
-| 17 | [规划 worker](../crates/firefly-planner/src/worker.rs)、[应用](../apps/planner/src/main.rs) | `Lane::{Idle, Solving, Unavailable}`、Ticket 取消标志与目标世代 | 取消立即撤销采用资格，任务返回后才释放槽位；轨迹到时与实际到点分别判断 |
-| 18 | [深度 worker](../apps/planner/src/depth_mapping.rs)、[里程计 worker](../crates/firefly-planner-runtime/src/odometry.rs)、[FC IMU worker](../apps/fc/src/imu.rs) | 启动应答、线程句柄与终止守卫；线程退出撤销快照和共享历史资格 | 就绪应答后消费；停止传播给拥有者；join 后报告线程错误 |
-| 19 | [Mimir ingress](../apps/mimir/src/ingress.rs)、[archive](../apps/mimir/src/archive.rs) | `PendingVoxels::append` 预算通过后提交块；writer 的 `finish(self)` 消费所有权 | 完整体素批次才提交；缺块、丢失和排空失败进入归档结果；`finish(self)` 消费 writer |
-| 20 | [日志发送](../crates/firefly-observability/src/lib.rs)、[状态采样](../apps/mimir/src/status.rs) | 发送序号与丢失计数；可选 `RateWindow` 共同拥有起止时刻与间隔计数 | 丢失计数持续报告到成功发布；频率和新鲜度由各自时间窗口派生 |
-| 21 | [渲染 capture](../apps/render/src/capture.rs)、[帧组装](../apps/render/src/link.rs) | 可选 `requested_seq` 表示出图窗口；GPU 在途计数与帧退休序号 | 回调归还 GPU 槽位；双目/深度成组，下视按独立采集节拍选入；退休序号拒绝迟到回复并回收缓冲 |
-| 22 | [仿真](../apps/firefly-sim/src/firefly_sim/main.py)、[电机](../apps/motor/src/actuator.rs) | 仿真接收时钟与暂停标志；电机 `ControlState` 共同拥有推力与收到时刻 | 超时暂停物理推进或归零电机；退出执行清理 |
-| 23 | [可选定位](../apps/localization/src/main.rs)、[匹配历史](../apps/lightglue/src/sensors.rs)、[融合门控](../crates/firefly-localization/src/filter.rs) | `AlignmentState::{Waiting, Ready, Reset}`；匹配历史与融合门控独立 | 对齐与历史就绪后处理观测；会话重置锁存；观测有等待、拒绝、过期与接受结果 |
-| 24 | [任务阶段](../scripts/flight_mission/config.py)、[运行与回收](../scripts/flight_mission/runtime.py)、[独立评分](../scripts/flight_mission/verification.py) | `Phase` 检查起飞 → 逐点规划/停留 → 返航/重捕获 → 精降/上锁 → 完成；失败和取消进入资源回收 | 预设与自定义点列共用 SIL/HIL；到位和连续视觉窗口分别持有身份与时间；逐个回收所有子进程，关闭 RRD 后独立评分，失败非零退出 |
-| 25 | [离线采集](../scripts/collect_vision_map.py)、[库图复用](../packages/firefly-mujoco/src/firefly_mujoco/vision_assets.py)、[建库](../scripts/build_vision_map.py) | 逐帧质量门控；`finish_capture` 回收 renderer 后原子提交清单，清理失败写入原因 | 配对与质量门控后接受帧；完整清单和指纹一致才复用；失败结果保留不完整状态 |
-| 26 | [CAD 资产流水线](../packages/firefly-cad/src/firefly_cad/pipeline.py) | 内容缓存与 manifest 的 `building / passed / failed`；失败保留源指纹与原因 | 生成、几何验收、资产指纹完成后发布通过状态 |
-| 27 | [数据集导出](../apps/rootslam/src/dataset_app.rs)、[产物预检](../apps/rootslam/src/dataset_app/outputs.rs) | 输入与输出预检、生产、EOF、导出；导出失败通过 `cancel_mapping` 回收并保留清理错误 | 预检本轮新产物路径；生产器、估计器、映射分别完成后导出对应结果 |
-| 28 | [部署](../xtask/src/deploy.rs)、[解包](../xtask/src/archive.rs) | 逐步骤检查远端完成标记；停服成功后替换，启动并收到 supervisor 应答后完成 | 发布成功要求 supervisor socket 应答；远端传输与远端执行结果分别检查 |
-| 29 | [识别宿主](../apps/landing/src/runtime.rs)、[目标跟踪](../apps/landing/src/tracking.rs)、[推理租约](../crates/firefly-pubsub/src/activity.rs) | `Pipeline::{Dormant, Active}`、`Acquisition::{Searching, Confirming, Tracking}`、有界 owner 租约；ORT 环境归进程、推理 Session 归 Active | 释放/到达时间过期后回收图像订阅、里程计线程和 Session；重复序号不续命，重新激活重新识别 |
-
-显式状态的入口为 `FlightState`、`ExecState`、轨迹 `Execution`、渲染 `Mailbox`、
-Mimir `Alignment`、supervisor `Lifecycle`、A* `NodeState` 与 Basalt 路标块 `State`。
-对隐式表示的调整以所属组件的转换契约为单位；控制、估计、地图与归档各自保持验证边界。
 
 自动降落在接近起飞高度后持续缓降，速度取下降率与地面速度阈值的 1.2 倍中的较小值。
 触地确认同时要求低高度、低速和有效控制输出低于最小推力到悬停推力区间的 30% 门限；

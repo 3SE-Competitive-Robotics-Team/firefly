@@ -454,7 +454,8 @@ uv run python scripts/hil_roundtrip.py --precision-land
 
 ## 场地与可选离线资产
 
-脚本、CAD 与验收共用 `firefly-workspace` 的工作区定位和流式 SHA-256；该包只依赖标准库。
+脚本、CAD 与验收共用 `firefly-workspace` 的工作区定位和流式 SHA-256；
+该包的进程识别与回收使用 psutil。
 
 ```bash
 uv run --package firefly-cad firefly-cad-build <场地.stp> --scene <赛季>@<版本>
@@ -634,7 +635,9 @@ uv run python scripts/verify_flight.py logs/<本轮目录>/log.rrd
 
 Mimir 先启动、最后关闭；任务设置、阶段、起飞坐标锚点和所用输入的指纹进入 `logs/flight`。
 精降任务关闭 RRD 后自动运行 `scripts/verify_flight.py`，也可以用上面的独立命令复核。
-评分器要求完整 footer、时序覆盖、原生模式与精降阶段顺序，以及全程连续的 352×288 下视灰度图像；
+评分器读取任务入口生成的 `settings`、`waypoint` 和 `phase` 事件；
+`waypoint_count` 声明航点数量，单航点与多航点共用同一协议，`down_rate_hz` 声明下视帧率。
+验收要求完整 footer、时序覆盖、原生模式与精降阶段顺序，以及全程连续的 352×288 下视灰度图像；
 同时检查下视帧率上界（含 1ms 采集时钟量化和长期频率约束）、推理空闲期计数保持不变，以及任务结束后的推理资源释放。
 起飞报告包含 FC 姿态源、后验新鲜度、实际横向位移、实际偏航和相对真值的航向估计误差；航向比较使用起飞前的固定坐标对齐。
 视觉闭环验收须保持 `mimir.images = true`。真值仅在评分阶段使用，

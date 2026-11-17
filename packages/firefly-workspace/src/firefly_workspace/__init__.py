@@ -22,7 +22,7 @@ def workspace_root(start: Path | None = None) -> Path:
                 config = tomllib.load(stream)
             if config.get("project", {}).get("name") == "firefly" and "workspace" in config.get("tool", {}).get("uv", {}):
                 return candidate
-    raise ValueError(f"firefly workspace not found from {directory}; run from the repository or pass --workspace")
+    raise ValueError(f"firefly workspace not found from {directory}; run from the repository or pass a workspace path")
 
 
 def digest(path: str | Path) -> str:

@@ -1,9 +1,7 @@
 """碰撞聚合：三角网格 → 实心体素 → 贪心 AABB 盒集合。
 
-`MuJoCo` 的 `type="mesh"` 几何只取凸包，场地凹结构（高地/隧道/外墙内侧）会被
-填平，飞行时会撞到空气，故碰撞用盒集合：体素填充为实心（逐列取上下界之间的
-段——"所有东西合成一个实心物块"），再贪心合并成 AABB。低质量、保留凹结构、
-必然撞得上。
+场地碰撞使用盒集合：网格表面体素化后填充封闭内部，再合并相邻占据格。
+碰撞边界的离散误差由体素分辨率决定，开放通道和薄结构由资产验收检查。
 
 产物 `<scene>_collision.json`：``{"res": r, "boxes": [[cx,cy,cz,hx,hy,hz], ...]}``
 （米，`MuJoCo` 系）；`firefly_mujoco.scene` 读它生成 `<geom type="box">`。
@@ -63,7 +61,7 @@ def merge_boxes(occ: np.ndarray) -> np.ndarray:
 def boxes_for_mesh(mesh, res: float) -> list[list[float]]:
     """三角网格 → 实心体素 → AABB 盒集合（米，``[cx,cy,cz,hx,hy,hz]``）。
 
-    体素占据用 `trimesh` 的 ``voxelized(pitch).fill()``（逐列正交填充，即实心）。
+    体素占据用 `trimesh` 的 ``voxelized(pitch).fill()``，默认填充封闭孔洞。
     """
     import trimesh
 

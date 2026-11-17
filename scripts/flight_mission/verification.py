@@ -74,25 +74,14 @@ def read_timeline(data, report):
         return None
     roundtrip = settings["mission"] == "roundtrip"
     count = settings.get("waypoint_count")
-    if count is not None:
-        check(
-            type(count) is int and (1 <= count <= 16 if roundtrip else count == 0),
-            "invalid waypoint count",
-        )
-        if report.failures:
-            return None
+    check(
+        type(count) is int and (1 <= count <= 16 if roundtrip else count == 0),
+        "invalid waypoint count",
+    )
+    if report.failures:
+        return None
     if not roundtrip:
         expected = ["takeoff", "acquire", "land", "complete"]
-    elif count is None:
-        expected = [
-            "takeoff",
-            "outbound",
-            "outbound_hover",
-            "return",
-            "acquire",
-            "land",
-            "complete",
-        ]
     else:
         expected = (
             ["takeoff"]
@@ -111,42 +100,39 @@ def read_timeline(data, report):
     start, home = homes[0]
     legs = []
     if roundtrip:
-        if count is None:
-            legs = [(phase["outbound"], phase["outbound_hover"], phase["return"])]
-        else:
-            planned = [(t, row) for t, row in data.events if row["kind"] == "waypoint"]
+        planned = [(t, row) for t, row in data.events if row["kind"] == "waypoint"]
+        check(
+            [row.get("index") for _, row in planned] == list(range(count)),
+            "ordered waypoint declarations are missing or duplicated",
+        )
+        if len(planned) != count:
+            return None
+        for index in range(count):
+            travel, hover, following = phases[1 + 2 * index : 4 + 2 * index]
+            legs.append((travel, hover, following))
+            offset = planned[index][1].get("offset", [])
             check(
-                [row.get("index") for _, row in planned] == list(range(count)),
-                "ordered waypoint declarations are missing or duplicated",
+                len(offset) == 2 and np.isfinite(offset).all(),
+                "invalid declared waypoint offset",
             )
-            if len(planned) != count:
+            if len(offset) != 2:
                 return None
-            for index in range(count):
-                travel, hover, following = phases[1 + 2 * index : 4 + 2 * index]
-                legs.append((travel, hover, following))
-                offset = planned[index][1].get("offset", [])
-                check(
-                    len(offset) == 2 and np.isfinite(offset).all(),
-                    "invalid declared waypoint offset",
-                )
-                if len(offset) != 2:
-                    return None
-                goal = np.array(home["position"]) + [offset[0], offset[1], settings["altitude"]]
-                check(
-                    planned[index][0] <= start
-                    and travel[1].get("index") == hover[1].get("index") == index
-                    and np.array_equal(travel[1].get("goal"), goal)
-                    and np.array_equal(hover[1].get("goal"), goal),
-                    f"waypoint {index}: phase identity/goal differs from the declared route",
-                )
-            return_goal = np.array(home["position"]) + [
-                *settings["return_offset"],
-                settings["altitude"],
-            ]
+            goal = np.array(home["position"]) + [offset[0], offset[1], settings["altitude"]]
             check(
-                np.array_equal(phase["return"][1].get("goal"), return_goal),
-                "return goal differs from the takeoff-frame approach point",
+                planned[index][0] <= start
+                and travel[1].get("index") == hover[1].get("index") == index
+                and np.array_equal(travel[1].get("goal"), goal)
+                and np.array_equal(hover[1].get("goal"), goal),
+                f"waypoint {index}: phase identity/goal differs from the declared route",
             )
+        return_goal = np.array(home["position"]) + [
+            *settings["return_offset"],
+            settings["altitude"],
+        ]
+        check(
+            np.array_equal(phase["return"][1].get("goal"), return_goal),
+            "return goal differs from the takeoff-frame approach point",
+        )
 
     check(
         all(phases[i + 1][0] > phases[i][0] for i in range(len(phases) - 1)),
@@ -193,67 +179,66 @@ def check_images(data, timeline, report):
             "continuous down-camera recording does not cover the mission",
         )
         rate = settings.get("down_rate_hz")
-        if rate is not None:
-            check(rate in (15, 30), "invalid requested down-camera rate")
-            if rate not in (15, 30):
-                return
+        check(rate in (15, 30), "invalid requested down-camera rate")
+        if rate not in (15, 30):
+            return
+        check(
+            min(np.diff(image_times), default=1.0) >= 1.0 / rate - 0.001000001,
+            "down-camera exceeds the requested capture rate",
+        )
+        # Intent comes from the shared resource API; actual work comes from native counters/images.
+        intervals = []
+        enabled, since = False, start
+        requests = [
+            (t, row["enabled"])
+            for t, row in data.events
+            if row["kind"] == "activity" and start <= t <= end
+        ]
+        check(bool(requests), "resource lifecycle requests are missing")
+        for t, requested in requests:
+            if requested != enabled:
+                if t > since:
+                    intervals.append((since, t, enabled))
+                since, enabled = t, requested
+        if since < end:
+            intervals.append((since, end, enabled))
+        windows = [(begin, finish) for begin, finish, active in intervals if active]
+        check(len(windows) >= 2, "takeoff and landing require separate activations")
+        check(
+            len(image_times) - 1 <= (image_times[-1] - image_times[0] + 0.002) * rate,
+            "down-camera long-term rate exceeds the configured rate",
+        )
+        runtime = data.scalars.get("/landing/runtime", [])
+        check(bool(runtime), "landing lifecycle evidence is missing")
+        check(
+            all(row[3] == float(settings.get("transport") == "hil") for _, row in runtime),
+            "landing backend does not match SIL/HIL execution",
+        )
+        for begin, finish in windows:
             check(
-                min(np.diff(image_times), default=1.0) >= 1.0 / rate - 0.001000001,
-                "down-camera exceeds the requested capture rate",
+                any(row[0] == 1 for t, row in runtime if begin <= t <= finish),
+                "landing pipeline was not active during a requested window",
             )
-            # Intent comes from the shared resource API; actual work comes from native counters/images.
-            intervals = []
-            enabled, since = False, start
-            requests = [
-                (t, row["enabled"])
-                for t, row in data.events
-                if row["kind"] == "activity" and start <= t <= end
-            ]
-            check(bool(requests), "resource lifecycle requests are missing")
-            for t, requested in requests:
-                if requested != enabled:
-                    if t > since:
-                        intervals.append((since, t, enabled))
-                    since, enabled = t, requested
-            if since < end:
-                intervals.append((since, end, enabled))
-            windows = [(begin, finish) for begin, finish, active in intervals if active]
-            check(len(windows) >= 2, "takeoff and landing require separate activations")
+        check(
+            any(row[0] == 0 for t, row in runtime if end <= t <= end + 0.5),
+            "landing resources were not released at mission completion",
+        )
+        for begin, finish, active in intervals:
+            if active or finish - begin <= 0.5:
+                continue
+            begin += 0.5  # Drain the bounded in-flight capture/inference work.
+            idle = [(t, row) for t, row in runtime if begin <= t < finish]
+            minimum = 3 if finish - begin >= 3 else int(finish - begin >= 1)
             check(
-                len(image_times) - 1 <= (image_times[-1] - image_times[0] + 0.002) * rate,
-                "down-camera long-term rate exceeds the configured rate",
+                len(idle) >= minimum and all(row[0] == 0 and row[2] == 0 for _, row in idle),
+                "landing pipeline did not suspend during idle time",
             )
-            runtime = data.scalars.get("/landing/runtime", [])
-            check(bool(runtime), "landing lifecycle evidence is missing")
             check(
-                all(row[3] == float(settings.get("transport") == "hil") for _, row in runtime),
-                "landing backend does not match SIL/HIL execution",
+                len({row[1] for _, row in idle}) <= 1,
+                "landing inference continued during idle time",
             )
-            for begin, finish in windows:
-                check(
-                    any(row[0] == 1 for t, row in runtime if begin <= t <= finish),
-                    "landing pipeline was not active during a requested window",
-                )
-            check(
-                any(row[0] == 0 for t, row in runtime if end <= t <= end + 0.5),
-                "landing resources were not released at mission completion",
-            )
-            for begin, finish, active in intervals:
-                if active or finish - begin <= 0.5:
-                    continue
-                begin += 0.5  # Drain the bounded in-flight capture/inference work.
-                idle = [(t, row) for t, row in runtime if begin <= t < finish]
-                minimum = 3 if finish - begin >= 3 else int(finish - begin >= 1)
-                check(
-                    len(idle) >= minimum and all(row[0] == 0 and row[2] == 0 for _, row in idle),
-                    "landing pipeline did not suspend during idle time",
-                )
-                check(
-                    len({row[1] for _, row in idle}) <= 1,
-                    "landing inference continued during idle time",
-                )
-            metrics["down_rate_limit_hz"] = rate
-            metrics["landing_inferences"] = max((row[1] for _, row in runtime), default=0.0)
+        metrics["down_rate_limit_hz"] = rate
+        metrics["landing_inferences"] = max((row[1] for _, row in runtime), default=0.0)
 
 
 def evaluate(data: Evidence):

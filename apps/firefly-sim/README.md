@@ -4,7 +4,7 @@ RMUC MuJoCo 物理进程，由根 uv workspace 管理。
 
 物理与 IMU 各 1kHz，发布 IMU、仿真位姿、评测状态与机体参数；接收
 `Firefly/Control` 四电机推力，无有效控制指令时物理暂停。
-双目与深度由独立的 Bevy `render` 进程生成。
+双目、深度与下视图像由独立的 Bevy `render` 进程生成。
 
 必须提供 `configs/scene.toml` 所选场景的 `models/<赛季>/v<版本>/<赛季>_collision.json`。
 

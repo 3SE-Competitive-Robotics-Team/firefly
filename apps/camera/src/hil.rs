@@ -1,8 +1,7 @@
 //! HIL 传感器接入：从 USB `FunctionFS` 端点读取仿真传感器并发布到本机话题。
 //!
 //! 时间戳沿用主机下发的仿真时间轴；本进程只做转接，不重排测量时刻。
-//! 图像按 `ImageChunk` 分块到达，块间的 IMU 立即发布；收齐后直接填进
-//! iceoryx2 共享内存（`publish_with`），不再 decode 成中间消息再拷一次。
+//! `SensorIngress` 统一解码、校验和组装图像分块，并将传感器消息发布到共享内存。
 
 use std::fs::OpenOptions;
 use std::io::ErrorKind;

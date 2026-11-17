@@ -30,7 +30,7 @@ Rust 应用统一用 `cargo xtask release` 构建；物理资产检查、离线�
 | `models/<赛季>/v<版本>/derived/raw/field_raw.npz` | 归一化顶点、三角形、逐面颜色、零件 tag |
 | `models/<赛季>/v<版本>/field.glb` | Bevy / Rerun；保留三角面与顶点的 CAD 颜色和程序化材质 |
 | `models/<赛季>/v<版本>/<赛季>_collision.json` | MuJoCo；米制 `[cx,cy,cz,hx,hy,hz]` 碰撞盒 |
-| `apps/planner/maps/<赛季>-<版本>.ffmap` | planner；与物理碰撞同一体素格，未额外膨胀 |
+| `apps/planner/maps/<赛季>-<版本>.ffmap` | 离线规划与资产验收；与物理碰撞同一体素格，未额外膨胀 |
 | `models/<赛季>/v<版本>/asset_manifest.json` | 源 SHA-256、转换参数、依赖版本、坐标变换、产物 hash 与几何验收 |
 
 `derived/stages/` 保存阶段输入与产物内容 hash；二者都匹配才复用。

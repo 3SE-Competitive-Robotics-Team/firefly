@@ -440,7 +440,7 @@ mod tests {
 
     /// 移植 `AttitudeControlConvergenceTest`：状态按速率设定点积分，误差应逐步减小并收敛。
     ///
-    /// C++ 断言末态四元数与目标逐分量相等；跨实现浮点运算顺序不同，改为按姿态夹角断言。
+    /// 收敛误差使用四元数姿态夹角衡量。
     #[test]
     fn converges_to_goal_for_all_quaternion_pairs() {
         let inputs = [

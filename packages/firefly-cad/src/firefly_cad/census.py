@@ -18,7 +18,7 @@ from firefly_workspace import digest
 
 log = logging.getLogger(__name__)
 
-#: 毫米转米（源 STEP 单位，对照 strands：`SI_UNIT(.MILLI.,.METRE.)`）。
+#: 源 STEP 使用毫米，输出总包围盒转换为米。
 MM_TO_M = 1e-3
 
 
@@ -50,7 +50,7 @@ def _shape_color(color_tool, shape):
                     round(color.Green(), 4),
                     round(color.Blue(), 4),
                 )
-        except Exception:  # noqa: BLE001 -- 同上
+        except Exception:  # 不支持的颜色类型继续尝试后续类型。
             continue
     return None, None
 

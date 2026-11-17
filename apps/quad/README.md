@@ -43,5 +43,5 @@ cargo run --release -p quad
 
 - 场地：`configs/quad.toml` 的 `field`（相对 `models/`），当前指向 RMUC 场地。
 - 模型朝向：glb 为 glTF Y-up、机头 `+Z`；挂载时转成世界 Z-up、机头 `+X`
-  （`main.rs` 的 `model_rot`）。模型子节点旁挂一个绿色前向标记便于校对。
-- 与 `apps/render` 的分工：`render` 是 VIO 的渲染 worker；本 app 是纯手动飞行。
+  （共享的 `firefly-render::drone::spawn_drone_visual`）。模型子节点旁挂一个绿色前向标记便于校对。
+- 与 `apps/render` 的分工：`render` 为 VIO、深度建图和精降生成传感器图像；quad 提供手动飞行。

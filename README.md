@@ -43,7 +43,7 @@ ALIKED/LightGlue 库图定位作为独立可选工具运行。
 
 | 应用 | 职责 |
 |---|---|
-| `mimir` | RRD 录制：列式数值诊断、左右目无损灰度图、事件与完整性检查 |
+| `mimir` | RRD 录制：列式数值诊断、双目与下视无损灰度图、事件与完整性检查 |
 | `fc` | 1kHz 飞控环：飞行模式与安全条件、姿态/位置控制、电机分配 |
 | `planner` | 独占深度融合与局部避障地图、全局/局部规划、完整轨迹发布与可视化 |
 | `traj` | 采样完整位置/航向轨迹，按里程计时钟发布飞控参考并处理规划心跳失联 |
@@ -51,7 +51,9 @@ ALIKED/LightGlue 库图定位作为独立可选工具运行。
 | `firefly-rootslam` | 默认双目/IMU VIO、连续机体里程计与预测姿态；默认关闭建图与回环 |
 | `aliked` | ALIKED-N16 特征提取：在线发布特征，`--build-map` 离线建 `ffvmap` 库图 |
 | `lightglue` | ALIKED/LightGlue 离线库图定位：`--map <地图.ffvmap>` 解算视觉位姿 |
-| `render` | 视觉传感器进程：订阅真值位姿渲染双目与深度并发布 IPC，`--offline` 供离线建库 |
+| `render` | 视觉传感器进程：订阅真值位姿渲染双目、深度与下视并发布 IPC，`--offline` 供离线建库 |
+| `landing` | 按需识别下视 H 标记，结合采集时刻里程计发布精降目标 |
+| `hil`、`hil-gadget` | 主机 USB 传感器/遥测桥接与板端 USB 模式管理 |
 | `quad` | 独立微无人机第三人称飞行游戏，使用本地输入与动力学 |
 | `ffctl` | 地面站 CLI：把操作员意图发成 IPC 消息，命令为 `<域> <动词>` 两层 |
 | `camera`、`imu`、`motor` | 板载 V4L2 相机、SPI BMI088、sysfs PWM；通过标准 IPC 连接算法进程 |
@@ -68,7 +70,7 @@ ALIKED/LightGlue 库图定位作为独立可选工具运行。
 |---|---|
 | `firefly-mujoco` | MuJoCo 物理库：RMUC 无人机场景与 IMU 提取 |
 | `firefly-cad` | RMUC 场地 STEP→glTF 资产管线：普查/三角化/分组/碰撞聚合 |
-| `firefly-workspace` | 工作区定位与文件内容指纹，仅依赖标准库 |
+| `firefly-workspace` | 工作区定位、配置与文件指纹、基于 psutil 的进程识别和回收 |
 
 ## 开始开发
 

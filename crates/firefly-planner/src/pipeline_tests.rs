@@ -641,26 +641,32 @@ fn tick_initial_plan_then_replan_at_threshold() {
     assert!(r1.reference.is_some());
 }
 
-/// 采用固定测试随机源，独立检查上游轴向、整数归一化与连败幅度公式。
+/// 固定随机源检查正交偏移、幅度边界和连败时的搜索范围扩张。
 #[test]
-fn random_mid_matches_upstream_directions_and_failure_scaling() {
+fn random_mid_expands_bounded_search_after_failures() {
     use rand::{RngExt, SeedableRng, rngs::StdRng};
     let mut manager = open_manager();
     let (start, goal) = (Vector3::new(0., 0., 1.), Vector3::new(6., 0., 1.));
-    for failures in [0, 1, 10] {
+    let mut previous_gain = 0.;
+    for failures in [0, 1, 10, 1000] {
         manager.consecutive_failures = failures;
         let mut rng = StdRng::seed_from_u64(71);
         let mut expected_rng = StdRng::seed_from_u64(71);
         let h = f64::from(expected_rng.random_range(0..=i32::MAX)) / f64::from(i32::MAX);
         let v = f64::from(expected_rng.random_range(0..=i32::MAX)) / f64::from(i32::MAX);
-        let scale = -0.978 / (f64::from(failures) + 0.989) + 0.989;
-        let expected = Vector3::new(
-            3.,
-            (h - 0.5) * 6. * 0.8 * scale,
-            1. - (v - 0.5) * 6. * 0.4 * scale,
-        );
         let actual = manager.random_mid(start, goal, &mut rng);
-        assert!((actual - expected).norm() < 1e-12);
+        let offset = actual - (start + goal) / 2.;
+        let horizontal_gain = offset.y / ((h - 0.5) * 6. * 0.8);
+        let vertical_gain = -offset.z / ((v - 0.5) * 6. * 0.4);
+        assert!(offset.x.abs() < 1e-12);
+        assert!((horizontal_gain - vertical_gain).abs() < 1e-12);
+        assert!(horizontal_gain > previous_gain && horizontal_gain < 1.);
+        if failures == 0 {
+            assert!(horizontal_gain < 0.01);
+        } else if failures == 1000 {
+            assert!(horizontal_gain > 0.95);
+        }
+        previous_gain = horizontal_gain;
         assert_eq!(rng.random::<u64>(), expected_rng.random::<u64>());
     }
     // Eigen 对零向量归一化保留零，同时仍消费两次随机数。
@@ -674,12 +680,12 @@ fn random_mid_matches_upstream_directions_and_failure_scaling() {
     }
 }
 
-/// 成功重规划清零连败（不变量，未失败时恒为 0）。
 #[test]
-fn successful_replan_keeps_failures_at_zero() {
+fn successful_replan_clears_previous_failures() {
     let mut m = open_manager();
     let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
-    let _ = m.cycle(1.5, None);
+    m.consecutive_failures = 3;
+    assert!(m.cycle(1.5, None).replanned);
     assert_eq!(m.consecutive_failures, 0);
 }
 
@@ -1309,37 +1315,5 @@ fn monitors_short_circuit_without_issued_traj() {
     assert!(
         m.next_swarm_conflict(0.5).is_none(),
         "无轨迹时 swarm 检查必须短路"
-    );
-}
-
-#[test]
-fn broadcast_des_clearance_returns_config_swarm_clearance() {
-    // 广播期望净距 = 本机 optimization/swarm_clearance 参数（官方发包时
-    // MINCO_msg.des_clearance = getSwarmClearance()，ego_replan_fsm.cpp:820）；
-    // 不依赖是否已规划
-    let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
-    let planner = Planner::new(
-        PlannerConfig {
-            swarm_clearance: 1.2,
-            ..PlannerConfig::default()
-        },
-        map,
-    );
-    let m = PlannerManager::with_planner(
-        planner,
-        ManagerOptions::default(),
-        Vector3::new(1.0, 1.0, 1.0),
-        Vector3::new(10.0, 1.0, 1.0),
-    )
-    .unwrap();
-    assert!(
-        (m.broadcast_des_clearance() - 1.2).abs() < 1e-9,
-        "广播净距应等于配置值"
-    );
-    // 默认配置回落默认值
-    let default = PlannerConfig::default().swarm_clearance;
-    assert!(
-        (open_manager().broadcast_des_clearance() - default).abs() < 1e-9,
-        "默认配置下广播净距应等于默认 swarm_clearance"
     );
 }

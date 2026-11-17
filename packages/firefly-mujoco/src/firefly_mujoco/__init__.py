@@ -72,7 +72,6 @@ __all__ = [
     "PLANT_STATE_TOPIC",
     "AIRFRAME_TOPIC",
     "CONTROL_TOPIC",
-    "DRONE_PAD_Z",
     "LOG_LEVEL_ERROR",
     "LOG_LEVEL_WARN",
     "LOG_LEVEL_INFO",

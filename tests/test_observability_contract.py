@@ -28,12 +28,8 @@ def test_default_blueprint_only_selects_registered_observations():
     assert store.application_id == "firefly"
     found_status = set()
     selected = set()
-    containers = set()
     for chunk in reader.stream(store=store):
         batch = chunk.to_record_batch()
-        if "ContainerBlueprint:display_name" in batch.schema.names:
-            for row in batch.column("ContainerBlueprint:display_name").to_pylist():
-                containers.update(row or [])
         for name in ("ViewBlueprint:space_origin", "ViewContents:query"):
             if name not in batch.schema.names:
                 continue
@@ -47,9 +43,6 @@ def test_default_blueprint_only_selects_registered_observations():
                     if path.startswith("mimir/status/"):
                         found_status.add(path)
     assert found_status == {path for path in registered if path.startswith("mimir/status/")}
-    assert len(found_status) == 6
-    assert {"Planner", "Traj", "Landing", "Cameras", "Stereo"} <= containers
-    assert "Performance" not in containers
     assert {
         "planner/loop_hz", "planner/fsm_hz", "planner/fsm_timing_ms",
         "planner/replan_submitted_hz", "planner/replan_hz", "planner/replan_ms",

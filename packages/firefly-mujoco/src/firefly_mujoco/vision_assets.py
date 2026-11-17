@@ -1,17 +1,15 @@
-"""离线库图的资产指纹、采集缓存与运行时兼容检查。"""
+"""离线库图的资产指纹与采集缓存完整性检查。"""
 import json
 from pathlib import Path
 import subprocess
 import tomllib
-
-import numpy as np
 
 from .scene import load_scene_name
 from firefly_workspace import digest, load_toml, parse_scene, workspace_root
 
 
 def capture_assets(root=None, *, run=subprocess.run):
-    """场地/传感器兼容条件与采集选择；二进制只作为生成来源保存。"""
+    """场地文件、渲染传感器契约与采集选择共同组成缓存指纹。"""
     root = workspace_root(root)
     scene = parse_scene(load_scene_name(root / "configs/scene.toml"))
     paths = [scene.dir / "field.glb", scene.dir / scene.collision]
@@ -25,27 +23,6 @@ def capture_assets(root=None, *, run=subprocess.run):
         sensor = tomllib.load(stream)
     selection = load_toml(root / "configs/vision_map.toml")
     return {"schema": 2, "files": files, "sensor": sensor, "selection": selection}
-
-
-def verify_map_compatibility(assets, *, root=None, allow_rig_translation=False, capture=capture_assets):
-    current = capture(root)
-    if assets.get("schema") != 2 or assets.get("files") != current["files"]:
-        raise ValueError("visual map geometry/calibration/appearance contract differs from runtime")
-    if assets.get("sensor") == current["sensor"]:
-        return {"status": "exact_match"}
-    previous = assets.get("sensor", {})
-    sensor = current["sensor"]
-    offsets = {"left_offset", "depth_offset"}
-    same_camera = ({k: v for k, v in previous.items() if k not in offsets}
-                   == {k: v for k, v in sensor.items() if k not in offsets})
-    if allow_rig_translation and same_camera and offsets <= previous.keys() and offsets <= sensor.keys():
-        shifts = [np.asarray(sensor[k]) - np.asarray(previous[k]) for k in sorted(offsets)]
-        if all(s.shape == (3,) and np.isfinite(s).all() for s in shifts) and np.allclose(shifts[0], shifts[1], atol=1e-12, rtol=0):
-            # 冻结路标已经在地图系；共同平移不改变左右/深度相对标定。
-            # 库帧机体位置只用于候选检索，保留采集时的位置及其偏移记录。
-            return {"status": "explicit_rig_translation_exception", "rig_translation_body_m": shifts[0].tolist(),
-                    "landmarks": "unchanged_map_coordinates", "candidate_body_position_offset_m": float(np.linalg.norm(shifts[0]))}
-    raise ValueError("visual map geometry/calibration/appearance contract differs from runtime")
 
 
 def reusable_capture(directory, assets):
