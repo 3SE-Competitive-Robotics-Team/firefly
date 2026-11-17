@@ -1,6 +1,7 @@
-"""Release flight command script; Mimir records native state and completion events."""
+"""Run native SIL/USB HIL missions; Mimir owns all runtime evidence."""
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -9,12 +10,14 @@ import time
 
 import iceoryx2 as iox2
 from firefly_mujoco import LandingTargetMessage, LogMessage, OdomMessage, PlannerStatusMessage, ReferenceMessage, TraceContext
-from firefly_mujoco.messages import ScalarMessage
-from firefly_workspace import workspace_root
+from firefly_mujoco.messages import AttitudeMessage, ScalarMessage
+from firefly_mujoco.scene import load_scene_name
+from firefly_workspace import digest, workspace_root
+from firefly_workspace.game import load_team
 from firefly_workspace.process import ManagedProcess, isolated_run
 
 
-def main(argv=None, *, hil=None, mission=None):
+def parse_args(argv=None, *, hil=None, mission=None):
     parser = argparse.ArgumentParser(description=__doc__)
     if hil is None:
         parser.add_argument("--hil", action="store_true")
@@ -24,24 +27,61 @@ def main(argv=None, *, hil=None, mission=None):
         parser.add_argument("--mission", choices=["hover", "roundtrip"], default="roundtrip")
     else:
         parser.set_defaults(mission=mission)
-    if mission != "roundtrip":
-        parser.add_argument("--hover-seconds", type=float, help="hover duration in seconds (default: 20)")
-    else:
-        parser.set_defaults(hover_seconds=None)
-    parser.add_argument("--precision-land", action="store_true", help="finish hover with down-camera precision landing")
+    parser.add_argument("--hover-seconds", type=float, help="hover duration (hover: 20s; roundtrip waypoint: 3s)")
+    parser.add_argument("--goal", type=float, nargs=2, metavar=("DX", "DY"),
+                        help="waypoint offset in odom metres (red: 2,0; blue: -2,0)")
+    parser.add_argument("--altitude", type=float, help="height above takeoff (hover: 1m; roundtrip: 2m)")
+    parser.add_argument("--return-offset", type=float, nargs=2, default=[.12, -.08], metavar=("DX", "DY"),
+                        help="return near takeoff before visual alignment, in odom metres")
+    parser.add_argument("--precision-land", action="store_true", help="finish with fresh down-camera acquisition and precision landing")
+    parser.add_argument("--acquire-timeout", type=float, default=12., help="visual reacquisition deadline, in wall seconds")
     parser.add_argument("--seed", type=int, default=20260930)
     args = parser.parse_args(argv)
-    if args.precision_land and args.mission != "hover":
-        parser.error("--precision-land requires --mission hover")
-    if args.hover_seconds is not None and args.mission != "hover":
-        parser.error("--hover-seconds requires --mission hover")
     if args.hover_seconds is None:
-        args.hover_seconds = 20.
-    if not 0 < args.hover_seconds <= 600:
-        parser.error("--hover-seconds must be in (0, 600]")
+        args.hover_seconds = 20. if args.mission == "hover" else 3.
+    if args.altitude is None:
+        args.altitude = 1. if args.mission == "hover" else 2.
+    values = [*(args.goal or []), *args.return_offset, args.altitude, args.hover_seconds, args.acquire_timeout]
+    if not all(math.isfinite(value) for value in values):
+        parser.error("mission parameters must be finite")
+    if not 0 < args.hover_seconds <= 600 or not .5 <= args.altitude <= 2.:
+        parser.error("hover duration must be in (0,600] and altitude in [0.5,2] metres")
+    if not 1 <= args.acquire_timeout <= 60 or math.hypot(*args.return_offset) > .3:
+        parser.error("acquisition timeout must be in [1,60] seconds and return offset within 0.3m")
+    if args.mission == "roundtrip" and args.goal is not None and not 1. <= math.hypot(*args.goal) <= 10.:
+        parser.error("roundtrip waypoint distance must be in [1,10] metres")
+    return args
+
+
+def default_goal(team):
+    """RMUC demonstration routes head towards the central field from either hangar."""
+    return [2., 0.] if team == "red" else [-2., 0.]
+
+
+def at_goal(message, goal):
+    position = [message.position_x, message.position_y, message.position_z]
+    velocity = [message.velocity_x, message.velocity_y, message.velocity_z]
+    return math.dist(position, goal) <= .15 and math.hypot(*velocity) <= .12
+
+
+def fresh_target(message, stamp, *, after, session, team):
+    return (message.valid == 1 and message.session == session and message.team == team
+            and after < message.timestamp <= stamp and stamp - message.timestamp <= .25
+            and all(math.isfinite(value) for value in message.position)
+            and math.isfinite(message.confidence) and .5 <= message.confidence <= 1.
+            and math.isfinite(message.reprojection_px) and 0 <= message.reprojection_px <= 2.)
+
+
+def main(argv=None, *, hil=None, mission=None):
+    args = parse_args(argv, hil=hil, mission=mission)
     root = workspace_root(Path(__file__))
-    processes, latest, subs = {}, {}, {}
+    team = load_team()
+    if args.goal is None:
+        args.goal = default_goal(team)
+    processes, latest, received, subs = {}, {}, {}, {}
     mode, stamp, sequence, logs = None, 0., 0, None
+    armed_session = None
+    phase_name = "startup"
 
     def start(name, command):
         child = ManagedProcess(command, cwd=root, env={**os.environ,
@@ -54,13 +94,23 @@ def main(argv=None, *, hil=None, mission=None):
         print(text, flush=True)
         if logs is None or processes["mimir"].process.poll() is not None:
             return
+        data = text.encode()
+        if len(data) > 512:
+            raise ValueError("flight event exceeds the registered TextLog payload")
         msg = LogMessage(sim_time=stamp, log_level=3, sequence=sequence)
         sequence += 1
         msg.wall_secs, msg.wall_nanos = divmod(time.time_ns(), 10**9)
-        data = text.encode()[:512].decode(errors="ignore").encode()
         msg.tag[:6], msg.tag_len = b"flight", 6
         msg.text[:len(data)], msg.text_len = data, len(data)
         logs.loan_uninit().write_payload(msg).send()
+
+    def mission_event(kind, **fields):
+        event("mission " + json.dumps({"kind": kind, **fields}, separators=(",", ":")))
+
+    def phase(name, **fields):
+        nonlocal phase_name
+        phase_name = name
+        mission_event("phase", name=name, **fields)
 
     def pump(landing=False):
         nonlocal mode, stamp
@@ -71,110 +121,205 @@ def main(argv=None, *, hil=None, mission=None):
             while (sample := sub.receive()) is not None:
                 payload = sample.payload().contents
                 msg = type(payload).from_buffer_copy(payload)
-                latest[name] = msg
+                latest[name], received[name] = msg, time.monotonic()
                 if name == "odom":
                     stamp = max(stamp, msg.timestamp)
                 elif name == "scalars" and bytes(msg.entity[:msg.entity_len]) == b"fc/debug/state":
                     mode = int(msg.scalars[0])
+                    received["mode"] = time.monotonic()
+                elif name == "attitude" and armed_session is not None and msg.session != armed_session:
+                    raise RuntimeError("VIO session changed during mission")
         time.sleep(.01)
 
-    def wait(predicate, wall=30., landing=False):
-        deadline = time.monotonic()+wall
+    def wait(predicate, wall=30., *, modes=None, landing=False):
+        deadline = time.monotonic() + wall
         while time.monotonic() < deadline:
             pump(landing)
+            if modes is not None:
+                if mode not in modes:
+                    raise RuntimeError(f"{phase_name}: unexpected FC mode {mode}, expected {sorted(modes)}")
+                for topic in ("odom", "mode", "attitude"):
+                    if time.monotonic() - received.get(topic, 0.) > 1.:
+                        raise RuntimeError(f"{phase_name}: stale {topic}")
             if predicate():
                 return
-        raise TimeoutError("flight command/completion deadline exceeded")
+        raise TimeoutError(f"{phase_name}: completion deadline exceeded ({wall:g}s)")
 
     def command(*values):
-        event("command ffctl "+" ".join(map(str, values)))
-        result = subprocess.run([str(root/"target/release/ffctl"), *map(str, values)],
+        event("command ffctl " + " ".join(map(str, values)))
+        result = subprocess.run([str(root / "target/release/ffctl"), *map(str, values)],
                                 cwd=root, capture_output=True, text=True, check=True, timeout=5.)
         event(result.stdout.strip())
 
-    def hold(seconds):
-        end = stamp+seconds
-        wait(lambda: stamp >= end, wall=seconds*2+30.)
+    def hold(seconds, *, modes=(3,)):
+        end = stamp + seconds
+        wait(lambda: stamp >= end, wall=seconds * 2 + 30., modes=set(modes))
+
+    def navigate(name, goal):
+        phase(name, goal=goal)
+        issued = time.time()
+        command("planner", "goal", "--", *goal)
+        wait(lambda: "planner" in latest and "reference" in latest
+             and latest["planner"].goal_timestamp >= issued
+             and latest["reference"].goal_timestamp == latest["planner"].goal_timestamp
+             and 0 <= stamp - latest["reference"].timestamp <= .25, modes={3})
+        identity = latest["planner"].goal_timestamp
+        command("fc", "track")
+        wait(lambda: mode == 4, modes={3, 4})
+        settled_since = None
+
+        def finished():
+            nonlocal settled_since
+            planner = latest["planner"]
+            arrived = (planner.goal_timestamp == identity and bool(planner.finished)
+                       and 0 <= stamp - planner.timestamp <= .5
+                       and at_goal(latest["odom"], goal))
+            settled_since = (stamp if settled_since is None else settled_since) if arrived else None
+            return settled_since is not None and stamp - settled_since >= .5
+
+        wait(finished, wall=100., modes={4})
+        command("fc", "hold")
+        wait(lambda: mode == 3, modes={3, 4})
 
     with isolated_run(root):
-        error, cleanup, recording = None, [], None
+        error, cleanup, recording, verification = None, [], None, None
+        completed = False
         try:
             if args.hil:
-                subprocess.run([str(root/"target/release/hil"), "--check"], cwd=root, check=True)
-            recording = start("mimir", [str(root/"target/release/mimir")]).wait_recording()
+                subprocess.run([str(root / "target/release/hil"), "--check"], cwd=root, check=True)
+            recording = start("mimir", [str(root / "target/release/mimir")]).wait_recording()
             time.sleep(2.)
             iox2.set_log_level(iox2.LogLevel.Error)
             node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
+
             def service(topic, payload, capacity, publishers=None):
-                builder = node.service_builder(iox2.ServiceName.new("Firefly/"+topic)).publish_subscribe(payload).user_header(TraceContext).subscriber_max_buffer_size(capacity)
+                builder = node.service_builder(iox2.ServiceName.new("Firefly/" + topic)).publish_subscribe(payload).user_header(TraceContext).subscriber_max_buffer_size(capacity)
                 if publishers is not None:
                     builder = builder.max_publishers(publishers)
                 return builder.open_or_create()
+
             logs = service("Log", LogMessage, 256, 10).publisher_builder().create()
+            event(f"flight recording={recording}")
+            revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=root))
+            mission_event("source", revision=revision, dirty=dirty)
             for name, topic, payload, capacity, publishers in [
                 ("landing", "LandingTarget", LandingTargetMessage, 2, None),
                 ("odom", "Odometry", OdomMessage, 2, None),
+                ("attitude", "VioAttitude", AttitudeMessage, 2, None),
                 ("planner", "PlannerStatus", PlannerStatusMessage, 2, None),
                 ("reference", "Reference", ReferenceMessage, 2, None),
                 ("scalars", "VizScalars", ScalarMessage, 1024, 8),
             ]:
                 subs[name] = service(topic, payload, capacity, publishers).subscriber_builder().buffer_size(capacity).create()
-            event(f"flight transport={'hil' if args.hil else 'sil'} mission={args.mission} seed={args.seed} recording={recording}")
-            start("sim", [sys.executable, "-c", "from firefly_sim.main import main; main(['--no-trace'], publish_plant_state=False)"])
-            start("render", [str(root/"target/release/render")])
+            mission_event("settings", mission=args.mission, precision_land=args.precision_land,
+                          team=team, scene=load_scene_name(), goal=args.goal, altitude=args.altitude, return_offset=args.return_offset,
+                          hover_seconds=args.hover_seconds, seed=args.seed, transport="hil" if args.hil else "sil")
+            binaries = ["render", "mimir", "ffctl"] + (["hil"] if args.hil else ["fc", "firefly-rootslam"])
+            sim_config = "sim-mission" if args.mission == "roundtrip" else "sim"
+            configs = ["game", "scene", sim_config, "render", "mimir"]
             if args.hil:
-                start("hil", [str(root/"target/release/hil")])
+                configs += ["hil", "processes-hil", "fc-hil", "rootslam-hil"]
             else:
-                start("vio", [str(root/"target/release/firefly-rootslam"), "--no-loop-closures", "--no-mapping"])
-                start("fc", [str(root/"target/release/fc")])
-                if args.precision_land:
-                    start("landing", [str(root/"target/release/landing"), "--simulation"])
-                if args.mission == "roundtrip":
-                    start("traj", [str(root/"target/release/traj")])
-                    start("planner", [str(root/"target/release/planner")])
-            wait(lambda: "odom" in latest and latest["odom"].is_initialized and stamp >= 4., wall=40.)
-            command("fc", "arm")
-            wait(lambda: mode == 1)
-            command("fc", "takeoff", 1.)
-            wait(lambda: mode == 3)
-            hold(args.hover_seconds if args.mission == "hover" else 3.)
+                configs += ["fc", "firefly-rootslam"]
             if args.mission == "roundtrip":
-                for goal in ([22., 0., 1.595], [0., 0., 1.]):
-                    issued = time.time()
-                    command("planner", "goal", *goal)
-                    wait(lambda: "planner" in latest and "reference" in latest
-                         and latest["planner"].goal_timestamp >= issued
-                         and latest["reference"].goal_timestamp == latest["planner"].goal_timestamp)
-                    identity = latest["planner"].goal_timestamp
-                    command("fc", "track")
-                    wait(lambda: mode == 4)
-                    def finished():
-                        if mode != 4:
-                            raise RuntimeError(f"native FC left TRACK: mode={mode}")
-                        return latest["planner"].goal_timestamp == identity and bool(latest["planner"].finished)
-                    wait(finished, wall=100.)
-                    pose = latest["odom"]
-                    event(f"trajectory completed goal={goal} odom={[pose.position_x, pose.position_y, pose.position_z]}")
-                    command("fc", "hold")
-                    wait(lambda: mode == 3)
-                    hold(2.)
+                binaries += [] if args.hil else ["planner", "traj"]
+                configs += ["planner", "traj"]
             if args.precision_land:
-                wait(lambda: "landing" in latest and latest["landing"].valid == 1
-                     and 0 <= stamp-latest["landing"].timestamp < .25)
+                binaries += [] if args.hil else ["landing"]
+                configs += ["landing"]
+            paths = [root / "target/release" / name for name in binaries]
+            paths += [root / "configs" / f"{name}.toml" for name in configs]
+            paths += [Path(__file__).resolve(), root / "scripts/verify_flight.py",
+                      root / "apps/firefly-sim/src/firefly_sim/main.py",
+                      root / "packages/firefly-mujoco/src/firefly_mujoco/scene.py",
+                      root / "packages/firefly-mujoco/src/firefly_mujoco/env.py"]
+            if args.precision_land:
+                paths += [root / "models/h-marker-yolo26n-cif-v1/manifest.json"]
+            for path in paths:
+                if path.suffix == ".toml" and not path.exists():
+                    mission_event("provenance", path=str(path.relative_to(root)), defaults=True)
+                else:
+                    mission_event("provenance", path=str(path.relative_to(root)), sha256=digest(path))
+            start("sim", [sys.executable, "-c",
+                f"from firefly_sim.main import main; main(['--no-trace', '--config', 'configs/{sim_config}.toml'], publish_plant_state=False)"])
+            start("render", [str(root / "target/release/render")])
+            if args.hil:
+                start("hil", [str(root / "target/release/hil")])
+            else:
+                start("vio", [str(root / "target/release/firefly-rootslam"), "--no-loop-closures", "--no-mapping"])
+                start("fc", [str(root / "target/release/fc")])
+                if args.precision_land:
+                    start("landing", [str(root / "target/release/landing"), "--simulation"])
+                if args.mission == "roundtrip":
+                    start("traj", [str(root / "target/release/traj")])
+                    start("planner", [str(root / "target/release/planner")])
+            wait(lambda: "odom" in latest and latest["odom"].is_initialized
+                 and "attitude" in latest and mode == 0 and stamp >= 4., wall=40.)
+            armed_session = latest["attitude"].session
+            pose = latest["odom"]
+            home = [pose.position_x, pose.position_y, pose.position_z]
+            quaternion = [pose.quat_x, pose.quat_y, pose.quat_z, pose.quat_w]
+            mission_event("home", position=home, quaternion=quaternion, session=armed_session)
+            phase("takeoff")
+            command("fc", "arm")
+            wait(lambda: mode == 1, modes={0, 1})
+            command("fc", "takeoff", args.altitude)
+            wait(lambda: mode == 3, modes={1, 2, 3})
+            hold(1. if args.mission == "roundtrip" else args.hover_seconds)
+            if args.mission == "roundtrip":
+                waypoint = [home[0] + args.goal[0], home[1] + args.goal[1], home[2] + args.altitude]
+                nearby = [home[0] + args.return_offset[0], home[1] + args.return_offset[1], home[2] + args.altitude]
+                navigate("outbound", waypoint)
+                phase("outbound_hover", goal=waypoint)
+                hold(args.hover_seconds)
+                navigate("return", nearby)
+            if args.precision_land:
+                phase("acquire")
+                acquire_stamp, observations, last_target = stamp, [], None
+
+                def acquired():
+                    nonlocal last_target
+                    message = latest.get("landing")
+                    if message is None or not fresh_target(message, stamp, after=acquire_stamp,
+                            session=armed_session, team=int(team == "blue")):
+                        observations.clear()
+                        return False
+                    if time.monotonic() - received["landing"] > .25:
+                        observations.clear()
+                        return False
+                    if message.timestamp != last_target:
+                        observations.append(message.timestamp)
+                        last_target = message.timestamp
+                    return len(observations) >= 3 and observations[-1] - observations[0] >= .15
+
+                wait(acquired, wall=args.acquire_timeout, modes={3})
+                phase("land", target_time=observations[-1])
                 command("fc", "land", "--precision")
-                wait(lambda: mode == 5)
-                wait(lambda: mode == 0, wall=45.)
-                event("precision landing completed and DISARMED")
-            event("flight commands completed")
+                wait(lambda: mode == 5, modes={3, 5})
+                wait(lambda: mode == 0, wall=45., modes={0, 5})
+                hold(.75, modes=(0,))
+            else:
+                phase("land")
+                command("fc", "land")
+                wait(lambda: mode == 5, modes={3, 5})
+                wait(lambda: mode == 0, wall=45., modes={0, 5})
+                hold(.75, modes=(0,))
+            phase("complete")
+            completed = True
         except (Exception, KeyboardInterrupt) as failure:
             error = str(failure) or type(failure).__name__
-            event("flight interrupted: "+error)
+            mission_event("failure", phase=phase_name, reason=error[:64])
         finally:
             try:
                 if "odom" in latest and mode != 0:
-                    command("fc", "land")
-                    wait(lambda: mode == 0, wall=40., landing=True)
-                    event("native FC landed and DISARMED")
+                    if error and args.precision_land:
+                        command("fc", "hold")
+                        event("abort: HOLD requested before simulation shutdown")
+                    else:
+                        command("fc", "land")
+                        wait(lambda: mode == 0, wall=40., landing=True)
+                        event("native FC landed and DISARMED")
             except Exception as failure:
                 cleanup.append(f"landing: {failure}")
             for name, child in reversed(processes.items()):
@@ -188,8 +333,17 @@ def main(argv=None, *, hil=None, mission=None):
                         child.process.kill()
                         child.process.wait(timeout=5.)
                         child.reader.join(timeout=5.)
-        print(json.dumps({"commands_completed": error is None, "error": error,
-                          "cleanup_errors": cleanup, "recording": str(recording)}))
+        if recording is not None and args.precision_land:
+            from verify_flight import verify_recording
+            try:
+                verification = verify_recording(recording)
+                if not verification["passed"]:
+                    error = error or "closed-loop verification failed"
+            except Exception as failure:
+                verification = {"passed": False, "failures": [f"recording verification: {failure}"], "metrics": {}}
+                error = error or "closed-loop verification failed"
+        print(json.dumps({"commands_completed": completed, "error": error,
+                          "cleanup_errors": cleanup, "recording": str(recording), "verification": verification}))
         return 1 if error or cleanup else 0
 
 

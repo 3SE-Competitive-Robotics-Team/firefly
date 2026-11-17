@@ -395,18 +395,18 @@ scripts/hil_hover.py 发送起飞、20 秒 Hold 和降落命令，记录 FC 原�
 scripts/hil_hover_monitor.py 可独立查看状态，不发送控制命令。
 命令流程完成、录制完整性、飞行精度和实时性分别报告。
 
-22m 往返使用板端 RootSLAM、planner、traj 与 FC，主机下发双目、IMU 和深度：
+往返任务使用板端 RootSLAM、planner、traj 与 FC，视觉降落同时使用 landing；主机下发双目、IMU、深度与下视：
 
 ```bash
 cargo build --locked --release -p render -p mimir -p hil -p ffctl
 cargo xtask deploy-hil
-uv run python scripts/hil_roundtrip.py
+uv run python scripts/hil_roundtrip.py --precision-land
 ```
 
 悬停和往返使用同一份 `processes-hil.toml` 与 `hil.toml`，全部进程自启动并持续下发深度。
-部署仅选择设备；任务脚本决定发送哪些飞行指令。固定的 HIL 脚本仅提供任务相关参数，
-例如悬停入口的 `--hover-seconds` 和所有入口的 `--seed`。
-任务发送 odom 系 (22, 0, 1.595) 和 (0, 0, 1) 两个目标，以原生轨迹完成状态切换航段。
+部署仅选择设备；任务脚本决定发送哪些飞行指令。HIL 与 SIL 共用 `flight.py` 的
+`--goal DX DY`、`--altitude`、`--hover-seconds`、`--return-offset DX DY` 和 `--seed`。
+目标相对解锁前保存的 odom 起飞点生成，以当前目标身份、原生轨迹完成、实际里程计到位和低速保持共同切换航段。
 飞控自身保护保持启用；两端使用同次构建并部署。
 `hil --check` 核对 USB 接口和端点；实际传输及协议一致性由运行验证。
 帧版本不匹配会结束会话，错误包含收到版本和当前版本；重新部署两端后再运行。
@@ -568,18 +568,42 @@ FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/sys
 
 ### 飞行指令脚本
 
-scripts/flight.py 负责启动 release 进程、发送起降和航点指令以及回收进程。
-阶段切换使用 FC 模式与 PlannerStatus 正常完成状态；运行事件通过 Firefly/Log 交给 Mimir。
-脚本退出码表示命令流程与清理结果。精度、碰撞和实时性需从录制证据独立核对。
+`scripts/flight.py` 启动 release 进程、编排起降/航点并回收进程。
+完整任务使用 `--mission roundtrip --precision-land`：从所选机库起飞，飞往航点并悬停，
+返回起飞点附近，等待新的下视识别，最后精确降落、上锁并记录静止保持。
 
 ~~~bash
-uv run python scripts/flight.py --mission hover
-uv run python scripts/flight.py --mission roundtrip
-uv run python scripts/hil_hover.py
-uv run python scripts/hil_roundtrip.py
+uv run python scripts/flight.py --mission roundtrip --precision-land
+uv run python scripts/flight.py --mission roundtrip --precision-land --goal 2 0 --hover-seconds 3
+uv run python scripts/flight.py --mission hover --precision-land
+uv run python scripts/hil_roundtrip.py --precision-land
+FIREFLY_RUN_PRECISION_MISSION=1 uv run pytest tests/system/test_flight_mission.py -q
+uv run python scripts/verify_flight.py logs/<本轮目录>/log.rrd
 ~~~
 
-原生 FC/planner 保护始终由运行进程执行。运行产物遵循 [Mimir 录制规则](mimir.md)。
+完整往返使用 `configs/sim-mission.toml`，以 30Hz 真值驱动双目、深度与下视，
+物理和 IMU 保持 1000Hz；HIL 的同周期送图预算见前文。悬停沿用 `configs/sim.toml`。
+`--goal DX DY` 相对解锁前保存的 odom 起飞点；RMUC 示例默认朝场地中部，red 为 (2,0)m、blue 为 (-2,0)m；
+`--altitude` 为相对起飞高度，往返缺省 2m、悬停缺省 1m。机库附近存在立柱，
+往返高度需要同时满足已知障碍净距和配置的规划高度边界；planner 保留原有碰撞门控。
+`--hover-seconds` 为航点停留时长，往返缺省 3s、悬停缺省 20s。
+`--return-offset DX DY` 缺省 (0.12,-0.08)m，限定在起飞点 0.3m 内，作为视觉接近点。
+航段同时检查当前 PlannerStatus/Reference 目标身份、原生完成状态、里程计距离和低速保持。
+返航后的 acquire 阶段要求至少三幅新的有效视觉观测，采集时间跨度至少 0.15s；
+旧观测、异队伍/会话和过期输入不能启动精降。`--acquire-timeout` 提供有界识别等待。
+任务异常时请求 HOLD 并结束本轮仿真，原始失败保持非零结果。
+返航引导依赖连续 VIO；累计漂移使平台超出可识别邻域时，本入口以识别超时结束，平台重捕获范围由相机视场与 landing 门控决定。
+省略 `--precision-land` 使用原有起飞点高度降落；真机接入仍遵循硬件与 NPU 验收边界。
+
+Mimir 先启动、最后关闭；任务设置、阶段、起飞坐标锚点和所用输入的指纹进入 `logs/flight`。
+精降任务关闭 RRD 后自动运行 `scripts/verify_flight.py`，也可以用上面的独立命令复核。
+评分器要求完整 footer、时序覆盖、原生模式与精降阶段顺序；真值仅在评分阶段使用，
+以起飞时刻的 GT/odom 姿态固定坐标对齐，不使用全程拟合抵消漂移。
+航点停留检查实际位置、速度与持续时间；返航分别检查水平/高度误差和机库邻域；
+落地检查实际落点、原停机坪高度、上锁时机和上锁后的静止保持。误差门槛与失败原因由
+评分源码和测试维护；碰撞安全仍由 planner/FC 执行，实时性能另按原始观测核对。
+`commands_completed` 仅描述任务阶段执行完成；验证失败或进程回收失败均使入口非零退出。
+运行产物遵循 [Mimir 录制规则](mimir.md)。
 
 ### 可选资产检查
 

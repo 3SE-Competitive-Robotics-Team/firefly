@@ -71,6 +71,14 @@ FC 使用限速度/加速度/jerk 的水平参考，依次经过 Align、Descend
 普通 `fc land` 保留原有起飞点高度语义。
 估计失效继续沿用已有姿态降级规则。参数契约见 `firefly-flight::precision`。
 
+`flight.py --mission roundtrip --precision-land` 在 SIL/HIL 中编排起飞、航点停留、返航和视觉降落。
+解锁前固定同一 VIO 会话的 odom 起飞点；去程航点和返航接近点都由该起点生成。
+航段要求 planner/traj 目标身份一致、FC 保持 TRACK，且里程计到位低速保持；悬停期间保持 HOLD。
+返航后要求重新收到多幅同会话、同队伍、新鲜且质量合格的下视观测，再交给 FC 精确降落。
+观测缺失、输入超时、模式异常或 VIO 会话改变均使任务失败；精降任务失败后请求 HOLD，再结束仿真进程。
+真值仅由独立 `verify_flight.py` 在 RRD 关闭后读取，核对航点停留、返航邻域和落地上锁的物理证据；
+评分失败或进程收尾失败使入口非零退出。任务输入、阶段与二进制/配置/脚本指纹通过既有 `logs/flight` 保存。
+
 ### Basalt 与 RootSLAM 独立应用
 
 `apps/rootslam` 的统一入口通过 `input::Source` 选择 IPC 或
@@ -292,7 +300,7 @@ ALIKED 的离线 / 在线模式在启动时确定；quad 使用 Bevy startup / u
 | 21 | [渲染 capture](../apps/render/src/capture.rs)、[帧组装](../apps/render/src/link.rs) | 可选 `requested_seq` 表示出图窗口；GPU 在途计数与帧退休序号 | 回调归还 GPU 槽位；三传感器成组发布；退休序号拒绝迟到回复并回收缓冲 |
 | 22 | [仿真](../apps/firefly-sim/src/firefly_sim/main.py)、[电机](../apps/motor/src/actuator.rs) | 仿真接收时钟与暂停标志；电机 `ControlState` 共同拥有推力与收到时刻 | 超时暂停物理推进或归零电机；退出执行清理 |
 | 23 | [可选定位](../apps/localization/src/main.rs)、[匹配历史](../apps/lightglue/src/sensors.rs)、[融合门控](../crates/firefly-localization/src/filter.rs) | `AlignmentState::{Waiting, Ready, Reset}`；匹配历史与融合门控独立 | 对齐与历史就绪后处理观测；会话重置锁存；观测有等待、拒绝、过期与接受结果 |
-| 24 | [飞行指令](../scripts/flight.py)、[子进程](../packages/firefly-workspace/src/firefly_workspace/process.py) | 指令发送 → 原生完成状态 → 降落 → 进程回收 | 事件进入 Mimir；命令结果与飞行质量分别核对 |
+| 24 | [飞行指令](../scripts/flight.py)、[独立评分](../scripts/verify_flight.py)、[子进程](../packages/firefly-workspace/src/firefly_workspace/process.py) | 起飞 → 去程/停留 → 返航/重捕获 → 精降/上锁 → 回收/评分 | 目标身份、实际到位和新鲜视觉门控；关闭 RRD 后独立核对真值，失败非零退出 |
 | 25 | [离线采集](../scripts/collect_vision_map.py)、[库图复用](../packages/firefly-mujoco/src/firefly_mujoco/vision_assets.py)、[建库](../scripts/build_vision_map.py) | 逐帧质量门控；`finish_capture` 回收 renderer 后原子提交清单，清理失败写入原因 | 配对与质量门控后接受帧；完整清单和指纹一致才复用；失败结果保留不完整状态 |
 | 26 | [CAD 资产流水线](../packages/firefly-cad/src/firefly_cad/pipeline.py) | 内容缓存与 manifest 的 `building / passed / failed`；失败保留源指纹与原因 | 生成、几何验收、资产指纹完成后发布通过状态 |
 | 27 | [数据集导出](../apps/rootslam/src/dataset_app.rs)、[产物预检](../apps/rootslam/src/dataset_app/outputs.rs) | 输入与输出预检、生产、EOF、导出；导出失败通过 `cancel_mapping` 回收并保留清理错误 | 预检本轮新产物路径；生产器、估计器、映射分别完成后导出对应结果 |
