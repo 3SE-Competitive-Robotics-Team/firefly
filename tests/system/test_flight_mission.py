@@ -15,8 +15,13 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize("down_rate", [15, 30])
-def test_roundtrip_reacquires_pad_and_physically_lands(down_rate):
+@pytest.mark.parametrize("down_rate, route, points", [
+    (15, [], 1), (30, [], 1),
+    (15, ["--shape", "square"], 5),
+    (15, ["--shape", "triangle"], 4),
+    (15, ["--waypoint", "2", "0", "--waypoint", "3", "1", "--waypoint", "2", "0"], 3),
+])
+def test_roundtrip_reacquires_pad_and_physically_lands(down_rate, route, points):
     reports = []
 
     def observe(line):
@@ -24,7 +29,7 @@ def test_roundtrip_reacquires_pad_and_physically_lands(down_rate):
             reports.append(json.loads(line))
 
     process = ManagedProcess(
-        [str(ROOT / ".venv/bin/python"), "scripts/flight.py", "--mission", "roundtrip", "--precision-land", "--down-rate", str(down_rate)],
+        [str(ROOT / ".venv/bin/python"), "scripts/flight.py", "--mission", "roundtrip", "--precision-land", "--down-rate", str(down_rate), *route],
         cwd=ROOT, env={**os.environ, "RUST_LOG": "info"}, on_line=observe,
     )
     try:
@@ -42,6 +47,7 @@ def test_roundtrip_reacquires_pad_and_physically_lands(down_rate):
     assert report["verification"]["metrics"]["down_frames"] > 30
     assert report["verification"]["metrics"]["down_rate_limit_hz"] == down_rate
     assert report["verification"]["metrics"]["idle_down_frames"] == 0
+    assert len(report["verification"]["metrics"]["waypoints"]) == points
     assert Path(report["recording"]).is_file()
     from rerun.chunk import RrdReader
     reader = RrdReader(report["recording"])

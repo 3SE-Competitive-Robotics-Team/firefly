@@ -82,7 +82,16 @@ def evaluate(data):
         return result()
     settings = settings_rows[0]
     roundtrip = settings["mission"] == "roundtrip"
-    expected = ["takeoff", "outbound", "outbound_hover", "return", "acquire", "land", "complete"] if roundtrip else ["takeoff", "acquire", "land", "complete"]
+    count = settings.get("waypoint_count")
+    if count is not None:
+        check(type(count) is int and (1 <= count <= 16 if roundtrip else count == 0),
+              "invalid waypoint count")
+        if failures:
+            return result()
+    expected = (["takeoff"] + ["waypoint", "waypoint_hover"] * count + ["return", "acquire", "land", "complete"]
+                if roundtrip and count is not None else
+                ["takeoff", "outbound", "outbound_hover", "return", "acquire", "land", "complete"]
+                if roundtrip else ["takeoff", "acquire", "land", "complete"])
     phases = [(stamp, row) for stamp, row in data.events if row["kind"] == "phase"]
     check([row["name"] for _, row in phases] == expected, "mission phase sequence is incomplete or out of order")
     check(settings["precision_land"], "precision landing must be selected")
@@ -91,6 +100,31 @@ def evaluate(data):
     phase = {row["name"]: (stamp, row) for stamp, row in phases}
     start, home = homes[0]
     end = phase["complete"][0]
+    legs = []
+    if roundtrip:
+        if count is None:
+            legs = [(phase["outbound"], phase["outbound_hover"], phase["return"])]
+        else:
+            planned = [(t, row) for t, row in data.events if row["kind"] == "waypoint"]
+            check([row.get("index") for _, row in planned] == list(range(count)),
+                  "ordered waypoint declarations are missing or duplicated")
+            if len(planned) != count:
+                return result()
+            for index in range(count):
+                travel, hover, following = phases[1 + 2*index:4 + 2*index]
+                legs.append((travel, hover, following))
+                offset = planned[index][1].get("offset", [])
+                check(len(offset) == 2 and np.isfinite(offset).all(), "invalid declared waypoint offset")
+                if len(offset) != 2:
+                    return result()
+                goal = np.array(home["position"]) + [offset[0], offset[1], settings["altitude"]]
+                check(planned[index][0] <= start and travel[1].get("index") == hover[1].get("index") == index
+                      and np.array_equal(travel[1].get("goal"), goal)
+                      and np.array_equal(hover[1].get("goal"), goal),
+                      f"waypoint {index}: phase identity/goal differs from the declared route")
+            return_goal = np.array(home["position"]) + [*settings["return_offset"], settings["altitude"]]
+            check(np.array_equal(phase["return"][1].get("goal"), return_goal),
+                  "return goal differs from the takeoff-frame approach point")
     images = [row for row in data.down_frames if start <= row[0] <= end]
     check(len(images) >= 3, "down-camera images were not recorded; enable mimir.images")
     check(all(row[1:] == (352, 288, 352 * 288) for row in images), "recorded down-camera images must be lossless CIF grayscale")
@@ -181,7 +215,8 @@ def evaluate(data):
     def phase_modes(begin, finish):
         return [value for t, value in modes if phase[begin][0] <= t <= phase[finish][0]]
 
-    check(2 in phase_modes("takeoff", "outbound" if roundtrip else "acquire"), "TAKEOFF state not observed")
+    flight_start = legs[0][0][0] if roundtrip else phase["acquire"][0]
+    check(any(mode == 2 for t, mode in modes if phase["takeoff"][0] <= t <= flight_start), "TAKEOFF state not observed")
     from firefly_mujoco.scene import resolve
     pad = np.array(resolve(settings.get("scene")).hangar(settings["team"]))
     check(np.linalg.norm(home_world[:2] - pad[:2]) <= .03 and .015 <= home_world[2] - pad[2] <= .03,
@@ -192,18 +227,28 @@ def evaluate(data):
     metrics["max_height_m"] = float(height.max())
     velocities = np.gradient(positions, times, axis=0)
     if roundtrip:
-        check(4 in phase_modes("outbound", "outbound_hover") and 4 in phase_modes("return", "acquire"),
-              "both legs require native TRACK state")
-        hover_start, hover_end = phase["outbound_hover"][0], phase["return"][0]
-        check(hover_end - hover_start >= settings["hover_seconds"] - .05, "waypoint hover duration too short")
-        hover = (times >= hover_start) & (times <= hover_end)
-        if hover.any():
-            error = np.linalg.norm(positions[hover] - world_goal(phase["outbound"][1]["goal"]), axis=1)
-            metrics["waypoint_max_error_m"] = float(error.max())
-            check(error.max() <= .3, "physical waypoint hover error exceeds 0.3m")
-            check(np.linalg.norm(velocities[hover], axis=1).max() <= .25, "physical waypoint hover did not settle")
-        else:
-            check(False, "waypoint hover ground truth is missing")
+        check(4 in phase_modes("return", "acquire"), "return leg requires native TRACK state")
+        metrics["waypoints"] = []
+        for index, (travel, hold, following) in enumerate(legs):
+            label = f"waypoint {index}"
+            check(any(mode == 4 for t, mode in modes if travel[0] <= t < hold[0]),
+                  f"{label}: native TRACK state missing")
+            check(hold[0] - travel[0] > 0 and following[0] - hold[0] >= settings["hover_seconds"] - .05,
+                  f"{label}: hover duration too short")
+            holding_modes = [mode for t, mode in modes if hold[0] <= t < following[0]]
+            check(bool(holding_modes) and all(mode == 3 for mode in holding_modes),
+                  f"{label}: native HOLD state missing during hover")
+            hover = (times >= hold[0]) & (times <= following[0])
+            if hover.any():
+                error = np.linalg.norm(positions[hover] - world_goal(travel[1]["goal"]), axis=1)
+                speed = float(np.linalg.norm(velocities[hover], axis=1).max())
+                metrics["waypoints"].append({"index": index, "max_error_m": float(error.max()),
+                                             "max_speed_mps": speed, "hover_seconds": following[0] - hold[0]})
+                check(error.max() <= .3, f"{label}: physical waypoint hover error exceeds 0.3m")
+                check(speed <= .25, f"{label}: physical waypoint hover did not settle")
+            else:
+                check(False, f"{label}: hover ground truth is missing")
+        metrics["waypoint_max_error_m"] = max((row["max_error_m"] for row in metrics["waypoints"]), default=0.)
         acquired_position = np.array([np.interp(phase["acquire"][0], times, positions[:, i]) for i in range(3)])
         return_error = acquired_position - world_goal(phase["return"][1]["goal"])
         metrics["return_xy_error_m"] = float(np.linalg.norm(return_error[:2]))
@@ -211,7 +256,7 @@ def evaluate(data):
         check(metrics["return_xy_error_m"] <= .3, "physical return horizontal error exceeds 0.3m")
         check(metrics["return_height_error_m"] <= .3, "physical return height error exceeds 0.3m")
         check(np.linalg.norm(acquired_position[:2] - pad[:2]) <= .45, "return did not reach the pad neighbourhood")
-        cruise = (times >= phase["outbound"][0]) & (times <= phase["acquire"][0])
+        cruise = (times >= flight_start) & (times <= phase["acquire"][0])
         check(height[cruise].min() >= settings["altitude"] - .4, "premature descent during waypoint flight")
     acquisition = [(t, row) for t, row in rows_between("/landing/target", ("acquire", "land"))
                    if t > phase["acquire"][0] and row[3] == 1]

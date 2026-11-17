@@ -314,7 +314,7 @@ ALIKED 的离线 / 在线模式在启动时确定；quad 使用 Bevy startup / u
 | 21 | [渲染 capture](../apps/render/src/capture.rs)、[帧组装](../apps/render/src/link.rs) | 可选 `requested_seq` 表示出图窗口；GPU 在途计数与帧退休序号 | 回调归还 GPU 槽位；双目/深度成组，下视按租约选入；退休序号拒绝迟到回复并回收缓冲 |
 | 22 | [仿真](../apps/firefly-sim/src/firefly_sim/main.py)、[电机](../apps/motor/src/actuator.rs) | 仿真接收时钟与暂停标志；电机 `ControlState` 共同拥有推力与收到时刻 | 超时暂停物理推进或归零电机；退出执行清理 |
 | 23 | [可选定位](../apps/localization/src/main.rs)、[匹配历史](../apps/lightglue/src/sensors.rs)、[融合门控](../crates/firefly-localization/src/filter.rs) | `AlignmentState::{Waiting, Ready, Reset}`；匹配历史与融合门控独立 | 对齐与历史就绪后处理观测；会话重置锁存；观测有等待、拒绝、过期与接受结果 |
-| 24 | [飞行指令](../scripts/flight.py)、[独立评分](../scripts/verify_flight.py)、[子进程](../packages/firefly-workspace/src/firefly_workspace/process.py) | 起飞 → 去程/停留 → 返航/重捕获 → 精降/上锁 → 回收/评分 | 目标身份、实际到位和新鲜视觉门控；关闭 RRD 后独立核对真值，失败非零退出 |
+| 24 | [飞行指令](../scripts/flight.py)、[独立评分](../scripts/verify_flight.py)、[子进程](../packages/firefly-workspace/src/firefly_workspace/process.py) | 起飞 → 按序逐点规划/停留 → 返航/重捕获 → 精降/上锁 → 回收/评分 | 预设正方形/三角形与自定义点列共用 SIL/HIL 编排；每点目标身份、实际到位和新鲜视觉门控；关闭 RRD 后逐点独立核对真值，失败非零退出 |
 | 25 | [离线采集](../scripts/collect_vision_map.py)、[库图复用](../packages/firefly-mujoco/src/firefly_mujoco/vision_assets.py)、[建库](../scripts/build_vision_map.py) | 逐帧质量门控；`finish_capture` 回收 renderer 后原子提交清单，清理失败写入原因 | 配对与质量门控后接受帧；完整清单和指纹一致才复用；失败结果保留不完整状态 |
 | 26 | [CAD 资产流水线](../packages/firefly-cad/src/firefly_cad/pipeline.py) | 内容缓存与 manifest 的 `building / passed / failed`；失败保留源指纹与原因 | 生成、几何验收、资产指纹完成后发布通过状态 |
 | 27 | [数据集导出](../apps/rootslam/src/dataset_app.rs)、[产物预检](../apps/rootslam/src/dataset_app/outputs.rs) | 输入与输出预检、生产、EOF、导出；导出失败通过 `cancel_mapping` 回收并保留清理错误 | 预检本轮新产物路径；生产器、估计器、映射分别完成后导出对应结果 |

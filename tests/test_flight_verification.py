@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from flight import at_goal, default_goal, fresh_target, parse_args
+from flight import at_goal, default_goal, fresh_target, parse_args, route_points
 from verify_flight import Evidence, evaluate
 from firefly_mujoco import LandingTargetMessage, OdomMessage
 from firefly_mujoco.scene import resolve
@@ -178,3 +178,127 @@ def test_mission_sensor_profile_preserves_imu_and_sets_camera_budget():
     physics, imu, pose, _, _ = decode_config(tomllib.loads(path.read_text()))
     assert physics == imu == .001
     assert pose == pytest.approx(1 / 30)
+
+
+@pytest.mark.parametrize("shape, count", [("square", 4), ("triangle", 3)])
+def test_presets_close_with_equal_sides_and_mirror_for_blue(shape, count):
+    args = parse_args(["--shape", shape, "--side", "3"])
+    red = np.array(route_points(args, "red"))
+    assert len(red) == count + 1 and np.array_equal(red[0], red[-1])
+    assert np.linalg.norm(np.diff(red, axis=0), axis=1) == pytest.approx([3.] * count)
+    assert np.array(route_points(args, "blue")) == pytest.approx(-red)
+    assert red[0].tolist() == [3., 0.]
+    if shape == "square":
+        edges = np.diff(red, axis=0)
+        assert all(abs(np.dot(a, b)) < 1e-12 for a, b in zip(edges, np.roll(edges, 1, axis=0)))
+    assert parse_args(["--shape", shape]).side == 2.
+
+
+def test_custom_waypoints_keep_order_and_initial_odom_axes_for_hil():
+    args = parse_args(["--waypoint", "2", "0", "--waypoint", "2", "2", "--waypoint", "0", "0"], hil=True, mission="roundtrip")
+    assert args.hil and route_points(args, "blue") == [[2., 0.], [2., 2.], [0., 0.]]
+    assert route_points(parse_args([]), "red") == [[4., 0.]]
+    assert route_points(parse_args(["--mission", "hover"]), "red") == []
+
+
+@pytest.mark.parametrize("argv", [
+    ["--shape", "square", "--goal", "2", "0"],
+    ["--side", "3"], ["--shape", "triangle", "--side", "nan"],
+    ["--shape", "square", "--side", "8"], ["--shape", "square", "--side", "0"],
+    ["--mission", "hover", "--shape", "square"], ["--mission", "hover", "--waypoint", "1", "0"],
+    ["--waypoint", "0", "0"], ["--waypoint", "nan", "0"], ["--waypoint", "8", "8"],
+    ["--waypoint", "2", "0", "--waypoint", "2", "0"],
+    ["--waypoint", "2", "0", "--waypoint", "-9", "0"],
+    ["--waypoint", "2", "0"] * 17,
+])
+def test_invalid_routes_fail_before_starting_processes(argv):
+    with pytest.raises(SystemExit):
+        parse_args(argv)
+
+
+def polygon_evidence(shape="square", team="red"):
+    points = route_points(parse_args(["--shape", shape]), team)
+    data = Evidence(recording_complete=True)
+    data.events = [
+        (0., {"kind": "settings", "mission": "roundtrip", "precision_land": True,
+              "team": team, "altitude": 1., "hover_seconds": 3., "waypoint_count": len(points),
+              "return_offset": [.12, -.08]}),
+        (1., {"kind": "home", "position": [0., 0., 0.], "quaternion": [0., 0., 0., 1.], "session": 7}),
+        (1.1, {"kind": "phase", "name": "takeoff"}),
+    ]
+    knots = [(0., [0., 0., 0.]), (1., [0., 0., 0.]), (3., [0., 0., 1.])]
+    tracks = []
+    for index, point in enumerate(points):
+        start = 3. + 6.*index
+        goal = [*point, 1.]
+        data.events += [
+            (.5, {"kind": "waypoint", "index": index, "offset": point}),
+            (start, {"kind": "phase", "name": "waypoint", "index": index, "goal": goal}),
+            (start + 3., {"kind": "phase", "name": "waypoint_hover", "index": index, "goal": goal}),
+        ]
+        knots += [(start + 3., goal), (start + 6., goal)]
+        tracks.append((start, start + 3.))
+    returning = 3. + 6.*len(points)
+    acquire, land, contact, end = returning + 3., returning + 4., returning + 9., returning + 10.
+    data.events += [(returning, {"kind": "phase", "name": "return", "goal": [.12, -.08, 1.]}),
+                    (acquire, {"kind": "phase", "name": "acquire"}),
+                    (land, {"kind": "phase", "name": "land"}),
+                    (end, {"kind": "phase", "name": "complete"})]
+    data.events.sort(key=lambda row: row[0])
+    knots += [(acquire, [.12, -.08, 1.]), (land, [.12, -.08, 1.]),
+              (contact, [0., 0., 0.]), (end + 1., [0., 0., 0.])]
+    pad = np.array(resolve().hangar(team)) + [0., 0., .021]
+    knot_times = [t for t, _ in knots]
+    for t in np.arange(.96, end + .05, .02):
+        i = min(np.searchsorted(knot_times, t, side="right") - 1, len(knots) - 2)
+        f = (t - knots[i][0]) / (knots[i+1][0] - knots[i][0])
+        f = f*f*(3 - 2*f)
+        position = pad + np.array(knots[i][1])*(1-f) + np.array(knots[i+1][1])*f
+        data.poses.append((float(t), position.tolist(), [0., 0., 0., 1.]))
+        data.down_frames.append((float(t), 352, 288, 352 * 288))
+    tracks.append((returning, acquire))
+    for t in np.arange(1., end + .01, .1):
+        mode = (0 if t >= contact else 5 if t >= land else 4 if any(a <= t < b for a, b in tracks)
+                else 3 if t >= 2.9 else 2 if t >= 1.5 else 1)
+        data.scalars.setdefault("/fc/debug/state", []).append((float(t), [mode]))
+        precision = 0 if t >= contact or t < land else 3 if t >= land+3. else 2 if t >= land+.5 else 1
+        data.scalars.setdefault("/fc/debug/precision", []).append((float(t), [precision]))
+    data.scalars["/landing/target"] = [(t, [0., 0., 0., 1.]) for t in (land-.4, land-.2, land-.05)]
+    data.scalars["/landing/quality"] = [(t, [7., float(team == "blue"), .2, .9]) for t in (land-.4, land-.2, land-.05)]
+    return data
+
+
+@pytest.mark.parametrize("shape, count", [("square", 5), ("triangle", 4)])
+@pytest.mark.parametrize("team", ["red", "blue"])
+def test_each_polygon_waypoint_is_physically_scored(shape, count, team):
+    report = evaluate(polygon_evidence(shape, team))
+    assert report["passed"], report
+    assert [row["index"] for row in report["metrics"]["waypoints"]] == list(range(count))
+
+
+@pytest.mark.parametrize("fault", ["skipped", "identity", "wrong_goal", "wrong_return", "missing_intent", "short_hold", "no_track", "no_hold", "missed_middle", "count"])
+def test_polygon_cannot_skip_or_miss_an_intermediate_waypoint(fault):
+    data = polygon_evidence()
+    if fault == "skipped":
+        data.events = [(t, row) for t, row in data.events if not (row.get("name") == "waypoint" and row.get("index") == 1)]
+    elif fault == "identity":
+        next(row for _, row in data.events if row.get("name") == "waypoint_hover")["index"] = 3
+    elif fault == "wrong_goal":
+        next(row for _, row in data.events if row.get("name") == "waypoint")["goal"] = [4., 0., 1.]
+    elif fault == "wrong_return":
+        next(row for _, row in data.events if row.get("name") == "return")["goal"] = [2., 0., 1.]
+    elif fault == "missing_intent":
+        data.events = [(t, row) for t, row in data.events if not (row["kind"] == "waypoint" and row["index"] == 1)]
+    elif fault == "short_hold":
+        data.events = [(t + 1. if row.get("name") == "waypoint_hover" and row.get("index") == 1 else t, row)
+                       for t, row in data.events]
+    elif fault in {"no_track", "no_hold"}:
+        begin, end, replacement = (9., 12., 3) if fault == "no_track" else (12., 15., 4)
+        data.scalars["/fc/debug/state"] = [(t, [replacement] if begin <= t < end else row)
+                                          for t, row in data.scalars["/fc/debug/state"]]
+    elif fault == "missed_middle":
+        data.poses = [(t, [p[0]+1., p[1], p[2]] if 12. <= t <= 15. else p, q) for t, p, q in data.poses]
+    elif fault == "count":
+        data.events[0][1]["waypoint_count"] = 17
+    report = evaluate(data)
+    assert not report["passed"], report

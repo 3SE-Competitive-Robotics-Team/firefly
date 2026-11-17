@@ -29,8 +29,13 @@ def parse_args(argv=None, *, hil=None, mission=None):
     else:
         parser.set_defaults(mission=mission)
     parser.add_argument("--hover-seconds", type=float, help="hover duration (hover: 20s; roundtrip waypoint: 3s)")
-    parser.add_argument("--goal", type=float, nargs=2, metavar=("DX", "DY"),
-                        help="waypoint offset in odom metres (red: 4,0; blue: -4,0)")
+    route = parser.add_mutually_exclusive_group()
+    route.add_argument("--goal", type=float, nargs=2, metavar=("DX", "DY"),
+                       help="single waypoint offset in odom metres (red: 4,0; blue: -4,0)")
+    route.add_argument("--shape", choices=("square", "triangle"), help="closed polygon one side-length ahead of takeoff")
+    route.add_argument("--waypoint", type=float, nargs=2, action="append", metavar=("DX", "DY"),
+                       help="repeat for ordered offsets from takeoff in odom metres")
+    parser.add_argument("--side", type=float, help="square/triangle side length in metres (default: 2)")
     parser.add_argument("--altitude", type=float, help="height above takeoff (hover: 1m; roundtrip: 2m)")
     parser.add_argument("--return-offset", type=float, nargs=2, default=[.12, -.08], metavar=("DX", "DY"),
                         help="return near takeoff before visual alignment, in odom metres")
@@ -43,7 +48,15 @@ def parse_args(argv=None, *, hil=None, mission=None):
         args.hover_seconds = 20. if args.mission == "hover" else 3.
     if args.altitude is None:
         args.altitude = 1. if args.mission == "hover" else 2.
-    values = [*(args.goal or []), *args.return_offset, args.altitude, args.hover_seconds, args.acquire_timeout]
+    if args.side is not None and args.shape is None:
+        parser.error("--side requires --shape")
+    if args.mission == "hover" and (args.goal is not None or args.shape or args.waypoint):
+        parser.error("waypoints and shapes require --mission roundtrip")
+    if args.shape and args.side is None:
+        args.side = 2.
+    values = [*(args.goal or []), *(value for point in args.waypoint or [] for value in point),
+              *([] if args.side is None else [args.side]),
+              *args.return_offset, args.altitude, args.hover_seconds, args.acquire_timeout]
     if not all(math.isfinite(value) for value in values):
         parser.error("mission parameters must be finite")
     if not 0 < args.hover_seconds <= 600 or not .5 <= args.altitude <= 2.:
@@ -52,12 +65,37 @@ def parse_args(argv=None, *, hil=None, mission=None):
         parser.error("acquisition timeout must be in [1,60] seconds and return offset within 0.3m")
     if args.mission == "roundtrip" and args.goal is not None and not 1. <= math.hypot(*args.goal) <= 10.:
         parser.error("roundtrip waypoint distance must be in [1,10] metres")
+    if args.shape and not 1. <= args.side <= 4.:
+        parser.error("shape side length must be in [1,4] metres")
+    if args.waypoint:
+        if len(args.waypoint) > 16 or not 1. <= math.hypot(*args.waypoint[0]) <= 10.:
+            parser.error("provide 1..16 waypoints; the first must be 1..10 metres from takeoff")
+        previous = [0., 0.]
+        for point in args.waypoint:
+            if math.hypot(*point) > 10. or not .5 <= math.dist(previous, point) <= 10.:
+                parser.error("waypoints must stay within 10m of takeoff, with consecutive legs in [0.5,10]m")
+            previous = point
     return args
 
 
 def default_goal(team):
     """RMUC demonstration routes head towards the central field from either hangar."""
     return [4., 0.] if team == "red" else [-4., 0.]
+
+
+def route_points(args, team):
+    """Ordered offsets in initial odom axes; polygons close at their field-side entry."""
+    if args.mission == "hover":
+        return []
+    if args.waypoint:
+        return args.waypoint
+    if args.shape:
+        side = args.side
+        points = ([[side, 0.], [2*side, 0.], [2*side, side], [side, side], [side, 0.]] if args.shape == "square"
+                  else [[side, 0.], [2*side, 0.], [1.5*side, math.sqrt(3.) * side / 2.], [side, 0.]])
+        direction = 1. if team == "red" else -1.
+        return [[direction * x, direction * y] for x, y in points]
+    return [args.goal if args.goal is not None else default_goal(team)]
 
 
 def at_goal(message, goal):
@@ -78,8 +116,7 @@ def main(argv=None, *, hil=None, mission=None):
     args = parse_args(argv, hil=hil, mission=mission)
     root = workspace_root(Path(__file__))
     team = load_team()
-    if args.goal is None:
-        args.goal = default_goal(team)
+    waypoints = route_points(args, team)
     processes, latest, received, subs = {}, {}, {}, {}
     mode, stamp, sequence, logs = None, 0., 0, None
     armed_session = None
@@ -169,8 +206,8 @@ def main(argv=None, *, hil=None, mission=None):
         end = stamp + seconds
         wait(lambda: stamp >= end, wall=seconds * 2 + 30., modes=set(modes))
 
-    def navigate(name, goal):
-        phase(name, goal=goal)
+    def navigate(name, goal, **fields):
+        phase(name, goal=goal, **fields)
         issued = time.time()
         command("planner", "goal", "--", *goal)
         wait(lambda: "planner" in latest and "reference" in latest
@@ -229,8 +266,11 @@ def main(argv=None, *, hil=None, mission=None):
             ]:
                 subs[name] = service(topic, payload, capacity, publishers).subscriber_builder().buffer_size(capacity).create()
             mission_event("settings", mission=args.mission, precision_land=args.precision_land,
-                          team=team, scene=load_scene_name(), goal=args.goal, altitude=args.altitude, return_offset=args.return_offset,
+                          team=team, scene=load_scene_name(), waypoint_count=len(waypoints),
+                          shape=args.shape, altitude=args.altitude, return_offset=args.return_offset,
                           hover_seconds=args.hover_seconds, down_rate_hz=args.down_rate, seed=args.seed, transport="hil" if args.hil else "sil")
+            for index, offset in enumerate(waypoints):
+                mission_event("waypoint", index=index, offset=offset)
             binaries = ["render", "mimir", "ffctl"] + (["hil"] if args.hil else ["fc", "firefly-rootslam"])
             sim_config = "sim-mission" if args.mission == "roundtrip" else "sim"
             configs = ["game", "scene", sim_config, "render", "mimir"]
@@ -288,11 +328,12 @@ def main(argv=None, *, hil=None, mission=None):
                 request_activity(False)
             hold(1. if args.mission == "roundtrip" else args.hover_seconds)
             if args.mission == "roundtrip":
-                waypoint = [home[0] + args.goal[0], home[1] + args.goal[1], home[2] + args.altitude]
                 nearby = [home[0] + args.return_offset[0], home[1] + args.return_offset[1], home[2] + args.altitude]
-                navigate("outbound", waypoint)
-                phase("outbound_hover", goal=waypoint)
-                hold(args.hover_seconds)
+                for index, offset in enumerate(waypoints):
+                    waypoint = [home[0] + offset[0], home[1] + offset[1], home[2] + args.altitude]
+                    navigate("waypoint", waypoint, index=index)
+                    phase("waypoint_hover", goal=waypoint, index=index)
+                    hold(args.hover_seconds)
                 navigate("return", nearby)
             if args.precision_land:
                 phase("acquire")

@@ -589,10 +589,14 @@ FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/sys
 `scripts/flight.py` 启动 release 进程、编排起降/航点并回收进程。
 完整任务使用 `--mission roundtrip --precision-land`：从所选机库起飞，飞往航点并悬停，
 返回起飞点附近，等待新的下视识别，最后精确降落、上锁并记录静止保持。
+多途经点沿用同一任务入口：每点完成规划、到位停稳和悬停，再提交下一点，最终返航精降。
 
 ~~~bash
 uv run python scripts/flight.py --mission roundtrip --precision-land
 uv run python scripts/flight.py --mission roundtrip --precision-land --goal 4 0 --hover-seconds 3
+uv run python scripts/flight.py --shape square --side 2 --precision-land
+uv run python scripts/flight.py --shape triangle --side 2 --precision-land
+uv run python scripts/flight.py --waypoint 2 0 --waypoint 3 1 --waypoint 2 0 --precision-land
 uv run python scripts/flight.py --mission hover --precision-land
 uv run python scripts/hil_roundtrip.py --precision-land
 FIREFLY_RUN_PRECISION_MISSION=1 uv run pytest tests/system/test_flight_mission.py -q
@@ -602,9 +606,14 @@ uv run python scripts/verify_flight.py logs/<本轮目录>/log.rrd
 完整往返使用 `configs/sim-mission.toml`，使用 30Hz 双目/深度供给；下视独立按租约选入 15/30 FPS，
 物理和 IMU 保持 1000Hz；HIL 的同周期送图预算见前文。悬停沿用 `configs/sim.toml`。
 `--goal DX DY` 相对解锁前保存的 odom 起飞点；RMUC 示例默认朝场地中部，red 为 (4,0)m、blue 为 (-4,0)m；
+`--shape square|triangle` 先向场地飞一个边长，再从该入口飞闭合的正方形或等边三角形，
+回到入口后返航；`--side` 指定边长，blue 将预设航线绕起点旋转 180°。
+重复 `--waypoint DX DY` 按输入顺序设置自定义航线，每点均相对同一起飞坐标，适合任意折线或多边形。
+`--goal`、`--shape`、`--waypoint` 三者互斥；多点和预设参数同样可用于 `scripts/hil_roundtrip.py`。
+途经点数量、离起点半径、相邻航段长度与参数范围在入口检查；实际通行由原生 planner 的地图和碰撞门控判定。
 `--altitude` 为相对起飞高度，往返缺省 2m、悬停缺省 1m。机库附近存在立柱，
 往返高度需要同时满足已知障碍净距和配置的规划高度边界；planner 保留原有碰撞门控。
-`--hover-seconds` 为航点停留时长，往返缺省 3s、悬停缺省 20s。
+`--hover-seconds` 为每个航点的停留时长，往返缺省 3s、悬停缺省 20s。
 `--return-offset DX DY` 缺省 (0.12,-0.08)m，限定在起飞点 0.3m 内，作为视觉接近点。
 航段同时检查当前 PlannerStatus/Reference 目标身份、原生完成状态、里程计距离和低速保持。
 返航后的 acquire 阶段要求至少三幅新的有效视觉观测，采集时间跨度至少 0.15s；
@@ -619,7 +628,8 @@ Mimir 先启动、最后关闭；任务设置、阶段、起飞坐标锚点和�
 同时检查下视帧率上界（含 1ms 采集时钟量化和长期频率约束）、空闲期无送图/推理，以及任务结束后的资源释放；旧录制沿用其原有全程图像契约。
 视觉闭环验收须保持 `mimir.images = true`。真值仅在评分阶段使用，
 以起飞时刻的 GT/odom 姿态固定坐标对齐，不使用全程拟合抵消漂移。
-航点停留检查实际位置、速度与持续时间；返航分别检查水平/高度误差和机库邻域；
+航点停留按声明顺序逐点检查目标身份、原生 TRACK/HOLD 模式、实际位置、速度与持续时间；
+每个点均须合格，评分分别报告各点及全程最大误差。返航分别检查水平/高度误差和机库邻域；
 落地检查实际落点、原停机坪高度、上锁时机和上锁后的静止保持。误差门槛与失败原因由
 评分源码和测试维护；碰撞安全仍由 planner/FC 执行，实时性能另按原始观测核对。
 `commands_completed` 仅描述任务阶段执行完成；验证失败或进程回收失败均使入口非零退出。
