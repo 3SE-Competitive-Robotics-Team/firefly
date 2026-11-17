@@ -33,7 +33,7 @@ def test_collision_asset_is_required(tmp_path):
 def test_physics_and_imu_without_renderer(tmp_path, rate):
     # 测试台阶顶面与停机坪同高，足够覆盖机体；不表示完整 RMUC 场地。
     (tmp_path / "rmuc2027_collision.json").write_text(json.dumps({
-        "boxes": [[-13.0, 0.0, 0.1875, 0.5, 0.5, 0.1875]],
+        "boxes": [[*scene.resolve().pad[:2], scene.resolve().pad[2]/2, 0.5, 0.5, scene.resolve().pad[2]/2]],
     }))
     env = DroneEnv(scene_factory=partial(scene.build_scene, name="rmuc2027@1.0.0", asset_dir=tmp_path), timestep=1.0 / rate, gyro_density=0.0, accel_density=0.0)
     np.testing.assert_allclose(env.state()[0], scene.drone_pad("rmuc2027@1.0.0"))
@@ -58,7 +58,7 @@ def test_physics_and_imu_without_renderer(tmp_path, rate):
 @pytest.mark.parametrize("buffered", [False, True])
 def test_sensor_snapshot_uses_integrated_state(tmp_path, buffered):
     (tmp_path / "rmuc2027_collision.json").write_text(json.dumps({
-        "boxes": [[-13.0, 0.0, 0.1875, 0.5, 0.5, 0.1875]],
+        "boxes": [[*scene.resolve().pad[:2], scene.resolve().pad[2]/2, 0.5, 0.5, scene.resolve().pad[2]/2]],
     }))
     env = DroneEnv(scene_factory=partial(scene.build_scene, name="rmuc2027@1.0.0", asset_dir=tmp_path), gyro_density=0.0, accel_density=0.0)
     origin = np.array([0.0, 0.0, 5.0])
@@ -100,7 +100,7 @@ def test_sensor_snapshot_uses_integrated_state(tmp_path, buffered):
 @pytest.mark.parametrize("buffered", [False, True])
 def test_imu_batches_preserve_seeded_samples_and_snapshots(tmp_path, gyro_density, accel_density, buffered):
     (tmp_path / "rmuc2027_collision.json").write_text(json.dumps({
-        "boxes": [[-13.0, 0.0, 0.1875, 0.5, 0.5, 0.1875]],
+        "boxes": [[*scene.resolve().pad[:2], scene.resolve().pad[2]/2, 0.5, 0.5, scene.resolve().pad[2]/2]],
     }))
     rng = np.random.default_rng(20260930)
     expected_rng = np.random.default_rng(20260930)
@@ -135,7 +135,7 @@ def test_imu_batches_preserve_seeded_samples_and_snapshots(tmp_path, gyro_densit
 @pytest.mark.parametrize("buffered", [False, True])
 def test_imu_noise_preserves_continuous_density(tmp_path, imu_rate, buffered):
     (tmp_path / "rmuc2027_collision.json").write_text(json.dumps({
-        "boxes": [[-13.0, 0.0, 0.1875, 0.5, 0.5, 0.1875]],
+        "boxes": [[*scene.resolve().pad[:2], scene.resolve().pad[2]/2, 0.5, 0.5, scene.resolve().pad[2]/2]],
     }))
     env = DroneEnv(scene_factory=partial(scene.build_scene, name="rmuc2027@1.0.0", asset_dir=tmp_path),
                    imu_period=1.0 / imu_rate, rng=np.random.default_rng(20260930))

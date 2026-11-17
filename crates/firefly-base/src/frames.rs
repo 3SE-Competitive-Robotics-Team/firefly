@@ -14,6 +14,7 @@ impl FrameId {
     pub const LEFT_CAMERA: Self = Self(3);
     pub const RIGHT_CAMERA: Self = Self(4);
     pub const DEPTH_CAMERA: Self = Self(5);
+    pub const DOWN_CAMERA: Self = Self(6);
 }
 
 /// `T_target_source`；列向量约定，`p_target = R p_source + t`。

@@ -33,5 +33,8 @@ serde.workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ort = { workspace = true, features = ["load-dynamic"] }
+
 [lints]
 workspace = true

@@ -40,6 +40,7 @@ const SPATIAL: &[(&str, &[u32])] = &[
     ),
     ("cameras/left", &[kind::CAMERA]),
     ("cameras/right", &[kind::CAMERA]),
+    ("cameras/down", &[kind::CAMERA]),
 ];
 
 /// Parent frame for registered 3D observations; pixel overlays keep camera coordinates.
@@ -57,7 +58,9 @@ pub(crate) fn frame(name: &str) -> Option<&'static str> {
         | "plan/local_traj/velocity"
         | "plan/planes" => Some("odom"),
         "vio/map/pose" | "vio/map/traj" | "corr/odom" | "corr/traj" => Some("map"),
-        "cameras/left" | "cameras/right" => Some("tf#/vio/prediction/pose_body_odom"),
+        "cameras/left" | "cameras/right" | "cameras/down" => {
+            Some("tf#/vio/prediction/pose_body_odom")
+        }
         _ => None,
     }
 }
@@ -209,6 +212,12 @@ pub fn fields(name: &str) -> Result<&'static [&'static str]> {
             "thrust_z_normalized",
         ],
         "render/capture/stages_s" => &["submit_s", "readback_s", "assemble_s", "queue_s"],
+        "fc/debug/precision" => &["stage"],
+        "landing/target" => &["x", "y", "z", "valid"],
+        "landing/quality" => &["session", "team", "reprojection_px", "confidence"],
+        "landing/runtime" => &["active", "inferences", "requested", "npu"],
+        "landing/vision" => &["detections", "valid", "reprojection_px", "processing_ms"],
+        "hil/camera/down" => &["capture_time_s", "pixel_sum", "width_px", "height_px"],
         "render/capture/publish_s" => &["process_s", "publish_s", "total_s"],
         "corr/debug/gate" => &["metric", "limit", "applied_translation_m", "accepted"],
         "corr/debug/map_observation" => &["visual_age_s", "position_disagreement_m", "consistent"],

@@ -13,6 +13,7 @@ use bevy::render::render_resource::{
 use bevy::render::renderer::RenderDevice;
 use bevy::render::{RenderApp, RenderStartup};
 
+#[cfg(test)]
 use firefly_pubsub::camera::IMAGE_SIZE;
 
 pub struct GrayscalePlugin;
@@ -100,8 +101,8 @@ impl GrayPackPipeline {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups((IMAGE_SIZE / 4).div_ceil(64) as u32, 1, 1);
+            pass.dispatch_workgroups((packed.size() / 4).div_ceil(64) as u32, 1, 1);
         }
-        encoder.copy_buffer_to_buffer(packed, 0, staging, 0, IMAGE_SIZE as u64);
+        encoder.copy_buffer_to_buffer(packed, 0, staging, 0, packed.size());
     }
 }

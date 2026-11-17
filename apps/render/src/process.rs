@@ -32,6 +32,7 @@ pub struct CaptureJob {
     pub right_gray: PooledBuffer,
     /// 深度预通道原始字节（小端 `f32`）。
     pub depth_raw: PooledBuffer,
+    pub down_gray: Option<PooledBuffer>,
 }
 
 /// 一拍的全部输出（工作线程内发布）。
@@ -50,6 +51,7 @@ pub struct ProcessedCapture<'a> {
     pub right_gray: PooledBuffer,
     /// 深度（米，行主序；在线含退化，离线为几何标签）。
     pub depth: &'a [f32],
+    pub down_gray: Option<PooledBuffer>,
 }
 
 /// 有界最新值邮箱：生产者不等待消费者；关闭唤醒接收端并丢弃未处理任务。
@@ -176,6 +178,7 @@ impl PixelProcessor {
             left_gray: job.left_gray,
             right_gray: job.right_gray,
             depth: &self.depth,
+            down_gray: job.down_gray,
         }
     }
 }
@@ -274,6 +277,7 @@ mod tests {
             }
             let result = processor.process(
                 CaptureJob {
+                    down_gray: None,
                     seq,
                     timing: CaptureTiming::default(),
                     stamp: seq as f64,
@@ -319,6 +323,7 @@ mod tests {
             let mut observations = Vec::new();
             for seq in 1..=2 {
                 jobs.replace(CaptureJob {
+                    down_gray: None,
                     seq,
                     stamp: 7. + seq as f64 / 10.,
                     timing: CaptureTiming::default(),
@@ -352,6 +357,7 @@ mod tests {
             ..Default::default()
         };
         let job = || CaptureJob {
+            down_gray: None,
             seq: 1,
             timing: CaptureTiming::default(),
             stamp: 1.,
@@ -376,6 +382,7 @@ mod tests {
     fn process_produces_expected_buffers() {
         let options = DepthNoiseOptions::default();
         let job = CaptureJob {
+            down_gray: None,
             seq: 3,
             timing: CaptureTiming::default(),
             stamp: 1.5,

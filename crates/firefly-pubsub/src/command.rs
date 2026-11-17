@@ -26,6 +26,7 @@ pub mod kind {
     pub const TRACK: u8 = 5;
     /// 自动降落（`Command::Land`）。
     pub const LAND: u8 = 6;
+    pub const PRECISION_LAND: u8 = 7;
 }
 
 /// 指令种类名（日志用；未知编码返回 `None`）。
@@ -41,6 +42,7 @@ pub fn kind_name(kind: u8) -> Option<&'static str> {
         kind::HOLD => Some("HOLD"),
         kind::TRACK => Some("TRACK"),
         kind::LAND => Some("LAND"),
+        kind::PRECISION_LAND => Some("PRECISION_LAND"),
         _ => None,
     }
 }
@@ -98,6 +100,7 @@ mod tests {
         .map(kind_name);
         assert!(named.iter().all(Option::is_some), "{named:?}");
         assert_eq!(kind_name(0), None);
-        assert_eq!(kind_name(7), None);
+        assert_eq!(kind_name(7), Some("PRECISION_LAND"));
+        assert_eq!(kind_name(8), None);
     }
 }

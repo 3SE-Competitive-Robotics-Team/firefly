@@ -16,7 +16,7 @@ from rerun.chunk import RrdReader
 
 from firefly_workspace.process import ManagedProcess, isolated_run
 from firefly_mujoco import TraceContext
-from firefly_mujoco.messages import ScalarMessage, LogMessage, GrayImageMessage, VizMessage, OdomMessage
+from firefly_mujoco.messages import DownImageMessage, LandingTargetMessage, ScalarMessage, LogMessage, GrayImageMessage, VizMessage, OdomMessage
 from firefly_workspace import digest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -278,7 +278,14 @@ def test_stereo_images_and_keypoint_ids_survive_recording():
         node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
         images = [publisher(node, "Firefly/Camera" + side, GrayImageMessage) for side in ("Left", "Right")]
         geometry = publisher(node, "Firefly/Viz", VizMessage, 256, 8)
+        down = publisher(node,"Firefly/CameraDown",DownImageMessage)
+        target = publisher(node,"Firefly/LandingTarget",LandingTargetMessage)
         try:
+            frame=DownImageMessage(timestamp=2.,sensor_id=3,width=352,height=288)
+            frame.data[:]=bytes([173])*len(frame.data)
+            down.loan_uninit().write_payload(frame).send()
+            observation=LandingTargetMessage(timestamp=2.,session=42,position=(.1,-.2,.3),reprojection_px=.7,confidence=.91,team=1,valid=1)
+            target.loan_uninit().write_payload(observation).send()
             for camera, port in enumerate(images):
                 msg = GrayImageMessage(timestamp=2., sensor_id=camera, width=320, height=240)
                 msg.data[:] = bytes([30 + camera]) * len(msg.data)
@@ -294,9 +301,17 @@ def test_stereo_images_and_keypoint_ids_survive_recording():
             time.sleep(.1)
         finally:
             assert process.stop() == 0, list(process.tail)
+        actual, logs=read(path)
+        assert actual["landing/target"]==[(2_000_000_000,[.1,-.2,.3,1.])]
+        assert actual["landing/quality"]==[(2_000_000_000,[42.,1.,.7,.91])]
+        assert "recording complete" in logs
         found_images, found_points = set(), set()
         for chunk in RrdReader(path).stream():
             batch = chunk.to_record_batch()
+            if chunk.entity_path=="/cameras/down/image":
+                assert batch.column("sim_time").cast("int64").to_pylist()==[2_000_000_000]
+                assert bytes(batch.column("Image:buffer")[0].as_py()[0])==bytes([173])*(352*288)
+                found_images.add("down")
             for camera, side in enumerate(("left", "right")):
                 if chunk.entity_path == f"/cameras/{side}/image":
                     assert batch.column("sim_time").cast("int64").to_pylist() == [2_000_000_000]
@@ -305,7 +320,8 @@ def test_stereo_images_and_keypoint_ids_survive_recording():
                 if chunk.entity_path == f"/cameras/{side}/points" and "track_id" in batch.schema.names:
                     assert batch.column("track_id").to_pylist() == [[42., 43.]]
                     found_points.add(side)
-        assert found_images == found_points == {"left", "right"}
+        assert found_images == {"left", "right", "down"}
+        assert found_points == {"left","right"}
 
 
 def test_spatial_batches_retain_repeated_and_out_of_order_times():

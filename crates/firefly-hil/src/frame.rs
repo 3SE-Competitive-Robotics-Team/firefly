@@ -6,6 +6,15 @@
 
 use std::io::{self, Read, Write};
 
+/// 两端驱动重试这些错误，保留 reader 中已收到的帧前缀。
+#[must_use]
+pub fn is_retryable(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+    )
+}
+
 use crate::protocol::{
     Header, Kind, MAX_FRAGMENT, MAX_MESSAGE, Message, decode_header, encode_header,
 };

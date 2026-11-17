@@ -229,6 +229,7 @@ mod tests {
             imu_alive: true,
             attitude_session_ok: true,
             landing_thrust_low: true,
+            landing_motion_low: true,
         }
     }
 

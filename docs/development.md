@@ -108,10 +108,12 @@ commit message 使用 `<type>(<scope>): <摘要>`；PR 标题使用 `<type>: <�
 场景由 `configs/scene.toml` 的 `scene = "<赛季>@<版本>"` 唯一选择，已注册
 `rmuc2027@1.0.0`；资产在 `models/<赛季>/v<版本>/`（`field.glb`、
 `<赛季>_collision.json`），另需 `models/drone/drone.glb`。启动时检查版本注册和资产完整性，错误指向具体场景。
-停机坪定义统一由 `firefly_mujoco.scene.SCENES[].pad` 与 `PAD_CLEARANCE` 提供。
+`configs/game.toml` 的 `team = "red"` / `"blue"` 选择己方机库；默认 red。
+停机坪定义由 `firefly_mujoco.scene.SCENES[].hangars` 与 `PAD_CLEARANCE` 提供，出生点在
+所选 H 标记中心正上方。物理代理按 CAD 甲板的八边形轮廓切分凸棱柱，保留轮廓外的碰撞体积，支撑面高度与图案一致。
 Python 仿真使用 `mujoco-core` 提供核心物理接口，导入名为 `mujoco`；
 render 使用无窗口 GPU 渲染；Rerun 原生 Viewer 需要图形会话。Rust/Python 版本和依赖
-以 workspace 配置为准。mimir 直接将左右目无损灰度图和结构化诊断写入 RRD，配置见 `configs/mimir.toml`。
+以 workspace 配置为准。mimir 直接将左右目和下视无损灰度图和结构化诊断写入 RRD，配置见 `configs/mimir.toml`。
 
 ```bash
 uv sync --all-packages --extra test
@@ -198,7 +200,7 @@ supervisor 的相对命令 `bin/<app>` 和 `logs/process` 仍依赖工作目录�
 
 | 进程 | 设备 | 话题 |
 |---|---|---|
-| `camera` | `V4L2` 节点 | 发布 `Firefly/CameraLeft`、`CameraRight`、可选 `Depth` |
+| `camera` | `V4L2` 节点 | 发布 `Firefly/CameraLeft`、`CameraRight`、可选 `Depth` 和 `CameraDown` |
 | `imu` | `spidev`（`BMI088` 两片） | 发布 `Firefly/Imu` |
 | `motor` | `sysfs` PWM | 订阅 `Firefly/Control`，发布 `Firefly/Airframe` |
 
@@ -206,7 +208,10 @@ supervisor 的相对命令 `bin/<app>` 和 `logs/process` 仍依赖工作目录�
 
 - `configs/camera.toml`：`/dev/videoN` 编号随内核与接线变化，先用
   `v4l2-ctl --list-devices` 核对。分辨率由 IPC 定长消息定死（320×240），
-  驱动按该组合启动；格式协商失败时返回错误。`[depth]` 控制深度发布。
+  双目和深度使用该组合；`[down]` 独立固定为 352×288，驱动必须原样接受格式。
+  `[depth]` 控制深度发布，下视使用独立工作线程、V4L2 单调采集时间戳与行跨度。
+  下视 `rate_hz` 只接受 15/30，采集流随相机进程持续运行；先用 S_PARM 请求驱动帧间隔，
+  发布前再按采集时间限频，退出进程时释放 mmap 流并 STREAMOFF。
   具体相机的格式、同步、时间戳和标定按配置指定的 `V4L2` 流做实机验证。
 - `configs/imu.toml`：实现 `BMI088`，启动通过 `WHO_AM_I` 核验设备身份。
   寄存器初始化值取自数据手册，首次上板须核对
@@ -270,6 +275,80 @@ supervisor 对异常退出退避重启；停止使用 SIGINT，超时返回错�
 省略时随规划路径定向。roll/pitch 由飞控实现推力方向。
 上电后先完成静止初始化与解锁检查，再接受起飞指令。飞控失联行为见架构文档。
 
+### 下视精确降落
+
+模型目录使用版本化名称，由 manifest 固定模型、源权重、校准集摘要及输入输出形状。
+训练权重来自 `se3_yolo/runs/h_marker/yolo26n_sim/weights/best.pt`；用训练仓库的
+导出环境运行（依赖由该仓库锁定）：
+
+```bash
+../se3_yolo/.venv/bin/python scripts/export_landing.py \
+  --checkpoint ../se3_yolo/runs/h_marker/yolo26n_sim/weights/best.pt \
+  --dataset ../se3_yolo/datasets/h_marker --output models/h-marker-yolo26n-cif-v1
+```
+
+相机输出 352×288；默认网络 NCHW 为 `[1,3,288,352]`。静态 INT8 QDQ 使用 train
+分组校准，val/test 保持独立。灰度复制为三通道，原分辨率角点用于米制定位。
+现有合成校准先重采样为 CIF；装机后使用真实镜头、曝光和运动图重新校准与测评。
+`configs/landing.toml` 配置内参、畸变、H 尺寸、安装位置与触地原点偏移；默认几何匹配仿真 CAD，
+实机参数须由标定/测量替换。下视光心位于机体后方 3cm。
+
+生产 `landing` 通过 ort-rs 的 `VSINPU` EP 运行，加载
+`models/npu/libonnxruntime.so`，禁止 CPU 回退。原生库必须提供 C API 31 和
+`OrtSessionOptionsAppendExecutionProvider_VSINPU`；标准 CPU 发行包不提供该 EP。
+官方 [ORT VSINPU 实现](https://github.com/microsoft/onnxruntime/tree/main/onnxruntime/core/providers/vsinpu)
+依赖 TIM-VX；TIM-VX 与 A733 SDK/内核驱动的兼容性、INT8 算子放置和时延由实机启动验证。
+
+在 aarch64 Linux 上，准备与板端驱动匹配的 SDK、已安装的 TIM-VX 和固定到完整 commit
+的干净 ORT 源码后，使用 `scripts/build_npu_runtime.py --help` 所列参数构建运行库。
+脚本验证源码 C API、构建 VSINPU、打包共享库、设置同目录 RPATH 并记录指纹；
+构建完成不代表模型已经通过 NPU 验收。运行库目录、INT8 ONNX 和模型 manifest 随
+`xtask deploy` 部署；发布缺少运行库时明确失败。可选 ALIKED/LightGlue 共用该 Linux 原生库。
+普通与 HIL 清单均自启动轻量的 landing 宿主，固定 CPU 4；FC 固定 CPU 5，VIO 在 CPU 6、7。
+A733 官方 SDK 的运行接口与版本见
+[厂商 NPU 开发文档](https://docs.radxa.com/en/cubie/a7a/app-dev/npu-dev/cubie-acuity-sdk)，
+VSINPU/TIM-VX 与该板 SDK 的兼容性仍须通过实际运行库和设备验证。
+
+```bash
+cargo xtask release
+./target/release/landing --simulation
+./target/release/ffctl fc land --precision
+uv run python scripts/validate_landing.py --output target/landing-validation/cif-v1
+uv run python scripts/flight.py --mission hover --hover-seconds 3 --precision-land
+```
+
+`--simulation` 显式选择 CPU，用于桌面仿真；生产默认后端始终为 NPU。
+在线进程按 `Firefly/Activity` 租约在 Dormant/Active 之间切换，Dormant 释放模型会话、图像订阅和里程计线程。
+任务每 200ms 续租，2s 未续租自动释放推理工作资源；多个拥有者只释放自己的推理请求。
+下视全程连续采集和录制，帧率由 `render.toml capture.down_hz` 或 `camera.toml down.rate_hz` 设置为 15/30 FPS。
+推理按 `landing.rate_hz` 调度，默认保持 10 Hz。
+任务通过统一资源 API 续租和释放请求；FC 独立判定精降命令资格，推理失败通过正常进程错误路径报告。
+`landing/runtime` 在 RRD 中记录实际活跃状态、累计推理数、推理请求状态和 NPU 标志。
+离线 `landing --image <352x288.png> --simulation` 输出检测、优化角点、米制平移和重投影残差。
+图像验收在两队机库上方 1m/1.5m、中心及偏置位置检验识别和米制误差，并导出 PNG；
+运行与飞行原始证据由最先启动、最后退出的 Mimir 保存。初次识别建议在 1m 高度完成，
+近距离由连续 H 角点跟踪维持观测；超时后重新经过 YOLO 确认。
+
+### 下视训练数据整理
+
+`scripts/collect_landing_dataset.py` 保留过程 PNG 和 RRD 的原始下视像素，按像素去重，
+从同时间的 GroundTruth 获取标签相机位姿，再用固定 CAD 的语义发光掩码独立生成
+完整 H 平台的 YOLO 框；检测模型的预测不作为标签。原始截图路径、录制指纹、
+采集时刻、位姿及插值标记写入 manifest。语义掩码保留其他几何的遮挡。
+
+```bash
+uv run python scripts/collect_landing_dataset.py --images target/landing-validation \
+  --recordings logs/<录制目录>/log.rrd logs/<另一录制目录>/log.rrd logs/<第三录制目录>/log.rrd \
+  --output datasets/h_marker_cif_v1 --sample-period 1 --max-samples 24
+```
+
+每个飞行录制归属同一划分，重复出现在不同划分的相同图像进入 quarantine；
+相同静态相机验收属于固定姿态组。微小、无 H 涂层或位姿缺失的样本保持待复核状态，
+按 `images/quarantine` 隔离，避免生成错误负样本。输出包含 `data.yaml`、
+images/labels/masks 的 train/val/test 目录及带框 review 图片；标注契约与
+`se3_yolo` 的完整平台可见范围一致。使用新的输出目录保留每版数据，
+检查 review 后再交给训练仓库；实际 OV2640 图像另行采集与标注。
+
 ### HIL 部署与运行
 
 HIL 用 USB 把电脑上的 MuJoCo 物理仿真与板端生产计算连接起来。电脑运行
@@ -299,7 +378,8 @@ FC 使用 `configs/fc-hil.toml`：水平速度环增益与正常部署一致，
 `configs/hil.toml` 管理 USB 身份、队列与送图节拍。`imu_batch = 1`；
 双目按采集时间配对，图像分为最多 16 KiB 的块，块间先发送 IMU 与指令。
 `image_queue` 是待发图像预算，至少为 2；双目对原子入队，每个队列位置最多占两张图，
-深度图独占一个位置。上行每条遥测和日志发送前优先排空控制队列。
+深度图和 CIF 下视图各独占一个位置；下视持续传输并独立节流，
+`down_rate_hz` 为下视 15/30 FPS 上界，双目/深度继续沿用 `image_period_s`。上行每条遥测和日志发送前优先排空控制队列。
 `image_period_s` 是板端视觉负载预算，图像、控制和后验的实际频率分别验收。
 HIL 默认送图预算为 30 Hz。`configs/processes-hil.toml` 为 A733 设置以下亲和性：
 
@@ -307,10 +387,11 @@ HIL 默认送图预算为 30 Hz。`configs/processes-hil.toml` 为 A733 设置�
 |---|---|---|
 | 6、7（A76） | RootSLAM | 两个 Rayon worker，所有线程在这两个大核内调度 |
 | 5（A55） | FC | 主循环和 IMU worker 固定在同一个小核 |
+| 4（A55） | landing | INT8 NPU 会话、预处理和角点；巡航释放工作资源 |
 | 0–4（A55） | camera、motor、planner 与 traj | 共享小核池，按运行负载调度 |
 
 亲和性由 `taskset` 在应用启动前设置，新线程继承该集合；Rayon 并行度由
-同一命令中的 `RAYON_NUM_THREADS` 设置。普通进程清单和 x86 运行沿用系统调度。
+同一命令中的 `RAYON_NUM_THREADS` 设置。普通板端清单沿用相同核分配；桌面 SIL 直接运行二进制，使用宿主机调度。
 HIL 亲和性约束应用线程，内核中断、系统服务和 supervisor 仍按系统策略调度。
 更换 HIL 板型时按实际 CPU 拓扑调整清单，并重新验证控制周期和完整悬停验收。
 用 `taskset -apc <pid>` 核对所有线程；修改清单后重启 supervisor 才会重新读取。
@@ -333,18 +414,24 @@ scripts/hil_hover.py 发送起飞、20 秒 Hold 和降落命令，记录 FC 原�
 scripts/hil_hover_monitor.py 可独立查看状态，不发送控制命令。
 命令流程完成、录制完整性、飞行精度和实时性分别报告。
 
-22m 往返使用板端 RootSLAM、planner、traj 与 FC，主机下发双目、IMU 和深度：
+往返任务使用板端 RootSLAM、planner、traj 与 FC，视觉降落同时使用 landing；主机下发双目、IMU、深度与下视：
 
 ```bash
 cargo build --locked --release -p render -p mimir -p hil -p ffctl
 cargo xtask deploy-hil
-uv run python scripts/hil_roundtrip.py
+uv run python scripts/hil_roundtrip.py --precision-land
 ```
 
 悬停和往返使用同一份 `processes-hil.toml` 与 `hil.toml`，全部进程自启动并持续下发深度。
-部署仅选择设备；任务脚本决定发送哪些飞行指令。固定的 HIL 脚本仅提供任务相关参数，
-例如悬停入口的 `--hover-seconds` 和所有入口的 `--seed`。
-任务发送 odom 系 (22, 0, 1.595) 和 (0, 0, 1) 两个目标，以原生轨迹完成状态切换航段。
+主机/板端驱动共享 `firefly-hil::topics` 路由表和 `open / drain / publish` API；
+`SensorIngress::accept_raw` 统一解码、图像重组、校验和与 IMU 唤醒。
+新增载荷维护协议编码和该路由表，应用层保持通用转发。协议 v8 的推理请求走高优先队列，
+下视传输独立于任务阶段；控制优先级、诊断连续性与队列预算在共享实现中维护。
+`cargo test -p firefly-hil --test bridge --release` 用真实 IPC 和字节流验证全部上行路由、
+下行请求、CIF 分片以及穿插 IMU；USB 实机验收仍由同一生产驱动执行。
+部署仅选择设备；任务脚本决定发送哪些飞行指令。HIL 与 SIL 共用 `flight.py` 的
+`--goal DX DY`、`--altitude`、`--hover-seconds`、`--return-offset DX DY` 和 `--seed`。
+目标相对解锁前保存的 odom 起飞点生成，以当前目标身份、原生轨迹完成、实际里程计到位和低速保持共同切换航段。
 飞控自身保护保持启用；两端使用同次构建并部署。
 `hil --check` 核对 USB 接口和端点；实际传输及协议一致性由运行验证。
 帧版本不匹配会结束会话，错误包含收到版本和当前版本；重新部署两端后再运行。
@@ -506,18 +593,58 @@ FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/sys
 
 ### 飞行指令脚本
 
-scripts/flight.py 负责启动 release 进程、发送起降和航点指令以及回收进程。
-阶段切换使用 FC 模式与 PlannerStatus 正常完成状态；运行事件通过 Firefly/Log 交给 Mimir。
-脚本退出码表示命令流程与清理结果。精度、碰撞和实时性需从录制证据独立核对。
+`scripts/flight.py` 启动 release 进程、编排起降/航点并回收进程。
+入口参数与合法阶段转换由 `scripts/flight_mission/config.py` 定义；
+`runtime.py` 拥有进程、IPC 和退出清理，`gates.py` 维护到位与视觉连续确认窗口。
+独立评分通过 `recording.py` 读取已关闭的 RRD，由 `verification.py` 核对阶段和物理证据。
+完整任务使用 `--mission roundtrip --precision-land`：从所选机库起飞，飞往航点并悬停，
+返回起飞点附近，等待新的下视识别，最后精确降落、上锁并记录静止保持。
+多途经点沿用同一任务入口：每点完成规划、到位停稳和悬停，再提交下一点，最终返航精降。
 
 ~~~bash
-uv run python scripts/flight.py --mission hover
-uv run python scripts/flight.py --mission roundtrip
-uv run python scripts/hil_hover.py
-uv run python scripts/hil_roundtrip.py
+uv run python scripts/flight.py --mission roundtrip --precision-land
+uv run python scripts/flight.py --mission roundtrip --precision-land --goal 8 0 --hover-seconds 3
+uv run python scripts/flight.py --shape square --side 4 --precision-land
+uv run python scripts/flight.py --shape triangle --side 2 --precision-land
+uv run python scripts/flight.py --waypoint 2 0 --waypoint 3 1 --waypoint 2 0 --precision-land
+uv run python scripts/flight.py --mission hover --precision-land
+uv run python scripts/hil_roundtrip.py --precision-land
+FIREFLY_RUN_PRECISION_MISSION=1 uv run pytest tests/system/test_flight_mission.py -q
+uv run python scripts/verify_flight.py logs/<本轮目录>/log.rrd
 ~~~
 
-原生 FC/planner 保护始终由运行进程执行。运行产物遵循 [Mimir 录制规则](mimir.md)。
+完整往返使用 `configs/sim-mission.toml`，使用 30Hz 双目/深度供给；下视按 `render.capture.down_hz` 以 15/30 FPS 连续采集，
+物理和 IMU 保持 1000Hz；HIL 的同周期送图预算见前文。悬停沿用 `configs/sim.toml`。
+`--goal DX DY` 相对解锁前保存的 odom 起飞点；RMUC 示例默认朝场地中部，red 为 (8,0)m、blue 为 (-8,0)m；
+`--shape square|triangle` 先向场地飞一个边长，再从该入口飞闭合的正方形或等边三角形，
+回到入口后返航；`--side` 指定边长，blue 将预设航线绕起点旋转 180°。
+重复 `--waypoint DX DY` 按输入顺序设置自定义航线，每点均相对同一起飞坐标，适合任意折线或多边形。
+`--goal`、`--shape`、`--waypoint` 三者互斥；多点和预设参数同样可用于 `scripts/hil_roundtrip.py`。
+途经点数量、离起点半径、相邻航段长度与参数范围在入口检查；实际通行由原生 planner 的地图和碰撞门控判定。
+`--altitude` 为相对起飞高度，往返缺省 2m、悬停缺省 1m。机库附近存在立柱，
+往返高度需要同时满足已知障碍净距和配置的规划高度边界；planner 保留原有碰撞门控。
+`--hover-seconds` 为每个航点的停留时长，往返缺省 3s、悬停缺省 20s。
+`--return-offset DX DY` 缺省 (0.12,-0.08)m，限定在起飞点 0.3m 内，作为视觉接近点。
+航段同时检查当前 PlannerStatus/Reference 目标身份、原生完成状态、里程计距离和低速保持。
+返航后的 acquire 阶段要求至少三幅新的有效视觉观测，采集时间跨度至少 0.15s；
+旧观测、异队伍/会话和过期输入不能启动精降。`--acquire-timeout` 提供有界识别等待。
+任务异常时请求 HOLD 并结束本轮仿真，原始失败保持非零结果。
+返航引导依赖连续 VIO；累计漂移使平台超出可识别邻域时，本入口以识别超时结束，平台重捕获范围由相机视场与 landing 门控决定。
+省略 `--precision-land` 使用原有起飞点高度降落；真机接入仍遵循硬件与 NPU 验收边界。
+
+Mimir 先启动、最后关闭；任务设置、阶段、起飞坐标锚点和所用输入的指纹进入 `logs/flight`。
+精降任务关闭 RRD 后自动运行 `scripts/verify_flight.py`，也可以用上面的独立命令复核。
+评分器要求完整 footer、时序覆盖、原生模式与精降阶段顺序，以及全程连续的 352×288 下视灰度图像；
+同时检查下视帧率上界（含 1ms 采集时钟量化和长期频率约束）、推理空闲期计数保持不变，以及任务结束后的推理资源释放。
+起飞报告包含 FC 姿态源、后验新鲜度、实际横向位移、实际偏航和相对真值的航向估计误差；航向比较使用起飞前的固定坐标对齐。
+视觉闭环验收须保持 `mimir.images = true`。真值仅在评分阶段使用，
+以起飞时刻的 GT/odom 姿态固定坐标对齐，不使用全程拟合抵消漂移。
+航点停留按声明顺序逐点检查目标身份、原生 TRACK/HOLD 模式、实际位置、速度与持续时间；
+每个点均须合格，评分分别报告各点及全程最大误差。返航分别检查水平/高度误差和机库邻域；
+落地检查实际落点、原停机坪高度、上锁时机和上锁后的静止保持。误差门槛与失败原因由
+评分源码和测试维护；碰撞安全仍由 planner/FC 执行，实时性能另按原始观测核对。
+`commands_completed` 仅描述任务阶段执行完成；验证失败或进程回收失败均使入口非零退出。
+运行产物遵循 [Mimir 录制规则](mimir.md)。
 
 ### 可选资产检查
 

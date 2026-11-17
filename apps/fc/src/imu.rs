@@ -27,6 +27,8 @@ pub struct Snapshot {
     pub rate: Vector3<f32>,
     /// Latest unfiltered gyro measurement, retained only for diagnostics.
     pub raw_rate: Vector3<f64>,
+    /// Specific force norm in m/s², independent of VIO velocity drift.
+    pub specific_force: f64,
     pub ready: bool,
     pub nis: f64,
     pub accel_accepted: bool,
@@ -236,6 +238,7 @@ fn observe_batch(
                 rotation,
                 rate: estimator.rate().cast::<f32>(),
                 raw_rate: sample.gyro,
+                specific_force: sample.accel.norm(),
                 ready: state.is_some(),
                 nis: estimator.gate().nis,
                 accel_accepted: estimator.gate().accepted,

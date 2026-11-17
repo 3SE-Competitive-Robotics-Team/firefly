@@ -1,0 +1,36 @@
+[package]
+name = "landing"
+version = "0.1.0"
+keywords = ["landing", "yolo", "npu", "robotics"]
+categories = ["robotics", "science"]
+edition = "2024"
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+usage-rs.workspace = true
+image.workspace = true
+firefly-base.workspace = true
+firefly-config.workspace = true
+firefly-error.workspace = true
+firefly-landing.workspace = true
+firefly-observability.workspace = true
+firefly-pubsub.workspace = true
+firefly-planner-runtime.workspace = true
+iceoryx2-bb-posix.workspace = true
+log.workspace = true
+nalgebra.workspace = true
+ort.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+toml.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ort = { workspace = true, features = ["load-dynamic", "vsinpu"] }
+
+[lints]
+workspace = true

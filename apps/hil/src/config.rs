@@ -69,6 +69,9 @@ pub struct Link {
     /// 下行图像节流周期（秒）；板端 VIO 跟不上时用它压低送帧率。
     #[serde(default = "default_image_period")]
     pub image_period_s: f64,
+    /// 连续下视传输频率上界；允许 15/30 FPS，独立于双目节流周期。
+    #[serde(default = "default_down_rate")]
+    pub down_rate_hz: u32,
 }
 
 impl Default for Link {
@@ -79,6 +82,7 @@ impl Default for Link {
             imu_batch: default_imu_batch(),
             image_queue: default_image_queue(),
             image_period_s: default_image_period(),
+            down_rate_hz: default_down_rate(),
         }
     }
 }
@@ -115,6 +119,10 @@ const fn default_image_queue() -> usize {
     4
 }
 
+const fn default_down_rate() -> u32 {
+    30
+}
+
 const fn default_image_period() -> f64 {
     0.1
 }
@@ -147,6 +155,12 @@ impl Config {
             return Err(firefly_error::Error::new(
                 firefly_error::ErrorKind::InvalidArgument,
                 "image_period_s must be positive",
+            ));
+        }
+        if !matches!(self.link.down_rate_hz, 15 | 30) {
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                "down_rate_hz must be 15 or 30",
             ));
         }
         if self.link.image_queue < 2 {

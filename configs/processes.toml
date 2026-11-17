@@ -1,49 +1,54 @@
 [[process]]
 name = "camera"
-command = ["bin/camera"]
+command = ["taskset", "-c", "0-4", "bin/camera"]
 autostart = false
 
 [[process]]
 name = "imu"
-command = ["bin/imu"]
+command = ["taskset", "-c", "0-4", "bin/imu"]
 autostart = false
 
 [[process]]
 name = "motor"
-command = ["bin/motor"]
+command = ["taskset", "-c", "0-4", "bin/motor"]
 autostart = false
 
 [[process]]
 name = "firefly-rootslam"
-command = ["bin/firefly-rootslam"]
+command = ["taskset", "-c", "6,7", "env", "RAYON_NUM_THREADS=2", "bin/firefly-rootslam"]
 autostart = true
 
 [[process]]
 name = "fc"
-command = ["bin/fc"]
+command = ["taskset", "-c", "5", "bin/fc"]
+autostart = true
+
+[[process]]
+name = "landing"
+command = ["taskset", "-c", "4", "bin/landing"]
 autostart = true
 
 [[process]]
 name = "localization"
-command = ["bin/localization"]
+command = ["taskset", "-c", "0-4", "bin/localization"]
 autostart = false
 
 [[process]]
 name = "traj"
-command = ["bin/traj"]
+command = ["taskset", "-c", "0-4", "bin/traj"]
 autostart = true
 
 [[process]]
 name = "planner"
-command = ["bin/planner"]
+command = ["taskset", "-c", "0-4", "bin/planner"]
 autostart = true
 
 [[process]]
 name = "aliked"
-command = ["bin/aliked"]
+command = ["taskset", "-c", "0-4", "bin/aliked"]
 autostart = false
 
 [[process]]
 name = "lightglue"
-command = ["bin/lightglue", "--map", "maps/rmuc2027-1.0.0.ffvmap"]
+command = ["taskset", "-c", "0-4", "bin/lightglue", "--map", "maps/rmuc2027-1.0.0.ffvmap"]
 autostart = false

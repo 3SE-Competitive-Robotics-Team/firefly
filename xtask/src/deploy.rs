@@ -27,6 +27,10 @@ const MODELS: &[&str] = &[
     "lightglue-aliked-k512.onnx",
     "lightglue-aliked-k512.onnx.data",
 ];
+const LANDING_MODELS: &[&str] = &[
+    "h-marker-yolo26n-cif-v1/manifest.json",
+    "h-marker-yolo26n-cif-v1/int8.onnx",
+];
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let device = parse_device(args)?;
@@ -113,7 +117,21 @@ fn package() -> Result<PathBuf, String> {
         });
     }
 
-    for model in MODELS {
+    let runtime = root.join("models/npu");
+    if !runtime.join("libonnxruntime.so").is_file() || !runtime.join("manifest.json").is_file() {
+        return Err("missing VSINPU runtime bundle; see scripts/build_npu_runtime.py".into());
+    }
+    for file in fs::read_dir(&runtime).map_err(|e| e.to_string())? {
+        let file = file.map_err(|e| e.to_string())?;
+        if file.path().is_file() {
+            entries.push(Entry {
+                path: format!("models/npu/{}", file.file_name().to_string_lossy()),
+                mode: 0o644,
+                source: file.path(),
+            });
+        }
+    }
+    for model in MODELS.iter().chain(LANDING_MODELS) {
         let source = root.join("models").join(model);
         if source.is_file() {
             entries.push(Entry {
@@ -121,9 +139,14 @@ fn package() -> Result<PathBuf, String> {
                 mode: 0o644,
                 source,
             });
+        } else if LANDING_MODELS.contains(model) {
+            return Err(format!(
+                "missing {}; export the quantized landing model before deployment",
+                source.display()
+            ));
         } else {
             eprintln!(
-                "warning: missing {}; aliked/lightglue will refuse to start",
+                "warning: missing {}; the corresponding vision application will refuse to start",
                 source.display()
             );
         }

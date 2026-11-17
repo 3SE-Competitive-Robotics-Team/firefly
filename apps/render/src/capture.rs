@@ -27,7 +27,7 @@ use bevy::render::render_resource::{
 use bevy::render::renderer::{RenderDevice, RenderGraph, RenderGraphSystems, RenderQueue};
 use bevy::render::texture::GpuImage;
 use bevy::render::view::ViewDepthStencilTexture;
-use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_WIDTH};
+use firefly_pubsub::camera::{DOWN_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH};
 use firefly_pubsub::trace::TraceContext;
 
 use crate::buffer::{BufferPool, PooledBuffer};
@@ -52,6 +52,7 @@ pub enum SensorKind {
     Right,
     /// 深度预通道。
     Depth,
+    Down,
 }
 
 /// 同一拍的墙钟阶段边界；只用于延迟诊断，不参与传感器时间戳。
@@ -79,7 +80,7 @@ impl Default for CaptureTiming {
     }
 }
 
-/// 回读请求（主世界→渲染世界，`seq` 关联三份回复与位姿时间戳）。
+/// 回读请求（主世界→渲染世界，`seq` 关联四份回复与位姿时间戳）。
 #[derive(Clone, Copy, Debug)]
 pub struct CaptureRequest {
     /// 单调序号。
@@ -93,6 +94,7 @@ pub struct CaptureRequest {
     pub left: AssetId<Image>,
     /// 右目灰度目标。
     pub right: AssetId<Image>,
+    pub down: Option<AssetId<Image>>,
 }
 
 /// 回读回复（渲染世界→主世界）。
@@ -101,6 +103,7 @@ pub struct CapturedFrame {
     /// 对应请求的序号。
     pub seq: u64,
     pub timing: CaptureTiming,
+    pub down_requested: bool,
     /// 传感器种类。
     pub kind: SensorKind,
     /// 时间戳（透传自请求）。
@@ -132,7 +135,7 @@ pub struct HubInner {
     pub request: Mutex<Option<CaptureRequest>>,
     /// 已完成的回复队列。
     pub done: Mutex<VecDeque<CaptureReply>>,
-    /// 在途缓冲组数（`0..=CAPTURE_SETS`；组内三份回复全部完成后递减）。
+    /// 在途缓冲组数（`0..=CAPTURE_SETS`；组内四份回复全部完成后递减）。
     pub inflight_sets: AtomicU32,
     /// 最近一次被渲染世界**取走**（提交拷贝）的请求序号；主世界据此收起
     /// 传感器相机（单调持久值，不受帧率/时序影响，见 `link::poll_pose`）。
@@ -186,6 +189,8 @@ struct CaptureSet {
     /// 灰度 GPU 打包目标（不可映射，供 compute 写入）。
     left_packed: Buffer,
     right_packed: Buffer,
+    down_packed: Buffer,
+    down: Buffer,
     /// 左目暂存。
     left: Buffer,
     /// 右目暂存。
@@ -204,6 +209,7 @@ struct CaptureBuffers {
     left: BufferPool,
     right: BufferPool,
     depth: BufferPool,
+    down: BufferPool,
 }
 
 impl FromWorld for CaptureBuffers {
@@ -216,6 +222,15 @@ impl FromWorld for CaptureBuffers {
             mapped_at_creation: false,
         };
         let sets = std::array::from_fn(|_| CaptureSet {
+            down_packed: device.create_buffer(&BufferDescriptor {
+                size: DOWN_SIZE as u64,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+                ..desc
+            }),
+            down: device.create_buffer(&BufferDescriptor {
+                size: DOWN_SIZE as u64,
+                ..desc
+            }),
             left_packed: device.create_buffer(&BufferDescriptor {
                 size: GRAY_BYTES as u64,
                 usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
@@ -243,6 +258,7 @@ impl FromWorld for CaptureBuffers {
             left: BufferPool::new(CAPTURE_SETS + 2, GRAY_BYTES),
             right: BufferPool::new(CAPTURE_SETS + 2, GRAY_BYTES),
             depth: BufferPool::new(CAPTURE_SETS + 2, FRAME_BYTES),
+            down: BufferPool::new(CAPTURE_SETS + 2, DOWN_SIZE),
         }
     }
 }
@@ -251,7 +267,11 @@ impl FromWorld for CaptureBuffers {
 ///
 /// 请求在无空闲组或纹理未就绪时保留在共享槽：主世界据此保持相机激活、
 /// 下帧重试（相机按需激活，见 `link::poll_pose`）。
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
 fn copy_sensors(
     hub: Res<CaptureHub>,
     mut extracted: ResMut<ExtractedRequest>,
@@ -290,6 +310,10 @@ fn copy_sensors(
         log::debug!("右目 GPU 纹理尚未就绪，下帧重试");
         return;
     };
+    let down = req.down.and_then(|id| images.get(id));
+    if req.down.is_some() && down.is_none() {
+        return;
+    }
     let mut depth_tex = None;
     for (_, eye, view) in &depth_cams {
         if *eye == Eye::Depth {
@@ -310,7 +334,16 @@ fn copy_sensors(
     };
 
     // 请求被真正消费（拷贝已编码）：主世界以 `taken_seq` 判据收起相机。
-    set.pending.store(3, Ordering::SeqCst);
+    let down_bytes = if down.is_some() {
+        buffers.down.take()
+    } else {
+        None
+    };
+    if down.is_some() && down_bytes.is_none() {
+        return;
+    }
+    set.pending
+        .store(if down.is_some() { 4 } else { 3 }, Ordering::SeqCst);
     hub.inner.inflight_sets.fetch_add(1, Ordering::SeqCst);
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("sensor-capture"),
@@ -329,6 +362,15 @@ fn copy_sensors(
         &set.right_packed,
         &set.right,
     );
+    if let Some(down) = down {
+        gray.encode(
+            &device,
+            &mut encoder,
+            &down.texture_view,
+            &set.down_packed,
+            &set.down,
+        );
+    }
     encode_copy(&mut encoder, depth_tex, &set.depth);
     queue.submit(std::iter::once(encoder.finish()));
     req.timing.submitted = Instant::now();
@@ -363,6 +405,17 @@ fn copy_sensors(
         req,
         depth_bytes,
     );
+    if let Some(down_bytes) = down_bytes {
+        map_for_readback(
+            &set.down,
+            "down",
+            &hub,
+            set.pending.clone(),
+            SensorKind::Down,
+            req,
+            down_bytes,
+        );
+    }
 }
 
 /// 单份纹理拷贝编码（只编码不映射，映射见 `map_for_readback`）。
@@ -427,6 +480,7 @@ fn map_for_readback(
                     .expect("hub poisoned")
                     .push_back(CaptureReply::Frame(CapturedFrame {
                         seq: req.seq,
+                        down_requested: req.down.is_some(),
                         timing: CaptureTiming {
                             readback: Instant::now(),
                             ..req.timing
@@ -486,6 +540,7 @@ mod tests {
             trace: TraceContext::default(),
             left: Handle::<Image>::default().id(),
             right: Handle::<Image>::default().id(),
+            down: Some(Handle::<Image>::default().id()),
         };
         hub.request(request);
         let mut frame = ExtractedRequest(*hub.inner.request.lock().unwrap());

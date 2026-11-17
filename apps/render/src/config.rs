@@ -116,6 +116,13 @@ pub struct CaptureConfig {
     /// 采集频率（Hz）；上限受 Bevy 120Hz 调度约束。
     #[serde(default = "default_capture_hz")]
     pub hz: f64,
+    /// 连续下视采集频率，仅允许 15/30 FPS，实际频率受输入位姿与总采集节拍限制。
+    #[serde(default = "default_down_hz")]
+    pub down_hz: u32,
+}
+
+const fn default_down_hz() -> u32 {
+    15
 }
 
 fn default_capture_hz() -> f64 {
@@ -126,6 +133,7 @@ impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
             hz: DEFAULT_CAPTURE_HZ,
+            down_hz: default_down_hz(),
         }
     }
 }
@@ -144,6 +152,13 @@ impl CaptureConfig {
             return Err(Error::new(
                 ErrorKind::InvalidArgument,
                 format!("capture.hz 必须在 (0, 120] Hz 内，当前 {}", self.hz),
+            )
+            .with_operation("render config"));
+        }
+        if !matches!(self.down_hz, 15 | 30) {
+            return Err(Error::new(
+                ErrorKind::InvalidArgument,
+                "capture.down_hz 必须为 15 或 30 FPS",
             )
             .with_operation("render config"));
         }
@@ -223,6 +238,29 @@ impl RenderConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn continuous_down_capture_accepts_only_15_or_30_fps() {
+        for down_hz in [15, 30] {
+            assert!(
+                CaptureConfig {
+                    down_hz,
+                    ..Default::default()
+                }
+                .validate()
+                .is_ok()
+            );
+        }
+        for down_hz in [0, 10, 60] {
+            assert!(
+                CaptureConfig {
+                    down_hz,
+                    ..Default::default()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+    }
     #[test]
     fn rejects_unknown_fields_at_each_config_level() {
         for source in [

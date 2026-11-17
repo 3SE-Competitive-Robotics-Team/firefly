@@ -340,6 +340,7 @@ fn takeoff_and_land_with_altitude_bias(altitude_bias: f32) {
         imu_alive: true,
         attitude_session_ok: true,
         landing_thrust_low: true,
+        landing_motion_low: true,
     };
     fsm.update(DT, &state, None, health);
     fsm.command(Command::Arm, health, &state).unwrap();
@@ -425,6 +426,27 @@ fn landing_thrust_gate_requires_valid_low_output() {
     assert!(ctrl.landing_thrust_low());
     ctrl.input_invalid = true;
     assert!(!ctrl.landing_thrust_low());
+}
+
+#[test]
+fn contact_candidate_removes_lateral_thrust_despite_position_drift() {
+    let (quad, air) = (plant(), Airframe::default());
+    let mut ctrl = controller();
+    let state = QuadState::default();
+    let downward = PositionSetpoint {
+        position: Vector3::new(0.5, -0.4, -1.),
+        ..PositionSetpoint::default()
+    };
+    for _ in 0..1000 {
+        ctrl.update(&state, &downward, &quad, &air, DT, true)
+            .unwrap();
+    }
+    assert!(ctrl.landing_thrust_low());
+    assert!((ctrl.attitude_setpoint.q_d * Vector3::z() - Vector3::z()).norm() < 1e-6);
+    let motors = ctrl
+        .update(&state, &downward, &quad, &air, DT, true)
+        .unwrap();
+    assert!(motors.iter().sum::<f32>() < 0.6 * quad.mass * G);
 }
 
 /// 瞬时无效位置设定值保留上一次有效推力，不能把电机切零。

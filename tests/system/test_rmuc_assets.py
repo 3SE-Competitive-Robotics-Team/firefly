@@ -22,14 +22,15 @@ def test_asset_provenance():
             assert hashlib.file_digest(stream, "sha256").hexdigest() == expected, name
 
 
-def test_spawn_contact_and_passive_rest():
+@pytest.mark.parametrize("team", ["red", "blue"])
+def test_spawn_contact_and_passive_rest(team):
     from firefly_mujoco.scene import build_scene, drone_pad, load_scene_name
     scene_name = load_scene_name()
-    model = mujoco.MjModel.from_xml_string(build_scene(name=scene_name))
+    model = mujoco.MjModel.from_xml_string(build_scene(name=scene_name, team=team))
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
     assert all(data.contact[i].dist >= -0.002 for i in range(data.ncon)), "spawn penetrates field"
-    start = np.array(drone_pad(scene_name))
+    start = np.array(drone_pad(scene_name, team=team))
     for _ in range(400):
         mujoco.mj_step(model, data)
     assert np.isfinite(data.qpos).all()

@@ -1,0 +1,20 @@
+[package]
+name = "firefly-landing"
+version = "0.1.0"
+keywords = ["landing", "vision", "geometry", "robotics"]
+categories = ["robotics", "science"]
+edition = "2024"
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+firefly-error.workspace = true
+nalgebra.workspace = true
+purecv.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true
