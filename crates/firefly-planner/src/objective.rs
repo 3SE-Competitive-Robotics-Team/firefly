@@ -112,9 +112,6 @@ impl<'a> ReboundDetector<'a> {
         if !constraint_points_straight_enough(points) {
             return false;
         }
-        // 官方 allowRebound criterion 3:多拓扑下任一内部控制点仍在初始基点
-        // 错误侧((p−base)·direction < 0,只看每点第 0 个平面)时停用内循环
-        // 检测——让候选先在自己初始化的一侧收敛;判定已避开即锁存为 true。
         if self.multitopo && !self.gate_latched {
             let avoided = points[1..points.len() - 1]
                 .iter()
@@ -146,9 +143,7 @@ pub struct MincoObjective<'a> {
     pieces: usize,
     // 本轮优化的约束快照；Detector 追加平面不修改此处的代价或梯度输入。
     cost: MincoCost,
-    // 复用 MINCO 和轨迹缓冲；联合回调每次重新生成系数并应用当前代价项。
     cache: Option<(DVector<f64>, Minco, firefly_trajectory::Trajectory)>,
-    // 平面池归检测器独占，新增约束由 take_planes 交给下一轮目标。
     detector: Option<ReboundDetector<'a>>,
     eval_count: usize,
     gradient_count: usize,
@@ -328,14 +323,13 @@ impl<'a> MincoObjective<'a> {
         for i in 0..self.pieces - 1 {
             q.push(Vector3::new(x[i * 3], x[i * 3 + 1], x[i * 3 + 2]));
         }
-        // 对照官方 `VirtualT2RealT`：无 clamp，分段有理映射本身不会溢出。
         let t = Vec::from_fn(self.pieces, |i| virtual_to_real(x[n_q + i]));
         (q, t)
     }
 
     /// # Errors
     ///
-    /// `InvalidArgument`:x 中时长非正(虚拟时间映射保证恒正，不应发生)。
+    /// `InvalidArgument`：时长非正或非有限。
     pub fn rebuild(&self, x: &DVector<f64>) -> firefly_error::Result<Minco> {
         let (q, t) = self.unpack(x);
         let points: Vec<Point3<f64>> = q.iter().map(|v| Point3::from(*v)).collect();
@@ -352,10 +346,6 @@ impl<'a> MincoObjective<'a> {
             }
         }
         for i in 0..self.pieces {
-            // 对照官方 `VirtualTGradCost`：`gdVT = (gdRT + wei_time) * dT/dVT`。
-            // firefly 的 `TimePenalty` 已把 `wei_time` 并入 `dt`（`accumulate` 中
-            // `d_f_d_t += weight`），故此处 `dt` 已等价于 `gdRT + wei_time`，不得
-            // 重复加；`dT/dVT` 按虚拟时间分段，对照官方 `gdVT2Rt`。
             g[3 * (self.pieces - 1) + i] = dt[i] * d_real_d_virtual(vt[i]);
         }
         g
@@ -372,7 +362,6 @@ fn constraint_points_straight_enough(points: &[Vector3<f64>]) -> bool {
         let before = points[i] - points[i - 1];
         let after = points[i + 1] - points[i];
         let product = before.normalize().dot(&after.normalize());
-        // 零长段无方向，官方 min_product 不因 NaN 更新。
         product.is_nan() || product >= 0.87
     })
 }
@@ -862,11 +851,9 @@ mod tests {
     fn gate_blocks_rebound_while_initial_obstacle_on_wrong_side() {
         let map = wall_map();
         let traj = straight_traj();
-        // k=5 单段 → 6 个约束点,穿墙点无平面覆盖 → roughly_check 必触发
         let points = constraint_sample_points(&traj, 5);
         assert!(points.len() > 4);
         let mut planes = vec![Vec::new(); points.len()];
-        // 内部点放一个"错误侧"平面:(p−base)·direction < 0
         planes[2].push(Plane::new(
             points[2] - Vector3::new(0.0, 1.0, 0.0),
             Vector3::new(0.0, -1.0, 0.0),
@@ -884,7 +871,6 @@ mod tests {
         );
         assert!(!det.gate_latched(), "未避开时不得锁存");
 
-        // 同样的几何、开关关(单拓扑):不门控,检测照常触发
         let mut det_single =
             ReboundDetector::new(&map, 5, 10.0, false, planes.clone(), false, false);
         assert!(det_single.check(&traj), "开关关时不允许被 criterion 3 拦截");
@@ -896,13 +882,11 @@ mod tests {
         let traj = straight_traj();
         let points = constraint_sample_points(&traj, 5);
         let mut planes = vec![Vec::new(); points.len()];
-        // 同一点放"正确侧"平面:(p−base)·direction ≥ 0 → 已避开
         planes[2].push(Plane::new(
             points[2] + Vector3::new(0.0, 1.5, 0.0),
             Vector3::new(0.0, -1.0, 0.0),
         ));
         let mut det = ReboundDetector::new(&map, 5, 10.0, false, planes, true, false);
-        // 首次 check:判定已避开 → 锁存,并放行 roughly_check(穿墙点未覆盖)
         assert!(det.check(&traj), "已避开时应放行内循环检测");
         assert!(det.gate_latched(), "判定已避开后必须锁存为 true");
     }

@@ -111,7 +111,6 @@ impl GridMap {
         out
     }
 
-    /// 直接读取膨胀计数（测试用，对照官方 `occupancy_buffer_inflate_`）。
     #[must_use]
     pub fn inflate_at(&self, idx: [usize; 3]) -> u16 {
         let global = self.global_index(idx);
@@ -123,7 +122,6 @@ impl GridMap {
         }
     }
 
-    /// 索引是否落在膨胀层内（对照官方 `getInflateOccupancy` 下游 `>0` 判膨胀）。
     #[must_use]
     pub fn is_inflated(&self, idx: [usize; 3]) -> bool {
         let g = self.global_index(idx);
@@ -303,7 +301,6 @@ mod tests {
                         map.set_state(index, VoxelState::Free);
                     }
                 }
-                // 待同步变化、单轴/多轴平移、跨整窗跳转和原地同步。
                 let centers = [
                     [5.0, 4.0, 4.0],
                     [5.0, 3.0, 4.0],
@@ -342,7 +339,6 @@ mod tests {
                 }
             }
         }
-        // 无变更再调：结果逐位一致（是否跳过由版本保证，此处验证幂等）。
         map.inflate_obstacles();
         let mut snap2 = Vec::new();
         for z in 0..8 {
@@ -353,7 +349,6 @@ mod tests {
             }
         }
         assert_eq!(snap, snap2);
-        // 同值写入不触发版本变化（占据状态未改变）。
         map.set_state([5, 5, 2], VoxelState::Occupied);
         map.inflate_obstacles();
         let mut snap3 = Vec::new();
@@ -365,7 +360,6 @@ mod tests {
             }
         }
         assert_eq!(snap, snap3);
-        // 真实变化重算：清除后邻域计数归零。
         map.set_state([5, 5, 2], VoxelState::Free);
         map.inflate_obstacles();
         assert_eq!(map.inflate_at([5, 5, 2]), 0);
@@ -394,14 +388,10 @@ mod tests {
             .unwrap();
         m.set_state([5, 5, 5], VoxelState::Occupied);
         m.inflate_obstacles(); // step = ceil((0.6-1e-5)/0.5)=2
-        // 本体与 2 格邻域均在膨胀层（计数>0）
         assert!(m.is_occupied_inflated(Vector3::new(2.5, 2.5, 2.5)));
         assert!(m.is_occupied_inflated(Vector3::new(3.5, 2.5, 2.5)));
-        // 3 格外不在膨胀层
         assert!(!m.is_occupied_inflated(Vector3::new(4.5, 2.5, 2.5)));
-        // 原图状态不受膨胀影响
         assert!(!m.is_occupied(Vector3::new(3.5, 2.5, 2.5)));
-        // 计数语义：中心 = 32767+1，邻域 =1
         assert_eq!(m.inflate_at([5, 5, 5]), GRID_MAP_OBS_FLAG + 1);
         assert_eq!(m.inflate_at([6, 5, 5]), 1);
     }
@@ -409,7 +399,6 @@ mod tests {
     #[test]
     fn change_inf_buf_counts() {
         let mut m = GridMapBuilder::new(0.5, [10, 10, 10]).build().unwrap();
-        // 单障碍增量：自身 32768，周围 1（默认 step=1 对应 0.2/0.5）
         m.change_inf_buf(true, [5, 5, 5]);
         assert_eq!(m.inflate_at([5, 5, 5]), GRID_MAP_OBS_FLAG + 1);
         assert_eq!(m.inflate_at([6, 5, 5]), 1);
@@ -417,26 +406,19 @@ mod tests {
         assert!(m.is_inflated([5, 5, 5]));
         assert!(m.is_inflated([6, 5, 5]));
         assert!(!m.is_inflated([7, 5, 5]));
-        // 多障碍叠加：邻域计数叠加
         m.change_inf_buf(true, [5, 6, 5]);
         assert_eq!(m.inflate_at([5, 5, 5]), GRID_MAP_OBS_FLAG + 2);
         assert_eq!(m.inflate_at([5, 6, 5]), GRID_MAP_OBS_FLAG + 2);
         assert_eq!(m.inflate_at([6, 5, 5]), 2);
-        // 移除一个：移除中心 FLAG，邻域 -1；[5,5,5] 仅剩来自 [5,6,5] 的邻域计数 1
         m.change_inf_buf(false, [5, 5, 5]);
         assert_eq!(m.inflate_at([5, 5, 5]), 1);
         assert_eq!(m.inflate_at([5, 6, 5]), GRID_MAP_OBS_FLAG + 1);
         assert_eq!(m.inflate_at([6, 5, 5]), 1);
-        // 再移除
         m.change_inf_buf(false, [5, 6, 5]);
         assert_eq!(m.inflate_at([5, 5, 5]), 0);
         assert_eq!(m.inflate_at([5, 6, 5]), 0);
         assert!(!m.is_inflated([5, 5, 5]));
     }
-
-    // --- ringbuffer 平移 ---
-
-    /// 3×3×3 膨胀位掩码必须与逐格 `is_inflated` 一致（含环形窗平移）。
     #[test]
     fn inflated_neighborhood_mask_matches_cell_queries() {
         let mut m = GridMapBuilder::new(0.5, [12, 10, 8])

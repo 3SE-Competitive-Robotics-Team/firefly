@@ -1,11 +1,3 @@
-//! 移植官方 `root_finder.hpp`（EGO-Planner-v2 `traj_opt`）。
-//!
-//! 对照 `~/Projects/EGO-Planner-v2/swarm-playground/main_ws/src/planner/traj_opt/include/optimizer/root_finder.hpp`（1090 行）。
-//! 函数与行为逐行对齐官方实现，仅做 Rust 习惯适配（`Vec<f64>` 领先系数在前，`BTreeSet<OrderedF64>` 代替 `std::set<double>`）。
-//! 公开 API：`poly_conv` / `poly_sqr` / `poly_val` / `count_roots` / `solve_polynomial`（对应官方 `RootFinder::` 命名空间）。
-
-// 逐行移植上游 `root_finder.hpp`：下列建议要么改变浮点语义（`midpoint`/`clamp`），
-// 要么要求调整与官方一致的语句顺序。按需逐条豁免，不整文件关闭 `all`/`pedantic`。
 #![allow(
     clippy::many_single_char_names,
     clippy::similar_names,
@@ -26,7 +18,6 @@ use std::f64::consts::PI;
 const DBL_EPSILON: f64 = f64::EPSILON;
 const HIGHEST_ORDER: usize = 64;
 
-// 有序浮点包装，使 `BTreeSet` 可承载 `f64`（全序 `total_cmp`，与官方 `std::set<double>` 去重一致）。
 #[derive(Debug, Clone, Copy)]
 pub struct OrderedF64(pub f64);
 
@@ -46,9 +37,6 @@ impl Ord for OrderedF64 {
         self.0.total_cmp(&other.0)
     }
 }
-
-// 内部工具（RootFinderPriv）
-
 /// 官方 `polyMod` (18)：`u mod v`，要求 `v[0]` 为 ±1。
 fn poly_mod(u: &[f64], v: &[f64], r: &mut [f64]) -> usize {
     let lu = u.len();
@@ -293,7 +281,6 @@ fn solve_quart_monic(a: f64, b: f64, c: f64, d: f64) -> BTreeSet<OrderedF64> {
     roots
 }
 
-/// 官方 `solveQuart` (353)
 fn solve_quart(a: f64, b: f64, c: f64, d: f64, e: f64) -> BTreeSet<OrderedF64> {
     if a.abs() < DBL_EPSILON {
         return solve_cub(b, c, d, e);
@@ -301,7 +288,6 @@ fn solve_quart(a: f64, b: f64, c: f64, d: f64, e: f64) -> BTreeSet<OrderedF64> {
     solve_quart_monic(b / a, c / a, d / a, e / a)
 }
 
-/// 官方 `polyDeri` (418)
 fn poly_deri(coeffs: &[f64]) -> Vec<f64> {
     let horder = coeffs.len() - 1;
     let mut d = Vec::with_capacity(horder);
@@ -311,7 +297,6 @@ fn poly_deri(coeffs: &[f64]) -> Vec<f64> {
     d
 }
 
-/// 官方 `safeNewton` (430)
 fn safe_newton<F, DF>(func: &F, dfunc: &DF, l: f64, h: f64, tol: f64, max_its: usize) -> f64
 where
     F: Fn(f64) -> f64,
@@ -364,7 +349,6 @@ where
     rts
 }
 
-/// 官方 `shrinkInterval` (509)
 fn shrink_interval(coeffs: &[f64], lbound: f64, ubound: f64, tol: f64) -> f64 {
     let dcoeffs = poly_deri(coeffs);
     let func = |x: f64| poly_eval(coeffs, x);
@@ -374,7 +358,6 @@ fn shrink_interval(coeffs: &[f64], lbound: f64, ubound: f64, tol: f64) -> f64 {
 
 /// 官方 `isolateRealRoots` (646)：区间隔离求根（Sturm 定理）
 fn isolate_real_roots(coeffs: &[f64], lbound: f64, ubound: f64, tol: f64) -> BTreeSet<OrderedF64> {
-    // 先用 Cauchy/Kojima 界收紧区间（与官方一致）
     let leading = coeffs[0];
     let mut monic = Vec::with_capacity(coeffs.len());
     monic.push(1.0);
@@ -402,7 +385,6 @@ fn isolate_real_roots(coeffs: &[f64], lbound: f64, ubound: f64, tol: f64) -> BTr
     let rho = rho_c.min(rho_k) + 1.0;
     let lb = lbound.max(-rho);
     let ub = ubound.min(rho);
-    // 递归隔离：用 count_roots 做区间二分，避免直接操作 Sturm 序列的复杂性
     fn rec(l: f64, r: f64, coeffs: &[f64], tol: f64, rts: &mut BTreeSet<OrderedF64>) {
         let n = count_roots(coeffs, l, r);
         if n == 0 {
@@ -471,9 +453,6 @@ fn isolate_real_roots(coeffs: &[f64], lbound: f64, ubound: f64, tol: f64) -> BTr
     rec(lb, ub, coeffs, tol, &mut rts);
     rts
 }
-
-// 公开 API（RootFinder）
-
 /// 官方 `polyConv` (741)：卷积
 #[must_use]
 pub fn poly_conv(l_coef: &[f64], r_coef: &[f64]) -> Vec<f64> {
@@ -640,7 +619,6 @@ pub fn count_roots(coeffs: &[f64], l: f64, r: f64) -> i32 {
     n_roots
 }
 
-/// 官方 `solvePolynomial` (990)
 #[must_use]
 pub fn solve_polynomial(
     coeffs: &[f64],
@@ -673,7 +651,6 @@ pub fn solve_polynomial(
         rts.insert(OrderedF64(f64::INFINITY));
         rts.insert(OrderedF64(f64::NEG_INFINITY));
     } else if nonzeros == 1 && offset == 0 {
-        // 常数非零，无根
     } else {
         let mut ncoeffs = vec![0.0; std::cmp::max(5, nonzeros)];
         let start = coeffs.len() - valid;

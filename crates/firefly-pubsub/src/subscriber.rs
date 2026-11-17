@@ -1,13 +1,4 @@
 //! 泛型订阅端：统一服务容量与接收缓冲配置，保留 trace 用户头。
-//!
-//! 与 [`crate::publish`] 对称：`NodeBuilder` → `service_builder(...)`
-//! `.publish_subscribe::<T>()` → `.user_header::<TraceContext>()` →
-//! `subscriber_builder().create()`。订阅端必须声明与发布端相同的
-//! User Header 类型（iceoryx2 连接时校验签名兼容）。
-//!
-//! 收到的样本携带发布端 fastrace 活动 span 的上下文
-//! （[`TraceContext::continue_span`] 可续接为跨进程 span 树）与双发送
-//! 时间戳（可计算端到端延迟）。
 
 use std::fmt::Debug;
 
@@ -23,7 +14,6 @@ pub type Received<T> = iceoryx2::sample::Sample<ipc::Service, T, TraceContext>;
 /// 接收队列与服务容量；服务容量由首次创建方确定，后续端口只能要求兼容的容量。
 #[derive(Debug, Clone, Copy)]
 pub struct SubscriberOptions {
-    /// 当前订阅端的队列深度。
     pub buffer_size: usize,
     /// 服务允许的队列上限；None 时队列大于 1 则取队列深度，否则用 iceoryx2 默认值。
     pub service_max_buffer_size: Option<usize>,
@@ -41,26 +31,13 @@ impl Default for SubscriberOptions {
     }
 }
 
-/// 泛型零拷贝订阅器（iceoryx2 ipc 服务，User Header 携带 trace 上下文）。
-///
-/// 消息须满足 iceoryx2 的 `Debug + ZeroCopySend` 约束。
-///
 /// 节点由调用方持有（进程共享单节点，见 [`crate::node`]），端口只借用其
 /// 创建服务；Drop 顺序由调用方作用域保证（节点最后释放）。
 pub struct Subscriber<T: Debug + IceoryxSend + ?Sized + 'static> {
-    /// 订阅器句柄。
     subscriber: Iox2Subscriber<ipc::Service, T, TraceContext>,
 }
 
 impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
-    /// 以进程共享节点 + 自定义话题名打开订阅器。
-    ///
-    /// `buffer_size` 控制 iceoryx2 内部环形缓冲区深度：
-    /// - IMU 使用 [`crate::imu::IMU_SUBSCRIPTION`]，服务容量与接收队列分开声明；
-    /// - 相机（10 Hz）建议 1，只保留最新帧避免左右目交叉。
-    ///
-    /// 大于 1 的缓冲同时声明服务所需容量，允许订阅端先创建服务。
-    ///
     /// # Errors
     /// 缓冲深度无效，或 Service/Subscriber 创建失败（IPC 资源不可用等）。
     pub fn with_topic_and_buffer(
@@ -78,8 +55,6 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
         )
     }
 
-    /// 以指定队列深度和服务容量创建订阅器；支持订阅端先创建服务。
-    ///
     /// # Errors
     /// 队列深度为零、超过声明的服务上限，或服务/订阅器创建失败。
     pub fn with_options(
@@ -134,8 +109,6 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
         Ok(Self { subscriber })
     }
 
-    /// 以自定义话题名打开订阅器（`buffer_size`=1，适用于相机等低频话题）。
-    ///
     /// # Errors
     /// Service/Subscriber 创建失败（IPC 资源不可用等）。
     pub fn with_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {

@@ -1,7 +1,5 @@
 //! 产品侧接线：把 [`QuadState`]/[`PositionSetpoint`] 接到 PX4 控制链。
 //!
-//! 链路与 PX4 完全一致：
-//! `PositionControl -> AttitudeControl -> RateControl -> ControlAllocationSequentialDesaturation`。
 //! 产品 Z-up/FLU 与 PX4 NED/FRD 的转换只在本文件（及 [`super::frames`]）发生；
 //! 移植的四个类保持 PX4 的归一化指令与坐标约定。
 //!
@@ -28,7 +26,6 @@ use super::types::{
 use crate::params::Px4Params;
 use crate::{Airframe, G, PositionSetpoint, QuadParams, QuadState};
 
-/// PX4 多旋翼控制链。
 pub struct Controller {
     params: Px4Params,
     rate: RateControl,
@@ -47,7 +44,6 @@ pub struct Controller {
     pub allocated_control: ControlVector,
     /// 归一化悬停推力（质量与推力上限的函数）。
     pub hover_thrust: f32,
-    /// 本 tick 是否发生分配饱和。
     pub saturated: bool,
     /// 控制器内部认为位置设定值无效（未输出新姿态）。
     pub input_invalid: bool,
@@ -65,7 +61,6 @@ impl Controller {
             && self.allocated_control[3].abs() <= threshold
     }
 
-    /// 以参数构造；机体参数在收到 `Airframe` 后通过 [`Self::set_airframe`] 注入。
     #[must_use]
     pub fn new(params: Px4Params) -> Self {
         let mut rate = RateControl::default();
@@ -152,7 +147,6 @@ impl Controller {
             .set_actuator_max(ActuatorVector::repeat(1.0));
 
         let hover = quad.mass * G / airframe.max_thrust();
-        // PX4 `PositionControl::HOVER_THRUST_MIN/MAX`。
         self.hover_thrust = constrain(self.params.hover_thrust.unwrap_or(hover), 0.1, 0.9);
         self.position.set_hover_thrust(self.hover_thrust);
     }
@@ -333,13 +327,11 @@ impl Controller {
         motors.iter().all(|m| m.is_finite()).then_some(motors)
     }
 
-    /// 解锁前清零积分（PX4 在未解锁时 `resetIntegral`）。
     pub fn reset(&mut self) {
         self.rate.reset_integral();
         self.position.reset_integral();
     }
 
-    /// 当前机体质量/推力对应的悬停推力（归一化）。
     #[must_use]
     pub fn hover_thrust(&self) -> f32 {
         self.hover_thrust
@@ -352,7 +344,6 @@ impl Controller {
     }
 }
 
-/// 机体参数签名：内容不变就不重建效能矩阵。
 fn signature_of(quad: &QuadParams, airframe: &Airframe) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     let mut mix = |bits: u32| {

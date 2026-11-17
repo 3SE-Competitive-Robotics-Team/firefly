@@ -16,10 +16,8 @@ use firefly_pubsub::trace::TraceContext;
 use crate::rig::{FOV_Y_DEG, SENSOR_NEAR};
 use crate::sensors;
 
-/// 一拍的原始输入（主世界装配后交给工作线程）。
 #[derive(Debug)]
 pub struct CaptureJob {
-    /// 单调序号。
     pub seq: u64,
     pub timing: CaptureTiming,
     /// 位姿时间戳（秒，sim 时间）。
@@ -28,26 +26,20 @@ pub struct CaptureJob {
     pub trace: TraceContext,
     /// 左目紧凑灰度（行主序无填充）。
     pub left_gray: PooledBuffer,
-    /// 右目紧凑灰度。
     pub right_gray: PooledBuffer,
     /// 深度预通道原始字节（小端 `f32`）。
     pub depth_raw: PooledBuffer,
     pub down_gray: Option<PooledBuffer>,
 }
 
-/// 一拍的全部输出（工作线程内发布）。
 #[derive(Debug)]
 pub struct ProcessedCapture<'a> {
-    /// 单调序号。
     pub seq: u64,
     pub timing: CaptureTiming,
     /// 位姿时间戳（秒）。
     pub stamp: f64,
-    /// 上游 trace 上下文。
     pub trace: TraceContext,
-    /// 左目灰度（发布）。
     pub left_gray: PooledBuffer,
-    /// 右目灰度（发布）。
     pub right_gray: PooledBuffer,
     /// 深度（米，行主序；在线含退化，离线为几何标签）。
     pub depth: &'a [f32],
@@ -109,7 +101,6 @@ impl<T> Latest<T> {
     }
 }
 
-/// 像素处理后立即发布。
 pub fn run_worker(
     jobs: &Latest<CaptureJob>,
     options: &DepthNoiseOptions,
@@ -132,7 +123,6 @@ pub fn run_worker(
     }
 }
 
-/// 像素线程自有的工作缓冲；发布完成后用于下一拍。
 pub struct PixelProcessor {
     depth: Vec<f32>,
     clean_depth: Vec<f32>,
@@ -377,7 +367,6 @@ mod tests {
         assert!(measured.depth.iter().all(|z| *z == 0.));
     }
 
-    /// 单拍管线产出各缓冲尺寸正确；全清空深度保持无效 `0.0`。
     #[test]
     fn process_produces_expected_buffers() {
         let options = DepthNoiseOptions::default();

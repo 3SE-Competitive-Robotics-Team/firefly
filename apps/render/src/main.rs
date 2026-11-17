@@ -1,13 +1,4 @@
 //! RMUC 视觉进程：订阅仿真位姿，渲染双目、下视与深度，发布 IPC；调试展示由独立 mimir 承担。
-//!
-//! sim 负责 `MuJoCo` 物理和 IMU；本进程从 `Firefly/GroundTruth` 摆放传感器，
-//! 发布 `Firefly/CameraLeft`、`Firefly/CameraRight`、`Firefly/CameraDown`、`Firefly/Depth`，
-//! 通过 `Firefly/CameraPair` 唤醒订阅端。真值只用于生成仿真测量。
-//! 视觉资产由 `configs/scene.toml` 选择。
-//!
-//! 传感器相机按 `configs/render.toml` 的采集节拍激活，逐像素处理与传感器发布在工作线程完成。
-//! 日志经 `firefly-observability` 汇入统一 rrd 记录。
-//! `--offline` 使用独立 `Firefly/Offline/*` 数据话题供离线库图渲染。
 
 mod buffer;
 mod capture;
@@ -54,7 +45,6 @@ struct Arguments {
     export_asset_contract: Option<std::path::PathBuf>,
 }
 
-/// 以 RMUC 资产和初始摆位启动 Bevy；仿真位姿到达后更新机体与传感器。
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Arguments::parse();
     let path = args
@@ -101,7 +91,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 组装 Bevy 应用（插件、资源与系统注册）；`main` 只做参数、日志与 IPC 准备。
 fn build_app(
     spec: SceneSpec,
     render_config: &RenderConfig,
@@ -159,7 +148,6 @@ fn pump_logs(logs: NonSend<firefly_observability::LogIpc>) {
     firefly_observability::pump_log_ipc(&logs);
 }
 
-/// 传感器场景只包含真实几何与共享光照。
 #[allow(clippy::needless_pass_by_value)]
 fn setup_scene(
     mut commands: Commands,
@@ -174,7 +162,6 @@ fn setup_scene(
 
 /// 出图节奏诊断：每 [`RATE_LOG_PERIOD`] 秒报一次应用帧率与**真实供图速率**。
 /// 供图目标由 `configs/render.toml` 的 `[capture] hz` 决定；帧率是供给侧余量，供图才是 VIO 拿到的输入。
-// 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 fn log_render_rate(time: Res<Time>, mut acc: Local<(f32, u32)>, mut stats: ResMut<CaptureStats>) {
     acc.0 += time.delta_secs();
@@ -191,11 +178,9 @@ fn log_render_rate(time: Res<Time>, mut acc: Local<(f32, u32)>, mut stats: ResMu
     }
 }
 
-/// 出图节奏诊断周期（秒）。
 const RATE_LOG_PERIOD: f32 = 5.0;
 
 /// 退出时刷 trace（`Ctrl-C` → `AppExit`，端口随后按 `Drop` 纪律释放）。
-// 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 fn flush_on_exit(exits: MessageReader<AppExit>) {
     if !exits.is_empty() {

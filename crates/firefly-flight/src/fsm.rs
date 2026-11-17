@@ -1,16 +1,4 @@
-//! 飞行状态机：解锁、模式、自动起降与失效保护（对照 `PX4` `nav_state` 与
-//! `ArduPilot` 模式机 + auto-takeoff 判据）。
-//!
-//! 纯逻辑：不做 IO、不读时钟（`dt` 由调用方给），全部转移条件显式、可单测。
-//! 上层（`apps/fc`）负责把健康电平与指令喂进来，并把 [`FlightFsm::update`] 的输出
-//!（当前模式该飞的参考 + 电机是否使能）映射成 PX4 控制链的参考与 4 电机推力。
-//!
-//! 指令语义 = **"谁在控制"**（对照 `MAVLink` `COMMAND_LONG`）：目标点（goal）属规划侧
-//! 输入，设定值流（`Firefly/Reference`）只在 [`FlightState::Track`] 下被消费，且其
-//! 存活性是失效保护条件（对照 `PX4` `COM_OF_LOSS_T` → 回落 Position 模式）。
-//!
-//! 高度一律相对**起飞点**（`origin`，第一次 update 时锁存；`Arm` 时刷新）——与
-//! `ArduPilot` 的 "alt-above-home" 语义一致，免去对世界原点的假设。
+//! 飞行状态机；高度相对起飞点，参考流只在 Track 模式消费。
 
 use nalgebra::Vector3;
 use serde::Deserialize;
@@ -21,15 +9,9 @@ use crate::px4::velocity_smoothing::VelocitySmoothing;
 use crate::safety::{ArmingCheck, FailsafeAction, FailsafeFlags};
 use crate::state::QuadState;
 
-/// 地面站指令（对照 `MAVLink` `COMMAND_LONG` 的解锁/模式类子集）。
-///
-/// 不含目标点：目标点是**规划侧**输入（`Firefly/Goal` → planner → `Reference`），
-/// 飞控只在 [`FlightState::Track`] 下消费参考流。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Command {
-    /// 解锁（需通过全部解锁前检查）。
     Arm,
-    /// 上锁（仅允许在地面）。
     Disarm,
     /// 自动起飞到相对起飞点的给定高度（m；`<= 0` 或非有限值 = 用 [`FsmParams::takeoff_altitude`]）。
     Takeoff {
@@ -38,32 +20,22 @@ pub enum Command {
     },
     /// 位置保持：中止当前段（起飞/降落）并原地悬停，地面与空中均可用。
     Hold,
-    /// 跟踪外部参考流（planner；需参考新鲜）。
     Track,
-    /// 自动降落（下降 → 落地 → 自动上锁）。
     Land,
-    /// 在新鲜视觉平台观测上精确降落。
     PrecisionLand,
 }
 
-/// 指令被拒绝的原因（逐项上报，对照 `PX4` `HealthAndArmingChecks` 的"为什么不能解锁"）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reject {
-    /// 解锁前检查失败（具体项见 [`ArmingCheck`]）。
     Arming(ArmingCheck),
-    /// 需要先解锁。
     NotArmed,
-    /// 当前状态不允许该指令。
     WrongState,
-    /// 参考流不存在或陈旧。
     ReferenceNotReady,
-    /// 起飞高度超范围。
     AltitudeOutOfRange,
     LandingTargetNotReady,
 }
 
 impl Reject {
-    /// 一行中文原因（进日志与 rrd）。
     #[must_use]
     pub fn reason(self) -> &'static str {
         match self {
@@ -77,18 +49,14 @@ impl Reject {
     }
 }
 
-/// 飞行状态（可观测、可记录；对照 `PX4` `nav_state` 的四旋翼子集）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlightState {
-    /// 停机坪：电机停转。
     Disarmed,
     /// 已解锁、仍在地面（等待起飞或降落收尾）。
     ArmedGrounded,
-    /// 自动起飞：按爬升率爬到目标高度。
     Takeoff,
     /// 位置保持（起飞完成后的默认态；也是参考失联的回落态）。
     Hold,
-    /// 跟踪外部参考流（planner）。
     Track,
     /// 自动降落：按下降率降到起飞点地面，落地后自动上锁。
     Land,
@@ -97,13 +65,11 @@ pub enum FlightState {
 }
 
 impl FlightState {
-    /// 电机是否允许出力。
     #[must_use]
     pub fn motors_enabled(self) -> bool {
         !matches!(self, Self::Disarmed)
     }
 
-    /// 简称（日志/rrd 实体名）。
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -132,18 +98,13 @@ impl FlightState {
     }
 }
 
-/// 上层每 tick 汇报的健康电平（飞控自己算，不由被控对象喂）。
-// 健康条件是独立电平，各自保持输入语义。
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Health {
     /// 状态估计就绪（`Firefly/Odometry` 的 `is_initialized`）。
     pub estimator_ready: bool,
-    /// 已收到机体/执行器描述（`Firefly/Airframe`）。
     pub airframe_ready: bool,
-    /// 里程计新鲜（`Firefly/Odometry`）。
     pub odometry_alive: bool,
-    /// IMU 新鲜。
     pub imu_alive: bool,
     /// VIO 姿态会话未改变（会话改变后不可恢复）。
     pub attitude_session_ok: bool,
@@ -153,7 +114,6 @@ pub struct Health {
     pub landing_motion_low: bool,
 }
 
-/// 状态机参数（缺键回落默认值；单位与来源见各字段）。
 #[derive(Deserialize, Clone, Copy, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct FsmParams {
@@ -306,7 +266,6 @@ impl FsmParams {
     }
 }
 
-/// 每 tick 的输出：当前模式该飞的参考 + 电机使能。
 #[derive(Clone, Copy, Debug)]
 pub struct Output {
     /// 当前模式下飞控该跟踪的参考（`Track` = 外部参考；其余 = 状态机自己生成）。
@@ -315,22 +274,15 @@ pub struct Output {
     pub motors_enabled: bool,
     /// 本 tick 自动产生的决策（指令引起的转移由 [`FlightFsm::command`] 返回）。
     pub event: Event,
-    /// 本 tick 的失效条件位掩码（记录用）。
     pub flags: FailsafeFlags,
-    /// 本 tick 的失效动作（记录用）。
     pub failsafe: FailsafeAction,
 }
 
-/// 状态机的内部决策（`update` 的返回值，供上层记录/上报）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
-    /// 无变化。
     None,
-    /// 发生了状态转移（`from` → `to`）。
     Transition {
-        /// 转移前状态。
         from: FlightState,
-        /// 转移后状态。
         to: FlightState,
     },
     /// 估计失效：空中进入姿态降级，地面上锁。
@@ -339,20 +291,16 @@ pub enum Event {
     FailsafeReferenceLost,
 }
 
-/// 飞行状态机。
 #[derive(Clone, Copy, Debug)]
 pub struct FlightFsm {
     params: FsmParams,
     state: FlightState,
     /// 起飞点高度（世界 z，第一次 update 时锁存；`Arm` 时刷新）。
     origin_z: Option<f32>,
-    /// 当前模式下发给位置环的目标位置（斜坡/保持点都由它承载）。
     target: Vector3<f32>,
     /// 目标航向（进入各模式时锁存；`Track` 由参考给）。
     target_yaw: f32,
-    /// 保持段的目标高度（世界 z）。
     ramp_z: f32,
-    /// 起飞/降落段的 jerk 受限垂直轨迹。
     vertical: VelocitySmoothing,
     /// 起飞目标高度（相对起飞点，m）。
     takeoff_target: f32,
@@ -394,7 +342,6 @@ impl FlightFsm {
         }
     }
 
-    /// 当前状态。
     #[must_use]
     pub fn state(&self) -> FlightState {
         self.state
@@ -443,8 +390,6 @@ impl FlightFsm {
             && state.velocity.z.abs() <= self.params.on_ground_velocity
     }
 
-    /// 处理一条指令。
-    ///
     /// 成功时返回该指令引起的转移（状态未变时为 [`Event::None`]）。
     ///
     /// # Errors
@@ -509,7 +454,6 @@ impl FlightFsm {
         reference: Option<&PositionSetpoint>,
         health: Health,
     ) -> Output {
-        // 起飞点锁存：首次 update 时以当前位置为准（上电停在停机坪），Arm 时刷新
         if self.origin_z.is_none() {
             self.origin_z = Some(state.position.z);
             self.target = state.position;
@@ -572,7 +516,6 @@ impl FlightFsm {
             }
         }
         match self.state {
-            // 无定时转移：只等指令
             FlightState::Disarmed
             | FlightState::ArmedGrounded
             | FlightState::Hold
@@ -766,7 +709,6 @@ impl FlightFsm {
 
     fn arm(&mut self, health: Health, state: &QuadState) -> Result<(), Reject> {
         self.arming_check(health, state).map_err(Reject::Arming)?;
-        // 起飞点以解锁时刻为准（`ArduPilot` 的 home 语义）
         self.origin_z = Some(state.position.z);
         self.target = state.position;
         self.ramp_z = state.position.z;
@@ -832,7 +774,6 @@ impl FlightFsm {
                 Reject::NotArmed
             });
         }
-        // 不带高度（<= 0 / 非有限）时用缺省高度
         let altitude = if altitude.is_finite() && altitude > 0.0 {
             altitude
         } else {
@@ -874,7 +815,6 @@ impl FlightFsm {
                 return Err(Reject::WrongState);
             }
         }
-        // 参考流必须在（否则一进 Track 就立刻失联回落，等于没接管）
         if !self.reference_fresh {
             return Err(Reject::ReferenceNotReady);
         }
@@ -902,7 +842,6 @@ impl FlightFsm {
     fn enter_land(&mut self, state: &QuadState) {
         self.precision = None;
         self.state = FlightState::Land;
-        // 降在起飞点正上方（x/y 取起飞点；我们的 origin 只存了高度，故取当前水平位置）
         self.target = state.position;
         self.ramp_z = state.position.z;
         self.vertical.reset(0.0, state.velocity.z, state.position.z);
@@ -965,7 +904,6 @@ mod tests {
         }
     }
 
-    /// 起解锁/起飞/推进的脚手架：把状态机输出当作"完美位置环"（直接吸附参考）。
     struct Rig {
         fsm: FlightFsm,
         state: QuadState,
@@ -987,7 +925,6 @@ mod tests {
 
         fn tick(&mut self) {
             let out = self.fsm.update(DT, &self.state, None, ok_health());
-            // 完美位置环：位置/速度直接吃参考（起飞/降落的斜坡因此成为真实轨迹）
             self.state.position = out.setpoint.position;
             self.state.velocity = Vector3::zeros();
         }
@@ -1059,7 +996,6 @@ mod tests {
         }
     }
 
-    /// 空中不许解锁（对照 `ArduPilot` 的 inflight-arming 禁止）。
     #[test]
     fn arm_in_air_is_rejected() {
         let mut fsm = FlightFsm::new(FsmParams::default());
@@ -1103,13 +1039,11 @@ mod tests {
         rig.cmd(Command::Takeoff { altitude: 1.0 }).unwrap();
         assert_eq!(rig.fsm.state(), FlightState::Takeoff);
 
-        // 斜坡限速：单 tick 的高度增量不超过爬升率×dt
         let before = rig.state.position.z;
         rig.tick();
         let step = rig.state.position.z - before;
         assert!(step <= 0.6 * DT + 1e-6, "斜坡过陡：{step}");
 
-        // 爬到目标附近 + 垂速足够小 → 自动转 Hold（`ArduPilot` 判据）
         rig.ticks(1000);
         assert_eq!(rig.fsm.state(), FlightState::Hold);
         assert!(
@@ -1119,7 +1053,6 @@ mod tests {
         );
     }
 
-    /// 起飞未完成（高度停在半路）时不得转 Hold，也不得被 Track 抢走。
     #[test]
     fn takeoff_incomplete_stays_in_takeoff() {
         let mut rig = Rig::new();
@@ -1130,12 +1063,10 @@ mod tests {
         assert_eq!(rig.cmd(Command::Track), Err(Reject::WrongState));
     }
 
-    /// 起飞高度范围与默认高度（`Takeoff` 指令不带高度时用默认值）。
     #[test]
     fn takeoff_without_altitude_uses_default() {
         let mut rig = Rig::new();
         rig.cmd(Command::Arm).unwrap();
-        // 高度 <= 0（或非有限）= 用缺省高度（对照 `MAVLink` `NAV_TAKEOFF` param7 缺省语义）
         rig.cmd(Command::Takeoff { altitude: 0.0 }).unwrap();
         rig.ticks(1000);
         assert_eq!(rig.fsm.state(), FlightState::Hold);
@@ -1239,7 +1170,6 @@ mod tests {
         assert_eq!(rig.fsm.state(), FlightState::Track);
     }
 
-    /// 参考失联超过超时（`PX4` `COM_OF_LOSS_T` 类比）→ 回落 Hold，且保持点 = 失联瞬间位置。
     #[test]
     fn reference_loss_in_track_falls_back_to_hold_at_current_position() {
         let mut rig = Rig::new();
@@ -1256,7 +1186,6 @@ mod tests {
             yaw: 0.3,
             yaw_rate: 0.0,
         };
-        // 短暂提供参考：状态仍是 Track、参考被透传
         let mut out = rig.fsm.update(DT, &rig.state, Some(&setpoint), ok_health());
         assert_eq!(rig.fsm.state(), FlightState::Track);
         assert!((out.setpoint.position - setpoint.position).norm() < 1e-6);
@@ -1343,7 +1272,6 @@ mod tests {
         );
     }
 
-    /// 失联降级锁存，恢复消息不能自动接管；无有效位置时不推断落地。
     #[test]
     fn estimator_loss_latches_attitude_fallback_until_explicit_recovery() {
         let mut rig = Rig::new();
@@ -1376,7 +1304,6 @@ mod tests {
         assert_eq!(rig.fsm.state(), FlightState::Hold);
     }
 
-    /// Hold 期间参考出现也不改变状态（外部控制须显式 Track 接管）。
     #[test]
     fn hold_does_not_auto_take_over_reference() {
         let mut rig = Rig::new();
@@ -1393,7 +1320,6 @@ mod tests {
         assert!((out.setpoint.position - rig.state.position).norm() < 1e-3);
     }
 
-    /// 状态变化必须上报事件：指令引起的转移由 `command` 返回，自动转移由 `update` 返回。
     #[test]
     fn transitions_are_reported_as_events() {
         let mut rig = Rig::new();
@@ -1413,7 +1339,6 @@ mod tests {
             })
         );
 
-        // 起飞完成是自动转移，由 update 上报
         let mut event = Event::None;
         for _ in 0..1000 {
             let out = rig.fsm.update(DT, &rig.state, None, ok_health());
@@ -1431,7 +1356,6 @@ mod tests {
                 to: FlightState::Hold,
             }
         );
-        // 无决策的 tick 不报事件；已在该状态时重复指令也算无决策
         assert_eq!(
             rig.fsm.update(DT, &rig.state, None, ok_health()).event,
             Event::None
@@ -1442,7 +1366,6 @@ mod tests {
         );
     }
 
-    /// `Hold` 对所有已解锁状态开放：中止起飞/降落段并原地保持。
     #[test]
     fn hold_aborts_any_armed_segment() {
         let mut rig = Rig::new();
@@ -1457,12 +1380,10 @@ mod tests {
         assert_eq!(rig.fsm.state(), FlightState::Takeoff);
         assert_eq!(rig.cmd(Command::Hold), Ok(()));
         assert_eq!(rig.fsm.state(), FlightState::Hold);
-        // Hold 保持在中止瞬间的位置。
         let held = rig.state.position;
         rig.ticks(200);
         assert!((rig.state.position.z - held.z).abs() < 1e-6);
 
-        // 有效估计支持中止降落；估计失效必须锁存姿态降级。
         rig.cmd(Command::Land).unwrap();
         assert_eq!(rig.fsm.state(), FlightState::Land);
         let bad = Health {
@@ -1477,7 +1398,6 @@ mod tests {
         assert_eq!(rig.fsm.state(), FlightState::AttitudeFallback);
     }
 
-    /// 上锁状态电机不出力；解锁后出力（输出契约）。
     #[test]
     fn motors_follow_state() {
         let mut rig = Rig::new();
@@ -1494,7 +1414,6 @@ mod tests {
         );
     }
 
-    /// 悬停平衡点自检：状态机在 Hold 下给出"停在原地"的参考，位置模式不产生水平力。
     #[test]
     fn precision_landing_requires_target_and_missing_target_returns_hold() {
         let mut rig = Rig::new();
@@ -1592,7 +1511,6 @@ mod tests {
         assert_eq!(out.setpoint.velocity, Vector3::zeros());
         assert_eq!(out.setpoint.acceleration, Vector3::zeros());
     }
-    /// 起飞垂直参考由 `VelocitySmoothing` 生成：加速度与 jerk 受限，速度连续。
     #[test]
     fn takeoff_vertical_reference_is_jerk_limited() {
         let mut rig = Rig::new();

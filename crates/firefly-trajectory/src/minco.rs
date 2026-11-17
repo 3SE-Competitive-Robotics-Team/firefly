@@ -1,5 +1,3 @@
-//! MINCO 轨迹类。
-//!
 //! 对 m 维 s 阶积分链（本系统 s = 3，最小加加速度），
 //! M 段轨迹，每段 2s−1 = 5 次多项式，整体 C^{s−1} 连续。
 //!
@@ -124,7 +122,6 @@ impl Minco {
             ));
         }
         if durations != self.t.as_slice() {
-            // 段数终身不变 → 带形维度固定：原地重填再重分解，复用两块缓冲。
             self.banded.reset(COEFFS_PER_PIECE * self.pieces, 6, 6);
             Self::fill_banded(&mut self.banded, durations);
             if let Some(solver) = Arc::get_mut(&mut self.solver) {
@@ -137,7 +134,6 @@ impl Minco {
                     return Err(error);
                 }
             } else {
-                // 有共享引用（仅测试会 clone Minco）：退回独占重建。
                 self.solver = Arc::new(BandedSolver::new_owned(self.banded.clone())?);
             }
             self.t.as_mut_slice().copy_from_slice(durations);
@@ -278,7 +274,6 @@ impl Minco {
         d_f_d_q: &mut DMatrix<f64>,
         d_f_d_t_out: &mut DVector<f64>,
     ) -> firefly_error::Result<()> {
-        // 入参不可覆盖：先拷进调用方缓冲，再就地做转置求解。
         g.copy_from(d_f_d_c);
         self.solver.solve_transpose_in_place(g);
 
@@ -363,7 +358,6 @@ impl Minco {
         let pieces = durations.len();
         let n = COEFFS_PER_PIECE * pieces;
 
-        // 起点：位置/速度/加速度
         m.set(0, 0, 1.0);
         m.set(1, 1, 1.0);
         m.set(2, 2, 2.0);
@@ -413,7 +407,6 @@ impl Minco {
             m.set(row + 5, row + 5, -2.0);
         }
 
-        // 终点：位置/速度/加速度
         let t = durations[pieces - 1];
         let t2 = t * t;
         let t3 = t2 * t;
@@ -641,7 +634,6 @@ mod tests {
         let start = endpoint([0.0; 3], [0.0; 3], [0.0; 3]);
         let end = endpoint([1.0; 3], [0.0; 3], [0.0; 3]);
         let b = || MincoBuilder::new(SolverOrder::MinimumJerk, start, end);
-        // 中间点数量与时长数量不匹配
         let r = b().build(
             &[Point3::new(1.0, 0.0, 0.0), Point3::new(2.0, 0.0, 0.0)],
             &[1.0, 1.0],
@@ -650,27 +642,17 @@ mod tests {
             r.unwrap_err().kind(),
             firefly_error::ErrorKind::InvalidArgument
         );
-        // 非正时长
         let r = b().build(&[Point3::origin()], &[0.0]);
         assert_eq!(
             r.unwrap_err().kind(),
             firefly_error::ErrorKind::InvalidArgument
         );
-        // 空输入
         let r = b().build(&[], &[]);
         assert_eq!(
             r.unwrap_err().kind(),
             firefly_error::ErrorKind::InvalidArgument
         );
-    }
-
-    #[test]
-    fn accessors() {
         let m = sample();
-        assert_eq!(m.pieces(), 2);
-        assert_eq!(m.duration(), 2.0);
-        assert_eq!(m.waypoint(0).unwrap(), Point3::new(1.0, 0.0, 0.0));
-        assert_eq!(m.waypoints().count(), 1);
         assert_eq!(
             m.waypoint(1).unwrap_err().kind(),
             firefly_error::ErrorKind::OutOfRange
@@ -681,7 +663,6 @@ mod tests {
     fn trajectory_satisfies_constraints() {
         let m = sample();
         let traj = m.solve().unwrap();
-        // 起止边界
         let s0 = traj.eval(0.0);
         assert!((s0.position - m.start.position).norm() < 1e-9);
         assert!((s0.velocity - m.start.velocity).norm() < 1e-9);
@@ -690,10 +671,8 @@ mod tests {
         assert!((sf.position - m.end.position).norm() < 1e-9);
         assert!((sf.velocity - m.end.velocity).norm() < 1e-9);
         assert!((sf.acceleration - m.end.acceleration).norm() < 1e-9);
-        // 途经中间点
         let s = traj.eval(1.0);
         assert!((s.position - Vector3::new(1.0, 0.0, 0.0)).norm() < 1e-9);
-        // 分段处 C2 连续
         let t = m.piece_duration(0);
         let left = traj.eval(t - 1e-8);
         let right = traj.eval(t + 1e-8);

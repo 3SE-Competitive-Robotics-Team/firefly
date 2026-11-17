@@ -55,8 +55,6 @@ impl Samples {
         let k = samples_per_piece;
         let expected = traj.pieces() * (k + 1);
         self.grid.clear();
-        // `reserve` 追加的是相对当前 len 的容量；clear 后 len == 0，
-        // 直接按目标长度预留即可（容量已足够时是空操作）。
         self.grid.reserve(expected);
         for (i, ti) in traj.durations().iter().enumerate() {
             for j in 0..=k {

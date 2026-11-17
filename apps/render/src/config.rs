@@ -17,7 +17,6 @@ pub const DEFAULT_ENV_INTENSITY: f32 = 1500.0;
 /// 传感器采集缺省频率（Hz）。
 pub const DEFAULT_CAPTURE_HZ: f64 = 10.0;
 
-/// 场景照明配置。
 #[derive(Deserialize, Serialize, Clone, Copy, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct LightConfig {
@@ -38,7 +37,6 @@ impl Default for LightConfig {
     }
 }
 
-/// 传感器相机曝光配置。
 #[derive(Deserialize, Serialize, Clone, Copy, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct ViewConfig {
@@ -59,12 +57,6 @@ impl Default for ViewConfig {
     }
 }
 
-/// 场景环境光贴图（IBL）配置。
-///
-/// 半球渐变"天空"（`EnvironmentMapLight::hemispherical_gradient`）：近黑高光面
-/// 只靠方向光会「黑底 + 一点高光」，IBL 同时给暗部补光（漫反射）与柔和反射
-/// （镜面），是黑亮面读得出形体的关键。颜色为 sRGB 0~1，`intensity` 缩放后
-/// 单位 cd/m²。
 #[derive(Deserialize, Serialize, Clone, Copy, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct EnvConfig {
@@ -109,7 +101,6 @@ impl Default for EnvConfig {
     }
 }
 
-/// 传感器采集节拍配置。
 #[derive(Deserialize, Serialize, Clone, Copy, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureConfig {
@@ -166,23 +157,17 @@ impl CaptureConfig {
     }
 }
 
-/// `configs/render.toml` 顶层：场景光照、相机曝光、采集节拍与深度退化。
 #[derive(Resource, Deserialize, Clone, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub struct RenderConfig {
-    /// 场景照明。
     #[serde(default)]
     pub light: LightConfig,
-    /// 相机曝光。
     #[serde(default)]
     pub view: ViewConfig,
-    /// 传感器采集节拍。
     #[serde(default)]
     pub capture: CaptureConfig,
-    /// 场景环境光贴图。
     #[serde(default)]
     pub env: EnvConfig,
-    /// 深度传感器退化模型。
     #[serde(default)]
     pub depth_noise: crate::depth_noise::DepthNoiseOptions,
 }

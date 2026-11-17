@@ -59,7 +59,6 @@ fn parse_args() -> Result<Args> {
     let mut args = Args {
         config: default_config(),
         start: [0.0; 3],
-        // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
         goal: None,
         mandatory_stop: false,
     };
@@ -174,7 +173,6 @@ impl App {
         let depth_fusion =
             depth_mapping::DepthFusion::new(&grid, mapping.depth, config.obstacle_clearance)?;
         grid = depth_mapping::collision_grid(&grid)?;
-        // 虚拟地面/天花板（对照官方 enable_virtual_wall）：任一配置存在即单独生效
         if config.virtual_ground.is_some() || config.virtual_ceiling.is_some() {
             grid.set_virtual_wall(VirtualWall {
                 ground: config.virtual_ground.unwrap_or(f64::NEG_INFINITY),
@@ -182,7 +180,6 @@ impl App {
             });
         }
         let planner = firefly_planner::Planner::new(config, grid);
-        // 初始目标缺省 = 起点：悬停等待外部 `Firefly/Goal` 目标
         let initial_goal = goal;
         let goal = start;
         let manager = PlannerManager::with_planner(
@@ -191,10 +188,8 @@ impl App {
             Vector3::new(start[0], start[1], start[2]),
             Vector3::new(goal[0], goal[1], goal[2]),
         )?;
-        // 进程共享节点：所有端口由它派生，进程退出时统一 Drop 释放 IPC 资源
         let node = create_node()?;
         let log_ipc = firefly_observability::init_ipc(&node, "planner");
-        // 局部 VIO 是建图、规划与输出计时的唯一状态输入。
         let odom = odometry::OdometryReceiver::start()
             .map_err(|e| e.with_operation("创建规划器局部里程计订阅"))?;
         let depth = depth_mapping::DepthReceiver::start(depth_fusion, odom.history())?;
@@ -288,7 +283,6 @@ impl App {
                 {
                     continue;
                 }
-                // 目标不参与 sim 时钟锚定（CLI 墙钟）；最新一条生效
                 self.pending_goal = Some(*sample);
                 log::info!(
                     "收到新目标 ({:.2},{:.2},{:.2})",
@@ -300,7 +294,6 @@ impl App {
         }
         if let Some(sub) = &self.stop_sub {
             while (sub.receive()?).is_some() {
-                // 无载荷消息，收到即置位（对照官方 mandatoryStopCallback）
                 self.pending_mandatory_stop = true;
             }
         }
@@ -319,7 +312,6 @@ impl App {
         self.fsm_time = None;
         let before = self.solver.stats();
         self.exec_step()?;
-        // 执行状态独立于轨迹输出门控；等待新鲜地图期间仍报告新鲜状态。
         if self.state_fresh {
             self.output.status(
                 self.t_sim,
@@ -391,7 +383,6 @@ impl App {
     fn exec_step(&mut self) -> Result<()> {
         self.state_fresh = false;
         self.output.heartbeat()?;
-        // 先消费传感器（更新权威仿真时钟），再取当帧 sim 时刻
         self.poll_sensors()?;
         let now = self.t_sim;
         if self.pending_mandatory_stop {
@@ -441,8 +432,6 @@ impl App {
                 view_half_angle: self.view_half_angle,
             });
 
-        // 动态目标：收到新目标即重目标（重算全局路径 + 重置状态机），
-        // 下一 tick 重新规划飞往新目标
         if let Some(goal) = self.pending_goal.take() {
             if goal.has_yaw > 1 || !goal.yaw.is_finite() {
                 log::warn!("invalid goal heading");
@@ -457,7 +446,6 @@ impl App {
                         .set_goal_yaw((goal.has_yaw == 1).then_some(goal.yaw));
                     if !self.fsm.is_mandatory_stopped() {
                         self.output.goal_timestamp = goal.timestamp;
-                        // 重复目标不重建轨迹；重发当前轨迹，让采样端看到同一目标身份。
                         self.republish_trajectory = repeated && !heading_changed;
                     }
                     log::info!(
@@ -481,7 +469,6 @@ impl App {
         report.replanned |= self.solver.tick(&mut self.fsm, now, measured, map_version);
         self.handoff_trajectory()?;
 
-        // 可视化：新轨迹 / 无人机位姿（经 Firefly/Viz 发布）
         if report.replanned
             && let Some(result) = self.fsm.manager().last_result()
         {
@@ -578,8 +565,6 @@ impl App {
         };
         let now = self.t_sim;
         let measured = Some(snapshot.state);
-        // 地图超时使正在执行的轨迹进入急停；等待地图期间保持停止锁存，
-        // 撤销异步结果资格；深度超时或线程结束保持急停锁存。
         let odometry = self.state_input.odometry().unwrap();
         if !self.synchronize_map(&odometry)? {
             self.solver.cancel();
@@ -621,7 +606,6 @@ impl App {
 
     /// `WaitSet` 分别驱动执行状态机 100Hz 与安全检查 20Hz。
     fn run(&mut self) -> Result<()> {
-        // 静态产物一次性记录（全局任务航点不随 tick 重复写）
         self.log_line_strip(
             "plan/global_path",
             self.fsm.manager().global_path(),
@@ -663,10 +647,6 @@ impl App {
                 self.stop_failed_callback();
                 return CallbackProgression::Stop;
             }
-            // 动态目标工作流：轨迹结束后保持运行并等待新目标，
-            // 不因 finished 退出进程（仅 SIGINT/SIGTERM 优雅退出）
-            // 每帧 trace 上下文：续接新鲜 odom 的 trace（跨进程同周期一条
-            // trace），无新鲜 odom 时自建未采样 root（不产生 span 记录）
             let root = match self.odom_trace.filter(|_| !self.state_input.stopped()) {
                 Some((tid, sid, sampled)) => Span::root(
                     "planner",
@@ -748,9 +728,6 @@ impl App {
         }
         CallbackProgression::Continue
     }
-
-    // --- 可视化发布（经 Firefly/Viz 话题，mimir 进程统一写 rerun）---
-
     /// 发布一条可视化消息；无发布端或发布失败时静默降级（可视化不阻断规划）。
     fn viz_publish(&self, msg: &VizMessage) {
         if let Some(pub_) = &self.viz_pub
@@ -785,7 +762,6 @@ impl App {
             arrows.push([s.velocity.x, s.velocity.y, s.velocity.z]);
         }
         self.log_line_strip(entity, &pts, (255, 96, 96), t);
-        // 速度箭头挂在子实体，随轨迹同时间戳更新
         let mut msg = VizMessage::base(kind::ARROWS, t, &format!("{entity}/velocity"));
         msg.color = [255, 96, 96];
         msg.arrow_count = SAMPLES.min(ARROWS_MAX) as u32;
@@ -874,8 +850,6 @@ fn main() {
             std::process::exit(1);
         }
     };
-    // 可视化发布端在 App::new 内随进程共享节点创建（经 Firefly/Viz 话题，
-    // mimir 进程统一写 rerun）
     match App::new(
         toml_cfg.config,
         toml_cfg.mapping,

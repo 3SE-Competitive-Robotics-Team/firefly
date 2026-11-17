@@ -212,7 +212,6 @@ mod tests {
     fn single_peer() -> (firefly_trajectory::Minco, firefly_trajectory::Trajectory) {
         let minco = test_minco();
         let traj = minco.solve().unwrap();
-        // 幽灵机:静止在轨迹中点附近(会触发避碰)
         let peer = firefly_trajectory::MincoBuilder::new(
             firefly_trajectory::SolverOrder::MinimumJerk,
             firefly_trajectory::Endpoint {
@@ -237,7 +236,6 @@ mod tests {
     fn peer_cost_zero_and_positive() {
         let minco = test_minco();
         let traj = minco.solve().unwrap();
-        // 远处 peer → 零代价
         let far = firefly_trajectory::MincoBuilder::new(
             firefly_trajectory::SolverOrder::MinimumJerk,
             firefly_trajectory::Endpoint {
@@ -257,7 +255,6 @@ mod tests {
         .unwrap();
         let p = SwarmPenalty::new(0.5, 2.0, 1.0, vec![Peer::new(0, 0.0, far, 0.5)]);
         assert_eq!(p.evaluate(&traj), 0.0);
-        // 近处 peer(同一轨迹,距离恒 0)→ 正代价
         let p = SwarmPenalty::new(0.5, 2.0, 1.0, vec![Peer::new(0, 0.0, traj.clone(), 0.5)]);
         assert!(p.evaluate(&traj) > 0.0);
     }
@@ -304,14 +301,11 @@ mod tests {
 
     #[test]
     fn peer_start_time_offsets_local_clock() {
-        // start_time=δ 的 peer 在绝对时刻 t_abs 的求值,等价于 start_time=0
-        // 的同一轨迹在 t_abs−δ 处的求值(官方 swarmGradCostP 的 pt_time 公式)
         let (_, peer) = single_peer();
         let dur = peer.duration();
         let delta = 0.7;
         let delayed = Peer::new(0, delta, peer.clone(), 0.5);
         let anchored = Peer::new(0, 0.0, peer, 0.5);
-        // 常规段 / 超时长匀速外推 / 负局部时刻(多项式回推)三种情形
         for t_abs in [dur * 0.5, dur + 0.5, delta * 0.5] {
             let s_delayed = delayed.sample_at(t_abs);
             let s_anchored = anchored.sample_at(t_abs - delta);

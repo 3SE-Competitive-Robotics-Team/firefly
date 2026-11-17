@@ -1,30 +1,4 @@
 //! 飞控进程：1kHz 控制环（`firefly-flight`）+ iceoryx2。
-//!
-//! 输入：
-//! - `Firefly/PlantState`（真值，每物理步）——仅供倾斜误差评测。
-//! - `Firefly/Airframe`（质量/惯量/旋翼几何/电机上限，1Hz 电平）——飞控参数的唯一来源；
-//! - `Firefly/Odometry`——连续 odom 系位置/速度/航向反馈；
-//! - `Firefly/CorrectedOdometry`——同时间戳配对建立 map←odom，转换地图参考；
-//! - `Firefly/Imu`（陀螺 + 加计，1kHz）——独立线程的备用姿态 ESKF；
-//! - `Firefly/VioAttitude`——VIO 后验的高频姿态与角速度预测；
-//! - `Firefly/Reference`（规划参考：位置/速度/偏航/偏航角速度）；
-//! - `Firefly/Command`（地面站指令：解锁/上锁/起飞/保持/跟踪/降落）。
-//!
-//! 输出：`Firefly/Control`（4 电机推力，1kHz；被控对象每步取最新）——**每个** tick 都发，
-//! 上锁时发零推力。仿真按指令新鲜度决定物理是否推进，板载执行器断流时输出零推力脉宽。
-//!
-//! [`FlightFsm`] 根据估计状态和健康条件生成参考与电机使能信号。
-//! [`firefly_flight::Controller`] 移植 PX4 的控制与分配算法：
-//! 位置 → 姿态 → 角速度 → 分配；本进程只做坐标/单位边界与主备姿态选择。
-//! 内环正常读取 VIO 预测，降级读取独立 ESKF 的姿态与去偏角速度，位置/速度来自局部里程计。
-//! 真值只用于评测。姿态主备选择约定见 `docs/architecture.md#imu`。
-//!
-//! 控制节拍使用墙钟，诊断时间取自 IMU。未就绪时持续发零推力，使被控对象能产生初始化测量。
-//!
-//! 本进程不建逐 tick span（1kHz）：时延证据用 tick 统计进 rrd，
-//! 跨进程时延用 Control 消息头里的发送时间戳（sim 侧测）。
-//!
-//! 运行：`cargo run --release -p fc`（配合 `uv run firefly-sim`）。
 
 mod attitude;
 mod config;
@@ -59,7 +33,6 @@ use firefly_pubsub::viz::{SCALARS_MAX, ScalarMessage, VizPublisher};
 use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 
-/// 缺省配置：按安装布局解析，与启动目录无关。
 fn default_config() -> PathBuf {
     firefly_config::paths::config("fc.toml")
 }
@@ -74,15 +47,11 @@ const IMU_STALE_LIMIT: Duration = Duration::from_millis(50);
 const REFERENCE_STALE_LIMIT: Duration = Duration::from_millis(500);
 /// 落后节拍上限：连续落后超过这么多个周期就重新对齐（避免越追越紧）。
 const MAX_LAG_TICKS: u32 = 10;
-/// 可视化发布周期（秒）：10Hz。
 const VIZ_PERIOD: f64 = 0.1;
-/// 诊断（日志 + 可视化）周期（秒）：1Hz。
 const STATS_PERIOD: f64 = 1.0;
 
-/// 退出标志（信号处理器置位，主循环检查）。
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-/// 解析 `--config <path>`（缺省 [`default_config`]）。
 fn parse_config_path() -> Result<PathBuf, String> {
     let mut it = std::env::args().skip(1);
     let mut path = default_config();
@@ -100,44 +69,34 @@ fn parse_config_path() -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// 连续 odom 系位置/速度反馈快照，仅来自 `Firefly/Odometry`。
 #[derive(Clone, Copy)]
 struct Estimate {
     /// 状态的测量时间（秒）。
     timestamp: f64,
-    /// 估计位置（m）。
     position: Vector3<f32>,
-    /// 估计速度（m/s）。
     velocity: Vector3<f32>,
     /// 最近有效估计到达的墙钟时刻。
     received_at: Instant,
-    /// 估计器已初始化（解锁前置条件之一）。
     initialized: bool,
 }
 
-/// 运行期输入快照（每 tick 排空到最新）。
 #[derive(Default)]
 struct Inputs {
     landing: Option<(LandingTargetMessage, Instant)>,
     /// 真值评测样本；控制与健康判据不得读取。
     plant: Option<(PlantStateMessage, Instant)>,
-    /// 机体/执行器（装配成 `firefly-flight` 的参数）。
     vehicle: Option<(QuadParams, Airframe)>,
-    /// odom 系位置/速度反馈。
     estimate: Option<Estimate>,
     frames: frames::ControlFrames,
     /// 最新 IMU 传感器时间（秒），作为控制与诊断时间轴。
     imu_time: f64,
-    /// 独立 IMU 工作线程发布的完整快照。
     attitude: Option<imu::Snapshot>,
     primary: attitude::Input,
     /// 参考（位置/速度/偏航/偏航角速度）与到达墙钟时刻（判新鲜）。
     reference: Option<(ReferenceMessage, Instant)>,
-    /// 最新地面站指令（序号最大的那条）。
     command: Option<CommandMessage>,
 }
 
-/// 控制输入、指令输出与评测端口。
 struct Ports {
     landing: Subscriber<LandingTargetMessage>,
     plant: Subscriber<PlantStateMessage>,
@@ -179,7 +138,6 @@ impl Ports {
         })
     }
 
-    /// 可视化发布器（只读借用，供 [`Controller::publish_viz`]）。
     fn viz_ref(&self) -> &VizPublisher {
         &self.viz
     }
@@ -259,7 +217,6 @@ impl Ports {
                 inputs.reference = Some((m, Instant::now()));
             }
         }
-        // 只留序号最大的指令：一次性 CLI 为打通信道会重复投递同一条，积压也折叠成最新
         while let Some(sample) = self.command.receive()? {
             if inputs
                 .command
@@ -288,7 +245,6 @@ fn valid_reference(m: &ReferenceMessage) -> bool {
     .all(|v| v.is_finite())
 }
 
-/// `AirframeMessage` → `firefly-flight` 参数（被控对象是唯一来源）。
 fn airframe_to_params(msg: &AirframeMessage) -> (QuadParams, Airframe) {
     let quad = QuadParams {
         mass: msg.mass as f32,
@@ -311,7 +267,6 @@ fn airframe_to_params(msg: &AirframeMessage) -> (QuadParams, Airframe) {
     (quad, airframe)
 }
 
-/// 健康电平：解锁前置条件与失效保护的输入（飞控自己算，不由被控对象喂）。
 fn health_of(inputs: &Inputs) -> Health {
     Health {
         estimator_ready: inputs.estimate.is_some_and(|e| e.initialized)
@@ -344,7 +299,6 @@ fn fresh_reference(inputs: &Inputs) -> Option<PositionSetpoint> {
     if at.elapsed() > REFERENCE_STALE_LIMIT {
         return None;
     }
-    // 用 IMU 时刻（仿真钟）算外推量：参考消息带的是它被算出的仿真时刻。
     let now_sim = if inputs.attitude.is_some() {
         inputs.imu_time
     } else {
@@ -372,7 +326,6 @@ fn command_of(msg: &CommandMessage) -> Option<Command> {
     }
 }
 
-/// 状态转移与失效保护进日志（双 sink：stderr + `Firefly/Log` → rrd `logs/fc`）。
 fn report_event(event: Event) {
     match event {
         Event::None => {}
@@ -395,7 +348,6 @@ impl CommandSequence {
         sequence > self.0
     }
 
-    /// Consume each sequence once, including commands that are subsequently rejected.
     fn consume(&mut self, sequence: u64) -> bool {
         if !self.is_new(sequence) {
             return false;
@@ -405,7 +357,6 @@ impl CommandSequence {
     }
 }
 
-/// 控制环的跨 tick 状态。
 struct Controller {
     team: u32,
     landing_identity: Option<(u64, f64)>,
@@ -416,24 +367,19 @@ struct Controller {
     standby_yaw: f32,
     position_error: Vector3<f32>,
     position_target: Vector3<f32>,
-    /// 飞行状态机（模式与安全层）。
     fsm: FlightFsm,
     /// 已执行的最大指令序号（重复投递去重）。
     commands: CommandSequence,
     /// 相对起飞点高度（m；最近一 tick 的估计高度，进日志与 rrd）。
     altitude: f32,
-    /// 上次可视化时刻（仿真时间）。
     last_viz: f64,
     last_tick_diagnostic: Option<Instant>,
     /// 最近一次控制使用的机体系角速度（FLU，rad/s），供诊断。
     ang_vel: Vector3<f32>,
-    /// PX4 控制链（位置 → 姿态 → 角速度 → 分配）。
     px4: Px4Controller,
     /// 解锁前首个失败项的位掩码（未解锁时有效）。
     arming_failed: u32,
-    /// 最近一 tick 的失效条件位掩码。
     failsafe_flags: FailsafeFlags,
-    /// 最近一 tick 的失效动作。
     failsafe_action: FailsafeAction,
 }
 
@@ -488,8 +434,6 @@ impl Controller {
             ang_vel,
         };
         self.ang_vel = state.ang_vel;
-        // 解锁还要求独立 ESKF 热备可用；诊断必须与 `apply_command` 的实际门控一致，
-        // 否则地面站会看到“检查全过、Arm 仍被拒”。
         let mut arm_health = health;
         arm_health.estimator_ready &= inputs
             .attitude
@@ -731,7 +675,6 @@ impl Controller {
         }
     }
 
-    /// 控制量 + 模式 + 姿态校验进 rrd（10Hz）。
     #[allow(clippy::too_many_lines)] // 诊断字段按实体平铺，拆函数只会增加跳转
     fn publish_viz(
         &mut self,
@@ -890,7 +833,6 @@ impl Controller {
             &[f64::from(self.failsafe_action.code())],
         );
         if let Some(truth) = plant_attitude {
-            // 重力在机体系中的方向不依赖局部航向，可直接与真值比较。
             let error = (attitude.inverse() * Vector3::z())
                 .angle(&(truth.inverse() * Vector3::z()))
                 .to_degrees();
@@ -901,7 +843,6 @@ impl Controller {
                 &[f64::from(error)],
             );
         }
-        // 模式编码见 `firefly_flight::FlightState::code`
         publish_scalars(
             ports.viz_ref(),
             sim_time,
@@ -917,7 +858,6 @@ impl Controller {
     }
 }
 
-/// 每 tick 的统计（1Hz 汇总进日志 + rrd）。
 #[derive(Default)]
 struct Stats {
     ticks: u64,
@@ -951,7 +891,6 @@ fn pace(next: &mut Instant, period: Duration, stats: &mut Stats) {
     *next += period;
 }
 
-/// 发布一条标量可视化（10Hz；`values[..n]` 单实体多值）。
 fn publish_scalars(viz: &VizPublisher, t: f64, entity: &str, values: &[f64]) {
     let mut msg = ScalarMessage::base(t, entity);
     let count = values.len().min(SCALARS_MAX);
@@ -975,7 +914,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let period = Duration::from_secs_f64(1.0 / cfg.rate_hz);
     let dt = (1.0 / cfg.rate_hz) as f32;
 
-    // 优雅退出：SIGINT/SIGTERM 置位退出标志（guard 存活到进程退出）。
     // 回调只写标志：信号上下文里不做日志/分配（异步信号安全）。
     let _signal_guard: SignalGuard = SignalHandler::register_multiple_signals(
         &vec![FetchableSignal::Interrupt, FetchableSignal::Terminate],
@@ -1023,7 +961,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tick += 1;
         pace(&mut next, period, &mut stats);
 
-        // ---- 诊断（1Hz）：tick 率/晚到/饱和/发布数（唯一时延证据来源） ----
         let window = window_start.elapsed();
         if window >= Duration::from_secs_f64(STATS_PERIOD) {
             let root = Span::root("fc-stats", SpanContext::random().sampled(false));
@@ -1301,7 +1238,6 @@ mod tests {
         controller.motor_output(&inputs, 0.001);
         assert_eq!(controller.source, attitude::Source::Vio);
         assert!(controller.attitude.angle() < 1e-6);
-        // 高频主预测断流，而低频里程计仍新鲜，也必须接管。
         inputs.primary = attitude::Input::default();
         let motors = controller.motor_output(&inputs, 0.001).0;
         assert_eq!(controller.source, attitude::Source::Standby);

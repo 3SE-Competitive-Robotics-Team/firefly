@@ -54,7 +54,6 @@ mod tests {
         assert!((config.control.position.tilt_max_deg - 32.0).abs() < 1e-6);
         assert!((config.control.position.vel_max_horizontal - 3.0).abs() < 1e-6);
         assert!((config.control.position.p[0] - 0.95).abs() < 1e-6);
-        // 角速度/姿态环未覆盖，使用 PX4 默认值。
         assert!((config.control.rate.p[0] - 0.15).abs() < 1e-6);
         assert!((config.control.attitude.p[0] - 4.0).abs() < 1e-6);
         assert!((config.control.position.vel_i[0] - 0.4).abs() < 1e-6);

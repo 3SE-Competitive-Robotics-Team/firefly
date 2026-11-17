@@ -34,23 +34,17 @@ use crate::buffer::{BufferPool, PooledBuffer};
 use crate::grayscale::GrayPackPipeline;
 use crate::rig::Eye;
 
-/// 单帧深度字节数（`Depth32Float`，每像素 4 字节）。
 pub const FRAME_BYTES: usize = 4 * IMAGE_WIDTH * IMAGE_HEIGHT;
-/// 单帧紧凑灰度字节数。
 pub const GRAY_BYTES: usize = IMAGE_WIDTH * IMAGE_HEIGHT;
 /// 拷贝行距（字节，256 对齐，无填充）。
 pub const BYTES_PER_ROW: u32 = 4 * IMAGE_WIDTH as u32;
 /// 回读缓冲组数：双缓冲，允许上一拍在途时发起下一拍。
 pub const CAPTURE_SETS: usize = 2;
 
-/// 传感器种类（回读回复的归属标记）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SensorKind {
-    /// 左目灰度。
     Left,
-    /// 右目灰度。
     Right,
-    /// 深度预通道。
     Depth,
     Down,
 }
@@ -83,32 +77,24 @@ impl Default for CaptureTiming {
 /// 回读请求（主世界→渲染世界，`seq` 关联四份回复与位姿时间戳）。
 #[derive(Clone, Copy, Debug)]
 pub struct CaptureRequest {
-    /// 单调序号。
     pub seq: u64,
     pub timing: CaptureTiming,
     /// 位姿时间戳（秒，发布时原样透传）。
     pub stamp: f64,
     /// 上游 trace 上下文（发布时续接）。
     pub trace: TraceContext,
-    /// 左目灰度目标。
     pub left: AssetId<Image>,
-    /// 右目灰度目标。
     pub right: AssetId<Image>,
     pub down: Option<AssetId<Image>>,
 }
 
-/// 回读回复（渲染世界→主世界）。
 #[derive(Debug)]
 pub struct CapturedFrame {
-    /// 对应请求的序号。
     pub seq: u64,
     pub timing: CaptureTiming,
     pub down_requested: bool,
-    /// 传感器种类。
     pub kind: SensorKind,
-    /// 时间戳（透传自请求）。
     pub stamp: f64,
-    /// 上游 trace 上下文（透传自请求）。
     pub trace: TraceContext,
     /// 紧凑像素（灰度 u8 / 深度小端 f32，行主序无填充）。
     pub bytes: PooledBuffer,
@@ -124,16 +110,13 @@ pub enum CaptureReply {
 /// 跨世界回读通道（主世界与渲染世界各持同一 `Arc`）。
 #[derive(Resource, Clone, Default)]
 pub struct CaptureHub {
-    /// 共享内核。
     pub inner: Arc<HubInner>,
 }
 
-/// 回读通道内核。
 #[derive(Debug, Default)]
 pub struct HubInner {
     /// 待执行请求；主世界保持对应相机姿态，直到渲染世界确认拷贝。
     pub request: Mutex<Option<CaptureRequest>>,
-    /// 已完成的回复队列。
     pub done: Mutex<VecDeque<CaptureReply>>,
     /// 在途缓冲组数（`0..=CAPTURE_SETS`；组内四份回复全部完成后递减）。
     pub inflight_sets: AtomicU32,
@@ -143,12 +126,10 @@ pub struct HubInner {
 }
 
 impl CaptureHub {
-    /// 发起回读请求（新位姿到达时调用；上个请求若在途则等下帧）。
     pub fn request(&self, req: CaptureRequest) {
         *self.inner.request.lock().expect("hub poisoned") = Some(req);
     }
 
-    /// 取出全部已完成的回复。
     pub fn drain(&self) -> Vec<CaptureReply> {
         self.inner
             .done
@@ -158,17 +139,14 @@ impl CaptureHub {
             .collect()
     }
 
-    /// 是否有请求待渲染世界取走。
     pub fn has_pending(&self) -> bool {
         self.inner.request.lock().expect("hub poisoned").is_some()
     }
 
-    /// 是否还能发起新一拍（有空闲缓冲组）。
     pub fn can_issue(&self) -> bool {
         (self.inner.inflight_sets.load(Ordering::SeqCst) as usize) < CAPTURE_SETS
     }
 
-    /// 最近被取走的请求序号（未被取走时保持旧值）。
     pub fn taken_seq(&self) -> u64 {
         self.inner.taken_seq.load(Ordering::SeqCst)
     }
@@ -191,11 +169,8 @@ struct CaptureSet {
     right_packed: Buffer,
     down_packed: Buffer,
     down: Buffer,
-    /// 左目暂存。
     left: Buffer,
-    /// 右目暂存。
     right: Buffer,
-    /// 深度暂存。
     depth: Buffer,
     /// 在途回复数（3 → 0）；0 表示本组空闲，可再取一拍。
     pending: Arc<AtomicU32>,
@@ -204,7 +179,6 @@ struct CaptureSet {
 /// 回读暂存缓冲组池（`init_gpu_resource` 创建，设备丢失时重建）。
 #[derive(Resource)]
 struct CaptureBuffers {
-    /// 双缓冲组。
     sets: [CaptureSet; CAPTURE_SETS],
     left: BufferPool,
     right: BufferPool,
@@ -291,7 +265,6 @@ fn copy_sensors(
         return;
     }
 
-    // 先找空闲组：全忙时把请求留在槽里（主世界不会顶掉），下帧再试。
     let Some(set) = buffers
         .sets
         .iter()
@@ -333,7 +306,6 @@ fn copy_sensors(
         return;
     };
 
-    // 请求被真正消费（拷贝已编码）：主世界以 `taken_seq` 判据收起相机。
     let down_bytes = if down.is_some() {
         buffers.down.take()
     } else {
@@ -505,7 +477,6 @@ fn map_for_readback(
     });
 }
 
-/// 回读插件（渲染世界侧系统注册）。
 pub struct CapturePlugin;
 
 impl Plugin for CapturePlugin {
@@ -513,9 +484,6 @@ impl Plugin for CapturePlugin {
         app.add_plugins(ExtractComponentPlugin::<Eye>::default());
         let hub = app.world().resource::<CaptureHub>().clone();
         let render_app = app.sub_app_mut(bevy::render::RenderApp);
-        // 暂存缓冲必须等渲染设备就绪后创建（`RenderDevice` 在插件
-        // `build` 时尚不存在，`init_gpu_resource` 将其推迟到
-        // `RenderStartup`，设备丢失重建时亦会自动重建）。
         render_app
             .insert_resource(hub)
             .init_resource::<ExtractedRequest>()

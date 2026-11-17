@@ -167,22 +167,22 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationAbsSc<'a, S, POSE
         normal_to_square_root(h, &b)
     }
     /// # Panics
-    /// This operation aborts in the original Schur implementation.
+    /// Always panics.
     pub fn jacobian_column_squared_norms(&self) -> DVector<S> {
         panic!("Original abs SC does not implement Jacobian scaling")
     }
     /// # Panics
-    /// This operation aborts in the original Schur implementation.
+    /// Always panics.
     pub fn scale_jl_cols(&mut self) {
         panic!("Original abs SC does not implement landmark scaling")
     }
     /// # Panics
-    /// This operation aborts in the original Schur implementation.
+    /// Always panics.
     pub fn scale_jp_cols(&mut self, _scaling: &DVector<S>) {
         panic!("Original abs SC does not implement pose scaling")
     }
     /// # Panics
-    /// This operation aborts in the original Schur implementation.
+    /// Always panics.
     pub fn set_landmark_damping(&mut self, _lambda: S) {
         panic!("Original abs SC does not implement landmark damping")
     }

@@ -167,8 +167,6 @@ fn run<S: BasaltScalar>(text: &str, tolerance: f64) {
         );
     }
 }
-// Exercise mixed pose/state ordering, unobserved poses and accumulation into
-// nonzero outputs. The independent dense product includes every padded column.
 fn check_sparse_accumulation<S: BasaltScalar>(
     point: &Keypoint<S>,
     relative: &HashMap<(TimeCamId, TimeCamId), RelPoseLin<S>>,
@@ -226,9 +224,7 @@ fn check_sparse_accumulation<S: BasaltScalar>(
     }
 }
 // The componentwise dot-product forward-error theorem, with explicit input
-// perturbations. A relative tolerance on H alone is invalid under cancellation:
-// even the C++ oracle's exact exported-J dot differs by 4.03e-4 at H[4,16].
-// J and residuals themselves retain the fixed oracle thresholds above.
+// perturbations, including cancellation in H.
 fn check_normal_equations<S: BasaltScalar>(
     storage: &DMatrix<S>,
     reference: &Value,

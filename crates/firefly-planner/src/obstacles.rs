@@ -1,23 +1,13 @@
 //! 障碍约束平面生成，对照 EGO-Planner-v2
 //! `poly_traj_optimizer.cpp` 的 `computePointsToCheck` /
 //! `finelyCheckAndSetConstraintPoints` / `roughlyCheckConstraintPoints`。
-//!
-//! 以 `res/max_vel` 时间步稠密采样，按每段 K 个约束点分桶。
-//! 碰撞段向前/向后寻找自由端点，由 A* 搜索绕行路径；无自由端点时拒绝。
-//! 约束方向由轨迹点与 A* 路径的交点确定，平面基点沿交点到轨迹点的方向
-//! 按地图分辨率步进，取障碍表面边界。
-//!
-//! 约束点布局对齐官方 `getInitConstraintPoints(K)`:**N·K+1** 点
-//! (每段 K 个采样 + 尾端点,段边界不重复);代价/检测按 `i_dp = i·K + j`
-//! 索引;前 2/3 约束点(`two_thirds_id`)才施加障碍/集群/队形力。
 
 use firefly_map::{GridMap, Plane};
 use firefly_search::Astar;
 use firefly_trajectory::Trajectory;
 use nalgebra::Vector3;
 
-/// 带时间戳的稠密采样点:(相对轨迹起点的时间 秒, 位置),
-/// 官方 `PtsChk_t` 元素。
+/// 稠密采样点：（相对轨迹起点的时间，秒；位置）。
 pub type SamplePoint = (f64, Vector3<f64>);
 /// 带时间戳检查点:按约束点桶组织的稠密采样(官方 `PtsChk_t`)。
 /// 不变量:同一桶内及相邻桶间时间戳单调不减;首桶必含 t≈0 的采样;
@@ -47,7 +37,6 @@ pub fn constraint_sample_points(traj: &Trajectory, k: usize) -> Vec<Vector3<f64>
         for j in 0..=k {
             pts.push(traj.eval(prefix + j as f64 * step).position);
             if j == k && i + 1 < n {
-                // 段边界:官方 push 但 i_dp 不递增(由下一段 j=0 覆盖同一索引)
                 pts.pop();
             }
         }
@@ -59,21 +48,15 @@ pub fn constraint_sample_points(traj: &Trajectory, k: usize) -> Vec<Vector3<f64>
 /// 碰撞段(官方 `segments` 一项):控制点下标闭区间 [in, out]。
 pub type CollisionSpan = (usize, usize);
 
-/// 官方 `finelyCheckAndSetConstraintPoints` 返回值。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckResult {
-    /// 无碰撞段,轨迹安全。
     Free,
-    /// 已并入约束平面(碰撞,平面已生成)。
     Finished,
-    /// 错误(稠密采样退化 / A\* 失败),应放弃本次规划。
     Error,
 }
 
-/// 障碍扫描器:稠密采样 + 分段 + A\* 绕障 + 交点平面。
 pub struct ObstacleScanner<'a> {
     map: &'a GridMap,
-    /// 每段约束点数(官方 `constraint_points_perPiece`)。
     samples_per_piece: usize,
     /// 稠密采样时间步:res / `max_vel`(官方 `computePointsToCheck`)。
     max_vel: f64,
@@ -127,9 +110,6 @@ impl<'a> ObstacleScanner<'a> {
             t_seg_start.push(acc);
         }
         let total = acc;
-        // 采样步长取「分辨率/最大速度」与「最短段时长/K/1.5」的较小者
-        // （官方 `computePointsToCheck` 的 min 上限）：后者保证每桶至少
-        // 1.5 次采样，短段轨迹（如急停定点段）不会跳桶导致覆盖失败。
         let t_step = (res / self.max_vel).min(
             durations.iter().copied().fold(f64::INFINITY, f64::min)
                 / self.samples_per_piece as f64
@@ -146,7 +126,6 @@ impl<'a> ObstacleScanner<'a> {
         loop {
             if t > total {
                 if touch_goal && !pts.is_empty() {
-                    // 官方:丢弃尾部空桶;全空视为失败
                     while pts.last().is_some_and(Vec::is_empty) {
                         pts.pop();
                     }
@@ -179,13 +158,7 @@ impl<'a> ObstacleScanner<'a> {
         Some(pts)
     }
 
-    /// 官方 `computePointsToCheck` 的 `setLocalTrajFromOpt` 调用形态:
-    /// 按 [`two_thirds_id`] 截断生成入库检查点。规划成功后调用一次挂到
-    /// 执行轨迹上,供执行期碰撞监控扫描(与规划内层共用同一采样器,
-    /// 保证监控所见即规划所验)。
-    ///
-    /// 返回 `None` = 稠密采样退化(非 `touch_goal` 时轨迹在覆盖前 2/3 桶前
-    /// 耗尽 / 全部桶为空,官方报错拒收);调用方必须视同本次规划失败。
+    /// 按 [`two_thirds_id`] 截断生成执行期检查点，采样覆盖不足时返回 `None`。
     #[must_use]
     pub fn compute_points_to_check(
         &self,
@@ -196,12 +169,7 @@ impl<'a> ObstacleScanner<'a> {
         self.points_to_check(traj, two_thirds_id(cols, touch_goal), touch_goal)
     }
 
-    /// 官方 `finelyCheckAndSetConstraintPoints`(`flag_first_init` 语义由调用方
-    /// 决定):稠密采样 → 占据分段(in/out)→ 每段 A\* 绕障 → 交点平面。
-    ///
-    /// [`Self::finely_check`] 的完整形态:同时返回碰撞段(官方
-    /// `final_segment_ids`:仅平面分配成功的段,供多拓扑候选生成使用;
-    /// 无碰撞时为空)。
+    /// 追加约束平面，并返回平面生成成功的碰撞段。
     pub fn finely_check_with_segments(
         &self,
         astar: &mut Astar,
@@ -277,7 +245,6 @@ impl<'a> ObstacleScanner<'a> {
         let mut final_spans = Vec::with_capacity(segment_ids.len());
         for (i, &span) in segment_ids.iter().enumerate() {
             let alloc = adjusted_span(&segment_ids, i, points.len());
-            // 官方 final_segment_ids:仅平面生成成功的段进入返回列表
             if assign_planes_for_segment(self.map, &paths[i], points, span, alloc, planes) {
                 final_spans.push((span.start, span.end));
             }
@@ -285,9 +252,6 @@ impl<'a> ObstacleScanner<'a> {
         (CheckResult::Finished, final_spans)
     }
 
-    /// 官方 `finelyCheckAndSetConstraintPoints`(`flag_first_init` 语义由调用方
-    /// 决定):稠密采样 → 占据分段(in/out)→ 每段 A* 绕障 → 交点平面。
-    ///
     /// `points` = 当前轨迹约束点(N·K+1),`planes` = 按约束点索引组织的
     /// {s,v} 平面池(本函数**就地追加**新平面)。返回 [`CheckResult`]。
     pub fn finely_check(
@@ -302,9 +266,7 @@ impl<'a> ObstacleScanner<'a> {
             .0
     }
 
-    /// 官方 `roughlyCheckConstraintPoints`(L-BFGS 内循环):在约束点数组上
-    /// 检测未覆盖穿入点,沿数组向前/向后找最近自由点(in/out,末端无自由点
-    /// 即放弃),每段 A\* 绕障 + 交点平面。返回是否有新障碍(触发 Rebound)。
+    /// 检测未覆盖的穿入点并追加平面；返回是否有新障碍。
     pub fn roughly_check(
         &self,
         astar: &mut Astar,
@@ -380,13 +342,11 @@ impl<'a> ObstacleScanner<'a> {
             match astar.search(self.map, in_pt, out_pt) {
                 Ok(p) => paths.push(p.points().to_vec()),
                 Err(_) if i + 1 < segment_ids.len() => {
-                    // 连下一段(官方 corner case 2)
                     segment_ids[i].end = segment_ids[i + 1].end;
                     segment_ids.remove(i + 1);
                     continue;
                 }
                 Err(_) => {
-                    // 官方:丢弃该段
                     segment_ids.remove(i);
                     continue;
                 }
@@ -406,8 +366,6 @@ impl<'a> ObstacleScanner<'a> {
         true
     }
 
-    /// 官方 `AstarSearch(in, out)` 逐段搜索(`SEARCH_ERR` 连下一段;末段失败
-    /// 返回 `None` → 调用方按 ERR 处理)。
     fn a_star_paths(
         &self,
         astar: &mut Astar,
@@ -418,7 +376,6 @@ impl<'a> ObstacleScanner<'a> {
         let mut i = 0usize;
         while i < segment_ids.len() {
             let span = segment_ids[i];
-            // 官方:从出侧点(in=points[end])搜到入侧点(out=points[start])
             let (in_pt, out_pt) = (points[span.end], points[span.start]);
             match astar.search(self.map, in_pt, out_pt) {
                 Ok(p) => paths.push(p.points().to_vec()),
@@ -434,7 +391,6 @@ impl<'a> ObstacleScanner<'a> {
         Some(paths)
     }
 
-    /// 测试侧独立几何检查，不参与生产轨迹验收。
     #[cfg(test)]
     #[must_use]
     pub fn is_safe(&self, traj: &Trajectory) -> bool {
@@ -450,14 +406,8 @@ struct ConstraintSpan {
     end: usize,
 }
 
-/// 官方 bounds + 防重叠切分（`poly_traj_optimizer.cpp` calculate bounds +
-/// Avoid overlap）：按相邻段中点算界（首段低界 1、末段高界 `cols-2`，
-/// 中点 `-1.0` 取整为低界、`+1.0` 取整为高界），再对相邻 adjusted
-/// 做中点切分（`middle∓0.1/1.1` 取整）。`MINIMUM_PERCENT=0` 故不扩缩，
-/// 仅返回切分后的分配界。
 fn adjusted_span(spans: &[ConstraintSpan], i: usize, cols: usize) -> (usize, usize) {
     let (mut lo, hi) = span_bounds(spans, i, cols);
-    // 与前一段的 adjusted 防重叠：中点切分（官方 Avoid overlap 段）。
     if i > 0 {
         let prev_hi = span_bounds(spans, i - 1, cols).1;
         if prev_hi >= lo {
@@ -468,7 +418,6 @@ fn adjusted_span(spans: &[ConstraintSpan], i: usize, cols: usize) -> (usize, usi
     (lo.min(hi), hi)
 }
 
-/// 单段 bounds（不含邻段切分）。
 fn span_bounds(spans: &[ConstraintSpan], i: usize, cols: usize) -> (usize, usize) {
     let n = spans.len();
     let lo = if i == 0 {
@@ -484,15 +433,6 @@ fn span_bounds(spans: &[ConstraintSpan], i: usize, cols: usize) -> (usize, usize
     (lo.min(hi), hi)
 }
 
-/// 官方"Assign data to each segment"(step 1/2/3):为段 [first, second]
-/// 内的约束点生成 {s,v} 平面。`alloc` 为防重叠切分后的分配界，
-/// step 1 清 `flag_temp` 与 step 3 传播均走到分配界（官方语义）。
-/// - `step 2`:段内每个中间约束点求"轨迹点直线(`ctrl_pts_law`)"与 A* 路径的
-///   交点,再从交点向轨迹点按分辨率步进找障碍表面边界;
-///   段长 == 1 时用中点(官方 corner case);
-/// - `step 3`:从首个交点索引向段边界传播 base/direction。
-///
-/// 返回是否生成了至少一个平面(官方 `got_intersection_id` ≥ 0)。
 fn assign_planes_for_segment(
     map: &GridMap,
     a_star_path: &[Vector3<f64>],
@@ -505,8 +445,6 @@ fn assign_planes_for_segment(
         start: first,
         end: second,
     } = span;
-    // 分配界：防重叠切分后的 step 1 清零界与 step 3 传播界（官方 adjusted）；
-    // 交点扫描仍按原始段 [first, second]（官方 step 2 与分配界无关）。
     let max_idx = points.len().saturating_sub(1);
     let lo = alloc.0.min(max_idx);
     let hi = alloc.1.min(max_idx).max(lo);
@@ -516,11 +454,7 @@ fn assign_planes_for_segment(
     let mut flag_temp = vec![false; hi.saturating_sub(lo) + 1];
     let mut got_intersection_id: Option<usize> = None;
 
-    // step 2:中间约束点求交点（官方按原始段 [first, second] 扫描）
     if second - first == 1 {
-        // 官方 corner case：基点取段首轨迹点，方向取交点−中点
-        // （`base=init_points[first]`，`dir=(intersection−middle).normalized()`；
-        // 基点仍按表面步进落在障碍表面——交点通常在自由空间）。
         let middle = (points[second] + points[first]) / 2.0;
         if let Some((intersection, _)) =
             intersection_on_path(a_star_path, &points[first], &points[second], middle)
@@ -550,12 +484,9 @@ fn assign_planes_for_segment(
         }
     }
 
-    // step 3:传播(官方从 got_intersection_id 向调整后段边界填充)
     let Some(got) = got_intersection_id else {
         return false;
     };
-    // 向后(got+1 ..= hi)：官方 `base_point[j].push_back(base_point[j-1].back())`，
-    // 直接取 j-1 的平面（j=got+1 时 j-1=got 必有平面，后续 j-1 已被传播）
     for j in (got + 1)..=hi {
         if !flag_temp[j - lo]
             && let Some(p) = planes[j - 1].last()
@@ -563,7 +494,6 @@ fn assign_planes_for_segment(
             planes[j].push(p.clone());
         }
     }
-    // 向前(lo..got 递减)：官方 `base_point[j].push_back(base_point[j+1].back())`
     for j in (lo..got).rev() {
         if !flag_temp[j - lo]
             && let Some(p) = planes[j + 1].last()
@@ -600,7 +530,6 @@ fn intersection_on_path(
                 break;
             }
         } else {
-            // 索引为 0 时结束回退，避免无符号下溢。
             if astar_id == 0 {
                 break;
             }
@@ -663,9 +592,6 @@ mod tests {
     use nalgebra::Point3;
 
     fn wall_map() -> (GridMap, Astar) {
-        // 0.1m 分辨率,墙在 x=4.5(体素 x=45..46),z 全高,
-        // y 留间隙 [4.5, 5.6]m 供 A* 绕行(官方语义:障碍必须可绕,否则
-        // A* 失败 → 官方返回 ERR,测试墙若贯穿全图则无解)。
         let mut map = GridMapBuilder::new(0.1, [100, 100, 20]).build().unwrap();
         for y in 0..100 {
             for z in 0..20 {
@@ -705,7 +631,6 @@ mod tests {
         for k in [5usize, 3] {
             let pts = constraint_sample_points(&traj, k);
             assert_eq!(pts.len(), traj.pieces() * k + 1, "N·K+1");
-            // 端点
             assert!((pts[0] - Vector3::zeros()).norm() < 1e-9);
             assert!((pts[traj.pieces() * k] - Vector3::new(4.0, 0.0, 0.0)).norm() < 1e-9);
         }
@@ -713,7 +638,6 @@ mod tests {
 
     #[test]
     fn two_thirds_truncation() {
-        // cols = 5*5+1 = 26:2/3 → 25 − 24/3 = 17
         assert_eq!(two_thirds_id(26, false), 17);
         assert_eq!(two_thirds_id(26, true), 25);
         assert_eq!(two_thirds_id(16, false), 15 - 14 / 3);
@@ -721,11 +645,8 @@ mod tests {
 
     #[test]
     fn compute_points_to_check_structure_and_density() {
-        // 空旷地图只需分辨率参与采样步长
         let map = GridMapBuilder::new(0.1, [100, 100, 20]).build().unwrap();
         let scanner = ObstacleScanner::new(&map).with_samples(5).with_max_vel(1.5);
-        // 单段直线轨迹 0→8m/8s(纯五次多项式,峰值速度 15/8 m/s):
-        // 中段速度 > res/(2·t_step)=0.75m/s,采样不被运动门限抑制
         let start = Endpoint {
             position: Vector3::zeros(),
             velocity: Vector3::zeros(),
@@ -744,7 +665,6 @@ mod tests {
         let cols = traj.pieces() * 5 + 1;
         let dur = traj.duration();
 
-        // touch_goal=true:全部 N·K 桶,覆盖首尾
         let chk = scanner
             .compute_points_to_check(&traj, true)
             .expect("touch_goal 应生成成功");
@@ -762,7 +682,6 @@ mod tests {
             "末桶必须覆盖最后一段({} vs {dur})",
             ts.last().unwrap()
         );
-        // 密度:高速窗口 [2,6]s 内相邻间隔恰为采样步长 res/max_vel
         let mut dense_pairs = 0usize;
         for w in ts.windows(2) {
             if w[0] >= 2.0 && w[1] <= 6.0 {
@@ -779,7 +698,6 @@ mod tests {
             "匀速窗口应有足量采样对,实际 {dense_pairs}"
         );
 
-        // 非 touch_goal:按 two_thirds 截断,桶数更少
         let trunc = scanner
             .compute_points_to_check(&traj, false)
             .expect("非 touch_goal 应生成成功");
@@ -801,7 +719,6 @@ mod tests {
             velocity: Vector3::zeros(),
             acceleration: Vector3::zeros(),
         };
-        // 直线穿墙轨迹(未绕障)
         let m = MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
             .build(
                 &[Point3::new(3.0, 2.0, 1.0), Point3::new(7.0, 2.0, 1.0)],
@@ -815,7 +732,6 @@ mod tests {
         assert_eq!(ret, CheckResult::Finished, "穿墙轨迹必有碰撞段");
         let total: usize = planes.iter().map(Vec::len).sum();
         assert!(total > 0, "必须生成平面");
-        // 每个平面方向应指向 A* 绕行方向(至少不是零向量)
         for pl in planes.iter().flatten() {
             assert!(pl.normal().norm() > 0.99, "方向必须归一化");
         }
@@ -825,12 +741,10 @@ mod tests {
     fn roughly_check_ignores_covered_points() {
         let (map, mut astar) = wall_map();
         let scanner = ObstacleScanner::new(&map).with_samples(5).with_max_vel(1.5);
-        // 构造穿墙约束点:直接给 y=2 直线采样点
         let points: Vec<Vector3<f64>> = (0..26)
             .map(|i| Vector3::new(1.0 + f64::from(i) * 0.3, 2.0, 1.0))
             .collect();
         let mut planes: Vec<Vec<Plane>> = vec![Vec::new(); points.len()];
-        // 用大致垂直墙面的平面盖住 x≈4.5 附近的点(方向 +x 朝自由侧)
         for i in 0..26 {
             let p = points[i];
             if (p.x - 4.5).abs() < 0.4 {
@@ -839,10 +753,7 @@ mod tests {
                 planes[i].push(Plane::new(base, dir));
             }
         }
-        // 覆盖后 roughly_check 不应再报新障碍(4.5 处穿入点已被平面包住)
         let new_obs = scanner.roughly_check(&mut astar, &points, &mut planes, false);
-        // 注意:4.5±0.4 外的点也可能在膨胀层内;此测试只验证"covered 判据"参与
-        // ——若所有穿入点都被覆盖,则无新障碍
         let all_covered = points
             .iter()
             .enumerate()
@@ -861,7 +772,6 @@ mod tests {
 
     #[test]
     fn intersection_on_path_walks_back_to_0_without_underflow() {
-        // 所有 A* 点都在 `point` 沿 ctrl 的后方（投影 < 0）；索引回退至 0 后返回 None。
         let path = vec![
             Vector3::new(0.0, 0.0, 0.0),
             Vector3::new(2.0, 0.0, 0.0),
@@ -879,7 +789,6 @@ mod tests {
     #[test]
     fn free_trajectory_returns_free() {
         let (mut map, mut astar) = wall_map();
-        // 把墙清掉 → 自由
         for y in 0..100 {
             for z in 0..20 {
                 map.set_state([45, y, z], VoxelState::Unknown);

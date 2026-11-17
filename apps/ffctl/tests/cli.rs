@@ -1,9 +1,5 @@
 //! `ffctl` 的 CLI 契约：用法错误、帮助与规格，用 `usage-rs` 自带的测试驱动跑真二进制。
-//!
-//! 只测不碰 IPC 的面（帮助/用法/规格）——投递路径要真发布消息，放在实测里跑，
-//! 免得测试去动一架正在飞的飞机。
 
-/// 顶层只列域与自用命令（不列动词）；域在前，`completion` 排在最后。
 #[test]
 fn top_level_lists_domains() {
     let out = usage_rs::test::command!("ffctl", "--help").assert_success();
@@ -18,7 +14,6 @@ fn top_level_lists_domains() {
     assert!(at("process ") < at("completion "), "{stdout}");
 }
 
-/// 域的下一层是动词，且每个域自带帮助。
 #[test]
 fn domains_list_verbs() {
     let out = usage_rs::test::command!("ffctl", "fc", "--help").assert_success();
@@ -45,7 +40,6 @@ fn domains_list_verbs() {
     }
 }
 
-/// `status` 的实时刷新与间隔参数都出现在帮助里。
 #[test]
 fn status_exposes_watch_and_interval() {
     let out = usage_rs::test::command!("ffctl", "process", "status", "--help").assert_success();
@@ -71,7 +65,6 @@ fn json_status_rejects_watch_before_connecting() {
     );
 }
 
-/// 未知子命令：clap 风格错误 + 退出码 2。
 #[test]
 fn unknown_subcommand_exits_two() {
     let out = usage_rs::test::command!("ffctl", "arm");
@@ -83,7 +76,6 @@ fn unknown_subcommand_exits_two() {
     );
 }
 
-/// 参数解析失败（高度不是数字）：退出码 2，错误指向那个位置参数。
 #[test]
 fn takeoff_rejects_non_numeric_altitude() {
     let out = usage_rs::test::command!("ffctl", "fc", "takeoff", "abc");
@@ -95,7 +87,6 @@ fn takeoff_rejects_non_numeric_altitude() {
     );
 }
 
-/// 规格导出（`usage-rs` 白送）：三个域都在，且带 `effect` 标注。
 #[test]
 fn usage_spec_exports_domains() {
     let out = usage_rs::test::command!("ffctl", "__usage_spec__").assert_success();
@@ -107,7 +98,6 @@ fn usage_spec_exports_domains() {
     assert!(spec.contains("effect=write"), "{spec}");
 }
 
-/// shell 的取值来自 `ValueEnum`：帮助里列全可能值，补全候选同源。
 #[test]
 fn completion_takes_a_value_enum_shell() {
     let out = usage_rs::test::command!("ffctl", "completion", "--help").assert_success();
@@ -117,7 +107,6 @@ fn completion_takes_a_value_enum_shell() {
     }
 }
 
-/// `validate` 声明的高度范围：负值是用法错误（退出码 2）。
 #[test]
 fn negative_altitude_is_a_usage_error() {
     let out = usage_rs::test::command!("ffctl", "fc", "takeoff", "-1");
@@ -125,7 +114,6 @@ fn negative_altitude_is_a_usage_error() {
     assert!(out.stderr_text().contains("高度"), "{}", out.stderr_text());
 }
 
-/// 坐标/高度必须是有限数值：`inf` 在解析期被拒（退出码 2）。
 #[test]
 fn non_finite_goal_is_a_usage_error() {
     let out = usage_rs::test::command!("ffctl", "planner", "goal", "inf", "0", "1");

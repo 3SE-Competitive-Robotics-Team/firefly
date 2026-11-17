@@ -1,15 +1,8 @@
 //! L-BFGS 优化器。
-//!
-//! liblbfgs 衍生版（More-Thuente 线搜索 + 两循环递归）的忠实移植，
-//! 严格对照 EGO-Planner-v2 捆绑的
-//! `swarm-playground/*/src/planner/traj_opt/include/optimizer/lbfgs.hpp`：
-//! 算法、数值公式、收敛判据与返回码语义一一对应。
-//! EGO 实际参数覆盖见 `LbfgsConfig::default`。
 
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::DVector;
 
-/// 对照官方返回码枚举（负值为错误）。
 const CONVERGENCE: i32 = 0;
 const STOP: i32 = 1;
 const ALREADY_MINIMIZED: i32 = 2;
@@ -129,9 +122,7 @@ impl Lbfgs {
     /// `InvalidArgument`：参数不满足官方校验约束。
     /// `Convergence`：线搜索失败（舍入误差、区间塌缩、评估次数超限等）。
     #[fastrace::trace]
-    // objective 为 trait 对象无 Debug：只记录初始点
     #[logcall::logcall("debug", input = "x0 = {x0:?}", output = "")]
-    // 变量名（x/g/d/m/k/end/pf）对照官方 lbfgs_optimize，便于逐行核对
     #[allow(clippy::many_single_char_names)]
     pub fn minimize(&self, objective: &mut dyn Objective, x0: DVector<f64>) -> Result<LbfgsReport> {
         let cfg = self.config.clone();
@@ -143,7 +134,6 @@ impl Lbfgs {
         let mut fx = objective.evaluate_gradient(&x, &mut g);
         let mut evaluations = 1;
 
-        // 官方工作区：环形缓冲 lm[m]（end 指针推进）、过去 past 次目标值 pf
         let m = cfg.memory;
         let mut lm: Vec<IterationData> = Vec::from_fn(m, |_| IterationData {
             alpha: 0.0,
@@ -169,11 +159,9 @@ impl Lbfgs {
             return Ok(report(0, fx, &g, Termination::Converged, x, evaluations));
         }
 
-        // k/end 与官方一致：k 从 1 起、每次有效更新 ++k；end 为环形缓冲写指针
         let mut k = 1usize;
         let mut end = 0usize;
         let mut iterations = 0usize;
-        // 线搜索回滚快照：维度终身不变，复用缓冲即可。
         let mut xp = x.clone();
         let mut gp = g.clone();
 
@@ -198,7 +186,6 @@ impl Lbfgs {
             ) {
                 Ok(_) => {}
                 Err(code) => {
-                    // 回退到线搜索前的点与梯度（官方语义）
                     x = xp;
                     g = gp;
                     break code;
@@ -206,7 +193,6 @@ impl Lbfgs {
             }
             iterations += 1;
 
-            // 梯度收敛：‖g‖₂ / max(1, ‖x‖₂) ≤ ε
             let mut xnorm = x.norm();
             if xnorm < 1.0 {
                 xnorm = 1.0;
@@ -216,7 +202,6 @@ impl Lbfgs {
                 break CONVERGENCE;
             }
 
-            // 相对改进停止（单次比较）：|(pf[k%past] − f) / f| < δ
             if cfg.past > 0 {
                 if cfg.past <= k {
                     let rate = (pf[k % cfg.past] - fx) / fx;
@@ -231,7 +216,6 @@ impl Lbfgs {
                 break ERR_MAXIMUMITERATION;
             }
 
-            // s/y 写入环形缓冲槽位 end
             let slot = &mut lm[end];
             slot.s.copy_from(&x);
             slot.s -= &xp;
@@ -284,7 +268,6 @@ impl Lbfgs {
         }
     }
 
-    /// 参数校验，逐条对照 `lbfgs_optimize` 入口检查。
     fn validate_config(cfg: &LbfgsConfig) -> Result<()> {
         if cfg.memory == 0 {
             return Err(Error::new(
@@ -416,7 +399,6 @@ fn two_loop_recursion(
 }
 
 /// 三次插值极小点（对照 `CUBIC_MINIMIZER_LBFGS`）。
-// 变量名对照宏展开（u/fu/du/v/fv/dv），便于逐行核对
 #[allow(clippy::many_single_char_names)]
 fn cubic_minimizer(u: f64, fu: f64, du: f64, v: f64, fv: f64, dv: f64) -> f64 {
     let d = v - u;
@@ -438,7 +420,6 @@ fn cubic_minimizer(u: f64, fu: f64, du: f64, v: f64, fv: f64, dv: f64) -> f64 {
 }
 
 /// 带区间保护的三次插值极小点（对照 `CUBIC_MINIMIZER2_LBFGS`）。
-// 变量名与参数表对照宏展开，便于逐行核对
 #[allow(clippy::many_single_char_names, clippy::too_many_arguments)]
 fn cubic_minimizer2(
     u: f64,
@@ -511,7 +492,6 @@ fn update_trial_interval(
         if *t <= lo || hi <= *t {
             return ERR_OUTOFINTERVAL;
         }
-        // 函数值必须从 x 起下降
         if 0.0 <= *dx * (*t - *x) {
             return ERR_INCREASEGRADIENT;
         }
@@ -520,7 +500,6 @@ fn update_trial_interval(
         }
     }
 
-    // 试探值选择：4 种 case 的 cubic/quadratic 插值取舍
     let newt;
     if *fx < ft {
         // Case 1：函数值更高，最小值被夹住；cubic 极小点更近取 cubic，否则取两者均值
@@ -576,9 +555,6 @@ fn update_trial_interval(
         };
     }
 
-    // 区间更新（与试探值选择无关）：
-    // Case a: f(x) < f(t) → y ← t；Case c: 导数变号 → y ← x；
-    // 随后一律 x ← t
     if *fx < ft {
         *y = *t;
         *fy = ft;
@@ -594,7 +570,6 @@ fn update_trial_interval(
         *dx = dt;
     }
 
-    // clip 到 [tmin, tmax]
     let mut newt = newt.min(tmax).max(tmin);
 
     // 已夹住且本 case 收缩了区间时，避免试探值贴上界
@@ -627,8 +602,6 @@ fn update_trial_interval(
 
 /// More-Thuente 线搜索（对照 `line_search_morethuente`）。
 /// 成功返回评估次数；Err 携带官方错误码。
-// 步长裁剪到边界后使用精确相等判定触界；成对变量 stx/sty、dgxm/dgym
-// 与官方命名一致。
 #[allow(clippy::float_cmp, clippy::similar_names, clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 fn line_search_morethuente(
@@ -672,19 +645,16 @@ fn line_search_morethuente(
     let mut dgy = dginit;
 
     loop {
-        // 对照上游 line_search_morethuente 的 proc_progress，先轮询再改写试探点。
         if objective.early_exit() {
             return Err(ERR_CANCELED);
         }
 
-        // 区间端点随 brackt 状态切换
         let (stmin, stmax) = if brackt {
             (stx.min(sty), stx.max(sty))
         } else {
             (stx, *stp + 4.0 * (*stp - stx))
         };
 
-        // clip 到 [stpmin, stpmax]
         if *stp < stpmin {
             *stp = stpmin;
         }
@@ -692,14 +662,12 @@ fn line_search_morethuente(
             *stp = stpmax;
         }
 
-        // 异常终止在即：退回目前最优点
         if brackt
             && (*stp <= stmin || stmax <= *stp || uinfo != 0 || stmax - stmin <= cfg.xtol * stmax)
         {
             *stp = stx;
         }
 
-        // x ← xp + stp·s，评估目标与梯度
         x.copy_from(xp);
         x.axpy(*stp, s, 1.0);
         *evaluations += 1;
@@ -709,7 +677,6 @@ fn line_search_morethuente(
         let ftest1 = finit + *stp * dgtest;
         count += 1;
 
-        // 错误与收敛判定（顺序与官方一致）
         if !f.is_finite() || (brackt && (*stp <= stmin || stmax <= *stp || uinfo != 0)) {
             return Err(ERR_ROUNDING_ERROR);
         }
@@ -764,7 +731,6 @@ fn line_search_morethuente(
                 &mut brackt,
             );
 
-            // 由修正值还原 f/dg 缓存
             fx = fxm + stx * dgtest;
             fy = fym + sty * dgtest;
             dgx = dgxm + dgtest;
@@ -786,7 +752,6 @@ fn line_search_morethuente(
             );
         }
 
-        // 夹住后强制区间充分收缩
         if brackt {
             if 0.66 * prev_width <= (sty - stx).abs() {
                 *stp = stx + 0.5 * (sty - stx);
@@ -965,7 +930,6 @@ mod tests {
             .minimize(&mut obj, DVector::from_vec(vec![3.0, -2.0, 1.0]))
             .unwrap();
         assert!(report.converged);
-        // 官方判据：‖g‖₂/max(1,‖x‖₂) ≤ 1e-5 或相对改进停止
         assert!(report.final_cost < 1e-3, "cost: {}", report.final_cost);
     }
 
@@ -982,7 +946,6 @@ mod tests {
             .minimize(&mut obj, DVector::from_vec(vec![-1.2, 1.0]))
             .unwrap();
         assert!(report.converged);
-        // 官方判据下 Rosenbrock 收敛到极小点附近（相对改进停止）
         assert!(report.final_cost < 1e-2, "cost: {}", report.final_cost);
     }
 
@@ -1044,7 +1007,6 @@ mod tests {
         let report = lbfgs
             .minimize(&mut obj, DVector::from_vec(vec![0.0, 0.0]))
             .unwrap();
-        // ALREADY_MINIMIZED 语义：初始点即极小点 → converged 且零迭代
         assert!(report.converged);
         assert_eq!(report.iterations, 0);
         assert!(report.final_cost.abs() < 1e-12);

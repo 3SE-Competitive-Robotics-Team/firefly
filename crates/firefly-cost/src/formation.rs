@@ -115,7 +115,6 @@ impl FormationPenalty {
                 let s = peer.traj.eval(local_t);
                 (s.position, s.velocity)
             } else {
-                // 超出轨迹：外推匀速（官方处理）
                 let s = peer.traj.eval(duration);
                 (s.position + s.velocity * (local_t - duration), s.velocity)
             };
@@ -152,7 +151,6 @@ pub(crate) struct FormationFrame {
 }
 
 impl Penalty for FormationPenalty {
-    // 与官方公式逐行对应(k/i/j/o/a/l/s),单字符命名保可读性
     #[allow(clippy::many_single_char_names)]
     fn evaluate(&self, traj: &Trajectory) -> f64 {
         if self.peers.is_empty() {
@@ -161,7 +159,6 @@ impl Penalty for FormationPenalty {
         let k = self.samples_per_piece;
         let mut cost = 0.0;
         let frame = self.frame();
-        // 前缀和随分段推进，避免每个样本重新累加 O(M)；求和顺序与原实现一致。
         let mut t_start = 0.0;
         for (i, ti) in traj.durations().iter().enumerate() {
             let step = ti / k as f64;
@@ -178,7 +175,6 @@ impl Penalty for FormationPenalty {
                 let t_local = tau * ti;
                 let t_abs = t_start + t_local;
                 let (o, a, l, _) = self.formation_state_with(t_abs, &frame);
-                // 循环内已知分段，用局部时刻取点，省掉 eval 的线性定位。
                 let s = traj.eval_piece(i, t_local);
                 let omg = trapezoid_weight(j, k);
                 cost += omg * step * (s.position - self.target(o, a, l)).norm_squared();
@@ -188,7 +184,6 @@ impl Penalty for FormationPenalty {
         cost
     }
 
-    // 与官方公式逐行对应(k/i/j/o/a/l/s),单字符命名保可读性
     #[allow(clippy::many_single_char_names)]
     fn accumulate(&self, traj: &Trajectory, weight: f64, acc: &mut Accumulator) {
         if self.peers.is_empty() {
@@ -244,7 +239,6 @@ mod tests {
     use firefly_trajectory::{Endpoint, MincoBuilder, SolverOrder};
 
     fn peers_on_line(y: f64) -> Vec<Peer> {
-        // 1 架 peer 沿 y 直线飞行（队形线 x 方向）
         let traj = MincoBuilder::new(
             SolverOrder::MinimumJerk,
             Endpoint {
@@ -267,7 +261,6 @@ mod tests {
 
     #[test]
     fn formation_cost_zero_and_positive() {
-        // 对齐（自己与 peer 同队形偏移）→ 零代价
         let traj = MincoBuilder::new(
             SolverOrder::MinimumJerk,
             Endpoint {
@@ -293,7 +286,6 @@ mod tests {
             peers_on_line(1.0),
         );
         assert!(p.evaluate(&traj) < 1e-6, "对齐应有零代价");
-        // 偏移（peer 在 y=0，自己在 y=2）→ 正代价
         let traj = MincoBuilder::new(
             SolverOrder::MinimumJerk,
             Endpoint {

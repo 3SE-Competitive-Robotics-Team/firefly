@@ -75,8 +75,7 @@ pub fn compute_rel_pose<S: BasaltScalar>(
 }
 
 /// Reprojection residual and analytic derivatives in inverse-distance coordinates.
-/// Invalid projections return before altering derivative outputs. `projection[3]`
-/// is intentionally untouched, matching the original diagnostic output.
+/// Invalid projections leave derivative outputs unchanged; `projection[3]` is preserved.
 #[expect(
     clippy::too_many_arguments,
     reason = "Preserves the upstream optional Jacobian interface"

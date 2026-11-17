@@ -12,24 +12,9 @@
 //! 推力按机体最大合推力归一化（`-1` 为满推力方向）；执行器指令 `[0, 1]`，`0` 停车、
 //! `1` 满推力；姿态为 FRD（x 前、y 右、z 下），推力沿 FRD `-z`。
 //! 全部矩阵为编译期定长 `4x4`，`f32`，分配路径不做堆分配、不打日志、不 panic。
-//!
-//! 结构对应：基类 `ControlAllocation` 保留效能矩阵、配平、线性化点、
-//! 归一化比例、限幅与速率限制；`ControlAllocationPseudoInverse` 用 Moore-Penrose
-//! 伪逆求混控矩阵并做列归一化；`ControlAllocationSequentialDesaturation` 沿轴
-//! 依次平移执行器指令以消除饱和。Rust 无继承，后两者以“组合 + `Deref`”复用基类
-//! 状态，方法与字段名与 C++ 一一对应（`_camelCase` → `snake_case`）。
-//!
-//! 不移植：`thrust_x`/`thrust_y` 轴——固定 X 四旋翼没有水平推力执行器，只有 4 个有效轴。
-//! 不移植：16 执行器容量、`num_actuators` 参数与多矩阵 `Configuration`——执行器数恒为 `NUM_ACTUATORS`。
-//! 不移植：`applyNanToActuators` 与执行器失效位掩码——没有失效检测输入，停桨掩码不参与 4 轴归一化。
-//! 不移植：`setHadActuatorFailure`——没有失效状态来源，归一化比例始终按当前矩阵重算。
-//! 不移植：`ActuatorEffectiveness` 的 VTOL、控制面、倾转与多矩阵选择——单机只有旋翼。
-//! 不移植：uORB 消息、`MC_AIRMODE` 参数读取与模块调度——混控模式由 [`Airmode`] 显式设置。
-//! 不移植：`ActuatorEffectivenessRotors` 的螺旋桨扭矩开关——X 四旋翼旋翼轴恒为 FRD `(0, 0, -1)`。
 
 use core::ops::{Deref, DerefMut};
 
-// 与 PX4 共享类型命名空间，逐项导入会掩盖移植中的符号差异。
 #[allow(clippy::wildcard_imports)]
 use super::types::*;
 
@@ -75,48 +60,30 @@ pub fn effectiveness_from_rotors(
     effectiveness
 }
 
-/// PX4 `ControlAxis` 的四轴子集：滚转、俯仰、偏航、垂直推力。
-///
-/// PX4 另有 `THRUST_X`/`THRUST_Y`，只服务倾斜旋翼/VTOL；本产品是固定 X 四旋翼，
-/// 不保留这两轴。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControlAxis {
-    /// 滚转（轴 0）。
     Roll = 0,
-    /// 俯仰（轴 1）。
     Pitch = 1,
-    /// 偏航（轴 2）。
     Yaw = 2,
-    /// 垂直推力（轴 3）。
     ThrustZ = 3,
 }
 
-/// PX4 `ControlAllocation`：分配算法的公共状态（基类）。
-// 字段名沿用 PX4 的 `_control_allocation_scale`，与结构体名同前缀。
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy, Debug)]
 pub struct ControlAllocation {
-    /// 效能矩阵：控制轴 × 执行器，单位每单位执行器指令。
     effectiveness: EffectivenessMatrix,
-    /// 分配时施加在各控制轴上的比例，无量纲。
     control_allocation_scale: ControlVector,
-    /// 配平（含线性化点）后的执行器指令，`[0, 1]`。
     actuator_trim: ActuatorVector,
-    /// 执行器指令下限，`[0, 1]`。
     actuator_min: ActuatorVector,
-    /// 执行器指令上限，`[0, 1]`。
     actuator_max: ActuatorVector,
     /// 速率限制：走完 `[min, max]` 允许的最短时间，单位 s；`0` 表示不限速。
     actuator_slew_rate_limit: ActuatorVector,
-    /// 上一次分配的执行器指令，`[0, 1]`。
     prev_actuator_sp: ActuatorVector,
     /// 本次分配的执行器指令，`[0, 1]`；NaN 表示停桨。
     actuator_sp: ActuatorVector,
-    /// 控制指令 `[roll, pitch, yaw, thrust_z]`。
     control_sp: ControlVector,
     /// 配平/线性化点处的控制量 `effectiveness * linearization_point`。
     control_trim: ControlVector,
-    /// 是否归一化滚转、俯仰、偏航列（PX4 `setNormalizeRPY`）。
     normalize_rpy: bool,
     /// 因不可独立实现而被清零的轴位掩码，位上移量等于轴索引。
     dropped_axes: u8,
@@ -131,7 +98,6 @@ impl Default for ControlAllocation {
 }
 
 impl ControlAllocation {
-    /// 构造：比例全 1、执行器范围 `[0, 1]`、其余状态为 0（对照 PX4 构造函数）。
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -170,18 +136,15 @@ impl ControlAllocation {
         self.control_trim = self.effectiveness * linearization_point;
     }
 
-    /// 执行器指令 `[0, 1]`。
     #[must_use]
     pub fn actuator_setpoint(&self) -> ActuatorVector {
         self.actuator_sp
     }
 
-    /// 设置控制指令 `[roll, pitch, yaw, thrust_z]`（力矩指令、归一化推力）。
     pub fn set_control_setpoint(&mut self, control: ControlVector) {
         self.control_sp = control;
     }
 
-    /// 当前控制指令 `[roll, pitch, yaw, thrust_z]`。
     #[must_use]
     pub fn control_setpoint(&self) -> ControlVector {
         self.control_sp
@@ -199,29 +162,24 @@ impl ControlAllocation {
             .component_mul(&self.control_allocation_scale)
     }
 
-    /// 效能矩阵：控制轴 × 执行器。
     #[must_use]
     pub fn effectiveness_matrix(&self) -> EffectivenessMatrix {
         self.effectiveness
     }
 
-    /// 设置执行器指令下限，`[0, 1]`。
     pub fn set_actuator_min(&mut self, actuator_min: ActuatorVector) {
         self.actuator_min = actuator_min;
     }
 
-    /// 执行器指令下限，`[0, 1]`。
     #[must_use]
     pub fn actuator_min(&self) -> ActuatorVector {
         self.actuator_min
     }
 
-    /// 设置执行器指令上限，`[0, 1]`。
     pub fn set_actuator_max(&mut self, actuator_max: ActuatorVector) {
         self.actuator_max = actuator_max;
     }
 
-    /// 执行器指令上限，`[0, 1]`。
     #[must_use]
     pub fn actuator_max(&self) -> ActuatorVector {
         self.actuator_max
@@ -315,7 +273,6 @@ impl ControlAllocation {
         actuator_normalized
     }
 
-    /// 是否归一化滚转、俯仰、偏航列（对照 PX4 `setNormalizeRPY`）。
     pub fn set_normalize_rpy(&mut self, normalize_rpy: bool) {
         self.normalize_rpy = normalize_rpy;
     }
@@ -333,13 +290,11 @@ impl ControlAllocation {
         self.had_actuator_failure = failure;
     }
 
-    /// 已配置的执行器数量（PX4 `numConfiguredActuators`）。
     #[must_use]
     pub fn num_configured_actuators(&self) -> usize {
         NUM_ACTUATORS
     }
 
-    /// 参数更新钩子（PX4 `updateParameters`）；本产品参数由构造注入，无操作。
     pub fn update_parameters(&mut self) {}
 
     /// 把掩码对应的执行器指令置为 NaN（PX4 `applyNanToActuators`）。
@@ -357,15 +312,12 @@ impl ControlAllocation {
 /// PX4 `ControlAllocationPseudoInverse`：伪逆分配 + 列归一化。
 #[derive(Clone, Copy, Debug)]
 pub struct ControlAllocationPseudoInverse {
-    /// 基类状态。
     base: ControlAllocation,
     /// 混控矩阵（执行器 × 控制轴），`effectiveness` 的伪逆经归一化后的结果。
     mix: MixMatrix,
-    /// 混控矩阵需要重算。
     mix_update_needed: bool,
     /// 比例分配（不做列归一化），对照 PX4 `_metric_allocation`。
     metric_allocation: bool,
-    /// 归一化比例需要重算。
     normalization_needs_update: bool,
 }
 
@@ -390,7 +342,6 @@ impl DerefMut for ControlAllocationPseudoInverse {
 }
 
 impl ControlAllocationPseudoInverse {
-    /// 构造：混控矩阵为 0，标记需要重算。
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -607,7 +558,6 @@ impl ControlAllocationPseudoInverse {
                 .scale_mut(1.0 / scale[AXIS_THRUST_Z]);
         }
 
-        // 小元素清零，避免分配算法在数值噪声上放大。
         for i in 0..NUM_ACTUATORS {
             for j in 0..NUM_AXES {
                 if self.mix[(i, j)].abs() < 1e-3 {
@@ -650,9 +600,7 @@ pub enum Airmode {
 /// PX4 `ControlAllocationSequentialDesaturation`：沿轴依次平移执行器指令以消除饱和。
 #[derive(Clone, Copy, Debug)]
 pub struct ControlAllocationSequentialDesaturation {
-    /// 伪逆分配状态（C++ 的父类）。
     pseudo_inverse: ControlAllocationPseudoInverse,
-    /// 混控模式。
     airmode: Airmode,
 }
 
@@ -680,7 +628,6 @@ impl ControlAllocationSequentialDesaturation {
     /// 偏航在饱和时仍保留的最小权限比例，无量纲（PX4 `MINIMUM_YAW_MARGIN`）。
     pub const MINIMUM_YAW_MARGIN: f32 = 0.15;
 
-    /// 构造：默认关闭 airmode（PX4 `MC_AIRMODE` 默认值 0）。
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -689,7 +636,6 @@ impl ControlAllocationSequentialDesaturation {
         }
     }
 
-    /// 设置混控模式（替代 PX4 的 `MC_AIRMODE` 参数读取）。
     pub fn set_airmode(&mut self, airmode: Airmode) {
         self.airmode = airmode;
     }
@@ -974,7 +920,6 @@ mod tests {
     fn hover_command_gives_equal_motor_outputs() {
         let mut allocation = quad_x_allocation();
 
-        // 悬停推力指令（FRD -z）应等分到 4 个旋翼。
         for step in 0..=10 {
             let thrust = step as f32 * 0.1;
             let outputs = allocate_quad(&mut allocation, 0.0, 0.0, 0.0, -thrust);
@@ -991,7 +936,6 @@ mod tests {
 
     #[test]
     fn collective_thrust_scales_linearly() {
-        // 对照 PX4 ControlAllocationSequentialDesaturationTest.CollectiveThrust。
         let mut allocation = quad_x_allocation();
         let mut thrust = 0.0_f32;
 
@@ -1004,7 +948,6 @@ mod tests {
 
     #[test]
     fn roll_pitch_yaw_allocation() {
-        // 对照 PX4 ...RollPitchYaw。
         let mut allocation = quad_x_allocation();
 
         assert_actuator_equals(
@@ -1041,7 +984,6 @@ mod tests {
 
     #[test]
     fn roll_pitch_yaw_at_full_thrust() {
-        // 对照 PX4 ...RollPitchYawFullThrust（偏航保留 15% 权限）。
         let mut allocation = quad_x_allocation();
 
         assert_actuator_equals(
@@ -1078,7 +1020,6 @@ mod tests {
 
     #[test]
     fn zero_thrust_airmode_disabled_allocates_nothing() {
-        // 对照 PX4 ...RollPitchYawZeroThrust：不增推就没有权限。
         let mut allocation = quad_x_allocation();
 
         for (roll, pitch, yaw) in [
@@ -1099,7 +1040,6 @@ mod tests {
 
     #[test]
     fn zero_thrust_airmode_roll_pitch() {
-        // 对照 PX4 ...RollPitchYawZeroThrustAirmodeRP：滚转/俯仰全分配，偏航不分配。
         let mut allocation = quad_x_allocation();
         allocation.set_airmode(Airmode::RollPitch);
 
@@ -1137,7 +1077,6 @@ mod tests {
 
     #[test]
     fn zero_thrust_airmode_roll_pitch_yaw() {
-        // 对照 PX4 ...RollPitchYawZeroThrustAirmodeRPY。
         let mut allocation = quad_x_allocation();
         allocation.set_airmode(Airmode::RollPitchYaw);
 
@@ -1175,7 +1114,6 @@ mod tests {
 
     #[test]
     fn thrust_and_yaw_partial() {
-        // 对照 PX4 ...AirmodeDisabledThrustAndYaw：偏航未饱和时总推力不变。
         let mut allocation = quad_x_allocation();
         let thrust = 0.75_f32;
         let yaw_torque = 0.02_f32;
@@ -1190,14 +1128,12 @@ mod tests {
 
     #[test]
     fn saturated_yaw_keeps_total_thrust() {
-        // 对照 PX4 ...AirmodeDisabledThrustAndSaturatedYaw：偏航饱和但总推力不变。
         let mut allocation = quad_x_allocation();
         let thrust = 0.75_f32;
         let outputs = allocate_quad(&mut allocation, 0.0, 0.0, 1.0, -thrust);
 
         assert_actuator_equals(outputs, [1.0, 0.5, 1.0, 0.5], "饱和偏航");
 
-        // 4 个旋翼推力之和等于指令总推力（旋翼推力沿 FRD -z，除以 -1）。
         let total: f32 = outputs.iter().sum();
         assert!(
             (total - 4.0 * thrust).abs() <= 1e-5,
@@ -1208,7 +1144,6 @@ mod tests {
 
     #[test]
     fn thrust_and_pitch_partial() {
-        // 对照 PX4 ...AirmodeDisabledThrustAndPitch。
         let mut allocation = quad_x_allocation();
         let thrust = 0.75_f32;
         let pitch = 0.025_f32; // 每个旋翼 0.1 / 4 的俯仰分量
@@ -1227,7 +1162,6 @@ mod tests {
 
     #[test]
     fn reduced_thrust_for_yaw() {
-        // 对照 PX4 ...AirmodeDisabledReducedThrustAndYaw：满推力偏航只保留 15% 权限。
         let mut allocation = quad_x_allocation();
         let margin = ControlAllocationSequentialDesaturation::MINIMUM_YAW_MARGIN;
         let outputs = allocate_quad(&mut allocation, 0.0, 0.0, 1.0, -3.2);
@@ -1240,7 +1174,6 @@ mod tests {
 
     #[test]
     fn reduced_thrust_for_pitch() {
-        // 对照 PX4 ...AirmodeDisabledReducedThrustAndPitch：俯仰饱和后减推补偿。
         let mut allocation = quad_x_allocation();
         let outputs = allocate_quad(&mut allocation, 0.0, 2.0, 0.0, -3.0);
         assert_actuator_equals(outputs, [1.0, 0.0, 0.0, 1.0], "大推力俯仰");
@@ -1418,7 +1351,6 @@ mod tests {
         allocation.set_control_setpoint(control);
         allocation.allocate();
 
-        // B * mix * control == control
         let allocated = allocation.allocated_control();
 
         for axis in 0..NUM_AXES {
@@ -1448,7 +1380,6 @@ mod tests {
             }
         }
 
-        // 未归一化的伪逆满足左侧往返。
         let identity = effectiveness * mix;
 
         for i in 0..NUM_AXES {
@@ -1465,7 +1396,6 @@ mod tests {
 
     #[test]
     fn pseudo_inverse_all_zero_case() {
-        // 对照 PX4 ControlAllocationTest.AllZeroCase：全零矩阵下分配结果为零。
         let mut allocation = ControlAllocationPseudoInverse::new();
         allocation.set_effectiveness_matrix(
             EffectivenessMatrix::zeros(),
@@ -1507,7 +1437,6 @@ mod tests {
 
     #[test]
     fn drop_dependent_axes_follows_priority() {
-        // 只保留 (2, 3) 两个同侧旋翼：滚转与推力共线、偏航与俯仰共线。
         let mut effectiveness = quad_x_effectiveness();
 
         for axis in 0..NUM_AXES {
@@ -1537,7 +1466,6 @@ mod tests {
         let clipped = allocation.clip_actuator_setpoint(ActuatorVector::new(-1.0, 0.05, 0.95, 0.5));
         assert_eq!(clipped, ActuatorVector::new(0.1, 0.1, 0.9, 0.5));
 
-        // 上限低于下限的执行器取配平值（新建对象：执行器范围 `[0.1, 0.9]` 会把线性化点抬到 0.1）。
         let mut allocation = ControlAllocation::new();
         allocation.set_effectiveness_matrix(
             EffectivenessMatrix::zeros(),
@@ -1598,7 +1526,6 @@ mod tests {
             true,
         );
 
-        // 线性化点处的控制量：推力轴 = 4 * 0.5 * (-1)。
         let control_trim = ControlVector::new(0.0, 0.0, 0.0, -2.0);
         allocation.set_control_setpoint(control_trim);
         allocation.allocate();
@@ -1617,7 +1544,6 @@ mod tests {
         allocation.set_slew_rate_limit(ActuatorVector::repeat(1.0));
         allocation.set_actuator_setpoint(ActuatorVector::zeros());
 
-        // 上一步 0、目标 1，限速 1 s：单步 0.1 s 只允许走 0.1。
         allocation.set_actuator_setpoint(ActuatorVector::repeat(1.0));
         allocation.apply_slew_rate_limit(0.1);
 
@@ -1628,7 +1554,6 @@ mod tests {
             );
         }
 
-        // 停桨（NaN）在零推力处保持 NaN。
         allocation.set_actuator_setpoint(ActuatorVector::repeat(f32::NAN));
         allocation.apply_slew_rate_limit(0.1);
 

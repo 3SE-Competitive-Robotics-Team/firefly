@@ -302,13 +302,11 @@ mod tests {
             let dense = to_dense(&banded);
             let solver = BandedSolver::new(&banded).unwrap();
             let rhs = DMatrix::from_fn(n, 3, |i, c| (i * 3 + c) as f64 * 0.1 + 1.0);
-            // 普通求解
             let mut got = rhs.clone();
             solver.solve_in_place(&mut got);
             let expected = dense.clone().lu().solve(&rhs).unwrap();
             let err = (&got - &expected).abs().max();
             assert!(err < 1e-8, "n={n} err={err}");
-            // 转置求解
             let got = solver.solve_transpose(&rhs);
             let expected = dense.transpose().lu().solve(&rhs).unwrap();
             let err = (&got - &expected).abs().max();

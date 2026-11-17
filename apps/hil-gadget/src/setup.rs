@@ -1,15 +1,4 @@
 //! Linux 板端的 configfs/`FunctionFS` 准备与绑定。
-//!
-//! 每次 `up`/`down` 都**整块重建** `g1`：configfs 在绑定失败后会保留
-//! `udc_name`，重试只会得到 `EBUSY`，反复失败还会推进 `next_interface_id`。
-//! 先删除 gadget 再按固定顺序创建，计数器与接口号才是干净、可复现的。
-//!
-//! HIL 与 `adb` 二选一：这块 UDC 的端点数量不足以同时容纳 adb 与 HIL 双向
-//! 端点，绑定失败会一并带走 adb。所以 `up` 只创建单一的 `hil` 功能，`down`
-//! 与看门狗重建 adb-only gadget 恢复远程访问。
-//!
-//! 所有步骤写 [`UP_LOG`] 并 `fsync`：TF 卡 `commit=600`，断电会丢未落盘写入，
-//! 而排障恰恰发生在 USB 已经不可用的时刻。
 
 use std::fs;
 use std::io::{Read, Write};
@@ -20,29 +9,18 @@ use std::time::{Duration, Instant};
 
 use firefly_hil::gadget::{HIL, write_descriptors};
 
-/// configfs gadget 目录（可整块删除重建）。
 const GADGET: &str = "/sys/kernel/config/usb_gadget/g1";
-/// `FunctionFS` 挂载根。
 const FFS_ROOT: &str = "/dev/usb-ffs";
-/// 运行时状态与日志目录（板载安装布局，落在磁盘）。
 const STATE_DIR: &str = "/opt/firefly/logs/hil";
-/// `up` 的进度日志。
 const UP_LOG: &str = "/opt/firefly/logs/hil/up.log";
-/// `serve` 写完描述符后创建的就绪标记。
 const READY: &str = "/opt/firefly/logs/hil/descriptors_ready";
-/// `up` 完成绑定后创建的标记。
 const UP_MARKER: &str = "/opt/firefly/logs/hil/up";
 /// adb 恢复成功标记（看门狗据此避免重复重建）。
 const RESTORE_MARKER: &str = "/opt/firefly/logs/hil/restored";
-/// `serve` 进程号文件（`start-stop-daemon` 写）。
 const SERVE_PID: &str = "/opt/firefly/logs/hil/serve.pid";
-/// 看门狗进程号文件。
 const WATCHDOG_PID: &str = "/opt/firefly/logs/hil/watchdog.pid";
-/// adbd 可执行文件。
 const ADBD: &str = "/usr/bin/adbd";
-/// Debian 的后台进程启动工具。
 const START_STOP_DAEMON: &str = "/usr/sbin/start-stop-daemon";
-/// adb 功能实例名。
 const ADB: &str = "adb";
 /// 启动后等待 adbd 写完描述符的时间。
 const ADBD_DESCRIPTOR_WAIT: Duration = Duration::from_secs(1);
@@ -52,11 +30,8 @@ const READY_TIMEOUT: Duration = Duration::from_secs(5);
 const BIND_TIMEOUT: Duration = Duration::from_secs(3);
 /// 看门狗等待 `up` 完成绑定的上限；超时即重建 adb-only gadget。
 const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(60);
-/// 活动进程清单。
 const PROCESSES: &str = "/opt/firefly/configs/processes.toml";
-/// 进程清单位于 configs 目录，文件名由调用方给出。
 const PROCESSES_DIR: &str = "/opt/firefly/configs";
-/// 默认 HIL 进程清单（deploy 随 configs 一起发布）。
 const PROCESSES_HIL: &str = "processes-hil.toml";
 /// 切换前的进程清单备份，恢复时原样写回。
 const PROCESSES_BACKUP: &str = "/opt/firefly/configs/processes-normal.toml";
@@ -65,7 +40,6 @@ const HOST_SEEN: &str = "/opt/firefly/logs/hil/host_seen";
 /// 主机无数据超过该时长即恢复 adb，避免 HIL 失败后失去远程访问。
 const HOST_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// 所有可能出现的功能实例名。
 const FUNCTIONS: [&str; 2] = [ADB, HIL.name];
 
 pub fn up() -> Result<(), String> {
@@ -118,7 +92,6 @@ pub fn serve() -> Result<(), String> {
     Ok(())
 }
 
-/// 按 `sensor` / `actuator` / `both` 建功能并记录绑定结果，用于定位 UDC 绑定失败。
 pub fn diag(mode: &str) -> Result<(), String> {
     if mode != "hil" {
         return Err(format!("diag 只支持 hil，实际 {mode}"));
@@ -268,8 +241,6 @@ fn rebuild(hil: bool) -> Result<(), String> {
     match rebuild_once(hil) {
         Ok(()) => Ok(()),
         Err(error) => {
-            // 首次绑定可能撞上 UDC 异步解绑的尾巴；整块重建一次是干净的复位，
-            // 与「重试写 UDC」不同，不会留下卡住的 udc_name/接口计数。
             note(&format!("rebuild 首次失败：{error}；整块重建后重试"));
             thread::sleep(Duration::from_millis(500));
             rebuild_once(hil)
@@ -496,8 +467,6 @@ fn restore_adb() -> Result<(), String> {
 /// Caller holds the transition lock through service startup and the final marker.
 fn restore_adb_inner() -> Result<(), String> {
     note("restore：停止 HIL 进程，重建 adb-only gadget");
-    // 先停 HIL 应用再撤 gadget：camera/motor 还持有 ffs 端点时重建 UDC，
-    // 会让 adb 绑定随端点释放反复失败（表现为 adb 设备时有时无）。
     stop_firefly();
     kill_serve();
     kill_adbd();
@@ -521,8 +490,6 @@ fn start_watchdog() -> Result<(), String> {
 
 fn start_daemon(command: &str, pidfile: &str) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|error| format!("current_exe: {error}"))?;
-    // 多次 up 会留下多个 watchdog/serve；旧进程醒来会和新会话抢 UDC，
-    // 表现为 HIL 与 adb 来回切换。启动前按 pidfile 结束同名旧进程。
     let _ = Command::new(START_STOP_DAEMON)
         .args([
             "--stop",
@@ -606,7 +573,6 @@ fn open_ep0(name: &str) -> Result<fs::File, String> {
         .map_err(|error| format!("open {}: {error}", path.display()))
 }
 
-/// 镜像启动脚本在后台常驻重绑 UDC；重建前必须让它退出，否则会抢绑。
 fn stop_adb_rebind_loop() {
     let _ = fs::write("/etc/.disable_udc", "");
     thread::sleep(Duration::from_millis(2500));
@@ -634,7 +600,6 @@ fn switch_processes_to_hil() -> Result<(), String> {
     Ok(())
 }
 
-/// 恢复真机进程清单。
 fn restore_processes() -> Result<(), String> {
     if restore_process_manifest(Path::new(PROCESSES_BACKUP), Path::new(PROCESSES))? {
         note("进程清单已恢复为真机");
@@ -661,7 +626,6 @@ fn restore_process_manifest(backup: &Path, active: &Path) -> Result<bool, String
     Ok(true)
 }
 
-/// 绑定后强制断开再接入：主机在同一 serial 上快速重枚举时常拒绝注册新配置。
 fn cycle_link() {
     let path = "/sys/class/udc/4100000.udc-controller/soft_connect";
     if !Path::new(path).exists() {
@@ -677,7 +641,6 @@ fn cycle_link() {
     ));
 }
 
-/// 解绑后 OTG 角色可能退回 host；厂商脚本也靠重写它恢复设备模式。
 fn set_device_role() {
     let path = "/sys/devices/platform/soc@3000000/10.usbc0/otg_role";
     let current = read_trimmed(Path::new(path)).unwrap_or_default();

@@ -271,7 +271,6 @@ impl Renderer {
                 )?;
             }
         }
-        // 换入新集合：复用缓冲拿到上一 tick 的集合，下轮直接清空重填（不克隆）。
         match self.voxel_state.get_mut(entity) {
             Some(prev) => std::mem::swap(prev, &mut self.voxel_current),
             None => {
@@ -363,8 +362,6 @@ mod tests {
         let node = create_node().unwrap();
         let subscriber = subscribe(&node);
         let mut renderer = Renderer::new(VizPublisher::with_voxels(&node).unwrap());
-        // A full refresh at a new origin must update the producer baseline, including
-        // when the following window returns to the origin preceding that refresh.
         for (i, (origin, force, expected)) in [
             ([0.; 3], false, kind::VOXELS),
             ([2.; 3], true, kind::VOXELS),

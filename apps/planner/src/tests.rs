@@ -96,8 +96,6 @@ fn local_depth_source_reaches_planner_without_an_occupancy_publisher() {
             "Depth + Odometry must create the collision grid from its own depth fusion"
         );
     }
-    // Continue valid odometry while withholding depth: the independently published map
-    // cannot stay ready merely because execution callbacks are still running.
     let lost_depth = Instant::now();
     loop {
         assert!(

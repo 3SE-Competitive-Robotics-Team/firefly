@@ -1,12 +1,4 @@
 //! IPC 接线：真值订阅 → 按配置节拍回读 → 工作线程逐像素处理 → 图像发布。
-//!
-//! 时序（采集频率由 `configs/render.toml` 的 `[capture] hz` 决定）：
-//! - `poll_pose` 排空真值更新位姿，按 `capture.hz` 的节拍（以 sim 时间为轴）
-//!   发起回读，并激活传感器相机；回读被渲染世界取走后收起
-//!   相机，限制传感器渲染只在有采集请求时执行。
-//! - 三份同 `seq` 回复到齐后装配成 [`CaptureJob`] 交给工作线程；工作线程算完
-//!   立即发布传感器，不向主线程回传像素缓冲。
-//! - 图像走 [`Publisher::publish_with`]，就地填充并注入续接后的 trace 上下文。
 
 use crate::config::RenderConfig;
 use std::collections::HashMap;
@@ -43,14 +35,11 @@ use crate::rig::{Eye, PoseState, apply_pose_to_eyes};
 /// [`NonSend`](bevy::ecs::system::NonSend) 资源持有——触碰端口的系统
 /// 自动约束到主线程，构造上不可能跨线程触碰。
 pub struct IpcPorts {
-    /// 位姿订阅（`Firefly/GroundTruth`，只保留最新）。
     pub pose_sub: Subscriber<OdomMessage>,
     /// 进程共享节点，必须在全部端口之后释放。
     pub node: IpcNode,
 }
 
-/// 打开主线程的订阅端口。
-///
 /// # Errors
 /// 节点/端口创建失败（IPC 资源不可用，见 `firefly-pubsub` 各构造器）。
 pub fn open_ports(offline: bool) -> Result<IpcPorts, firefly_error::Error> {
@@ -102,12 +91,9 @@ impl SensorPublishers {
     }
 }
 
-/// 待发布帧（四份同 `seq` 回复在此集合）。
 #[derive(Resource)]
 pub struct PendingFrames {
-    /// `seq` → 已到回复。
     pub frames: HashMap<u64, Vec<CapturedFrame>>,
-    /// 下一个回读序号。
     pub next_seq: u64,
     /// 已完成或失败的最新序号；迟到片段必须丢弃并归还缓冲。
     retired_seq: u64,
@@ -124,14 +110,11 @@ impl Default for PendingFrames {
     }
 }
 
-/// 出图统计（诊断用：区分应用帧率与真实供图速率）。
 #[derive(Resource, Default)]
 pub struct CaptureStats {
-    /// 本统计周期内已发布的拍数。
     pub published: u32,
 }
 
-/// 传感器出图节拍与相机激活状态（主线程独占）。
 #[derive(Resource, Default)]
 pub struct SensorCapture {
     /// 下一个允许触发的 sim 时刻（秒）。
@@ -142,7 +125,6 @@ pub struct SensorCapture {
     down_cadence: FrameCadence,
 }
 
-/// 逐像素处理与发布；待处理任务只保留最新一拍。
 #[derive(Resource)]
 pub struct CapturePipeline {
     jobs: Arc<Latest<CaptureJob>>,
@@ -205,7 +187,6 @@ impl Drop for CapturePipeline {
     }
 }
 
-/// 位姿轮询 + 出图节拍：排空真值保留最新 → 按固定节拍发起回读并按需激活相机。
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub fn poll_pose(
     ports: NonSend<IpcPorts>,
@@ -252,7 +233,6 @@ pub fn poll_pose(
         pose.has_pose = true;
     }
 
-    // 渲染世界已取走本窗口的请求（拷贝已编码）→ 收起传感器相机，停止空转。
     if capture
         .requested_seq
         .is_some_and(|seq| hub.taken_seq() >= seq)
@@ -290,7 +270,6 @@ pub fn poll_pose(
         log::debug!("pose t={:.3} 回读 seq={seq}", pose.stamp);
     }
 
-    // rig 摆位与激活同系统内完成：本帧渲染即用新变换、且只在出图窗口渲染。
     apply_pose_to_eyes(&pose, &mut eyes);
     let active = capture.requested_seq.is_some();
     for (eye, mut camera) in &mut cameras {
@@ -301,7 +280,6 @@ pub fn poll_pose(
     }
 }
 
-/// 回读装配：三份同 `seq` 到齐 → 交给工作线程（不阻塞主线程逐像素计算）。
 #[allow(clippy::needless_pass_by_value)]
 pub fn drain_captures(
     hub: Res<CaptureHub>,
@@ -382,7 +360,6 @@ impl PendingFrames {
     }
 }
 
-/// 汇总发布计数，工作线程提前退出视为传感器故障。
 #[allow(clippy::needless_pass_by_value)]
 pub fn poll_processor(
     pipeline: Res<CapturePipeline>,
@@ -400,9 +377,7 @@ pub fn poll_processor(
     stats.published += pipeline.published.swap(0, Ordering::Relaxed);
 }
 
-/// 发布一拍：续接 trace → 左/右灰度 + 深度 + 相机对事件。
 fn publish(ports: &SensorPublishers, result: &ProcessedCapture) {
-    // 帧 trace：续接 sim 相机周期的 span，无上游时用未采样 root（对照 vio）。
     let root = result
         .trace
         .continue_span("render-sensors")

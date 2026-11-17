@@ -76,7 +76,6 @@ impl Penalty for UniformPenalty {
         self.accumulate_with(traj, &samples, weight, acc);
     }
 
-    // 与官方公式逐行对应(k/n/i/j/tau/dps/r),单字符命名保可读性
     #[allow(clippy::many_single_char_names)]
     fn accumulate_with(
         &self,
@@ -93,8 +92,6 @@ impl Penalty for UniformPenalty {
         if n == 0 {
             return;
         }
-        // 唯一约束点序列:第 m 个点的位置(段边界只保留一次)。
-        // 逐点梯度就地取相邻两条边。
         let pieces = traj.pieces();
         let unique = |m: usize| -> Vector3<f64> {
             if m == n {
@@ -104,7 +101,6 @@ impl Penalty for UniformPenalty {
             }
         };
         let inv = 4.0 / n as f64;
-        // 全采样(含段边界重复):边界点两侧各累加一次,omg=0.5(官方一致)
         for (i, ti) in traj.durations().iter().enumerate() {
             for j in 0..=k {
                 let i_dp = i * k + j;
@@ -118,7 +114,6 @@ impl Penalty for UniformPenalty {
                     let d = unique(i_dp + 1) - unique(i_dp);
                     gdp += -inv * d.norm_squared() * d;
                 }
-                // 官方 omg = (j==0 || j==K) ? 0.5 : 1.0,即 i_dp % K == 0
                 let omg = if i_dp.is_multiple_of(k) { 0.5 } else { 1.0 };
                 let d_p = gdp * (weight * omg);
                 acc.add(
@@ -144,8 +139,6 @@ mod tests {
 
     #[test]
     fn uniform_vs_nonuniform() {
-        // 匀速直线:约束点均匀分布 → 代价接近零(端点折半权重下严格为 0 的
-        // 情形是全部相邻距离相等;此处 4 段等长直线)
         let start = Endpoint {
             position: Vector3::new(0.0, 0.0, 0.0),
             velocity: Vector3::new(1.0, 0.0, 0.0),
@@ -167,16 +160,11 @@ mod tests {
             )
             .unwrap();
         let traj = minco.solve().unwrap();
-        // 官方 distanceSqrVarianceWithGradCost2p 非中心化:等距直线 →
-        // 相邻距离平方 R = 0.2² 全同,Ju = mean(R²) = (0.2²)² = 1.6e-3。
-        // 端点梯度非 0(移动端点改变首/末 R),梯度正确性由
-        // gradient_matches_numerical_in_parameter_space 数值验证。
         let actual = UniformPenalty::new().evaluate(&traj);
         assert!(
             (actual - 1.6e-3).abs() < 1e-9,
             "等距直线 Ju 应为 1.6e-3,实际 {actual}"
         );
-        // 非均匀时长 → 代价不同(非 1.6e-3)
         let minco = test_minco();
         let traj = minco.solve().unwrap();
         let nonuniform = UniformPenalty::new().evaluate(&traj);

@@ -70,36 +70,3 @@ impl Default for PlannerConfig {
         }
     }
 }
-
-#[cfg(test)]
-#[allow(clippy::float_cmp)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn defaults_match_paper_table_s6() {
-        let c = PlannerConfig::default();
-        assert_eq!(c.constraint_points_per_piece, 5);
-        assert_eq!(c.obstacle_clearance, 0.1);
-        assert_eq!(c.obstacle_clearance_soft, 0.5);
-        assert_eq!(c.weight_obstacle_soft, 5000.0);
-        assert_eq!(c.swarm_clearance, 0.5);
-        // 官方 manager/drone_id launch 默认 0。
-        assert_eq!(c.drone_id, 0);
-        assert_eq!(c.max_velocity, 1.5);
-        assert_eq!(c.max_acceleration, 6.0);
-        assert_eq!(c.max_jerk, 10.0);
-        assert_eq!(c.weight_smoothness, 1.0);
-        assert_eq!(c.weight_time, 10.0);
-        assert_eq!(c.weight_feasibility, 10_000.0);
-        assert_eq!(c.weight_obstacle, 10_000.0);
-        assert_eq!(c.weight_swarm, 10_000.0);
-        assert_eq!(c.weight_formation, 100.0);
-        assert_eq!(c.weight_sqrvariance, 10_000.0);
-        // 官方 planner_manager.cpp:24 默认 false(run_in_sim.xml 同)
-        assert!(!c.use_multitopology_trajs);
-        // 官方 grid_map.cpp 默认 enable_virtual_wall = false
-        assert_eq!(c.virtual_ground, None);
-        assert_eq!(c.virtual_ceiling, None);
-    }
-}

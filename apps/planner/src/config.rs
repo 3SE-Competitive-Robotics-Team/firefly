@@ -67,7 +67,6 @@ mod tests {
         let cfg: PlannerToml = toml::from_str("max_velocity = 2.0").unwrap();
         assert!((cfg.config.max_velocity - 2.0).abs() < 1e-12);
         assert!((cfg.config.piece_length - 1.5).abs() < 1e-12);
-        // 缺键 = 不启用虚拟墙（官方 enable_virtual_wall 默认 false）
         assert_eq!(cfg.config.virtual_ground, None);
         assert_eq!(cfg.config.virtual_ceiling, None);
     }

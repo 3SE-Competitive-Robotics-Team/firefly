@@ -57,7 +57,6 @@ use rayon::prelude::*;
 use std::{collections::BTreeMap, marker::PhantomData, sync::Arc};
 
 /// Tracks against patches retained from each feature's initial frame.
-/// As in the original implementation, expired patches remain stored.
 pub struct PatchOpticalFlow<P: Pattern<f32, N>, const N: usize> {
     t_ns: i64,
     frame_counter: usize,

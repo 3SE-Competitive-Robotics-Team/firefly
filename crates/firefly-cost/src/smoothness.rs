@@ -91,7 +91,6 @@ mod tests {
     fn smoothness_energy() {
         let minco = test_minco();
         let traj = minco.solve().unwrap();
-        // 非负且有限
         let j = SmoothnessPenalty.evaluate(&traj);
         assert!(j.is_finite() && j >= 0.0);
         // 静止到静止单段最小 jerk：jerk = 60t−30 → ∫jerk² = 720
@@ -117,7 +116,6 @@ mod tests {
     }
     #[test]
     fn zero_velocity_trajectory_has_positive_energy() {
-        // 静止到静止的单段轨迹，jerk 能量应为正
         use firefly_trajectory::{Endpoint, MincoBuilder, SolverOrder};
         use nalgebra::Vector3;
         let start = Endpoint {

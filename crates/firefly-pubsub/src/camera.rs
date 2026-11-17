@@ -1,25 +1,15 @@
 //! 图像消息（双目灰度、下视灰度与深度）及话题。
 //!
-//! `#[repr(C)]` 定长结构，满足 `ZeroCopySend` 约束（自包含、无堆指针、
-//! 统一内存布局、`'static`、无 `Drop`）。图像数据内嵌定长数组，
-//! iceoryx2 共享内存零拷贝传输；trace 上下文由发布中间件写入
-//! **User Header**（见 [`crate::trace`]）。
-//!
 //! 双目/深度使用 [`IMAGE_WIDTH`] × [`IMAGE_HEIGHT`]，下视使用
 //! [`DOWN_WIDTH`] × [`DOWN_HEIGHT`]；订阅端按对应的定长消息接收。
 
 use iceoryx2::prelude::*;
 
-/// 图像宽度（像素）。
 pub const IMAGE_WIDTH: usize = 320;
-/// 图像高度（像素）。
 pub const IMAGE_HEIGHT: usize = 240;
-/// 灰度/深度图像素总数（320×240）。
 pub const IMAGE_SIZE: usize = IMAGE_WIDTH * IMAGE_HEIGHT;
 
-/// 下视相机原始灰度图宽度（像素）。
 pub const DOWN_WIDTH: usize = 352;
-/// 下视相机原始灰度图高度（像素）。
 pub const DOWN_HEIGHT: usize = 288;
 pub const DOWN_SIZE: usize = DOWN_WIDTH * DOWN_HEIGHT;
 pub const CAMERA_DOWN_TOPIC: &str = "Firefly/CameraDown";
@@ -55,10 +45,8 @@ impl Default for DownImageMessage {
 pub const CAMERA_LEFT_TOPIC: &str = "Firefly/CameraLeft";
 /// 右目灰度话题（`sensor_id = 1`）。
 pub const CAMERA_RIGHT_TOPIC: &str = "Firefly/CameraRight";
-/// 深度话题。
 pub const DEPTH_TOPIC: &str = "Firefly/Depth";
 
-/// 灰度图像消息（定长 u8 数组，零拷贝）。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
 #[type_name("FireflyGrayImageMessage")]
@@ -67,16 +55,13 @@ pub struct GrayImageMessage {
     pub timestamp: f64,
     /// 相机 id（左目 0 / 右目 1）。
     pub sensor_id: i32,
-    /// 图像宽度（像素）。
     pub width: u32,
-    /// 图像高度（像素）。
     pub height: u32,
     /// 灰度像素（行主序）。
     pub data: [u8; IMAGE_SIZE],
 }
 
 impl Default for GrayImageMessage {
-    // 定长共享内存消息（76KB），大数组是设计使然
     #[allow(clippy::large_stack_arrays)]
     fn default() -> Self {
         Self {
@@ -96,18 +81,14 @@ impl Default for GrayImageMessage {
 pub struct DepthImageMessage {
     /// 传感器时钟时间戳（秒）。
     pub timestamp: f64,
-    /// 相机 id。
     pub sensor_id: i32,
-    /// 图像宽度（像素）。
     pub width: u32,
-    /// 图像高度（像素）。
     pub height: u32,
     /// 深度像素（米，行主序）。
     pub data: [f32; IMAGE_SIZE],
 }
 
 impl Default for DepthImageMessage {
-    // 定长共享内存消息（307KB），大数组是设计使然
     #[allow(clippy::large_stack_arrays)]
     fn default() -> Self {
         Self {
@@ -139,7 +120,6 @@ mod tests {
     #[test]
     fn gray_image_is_plain_old_data() {
         let m = GrayImageMessage::default();
-        // 8(ts) + 12(sensor_id/width/height) + 76800(data)，对齐 8
         assert_eq!(std::mem::size_of::<GrayImageMessage>(), 76824);
         assert!((m.timestamp + 1.0).abs() < 1e-9);
         assert_eq!(m.data.len(), IMAGE_SIZE);
@@ -148,7 +128,6 @@ mod tests {
     #[test]
     fn depth_image_is_plain_old_data() {
         let m = DepthImageMessage::default();
-        // 8(ts) + 12 + 4*76800(data)，对齐 8
         assert_eq!(std::mem::size_of::<DepthImageMessage>(), 307_224);
         assert!(m.data.iter().all(|&v| v == 0.0));
     }

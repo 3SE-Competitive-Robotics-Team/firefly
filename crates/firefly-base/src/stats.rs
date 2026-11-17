@@ -43,7 +43,6 @@ mod tests {
         // ν=100 的 95% 分位数 ≈ 124.34（Wilson–Hilferty 精度 ~1e-2）
         let v = chi2_95(100);
         assert!((v - 124.34).abs() < 0.1, "chi2(100) = {v}");
-        // 单调性
         assert!(chi2_95(100) > chi2_95(50));
     }
 

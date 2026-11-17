@@ -74,7 +74,6 @@ mod tests {
 
     #[test]
     fn parses_utime_stime_after_parenthesized_comm() {
-        // 字段 3..13 各一个 0，然后 utime=7、stime=9。
         let stat = "123 (planner with ) paren) S 0 0 0 0 0 0 0 0 0 0 7 9";
         assert_eq!(parse_stat(stat), Some(16));
     }

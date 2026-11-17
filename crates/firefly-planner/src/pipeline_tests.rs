@@ -12,7 +12,6 @@ use firefly_map::{GridMapBuilder, VoxelState};
 use firefly_trajectory::{Endpoint, MincoBuilder, SolverOrder, Trajectory};
 use nalgebra::{Point3, Vector3};
 
-/// 组装真实 FSM、规划管理器和轨迹消费者；cycle 推进一次完整规划周期。
 struct PlannerManager {
     fsm: ReplanFsm,
     server: TrajectoryServer,
@@ -153,8 +152,6 @@ fn arc_point(path: &[Vector3<f64>], from: Vector3<f64>, arc: f64) -> Vector3<f64
     *path.last().unwrap()
 }
 
-/// 空旷地图上的管理器:起点 (1,1,1) → 终点 (10,1,1)。可选注入虚拟墙
-/// `(ground, ceil)`（米，世界坐标 z）。
 fn open_manager_with_wall(virtual_wall: Option<(f64, f64)>) -> PlannerManager {
     let mut builder = GridMapBuilder::new(0.5, [40, 24, 16]);
     if let Some((ground, ceil)) = virtual_wall {
@@ -392,8 +389,6 @@ fn registered_peers_are_rebased_to_planning_epoch() {
 
 #[test]
 fn global_traj_time_parameterization() {
-    // 全局轨迹多项式化（官方 planGlobalTrajWaypoints）：时间参数化的
-    // MINCO 轨迹，首末状态完整（零速零加速）、内点为任务航点。
     let m = open_manager();
     let start = m.global_path()[0];
     let goal = m.goal().coords;
@@ -412,15 +407,12 @@ fn global_traj_time_parameterization() {
         g.traj.eval(g.traj.duration()).velocity.norm() < 1e-6,
         "终点零速"
     );
-    // des_vel 迭代保证最大速度不超 max_vel（官方达标即断/再缩放一次）
     let max_vel = PlannerConfig::default().max_velocity;
     assert!(
         crate::planner::Planner::trajectory_max_vel(&g.traj) <= max_vel + 1e-6,
         "全局轨迹最大速度 {} 超限 {max_vel}",
         crate::planner::Planner::trajectory_max_vel(&g.traj)
     );
-    // 内点即任务航点：逐段时长 = 段长/des_vel，总时长 = 路径长
-    // /des_vel（首轮达标则 des_vel = max_vel/1.5；超标再缩放一半）
     let dur = g.traj.duration();
     let path_len = path_length(m.global_path());
     assert!(
@@ -443,10 +435,8 @@ fn global_guidance_preserves_measured_velocity_on_rebuild() {
         let head = m.global.traj.eval(0.);
         assert!((head.position - measured.position.coords).norm() < 1e-9);
         assert!((head.velocity - measured.velocity).norm() < 1e-9);
-        // 上游 planNextWaypoint 使用 odom P/V，起始加速度为零。
         assert!(head.acceleration.norm() < 1e-9);
         if speed > PlannerConfig::default().max_velocity {
-            // 上游对已经超速的边界不执行第二次时间缩放。
             assert!((m.global.traj.duration() - 10.).abs() < 1e-9);
         }
         let corrected = State {
@@ -472,7 +462,6 @@ fn global_guidance_preserves_measured_velocity_on_rebuild() {
 #[test]
 fn glb_t_of_lc_tgt_advances_and_resets_on_retarget() {
     let mut m = open_manager();
-    // 构造/重目标后按官方 setGlobalTraj 初始化：glb = 锚点、last = -1
     assert!(
         (m.global.glb_t_of_lc_tgt - m.global.start_time).abs() < 1e-9,
         "初始 glb = 锚点"
@@ -483,7 +472,6 @@ fn glb_t_of_lc_tgt_advances_and_resets_on_retarget() {
     );
     let path = m.global_path().to_vec();
     let start = path[0];
-    // 首次 horizon：入口 last = 旧 glb（0），glb 前推
     let _ = m.horizon(start);
     assert!(
         (m.global.last_glb_t_of_lc_tgt).abs() < 1e-9,
@@ -491,7 +479,6 @@ fn glb_t_of_lc_tgt_advances_and_resets_on_retarget() {
     );
     let glb1 = m.global.glb_t_of_lc_tgt;
     assert!(glb1 > 0.0, "glb 应前推");
-    // 同 start 再选：命中同一目标 → last = 前次 glb、glb 不变
     let _ = m.horizon(start);
     assert!(
         (m.global.last_glb_t_of_lc_tgt - glb1).abs() < 1e-9,
@@ -501,11 +488,9 @@ fn glb_t_of_lc_tgt_advances_and_resets_on_retarget() {
         (m.global.glb_t_of_lc_tgt - glb1).abs() < 1e-9,
         "同 start 命中同一目标，glb 不变"
     );
-    // 起点前移：目标更晚 → glb 前推
     let mid = arc_point(&path, start, 3.0);
     let _ = m.horizon(mid);
     assert!(m.global.glb_t_of_lc_tgt > glb1, "起点前移后 glb 应前推");
-    // 手动推进到全局终点：touch_goal → glb = 锚点 + duration
     m.global.glb_t_of_lc_tgt = m.global.start_time + m.global.traj.duration();
     let h = m.horizon(mid);
     assert!(h.touch_goal, "步进越过终点应 touch_goal");
@@ -517,7 +502,6 @@ fn glb_t_of_lc_tgt_advances_and_resets_on_retarget() {
         (h.target - m.goal().coords).norm() < 1e-9,
         "touch 目标 = 全局终点"
     );
-    // 重设目标：官方 setGlobalTraj 等效（glb = now、last = -1）
     m.set_goal(10.0, None, Vector3::new(15.0, 1.0, 1.0))
         .unwrap();
     assert!(
@@ -532,8 +516,6 @@ fn glb_t_of_lc_tgt_advances_and_resets_on_retarget() {
 
 #[test]
 fn horizon_time_stepping_local_target() {
-    // 官方 getLocalTarget：时间步进 + 距离判定——首个距 start ≥ 视界的
-    // 全局轨迹点为局部目标（连同 glb 时刻的轨迹速度）。
     let mut m = open_manager();
     let start = m.global_path()[0];
     let h = m.horizon(start);
@@ -553,7 +535,6 @@ fn horizon_time_stepping_local_target() {
         d < 6.5,
         "目标应为首次越过视界的步进点(不应超远):实际 {d:.3}"
     );
-    // 远离终点（> 刹车距离）→ 目标速度 = 全局轨迹在该时刻的速度（非零）
     let tv = m.global.traj.eval(glb - m.global.start_time).velocity;
     assert!(
         (h.target_vel - tv).norm() < 1e-9,
@@ -564,8 +545,6 @@ fn horizon_time_stepping_local_target() {
 
 #[test]
 fn horizon_touch_goal_zeroes_velocity() {
-    // 短路径(< 视界)：步进耗尽 → touch_goal、目标 = 全局终点、
-    // 目标速度为零（触及时终点距离为 0 < 刹车距离）。
     let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
     let planner = Planner::new(PlannerConfig::default(), map);
     let mut m = PlannerManager::with_planner(
@@ -591,8 +570,6 @@ fn horizon_touch_goal_zeroes_velocity() {
 
 #[test]
 fn horizon_zero_vel_within_braking_distance() {
-    // 低限加速度拉大刹车距离 max_vel²/(2·max_acc)：非 touch_goal 目标
-    // 落入刹车距离内时目标速度仍取零（官方 local_target_vel 判定）。
     let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
     let planner = Planner::new(
         PlannerConfig {
@@ -626,7 +603,6 @@ fn horizon_zero_vel_within_braking_distance() {
 #[test]
 fn tick_initial_plan_then_replan_at_threshold() {
     let mut m = open_manager();
-    // 首帧:初始规划建立局部轨迹
     let r0 = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
     assert!(m.local().is_some(), "首帧应建立局部轨迹");
     assert!(r0.replanned, "首条轨迹也作为新轨迹交给输出消费者");
@@ -634,14 +610,12 @@ fn tick_initial_plan_then_replan_at_threshold() {
     let ref0 = r0.reference.expect("首帧应有参考指令");
     assert!((ref0.position - Vector3::new(1.0, 1.0, 1.0)).norm() < 1e-6);
     assert!(!m.is_finished());
-    // t=1.5 > replan_thresh(1.0) → 触发重规划(暖启动)
     let r1 = m.cycle(1.5, None);
     assert!(r1.replanned, "超过阈值应重规划");
     assert_eq!(m.replans(), 1);
     assert!(r1.reference.is_some());
 }
 
-/// 固定随机源检查正交偏移、幅度边界和连败时的搜索范围扩张。
 #[test]
 fn random_mid_expands_bounded_search_after_failures() {
     use rand::{RngExt, SeedableRng, rngs::StdRng};
@@ -719,13 +693,9 @@ fn task_finishes_at_final_trajectory_end() {
 fn warm_start_falls_back_to_cold_when_exhausted() {
     let mut m = open_manager();
     let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
-    // 重规划到 horizon(非终点)的局部轨迹,使"轨迹耗尽"不会误触到达判定
     let _ = m.cycle(1.5, None);
     let dur = m.local().unwrap().traj.duration();
     assert!(m.local().unwrap().start_time < 1.5 + 1e-9);
-    // 轨迹耗尽(now = start + duration + 0.1),未到达目标 → 强制重规划。
-    // 暖启动的 elapsed 超过旧轨迹时长 → init_warm_start 必然失败
-    // → 降级冷启动(官方 case2 → case1 策略链)仍须成功。
     let t_end = m.local().unwrap().start_time + dur + 0.1;
     let r = m.cycle(t_end, None);
     assert!(r.replanned, "轨迹耗尽应强制重规划");
@@ -737,20 +707,16 @@ fn warm_start_falls_back_to_cold_when_exhausted() {
 #[test]
 fn set_goal_rebuilds_path_and_dedups_same_target() {
     let mut m = open_manager();
-    // 先正常规划出局部轨迹(飞行中状态)
     let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
     let _ = m.cycle(1.5, None);
     assert!(m.local().is_some(), "前置:应有局部轨迹");
 
-    // 动态重目标:新目标重建全局路径、通知 FSM 重规划(目标取地图内部点)
     let new_goal = Vector3::new(15.0, 1.0, 1.0);
     m.set_goal(2.0, None, new_goal).unwrap();
     assert!((m.goal().coords - new_goal).norm() < 1e-9, "目标应更新");
     assert_eq!(m.global_path().last().unwrap(), &new_goal);
     assert!(m.local().is_some(), "重目标期间保持旧轨迹，等待新轨迹入库");
     assert!(!m.is_finished());
-    // 重目标后下一 tick 应重新规划出新轨迹(初始规划不计 replans,
-    // 语义见 tick_initial_plan_then_replan_at_threshold)
     let _ = m.cycle(2.1, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
     let local = m.local().expect("重目标后应重新规划出新轨迹");
     assert!(
@@ -759,7 +725,6 @@ fn set_goal_rebuilds_path_and_dedups_same_target() {
         local.start_time
     );
 
-    // 同目标幂等:CLI 连发防竞态,重复目标不得重置状态机/清空轨迹
     let replans_after_retarget = m.replans();
     let local_after_retarget = m.local().is_some();
     m.set_goal(2.2, None, new_goal).unwrap();
@@ -804,7 +769,6 @@ fn collision_monitor_triggers_immediate_replan() {
         !m.map().is_occupied_inflated(obstacle),
         "膨胀层刷新前新障碍不可见"
     );
-    // t=0.5 < replan_thresh(1.0):只有碰撞监控能触发重规划
     let r = m.cycle(0.5, None);
     assert!(r.collision, "监控应发现前方碰撞");
     assert!(r.replanned, "发现碰撞应绕过 周期重规划阈值立即重规划");
@@ -823,7 +787,6 @@ fn collision_monitor_triggers_immediate_replan() {
 
 #[test]
 fn collision_monitor_ignores_already_flown_part() {
-    // 阈值拉高隔离阈值重规划,聚焦监控行为
     let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
     let planner = Planner::new(PlannerConfig::default(), map);
     let options = ManagerOptions {
@@ -839,7 +802,6 @@ fn collision_monitor_ignores_already_flown_part() {
     .unwrap();
     let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
 
-    // 已飞过位置(t=0.5 时所在)注入障碍;t=2.0 时机体已远离
     let past = m.local().unwrap().traj.eval(0.5).position;
     let now_pos = m.local().unwrap().traj.eval(2.0).position;
     assert!(
@@ -864,7 +826,6 @@ fn collision_monitor_ignores_already_flown_part() {
 fn ground_height_measures_flat_floor() {
     let mut m = open_manager();
     let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
-    // 平地：整个底层体素层（z∈[0,0.5)）填满占据
     let dims = m.map().dims();
     for i in 0..dims[0] {
         for j in 0..dims[1] {
@@ -878,7 +839,6 @@ fn ground_height_measures_flat_floor() {
         (0.0..0.5).contains(&h),
         "测得高度应落在地面体素层内，实际 {h}",
     );
-    // 首个命中不变量：命中体素占据，其上一层自由
     let fwd = m
         .local()
         .unwrap()
@@ -892,7 +852,6 @@ fn ground_height_measures_flat_floor() {
 #[test]
 fn ground_height_fails_at_map_bottom() {
     let mut m = open_manager();
-    // 空旷地图（无地面）：逐格下降扫描至图底仍无占据 → 测量失败
     let r = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
     assert!(m.local().is_some(), "前置：轨迹已存在");
     assert!(r.ground_height.is_none(), "图底之下无地面应返回失败");
@@ -902,13 +861,11 @@ fn ground_height_fails_at_map_bottom() {
 #[test]
 fn ground_height_skipped_without_plan() {
     let m = open_manager();
-    // 无可执行轨迹（官方 pts_chk < 3 的前置条件）不测量
     assert!(m.measure_ground_height(0.0).is_none());
 }
 
 #[test]
 fn ground_height_ignores_virtual_floor_below_ground() {
-    // 虚拟地板低于真实地面：扫描命中真实占据层，仍报地面高度
     let mut m = open_manager_with_wall(Some((-0.1, f64::INFINITY)));
     let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
     let dims = m.map().dims();
@@ -925,7 +882,6 @@ fn ground_height_ignores_virtual_floor_below_ground() {
 
 #[test]
 fn ground_height_fails_at_virtual_floor() {
-    // 虚拟地板设在扫描起点与真实地面之间：先于占据命中触墙 → 测量失败
     let mut m = open_manager_with_wall(Some((0.7, f64::INFINITY)));
     let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
     let dims = m.map().dims();
@@ -945,8 +901,6 @@ fn emergency_stop_generates_stationary_reference() {
     let stop_pos = Vector3::new(2.0, 1.0, 1.0);
     m.enter_emergency_stop(0.5, Some(state_at(stop_pos)));
     assert!(m.fsm.is_emergency(), "进入后应处于急停态");
-    // 停车轨迹：两段各 STOP_PIECE_DURATION，全程定点零速零加速度
-    // （官方 EmergencyStop 的边界状态全同约束 ⇒ 恒为常值多项式）
     let local = m.local().expect("急停应入库停车轨迹");
     assert!((local.traj.duration() - 2.0 * STOP_PIECE_DURATION).abs() < 1e-9);
     for t in [0.0, 0.7, 1.3, 2.0] {
@@ -955,7 +909,6 @@ fn emergency_stop_generates_stationary_reference() {
         assert!(s.velocity.norm() < 1e-9, "t={t} 参考速度应为零");
         assert!(s.acceleration.norm() < 1e-9, "t={t} 参考加速度应为零");
     }
-    // 急停中的 tick：报告急停态，参考为原地悬停
     let r = m.cycle(1.0, None);
     assert!(r.emergency_stop, "急停中报告应急停标志");
     let reference = r.reference.expect("急停态应有悬停参考");
@@ -970,8 +923,6 @@ fn emergency_stop_survives_trajectory_exhaustion() {
     let stop_pos = Vector3::new(2.0, 1.0, 1.0);
     m.enter_emergency_stop(0.5, Some(state_at(stop_pos)));
     let replans_before = m.replans();
-    // 远超停车轨迹时长（2s）：不得触发常规强制重规划或脱困直飞
-    // （对照官方：重规划仅在 EXEC_TRAJ case 生效）
     let r = m.cycle(10.0, None);
     assert!(m.fsm.is_emergency(), "轨迹耗尽不得退出急停");
     assert!(!r.replanned, "急停中轨迹耗尽不得常规重规划");
@@ -988,13 +939,11 @@ fn emergency_recovers_when_failsafe_enabled_and_slow() {
     let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
     let stop_pos = Vector3::new(2.0, 1.0, 1.0);
     m.enter_emergency_stop(0.5, Some(state_at(stop_pos)));
-    // 超阈值速度：即使 fail-safe 允许也不恢复（官方 vel < 0.1 判据）
     let mut fast = state_at(stop_pos);
     fast.velocity = Vector3::new(1.0, 0.0, 0.0);
     let r_fast = m.cycle(0.8, Some(fast));
     assert!(m.fsm.is_emergency(), "超阈值速度不应恢复");
     assert!(!r_fast.replanned);
-    // 低速观测 + fail-safe 允许（默认）→ 从当前位姿完整重规划并退出
     let r = m.cycle(1.0, Some(state_at(stop_pos)));
     assert!(!m.fsm.is_emergency(), "低速且 fail-safe 允许应退出急停");
     assert!(r.replanned, "恢复应产出新轨迹");
@@ -1013,8 +962,6 @@ fn in_collision_goal_modified_to_nearest_free_point() {
     let old_start = m.global_path()[0];
     let duration = m.global.traj.duration();
     let old_goal = m.goal();
-    // 目标附近整块占据（res 0.5，goal=(10,1,1) → 体素 [20,2,2] 及邻域），
-    // 使回扫从末端起至少跨过一个步长才碰到自由点
     for i in 18..=21 {
         for j in 1..=3 {
             for k in 1..=3 {
@@ -1027,7 +974,6 @@ fn in_collision_goal_modified_to_nearest_free_point() {
         m.map().is_occupied_inflated(old_goal.coords),
         "场景前提：目标应落在膨胀占据内"
     );
-    // t=0.5 < replan_thresh：本 tick 只有目标修正分支能动作
     let r = m.cycle(0.5, None);
     assert!(r.replanned, "目标修正应本 tick 立即重规划");
     let new_goal = m.goal();
@@ -1103,7 +1049,6 @@ fn free_goal_left_untouched() {
     let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
     let goal = m.goal();
     let path = m.global_path().to_vec();
-    // 目标自由且低于重规划阈值：目标与轨迹均不变
     let r = m.cycle(0.5, None);
     assert!(!r.replanned);
     assert_eq!(m.goal(), goal);
@@ -1117,7 +1062,6 @@ fn fully_blocked_global_path_keeps_goal_without_panic() {
     let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
     let goal = m.goal();
     let path = m.global_path().to_vec();
-    // 整条直线路径占据：路径 y=z=1，占据 y=z∈[1.0,1.5) 的体素条带即覆盖全程
     let dims = m.map().dims();
     for i in 0..dims[0] {
         m.map_mut().set_state([i, 2, 2], VoxelState::Occupied);
@@ -1126,7 +1070,6 @@ fn fully_blocked_global_path_keeps_goal_without_panic() {
     for p in &path {
         assert!(m.map().is_occupied_inflated(*p), "场景前提：{p:?} 应被占据");
     }
-    // 回扫耗尽：不 panic，目标与轨迹保持不变（后续碰撞监控/急停接管）
     let r = m.cycle(0.5, None);
     assert_eq!(m.goal(), goal, "回扫耗尽目标不得变动");
     assert_eq!(m.global_path(), path.as_slice());
@@ -1140,14 +1083,12 @@ fn emergency_without_failsafe_never_recovers() {
     let stop_pos = Vector3::new(2.0, 1.0, 1.0);
     m.trigger_emergency_stop_disable_failsafe(0.5, Some(state_at(stop_pos)));
     assert!(m.fsm.is_emergency(), "深度丢失入口应进入急停");
-    // fail-safe 已关闭：即使完全静止也不自动恢复（官方语义）
     let r = m.cycle(1.0, Some(state_at(stop_pos)));
     assert!(m.fsm.is_emergency(), "fail-safe 关闭不得自动恢复");
     assert!(r.emergency_stop);
     assert!(!r.replanned);
 }
 
-/// 定点悬停轨迹（单段）：swarm 对端注入用。
 fn hover_traj(pos: Vector3<f64>, duration: f64) -> Trajectory {
     let endpoint = Endpoint {
         position: pos,
@@ -1161,7 +1102,6 @@ fn hover_traj(pos: Vector3<f64>, duration: f64) -> Trajectory {
         .unwrap()
 }
 
-/// 指定 `drone_id` 的空旷管理器（其余同 `open_manager`）。
 fn manager_with_drone_id(drone_id: i32) -> PlannerManager {
     let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
     let planner = Planner::new(
@@ -1183,17 +1123,14 @@ fn manager_with_drone_id(drone_id: i32) -> PlannerManager {
 #[test]
 fn sequential_start_waits_for_predecessors() {
     let mut m = manager_with_drone_id(2);
-    // 未收齐前序：不规划、无参考输出（官方 SEQUENTIAL_START 停留语义）
     let r = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
     assert!(!m.sequential_start_ready());
     assert!(m.local().is_none(), "未收齐前序 agent 轨迹不得初始规划");
     assert!(r.reference.is_none());
-    // 只收 agent 0（缺 agent 1）：仍等待
     m.register_swarm_traj(0, hover_traj(Vector3::new(15.0, 10.0, 1.0), 30.0), 0.0, 0.5);
     let _ = m.cycle(0.1, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
     assert!(!m.sequential_start_ready());
     assert!(m.local().is_none());
-    // 收齐 agent 1：本 tick 即初始规划
     m.register_swarm_traj(1, hover_traj(Vector3::new(18.0, 10.0, 1.0), 30.0), 0.0, 0.5);
     let _ = m.cycle(0.2, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
     assert!(m.sequential_start_ready());
@@ -1216,7 +1153,6 @@ fn mandatory_stop_disables_failsafe_recovery() {
     m.mandatory_stop(0.5, Some(state_at(stop_pos)));
     assert!(m.is_mandatory_stopped(), "强制停止标志应锁存");
     assert!(m.fsm.is_emergency(), "强制停止应进入急停");
-    // fail-safe 已关闭：完全静止也不自动恢复（官方 enable_fail_safe_=false）
     let r = m.cycle(1.0, Some(state_at(stop_pos)));
     assert!(m.fsm.is_emergency(), "强制停止后不得自动恢复");
     assert!(r.emergency_stop);
@@ -1228,7 +1164,6 @@ fn mandatory_stop_latch_rejects_retarget() {
     let mut m = open_manager();
     let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
     m.mandatory_stop(0.5, Some(state_at(Vector3::new(2.0, 1.0, 1.0))));
-    // 锁存中收到新目标：目标与急停态均不变（急停后不自动恢复）
     let goal_before = m.goal();
     m.set_goal(0.6, None, Vector3::new(15.0, 10.0, 1.0))
         .unwrap();
@@ -1242,7 +1177,6 @@ fn swarm_conflict_triggers_immediate_replan() {
     let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
     assert!(m.local().is_some());
     let local = m.local().unwrap();
-    // 非零侧偏打破静态对称，避免在避碰代价驻点上测试求解器收敛。
     let position =
         local.traj.eval(local.traj.duration() * 0.45).position + Vector3::new(0., 0.2, 0.);
     m.register_swarm_traj(1, hover_traj(position, 30.), 0., 0.);
@@ -1250,7 +1184,6 @@ fn swarm_conflict_triggers_immediate_replan() {
         m.next_swarm_conflict(0.5).is_some(),
         "测试对端必须位于监控覆盖范围内"
     );
-    // t=0.5 < replan_thresh(1.0)：仅 swarm 预测检查能触发重规划
     let r = m.cycle(0.5, None);
     assert!(r.replanned, "预测距离过近应立即重规划");
     assert_eq!(m.replans(), 1);
@@ -1261,7 +1194,6 @@ fn swarm_conflict_triggers_immediate_replan() {
 fn far_swarm_peer_does_not_disturb() {
     let mut m = open_manager();
     let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
-    // 对端横向偏离航迹 4m：远超净距，无冲突无重规划
     m.register_swarm_traj(1, hover_traj(Vector3::new(4.0, 5.0, 1.0), 30.0), 0.0, 0.0);
     let r = m.cycle(0.5, None);
     assert!(!r.replanned);
@@ -1273,7 +1205,6 @@ fn far_swarm_peer_does_not_disturb() {
 fn own_swarm_slot_is_rejected() {
     let mut m = open_manager(); // drone_id = 0
     let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
-    // 自身槽位拒收（官方 recv_id == 自身直接返回）：不得触发冲突重规划
     m.register_swarm_traj(0, hover_traj(Vector3::new(4.0, 1.0, 1.0), 30.0), 0.0, 0.0);
     let r = m.cycle(0.5, None);
     assert!(!r.replanned, "自身槽位不得参与 swarm 检查");
@@ -1288,15 +1219,12 @@ fn traj_id_increments_on_each_adopted_plan() {
         0,
         "构造后无轨迹：0 = 无轨迹哨兵（官方 traj_id <= 0）"
     );
-    // 初始规划（官方 GEN_NEW_TRAJ 首次 setLocalTraj）→ 序号 1
     let _ = m.cycle(0.0, Some(state_at(Vector3::new(1.0, 1.0, 1.0))));
     assert_eq!(m.traj_id(), 1, "初始规划应拿到 1 号");
     assert_eq!(m.local().unwrap().traj_id, 1, "入库轨迹应携带当前序号");
-    // 超阈值重规划 → 序号 2（每条新轨迹递增，供对端区分新旧）
     let _ = m.cycle(1.5, None);
     assert_eq!(m.traj_id(), 2, "首次重规划应拿到 2 号");
     assert_eq!(m.local().unwrap().traj_id, 2);
-    // 再重规划 → 序号 3（新型轨迹一定会被对端视为更新）
     let _ = m.cycle(3.0, None);
     assert_eq!(m.traj_id(), 3, "每次成功入库持续递增");
     assert_eq!(m.local().unwrap().traj_id, 3);
@@ -1304,8 +1232,6 @@ fn traj_id_increments_on_each_adopted_plan() {
 
 #[test]
 fn monitors_short_circuit_without_issued_traj() {
-    // 构造后未规划（traj_id == 0）：官方 ego_replan_fsm.cpp:307 入口短路——
-    // 即便地图有障碍、对端有轨迹，碰撞/swarm 监控都不扫描
     let mut m = open_manager();
     assert_eq!(m.traj_id(), 0);
     m.map_mut().set_state([8, 2, 2], VoxelState::Occupied);

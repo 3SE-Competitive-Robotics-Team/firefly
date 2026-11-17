@@ -1,11 +1,4 @@
 //! EGO 规划器（Rebound 主循环）。
-//!
-//! 论文流程（Sci. Robot. 2022, Trajectory planning procedure）：
-//! 1. 局部目标选择（规划距离内）
-//! 2. 多项式种子等时重采样或上一条轨迹暖启动
-//! 3. 碰撞段通过局部 A* 生成 Rebound 约束（firefly-search）
-//! 4. Rebound 循环：扫描新障碍 → 生成 {s,v} 平面 → L-BFGS 优化
-//! 5. 无新障碍时返回轨迹
 
 use firefly_cost::{
     FeasibilityPenalty, FormationPenalty, MincoCost, ObstaclePenalty, SwarmPenalty,
@@ -29,9 +22,6 @@ use crate::root_finder;
 #[path = "planner_regression_tests.rs"]
 mod regression_tests;
 
-/// [`Planner::try_finish`] 的判定结果。仅 [`FinishCheck::SwarmTooClose`] 在
-/// 外层触发 swarm 权重倍增（对照官方 `wei_swarm_mod_ *= 2` 的唯一触发路径），
-/// 其余失败 restart 但权重不变。
 #[derive(Debug)]
 enum FinishCheck {
     Accept(Trajectory),
@@ -39,12 +29,10 @@ enum FinishCheck {
     Collision,
 }
 
-/// 单次完整优化内层（官方 `optimizeTrajectory`）的产出。
 struct InnerOutcome {
     trajectory: Trajectory,
     planes_by_point: Vec<Vec<Plane>>,
     iterations: usize,
-    /// L-BFGS 输出的目标总代价（官方 `final_cost`）。
     final_cost: f64,
 }
 
@@ -55,10 +43,8 @@ pub struct State {
     pub acceleration: Vector3<f64>,
 }
 
-/// 初始解来源（对照官方 `computeInitState` 的两个 case）。
 #[derive(Debug, Clone, Copy)]
 pub enum InitSource<'a> {
-    /// case 1：2 秒多项式种子等时重采样（首帧 / 暖启动失败降级）。
     ColdStart,
     /// case 2：旧局部轨迹与全局多项式拼接。
     /// `elapsed` 为局部轨迹已执行时长；`global_start`、`global_end`
@@ -70,9 +56,9 @@ pub enum InitSource<'a> {
         global_start: f64,
         global_end: f64,
     },
-    /// 随机多项式初始化（官方 `computeInitState` `flag_randomPolyTraj`）：
-    /// `mid` 为带随机偏移的中点（调用方按连败次数定幅度），2 段种子重采样。
-    RandomStart { mid: Vector3<f64> },
+    RandomStart {
+        mid: Vector3<f64>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -100,9 +86,6 @@ pub struct Planner {
     map: GridMap,
     formation: Option<FormationSpec>,
     astar: firefly_search::Astar,
-    /// 当前/最近一次规划的 swarm 权重系数（官方 `wei_swarm_mod_` 相对
-    /// `wei_swarm_` 的倍数）：每次 rebound 复位为 1.0，仅「收敛但集群
-    /// 间距不满足」的 restart 时倍增，乘到 `SwarmPenalty` 权重上。
     last_swarm_weight_mod: f64,
 }
 
@@ -123,14 +106,11 @@ impl Planner {
         }
     }
 
-    /// 最近一次规划实际使用的 swarm 权重系数（≥1.0）。无 peers 或首次
-    /// 即成功时为 1.0；>1 说明经历过「收敛但集群间距不满足」的重启倍增。
     #[must_use]
     pub fn last_swarm_weight_mod(&self) -> f64 {
         self.last_swarm_weight_mod
     }
 
-    /// 设置队形规格（论文 Formation expectation + 官方 formationGradCostP 动态推断）。
     pub fn set_formation(&mut self, spec: FormationSpec) {
         self.formation = Some(spec);
     }
@@ -179,13 +159,11 @@ impl Planner {
         }
     }
 
-    /// 规划器持有的地图（可视化等用途）。
     #[must_use]
     pub fn map_ref(&self) -> &GridMap {
         &self.map
     }
 
-    /// 可变地图（动态障碍更新）。
     pub fn map_mut(&mut self) -> &mut GridMap {
         &mut self.map
     }
@@ -199,10 +177,7 @@ impl Planner {
     }
 
     /// 显式局部终点 PVA，不截断目标；终点速度由调用方的全局轨迹提供。
-    /// 带初始解来源的规划（连续重规划用暖启动，官方 `planFromLocalTraj`
-    /// 策略链：case2 暖启动 → 失败降级 case1 冷启动）。
-    /// `touch_goal` = 局部目标是否即全局终点(官方 `setIfTouchGoal`,影响
-    /// 约束力是否覆盖全程)。
+    /// `touch_goal` 表示局部目标即全局终点，此时约束覆盖全程。
     ///
     /// # Errors
     ///
@@ -218,8 +193,6 @@ impl Planner {
         self.plan_in_swarm_init(start, goal, &[], source, touch_goal)
     }
 
-    /// 集群规划：本机轨迹避让其他机轨迹（论文 decentralized framework：
-    /// 接收其他机轨迹作为约束，只规划自己）。
     /// # Errors
     ///
     /// `NotFound`：起点/终点不可达；`Convergence`：Rebound 超出迭代上限。
@@ -238,8 +211,6 @@ impl Planner {
         self.plan_in_swarm_init(start, goal, peers, InitSource::ColdStart, false)
     }
 
-    /// 集群规划 + 初始解来源（官方式连续重规划：每帧从上一帧轨迹暖启动，
-    /// 避让偏移逐帧继承；`touch_goal` 见 [`Self::plan_with_init`]）。
     /// # Errors
     ///
     /// `NotFound`：起点/终点不可达；`Convergence`：Rebound 超出迭代上限。
@@ -255,7 +226,6 @@ impl Planner {
         self.plan_in_swarm_init(start, goal, peers, source, touch_goal)
     }
 
-    /// 集群规划（带初始解来源，见 [`InitSource`]）。
     fn plan_in_swarm_init(
         &mut self,
         start: State,
@@ -265,7 +235,6 @@ impl Planner {
         touch_goal: bool,
     ) -> Result<PlanResult> {
         self.check_cancelled()?;
-        // 地图可能已被动态障碍更新：重算膨胀层（官方 clearAndInflateLocalMap）
         self.map.inflate_obstacles();
         let start_endpoint = Endpoint {
             position: start.position.coords,
@@ -316,10 +285,6 @@ impl Planner {
         self.rebound(minco, start_endpoint, local_goal, peers, touch_goal)
     }
 
-    /// Rebound 编排入口（对齐官方 `EGOPlannerManager::reboundReplan`）：
-    /// 初始 fine check 后，开关关/无碰撞段走单候选路径；多拓扑开启且存在
-    /// 碰撞段时生成候选集（官方 `distinctiveTrajs`），从最后一个候选到第一个
-    /// 逐个跑完整优化，取 `final_cost` 最小者（严格小于才替换）。
     fn rebound(
         &mut self,
         minco: Minco,
@@ -328,14 +293,11 @@ impl Planner {
         peers: &[firefly_cost::Peer],
         touch_goal: bool,
     ) -> Result<PlanResult> {
-        // 官方 optimizeTrajectory 开头 wei_swarm_mod_ = wei_swarm_：按次复位
         self.last_swarm_weight_mod = 1.0;
         let k = self.config.constraint_points_per_piece;
         let n_points = minco.pieces() * k + 1;
         let mut planes_by_point: Vec<Vec<Plane>> = vec![Vec::new(); n_points];
 
-        // 初始约束(官方 flag_first_init=true):稠密采样 + 分段 + A\* 绕障 + 平面;
-        // 碰撞段供多拓扑候选生成(官方 `segments`)
         let traj0 = minco.solve()?;
         let points0 = constraint_sample_points(&traj0, k);
         let scanner0 = ObstacleScanner::new(&self.map)
@@ -356,7 +318,6 @@ impl Planner {
         }
 
         if !self.config.use_multitopology_trajs || segments.is_empty() {
-            // 单候选路径(开关关时与单拓扑实现完全一致;无碰撞段时候选本就唯一)
             let outcome = self.rebound_inner(
                 minco,
                 planes_by_point,
@@ -372,8 +333,6 @@ impl Planner {
         let candidates = distinctive_candidates(&self.map, &points0, &planes_by_point, &segments);
         log::debug!("multi-topo: {} 个候选", candidates.len());
         let mut best: Option<(f64, InnerOutcome)> = None;
-        // 官方:从最后一个候选到第一个遍历,严格小于才替换(平局保持先评估者);
-        // 官方 min_cost 初值 999999,此处以 None 起步等价且避开哨兵值边界
         for candidate in candidates.iter().rev() {
             self.check_cancelled()?;
             match self.rebound_inner(
@@ -405,17 +364,6 @@ impl Planner {
         }
     }
 
-    /// 单次完整优化内层（对齐官方 v2 `PolyTrajOptimizer::optimizeTrajectory`）：
-    /// - L-BFGS 内部动态检测约束点（`ReboundDetector` → 官方
-    ///   `roughlyCheckConstraintPoints`），发现新穿入即提前终止
-    ///   （官方 `STOP_FOR_REBOUND`，`rebound_times ≤ 20`）；
-    /// - 优化后 fine check，碰撞则并入新平面后 restart（`restart_nums` 限）；
-    /// - 成功条件：swarm 距离满足 && fine check `OBS_FREE`（官方）。
-    /// - restart 失败分支（官方 `flag_still_unsafe`）：仅 swarm 间距不满足时
-    ///   swarm 权重倍增（官方 `wei_swarm_mod_ *= 2`），其余权重不变。
-    /// - 全局迭代上限 [`Self::REBOUND_MAX_ITERATIONS`] 兜底所有分支。
-    /// - criterion 3 门控锁存位每次进入复位为 false（官方
-    ///   `optimizeTrajectory` Preparision 1）。
     #[allow(clippy::too_many_lines)]
     fn rebound_inner(
         &mut self,
@@ -438,7 +386,6 @@ impl Planner {
         loop {
             self.check_cancelled()?;
             iteration += 1;
-            // 所有 Rebound 和 restart 尝试共享迭代预算。
             if iteration > Self::REBOUND_MAX_ITERATIONS {
                 return Err(Error::temporary(
                     ErrorKind::Convergence,
@@ -448,7 +395,6 @@ impl Planner {
             let _span =
                 fastrace::local::LocalSpan::enter_with_local_parent(format!("rebound-{iteration}"));
 
-            // 一次全量 L-BFGS（官方 max_iterations=200）；objective 内部检测约束点
             let mut objective = self.build_objective(
                 start_endpoint,
                 local_goal,
@@ -462,7 +408,6 @@ impl Planner {
             );
             objective.set_cancellation(self.cancellation.clone());
             let x0 = Self::pack(&minco);
-            // 队形目标是稳定约束（非动态障碍），一次优化到位需要更多迭代
             let config = if self.formation.is_some() {
                 LbfgsConfig {
                     max_iterations: 300,
@@ -483,12 +428,10 @@ impl Planner {
                 report.early_exit,
                 report.gradient_norm
             );
-            // 取回含新平面（roughly check 就地追加）的平面池
             planes_by_point = objective.take_planes();
             // 沿用 final_x；取消时它是上游撤销未接受试探后的最后接受点。
             minco = objective.rebuild(&report.final_x)?;
             if report.early_exit {
-                // 官方 STOP_FOR_REBOUND：约束已变，重新优化
                 rebound_times += 1;
                 log::debug!(
                     "rebound {iteration}: 内循环检测触发（planes={}）",
@@ -503,7 +446,6 @@ impl Planner {
                 continue;
             }
 
-            // fine check（官方 finelyCheckAndSetConstraintPoints,flag_first_init=false）
             let traj = minco.solve()?;
             match self.try_finish(&traj, swarm_safe, &mut planes_by_point, touch_goal) {
                 FinishCheck::Accept(trajectory) => {
@@ -515,8 +457,6 @@ impl Planner {
                     });
                 }
                 FinishCheck::SwarmTooClose => {
-                    // 官方 L112:收敛但集群太近 → restart 且权重倍增,
-                    // 对避碰项逐次指数加权直到解出安全间距
                     self.last_swarm_weight_mod *= 2.0;
                     log::debug!(
                         "rebound {iteration}: swarm 间距不满足,restart 且 swarm 权重 ×{}",
@@ -528,7 +468,6 @@ impl Planner {
                 }
             }
             restart_nums += 1;
-            // 官方上限 `restart_nums < 3`（`poly_traj_optimizer.cpp` 外层循环条件）。
             if restart_nums >= 3 {
                 return Err(Error::temporary(
                     ErrorKind::Convergence,
@@ -538,7 +477,6 @@ impl Planner {
         }
     }
 
-    /// 组装最终 PlanResult（轨迹 + 迭代数 + 平面）。
     fn finish(outcome: InnerOutcome) -> PlanResult {
         PlanResult {
             trajectory: outcome.trajectory,
@@ -547,15 +485,6 @@ impl Planner {
         }
     }
 
-    /// 轨迹安全（障碍/集群）时返回 [`FinishCheck::Accept`]，否则返回
-    /// 失败原因。障碍检查 = 官方 fine check：稠密采样 + in/out 分段 + A*
-    /// 绕障 + 平面（碰撞时新平面已并入 `planes_by_point`，调用方 restart）。
-    /// 失败原因决定 restart 策略：仅 swarm 间距不满足触发权重倍增（官方
-    /// L95–113 三分支），碰撞失败权重不变。
-    ///
-    /// 注：队形是代价项（`formationGradCostP`，`formation_ws` 专有），
-    /// 非官方成功门——`try_finish` 只查 swarm + 障碍，不查队形达成；
-    /// 队形靠代价优化与持续重规划收敛。
     fn try_finish(
         &mut self,
         traj: &Trajectory,
@@ -563,7 +492,6 @@ impl Planner {
         planes_by_point: &mut [Vec<Plane>],
         touch_goal: bool,
     ) -> FinishCheck {
-        // 对照 optimizeTrajectory：先检查 swarm，再做 finelyCheckAndSetConstraintPoints。
         if !swarm_safe {
             return FinishCheck::SwarmTooClose;
         }
@@ -861,7 +789,6 @@ impl Planner {
             x[i * 3 + 1] = w.y;
             x[i * 3 + 2] = w.z;
         }
-        // 对照官方 `RealT2VirtualT`：初始真实时间 → 虚拟时间作为优化初值。
         for i in 0..pieces {
             x[3 * (pieces - 1) + i] = real_to_virtual(minco.piece_duration(i));
         }
@@ -872,8 +799,6 @@ impl Planner {
         let to_goal = goal - start;
         let dist = to_goal.norm();
         if dist <= self.config.planning_distance {
-            // 目标在规划距离内且落入膨胀占据区时，沿目标方向回退到最近自由点，
-            // 使 A* 的终点位于可通行区域。
             if self.map.is_occupied_inflated(goal) {
                 let dir = to_goal / dist.max(1e-9);
                 for step in 1..=24 {
@@ -887,7 +812,6 @@ impl Planner {
         }
         let dir = to_goal / dist;
         let base = start + dir * self.config.planning_distance;
-        // 局部目标被障碍占用时沿方向回退找最近自由点（A* 要求目标可达，判定用膨胀层）
         if self.map.is_occupied_inflated(base) {
             for step in 1..=24 {
                 let candidate =
@@ -906,7 +830,6 @@ mod tests {
     use super::*;
     use firefly_map::{GridMapBuilder, VoxelState};
 
-    /// 膨胀栅格中的窄门通行场景。
     #[test]
     #[ignore = "known planner robustness limitation"]
     fn ego_threads_feasible_slot() {
@@ -941,7 +864,6 @@ mod tests {
         assert!(r.trajectory.duration() > 0.0);
     }
 
-    /// `RandomStart` 接线：空图随机中点应一次成功，端点精确。
     #[test]
     fn random_start_plans_through_random_mid() {
         let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
@@ -967,7 +889,6 @@ mod tests {
     }
 
     fn wall_scenario(config: PlannerConfig) -> (Planner, State, Point3<f64>) {
-        // 0.1m 分辨率：墙 x=4.5，高 z<1.5
         let mut map = GridMapBuilder::new(0.1, [100, 100, 100]).build().unwrap();
         for y in 0..100 {
             for z in 0..15 {
@@ -998,7 +919,6 @@ mod tests {
             acceleration: Vector3::zeros(),
         };
 
-        // 官方多项式冷启动直接穿墙，Rebound 必须生成绕障约束。
         let init_config = crate::init::InitConfig {
             piece_length: planner.config.piece_length,
             max_velocity: planner.config.max_velocity,
@@ -1006,7 +926,6 @@ mod tests {
         let wall_hitting =
             crate::init::init_polynomial(&init_config, start_endpoint, local_goal).unwrap();
 
-        // 必须覆盖初值碰撞时的约束生成与优化。
         let scanner = ObstacleScanner::new(&planner.map)
             .with_samples(planner.config.constraint_points_per_piece);
         let traj0 = wall_hitting.solve().unwrap();
@@ -1021,7 +940,6 @@ mod tests {
                 false, // 非 touch_goal:障碍墙场景,完整约束采样
             )
             .expect("rebound 必须逃出障碍");
-        // 借用区分离:rebound(&mut self) 结束后重建扫描器做最终安全校验
         let scanner_final = ObstacleScanner::new(&planner.map)
             .with_samples(planner.config.constraint_points_per_piece);
         assert!(
@@ -1030,7 +948,6 @@ mod tests {
         );
         assert!(!result.planes.is_empty(), "逃逸过程必须生成平面");
 
-        // 边界条件保持
         let s0 = result.trajectory.eval(0.0);
         assert!((s0.position - start.position.coords).norm() < 1e-6);
         let sf = result.trajectory.eval(result.trajectory.duration());
@@ -1039,7 +956,6 @@ mod tests {
 
     #[test]
     fn rebound_with_multitopology_escapes_wall() {
-        // 初始轨迹穿入障碍以启用多拓扑分支；验证最终轨迹安全并生成约束平面。
         let config = PlannerConfig {
             use_multitopology_trajs: true,
             ..PlannerConfig::default()
@@ -1083,7 +999,6 @@ mod tests {
     #[test]
     #[allow(clippy::similar_names)]
     fn precise_extrema_ge_sampling() {
-        // 验证精确极值 >= 400 点采样：构造含窄峰的轨迹，采样易漏峰
         use firefly_trajectory::{Endpoint, MincoBuilder, SolverOrder};
         use nalgebra::Vector3;
         let start = Endpoint {

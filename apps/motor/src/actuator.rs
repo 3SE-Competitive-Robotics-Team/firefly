@@ -18,27 +18,20 @@ use iceoryx2_bb_posix::clock::{ClockType, Time};
 use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 use serde::Deserialize;
 
-/// 缺省配置：按安装布局解析，与启动目录无关。
 fn default_config() -> PathBuf {
     firefly_config::paths::config("motor.toml")
 }
-/// `sysfs` PWM 类目录。
 const PWM_CLASS: &str = "/sys/class/pwm";
-/// 电机数：与 `ControlMessage::thrust` 的定长数组一致。
 const MOTORS: usize = 4;
 /// 通道目录出现的最长等待；导出是异步的，刚写完 `export` 时目录还不存在。
 const EXPORT_TIMEOUT: Duration = Duration::from_millis(200);
-/// 导出轮询间隔。
 const EXPORT_POLL: Duration = Duration::from_millis(10);
-/// 日志推进周期。
 const PUMP_PERIOD: Duration = Duration::from_millis(100);
 /// `u64` 十进制最长位数：脉宽写入的栈上缓冲区大小。
 const MAX_DUTY_DIGITS: usize = 20;
 
-/// 退出标志（信号处理器置位，主循环每拍检查）。
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-/// 执行器配置。
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -51,34 +44,25 @@ struct Config {
     /// `Airframe` 重发周期（ms）。
     #[serde(default = "default_airframe_ms")]
     airframe_ms: u64,
-    /// PWM 时序。
     pwm: Pwm,
     /// 四路电调通道，顺序与 `ControlMessage::thrust` 一致。
     channel: [ChannelSpec; MOTORS],
-    /// 机体与执行器描述。
     airframe: AirframeConfig,
 }
 
-/// PWM 时序参数。单位写进字段名，调用点不必回查文档。
 #[allow(clippy::struct_field_names)] // 后缀是单位，不是重复的语义
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Pwm {
-    /// 周期（ns）。
     period_ns: u64,
-    /// 零推力脉宽（ns）。
     min_duty_ns: u64,
-    /// 满推力脉宽（ns）。
     max_duty_ns: u64,
 }
 
-/// 一路 `sysfs` PWM 通道。
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChannelSpec {
-    /// `pwmchip` 编号。
     chip: u32,
-    /// 芯片内的通道号。
     pwm: u32,
 }
 
@@ -118,7 +102,6 @@ const fn default_airframe_ms() -> u64 {
     1_000
 }
 
-/// 解析 `--config <path>`（缺省 [`default_config`]）。
 fn parse_config_path() -> Result<PathBuf, String> {
     let mut it = std::env::args().skip(1);
     let mut path = default_config();
@@ -136,7 +119,6 @@ fn parse_config_path() -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// 校验速率、PWM 时序与机体参数。
 fn validate(config: &Config) -> firefly_error::Result<()> {
     let invalid = |message: String| {
         Err(firefly_error::Error::new(
@@ -193,7 +175,6 @@ fn validate(config: &Config) -> firefly_error::Result<()> {
     Ok(())
 }
 
-/// 控制主循环：订阅 `Control`，把推力映射成脉宽写到 `sysfs`，并重发 `Airframe`。
 pub fn run() -> Result<(), Box<dyn Error>> {
     let config_path =
         parse_config_path().map_err(|error| format!("{error}；用法：motor [--config <path>]"))?;
@@ -344,9 +325,7 @@ impl ControlState {
     }
 }
 
-/// 一路 `sysfs` PWM 通道。
 struct Channel {
-    /// `duty_cycle` 属性路径。
     duty_path: PathBuf,
     /// 已打开的 `duty_cycle` 文件：每拍只写不 open/close。
     duty_file: File,
@@ -355,7 +334,6 @@ struct Channel {
 }
 
 impl Channel {
-    /// 导出通道、设定周期与零推力脉宽、使能输出。
     fn open(spec: &ChannelSpec, mapping: &ThrustToDuty) -> Result<Self, String> {
         let chip_dir = Path::new(PWM_CLASS).join(format!("pwmchip{}", spec.chip));
         let channel_dir = chip_dir.join(format!("pwm{}", spec.pwm));
@@ -368,8 +346,6 @@ impl Channel {
         let duty_path = channel_dir.join("duty_cycle");
         // 先失能再改时序：部分驱动不允许在使能状态下改周期。
         let _ = fs::write(&enable, "0");
-        // 周期未设时内核拒绝任何占空比（周期 0 非法），这次清零失败是预期的；
-        // 它只在通道被上次运行留在高占空比时才起作用。
         let _ = write_attribute(&duty_path, 0);
         write_attribute(&channel_dir.join("period"), mapping.period_ns())?;
         let duty_file = File::options()
@@ -401,7 +377,6 @@ impl Channel {
     }
 }
 
-/// 等待异步出现的通道目录。
 fn wait_for(path: &Path) -> Result<(), String> {
     let started = Instant::now();
     while started.elapsed() < EXPORT_TIMEOUT {
@@ -413,7 +388,6 @@ fn wait_for(path: &Path) -> Result<(), String> {
     Err(format!("等待 {} 出现超时", path.display()))
 }
 
-/// 写一个 `sysfs` 属性。
 fn write_attribute(path: &Path, value: impl std::fmt::Display) -> Result<(), String> {
     fs::write(path, value.to_string()).map_err(|error| format!("写 {}: {error}", path.display()))
 }
@@ -467,7 +441,6 @@ mod tests {
         assert_eq!(state.output(now + lifetime, lifetime), Some([2.; MOTORS]));
     }
 
-    /// 仓库里的配置必须能被本进程解析并通过校验：板端启动才发现漂移太晚。
     #[test]
     fn shipped_config_parses() {
         let raw = include_str!("../../../configs/motor.toml");
@@ -490,7 +463,6 @@ mod tests {
         assert!(validate(&config).is_err());
     }
 
-    /// 栈上十进制格式化必须与 `u64::to_string` 一致（`sysfs` 只认纯数字）。
     #[test]
     fn decimal_digits_match_to_string() {
         let mut buffer = [0u8; MAX_DUTY_DIGITS];

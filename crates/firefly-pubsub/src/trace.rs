@@ -21,8 +21,6 @@ use fastrace::prelude::*;
 use iceoryx2::prelude::*;
 use iceoryx2_bb_posix::clock::{ClockType, Time};
 
-/// 消息携带的 trace 上下文（iceoryx2 User Header，零拷贝 POD）。
-///
 /// [`Default`] 产生全零占位（`version == 0`），不携带有效发送时间。
 /// [`Self::timestamps_only`] 采集发送时间并填写当前版本，但不携带 span。
 /// `version == 1` 表示结构已填充；`trace_id == 0` 表示发布端不在任何 fastrace
@@ -31,7 +29,6 @@ use iceoryx2_bb_posix::clock::{ClockType, Time};
 #[derive(Debug, Clone, Copy, Default, ZeroCopySend)]
 #[type_name("FireflyTraceContext")]
 pub struct TraceContext {
-    /// 结构版本（当前为 [`TraceContext::VERSION`]）。
     pub version: u8,
     /// 标志位：bit0 = sampled（W3C Trace Context）。
     pub flags: u8,
@@ -39,7 +36,6 @@ pub struct TraceContext {
     pub reserved: [u8; 2],
     /// trace-id 高 64 位（W3C 128-bit 拆分，避免 16 字节对齐）。
     pub trace_id_hi: u64,
-    /// trace-id 低 64 位。
     pub trace_id_lo: u64,
     /// 当前 span-id（订阅端以其为 parent 续接）。
     pub span_id: u64,
@@ -52,9 +48,7 @@ pub struct TraceContext {
 }
 
 impl TraceContext {
-    /// 当前结构版本。
     pub const VERSION: u8 = 1;
-    /// sampled 标志位（W3C bit0）。
     pub const FLAG_SAMPLED: u8 = 0b0000_0001;
 
     /// 从 fastrace 活动 span 上下文构建（发布端注入），同时采集双时间戳。
@@ -74,19 +68,16 @@ impl TraceContext {
         Self::capture(0, 0, 0, 0)
     }
 
-    /// 是否携带有效 trace 上下文。
     #[must_use]
     pub fn is_traced(&self) -> bool {
         self.version == Self::VERSION && self.trace_id() != 0
     }
 
-    /// 重组 128-bit trace-id（W3C 格式）。
     #[must_use]
     pub fn trace_id(&self) -> u128 {
         (u128::from(self.trace_id_hi) << 64) | u128::from(self.trace_id_lo)
     }
 
-    /// 是否采样（W3C sampled flag）。
     #[must_use]
     pub fn sampled(&self) -> bool {
         self.flags & Self::FLAG_SAMPLED != 0
@@ -100,9 +91,7 @@ impl TraceContext {
         })
     }
 
-    /// 订阅端续接：以本上下文为父，在本进程内启动入口 span（跨进程 trace 续接，
-    /// fastrace 官方模式 `Span::root(name, ctx)`——`trace_id` 与链路一致、
-    /// parent 指向发布端 span）。
+    /// 以本上下文为父，在本进程内启动入口 span。
     ///
     /// 返回 `None` 表示无 trace 上下文（[`TraceContext::is_traced`] 为 `false`）；
     /// 未启用 fastrace `enable` 时返回 noop span（不采集）。
@@ -118,11 +107,7 @@ impl TraceContext {
         jiff::Timestamp::from_nanosecond(nanos).unwrap_or(jiff::Timestamp::UNIX_EPOCH)
     }
 
-    /// 采集当前墙钟（jiff）+ 单调（`CLOCK_MONOTONIC`）时间戳。
-    ///
-    /// 单调时钟失败时（如 macOS：iceoryx2-pal 的 `CLOCK_MONOTONIC` 常量误写为
-    /// 1，Darwin 实际为 6，见 `iceoryx2-pal-posix/src/macos/constants.rs`；
-    /// Linux 正常），降级为 `0` = 单调时间不可用。
+    /// 单调时间不可用时填零。
     fn capture(trace_id_hi: u64, trace_id_lo: u64, span_id: u64, flags: u8) -> Self {
         let real = jiff::Timestamp::now();
         let mono_ns = Time::now_with_clock(ClockType::Monotonic)
@@ -145,7 +130,6 @@ impl TraceContext {
 mod tests {
     use super::*;
 
-    /// 编译期断言：TraceContext 满足 iceoryx2 User Header 要求（零拷贝 POD）。
     fn assert_zero_copy_send<T: ZeroCopySend>() {}
     #[test]
     fn trace_context_is_plain_old_data() {
@@ -176,7 +160,6 @@ mod tests {
         assert_eq!(back.trace_id, sc.trace_id);
         assert_eq!(back.span_id, sc.span_id);
         assert_eq!(back.sampled, sc.sampled);
-        // 墙钟始终可采集；单调时钟不可用时字段为 0。
         assert!(ctx.send_ts_secs > 0);
         if Time::now_with_clock(ClockType::Monotonic).is_ok() {
             assert!(ctx.send_ts_mono_ns > 0);

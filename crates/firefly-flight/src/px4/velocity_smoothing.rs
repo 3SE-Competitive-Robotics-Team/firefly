@@ -1,49 +1,33 @@
 //! PX4 `VelocitySmoothing`：jerk 受限的 1D 速度轨迹（`src/lib/motion_planning/VelocitySmoothing.{hpp,cpp}`）。
 //!
 //! 三个轴各用一个实例，`time_synchronization` 把多个轴的总时长对齐成直线。
-//! 与 PX4 的差异只有语言层：`math::sign/constrain` → 本地辅助函数，字段名保留。
 //!
 //! 单位：位置 m、速度 m/s、加速度 m/s²、jerk m/s³、时间 s。
 
 use super::types::constrain;
 
-/// 轨迹在某时刻的 jerk/加速度/速度/位置。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Trajectory {
-    /// jerk（m/s³）。
     pub j: f32,
-    /// 加速度（m/s²）。
     pub a: f32,
-    /// 速度（m/s）。
     pub v: f32,
-    /// 位置（m）。
     pub x: f32,
 }
 
-/// PX4 `VelocitySmoothing`。
 #[derive(Clone, Copy, Debug)]
 pub struct VelocitySmoothing {
     /// 速度设定值（经 `max_vel` 限幅），m/s。
     vel_sp: f32,
-    /// 最大 jerk（m/s³）。
     max_jerk: f32,
-    /// 最大加速度（m/s²）。
     max_accel: f32,
-    /// 最大速度（m/s）。
     max_vel: f32,
-    /// 当前轨迹状态。
     state: Trajectory,
     /// 运动方向（+1 / -1 / 0）。
     direction: i32,
-    /// 本段轨迹的初始状态。
     state_init: Trajectory,
-    /// 加速段时长（s）。
     t1: f32,
-    /// 匀速段时长（s）。
     t2: f32,
-    /// 减速段时长（s）。
     t3: f32,
-    /// 段内局部时间（s）。
     local_time: f32,
 }
 
@@ -54,7 +38,6 @@ impl Default for VelocitySmoothing {
 }
 
 impl VelocitySmoothing {
-    /// 以初始加速度/速度/位置构造。
     #[must_use]
     pub fn new(initial_accel: f32, initial_vel: f32, initial_pos: f32) -> Self {
         let mut value = Self {
@@ -160,86 +143,69 @@ impl VelocitySmoothing {
         }
     }
 
-    /// 最大 jerk（m/s³）。
     #[must_use]
     pub fn max_jerk(&self) -> f32 {
         self.max_jerk
     }
-    /// 设置最大 jerk（m/s³）。
     pub fn set_max_jerk(&mut self, max_jerk: f32) {
         self.max_jerk = max_jerk;
     }
-    /// 最大加速度（m/s²）。
     #[must_use]
     pub fn max_accel(&self) -> f32 {
         self.max_accel
     }
-    /// 设置最大加速度（m/s²）。
     pub fn set_max_accel(&mut self, max_accel: f32) {
         self.max_accel = max_accel;
     }
-    /// 最大速度（m/s）。
     #[must_use]
     pub fn max_vel(&self) -> f32 {
         self.max_vel
     }
-    /// 设置最大速度（m/s）。
     pub fn set_max_vel(&mut self, max_vel: f32) {
         self.max_vel = max_vel;
     }
 
-    /// 当前 jerk（m/s³）。
     #[must_use]
     pub fn current_jerk(&self) -> f32 {
         self.state.j
     }
-    /// 设置当前加速度（m/s²）。
     pub fn set_current_acceleration(&mut self, accel: f32) {
         self.state.a = accel;
         self.state_init.a = accel;
     }
-    /// 当前加速度（m/s²）。
     #[must_use]
     pub fn current_acceleration(&self) -> f32 {
         self.state.a
     }
-    /// 设置当前速度（m/s）。
     pub fn set_current_velocity(&mut self, vel: f32) {
         self.state.v = vel;
         self.state_init.v = vel;
     }
-    /// 当前速度（m/s）。
     #[must_use]
     pub fn current_velocity(&self) -> f32 {
         self.state.v
     }
-    /// 设置当前位置（m）。
     pub fn set_current_position(&mut self, pos: f32) {
         self.state.x = pos;
         self.state_init.x = pos;
     }
-    /// 当前位置（m）。
     #[must_use]
     pub fn current_position(&self) -> f32 {
         self.state.x
     }
 
-    /// T1（s）。
     #[must_use]
     pub fn t1(&self) -> f32 {
         self.t1
     }
-    /// T2（s）。
     #[must_use]
     pub fn t2(&self) -> f32 {
         self.t2
     }
-    /// T3（s）。
     #[must_use]
     pub fn t3(&self) -> f32 {
         self.t3
     }
-    /// 总时长（s）。
     #[must_use]
     pub fn total_time(&self) -> f32 {
         self.t1 + self.t2 + self.t3
@@ -310,10 +276,6 @@ fn sign(value: f32) -> i32 {
         0
     }
 }
-
-// 以下四个是无状态的纯函数（只用参数），从 PX4 的成员函数拆出到模块作用域：
-// 它们不读 `self`，留在 `impl` 里只会让类型职责变模糊。
-
 fn compute_t1(a0: f32, v3: f32, jerk_max: f32, accel_max: f32) -> f32 {
     let delta = 2.0 * a0 * a0 + 4.0 * jerk_max * v3;
     if delta < 0.0 {

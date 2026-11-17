@@ -1,5 +1,4 @@
-//! 视觉位姿解算：2D-3D 对应 → `PnP+RANSAC` → 全局位姿 + 协方差
-//! （对照 VINS-Fusion `findConnection` 的 `PnP` 段；求解器用 `purecv`）。
+//! 2D-3D 位姿解算，使用 `purecv` 的 `PnP` 与 RANSAC。
 
 pub mod calibration;
 pub mod depth;
@@ -21,22 +20,17 @@ pub struct CameraIntrinsics {
     pub cy: f64,
 }
 
-/// 视觉位姿解算结果。
 #[derive(Debug, Clone)]
 pub struct VisualPose {
     /// 全局位姿 `T_global`（4×4 齐次）。
     pub t_global: Matrix4<f64>,
-    /// 内点数。
     pub num_inliers: usize,
-    /// 总对应数。
     pub total: usize,
     /// 内点平均重投影误差（像素）。
     pub mean_reproj_px: f64,
 }
 
 /// `+Z`（`OpenCV`/`purecv`）↔ `-Z`（本仓相机系）桥：`M=diag(1,-1,-1)`。
-/// 两系像素一致，漏掉即约 180° 系统误差——三处共用（求解右乘、重投影左乘、
-/// 测试期望），单一事实来源。
 fn axis_flip() -> Matrix4<f64> {
     Matrix4::new(
         1.0, 0.0, 0.0, 0.0, //
@@ -46,12 +40,6 @@ fn axis_flip() -> Matrix4<f64> {
     )
 }
 
-/// 由 2D（当前图像素）-3D（库图全局）对应解全局位姿。
-///
-/// `prior` 为 VIO 先验位姿（作初值用，无则传 `None`）；对应数 `< 6` 时返回
-/// `InvalidArgument`（`purecv` 下限）；`RANSAC` 无足够内点时返回 `Ok(None)`
-/// （调用方按拒收处理，与 `FusionFilter` 门控语义一致）。
-/// 旋转向量 + 平移组装位姿矩阵。
 fn vecs_to_isometry(rvec: [f64; 3], tvec: [f64; 3]) -> Isometry3<f64> {
     let axis = Vector3::new(rvec[0], rvec[1], rvec[2]);
     let angle = axis.norm();
@@ -86,20 +74,13 @@ fn reproj_error(
     Some((du * du + dv * dv).sqrt())
 }
 
-/// 先验几何门：PnP 解与先验差 `PRIOR_MAX_TRANS` / `PRIOR_MAX_ROT` 以上即拒收。
-/// 平移阈值取库图查询半径（解落在检索球外即自相矛盾）；旋转阈值远大于
-/// `VIO` 短时漂移、远小于 `PnP` 翻转二义性的 `~90°+`。
 pub const PRIOR_MAX_TRANS: f64 = 3.0;
 /// 先验几何门旋转阈值（弧度，15°）。
 pub const PRIOR_MAX_ROT: f64 = 15.0 * std::f64::consts::PI / 180.0;
 
 /// 由 2D（当前图像素）-3D（库图全局）对应解全局位姿。
 ///
-/// `prior` 为 VIO 先验位姿（相机系，与返回的 `t_global` 同系）：RANSAC 解算后
-/// 与先验做几何一致性校验（对照 VINS-Fusion `KeyFrame::findConnection` 尾段
-/// `abs(relative_yaw) < 30° && relative_t.norm() < 20m` 才接受 loop 边——本链
-/// 是连续跟踪，先验可信度高于检环，故阈值更紧）。无先验（`None`）时不校验。
-/// 对应数 `< 6` 时拒绝。
+/// `prior` 为 camera→world 先验，与输出位姿同系；提供时校验几何一致性。
 ///
 /// # Errors
 ///
@@ -141,7 +122,6 @@ pub fn solve_visual_pose(
         .collect();
     let image: Vec<Point2f> = points_2d.iter().map(|p| Point2f::new(p[0], p[1])).collect();
     let cam = camera_matrix(intrinsics);
-    // 在全部对应上执行 RANSAC 与精化；有先验时通过几何门才发布。
     if let Some((t_global, inliers)) = ransac_pose(&object, &image, &cam)? {
         let prior_ok = prior
             .as_ref()
@@ -157,8 +137,6 @@ pub fn solve_visual_pose(
             }));
         }
     }
-    // 主路未发布且先验存在时，在先验投影误差筛选出的子集上重新执行 RANSAC 与精化。
-    // 子集仍无有效解时返回 None；主路通过时不执行此步骤。
     let Some(t_prior) = prior else {
         return Ok(None);
     };
@@ -172,7 +150,6 @@ pub fn solve_visual_pose(
     let ocv_prior = flip * prior_inv;
     let r_p = ocv_prior.fixed_view::<3, 3>(0, 0).into_owned();
     let t_p = ocv_prior.fixed_view::<3, 1>(0, 3).into_owned();
-    // 子集数组与内点索引同系（`mean_reprojection` 按索引取点，错系即错数）。
     let mut sub_3d: Vec<[f64; 3]> = Vec::new();
     let mut sub_2d: Vec<[f32; 2]> = Vec::new();
     for (p3, p2) in points_3d.iter().zip(points_2d.iter()) {
@@ -187,7 +164,6 @@ pub fn solve_visual_pose(
         }
     }
     log::debug!("先验子集重解（子集 {}/{})", sub_3d.len(), points_2d.len());
-    // 子集与全集相同 → 确定性 RANSAC 重跑结果相同，跳过。
     if sub_3d.len() == points_2d.len() || sub_3d.len() < SUBSET_MIN_PAIRS {
         return Ok(None);
     }
@@ -232,7 +208,6 @@ fn passes_prior_gate(t_global: &Matrix4<f64>, t_prior: &Matrix4<f64>) -> bool {
     pass
 }
 
-/// 由内参组装 `3×3` 相机矩阵。
 fn camera_matrix(intrinsics: CameraIntrinsics) -> Matrix<f64> {
     let mut cam = Matrix::new(3, 3, 1);
     for (r, c, v) in [
@@ -247,9 +222,6 @@ fn camera_matrix(intrinsics: CameraIntrinsics) -> Matrix<f64> {
     cam
 }
 
-/// 对全部 RANSAC 内点执行 DLT 初始化与 LM 精化。
-/// `purecv::solve_pnp` 尚不支持 `use_extrinsic_guess=true`，因此重新估计初值，
-/// 不保证与从 RANSAC 位姿开始的精化收敛到同一解。
 fn refine_with_inliers(
     object: &[Point3f],
     image: &[Point2f],
@@ -287,13 +259,7 @@ fn refine_with_inliers(
     Some((rvec_ref, tvec_ref))
 }
 
-/// 先验播种精化调参（与 `RANSAC` 同口径，见 `solve_pnp_ransac` 调用处）。
-/// `Huber` 拐点：真值内点亚像素、混叠外点数十像素以上，`2px` 分得开。
-/// 先验子集筛选半径（像素）：覆盖米级先验误差在 5m+ 深度的投影（`~35px`）
-/// 并留裕量；混叠外点在此半径外，被子集排除后 `RANSAC` 有机会命中真值。
-/// 子集与全集相同时跳过重试（`RANSAC` 确定性种子，重跑结果相同）。
 const PRIOR_SUBSET_PX: f64 = 64.0;
-/// 子集最小对应数（低于此数 `RANSAC` 无共识 odds，直接回落）。
 const SUBSET_MIN_PAIRS: usize = 12;
 
 /// OCV 针孔投影（`+Z` 朝向，无畸变，与 `purecv` 同假设）：返回像素与相机系坐标。
@@ -304,7 +270,6 @@ fn project_ocv(
     intr: CameraIntrinsics,
 ) -> Option<(f64, f64)> {
     let c = r * Vector3::new(p[0], p[1], p[2]) + t;
-    // 非有限与近零深度都不可投影（`NaN <= x` 为假，须显式判非有限）。
     if !c.z.is_finite() || c.z <= 1e-9 {
         return None;
     }
@@ -314,11 +279,6 @@ fn project_ocv(
     ))
 }
 
-/// RANSAC＋精化＋成位姿（无门）：`RANSAC` 共识 → 全量内点精化 →
-/// `t_global`（camera→world，`-Z`）。无共识返回空；调用方做门与发布。
-/// （`purecv` 的 `RANSAC` 定种子，同输入同输出，子集与全集相同时禁止重试。）
-/// （返回类型复杂是领域常态，本文件 `match_frame` 处同惯例。）
-/// 位姿（camera→world）与 RANSAC 内点索引。
 type PoseAndInliers = (Matrix4<f64>, Vec<i32>);
 
 fn ransac_pose(
@@ -455,7 +415,6 @@ fn mean_reprojection(
 mod tests {
     use super::*;
 
-    /// 合成：已知位姿投影 3D→2D，加噪后求解，误差应小。
     #[test]
     fn solves_synthetic_pose() {
         let intrinsics = CameraIntrinsics {
@@ -505,8 +464,6 @@ mod tests {
         assert!(r[(0, 0)] > 0.0 && r[(3, 3)] > 0.0);
     }
 
-    /// 全链回归：下倾左目（机体经外参直达相机）→ `OpenCV` 类 `PnP` → `cam_pose_to_body`，
-    /// 解出的机体系位姿应贴合真值（含旋转）。
     #[test]
     fn tilted_camera_full_chain() {
         use crate::calibration::{cam_pose_to_body, focal, rot_cam_to_body};
@@ -554,10 +511,6 @@ mod tests {
         assert!(r_err < 0.05, "rot err {r_err}");
     }
 
-    /// 先验几何门：近先验解通过，公里级野值拒收（无先验时不校验）。
-    ///
-    /// 直接构造门输入（`t_global`/`t_prior` 同为 camera→world）：几何门是纯矩阵
-    /// 比较，与 `PnP` 求解器无关——合成投影的符号/桥约定由上两个测试覆盖。
     #[test]
     fn prior_gate_rejects_wild_pose() {
         let near = Isometry3::from_parts(
@@ -586,7 +539,6 @@ mod tests {
         assert!(passes_prior_gate(&near, &near));
     }
 
-    /// 合成位姿真值（OCV 系）与投影：`project_ocv` 自洽性由收敛测试覆盖。
     fn synth_scene(
         n: usize,
         planar: bool,
@@ -623,9 +575,6 @@ mod tests {
         (obj, img)
     }
 
-    /// 端到端翻转共识恢复：20 真值对混入 60 翻转一致对（`RANSAC` 全集共识
-    /// 锁翻转解）＋真值附近先验 → 先验子集（真值占比反转）重解发布真值。
-    /// 无论全集直解命中哪边，最终必为真值 basin（翻转 `~180°` 过不了先验门）。
     #[test]
     fn solve_recovers_flip_consensus() {
         let intr = CameraIntrinsics {
@@ -636,7 +585,6 @@ mod tests {
         let r_gt = Matrix3::identity();
         let t_gt = Vector3::zeros();
         let (mut obj, mut img) = synth_scene(20, true, r_gt, t_gt);
-        // 翻转一致对：绕光轴 180° 的位姿下自洽（与真值差 180°，先验门必拒）。
         let r_flip = UnitQuaternion::from_euler_angles(0.0, 0.0, std::f64::consts::PI)
             .to_rotation_matrix()
             .into_inner();
@@ -686,8 +634,6 @@ mod tests {
         assert!(cos_a.clamp(-1.0, 1.0).acos() < 0.17, "rot off basin");
     }
 
-    /// 端到端翻转恢复：平面点集（走廊墙面形态）＋真值附近先验 → 发布真值
-    /// basin（无论 `RANSAC` 直解命中与否；翻转解 `~180°` 过不了先验门）。
     #[test]
     fn solve_recovers_prior_basin_on_plane() {
         let intr = CameraIntrinsics {
@@ -698,7 +644,6 @@ mod tests {
         let r_gt = Matrix3::identity();
         let t_gt = Vector3::zeros();
         let (obj, img_f32) = synth_scene(80, true, r_gt, t_gt);
-        // 先验（camera→world，`-Z`）：真值扰动 0.5m/8° 后过桥。
         let dq = UnitQuaternion::from_euler_angles(0.0, 0.14, 0.0);
         let r_pert = dq.to_rotation_matrix().into_inner();
         let t_pert = Vector3::new(0.5, 0.0, 0.0);
@@ -711,7 +656,6 @@ mod tests {
         let pose = solve_visual_pose(&p2, &p3, intr, Some(t_prior))
             .unwrap()
             .expect("planar scene with near prior should publish");
-        // 期望真值 basin（`ocv⁻¹·flip` 的平移为零、旋转为桥本身）。
         let dt = pose.t_global.fixed_view::<3, 1>(0, 3).norm();
         assert!(dt < 0.5, "trans err {dt}");
         let m = axis_flip().fixed_view::<3, 3>(0, 0).into_owned();

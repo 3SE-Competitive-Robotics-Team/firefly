@@ -21,8 +21,6 @@ use iceoryx2::prelude::{LogLevel, set_log_level};
 use usage_rs::Run;
 
 fn main() -> ExitCode {
-    // iceoryx2 缺省级别会往 stderr 打配置行；本进程的 stderr 只留给错误
     set_log_level(LogLevel::Error);
-    // `parse()` 自己处理 `--help`/`--version`/用法错误（clap 风格，退出码 2）与补全请求
     cli::Ffctl::parse().command.run()
 }

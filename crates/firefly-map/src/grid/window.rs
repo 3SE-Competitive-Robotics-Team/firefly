@@ -59,9 +59,6 @@ impl GridMap {
             self.local_update_range3i[2] as f64 * self.resolution,
         )
     }
-
-    // --- 全局索引 ↔ 窗口坐标换算 ---
-
     /// 世界位置 → 全局体素索引（世界锚定整数，不随窗口平移；纯映射，不含窗口判定）。
     #[must_use]
     pub fn pos_to_global_index(&self, p: Vector3<f64>) -> [i64; 3] {
@@ -78,7 +75,6 @@ impl GridMap {
         self.in_window_global(g).then_some(g)
     }
 
-    /// 全局索引是否在当前占据窗口内（对照官方 `isInBuf`）。
     pub(super) fn in_window_global(&self, g: [i64; 3]) -> bool {
         g.iter()
             .zip(&self.low)
@@ -86,7 +82,6 @@ impl GridMap {
             .all(|((&gi, &lo), &up)| gi >= lo && gi <= up)
     }
 
-    /// 全局索引是否在膨胀缓冲窗口内（对照官方 `isInInfBuf`）。
     pub(super) fn in_inf_window(&self, g: [i64; 3]) -> bool {
         g.iter()
             .zip(&self.inf_low)
@@ -116,9 +111,6 @@ impl GridMap {
             (global[2] - self.low[2]) as usize,
         ])
     }
-
-    // --- 环形寻址（对照官方 globalIdx2BufIdx / globalIdx2InfBufIdx，grid_map.h:318）---
-
     /// 全局索引 → 占据缓冲线性地址：`(id − ring_origin) % size` 取模映射后行主序展开。
     pub(super) fn occ_addr(&self, g: [i64; 3]) -> usize {
         let c = [
@@ -155,22 +147,12 @@ impl GridMap {
         }
         g
     }
-
-    // --- 对外体素读写（窗口坐标）---
-
     #[must_use]
     pub fn index_of(&self, p: Vector3<f64>) -> Option<[usize; 3]> {
         self.window_index(self.pos_to_global_index(p))
     }
 
-    /// ringbuffer 平移（对照官方 `moveRingBuffer`，grid_map.cpp:399-457）：
-    /// 新中心 = 相机位置的全局体素索引，窗口随之重定心；逐轴按中心相对
-    /// 上次的位置判方向，清除移出窗口的体素（负向移动清上侧、正向清下侧，
-    /// 对照 `clearBuffer` `grid_map.cpp:747`）；环形寻址原点 while 循环对齐到
-    /// 新窗口内（grid_map.cpp:431-449）。相机未动时无副作用。
-    ///
-    /// 官方调用时机：感知更新入口先平移再投影（updateOccupancyCallback
-    /// `grid_map.cpp:150` 与 `cloudCallback` `grid_map.cpp:358`）。
+    /// 窗口随相机重定心，清除移出区域；感知更新先平移窗口再投影。
     pub fn move_ring_buffer(&mut self, center: Vector3<f64>) {
         let cg = self.pos_to_global_index(center);
         if cg != self.center_last {
@@ -186,13 +168,11 @@ impl GridMap {
         let ig = i64::from(self.inf_grid);
         for i in 0..3 {
             new_low[i] = cg[i] - lr[i];
-            // 官方 upbound3i 含端点减一（grid_map.cpp:406）
             new_up[i] = cg[i] + lr[i] - 1;
             new_inf_low[i] = new_low[i] - ig;
             new_inf_up[i] = new_up[i] + ig;
         }
 
-        // 清除移出窗口的体素：判据与清除均基于旧边界（官方在更新 md_ 边界前调用）
         if cg[0] < self.center_last[0] {
             self.clear_buffer(0, new_up[0]);
         }
@@ -212,7 +192,6 @@ impl GridMap {
             self.clear_buffer(5, new_low[2]);
         }
 
-        // 环形寻址原点对齐新窗口（while 循环保持模尺寸不变，grid_map.cpp:431-449）
         for i in 0..3 {
             while self.ring_origin[i] < new_low[i] {
                 self.ring_origin[i] += self.dims[i] as i64;
@@ -322,7 +301,6 @@ mod tests {
         assert!(!map.is_occupied_inflated(observed));
     }
 
-    /// 相机未动：`move_ring_buffer` 无副作用，内容原样保留。
     #[test]
     fn stationary_center_is_noop() {
         let mut m = GridMapBuilder::new(1.0, [8, 8, 8]).build().unwrap();
@@ -334,98 +312,71 @@ mod tests {
         assert_eq!(m.origin(), Vector3::zeros());
     }
 
-    /// 平移后：旧区域被清空、新区域可查询、窗口坐标随 origin 刚性平移。
     #[test]
     fn move_translates_window_and_clears_left_behind() {
         let mut m = GridMapBuilder::new(1.0, [8, 8, 8]).build().unwrap();
-        // 障碍在全局 x=1（世界 x∈[1,2)）
         m.set_state([1, 4, 4], VoxelState::Occupied);
         assert!(m.is_occupied(Vector3::new(1.5, 4.5, 4.5)));
-        // 相机右移两格（中心 4 → 6）：窗口 [0,7] → [2,9]
         m.move_ring_buffer(Vector3::new(6.5, 4.5, 4.5));
-        // origin 随窗口平移（全局 x=2 处为新窗口角点）
         assert_eq!(m.origin(), Vector3::new(2.0, 0.0, 0.0));
-        // 旧障碍已移出窗口 → 查询为自由（且 index_of 返回 None）
         assert_eq!(m.index_of(Vector3::new(1.5, 4.5, 4.5)), None);
         assert!(!m.is_occupied(Vector3::new(1.5, 4.5, 4.5)));
-        // 新区域可查询可写入
         let idx = m
             .index_of(Vector3::new(8.5, 4.5, 4.5))
             .expect("新区域在窗口内");
         m.set_state(idx, VoxelState::Occupied);
         assert_eq!(m.state(idx), VoxelState::Occupied);
-        // 幸存区域数据完好：窗口坐标 1 = 全局 x=3（新窗口 [2,9] 与旧窗口 [0,7] 重叠区）
         m.set_state([1, 4, 4], VoxelState::Occupied);
         assert!(m.is_occupied(Vector3::new(3.5, 4.5, 4.5)));
         assert_eq!(m.global_index([1, 4, 4]), [3, 4, 4]);
     }
 
-    /// 环形寻址跨边界：多次小步平移后环形原点调整、存储地址回绕，
-    /// 幸存数据经取模映射正确读写；出窗数据被清除后槽位可复用。
     #[test]
     fn ring_address_wraps_across_boundary() {
         let mut m = GridMapBuilder::new(1.0, [4, 4, 4]).build().unwrap();
-        // 障碍在全局 x=3（初始窗口 [0,3] 最右列）
         m.set_state([3, 2, 2], VoxelState::Occupied);
-        // +1 平移两次：窗口 [0,3] → [1,4] → [2,5]，x=3 始终在窗口内，
-        // 环形原点从 0 跳到 4 但存储地址不变、数据不搬移
         for cx in [3.5, 4.5] {
             m.move_ring_buffer(Vector3::new(cx, 2.5, 2.5));
         }
         assert_eq!(m.origin(), Vector3::new(2.0, 0.0, 0.0));
         assert!(m.is_occupied(Vector3::new(3.5, 2.5, 2.5)));
         assert_eq!(m.state([1, 2, 2]), VoxelState::Occupied); // 窗口 [2,5] 中 x=3 → 坐标 1
-        // 第三次 +1：窗口 [3,6]，x=3 落入清除条带（官方 clearBuffer(1, new_low)
-        // 含边界列，grid_map.cpp:747-757），占据清除、槽位回收
         m.move_ring_buffer(Vector3::new(5.5, 2.5, 2.5));
         assert!(!m.is_occupied(Vector3::new(3.5, 2.5, 2.5)));
-        // 回收槽位写入新障碍：全局 x=6（窗口坐标 3）经环形映射可查询。
         m.set_state([3, 2, 2], VoxelState::Occupied);
         assert!(m.is_occupied(Vector3::new(6.5, 2.5, 2.5)));
         assert!(!m.is_occupied(Vector3::new(3.5, 2.5, 2.5)));
     }
 
-    /// 膨胀层随平移：幸存障碍计数完好、窗口边缘障碍移出时障碍源被反向移除、
-    /// 回收槽位不留残留计数。
     #[test]
     fn inflate_layer_moves_with_ring_buffer() {
         let mut m = GridMapBuilder::new(1.0, [8, 4, 4])
             .with_obstacles_inflation(0.6)
             .build()
             .unwrap(); // step=1
-        // 障碍 A 全局 x=2（右移后幸存）、B 全局 x=0（右移后出窗）
         m.set_state([2, 2, 2], VoxelState::Occupied);
         m.set_state([0, 2, 2], VoxelState::Occupied);
         m.inflate_obstacles();
         assert_eq!(m.inflate_at([2, 2, 2]), GRID_MAP_OBS_FLAG + 1);
-        // 相机右移一格（中心 4 → 5，窗口 [0,7] → [1,8]）：A 幸存、B 出窗清除
         m.move_ring_buffer(Vector3::new(5.5, 2.5, 2.5));
-        // A 在新窗口坐标 1，本体与邻域计数完好
         assert!(m.is_occupied(Vector3::new(2.5, 2.5, 2.5)));
         assert_eq!(m.inflate_at([1, 2, 2]), GRID_MAP_OBS_FLAG + 1);
         assert!(m.is_occupied_inflated(Vector3::new(3.5, 2.5, 2.5)));
-        // B 出窗：占据清除，其障碍源从膨胀层反向移除（槽位无 FLAG 残留）
         assert!(!m.is_occupied(Vector3::new(0.5, 2.5, 2.5)));
         assert_eq!(m.window_index([0, 2, 2]), None);
         assert!(!m.is_occupied_inflated(Vector3::new(0.5, 2.5, 2.5)));
-        // B 的邻域计数随障碍源移除：全局 x=1（窗口坐标 0）只剩 A 的 +1
         assert_eq!(m.inflate_at([0, 2, 2]), 1);
     }
 
-    /// 各轴独立平移：仅移动轴清除条带，正交轴内容不受影响。
     #[test]
     fn per_axis_translation_is_independent() {
         let mut m = GridMapBuilder::new(1.0, [6, 6, 6]).build().unwrap();
         m.set_state([2, 2, 2], VoxelState::Occupied);
         m.set_state([2, 3, 2], VoxelState::Occupied);
-        // 仅 y 向下移一格（中心 y 3 → 2，y 窗口 [0,5] → [-1,4]）：清除条带
-        // y∈[4,5]（官方 clearBuffer(2, new_up) 含边界列），y=3 幸存
         m.move_ring_buffer(Vector3::new(3.5, 2.5, 3.5));
         assert_eq!(m.origin(), Vector3::new(0.0, -1.0, 0.0));
-        // x/z 未动：全局 (x=2,z=2) 数据保留（y=3 在新窗口 [−1,4] 内、清条带外）
         assert!(m.is_occupied(Vector3::new(2.5, 2.5, 2.5)));
         assert!(m.is_occupied(Vector3::new(2.5, 3.5, 2.5)));
-        // 全局 y=5 处写入再上移清除
         m.set_state([2, 0, 2], VoxelState::Occupied); // 全局 y=... 窗口坐标 0 → 全局 y=-1
         assert!(m.is_occupied(Vector3::new(2.5, -0.5, 2.5)));
         m.move_ring_buffer(Vector3::new(3.5, 3.5, 3.5)); // y 窗口回到 [0,5]
@@ -433,7 +384,6 @@ mod tests {
         assert_eq!(m.window_index([-1, 0, 2]), None);
     }
 
-    /// 全局/窗口双参照系换算往返一致。
     #[test]
     fn global_window_index_roundtrip() {
         let mut m = GridMapBuilder::new(0.5, [10, 10, 10]).build().unwrap();

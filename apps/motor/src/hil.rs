@@ -211,7 +211,6 @@ mod tests {
         assert_eq!(actual, expected);
         assert_eq!(stats.control_messages, 3);
         assert_eq!(stats.telemetry_messages, 2);
-        // The control produced by the final write remains queued for the next turn.
         let mut pending = Vec::new();
         control
             .drain(Some(Kind::Control), |message| {

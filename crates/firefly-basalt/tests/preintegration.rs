@@ -30,7 +30,6 @@ fn compare<S: BasaltScalar, const R: usize, const C: usize>(
     }
 }
 
-// Keep each reference scenario and all of its dependent outputs together.
 #[allow(clippy::too_many_lines)]
 fn reference<S: BasaltScalar>(fixtures: &Value, tolerance: f64) {
     let v = |x, y, z| {

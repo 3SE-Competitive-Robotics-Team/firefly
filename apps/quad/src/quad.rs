@@ -1,8 +1,5 @@
 //! 第三人称飞行的 Bevy 接线：键盘 → 期望姿态/推力 → PX4 控制链
 //! （`AttitudeControl` → `RateControl` → `ControlAllocation`）→ 六自由度积分 → `Transform`。
-//!
-//! 模型与飞控本体在 `firefly-flight`，本模块只做输入、坐标搬运和手柄到
-//! 姿态/推力的映射。
 
 use bevy::prelude::*;
 use firefly_flight::{Controller, G, Px4Params, QuadState, integrate, yaw_of};
@@ -13,18 +10,14 @@ use crate::config::QuadConfig;
 /// 机体状态（挂机体根实体；位置/姿态同步到 `Transform`）。
 #[derive(Component)]
 pub struct Quad {
-    /// 六自由度状态。
     pub state: QuadState,
     /// 最近一次分配的 4 电机推力（N，HUD 显示）。
     pub motors: [f32; 4],
-    /// 最近一次分配是否触限。
     pub saturated: bool,
-    /// PX4 控制链（角速度 → 姿态 → 分配）。
     pub ctrl: Controller,
 }
 
 impl Quad {
-    /// 以飞控参数构造；机体参数在每 tick 由 `QuadConfig` 注入。
     #[must_use]
     pub fn new(params: Px4Params) -> Self {
         Self {
@@ -47,12 +40,9 @@ pub struct QuadInput {
     pub yaw: f32,
     /// 油门（Space=+1 上升）。
     pub throttle: f32,
-    /// 重置（R）。
     pub reset: bool,
 }
 
-/// 键盘 → 控制输入。
-// 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 pub fn read_input(keys: Res<ButtonInput<KeyCode>>, mut input: ResMut<QuadInput>) {
     let axis = |pos: KeyCode, neg: KeyCode| {
@@ -65,8 +55,6 @@ pub fn read_input(keys: Res<ButtonInput<KeyCode>>, mut input: ResMut<QuadInput>)
     input.reset = keys.just_pressed(KeyCode::KeyR);
 }
 
-/// 定步长（`FixedUpdate`）：手柄 → 期望姿态/推力 → PX4 控制链 → 积分。
-// 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 pub fn dynamics(
     time: Res<Time<Fixed>>,
@@ -85,7 +73,6 @@ pub fn dynamics(
         };
         quad.ctrl.reset();
     } else {
-        // `state` 复制一份，避免同时借用 `quad.ctrl`（可变）与 `quad.state`（不可变）。
         let state = quad.state;
         // 期望姿态：当前航向下叠加倾角；偏航是机体 z 的角速度前馈，不写进姿态。
         let tilt = cfg.control.position.tilt_max_deg.to_radians();

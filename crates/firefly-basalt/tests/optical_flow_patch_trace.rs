@@ -25,9 +25,6 @@ fn numbers(value: &Value) -> Vec<f32> {
         .collect()
 }
 
-// Eigen's complete scalar redux tree, with the contractions emitted by the
-// pinned GCC native build. Kept in diagnostics until other platform oracles
-// establish whether adopting this arithmetic preserves existing gates.
 fn contracted_dot(left: &[f32], right: &[f32]) -> f32 {
     match left.len() {
         1 => left[0] * right[0],

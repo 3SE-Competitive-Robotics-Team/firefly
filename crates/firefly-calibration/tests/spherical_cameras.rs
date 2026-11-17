@@ -280,7 +280,6 @@ fn strict_radial_boundary_and_upstream_validity_semantics() {
     let mut ray = Vector4::zeros();
     assert!(!ds.unproject(&Vector2::new(1., 0.), &mut ray, None, None));
     assert!(ds.unproject(&Vector2::new(1_f64.next_down(), 0.), &mut ray, None, None));
-    // The upstream UCM test uses scaled r²; validity does not imply a finite ray.
     let ucm = UnifiedCamera::<f64>::new(SVector::from([1., 1., 0., 0., 0.75]));
     assert!(ucm.unproject(&Vector2::new(2., 0.), &mut ray, None, None));
     assert!(ray[0].is_nan());

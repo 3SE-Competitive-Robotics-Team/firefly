@@ -308,8 +308,6 @@ impl<S: BasaltScalar> BundleAdjustmentBase<S> {
                         None,
                         None,
                     ) {
-                        // Upstream computes a robust diagnostic cost but intentionally
-                        // assembles these two Gauss-Newton iterations without weights.
                         jacobian *= *derivative;
                         h += jacobian.transpose() * jacobian;
                         b += jacobian.transpose() * residual;

@@ -206,16 +206,13 @@ mod tests {
     #[test]
     fn index_and_state_mapping() {
         let g = GridMapBuilder::new(0.5, [4, 4, 4]).build().unwrap();
-        // 索引映射
         let p = Vector3::new(0.25, 0.75, 1.25);
         assert_eq!(g.index_of(p), Some([0, 1, 2]));
-        // 占据状态的读写往返。
         let mut g = GridMapBuilder::new(0.5, [4, 4, 4]).build().unwrap();
         let idx = g.index_of(p).unwrap();
         g.set_state(idx, VoxelState::Occupied);
         assert!(g.is_occupied(p));
         assert_eq!(g.state(idx), VoxelState::Occupied);
-        // Free 映射到 Free
         g.set_state(idx, VoxelState::Free);
         assert_eq!(g.state(idx), VoxelState::Free);
         assert!(!g.is_occupied(p));
@@ -231,7 +228,6 @@ mod tests {
             .unwrap();
         assert!(!m.is_occupied(Vector3::new(100.0, 0.0, 0.5)));
         assert!(!m.is_occupied_inflated(Vector3::new(-50.0, 0.0, 0.5)));
-        // 窗外但 z ≥ ceil → 墙命中
         assert!(m.is_occupied(Vector3::new(100.0, 0.0, 2.5)));
     }
 
@@ -243,23 +239,18 @@ mod tests {
             .with_obstacles_inflation(0.6)
             .build()
             .unwrap();
-        // 障碍在 (4.25,4.25,2.25)，探针取远端角落避免落入膨胀层
         m.set_state([8, 8, 4], VoxelState::Occupied);
         m.inflate_obstacles();
         let below = Vector3::new(1.0, 1.0, 0.25); // 带内自由区但 z ≤ ground
         let above = Vector3::new(1.0, 1.0, 4.75); // 带内自由区但 z ≥ ceil
         let inside = Vector3::new(1.0, 1.0, 2.0); // 带内自由区
-        // is_occupied
         assert!(m.is_occupied(below));
         assert!(m.is_occupied(above));
         assert!(!m.is_occupied(inside));
-        // 墙不掩盖体素占据：带内真实障碍仍可查
         assert!(m.is_occupied(Vector3::new(4.25, 4.25, 2.25)));
-        // is_occupied_inflated
         assert!(m.is_occupied_inflated(below));
         assert!(m.is_occupied_inflated(above));
         assert!(!m.is_occupied_inflated(inside));
-        // is_inflated（索引查询，按体素中心 z 判墙）：z=0 层中心 0.25 ≤ ground
         assert!(m.is_inflated([5, 5, 0]));
         assert!(m.is_inflated([5, 5, 9])); // 中心 4.75 ≥ ceil
         assert!(!m.is_inflated([5, 5, 4])); // 中心 2.25 在带内且非膨胀层
@@ -272,17 +263,14 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(plain.virtual_wall(), None);
-        // 障碍在 (2.5,2.5,0.25)，查询点取远端角落避免落入膨胀层
         plain.set_state([5, 5, 0], VoxelState::Occupied);
         plain.inflate_obstacles();
-        // 未配置时全图任意高度均不受墙影响
         for z in [0.25, 1.0, 2.5, 4.75] {
             let p = Vector3::new(4.25, 4.25, z);
             assert!(!plain.is_occupied(p));
             assert!(!plain.is_occupied_inflated(p));
         }
         assert!(!plain.is_inflated([5, 5, 9]));
-        // set_virtual_wall 注入后生效（单侧：只拦上方）
         plain.set_virtual_wall(VirtualWall {
             ground: f64::NEG_INFINITY,
             ceil: 1.0,

@@ -209,7 +209,6 @@ impl MincoCost {
                         costs[2] += omg * step * costj;
                     }
                 }
-                // formation 工作区的额外约束，不改变 main_ws 各项的相对顺序。
                 if let Some((weight, penalty)) = &self.formation
                     && let Some(frame) = &formation_frame
                     && let Some((costp, gradp, gradt, grad_prev_t)) =

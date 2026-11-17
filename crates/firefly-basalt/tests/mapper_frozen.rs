@@ -136,10 +136,6 @@ fn frozen_original_tracks_match_setup_and_optimizer_stages() {
             missing, 0,
             "{name}: differing geometry/observation membership"
         );
-        // The original parallel optimizer is not a deterministic intermediate
-        // oracle: identical frozen inputs differ by 1.53e-9 after the first
-        // optimization in repeated C++ runs. Keep those values in diagnostics,
-        // while certifying deterministic setup and the final converged result.
         if matches!(name, "loaded" | "setup" | "final") {
             assert!(
                 error <= 1e-10,

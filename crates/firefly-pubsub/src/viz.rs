@@ -4,14 +4,11 @@
 use iceoryx2::prelude::*;
 use std::cell::Cell;
 
-/// 统一可视化话题（Rust/Python 发布端 → Rust `mimir` 订阅端）。
 pub const VIZ_TOPIC: &str = "Firefly/Viz";
 
 /// 消息类型（`VizMessage::kind` 取值，与 `firefly_mujoco/messages.py` 一致）。
 pub mod kind {
-    /// 位姿（`vio/odom`、`gt/pose` 等刚体变换实体）。
     pub const POSE: u32 = 1;
-    /// 折线（轨迹增量段、全局路径）。
     pub const LINE_STRIP: u32 = 2;
     /// 占据体素网格**全量快照**（静态先验地图；消费端以此**替换**自己的集合）。
     pub const VOXELS: u32 = 3;
@@ -19,11 +16,8 @@ pub mod kind {
     pub const VOXELS_ADD: u32 = 8;
     /// 占据体素**增量删除**（滑出观察窗、衰减回未知；消费端从集合移除）。
     pub const VOXELS_REMOVE: u32 = 9;
-    /// 标量曲线（`db_size`、`track_avg_len` 等单值序列）。
     pub const SCALARS: u32 = 4;
-    /// 直方图（`track_length` 桶计数）。
     pub const BAR_CHART: u32 = 5;
-    /// 3D 箭头（障碍平面法线、轨迹速度向量）。
     pub const ARROWS: u32 = 6;
     /// 递归清除指定的非空实体路径。
     pub const CLEAR: u32 = 7;
@@ -54,7 +48,6 @@ pub const ARROWS_MAX: usize = 256;
 pub const VOXELS_MAX: usize = 16_384;
 /// 直方图桶数上限（64；vio `track_length` 直方图 21 桶）。
 pub const BINS_MAX: usize = 64;
-/// 标量值个数上限（4）。
 pub const SCALARS_MAX: usize = 4;
 
 /// 可视化消息（扁平 tagged-union：`kind` 区分类型，其余字段按类型取用）。
@@ -62,9 +55,7 @@ pub const SCALARS_MAX: usize = 4;
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
 #[type_name("FireflyVizMessage")]
 pub struct VizMessage {
-    /// 消息类型（[`kind`] 常量）。
     pub kind: u32,
-    /// 实体路径有效字节数（[`Self::set_entity`] 写入）。
     pub entity_len: u32,
     /// 颜色 RGB（`[r, g, b]`，按 kind 取用）。
     pub color: [u8; 3],
@@ -72,31 +63,20 @@ pub struct VizMessage {
     pub timestamp: f64,
     /// 实体路径（UTF-8，`[u8; 64]` 定长 + `len`）。
     pub entity: [u8; ENTITY_MAX],
-    /// 位置（pose）。
     pub xyz: [f64; 3],
     /// Hamilton xyzw、机体→父坐标系；与 `OdomMessage` 的分量解释边界一致。
     pub quat_xyzw: [f64; 4],
-    /// 折线或图像点集。
     pub points: [[f64; 3]; POINTS_MAX],
-    /// `points` 有效点数。
     pub point_count: u32,
-    /// 箭头数（arrows）。
     pub arrow_count: u32,
-    /// 箭头起点（arrows；`arrow_origins[..arrow_count]`）。
     pub arrow_origins: [[f64; 3]; ARROWS_MAX],
-    /// 箭头向量（arrows；`arrow_vectors[..arrow_count]`）。
     pub arrow_vectors: [[f64; 3]; ARROWS_MAX],
     /// 标量值或点集/矩阵元数据（`scalars[..scalar_count]`）。
     pub scalars: [f64; SCALARS_MAX],
-    /// `scalars` 有效数。
     pub scalar_count: u32,
-    /// 直方图桶计数（`bar_chart`；`bins[..bin_count]`）。
     pub bins: [u64; BINS_MAX],
-    /// `bins` 有效数。
     pub bin_count: u32,
-    /// 直方图首桶下界（`bar_chart`）。
     pub bin_start: i64,
-    /// 桶宽（`bar_chart`）。
     pub bin_width: i64,
     /// 发布器内连续序号，用于检测订阅缓冲覆盖。
     pub sequence: u64,
@@ -130,8 +110,6 @@ impl Default for VizMessage {
 }
 
 impl VizMessage {
-    /// 构造已设 `kind`/`timestamp`/`entity` 的默认实例（其余字段零值，
-    /// 按 kind 填充 payload 字段）。
     #[must_use]
     pub fn base(kind: u32, timestamp: f64, entity: &str) -> Self {
         let mut m = Self {
@@ -160,14 +138,11 @@ impl VizMessage {
 pub const SCALAR_TOPIC: &str = "Firefly/VizScalars";
 /// 1kHz IMU 双标量与相机更新突发的独立接收容量；每条仅 128 字节。
 pub const SCALAR_BUFFER_SIZE: usize = 1024;
-/// 体素快照与增量话题。
 pub const VOXEL_TOPIC: &str = "Firefly/VizVoxels";
 /// 单一 planner 发布体素；独立缓冲限制大载荷的共享内存预算。
 pub const VOXEL_BUFFER_SIZE: usize = 32;
-/// 所有可视化话题允许的发布者数。
 pub const VIZ_MAX_PUBLISHERS: usize = 8;
 
-/// 不携带图像、点集或体素的标量载荷。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
 #[type_name("FireflyScalarMessage")]
@@ -182,7 +157,6 @@ pub struct ScalarMessage {
 }
 
 impl ScalarMessage {
-    /// 构造指定实体和测量时刻的空标量消息。
     #[must_use]
     pub fn base(timestamp: f64, entity: &str) -> Self {
         let (entity, entity_len) = entity_bytes(entity);
@@ -220,7 +194,6 @@ pub struct VoxelMessage {
 }
 
 impl VoxelMessage {
-    /// 构造一个空的单块更新；序号由发布器填写。
     #[must_use]
     #[allow(clippy::large_stack_arrays)]
     pub fn base(kind: u32, timestamp: f64, entity: &str) -> Self {
@@ -296,8 +269,6 @@ impl VizPublisher {
         })
     }
 
-    /// 打开诊断与单发布者体素通道。
-    ///
     /// # Errors
     /// 任一服务或发布端创建失败。
     pub fn with_voxels(node: &crate::node::IpcNode) -> Result<Self, firefly_error::Error> {
@@ -391,7 +362,6 @@ fn subscribe_with_topic(
 mod tests {
     use super::*;
 
-    /// 编译期断言：满足 iceoryx2 零拷贝约束。
     fn assert_zero_copy_send<T: ZeroCopySend>() {}
 
     #[test]
@@ -452,7 +422,6 @@ mod tests {
             Some(SCALAR_BUFFER_SIZE),
         )
         .unwrap();
-        // 250ms IMU 双通道突发，覆盖录制接收线程短暂停顿。
         for sequence in 0_u32..500 {
             let mut message = ScalarMessage::base(f64::from(sequence / 2) * 0.001, "vio/input/imu");
             message.sequence = u64::from(sequence);
@@ -490,7 +459,6 @@ mod tests {
     #[test]
     fn entity_truncates_at_char_boundary() {
         let mut m = VizMessage::default();
-        // 63 个 ASCII + 1 个 3 字节 UTF-8 字符 → 66 字节，须截断到字符边界
         let s = format!("{}{}", "a".repeat(ENTITY_MAX - 1), "中");
         m.set_entity(&s);
         assert!(m.entity_len as usize <= ENTITY_MAX);

@@ -1,10 +1,4 @@
 //! 泛型发布端：注入 trace 上下文，并按需发送事件唤醒。
-//!
-//! 对照 iceoryx2 最佳实践（`examples/rust/publish_subscribe_with_user_header`）：
-//! `NodeBuilder` → `service_builder(...).publish_subscribe::<T>()` →
-//! `user_header::<TraceContext>()` → `publisher_builder().create()` →
-//! `loan_uninit`/`write_payload`/`send`。trace 上下文与时间戳放在
-//! User Header（零拷贝），payload 保持精简。
 
 use std::fmt::Debug;
 
@@ -17,22 +11,15 @@ use crate::event::TopicNotifier;
 use crate::node::IpcNode;
 use crate::trace::TraceContext;
 
-/// 泛型零拷贝发布端（iceoryx2 ipc 服务，User Header 携带 trace 上下文）。
-///
-/// 消息须满足 iceoryx2 的 `Debug + ZeroCopySend` 约束。
-///
 /// 节点由调用方持有（进程共享单节点，见 [`crate::node`]），端口只借用其
 /// 创建服务；Drop 顺序由调用方作用域保证（节点最后释放）。
 pub struct Publisher<T: Debug + IceoryxSend + ?Sized + 'static> {
-    /// 发布器句柄。
     publisher: Iox2Publisher<ipc::Service, T, TraceContext>,
     /// 事件唤醒端：`Some` 时 publish 成功后自动通知（订阅端 `WaitSet` 即到即醒）。
     notifier: Option<TopicNotifier>,
 }
 
 impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
-    /// 以进程共享节点 + 自定义话题名创建发布器。
-    ///
     /// # Errors
     /// Service/Publisher 创建失败（IPC 资源不可用等）。
     pub fn with_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
@@ -131,11 +118,7 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
         self.publish_counted(msg).map(|(_, ctx)| ctx)
     }
 
-    /// 同 [`publish`](Self::publish)，但额外返回**本次收到该样本的订阅端数**。
-    ///
-    /// 一次性 CLI（`apps/ffctl`）靠它确认“有没有人在听”：iceoryx2 的 `send` 在无订阅端时
-    /// 不报错（样本直接丢弃），单看 `Result` 无法区分“投递成功”与“没人订阅”；
-    /// 每次 `send` 内部会刷新连接（iceoryx2 0.10 `send_sample`），故计数即最新连接态。
+    /// 返回本次收到样本的订阅端数；无人订阅时发送成功，计数为零。
     ///
     /// # Errors
     /// 借出样本失败或发送失败（如发布端超时）。

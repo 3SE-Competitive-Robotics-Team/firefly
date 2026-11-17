@@ -1,15 +1,4 @@
 //! `aliked` 进程：ALIKED-N16 特征提取（`ort` ONNX Runtime 推理）。
-//!
-//! 两种模式：
-//! - 在线：订阅左目灰度 → `models/aliked-n16-k512.onnx`（静态 320×240，K=512）→
-//!   经 `Firefly/Features` 发布特征（关键点/描述子/score）；
-//! - 离线建库：`--build-map <frames_dir> --out <map.ffvmap>`——读摆拍 bin
-//!   （`collect_vision_map.py` 布局），提特征 + 深度反投影（-Z 相机系，
-//!   与 `firefly-vision-match::calibration` 同惯例）写 `ffvmap` 库图。
-//!
-//! 权重在 `models/`（已 ignore，不进 git）。
-//!
-//! 运行：`cargo run --release -p aliked [--model <path>]`。
 
 use firefly_pubsub::camera::{CAMERA_LEFT_TOPIC, GrayImageMessage};
 use firefly_pubsub::event::{CAMERA_PAIR_TOPIC, TopicListener};
@@ -26,28 +15,16 @@ use ort::session::{Session, SessionOutputs};
 use ort::value::Tensor;
 use std::path::{Path, PathBuf};
 
-/// 缺省权重路径（相对运行目录，通常为仓库根）。
-/// 缺省权重：按安装布局解析。
 fn default_model() -> PathBuf {
     firefly_config::paths::models("aliked-n16-k512.onnx")
 }
-/// 导出约定：静态分辨率（见导出脚本）。
 const WIDTH: usize = 320;
 const HEIGHT: usize = 240;
-/// 特征处理最小间隔（传感器秒）；只处理最新帧，推理慢时丢帧而不积压。
-/// 默认特征推理频率（Hz）。地图查询节流 1Hz、在线回环关键帧 1s，供给侧 2Hz 已足够：
-/// 查询侧要求特征与里程计时间差 ≤ `ODOM_FRESH_TIMEOUT`（1s），2Hz 每 0.5s 一帧。
-/// 更高频率只增加重复推理——消费者按各自节流取最新帧。
 const DEFAULT_RATE_HZ: f64 = 2.0;
-/// 允许的频率范围（Hz）：低于 0.5 会顶破查询侧 1s 新鲜度门，高于 10 超过相机帧率。
 const RATE_HZ_RANGE: std::ops::RangeInclusive<f64> = 0.5..=10.0;
-/// 时钟回拨重整阈值（秒）：帧时间戳比节流门限早超此值即视为传感器时钟重启
-///（`sim` 重启后任务时钟归零），重整节流门限而非永久静默（否则重启后无特征）。
 const CLOCK_REWIND_MARGIN: f64 = 2.0;
-/// 心跳周期（无事件时兜底）。
 const HEARTBEAT: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// 命令行参数。
 struct Args {
     model: PathBuf,
     build_map: Option<PathBuf>,
@@ -56,8 +33,6 @@ struct Args {
     rate_hz: f64,
 }
 
-/// 解析命令行参数：`--model`（在线/离线通用）、`--build-map <dir>` +
-/// `--out <map.ffvmap>`（离线建库，两者必须同时出现）、`--rate-hz`（在线推理频率）。
 fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
     let mut model = default_model();
@@ -118,7 +93,6 @@ struct Model {
     input: Tensor<f32>,
 }
 
-/// 加载 ONNX 会话（文件缺失即报错）。四条算子线程，空闲休眠。
 fn load_model(model: &std::path::Path) -> Result<Model, Box<dyn std::error::Error>> {
     if !model.is_file() {
         return Err(format!(
@@ -168,7 +142,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 主循环：相机对事件唤醒 → 取最新左目帧 → 按 `period` 节流推理 → 发布特征。
 fn run_loop(model: &mut Model, period: f64) -> Result<(), firefly_error::Error> {
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "aliked");
@@ -203,7 +176,6 @@ fn run_loop(model: &mut Model, period: f64) -> Result<(), firefly_error::Error> 
     let on_event = |attachment_id: WaitSetAttachmentId<ipc::Service>| {
         let _ = attachment_id.has_event_from(&tick_guard);
         let _ = cam_events.drain();
-        // 排空左目队列，只取最新帧；持样本句柄零拷贝（77KB 灰度不落地拷贝）。
         let mut latest: Option<Received<GrayImageMessage>> = None;
         while let Ok(Some(sample)) = left_sub.receive() {
             latest = Some(sample);
@@ -212,7 +184,6 @@ fn run_loop(model: &mut Model, period: f64) -> Result<(), firefly_error::Error> 
             return CallbackProgression::Continue;
         };
         if frame.timestamp + 1e-9 < next_feat {
-            // 时钟回拨（传感器重启）vs 正常节流：回拨则重整门限，否则跳过
             if next_feat - frame.timestamp > CLOCK_REWIND_MARGIN {
                 log::info!(
                     "传感器时钟回拨（{:.2} → {:.2}），特征节流重整",
@@ -224,8 +195,6 @@ fn run_loop(model: &mut Model, period: f64) -> Result<(), firefly_error::Error> 
             }
         }
         next_feat = frame.timestamp + period;
-        // 相机帧时间戳即 sim 时钟（传感器时钟 = 仿真时钟）；推理前后各 pump
-        // 一次（推理阻塞数百 ms，积压日志及时排空，不等下一帧）。
         firefly_observability::set_sim_time(frame.timestamp);
         firefly_observability::pump_log_ipc(&log_ipc);
         let root = fastrace::Span::root("aliked", fastrace::prelude::SpanContext::random());
@@ -328,7 +297,6 @@ impl<'a> Features<'a> {
     }
 }
 
-/// 单帧推理（在线）：灰度帧 → 特征消息（定长 512，大数组是设计使然）。
 #[allow(clippy::large_stack_arrays)]
 fn infer_frame(
     model: &mut Model,
@@ -351,8 +319,6 @@ fn infer_frame(
     Ok(msg)
 }
 
-/// 离线建库：摆拍 bin（`collect_vision_map.py` 布局）→ 每帧提特征 +
-/// 深度向左目重投影、遮挡筛选与连续表面采样 → 地图路标 → 写 `ffvmap`。
 fn build_map_offline(
     model: &mut Model,
     frames_dir: &Path,
@@ -473,7 +439,6 @@ fn landmark_coverage(points: &[VisionMapPoint]) -> bool {
     points.len() >= 64 && occupied.iter().filter(|filled| **filled).count() >= 6
 }
 
-/// 冒烟推理：零图单帧，校验输出形状（K=512、描述子 128 维）。
 fn smoke_inference(model: &mut Model) -> Result<(), Box<dyn std::error::Error>> {
     let outputs = model.run(&vec![0; WIDTH * HEIGHT], WIDTH, HEIGHT)?;
     Features::from_outputs(&outputs)?;
@@ -485,7 +450,6 @@ fn smoke_inference(model: &mut Model) -> Result<(), Box<dyn std::error::Error>> 
 mod tests {
     use super::*;
 
-    /// 测试用权重路径：按安装布局解析；缺失时跳过（`models/` 已 ignore，CI 无权重）。
     fn test_model_path() -> Option<PathBuf> {
         let path = default_model();
         path.is_file().then_some(path)

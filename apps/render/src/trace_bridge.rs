@@ -97,8 +97,6 @@ impl Subscriber for ForwardToLog {
             Level::WARN => log::Level::Warn,
             Level::ERROR => log::Level::Error,
         };
-        // 官方桥（`logforth-bridge-log`）同款纪律：先问门面过不过滤，
-        // 不过直接丢，避免字段格式化的无用开销。
         if !log::logger().enabled(
             &log::Metadata::builder()
                 .level(level)
@@ -112,7 +110,6 @@ impl Subscriber for ForwardToLog {
         };
         event.record(&mut visitor);
         let message = visitor.fields.format();
-        // `format_args!` 临时值活不过分号：build 与 log 必须同语句完成。
         log::logger().log(
             &log::Record::builder()
                 .args(format_args!("{message}"))

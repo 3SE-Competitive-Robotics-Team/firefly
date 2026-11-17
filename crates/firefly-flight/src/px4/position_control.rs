@@ -7,29 +7,14 @@
 //! 约定：世界系 NED、机体系 FRD；位置 m，速度 m/s，加速度 m/s²，角度 rad，
 //! 角速度 rad/s；推力按最大集体推力归一化（无量纲，机体系 z 分量向上为负）。
 //! 设定值中的 NAN 表示该分量未设定。
-//!
-//! `types.rs` 未提供 `vehicle_local_position_setpoint_s` 的对应结构，因此本文件
-//! 定义专用结构 [`LocalPositionSetpoint`]，字段与原消息的控制相关字段一一对应。
-//!
-//! 不移植：uORB 主题 `trajectory_setpoint`、`vehicle_attitude_setpoint`、
-//! `vehicle_local_position_setpoint`，改用 [`TrajectorySetpoint`]、
-//! [`VehicleAttitudeSetpoint`] 与 [`LocalPositionSetpoint`]。
-//! 不移植：参数与 YAML 配置，增益和限幅通过 setter 注入。
-//! 不移植：模块调度与采样周期，由调用方按固定 `dt` 驱动 [`PositionControl::update`]。
-//! 不移植：日志与 uORB 调试消息，控制律不产生日志。
-//! 不移植：land detector，落地上锁不属于控制律。
-//! 不移植：`empty_trajectory_setpoint` 的 timestamp 字段，本 crate 的消息结构不含时间戳。
 
 use super::control_math::{
     add_if_not_nan_vector3f, constrain_xy, limit_tilt, replace_nonfinite_with_zero,
     thrust_to_attitude,
 };
-// 共享类型统一从 types 引入，与 PX4 的 `using namespace` 对应
 #[allow(clippy::wildcard_imports)]
 use super::types::*;
 
-// PX4 在 `PositionControl.hpp` 中定义 `PositionControlStates`；本 crate 统一放在
-// `types.rs`，此处重导出以保持 PX4 的模块边界。
 pub use super::types::PositionControlStates;
 
 /// PX4 `vehicle_local_position_setpoint_s` 中由位置控制器填充的字段。
@@ -38,30 +23,17 @@ pub use super::types::PositionControlStates;
 /// 偏航 rad，偏航角速度 rad/s。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LocalPositionSetpoint {
-    /// 期望位置（m，NED）。
     pub position: Vector3f,
-    /// 期望速度（m/s，NED）。
     pub velocity: Vector3f,
-    /// 期望加速度（m/s²，NED）。
     pub acceleration: Vector3f,
-    /// 期望推力（归一化，NED）。
     pub thrust: Vector3f,
-    /// 期望偏航角（rad）。
     pub yaw: f32,
-    /// 期望偏航角速度（rad/s）。
     pub yawspeed: f32,
 }
 
-/// 多旋翼核心位置控制器。
-///
-/// 位置环为 P 控制，速度环为 PID 控制；输入为载具位置/速度/偏航、
-/// 期望位置/速度/加速度/推力/偏航/偏航角速度以及比全局限幅更严格的约束，
-/// 输出为推力向量与偏航设定值。
-///
 /// 若某分量设定值为 NAN，则视为未设定：有位置与速度设定值时速度设定值作为前馈，
 /// 且 P 控制器输出的速度分量优先于前馈分量。
 pub struct PositionControl {
-    // 增益
     /// 位置控制比例增益（1/s）。
     gain_pos_p: Vector3f,
     /// 速度控制比例增益（1/s）。
@@ -71,7 +43,6 @@ pub struct PositionControl {
     /// 速度控制微分增益（无量纲）。
     gain_vel_d: Vector3f,
 
-    // 限幅
     /// 水平速度限幅（m/s）。
     lim_vel_horizontal: f32,
     /// 向上速度限幅（m/s）。
@@ -92,30 +63,19 @@ pub struct PositionControl {
     /// 是否解耦水平与垂直加速度（忽略垂直加速度设定值对倾角的影响）。
     decouple_horizontal_and_vertical_acceleration: bool,
 
-    // 状态
-    /// 当前载具位置（m，NED）。
     pos: Vector3f,
-    /// 当前载具速度（m/s，NED）。
     vel: Vector3f,
     /// 速度导数（m/s²，NED），代替加速度估计。
     vel_dot: Vector3f,
     /// 速度控制积分项（m/s²）。
     vel_int: Vector3f,
-    /// 当前航向（rad）。
     yaw: f32,
 
-    // 设定值
-    /// 期望位置（m，NED）。
     pos_sp: Vector3f,
-    /// 期望速度（m/s，NED）。
     vel_sp: Vector3f,
-    /// 期望加速度（m/s²，NED）。
     acc_sp: Vector3f,
-    /// 期望推力（归一化，NED）。
     thr_sp: Vector3f,
-    /// 期望航向（rad）。
     yaw_sp: f32,
-    /// 期望偏航角速度（rad/s）。
     yawspeed_sp: f32,
 }
 
@@ -126,9 +86,7 @@ impl Default for PositionControl {
 }
 
 impl PositionControl {
-    /// 悬停推力配置/估计的下限（归一化）。
     const HOVER_THRUST_MIN: f32 = 0.1;
-    /// 悬停推力配置/估计的上限（归一化）。
     const HOVER_THRUST_MAX: f32 = 0.9;
 
     /// PX4 `PositionControl::empty_trajectory_setpoint`。
@@ -136,7 +94,6 @@ impl PositionControl {
     /// 所有设定值均为 NAN（不受控），本 crate 的消息结构不含时间戳。
     pub const EMPTY_TRAJECTORY_SETPOINT: TrajectorySetpoint = TrajectorySetpoint::EMPTY;
 
-    /// 创建零初始状态的控制器（对应 C++ 的默认构造函数）。
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -167,12 +124,10 @@ impl PositionControl {
         }
     }
 
-    /// 设置位置控制比例增益（1/s，x/y/z 三轴）。
     pub fn set_position_gains(&mut self, p: Vector3f) {
         self.gain_pos_p = p;
     }
 
-    /// 设置速度控制 P/I/D 增益（x/y/z 三轴）。
     pub fn set_velocity_gains(&mut self, p: Vector3f, i: Vector3f, d: Vector3f) {
         self.gain_vel_p = p;
         self.gain_vel_i = i;
@@ -193,7 +148,6 @@ impl PositionControl {
     ///
     /// 最小推力会抬到 `1e-3`，以保证总能由推力向量推断姿态。
     pub fn set_thrust_limits(&mut self, min: f32, max: f32) {
-        // 保证推力向量始终有足够长度来推断姿态
         self.lim_thr_min = min.max(10e-4);
         self.lim_thr_max = max;
     }
@@ -263,7 +217,6 @@ impl PositionControl {
             } else {
                 0.0
             };
-            // 航向目标缺省时保持当前航向。
             self.yaw_sp = if is_finite(self.yaw_sp) {
                 self.yaw_sp
             } else {
@@ -271,7 +224,6 @@ impl PositionControl {
             };
         }
 
-        // 必须存在有效的输出加速度与推力设定值，否则说明某处出错
         valid && self.acc_sp.is_all_finite() && self.thr_sp.is_all_finite()
     }
 
@@ -281,12 +233,10 @@ impl PositionControl {
         [self.vel_sp[2], self.vel[2], self.acc_sp[2], self.thr_sp[2]]
     }
 
-    /// 将积分项清零。
     pub fn reset_integral(&mut self) {
         self.vel_int = Vector3f::zeros();
     }
 
-    /// 将水平积分项清零。
     pub fn reset_integral_xy(&mut self) {
         self.vel_int[0] = 0.0;
         self.vel_int[1] = 0.0;
@@ -323,7 +273,6 @@ impl PositionControl {
     fn input_valid(&self) -> bool {
         let mut valid = true;
 
-        // x、y、z 每轴至少需要一个设定值
         for i in 0..3 {
             valid = valid
                 && (is_finite(self.pos_sp[i])
@@ -331,12 +280,10 @@ impl PositionControl {
                     || is_finite(self.acc_sp[i]));
         }
 
-        // x 与 y 的设定值必须成对出现
         valid = valid && (is_finite(self.pos_sp[0]) == is_finite(self.pos_sp[1]));
         valid = valid && (is_finite(self.vel_sp[0]) == is_finite(self.vel_sp[1]));
         valid = valid && (is_finite(self.acc_sp[0]) == is_finite(self.acc_sp[1]));
 
-        // 每个受控状态都需要有效的状态估计
         for i in 0..3 {
             if is_finite(self.pos_sp[i]) {
                 valid = valid && is_finite(self.pos[i]);
@@ -352,11 +299,8 @@ impl PositionControl {
 
     /// 位置比例控制。
     fn position_control(&mut self) {
-        // P 位置控制器
         let mut vel_sp_position = (self.pos_sp - self.pos).component_mul(&self.gain_pos_p);
-        // 位置设定值或状态为 NAN 时，该分量不影响速度设定值
         add_if_not_nan_vector3f(&mut self.vel_sp, vel_sp_position);
-        // 约束前先清除 NAN，保证后续引用安全
         replace_nonfinite_with_zero(&mut vel_sp_position);
 
         // 水平速度约束：优先满足期望位置方向的速度分量，其次才是前馈项
@@ -370,45 +314,36 @@ impl PositionControl {
         );
         self.vel_sp[0] = vel_sp_xy[0];
         self.vel_sp[1] = vel_sp_xy[1];
-        // z 方向速度约束
         self.vel_sp[2] = constrain(self.vel_sp[2], -self.lim_vel_up, self.lim_vel_down);
     }
 
     /// 速度 PID 控制，并处理垂直抗积分饱和、水平裕度饱和与跟踪抗饱和。
     fn velocity_control(&mut self, dt: f32) {
-        // 约束垂直速度积分项
         self.vel_int[2] = constrain(self.vel_int[2], -CONSTANTS_ONE_G, CONSTANTS_ONE_G);
 
-        // PID 速度控制
         let mut vel_error = self.vel_sp - self.vel;
         let acc_sp_velocity = vel_error.component_mul(&self.gain_vel_p) + self.vel_int
             - self.vel_dot.component_mul(&self.gain_vel_d);
 
-        // 设定值或对应状态为 NAN 时不产生控制输入
         add_if_not_nan_vector3f(&mut self.acc_sp, acc_sp_velocity);
 
         self.acceleration_control();
 
-        // 垂直方向抗积分饱和
         if (self.thr_sp[2] >= -self.lim_thr_min && vel_error[2] >= 0.0)
             || (self.thr_sp[2] <= -self.lim_thr_max && vel_error[2] <= 0.0)
         {
             vel_error[2] = 0.0;
         }
 
-        // 优先垂直控制，同时为水平控制保留裕度
         let thrust_sp_xy = Vector2f::new(self.thr_sp[0], self.thr_sp[1]);
         let thrust_sp_xy_norm = thrust_sp_xy.norm();
         let thrust_max_squared = sq(self.lim_thr_max);
 
-        // 在保留水平裕度的前提下，计算剩余可用垂直推力
         let allocated_horizontal_thrust = thrust_sp_xy_norm.min(self.lim_thr_xy_margin);
         let thrust_z_max_squared = thrust_max_squared - sq(allocated_horizontal_thrust);
 
-        // 饱和最大垂直推力
         self.thr_sp[2] = self.thr_sp[2].max(-thrust_z_max_squared.sqrt());
 
-        // 垂直控制优先后，计算剩余可用水平推力
         let thrust_max_xy_squared = thrust_max_squared - sq(self.thr_sp[2]);
         let mut thrust_max_xy = 0.0;
 
@@ -416,7 +351,6 @@ impl PositionControl {
             thrust_max_xy = thrust_max_xy_squared.sqrt();
         }
 
-        // 饱和水平推力
         if thrust_sp_xy_norm > thrust_max_xy {
             let thrust_sp_xy_scaled = thrust_sp_xy / thrust_sp_xy_norm * thrust_max_xy;
             self.thr_sp[0] = thrust_sp_xy_scaled[0];
@@ -428,8 +362,6 @@ impl PositionControl {
         let acc_sp_xy_produced =
             Vector2f::new(self.thr_sp[0], self.thr_sp[1]) * (CONSTANTS_ONE_G / self.hover_thrust);
 
-        // 由于饱和与实际垂直推力（独立计算）的影响，实际产生的加速度可能大于或小于期望值；
-        // 仅在信号饱和时运行 ARW 回路
         if self.acc_sp.fixed_rows::<2>(0).norm_squared() > acc_sp_xy_produced.norm_squared() {
             let arw_gain = 2.0 / self.gain_vel_p[0];
             let acc_sp_xy = Vector2f::new(self.acc_sp[0], self.acc_sp[1]);
@@ -440,29 +372,23 @@ impl PositionControl {
             vel_error[1] = vel_error_xy[1];
         }
 
-        // 保证积分项不出现 NAN
         replace_nonfinite_with_zero(&mut vel_error);
-        // 更新速度控制积分项
         self.vel_int += vel_error.component_mul(&self.gain_vel_i) * dt;
     }
 
     /// 加速度设定值处理：生成机体 z 轴、限制倾角并换算集体推力。
     fn acceleration_control(&mut self) {
-        // 姿态生成时垂直方向按标准重力加速度处理
         let mut z_specific_force = -CONSTANTS_ONE_G;
 
         if !self.decouple_horizontal_and_vertical_acceleration {
-            // 纳入垂直加速度设定值以改善水平加速度跟踪
             z_specific_force += self.acc_sp[2];
         }
 
         let mut body_z =
             Vector3f::new(-self.acc_sp[0], -self.acc_sp[1], -z_specific_force).normalize();
         limit_tilt(&mut body_z, Vector3f::z(), self.lim_tilt);
-        // 按悬停推力对应标准重力，把加速度换算为 NED 推力
         let thrust_ned_z =
             self.acc_sp[2] * (self.hover_thrust / CONSTANTS_ONE_G) - self.hover_thrust;
-        // 把推力投影到规划出的机体姿态上
         let cos_ned_body = Vector3f::z().dot(&body_z);
         let collective_thrust = (thrust_ned_z / cos_ned_body).min(-self.lim_thr_min);
         self.thr_sp = body_z * collective_thrust;
@@ -494,7 +420,6 @@ mod tests {
         (phi, theta, psi)
     }
 
-    /// 对应 `PositionControlBasicTest` 夹具。
     struct Fixture {
         control: PositionControl,
         input: TrajectorySetpoint,
@@ -570,7 +495,6 @@ mod tests {
         fixture.input.position = Vector3f::new(1.0, 0.0, 0.0);
 
         assert!(fixture.run());
-        // 位置阶跃产生同向速度设定值，并被水平速度限幅约束
         assert!(fixture.output.velocity[0] > 0.0);
         assert!(fixture.output.velocity[0] <= 1.0 + 1e-6);
         assert_close(fixture.output.velocity[1], 0.0, 1e-6);
@@ -646,16 +570,13 @@ mod tests {
     #[test]
     fn position_control_max_thrust_limit() {
         let mut fixture = Fixture::new();
-        // 让控制器同时进入垂直与水平饱和
         fixture.input.position = Vector3f::new(10.0, 10.0, -10.0);
 
         assert!(fixture.run());
         let thrust = fixture.output.thrust;
 
-        // 推力向量模长受最大推力限制
         assert_close(thrust.norm(), MAXIMUM_THRUST, 1e-4);
 
-        // 水平推力受裕度限制
         assert_close(thrust[0], HORIZONTAL_THRUST_MARGIN / 2.0_f32.sqrt(), 1e-5);
         assert_close(thrust[1], HORIZONTAL_THRUST_MARGIN / 2.0_f32.sqrt(), 1e-5);
         assert_close(
@@ -666,12 +587,10 @@ mod tests {
             1e-5,
         );
 
-        // 集体推力受最大推力限制
         assert_close(fixture.attitude.thrust_body[0], 0.0, 1e-6);
         assert_close(fixture.attitude.thrust_body[1], 0.0, 1e-6);
         assert_close(fixture.attitude.thrust_body[2], -MAXIMUM_THRUST, 1e-5);
 
-        // 水平裕度产生的倾角等于 水平裕度 / 最大推力
         let (phi, _, _) = euler(fixture.attitude.q_d);
         let expected = ((HORIZONTAL_THRUST_MARGIN / 2.0_f32.sqrt()) / MAXIMUM_THRUST).asin();
         assert_close(phi, expected, 1e-5);
@@ -710,7 +629,6 @@ mod tests {
     #[test]
     fn idle_thrust_input() {
         let mut fixture = Fixture::new();
-        // 很大的向下加速度，确保不产生推力
         fixture.input.acceleration = Vector3f::new(0.0, 0.0, 100.0);
 
         assert!(fixture.run());
@@ -782,7 +700,6 @@ mod tests {
     #[test]
     #[allow(clippy::similar_names)] // 与 PX4 测试中的 has_x/y/z_setpoint 命名保持一致
     fn setpoint_validity_all_combinations() {
-        // 遍历所有“已设定/未设定（NAN）”组合，检查接受/拒绝是否符合规则
         let mut fixture = Fixture::new();
 
         for combination in 0..512_u32 {
@@ -790,17 +707,14 @@ mod tests {
 
             for j in 0..9_usize {
                 if combination & (1 << j) != 0 {
-                    // 取任意有限值，部分取值会明显触及限幅以覆盖边界组合
                     let value = combination as f32 / (j as f32 + 1.0);
                     set_input_component(&mut fixture.input, j, value);
                 }
             }
 
-            // 每轴至少一个设定值
             let has_x_setpoint = (combination & 7) != 0;
             let has_y_setpoint = ((combination >> 3) & 7) != 0;
             let has_z_setpoint = ((combination >> 6) & 7) != 0;
-            // x/y 设定值必须成对出现
             let has_xy_pairs = (combination & 7) == ((combination >> 3) & 7);
             let expected = has_x_setpoint && has_y_setpoint && has_z_setpoint && has_xy_pairs;
 
@@ -815,26 +729,21 @@ mod tests {
 
         let mut states = PositionControlStates::default();
 
-        // 所有状态有效
         fixture.control.set_state(&states);
         assert!(fixture.run());
 
-        // 位置无效
         states.position[0] = f32::NAN;
         fixture.control.set_state(&states);
         assert!(!fixture.run());
 
-        // 位置与速度均无效
         states.velocity[0] = f32::NAN;
         fixture.control.set_state(&states);
         assert!(!fixture.run());
 
-        // 速度无效
         states.position[0] = 0.0;
         fixture.control.set_state(&states);
         assert!(!fixture.run());
 
-        // 速度导数无效
         states.velocity[0] = 0.0;
         states.acceleration[1] = f32::NAN;
         fixture.control.set_state(&states);
@@ -848,26 +757,21 @@ mod tests {
 
         let mut states = PositionControlStates::default();
 
-        // 所有状态有效
         fixture.control.set_state(&states);
         assert!(fixture.run());
 
-        // 位置无效：速度控制仍然有效
         states.position[0] = f32::NAN;
         fixture.control.set_state(&states);
         assert!(fixture.run());
 
-        // 位置与速度均无效
         states.velocity[0] = f32::NAN;
         fixture.control.set_state(&states);
         assert!(!fixture.run());
 
-        // 速度无效
         states.position[0] = 0.0;
         fixture.control.set_state(&states);
         assert!(!fixture.run());
 
-        // 速度导数无效
         states.velocity[0] = 0.0;
         states.acceleration[1] = f32::NAN;
         fixture.control.set_state(&states);
@@ -876,7 +780,6 @@ mod tests {
 
     #[test]
     fn update_hover_thrust() {
-        // 给定悬停推力且速度变化为零
         let hover_thrust = 0.6;
         let mut fixture = Fixture::new();
         fixture.control.set_hover_thrust(hover_thrust);
@@ -885,7 +788,6 @@ mod tests {
         assert!(fixture.run());
         assert_close(fixture.output.thrust[2], -hover_thrust, 1e-6);
 
-        // 通过 update_hover_thrust 改变悬停推力后，积分项被调整以保持输出连续
         let hover_thrust_new = 0.7;
         fixture.control.update_hover_thrust(hover_thrust_new);
         assert!(fixture.run());
@@ -909,19 +811,15 @@ mod tests {
 
     #[test]
     fn integrator_windup_with_invalid_setpoint() {
-        // 用包含部分有效值的无效设定值运行
         let mut fixture = Fixture::new();
         fixture.input.position[0] = 0.1;
         fixture.input.position[1] = 0.2;
-        // z 轴设定值保持 NAN
         assert!(!fixture.run());
 
-        // 再用有效设定值运行
         fixture.input = PositionControl::EMPTY_TRAJECTORY_SETPOINT;
         fixture.input.velocity = Vector3f::zeros();
         assert!(fixture.run());
 
-        // 积分项没有累积出意外偏差
         let (phi, theta, _) = euler(fixture.attitude.q_d);
         assert_close(phi, 0.0, 1e-6);
         assert_close(theta, 0.0, 1e-6);

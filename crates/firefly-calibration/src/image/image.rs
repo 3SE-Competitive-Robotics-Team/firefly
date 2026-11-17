@@ -2,14 +2,8 @@
 // Copyright (c) 2011 Steven Lovegrove (Pangolin image container).
 // SPDX-License-Identifier: BSD-3-Clause AND MIT
 // License notices and conditions are indexed in docs/licenses/README.md.
-//! Translation of `include/basalt/image/image.h`, headers revision
-//! `aa441ba3e51050c47ba1902537792a2e4db7e43d` (original Basalt dependency).
-//! Borrowed slices replace raw pointers; stride is in pixels rather than bytes.
-//! Raw-pointer reinterpretation and allocator ownership transfer are intentionally
-//! absent: Rust views preserve the element type and transfers use moves. Empty
-//! reductions return `None`; deallocation resets dimensions instead of retaining
-//! a shape with a null pointer. Signed overflow uses wrapping arithmetic where
-//! the C++ operation has undefined behavior.
+//! Image views with stride in pixels. Empty reductions return `None`;
+//! signed integer arithmetic wraps on overflow.
 
 use nalgebra::{RealField, Vector2, Vector3};
 

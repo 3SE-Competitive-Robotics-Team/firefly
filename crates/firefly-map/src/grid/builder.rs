@@ -80,8 +80,6 @@ impl GridMapBuilder {
                 "local_update_range must be finite and positive",
             ));
         }
-        // 膨胀步长与分辨率（官方 grid_map.cpp:44-48）：inf_grid > 4 时放大分辨率；
-        // 先定分辨率再换算范围/尺寸（与官方顺序一致）
         let mut resolution = self.resolution;
         let mut inf_grid = ((self.obstacles_inflation - 1e-5) / resolution).ceil() as i32;
         if inf_grid > 4 {
@@ -106,14 +104,10 @@ impl GridMapBuilder {
             ));
         }
         let capacity = dims[0] * dims[1] * dims[2];
-        // 膨胀缓冲每侧多 inf_grid 格（官方 grid_map.cpp:56
-        // `ringbuffer_inf_size3i_ = ringbuffer_size3i_ + 2*inf_grid`）
         let g = inf_grid.unsigned_abs() as usize;
         let inf_dims = [dims[0] + 2 * g, dims[1] + 2 * g, dims[2] + 2 * g];
         let inf_capacity = inf_dims[0] * inf_dims[1] * inf_dims[2];
 
-        // 初始窗口覆盖整个 buffer：低维全局索引 [0, dims)，环形原点对齐 0，
-        // 与静态地图行为一致（首次 move_ring_buffer 才开始平移）
         let dims_i64 = [dims[0] as i64, dims[1] as i64, dims[2] as i64];
         let ig = i64::from(inf_grid);
         Ok(GridMap {
@@ -180,8 +174,6 @@ mod tests {
 
     #[test]
     fn local_update_range_sets_buffer_size() {
-        // 官方 launch advanced_param.xml:79-81 默认 5.5/5.5/2.0，res 0.4 →
-        // ceil(5.5/0.4)=14、ceil(2/0.4)=5，buffer = 2× → [28,28,10]
         let m = GridMapBuilder::new(0.4, [1, 1, 1])
             .with_local_update_range([5.5, 5.5, 2.0])
             .build()
@@ -191,7 +183,6 @@ mod tests {
         assert!((lr.x - 5.6).abs() < 1e-12); // 14 格 × 0.4
         assert!((lr.y - 5.6).abs() < 1e-12);
         assert!((lr.z - 2.0).abs() < 1e-12);
-        // 初始窗口覆盖整个 buffer（静态语义）
         assert_eq!(m.index_of(Vector3::new(0.1, 0.1, 0.1)), Some([0, 0, 0]));
         assert_eq!(m.index_of(Vector3::new(11.1, 11.1, 3.9)), Some([27, 27, 9]));
         assert_eq!(m.index_of(Vector3::new(11.3, 0.1, 0.1)), None);
@@ -213,13 +204,11 @@ mod tests {
 
     #[test]
     fn builder_enlarges_resolution_when_inflation_exceeds_4() {
-        // ceil((0.3-1e-5)/0.05)=6 > 4 → 分辨率放大为 0.3/4（官方 grid_map.cpp:44-48）
         let mut m = GridMapBuilder::new(0.05, [40, 40, 40])
             .with_obstacles_inflation(0.3)
             .build()
             .unwrap();
         assert!((m.resolution() - 0.3 / 4.0).abs() < 1e-12);
-        // step=4：本体与 4 格邻域在膨胀层，5 格外不在
         m.set_state([20, 20, 20], VoxelState::Occupied);
         m.inflate_obstacles();
         assert_eq!(m.inflate_at([24, 20, 20]), 1);

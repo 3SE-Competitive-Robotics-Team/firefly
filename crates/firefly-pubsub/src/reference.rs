@@ -1,15 +1,7 @@
-//! 规划参考消息（规划 → 飞控）。
-//!
-//! 轨迹输出进程把执行中轨迹的参考状态（位置/速度）发布到 `Firefly/Reference`，
-//! 默认局部规划器直接输出 odom 参考，携带恒等变换快照。
-//! 通用外部参考可携带参考系←odom 快照，飞控将其转换到 odom。`#[repr(C)]` 定长零拷贝。
-
 use iceoryx2::prelude::*;
 
-/// 参考话题（规划 → 飞控）。
 pub const REFERENCE_TOPIC: &str = "Firefly/Reference";
 
-/// 参考状态消息：轨迹在当前时刻的目标位置/速度。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
 #[type_name("FireflyReferenceMessage")]
@@ -71,7 +63,6 @@ mod tests {
     #[test]
     fn reference_message_is_plain_old_data() {
         let m = ReferenceMessage::default();
-        // 12 × f64 参考 + 7 × f64 变换 + u64 标记 + f64 目标身份。
         assert_eq!(std::mem::size_of::<ReferenceMessage>(), 168);
         assert!((m.timestamp + 1.0).abs() < 1e-9);
     }

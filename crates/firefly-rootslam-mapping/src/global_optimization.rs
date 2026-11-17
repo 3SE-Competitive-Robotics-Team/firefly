@@ -1359,8 +1359,6 @@ mod tests {
             ..Default::default()
         };
         let result = optimize_global(&snapshot, &calibration, &options).unwrap();
-        // Demanding the requested criterion spends the whole Krylov budget on an
-        // unreachable target and leaves the outer loop without a usable step.
         assert!(
             result.linear_iterations < 1_000,
             "single precision spent {} Krylov iterations",

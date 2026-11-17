@@ -37,24 +37,19 @@ use firefly_pubsub::viz::{
     VizMessage, VoxelMessage, kind as viz_kind,
 };
 
-/// 帧头魔数（ASCII `FHL1`）。
 pub const MAGIC: [u8; 4] = *b"FHL1";
 /// 当前协议版本；接收端拒绝版本不一致的帧，主机与板端同步部署。
 pub const VERSION: u16 = 8;
-/// 固定帧头长度（字节）。
 pub const HEADER_LEN: usize = 48;
 /// 单帧负载上限（字节）；大消息按此分片，限制单次 USB 传输的排队时延。
 pub const MAX_FRAGMENT: usize = 16 * 1024;
 /// 单条重组消息上限（字节）；深度图 320×240×f32 约 300KiB。
 pub const MAX_MESSAGE: usize = 512 * 1024;
-/// 单个 IMU 批次的最大样本数（主机按到达批次聚合）。
 pub const MAX_IMU_BATCH: usize = 64;
 /// 图像分块头长度：时间戳 8 + 传感器 1 + 图像号 4 + 块下标 2 + 块总数 2。
 pub const IMAGE_CHUNK_HEADER_LEN: usize = 17;
-/// 单块像素上限：块头 + 像素能放进一个 16KiB 帧，不再二次分片。
 pub const IMAGE_CHUNK_DATA_MAX: usize = MAX_FRAGMENT - 64;
 
-/// 消息所属的 USB 端点/方向。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Link {
     /// 传感器与指令下行：主机 → 板端。
@@ -63,7 +58,6 @@ pub enum Link {
     Actuator,
 }
 
-/// 消息类型。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
 pub enum Kind {
@@ -71,60 +65,36 @@ pub enum Kind {
     Hello = 1,
     /// 板端握手应答：板端会话号、运行时长与端点状态。
     HelloAck = 2,
-    /// 原始 IMU 批次。
     Imu = 3,
-    /// 左目灰度图。
     GrayLeft = 4,
-    /// 右目灰度图。
     GrayRight = 5,
-    /// 深度图。
     Depth = 6,
-    /// 机体与执行器描述。
     Airframe = 7,
-    /// 飞控控制输出。
     Control = 8,
-    /// 原始里程计。
     Odometry = 9,
-    /// 校正后里程计（外部定位或回环后）。
     CorrectedOdometry = 10,
-    /// VIO 高频预测姿态。
     VioAttitude = 11,
-    /// 地面站指令。
     Command = 12,
-    /// 规划目标。
     Goal = 13,
-    /// 遥测标量。
     Scalar = 14,
-    /// 结构化日志。
     Log = 15,
-    /// 传输统计。
     Stats = 16,
-    /// 往返时延探测。
     Ping = 17,
-    /// 往返时延应答。
     Pong = 18,
-    /// 会话结束。
     Bye = 19,
     /// 图像分块（大图按块传输，块间可插高优先消息）。
     ImageChunk = 20,
-    /// 板端规划参考，供主机独立评分。
     Reference = 21,
-    /// 板端规划目标身份和正常完成状态。
     PlannerStatus = 22,
-    /// 原子导航与显示坐标关系。
     Navigation = 23,
-    /// 有界空间诊断。
     Viz = 24,
-    /// 有序体素更新分块。
     Voxels = 25,
-    /// 视觉降落目标。
     LandingTarget = 26,
     /// 有时限的资源请求；SIL/HIL 共用同一消息。
     Activity = 27,
 }
 
 impl Kind {
-    /// 线上编码。
     #[must_use]
     pub const fn id(self) -> u16 {
         self as u16
@@ -199,7 +169,6 @@ impl Kind {
         }
     }
 
-    /// 诊断用名称。
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -234,10 +203,8 @@ impl Kind {
     }
 }
 
-/// 帧头。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Header {
-    /// 消息类型。
     pub kind: Kind,
     /// 发布端会话号；跨会话残留帧必须丢弃。
     pub session: u64,
@@ -245,30 +212,22 @@ pub struct Header {
     pub seq: u64,
     /// 消息主时间戳（秒，发布端时钟域），仅用于诊断与统计。
     pub capture_time: f64,
-    /// 当前分片下标（从 0 开始）。
     pub fragment_index: u16,
-    /// 本条消息的分片总数。
     pub fragment_count: u16,
-    /// 当前分片负载长度（字节）。
     pub payload_len: u32,
 }
 
 /// 板端运行统计（板端 → 主机，1Hz）。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Stats {
-    /// 板端传感器端点已收消息数。
     pub sensor_messages: u64,
-    /// 板端指令端点已收消息数。
     pub command_messages: u64,
-    /// 板端上行已发控制消息数。
     pub control_messages: u64,
-    /// 板端上行已发遥测消息数。
     pub telemetry_messages: u64,
     /// 板端丢弃的传感器图像数（旧帧被新帧替换）。
     pub dropped_images: u64,
     /// 板端检测到的 IMU 时间戳间隙（秒累计）。
     pub imu_gap_seconds: f64,
-    /// 板端上行队列当前积压（消息数）。
     pub uplink_backlog: u32,
     /// 板端最近一次收到主机数据距统计时刻的单调秒数。
     pub since_host_data_s: f64,
@@ -285,17 +244,13 @@ pub struct ImageChunkHeader {
     pub sensor_id: u8,
     /// 图像号；新图号到达即丢弃未完成的旧图。
     pub image_id: u32,
-    /// 本块下标。
     pub chunk_index: u16,
-    /// 本图总块数。
     pub chunk_count: u16,
 }
 
 impl ImageChunkHeader {
-    /// 线上长度。
     pub const LEN: usize = IMAGE_CHUNK_HEADER_LEN;
 
-    /// 编码为定长头。
     #[must_use]
     pub fn encode(&self) -> [u8; Self::LEN] {
         let mut out = [0_u8; Self::LEN];
@@ -347,10 +302,8 @@ impl ImageChunkHeader {
     }
 }
 
-/// 一张图的一个分块。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageChunk {
-    /// 分块头。
     pub header: ImageChunkHeader,
     /// 像素/深度字节；按块号顺序拼接。
     pub data: Vec<u8>,
@@ -363,75 +316,49 @@ pub struct ImageChunk {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum Message {
-    /// 主机握手。
     Hello(Hello),
-    /// 板端握手应答。
     HelloAck(HelloAck),
     /// IMU 批次（至少一条）。
     Imu(Vec<ImuMessage>),
     /// 灰度图（装箱，避免 300KiB 消息按值搬移撑爆线程栈）。
     Gray(Box<GrayImageMessage>),
-    /// 深度图（装箱）。
     Depth(Box<DepthImageMessage>),
-    /// 图像分块。
     ImageChunk(ImageChunk),
-    /// 机体描述。
     Airframe(AirframeMessage),
-    /// 控制输出。
     Control(ControlMessage),
-    /// 原始里程计。
     Odometry(OdomMessage),
-    /// 校正后里程计。
     CorrectedOdometry(OdomMessage),
-    /// 预测姿态。
     VioAttitude(AttitudeMessage),
-    /// 地面站指令。
     Command(CommandMessage),
-    /// 规划目标。
     Goal(GoalMessage),
-    /// 板端规划参考。
     Reference(ReferenceMessage),
-    /// 板端规划执行快照。
     PlannerStatus(PlannerStatusMessage),
-    /// 原子导航快照。
     Navigation(NavigationMessage),
     /// 空间诊断，仅编码有效数组元素。
     Viz(Box<VizMessage>),
     /// 体素分块，仅编码有效索引。
     Voxels(Box<VoxelMessage>),
-    /// 遥测标量。
     Scalar(ScalarMessage),
     /// 视觉降落目标，保持采集时间和 VIO 会话。
     LandingTarget(LandingTargetMessage),
-    /// 任务资源租约。
     Activity(ActivityMessage),
-    /// 结构化日志。
     Log(LogMessage),
-    /// 传输统计。
     Stats(Stats),
-    /// 时延探测。
     Ping(u64),
-    /// 时延应答。
     Pong(u64),
     /// 会话结束（`0` 正常，`1` 板端故障，`2` 主机取消）。
     Bye(u8),
 }
 
-/// 主机握手内容。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hello {
-    /// 协议版本。
     pub version: u16,
-    /// 主机角色标识（固定 [`ROLE_HOST`]）。
     pub role: u8,
-    /// 主机本次会话号。
     pub session: u64,
 }
 
-/// 板端握手应答。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HelloAck {
-    /// 协议版本。
     pub version: u16,
     /// 0 = 接受；非 0 为拒绝原因（1 版本不兼容，2 端点不可用，3 会话繁忙）。
     pub status: u8,
@@ -441,9 +368,7 @@ pub struct HelloAck {
     pub uptime_s: f64,
 }
 
-/// 主机角色编码。
 pub const ROLE_HOST: u8 = 1;
-/// 板端角色编码。
 pub const ROLE_BOARD: u8 = 2;
 
 impl PartialEq for Message {
@@ -454,7 +379,6 @@ impl PartialEq for Message {
 }
 
 impl Message {
-    /// 消息类型。
     #[must_use]
     pub const fn kind(&self) -> Kind {
         match self {
@@ -525,7 +449,6 @@ impl Message {
         }
     }
 
-    /// 编码消息体。
     #[must_use]
     #[allow(clippy::too_many_lines)] // 线上格式按类型平铺，拆函数只会增加跳转
     pub fn encode(&self) -> Vec<u8> {
@@ -806,8 +729,6 @@ impl Message {
         out
     }
 
-    /// 按类型解码消息体。
-    ///
     /// # Errors
     /// 长度、取值或消息类型不合法时返回 [`io::ErrorKind::InvalidData`]。
     #[allow(clippy::too_many_lines)] // 与 encode 对称的平铺结构
@@ -1227,7 +1148,6 @@ impl Message {
     }
 }
 
-/// 编码帧头。
 #[must_use]
 pub fn encode_header(header: &Header) -> [u8; HEADER_LEN] {
     let mut out = [0_u8; HEADER_LEN];
@@ -1246,8 +1166,6 @@ pub fn encode_header(header: &Header) -> [u8; HEADER_LEN] {
     out
 }
 
-/// 解码帧头。
-///
 /// # Errors
 /// 魔数、版本、长度或消息类型非法时返回 [`io::ErrorKind::InvalidData`]。
 pub fn decode_header(raw: &[u8; HEADER_LEN]) -> io::Result<Header> {

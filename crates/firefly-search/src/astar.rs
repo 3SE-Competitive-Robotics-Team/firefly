@@ -55,7 +55,6 @@ struct Entry {
     f: f64,
 }
 
-/// 节点状态（官方 `GridNode::enum_state`）。
 #[derive(Clone, Copy, PartialEq)]
 enum NodeState {
     Undefined,
@@ -135,10 +134,6 @@ impl Astar {
         let mut goal_idx = map
             .index_of(goal_pt)
             .ok_or_else(|| Error::new(ErrorKind::OutOfRange, "goal is outside the map"))?;
-        // 端点落入膨胀占据时按 resolution 沿远离对端方向外推，直到自由或越出地图
-        // （对照官方 `ConvertToIndexAndAdjustStartEndPoints` 的 `checkOccupancy` =
-        // `getInflateOccupancy`，即含膨胀；终点分支按语义检查自身索引，不复刻官方
-        // 误查 `start_idx` 的笔误）。
         while map.is_occupied_inflated(center_of(map, start_idx)) {
             let dir = (start_pt - goal_pt)
                 .try_normalize(0.0)
@@ -162,7 +157,6 @@ impl Astar {
         self.ensure_capacity(total);
         self.round = self.round.wrapping_add(1);
         if self.round == 0 {
-            // 世代回绕：全部清零重来
             self.g_score.fill(f64::INFINITY);
             self.came_from.fill(Node::NONE);
             self.rounds.fill(0);
@@ -214,7 +208,6 @@ impl Astar {
         Err(Error::temporary(ErrorKind::NotFound, "no path found"))
     }
 
-    /// 展开一个节点：缓存 3×3×3 膨胀占用，逐个邻居松弛（不经过中间 Vec）。
     #[inline]
     fn expand(&mut self, map: &GridMap, idx: [usize; 3], goal_idx: [usize; 3], node: Node, g: f64) {
         let blocked = map.inflated_neighborhood_mask(idx);
@@ -223,7 +216,6 @@ impl Astar {
         });
     }
 
-    /// 遍历 26 邻域中避开膨胀层的单位步。
     fn for_each_neighbor(
         map: &GridMap,
         idx: [usize; 3],
@@ -266,7 +258,6 @@ impl Astar {
         }
     }
 
-    /// 单邻居松弛：闭集与无改进的节点跳过。
     #[inline]
     #[allow(
         clippy::too_many_arguments,
@@ -304,7 +295,6 @@ impl Astar {
         });
     }
 
-    /// 测试用：返回邻居集合（生产路径直接 `expand`，不分配）。
     #[cfg(test)]
     fn fill_neighbors(map: &GridMap, idx: [usize; 3], out: &mut Vec<(Node, f64, [usize; 3])>) {
         out.clear();
@@ -400,7 +390,6 @@ impl Astar {
     /// 乘 `TIE_BREAKER` 轻微高估打破 f 平局、偏向直趋目标，乘 resolution 与 g
     /// （米）保持同量纲。
     fn heuristic(map: &GridMap, a: [usize; 3], b: [usize; 3]) -> f64 {
-        /// 官方 `tie_breaker_`。
         const TIE_BREAKER: f64 = 1.0 + 1.0 / 10000.0;
         let dx = a[0].abs_diff(b[0]) as f64;
         let dy = a[1].abs_diff(b[1]) as f64;
@@ -413,7 +402,6 @@ impl Astar {
             * (SQRT_3 * low + std::f64::consts::SQRT_2 * (mid - low) + (high - mid))
     }
 
-    /// 标记节点为本代已访问（首次使用时分配缓冲）。
     fn touch(&mut self, node: Node, round: u32) {
         self.rounds[node.0 as usize] = round;
     }
@@ -554,7 +542,6 @@ mod tests {
         map.inflate_obstacles();
         let mut astar = Astar::default();
         let path = search(&mut astar, &map, [0.5, 4.5, 0.5], [9.5, 4.5, 0.5]).unwrap();
-        // 路径不穿过墙体（x=4, y 2..8, z 0..2）
         assert!(
             path.points()
                 .iter()
@@ -591,7 +578,6 @@ mod tests {
 
     #[test]
     fn open_grid_path_length_is_analytic_optimum() {
-        // 空图对角线：8 格 dx/dy/dz 全等 → 最优 8×√3（米制 resolution=1）。
         let map = empty_map();
         let mut astar = Astar::default();
         let path = search(&mut astar, &map, [0.5, 0.5, 0.5], [8.5, 8.5, 8.5]).unwrap();
@@ -622,7 +608,6 @@ mod tests {
 
     #[test]
     fn path_nodes_keep_inflated_clearance() {
-        // 上游 checkOccupancy 使用膨胀占据，验收路径节点与 26 邻域步长。
         let mut map = empty_map();
         map.set_state([5, 5, 5], firefly_map::VoxelState::Occupied);
         map.inflate_obstacles();
@@ -652,7 +637,6 @@ mod tests {
 
     #[test]
     fn buffer_reused_across_searches() {
-        // 第二次搜索复用同一世代缓冲：正确性 + 世代递增
         let map = empty_map();
         let mut astar = Astar::default();
         let p1 = search(&mut astar, &map, [0.5, 0.5, 0.5], [9.5, 9.5, 0.5]).unwrap();
@@ -698,7 +682,6 @@ mod tests {
 
     #[test]
     fn fine_grid_large_map() {
-        // 0.1m 分辨率 280×80×32 网格上绕柱搜索，验证性能与正确性
         let mut map = firefly_map::GridMapBuilder::new(0.1, [280, 80, 32])
             .build()
             .unwrap();
@@ -716,7 +699,6 @@ mod tests {
 
     #[test]
     fn heuristic_matches_official_diag_heu() {
-        // 对照官方 getDiagHeu 取值；resolution = 1.0 时米与格数同值
         let map = empty_map();
         let tb = 1.0 + 1.0 / 10000.0;
         for (b, cells) in [
@@ -728,7 +710,6 @@ mod tests {
             let h = Astar::heuristic(&map, [0, 0, 0], b);
             assert!((h - tb * cells).abs() < 1e-12, "b={b:?} h={h}");
         }
-        // 分辨率因子：h 按米计，与 g 同量纲
         let fine = firefly_map::GridMapBuilder::new(0.5, [10, 10, 10])
             .build()
             .unwrap();
@@ -743,15 +724,12 @@ mod tests {
         map.inflate_obstacles();
         let mut astar = Astar::default();
         let path = search(&mut astar, &map, [2.5, 5.5, 5.5], [9.5, 5.5, 5.5]).unwrap();
-        // 路径起点为外推后的自由体素中心（沿远离目标方向），而非原始入障坐标
         assert_eq!(path.points().first(), Some(&Vector3::new(0.5, 5.5, 5.5)));
         assert_eq!(path.points().last(), Some(&Vector3::new(9.5, 5.5, 5.5)));
     }
 
     #[test]
     fn start_inside_inflation_is_pushed_out() {
-        // 仅膨胀区（原始自由）：官方 `checkOccupancy` = `getInflateOccupancy` 同样算占用
-        // → 起点仍沿远离对端方向外推至膨胀层外。
         let mut map = empty_map();
         map.set_state([3, 5, 5], firefly_map::VoxelState::Occupied);
         map.inflate_obstacles(); // 起点 [2,5,5] 落在膨胀层内，原始自由
@@ -768,7 +746,6 @@ mod tests {
         map.inflate_obstacles();
         let mut astar = Astar::default();
         let path = search(&mut astar, &map, [0.5, 5.5, 5.5], [7.5, 5.5, 5.5]).unwrap();
-        // 路径终点为外推后的自由体素中心（沿远离起点方向）
         assert_eq!(path.points().first(), Some(&Vector3::new(0.5, 5.5, 5.5)));
         assert_eq!(path.points().last(), Some(&Vector3::new(9.5, 5.5, 5.5)));
     }
@@ -789,14 +766,12 @@ mod gap_tests {
     use super::*;
     use firefly_map::{GridMapBuilder, VoxelState};
 
-    /// 两堵墙留 1 格门，A* 应穿过门（而非绕墙外圈）。
     #[test]
     fn finds_path_through_gap() {
         let mut map = GridMapBuilder::new(1.0, [12, 12, 12])
             .with_obstacles_inflation(0.0)
             .build()
             .unwrap();
-        // x=5 与 x=7 两堵墙（y,z 全占），但 y=6 留出门缝（1 格宽）
         for x in [5usize, 7] {
             for y in 0..12 {
                 for z in 0..12 {
@@ -816,7 +791,6 @@ mod gap_tests {
                 Vector3::new(11.5, 6.5, 0.5),
             )
             .expect("应找到穿门路径");
-        // 路径经过 x in [5,7] 时 y 应落在门（6）附近
         let through_gap = path
             .points()
             .iter()
@@ -830,7 +804,6 @@ mod neighbor_tests {
     use super::*;
     use firefly_map::{GridMapBuilder, VirtualWall, VoxelState};
 
-    /// 上游邻居判定：只查询目标节点的膨胀占据。
     fn upstream_neighbors(map: &GridMap, idx: [usize; 3]) -> Vec<(u32, f64)> {
         let [dx, dy, dz] = map.dims();
         let [x, y, z] = idx;

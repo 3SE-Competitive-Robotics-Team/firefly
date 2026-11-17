@@ -23,7 +23,6 @@ use v4l::prelude::MmapStream;
 use v4l::video::Capture;
 use v4l::{Format, FourCC};
 
-/// 缺省配置：按安装布局解析，与启动目录无关。
 fn default_config() -> PathBuf {
     firefly_config::paths::config("camera.toml")
 }
@@ -32,7 +31,6 @@ const DEFAULT_BUFFERS: u32 = 4;
 /// `Z16` 深度默认按毫米缩放。
 const DEFAULT_DEPTH_SCALE: f64 = 0.001;
 
-/// 退出标志（信号处理器置位，主循环每帧检查）。
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
 struct DownWorker(Option<std::thread::JoinHandle<Result<(), String>>>);
@@ -173,7 +171,6 @@ fn capture_down(
     Ok(())
 }
 
-/// 相机配置。
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -183,9 +180,7 @@ struct Config {
     /// 图像高度（像素）；必须与消息布局一致。
     #[serde(default = "default_height")]
     height: u32,
-    /// 左目相机。
     left: Source,
-    /// 右目相机。
     right: Source,
     /// 深度相机；省略则不发布 `Firefly/Depth`。
     #[serde(default)]
@@ -194,16 +189,12 @@ struct Config {
     down: Option<DownSource>,
 }
 
-/// 灰度相机设备。
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Source {
-    /// `V4L2` 设备节点。
     device: String,
-    /// 采集像素格式。
     #[serde(default = "default_format")]
     format: FrameFormat,
-    /// 采集缓冲数。
     #[serde(default = "default_buffers")]
     buffers: u32,
 }
@@ -225,16 +216,13 @@ const fn default_down_rate() -> u32 {
     15
 }
 
-/// 深度相机设备。
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Depth {
-    /// `V4L2` 设备节点。
     device: String,
     /// `Z16` 原始单位 → 米。
     #[serde(default = "default_depth_scale")]
     scale: f64,
-    /// 采集缓冲数。
     #[serde(default = "default_buffers")]
     buffers: u32,
 }
@@ -259,7 +247,6 @@ const fn default_depth_scale() -> f64 {
     DEFAULT_DEPTH_SCALE
 }
 
-/// 解析 `--config <path>`（缺省 [`default_config`]）。
 fn parse_config_path() -> Result<PathBuf, String> {
     let mut it = std::env::args().skip(1);
     let mut path = default_config();
@@ -277,7 +264,6 @@ fn parse_config_path() -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// 校验配置与消息布局、采集格式的相容性。
 fn validate(config: &Config) -> firefly_error::Result<()> {
     let invalid = |message: String| {
         Err(firefly_error::Error::new(
@@ -387,8 +373,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let depth_scale = config.depth.as_ref().map(|depth| depth.scale);
 
     while RUNNING.load(Ordering::Relaxed) {
-        // 三路共用一次采样时刻：与仿真「一次渲染出三类图」的语义一致，
-        // 双目配对的 dt 因此为零。
         let stamp = monotonic_seconds()?;
         pump_gray(
             &mut left_stream,
@@ -447,7 +431,6 @@ fn configure(
     Ok(())
 }
 
-/// 像素格式对应的 `V4L2` 四字符码。
 fn fourcc(format: FrameFormat) -> FourCC {
     match format {
         FrameFormat::Grey => FourCC::new(b"GREY"),
@@ -573,7 +556,6 @@ fn monotonic_seconds() -> Result<f64, Box<dyn Error>> {
 mod tests {
     use super::*;
 
-    /// 仓库里的配置必须能被本进程解析并通过校验：板端启动才发现漂移太晚。
     #[test]
     fn shipped_config_parses() {
         let raw = include_str!("../../../configs/camera.toml");

@@ -1,13 +1,5 @@
-//! 里程计消息（iceoryx2 zero-copy）与话题。
-//!
-//! `#[repr(C)]` 定长结构，满足 `ZeroCopySend` 约束（自包含、无堆指针、
-//! 统一内存布局、`'static`、无 `Drop`）。trace 上下文（`trace_id`/`span_id`/
-//! 双时间戳）由发布中间件写入 **User Header**（见 [`crate::trace`]），
-//! payload 保持精简。
-
 use iceoryx2::prelude::*;
 
-/// 里程计话题（对照 `docs/architecture.md` 的 `topic: odom`）。
 pub const ODOM_TOPIC: &str = "Firefly/Odometry";
 
 /// 地图系里程计：RootSLAM 默认发布，外部地图模式由 localization 独占发布。
@@ -16,8 +8,6 @@ pub const CORRECTED_ODOM_TOPIC: &str = "Firefly/CorrectedOdometry";
 /// 仿真真值：仅供传感器图像生成、评测与可视化对照。
 pub const GROUND_TRUTH_TOPIC: &str = "Firefly/GroundTruth";
 
-/// 里程计消息（对照 `docs/architecture.md` 的 `topic: odom`）。
-///
 /// 位置和物理速度表达在对应父坐标系；Hamilton xyzw 表示 body→parent。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
@@ -38,7 +28,6 @@ pub struct OdomMessage {
     pub quat_y: f64,
     pub quat_z: f64,
     pub quat_w: f64,
-    /// 估计器是否已初始化。
     pub is_initialized: bool,
 }
 
@@ -122,7 +111,6 @@ mod tests {
 
     #[test]
     fn odom_message_is_plain_old_data() {
-        // ZeroCopySend 约束的自检：定长（可逐字节复制）、默认值合法
         let m = OdomMessage::default();
         assert_eq!(std::mem::size_of::<OdomMessage>(), 96);
         assert!((m.quat_w - 1.0).abs() < 1e-12);

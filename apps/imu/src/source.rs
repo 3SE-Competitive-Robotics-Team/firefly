@@ -16,7 +16,6 @@ use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 use serde::Deserialize;
 use spidev::{SpiModeFlags, Spidev, SpidevOptions, SpidevTransfer};
 
-/// 缺省配置：按安装布局解析，与启动目录无关。
 fn default_config() -> PathBuf {
     firefly_config::paths::config("imu.toml")
 }
@@ -31,10 +30,8 @@ const GYRO_RESET_SETTLE: Duration = Duration::from_millis(30);
 /// 配置写入到可读数之间的稳定时间。
 const POWER_UP_SETTLE: Duration = Duration::from_millis(5);
 
-/// 退出标志（信号处理器置位，主循环每拍检查）。
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-/// IMU 配置。
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -44,17 +41,13 @@ struct Config {
     /// SPI 时钟模式（0..=3）。
     #[serde(default = "default_mode")]
     mode: u8,
-    /// 加速度计从机。
     accel: AccelDevice,
-    /// 陀螺从机。
     gyro: GyroDevice,
 }
 
-/// 加速度计从机与量程。
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AccelDevice {
-    /// `spidev` 设备节点。
     device: String,
     /// SPI 时钟（Hz）。
     #[serde(default = "default_speed_hz")]
@@ -64,11 +57,9 @@ struct AccelDevice {
     range_g: u32,
 }
 
-/// 陀螺从机与量程。
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GyroDevice {
-    /// `spidev` 设备节点。
     device: String,
     /// SPI 时钟（Hz）。
     #[serde(default = "default_speed_hz")]
@@ -98,7 +89,6 @@ const fn default_gyro_range_dps() -> u32 {
     2_000
 }
 
-/// 解析 `--config <path>`（缺省 [`default_config`]）。
 fn parse_config_path() -> Result<PathBuf, String> {
     let mut it = std::env::args().skip(1);
     let mut path = default_config();
@@ -116,7 +106,6 @@ fn parse_config_path() -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// 校验采样率、SPI 模式与接线参数。
 fn validate(config: &Config) -> firefly_error::Result<()> {
     let invalid = |message: String| {
         Err(firefly_error::Error::new(
@@ -144,7 +133,6 @@ fn validate(config: &Config) -> firefly_error::Result<()> {
     Ok(())
 }
 
-/// 采样主循环：按固定速率读两片从机并发布一条 `Firefly/Imu`。
 pub fn run() -> Result<(), Box<dyn Error>> {
     let config_path =
         parse_config_path().map_err(|error| format!("{error}；用法：imu [--config <path>]"))?;
@@ -217,14 +205,12 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// 单片 `spidev` 从机。
 struct Spi {
     device: Spidev,
     path: String,
 }
 
 impl Spi {
-    /// 打开并配置一条 `spidev` 通道。
     fn open(path: &str, speed_hz: u32, mode: SpiModeFlags) -> io::Result<Self> {
         let mut device = Spidev::open(path)?;
         let options = SpidevOptions::new()
@@ -253,12 +239,10 @@ impl Spi {
         Ok(out)
     }
 
-    /// 读一个寄存器。
     fn read_byte(&self, header: &[u8]) -> io::Result<u8> {
         Ok(self.read::<1>(header)?[0])
     }
 
-    /// 写一个寄存器。
     fn write(&self, register: u8, value: u8) -> io::Result<()> {
         let tx = [register & !0x80, value];
         let mut rx = [0u8; 2];
@@ -321,7 +305,6 @@ fn init_gyro(spi: &Spi, range: bmi088::GyroRange) -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-/// SPI 模式号 → 标志位。
 fn mode_flags(mode: u8) -> Result<SpiModeFlags, String> {
     match mode {
         0 => Ok(SpiModeFlags::SPI_MODE_0),
@@ -343,7 +326,6 @@ fn monotonic_seconds() -> Result<f64, Box<dyn Error>> {
 mod tests {
     use super::*;
 
-    /// 仓库里的配置必须能被本进程解析并通过校验：板端启动才发现漂移太晚。
     #[test]
     fn shipped_config_parses() {
         let raw = include_str!("../../../configs/imu.toml");

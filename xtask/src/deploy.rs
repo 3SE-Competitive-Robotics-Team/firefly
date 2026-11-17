@@ -180,9 +180,6 @@ fn push(device: &str, package: &Path) -> Result<(), String> {
     adb(device, &["push", &unpacker_arg, REMOTE_UNPACKER])?;
     remote_step(device, &format!("chmod 755 {REMOTE_UNPACKER}"))?;
 
-    // 部署是覆盖语义会留下已退役的二进制与配置，解包前先停服务并清空受管目录；
-    // `logs` 与镜像预置的 `systemd` 不动。包已推到设备，这一步之后解包失败才会
-    // 留下空的受管目录，所以清理放在推送之后。
     prepare_destination_with(|args| adb_output(device, args))?;
     unpack_with(|args| adb_output(device, args))?;
     check_unpacked(device)?;

@@ -236,7 +236,6 @@ pub mod paths {
 
         #[test]
         fn executable_prefix_is_used_when_it_has_configs() {
-            // 产物写在 target/（磁盘），不写 /tmp。
             let scratch = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../target/firefly-config-tests")
                 .join("prefix");

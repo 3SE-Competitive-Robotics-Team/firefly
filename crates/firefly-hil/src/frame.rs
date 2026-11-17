@@ -586,7 +586,6 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&encode_header(&header));
         bytes.push(body[0]);
-        // 下一条消息完整；读取器应丢弃上一条残缺消息后返回它。
         let mut writer = FrameWriter::new(&mut bytes);
         writer.set_session(1);
         writer

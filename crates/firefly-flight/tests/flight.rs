@@ -8,7 +8,6 @@ use nalgebra::{UnitQuaternion, Vector3};
 
 const DT: f32 = 0.001;
 
-/// 去掉气动阻尼：与 `MuJoCo` 被控对象一致，只留 `PX4` 控制律本身。
 fn plant() -> QuadParams {
     QuadParams {
         linear_drag: 0.0,
@@ -120,7 +119,6 @@ fn lateral_step_tilts_then_translates() {
     );
 }
 
-/// 大水平误差不得靠集合推力顶满把姿态权限挤掉（旧实现 15m 会锁死爬升）。
 #[test]
 fn large_lateral_error_tilts_instead_of_climbing() {
     let (quad, air) = (plant(), Airframe::default());
@@ -163,7 +161,6 @@ fn large_lateral_error_tilts_instead_of_climbing() {
     );
 }
 
-/// 电机推力永不超过机体上限，且不为负。
 #[test]
 fn motors_stay_within_limits() {
     let (quad, air) = (plant(), Airframe::default());
@@ -191,7 +188,6 @@ fn motors_stay_within_limits() {
     }
 }
 
-/// 常值侧风下速度积分项消除稳态位置偏差。
 #[test]
 fn wind_is_rejected_by_velocity_integrator() {
     let (quad, air) = (plant(), Airframe::default());
@@ -220,7 +216,6 @@ fn wind_is_rejected_by_velocity_integrator() {
     );
 }
 
-/// 匀速参考 + 真实阻力：速度积分项把滞后压到可接受范围。
 #[test]
 fn velocity_tracking_with_drag_has_small_lag() {
     let quad = QuadParams::default();
@@ -251,7 +246,6 @@ fn velocity_tracking_with_drag_has_small_lag() {
     assert!(lag.abs() < 0.1, "1m/s 稳态滞后 {lag:.3} m");
 }
 
-/// 产品系航向设定值：+90° 偏航后机体 +X 指向产品世界 +Y。
 #[test]
 fn yaw_setpoint_turns_to_requested_heading() {
     let (quad, air) = (plant(), Airframe::default());
@@ -287,7 +281,6 @@ fn yaw_setpoint_turns_to_requested_heading() {
     );
 }
 
-/// 姿态支持只稳定姿态与悬停推力，不产生水平加速度。
 #[test]
 fn fallback_support_is_level_and_hovering() {
     let (quad, air) = (plant(), Airframe::default());
@@ -317,7 +310,6 @@ fn fallback_support_is_level_and_hovering() {
     );
 }
 
-/// 产品级闭环：起飞 → 保持 → 降落，状态机与 PX4 控制链一起跑。
 #[test]
 fn arm_takeoff_hold_land_closes_the_loop() {
     for altitude_bias in [-0.04, 0.0, 0.04] {
@@ -449,7 +441,6 @@ fn contact_candidate_removes_lateral_thrust_despite_position_drift() {
     assert!(motors.iter().sum::<f32>() < 0.6 * quad.mass * G);
 }
 
-/// 瞬时无效位置设定值保留上一次有效推力，不能把电机切零。
 #[test]
 fn invalid_setpoint_keeps_last_valid_thrust() {
     let (quad, air) = (plant(), Airframe::default());

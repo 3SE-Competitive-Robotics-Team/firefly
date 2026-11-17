@@ -244,7 +244,6 @@ impl Parser {
         let mut decor = Vec::new();
         let mut motions = Vec::new();
         let mut current: Option<Motion> = None;
-        // 数据段：占据（默认）或装饰
         let mut in_decor = false;
         let mut line_no = 0usize;
 
@@ -297,7 +296,6 @@ impl Parser {
                     parse_waypoint(&words, line_no, &mut m.waypoints)?;
                 }
                 _ => {
-                    // 数据行（整行三个坐标），归属当前段
                     let nums =
                         parse_f64_n(&line.split_whitespace().collect::<Vec<_>>(), 3, line_no)?;
                     if in_decor {
@@ -515,9 +513,7 @@ MOTION sphere 15 4 1 0.5
         assert_close(m.position_at(0.0), [1.0, 2.0, 1.0]);
         assert_close(m.position_at(2.0), [9.5, 2.0, 1.0]); // (1+18)/2
         assert_close(m.position_at(4.0), [18.0, 2.0, 1.0]);
-        // t=10 取模到 t=2（周期 8）：(1+18)/2 处继续插值，而非瞬移回起点
         assert_close(m.position_at(10.0), [9.5, 2.0, 1.0]);
-        // 非循环障碍：t 超过末航点停在终点
         assert_close(map.motions[1].position_at(100.0), [15.0, 6.0, 1.0]);
     }
 
@@ -527,7 +523,6 @@ MOTION sphere 15 4 1 0.5
         let grid = map.to_grid_map(0.0).unwrap();
         let voxels = map.motion_voxels(0.0, &grid);
         assert_ne!(voxels, [] as [[usize; 3]; 0]);
-        // 每个体素都在界内
         for idx in voxels {
             assert!(idx.iter().zip(grid.dims()).all(|(i, d)| *i < d));
         }

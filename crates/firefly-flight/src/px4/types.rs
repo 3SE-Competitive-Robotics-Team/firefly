@@ -11,7 +11,6 @@
 
 use nalgebra::{SMatrix, SVector, UnitQuaternion, Vector2, Vector3, Vector4};
 
-/// Number of actuators supported by this product (a single X quad).
 pub const NUM_ACTUATORS: usize = 4;
 /// Control axes kept for this product: roll, pitch, yaw, `thrust_z`.
 pub const NUM_AXES: usize = 4;
@@ -34,45 +33,36 @@ pub type Quatf = UnitQuaternion<f32>;
 /// Standard gravity (m/s²), PX4's `CONSTANTS_ONE_G`.
 pub const CONSTANTS_ONE_G: f32 = 9.80665;
 
-/// PX4 `math::constrain`.
 #[must_use]
 pub fn constrain(value: f32, min: f32, max: f32) -> f32 {
     value.max(min).min(max)
 }
 
-/// PX4 `math::radians`.
 #[must_use]
 pub fn radians(degrees: f32) -> f32 {
     degrees * core::f32::consts::PI / 180.0
 }
 
-/// PX4 `math::degrees`.
 #[must_use]
 pub fn degrees(radians: f32) -> f32 {
     radians * 180.0 / core::f32::consts::PI
 }
 
-/// PX4 `math::sq`.
 #[must_use]
 pub fn sq(value: f32) -> f32 {
     value * value
 }
 
-/// PX4 `PX4_ISFINITE`.
 #[must_use]
 pub fn is_finite(value: f32) -> bool {
     value.is_finite()
 }
 
-/// Component-wise vector helpers mirroring `matrix::Vector3f`.
 pub trait Vector3fExt {
-    /// PX4 `emult`.
     #[must_use]
     fn emult(self, other: Self) -> Self;
-    /// PX4 `isAllFinite`.
     #[must_use]
     fn is_all_finite(&self) -> bool;
-    /// PX4 `nanToZero`.
     #[must_use]
     fn nan_to_zero(self) -> Self;
 }
@@ -113,7 +103,6 @@ pub fn quat_dcm_z(q: Quatf) -> Vector3f {
     q * Vector3::z()
 }
 
-/// PX4 `Quatf::rotateVector()`.
 #[must_use]
 pub fn quat_rotate(q: Quatf, v: Vector3f) -> Vector3f {
     q * v
@@ -131,7 +120,6 @@ pub fn quat_from_rotation_vector(v: Vector3f) -> Quatf {
     UnitQuaternion::from_scaled_axis(v)
 }
 
-/// PX4 `Quatf::normalized()`.
 #[must_use]
 pub fn quat_normalize(q: Quatf) -> Quatf {
     UnitQuaternion::new_normalize(q.into_inner())
@@ -149,7 +137,6 @@ pub struct TrajectorySetpoint {
 }
 
 impl TrajectorySetpoint {
-    /// PX4 `PositionControl::empty_trajectory_setpoint`.
     pub const EMPTY: Self = Self {
         position: Vector3f::new(f32::NAN, f32::NAN, f32::NAN),
         velocity: Vector3f::new(f32::NAN, f32::NAN, f32::NAN),
@@ -188,7 +175,6 @@ impl Default for VehicleAttitudeSetpoint {
     }
 }
 
-/// `vehicle_rates_setpoint_s` subset.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VehicleRatesSetpoint {
     pub roll: f32,
@@ -197,13 +183,11 @@ pub struct VehicleRatesSetpoint {
     pub thrust_body: Vector3f,
 }
 
-/// `vehicle_torque_setpoint_s` subset.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VehicleTorqueSetpoint {
     pub xyz: Vector3f,
 }
 
-/// `vehicle_thrust_setpoint_s` subset.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VehicleThrustSetpoint {
     pub xyz: Vector3f,
@@ -223,26 +207,21 @@ mod tests {
 
     #[test]
     fn quaternion_helpers_match_px4_semantics() {
-        // canonical flips the antipodal representation.
         let q = UnitQuaternion::from_scaled_axis(Vector3::new(0.0, 0.0, 4.0));
         let c = quat_canonical(q);
         assert!(c.scalar() >= 0.0);
         assert!((c * Vector3::x() - q * Vector3::x()).norm() < 1e-6);
 
-        // dcm_z is the body +z direction in world.
         let q = UnitQuaternion::from_scaled_axis(Vector3::new(0.0, 0.3, 0.0));
         assert!((quat_dcm_z(q) - q * Vector3::z()).norm() < 1e-6);
 
-        // two-vector rotation maps v0 onto v1.
         let v0 = Vector3::new(0.0, 0.0, 1.0);
         let v1 = Vector3::new(0.2, -0.1, 0.97).normalize();
         assert!((quat_from_two_vectors(v0, v1) * v0 - v1).norm() < 1e-5);
 
-        // rotation vector round trip.
         let v = Vector3::new(0.01, -0.02, 0.003);
         assert!((quat_from_rotation_vector(v).scaled_axis() - v).norm() < 1e-6);
 
-        // imag is the vector part.
         let q = UnitQuaternion::from_scaled_axis(Vector3::new(0.1, 0.2, 0.3));
         assert!((quat_imag(q) - q.vector().into_owned()).norm() < 1e-6);
     }

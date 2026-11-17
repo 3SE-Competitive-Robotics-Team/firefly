@@ -1,10 +1,4 @@
 //! 微无人机第三人称飞行游戏（独立，不接 IPC / VIO）。
-//!
-//! 四旋翼模型与飞控（角度模式）由 `firefly-flight` 提供——与闭环评估共用同一实现；
-//! 本 app 只做输入/相机/场景接线，在 `configs/quad.toml` 指定的场地里飞。
-//! 第三人称追踪相机、场景光照和机体可视化复用 `firefly-render`。
-//!
-//! 运行：`cargo run --release -p quad`
 
 mod config;
 mod quad;
@@ -21,7 +15,6 @@ use firefly_render::lighting::{ILLUMINANCE, spawn_scene_lighting, viewer_camera}
 use firefly_render::scene::{models_dir, spawn_scene};
 use quad::{Quad, QuadInput};
 
-/// 缺省配置：按安装布局解析，与启动目录无关。
 fn config_path() -> std::path::PathBuf {
     firefly_config::paths::config("quad.toml")
 }
@@ -66,7 +59,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.add_plugins(firefly_render::textures::MaterialMipmapPlugin)
         .insert_resource(cfg)
         .insert_resource(QuadInput::default())
-        // 动力学定步长 240Hz（显式积分稳定）。
         .insert_resource(Time::<Fixed>::from_hz(240.0))
         .add_systems(Startup, (setup_scene, setup_drone, setup_hud))
         .add_systems(FixedUpdate, quad::dynamics)
@@ -75,8 +67,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 场地 + 光照 + 主相机。
-// 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 fn setup_scene(mut commands: Commands, cfg: Res<QuadConfig>, assets: Res<AssetServer>) {
     spawn_scene_lighting(&mut commands, ILLUMINANCE);
@@ -89,8 +79,6 @@ fn setup_scene(mut commands: Commands, cfg: Res<QuadConfig>, assets: Res<AssetSe
     ));
 }
 
-/// 机体根实体 + 模型子节点（模型/标记由 `firefly-render` 统一挂）。
-// 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 fn setup_drone(
     mut commands: Commands,
@@ -113,12 +101,9 @@ fn setup_drone(
         });
 }
 
-/// HUD 文本（`update_hud` 更新）。
 #[derive(Component)]
 struct Hud;
 
-/// 左上角提示。
-// 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 fn setup_hud(mut commands: Commands) {
     commands.spawn((
@@ -138,8 +123,6 @@ fn setup_hud(mut commands: Commands) {
     ));
 }
 
-/// HUD：速度 / 高度 / 4 电机推力（仅变化时写，避免每帧触发 UI 变更检测）。
-// 系统参数按值传递（`SystemParam` 契约）。
 #[allow(clippy::needless_pass_by_value)]
 fn update_hud(drone: Single<(&Quad, &Transform)>, mut text: Single<&mut Text, With<Hud>>) {
     let (quad, transform) = drone.into_inner();

@@ -1,32 +1,19 @@
-//! 多拓扑候选轨迹生成——严格对照官方 EGO-Planner-v2
-//! `poly_traj_optimizer.cpp::distinctiveTrajs`(L816–1125)。
-//!
-//! 输入为初始轨迹的约束点、fine check 生成的 {s,v} 平面池与碰撞段
-//! (控制点下标闭区间,官方 `segments`)。每个候选与输入约束点完全相同,
-//! 仅平面分配不同:每段可取原侧(0)或翻侧(1),二进制组合枚举
-//! ≤ 2^3 = 8 个候选(官方 `MAX_TRAJS=8`、`VARIS=2`)。
+//! 多拓扑候选平面集，参考 EGO-Planner-v2 `distinctiveTrajs`。
 
 use firefly_map::{GridMap, Plane};
 use nalgebra::Vector3;
 
-/// 段数上限:官方 `min(段数, floor(log(MAX_TRAJS)/log(VARIS)))` = 3。
 const SEG_UPBOUND_CAP: usize = 3;
-/// 镜像点向外搜索上限倍数:官方 `"5" is the threshold`。
 const SEARCH_OUTBOUND_FACTOR: f64 = 5.0;
 
-/// 单个拓扑候选:约束点 + 按约束点索引组织的平面池
-/// (官方 `ConstraintPoints`;控制点位置与输入一致,仅平面分配不同)。
 #[derive(Debug, Clone)]
 pub struct TopoCandidate {
     pub points: Vec<Vector3<f64>>,
     pub planes: Vec<Vec<Plane>>,
 }
 
-/// 官方 `distinctiveTrajs`:由碰撞段生成拓扑互异的候选平面集。
-///
 /// `segments` 为 [`crate::obstacles::ObstacleScanner::finely_check_with_segments`]
-/// 输出的碰撞段(控制点下标闭区间)。返回空表示整体中止(官方返回 blank:
-/// 段内出现非单基点的控制点,不应发生)。
+/// 输出的碰撞段（控制点下标闭区间）。段内存在非单基点控制点时返回空。
 #[must_use]
 pub fn distinctive_candidates(
     map: &GridMap,
@@ -38,20 +25,16 @@ pub fn distinctive_candidates(
         points: cps_points.to_vec(),
         planes: cps_planes.to_vec(),
     };
-    // 官方:无碰撞段 → 返回 [cps_] 单候选
     if segments.is_empty() {
         return vec![single()];
     }
 
     let res = map.resolution();
     let cp_size = cps_points.len();
-    // 官方 CTRL_PT_DIST:首尾控制点直线距离 / (cp_size − 1)
     let ctrl_pt_dist = (cps_points[0] - cps_points[cp_size - 1]).norm() / (cp_size - 1) as f64;
 
-    // 段列表截断到上限(官方 seg_upbound)
     let mut segments: Vec<crate::obstacles::CollisionSpan> =
         segments[..segments.len().min(SEG_UPBOUND_CAP)].to_vec();
-    // RichInfoSegs:每段 [原侧, 翻侧] 平面池(段内局部索引);两侧控制点相同
     let mut rich: Vec<[Vec<Vec<Plane>>; 2]> = segments
         .iter()
         .map(|&(a, b)| {
@@ -81,12 +64,10 @@ pub fn distinctive_candidates(
     }
 
     if segments.is_empty() {
-        // 官方:全部段被删后回落 [cps_] 单候选
         return vec![single()];
     }
 
     /*** Step 2:二进制选择表枚举组合 ***/
-    // 枚举顺序与官方计数器(selection[0] 为最低位,全 0 原侧在前)一致。
     let mut out = Vec::with_capacity(1usize << segments.len());
     for combo in 0..(1usize << segments.len()) {
         let mut planes = vec![Vec::new(); cp_size];
@@ -99,7 +80,6 @@ pub fn distinctive_candidates(
             if in_seg {
                 let side = (combo >> seg_id) & 1;
                 let src = &rich[seg_id][side][cp_of_seg];
-                // 官方:选中翻侧但翻侧为空 → 弃该组合
                 if side == 1 && src.is_empty() {
                     abandoned = true;
                     break;
@@ -111,7 +91,6 @@ pub fn distinctive_candidates(
                     seg_id += 1;
                 }
             } else {
-                // 段外:复制 cps_ 原值
                 planes[cp_id].clone_from(&cps_planes[cp_id]);
             }
         }
@@ -125,13 +104,10 @@ pub fn distinctive_candidates(
     out
 }
 
-/// Step 1 的单段处理结果。
 enum FlippedSide {
-    /// 翻侧已构造完成。
     Built,
     /// 该段被丢弃(找不到占据采样 / 镜像点过近 / 超出搜索上限)。
     Dropped,
-    /// 整体中止(段内出现非单基点控制点,官方 `ROS_ERROR` + 返回 blank)。
     Abort,
 }
 
@@ -154,7 +130,6 @@ fn search_free_outward(
     None
 }
 
-/// 官方 Step 1:为一段构造翻转侧平面(写入 `sides[1]`,段内局部索引)。
 fn fill_flipped_side(
     map: &GridMap,
     span: &crate::obstacles::CollisionSpan,
@@ -168,8 +143,6 @@ fn fill_flipped_side(
     let cp_size = pts.len();
 
     if cp_size > 1 {
-        // 1.1 首/末占据采样点(沿控制点折线,步长≈分辨率;
-        // 首向循环采样更密——对照官方两处 step_size 的差异)
         let occ_start = 'find_start: {
             for j in 0..cp_size - 1 {
                 let step = res / (pts[j] - pts[j + 1]).norm() / 2.0;
@@ -205,14 +178,11 @@ fn fill_flipped_side(
             return FlippedSide::Dropped;
         };
 
-        // 1.2 翻转方向 + 镜像基点([occ_start, occ_end])
         for j in occ_start_id..=occ_end_id {
-            // 官方:恰好 1 个基点,否则报错并放弃全部候选
             if sides[0][j].len() != 1 {
                 return FlippedSide::Abort;
             }
             let rev_dir = -sides[0][j][0].normal();
-            // 段端点用占据采样点特判,其余镜像原基距
             let rev_base = if j == occ_start_id {
                 occ_start_pt
             } else if j == occ_end_id {
@@ -221,7 +191,6 @@ fn fill_flipped_side(
                 pts[j] + rev_dir * (sides[0][j][0].point() - pts[j]).norm()
             };
             if map.is_occupied_inflated(rev_base) {
-                // 沿翻转方向向外搜索自由点,上限 5×平均控制点间距
                 match search_free_outward(
                     map,
                     rev_base,
@@ -235,12 +204,10 @@ fn fill_flipped_side(
             } else if (rev_base - pts[j]).norm() >= res {
                 set_first_plane(&mut sides[1][j], Plane::new(rev_base, rev_dir));
             } else {
-                // 镜像点距控制点过近(too close)→ 丢段
                 return FlippedSide::Dropped;
             }
         }
 
-        // 1.3 段外控制点复制 occ 端点的翻侧值
         if let Some(start_plane) = sides[1][occ_start_id].first().cloned() {
             for slot in sides[1][..occ_start_id].iter_mut().rev() {
                 set_first_plane(slot, start_plane.clone());
@@ -257,7 +224,6 @@ fn fill_flipped_side(
     FlippedSide::Built
 }
 
-/// 官方 `else` 分支:单控制点段(`cp_size == 1`)的翻侧构造。
 fn fill_single_point_side(
     map: &GridMap,
     sides: &mut [Vec<Vec<Plane>>; 2],
@@ -266,7 +232,6 @@ fn fill_single_point_side(
     ctrl_pt_dist: f64,
 ) -> FlippedSide {
     if sides[0][0].is_empty() {
-        // 官方直接读 [0][0];空平面无法翻转,丢段
         return FlippedSide::Dropped;
     }
     let orig = &sides[0][0][0];
@@ -291,7 +256,6 @@ fn fill_single_point_side(
     FlippedSide::Built
 }
 
-/// 替换第 0 个平面、保留其余(对照官方 `[0] =` 元素赋值语义)。
 fn set_first_plane(slot: &mut Vec<Plane>, plane: Plane) {
     if slot.is_empty() {
         slot.push(plane);
@@ -307,8 +271,6 @@ mod tests {
 
     const RES: f64 = 0.5;
 
-    /// 合成地图:分辨率 0.5,`walls` 内的体素列全高占据,膨胀 1 格
-    /// (`is_occupied_inflated` 只看膨胀层;半径 0 会得到全空膨胀层)。
     fn wall_map(walls: &[usize]) -> GridMap {
         let mut map = GridMapBuilder::new(RES, [40, 6, 6])
             .with_obstacles_inflation(RES * 0.99)
@@ -325,14 +287,12 @@ mod tests {
         map
     }
 
-    /// 沿 x 轴的合成控制点:x = 2..=18 步长 2(9 点,间距 2 m)。
     fn line_points() -> Vec<Vector3<f64>> {
         (0..9)
             .map(|i| Vector3::new(2.0 + f64::from(i) * 2.0, 0.5, 0.5))
             .collect()
     }
 
-    /// 给下标 `idx` 的控制点一个朝 −x 的原侧平面(基点在点西侧 `dist` 处)。
     fn west_plane(points: &[Vector3<f64>], idx: usize, dist: f64) -> Plane {
         Plane::new(
             points[idx] - Vector3::new(dist, 0.0, 0.0),
@@ -356,10 +316,8 @@ mod tests {
 
     #[test]
     fn single_segment_yields_two_candidates_with_flipped_side() {
-        // 体素 17..23 占据(含 1 格膨胀 → 占据区 x∈[8.0,12.0))
         let map = wall_map(&[17, 18, 19, 20, 21, 22, 23]);
         let points = line_points();
-        // 段覆盖下标 3..=6(x = 8..14,穿墙),原侧平面朝 −x、基点在点西 1.5 m
         let span = (3usize, 6usize);
         let mut planes: Vec<Vec<Plane>> = vec![Vec::new(); points.len()];
         for (j, slot) in planes[span.0..=span.1].iter_mut().enumerate() {
@@ -368,15 +326,12 @@ mod tests {
         let cands = distinctive_candidates(&map, &points, &planes, &[span]);
         assert_eq!(cands.len(), 2, "单段 → 两候选");
 
-        // 候选 0(全原侧)= 输入
         for plane in &cands[0].planes[span.0..=span.1] {
             assert!((plane[0].normal() - Vector3::new(-1.0, 0.0, 0.0)).norm() < 1e-12);
         }
-        // 候选 1:段外复制输入(此处无平面)
         assert!(cands[1].planes[0].is_empty());
         assert!(cands[1].planes[7].is_empty());
 
-        // 候选 1(翻侧):段内方向相反(+x),基点在自由侧(x ≥ 12.0)
         for plane in &cands[1].planes[span.0..=span.1] {
             let pl = &plane[0];
             assert!(
@@ -393,8 +348,6 @@ mod tests {
 
     #[test]
     fn mirrored_point_blocked_within_search_bound_drops_segment() {
-        // 体素 16 起全图占据(含 1 格膨胀 → 占据区 x∈[7.5,20)):
-        // 镜像点被占且 5×间距(10 m)内向 +x 无自由点(越界亦视为占据)
         let map = wall_map(&(16..40).collect::<Vec<_>>());
         let points = line_points();
         let span = (3usize, 5usize);
@@ -403,7 +356,6 @@ mod tests {
             slot.push(west_plane(&points, j + span.0, 1.5));
         }
         let cands = distinctive_candidates(&map, &points, &planes, &[span]);
-        // 段被丢弃后回落单候选(官方 seg_upbound==0 分支),且等于输入
         assert_eq!(cands.len(), 1);
         for plane in &cands[0].planes[span.0..=span.1] {
             assert_eq!(plane.len(), 1);
@@ -416,9 +368,6 @@ mod tests {
 
     #[test]
     fn two_segments_enumerate_four_combinations_in_official_order() {
-        // 两堵分离薄墙(体素 15 与 31,含膨胀 → 占据区 [7.0,8.5)/[15.0,16.5)),
-        // 段互不相邻 → 4 组合,枚举顺序与官方计数器一致:
-        // [00, 10, 01, 11](selection[0] 为最低位)
         let map = wall_map(&[15, 31]);
         let points = line_points();
         let spans = [(2usize, 3usize), (6usize, 7usize)];
@@ -430,7 +379,6 @@ mod tests {
         }
         let cands = distinctive_candidates(&map, &points, &planes, &spans);
         assert_eq!(cands.len(), 4, "两段 → 四组合");
-        // 原侧方向 −x,翻侧 +x;combo 位 k 对应第 k 段(bit0 → 段 2..=3)
         let flipped = |c: &TopoCandidate, j: usize| {
             c.planes[j][0].normal().dot(&Vector3::new(-1.0, 0.0, 0.0)) < 0.0
         };

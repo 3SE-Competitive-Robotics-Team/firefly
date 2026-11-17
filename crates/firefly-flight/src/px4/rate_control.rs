@@ -3,19 +3,11 @@
 //! 参考实现：PX4-Autopilot 提交 `4dbd2e069a5c30c2e53e47e842095d2576dc38c4`
 //! 的 `src/lib/rate_control/rate_control.hpp` 与 `src/lib/rate_control/rate_control.cpp`
 //! （BSD-3-Clause）。保持 PX4 的 NED 世界系 / FRD 机体系约定；力矩指令按各轴最大力矩归一化。
-//!
-//! 不移植：`rate_ctrl_status_s` 的 uORB 话题定义与发布——[`RateControl::rate_control_status`]
-//! 返回包含三个积分项的 [`RateCtrlStatus`]。
-//! 不移植：`RateControl() = default` / `~RateControl()`——Rust 用 [`Default`] 零初始化并由编译器析构。
-//! 不移植：`using namespace matrix`——改用 `nalgebra` 类型。
 
-// 字段名与 C++ 保持一致（含 `_` 前缀），并按要求使用 `types` 的 glob 导入。
 #![allow(clippy::used_underscore_binding, clippy::wildcard_imports)]
 
 use super::types::*;
 
-/// 三轴角速率 PID 控制器。
-///
 /// 输出为归一化力矩指令 `[-1, 1]`（PX4 不在此处限幅，饱和由控制分配反馈）。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RateControl {
@@ -51,12 +43,10 @@ impl RateControl {
         self._gain_d = d;
     }
 
-    /// 设置所有轴的积分项上限（归一化力矩）。
     pub fn set_integrator_limit(&mut self, integrator_limit: Vector3f) {
         self._lim_int = integrator_limit;
     }
 
-    /// 设置角速率到力矩的直接前馈增益 [归一化力矩/(rad/s)]。
     pub fn set_feed_forward_gain(&mut self, ff: Vector3f) {
         self._gain_ff = ff;
     }
@@ -107,7 +97,6 @@ impl RateControl {
         dt: f32,
         landed: bool,
     ) -> Vector3f {
-        // 角速率误差
         let mut rate_error = rate_sp - rate;
 
         // 带前馈的 PID：积分项使用本周期积分前的值
@@ -115,7 +104,6 @@ impl RateControl {
             - self._gain_d.emult(angular_accel)
             + self._gain_ff.emult(rate_sp);
 
-        // 未着陆时才积分
         if !landed {
             self.update_integral(&mut rate_error, dt);
         }
@@ -123,7 +111,6 @@ impl RateControl {
         torque
     }
 
-    /// 积分项清零。
     pub fn reset_integral(&mut self) {
         self._rate_int = Vector3f::zeros();
     }
@@ -137,7 +124,6 @@ impl RateControl {
         }
     }
 
-    /// 读取积分项状态，供日志/诊断使用。
     #[must_use]
     pub fn rate_control_status(&self) -> RateCtrlStatus {
         RateCtrlStatus {
@@ -150,12 +136,10 @@ impl RateControl {
     /// 一阶积分更新，含抗饱和与随误差衰减的 `i_factor`。
     fn update_integral(&mut self, rate_error: &mut Vector3f, dt: f32) {
         for i in 0..3 {
-            // 正向饱和时只允许负误差继续积分
             if self._control_allocator_saturation_positive[i] {
                 rate_error[i] = rate_error[i].min(0.0);
             }
 
-            // 负向饱和时只允许正误差继续积分
             if self._control_allocator_saturation_negative[i] {
                 rate_error[i] = rate_error[i].max(0.0);
             }
@@ -164,10 +148,8 @@ impl RateControl {
             let mut i_factor = rate_error[i] / radians(400.0);
             i_factor = (1.0 - i_factor * i_factor).max(0.0);
 
-            // 一阶（矩形）积分
             let rate_i = self._rate_int[i] + i_factor * self._gain_i[i] * rate_error[i] * dt;
 
-            // 非有限值或越界时不写回
             if is_finite(rate_i) {
                 self._rate_int[i] = constrain(rate_i, -self._lim_int[i], self._lim_int[i]);
             }
@@ -179,7 +161,6 @@ impl RateControl {
 mod tests {
     use super::*;
 
-    /// 逐分量断言，`tol` 与量纲一致。
     fn assert_near(actual: Vector3f, expected: Vector3f, tol: f32) {
         for i in 0..3 {
             assert!(
@@ -250,7 +231,6 @@ mod tests {
         assert!((state.pitchspeed_integ - 0.05).abs() < 1e-7);
         assert!((state.yawspeed_integ - 0.05).abs() < 1e-7);
 
-        // 下一步力矩使用限幅后的积分项
         let torque = rate_control.update(
             Vector3f::zeros(),
             Vector3f::new(1.0, 1.0, 1.0),
@@ -284,7 +264,6 @@ mod tests {
         assert!(state.pitchspeed_integ > 0.0);
         assert!(state.yawspeed_integ > 0.0);
 
-        // 负向饱和对称地阻断负误差
         let mut rate_control = RateControl::default();
         rate_control.set_pid_gains(
             Vector3f::zeros(),
@@ -365,7 +344,6 @@ mod tests {
         let state = rate_control.rate_control_status();
         assert!((state.rollspeed_integ - 0.75 * error_200).abs() < 1e-6);
 
-        // 400 °/s：i_factor = 0，不再积分
         rate_control.reset_integral();
         let error_400 = radians(400.0);
         let _ = rate_control.update(

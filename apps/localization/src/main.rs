@@ -25,24 +25,15 @@ use iceoryx2::waitset::WaitSetRunResult;
 use nalgebra::{Isometry3, Matrix4, Quaternion, Translation3, UnitQuaternion, Vector3};
 
 const LOOP_PERIOD: Duration = Duration::from_millis(10);
-/// 矫正后位姿图例颜色（绿，与 vio 橙 / 真值蓝区分）。
 const CORRECTED_COLOR: (u8, u8, u8) = (60, 200, 80);
-/// 缺省配置：按安装布局解析，与启动目录无关。
 fn default_config() -> PathBuf {
     firefly_config::paths::config("localization.toml")
 }
 const ODOM_FRESH_TIMEOUT: f64 = 1.0;
-/// 视觉观测待融合队列上限（条）：观测先到、odom 后到时暂存，按 `timestamp`
-/// 排序，odom 追上即融合；溢出时丢最旧（对端断流的背压语义，非延时等待）。
 const PENDING_VISUAL_CAP: usize = 8;
-/// 待融合观测超期（秒）：相对 `t_sim` 过期即丢弃（对端断流时不无限囤积；
-/// 超期观测不能外推配对；任务可用性另由 `QualityOptions` 的更短时限判断。
 const PENDING_VISUAL_TIMEOUT: f64 = 10.0;
-/// odom 内插窗口（条）：100Hz 下约 10s，与超期对齐（窗口外无法内插，留了也白留；
-/// 62KB，可忽略）。
 const ODOM_HIST_CAP: usize = 1000;
 
-/// 命令行参数。
 struct Args {
     config: PathBuf,
     odom_topic: String,
@@ -77,8 +68,6 @@ fn parse_args() -> Result<Args> {
     Ok(args)
 }
 
-/// 历史 odom 在目标时刻插值（位置 lerp + 姿态 slerp；时刻越界返回空，
-/// 该 tick 跳过——不以外推污染配准）。
 fn interp_odom(
     hist: &std::collections::VecDeque<(f64, OdomMessage)>,
     t: f64,
@@ -162,23 +151,14 @@ struct App {
     viz_pub: Option<VizPublisher>,
     corr_prev: Option<[f64; 3]>,
     latest_odom: Option<OdomMessage>,
-    /// 视觉位姿观测订阅（`lightglue` 进程发布，定位后端融合）。
     visual_obs: Subscriber<PoseObservation>,
-    /// odom 环形历史（时间戳，消息）：按观测时间戳插值位姿，消除
-    /// 最新配对 ~0.1s 失配（1.5m/s 下 15cm 系统性错位）；`ODOM_HIST_CAP` 深
-    /// 容忍低速 odom 与视觉滞后内插。
     odom_hist: std::collections::VecDeque<(f64, OdomMessage)>,
-    /// 待融合视觉观测（按 `timestamp` 排序）：观测先到、odom 后到时暂存，
-    /// odom 追上即融合——事件驱动的订阅关系，无延时等待。
     pending_visual: std::collections::VecDeque<PoseObservation>,
     last_odom_recv: std::time::Instant,
     last_published: f64,
     last_visual: f64,
-    /// 新息门限快照（`cfg.fusion.visual.max_innovation_trans`，门控
-    /// 诊断标量的 `limit` 分量与滤波器用同一值，按路径传入）。
     innov_limit_visual: f64,
     t_sim: f64,
-    /// 日志聚合句柄（主循环作用域持有，每 tick 传给 `pump_log_ipc`）。
     log_ipc: firefly_observability::LogIpc,
     _node: firefly_pubsub::node::IpcNode,
 }
@@ -286,8 +266,6 @@ impl App {
                 }
                 odom_arrived = true;
             }
-            // odom 到达即追一次待融合队列：观测先到、odom 后到的竞态在此闭合，
-            // 无需延时等待——唤醒源仍是数据到达本身。
             if odom_arrived {
                 self.drain_pending_visual();
             }
@@ -355,7 +333,6 @@ impl App {
         }
     }
 
-    /// 视觉观测融合：按观测时刻插值 odom 作预测位姿，更新 ESKF。
     #[fastrace::trace]
     fn fuse_visual(&mut self, obs: &PoseObservation) {
         let Some(t_vio) = interp_odom(&self.odom_hist, obs.timestamp) else {
@@ -469,8 +446,6 @@ impl App {
         Ok(())
     }
 
-    /// 门控诊断可视化（每次融合尝试即发，事件驱动，无尝试不发）。
-    ///
     /// `corr/debug/gate` 四元组见 [`gate_diag`]，`corr/debug/drift` 三元组为
     /// 判决时刻累计漂移 `T_drift` 的平移分量 `[dx, dy, dz]`。发布失败只降级，
     /// 不影响融合。
@@ -502,8 +477,6 @@ impl App {
         }
     }
 
-    /// 矫正后位姿可视化（`corr/odom` 位姿 + `corr/traj` 增量轨迹段，绿，
-    /// 发布失败只降级，不影响融合）。
     fn log_corrected_viz(&mut self, msg: &OdomMessage) {
         let Some(viz) = &self.viz_pub else {
             return;
@@ -667,7 +640,6 @@ mod tests {
                 let initial = *navigation.receive().unwrap().unwrap();
                 assert_eq!(initial.translation, [0.; 3]);
                 assert_eq!(corrected.receive().unwrap().unwrap().position_x, 0.);
-                // 9 cm 候选留在融合器内，发布坐标系保持已提交版本。
                 app.fusion.set_alignment(shifted(0.09)).unwrap();
                 sample.timestamp = 4.;
                 app.latest_odom = Some(sample);
@@ -679,7 +651,6 @@ mod tests {
                 assert_eq!(small.rotation, initial.rotation);
                 assert_eq!(small.odom.position_x, 0.);
                 assert_eq!(corrected.receive().unwrap().unwrap().position_x, 0.);
-                // 11 cm 超过门限：下游废弃局部地图与在途参考。
                 app.fusion.set_alignment(shifted(0.11)).unwrap();
                 sample.timestamp = 5.;
                 app.latest_odom = Some(sample);
@@ -773,7 +744,6 @@ mod tests {
         assert!((interp_odom(&history, 3.).unwrap()[(0, 3)] - 4.).abs() < 1e-12);
     }
 
-    /// 接受：`chi2`/阈值透传，平移修正量取 `delta` 平移分量模，标志为 1。
     #[test]
     fn accepted_maps_chi2_and_applied() {
         let mut delta = Vector6::zeros();
@@ -791,7 +761,6 @@ mod tests {
         assert!((d[3] - 1.0).abs() < 1e-12);
     }
 
-    /// 新息拒收：`metric` 为新息平移量，`limit` 为传入的门限，修正量为 0。
     #[test]
     fn innovation_reject_maps_trans_and_limit() {
         let gate = RelocGate::RejectedInnovation {
@@ -805,7 +774,6 @@ mod tests {
         assert!(d[3].abs() < 1e-12);
     }
 
-    /// 预检拒收无判决数值：返回空，调用方不发标量。
     #[test]
     fn precheck_maps_none() {
         let gate = RelocGate::RejectedPrecheck {

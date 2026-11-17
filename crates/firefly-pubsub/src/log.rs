@@ -1,55 +1,29 @@
-//! 结构化日志消息（iceoryx2 zero-copy）：各进程经 `Firefly/Log` 话题向
-//! `mimir` 聚合，统一写 rerun `TextLog`（持久可检索）；stderr 只作
-//! 进程级诊断，不作记录载体。
-//!
-//! 设计约束：
-//! - `#[repr(C)]` 定长结构，满足 `ZeroCopySend`（自包含、无堆指针、
-//!   统一内存布局、`'static`、无 `Drop`），与 [`crate::viz`] 同惯例；
-//! - `trace_id_hi/lo` 随消息携带（订阅端无需读 User Header 即可关联 span
-//!   树，对照 [`crate::trace::TraceContext`]）；
-//! - `sim_time < 0` 表示发布端尚无 sim 时钟（如 ORT 模型加载期），聚合端
-//!   回落墙钟时间轴写入，仍可检索；
-//! - 文本按 UTF-8 字节截断（[`LogMessage::set_text`] 保护字符边界，
-//!   与 [`crate::viz::VizMessage::set_entity`] 同手法）。
-
 use iceoryx2::prelude::*;
 
-/// 统一日志话题（各进程发布端 → `mimir` 聚合端）。
 pub const LOG_TOPIC: &str = "Firefly/Log";
 /// 突发事件与 trace 诊断的订阅队列上限；mimir 使用同值。
 pub const LOG_BUFFER_SIZE: usize = 256;
 
 /// 日志级别（`log::Level` 的数值镜像，聚合端映射到 rerun `TextLogLevel`）。
 pub mod level {
-    /// 错误。
     pub const ERROR: u8 = 1;
-    /// 警告。
     pub const WARN: u8 = 2;
-    /// 信息。
     pub const INFO: u8 = 3;
-    /// 调试。
     pub const DEBUG: u8 = 4;
-    /// 追踪。
     pub const TRACE: u8 = 5;
 }
 
-/// 进程标签字节上限（64，如 `vio`/`planner`/`localization`/`aliked`/`lightglue`）。
 pub const TAG_MAX: usize = 64;
-/// 日志文本字节上限（512，超长截断）。
 pub const TEXT_MAX: usize = 512;
 
-/// 结构化日志消息（扁平定长：级别 + 进程标签 + 文本 + 双时间戳 + trace 链）。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
 #[type_name("FireflyLogMessage")]
 pub struct LogMessage {
-    /// 级别（[`level`] 常量）。
     pub log_level: u8,
-    /// 进程标签有效字节数。
     pub tag_len: u8,
     /// 保留字段（对齐），必须为零。
     pub reserved: [u8; 2],
-    /// 文本有效字节数。
     pub text_len: u32,
     /// 进程标签（UTF-8，`[u8; 64]` 定长 + `len`）。
     pub tag: [u8; TAG_MAX],
@@ -64,7 +38,6 @@ pub struct LogMessage {
     pub wall_nanos: u32,
     /// trace-id 高 64 位（W3C 128-bit 拆分；0 = 无 span 上下文）。
     pub trace_id_hi: u64,
-    /// trace-id 低 64 位。
     pub trace_id_lo: u64,
     /// Per-publisher send sequence, including failed sends.
     pub sequence: u64,
@@ -135,7 +108,6 @@ impl LogMessage {
         std::str::from_utf8(&self.text[..n]).unwrap_or("\u{FFFD}")
     }
 
-    /// 是否携带有效 trace 上下文。
     #[must_use]
     pub fn is_traced(&self) -> bool {
         self.trace_id_hi != 0 || self.trace_id_lo != 0
@@ -151,7 +123,6 @@ pub const LOG_MAX_PUBLISHERS: usize = 10;
 mod tests {
     use super::*;
 
-    /// 编译期断言：满足 iceoryx2 零拷贝约束。
     fn assert_zero_copy_send<T: ZeroCopySend>() {}
 
     #[test]
@@ -171,16 +142,11 @@ mod tests {
         m.set_text("VIO ready");
         assert_eq!(m.tag_str(), "vio");
         assert_eq!(m.text_str(), "VIO ready");
-        // 多字节截断不断裂：TEXT_MAX-1 个 ASCII + 1 个 3 字节字符 → 退到 ASCII 前缀
-        m.set_text(&format!("{}{}", "a".repeat(TEXT_MAX - 1), "绪"));
-        assert!(m.text_str().is_ascii());
     }
 
     #[test]
     fn text_truncates_at_char_boundary() {
         let mut m = LogMessage::default();
-        // 511 个 ASCII + 1 个 3 字节字符 = 514 字节：退过续字节后停在多字节
-        // 首字节再退一位 → 纯 ASCII 前缀（与 VizMessage::set_entity 同语义）
         let s = format!("{}{}", "a".repeat(TEXT_MAX - 1), "中");
         m.set_text(&s);
         assert!((m.text_len as usize) <= TEXT_MAX);

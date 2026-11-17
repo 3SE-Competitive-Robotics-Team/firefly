@@ -61,7 +61,6 @@ fn mapping_timers_are_independent_and_keep_their_phase() {
     assert!(timer_due(&mut fading, FADING_PERIOD, now));
     assert_eq!(fading, start + Duration::from_secs(1));
 
-    // A delayed callback skips missed ticks without permanently shifting the cadence.
     let delayed = start + Duration::from_millis(1555);
     assert!(timer_due(&mut fading, FADING_PERIOD, delayed));
     assert_eq!(fading, start + Duration::from_secs(2));
@@ -125,8 +124,6 @@ fn ground_depth_does_not_observe_air_above_the_camera() {
     let source = mapping.build(0.4).unwrap();
     let options = mapping.depth;
     let mut fusion = DepthFusion::new(&source, options, 0.4).unwrap();
-    // A level vehicle above a perfectly measured plane, using the deployed rig.
-    // Returning ground rays cannot certify air above their camera origin.
     let body = Isometry3::translation(0.0177, -0.0071, 0.9888);
     let camera = body * options.extrinsic().unwrap();
     let [fx, fy, cx, cy] = options.intrinsics;
@@ -166,7 +163,6 @@ fn ground_depth_does_not_observe_air_above_the_camera() {
     let snapshot = fusion.snapshot().unwrap().unwrap();
     assert!(snapshot.observed.is_free(camera.translation.vector));
     assert!(snapshot.observed.is_free(Vector3::new(0.5, -0.0071, 0.8)));
-    // This crosses the same 1.0 m voxel boundary as the stalled flight's climb.
     let above = Vector3::new(0.0454, -0.0075, 1.0011);
     assert!(!snapshot.observed.is_free(above));
     assert_eq!(fusion.map.inflated_occupancy_at(above), 0);
@@ -206,8 +202,6 @@ fn full_depth_to_collision_path_preserves_native_inflation_and_clears_obstacles(
     assert!(input.ready(&nav, now, Duration::from_secs(1)));
     input.apply(&mut collision, &nav, true).unwrap();
     assert!(collision.is_occupied_inflated(Vector3::new(0.125, 0.125, 0.625)));
-    // Every planning voxel agrees with the native inflated grid: no second inflation,
-    // no axis/layout conversion error, no extra voxel from floating-boundary rounding.
     for x in 0..collision.dims()[0] {
         for y in 0..collision.dims()[1] {
             for z in 0..collision.dims()[2] {
@@ -283,7 +277,6 @@ fn local_map_requires_exact_coverage() {
         .integrate(frame(1.1, 500, now), Isometry3::identity(), 1.1)
         .unwrap();
     let mut snapshot = fusion.snapshot().unwrap().unwrap();
-    // Partial depth-map coverage must not authorize an uncovered planning window.
     snapshot.bounds.max[0] = 0.5;
     let mut input = MapInput::default();
     let mut collision = collision_grid(&source()).unwrap();
@@ -307,7 +300,6 @@ fn calibration_errors_are_rejected_before_starting_workers() {
 
 #[test]
 fn depth_uses_body_odometry_and_camera_extrinsics_in_order() {
-    // Camera +Z becomes body +X, then body yaw rotates it into odom +Y.
     let mut options = options();
     options.translation = [0.25, 0., 0.];
     options.rotation = [

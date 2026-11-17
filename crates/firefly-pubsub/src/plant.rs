@@ -1,14 +1,10 @@
 //! 被控对象消息：状态（`Firefly/PlantState`，200Hz）与机体/执行器描述
 //! （`Firefly/Airframe`，1Hz 电平）。
 //!
-//! 这两条话题是**被控对象属性**的唯一来源：质量/惯量/气动阻尼来自物理模型，
-//! 旋翼位置/旋向/单电机推力上限/反扭矩系数来自机体布局——飞控订阅后装配
-//! [`firefly-flight`] 的参数，不另抄一份（改几何即改被控对象，无第二处同步）。
-//! `#[repr(C)]` 定长结构，满足 `ZeroCopySend` 约束；trace 上下文在 User Header。
+//! 机体参数由被控对象统一发布，飞控订阅后装配控制器。
 
 use iceoryx2::prelude::*;
 
-/// 被控对象状态话题（sim → 飞控）。
 pub const PLANT_STATE_TOPIC: &str = "Firefly/PlantState";
 /// 机体/执行器描述话题（sim → 飞控，持续重发，晚订阅必收）。
 pub const AIRFRAME_TOPIC: &str = "Firefly/Airframe";
@@ -21,7 +17,6 @@ pub const AIRFRAME_BUFFER_SIZE: usize = 4;
 /// 被控对象状态（真值）：位置/速度世界系，姿态为**机体→世界** Hamilton
 /// 四元数 `[x,y,z,w]`（与 [`firefly_flight::QuadState`] 同约定），角速度机体系。
 ///
-/// ⚠️ 与 [`crate::odom::OdomMessage`] 的 JPL `q_GtoI`（估计姿态）**不同约定**：
 /// 本消息仅供评测与可视化，禁止用于控制、初始化或健康判据。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
@@ -69,9 +64,6 @@ impl Default for PlantStateMessage {
     }
 }
 
-/// 机体/执行器描述：刚体属性（质量/惯量/阻尼）+ 执行器属性（旋翼几何/旋向/
-/// 单电机推力上限/反扭矩系数）。
-///
 /// 惯量是**机体系**对角元（物理模型若以主轴系给出，发布端须先转回机体系）。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
@@ -132,8 +124,6 @@ mod tests {
     #[test]
     fn airframe_message_is_plain_old_data() {
         let m = AirframeMessage::default();
-        // 7 × f64（timestamp + 质量 + 惯量 3 + 阻尼 2）+ 12 × f64（旋翼位置）
-        // + 4 × f64（旋向）+ 2 × f64（推力上限 + 反扭矩系数）= 25 × 8
         assert_eq!(std::mem::size_of::<AirframeMessage>(), 200);
         assert!(m.rotor_spins.iter().all(|s| (*s - 1.0).abs() < 1e-12));
     }

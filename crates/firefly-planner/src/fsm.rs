@@ -14,7 +14,6 @@ pub enum ExecState {
     EmergencyStop,
 }
 
-// 各事件标志可同时成立，不承担状态编码。
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Default)]
 pub struct TickReport {
@@ -25,7 +24,6 @@ pub struct TickReport {
     pub ground_height: Option<f64>,
 }
 
-// 保留上游彼此独立的输入和 fail-safe 标志，执行状态由 ExecState 唯一编码。
 #[allow(clippy::struct_excessive_bools)]
 pub struct ReplanFsm {
     pub(crate) generation: u64,
@@ -439,7 +437,6 @@ mod tests {
     #[test]
     fn first_generation_retries_ten_times_then_uses_random_initialization() {
         let mut fsm = fsm();
-        // 固定起点与对端重合，任何候选都无法满足集群后检查。
         let endpoint = Endpoint {
             position: measured().position.coords,
             velocity: Vector3::zeros(),

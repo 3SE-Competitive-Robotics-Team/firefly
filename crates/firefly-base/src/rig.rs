@@ -142,7 +142,6 @@ mod tests {
         let r = cam_axes_in_body();
         assert!((r.transpose() * r - Matrix3::identity()).norm() < 1e-12);
         assert!((r.determinant() - 1.0).abs() < 1e-12);
-        // 光轴（−z 列）应指向机头并下倾
         let view = -r.column(2);
         assert!(view.x > 0.9, "光轴须指向前方: {view}");
         assert!((view.z + DOWNTILT_DEG.to_radians().sin()).abs() < 1e-12);

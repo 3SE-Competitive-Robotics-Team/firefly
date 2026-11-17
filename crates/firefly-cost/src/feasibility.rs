@@ -151,18 +151,14 @@ mod tests {
     fn feasibility_cost_zero_and_positive() {
         let minco = test_minco();
         let traj = minco.solve().unwrap();
-        // 无限限制 → 零代价
         assert_eq!(FeasibilityPenalty::new(1e9, 1e9, 1e9).evaluate(&traj), 0.0);
-        // 紧限制 → 正代价
         assert!(FeasibilityPenalty::new(0.1, 0.1, 0.1).evaluate(&traj) > 0.0);
     }
     #[test]
     fn jerk_limit_zero_and_positive() {
         let minco = test_minco();
         let traj = minco.solve().unwrap();
-        // jerk 限制极大(V/A 松弛)→ jerk 项零贡献
         assert_eq!(FeasibilityPenalty::new(1e9, 1e9, 1e9).evaluate(&traj), 0.0);
-        // 紧 jerk 限制 → 正代价
         assert!(FeasibilityPenalty::new(1e9, 1e9, 0.1).evaluate(&traj) > 0.0);
     }
 }

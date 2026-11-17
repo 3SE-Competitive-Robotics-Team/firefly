@@ -1,4 +1,3 @@
-// Nonlinear factor Jacobian checks corresponding to upstream test_nfr.cpp.
 use firefly_basalt::imu::imu_types::PoseState;
 use firefly_basalt::utils::nfr::{abs_position_error, rel_pose_error, roll_pitch_error, yaw_error};
 use firefly_basalt::utils::sophus_utils::se3_expd;

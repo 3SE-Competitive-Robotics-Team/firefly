@@ -152,15 +152,11 @@ mod tests {
     fn export_map_file_voxelizes_obstacles() {
         let scene = sample_scene();
         let map = scene.to_map_file().unwrap();
-        // box 中心被占据
         let grid = map.to_grid_map(0.0).unwrap();
         assert!(grid.is_occupied(Vector3::new(2.0, 2.0, 1.0)));
-        // 起点不被占据
         assert!(!grid.is_occupied(Vector3::new(0.5, 0.5, 0.5)));
-        // 球内体素中心（球心 x=5.0 恰在窗口右界外，体素被 clamp 截断）
         assert!(grid.is_occupied(Vector3::new(4.75, 2.0, 1.0)));
         assert_ne!(map.occupied, [] as [[f64; 3]; 0]);
-        // 占据坐标唯一。
         let mut dedup = map.occupied.clone();
         dedup.sort_by(|a, b| a.partial_cmp(b).unwrap());
         dedup.dedup();
@@ -193,7 +189,6 @@ mod tests {
     fn voxel_state_unknown_by_default() {
         let scene = sample_scene();
         let grid = scene.to_map_file().unwrap().to_grid_map(0.0).unwrap();
-        // 未观测体素在规划查询中按自由处理。
         let idx = grid.index_of(Vector3::new(4.5, 4.5, 0.5)).unwrap();
         assert_eq!(grid.state(idx), VoxelState::Free);
     }

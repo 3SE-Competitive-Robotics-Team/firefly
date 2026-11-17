@@ -218,7 +218,6 @@ mod tests {
         assert_eq!(magic, DESCRIPTORS_MAGIC_V2);
         assert_eq!(flags, HAS_FS_HS);
         assert_eq!(total, raw.len());
-        // HIL：接口 9 + 两个端点 14 = 23 字节，共 3 个描述符。
         assert_eq!(total, DESCRIPTORS_HEAD + 23 + 23);
         assert_eq!(fs, 3);
         assert_eq!(hs, 3);

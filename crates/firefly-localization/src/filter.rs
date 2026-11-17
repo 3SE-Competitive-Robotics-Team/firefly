@@ -10,10 +10,7 @@ use nalgebra::{Matrix4, Matrix6, Vector6};
 
 use firefly_base::stats::chi2_95;
 
-/// 单源门控画像：同一信任等级的观测共用一套门限（对照 VINS-Fusion
-/// `findConnection` 的外生验证定信任：特征验证过的边走宽门，几何混叠
-/// 风险高的边走紧门；画像只描述信任，不携带状态，可 `Copy` 按值传递）。
-/// 新息门定接受，修正限幅定单步注入量（防跳变 backstop，非接受门）。
+/// 新息门决定接受资格，修正限幅限制单步注入量。
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GateProfile {
@@ -28,7 +25,6 @@ pub struct GateProfile {
 }
 
 impl GateProfile {
-    /// 保守门限：限制新息与单步注入；缺省配置使用此档。
     #[must_use]
     pub fn tight() -> Self {
         Self {
@@ -53,13 +49,11 @@ impl GateProfile {
 }
 
 impl Default for GateProfile {
-    /// 缺省紧门（保守：未知来源按不可信处理）。
     fn default() -> Self {
         Self::tight()
     }
 }
 
-/// 融合参数。
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FusionOptions {
@@ -79,9 +73,7 @@ pub struct FusionOptions {
     /// `chi2` 阈值乘子（对照 `UpdaterOptions::chi2_multipler`；取 1 即
     /// `chi2_95` 原教旨名义 5% 误拒率，乘子下调等价于收紧置信度）。
     pub chi2_multiplier: f64,
-    /// 最小内点率。
     pub min_inlier_ratio: f64,
-    /// 最小内点数。
     pub min_num_inliers: usize,
     /// 最大观测误差；视觉观测为平均重投影误差，单位像素。
     pub max_registration_error: f64,
@@ -127,23 +119,30 @@ impl Default for FusionOptions {
     }
 }
 
-/// 门控结果。
 #[derive(Debug, Clone)]
 pub enum RelocGate {
-    /// 接受，已融合。
     Accepted {
         chi2: f64,
         threshold: f64,
         delta: Vector6<f64>,
     },
     /// 观测质量拒绝（收敛/内点/误差）。
-    RejectedPrecheck { reason: &'static str },
-    /// `chi2` 拒绝。
-    RejectedChi2 { chi2: f64, threshold: f64 },
+    RejectedPrecheck {
+        reason: &'static str,
+    },
+    RejectedChi2 {
+        chi2: f64,
+        threshold: f64,
+    },
     /// 新息超限（局部跟踪档：平移/旋转跳变过大，疑似别名误锁）。
-    RejectedInnovation { trans: f64, rot_deg: f64 },
+    RejectedInnovation {
+        trans: f64,
+        rot_deg: f64,
+    },
     /// 数值异常（`S` 不可逆等）。
-    RejectedNumerical { reason: &'static str },
+    RejectedNumerical {
+        reason: &'static str,
+    },
 }
 
 /// 单次视觉位姿观测：地图位姿、body 右扰动信息与质量字段。
@@ -154,17 +153,14 @@ pub struct Observation {
     pub t_global: Matrix4<f64>,
     /// body 右扰动信息矩阵，顺序 `[rot, trans]`；观测噪声 `R = h⁻¹`。
     pub h: Matrix6<f64>,
-    /// 内点数。
     pub num_inliers: usize,
     /// 总点数（内点率分母；未知传 0 跳过比率门）。
     pub total_points: usize,
     /// 平均重投影误差，单位像素。
     pub error: f64,
-    /// 是否收敛。
     pub converged: bool,
 }
 
-/// 融合滤波器：维护 `T_drift` 与 `P`。
 #[derive(Debug, Clone)]
 pub struct FusionFilter {
     /// `T_drift = T_map_body · T_odom_body⁻¹`；初始值由部署先验指定。
@@ -180,7 +176,6 @@ pub struct FusionFilter {
 }
 
 impl FusionFilter {
-    /// 新建：单位 map←odom，协方差由 `p_init_rot/pos` 指定。
     #[must_use]
     pub fn new(options: FusionOptions) -> Self {
         let mut p = Matrix6::zeros();
@@ -201,25 +196,21 @@ impl FusionFilter {
         }
     }
 
-    /// 默认参数构造（双画像皆紧门；宽松的视觉画像须由配置显式给出）。
     #[must_use]
     pub fn with_default() -> Self {
         Self::new(FusionOptions::default())
     }
 
-    /// 访问漂移。
     #[must_use]
     pub fn drift(&self) -> &Matrix4<f64> {
         &self.t_drift
     }
 
-    /// 访问协方差。
     #[must_use]
     pub fn covariance(&self) -> &Matrix6<f64> {
         &self.p
     }
 
-    /// 连续拒收计数（诊断用）。
     #[must_use]
     pub const fn consecutive_rejects(&self) -> usize {
         self.consecutive_rejects
@@ -232,7 +223,6 @@ impl FusionFilter {
         let dist = if let Some(last) = &self.last_vio {
             let d = t_vio.fixed_view::<3, 1>(0, 3) - last.fixed_view::<3, 1>(0, 3);
             let dist = d.norm();
-            // 非有限位移不参与协方差扩散。
             if dist.is_finite() { dist } else { 0.0 }
         } else {
             self.last_vio = Some(*t_vio);
@@ -247,9 +237,7 @@ impl FusionFilter {
                 self.options.process_noise_pos + self.options.process_noise_pos_per_m * dist;
         }
         self.p += q;
-        // 数值防护：保持对称
         self.p = (self.p + self.p.transpose()) * 0.5;
-        // 平移协方差下限见 `p_min_pos`。
         for i in 3..6 {
             if self.p[(i, i)] < self.options.p_min_pos {
                 self.p[(i, i)] = self.options.p_min_pos;
@@ -266,7 +254,6 @@ impl FusionFilter {
         self.update_inner(t_vio, obs, &profile)
     }
 
-    /// 观测质量、误差态更新与协方差重置共用的内核。
     #[allow(clippy::too_many_lines)]
     #[fastrace::trace]
     fn update_inner(
@@ -322,7 +309,6 @@ impl FusionFilter {
         let error = drift.inverse().matrix() * observed_drift.matrix();
         let z = se3_log(&error);
 
-        // 新息限幅先于 chi2 检验，拒绝超过入口画像门限的跳变。
         let innov_rot = z.fixed_rows::<3>(0).norm();
         let innov_trans = z.fixed_rows::<3>(3).norm();
         if innov_trans > profile.max_innovation_trans || innov_rot > profile.max_innovation_rot {
@@ -360,7 +346,6 @@ impl FusionFilter {
             fallback * self.r_scale
         };
 
-        // R 下限按离线标定修正噪声设置，限制观测信息矩阵的置信度。
         for i in 0..3 {
             if r[(i, i)] < self.options.r_floor_rot {
                 r[(i, i)] = self.options.r_floor_rot;
@@ -392,7 +377,6 @@ impl FusionFilter {
             self.consecutive_rejects += 1;
             if self.consecutive_rejects >= self.options.auto_scale_trigger {
                 self.r_scale *= self.options.auto_scale_factor;
-                // 上限 16 倍，避免发散
                 if self.r_scale > 16.0 {
                     self.r_scale = 16.0;
                 }
@@ -404,14 +388,12 @@ impl FusionFilter {
             return RelocGate::RejectedChi2 { chi2, threshold };
         }
 
-        // 4. 通过：Joseph 更新，限幅后注入名义量
         self.consecutive_rejects = 0;
         self.r_scale = 1.0;
 
         let mut k = self.p * s_inv;
         let mut delta = k * z;
 
-        // 限幅（按入口画像）：旋转与平移分别截断，只防单步跳变，不做接受门
         let rot_norm = delta.fixed_rows::<3>(0).norm();
         if rot_norm > profile.max_correction_rot && rot_norm > 1e-12 {
             let scale = profile.max_correction_rot / rot_norm;
@@ -455,7 +437,7 @@ impl FusionFilter {
     ///
     /// # Panics
     ///
-    /// 观测协方差与其回退对角阵均不可逆时（回退阵对角为正，实践中不发生）。
+    /// 观测协方差与其回退对角阵均不可逆时。
     #[fastrace::trace]
     pub fn update_with_observation(
         &mut self,
@@ -477,7 +459,6 @@ impl FusionFilter {
             for i in 3..6 {
                 fb[(i, i)] = self.options.fallback_noise_pos;
             }
-            // 对角阵求逆必成功（`fallback_noise_*` 为正）；`expect` 仅作不变量断言。
             fb.try_inverse()
                 .expect("fallback 对角信息阵必须可逆（fallback_noise_* 为正）")
         });
@@ -496,7 +477,6 @@ impl FusionFilter {
         )
     }
 
-    /// 由 `VIO` 位姿得矫正后全局位姿。
     #[must_use]
     pub fn corrected_pose(&self, t_vio: &Matrix4<f64>) -> Matrix4<f64> {
         self.t_drift * *t_vio
@@ -517,7 +497,6 @@ impl FusionFilter {
         Ok(())
     }
 
-    /// 重置为初值。
     pub fn reset(&mut self) {
         self.t_drift = self.initial_drift;
         let mut p = Matrix6::zeros();
@@ -546,7 +525,6 @@ mod tests {
         se3_exp(&a)
     }
 
-    /// 测试观测包（`num/total/err/conv` 取融合典型值，调用方按需覆写字段）。
     fn obs(t_global: &Matrix4<f64>, h: &Matrix6<f64>) -> Observation {
         Observation {
             t_global: *t_global,
@@ -625,7 +603,6 @@ mod tests {
 
     #[test]
     fn predict_enforces_p_floor() {
-        // 高置信更新后，预测将平移协方差恢复到设定下限。
         let mut f = FusionFilter::with_default();
         let t_vio = Matrix4::identity();
         f.predict(&t_vio);
@@ -635,7 +612,6 @@ mod tests {
         assert!(f.covariance()[(3, 3)] < 0.25);
         f.predict(&t_vio);
         assert!((f.covariance()[(3, 3)] - 0.25).abs() < 1e-9);
-        // 旋转不限下限（转角漂移小，保持收敛）。
         assert!(f.covariance()[(0, 0)] < 0.01);
     }
 
@@ -661,12 +637,10 @@ mod tests {
         let mut f = FusionFilter::new(opts);
         f.predict(&Matrix4::identity());
         f.predict(&pose(Vector3::new(10.0, 0.0, 0.0), 0.0));
-        // P_trans = p_init(0.01) + 0.04×10m
         let p = f.covariance()[(3, 3)];
         assert!((p - 0.41).abs() < 1e-9);
     }
 
-    /// 远端悬停时 VIO 位姿存在平移偏差；已通过特征验证的视觉观测应被接受并完整融合。
     #[test]
     fn replay_far_end_hover_accepts() {
         use firefly_pubsub::vision::{OBS_SOURCE_VISUAL, PoseObservation};
@@ -701,7 +675,6 @@ mod tests {
             error: 0.1,
             converged: true,
         };
-        // 预测位姿 = 未修正的 VIO 末端（x=20），观测 x=22.3，新息 2.3m
         let t_vio = pose(Vector3::new(20.0, 0.0, 0.0), 0.0);
         let g = f.update_with_observation(&t_vio, &obs);
         assert!(matches!(g, RelocGate::Accepted { .. }));
@@ -709,7 +682,6 @@ mod tests {
             .corrected_pose(&t_vio)
             .fixed_view::<3, 1>(0, 3)
             .into_owned();
-        // K·z≈2.19m 全量注入：矫正后 x ∈ (22.1, 22.31)
         assert!(trans.x > 22.1 && trans.x < 22.31);
     }
 
@@ -734,7 +706,6 @@ mod tests {
         let mut f = FusionFilter::with_default();
         let t_vio = Matrix4::identity();
         f.predict(&t_vio);
-        // 5m 跳变（别名误锁形态）：新息门先于 chi2 拒收
         let t_observed = pose(Vector3::new(5.0, 0.0, 0.0), 0.0);
         let h = Matrix6::identity() * 1000.0;
         let g = f.update(&t_vio, &obs(&t_observed, &h));
@@ -756,12 +727,10 @@ mod tests {
     fn chi2_rejects_confident_but_wrong() {
         let mut f = FusionFilter::new(low_floor_opts());
         let t_vio = Matrix4::identity();
-        // 先接受一次高置信真值，把 P 收敛到 R 量级（chi2 能算数的条件）
         f.predict(&t_vio);
         let h_tight = Matrix6::identity() * 1000.0;
         let g0 = f.update(&t_vio, &obs(&Matrix4::identity(), &h_tight));
         assert!(matches!(g0, RelocGate::Accepted { .. }));
-        // 0.25m 偏差（新息门内）+ 高置信：S≈2.6e-3，chi2≈24 > 12.6，拒收
         f.predict(&t_vio);
         let t_observed = pose(Vector3::new(0.25, 0.0, 0.0), 0.0);
         let g = f.update(&t_vio, &obs(&t_observed, &h_tight));
@@ -774,17 +743,14 @@ mod tests {
         let mut f = FusionFilter::with_default();
         let t_vio = Matrix4::identity();
         f.predict(&t_vio);
-        // VIO 漂 0.3m，视觉定位 给出真值（0.3m 观测）
         let t_observed = pose(Vector3::new(0.3, 0.0, 0.0), 0.0);
         let mut h = Matrix6::identity();
-        // 构造信息使 R≈0.04（与 fallback 一致），保证 chi2 通过
         for i in 0..6 {
             h[(i, i)] = 25.0;
         }
         let g = f.update(&t_vio, &obs(&t_observed, &h));
         assert!(matches!(g, RelocGate::Accepted { .. }));
         let t_corr = f.corrected_pose(&t_vio);
-        // 矫正后应向 0.3m 靠拢（非 100% 因 K<1）
         let trans = t_corr.fixed_view::<3, 1>(0, 3).into_owned();
         assert!(trans.x > 0.05 && trans.x < 0.3);
     }
@@ -870,7 +836,6 @@ mod tests {
         let mut f = FusionFilter::with_default();
         let t_vio = Matrix4::identity();
         f.predict(&t_vio);
-        // R=0.04（与视觉镜像测试同等置信）：chi2≈5 可过，新息 0.5 > 0.3 拒收
         let t_observed = pose(Vector3::new(0.5, 0.0, 0.0), 0.0);
         let h = Matrix6::identity() * 25.0;
         let g = f.update(&t_vio, &obs(&t_observed, &h));
@@ -882,19 +847,16 @@ mod tests {
     fn auto_scale_on_consecutive_chi2() {
         let mut f = FusionFilter::new(low_floor_opts());
         let t_vio = Matrix4::identity();
-        // 收敛 P（同 chi2_rejects_confident_but_wrong 前置）
         f.predict(&t_vio);
         let h_tight = Matrix6::identity() * 1000.0;
         let g0 = f.update(&t_vio, &obs(&Matrix4::identity(), &h_tight));
         assert!(matches!(g0, RelocGate::Accepted { .. }));
-        // 新息门内 + 高置信 + 0.25m 偏差 → 连续 chi2 拒收 → 放大 R
         let t_observed = pose(Vector3::new(0.25, 0.0, 0.0), 0.0);
         for _ in 0..3 {
             f.predict(&t_vio);
             let _ = f.update(&t_vio, &obs(&t_observed, &h_tight));
         }
         assert!(f.r_scale > 1.0);
-        // 一次通过后复位
         let t_observed_ok = Matrix4::identity();
         let h_ok = Matrix6::identity() * 10.0;
         f.predict(&t_vio);
@@ -917,7 +879,6 @@ mod tests {
         let mut f = FusionFilter::new(opts);
         let t_vio = Matrix4::identity();
         f.predict(&t_vio);
-        // 新息门内的高置信观测仍会按入口画像限制旋转和平移修正幅度。
         let t_observed = pose(Vector3::new(0.25, 0.0, 0.0), 4.0);
         let h = Matrix6::identity() * 1.0e6; // R→下限，K≈0.7/0.9
         let g = f.update(&t_vio, &obs(&t_observed, &h));

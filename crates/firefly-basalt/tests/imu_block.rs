@@ -103,7 +103,6 @@ fn compare_normal_equations<S: BasaltScalar>(
     }
 }
 
-// Keep one complete source fixture scenario and all coupled outputs together.
 #[allow(clippy::too_many_lines)]
 fn reference<S: BasaltScalar>(fixture: &Value, tolerance: f64) {
     let v = |x, y, z| {

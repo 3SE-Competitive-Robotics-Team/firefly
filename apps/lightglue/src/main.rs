@@ -24,7 +24,6 @@ use ort::session::{IoBinding, Session};
 use ort::value::Tensor;
 use std::path::PathBuf;
 
-/// 缺省权重：按安装布局解析。
 fn default_model() -> PathBuf {
     firefly_config::paths::models("lightglue-aliked-k512.onnx")
 }
@@ -33,17 +32,14 @@ const WIDTH: i64 = 320;
 const HEIGHT: i64 = 240;
 /// 库图查询半径（米，VIO 先验周围）。
 const QUERY_RADIUS: f64 = 3.0;
-/// 单次查询候选帧数：拼多帧对应破平面退化（单帧共面时 `PnP` 有翻转二义性）。
 const QUERY_TOPK: usize = 3;
 /// 匹配分数阈值（图内建 0.1 过滤，此处再收紧）。
 const SCORE_THRESHOLD: f32 = 0.2;
 /// 候选帧航向门限（度）：先验机头方向与库图帧机头方向的夹角超过此值的帧剔除。
-/// 同一位置可能采了多个朝向的关键帧，只按距离选会挑到背/侧视帧而匹配失败。
 const MAX_HEADING_DEG: f64 = 60.0;
 /// odom 先验新鲜度（秒），超时跳过本次查询。
 const ODOM_FRESH_TIMEOUT: f64 = 1.0;
 
-/// 解析模型、显式离线地图与应用配置。
 fn parse_args() -> Result<(PathBuf, Option<PathBuf>, PathBuf), String> {
     let mut it = std::env::args().skip(1);
     let mut model = default_model();
@@ -71,7 +67,6 @@ fn parse_args() -> Result<(PathBuf, Option<PathBuf>, PathBuf), String> {
     Ok((model, map, config))
 }
 
-/// 加载 ONNX 会话；六条算子线程，空闲时休眠。
 fn load_session(model: &std::path::Path) -> Result<Session, Box<dyn std::error::Error>> {
     if !model.is_file() {
         return Err(format!(
@@ -129,7 +124,6 @@ impl Default for Options {
     }
 }
 
-/// 冒烟推理：零特征自匹配，校验输出形状（`[1,512]` 静态）。
 fn smoke_inference(session: &mut Session) -> Result<(), Box<dyn std::error::Error>> {
     let zeros = |n: usize| {
         Tensor::from_array((
@@ -158,8 +152,6 @@ fn smoke_inference(session: &mut Session) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-/// 主循环：特征事件唤醒 → 取最新特征 + 先验 odom → 查库匹配 + `PnP` → 发观测。
-///
 /// 查询先验固定为地图系校正里程计，局部里程计不能直接查询地图位置。
 #[allow(clippy::too_many_lines)]
 fn run_loop(
@@ -208,10 +200,7 @@ fn run_loop(
             format!("创建推理绑定失败: {e}"),
         )
     })?;
-    // 特征发布端带 notify（`aliked` 为 `with_topic_notify`）：特征到即醒；
-    // 心跳仅兜底无事件时的 odom 缓存更新与断流自愈。
     let mut latest_corrected: Option<OdomMessage> = None;
-    // 查询节流独立于特征发布，消费最新图像以限制等待时间。
     let mut last_map_query = f64::NEG_INFINITY;
     let on_event = |attachment_id: WaitSetAttachmentId<ipc::Service>| {
         let root = fastrace::Span::root("lightglue", fastrace::prelude::SpanContext::random());
@@ -243,8 +232,6 @@ fn run_loop(
             && feat.timestamp - last_map_query >= options.query_period
         {
             last_map_query = feat.timestamp;
-            // 特征时间戳即 sim 时钟；查询前后各 pump 一次（匹配阻塞下积压排空）。
-            // 记录查询耗时；特征时间戳用于 sim 时钟，到达滞后由定位侧记录。
             firefly_observability::set_sim_time(feat.timestamp);
             firefly_observability::pump_log_ipc(&log_ipc);
             let t_query = std::time::Instant::now();
@@ -311,14 +298,6 @@ fn run_loop(
     Ok(())
 }
 
-/// 推理缓冲与 io-binding：**一次分配，跨查询/跨候选复用**。
-///
-/// `Session::run(inputs)` 每次调用都会把输入拷进会话缓冲、并新建输出张量；
-/// `IoBinding` 让输入在绑定时登记、输出绑定到预分配张量，之后每次 `run_binding`
-/// 复用同一批内存（对照 ort 文档：「condition tensor is only copied to the device
-/// once instead of 20 times」）。输入张量本体存在这里，用
-/// [`Tensor::try_extract_tensor_mut`] 直接写进它的内存，避免每候选一次
-/// `Vec` 分配 + `Tensor::from_array` 拷贝。
 struct MatchBindings {
     binding: IoBinding,
     /// 查询侧关键点 `[1, NUM_POINTS, 2]`（每查询重填）。
@@ -334,7 +313,6 @@ struct MatchBindings {
 impl MatchBindings {
     fn new(session: &Session) -> Result<Self, Box<dyn std::error::Error>> {
         let mut binding = session.create_binding()?;
-        // 输出绑定到预分配张量，推理结果写回绑定内存。
         binding.bind_output(
             "matches0",
             Tensor::from_array(([1usize, NUM_POINTS], vec![0i64; NUM_POINTS]))?,
@@ -343,7 +321,6 @@ impl MatchBindings {
             "scores0",
             Tensor::from_array(([1usize, NUM_POINTS], vec![0f32; NUM_POINTS]))?,
         )?;
-        // 图像尺寸在整个会话内恒定，绑定一次即可。
         binding.bind_input(
             "s0",
             &Tensor::from_array(([1usize, 2], vec![WIDTH, HEIGHT]))?,
@@ -368,7 +345,6 @@ impl MatchBindings {
     }
 }
 
-/// 把查询侧特征写进已绑定张量并重新登记（查询侧每查询都变，必须重绑）。
 fn bind_query(
     bindings: &mut MatchBindings,
     feat: &FeatureMessage,
@@ -397,9 +373,7 @@ fn fill_feature_inputs<'a>(
     }
 }
 
-/// 外观匹配结果：查询索引、库图索引、分数。
 type FeatureMatches = Vec<(usize, usize, f32)>;
-/// 点的库图匹配结果：查询索引、库图点坐标、分数。
 type PointMatches = Vec<(usize, [f64; 3], f32)>;
 
 /// 外观对应保留两侧索引，深度缺失不能影响模型的输入与注意力计算。
@@ -453,8 +427,6 @@ fn match_points(
 }
 
 /// 候选库图帧：先验邻域内 + 航向接近，按距离升序取 `QUERY_TOPK`。
-///
-/// 航向 = 机体系 `+x` 在世界系的方向；同位置多朝向的关键帧只按距离会挑到背/侧视帧。
 fn candidates_by_heading(
     map: &VisionMap,
     t_body_prior: &nalgebra::Matrix4<f64>,
@@ -488,7 +460,6 @@ fn candidates_by_heading(
     scored.into_iter().map(|(i, _)| i).collect()
 }
 
-/// 单次查询：先验邻域多帧匹配拼对应 → `PnP` → 机体位姿观测。
 #[fastrace::trace]
 fn query_once(
     session: &mut Session,
@@ -512,8 +483,6 @@ fn query_once(
         log::info!("视觉查询拒绝 t={:.2}: no_candidates", feat.timestamp);
         return Ok(None);
     }
-    // 多帧拼对应：单帧共面时 PnP 有翻转二义性，多视角点集破退化。
-    // query 侧每查询填一次，库侧每候选填一次（都写进已绑定张量的内存）。
     bind_query(bindings, feat)?;
     // 同一像素只保留最高分的地图对应，避免跨库帧重复计算信息量。
     let mut best = vec![None::<([f64; 3], f32)>; NUM_POINTS];
@@ -727,7 +696,6 @@ mod tests {
         }
     }
 
-    /// 已知库帧提供独立地图位姿，匹配和 `PnP` 必须恢复它。
     #[test]
     #[ignore = "requires exported models and RMUC visual map"]
     #[allow(clippy::large_stack_arrays)]
@@ -786,13 +754,11 @@ mod tests {
         assert!(observation.error < 1.);
     }
 
-    /// 测试用权重路径：按安装布局解析；缺失时跳过（`models/` 已 ignore，CI 无权重）。
     fn test_model_path() -> Option<PathBuf> {
         let path = default_model();
         path.is_file().then_some(path)
     }
 
-    /// 端到端冒烟：权重缺失时跳过。
     #[test]
     fn onnx_smoke_or_skip() {
         let Some(path) = test_model_path() else {

@@ -8,19 +8,11 @@
 //! 偏航权重、逐轴速率限幅、前馈增益与限幅、`omega_command` 的偏航解耦均与 PX4 一致。
 //! 保持 NED 世界系 / FRD 机体系约定；输入/输出均为机体角速率。
 //!
-//! 不移植：`AttitudeControl()` / `~AttitudeControl()`——Rust 用 [`AttitudeControl::new`] / [`Default`] 构造、自动析构。
-//! 不移植：`setAttitudeSetpoint(..., const float dt = -1.f)` 的默认参数——Rust 无默认参数，
-//! 调用方显式传 `-1.0` 表示把参考模型重置到当前设定点。
-//! 不移植：文件内联的 `qmul` / `qinv` / `qzaxis` 包装——直接用 `nalgebra` 的 `*`、
-//! `inverse()` 与 [`quat_dcm_z`]。
-//!
 //! 辅助函数：`quat_canonical_px4` 与 `quat_from_two_vectors_px4` 分别复刻 PX4
 //! `Quatf::canonical()`（按首个非零分量定符号）与 `Quatf(v0, v1)`（反向平行时取正交轴
 //! 180° 旋转）。`types::quat_canonical` / `types::quat_from_two_vectors` 在 180° 边界上
 //! 分别退化为按标量符号/单位四元数，因此在本模块内私有补齐。
 
-// 字段名与 C++ 保持一致（含 `_` 前缀），并按要求使用 `types` 的 glob 导入。
-// `UnitQuaternion` 没有 `MulAssign`，四元数更新沿用 PX4 的 `q = q * dq` 赋值式。
 #![allow(
     clippy::assign_op_pattern,
     clippy::used_underscore_binding,
@@ -31,7 +23,6 @@ use nalgebra::Quaternion;
 
 use super::types::*;
 
-/// 四元数姿态控制器。
 #[derive(Clone, Copy, Debug)]
 pub struct AttitudeControl {
     /// 姿态 P 增益 [rad/s per rad]，偏航轴已补偿 `_yaw_w`。
@@ -41,13 +32,11 @@ pub struct AttitudeControl {
     /// 偏航权重 [0, 1]，压低偏航相对 roll/pitch 的优先级。
     _yaw_w: f32,
 
-    /// 参考模型跟踪的参考姿态。
     _q_ref: Quatf,
     /// 误差驱动的修正角速率（二阶状态）[rad/s]。
     _omega_correction: Vector3f,
     /// 解析前馈角速率 [rad/s]，不受前馈限幅。
     _omega_command: Vector3f,
-    /// 参考模型是否已初始化。
     _ref_initialized: bool,
 
     /// 参考模型自然频率 [rad/s]。
@@ -68,10 +57,6 @@ impl Default for AttitudeControl {
 }
 
 impl AttitudeControl {
-    /// 构造使用 PX4 默认参数的姿态控制器。
-    ///
-    /// 默认：增益与速率上限为零、偏航权重 0、参考模型频率 50 rad/s、
-    /// 前馈增益 1、前馈限幅 0（不限幅）、参考姿态为单位四元数。
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -98,7 +83,6 @@ impl AttitudeControl {
         self._proportional_gain = proportional_gain;
         self._yaw_w = constrain(yaw_weight, 0.0, 1.0);
 
-        // 补偿偏航权重对输出的缩放
         if self._yaw_w > 1e-4 {
             self._proportional_gain[2] /= self._yaw_w;
         }
@@ -120,7 +104,6 @@ impl AttitudeControl {
         self._ff_max = limit.max(0.0);
     }
 
-    /// 设置输出角速率上限 [rad/s]。
     pub fn set_rate_limit(&mut self, rate_limit: Vector3f) {
         self._rate_limit = rate_limit;
     }
@@ -136,7 +119,6 @@ impl AttitudeControl {
         if self._ref_initialized && dt > 0.0 {
             self.propagate_reference_model(qd_normalized, yawspeed_setpoint, dt);
         } else {
-            // 首次调用（或 dt 越界）：参考姿态直接对齐设定点
             self._q_ref = qd_normalized;
             self._omega_correction = Vector3f::zeros();
             self._omega_command = Vector3f::zeros();
@@ -158,29 +140,23 @@ impl AttitudeControl {
     /// 返回机体系角速率设定点 [rad/s]，供 [`super::rate_control::RateControl`] 跟踪。
     #[must_use]
     pub fn update(&self, q: Quatf) -> Vector3f {
-        // P 控制器始终跟踪参考模型姿态
         let mut qd = self._q_ref;
 
-        // 忽略偏航的降阶期望姿态，优先保证 roll/pitch
         let e_z = quat_dcm_z(q);
         let e_z_d = quat_dcm_z(qd);
         let mut qd_red = quat_from_two_vectors_px4(e_z, e_z_d);
 
         if quat_imag(qd_red)[0].abs() > (1.0 - 1e-5) || quat_imag(qd_red)[1].abs() > (1.0 - 1e-5) {
-            // 机体推力方向与期望完全相反：直接用完整期望姿态
             qd_red = qd;
         } else {
-            // 世界系中的倾斜误差四元数右乘到当前姿态
             qd_red = qd_red * q;
         }
 
         // qd = qd_red * qd_dyaw，其中 qd_dyaw = (cos(Δψ/2), 0, 0, sin(Δψ/2))
         let qd_dyaw = quat_canonical_px4(qd_red.inverse() * qd);
-        // acos/asin 的定义域保护
         let qd_dyaw_w = constrain(qd_dyaw.scalar(), -1.0, 1.0);
         let qd_dyaw_z = constrain(qd_dyaw.vector()[2], -1.0, 1.0);
 
-        // 偏航角按权重缩放后重组期望姿态
         qd = qd_red
             * Quatf::from_quaternion(Quaternion::new(
                 (self._yaw_w * qd_dyaw_w.acos()).cos(),
@@ -189,16 +165,12 @@ impl AttitudeControl {
                 (self._yaw_w * qd_dyaw_z.asin()).sin(),
             ));
 
-        // 四元数姿态控制律：qe 为 q 到 qd 的旋转
         let qe = quat_canonical_px4(q.inverse() * qd);
 
-        // 用 sin(α/2)·旋转轴 作为姿态误差，并处理四元数反极歧义
         let eq = 2.0 * quat_imag(qe);
 
-        // 计算角速率设定点
         let mut rate_setpoint = eq.emult(self._proportional_gain);
 
-        // 把参考系角速率映射到当前机体系
         let q_rel = q.inverse() * self._q_ref;
 
         // 解析角速率指令（手动/自动偏航）是设定点而非模型预测：以单位增益前馈，
@@ -216,7 +188,6 @@ impl AttitudeControl {
 
         rate_setpoint += omega_ff;
 
-        // 输出角速率限幅
         for i in 0..3 {
             rate_setpoint[i] =
                 constrain(rate_setpoint[i], -self._rate_limit[i], self._rate_limit[i]);
@@ -225,9 +196,6 @@ impl AttitudeControl {
         rate_setpoint
     }
 
-    /// 参考模型当前跟踪的姿态。
-    ///
-    /// C++ 返回 `const Quatf&`；`Quatf` 在 Rust 中是 `Copy`，按值返回。
     #[must_use]
     pub fn reference_attitude(&self) -> Quatf {
         self._q_ref
@@ -255,7 +223,6 @@ impl AttitudeControl {
         let q_err = quat_canonical_px4(q_ref_inv * qd);
         let e = 2.0 * quat_imag(q_err);
 
-        // exp(A·dt) 的分量
         let w_dt = self._omega_n * dt;
         let emt = (-w_dt).exp();
         let a = (1.0 + w_dt) * emt;
@@ -263,7 +230,6 @@ impl AttitudeControl {
         let gamma = self._kq * dt * emt;
         let delta = (1.0 - w_dt) * emt;
 
-        // 在切空间传播误差驱动修正（二阶状态）；delta_phi 为 [0, dt] 内角速率积分
         let delta_phi = (1.0 - a) * e + b * self._omega_correction + omega_command * dt;
         self._omega_correction = gamma * e + delta * self._omega_correction;
 
@@ -273,7 +239,6 @@ impl AttitudeControl {
             self._omega_correction -= self._omega_correction.dot(&yaw_axis_body) * yaw_axis_body;
         }
 
-        // 解析参考角速率单独保存，供 update 免除前馈限幅
         self._omega_command = omega_command;
 
         self._q_ref = quat_normalize(self._q_ref * quat_from_rotation_vector(delta_phi));
@@ -322,7 +287,6 @@ fn quat_from_two_vectors_px4(src: Vector3f, dst: Vector3f) -> Quatf {
         cr = src.cross(&axis);
         0.0
     } else {
-        // 常规情况：半程四元数解
         dt + (src.norm_squared() * dst.norm_squared()).sqrt()
     };
 
@@ -381,7 +345,6 @@ mod tests {
 
     #[test]
     fn yaw_weight_scaling() {
-        // 纯偏航设定点，偏航权重 0.4
         let yaw_gain = 2.8_f32;
         let yaw_sp = 0.1_f32;
         let pure_yaw_attitude = quat_from_rotation_vector(Vector3f::new(0.0, 0.0, yaw_sp));
@@ -393,13 +356,10 @@ mod tests {
 
         let rate_setpoint = attitude_control.update(Quatf::identity());
 
-        // roll/pitch 无输出
         assert_near(rate_setpoint[0], 0.0, 1e-6);
         assert_near(rate_setpoint[1], 0.0, 1e-6);
-        // 偏航误差 × 增益（已按 yaw_weight 预补偿）
         assert_near(rate_setpoint[2], yaw_sp * yaw_gain, 1e-4);
 
-        // 偏航权重为 0：无输出且无 NaN
         attitude_control.set_proportional_gain(Vector3f::new(6.5, 6.5, yaw_gain), 0.0);
         let rate_setpoint = attitude_control.update(Quatf::identity());
         assert_near(rate_setpoint.norm(), 0.0, 1e-9);
@@ -431,7 +391,6 @@ mod tests {
             attitude_control.update_reference(qd, 0.0, -1.0);
 
             let rate_setpoint = attitude_control.update(Quatf::identity());
-            // 误差四元数虚部为 +x（或 -x），输出滚转速率与旋转角同号
             assert_near(rate_setpoint[0], 2.0 * (angle / 2.0).sin(), 1e-5);
             assert_near(rate_setpoint[1], 0.0, 1e-6);
             assert_near(rate_setpoint[2], 0.0, 1e-6);
@@ -467,12 +426,9 @@ mod tests {
 
                 for step in (1..=100).rev() {
                     let rate_setpoint_new = attitude_control.update(state);
-                    // 用速率设定点直接旋转仿真状态
                     state = state * quat_from_rotation_vector(rate_setpoint_new);
-                    // 间歇性反极表示，验证不会反向绕远
                     state = Quatf::new_unchecked(-state.into_inner());
 
-                    // 误差与输出应逐步减小
                     if rate_setpoint_new.norm() >= rate_setpoint.norm() {
                         converged_at = step;
                         break;
@@ -498,7 +454,6 @@ mod tests {
             attitude_control.update_reference(q_d, 0.0, dt);
         }
 
-        // 车辆已在设定点：无位置误差，模型也不产生速率输出
         let rate_setpoint = attitude_control.update(q_d);
         assert_near(rate_setpoint.norm(), 0.0, 1e-3);
     }
@@ -514,7 +469,6 @@ mod tests {
             K_SETTLE_STEPS,
         );
 
-        // 在参考姿态处评估：P 项为零，只剩前馈
         let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         assert_near(rate_setpoint[0], omega, 1e-3);
         assert_near(rate_setpoint[1], 0.0, 1e-3);
@@ -605,12 +559,10 @@ mod tests {
             K_SETTLE_STEPS,
         );
 
-        // 增益 0：P 项为零时输出为零
         attitude_control.set_feed_forward_gain(0.0);
         let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         assert_near(rate_setpoint.norm(), 0.0, 1e-3);
 
-        // 恢复增益：参考模型状态保留，前馈立即恢复
         attitude_control.set_feed_forward_gain(1.0);
         let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         assert_near(rate_setpoint[0], omega, 1e-3);
@@ -620,7 +572,6 @@ mod tests {
 
     #[test]
     fn unlocked_yaw_does_not_feed_back_slaved_heading() {
-        // 手动偏航速率：设定航向跟随实测偏航快速推进，解析指令只有很小的滤波尾
         let ramp_rate = 0.8_f32;
         let commanded = 0.05_f32;
         let mut attitude_control = feedforward_controller();
@@ -632,7 +583,6 @@ mod tests {
         );
 
         let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
-        // 偏航前馈只跟踪解析指令，不锁存被测偏航
         assert_near(rate_setpoint[2], commanded, 1e-3);
         assert!(rate_setpoint[2].abs() < 0.2);
         assert_near(rate_setpoint[0], 0.0, 1e-3);
@@ -641,7 +591,6 @@ mod tests {
 
     #[test]
     fn locked_yaw_ramp_still_feeds_forward() {
-        // 真实偏航角目标、无解析角速率：参考模型必须对航向求导
         let omega = 0.5_f32;
         let mut attitude_control = feedforward_controller();
         ramp_setpoint(
@@ -674,7 +623,6 @@ mod tests {
         }
 
         let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
-        // 前馈是解析世界系偏航角速率在机体系的投影，不是被跟随的航向斜坡
         assert_near(rate_setpoint[0], -tilt.sin() * commanded, 1e-3);
         assert_near(rate_setpoint[1], 0.0, 1e-3);
         assert_near(rate_setpoint[2], tilt.cos() * commanded, 1e-3);
@@ -691,7 +639,6 @@ mod tests {
             K_SETTLE_STEPS,
         );
 
-        // 解析偏航速率绕过参考模型，以单位增益前馈
         attitude_control.set_feed_forward_gain(0.0);
         let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         assert_near(rate_setpoint[2], commanded, 1e-3);
@@ -712,7 +659,6 @@ mod tests {
         );
 
         let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
-        // 指令偏航不受前馈增益缩放
         assert_near(rate_setpoint[2], commanded, 1e-3);
         assert_near(rate_setpoint[0], 0.0, 1e-3);
         assert_near(rate_setpoint[1], 0.0, 1e-3);
@@ -731,7 +677,6 @@ mod tests {
         );
 
         let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
-        // 误差驱动预判按增益缩放，与解析指令不同
         assert_near(rate_setpoint[0], 0.1 * omega, 1e-3);
         assert_near(rate_setpoint[1], 0.0, 1e-3);
         assert_near(rate_setpoint[2], 0.0, 1e-3);
@@ -752,7 +697,6 @@ mod tests {
         let rate_setpoint = attitude_control.update(attitude_control.reference_attitude());
         assert_near(rate_setpoint[0], 0.2, 1e-3);
 
-        // 解析指令不受前馈限幅影响
         let mut attitude_control = feedforward_controller();
         attitude_control.set_feed_forward_limit(0.2);
         ramp_setpoint(
@@ -771,7 +715,6 @@ mod tests {
         let q_d = quat_from_rotation_vector(Vector3f::new(-0.3, 0.2, 0.4));
         attitude_control.update_reference(q_d, 0.0, -1.0);
 
-        // 常值设定点：参考模型无误差、保持不动
         for _ in 0..K_SETTLE_STEPS {
             attitude_control.update_reference(q_d, 0.0, K_DT);
         }

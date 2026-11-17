@@ -315,7 +315,6 @@ mod tests {
         let r = frames
             .reference(&reference, now, Duration::from_millis(500), dt)
             .unwrap();
-        // 1 + 2·0.5 + ½·3·0.25 = 2.375；2 + 3·0.5 = 3.5
         assert!((r.position.x - 2.375).abs() < 1e-6, "{:?}", r.position);
         assert!((r.velocity.x - 3.5).abs() < 1e-6, "{:?}", r.velocity);
         assert!(

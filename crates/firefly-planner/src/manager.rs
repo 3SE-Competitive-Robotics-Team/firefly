@@ -24,7 +24,6 @@ pub const DEFAULT_PLANNING_HORIZON: f64 = 6.0;
 /// 地面高度测量前视距离（米，官方 `measureGroundHeight` 的 `2.0/max_vel` 前方采样）。
 const GROUND_LOOKAHEAD_DIST: f64 = 2.0;
 
-/// 管理器行为参数。
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ManagerOptions {
@@ -49,7 +48,6 @@ impl Default for ManagerOptions {
     }
 }
 
-/// 执行中的局部轨迹（官方 `LocalTrajData`：轨迹 + 起始时刻 + 检查点）。
 #[derive(Debug, Clone)]
 pub struct LocalTraj {
     pub traj: Trajectory,
@@ -57,17 +55,12 @@ pub struct LocalTraj {
     pub yaw: Trajectory,
     /// 轨迹起始时刻（管理器时钟，秒）；检查点/监控的时间原点。
     pub start_time: f64,
-    /// 带时间戳检查点（官方 `PtsChk_t`，规划成功后生成一次）：执行期
-    /// 碰撞监控的扫描源。不变量：非空（采样退化的轨迹不入执行，
-    /// 见 [`PlannerManager::adopt_plan`]）。
+    /// 非空的执行期碰撞检查点；采样退化的轨迹不入执行。
     pub points_to_check: PointsToCheck,
-    /// 轨迹序号（官方 `LocalTrajData::traj_id`，见 `plan_container.hpp:36`）：
-    /// 由 [`PlannerManager::adopt_plan`] 入库时写入管理器计数器当前值；
-    /// 广播时随轨迹携带，接收方据此丢弃过期包。
+    /// 成功入库时递增；接收方据此丢弃过期轨迹。
     pub traj_id: u32,
 }
 
-/// 已登记的其他机轨迹（官方 `swarm_traj` 槽位元素）。
 #[derive(Debug, Clone)]
 pub(crate) struct SwarmTraj {
     pub(crate) traj: Trajectory,
@@ -79,8 +72,6 @@ pub(crate) struct SwarmTraj {
     pub(crate) des_clearance: f64,
 }
 
-/// 局部目标（官方 `getLocalTarget` 输出，`planner_manager.cpp:327`：位置 +
-/// 目标速度 + 是否触及全局终点）。
 pub(crate) struct Horizon {
     /// 局部目标位置（地图系，米）：全局轨迹上距当前位置 `planning_horizon`
     /// 的等时步进点，或全局终点。
@@ -102,9 +93,6 @@ impl Horizon {
     }
 }
 
-/// 全局轨迹与局部目标时间簿记（官方 `GlobalTrajData`，见
-/// `plan_container.hpp:20-31`）：MINCO 时间参数化轨迹 + 管理器时钟锚点 +
-/// 当前/上一局部目标对应的全局轨迹时间。
 #[derive(Clone)]
 pub(crate) struct GlobalTraj {
     /// MINCO 时间参数化轨迹（官方 `planGlobalTrajWaypoints` 产出）：
@@ -122,8 +110,6 @@ pub(crate) struct GlobalTraj {
 }
 
 impl GlobalTraj {
-    /// 官方 `setGlobalTraj`（`plan_container.hpp:62`）：锚定世界时并重置
-    /// 局部目标时间簿记（`glb = world_time`、`last = -1.0`）。
     fn new(traj: Trajectory, world_time: f64) -> Self {
         Self {
             traj,
@@ -200,8 +186,6 @@ impl PlannerManager {
             goal_yaw: self.goal_yaw,
         }
     }
-    /// 实际构造入口：给定已构建的 [`Planner`]（应用层负责地图来源）。
-    ///
     /// # Errors
     ///
     /// 任务航点不在地图内或全局轨迹构造失败。
@@ -222,10 +206,7 @@ impl PlannerManager {
             &global_path,
             max_vel,
         )?;
-        // 初始全局轨迹锚点取管理器时钟原点（0.0）：glb_t 簿记是相对游标，
-        // 与绝对时钟无关（官方 setGlobalTraj 以规划时刻锚定，此处等义）
         let global = GlobalTraj::new(global_traj, 0.0);
-        // drone_id ≤ 0（单机/0 号机）无需顺序起飞等待（官方 SEQUENTIAL_START 短路）
         let have_recv_pre_agent = planner.config().drone_id <= 0;
         Ok(Self {
             planner,
@@ -239,8 +220,6 @@ impl PlannerManager {
             touch_goal: false,
             replans: 0,
             swarm: Vec::new(),
-            // 官方 init：have_recv_pre_agent_ = false；drone_id ≤ 0 的检查恒
-            // 短路为真，直接置 true 等价
             have_recv_pre_agent,
             consecutive_failures: 0,
             motion_context: None,
@@ -255,7 +234,6 @@ impl PlannerManager {
         measured: Option<State>,
         goal: Vector3<f64>,
     ) -> Result<()> {
-        // 重复目标视为幂等操作，保留当前执行状态。
         if (goal - self.goal.coords).norm() < 1e-6 {
             return Ok(());
         }
@@ -272,10 +250,8 @@ impl PlannerManager {
             path_length(&global_path)
         );
         self.global_path = global_path;
-        // 官方 setGlobalTraj：全局轨迹重建即重置 glb_t 簿记（glb = now，last = -1）
         self.global = GlobalTraj::new(global_traj, now);
         self.goal = Point3::from(goal);
-        // 清除当前轨迹与到达标记，使下一 tick 为新目标执行初始规划。
         self.touch_goal = false;
         self.replans = 0;
         Ok(())
@@ -297,8 +273,6 @@ impl PlannerManager {
         Ok(())
     }
 
-    /// 只读地图访问。
-    /// 对照 FSM planFromGlobalTraj：同一状态调用内采用相同初始化模式。
     pub(crate) fn plan_from_global_traj(
         &mut self,
         now: f64,
@@ -313,7 +287,6 @@ impl PlannerManager {
         (0..trials).any(|_| self.call_rebound_replan(now, start, true, random))
     }
 
-    /// 对照 planFromLocalTraj：暖启动、确定性多项式、随机多项式。
     pub(crate) fn plan_from_local_traj(
         &mut self,
         now: f64,
@@ -441,23 +414,16 @@ impl PlannerManager {
         self.planner.map_ref()
     }
 
-    /// 可变地图访问（深度感知建图/动态障碍写入入口）。
     pub fn map_mut(&mut self) -> &mut GridMap {
         self.planner.map_mut()
     }
 
-    /// 本机编号（官方 `pp_.drone_id`，来自 [`crate::PlannerConfig::drone_id`]）。
     #[must_use]
     pub fn drone_id(&self) -> i32 {
         self.planner.config().drone_id
     }
 
-    /// 对外广播的期望净距（米，官方发包时 `MINCO_msg.des_clearance =
-    /// getSwarmClearance()`，见 `ego_replan_fsm.cpp:820`）：即本机
-    /// `optimization/swarm_clearance` 参数。对端收到后存入其
-    /// `swarm_traj[本机].des_clearance`，作检查阈值
-    /// `其对端 swarm_clearance + 本机 des_clearance` 的对端项（非对称：
-    /// 各机参数可不同）。
+    /// 对端检查时与其 `swarm_clearance` 相加的本机期望净距（米）。
     #[must_use]
     pub fn broadcast_des_clearance(&self) -> f64 {
         self.planner.config().swarm_clearance
@@ -470,14 +436,8 @@ impl PlannerManager {
         self.have_recv_pre_agent
     }
 
-    /// 登记其他机轨迹（单进程仿真下由外部注入；对照官方
-    /// `RecvBroadcastMINCOTrajCallback` 的存储段）：槽位按 `agent_id` 索引，
-    /// 重复登记以最新为准。`des_clearance` 为对端广播的期望净距——调用方
-    /// 应以对端管理器 `broadcast_des_clearance()` 的返回值传入（各机参数
-    /// 可不同；检查阈值 = 本机 `swarm_clearance + 对端 des_clearance`，
-    /// 见官方 `planner_manager.cpp:416`）。同时按官方条件推进顺序起飞就绪位——
-    /// `swarm_traj.size() >= drone_id` 且 `0..drone_id` 各槽位全部有效。
-    /// 自身槽位（`agent_id == drone_id`）拒收（官方 `recv_id == 自身`直接返回）。
+    /// 按 `agent_id` 更新对端轨迹；自身槽位拒收，前序机全部就绪后允许顺序起飞。
+    /// 间距门限为本机 `swarm_clearance` 与对端 `des_clearance` 之和。
     pub fn register_swarm_traj(
         &mut self,
         agent_id: usize,
@@ -496,7 +456,6 @@ impl PlannerManager {
             start_time,
             des_clearance,
         });
-        // 官方 have_recv_pre_agent_ 推进：一次性锁存，置位后不回退
         let need = usize::try_from(self.drone_id()).unwrap_or(usize::MAX);
         if !self.have_recv_pre_agent
             && need >= 1
@@ -513,7 +472,6 @@ impl PlannerManager {
         &self.global_path
     }
 
-    /// 可变规划器（队形/集群配置注入，测试与应用层装配用）。
     pub fn planner_mut(&mut self) -> &mut Planner {
         &mut self.planner
     }
@@ -528,22 +486,17 @@ impl PlannerManager {
         self.replans
     }
 
-    /// 当前执行的局部轨迹。
     #[must_use]
     pub fn local(&self) -> Option<&LocalTraj> {
         self.local.as_ref()
     }
 
-    /// 已入库轨迹序号（官方 `TrajContainer::setLocalTraj` 的 `traj_id++` 结果）：
-    /// 初始 `0` = 尚无可执行轨迹（官方 `traj_id <= 0` 哨兵，见
-    /// `ego_replan_fsm.cpp:307`）；此后每次成功入库新轨迹递增。广播新轨迹时
-    /// 随包携带，对端据此丢弃过期包。
+    /// 初始 0 表示尚无可执行轨迹；每次成功入库递增。
     #[must_use]
     pub const fn traj_id(&self) -> u32 {
         self.traj_id
     }
 
-    /// 最近一次成功规划的结果（可视化平面等衍生数据源）。
     #[must_use]
     pub fn last_result(&self) -> Option<&PlanResult> {
         self.last_result.as_ref()
@@ -583,7 +536,6 @@ impl PlannerManager {
                                 pt.z
                             );
                             self.global_path = new_path;
-                            // 官方 planNextWaypoint：全局轨迹重建即重置 glb_t 簿记
                             self.global = GlobalTraj::new(new_global_traj, now);
                             self.goal = Point3::from(pt);
                             return true;
@@ -664,11 +616,7 @@ impl PlannerManager {
             + (vertical - 0.5) * d.norm() * v * 0.4 * k
     }
 
-    /// 官方 `setLocalTrajFromOpt`：规划结果连同带时间戳检查点一并入库，
-    /// 并登记该轨迹的 `touch_goal`（碰撞监控扫描上界依据）。检查点生成失败
-    /// （稠密采样退化）视同规划失败——无监控覆盖的轨迹不得进入执行。
-    /// 返回是否入库成功。序号递增（官方 `setLocalTraj` 的 `traj_id++`，
-    /// `plan_container.hpp:78`）：仅成功入库才消耗——入库失败不占序号。
+    /// 检查点生成成功后采用规划结果并递增序号；失败保留当前轨迹与序号。
     pub(crate) fn adopt_plan(
         &mut self,
         mut result: PlanResult,
@@ -676,8 +624,6 @@ impl PlannerManager {
         touch_goal: bool,
     ) -> bool {
         if !self.set_local_traj(result.trajectory.clone(), now, touch_goal, self.traj_id + 1) {
-            // 无监控覆盖的轨迹不入执行，视同本次重规划失败（官方
-            // setLocalTrajFromOpt 失败时同样不更新局部轨迹）
             return false;
         }
         self.traj_id += 1;
@@ -686,11 +632,7 @@ impl PlannerManager {
         true
     }
 
-    /// 官方 `setLocalTrajFromOpt`：轨迹连同带时间戳检查点一并入库。检查点
-    /// 生成失败（稠密采样退化）视同入库失败——无监控覆盖的轨迹不得进入
-    /// 执行。`traj_id` 为写入本条的轨迹序号：常规规划由 [`Self::adopt_plan`]
-    /// 以递增计数传入；急停轨迹不经 `adopt_plan`、以管理器当前计数器传入
-    /// （不消耗新序号）。返回是否入库成功。
+    /// 轨迹与非空检查点一并入库；调用方提供序号，急停轨迹沿用当前序号。
     pub(crate) fn set_local_traj(
         &mut self,
         mut traj: Trajectory,
@@ -794,7 +736,6 @@ impl PlannerManager {
     }
 
     pub(crate) fn next_collision(&self, now: f64) -> Option<f64> {
-        // 官方 ego_replan_fsm.cpp:307：traj_id <= 0 等价无可执行轨迹，入口短路
         if self.traj_id == 0 {
             return None;
         }
@@ -835,7 +776,6 @@ impl PlannerManager {
     /// 入口同 [`Self::next_collision`]：`traj_id == 0` 直接短路。
     #[must_use]
     pub(crate) fn next_swarm_conflict(&self, now: f64) -> Option<(usize, f64)> {
-        // 官方 ego_replan_fsm.cpp:307：traj_id <= 0 等价无可执行轨迹，入口短路
         if self.traj_id == 0 {
             return None;
         }
@@ -893,7 +833,6 @@ impl PlannerManager {
         let reso = map.resolution();
         loop {
             map.index_of(p)?; // 出界即图底：无地面（官方 `getOccupancy == -1`）
-            // 虚拟地板不是地面（官方 `ret == -1` 先于 `ret == 1`）
             if map.virtual_wall().is_some_and(|w| p.z <= w.ground) {
                 return None;
             }
@@ -934,15 +873,11 @@ impl PlannerManager {
             }
             t += t_step;
         }
-        // 步进越过全局终点（含首步即越过）→ 局部目标 = 全局终点（官方
-        // 末点判定 `t - start >= duration - 1e-5`：循环中途命中但落进末窗
-        // 同样覆盖为目标）
         let touch_goal = t - g.start_time >= g.traj.duration() - 1e-5;
         if touch_goal {
             target = self.goal.coords;
             g.glb_t_of_lc_tgt = t_end;
         }
-        // 刹车距离（max_vel²/2·max_acc）内目标速度取零（官方 `local_target_vel`）
         let end_dist = (self.goal.coords - target).norm();
         let target_vel = if end_dist < max_vel * max_vel / (2.0 * max_acc.max(1e-9)) {
             Vector3::zeros()
@@ -991,7 +926,6 @@ pub(crate) fn plan_global_traj_waypoints(
     path: &[Vector3<f64>],
     max_vel: f64,
 ) -> Result<Trajectory> {
-    // 同位置目标没有可用于分配时间的路径长度。
     if path.len() < 2 {
         let endpoint = Endpoint {
             position: start.position,
@@ -1002,7 +936,6 @@ pub(crate) fn plan_global_traj_waypoints(
             MincoBuilder::new(SolverOrder::MinimumJerk, start, endpoint).build(&[], &[1.0])?;
         return minco.solve();
     }
-    // 内点 = path[1..len-1]（排除起点与终点）：段数 = path.len() - 1
     let inner: Vec<nalgebra::Point3<f64>> = path[1..path.len() - 1]
         .iter()
         .map(|p| nalgebra::Point3::from(*p))
@@ -1092,7 +1025,6 @@ pub(crate) fn piece_index_at(traj: &Trajectory, t: f64) -> usize {
     }
 }
 
-/// 路径累计长度。
 pub(crate) fn path_length(points: &[Vector3<f64>]) -> f64 {
     points.windows(2).map(|w| (w[1] - w[0]).norm()).sum()
 }

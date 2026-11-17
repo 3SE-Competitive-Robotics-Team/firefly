@@ -156,7 +156,6 @@ mod tests {
 
     #[test]
     fn gradient_mapping() {
-        // 零状态梯度 → 无效果
         let mut acc = Accumulator::new(1);
         let zero = Sample {
             position: Vector3::zeros(),

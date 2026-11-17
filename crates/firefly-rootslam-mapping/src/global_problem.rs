@@ -1,6 +1,4 @@
-//! Versioned numerical inputs for replaying global BA. This is deliberately not
-//! a persistent-map checkpoint: images, descriptors, features, aliases and map
-//! lifecycle state are absent. Restored snapshots are for optimization only.
+//! Versioned numerical inputs for replaying global BA.
 use crate::{
     global_optimization::{
         KrylovPrecision, OptimizationOptions, OptimizationResult, Precision, optimize_global,

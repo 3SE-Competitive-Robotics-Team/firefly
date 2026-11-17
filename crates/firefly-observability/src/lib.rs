@@ -1,41 +1,4 @@
 //! 日志与追踪基础设施。
-//!
-//! 基于 logforth + fastrace 的最佳实践（fastrace/examples/log-integration）：
-//! - 日志记录携带当前 span 信息（`FastraceDiagnostic`）
-//! - 日志同时作为 span 事件（`FastraceEvent`），在 trace 中可见
-//! - 日志级别由 `RUST_LOG` 控制，未设置时仅输出 error
-//!
-//! 聚合链路（[`IpcAppend`]）：各进程经 `log!` 宏的调用点**零改动**——
-//! `init()` 在 stderr 链路旁常驻一个 dormant 的 [`IpcAppend`]，`init_ipc`
-//! 在进程共享节点就绪后同线程建端并返回 [`LogIpc`] 句柄（调用方在主循环
-//! 作用域持有）；此后每条日志同时写 stderr（原链路保留）与 IPC（聚合端
-//! `mimir` 统一写 rerun `TextLog`，持久可检索）。IPC 不可用/未初始化
-//! 时静默降级为纯 stderr，不阻断进程。
-//!
-//! 线程模型（对照 logforth 官方 `appenders/async`：`Async` + `DropIncoming`）：
-//! logforth 的 `append` 在**调用线程同步执行**——`IpcAppend::append` 只做
-//! 纯内存格式化（`Record` → [`QueuedLog`] 入队，无锁化快照 sim 时钟/trace
-//! 上下文）；真正的 IPC 发布由**主循环驱动**（每 tick [`pump_log_ipc`] 排空
-//! channel、零拷贝发送）。iceoryx2 发布端不出 [`LogIpc`] 句柄的作用域——
-//! 调用方持有句柄、主循环线程 pump，从构造上不可能跨线程触碰，无 `unsafe`。
-//!
-//! 背压语义：channel 有界，满时累计缺失数并由 pump 发出完整性故障；日志不阻塞计算线程。
-//!
-//! 用法：
-//! ```
-//! firefly_observability::init();
-//! // ...
-//! firefly_observability::flush();
-//! ```
-//!
-//! 聚合版（节点就绪后调用一次，主循环每 tick 加三行）：
-//! ```ignore
-//! let node = firefly_pubsub::node::create_node()?;
-//! let log_ipc = firefly_observability::init_ipc(&node, "vio");
-//! // 主循环内：
-//! // firefly_observability::set_sim_time(t);
-//! // firefly_observability::pump_log_ipc(&log_ipc);
-//! ```
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -55,11 +18,9 @@ pub fn init() {
                 .append(logforth::append::Stderr::default())
         })
         .dispatch(|d| {
-            // Every dispatch participates in log_enabled!, including span events.
             d.filter(RustLogFilterBuilder::from_default_env().build())
                 .append(logforth::append::FastraceEvent::default())
         })
-        // 聚合器在 `init_ipc` 接通前保持 dormant；无发布端时 append 不执行发布。
         .dispatch(|d| {
             d.filter(RustLogFilterBuilder::from_default_env().build())
                 .append(IpcAppend)
@@ -69,9 +30,6 @@ pub fn init() {
     fastrace::set_reporter(CompactReporter, fastrace::collector::Config::default());
 }
 
-/// 紧凑 span 报告：每条 span 一行 `时长ms 名字 trace=<id>`。
-///
-/// 保留 span 名称、时长与 trace 关联，每条 span 输出一行，便于高频采样进程使用。
 struct CompactReporter;
 
 impl fastrace::collector::Reporter for CompactReporter {
@@ -99,7 +57,6 @@ fn sim_time_bits() -> u64 {
     SIM_TIME_BITS.load(Ordering::Relaxed)
 }
 
-/// 进程标签（`init_ipc` 写入；`IpcAppend` 每次 `append` 时读取）。
 static TAG: Mutex<String> = Mutex::new(String::new());
 
 /// 日志聚合句柄（调用方持有：主循环作用域，与 `node` 同生命周期）。
@@ -112,11 +69,8 @@ pub struct LogIpc {
     reported_loss: Cell<u64>,
 }
 
-/// 聚合链路是否已武装（`init_ipc` 置位；`IpcAppend` 的 dormant 判定；
-/// `Mutex<bool>` 即 `Sync`，判定位只读、写一次，无线程模型问题）。
 static IPC_ARMED: Mutex<bool> = Mutex::new(false);
 
-/// 待发送日志（`append` 调用线程内格式化完毕，主循环只做 IPC 发布）。
 struct QueuedLog {
     log_level: u8,
     tag: String,
@@ -132,7 +86,6 @@ struct QueuedLog {
 const QUEUE_CAP: usize = 128;
 static DROPPED_RECORDS: AtomicU64 = AtomicU64::new(0);
 
-/// 跨线程队列（`append` 入队 → 主循环 `pump_log_ipc` 出队；标准库 mpsc 足够）。
 static LOG_QUEUE: OnceLock<Queue> = OnceLock::new();
 
 struct Queue {

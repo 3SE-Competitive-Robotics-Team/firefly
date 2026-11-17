@@ -31,7 +31,6 @@ fn check_initial_bias_prior(is_sqrt: bool, gyro: bool) {
         0.
     );
 
-    // Name the physical state being changed; do not repeat its increment indices.
     let initial = estimator.latest_state().clone();
     let mut changed = initial.clone();
     let perturbation = Vector3::new(0.01, -0.02, 0.03);
@@ -50,7 +49,6 @@ fn check_initial_bias_prior(is_sqrt: bool, gyro: bool) {
         .apply_inc(&initial.diff(&changed));
 
     let actual = estimator.ba.compute_marg_prior_error(&estimator.marg_data);
-    // The configured information must penalize its named bias, in either storage mode.
     let expected = 0.5 * information * perturbation.norm_squared();
     assert!(
         (actual - expected).abs() < 1e-12,

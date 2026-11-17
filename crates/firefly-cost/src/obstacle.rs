@@ -113,7 +113,6 @@ impl Penalty for ObstaclePenalty {
                     continue;
                 }
                 let omg = trapezoid_weight(j, k);
-                // 同一平面只算一次距离与误差，代价与导数一起产出。
                 let (point_cost, point_gradient) =
                     self.point_cost_and_gradient(s.position, &self.planes_by_point[idx]);
                 // 采样权重 (omg·T/K) 对 T 的导数:omg·f/K
@@ -222,11 +221,9 @@ mod tests {
     fn plane_cost_zero_and_positive() {
         let minco = test_minco();
         let traj = minco.solve().unwrap();
-        // 远处平面无代价
         let plane = Plane::new(Vector3::new(-10.0, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0));
         let n_points = traj.pieces() * 5 + 1;
         assert_eq!(penalty(vec![vec![plane]; n_points]).evaluate(&traj), 0.0);
-        // 相交平面有正代价
         let plane = Plane::new(Vector3::new(5.0, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0));
         let n_points = traj.pieces() * 5 + 1;
         assert!(penalty(vec![vec![plane]; n_points]).evaluate(&traj) > 0.0);
@@ -239,7 +236,6 @@ mod tests {
         let plane = Plane::new(Vector3::new(5.0, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0));
         let n_points = traj.pieces() * 5 + 1;
         let full = penalty(vec![vec![plane.clone()]; n_points]).evaluate(&traj);
-        // 截断到 2/3 后代价应减小或不变(官方只对前 2/3 施力)
         let truncated =
             penalty(vec![vec![plane]; n_points]).with_two_thirds(n_points - 1 - (n_points - 2) / 3);
         assert!(truncated.evaluate(&traj) <= full + 1e-12);

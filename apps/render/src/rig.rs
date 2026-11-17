@@ -24,7 +24,6 @@ pub const FOV_Y_DEG: f32 = firefly_base::rig::FOV_Y_DEG as f32;
 /// 相机下倾角（度）；来源 [`firefly_base::rig::DOWNTILT_DEG`]。
 pub const DOWNTILT_DEG: f32 = firefly_base::rig::DOWNTILT_DEG as f32;
 
-/// 机体系位置（f64 米）→ Bevy `Vec3`。
 const fn body_vec(p: [f64; 3]) -> Vec3 {
     Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32)
 }
@@ -41,22 +40,17 @@ pub const SENSOR_NEAR: f32 = 0.05;
 /// [`crate::sensors`] 的有效掩码承担）。
 pub const SENSOR_FAR: f32 = 100.0;
 
-/// 场地 mesh 层：所有相机都渲染。
 pub const WORLD_LAYER: usize = 0;
-/// rig 相机标记（主世界→渲染世界的透传标记，见 [`crate::capture`]）。
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug, ExtractComponent)]
 #[extract_app(RenderApp)]
 pub enum Eye {
-    /// 左目灰度（发布 `Firefly/CameraLeft`）。
     Left,
-    /// 右目灰度（发布 `Firefly/CameraRight`）。
     Right,
     /// 深度（预通道纹理即深度源，颜色输出仅占位）。
     Depth,
     Down,
 }
 
-/// 位姿状态（`link` 每收到新真值写入，rig 相机读取）。
 #[derive(Resource, Default)]
 pub struct PoseState {
     /// 机体位置（世界系，米）。
@@ -65,23 +59,17 @@ pub struct PoseState {
     pub quat: Quat,
     /// 真值时间戳（秒，`sim_time`）。
     pub stamp: f64,
-    /// 最近一条真值的 trace 上下文（出图发布时续接）。
     pub trace: TraceContext,
-    /// 是否收到过真值。
     pub has_pose: bool,
 }
 
-/// 传感器回读目标（主世界句柄，`capture` 按 `AssetId` 在渲染世界取 GPU 纹理）。
 #[derive(Resource)]
 pub struct SensorTargets {
-    /// 左目灰度目标。
     pub left: Handle<Image>,
-    /// 右目灰度目标。
     pub right: Handle<Image>,
     pub down: Handle<Image>,
 }
 
-/// 机体位姿 + 相机 mounting 偏移 → 相机世界变换。
 #[must_use]
 pub fn eye_transform(pos: Vec3, quat: Quat, offset: Vec3) -> Transform {
     Transform {
@@ -149,8 +137,6 @@ fn sensor_target_with_size(width: usize, height: usize) -> Image {
     image
 }
 
-/// 装配 rig：三传感器相机（左/右/深度）。
-// 系统参数按值传递（`SystemParam` 契约，见 `main.rs` 同类标注）。
 #[allow(clippy::needless_pass_by_value)]
 pub fn spawn_rig(
     mut commands: Commands,
@@ -167,8 +153,6 @@ pub fn spawn_rig(
         down: down.clone(),
     });
 
-    // 环境光贴图（IBL）：半球渐变天空，给近黑高光面暗部补光 + 柔和反射（场景级，
-    // 所有相机共用）。
     let env = EnvironmentMapLight {
         intensity: config.env.intensity,
         ..EnvironmentMapLight::hemispherical_gradient(
@@ -189,7 +173,6 @@ pub fn spawn_rig(
     let sensor_layers = RenderLayers::layer(WORLD_LAYER);
 
     // 双目灰度相机：颜色中间纹理用 sRGB 编码，最终输出单通道 BT.601。
-    // 出图窗口由 `link::poll_pose` 激活：非出图帧不渲染传感器（省 GPU）。
     for (eye, offset, target) in [
         (Eye::Left, LEFT_OFFSET, left),
         (Eye::Right, RIGHT_OFFSET, right),
@@ -235,9 +218,6 @@ pub fn spawn_rig(
         down_transform(pose.pos, pose.quat),
     ));
 
-    // 深度相机：只跑深度预通道。`RenderTarget::None` 无颜色输出，Bevy 会移除
-    // `ViewTarget`，彩色主 pass 不执行（省掉一整遍 5M 三角面）；深度经
-    // `ViewDepthStencilTexture` 回读。
     commands.spawn((
         Camera {
             is_active: false,
