@@ -574,7 +574,7 @@ impl Message {
                 put_u16(&mut out, u16::try_from(message.height).unwrap_or(0));
                 put_i32(&mut out, message.sensor_id);
                 put_f64(&mut out, message.timestamp);
-                for value in message.data {
+                for &value in &message.data {
                     out.extend_from_slice(&value.to_le_bytes());
                 }
             }
