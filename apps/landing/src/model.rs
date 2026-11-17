@@ -131,9 +131,7 @@ impl Model {
                 #[cfg(target_os = "linux")]
                 {
                     builder
-                        .with_execution_providers([ort::ep::VSINPU::default()
-                            .build()
-                            .error_on_failure()])
+                        .with_execution_providers([ort::ep::VSINPU.build().error_on_failure()])
                         .map_err(|e| external("landing.vsinpu.register", e))?
                         .with_disable_cpu_fallback()
                         .map_err(|e| external("landing.vsinpu.configure", e))?
