@@ -180,7 +180,7 @@ def test_arrival_requires_stopping_and_roundtrip_accepts_precision_land():
     args = parse_args(["--precision-land", "--goal", "2", "1"])
     assert args.mission == "roundtrip" and args.precision_land and args.hover_seconds == 3. and args.altitude == 2.
     assert parse_args([], hil=True, mission="hover").hover_seconds == 20.
-    assert default_goal("red") == [4., 0.] and default_goal("blue") == [-4., 0.]
+    assert default_goal("red") == [8., 0.] and default_goal("blue") == [-8., 0.]
     for argv in (["--goal", "nan", "0"], ["--goal", "0", "0"], ["--return-offset", "1", "0"], ["--altitude", "0"]):
         with pytest.raises(SystemExit):
             parse_args(argv)
@@ -205,13 +205,13 @@ def test_presets_close_with_equal_sides_and_mirror_for_blue(shape, count):
     if shape == "square":
         edges = np.diff(red, axis=0)
         assert all(abs(np.dot(a, b)) < 1e-12 for a, b in zip(edges, np.roll(edges, 1, axis=0)))
-    assert parse_args(["--shape", shape]).side == 2.
+    assert parse_args(["--shape", shape]).side == (4. if shape == "square" else 2.)
 
 
 def test_custom_waypoints_keep_order_and_initial_odom_axes_for_hil():
     args = parse_args(["--waypoint", "2", "0", "--waypoint", "2", "2", "--waypoint", "0", "0"], hil=True, mission="roundtrip")
     assert args.hil and route_points(args, "blue") == [[2., 0.], [2., 2.], [0., 0.]]
-    assert route_points(parse_args([]), "red") == [[4., 0.]]
+    assert route_points(parse_args([]), "red") == [[8., 0.]]
     assert route_points(parse_args(["--mission", "hover"]), "red") == []
 
 
@@ -298,7 +298,8 @@ def test_polygon_cannot_skip_or_miss_an_intermediate_waypoint(fault):
     elif fault == "identity":
         next(row for _, row in data.events if row.get("name") == "waypoint_hover")["index"] = 3
     elif fault == "wrong_goal":
-        next(row for _, row in data.events if row.get("name") == "waypoint")["goal"] = [4., 0., 1.]
+        leg = next(row for _, row in data.events if row.get("name") == "waypoint")
+        leg["goal"] = [leg["goal"][0] + 1., *leg["goal"][1:]]
     elif fault == "wrong_return":
         next(row for _, row in data.events if row.get("name") == "return")["goal"] = [2., 0., 1.]
     elif fault == "missing_intent":

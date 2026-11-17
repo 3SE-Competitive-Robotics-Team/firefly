@@ -594,8 +594,8 @@ FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/sys
 
 ~~~bash
 uv run python scripts/flight.py --mission roundtrip --precision-land
-uv run python scripts/flight.py --mission roundtrip --precision-land --goal 4 0 --hover-seconds 3
-uv run python scripts/flight.py --shape square --side 2 --precision-land
+uv run python scripts/flight.py --mission roundtrip --precision-land --goal 8 0 --hover-seconds 3
+uv run python scripts/flight.py --shape square --side 4 --precision-land
 uv run python scripts/flight.py --shape triangle --side 2 --precision-land
 uv run python scripts/flight.py --waypoint 2 0 --waypoint 3 1 --waypoint 2 0 --precision-land
 uv run python scripts/flight.py --mission hover --precision-land
@@ -606,7 +606,7 @@ uv run python scripts/verify_flight.py logs/<本轮目录>/log.rrd
 
 完整往返使用 `configs/sim-mission.toml`，使用 30Hz 双目/深度供给；下视按 `render.capture.down_hz` 以 15/30 FPS 连续采集，
 物理和 IMU 保持 1000Hz；HIL 的同周期送图预算见前文。悬停沿用 `configs/sim.toml`。
-`--goal DX DY` 相对解锁前保存的 odom 起飞点；RMUC 示例默认朝场地中部，red 为 (4,0)m、blue 为 (-4,0)m；
+`--goal DX DY` 相对解锁前保存的 odom 起飞点；RMUC 示例默认朝场地中部，red 为 (8,0)m、blue 为 (-8,0)m；
 `--shape square|triangle` 先向场地飞一个边长，再从该入口飞闭合的正方形或等边三角形，
 回到入口后返航；`--side` 指定边长，blue 将预设航线绕起点旋转 180°。
 重复 `--waypoint DX DY` 按输入顺序设置自定义航线，每点均相对同一起飞坐标，适合任意折线或多边形。

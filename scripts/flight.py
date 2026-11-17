@@ -31,11 +31,11 @@ def parse_args(argv=None, *, hil=None, mission=None):
     parser.add_argument("--hover-seconds", type=float, help="hover duration (hover: 20s; roundtrip waypoint: 3s)")
     route = parser.add_mutually_exclusive_group()
     route.add_argument("--goal", type=float, nargs=2, metavar=("DX", "DY"),
-                       help="single waypoint offset in odom metres (red: 4,0; blue: -4,0)")
+                       help="single waypoint offset in odom metres (red: 8,0; blue: -8,0)")
     route.add_argument("--shape", choices=("square", "triangle"), help="closed polygon one side-length ahead of takeoff")
     route.add_argument("--waypoint", type=float, nargs=2, action="append", metavar=("DX", "DY"),
                        help="repeat for ordered offsets from takeoff in odom metres")
-    parser.add_argument("--side", type=float, help="square/triangle side length in metres (default: 2)")
+    parser.add_argument("--side", type=float, help="polygon side length in metres (square: 4; triangle: 2)")
     parser.add_argument("--altitude", type=float, help="height above takeoff (hover: 1m; roundtrip: 2m)")
     parser.add_argument("--return-offset", type=float, nargs=2, default=[.12, -.08], metavar=("DX", "DY"),
                         help="return near takeoff before visual alignment, in odom metres")
@@ -52,7 +52,7 @@ def parse_args(argv=None, *, hil=None, mission=None):
     if args.mission == "hover" and (args.goal is not None or args.shape or args.waypoint):
         parser.error("waypoints and shapes require --mission roundtrip")
     if args.shape and args.side is None:
-        args.side = 2.
+        args.side = 4. if args.shape == "square" else 2.
     values = [*(args.goal or []), *(value for point in args.waypoint or [] for value in point),
               *([] if args.side is None else [args.side]),
               *args.return_offset, args.altitude, args.hover_seconds, args.acquire_timeout]
@@ -79,7 +79,7 @@ def parse_args(argv=None, *, hil=None, mission=None):
 
 def default_goal(team):
     """RMUC demonstration routes head towards the central field from either hangar."""
-    return [4., 0.] if team == "red" else [-4., 0.]
+    return [8., 0.] if team == "red" else [-8., 0.]
 
 
 def route_points(args, team):
