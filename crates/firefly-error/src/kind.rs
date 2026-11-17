@@ -1,5 +1,3 @@
-//! 错误分类：按调用者可以采取的动作划分。
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     NotFound,

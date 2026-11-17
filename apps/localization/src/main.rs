@@ -1,5 +1,3 @@
-//! 视觉定位融合：VIO 时间配对、map←odom 修正与地图里程计发布。
-
 use std::path::PathBuf;
 use std::time::Duration;
 

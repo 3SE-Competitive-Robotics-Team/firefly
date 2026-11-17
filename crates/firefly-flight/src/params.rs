@@ -1,5 +1,3 @@
-//! 机体与飞控参数（`serde` 可反序列化，缺键回落默认值）。
-
 use serde::Deserialize;
 
 /// 机体参数（刚体本身；旋翼布局与推力上限见 [`crate::Airframe`]）。
@@ -60,13 +58,9 @@ impl Default for QuadParams {
 #[derive(Deserialize, Clone, Copy, Debug, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Px4Params {
-    /// 角速度环。
     pub rate: RateParams,
-    /// 姿态环。
     pub attitude: AttitudeParams,
-    /// 位置/速度环。
     pub position: PositionParams,
-    /// 控制分配。
     pub allocation: AllocationParams,
     /// 悬停推力（归一化，`[0.1,0.9]`）；`None` 时由机体质量与推力上限计算。
     pub hover_thrust: Option<f32>,
@@ -239,7 +233,6 @@ impl Default for PositionParams {
     }
 }
 
-/// 控制分配参数。
 #[derive(Deserialize, Clone, Copy, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct AllocationParams {

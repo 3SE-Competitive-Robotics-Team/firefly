@@ -1,5 +1,3 @@
-//! 扁平错误结构：机器可读的 kind/status + 人类可读的上下文。
-
 use core::fmt;
 
 use crate::{ErrorKind, ErrorStatus};
@@ -170,10 +168,8 @@ mod tests {
 
     #[test]
     fn error_parts_and_display() {
-        // 永久错误不可重试
         let e = Error::new(ErrorKind::InvalidArgument, "bad input");
         assert!(!e.is_retryable());
-        // 上下文保留
         let e = Error::new(ErrorKind::OutOfRange, "index out of bounds")
             .with_context("piece", 3)
             .with_context("dim", "x");
@@ -181,12 +177,10 @@ mod tests {
         assert_eq!(ctx.len(), 2);
         assert_eq!(ctx[0], ("piece", "3"));
         assert_eq!(ctx[1], ("dim", "x"));
-        // 位置信息
         let e = Error::new(ErrorKind::Internal, "boom");
         let text = e.to_string();
         assert!(text.contains("error.rs"), "missing file: {text}");
         assert!(text.contains(':'), "missing line:col: {text}");
-        // display 含全部部分
         let e = Error::new(ErrorKind::Convergence, "lbfgs failed")
             .with_operation("optimize")
             .with_context("iterations", 100);
@@ -200,12 +194,10 @@ mod tests {
         assert_eq!(e.context().collect::<Vec<_>>(), vec![("iterations", "100")]);
         let e = e.with_operation("plan");
         assert_eq!(e.operation(), Some("plan"));
-        // source 链
         let inner = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
         let e = Error::new(ErrorKind::NotFound, "map file missing").with_source(inner);
         assert!(e.to_string().contains("caused by: no such file"));
         assert!(std::error::Error::source(&e).is_some());
-        // Result 别名
         let f = |ok: bool| -> Result<i32> {
             if ok {
                 Ok(1)

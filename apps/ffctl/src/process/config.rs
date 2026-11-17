@@ -1,7 +1,4 @@
-//! 进程清单：TOML 读取、校验和原子回写。
-//!
-//! `enable`/`disable` 直接修改清单中的 `autostart`。
-//! 回写会重新排版 TOML，文件内的注释不会保留。
+//! 进程清单回写会重新排版 TOML，文件内的注释不会保留。
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;

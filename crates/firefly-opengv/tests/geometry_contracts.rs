@@ -1,6 +1,3 @@
-// SPDX-License-Identifier: BSD-3-Clause
-
-//! Known 3-D scenes, geometric transformations and actual consensus with deterministic sampling.
 use firefly_opengv::{
     absolute_pose::{central_absolute_adapter::CentralAbsoluteAdapter, methods},
     optimization_functor::RustNumericalBackend,

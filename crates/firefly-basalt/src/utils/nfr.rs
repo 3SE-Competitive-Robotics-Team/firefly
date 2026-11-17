@@ -1,7 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-// License notices and conditions are indexed in docs/licenses/README.md.
-//! `utils/nfr.h` from Basalt 0f3b2b52c807f70ff4e2973ce253c73329eea7bc.
 //! Nonlinear factor residuals with world-additive translation and left rotation increments.
 use crate::utils::sophus_utils::hat;
 use crate::utils::sophus_utils::right_jacobian_inv_se3_decoupled;

@@ -1,19 +1,7 @@
-//! Trace 上下文中间件（fastrace + iceoryx2 User Header）。
-//!
-//! 概念对齐 [W3C Trace Context]：每条 iceoryx2 消息的 User Header 携带发布端
-//! fastrace 活动 span 的 `(trace_id, span_id, sampled)`，订阅端以 `span_id`
-//! 为 parent 续接成跨进程 span 树（全链路性能/延迟/debug 的锚点）。
-//!
-//! 同时携带双发送时间戳：
-//! - 墙钟（jiff [`Timestamp`](jiff::Timestamp)）：日志/排查可读，受系统时间跳变影响；
-//! - 单调（[`ClockType::Monotonic`]，自启动纳秒）：同机跨进程可比，算端到端延迟
-//!   不受墙钟调整影响。
-//!
-//! 共享内存里只存二进制 POD（W3C `traceparent` 字符串仅在导出边界编码）。
-//! 订阅端须声明同一 header 类型：
-//! `service_builder(...).publish_subscribe::<T>().user_header::<TraceContext>()`。
-//!
-//! [W3C Trace Context]: https://www.w3.org/TR/trace-context/
+//! IPC 用户头携带 W3C `(trace_id, span_id, sampled)`，订阅端以发送 span 为父续接。
+//! 墙钟用于可读时间；单调时钟用于同机端到端延迟，不受墙钟跳变影响。
+//! 两端须以相同的 [`TraceContext`] POD 用户头创建服务。
+//! 规范：[W3C Trace Context](https://www.w3.org/TR/trace-context/)。
 
 use std::borrow::Cow;
 

@@ -1,5 +1,3 @@
-//! Bounded, low-rate display metrics derived from existing scalar observations.
-
 #[derive(Default)]
 pub(crate) struct Status {
     values: [Option<(f64, f64)>; 6],

@@ -1,4 +1,3 @@
-//! Floating-point types and constants used by the upstream Basalt instantiations.
 mod sealed {
     pub trait Sealed {}
     impl Sealed for f32 {}

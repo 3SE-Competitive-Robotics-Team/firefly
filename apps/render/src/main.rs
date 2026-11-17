@@ -1,5 +1,3 @@
-//! RMUC 视觉进程：订阅仿真位姿，渲染双目、下视与深度，发布 IPC；调试展示由独立 mimir 承担。
-
 mod buffer;
 mod capture;
 mod config;

@@ -1,7 +1,4 @@
-//! HIL 执行器回传：把本机控制与遥测写进 USB `FunctionFS` 端点。
-//!
-//! 时间戳与消息语义保持与真机相同；写端点阻塞即背压，不静默丢控制。
-//! `Stats` 每秒回报一次收发计数，主机把它记进 RRD。
+//! USB 写端点阻塞时施加背压，不丢弃控制消息。
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -16,13 +13,11 @@ use firefly_hil::topics::TelemetrySubscribers as Ports;
 use firefly_pubsub::node::create_node;
 use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 
-/// HIL 功能实例名。
 const HIL_INSTANCE: &str = "hil";
 /// 上行端点在功能内的序号（第二个数据端点）。
 const UPLINK_ENDPOINT: usize = 1;
 /// 无数据轮询间隔。
 const POLL: Duration = Duration::from_millis(1);
-/// 统计回报周期。
 const STATS_PERIOD: Duration = Duration::from_secs(1);
 
 static RUNNING: AtomicBool = AtomicBool::new(true);

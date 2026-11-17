@@ -1,12 +1,5 @@
-//! `cargo xtask deploy`：构建机载 release，打成 zstd 包并推到设备解包，最后拉起服务。
-//!
-//! 解包前会停掉 `firefly.service` 并清空 `bin`、`configs`、`models`，因此已退役的
-//! 进程与配置不会残留；`logs` 保留。部署流程自己停的服务由自己拉起，失败不算部署成功。
-//!
-//! 设备端由同一个 `xtask` 二进制的 `unpack` 子命令解包，不依赖 tar 或 zstd CLI。
-//!
-//! 板载 adbd 走 legacy shell 协议，`adb shell` 不传递远端退出码（远端失败也返回 0），
-//! 所以解包完整性与服务就绪都靠远端输出判定，不能依赖 `adb` 的退出状态。
+//! 部署替换 bin/configs/models，保留 logs；自己停止的服务由自己恢复。
+//! legacy adb shell 不传递远端退出码，解包完整性与服务就绪须检查远端输出。
 
 use std::fs;
 use std::path::{Path, PathBuf};

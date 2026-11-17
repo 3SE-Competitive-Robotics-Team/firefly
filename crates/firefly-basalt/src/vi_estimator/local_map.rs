@@ -1,5 +1,4 @@
-//! Optional integration snapshot of optimized local geometry before marginalization.
-//! This output extends the original estimator API without changing its prior archive.
+//! Optimized local geometry is captured before marginalization.
 use super::{ba_base::BundleAdjustmentBase, landmark_database::Keypoint};
 use crate::optical_flow::OpticalFlowResult;
 use firefly_calibration::observation::TimeCamId;

@@ -1,8 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-// See docs/licenses/README.md.
-//! Native Cereal marginalization archives and asynchronous directory I/O.
-//! Translation of official `io/marg_data_io.h/.cpp` at Basalt `0f3b2b52`.
 use super::dataset_io::ImageData;
 use crate::{
     optical_flow::{AffineCompact2, OpticalFlowInput, OpticalFlowResult},

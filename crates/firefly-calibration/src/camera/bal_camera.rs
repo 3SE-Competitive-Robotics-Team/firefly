@@ -1,7 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Translation of `include/basalt/camera/bal_camera.hpp` at
-//! `aa441ba3e51050c47ba1902537792a2e4db7e43d`.
 #![allow(clippy::many_single_char_names, clippy::similar_names)]
 use crate::scalar::BasaltScalar;
 use nalgebra::{Matrix2, SMatrix, SVector, Vector2, Vector3, Vector4};

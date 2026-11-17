@@ -1,20 +1,10 @@
-//! 带形矩阵 LU 分解（论文 O(M) 线性复杂度）。
-//!
-//! MINCO 系统 M(T)c = b(q) 的 M 是带形矩阵（补充材料 S6 + MINCO 论文 Eq. 53）：
-//! 下带宽 lowerBw = 8、上带宽 upperBw = 5（块结构推导）。
-//!
-//! 参考官方实现（EGO-Planner-v2 `poly_traj_utils.hpp` `BandedSystem`）：
-//! - 无部分主元（T > 0 时 M 非奇异且结构稳定，官方注释
-//!   "NO PIVOT is applied on the matrix A for efficiency"），
-//!   避免行交换导致的带宽扩展，分解 O(lowerBw·upperBw·N)
-//! - 存储为 Golub & Van Loan 建议的列主序带布局
-//! - Aᵀ 求解直接用 U/L 元素（Aᵀ = UᵀLᵀ，无主元时 P = I），
-//!   零额外分解成本
+//! 无主元带形 LU；带存储布局见 [`BandedMatrix`]，分解复杂度为 `O(lower_bw·upper_bw·N)`。
+//! 转置系统复用原 LU（`Aᵀ = UᵀLᵀ`），不额外分解。
 
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::DMatrix;
 
-/// 带形矩阵：列主序带存储 `data[(i - j + upper_bw) * n + j]`。
+/// 带形矩阵按对角线连续存储：`data[(i - j + upper_bw) * n + j]`。
 #[derive(Debug, Clone)]
 pub struct BandedMatrix {
     n: usize,

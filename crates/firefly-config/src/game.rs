@@ -1,4 +1,3 @@
-//! 比赛队伍配置；世界坐标几何由场景拥有，算法反馈仍使用局部 odom。
 use serde::Deserialize;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]

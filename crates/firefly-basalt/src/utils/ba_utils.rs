@@ -1,6 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Translation of original Basalt `0f3b2b52` `utils/ba_utils.h`.
 use crate::utils::sophus_utils::hat;
 use crate::utils::sophus_utils::so3_inverse;
 use crate::utils::sophus_utils::so3_matrix;

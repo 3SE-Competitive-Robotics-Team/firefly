@@ -1,9 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-// License notices and conditions are indexed in docs/licenses/README.md.
-//! Translation of `include/basalt/image/image_pyr.h` at
-//! `aa441ba3e51050c47ba1902537792a2e4db7e43d`.
-
 use firefly_calibration::image::image::{Image, ImageMut, ManagedImage};
 
 mod sealed {

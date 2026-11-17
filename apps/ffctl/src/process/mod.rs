@@ -1,5 +1,3 @@
-//! 进程管理：清单、supervisor、控制协议与 CLI 共用出口。
-
 pub(crate) mod client;
 pub(crate) mod config;
 pub(crate) mod metrics;

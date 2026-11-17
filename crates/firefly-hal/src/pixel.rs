@@ -1,7 +1,4 @@
-//! 采集帧换算：设备像素格式 → 总线消息载荷（纯计算，无 I/O）。
-//!
-//! 深度无效值沿用 `planner` 的判据（`z <= 0.05` 视为无效），因此 `Z16` 的 0
-//! 直接缩放成 0 米，不额外编码成 `NaN`。
+//! `Z16` 的 0 表示无效深度，换算后保持为 0 米。
 
 use serde::Deserialize;
 
@@ -18,7 +15,6 @@ pub enum FrameFormat {
 }
 
 impl FrameFormat {
-    /// 每像素占用的源字节数。
     #[must_use]
     pub const fn bytes_per_pixel(self) -> usize {
         match self {

@@ -1,7 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Original Basalt `sqrt_keypoint_vio.h/.cpp`, revision
-//! `0f3b2b52c807f70ff4e2973ce253c73329eea7bc`.
 use super::{
     ba_base::BundleAdjustmentBase,
     landmark_database::{Keypoint, KeypointObservation},
@@ -83,8 +79,6 @@ pub struct SqrtKeypointVioEstimator<S: BasaltScalar> {
 // JacobiSVD full V. Eigen's wide-matrix preconditioner computes the pivoted
 // QR of the transpose. All subsequent 2x2 rotations and singular-value sorting
 // touch only columns 0 and 1, so column 2 remains Q.col(2) exactly.
-// Eigen implementation copyright (C) 2009-2016 Gael Guennebaud and Benoit Jacob,
-// MPL-2.0, https://mozilla.org/MPL/2.0/ .
 fn rotation_from_two_vectors<S: BasaltScalar>(
     first: &Vector3<S>,
     second: &Vector3<S>,

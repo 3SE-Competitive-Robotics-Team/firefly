@@ -1,6 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Original Basalt `linearization_rel_sc.hpp/.cpp`.
 use super::{
     imu_block::ImuBlock,
     linearization_base::{Options, normal_to_square_root, select_observations},

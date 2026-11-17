@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: GPL-3.0-only
-// Harness for verbatim EGO-Planner-v2 functions inserted by generate.py.
 #include <Eigen/Eigen>
 #include <algorithm>
 #include <cmath>

@@ -1,8 +1,4 @@
-// Copyright (C) 2010 Gael Guennebaud <gael.guennebaud@inria.fr>.
-// Derived from CSparse, Copyright (c) 2006 Timothy A. Davis.
-// SPDX-License-Identifier: MPL-2.0
-// Eigen's CSparse derivative is distributed under MPL-2.0 by permission.
-//! Translation of Eigen 5.0.1 `OrderingMethods/Amd.h` quotient-graph AMD.
+//! Quotient-graph approximate minimum-degree ordering.
 use std::ops::{Index, IndexMut};
 
 // Signed indexing retains the upstream -1/-2 sentinels while bounds-checking

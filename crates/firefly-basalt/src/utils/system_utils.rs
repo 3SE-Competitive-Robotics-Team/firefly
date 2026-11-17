@@ -1,7 +1,3 @@
-// Copyright (c) 2021 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Original `utils/system_utils.h` and Linux `src/utils/system_utils.cpp`.
-
 #[must_use]
 pub fn ensure_trailing_slash(path: &str) -> String {
     if path.is_empty() || path.ends_with('/') {

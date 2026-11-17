@@ -1,7 +1,3 @@
-//! 障碍约束平面生成，对照 EGO-Planner-v2
-//! `poly_traj_optimizer.cpp` 的 `computePointsToCheck` /
-//! `finelyCheckAndSetConstraintPoints` / `roughlyCheckConstraintPoints`。
-
 use firefly_map::{GridMap, Plane};
 use firefly_search::Astar;
 use firefly_trajectory::Trajectory;

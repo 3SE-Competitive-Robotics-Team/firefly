@@ -1,8 +1,3 @@
-//! 飞控域（`apps/fc`）：模式与起降。
-//!
-//! 指令经 `Firefly/Command` 投递，由飞控的模式与安全层
-//! （`firefly_flight::FlightFsm`）逐项判定后执行。
-
 mod arm;
 mod disarm;
 mod hold;

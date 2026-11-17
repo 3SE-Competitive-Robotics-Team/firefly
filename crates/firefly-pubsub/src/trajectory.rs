@@ -1,4 +1,3 @@
-//! 规划器与独立轨迹输出进程之间的完整多项式、心跳和输出门控。
 use iceoryx2::prelude::*;
 
 pub const TRAJECTORY_TOPIC: &str = "Firefly/Trajectory";

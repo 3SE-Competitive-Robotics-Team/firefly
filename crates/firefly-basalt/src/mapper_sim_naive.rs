@@ -1,6 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Original `src/mapper_sim_naive.cpp`: replay simulated keyframes in one VIO window.
 use crate::imu::imu_types::ImuData;
 use crate::imu::imu_types::PoseVelBiasState;
 use crate::spline::se3_spline::Se3Spline;

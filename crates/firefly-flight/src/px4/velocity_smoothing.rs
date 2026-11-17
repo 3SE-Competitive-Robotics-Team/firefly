@@ -1,8 +1,5 @@
-//! PX4 `VelocitySmoothing`：jerk 受限的 1D 速度轨迹（`src/lib/motion_planning/VelocitySmoothing.{hpp,cpp}`）。
-//!
-//! 三个轴各用一个实例，`time_synchronization` 把多个轴的总时长对齐成直线。
-//!
-//! 单位：位置 m、速度 m/s、加速度 m/s²、jerk m/s³、时间 s。
+//! jerk 受限的一维速度轨迹：位置 m、速度 m/s、加速度 m/s²、jerk m/s³、时间 s。
+//! 多轴通过 [`VelocitySmoothing::time_synchronization`] 对齐总时长。
 
 use super::types::constrain;
 

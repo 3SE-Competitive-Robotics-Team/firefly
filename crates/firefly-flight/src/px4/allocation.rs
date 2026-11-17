@@ -1,17 +1,5 @@
-//! PX4 控制分配在固定 X 四旋翼上的移植。
-//!
-//! 参考实现：PX4-Autopilot 提交 `4dbd2e069a5c30c2e53e47e842095d2576dc38c4`，文件
-//! `ControlAllocation.hpp` / `ControlAllocation.cpp`、
-//! `ControlAllocationPseudoInverse.hpp` / `ControlAllocationPseudoInverse.cpp`、
-//! `ControlAllocationSequentialDesaturation.hpp` / `ControlAllocationSequentialDesaturation.cpp`、
-//! `actuator_effectiveness/ActuatorEffectiveness.hpp` / `.cpp` 与
-//! `modules/control_allocator/VehicleActuatorEffectiveness/ActuatorEffectivenessRotors.cpp`，
-//! BSD-3-Clause 许可来源见仓库 docs/licenses/README.md。
-//!
-//! 约定与单位：控制轴顺序 `[roll, pitch, yaw, thrust_z]`；力矩为非归一化前的控制指令，
-//! 推力按机体最大合推力归一化（`-1` 为满推力方向）；执行器指令 `[0, 1]`，`0` 停车、
-//! `1` 满推力；姿态为 FRD（x 前、y 右、z 下），推力沿 FRD `-z`。
-//! 全部矩阵为编译期定长 `4x4`，`f32`，分配路径不做堆分配、不打日志、不 panic。
+//! 固定 X 四旋翼分配；轴顺序与归一化约定见 [`super::types`]。
+//! 分配矩阵为定长 `4×4`、`f32`，分配路径不做堆分配。
 
 use core::ops::{Deref, DerefMut};
 

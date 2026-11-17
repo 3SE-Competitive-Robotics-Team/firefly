@@ -1,5 +1,3 @@
-//! `configs/localization.toml` 的参数定义；缺失字段使用对应类型的默认值。
-
 use firefly_error::{Error, ErrorKind, Result};
 use serde::Deserialize;
 
@@ -11,7 +9,6 @@ use crate::filter::FusionOptions;
 pub struct LocalizationConfig {
     /// 外部地图启动位姿；运行外部定位服务时必须显式提供，不来自在线真值。
     pub origin: Option<InitialAlignment>,
-    /// 融合参数。
     pub fusion: FusionOptions,
     pub quality: crate::quality::QualityOptions,
     /// 对齐修正提交门限；低于门限不递增修订号。

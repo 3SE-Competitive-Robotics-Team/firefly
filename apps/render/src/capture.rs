@@ -1,13 +1,5 @@
-//! GPU 回读：紧凑灰度缓冲 + 深度预通道纹理 → CPU。
-//!
-//! 链路（每相机节拍一次，由 `link` 按 `[capture] hz` 的节拍发起请求）：
-//! 主世界 `CaptureHub::request` → 渲染世界 `copy_sensors`（`RenderGraphSystems::Finish` 阶段，
-//! 图像绘制提交后、窗口呈现前在同队列提交拷贝）→ `map_async` 回调经通道回传字节 →
-//! 主世界 `link` 配对三份同 `seq` 回复后，交给像素线程处理并发布。
-//!
-//! [`CAPTURE_SETS`] 组回读缓冲允许多拍在途；全部占用时保留请求，下帧重试。
-//!
-//! 灰度由 GPU 打包为每像素一字节；深度行距 `320 × 4 = 1280` 字节满足 256 对齐。
+//! 纹理拷贝在图像绘制之后、窗口呈现之前，与绘制共用 GPU 队列。
+//! 回读缓冲组全部占用时保留请求，下帧重试。
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};

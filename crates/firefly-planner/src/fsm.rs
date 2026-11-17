@@ -1,4 +1,3 @@
-//! 对照 EGO-Planner-v2 `ego_replan_fsm.cpp`：执行回调与安全回调。
 use crate::{PlannerManager, State};
 use firefly_error::Result;
 use nalgebra::Vector3;

@@ -1,6 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Original `linearization_abs_qr.hpp/.cpp`, preserving per-landmark QR blocks.
 use super::{
     imu_block::ImuBlock, landmark_block::RelPoseLin,
     landmark_block_abs_dynamic::LandmarkBlockAbsDynamic, linearization_base::Options,

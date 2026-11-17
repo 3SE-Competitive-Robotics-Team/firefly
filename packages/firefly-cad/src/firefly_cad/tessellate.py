@@ -34,7 +34,6 @@ log = logging.getLogger(__name__)
 
 #: 毫米转米（源 STEP 单位）。
 MM_TO_M = 1e-3
-#: 默认线性偏差（毫米）。
 DEFAULT_DEFLECTION_MM = 2.0
 #: 无逐面颜色时的占位（下游按默认材质处理）。
 NO_COLOR = (-1.0, -1.0, -1.0)

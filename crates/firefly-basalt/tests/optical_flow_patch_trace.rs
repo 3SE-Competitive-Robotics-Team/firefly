@@ -1,7 +1,5 @@
-//! Fixed-input intermediates for the first room1 stereo-track discrepancy.
-//! This diagnostic exports arithmetic variants; completion is not an acceptance
-//! claim. The unchanged dataset gate and fixed C++ arithmetic regression provide
-//! the numerical checks, with the reference compiler profile stated explicitly.
+//! Fixed-input arithmetic variants; numerical acceptance uses the dataset gate
+//! and fixed C++ arithmetic regression.
 use firefly_basalt::optical_flow::{
     AffineCompact2,
     frame_to_frame_optical_flow::FrameToFrameOpticalFlow,

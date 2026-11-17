@@ -1,4 +1,3 @@
-//! Estimator settings shared by IPC and recorded sensor sources.
 use firefly_basalt::utils::vio_config::VioConfig;
 use firefly_error::{Error, ErrorKind, Result};
 use std::path::PathBuf;

@@ -773,7 +773,6 @@ mod tests {
 
     #[test]
     fn solve_polynomial_degree7_known_roots() {
-        // 7 次：根 0.1 0.2 0.3 0.5 0.7 0.85 0.95
         let roots = [0.1, 0.2, 0.3, 0.5, 0.7, 0.85, 0.95];
         let mut coeff = vec![1.0];
         for &r in &roots {

@@ -1,5 +1,3 @@
-//! USB 设备发现：按 VID/PID/序列号匹配，按接口子类定位传感器与执行器端点。
-
 use std::time::Duration;
 
 use nusb::MaybeFuture;
@@ -9,7 +7,6 @@ use nusb::transfer::{Bulk, In, Out};
 
 use crate::config::Config;
 
-/// 主机侧已打开的 HIL 设备。
 pub struct HostLink {
     /// 设备句柄；接口必须活到端点线程结束。
     pub device: nusb::Device,
@@ -22,7 +19,7 @@ pub struct HostLink {
 }
 
 impl HostLink {
-    /// 打开设备并认领两个厂商接口。
+    /// 打开设备并认领包含上下行端点的单个厂商接口。
     ///
     /// # Errors
     /// 设备缺席、描述符不含预期接口或端点、认领失败。

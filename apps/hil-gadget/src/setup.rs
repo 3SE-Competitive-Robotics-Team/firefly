@@ -1,5 +1,3 @@
-//! Linux 板端的 configfs/`FunctionFS` 准备与绑定。
-
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -22,7 +20,6 @@ const WATCHDOG_PID: &str = "/opt/firefly/logs/hil/watchdog.pid";
 const ADBD: &str = "/usr/bin/adbd";
 const START_STOP_DAEMON: &str = "/usr/sbin/start-stop-daemon";
 const ADB: &str = "adb";
-/// 启动后等待 adbd 写完描述符的时间。
 const ADBD_DESCRIPTOR_WAIT: Duration = Duration::from_secs(1);
 /// 等待 `serve` 写描述符的上限。
 const READY_TIMEOUT: Duration = Duration::from_secs(5);

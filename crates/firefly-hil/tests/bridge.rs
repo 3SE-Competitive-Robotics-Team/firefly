@@ -1,4 +1,3 @@
-//! 真实 IPC + 线上帧往返；两端隔离命名空间，执行生产 ingress 和路由。
 use firefly_hil::{
     FrameReader, FrameWriter, Message,
     ingress::SensorIngress,

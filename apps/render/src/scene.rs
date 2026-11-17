@@ -1,9 +1,6 @@
-//! RMUC 场景资产（赛季 + 场地版本）与初始摆位；配置与 sim / viz 共用。
-
 use bevy::prelude::*;
 use serde::Deserialize;
 
-/// 一个已注册的场地版本。
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct SceneSpec {
     /// 配置取值，`<赛季>@<版本>`。
@@ -39,7 +36,6 @@ fn resolve(name: &str) -> Option<SceneSpec> {
     SCENES.iter().find(|spec| spec.name == name).copied()
 }
 
-/// `configs/scene.toml` 的反序列化形态。
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SceneConfig {

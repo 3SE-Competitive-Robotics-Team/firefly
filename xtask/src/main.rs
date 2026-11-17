@@ -1,5 +1,3 @@
-//! 仓库构建与机载部署入口。
-
 mod archive;
 mod container;
 mod deploy;

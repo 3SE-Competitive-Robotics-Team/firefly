@@ -1,5 +1,3 @@
-//! supervisor 控制客户端：一次性 CLI 通过 Unix socket 发请求。
-
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;

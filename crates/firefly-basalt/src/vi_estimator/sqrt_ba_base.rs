@@ -1,6 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Original `sqrt_ba_base.h/.cpp`: shared Schur operations and square-root prior diagnostics.
 use crate::utils::imu_types::{MargLinData, PoseStateWithLin, PoseVelBiasStateWithLin};
 use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector};

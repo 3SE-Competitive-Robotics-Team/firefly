@@ -1,7 +1,4 @@
-// Copyright (c) 2019 Vladyslav Usenko, Michael Loipführer and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause AND MPL-2.0
-//! Original `src/time_alignment.cpp`: gyro/mocap alignment, grid search,
-//! Jacobi-SVD quadratic refinement, and output files. Rendering is caller-owned.
+//! Gyro/mocap alignment; rendering is caller-owned.
 use crate::utils::sophus_utils::se3_inverse;
 use crate::utils::sophus_utils::se3_product;
 use crate::utils::sophus_utils::so3_inverse;
@@ -203,10 +200,7 @@ pub fn search(gyro: RotationSamples, mocap: RotationSamples, max_offset_s: f64) 
     result
 }
 
-// Eigen JacobiSVD real 3-column specialization, MPL-2.0.
-// Copyright (C) 2009-2010 Benoit Jacob <jacob.benoit.1@gmail.com>
-// Copyright (C) 2013-2016 Gael Guennebaud <gael.guennebaud@inria.fr>
-// See docs/licenses/README.md. The polynomial matrix is always full column rank.
+// The polynomial matrix is always full column rank.
 #[expect(
     clippy::many_single_char_names,
     clippy::too_many_lines,

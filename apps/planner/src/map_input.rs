@@ -1,4 +1,3 @@
-//! Derive a collision grid from the planner-owned, already inflated depth map.
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_map::{CollisionSnapshot, GridMap};
 use firefly_pubsub::odom::OdomMessage;

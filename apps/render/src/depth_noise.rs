@@ -21,7 +21,7 @@ pub struct DepthNoiseOptions {
     pub disparity_sigma_px: f32,
     /// 视差量化步长，像素；1/32 参照 `RealSense` D400 文档。
     pub disparity_step_px: f32,
-    /// 视差方差中空间/时间相关部分的比例，无量纲 [0,1]。
+    /// 视差方差中空间/时间相关部分的比例，无量纲 `[0,1]`。
     pub correlated_fraction: f32,
     /// 横向采样抖动标准差，像素；0.5 参照 `SimKinect`。
     pub lateral_sigma_px: f32,

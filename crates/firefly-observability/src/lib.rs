@@ -1,5 +1,3 @@
-//! 日志与追踪基础设施。
-
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};

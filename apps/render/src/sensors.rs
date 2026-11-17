@@ -1,9 +1,5 @@
-//! 传感器像素数学：深度线性化与灰度参考公式。
-//!
-//! 深度线性化依据：`Bevy` 相机投影恒为无限远反向 Z
-//! （`PerspectiveProjection::get_clip_from_view` 用
-//! `perspective_infinite_reverse`），深度预通道纹理存 NDC `d ∈ [0, 1]`，
-//! `d = 0` 为清空值（无几何体，判无效），`dist = near / d` 精确还原光轴 Z 深度。
+//! Bevy 无限远反向 Z 投影的深度预通道存 NDC `d ∈ [0, 1]`。
+//! `d = 0` 为无几何体的清空值；`near / d` 还原光轴深度。
 
 /// 深度有效下限（米）。
 pub const DEPTH_MIN: f32 = 0.05;

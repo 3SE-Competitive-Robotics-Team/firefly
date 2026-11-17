@@ -113,7 +113,6 @@ fn analytic_gradient_matches_numerical_end_to_end() {
         );
     }
 
-    // 顺带验证 DMatrix 形状（防 API 回归）
     assert_eq!(dq.nrows(), 3);
     assert_eq!(dq.ncols(), minco.pieces() - 1);
     assert_eq!(dt.len(), minco.pieces());

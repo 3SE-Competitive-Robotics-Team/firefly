@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: GPL-3.0-only
-//! Numerical state and callbacks corresponding to upstream `grid_map.cpp`.
 use crate::{
     DepthImage, MappingParameters,
     config::{invalid, logit},

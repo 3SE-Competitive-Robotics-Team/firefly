@@ -1,6 +1,4 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Original Basalt `vi_estimator/sc_ba_base.h/.cpp`: host-grouped Schur blocks.
+//! Host-grouped Schur blocks.
 use super::{
     ba_base::BundleAdjustmentBase,
     landmark_database::{LandmarkDatabase, ObservationIndex},

@@ -1,6 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Non-rendering input and result collection from original `src/opt_flow.cpp`.
 use crate::{
     io::dataset_io::VioDataset,
     optical_flow::{OpticalFlowInput, OpticalFlowResult},

@@ -1,5 +1,3 @@
-//! 世界/窗口坐标、环形寻址与滚动窗口与固定先验恢复。
-
 use super::{GRID_MAP_OBS_FLAG, GridMap, VoxelState};
 use nalgebra::Vector3;
 

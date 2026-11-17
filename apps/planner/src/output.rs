@@ -1,4 +1,3 @@
-//! planner 发布完整轨迹、心跳、门控与原生执行状态。
 use firefly_error::Result;
 use firefly_pubsub::{
     node::IpcNode,

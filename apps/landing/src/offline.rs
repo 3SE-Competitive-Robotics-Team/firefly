@@ -1,4 +1,3 @@
-//! 单幅 CIF 图像的检测、角点优化与几何结果导出。
 use crate::{Result, config::Config, model};
 use firefly_pubsub::camera::{DOWN_HEIGHT, DOWN_WIDTH};
 use std::path::Path;

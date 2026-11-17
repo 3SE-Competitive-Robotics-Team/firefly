@@ -1,6 +1,5 @@
-//! Planner-owned EGO depth map. Fusion runs outside the FSM/solver threads.
-//! Measurement-time interpolation replaces ROS `ApproximateTime` transport pairing;
-//! the numerical callbacks, 32 ms occupancy and 500 ms fading periods stay separate.
+//! Depth and pose are paired by measurement-time interpolation;
+//! occupancy and fading use independent timers.
 use std::{
     collections::VecDeque,
     sync::{

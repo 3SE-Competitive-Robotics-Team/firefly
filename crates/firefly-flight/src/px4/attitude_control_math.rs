@@ -1,12 +1,5 @@
-//! PX4 倾斜设定点的偏航误差补偿（`AttitudeControlMath`）。
-//!
-//! 参考实现：PX4-Autopilot 提交 `4dbd2e069a5c30c2e53e47e842095d2576dc38c4`
-//! 的 `src/modules/mc_att_control/AttitudeControl/AttitudeControlMath.hpp`（BSD-3-Clause）。
-//! 保持 NED 世界系 / FRD 机体系约定。
-//!
-//! 倾斜修正只在世界系中重定向推力轴，不改变期望倾角大小；`q_sp_tilt` 必须是不含偏航的
-//! 纯倾斜四元数。反向平行时 PX4 `Quatf(v0, v1)` 取正交轴 180° 旋转，`types` 中的
-//! 同名助手会退化为单位四元数，故此处私有补齐。
+//! NED 世界系、FRD 机体系；`q_sp_tilt` 是不含偏航的纯倾斜四元数。
+//! 世界系中的推力轴重定向保持倾角大小，反向平行时取正交轴 180° 旋转。
 
 #![allow(clippy::wildcard_imports)]
 

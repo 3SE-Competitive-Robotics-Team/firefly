@@ -1,13 +1,7 @@
-//! `configs/quad.toml`：第三人称飞行的场地/起点 + 机体、机体布局与 PX4 控制参数。
-//!
-//! 参数类型定义在 `firefly-flight`（四旋翼模型与飞控的唯一实现），缺键回落
-//! 对应类型的默认值。
-
 use bevy::prelude::*;
 use firefly_flight::{Airframe, Px4Params, QuadParams};
 use serde::Deserialize;
 
-/// 顶层配置。
 #[derive(Resource, Deserialize, Clone, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct QuadConfig {
@@ -15,13 +9,10 @@ pub struct QuadConfig {
     pub field: String,
     /// 初始位置（米，世界系）。
     pub start: [f32; 3],
-    /// 刚体参数（质量/惯量/气动阻尼）。
     #[serde(default)]
     pub drone: QuadParams,
-    /// 机体布局（旋翼几何/旋向/电机推力上限）。
     #[serde(default)]
     pub airframe: Airframe,
-    /// PX4 控制参数（角速度/姿态/位置环、分配 airmode）。
     #[serde(default)]
     pub control: Px4Params,
     /// 手柄到姿态/推力的映射参数。
@@ -109,7 +100,6 @@ mod tests {
         for (actual, expected) in config.start.iter().zip([0.0, -2.0, 1.2]) {
             assert!((actual - expected).abs() < 1e-6);
         }
-        // 240Hz 定步长使用对应的角速度环与姿态环增益。
         assert!((config.control.rate.p[0] - 0.02).abs() < 1e-6);
         assert!((config.control.attitude.p[0] - 9.0).abs() < 1e-6);
         assert!((config.manual.climb_rate_max - 3.0).abs() < 1e-6);

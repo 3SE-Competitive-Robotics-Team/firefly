@@ -1,9 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-// See docs/licenses/README.md.
-//! Original Basalt `vi_estimator/ba_base.h` and `ba_base.cpp`, revision
-//! `0f3b2b52c807f70ff4e2973ce253c73329eea7bc`.
-
 use super::landmark_database::LandmarkDatabase;
 use crate::utils::sophus_utils::so3_inverse;
 use crate::utils::sophus_utils::so3_product;
@@ -31,11 +25,6 @@ pub struct BundleAdjustmentBase<S: BasaltScalar> {
     pub huber_thresh: S,
     pub calib: Calibration<S>,
 }
-
-// Fixed real specializations of Eigen JacobiSVD / RealSvd2x2 / LDLT.
-// Copyright (C) 2008-2016 Gael Guennebaud, Benoit Jacob, Keir Mierle,
-// and Timothy E. Holy. These helper implementations are MPL-2.0:
-// https://mozilla.org/MPL/2.0/ .
 
 #[expect(
     clippy::many_single_char_names,

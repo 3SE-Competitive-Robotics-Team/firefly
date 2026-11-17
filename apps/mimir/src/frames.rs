@@ -174,7 +174,6 @@ mod tests {
             };
             let anchor = if truth_first {
                 assert!(frames.truth(truth).unwrap().is_none());
-                // A genuinely different nanosecond must still not match.
                 assert!(
                     frames
                         .navigation(nav(navigation_time - 1e-9))

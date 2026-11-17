@@ -1,5 +1,3 @@
-//! 主机侧 HIL 链路配置。
-
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -9,26 +7,20 @@ pub fn default_config() -> PathBuf {
     firefly_config::paths::config("hil.toml")
 }
 
-/// 主机侧 HIL 配置。
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// USB 设备匹配与端点发现。
     #[serde(default)]
     pub usb: Usb,
-    /// 链路队列与批处理。
     #[serde(default)]
     pub link: Link,
 }
 
-/// USB 设备匹配。
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Usb {
-    /// 设备 VID。
     #[serde(default = "default_vendor")]
     pub vendor: u16,
-    /// 设备 PID。
     #[serde(default = "default_product")]
     pub product: u16,
     /// 序列号前缀匹配；空表示不校验。
@@ -50,7 +42,6 @@ impl Default for Usb {
     }
 }
 
-/// 队列与批处理参数。
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Link {
@@ -60,7 +51,6 @@ pub struct Link {
     /// 单次 bulk OUT 写缓冲（字节）。
     #[serde(default = "default_write_buffer")]
     pub write_buffer: usize,
-    /// 单个 IMU 批次的最大样本数。
     #[serde(default = "default_imu_batch")]
     pub imu_batch: usize,
     /// 待发图像预算（至少两张）；队列按双目对占位，深度独占一个位置。

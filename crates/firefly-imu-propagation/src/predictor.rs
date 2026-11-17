@@ -1,4 +1,3 @@
-//! Bounded posterior replay for the online `RootSLAM` IMU prediction.
 use crate::{Bias, ImuSample, Prediction, PropagationError, State, propagate};
 use nalgebra::Vector3;
 use std::collections::VecDeque;

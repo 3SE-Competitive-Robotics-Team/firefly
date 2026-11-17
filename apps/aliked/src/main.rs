@@ -1,5 +1,3 @@
-//! `aliked` 进程：ALIKED-N16 特征提取（`ort` ONNX Runtime 推理）。
-
 use firefly_pubsub::camera::{CAMERA_LEFT_TOPIC, GrayImageMessage};
 use firefly_pubsub::event::{CAMERA_PAIR_TOPIC, TopicListener};
 use firefly_pubsub::node::create_node;

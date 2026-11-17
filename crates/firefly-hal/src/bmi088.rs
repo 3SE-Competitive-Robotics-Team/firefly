@@ -1,8 +1,5 @@
-//! `BMI088` 六轴 IMU 的寄存器表与单位换算（纯计算，无 I/O）。
-//!
-//! 加速度计与陀螺是同一封装内的两片独立 SPI 从机，各占一条片选；加速度计的
-//! SPI 读在地址之后需要多一个哑字节，陀螺不需要。量程编码与灵敏度取自数据
-//! 手册的灵敏度表，`WHO_AM_I` 用于在初始化阶段确认器件型号。
+//! BMI088 的加速度计与陀螺是独立 SPI 从机，各占一条片选。
+//! 加速度计 SPI 读在地址后需要一个哑字节，陀螺不需要。
 
 /// SPI 读操作地址位。
 const SPI_READ: u8 = 0x80;
@@ -18,33 +15,23 @@ pub const GYRO_CHIP_ID: u8 = 0x0F;
 pub const ACCEL_DATA_REGISTER: u8 = 0x12;
 /// 陀螺数据起始寄存器（`RATE_X_LSB`，小端三轴依次排列）。
 pub const GYRO_DATA_REGISTER: u8 = 0x02;
-/// 加速度计软复位寄存器。
 pub const ACCEL_SOFTRESET_REGISTER: u8 = 0x7E;
-/// 陀螺软复位寄存器。
 pub const GYRO_SOFTRESET_REGISTER: u8 = 0x14;
-/// 软复位写入值。
 pub const SOFTRESET_COMMAND: u8 = 0xB6;
-/// 加速度计电源控制寄存器。
 pub const ACCEL_PWR_CTRL_REGISTER: u8 = 0x7D;
-/// 加速度计上电。
 pub const ACCEL_PWR_CTRL_ON: u8 = 0x04;
-/// 加速度计电源配置寄存器。
 pub const ACCEL_PWR_CONF_REGISTER: u8 = 0x7C;
 /// 加速度计正常工作（非省电）。
 pub const ACCEL_PWR_CONF_ACTIVE: u8 = 0x00;
 /// 加速度计配置寄存器（带宽与输出数据率）。
 pub const ACCEL_CONF_REGISTER: u8 = 0x40;
-/// 加速度计量程寄存器。
 pub const ACCEL_RANGE_REGISTER: u8 = 0x41;
-/// 陀螺量程寄存器。
 pub const GYRO_RANGE_REGISTER: u8 = 0x0F;
-/// 陀螺带宽寄存器。
 pub const GYRO_BANDWIDTH_REGISTER: u8 = 0x10;
 /// 陀螺带宽：2000 Hz 输出数据率、532 Hz 滤波带宽。
 pub const GYRO_BANDWIDTH_2000_HZ: u8 = 0x00;
 /// 陀螺低功耗模式寄存器。
 pub const GYRO_LPM1_REGISTER: u8 = 0x11;
-/// 陀螺正常工作模式。
 pub const GYRO_LPM1_NORMAL: u8 = 0x00;
 
 /// 加速度计 `ACC_CONF` 的带宽编码：正常带宽。
@@ -56,21 +43,13 @@ const STANDARD_GRAVITY: f64 = 9.806_65;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum AccelOdr {
-    /// 12.5 Hz。
     Hz12_5 = 0x05,
-    /// 25 Hz。
     Hz25 = 0x06,
-    /// 50 Hz。
     Hz50 = 0x07,
-    /// 100 Hz。
     Hz100 = 0x08,
-    /// 200 Hz。
     Hz200 = 0x09,
-    /// 400 Hz。
     Hz400 = 0x0A,
-    /// 800 Hz。
     Hz800 = 0x0B,
-    /// 1600 Hz。
     Hz1600 = 0x0C,
 }
 
@@ -101,16 +80,12 @@ impl AccelOdr {
     }
 }
 
-/// 加速度计量程（`ACC_RANGE`）。
+/// 加速度计对称量程（±g，`ACC_RANGE`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccelRange {
-    /// ±3 g。
     G3,
-    /// ±6 g。
     G6,
-    /// ±12 g。
     G12,
-    /// ±24 g。
     G24,
 }
 
@@ -152,18 +127,13 @@ impl AccelRange {
     }
 }
 
-/// 陀螺量程（`RATE_RANGE`）。
+/// 陀螺对称量程（±°/s，`RATE_RANGE`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GyroRange {
-    /// ±2000 °/s。
     Dps2000,
-    /// ±1000 °/s。
     Dps1000,
-    /// ±500 °/s。
     Dps500,
-    /// ±250 °/s。
     Dps250,
-    /// ±125 °/s。
     Dps125,
 }
 

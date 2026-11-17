@@ -1,6 +1,3 @@
-// Copyright (c) 2020-2021 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Timers and execution statistics from original Basalt `utils/time_utils.hpp`.
 use std::{collections::HashMap, mem::DropGuard, time::Instant};
 
 /// Process-local monotonic clock for joining frame stages across worker threads.

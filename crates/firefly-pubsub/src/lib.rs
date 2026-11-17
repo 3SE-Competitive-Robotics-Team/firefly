@@ -1,5 +1,3 @@
-//! iceoryx2 发布订阅端口与消息类型。
-
 pub mod activity;
 pub mod camera;
 pub mod command;

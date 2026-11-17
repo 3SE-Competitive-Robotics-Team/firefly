@@ -1,8 +1,6 @@
-//! 地图文件存取：小端二进制（`MAGIC` + 版本 + 帧流），无第三方依赖。
-//!
-//! 布局（v2）：`magic[8] version u32 count u64`，每帧
-//! `id u64 ts f64 pos 3f64 quat 4f64 n u64`，
-//! 每点 `xyz 3f64 uv 2f32 desc 128f32 score f32`。
+//! 小端二进制地图布局（v2）：`magic[8] version u32 count u64`，每帧
+//! `id u64 ts f64 pos 3f64 quat 4f64 n u64`，每点
+//! `xyz 3f64 uv 2f32 desc 128f32 score f32`。
 
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -11,9 +9,7 @@ use firefly_error::{Error, ErrorKind};
 
 use crate::map::{VisionKeyFrame, VisionMap, VisionMapPoint};
 
-/// 文件魔数。
 const MAGIC: &[u8; 8] = b"FFVMAP01";
-/// 文件版本。
 const VERSION: u32 = 2;
 
 fn read_exact<const N: usize>(r: &mut impl Read) -> Result<[u8; N], Error> {

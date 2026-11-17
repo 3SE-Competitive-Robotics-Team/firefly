@@ -1,5 +1,3 @@
-//! `BMI088` 的 SPI 访问与采样主循环。
-
 use std::error::Error;
 use std::io;
 use std::path::PathBuf;
@@ -35,7 +33,6 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
-    /// 采样率（Hz）。
     #[serde(default = "default_rate_hz")]
     rate_hz: f64,
     /// SPI 时钟模式（0..=3）。
@@ -49,10 +46,8 @@ struct Config {
 #[serde(deny_unknown_fields)]
 struct AccelDevice {
     device: String,
-    /// SPI 时钟（Hz）。
     #[serde(default = "default_speed_hz")]
     speed_hz: u32,
-    /// 量程（g）。
     #[serde(default = "default_accel_range_g")]
     range_g: u32,
 }
@@ -61,10 +56,8 @@ struct AccelDevice {
 #[serde(deny_unknown_fields)]
 struct GyroDevice {
     device: String,
-    /// SPI 时钟（Hz）。
     #[serde(default = "default_speed_hz")]
     speed_hz: u32,
-    /// 量程（°/s）。
     #[serde(default = "default_gyro_range_dps")]
     range_dps: u32,
 }

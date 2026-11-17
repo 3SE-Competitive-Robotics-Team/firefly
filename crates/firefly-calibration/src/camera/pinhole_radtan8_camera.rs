@@ -1,7 +1,3 @@
-// Copyright (c) 2021-2022 Collabora Ltd.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Translation of `include/basalt/camera/pinhole_radtan8_camera.hpp` at
-//! `aa441ba3e51050c47ba1902537792a2e4db7e43d`.
 // Preserve upstream symbolic Jacobian expressions and arithmetic order.
 #![allow(clippy::many_single_char_names, clippy::similar_names)]
 use crate::scalar::BasaltScalar;

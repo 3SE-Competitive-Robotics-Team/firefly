@@ -1,24 +1,16 @@
-//! 电调 PWM：推力（N）→ 占空比（ns）的线性映射。
-//!
-//! 将 `Firefly/Control` 的牛顿推力转换为电调脉宽，映射参数来自部署配置。
-//! 当前线性模型不包含电机与电调的非线性推力特性。
+//! 以线性模型把推力（N）映射为 PWM 脉宽（ns），参数由部署配置提供。
 
-/// 推力到占空比的线性映射。
+/// 推力到 PWM 脉宽的线性映射。
 #[derive(Debug, Clone, Copy)]
 pub struct ThrustToDuty {
-    /// PWM 周期（ns）。
     period_ns: u64,
     /// 零推力脉宽（ns），也是失效/上锁时的输出。
     min_duty_ns: u64,
-    /// 满推力脉宽（ns）。
     max_duty_ns: u64,
-    /// 单电机推力上限（N）。
     max_thrust_n: f64,
 }
 
 impl ThrustToDuty {
-    /// 构造并校验参数。
-    ///
     /// # Errors
     /// 周期为零、脉宽区间为空或超出周期、推力上限非正。
     pub fn new(
@@ -51,13 +43,11 @@ impl ThrustToDuty {
         })
     }
 
-    /// 周期（ns）。
     #[must_use]
     pub const fn period_ns(&self) -> u64 {
         self.period_ns
     }
 
-    /// 零推力脉宽（ns）。
     #[must_use]
     pub const fn min_duty_ns(&self) -> u64 {
         self.min_duty_ns

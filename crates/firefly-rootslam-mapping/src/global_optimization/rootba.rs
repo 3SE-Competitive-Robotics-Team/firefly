@@ -1,11 +1,5 @@
 //! `RootBA`'s staged QR / PCG, adapted to fixed-calibration rigs and pose clusters.
-//! Reference: `rootba/solver/linearizor_qr.cpp` and `qr/impl/landmark_block_base.ipp`.
 //! Pose-graph factors enter the same square-root operator (`RootSLAM` eq. 11).
-// SPDX-License-Identifier: BSD-3-Clause
-// Copyright (c) 2021-2023, Nikolaus Demmel.
-// Copyright 2015 Google Inc. All rights reserved.
-// Rust rig adaptation: Copyright (c) 2026, Firefly contributors.
-// License: docs/licenses/crates/firefly-rootslam-mapping/LICENSE
 use super::{
     BTreeMap, BTreeSet, BasaltScalar, Calibration, DMatrix, DVector, DampingCoordinates, Error,
     ErrorKind, KrylovPrecision, MapSnapshot, OptimizationOptions, OptimizationResult,

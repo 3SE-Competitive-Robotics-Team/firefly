@@ -1,7 +1,4 @@
-//! 传感器标定常量（真值，来源为 `firefly_base::rig` 的相机安装参数）。
-//!
-//! 左目与深度相机同朝向；`PnP` 解的是左目
-//! 位姿，经 [`cam_pose_to_body`] 转到机体系（VIO/融合状态系）再参与融合。
+//! `PnP` 输出左目位姿，由 [`cam_pose_to_body`] 转为机体位姿；外参由 `firefly_base::rig` 派生。
 
 use firefly_base::{FrameId, RigidTransform};
 use nalgebra::{Matrix3, Matrix4};

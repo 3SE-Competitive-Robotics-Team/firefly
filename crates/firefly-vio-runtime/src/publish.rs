@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: BSD-3-Clause
-//! Identical publication order, timestamps and diagnostics for all VIO backends.
 use firefly_error::Result;
 use firefly_pubsub::{
     attitude::AttitudeMessage,

@@ -1,9 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// Copyright 2011-2017 Hauke Strasdat, 2012-2017 Steven Lovegrove.
-// SPDX-License-Identifier: BSD-3-Clause AND MIT AND MPL-2.0
-// License notices and conditions are indexed in docs/licenses/README.md.
-//! Basalt `utils/sophus_utils.hpp` at aa441ba3e51050c47ba1902537792a2e4db7e43d.
-//! SO(3) exp/log follow Sophus d0b7315a0d90fc6143defa54596a3a95d9fa10ec.
 //! Tangent vectors place translation before rotation, as in the reference.
 
 use firefly_calibration::scalar::BasaltScalar;
@@ -11,9 +5,6 @@ use nalgebra::{
     Isometry3, Matrix3, Quaternion, SMatrix, SVector, Translation3, UnitQuaternion, Vector3,
 };
 
-// Eigen QuaternionBase::toRotationMatrix, MPL-2.0; see the license index.
-// Copyright (C) 2008-2010 Gael Guennebaud <gael.guennebaud@inria.fr>
-// Copyright (C) 2009 Mathieu Gautier <mathieu.gautier@cea.fr>
 /// Rotation matrix using the pinned Eigen/Sophus quaternion evaluation order.
 #[must_use]
 pub fn so3_matrix<S: BasaltScalar>(rotation: &UnitQuaternion<S>) -> Matrix3<S> {

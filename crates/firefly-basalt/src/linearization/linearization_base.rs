@@ -1,6 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Shared configuration from original Basalt `linearization_base.hpp`.
 use super::landmark_block;
 use super::{
     linearization_abs_qr::LinearizationAbsQr, linearization_abs_sc::LinearizationAbsSc,

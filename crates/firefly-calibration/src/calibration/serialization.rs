@@ -1,6 +1,4 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Cereal JSON field layout from original `serialization/headers_serialization.h`.
+//! Cereal JSON calibration field layout.
 use crate::{
     calibration::{Calibration, MocapCalibration},
     camera::{

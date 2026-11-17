@@ -1,6 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause AND MPL-2.0
-//! Original `src/kitti_eval.cpp`: KITTI segment evaluation and trajectory I/O.
 use crate::utils::sophus_utils::se3_inverse;
 use crate::utils::sophus_utils::se3_product;
 use crate::utils::sophus_utils::so3_from_quaternion;
@@ -60,9 +57,6 @@ pub fn read_poses(input: impl BufRead) -> io::Result<Vec<Isometry3<f64>>> {
     Ok(poses)
 }
 
-// Eigen Quaternion matrix construction, MPL-2.0; see the license index.
-// Copyright (C) 2008-2010 Gael Guennebaud <gael.guennebaud@inria.fr>
-// Copyright (C) 2009 Mathieu Gautier <mathieu.gautier@cea.fr>
 fn matrix_quaternion(matrix: &Matrix3<f64>) -> Quaternion<f64> {
     let mut coefficients = [0.; 4];
     let mut t = matrix.trace();

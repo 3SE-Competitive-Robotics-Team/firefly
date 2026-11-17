@@ -1,8 +1,5 @@
-//! 像素处理工作线程：接收 GPU 灰度 + 深度线性化/噪声。
-//!
-//! iceoryx2 发布端口在工作线程内创建和使用。
-//!
-//! 深度退化由 `depth_noise` 配置，在线测量施加噪声；离线地图路标使用理想几何深度标签。
+//! IPC 发布端口在像素工作线程内创建和使用。
+//! 在线深度加入退化；离线路标使用理想几何深度标签。
 
 use crate::buffer::PooledBuffer;
 use crate::capture::CaptureTiming;

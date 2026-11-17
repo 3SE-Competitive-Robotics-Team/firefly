@@ -1,8 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause AND MPL-2.0
-//! Original Basalt `linearization/landmark_block_abs_dynamic.hpp`.
-//! Landmark references are passed explicitly at linearization and back-substitution
-//! instead of retaining C++ raw pointers across the solver's cost evaluation.
 use super::landmark_block::{Options, RelPoseLin, State};
 use crate::{
     utils::{
@@ -525,7 +520,6 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
     }
 }
 
-// Real specialization of Eigen 5.0.1 JacobiRotation::makeGivens, MPL-2.0.
 #[expect(
     clippy::many_single_char_names,
     reason = "Uses the original Givens rotation notation"

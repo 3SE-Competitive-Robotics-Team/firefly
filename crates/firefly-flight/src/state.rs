@@ -1,5 +1,3 @@
-//! 机体状态与控制输出、六自由度积分。
-
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 
 use crate::{G, params::QuadParams};
@@ -16,7 +14,6 @@ pub struct Wrench {
     pub torque: Vector3<f32>,
 }
 
-/// 六自由度机体状态。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct QuadState {
     /// 世界系位置（m）。

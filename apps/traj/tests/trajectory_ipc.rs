@@ -1,4 +1,3 @@
-//! planner 与独立 traj release 应用的真实 IPC 验证，需要独占规划相关话题。
 use firefly_pubsub::{
     navigation::{NAVIGATION_TOPIC, NavigationMessage},
     node::create_node,

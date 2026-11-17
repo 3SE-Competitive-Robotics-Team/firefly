@@ -84,7 +84,7 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
     }
 
     /// 以自定义话题名创建**带事件唤醒**的发布器：publish 成功后自动通知
-    /// 同名 event service（订阅端把 [`firefly_pubsub::event::TopicListener`]
+    /// 同名 event service（订阅端把 [`crate::event::TopicListener`]
     /// 挂进 `WaitSet` 即到即醒；无监听者时通知静默丢弃）。
     ///
     /// # Errors

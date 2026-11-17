@@ -1,7 +1,3 @@
-//! 被控对象真值状态（`Firefly/PlantState`）与机体/执行器描述（`Firefly/Airframe`）。
-//!
-//! 机体参数由被控对象统一发布，飞控订阅后装配控制器。
-
 use iceoryx2::prelude::*;
 
 pub const PLANT_STATE_TOPIC: &str = "Firefly/PlantState";
@@ -14,7 +10,7 @@ pub const PLANT_STATE_BUFFER_SIZE: usize = 8;
 pub const AIRFRAME_BUFFER_SIZE: usize = 4;
 
 /// 被控对象状态（真值）：位置/速度世界系，姿态为**机体→世界** Hamilton
-/// 四元数 `[x,y,z,w]`（与 [`firefly_flight::QuadState`] 同约定），角速度机体系。
+/// 四元数 `[x,y,z,w]`（与 `firefly_flight::QuadState` 同约定），角速度机体系。
 ///
 /// 本消息仅供评测与可视化，禁止用于控制、初始化或健康判据。
 #[repr(C)]

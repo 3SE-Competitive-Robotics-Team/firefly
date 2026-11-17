@@ -1,5 +1,3 @@
-//! 地图类型与空间查询。
-
 /// 单个 3D 路标：全局坐标 + 库图 2D 观测 + ALIKED 描述子（`PnP` 的 3D 侧）。
 #[derive(Debug, Clone)]
 pub struct VisionMapPoint {
@@ -24,7 +22,6 @@ pub struct VisionKeyFrame {
     pub position: [f64; 3],
     /// 全局姿态四元数 `[x, y, z, w]`。
     pub quat_xyzw: [f64; 4],
-    /// 本帧路标。
     pub points: Vec<VisionMapPoint>,
 }
 
@@ -36,13 +33,11 @@ pub struct VisionMap {
 }
 
 impl VisionMap {
-    /// 新建空地图。
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 路标总数（诊断用）。
     #[must_use]
     pub fn num_points(&self) -> usize {
         self.frames.iter().map(|f| f.points.len()).sum()

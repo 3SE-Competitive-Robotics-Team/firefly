@@ -1,6 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Dataset feeds and state collection corresponding to original `src/vio.cpp`.
 use firefly_basalt::imu::imu_types::ImuData;
 use firefly_basalt::imu::imu_types::PoseVelBiasState;
 use firefly_basalt::serialization::eigen_io::EigenMatrix;

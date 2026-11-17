@@ -1,5 +1,3 @@
-//! 障碍邻域计数、占据变化同步与膨胀查询。
-
 use super::window::wrap_index;
 use super::{GRID_MAP_OBS_FLAG, GridMap};
 use nalgebra::Vector3;

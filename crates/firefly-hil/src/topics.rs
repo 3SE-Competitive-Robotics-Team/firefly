@@ -1,7 +1,3 @@
-//! HIL 唯一 IPC 路由登记：两端共享类型、话题、队列与连续性策略。
-//!
-//! 新业务消息在协议中定义后，只在 routes! 登记一次；主机和板端通过
-//! open / drain / publish 接入。图像与 IMU 保留各自的分片和批次调度。
 use crate::protocol::{Kind, Message};
 use firefly_pubsub::{
     activity::ActivityMessage,

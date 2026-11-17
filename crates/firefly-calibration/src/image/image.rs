@@ -1,7 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// Copyright (c) 2011 Steven Lovegrove (Pangolin image container).
-// SPDX-License-Identifier: BSD-3-Clause AND MIT
-// License notices and conditions are indexed in docs/licenses/README.md.
 //! Image views with stride in pixels. Empty reductions return `None`;
 //! signed integer arithmetic wraps on overflow.
 

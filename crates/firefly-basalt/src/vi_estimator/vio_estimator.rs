@@ -1,6 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Original `vi_estimator/vio_estimator.h` and `src/vi_estimator/vio_estimator.cpp`.
 use crate::imu::imu_types::ImuData;
 use crate::imu::imu_types::PoseVelBiasState;
 use crate::{optical_flow::OpticalFlowResult, utils::imu_types::MargData};

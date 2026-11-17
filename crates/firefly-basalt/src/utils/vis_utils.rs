@@ -1,7 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Original `utils/vis_utils.h` geometry and colors, without an OpenGL context.
-//! The caller submits the returned primitives to its renderer.
 use nalgebra::{Matrix4, Vector3};
 
 pub const CAM_COLOR: [u8; 3] = [250, 0, 26];

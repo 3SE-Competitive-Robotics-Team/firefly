@@ -1,5 +1,3 @@
-//! 最小 TOML 应用：命令行 → 公共启动入口 → 已校验配置 → 运行。
-
 use firefly_error::{Error, ErrorKind, Result};
 use serde::Deserialize;
 

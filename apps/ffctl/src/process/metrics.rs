@@ -1,6 +1,4 @@
-//! 进程占用采样：直接读 `/proc/<pid>/stat` 与 `/proc/<pid>/statm`。
-//!
-//! 只在 Linux 目标上有数据；macOS 上 `/proc` 不存在，读取失败时调用方显示 `-`。
+//! 进程占用仅在 Linux 上从 `/proc` 采样；读取失败时调用方显示 `-`。
 
 use std::fs;
 use std::time::Duration;

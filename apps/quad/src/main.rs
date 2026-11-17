@@ -1,5 +1,3 @@
-//! 微无人机第三人称飞行游戏（独立，不接 IPC / VIO）。
-
 mod config;
 mod quad;
 

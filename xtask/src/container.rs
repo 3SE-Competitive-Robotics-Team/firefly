@@ -1,11 +1,4 @@
-//! 机载构建：在 Apple container 里用 aarch64 Debian trixie 原生编译。
-//!
-//! 基础镜像固定到 digest，系统 glibc 2.41 与 Orange Pi Zero 3W 一致；ONNX Runtime
-//! 静态库因此不需要交叉 sysroot。构建产物在 `target/container/aarch64/release`。
-//!
-//! 构建镜像在基础镜像上加装 `libclang-dev`：`v4l` 依赖的 `v4l2-sys-mit` 用 bindgen
-//! 生成 V4L2 绑定，需要 libclang 的共享库。`Containerfile` 由基础镜像常量生成，
-//! 保证 digest 只有一处来源。
+//! 原生 aarch64 Debian 构建；`v4l2-sys-mit` 的 bindgen 需要 `libclang-dev`。
 
 use std::fs;
 use std::path::Path;
@@ -17,7 +10,6 @@ pub const IMAGE: &str =
 const TOOLCHAIN: &str = "1.100.0";
 /// Apple container 默认只给约 1GB，release 并行编译会被 OOM kill。
 const MEMORY: &str = "8G";
-/// 派生构建镜像的仓库名。
 const BUILDER_IMAGE: &str = "firefly-board-builder";
 
 pub fn build(root: &Path, apps: &[&str], with_unpacker: bool) -> Result<(), String> {

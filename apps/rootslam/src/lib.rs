@@ -1,4 +1,3 @@
-//! Dataset execution for the original Basalt estimator and `RootSLAM`.
 pub mod config;
 pub mod dataset;
 pub mod dataset_app;

@@ -1,8 +1,9 @@
 # Repository license references
 
-Full license texts and notices are collected under this directory. Source files
-retain their SPDX identifiers and copyright attributions; package SPDX
-expressions remain in their Cargo manifests.
+Full license texts, copyright notices and upstream provenance are collected under
+this directory. [File-level notices](source-notices.md) map source files to their
+applicable declarations; package SPDX expressions remain in their Cargo manifests.
+Source distributions include this directory and the repository README.
 
 | Package or component | License metadata | License text |
 |---|---|---|

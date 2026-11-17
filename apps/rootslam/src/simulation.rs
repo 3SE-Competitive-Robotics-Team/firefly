@@ -1,4 +1,3 @@
-//! Headless queue execution of original Basalt `vio_sim.cpp`.
 use crate::dataset::EndMarker;
 use firefly_basalt::imu::imu_types::PoseVelBiasState;
 use firefly_basalt::{

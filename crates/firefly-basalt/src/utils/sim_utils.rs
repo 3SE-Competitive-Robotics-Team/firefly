@@ -1,6 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Original `utils/sim_utils.h`: simulated image observations.
 use nalgebra::Vector2;
 use serde::{Deserialize, Serialize};
 

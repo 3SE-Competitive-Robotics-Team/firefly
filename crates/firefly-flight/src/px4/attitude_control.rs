@@ -1,17 +1,6 @@
-//! PX4 四元数姿态控制器（`AttitudeControl`）。
-//!
-//! 参考实现：PX4-Autopilot 提交 `4dbd2e069a5c30c2e53e47e842095d2576dc38c4`
-//! 的 `src/modules/mc_att_control/AttitudeControl/AttitudeControl.hpp` 与
-//! `src/modules/mc_att_control/AttitudeControl/AttitudeControl.cpp`（BSD-3-Clause）。
-//!
-//! 结构：二阶临界阻尼参考模型（ZOH 精确离散）→ 参考姿态的 P 控制 → 角速率前馈。
-//! 偏航权重、逐轴速率限幅、前馈增益与限幅、`omega_command` 的偏航解耦均与 PX4 一致。
-//! 保持 NED 世界系 / FRD 机体系约定；输入/输出均为机体角速率。
-//!
-//! 辅助函数：`quat_canonical_px4` 与 `quat_from_two_vectors_px4` 分别复刻 PX4
-//! `Quatf::canonical()`（按首个非零分量定符号）与 `Quatf(v0, v1)`（反向平行时取正交轴
-//! 180° 旋转）。`types::quat_canonical` / `types::quat_from_two_vectors` 在 180° 边界上
-//! 分别退化为按标量符号/单位四元数，因此在本模块内私有补齐。
+//! 二阶临界阻尼参考模型 → 姿态 P 控制 → 角速度前馈。
+//! 姿态输入为 FRD→NED 四元数，输出为 FRD 机体系角速率（rad/s）。
+//! 私有四元数助手保留 PX4 按首个非零分量定符号、反向平行时取正交轴 180° 旋转的约定。
 
 #![allow(
     clippy::assign_op_pattern,
@@ -74,8 +63,6 @@ impl AttitudeControl {
         }
     }
 
-    /// 设置姿态 P 增益与偏航权重。
-    ///
     /// - `proportional_gain`：各轴增益 [rad/s per rad]
     /// - `yaw_weight`：偏航权重，内部限幅到 [0, 1]；非零时把偏航增益按 `1/yaw_weight`
     ///   预补偿，使 `update` 中的偏航缩放后的实际增益保持不变。
@@ -299,7 +286,6 @@ mod tests {
 
     /// 参考实现的设定点频率（Hz）对应的周期（秒）。
     const K_DT: f32 = 0.004;
-    /// 参考模型收敛所需的仿真步数。
     const K_SETTLE_STEPS: usize = 500;
 
     fn assert_near(actual: f32, expected: f32, tol: f32) {

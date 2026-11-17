@@ -1,5 +1,3 @@
-//! Serialize complete USB mode transitions, including their final state markers.
-
 use std::{fs, path::Path};
 
 pub fn lock(directory: &Path) -> Result<fs::File, String> {

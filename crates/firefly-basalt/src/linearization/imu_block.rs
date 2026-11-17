@@ -1,5 +1,3 @@
-// Source: original Basalt 0f3b2b52c807f70ff4e2973ce253c73329eea7bc,
-// include/basalt/linearization/imu_block.hpp; repository BSD-3-Clause license.
 //! Whitened inertial and bias random-walk rows for two adjacent states.
 
 use crate::imu::preintegration::IntegratedImuMeasurement;

@@ -1,5 +1,3 @@
-//! 错误状态：显式的重试语义。
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorStatus {
     Permanent,

@@ -1,8 +1,3 @@
-//! planner 接入：Odometry + 深度/目标 → 自持占据地图 + FSM → 完整轨迹。
-//! FSM 为 100Hz，安全检查为 20Hz；完整轨迹交给独立 traj app 采样输出。
-//! Odometry 失联或无效状态锁存停止输出。
-//! 地图融合超时触发急停并禁用 fail-safe；真值不进入规划状态链路。
-
 mod config;
 mod depth_mapping;
 mod map_input;

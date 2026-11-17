@@ -1,5 +1,3 @@
-//! PX4 控制链的闭环不变量（与 `apps/fc` 相同的接线：控制器 → 电机 → 刚体）。
-
 use firefly_flight::{
     Airframe, Command, Controller, FlightFsm, FlightState, FsmParams, G, Health, PositionSetpoint,
     Px4Params, QuadParams, QuadState, Wrench, integrate,

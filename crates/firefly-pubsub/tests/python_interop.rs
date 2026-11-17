@@ -1,5 +1,3 @@
-//! Rust/Python 消息、用户头与事件互通；使用隔离话题，不依赖仿真资产。
-
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 

@@ -1,4 +1,3 @@
-//! Visual-inertial estimator components translated from original Basalt.
 pub mod ba_base;
 pub mod landmark_database;
 pub mod local_map;

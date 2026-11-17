@@ -1,9 +1,5 @@
-//! 对 m 维 s 阶积分链（本系统 s = 3，最小加加速度），
-//! M 段轨迹，每段 2s−1 = 5 次多项式，整体 C^{s−1} 连续。
-//!
-//! 核心映射（MINCO 论文 Theorem 2，Eq. 48–55）：
-//! `M(T) c = b(q)`，M 为块下双对角带形矩阵，c 由带形 LU 求解。
-//! 参数 {q, T} 与系数 c 之间可线性复杂度地传播梯度。
+//! 最小 jerk 参数化使用五次多项式，段间位置、速度、加速度连续。
+//! 系数与梯度映射对应 MINCO Theorem 2、Eq. 48–55；整体参数化见 [`crate`]。
 
 use crate::banded::{BandedMatrix, BandedSolver};
 use nalgebra::DMatrix;

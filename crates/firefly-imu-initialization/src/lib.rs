@@ -1,5 +1,3 @@
-//! Shared stationary gravity sampling for visual-inertial estimators.
-
 use nalgebra::{UnitQuaternion, Vector3};
 
 const MIN_DURATION_NS: i128 = 100_000_000;

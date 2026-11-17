@@ -1,5 +1,3 @@
-//! 派生占据状态、固定先验、观测重置与虚拟墙查询。
-
 use super::{GridMap, VirtualWall, VoxelState};
 use nalgebra::Vector3;
 

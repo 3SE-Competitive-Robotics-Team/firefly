@@ -1,4 +1,3 @@
-//! 下视识别应用入口；标定、离线导出和在线生命周期由对应模块拥有。
 mod config;
 mod model;
 mod offline;

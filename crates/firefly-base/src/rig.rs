@@ -1,22 +1,12 @@
-//! RMUC 传感器 rig 几何的**唯一来源**：机体 ↔ 左目 ↔ 右目 ↔ 深度相机。
-//!
-//! `render`（成像）、`firefly-map`（深度射线）、`firefly-vision-match`（库图定位）
-//! 与 `firefly-rootslam`（估计器外参）全部从这里派生，不得再各自复制数值。
-//!
-//! # 约定
-//! - 机体 `BODY`：`+x` 前、`+y` 左、`+z` 上（与 `MuJoCo` 一致）。
-//! - 相机（本模块 canonical 约定，与 `render`/`firefly-map` 一致）：`+x` 图右、
-//!   `+y` 图上、光轴为 `−z`；图右对应机体 `−y`，光轴下倾 [`DOWNTILT_DEG`]。
-//! - 视觉/估计器使用的 CV 光学约定（`+x` 右、`+y` 下、`+z` 前）与之相差
-//!   [`CV_FROM_RENDER`]（绕 x 轴 180°）。
+//! 机体 `BODY`：`+x` 前、`+y` 左、`+z` 上（与 `MuJoCo` 一致）。
+//! 相机：`+x` 图右、`+y` 图上、光轴 `−z`；图右对应机体 `−y`，光轴下倾 [`DOWNTILT_DEG`]。
+//! CV 光学约定（`+x` 右、`+y` 下、`+z` 前）经 [`CV_FROM_RENDER`]（绕 x 轴 180°）转换。
 
 use nalgebra::{Matrix3, UnitQuaternion, Vector3};
 
 use crate::frames::{FrameId, FrameTree, RigidTransform};
 
-/// 相机下倾角（度）。
 pub const DOWNTILT_DEG: f64 = 20.0;
-/// 垂直视场（度）。
 pub const FOV_Y_DEG: f64 = 70.88;
 /// 双目基线（米，沿机体 y）。
 pub const BASELINE: f64 = 0.05;
@@ -44,7 +34,6 @@ pub fn principal_point(width: usize, height: usize) -> [f64; 2] {
     [(width as f64 - 1.0) / 2.0, (height as f64 - 1.0) / 2.0]
 }
 
-/// rig 的四个相机坐标系。
 pub const CAMERAS: [FrameId; 4] = [
     FrameId::LEFT_CAMERA,
     FrameId::RIGHT_CAMERA,

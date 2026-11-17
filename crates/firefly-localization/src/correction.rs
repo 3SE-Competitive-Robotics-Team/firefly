@@ -1,4 +1,3 @@
-//! 地图坐标切换策略：对齐变化超过门限才提交新坐标系。
 use firefly_error::{Error, ErrorKind, Result};
 
 /// 对齐修正的提交门限，长度为米，角度为弧度。

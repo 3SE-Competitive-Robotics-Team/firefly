@@ -1,5 +1,3 @@
-//! `ffctl` 的 CLI 契约：用法错误、帮助与规格，用 `usage-rs` 自带的测试驱动跑真二进制。
-
 #[test]
 fn top_level_lists_domains() {
     let out = usage_rs::test::command!("ffctl", "--help").assert_success();

@@ -1,5 +1,3 @@
-//! 栅格配置、参数校验与缓冲初始化。
-
 use super::{GridMap, VirtualWall};
 use firefly_error::{Error, ErrorKind};
 use nalgebra::Vector3;

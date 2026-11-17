@@ -1,4 +1,3 @@
-//! Versioned numerical inputs for replaying global BA.
 use crate::{
     global_optimization::{
         KrylovPrecision, OptimizationOptions, OptimizationResult, Precision, optimize_global,

@@ -1,8 +1,4 @@
-//! 帧收发：分片、重组与流式读取。
-//!
-//! 一个端点是一条字节流；每条消息按 [`MAX_FRAGMENT`] 切成若干帧，帧头记录
-//! 分片下标与总数。接收端只在全部分片到齐后解码，任一分片缺失、乱序或跨会话
-//! 都丢弃整条消息并计数，不把截断图像或半个 IMU 批次交给算法。
+//! 接收端只在消息的全部分片到齐后解码；分片缺失、乱序或跨会话时丢弃整条消息并计数。
 
 use std::io::{self, Read, Write};
 
@@ -19,12 +15,10 @@ use crate::protocol::{
     Header, Kind, MAX_FRAGMENT, MAX_MESSAGE, Message, decode_header, encode_header,
 };
 
-/// 一次完整读取的结果：帧头与解码后的消息。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
     /// 该消息首片的帧头（分片信息已归一化为单条消息）。
     pub header: Header,
-    /// 解码后的消息。
     pub message: Message,
 }
 
@@ -45,7 +39,6 @@ impl<W: Write> FrameWriter<W> {
         }
     }
 
-    /// 当前会话号。
     #[must_use]
     pub const fn session(&self) -> u64 {
         self.session
@@ -57,7 +50,6 @@ impl<W: Write> FrameWriter<W> {
         self.seq = 0;
     }
 
-    /// 解包底层写入器。
     pub fn into_inner(self) -> W {
         self.inner
     }
@@ -171,7 +163,6 @@ pub struct FrameReader<R: Read> {
 }
 
 impl<R: Read> FrameReader<R> {
-    /// 创建读取器。
     pub const fn new(inner: R) -> Self {
         Self {
             inner,
@@ -188,7 +179,6 @@ impl<R: Read> FrameReader<R> {
         self.dropped
     }
 
-    /// 解包底层读取器。
     pub fn into_inner(self) -> R {
         self.inner
     }

@@ -1,12 +1,4 @@
-//! PX4 `PositionControl` 的 1:1 移植：位置 P 控制 + 速度 PID 控制。
-//!
-//! 来源：PX4-Autopilot 提交 `4dbd2e069a5c30c2e53e47e842095d2576dc38c4` 的
-//! `src/modules/mc_pos_control/PositionControl/PositionControl.hpp`、
-//! `PositionControl.cpp` 与 `PositionControlTest.cpp`，BSD-3-Clause 许可。
-//!
-//! 约定：世界系 NED、机体系 FRD；位置 m，速度 m/s，加速度 m/s²，角度 rad，
-//! 角速度 rad/s；推力按最大集体推力归一化（无量纲，机体系 z 分量向上为负）。
-//! 设定值中的 NAN 表示该分量未设定。
+//! 设定值中的 `NaN` 表示分量未设定；坐标、单位与归一化约定见 [`super::types`]。
 
 use super::control_math::{
     add_if_not_nan_vector3f, constrain_xy, limit_tilt, replace_nonfinite_with_zero,
@@ -297,7 +289,6 @@ impl PositionControl {
         valid
     }
 
-    /// 位置比例控制。
     fn position_control(&mut self) {
         let mut vel_sp_position = (self.pos_sp - self.pos).component_mul(&self.gain_pos_p);
         add_if_not_nan_vector3f(&mut self.vel_sp, vel_sp_position);

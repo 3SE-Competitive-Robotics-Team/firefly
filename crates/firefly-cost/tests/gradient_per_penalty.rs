@@ -1,5 +1,4 @@
-//! 逐项验证：每个 penalty 的 dF/dc 与系数空间中心差分对比。
-//! 用于定位累加器错误，也是长期回归测试。
+//! 每项惩罚的 dF/dc 与系数空间中心差分对比。
 
 use firefly_cost::{Accumulator, FeasibilityPenalty, ObstaclePenalty, Penalty, SmoothnessPenalty};
 use firefly_map::Plane;

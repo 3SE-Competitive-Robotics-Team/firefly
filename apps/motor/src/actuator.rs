@@ -1,5 +1,3 @@
-//! `sysfs` PWM 输出、`Control` 订阅与 `Airframe` 发布。
-
 use std::error::Error;
 use std::fs::{self, File};
 use std::os::unix::fs::FileExt;
@@ -35,7 +33,6 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
-    /// 控制输出速率（Hz）。
     #[serde(default = "default_rate_hz")]
     rate_hz: f64,
     /// `Control` 断流判定（ms）；超过即回到零推力脉宽。

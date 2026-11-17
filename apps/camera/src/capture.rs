@@ -1,5 +1,3 @@
-//! `V4L2` 采集主循环与配置。
-
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};

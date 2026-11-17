@@ -29,12 +29,10 @@ def test_tessellate_sample(tmp_path: Path) -> None:
     assert len(colors) == len(faces)
     assert manifest["n_triangles"] == len(faces)
 
-    # 归一化：x/y 居中（包围盒关于 0 对称），z 底置 0。
     assert abs(float(vertices[:, 0].min() + vertices[:, 0].max())) < 1e-4
     assert abs(float(vertices[:, 1].min() + vertices[:, 1].max())) < 1e-4
     assert abs(float(vertices[:, 2].min())) < 1e-4
 
-    # 逐面颜色保留：至少各有红/蓝面子集。
     assert ((colors[:, 0] > 0.5) & (colors[:, 1] < 0.1)).any()
     assert ((colors[:, 2] > 0.5) & (colors[:, 0] < 0.1)).any()
 

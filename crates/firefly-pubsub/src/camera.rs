@@ -1,7 +1,5 @@
-//! 图像消息（双目灰度、下视灰度与深度）及话题。
-//!
 //! 双目/深度使用 [`IMAGE_WIDTH`] × [`IMAGE_HEIGHT`]，下视使用
-//! [`DOWN_WIDTH`] × [`DOWN_HEIGHT`]；订阅端按对应的定长消息接收。
+//! [`DOWN_WIDTH`] × [`DOWN_HEIGHT`]；订阅端按对应定长消息接收。
 
 use iceoryx2::prelude::*;
 

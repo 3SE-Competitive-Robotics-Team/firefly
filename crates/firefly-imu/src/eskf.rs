@@ -1,6 +1,3 @@
-//! 姿态 ESKF：Robo-Rust `eskf_imu.rs` 的名义/误差状态接口，采用 Solà 右误差方程。
-//! 加计 NIS 对照 `WangHongxi2001` `QuaternionEKF.c::IMU_QuaternionEKF_xhatUpdate`。
-
 use crate::{Options, invalid};
 use firefly_base::se3::{jr_so3, skew};
 use firefly_error::Result;

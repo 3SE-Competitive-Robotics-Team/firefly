@@ -1,18 +1,6 @@
-//! 版本化消息协议：固定 48 字节帧头 + 按类型编码的消息体。
-//!
-//! 两个方向各自独占端点，消息类型与端点绑定：
-//!
-//! | 端点 | 方向 | 消息 |
-//! |---|---|---|
-//! | 传感器 | 主机 → 板端 | `Imu`、`GrayLeft`、`GrayRight`、`Depth`、`Airframe`、`Hello`、`Command`、`Goal`、`Activity`、`ImageChunk`、`Ping`、`Bye` |
-//! | 执行器 | 板端 → 主机 | `HelloAck`、`Control`、`Odometry`、`CorrectedOdometry`、`VioAttitude`、`Reference`、`PlannerStatus`、`LandingTarget`、`Navigation`、`Viz`、`Voxels`、`Scalar`、`Log`、`Stats`、`Pong` |
-//!
-//! 所有多字节字段为小端。大消息在 [`crate::frame`] 层按
-//! [`MAX_FRAGMENT`] 分片，接收端按序号重组；任一分片缺失或次序异常即丢弃
-//! 整条消息并计数，不把截断图像当有效测量。
-//!
-//! `capture_time` 与消息体里的时间戳都取自发布端的同一时钟域。板端算法消费的
-//! 传感器与状态时间沿用仿真时间轴；板端判断新鲜度只用本机单调时钟的到达时刻。
+//! 帧头长度为 [`HEADER_LEN`]，所有多字节字段为小端；消息方向由 [`Kind::link`] 定义。
+//! 大消息的分片与重组契约见 [`crate::frame`]。
+//! 传感器与状态消息沿用仿真时间轴；跨机新鲜度由接收端按本机单调时钟判断。
 
 use std::io;
 
@@ -364,7 +352,6 @@ pub struct HelloAck {
     pub status: u8,
     /// 板端本次上电会话号（用于识别板端重启）。
     pub board_session: u64,
-    /// 板端系统运行时长（秒）。
     pub uptime_s: f64,
 }
 

@@ -1,5 +1,3 @@
-//! 机体可视化：`drone.glb` 模型 + 前向标记。
-
 use std::f32::consts::FRAC_PI_2;
 
 use bevy::gltf::GltfAssetLabel;

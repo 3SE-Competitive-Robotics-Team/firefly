@@ -1,9 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-// See docs/licenses/README.md.
-//! Translation of `include/basalt/utils/imu_types.h`, original Basalt
-//! `0f3b2b52c807f70ff4e2973ce253c73329eea7bc`.
-
 use crate::imu::imu_types::PoseState;
 use crate::imu::imu_types::PoseVelBiasState;
 use crate::imu::preintegration::IntegratedImuMeasurement;

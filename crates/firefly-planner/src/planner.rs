@@ -1,5 +1,3 @@
-//! EGO 规划器（Rebound 主循环）。
-
 use firefly_cost::{
     FeasibilityPenalty, FormationPenalty, MincoCost, ObstaclePenalty, SwarmPenalty,
 };
@@ -606,7 +604,6 @@ impl Planner {
     }
 
     #[allow(clippy::many_single_char_names)]
-    /// 单段最大加加速度（jerk），同范式扩展。
     fn piece_max_jerk(traj: &Trajectory, piece: usize, dur: f64) -> f64 {
         // nJer = T³·jer(Tu)=6c3T³+24c4T⁴u+60c5T⁵u²，降幂 [60c5T⁵,24c4T⁴,6c3T³]
         let coeffs = traj.coefficients();

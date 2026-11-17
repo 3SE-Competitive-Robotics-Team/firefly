@@ -1,4 +1,3 @@
-//! 识别宿主的工作资源生命周期与图像处理。
 use crate::{RUNNING, Result, config::Config, model, tracking};
 use firefly_pubsub::{
     activity::{ACTIVITY_TOPIC, ActivityReceiver, LANDING},

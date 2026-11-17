@@ -1,6 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Native cereal overloads from official `include/basalt/io/dataset_io.h`.
 use super::dataset_io::{AccelData, GyroData};
 use crate::utils::common_types::CerealBinary;
 use firefly_calibration::image::image::ManagedImage;

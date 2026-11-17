@@ -1,4 +1,3 @@
-//! 官方公式数值对照与最终输出契约；期望值独立于被测实现。
 use super::*;
 use firefly_cost::Cost;
 use firefly_optimize::Objective;

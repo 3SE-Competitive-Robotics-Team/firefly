@@ -1,7 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Translation of `spline/se3_spline.h` at headers revision
-//! `aa441ba3e51050c47ba1902537792a2e4db7e43d`.
 use super::so3_spline::{Jacobian as So3Jacobian, So3Spline};
 use crate::utils::sophus_utils::{
     hat, left_jacobian_so3, so3_exp, so3_inverse, so3_log, so3_matrix, so3_product,

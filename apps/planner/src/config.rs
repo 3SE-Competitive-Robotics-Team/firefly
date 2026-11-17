@@ -1,5 +1,3 @@
-//! `configs/planner.toml` 的参数定义；缺失字段使用对应类型的默认值。
-
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_planner::{ManagerOptions, PlannerConfig};
 use serde::Deserialize;
@@ -61,7 +59,6 @@ mod tests {
         assert!((cfg.manager.replan_thresh - DEFAULT_REPLAN_THRESH).abs() < 1e-12);
     }
 
-    /// 缺键回落默认值（最小化配置合法）。
     #[test]
     fn partial_file_falls_back_to_defaults() {
         let cfg: PlannerToml = toml::from_str("max_velocity = 2.0").unwrap();

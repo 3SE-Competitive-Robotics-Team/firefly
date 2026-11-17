@@ -1,7 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Translation of `include/basalt/io/dataset_io_euroc.h` at
-//! `0f3b2b52c807f70ff4e2973ce253c73329eea7bc`.
 use super::{
     dataset_common::{self as common, Records},
     dataset_io::{AccelData, DatasetIoInterface, GyroData, ImageData, VioDataset, VioDatasetPtr},

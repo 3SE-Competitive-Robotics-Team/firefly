@@ -1,5 +1,3 @@
-//! 飞控进程：1kHz 控制环（`firefly-flight`）+ iceoryx2。
-
 mod attitude;
 mod config;
 mod frames;

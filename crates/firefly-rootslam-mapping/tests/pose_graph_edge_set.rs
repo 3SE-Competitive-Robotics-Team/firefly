@@ -1,10 +1,6 @@
-//! The optimization edge set holds the measurement-bearing edges only.
-//!
-//! The covisibility graph and its spanning forest restate the relative poses
-//! the map holds right now, so their residual is zero by construction and they
-//! contribute stiffness only. Treating them as constraints would pin the map
-//! to its present shape and suppress the loop correction that the pose-graph
-//! optimizer exists to distribute.
+//! The pose graph uses measurement-bearing edges only.
+//! Covisibility and spanning-forest edges derive from current poses: their residual
+//! is zero, so they add stiffness and suppress the loop correction.
 use firefly_rootslam_mapping::{
     global_optimization::{OptimizationOptions, optimize_pose_graph},
     map::{MapKeyframe, MapSnapshot},

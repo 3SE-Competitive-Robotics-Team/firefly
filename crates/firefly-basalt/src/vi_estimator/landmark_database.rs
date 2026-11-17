@@ -1,9 +1,4 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-// See docs/licenses/README.md.
-//! `include/basalt/vi_estimator/landmark_database.h` and
-//! `src/vi_estimator/landmark_database.cpp`, upstream
-//! `0f3b2b52c807f70ff4e2973ce253c73329eea7bc`.
+//! Landmark observations indexed by host and target frames.
 
 use crate::utils::common_types::FrameId;
 use firefly_calibration::observation::TimeCamId;

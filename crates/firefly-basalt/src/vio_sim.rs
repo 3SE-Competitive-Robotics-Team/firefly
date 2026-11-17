@@ -1,7 +1,5 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause AND MPL-2.0
-//! Original `src/vio_sim.cpp` simulation, with drawing and queue consumers owned
-//! by the caller. Random streams reproduce the Linux/glibc/libstdc++ reference.
+//! Random streams reproduce the Linux/glibc/libstdc++ reference;
+//! drawing and queue consumers are caller-owned.
 use crate::imu::imu_types::ImuData;
 use crate::spline::se3_spline::Se3Spline;
 use crate::utils::sophus_utils::se3_inverse;
@@ -130,9 +128,8 @@ impl EigenRandom {
         value >> 1
     }
     pub(crate) fn sample(&mut self) -> f64 {
-        // Copyright (C) 2024 Charles Schlosser <cs.schlosser@gmail.com>
         // Eigen 5 RandomImpl fills the 52 mantissa bits using two 31-bit
-        // rand() draws, then maps [2,4) to [-1,1). MPL-2.0, see crate license.
+        // rand() draws, then maps [2,4) to [-1,1).
         let low = u64::from(self.next());
         let high = u64::from(self.next());
         let bits = (low | (high << 31)) & 0x000f_ffff_ffff_ffff;

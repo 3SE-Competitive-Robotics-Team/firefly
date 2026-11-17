@@ -1,9 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause AND MPL-2.0
-// License notices and conditions are indexed in docs/licenses/README.md; see also the notice next to the LDLT helper.
-//! Translation of `include/basalt/imu/preintegration.h` at
-//! `aa441ba3e51050c47ba1902537792a2e4db7e43d`.
-
 use super::imu_types::{ImuData, PoseVelState};
 use crate::utils::sophus_utils::{
     hat, left_jacobian_inv_so3, right_jacobian_inv_so3, right_jacobian_so3, so3_exp, so3_inverse,
@@ -316,14 +310,6 @@ impl<S: BasaltScalar> IntegratedImuMeasurement<S> {
     }
 }
 
-// Real 9x9 specialization of Eigen 3.4.0 LDLT.h factorization and triangular solve.
-// Copyright (C) 2008-2011 Gael Guennebaud <gael.guennebaud@inria.fr>
-// Copyright (C) 2009 Keir Mierle <mierle@gmail.com>
-// Copyright (C) 2009 Benoit Jacob <jacob.benoit.1@gmail.com>
-// Copyright (C) 2011 Timothy E. Holy <tim.holy@gmail.com>
-// This Source Code Form is subject to the terms of the Mozilla Public License,
-// v. 2.0. If a copy of the MPL was not distributed with this file, You can obtain
-// one at https://mozilla.org/MPL/2.0/.
 fn sqrt_inverse_ldlt<S: BasaltScalar>(mut matrix: Matrix9<S>) -> Matrix9<S> {
     let mut swaps = std::array::from_fn::<_, 9, _>(|i| i);
     for k in 0..9 {

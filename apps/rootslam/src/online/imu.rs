@@ -1,4 +1,3 @@
-//! Basalt queue and posterior adaptation for the event-driven IMU runtime.
 use super::{error, publish_pose_diagnostic, publish_scalar_diagnostic};
 use firefly_basalt::imu::imu_types::{ImuData, PoseVelBiasState};
 use firefly_error::Result;

@@ -1,5 +1,3 @@
-//! 有界墙钟计数器；按实际经过的时间计算 Hz。
-
 use std::time::{Duration, Instant};
 
 pub struct Rate {

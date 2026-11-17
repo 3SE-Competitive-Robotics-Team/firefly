@@ -1,4 +1,3 @@
-//! 真实 CAD 导出地图的消费端验收；从停机坪上空向前爬升避开台阶膨胀层。
 mod support;
 
 use firefly_map::MapFile;

@@ -1,7 +1,3 @@
-//! The map policy configuration surface.
-//!
-//! The pose-graph residual scale replaced a raw information matrix in the
-//! policy, so the accepted document shape is pinned here.
 use firefly_rootslam_mapping::{edge_information::EdgeInformation, map::MapPolicy};
 
 #[test]

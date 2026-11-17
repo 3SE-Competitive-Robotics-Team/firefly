@@ -1,4 +1,3 @@
-//! Camera models from the pinned original Basalt headers.
 pub mod bal_camera;
 pub mod double_sphere_camera;
 pub mod extended_camera;

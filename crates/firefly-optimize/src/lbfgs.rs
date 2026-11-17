@@ -1,5 +1,3 @@
-//! L-BFGS 优化器。
-
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::DVector;
 

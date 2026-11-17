@@ -1,4 +1,3 @@
-//! Linearization components translated from original Basalt.
 pub mod block_diagonal;
 pub mod imu_block;
 pub mod landmark_block;

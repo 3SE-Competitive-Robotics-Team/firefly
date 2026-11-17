@@ -1,5 +1,3 @@
-// Copyright (C) 2009 Thomas Capricelli <orzel@freehackers.org>
-// SPDX-License-Identifier: MPL-2.0
 //! Eigen/MINPACK LM iteration with forward `NumericalDiff` evaluation accounting.
 use super::LmParameters;
 use nalgebra::{DMatrix, DVector};

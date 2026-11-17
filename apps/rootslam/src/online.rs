@@ -1,4 +1,3 @@
-//! Online IPC adapter for the simulated camera and IMU topics.
 use crate::config::{Options, initial_vio_config};
 mod imu;
 use crate::input::SensorModel;

@@ -1,5 +1,3 @@
-//! 场景资产加载：`models/` 资产根 + 视觉 glTF。
-
 use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 

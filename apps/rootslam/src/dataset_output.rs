@@ -1,4 +1,3 @@
-//! Headless output formats and local-estimator statistics from original `vio.cpp`.
 use firefly_basalt::vi_estimator::vio_estimator::align_svd;
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{Isometry3, Vector3};

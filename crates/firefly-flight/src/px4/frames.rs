@@ -1,13 +1,7 @@
-//! 产品坐标与 PX4 内部坐标的边界转换。
-//!
 //! 产品：世界 `+Z` 上、机体 FLU（`+X` 前、`+Y` 左、`+Z` 上）。
 //! PX4：世界 NED、机体 FRD（`+X` 前、`+Y` 右、`+Z` 下）。
-//! 两个坐标系之间是同一个反射 `F = diag(1, -1, -1)`；它是对合的，
-//! 因此 `F⁻¹ = F`，位置、速度、加速度、角速度、力矩都用同一套换轴。
-//!
-//! 姿态按 `q_frd_ned = F · q_flu_world · F⁻¹` 共轭转换；航向角
-//! `yaw_ned = -yaw_flu`（绕相反的世界 z 轴）。所有转换只在本模块出现，
-//! 移植的 PX4 类保持 NED/FRD。
+//! 换轴矩阵 `F = diag(1, -1, -1)` 满足 `F⁻¹ = F`，向量均按 `F` 换基。
+//! 姿态按 `q_frd_ned = F · q_flu_world · F⁻¹` 共轭转换，航向 `yaw_ned = -yaw_flu`。
 
 use nalgebra::{UnitQuaternion, Vector3};
 
@@ -136,7 +130,6 @@ mod tests {
         let back = attitude_from_frd_ned(q_frd);
         let dot = back.into_inner().coords.dot(&q_flu.into_inner().coords);
         assert!((dot.abs() - 1.0).abs() < 1e-6);
-        // 航向角符号。
         assert!((yaw_of_frd_ned(q_frd) - yaw_to_ned(std::f32::consts::FRAC_PI_2)).abs() < 1e-6);
     }
 

@@ -1,5 +1,3 @@
-//! 规划管理：全局引导、局部目标、初始化、优化调用及轨迹入库。
-
 use firefly_error::Result;
 use firefly_map::GridMap;
 use firefly_trajectory::{Endpoint, MincoBuilder, SolverOrder, Trajectory};

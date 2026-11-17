@@ -1,7 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Translation of `include/basalt/camera/double_sphere_camera.hpp` at
-//! `aa441ba3e51050c47ba1902537792a2e4db7e43d`.
 // Preserve the upstream mathematical names and arithmetic order for comparison.
 #![allow(clippy::many_single_char_names, clippy::similar_names)]
 use super::clamp;

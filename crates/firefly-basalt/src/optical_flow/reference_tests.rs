@@ -1,4 +1,3 @@
-//! Regression fixtures for optical-flow arithmetic and tracker behavior.
 use super::{
     patch::{OpticalFlowPatch, PatchScalar},
     patterns::*,

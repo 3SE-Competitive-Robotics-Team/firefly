@@ -1,4 +1,3 @@
-//! Original Basalt headless alignment, mapping and evaluation entry points.
 use firefly_basalt::{io::dataset_io::DatasetIoFactory, kitti_eval, time_alignment};
 use firefly_calibration::calibration::Calibration;
 use firefly_calibration::calibration::MocapCalibration;

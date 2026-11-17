@@ -15,7 +15,6 @@ use bevy::log::tracing::{
 /// 事件字段收集（`message` 作正文，其余 `k=v` 附加）。
 #[derive(Default)]
 struct Fields {
-    /// 正文。
     message: Option<String>,
     /// 附加字段。
     rest: Vec<String>,
@@ -34,7 +33,6 @@ impl Fields {
 
 /// tracing 事件访问器（标量直写，其余 `Debug` 兜底）。
 struct FieldVisitor {
-    /// 收集器。
     fields: Fields,
 }
 

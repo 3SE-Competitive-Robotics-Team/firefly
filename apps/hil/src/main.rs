@@ -1,11 +1,3 @@
-//! 主机侧 USB HIL 桥：nusb 端点与本地 IPC 话题互转。
-//!
-//! 下行把 `Firefly/Imu`、双目/深度与 `Firefly/Airframe` 以及地面站指令
-//! 送进板端；上行把板端 `Control`、里程计、姿态与标量诊断发布回本机话题，
-//! 供 `firefly-sim`、`mimir` 与验收评分消费。算法进程不感知 USB。
-//!
-//! 运行：`hil --config configs/hil.toml`；`hil --probe` 只打印 USB 描述符。
-
 mod bridge;
 mod config;
 mod host;

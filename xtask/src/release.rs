@@ -1,5 +1,3 @@
-//! `cargo xtask release`：构建指定目标的全部 release 应用。
-
 use std::process::Command;
 
 use crate::container;

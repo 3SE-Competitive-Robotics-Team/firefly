@@ -1,10 +1,7 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-// License notices and conditions are indexed in docs/licenses/README.md.
-//! Original `serialization/eigen_io.h`: row-major coefficient archives, regardless
-//! of matrix storage order. Cereal native binary uses native scalar byte order.
-//! Fully dynamic matrix JSON intentionally retains the upstream non-roundtrip
-//! behavior: two size tags disappear on write and both read as the array length.
+//! Row-major coefficient archives, regardless of matrix storage order.
+//! Cereal native binary uses native scalar byte order.
+//! Fully dynamic matrix JSON retains its asymmetric encoding:
+//! two size tags disappear on write and both read as the array length.
 use crate::utils::sophus_utils::Sim3;
 use nalgebra::{
     DefaultAllocator, Dim, Isometry3, OMatrix, Quaternion, Scalar, Translation3, UnitQuaternion,

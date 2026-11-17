@@ -63,7 +63,6 @@ EMISSION_STRENGTH = 8.0
 
 #: 微表面细节纹理边长（像素）。
 DETAIL_SIZE = 256
-#: 细节纹理随机种子（确定性，各次运行一致）。
 DETAIL_SEED = 7
 #: 世界空间 UV 周期（米）：一个纹理周期覆盖的边长。
 UV_TILE = 0.35

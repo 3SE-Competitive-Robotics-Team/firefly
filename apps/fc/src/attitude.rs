@@ -1,4 +1,3 @@
-//! VIO 主姿态输入的时间、有效性与会话检查；不修正独立 ESKF。
 use firefly_pubsub::attitude::AttitudeMessage;
 use nalgebra::{UnitQuaternion, Vector3};
 use std::time::Instant;

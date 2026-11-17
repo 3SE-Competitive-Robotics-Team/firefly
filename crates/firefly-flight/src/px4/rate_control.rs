@@ -1,8 +1,4 @@
-//! PX4 三轴角速率 PID 控制器（`RateControl`）。
-//!
-//! 参考实现：PX4-Autopilot 提交 `4dbd2e069a5c30c2e53e47e842095d2576dc38c4`
-//! 的 `src/lib/rate_control/rate_control.hpp` 与 `src/lib/rate_control/rate_control.cpp`
-//! （BSD-3-Clause）。保持 PX4 的 NED 世界系 / FRD 机体系约定；力矩指令按各轴最大力矩归一化。
+//! 三轴角速度 PID；坐标、单位与归一化约定见 [`super::types`]。
 
 #![allow(clippy::used_underscore_binding, clippy::wildcard_imports)]
 
@@ -32,8 +28,6 @@ pub struct RateControl {
 }
 
 impl RateControl {
-    /// 设置 PID 增益。
-    ///
     /// - `p`：比例增益 [归一化力矩/(rad/s)]
     /// - `i`：积分增益 [归一化力矩/rad]
     /// - `d`：微分增益 [归一化力矩/(rad/s²)]
@@ -61,8 +55,6 @@ impl RateControl {
         self._control_allocator_saturation_negative = saturation_negative;
     }
 
-    /// 设置单轴正向饱和标志。
-    ///
     /// `axis`：0 roll，1 pitch，2 yaw；越界忽略。
     pub fn set_positive_saturation_flag(&mut self, axis: usize, is_saturated: bool) {
         if axis < 3 {
@@ -70,8 +62,6 @@ impl RateControl {
         }
     }
 
-    /// 设置单轴负向饱和标志。
-    ///
     /// `axis`：0 roll，1 pitch，2 yaw；越界忽略。
     pub fn set_negative_saturation_flag(&mut self, axis: usize, is_saturated: bool) {
         if axis < 3 {

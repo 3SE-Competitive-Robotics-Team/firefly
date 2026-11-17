@@ -1,8 +1,4 @@
-//! 数值优化。
-//!
-//! L-BFGS（有限内存 BFGS）求解无约束问题，配合 More-Thuente 线搜索
-//! （默认强 Wolfe 条件）。论文对比表明 L-BFGS 优于 Barzilai-Borwein
-//! 与截断牛顿（EGO-Planner v1 Sec. VI-B）。
+//! 无约束 L-BFGS，配合 More–Thuente 线搜索；默认使用强 Wolfe 条件。
 
 mod lbfgs;
 

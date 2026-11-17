@@ -1,22 +1,3 @@
-//! 板端 HIL USB gadget 管理：准备 configfs 功能、写入 `FunctionFS` 描述符并绑定 UDC。
-//!
-//! HIL 与 `adb` 二选一：UDC 的端点数量不足以同时容纳 adb 与 HIL 双向端点，
-//! HIL 期间 adb 不可用。`down`/看门狗先停 HIL 进程集、写回正常进程清单，再重建
-//! adb-only gadget 并启动正常 `firefly`。`up` 必须在 UDC 未绑定时重建功能
-//! （`FunctionFS` 要求描述符在绑定前写入）。重启后镜像自带的启动流程会恢复
-//! 原状，不依赖本工具的清理。
-//!
-//! 用法（板端 root）：
-//!
-//! ```text
-//! hil-gadget up             # 重建 gadget，启动描述符守护进程并绑定
-//! hil-gadget serve          # 仅写描述符并保持 ep0（由 up 派生）
-//! hil-gadget down           # 解绑、移除 HIL 功能并恢复 adb
-//! hil-gadget status         # 打印接口/端点状态
-//! ```
-//!
-//! `processes-hil.toml` 统一启动板端 RootSLAM、planner、traj、FC 和 USB 桥接。
-
 #[cfg(target_os = "linux")]
 mod setup;
 

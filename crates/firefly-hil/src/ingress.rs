@@ -1,4 +1,3 @@
-//! 统一 HIL 传感器入口：分块重组、校验、零拷贝发布和 IMU 批次唤醒。
 use crate::{
     protocol::{IMAGE_CHUNK_HEADER_LEN, ImageChunkHeader, Kind, Link, Message},
     topics::{SensorPublishers, error},
@@ -98,7 +97,6 @@ impl SensorIngress {
     }
 }
 
-/// 一张图的块重组状态。
 struct ChunkAssembly {
     image_id: u32,
     sensor_id: u8,

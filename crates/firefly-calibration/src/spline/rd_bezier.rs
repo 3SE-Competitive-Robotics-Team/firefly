@@ -1,7 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Translation of `include/basalt/spline/rd_bezier.h` at
-//! `aa441ba3e51050c47ba1902537792a2e4db7e43d`.
 use super::spline_common::{self, Jacobian};
 use crate::scalar::BasaltScalar;
 use nalgebra::{SMatrix, SVector};

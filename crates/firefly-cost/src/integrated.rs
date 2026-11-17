@@ -1,6 +1,3 @@
-//! 对照 EGO-Planner-v2 `9d85475e` 的 `main_ws/poly_traj_optimizer.cpp`。
-//! 主积分循环现场求 P/V/A/J/snap；Uniform 在其后单独计算并映射。
-
 use firefly_trajectory::{Sample, Trajectory};
 use nalgebra::{SVector, Vector3};
 

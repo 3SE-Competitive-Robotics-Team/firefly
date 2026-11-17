@@ -1,12 +1,6 @@
-//! `configs/fc.toml`：飞控进程参数（缺键回落 `firefly-flight` 默认值）。
-//!
-//! 只承载**飞控侧**参数（控制环频率、PX4 控制增益）：质量/惯量/旋翼几何/电机推力上限
-//! 是被控对象属性，由被控对象经 `Firefly/Airframe` 发布，见 `main.rs`。
-
 use firefly_flight::{FsmParams, Px4Params};
 use serde::Deserialize;
 
-/// 顶层配置。
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct FcConfig {

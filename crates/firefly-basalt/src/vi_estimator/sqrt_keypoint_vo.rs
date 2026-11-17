@@ -1,6 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Official `sqrt_keypoint_vo.h` / `src/vi_estimator/sqrt_keypoint_vo.cpp`.
 use super::{
     ba_base::BundleAdjustmentBase,
     landmark_database::{Keypoint, KeypointObservation},

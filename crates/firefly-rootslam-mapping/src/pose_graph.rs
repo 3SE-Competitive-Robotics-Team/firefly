@@ -94,8 +94,7 @@ pub fn adjoint<S: BasaltScalar>(pose: &Isometry3<S>) -> Matrix6<S> {
 }
 
 /// Coupled SE(3) inverse right Jacobian, including translation/rotation coupling.
-/// Upper-right formula follows Sophus SE3, copyright Hauke Strasdat and
-/// contributors, MIT licensed. Small-angle series avoids coefficient cancellation.
+/// Small-angle series avoids coefficient cancellation.
 pub fn right_jacobian_inverse<S: BasaltScalar>(tangent: &Vector6<S>) -> Matrix6<S> {
     let upsilon = -tangent.fixed_rows::<3>(0).into_owned();
     let omega = -tangent.fixed_rows::<3>(3).into_owned();

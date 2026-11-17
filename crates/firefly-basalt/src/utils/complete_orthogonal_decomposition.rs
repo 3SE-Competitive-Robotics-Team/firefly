@@ -1,9 +1,3 @@
-// Copyright (C) 2016 Rasmus Munk Larsen <rmlarsen@google.com>.
-// Copyright (C) 2010 Gael Guennebaud <gael.guennebaud@inria.fr>.
-// SPDX-License-Identifier: MPL-2.0
-// This Source Code Form is subject to the terms of the Mozilla Public License,
-// v. 2.0. If a copy of the MPL was not distributed with this file, You can obtain
-// one at https://mozilla.org/MPL/2.0/.
 //! Real dynamic specialization of Eigen 5.0.1 `CompleteOrthogonalDecomposition`,
 //! `ColPivHouseholderQR` and Householder operations, preserving rank thresholds.
 use firefly_calibration::scalar::BasaltScalar;

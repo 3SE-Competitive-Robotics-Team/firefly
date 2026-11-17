@@ -1,5 +1,3 @@
-//! 多拓扑候选平面集，参考 EGO-Planner-v2 `distinctiveTrajs`。
-
 use firefly_map::{GridMap, Plane};
 use nalgebra::Vector3;
 

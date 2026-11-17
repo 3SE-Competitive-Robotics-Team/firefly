@@ -1,17 +1,8 @@
-//! Pose-graph residual information scale, `RootSLAM` section III-C `S_ab`.
-//!
-//! The paper weights every edge of the pose graph with `S_ab`, the square root
-//! of the edge information matrix, so that the metre- and radian-valued
-//! pose-graph residuals of Equation (9) can be summed with the pixel-valued
-//! reprojection residuals of the bundle adjustment. This implementation derives
-//! the numerical scale from the camera model as a project calibration policy.
-//!
-//! The scale is expressed in pixel equivalents: a pose-graph translation
-//! residual of one metre is multiplied by `translation_pixels_per_meter`, and
-//! a rotation residual of one radian by `rotation_pixels_per_radian`. Both
-//! numbers are the image-plane displacement that the corresponding rigid body
-//! error produces at `reference_depth_m`, so the two residual families share
-//! one unit and Equation (9) becomes a sum of comparable terms.
+//! `RootSLAM` Equation (9) uses square-root information `S_ab` to combine
+//! pose-graph and reprojection residuals in pixel-equivalent units.
+//! Project calibration derives `translation_pixels_per_meter` and
+//! `rotation_pixels_per_radian` from the camera model at `reference_depth_m`;
+//! they scale metre-valued translation and radian-valued rotation residuals, respectively.
 
 use firefly_calibration::calibration::Calibration;
 use firefly_error::{Error, ErrorKind, Result};

@@ -1,4 +1,3 @@
-//! Render immutable collision-map views outside the FSM thread.
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;

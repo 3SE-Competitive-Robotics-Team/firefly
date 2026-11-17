@@ -1,7 +1,5 @@
-//! SO(3)/SE(3) 共用李群运算。
-//!
 //! Hamilton 主动旋转，扭量按 `[rotation, translation]` 排列。
-//! 指数映射与 Sophus / `OpenVINS` 的数学定义一致，小角使用 Taylor 展开；
+//! 指数映射与 Sophus / `OpenVINS` 的数学定义一致，小角使用 Taylor 展开。
 
 use nalgebra::{Matrix3, Matrix4, Quaternion, Rotation3, UnitQuaternion, Vector3, Vector6};
 
@@ -82,7 +80,6 @@ pub fn so3_log(q: &UnitQuaternion<f64>) -> Vector3<f64> {
     v * (angle / norm)
 }
 
-/// SO(3) 矩阵指数；与四元数形式共享同一个指数映射。
 #[must_use]
 pub fn so3_exp_matrix(omega: &Vector3<f64>) -> Matrix3<f64> {
     so3_exp(omega).to_rotation_matrix().into_inner()

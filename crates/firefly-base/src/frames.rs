@@ -26,7 +26,6 @@ pub struct RigidTransform {
     pose: Isometry3<f64>,
 }
 impl RigidTransform {
-    /// 创建刚体变换。
     /// # Errors
     /// 非有限值、非单位四元数，或同坐标系非恒等变换。
     pub fn from_parts(

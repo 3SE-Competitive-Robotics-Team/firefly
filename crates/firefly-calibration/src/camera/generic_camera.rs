@@ -1,7 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Translation of `include/basalt/camera/generic_camera.hpp` at
-//! `aa441ba3e51050c47ba1902537792a2e4db7e43d`.
 use super::{
     double_sphere_camera::DoubleSphereCamera, extended_camera::ExtendedUnifiedCamera,
     kannala_brandt_camera4::KannalaBrandtCamera4, pinhole_camera::PinholeCamera,

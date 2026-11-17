@@ -1,11 +1,6 @@
-//! 板端 `FunctionFS` 功能接口：描述符与端点常量。
-//!
-//! 单一 HIL 功能接口与主机的一个 USB 厂商接口一一对应，接口号由 configfs 按
-//! 函数链接顺序分配；主机侧按 `bInterfaceClass=0xFF` 与子类匹配，不依赖接口号。
-//! 端点号 1、2 已被 `adb` 占用，这里只用 3、4。
-//!
-//! `FunctionFS` 要求描述符在 UDC 绑定前由用户态写入 `ep0`，因此本模块只负责
-//! 生成描述符字节；创建 configfs 目录、挂载与绑定由板端 `hil-gadget` 进程完成。
+//! HIL 使用单个厂商接口，按类与子类匹配；接口号由 configfs 链接顺序分配。
+//! 端点 1、2 留给 ADB，HIL 使用 3、4。
+//! `FunctionFS` 描述符须在 UDC 绑定前由用户态写入 `ep0`。
 
 use std::io::{self, Write};
 

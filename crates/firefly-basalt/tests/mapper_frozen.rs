@@ -1,4 +1,3 @@
-//! Independent original-controller comparison after freezing random matching.
 use firefly_basalt::utils::sophus_utils::se3_matrix;
 use firefly_basalt::{
     mapper::Mapper,

@@ -1,11 +1,4 @@
-//! `cargo xtask deploy-hil`：部署机载 release，切换到 HIL gadget 并校验主机枚举。
-//!
-//! 部署沿用普通 `deploy`（含服务就绪检查）；之后把活动进程清单切到 HIL、
-//! 由 `hil-gadget up` 重建 gadget。切换后 `adb` 会消失，这是设计使然：
-//! 这块 UDC 的端点不足以同时承载 adb 与 HIL。主机侧用 nusb 直接认领两个
-//! 厂商接口；`hil --check` 通过即视为链路就绪。
-//!
-//! 板端 HIL 使用 RootSLAM，进程清单为 `processes-hil.toml`。
+//! HIL 切换后 ADB 不可用；以 `hil --check` 对单个厂商接口及两个端点的检查确认就绪。
 
 use std::process::Command;
 use std::thread;
@@ -17,7 +10,6 @@ use crate::target;
 const DEFAULT_DEVICE: &str = "firefly-0001";
 /// 等待 HIL 设备枚举的上限。
 const ENUMERATION_TIMEOUT: Duration = Duration::from_secs(20);
-/// 完整 HIL 进程清单。
 const MANIFEST: &str = "processes-hil.toml";
 
 pub fn run(args: &[String]) -> Result<(), String> {

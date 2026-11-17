@@ -1,8 +1,4 @@
-//! RMUC 传感器 rig：机体位姿与双目/深度相机几何。
-//!
-//! 基线沿机体 y 轴相距 0.05 米，深度居中，前向 +x、下倾 20°，
-//! 垂直视场 70.88°，分辨率 320×240。标定须与 VIO 和视觉定位模块保持一致。
-//! 仿真位姿四元数按 Hamilton 机体→世界系解读。
+//! 传感器几何由 [`firefly_base::rig`] 派生；仿真姿态按 Hamilton 机体→世界系解读。
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;

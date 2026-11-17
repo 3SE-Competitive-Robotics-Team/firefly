@@ -1,5 +1,3 @@
-//! EGO 多项式冷启动、随机种子与连续轨迹暖启动。
-
 use firefly_error::Result;
 use firefly_trajectory::{Endpoint, Minco, MincoBuilder, SolverOrder, Trajectory};
 use nalgebra::{Point3, Vector3};

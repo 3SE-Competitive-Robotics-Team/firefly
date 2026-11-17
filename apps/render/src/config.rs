@@ -1,20 +1,15 @@
-//! `apps/render` 视觉配置（`configs/render.toml`）：场景光照、相机曝光与深度退化。
-//! 场景光照本体（唯一一份、所有相机共用）在 [`firefly_render::lighting`]。
-
 use bevy::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 
 /// 场景三方向光缺省照度（lux）。
 pub const DEFAULT_DIRECTIONAL: [f32; 3] = firefly_render::lighting::ILLUMINANCE;
-/// 传感器相机曝光缺省（EV100）。
 pub const DEFAULT_SENSOR_EV100: f32 = 11.0;
 /// 环境光贴图缺省颜色/强度（sRGB 0~1；强度缩放后单位 cd/m²）。
 pub const DEFAULT_ENV_TOP: [f32; 3] = [0.62, 0.68, 0.78];
 pub const DEFAULT_ENV_MID: [f32; 3] = [0.35, 0.38, 0.44];
 pub const DEFAULT_ENV_BOTTOM: [f32; 3] = [0.09, 0.09, 0.10];
 pub const DEFAULT_ENV_INTENSITY: f32 = 1500.0;
-/// 传感器采集缺省频率（Hz）。
 pub const DEFAULT_CAPTURE_HZ: f64 = 10.0;
 
 #[derive(Deserialize, Serialize, Clone, Copy, Debug)]

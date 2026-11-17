@@ -1,8 +1,5 @@
-// Copyright (C) 2008-2012 Gael Guennebaud <gael.guennebaud@inria.fr>.
-// Derived from LDL, Copyright (c) 2005 Timothy A. Davis.
-// SPDX-License-Identifier: MPL-2.0
-//! Eigen 5.0.1 simplicial LDLT numeric elimination with the original AMD order.
-//! Sparse columns grow to their symbolic fill pattern; no dense system is formed.
+//! Simplicial LDLT uses the reference AMD order and symbolic sparse fill;
+//! no dense system is formed.
 use super::amd::minimum_degree_ordering;
 use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::DVector;

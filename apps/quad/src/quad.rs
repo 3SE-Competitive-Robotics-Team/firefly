@@ -1,6 +1,3 @@
-//! 第三人称飞行的 Bevy 接线：键盘 → 期望姿态/推力 → PX4 控制链
-//! （`AttitudeControl` → `RateControl` → `ControlAllocation`）→ 六自由度积分 → `Transform`。
-
 use bevy::prelude::*;
 use firefly_flight::{Controller, G, Px4Params, QuadState, integrate, yaw_of};
 use nalgebra::{UnitQuaternion, Vector3};

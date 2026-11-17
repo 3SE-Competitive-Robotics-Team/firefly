@@ -1,5 +1,3 @@
-//! render 与 quad 共用的第三人称追踪相机。
-
 use bevy::prelude::*;
 
 /// 相机到机体的后向距离（米）。

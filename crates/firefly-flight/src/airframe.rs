@@ -1,12 +1,5 @@
-//! 机体（airframe）：4 旋翼几何/旋向/推力上限与正模型（电机 → 力/力矩）。
-//!
-//! 四旋翼唯一力源是 4 个沿机体 `+Z` 的旋翼推力：水平力只能靠倾斜，滚转/俯仰力矩
-//! 来自推力差，偏航力矩来自旋翼反扭矩。[`Airframe::realize`] 把 4 电机推力还原为
-//! 机体的世界系力/力矩，供 `integrate` 或 `MuJoCo` 被控对象使用。
-//!
-//! 控制分配不在这里：产品链路使用 PX4 的
-//! [`ControlAllocationSequentialDesaturation`](crate::px4::allocation::ControlAllocationSequentialDesaturation)，
-//! 效能矩阵由 [`crate::px4::allocation::effectiveness_from_rotors`] 从同一份旋翼几何构造。
+//! 四个旋翼沿机体 `+Z` 产生推力，水平加速依靠倾斜；滚转/俯仰力矩来自推力差，
+//! 偏航力矩来自旋翼反扭矩。[`Airframe::realize`] 返回世界系的合力与力矩。
 
 use nalgebra::{UnitQuaternion, Vector3};
 use serde::Deserialize;
@@ -35,7 +28,6 @@ fn d_spin() -> f32 {
 #[derive(Deserialize, Clone, Copy, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct Airframe {
-    /// 4 个旋翼的安装位置与旋向。
     #[serde(default = "d_rotors")]
     pub rotors: [Rotor; 4],
     /// 单电机推力上限（N）。

@@ -1,5 +1,3 @@
-//! 命令行坐标解析。
-
 use firefly_error::{Error, ErrorKind, Result};
 
 /// 解析 `--xxx x y z` 形式的三维参数。

@@ -1,8 +1,4 @@
-//! PX4 多旋翼控制与分配算法的 Rust 移植。
-//!
-//! 参考固定版本见 `~/Projects/PX4-Autopilot`（提交 `4dbd2e0`，BSD-3）。模块内部保持 PX4 的 NED/FRD
-//! 约定与归一化指令；与产品 Z-up/FLU 坐标的转换在 [`controller::Controller`] 边界发生。
-//! 模块按 PX4 类与命名空间组织，不包含平台调度和参数服务。
+//! PX4 控制核心；坐标、单位与归一化约定见 [`types`]，产品边界见 [`controller`]。
 
 pub mod allocation;
 pub mod attitude_control;

@@ -1,12 +1,6 @@
-//! 事件唤醒层：pubsub 数据面（拉模型）的推模型补充。
-//!
-//! 对照 iceoryx2 官方 `examples/rust/event_based_communication`：每个话题
-//! 配对一个**同名** event service——发布端 send 后 notify，订阅端把
-//! [`TopicListener`] 挂进 `WaitSet` 即到即醒，不靠固定节拍轮询。
-//!
-//! - 通知不携带数据；trace 上下文仍走 pubsub User Header（[`crate::trace`]）
-//! - `EventId` 跨语言统一为 [`EVENT_ID_SENT_SAMPLE`]（Python 侧 `iox2.EventId.new(0)`）
-//! - notify 无监听者时静默成功（iceoryx2 返回 Ok(0)），订阅方缺席不构成错误
+//! 每个 pubsub 话题配对同名事件服务，监听者收到通知后读取数据。
+//! 通知不携带数据；trace 上下文由 pubsub 用户头传递。
+//! 跨语言事件 ID 为 [`EVENT_ID_SENT_SAMPLE`]；无监听者时 notify 成功返回 0。
 
 use iceoryx2::port::listener::Listener;
 use iceoryx2::port::notifier::Notifier;

@@ -1,4 +1,3 @@
-//! Asynchronous persistent-map and loop-closing workers, followed by global BA.
 use firefly_basalt::vi_estimator::local_map::LocalMapSnapshot;
 use firefly_calibration::calibration::Calibration;
 use firefly_error::{Error, ErrorKind, Result};

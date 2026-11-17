@@ -1,4 +1,3 @@
-//! traj 消费完整轨迹和心跳，独立以 100Hz 发布飞控参考。
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_planner::{TrajectoryCommand, TrajectoryServer};
 use firefly_planner_runtime::{odometry::OdometryReceiver, rate::Rate};
@@ -98,7 +97,6 @@ fn decode(pieces: &[TrajectoryPieceMessage]) -> Result<TrajectoryCommand> {
     Ok(command)
 }
 
-/// 独立轨迹输出进程入口。
 #[allow(clippy::too_many_lines)]
 pub fn run(timeout: f64) -> Result<()> {
     let node = create_node()?;

@@ -1,4 +1,3 @@
-//! Persistent map based on `RootSLAM` §III-A, with explicit culling and fusion policies.
 use crate::pose_graph::{EdgeKind, PoseGraphEdge};
 use firefly_basalt::{
     optical_flow::{OpticalFlowInput, OpticalFlowResult},

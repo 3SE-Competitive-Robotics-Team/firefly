@@ -1,10 +1,4 @@
-//! 解锁前检查与失效标志（对照 PX4 `ArmingCheck` / `FailsafeFlags` 的语义）。
-//!
-//! 本产品没有 RC / GCS / 电池 / 地理围栏 / GNSS / mission 输入，因此枚举只覆盖
-//! 这台飞机实际能评估的检查与失效条件；PX4 中依赖这些输入的位不会伪造为“永远通过”。
-//!
-//! 记录形式：`ArmingCheck` 与 `FailsafeFlags` 都是稳定的位掩码（位号 = 枚举判别值），
-//! `apps/fc` 通过 IPC 发布 u32 位掩码，mimir 按注册的数值字段记录。
+//! 解锁与失效诊断使用稳定的位编码，由 FC 发布到 IPC 并录入 RRD。
 
 use crate::fsm::Health;
 
@@ -95,9 +89,7 @@ impl FailsafeFlags {
     pub const LOCAL_POSITION_INVALID: Self = Self(1 << 1);
     /// 局部速度不可用（与位置同源）。
     pub const LOCAL_VELOCITY_INVALID: Self = Self(1 << 2);
-    /// IMU 陈旧。
     pub const IMU_STALE: Self = Self(1 << 3);
-    /// 未收到机体描述。
     pub const AIRFRAME_MISSING: Self = Self(1 << 4);
     /// VIO 会话改变（不可恢复，需重启 FC）。
     pub const ATTITUDE_SESSION_CHANGED: Self = Self(1 << 5);
@@ -106,7 +98,6 @@ impl FailsafeFlags {
     /// `Track` 下参考流超过失联超时。
     pub const REFERENCE_LOST: Self = Self(1 << 7);
 
-    /// 已定义的位数。
     pub const COUNT: u32 = 8;
 
     /// 由健康电平与参考流状态构造。
@@ -144,19 +135,16 @@ impl FailsafeFlags {
         self.0
     }
 
-    /// 是否没有任何失效位。
     #[must_use]
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
 
-    /// 是否包含某一位。
     #[must_use]
     pub const fn contains(self, flag: Self) -> bool {
         self.0 & flag.0 != 0
     }
 
-    /// 置位。
     pub fn insert(&mut self, flag: Self) {
         self.0 |= flag.0;
     }
@@ -182,7 +170,6 @@ impl FailsafeFlags {
 /// 失效动作（对照 PX4 `FailsafeState` 的产品子集）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FailsafeAction {
-    /// 无失效。
     #[default]
     None,
     /// 参考丢失，回落位置保持。

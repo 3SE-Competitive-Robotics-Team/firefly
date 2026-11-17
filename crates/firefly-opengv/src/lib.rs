@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: BSD-3-Clause
-
-//! Central and generalized visual geometry, sample consensus and numerical solvers.
-
 pub mod absolute_pose;
 pub mod indices;
 pub mod math;

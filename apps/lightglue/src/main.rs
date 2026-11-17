@@ -1,5 +1,3 @@
-//! ALIKED/LightGlue 离线视觉地图定位；稀疏地图回环由 `RootSLAM` 维护。
-
 mod sensors;
 #[cfg(test)]
 mod validation;

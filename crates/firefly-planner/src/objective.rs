@@ -1,15 +1,6 @@
-//! 时空联合优化目标。
-//!
-//! 变量 x = [q 展平 (3(M−1)), vt(M)]，vt 为虚拟时间，对照官方
-//! `poly_traj_optimizer.cpp:VirtualT2RealT` 的分段有理映射保证真实时间 T 恒正。
-//! 代价：firefly-cost 各项(平滑/时间/可行/障碍/集群/队形/均匀)，
-//! 梯度经 `Minco::propagate_gradient` 传播到 {q, T} 后经虚拟时间链式法则转回。
-//!
-//! L-BFGS 内循环碰撞检测对齐官方 `poly_traj_optimizer.cpp`:
-//! 代价回调内 `iter_num_ >= 3 且采样约束点方向足够平顺` 时调用
-//! `roughlyCheckConstraintPoints`——在约束点数组上检测未覆盖穿入点、
-//! 沿数组 in/out 自由点搜索 + A\* 绕障 + 交点平面,命中即提前终止
-//! (官方 `STOP_FOR_REBOUND`),由外层吸收新平面后重新优化。
+//! 变量 `x = [q 展平 (3(M−1)), vt(M)]`，虚拟时间经分段有理映射保持真实时间为正。
+//! MINCO 梯度传播到 `{q, T}` 后，经虚拟时间链式法则映射回 `x`。
+//! 新碰撞平面触发提前结束，由外层吸收后重新优化。
 
 use firefly_cost::{Accumulator, MincoCost};
 use firefly_map::{GridMap, Plane};

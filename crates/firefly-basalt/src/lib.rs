@@ -1,5 +1,3 @@
-//! Rust translations of upstream Basalt, preserving source-file boundaries.
-
 pub mod hash_bow;
 pub mod image;
 pub mod imu;

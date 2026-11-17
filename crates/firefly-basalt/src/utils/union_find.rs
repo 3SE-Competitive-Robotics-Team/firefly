@@ -1,10 +1,3 @@
-// SPDX-License-Identifier: MPL-2.0
-// Copyright (c) 2016 Pierre MOULON, 2018 Nikolaus DEMMEL.
-// Source: VladyslavUsenko/basalt 0f3b2b52c807f70ff4e2973ce253c73329eea7bc,
-// include/basalt/utils/union_find.h (adapted from OpenMVG).
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. https://mozilla.org/MPL/2.0/
-
 /// Disjoint sets with union by rank and recursive path compression.
 #[derive(Clone, Debug, Default)]
 pub struct UnionFind {

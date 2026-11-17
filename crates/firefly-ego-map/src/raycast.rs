@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-3.0-only
 //! `raycast.cpp`: integer-cell direction, strict tie comparisons, end cell excluded.
 use nalgebra::Vector3;
 

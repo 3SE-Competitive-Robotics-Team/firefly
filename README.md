@@ -98,3 +98,9 @@ cargo xtask release
 - [OpenGV: A Unified and Generalized Approach to Calibrated Geometric Vision](https://doi.org/10.1109/ICRA.2014.6907291)
 - [Ceres Solver](http://ceres-solver.org/)
 - [Eigen](https://eigen.tuxfamily.org/)
+
+## 许可证与第三方来源
+
+各组件的许可证全文见[许可证索引](docs/licenses/README.md)，源码文件对应的版权、
+许可标识和上游版本见[文件级声明](docs/licenses/source-notices.md)。其他算法的授权和
+署名见[第三方声明](docs/licenses/third-party-notices.md)。分发源码时同时包含这些文档。

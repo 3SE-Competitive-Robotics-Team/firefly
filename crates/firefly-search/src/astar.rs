@@ -1,11 +1,6 @@
-//! A* 网格搜索。
-//!
-//! 对齐官方 EGO-Planner `dyn_a_star`：26 邻域（代价 `√(dx²+dy²+dz²)`×resolution）、
-//! 判据 = 官方 `checkOccupancy`（`getInflateOccupancy`，含膨胀）；`tie_breaker` ×
-//! 对角启发、端点入障沿远离对端方向外推至自由、节点池预分配 +
-//! 世代计数复用（`rounds` 区分每次搜索，免重置）。
-//!
-//! 地图索引固定在占据窗口；26 邻域只检查目标节点的膨胀占据。
+//! A* 使用 26 邻域，边代价为 `√(dx²+dy²+dz²)·resolution`。
+//! 仅目标节点查询膨胀占据，不检查连线；地图索引绑定占据窗口。
+//! 端点在障碍内时沿远离另一端的方向外推到自由节点。
 
 use firefly_error::{Error, ErrorKind};
 use firefly_map::GridMap;

@@ -1,9 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-// See docs/licenses/README.md.
-//! Dense accumulator from `include/basalt/optimization/accumulator.h`,
-//! original Basalt `0f3b2b52c807f70ff4e2973ce253c73329eea7bc`.
-
 use crate::utils::ldlt::Ldlt;
 use crate::utils::sparse_ldlt::{SparseLdlt, SparseMatrix, conjugate_gradient};
 use firefly_calibration::scalar::BasaltScalar;

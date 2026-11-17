@@ -1,11 +1,3 @@
-//! IPC 投递：一次性 CLI 与订阅端的连接是异步建立的，投递策略集中在这里。
-//!
-//! `iceoryx2` 的 `send` 在无订阅端时不报错（样本直接丢弃），而**首次**投递往往只建立
-//! 连接、样本进不了订阅端缓冲区——所以每条消息在 [`DELIVER_TIMEOUT`] 窗口内反复投递，
-//! 以最后一次的接收端数为准；窗口内始终没人订阅即报错（退出码 1），不静默丢弃。
-//!
-//! 重复投递无害：指令按 `sequence` 去重（同一条只生效一次），目标点取最新。
-
 use std::fmt::Debug;
 use std::process::ExitCode;
 use std::thread;
@@ -19,7 +11,6 @@ use iceoryx2::prelude::ZeroCopySend;
 
 /// 投递期限（一次性 CLI 与订阅端的连接是异步建立的，需重试到连接建立）。
 const DELIVER_TIMEOUT: Duration = Duration::from_millis(300);
-/// 投递重试间隔。
 const DELIVER_RETRY: Duration = Duration::from_millis(30);
 
 /// 打开某话题的发布端（节点只在本进程存活期间存在）。

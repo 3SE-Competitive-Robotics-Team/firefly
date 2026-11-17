@@ -1,6 +1,4 @@
-//! 进程 supervisor：按清单顺序拉起、监控、重启，并通过 Unix socket 接受控制。
-//!
-//! 清单只在启动时读取；`enable`/`disable` 的改动由下一次 supervisor 启动生效。
+//! 进程清单只在启动时读取；`enable`/`disable` 的改动由下一次 supervisor 启动生效。
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};

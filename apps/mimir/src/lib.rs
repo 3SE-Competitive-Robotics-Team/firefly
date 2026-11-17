@@ -1,4 +1,3 @@
-//! Native IPC recording with bounded ingress and synchronous, columnar RRD writes.
 mod archive;
 pub mod config;
 mod frames;

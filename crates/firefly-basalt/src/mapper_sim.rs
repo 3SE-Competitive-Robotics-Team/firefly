@@ -1,6 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Non-GUI data flow and callbacks from original `src/mapper_sim.cpp`.
 use crate::spline::se3_spline::Se3Spline;
 use crate::utils::sophus_utils::se3_expd;
 use crate::utils::sophus_utils::se3_inverse;

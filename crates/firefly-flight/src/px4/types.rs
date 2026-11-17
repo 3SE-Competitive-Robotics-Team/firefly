@@ -1,7 +1,5 @@
 //! Shared types and math conventions for the PX4 control core.
 //!
-//! The control algorithms are ported from PX4-Autopilot
-//! (`4dbd2e069a5c30c2e53e47e842095d2576dc38c4`), keeping PX4's internal
 //! **NED world frame / FRD body frame** conventions. Conversion to the
 //! product's Z-up / FLU frames happens only at the outer boundary.
 //!

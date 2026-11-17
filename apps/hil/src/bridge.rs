@@ -1,11 +1,3 @@
-//! 主机侧链路运行时：USB 端点与本地 IPC 话题双向转接。
-//!
-//! iceoryx2 端口是单线程对象，因此主线程独占全部发布/订阅端口，USB 读与写
-//! 各由一个线程持有；三方通过有界 `mpsc` 通道交接消息。图像走独立的 `try_send`
-//! 队列，满队列即丢当前帧；IMU、控制与指令走高优先阻塞队列。写线程先排空高优先
-//! 队列，再把图像按 16 KiB 分块写出，块与块之间继续插高优先消息，避免整帧图像
-//! 把 1 kHz 的 IMU 压在后面。
-
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -28,11 +20,9 @@ use crate::host::HostLink;
 
 /// 下行发送队列深度；满时图像丢帧、IMU/指令阻塞。
 const DOWNLINK_QUEUE: usize = 64;
-/// 上行接收队列深度。
 const UPLINK_QUEUE: usize = 1024;
 /// IPC 轮询间隔。
 const POLL: Duration = Duration::from_millis(1);
-/// 统计标量发布周期。
 const STATS_PERIOD: Duration = Duration::from_secs(1);
 /// 双目配对的采集时间容差（秒）。
 const STEREO_TOLERANCE_S: f64 = 0.001;
@@ -110,7 +100,6 @@ fn open_ports(node: &IpcNode) -> Result<(Downlink, Uplink), String> {
     ))
 }
 
-// 线程入口按值取得端口与停止标志；所有权随 `move` 闭包转移。
 #[allow(clippy::needless_pass_by_value)]
 fn usb_writer(
     writer: impl Write,

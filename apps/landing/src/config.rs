@@ -1,4 +1,3 @@
-//! 下视识别配置、标定和参数校验。
 use crate::model;
 use serde::Deserialize;
 use std::path::PathBuf;

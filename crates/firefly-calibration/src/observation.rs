@@ -1,6 +1,3 @@
-// Copyright (c) 2018-2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-// License notices and conditions are indexed in docs/licenses/README.md.
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

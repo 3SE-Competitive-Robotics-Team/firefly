@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-3.0-only
 use firefly_error::{Error, ErrorKind, Result};
 
 /// `grid_map.cpp::initMap` ROS defaults, before launch-file overrides.

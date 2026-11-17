@@ -1,7 +1,4 @@
-//! `FFMap` 占据地图标准文件格式（见 `docs/architecture.md#ffmap`）。
-//!
-//! 静态环境为占据体素列表，动态障碍为形状 + 时间航点；
-//! 文本行式指令，`#` 开头为注释。
+//! `FFMap` 文本文件格式见仓库 `docs/architecture.md#ffmap`。
 
 use std::fs;
 

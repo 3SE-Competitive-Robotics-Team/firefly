@@ -1,5 +1,3 @@
-//! 2D-3D 位姿解算，使用 `purecv` 的 `PnP` 与 RANSAC。
-
 pub mod calibration;
 pub mod depth;
 mod refine;

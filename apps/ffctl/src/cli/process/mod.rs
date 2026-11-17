@@ -1,5 +1,3 @@
-//! 进程域（`ffctl process`）：supervisor 与进程清单管理。
-
 mod disable;
 mod enable;
 mod restart;

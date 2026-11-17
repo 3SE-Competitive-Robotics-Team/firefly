@@ -1,8 +1,3 @@
-//! 场景设计器：用几何体程序化定义障碍 + 起终点，导出 `FFMap` 标准格式。
-//!
-//! 场景是*内存中的设计工具*，不是地图格式本身；地图一律以
-//! `MapFile`（`.ffmap`）落盘（见 `docs/architecture.md#ffmap`）。
-
 use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::Vector3;
 
@@ -46,7 +41,6 @@ pub enum Obstacle {
     Sphere { center: [f64; 3], radius: f64 },
 }
 impl Scene {
-    /// 校验场景字段合法。
     fn validate(&self) -> Result<()> {
         let ok = self.resolution > 0.0 && self.dims.iter().all(|&d| d > 0);
         if !ok {

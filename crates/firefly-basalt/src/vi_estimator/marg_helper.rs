@@ -1,7 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Translation of `vi_estimator/marg_helper.h` and its `.cpp` implementation,
-//! original Basalt `0f3b2b52c807f70ff4e2973ce253c73329eea7bc`.
 use crate::utils::{
     complete_orthogonal_decomposition::{
         CompleteOrthogonalDecomposition, apply_householder_left, machine_epsilon, make_householder,

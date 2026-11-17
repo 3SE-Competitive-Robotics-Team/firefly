@@ -1,8 +1,3 @@
-//! HIL 传感器接入：从 USB `FunctionFS` 端点读取仿真传感器并发布到本机话题。
-//!
-//! 时间戳沿用主机下发的仿真时间轴；本进程只做转接，不重排测量时刻。
-//! `SensorIngress` 统一解码、校验和组装图像分块，并将传感器消息发布到共享内存。
-
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,13 +10,11 @@ use firefly_pubsub::node::create_node;
 use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 
-/// HIL 功能实例名。
 const HIL_INSTANCE: &str = "hil";
 /// 下行端点在功能内的序号（第一个数据端点）。
 const DOWNLINK_ENDPOINT: usize = 0;
 /// 无数据轮询间隔；比 1ms 小，减少 IMU 到达的额外驻留。
 const POLL: Duration = Duration::from_micros(200);
-/// 主机心跳刷新间隔。
 const HOST_HEARTBEAT: Duration = Duration::from_millis(500);
 
 static RUNNING: AtomicBool = AtomicBool::new(true);

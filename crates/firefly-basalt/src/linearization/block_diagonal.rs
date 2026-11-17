@@ -1,7 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Translation of `include/basalt/linearization/block_diagonal.hpp`,
-//! original Basalt `0f3b2b52c807f70ff4e2973ce253c73329eea7bc`.
 use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector};
 use std::collections::{HashMap, hash_map::Entry};

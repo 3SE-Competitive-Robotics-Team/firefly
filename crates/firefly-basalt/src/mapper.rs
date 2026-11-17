@@ -1,6 +1,3 @@
-// Copyright (c) 2019 Vladyslav Usenko and Nikolaus Demmel.
-// SPDX-License-Identifier: BSD-3-Clause
-//! Original `src/mapper.cpp` offline controller, cache I/O and trajectory export.
 use crate::utils::sophus_utils::so3_inverse;
 use crate::utils::sophus_utils::so3_product;
 use crate::{

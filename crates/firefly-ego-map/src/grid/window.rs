@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-3.0-only
 use super::{GridMap, Index, OBSTACLE_FLAG};
 use nalgebra::Vector3;
 

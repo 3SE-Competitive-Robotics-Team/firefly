@@ -1,9 +1,3 @@
-// Copyright (C) 2008-2009 Gael Guennebaud <gael.guennebaud@inria.fr>
-// Copyright (C) 2009 Benoit Jacob <jacob.benoit.1@gmail.com>
-// SPDX-License-Identifier: MPL-2.0
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. https://mozilla.org/MPL/2.0/
-//! Eigen 5.0.1 `FullPivHouseholderQR`: real decomposition, rank and solve used by NFR.
 use super::complete_orthogonal_decomposition::{apply_householder_left, make_householder};
 use nalgebra::{DMatrix, DVector};
 

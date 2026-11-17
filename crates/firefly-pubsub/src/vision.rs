@@ -23,9 +23,7 @@ pub struct FeatureMessage {
     pub count: u32,
     /// 像素坐标 `[N, 2]`（原图系）。
     pub keypoints: [[f32; 2]; MAX_FEATURES],
-    /// 描述子 `[N, 128]`。
     pub descriptors: [[f32; DESC_DIM]; MAX_FEATURES],
-    /// 检测得分 `[N]`。
     pub scores: [f32; MAX_FEATURES],
 }
 

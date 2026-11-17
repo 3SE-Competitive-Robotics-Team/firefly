@@ -1,11 +1,4 @@
-//! PX4 `ControlMath` 的 1:1 移植。
-//!
-//! 来源：PX4-Autopilot 提交 `4dbd2e069a5c30c2e53e47e842095d2576dc38c4` 的
-//! `src/modules/mc_pos_control/PositionControl/ControlMath.hpp` 与
-//! `ControlMath.cpp`，BSD-3-Clause 许可。
-//!
-//! 约定：世界系 NED、机体系 FRD；位置 m，速度 m/s，加速度 m/s²，角度 rad；
-//! 推力按最大集体推力归一化（无量纲，机体系 z 分量向上为负）。
+//! 坐标、单位与推力归一化约定见 [`super::types`]。
 
 use nalgebra::Matrix3;
 

@@ -1,9 +1,3 @@
-// SPDX-License-Identifier: BSD-3-Clause
-// Copyright (c) 2019, Vladyslav Usenko and Nikolaus Demmel.
-// Source: VladyslavUsenko/basalt 0f3b2b52c807f70ff4e2973ce253c73329eea7bc,
-// include/basalt/utils/vio_config.h and src/utils/vio_config.cpp.
-// See docs/licenses/README.md.
-
 use firefly_error::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 use std::{
