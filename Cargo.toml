@@ -42,7 +42,7 @@ bevy = "0.20.1"
 fastrace = { version = "0.7.19", default-features = false }
 iceoryx2 = "0.10.0"
 iceoryx2-bb-posix = "0.10.0"
-jiff = "0.2.41"
+jiff = "1.0.0"
 log = "0.4.35"
 logcall = "0.2.1"
 logforth = { version = "0.30.1", default-features = false }
@@ -53,14 +53,14 @@ nusb = "0.2.9"
 nix = { version = "0.32.0", features = ["signal", "process", "feature", "term", "fs"] }
 ort = { version = "=2.0.0-rc.15" }
 purecv = { version = "0.12.0", default-features = false, features = ["simd", "parallel"] }
-rand = "0.10.3"
+rand = "0.10.4"
 rayon = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
 spidev = "0.7.1"
 toml = "1.2.1"
-usage-rs = "7.3.0"
+usage-rs = "7.4.0"
 v4l = "0.14.0"
-zstd = "0.14.3"
+zstd = "0.14.4"
 firefly-cost = { path = "crates/firefly-cost" }
 firefly-error = { path = "crates/firefly-error" }
 firefly-hal = { path = "crates/firefly-hal" }
