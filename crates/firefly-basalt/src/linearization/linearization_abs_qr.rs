@@ -20,7 +20,8 @@ pub struct LinearizationAbsQr<'a, S: BasaltScalar, const POSE_SIZE: usize> {
     landmark_blocks: Vec<LandmarkBlockAbsDynamic<S, POSE_SIZE>>,
     landmark_offsets: Vec<usize>,
     imu_blocks: Vec<ImuBlock<'a, S>>,
-    relative_pose_lin: HashMap<(TimeCamId, TimeCamId), RelPoseLin<S>>,
+    frame_pairs: Vec<(TimeCamId, TimeCamId)>,
+    relative_pose_lin: Vec<RelPoseLin<S>>,
     order: &'a AbsOrderMap,
     marginalization: Option<&'a MargLinData<S>>,
     pose_damping: S,
@@ -49,19 +50,14 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationAbsQr<'a, S, POSE
     ) -> Self {
         assert_eq!(options.lb_options.huber_parameter, estimator.huber_thresh);
         assert_eq!(options.lb_options.obs_std_dev, estimator.obs_std_dev);
-        let mut relative_pose_lin = HashMap::new();
+        let mut frame_pairs = Vec::new();
+        let mut pair_indices = HashMap::new();
         for (&host, targets) in estimator.lmdb.observations() {
             assert!(!targets.is_empty());
             for (&target, observations) in targets {
                 assert!(!observations.is_empty());
-                relative_pose_lin.insert(
-                    (host, target),
-                    RelPoseLin {
-                        t_t_h: Matrix4::zeros(),
-                        d_rel_d_h: SMatrix::zeros(),
-                        d_rel_d_t: SMatrix::zeros(),
-                    },
-                );
+                pair_indices.insert((host, target), frame_pairs.len());
+                frame_pairs.push((host, target));
             }
         }
         let landmark_blocks: Vec<_> = estimator
@@ -74,13 +70,7 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationAbsQr<'a, S, POSE
                     || lost_landmarks.is_some_and(|lost| lost.contains(id))
             })
             .map(|(&id, point)| {
-                LandmarkBlockAbsDynamic::new(
-                    id,
-                    point,
-                    &relative_pose_lin,
-                    order,
-                    options.lb_options,
-                )
+                LandmarkBlockAbsDynamic::new(id, point, &pair_indices, order, options.lb_options)
             })
             .collect();
         let mut num_rows = 0;
@@ -102,7 +92,15 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationAbsQr<'a, S, POSE
             landmark_blocks,
             landmark_offsets,
             imu_blocks,
-            relative_pose_lin,
+            relative_pose_lin: vec![
+                RelPoseLin {
+                    t_t_h: Matrix4::zeros(),
+                    d_rel_d_h: SMatrix::zeros(),
+                    d_rel_d_t: SMatrix::zeros(),
+                };
+                frame_pairs.len()
+            ],
+            frame_pairs,
             order,
             marginalization,
             pose_damping: S::zero(),
@@ -116,7 +114,8 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationAbsQr<'a, S, POSE
         self.pose_damping = S::zero();
         self.pose_damping_sqrt = S::zero();
         self.marg_scaling = DVector::zeros(0);
-        for (&(host, target), relative) in &mut self.relative_pose_lin {
+        for (&(host, target), relative) in self.frame_pairs.iter().zip(&mut self.relative_pose_lin)
+        {
             if host == target {
                 relative.t_t_h = Matrix4::identity();
                 relative.d_rel_d_h.fill(S::zero());
@@ -149,10 +148,10 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationAbsQr<'a, S, POSE
             .landmark_blocks
             .par_iter_mut()
             .map(|block| {
-                block.update_relative_poses(&self.relative_pose_lin);
                 let error = block.linearize_landmark(
                     estimator.lmdb.landmark(block.landmark_id),
                     &estimator.calib,
+                    &self.relative_pose_lin,
                 );
                 (error, !block.is_numerical_failure())
             })

@@ -15,11 +15,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::AddAssign;
 
 #[derive(Clone, Debug)]
-struct Observation<S: BasaltScalar> {
+struct Observation {
     target: TimeCamId,
     host_offset: usize,
     target_offset: Option<usize>,
-    relative: RelPoseLin<S>,
+    pair_index: usize,
 }
 #[derive(Clone, Debug)]
 pub struct LandmarkBlockAbsDynamic<S: BasaltScalar, const POSE_SIZE: usize> {
@@ -30,7 +30,7 @@ pub struct LandmarkBlockAbsDynamic<S: BasaltScalar, const POSE_SIZE: usize> {
     storage: DMatrix<S>,
     landmark_scaling: Vector3<S>,
     damping_rotations: Vec<(S, S)>,
-    observations: Vec<Observation<S>>,
+    observations: Vec<Observation>,
     residuals_by_pose: BTreeMap<usize, BTreeSet<usize>>,
     /// Ascending storage columns that can be nonzero after `linearize_landmark`.
     ///
@@ -51,7 +51,7 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
     pub fn new(
         landmark_id: usize,
         point: &Keypoint<S>,
-        relative: &HashMap<(TimeCamId, TimeCamId), RelPoseLin<S>>,
+        pair_indices: &HashMap<(TimeCamId, TimeCamId), usize>,
         ordering: &AbsOrderMap,
         options: Options<S>,
     ) -> Self {
@@ -77,7 +77,7 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
                 target,
                 host_offset,
                 target_offset,
-                relative: relative[&(point.host_kf_id, target)].clone(),
+                pair_index: pair_indices[&(point.host_kf_id, target)],
             });
         }
         let padding_index = ordering.total_size;
@@ -130,20 +130,14 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
     pub fn has_landmark_damping(&self) -> bool {
         !self.damping_rotations.is_empty()
     }
-    /// Refresh the data reached through the original block's relative-pose pointers.
     /// # Panics
-    /// Requires every allocated host-target pair to remain present.
-    pub fn update_relative_poses(
+    /// Requires the landmark layout and frame-pair indexing used at allocation.
+    pub fn linearize_landmark(
         &mut self,
-        relative: &HashMap<(TimeCamId, TimeCamId), RelPoseLin<S>>,
-    ) {
-        for observation in &mut self.observations {
-            observation.relative = relative[&(self.host, observation.target)].clone();
-        }
-    }
-    /// # Panics
-    /// Requires the same landmark and observation layout as allocation.
-    pub fn linearize_landmark(&mut self, point: &Keypoint<S>, calibration: &Calibration<S>) -> S {
+        point: &Keypoint<S>,
+        calibration: &Calibration<S>,
+        relative_poses: &[RelPoseLin<S>],
+    ) -> S {
         assert_ne!(self.state, State::Uninitialized);
         assert_eq!(point.host_kf_id, self.host);
         assert_eq!(point.obs.len(), self.observations.len());
@@ -167,6 +161,7 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
             let Some(target_offset) = observation.target_offset else {
                 continue;
             };
+            let relative = &relative_poses[observation.pair_index];
             let mut residual = Vector2::zeros();
             // The C++ invalid-projection branch leaves these uninitialized when
             // use_valid_projections_only is disabled. Safe Rust uses NaN to
@@ -176,7 +171,7 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
             let valid = linearize_point(
                 &point.obs[&observation.target],
                 point,
-                &observation.relative.t_t_h,
+                &relative.t_t_h,
                 &calibration.intrinsics[observation.target.cam_id],
                 &mut residual,
                 Some(&mut pose_derivative),
@@ -212,8 +207,8 @@ impl<S: BasaltScalar, const POSE_SIZE: usize> LandmarkBlockAbsDynamic<S, POSE_SI
                 .view_mut((index * 2, self.residual_index), (2, 1))
                 .copy_from(&(residual * sqrt_weight));
             pose_derivative *= sqrt_weight;
-            let host = pose_derivative * observation.relative.d_rel_d_h;
-            let target = pose_derivative * observation.relative.d_rel_d_t;
+            let host = pose_derivative * relative.d_rel_d_h;
+            let target = pose_derivative * relative.d_rel_d_t;
             for r in 0..2 {
                 for c in 0..6 {
                     self.storage[(index * 2 + r, observation.host_offset + c)] += host[(r, c)];
