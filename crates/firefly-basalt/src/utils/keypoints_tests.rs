@@ -2,6 +2,21 @@ use super::*;
 use serde_json::Value;
 
 #[test]
+fn fast_minimum_contrast_is_strict_on_eight_bit_pixels() {
+    for contrast in [0_u16, 5, 6, 10, 20, 40, 41] {
+        let mut pixels = vec![0x80ff; 64 * 64];
+        pixels[32 * 64 + 32] = (128 + contrast) << 8;
+        let mut points = KeypointsData::default();
+        detect_keypoints(&Image::new(&pixels, 64, 64, 64), &mut points, 64, 1, &[]).unwrap();
+        let expected: Vec<_> = (contrast > 5)
+            .then_some(Vector2::new(32., 32.))
+            .into_iter()
+            .collect();
+        assert_eq!(points.corners, expected, "contrast={contrast}");
+    }
+}
+
+#[test]
 fn real_dataset_cell_fast_candidates_match_original() {
     let reference: Value = serde_json::from_str(include_str!(
         "../../tests/reference/keypoints_dataset_cell.json"

@@ -164,14 +164,22 @@ pub fn detect_keypoints(
         .map(|(x, y)| {
             let mut corners = Vec::new();
             let mut pixels = Vec::with_capacity(patch_size * patch_size);
+            let (mut low, mut high) = (u8::MAX, u8::MIN);
             for sy in y..y + patch_size {
                 for sx in x..x + patch_size {
-                    pixels.push((image.get(sx, sy) >> 8) as u8);
+                    let value = (image.get(sx, sy) >> 8) as u8;
+                    low = low.min(value);
+                    high = high.max(value);
+                    pixels.push(value);
                 }
             }
             let image8 = Matrix::from_vec(patch_size, patch_size, 1, pixels);
             let mut added = 0;
             let mut threshold = 40;
+            // FAST requires a strict intensity difference from the centre pixel.
+            while threshold >= high - low && threshold >= 5 {
+                threshold /= 2;
+            }
             while added < num_points_cell && threshold >= 5 {
                 let mut points = FastFeatureDetector::new(threshold, true, FastType::Type9_16)
                     .detect(&image8)
