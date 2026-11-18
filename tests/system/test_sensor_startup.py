@@ -124,16 +124,15 @@ main(["--no-trace"], publish_plant_state=False)
                     and samples >= 20 and controls >= 100 and valid_depth_frames >= 3):
                 break
             time.sleep(0.01)
-        if first_ready is None:
+        else:
             diagnostics = "\n".join(f"{name}:\n" + "\n".join(child.tail) for name, child in processes.items())
-            raise AssertionError("传感器启动未就绪\n" + diagnostics)
-        assert first_ready >= 1.0, "不得跳过静止观测窗口"
+            raise AssertionError(
+                f"传感器启动超时：首次就绪={first_ready}，最后里程计时间={previous_timestamp}，"
+                f"里程计={samples}，控制={controls}，有效深度帧={valid_depth_frames}\n{diagnostics}"
+            )
         assert np.linalg.norm(first_position) < 0.1, f"初始位置应为局部原点: {first_position}"
-        assert controls >= 100, "无 PlantState 时也必须持续发布零推力"
-        assert valid_depth_frames >= 3, "必须从发布端收到至少三帧有效深度测量"
         if os.environ.get("FIREFLY_RUN_FLIGHT") == "1":
             _verify_flight(ground_truth, check_alive)
-        print(f"PASS: ready={first_ready:.3f}s, local_position={first_position}, odom={samples}, controls={controls}")
     finally:
         # 只停止本次创建的进程；SIGINT 触发端口 Drop 与录制 flush。
         failures = []

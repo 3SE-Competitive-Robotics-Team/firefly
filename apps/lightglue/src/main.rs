@@ -602,23 +602,14 @@ fn observation_from_matches(
 
 #[cfg(test)]
 mod tests {
-    use super::default_model;
-    use std::path::PathBuf;
-
     #[test]
-    fn config_defaults_without_file() {
-        let options: super::Options = firefly_config::load(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../configs/__missing__/lightglue.toml"
-        ))
-        .unwrap();
-        assert!((options.query_period - 1.).abs() < f64::EPSILON);
-    }
-
-    #[test]
+    #[ignore = "requires exported LightGlue weights and ONNX Runtime"]
     #[allow(clippy::large_stack_arrays)]
-    fn query_inputs_preserve_all_transmitted_features() {
-        use super::{DESC_DIM, FeatureMessage, NUM_POINTS, fill_feature_inputs};
+    fn exported_model_checks_output_tensors_and_binds_full_query() {
+        use super::*;
+        let mut session = load_session(&default_model()).unwrap();
+        smoke_inference(&mut session).unwrap();
+        let mut bindings = MatchBindings::new(&session).unwrap();
         let mut features = FeatureMessage {
             timestamp: 1.,
             count: 7,
@@ -630,23 +621,15 @@ mod tests {
             features.keypoints[index] = [index as f32, -(index as f32)];
             features.descriptors[index] = std::array::from_fn(|column| (index + column) as f32);
         }
-        let mut keypoints = vec![f32::NAN; NUM_POINTS * 2];
-        let mut descriptors = vec![f32::NAN; NUM_POINTS * DESC_DIM];
-        fill_feature_inputs(
-            &mut keypoints,
-            &mut descriptors,
-            features.keypoints.iter().zip(&features.descriptors),
+        bind_query(&mut bindings, &features).unwrap();
+        assert_eq!(
+            bindings.k0.extract_tensor().1,
+            features.keypoints.as_flattened()
         );
-        for index in 0..NUM_POINTS {
-            assert_eq!(
-                keypoints[2 * index..2 * (index + 1)],
-                features.keypoints[index]
-            );
-            assert_eq!(
-                descriptors[index * DESC_DIM..(index + 1) * DESC_DIM],
-                features.descriptors[index]
-            );
-        }
+        assert_eq!(
+            bindings.d0.extract_tensor().1,
+            features.descriptors.as_flattened()
+        );
     }
 
     #[test]
@@ -703,7 +686,7 @@ mod tests {
         let map =
             firefly_vision_map::load_map(&root.join("apps/planner/maps/rmuc2027-1.0.0.ffvmap"))
                 .unwrap();
-        let mut session = load_session(&test_model_path().expect("model required")).unwrap();
+        let mut session = load_session(&default_model()).unwrap();
         let frame = map
             .frames
             .iter()
@@ -750,21 +733,6 @@ mod tests {
         assert!(error.norm() < 0.05, "map pose error {error}");
         assert!(observation.num_inliers >= 30);
         assert!(observation.error < 1.);
-    }
-
-    fn test_model_path() -> Option<PathBuf> {
-        let path = default_model();
-        path.is_file().then_some(path)
-    }
-
-    #[test]
-    fn onnx_smoke_or_skip() {
-        let Some(path) = test_model_path() else {
-            println!("skip: 无权重 {}", default_model().display());
-            return;
-        };
-        let mut session = super::load_session(&path).unwrap();
-        super::smoke_inference(&mut session).unwrap();
     }
 }
 

@@ -14,28 +14,32 @@ fn top_level_lists_domains() {
 
 #[test]
 fn domains_list_verbs() {
-    let out = usage_rs::test::command!("ffctl", "fc", "--help").assert_success();
-    let stdout = out.stdout_text();
-    for verb in ["arm", "disarm", "hold", "land", "takeoff", "track"] {
-        assert!(stdout.contains(verb), "缺少 {verb}：{stdout}");
-    }
-
-    let out = usage_rs::test::command!("ffctl", "planner", "--help").assert_success();
-    assert!(out.stdout_text().contains("goal"), "{}", out.stdout_text());
-
-    let out = usage_rs::test::command!("ffctl", "process", "--help").assert_success();
-    let stdout = out.stdout_text();
-    for verb in [
-        "start",
-        "stop",
-        "restart",
-        "enable",
-        "disable",
-        "status",
-        "supervise",
-    ] {
-        assert!(stdout.contains(verb), "缺少 {verb}：{stdout}");
-    }
+    let check = |domain: &str, verbs: &[&str]| {
+        let out = usage_rs::test::command!("ffctl", domain, "--help").assert_success();
+        let stdout = out.stdout_text();
+        for verb in verbs {
+            assert!(
+                stdout
+                    .lines()
+                    .any(|line| line.split_whitespace().next() == Some(verb)),
+                "缺少 {domain} {verb}：{stdout}"
+            );
+        }
+    };
+    check("fc", &["arm", "disarm", "hold", "land", "takeoff", "track"]);
+    check("planner", &["goal"]);
+    check(
+        "process",
+        &[
+            "start",
+            "stop",
+            "restart",
+            "enable",
+            "disable",
+            "status",
+            "supervise",
+        ],
+    );
 }
 
 #[test]
@@ -89,11 +93,20 @@ fn takeoff_rejects_non_numeric_altitude() {
 fn usage_spec_exports_domains() {
     let out = usage_rs::test::command!("ffctl", "__usage_spec__").assert_success();
     let spec = out.stdout_text();
-    assert!(spec.contains("cmd fc"), "{spec}");
-    assert!(spec.contains("cmd planner"), "{spec}");
-    assert!(spec.contains("cmd process"), "{spec}");
-    assert!(spec.contains("cmd takeoff"), "{spec}");
-    assert!(spec.contains("effect=write"), "{spec}");
+    for domain in ["fc", "planner", "process"] {
+        let prefix = format!("cmd {domain} ");
+        assert!(spec.lines().any(|line| line.starts_with(&prefix)), "{spec}");
+    }
+    let takeoff = spec
+        .lines()
+        .find(|line| line.trim_start().starts_with("cmd takeoff "))
+        .expect("missing takeoff declaration");
+    assert!(
+        takeoff
+            .split_whitespace()
+            .any(|field| field == "effect=write"),
+        "{takeoff}"
+    );
 }
 
 #[test]

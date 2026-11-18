@@ -93,6 +93,7 @@ fn reference<S: BasaltScalar, const N: usize>(case: &Value, tol: f64) {
     matrix(curve.knots_front(), &case["popped_front"], tol);
     let converted = curve.cast::<f64>();
     assert_eq!(converted.time_interval_ns(), curve.time_interval_ns());
+    assert_eq!(converted.knots().len(), curve.knots().len());
     for (actual, original) in converted.knots().iter().zip(curve.knots()) {
         assert_eq!(*actual, original.map(BasaltScalar::as_f64));
     }

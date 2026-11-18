@@ -1,5 +1,5 @@
-//! 部署替换 bin/configs/models，保留 logs；自己停止的服务由自己恢复。
-//! legacy adb shell 不传递远端退出码，解包完整性与服务就绪须检查远端输出。
+//! 部署替换 bin/configs/models，保留 logs。安装成功后启动服务，以 supervisor 应答确认就绪。
+//! 板载 legacy adb shell 的退出码反映传输结果，远端步骤通过输出标记确认成功。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -224,7 +224,7 @@ fn unpack_with(mut output: impl FnMut(&[&str]) -> Result<String, String>) -> Res
     Ok(())
 }
 
-/// 解包失败在板载 adbd 上不会反映成 `adb` 的退出码，所以按应用名单逐个确认可执行位。
+/// 检查机载清单中的每个程序在部署路径上都有执行权限。
 fn check_unpacked(device: &str) -> Result<(), String> {
     let expected = Target::Board
         .apps()
@@ -246,10 +246,6 @@ fn check_unpacked(device: &str) -> Result<(), String> {
     }
 }
 
-/// 部署流程自己停了 `firefly.service`，解包完成后必须重新拉起。
-///
-/// `systemd` 的 active 状态早于 supervisor 的 socket 就绪，只看 `is-active` 会把
-/// “起来了但不应答”判成成功，所以以 `ffctl process status` 在超时内应答为就绪判据。
 fn start(device: &str) -> Result<(), String> {
     remote_step(device, "systemctl start firefly")?;
     let probe = concat!(
@@ -331,7 +327,7 @@ mod tests {
     use super::{has_marker, prepare_destination_with, remote_step_with, unpack_with};
 
     #[test]
-    fn failed_remote_stop_preserves_installed_files() {
+    fn failed_stop_returns_before_sending_cleanup_command() {
         let mut commands = Vec::new();
         let result = prepare_destination_with(|args| {
             commands.push(args[1].to_owned());
@@ -374,25 +370,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_shell_requires_unpack_completion_before_start() {
-        for tail in [
-            "configs/fc.toml: permission denied",
-            "models/model.onnx: no space left",
-        ] {
-            let mut started = false;
-            let result: Result<(), String> = (|| {
-                unpack_with(|args| {
-                    assert_eq!(args[0], "shell");
-                    assert!(args[1].contains(" && echo FIREFLY_UNPACK_COMPLETE"));
-                    // Legacy adb succeeds even when the remote unpacker fails.
-                    Ok(format!("bin/fc\n{tail}\n"))
-                })?;
-                started = true;
-                Ok(())
-            })();
-            assert!(result.is_err());
-            assert!(!started);
-        }
+    fn unpack_requires_completion_marker_and_reports_remote_output() {
+        let diagnostic = "configs/fc.toml: permission denied";
+        let error = unpack_with(|args| {
+            assert_eq!(args[0], "shell");
+            assert!(args[1].contains(" && echo FIREFLY_UNPACK_COMPLETE"));
+            Ok(format!("bin/fc\n{diagnostic}\n"))
+        })
+        .unwrap_err();
+        assert!(error.contains(diagnostic), "{error}");
         assert!(unpack_with(|_| Ok("unpacked\nFIREFLY_UNPACK_COMPLETE\n".into())).is_ok());
     }
 }

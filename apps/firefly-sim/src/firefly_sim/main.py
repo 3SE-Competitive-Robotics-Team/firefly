@@ -92,11 +92,7 @@ def _subscriber(node, topic: str, payload_cls, subscriber_max: int | None = None
 
 
 def advance_grid(next_t: float, t: float, period: float) -> tuple[float, int]:
-    """推进网格时刻，返回（新时刻，跳过的格点数）。
-
-    跳过发生在物理步进跟不上发布节拍时（进程被抢占数百 ms）：跳过的采样/帧
-    永久丢失（物理不可倒带），由调用方计数告警。正常节拍下返回跳过 0。
-    """
+    """发布到期样本后，按仿真时间推进到下一个格点，返回新时刻和本次额外跨过的格点数。"""
     skipped = 0
     while next_t <= t + 1e-12:
         next_t += period

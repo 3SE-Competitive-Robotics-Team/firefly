@@ -448,20 +448,10 @@ fn smoke_inference(model: &mut Model) -> Result<(), Box<dyn std::error::Error>> 
 mod tests {
     use super::*;
 
-    fn test_model_path() -> Option<PathBuf> {
-        let path = default_model();
-        path.is_file().then_some(path)
-    }
-
     #[test]
-    fn reused_input_matches_fresh_tensor_across_frames_or_skip() {
-        let Some(path) = test_model_path() else {
-            log::warn!("skip: 无权重 {}", default_model().display());
-            return;
-        };
-        let mut model = load_model(&path).unwrap();
-        // ort 只允许一个进程级环境；冒烟与缓冲区回归共用一次初始化。
-        smoke_inference(&mut model).unwrap();
+    #[ignore = "requires exported ALIKED weights and ONNX Runtime"]
+    fn reused_input_matches_fresh_tensor_across_frames() {
+        let mut model = load_model(&default_model()).unwrap();
         let input_ptr = model.input.extract_tensor().1.as_ptr();
         let mut frame = GrayImageMessage {
             width: WIDTH as u32,

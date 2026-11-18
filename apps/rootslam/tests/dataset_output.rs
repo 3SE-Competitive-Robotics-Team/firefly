@@ -67,9 +67,12 @@ fn native_ground_truth_bytes_and_original_trajectory_oracle() {
         assert_eq!(actual.lines().next(), expected.lines().next());
         assert_eq!(actual.lines().count(), expected.lines().count());
         for (a, e) in actual.lines().skip(1).zip(expected.lines().skip(1)) {
-            for (a, e) in a.split([' ', ',']).zip(e.split([' ', ','])) {
-                assert_eq!(a.parse::<f64>().unwrap(), e.parse::<f64>().unwrap());
-            }
+            let values = |line: &str| {
+                line.split([' ', ','])
+                    .map(|field| field.parse::<f64>().unwrap())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(values(a), values(e), "{name} trajectory row");
         }
     }
     let mut kitti = Vec::new();
@@ -113,9 +116,10 @@ fn original_alignment_and_result_schema() {
         exec_time_ns: 123,
     })
     .unwrap();
-    assert_eq!(value.as_object().unwrap().len(), 3);
-    assert_eq!(value["num_frames"], 100);
-    assert_eq!(value["exec_time_ns"], 123);
+    assert_eq!(
+        value,
+        serde_json::json!({"rms_ate": error, "num_frames": 100, "exec_time_ns": 123})
+    );
     let stats = firefly_rootslam::dataset_output::original_statistics(
         std::time::Duration::from_millis(1250),
         0.01,

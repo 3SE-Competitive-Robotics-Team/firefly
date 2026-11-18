@@ -695,7 +695,7 @@ mod tests {
     #[test]
     fn solve_cubic_single() {
         let r = solve_cub(1.0, 0.0, 0.0, -1.0);
-        assert!(r.contains(&OrderedF64(1.0)));
+        assert_eq!(r, BTreeSet::from([OrderedF64(1.0)]));
     }
 
     #[test]
@@ -711,8 +711,11 @@ mod tests {
         let c = vec![1.0, -3.0, 2.0];
         let r = solve_polynomial(&c, -10.0, 10.0, 1e-9);
         let v: Vec<f64> = r.iter().map(|x| x.0).collect();
-        assert!(v.iter().any(|x| (x - 1.0).abs() < 1e-6));
-        assert!(v.iter().any(|x| (x - 2.0).abs() < 1e-6));
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert!(
+            (v[0] - 1.0).abs() < 1e-6 && (v[1] - 2.0).abs() < 1e-6,
+            "{v:?}"
+        );
     }
 
     #[test]

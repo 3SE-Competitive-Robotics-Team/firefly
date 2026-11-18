@@ -4,18 +4,20 @@ import pytest
 from firefly_workspace import digest, workspace_root
 
 
-def test_optional_toml_only_defaults_when_missing(tmp_path, caplog):
+def test_optional_toml_distinguishes_missing_from_empty_and_propagates_errors(tmp_path, caplog):
     import logging
     import tomllib
     from firefly_workspace import load_toml
 
     path = tmp_path / "optional.toml"
-    with caplog.at_level(logging.INFO):
-        assert load_toml(path) == {}
+    caplog.set_level(logging.INFO)
+    assert load_toml(path) == {}
     assert any(record.levelno == logging.INFO and str(path) in record.getMessage()
                and "使用默认值" in record.getMessage() for record in caplog.records)
+    caplog.clear()
     path.write_text("# defaults\n")
     assert load_toml(path) == {}
+    assert any("已加载配置" in message and str(path) in message for message in caplog.messages)
     path.write_text("rate = 50")
     assert load_toml(path) == {"rate": 50}
     path.write_text("rate = [")
@@ -36,9 +38,11 @@ def test_workspace_discovery_uses_workspace_manifest(tmp_path, monkeypatch):
     source = nested / "tool.py"
     source.write_text("")
     assert workspace_root(source) == tmp_path
-    (tmp_path / "pyproject.toml").write_text('[project]\nname = "unrelated"\n')
-    with pytest.raises(ValueError, match="workspace not found"):
-        workspace_root()
+    for manifest in ('[project]\nname = "unrelated"\n[tool.uv.workspace]\n',
+                     '[project]\nname = "firefly"\n'):
+        (tmp_path / "pyproject.toml").write_text(manifest)
+        with pytest.raises(ValueError, match="workspace not found"):
+            workspace_root()
 
 
 @pytest.mark.parametrize(("contents", "expected"), [

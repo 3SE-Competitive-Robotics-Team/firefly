@@ -7,8 +7,7 @@ use crate::ipc::{report, send_command};
 
 /// 解锁：通过全部解锁前检查后电机可出力
 ///
-/// 检查项（缺一即拒，原因逐条打印在飞控日志）：状态估计就绪、已收到机体描述、
-/// 被控对象状态与 IMU 新鲜、停在起飞点地面。
+/// 飞控按顺序检查解锁条件，拒绝时报告首个未通过项。
 #[derive(Args)]
 #[usage(effect = "write")]
 pub(crate) struct Arm;

@@ -651,6 +651,15 @@ Mimir 先启动、最后关闭；任务设置、阶段、起飞坐标锚点和�
 
 ### 可选资产检查
 
+导出视觉模型并准备对应平台的 ONNX Runtime 后，单独运行张量与推理回归：
+
+```bash
+cargo test --release -p aliked reused_input_matches_fresh_tensor_across_frames -- --ignored
+cargo test --release -p lightglue exported_model_checks_output_tensors_and_binds_full_query -- --ignored
+```
+
+RMUC 场地资产与规划检查：
+
 ```bash
 FIREFLY_RUN_RMUC_ASSETS=1 uv run --all-packages --extra test pytest tests/system/test_rmuc_assets.py -q
 cargo test --release -p firefly-planner --test rmuc_asset -- --ignored

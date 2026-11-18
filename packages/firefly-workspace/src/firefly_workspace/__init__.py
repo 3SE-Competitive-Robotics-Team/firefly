@@ -53,7 +53,7 @@ def startup(path: str | Path, decode: Callable[[dict], T], *,
 
 
 def load_toml(path: str | Path) -> dict:
-    """已初始化日志的进程读取辅助配置；仅缺文件返回空表，其他错误传播。"""
+    """读取并解析辅助配置。文件缺失时记录使用默认值并返回空表。"""
     values, exists = _read_toml(path)
     _report_config(path, exists)
     return values

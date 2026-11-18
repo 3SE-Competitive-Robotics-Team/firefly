@@ -19,7 +19,7 @@ const ZSTD_LEVEL: i32 = 3;
 pub struct Entry {
     /// 包内路径，使用 `/` 分隔。
     pub path: String,
-    /// Unix 权限位，只保留低 9 位。
+    /// Unix 权限位；解包时取低 9 位设置目标文件权限。
     pub mode: u32,
     pub source: PathBuf,
 }
@@ -187,19 +187,15 @@ mod tests {
             fs::read_to_string(out.join("configs/firefly-rootslam.toml")).unwrap(),
             "key = 1\n"
         );
-        assert_eq!(
-            fs::metadata(out.join("bin/fc"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o755
-        );
+        for entry in &entries {
+            let permissions = fs::metadata(out.join(&entry.path)).unwrap().permissions();
+            assert_eq!(permissions.mode() & 0o777, entry.mode, "{}", entry.path);
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn rejects_unsafe_or_empty_paths() {
+    fn writer_rejects_unsafe_or_empty_paths() {
         let dir = scratch("unsafe");
         let file = dir.join("file");
         fs::write(&file, b"x").unwrap();
@@ -218,12 +214,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_foreign_package() {
+    fn unpack_rejects_wrong_magic_in_an_empty_package() {
         let dir = scratch("foreign");
         let package = dir.join("package.zst");
         fs::write(
             &package,
-            zstd::encode_all(&b"not a package"[..], 3).unwrap(),
+            zstd::encode_all(&b"OTHER001\0\0\0\0"[..], 3).unwrap(),
         )
         .unwrap();
         assert!(unpack(&package, &dir.join("out")).is_err());
