@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable, Sequence
 from functools import partial
-import os
 from typing import Protocol
 
 import time
@@ -201,7 +200,7 @@ def decode_config(cfg: dict, *, scene_loader: Callable[[], str] = load_scene_nam
 
 
 def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory = DroneEnv,
-         publish_plant_state: bool = True,
+         publish_plant_state: bool = True, seed: int | None = None,
          scene_loader: Callable[[], str] = load_scene_name) -> None:
     parser = argparse.ArgumentParser(description="RMUC MuJoCo 物理进程；图像由 render 提供")
     parser.add_argument("--no-trace", action="store_true")
@@ -210,8 +209,7 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
     trace_enabled = not args.no_trace
     physics_period, imu_period, pose_period, start_pos, scene_name = startup(
         args.config, partial(decode_config, scene_loader=scene_loader))
-    seed = os.environ.get("FIREFLY_MISSION_SEED")
-    rng = np.random.default_rng(int(seed)) if seed is not None else None
+    rng = np.random.default_rng(seed) if seed is not None else None
     env = env_factory(timestep=physics_period, imu_period=imu_period,
                       scene_factory=partial(build_scene, name=scene_name), rng=rng)
     env.reset(start_pos, np.array([0.0, 0.0, 0.0, 1.0]))  # xyzw 单位四元数

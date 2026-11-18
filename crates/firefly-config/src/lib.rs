@@ -117,16 +117,12 @@ mod tests {
 }
 
 /// 随程序安装的 `configs/` 与 `models/` 资源定位。
-/// 安装根依次取非空环境覆盖、含 `configs/` 的可执行文件前缀、编译期默认值。
+/// 安装根优先取含 `configs/` 的可执行文件前缀，其次取编译期默认值。
 pub mod paths {
     use std::{
-        ffi::OsStr,
         path::{Component, Path, PathBuf},
         sync::OnceLock,
     };
-
-    /// 覆盖安装根的环境变量。
-    pub const ROOT_ENV: &str = "FIREFLY_ROOT";
 
     /// 板载布局（Orange Pi Zero 3W，aarch64-linux）。
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
@@ -142,7 +138,6 @@ pub mod paths {
     pub fn root() -> PathBuf {
         ROOT.get_or_init(|| {
             resolve(
-                std::env::var_os(ROOT_ENV).as_deref(),
                 std::env::current_exe().ok().as_deref(),
                 Path::new(DEFAULT_ROOT),
             )
@@ -162,10 +157,7 @@ pub mod paths {
         root().join("models").join(name)
     }
 
-    fn resolve(override_root: Option<&OsStr>, exe: Option<&Path>, default: &Path) -> PathBuf {
-        if let Some(dir) = override_root.filter(|dir| !dir.is_empty()) {
-            return normalize(Path::new(dir));
-        }
+    fn resolve(exe: Option<&Path>, default: &Path) -> PathBuf {
         if let Some(prefix) = exe
             .and_then(install_prefix)
             .filter(|prefix| prefix.join("configs").is_dir())
@@ -202,22 +194,9 @@ pub mod paths {
         use std::fs;
 
         #[test]
-        fn env_override_wins_over_everything() {
+        fn missing_executable_falls_back_to_default() {
             let default = Path::new("/default/root");
-            let exe = Path::new("/installed/bin/fc");
-            assert_eq!(
-                resolve(Some(OsStr::new("/custom/root")), Some(exe), default),
-                PathBuf::from("/custom/root")
-            );
-        }
-
-        #[test]
-        fn empty_env_value_is_ignored() {
-            let default = Path::new("/default/root");
-            assert_eq!(
-                resolve(Some(OsStr::new("")), None, default),
-                PathBuf::from("/default/root")
-            );
+            assert_eq!(resolve(None, default), PathBuf::from("/default/root"));
         }
 
         #[test]
@@ -229,7 +208,7 @@ pub mod paths {
             fs::create_dir_all(&configs).unwrap();
             let exe = scratch.join("bin").join("fc");
             assert_eq!(
-                resolve(None, Some(&exe), Path::new("/default/root")),
+                resolve(Some(&exe), Path::new("/default/root")),
                 normalize(&scratch)
             );
             assert_eq!(
@@ -244,7 +223,7 @@ pub mod paths {
         fn executable_without_configs_falls_back_to_default() {
             let exe = Path::new("/usr/local/bin/fc");
             assert_eq!(
-                resolve(None, Some(exe), Path::new("/opt/firefly")),
+                resolve(Some(exe), Path::new("/opt/firefly")),
                 PathBuf::from("/opt/firefly")
             );
         }

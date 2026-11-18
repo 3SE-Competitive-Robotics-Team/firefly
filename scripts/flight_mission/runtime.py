@@ -44,7 +44,6 @@ class FlightRunner:
             env={
                 **os.environ,
                 "RUST_LOG": os.environ.get("RUST_LOG", "info"),
-                "FIREFLY_MISSION_SEED": str(self.options.seed),
             },
         )
         self.processes[name] = child
@@ -276,7 +275,9 @@ class FlightRunner:
             [
                 sys.executable,
                 "-c",
-                f"from firefly_sim.main import main; main(['--no-trace', '--config', 'configs/{sim_config}.toml'], publish_plant_state=False)",
+                "from firefly_sim.main import main; "
+                f"main(['--no-trace', '--config', 'configs/{sim_config}.toml'], "
+                f"publish_plant_state=False, seed={self.options.seed!r})",
             ],
         )
         self._start("render", [str(self.root / "target/release/render")])
