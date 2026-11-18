@@ -141,6 +141,7 @@ fn run_mapping(
                 last_stamp = Some(message.timestamp);
                 pending.push_back(DepthFrame::from_message(
                     &message,
+                    &fusion.map,
                     fusion.options.k_depth_scaling_factor,
                     *message.user_header(),
                 )?);
@@ -235,22 +236,25 @@ struct DepthFrame {
 }
 
 impl DepthFrame {
-    fn from_message(message: &DepthImageMessage, scale: f64, trace: TraceContext) -> Result<Self> {
+    fn from_message(
+        message: &DepthImageMessage,
+        map: &GridMap,
+        scale: f64,
+        trace: TraceContext,
+    ) -> Result<Self> {
         if message.sensor_id != 0
             || message.width as usize != IMAGE_WIDTH
             || message.height as usize != IMAGE_HEIGHT
         {
             return Err(invalid("depth image does not match the calibrated rig"));
         }
-        let pixels = message
-            .data
-            .iter()
-            .map(|&metres| depth_units(metres, scale))
-            .collect();
+        let image = map.sample_depth(IMAGE_WIDTH, IMAGE_HEIGHT, &message.data, |metres| {
+            depth_units(metres, scale)
+        })?;
         Ok(Self {
             timestamp: message.timestamp,
             received: Instant::now(),
-            image: DepthImage::new(IMAGE_WIDTH, IMAGE_HEIGHT, pixels)?,
+            image,
             trace,
         })
     }

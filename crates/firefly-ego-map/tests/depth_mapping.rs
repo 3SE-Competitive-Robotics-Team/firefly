@@ -27,6 +27,77 @@ fn depth(raw: u16) -> DepthImage {
 }
 
 #[test]
+fn sampled_depth_matches_dense_projection_and_occupancy() {
+    let (width, height) = (13, 9);
+    let addresses: Vec<_> = (0..width * height).collect();
+    let pixels: Vec<_> = (0..width * height)
+        .map(|i| if i % 11 == 0 { 0 } else { (300 + 7 * i) as u16 })
+        .collect();
+    for (filter, margin, step) in [(true, 2, 2), (false, 2, 3), (true, 0, 1), (true, 5, 2)] {
+        let p = MappingParameters {
+            use_depth_filter: filter,
+            depth_filter_margin: margin,
+            skip_pixel: step,
+            ..parameters()
+        };
+        let mut dense = GridMap::new(p.clone()).unwrap();
+        let mut sampled = GridMap::new(p).unwrap();
+        for frame in 0..4 {
+            let pose = Isometry3::translation(f64::from(frame) * 0.1, 0., 0.);
+            let timestamp = 1. + f64::from(frame) * 0.032;
+            let full = DepthImage::new(width, height, pixels.clone()).unwrap();
+            let mut indices = Vec::new();
+            let packed = sampled
+                .sample_depth(width, height, &addresses, |i| {
+                    indices.push(i);
+                    pixels[i]
+                })
+                .unwrap();
+            let border = if filter { margin as usize } else { 0 };
+            let expected: Vec<_> = (border..height.saturating_sub(border))
+                .step_by(step as usize)
+                .flat_map(|y| {
+                    (border..width.saturating_sub(border))
+                        .step_by(step as usize)
+                        .map(move |x| y * width + x)
+                })
+                .collect();
+            assert_eq!(indices, expected);
+            dense.depth_odom_callback(full, pose).unwrap();
+            sampled.depth_odom_callback(packed, pose).unwrap();
+            dense.update_occupancy_callback(timestamp).unwrap();
+            sampled.update_occupancy_callback(timestamp).unwrap();
+            assert_eq!(sampled.projected_points(), dense.projected_points());
+            assert_eq!(sampled.occupancy_buffer(), dense.occupancy_buffer());
+            assert_eq!(sampled.inflation_buffer(), dense.inflation_buffer());
+            assert_eq!(sampled.observed_free_buffer(), dense.observed_free_buffer());
+        }
+    }
+}
+
+#[test]
+fn incompatible_depth_sampling_is_rejected_at_ingress() {
+    let source = GridMap::new(parameters()).unwrap();
+    let mut other = GridMap::new(MappingParameters {
+        skip_pixel: 2,
+        ..parameters()
+    })
+    .unwrap();
+    let image = source.sample_depth(3, 3, &[1250; 9], |raw| raw).unwrap();
+    assert!(
+        other
+            .depth_pose_callback(image.clone(), Isometry3::identity())
+            .is_err()
+    );
+    assert!(
+        other
+            .depth_odom_callback(image, Isometry3::identity())
+            .is_err()
+    );
+    assert!(!other.update_occupancy_callback(1.).unwrap());
+}
+
+#[test]
 fn single_ray_updates_endpoint_and_traversed_cells() {
     let mut map = GridMap::new(parameters()).unwrap();
     for frame in 0..5 {
