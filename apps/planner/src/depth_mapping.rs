@@ -307,6 +307,8 @@ pub struct DepthFusion {
     collision_resolution: f64,
     collision_origin: nalgebra::Vector3<f64>,
     collision_cache: Option<firefly_map::CollisionSnapshot>,
+    observed_cache: Option<firefly_map::ObservedSpace>,
+    cached_revisions: (u64, u64),
     options: DepthOptions,
     last_fused: Option<(f64, Instant)>,
     sequence: u64,
@@ -324,6 +326,8 @@ impl DepthFusion {
                 - nalgebra::Vector3::from(grid.global_index([0; 3]).map(|v| v as f64))
                     * grid.resolution(),
             collision_cache: None,
+            observed_cache: None,
+            cached_revisions: (0, 0),
             options,
             last_fused: None,
             sequence: 0,
@@ -357,7 +361,43 @@ impl DepthFusion {
             min: low.map(|v| f64::from(v) * resolution),
             max: high.map(|v| (f64::from(v) + 1.) * resolution),
         };
+        let revisions = self.map.snapshot_revisions();
+        if self.collision_cache.is_none() || revisions.0 != self.cached_revisions.0 {
+            let collision = self.build_collision(bounds)?;
+            // The planner uses shared-buffer identity to detect a changed map. Updates
+            // between snapshots can cancel, leaving the same packed collision geometry.
+            if self.collision_cache.as_ref() != Some(&collision) {
+                self.collision_cache = Some(collision);
+            }
+        }
+        if self.observed_cache.is_none() || revisions.1 != self.cached_revisions.1 {
+            let (free, dims, origin) = self.map.observed_free_buffer();
+            self.observed_cache = Some(firefly_map::ObservedSpace::from_buffer(
+                resolution, low, dims, origin, free,
+            ));
+        }
+        self.cached_revisions = revisions;
         self.sequence += 1;
+        Ok(Some(LocalSnapshot {
+            collision: self
+                .collision_cache
+                .as_ref()
+                .expect("collision snapshot prepared")
+                .clone(),
+            observed: self
+                .observed_cache
+                .as_ref()
+                .expect("observed snapshot prepared")
+                .clone(),
+            bounds,
+            sequence: self.sequence,
+            timestamp,
+            fused_at,
+        }))
+    }
+
+    fn build_collision(&self, bounds: Bounds) -> Result<firefly_map::CollisionSnapshot> {
+        let resolution = self.map.resolution();
         let mut cells = Vec::new();
         let mut overflow = false;
         self.map.visit_inflated_runs(|low, high| {
@@ -375,31 +415,13 @@ impl DepthFusion {
         }
         let (collision_low, collision_high) =
             bounds.voxel_bounds(self.collision_origin, self.collision_resolution);
-        let collision = firefly_map::CollisionSnapshot::from_runs(
+        Ok(firefly_map::CollisionSnapshot::from_runs(
             collision_low,
             std::array::from_fn(|i| (collision_high[i] - collision_low[i]) as usize),
             cells
                 .iter()
                 .map(|cell| cell.voxel_bounds(self.collision_origin, self.collision_resolution)),
-        );
-        if self.collision_cache.as_ref() != Some(&collision) {
-            self.collision_cache = Some(collision);
-        }
-        Ok(Some(LocalSnapshot {
-            collision: self
-                .collision_cache
-                .as_ref()
-                .expect("collision snapshot prepared")
-                .clone(),
-            observed: {
-                let (free, dims, origin) = self.map.observed_free_buffer();
-                firefly_map::ObservedSpace::from_buffer(resolution, low, dims, origin, free)
-            },
-            bounds,
-            sequence: self.sequence,
-            timestamp,
-            fused_at,
-        }))
+        ))
     }
 }
 

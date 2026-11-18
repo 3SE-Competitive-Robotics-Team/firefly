@@ -18,6 +18,8 @@ type Index = Vector3<i32>;
     reason = "Preserve independent C++ callback flags"
 )]
 pub struct GridMap {
+    collision_revision: u64,
+    observed_revision: u64,
     parameters: MappingParameters,
     resolution_inv: f64,
     half_range: Index,
@@ -104,6 +106,8 @@ impl GridMap {
         // `initMap` camera-to-body rotation, before extrinsicCallback overrides it.
         let rotation = Matrix3::new(0., 0., 1., -1., 0., 0., 0., -1., 0.);
         Ok(Self {
+            collision_revision: 0,
+            observed_revision: 0,
             prob_hit_log: logit(parameters.p_hit),
             prob_miss_log: logit(parameters.p_miss),
             clamp_min_log,
@@ -373,8 +377,10 @@ impl GridMap {
             self.count_hit_and_miss[address] = 0;
             // Occupancy starts at p_min upstream, so its numeric value alone cannot
             // distinguish an unobserved cell from one traversed by a depth ray.
-            self.observed_free[address] =
-                hit == 0 && all > 0 && self.occupancy[address] < self.min_occupancy_log;
+            self.set_observed_free(
+                address,
+                hit == 0 && all > 0 && self.occupancy[address] < self.min_occupancy_log,
+            );
             if (update >= 0. && self.occupancy[address] >= self.clamp_max_log)
                 || (update <= 0. && self.occupancy[address] <= self.clamp_min_log)
             {
@@ -389,7 +395,7 @@ impl GridMap {
         if !self.projected.is_empty() {
             let address = self.address(self.position_to_index(self.camera_position));
             if self.occupancy[address] < self.min_occupancy_log {
-                self.observed_free[address] = true;
+                self.set_observed_free(address, true);
             }
         }
     }
@@ -427,7 +433,7 @@ impl GridMap {
             let id = self.position_to_index(point);
             let address = self.address(id);
             self.occupancy[address] = self.clamp_max_log;
-            self.observed_free[address] = false;
+            self.set_observed_free(address, false);
             if self.inflate[self.inf_address(id)] < OBSTACLE_FLAG
                 && self.occupancy[address] >= self.min_occupancy_log
             {
@@ -456,26 +462,43 @@ impl GridMap {
         }
     }
 
+    fn set_observed_free(&mut self, address: usize, free: bool) {
+        let previous = std::mem::replace(&mut self.observed_free[address], free);
+        self.observed_revision = self
+            .observed_revision
+            .wrapping_add(u64::from(previous != free));
+    }
+
+    fn set_inflation(&mut self, address: usize, count: u16) {
+        let previous = std::mem::replace(&mut self.inflate[address], count);
+        self.collision_revision = self
+            .collision_revision
+            .wrapping_add(u64::from((previous == 0) != (count == 0)));
+    }
+
     fn change_inf_buf(&mut self, add: bool, id: Index) {
         let center = self.inf_address(id);
-        self.inflate[center] = if add {
+        let count = if add {
             self.inflate[center].wrapping_add(OBSTACLE_FLAG)
         } else {
             self.inflate[center].wrapping_sub(OBSTACLE_FLAG)
         };
+        self.set_inflation(center, count);
         for x in -self.inf_grid..=self.inf_grid {
             for y in -self.inf_grid..=self.inf_grid {
                 for z in -self.inf_grid..=self.inf_grid {
                     let address = self.inf_address(id + Index::new(x, y, z));
                     if add {
-                        self.inflate[address] = self.inflate[address].wrapping_add(1);
+                        self.set_inflation(address, self.inflate[address].wrapping_add(1));
                     } else {
-                        self.inflate[address] = self.inflate[address].wrapping_sub(1);
+                        self.set_inflation(address, self.inflate[address].wrapping_sub(1));
                         // Upstream's unsigned underflow recovery, with the same reset scope.
                         if self.inflate[address] > 65000 {
                             self.occupancy.fill(self.clamp_min_log);
                             self.observed_free.fill(false);
                             self.inflate.fill(0);
+                            self.observed_revision = self.observed_revision.wrapping_add(1);
+                            self.collision_revision = self.collision_revision.wrapping_add(1);
                         }
                     }
                 }
@@ -544,6 +567,11 @@ impl GridMap {
     pub fn observed_free_buffer(&self) -> (&[bool], [i32; 3], [i32; 3]) {
         (&self.observed_free, self.size.into(), self.origin.into())
     }
+    /// Revisions of the collision and observed-free masks, respectively, including their window.
+    #[must_use]
+    pub fn snapshot_revisions(&self) -> (u64, u64) {
+        (self.collision_revision, self.observed_revision)
+    }
     #[must_use]
     pub fn inflation_buffer(&self) -> &[u16] {
         &self.inflate
@@ -570,8 +598,16 @@ impl GridMap {
         for z in self.low.z..=self.high.z {
             for y in self.low.y..=self.high.y {
                 let mut start = None;
-                for x in self.low.x..=self.high.x {
-                    let occupied = self.inflate[self.inf_address(Index::new(x, y, z))] > 0;
+                let address = self.inf_address(Index::new(self.low.x, y, z));
+                let stride = self.inf_size.x as usize;
+                let offset = address % stride;
+                let row = &self.inflate[address - offset..][..stride];
+                let counts = row[offset..]
+                    .iter()
+                    .chain(&row[..offset])
+                    .take(self.size.x as usize);
+                for (x, &count) in (self.low.x..=self.high.x).zip(counts) {
+                    let occupied = count > 0;
                     if occupied && start.is_none() {
                         start = Some(x);
                     } else if !occupied && let Some(begin) = start.take() {

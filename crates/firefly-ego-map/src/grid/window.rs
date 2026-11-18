@@ -66,6 +66,10 @@ impl GridMap {
     }
     pub(super) fn move_ring_buffer(&mut self) {
         let center = self.position_to_index(self.camera_position);
+        if !self.initialized || center != self.center_last {
+            self.collision_revision = self.collision_revision.wrapping_add(1);
+            self.observed_revision = self.observed_revision.wrapping_add(1);
+        }
         if !self.initialized {
             self.initialized = true;
             self.center_last = center;
@@ -105,7 +109,7 @@ impl GridMap {
                     self.flag_traverse[address] = self.raycast_num;
                     self.flag_rayend[address] = self.raycast_num;
                     self.occupancy[address] = self.clamp_min_log;
-                    self.observed_free[address] = false;
+                    self.set_observed_free(address, false);
                     if self.inflate[self.inf_address(id)] > OBSTACLE_FLAG {
                         self.change_inf_buf(false, id);
                     }
