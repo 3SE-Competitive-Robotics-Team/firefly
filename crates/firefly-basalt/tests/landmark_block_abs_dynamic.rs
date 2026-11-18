@@ -55,7 +55,8 @@ fn run<S: BasaltScalar>(text: &str, tolerance: f64) {
                 cam_id: 0,
             },
         );
-        let mut relative = HashMap::new();
+        let mut pair_indices = HashMap::new();
+        let mut relative = Vec::new();
         for obs in case["observations"].as_array().unwrap() {
             let target = TimeCamId {
                 frame_id: obs["frame"].as_i64().unwrap(),
@@ -66,20 +67,18 @@ fn run<S: BasaltScalar>(text: &str, tolerance: f64) {
                 target,
                 Vector2::new(s(number(&pixel[0])), s(number(&pixel[1]))),
             );
-            relative.insert(
-                (point.host_kf_id, target),
-                RelPoseLin {
-                    t_t_h: Matrix4::from_row_iterator(
-                        obs["transform"]["values"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .map(|v| s(number(v))),
-                    ),
-                    d_rel_d_h: SMatrix::identity(),
-                    d_rel_d_t: -SMatrix::<S, 6, 6>::identity(),
-                },
-            );
+            pair_indices.insert((point.host_kf_id, target), relative.len());
+            relative.push(RelPoseLin {
+                t_t_h: Matrix4::from_row_iterator(
+                    obs["transform"]["values"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| s(number(v))),
+                ),
+                d_rel_d_h: SMatrix::identity(),
+                d_rel_d_t: -SMatrix::<S, 6, 6>::identity(),
+            });
         }
         let mut order = AbsOrderMap::default();
         order.abs_order_map.insert(10, (0, 6));
@@ -99,8 +98,9 @@ fn run<S: BasaltScalar>(text: &str, tolerance: f64) {
             obs_std_dev: s(1.5),
             ..Options::default()
         };
-        let mut block = LandmarkBlockAbsDynamic::<S, 6>::new(1, &point, &relative, &order, options);
-        let error = block.linearize_landmark(&point, &calibration);
+        let mut block =
+            LandmarkBlockAbsDynamic::<S, 6>::new(1, &point, &pair_indices, &order, options);
+        let error = block.linearize_landmark(&point, &calibration, &relative);
         assert!(
             (error.as_f64() - number(&case["error"])).abs()
                 <= tolerance * (1. + number(&case["error"]).abs())
@@ -141,7 +141,7 @@ fn run<S: BasaltScalar>(text: &str, tolerance: f64) {
             &case["h"],
             &case["b"],
         );
-        check_sparse_accumulation(&point, &relative, &calibration, options);
+        check_sparse_accumulation(&point, &pair_indices, &relative, &calibration, options);
         let increment = DVector::from_fn(18, |i, _| s(i as f64 - 8.) * s(0.000_125));
         let mut decrease = s(0.125);
         block.back_substitute(&mut point, &increment, &mut decrease);
@@ -169,7 +169,8 @@ fn run<S: BasaltScalar>(text: &str, tolerance: f64) {
 }
 fn check_sparse_accumulation<S: BasaltScalar>(
     point: &Keypoint<S>,
-    relative: &HashMap<(TimeCamId, TimeCamId), RelPoseLin<S>>,
+    pair_indices: &HashMap<(TimeCamId, TimeCamId), usize>,
+    relative: &[RelPoseLin<S>],
     calibration: &Calibration<S>,
     options: Options<S>,
 ) {
@@ -179,8 +180,8 @@ fn check_sparse_accumulation<S: BasaltScalar>(
         .extend([(10, (15, 15)), (20, (30, 15)), (30, (0, 15)), (40, (45, 6))]);
     order.total_size = 51;
     order.items = 4;
-    let mut block = LandmarkBlockAbsDynamic::<S, 6>::new(1, point, relative, &order, options);
-    block.linearize_landmark(point, calibration);
+    let mut block = LandmarkBlockAbsDynamic::<S, 6>::new(1, point, pair_indices, &order, options);
+    block.linearize_landmark(point, calibration, relative);
     block.perform_qr();
     let mut jacobian = DMatrix::zeros(block.num_q2_rows(), order.total_size);
     let mut residual = DVector::zeros(block.num_q2_rows());
