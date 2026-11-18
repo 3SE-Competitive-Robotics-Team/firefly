@@ -77,6 +77,54 @@ fn hessian_prior_uses_accelerometer_bias_information() {
 }
 
 #[test]
+fn zero_residual_trials_restore_state_and_share_one_assembly() {
+    use firefly_basalt::imu::imu_types::PoseVelBiasState;
+    use firefly_basalt::utils::{imu_types::PoseVelBiasStateWithLin, time_utils::Samples};
+
+    let mut estimator = SqrtKeypointVioEstimator::<f64>::new(
+        &Vector3::new(0., 0., -9.81),
+        &Calibration::default(),
+        &VioConfig::default(),
+    );
+    estimator.initialize_state(
+        0,
+        Isometry3::identity(),
+        Vector3::zeros(),
+        Vector3::zeros(),
+        Vector3::zeros(),
+    );
+    estimator.imu_meas.clear();
+    for stamp in 1..5 {
+        let state = PoseVelBiasState::new(
+            stamp,
+            Isometry3::identity(),
+            Vector3::zeros(),
+            Vector3::zeros(),
+            Vector3::zeros(),
+        );
+        estimator
+            .ba
+            .frame_states
+            .insert(stamp, PoseVelBiasStateWithLin::new(state, false));
+    }
+    estimator.optimize().unwrap();
+    let samples = |name| match &estimator.stats_all.get(name).unwrap().data {
+        Samples::Scalars(values) => values.as_slice(),
+        Samples::Vectors(_) => panic!("expected scalar statistics"),
+    };
+    assert!(samples("num_it")[0] > 1.);
+    assert_eq!(samples("num_it"), samples("num_it_rejected"));
+    assert_eq!(samples("get_dense_H_b").len(), 1);
+    assert_eq!(
+        estimator.ba.compute_marg_prior_error(&estimator.marg_data),
+        0.
+    );
+    for stamp in 0..5 {
+        assert_eq!(estimator.pose_at(stamp), Some(Isometry3::identity()));
+    }
+}
+
+#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "Keeps the analytic trajectory, camera observations and IMU model together as the test oracle"
