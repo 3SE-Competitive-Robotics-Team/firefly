@@ -265,6 +265,75 @@ fn empty_images_and_fading_cannot_refresh_map_age() {
 }
 
 #[test]
+fn cached_masks_match_live_voxels_after_fusion_fading_and_window_moves() {
+    let options = DepthOptions {
+        fading_time: 0.51,
+        ..options()
+    };
+    let mut fusion = DepthFusion::new(&source(), options, 0.25).unwrap();
+    let mut last_sequence = 0;
+    let now = Instant::now();
+    for (i, (x, depth)) in [
+        (0., 500),
+        (0., 500),
+        (0., 500),
+        (0., 500),
+        (0., 500),
+        (0., 1250),
+        (0.5, 1250),
+        (2.25, 500),
+        (-1., 500),
+        (-1., 500),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let timestamp = 1. + i as f64 * 0.1;
+        fusion
+            .integrate(
+                frame(timestamp, depth, now),
+                Isometry3::translation(x, 0., 0.),
+                timestamp,
+            )
+            .unwrap();
+        if i == 0 {
+            continue;
+        }
+        for fade in [false, true] {
+            if fade {
+                fusion.map.fading_callback();
+            }
+            let snapshot = fusion.snapshot().unwrap().unwrap();
+            assert_eq!(snapshot.sequence, last_sequence + 1);
+            assert_eq!(snapshot.timestamp, timestamp);
+            assert_eq!(snapshot.fused_at, now);
+            last_sequence = snapshot.sequence;
+            let (low, high) = fusion.map.bounds().unwrap();
+            let (free, _, _) = fusion.map.observed_free_buffer();
+            for z in low[2]..=high[2] {
+                for y in low[1]..=high[1] {
+                    for x in low[0]..=high[0] {
+                        let point = (Vector3::new(x, y, z).cast::<f64>() + Vector3::repeat(0.5))
+                            * fusion.map.resolution();
+                        let global = ((point - fusion.collision_origin)
+                            / fusion.collision_resolution)
+                            .map(|v| v.floor() as i64);
+                        assert_eq!(
+                            snapshot.collision.is_occupied(global.into()),
+                            fusion.map.inflated_occupancy_at(point) > 0
+                        );
+                        assert_eq!(
+                            snapshot.observed.is_free(point),
+                            free[fusion.map.buffer_index(point).unwrap()]
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn local_map_requires_exact_coverage() {
     let mut fusion = DepthFusion::new(&source(), options(), 0.25).unwrap();
     let now = Instant::now();
