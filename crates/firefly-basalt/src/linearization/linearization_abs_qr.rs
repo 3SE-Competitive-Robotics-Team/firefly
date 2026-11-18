@@ -15,6 +15,7 @@ use firefly_calibration::scalar::BasaltScalar;
 use nalgebra::{DMatrix, DVector, Matrix4, SMatrix};
 use rayon::prelude::*;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::OnceLock;
 
 pub struct LinearizationAbsQr<'a, S: BasaltScalar, const POSE_SIZE: usize> {
     landmark_blocks: Vec<LandmarkBlockAbsDynamic<S, POSE_SIZE>>,
@@ -24,6 +25,7 @@ pub struct LinearizationAbsQr<'a, S: BasaltScalar, const POSE_SIZE: usize> {
     relative_pose_lin: Vec<RelPoseLin<S>>,
     order: &'a AbsOrderMap,
     marginalization: Option<&'a MargLinData<S>>,
+    prior_normal: OnceLock<DMatrix<S>>,
     pose_damping: S,
     pose_damping_sqrt: S,
     marg_scaling: DVector<S>,
@@ -103,6 +105,7 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationAbsQr<'a, S, POSE
             frame_pairs,
             order,
             marginalization,
+            prior_normal: OnceLock::new(),
             pose_damping: S::zero(),
             pose_damping_sqrt: S::zero(),
             marg_scaling: DVector::zeros(0),
@@ -324,7 +327,7 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationAbsQr<'a, S, POSE
             .len()
             .div_ceil(rayon::current_num_threads())
             .max(1);
-        let (mut hessian, mut rhs) = self
+        let (hessian, rhs) = self
             .landmark_blocks
             .par_chunks(chunk_size)
             .map(|blocks| {
@@ -336,13 +339,11 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationAbsQr<'a, S, POSE
             })
             .reduce_with(|(h, b), (other_h, other_b)| (h + other_h, b + other_b))
             .unwrap_or_else(|| (DMatrix::zeros(size, size), DVector::zeros(size)));
-        let mut accumulator = DenseAccumulator::default();
-        accumulator.reset(size);
+        let mut accumulator = DenseAccumulator::from_parts(hessian, rhs);
         for block in &self.imu_blocks {
             block.add_dense_h_b(&mut accumulator);
         }
-        hessian += accumulator.h();
-        rhs += accumulator.b();
+        let (mut hessian, mut rhs) = accumulator.into_parts();
         if self.has_pose_damping() {
             for i in 0..size {
                 hessian[(i, i)] += self.pose_damping;
@@ -353,7 +354,14 @@ impl<'a, S: BasaltScalar, const POSE_SIZE: usize> LinearizationAbsQr<'a, S, POSE
                 self.marg_scaling.is_empty(),
                 "upstream prior H/b scaling is unsupported"
             );
-            estimator.linearize_marg_prior(prior, self.order, &mut hessian, &mut rhs);
+            // The borrowed prior is fixed across outer iterations. Its RHS follows the state.
+            let prior_h = if prior.is_sqrt {
+                self.prior_normal
+                    .get_or_init(|| prior.h.transpose() * &prior.h)
+            } else {
+                &prior.h
+            };
+            estimator.add_marg_prior(prior, prior_h, self.order, &mut hessian, &mut rhs);
         }
         (hessian, rhs)
     }

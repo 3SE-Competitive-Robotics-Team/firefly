@@ -91,6 +91,14 @@ impl<S: BasaltScalar> Default for DenseAccumulator<S> {
     }
 }
 impl<S: BasaltScalar> DenseAccumulator<S> {
+    pub(crate) fn from_parts(h: DMatrix<S>, b: DVector<S>) -> Self {
+        Self { h, b }
+    }
+
+    pub(crate) fn into_parts(self) -> (DMatrix<S>, DVector<S>) {
+        (self.h, self.b)
+    }
+
     pub fn reset(&mut self, size: usize) {
         self.h = DMatrix::zeros(size, size);
         self.b = DVector::zeros(size);
