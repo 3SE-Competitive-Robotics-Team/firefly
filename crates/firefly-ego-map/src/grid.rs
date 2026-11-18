@@ -1,6 +1,6 @@
 use crate::{
     DepthImage, MappingParameters,
-    config::{invalid, logit},
+    config::{DepthSampling, invalid, logit},
     raycast::RayCaster,
 };
 use firefly_error::Result;
@@ -161,10 +161,31 @@ impl GridMap {
             .ok_or_else(|| invalid("map buffer exceeds signed-index range"))
     }
 
+    /// Capture only the source pixels used for projection, in row-major order.
+    /// `convert` maps a selected source value to depth units.
+    /// # Errors
+    /// Rejects empty dimensions and mismatched source storage.
+    pub fn sample_depth<T: Copy>(
+        &self,
+        width: usize,
+        height: usize,
+        source: &[T],
+        convert: impl FnMut(T) -> u16,
+    ) -> Result<DepthImage> {
+        DepthImage::sample(
+            width,
+            height,
+            source,
+            DepthSampling::for_map(&self.parameters),
+            convert,
+        )
+    }
+
     /// `depthPoseCallback`: pose is camera-to-world, and already paired with depth.
     /// # Errors
-    /// Rejects non-finite poses or coordinates outside the supported index range.
+    /// Requires a matching sampling grid, a finite pose and indexable coordinates.
     pub fn depth_pose_callback(&mut self, depth: DepthImage, pose: Isometry3<f64>) -> Result<()> {
+        depth.validate_sampling(DepthSampling::for_map(&self.parameters))?;
         self.validate_pose(&pose)?;
         self.camera_position = pose.translation.vector;
         self.camera_rotation = pose.rotation.to_rotation_matrix().into_inner();
@@ -175,12 +196,13 @@ impl GridMap {
 
     /// `depthOdomCallback`: compose body-to-world with camera-to-body extrinsics.
     /// # Errors
-    /// Rejects invalid poses, as in `depth_pose_callback`.
+    /// Checks the sampling grid and pose as in `depth_pose_callback`.
     pub fn depth_odom_callback(
         &mut self,
         depth: DepthImage,
         body_pose: Isometry3<f64>,
     ) -> Result<()> {
+        depth.validate_sampling(DepthSampling::for_map(&self.parameters))?;
         let (position, rotation) = self.camera_pose_from_body(&body_pose)?;
         self.camera_position = position;
         self.camera_rotation = rotation;
@@ -285,39 +307,38 @@ impl GridMap {
             self.has_first_depth = true;
             return Ok(());
         }
-        let margin = if p.use_depth_filter {
-            p.depth_filter_margin as usize
-        } else {
-            0
-        };
+        let sampling = DepthSampling::for_map(p);
         let inv_factor = 1. / p.k_depth_scaling_factor;
-        for v in (margin..image.height.saturating_sub(margin)).step_by(p.skip_pixel as usize) {
-            for u in (margin..image.width.saturating_sub(margin)).step_by(p.skip_pixel as usize) {
-                let raw = f64::from(image.pixels[v * image.width + u]);
-                let depth = if p.use_depth_filter {
-                    raw * inv_factor
-                } else {
-                    raw / p.k_depth_scaling_factor
-                };
-                let minimum = if p.use_depth_filter {
-                    p.depth_filter_mindist
-                } else {
-                    0.1
-                };
-                if depth < minimum {
-                    continue;
-                }
-                let local = Vector3::new(
-                    (u as f64 - p.cx) * depth / p.fx,
-                    (v as f64 - p.cy) * depth / p.fy,
-                    depth,
-                );
-                let point = self.camera_rotation * local + self.camera_position;
-                if !self.indexable(point) {
-                    return Err(invalid("projected point exceeds signed-index range"));
-                }
-                self.projected.push(point);
+        for (index, (u, v)) in sampling.coordinates(image.width, image.height).enumerate() {
+            let address = if image.sampling.is_some() {
+                index
+            } else {
+                v * image.width + u
+            };
+            let raw = f64::from(image.pixels[address]);
+            let depth = if p.use_depth_filter {
+                raw * inv_factor
+            } else {
+                raw / p.k_depth_scaling_factor
+            };
+            let minimum = if p.use_depth_filter {
+                p.depth_filter_mindist
+            } else {
+                0.1
+            };
+            if depth < minimum {
+                continue;
             }
+            let local = Vector3::new(
+                (u as f64 - p.cx) * depth / p.fx,
+                (v as f64 - p.cy) * depth / p.fy,
+                depth,
+            );
+            let point = self.camera_rotation * local + self.camera_position;
+            if !self.indexable(point) {
+                return Err(invalid("projected point exceeds signed-index range"));
+            }
+            self.projected.push(point);
         }
         Ok(())
     }

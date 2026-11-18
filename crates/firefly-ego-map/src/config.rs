@@ -104,12 +104,46 @@ impl MappingParameters {
     }
 }
 
-/// Contiguous `CV_16UC1` equivalent. Units are divided by `k_depth_scaling_factor`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DepthSampling {
+    margin: usize,
+    step: usize,
+}
+
+impl DepthSampling {
+    pub(crate) fn for_map(p: &MappingParameters) -> Self {
+        Self {
+            margin: if p.use_depth_filter {
+                p.depth_filter_margin as usize
+            } else {
+                0
+            },
+            step: p.skip_pixel as usize,
+        }
+    }
+
+    fn axis(self, size: usize) -> impl ExactSizeIterator<Item = usize> + Clone {
+        (self.margin..size.saturating_sub(self.margin)).step_by(self.step)
+    }
+
+    pub(crate) fn coordinates(
+        self,
+        width: usize,
+        height: usize,
+    ) -> impl Iterator<Item = (usize, usize)> {
+        let columns = self.axis(width);
+        self.axis(height)
+            .flat_map(move |v| columns.clone().map(move |u| (u, v)))
+    }
+}
+
+/// Depth units in source image coordinates, stored densely or on the map's sampling grid.
 #[derive(Clone, Debug)]
 pub struct DepthImage {
     pub(crate) width: usize,
     pub(crate) height: usize,
     pub(crate) pixels: Vec<u16>,
+    pub(crate) sampling: Option<DepthSampling>,
 }
 impl DepthImage {
     /// # Errors
@@ -122,7 +156,56 @@ impl DepthImage {
             width,
             height,
             pixels,
+            sampling: None,
         })
+    }
+
+    pub(crate) fn sample<T: Copy>(
+        width: usize,
+        height: usize,
+        source: &[T],
+        sampling: DepthSampling,
+        mut convert: impl FnMut(T) -> u16,
+    ) -> Result<Self> {
+        if width == 0 || height == 0 || width.checked_mul(height) != Some(source.len()) {
+            return Err(invalid("invalid depth dimensions"));
+        }
+        let columns = sampling.axis(width).len();
+        let rows = sampling.axis(height);
+        let mut pixels = vec![0; columns * rows.len()];
+        if columns > 0 {
+            for (v, output) in rows.zip(pixels.chunks_exact_mut(columns)) {
+                let start = v * width + sampling.margin;
+                let row = &source[start..(v + 1) * width - sampling.margin];
+                if sampling.step == 2 {
+                    // Fixed-width pairs let the release build vectorize the default sampling grid.
+                    let (pairs, tail) = row.as_chunks::<2>();
+                    for (dst, pair) in output.iter_mut().zip(pairs) {
+                        *dst = convert(pair[0]);
+                    }
+                    if let [last] = tail {
+                        output[columns - 1] = convert(*last);
+                    }
+                } else {
+                    for (dst, src) in output.iter_mut().zip(row.iter().step_by(sampling.step)) {
+                        *dst = convert(*src);
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            width,
+            height,
+            pixels,
+            sampling: Some(sampling),
+        })
+    }
+
+    pub(crate) fn validate_sampling(&self, sampling: DepthSampling) -> Result<()> {
+        if self.sampling.is_some_and(|layout| layout != sampling) {
+            return Err(invalid("depth sampling grid differs from map"));
+        }
+        Ok(())
     }
 }
 

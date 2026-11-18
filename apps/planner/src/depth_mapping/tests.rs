@@ -119,6 +119,58 @@ fn metric_depth_conversion_rounds_even_saturates_and_rejects_missing_values() {
 }
 
 #[test]
+#[ignore = "release comparison of full and sampled depth ingestion"]
+fn benchmark_depth_ingestion() {
+    use std::hint::black_box;
+    let mapping = crate::config::MappingOptions::default();
+    let source = mapping.build(0.4).unwrap();
+    let fusion = DepthFusion::new(&source, mapping.depth, 0.4).unwrap();
+    let scale = mapping.depth.k_depth_scaling_factor;
+    let message = DepthImageMessage {
+        width: IMAGE_WIDTH as u32,
+        height: IMAGE_HEIGHT as u32,
+        data: std::array::from_fn(|i| match i % 31 {
+            0 => f32::NAN,
+            1 => 0.,
+            _ => (200 + (i * 37 % 7800)) as f32 / 1000.,
+        }),
+        ..Default::default()
+    };
+    let mut full = Vec::new();
+    let mut sampled = Vec::new();
+    for round in 0..10 {
+        for packed in [round % 2 == 0, round % 2 != 0] {
+            let start = Instant::now();
+            for _ in 0..128 {
+                let input = black_box(&message);
+                let image = if packed {
+                    fusion
+                        .map
+                        .sample_depth(IMAGE_WIDTH, IMAGE_HEIGHT, &input.data, |metres| {
+                            depth_units(metres, scale)
+                        })
+                        .unwrap()
+                } else {
+                    let units = input.data.iter().map(|&d| depth_units(d, scale)).collect();
+                    DepthImage::new(IMAGE_WIDTH, IMAGE_HEIGHT, units).unwrap()
+                };
+                black_box(image);
+            }
+            if round > 0 {
+                let times = if packed { &mut sampled } else { &mut full };
+                times.push(start.elapsed().as_secs_f64() * 1e6 / 128.);
+            }
+        }
+    }
+    full.sort_by(f64::total_cmp);
+    sampled.sort_by(f64::total_cmp);
+    println!(
+        "depth ingestion median microseconds/frame: full={} sampled={}",
+        full[4], sampled[4]
+    );
+}
+
+#[test]
 fn ground_depth_does_not_observe_air_above_the_camera() {
     let mapping = crate::config::MappingOptions::default();
     let source = mapping.build(0.4).unwrap();
