@@ -6,6 +6,7 @@ flowchart TB
 实机 camera、imu
 仿真 render、firefly-sim`"]
     operator["地面站 ffctl"]
+    task["任务脚本 FlightRunner"]
 
     subgraph flight["机载计算 · iceoryx2 IPC"]
         vio["`firefly-rootslam
@@ -30,6 +31,9 @@ flowchart TB
     sensors -->|下视图像| landing
     sensors -->|IMU| fc
     operator -->|航点| planner
+    task -->|任务指令| operator
+    fc -->|FcStatus 模式快照| task
+    fc -.->|FcStatus 模式快照| mimir
     operator -->|模式指令| fc
     fc -->|电机推力| actuators["`执行端
 实机 motor

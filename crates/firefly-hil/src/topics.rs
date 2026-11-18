@@ -6,6 +6,7 @@ use firefly_pubsub::{
     command::CommandMessage,
     control::{CONTROL_BUFFER_SIZE, ControlMessage},
     event::TopicNotifier,
+    fc_status::{FC_STATUS_BUFFER_SIZE, FC_STATUS_TOPIC, FcStatusMessage},
     goal::GoalMessage,
     imu::ImuMessage,
     landing::LandingTargetMessage,
@@ -40,6 +41,7 @@ struct Sequences {
 
 fn sequence(message: &mut Message) -> Option<&mut u64> {
     match message {
+        Message::FcStatus(value) => Some(&mut value.sequence),
         Message::Scalar(value) => Some(&mut value.sequence),
         Message::Log(value) => Some(&mut value.sequence),
         Message::Viz(value) => Some(&mut value.sequence),
@@ -148,6 +150,7 @@ routes! { RequestsSubscribers, RequestsPublishers;
 }
 
 routes! { TelemetrySubscribers, TelemetryPublishers;
+    fc_status: FcStatusMessage => FcStatus (FC_STATUS_TOPIC, FC_STATUS_BUFFER_SIZE, 1),
     control: ControlMessage => Control (firefly_pubsub::control::CONTROL_TOPIC, CONTROL_BUFFER_SIZE, 2),
     odom: OdomMessage => Odometry (firefly_pubsub::odom::ODOM_TOPIC, 2, 2),
     corrected: OdomMessage => CorrectedOdometry (firefly_pubsub::odom::CORRECTED_ODOM_TOPIC, 2, 2),

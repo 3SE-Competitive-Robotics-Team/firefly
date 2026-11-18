@@ -15,6 +15,7 @@ from rerun.chunk import RrdReader
 
 from firefly_workspace.process import ManagedProcess, isolated_run
 from firefly_ipc.messages import (
+    FC_STATUS_BUFFER_SIZE, FC_STATUS_TOPIC, FcStatusMessage,
     SCALAR_BUFFER_SIZE, VIZ_MAX_PUBLISHERS, DownImageMessage, GrayImageMessage,
     LandingTargetMessage, LogMessage, NavigationMessage, OdomMessage,
     ScalarMessage, TraceContext, VizMessage,
@@ -183,7 +184,7 @@ def test_ipc_recording_retains_every_sample(rate, repeat):
                "seconds": time.monotonic() - start, "statistics": logs, "rrd": str(path)})
 
 
-@pytest.mark.parametrize("fault", ["sequence", "producer_loss", "unknown_entity"])
+@pytest.mark.parametrize("fault", ["sequence", "producer_loss", "unknown_entity", "fc_status_gap"])
 def test_incomplete_recording_is_an_error(fault):
     with isolated_run(ROOT):
         process, path = recording()
@@ -193,6 +194,10 @@ def test_incomplete_recording_is_an_error(fault):
                 port = publisher(node, "Firefly/Log", LogMessage, 256, 10)
                 message = LogMessage(dropped_records=1)
                 port.loan_uninit().write_payload(message).send()
+            elif fault == "fc_status_gap":
+                port = publisher(node, FC_STATUS_TOPIC, FcStatusMessage, FC_STATUS_BUFFER_SIZE, 1)
+                for seq in (0, 2):
+                    port.loan_uninit().write_payload(FcStatusMessage(1., seq, 3)).send()
             else:
                 port = publisher(node, "Firefly/VizScalars", ScalarMessage, SCALAR_BUFFER_SIZE, VIZ_MAX_PUBLISHERS)
                 name = "unknown/value" if fault == "unknown_entity" else "fc/debug/altitude"
@@ -425,6 +430,22 @@ def test_spatial_frames_preserve_raw_poses_and_follow_navigation():
         print({"rrd": str(path), "statistics": logs})
 
 
+def test_fc_status_preserves_modes_and_measurement_times_without_viz():
+    with isolated_run(ROOT):
+        process, path = recording()
+        try:
+            node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
+            port = publisher(node, FC_STATUS_TOPIC, FcStatusMessage, FC_STATUS_BUFFER_SIZE, 1)
+            modes = [(1., 0), (1.1, 1), (1.2, 2), (1.3, 3), (1.4, 3)]
+            for seq, (stamp, mode) in enumerate(modes):
+                port.loan_uninit().write_payload(FcStatusMessage(stamp, seq, mode)).send()
+        finally:
+            assert process.stop() == 0, list(process.tail)
+        rows, logs = read(path)
+        assert rows["fc/debug/state"] == [(round(t * 1e9), [mode]) for t, mode in modes]
+        assert "recording complete" in logs
+
+
 def test_metric_cards_use_measurement_time_and_preserve_sources():
     with isolated_run(ROOT):
         process, path = recording()
@@ -434,7 +455,7 @@ def test_metric_cards_use_measurement_time_and_preserve_sources():
                    ("rootslam/frame_processing_ms", 1.1, [6.5]),
                    ("vio/prediction/posterior_age_s", 1.2, [.012]),
                    ("vio/diagnostics/tracks", 1.3, [90., 80., 70., 60.]),
-                   ("fc/debug/state", 1.5, [1.]), ("fc/debug/state", 4.1, [1.])]
+                   ("fc/debug/altitude", 1.5, [1.]), ("fc/debug/altitude", 4.1, [1.])]
         samples.extend(("render/capture/publish_s", 1. + frame / 60., [0., 0., .008])
                        for frame in range(61))
         samples.sort(key=lambda sample: sample[1])

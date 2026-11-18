@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from flight_mission.config import Phase, parse_args
 from flight_mission.gates import Arrival, VisualAcquisition
 from flight_mission.runtime import FlightRunner
-from firefly_ipc.messages import LandingTargetMessage, OdomMessage
+from firefly_ipc.messages import FcStatusMessage, FlightMode, LandingTargetMessage, OdomMessage
 
 
 def test_options_are_immutable_and_route_offsets_own_their_values():
@@ -82,6 +82,25 @@ def test_visual_confirmation_deduplicates_and_recovers_after_stale_input():
     assert acquisition.target_time == 1.55
     assert not acquisition.observe(target(1.54), 1.55, 4.3, 4.3)
     assert acquisition.target_time is None
+
+
+def test_mode_wait_uses_status_arrival_time(monkeypatch):
+    from ctypes import pointer
+
+    runner = FlightRunner(parse_args([]), ROOT, "red")
+    now = 10.
+    monkeypatch.setattr("flight_mission.runtime.time.monotonic", lambda: now)
+    monkeypatch.setattr("flight_mission.runtime.time.sleep", lambda _: None)
+    sample = SimpleNamespace(payload=lambda: pointer(FcStatusMessage(4., 0, FlightMode.HOLD)))
+    samples = iter([sample])
+    runner.subs["mode"] = SimpleNamespace(receive=lambda: next(samples, None))
+    runner.received.update(odom=now, attitude=now)
+    runner._wait(lambda: True, modes={FlightMode.HOLD})
+    assert runner.mode is FlightMode.HOLD
+    now += 1.1
+    runner.received.update(odom=now, attitude=now)
+    with pytest.raises(RuntimeError, match="stale mode"):
+        runner._wait(lambda: True, modes={FlightMode.HOLD})
 
 
 def test_runner_starts_the_requested_command_and_cleans_every_child(monkeypatch):

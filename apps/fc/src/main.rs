@@ -17,6 +17,7 @@ use firefly_flight::{
 use firefly_pubsub::attitude::{ATTITUDE_TOPIC, AttitudeMessage};
 use firefly_pubsub::command::{COMMAND_TOPIC, CommandMessage, kind as command_kind};
 use firefly_pubsub::control::{CONTROL_BUFFER_SIZE, CONTROL_TOPIC, ControlMessage};
+use firefly_pubsub::fc_status::{FC_STATUS_BUFFER_SIZE, FC_STATUS_TOPIC, FcStatusMessage};
 use firefly_pubsub::landing::{LANDING_TARGET_TOPIC, LandingTargetMessage};
 use firefly_pubsub::node::{IpcNode, create_node};
 use firefly_pubsub::odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC, OdomMessage};
@@ -44,7 +45,7 @@ const IMU_STALE_LIMIT: Duration = Duration::from_millis(50);
 const REFERENCE_STALE_LIMIT: Duration = Duration::from_millis(500);
 /// 落后节拍上限：连续落后超过这么多个周期就重新对齐（避免越追越紧）。
 const MAX_LAG_TICKS: u32 = 10;
-const VIZ_PERIOD: f64 = 0.1;
+const STATUS_PERIOD: f64 = 0.1;
 const STATS_PERIOD: f64 = 1.0;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
@@ -104,6 +105,7 @@ struct Ports {
     reference: Subscriber<ReferenceMessage>,
     command: Subscriber<CommandMessage>,
     control: Publisher<ControlMessage>,
+    status: Publisher<FcStatusMessage>,
     viz: VizPublisher,
 }
 
@@ -130,6 +132,12 @@ impl Ports {
                 node,
                 CONTROL_TOPIC,
                 Some(CONTROL_BUFFER_SIZE),
+            )?,
+            status: Publisher::with_topic_buffer_publishers(
+                node,
+                FC_STATUS_TOPIC,
+                Some(FC_STATUS_BUFFER_SIZE),
+                Some(1),
             )?,
             viz: VizPublisher::new(node)?,
         })
@@ -369,7 +377,8 @@ struct Controller {
     commands: CommandSequence,
     /// 相对起飞点高度（m；最近一 tick 的估计高度，进日志与 rrd）。
     altitude: f32,
-    last_viz: f64,
+    last_status: f64,
+    status_sequence: u64,
     last_tick_diagnostic: Option<Instant>,
     /// 最近一次控制使用的机体系角速度（FLU，rad/s），供诊断。
     ang_vel: Vector3<f32>,
@@ -394,7 +403,8 @@ impl Controller {
             fsm: FlightFsm::new(fsm),
             commands: CommandSequence::default(),
             altitude: 0.0,
-            last_viz: f64::NEG_INFINITY,
+            last_status: f64::NEG_INFINITY,
+            status_sequence: 0,
             last_tick_diagnostic: None,
             ang_vel: Vector3::zeros(),
             px4: Px4Controller::new(params),
@@ -537,6 +547,16 @@ impl Controller {
         if log::log_enabled!(target: "fc::diagnostics", log::Level::Debug) {
             self.publish_tick_diagnostic(ports, inputs, tick, &motors, saturated);
         }
+        if inputs.imu_time - self.last_status < STATUS_PERIOD {
+            return Ok(());
+        }
+        self.last_status = inputs.imu_time;
+        ports.status.publish(FcStatusMessage {
+            timestamp: inputs.imu_time,
+            sequence: self.status_sequence,
+            mode: self.fsm.state().code(),
+        })?;
+        self.status_sequence = self.status_sequence.wrapping_add(1);
         let truth = inputs.plant.map(|(plant, _)| {
             UnitQuaternion::new_normalize(Quaternion::new(
                 plant.quat_w as f32,
@@ -674,17 +694,13 @@ impl Controller {
 
     #[allow(clippy::too_many_lines)] // 诊断字段按实体平铺，拆函数只会增加跳转
     fn publish_viz(
-        &mut self,
+        &self,
         ports: &Ports,
         sim_time: f64,
         attitude: UnitQuaternion<f32>,
         plant_attitude: Option<UnitQuaternion<f32>>,
         motors: &[f32; 4],
     ) {
-        if sim_time - self.last_viz < VIZ_PERIOD {
-            return;
-        }
-        self.last_viz = sim_time;
         let precision = match self.fsm.precision_stage() {
             None => 0.,
             Some(firefly_flight::precision::PrecisionStage::Align) => 1.,
@@ -840,12 +856,6 @@ impl Controller {
                 &[f64::from(error)],
             );
         }
-        publish_scalars(
-            ports.viz_ref(),
-            sim_time,
-            "fc/debug/state",
-            &[f64::from(self.fsm.state().code())],
-        );
         publish_scalars(
             ports.viz_ref(),
             sim_time,

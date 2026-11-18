@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import ctypes
+from enum import IntEnum
 
 #: 话题名（与 Rust `firefly-pubsub` 常量一致）
 TOPIC_IMU = "Firefly/Imu"
@@ -26,6 +27,34 @@ PLANT_STATE_SERVICE_MAX = 8
 AIRFRAME_SERVICE_MAX = 4
 #: 飞控指令服务订阅端上限（与 Rust `control.rs: CONTROL_SERVICE_MAX` 同值）。
 CONTROL_SERVICE_MAX = 32
+
+FC_STATUS_TOPIC = "Firefly/FcStatus"
+FC_STATUS_BUFFER_SIZE = 16
+
+
+class FlightMode(IntEnum):
+    """FC 状态机的公开编码，对应 Rust FlightState.code()。"""
+
+    DISARMED = 0
+    ARMED_GROUNDED = 1
+    TAKEOFF = 2
+    HOLD = 3
+    TRACK = 4
+    LAND = 5
+    ATTITUDE_FALLBACK = 6
+
+
+class FcStatusMessage(ctypes.Structure):
+    _fields_ = [
+        ("timestamp", ctypes.c_double),
+        ("sequence", ctypes.c_uint64),
+        ("mode", ctypes.c_uint8),
+    ]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflyFcStatus"
+
 
 #: 图像分辨率（与 Rust `firefly_pubsub::camera::IMAGE_WIDTH/HEIGHT` 一致）
 IMAGE_WIDTH = 320

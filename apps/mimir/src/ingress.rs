@@ -15,6 +15,7 @@ use firefly_pubsub::{
         CAMERA_DOWN_TOPIC, CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DOWN_HEIGHT, DOWN_SENSOR_ID,
         DOWN_WIDTH, DownImageMessage, GrayImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH,
     },
+    fc_status::{FC_STATUS_BUFFER_SIZE, FC_STATUS_TOPIC, FcStatusMessage},
     landing::{LANDING_TARGET_TOPIC, LandingTargetMessage},
     log::{LOG_BUFFER_SIZE, LOG_MAX_PUBLISHERS, LOG_TOPIC, LogMessage},
     navigation::{NAVIGATION_TOPIC, NavigationMessage},
@@ -35,6 +36,7 @@ use crate::{
 };
 
 enum Event {
+    FcStatus(FcStatusMessage),
     Scalar(ScalarMessage),
     Geometry(Box<VizMessage>),
     Voxel(Box<VoxelMessage>),
@@ -63,13 +65,10 @@ impl Event {
 
     fn write(self, archive: &mut Archive) -> Result<()> {
         match self {
-            Self::Scalar(msg) => archive.scalar(
-                schema::entity(&msg.entity, msg.entity_len)?,
-                msg.timestamp,
-                msg.scalars
-                    .get(..msg.scalar_count as usize)
-                    .ok_or_else(|| invalid("scalar count"))?,
-            ),
+            Self::FcStatus(msg) => {
+                archive.scalar("fc/debug/state", msg.timestamp, &[f64::from(msg.mode)])
+            }
+            Self::Scalar(msg) => archive.viz_scalar(&msg),
             Self::Geometry(msg) => archive.geometry(&msg),
             Self::Voxel(msg) => archive.voxel(&msg),
             Self::Log(msg) => {
@@ -260,6 +259,7 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
         None
     };
     let mut continuity = Continuity::default();
+    let fc_status = buffered::<FcStatusMessage>(&node, FC_STATUS_TOPIC, FC_STATUS_BUFFER_SIZE, 1)?;
     let mut last_attitude = f64::NEG_INFINITY;
     log::info!("mimir subscriptions ready");
     loop {
@@ -267,6 +267,18 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
         // Producers stop first. Repeat bounded sweeps until all diagnostic subscriptions
         // are empty, including buffers belonging to multiple or disconnected publishers.
         let mut received_diagnostics = false;
+        for _ in 0..FC_STATUS_BUFFER_SIZE {
+            let Some(sample) = fc_status.receive()? else {
+                break;
+            };
+            received_diagnostics = true;
+            continuity.observe(
+                sample.header().publisher_id().value(),
+                sample.sequence,
+                options.max_publishers,
+            )?;
+            sender.send(Event::FcStatus(*sample))?;
+        }
         for _ in 0..VIZ_BUFFER_SIZE {
             let Some(sample) = scalars.receive()? else {
                 break;

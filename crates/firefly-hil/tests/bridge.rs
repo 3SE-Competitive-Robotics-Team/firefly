@@ -206,6 +206,11 @@ fn every_uplink_route_roundtrips_through_ipc_and_wire() {
     let monitor = TelemetrySubscribers::open(&node, &host).unwrap();
     let destination = TelemetryPublishers::open(&node, &host).unwrap();
     let expected = vec![
+        Message::FcStatus(firefly_pubsub::fc_status::FcStatusMessage {
+            timestamp: 12.5,
+            sequence: 0,
+            mode: 3,
+        }),
         Message::Control(ControlMessage::default()),
         Message::Odometry(OdomMessage::default()),
         Message::CorrectedOdometry(OdomMessage::default()),

@@ -20,6 +20,7 @@ fn workspace_python() -> Command {
 #[ignore = "requires the synced workspace Python environment"]
 fn viz_python_layout_matches_rust_offsets_and_sizes() {
     use firefly_pubsub::activity::ActivityMessage;
+    use firefly_pubsub::fc_status::{FC_STATUS_BUFFER_SIZE, FcStatusMessage};
     use firefly_pubsub::landing::LandingTargetMessage;
     use firefly_pubsub::log::LogMessage;
     use firefly_pubsub::navigation::NavigationMessage;
@@ -32,8 +33,10 @@ import ctypes
 from firefly_ipc.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage
 from firefly_ipc.messages import PlannerStatusMessage, LandingTargetMessage, ActivityMessage
 from firefly_ipc.messages import LogMessage, NavigationMessage, VIZ_MAX_PUBLISHERS
+from firefly_ipc.messages import FC_STATUS_BUFFER_SIZE, FcStatusMessage
 from firefly_ipc.activity import LANDING
 for cls, fields in [
+    (FcStatusMessage, ['timestamp', 'sequence', 'mode']),
     (ScalarMessage, ['timestamp', 'scalars', 'sequence']),
     (VizMessage, ['timestamp', 'points', 'sequence']),
     (VoxelMessage, ['voxels', 'sequence', 'chunk_index', 'chunk_count']),
@@ -44,6 +47,7 @@ for cls, fields in [
     (NavigationMessage, ['odom', 'translation', 'rotation', 'revision', 'external_map']),
 ]:
     print(ctypes.sizeof(cls), *(getattr(cls, name).offset for name in fields))
+print(FC_STATUS_BUFFER_SIZE)
 print(SCALAR_BUFFER_SIZE)
 print(VIZ_MAX_PUBLISHERS)
 print(LANDING)
@@ -62,6 +66,10 @@ print(LANDING)
     assert_eq!(
         actual,
         vec![
+            size_of::<FcStatusMessage>(),
+            offset_of!(FcStatusMessage, timestamp),
+            offset_of!(FcStatusMessage, sequence),
+            offset_of!(FcStatusMessage, mode),
             size_of::<ScalarMessage>(),
             offset_of!(ScalarMessage, timestamp),
             offset_of!(ScalarMessage, scalars),
@@ -102,6 +110,7 @@ print(LANDING)
             offset_of!(NavigationMessage, rotation),
             offset_of!(NavigationMessage, revision),
             offset_of!(NavigationMessage, external_map),
+            FC_STATUS_BUFFER_SIZE,
             SCALAR_BUFFER_SIZE,
             firefly_pubsub::viz::VIZ_MAX_PUBLISHERS,
             firefly_pubsub::activity::LANDING as usize,

@@ -11,6 +11,7 @@ use firefly_pubsub::camera::{
 };
 use firefly_pubsub::command::CommandMessage;
 use firefly_pubsub::control::ControlMessage;
+use firefly_pubsub::fc_status::FcStatusMessage;
 use firefly_pubsub::goal::GoalMessage;
 use firefly_pubsub::imu::ImuMessage;
 use firefly_pubsub::landing::LandingTargetMessage;
@@ -27,7 +28,7 @@ use firefly_pubsub::viz::{
 
 pub const MAGIC: [u8; 4] = *b"FHL1";
 /// 当前协议版本；接收端拒绝版本不一致的帧，主机与板端同步部署。
-pub const VERSION: u16 = 8;
+pub const VERSION: u16 = 9;
 pub const HEADER_LEN: usize = 48;
 /// 单帧负载上限（字节）；大消息按此分片，限制单次 USB 传输的排队时延。
 pub const MAX_FRAGMENT: usize = 16 * 1024;
@@ -80,6 +81,7 @@ pub enum Kind {
     LandingTarget = 26,
     /// 有时限的资源请求；SIL/HIL 共用同一消息。
     Activity = 27,
+    FcStatus = 28,
 }
 
 impl Kind {
@@ -119,6 +121,7 @@ impl Kind {
             25 => Self::Voxels,
             26 => Self::LandingTarget,
             27 => Self::Activity,
+            28 => Self::FcStatus,
             _ => return None,
         })
     }
@@ -146,6 +149,7 @@ impl Kind {
             | Self::LandingTarget
             | Self::Reference
             | Self::PlannerStatus
+            | Self::FcStatus
             | Self::Control
             | Self::Odometry
             | Self::CorrectedOdometry
@@ -164,6 +168,7 @@ impl Kind {
             Self::HelloAck => "hello_ack",
             Self::Reference => "reference",
             Self::PlannerStatus => "planner_status",
+            Self::FcStatus => "fc_status",
             Self::Navigation => "navigation",
             Self::Viz => "viz",
             Self::Voxels => "voxels",
@@ -321,6 +326,7 @@ pub enum Message {
     Goal(GoalMessage),
     Reference(ReferenceMessage),
     PlannerStatus(PlannerStatusMessage),
+    FcStatus(FcStatusMessage),
     Navigation(NavigationMessage),
     /// 空间诊断，仅编码有效数组元素。
     Viz(Box<VizMessage>),
@@ -390,6 +396,7 @@ impl Message {
             Self::Goal(_) => Kind::Goal,
             Self::Reference(_) => Kind::Reference,
             Self::PlannerStatus(_) => Kind::PlannerStatus,
+            Self::FcStatus(_) => Kind::FcStatus,
             Self::Navigation(_) => Kind::Navigation,
             Self::Viz(_) => Kind::Viz,
             Self::Voxels(_) => Kind::Voxels,
@@ -420,6 +427,7 @@ impl Message {
             Self::Goal(m) => m.timestamp,
             Self::Reference(m) => m.timestamp,
             Self::PlannerStatus(m) => m.timestamp,
+            Self::FcStatus(m) => m.timestamp,
             Self::Navigation(m) => m.odom.timestamp,
             Self::Viz(m) => m.timestamp,
             Self::Voxels(m) => m.timestamp,
@@ -590,6 +598,11 @@ impl Message {
                 }
                 put_u64(&mut out, message.has_alignment);
                 put_f64(&mut out, message.goal_timestamp);
+            }
+            Self::FcStatus(message) => {
+                put_f64(&mut out, message.timestamp);
+                put_u64(&mut out, message.sequence);
+                out.push(message.mode);
             }
             Self::PlannerStatus(message) => {
                 put_f64(&mut out, message.timestamp);
@@ -936,6 +949,11 @@ impl Message {
                 alignment_rotation: [input.f64()?, input.f64()?, input.f64()?, input.f64()?],
                 has_alignment: input.u64()?,
                 goal_timestamp: input.f64()?,
+            }),
+            Kind::FcStatus => Self::FcStatus(FcStatusMessage {
+                timestamp: input.f64()?,
+                sequence: input.u64()?,
+                mode: input.u8()?,
             }),
             Kind::PlannerStatus => Self::PlannerStatus(PlannerStatusMessage {
                 timestamp: input.f64()?,

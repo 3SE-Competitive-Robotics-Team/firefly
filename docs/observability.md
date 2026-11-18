@@ -71,6 +71,7 @@ This catalog covers all production topic constants; test topics use isolated nam
 | `Firefly/Control` | FC → actuators/sim | Motor evidence and FC summaries |
 | `Firefly/PlantState`, `Firefly/Airframe` | sim/airframe → FC, system consumers | Optional physical-state evidence; VIO uses camera and IMU observations |
 | `Firefly/Command` | ffctl → FC | Results and rejection reasons in event logs |
+| `Firefly/FcStatus` | FC → mission runner, HIL monitor and Mimir; current `FlightState::code()` | One publisher, 16 slots, 24-byte IPC sample, up to 10 Hz on the IMU measurement clock (240 payload bytes/s). A fresh sample repeats the current mode. Task freshness uses local arrival time with a 1 s limit. Mimir checks publisher sequence and writes every row to `fc/debug/state` at measurement time. HIL v9 forwards a 17-byte payload from board to host; deploy both peers together. |
 | `Firefly/Goal` | ffctl → planner | Position and optional terminal yaw in local odom coordinates; yaw in radians, CLI in degrees |
 | `Firefly/MandatoryStop` | external tools → planner | Stop command; outcome in planner state and logs |
 | `Firefly/Trajectory`, `Firefly/PlannerHeartbeat`, `Firefly/TrajectoryControl`, `Firefly/PlannerStatus` | planner → traj (trajectory, heartbeat, control), flight scripts (status) | Atomic xyz/yaw polynomials with shared piece times and a stationary endpoint; heartbeat loss finishes the committed stop; status reports scheduled completion; flight scripts observe native completion |

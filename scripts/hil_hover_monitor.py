@@ -14,18 +14,9 @@ import time
 import iceoryx2 as iox2
 from firefly_ipc.messages import (
     CONTROL_SERVICE_MAX, CONTROL_TOPIC, SCALAR_BUFFER_SIZE, TOPIC_GT, VIZ_MAX_PUBLISHERS,
-    ControlMessage, OdomMessage, ScalarMessage, TraceContext,
+    FC_STATUS_BUFFER_SIZE, FC_STATUS_TOPIC, ControlMessage, FcStatusMessage, FlightMode,
+    OdomMessage, ScalarMessage, TraceContext,
 )
-
-MODE_NAMES = {
-    0: "DISARMED",
-    1: "ARMED",
-    2: "TAKEOFF",
-    3: "HOLD",
-    4: "TRACK",
-    5: "LAND",
-    6: "ATTITUDE_FALLBACK",
-}
 
 
 def open_sub(node, topic, payload, capacity=None, *, publishers=None):
@@ -52,6 +43,7 @@ def main() -> None:
     gt = open_sub(node, TOPIC_GT, OdomMessage)
     odom = open_sub(node, "Firefly/Odometry", OdomMessage)
     control = open_sub(node, CONTROL_TOPIC, ControlMessage, CONTROL_SERVICE_MAX)
+    status = open_sub(node, FC_STATUS_TOPIC, FcStatusMessage, FC_STATUS_BUFFER_SIZE, publishers=1)
     scalars = open_sub(node, "Firefly/VizScalars", ScalarMessage, SCALAR_BUFFER_SIZE,
                        publishers=VIZ_MAX_PUBLISHERS)
     started = time.monotonic()
@@ -68,12 +60,12 @@ def main() -> None:
             odom_z = float(sample.payload().contents.position_z)
         while (sample := control.receive()) is not None:
             thrust = max(float(v) for v in sample.payload().contents.thrust)
+        while (sample := status.receive()) is not None:
+            mode = FlightMode(sample.payload().contents.mode).name
         while (sample := scalars.receive()) is not None:
             message = sample.payload().contents
             entity = bytes(message.entity[: message.entity_len]).decode(errors="replace")
-            if entity == "fc/debug/state" and message.scalar_count:
-                mode = MODE_NAMES.get(int(message.scalars[0]), str(int(message.scalars[0])))
-            elif entity == "fc/debug/position_error_odom" and message.scalar_count >= 3:
+            if entity == "fc/debug/position_error_odom" and message.scalar_count >= 3:
                 error_z = float(message.scalars[2])
         if time.monotonic() >= next_print:
             print(

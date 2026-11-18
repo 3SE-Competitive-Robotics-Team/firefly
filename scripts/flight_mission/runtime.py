@@ -9,15 +9,16 @@ import time
 
 import iceoryx2 as iox2
 from firefly_ipc.messages import (
-    SCALAR_BUFFER_SIZE,
-    VIZ_MAX_PUBLISHERS,
+    FC_STATUS_BUFFER_SIZE,
+    FC_STATUS_TOPIC,
     AttitudeMessage,
+    FcStatusMessage,
+    FlightMode,
     LandingTargetMessage,
     LogMessage,
     OdomMessage,
     PlannerStatusMessage,
     ReferenceMessage,
-    ScalarMessage,
     TraceContext,
 )
 from firefly_ipc.activity import ActivityLease, LANDING
@@ -94,9 +95,8 @@ class FlightRunner:
                 self.latest[name], self.received[name] = (msg, time.monotonic())
                 if name == "odom":
                     self.stamp = max(self.stamp, msg.timestamp)
-                elif name == "scalars" and bytes(msg.entity[: msg.entity_len]) == b"fc/debug/state":
-                    self.mode = int(msg.scalars[0])
-                    self.received["mode"] = time.monotonic()
+                elif name == "mode":
+                    self.mode = FlightMode(msg.mode)
                 elif (
                     name == "attitude"
                     and self.armed_session is not None
@@ -138,7 +138,7 @@ class FlightRunner:
             )
         self._event(result.stdout.strip())
 
-    def _hold(self, seconds, *, modes=(3,)):
+    def _hold(self, seconds, *, modes=(FlightMode.HOLD,)):
         end = self.stamp + seconds
         self._wait(lambda: self.stamp >= end, wall=seconds * 2 + 30.0, modes=set(modes))
 
@@ -156,21 +156,21 @@ class FlightRunner:
                 )
                 and (0 <= self.stamp - self.latest["reference"].timestamp <= 0.25)
             ),
-            modes={3},
+            modes={FlightMode.HOLD},
         )
         identity = self.latest["planner"].goal_timestamp
         self._command("fc", "track")
-        self._wait(lambda: self.mode == 4, modes={3, 4})
+        self._wait(lambda: self.mode == FlightMode.TRACK, modes={FlightMode.HOLD, FlightMode.TRACK})
         arrival = Arrival(tuple(goal), identity)
         self._wait(
             lambda: arrival.observe(
                 self.latest.get("planner"), self.latest.get("odom"), self.stamp
             ),
             wall=100.0,
-            modes={4},
+            modes={FlightMode.TRACK},
         )
         self._command("fc", "hold")
-        self._wait(lambda: self.mode == 3, modes={3, 4})
+        self._wait(lambda: self.mode == FlightMode.HOLD, modes={FlightMode.HOLD, FlightMode.TRACK})
 
     def _startup(self):
         if self.options.hil:
@@ -186,7 +186,7 @@ class FlightRunner:
 
         def service(topic, payload, capacity, publishers=None):
             builder = (
-                self.node.service_builder(iox2.ServiceName.new("Firefly/" + topic))
+                self.node.service_builder(iox2.ServiceName.new(topic))
                 .publish_subscribe(payload)
                 .user_header(TraceContext)
                 .subscriber_max_buffer_size(capacity)
@@ -195,7 +195,7 @@ class FlightRunner:
                 builder = builder.max_publishers(publishers)
             return builder.open_or_create()
 
-        self.logs = service("Log", LogMessage, 256, 10).publisher_builder().create()
+        self.logs = service("Firefly/Log", LogMessage, 256, 10).publisher_builder().create()
         if self.options.precision_land:
             self.activity = ActivityLease(self.node)
         self._event(f"flight recording={self.recording}")
@@ -205,12 +205,12 @@ class FlightRunner:
         dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=self.root))
         self._mission_event("source", revision=revision, dirty=dirty)
         for name, topic, payload, capacity, publishers in [
-            ("landing", "LandingTarget", LandingTargetMessage, 2, None),
-            ("odom", "Odometry", OdomMessage, 2, None),
-            ("attitude", "VioAttitude", AttitudeMessage, 2, None),
-            ("planner", "PlannerStatus", PlannerStatusMessage, 2, None),
-            ("reference", "Reference", ReferenceMessage, 2, None),
-            ("scalars", "VizScalars", ScalarMessage, SCALAR_BUFFER_SIZE, VIZ_MAX_PUBLISHERS),
+            ("landing", "Firefly/LandingTarget", LandingTargetMessage, 2, None),
+            ("odom", "Firefly/Odometry", OdomMessage, 2, None),
+            ("attitude", "Firefly/VioAttitude", AttitudeMessage, 2, None),
+            ("planner", "Firefly/PlannerStatus", PlannerStatusMessage, 2, None),
+            ("reference", "Firefly/Reference", ReferenceMessage, 2, None),
+            ("mode", FC_STATUS_TOPIC, FcStatusMessage, FC_STATUS_BUFFER_SIZE, 1),
         ]:
             self.subs[name] = (
                 service(topic, payload, capacity, publishers)
@@ -308,7 +308,8 @@ class FlightRunner:
                 "odom" in self.latest
                 and self.latest["odom"].is_initialized
                 and ("attitude" in self.latest)
-                and (self.mode == 0)
+                and (self.mode == FlightMode.DISARMED)
+                and time.monotonic() - self.received["mode"] <= 1.0
                 and (self.stamp >= 4.0)
             ),
             wall=40.0,
@@ -322,9 +323,9 @@ class FlightRunner:
         )
         self._phase("takeoff")
         self._command("fc", "arm")
-        self._wait(lambda: self.mode == 1, modes={0, 1})
+        self._wait(lambda: self.mode == FlightMode.ARMED_GROUNDED, modes={FlightMode.DISARMED, FlightMode.ARMED_GROUNDED})
         self._command("fc", "takeoff", self.options.altitude)
-        self._wait(lambda: self.mode == 3, modes={1, 2, 3})
+        self._wait(lambda: self.mode == FlightMode.HOLD, modes={FlightMode.ARMED_GROUNDED, FlightMode.TAKEOFF, FlightMode.HOLD})
         if self.options.mission == "hover":
             self._request_activity(False)
         self._hold(1.0 if self.options.mission == "roundtrip" else self.options.hover_seconds)
@@ -357,19 +358,19 @@ class FlightRunner:
                     time.monotonic(),
                 ),
                 wall=self.options.acquire_timeout,
-                modes={3},
+                modes={FlightMode.HOLD},
             )
             self._phase("land", target_time=acquisition.target_time)
             self._command("fc", "land", "--precision")
-            self._wait(lambda: self.mode == 5, modes={3, 5})
-            self._wait(lambda: self.mode == 0, wall=45.0, modes={0, 5})
-            self._hold(0.75, modes=(0,))
+            self._wait(lambda: self.mode == FlightMode.LAND, modes={FlightMode.HOLD, FlightMode.LAND})
+            self._wait(lambda: self.mode == FlightMode.DISARMED, wall=45.0, modes={FlightMode.DISARMED, FlightMode.LAND})
+            self._hold(0.75, modes=(FlightMode.DISARMED,))
         else:
             self._phase("land")
             self._command("fc", "land")
-            self._wait(lambda: self.mode == 5, modes={3, 5})
-            self._wait(lambda: self.mode == 0, wall=45.0, modes={0, 5})
-            self._hold(0.75, modes=(0,))
+            self._wait(lambda: self.mode == FlightMode.LAND, modes={FlightMode.HOLD, FlightMode.LAND})
+            self._wait(lambda: self.mode == FlightMode.DISARMED, wall=45.0, modes={FlightMode.DISARMED, FlightMode.LAND})
+            self._hold(0.75, modes=(FlightMode.DISARMED,))
         self._phase("complete")
         if self.activity is not None:
             deadline = time.monotonic() + 0.3
@@ -379,13 +380,13 @@ class FlightRunner:
     def _close(self, error: str | None) -> list[str]:
         cleanup = []
         try:
-            if "odom" in self.latest and self.mode != 0:
+            if "odom" in self.latest and self.mode != FlightMode.DISARMED:
                 if error and self.options.precision_land:
                     self._command("fc", "hold")
                     self._event("abort: HOLD requested before simulation shutdown")
                 else:
                     self._command("fc", "land")
-                    self._wait(lambda: self.mode == 0, wall=40.0, landing=True)
+                    self._wait(lambda: self.mode == FlightMode.DISARMED, wall=40.0, landing=True)
                     self._event("native FC landed and DISARMED")
         except Exception as failure:
             cleanup.append(f"landing: {failure}")

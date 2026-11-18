@@ -4,7 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io::BufWriter;
 
 use firefly_error::Result;
-use firefly_pubsub::viz::{VizMessage, VoxelMessage, kind};
+use firefly_pubsub::viz::{ScalarMessage, VizMessage, VoxelMessage, kind};
 use firefly_pubsub::{navigation::NavigationMessage, odom::OdomMessage};
 use re_byte_size::SizeBytes as _;
 use re_chunk::{Chunk, PendingRow, RowId, TimeColumn, TimePoint, Timeline};
@@ -302,6 +302,21 @@ impl Archive {
                 "display world aligned to map using one exact-time stationary startup pair (yaw and translation only)", "INFO")?;
         }
         Ok(())
+    }
+
+    /// Decode a `VizScalars` row from its registered diagnostic producer.
+    /// # Errors
+    /// Invalid entity, payload width, source or archive write.
+    pub fn viz_scalar(&mut self, msg: &ScalarMessage) -> Result<()> {
+        let name = schema::entity(&msg.entity, msg.entity_len)?;
+        if name == "fc/debug/state" {
+            return Err(invalid("fc/debug/state is owned by Firefly/FcStatus"));
+        }
+        let values = msg
+            .scalars
+            .get(..msg.scalar_count as usize)
+            .ok_or_else(|| invalid("scalar count"))?;
+        self.scalar(name, msg.timestamp, values)
     }
 
     /// Preserve every scalar row, including repeated measurement timestamps.

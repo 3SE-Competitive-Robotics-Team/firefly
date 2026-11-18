@@ -3,6 +3,7 @@ pub mod camera;
 pub mod command;
 pub mod control;
 pub mod event;
+pub mod fc_status;
 pub mod goal;
 pub mod imu;
 pub mod landing;
