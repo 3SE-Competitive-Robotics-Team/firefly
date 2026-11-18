@@ -386,10 +386,11 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
             stats.add("linearizeProblem", stage.reset()).format("ms");
             linearization.perform_qr();
             stats.add("performQR", stage.reset()).format("ms");
+            let mut iteration_timer = Timer::default();
+            // A rejected trial restores the linearization point. Only its diagonal damping changes.
+            let (h, b) = linearization.assemble_normal_equations(&self.ba);
+            stats.add("get_dense_H_b", stage.reset()).format("ms");
             while iteration <= self.config.vio_max_iterations && !terminated {
-                let iteration_timer = Timer::default();
-                let (h, b) = linearization.assemble_normal_equations(&self.ba);
-                stats.add("get_dense_H_b", stage.reset()).format("ms");
                 let mut inc = DVector::zeros(order.total_size);
                 for _ in 0..3 {
                     let mut damped = h.clone();
@@ -470,6 +471,8 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
                     terminated = true;
                     termination_code = 4.;
                 }
+                iteration_timer = Timer::default();
+                stage.reset();
             }
         }
         stats.add("optimize", timer.elapsed()).format("ms");
