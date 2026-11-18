@@ -454,6 +454,26 @@ fn run<S: BasaltScalar>(text: &str, mode: Option<LinearizationType>) {
             root_pairs = Some(columns);
         }
         let (h, b) = linearization.assemble_normal_equations(&ba);
+        if with_prior && kind == LinearizationType::AbsQr {
+            // Hold the factor rows fixed and change only the prior's evaluation point.
+            let mut moved = ba.clone();
+            moved
+                .frame_poses
+                .get_mut(&10)
+                .unwrap()
+                .apply_inc(&SVector::<S, 6>::repeat(scalar(0.125)));
+            let delta = moved.compute_delta(&prior.order) - ba.compute_delta(&prior.order);
+            let (next_h, next_b) = linearization.assemble_normal_equations(&moved);
+            assert_eq!(next_h, h);
+            let expected_change = prior.h.transpose() * (&prior.h * delta);
+            for i in 0..expected_change.len() {
+                check(
+                    next_b[i],
+                    (b[i] + expected_change[i]).as_f64(),
+                    "updated prior rhs",
+                );
+            }
+        }
         let size = order.total_size;
         for row in 0..size {
             for col in 0..size {

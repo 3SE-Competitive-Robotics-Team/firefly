@@ -13,6 +13,7 @@ use nalgebra::{
     DMatrix, DVector, Isometry3, Matrix4, SMatrix, SVector, Translation3, Vector2, Vector3, Vector4,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::AddAssign;
 
 pub type Outliers<S> = BTreeMap<usize, Vec<(TimeCamId, S)>>;
 
@@ -381,27 +382,38 @@ impl<S: BasaltScalar> BundleAdjustmentBase<S> {
         h: &mut DMatrix<S>,
         b: &mut DVector<S>,
     ) -> S {
+        let normal;
+        let prior_h = if prior.is_sqrt {
+            normal = prior.h.transpose() * &prior.h;
+            &normal
+        } else {
+            &prior.h
+        };
+        self.add_marg_prior(prior, prior_h, order, h, b);
+        self.compute_marg_prior_error(prior)
+    }
+
+    pub(crate) fn add_marg_prior(
+        &self,
+        prior: &MargLinData<S>,
+        prior_h: &DMatrix<S>,
+        order: &AbsOrderMap,
+        h: &mut DMatrix<S>,
+        b: &mut DVector<S>,
+    ) {
         assert_eq!(prior.h.ncols(), prior.order.total_size);
         for (time, entry) in &prior.order.abs_order_map {
             assert_eq!(&order.abs_order_map[time], entry);
         }
         let delta = self.compute_delta(&prior.order);
         let n = prior.order.total_size;
-        let (prior_h, prior_b) = if prior.is_sqrt {
-            (
-                prior.h.transpose() * &prior.h,
-                prior.h.transpose() * (&prior.b + &prior.h * delta),
-            )
+        let prior_b = if prior.is_sqrt {
+            prior.h.transpose() * (&prior.b + &prior.h * delta)
         } else {
-            (prior.h.clone(), &prior.h * delta + &prior.b)
+            &prior.h * delta + &prior.b
         };
-        for i in 0..n {
-            b[i] += prior_b[i];
-            for j in 0..n {
-                h[(i, j)] += prior_h[(i, j)];
-            }
-        }
-        self.compute_marg_prior_error(prior)
+        b.rows_mut(0, n).add_assign(prior_b);
+        h.view_mut((0, 0), (n, n)).add_assign(prior_h);
     }
 
     /// # Panics
