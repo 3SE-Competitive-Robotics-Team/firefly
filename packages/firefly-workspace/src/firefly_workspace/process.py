@@ -86,8 +86,8 @@ def active_processes(root: Path) -> list[int]:
     """按可执行路径、工作目录与 argv 识别本仓库进程。"""
     root = root.resolve()
     found = []
-    binaries = {"firefly-rootslam", "render", "mimir", "fc", "hil", "localization", "planner", "traj", "landing"}
-    scripts = {"firefly-sim", "mimir", "rerun", "flight.py",
+    binaries = {"firefly-rootslam", "render", "mimir", "fc", "hil", "localization", "planner", "traj", "aliked", "lightglue", "landing"}
+    scripts = {"firefly-sim", "mimir", "rerun", "collect_vision_map.py", "flight.py",
                "hil_hover.py", "hil_roundtrip.py", "validate_landing.py"}
     modules = {"firefly_sim", "firefly_sim.main"}
     for process in psutil.process_iter():

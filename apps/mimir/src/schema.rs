@@ -238,6 +238,7 @@ pub fn fields(name: &str) -> Result<&'static [&'static str]> {
         "planner/replan_ms" => &["latency_ms", "solve_ms", "adopted"],
         "planner/fsm_timing_ms" => &["fsm_ms", "step_ms", "period_ms"],
         "traj/timing_ms" => &["tick_ms", "sample_ms", "publish_ms", "period_ms"],
+        "vision/debug/map_query_wall_s" => &["query_s"],
         "fc/standby_eskf/accel_nis" => &["nis"],
         "fc/debug/saturated_ticks" => &["count"],
         "fc/arming/failed" | "fc/failsafe/flags" => &["mask"],

@@ -5,6 +5,7 @@
 
 RootSLAM 默认只提供 VIO；planner 使用机体里程计、深度和相机外参，独立执行 EGO 局部建图与规划。
 目标、占据地图和轨迹统一在 odom 系，从传感器输入和空局部地图启动。
+ALIKED/LightGlue 库图定位作为独立可选工具运行。
 真值用于传感器生成、评测和可视化；估计与控制使用传感器观测。
 稀疏地图优化结果用于离线轨迹评估，在线导航使用 VIO。设备同步、标定、实时性和飞行能力分别验收。
 
@@ -27,7 +28,7 @@ RootSLAM 默认只提供 VIO；planner 使用机体里程计、深度和相机�
 | `crates/firefly-ego-map` | EGO 局部概率占据、射线融合与障碍膨胀 |
 | `crates/firefly-{map,search,trajectory,optimize,cost,planner}` | 占据地图、动态障碍体素化、A*、MINCO、L-BFGS、代价与重规划 |
 | `crates/firefly-cost/src/{swarm,formation}.rs` | 库级集群间距与队形代价，由库调用方提供集群轨迹 |
-| `crates/firefly-localization` | 外部位姿融合与地图对齐修正 |
+| `crates/firefly-{localization,vision-map,vision-match}` | 定位融合、视觉库图与匹配 |
 | `crates/firefly-flight` | 飞行模式、安全条件、姿态/位置控制与电机分配 |
 | `crates/firefly-imu` | 独立备用姿态/陀螺零偏 ESKF、静止初始化与加计 NIS |
 | `crates/firefly-{base,config}` | 坐标/刚体变换、可选 TOML 配置 |
@@ -46,9 +47,11 @@ RootSLAM 默认只提供 VIO；planner 使用机体里程计、深度和相机�
 | `fc` | 1kHz 飞控环：飞行模式与安全条件、姿态/位置控制、电机分配 |
 | `planner` | 独占深度融合与局部避障地图、全局/局部规划、完整轨迹发布与可视化 |
 | `traj` | 采样完整位置/航向轨迹，按里程计时钟发布飞控参考并处理规划心跳失联 |
-| `localization` | 外部位姿观测 ESKF：时间配对、map←odom 修正与导航发布，要求显式启动对齐 |
+| `localization` | 可选外部库图 ESKF：时间配对、map←odom 修正与导航发布，要求显式启动对齐 |
 | `firefly-rootslam` | 默认双目/IMU VIO、连续机体里程计与预测姿态；默认关闭建图与回环 |
-| `render` | 视觉传感器进程：订阅真值位姿渲染双目、深度与下视并发布 IPC，`--offline` 供离线传感器采集 |
+| `aliked` | ALIKED-N16 特征提取：在线发布特征，`--build-map` 离线建 `ffvmap` 库图 |
+| `lightglue` | ALIKED/LightGlue 离线库图定位：`--map <地图.ffvmap>` 解算视觉位姿 |
+| `render` | 视觉传感器进程：订阅真值位姿渲染双目、深度与下视并发布 IPC，`--offline` 供离线建库 |
 | `landing` | 按需识别下视 H 标记，结合采集时刻里程计发布精降目标 |
 | `hil`、`hil-gadget` | 主机 USB 传感器/遥测桥接与板端 USB 模式管理 |
 | `quad` | 独立微无人机第三人称飞行游戏，使用本地输入与动力学 |

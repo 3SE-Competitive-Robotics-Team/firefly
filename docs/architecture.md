@@ -9,7 +9,7 @@
 
 默认自主链路从空滚动地图启动：RootSLAM 提供连续 VIO，planner 融合机体里程计和深度，
 生成 odom 系轨迹，独立 traj 应用采样为参考，FC 跟踪参考并输出电机推力。
-外部位姿观测可由独立的 localization 服务融合。
+离线库图定位是可选的独立服务。
 
 ```mermaid
 flowchart LR
@@ -29,7 +29,7 @@ flowchart LR
     V -->|机体 Odometry| T
     T -->|odom 系 Reference| F
     V -->|原始 odom| L[可选 localization]
-    A[外部位姿源] -->|PoseObservation| L
+    A[可选 ALIKED / LightGlue] -->|地图位姿| L
     L -->|校正诊断| D[mimir]
     R -->|图像| D
     SIM -->|真值| D
@@ -202,6 +202,7 @@ odom 会话变化时重建整条坐标链。mimir 使用相同链表达原始观
 视觉算法采用像素中心坐标，左上中心为 `(0,0)`。
 主点由 `firefly_base::rig::principal_point` 计算，320×240 为 `(159.5,119.5)`。
 GPU 采样中心为 `(u+0.5,v+0.5)`，转换为数组坐标时减去半像素。
+在线库图使用与传感器匹配的主点及标定契约。
 
 ### 控制与外部地图
 
@@ -222,6 +223,7 @@ p_map_odom = p_map_body_start - R_map_odom p_odom_body_start
 
 锁存只确定航向规范并保留重力倾角。锁存完成后发布地图里程计；
 VIO 会话失效使外部定位进入停止状态。任意位置冷启动和绑架重定位属于独立能力。
+地图查询使用声明外部对齐的原子 Navigation 快照。
 
 可选 ESKF 采用 odom 系右扰动，令 `D=T_map_odom`、`V=T_odom_body`、
 `Y=T_map_body`：
@@ -278,13 +280,13 @@ Mimir 原点匹配的 `Matching / Anchored / Unavailable`、轨迹执行的
 | [渲染 mailbox](../apps/render/src/process.rs)、[GPU capture](../apps/render/src/capture.rs)、[帧链路](../apps/render/src/link.rs) | 空 / 有值 / 关闭；提交 → GPU 映射 → 应答；帧组装 → 完成 / 退休 | 通道关闭结束等待；请求与 GPU 槽位分别回收 |
 | [仿真](../apps/firefly-sim/src/firefly_sim/main.py)、[电机](../apps/motor/src/actuator.rs) | 等待新鲜控制 → 运行 → 控制超时 | 仿真暂停推进时间；执行器回到零输出，退出时归零 |
 | [相机](../apps/camera/src/capture.rs)、[IMU 设备](../apps/imu/src/source.rs) | 打开设备 → 发布循环 → 停止 | 进程拥有设备句柄和退出流程 |
-| [可选定位](../apps/localization/src/main.rs)、[门控](../crates/firefly-localization/src/filter.rs) | 等待对齐 / 历史 → 就绪 → 重置锁存；观测等待 → 接受 / 拒绝 / 过期 | 观测等待里程计区间；拒绝计数归门控，会话重置结束当前定位 |
+| [可选定位](../apps/localization/src/main.rs)、[门控](../crates/firefly-localization/src/filter.rs)、[匹配历史](../apps/lightglue/src/sensors.rs) | 等待对齐 / 历史 → 就绪 → 重置锁存；观测等待 → 接受 / 拒绝 / 过期 | 观测等待里程计区间；拒绝计数归门控，会话重置结束当前定位 |
 | [任务编排](../scripts/flight_mission/runtime.py)、[独立评分](../scripts/flight_mission/verification.py) | 起飞 → 逐航点飞行/停留 → 返航/重捕获 → 降落/上锁 → 完成 | 失败和取消进入回收；关闭 RRD 后核对声明航点、物理证据和资源生命周期 |
 | [降落识别](../apps/landing/src/runtime.rs)、[跟踪](../apps/landing/src/tracking.rs) | Dormant ↔ Active；Searching → Confirming → Tracking | 租约失效释放图像、里程计线程与推理 Session；重新激活或会话变化重新识别 |
-| [CAD 构建](../packages/firefly-cad/src/firefly_cad/pipeline.py) | 生成 → 验收 → 提交清单 | 按输入与输出内容指纹复用资产 |
+| [离线采集](../scripts/collect_vision_map.py)、[资产缓存](../packages/firefly-mujoco/src/firefly_mujoco/vision_assets.py)、[CAD 构建](../packages/firefly-cad/src/firefly_cad/pipeline.py) | 生成 → 验收 → 提交清单；完整且内容匹配才复用 | 失败保留未完成状态；采集提交前回收 renderer |
 | [数据集导出](../apps/rootslam/src/dataset_app.rs)、[部署](../xtask/src/deploy.rs) | 前置校验 → 执行 → 完成确认 | 导出失败回收生产器和映射线程；部署以 supervisor socket 应答确认就绪 |
 
-quad 使用 Bevy startup / update 生命周期。
+ALIKED 的离线 / 在线模式在启动时确定；quad 使用 Bevy startup / update 生命周期。
 上述状态的操作入口见 [开发指南](development.md)，输入与归档契约见
 [可观测性](observability.md)。
 
@@ -443,12 +445,19 @@ RC、电池、GNSS 等扩展条件随相应输入接入。
 
 <a id="loops"></a>
 
-## 回环与外部位姿融合
+## 回环与可选库图定位
 
 RootSLAM 持久地图执行地点检索、几何回环验证和 PGO，数据集完成后可执行全局 BA。
 离线最终轨迹与在线局部 VIO 分别评分；在线导航沿用局部 VIO 规范。
 
-可选 localization 进程融合外部位姿观测。
+可选 ALIKED-N16/LightGlue 在库图中匹配特征，以库中三维点求 PnP。
+深度标签先注册到左目，采用 z-buffer 和空洞/边缘检查。
+图像时刻 t 的先验为
+`T_map_body(s) inverse(T_odom_body(s)) T_odom_body(t)`，
+要求两个时刻都有原始 VIO 历史，并以图像测量时间作为观测时间。
+
+候选与算子并发有界，非平面支撑和 PnP 质量满足门限后完成查询；
+繁忙时保留最新图像，退出回收工作线程。
 ESKF 修正提交规则由 `firefly_localization::CorrectionOptions` 维护。
 共享图像/IMU 的相关性属于融合模型评估范围。
 

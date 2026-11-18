@@ -2,10 +2,12 @@ use std::path::{Path, PathBuf};
 
 /// 桌面应用：仿真、可视化与地面站 CLI。
 const DESKTOP_APPS: &[&str] = &[
+    "aliked",
     "fc",
     "ffctl",
     "firefly-rootslam",
     "hil",
+    "lightglue",
     "localization",
     "landing",
     "mimir",
@@ -17,12 +19,14 @@ const DESKTOP_APPS: &[&str] = &[
 
 /// 机载应用：Orange Pi Zero 3W 上运行的进程，不含 Bevy 仿真/演示程序。
 const BOARD_APPS: &[&str] = &[
+    "aliked",
     "camera",
     "fc",
     "ffctl",
     "hil-gadget",
     "imu",
     "firefly-rootslam",
+    "lightglue",
     "localization",
     "landing",
     "mimir",

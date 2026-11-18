@@ -14,6 +14,12 @@ const DESTINATION: &str = "/opt/firefly";
 const PACKAGE: &str = "dist/firefly-aarch64.zst";
 const REMOTE_PACKAGE: &str = "/tmp/firefly-package.zst";
 const REMOTE_UNPACKER: &str = "/tmp/firefly-xtask";
+/// 只部署默认模型；`lightglue` 的权重带外部数据文件，两者必须同批部署。
+const MODELS: &[&str] = &[
+    "aliked-n16-k512.onnx",
+    "lightglue-aliked-k512.onnx",
+    "lightglue-aliked-k512.onnx.data",
+];
 const LANDING_MODELS: &[&str] = &[
     "h-marker-yolo26n-cif-v1/manifest.json",
     "h-marker-yolo26n-cif-v1/int8.onnx",
@@ -118,19 +124,25 @@ fn package() -> Result<PathBuf, String> {
             });
         }
     }
-    for model in LANDING_MODELS {
+    for model in MODELS.iter().chain(LANDING_MODELS) {
         let source = root.join("models").join(model);
-        if !source.is_file() {
+        if source.is_file() {
+            entries.push(Entry {
+                path: format!("models/{model}"),
+                mode: 0o644,
+                source,
+            });
+        } else if LANDING_MODELS.contains(model) {
             return Err(format!(
                 "missing {}; export the quantized landing model before deployment",
                 source.display()
             ));
+        } else {
+            eprintln!(
+                "warning: missing {}; the corresponding vision application will refuse to start",
+                source.display()
+            );
         }
-        entries.push(Entry {
-            path: format!("models/{model}"),
-            mode: 0o644,
-            source,
-        });
     }
 
     let package = root.join(PACKAGE);

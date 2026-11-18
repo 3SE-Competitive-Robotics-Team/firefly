@@ -145,8 +145,9 @@ cargo run --release -p planner
 两个独立应用，前者规划并发布心跳，后者采样并发布飞控参考。
 planner 使用 `configs/planner.toml`，traj 使用 `configs/traj.toml`；轨迹心跳失联门限由 traj 配置。
 RootSLAM 默认关闭建图与回环，作为局部 VIO 使用。
-接入外部位姿源时，先填写 `configs/localization.toml [origin]`，以
-`firefly-rootslam --external-localization` 启动估计器，再启动 `localization`。
+可选库图定位先填写 `configs/localization.toml [origin]`，并用
+`firefly-rootslam --external-localization`，再启动 localization、aliked 和
+`lightglue --map <地图.ffvmap>`。这些可选服务由操作员显式启动。
 planner 使用机体 Odometry、深度与配置中的相机外参；定位与规划从传感器观测建立状态。
 场地真值用于传感器生成、独立评分与可视化。
 
@@ -166,7 +167,7 @@ cargo xtask deploy
 ```
 
 板载应用名单由 [`xtask/src/target.rs`](../xtask/src/target.rs) 维护。
-`deploy` 把二进制、`configs/*.toml`、精降模型及其 NPU 运行库打成
+`deploy` 把二进制、`configs/*.toml` 与默认视觉模型打成
 `dist/firefly-aarch64.zst`（xtask 定义的 zstd 容器），推到设备后由同一 xtask 的 `unpack`
 解包，`--device` 默认 `firefly-0001`。解包前会停掉 `firefly.service` 并清空
 `/opt/firefly/{bin,configs,models}`，用本次发布替换应用产物；`logs` 与镜像
@@ -230,7 +231,8 @@ supervisor 的相对命令 `bin/<app>` 和 `logs/process` 仍依赖工作目录�
 
 `firefly.service` 由镜像构建 [`orangepi-build`](https://github.com/3SE-Competitive-Robotics-Team/orangepi-build)
 预置并默认启动；服务执行 `ffctl process supervise`。supervisor 按 `configs/processes.toml`
-的数组顺序拉起 `autostart = true` 的进程。`deploy` 使用仓库中的进程清单。运行期管理：
+的数组顺序拉起 `autostart = true` 的进程。`processes.toml` 被 `deploy` 覆盖；
+`lightglue` 在生产 `.ffvmap` 部署前保持 `autostart = false`。运行期管理：
 
 ```bash
 cd /opt/firefly
@@ -301,7 +303,7 @@ supervisor 对异常退出退避重启；停止使用 SIGINT，超时返回错�
 的干净 ORT 源码后，使用 `scripts/build_npu_runtime.py --help` 所列参数构建运行库。
 脚本验证源码 C API、构建 VSINPU、打包共享库、设置同目录 RPATH 并记录指纹；
 构建完成不代表模型已经通过 NPU 验收。运行库目录、INT8 ONNX 和模型 manifest 随
-`xtask deploy` 部署；发布缺少运行库时明确失败。
+`xtask deploy` 部署；发布缺少运行库时明确失败。可选 ALIKED/LightGlue 共用该 Linux 原生库。
 普通与 HIL 清单均自启动轻量的 landing 宿主，固定 CPU 4；FC 固定 CPU 5，VIO 在 CPU 6、7。
 A733 官方 SDK 的运行接口与版本见
 [厂商 NPU 开发文档](https://docs.radxa.com/en/cubie/a7a/app-dev/npu-dev/cubie-acuity-sdk)，
@@ -461,7 +463,32 @@ uv run --package firefly-cad firefly-cad-build <场地.stp> --scene <赛季>@<�
 
 `firefly-cad-build` 构建并验收几何资产，配置为 `configs/cad.toml`。GLB、碰撞盒、FFMap 必须来自
 同一归一化几何，通过内容 hash、坐标和占据检查；细节见
-[CAD README](../packages/firefly-cad/README.md)。在线运行与场地验收共用 `configs/scene.toml` 所选场景。
+[CAD README](../packages/firefly-cad/README.md)。在线运行、离线采集、建库与验收资产指纹
+共同使用 `configs/scene.toml` 所选场景；采集与库图默认输出位于该版本的资产目录及地图路径。
+
+`scripts/collect_vision_map.py` 使用 `render --offline` 和隔离的 `Firefly/Offline/*`，
+按同一时间戳配对左图、理想深度与位姿标签，使用独立离线通道。
+同步帧、图像纹理、路标覆盖与内容指纹由采集和构建器检查，通过后建库。
+库图兼容性只依赖场地、标定、光照和曝光；源码/二进制 hash 用于追溯，普通重编译或在线
+噪声变化可沿用兼容库图。每次采集保留原 manifest，替换资产前归档。
+
+官方预训练模型的可复现导出使用独立 CPU 环境：
+
+```bash
+uv venv models/vision-export/.venv --python 3.12
+uv pip install --python models/vision-export/.venv/bin/python -e packages/firefly-workspace
+uv pip install --python models/vision-export/.venv/bin/python torch==2.15.0 torchvision==0.29.2 --index-url https://download.pytorch.org/whl/cpu
+uv pip install --python models/vision-export/.venv/bin/python onnxscript==0.7.2 onnx==1.23.2 onnxruntime==1.32.0 kornia==0.9.2 opencv-python==5.0.0.93 matplotlib==3.11.2
+models/vision-export/.venv/bin/python scripts/export_vision_models.py
+uv run --all-packages python scripts/build_vision_map.py <通过内容校验的采集目录>
+```
+
+使用官方 ALIKED-N16（128 维）与匹配的 128 维 LightGlue 权重，320×240、512 点。
+导出保留全部匹配层，以固定执行路径完成推理。
+导出器校验可变形卷积与 torchvision 的一致性、ONNX 与 PyTorch 输出一致性，
+`models/vision_models.json` 保存源码版本、权重及模型 hash、数值检查结果。
+视觉地图旁的 `.manifest.json` 关联模型、构建器、采集清单和场地指纹。
+模型与地图保存在本地产物目录；上游源码及权重的许可见固定版本的 LightGlue 仓库。
 
 <a id="diagnostics"></a>
 
@@ -483,7 +510,7 @@ uv run --package firefly-cad firefly-cad-build <场地.stp> --scene <赛季>@<�
 构建并行度使用 Cargo 默认值或 `CARGO_BUILD_JOBS`，Python 依赖通过 `uv sync` 安装。
 
 firefly_workspace.process 提供子进程回收、输出排空和运行互斥；
-firefly_mujoco.messages 统一 Python IPC 定义。
+firefly_mujoco.messages 统一 Python IPC 定义，firefly_mujoco.vision_assets 维护建图库图的资产契约。
 对应单元测试随各自包运行。
 
 ```bash
@@ -624,6 +651,13 @@ Mimir 先启动、最后关闭；任务设置、阶段、起飞坐标锚点和�
 
 ### 可选资产检查
 
+导出视觉模型并准备对应平台的 ONNX Runtime 后，单独运行张量与推理回归：
+
+```bash
+cargo test --release -p aliked reused_input_matches_fresh_tensor_across_frames -- --ignored
+cargo test --release -p lightglue exported_model_checks_output_tensors_and_binds_full_query -- --ignored
+```
+
 RMUC 场地资产与规划检查：
 
 ```bash
@@ -632,4 +666,14 @@ cargo test --release -p firefly-planner --test rmuc_asset -- --ignored
 cargo test --release -p firefly-planner rmuc_22m_initial_trajectory_is_executable -- --ignored
 ```
 
-在线回环以真实重访被后端接受的记录为证据。
+库图独立视角验收先启动 `./target/release/mimir`，再执行：
+
+```bash
+RUST_LOG=info FIREFLY_QUERY_MAP=<独立查询.ffvmap> FIREFLY_QUERY_COUNT=20 \
+  FIREFLY_MAP_VALIDATION_REPORT="$PWD/logs/map_validation.json" \
+  cargo test --release -p lightglue held_out_map_localization_contract -- --ignored --nocapture
+```
+
+独立查询使用建库位置之外的视角，查询位姿作为评分标签，先验加入固定偏差；每个指定查询
+分别报告几何与误差断言，以及接受或拒绝结果。模型导出、资产质量、库图定位、飞行和
+在线回环分别验收；在线回环以真实重访被后端接受的记录为证据。

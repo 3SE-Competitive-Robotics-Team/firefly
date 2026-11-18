@@ -255,7 +255,7 @@ pub mod paths {
             assert!(config.ends_with("configs/fc.toml"));
             assert!(config.is_absolute());
             assert!(!config.to_string_lossy().contains(".."));
-            assert!(models("drone/drone.glb").ends_with("models/drone/drone.glb"));
+            assert!(models("aliked.onnx").ends_with("models/aliked.onnx"));
         }
 
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
