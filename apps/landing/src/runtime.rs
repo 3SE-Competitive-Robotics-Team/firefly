@@ -24,7 +24,7 @@ enum Pipeline {
 struct Worker {
     model: model::Model,
     camera: Subscriber<DownImageMessage>,
-    odometry: firefly_planner_runtime::odometry::OdometryReceiver,
+    odometry: firefly_odometry::OdometryReceiver,
     tracker: tracking::Tracker,
     last_frame: f64,
     next_inference: Instant,
@@ -40,7 +40,7 @@ impl Worker {
         Ok(Self {
             model: model::Model::load(&config.manifest, config.backend, environment)?,
             camera: Subscriber::with_topic(node, CAMERA_DOWN_TOPIC)?,
-            odometry: firefly_planner_runtime::odometry::OdometryReceiver::start()?,
+            odometry: firefly_odometry::OdometryReceiver::start()?,
             tracker: tracking::Tracker::new(config.tracking()),
             last_frame: not_before,
             next_inference: Instant::now(),

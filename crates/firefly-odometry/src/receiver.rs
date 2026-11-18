@@ -1,4 +1,4 @@
-//! planner 与 traj 独立接收局部状态，按真实接收时间维护状态流的存活期。
+//! 每个进程独立订阅里程计，按本地接收时间维护有效期与测量历史。
 use std::collections::VecDeque;
 use std::mem::DropGuard;
 use std::sync::{
@@ -25,7 +25,7 @@ struct Shared {
     error: Option<String>,
 }
 
-/// Bounded measurement-time history shared with the depth worker.
+/// 同一进程内按测量时间排列的有界里程计历史。
 #[derive(Clone)]
 pub struct OdometryHistory {
     shared: Arc<Mutex<Shared>>,
@@ -187,6 +187,24 @@ fn internal(message: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_input_retires_buffered_history() {
+        let mut state = Shared::default();
+        let message = OdomMessage {
+            timestamp: 42.,
+            is_initialized: true,
+            ..Default::default()
+        };
+        let received = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        assert!(state.input.observe(&message, received));
+        state.history.push_back(message);
+        let history = OdometryHistory {
+            shared: Arc::new(Mutex::new(state)),
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        assert!(history.snapshot().unwrap().is_empty());
+    }
 
     #[test]
     fn panicking_receiver_retires_shared_history() {

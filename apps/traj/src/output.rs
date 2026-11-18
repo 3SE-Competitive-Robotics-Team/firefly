@@ -1,6 +1,7 @@
 use firefly_error::{Error, ErrorKind, Result};
+use firefly_observability::rate::Rate;
+use firefly_odometry::OdometryReceiver;
 use firefly_planner::{TrajectoryCommand, TrajectoryServer};
-use firefly_planner_runtime::{odometry::OdometryReceiver, rate::Rate};
 use firefly_pubsub::{
     node::create_node,
     publish::Publisher,

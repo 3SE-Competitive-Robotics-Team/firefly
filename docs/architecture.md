@@ -41,3 +41,6 @@ flowchart TB
     flight -.-> mimir["`mimir · 观测录制
 log.rrd`"]
 ```
+
+`planner`、`traj` 和 `landing` 各自在进程内通过 `firefly-odometry` 接收并校验里程计。
+`landing` 按图像时间查询历史样本，`traj` 按样本时间采样轨迹，`planner` 将实测位置和速度转换为规划初态，并为这个起点指定零加速度。

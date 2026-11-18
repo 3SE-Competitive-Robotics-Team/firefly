@@ -14,7 +14,7 @@ use std::{
 use firefly_base::FrameId;
 use firefly_ego_map::{DepthImage, GridMap};
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_planner_runtime::odometry::OdometryHistory;
+use firefly_odometry::OdometryHistory;
 use firefly_pubsub::{
     camera::{DEPTH_TOPIC, DepthImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH},
     node::create_node,

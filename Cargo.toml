@@ -73,7 +73,7 @@ firefly-map = { path = "crates/firefly-map" }
 firefly-observability = { path = "crates/firefly-observability" }
 firefly-optimize = { path = "crates/firefly-optimize" }
 firefly-planner = { path = "crates/firefly-planner" }
-firefly-planner-runtime = { path = "crates/firefly-planner-runtime" }
+firefly-odometry = { path = "crates/firefly-odometry" }
 firefly-pubsub = { path = "crates/firefly-pubsub" }
 firefly-localization = { path = "crates/firefly-localization" }
 firefly-search = { path = "crates/firefly-search" }

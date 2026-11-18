@@ -2,7 +2,6 @@
 
 use std::time::{Duration, Instant};
 
-use firefly_planner::State;
 use firefly_pubsub::odom::OdomMessage;
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 
@@ -12,7 +11,8 @@ const MAX_AGE: Duration = Duration::from_millis(500);
 #[derive(Clone, Copy)]
 pub struct Snapshot {
     pub timestamp: f64,
-    pub state: State,
+    pub position: Point3<f64>,
+    pub velocity: Vector3<f64>,
     pub orientation: UnitQuaternion<f64>,
 }
 
@@ -37,11 +37,8 @@ impl Snapshot {
         let pose = m.body_pose(firefly_base::FrameId::ODOM).ok()?;
         Some(Self {
             timestamp: m.timestamp,
-            state: State {
-                position: Point3::new(m.position_x, m.position_y, m.position_z),
-                velocity: Vector3::new(m.velocity_x, m.velocity_y, m.velocity_z),
-                acceleration: Vector3::zeros(),
-            },
+            position: Point3::new(m.position_x, m.position_y, m.position_z),
+            velocity: Vector3::new(m.velocity_x, m.velocity_y, m.velocity_z),
             orientation: pose.isometry().rotation,
         })
     }

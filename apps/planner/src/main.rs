@@ -13,10 +13,10 @@ use std::time::{Duration, Instant};
 use fastrace::prelude::*;
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_map::{Plane, VirtualWall};
-use firefly_observability::init as init_observability;
+use firefly_observability::{init as init_observability, rate::Rate};
+use firefly_odometry::{OdometryReceiver, Snapshot, StateInput};
 use firefly_planner::worker::{MapVersion, PlanningWorker, WorkerStats};
-use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager, ReplanFsm};
-use firefly_planner_runtime::{odometry, rate::Rate, state_input::StateInput};
+use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager, ReplanFsm, State};
 use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::publish::Publisher;
@@ -39,6 +39,15 @@ const MAP_TIMEOUT: f64 = 1.0;
 /// 缺省配置：按安装布局解析，与启动目录无关。
 fn default_config() -> PathBuf {
     firefly_config::paths::config("planner.toml")
+}
+
+/// 里程计提供位置和速度；从观测起算时采用零加速度边界。
+fn planning_state(sample: Snapshot) -> State {
+    State {
+        position: sample.position,
+        velocity: sample.velocity,
+        acceleration: Vector3::zeros(),
+    }
 }
 
 struct Args {
@@ -119,7 +128,7 @@ struct App {
     display: voxel_display::DisplayWorker,
     /// 状态时钟（秒），只由通过校验的局部里程计推进。
     t_sim: f64,
-    odom: odometry::OdometryReceiver,
+    odom: OdometryReceiver,
     state_input: StateInput,
     received_state: bool,
     /// 本拍是否拿到新鲜里程计：决定体素快照是否重扫（无状态时不扫）。
@@ -185,8 +194,8 @@ impl App {
         )?;
         let node = create_node()?;
         let log_ipc = firefly_observability::init_ipc(&node, "planner");
-        let odom = odometry::OdometryReceiver::start()
-            .map_err(|e| e.with_operation("创建规划器局部里程计订阅"))?;
+        let odom =
+            OdometryReceiver::start().map_err(|e| e.with_operation("创建规划器局部里程计订阅"))?;
         let depth = depth_mapping::DepthReceiver::start(depth_fusion, odom.history())?;
         let goal_sub = open_sub::<GoalMessage>(
             &node,
@@ -398,11 +407,11 @@ impl App {
             return Ok(());
         };
         self.state_fresh = true;
-        let measured = Some(snapshot.state);
+        let measured = Some(planning_state(snapshot));
         if !self.received_state {
             self.fsm
                 .manager_mut()
-                .set_goal(now, measured, snapshot.state.position.coords)?;
+                .set_goal(now, measured, snapshot.position.coords)?;
             if let Some(goal) = self.initial_goal {
                 self.fsm.set_goal(now, measured, Vector3::from(goal))?;
             }
@@ -415,7 +424,7 @@ impl App {
             self.output.control(false)?;
             return Ok(());
         }
-        self.perceived_center = snapshot.state.position.coords;
+        self.perceived_center = snapshot.position.coords;
         self.fsm
             .manager_mut()
             .update_motion_context(firefly_planner::motion::MotionContext {
@@ -484,7 +493,7 @@ impl App {
         let q = snapshot.orientation.quaternion();
         self.log_pose(
             "plan/drone",
-            snapshot.state.position.coords.into(),
+            snapshot.position.coords.into(),
             [q.i, q.j, q.k, q.w],
             now,
         );
@@ -559,7 +568,7 @@ impl App {
             return Ok(());
         };
         let now = self.t_sim;
-        let measured = Some(snapshot.state);
+        let measured = Some(planning_state(snapshot));
         let odometry = self.state_input.odometry().unwrap();
         if !self.synchronize_map(&odometry)? {
             self.solver.cancel();

@@ -4,6 +4,30 @@ use firefly_pubsub::navigation::{NAVIGATION_TOPIC, NavigationMessage};
 use firefly_pubsub::odom::{ODOM_TOPIC, OdomMessage};
 use firefly_pubsub::viz::VOXELS_MAX;
 
+#[test]
+fn measured_start_uses_odometry_position_and_velocity_and_zero_acceleration() {
+    let mut input = StateInput::default();
+    let now = Instant::now();
+    let odometry = OdomMessage {
+        timestamp: 12.5,
+        position_x: 1.,
+        position_y: -2.,
+        position_z: 3.,
+        velocity_x: -4.,
+        velocity_y: 5.,
+        velocity_z: -6.,
+        is_initialized: true,
+        ..Default::default()
+    };
+    assert!(input.observe(&odometry, now));
+    let sample = input.current(now).unwrap();
+    assert_eq!(sample.timestamp, odometry.timestamp);
+    let start = planning_state(sample);
+    assert_eq!(start.position.coords, Vector3::new(1., -2., 3.));
+    assert_eq!(start.velocity, Vector3::new(-4., 5., -6.));
+    assert_eq!(start.acceleration, Vector3::zeros());
+}
+
 fn publish_odometry(publisher: &Publisher<OdomMessage>, timestamp: f64, shift: f64) {
     publisher
         .publish(OdomMessage {
@@ -203,7 +227,7 @@ fn safety_callback_applies_new_obstacles_and_deletions_without_exec_tick() {
     app.safety_step().unwrap();
     assert!(!app.fsm.manager().map().is_occupied_inflated(point));
 
-    let measured = app.state_input.current(Instant::now()).unwrap().state;
+    let measured = planning_state(app.state_input.current(Instant::now()).unwrap());
     app.fsm
         .set_goal(app.t_sim, Some(measured), Vector3::new(2., 0., 1.))
         .unwrap();

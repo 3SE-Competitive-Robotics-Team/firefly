@@ -3640,6 +3640,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "firefly-odometry"
+version = "0.1.0"
+dependencies = [
+ "firefly-base",
+ "firefly-error",
+ "firefly-pubsub",
+ "log",
+ "nalgebra",
+]
+
+[[package]]
 name = "firefly-opengv"
 version = "0.1.0"
 dependencies = [
@@ -3677,18 +3688,6 @@ dependencies = [
  "nalgebra",
  "rand 0.10.4",
  "serde",
-]
-
-[[package]]
-name = "firefly-planner-runtime"
-version = "0.1.0"
-dependencies = [
- "firefly-base",
- "firefly-error",
- "firefly-planner",
- "firefly-pubsub",
- "log",
- "nalgebra",
 ]
 
 [[package]]
@@ -5475,7 +5474,7 @@ dependencies = [
  "firefly-error",
  "firefly-landing",
  "firefly-observability",
- "firefly-planner-runtime",
+ "firefly-odometry",
  "firefly-pubsub",
  "iceoryx2-bb-posix",
  "image",
@@ -7252,8 +7251,8 @@ dependencies = [
  "firefly-error",
  "firefly-map",
  "firefly-observability",
+ "firefly-odometry",
  "firefly-planner",
- "firefly-planner-runtime",
  "firefly-pubsub",
  "firefly-trajectory",
  "iceoryx2",
@@ -9563,8 +9562,8 @@ dependencies = [
  "firefly-config",
  "firefly-error",
  "firefly-observability",
+ "firefly-odometry",
  "firefly-planner",
- "firefly-planner-runtime",
  "firefly-pubsub",
  "firefly-trajectory",
  "iceoryx2",
