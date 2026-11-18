@@ -15,7 +15,7 @@ import tomllib
 import iceoryx2 as iox2
 import numpy as np
 
-from firefly_mujoco import ControlMessage, DepthImageMessage, OdomMessage, TraceContext
+from firefly_ipc.messages import ControlMessage, DepthImageMessage, OdomMessage, TraceContext
 
 from firefly_workspace.process import ManagedProcess, isolated_run
 

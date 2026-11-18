@@ -17,7 +17,15 @@ from firefly_workspace import startup
 import iceoryx2 as iox2
 import numpy as np
 
-from firefly_mujoco import (
+from firefly_mujoco import DroneEnv, build_scene, drone_pad, load_scene_name
+from firefly_ipc.messages import (
+    AIRFRAME_SERVICE_MAX,
+    CONTROL_SERVICE_MAX,
+    EVENT_ID_SENT_SAMPLE,
+    IMU_SERVICE_MAX,
+    PLANT_STATE_SERVICE_MAX,
+    TOPIC_GT,
+    TOPIC_IMU,
     AIRFRAME_TOPIC,
     CONTROL_TOPIC,
     LOG_LEVEL_ERROR,
@@ -27,37 +35,14 @@ from firefly_mujoco import (
     PLANT_STATE_TOPIC,
     AirframeMessage,
     ControlMessage,
-    DroneEnv,
     ImuMessage,
     LogMessage,
     OdomMessage,
     PlantStateMessage,
     TraceContext,
-    build_scene,
-    drone_pad,
-    load_scene_name,
 )
 
 from . import trace as ftrace
-
-#: 话题名（与 Rust `firefly-pubsub` 常量一致）
-TOPIC_IMU = "Firefly/Imu"
-TOPIC_GT = "Firefly/GroundTruth"
-#: 事件 id：「该话题有新样本」（与 Rust event::EVENT_ID_SENT_SAMPLE 一致）
-EVENT_ID_SENT_SAMPLE = 0
-
-
-#: IMU 服务订阅端上限（与 Rust `imu.rs: IMU_SERVICE_MAX` 同值；先创建方定上限，
-#: 后续 open 不得超限——sim / firefly-rootslam 启动顺序任意，两边必须一致）。
-IMU_SERVICE_MAX = 128
-
-#: 被控对象状态服务订阅端上限（与 Rust `plant.rs: PLANT_STATE_SERVICE_MAX` 同值；
-#: sim 先起时由本进程创建服务，评测订阅不得超限）。
-PLANT_STATE_SERVICE_MAX = 8
-#: 机体描述服务订阅端上限（与 Rust `plant.rs: AIRFRAME_SERVICE_MAX` 同值）。
-AIRFRAME_SERVICE_MAX = 4
-#: 飞控指令服务订阅端上限（与 Rust `control.rs: CONTROL_SERVICE_MAX` 同值）。
-CONTROL_SERVICE_MAX = 32
 
 #: 机体描述发布周期（秒）：1Hz 持续电平（iceoryx2 无 latch，靠重发保证晚订阅必收）。
 AIRFRAME_PERIOD = 1.0

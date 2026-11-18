@@ -11,7 +11,7 @@ fn workspace_python() -> Command {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.venv/bin/python");
     assert!(
         path.is_file(),
-        "prepare the workspace Python with uv sync --package firefly-sim"
+        "prepare the workspace Python with uv sync --package firefly-ipc"
     );
     Command::new(path)
 }
@@ -22,16 +22,17 @@ fn viz_python_layout_matches_rust_offsets_and_sizes() {
     use firefly_pubsub::activity::ActivityMessage;
     use firefly_pubsub::landing::LandingTargetMessage;
     use firefly_pubsub::log::LogMessage;
+    use firefly_pubsub::navigation::NavigationMessage;
     use firefly_pubsub::trajectory::PlannerStatusMessage;
     use firefly_pubsub::viz::{SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage};
     use std::mem::{offset_of, size_of};
 
     let script = r"
 import ctypes
-from firefly_mujoco.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage
-from firefly_mujoco.messages import PlannerStatusMessage, LandingTargetMessage, ActivityMessage
-from firefly_mujoco import LogMessage
-from firefly_mujoco.activity import LANDING
+from firefly_ipc.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage
+from firefly_ipc.messages import PlannerStatusMessage, LandingTargetMessage, ActivityMessage
+from firefly_ipc.messages import LogMessage, NavigationMessage, VIZ_MAX_PUBLISHERS
+from firefly_ipc.activity import LANDING
 for cls, fields in [
     (ScalarMessage, ['timestamp', 'scalars', 'sequence']),
     (VizMessage, ['timestamp', 'points', 'sequence']),
@@ -40,9 +41,11 @@ for cls, fields in [
     (LandingTargetMessage, ['timestamp', 'session', 'position', 'confidence', 'team', 'valid']),
     (ActivityMessage, ['timestamp', 'owner', 'sequence', 'mask', 'lease_ms']),
     (LogMessage, ['sim_time', 'sequence', 'dropped_records']),
+    (NavigationMessage, ['odom', 'translation', 'rotation', 'revision', 'external_map']),
 ]:
     print(ctypes.sizeof(cls), *(getattr(cls, name).offset for name in fields))
 print(SCALAR_BUFFER_SIZE)
+print(VIZ_MAX_PUBLISHERS)
 print(LANDING)
 ";
     let output = workspace_python().args(["-c", script]).output().unwrap();
@@ -93,7 +96,14 @@ print(LANDING)
             offset_of!(LogMessage, sim_time),
             offset_of!(LogMessage, sequence),
             offset_of!(LogMessage, dropped_records),
+            size_of::<NavigationMessage>(),
+            offset_of!(NavigationMessage, odom),
+            offset_of!(NavigationMessage, translation),
+            offset_of!(NavigationMessage, rotation),
+            offset_of!(NavigationMessage, revision),
+            offset_of!(NavigationMessage, external_map),
             SCALAR_BUFFER_SIZE,
+            firefly_pubsub::viz::VIZ_MAX_PUBLISHERS,
             firefly_pubsub::activity::LANDING as usize,
         ]
     );
@@ -104,7 +114,7 @@ import ctypes
 import sys
 import time
 import iceoryx2 as iox2
-from firefly_mujoco import OdomMessage, TraceContext
+from firefly_ipc.messages import OdomMessage, TraceContext
 
 iox2.set_log_level(iox2.LogLevel.Error)
 node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)

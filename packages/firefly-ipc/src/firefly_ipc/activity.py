@@ -1,7 +1,9 @@
 """Task-owned inference leases shared by native SIL and USB HIL."""
 import time
 
-import iceoryx2 as iox2
+# iceoryx2 exports ServiceName from its native extension.
+from iceoryx2 import ServiceName  # ty: ignore[missing-module-member]
+
 from .messages import ActivityMessage, TraceContext
 
 LANDING = 2
@@ -9,7 +11,14 @@ LANDING = 2
 
 class ActivityLease:
     def __init__(self, node, *, prefix="Firefly"):
-        service = node.service_builder(iox2.ServiceName.new(prefix + "/Activity")).publish_subscribe(ActivityMessage).user_header(TraceContext).subscriber_max_buffer_size(8).max_publishers(8).open_or_create()
+        service = (
+            node.service_builder(ServiceName.new(prefix + "/Activity"))
+            .publish_subscribe(ActivityMessage)
+            .user_header(TraceContext)
+            .subscriber_max_buffer_size(8)
+            .max_publishers(8)
+            .open_or_create()
+        )
         self.publisher = service.publisher_builder().create()
         self.owner, self.sequence, self.mask = time.time_ns(), 0, 0
         self.next_send = 0.

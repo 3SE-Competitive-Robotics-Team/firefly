@@ -15,7 +15,7 @@ import time
 import iceoryx2 as iox2
 import numpy as np
 from PIL import Image
-from firefly_mujoco import DownImageMessage, OdomMessage, TraceContext, LogMessage
+from firefly_ipc.messages import DownImageMessage, OdomMessage, TraceContext, LogMessage
 from firefly_mujoco.scene import resolve
 from firefly_workspace import workspace_root
 from firefly_workspace.process import ManagedProcess, isolated_run

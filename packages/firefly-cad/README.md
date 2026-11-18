@@ -60,7 +60,7 @@ uv run --package firefly-cad firefly-cad-build <场地.stp> --scene <赛季>@<�
 光学参数标定和 VIO 验证分别记录实测依据与实际资产指纹。
 
 ```bash
-uv run --all-packages --extra test pytest packages/firefly-cad/tests/ packages/firefly-mujoco/tests/ -q -p no:cacheprovider
+uv run --all-packages --extra test pytest packages/firefly-cad/tests/ apps/firefly-sim/tests/ -q -p no:cacheprovider
 uv run --all-packages --extra test pytest tests/system/test_rmuc_assets.py -q -p no:cacheprovider
 ```
 

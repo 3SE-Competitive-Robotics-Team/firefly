@@ -4,8 +4,10 @@ from pathlib import Path
 import time
 
 import iceoryx2 as iox2
-from firefly_mujoco.activity import ActivityLease, LANDING
-from firefly_mujoco.messages import AttitudeMessage, DownImageMessage, ScalarMessage, TraceContext
+from firefly_ipc.activity import ActivityLease, LANDING
+from firefly_ipc.messages import (
+    SCALAR_BUFFER_SIZE, VIZ_MAX_PUBLISHERS, AttitudeMessage, DownImageMessage, ScalarMessage, TraceContext,
+)
 from firefly_workspace.process import ManagedProcess, isolated_run
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,7 +28,7 @@ def test_owner_silence_releases_inference_and_can_wake_again():
 
             attitude = port("VioAttitude", AttitudeMessage, publish=True)
             images = port("CameraDown", DownImageMessage, publish=True)
-            scalars = port("VizScalars", ScalarMessage, capacity=1024, publishers=8)
+            scalars = port("VizScalars", ScalarMessage, capacity=SCALAR_BUFFER_SIZE, publishers=VIZ_MAX_PUBLISHERS)
             lease = ActivityLease(node)
             landing = ManagedProcess([str(ROOT / "target/release/landing"), "--simulation"], cwd=ROOT, env=os.environ.copy())
             beginning = time.monotonic()

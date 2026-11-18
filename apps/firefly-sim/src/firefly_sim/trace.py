@@ -19,7 +19,7 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.trace import Span, set_span_in_context
 
-from firefly_mujoco import TraceContext
+from firefly_ipc.messages import TraceContext
 
 _tracer: trace.Tracer
 _enabled: bool = True

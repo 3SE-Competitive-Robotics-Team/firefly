@@ -6,7 +6,7 @@ use std::cell::Cell;
 
 pub const VIZ_TOPIC: &str = "Firefly/Viz";
 
-/// 消息类型（`VizMessage::kind` 取值，与 `firefly_mujoco/messages.py` 一致）。
+/// 消息类型（`VizMessage::kind` 取值，与 `firefly_ipc/messages.py` 一致）。
 pub mod kind {
     pub const POSE: u32 = 1;
     pub const LINE_STRIP: u32 = 2;

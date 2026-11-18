@@ -46,7 +46,7 @@ Ground truth, local odometry and map odometry retain their original frames. Offl
 ## IPC topic catalog
 
 Rust layouts and capacities live in [firefly-pubsub](../crates/firefly-pubsub/src/lib.rs).
-Python wire mirrors live in [firefly-mujoco/messages.py](../packages/firefly-mujoco/src/firefly_mujoco/messages.py).
+Python wire mirrors live in [firefly-ipc/messages.py](../packages/firefly-ipc/src/firefly_ipc/messages.py).
 This catalog covers all production topic constants; test topics use isolated names.
 
 | Topic | Producers → consumers; purpose | Recording policy |
@@ -431,7 +431,7 @@ provide archived timing.
 ```bash
 cargo test -p mimir -p firefly-observability -p firefly-pubsub --all-targets
 cargo test -p firefly-pubsub --test python_interop -- --ignored
-uv run pytest packages/firefly-workspace/tests packages/firefly-mujoco/tests tests/test_observability_contract.py -q
+uv run pytest packages/firefly-workspace/tests tests/test_observability_contract.py -q
 uv run pytest tests/system/test_mimir.py -q -s
 ```
 

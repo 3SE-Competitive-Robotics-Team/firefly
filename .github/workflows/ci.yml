@@ -55,7 +55,9 @@ jobs:
 
       - name: Rust/Python IPC compatibility
         run: |
-          uv sync --package firefly-sim --no-dev
+          uv sync --locked --package firefly-ipc --no-dev
+          .venv/bin/python -c "import importlib.util; assert importlib.util.find_spec('mujoco') is None"
+          .venv/bin/python scripts/hil_hover_monitor.py --seconds 0
           cargo test -p firefly-pubsub --test python_interop -- --ignored
 
   python:

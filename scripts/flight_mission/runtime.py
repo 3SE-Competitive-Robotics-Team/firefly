@@ -8,16 +8,19 @@ import sys
 import time
 
 import iceoryx2 as iox2
-from firefly_mujoco import (
+from firefly_ipc.messages import (
+    SCALAR_BUFFER_SIZE,
+    VIZ_MAX_PUBLISHERS,
+    AttitudeMessage,
     LandingTargetMessage,
     LogMessage,
     OdomMessage,
     PlannerStatusMessage,
     ReferenceMessage,
+    ScalarMessage,
     TraceContext,
 )
-from firefly_mujoco.messages import AttitudeMessage, ScalarMessage
-from firefly_mujoco.activity import ActivityLease, LANDING
+from firefly_ipc.activity import ActivityLease, LANDING
 from firefly_mujoco.scene import load_scene_name
 from firefly_workspace import digest, load_toml
 from firefly_workspace.process import ManagedProcess, isolated_run
@@ -207,7 +210,7 @@ class FlightRunner:
             ("attitude", "VioAttitude", AttitudeMessage, 2, None),
             ("planner", "PlannerStatus", PlannerStatusMessage, 2, None),
             ("reference", "Reference", ReferenceMessage, 2, None),
-            ("scalars", "VizScalars", ScalarMessage, 1024, 8),
+            ("scalars", "VizScalars", ScalarMessage, SCALAR_BUFFER_SIZE, VIZ_MAX_PUBLISHERS),
         ]:
             self.subs[name] = (
                 service(topic, payload, capacity, publishers)
@@ -255,8 +258,8 @@ class FlightRunner:
             self.root / "apps/firefly-sim/src/firefly_sim/main.py",
             self.root / "packages/firefly-mujoco/src/firefly_mujoco/scene.py",
             self.root / "packages/firefly-mujoco/src/firefly_mujoco/env.py",
-            self.root / "packages/firefly-mujoco/src/firefly_mujoco/activity.py",
-            self.root / "packages/firefly-mujoco/src/firefly_mujoco/messages.py",
+            self.root / "packages/firefly-ipc/src/firefly_ipc/activity.py",
+            self.root / "packages/firefly-ipc/src/firefly_ipc/messages.py",
         ]
         if self.options.precision_land:
             paths += [self.root / "models/h-marker-yolo26n-cif-v1/manifest.json"]

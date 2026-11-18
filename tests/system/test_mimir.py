@@ -5,7 +5,6 @@ import os
 import signal
 import threading
 import time
-import ctypes
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -15,23 +14,14 @@ import pytest
 from rerun.chunk import RrdReader
 
 from firefly_workspace.process import ManagedProcess, isolated_run
-from firefly_mujoco import TraceContext
-from firefly_mujoco.messages import DownImageMessage, LandingTargetMessage, ScalarMessage, LogMessage, GrayImageMessage, VizMessage, OdomMessage
+from firefly_ipc.messages import (
+    SCALAR_BUFFER_SIZE, VIZ_MAX_PUBLISHERS, DownImageMessage, GrayImageMessage,
+    LandingTargetMessage, LogMessage, NavigationMessage, OdomMessage,
+    ScalarMessage, TraceContext, VizMessage,
+)
 from firefly_workspace import digest
 
 ROOT = Path(__file__).resolve().parents[2]
-
-
-class NavigationMessage(ctypes.Structure):
-    """Test publisher for firefly_pubsub::navigation::NavigationMessage; IPC verifies the ABI."""
-
-    _fields_ = [("odom", OdomMessage), ("translation", ctypes.c_double * 3),
-                ("rotation", ctypes.c_double * 4), ("revision", ctypes.c_uint64),
-                ("external_map", ctypes.c_uint64)]
-
-    @staticmethod
-    def type_name():
-        return "FireflyNavigationMessage"
 
 
 def publisher(node, topic, payload, capacity=None, publishers=None):
@@ -147,7 +137,7 @@ def test_ipc_recording_retains_every_sample(rate, repeat):
         cameras = []
         try:
             node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
-            port = publisher(node, "Firefly/VizScalars", ScalarMessage, 1024, 8)
+            port = publisher(node, "Firefly/VizScalars", ScalarMessage, SCALAR_BUFFER_SIZE, VIZ_MAX_PUBLISHERS)
             cameras = [publisher(node, "Firefly/Camera" + side, GrayImageMessage) for side in ("Left", "Right")]
             events = publisher(node, "Firefly/Log", LogMessage, 256, 10)
             navigation_port = publisher(node, "Firefly/Navigation", NavigationMessage)
@@ -204,7 +194,7 @@ def test_incomplete_recording_is_an_error(fault):
                 message = LogMessage(dropped_records=1)
                 port.loan_uninit().write_payload(message).send()
             else:
-                port = publisher(node, "Firefly/VizScalars", ScalarMessage, 1024, 8)
+                port = publisher(node, "Firefly/VizScalars", ScalarMessage, SCALAR_BUFFER_SIZE, VIZ_MAX_PUBLISHERS)
                 name = "unknown/value" if fault == "unknown_entity" else "fc/debug/altitude"
                 for seq in (0, 2):
                     port.loan_uninit().write_payload(scalar(name, 1., seq, [1.])).send()
@@ -224,7 +214,7 @@ def test_shutdown_drains_delivered_backlog(stream):
         ports = []
         try:
             if stream == "scalars":
-                ports = [publisher(node, "Firefly/VizScalars", ScalarMessage, 1024, 8)]
+                ports = [publisher(node, "Firefly/VizScalars", ScalarMessage, SCALAR_BUFFER_SIZE, VIZ_MAX_PUBLISHERS)]
                 count = 600
             else:
                 ports = [publisher(node, "Firefly/Log", LogMessage, 256, 10) for _ in range(3)]
@@ -439,7 +429,7 @@ def test_metric_cards_use_measurement_time_and_preserve_sources():
     with isolated_run(ROOT):
         process, path = recording()
         node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
-        port = publisher(node, "Firefly/VizScalars", ScalarMessage, 1024, 8)
+        port = publisher(node, "Firefly/VizScalars", ScalarMessage, SCALAR_BUFFER_SIZE, VIZ_MAX_PUBLISHERS)
         samples = [("fc/debug/tick_rate", 1., [999.5]),
                    ("rootslam/frame_processing_ms", 1.1, [6.5]),
                    ("vio/prediction/posterior_age_s", 1.2, [.012]),

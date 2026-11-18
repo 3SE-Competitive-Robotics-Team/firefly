@@ -8,6 +8,25 @@ from __future__ import annotations
 
 import ctypes
 
+#: 话题名（与 Rust `firefly-pubsub` 常量一致）
+TOPIC_IMU = "Firefly/Imu"
+TOPIC_GT = "Firefly/GroundTruth"
+#: 事件 id：「该话题有新样本」（与 Rust event::EVENT_ID_SENT_SAMPLE 一致）
+EVENT_ID_SENT_SAMPLE = 0
+
+
+#: IMU 服务订阅端上限（与 Rust `imu.rs: IMU_SERVICE_MAX` 同值；先创建方定上限，
+#: 后续 open 不得超限——sim / firefly-rootslam 启动顺序任意，两边必须一致）。
+IMU_SERVICE_MAX = 128
+
+#: 被控对象状态服务订阅端上限（与 Rust `plant.rs: PLANT_STATE_SERVICE_MAX` 同值；
+#: sim 先起时由本进程创建服务，评测订阅不得超限）。
+PLANT_STATE_SERVICE_MAX = 8
+#: 机体描述服务订阅端上限（与 Rust `plant.rs: AIRFRAME_SERVICE_MAX` 同值）。
+AIRFRAME_SERVICE_MAX = 4
+#: 飞控指令服务订阅端上限（与 Rust `control.rs: CONTROL_SERVICE_MAX` 同值）。
+CONTROL_SERVICE_MAX = 32
+
 #: 图像分辨率（与 Rust `firefly_pubsub::camera::IMAGE_WIDTH/HEIGHT` 一致）
 IMAGE_WIDTH = 320
 IMAGE_HEIGHT = 240
@@ -178,7 +197,7 @@ class ReferenceMessage(ctypes.Structure):
 
 
 class OdomMessage(ctypes.Structure):
-    """里程计：与 Rust `OdomMessage`（`FireflyOdomMessage`）一致。"""
+    """里程计的位置与速度在父坐标系中表达，姿态为机体到父系的 Hamilton xyzw 四元数。"""
 
     _fields_ = [
         ("timestamp", ctypes.c_double),
@@ -200,12 +219,27 @@ class OdomMessage(ctypes.Structure):
         return "FireflyOdomMessage"
 
 
+class NavigationMessage(ctypes.Structure):
+    """同一次提交的里程计、map←odom 变换和修正版本。"""
+
+    _fields_ = [
+        ("odom", OdomMessage),
+        ("translation", ctypes.c_double * 3),
+        ("rotation", ctypes.c_double * 4),
+        ("revision", ctypes.c_uint64),
+        ("external_map", ctypes.c_uint64),
+    ]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflyNavigationMessage"
+
+
 class PlantStateMessage(ctypes.Structure):
     """被控对象状态（真值，每物理步）：与 Rust `PlantStateMessage`（`FireflyPlantStateMessage`）一致。
 
     姿态为**机体→世界** Hamilton 四元数 `[x, y, z, w]`（与 `firefly-flight` 的
-    `QuadState::attitude` 同约定）；角速度为机体系。注意与 `OdomMessage` 的
-    JPL `q_GtoI` 不同约定，不得混用。
+    `QuadState::attitude` 同约定）；角速度为机体系。
     """
 
     _fields_ = [
@@ -360,6 +394,7 @@ BINS_MAX = 64
 SCALARS_MAX = 4
 #: 1kHz IMU 双标量与相机诊断突发的接收容量，与 Rust SCALAR_BUFFER_SIZE 一致。
 SCALAR_BUFFER_SIZE = 1024
+VIZ_MAX_PUBLISHERS = 8
 
 
 class AttitudeMessage(ctypes.Structure):

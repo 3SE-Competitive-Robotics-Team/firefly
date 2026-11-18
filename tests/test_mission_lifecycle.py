@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from flight_mission.config import Phase, parse_args
 from flight_mission.gates import Arrival, VisualAcquisition
 from flight_mission.runtime import FlightRunner
-from firefly_mujoco import LandingTargetMessage, OdomMessage
+from firefly_ipc.messages import LandingTargetMessage, OdomMessage
 
 
 def test_options_are_immutable_and_route_offsets_own_their_values():

@@ -12,7 +12,7 @@ from flight_mission.config import default_goal, parse_args, route_points
 from flight_mission.gates import at_goal, fresh_target
 from flight_mission.recording import Evidence
 from flight_mission.verification import evaluate
-from firefly_mujoco import LandingTargetMessage, OdomMessage
+from firefly_ipc.messages import LandingTargetMessage, OdomMessage
 from firefly_mujoco.scene import resolve
 
 

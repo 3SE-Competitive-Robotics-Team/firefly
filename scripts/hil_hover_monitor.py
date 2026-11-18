@@ -3,7 +3,7 @@
 只订阅主机侧话题，不参与控制；用于确认 HIL 闭环确实在飞，而 RRD 仍是
 原始证据。运行：
 
-    uv run python scripts/hil_hover_monitor.py --seconds 40
+    uv run --isolated --package firefly-ipc --no-dev python scripts/hil_hover_monitor.py --seconds 40
 """
 
 from __future__ import annotations
@@ -12,8 +12,10 @@ import argparse
 import time
 
 import iceoryx2 as iox2
-from firefly_mujoco import ControlMessage, OdomMessage, TraceContext
-from firefly_mujoco.messages import ScalarMessage
+from firefly_ipc.messages import (
+    CONTROL_SERVICE_MAX, CONTROL_TOPIC, SCALAR_BUFFER_SIZE, TOPIC_GT, VIZ_MAX_PUBLISHERS,
+    ControlMessage, OdomMessage, ScalarMessage, TraceContext,
+)
 
 MODE_NAMES = {
     0: "DISARMED",
@@ -26,14 +28,18 @@ MODE_NAMES = {
 }
 
 
-def open_sub(node, topic, payload, capacity=2):
-    service = (
+def open_sub(node, topic, payload, capacity=None, *, publishers=None):
+    builder = (
         node.service_builder(iox2.ServiceName.new(topic))
         .publish_subscribe(payload)
         .user_header(TraceContext)
-        .open_or_create()
     )
-    return service.subscriber_builder().buffer_size(capacity).create()
+    if capacity is not None:
+        builder = builder.subscriber_max_buffer_size(capacity)
+    if publishers is not None:
+        builder = builder.max_publishers(publishers)
+    service = builder.open_or_create()
+    return service.subscriber_builder().buffer_size(capacity or 2).create()
 
 
 def main() -> None:
@@ -43,10 +49,11 @@ def main() -> None:
     args = parser.parse_args()
     iox2.set_log_level(iox2.LogLevel.Error)
     node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
-    gt = open_sub(node, "Firefly/GroundTruth", OdomMessage)
+    gt = open_sub(node, TOPIC_GT, OdomMessage)
     odom = open_sub(node, "Firefly/Odometry", OdomMessage)
-    control = open_sub(node, "Firefly/Control", ControlMessage, 32)
-    scalars = open_sub(node, "Firefly/VizScalars", ScalarMessage, 1024)
+    control = open_sub(node, CONTROL_TOPIC, ControlMessage, CONTROL_SERVICE_MAX)
+    scalars = open_sub(node, "Firefly/VizScalars", ScalarMessage, SCALAR_BUFFER_SIZE,
+                       publishers=VIZ_MAX_PUBLISHERS)
     started = time.monotonic()
     next_print = started
     altitude = 0.0

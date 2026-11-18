@@ -1,41 +1,6 @@
-"""firefly-mujoco：无人机 MuJoCo 物理环境库。
-
-提供 [`DroneEnv`](firefly_mujoco.env.DroneEnv)（被控对象：物理步进 +
-IMU 提取 + 施加旋翼推力）与跨语言消息契约
-[`messages`](firefly_mujoco.messages)。控制律不在本库（唯一实现在 `firefly-flight`）。
-"""
+"""MuJoCo 物理环境与场景构建。"""
 
 from .env import DroneEnv
-from .messages import (
-    AIRFRAME_TOPIC,
-    CONTROL_TOPIC,
-    LOG_LEVEL_DEBUG,
-    LOG_LEVEL_ERROR,
-    LOG_LEVEL_INFO,
-    LOG_LEVEL_TRACE,
-    LOG_LEVEL_WARN,
-    LOG_TEXT_MAX,
-    LOG_TAG_MAX,
-    LOG_TOPIC,
-    PLANT_STATE_TOPIC,
-    ActivityMessage,
-    AirframeMessage,
-    ControlMessage,
-    DepthImageMessage,
-    DownImageMessage,
-    LandingTargetMessage,
-    GrayImageMessage,
-    IMAGE_HEIGHT,
-    IMAGE_SIZE,
-    IMAGE_WIDTH,
-    ImuMessage,
-    LogMessage,
-    OdomMessage,
-    PlantStateMessage,
-    PlannerStatusMessage,
-    ReferenceMessage,
-    TraceContext,
-)
 from .scene import (
     DEFAULT_SCENE, PAD_CLEARANCE, SCENES, Scene, build_scene, drone_pad, load_scene_name,
     resolve as resolve_scene,
@@ -51,32 +16,4 @@ __all__ = [
     "Scene",
     "drone_pad",
     "PAD_CLEARANCE",
-    "IMAGE_WIDTH",
-    "IMAGE_HEIGHT",
-    "IMAGE_SIZE",
-    "TraceContext",
-    "ImuMessage",
-    "GrayImageMessage",
-    "DepthImageMessage",
-    "ActivityMessage",
-    "DownImageMessage",
-    "LandingTargetMessage",
-    "ReferenceMessage",
-    "OdomMessage",
-    "PlantStateMessage",
-    "PlannerStatusMessage",
-    "AirframeMessage",
-    "ControlMessage",
-    "LogMessage",
-    "LOG_TOPIC",
-    "PLANT_STATE_TOPIC",
-    "AIRFRAME_TOPIC",
-    "CONTROL_TOPIC",
-    "LOG_LEVEL_ERROR",
-    "LOG_LEVEL_WARN",
-    "LOG_LEVEL_INFO",
-    "LOG_LEVEL_DEBUG",
-    "LOG_LEVEL_TRACE",
-    "LOG_TAG_MAX",
-    "LOG_TEXT_MAX",
 ]
