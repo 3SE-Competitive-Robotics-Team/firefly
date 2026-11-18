@@ -103,5 +103,4 @@ Complete dataset runs additionally evaluate map construction, loop quality, traj
 coverage and elapsed time. [Issue #149](https://github.com/3SE-Competitive-Robotics-Team/firefly/issues/149)
 tracks the measured performance, convergence and accuracy work.
 
-See [architecture](../../docs/architecture.md#basalt-与-rootslam-独立应用) for state
-ownership and the live VIO/planner data flow.
+See [architecture](../../docs/architecture.md) for the live VIO/planner data flow.

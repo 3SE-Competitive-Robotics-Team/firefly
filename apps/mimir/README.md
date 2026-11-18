@@ -17,4 +17,4 @@ The shared layout is embedded in new recordings; loading its RBL explicitly also
 viewer layout. See the [viewer layout contract](../../docs/observability.md#default-viewer-layout).
 
 Follow [observability](../../docs/observability.md) when adding or changing observations.
-Build and lifecycle rules are in [development](../../docs/development.md).
+See the [development guide](../../docs/development.md#构建) for the workspace build.

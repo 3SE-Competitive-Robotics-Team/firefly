@@ -257,8 +257,8 @@ uv run python apps/rootslam/export_rrd.py --problem logs/tumvi_room2/float64/glo
 The default IPC configuration provides local VIO to flight control and planner.
 Optional sparse mapping maintains its own posterior map; planner owns dense depth
 fusion. `--external-localization` assigns corrected-odometry and navigation
-publication to the localization process. Data flow and state ownership are in
-[architecture](../../docs/architecture.md#basalt-与-rootslam-独立应用).
+publication to the localization process. The online data flow is shown in
+[architecture](../../docs/architecture.md).
 
 ```bash
 cargo test -p firefly-calibration -p firefly-basalt -p firefly-rootslam-mapping -p firefly-rootslam --all-targets
@@ -266,6 +266,6 @@ cargo clippy -p firefly-calibration -p firefly-basalt -p firefly-rootslam-mappin
 uv run python -B -m unittest discover -s apps/rootslam/tests -p test_export_rrd.py
 ```
 
-Full-workspace checks, process cleanup and flight validation are described in
-[development](../../docs/development.md#tests). Observation ownership and recorder
+Full-workspace checks are in the
+[development guide](../../docs/development.md#测试). Observation ownership and recorder
 budgets are described in [observability](../../docs/observability.md).

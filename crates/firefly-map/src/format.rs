@@ -1,4 +1,4 @@
-//! `FFMap` 文本文件格式见仓库 `docs/architecture.md#ffmap`。
+//! `FFMap` 行式文本格式。`MapFile` 读写栅格几何、占据格心、装饰体素及动态障碍航点。
 
 use std::fs;
 
@@ -133,8 +133,7 @@ impl MapFile {
     /// `InvalidData`：占据体素超出地图范围。
     /// 转占据栅格；`obstacles_inflation` 为障碍膨胀半径（米）。
     ///
-    /// 该半径决定 `is_occupied_inflated` 的判据，A* 搜索、细检与代价阈值必须与它一致，
-    /// 否则会出现「全局搜得到、局部飞不了」的路径（见 `docs/architecture.md` 规划层）。
+    /// A* 搜索、碰撞检查与代价计算使用同一膨胀半径。
     pub fn to_grid_map(&self, obstacles_inflation: f64) -> Result<GridMap> {
         let origin = Vector3::new(self.origin[0], self.origin[1], self.origin[2]);
         let mut map = GridMapBuilder::new(self.resolution, self.dims)

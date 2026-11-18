@@ -1,5 +1,5 @@
 //! 几何驱动的双目深度退化：视差量化、相关破面与边缘位置抖动。
-//! 模型依据及未建模的物理因素见 `docs/architecture.md#mapping`；默认值不是实机标定。
+//! [`DepthNoiseOptions`] 给出仿真参数、单位与取值依据。
 
 use firefly_error::{Error, ErrorKind, Result};
 use rand::{RngExt, SeedableRng, rngs::StdRng};

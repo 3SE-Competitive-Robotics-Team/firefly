@@ -8,7 +8,7 @@ logs/<yyyymmdd_hhmmss>/log.rrd
 ```
 
 `logs/` 位于 Firefly 安装根目录，开发机默认是仓库根目录；根目录解析沿用
-[运行期路径约定](development.md#机载部署)。时间目录由 Mimir 读取系统当前本地时区生成，
+[firefly-config 的路径解析](../crates/firefly-config/src/lib.rs)。时间目录由 Mimir 读取系统当前本地时区生成，
 精度为秒，例如 `logs/20261115_093005/log.rrd`。Rust 使用
 `jiff::ZonedDateTime::now().strftime("%Y%m%d_%H%M%S")`；时区遵循系统设置和 `TZ`。
 Jiff 的本地时区行为见[官方文档](https://docs.rs/jiff/1.0.0/jiff/struct.ZonedDateTime.html#method.now)。

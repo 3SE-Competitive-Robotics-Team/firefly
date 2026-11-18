@@ -17,8 +17,6 @@ uv run --package firefly-cad firefly-cad-build <场地.stp> --scene <赛季>@<�
 若发行版 Blender 缺 NumPy，构建器使用 `uv` 将匹配 Python ABI 的 NumPy
 安装到 `derived/blender-python-*`，由导出子进程的路径配置使用。
 
-Rust 应用统一用 `cargo xtask release` 构建；物理资产检查、离线图像采集、
-建库和任务验收各自使用 [开发指南](../../docs/development.md#assets) 中的入口。
 飞行指令由 scripts/flight.py 执行，命令结果与飞行质量分别核对；
 运行证据遵循 [Mimir 录制规则](../../docs/mimir.md)，保存为本地时间的
 `logs/yyyymmdd_hhmmss/log.rrd`。几何、建库、飞行和在线定位各自验收。
@@ -63,7 +61,7 @@ Rust 应用统一用 `cargo xtask release` 构建；物理资产检查、离线�
 
 ```bash
 uv run --all-packages --extra test pytest packages/firefly-cad/tests/ packages/firefly-mujoco/tests/ -q -p no:cacheprovider
-FIREFLY_RUN_RMUC_ASSETS=1 uv run --all-packages --extra test pytest tests/system/test_rmuc_assets.py -q -p no:cacheprovider
+uv run --all-packages --extra test pytest tests/system/test_rmuc_assets.py -q -p no:cacheprovider
 ```
 
-系统验收边界见 [测试契约](../../docs/development.md#tests)。
+工作区测试命令见[开发指南](../../docs/development.md#测试)。

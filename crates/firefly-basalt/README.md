@@ -11,5 +11,5 @@ contracts; [dataset evaluation](../../apps/rootslam/README.md) measures applicat
 ## References
 
 - [Original Basalt source](https://gitlab.com/VladyslavUsenko/basalt)
-- [Workspace architecture](../../docs/architecture.md#basalt-与-rootslam-独立应用)
+- [Workspace architecture](../../docs/architecture.md)
 - [License index](../../docs/licenses/README.md)

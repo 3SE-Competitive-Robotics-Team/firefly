@@ -1,8 +1,8 @@
 # Observability
 
 This is the single source of policy for observation registration, publishing, recording and validation.
-See [architecture](architecture.md) for algorithm and coordinate responsibilities and
-[development](development.md) for builds and process ownership. Defaults and limits live in source and configuration.
+See [architecture](architecture.md) for the system data flow and
+[development](development.md) for build, run and test commands. Defaults and limits live in source and configuration.
 
 ## Registration and change process
 
@@ -430,9 +430,9 @@ provide archived timing.
 
 ```bash
 cargo test -p mimir -p firefly-observability -p firefly-pubsub --all-targets
-FIREFLY_TEST_PYTHON="$PWD/.venv/bin/python" cargo test -p firefly-pubsub --test python_interop -- --ignored
+cargo test -p firefly-pubsub --test python_interop -- --ignored
 uv run pytest packages/firefly-workspace/tests packages/firefly-mujoco/tests tests/test_observability_contract.py -q
-FIREFLY_RUN_TELEMETRY_LOAD=1 uv run pytest tests/system/test_mimir.py -q -s
+uv run pytest tests/system/test_mimir.py -q -s
 ```
 
 The IPC load test requires release mimir and an idle workspace. It checks exact values and timestamps

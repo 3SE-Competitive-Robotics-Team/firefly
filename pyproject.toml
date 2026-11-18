@@ -1,4 +1,4 @@
-# Python workspace 聚合包；目录职责与开发入口见 README.md。
+# Python workspace 聚合包。
 
 [project]
 name = "firefly"
