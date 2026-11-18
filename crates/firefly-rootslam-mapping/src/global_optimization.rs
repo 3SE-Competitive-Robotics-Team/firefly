@@ -1701,12 +1701,16 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ROOTSLAM_LINEAR_SYSTEM_ARCHIVE from an actual failed solve"]
+    #[ignore = "requires datasets/rootslam-reference/linear_system.json from a failed f32 solve"]
     fn frozen_single_precision_system_meets_unchanged_gradient_criterion() {
-        let path = std::env::var_os("ROOTSLAM_LINEAR_SYSTEM_ARCHIVE").unwrap();
-        let archive: serde_json::Value =
-            serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(path).unwrap()))
-                .unwrap();
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../datasets/rootslam-reference/linear_system.json"
+        );
+        let archive: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(
+            std::fs::File::open(path).expect(path),
+        ))
+        .unwrap();
         let integer = |v: &serde_json::Value| usize::try_from(v.as_u64().unwrap()).unwrap();
         #[expect(
             clippy::cast_possible_truncation,

@@ -7,8 +7,17 @@ use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::Subscriber;
 
+fn workspace_python() -> Command {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.venv/bin/python");
+    assert!(
+        path.is_file(),
+        "prepare the workspace Python with uv sync --package firefly-sim"
+    );
+    Command::new(path)
+}
+
 #[test]
-#[ignore = "requires FIREFLY_TEST_PYTHON pointing to the synced workspace Python"]
+#[ignore = "requires the synced workspace Python environment"]
 fn viz_python_layout_matches_rust_offsets_and_sizes() {
     use firefly_pubsub::activity::ActivityMessage;
     use firefly_pubsub::landing::LandingTargetMessage;
@@ -17,7 +26,6 @@ fn viz_python_layout_matches_rust_offsets_and_sizes() {
     use firefly_pubsub::viz::{SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage};
     use std::mem::{offset_of, size_of};
 
-    let python = std::env::var("FIREFLY_TEST_PYTHON").expect("workspace Python path");
     let script = r"
 import ctypes
 from firefly_mujoco.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage
@@ -37,7 +45,7 @@ for cls, fields in [
 print(SCALAR_BUFFER_SIZE)
 print(LANDING)
 ";
-    let output = Command::new(python).args(["-c", script]).output().unwrap();
+    let output = workspace_python().args(["-c", script]).output().unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -130,10 +138,9 @@ raise RuntimeError('IPC roundtrip timed out')
 ";
 
 #[test]
-#[ignore = "requires FIREFLY_TEST_PYTHON pointing to the synced workspace Python"]
+#[ignore = "requires the synced workspace Python environment"]
 fn cif_down_image_roundtrip_preserves_every_pixel_and_dimensions() {
     use firefly_pubsub::camera::{DOWN_HEIGHT, DOWN_SENSOR_ID, DOWN_WIDTH, DownImageMessage};
-    let python = std::env::var("FIREFLY_TEST_PYTHON").expect("workspace Python path");
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -146,7 +153,7 @@ fn cif_down_image_roundtrip_preserves_every_pixel_and_dimensions() {
     let peer = PEER.replace("OdomMessage", "DownImageMessage")
         .replace("assert msg.timestamp == 12.5 and msg.position_x == 2.5", "assert msg.timestamp == 12.5 and (msg.width, msg.height, msg.sensor_id) == (352, 288, 3)")
         .replace("assert msg.velocity_y == -3.25 and msg.is_initialized", "assert bytes(msg.data) == bytes(range(256)) * 396");
-    let mut child = Command::new(python)
+    let mut child = workspace_python()
         .args(["-c", &peer, &request, &response])
         .spawn()
         .unwrap();
@@ -196,9 +203,8 @@ fn cif_down_image_roundtrip_preserves_every_pixel_and_dimensions() {
 }
 
 #[test]
-#[ignore = "requires FIREFLY_TEST_PYTHON pointing to the synced workspace Python"]
+#[ignore = "requires the synced workspace Python environment"]
 fn rust_python_payload_header_and_event_roundtrip() {
-    let python = std::env::var("FIREFLY_TEST_PYTHON").expect("workspace Python path");
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -209,7 +215,7 @@ fn rust_python_payload_header_and_event_roundtrip() {
     let publisher = Publisher::<OdomMessage>::with_topic_notify(&node, &request).unwrap();
     let subscriber = Subscriber::<OdomMessage>::with_topic(&node, &response).unwrap();
     let listener = TopicListener::with_topic(&node, &response).unwrap();
-    let mut child = Command::new(python)
+    let mut child = workspace_python()
         .args(["-c", PEER, &request, &response])
         .spawn()
         .unwrap();
@@ -252,9 +258,8 @@ fn rust_python_payload_header_and_event_roundtrip() {
 }
 
 #[test]
-#[ignore = "requires FIREFLY_TEST_PYTHON pointing to the synced workspace Python"]
+#[ignore = "requires the synced workspace Python environment"]
 fn reference_alignment_snapshot_roundtrip() {
-    let python = std::env::var("FIREFLY_TEST_PYTHON").expect("workspace Python path");
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -269,7 +274,7 @@ fn reference_alignment_snapshot_roundtrip() {
     .unwrap();
     let listener = TopicListener::with_topic(&node, &response).unwrap();
     let peer = PEER.replace("OdomMessage", "ReferenceMessage").replace("msg.is_initialized", "msg.has_alignment == 1 and list(msg.alignment_translation) == [10., 20., 30.] and msg.alignment_rotation[3] == 1. and msg.goal_timestamp == 123.");
-    let mut child = Command::new(python)
+    let mut child = workspace_python()
         .args(["-c", &peer, &request, &response])
         .spawn()
         .unwrap();

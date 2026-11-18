@@ -337,10 +337,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires FIREFLY_LANDING_FRAMES containing recorded CIF 14.png/15.png/16.png"]
     fn recorded_glossy_h_keeps_its_four_corners_during_approach() {
         use firefly_pubsub::camera::{DOWN_HEIGHT, DOWN_WIDTH};
-        let directory = std::path::PathBuf::from(std::env::var("FIREFLY_LANDING_FRAMES").unwrap());
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/reference/flight3");
         for name in ["14.png", "15.png", "16.png"] {
             let image = image::open(directory.join(name)).unwrap().to_luma8();
             let corners = refine_corners(

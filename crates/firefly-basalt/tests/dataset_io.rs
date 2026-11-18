@@ -42,28 +42,9 @@ impl Drop for Fixture {
         std::fs::remove_dir_all(&self.0).unwrap();
     }
 }
-fn cpp_reference(kind: &str, fixture: &Fixture, reader: &dyn DatasetIoInterface) {
-    let Ok(binary) = std::env::var("BASALT_DATASET_REFERENCE") else {
-        return;
-    };
-    let output = std::process::Command::new(binary)
-        .arg(kind)
-        .arg(&fixture.0)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let expected: serde_json::Value = serde_json::from_str(
-        stdout
-            .lines()
-            .find_map(|s| s.strip_prefix("REFERENCE_JSON="))
-            .unwrap(),
-    )
-    .unwrap();
+fn check_cpp_reference(kind: &str, reader: &dyn DatasetIoInterface) {
+    let reference: serde_json::Value =
+        serde_json::from_str(include_str!("reference/dataset_io.json")).unwrap();
     let shared = reader.data().unwrap();
     let data = shared.lock().unwrap();
     let timestamps = data.image_timestamps();
@@ -89,7 +70,7 @@ fn cpp_reference(kind: &str, fixture: &Fixture, reader: &dyn DatasetIoInterface)
     let images:Vec<_>=timestamps.iter().map(|t|data.image_data(*t).unwrap().iter().map(|im|im.img.as_ref().map_or(serde_json::Value::Null,|pixels|serde_json::json!({"width":pixels.w,"height":pixels.h,"pixels":pixels.data(),"exposure":im.exposure}))).collect::<Vec<_>>()).collect();
     assert_eq!(
         serde_json::json!({"timestamps":timestamps,"gt_timestamps":data.gt_timestamps(),"gyro":gyro,"accel":accel,"poses":poses,"images":images}),
-        expected
+        reference[kind]
     );
 }
 #[test]
@@ -127,7 +108,7 @@ fn euroc_loads_stereo_imu_exposure_and_selects_groundtruth() {
     assert_eq!(imgs[0].exposure, 0.005);
     assert!(data.image_data(200).unwrap()[1].img.is_none());
     drop(data);
-    cpp_reference("euroc", &f, &reader);
+    check_cpp_reference("euroc", &reader);
     {
         let mut data = shared.lock().unwrap();
         data.image_timestamps_mut().retain(|&time| time == 200);
@@ -145,7 +126,7 @@ fn euroc_loads_stereo_imu_exposure_and_selects_groundtruth() {
     assert!(reader.data().is_none());
     let mut mocap = EurocIo::new(true);
     mocap.read(&f.0).unwrap();
-    cpp_reference("mocap", &f, &mocap);
+    check_cpp_reference("mocap", &mocap);
     assert_eq!(
         mocap.data().unwrap().lock().unwrap().gt_timestamps(),
         &[110]
@@ -210,7 +191,7 @@ fn uzh_preserves_blue_channel_seconds_and_xyzw_quaternion() {
     );
     assert_eq!(data.gt_pose_data()[0].rotation.quaternion().k.abs(), 1.);
     drop(data);
-    cpp_reference("uzh", &f, &reader);
+    check_cpp_reference("uzh", &reader);
     f.text("groundtruth.txt", "1.25 7 8 9 0 0 1 0\n");
     reader.read(&f.0).unwrap();
     let shared = reader.data().unwrap();
@@ -260,5 +241,5 @@ fn kitti_reads_indexed_images_and_row_major_poses() {
     assert!(data.gyro_data().is_empty());
     assert!(data.image_data(100_000_000).unwrap()[0].img.is_none());
     drop(data);
-    cpp_reference("kitti", &f, &reader);
+    check_cpp_reference("kitti", &reader);
 }

@@ -1,6 +1,5 @@
 //! Differential test against the fixed upstream C++ bodies, not a Rust-generated baseline.
-//! Build the oracle with tests/reference/generate.py, then set `FIREFLY_EGO_MAP_REFERENCE`
-//! to its executable and explicitly run this ignored test.
+//! Build the oracle with tests/reference/generate.py, then explicitly run this ignored test.
 use firefly_ego_map::{DepthImage, GridMap, MappingParameters};
 use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3};
 use std::fmt::Write as _;
@@ -86,10 +85,10 @@ fn snapshot(map: &GridMap) -> Vec<f64> {
 }
 
 #[test]
-#[ignore = "requires pinned upstream C++ oracle via FIREFLY_EGO_MAP_REFERENCE"]
+#[ignore = "requires the pinned upstream C++ oracle built by tests/reference/generate.py"]
 fn cpp_local_mapping_matches_each_update() {
-    let binary = std::env::var_os("FIREFLY_EGO_MAP_REFERENCE")
-        .expect("build tests/reference/generate.py and provide FIREFLY_EGO_MAP_REFERENCE");
+    let binary = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/ego-map-reference/reference");
     for variant in 0..3 {
         let config = MappingParameters {
             resolution: 0.5,
@@ -156,7 +155,7 @@ fn cpp_local_mapping_matches_each_update() {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .unwrap();
+            .expect("start the C++ oracle built by tests/reference/generate.py");
         let mut stdin = child.stdin.take().unwrap();
         // Drain stdout concurrently with input to avoid filling either OS pipe.
         let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));

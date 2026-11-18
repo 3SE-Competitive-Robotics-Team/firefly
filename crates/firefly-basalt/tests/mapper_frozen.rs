@@ -59,19 +59,18 @@ fn difference(actual: &Value, expected: &Value) -> (f64, usize) {
 }
 
 #[test]
-#[ignore = "requires BASALT_SOURCE, BASALT_MAPPER_CACHE and BASALT_MAPPER_FROZEN"]
+#[ignore = "requires the upstream fixture in datasets/basalt-reference/mapper"]
 fn frozen_original_tracks_match_setup_and_optimizer_stages() {
-    let root = PathBuf::from(std::env::var_os("BASALT_SOURCE").unwrap());
-    let cache = PathBuf::from(std::env::var_os("BASALT_MAPPER_CACHE").unwrap());
-    let fixture = PathBuf::from(std::env::var_os("BASALT_MAPPER_FROZEN").unwrap());
+    let root =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../datasets/basalt-reference/mapper");
+    let cache = root.join("cache");
+    let fixture = root.join("frozen.json");
     let expected: Value =
         serde_json::from_reader(BufReader::new(File::open(fixture).unwrap())).unwrap();
     let mut config = VioConfig::default();
-    config
-        .load(root.join("data/tumvi_512_config.json"))
-        .unwrap();
+    config.load(root.join("tumvi_512_config.json")).unwrap();
     let mut mapper =
-        Mapper::load_data(&root.join("data/tumvi_512_ds_calib.json"), &cache, &config).unwrap();
+        Mapper::load_data(&root.join("tumvi_512_ds_calib.json"), &cache, &config).unwrap();
     let mut actual = json!({"loaded":snapshot(&mapper)});
     for frame in expected["corners"].as_array().unwrap() {
         let image = TimeCamId {

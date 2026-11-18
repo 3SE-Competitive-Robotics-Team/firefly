@@ -1,0 +1,35 @@
+{
+  "source": "Basalt 0f3b2b52, basalt-headers aa441ba3, OpenCV 4.12.0; Firefly probe 7ffdb4d:crates/firefly-basalt/tests/reference/dataset_io.cpp",
+  "euroc": {
+    "accel":[[90,4.0,5.0,6.0]],
+    "gt_timestamps":[100],
+    "gyro":[[90,1.0,2.0,3.0]],
+    "images":[[{"exposure":0.005,"height":1,"pixels":[256,65280],"width":2},{"exposure":0.0,"height":1,"pixels":[123,65535],"width":2}],[{"exposure":0.0,"height":1,"pixels":[256,65280],"width":2},null]],
+    "poses":[[1.0,2.0,3.0,0.0,0.0,0.0,1.0]],
+    "timestamps":[100,200]
+  },
+  "mocap": {
+    "accel":[[90,4.0,5.0,6.0]],
+    "gt_timestamps":[110],
+    "gyro":[[90,1.0,2.0,3.0]],
+    "images":[[{"exposure":0.005,"height":1,"pixels":[256,65280],"width":2},{"exposure":0.0,"height":1,"pixels":[123,65535],"width":2}],[{"exposure":0.0,"height":1,"pixels":[256,65280],"width":2},null]],
+    "poses":[[4.0,5.0,6.0,0.0,0.0,0.0,1.0]],
+    "timestamps":[100,200]
+  },
+  "uzh": {
+    "accel":[[1200000000,4.0,5.0,6.0]],
+    "gt_timestamps":[1250000000],
+    "gyro":[[1200000000,1.0,2.0,3.0]],
+    "images":[[{"exposure":0.0,"height":1,"pixels":[8448],"width":1},{"exposure":0.0,"height":1,"pixels":[256,65280],"width":2}]],
+    "poses":[[7.0,8.0,9.0,0.0,0.0,1.0,0.0]],
+    "timestamps":[1250000000]
+  },
+  "kitti": {
+    "accel":[],
+    "gt_timestamps":[0],
+    "gyro":[],
+    "images":[[{"exposure":0.0,"height":1,"pixels":[256,65280],"width":2},{"exposure":0.0,"height":1,"pixels":[256,65280],"width":2}],[null,null]],
+    "poses":[[2.0,3.0,4.0,0.0,0.0,0.0,1.0]],
+    "timestamps":[0,100000000]
+  }
+}
