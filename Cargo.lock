@@ -123,23 +123,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aliked"
-version = "0.1.0"
-dependencies = [
- "fastrace",
- "firefly-config",
- "firefly-error",
- "firefly-observability",
- "firefly-pubsub",
- "firefly-vision-map",
- "firefly-vision-match",
- "iceoryx2",
- "log",
- "nalgebra",
- "ort",
-]
-
-[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3804,24 +3787,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "firefly-vision-map"
-version = "0.1.0"
-dependencies = [
- "firefly-error",
-]
-
-[[package]]
-name = "firefly-vision-match"
-version = "0.1.0"
-dependencies = [
- "firefly-base",
- "firefly-error",
- "log",
- "nalgebra",
- "purecv",
-]
-
-[[package]]
 name = "fixed"
 version = "1.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5665,26 +5630,6 @@ checksum = "3c8469b4a23b962c1396b9b451dda50ef5b283e8dd309d69033475fa9b334324"
 dependencies = [
  "libc",
  "pkg-config",
-]
-
-[[package]]
-name = "lightglue"
-version = "0.1.0"
-dependencies = [
- "fastrace",
- "firefly-base",
- "firefly-config",
- "firefly-error",
- "firefly-observability",
- "firefly-pubsub",
- "firefly-vision-map",
- "firefly-vision-match",
- "iceoryx2",
- "log",
- "nalgebra",
- "ort",
- "serde",
- "serde_json",
 ]
 
 [[package]]

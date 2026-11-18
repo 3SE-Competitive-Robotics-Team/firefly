@@ -74,7 +74,7 @@ This catalog covers all production topic constants; test topics use isolated nam
 | `Firefly/Goal` | ffctl → planner | Position and optional terminal yaw in local odom coordinates; yaw in radians, CLI in degrees |
 | `Firefly/MandatoryStop` | external tools → planner | Stop command; outcome in planner state and logs |
 | `Firefly/Trajectory`, `Firefly/PlannerHeartbeat`, `Firefly/TrajectoryControl`, `Firefly/PlannerStatus` | planner → traj (trajectory, heartbeat, control), flight scripts (status) | Atomic xyz/yaw polynomials with shared piece times and a stationary endpoint; heartbeat loss finishes the committed stop; status reports scheduled completion; flight scripts observe native completion |
-| `Firefly/Features`, `Firefly/PoseObservation` | feature/matching → localization | Business localization input; localization emits registered result diagnostics |
+| `Firefly/PoseObservation` | external pose source → localization | Business localization input; localization emits registered result diagnostics |
 
 Latest-value business channels retain the newest available sample. Complete replay uses the dedicated
 registered diagnostic observations with coverage checks. Start mimir first and stop it last.
@@ -113,7 +113,7 @@ of subsequent business events. Known loss makes the recording fail.
 | `hil/link`, `hil/board` | Host USB bridge: per-wall-second traffic counts and board freshness, stamped with the latest simulated IMU time; enabled during HIL, two rows per second |
 | `hil/camera/{left,right,down}` | Board camera bridge: capture timestamp, pixel checksum and dimensions for transport verification, one row per admitted image at its original capture time |
 | `fc/debug/vertical_ned` | FC vertical velocity target/measurement, acceleration target and thrust target in NED, at the existing FC diagnostic cadence; retained for HIL and simulation control diagnosis |
-| `corr/*`, `vision/debug/map_query_wall_s` | External localization gates, disagreement, correction and query timing |
+| `corr/*` | External localization gates, disagreement and correction |
 | `plan/*` | Global guides, accepted executable local paths including their stopping tail, poses, obstacle planes and maps for display |
 | `plan/collision` | Planner-owned depth map after obstacle inflation, in odom coordinates at the planner simulation timestamp; bounded voxel snapshots/deltas for checking collision geometry, using the existing map display cadence and budgets |
 | `planner/loop_hz`, `planner/fsm_hz` | Completed execution callbacks and actual FSM executions per wall second; FSM executions require fresh odometry and a ready map |

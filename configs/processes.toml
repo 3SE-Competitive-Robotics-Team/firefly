@@ -42,13 +42,3 @@ autostart = true
 name = "planner"
 command = ["taskset", "-c", "0-4", "bin/planner"]
 autostart = true
-
-[[process]]
-name = "aliked"
-command = ["taskset", "-c", "0-4", "bin/aliked"]
-autostart = false
-
-[[process]]
-name = "lightglue"
-command = ["taskset", "-c", "0-4", "bin/lightglue", "--map", "maps/rmuc2027-1.0.0.ffvmap"]
-autostart = false

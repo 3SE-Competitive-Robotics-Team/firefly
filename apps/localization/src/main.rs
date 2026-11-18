@@ -511,7 +511,7 @@ impl App {
     }
 
     fn run(&mut self) -> Result<()> {
-        log::info!("外部库图定位启动：ESKF，发布 {CORRECTED_ODOM_TOPIC}");
+        log::info!("外部位姿融合启动：ESKF，发布 {CORRECTED_ODOM_TOPIC}");
         let waitset = iceoryx2::waitset::WaitSetBuilder::new()
             .create::<iceoryx2::prelude::ipc::Service>()
             .map_err(|e| Error::new(ErrorKind::Internal, format!("创建 WaitSet 失败: {e:?}")))?;
