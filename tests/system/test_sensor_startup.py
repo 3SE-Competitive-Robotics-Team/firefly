@@ -1,6 +1,5 @@
 """发布构建的传感器启动检查；运行记录仅写 logs/ 下的 rrd。
 
-从仓库根运行：FIREFLY_RUN_SENSOR_STARTUP=1 uv run --all-packages --extra test pytest tests/system/test_sensor_startup.py -q
 需要 RMUC 资产、图形会话与 release 构建的 firefly-rootslam / fc / render，且没有其他闭环进程。
 GroundTruth 供 render 合成图像及 viz 对照记录；屏蔽 PlantState，算法只使用 IMU 与图像。
 """
@@ -15,7 +14,6 @@ import tomllib
 
 import iceoryx2 as iox2
 import numpy as np
-import pytest
 
 from firefly_mujoco import ControlMessage, DepthImageMessage, OdomMessage, TraceContext
 
@@ -23,18 +21,18 @@ from firefly_workspace.process import ManagedProcess, isolated_run
 
 ROOT = Path(__file__).resolve().parents[2]
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("FIREFLY_RUN_SENSOR_STARTUP") != "1",
-    reason="requires explicit FIREFLY_RUN_SENSOR_STARTUP=1, RMUC assets and graphics session",
-)
-
 
 def test_sensor_startup() -> None:
     with isolated_run(ROOT):
-        _sensor_startup()
+        _sensor_startup(fly=False)
 
 
-def _sensor_startup() -> None:
+def test_takeoff_hover_and_land() -> None:
+    with isolated_run(ROOT):
+        _sensor_startup(fly=True)
+
+
+def _sensor_startup(*, fly: bool) -> None:
     from firefly_mujoco import build_scene, load_scene_name, resolve_scene
 
     scene = resolve_scene(load_scene_name())
@@ -131,7 +129,7 @@ main(["--no-trace"], publish_plant_state=False)
                 f"里程计={samples}，控制={controls}，有效深度帧={valid_depth_frames}\n{diagnostics}"
             )
         assert np.linalg.norm(first_position) < 0.1, f"初始位置应为局部原点: {first_position}"
-        if os.environ.get("FIREFLY_RUN_FLIGHT") == "1":
+        if fly:
             _verify_flight(ground_truth, check_alive)
     finally:
         # 只停止本次创建的进程；SIGINT 触发端口 Drop 与录制 flush。

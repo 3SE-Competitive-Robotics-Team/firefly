@@ -1,15 +1,11 @@
 """真实 RMUC 资产的 provenance 与物理接触验收；须显式启用。"""
 import hashlib
 import json
-import os
 from pathlib import Path
 
 import mujoco
 import numpy as np
 import pytest
-
-ROOT = Path(__file__).resolve().parents[2]
-pytestmark = pytest.mark.skipif(os.environ.get("FIREFLY_RUN_RMUC_ASSETS") != "1", reason="requires built RMUC assets")
 
 
 def test_asset_provenance():

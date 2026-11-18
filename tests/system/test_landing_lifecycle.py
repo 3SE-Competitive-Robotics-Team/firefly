@@ -4,14 +4,11 @@ from pathlib import Path
 import time
 
 import iceoryx2 as iox2
-import pytest
 from firefly_mujoco.activity import ActivityLease, LANDING
 from firefly_mujoco.messages import AttitudeMessage, DownImageMessage, ScalarMessage, TraceContext
 from firefly_workspace.process import ManagedProcess, isolated_run
 
 ROOT = Path(__file__).resolve().parents[2]
-pytestmark = pytest.mark.skipif(os.environ.get("FIREFLY_RUN_PRECISION_MISSION") != "1",
-                              reason="requires idle host and exported INT8 model")
 
 
 def test_owner_silence_releases_inference_and_can_wake_again():

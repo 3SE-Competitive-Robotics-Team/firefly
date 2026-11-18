@@ -20,10 +20,6 @@ from firefly_mujoco.messages import DownImageMessage, LandingTargetMessage, Scal
 from firefly_workspace import digest
 
 ROOT = Path(__file__).resolve().parents[2]
-pytestmark = pytest.mark.skipif(
-    os.environ.get("FIREFLY_RUN_TELEMETRY_LOAD") != "1",
-    reason="explicit native recorder test on an idle host with release mimir",
-)
 
 
 class NavigationMessage(ctypes.Structure):

@@ -9,10 +9,6 @@ from firefly_workspace.process import ManagedProcess
 
 
 ROOT = Path(__file__).resolve().parents[2]
-pytestmark = pytest.mark.skipif(
-    os.environ.get("FIREFLY_RUN_PRECISION_MISSION") != "1",
-    reason="requires idle host, native GPU and quantized landing model",
-)
 
 
 @pytest.mark.parametrize("route, points", [
