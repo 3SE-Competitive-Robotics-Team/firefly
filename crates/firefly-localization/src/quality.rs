@@ -1,6 +1,6 @@
-//! 库图观测诊断；不代表里程计有效性、统计置信界或任务准入条件。
+//! 评估已接受的外部位姿观测的新鲜度，以及观测位置与同一时刻融合位置的分歧。
 
-/// 库图观测的新鲜度与融合后分歧诊断阈值。
+/// 外部位姿观测的最大年龄和融合后位置分歧上限。
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QualityOptions {
@@ -26,7 +26,7 @@ impl QualityOptions {
             .all(|x| x.is_finite() && *x > 0.)
     }
 }
-/// 库图观测摘要；与局部 VIO 是否有效无关。
+/// 最近一次外部位姿观测的时间戳、位置分歧，以及观测是否新鲜且一致。
 pub struct ObservationStatus {
     pub visual_timestamp: f64,
     pub position_disagreement: f64,
@@ -47,7 +47,7 @@ impl Quality {
             self.observation = Some((timestamp, disagreement));
         }
     }
-    /// 按估计时刻记录最近库图观测的年龄与分歧；无观测用 -1 表示。
+    /// 按估计时刻判断观测年龄和位置分歧是否均在阈值内。尚无观测时，时间戳和位置分歧均为 -1。
     #[must_use]
     pub fn status(&self, timestamp: f64, options: &QualityOptions) -> ObservationStatus {
         let (visual_timestamp, position_disagreement) = self.observation.unwrap_or((-1., -1.));
