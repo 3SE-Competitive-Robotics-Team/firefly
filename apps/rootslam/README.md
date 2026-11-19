@@ -255,6 +255,13 @@ uv run python apps/rootslam/export_rrd.py --problem logs/tumvi_room2/float64/glo
 ## Online operation and validation
 
 The default IPC configuration provides local VIO to flight control and planner.
+On the 320×240 rig, the left image carries feature IDs across time. Each stereo
+pair measures disparity again for every current left track, so a feature that
+loses its right observation can recover depth under the same ID. Tracking uses
+the full and half-resolution images, with forward/backward and epipolar checks.
+An explicit `vio.vio_config` archive selects its own tracking settings. The
+frame-to-frame tracker accepts `config.optical_flow_rematch_stereo` for this
+matching policy. Archives that omit it use Basalt's temporal right-eye tracking.
 Optional sparse mapping maintains its own posterior map; planner owns dense depth
 fusion. `--external-localization` assigns corrected-odometry and navigation
 publication to the localization process. The online data flow is shown in

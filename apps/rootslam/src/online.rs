@@ -1,4 +1,4 @@
-use crate::config::{Options, initial_vio_config};
+use crate::config::{Options, live_vio_config};
 mod imu;
 use crate::input::SensorModel;
 use firefly_basalt::{
@@ -195,7 +195,7 @@ impl Startup {
 impl LiveSession {
     fn new(options: &Options, model: &SensorModel, precision: Precision) -> Result<Self> {
         let calibration = &model.calibration;
-        let vio = initial_vio_config(options)?;
+        let vio = live_vio_config(options)?;
         let node = create_node()?;
         let image_options = SubscriberOptions {
             buffer_size: 2,
@@ -583,10 +583,10 @@ mod config_tests {
     #[test]
     fn detection_override_preserves_all_other_online_parameters() {
         let options: Options = toml::from_str("optical_flow_detection_grid_size = 20").unwrap();
-        let mut expected = initial_vio_config(&Options::default()).unwrap();
+        let mut expected = live_vio_config(&Options::default()).unwrap();
         assert_eq!(expected.optical_flow_detection_grid_size, 50);
         expected.optical_flow_detection_grid_size = 20;
-        assert_eq!(initial_vio_config(&options).unwrap(), expected);
+        assert_eq!(live_vio_config(&options).unwrap(), expected);
     }
 
     #[test]
@@ -597,7 +597,7 @@ mod config_tests {
                 ..Options::default()
             };
             assert!(options.validate().is_err());
-            assert!(initial_vio_config(&options).is_err());
+            assert!(live_vio_config(&options).is_err());
         }
     }
 
@@ -643,8 +643,11 @@ mod config_tests {
         let parsed: Document = toml::from_str(&document).expect("板端 HIL 配置可解析");
         assert_eq!(parsed.precision, Precision::Float32);
         assert!(!parsed.vio.map && !parsed.vio.loops);
-        let mut expected = initial_vio_config(&Options::default()).unwrap();
+        let mut expected = crate::config::initial_vio_config(&Options::default()).unwrap();
+        expected.optical_flow_rematch_stereo = true;
+        expected.optical_flow_levels = 1;
+        expected.optical_flow_pattern = 50;
         expected.optical_flow_detection_grid_size = 20;
-        assert_eq!(initial_vio_config(&parsed.vio).unwrap(), expected);
+        assert_eq!(live_vio_config(&parsed.vio).unwrap(), expected);
     }
 }

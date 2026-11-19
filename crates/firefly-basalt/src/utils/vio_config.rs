@@ -17,7 +17,7 @@ pub enum LinearizationType {
 }
 
 /// Basalt algorithm parameters with the upstream cereal field names.
-/// All archive fields are required; constructing defaults is a separate operation.
+/// Upstream fields are required when reading an archive.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -40,6 +40,13 @@ pub struct VioConfig {
     pub optical_flow_epipolar_error: f32,
     #[serde(rename = "config.optical_flow_levels")]
     pub optical_flow_levels: i32,
+    /// Match the primary camera's current tracks against the simultaneous right image.
+    #[serde(
+        default,
+        rename = "config.optical_flow_rematch_stereo",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub optical_flow_rematch_stereo: bool,
     #[serde(rename = "config.optical_flow_skip_frames")]
     pub optical_flow_skip_frames: i32,
     #[serde(rename = "config.vio_linearization_type")]
@@ -137,6 +144,7 @@ impl Default for VioConfig {
             optical_flow_max_iterations: 5,
             optical_flow_epipolar_error: 0.005,
             optical_flow_levels: 3,
+            optical_flow_rematch_stereo: false,
             optical_flow_skip_frames: 1,
             vio_linearization_type: LinearizationType::AbsQr,
             vio_sqrt_marg: true,
