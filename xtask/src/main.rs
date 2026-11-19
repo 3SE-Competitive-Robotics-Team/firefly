@@ -3,7 +3,6 @@ mod container;
 mod deploy;
 mod deploy_hil;
 mod mission;
-mod processes;
 mod release;
 mod target;
 
@@ -39,7 +38,7 @@ fn run() -> Result<(), String> {
             let [root] = rest else {
                 return Err("expected workspace path".into());
             };
-            let ids = processes::active(Path::new(root)).map_err(|e| e.to_string())?;
+            let ids = xtask::processes::active(Path::new(root)).map_err(|e| e.to_string())?;
             println!("{}", serde_json::json!(ids));
             Ok(())
         }

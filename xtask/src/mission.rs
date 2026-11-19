@@ -219,7 +219,7 @@ fn claim_environment(root: &Path) -> Result<fs::File, Box<dyn std::error::Error>
         .truncate(false)
         .open(root.join("logs/run.lock"))?;
     lock.try_lock()?;
-    let occupied = crate::processes::active(root)?;
+    let occupied = xtask::processes::active(root)?;
     if !occupied.is_empty() {
         return Err(format!("repository flight processes already running: {occupied:?}").into());
     }

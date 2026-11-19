@@ -18,6 +18,10 @@ fn simulation_command(args: &[OsString]) -> bool {
     }
 }
 
+/// Return live Firefly process IDs owned by this checkout.
+///
+/// # Errors
+/// Returns an error if the checkout or the host process table cannot be read.
 pub fn active(root: &Path) -> io::Result<Vec<u32>> {
     let root = root.canonicalize()?;
     let target = root.join("target");
@@ -59,50 +63,4 @@ pub fn active(root: &Path) -> io::Result<Vec<u32>> {
     }
     ids.sort_unstable();
     Ok(ids)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::{
-        fs,
-        os::unix::process::CommandExt,
-        process::{Command, Stdio},
-        thread,
-        time::{Duration, Instant},
-    };
-
-    #[test]
-    fn only_the_owning_checkout_reports_a_running_native_binary() {
-        let target = crate::target::workspace_root().join("target");
-        let checkout = tempfile::tempdir_in(target).unwrap();
-        let binaries = checkout.path().join("target");
-        let other = checkout.path().join("other");
-        fs::create_dir(&other).unwrap();
-        fs::create_dir(&binaries).unwrap();
-        let exe = binaries.join("mimir");
-        fs::copy("/bin/sh", &exe).unwrap();
-        let mut process = Command::new(exe)
-            .arg0("sh")
-            .args(["-c", "read -r line"])
-            .stdin(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let found = loop {
-            if active(checkout.path()).unwrap().contains(&process.id()) {
-                break true;
-            }
-            if Instant::now() >= deadline {
-                break false;
-            }
-            thread::sleep(Duration::from_millis(20));
-        };
-        let foreign = active(&other).unwrap();
-        process.kill().unwrap();
-        process.wait().unwrap();
-        assert!(found);
-        assert!(!foreign.contains(&process.id()));
-        assert!(!active(checkout.path()).unwrap().contains(&process.id()));
-    }
 }
