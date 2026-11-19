@@ -25,20 +25,21 @@ from firefly_ipc.activity import ActivityLease, LANDING
 from firefly_mujoco.scene import load_scene_name
 from firefly_workspace import digest, load_toml
 from firefly_workspace.process import ManagedProcess, isolated_run
-from .config import ArrivalMode, MissionOptions, Phase, route_waypoints
+from .config import ArrivalMode, MissionPlan, Phase, SystemRun, route_waypoints
 from .gates import Arrival, VisualAcquisition
 
 
 class FlightRunner:
-    def __init__(self, options: MissionOptions, root: Path, team: str):
-        self.options, self.root, self.team = (options, root, team)
-        self.waypoints = route_waypoints(options, team)
+    def __init__(self, options: SystemRun | MissionPlan, root: Path, team: str):
+        self.plan = options if isinstance(options, SystemRun) else SystemRun((options,))
+        self.options, self.root, self.team = self.plan.missions[0], root, team
+        self.flight_id = None
         self.down_rate = (
             load_toml(root / "configs/render.toml").get("capture", {}).get("down_hz", 15)
         )
         self.processes, self.latest, self.received, self.subs = ({}, {}, {}, {})
         self.mode, self.stamp, self.sequence, self.logs = (None, 0.0, 0, None)
-        self.armed_session, self.activity, self.node, self.recording = (None, None, None, None)
+        self.vio_session, self.activity, self.node, self.recording = (None, None, None, None)
         self.phase_name = Phase.STARTUP
 
     def _start(self, name, command):
@@ -68,6 +69,8 @@ class FlightRunner:
         self.logs.loan_uninit().write_payload(msg).send()
 
     def _mission_event(self, kind, **fields):
+        if self.flight_id is not None:
+            fields["flight_id"] = self.flight_id
         self._event("mission " + json.dumps({"kind": kind, **fields}, separators=(",", ":")))
 
     def _request_activity(self, enabled):
@@ -78,7 +81,7 @@ class FlightRunner:
     def _phase(self, name, *, passed=False, **fields):
         self.phase_name = self.phase_name.advance(Phase(name), passed=passed)
         self._mission_event("phase", name=name, **fields)
-        self._request_activity(name in {"takeoff", "acquire", "land"})
+        self._request_activity(self.options.precision_land and name in {"takeoff", "acquire", "land"})
 
     def _pump(self, landing=False):
         if self.activity is not None:
@@ -99,10 +102,10 @@ class FlightRunner:
                     self.mode = FlightMode(msg.mode)
                 elif (
                     name == "attitude"
-                    and self.armed_session is not None
-                    and (msg.session != self.armed_session)
+                    and self.vio_session is not None
+                    and msg.session != self.vio_session
                 ):
-                    raise RuntimeError("VIO session changed during mission")
+                    raise RuntimeError("VIO session changed during system run")
         time.sleep(0.01)
 
     def _wait(self, predicate, wall=30.0, *, modes=None, landing=False):
@@ -205,7 +208,10 @@ class FlightRunner:
             return builder.open_or_create()
 
         self.logs = service("Firefly/Log", LogMessage, 256, 10).publisher_builder().create()
-        if self.options.precision_land:
+        precision = any(m.precision_land for m in self.plan.missions)
+        navigation = any(m.mission == "roundtrip" for m in self.plan.missions)
+        cuboid = any(m.shape == "cuboid" for m in self.plan.missions)
+        if precision:
             self.activity = ActivityLease(self.node)
         self._event(f"flight recording={self.recording}")
         revision = subprocess.check_output(
@@ -227,36 +233,21 @@ class FlightRunner:
                 .buffer_size(capacity)
                 .create()
             )
-        self._mission_event(
-            "settings",
-            mission=self.options.mission,
-            precision_land=self.options.precision_land,
-            team=self.team,
-            scene=load_scene_name(),
-            waypoint_count=len(self.waypoints),
-            shape=self.options.shape,
-            altitude=self.options.altitude,
-            return_offset=self.options.return_offset,
-            hover_seconds=self.options.hover_seconds,
-            down_rate_hz=self.down_rate,
-            seed=self.options.seed,
-            transport="hil" if self.options.hil else "sil",
-        )
-        for index, point in enumerate(self.waypoints):
-            self._mission_event("waypoint", index=index, offset=point.offset, arrival=point.arrival)
+        self._mission_event("system_run", planned_flights=len(self.plan.missions))
         binaries = ["render", "mimir", "ffctl"] + (
             ["hil"] if self.options.hil else ["fc", "firefly-rootslam"]
         )
-        sim_config = "sim-mission" if self.options.mission == "roundtrip" else "sim"
+        sim_config = "sim-mission" if navigation else "sim"
+        planner_config = "planner-cuboid-sil" if cuboid and not self.options.hil else "planner"
         configs = ["game", "scene", sim_config, "render", "mimir"]
         if self.options.hil:
             configs += ["hil", "processes-hil", "fc-hil", "rootslam-hil"]
         else:
             configs += ["fc", "firefly-rootslam"]
-        if self.options.mission == "roundtrip":
+        if navigation:
             binaries += [] if self.options.hil else ["planner", "traj"]
-            configs += ["planner", "traj"]
-        if self.options.precision_land:
+            configs += [planner_config, "traj"]
+        if precision:
             binaries += [] if self.options.hil else ["landing"]
             configs += ["landing"]
         paths = [self.root / "target/release" / name for name in binaries]
@@ -270,7 +261,7 @@ class FlightRunner:
             self.root / "packages/firefly-ipc/src/firefly_ipc/activity.py",
             self.root / "packages/firefly-ipc/src/firefly_ipc/messages.py",
         ]
-        if self.options.precision_land:
+        if precision:
             model_manifest = "viplite.json" if self.options.hil else "manifest.json"
             paths.append(self.root / "models/h-marker-yolo26n-cif-v1" / model_manifest)
         paths += sorted(Path(__file__).parent.glob("*.py"))
@@ -306,30 +297,52 @@ class FlightRunner:
                 ],
             )
             self._start("fc", [str(self.root / "target/release/fc")])
-            if self.options.precision_land:
+            if precision:
                 self._start("landing", [str(self.root / "target/release/landing"), "--simulation"])
-            if self.options.mission == "roundtrip":
+            if navigation:
                 self._start("traj", [str(self.root / "target/release/traj")])
-                self._start("planner", [str(self.root / "target/release/planner")])
+                self._start("planner", [str(self.root / "target/release/planner"),
+                                        "--config", str(self.root / "configs" / f"{planner_config}.toml")])
 
     def _execute(self):
+        for self.flight_id, self.options in enumerate(self.plan.missions, start=1):
+            self.phase_name = Phase.STARTUP
+            self._fly()
+
+    def _fly(self):
+        waypoints = route_waypoints(self.options, self.team)
+        self._mission_event(
+            "settings", mission=self.options.mission, precision_land=self.options.precision_land,
+            team=self.team, scene=load_scene_name(), waypoint_count=len(waypoints),
+            shape=self.options.shape, altitude=self.options.altitude,
+            return_offset=self.options.return_offset, hover_seconds=self.options.hover_seconds,
+            down_rate_hz=self.down_rate, seed=self.options.seed,
+            transport="hil" if self.options.hil else "sil",
+        )
+        for index, point in enumerate(waypoints):
+            self._mission_event("waypoint", index=index, offset=point.offset, arrival=point.arrival)
+        ground_since, preceding_stamp = time.monotonic(), self.stamp
         self._wait(
             lambda: (
                 "odom" in self.latest
                 and self.latest["odom"].is_initialized
                 and ("attitude" in self.latest)
                 and (self.mode == FlightMode.DISARMED)
-                and time.monotonic() - self.received["mode"] <= 1.0
+                and all(self.received.get(topic, 0.) >= ground_since
+                        and time.monotonic() - self.received[topic] <= 1.0
+                        and self.latest[topic].timestamp > preceding_stamp
+                        for topic in ("odom", "attitude", "mode"))
                 and (self.stamp >= 4.0)
             ),
             wall=40.0,
         )
-        self.armed_session = self.latest["attitude"].session
+        if self.vio_session is None:
+            self.vio_session = self.latest["attitude"].session
         pose = self.latest["odom"]
         home = [pose.position_x, pose.position_y, pose.position_z]
         quaternion = [pose.quat_x, pose.quat_y, pose.quat_z, pose.quat_w]
         self._mission_event(
-            "home", position=home, quaternion=quaternion, session=self.armed_session
+            "home", position=home, quaternion=quaternion, session=self.latest["attitude"].session
         )
         self._phase("takeoff")
         self._command("fc", "arm")
@@ -345,10 +358,10 @@ class FlightRunner:
                 home[1] + self.options.return_offset[1],
                 home[2] + self.options.altitude,
             ]
-            goals = [[home[0] + p.offset[0], home[1] + p.offset[1], home[2] + self.options.altitude]
-                     for p in self.waypoints] + [nearby]
+            goals = [[origin + delta for origin, delta in zip(home, p.offset, strict=True)]
+                     for p in waypoints] + [nearby]
             preview = None
-            for index, point in enumerate(self.waypoints):
+            for index, point in enumerate(waypoints):
                 successor = goals[index + 1] if point.arrival == ArrivalMode.PASS else None
                 preview = self._navigate("waypoint", goals[index], index=index,
                                          successor=successor, preview_identity=preview)
@@ -359,7 +372,7 @@ class FlightRunner:
         if self.options.precision_land:
             self._phase("acquire")
             acquisition = VisualAcquisition(
-                after=self.stamp, session=self.armed_session, team=int(self.team == "blue")
+                after=self.stamp, session=self.vio_session, team=int(self.team == "blue")
             )
             self._wait(
                 lambda: acquisition.observe(
@@ -373,15 +386,12 @@ class FlightRunner:
             )
             self._phase("land", target_time=acquisition.target_time)
             self._command("fc", "land", "--precision")
-            self._wait(lambda: self.mode == FlightMode.LAND, modes={FlightMode.HOLD, FlightMode.LAND})
-            self._wait(lambda: self.mode == FlightMode.DISARMED, wall=45.0, modes={FlightMode.DISARMED, FlightMode.LAND})
-            self._hold(0.75, modes=(FlightMode.DISARMED,))
         else:
             self._phase("land")
             self._command("fc", "land")
-            self._wait(lambda: self.mode == FlightMode.LAND, modes={FlightMode.HOLD, FlightMode.LAND})
-            self._wait(lambda: self.mode == FlightMode.DISARMED, wall=45.0, modes={FlightMode.DISARMED, FlightMode.LAND})
-            self._hold(0.75, modes=(FlightMode.DISARMED,))
+        self._wait(lambda: self.mode == FlightMode.LAND, modes={FlightMode.HOLD, FlightMode.LAND})
+        self._wait(lambda: self.mode == FlightMode.DISARMED, wall=45.0, modes={FlightMode.DISARMED, FlightMode.LAND})
+        self._hold(0.75, modes=(FlightMode.DISARMED,))
         self._phase("complete")
         if self.activity is not None:
             deadline = time.monotonic() + 0.3
@@ -437,7 +447,7 @@ class FlightRunner:
                     error += f"; failure recording: {logging_failure}"
             finally:
                 cleanup = self._close(error)
-            if self.recording is not None and self.options.precision_land:
+            if self.recording is not None and (len(self.plan.missions) > 1 or self.options.precision_land):
                 from .verification import verify_recording
 
                 try:

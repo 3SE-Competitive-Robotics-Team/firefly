@@ -2,6 +2,8 @@
 
 Firefly 是用 Rust 和 Python 开发的 RoboMaster 四旋翼自主飞行系统，涵盖视觉惯性定位、轨迹规划与飞行控制，支持在 MuJoCo 中仿真。
 
+机载 Rust 服务 `firefly-daemon` 随系统启动，管理一次上电期间的任务和架次。板上应用或 `ffctl mission` 可以提交任务、查询回执和请求取消。板端部署与 SIL 验收入口见[开发指南](docs/development.md#板上任务服务)。
+
 ## 文档
 
 - [系统架构图](docs/architecture.md)

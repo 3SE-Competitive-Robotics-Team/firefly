@@ -3457,6 +3457,7 @@ version = "0.1.0"
 dependencies = [
  "firefly-config",
  "firefly-error",
+ "firefly-mission",
  "firefly-pubsub",
  "iceoryx2",
  "nix 0.32.0",
@@ -3529,6 +3530,24 @@ dependencies = [
  "firefly-map",
  "firefly-trajectory",
  "nalgebra",
+]
+
+[[package]]
+name = "firefly-daemon"
+version = "0.1.0"
+dependencies = [
+ "firefly-config",
+ "firefly-error",
+ "firefly-flight",
+ "firefly-mission",
+ "firefly-observability",
+ "firefly-odometry",
+ "firefly-pubsub",
+ "iceoryx2",
+ "nix 0.32.0",
+ "serde",
+ "serde_json",
+ "signal-hook",
 ]
 
 [[package]]
@@ -3625,6 +3644,15 @@ version = "0.1.0"
 dependencies = [
  "firefly-error",
  "nalgebra",
+]
+
+[[package]]
+name = "firefly-mission"
+version = "0.1.0"
+dependencies = [
+ "firefly-config",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

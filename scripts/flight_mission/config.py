@@ -4,10 +4,14 @@ import argparse
 from dataclasses import dataclass
 from enum import StrEnum
 import math
+import sys
+
+CUBOID_BASE = 1.3
+CUBOID_ROOF = CUBOID_BASE + 2.0
 
 
 @dataclass(frozen=True)
-class MissionOptions:
+class MissionPlan:
     hil: bool
     mission: str
     hover_seconds: float
@@ -29,8 +33,19 @@ class ArrivalMode(StrEnum):
 
 
 @dataclass(frozen=True)
+class SystemRun:
+    missions: tuple[MissionPlan, ...]
+
+    def __post_init__(self):
+        if not self.missions:
+            raise ValueError("select at least one mission to fly")
+        if len({(m.hil, m.seed) for m in self.missions}) != 1:
+            raise ValueError("all missions share one transport and simulation seed")
+
+
+@dataclass(frozen=True)
 class Waypoint:
-    offset: tuple[float, float]
+    offset: tuple[float, float, float]
     arrival: ArrivalMode
 
 
@@ -64,9 +79,10 @@ _TRANSITIONS = {
 }
 
 
-def parse_args(argv=None, *, hil=None, mission=None) -> MissionOptions:
+def parse_args(argv=None, *, hil=None, mission=None) -> MissionPlan:
     parser = argparse.ArgumentParser(
-        description="Fly a hover or waypoint mission and return to the selected hangar."
+        description="Fly a hover or waypoint mission and return to the selected hangar.",
+        epilog="Separate successive missions with --next. --hil and --seed apply to the entire run.",
     )
     if hil is None:
         parser.add_argument("--hil", action="store_true")
@@ -77,7 +93,7 @@ def parse_args(argv=None, *, hil=None, mission=None) -> MissionOptions:
     else:
         parser.set_defaults(mission=mission)
     parser.add_argument(
-        "--hover-seconds", type=float, help="hover duration (hover: 20s; roundtrip waypoint: 3s)"
+        "--hover-seconds", type=float, help="hover duration (hover: 20s; cuboid: 1s; other waypoints: 3s)"
     )
     route = parser.add_mutually_exclusive_group()
     route.add_argument(
@@ -89,8 +105,8 @@ def parse_args(argv=None, *, hil=None, mission=None) -> MissionOptions:
     )
     route.add_argument(
         "--shape",
-        choices=("square", "triangle"),
-        help="closed polygon one side-length ahead of takeoff",
+        choices=("square", "triangle", "cuboid"),
+        help="field-side polygon or 3D cuboid wireframe",
     )
     route.add_argument(
         "--waypoint",
@@ -101,10 +117,10 @@ def parse_args(argv=None, *, hil=None, mission=None) -> MissionOptions:
         help="repeat for ordered offsets from takeoff in odom metres",
     )
     parser.add_argument(
-        "--side", type=float, help="polygon side length in metres (square: 4; triangle: 2)"
+        "--side", type=float, help="side length in metres (square: 4; triangle: 2; cuboid long edge: 3)"
     )
     parser.add_argument(
-        "--altitude", type=float, help="height above takeoff (hover: 1m; roundtrip: 2m)"
+        "--altitude", type=float, help="takeoff and return height in metres (hover: 1; cuboid: 1.9; other roundtrips: 2)"
     )
     parser.add_argument(
         "--return-offset",
@@ -129,16 +145,22 @@ def parse_args(argv=None, *, hil=None, mission=None) -> MissionOptions:
     parser.add_argument("--pass-at", type=int, action="append", metavar="N",
                         help="1-based waypoint to fly through; repeat for multiple points (square defaults to point 1)")
     args = parser.parse_args(argv)
+    if args.mission == "hover":
+        dwell, height = 20., 1.
+    elif args.shape == "cuboid":
+        dwell, height = 1., 1.9
+    else:
+        dwell, height = 3., 2.
     if args.hover_seconds is None:
-        args.hover_seconds = 20.0 if args.mission == "hover" else 3.0
+        args.hover_seconds = dwell
     if args.altitude is None:
-        args.altitude = 1.0 if args.mission == "hover" else 2.0
+        args.altitude = height
     if args.side is not None and args.shape is None:
         parser.error("--side requires --shape")
     if args.mission == "hover" and (args.goal is not None or args.shape or args.waypoint):
         parser.error("waypoints and shapes require --mission roundtrip")
     if args.shape and args.side is None:
-        args.side = 4.0 if args.shape == "square" else 2.0
+        args.side = {"square": 4.0, "triangle": 2.0, "cuboid": 3.0}[args.shape]
     values = [
         *(args.goal or []),
         *(value for point in args.waypoint or [] for value in point),
@@ -176,10 +198,30 @@ def parse_args(argv=None, *, hil=None, mission=None) -> MissionOptions:
     args.return_offset = tuple(args.return_offset)
     args.waypoint = tuple(map(tuple, args.waypoint)) if args.waypoint else None
     args.pass_at = tuple(args.pass_at or ((1,) if args.shape == "square" else ()))
-    options = MissionOptions(**vars(args))
+    options = MissionPlan(**vars(args))
     if any(not 1 <= index <= len(route_points(options, "red")) for index in options.pass_at):
         parser.error("--pass-at must identify a waypoint on this route")
     return options
+
+
+def parse_run(argv=None, *, hil=None, mission=None) -> SystemRun:
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--seed", type=int, default=20260930)
+    if hil is None:
+        parser.add_argument("--hil", action="store_true")
+    else:
+        parser.set_defaults(hil=hil)
+    run, rest = parser.parse_known_args(sys.argv[1:] if argv is None else argv)
+    groups = [[]]
+    for token in rest:
+        if token == "--next":
+            groups.append([])
+        else:
+            groups[-1].append(token)
+    if len(groups) > 1 and not all(groups):
+        parser.error("--next requires a mission on either side")
+    return SystemRun(tuple(parse_args([*group, "--seed", str(run.seed)], hil=run.hil, mission=mission)
+                           for group in groups))
 
 
 def default_goal(team):
@@ -188,13 +230,24 @@ def default_goal(team):
 
 
 def route_points(args, team):
-    """Ordered offsets in initial odom axes; polygons close at their field-side entry."""
+    """Declared offsets in initial odom axes. Planar routes inherit takeoff altitude."""
     if args.mission == "hover":
         return ()
     if args.waypoint:
         return args.waypoint
     if args.shape:
         side = args.side
+        direction = 1.0 if team == "red" else -1.0
+        if args.shape == "cuboid":
+            length = direction * side
+            width = length * 2 / 3
+            corners = ((length, 0.), (2 * length, 0.), (2 * length, width), (length, width))
+            roof = tuple((*xy, CUBOID_ROOF) for xy in corners)
+            base = tuple((*xy, CUBOID_BASE) for xy in corners)
+            a, b, c, d = range(4)
+            return (roof[a], roof[b], roof[c], roof[d], roof[a],
+                    base[a], base[b], base[c], base[d], base[a],
+                    base[b], roof[b], roof[c], base[c], base[d], roof[d])
         points = (
             [[side, 0.0], [2 * side, 0.0], [2 * side, side], [side, side], [side, 0.0]]
             if args.shape == "square"
@@ -205,13 +258,13 @@ def route_points(args, team):
                 [side, 0.0],
             ]
         )
-        direction = 1.0 if team == "red" else -1.0
         return tuple((direction * x, direction * y) for x, y in points)
     return (args.goal if args.goal is not None else default_goal(team),)
 
 
 def route_waypoints(options, team):
     return tuple(
-        Waypoint(offset, ArrivalMode.PASS if index in options.pass_at else ArrivalMode.STOP)
+        Waypoint(offset if len(offset) == 3 else (*offset, options.altitude),
+                 ArrivalMode.PASS if index in options.pass_at else ArrivalMode.STOP)
         for index, offset in enumerate(route_points(options, team), start=1)
     )

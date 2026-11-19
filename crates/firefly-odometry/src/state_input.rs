@@ -17,7 +17,9 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    fn from_message(m: &OdomMessage) -> Option<Self> {
+    /// Decode an initialized odometry measurement with a valid timestamp, pose and velocity.
+    #[must_use]
+    pub fn from_message(m: &OdomMessage) -> Option<Self> {
         let values = [
             m.timestamp,
             m.position_x,

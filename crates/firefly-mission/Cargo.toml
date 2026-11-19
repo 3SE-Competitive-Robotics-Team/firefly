@@ -1,0 +1,18 @@
+[package]
+name = "firefly-mission"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Onboard mission plans and local control protocol"
+keywords = ["robotics", "mission"]
+categories = ["embedded"]
+
+[dependencies]
+serde.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+firefly-config.workspace = true
+
+[lints]
+workspace = true

@@ -1,8 +1,11 @@
 """Grade native mission states, continuous images and physical flight evidence."""
 
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
+from operator import itemgetter
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
+from .config import CUBOID_ROOF
 from .recording import Evidence, read_recording
 
 
@@ -83,21 +86,19 @@ def read_timeline(data, report):
     planned = [(t, row) for t, row in data.events if row["kind"] == "waypoint"]
     arrivals = [row.get("arrival", "stop") for _, row in planned]
     check(all(kind in ("stop", "pass") for kind in arrivals), "invalid waypoint arrival mode")
-    if not roundtrip:
-        expected = ["takeoff", "acquire", "land", "complete"]
-    else:
-        expected = (
-            ["takeoff"]
-            + [phase for kind in arrivals for phase in
-               (("waypoint", "waypoint_hover") if kind == "stop" else ("waypoint",))]
-            + ["return", "acquire", "land", "complete"]
-        )
+    expected = ["takeoff"]
+    if roundtrip:
+        expected.extend(phase for kind in arrivals for phase in
+                        (("waypoint", "waypoint_hover") if kind == "stop" else ("waypoint",)))
+        expected.append("return")
+    if settings["precision_land"]:
+        expected.append("acquire")
+    expected.extend(("land", "complete"))
     phases = [(stamp, row) for stamp, row in data.events if row["kind"] == "phase"]
     check(
         [row["name"] for _, row in phases] == expected,
         "mission phase sequence is incomplete or out of order",
     )
-    check(settings["precision_land"], "precision landing must be selected")
     if len(phases) != len(expected) or [row["name"] for _, row in phases] != expected:
         return None
     phase = {row["name"]: (stamp, row) for stamp, row in phases}
@@ -123,13 +124,16 @@ def read_timeline(data, report):
                                     PhaseEvent.from_row(hover) if hover else None,
                                     PhaseEvent.from_row(following)))
             offset = planned[index][1].get("offset", [])
+            if len(offset) == 2:  # Planar declarations in older recordings inherit takeoff height.
+                offset = [*offset, settings["altitude"]]
+            ceiling = CUBOID_ROOF if settings.get("shape") == "cuboid" else settings["altitude"]
             check(
-                len(offset) == 2 and np.isfinite(offset).all(),
+                len(offset) == 3 and np.isfinite(offset).all() and 0.5 <= offset[2] <= ceiling,
                 "invalid declared waypoint offset",
             )
-            if len(offset) != 2:
+            if len(offset) != 3:
                 return None
-            goal = np.array(home["position"]) + [offset[0], offset[1], settings["altitude"]]
+            goal = np.array(home["position"]) + offset
             check(
                 planned[index][0] <= start
                 and travel[1].get("index") == index
@@ -248,19 +252,21 @@ def check_images(data, timeline, report):
                 "landing inference continued during idle time",
             )
         metrics["down_rate_limit_hz"] = rate
-        metrics["landing_inferences"] = max((row[1] for _, row in runtime), default=0.0)
+        counts = [row[1] for t, row in runtime if start <= t <= end + .5]
+        metrics["landing_inferences"] = max(counts, default=0.) - min(counts, default=0.)
 
 
-def evaluate(data: Evidence):
-    """Return a complete report after checking event protocol, image coverage and physical flight."""
+def evaluate_flight(data: Evidence, *, frame=None, first=True):
     report = Report()
     timeline = read_timeline(data, report)
     if timeline is None:
         return report.result()
-    check_images(data, timeline, report)
+    if timeline.settings["precision_land"]:
+        check_images(data, timeline, report)
     check, metrics, result = report.check, report.metrics, report.result
     settings, home = timeline.settings, timeline.home
     start, end, phase, legs = timeline.start, timeline.end, timeline.phases, timeline.legs
+    metrics.update(home_s=start, complete_s=end)
     roundtrip = settings["mission"] == "roundtrip"
     poses = [row for row in data.poses if start - 0.05 <= row[0] <= end + 0.05]
     modes = [
@@ -286,10 +292,13 @@ def evaluate(data: Evidence):
     home_world = np.array([np.interp(start, times, positions[:, i]) for i in range(3)])
     gt_rotations = Slerp(times, Rotation.from_quat([row[2] for row in poses]))
     gt_rotation = gt_rotations([start])[0]
-    alignment = gt_rotation * Rotation.from_quat(home["quaternion"]).inv()
+    if frame is None:
+        alignment = gt_rotation * Rotation.from_quat(home["quaternion"]).inv()
+        frame = (alignment, home_world - alignment.apply(home["position"]))
+    alignment, origin = frame
 
     def world_goal(point):
-        return home_world + alignment.apply(np.array(point) - np.array(home["position"]))
+        return origin + alignment.apply(point)
 
     def rows_between(name, stop):
         return [
@@ -303,7 +312,8 @@ def evaluate(data: Evidence):
             value for t, value in modes if phase[begin].timestamp <= t <= phase[finish].timestamp
         ]
 
-    flight_start = legs[0].travel.timestamp if roundtrip else phase["acquire"].timestamp
+    approach = "acquire" if settings["precision_land"] else "land"
+    flight_start = legs[0].travel.timestamp if roundtrip else phase[approach].timestamp
     check(
         any(mode == 2 for t, mode in modes if phase["takeoff"].timestamp <= t <= flight_start),
         "TAKEOFF state not observed",
@@ -312,15 +322,22 @@ def evaluate(data: Evidence):
 
     pad = np.array(resolve(settings.get("scene")).hangar(settings["team"]))
     check(
-        np.linalg.norm(home_world[:2] - pad[:2]) <= 0.03
+        np.linalg.norm(home_world[:2] - pad[:2]) <= (0.03 if first else 0.12)
         and 0.015 <= home_world[2] - pad[2] <= 0.03,
         "mission did not start on the configured team pad",
     )
     height = positions[:, 2] - home_world[2]
-    check(height.max() >= settings["altitude"] - 0.2, "takeoff height was not reached")
-    check(height.max() <= settings["altitude"] + 0.4, "flight exceeded the altitude envelope")
+    takeoff = height[times <= flight_start]
+    check(takeoff.size and takeoff.max() >= settings["altitude"] - 0.2, "takeoff height was not reached")
+    route_heights = [leg.travel.goal[2] - home["position"][2] for leg in legs]
+    max_height = max([settings["altitude"], *route_heights])
+    check(height.max() <= max_height + 0.4, "flight exceeded the altitude envelope")
+    if max_height > settings["altitude"] + 1e-6:
+        check(takeoff.size and takeoff.max() <= settings["altitude"] + 0.4, "takeoff exceeded the altitude envelope")
     metrics["max_height_m"] = float(height.max())
     takeoff_begin = next((t for t, mode in modes if mode == 2), None)
+    if takeoff_begin is not None:
+        metrics["takeoff_s"] = takeoff_begin
     takeoff_end = next(
         (t for t, mode in modes if takeoff_begin is not None and t > takeoff_begin and mode == 3),
         None,
@@ -372,7 +389,7 @@ def evaluate(data: Evidence):
             metrics["takeoff_heading_error_deg"] = float(np.abs(error).max() * 180 / np.pi)
     velocities = np.gradient(positions, times, axis=0)
     if roundtrip:
-        check(4 in phase_modes("return", "acquire"), "return leg requires native TRACK state")
+        check(4 in phase_modes("return", approach), "return leg requires native TRACK state")
         metrics["waypoints"] = []
         for leg in legs:
             index = leg.index
@@ -433,7 +450,7 @@ def evaluate(data: Evidence):
             (row.get("max_error_m", row.get("closest_error_m")) for row in metrics["waypoints"]), default=0.0
         )
         acquired_position = np.array(
-            [np.interp(phase["acquire"].timestamp, times, positions[:, i]) for i in range(3)]
+            [np.interp(phase[approach].timestamp, times, positions[:, i]) for i in range(3)]
         )
         return_error = acquired_position - world_goal(phase["return"].goal)
         metrics["return_xy_error_m"] = float(np.linalg.norm(return_error[:2]))
@@ -444,11 +461,60 @@ def evaluate(data: Evidence):
             np.linalg.norm(acquired_position[:2] - pad[:2]) <= 0.45,
             "return did not reach the pad neighbourhood",
         )
-        cruise = (times >= flight_start) & (times <= phase["acquire"].timestamp)
+        previous_height = settings["altitude"]
+        for travel, following in [
+            *((leg.travel, leg.following) for leg in legs), (phase["return"], phase[approach])
+        ]:
+            target_height = travel.goal[2] - home["position"][2]
+            cruise = (times >= travel.timestamp) & (times <= following.timestamp)
+            check(cruise.any() and height[cruise].min() >= min(previous_height, target_height) - 0.4,
+                  "premature descent during waypoint flight")
+            previous_height = target_height
+    if settings["precision_land"]:
+        check_precision(rows_between, phase, home, settings, check)
+    landed_modes = [(t, mode) for t, mode in modes if t >= phase["land"].timestamp]
+    check(
+        bool(landed_modes)
+        and any(mode == 5 for _, mode in landed_modes)
+        and landed_modes[-1][1] == 0,
+        "LAND must finish in DISARMED",
+    )
+    land_start = next((i for i, (_, mode) in enumerate(landed_modes) if mode == 5), None)
+    if land_start is not None:
         check(
-            height[cruise].min() >= settings["altitude"] - 0.4,
-            "premature descent during waypoint flight",
+            all(mode in (0, 5) for _, mode in landed_modes[land_start:]),
+            "FC left LAND before completion",
         )
+    disarmed = next((t for t, mode in landed_modes if mode == 0), None)
+    if disarmed is not None:
+        metrics["disarmed_s"] = disarmed
+        check(
+            all(mode == 0 for t, mode in landed_modes if t >= disarmed), "FC rearmed after landing"
+        )
+        disarm_height = np.interp(disarmed, times, positions[:, 2]) - home_world[2]
+        check(abs(disarm_height) <= 0.04, "disarmed before physical ground contact")
+        disarm_speed = np.linalg.norm(
+            [np.interp(disarmed, times, velocities[:, i]) for i in range(3)]
+        )
+        check(disarm_speed <= 0.15, "disarmed while physically moving")
+        check(end - disarmed >= 0.5, "post-disarm settling evidence too short")
+    tail = times >= end - 0.5
+    metrics["landing_xy_error_m"] = float(
+        np.linalg.norm(positions[tail, :2] - pad[:2], axis=1).max()
+    )
+    metrics["landing_height_error_m"] = float(np.abs(positions[tail, 2] - home_world[2]).max())
+    metrics["landing_max_speed_mps"] = float(np.linalg.norm(velocities[tail], axis=1).max())
+    if settings["precision_land"]:
+        check(metrics["landing_xy_error_m"] <= 0.12, "physical landing error exceeds 0.12m")
+    check(
+        metrics["landing_height_error_m"] <= 0.02,
+        "physical landing is not on the original pad surface",
+    )
+    check(metrics["landing_max_speed_mps"] <= 0.05, "vehicle is not stationary on the pad")
+    return result()
+
+
+def check_precision(rows_between, phase, home, settings, check):
     acquisition = [
         (t, row)
         for t, row in rows_between("/landing/target", ("acquire", "land"))
@@ -481,44 +547,89 @@ def evaluate(data: Evidence):
         and precision.index(1) < precision.index(2) < precision.index(3),
         "ordered Align, Descend and Final precision stages required",
     )
-    landed_modes = [(t, mode) for t, mode in modes if t >= phase["land"].timestamp]
-    check(
-        bool(landed_modes)
-        and any(mode == 5 for _, mode in landed_modes)
-        and landed_modes[-1][1] == 0,
-        "LAND must finish in DISARMED",
-    )
-    land_start = next((i for i, (_, mode) in enumerate(landed_modes) if mode == 5), None)
-    if land_start is not None:
-        check(
-            all(mode in (0, 5) for _, mode in landed_modes[land_start:]),
-            "FC left LAND before completion",
-        )
-    disarmed = next((t for t, mode in landed_modes if mode == 0), None)
-    if disarmed is not None:
-        check(
-            all(mode == 0 for t, mode in landed_modes if t >= disarmed), "FC rearmed after landing"
-        )
-        disarm_height = np.interp(disarmed, times, positions[:, 2]) - home_world[2]
-        check(abs(disarm_height) <= 0.04, "disarmed before physical ground contact")
-        disarm_speed = np.linalg.norm(
-            [np.interp(disarmed, times, velocities[:, i]) for i in range(3)]
-        )
-        check(disarm_speed <= 0.15, "disarmed while physically moving")
-        check(end - disarmed >= 0.5, "post-disarm settling evidence too short")
-    tail = times >= end - 0.5
-    metrics["landing_xy_error_m"] = float(
-        np.linalg.norm(positions[tail, :2] - pad[:2], axis=1).max()
-    )
-    metrics["landing_height_error_m"] = float(np.abs(positions[tail, 2] - home_world[2]).max())
-    metrics["landing_max_speed_mps"] = float(np.linalg.norm(velocities[tail], axis=1).max())
-    check(metrics["landing_xy_error_m"] <= 0.12, "physical landing error exceeds 0.12m")
-    check(
-        metrics["landing_height_error_m"] <= 0.02,
-        "physical landing is not on the original pad surface",
-    )
-    check(metrics["landing_max_speed_mps"] <= 0.05, "vehicle is not stationary on the pad")
-    return result()
+
+
+def _window(rows, begin, end):
+    stamp = itemgetter(0)
+    return rows[bisect_left(rows, begin, key=stamp):bisect_right(rows, end, key=stamp)]
+
+
+def _initial_frame(poses, home):
+    """Align odometry once at the first ground anchor using bracketing truth samples."""
+    stamp, anchor = home
+    samples = _window(poses, stamp - .1, stamp + .1)
+    if len(samples) < 2 or not samples[0][0] <= stamp <= samples[-1][0]:
+        return None
+    times, xyz, quats = zip(*samples)
+    if np.any(np.diff(times) <= 0):
+        return None
+    rotation = Slerp(times, Rotation.from_quat(quats))(stamp) * Rotation.from_quat(anchor["quaternion"]).inv()
+    position = [np.interp(stamp, times, axis) for axis in zip(*xyz)]
+    return rotation, position - rotation.apply(anchor["position"])
+
+
+def evaluate(data: Evidence):
+    """Grade each flight in one fixed odometry frame; older recordings contain one flight."""
+    headers = [row for _, row in data.events if row["kind"] == "system_run"]
+    if not headers and not any("flight_id" in row for _, row in data.events):
+        return evaluate_flight(data)
+    report = Report()
+    count = headers[0].get("planned_flights") if headers else None
+    if len(headers) != 1 or type(count) is not int or count < 1:
+        report.check(False, "invalid system run declaration")
+        return report.result()
+    groups = {}
+    last_id = 0
+    for stamp, row in data.events:
+        if row["kind"] in ("system_run", "source", "provenance"):
+            continue
+        fid = row.get("flight_id")
+        if type(fid) is not int or not 1 <= fid <= count:
+            report.check(False, "missing or invalid flight identity")
+            continue
+        report.check(fid >= last_id, "flight events overlap or run out of order")
+        last_id = fid
+        groups.setdefault(fid, []).append((stamp, row))
+    report.check(list(groups) == list(range(1, len(groups) + 1)) and len(groups) == count,
+                 "run did not execute all declared flights in order")
+    previous_end = None
+    session = frame = None
+    flights = []
+    for fid, events in groups.items():
+        settings = next((row for _, row in events if row["kind"] == "settings"), {})
+        home = next(((t, row) for t, row in events if row["kind"] == "home"), None)
+        end = next((t for t, row in events if row.get("name") == "complete"), events[-1][0])
+        start = home[0] if home else events[0][0]
+        next_events = groups.get(fid + 1)
+        release_end = min(end + .5, next_events[0][0]) if next_events else end + .5
+        poses = _window(data.poses, start - .05, end + .05)
+        part = Evidence(events=events, poses=poses, recording_complete=data.recording_complete,
+                        down_frames=_window(data.down_frames, start, end),
+                        scalars={k: _window(rows, start, release_end) for k, rows in data.scalars.items()})
+        boundary = Report()
+        if home:
+            _, anchor = home
+            if fid == 1:
+                session = anchor["session"]
+                frame = _initial_frame(poses, home)
+            boundary.check(frame is not None and anchor["session"] == session,
+                           "shared VIO session or initial odometry alignment is missing")
+        if previous_end is not None:
+            idle = _window(data.scalars.get("/fc/debug/state", []), previous_end - .1, start)
+            coverage = [previous_end - .1, *(t for t, _ in idle), start]
+            boundary.check(start > previous_end and bool(idle) and max(np.diff(coverage)) <= .35
+                           and all(v[0] == 0 for _, v in idle),
+                           "next flight requires a disarmed ground interval")
+        result = evaluate_flight(part, frame=frame, first=fid == 1)
+        result["failures"] += boundary.failures
+        result["passed"] = not result["failures"]
+        flights.append(dict(flight_id=fid, shape=settings.get("shape"), **result))
+        report.failures.extend(f"flight {fid}: {message}" for message in result["failures"])
+        previous_end = end
+    if count == 1 and flights:
+        report.metrics.update(flights[0]["metrics"])
+    report.metrics.update(planned_flights=count, vio_session=session, flights=flights)
+    return report.result()
 
 
 def verify_recording(path):

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 /// 桌面应用：仿真、可视化与地面站 CLI。
 const DESKTOP_APPS: &[&str] = &[
+    "firefly-daemon",
     "fc",
     "ffctl",
     "firefly-rootslam",
@@ -17,6 +18,7 @@ const DESKTOP_APPS: &[&str] = &[
 
 /// 机载应用：Orange Pi Zero 3W 上运行的进程，不含 Bevy 仿真/演示程序。
 const BOARD_APPS: &[&str] = &[
+    "firefly-daemon",
     "camera",
     "fc",
     "ffctl",
@@ -85,6 +87,7 @@ mod tests {
     #[test]
     fn desktop_release_includes_vio_planning_and_hil() {
         let apps = Target::Desktop.apps();
+        assert!(apps.contains(&"firefly-daemon"));
         assert!(apps.contains(&"firefly-rootslam"));
         assert!(apps.contains(&"planner"));
         assert!(apps.contains(&"traj"));
@@ -94,6 +97,7 @@ mod tests {
     #[test]
     fn board_release_includes_rootslam_and_the_gadget() {
         let apps = Target::Board.apps();
+        assert!(apps.contains(&"firefly-daemon"));
         assert!(apps.contains(&"firefly-rootslam"));
         assert!(apps.contains(&"hil-gadget"));
         assert!(apps.contains(&"planner"));

@@ -644,6 +644,9 @@ mod config_tests {
         assert_eq!(parsed.precision, Precision::Float32);
         assert!(!parsed.vio.map && !parsed.vio.loops);
         let mut expected = crate::config::initial_vio_config(&Options::default()).unwrap();
+        expected.vio_init_yaw_weight = None;
+        expected.vio_init_tilt_weight = 1e4;
+        expected.vio_init_velocity_weight = 1e4;
         expected.optical_flow_rematch_stereo = true;
         expected.optical_flow_levels = 1;
         expected.optical_flow_pattern = 50;
