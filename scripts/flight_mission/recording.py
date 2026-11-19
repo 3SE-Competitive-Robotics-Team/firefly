@@ -31,14 +31,10 @@ def read_recording(path):
         "/fc/imu/health",
         "/fc/imu/quaternion_xyzw",
     }
+    evidence_paths = scalar_paths | {"/gt/pose", "/logs/flight", "/logs/mimir", "/cameras/down/image"}
     for chunk in reader.stream(store=recording):
         entity = str(chunk.entity_path)
-        if entity not in scalar_paths | {
-            "/gt/pose",
-            "/logs/flight",
-            "/logs/mimir",
-            "/cameras/down/image",
-        }:
+        if entity not in evidence_paths:
             continue
         batch = chunk.to_record_batch()
         if entity == "/logs/mimir" and "TextLog:text" in batch.schema.names:

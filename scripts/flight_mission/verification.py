@@ -1,6 +1,7 @@
 """Grade native mission states, continuous images and physical flight evidence."""
 
 from dataclasses import dataclass, field
+import math
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 from .recording import Evidence, read_recording
@@ -31,7 +32,8 @@ class PhaseEvent:
         stamp, payload = row
         goal = payload.get("goal")
         return cls(
-            stamp, payload["name"], tuple(goal) if goal is not None else None, payload.get("index")
+            stamp, payload.get("name"), tuple(goal) if isinstance(goal, (list, tuple)) else None,
+            payload.get("index"),
         )
 
 
@@ -92,15 +94,15 @@ def read_timeline(data, report):
                (("waypoint", "waypoint_hover") if kind == "stop" else ("waypoint",))]
             + ["return", "acquire", "land", "complete"]
         )
-    phases = [(stamp, row) for stamp, row in data.events if row["kind"] == "phase"]
+    phases = [PhaseEvent.from_row(row) for row in data.events if row[1]["kind"] == "phase"]
     check(
-        [row["name"] for _, row in phases] == expected,
+        [event.name for event in phases] == expected,
         "mission phase sequence is incomplete or out of order",
     )
     check(settings["precision_land"], "precision landing must be selected")
-    if len(phases) != len(expected) or [row["name"] for _, row in phases] != expected:
+    if report.failures:
         return None
-    phase = {row["name"]: (stamp, row) for stamp, row in phases}
+    phase = {event.name: event for event in phases}
     start, home = homes[0]
     legs = []
     if roundtrip:
@@ -119,23 +121,21 @@ def read_timeline(data, report):
                 hover = phases[cursor]
                 cursor += 1
             following = phases[cursor]
-            legs.append(WaypointLeg(index, PhaseEvent.from_row(travel),
-                                    PhaseEvent.from_row(hover) if hover else None,
-                                    PhaseEvent.from_row(following)))
-            offset = planned[index][1].get("offset", [])
-            check(
-                len(offset) == 2 and np.isfinite(offset).all(),
-                "invalid declared waypoint offset",
+            legs.append(WaypointLeg(index, travel, hover, following))
+            offset = planned[index][1].get("offset")
+            valid_offset = (
+                isinstance(offset, (list, tuple)) and len(offset) == 2
+                and all(type(value) in (int, float) and math.isfinite(value) for value in offset)
             )
-            if len(offset) != 2:
+            if not valid_offset:
+                check(False, "invalid declared waypoint offset")
                 return None
             goal = np.array(home["position"]) + [offset[0], offset[1], settings["altitude"]]
             check(
                 planned[index][0] <= start
-                and travel[1].get("index") == index
-                and np.array_equal(travel[1].get("goal"), goal)
-                and (hover is None or (hover[1].get("index") == index
-                                        and np.array_equal(hover[1].get("goal"), goal))),
+                and travel.index == index
+                and np.array_equal(travel.goal, goal)
+                and (hover is None or (hover.index == index and np.array_equal(hover.goal, goal))),
                 f"waypoint {index}: phase identity/goal differs from the declared route",
             )
         return_goal = np.array(home["position"]) + [
@@ -143,24 +143,18 @@ def read_timeline(data, report):
             settings["altitude"],
         ]
         check(
-            np.array_equal(phase["return"][1].get("goal"), return_goal),
+            np.array_equal(phase["return"].goal, return_goal),
             "return goal differs from the takeoff-frame approach point",
         )
 
     check(
-        all(phases[i + 1][0] > phases[i][0] for i in range(len(phases) - 1)),
+        all(after.timestamp > before.timestamp for before, after in zip(phases, phases[1:])),
         "phase timestamps must increase",
     )
 
     if report.failures:
         return None
-    return Timeline(
-        settings,
-        home,
-        start,
-        {name: PhaseEvent.from_row(row) for name, row in phase.items()},
-        tuple(legs),
-    )
+    return Timeline(settings, home, start, phase, tuple(legs))
 
 
 def check_images(data, timeline, report):
@@ -176,6 +170,9 @@ def check_images(data, timeline, report):
         image_times = [row[0] for row in images]
         metrics["down_frames"] = len(images)
         gaps = np.diff(image_times)
+        if np.any(gaps <= 0):
+            check(False, "down-camera timestamps must increase")
+            return
         metrics["max_down_gap_s"] = float(max(gaps, default=0.0))
         metrics["down_fps"] = (
             (len(image_times) - 1) / (image_times[-1] - image_times[0])
@@ -193,7 +190,7 @@ def check_images(data, timeline, report):
         if rate not in (15, 30):
             return
         check(
-            min(np.diff(image_times), default=1.0) >= 1.0 / rate - 0.001000001,
+            min(gaps, default=1.0) >= 1.0 / rate - 0.001000001,
             "down-camera exceeds the requested capture rate",
         )
         # Intent comes from the shared resource API; actual work comes from native counters/images.
@@ -452,13 +449,15 @@ def evaluate(data: Evidence):
     acquisition = [
         (t, row)
         for t, row in rows_between("/landing/target", ("acquire", "land"))
-        if t > phase["acquire"].timestamp and row[3] == 1
+        if t > phase["acquire"].timestamp and len(row) == 4 and row[3] == 1
+        and all(math.isfinite(value) for value in row[:3])
     ]
     quality = dict(rows_between("/landing/quality", ("acquire", "land")))
     valid = [
         (t, row)
         for t, row in acquisition
         if t in quality
+        and len(quality[t]) == 4
         and quality[t][0] == float(home["session"])
         and quality[t][1] == int(settings["team"] == "blue")
         and 0 <= quality[t][2] <= 2.0

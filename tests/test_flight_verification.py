@@ -31,6 +31,26 @@ def test_visual_span_uses_rrd_nanosecond_precision(last, passed):
     assert evaluate(data)["passed"] == passed
 
 
+@pytest.mark.parametrize("fault, reason", [
+    ("nonfinite_target", "three fresh"),
+    ("missing_offset", "invalid declared waypoint offset"),
+    ("duplicate_image_time", "down-camera timestamps must increase"),
+])
+def test_invalid_recorded_evidence_reports_the_failed_check(fault, reason):
+    data = successful_evidence()
+    if fault == "nonfinite_target":
+        for _, row in data.scalars["/landing/target"]:
+            row[0] = float("nan")
+    elif fault == "missing_offset":
+        next(row for _, row in data.events if row["kind"] == "waypoint")["offset"] = None
+    else:
+        stamp = data.down_frames[len(data.down_frames) // 2][0]
+        data.down_frames = [(stamp, *row[1:]) for row in data.down_frames]
+    report = evaluate(data)
+    assert not report["passed"]
+    assert any(reason in failure for failure in report["failures"])
+
+
 @pytest.mark.parametrize("fault", ["cruise_gap", "cruise_compute", "missing_runtime", "rate", "invalid_rate", "missing_rate", "rate_drift", "not_released", "cpu_hil"])
 def test_continuous_video_and_on_demand_inference_are_independently_scored(fault):
     data = successful_evidence()
