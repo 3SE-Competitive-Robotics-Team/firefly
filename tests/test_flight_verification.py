@@ -88,6 +88,19 @@ def test_continuous_video_and_on_demand_inference_are_independently_scored(fault
     assert not report["passed"], report
 
 
+def test_landing_worker_can_confirm_release_during_ground_settling():
+    data = successful_evidence()
+    end = next(t for t, row in data.events if row.get("name") == "complete")
+    data.events = [(end - .75 if t == end and row["kind"] == "activity" else t, row)
+                   for t, row in data.events]
+    runtime = data.scalars["/landing/runtime"]
+    _, idle = runtime[-1]
+    runtime[-1] = (end - .74, idle)
+    assert evaluate(data)["passed"]
+    runtime.append((end - .1, [1., 110., 1., 0.]))
+    assert not evaluate(data)["passed"]
+
+
 def test_scoring_uses_initial_full_coordinate_alignment():
     data = successful_evidence()
     from scipy.spatial.transform import Rotation

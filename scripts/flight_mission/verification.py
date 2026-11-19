@@ -265,10 +265,12 @@ def check_images(data, timeline, report):
                 any(row[0] == 1 for t, row in runtime if begin <= t <= finish),
                 "landing pipeline was not active during a requested window",
             )
-        check(
-            any(row[0] == 0 for t, row in runtime if end <= t <= end + 0.5),
-            "landing resources were not released at mission completion",
-        )
+        # Ground settling may continue after the landing worker has already acknowledged release.
+        released = next((t for t, row in runtime if since <= t <= since + 0.5
+                         and row[0] == 0 and row[2] == 0), None)
+        check(not enabled and since >= timeline.phases["land"].timestamp and released is not None
+              and all(row[0] == 0 and row[2] == 0 for t, row in runtime if released <= t <= end + 0.5),
+              "landing resources were not released at mission completion")
         for begin, finish, active in intervals:
             if active or finish - begin <= 0.5:
                 continue
