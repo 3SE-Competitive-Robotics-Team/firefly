@@ -286,11 +286,17 @@ fn ipc_loop(
     let mut last_heartbeat = Instant::now();
     let mut session = 0_u64;
     let mut imu_batch: Vec<ImuMessage> = Vec::with_capacity(options.imu_batch);
+    let (responses, rx) = sync_channel(4);
+    crate::mission::serve(priority_tx.clone(), rx).map_err(|e| e.to_string())?;
     while !stop.load(Ordering::Relaxed) {
         let mut activity = false;
         // 先排空上行控制：图像/IMU 下行不能把 1 kHz 控制的回传压在后面。
         while let Ok(message) = up_rx.try_recv() {
-            dispatch_uplink(&up, &mut stats, &mut session, message, last_imu_stamp)?;
+            if let Message::MissionReply(id, body) = message {
+                let _ = responses.try_send((id, body));
+            } else {
+                dispatch_uplink(&up, &mut stats, &mut session, message, last_imu_stamp)?;
+            }
             activity = true;
         }
         activity |= down

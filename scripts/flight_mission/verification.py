@@ -5,8 +5,9 @@ from dataclasses import dataclass, field
 from operator import itemgetter
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
-from .config import CUBOID_ROOF
 from .recording import Evidence, read_recording
+
+CUBOID_ROOF = 3.3
 
 
 @dataclass
@@ -95,6 +96,35 @@ def read_timeline(data, report):
         expected.append("acquire")
     expected.extend(("land", "complete"))
     phases = [(stamp, row) for stamp, row in data.events if row["kind"] == "phase"]
+    native = "mission_id" in settings and "flight_id" in settings
+    if native:
+        terminal = phases[-1][1] if phases else {}
+        if terminal.get("name") in {"recover", "needs_operator", "interrupted"}:
+            check(False, f"mission ended in {terminal['name']}: {terminal.get('reason', 'reason missing')}")
+            return None
+        # Independently check every native phase, including HOLD acknowledgement
+        # and disarmed settling, before selecting the windows for physical scoring.
+        layout = [("arm", None), ("takeoff", "takeoff"), ("hover", None)]
+        for arrival in arrivals:
+            layout.append(("navigate", "waypoint"))
+            if arrival == "stop":
+                layout.extend((("hold", None), ("dwell", "waypoint_hover")))
+        if roundtrip:
+            layout.extend((("navigate", "return"), ("hold", None), ("dwell", None)))
+        if settings["precision_land"]:
+            layout.append(("acquire", "acquire"))
+        layout.extend((("land", "land"), ("ground", None), ("complete", "complete")))
+        if [row["name"] for _, row in phases] != [name for name, _ in layout]:
+            check(False, "native phase sequence is incomplete or out of order")
+            return None
+        cursor = 0
+        for _, row in phases:
+            if row["name"] in ("navigate", "hold", "dwell"):
+                check(row.get("index") == cursor, "phase refers to the wrong waypoint")
+                if row["name"] == "dwell" or (row["name"] == "navigate" and cursor < len(arrivals) and arrivals[cursor] == "pass"):
+                    cursor += 1
+        phases = [(t, dict(row, name=window)) for (t, row), (_, window) in zip(phases, layout) if window]
+        settings = {**settings, **data.capture}
     check(
         [row["name"] for _, row in phases] == expected,
         "mission phase sequence is incomplete or out of order",
@@ -126,7 +156,7 @@ def read_timeline(data, report):
             offset = planned[index][1].get("offset", [])
             if len(offset) == 2:  # Planar declarations in older recordings inherit takeoff height.
                 offset = [*offset, settings["altitude"]]
-            ceiling = CUBOID_ROOF if settings.get("shape") == "cuboid" else settings["altitude"]
+            ceiling = CUBOID_ROOF if native or settings.get("shape") == "cuboid" else settings["altitude"]
             check(
                 len(offset) == 3 and np.isfinite(offset).all() and 0.5 <= offset[2] <= ceiling,
                 "invalid declared waypoint offset",
@@ -225,7 +255,9 @@ def check_images(data, timeline, report):
         runtime = data.scalars.get("/landing/runtime", [])
         check(bool(runtime), "landing lifecycle evidence is missing")
         check(
-            all(row[3] == float(settings.get("transport") == "hil") for _, row in runtime),
+            (all(row[3] == float(settings["transport"] == "hil") for _, row in runtime)
+             if "transport" in settings else len({row[3] for _, row in runtime}) == 1
+             and all(row[3] in (0, 1) for _, row in runtime)),
             "landing backend does not match SIL/HIL execution",
         )
         for begin, finish in windows:
@@ -265,6 +297,8 @@ def evaluate_flight(data: Evidence, *, frame=None, first=True):
         check_images(data, timeline, report)
     check, metrics, result = report.check, report.metrics, report.result
     settings, home = timeline.settings, timeline.home
+    if "mission_id" in settings:
+        check(bool(data.capture.get("scene")), "missing recorded simulation scene")
     start, end, phase, legs = timeline.start, timeline.end, timeline.phases, timeline.legs
     metrics.update(home_s=start, complete_s=end)
     roundtrip = settings["mission"] == "roundtrip"
@@ -571,6 +605,8 @@ def _initial_frame(poses, home):
 def evaluate(data: Evidence):
     """Grade each flight in one fixed odometry frame; older recordings contain one flight."""
     headers = [row for _, row in data.events if row["kind"] == "system_run"]
+    if any("mission_id" in row for _, row in data.events) or any("run" in row for row in headers):
+        return evaluate_native(data)
     if not headers and not any("flight_id" in row for _, row in data.events):
         return evaluate_flight(data)
     report = Report()
@@ -592,6 +628,56 @@ def evaluate(data: Evidence):
         groups.setdefault(fid, []).append((stamp, row))
     report.check(list(groups) == list(range(1, len(groups) + 1)) and len(groups) == count,
                  "run did not execute all declared flights in order")
+    return grade_groups(data, groups, count, report)
+
+
+def evaluate_native(data, *, board=False):
+    report = Report()
+    report.check(data.recording_complete, "incomplete recording")
+    report.check(any(row["kind"] == "system_run" for _, row in data.events),
+                 "missing system run declaration")
+    groups = {}
+    missions = {}
+    run = None
+    previous = None
+    for stamp, row in data.events:
+        if row["kind"] == "system_run":
+            run = run or row.get("run")
+            report.check(bool(run) and row.get("run") == run, "conflicting system run identities")
+            continue
+        mission = row.get("mission_id")
+        if not mission or not row.get("run") or "flight_id" not in row:
+            report.check(False, "missing native run, mission or airborne identity")
+            return report.result()
+        run = run or row["run"]
+        report.check(row["run"] == run, "conflicting system run identities")
+        if mission != previous:
+            report.check(mission not in missions, "mission events overlap")
+            previous = mission
+        missions.setdefault(mission, []).append((stamp, row))
+    attempts = []
+    for mission, rows in missions.items():
+        identity = None
+        for _, row in rows:
+            if row["kind"] == "airborne":
+                fid = row["flight_id"]
+                report.check(identity is None and type(fid) is int and fid > 0,
+                             "invalid or repeated airborne assignment")
+                identity = fid
+            report.check(row["flight_id"] == identity, "flight identity changed without airborne assignment")
+        if type(identity) is not int or identity <= 0:
+            attempts.append(mission)
+            names = [row.get("name") for _, row in rows if row["kind"] == "phase"]
+            report.check(names[:1] == ["arm"] and names[-1:] == ["interrupted"]
+                         and "recover" in names, f"{mission}: missing airborne or interruption evidence")
+            continue
+        report.check(not groups or identity == next(reversed(groups)) + 1, "flight sequence has gaps or duplicates")
+        groups[identity] = rows
+    report.metrics.update(run=run, ground_attempts=attempts)
+    return grade_groups(data, groups, None, report, board=board)
+
+
+def grade_groups(data, groups, count, report, *, board=False):
     previous_end = None
     session = frame = None
     flights = []
@@ -603,34 +689,68 @@ def evaluate(data: Evidence):
         next_events = groups.get(fid + 1)
         release_end = min(end + .5, next_events[0][0]) if next_events else end + .5
         poses = _window(data.poses, start - .05, end + .05)
-        part = Evidence(events=events, poses=poses, recording_complete=data.recording_complete,
+        part = Evidence(events=events, poses=poses, recording_complete=data.recording_complete, capture=data.capture,
                         down_frames=_window(data.down_frames, start, end),
                         scalars={k: _window(rows, start, release_end) for k, rows in data.scalars.items()})
         boundary = Report()
         if home:
             _, anchor = home
-            if fid == 1:
+            if not flights:
                 session = anchor["session"]
-                frame = _initial_frame(poses, home)
-            boundary.check(frame is not None and anchor["session"] == session,
-                           "shared VIO session or initial odometry alignment is missing")
+                if not board:
+                    frame = _initial_frame(poses, home)
+            if not board:
+                boundary.check(frame is not None, "initial odometry alignment is missing")
+            boundary.check(session is not None and anchor["session"] == session, "shared VIO session changed")
         if previous_end is not None:
             idle = _window(data.scalars.get("/fc/debug/state", []), previous_end - .1, start)
             coverage = [previous_end - .1, *(t for t, _ in idle), start]
             boundary.check(start > previous_end and bool(idle) and max(np.diff(coverage)) <= .35
                            and all(v[0] == 0 for _, v in idle),
                            "next flight requires a disarmed ground interval")
-        result = evaluate_flight(part, frame=frame, first=fid == 1)
+        result = Report().result() if board else evaluate_flight(part, frame=frame, first=not flights)
+        if board and not settings.get("mission_id"):
+            boundary.check(False, "missing native mission settings")
+        if settings.get("mission_id"):
+            lifecycle = Report()
+            timeline = read_timeline(part, lifecycle)
+            if timeline is not None:
+                lifecycle.check(timeline.home.get("session") is not None and
+                                timeline.home["session"] == session, "shared VIO session changed")
+                states = _window(part.scalars.get("/fc/debug/state", []), timeline.start, timeline.end)
+                modes = [int(v[0]) for _, v in states]
+                times = [timeline.start, *(t for t, _ in states), timeline.end]
+                lifecycle.check(max(np.diff(times)) <= .35 and 6 not in modes,
+                                "FC status gap or attitude fallback during flight")
+                lifecycle.check(2 in modes and 5 in modes and modes[-1] == 0 and modes.index(2) < modes.index(5),
+                                "FC takeoff, landing or final disarm evidence missing")
+            result["lifecycle"] = lifecycle.result()
+            result["phase"] = next((row.get("name") for _, row in reversed(events) if row["kind"] == "phase"), None)
+            result["ground_truth_available"] = bool(poses)
+            result["failures"].extend(x for x in lifecycle.failures if x not in result["failures"])
         result["failures"] += boundary.failures
         result["passed"] = not result["failures"]
-        flights.append(dict(flight_id=fid, shape=settings.get("shape"), **result))
+        flights.append(dict(flight_id=fid, mission_id=settings.get("mission_id"), shape=settings.get("shape"), **result))
         report.failures.extend(f"flight {fid}: {message}" for message in result["failures"])
         previous_end = end
-    if count == 1 and flights:
+    if len(flights) == 1:
         report.metrics.update(flights[0]["metrics"])
-    report.metrics.update(planned_flights=count, vio_session=session, flights=flights)
+    if count is not None:
+        report.metrics["planned_flights"] = count
+    report.metrics.update(vio_session=session, flights=flights)
     return report.result()
 
 
-def verify_recording(path):
-    return evaluate(read_recording(path))
+def verify_recording(path, *, expected_transport=None):
+    data = read_recording(path)
+    if expected_transport == "board":
+        result = evaluate_native(data, board=True)
+        result["metrics"]["verification_scope"] = "onboard_lifecycle"
+        return result
+    result = evaluate(data)
+    if expected_transport and any(row.get("precision_land") for _, row in data.events):
+        runtime = data.scalars.get("/landing/runtime", [])
+        if not runtime or any(row[3] != int(expected_transport == "hil") for _, row in runtime):
+            result["failures"].append(f"recorded inference backend differs from {expected_transport} acceptance target")
+            result["passed"] = False
+    return result

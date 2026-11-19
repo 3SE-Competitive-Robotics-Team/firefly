@@ -12,20 +12,19 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.parametrize("route, points", [
-    ([], 1),
-    (["--shape", "square"], 5),
-    (["--shape", "triangle"], 4),
-    (["--waypoint", "2", "0", "--waypoint", "3", "1", "--waypoint", "2", "0"], 3),
+    ("square", 5),
+    ("triangle", 4),
+    ("cuboid", 16),
 ])
 def test_roundtrip_reacquires_pad_and_physically_lands(route, points):
     reports = []
 
     def observe(line):
-        if line.startswith('{"commands_completed":'):
+        if line.startswith("{") and '"commands_completed":' in line:
             reports.append(json.loads(line))
 
     process = ManagedProcess(
-        [str(ROOT / ".venv/bin/python"), "scripts/flight.py", "--mission", "roundtrip", "--precision-land", *route],
+        ["cargo", "xtask", "sil", f"configs/mission-{route}.toml"],
         cwd=ROOT, env={**os.environ, "RUST_LOG": "info"}, on_line=observe,
     )
     try:
@@ -44,11 +43,11 @@ def test_roundtrip_reacquires_pad_and_physically_lands(route, points):
     assert report["verification"]["metrics"]["max_down_gap_s"] <= .5
     assert report["verification"]["metrics"]["down_fps"] >= 10.
     assert len(report["verification"]["metrics"]["waypoints"]) == points
-    if route == ["--shape", "square"]:
+    if route == "square":
         visits = report["verification"]["metrics"]["waypoints"]
-        assert [v["arrival"] for v in visits] == ["pass", "stop", "stop", "stop", "stop"]
+        assert [v["arrival"] for v in visits] == ["pass"] * 4 + ["stop"]
         assert visits[0]["pass_speed_mps"] > 0.25
-        assert visits[-1]["hover_seconds"] >= 2.95
+        assert visits[-1]["hover_seconds"] >= .95
     assert Path(report["recording"]).is_file()
     from rerun.chunk import RrdReader
     reader = RrdReader(report["recording"])

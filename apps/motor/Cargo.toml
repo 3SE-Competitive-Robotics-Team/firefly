@@ -26,6 +26,7 @@ serde.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 firefly-hil.workspace = true
+firefly-mission.workspace = true
 
 [dev-dependencies]
 toml.workspace = true

@@ -1,0 +1,10 @@
+altitude = 2.0
+hover_seconds = 3
+precision_land = true
+return_offset = [0.12, -0.08]
+waypoints = [
+  { offset = [2, 0, 2], arrival = "stop" },
+  { offset = [4, 0, 2], arrival = "stop" },
+  { offset = [3, 1.7320508075688772, 2], arrival = "stop" },
+  { offset = [2, 0, 2], arrival = "stop" },
+]

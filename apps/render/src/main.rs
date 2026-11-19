@@ -80,6 +80,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     });
     let log_ipc = firefly_observability::init_ipc(&ports.node, "render");
+    log_ipc.event(
+        "render",
+        0.0,
+        &format!(
+            "capture {{\"scene\":\"{}\",\"down_rate_hz\":{}}}",
+            spec.name, render_config.capture.down_hz
+        ),
+    );
     build_app(spec, &render_config, ports, log_ipc, offline)
         .unwrap_or_else(|error| {
             log::error!("render 初始化失败: {error}");

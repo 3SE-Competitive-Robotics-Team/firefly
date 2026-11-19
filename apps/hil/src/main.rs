@@ -1,6 +1,7 @@
 mod bridge;
 mod config;
 mod host;
+mod mission;
 
 use std::process::ExitCode;
 

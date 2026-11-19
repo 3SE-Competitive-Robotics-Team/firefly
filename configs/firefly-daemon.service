@@ -1,0 +1,20 @@
+[Unit]
+Description=Firefly mission daemon
+PartOf=firefly.service
+After=firefly.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+WorkingDirectory=/opt/firefly
+ExecStart=/opt/firefly/bin/firefly-daemon
+Environment=RUST_LOG=info
+WatchdogSec=4s
+TimeoutStartSec=30s
+TimeoutStopSec=10s
+TimeoutAbortSec=5s
+Restart=on-failure
+RestartSec=1s
+
+[Install]
+WantedBy=firefly.service

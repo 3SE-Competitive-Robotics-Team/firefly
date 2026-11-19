@@ -2502,12 +2502,14 @@ dependencies = [
  "firefly-error",
  "firefly-hal",
  "firefly-hil",
+ "firefly-mission",
  "firefly-observability",
  "firefly-pubsub",
  "iceoryx2-bb-posix",
  "log",
  "nix 0.32.0",
  "serde",
+ "serde_json",
  "toml 1.2.1+spec-1.1.0",
  "v4l",
 ]
@@ -3545,9 +3547,11 @@ dependencies = [
  "firefly-pubsub",
  "iceoryx2",
  "nix 0.32.0",
+ "sd-notify",
  "serde",
  "serde_json",
  "signal-hook",
+ "tempfile",
 ]
 
 [[package]]
@@ -4525,11 +4529,13 @@ dependencies = [
  "firefly-config",
  "firefly-error",
  "firefly-hil",
+ "firefly-mission",
  "firefly-observability",
  "firefly-pubsub",
  "log",
  "nusb",
  "serde",
+ "serde_json",
  "signal-hook",
 ]
 
@@ -6023,6 +6029,7 @@ dependencies = [
  "firefly-error",
  "firefly-hal",
  "firefly-hil",
+ "firefly-mission",
  "firefly-observability",
  "firefly-pubsub",
  "iceoryx2-bb-posix",
@@ -8651,6 +8658,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sd-notify"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e4ef7359e694bfaf1dd27a30f9d760b54c00dfae9f19bd0c05a39bc9128fe76"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "security-framework"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10952,6 +10968,12 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "firefly-mission",
+ "nix 0.32.0",
+ "serde_json",
+ "signal-hook",
+ "tempfile",
+ "toml 1.2.1+spec-1.1.0",
  "zstd",
 ]
 

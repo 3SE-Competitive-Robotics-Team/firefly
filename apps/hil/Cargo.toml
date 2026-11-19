@@ -14,6 +14,8 @@ readme.workspace = true
 firefly-config = { workspace = true }
 firefly-error = { workspace = true }
 firefly-hil = { workspace = true }
+firefly-mission.workspace = true
+serde_json.workspace = true
 firefly-observability = { workspace = true }
 firefly-pubsub = { workspace = true }
 log = { workspace = true }

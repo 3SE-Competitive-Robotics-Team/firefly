@@ -26,6 +26,8 @@ serde.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 firefly-hil.workspace = true
+firefly-mission.workspace = true
+serde_json.workspace = true
 nix.workspace = true
 v4l.workspace = true
 

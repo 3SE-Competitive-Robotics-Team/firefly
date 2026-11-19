@@ -8,11 +8,8 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from flight_mission.config import ArrivalMode, default_goal, parse_args, route_points, route_waypoints
-from flight_mission.gates import at_goal, fresh_target
 from flight_mission.recording import Evidence
-from flight_mission.verification import evaluate
-from firefly_ipc.messages import LandingTargetMessage, OdomMessage
+from flight_mission.verification import evaluate, evaluate_native
 from firefly_mujoco.scene import resolve
 
 
@@ -159,30 +156,6 @@ def test_command_completion_cannot_hide_physical_or_protocol_failure(fault):
     assert not evaluate(data)["passed"], fault
 
 
-def test_fresh_target_requires_new_identity_quality_and_time():
-    message = LandingTargetMessage(timestamp=5., session=7, team=0, valid=1, confidence=.9, reprojection_px=.2)
-    arguments = dict(after=4.8, session=7, team=0)
-    assert fresh_target(message, 5.1, **arguments)
-    for field, value in [("session", 8), ("team", 1), ("valid", 0), ("confidence", float("nan")),
-                         ("reprojection_px", 3.), ("timestamp", 4.7), ("timestamp", 5.2)]:
-        invalid = copy.copy(message)
-        setattr(invalid, field, value)
-        assert not fresh_target(invalid, 5.1, **arguments), field
-    assert not fresh_target(message, 5.3, **arguments)
-
-
-def test_arrival_requires_stopping_and_roundtrip_accepts_precision_land():
-    pose = OdomMessage(position_x=2., position_z=1., is_initialized=True)
-    assert at_goal(pose, [2., 0., 1.])
-    pose.velocity_x = .5
-    assert not at_goal(pose, [2., 0., 1.])
-    args = parse_args(["--precision-land", "--goal", "2", "1"])
-    assert args.mission == "roundtrip" and args.precision_land and args.hover_seconds == 3. and args.altitude == 2.
-    assert parse_args([], hil=True, mission="hover").hover_seconds == 20.
-    assert default_goal("red") == (8., 0.) and default_goal("blue") == (-8., 0.)
-    for argv in (["--goal", "nan", "0"], ["--goal", "0", "0"], ["--return-offset", "1", "0"], ["--altitude", "0"]):
-        with pytest.raises(SystemExit):
-            parse_args(argv)
 
 
 def test_mission_sensor_profile_preserves_imu_and_sets_camera_budget():
@@ -193,56 +166,25 @@ def test_mission_sensor_profile_preserves_imu_and_sets_camera_budget():
     assert pose == pytest.approx(1 / 30)
 
 
-@pytest.mark.parametrize("shape, count", [("square", 4), ("triangle", 3)])
-def test_presets_close_with_equal_sides_and_mirror_for_blue(shape, count):
-    args = parse_args(["--shape", shape, "--side", "3"])
-    red = np.array(route_points(args, "red"))
-    assert len(red) == count + 1 and np.array_equal(red[0], red[-1])
-    assert np.linalg.norm(np.diff(red, axis=0), axis=1) == pytest.approx([3.] * count)
-    assert np.array(route_points(args, "blue")) == pytest.approx(-red)
-    assert red[0].tolist() == [3., 0.]
-    if shape == "square":
-        edges = np.diff(red, axis=0)
-        assert all(abs(np.dot(a, b)) < 1e-12 for a, b in zip(edges, np.roll(edges, 1, axis=0)))
-    assert parse_args(["--shape", shape]).side == (4. if shape == "square" else 2.)
+def route(shape, team="red"):
+    config = Path(__file__).resolve().parents[1] / f"configs/mission-{shape}.toml"
+    points = tomllib.loads(config.read_text())["waypoints"]
+    sign = 1 if team == "red" else -1
+    return tuple((sign * p["offset"][0], sign * p["offset"][1]) for p in points)
 
 
-def test_custom_waypoints_keep_order_and_initial_odom_axes_for_hil():
-    args = parse_args(["--waypoint", "2", "0", "--waypoint", "2", "2", "--waypoint", "0", "0"], hil=True, mission="roundtrip")
-    assert args.hil and route_points(args, "blue") == ((2., 0.), (2., 2.), (0., 0.))
-    assert route_points(parse_args([]), "red") == ((8., 0.),)
-    assert route_points(parse_args(["--mission", "hover"]), "red") == ()
-
-
-def test_square_visits_have_independent_arrival_modes():
-    points = route_waypoints(parse_args(["--shape", "square"]), "red")
-    assert points[0].offset == points[-1].offset
-    assert [p.arrival for p in points] == [ArrivalMode.PASS] + [ArrivalMode.STOP] * 4
-    points = route_waypoints(parse_args(["--shape", "square", "--pass-at", "2", "--pass-at", "3"]), "blue")
-    assert [p.arrival for p in points] == [ArrivalMode.STOP, ArrivalMode.PASS, ArrivalMode.PASS,
-                                          ArrivalMode.STOP, ArrivalMode.STOP]
-
-
-def test_cuboid_covers_twelve_edges_and_keeps_both_flight_levels_when_mirrored():
-    options = parse_args(["--shape", "cuboid"])
-    points = route_waypoints(options, "red")
-    red = np.array([point.offset for point in points])
-    assert {p.arrival for p in points} == {ArrivalMode.STOP}
-    assert np.unique(red, axis=0).shape == (8, 3)
-    assert np.ptp(red, axis=0) == pytest.approx([3., 2., 2.])
-    assert red[0] == pytest.approx([3., 0., 3.3])
-    assert red[:, 2].min() == pytest.approx(1.3)
+def test_cuboid_covers_twelve_edges_at_two_flight_levels():
     configs = Path(__file__).resolve().parents[1] / "configs"
-    desktop = tomllib.loads((configs / "planner-cuboid-sil.toml").read_text())
-    standard = tomllib.loads((configs / "planner.toml").read_text())
-    assert desktop["virtual_ceiling"] >= red[:, 2].max() + desktop["obstacle_clearance"]
-    assert desktop["obstacle_clearance"] == standard["obstacle_clearance"]
-    assert desktop["virtual_ground"] == standard["virtual_ground"]
+    points = tomllib.loads((configs / "mission-cuboid.toml").read_text())["waypoints"]
+    assert all(p["arrival"] == "stop" for p in points)
+    red = np.array([p["offset"] for p in points])
+    assert red[0] == pytest.approx([3., 0., 3.3])
+    assert np.ptp(red, axis=0) == pytest.approx([3., 2., 2.])
+    assert np.unique(red, axis=0).shape == (8, 3)
     assert np.all(np.count_nonzero(np.diff(red, axis=0), axis=1) == 1)
-    edges = {frozenset((p.offset, q.offset)) for p, q in zip(points, points[1:])}
-    assert len(points) == 16 and len(edges) == 12
-    blue = route_waypoints(options, "blue")
-    assert np.array([point.offset for point in blue]) == pytest.approx(red * [-1, -1, 1])
+    assert len({frozenset((tuple(a), tuple(b))) for a, b in zip(red, red[1:])}) == 12
+    desktop = tomllib.loads((configs / "planner-cuboid-sil.toml").read_text())
+    assert desktop["virtual_ceiling"] >= red[:, 2].max() + desktop["obstacle_clearance"]
 
 
 def test_multilevel_waypoints_are_scored_at_their_declared_height():
@@ -251,6 +193,56 @@ def test_multilevel_waypoints_are_scored_at_their_declared_height():
     second = next(row for _, row in data.events if row["kind"] == "waypoint" and row["index"] == 1)
     second["offset"] = (2., 0., 1.)
     assert not evaluate(data)["passed"]
+
+
+@pytest.mark.parametrize("fault", [None, "missing_header", "missing_liftoff", "changed_run", "old_names", "missing_hold"])
+def test_native_events_bind_the_flight_only_after_measured_liftoff(fault):
+    data = successful_evidence()
+    settings = data.events[0][1]
+    data.capture = {"down_rate_hz": settings.pop("down_rate_hz"), "scene": "rmuc2027@1.0.0"}
+    events = [(0., {"kind": "system_run", "run": "boot"})]
+    observed = [(1.02, {"kind": "phase", "name": "arm"}), (1.5, {"kind": "airborne"}),
+                (2.95, {"kind": "phase", "name": "hover"}),
+                (5.9, {"kind": "phase", "name": "hold", "index": 0}),
+                (11.8, {"kind": "phase", "name": "hold", "index": 1}),
+                (11.9, {"kind": "phase", "name": "dwell", "index": 1}),
+                (18.9, {"kind": "phase", "name": "ground"})]
+    for stamp, row in sorted(data.events + observed, key=lambda pair: pair[0]):
+        name = row.get("name")
+        if name in ("waypoint", "return"):
+            if name == "return":
+                row["index"] = 1
+            row["name"] = "navigate" if fault != "old_names" else name
+        elif name == "waypoint_hover":
+            row["name"] = "dwell"
+        if fault == "missing_liftoff" and row["kind"] == "airborne":
+            continue
+        if fault == "missing_hold" and name == "hold":
+            continue
+        events.append((stamp, dict(row, run="changed" if fault == "changed_run" and stamp > 6 else "boot",
+                                   mission_id="inspection", flight_id=1 if stamp >= 1.5 else None)))
+    data.events = events[1:] if fault == "missing_header" else events
+    result = evaluate(data)
+    assert result["passed"] == (fault is None), result
+    data.poses.clear()
+    data.capture.clear()
+    board = evaluate_native(data, board=True)
+    assert board["passed"] == (fault is None), board
+    if fault is None:
+        assert not board["metrics"]["flights"][0]["ground_truth_available"]
+        assert not evaluate(data)["passed"]
+        data.scalars["/fc/debug/state"].clear()
+        assert not evaluate_native(data, board=True)["passed"]
+
+
+def test_restart_is_the_same_run_and_ground_cancellation_has_no_flight_number():
+    header = {"kind": "system_run", "run": "boot"}
+    data = Evidence(events=[(0., header), (1., header)], recording_complete=True)
+    for i, name in enumerate(["arm", "recover", "interrupted"]):
+        data.events.append((i+2., dict(kind="phase", name=name, run="boot", mission_id="cancelled", flight_id=None)))
+    result = evaluate(data)
+    assert result["passed"] and result["metrics"]["flights"] == []
+    assert result["metrics"]["ground_attempts"] == ["cancelled"]
 
 
 def test_cuboid_may_climb_above_takeoff_only_after_entering_the_route():
@@ -262,21 +254,6 @@ def test_cuboid_may_climb_above_takeoff_only_after_entering_the_route():
     assert "takeoff exceeded the altitude envelope" in evaluate(data)["failures"]
 
 
-@pytest.mark.parametrize("argv", [
-    ["--shape", "square", "--goal", "2", "0"],
-    ["--side", "3"], ["--shape", "triangle", "--side", "nan"],
-    ["--shape", "square", "--side", "8"], ["--shape", "square", "--side", "0"],
-    ["--mission", "hover", "--shape", "square"], ["--mission", "hover", "--waypoint", "1", "0"],
-    ["--waypoint", "0", "0"], ["--waypoint", "nan", "0"], ["--waypoint", "8", "8"],
-    ["--waypoint", "2", "0", "--waypoint", "2", "0"],
-    ["--waypoint", "2", "0", "--waypoint", "-9", "0"],
-    ["--waypoint", "2", "0"] * 17,
-    ["--shape", "square", "--pass-at", "6"], ["--pass-at", "0"],
-    ["--shape", "cuboid", "--altitude", "3.3"],
-])
-def test_invalid_routes_fail_before_starting_processes(argv):
-    with pytest.raises(SystemExit):
-        parse_args(argv)
 
 
 def successful_evidence(team="red", *, points=((2., 0.),)):
@@ -340,7 +317,7 @@ def successful_evidence(team="red", *, points=((2., 0.),)):
 @pytest.mark.parametrize("shape, count", [("square", 5), ("triangle", 4)])
 @pytest.mark.parametrize("team", ["red", "blue"])
 def test_each_polygon_waypoint_is_physically_scored(shape, count, team):
-    points = route_points(parse_args(["--shape", shape]), team)
+    points = route(shape, team)
     report = evaluate(successful_evidence(team, points=points))
     assert report["passed"], report
     assert [row["index"] for row in report["metrics"]["waypoints"]] == list(range(count))
@@ -367,7 +344,7 @@ def test_fly_through_requires_measured_speed_proximity_and_track(fault):
 
 @pytest.mark.parametrize("fault", ["skipped", "identity", "wrong_goal", "wrong_return", "missing_intent", "short_hold", "no_track", "no_hold", "missed_middle", "count", "missing_count"])
 def test_polygon_cannot_skip_or_miss_an_intermediate_waypoint(fault):
-    data = successful_evidence(points=route_points(parse_args(["--shape", "square"]), "red"))
+    data = successful_evidence(points=route("square"))
     if fault == "skipped":
         data.events = [(t, row) for t, row in data.events if not (row.get("name") == "waypoint" and row.get("index") == 1)]
     elif fault == "identity":

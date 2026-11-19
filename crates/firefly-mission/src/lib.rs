@@ -45,36 +45,40 @@ impl Plan {
         if self.waypoints.len() > 16 {
             return Err("a mission plan supports up to 16 waypoints");
         }
-        if !self.return_offset.iter().all(|v| v.is_finite()) {
-            return Err("invalid return offset");
+        if !(0.0..=0.3).contains(&self.return_offset[0].hypot(self.return_offset[1])) {
+            return Err("return offset must be within 0.3 m of takeoff");
         }
-        if !(self.altitude.is_finite()
-            && self.altitude > 0.0
-            && self.hover_seconds.is_finite()
-            && (0.0..=3600.).contains(&self.hover_seconds))
+        if !((0.5..=2.0).contains(&self.altitude)
+            && self.hover_seconds > 0.0
+            && self.hover_seconds <= 600.0)
         {
             return Err("invalid takeoff height or dwell time");
         }
-        for (i, point) in self.waypoints.iter().enumerate() {
-            if !point.offset.iter().all(|v| v.is_finite()) || point.offset[2] <= 0. {
-                return Err("waypoints require finite coordinates and positive height");
+        let mut previous = [0.0, 0.0, self.altitude];
+        for (index, waypoint) in self.waypoints.iter().enumerate() {
+            let [x, y, z] = waypoint.offset;
+            if !(0.5..=3.3).contains(&z) || !(0.0..=10.0).contains(&x.hypot(y)) {
+                return Err(
+                    "waypoints require height in [0.5,3.3] m and horizontal radius <= 10 m",
+                );
             }
-            let next = self
-                .waypoints
-                .get(i + 1)
-                .map_or_else(|| self.return_point(), |w| w.offset);
-            if point.arrival == Arrival::Pass
-                && point
-                    .offset
-                    .iter()
-                    .zip(next)
-                    .all(|(a, b)| (a - b).abs() < 1e-6)
-            {
-                return Err("pass waypoint requires a distinct successor");
+            if index == 0 && x.hypot(y) < 1.0 {
+                return Err("first waypoint must be at least 1 m horizontally from takeoff");
             }
+            if !valid_leg(previous, waypoint.offset) {
+                return Err("consecutive waypoint spacing must be in [0.5,10] m");
+            }
+            previous = waypoint.offset;
+        }
+        if !self.waypoints.is_empty() && !valid_leg(previous, self.return_point()) {
+            return Err("return leg must be in [0.5,10] m");
         }
         Ok(())
     }
+}
+
+fn valid_leg(a: [f64; 3], b: [f64; 3]) -> bool {
+    (0.5..=10.0).contains(&(a[0] - b[0]).hypot(a[1] - b[1]).hypot(a[2] - b[2]))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -95,10 +99,16 @@ pub fn valid_id(id: &str) -> bool {
 
 #[must_use]
 pub fn runtime_dir() -> PathBuf {
-    if cfg!(target_os = "linux") {
+    runtime_dir_for(&firefly_config::paths::root())
+}
+
+/// Resolve sockets for the board installation or an isolated SIL prefix.
+#[must_use]
+pub fn runtime_dir_for(prefix: &std::path::Path) -> PathBuf {
+    if cfg!(target_os = "linux") && prefix == std::path::Path::new("/opt/firefly") {
         PathBuf::from("/run/firefly")
     } else {
-        firefly_config::paths::root().join("state")
+        prefix.join("state")
     }
 }
 
@@ -134,7 +144,14 @@ pub fn write_frame(stream: &UnixStream, value: &impl Serialize) -> io::Result<()
 /// # Errors
 /// Returns daemon rejection, timeout, or transport errors.
 pub fn call(request: &Request) -> io::Result<serde_json::Value> {
-    let stream = UnixStream::connect(socket_path())?;
+    call_at(&socket_path(), request)
+}
+
+/// Submit a request through a local daemon or USB HIL bridge socket.
+/// # Errors
+/// Returns connection, framing, timeout or mission errors.
+pub fn call_at(socket: &std::path::Path, request: &Request) -> io::Result<serde_json::Value> {
+    let stream = UnixStream::connect(socket)?;
     let timeout = Some(Duration::from_secs(5));
     stream.set_read_timeout(timeout)?;
     stream.set_write_timeout(timeout)?;
@@ -160,7 +177,7 @@ mod tests {
             }],
         };
         assert!(plan.validate().is_err());
-        plan.return_offset = [0.12, -0.08];
+        plan.waypoints[0].offset = [1., 0., 1.7];
         assert!(plan.validate().is_ok());
         plan.waypoints[0].offset[1] = f64::NAN;
         assert!(plan.validate().is_err());
@@ -172,6 +189,45 @@ mod tests {
         assert!(!valid_id("../previous-run"));
         assert!(!valid_id(""));
         assert!(!valid_id(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn rejects_out_of_envelope_inputs_before_flight() {
+        let mut plan = Plan {
+            altitude: 2.,
+            hover_seconds: 600.,
+            return_offset: [0., 0.],
+            precision_land: false,
+            waypoints: vec![Waypoint {
+                arrival: Arrival::Stop,
+                offset: [1., 0., 2.],
+            }],
+        };
+        assert!(plan.validate().is_ok());
+        for bad in [0.49, 2.01, f64::NAN] {
+            plan.altitude = bad;
+            assert!(plan.validate().is_err());
+        }
+        plan.altitude = 2.;
+        for bad in [0., 600.01, f64::INFINITY] {
+            plan.hover_seconds = bad;
+            assert!(plan.validate().is_err());
+        }
+        plan.hover_seconds = 1.;
+        for offset in [[100., 0., 2.], [0.9, 0., 2.], [1., 0., 4.], [1., 0., 0.4]] {
+            plan.waypoints[0].offset = offset;
+            assert!(plan.validate().is_err());
+        }
+        plan.waypoints[0].offset = [6., 0., 3.3];
+        plan.waypoints.push(Waypoint {
+            arrival: Arrival::Stop,
+            offset: [6., 0., 1.3],
+        });
+        assert!(plan.validate().is_ok());
+        for offset in [[6., 0., 3.2], [-6., 0., 2.]] {
+            plan.waypoints[1].offset = offset;
+            assert!(plan.validate().is_err());
+        }
     }
 
     #[test]

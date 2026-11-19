@@ -28,8 +28,10 @@ use firefly_pubsub::viz::{
 
 pub const MAGIC: [u8; 4] = *b"FHL1";
 /// 当前协议版本；接收端拒绝版本不一致的帧，主机与板端同步部署。
-pub const VERSION: u16 = 10;
+pub const VERSION: u16 = 11;
 pub const HEADER_LEN: usize = 48;
+/// Maximum serialized JSON request or reply, excluding its 8-byte correlation ID.
+pub const MISSION_BODY_MAX: usize = 8192;
 /// 单帧负载上限（字节）；大消息按此分片，限制单次 USB 传输的排队时延。
 pub const MAX_FRAGMENT: usize = 16 * 1024;
 /// 单条重组消息上限（字节）；深度图 320×240×f32 约 300KiB。
@@ -82,6 +84,8 @@ pub enum Kind {
     /// 有时限的资源请求；SIL/HIL 共用同一消息。
     Activity = 27,
     FcStatus = 28,
+    MissionRequest = 29,
+    MissionReply = 30,
 }
 
 impl Kind {
@@ -122,6 +126,8 @@ impl Kind {
             26 => Self::LandingTarget,
             27 => Self::Activity,
             28 => Self::FcStatus,
+            29 => Self::MissionRequest,
+            30 => Self::MissionReply,
             _ => return None,
         })
     }
@@ -141,7 +147,8 @@ impl Kind {
             | Self::Goal
             | Self::Activity
             | Self::Ping
-            | Self::Bye => Link::Sensor,
+            | Self::Bye
+            | Self::MissionRequest => Link::Sensor,
             Self::HelloAck
             | Self::Navigation
             | Self::Viz
@@ -157,7 +164,8 @@ impl Kind {
             | Self::Scalar
             | Self::Log
             | Self::Stats
-            | Self::Pong => Link::Actuator,
+            | Self::Pong
+            | Self::MissionReply => Link::Actuator,
         }
     }
 
@@ -169,6 +177,8 @@ impl Kind {
             Self::Reference => "reference",
             Self::PlannerStatus => "planner_status",
             Self::FcStatus => "fc_status",
+            Self::MissionRequest => "mission_request",
+            Self::MissionReply => "mission_reply",
             Self::Navigation => "navigation",
             Self::Viz => "viz",
             Self::Voxels => "voxels",
@@ -327,6 +337,8 @@ pub enum Message {
     Reference(ReferenceMessage),
     PlannerStatus(PlannerStatusMessage),
     FcStatus(FcStatusMessage),
+    MissionRequest(u64, Vec<u8>),
+    MissionReply(u64, Vec<u8>),
     Navigation(NavigationMessage),
     /// 空间诊断，仅编码有效数组元素。
     Viz(Box<VizMessage>),
@@ -397,6 +409,8 @@ impl Message {
             Self::Reference(_) => Kind::Reference,
             Self::PlannerStatus(_) => Kind::PlannerStatus,
             Self::FcStatus(_) => Kind::FcStatus,
+            Self::MissionRequest(..) => Kind::MissionRequest,
+            Self::MissionReply(..) => Kind::MissionReply,
             Self::Navigation(_) => Kind::Navigation,
             Self::Viz(_) => Kind::Viz,
             Self::Voxels(_) => Kind::Voxels,
@@ -440,7 +454,9 @@ impl Message {
             | Self::Stats(_)
             | Self::Ping(_)
             | Self::Pong(_)
-            | Self::Bye(_) => -1.0,
+            | Self::Bye(_)
+            | Self::MissionRequest(..)
+            | Self::MissionReply(..) => -1.0,
         }
     }
 
@@ -605,6 +621,7 @@ impl Message {
                 put_f64(&mut out, message.timestamp);
                 put_u64(&mut out, message.sequence);
                 out.push(message.mode);
+                out.push(message.can_arm);
             }
             Self::PlannerStatus(message) => {
                 put_f64(&mut out, message.timestamp);
@@ -728,6 +745,10 @@ impl Message {
             }
             Self::Ping(token) | Self::Pong(token) => put_u64(&mut out, *token),
             Self::Bye(reason) => out.push(*reason),
+            Self::MissionRequest(id, body) | Self::MissionReply(id, body) => {
+                put_u64(&mut out, *id);
+                out.extend_from_slice(body);
+            }
         }
         out
     }
@@ -959,6 +980,7 @@ impl Message {
                 timestamp: input.f64()?,
                 sequence: input.u64()?,
                 mode: input.u8()?,
+                can_arm: input.u8()?,
             }),
             Kind::PlannerStatus => Self::PlannerStatus(PlannerStatusMessage {
                 timestamp: input.f64()?,
@@ -1151,6 +1173,18 @@ impl Message {
             Kind::Ping => Self::Ping(input.u64()?),
             Kind::Pong => Self::Pong(input.u64()?),
             Kind::Bye => Self::Bye(input.u8()?),
+            Kind::MissionRequest | Kind::MissionReply => {
+                let id = input.u64()?;
+                if !(1..=MISSION_BODY_MAX).contains(&input.remaining()) {
+                    return Err(invalid("invalid mission frame size"));
+                }
+                let body = input.bytes(input.remaining())?.to_vec();
+                if kind == Kind::MissionRequest {
+                    Self::MissionRequest(id, body)
+                } else {
+                    Self::MissionReply(id, body)
+                }
+            }
         };
         if input.remaining() != 0 {
             return Err(invalid("trailing bytes"));

@@ -1,1 +1,1 @@
-"""Native SIL/HIL mission configuration, execution and verification."""
+"""Offline mission evidence and physical scoring."""

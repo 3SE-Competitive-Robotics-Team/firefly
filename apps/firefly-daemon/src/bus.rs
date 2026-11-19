@@ -74,6 +74,11 @@ pub struct Bus {
     lease_owner: u64,
     lease_sent: Option<Instant>,
 }
+impl Input<OdomMessage> {
+    pub fn last_stamp(&self) -> f64 {
+        self.sample.map_or(-1., |(sample, _)| sample.timestamp)
+    }
+}
 impl Bus {
     pub fn open() -> Result<Self> {
         let node = create_node()?;

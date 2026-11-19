@@ -2,6 +2,8 @@ mod bus;
 mod events;
 mod flight;
 mod store;
+#[cfg(target_os = "linux")]
+mod watchdog;
 
 use bus::{Bus, speed};
 use firefly_flight::FlightState as Mode;
@@ -35,27 +37,41 @@ fn overview(r: &Receipt) -> Value {
 }
 
 struct Daemon {
-    store: Store,
+    run: String,
+    journal: store::Journal,
+    receipts: std::collections::HashMap<String, Receipt>,
     session: Option<u64>,
     flight: Option<Flight>,
     bus: Bus,
     team: u32,
     last_flight: u64,
+    accepted_stamp: Option<f64>,
+    airborne_stamp: Option<f64>,
 }
 impl Daemon {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let store = Store::open()?;
-        let (session, last_flight, active) = store.recover()?;
+        let store::Recovered {
+            session,
+            last_flight,
+            active,
+            mut receipts,
+        } = store.recover()?;
         let mut flight = active.map(Flight::new);
         if let Some(f) = &mut flight {
             f.interrupt("daemon restarted during mission");
             store.save(&f.record)?;
+            receipts.insert(f.record.id.clone(), f.record.clone());
         }
         Ok(Self {
-            store,
+            run: store.run.clone(),
+            journal: store::Journal::start(store)?,
+            receipts,
             session,
             last_flight,
             flight,
+            accepted_stamp: None,
+            airborne_stamp: None,
             bus: Bus::open()?,
             team: firefly_config::game::load()?.team.code(),
         })
@@ -75,6 +91,9 @@ impl Daemon {
             ));
         }
         let velocity = speed(pose);
+        if self.bus.fc.fresh().is_none_or(|fc| fc.can_arm != 1) {
+            return Err("waiting for FC arming checks".into());
+        }
         if velocity > 0.12 {
             return Err(format!(
                 "waiting for stationary odometry, speed {velocity:.3} m/s exceeds 0.12 m/s"
@@ -96,8 +115,9 @@ impl Daemon {
                     .and_then(|fc| Mode::from_code(fc.mode))
                     .map(Mode::name);
                 return Ok(Ok(
-                    json!({"run":self.store.run,"ready":ground.is_ok() && self.flight.is_none(),"waiting":ground.err(),
-                "session":self.session,"fc_mode":mode,"active":self.flight.as_ref().map(|f|overview(&f.record))}),
+                    json!({"run":self.run,"ready":ground.is_ok() && self.flight.is_none(),"waiting":ground.err(),
+                "session":self.session,"fc_mode":mode,"planner_ready":self.bus.heartbeat.fresh().is_some(),
+                "active":self.flight.as_ref().map(|f|overview(&f.record))}),
                 ));
             }
             Request::Submit { id, .. }
@@ -107,23 +127,21 @@ impl Daemon {
         if !valid_id(id) {
             return Ok(Err("invalid mission id".into()));
         }
-        let existing = self.store.load(id)?;
+        let existing = self.receipts.get(id);
         match request {
             Request::Status { .. } => Ok(existing
-                .as_ref()
                 .map(overview)
                 .ok_or_else(|| "unknown mission id".into())),
             Request::Cancel { id } => {
                 if let Some(f) = self.flight.as_mut().filter(|f| f.record.id == id) {
-                    if f.record.phase != Phase::Recover {
+                    if !matches!(f.record.phase, Phase::Recover | Phase::NeedsOperator) {
                         f.interrupt("operator cancelled");
-                        self.store.save(&f.record)?;
+                        self.journal.submit(&f.record)?;
                         events::phase(&self.bus, f);
                     }
                     Ok(Ok(overview(&f.record)))
                 } else {
                     Ok(existing
-                        .as_ref()
                         .map(overview)
                         .ok_or_else(|| "unknown mission id".into()))
                 }
@@ -131,7 +149,7 @@ impl Daemon {
             Request::Submit { id, plan } => {
                 if let Some(r) = existing {
                     return Ok(if r.plan == plan {
-                        Ok(overview(&r))
+                        Ok(overview(r))
                     } else {
                         Err("mission id already has a different plan".into())
                     });
@@ -153,7 +171,7 @@ impl Daemon {
                     id,
                     plan,
                     session,
-                    run: self.store.run.clone(),
+                    run: self.run.clone(),
                     home: [p.position_x, p.position_y, p.position_z],
                     home_quaternion: [p.quat_x, p.quat_y, p.quat_z, p.quat_w],
                     phase: Phase::Arm,
@@ -162,75 +180,134 @@ impl Daemon {
                     reason: None,
                     attention: None,
                 });
-                self.store.save(&f.record)?;
+                self.journal.submit(&f.record)?;
                 self.session = Some(session);
-                events::start(&self.bus, &f, self.team);
+                self.accepted_stamp = Some(p.timestamp);
                 let reply = overview(&f.record);
                 self.flight = Some(f);
                 Ok(Ok(reply))
             }
         }
     }
+    fn tick(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(f) = &mut self.flight else {
+            return Ok(());
+        };
+        if f.record.flight_number.is_none()
+            && let Some((pose, session, mode)) = self.bus.navigation()
+            && session == f.record.session
+            && matches!(mode, Mode::Takeoff | Mode::Hold | Mode::Track | Mode::Land)
+            && pose.position_z - f.record.home[2] > 0.15
+        {
+            self.last_flight += 1;
+            f.record.flight_number = Some(self.last_flight);
+            self.airborne_stamp = Some(pose.timestamp);
+            self.journal.submit(&f.record)?;
+            return Ok(());
+        }
+        let before = (f.record.phase, f.record.waypoint);
+        let lease = self.bus.landing_active();
+        f.tick(&mut self.bus, self.team)?;
+        if lease != self.bus.landing_active() {
+            events::record(
+                &self.bus,
+                &f.record,
+                json!({"kind":"activity","enabled":!lease}),
+            );
+        }
+        if before != (f.record.phase, f.record.waypoint) {
+            self.journal.submit(&f.record)?;
+            events::phase(&self.bus, f);
+        }
+        if f.record.phase.terminal() {
+            self.bus.lease(false)?;
+            self.flight = None;
+        }
+        Ok(())
+    }
+
     fn serve(
         &mut self,
         requests: &Receiver<Query>,
         stopping: &AtomicBool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(target_os = "linux")]
+        let mut watchdog = watchdog::Watchdog::ready()?;
+        let mut pending_reply: Option<(SyncSender<Reply>, Reply)> = None;
+        let mut announce_recovery = self.flight.is_some();
+        let mut announce_run = true;
         while !stopping.load(Ordering::Relaxed) {
             self.bus.pump()?;
-            if let Ok((request, reply)) = requests.try_recv() {
-                let _ = reply.send(self.request(request)?);
+            if announce_run && self.bus.odom.last_stamp() >= 0.0 {
+                let event = json!({"kind":"system_run","run":self.run});
+                self.bus.log.event(
+                    "flight",
+                    self.bus.odom.last_stamp(),
+                    &format!("mission {event}"),
+                );
+                announce_run = false;
             }
-            if let Some(f) = &mut self.flight {
-                let before = (f.record.phase, f.record.waypoint, f.record.flight_number);
-                if f.record.flight_number.is_none()
-                    && self.bus.navigation().is_some_and(|(p, s, m)| {
-                        s == f.record.session
-                            && matches!(m, Mode::Takeoff | Mode::Hold | Mode::Track | Mode::Land)
-                            && p.position_z - f.record.home[2] > 0.15
-                    })
-                {
-                    self.last_flight += 1;
-                    f.record.flight_number = Some(self.last_flight);
-                }
-                let lease = self.bus.landing_active();
-                f.tick(&mut self.bus, self.team)?;
-                if lease != self.bus.landing_active() {
-                    events::record(
-                        &self.bus,
-                        &f.record.id,
-                        json!({"kind":"activity","enabled":!lease}),
-                    );
-                }
-                if before != (f.record.phase, f.record.waypoint, f.record.flight_number) {
-                    self.store.save(&f.record)?;
-                    if (before.0, before.1) != (f.record.phase, f.record.waypoint) {
-                        events::phase(&self.bus, f);
-                    }
-                }
-                if f.record.phase.terminal() {
-                    self.bus.lease(false)?;
-                    self.flight = None;
+            if announce_recovery
+                && self.bus.odom.last_stamp() >= 0.0
+                && let Some(f) = &self.flight
+            {
+                events::phase(&self.bus, f);
+                announce_recovery = false;
+            }
+            if self.collect_commits()?
+                && let Some((reply, value)) = pending_reply.take()
+            {
+                let _ = reply.send(value);
+            }
+            if !self.journal.pending()
+                && let Ok((request, reply)) = requests.try_recv()
+            {
+                let value = self.request(request)?;
+                if self.journal.pending() {
+                    pending_reply = Some((reply, value));
+                } else {
+                    let _ = reply.send(value);
                 }
             }
+            if pending_reply.is_none() && self.airborne_stamp.is_none() {
+                self.tick()?;
+            }
+            #[cfg(target_os = "linux")]
+            watchdog.completed_iteration()?;
             thread::sleep(Duration::from_millis(20));
         }
         self.stop()
     }
 
+    fn collect_commits(&mut self) -> io::Result<bool> {
+        while let Some(receipt) = self.journal.poll()? {
+            if receipt.phase == Phase::Arm
+                && let Some(stamp) = self.accepted_stamp.take()
+            {
+                events::start(&self.bus, &receipt, self.team, stamp);
+            }
+            if receipt.flight_number.is_some()
+                && let Some(stamp) = self.airborne_stamp.take()
+            {
+                events::record_at(&self.bus, &receipt, stamp, json!({"kind":"airborne"}));
+            }
+            self.receipts.insert(receipt.id.clone(), receipt);
+        }
+        Ok(!self.journal.pending())
+    }
+
     fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(f) = &mut self.flight {
-            f.interrupt("service stopping");
-            self.store.save(&f.record)?;
-            events::phase(&self.bus, f);
+            if !matches!(f.record.phase, Phase::Recover | Phase::NeedsOperator) {
+                f.interrupt("service stopping");
+                self.journal.submit(&f.record)?;
+                events::phase(&self.bus, f);
+            }
             let deadline = Instant::now() + Duration::from_secs(2);
-            while Instant::now() < deadline {
+            while Instant::now() < deadline && self.flight.is_some() {
                 self.bus.pump()?;
-                f.tick(&mut self.bus, self.team)?;
-                if f.record.phase.terminal() {
-                    self.store.save(&f.record)?;
-                    break;
-                }
+                self.collect_commits()?;
+                self.tick()?;
                 if self
                     .bus
                     .fc
@@ -241,6 +318,9 @@ impl Daemon {
                 }
                 thread::sleep(Duration::from_millis(20));
             }
+        }
+        while !self.collect_commits()? {
+            thread::sleep(Duration::from_millis(5));
         }
         Ok(())
     }

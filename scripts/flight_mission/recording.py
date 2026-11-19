@@ -11,6 +11,7 @@ class Evidence:
     scalars: dict[str, list[tuple[float, list[float]]]] = field(default_factory=dict)
     recording_complete: bool = False
     down_frames: list[tuple[float, int, int, int]] = field(default_factory=list)
+    capture: dict = field(default_factory=dict)
 
 
 def read_recording(path):
@@ -36,6 +37,7 @@ def read_recording(path):
         if entity not in scalar_paths | {
             "/gt/pose",
             "/logs/flight",
+            "/logs/render",
             "/logs/mimir",
             "/cameras/down/image",
         }:
@@ -77,6 +79,11 @@ def read_recording(path):
                 for text in row or []:
                     if entity == "/logs/flight" and text.startswith("mission {"):
                         data.events.append((stamp, json.loads(text.removeprefix("mission "))))
+                    if entity == "/logs/render" and text.startswith("capture {"):
+                        config = json.loads(text.removeprefix("capture "))
+                        if data.capture and config != data.capture:
+                            raise ValueError("render capture configuration changed during recording")
+                        data.capture = config
     data.events.sort(key=lambda row: row[0])
     data.poses.sort(key=lambda row: row[0])
     for values in data.scalars.values():

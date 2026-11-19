@@ -41,7 +41,7 @@ impl Phase {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Receipt {
     pub id: String,
     pub run: String,
@@ -60,6 +60,7 @@ pub struct Flight {
     pub record: Receipt,
     entered: Instant,
     sequence: u64,
+    arm_sent: bool,
     since: Option<f64>,
     goal: f64,
     acquire_after: f64,
@@ -75,6 +76,7 @@ impl Flight {
             record,
             entered: Instant::now(),
             sequence: nanos(),
+            arm_sent: false,
             since: None,
             goal: 0.,
             acquire_after: 0.,
@@ -237,6 +239,14 @@ impl Flight {
         }
         Ok(())
     }
+    fn arm(&mut self, bus: &Bus) -> firefly_error::Result<()> {
+        if !self.arm_sent {
+            bus.command(kind::ARM, 0., self.sequence)?;
+            self.arm_sent = true;
+        }
+        Ok(())
+    }
+
     pub fn tick(&mut self, bus: &mut Bus, team: u32) -> firefly_error::Result<()> {
         use Phase::{
             Acquire, Arm, Complete, Dwell, Ground, Hold, Hover, Interrupted, Land, Navigate,
@@ -283,7 +293,7 @@ impl Flight {
         }
         match phase {
             Arm if mode == Mode::ArmedGrounded => self.enter(Takeoff),
-            Arm => bus.command(kind::ARM, 0., self.sequence)?,
+            Arm => self.arm(bus)?,
             Takeoff if mode == Mode::Hold => {
                 self.enter(Hover);
             }
@@ -338,5 +348,47 @@ impl Flight {
             | Phase::NeedsOperator => (),
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod contract {
+    use super::Phase::*;
+
+    #[test]
+    fn durable_receipts_and_recording_names_are_stable() {
+        let phases = [
+            Arm,
+            Takeoff,
+            Hover,
+            Navigate,
+            Hold,
+            Dwell,
+            Acquire,
+            Land,
+            Ground,
+            Recover,
+            NeedsOperator,
+            Complete,
+            Interrupted,
+        ];
+        assert_eq!(
+            serde_json::to_value(phases).unwrap(),
+            serde_json::json!([
+                "arm",
+                "takeoff",
+                "hover",
+                "navigate",
+                "hold",
+                "dwell",
+                "acquire",
+                "land",
+                "ground",
+                "recover",
+                "needs_operator",
+                "complete",
+                "interrupted"
+            ])
+        );
     }
 }

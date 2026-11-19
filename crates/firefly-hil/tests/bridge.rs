@@ -37,6 +37,19 @@ fn prefix(name: &str) -> String {
     )
 }
 
+#[test]
+fn mission_frames_preserve_request_identity_and_bound_the_payload() {
+    use firefly_hil::protocol::Kind;
+    let request = Message::MissionRequest(42, br#"{"op":"status"}"#.to_vec());
+    let reply = Message::MissionReply(42, br#"{"Ok":{"ready":true}}"#.to_vec());
+    for message in [request, reply] {
+        let bytes = message.encode();
+        assert_eq!(Message::decode(message.kind(), &bytes).unwrap(), message);
+    }
+    assert!(Message::decode(Kind::MissionReply, &[0; 8]).is_err());
+    assert!(Message::decode(Kind::MissionRequest, &[0; 8201]).is_err());
+}
+
 fn ingest(ingress: &mut SensorIngress, messages: &[Message]) -> usize {
     let mut writer = FrameWriter::new(Vec::new());
     writer.set_session(73);
@@ -210,6 +223,7 @@ fn every_uplink_route_roundtrips_through_ipc_and_wire() {
             timestamp: 12.5,
             sequence: 0,
             mode: 3,
+            can_arm: 0,
         }),
         Message::Control(ControlMessage::default()),
         Message::Odometry(OdomMessage::default()),

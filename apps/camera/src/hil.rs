@@ -35,6 +35,23 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("HIL 传感器端点 {}", path.display());
 
     let mut reader = FrameReader::new(file);
+    let (requests, jobs) = std::sync::mpsc::sync_channel::<(u64, Vec<u8>)>(4);
+    let replies = std::os::unix::net::UnixDatagram::unbound()?;
+    let destination = firefly_mission::runtime_dir().join("hil-replies.sock");
+    std::thread::spawn(move || {
+        for (id, bytes) in jobs {
+            let reply = serde_json::from_slice(&bytes)
+                .map_err(|e| e.to_string())
+                .and_then(|request| firefly_mission::call(&request).map_err(|e| e.to_string()));
+            if let Ok(body) = serde_json::to_vec(&reply) {
+                let mut packet = id.to_le_bytes().to_vec();
+                packet.extend(body);
+                if let Err(e) = replies.send_to(&packet, &destination) {
+                    log::warn!("HIL mission response: {e}");
+                }
+            }
+        }
+    });
     let mut last_heartbeat = Instant::now();
     let mut imu_published = 0_u64;
     let mut last_imu_log = Instant::now();
@@ -50,7 +67,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     touch_host_seen();
                     last_heartbeat = Instant::now();
                 }
-                imu_published += ingress.accept_raw(header.kind, body)? as u64;
+                if header.kind == firefly_hil::protocol::Kind::MissionRequest {
+                    if let firefly_hil::protocol::Message::MissionRequest(id, bytes) =
+                        firefly_hil::protocol::Message::decode(header.kind, &body)?
+                        && let Err(e) = requests.try_send((id, bytes))
+                    {
+                        log::warn!("HIL mission queue: {e}");
+                    }
+                } else {
+                    imu_published += ingress.accept_raw(header.kind, body)? as u64;
+                }
             }
             Err(error) if firefly_hil::frame::is_retryable(&error) => std::thread::sleep(POLL),
             Err(error) if error.kind() == ErrorKind::UnexpectedEof => {

@@ -1,66 +1,47 @@
 use crate::{
     bus::Bus,
-    flight::{Flight, Phase},
+    flight::{Flight, Phase, Receipt},
 };
 use serde_json::{Value, json};
 
-pub fn record(bus: &Bus, id: &str, mut event: Value) {
-    event["mission_id"] = json!(id);
-    let stamp = bus.odom.fresh().map_or(-1., |p| p.timestamp);
+pub fn record(bus: &Bus, receipt: &Receipt, event: Value) {
+    record_at(bus, receipt, bus.odom.last_stamp(), event);
+}
+
+pub fn record_at(bus: &Bus, receipt: &Receipt, stamp: f64, mut event: Value) {
+    event["run"] = json!(receipt.run);
+    event["mission_id"] = json!(receipt.id);
+    event["flight_id"] = json!(receipt.flight_number);
+    // Recovery and shutdown can follow a loss of telemetry. Use the last measured
+    // timestamp for the observation, including when it is too old to navigate.
     bus.log.event("flight", stamp, &format!("mission {event}"));
 }
-pub fn start(bus: &Bus, f: &Flight, team: u32) {
-    let r = &f.record;
-    record(
-        bus,
-        &r.id,
-        json!({"kind":"settings","run":r.run,"mission":if r.plan.waypoints.is_empty(){"hover"}else{"roundtrip"},
+
+pub fn start(bus: &Bus, r: &Receipt, team: u32, stamp: f64) {
+    let emit = |event| record_at(bus, r, stamp, event);
+    emit(
+        json!({"kind":"settings","mission":if r.plan.waypoints.is_empty(){"hover"}else{"roundtrip"},
         "team":if team==0{"red"}else{"blue"},"waypoint_count":r.plan.waypoints.len(),"precision_land":r.plan.precision_land,
-        "altitude":r.plan.altitude,"hover_seconds":r.plan.hover_seconds,"return_offset":&r.plan.return_point()[..2]}),
+        "altitude":r.plan.altitude,"hover_seconds":r.plan.hover_seconds,"return_offset":r.plan.return_offset}),
     );
     for (index, w) in r.plan.waypoints.iter().enumerate() {
-        record(
-            bus,
-            &r.id,
-            json!({"kind":"waypoint","index":index,"offset":w.offset,"arrival":w.arrival}),
-        );
+        emit(json!({"kind":"waypoint","index":index,"offset":w.offset,"arrival":w.arrival}));
     }
-    record(
-        bus,
-        &r.id,
+    emit(
         json!({"kind":"home","position":r.home,"quaternion":r.home_quaternion,"session":r.session}),
     );
-    phase(bus, f);
+    emit(json!({"kind":"phase","name":r.phase}));
 }
+
 pub fn phase(bus: &Bus, f: &Flight) {
     let r = &f.record;
-    let index = r.waypoint;
-    let event = match r.phase {
-        Phase::Arm => json!({"name":"takeoff"}),
-        Phase::Navigate => {
-            json!({"name":if index<r.plan.waypoints.len(){"waypoint"}else{"return"},"index":index,"goal":f.point(index)})
-        }
-        Phase::Dwell if index < r.plan.waypoints.len() => {
-            json!({"name":"waypoint_hover","index":index,"goal":f.point(index)})
-        }
-        Phase::Acquire => json!({"name":"acquire"}),
-        Phase::Land => json!({"name":"land"}),
-        Phase::Complete => json!({"name":"complete"}),
-        Phase::Recover => {
-            record(bus, &r.id, json!({"kind":"failure","reason":r.reason}));
-            return;
-        }
-        Phase::NeedsOperator => {
-            record(
-                bus,
-                &r.id,
-                json!({"kind":"operator_required","reason":r.attention}),
-            );
-            return;
-        }
-        _ => return,
-    };
-    let mut event = event;
-    event["kind"] = json!("phase");
-    record(bus, &r.id, event);
+    let mut event = json!({"kind":"phase","name":r.phase});
+    if matches!(r.phase, Phase::Navigate | Phase::Hold | Phase::Dwell) {
+        event["index"] = json!(r.waypoint);
+        event["goal"] = json!(f.point(r.waypoint));
+    }
+    if let Some(reason) = r.attention.as_ref().or(r.reason.as_ref()) {
+        event["reason"] = json!(reason);
+    }
+    record(bus, r, event);
 }

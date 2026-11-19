@@ -87,8 +87,7 @@ def active_processes(root: Path) -> list[int]:
     root = root.resolve()
     found = []
     binaries = {"firefly-daemon", "firefly-rootslam", "render", "mimir", "fc", "hil", "localization", "planner", "traj", "landing"}
-    scripts = {"firefly-sim", "mimir", "rerun", "flight.py",
-               "hil_hover.py", "hil_roundtrip.py", "validate_landing.py"}
+    scripts = {"firefly-sim", "mimir", "rerun", "validate_landing.py"}
     modules = {"firefly_sim", "firefly_sim.main"}
     for process in psutil.process_iter():
         if process.pid == os.getpid():

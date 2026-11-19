@@ -33,7 +33,9 @@ flowchart TB
     sensors -->|下视图像| landing
     sensors -->|IMU| fc
     init --> supervisor
-    supervisor -->|开机拉起与异常重启| task
+    init -->|联动启停| unit["systemd · firefly-daemon.service"]
+    unit -->|就绪通知与独立看门狗| task
+    init -->|firefly-mimir.service| mimir
     operator -->|本机 Unix socket · 提交、查询、取消| task
     task -->|航点| planner
     vio -->|本架次起飞位置与运行会话| task
@@ -67,11 +69,11 @@ log.rrd`"]
 
 一个相近的产品例子是 NetworkManager。连接和设备状态由常驻进程维护，命令行工具和桌面程序通过同一控制接口操作它。Firefly 沿用这种控制关系，板上其他应用与 `ffctl` 可以独立连接和退出。[NetworkManager 服务](https://networkmanager.dev/docs/api/latest/NetworkManager.html) · [nmcli 客户端](https://networkmanager.dev/docs/api/latest/nmcli.html)
 
-Orange Pi 的 BSP 在 `multi-user.target` 启用 `firefly.service`。该单元以前台方式启动 `ffctl process supervise`，监管器按 `configs/processes.toml` 启动各进程并处理异常退出。`apps/firefly-daemon` 拥有当前任务、FC 模式请求、规划目标和精降识别租约。`fc` 独立执行解锁检查、模式转换和失效保护。客户端退出后任务继续，机载按键服务和板上 CLI 均可使用同一控制协议。该进程分工参考 PX4 POSIX 的常驻服务和短生命周期客户端，以及 systemd 的进程监管语义。[PX4 System Startup](https://docs.px4.io/main/en/concept/system_startup) · [systemd.service](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)
+Orange Pi 的 BSP 启用 `firefly.service`。其主进程 `ffctl process supervise` 管理设备、FC 和 VIO。板端普通运行由 systemd 提前启动独立的 `firefly-mimir.service`，结束运行时最后排空录制。`cargo xtask deploy` 安装并启用独立的 `firefly-daemon.service`，跟随整组服务启停。daemon 打开 IPC、完成任务恢复并监听客户端后发送 READY。传感器就绪与允许起飞由任务接口单独报告。`WatchdogSec=4s` 是初始故障检测预算。daemon 每完成一轮工作检查单调时钟，按 systemd 下发超时的一半发送 WATCHDOG。卡在 IPC、主线程被停止或运行循环失去进展都会中断通知。systemd 按 `Restart=on-failure` 单独拉起任务服务，FC、VIO 和录制保持运行。该超时针对服务活性，20 ms 调度周期的超期需要单独测量。[systemd.service](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html) · [sd_event_set_watchdog](https://www.freedesktop.org/software/systemd/man/latest/sd_event_set_watchdog.html)
 
 `crates/firefly-mission` 定义计划与请求。`ffctl mission` 在板上通过仅服务用户可访问的 `/run/firefly/mission.sock` 发送一行 JSON 并读取一行回执。状态查询在传感器上线前即可使用。首次提交要有新鲜的里程计、姿态与飞控上锁状态。一架飞机一次执行一项任务，忙时立即答复。任务执行中的人工取消进入收尾，地面已解锁时请求上锁，空中请求普通降落，飞控已在降落或失效保护模式时等待飞控处理。
 
-Linux 内核的 boot ID 标识一次 SystemRun。daemon 在发出首条指令前将任务写入 `state/missions/<boot-id>/<mission-id>.json`，在状态转换时通过文件同步、原子替换和目录同步更新回执。同一次运行内重复提交相同 ID 和计划返回已有回执，修改该 ID 的计划会被拒绝。进程重启读回未终结任务并进入收尾，整机重启产生新的运行身份，历史回执保留在原运行目录。Mimir 按测量时钟录制阶段和原始观测，质量评分使用独立测量数据。
+Linux 的 boot ID 标识一次 SystemRun。回执位于 `state/missions/<boot-id>/<mission-id>.json`。串行写线程执行文件同步、原子替换和目录同步。主循环持续接收遥测并推进普通飞行阶段，写线程按顺序确认最多八个排队的回执。首次提交落盘后才答复并发送 ARM，架次号落盘后才发布离地事件。取消确认和下一项任务也以已提交的回执为准。写失败或等待超过三秒会结束服务并触发恢复。同一运行内重复提交相同 ID 与计划返回已有回执。同 ID 换计划会被拒绝。进程重启时，未完成任务从收尾阶段接管。
 
 `ready` 表示 daemon 空闲、执行器已报告机体参数、飞控已上锁且有效里程计显示静止。带航点的任务在提交时还需要 planner 心跳。最终解锁由 FC 的实时检查裁决。运行状态给出最近一次新鲜的 `fc_mode`。收尾时，FC 进入锁存的 `ATTITUDE_FALLBACK`，或 45 秒内仍未确认上锁，daemon 进入 `needs_operator`。操作员可查询原因并接管飞控，该任务持续占用执行位置，直至 FC 连续报告上锁。单独停止任务服务时，它先保存中断原因，在两秒的退出窗口内请求地面上锁或空中降落。整机停机按落稳上锁后的流程执行。
 

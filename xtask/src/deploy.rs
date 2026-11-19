@@ -104,6 +104,13 @@ fn package() -> Result<PathBuf, String> {
         });
     }
 
+    for name in ["firefly-daemon.service", "firefly-mimir.service"] {
+        entries.push(Entry {
+            path: format!("configs/{name}"),
+            mode: 0o644,
+            source: config_dir.join(name),
+        });
+    }
     for model in LANDING_MODELS {
         let source = root.join("models").join(model);
         if !source.is_file() {
@@ -221,10 +228,19 @@ fn check_unpacked(device: &str) -> Result<(), String> {
 }
 
 fn start(device: &str) -> Result<(), String> {
+    remote_step(
+        device,
+        concat!(
+            "install -m 644 /opt/firefly/configs/firefly-daemon.service ",
+            "/opt/firefly/configs/firefly-mimir.service /etc/systemd/system/ && ",
+            "systemctl daemon-reload && systemctl enable firefly-daemon.service firefly-mimir.service"
+        ),
+    )?;
     remote_step(device, "systemctl start firefly")?;
     let probe = concat!(
         "for attempt in $(seq 1 20); do ",
-        "if ffctl process status >/dev/null 2>&1 && ffctl mission status >/dev/null 2>&1; then echo SUPERVISOR_READY; break; fi; ",
+        "if systemctl is-active --quiet firefly-mimir && ffctl process status >/dev/null 2>&1 ",
+        "&& ffctl mission status >/dev/null 2>&1; then echo SUPERVISOR_READY; break; fi; ",
         "sleep 0.5; ",
         "done"
     );
