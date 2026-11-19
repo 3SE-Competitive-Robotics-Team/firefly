@@ -2,6 +2,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -43,11 +44,31 @@ fn forward(
     log::info!("HIL 执行器端点 {}", path.display());
 
     let mut writer = FrameWriter::new(file);
+    let dir = firefly_mission::runtime_dir();
+    std::fs::create_dir_all(&dir)?;
+    let socket = dir.join("hil-replies.sock");
+    if socket.exists() {
+        std::fs::remove_file(&socket)?;
+    }
+    let replies = std::os::unix::net::UnixDatagram::bind(&socket)?;
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
+    replies.set_nonblocking(true)?;
+    let mut packet = [0; 8 + firefly_hil::protocol::MISSION_BODY_MAX];
     let mut stats = Stats::default();
     let mut last_stats = Instant::now();
     while RUNNING.load(Ordering::Relaxed) {
         firefly_observability::pump_log_ipc(log_ipc);
         let mut wrote = drain_control(&mut writer, ports, &mut stats)?;
+        match replies.recv(&mut packet) {
+            Ok(n) if n > 8 => {
+                let id = u64::from_le_bytes(packet[..8].try_into()?);
+                writer.write_message(&Message::MissionReply(id, packet[8..n].to_vec()))?;
+                wrote = true;
+            }
+            Ok(_) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => (),
+            Err(e) => return Err(e.into()),
+        }
         wrote |= ports.drain(None, |message| {
             if matches!(message, Message::Control(_)) {
                 writer.write_message(&message)?;

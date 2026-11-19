@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 /// 桌面应用：仿真、可视化与地面站 CLI。
 const DESKTOP_APPS: &[&str] = &[
+    "firefly-verify",
     "firefly-daemon",
     "fc",
     "ffctl",

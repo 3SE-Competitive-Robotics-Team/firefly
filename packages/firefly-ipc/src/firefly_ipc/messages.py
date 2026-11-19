@@ -49,11 +49,12 @@ class FcStatusMessage(ctypes.Structure):
         ("timestamp", ctypes.c_double),
         ("sequence", ctypes.c_uint64),
         ("mode", ctypes.c_uint8),
+        ("can_arm", ctypes.c_uint8),
     ]
 
     @staticmethod
     def type_name() -> str:
-        return "FireflyFcStatus"
+        return "FireflyFcStatusV2"
 
 
 #: 图像分辨率（与 Rust `firefly_pubsub::camera::IMAGE_WIDTH/HEIGHT` 一致）

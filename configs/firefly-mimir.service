@@ -1,0 +1,17 @@
+[Unit]
+Description=Firefly onboard recorder
+Before=firefly.service
+PartOf=firefly.service
+# The USB HIL host records ground truth and onboard telemetry together.
+ConditionPathExists=!/opt/firefly/configs/processes-normal.toml
+
+[Service]
+Type=exec
+WorkingDirectory=/opt/firefly
+ExecStart=/opt/firefly/bin/mimir
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=45s
+
+[Install]
+WantedBy=firefly.service

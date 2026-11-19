@@ -555,6 +555,10 @@ impl Controller {
             timestamp: inputs.imu_time,
             sequence: self.status_sequence,
             mode: self.fsm.state().code(),
+            can_arm: u8::from(
+                self.fsm.state() == firefly_flight::FlightState::Disarmed
+                    && self.arming_failed == 0,
+            ),
         })?;
         self.status_sequence = self.status_sequence.wrapping_add(1);
         let truth = inputs.plant.map(|(plant, _)| {

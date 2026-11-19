@@ -24,7 +24,7 @@ from firefly_ipc.messages import LogMessage, NavigationMessage, VIZ_MAX_PUBLISHE
 from firefly_ipc.messages import FC_STATUS_BUFFER_SIZE, FcStatusMessage
 from firefly_ipc.activity import LANDING
 for cls, fields in [
-    (FcStatusMessage, ['timestamp', 'sequence', 'mode']),
+    (FcStatusMessage, ['timestamp', 'sequence', 'mode', 'can_arm']),
     (ScalarMessage, ['timestamp', 'scalars', 'sequence']),
     (VizMessage, ['timestamp', 'points', 'sequence']),
     (VoxelMessage, ['voxels', 'sequence', 'chunk_index', 'chunk_count']),
@@ -76,6 +76,7 @@ fn viz_python_layout_matches_rust_offsets_and_sizes() {
             offset_of!(FcStatusMessage, timestamp),
             offset_of!(FcStatusMessage, sequence),
             offset_of!(FcStatusMessage, mode),
+            offset_of!(FcStatusMessage, can_arm),
             size_of::<ScalarMessage>(),
             offset_of!(ScalarMessage, timestamp),
             offset_of!(ScalarMessage, scalars),

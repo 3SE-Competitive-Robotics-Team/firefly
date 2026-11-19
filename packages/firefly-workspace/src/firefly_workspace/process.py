@@ -5,12 +5,14 @@ from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 import fcntl
+import json
 import os
 import signal
 import subprocess
 import threading
 import time
-import psutil
+
+from firefly_workspace import workspace_root
 
 
 class ManagedProcess:
@@ -83,38 +85,12 @@ class ManagedProcess:
 
 
 def active_processes(root: Path) -> list[int]:
-    """按可执行路径、工作目录与 argv 识别本仓库进程。"""
-    root = root.resolve()
-    found = []
-    binaries = {"firefly-daemon", "firefly-rootslam", "render", "mimir", "fc", "hil", "localization", "planner", "traj", "landing"}
-    scripts = {"firefly-sim", "mimir", "rerun", "flight.py",
-               "hil_hover.py", "hil_roundtrip.py", "validate_landing.py"}
-    modules = {"firefly_sim", "firefly_sim.main"}
-    for process in psutil.process_iter():
-        if process.pid == os.getpid():
-            continue
-        try:
-            with process.oneshot():
-                args = process.cmdline()
-                executable = process.exe()
-                directory = process.cwd()
-            if not executable or not directory:
-                continue
-            exe = Path(executable).resolve()
-            cwd = Path(directory).resolve()
-            native = exe.is_relative_to(root / "target") and exe.name in binaries
-            python_entry = any(Path(arg).name in scripts for arg in args[:2])
-            if args[1:2] == ["-m"]:
-                python_entry = len(args) > 2 and args[2] in modules
-            elif args[1:2] == ["-c"]:
-                code = next(iter(args[2:3]), "")
-                python_entry |= any(module in code for module in modules)
-            python = cwd.is_relative_to(root) and python_entry
-            if native or python:
-                found.append(process.pid)
-        except (psutil.Error, OSError, UnicodeError):
-            continue
-    return sorted(found)
+    """读取 xtask 对指定工作区的进程检查结果。"""
+    workspace = workspace_root(Path(__file__))
+    occupied = json.loads(subprocess.check_output(
+        ["cargo", "xtask", "processes", str(root.resolve())], cwd=workspace,
+    ))
+    return [pid for pid in occupied if pid != os.getpid()]
 
 
 def require_idle(root: Path) -> None:

@@ -67,6 +67,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.3
+
       - name: Install uv
         uses: astral-sh/setup-uv@v10.3.3
 

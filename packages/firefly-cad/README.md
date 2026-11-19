@@ -17,7 +17,7 @@ uv run --package firefly-cad firefly-cad-build <场地.stp> --scene <赛季>@<�
 若发行版 Blender 缺 NumPy，构建器使用 `uv` 将匹配 Python ABI 的 NumPy
 安装到 `derived/blender-python-*`，由导出子进程的路径配置使用。
 
-飞行指令由 scripts/flight.py 执行，命令结果与飞行质量分别核对；
+任务由 firefly-daemon 执行，cargo xtask sil 提交计划并独立核对飞行质量。
 运行证据遵循 [Mimir 录制规则](../../docs/mimir.md)，保存为本地时间的
 `logs/yyyymmdd_hhmmss/log.rrd`。几何、建库、飞行和在线定位各自验收。
 

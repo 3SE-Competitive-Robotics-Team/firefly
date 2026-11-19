@@ -31,7 +31,7 @@ ffctl mission status inspection-001
 
 同 ID 重试会返回该任务的当前或最终回执。需要中断时使用 `ffctl mission cancel inspection-001`。任务进入 `complete` 或 `interrupted` 后，可查询运行就绪状态，再提交新的任务 ID。板上应用可直接使用 `firefly_mission::call`。当前 socket 允许服务所属用户访问。现场任务通过计划指定本架次的起飞高度、以起飞点为原点的三维航点、停留时间、返航偏移和精降方式。普通返航偏移默认为零。示例长方体上框高 3.3 米，SIL 配套场地的规划上界为 3.7 米。现场应根据实测空间配置规划边界。
 
-每份计划支持至多 16 个航点，单次上电可依次提交多份计划。桌面闭环验收使用同一份 daemon 和 CLI，一次启动仿真、飞控和 VIO。每次提交由独立的短命客户端完成。在仓库根执行 `cargo xtask release` 和 `uv run python scripts/verify_daemon_sil.py`。脚本打印 Mimir 的录制路径和按架次的真值评分，已有录制也可以作为该脚本的路径参数重新评分。
+每份计划最多 16 点。起飞和返航高度为 0.5–2 米，停留时间为 (0, 600] 秒，返航平面偏移不超过 0.3 米。航点距起点水平半径不超过 10 米，首点水平距离至少 1 米，各段三维长度为 0.5–10 米。航点高度为 0.5–3.3 米，以支持长方体竖边。`systemctl cat firefly-daemon.service firefly-mimir.service` 可查看部署的两个单元。普通板端运行先启动独立的录制服务，停机时最后排空录制。USB HIL 切换清单后由主机录制同一条真值时间线。
 
 ### A733 精降模型
 
@@ -49,29 +49,20 @@ python3 compile_landing_viplite.py
 
 ## 运行
 
-桌面悬停仿真需要 GPU 和 [scene.toml](../configs/scene.toml) 对应的[场地资产](../packages/firefly-cad/README.md)。
+SIL 和 USB HIL 使用同一份任务计划和 Rust daemon。启动前，xtask 取得运行锁并检查当前工作区是否有占用 IPC 的飞行进程。`cargo xtask processes .` 可以查看匹配的 PID。SIL 在本机启动隔离的任务服务，HIL 通过 USB 请求板上正在运行的 daemon。MuJoCo 物理进程使用 Python。
+
+xtask 顺序提交计划，录制关闭后调用 Rust 评分器逐架次验收。HIL 使用主机 Mimir，将板端遥测和仿真真值写入同一份 RRD。桌面 release 包含独立的 `firefly-verify`，可复制到相同平台的机器上使用。它将 JSON 报告写入标准输出，验收通过时返回 0，验收失败或录制无效时返回 1。
 
 ```bash
-uv run python scripts/flight.py --mission hover
+cargo xtask sil configs/mission-hover.toml
+cargo xtask sil configs/mission-square.toml configs/mission-cuboid.toml
+cargo xtask deploy-hil
+cargo xtask hil configs/mission-square.toml
+target/release/firefly-verify --transport sil <录制路径>
+target/release/firefly-verify --transport board <板上录制路径>
 ```
 
-脚本会启动并回收仿真进程。其他运行参数见 `uv run python scripts/flight.py --help`，录制结果见 [Mimir 录制规则](mimir.md)。
-
-长方体演示长 3 米、宽 2 米、高 2 米。起飞至 1.9 米，从近侧 A′ 起笔绕上框（3.3 米），沿 A 点下降绕下框（1.3 米），再沿 B、C、D 三条竖棱上升、下降、上升。从 D′ 返回 1.9 米高的精降接管点。高度均相对于起飞点，每次到达顶点停稳 1 秒。蓝方沿水平面旋转 180° 执行同一路线。
-
-```bash
-uv run python scripts/flight.py --shape cuboid --precision-land
-```
-
-桌面长方体场景使用 `configs/planner-cuboid-sil.toml`，虚拟顶板为 3.7 米。板端默认规划范围的顶板为 2.195 米。
-
-用 `--next` 连接任意多个架次的任务参数。`--seed`、`--hil` 属于整次系统运行，航线、高度和精降方式逐架次声明。例如同一次上电先飞 1.7 米正方形，再飞 3 × 2 × 2 米长方体：
-
-```bash
-uv run python scripts/flight.py --shape square --altitude 1.7 --precision-land --next --shape cuboid --precision-land
-```
-
-SIL 按任务全集启动进程和选择场景，包括长方体时共享 3.7 米虚拟顶板。首架次完成且落稳上锁后才开始下一架次。退出时输出一份 RRD 路径，`scripts/verify_flight.py` 可独立复算其中各架次的物理指标，按首架次建立的同一坐标变换评分。
+板上录制按运行、任务和架次核对状态、FC 实测模式、架次间上锁区间与 VIO 会话。SIL/HIL 另用仿真真值核对高度、航点和落点。SIL 需要 GPU 与场地资产。同一次调用保持一个 VIO 坐标系。长方体 3 × 2 × 2 米，从 A′ 起笔，最高航点为 3.3 米。SIL 使用 3.7 米顶板，板端使用现场规划配置。计划偏移直接沿 odom 轴声明。首架次完成且落稳上锁后才提交下一架次。
 
 ## 测试
 
