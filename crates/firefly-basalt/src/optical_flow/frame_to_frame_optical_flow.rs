@@ -111,6 +111,9 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> FrameToFrameOpticalFlow<P, N> {
         if self.t_ns >= 0 {
             let previous = self.transforms.as_ref().unwrap();
             for (i, observations) in next.observations.iter_mut().enumerate() {
+                if i == 1 && self.config.optical_flow_rematch_stereo {
+                    continue;
+                }
                 *observations =
                     self.track_points(&self.pyramid[i], &pyramid[i], &previous.observations[i]);
             }
@@ -239,14 +242,19 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> FrameToFrameOpticalFlow<P, N> {
                 ..AffineCompact2::default()
             };
             result.observations[0].insert(self.last_keypoint_id, transform);
-            new_points.insert(self.last_keypoint_id, transform);
+            if !self.config.optical_flow_rematch_stereo {
+                new_points.insert(self.last_keypoint_id, transform);
+            }
             self.last_keypoint_id += 1;
         }
         if self.calib.intrinsics.len() > 1 {
-            let stereo = self.track_points(&self.pyramid[0], &self.pyramid[1], &new_points);
-            for (id, transform) in stereo {
-                result.observations[1].entry(id).or_insert(transform);
-            }
+            let sources = if self.config.optical_flow_rematch_stereo {
+                &result.observations[0]
+            } else {
+                &new_points
+            };
+            let stereo = self.track_points(&self.pyramid[0], &self.pyramid[1], sources);
+            result.observations[1].extend(stereo);
         }
         profile_stage(result.t_ns, "stereo_new", detection_end);
         Ok(())

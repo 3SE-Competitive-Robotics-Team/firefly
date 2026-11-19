@@ -76,3 +76,15 @@ pub(crate) fn initial_vio_config(options: &Options) -> Result<VioConfig> {
     vio.vio_init_yaw_weight = Some(1e2);
     Ok(vio)
 }
+
+pub(crate) fn live_vio_config(options: &Options) -> Result<VioConfig> {
+    let mut vio = initial_vio_config(options)?;
+    if options.vio_config.is_none() {
+        // Pattern 50 spans 10.5 pixels at each level. Use the full and
+        // half-resolution images to measure disparity on this 320×240 rig.
+        vio.optical_flow_pattern = 50;
+        vio.optical_flow_levels = 1;
+        vio.optical_flow_rematch_stereo = true;
+    }
+    Ok(vio)
+}

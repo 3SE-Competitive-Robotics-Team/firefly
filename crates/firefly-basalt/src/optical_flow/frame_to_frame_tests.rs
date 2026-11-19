@@ -97,6 +97,33 @@ fn input(cameras: i32, frame: i32) -> Arc<OpticalFlowInput> {
 }
 
 #[test]
+fn surviving_left_tracks_recover_depth_after_right_eye_occlusion() {
+    let config = VioConfig {
+        optical_flow_levels: 1,
+        optical_flow_detection_grid_size: 20,
+        optical_flow_rematch_stereo: true,
+        ..VioConfig::default()
+    };
+    let mut tracker = FrameToFrameOpticalFlow::<crate::optical_flow::patterns::Pattern50, 52>::new(
+        config,
+        &calibration(2),
+    )
+    .unwrap();
+    let mut first = input(2, 0);
+    Arc::get_mut(&mut first).unwrap().img_data[1].img = Some(Arc::new(ManagedImage::new(256, 192)));
+    let occluded = tracker.process_frame(first).unwrap().unwrap();
+    assert!(!occluded.observations[0].is_empty());
+    assert!(occluded.observations[1].is_empty());
+
+    let restored = tracker.process_frame(input(2, 1)).unwrap().unwrap();
+    assert!(restored.observations[1].iter().any(|(id, right)| {
+        let disparity = right.translation - restored.observations[0][id].translation;
+        occluded.observations[0].contains_key(id)
+            && (disparity - Vector2::new(1.0, 0.0)).norm() < 0.1
+    }));
+}
+
+#[test]
 fn all_three_tracking_modes_and_queues_match_cpp() {
     for mode in ["frame_to_frame", "patch", "multiscale_frame_to_frame"] {
         for cameras in if mode == "multiscale_frame_to_frame" {
