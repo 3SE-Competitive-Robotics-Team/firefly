@@ -13,24 +13,14 @@ pub struct Store {
     pub run: String,
 }
 impl Store {
-    pub fn open() -> io::Result<Self> {
-        #[cfg(target_os = "linux")]
-        let run = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
-        #[cfg(not(target_os = "linux"))]
-        let run = String::from_utf8(
-            std::process::Command::new("sysctl")
-                .args(["-n", "kern.bootsessionuuid"])
-                .output()?
-                .stdout,
-        )
-        .map_err(io::Error::other)?;
-        let run = run.trim().to_owned();
+    pub fn open(missions: &Path, run: String) -> io::Result<Self> {
         if !firefly_mission::valid_id(&run) {
-            return Err(io::Error::other("missing OS boot identity"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid system run ID",
+            ));
         }
-        let dir = firefly_config::paths::root()
-            .join("state/missions")
-            .join(&run);
+        let dir = missions.join(&run);
         fs::create_dir_all(&dir)?;
         Ok(Self { dir, run })
     }
@@ -40,7 +30,7 @@ impl Store {
         serde_json::to_writer(&mut file, r)?;
         file.flush()?;
         file.sync_all()?;
-        fs::rename(tmp, self.dir.join(format!("{}.json", r.id)))?;
+        fs::rename(tmp, self.dir.join(format!("{}.json", r.mission.id)))?;
         File::open(&self.dir)?.sync_all()
     }
     pub fn recover(&self) -> io::Result<Recovered> {
@@ -54,19 +44,19 @@ impl Store {
                 continue;
             }
             let r: Receipt = serde_json::from_reader(File::open(&path)?)?;
-            if !firefly_mission::valid_id(&r.id)
-                || path.file_stem() != Some(Path::new(&r.id).as_os_str())
-                || r.run != self.run
-                || session.is_some_and(|s| s != r.session)
+            if !firefly_mission::valid_id(&r.mission.id)
+                || path.file_stem() != Some(Path::new(&r.mission.id).as_os_str())
+                || r.mission.run != self.run
+                || session.is_some_and(|s| s != r.mission.session)
             {
                 return Err(io::Error::other("inconsistent mission receipt"));
             }
-            session = Some(r.session);
-            last_flight = last_flight.max(r.flight_number.unwrap_or(0));
+            session = Some(r.mission.session);
+            last_flight = last_flight.max(r.mission.flight_number.unwrap_or(0));
             if !r.phase.terminal() && active.replace(r.clone()).is_some() {
                 return Err(io::Error::other("multiple active missions"));
             }
-            receipts.insert(r.id.clone(), r);
+            receipts.insert(r.mission.id.clone(), r);
         }
         Ok(Recovered {
             session,
@@ -84,11 +74,18 @@ pub struct Recovered {
     pub receipts: HashMap<String, Receipt>,
 }
 
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Commit {
+    Accepted(f64),
+    Airborne(f64),
+    PhaseChanged(f64),
+}
+
 /// One FIFO writer preserves transition order. The oldest outstanding commit bounds I/O latency.
 pub struct Journal {
     tx: SyncSender<Receipt>,
     rx: Receiver<io::Result<Receipt>>,
-    pending: VecDeque<Instant>,
+    pending: VecDeque<(Instant, Commit)>,
 }
 
 impl Journal {
@@ -112,27 +109,30 @@ impl Journal {
             pending: VecDeque::new(),
         })
     }
-    pub fn submit(&mut self, receipt: &Receipt) -> io::Result<()> {
+    pub fn submit(&mut self, receipt: Receipt, commit: Commit) -> io::Result<()> {
         if self.pending.len() >= 8 {
             return Err(io::Error::other("mission journal queue is full"));
         }
-        self.tx
-            .try_send(receipt.clone())
-            .map_err(io::Error::other)?;
-        self.pending.push_back(Instant::now());
+        self.tx.try_send(receipt).map_err(io::Error::other)?;
+        self.pending.push_back((Instant::now(), commit));
         Ok(())
     }
     pub fn pending(&self) -> bool {
         !self.pending.is_empty()
     }
-    pub fn poll(&mut self) -> io::Result<Option<Receipt>> {
-        let Some(started) = self.pending.front() else {
+    pub fn identity_pending(&self) -> bool {
+        self.pending
+            .iter()
+            .any(|(_, c)| matches!(c, Commit::Accepted(_) | Commit::Airborne(_)))
+    }
+    pub fn poll(&mut self) -> io::Result<Option<(Receipt, Commit)>> {
+        let Some(&(started, commit)) = self.pending.front() else {
             return Ok(None);
         };
         match self.rx.try_recv() {
             Ok(result) => {
                 self.pending.pop_front();
-                result.map(Some)
+                result.map(|receipt| Some((receipt, commit)))
             }
             Err(TryRecvError::Empty) if started.elapsed() < Duration::from_secs(3) => Ok(None),
             Err(TryRecvError::Empty) => Err(io::Error::new(
@@ -147,51 +147,72 @@ impl Journal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flight::Phase;
+    use crate::flight::Mission;
+    use firefly_mission::Phase;
     use firefly_mission::Plan;
 
     #[test]
     fn queued_receipts_commit_in_order_and_recover_the_last_transition() {
         let dir = tempfile::tempdir_in(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"))
             .unwrap();
-        let store = || Store {
-            dir: dir.path().to_owned(),
-            run: "boot".into(),
-        };
+        let store = || Store::open(dir.path(), "boot".into()).unwrap();
+        assert!(Store::open(dir.path(), "../escape".into()).is_err());
         let mut journal = Journal::start(store()).unwrap();
         let mut receipt = Receipt {
-            id: "survey".into(),
-            run: "boot".into(),
-            session: 1,
-            flight_number: Some(1),
-            plan: Plan {
-                altitude: 1.,
-                hover_seconds: 2.,
-                return_offset: [0.; 2],
-                precision_land: false,
-                waypoints: vec![],
-            },
             phase: Phase::Navigate,
-            waypoint: 0,
-            home: [0.; 3],
-            home_quaternion: [0., 0., 0., 1.],
-            reason: None,
-            attention: None,
+            mission: Mission {
+                id: "survey".into(),
+                run: "boot".into(),
+                session: 1,
+                flight_number: Some(1),
+                plan: Plan {
+                    altitude: 1.,
+                    hover_seconds: 2.,
+                    return_offset: [0.; 2],
+                    precision_land: false,
+                    waypoints: vec![],
+                },
+                waypoint: 0,
+                home: [0.; 3],
+                home_quaternion: [0., 0., 0., 1.],
+                reason: None,
+                attention: None,
+            },
         };
         for index in 0..8 {
-            receipt.waypoint = index;
-            journal.submit(&receipt).unwrap();
+            receipt.mission.waypoint = index;
+            let commit = if index == 3 {
+                Commit::Airborne(1.5)
+            } else {
+                Commit::PhaseChanged(index as f64)
+            };
+            journal.submit(receipt.clone(), commit).unwrap();
         }
-        assert!(journal.submit(&receipt).is_err());
+        assert!(journal.submit(receipt, Commit::PhaseChanged(9.)).is_err());
         let mut observed = Vec::new();
         while journal.pending() {
-            if let Some(committed) = journal.poll().unwrap() {
-                observed.push(committed.waypoint);
+            if let Some((committed, reason)) = journal.poll().unwrap() {
+                let index = committed.mission.waypoint;
+                assert_eq!(
+                    reason,
+                    if index == 3 {
+                        Commit::Airborne(1.5)
+                    } else {
+                        Commit::PhaseChanged(index as f64)
+                    }
+                );
+                assert_eq!(journal.identity_pending(), index < 3);
+                observed.push(index);
             } else {
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
         assert_eq!(observed, (0..8).collect::<Vec<_>>());
-        assert_eq!(store().recover().unwrap().active.unwrap().waypoint, 7);
+        let next_boot = Store::open(dir.path(), "next-boot".into()).unwrap();
+        assert!(next_boot.recover().unwrap().receipts.is_empty());
+        assert_eq!(
+            store().recover().unwrap().active.unwrap().mission.waypoint,
+            7
+        );
     }
 }

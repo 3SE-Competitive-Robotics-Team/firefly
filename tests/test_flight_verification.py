@@ -276,13 +276,21 @@ def test_native_events_bind_the_flight_only_after_measured_liftoff(fault):
         assert not evaluate(data, board=True)["passed"]
 
 
-def test_restart_is_the_same_run_and_ground_cancellation_has_no_flight_number():
+@pytest.mark.parametrize(("phases", "accepted"), [
+    (["arm", "recover", "interrupted"], True),
+    (["arm", "takeoff", "recover", "recover", "needs_operator", "interrupted"], True),
+    (["arm", "interrupted", "recover", "interrupted"], False),
+    (["arm", "recover", "navigate", "interrupted"], False),
+    (["arm", "recover", "needs_operator", "recover", "interrupted"], False),
+])
+def test_restart_is_the_same_run_and_ground_cancellation_has_no_flight_number(phases, accepted):
     header = {"kind": "system_run", "run": "boot"}
     data = Evidence(events=[(0., header), (1., header)], recording_complete=True)
-    for i, name in enumerate(["arm", "recover", "interrupted"]):
+    for i, name in enumerate(phases):
         data.events.append((i+2., dict(kind="phase", name=name, run="boot", mission_id="cancelled", flight_id=None)))
     result = evaluate(data)
-    assert result["passed"] and result["metrics"]["flights"] == []
+    assert result["passed"] == accepted, result
+    assert result["metrics"]["flights"] == []
     assert result["metrics"]["ground_attempts"] == ["cancelled"]
 
 

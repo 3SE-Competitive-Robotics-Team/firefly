@@ -6,6 +6,32 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+/// Mission milestones in operator replies, durable receipts and recorded events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Arm,
+    Takeoff,
+    Hover,
+    Navigate,
+    Hold,
+    Dwell,
+    Acquire,
+    Land,
+    Ground,
+    Recover,
+    NeedsOperator,
+    Complete,
+    Interrupted,
+}
+
+impl Phase {
+    #[must_use]
+    pub fn terminal(self) -> bool {
+        matches!(self, Self::Complete | Self::Interrupted)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Arrival {

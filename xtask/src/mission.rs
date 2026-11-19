@@ -1,4 +1,4 @@
-use firefly_mission::{Plan, Request, call_at};
+use firefly_mission::{Phase, Plan, Request, call_at};
 use nix::{
     sys::signal::{Signal, kill},
     unistd::Pid,
@@ -193,9 +193,10 @@ fn fly(
                     id: Some(id.clone()),
                 },
             )?;
-            match receipt["phase"].as_str() {
-                Some("complete") => Ok(true),
-                Some("interrupted" | "needs_operator") => {
+            let phase = serde_json::from_value::<Phase>(receipt["phase"].clone())?;
+            match phase {
+                Phase::Complete => Ok(true),
+                Phase::Interrupted | Phase::NeedsOperator => {
                     Err(io::Error::other(receipt.to_string()))
                 }
                 _ => Ok(false),

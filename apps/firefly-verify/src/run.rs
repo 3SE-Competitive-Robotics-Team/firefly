@@ -2,7 +2,56 @@ use super::{
     Event, Evidence, FlightEvidence, Report, Value, flight, json,
     timeline::{Timeline, rows},
 };
+use firefly_mission::Phase;
+use serde::Deserialize;
+use std::num::NonZeroU64;
+
+enum Attempt {
+    Ground,
+    Airborne(NonZeroU64),
+}
+
+impl Attempt {
+    fn observe(&mut self, row: &Value, report: &mut Report) {
+        let id = row["flight_id"].as_u64().and_then(NonZeroU64::new);
+        if row["kind"] == "airborne" {
+            if let (Self::Ground, Some(id)) = (&*self, id) {
+                *self = Self::Airborne(id);
+            } else {
+                report.check(false, "invalid or repeated airborne assignment");
+            }
+        }
+        let consistent = match self {
+            Self::Ground => row["flight_id"].is_null(),
+            Self::Airborne(assigned) => Some(*assigned) == id,
+        };
+        report.check(
+            consistent,
+            "flight identity changed without airborne assignment",
+        );
+    }
+}
+
 type Groups = Vec<(u64, Vec<Event>)>;
+
+fn interrupted_ground_attempt(events: &[Event]) -> bool {
+    use Phase::{Arm, Interrupted, NeedsOperator, Recover, Takeoff};
+    let mut phases = rows(events, "phase")
+        .map(|e| Phase::deserialize(&e.1["name"]).ok())
+        .peekable();
+    if phases.next() != Some(Some(Arm)) {
+        return false;
+    }
+    phases.next_if_eq(&Some(Takeoff));
+    if phases.next() != Some(Some(Recover)) {
+        return false;
+    }
+    // Each daemon restart can announce the same durable recovery phase again.
+    while phases.next_if_eq(&Some(Recover)).is_some() {}
+    while phases.next_if_eq(&Some(NeedsOperator)).is_some() {}
+    phases.next() == Some(Some(Interrupted)) && phases.next().is_none()
+}
+
 fn native_groups(data: &Evidence, report: &mut Report) -> Option<Groups> {
     report.check(data.recording_complete, "incomplete recording");
     report.check(
@@ -45,33 +94,19 @@ fn native_groups(data: &Evidence, report: &mut Report) -> Option<Groups> {
     let mut attempts = Vec::new();
     let mut groups = Groups::new();
     for (mission, events) in missions {
-        let mut identity = Value::Null;
+        let mut attempt = Attempt::Ground;
         for (_, row) in &events {
-            if row["kind"] == "airborne" {
-                report.check(
-                    identity.is_null() && row["flight_id"].as_u64().is_some_and(|n| n > 0),
-                    "invalid or repeated airborne assignment",
-                );
-                identity = row["flight_id"].clone();
-            }
-            report.check(
-                row["flight_id"] == identity,
-                "flight identity changed without airborne assignment",
-            );
+            attempt.observe(row, report);
         }
-        let Some(id) = identity.as_u64().filter(|n| *n > 0) else {
+        let Attempt::Airborne(assigned) = attempt else {
             attempts.push(mission);
-            let phases: Vec<_> = rows(&events, "phase")
-                .filter_map(|e| e.1["name"].as_str())
-                .collect();
             report.check(
-                phases.first() == Some(&"arm")
-                    && phases.last() == Some(&"interrupted")
-                    && phases.contains(&"recover"),
+                interrupted_ground_attempt(&events),
                 format!("{mission}: missing airborne or interruption evidence"),
             );
             continue;
         };
+        let id = assigned.get();
         report.check(
             groups.last().is_none_or(|g| g.0.checked_add(1) == Some(id)),
             "flight sequence has gaps or duplicates",

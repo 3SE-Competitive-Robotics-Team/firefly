@@ -1,4 +1,5 @@
 use super::{Event, FlightEvidence, Report, Value, Vec3};
+use serde::Deserialize;
 use std::collections::BTreeMap;
 #[derive(Clone)]
 pub(super) struct Phase {
@@ -34,45 +35,67 @@ pub(super) fn rows<'a>(events: &'a [Event], kind: &'a str) -> impl Iterator<Item
     events.iter().filter(move |(_, row)| row["kind"] == kind)
 }
 
-type PhaseLayout = Vec<(&'static str, Option<&'static str>)>;
+#[derive(Clone, Copy, PartialEq)]
+enum EventPhase {
+    Native(firefly_mission::Phase),
+    Legacy(&'static str),
+}
+
+impl EventPhase {
+    fn matches(self, observed: &Value) -> bool {
+        match self {
+            Self::Native(phase) => {
+                firefly_mission::Phase::deserialize(observed).ok() == Some(phase)
+            }
+            Self::Legacy(name) => observed.as_str() == Some(name),
+        }
+    }
+}
+
+type PhaseLayout = Vec<(EventPhase, Option<&'static str>)>;
 fn layout(native: bool, round: bool, precision: bool, arrivals: &[Option<&str>]) -> PhaseLayout {
+    use EventPhase::Native;
+    use firefly_mission::Phase::{
+        Acquire, Arm, Complete, Dwell, Ground, Hold, Hover, Land, Navigate, Takeoff,
+    };
+    let name = |phase, legacy| {
+        if native {
+            Native(phase)
+        } else {
+            EventPhase::Legacy(legacy)
+        }
+    };
     let mut layout = Vec::new();
     if native {
-        layout.push(("arm", None));
+        layout.push((Native(Arm), None));
     }
-    layout.push(("takeoff", Some("takeoff")));
+    layout.push((name(Takeoff, "takeoff"), Some("takeoff")));
     if native {
-        layout.push(("hover", None));
+        layout.push((Native(Hover), None));
     }
     if round {
         for arrival in arrivals {
-            layout.push((
-                if native { "navigate" } else { "waypoint" },
-                Some("waypoint"),
-            ));
+            layout.push((name(Navigate, "waypoint"), Some("waypoint")));
             if *arrival == Some("stop") {
                 if native {
-                    layout.push(("hold", None));
+                    layout.push((Native(Hold), None));
                 }
-                layout.push((
-                    if native { "dwell" } else { "waypoint_hover" },
-                    Some("waypoint_hover"),
-                ));
+                layout.push((name(Dwell, "waypoint_hover"), Some("waypoint_hover")));
             }
         }
-        layout.push((if native { "navigate" } else { "return" }, Some("return")));
+        layout.push((name(Navigate, "return"), Some("return")));
         if native {
-            layout.extend([("hold", None), ("dwell", None)]);
+            layout.extend([(Native(Hold), None), (Native(Dwell), None)]);
         }
     }
     if precision {
-        layout.push(("acquire", Some("acquire")));
+        layout.push((name(Acquire, "acquire"), Some("acquire")));
     }
-    layout.push(("land", Some("land")));
+    layout.push((name(Land, "land"), Some("land")));
     if native {
-        layout.push(("ground", None));
+        layout.push((Native(Ground), None));
     }
-    layout.push(("complete", Some("complete")));
+    layout.push((name(Complete, "complete"), Some("complete")));
     layout
 }
 
@@ -83,10 +106,12 @@ fn observed_windows(
     native: bool,
     report: &mut Report,
 ) -> Option<Vec<(&'static str, Phase)>> {
-    if !layout
-        .iter()
-        .map(|(n, _)| Some(*n))
-        .eq(observed.iter().map(|e| e.1["name"].as_str()))
+    use firefly_mission::Phase::{Dwell, Hold, Navigate};
+    if layout.len() != observed.len()
+        || !layout
+            .iter()
+            .zip(observed)
+            .all(|((name, _), e)| name.matches(&e.1["name"]))
     {
         report.check(
             false,
@@ -106,13 +131,14 @@ fn observed_windows(
             index: row["index"].as_u64(),
             goal: vec3(&row["goal"]),
         };
-        if native && matches!(name, "navigate" | "hold" | "dwell") {
+        if matches!(name, EventPhase::Native(Navigate | Hold | Dwell)) {
             report.check(
                 p.index == Some(cursor as u64),
                 "phase refers to the wrong waypoint",
             );
-            if name == "dwell"
-                || (name == "navigate" && arrivals.get(cursor) == Some(&Some("pass")))
+            if name == EventPhase::Native(Dwell)
+                || (name == EventPhase::Native(Navigate)
+                    && arrivals.get(cursor) == Some(&Some("pass")))
             {
                 cursor += 1;
             }

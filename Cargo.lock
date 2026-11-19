@@ -3551,6 +3551,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook",
+ "sysctl",
  "tempfile",
 ]
 
@@ -3807,6 +3808,7 @@ name = "firefly-verify"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
+ "firefly-mission",
  "futures-lite",
  "nalgebra",
  "re_log_encoding",
