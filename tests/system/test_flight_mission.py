@@ -44,6 +44,11 @@ def test_roundtrip_reacquires_pad_and_physically_lands(route, points):
     assert report["verification"]["metrics"]["max_down_gap_s"] <= .5
     assert report["verification"]["metrics"]["down_fps"] >= 10.
     assert len(report["verification"]["metrics"]["waypoints"]) == points
+    if route == ["--shape", "square"]:
+        visits = report["verification"]["metrics"]["waypoints"]
+        assert [v["arrival"] for v in visits] == ["pass", "stop", "stop", "stop", "stop"]
+        assert visits[0]["pass_speed_mps"] > 0.25
+        assert visits[-1]["hover_seconds"] >= 2.95
     assert Path(report["recording"]).is_file()
     from rerun.chunk import RrdReader
     reader = RrdReader(report["recording"])

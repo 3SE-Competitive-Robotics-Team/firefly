@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 use firefly_error::Error;
-use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
+use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage, PASS};
 use usage_rs::{Args, Run};
 
 use crate::cli::Meters;
@@ -29,7 +29,7 @@ impl Run for Goal {
     type Output = ExitCode;
 
     fn run(self) -> Self::Output {
-        report(publish(&self))
+        report(publish_goal(&self))
     }
 }
 
@@ -37,7 +37,7 @@ impl Run for Goal {
 ///
 /// # Errors
 /// 端口创建失败，或投递期限内无订阅端（planner 未启动）。
-fn publish(goal: &Goal) -> Result<(), Error> {
+fn publish_goal(goal: &Goal) -> Result<(), Error> {
     if goal.yaw.is_some_and(|yaw| !yaw.is_finite()) {
         return Err(Error::new(
             firefly_error::ErrorKind::InvalidArgument,
@@ -45,15 +45,54 @@ fn publish(goal: &Goal) -> Result<(), Error> {
         ));
     }
     let (x, y, z) = (goal.x.get(), goal.y.get(), goal.z.get());
-    let publisher = new_publisher::<GoalMessage>(GOAL_TOPIC)?;
-    let msg = GoalMessage {
+    publish(GoalMessage {
         timestamp: wall_seconds(),
         position_x: x,
         position_y: y,
         position_z: z,
         yaw: goal.yaw.unwrap_or(0.).to_radians(),
         has_yaw: u64::from(goal.yaw.is_some()),
-    };
+        ..Default::default()
+    })
+}
+
+/// 经过当前点并在 TRACK 下继续飞向后继点（同一 odom 坐标系，米）
+#[derive(Args)]
+#[usage(effect = "write")]
+pub(crate) struct Pass {
+    x: Meters,
+    y: Meters,
+    z: Meters,
+    next_x: Meters,
+    next_y: Meters,
+    next_z: Meters,
+}
+
+impl Run for Pass {
+    type Output = ExitCode;
+
+    fn run(self) -> Self::Output {
+        report(publish(GoalMessage {
+            timestamp: wall_seconds(),
+            position_x: self.x.get(),
+            position_y: self.y.get(),
+            position_z: self.z.get(),
+            arrival: PASS,
+            next_position: [self.next_x.get(), self.next_y.get(), self.next_z.get()],
+            ..Default::default()
+        }))
+    }
+}
+
+fn publish(msg: GoalMessage) -> Result<(), Error> {
+    if !msg.is_valid() {
+        return Err(Error::new(
+            firefly_error::ErrorKind::InvalidArgument,
+            "invalid waypoint or successor",
+        ));
+    }
+    let publisher = new_publisher::<GoalMessage>(GOAL_TOPIC)?;
+    let (x, y, z) = (msg.position_x, msg.position_y, msg.position_z);
     let receivers = deliver(&publisher, msg, GOAL_TOPIC)?;
     println!("已投递目标 ({x:.2}, {y:.2}, {z:.2}) → {GOAL_TOPIC}（{receivers} 个订阅端）");
     Ok(())

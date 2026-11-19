@@ -17,7 +17,7 @@ use firefly_observability::{init as init_observability, rate::Rate};
 use firefly_odometry::{OdometryReceiver, Snapshot, StateInput};
 use firefly_planner::worker::{MapVersion, PlanningWorker, WorkerStats};
 use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager, ReplanFsm, State};
-use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage};
+use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage, PASS};
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::Subscriber;
@@ -143,6 +143,8 @@ struct App {
     stop_sub: Option<Subscriber<MandatoryStopMessage>>,
     /// 收到的最近目标（本 tick 处理一次，处理完清空；快速连续发布取最新）。
     pending_goal: Option<GoalMessage>,
+    /// Current pass point and its successor, both in the local odometry frame.
+    passage: Option<(Vector3<f64>, Vector3<f64>)>,
     /// 强制停止待处理标记（poll 置位，step 消费后清零）。
     pending_mandatory_stop: bool,
     /// 最新 odom 携带的 trace 上下文 `(trace_id, span_id, sampled)`（续接用）。
@@ -245,6 +247,7 @@ impl App {
             goal_sub,
             stop_sub,
             pending_goal: None,
+            passage: None,
             pending_mandatory_stop: false,
             odom_trace: None,
             finished: false,
@@ -279,7 +282,7 @@ impl App {
         }
         if let Some(sub) = &self.goal_sub {
             while let Some(sample) = sub.receive()? {
-                if !sample.timestamp.is_finite()
+                if !sample.is_valid()
                     || sample.timestamp
                         <= self
                             .pending_goal
@@ -437,11 +440,8 @@ impl App {
             });
 
         if let Some(goal) = self.pending_goal.take() {
-            if goal.has_yaw > 1 || !goal.yaw.is_finite() {
-                log::warn!("invalid goal heading");
-                return Ok(());
-            }
             let target = Vector3::new(goal.position_x, goal.position_y, goal.position_z);
+            let next = Vector3::from(goal.next_position);
             let repeated = (target - self.fsm.manager().goal().coords).norm() < 1e-6;
             match self.fsm.set_goal(now, measured, target) {
                 Ok(()) => {
@@ -450,6 +450,8 @@ impl App {
                         .set_goal_yaw((goal.has_yaw == 1).then_some(goal.yaw));
                     if !self.fsm.is_mandatory_stopped() {
                         self.output.goal_timestamp = goal.timestamp;
+                        self.output.passed = false;
+                        self.passage = (goal.arrival == PASS).then_some((target, next));
                         self.republish_trajectory = repeated && !heading_changed;
                     }
                     log::info!(
@@ -460,6 +462,17 @@ impl App {
                     );
                 }
                 Err(e) => log::warn!("目标 ({target:?}) 不可达，忽略：{e}"),
+            }
+        }
+        if let Some((point, next)) = self.passage
+            && !self.fsm.is_mandatory_stopped()
+            && !self.fsm.is_emergency()
+            && (point - snapshot.position.coords).norm() <= 0.35
+        {
+            self.passage = None;
+            match self.fsm.set_goal(now, measured, next) {
+                Ok(()) => self.output.passed = true,
+                Err(error) => log::warn!("途经点的后继目标不可达：{error}"),
             }
         }
         self.output.control(true)?;

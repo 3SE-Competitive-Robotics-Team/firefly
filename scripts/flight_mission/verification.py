@@ -39,7 +39,7 @@ class PhaseEvent:
 class WaypointLeg:
     index: int
     travel: PhaseEvent
-    hover: PhaseEvent
+    hover: PhaseEvent | None
     following: PhaseEvent
 
 
@@ -80,12 +80,16 @@ def read_timeline(data, report):
     )
     if report.failures:
         return None
+    planned = [(t, row) for t, row in data.events if row["kind"] == "waypoint"]
+    arrivals = [row.get("arrival", "stop") for _, row in planned]
+    check(all(kind in ("stop", "pass") for kind in arrivals), "invalid waypoint arrival mode")
     if not roundtrip:
         expected = ["takeoff", "acquire", "land", "complete"]
     else:
         expected = (
             ["takeoff"]
-            + ["waypoint", "waypoint_hover"] * count
+            + [phase for kind in arrivals for phase in
+               (("waypoint", "waypoint_hover") if kind == "stop" else ("waypoint",))]
             + ["return", "acquire", "land", "complete"]
         )
     phases = [(stamp, row) for stamp, row in data.events if row["kind"] == "phase"]
@@ -100,16 +104,24 @@ def read_timeline(data, report):
     start, home = homes[0]
     legs = []
     if roundtrip:
-        planned = [(t, row) for t, row in data.events if row["kind"] == "waypoint"]
         check(
             [row.get("index") for _, row in planned] == list(range(count)),
             "ordered waypoint declarations are missing or duplicated",
         )
         if len(planned) != count:
             return None
-        for index in range(count):
-            travel, hover, following = phases[1 + 2 * index : 4 + 2 * index]
-            legs.append((travel, hover, following))
+        cursor = 1
+        for index, arrival in enumerate(arrivals):
+            travel = phases[cursor]
+            cursor += 1
+            hover = None
+            if arrival == "stop":
+                hover = phases[cursor]
+                cursor += 1
+            following = phases[cursor]
+            legs.append(WaypointLeg(index, PhaseEvent.from_row(travel),
+                                    PhaseEvent.from_row(hover) if hover else None,
+                                    PhaseEvent.from_row(following)))
             offset = planned[index][1].get("offset", [])
             check(
                 len(offset) == 2 and np.isfinite(offset).all(),
@@ -120,9 +132,10 @@ def read_timeline(data, report):
             goal = np.array(home["position"]) + [offset[0], offset[1], settings["altitude"]]
             check(
                 planned[index][0] <= start
-                and travel[1].get("index") == hover[1].get("index") == index
+                and travel[1].get("index") == index
                 and np.array_equal(travel[1].get("goal"), goal)
-                and np.array_equal(hover[1].get("goal"), goal),
+                and (hover is None or (hover[1].get("index") == index
+                                        and np.array_equal(hover[1].get("goal"), goal))),
                 f"waypoint {index}: phase identity/goal differs from the declared route",
             )
         return_goal = np.array(home["position"]) + [
@@ -146,10 +159,7 @@ def read_timeline(data, report):
         home,
         start,
         {name: PhaseEvent.from_row(row) for name, row in phase.items()},
-        tuple(
-            WaypointLeg(index, *(PhaseEvent.from_row(row) for row in leg))
-            for index, leg in enumerate(legs)
-        ),
+        tuple(legs),
     )
 
 
@@ -368,6 +378,26 @@ def evaluate(data: Evidence):
             index = leg.index
             travel, hold, following = leg.travel, leg.hover, leg.following
             label = f"waypoint {index}"
+            if hold is None:
+                # The switch happens on entry to the radius. Find the physical crossing
+                # around that instant, including the beginning of the outgoing leg.
+                window = (times >= max(travel.timestamp, following.timestamp - 0.5)) & (
+                    times <= following.timestamp + 0.5)
+                check(window.any(), f"{label}: missing ground truth during passage")
+                if not window.any():
+                    continue
+                samples = np.flatnonzero(window)
+                distances = np.linalg.norm(positions[window] - world_goal(travel.goal), axis=1)
+                nearest = int(distances.argmin())
+                error = float(distances[nearest])
+                speed = float(np.linalg.norm(velocities[samples[nearest], :2]))
+                near_modes = [mode for t, mode in modes if times[samples[0]] <= t <= times[samples[-1]]]
+                check(bool(near_modes) and all(mode == 4 for mode in near_modes),
+                      f"{label}: continuous TRACK required through the waypoint")
+                check(error <= 0.35 and speed > 0.25, f"{label}: physical fly-through missed or stopped")
+                metrics["waypoints"].append({"index": index, "arrival": "pass",
+                                             "closest_error_m": error, "pass_speed_mps": speed})
+                continue
             check(
                 any(mode == 4 for t, mode in modes if travel.timestamp <= t < hold.timestamp),
                 f"{label}: native TRACK state missing",
@@ -389,6 +419,7 @@ def evaluate(data: Evidence):
                 metrics["waypoints"].append(
                     {
                         "index": index,
+                        "arrival": "stop",
                         "max_error_m": float(error.max()),
                         "max_speed_mps": speed,
                         "hover_seconds": following.timestamp - hold.timestamp,
@@ -399,7 +430,7 @@ def evaluate(data: Evidence):
             else:
                 check(False, f"{label}: hover ground truth is missing")
         metrics["waypoint_max_error_m"] = max(
-            (row["max_error_m"] for row in metrics["waypoints"]), default=0.0
+            (row.get("max_error_m", row.get("closest_error_m")) for row in metrics["waypoints"]), default=0.0
         )
         acquired_position = np.array(
             [np.interp(phase["acquire"].timestamp, times, positions[:, i]) for i in range(3)]

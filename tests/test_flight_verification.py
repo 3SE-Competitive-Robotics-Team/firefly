@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from flight_mission.config import default_goal, parse_args, route_points
+from flight_mission.config import ArrivalMode, default_goal, parse_args, route_points, route_waypoints
 from flight_mission.gates import at_goal, fresh_target
 from flight_mission.recording import Evidence
 from flight_mission.verification import evaluate
@@ -180,6 +180,15 @@ def test_custom_waypoints_keep_order_and_initial_odom_axes_for_hil():
     assert route_points(parse_args(["--mission", "hover"]), "red") == ()
 
 
+def test_square_visits_have_independent_arrival_modes():
+    points = route_waypoints(parse_args(["--shape", "square"]), "red")
+    assert points[0].offset == points[-1].offset
+    assert [p.arrival for p in points] == [ArrivalMode.PASS] + [ArrivalMode.STOP] * 4
+    points = route_waypoints(parse_args(["--shape", "square", "--pass-at", "2", "--pass-at", "3"]), "blue")
+    assert [p.arrival for p in points] == [ArrivalMode.STOP, ArrivalMode.PASS, ArrivalMode.PASS,
+                                          ArrivalMode.STOP, ArrivalMode.STOP]
+
+
 @pytest.mark.parametrize("argv", [
     ["--shape", "square", "--goal", "2", "0"],
     ["--side", "3"], ["--shape", "triangle", "--side", "nan"],
@@ -189,6 +198,7 @@ def test_custom_waypoints_keep_order_and_initial_odom_axes_for_hil():
     ["--waypoint", "2", "0", "--waypoint", "2", "0"],
     ["--waypoint", "2", "0", "--waypoint", "-9", "0"],
     ["--waypoint", "2", "0"] * 17,
+    ["--shape", "square", "--pass-at", "6"], ["--pass-at", "0"],
 ])
 def test_invalid_routes_fail_before_starting_processes(argv):
     with pytest.raises(SystemExit):
@@ -260,6 +270,25 @@ def test_each_polygon_waypoint_is_physically_scored(shape, count, team):
     report = evaluate(successful_evidence(team, points=points))
     assert report["passed"], report
     assert [row["index"] for row in report["metrics"]["waypoints"]] == list(range(count))
+
+
+@pytest.mark.parametrize("fault", ["none", "stationary", "miss", "hold"])
+def test_fly_through_requires_measured_speed_proximity_and_track(fault):
+    data = successful_evidence(points=((4., 0.), (8., 0.), (4., 0.)))
+    next(row for _, row in data.events if row["kind"] == "waypoint")["arrival"] = "pass"
+    data.events = [(t, row) for t, row in data.events
+                   if not (row.get("name") == "waypoint_hover" and row.get("index") == 0)]
+    pad = np.array(resolve().hangar("red")) + [0., 0., .021]
+    for i, (t, p, q) in enumerate(data.poses):
+        if 8. <= t <= 10.:
+            data.poses[i] = (t, (pad + [4. + (0. if fault == "stationary" else t - 9.),
+                                          1. if fault == "miss" else 0., 1.]).tolist(), q)
+    data.scalars["/fc/debug/state"] = [
+        (t, [3 if fault == "hold" else 4]) if 8. <= t <= 10. else (t, row)
+        for t, row in data.scalars["/fc/debug/state"]
+    ]
+    result = evaluate(data)
+    assert result["passed"] == (fault == "none"), result
 
 
 @pytest.mark.parametrize("fault", ["skipped", "identity", "wrong_goal", "wrong_return", "missing_intent", "short_hold", "no_track", "no_hold", "missed_middle", "count", "missing_count"])
