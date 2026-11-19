@@ -3,14 +3,14 @@ use firefly_pubsub::camera::{DOWN_HEIGHT, DOWN_WIDTH};
 use std::path::Path;
 
 pub(crate) fn run(config: &Config, path: &Path) -> Result<()> {
-    let environment = model::environment(config.runtime.as_deref())?;
+    let environment = model::environment(config.backend, config.runtime.as_deref())?;
     let image = image::open(path)
         .map_err(|e| crate::external("landing.image.read", e).with_context("path", path.display()))?
         .to_luma8();
     if image.dimensions() != (DOWN_WIDTH as u32, DOWN_HEIGHT as u32) {
         return Err(crate::invalid("offline input must be 352x288"));
     }
-    let mut model = model::Model::load(&config.manifest, config.backend, &environment)?;
+    let mut model = model::Model::load(&config.manifest(), &environment)?;
     let mut results = Vec::new();
     let q = config.camera_rotation_xyzw;
     let camera = nalgebra::Isometry3::from_parts(

@@ -20,9 +20,8 @@ def sha256(path: Path) -> str:
 CAMERA_SIZE = (352, 288)
 
 
-def preprocess(path: Path, size: tuple[int, int]):
+def camera_gray(path: Path):
     import cv2
-    import numpy as np
 
     # Synthetic calibration first samples the selected camera output resolution.
     # Real OV2640 frames replace this input when the module and lens are available.
@@ -30,7 +29,14 @@ def preprocess(path: Path, size: tuple[int, int]):
     if rgb is None:
         raise ValueError(f"Cannot read calibration image: {path}")
     gray = cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY)
-    gray = cv2.resize(gray, CAMERA_SIZE, interpolation=cv2.INTER_LINEAR)
+    return cv2.resize(gray, CAMERA_SIZE, interpolation=cv2.INTER_LINEAR)
+
+
+def preprocess(path: Path, size: tuple[int, int]):
+    import cv2
+    import numpy as np
+
+    gray = camera_gray(path)
     target_width, target_height = size
     scale = min(target_width / CAMERA_SIZE[0], target_height / CAMERA_SIZE[1])
     width, height = (round(value * scale) for value in CAMERA_SIZE)

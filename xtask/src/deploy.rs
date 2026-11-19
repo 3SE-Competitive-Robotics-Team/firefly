@@ -15,8 +15,8 @@ const PACKAGE: &str = "dist/firefly-aarch64.zst";
 const REMOTE_PACKAGE: &str = "/tmp/firefly-package.zst";
 const REMOTE_UNPACKER: &str = "/tmp/firefly-xtask";
 const LANDING_MODELS: &[&str] = &[
-    "h-marker-yolo26n-cif-v1/manifest.json",
-    "h-marker-yolo26n-cif-v1/int8.onnx",
+    "h-marker-yolo26n-cif-v1/viplite.json",
+    "h-marker-yolo26n-cif-v1/h-marker.nb",
 ];
 
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -104,20 +104,6 @@ fn package() -> Result<PathBuf, String> {
         });
     }
 
-    let runtime = root.join("models/npu");
-    if !runtime.join("libonnxruntime.so").is_file() || !runtime.join("manifest.json").is_file() {
-        return Err("missing VSINPU runtime bundle; see scripts/build_npu_runtime.py".into());
-    }
-    for file in fs::read_dir(&runtime).map_err(|e| e.to_string())? {
-        let file = file.map_err(|e| e.to_string())?;
-        if file.path().is_file() {
-            entries.push(Entry {
-                path: format!("models/npu/{}", file.file_name().to_string_lossy()),
-                mode: 0o644,
-                source: file.path(),
-            });
-        }
-    }
     for model in LANDING_MODELS {
         let source = root.join("models").join(model);
         if !source.is_file() {

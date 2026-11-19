@@ -4,7 +4,7 @@ use std::path::PathBuf;
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Config {
-    pub(crate) manifest: PathBuf,
+    pub(crate) manifest: Option<PathBuf>,
     pub(crate) backend: model::Backend,
     pub(crate) runtime: Option<PathBuf>,
     pub(crate) rate_hz: f64,
@@ -20,6 +20,16 @@ pub(crate) struct Config {
     pub(crate) camera_rotation_xyzw: [f64; 4],
 }
 impl Config {
+    pub(crate) fn manifest(&self) -> PathBuf {
+        self.manifest.clone().unwrap_or_else(|| {
+            let file = match self.backend {
+                model::Backend::Cpu => "manifest.json",
+                model::Backend::Viplite => "viplite.json",
+            };
+            firefly_config::paths::models("h-marker-yolo26n-cif-v1").join(file)
+        })
+    }
+
     pub(crate) fn tracking(&self) -> crate::tracking::Settings {
         let q = self.camera_rotation_xyzw;
         crate::tracking::Settings {
@@ -43,13 +53,9 @@ impl Default for Config {
         );
         let q = rotation.quaternion();
         Self {
-            manifest: firefly_config::paths::models("h-marker-yolo26n-cif-v1/manifest.json"),
-            backend: model::Backend::Vsinpu,
-            runtime: if cfg!(target_os = "linux") {
-                Some(firefly_config::paths::models("npu/libonnxruntime.so"))
-            } else {
-                None
-            },
+            manifest: None,
+            backend: model::Backend::Viplite,
+            runtime: None,
             rate_hz: 10.,
             confidence: 0.5,
             diagnostics: false,
@@ -101,7 +107,7 @@ mod tests {
         let mut config: Config =
             toml::from_str(include_str!("../../../configs/landing.toml")).unwrap();
         validate(&config).unwrap();
-        assert_eq!(config.backend, model::Backend::Vsinpu);
+        assert_eq!(config.backend, model::Backend::Viplite);
         assert_eq!(config.camera_position, [-0.03, 0., 0.]);
         config.camera_rotation_xyzw = [0.; 4];
         assert!(validate(&config).is_err());

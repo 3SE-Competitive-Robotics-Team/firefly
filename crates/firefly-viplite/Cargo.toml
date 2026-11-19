@@ -1,0 +1,17 @@
+[package]
+name = "firefly-viplite"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "A733 VIPLite inference for the Firefly H marker"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ["npu", "inference", "robotics"]
+categories = ["hardware-support", "embedded"]
+
+[dependencies]
+libloading = "0.8.9"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

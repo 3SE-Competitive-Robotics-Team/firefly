@@ -35,10 +35,10 @@ impl Worker {
         config: &Config,
         node: &firefly_pubsub::node::IpcNode,
         not_before: f64,
-        environment: &ort::environment::Environment,
+        environment: &model::Environment,
     ) -> Result<Self> {
         Ok(Self {
-            model: model::Model::load(&config.manifest, config.backend, environment)?,
+            model: model::Model::load(&config.manifest(), environment)?,
             camera: Subscriber::with_topic(node, CAMERA_DOWN_TOPIC)?,
             odometry: firefly_odometry::OdometryReceiver::start()?,
             tracker: tracking::Tracker::new(config.tracking()),
@@ -154,12 +154,14 @@ pub(crate) fn run(config: &Config, team: u32) -> Result<()> {
             (Pipeline::Dormant, true) => {
                 log::info!("landing pipeline starting: backend={:?}", config.backend);
                 if environment.is_none() {
-                    environment = Some(model::environment(config.runtime.as_deref()).inspect_err(
-                        |error| {
-                            log::error!("landing runtime activation failed: {error}");
-                            firefly_observability::pump_log_ipc(&log_ipc);
-                        },
-                    )?);
+                    environment = Some(
+                        model::environment(config.backend, config.runtime.as_deref()).inspect_err(
+                            |error| {
+                                log::error!("landing runtime activation failed: {error}");
+                                firefly_observability::pump_log_ipc(&log_ipc);
+                            },
+                        )?,
+                    );
                 }
                 let worker = Worker::start(
                     config,
@@ -209,7 +211,7 @@ pub(crate) fn run(config: &Config, team: u32) -> Result<()> {
                 f64::from(matches!(pipeline, Pipeline::Active(_))),
                 inferences as f64,
                 f64::from(requested),
-                f64::from(config.backend == model::Backend::Vsinpu),
+                f64::from(config.backend == model::Backend::Viplite),
             ];
             status.publish(row)?;
             next_status = Instant::now() + Duration::from_secs(1);

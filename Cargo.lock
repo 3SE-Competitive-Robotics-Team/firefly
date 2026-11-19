@@ -3785,6 +3785,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "firefly-viplite"
+version = "0.1.0"
+dependencies = [
+ "libloading 0.8.9",
+]
+
+[[package]]
 name = "fixed"
 version = "1.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5475,6 +5482,7 @@ dependencies = [
  "firefly-observability",
  "firefly-odometry",
  "firefly-pubsub",
+ "firefly-viplite",
  "iceoryx2-bb-posix",
  "image",
  "log",
