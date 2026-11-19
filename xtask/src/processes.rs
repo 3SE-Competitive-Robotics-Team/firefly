@@ -67,7 +67,7 @@ mod tests {
     use std::{
         fs,
         os::unix::process::CommandExt,
-        process::Command,
+        process::{Command, Stdio},
         thread,
         time::{Duration, Instant},
     };
@@ -81,9 +81,13 @@ mod tests {
         fs::create_dir(&other).unwrap();
         fs::create_dir(&binaries).unwrap();
         let exe = binaries.join("mimir");
-        fs::copy("/bin/sleep", &exe).unwrap();
-        // Multicall coreutils selects the sleep applet from argv[0].
-        let mut process = Command::new(exe).arg0("sleep").arg("30").spawn().unwrap();
+        fs::copy("/bin/sh", &exe).unwrap();
+        let mut process = Command::new(exe)
+            .arg0("sh")
+            .args(["-c", "read -r line"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         let found = loop {
             if active(checkout.path()).unwrap().contains(&process.id()) {
