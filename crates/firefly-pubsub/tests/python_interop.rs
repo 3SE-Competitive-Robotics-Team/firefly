@@ -194,12 +194,14 @@ deadline = time.monotonic() + 5
 while time.monotonic() < deadline:
     if (sample := incoming.receive()) is not None:
         msg = sample.payload().contents
+        if msg.timestamp == 2.:
+            break  # Rust has consumed the status; the publisher can now close.
+        assert msg.timestamp == 1.
         assert msg.arrival == 1 and msg.position_x == 4 and list(msg.next_position) == [8,0,2]
         outgoing.loan_uninit().write_payload(PlannerStatusMessage(2., msg.timestamp, 0, 1)).send()
-        break
     time.sleep(0.01)
 else:
-    raise TimeoutError('waypoint missing')
+    raise TimeoutError('waypoint status was not acknowledged')
 ";
     let mut child = workspace_python()
         .args(["-c", peer, &request, &response])
@@ -207,10 +209,10 @@ else:
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
     let mut reply = None;
-    while Instant::now() < deadline && reply.is_none() {
+    while Instant::now() < deadline {
         goals
             .publish(GoalMessage {
-                timestamp: 1.,
+                timestamp: if reply.is_some() { 2. } else { 1. },
                 position_x: 4.,
                 position_z: 2.,
                 arrival: PASS,
@@ -218,7 +220,12 @@ else:
                 ..Default::default()
             })
             .unwrap();
-        reply = statuses.receive().unwrap().map(|s| *s);
+        if let Some(sample) = statuses.receive().unwrap() {
+            reply = Some(*sample);
+        }
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(child.wait().unwrap().success());
