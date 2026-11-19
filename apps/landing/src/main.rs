@@ -9,7 +9,7 @@ use firefly_error::{Error, ErrorKind, Result};
 use std::{path::PathBuf, sync::atomic::AtomicBool};
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-/// 下视图像识别；生产后端为 INT8 VSINPU。
+/// 下视图像识别，机载后端使用 `VIPLite`。
 #[derive(usage_rs::Cli)]
 #[usage(bin = "landing")]
 struct Arguments {
@@ -42,7 +42,7 @@ fn main() -> Result<()> {
     if args.simulation {
         config.backend = model::Backend::Cpu;
     }
-    if config.backend != model::Backend::Vsinpu && !args.simulation && args.image.is_none() {
+    if config.backend != model::Backend::Viplite && !args.simulation && args.image.is_none() {
         return Err(invalid("live CPU inference requires explicit --simulation"));
     }
     if let Some(path) = args.image {

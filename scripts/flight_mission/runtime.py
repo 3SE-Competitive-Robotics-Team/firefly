@@ -271,7 +271,8 @@ class FlightRunner:
             self.root / "packages/firefly-ipc/src/firefly_ipc/messages.py",
         ]
         if self.options.precision_land:
-            paths += [self.root / "models/h-marker-yolo26n-cif-v1/manifest.json"]
+            model_manifest = "viplite.json" if self.options.hil else "manifest.json"
+            paths.append(self.root / "models/h-marker-yolo26n-cif-v1" / model_manifest)
         paths += sorted(Path(__file__).parent.glob("*.py"))
         for path in paths:
             if path.suffix == ".toml" and (not path.exists()):

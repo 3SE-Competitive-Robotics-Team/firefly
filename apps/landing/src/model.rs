@@ -1,4 +1,4 @@
-//! 固定指纹的 INT8 ONNX 模型；生产会话要求 VSINPU 且所有图节点均可放置。
+//! 下视 H 标记检测。桌面仿真使用 ONNX，板端使用预编译 NBG。
 use std::path::{Path, PathBuf};
 
 use firefly_landing::{Detection, Letterbox, decode_raw_detections};
@@ -13,7 +13,7 @@ use crate::{Result, external, invalid};
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
     #[default]
-    Vsinpu,
+    Viplite,
     Cpu,
 }
 
@@ -34,9 +34,16 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self, backend: Backend) -> Result<()> {
+        if backend == Backend::Viplite && self.input != [1, 3, DOWN_HEIGHT, DOWN_WIDTH] {
+            return Err(invalid("VIPLite expects the down camera resolution"));
+        }
         if self.schema != 1
-            || self.quantization != "int8_qdq"
+            || self.quantization
+                != match backend {
+                    Backend::Cpu => "int8_qdq",
+                    Backend::Viplite => "viplite_int8",
+                }
             || self.camera != [DOWN_WIDTH, DOWN_HEIGHT]
             || self.input[0] != 1
             || self.input[1] != 3
@@ -61,13 +68,29 @@ impl Manifest {
 }
 
 pub struct Model {
-    session: Session,
-    input: Tensor<f32>,
+    engine: Engine,
     transform: Letterbox,
 }
 
-/// ORT 环境由进程宿主持有；工作周期仅创建和释放 Session。
-pub fn environment(runtime: Option<&Path>) -> Result<ort::environment::Environment> {
+enum Engine {
+    Cpu {
+        session: Session,
+        input: Tensor<f32>,
+    },
+    #[cfg(target_os = "linux")]
+    Viplite(Box<firefly_viplite::Network>),
+}
+
+pub enum Environment {
+    Cpu(ort::environment::Environment),
+    Viplite,
+}
+
+/// 桌面 ORT 环境跨精降周期复用。板端网络由当前精降周期持有。
+pub fn environment(backend: Backend, runtime: Option<&Path>) -> Result<Environment> {
+    if backend == Backend::Viplite {
+        return Ok(Environment::Viplite);
+    }
     #[cfg(target_os = "linux")]
     let environment = if let Some(runtime) = runtime {
         ort::init_from(runtime)
@@ -88,15 +111,11 @@ pub fn environment(runtime: Option<&Path>) -> Result<ort::environment::Environme
             .build()
             .map_err(|e| external("landing.runtime.create", e))?
     };
-    Ok(environment)
+    Ok(Environment::Cpu(environment))
 }
 
 impl Model {
-    pub fn load(
-        manifest_path: &Path,
-        backend: Backend,
-        environment: &ort::environment::Environment,
-    ) -> Result<Self> {
+    pub fn load(manifest_path: &Path, environment: &Environment) -> Result<Self> {
         let manifest: Manifest =
             serde_json::from_slice(&std::fs::read(manifest_path).map_err(|e| {
                 firefly_error::Error::from(e)
@@ -104,7 +123,11 @@ impl Model {
                     .with_context("path", manifest_path.display())
             })?)
             .map_err(|e| invalid("invalid model manifest JSON").with_source(e))?;
-        manifest.validate()?;
+        let backend = match environment {
+            Environment::Cpu(_) => Backend::Cpu,
+            Environment::Viplite => Backend::Viplite,
+        };
+        manifest.validate(backend)?;
         let model_path = manifest_path
             .parent()
             .ok_or_else(|| invalid("manifest parent missing"))?
@@ -117,68 +140,80 @@ impl Model {
         if format!("{:x}", Sha256::digest(&bytes)) != manifest.sha256 {
             return Err(invalid("landing model SHA256 mismatch"));
         }
-        let builder = Session::builder(environment)
-            .map_err(|e| external("landing.session.create", e))?
-            .with_intra_threads(1)
-            .map_err(|e| external("landing.session.configure", e))?
-            .with_intra_op_spinning(false)
-            .map_err(|e| external("landing.session.configure", e))?
-            .with_auto_device(ort::session::builder::AutoDevicePolicy::PreferCPU)
-            .map_err(|e| external("landing.session.configure", e))?;
-        let mut builder = match backend {
-            Backend::Cpu => builder,
-            Backend::Vsinpu => {
+        let engine = match environment {
+            Environment::Cpu(environment) => {
+                let session = Session::builder(environment)
+                    .map_err(|e| external("landing.session.create", e))?
+                    .with_intra_threads(1)
+                    .map_err(|e| external("landing.session.configure", e))?
+                    .with_intra_op_spinning(false)
+                    .map_err(|e| external("landing.session.configure", e))?
+                    .with_auto_device(ort::session::builder::AutoDevicePolicy::PreferCPU)
+                    .map_err(|e| external("landing.session.configure", e))?
+                    .commit_from_memory(&bytes)
+                    .map_err(|e| external("landing.model.compile", e))?;
+                let input =
+                    Tensor::from_array((manifest.input, vec![0.; manifest.input.iter().product()]))
+                        .map_err(|e| external("landing.tensor.create", e))?;
+                Engine::Cpu { session, input }
+            }
+            Environment::Viplite => {
                 #[cfg(target_os = "linux")]
                 {
-                    builder
-                        .with_execution_providers([ort::ep::VSINPU.build().error_on_failure()])
-                        .map_err(|e| external("landing.vsinpu.register", e))?
-                        .with_disable_cpu_fallback()
-                        .map_err(|e| external("landing.vsinpu.configure", e))?
+                    Engine::Viplite(Box::new(
+                        firefly_viplite::Network::open(bytes, DOWN_WIDTH, DOWN_HEIGHT)
+                            .map_err(|e| external("landing.viplite.open", e))?,
+                    ))
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
-                    return Err(firefly_error::Error::new(firefly_error::ErrorKind::Unsupported, "VSINPU requires the A733 Linux runtime; use CPU only for explicit offline comparison").with_operation("landing.vsinpu.register"));
+                    return Err(invalid("VIPLite requires the A733 Linux runtime"));
                 }
             }
         };
-        let session = builder
-            .commit_from_memory(&bytes)
-            .map_err(|e| external("landing.model.compile", e))?;
-        let input = Tensor::from_array((manifest.input, vec![0.; manifest.input.iter().product()]))
-            .map_err(|e| external("landing.tensor.create", e))?;
         let transform = Letterbox::new(manifest.camera, [manifest.input[3], manifest.input[2]])?;
         log::info!(
             "landing model ready: backend={backend:?}, sha256={}, input={:?}",
             manifest.sha256,
             manifest.input
         );
-        Ok(Self {
-            session,
-            input,
-            transform,
-        })
+        Ok(Self { engine, transform })
     }
 
     pub fn detect(&mut self, gray: &[u8], threshold: f32) -> Result<Vec<Detection>> {
-        self.transform.write_gray(
-            gray,
-            self.input
-                .try_extract_tensor_mut::<f32>()
-                .map_err(|e| external("landing.tensor.input", e))?
-                .1,
-        )?;
-        let outputs = self
-            .session
-            .run(ort::inputs!["images" => &self.input])
-            .map_err(|e| external("landing.inference", e))?;
-        if outputs.len() != 1 {
-            return Err(invalid("landing model must have one output"));
+        match &mut self.engine {
+            Engine::Cpu { session, input } => {
+                self.transform.write_gray(
+                    gray,
+                    input
+                        .try_extract_tensor_mut::<f32>()
+                        .map_err(|e| external("landing.tensor.input", e))?
+                        .1,
+                )?;
+                let outputs = session
+                    .run(ort::inputs!["images" => &*input])
+                    .map_err(|e| external("landing.inference", e))?;
+                if outputs.len() != 1 {
+                    return Err(invalid("landing model must have one output"));
+                }
+                let (shape, values) = outputs[0]
+                    .try_extract_tensor::<f32>()
+                    .map_err(|e| external("landing.tensor.output", e))?;
+                decode_raw_detections(shape, values, &self.transform, threshold)
+            }
+            #[cfg(target_os = "linux")]
+            Engine::Viplite(network) => {
+                let values = network
+                    .run(gray)
+                    .map_err(|e| external("landing.viplite.run", e))?;
+                decode_raw_detections(
+                    &[1, 5, (values.len() / 5) as i64],
+                    values,
+                    &self.transform,
+                    threshold,
+                )
+            }
         }
-        let (shape, values) = outputs[0]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| external("landing.tensor.output", e))?;
-        decode_raw_detections(shape, values, &self.transform, threshold)
     }
 }
 
@@ -199,11 +234,15 @@ mod tests {
             output: "yolo_xywh_score".into(),
             classes: vec!["h_marker".into()],
         };
-        manifest.validate().unwrap();
+        manifest.validate(Backend::Cpu).unwrap();
+        assert!(manifest.validate(Backend::Viplite).is_err());
         manifest.model = "../model.onnx".into();
-        assert!(manifest.validate().is_err());
+        assert!(manifest.validate(Backend::Cpu).is_err());
         manifest.model = "model.onnx".into();
-        manifest.quantization = "fp32".into();
-        assert!(manifest.validate().is_err());
+        manifest.quantization = "viplite_int8".into();
+        manifest.validate(Backend::Viplite).unwrap();
+        assert!(manifest.validate(Backend::Cpu).is_err());
+        manifest.input[2] = 320;
+        assert!(manifest.validate(Backend::Viplite).is_err());
     }
 }

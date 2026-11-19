@@ -16,6 +16,7 @@ codegen-units = 1
 
 [workspace.dependencies]
 firefly-landing = { path = "crates/firefly-landing" }
+firefly-viplite = { path = "crates/firefly-viplite" }
 sha2 = "0.10.9"
 re_build_info = "=0.43.2"
 re_byte_size = "=0.43.2"
