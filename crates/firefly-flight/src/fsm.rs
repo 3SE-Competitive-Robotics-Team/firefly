@@ -65,6 +65,22 @@ pub enum FlightState {
 }
 
 impl FlightState {
+    /// Decode the mode reported by the flight controller on its status topic.
+    #[must_use]
+    pub fn from_code(code: u8) -> Option<Self> {
+        [
+            Self::Disarmed,
+            Self::ArmedGrounded,
+            Self::Takeoff,
+            Self::Hold,
+            Self::Track,
+            Self::Land,
+            Self::AttitudeFallback,
+        ]
+        .into_iter()
+        .find(|state| state.code() == code)
+    }
+
     #[must_use]
     pub fn motors_enabled(self) -> bool {
         !matches!(self, Self::Disarmed)

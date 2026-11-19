@@ -1,4 +1,9 @@
 [[process]]
+name = "firefly-daemon"
+command = ["bin/firefly-daemon"]
+autostart = true
+
+[[process]]
 name = "camera"
 command = ["taskset", "-c", "0-4", "bin/camera"]
 autostart = false

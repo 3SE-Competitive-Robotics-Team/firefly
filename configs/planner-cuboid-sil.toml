@@ -1,0 +1,4 @@
+# 桌面长方体场景：3.3 米上框，顶部预留 0.4 米。
+obstacle_clearance = 0.4
+virtual_ground = -0.505
+virtual_ceiling = 3.7

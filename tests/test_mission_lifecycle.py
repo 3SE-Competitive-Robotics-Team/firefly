@@ -9,10 +9,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-from flight_mission.config import Phase, parse_args
+from flight_mission.config import Phase, parse_args, parse_run
 from flight_mission.gates import Arrival, VisualAcquisition
 from flight_mission.runtime import FlightRunner
-from firefly_ipc.messages import FcStatusMessage, FlightMode, LandingTargetMessage, OdomMessage
+from firefly_ipc.messages import AttitudeMessage, FcStatusMessage, FlightMode, LandingTargetMessage, OdomMessage
 
 
 def test_options_are_immutable_and_route_offsets_own_their_values():
@@ -20,6 +20,35 @@ def test_options_are_immutable_and_route_offsets_own_their_values():
     assert options.waypoint == ((2.0, 0.0), (3.0, 1.0))
     with pytest.raises(FrozenInstanceError):
         options.altitude = 1.0
+
+
+def test_one_system_run_orders_arbitrary_missions_and_shares_transport_and_seed():
+    plan = parse_run(["--shape", "square", "--precision-land", "--next", "--mission", "hover",
+                      "--next", "--shape", "cuboid", "--seed", "91", "--hil"])
+    assert [m.shape for m in plan.missions] == ["square", None, "cuboid"]
+    assert [m.precision_land for m in plan.missions] == [True, False, False]
+    assert all(m.seed == 91 and m.hil for m in plan.missions)
+    assert parse_run([]).missions == (parse_args([]),)
+    with pytest.raises(SystemExit):
+        parse_run(["--shape", "square", "--next"])
+
+
+def test_failed_flight_stops_queue(monkeypatch):
+    runner = FlightRunner(parse_run(["--mission", "hover"] + ["--next", "--mission", "hover"] * 2),
+                          ROOT, "red")
+    started = []
+
+    def fly():
+        started.append(runner.flight_id)
+        assert runner.phase_name == Phase.STARTUP
+        if runner.flight_id == 2:
+            raise RuntimeError("lost VIO")
+        runner.phase_name = Phase.COMPLETE
+
+    monkeypatch.setattr(runner, "_fly", fly)
+    with pytest.raises(RuntimeError, match="lost VIO"):
+        runner._execute()
+    assert started == [1, 2]
 
 
 def test_phase_sequence_covers_waypoints_and_rejects_invalid_reentry():
@@ -101,6 +130,18 @@ def test_mode_wait_uses_status_arrival_time(monkeypatch):
     runner.received.update(odom=now, attitude=now)
     with pytest.raises(RuntimeError, match="stale mode"):
         runner._wait(lambda: True, modes={FlightMode.HOLD})
+
+
+def test_vio_restart_on_ground_invalidates_the_run():
+    from ctypes import pointer
+
+    runner = FlightRunner(parse_args([]), ROOT, "red")
+    runner.vio_session = 7
+    runner.mode = FlightMode.DISARMED
+    sample = SimpleNamespace(payload=lambda: pointer(AttitudeMessage(timestamp=23., session=8)))
+    runner.subs["attitude"] = SimpleNamespace(receive=lambda: sample)
+    with pytest.raises(RuntimeError, match="VIO session changed"):
+        runner._pump()
 
 
 def test_runner_starts_the_requested_command_and_cleans_every_child(monkeypatch):

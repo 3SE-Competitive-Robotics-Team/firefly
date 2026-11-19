@@ -224,7 +224,7 @@ fn start(device: &str) -> Result<(), String> {
     remote_step(device, "systemctl start firefly")?;
     let probe = concat!(
         "for attempt in $(seq 1 20); do ",
-        "if ffctl process status >/dev/null 2>&1; then echo SUPERVISOR_READY; break; fi; ",
+        "if ffctl process status >/dev/null 2>&1 && ffctl mission status >/dev/null 2>&1; then echo SUPERVISOR_READY; break; fi; ",
         "sleep 0.5; ",
         "done"
     );
@@ -234,7 +234,7 @@ fn start(device: &str) -> Result<(), String> {
             &["shell", "systemctl status firefly --no-pager -l | head -20"],
         )?;
         return Err(format!(
-            "firefly.service 启动后 supervisor 未应答：\n{status}"
+            "firefly.service 启动后 supervisor 或任务服务未应答：\n{status}"
         ));
     }
     Ok(())

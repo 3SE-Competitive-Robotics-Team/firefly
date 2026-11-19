@@ -28,6 +28,7 @@ fn domains_list_verbs() {
     };
     check("fc", &["arm", "disarm", "hold", "land", "takeoff", "track"]);
     check("planner", &["goal"]);
+    check("mission", &["submit", "status", "cancel"]);
     check(
         "process",
         &[

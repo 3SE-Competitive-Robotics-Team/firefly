@@ -90,6 +90,12 @@ pub struct VioConfig {
     pub vio_init_pose_weight: f64,
     #[serde(skip)]
     pub vio_init_yaw_weight: Option<f64>,
+    /// Precision of the roll and pitch measured from gravity at startup.
+    #[serde(skip)]
+    pub vio_init_tilt_weight: f64,
+    /// Precision of the initial velocity measurement, when starting from rest.
+    #[serde(skip)]
+    pub vio_init_velocity_weight: f64,
     #[serde(rename = "config.vio_init_ba_weight")]
     pub vio_init_ba_weight: f64,
     #[serde(rename = "config.vio_init_bg_weight")]
@@ -166,6 +172,8 @@ impl Default for VioConfig {
             vio_scale_jacobian: true,
             vio_init_pose_weight: 1e8,
             vio_init_yaw_weight: None,
+            vio_init_tilt_weight: 0.0,
+            vio_init_velocity_weight: 0.0,
             vio_init_ba_weight: 1e1,
             vio_init_bg_weight: 1e2,
             vio_marg_lost_landmarks: true,

@@ -22,6 +22,40 @@ def test_physical_roundtrip_passes_for_either_team(team):
     assert result["passed"], result
 
 
+@pytest.mark.parametrize("fault", [None, "session", "intervening_arm", "shifted_odom", "missing"])
+def test_flights_keep_one_frame_and_independent_grades(fault):
+    data = successful_evidence()
+    second = copy.deepcopy(data)
+    second.scalars["/fc/debug/state"][0] = (1., [0])
+    shift = 19.
+    data.events = [(0., {"kind": "system_run", "planned_flights": 2})] + [
+        (t, dict(row, flight_id=1)) for t, row in data.events]
+    if fault == "shifted_odom":
+        # A one-metre VIO translation jump moves every declared goal with the home.
+        for _, row in second.events:
+            if row["kind"] == "home":
+                row["position"][0] += 1.
+            if "goal" in row:
+                row["goal"] = [row["goal"][0] + 1., *row["goal"][1:]]
+    if fault == "session":
+        next(row for _, row in second.events if row["kind"] == "home")["session"] += 1
+    if fault != "missing":
+        data.events.extend((t + shift, dict(row, flight_id=2)) for t, row in second.events)
+    data.poses.extend((t + shift, p, q) for t, p, q in second.poses)
+    data.down_frames.extend((t + shift, *dims) for t, *dims in second.down_frames)
+    states = data.scalars["/fc/debug/state"]
+    first_end = next(t for t, row in data.events if row.get("name") == "complete")
+    states.extend((float(t), [1 if fault == "intervening_arm" else 0])
+                  for t in np.arange(first_end + .05, shift + 1., .1))
+    for key, rows in second.scalars.items():
+        data.scalars[key].extend((t + shift, v) for t, v in rows)
+    report = evaluate(data)
+    assert report["metrics"]["flights"][0]["passed"], report
+    assert report["passed"] == (fault is None), report
+    if fault == "shifted_odom":
+        assert any("physical waypoint hover error" in s for s in report["failures"])
+
+
 @pytest.mark.parametrize("last, passed", [(12.934, True), (12.933999, False)])
 def test_visual_span_uses_rrd_nanosecond_precision(last, passed):
     data = successful_evidence()
@@ -189,6 +223,45 @@ def test_square_visits_have_independent_arrival_modes():
                                           ArrivalMode.STOP, ArrivalMode.STOP]
 
 
+def test_cuboid_covers_twelve_edges_and_keeps_both_flight_levels_when_mirrored():
+    options = parse_args(["--shape", "cuboid"])
+    points = route_waypoints(options, "red")
+    red = np.array([point.offset for point in points])
+    assert {p.arrival for p in points} == {ArrivalMode.STOP}
+    assert np.unique(red, axis=0).shape == (8, 3)
+    assert np.ptp(red, axis=0) == pytest.approx([3., 2., 2.])
+    assert red[0] == pytest.approx([3., 0., 3.3])
+    assert red[:, 2].min() == pytest.approx(1.3)
+    configs = Path(__file__).resolve().parents[1] / "configs"
+    desktop = tomllib.loads((configs / "planner-cuboid-sil.toml").read_text())
+    standard = tomllib.loads((configs / "planner.toml").read_text())
+    assert desktop["virtual_ceiling"] >= red[:, 2].max() + desktop["obstacle_clearance"]
+    assert desktop["obstacle_clearance"] == standard["obstacle_clearance"]
+    assert desktop["virtual_ground"] == standard["virtual_ground"]
+    assert np.all(np.count_nonzero(np.diff(red, axis=0), axis=1) == 1)
+    edges = {frozenset((p.offset, q.offset)) for p, q in zip(points, points[1:])}
+    assert len(points) == 16 and len(edges) == 12
+    blue = route_waypoints(options, "blue")
+    assert np.array([point.offset for point in blue]) == pytest.approx(red * [-1, -1, 1])
+
+
+def test_multilevel_waypoints_are_scored_at_their_declared_height():
+    data = successful_evidence(points=((2., 0., 1.), (2., 0., .5)))
+    assert evaluate(data)["passed"]
+    second = next(row for _, row in data.events if row["kind"] == "waypoint" and row["index"] == 1)
+    second["offset"] = (2., 0., 1.)
+    assert not evaluate(data)["passed"]
+
+
+def test_cuboid_may_climb_above_takeoff_only_after_entering_the_route():
+    data = successful_evidence(points=((3., 0., 3.3), (3., 0., 1.3)))
+    data.events[0][1]["shape"] = "cuboid"
+    assert evaluate(data)["passed"]
+    _, pos, _ = next(row for row in data.poses if 2.5 < row[0] < 3.)
+    pos[2] += 1.
+    assert "takeoff exceeded the altitude envelope" in evaluate(data)["failures"]
+
+
 @pytest.mark.parametrize("argv", [
     ["--shape", "square", "--goal", "2", "0"],
     ["--side", "3"], ["--shape", "triangle", "--side", "nan"],
@@ -199,6 +272,7 @@ def test_square_visits_have_independent_arrival_modes():
     ["--waypoint", "2", "0", "--waypoint", "-9", "0"],
     ["--waypoint", "2", "0"] * 17,
     ["--shape", "square", "--pass-at", "6"], ["--pass-at", "0"],
+    ["--shape", "cuboid", "--altitude", "3.3"],
 ])
 def test_invalid_routes_fail_before_starting_processes(argv):
     with pytest.raises(SystemExit):
@@ -218,7 +292,7 @@ def successful_evidence(team="red", *, points=((2., 0.),)):
     tracks = []
     for index, point in enumerate(points):
         start = 3. + 6.*index
-        goal = [*point, 1.]
+        goal = [*point, 1.] if len(point) == 2 else list(point)
         data.events += [
             (.5, {"kind": "waypoint", "index": index, "offset": point}),
             (start, {"kind": "phase", "name": "waypoint", "index": index, "goal": goal}),

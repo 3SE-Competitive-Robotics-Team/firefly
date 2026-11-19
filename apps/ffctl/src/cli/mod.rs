@@ -1,6 +1,7 @@
 mod completion;
 mod fc;
 mod meters;
+mod mission;
 mod planner;
 mod process;
 
@@ -24,6 +25,7 @@ pub(crate) struct Ffctl {
 #[derive(Subcommands)]
 #[usage(run)]
 pub(crate) enum Command {
+    Mission(mission::Mission),
     #[usage(display_order = 0)]
     Fc(Fc),
     #[usage(display_order = 1)]

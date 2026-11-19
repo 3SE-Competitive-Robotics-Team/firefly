@@ -80,6 +80,14 @@ pub(crate) fn initial_vio_config(options: &Options) -> Result<VioConfig> {
 pub(crate) fn live_vio_config(options: &Options) -> Result<VioConfig> {
     let mut vio = initial_vio_config(options)?;
     if options.vio_config.is_none() {
+        // The controller keeps its goals in the odometry frame chosen at startup.
+        // Use Basalt's first-pose precision for that frame's yaw as well as its origin.
+        vio.vio_init_yaw_weight = None;
+        // A horizontal accelerometer bias of 0.1 m/s² tilts the measured gravity
+        // direction by about 0.01 rad. Carry that measurement into the first solve.
+        vio.vio_init_tilt_weight = 1.0 / 0.01_f64.powi(2);
+        // The live flight starts at rest on the pad (velocity sigma 0.01 m/s).
+        vio.vio_init_velocity_weight = 1.0 / 0.01_f64.powi(2);
         // Pattern 50 spans 10.5 pixels at each level. Use the full and
         // half-resolution images to measure disparity on this 320×240 rig.
         vio.optical_flow_pattern = 50;

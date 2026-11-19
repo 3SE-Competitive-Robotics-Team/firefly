@@ -18,6 +18,21 @@ container system start
 cargo xtask release --target board
 ```
 
+### 板上任务服务
+
+安装包含 `firefly-daemon` 和 `ffctl` 的 board release。Orange Pi BSP 随开机启动 `firefly.service` 并读取 `/opt/firefly/configs/processes.toml`。整机装配时核对相机设备、IMU 和 PWM 通道，在板上用 `ffctl process enable camera imu motor` 为已装配的设备保存开机配置。部署会更新进程清单，现场交付时需核对设备启用项与实测机体参数。
+
+```bash
+cd /opt/firefly
+ffctl mission status
+ffctl mission submit inspection-001 configs/mission-square.toml
+ffctl mission status inspection-001
+```
+
+同 ID 重试会返回该任务的当前或最终回执。需要中断时使用 `ffctl mission cancel inspection-001`。任务进入 `complete` 或 `interrupted` 后，可查询运行就绪状态，再提交新的任务 ID。板上应用可直接使用 `firefly_mission::call`。当前 socket 允许服务所属用户访问。现场任务通过计划指定本架次的起飞高度、以起飞点为原点的三维航点、停留时间、返航偏移和精降方式。普通返航偏移默认为零。示例长方体上框高 3.3 米，SIL 配套场地的规划上界为 3.7 米。现场应根据实测空间配置规划边界。
+
+每份计划支持至多 16 个航点，单次上电可依次提交多份计划。桌面闭环验收使用同一份 daemon 和 CLI，一次启动仿真、飞控和 VIO。每次提交由独立的短命客户端完成。在仓库根执行 `cargo xtask release` 和 `uv run python scripts/verify_daemon_sil.py`。脚本打印 Mimir 的录制路径和按架次的真值评分，已有录制也可以作为该脚本的路径参数重新评分。
+
 ### A733 精降模型
 
 `scripts/export_landing_viplite.py` 从现有 FP32 ONNX 拆出检测框和置信度两个输出，让两者分别量化。使用 `se3_yolo` 的导出环境和训练时的标定集准备工作目录，然后在全志的 x86 Linux ACUITY 镜像 `ubuntu-npu:v2.0.10.2` 内编译。下例中的 `/work` 是该工作目录在容器内的挂载位置。
@@ -41,6 +56,22 @@ uv run python scripts/flight.py --mission hover
 ```
 
 脚本会启动并回收仿真进程。其他运行参数见 `uv run python scripts/flight.py --help`，录制结果见 [Mimir 录制规则](mimir.md)。
+
+长方体演示长 3 米、宽 2 米、高 2 米。起飞至 1.9 米，从近侧 A′ 起笔绕上框（3.3 米），沿 A 点下降绕下框（1.3 米），再沿 B、C、D 三条竖棱上升、下降、上升。从 D′ 返回 1.9 米高的精降接管点。高度均相对于起飞点，每次到达顶点停稳 1 秒。蓝方沿水平面旋转 180° 执行同一路线。
+
+```bash
+uv run python scripts/flight.py --shape cuboid --precision-land
+```
+
+桌面长方体场景使用 `configs/planner-cuboid-sil.toml`，虚拟顶板为 3.7 米。板端默认规划范围的顶板为 2.195 米。
+
+用 `--next` 连接任意多个架次的任务参数。`--seed`、`--hil` 属于整次系统运行，航线、高度和精降方式逐架次声明。例如同一次上电先飞 1.7 米正方形，再飞 3 × 2 × 2 米长方体：
+
+```bash
+uv run python scripts/flight.py --shape square --altitude 1.7 --precision-land --next --shape cuboid --precision-land
+```
+
+SIL 按任务全集启动进程和选择场景，包括长方体时共享 3.7 米虚拟顶板。首架次完成且落稳上锁后才开始下一架次。退出时输出一份 RRD 路径，`scripts/verify_flight.py` 可独立复算其中各架次的物理指标，按首架次建立的同一坐标变换评分。
 
 ## 测试
 

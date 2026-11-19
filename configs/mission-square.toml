@@ -1,0 +1,12 @@
+# Odom-axis offsets from this flight's measured home, in metres.
+altitude = 1.7
+return_offset = [0.12, -0.08]
+hover_seconds = 1
+precision_land = true
+waypoints = [
+  { offset = [4, 0, 1.7], arrival = "pass" },
+  { offset = [8, 0, 1.7], arrival = "pass" },
+  { offset = [8, 4, 1.7], arrival = "pass" },
+  { offset = [4, 4, 1.7], arrival = "pass" },
+  { offset = [4, 0, 1.7], arrival = "stop" },
+]

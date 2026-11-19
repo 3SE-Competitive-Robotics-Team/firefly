@@ -7,6 +7,47 @@ use firefly_basalt::{
 use firefly_calibration::calibration::Calibration;
 use nalgebra::{Isometry3, Vector3};
 
+#[test]
+fn tilt_and_velocity_priors_penalize_changes_to_the_initial_state() {
+    for is_sqrt in [true, false] {
+        for weight in [0., 10_000.] {
+            let config = VioConfig {
+                vio_sqrt_marg: is_sqrt,
+                vio_init_tilt_weight: weight * 2.,
+                vio_init_velocity_weight: weight,
+                ..VioConfig::default()
+            };
+            let mut estimator = SqrtKeypointVioEstimator::<f64>::new(
+                &Vector3::new(0., 0., -9.81),
+                &Calibration::default(),
+                &config,
+            );
+            estimator.initialize_state(
+                0,
+                Isometry3::identity(),
+                Vector3::new(1., 2., 3.),
+                Vector3::zeros(),
+                Vector3::zeros(),
+            );
+            let initial = estimator.latest_state().clone();
+            let mut changed = initial.clone();
+            let delta = Vector3::new(0.01, -0.02, 0.03);
+            changed.state.vel_w_i += delta;
+            let tilt = Vector3::new(0.02, -0.01, 0.);
+            changed.state.pose.t_w_i.rotation = nalgebra::UnitQuaternion::from_scaled_axis(tilt);
+            estimator
+                .ba
+                .frame_states
+                .get_mut(&0)
+                .unwrap()
+                .apply_inc(&initial.diff(&changed));
+            let cost = estimator.ba.compute_marg_prior_error(&estimator.marg_data);
+            let expected = 0.5 * weight * (delta.norm_squared() + 2. * tilt.norm_squared());
+            assert!((cost - expected).abs() < 1e-12);
+        }
+    }
+}
+
 fn check_initial_bias_prior(is_sqrt: bool, gyro: bool) {
     let config = VioConfig {
         vio_sqrt_marg: is_sqrt,

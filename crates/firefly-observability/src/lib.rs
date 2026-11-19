@@ -180,6 +180,22 @@ pub fn pump_log_ipc(log_ipc: &LogIpc) {
 }
 
 impl LogIpc {
+    /// Record an application lifecycle event on its measurement clock.
+    pub fn event(&self, tag: &str, stamp: f64, text: &str) {
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let mut msg = LogMessage {
+            sim_time: stamp,
+            wall_secs: wall.as_secs() as i64,
+            wall_nanos: wall.subsec_nanos(),
+            ..Default::default()
+        };
+        msg.set_tag(tag);
+        msg.set_text(text);
+        self.publish(msg);
+    }
+
     fn publish(&self, mut msg: LogMessage) {
         let Some(publisher) = &self.publisher else {
             return;
