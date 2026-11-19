@@ -20,6 +20,18 @@ class MissionOptions:
     precision_land: bool
     acquire_timeout: float
     seed: int
+    pass_at: tuple[int, ...]
+
+
+class ArrivalMode(StrEnum):
+    STOP = "stop"
+    PASS = "pass"
+
+
+@dataclass(frozen=True)
+class Waypoint:
+    offset: tuple[float, float]
+    arrival: ArrivalMode
 
 
 class Phase(StrEnum):
@@ -32,7 +44,9 @@ class Phase(StrEnum):
     LAND = "land"
     COMPLETE = "complete"
 
-    def advance(self, following: "Phase") -> "Phase":
+    def advance(self, following: "Phase", *, passed=False) -> "Phase":
+        if passed and self == Phase.WAYPOINT and following in (Phase.WAYPOINT, Phase.RETURN):
+            return following
         if following not in _TRANSITIONS[self]:
             raise ValueError(f"invalid mission phase transition: {self} -> {following}")
         return following
@@ -112,6 +126,8 @@ def parse_args(argv=None, *, hil=None, mission=None) -> MissionOptions:
         help="visual reacquisition deadline, in wall seconds",
     )
     parser.add_argument("--seed", type=int, default=20260930)
+    parser.add_argument("--pass-at", type=int, action="append", metavar="N",
+                        help="1-based waypoint to fly through; repeat for multiple points (square defaults to point 1)")
     args = parser.parse_args(argv)
     if args.hover_seconds is None:
         args.hover_seconds = 20.0 if args.mission == "hover" else 3.0
@@ -159,7 +175,11 @@ def parse_args(argv=None, *, hil=None, mission=None) -> MissionOptions:
     args.goal = tuple(args.goal) if args.goal is not None else None
     args.return_offset = tuple(args.return_offset)
     args.waypoint = tuple(map(tuple, args.waypoint)) if args.waypoint else None
-    return MissionOptions(**vars(args))
+    args.pass_at = tuple(args.pass_at or ((1,) if args.shape == "square" else ()))
+    options = MissionOptions(**vars(args))
+    if any(not 1 <= index <= len(route_points(options, "red")) for index in options.pass_at):
+        parser.error("--pass-at must identify a waypoint on this route")
+    return options
 
 
 def default_goal(team):
@@ -188,3 +208,10 @@ def route_points(args, team):
         direction = 1.0 if team == "red" else -1.0
         return tuple((direction * x, direction * y) for x, y in points)
     return (args.goal if args.goal is not None else default_goal(team),)
+
+
+def route_waypoints(options, team):
+    return tuple(
+        Waypoint(offset, ArrivalMode.PASS if index in options.pass_at else ArrivalMode.STOP)
+        for index, offset in enumerate(route_points(options, team), start=1)
+    )

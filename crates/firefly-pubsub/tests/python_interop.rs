@@ -16,22 +16,10 @@ fn workspace_python() -> Command {
     Command::new(path)
 }
 
-#[test]
-#[ignore = "requires the synced workspace Python environment"]
-fn viz_python_layout_matches_rust_offsets_and_sizes() {
-    use firefly_pubsub::activity::ActivityMessage;
-    use firefly_pubsub::fc_status::{FC_STATUS_BUFFER_SIZE, FcStatusMessage};
-    use firefly_pubsub::landing::LandingTargetMessage;
-    use firefly_pubsub::log::LogMessage;
-    use firefly_pubsub::navigation::NavigationMessage;
-    use firefly_pubsub::trajectory::PlannerStatusMessage;
-    use firefly_pubsub::viz::{SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage};
-    use std::mem::{offset_of, size_of};
-
-    let script = r"
+const LAYOUT_SCRIPT: &str = r"
 import ctypes
 from firefly_ipc.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage
-from firefly_ipc.messages import PlannerStatusMessage, LandingTargetMessage, ActivityMessage
+from firefly_ipc.messages import GoalMessage, PlannerStatusMessage, LandingTargetMessage, ActivityMessage
 from firefly_ipc.messages import LogMessage, NavigationMessage, VIZ_MAX_PUBLISHERS
 from firefly_ipc.messages import FC_STATUS_BUFFER_SIZE, FcStatusMessage
 from firefly_ipc.activity import LANDING
@@ -40,7 +28,8 @@ for cls, fields in [
     (ScalarMessage, ['timestamp', 'scalars', 'sequence']),
     (VizMessage, ['timestamp', 'points', 'sequence']),
     (VoxelMessage, ['voxels', 'sequence', 'chunk_index', 'chunk_count']),
-    (PlannerStatusMessage, ['timestamp', 'goal_timestamp', 'finished']),
+    (GoalMessage, ['timestamp', 'arrival', 'next_position']),
+    (PlannerStatusMessage, ['timestamp', 'goal_timestamp', 'finished', 'passed']),
     (LandingTargetMessage, ['timestamp', 'session', 'position', 'confidence', 'team', 'valid']),
     (ActivityMessage, ['timestamp', 'owner', 'sequence', 'mask', 'lease_ms']),
     (LogMessage, ['sim_time', 'sequence', 'dropped_records']),
@@ -52,7 +41,24 @@ print(SCALAR_BUFFER_SIZE)
 print(VIZ_MAX_PUBLISHERS)
 print(LANDING)
 ";
-    let output = workspace_python().args(["-c", script]).output().unwrap();
+
+#[test]
+#[ignore = "requires the synced workspace Python environment"]
+fn viz_python_layout_matches_rust_offsets_and_sizes() {
+    use firefly_pubsub::activity::ActivityMessage;
+    use firefly_pubsub::fc_status::{FC_STATUS_BUFFER_SIZE, FcStatusMessage};
+    use firefly_pubsub::goal::GoalMessage;
+    use firefly_pubsub::landing::LandingTargetMessage;
+    use firefly_pubsub::log::LogMessage;
+    use firefly_pubsub::navigation::NavigationMessage;
+    use firefly_pubsub::trajectory::PlannerStatusMessage;
+    use firefly_pubsub::viz::{SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage};
+    use std::mem::{offset_of, size_of};
+
+    let output = workspace_python()
+        .args(["-c", LAYOUT_SCRIPT])
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -83,10 +89,15 @@ print(LANDING)
             offset_of!(VoxelMessage, sequence),
             offset_of!(VoxelMessage, chunk_index),
             offset_of!(VoxelMessage, chunk_count),
+            size_of::<GoalMessage>(),
+            offset_of!(GoalMessage, timestamp),
+            offset_of!(GoalMessage, arrival),
+            offset_of!(GoalMessage, next_position),
             size_of::<PlannerStatusMessage>(),
             offset_of!(PlannerStatusMessage, timestamp),
             offset_of!(PlannerStatusMessage, goal_timestamp),
             offset_of!(PlannerStatusMessage, finished),
+            offset_of!(PlannerStatusMessage, passed),
             size_of::<LandingTargetMessage>(),
             offset_of!(LandingTargetMessage, timestamp),
             offset_of!(LandingTargetMessage, session),
@@ -155,6 +166,68 @@ while time.monotonic() < deadline:
         sent = True
 raise RuntimeError('IPC roundtrip timed out')
 ";
+
+#[test]
+#[ignore = "requires the synced workspace Python environment"]
+fn waypoint_passage_roundtrip() {
+    use firefly_pubsub::goal::{GoalMessage, PASS};
+    use firefly_pubsub::trajectory::PlannerStatusMessage;
+    let node = create_node().unwrap();
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let request = format!("Firefly/Test/Interop/Waypoint/{unique}/Request");
+    let response = format!("Firefly/Test/Interop/Waypoint/{unique}/Status");
+    let goals = Publisher::<GoalMessage>::with_topic(&node, &request).unwrap();
+    let statuses = Subscriber::<PlannerStatusMessage>::with_topic(&node, &response).unwrap();
+    let peer = r"
+import iceoryx2 as iox2
+import sys, time
+from firefly_ipc.messages import GoalMessage, PlannerStatusMessage, TraceContext
+node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
+def service(topic, kind):
+    return node.service_builder(iox2.ServiceName.new(topic)).publish_subscribe(kind).user_header(TraceContext).open_or_create()
+incoming = service(sys.argv[1], GoalMessage).subscriber_builder().create()
+outgoing = service(sys.argv[2], PlannerStatusMessage).publisher_builder().create()
+deadline = time.monotonic() + 5
+while time.monotonic() < deadline:
+    if (sample := incoming.receive()) is not None:
+        msg = sample.payload().contents
+        assert msg.arrival == 1 and msg.position_x == 4 and list(msg.next_position) == [8,0,2]
+        outgoing.loan_uninit().write_payload(PlannerStatusMessage(2., msg.timestamp, 0, 1)).send()
+        break
+    time.sleep(0.01)
+else:
+    raise TimeoutError('waypoint missing')
+";
+    let mut child = workspace_python()
+        .args(["-c", peer, &request, &response])
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut reply = None;
+    while Instant::now() < deadline && reply.is_none() {
+        goals
+            .publish(GoalMessage {
+                timestamp: 1.,
+                position_x: 4.,
+                position_z: 2.,
+                arrival: PASS,
+                next_position: [8., 0., 2.],
+                ..Default::default()
+            })
+            .unwrap();
+        reply = statuses.receive().unwrap().map(|s| *s);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(child.wait().unwrap().success());
+    let status = reply.expect("waypoint status");
+    assert_eq!(
+        (status.goal_timestamp, status.passed, status.finished),
+        (1., 1, 0)
+    );
+}
 
 #[test]
 #[ignore = "requires the synced workspace Python environment"]

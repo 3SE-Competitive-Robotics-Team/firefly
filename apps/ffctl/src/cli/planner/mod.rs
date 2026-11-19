@@ -2,7 +2,7 @@ mod goal;
 
 use usage_rs::{Args, Subcommands};
 
-use goal::Goal;
+use goal::{Goal, Pass};
 
 /// 规划（`apps/planner`）：目标
 #[derive(Args)]
@@ -17,4 +17,5 @@ pub(crate) struct Planner {
 #[usage(run)]
 pub(crate) enum PlannerCommand {
     Goal(Goal),
+    Pass(Pass),
 }

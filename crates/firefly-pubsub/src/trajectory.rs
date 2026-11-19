@@ -30,6 +30,8 @@ pub struct PlannerStatusMessage {
     pub timestamp: f64,
     pub goal_timestamp: f64,
     pub finished: u64,
+    /// Latched for this goal identity when odometry enters its pass radius.
+    pub passed: u64,
 }
 
 /// 整条轨迹以 `[TrajectoryPieceMessage]` 单个原子样本发送，不限制段数。

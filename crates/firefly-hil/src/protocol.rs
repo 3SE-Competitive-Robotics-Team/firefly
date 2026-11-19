@@ -28,7 +28,7 @@ use firefly_pubsub::viz::{
 
 pub const MAGIC: [u8; 4] = *b"FHL1";
 /// 当前协议版本；接收端拒绝版本不一致的帧，主机与板端同步部署。
-pub const VERSION: u16 = 9;
+pub const VERSION: u16 = 10;
 pub const HEADER_LEN: usize = 48;
 /// 单帧负载上限（字节）；大消息按此分片，限制单次 USB 传输的排队时延。
 pub const MAX_FRAGMENT: usize = 16 * 1024;
@@ -571,6 +571,8 @@ impl Message {
                 put_f64(&mut out, message.position_z);
                 put_f64(&mut out, message.yaw);
                 put_u64(&mut out, message.has_yaw);
+                put_u64(&mut out, message.arrival);
+                put_f64s(&mut out, &message.next_position);
             }
             Self::Reference(message) => {
                 for value in [
@@ -608,6 +610,7 @@ impl Message {
                 put_f64(&mut out, message.timestamp);
                 put_f64(&mut out, message.goal_timestamp);
                 put_u64(&mut out, message.finished);
+                put_u64(&mut out, message.passed);
             }
             Self::Navigation(message) => {
                 out.extend(Self::Odometry(message.odom).encode());
@@ -931,6 +934,8 @@ impl Message {
                 position_z: input.f64()?,
                 yaw: input.f64()?,
                 has_yaw: input.u64()?,
+                arrival: input.u64()?,
+                next_position: input.f64s()?,
             }),
             Kind::Reference => Self::Reference(ReferenceMessage {
                 timestamp: input.f64()?,
@@ -959,6 +964,7 @@ impl Message {
                 timestamp: input.f64()?,
                 goal_timestamp: input.f64()?,
                 finished: input.u64()?,
+                passed: input.u64()?,
             }),
             Kind::Navigation => Self::Navigation(NavigationMessage {
                 odom: input.odom()?,

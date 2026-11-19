@@ -25,14 +25,14 @@ from firefly_ipc.activity import ActivityLease, LANDING
 from firefly_mujoco.scene import load_scene_name
 from firefly_workspace import digest, load_toml
 from firefly_workspace.process import ManagedProcess, isolated_run
-from .config import MissionOptions, Phase, route_points
+from .config import ArrivalMode, MissionOptions, Phase, route_waypoints
 from .gates import Arrival, VisualAcquisition
 
 
 class FlightRunner:
     def __init__(self, options: MissionOptions, root: Path, team: str):
         self.options, self.root, self.team = (options, root, team)
-        self.waypoints = route_points(options, team)
+        self.waypoints = route_waypoints(options, team)
         self.down_rate = (
             load_toml(root / "configs/render.toml").get("capture", {}).get("down_hz", 15)
         )
@@ -75,8 +75,8 @@ class FlightRunner:
             self.activity.set(LANDING if enabled else 0, self.stamp)
             self._mission_event("activity", enabled=enabled)
 
-    def _phase(self, name, **fields):
-        self.phase_name = self.phase_name.advance(Phase(name))
+    def _phase(self, name, *, passed=False, **fields):
+        self.phase_name = self.phase_name.advance(Phase(name), passed=passed)
         self._mission_event("phase", name=name, **fields)
         self._request_activity(name in {"takeoff", "acquire", "land"})
 
@@ -142,25 +142,34 @@ class FlightRunner:
         end = self.stamp + seconds
         self._wait(lambda: self.stamp >= end, wall=seconds * 2 + 30.0, modes=set(modes))
 
-    def _navigate(self, name, goal, **fields):
-        self._phase(name, goal=goal, **fields)
-        issued = time.time()
-        self._command("planner", "goal", "--", *goal)
-        self._wait(
-            lambda: (
-                "planner" in self.latest
-                and "reference" in self.latest
-                and (self.latest["planner"].goal_timestamp >= issued)
-                and (
-                    self.latest["reference"].goal_timestamp == self.latest["planner"].goal_timestamp
-                )
-                and (0 <= self.stamp - self.latest["reference"].timestamp <= 0.25)
-            ),
-            modes={FlightMode.HOLD},
-        )
-        identity = self.latest["planner"].goal_timestamp
-        self._command("fc", "track")
-        self._wait(lambda: self.mode == FlightMode.TRACK, modes={FlightMode.HOLD, FlightMode.TRACK})
+    def _navigate(self, name, goal, *, successor=None, preview_identity=None, **fields):
+        self._phase(name, goal=goal, passed=preview_identity is not None, **fields)
+        identity = preview_identity
+        if identity is None or successor is not None:
+            issued = time.time()
+            if successor is None:
+                self._command("planner", "goal", "--", *goal)
+            else:
+                self._command("planner", "pass", "--", *goal, *successor)
+            self._wait(
+                lambda: (
+                    "planner" in self.latest and "reference" in self.latest
+                    and self.latest["planner"].goal_timestamp >= issued
+                    and self.latest["reference"].goal_timestamp == self.latest["planner"].goal_timestamp
+                    and 0 <= self.stamp - self.latest["reference"].timestamp <= 0.25
+                ),
+                modes={FlightMode.HOLD if preview_identity is None else FlightMode.TRACK},
+            )
+            identity = self.latest["planner"].goal_timestamp
+        if preview_identity is None:
+            self._command("fc", "track")
+            self._wait(lambda: self.mode == FlightMode.TRACK, modes={FlightMode.HOLD, FlightMode.TRACK})
+        if successor is not None:
+            self._wait(lambda: self.latest["planner"].goal_timestamp == identity
+                       and self.latest["planner"].passed
+                       and 0 <= self.stamp - self.latest["planner"].timestamp <= 0.5,
+                       wall=100.0, modes={FlightMode.TRACK})
+            return identity
         arrival = Arrival(tuple(goal), identity)
         self._wait(
             lambda: arrival.observe(
@@ -233,8 +242,8 @@ class FlightRunner:
             seed=self.options.seed,
             transport="hil" if self.options.hil else "sil",
         )
-        for index, offset in enumerate(self.waypoints):
-            self._mission_event("waypoint", index=index, offset=offset)
+        for index, point in enumerate(self.waypoints):
+            self._mission_event("waypoint", index=index, offset=point.offset, arrival=point.arrival)
         binaries = ["render", "mimir", "ffctl"] + (
             ["hil"] if self.options.hil else ["fc", "firefly-rootslam"]
         )
@@ -335,16 +344,17 @@ class FlightRunner:
                 home[1] + self.options.return_offset[1],
                 home[2] + self.options.altitude,
             ]
-            for index, offset in enumerate(self.waypoints):
-                waypoint = [
-                    home[0] + offset[0],
-                    home[1] + offset[1],
-                    home[2] + self.options.altitude,
-                ]
-                self._navigate("waypoint", waypoint, index=index)
-                self._phase("waypoint_hover", goal=waypoint, index=index)
-                self._hold(self.options.hover_seconds)
-            self._navigate("return", nearby)
+            goals = [[home[0] + p.offset[0], home[1] + p.offset[1], home[2] + self.options.altitude]
+                     for p in self.waypoints] + [nearby]
+            preview = None
+            for index, point in enumerate(self.waypoints):
+                successor = goals[index + 1] if point.arrival == ArrivalMode.PASS else None
+                preview = self._navigate("waypoint", goals[index], index=index,
+                                         successor=successor, preview_identity=preview)
+                if point.arrival == ArrivalMode.STOP:
+                    self._phase("waypoint_hover", goal=goals[index], index=index)
+                    self._hold(self.options.hover_seconds)
+            self._navigate("return", nearby, preview_identity=preview)
         if self.options.precision_land:
             self._phase("acquire")
             acquisition = VisualAcquisition(

@@ -383,6 +383,7 @@ mod tests {
                 timestamp: 12.5,
                 goal_timestamp: 1_794_740_646.245_043,
                 finished: 1,
+                passed: 1,
             }),
         ] {
             assert_eq!(message.kind().link(), crate::protocol::Link::Actuator);
@@ -505,12 +506,19 @@ mod tests {
             position_z: 3.0,
             yaw: 1.25,
             has_yaw: 1,
+            ..Default::default()
         });
         let Message::Goal(decoded) = roundtrip(&message, 42) else {
             panic!("goal")
         };
         assert_eq!(decoded.yaw, 1.25);
         assert_eq!(decoded.has_yaw, 1);
+        let pass = Message::Goal(firefly_pubsub::goal::GoalMessage {
+            arrival: firefly_pubsub::goal::PASS,
+            next_position: [3., 2., 1.],
+            ..Default::default()
+        });
+        assert_eq!(roundtrip(&pass, 43), pass);
     }
 
     #[test]

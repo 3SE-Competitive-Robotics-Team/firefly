@@ -15,6 +15,7 @@ pub struct OutputPublisher {
     control: Publisher<TrajectoryControlMessage>,
     status: Publisher<PlannerStatusMessage>,
     pub goal_timestamp: f64,
+    pub passed: bool,
     enabled: bool,
     sequence: u64,
 }
@@ -26,6 +27,7 @@ impl OutputPublisher {
             control: Publisher::with_topic(node, TRAJECTORY_CONTROL_TOPIC)?,
             status: Publisher::with_topic(node, PLANNER_STATUS_TOPIC)?,
             goal_timestamp: 0.0,
+            passed: false,
             enabled: false,
             sequence: 0,
         })
@@ -42,6 +44,7 @@ impl OutputPublisher {
             timestamp,
             goal_timestamp: self.goal_timestamp,
             finished: u64::from(finished),
+            passed: u64::from(self.passed),
         })?;
         Ok(())
     }

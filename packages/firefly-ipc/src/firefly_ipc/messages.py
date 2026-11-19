@@ -184,18 +184,33 @@ class DepthImageMessage(ctypes.Structure):
         return "FireflyDepthImageMessage"
 
 
+class GoalMessage(ctypes.Structure):
+    """Local odometry waypoint; arrival 0 stops, arrival 1 continues to next_position."""
+
+    _fields_ = [
+        ("timestamp", ctypes.c_double), ("position_x", ctypes.c_double),
+        ("position_y", ctypes.c_double), ("position_z", ctypes.c_double),
+        ("yaw", ctypes.c_double), ("has_yaw", ctypes.c_uint64),
+        ("arrival", ctypes.c_uint64), ("next_position", ctypes.c_double * 3),
+    ]
+
+    @staticmethod
+    def type_name():
+        return "FireflyGoalMessage"
+
+
 class PlannerStatusMessage(ctypes.Structure):
     """规划目标执行快照，与 Rust trajectory::PlannerStatusMessage 一致。"""
 
     _fields_ = [("timestamp", ctypes.c_double), ("goal_timestamp", ctypes.c_double),
-                ("finished", ctypes.c_uint64)]
+                ("finished", ctypes.c_uint64), ("passed", ctypes.c_uint64)]
 
     @staticmethod
     def type_name():
         return "FireflyPlannerStatusMessage"
 
 
-assert ctypes.sizeof(PlannerStatusMessage) == 24
+assert ctypes.sizeof(PlannerStatusMessage) == 32
 
 
 class ReferenceMessage(ctypes.Structure):
