@@ -78,12 +78,10 @@ class Scene:
 
 
 #: 已接入的场地版本。新增版本：目录 `models/<赛季>/v<版本>/` 加一行。
+# CAD part 10, H 中心及支撑面高度。独立评分器嵌入同一份场地数据。
 SCENES = {
-    # CAD part=10，H 图案中心；板面 z=1.900，涂层 z=1.901。
-    "rmuc2027@1.0.0": Scene("rmuc2027@1.0.0", {
-        "red": (-1.032376, -1.032376, 1.9),
-        "blue": (1.032376, 1.032376, 1.9),
-    }),
+    name: Scene(name, {team: tuple(point) for team, point in pads.items()})
+    for name, pads in json.loads(Path(__file__).with_name("hangars.json").read_text()).items()
 }
 
 

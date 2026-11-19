@@ -218,9 +218,9 @@ fn claim_environment(root: &Path) -> Result<fs::File, Box<dyn std::error::Error>
         .truncate(false)
         .open(root.join("logs/run.lock"))?;
     lock.try_lock()?;
-    let python = root.join(".venv/bin/python");
-    if !program(&python, &["-c","from pathlib import Path; from firefly_workspace.process import require_idle; require_idle(Path.cwd())"]).status()?.success() {
-        return Err("could not acquire idle simulation environment".into())
+    let occupied = crate::processes::active(root)?;
+    if !occupied.is_empty() {
+        return Err(format!("repository flight processes already running: {occupied:?}").into());
     }
     Ok(lock)
 }
@@ -260,6 +260,10 @@ pub fn run(hil: bool, args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         return Err("provide one or more mission plan files".into());
     }
     let release = root.join("target/release");
+    let verifier = release.join("firefly-verify");
+    if !verifier.is_file() {
+        return Err("missing firefly-verify; build the host tools with cargo xtask release".into());
+    }
     let _lock = claim_environment(&root)?;
     let python = root.join(".venv/bin/python");
     if hil
@@ -299,8 +303,7 @@ pub fn run(hil: bool, args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let mut expected = Vec::new();
     let mission = fly(&mut stack, &socket, plans, nonce, &mut expected);
     let cleanup = stack.shutdown();
-    let score = Command::new(&python)
-        .args(["scripts/verify_flight.py"])
+    let score = Command::new(verifier)
         .arg(&path)
         .args(["--transport", if hil { "hil" } else { "sil" }])
         .output()?;

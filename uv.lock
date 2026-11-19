@@ -76,6 +76,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "psutil" },
     { name = "pytest" },
     { name = "rerun-sdk" },
     { name = "scipy" },
@@ -92,6 +93,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "psutil", specifier = ">=7.2.2,<8" },
     { name = "pytest", specifier = ">=9.2.0" },
     { name = "rerun-sdk", specifier = ">=0.43.2,<0.44" },
     { name = "scipy", specifier = ">=1.18.1" },
@@ -183,12 +185,6 @@ provides-extras = ["test"]
 name = "firefly-workspace"
 version = "0.1.0"
 source = { editable = "packages/firefly-workspace" }
-dependencies = [
-    { name = "psutil" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "psutil", specifier = ">=7.2.2,<8" }]
 
 [[package]]
 name = "flatbuffers"

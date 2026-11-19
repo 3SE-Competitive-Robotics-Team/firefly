@@ -3,6 +3,7 @@ mod container;
 mod deploy;
 mod deploy_hil;
 mod mission;
+mod processes;
 mod release;
 mod target;
 
@@ -15,6 +16,7 @@ usage:
   cargo xtask deploy [--device <serial>]
   cargo xtask deploy-hil [--device <serial>]
   cargo xtask sil|hil [--seed N] <plan.toml>...
+  cargo xtask processes <workspace>
   cargo xtask unpack <package> <directory>";
 
 fn main() -> ExitCode {
@@ -33,6 +35,14 @@ fn run() -> Result<(), String> {
         .split_first()
         .ok_or_else(|| "missing command".to_owned())?;
     match command.as_str() {
+        "processes" => {
+            let [root] = rest else {
+                return Err("expected workspace path".into());
+            };
+            let ids = processes::active(Path::new(root)).map_err(|e| e.to_string())?;
+            println!("{}", serde_json::json!(ids));
+            Ok(())
+        }
         "release" => release::run(rest),
         "deploy" => deploy::run(rest),
         "deploy-hil" => deploy_hil::run(rest),

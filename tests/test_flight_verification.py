@@ -1,16 +1,44 @@
 """Unit coverage of mission gates and independent physical scoring."""
 import copy
+from dataclasses import asdict, dataclass, field
+from functools import cache
+import json
 from pathlib import Path
-import sys
+import subprocess
 import tomllib
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from flight_mission.recording import Evidence
-from flight_mission.verification import evaluate, evaluate_native
 from firefly_mujoco.scene import resolve
+
+
+@dataclass
+class Evidence:
+    events: list = field(default_factory=list)
+    poses: list = field(default_factory=list)
+    down_frames: list = field(default_factory=list)
+    scalars: dict = field(default_factory=dict)
+    capture: dict = field(default_factory=dict)
+    recording_complete: bool = False
+
+
+@cache
+def fixture_grader():
+    root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        ["cargo", "build", "-p", "firefly-verify", "--example", "grade_evidence", "--message-format=json"],
+        cwd=root, stdout=subprocess.PIPE, text=True, check=True,
+    )
+    return next(row["executable"] for line in completed.stdout.splitlines()
+                if (row := json.loads(line)).get("executable")
+                and row["target"]["name"] == "grade_evidence")
+
+
+def evaluate(data, *, board=False):
+    payload = json.dumps([asdict(data), "board" if board else None], allow_nan=False,
+                         default=lambda x: x.tolist())
+    return json.loads(subprocess.check_output([fixture_grader()], input=payload, text=True))
 
 
 @pytest.mark.parametrize("team", ["red", "blue"])
@@ -239,13 +267,13 @@ def test_native_events_bind_the_flight_only_after_measured_liftoff(fault):
     assert result["passed"] == (fault is None), result
     data.poses.clear()
     data.capture.clear()
-    board = evaluate_native(data, board=True)
+    board = evaluate(data, board=True)
     assert board["passed"] == (fault is None), board
     if fault is None:
         assert not board["metrics"]["flights"][0]["ground_truth_available"]
         assert not evaluate(data)["passed"]
         data.scalars["/fc/debug/state"].clear()
-        assert not evaluate_native(data, board=True)["passed"]
+        assert not evaluate(data, board=True)["passed"]
 
 
 def test_restart_is_the_same_run_and_ground_cancellation_has_no_flight_number():

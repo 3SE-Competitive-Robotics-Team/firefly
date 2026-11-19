@@ -1,24 +1,14 @@
-"""Grade a closed mission RRD using simulated truth or onboard lifecycle evidence."""
-
-import argparse
-import json
+"""Compatibility entry point for the standalone Rust flight verifier."""
+import os
 from pathlib import Path
-from flight_mission.verification import verify_recording
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("recording", type=Path)
-    parser.add_argument("--transport", choices=("sil", "hil", "board"),
-                        help="board grades the recorded lifecycle without external ground truth")
-    args = parser.parse_args()
-    try:
-        report = verify_recording(args.recording, expected_transport=args.transport)
-    except Exception as error:
-        report = {"passed": False, "failures": [f"invalid recording: {error}"], "metrics": {}}
-    print(json.dumps(report))
-    return 0 if report["passed"] else 1
+import sys
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    root = Path(__file__).resolve().parents[1]
+    binary = root / "target/release/firefly-verify"
+    if binary.is_file():
+        os.execv(binary, [str(binary), *sys.argv[1:]])
+    manifest = root / "apps/firefly-verify/Cargo.toml"
+    os.execvp("cargo", ["cargo", "run", "--quiet", "--release", "--manifest-path", str(manifest),
+                        "--bin", "firefly-verify", "--", *sys.argv[1:]])

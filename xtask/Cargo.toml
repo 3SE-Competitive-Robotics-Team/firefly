@@ -16,6 +16,8 @@ serde_json.workspace = true
 signal-hook.workspace = true
 toml.workspace = true
 tempfile = "3"
+# Bevy enables apple-sandbox on its 0.39 dependency. The host inspector needs process enumeration.
+sysinfo = { version = "0.40.4", default-features = false, features = ["system"] }
 
 [lints]
 workspace = true

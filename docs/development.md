@@ -49,15 +49,17 @@ python3 compile_landing_viplite.py
 
 ## 运行
 
-SIL 和 USB HIL 使用同一份任务计划和 Rust daemon。xtask 管理仿真进程、顺序提交计划，并用 Mimir 返回的 RRD 逐架次评分。SIL 在本机启动隔离的任务服务，HIL 通过 USB 请求板上正在运行的 daemon。HIL 使用主机 Mimir 录制包含真值的验收数据。MuJoCo 物理进程和离线 RRD 评分使用 Python。
+SIL 和 USB HIL 使用同一份任务计划和 Rust daemon。启动前，xtask 取得运行锁并检查当前工作区是否有占用 IPC 的飞行进程。`cargo xtask processes .` 可以查看匹配的 PID。SIL 在本机启动隔离的任务服务，HIL 通过 USB 请求板上正在运行的 daemon。MuJoCo 物理进程使用 Python。
+
+xtask 顺序提交计划，录制关闭后调用 Rust 评分器逐架次验收。HIL 使用主机 Mimir，将板端遥测和仿真真值写入同一份 RRD。桌面 release 包含独立的 `firefly-verify`，可复制到相同平台的机器上使用。它将 JSON 报告写入标准输出，验收通过时返回 0，验收失败或录制无效时返回 1。
 
 ```bash
 cargo xtask sil configs/mission-hover.toml
 cargo xtask sil configs/mission-square.toml configs/mission-cuboid.toml
 cargo xtask deploy-hil
 cargo xtask hil configs/mission-square.toml
-uv run python scripts/verify_flight.py <录制路径>
-uv run python scripts/verify_flight.py --transport board <板上录制路径>
+target/release/firefly-verify --transport sil <录制路径>
+target/release/firefly-verify --transport board <板上录制路径>
 ```
 
 板上录制按运行、任务和架次核对状态、FC 实测模式、架次间上锁区间与 VIO 会话。SIL/HIL 另用仿真真值核对高度、航点和落点。SIL 需要 GPU 与场地资产。同一次调用保持一个 VIO 坐标系。长方体 3 × 2 × 2 米，从 A′ 起笔，最高航点为 3.3 米。SIL 使用 3.7 米顶板，板端使用现场规划配置。计划偏移直接沿 odom 轴声明。首架次完成且落稳上锁后才提交下一架次。

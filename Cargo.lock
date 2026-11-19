@@ -1101,7 +1101,7 @@ dependencies = [
  "const-fnv1a-hash",
  "log",
  "serde",
- "sysinfo",
+ "sysinfo 0.39.6",
 ]
 
 [[package]]
@@ -3800,6 +3800,21 @@ dependencies = [
  "fastrace",
  "firefly-error",
  "nalgebra",
+]
+
+[[package]]
+name = "firefly-verify"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "futures-lite",
+ "nalgebra",
+ "re_log_encoding",
+ "re_log_msg",
+ "re_log_types",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -9164,6 +9179,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysinfo"
+version = "0.40.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e80749408e2d8bec0ffa303012cf4e1b3b355f4a09087b4fdf7473680f6a2de"
+dependencies = [
+ "libc",
+ "memchr",
+ "ntapi",
+ "objc2-core-foundation",
+ "objc2-io-kit",
+ "windows",
+]
+
+[[package]]
 name = "taffy"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10972,6 +11001,7 @@ dependencies = [
  "nix 0.32.0",
  "serde_json",
  "signal-hook",
+ "sysinfo 0.40.4",
  "tempfile",
  "toml 1.2.1+spec-1.1.0",
  "zstd",
