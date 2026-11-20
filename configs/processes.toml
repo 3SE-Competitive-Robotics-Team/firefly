@@ -40,7 +40,7 @@ autostart = true
 
 [[process]]
 name = "planner"
-command = ["taskset", "-c", "2", "bin/planner"]
+command = ["taskset", "-c", "2,4", "bin/planner"]
 autostart = true
 
 [[process]]

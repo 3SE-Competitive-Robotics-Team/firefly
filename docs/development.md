@@ -35,13 +35,13 @@ ffctl mission status inspection-001
 
 ### A733 进程绑核
 
-普通模式和 USB HIL 使用相同的板端 CPU 分配。RootSLAM 的两个 Rayon 工作线程共享 CPU 6、7，其余常驻进程各自限制到一个核心。
+普通模式和 USB HIL 使用相同的板端 CPU 分配。planner 的规划和建图线程可在 CPU 2、4 并行，RootSLAM 的两个 Rayon 工作线程可在 CPU 6、7 并行。其余常驻进程各自限制到一个核心。
 
 | CPU | 进程 |
 |---|---|
 | 0 | ffctl supervisor、firefly-daemon、板端 Mimir、HIL gadget 的 serve 和 watchdog |
 | 1 | camera、imu、motor |
-| 2 | planner（含深度建图线程） |
+| 2、4 | planner（含深度建图线程） |
 | 3 | depth |
 | 4 | traj、landing、localization |
 | 5 | fc |
