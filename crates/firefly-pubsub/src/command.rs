@@ -2,6 +2,11 @@ use iceoryx2::prelude::*;
 
 pub const COMMAND_TOPIC: &str = "Firefly/Command";
 
+impl crate::request::MissionRequest for CommandMessage {
+    const TOPIC: &'static str = COMMAND_TOPIC;
+    const BUFFER_SIZE: usize = 8;
+}
+
 /// 指令种类（线上编码，`Rust`/Python 双端同值；对应 `firefly_flight::Command` 的变体）。
 pub mod kind {
     pub const ARM: u8 = 1;

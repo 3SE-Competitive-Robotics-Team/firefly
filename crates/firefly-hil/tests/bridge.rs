@@ -20,6 +20,7 @@ use firefly_pubsub::{
     odom::OdomMessage,
     plant::AirframeMessage,
     reference::ReferenceMessage,
+    request::MissionRequest,
     subscriber::{Subscriber, SubscriberOptions},
     trajectory::PlannerStatusMessage,
     viz::{self, ScalarMessage, VizMessage, VoxelMessage},
@@ -128,6 +129,56 @@ fn downlink_requests_use_the_same_native_ipc_contract() {
             .accept_raw(firefly_hil::Kind::Control, vec![])
             .is_err()
     );
+}
+
+#[test]
+fn native_and_hil_request_ports_can_each_create_the_service_first() {
+    use iceoryx2::prelude::{Config, NodeBuilder, ipc};
+
+    for first in ["daemon", "consumers", "hil"] {
+        let mut config = Config::default();
+        config.global.prefix = format!("ffreq{}-{first}-", std::process::id())
+            .as_str()
+            .try_into()
+            .unwrap();
+        let node = NodeBuilder::new()
+            .config(&config)
+            .create::<ipc::Service>()
+            .unwrap();
+        let daemon = || {
+            (
+                CommandMessage::publisher(&node).unwrap(),
+                GoalMessage::publisher(&node).unwrap(),
+            )
+        };
+        let consumers = || {
+            (
+                CommandMessage::subscriber(&node).unwrap(),
+                GoalMessage::subscriber(&node).unwrap(),
+            )
+        };
+        let publishers = (first == "daemon").then(daemon);
+        let subscribers = (first == "consumers").then(consumers);
+        let relay = RequestsPublishers::open(&node, "Firefly").unwrap();
+        let _daemon = publishers.unwrap_or_else(daemon);
+        let (fc, planner) = subscribers.unwrap_or_else(consumers);
+        let _ffctl = daemon();
+        let _host_ingress = RequestsSubscribers::open(&node, "Firefly").unwrap();
+        relay
+            .publish(Message::Command(CommandMessage {
+                sequence: 17,
+                ..Default::default()
+            }))
+            .unwrap();
+        relay
+            .publish(Message::Goal(GoalMessage {
+                timestamp: 19.,
+                ..Default::default()
+            }))
+            .unwrap();
+        assert_eq!(fc.receive().unwrap().unwrap().sequence, 17);
+        assert_eq!(planner.receive().unwrap().unwrap().timestamp, 19.);
+    }
 }
 
 #[test]

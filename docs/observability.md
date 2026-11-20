@@ -70,9 +70,9 @@ This catalog covers all production topic constants; test topics use isolated nam
 | `Firefly/Reference` | traj → FC, flight scripts | Flight scripts observe reference goal identity |
 | `Firefly/Control` | FC → actuators/sim | Motor evidence and FC summaries |
 | `Firefly/PlantState`, `Firefly/Airframe` | sim/airframe → FC, system consumers | Optional physical-state evidence; VIO uses camera and IMU observations |
-| `Firefly/Command` | ffctl → FC | Results and rejection reasons in event logs |
+| `Firefly/Command` | daemon, ffctl, HIL relay → FC | Three publisher slots. FC consumes the latest request, the HIL bridge buffers up to eight. Results and rejection reasons in event logs. |
 | `Firefly/FcStatus` | FC → daemon, USB HIL and Mimir; `mode` is the native state code, `can_arm` is the FC's latest pre-arm decision (0/1). | V2 IPC type, 24 bytes at up to 10 Hz, one publisher and 16 slots. Mimir records mode and verifies sequence continuity; the existing `fc/arming/failed` observation retains the reason. HIL v11 carries 18 payload bytes. Update all peers together. |
-| `Firefly/Goal` | ffctl → planner | 80-byte waypoint in local odom coordinates. STOP (0) supports optional terminal yaw in radians (CLI degrees). PASS (1) carries the next xyz position. One sample per task command. |
+| `Firefly/Goal` | daemon, ffctl, HIL relay → planner | Three publisher slots. The planner consumes the latest request, the HIL bridge buffers up to four. 80-byte waypoint in local odom coordinates. STOP (0) supports optional terminal yaw in radians (CLI degrees). PASS (1) carries the next xyz position. One sample per task command. |
 | `Firefly/MandatoryStop` | external tools → planner | Stop command; outcome in planner state and logs |
 | `Firefly/Trajectory`, `Firefly/PlannerHeartbeat`, `Firefly/TrajectoryControl`, `Firefly/PlannerStatus` | planner → traj (trajectory, heartbeat, control), flight scripts (status) | Atomic xyz/yaw polynomials with shared piece times and a stationary endpoint; heartbeat loss finishes the committed stop; 32-byte status identifies the command and reports scheduled completion plus latched measured passage |
 | `Firefly/PoseObservation` | external pose source → localization | Business localization input; localization emits registered result diagnostics |

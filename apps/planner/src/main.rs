@@ -20,6 +20,7 @@ use firefly_planner::{ManagerOptions, PlannerConfig, PlannerManager, ReplanFsm, 
 use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage, PASS};
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::publish::Publisher;
+use firefly_pubsub::request::MissionRequest;
 use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::trajectory::{MANDATORY_STOP_TOPIC, MandatoryStopMessage};
 use firefly_pubsub::viz::{
@@ -88,13 +89,13 @@ fn parse_args() -> Result<Args> {
 }
 
 /// 打开可选订阅器：失败降级为 `None` 并记录（辅助输入流可缺失，状态门控仍生效）。
-fn open_sub<T: std::fmt::Debug + ZeroCopySend + 'static>(
-    node: &firefly_pubsub::node::IpcNode,
+fn log_subscription<T: std::fmt::Debug + ZeroCopySend + 'static>(
+    port: Result<Subscriber<T>>,
     topic: &str,
     ok_msg: &str,
     err_msg: &str,
 ) -> Option<Subscriber<T>> {
-    match Subscriber::<T>::with_topic(node, topic) {
+    match port {
         Ok(s) => {
             log::info!("{ok_msg}（topic {topic}）");
             Some(s)
@@ -199,14 +200,14 @@ impl App {
         let odom =
             OdometryReceiver::start().map_err(|e| e.with_operation("创建规划器局部里程计订阅"))?;
         let depth = depth_mapping::DepthReceiver::start(depth_fusion, odom.history())?;
-        let goal_sub = open_sub::<GoalMessage>(
-            &node,
+        let goal_sub = log_subscription(
+            GoalMessage::subscriber(&node),
             GOAL_TOPIC,
             "已订阅目标话题（`ffctl planner goal X Y Z` 发布）",
             "目标订阅不可用",
         );
-        let stop_sub = open_sub::<MandatoryStopMessage>(
-            &node,
+        let stop_sub = log_subscription(
+            Subscriber::<MandatoryStopMessage>::with_topic(&node, MANDATORY_STOP_TOPIC),
             MANDATORY_STOP_TOPIC,
             "已订阅强制停止话题（`planner --mandatory-stop` 发布）",
             "强制停止订阅不可用",

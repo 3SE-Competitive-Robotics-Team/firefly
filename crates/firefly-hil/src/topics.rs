@@ -17,6 +17,7 @@ use firefly_pubsub::{
     plant::AirframeMessage,
     publish::Publisher,
     reference::ReferenceMessage,
+    request::{MissionRequest, REQUEST_MAX_PUBLISHERS},
     subscriber::{Subscriber, SubscriberOptions},
     trajectory::PlannerStatusMessage,
     viz::{
@@ -144,8 +145,8 @@ macro_rules! routes {
 
 routes! { RequestsSubscribers, RequestsPublishers;
     activity: ActivityMessage => Activity (firefly_pubsub::activity::ACTIVITY_TOPIC, 8, firefly_pubsub::activity::MAX_OWNERS),
-    command: CommandMessage => Command (firefly_pubsub::command::COMMAND_TOPIC, 8, 2),
-    goal: GoalMessage => Goal (firefly_pubsub::goal::GOAL_TOPIC, 4, 2),
+    command: CommandMessage => Command (CommandMessage::TOPIC, CommandMessage::BUFFER_SIZE, REQUEST_MAX_PUBLISHERS),
+    goal: GoalMessage => Goal (GoalMessage::TOPIC, GoalMessage::BUFFER_SIZE, REQUEST_MAX_PUBLISHERS),
     airframe: AirframeMessage => Airframe (firefly_pubsub::plant::AIRFRAME_TOPIC, 4, 2),
 }
 

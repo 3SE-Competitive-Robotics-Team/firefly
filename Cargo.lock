@@ -3590,6 +3590,7 @@ name = "firefly-hil"
 version = "0.1.0"
 dependencies = [
  "firefly-pubsub",
+ "iceoryx2",
  "log",
  "proptest",
  "serde",

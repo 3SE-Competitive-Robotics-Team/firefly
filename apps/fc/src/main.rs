@@ -15,7 +15,7 @@ use firefly_flight::{
     QuadState, Reject,
 };
 use firefly_pubsub::attitude::{ATTITUDE_TOPIC, AttitudeMessage};
-use firefly_pubsub::command::{COMMAND_TOPIC, CommandMessage, kind as command_kind};
+use firefly_pubsub::command::{CommandMessage, kind as command_kind};
 use firefly_pubsub::control::{CONTROL_BUFFER_SIZE, CONTROL_TOPIC, ControlMessage};
 use firefly_pubsub::fc_status::{FC_STATUS_BUFFER_SIZE, FC_STATUS_TOPIC, FcStatusMessage};
 use firefly_pubsub::landing::{LANDING_TARGET_TOPIC, LandingTargetMessage};
@@ -27,6 +27,7 @@ use firefly_pubsub::plant::{
 };
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::reference::{REFERENCE_TOPIC, ReferenceMessage};
+use firefly_pubsub::request::MissionRequest;
 use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::viz::{SCALARS_MAX, ScalarMessage, VizPublisher};
 use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
@@ -127,7 +128,7 @@ impl Ports {
             corrected: Subscriber::with_topic(node, CORRECTED_ODOM_TOPIC)?,
             attitude: Subscriber::with_topic(node, ATTITUDE_TOPIC)?,
             reference: Subscriber::with_topic(node, REFERENCE_TOPIC)?,
-            command: Subscriber::with_topic(node, COMMAND_TOPIC)?,
+            command: CommandMessage::subscriber(node)?,
             control: Publisher::with_topic_and_buffer(
                 node,
                 CONTROL_TOPIC,

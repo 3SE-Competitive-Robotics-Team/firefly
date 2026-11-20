@@ -1,6 +1,11 @@
 use iceoryx2::prelude::*;
 
 pub const GOAL_TOPIC: &str = "Firefly/Goal";
+
+impl crate::request::MissionRequest for GoalMessage {
+    const TOPIC: &'static str = GOAL_TOPIC;
+    const BUFFER_SIZE: usize = 4;
+}
 pub const STOP: u64 = 0;
 pub const PASS: u64 = 1;
 

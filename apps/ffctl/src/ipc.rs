@@ -7,29 +7,19 @@ use firefly_error::{Error, ErrorKind};
 use firefly_pubsub::command::{COMMAND_TOPIC, CommandMessage};
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::publish::Publisher;
+use firefly_pubsub::request::MissionRequest;
 use iceoryx2::prelude::ZeroCopySend;
 
 /// 投递期限（一次性 CLI 与订阅端的连接是异步建立的，需重试到连接建立）。
 const DELIVER_TIMEOUT: Duration = Duration::from_millis(300);
 const DELIVER_RETRY: Duration = Duration::from_millis(30);
 
-/// 打开某话题的发布端（节点只在本进程存活期间存在）。
-///
-/// # Errors
-/// 节点或端口创建失败（IPC 资源不可用等）。
-pub(crate) fn new_publisher<T: Debug + ZeroCopySend + 'static>(
-    topic: &str,
-) -> Result<Publisher<T>, Error> {
-    let node = create_node()?;
-    Publisher::<T>::with_topic(&node, topic)
-}
-
 /// 投递一条地面站指令（`Firefly/Command`）。
 ///
 /// # Errors
 /// 端口创建失败，或投递期限内无订阅端（飞控未启动）。
 pub(crate) fn send_command(kind: u8, altitude: f64, label: &str) -> Result<(), Error> {
-    let publisher = new_publisher::<CommandMessage>(COMMAND_TOPIC)?;
+    let publisher = CommandMessage::publisher(&create_node()?)?;
     let nanos = wall_nanos();
     let msg = CommandMessage {
         timestamp: nanos as f64 / 1e9,

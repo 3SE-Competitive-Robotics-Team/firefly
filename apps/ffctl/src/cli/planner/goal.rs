@@ -2,10 +2,11 @@ use std::process::ExitCode;
 
 use firefly_error::Error;
 use firefly_pubsub::goal::{GOAL_TOPIC, GoalMessage, PASS};
+use firefly_pubsub::{node::create_node, request::MissionRequest};
 use usage_rs::{Args, Run};
 
 use crate::cli::Meters;
-use crate::ipc::{deliver, new_publisher, report, wall_seconds};
+use crate::ipc::{deliver, report, wall_seconds};
 
 /// 发布规划目标点（odom 系，米）：planner 重算全局路径并重新规划
 ///
@@ -91,7 +92,7 @@ fn publish(msg: GoalMessage) -> Result<(), Error> {
             "invalid waypoint or successor",
         ));
     }
-    let publisher = new_publisher::<GoalMessage>(GOAL_TOPIC)?;
+    let publisher = GoalMessage::publisher(&create_node()?)?;
     let (x, y, z) = (msg.position_x, msg.position_y, msg.position_z);
     let receivers = deliver(&publisher, msg, GOAL_TOPIC)?;
     println!("已投递目标 ({x:.2}, {y:.2}, {z:.2}) → {GOAL_TOPIC}（{receivers} 个订阅端）");
