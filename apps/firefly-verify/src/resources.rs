@@ -22,11 +22,20 @@ pub(super) fn images(data: &FlightEvidence<'_>, timeline: &Timeline, report: &mu
     };
     let span = last.0 - first.0;
     let n = frames.len() - 1;
-    let gaps = || frames.windows(2).map(|w| w[1].0 - w[0].0);
-    let max_gap = gaps().fold(0., f64::max);
     report
         .metrics
         .insert("down_frames".into(), json!(frames.len()));
+    let mut min_gap = f64::INFINITY;
+    let mut max_gap = 0_f64;
+    for pair in frames.windows(2) {
+        let gap = pair[1].0 - pair[0].0;
+        if !gap.is_finite() || gap <= 0. {
+            report.check(false, "down-camera timestamps must increase");
+            return;
+        }
+        min_gap = min_gap.min(gap);
+        max_gap = max_gap.max(gap);
+    }
     report
         .metrics
         .insert("max_down_gap_s".into(), json!(max_gap));
@@ -44,7 +53,7 @@ pub(super) fn images(data: &FlightEvidence<'_>, timeline: &Timeline, report: &mu
         return;
     }
     report.check(
-        gaps().all(|g| g >= 1. / rate - 0.001_000_001),
+        min_gap >= 1. / rate - 0.001_000_001,
         "down-camera exceeds the requested capture rate",
     );
     let long_term_rate_ok = n as f64 <= (span + 0.002) * rate;
@@ -165,7 +174,7 @@ pub(super) fn precision(data: &FlightEvidence<'_>, timeline: &Timeline, report: 
         .scalar("/landing/target", begin_time, end_time)
         .iter()
         .filter_map(|(stamp, v)| {
-            if *stamp <= begin_time || v[3] != 1. {
+            if *stamp <= begin_time || v[3] != 1. || !v[..3].iter().all(|x| x.is_finite()) {
                 return None;
             }
             let (_, q) = window(quality, *stamp, *stamp, |s| s.0).last()?;
@@ -195,4 +204,64 @@ pub(super) fn precision(data: &FlightEvidence<'_>, timeline: &Timeline, report: 
         matches!(steps,[Some(i),Some(j),Some(k)] if i<j && j<k),
         "ordered Align, Descend and Final precision stages required",
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Evidence, timeline::Phase};
+
+    #[test]
+    fn nonfinite_coordinates_do_not_confirm_acquisition() {
+        let phases = [("acquire", 0.), ("land", 0.4), ("complete", 1.)].map(|(name, timestamp)| {
+            (
+                name,
+                Phase {
+                    timestamp,
+                    goal: None,
+                    index: None,
+                },
+            )
+        });
+        let timeline = Timeline {
+            settings: json!({"team":"red"}),
+            home: json!({"session":7}),
+            start: 0.,
+            phases: phases.into(),
+            legs: vec![],
+        };
+        let mut data = Evidence::default();
+        let stamps = [0.1, 0.2, 0.3];
+        data.scalars.insert(
+            "/landing/quality".into(),
+            stamps.map(|t| (t, vec![7., 0., 0.2, 0.9])).into(),
+        );
+        data.scalars.insert(
+            "/fc/debug/precision".into(),
+            vec![(0.5, vec![1.]), (0.6, vec![2.]), (0.7, vec![3.])],
+        );
+        for (axis, value) in [
+            (0, 1.),
+            (0, f64::NAN),
+            (1, f64::INFINITY),
+            (2, f64::NEG_INFINITY),
+        ] {
+            let mut targets = stamps.map(|t| (t, vec![0., 0., 0., 1.]));
+            targets[1].1[axis] = value;
+            data.scalars
+                .insert("/landing/target".into(), targets.into());
+            let mut report = Report::default();
+            precision(
+                &FlightEvidence::new(&data, &[], 0., 1., 1.),
+                &timeline,
+                &mut report,
+            );
+            if value.is_finite() {
+                assert!(report.failures.is_empty(), "{:?}", report.failures);
+            } else {
+                assert_eq!(report.failures.len(), 1);
+                assert!(report.failures[0].contains("three fresh"));
+            }
+        }
+    }
 }

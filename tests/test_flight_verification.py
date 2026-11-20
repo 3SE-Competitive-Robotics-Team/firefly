@@ -90,6 +90,23 @@ def test_visual_span_uses_rrd_nanosecond_precision(last, passed):
     assert evaluate(data)["passed"] == passed
 
 
+def test_missing_waypoint_offset_reports_the_invalid_declaration():
+    data = successful_evidence()
+    next(row for _, row in data.events if row["kind"] == "waypoint")["offset"] = None
+    report = evaluate(data)
+    assert not report["passed"]
+    assert "invalid declared waypoint offset" in report["failures"]
+
+
+def test_duplicate_down_camera_timestamp_reports_the_clock_error():
+    data = successful_evidence()
+    middle = len(data.down_frames) // 2
+    data.down_frames.insert(middle, data.down_frames[middle])
+    report = evaluate(data)
+    assert not report["passed"]
+    assert "down-camera timestamps must increase" in report["failures"]
+
+
 @pytest.mark.parametrize("fault", ["cruise_gap", "cruise_compute", "missing_runtime", "rate", "invalid_rate", "missing_rate", "rate_drift", "not_released", "cpu_hil"])
 def test_continuous_video_and_on_demand_inference_are_independently_scored(fault):
     data = successful_evidence()
