@@ -45,5 +45,5 @@ autostart = true
 
 [[process]]
 name = "depth"
-command = ["taskset", "-c", "0-4", "bin/depth"]
+command = ["taskset", "-c", "3", "bin/depth"]
 autostart = true
