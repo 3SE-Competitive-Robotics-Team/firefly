@@ -33,6 +33,22 @@ ffctl mission status inspection-001
 
 每份计划最多 16 点。起飞和返航高度为 0.5–2 米，停留时间为 (0, 600] 秒，返航平面偏移不超过 0.3 米。航点距起点水平半径不超过 10 米，首点水平距离至少 1 米，各段三维长度为 0.5–10 米。航点高度为 0.5–3.3 米，以支持长方体竖边。`systemctl cat firefly-daemon.service firefly-mimir.service` 可查看部署的两个单元。普通板端运行先启动独立的录制服务，停机时最后排空录制。USB HIL 切换清单后由主机录制同一条真值时间线。
 
+### A733 进程绑核
+
+普通模式和 USB HIL 使用相同的板端 CPU 分配。RootSLAM 的两个 Rayon 工作线程共享 CPU 6、7，其余常驻进程各自限制到一个核心。
+
+| CPU | 进程 |
+|---|---|
+| 0 | ffctl supervisor、firefly-daemon、板端 Mimir、HIL gadget 的 serve 和 watchdog |
+| 1 | camera、imu、motor |
+| 2 | planner（含深度建图线程） |
+| 3 | depth |
+| 4 | traj、landing、localization |
+| 5 | fc |
+| 6、7 | firefly-rootslam |
+
+板上用 `ffctl process status` 查看进程 PID，再用 `taskset -apc <PID>` 核对所有线程的有效亲和性。
+
 ### A733 精降模型
 
 `scripts/export_landing_viplite.py` 从现有 FP32 ONNX 拆出检测框和置信度两个输出，让两者分别量化。使用 `se3_yolo` 的导出环境和训练时的标定集准备工作目录，然后在全志的 x86 Linux ACUITY 镜像 `ubuntu-npu:v2.0.10.2` 内编译。下例中的 `/work` 是该工作目录在容器内的挂载位置。

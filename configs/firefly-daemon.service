@@ -4,6 +4,7 @@ PartOf=firefly.service
 After=firefly.service
 
 [Service]
+CPUAffinity=0
 Type=notify
 NotifyAccess=main
 WorkingDirectory=/opt/firefly

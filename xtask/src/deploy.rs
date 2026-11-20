@@ -105,7 +105,11 @@ fn package() -> Result<PathBuf, String> {
         });
     }
 
-    for name in ["firefly-daemon.service", "firefly-mimir.service"] {
+    for name in [
+        "firefly-daemon.service",
+        "firefly-mimir.service",
+        "firefly.service.d/cpu-affinity.conf",
+    ] {
         entries.push(Entry {
             path: format!("configs/{name}"),
             mode: 0o644,
@@ -232,6 +236,8 @@ fn start(device: &str) -> Result<(), String> {
     remote_step(
         device,
         concat!(
+            "install -Dm 644 /opt/firefly/configs/firefly.service.d/cpu-affinity.conf ",
+            "/etc/systemd/system/firefly.service.d/cpu-affinity.conf && ",
             "install -m 644 /opt/firefly/configs/firefly-daemon.service ",
             "/opt/firefly/configs/firefly-mimir.service /etc/systemd/system/ && ",
             "systemctl daemon-reload && systemctl enable firefly-daemon.service firefly-mimir.service"

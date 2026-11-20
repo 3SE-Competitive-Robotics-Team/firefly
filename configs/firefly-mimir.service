@@ -6,6 +6,7 @@ PartOf=firefly.service
 ConditionPathExists=!/opt/firefly/configs/processes-normal.toml
 
 [Service]
+CPUAffinity=0
 Type=exec
 WorkingDirectory=/opt/firefly
 ExecStart=/opt/firefly/bin/mimir
