@@ -35,3 +35,8 @@ autostart = true
 name = "planner"
 command = ["taskset", "-c", "0-4", "bin/planner"]
 autostart = true
+
+[[process]]
+name = "depth"
+command = ["taskset", "-c", "0-4", "bin/depth"]
+autostart = true

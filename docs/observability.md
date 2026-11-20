@@ -51,19 +51,19 @@ This catalog covers all production topic constants; test topics use isolated nam
 
 | Topic | Producers → consumers; purpose | Recording policy |
 |---|---|---|
-| `Firefly/VizScalars` | FC, VIO, render, localization, planner, traj → mimir | Every registered numeric row; publisher sequence checked |
+| `Firefly/VizScalars` | FC, VIO, render, depth, localization, planner, traj and HIL → mimir | Nine publisher slots. Every registered numeric row; publisher sequence checked |
 | `Firefly/Viz` | VIO, render, planner, localization → mimir | Registered spatial observations; sequence checked |
 | `Firefly/VizVoxels` | planner → mimir | Complete ordered map updates; missing chunks fail |
 | `Firefly/Log` | Rust applications, sim, flight scripts → mimir | Sequence and producer loss count checked |
 | `Firefly/GroundTruth` | sim → render, mimir, tools | Pose and trajectory; independent scoring samples |
 | `Firefly/CorrectedOdometry` | VIO/localization → mimir, tools | Map-frame pose and trajectory |
 | `Firefly/VioAttitude` | VIO prediction → FC, mimir | Bias summary; control consumers remain independent |
-| `Firefly/CameraLeft`, `Firefly/CameraRight` | render/sensors → VIO, mimir | Lossless grayscale samples when images are enabled |
+| `Firefly/CameraLeft`, `Firefly/CameraRight` | render/camera → VIO, depth (left), mimir | Lossless grayscale samples when images are enabled |
 | `Firefly/Activity` | Task → landing; HIL priority downlink | 32-byte owner/sequence inference lease, 5 Hz per owner, 8 receive slots and up to 8 owners/publishers; local arrival expiry ≤2s. LANDING requests inference; release/expiry suspends inference work. Phase requests are retained in `logs/flight`; actual resources in `landing/runtime`. Camera acquisition, publication and HIL image transport run continuously. |
 | `Firefly/CameraDown` | render/camera → landing, mimir; OV2640 CIF 352×288, sensor id 3 | Latest-value 101400-byte grayscale input; lossless samples when images are enabled |
 | `Firefly/LandingTarget` | landing → FC, mimir, HIL uplink; odom-frame body contact position | Latest-value 64-byte message; capture time, VIO session, team and validity; recorded as `landing/target` and `landing/quality` |
 | `Firefly/CameraPair` | render → image consumers | Pair notification; image topics carry the recording |
-| `Firefly/Depth` | render/sensors → planner-owned EGO mapper | Planning input; voxel observations provide map display |
+| `Firefly/Depth` | YOLO depth → planner-owned EGO mapper | Latest 320×240 float32 axial metres in the left camera frame, with its capture timestamp. HIL computes on board. Offline dataset labels use a separate namespace. |
 | `Firefly/Imu` | sim/sensors → VIO, FC | Optional replay observations use the registered `vio/input/*` diagnostic gate |
 | `Firefly/Odometry` | VIO → control, planning, flight scripts | Pose diagnostics; flight scripts subscribe to native state |
 | `Firefly/Navigation` | VIO/localization → optional consumers, mimir | Atomic map←odom relation; mimir records changes only and uses bounded startup matching, with poses supplied by their existing observation streams |
@@ -116,6 +116,7 @@ of subsequent business events. Known loss makes the recording fail.
 | `fc/debug/vertical_ned` | FC vertical velocity target/measurement, acceleration target and thrust target in NED, at the existing FC diagnostic cadence; retained for HIL and simulation control diagnosis |
 | `corr/*` | External localization gates, disagreement and correction |
 | `plan/*` | Global guides, accepted executable local paths including their stopping tail, poses, obstacle planes and maps for display |
+| `depth/inference` | At most 1 Hz while publishing depth, four scalars on the image clock: cumulative published frames, preprocessing + inference + restore + IPC milliseconds for that frame, center pixel metres, A733 NPU active (0/1). No depth image telemetry. |
 | `plan/collision` | Planner-owned depth map after obstacle inflation, in odom coordinates at the planner simulation timestamp; bounded voxel snapshots/deltas for checking collision geometry, using the existing map display cadence and budgets |
 | `planner/loop_hz`, `planner/fsm_hz` | Completed execution callbacks and actual FSM executions per wall second; FSM executions require fresh odometry and a ready map |
 | `planner/replan_submitted_hz`, `planner/replan_hz` | Worker jobs submitted and candidates actually adopted per wall second |

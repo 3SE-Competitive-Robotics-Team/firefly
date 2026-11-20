@@ -1,16 +1,15 @@
 //! IPC 发布端口在像素工作线程内创建和使用。
-//! 在线深度加入退化；离线路标使用理想几何深度标签。
+//! 离线数据集使用几何深度标签。
 
 use crate::buffer::PooledBuffer;
 use crate::capture::CaptureTiming;
 use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 
-use crate::depth_noise::{self, DepthNoiseOptions};
-use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_SIZE, IMAGE_WIDTH};
+use firefly_pubsub::camera::IMAGE_SIZE;
 use firefly_pubsub::trace::TraceContext;
 
-use crate::rig::{FOV_Y_DEG, SENSOR_NEAR};
+use crate::rig::SENSOR_NEAR;
 use crate::sensors;
 
 #[derive(Debug)]
@@ -25,7 +24,7 @@ pub struct CaptureJob {
     pub left_gray: PooledBuffer,
     pub right_gray: PooledBuffer,
     /// 深度预通道原始字节（小端 `f32`）。
-    pub depth_raw: PooledBuffer,
+    pub depth_raw: Option<PooledBuffer>,
     pub down_gray: Option<PooledBuffer>,
 }
 
@@ -38,7 +37,7 @@ pub struct ProcessedCapture<'a> {
     pub trace: TraceContext,
     pub left_gray: PooledBuffer,
     pub right_gray: PooledBuffer,
-    /// 深度（米，行主序；在线含退化，离线为几何标签）。
+    /// 深度（米，行主序；离线几何标签）。
     pub depth: &'a [f32],
     pub down_gray: Option<PooledBuffer>,
 }
@@ -98,12 +97,7 @@ impl<T> Latest<T> {
     }
 }
 
-pub fn run_worker(
-    jobs: &Latest<CaptureJob>,
-    options: &DepthNoiseOptions,
-    offline: bool,
-    mut publish: impl FnMut(&ProcessedCapture),
-) {
+pub fn run_worker(jobs: &Latest<CaptureJob>, mut publish: impl FnMut(&ProcessedCapture)) {
     let mut processor = PixelProcessor::default();
     while let Some(job) = jobs.recv() {
         let root = job.trace.continue_span("render-pixels").unwrap_or_else(|| {
@@ -113,7 +107,7 @@ pub fn run_worker(
             )
         });
         let guard = root.set_local_parent();
-        let result = processor.process(job, options, offline);
+        let result = processor.process(job);
         publish(&result);
         drop(guard);
         fastrace::flush();
@@ -122,38 +116,22 @@ pub fn run_worker(
 
 pub struct PixelProcessor {
     depth: Vec<f32>,
-    clean_depth: Vec<f32>,
 }
 
 impl Default for PixelProcessor {
     fn default() -> Self {
         Self {
             depth: vec![0.; IMAGE_SIZE],
-            clean_depth: vec![0.; IMAGE_SIZE],
         }
     }
 }
 
 impl PixelProcessor {
     /// 单拍像素管线；结果借用工作缓冲，必须在下一拍前完成发布。
-    pub fn process(
-        &mut self,
-        mut job: CaptureJob,
-        options: &DepthNoiseOptions,
-        offline: bool,
-    ) -> ProcessedCapture<'_> {
+    pub fn process(&mut self, mut job: CaptureJob) -> ProcessedCapture<'_> {
         job.timing.started = Instant::now();
-        sensors::linearize_depth(&job.depth_raw, &mut self.depth, SENSOR_NEAR);
-        if !offline {
-            depth_noise::apply(
-                &mut self.depth,
-                IMAGE_WIDTH,
-                IMAGE_HEIGHT,
-                (IMAGE_HEIGHT as f32 / 2.0) / (FOV_Y_DEG.to_radians() / 2.0).tan(),
-                job.stamp,
-                options,
-                &mut self.clean_depth,
-            );
+        if let Some(raw) = &job.depth_raw {
+            sensors::linearize_depth(raw, &mut self.depth, SENSOR_NEAR);
         }
 
         job.timing.processed = Instant::now();
@@ -174,13 +152,6 @@ impl PixelProcessor {
 mod tests {
     use super::*;
     use crate::buffer::BufferPool;
-
-    fn pixels(bytes: &[u8]) -> PooledBuffer {
-        let pool = BufferPool::new(1, bytes.len());
-        let mut buffer = pool.take().unwrap();
-        buffer.copy_from_slice(bytes);
-        buffer
-    }
 
     fn filled_pixels(value: u8, len: usize) -> PooledBuffer {
         let pool = BufferPool::new(1, len);
@@ -262,20 +233,16 @@ mod tests {
             for pixel in bytes.as_chunks_mut::<4>().0 {
                 pixel.copy_from_slice(&d.to_le_bytes());
             }
-            let result = processor.process(
-                CaptureJob {
-                    down_gray: None,
-                    seq,
-                    timing: CaptureTiming::default(),
-                    stamp: seq as f64,
-                    trace: TraceContext::default(),
-                    left_gray: left.take().unwrap(),
-                    right_gray: right.take().unwrap(),
-                    depth_raw: bytes,
-                },
-                &DepthNoiseOptions::default(),
-                true,
-            );
+            let result = processor.process(CaptureJob {
+                down_gray: None,
+                seq,
+                timing: CaptureTiming::default(),
+                stamp: seq as f64,
+                trace: TraceContext::default(),
+                left_gray: left.take().unwrap(),
+                right_gray: right.take().unwrap(),
+                depth_raw: Some(bytes),
+            });
             if let Some(previous) = address {
                 assert_eq!(result.depth.as_ptr(), previous);
             }
@@ -296,7 +263,7 @@ mod tests {
         let (published, received) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
             let worker = scope.spawn(|| {
-                run_worker(&jobs, &DepthNoiseOptions::default(), true, |result| {
+                run_worker(&jobs, |result| {
                     published
                         .send((
                             result.seq,
@@ -317,7 +284,7 @@ mod tests {
                     trace: TraceContext::default(),
                     left_gray: filled_pixels(128, IMAGE_SIZE),
                     right_gray: filled_pixels(64, IMAGE_SIZE),
-                    depth_raw: filled_pixels(0, 4 * IMAGE_SIZE),
+                    depth_raw: None,
                 });
                 // 有限等待只检测线程死锁；不把处理耗时作为数值正确性门槛。
                 let value = received.recv_timeout(std::time::Duration::from_secs(10));
@@ -338,35 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_depth_is_geometry_independent_of_sensor_range_and_noise() {
-        let options = DepthNoiseOptions {
-            max_depth_m: 4.,
-            ..Default::default()
-        };
-        let job = || CaptureJob {
-            down_gray: None,
-            seq: 1,
-            timing: CaptureTiming::default(),
-            stamp: 1.,
-            trace: TraceContext::default(),
-            left_gray: filled_pixels(128, IMAGE_SIZE),
-            right_gray: filled_pixels(128, IMAGE_SIZE),
-            depth_raw: pixels(
-                &(0..IMAGE_SIZE)
-                    .flat_map(|_| (SENSOR_NEAR / 10.).to_le_bytes())
-                    .collect::<Vec<_>>(),
-            ),
-        };
-        let mut processor = PixelProcessor::default();
-        let ideal = processor.process(job(), &options, true);
-        assert!(ideal.depth.iter().all(|z| (*z - 10.).abs() < 1e-5));
-        let measured = processor.process(job(), &options, false);
-        assert!(measured.depth.iter().all(|z| *z == 0.));
-    }
-
-    #[test]
     fn process_produces_expected_buffers() {
-        let options = DepthNoiseOptions::default();
         let job = CaptureJob {
             down_gray: None,
             seq: 3,
@@ -375,10 +314,10 @@ mod tests {
             trace: TraceContext::default(),
             left_gray: filled_pixels(128u8, IMAGE_SIZE),
             right_gray: filled_pixels(64u8, IMAGE_SIZE),
-            depth_raw: filled_pixels(0u8, 4 * IMAGE_SIZE),
+            depth_raw: None,
         };
         let mut processor = PixelProcessor::default();
-        let out = processor.process(job, &options, false);
+        let out = processor.process(job);
         assert_eq!(out.seq, 3);
         assert!((out.stamp - 1.5).abs() < 1e-9);
         assert_eq!(out.left_gray.len(), IMAGE_SIZE);

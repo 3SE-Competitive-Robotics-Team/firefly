@@ -141,7 +141,7 @@ pub const SCALAR_BUFFER_SIZE: usize = 1024;
 pub const VOXEL_TOPIC: &str = "Firefly/VizVoxels";
 /// 单一 planner 发布体素；独立缓冲限制大载荷的共享内存预算。
 pub const VOXEL_BUFFER_SIZE: usize = 32;
-pub const VIZ_MAX_PUBLISHERS: usize = 8;
+pub const VIZ_MAX_PUBLISHERS: usize = 9;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ZeroCopySend)]

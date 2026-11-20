@@ -52,6 +52,7 @@ pub fn active(root: &Path) -> io::Result<Vec<u32>> {
                         | "planner"
                         | "traj"
                         | "landing"
+                        | "depth"
                 )
             );
         if native

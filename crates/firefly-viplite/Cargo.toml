@@ -11,6 +11,7 @@ keywords = ["npu", "inference", "robotics"]
 categories = ["hardware-support", "embedded"]
 
 [dependencies]
+half = "2.7"
 libloading = "0.8.9"
 
 [lints.rust]

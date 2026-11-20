@@ -142,7 +142,7 @@ impl Default for DepthOptions {
         let center = rig::principal_point(IMAGE_WIDTH, IMAGE_HEIGHT);
         Self {
             intrinsics: [focal, focal, center[0], center[1]],
-            translation: rig::position_in_body(FrameId::DEPTH_CAMERA).into(),
+            translation: rig::position_in_body(FrameId::LEFT_CAMERA).into(),
             rotation: [q.i, q.j, q.k, q.w],
             use_depth_filter: true,
             depth_filter_mindist: 0.2,
@@ -165,7 +165,7 @@ impl DepthOptions {
     pub fn extrinsic(&self) -> Result<nalgebra::Isometry3<f64>> {
         Ok(*firefly_base::RigidTransform::from_parts(
             firefly_base::FrameId::BODY,
-            firefly_base::FrameId::DEPTH_CAMERA,
+            firefly_base::FrameId::LEFT_CAMERA,
             self.translation,
             self.rotation,
         )?

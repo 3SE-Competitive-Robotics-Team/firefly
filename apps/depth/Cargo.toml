@@ -1,0 +1,28 @@
+[package]
+name = "depth"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Left-camera metric depth for the onboard planner"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ["robotics", "depth", "inference"]
+categories = ["robotics"]
+
+[dependencies]
+fastrace.workspace = true
+firefly-config.workspace = true
+firefly-observability.workspace = true
+firefly-pubsub.workspace = true
+iceoryx2-bb-posix.workspace = true
+log.workspace = true
+ort.workspace = true
+usage-rs.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ort = { workspace = true, features = ["load-dynamic"] }
+firefly-viplite.workspace = true
+
+[lints]
+workspace = true

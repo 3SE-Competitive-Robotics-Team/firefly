@@ -29,7 +29,8 @@ flowchart TB
     end
 
     sensors -->|双目与 IMU| vio
-    sensors -->|深度| planner
+    sensors -->|前视左目| depth["depth · YOLO26n-Depth"]
+    depth -->|左目采集时间、米制深度| planner
     sensors -->|下视图像| landing
     sensors -->|IMU| fc
     init --> supervisor

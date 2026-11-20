@@ -10,7 +10,7 @@ use firefly_hil::protocol::{
     Hello, IMAGE_CHUNK_DATA_MAX, ImageChunkHeader, Kind, Message, ROLE_HOST, VERSION,
 };
 use firefly_hil::topics::{SensorSubscribers as Downlink, TelemetryPublishers as Uplink};
-use firefly_pubsub::camera::{DepthImageMessage, DownImageMessage, GrayImageMessage};
+use firefly_pubsub::camera::{DownImageMessage, GrayImageMessage};
 use firefly_pubsub::imu::ImuMessage;
 use firefly_pubsub::node::{IpcNode, create_node};
 use firefly_pubsub::viz::ScalarMessage;
@@ -27,10 +27,9 @@ const STATS_PERIOD: Duration = Duration::from_secs(1);
 /// 双目配对的采集时间容差（秒）。
 const STEREO_TOLERANCE_S: f64 = 0.001;
 
-/// A queue entry admits both stereo views together; depth is independently optional.
+/// A queue entry admits both stereo views together.
 enum ImageBatch {
     Stereo(Box<GrayImageMessage>, Box<GrayImageMessage>),
-    Depth(Box<DepthImageMessage>),
     Down(Box<DownImageMessage>),
 }
 
@@ -180,21 +179,6 @@ fn write_image(
             next_image_id,
             stop,
         ),
-        ImageBatch::Depth(image) => {
-            let mut raw = Vec::with_capacity(image.data.len() * 4);
-            for value in image.data {
-                raw.extend_from_slice(&value.to_le_bytes());
-            }
-            write_chunks(
-                writer,
-                priority,
-                image.timestamp,
-                2,
-                &raw,
-                next_image_id,
-                stop,
-            )
-        }
     }
 }
 
@@ -275,7 +259,6 @@ fn ipc_loop(
     let mut image_deadline = Instant::now() + image_period;
     let mut pending_left: Option<GrayImageMessage> = None;
     let mut pending_right: Option<GrayImageMessage> = None;
-    let mut pending_depth: Option<DepthImageMessage> = None;
     let mut pending_down = None;
     let mut down_deadline = Instant::now();
     let mut last_imu_stamp = f64::NAN;
@@ -346,10 +329,6 @@ fn ipc_loop(
                 Duration::from_secs_f64(1. / f64::from(options.down_rate_hz)),
             );
         }
-        while let Ok(Some(sample)) = down.depth.receive() {
-            pending_depth = Some(*sample.payload());
-            activity = true;
-        }
         if let (Some(left), Some(right)) = (&pending_left, &pending_right) {
             // 双目必须同帧：时间戳不一致的旧帧直接丢弃，不能凑成一对。
             if (left.timestamp - right.timestamp).abs() > crate::bridge::STEREO_TOLERANCE_S {
@@ -363,9 +342,6 @@ fn ipc_loop(
                 let left = pending_left.take().expect("已检查非空");
                 let right = pending_right.take().expect("已检查非空");
                 enqueue_stereo(image_tx, &left, &right, &mut stats)?;
-                if let Some(depth) = pending_depth.take() {
-                    try_image(image_tx, ImageBatch::Depth(Box::new(depth)), &mut stats)?;
-                }
                 last_image_stamp = left.timestamp;
                 image_deadline = next_image_deadline(image_deadline, Instant::now(), image_period);
             }
@@ -494,7 +470,7 @@ fn try_image(
 ) -> Result<bool, String> {
     let image_count = match message {
         ImageBatch::Stereo(..) => 2,
-        ImageBatch::Depth(_) | ImageBatch::Down(_) => 1,
+        ImageBatch::Down(_) => 1,
     };
     match tx.try_send(message) {
         Ok(()) => Ok(true),

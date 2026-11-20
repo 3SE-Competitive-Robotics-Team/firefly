@@ -1,7 +1,6 @@
 mod buffer;
 mod capture;
 mod config;
-mod depth_noise;
 mod grayscale;
 mod link;
 mod process;
@@ -132,7 +131,7 @@ fn build_app(
     .insert_resource(CaptureHub::default())
     .insert_resource(PendingFrames::default())
     .insert_resource(SensorCapture::default())
-    .insert_resource(CapturePipeline::spawn(render_config.depth_noise, offline)?)
+    .insert_resource(CapturePipeline::spawn(offline)?)
     .insert_resource(CaptureStats::default())
     .insert_non_send(ports)
     .insert_non_send(log_ipc)

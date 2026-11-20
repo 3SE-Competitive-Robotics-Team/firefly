@@ -163,8 +163,6 @@ pub struct RenderConfig {
     pub capture: CaptureConfig,
     #[serde(default)]
     pub env: EnvConfig,
-    #[serde(default)]
-    pub depth_noise: crate::depth_noise::DepthNoiseOptions,
 }
 
 /// 离线资产兼容契约；算法版本与生产二进制另外记录为 provenance。
@@ -187,10 +185,9 @@ pub struct AssetContract {
 
 impl RenderConfig {
     /// # Errors
-    /// 采集频率或深度退化参数越界。
+    /// 采集频率越界。
     pub fn validate(&self) -> Result<()> {
-        self.capture.validate()?;
-        self.depth_noise.validate()
+        self.capture.validate()
     }
 
     pub fn asset_contract(&self) -> AssetContract {
@@ -255,11 +252,9 @@ mod tests {
         }
     }
     #[test]
-    fn asset_contract_excludes_online_noise_but_tracks_sensor_exposure() {
+    fn asset_contract_tracks_sensor_exposure() {
         let mut config = RenderConfig::default();
         let original = toml::to_string(&config.asset_contract()).unwrap();
-        config.depth_noise.temporal_fraction = 0.5;
-        assert_eq!(original, toml::to_string(&config.asset_contract()).unwrap());
         config.view.sensor_ev100 += 1.;
         assert_ne!(original, toml::to_string(&config.asset_contract()).unwrap());
     }

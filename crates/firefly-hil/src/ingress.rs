@@ -68,6 +68,9 @@ impl SensorIngress {
         }
         if kind == Kind::ImageChunk {
             let header = ImageChunkHeader::decode(&body)?;
+            if header.sensor_id == 2 {
+                return Err(invalid("depth is inferred onboard"));
+            }
             handle_chunk(&mut self.assembly, header, body, &self.ports)?;
             return Ok(0);
         }
@@ -84,10 +87,7 @@ impl SensorIngress {
                 publish_image_checksum(&self.ports, &image)?;
                 Ok(0)
             }
-            Message::Depth(image) => {
-                self.ports.sensors.depth.publish(*image).map_err(error)?;
-                Ok(0)
-            }
+            Message::Depth(_) => Err(invalid("depth is inferred onboard")),
             Message::Hello(_) | Message::Ping(_) | Message::Bye(_) => Ok(0),
             request => {
                 self.ports.sensors.requests.publish(request)?;
@@ -197,31 +197,6 @@ fn publish_assembled(ports: &IngressPorts, image: ChunkAssembly) -> Result<()> {
             scalar.scalars = [timestamp, sum as f64, f64::from(width), f64::from(height)];
             scalar.scalar_count = 4;
             ports.scalars.publish(scalar)?;
-        }
-        2 => {
-            let expected = IMAGE_SIZE * 4;
-            if total != expected {
-                log::warn!("深度块总长 {total} != {expected}，丢弃");
-                return Ok(());
-            }
-            let mut offset = 0_usize;
-            ports
-                .sensors
-                .depth
-                .publish_with(|message| {
-                    message.timestamp = timestamp;
-                    message.sensor_id = 0;
-                    message.width = width;
-                    message.height = height;
-                    for chunk in &chunks {
-                        let Some(body) = chunk.as_ref() else { continue };
-                        for value in body[IMAGE_CHUNK_HEADER_LEN..].as_chunks::<4>().0 {
-                            message.data[offset] = f32::from_le_bytes(*value);
-                            offset += 1;
-                        }
-                    }
-                })
-                .map_err(error)?;
         }
         3 => publish_down(ports, timestamp, &chunks, total)?,
         other => log::warn!("未知图像传感器 {other}"),

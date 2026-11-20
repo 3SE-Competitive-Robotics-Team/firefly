@@ -14,9 +14,10 @@ const DESTINATION: &str = "/opt/firefly";
 const PACKAGE: &str = "dist/firefly-aarch64.zst";
 const REMOTE_PACKAGE: &str = "/tmp/firefly-package.zst";
 const REMOTE_UNPACKER: &str = "/tmp/firefly-xtask";
-const LANDING_MODELS: &[&str] = &[
+const BOARD_MODELS: &[&str] = &[
     "h-marker-yolo26n-cif-v1/viplite.json",
     "h-marker-yolo26n-cif-v1/h-marker.nb",
+    "yolo26n-depth/yolo26n-depth-320-int8.nb",
 ];
 
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -111,11 +112,11 @@ fn package() -> Result<PathBuf, String> {
             source: config_dir.join(name),
         });
     }
-    for model in LANDING_MODELS {
+    for model in BOARD_MODELS {
         let source = root.join("models").join(model);
         if !source.is_file() {
             return Err(format!(
-                "missing {}; export the quantized landing model before deployment",
+                "missing {}; install the quantized board model before deployment",
                 source.display()
             ));
         }

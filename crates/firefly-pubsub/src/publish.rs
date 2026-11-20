@@ -74,7 +74,7 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
         let publisher = service.publisher_builder().create().map_err(|e| {
             firefly_error::Error::new(
                 firefly_error::ErrorKind::Internal,
-                format!("创建发布器失败: {e:?}"),
+                format!("创建 `{topic}` 发布器失败: {e:?}"),
             )
         })?;
         Ok(Self {
