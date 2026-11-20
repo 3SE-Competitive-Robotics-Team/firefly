@@ -39,7 +39,7 @@ ffctl mission status inspection-001
 
 | CPU | 进程 |
 |---|---|
-| 0 | ffctl supervisor、firefly-daemon、板端 Mimir、HIL gadget 的 serve 和 watchdog |
+| 0 | ffctl supervisor、firefly-daemon、板端 Mimir、HIL gadget 的 up、serve 和 watchdog |
 | 1 | camera、imu、motor |
 | 2、4 | planner（含深度建图线程） |
 | 3 | depth |
