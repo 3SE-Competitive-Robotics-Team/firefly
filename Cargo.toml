@@ -18,7 +18,6 @@ codegen-units = 1
 firefly-mission = { path = "crates/firefly-mission" }
 firefly-landing = { path = "crates/firefly-landing" }
 firefly-viplite = { path = "crates/firefly-viplite" }
-sha2 = "0.11.1"
 re_build_info = "=0.43.2"
 re_byte_size = "=0.43.2"
 re_chunk = "=0.43.2"

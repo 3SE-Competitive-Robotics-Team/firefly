@@ -116,7 +116,7 @@ def main():
     if list(output.shape) != output_shape:
         raise ValueError("Quantized output shape changed")
     manifest = {
-        "schema": 1, "model": quantized.name, "sha256": sha256(quantized),
+        "schema": 1, "model": quantized.name,
         "source_sha256": sha256(checkpoint),
         "calibration_sha256": sha256(dataset_manifest),
         "quantization": "int8_qdq", "input": [1, 3, args.height, args.width],

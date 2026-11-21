@@ -48,7 +48,8 @@ def prepare(model_dir, dataset, output):
     if not rows:
         raise ValueError("Empty calibration dataset")
     (output / "dataset.txt").write_text("\n".join(rows) + "\n")
-    manifest.update(model="h-marker.nb", quantization="viplite_int8", sha256=None)
+    manifest.pop("sha256", None)
+    manifest.update(model="h-marker.nb", quantization="viplite_int8")
     (output / "manifest-template.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"{output / 'h.onnx'} with {len(rows)} calibration frames and {count} candidates")
 
