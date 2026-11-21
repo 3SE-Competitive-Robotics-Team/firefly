@@ -59,9 +59,9 @@ impl SensorIngress {
             assembly: None,
         })
     }
-    /// 返回本次发布的 IMU 样本数；坏格式或错误方向终止本次会话。
+    /// 返回本次发布的 IMU 样本数；坏格式、错误方向或板端应推断的 depth 流终止本次会话。
     /// # Errors
-    /// 协议、图像重组或 IPC 发布失败。
+    /// 协议、图像重组、depth 拒收或 IPC 发布失败。
     pub fn accept_raw(&mut self, kind: Kind, body: Vec<u8>) -> Result<usize> {
         if kind.link() != Link::Sensor {
             return Err(invalid("uplink message received on sensor endpoint"));

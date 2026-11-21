@@ -112,7 +112,7 @@ pub struct DepthOptions {
     /// CV pinhole fx, fy, cx, cy for the axial depth image.
     pub intrinsics: [f64; 4],
     pub translation: [f64; 3],
-    /// body <- depth optical camera, Hamilton xyzw.
+    /// body <- left optical camera, Hamilton xyzw.
     pub rotation: [f64; 4],
     pub use_depth_filter: bool,
     pub depth_filter_mindist: f64,

@@ -1,5 +1,5 @@
 //! IPC 发布端口在像素工作线程内创建和使用。
-//! 离线数据集使用几何深度标签。
+//! 在线不发布深度；离线数据集使用几何深度标签。
 
 use crate::buffer::PooledBuffer;
 use crate::capture::CaptureTiming;
@@ -37,7 +37,7 @@ pub struct ProcessedCapture<'a> {
     pub trace: TraceContext,
     pub left_gray: PooledBuffer,
     pub right_gray: PooledBuffer,
-    /// 深度（米，行主序；离线几何标签）。
+    /// 深度（米，行主序；仅离线填充几何标签）。
     pub depth: &'a [f32],
     pub down_gray: Option<PooledBuffer>,
 }

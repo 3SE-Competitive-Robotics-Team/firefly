@@ -27,7 +27,6 @@ const STATS_PERIOD: Duration = Duration::from_secs(1);
 /// 双目配对的采集时间容差（秒）。
 const STEREO_TOLERANCE_S: f64 = 0.001;
 
-/// A queue entry admits both stereo views together.
 enum ImageBatch {
     Stereo(Box<GrayImageMessage>, Box<GrayImageMessage>),
     Down(Box<DownImageMessage>),

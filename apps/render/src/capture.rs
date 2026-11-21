@@ -66,7 +66,7 @@ impl Default for CaptureTiming {
     }
 }
 
-/// 回读请求（主世界→渲染世界，`seq` 关联四份回复与位姿时间戳）。
+/// 回读请求（主世界→渲染世界，`seq` 关联本拍全部回复与位姿时间戳）。
 #[derive(Clone, Copy, Debug)]
 pub struct CaptureRequest {
     pub seq: u64,
@@ -112,7 +112,7 @@ pub struct HubInner {
     /// 待执行请求；主世界保持对应相机姿态，直到渲染世界确认拷贝。
     pub request: Mutex<Option<CaptureRequest>>,
     pub done: Mutex<VecDeque<CaptureReply>>,
-    /// 在途缓冲组数（`0..=CAPTURE_SETS`；组内四份回复全部完成后递减）。
+    /// 在途缓冲组数（`0..=CAPTURE_SETS`；组内回复（2–4 份）全部完成后递减）。
     pub inflight_sets: AtomicU32,
     /// 最近一次被渲染世界**取走**（提交拷贝）的请求序号；主世界据此收起
     /// 传感器相机（单调持久值，不受帧率/时序影响，见 `link::poll_pose`）。
@@ -156,7 +156,7 @@ fn extract_request(hub: Extract<Res<CaptureHub>>, mut request: ResMut<ExtractedR
     request.0 = *hub.inner.request.lock().expect("hub poisoned");
 }
 
-/// 单组回读暂存（三份纹理各一块；回调内 `unmap` 后归还）。
+/// 单组回读暂存（左、右目必选，离线深度标签与下视按需；回调内 `unmap` 后归还）。
 struct CaptureSet {
     /// 灰度 GPU 打包目标（不可映射，供 compute 写入）。
     left_packed: Buffer,
@@ -166,7 +166,7 @@ struct CaptureSet {
     left: Buffer,
     right: Buffer,
     depth: Buffer,
-    /// 在途回复数（3 → 0）；0 表示本组空闲，可再取一拍。
+    /// 在途回复数（2–4 → 0）；0 表示本组空闲，可再取一拍。
     pending: Arc<AtomicU32>,
 }
 

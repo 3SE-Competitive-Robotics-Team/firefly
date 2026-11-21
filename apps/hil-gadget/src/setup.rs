@@ -541,7 +541,8 @@ fn wait_ready() -> Result<(), String> {
 }
 
 fn spawn_adbd() -> Result<(), String> {
-    // The HIL watchdog can restore USB. Give the Android debug daemon its normal CPU range.
+    // The HIL watchdog runs pinned to CPU 0, so adbd would inherit that mask; restore the
+    // full online CPU set when the watchdog respawns adb.
     let online = fs::read_to_string("/sys/devices/system/cpu/online")
         .map_err(|error| format!("read online CPUs: {error}"))?;
     Command::new("/usr/bin/taskset")

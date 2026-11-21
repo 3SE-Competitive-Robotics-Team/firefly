@@ -39,7 +39,7 @@ pub const ENTITY_MAX: usize = 64;
 /// 服务 `subscriber_max_buffer_size`（订阅端环形缓冲历史上限；多实体 10Hz
 /// 突发下防溢出丢帧，订阅端 `buffer_size` 不得超过该值）。
 pub const VIZ_BUFFER_SIZE: usize = 256;
-/// 折线点数上限（512；发布端超限硬断言，调用方必须分段或按用途限采样）。
+/// 折线点数上限（512；超限发布端截断并告警，HIL 解码按预算拒绝；调用方必须分段或按用途限采样）。
 pub const POINTS_MAX: usize = 512;
 /// 箭头数上限（256，起点 + 向量各一数组；轨迹速度箭头 100 采样点、障碍
 /// 平面法线均远小于此）。
@@ -83,6 +83,7 @@ pub struct VizMessage {
 }
 
 impl Default for VizMessage {
+    // 定长 ZeroCopySend 载荷：数组大小由 IPC 布局固定，只能在栈上整体构造。
     #[allow(clippy::large_stack_arrays)]
     fn default() -> Self {
         Self {
@@ -195,6 +196,7 @@ pub struct VoxelMessage {
 
 impl VoxelMessage {
     #[must_use]
+    // 定长 ZeroCopySend 载荷：数组大小由 IPC 布局固定，只能在栈上整体构造。
     #[allow(clippy::large_stack_arrays)]
     pub fn base(kind: u32, timestamp: f64, entity: &str) -> Self {
         let (entity, entity_len) = entity_bytes(entity);

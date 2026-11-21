@@ -35,7 +35,7 @@ pub(crate) fn deploy(device: &str) -> Result<(), String> {
     start(device)
 }
 
-/// 在板上执行一条 shell 命令；远端退出码不可靠，调用方按输出判定。
+/// 在板上执行一条 shell 命令；退出码只反映传输结果。
 pub(crate) fn shell(device: &str, command: &str) -> Result<(), String> {
     adb(device, &["shell", command])
 }

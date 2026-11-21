@@ -17,8 +17,8 @@ CAMERA_SIZE = (352, 288)
 def camera_gray(path: Path):
     import cv2
 
-    # Synthetic calibration first samples the selected camera output resolution.
-    # Real OV2640 frames replace this input when the module and lens are available.
+    # Calibration inputs are synthetic CIF screenshots; recorded OV2640 frames substitute
+    # them once the bridge driver is validated (see docs/hw/spec.md).
     rgb = cv2.imread(str(path))
     if rgb is None:
         raise ValueError(f"Cannot read calibration image: {path}")

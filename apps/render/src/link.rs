@@ -350,7 +350,7 @@ impl PendingFrames {
         };
 
         if labels != depth_raw.is_some() || down_requested != down_gray.is_some() {
-            log::warn!("seq={seq} down-camera reply does not match the capture request");
+            log::warn!("seq={seq} sensor replies do not match the capture request");
             return None;
         }
         timing.assembled = Instant::now();

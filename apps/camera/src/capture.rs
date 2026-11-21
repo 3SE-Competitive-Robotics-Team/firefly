@@ -273,7 +273,7 @@ fn validate(config: &Config) -> firefly_error::Result<()> {
     Ok(())
 }
 
-/// 采集主循环：三路流各取一帧发布，直到收到 `SIGINT`/`SIGTERM`。
+/// 采集主循环：左、右目各取一帧发布（下视由独立线程采集），直到收到 `SIGINT`/`SIGTERM`。
 pub fn run() -> Result<(), Box<dyn Error>> {
     let config_path =
         parse_config_path().map_err(|error| format!("{error}；用法：camera [--config <path>]"))?;

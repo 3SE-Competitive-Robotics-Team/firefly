@@ -1,6 +1,6 @@
 """RMUC 物理主循环：接收飞控电机推力，发布 IMU、仿真位姿与机体描述。
 
-图像与深度由 render 发布。无新鲜飞控指令时暂停物理与传感器时间。
+相机图像由 render 发布，深度由左目 YOLO 推理生成。无新鲜飞控指令时暂停物理与传感器时间。
 """
 
 from __future__ import annotations
@@ -187,7 +187,7 @@ def decode_config(cfg: dict, *, scene_loader: Callable[[], str] = load_scene_nam
 def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory = DroneEnv,
          publish_plant_state: bool = True, seed: int | None = None,
          scene_loader: Callable[[], str] = load_scene_name) -> None:
-    parser = argparse.ArgumentParser(description="RMUC MuJoCo 物理进程；图像由 render 提供")
+    parser = argparse.ArgumentParser(description="RMUC MuJoCo 物理进程；相机图像由 render 提供")
     parser.add_argument("--no-trace", action="store_true")
     parser.add_argument("--config", default="configs/sim.toml")
     args = parser.parse_args(argv)

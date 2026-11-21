@@ -1,5 +1,7 @@
 //! Synchronous VIPLite inference for A733 vision models.
 
+// C ABI from vip_lite.h: keep C names, constants and the SDK's struct layout; the module's lints
+// do not apply to either the generated declarations or the hand-maintained loader below.
 #[allow(
     non_camel_case_types,
     non_snake_case,
