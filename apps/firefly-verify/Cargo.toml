@@ -12,8 +12,7 @@ categories = ["science::robotics"]
 
 [dependencies]
 firefly-mission.workspace = true
-futures-lite = "2"
-arrow-array = "58.4.1"
+futures-lite = "2.6.1"
 nalgebra = { workspace = true, features = ["serde-serialize"] }
 re_log_encoding.workspace = true
 re_log_msg.workspace = true
@@ -22,7 +21,7 @@ serde.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = "3.27.0"
 
 [lints]
 workspace = true

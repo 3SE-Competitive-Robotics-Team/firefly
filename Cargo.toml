@@ -18,7 +18,7 @@ codegen-units = 1
 firefly-mission = { path = "crates/firefly-mission" }
 firefly-landing = { path = "crates/firefly-landing" }
 firefly-viplite = { path = "crates/firefly-viplite" }
-sha2 = "0.10.9"
+sha2 = "0.11.1"
 re_build_info = "=0.43.2"
 re_byte_size = "=0.43.2"
 re_chunk = "=0.43.2"
@@ -42,9 +42,9 @@ signal-hook = "0.4.6"
 firefly-base = { path = "crates/firefly-base" }
 bevy = "0.20.1"
 fastrace = { version = "0.7.19", default-features = false }
-iceoryx2 = "0.10.0"
-iceoryx2-bb-posix = "0.10.0"
-jiff = "1.0.0"
+iceoryx2 = "0.10.1"
+iceoryx2-bb-posix = "0.10.1"
+jiff = "1.0.1"
 log = "0.4.35"
 logcall = "0.2.1"
 logforth = { version = "0.30.1", default-features = false }
@@ -58,7 +58,7 @@ rand = "0.10.4"
 rayon = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
 spidev = "0.7.1"
-toml = "1.2.1"
+toml = "1.2.2"
 usage-rs = "7.4.0"
 v4l = "0.14.0"
 zstd = "0.14.4"
