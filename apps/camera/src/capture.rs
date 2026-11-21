@@ -2,12 +2,11 @@ use std::error::Error;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use firefly_hal::pixel::{FrameFormat, gray_from_yuyv, meters_from_z16};
+use firefly_hal::pixel::{FrameFormat, gray_from_yuyv};
 use firefly_pubsub::camera::FrameCadence;
 use firefly_pubsub::camera::{
-    CAMERA_DOWN_TOPIC, CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DEPTH_TOPIC, DOWN_HEIGHT,
-    DOWN_SENSOR_ID, DOWN_SIZE, DOWN_WIDTH, DepthImageMessage, DownImageMessage, GrayImageMessage,
-    IMAGE_HEIGHT, IMAGE_WIDTH,
+    CAMERA_DOWN_TOPIC, CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DOWN_HEIGHT, DOWN_SENSOR_ID,
+    DOWN_SIZE, DOWN_WIDTH, DownImageMessage, GrayImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH,
 };
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::publish::Publisher;
@@ -26,8 +25,6 @@ fn default_config() -> PathBuf {
 }
 /// 默认采集缓冲数；太少容易在调度抖动时丢帧。
 const DEFAULT_BUFFERS: u32 = 4;
-/// `Z16` 深度默认按毫米缩放。
-const DEFAULT_DEPTH_SCALE: f64 = 0.001;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
@@ -180,9 +177,6 @@ struct Config {
     height: u32,
     left: Source,
     right: Source,
-    /// 深度相机；省略则不发布 `Firefly/Depth`。
-    #[serde(default)]
-    depth: Option<Depth>,
     #[serde(default)]
     down: Option<DownSource>,
 }
@@ -214,17 +208,6 @@ const fn default_down_rate() -> u32 {
     15
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Depth {
-    device: String,
-    /// `Z16` 原始单位 → 米。
-    #[serde(default = "default_depth_scale")]
-    scale: f64,
-    #[serde(default = "default_buffers")]
-    buffers: u32,
-}
-
 const fn default_width() -> u32 {
     IMAGE_WIDTH as u32
 }
@@ -239,10 +222,6 @@ const fn default_buffers() -> u32 {
 
 const fn default_format() -> FrameFormat {
     FrameFormat::Grey
-}
-
-const fn default_depth_scale() -> f64 {
-    DEFAULT_DEPTH_SCALE
 }
 
 fn parse_config_path() -> Result<PathBuf, String> {
@@ -291,14 +270,6 @@ fn validate(config: &Config) -> firefly_error::Result<()> {
     {
         return invalid("invalid OV2640 down source".into());
     }
-    if let Some(depth) = &config.depth {
-        if !depth.scale.is_finite() || depth.scale <= 0.0 {
-            return invalid(format!("depth 的 scale 必须为正：{}", depth.scale));
-        }
-        if depth.buffers == 0 {
-            return invalid("depth 的 buffers 必须为正".to_owned());
-        }
-    }
     Ok(())
 }
 
@@ -339,36 +310,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let mut right_stream =
         MmapStream::with_buffers(&right_dev, Type::VideoCapture, config.right.buffers)?;
 
-    let depth_dev = match &config.depth {
-        Some(depth) => {
-            let device = Device::with_path(&depth.device)?;
-            configure(&device, FrameFormat::Z16, width, height)?;
-            log::info!("深度源：{}", depth.device);
-            Some(device)
-        }
-        None => None,
-    };
-    let mut depth_stream = match (&depth_dev, &config.depth) {
-        (Some(device), Some(depth)) => Some(MmapStream::with_buffers(
-            device,
-            Type::VideoCapture,
-            depth.buffers,
-        )?),
-        _ => None,
-    };
-    let depth_pub = match &config.depth {
-        Some(_) => Some(Publisher::<DepthImageMessage>::with_topic(
-            &node,
-            DEPTH_TOPIC,
-        )?),
-        None => None,
-    };
     left_stream.set_timeout(std::time::Duration::from_millis(100));
     right_stream.set_timeout(std::time::Duration::from_millis(100));
-    if let Some(stream) = &mut depth_stream {
-        stream.set_timeout(std::time::Duration::from_millis(100));
-    }
-    let depth_scale = config.depth.as_ref().map(|depth| depth.scale);
 
     while RUNNING.load(Ordering::Relaxed) {
         let stamp = monotonic_seconds()?;
@@ -390,11 +333,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             1,
             stamp,
         )?;
-        if let (Some(stream), Some(publisher), Some(scale)) =
-            (depth_stream.as_mut(), depth_pub.as_ref(), depth_scale)
-        {
-            pump_depth(stream, publisher, scale, width, height, stamp)?;
-        }
         firefly_observability::pump_log_ipc(&log_ipc);
     }
     if let Some(down) = down {
@@ -494,51 +432,6 @@ fn pump_gray(
             source.device,
             source.format
         );
-    }
-    Ok(())
-}
-
-/// 取一帧深度并发布（米制）；帧长不足时丢帧并告警。
-fn pump_depth(
-    stream: &mut MmapStream<'_>,
-    publisher: &Publisher<DepthImageMessage>,
-    scale: f64,
-    width: usize,
-    height: usize,
-    stamp: f64,
-) -> Result<(), Box<dyn Error>> {
-    let (bytes, _meta) = match stream.next() {
-        Ok(frame) => frame,
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-            ) =>
-        {
-            return Ok(());
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let pixels = width * height;
-    if bytes.len() < pixels * 2 {
-        log::warn!(
-            "深度帧长 {} < 期望 {}（{width}×{height} z16），丢帧",
-            bytes.len(),
-            pixels * 2
-        );
-        return Ok(());
-    }
-    let scale = scale as f32;
-    let mut written = pixels;
-    publisher.publish_with(|message| {
-        message.timestamp = stamp;
-        message.sensor_id = 0;
-        message.width = width as u32;
-        message.height = height as u32;
-        written = meters_from_z16(&bytes[..pixels * 2], &mut message.data[..pixels], scale);
-    })?;
-    if written != pixels {
-        log::warn!("深度只解出 {written}/{pixels} 个像素，图像不完整");
     }
     Ok(())
 }

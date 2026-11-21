@@ -2,12 +2,12 @@
 
 [[process]]
 name = "camera"
-command = ["taskset", "-c", "0-4", "bin/camera", "--hil"]
+command = ["taskset", "-c", "1", "bin/camera", "--hil"]
 autostart = true
 
 [[process]]
 name = "motor"
-command = ["taskset", "-c", "0-4", "bin/motor", "--hil"]
+command = ["taskset", "-c", "1", "bin/motor", "--hil"]
 autostart = true
 
 [[process]]
@@ -28,10 +28,15 @@ autostart = true
 
 [[process]]
 name = "traj"
-command = ["taskset", "-c", "0-4", "bin/traj"]
+command = ["taskset", "-c", "4", "bin/traj"]
 autostart = true
 
 [[process]]
 name = "planner"
-command = ["taskset", "-c", "0-4", "bin/planner"]
+command = ["taskset", "-c", "2,4", "bin/planner"]
+autostart = true
+
+[[process]]
+name = "depth"
+command = ["taskset", "-c", "3", "bin/depth"]
 autostart = true

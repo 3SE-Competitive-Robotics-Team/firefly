@@ -53,10 +53,10 @@ pub struct Link {
     pub write_buffer: usize,
     #[serde(default = "default_imu_batch")]
     pub imu_batch: usize,
-    /// 待发图像预算（至少两张）；队列按双目对占位，深度独占一个位置。
+    /// 待发图像预算（至少两张）；队列按整对双目或单张下视图像入队。
     #[serde(default = "default_image_queue")]
     pub image_queue: usize,
-    /// 双目与深度节流周期（秒）；下视使用独立的 `down_rate_hz`。
+    /// 双目节流周期（秒）；下视使用独立的 `down_rate_hz`。
     #[serde(default = "default_image_period")]
     pub image_period_s: f64,
     /// 连续下视传输频率上界；允许 15/30 FPS，独立于双目节流周期。

@@ -211,7 +211,7 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
             1 / physics_period,
         )
     )
-    log("RMUC 双目与深度由 render 进程发布")
+    log("RMUC 相机图像由 render 发布，深度由左目 YOLO 推理生成")
 
     # 仅输出 error 及以上级别的 iceoryx2 日志；消息消费由订阅端轮询驱动。
     iox2.set_log_level(iox2.LogLevel.Error)

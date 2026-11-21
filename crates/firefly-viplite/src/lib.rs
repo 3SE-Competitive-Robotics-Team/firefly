@@ -1,4 +1,4 @@
-//! Synchronous VIPLite inference for the two outputs of the A733 H detector.
+//! Synchronous VIPLite inference for A733 vision models.
 
 #[allow(
     non_camel_case_types,
@@ -41,6 +41,7 @@ pub struct Network {
     prepared: bool,
     buffers: Vec<Buffer>,
     candidates: usize,
+    plane: Vec<u8>,
     lookup: [u8; 256],
     output: Vec<f32>,
     // The SDK may retain the NBG address until vip_destroy_network.
@@ -50,6 +51,15 @@ pub struct Network {
 
 impl Network {
     pub fn open(model: Vec<u8>, width: usize, height: usize) -> Result<Self, String> {
+        Self::create(model, width, height, false)
+    }
+
+    /// Compact depth networks expose a single FP16 metric head at quarter resolution.
+    pub fn open_depth(model: Vec<u8>, side: usize) -> Result<Self, String> {
+        Self::create(model, side, side, true)
+    }
+
+    fn create(model: Vec<u8>, width: usize, height: usize, depth: bool) -> Result<Self, String> {
         let size = u32::try_from(model.len()).map_err(|_| "NBG exceeds the SDK size limit")?;
         let device = DEVICE.try_lock().map_err(|_| "VIPLite is already in use")?;
         // Load the BSP-provided C ABI. Each handle below is owned by this single-threaded session.
@@ -61,6 +71,7 @@ impl Network {
             prepared: false,
             buffers: Vec::new(),
             candidates: 0,
+            plane: vec![0; width * height],
             lookup: [0; 256],
             output: Vec::new(),
             model,
@@ -76,7 +87,7 @@ impl Network {
         })?;
         for (property, expected) in [
             (VIP_NETWORK_PROP_INPUT_COUNT, 1),
-            (VIP_NETWORK_PROP_OUTPUT_COUNT, 2),
+            (VIP_NETWORK_PROP_OUTPUT_COUNT, if depth { 1 } else { 2 }),
         ] {
             let mut count = 0_u32;
             check("vip_query_network", unsafe {
@@ -92,25 +103,34 @@ impl Network {
                 ));
             }
         }
-        let input = result.bind(true, 0)?;
+        let input = result.bind(true, 0, false)?;
         if input != [width, height, 3, 1] {
             return Err(format!("Unexpected NBG input {input:?}"));
         }
-        let boxes = result.bind(false, 0)?;
-        let scores = result.bind(false, 1)?;
-        let Some(&n) = boxes.first() else {
-            return Err("Missing boxes dimension".into());
-        };
-        if !(1..=10000).contains(&n)
-            || boxes.get(1) != Some(&4)
-            || boxes[2..].iter().any(|&d| d != 1)
-            || scores.first() != Some(&n)
-            || scores[1..].iter().any(|&d| d != 1)
-        {
-            return Err(format!("Unexpected NBG outputs {boxes:?}, {scores:?}"));
+        if depth {
+            let dims = result.bind(false, 0, true)?;
+            if dims.get(..2) != Some(&[width / 4, height / 4]) || dims[2..].iter().any(|&d| d != 1)
+            {
+                return Err(format!("Unexpected depth head {dims:?}"));
+            }
+            result.output.resize(result.buffers[1].elements, 0.);
+        } else {
+            let boxes = result.bind(false, 0, false)?;
+            let scores = result.bind(false, 1, false)?;
+            let Some(&n) = boxes.first() else {
+                return Err("Missing boxes dimension".into());
+            };
+            if !(1..=10000).contains(&n)
+                || boxes.get(1) != Some(&4)
+                || boxes[2..].iter().any(|&d| d != 1)
+                || scores.first() != Some(&n)
+                || scores[1..].iter().any(|&d| d != 1)
+            {
+                return Err(format!("Unexpected NBG outputs {boxes:?}, {scores:?}"));
+            }
+            result.candidates = n;
+            result.output.resize(5 * n, 0.0);
         }
-        result.candidates = n;
-        result.output.resize(5 * n, 0.0);
         let input = &result.buffers[0];
         result.lookup = std::array::from_fn(|pixel| {
             let raw = ((pixel as f32 / 255.) / input.scale).round() + f32::from(input.zero);
@@ -135,7 +155,7 @@ impl Network {
         Ok(result)
     }
 
-    fn bind(&mut self, input: bool, index: u32) -> Result<Vec<usize>, String> {
+    fn bind(&mut self, input: bool, index: u32, fp16: bool) -> Result<Vec<usize>, String> {
         let query = if input {
             self.api.vip_query_input
         } else {
@@ -167,29 +187,39 @@ impl Network {
             VIP_BUFFER_PROP_QUANT_FORMAT,
             ptr::from_mut(&mut p.quant_format).cast(),
         )?;
-        if p.data_format as u32 != VIP_BUFFER_FORMAT_INT8
-            || p.quant_format as u32 != VIP_BUFFER_QUANTIZE_TF_ASYMM
-        {
-            return Err(format!(
-                "Expected affine INT8 port, got format {}, quantization {}",
-                p.data_format, p.quant_format
-            ));
-        }
-        // quant_format selects the affine member of the SDK union.
-        let affine = unsafe { &mut p.quant_data.affine };
-        read(
-            VIP_BUFFER_PROP_TF_SCALE,
-            ptr::from_mut(&mut affine.scale).cast(),
-        )?;
-        read(
-            VIP_BUFFER_PROP_TF_ZERO_POINT,
-            ptr::from_mut(&mut affine.zeroPoint).cast(),
-        )?;
-        let scale = affine.scale;
-        let zero = i8::try_from(affine.zeroPoint).map_err(|_| "Invalid INT8 zero point")?;
-        if !scale.is_finite() || scale <= 0. {
-            return Err("Invalid tensor quantization scale".into());
-        }
+        let (scale, zero) = if fp16 {
+            if p.data_format as u32 != VIP_BUFFER_FORMAT_FP16
+                || p.quant_format as u32 != VIP_BUFFER_QUANTIZE_NONE
+            {
+                return Err("Expected unquantized FP16 output".into());
+            }
+            (1., 0)
+        } else {
+            if p.data_format as u32 != VIP_BUFFER_FORMAT_INT8
+                || p.quant_format as u32 != VIP_BUFFER_QUANTIZE_TF_ASYMM
+            {
+                return Err(format!(
+                    "Expected affine INT8 port, got format {}, quantization {}",
+                    p.data_format, p.quant_format
+                ));
+            }
+            // quant_format selects the affine member of the SDK union.
+            let affine = unsafe { &mut p.quant_data.affine };
+            read(
+                VIP_BUFFER_PROP_TF_SCALE,
+                ptr::from_mut(&mut affine.scale).cast(),
+            )?;
+            read(
+                VIP_BUFFER_PROP_TF_ZERO_POINT,
+                ptr::from_mut(&mut affine.zeroPoint).cast(),
+            )?;
+            let scale = affine.scale;
+            let zero = i8::try_from(affine.zeroPoint).map_err(|_| "Invalid INT8 zero point")?;
+            if !scale.is_finite() || scale <= 0. {
+                return Err("Invalid tensor quantization scale".into());
+            }
+            (scale, zero)
+        };
         let dims: Vec<_> = p.sizes[..p.num_of_dims as usize]
             .iter()
             .map(|&d| d as usize)
@@ -209,7 +239,7 @@ impl Network {
             zero,
         });
         let available = unsafe { self.api.vip_get_buffer_size(handle) } as usize;
-        if elements == 0 || elements > available {
+        if elements == 0 || elements > available / if fp16 { 2 } else { 1 } {
             return Err("Invalid VIPLite buffer size".into());
         }
         Ok(dims)
@@ -226,11 +256,12 @@ impl Network {
                 return Err("Failed to map NPU input".into());
             }
             let dst = slice::from_raw_parts_mut(mapped, input.elements);
-            for (out, pixel) in dst[..gray.len()].iter_mut().zip(gray) {
+            for (out, pixel) in self.plane.iter_mut().zip(gray) {
                 *out = self.lookup[*pixel as usize];
             }
-            dst.copy_within(..gray.len(), gray.len());
-            dst.copy_within(..gray.len(), 2 * gray.len());
+            for channel in dst.chunks_exact_mut(gray.len()) {
+                channel.copy_from_slice(&self.plane);
+            }
             check("vip_unmap_input", self.api.vip_unmap_buffer(input.handle))?;
             check(
                 "vip_flush_input",
@@ -238,6 +269,26 @@ impl Network {
                     .vip_flush_buffer(input.handle, VIP_BUFFER_OPER_TYPE_FLUSH),
             )?;
             check("vip_run_network", self.api.vip_run_network(self.network))?;
+        }
+        if self.candidates == 0 {
+            let buffer = &self.buffers[1];
+            unsafe {
+                check(
+                    "vip_invalidate_output",
+                    self.api
+                        .vip_flush_buffer(buffer.handle, VIP_BUFFER_OPER_TYPE_INVALIDATE),
+                )?;
+                let mapped = self.api.vip_map_buffer(buffer.handle).cast::<half::f16>();
+                if mapped.is_null() {
+                    return Err("Failed to map depth output".into());
+                }
+                half::slice::HalfFloatSliceExt::convert_to_f32_slice(
+                    slice::from_raw_parts(mapped, buffer.elements),
+                    &mut self.output,
+                );
+                check("vip_unmap_output", self.api.vip_unmap_buffer(buffer.handle))?;
+            }
+            return Ok(&self.output);
         }
         let (boxes, scores) = self.output.split_at_mut(4 * self.candidates);
         for (buffer, out) in self.buffers[1..].iter().zip([boxes, scores]) {

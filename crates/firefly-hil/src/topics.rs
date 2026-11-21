@@ -2,7 +2,7 @@ use crate::protocol::{Kind, Message};
 use firefly_pubsub::{
     activity::ActivityMessage,
     attitude::AttitudeMessage,
-    camera::{DepthImageMessage, DownImageMessage, GrayImageMessage},
+    camera::{DownImageMessage, GrayImageMessage},
     command::CommandMessage,
     control::{CONTROL_BUFFER_SIZE, ControlMessage},
     event::TopicNotifier,
@@ -171,7 +171,6 @@ pub struct SensorSubscribers {
     pub imu: Subscriber<ImuMessage>,
     pub left: Subscriber<GrayImageMessage>,
     pub right: Subscriber<GrayImageMessage>,
-    pub depth: Subscriber<DepthImageMessage>,
     pub down: Subscriber<DownImageMessage>,
 }
 impl SensorSubscribers {
@@ -203,12 +202,6 @@ impl SensorSubscribers {
                 options(2, 2),
             )
             .map_err(error)?,
-            depth: Subscriber::with_options(
-                node,
-                &topic(prefix, firefly_pubsub::camera::DEPTH_TOPIC),
-                options(2, 2),
-            )
-            .map_err(error)?,
             down: Subscriber::with_options(
                 node,
                 &topic(prefix, firefly_pubsub::camera::CAMERA_DOWN_TOPIC),
@@ -225,7 +218,6 @@ pub struct SensorPublishers {
     pub imu_notify: TopicNotifier,
     pub left: Publisher<GrayImageMessage>,
     pub right: Publisher<GrayImageMessage>,
-    pub depth: Publisher<DepthImageMessage>,
     pub down: Publisher<DownImageMessage>,
 }
 impl SensorPublishers {
@@ -254,12 +246,6 @@ impl SensorPublishers {
             right: Publisher::with_topic_and_buffer(
                 node,
                 &topic(prefix, firefly_pubsub::camera::CAMERA_RIGHT_TOPIC),
-                Some(2),
-            )
-            .map_err(error)?,
-            depth: Publisher::with_topic_and_buffer(
-                node,
-                &topic(prefix, firefly_pubsub::camera::DEPTH_TOPIC),
                 Some(2),
             )
             .map_err(error)?,

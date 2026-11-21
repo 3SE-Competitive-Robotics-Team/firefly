@@ -508,8 +508,11 @@ fn start_daemon(command: &str, pidfile: &str) -> Result<(), String> {
             "--pidfile",
             pidfile,
             "--startas",
-            &exe.to_string_lossy(),
+            "/usr/bin/taskset",
             "--",
+            "-c",
+            "0",
+            &exe.to_string_lossy(),
             command,
         ])
         .stdin(Stdio::null())
@@ -538,7 +541,11 @@ fn wait_ready() -> Result<(), String> {
 }
 
 fn spawn_adbd() -> Result<(), String> {
-    Command::new(ADBD)
+    // The HIL watchdog can restore USB. Give the Android debug daemon its normal CPU range.
+    let online = fs::read_to_string("/sys/devices/system/cpu/online")
+        .map_err(|error| format!("read online CPUs: {error}"))?;
+    Command::new("/usr/bin/taskset")
+        .args(["-c", online.trim(), ADBD])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

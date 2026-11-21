@@ -10,7 +10,6 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-import tomllib
 
 import iceoryx2 as iox2
 import numpy as np
@@ -40,7 +39,7 @@ def _sensor_startup(*, fly: bool) -> None:
     mesh = scene.visual
     if not mesh.is_file():
         raise FileNotFoundError(f"RMUC 视觉资产缺失：{mesh}")
-    for name in ("firefly-rootslam", "fc", "render", "mimir"):
+    for name in ("firefly-rootslam", "fc", "render", "mimir", "depth"):
         if not (ROOT / "target" / "release" / name).is_file():
             raise RuntimeError(f"missing release binary: {name}")
     output = None
@@ -62,6 +61,7 @@ def _sensor_startup(*, fly: bool) -> None:
         time.sleep(2)
         check_alive()
         start("render", [str(ROOT / "target/release/render")])
+        start("depth", [str(ROOT / "target/release/depth"), "--simulation"])
         start("firefly-rootslam", [str(ROOT / "target/release/firefly-rootslam")])
         start("fc", [str(ROOT / "target/release/fc")])
         iox2.set_log_level(iox2.LogLevel.Error)
@@ -75,10 +75,6 @@ def _sensor_startup(*, fly: bool) -> None:
         ground_truth = subscribe("Firefly/GroundTruth", OdomMessage)
         control = subscribe("Firefly/Control", ControlMessage, 32)
         depth = subscribe("Firefly/Depth", DepthImageMessage)
-        with (ROOT / "configs/render.toml").open("rb") as stream:
-            depth_options = tomllib.load(stream).get("depth_noise", {})
-        depth_min = depth_options.get("min_depth_m", 0.2)
-        depth_max = depth_options.get("max_depth_m", 8.0)
         # GroundTruth 供 render 摆放传感器；PlantState 不参与启动。
         simulation = """
 from firefly_sim.main import main
@@ -113,7 +109,7 @@ main(["--no-trace"], publish_plant_state=False)
                 values = np.ctypeslib.as_array(msg.data)
                 assert (msg.width, msg.height) == (320, 240)
                 assert np.isfinite(values).all()
-                assert np.all((values == 0.) | ((values >= depth_min) & (values <= depth_max)))
+                assert np.all(values > 0.)
                 if previous_depth_timestamp is not None:
                     assert msg.timestamp > previous_depth_timestamp
                 previous_depth_timestamp = msg.timestamp

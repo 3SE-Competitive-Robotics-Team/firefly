@@ -29,13 +29,14 @@ flowchart TB
     end
 
     sensors -->|双目与 IMU| vio
-    sensors -->|深度| planner
+    sensors -->|前视左目| depth["depth · YOLO26n-Depth"]
+    depth -->|左目采集时间、米制深度| planner
     sensors -->|下视图像| landing
     sensors -->|IMU| fc
     init --> supervisor
     init -->|联动启停| unit["systemd · firefly-daemon.service"]
     unit -->|就绪通知与独立看门狗| task
-    init -->|firefly-mimir.service| mimir
+    init -->|按需启动 firefly-mimir.service| mimir
     operator -->|本机 Unix socket · 提交、查询、取消| task
     task -->|航点| planner
     vio -->|本架次起飞位置与运行会话| task
@@ -69,7 +70,7 @@ log.rrd`"]
 
 一个相近的产品例子是 NetworkManager。连接和设备状态由常驻进程维护，命令行工具和桌面程序通过同一控制接口操作它。Firefly 沿用这种控制关系，板上其他应用与 `ffctl` 可以独立连接和退出。[NetworkManager 服务](https://networkmanager.dev/docs/api/latest/NetworkManager.html) · [nmcli 客户端](https://networkmanager.dev/docs/api/latest/nmcli.html)
 
-Orange Pi 的 BSP 启用 `firefly.service`。其主进程 `ffctl process supervise` 管理设备、FC 和 VIO。板端普通运行由 systemd 提前启动独立的 `firefly-mimir.service`，结束运行时最后排空录制。`cargo xtask deploy` 安装并启用独立的 `firefly-daemon.service`，跟随整组服务启停。daemon 打开 IPC、完成任务恢复并监听客户端后发送 READY。传感器就绪与允许起飞由任务接口单独报告。`WatchdogSec=4s` 是初始故障检测预算。daemon 每完成一轮工作检查单调时钟，按 systemd 下发超时的一半发送 WATCHDOG。卡在 IPC、主线程被停止或运行循环失去进展都会中断通知。systemd 按 `Restart=on-failure` 单独拉起任务服务，FC、VIO 和录制保持运行。该超时针对服务活性，20 ms 调度周期的超期需要单独测量。[systemd.service](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html) · [sd_event_set_watchdog](https://www.freedesktop.org/software/systemd/man/latest/sd_event_set_watchdog.html)
+Orange Pi 的 BSP 启用 `firefly.service`。其主进程 `ffctl process supervise` 管理设备、FC 和 VIO。部署时默认关闭板端 `firefly-mimir.service` 自启动。普通板端运行可手动启动该服务录制，USB HIL 由宿主机 Mimir 同步录制板端遥测和仿真真值。`cargo xtask deploy` 安装并启用独立的 `firefly-daemon.service`，跟随整组服务启停。daemon 打开 IPC、完成任务恢复并监听客户端后发送 READY。传感器就绪与允许起飞由任务接口单独报告。`WatchdogSec=4s` 是初始故障检测预算。daemon 每完成一轮工作检查单调时钟，按 systemd 下发超时的一半发送 WATCHDOG。卡在 IPC、主线程被停止或运行循环失去进展都会中断通知。systemd 按 `Restart=on-failure` 单独拉起任务服务，FC、VIO 和录制保持运行。该超时针对服务活性，20 ms 调度周期的超期需要单独测量。[systemd.service](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html) · [sd_event_set_watchdog](https://www.freedesktop.org/software/systemd/man/latest/sd_event_set_watchdog.html)
 
 `crates/firefly-mission` 定义计划与请求。`ffctl mission` 在板上通过仅服务用户可访问的 `/run/firefly/mission.sock` 发送一行 JSON 并读取一行回执。状态查询在传感器上线前即可使用。首次提交要有新鲜的里程计、姿态与飞控上锁状态。一架飞机一次执行一项任务，忙时立即答复。任务执行中的人工取消进入收尾，地面已解锁时请求上锁，空中请求普通降落，飞控已在降落或失效保护模式时等待飞控处理。
 

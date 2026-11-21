@@ -3018,6 +3018,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "930c7171c8df9fb1782bdf9b918ed9ed2d33d1d22300abb754f9085bc48bf8e8"
 
 [[package]]
+name = "depth"
+version = "0.1.0"
+dependencies = [
+ "fastrace",
+ "firefly-config",
+ "firefly-observability",
+ "firefly-pubsub",
+ "firefly-viplite",
+ "iceoryx2-bb-posix",
+ "log",
+ "ort",
+ "usage-rs",
+]
+
+[[package]]
 name = "der"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3839,6 +3854,7 @@ dependencies = [
 name = "firefly-viplite"
 version = "0.1.0"
 dependencies = [
+ "half",
  "libloading 0.8.9",
 ]
 

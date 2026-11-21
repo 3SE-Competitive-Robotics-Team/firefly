@@ -33,6 +33,7 @@ use crate::rig::{Eye, PoseState, apply_pose_to_eyes};
 /// [`NonSend`] 资源持有——触碰端口的系统
 /// 自动约束到主线程，构造上不可能跨线程触碰。
 pub struct IpcPorts {
+    offline: bool,
     pub pose_sub: Subscriber<OdomMessage>,
     /// 进程共享节点，必须在全部端口之后释放。
     pub node: IpcNode,
@@ -51,14 +52,18 @@ pub fn open_ports(offline: bool) -> Result<IpcPorts, firefly_error::Error> {
     };
     let pose_sub = Subscriber::with_topic(&node, &topic(GROUND_TRUTH_TOPIC))?;
     log::info!("IPC 就绪：订阅位姿，offline={offline}");
-    Ok(IpcPorts { pose_sub, node })
+    Ok(IpcPorts {
+        offline,
+        pose_sub,
+        node,
+    })
 }
 
 /// 传感器发布端口只在像素工作线程构造和使用，节点最后释放。
 struct SensorPublishers {
     left_pub: Publisher<GrayImageMessage>,
     right_pub: Publisher<GrayImageMessage>,
-    depth_pub: Publisher<DepthImageMessage>,
+    depth_pub: Option<Publisher<DepthImageMessage>>,
     down_pub: Publisher<DownImageMessage>,
     pair_notify: TopicNotifier,
     viz_pub: VizPublisher,
@@ -79,7 +84,9 @@ impl SensorPublishers {
         Ok(Self {
             left_pub: Publisher::with_topic(&node, &topic(CAMERA_LEFT_TOPIC))?,
             right_pub: Publisher::with_topic(&node, &topic(CAMERA_RIGHT_TOPIC))?,
-            depth_pub: Publisher::with_topic(&node, &topic(DEPTH_TOPIC))?,
+            depth_pub: offline
+                .then(|| Publisher::with_topic(&node, &topic(DEPTH_TOPIC)))
+                .transpose()?,
             down_pub: Publisher::with_topic(&node, &topic(CAMERA_DOWN_TOPIC))?,
             pair_notify: TopicNotifier::with_topic(&node, &topic(CAMERA_PAIR_TOPIC))?,
             viz_pub: VizPublisher::new(&node)?,
@@ -131,10 +138,7 @@ pub struct CapturePipeline {
 }
 
 impl CapturePipeline {
-    pub fn spawn(
-        options: crate::depth_noise::DepthNoiseOptions,
-        offline: bool,
-    ) -> Result<Self, firefly_error::Error> {
+    pub fn spawn(offline: bool) -> Result<Self, firefly_error::Error> {
         let jobs = Arc::new(Latest::<CaptureJob>::default());
         let published = Arc::new(AtomicU32::new(0));
         let (input, count) = (jobs.clone(), published.clone());
@@ -152,7 +156,7 @@ impl CapturePipeline {
                         return;
                     }
                 };
-                run_worker(&input, &options, offline, |result| {
+                run_worker(&input, |result| {
                     publish(&ports, result);
                     count.fetch_add(1, Ordering::Relaxed);
                 });
@@ -259,6 +263,7 @@ pub fn poll_pose(
             trace: pose.trace,
             left: targets.left.id(),
             right: targets.right.id(),
+            labels: ports.offline,
             down: down.then(|| targets.down.id()),
         });
         capture.requested_seq = Some(seq);
@@ -271,7 +276,9 @@ pub fn poll_pose(
     apply_pose_to_eyes(&pose, &mut eyes);
     let active = capture.requested_seq.is_some();
     for (eye, mut camera) in &mut cameras {
-        let enabled = active && (*eye != Eye::Down || capture.requested_down);
+        let enabled = active
+            && (*eye != Eye::Depth || ports.offline)
+            && (*eye != Eye::Down || capture.requested_down);
         if camera.is_active != enabled {
             camera.is_active = enabled;
         }
@@ -309,7 +316,10 @@ impl PendingFrames {
         let seq = self
             .frames
             .iter()
-            .filter(|(_, frames)| frames.len() >= if frames[0].down_requested { 4 } else { 3 })
+            .filter(|(_, frames)| {
+                frames.len()
+                    >= 2 + usize::from(frames[0].down_requested) + usize::from(frames[0].labels)
+            })
             .map(|(seq, _)| *seq)
             .max()?;
         let frames = self.frames.remove(&seq).expect("complete frame");
@@ -319,6 +329,7 @@ impl PendingFrames {
         let mut depth_raw = None;
         let mut down_gray = None;
         let down_requested = frames[0].down_requested;
+        let labels = frames[0].labels;
         let mut stamp = 0.0;
         let mut trace = TraceContext::default();
         let mut timing = frames[0].timing;
@@ -333,14 +344,12 @@ impl PendingFrames {
                 SensorKind::Down => down_gray = Some(frame.bytes),
             }
         }
-        let (Some(left_gray), Some(right_gray), Some(depth_raw)) =
-            (left_gray, right_gray, depth_raw)
-        else {
+        let (Some(left_gray), Some(right_gray)) = (left_gray, right_gray) else {
             log::warn!("seq={seq} 回复不全（同类重复），丢弃本节拍");
             return None;
         };
 
-        if down_requested != down_gray.is_some() {
+        if labels != depth_raw.is_some() || down_requested != down_gray.is_some() {
             log::warn!("seq={seq} down-camera reply does not match the capture request");
             return None;
         }
@@ -390,7 +399,9 @@ fn publish(ports: &SensorPublishers, result: &ProcessedCapture) {
     }
     publish_gray(&ports.left_pub, &result.left_gray, result.stamp, 0);
     publish_gray(&ports.right_pub, &result.right_gray, result.stamp, 1);
-    publish_depth(&ports.depth_pub, result.depth, result.stamp);
+    if let Some(labels) = &ports.depth_pub {
+        publish_depth(labels, result.depth, result.stamp);
+    }
     if let Some(image) = &result.down_gray
         && let Err(error) = ports.down_pub.publish_with(|message| {
             message.timestamp = result.stamp;
@@ -431,7 +442,7 @@ fn publish(ports: &SensorPublishers, result: &ProcessedCapture) {
         let _ = ports.viz_pub.publish(message);
     }
     log::debug!(
-        "发布 seq={} t={:.3}（左/右/深度 + pair 事件）",
+        "发布 seq={} t={:.3}（左/右 + pair 事件）",
         result.seq,
         result.stamp
     );
@@ -450,7 +461,7 @@ fn publish_gray(publisher: &Publisher<GrayImageMessage>, gray: &[u8], stamp: f64
     }
 }
 
-/// 深度发布（米制 f32，行主序；噪声已在工作线程加入）。
+/// 深度发布（米制 f32，行主序；离线几何标签）。
 fn publish_depth(publisher: &Publisher<DepthImageMessage>, depth: &[f32], stamp: f64) {
     if let Err(e) = publisher.publish_with(|msg| {
         msg.timestamp = stamp;
@@ -497,6 +508,7 @@ mod tests {
                 seq,
                 timing: CaptureTiming::default(),
                 down_requested: true,
+                labels: true,
                 kind,
                 stamp: seq as f64,
                 trace: TraceContext::default(),
@@ -512,6 +524,23 @@ mod tests {
                 self.frame(seq, SensorKind::Down),
             ]
         }
+    }
+
+    #[test]
+    fn online_stereo_is_complete_without_a_geometry_label() {
+        let replies = Replies::new();
+        let frames = [SensorKind::Left, SensorKind::Right].map(|kind| {
+            let CaptureReply::Frame(mut frame) = replies.frame(1, kind) else {
+                unreachable!()
+            };
+            frame.labels = false;
+            frame.down_requested = false;
+            CaptureReply::Frame(frame)
+        });
+        let job = PendingFrames::default().assemble(frames).unwrap();
+        assert!(job.depth_raw.is_none());
+        assert!(job.down_gray.is_none());
+        assert_eq!(job.seq, 1);
     }
 
     #[test]

@@ -138,6 +138,7 @@ fn launch_stack(
             &["--no-loop-closures", "--no-mapping"],
         ))?;
         stack.launch(program(release.join("fc"), &[]))?;
+        stack.launch(program(release.join("depth"), &["--simulation"]))?;
         if plans.iter().any(|p| p.precision_land) {
             stack.launch(program(release.join("landing"), &["--simulation"]))?;
         }

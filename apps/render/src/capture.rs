@@ -78,6 +78,7 @@ pub struct CaptureRequest {
     pub left: AssetId<Image>,
     pub right: AssetId<Image>,
     pub down: Option<AssetId<Image>>,
+    pub labels: bool,
 }
 
 #[derive(Debug)]
@@ -85,6 +86,7 @@ pub struct CapturedFrame {
     pub seq: u64,
     pub timing: CaptureTiming,
     pub down_requested: bool,
+    pub labels: bool,
     pub kind: SensorKind,
     pub stamp: f64,
     pub trace: TraceContext,
@@ -279,25 +281,20 @@ fn copy_sensors(
     if req.down.is_some() && down.is_none() {
         return;
     }
-    let mut depth_tex = None;
-    for (_, eye, view) in &depth_cams {
-        if *eye == Eye::Depth {
-            depth_tex = Some(view.texture());
-            break;
-        }
-    }
-    let Some(depth_tex) = depth_tex else {
-        log::debug!("深度预通道纹理尚未就绪，下帧重试");
+    let labels = if req.labels {
+        let Some((_, _, view)) = depth_cams.iter().find(|(_, eye, _)| **eye == Eye::Depth) else {
+            return;
+        };
+        let Some(bytes) = buffers.depth.take() else {
+            return;
+        };
+        Some((view.texture(), bytes))
+    } else {
+        None
+    };
+    let (Some(left_bytes), Some(right_bytes)) = (buffers.left.take(), buffers.right.take()) else {
         return;
     };
-    let (Some(left_bytes), Some(right_bytes), Some(depth_bytes)) = (
-        buffers.left.take(),
-        buffers.right.take(),
-        buffers.depth.take(),
-    ) else {
-        return;
-    };
-
     let down_bytes = if down.is_some() {
         buffers.down.take()
     } else {
@@ -306,8 +303,10 @@ fn copy_sensors(
     if down.is_some() && down_bytes.is_none() {
         return;
     }
-    set.pending
-        .store(if down.is_some() { 4 } else { 3 }, Ordering::SeqCst);
+    set.pending.store(
+        2 + u32::from(down.is_some()) + u32::from(labels.is_some()),
+        Ordering::SeqCst,
+    );
     hub.inner.inflight_sets.fetch_add(1, Ordering::SeqCst);
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("sensor-capture"),
@@ -335,7 +334,9 @@ fn copy_sensors(
             &set.down,
         );
     }
-    encode_copy(&mut encoder, depth_tex, &set.depth);
+    if let Some((texture, _)) = &labels {
+        encode_copy(&mut encoder, texture, &set.depth);
+    }
     queue.submit(std::iter::once(encoder.finish()));
     req.timing.submitted = Instant::now();
     *hub.inner.request.lock().expect("hub poisoned") = None;
@@ -360,15 +361,17 @@ fn copy_sensors(
         req,
         right_bytes,
     );
-    map_for_readback(
-        &set.depth,
-        "depth",
-        &hub,
-        set.pending.clone(),
-        SensorKind::Depth,
-        req,
-        depth_bytes,
-    );
+    if let Some((_, depth_bytes)) = labels {
+        map_for_readback(
+            &set.depth,
+            "depth",
+            &hub,
+            set.pending.clone(),
+            SensorKind::Depth,
+            req,
+            depth_bytes,
+        );
+    }
     if let Some(down_bytes) = down_bytes {
         map_for_readback(
             &set.down,
@@ -445,6 +448,7 @@ fn map_for_readback(
                     .push_back(CaptureReply::Frame(CapturedFrame {
                         seq: req.seq,
                         down_requested: req.down.is_some(),
+                        labels: req.labels,
                         timing: CaptureTiming {
                             readback: Instant::now(),
                             ..req.timing
@@ -501,6 +505,7 @@ mod tests {
             left: Handle::<Image>::default().id(),
             right: Handle::<Image>::default().id(),
             down: Some(Handle::<Image>::default().id()),
+            labels: true,
         };
         hub.request(request);
         let mut frame = ExtractedRequest(*hub.inner.request.lock().unwrap());
