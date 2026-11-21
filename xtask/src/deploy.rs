@@ -240,13 +240,14 @@ fn start(device: &str) -> Result<(), String> {
             "/etc/systemd/system/firefly.service.d/cpu-affinity.conf && ",
             "install -m 644 /opt/firefly/configs/firefly-daemon.service ",
             "/opt/firefly/configs/firefly-mimir.service /etc/systemd/system/ && ",
-            "systemctl daemon-reload && systemctl enable firefly-daemon.service firefly-mimir.service"
+            "systemctl daemon-reload && systemctl disable --now firefly-mimir.service && ",
+            "systemctl enable firefly-daemon.service"
         ),
     )?;
     remote_step(device, "systemctl start firefly")?;
     let probe = concat!(
         "for attempt in $(seq 1 20); do ",
-        "if systemctl is-active --quiet firefly-mimir && ffctl process status >/dev/null 2>&1 ",
+        "if ffctl process status >/dev/null 2>&1 ",
         "&& ffctl mission status >/dev/null 2>&1; then echo SUPERVISOR_READY; break; fi; ",
         "sleep 0.5; ",
         "done"

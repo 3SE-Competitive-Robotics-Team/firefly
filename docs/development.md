@@ -31,7 +31,7 @@ ffctl mission status inspection-001
 
 同 ID 重试会返回该任务的当前或最终回执。需要中断时使用 `ffctl mission cancel inspection-001`。任务进入 `complete` 或 `interrupted` 后，可查询运行就绪状态，再提交新的任务 ID。板上应用可直接使用 `firefly_mission::call`。当前 socket 允许服务所属用户访问。现场任务通过计划指定本架次的起飞高度、以起飞点为原点的三维航点、停留时间、返航偏移和精降方式。普通返航偏移默认为零。示例长方体上框高 3.3 米，SIL 配套场地的规划上界为 3.7 米。现场应根据实测空间配置规划边界。
 
-每份计划最多 16 点。起飞和返航高度为 0.5–2 米，停留时间为 (0, 600] 秒，返航平面偏移不超过 0.3 米。航点距起点水平半径不超过 10 米，首点水平距离至少 1 米，各段三维长度为 0.5–10 米。航点高度为 0.5–3.3 米，以支持长方体竖边。`systemctl cat firefly-daemon.service firefly-mimir.service` 可查看部署的两个单元。普通板端运行先启动独立的录制服务，停机时最后排空录制。USB HIL 切换清单后由主机录制同一条真值时间线。
+每份计划最多 16 点。起飞和返航高度为 0.5–2 米，停留时间为 (0, 600] 秒，返航平面偏移不超过 0.3 米。航点距起点水平半径不超过 10 米，首点水平距离至少 1 米，各段三维长度为 0.5–10 米。航点高度为 0.5–3.3 米，以支持长方体竖边。`systemctl cat firefly-daemon.service firefly-mimir.service` 可查看部署的两个单元。部署会关闭板端 Mimir 自启动。普通板端运行如需本地录制，可手动执行 `systemctl start firefly-mimir.service`。USB HIL 由宿主机 Mimir 同步录制板端遥测和仿真真值。
 
 ### A733 进程绑核
 
