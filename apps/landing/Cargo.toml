@@ -26,7 +26,6 @@ nalgebra.workspace = true
 ort.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 toml.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

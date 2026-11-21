@@ -5,7 +5,6 @@ use firefly_landing::{Detection, Letterbox, decode_raw_detections};
 use firefly_pubsub::camera::{DOWN_HEIGHT, DOWN_WIDTH};
 use ort::{session::Session, value::Tensor};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 use crate::{Result, external, invalid};
 
@@ -18,13 +17,9 @@ pub enum Backend {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub schema: u32,
     pub model: PathBuf,
-    pub sha256: String,
-    pub source_sha256: String,
-    pub calibration_sha256: String,
     pub quantization: String,
     pub input: [usize; 4],
     /// 相机输出宽、高，须与 IPC 消息布局一致。
@@ -52,9 +47,6 @@ impl Manifest {
                 .any(|&n| n == 0 || n > 640 || n % 32 != 0)
             || self.output != "yolo_xywh_score"
             || self.classes != ["h_marker"]
-            || [&self.sha256, &self.source_sha256, &self.calibration_sha256]
-                .iter()
-                .any(|s| s.len() != 64 || !s.bytes().all(|c| c.is_ascii_hexdigit()))
             || self.model.components().count() != 1
             || !self
                 .model
@@ -137,9 +129,6 @@ impl Model {
                 .with_operation("landing.model.read")
                 .with_context("path", model_path.display())
         })?;
-        if format!("{:x}", Sha256::digest(&bytes)) != manifest.sha256 {
-            return Err(invalid("landing model SHA256 mismatch"));
-        }
         let engine = match environment {
             Environment::Cpu(environment) => {
                 let session = Session::builder(environment)
@@ -173,8 +162,8 @@ impl Model {
         };
         let transform = Letterbox::new(manifest.camera, [manifest.input[3], manifest.input[2]])?;
         log::info!(
-            "landing model ready: backend={backend:?}, sha256={}, input={:?}",
-            manifest.sha256,
+            "landing model ready: backend={backend:?}, model={}, input={:?}",
+            model_path.display(),
             manifest.input
         );
         Ok(Self { engine, transform })
@@ -225,9 +214,6 @@ mod tests {
         let mut manifest = Manifest {
             schema: 1,
             model: "model.onnx".into(),
-            sha256: "a".repeat(64),
-            source_sha256: "b".repeat(64),
-            calibration_sha256: "c".repeat(64),
             quantization: "int8_qdq".into(),
             input: [1, 3, 288, 352],
             camera: [352, 288],

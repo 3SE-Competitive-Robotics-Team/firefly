@@ -1,4 +1,4 @@
-"""Prepare the COCO128 calibration tensors, or compile the fixed 320 depth model inside ACUITY."""
+"""Prepare calibration tensors from a ZIP of images, or compile the fixed 320 depth model inside ACUITY."""
 import argparse
 import json
 import os
@@ -16,15 +16,19 @@ def prepare(archive_path):
     directory = Path("calibration")
     directory.mkdir(exist_ok=True)
     with zipfile.ZipFile(archive_path) as archive:
-        names = sorted(n for n in archive.namelist() if n.startswith("coco128/images/train2017/") and n.endswith(".jpg"))
-        if len(names) != 128:
-            raise ValueError("Expected 128 COCO128 calibration images")
+        names = sorted(n for n in archive.namelist()
+                       if Path(n).suffix.lower() in {".jpg", ".jpeg", ".png"}
+                       and not Path(n).name.startswith("._"))
+        if not names:
+            raise ValueError("No calibration images in archive")
         rows = []
-        for name in names:
+        for index, name in enumerate(names):
             image = cv2.imdecode(np.frombuffer(archive.read(name), np.uint8), cv2.IMREAD_COLOR)
+            if image is None:
+                raise ValueError(f"Cannot decode calibration image: {name}")
             rgb = cv2.cvtColor(cv2.resize(image, (320, 320)), cv2.COLOR_BGR2RGB)
             tensor = np.ascontiguousarray(rgb.transpose(2, 0, 1)[None], dtype=np.float32) / 255
-            path = directory / (Path(name).stem + ".npy")
+            path = directory / f"{index:05}.npy"
             np.save(path, tensor)
             rows.append(str(path))
     Path("dataset.txt").write_text("\n".join(rows) + "\n")
@@ -71,8 +75,11 @@ def compile_model():
     Path("input.yml").write_text(yaml.safe_dump(meta))
     pegasus("generate", "postprocess-file", "--model", "depth.json", "--postprocess-file-output", "output.yml")
     common = ["--model-data", "depth.data", "--model-quantize", "depth.quantize", "--with-input-meta", "input.yml"]
+    frames = Path(db["path"]).read_text().splitlines()
+    if not frames:
+        raise ValueError("Empty calibration dataset")
     pegasus("quantize", "--model", "depth.json", *common, "--device", "CPU", "--quantizer", "perchannel_symmetric_affine",
-            "--qtype", "int8", "--rebuild", "--batch-size", "1", "--iterations", "128")
+            "--qtype", "int8", "--rebuild", "--batch-size", "1", "--iterations", str(len(frames)))
     graph = json.loads(Path("depth.json").read_text())
     compact_head(graph)
     native = Path("native")
@@ -86,7 +93,7 @@ def compile_model():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prepare", type=Path, metavar="COCO128_ZIP", help="write normalized calibration inputs on the export host")
+    parser.add_argument("--prepare", type=Path, metavar="IMAGE_ZIP", help="write normalized calibration inputs on the export host")
     args = parser.parse_args()
     if args.prepare:
         prepare(args.prepare)

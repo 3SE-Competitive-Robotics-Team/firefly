@@ -11,7 +11,7 @@ logs/<yyyymmdd_hhmmss>/log.rrd
 [firefly-config 的路径解析](../crates/firefly-config/src/lib.rs)。时间目录由 Mimir 读取系统当前本地时区生成，
 精度为秒，例如 `logs/20261115_093005/log.rrd`。Rust 使用
 `jiff::ZonedDateTime::now().strftime("%Y%m%d_%H%M%S")`；时区遵循系统设置和 `TZ`。
-Jiff 的本地时区行为见[官方文档](https://docs.rs/jiff/1.0.0/jiff/struct.ZonedDateTime.html#method.now)。
+Jiff 的本地时区行为见[官方文档](https://docs.rs/jiff/1.0.1/jiff/struct.ZonedDateTime.html#method.now)。
 
 **录制目录和文件名由 Mimir 独占决定。** 命令行只接受 `--config` 和帮助参数，
 配置及库入口均使用这套固定规则。调用方从 stdout 的 `recording: <绝对路径>`

@@ -3,8 +3,8 @@ name = "firefly-ipc"
 version = "0.1.0"
 description = "Firefly IPC 消息布局与 iceoryx2 通信接口"
 requires-python = ">=3.12"
-dependencies = ["iceoryx2==0.10.0"]
+dependencies = ["iceoryx2==0.10.1"]
 
 [build-system]
-requires = ["uv_build>=0.13.8,<0.14"]
+requires = ["uv_build>=0.13.9,<0.14"]
 build-backend = "uv_build"

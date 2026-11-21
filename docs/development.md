@@ -61,6 +61,8 @@ cd /work
 python3 compile_landing_viplite.py
 ```
 
+标定集的 `manifest.json` 用 `frames[].image` 指定图片路径，两个导出脚本都使用 `split` 为 `train` 的帧。VIPLite 准备阶段读取模型目录中的 `fp32.onnx` 和 `manifest.json`。
+
 将工作目录 `bundle/` 下的 `h-marker.nb` 与 `viplite.json` 一起放入 `models/h-marker-yolo26n-cif-v1/`。板端 `landing --image` 可用 352×288 图像验证 VIPLite 推理。桌面 `landing --simulation --image` 使用同一检测器的 ONNX 版本进行对照。
 
 ### 单张 RGB 图像的深度验证
@@ -74,13 +76,13 @@ yolo export task=depth model=models/yolo26n-depth/yolo26n-depth.pt format=onnx i
 python scripts/depth_image.py models/yolo26n-depth/yolo26n-depth.ort input.jpg depth.npy
 ```
 
-图片推理需要 Python、NumPy、OpenCV 和 ONNX Runtime。脚本拉伸输入到 768×768，再按官方深度预测器的双线性插值方式将输出恢复到原图尺寸。用同图对照 PyTorch 输出可验证导出和预后处理。现场距离精度需用相机拍摄的画面和对应距离真值评估。
+图片推理需要 Python、NumPy、OpenCV 和 ONNX Runtime。脚本读取模型输入的固定高宽，支持仓库里的 320 和 768 两种导出，再按官方深度预测器的双线性插值方式将输出恢复到原图尺寸。用同图对照 PyTorch 输出可验证导出和预后处理。现场距离精度需用相机拍摄的画面和对应距离真值评估。
 
 ### 飞行链路的 320 深度模型
 
 `depth` 订阅最新一张 320×240 左目灰度图，全视场缩放至 320×320，按 RGB 三通道输入。SIL 的 `depth --simulation` 加载 `models/yolo26n-depth/yolo26n-depth-320.onnx`。按上节从同一权重导出，使用 `imgsz=320`。板端加载同目录的 `yolo26n-depth-320-int8.nb`，输入为有符号 INT8，输出为 80×80 FP16 米制深度。部署包随程序安装该 NBG。两个后端按端点对齐插值恢复为 320×240，并保留原图的采集时间戳。仅离线数据集导出使用渲染几何标签。
 
-在同一工作目录放置 320 ONNX 和 `scripts/compile_depth_viplite.py`，用导出环境运行 `python compile_depth_viplite.py --prepare /path/to/coco128.zip` 准备标定集，然后在上述 ACUITY 镜像中运行 `python3 compile_depth_viplite.py`。将 ONNX 和生成的 NBG 安装到模型目录。本次板测 NBG 的 SHA-256 为 `4dbadb624f071d7a15f5df059a5a39df0bfcf4fe84f1ec2e4ddfe20367677a08`。
+在同一工作目录放置 320 ONNX 和 `scripts/compile_depth_viplite.py`。把选定的 JPEG 或 PNG 标定图片打成 ZIP，用导出环境运行 `python compile_depth_viplite.py --prepare /path/to/calibration.zip`，再在上述 ACUITY 镜像中运行 `python3 compile_depth_viplite.py`。量化迭代次数取自生成的图片清单。将 ONNX 和生成的 NBG 安装到模型目录。本次板测 NBG 的 SHA-256 为 `4dbadb624f071d7a15f5df059a5a39df0bfcf4fe84f1ec2e4ddfe20367677a08`。
 
 ## 运行
 

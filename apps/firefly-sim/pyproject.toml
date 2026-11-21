@@ -8,7 +8,7 @@ dependencies = [
     "firefly-workspace",
     "firefly-ipc",
     "firefly-mujoco",
-    "iceoryx2==0.10.0",
+    "iceoryx2==0.10.1",
     "numpy>=2.5.5,<3",
     "opentelemetry-api>=1.45.2,<2",
     "opentelemetry-sdk>=1.45.2,<2",
@@ -20,7 +20,7 @@ firefly-ipc = { workspace = true }
 firefly-mujoco = { workspace = true }
 
 [build-system]
-requires = ["uv_build>=0.13.8,<0.14"]
+requires = ["uv_build>=0.13.9,<0.14"]
 build-backend = "uv_build"
 
 [project.scripts]

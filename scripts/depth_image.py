@@ -33,9 +33,12 @@ def predict(model: Path, image: Path) -> np.ndarray:
     session = ort.InferenceSession(str(model), providers=["CPUExecutionProvider"])
     (port,) = session.get_inputs()
     (output,) = session.get_outputs()
-    if port.shape != [1, 3, 768, 768] or port.type != "tensor(float)":
+    if (len(port.shape) != 4 or port.shape[:2] != [1, 3]
+            or not all(isinstance(n, int) and n > 0 for n in port.shape[2:])
+            or port.type != "tensor(float)"):
         raise ValueError(f"Unexpected YOLO26 depth input: {port.shape} {port.type}")
-    rgb = cv2.cvtColor(cv2.resize(frame, (768, 768)), cv2.COLOR_BGR2RGB)
+    height, width = port.shape[2:]
+    rgb = cv2.cvtColor(cv2.resize(frame, (width, height)), cv2.COLOR_BGR2RGB)
     tensor = np.ascontiguousarray(rgb.transpose(2, 0, 1)[None], dtype=np.float32) / 255
     (raw,) = session.run([output.name], {port.name: tensor})
     if not isinstance(raw, np.ndarray):
@@ -45,7 +48,7 @@ def predict(model: Path, image: Path) -> np.ndarray:
     depth = raw.reshape(raw.shape[-2:])
     if not np.isfinite(depth).all() or np.any(depth <= 0):
         raise ValueError("Model returned invalid metric depth")
-    return resize_depth(resize_depth(depth, 768, 768), *frame.shape[:2])
+    return resize_depth(resize_depth(depth, height, width), *frame.shape[:2])
 
 
 def main() -> None:
@@ -54,8 +57,6 @@ def main() -> None:
     parser.add_argument("image", type=Path)
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
-    if args.output.suffix != ".npy":
-        parser.error("output must be a .npy file")
     result = predict(args.model, args.image)
     with args.output.open("xb") as stream:
         np.save(stream, result, allow_pickle=False)

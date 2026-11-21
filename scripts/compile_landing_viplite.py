@@ -1,5 +1,4 @@
 """Run inside the A733 ACUITY image in the directory prepared by export_landing_viplite.py."""
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -41,7 +40,6 @@ def main():
     bundle = Path("bundle")
     bundle.mkdir(exist_ok=True)
     manifest = json.loads(Path("manifest-template.json").read_text())
-    manifest["sha256"] = hashlib.sha256(data).hexdigest()
     shutil.copyfile(binary, bundle / manifest["model"])
     (bundle / "viplite.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
