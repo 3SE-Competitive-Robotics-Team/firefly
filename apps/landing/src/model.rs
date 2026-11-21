@@ -1,5 +1,8 @@
 //! 下视 H 标记检测。桌面仿真使用 ONNX，板端使用预编译 NBG。
-use std::path::{Path, PathBuf};
+use std::{
+    fmt::Write as _,
+    path::{Path, PathBuf},
+};
 
 use firefly_landing::{Detection, Letterbox, decode_raw_detections};
 use firefly_pubsub::camera::{DOWN_HEIGHT, DOWN_WIDTH};
@@ -137,7 +140,11 @@ impl Model {
                 .with_operation("landing.model.read")
                 .with_context("path", model_path.display())
         })?;
-        if format!("{:x}", Sha256::digest(&bytes)) != manifest.sha256 {
+        let mut model_sha256 = String::with_capacity(64);
+        for byte in Sha256::digest(&bytes) {
+            write!(model_sha256, "{byte:02x}").expect("writing to a String succeeds");
+        }
+        if model_sha256 != manifest.sha256 {
             return Err(invalid("landing model SHA256 mismatch"));
         }
         let engine = match environment {

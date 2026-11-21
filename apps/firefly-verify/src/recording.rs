@@ -1,10 +1,10 @@
 use super::{Evidence, Vec3};
-use arrow_array::{
+use re_log_encoding::{DecoderApp, read_rrd_footer};
+use re_log_msg::LogMsg;
+use re_log_types::external::arrow::array::{
     Array, DurationNanosecondArray, FixedSizeListArray, Float32Array, Float64Array, Int64Array,
     ListArray, RecordBatch, StringArray, StructArray, TimestampNanosecondArray, UInt32Array,
 };
-use re_log_encoding::{DecoderApp, read_rrd_footer};
-use re_log_msg::LogMsg;
 use std::{
     error::Error,
     fs::File,
