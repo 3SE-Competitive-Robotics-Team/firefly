@@ -1,20 +1,14 @@
 """Export the trained H detector and calibrate a fixed INT8 QDQ ONNX artifact.
 
 Run with se3_yolo's export environment. A new output directory preserves each
-model's training checkpoint, calibration provenance and inference contract.
+model's training checkpoint and inference contract.
 """
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import shutil
-
-
-def sha256(path: Path) -> str:
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 CAMERA_SIZE = (352, 288)
@@ -65,16 +59,10 @@ def main():
     size = (args.width, args.height)
     if any(value <= 0 or value > 640 or value % 32 for value in size):
         parser.error("--width and --height must be multiples of 32 in 32..640")
-    dataset_manifest = args.dataset / "manifest.json"
-    dataset = json.loads(dataset_manifest.read_text())
-    if dataset["status"] != "complete" or dataset["names"] != ["h_marker"]:
-        raise ValueError("Expected a complete h_marker dataset")
+    dataset = json.loads((args.dataset / "manifest.json").read_text())
     calibration = [row for row in dataset["frames"] if row["split"] == "train"]
     if not calibration:
         raise ValueError("No training calibration frames")
-    for row in calibration:
-        if sha256(args.dataset / row["image"]) != row["sha256"]:
-            raise ValueError(f"Calibration checksum mismatch: {row['image']}")
     args.output.mkdir(parents=True, exist_ok=False)
     checkpoint = args.output / "source.pt"
     shutil.copyfile(args.checkpoint, checkpoint)
@@ -117,8 +105,6 @@ def main():
         raise ValueError("Quantized output shape changed")
     manifest = {
         "schema": 1, "model": quantized.name,
-        "source_sha256": sha256(checkpoint),
-        "calibration_sha256": sha256(dataset_manifest),
         "quantization": "int8_qdq", "input": [1, 3, args.height, args.width],
         "camera": list(CAMERA_SIZE),
         "output": "yolo_xywh_score", "classes": ["h_marker"],

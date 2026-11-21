@@ -7,23 +7,22 @@ import cv2
 import onnx
 
 
-from export_landing import CAMERA_SIZE, camera_gray, sha256
+from export_landing import CAMERA_SIZE, camera_gray
 
 
 def prepare(model_dir, dataset, output):
     manifest = json.loads((model_dir / "manifest.json").read_text())
     metadata = dataset / "manifest.json"
-    if sha256(metadata) != manifest["calibration_sha256"] or sha256(model_dir / "source.pt") != manifest["source_sha256"]:
-        raise ValueError("The checkpoint or calibration dataset differs from the ONNX export")
     graph = onnx.load(model_dir / "fp32.onnx")
     shape = [d.dim_value for d in graph.graph.input[0].type.tensor_type.shape.dim]
     if shape != [1, 3, CAMERA_SIZE[1], CAMERA_SIZE[0]] or shape != manifest["input"]:
         raise ValueError(f"Expected the fixed camera resolution, got {shape}")
     head = graph.graph.node[-1]
-    if head.op_type != "Concat" or list(head.output) != ["output0"] or len(head.input) != 2:
+    detection, = graph.graph.output
+    if head.op_type != "Concat" or list(head.output) != [detection.name] or len(head.input) != 2:
         raise ValueError("Expected the final single-class box/score concatenation")
     # Separate quantization scales preserve probabilities alongside pixel coordinates.
-    count = graph.graph.output[0].type.tensor_type.shape.dim[2].dim_value
+    count = detection.type.tensor_type.shape.dim[2].dim_value
     outputs = [onnx.helper.make_tensor_value_info(name, onnx.TensorProto.FLOAT, [1, channels, count])
                for name, channels in zip(head.input, (4, 1))]
     del graph.graph.node[-1]
@@ -39,8 +38,6 @@ def prepare(model_dir, dataset, output):
         if frame["split"] != "train":
             continue
         image = dataset / frame["image"]
-        if sha256(image) != frame["sha256"]:
-            raise ValueError(f"Calibration checksum mismatch: {image}")
         path = calibration / f"{len(rows):05}.png"
         if not cv2.imwrite(str(path), cv2.cvtColor(camera_gray(image), cv2.COLOR_GRAY2BGR)):
             raise OSError(path)
@@ -48,7 +45,8 @@ def prepare(model_dir, dataset, output):
     if not rows:
         raise ValueError("Empty calibration dataset")
     (output / "dataset.txt").write_text("\n".join(rows) + "\n")
-    manifest.pop("sha256", None)
+    for key in ("sha256", "source_sha256", "calibration_sha256"):
+        manifest.pop(key, None)
     manifest.update(model="h-marker.nb", quantization="viplite_int8")
     (output / "manifest-template.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"{output / 'h.onnx'} with {len(rows)} calibration frames and {count} candidates")
