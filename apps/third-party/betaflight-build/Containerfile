@@ -1,0 +1,11 @@
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl git make openssl xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src/apps/third-party/betaflight
+CMD make configs arm_sdk_install \
+    && SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) \
+    && export SOURCE_DATE_EPOCH \
+    && exec make -j1 CONFIG_DIR=src/firefly OBJECT_DIR=obj/container/main \
+        BIN_DIR=obj/container BETAFPVG473_V2_BMI270
