@@ -6,7 +6,7 @@
 
 ## 编译 Matrix BMI270 固件
 
-在 Firefly 仓库根目录运行。容器使用该版 Betaflight 原生支持的 Linux x86-64 工具链。
+Matrix 固件统一用 Apple `container` 编译。Betaflight 的 `make` 命令在 `linux/amd64` 容器内执行，使用 Linux 版 Arm GNU Toolchain 13.3.Rel1。在 Firefly 仓库根目录运行下列命令。
 
 ```sh
 git submodule update --init apps/third-party/betaflight
@@ -15,7 +15,9 @@ container build --platform linux/amd64 -t firefly-betaflight -f "$recipe/Contain
 container run --rm --platform linux/amd64 -u "$(id -u):$(id -g)" -v "$PWD:/src" firefly-betaflight
 ```
 
-镜像建一次即可。后续编译只需执行最后一行。首次编译会下载 Arm GNU Toolchain 13.3.Rel1，缓存在子模块的 `tools/`。HEX 输出到 `apps/third-party/betaflight/obj/container/`。
+镜像建一次即可。后续编译只需执行最后一行。首次编译会把工具链下载到子模块的 `tools/`。刷写、交付和 SHA-256 校验均使用 `apps/third-party/betaflight/obj/container/` 下的 HEX。
+
+## 验证串口协议
 
 在 macOS 上用系统 Clang 运行 Firefly 串口协议单元测试。
 

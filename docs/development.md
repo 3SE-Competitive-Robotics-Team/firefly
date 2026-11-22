@@ -26,6 +26,8 @@ container system start
 cargo xtask release --target board
 ```
 
+Matrix BMI270 飞控固件使用单独的 `linux/amd64` 容器构建。编译命令和 HEX 路径见 [Matrix 固件构建说明](../apps/third-party/README.md#编译-matrix-bmi270-固件)。
+
 ### 板上任务服务
 
 安装包含 `firefly-daemon` 和 `ffctl` 的 board release。Orange Pi BSP 随开机启动 `firefly.service` 并读取 `/opt/firefly/configs/processes.toml`。整机装配时核对相机设备、IMU 和 PWM 通道，在板上用 `ffctl process enable camera imu motor` 为已装配的设备保存开机配置。部署会更新进程清单，现场交付时需核对设备启用项与实测机体参数。
