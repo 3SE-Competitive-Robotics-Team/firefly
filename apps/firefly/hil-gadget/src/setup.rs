@@ -637,9 +637,9 @@ fn restore_processes() -> Result<()> {
 
 fn switch_process_manifest(source: &Path, active: &Path, backup: &Path) -> Result<()> {
     if !backup.exists() {
-        fs::copy(active, backup).at_path("backup", &active)?;
+        fs::copy(active, backup).at_path("backup", active)?;
     }
-    fs::copy(source, active).at_path("switch", &active)?;
+    fs::copy(source, active).at_path("switch", active)?;
     Ok(())
 }
 
@@ -647,7 +647,7 @@ fn restore_process_manifest(backup: &Path, active: &Path) -> Result<bool> {
     if !backup.exists() {
         return Ok(false);
     }
-    fs::copy(backup, active).at_path("restore", &active)?;
+    fs::copy(backup, active).at_path("restore", active)?;
     remove_file(backup)?;
     Ok(true)
 }
@@ -786,7 +786,7 @@ fn remove_dir_with_retry(path: &Path) -> Result<()> {
 }
 
 fn write_value(path: &Path, value: &str) -> Result<()> {
-    fs::write(path, format!("{value}\n")).at_path("write", &path)
+    fs::write(path, format!("{value}\n")).at_path("write", path)
 }
 
 fn read_trimmed(path: &Path) -> Option<String> {
