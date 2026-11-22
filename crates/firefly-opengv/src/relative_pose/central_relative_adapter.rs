@@ -14,9 +14,9 @@ impl<'a> CentralRelativeAdapter<'a> {
     pub fn new(
         bearing_vectors1: &'a [Vector3<f64>],
         bearing_vectors2: &'a [Vector3<f64>],
-    ) -> Result<Self, String> {
+    ) -> firefly_error::Result<Self> {
         if bearing_vectors1.len() != bearing_vectors2.len() {
-            return Err("adapter storage shape violates correspondence bounds".into());
+            return Err(crate::invalid_correspondences());
         }
         Ok(Self {
             bearing_vectors1,

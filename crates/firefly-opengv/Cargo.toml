@@ -11,6 +11,7 @@ keywords = ["vision", "robotics", "slam"]
 categories = ["algorithms", "science"]
 
 [dependencies]
+firefly-error.workspace = true
 faer = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }

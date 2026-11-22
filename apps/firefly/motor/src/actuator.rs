@@ -1,4 +1,4 @@
-use std::error::Error;
+use firefly_error::{Error, ErrorKind, Result};
 use std::fs::{self, File};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
@@ -121,14 +121,12 @@ fn validate(config: &Config) -> firefly_error::Result<()> {
             ));
         }
     }
-    if let Err(error) = ThrustToDuty::new(
+    ThrustToDuty::new(
         config.pwm.period_ns,
         config.pwm.min_duty_ns,
         config.pwm.max_duty_ns,
         config.airframe.max_thrust_per_motor,
-    ) {
-        return invalid(error);
-    }
+    )?;
     let airframe = &config.airframe;
     if !airframe.mass.is_finite() || airframe.mass <= 0.0 {
         return invalid(format!("质量必须为正：{}", airframe.mass));
@@ -152,7 +150,7 @@ fn validate(config: &Config) -> firefly_error::Result<()> {
     Ok(())
 }
 
-pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
+pub fn run(config_path: &Path) -> Result<()> {
     let config: Config =
         firefly_config::startup(config_path, firefly_observability::init, validate)?;
     let mapping = ThrustToDuty::new(
@@ -167,7 +165,8 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         &|_signal| {
             RUNNING.store(false, Ordering::Relaxed);
         },
-    )?;
+    )
+    .map_err(|e| Error::caused_by(ErrorKind::Internal, "register shutdown signals", e))?;
 
     let mut channels = Vec::with_capacity(MOTORS);
     for spec in &config.channel {
@@ -217,7 +216,7 @@ fn drive(
     config: &Config,
     mapping: &ThrustToDuty,
     log_ipc: &firefly_observability::LogIpc,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<()> {
     let period = Duration::from_secs_f64(1.0 / config.rate_hz);
     let stale = Duration::from_millis(config.stale_ms);
     let airframe_period = Duration::from_millis(config.airframe_ms);
@@ -247,7 +246,7 @@ fn drive(
             let wanted = output.map_or(0., |thrust| thrust[index]);
             channel
                 .set_duty(mapping.duty_ns(wanted))
-                .map_err(|error| format!("电机 {index}: {error}"))?;
+                .map_err(|error| error.with_context("motor", index))?;
         }
 
         if last_airframe.is_none_or(|at| at.elapsed() >= airframe_period) {
@@ -309,12 +308,15 @@ struct Channel {
 }
 
 impl Channel {
-    fn open(spec: &ChannelSpec, mapping: &ThrustToDuty) -> Result<Self, String> {
+    fn open(spec: &ChannelSpec, mapping: &ThrustToDuty) -> Result<Self> {
         let chip_dir = Path::new(PWM_CLASS).join(format!("pwmchip{}", spec.chip));
         let channel_dir = chip_dir.join(format!("pwm{}", spec.pwm));
         if !channel_dir.exists() {
-            fs::write(chip_dir.join("export"), spec.pwm.to_string())
-                .map_err(|error| format!("导出 {}: {error}", channel_dir.display()))?;
+            fs::write(chip_dir.join("export"), spec.pwm.to_string()).map_err(|error| {
+                Error::from(error)
+                    .with_operation("export PWM channel")
+                    .with_context("path", channel_dir.display())
+            })?;
             wait_for(&channel_dir)?;
         }
         let enable = channel_dir.join("enable");
@@ -326,12 +328,17 @@ impl Channel {
         let duty_file = File::options()
             .write(true)
             .open(&duty_path)
-            .map_err(|error| format!("打开 {}: {error}", duty_path.display()))?;
+            .map_err(|error| {
+                Error::from(error)
+                    .with_operation("open PWM duty cycle")
+                    .with_context("path", duty_path.display())
+            })?;
         write_duty(&duty_file, &duty_path, mapping.min_duty_ns())?;
         write_attribute(&enable, 1).map_err(|error| {
-            format!(
-                "{error}；`sysfs` 通道使能需要设备树描述，`pwm-sunxi` 会拒绝未描述的通道\
-                 （dmesg 里是 `can't parse pwm device`）"
+            error.with_context(
+                "hint",
+                "`sysfs` 通道使能需要设备树描述，`pwm-sunxi` 会拒绝未描述的通道\
+                 （dmesg 里是 `can't parse pwm device`）",
             )
         })?;
         Ok(Self {
@@ -342,7 +349,7 @@ impl Channel {
     }
 
     /// 写入脉宽；与上次相同时跳过，避免高频 `sysfs` 写。
-    fn set_duty(&mut self, duty_ns: u64) -> Result<(), String> {
+    fn set_duty(&mut self, duty_ns: u64) -> Result<()> {
         if self.current == duty_ns {
             return Ok(());
         }
@@ -352,7 +359,7 @@ impl Channel {
     }
 }
 
-fn wait_for(path: &Path) -> Result<(), String> {
+fn wait_for(path: &Path) -> Result<()> {
     let started = Instant::now();
     while started.elapsed() < EXPORT_TIMEOUT {
         if path.exists() {
@@ -360,19 +367,27 @@ fn wait_for(path: &Path) -> Result<(), String> {
         }
         thread::sleep(EXPORT_POLL);
     }
-    Err(format!("等待 {} 出现超时", path.display()))
+    Err(Error::new(ErrorKind::Timeout, "wait for PWM channel").with_context("path", path.display()))
 }
 
-fn write_attribute(path: &Path, value: impl std::fmt::Display) -> Result<(), String> {
-    fs::write(path, value.to_string()).map_err(|error| format!("写 {}: {error}", path.display()))
+fn write_attribute(path: &Path, value: impl std::fmt::Display) -> Result<()> {
+    fs::write(path, value.to_string()).map_err(|error| {
+        Error::from(error)
+            .with_operation("write PWM attribute")
+            .with_context("path", path.display())
+    })
 }
 
 /// 写入已打开通道的脉宽：一次 `write` 到位，不重新 open，也不分配 `String`。
-fn write_duty(file: &File, path: &Path, duty_ns: u64) -> Result<(), String> {
+fn write_duty(file: &File, path: &Path, duty_ns: u64) -> Result<()> {
     let mut buffer = [0u8; MAX_DUTY_DIGITS];
     let text = decimal_digits(duty_ns, &mut buffer);
-    file.write_all_at(text, 0)
-        .map_err(|error| format!("写 {}（{duty_ns}）: {error}", path.display()))
+    file.write_all_at(text, 0).map_err(|error| {
+        Error::from(error)
+            .with_operation("write PWM duty cycle")
+            .with_context("path", path.display())
+            .with_context("duty_ns", duty_ns)
+    })
 }
 
 /// `u64` 转十进制字节；返回 `buffer` 的尾部切片。
@@ -389,9 +404,9 @@ fn decimal_digits(mut value: u64, buffer: &mut [u8; MAX_DUTY_DIGITS]) -> &[u8] {
 }
 
 /// `CLOCK_MONOTONIC` 秒：板载各进程共用的时间基准。
-fn monotonic_seconds() -> Result<f64, Box<dyn Error>> {
+fn monotonic_seconds() -> Result<f64> {
     let time = Time::now_with_clock(ClockType::Monotonic)
-        .map_err(|error| format!("读取单调时钟失败: {error:?}"))?;
+        .map_err(|error| Error::caused_by(ErrorKind::Internal, "read monotonic clock", error))?;
     Ok(time.as_duration().as_secs_f64())
 }
 

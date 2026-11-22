@@ -1,4 +1,4 @@
-use std::error::Error;
+use firefly_error::{Error, ErrorKind, Result};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -25,14 +25,13 @@ const DEFAULT_BUFFERS: u32 = 4;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-struct DownWorker(Option<std::thread::JoinHandle<Result<(), String>>>);
+struct DownWorker(Option<std::thread::JoinHandle<Result<()>>>);
 impl DownWorker {
-    fn finish(mut self) -> Result<(), Box<dyn Error>> {
+    fn finish(mut self) -> Result<()> {
         if let Some(worker) = self.0.take() {
             worker
                 .join()
-                .map_err(|_| "down camera worker panicked")?
-                .map_err(Into::into)
+                .map_err(|_| Error::new(ErrorKind::Internal, "down camera worker panicked"))?
         } else {
             Ok(())
         }
@@ -47,14 +46,14 @@ impl Drop for DownWorker {
     }
 }
 
-fn start_down(source: &DownSource) -> Result<DownWorker, Box<dyn Error>> {
+fn start_down(source: &DownSource) -> Result<DownWorker> {
     let source = source.clone();
     let (ready, started) = std::sync::mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
-        let result = (|| -> Result<(), Box<dyn Error>> {
+        let result = (|| -> Result<()> {
             let node = create_node()?;
             let publisher = Publisher::<DownImageMessage>::with_topic(&node, CAMERA_DOWN_TOPIC)?;
-            let _ = ready.send(Ok(()));
+            let _ = ready.send(());
             capture_down(&source, &publisher)?;
             Ok(())
         })();
@@ -62,27 +61,30 @@ fn start_down(source: &DownSource) -> Result<DownWorker, Box<dyn Error>> {
             Ok(()) => Ok(()),
             Err(error) => {
                 log::error!("down camera: {error}");
-                let _ = ready.send(Err(error.to_string()));
                 RUNNING.store(false, Ordering::Relaxed);
-                Err(error.to_string())
+                Err(error)
             }
         }
     });
     let guard = DownWorker(Some(worker));
-    started
-        .recv()
-        .map_err(|e| e.to_string())?
-        .map_err(|e| -> Box<dyn Error> { e.into() })?;
+    if started.recv().is_err() {
+        guard.finish()?;
+        return Err(Error::new(
+            ErrorKind::Internal,
+            "down camera exited before startup",
+        ));
+    }
     Ok(guard)
 }
 
 /// 下视采集流随进程持续运行，退出作用域时 Drop 执行 STREAMOFF。
-fn capture_down(
-    source: &DownSource,
-    publisher: &Publisher<DownImageMessage>,
-) -> Result<(), Box<dyn Error>> {
+fn capture_down(source: &DownSource, publisher: &Publisher<DownImageMessage>) -> Result<()> {
     let rate = source.rate_hz;
-    let device = Device::with_path(&source.device)?;
+    let device = Device::with_path(&source.device).map_err(|e| {
+        Error::from(e)
+            .with_operation("open camera")
+            .with_context("device", &source.device)
+    })?;
     configure(&device, source.format, DOWN_WIDTH, DOWN_HEIGHT)?;
     let format = device.format()?;
     let row_bytes = DOWN_WIDTH * source.format.bytes_per_pixel();
@@ -124,7 +126,10 @@ fn capture_down(
             .flags
             .contains(v4l::buffer::Flags::TIMESTAMP_MONOTONIC)
         {
-            return Err("down camera requires V4L2 CLOCK_MONOTONIC capture timestamps".into());
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "down camera requires V4L2 CLOCK_MONOTONIC capture timestamps",
+            ));
         }
         let stamp = metadata.timestamp.sec as f64 + metadata.timestamp.usec as f64 * 1e-6;
         let Some(bytes) = bytes.get(..metadata.bytesused as usize) else {
@@ -147,7 +152,10 @@ fn capture_down(
             } else {
                 let written = gray_from_yuyv(row, destination);
                 if written != DOWN_WIDTH {
-                    return Err("incomplete down YUYV row".into());
+                    return Err(Error::new(
+                        ErrorKind::InvalidData,
+                        "incomplete down YUYV row",
+                    ));
                 }
             }
         }
@@ -254,7 +262,7 @@ fn validate(config: &Config) -> firefly_error::Result<()> {
 }
 
 /// 采集主循环：左、右目各取一帧发布（下视由独立线程采集），直到收到 `SIGINT`/`SIGTERM`。
-pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
+pub fn run(config_path: &Path) -> Result<()> {
     let config: Config =
         firefly_config::startup(config_path, firefly_observability::init, validate)?;
     let width = config.width as usize;
@@ -265,7 +273,8 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         &|_signal| {
             RUNNING.store(false, Ordering::Relaxed);
         },
-    )?;
+    )
+    .map_err(|e| Error::caused_by(ErrorKind::Internal, "register shutdown signals", e))?;
 
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "camera");
@@ -278,12 +287,20 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         config.right.device
     );
 
-    let left_dev = Device::with_path(&config.left.device)?;
+    let left_dev = Device::with_path(&config.left.device).map_err(|e| {
+        Error::from(e)
+            .with_operation("open camera")
+            .with_context("device", &config.left.device)
+    })?;
     configure(&left_dev, config.left.format, width, height)?;
     let mut left_stream =
         MmapStream::with_buffers(&left_dev, Type::VideoCapture, config.left.buffers)?;
 
-    let right_dev = Device::with_path(&config.right.device)?;
+    let right_dev = Device::with_path(&config.right.device).map_err(|e| {
+        Error::from(e)
+            .with_operation("open camera")
+            .with_context("device", &config.right.device)
+    })?;
     configure(&right_dev, config.right.format, width, height)?;
     let mut right_stream =
         MmapStream::with_buffers(&right_dev, Type::VideoCapture, config.right.buffers)?;
@@ -324,23 +341,20 @@ pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 /// 按目标格式协商设备像素格式；驱动必须原样接受，否则说明内核不支持该组合。
-fn configure(
-    device: &Device,
-    format: FrameFormat,
-    width: usize,
-    height: usize,
-) -> Result<(), Box<dyn Error>> {
+fn configure(device: &Device, format: FrameFormat, width: usize, height: usize) -> Result<()> {
     let requested = Format::new(width as u32, height as u32, fourcc(format));
     let actual = device.set_format(&requested)?;
     if actual.width != requested.width
         || actual.height != requested.height
         || actual.fourcc != requested.fourcc
     {
-        return Err(format!(
-            "设备不接受 {width}×{height} {}：驱动改为 {}×{} {}",
-            requested.fourcc, actual.width, actual.height, actual.fourcc
-        )
-        .into());
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            format!(
+                "设备不接受 {width}×{height} {}：驱动改为 {}×{} {}",
+                requested.fourcc, actual.width, actual.height, actual.fourcc
+            ),
+        ));
     }
     Ok(())
 }
@@ -362,7 +376,7 @@ fn pump_gray(
     height: usize,
     sensor_id: i32,
     stamp: f64,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<()> {
     let (bytes, _meta) = match stream.next() {
         Ok(frame) => frame,
         Err(error)
@@ -415,9 +429,9 @@ fn pump_gray(
 }
 
 /// `CLOCK_MONOTONIC` 秒：板载各进程共用的时间基准。
-fn monotonic_seconds() -> Result<f64, Box<dyn Error>> {
+fn monotonic_seconds() -> Result<f64> {
     let time = Time::now_with_clock(ClockType::Monotonic)
-        .map_err(|error| format!("读取单调时钟失败: {error:?}"))?;
+        .map_err(|error| Error::caused_by(ErrorKind::Internal, "read monotonic clock", error))?;
     Ok(time.as_duration().as_secs_f64())
 }
 

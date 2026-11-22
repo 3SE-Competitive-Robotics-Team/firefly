@@ -8,8 +8,11 @@ mod status;
 
 use firefly_error::{Error, ErrorKind};
 
-fn failure(operation: &'static str, error: impl std::fmt::Display) -> Error {
-    Error::new(ErrorKind::Internal, error.to_string()).with_operation(operation)
+fn failure(
+    operation: &'static str,
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> Error {
+    Error::caused_by(ErrorKind::Internal, operation, error)
 }
 
 fn invalid(message: impl Into<String>) -> Error {

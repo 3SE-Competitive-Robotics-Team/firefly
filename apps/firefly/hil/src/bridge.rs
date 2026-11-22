@@ -1,3 +1,4 @@
+use firefly_error::{Error, ErrorKind, Result};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -45,19 +46,19 @@ impl Drop for StopOnDrop<'_> {
 ///
 /// # Errors
 /// 设备缺席、端点不可用、IPC 端口创建失败或链路读写出错。
-pub fn run(config: &Config) -> Result<(), String> {
+pub fn run(config: &Config) -> Result<()> {
     let link = HostLink::open(config)?;
     let (writer, reader, device, interface) =
         link.split(config.link.write_buffer, config.link.read_buffer)?;
     // 设备与接口句柄必须活到两个端点线程结束，否则 macOS 可能在端点仍在使用时释放设备。
     let _keep = (device, interface);
-    let node = create_node().map_err(|error| error.to_string())?;
+    let node = create_node()?;
     let (down, up) = open_ports(&node)?;
     let session = session_id();
     let stop = Arc::new(AtomicBool::new(false));
     for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
         signal_hook::flag::register(signal, Arc::clone(&stop))
-            .map_err(|error| format!("register signal: {error}"))?;
+            .map_err(|error| Error::from(error).with_operation("register signal"))?;
     }
     let (priority_tx, priority_rx) = sync_channel(DOWNLINK_QUEUE);
     // Each entry owns at most two images, preserving the configured image budget.
@@ -82,8 +83,12 @@ pub fn run(config: &Config) -> Result<(), String> {
     drop(priority_tx);
     drop(image_tx);
     drop(up_rx);
-    let writer = writer.join().map_err(|_| "USB 写线程 panic".to_owned());
-    let reader = reader.join().map_err(|_| "USB 读线程 panic".to_owned());
+    let writer = writer
+        .join()
+        .map_err(|_| Error::new(ErrorKind::Internal, "USB 写线程 panic"));
+    let reader = reader
+        .join()
+        .map_err(|_| Error::new(ErrorKind::Internal, "USB 读线程 panic"));
     writer??;
     reader??;
     result?;
@@ -91,10 +96,10 @@ pub fn run(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
-fn open_ports(node: &IpcNode) -> Result<(Downlink, Uplink), String> {
+fn open_ports(node: &IpcNode) -> Result<(Downlink, Uplink)> {
     Ok((
-        Downlink::open(node, "Firefly").map_err(|e| e.to_string())?,
-        Uplink::open(node, "Firefly").map_err(|e| e.to_string())?,
+        Downlink::open(node, "Firefly")?,
+        Uplink::open(node, "Firefly")?,
     ))
 }
 
@@ -105,7 +110,7 @@ fn usb_writer(
     images: Receiver<ImageBatch>,
     session: u64,
     stop: Arc<AtomicBool>,
-) -> Result<(), String> {
+) -> Result<()> {
     let _stop_on_exit = StopOnDrop(&stop);
     let mut writer = FrameWriter::new(writer);
     writer.set_session(session);
@@ -115,7 +120,7 @@ fn usb_writer(
             role: ROLE_HOST,
             session,
         }))
-        .map_err(|error| format!("写 hello: {error}"))?;
+        .map_err(|error| Error::from(error).with_operation("写 hello"))?;
     let mut next_image_id = 0_u32;
     while !stop.load(Ordering::Relaxed) {
         let mut wrote = false;
@@ -123,9 +128,11 @@ fn usb_writer(
         while !stop.load(Ordering::Relaxed)
             && let Ok(message) = priority.try_recv()
         {
-            writer
-                .write_message(&message)
-                .map_err(|error| format!("写 {}: {error}", message.kind().name()))?;
+            writer.write_message(&message).map_err(|error| {
+                Error::from(error)
+                    .with_operation("write HIL message")
+                    .with_context("kind", message.kind().name())
+            })?;
             wrote = true;
         }
         if let Ok(message) = images.try_recv() {
@@ -136,9 +143,11 @@ fn usb_writer(
             continue;
         }
         match priority.recv_timeout(Duration::from_millis(1)) {
-            Ok(message) => writer
-                .write_message(&message)
-                .map_err(|error| format!("写 {}: {error}", message.kind().name()))?,
+            Ok(message) => writer.write_message(&message).map_err(|error| {
+                Error::from(error)
+                    .with_operation("write HIL message")
+                    .with_context("kind", message.kind().name())
+            })?,
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -153,7 +162,7 @@ fn write_image(
     priority: &Receiver<Message>,
     next_image_id: &mut u32,
     stop: &AtomicBool,
-) -> Result<(), String> {
+) -> Result<()> {
     match message {
         ImageBatch::Stereo(left, right) => {
             for (sensor, image) in [(0, left), (1, right)] {
@@ -189,9 +198,9 @@ fn write_chunks(
     data: &[u8],
     next_image_id: &mut u32,
     stop: &AtomicBool,
-) -> Result<(), String> {
+) -> Result<()> {
     let count = u16::try_from(data.len().div_ceil(IMAGE_CHUNK_DATA_MAX).max(1))
-        .map_err(|_| "图像块数过多".to_owned())?;
+        .map_err(|_| Error::new(ErrorKind::OutOfRange, "图像块数过多"))?;
     let image_id = *next_image_id;
     *next_image_id = next_image_id.wrapping_add(1);
     for (index, chunk) in data.chunks(IMAGE_CHUNK_DATA_MAX).enumerate() {
@@ -208,25 +217,23 @@ fn write_chunks(
         let encoded = header.encode();
         writer
             .write_parts(Kind::ImageChunk, timestamp, &[&encoded, chunk])
-            .map_err(|error| format!("写图像块: {error}"))?;
+            .map_err(|error| Error::from(error).with_operation("写图像块"))?;
         // 一块最多挡住 IMU 约 0.4ms；这里把积压的 IMU/指令立刻插出去。
         while !stop.load(Ordering::Relaxed)
             && let Ok(message) = priority.try_recv()
         {
-            writer
-                .write_message(&message)
-                .map_err(|error| format!("写 {}: {error}", message.kind().name()))?;
+            writer.write_message(&message).map_err(|error| {
+                Error::from(error)
+                    .with_operation("write HIL message")
+                    .with_context("kind", message.kind().name())
+            })?;
         }
     }
     Ok(())
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn usb_reader(
-    reader: impl Read,
-    queue: SyncSender<Message>,
-    stop: Arc<AtomicBool>,
-) -> Result<(), String> {
+fn usb_reader(reader: impl Read, queue: SyncSender<Message>, stop: Arc<AtomicBool>) -> Result<()> {
     let _stop_on_exit = StopOnDrop(&stop);
     let mut reader = FrameReader::new(reader);
     while !stop.load(Ordering::Relaxed) {
@@ -237,7 +244,7 @@ fn usb_reader(
                 }
             }
             Err(error) if firefly_hil::frame::is_retryable(&error) => {}
-            Err(error) => return Err(format!("读执行器端点: {error}")),
+            Err(error) => return Err(Error::from(error).with_operation("read actuator endpoint")),
         }
     }
     Ok(())
@@ -253,7 +260,7 @@ fn ipc_loop(
     up_rx: &Receiver<Message>,
     stop: &AtomicBool,
     options: &crate::config::Link,
-) -> Result<(), String> {
+) -> Result<()> {
     let image_period = Duration::from_secs_f64(options.image_period_s);
     let mut image_deadline = Instant::now() + image_period;
     let mut pending_left: Option<GrayImageMessage> = None;
@@ -269,7 +276,7 @@ fn ipc_loop(
     let mut session = 0_u64;
     let mut imu_batch: Vec<ImuMessage> = Vec::with_capacity(options.imu_batch);
     let (responses, rx) = sync_channel(4);
-    crate::mission::serve(priority_tx.clone(), rx).map_err(|e| e.to_string())?;
+    crate::mission::serve(priority_tx.clone(), rx)?;
     while !stop.load(Ordering::Relaxed) {
         let mut activity = false;
         // 先排空上行控制：图像/IMU 下行不能把 1 kHz 控制的回传压在后面。
@@ -281,12 +288,9 @@ fn ipc_loop(
             }
             activity = true;
         }
-        activity |= down
-            .requests
-            .drain(None, |message| {
-                send_blocking(priority_tx, message).map_err(std::io::Error::other)
-            })
-            .map_err(|e| e.to_string())?;
+        activity |= down.requests.drain(None, |message| {
+            send_blocking(priority_tx, message).map_err(std::io::Error::other)
+        })?;
         while imu_batch.len() < options.imu_batch {
             match down.imu.receive() {
                 Ok(Some(sample)) => imu_batch.push(*sample.payload()),
@@ -387,8 +391,9 @@ fn ipc_loop(
     Ok(())
 }
 
-fn send_blocking(tx: &SyncSender<Message>, message: Message) -> Result<(), String> {
-    tx.send(message).map_err(|_| "USB 写线程已退出".to_owned())
+fn send_blocking(tx: &SyncSender<Message>, message: Message) -> Result<()> {
+    tx.send(message)
+        .map_err(|_| Error::new(ErrorKind::Unavailable, "USB 写线程已退出"))
 }
 
 fn record_image_checksum(stats: &mut StatsCounters, image: &GrayImageMessage) {
@@ -450,7 +455,7 @@ fn enqueue_stereo(
     left: &GrayImageMessage,
     right: &GrayImageMessage,
     stats: &mut StatsCounters,
-) -> Result<(), String> {
+) -> Result<()> {
     if try_image(
         tx,
         ImageBatch::Stereo(Box::new(*left), Box::new(*right)),
@@ -466,14 +471,16 @@ fn try_image(
     tx: &SyncSender<ImageBatch>,
     message: ImageBatch,
     stats: &mut StatsCounters,
-) -> Result<bool, String> {
+) -> Result<bool> {
     let image_count = match message {
         ImageBatch::Stereo(..) => 2,
         ImageBatch::Down(_) => 1,
     };
     match tx.try_send(message) {
         Ok(()) => Ok(true),
-        Err(TrySendError::Disconnected(_)) => Err("USB 写线程已退出".to_owned()),
+        Err(TrySendError::Disconnected(_)) => {
+            Err(Error::new(ErrorKind::Unavailable, "USB 写线程已退出"))
+        }
         Err(TrySendError::Full(_)) => {
             stats.dropped_images += image_count;
             Ok(false)
@@ -509,7 +516,7 @@ fn dispatch_uplink(
     session: &mut u64,
     message: Message,
     latest_imu_stamp: f64,
-) -> Result<(), String> {
+) -> Result<()> {
     if *session == 0 {
         *session = 1;
     }
@@ -549,7 +556,7 @@ fn dispatch_uplink(
         Message::Pong(_) => return Ok(()),
         _ => stats.telemetry += 1,
     }
-    ports.publish(message).map_err(|error| error.to_string())
+    ports.publish(message).map_err(Error::from)
 }
 
 fn publish_stats(ports: &Uplink, stats: &mut StatsCounters, timestamp: f64) {

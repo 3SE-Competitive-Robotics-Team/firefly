@@ -46,8 +46,12 @@ def startup(path: str | Path, decode: Callable[[dict], T], *,
     decode 只构造和校验配置；返回成功后调用方才创建运行资源。
     """
     init_logging()
-    values, exists = _read_toml(path)
-    config = decode(values)
+    try:
+        values, exists = _read_toml(path)
+        config = decode(values)
+    except (OSError, ValueError) as error:
+        error.add_note(f"配置文件 {path}")
+        raise
     _report_config(path, exists)
     return config
 

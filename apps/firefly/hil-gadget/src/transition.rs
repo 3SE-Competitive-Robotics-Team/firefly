@@ -1,8 +1,8 @@
+use firefly_error::{IoResultExt, Result};
 use std::{fs, path::Path};
 
-pub fn lock(directory: &Path) -> Result<fs::File, String> {
-    fs::create_dir_all(directory)
-        .map_err(|error| format!("create transition directory: {error}"))?;
+pub fn lock(directory: &Path) -> Result<fs::File> {
+    fs::create_dir_all(directory).at_path("create transition directory", directory)?;
     let path = directory.join("transition.lock");
     let file = fs::OpenOptions::new()
         .create(true)
@@ -10,9 +10,8 @@ pub fn lock(directory: &Path) -> Result<fs::File, String> {
         .read(true)
         .write(true)
         .open(&path)
-        .map_err(|error| format!("open {}: {error}", path.display()))?;
-    file.lock()
-        .map_err(|error| format!("lock {}: {error}", path.display()))?;
+        .at_path("open", &path)?;
+    file.lock().at_path("lock", &path)?;
     Ok(file)
 }
 

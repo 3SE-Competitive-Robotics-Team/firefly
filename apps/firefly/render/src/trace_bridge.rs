@@ -129,9 +129,15 @@ impl Subscriber for ForwardToLog {
 ///
 /// # Errors
 /// 全局 dispatcher 已被占用（返回占用错误描述）。
-pub fn init() -> Result<(), String> {
+pub fn init() -> firefly_error::Result<()> {
     set_global_default(Dispatch::new(ForwardToLog {
         next_id: AtomicU64::new(1),
     }))
-    .map_err(|e| format!("{e:?}"))
+    .map_err(|e| {
+        firefly_error::Error::caused_by(
+            firefly_error::ErrorKind::Unavailable,
+            "install tracing dispatcher",
+            e,
+        )
+    })
 }

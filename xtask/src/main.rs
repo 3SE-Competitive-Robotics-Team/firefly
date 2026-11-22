@@ -8,6 +8,7 @@ mod release;
 mod session_logs;
 mod target;
 
+use firefly_error::{IoResultExt, Result};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -67,36 +68,31 @@ struct Mission {
 }
 
 fn main() -> ExitCode {
-    match run(Arguments::parse().command) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("{error}");
-            ExitCode::FAILURE
-        }
-    }
+    firefly_error::report("xtask", run(Arguments::parse().command))
 }
 
-fn run(command: Command) -> Result<(), String> {
+fn run(command: Command) -> Result<()> {
     match command {
-        Command::View { recording } => session_logs::view(&recording).map_err(|e| e.to_string()),
+        Command::View { recording } => {
+            session_logs::view(&recording).at_path("view recording", &recording)
+        }
         Command::ArchiveSession { workspace } => {
-            session_logs::serve(&workspace).map_err(|e| e.to_string())
+            session_logs::serve(&workspace).at_path("archive session", &workspace)
         }
         Command::Processes { workspace } => {
-            let ids = xtask::processes::active(&workspace).map_err(|e| e.to_string())?;
+            let ids = xtask::processes::active(&workspace)
+                .at_path("list active processes", &workspace)?;
             println!("{}", serde_json::json!(ids));
             Ok(())
         }
         Command::Release { target } => release::build(target),
         Command::Deploy(args) => deploy::run(&args.device),
         Command::DeployHil(args) => deploy_hil::run(&args.device),
-        Command::Sil(args) => {
-            mission::run(false, &args.plans, args.seed).map_err(|e| e.to_string())
-        }
-        Command::Hil(args) => mission::run(true, &args.plans, args.seed).map_err(|e| e.to_string()),
+        Command::Sil(args) => mission::run(false, &args.plans, args.seed),
+        Command::Hil(args) => mission::run(true, &args.plans, args.seed),
         Command::Unpack { package, directory } => {
             let count = archive::unpack(&package, &directory)
-                .map_err(|error| format!("unpack {}: {error}", package.display()))?;
+                .at_path("unpack deployment package", &package)?;
             println!("unpacked {count} files into {}", directory.display());
             Ok(())
         }

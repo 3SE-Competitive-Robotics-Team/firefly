@@ -60,8 +60,12 @@ fn scalars(viz: &VizPublisher, stamp: f64, path: &str, values: &[f64]) {
     let _ = viz.publish(m);
 }
 
+fn main() -> std::process::ExitCode {
+    firefly_error::report("fc", run_app())
+}
+
 #[allow(clippy::too_many_lines)]
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn run_app() -> firefly_error::Result<()> {
     let cfg_path = Arguments::parse()
         .config
         .unwrap_or_else(|| firefly_config::paths::config("fc.toml"));
@@ -71,7 +75,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _signals = SignalHandler::register_multiple_signals(
         &vec![FetchableSignal::Interrupt, FetchableSignal::Terminate],
         &|_| RUNNING.store(false, Ordering::Relaxed),
-    )?;
+    )
+    .map_err(|e| {
+        firefly_error::Error::caused_by(
+            firefly_error::ErrorKind::Internal,
+            "register shutdown signals",
+            e,
+        )
+    })?;
     let node = create_node()?;
     let sticks = Subscriber::<SticksMessage>::with_topic_and_buffer(
         &node,

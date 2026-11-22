@@ -67,37 +67,56 @@ impl Plan {
 
     /// # Errors
     /// Rejects invalid timing, altitude and degenerate pass segments.
-    pub fn validate(&self) -> Result<(), &'static str> {
+    pub fn validate(&self) -> firefly_error::Result<()> {
         if self.waypoints.len() > 16 {
-            return Err("a mission plan supports up to 16 waypoints");
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                "a mission plan supports up to 16 waypoints",
+            ));
         }
         if !(0.0..=0.3).contains(&self.return_offset[0].hypot(self.return_offset[1])) {
-            return Err("return offset must be within 0.3 m of takeoff");
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                "return offset must be within 0.3 m of takeoff",
+            ));
         }
         if !((0.5..=2.0).contains(&self.altitude)
             && self.hover_seconds > 0.0
             && self.hover_seconds <= 600.0)
         {
-            return Err("invalid takeoff height or dwell time");
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                "invalid takeoff height or dwell time",
+            ));
         }
         let mut previous = [0.0, 0.0, self.altitude];
         for (index, waypoint) in self.waypoints.iter().enumerate() {
             let [x, y, z] = waypoint.offset;
             if !(0.5..=3.3).contains(&z) || !(0.0..=10.0).contains(&x.hypot(y)) {
-                return Err(
+                return Err(firefly_error::Error::new(
+                    firefly_error::ErrorKind::InvalidArgument,
                     "waypoints require height in [0.5,3.3] m and horizontal radius <= 10 m",
-                );
+                ));
             }
             if index == 0 && x.hypot(y) < 1.0 {
-                return Err("first waypoint must be at least 1 m horizontally from takeoff");
+                return Err(firefly_error::Error::new(
+                    firefly_error::ErrorKind::InvalidArgument,
+                    "first waypoint must be at least 1 m horizontally from takeoff",
+                ));
             }
             if !valid_leg(previous, waypoint.offset) {
-                return Err("consecutive waypoint spacing must be in [0.5,10] m");
+                return Err(firefly_error::Error::new(
+                    firefly_error::ErrorKind::InvalidArgument,
+                    "consecutive waypoint spacing must be in [0.5,10] m",
+                ));
             }
             previous = waypoint.offset;
         }
         if !self.waypoints.is_empty() && !valid_leg(previous, self.return_point()) {
-            return Err("return leg must be in [0.5,10] m");
+            return Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                "return leg must be in [0.5,10] m",
+            ));
         }
         Ok(())
     }
@@ -150,7 +169,10 @@ pub fn read_frame<T: DeserializeOwned>(stream: &UnixStream) -> io::Result<T> {
     let mut buf = Vec::new();
     BufReader::new(stream.take(65537)).read_until(b'\n', &mut buf)?;
     if buf.len() > 65536 || buf.last() != Some(&b'\n') {
-        return Err(io::Error::other("invalid mission frame"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid mission frame",
+        ));
     }
     Ok(serde_json::from_slice(&buf)?)
 }
@@ -161,7 +183,10 @@ pub fn write_frame(stream: &UnixStream, value: &impl Serialize) -> io::Result<()
     let mut frame = serde_json::to_vec(value)?;
     frame.push(b'\n');
     if frame.len() > 65536 {
-        return Err(io::Error::other("mission frame too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "mission frame too large",
+        ));
     }
     let mut writer = stream;
     writer.write_all(&frame)
@@ -169,21 +194,30 @@ pub fn write_frame(stream: &UnixStream, value: &impl Serialize) -> io::Result<()
 
 /// # Errors
 /// Returns daemon rejection, timeout, or transport errors.
-pub fn call(request: &Request) -> io::Result<serde_json::Value> {
+pub fn call(request: &Request) -> firefly_error::Result<serde_json::Value> {
     call_at(&socket_path(), request)
 }
 
 /// Submit a request through a local daemon or USB HIL bridge socket.
 /// # Errors
 /// Returns connection, framing, timeout or mission errors.
-pub fn call_at(socket: &std::path::Path, request: &Request) -> io::Result<serde_json::Value> {
-    let stream = UnixStream::connect(socket)?;
+pub fn call_at(
+    socket: &std::path::Path,
+    request: &Request,
+) -> firefly_error::Result<serde_json::Value> {
+    use firefly_error::{Error, ErrorKind, IoResultExt};
+    let stream = UnixStream::connect(socket).at_path("connect to mission service", socket)?;
     let timeout = Some(Duration::from_secs(5));
     stream.set_read_timeout(timeout)?;
     stream.set_write_timeout(timeout)?;
-    write_frame(&stream, request)?;
-    let reply: Result<serde_json::Value, String> = read_frame(&stream)?;
-    reply.map_err(io::Error::other)
+    write_frame(&stream, request).at_path("send mission request", socket)?;
+    let reply: Result<serde_json::Value, String> =
+        read_frame(&stream).at_path("read mission reply", socket)?;
+    reply.map_err(|message| {
+        Error::new(ErrorKind::Rejected, message)
+            .with_operation("mission request")
+            .with_context("socket", socket.display())
+    })
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
+firefly-error.workspace = true
 usage-rs.workspace = true
 firefly-archive.workspace = true
 serde.workspace = true

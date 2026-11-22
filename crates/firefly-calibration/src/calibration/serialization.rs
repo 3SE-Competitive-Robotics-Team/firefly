@@ -110,28 +110,30 @@ struct CalibrationArchive {
     vignette: Vec<SplineArchive>,
 }
 
-fn number<S: BasaltScalar>(v: &Value, key: &str) -> Result<S, String> {
+fn number<S: BasaltScalar>(v: &Value, key: &'static str) -> serde_json::Result<S> {
     v.get(key)
         .and_then(Value::as_f64)
         .map(S::from_f64_lossy)
-        .ok_or_else(|| format!("missing numeric camera field {key}"))
+        .ok_or_else(|| serde::de::Error::missing_field(key))
 }
 fn parameters<S: BasaltScalar, const N: usize>(
     v: &Value,
-    keys: [&str; N],
-) -> Result<SVector<S, N>, String> {
+    keys: [&'static str; N],
+) -> serde_json::Result<SVector<S, N>> {
     let mut p = SVector::zeros();
     for (i, key) in keys.iter().enumerate() {
         p[i] = number(v, key)?;
     }
     Ok(p)
 }
-fn read_camera<S: BasaltScalar>(v: &Value) -> Result<GenericCamera<S>, String> {
+fn read_camera<S: BasaltScalar>(v: &Value) -> serde_json::Result<GenericCamera<S>> {
     let name = v
         .get("camera_type")
         .and_then(Value::as_str)
-        .ok_or("missing camera_type")?;
-    let p = v.get("intrinsics").ok_or("missing intrinsics")?;
+        .ok_or_else(|| <serde_json::Error as serde::de::Error>::missing_field("camera_type"))?;
+    let p = v
+        .get("intrinsics")
+        .ok_or_else(|| <serde_json::Error as serde::de::Error>::missing_field("intrinsics"))?;
     Ok(match name {
         "ds" => GenericCamera::DoubleSphere(DoubleSphereCamera::new(parameters(
             p,

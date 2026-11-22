@@ -49,6 +49,15 @@ fn only_the_owning_checkout_reports_a_live_daemon() {
         );
         thread::sleep(Duration::from_millis(20));
     }
+    let rejection = call_at(
+        &socket,
+        &Request::Status {
+            id: Some("missing".into()),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(rejection.kind(), firefly_error::ErrorKind::Rejected);
+    assert_eq!(rejection.message(), "unknown mission id");
     assert!(active(owner.path()).unwrap().contains(&pid));
     assert!(!active(other.path()).unwrap().contains(&pid));
     drop(daemon);

@@ -1,3 +1,4 @@
+use firefly_error::{Error, ErrorKind, Result};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -54,7 +55,10 @@ impl Run for Status {
         };
         let seconds = self.interval.unwrap_or(DEFAULT_INTERVAL);
         if !(seconds.is_finite() && seconds > 0.0) {
-            return crate::process::report(Err("刷新间隔必须是正数秒".to_owned()));
+            return crate::process::report(Err(Error::new(
+                ErrorKind::InvalidArgument,
+                "刷新间隔必须是正数秒",
+            )));
         }
         if self.watch {
             watch(&config, Duration::from_secs_f64(seconds))
@@ -66,9 +70,10 @@ impl Run for Status {
     }
 }
 
-fn json(result: Result<Vec<ProcessStatus>, String>) -> ExitCode {
+fn json(result: Result<Vec<ProcessStatus>>) -> ExitCode {
     let result = result.and_then(|statuses| {
-        serde_json::to_string(&statuses).map_err(|error| format!("编码进程状态: {error}"))
+        serde_json::to_string(&statuses)
+            .map_err(|error| Error::caused_by(ErrorKind::Internal, "编码进程状态", error))
     });
     match result {
         Ok(text) => {
@@ -79,7 +84,7 @@ fn json(result: Result<Vec<ProcessStatus>, String>) -> ExitCode {
     }
 }
 
-fn once(config: &Config, result: Result<Vec<ProcessStatus>, String>) -> ExitCode {
+fn once(config: &Config, result: Result<Vec<ProcessStatus>>) -> ExitCode {
     let statuses = match result {
         Ok(statuses) => statuses,
         Err(error) => return crate::process::report(Err(error)),
@@ -103,8 +108,7 @@ fn watch(config: &Config, interval: Duration) -> ExitCode {
     let stop = Arc::new(AtomicBool::new(false));
     for signal in [SIGINT, SIGTERM] {
         if let Err(error) = flag::register(signal, Arc::clone(&stop)) {
-            eprintln!("ffctl: 安装信号处理失败: {error}");
-            return ExitCode::FAILURE;
+            return crate::process::report(Err(Error::from(error).with_operation("安装信号处理")));
         }
     }
 
@@ -187,12 +191,12 @@ impl Drop for RawMode {
     }
 }
 
-fn query() -> Result<Vec<ProcessStatus>, String> {
+fn query() -> Result<Vec<ProcessStatus>> {
     let response = client::send(&Request::Status)?;
     if response.ok {
         Ok(response.processes)
     } else {
-        Err(response.message)
+        Err(Error::new(ErrorKind::Unavailable, response.message))
     }
 }
 
@@ -274,11 +278,16 @@ mod tests {
     #[test]
     fn missing_supervisor_is_a_failure() {
         assert_eq!(
-            super::once(&config_with(&[]), Err("missing socket".into())),
+            super::once(
+                &config_with(&[]),
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound).into())
+            ),
             std::process::ExitCode::FAILURE
         );
         assert_eq!(
-            super::json(Err("missing socket".into())),
+            super::json(Err(
+                std::io::Error::from(std::io::ErrorKind::NotFound).into()
+            )),
             std::process::ExitCode::FAILURE
         );
     }

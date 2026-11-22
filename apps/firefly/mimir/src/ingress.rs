@@ -36,7 +36,7 @@ use re_sdk_types::archetypes as rr;
 use crate::{
     archive::{Archive, wall_time_ns},
     config::Options,
-    failure, invalid, schema,
+    invalid, schema,
 };
 
 enum Event {
@@ -181,7 +181,14 @@ impl Sender {
             .fetch_max(previous + size, Ordering::Relaxed);
         if let Err(error) = self.tx.try_send(event) {
             self.bytes.fetch_sub(size, Ordering::AcqRel);
-            return Err(failure("enqueue recording", error));
+            return Err(match error {
+                mpsc::TrySendError::Full(_) => {
+                    Error::new(ErrorKind::ResourceExhausted, "recording queue full")
+                }
+                mpsc::TrySendError::Disconnected(_) => {
+                    Error::new(ErrorKind::Unavailable, "recording writer stopped")
+                }
+            });
         }
         Ok(())
     }
@@ -456,7 +463,7 @@ pub fn run(options: &Options, stop: &Arc<AtomicBool>, run: firefly_archive::Run)
             writer_stop.store(true, Ordering::Release);
             let ingress_error = writer_error
                 .lock()
-                .map_err(|e| failure("read ingress status", e))?
+                .map_err(|_| Error::new(ErrorKind::Internal, "ingress status lock poisoned"))?
                 .clone();
             let own_error = result.as_ref().err().map(ToString::to_string);
             archive.log(
@@ -474,17 +481,18 @@ pub fn run(options: &Options, stop: &Arc<AtomicBool>, run: firefly_archive::Run)
             let closed = archive.finish(own_error.as_deref().or(ingress_error.as_deref()));
             result.and(closed)
         })
-        .map_err(|e| failure("start writer", e))?;
+        .map_err(|e| Error::from(e).with_operation("start writer"))?;
     let received = receive(options, &sender, stop);
     if let Err(value) = &received {
         *error
             .lock()
-            .map_err(|e| failure("store ingress status", e))? = Some(value.to_string());
+            .map_err(|_| Error::new(ErrorKind::Internal, "ingress status lock poisoned"))? =
+            Some(value.to_string());
     }
     drop(sender);
     let written = writer
         .join()
-        .map_err(|_| failure("join writer", "writer panicked"))?;
+        .map_err(|_| Error::new(ErrorKind::Internal, "recording writer panicked"))?;
     received.and(written)
 }
 

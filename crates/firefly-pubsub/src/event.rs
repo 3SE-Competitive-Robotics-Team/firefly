@@ -2,6 +2,7 @@
 //! 通知不携带数据；trace 上下文由 pubsub 用户头传递。
 //! 跨语言事件 ID 为 [`EVENT_ID_SENT_SAMPLE`]；无监听者时 notify 成功返回 0。
 
+use firefly_error::{Error, ErrorKind};
 use iceoryx2::port::listener::Listener;
 use iceoryx2::port::notifier::Notifier;
 use iceoryx2::prelude::*;
@@ -21,18 +22,13 @@ fn open_event(
     topic: &str,
 ) -> Result<iceoryx2::service::port_factory::event::PortFactory<Service>, firefly_error::Error> {
     node.service_builder(&topic.try_into().map_err(|e| {
-        firefly_error::Error::new(
-            firefly_error::ErrorKind::InvalidArgument,
-            format!("非法话题名 `{topic}`: {e:?}"),
-        )
+        Error::caused_by(ErrorKind::InvalidArgument, "非法话题名", e).with_context("topic", topic)
     })?)
     .event()
     .open_or_create()
     .map_err(|e| {
-        firefly_error::Error::new(
-            firefly_error::ErrorKind::Internal,
-            format!("打开/创建事件服务 `{topic}` 失败: {e:?}"),
-        )
+        Error::caused_by(ErrorKind::Unavailable, "打开/创建事件服务 失败", e)
+            .with_context("topic", topic)
     })
 }
 
@@ -52,10 +48,8 @@ impl TopicNotifier {
             .notifier_builder()
             .create()
             .map_err(|e| {
-                firefly_error::Error::new(
-                    firefly_error::ErrorKind::Internal,
-                    format!("创建事件通知端失败: {e:?}"),
-                )
+                Error::caused_by(ErrorKind::Unavailable, "创建事件通知端失败", e)
+                    .with_context("topic", topic)
             })?;
         Ok(Self { notifier })
     }
@@ -88,10 +82,8 @@ impl TopicListener {
             .listener_builder()
             .create()
             .map_err(|e| {
-                firefly_error::Error::new(
-                    firefly_error::ErrorKind::Internal,
-                    format!("创建事件监听端失败: {e:?}"),
-                )
+                Error::caused_by(ErrorKind::Unavailable, "创建事件监听端失败", e)
+                    .with_context("topic", topic)
             })?;
         Ok(Self { listener })
     }
@@ -103,10 +95,8 @@ impl TopicListener {
     /// 底层 event 监听失败。
     pub fn drain(&self) -> Result<usize, firefly_error::Error> {
         let count = self.listener.try_wait(|_| {}).map_err(|e| {
-            firefly_error::Error::temporary(
-                firefly_error::ErrorKind::Internal,
-                format!("排空事件通知失败: {e:?}"),
-            )
+            Error::caused_by(ErrorKind::Unavailable, "排空事件通知失败", e)
+                .with_status(firefly_error::ErrorStatus::Temporary)
         })?;
         Ok(usize::try_from(count).unwrap_or(usize::MAX))
     }

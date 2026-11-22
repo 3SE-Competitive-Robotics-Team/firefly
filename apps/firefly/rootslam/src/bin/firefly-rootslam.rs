@@ -66,7 +66,11 @@ fn argument_error(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::InvalidArgument, message).with_operation("rootslam::arguments")
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    firefly_error::report("firefly-rootslam", run_app())
+}
+
+fn run_app() -> firefly_error::Result<()> {
     let arguments = Arguments::parse();
     let mut config: Config = firefly_config::startup(
         arguments

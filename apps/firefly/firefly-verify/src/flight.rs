@@ -3,6 +3,7 @@ use super::{
     timeline::{Timeline, number, vec3},
     window,
 };
+use firefly_error::{Error, ErrorKind, Result};
 use std::collections::BTreeSet;
 
 pub(super) type Frame = (Rotation, Vec3);
@@ -464,7 +465,7 @@ pub(super) fn grade(
     data: &FlightEvidence<'_>,
     frame: Option<Frame>,
     first: bool,
-) -> Result<Report, String> {
+) -> Result<Report> {
     let mut report = Report::default();
     let Some(timeline) = Timeline::read(data, &mut report) else {
         return Ok(report);
@@ -492,7 +493,7 @@ pub(super) fn grade(
     }
     let frame = frame
         .or_else(|| align(poses, start, &timeline.home))
-        .ok_or("invalid home anchor")?;
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "invalid home anchor"))?;
     let home = position(poses, start);
     let approach = timeline.phases[if precision { "acquire" } else { "land" }].timestamp;
     let flight_start = timeline
@@ -513,13 +514,19 @@ pub(super) fn grade(
     let pads: Value = serde_json::from_str(include_str!(
         "../../../../packages/firefly-mujoco/src/firefly_mujoco/hangars.json"
     ))
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| Error::caused_by(ErrorKind::InvalidData, "decode landing pad coordinates", e))?;
     let scene = timeline.settings["scene"]
         .as_str()
         .unwrap_or("rmuc2027@1.0.0");
-    let team = timeline.settings["team"].as_str().ok_or("missing team")?;
-    let pad =
-        vec3(&pads[scene][team]).ok_or_else(|| format!("unknown scene or team: {scene}/{team}"))?;
+    let team = timeline.settings["team"]
+        .as_str()
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "missing team"))?;
+    let pad = vec3(&pads[scene][team]).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!("unknown scene or team: {scene}/{team}"),
+        )
+    })?;
     report.check(
         (home - pad).xy().norm() <= if first { 0.03 } else { 0.12 }
             && (0.015..=0.03).contains(&(home.z - pad.z)),

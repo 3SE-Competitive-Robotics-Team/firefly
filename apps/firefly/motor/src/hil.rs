@@ -23,22 +23,26 @@ const STATS_PERIOD: Duration = Duration::from_secs(1);
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run() -> firefly_error::Result<()> {
     firefly_observability::init();
     let _guard: SignalGuard = SignalHandler::register_multiple_signals(
         &vec![FetchableSignal::Interrupt, FetchableSignal::Terminate],
         &|_signal| RUNNING.store(false, Ordering::Relaxed),
-    )?;
+    )
+    .map_err(|e| {
+        firefly_error::Error::caused_by(
+            firefly_error::ErrorKind::Internal,
+            "register shutdown signals",
+            e,
+        )
+    })?;
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "motor");
     let ports = Ports::open(&node, "Firefly")?;
     forward(&ports, &log_ipc)
 }
 
-fn forward(
-    ports: &Ports,
-    log_ipc: &firefly_observability::LogIpc,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn forward(ports: &Ports, log_ipc: &firefly_observability::LogIpc) -> firefly_error::Result<()> {
     let path = endpoint_file_at(HIL_INSTANCE, UPLINK_ENDPOINT)?;
     let file = OpenOptions::new().write(true).open(&path)?;
     log::info!("HIL 执行器端点 {}", path.display());
@@ -61,7 +65,11 @@ fn forward(
         let mut wrote = drain_control(&mut writer, ports, &mut stats)?;
         match replies.recv(&mut packet) {
             Ok(n) if n > 8 => {
-                let id = u64::from_le_bytes(packet[..8].try_into()?);
+                let id = u64::from_le_bytes(
+                    packet[..8]
+                        .try_into()
+                        .expect("packet has an eight-byte ID when n > 8"),
+                );
                 writer.write_message(&Message::MissionReply(id, packet[8..n].to_vec()))?;
                 wrote = true;
             }

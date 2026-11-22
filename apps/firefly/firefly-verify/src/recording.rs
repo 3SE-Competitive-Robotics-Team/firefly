@@ -1,26 +1,26 @@
 use super::{Evidence, Vec3};
+use firefly_error::{Error, ErrorKind, IoResultExt, Result};
 use re_log_encoding::{DecoderApp, read_rrd_footer};
 use re_log_msg::LogMsg;
 use re_log_types::external::arrow::array::{
     Array, DurationNanosecondArray, FixedSizeListArray, Float32Array, Float64Array, Int64Array,
     ListArray, RecordBatch, StringArray, StructArray, TimestampNanosecondArray, UInt32Array,
 };
-use std::{
-    error::Error,
-    fs::File,
-    io::{self, BufReader},
-    path::Path,
-};
-type Result<T> = std::result::Result<T, Box<dyn Error>>;
+use std::{fs::File, io::BufReader, path::Path};
+
+#[track_caller]
+fn invalid(message: impl Into<String>) -> Error {
+    Error::new(ErrorKind::InvalidData, message)
+}
 
 fn cast<T: 'static>(a: &dyn Array) -> Result<&T> {
     a.as_any()
         .downcast_ref()
-        .ok_or_else(|| format!("unexpected Arrow type {}", a.data_type()).into())
+        .ok_or_else(|| invalid(format!("unexpected Arrow type {}", a.data_type())))
 }
 fn nanoseconds(column: &dyn Array) -> Result<&[i64]> {
     if column.null_count() != 0 {
-        return Err("missing sim_time".into());
+        return Err(invalid("missing sim_time"));
     }
     if let Some(times) = column.as_any().downcast_ref::<DurationNanosecondArray>() {
         return Ok(times.values());
@@ -36,7 +36,7 @@ fn vector<const N: usize>(a: &dyn Array) -> Result<[f64; N]> {
     let first = vectors.value(0);
     let v = cast::<Float32Array>(&*first)?;
     if v.len() != N {
-        return Err("invalid pose dimension".into());
+        return Err(invalid("invalid pose dimension"));
     }
     Ok(std::array::from_fn(|i| f64::from(v.value(i))))
 }
@@ -49,28 +49,35 @@ pub(super) fn read(path: &Path) -> Result<Evidence> {
         .filter(|dir| firefly_archive::manifest_path(dir).is_file());
     let files = firefly_archive::reader::RecordingFiles::open(run.unwrap_or(path))?;
     if run.is_some() && !files.paths().iter().any(|file| file == path) {
-        return Err("requested file is not a sealed recording segment".into());
+        return Err(invalid("requested file is not a sealed recording segment"));
     }
     let mut data = Evidence::default();
     let mut seen = std::collections::HashSet::new();
     for path in files.paths() {
         data.recording_complete = false;
-        let file = File::open(path)?;
-        let footer = futures_lite::future::block_on(read_rrd_footer(&file))?
-            .ok_or("missing recording footer")?;
+        let file = File::open(path).at_path("open recording segment", path)?;
+        let footer = futures_lite::future::block_on(read_rrd_footer(&file))
+            .map_err(|e| Error::caused_by(ErrorKind::InvalidData, "read recording footer", e))?
+            .ok_or_else(|| invalid("missing recording footer"))?;
         let mut recordings = footer
             .manifests
             .into_keys()
             .filter(re_log_types::StoreId::is_recording);
-        let recording = recordings.next().ok_or("missing recording manifest")?;
+        let recording = recordings
+            .next()
+            .ok_or_else(|| invalid("missing recording manifest"))?;
         if recordings.next().is_some() {
-            return Err("expected one recording".into());
+            return Err(invalid("expected one recording"));
         }
         // Decode the full stream so damaged chunks also fail integrity verification.
-        for msg in DecoderApp::decode_eager(BufReader::new(file))? {
-            let msg = msg?;
+        for msg in DecoderApp::decode_eager(BufReader::new(file))
+            .map_err(|e| Error::caused_by(ErrorKind::InvalidData, "decode recording", e))?
+        {
+            let msg = msg.map_err(|e| {
+                Error::caused_by(ErrorKind::InvalidData, "decode recording message", e)
+            })?;
             if msg.store_id().is_recording() && msg.store_id() != &recording {
-                return Err("recording identity differs from the manifest".into());
+                return Err(invalid("recording identity differs from the manifest"));
             }
             if let LogMsg::ArrowMsg(id, msg) = msg
                 && id == recording
@@ -87,6 +94,11 @@ pub(super) fn read(path: &Path) -> Result<Evidence> {
         rows.sort_by(|a, b| a.0.total_cmp(&b.0));
     }
     Ok(data)
+}
+
+fn decode_event(text: &str) -> Result<serde_json::Value> {
+    serde_json::from_str(text)
+        .map_err(|e| Error::caused_by(ErrorKind::InvalidData, "decode recorded event", e))
 }
 
 fn collect(data: &mut Evidence, path: &str, b: &RecordBatch) -> Result<()> {
@@ -130,14 +142,14 @@ fn collect(data: &mut Evidence, path: &str, b: &RecordBatch) -> Result<()> {
             "TextLog:text" => {
                 for s in cast::<StringArray>(&*row)?.iter().flatten() {
                     if path == "/logs/flight" && s.starts_with("mission {") {
-                        data.events.push((t, serde_json::from_str(&s[8..])?));
+                        data.events.push((t, decode_event(&s[8..])?));
                     }
                     if path == "/logs/render" && s.starts_with("capture {") {
-                        let cfg = serde_json::from_str(&s[8..])?;
+                        let cfg = decode_event(&s[8..])?;
                         if !data.capture.is_null() && data.capture != cfg {
-                            return Err(
-                                "render capture configuration changed during recording".into()
-                            );
+                            return Err(invalid(
+                                "render capture configuration changed during recording",
+                            ));
                         }
                         data.capture = cfg;
                     }
@@ -167,7 +179,7 @@ fn collect(data: &mut Evidence, path: &str, b: &RecordBatch) -> Result<()> {
                         Ok(cast::<UInt32Array>(
                             fields
                                 .column_by_name(name)
-                                .ok_or("missing image dimension")?
+                                .ok_or_else(|| invalid("missing image dimension"))?
                                 .as_ref(),
                         )?
                         .value(0))
@@ -176,7 +188,9 @@ fn collect(data: &mut Evidence, path: &str, b: &RecordBatch) -> Result<()> {
                         t,
                         dimension("width")?,
                         dimension("height")?,
-                        usize::try_from(cast::<ListArray>(&*row)?.value_length(0))?,
+                        usize::try_from(cast::<ListArray>(&*row)?.value_length(0)).map_err(
+                            |e| Error::caused_by(ErrorKind::InvalidData, "read image length", e),
+                        )?,
                     ));
                 }
             }
@@ -188,7 +202,7 @@ fn column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a ListArray> {
     cast(
         batch
             .column_by_name(name)
-            .ok_or_else(|| io::Error::other(format!("missing {name}")))?
+            .ok_or_else(|| invalid(format!("missing {name}")))?
             .as_ref(),
     )
 }

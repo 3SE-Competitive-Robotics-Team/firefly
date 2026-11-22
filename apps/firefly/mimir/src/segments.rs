@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use firefly_archive::{Run, Segment};
-use firefly_error::Result;
+use firefly_error::{Error, ErrorKind, Result};
 use re_chunk::{Chunk, ComponentIdentifier, RowId};
 use re_log_encoding::{DecoderApp, EncodeError, Encoder, EncodingOptions};
 use re_log_msg::{LogMsg, SetStoreInfo, StoreInfo, StoreSource};
@@ -175,12 +175,12 @@ impl Segments {
             .create(true)
             .truncate(false)
             .open(run.path().join(".rrd.lock"))
-            .map_err(|e| failure("open recorder lease", e))?;
+            .map_err(|e| Error::from(e).with_operation("open recorder lease"))?;
         recorder
             .try_lock()
-            .map_err(|e| failure("acquire exclusive recorder lease", e))?;
+            .map_err(|e| Error::from(e).with_operation("acquire exclusive recorder lease"))?;
         run.recorder_started()
-            .map_err(|e| failure("register recorder session", e))?;
+            .map_err(|e| Error::from(e).with_operation("register recorder session"))?;
         Ok(Self {
             run,
             _recorder: recorder,
@@ -259,7 +259,7 @@ impl Segments {
                 }
                 Err(error) => {
                     self.gap(&format!("RRD write failed: {error}"));
-                    return Err(failure("write RRD", error));
+                    return Err(Error::from(error).with_operation("write RRD"));
                 }
             }
         }
@@ -317,12 +317,13 @@ impl Segments {
             active
                 .seal()
                 .inspect_err(|error| self.gap(&format!("RRD seal failed: {error}")))
-                .map_err(|e| failure("close RRD", e))?;
+                .map_err(|e| Error::from(e).with_operation("close RRD"))?;
         }
         if self.lost_chunks > 0 {
             let message = format!("{} RRD chunks lost to disk pressure", self.lost_chunks);
             self.gap(&message);
-            return Err(failure("finalize recording", message));
+            return Err(Error::new(ErrorKind::ResourceExhausted, message)
+                .with_operation("finalize recording"));
         }
         Ok(())
     }

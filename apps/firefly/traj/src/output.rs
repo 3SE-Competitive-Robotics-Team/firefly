@@ -127,10 +127,10 @@ pub fn run(timeout: f64) -> Result<()> {
     let origin = Instant::now();
     let waitset = WaitSetBuilder::new()
         .create::<ipc::Service>()
-        .map_err(|e| internal(format!("create output waitset: {e:?}")))?;
+        .map_err(|e| Error::caused_by(ErrorKind::Internal, "create output waitset", e))?;
     let tick = waitset
         .attach_interval(Duration::from_millis(10))
-        .map_err(|e| internal(format!("attach output timer: {e:?}")))?;
+        .map_err(|e| Error::caused_by(ErrorKind::Internal, "attach output timer", e))?;
     let mut error = None;
     log::info!("独立轨迹输出启动：100Hz，心跳超时 {timeout}s");
     let result = waitset.wait_and_process(|event: WaitSetAttachmentId<ipc::Service>| {
@@ -232,7 +232,7 @@ pub fn run(timeout: f64) -> Result<()> {
         }
         CallbackProgression::Continue
     });
-    result.map_err(|e| internal(format!("output waitset: {e:?}")))?;
+    result.map_err(|e| Error::caused_by(ErrorKind::Internal, "output waitset", e))?;
     if let Some(error) = error {
         return Err(error);
     }
@@ -240,9 +240,6 @@ pub fn run(timeout: f64) -> Result<()> {
 }
 fn invalid(message: &str) -> Error {
     Error::new(ErrorKind::InvalidArgument, message.to_owned())
-}
-fn internal(message: String) -> Error {
-    Error::new(ErrorKind::Internal, message).with_operation("trajectory output")
 }
 
 #[cfg(test)]

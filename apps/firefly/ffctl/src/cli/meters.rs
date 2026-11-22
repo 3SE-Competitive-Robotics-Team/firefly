@@ -12,14 +12,23 @@ impl Meters {
 }
 
 impl FromStr for Meters {
-    type Err = String;
+    type Err = firefly_error::Error;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let value: f64 = text.parse().map_err(|_| format!("`{text}` 不是数值"))?;
+        let value: f64 = text.parse().map_err(|e| {
+            firefly_error::Error::caused_by(
+                firefly_error::ErrorKind::InvalidArgument,
+                format!("`{text}` 不是数值"),
+                e,
+            )
+        })?;
         if value.is_finite() {
             Ok(Self(value))
         } else {
-            Err(format!("`{text}` 不是有限数值"))
+            Err(firefly_error::Error::new(
+                firefly_error::ErrorKind::InvalidArgument,
+                format!("`{text}` 不是有限数值"),
+            ))
         }
     }
 }

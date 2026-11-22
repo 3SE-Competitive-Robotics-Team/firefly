@@ -11,6 +11,7 @@ keywords = ["npu", "inference", "robotics"]
 categories = ["hardware-support", "embedded"]
 
 [dependencies]
+firefly-error.workspace = true
 half = "2.7.1"
 libloading = "0.9.1"
 

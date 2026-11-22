@@ -27,9 +27,6 @@ use firefly_pubsub::{
 };
 use std::{cell::RefCell, collections::BTreeMap, io};
 
-pub(crate) fn error(error: impl std::fmt::Display) -> io::Error {
-    io::Error::other(error.to_string())
-}
 pub(crate) fn topic(prefix: &str, name: &str) -> String {
     format!("{prefix}/{}", name.strip_prefix("Firefly/").unwrap_or(name))
 }
@@ -98,7 +95,7 @@ macro_rules! routes {
             pub fn open(node: &IpcNode, prefix: &str) -> io::Result<Self> {
                 Ok(Self { $($field: Subscriber::with_options(node, &topic(prefix, $topic), SubscriberOptions {
                     buffer_size: $capacity, service_max_buffer_size: Some($capacity), max_publishers: Some($publishers),
-                }).map_err(error)?,)+ sequences: RefCell::default() })
+                }).map_err(io::Error::other)?,)+ sequences: RefCell::default() })
             }
             /// 排空已登记流；only 指定单个消息种类，None 处理全部，sink 错误结束会话。
             /// # Errors
@@ -106,7 +103,7 @@ macro_rules! routes {
             pub fn drain(&self, only: Option<Kind>, mut sink: impl FnMut(Message) -> io::Result<()>) -> io::Result<bool> {
                 let mut any = false;
                 $(if only.is_none_or(|kind| kind == Kind::$variant) {
-                    while let Some(sample) = self.$field.receive().map_err(error)? {
+                    while let Some(sample) = self.$field.receive().map_err(io::Error::other)? {
                         let mut message = Message::$variant((*sample).into());
                         self.sequences.borrow_mut().observe(&mut message, sample.header().publisher_id().value(), $publishers)?;
                         sink(message)?; any = true;
@@ -124,7 +121,7 @@ macro_rules! routes {
             /// IPC 服务容量或端口创建失败。
             pub fn open(node: &IpcNode, prefix: &str) -> io::Result<Self> {
                 Ok(Self { $($field: Publisher::with_topic_buffer_publishers(node, &topic(prefix, $topic),
-                    Some($capacity), Some($publishers)).map_err(error)?,)+ sequences: RefCell::default() })
+                    Some($capacity), Some($publishers)).map_err(io::Error::other)?,)+ sequences: RefCell::default() })
             }
             /// 发布到登记的本机话题；诊断流为聚合发布者分配连续序号。
             /// # Errors
@@ -134,7 +131,7 @@ macro_rules! routes {
                 match message {
                     $(Message::$variant(value) => {
                         let payload: &$payload = std::borrow::Borrow::borrow(&value);
-                        self.$field.publish(*payload).map_err(error)?;
+                        self.$field.publish(*payload).map_err(io::Error::other)?;
                     },)+
                     other => return Err(io::Error::other(format!("unregistered HIL IPC route: {}", other.kind().name()))),
                 }
@@ -191,25 +188,25 @@ impl SensorSubscribers {
                 &topic(prefix, firefly_pubsub::imu::IMU_TOPIC),
                 options(100, 128),
             )
-            .map_err(error)?,
+            .map_err(io::Error::other)?,
             left: Subscriber::with_options(
                 node,
                 &topic(prefix, firefly_pubsub::camera::CAMERA_LEFT_TOPIC),
                 options(2, 2),
             )
-            .map_err(error)?,
+            .map_err(io::Error::other)?,
             right: Subscriber::with_options(
                 node,
                 &topic(prefix, firefly_pubsub::camera::CAMERA_RIGHT_TOPIC),
                 options(2, 2),
             )
-            .map_err(error)?,
+            .map_err(io::Error::other)?,
             down: Subscriber::with_options(
                 node,
                 &topic(prefix, firefly_pubsub::camera::CAMERA_DOWN_TOPIC),
                 options(2, 2),
             )
-            .map_err(error)?,
+            .map_err(io::Error::other)?,
         })
     }
 }
@@ -233,30 +230,30 @@ impl SensorPublishers {
                 &topic(prefix, firefly_pubsub::imu::IMU_TOPIC),
                 Some(128),
             )
-            .map_err(error)?,
+            .map_err(io::Error::other)?,
             imu_notify: TopicNotifier::with_topic(
                 node,
                 &topic(prefix, firefly_pubsub::imu::IMU_TOPIC),
             )
-            .map_err(error)?,
+            .map_err(io::Error::other)?,
             left: Publisher::with_topic_and_buffer(
                 node,
                 &topic(prefix, firefly_pubsub::camera::CAMERA_LEFT_TOPIC),
                 Some(2),
             )
-            .map_err(error)?,
+            .map_err(io::Error::other)?,
             right: Publisher::with_topic_and_buffer(
                 node,
                 &topic(prefix, firefly_pubsub::camera::CAMERA_RIGHT_TOPIC),
                 Some(2),
             )
-            .map_err(error)?,
+            .map_err(io::Error::other)?,
             down: Publisher::with_topic_and_buffer(
                 node,
                 &topic(prefix, firefly_pubsub::camera::CAMERA_DOWN_TOPIC),
                 Some(2),
             )
-            .map_err(error)?,
+            .map_err(io::Error::other)?,
         })
     }
     /// 整批发布后只唤醒一次，保留 128 槽的消费者契约。
@@ -264,7 +261,7 @@ impl SensorPublishers {
     /// IPC 发布失败。
     pub fn publish_imu(&self, samples: &[ImuMessage]) -> io::Result<usize> {
         for sample in samples {
-            self.imu.publish(*sample).map_err(error)?;
+            self.imu.publish(*sample).map_err(io::Error::other)?;
         }
         if !samples.is_empty() {
             self.imu_notify.notify_sent_sample();

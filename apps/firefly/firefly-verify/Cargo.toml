@@ -11,6 +11,7 @@ keywords = ["robotics", "telemetry"]
 categories = ["science::robotics"]
 
 [dependencies]
+firefly-error.workspace = true
 usage-rs.workspace = true
 firefly-archive.workspace = true
 firefly-mission.workspace = true

@@ -1,5 +1,6 @@
 //! 进程清单回写会重新排版 TOML，文件内的注释不会保留。
 
+use firefly_error::{Error, ErrorKind, IoResultExt, Result};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -27,18 +28,19 @@ pub(crate) struct Process {
 }
 
 impl Config {
-    pub(crate) fn load(path: &Path) -> Result<Self, String> {
-        let raw = fs::read_to_string(path)
-            .map_err(|error| format!("读取 {}: {error}", path.display()))?;
-        let config: Self =
-            toml::from_str(&raw).map_err(|error| format!("解析 {}: {error}", path.display()))?;
+    pub(crate) fn load(path: &Path) -> Result<Self> {
+        let raw = fs::read_to_string(path).at_path("读取", path)?;
+        let config: Self = toml::from_str(&raw).map_err(|error| {
+            Error::caused_by(ErrorKind::InvalidArgument, "parse process manifest", error)
+                .with_context("path", path.display())
+        })?;
         config.validate()?;
         Ok(config)
     }
 
-    pub(crate) fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.processes.is_empty() {
-            return Err("进程清单为空".to_owned());
+            return Err(Error::new(ErrorKind::InvalidArgument, "进程清单为空"));
         }
         let mut names = std::collections::HashSet::new();
         for process in &self.processes {
@@ -48,21 +50,30 @@ impl Config {
                     .chars()
                     .all(|character| character.is_ascii_alphanumeric() || "-_".contains(character));
             if !valid_name {
-                return Err(format!("非法进程名：{:?}", process.name));
+                return Err(Error::new(
+                    ErrorKind::InvalidArgument,
+                    format!("非法进程名：{:?}", process.name),
+                ));
             }
             if !names.insert(process.name.as_str()) {
-                return Err(format!("进程名重复：{}", process.name));
+                return Err(Error::new(
+                    ErrorKind::InvalidArgument,
+                    format!("进程名重复：{}", process.name),
+                ));
             }
             if process.command.is_empty() || process.command[0].is_empty() {
-                return Err(format!("{} 的 command 为空", process.name));
+                return Err(Error::new(
+                    ErrorKind::InvalidArgument,
+                    format!("{} 的 command 为空", process.name),
+                ));
             }
         }
         Ok(())
     }
 
-    pub(crate) fn save(&self, path: &Path) -> Result<(), String> {
-        let text =
-            toml::to_string_pretty(self).map_err(|error| format!("序列化进程清单: {error}"))?;
+    pub(crate) fn save(&self, path: &Path) -> Result<()> {
+        let text = toml::to_string_pretty(self)
+            .map_err(|error| Error::caused_by(ErrorKind::Internal, "序列化进程清单", error))?;
         atomic_write(path, text.as_bytes())
     }
 
@@ -70,9 +81,9 @@ impl Config {
         &mut self,
         names: &[String],
         autostart: bool,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<String>> {
         if names.is_empty() {
-            return Err("至少给一个进程名".to_owned());
+            return Err(Error::new(ErrorKind::InvalidArgument, "至少给一个进程名"));
         }
         let missing: Vec<&str> = names
             .iter()
@@ -80,7 +91,10 @@ impl Config {
             .map(String::as_str)
             .collect();
         if !missing.is_empty() {
-            return Err(format!("清单里没有：{}", missing.join(", ")));
+            return Err(Error::new(
+                ErrorKind::InvalidArgument,
+                format!("清单里没有：{}", missing.join(", ")),
+            ));
         }
 
         let mut changed = Vec::new();
@@ -94,13 +108,19 @@ impl Config {
     }
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("{} 没有父目录", path.display()))?;
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| format!("{} 没有文件名", path.display()))?;
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidArgument,
+            format!("{} 没有父目录", path.display()),
+        )
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidArgument,
+            format!("{} 没有文件名", path.display()),
+        )
+    })?;
     let temp = parent.join(format!(".{}.tmp", file_name.to_string_lossy()));
 
     let mut file = OpenOptions::new()
@@ -108,23 +128,23 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .create(true)
         .truncate(true)
         .open(&temp)
-        .map_err(|error| format!("写 {}: {error}", temp.display()))?;
-    file.write_all(bytes)
-        .map_err(|error| format!("写 {}: {error}", temp.display()))?;
-    file.sync_all()
-        .map_err(|error| format!("fsync {}: {error}", temp.display()))?;
+        .at_path("写", &temp)?;
+    file.write_all(bytes).at_path("写", &temp)?;
+    file.sync_all().at_path("fsync", &temp)?;
     drop(file);
 
-    fs::rename(&temp, path).map_err(|error| format!("替换 {}: {error}", path.display()))?;
+    fs::rename(&temp, path).at_path("替换", path)?;
     sync_dir(parent)
 }
 
-fn sync_dir(dir: &Path) -> Result<(), String> {
+fn sync_dir(dir: &Path) -> Result<()> {
     match File::open(dir).and_then(|directory| directory.sync_all()) {
         Ok(()) => Ok(()),
         // macOS 对目录 fsync 返回 EINVAL；目标板（Linux）会真正落盘。
         Err(error) if error.raw_os_error() == Some(22) => Ok(()),
-        Err(error) => Err(format!("fsync {}: {error}", dir.display())),
+        Err(error) => Err(Error::from(error)
+            .with_operation("fsync")
+            .with_context("path", dir.display())),
     }
 }
 

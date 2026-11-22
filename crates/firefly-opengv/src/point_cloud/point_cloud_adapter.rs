@@ -11,9 +11,12 @@ pub struct PointCloudAdapter<'a> {
 impl<'a> PointCloudAdapter<'a> {
     /// # Errors
     /// The two point clouds have different lengths.
-    pub fn new(points1: &'a [Vector3<f64>], points2: &'a [Vector3<f64>]) -> Result<Self, String> {
+    pub fn new(
+        points1: &'a [Vector3<f64>],
+        points2: &'a [Vector3<f64>],
+    ) -> firefly_error::Result<Self> {
         if points1.len() != points2.len() {
-            return Err("adapter storage shape violates correspondence bounds".into());
+            return Err(crate::invalid_correspondences());
         }
         Ok(Self {
             points1,

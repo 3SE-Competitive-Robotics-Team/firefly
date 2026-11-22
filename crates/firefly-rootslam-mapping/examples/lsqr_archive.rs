@@ -1,6 +1,7 @@
 //! Evaluate a frozen square-root system without changing its coefficients,
 //! damping, physical-gradient stopping rule, or the production optimizer.
 use firefly_calibration::scalar::BasaltScalar;
+use firefly_error::{Error, ErrorKind, IoResultExt};
 use nalgebra::{DMatrix, DVector};
 use serde::Deserialize;
 use serde_json::json;
@@ -401,14 +402,32 @@ struct Arguments {
     matvec: bool,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn write_output(path: &std::path::Path, output: &serde_json::Value) -> firefly_error::Result<()> {
+    let file = File::create(path).at_path("create precision comparison", path)?;
+    serde_json::to_writer_pretty(file, output).map_err(|e| {
+        Error::caused_by(ErrorKind::Io, "write precision comparison", e)
+            .with_context("path", path.display())
+    })
+}
+
+fn main() -> std::process::ExitCode {
+    firefly_error::report("lsqr_archive", run_app())
+}
+
+fn run_app() -> firefly_error::Result<()> {
     let args = Arguments::parse();
-    let archive: Archive = serde_json::from_reader(BufReader::new(File::open(&args.input)?))?;
+    let archive: Archive = serde_json::from_reader(BufReader::new(
+        File::open(&args.input).at_path("open archive", &args.input)?,
+    ))
+    .map_err(|e| {
+        Error::caused_by(ErrorKind::InvalidData, "decode LSQR archive", e)
+            .with_context("path", args.input.display())
+    })?;
     if args.matvec {
         let output = json!({"rows":archive.blocks.iter().map(|block|block.rows).sum::<usize>()+archive.columns,
             "columns":archive.columns,"f32_f32":matvec_benchmark::<f32,f32>(&archive),
             "f32_f64":matvec_benchmark::<f32,f64>(&archive),"f64_f64":matvec_benchmark::<f64,f64>(&archive)});
-        serde_json::to_writer_pretty(File::create(&args.output)?, &output)?;
+        write_output(&args.output, &output)?;
         return Ok(());
     }
     analyze_archive(&archive, &args.output, args.full_reorthogonalization)
@@ -417,9 +436,12 @@ fn analyze_archive(
     archive: &Archive,
     output_path: &std::path::Path,
     reorthogonalize: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> firefly_error::Result<()> {
     if archive.scalar_bytes != 4 {
-        return Err("precision comparison requires an archived f32 system".into());
+        return Err(Error::new(
+            ErrorKind::InvalidArgument,
+            "precision comparison requires an archived f32 system",
+        ));
     }
     let float = Operator::<f32>::new(archive);
     let double = Operator::<f64>::new(archive);
@@ -429,7 +451,7 @@ fn analyze_archive(
     let initial64 = double.transpose(&double.rhs()).norm();
     let mut output = json!({"scalar_bytes":archive.scalar_bytes,"columns":archive.columns,"rows":double.rows,"blocks":archive.blocks.len(),"damping":archive.damping,"initial_gradient_f32":initial32,"initial_gradient_f64":initial64,"threshold_f32":f64::from(initial32)*archive.relative_gradient_tolerance,"threshold_f64":initial64*archive.relative_gradient_tolerance,"archived_step_gradient_f32":float.gradient(&step32),"archived_step_gradient_f64":double.gradient(&step64),"residual_norm_f64":(double.mul(&step64)-double.rhs()).norm()});
     output["double_lsqr"] = json!({"status":"running"});
-    serde_json::to_writer_pretty(File::create(output_path)?, &output)?;
+    write_output(output_path, &output)?;
     let start = Instant::now();
     let (solution, iterations, converged, max_overlap) = solve(
         &double,
@@ -459,7 +481,7 @@ fn analyze_archive(
         "rounded_passes_original_threshold":double.gradient(&rounded)<=threshold,
         "maximum_v_inner_product":overlap,"elapsed_seconds":start.elapsed().as_secs_f64()
     });
-    serde_json::to_writer_pretty(File::create(output_path)?, &output)?;
+    write_output(output_path, &output)?;
     let mut refinements = Vec::new();
     for round in 0..3 {
         let residual_rhs = double.rhs() - double.mul(&reference);
@@ -498,7 +520,7 @@ fn analyze_archive(
         "rounding":"A certified f64 reference whose cast-f32 gradient fails shows rounding limits that reference step, not impossibility of every representable f32 step."
     });
     output["float_lsqr"] = json!({"status":"running"});
-    serde_json::to_writer_pretty(File::create(output_path)?, &output)?;
+    write_output(output_path, &output)?;
     let start = Instant::now();
     output["float_lsqr"] = float_trace(
         &float,
@@ -507,7 +529,7 @@ fn analyze_archive(
         &step32,
     );
     output["float_lsqr"]["elapsed_seconds"] = json!(start.elapsed().as_secs_f64());
-    serde_json::to_writer_pretty(File::create(output_path)?, &output)?;
+    write_output(output_path, &output)?;
     Ok(())
 }
 

@@ -2,6 +2,7 @@ use super::{
     Event, Evidence, FlightEvidence, Report, Value, flight, json,
     timeline::{Timeline, rows},
 };
+use firefly_error::{Error, ErrorKind, Result};
 use firefly_mission::Phase;
 use serde::Deserialize;
 use std::num::NonZeroU64;
@@ -191,7 +192,7 @@ fn grade_groups(
     count: Option<u64>,
     board: bool,
     report: &mut Report,
-) -> Result<(), String> {
+) -> Result<()> {
     let mut session = Value::Null;
     let mut frame = None;
     let mut previous = None;
@@ -293,7 +294,7 @@ fn grade_groups(
     Ok(())
 }
 
-pub(super) fn evaluate(data: &Evidence, mode: Option<&str>) -> Result<Value, String> {
+pub(super) fn evaluate(data: &Evidence, mode: Option<&str>) -> Result<Value> {
     for (name, series) in &data.scalars {
         let min = match name.as_str() {
             "/landing/target"
@@ -304,7 +305,10 @@ pub(super) fn evaluate(data: &Evidence, mode: Option<&str>) -> Result<Value, Str
             _ => 1,
         };
         if series.iter().any(|sample| sample.1.len() < min) {
-            return Err(format!("incomplete scalar row at {name}"));
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("incomplete scalar row at {name}"),
+            ));
         }
     }
     let board = mode == Some("board");

@@ -13,6 +13,7 @@
 mod ffi;
 
 use ffi::*;
+use firefly_error::{Error, ErrorKind, Result};
 use std::{
     ffi::c_void,
     ptr, slice,
@@ -22,11 +23,13 @@ use std::{
 // VIPLite initialization and shutdown have process scope.
 static DEVICE: Mutex<()> = Mutex::new(());
 
-fn check(operation: &str, status: vip_status_e) -> Result<(), String> {
+fn check(operation: &'static str, status: vip_status_e) -> Result<()> {
     if status == VIP_SUCCESS {
         Ok(())
     } else {
-        Err(format!("{operation}: VIPLite status {status}"))
+        Err(Error::new(ErrorKind::Io, "VIPLite call failed")
+            .with_operation(operation)
+            .with_context("status", status))
     }
 }
 
@@ -52,20 +55,30 @@ pub struct Network {
 }
 
 impl Network {
-    pub fn open(model: Vec<u8>, width: usize, height: usize) -> Result<Self, String> {
+    pub fn open(model: Vec<u8>, width: usize, height: usize) -> Result<Self> {
         Self::create(model, width, height, false)
     }
 
     /// Compact depth networks expose a single FP16 metric head at quarter resolution.
-    pub fn open_depth(model: Vec<u8>, side: usize) -> Result<Self, String> {
+    pub fn open_depth(model: Vec<u8>, side: usize) -> Result<Self> {
         Self::create(model, side, side, true)
     }
 
-    fn create(model: Vec<u8>, width: usize, height: usize, depth: bool) -> Result<Self, String> {
-        let size = u32::try_from(model.len()).map_err(|_| "NBG exceeds the SDK size limit")?;
-        let device = DEVICE.try_lock().map_err(|_| "VIPLite is already in use")?;
+    fn create(model: Vec<u8>, width: usize, height: usize, depth: bool) -> Result<Self> {
+        let size = u32::try_from(model.len()).map_err(|e| {
+            Error::caused_by(ErrorKind::OutOfRange, "NBG exceeds the SDK size limit", e)
+        })?;
+        let device = DEVICE.try_lock().map_err(|e| match e {
+            std::sync::TryLockError::WouldBlock => {
+                Error::new(ErrorKind::Unavailable, "VIPLite is already in use")
+            }
+            std::sync::TryLockError::Poisoned(_) => {
+                Error::new(ErrorKind::Internal, "VIPLite device lock is poisoned")
+            }
+        })?;
         // Load the BSP-provided C ABI. Each handle below is owned by this single-threaded session.
-        let api = unsafe { Vip::new("libNBGlinker.so") }.map_err(|e| e.to_string())?;
+        let api = unsafe { Vip::new("libNBGlinker.so") }
+            .map_err(|e| Error::caused_by(ErrorKind::Unavailable, "load libNBGlinker.so", e))?;
         check("vip_init", unsafe { api.vip_init() })?;
         let mut result = Self {
             api,
@@ -100,27 +113,37 @@ impl Network {
                 )
             })?;
             if count != expected {
-                return Err(format!(
-                    "Unexpected NBG port count {count}, expected {expected}"
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Unexpected NBG port count {count}, expected {expected}"),
                 ));
             }
         }
         let input = result.bind(true, 0, false)?;
         if input != [width, height, 3, 1] {
-            return Err(format!("Unexpected NBG input {input:?}"));
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("Unexpected NBG input {input:?}"),
+            ));
         }
         if depth {
             let dims = result.bind(false, 0, true)?;
             if dims.get(..2) != Some(&[width / 4, height / 4]) || dims[2..].iter().any(|&d| d != 1)
             {
-                return Err(format!("Unexpected depth head {dims:?}"));
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Unexpected depth head {dims:?}"),
+                ));
             }
             result.output.resize(result.buffers[1].elements, 0.);
         } else {
             let boxes = result.bind(false, 0, false)?;
             let scores = result.bind(false, 1, false)?;
             let Some(&n) = boxes.first() else {
-                return Err("Missing boxes dimension".into());
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Missing boxes dimension",
+                ));
             };
             if !(1..=10000).contains(&n)
                 || boxes.get(1) != Some(&4)
@@ -128,7 +151,10 @@ impl Network {
                 || scores.first() != Some(&n)
                 || scores[1..].iter().any(|&d| d != 1)
             {
-                return Err(format!("Unexpected NBG outputs {boxes:?}, {scores:?}"));
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Unexpected NBG outputs {boxes:?}, {scores:?}"),
+                ));
             }
             result.candidates = n;
             result.output.resize(5 * n, 0.0);
@@ -157,7 +183,7 @@ impl Network {
         Ok(result)
     }
 
-    fn bind(&mut self, input: bool, index: u32, fp16: bool) -> Result<Vec<usize>, String> {
+    fn bind(&mut self, input: bool, index: u32, fp16: bool) -> Result<Vec<usize>> {
         let query = if input {
             self.api.vip_query_input
         } else {
@@ -175,7 +201,10 @@ impl Network {
             ptr::from_mut(&mut p.num_of_dims).cast(),
         )?;
         if !(1..=6).contains(&p.num_of_dims) {
-            return Err("Invalid VIPLite tensor rank".into());
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Invalid VIPLite tensor rank",
+            ));
         }
         read(
             VIP_BUFFER_PROP_SIZES_OF_DIMENSION,
@@ -193,16 +222,22 @@ impl Network {
             if p.data_format as u32 != VIP_BUFFER_FORMAT_FP16
                 || p.quant_format as u32 != VIP_BUFFER_QUANTIZE_NONE
             {
-                return Err("Expected unquantized FP16 output".into());
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Expected unquantized FP16 output",
+                ));
             }
             (1., 0)
         } else {
             if p.data_format as u32 != VIP_BUFFER_FORMAT_INT8
                 || p.quant_format as u32 != VIP_BUFFER_QUANTIZE_TF_ASYMM
             {
-                return Err(format!(
-                    "Expected affine INT8 port, got format {}, quantization {}",
-                    p.data_format, p.quant_format
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "Expected affine INT8 port, got format {}, quantization {}",
+                        p.data_format, p.quant_format
+                    ),
                 ));
             }
             // quant_format selects the affine member of the SDK union.
@@ -216,9 +251,14 @@ impl Network {
                 ptr::from_mut(&mut affine.zeroPoint).cast(),
             )?;
             let scale = affine.scale;
-            let zero = i8::try_from(affine.zeroPoint).map_err(|_| "Invalid INT8 zero point")?;
+            let zero = i8::try_from(affine.zeroPoint).map_err(|e| {
+                Error::caused_by(ErrorKind::InvalidData, "invalid INT8 zero point", e)
+            })?;
             if !scale.is_finite() || scale <= 0. {
-                return Err("Invalid tensor quantization scale".into());
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Invalid tensor quantization scale",
+                ));
             }
             (scale, zero)
         };
@@ -229,7 +269,7 @@ impl Network {
         let elements = dims
             .iter()
             .try_fold(1_usize, |n, d| n.checked_mul(*d))
-            .ok_or("Tensor size overflow")?;
+            .ok_or_else(|| Error::new(ErrorKind::OutOfRange, "tensor size overflow"))?;
         let mut handle = ptr::null_mut();
         check("vip_create_buffer", unsafe {
             self.api.vip_create_buffer(&mut p, 0, &mut handle)
@@ -242,20 +282,26 @@ impl Network {
         });
         let available = unsafe { self.api.vip_get_buffer_size(handle) } as usize;
         if elements == 0 || elements > available / if fp16 { 2 } else { 1 } {
-            return Err("Invalid VIPLite buffer size".into());
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Invalid VIPLite buffer size",
+            ));
         }
         Ok(dims)
     }
 
-    pub fn run(&mut self, gray: &[u8]) -> Result<&[f32], String> {
+    pub fn run(&mut self, gray: &[u8]) -> Result<&[f32]> {
         let input = &self.buffers[0];
         if gray.len().checked_mul(3) != Some(input.elements) {
-            return Err("Camera dimensions differ from NBG".into());
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Camera dimensions differ from NBG",
+            ));
         }
         unsafe {
             let mapped = self.api.vip_map_buffer(input.handle).cast::<u8>();
             if mapped.is_null() {
-                return Err("Failed to map NPU input".into());
+                return Err(Error::new(ErrorKind::Io, "Failed to map NPU input"));
             }
             let dst = slice::from_raw_parts_mut(mapped, input.elements);
             for (out, pixel) in self.plane.iter_mut().zip(gray) {
@@ -282,7 +328,7 @@ impl Network {
                 )?;
                 let mapped = self.api.vip_map_buffer(buffer.handle).cast::<half::f16>();
                 if mapped.is_null() {
-                    return Err("Failed to map depth output".into());
+                    return Err(Error::new(ErrorKind::Io, "Failed to map depth output"));
                 }
                 half::slice::HalfFloatSliceExt::convert_to_f32_slice(
                     slice::from_raw_parts(mapped, buffer.elements),
@@ -302,7 +348,7 @@ impl Network {
                 )?;
                 let mapped = self.api.vip_map_buffer(buffer.handle);
                 if mapped.is_null() {
-                    return Err("Failed to map NPU output".into());
+                    return Err(Error::new(ErrorKind::Io, "Failed to map NPU output"));
                 }
                 for (value, &raw) in out
                     .iter_mut()

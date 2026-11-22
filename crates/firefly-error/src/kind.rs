@@ -1,6 +1,13 @@
+/// Failure class used by callers when choosing a response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ErrorKind {
     NotFound,
+    PermissionDenied,
+    Rejected,
+    InvalidData,
+    Unavailable,
+    Io,
     InvalidArgument,
     OutOfRange,
     Unsupported,
@@ -14,6 +21,11 @@ impl ErrorKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Rejected => "rejected",
+            Self::PermissionDenied => "permission denied",
+            Self::InvalidData => "invalid data",
+            Self::Unavailable => "unavailable",
+            Self::Io => "I/O",
             Self::NotFound => "not found",
             Self::InvalidArgument => "invalid argument",
             Self::OutOfRange => "out of range",

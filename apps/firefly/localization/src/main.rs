@@ -495,10 +495,10 @@ impl App {
         log::info!("外部位姿融合启动：ESKF，发布 {CORRECTED_ODOM_TOPIC}");
         let waitset = iceoryx2::waitset::WaitSetBuilder::new()
             .create::<iceoryx2::prelude::ipc::Service>()
-            .map_err(|e| Error::new(ErrorKind::Internal, format!("创建 WaitSet 失败: {e:?}")))?;
+            .map_err(|e| Error::caused_by(ErrorKind::Internal, "创建 WaitSet 失败", e))?;
         let tick_guard = waitset
             .attach_interval(LOOP_PERIOD)
-            .map_err(|e| Error::new(ErrorKind::Internal, format!("挂载节拍定时器失败: {e:?}")))?;
+            .map_err(|e| Error::caused_by(ErrorKind::Internal, "挂载节拍定时器失败", e))?;
         let on_tick = |attachment_id: iceoryx2::waitset::WaitSetAttachmentId<ipc::Service>| {
             if !attachment_id.has_event_from(&tick_guard) {
                 return CallbackProgression::Continue;
@@ -519,9 +519,10 @@ impl App {
             }
             Ok(_) => {}
             Err(e) => {
-                return Err(Error::new(
+                return Err(Error::caused_by(
                     ErrorKind::Internal,
-                    format!("WaitSet 事件等待失败: {e:?}"),
+                    "WaitSet 事件等待失败",
+                    e,
                 ));
             }
         }
@@ -529,41 +530,30 @@ impl App {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
+    let result = run();
+    firefly_observability::flush();
+    result.unwrap_or_else(|e| firefly_error::report("localization", Err(e)))
+}
+
+fn run() -> Result<std::process::ExitCode> {
     let args = Arguments::parse();
     let config = args.config.unwrap_or_else(default_config);
-    let cfg = match firefly_config::startup::<LocalizationConfig>(
+    let cfg = firefly_config::startup::<LocalizationConfig>(
         &config,
         init_observability,
         LocalizationConfig::validate,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("加载配置失败 {}：{e}", config.display());
-            std::process::exit(1);
-        }
-    };
-    let mut app = match App::new(
+    )?;
+    let mut app = App::new(
         cfg,
         args.odom_topic
             .as_deref()
             .unwrap_or(firefly_pubsub::odom::ODOM_TOPIC),
-    ) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("初始化失败：{e}");
-            firefly_observability::flush();
-            std::process::exit(1);
-        }
-    };
-    if let Err(e) = app.run() {
-        log::error!("localization 失败：{e}");
-        firefly_observability::pump_log_ipc(&app.log_ipc);
-        firefly_observability::flush();
-        std::process::exit(1);
-    }
+    )?;
+    let code =
+        firefly_error::report_with(app.run(), |error| log::error!("localization 失败：{error}"));
     firefly_observability::pump_log_ipc(&app.log_ipc);
-    firefly_observability::flush();
+    Ok(code)
 }
 
 #[cfg(test)]

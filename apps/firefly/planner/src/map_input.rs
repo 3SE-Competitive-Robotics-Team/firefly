@@ -51,7 +51,7 @@ pub enum MapStatus {
 pub struct MapInput {
     required: Option<Bounds>,
     snapshot: Option<LocalSnapshot>,
-    fault: Option<String>,
+    fault: Option<Error>,
 }
 impl MapInput {
     pub fn observed(&self) -> Option<firefly_map::ObservedSpace> {
@@ -60,7 +60,7 @@ impl MapInput {
     pub fn observe_local(&mut self, snapshot: LocalSnapshot) -> Result<()> {
         let result = self.accept(snapshot);
         if let Err(error) = &result {
-            self.fault.get_or_insert_with(|| error.to_string());
+            self.fault.get_or_insert_with(|| error.clone());
         }
         result
     }
@@ -130,7 +130,7 @@ impl MapInput {
     ) -> Result<()> {
         let required = self.prepare_region(map, odometry, rolling);
         if let Some(reason) = &self.fault {
-            return Err(invalid("depth map input fault").with_context("reason", reason.clone()));
+            return Err(reason.clone().with_operation("apply depth map"));
         }
         let snapshot = self
             .snapshot

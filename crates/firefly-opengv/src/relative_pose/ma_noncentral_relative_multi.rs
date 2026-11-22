@@ -23,7 +23,7 @@ impl<'a> MaNoncentralRelativeMulti<'a> {
         bearing_vectors2: &'a [&'a [f64]],
         cam_offsets: &'a [f64],
         number_bearing_vectors: &'a [usize],
-    ) -> Result<Self, String> {
+    ) -> firefly_error::Result<Self> {
         if bearing_vectors1.len() != number_bearing_vectors.len()
             || bearing_vectors2.len() != number_bearing_vectors.len()
             || cam_offsets.len() / 3 < number_bearing_vectors.len()
@@ -31,7 +31,7 @@ impl<'a> MaNoncentralRelativeMulti<'a> {
                 bearing_vectors1[g].len() / 3 < n || bearing_vectors2[g].len() / 3 < n
             })
         {
-            return Err("adapter storage shape violates correspondence bounds".into());
+            return Err(crate::invalid_correspondences());
         }
 
         let mut offsets = Vec::new();

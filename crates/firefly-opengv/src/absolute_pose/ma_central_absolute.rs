@@ -18,9 +18,9 @@ impl<'a> MaCentralAbsolute<'a> {
         bearing_vectors: &'a [f64],
         number_points: usize,
         number_bearing_vectors: usize,
-    ) -> Result<Self, String> {
+    ) -> firefly_error::Result<Self> {
         if points.len() / 3 < number_points || bearing_vectors.len() / 3 < number_bearing_vectors {
-            return Err("adapter storage shape violates correspondence bounds".into());
+            return Err(crate::invalid_correspondences());
         }
         Ok(Self {
             points,

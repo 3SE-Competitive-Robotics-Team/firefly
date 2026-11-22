@@ -121,9 +121,7 @@ fn deserialize_optimization<'de, D: serde::Deserializer<'de>>(
     serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 fn io_error(error: std::io::Error) -> Error {
-    Error::new(ErrorKind::Internal, "Dataset application I/O failed")
-        .with_operation("rootslam.dataset.io")
-        .with_source(error)
+    Error::from(error).with_operation("rootslam.dataset.io")
 }
 /// # Errors
 /// Propagates dataset input, estimation, mapping and output failures.

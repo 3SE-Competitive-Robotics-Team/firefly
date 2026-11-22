@@ -154,6 +154,17 @@ uv run --locked --only-group docs zensical build --clean --strict
 
 新增页面时在 `zensical.toml` 的 `nav` 中登记。站内页面使用相对链接，RootSLAM 测评页在构建时读取 `apps/firefly/rootslam/README.md`，更新正文时编辑这份 README。源码链接使用 GitHub 文件地址。文档 PR 会自动构建，合入 `main` 后发布到 GitHub Pages。首次发布时，在仓库 **Settings → Pages → Source** 选择 **GitHub Actions**。
 
+## 错误处理
+
+Rust 应用和跨 crate 的业务接口用 `firefly_error::Result<T>` 传播失败。实现 `Read`、`Write`、Serde 或设备库接口时，遵循该接口的错误类型。在了解操作含义的一层将外部错误转为 `firefly_error::Error`。[共享错误 API](https://github.com/3SE-Competitive-Robotics-Team/firefly/tree/main/crates/firefly-error/src)
+
+1. 按调用方的处理方式选 `ErrorKind`。例如，配置值无效用 `InvalidArgument`，输入数据损坏用 `InvalidData`，设备正忙用 `Unavailable`。只有调用方可以安全地重复该操作时才用 `Error::temporary`。重试次数和期限由调用方决定。
+2. 在知道路径、设备名或话题名的地方补充上下文。文件操作可写成 `File::open(path).at_path("open recording", path)?`，需要引入 `firefly_error::IoResultExt`。其他外部错误用 `Error::caused_by(kind, message, source)` 保留原始错误。传递已有的 Firefly 错误时直接用 `?`，或用 `with_context` 补充信息。
+3. 用线程的返回值或通道传递错误。线程退出后，由所有者收回线程并完成清理。需要多个读者查看同一次失败时，可克隆 `Error`。测试应断言分类、重试状态和关键上下文。
+4. 在进程入口调用 `firefly_error::report("应用名", result)`。成功返回 0，运行失败把诊断写入 stderr 并返回 1。已经接入进程日志的入口可用 `report_with` 写日志，并在退出前排空队列。命令行解析器负责用法错误。Python 仿真保留原生异常，在 CLI 入口报告运行失败。
+
+调用方读取任务回执或评分 JSON 时，沿用已发布的字段和退出码。只在生成协议响应、评分报告或日志时将错误转成文本。对协议的回归测试应从实际命令读取 stdout、stderr 和退出码。
+
 ## Rust 命令行
 
 所有 Rust 应用、`xtask`、示例和自定义基准程序都用 `usage-rs` 解析命令行参数。在所属 crate 的 `[dependencies]` 中写入 `usage-rs.workspace = true`。如果只有示例或基准程序需要解析参数，将这行放在 `[dev-dependencies]`。

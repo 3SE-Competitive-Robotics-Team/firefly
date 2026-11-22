@@ -127,10 +127,10 @@ fn session(
 fn monotonic_seconds() -> io::Result<f64> {
     Time::now_with_clock(ClockType::Monotonic)
         .map(|t| t.as_duration().as_secs_f64())
-        .map_err(|e| io::Error::other(format!("{e:?}")))
+        .map_err(io::Error::other)
 }
 
-pub fn run(device: &Path) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(device: &Path) -> firefly_error::Result<()> {
     let node = create_node()?;
     let sticks = Subscriber::with_topic_and_buffer(&node, STICKS_TOPIC, STICKS_BUFFER_SIZE)?;
     let publisher = Publisher::with_topic_and_buffer(

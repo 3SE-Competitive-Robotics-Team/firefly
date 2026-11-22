@@ -20,14 +20,14 @@ impl<'a> NoncentralAbsoluteAdapter<'a> {
         points: &'a [Vector3<f64>],
         cam_offsets: &'a [Vector3<f64>],
         cam_rotations: &'a [Matrix3<f64>],
-    ) -> Result<Self, String> {
+    ) -> firefly_error::Result<Self> {
         if points.len() != bearing_vectors.len()
             || cam_correspondences.len() != bearing_vectors.len()
             || cam_correspondences
                 .iter()
                 .any(|&i| i >= cam_offsets.len() || i >= cam_rotations.len())
         {
-            return Err("adapter storage shape violates correspondence bounds".into());
+            return Err(crate::invalid_correspondences());
         }
         Ok(Self {
             points,

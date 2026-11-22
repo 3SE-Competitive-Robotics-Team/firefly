@@ -599,7 +599,11 @@ struct Arguments {
     config: PathBuf,
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    firefly_error::report("firefly-basalt-tools", run_app())
+}
+
+fn run_app() -> firefly_error::Result<()> {
     let path = Arguments::parse().config;
     let options = firefly_config::startup(path, firefly_observability::init, Options::validate)?;
     let node = firefly_pubsub::node::create_node()?;

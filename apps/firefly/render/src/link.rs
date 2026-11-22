@@ -169,8 +169,7 @@ impl CapturePipeline {
                 });
             })
             .map_err(|error| {
-                firefly_error::Error::new(firefly_error::ErrorKind::Internal, error.to_string())
-                    .with_operation("spawn sensor processor")
+                firefly_error::Error::from(error).with_operation("spawn sensor processor")
             })?;
         let pipeline = Self {
             jobs,
@@ -178,8 +177,11 @@ impl CapturePipeline {
             worker: Some(worker),
         };
         ready_rx.recv().map_err(|error| {
-            firefly_error::Error::new(firefly_error::ErrorKind::Internal, error.to_string())
-                .with_operation("open sensor publishers")
+            firefly_error::Error::caused_by(
+                firefly_error::ErrorKind::Unavailable,
+                "open sensor publishers",
+                error,
+            )
         })??;
         Ok(pipeline)
     }

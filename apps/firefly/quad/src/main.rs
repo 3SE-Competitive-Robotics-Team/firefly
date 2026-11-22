@@ -26,7 +26,11 @@ struct Arguments {
     config: Option<std::path::PathBuf>,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
+    firefly_error::report("quad", run_app())
+}
+
+fn run_app() -> firefly_error::Result<()> {
     let args = Arguments::parse();
     let path = args.config.unwrap_or_else(config_path);
     let mut app = App::new();

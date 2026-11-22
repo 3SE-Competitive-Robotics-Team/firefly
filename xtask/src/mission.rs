@@ -1,4 +1,5 @@
 use firefly_archive::{Run, output::Output};
+use firefly_error::{Error, ErrorKind, IoResultExt};
 use firefly_mission::{Phase, Plan, Request, call_at};
 use nix::{
     sys::signal::{Signal, kill},
@@ -92,8 +93,8 @@ impl Stack {
     fn wait(
         &mut self,
         limit: Duration,
-        mut sample: impl FnMut() -> io::Result<bool>,
-    ) -> io::Result<()> {
+        mut sample: impl FnMut() -> firefly_error::Result<bool>,
+    ) -> firefly_error::Result<()> {
         let start = Instant::now();
         loop {
             self.healthy()?;
@@ -101,7 +102,10 @@ impl Stack {
                 return Ok(());
             }
             if start.elapsed() >= limit {
-                return Err(io::Error::other("mission client deadline exceeded"));
+                return Err(Error::new(
+                    ErrorKind::Timeout,
+                    "mission client deadline exceeded",
+                ));
             }
             thread::sleep(Duration::from_millis(200));
         }
@@ -174,12 +178,21 @@ impl Drop for Stack {
     }
 }
 
-fn record(stack: &mut Stack, release: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn record(stack: &mut Stack, release: &Path) -> firefly_error::Result<PathBuf> {
     let (tx, rx) = mpsc::channel();
     stack.spawn(program(release.join("mimir"), &[]), Some(tx))?;
-    let path = rx.recv_timeout(Duration::from_secs(15))?;
+    let path = rx.recv_timeout(Duration::from_secs(15)).map_err(|e| {
+        let kind = match e {
+            mpsc::RecvTimeoutError::Timeout => ErrorKind::Timeout,
+            mpsc::RecvTimeoutError::Disconnected => ErrorKind::Unavailable,
+        };
+        Error::caused_by(kind, "wait for recording path", e)
+    })?;
     if path != stack.run.path() {
-        return Err("Mimir opened a different run archive".into());
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Mimir opened a different run archive",
+        ));
     }
     Ok(path)
 }
@@ -196,7 +209,7 @@ fn launch_stack(
     let navigates = plans.iter().any(|plan| !plan.waypoints.is_empty());
     let scene = if navigates { "sim-mission" } else { "sim" };
     let sim = format!(
-        "from firefly_sim.main import main; main(['--no-trace','--config','configs/{scene}.toml'], publish_plant_state=False, seed={seed})"
+        "from firefly_sim.main import cli; raise SystemExit(cli(['--no-trace','--config','configs/{scene}.toml'], publish_plant_state=False, seed={seed}))"
     );
     stack.launch(program(python, &["-c", &sim]))?;
     stack.launch(program(release.join("render"), &[]))?;
@@ -246,7 +259,7 @@ fn fly(
     plans: Vec<Plan>,
     nonce: u128,
     expected: &mut Vec<String>,
-) -> io::Result<()> {
+) -> firefly_error::Result<()> {
     for (i, plan) in plans.into_iter().enumerate() {
         stack.wait(Duration::from_secs(90), || {
             Ok(
@@ -274,11 +287,12 @@ fn fly(
                     id: Some(id.clone()),
                 },
             )?;
-            let phase = serde_json::from_value::<Phase>(receipt["phase"].clone())?;
+            let phase = serde_json::from_value::<Phase>(receipt["phase"].clone())
+                .map_err(|e| Error::caused_by(ErrorKind::InvalidData, "decode mission phase", e))?;
             match phase {
                 Phase::Complete => Ok(true),
                 Phase::Interrupted | Phase::NeedsOperator => {
-                    Err(io::Error::other(receipt.to_string()))
+                    Err(Error::new(ErrorKind::Rejected, receipt.to_string()))
                 }
                 _ => Ok(false),
             }
@@ -292,17 +306,21 @@ fn fly(
     Ok(())
 }
 
-fn claim_environment(root: &Path) -> Result<fs::File, Box<dyn std::error::Error>> {
+fn claim_environment(root: &Path) -> firefly_error::Result<fs::File> {
     fs::create_dir_all(root.join("logs"))?;
     let lock = fs::File::options()
         .write(true)
         .create(true)
         .truncate(false)
         .open(root.join("logs/run.lock"))?;
-    lock.try_lock()?;
+    lock.try_lock()
+        .map_err(|e| Error::from(e).with_operation("claim simulation environment"))?;
     let occupied = xtask::processes::active(root)?;
     if !occupied.is_empty() {
-        return Err(format!("repository flight processes already running: {occupied:?}").into());
+        return Err(Error::new(
+            ErrorKind::Unavailable,
+            format!("repository flight processes already running: {occupied:?}"),
+        ));
     }
     Ok(lock)
 }
@@ -323,19 +341,32 @@ fn program(path: impl AsRef<Path>, args: &[&str]) -> Command {
     cmd
 }
 
-pub fn run(hil: bool, paths: &[PathBuf], seed: u64) -> Result<(), Box<dyn std::error::Error>> {
+fn read_plan(path: &Path) -> firefly_error::Result<Plan> {
+    let plan: Plan = toml::from_str(&fs::read_to_string(path).at_path("read mission plan", path)?)
+        .map_err(|e| {
+            Error::caused_by(ErrorKind::InvalidArgument, "parse mission plan", e)
+                .with_context("path", path.display())
+        })?;
+    plan.validate()
+        .map_err(|e| e.with_context("path", path.display()))?;
+    Ok(plan)
+}
+
+pub fn run(hil: bool, paths: &[PathBuf], seed: u64) -> firefly_error::Result<()> {
     let root = super::target::workspace_root();
     std::env::set_current_dir(&root)?;
     let mut plans = Vec::with_capacity(paths.len());
     for path in paths {
-        let plan: Plan = toml::from_str(&fs::read_to_string(path)?)?;
-        plan.validate()?;
+        let plan = read_plan(path)?;
         plans.push(plan);
     }
     let release = root.join("target/release");
     let verifier = release.join("firefly-verify");
     if !verifier.is_file() {
-        return Err("missing firefly-verify; build the host tools with cargo xtask release".into());
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            "missing firefly-verify; build the host tools with cargo xtask release",
+        ));
     }
     let _lock = claim_environment(&root)?;
     let mut stack = Stack::new(&root, if hil { "hil" } else { "sil" })?;
@@ -345,7 +376,7 @@ pub fn run(hil: bool, paths: &[PathBuf], seed: u64) -> Result<(), Box<dyn std::e
             .status()?
             .success()
     {
-        return Err("USB HIL is unavailable".into());
+        return Err(Error::new(ErrorKind::Unavailable, "USB HIL is unavailable"));
     }
     let prefix = tempfile::Builder::new()
         .prefix("sil-")
@@ -373,7 +404,16 @@ pub fn run(hil: bool, paths: &[PathBuf], seed: u64) -> Result<(), Box<dyn std::e
     } else {
         None
     };
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| {
+            Error::caused_by(
+                ErrorKind::InvalidData,
+                "system clock precedes Unix epoch",
+                e,
+            )
+        })?
+        .as_nanos();
     let mut expected = Vec::new();
     let mission = fly(&mut stack, &socket, plans, nonce, &mut expected);
     if let Some(start) = board_start
@@ -389,7 +429,8 @@ pub fn run(hil: bool, paths: &[PathBuf], seed: u64) -> Result<(), Box<dyn std::e
         .args(["--transport", if hil { "hil" } else { "sil" }])
         .output()?;
     let report: Value = serde_json::from_slice(&score.stdout).map_err(|e| {
-        io::Error::other(format!("{e}: {}", String::from_utf8_lossy(&score.stderr)))
+        Error::caused_by(ErrorKind::InvalidData, "decode verifier report", e)
+            .with_context("stderr", String::from_utf8_lossy(&score.stderr))
     })?;
     let ids: Vec<_> = report["metrics"]["flights"]
         .as_array()
@@ -403,7 +444,10 @@ pub fn run(hil: bool, paths: &[PathBuf], seed: u64) -> Result<(), Box<dyn std::e
     );
     mission?;
     if !cleanup.is_empty() || !score.status.success() || ids != expected {
-        return Err("mission or recording acceptance failed".into());
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "mission or recording acceptance failed",
+        ));
     }
     Ok(())
 }

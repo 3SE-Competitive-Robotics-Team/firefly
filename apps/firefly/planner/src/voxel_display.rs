@@ -22,7 +22,7 @@ pub(super) struct Request {
 enum Mailbox {
     Open(Box<Option<Request>>),
     Stopped,
-    Failed(String),
+    Failed(Error),
 }
 
 pub(super) struct DisplayWorker {
@@ -75,22 +75,20 @@ impl DisplayWorker {
                     *shared = match result {
                         Ok(()) => Mailbox::Stopped,
                         Err(error) => {
-                            let reason = error.to_string();
-                            let _ = ready.send(Err(reason.clone()));
-                            Mailbox::Failed(reason)
+                            let _ = ready.send(Err(error.clone()));
+                            Mailbox::Failed(error)
                         }
                     };
                 }
             })
-            .map_err(|e| internal(e.to_string()))?;
+            .map_err(|e| Error::from(e).with_operation("spawn voxel display"))?;
         let receiver = Self {
             shared,
             thread: Some(thread),
         };
         startup
             .recv()
-            .map_err(|e| internal(e.to_string()))?
-            .map_err(internal)?;
+            .map_err(|e| Error::caused_by(ErrorKind::Unavailable, "start voxel display", e))??;
         Ok(receiver)
     }
 
@@ -102,7 +100,7 @@ impl DisplayWorker {
             .lock()
             .map_err(|_| internal("display state poisoned"))?;
         let pending = match &mut *shared {
-            Mailbox::Failed(error) => return Err(internal(error.clone())),
+            Mailbox::Failed(error) => return Err(error.clone()),
             Mailbox::Stopped => return Err(internal("display worker stopped")),
             Mailbox::Open(pending) => pending.as_mut(),
         };

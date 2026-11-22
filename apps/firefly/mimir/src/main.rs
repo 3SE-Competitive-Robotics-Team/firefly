@@ -3,7 +3,7 @@ mod standalone;
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
 
-use firefly_error::{Error, ErrorKind, Result};
+use firefly_error::{Error, Result};
 use mimir::{config::Options, ingress};
 
 /// 将运行数据录制为 RRD
@@ -15,7 +15,11 @@ struct Arguments {
     config: Option<PathBuf>,
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    firefly_error::report("mimir", run_app())
+}
+
+fn run_app() -> firefly_error::Result<()> {
     let config = Arguments::parse()
         .config
         .unwrap_or_else(|| firefly_config::paths::config("mimir.toml"));
@@ -34,9 +38,8 @@ fn record(config: PathBuf, run: &firefly_archive::Run) -> Result<()> {
     let mut registrations = Vec::new();
     for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
         registrations.push(
-            signal_hook::flag::register(signal, Arc::clone(&stop)).map_err(|e| {
-                Error::new(ErrorKind::Internal, e.to_string()).with_operation("install stop signal")
-            })?,
+            signal_hook::flag::register(signal, Arc::clone(&stop))
+                .map_err(|e| Error::from(e).with_operation("install stop signal"))?,
         );
     }
     let result = ingress::run(&options, &stop, run.clone());

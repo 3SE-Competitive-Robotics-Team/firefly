@@ -47,29 +47,25 @@ fn default_scene() -> String {
     DEFAULT_SCENE.into()
 }
 
-/// 读取场景；缺配置使用默认场景，读取/解析失败报错退出。
-fn load_scene_name() -> String {
-    firefly_config::load::<SceneConfig>(firefly_config::paths::config("scene.toml"))
-        .unwrap_or_else(|e| {
-            log::error!("加载 configs/scene.toml 失败：{e}");
-            std::process::exit(1);
-        })
-        .scene
-}
-
-/// 解析场景；未注册的版本或缺失视觉资产必须报错退出。
-#[must_use]
-pub fn selected() -> SceneSpec {
-    let name = load_scene_name();
-    let Some(spec) = resolve(&name) else {
+/// 加载场景配置并检查视觉资产。
+pub fn selected() -> firefly_error::Result<SceneSpec> {
+    use firefly_error::{Error, ErrorKind, IoResultExt};
+    let config = firefly_config::paths::config("scene.toml");
+    let name = firefly_config::load::<SceneConfig>(&config)?.scene;
+    let spec = resolve(&name).ok_or_else(|| {
         let supported: Vec<_> = SCENES.iter().map(|s| s.name).collect();
-        log::error!("未注册的场景 {name}；可用：{}", supported.join(", "));
-        std::process::exit(1);
-    };
+        Error::new(ErrorKind::InvalidArgument, format!("未注册的场景 {name}"))
+            .with_context("supported", supported.join(", "))
+            .with_context("path", config.display())
+    })?;
     let path = firefly_render::scene::models_dir().join(spec.asset_path());
-    if !path.is_file() {
-        log::error!("场景视觉资产缺失：{}", path.display());
-        std::process::exit(1);
+    if !path
+        .metadata()
+        .at_path("read scene asset", &path)?
+        .is_file()
+    {
+        return Err(Error::new(ErrorKind::InvalidData, "场景视觉资产必须是文件")
+            .with_context("path", path.display()));
     }
-    spec
+    Ok(spec)
 }

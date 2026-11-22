@@ -3025,6 +3025,7 @@ version = "0.1.0"
 dependencies = [
  "fastrace",
  "firefly-config",
+ "firefly-error",
  "firefly-observability",
  "firefly-pubsub",
  "firefly-viplite",
@@ -3446,6 +3447,7 @@ name = "fc"
 version = "0.1.0"
 dependencies = [
  "firefly-config",
+ "firefly-error",
  "firefly-flight",
  "firefly-imu",
  "firefly-observability",
@@ -3609,6 +3611,7 @@ dependencies = [
 name = "firefly-hal"
 version = "0.1.0"
 dependencies = [
+ "firefly-error",
  "serde",
 ]
 
@@ -3685,6 +3688,7 @@ name = "firefly-mission"
 version = "0.1.0"
 dependencies = [
  "firefly-config",
+ "firefly-error",
  "serde",
  "serde_json",
 ]
@@ -3716,6 +3720,7 @@ name = "firefly-opengv"
 version = "0.1.0"
 dependencies = [
  "faer",
+ "firefly-error",
  "log",
  "nalgebra",
  "num-complex",
@@ -3839,6 +3844,7 @@ name = "firefly-verify"
 version = "0.1.0"
 dependencies = [
  "firefly-archive",
+ "firefly-error",
  "firefly-mission",
  "futures-lite",
  "nalgebra",
@@ -3869,6 +3875,7 @@ dependencies = [
 name = "firefly-viplite"
 version = "0.1.0"
 dependencies = [
+ "firefly-error",
  "half",
  "libloading 0.9.1",
 ]
@@ -4595,6 +4602,7 @@ dependencies = [
 name = "hil-gadget"
 version = "0.1.0"
 dependencies = [
+ "firefly-error",
  "firefly-hil",
  "usage-rs",
 ]
@@ -11037,6 +11045,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "firefly-archive",
+ "firefly-error",
  "firefly-mission",
  "nix 0.32.0",
  "serde",

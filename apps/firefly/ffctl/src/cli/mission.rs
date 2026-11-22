@@ -1,4 +1,4 @@
-use firefly_mission::{Plan, Request};
+use firefly_mission::{Plan, Request, call};
 use std::{path::PathBuf, process::ExitCode};
 use usage_rs::{Args, Run, Subcommands};
 
@@ -35,22 +35,14 @@ pub(crate) struct Cancel {
     id: String,
 }
 
-fn report(result: Result<serde_json::Value, String>) -> ExitCode {
-    match result {
-        Ok(value) => {
-            println!("{value}");
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprintln!("{error}");
-            ExitCode::FAILURE
-        }
-    }
+fn report(result: firefly_error::Result<serde_json::Value>) -> ExitCode {
+    crate::ipc::report(result.map(|value| println!("{value}")))
 }
+
 impl Run for Status {
     type Output = ExitCode;
     fn run(self) -> ExitCode {
-        report(firefly_mission::call(&Request::Status { id: self.id }).map_err(|e| e.to_string()))
+        report(call(&Request::Status { id: self.id }))
     }
 }
 impl Run for Submit {
@@ -58,17 +50,13 @@ impl Run for Submit {
     fn run(self) -> ExitCode {
         report(
             firefly_config::load::<Plan>(self.plan)
-                .map_err(|e| e.to_string())
-                .and_then(|plan| {
-                    firefly_mission::call(&Request::Submit { id: self.id, plan })
-                        .map_err(|e| e.to_string())
-                }),
+                .and_then(|plan| call(&Request::Submit { id: self.id, plan })),
         )
     }
 }
 impl Run for Cancel {
     type Output = ExitCode;
     fn run(self) -> ExitCode {
-        report(firefly_mission::call(&Request::Cancel { id: self.id }).map_err(|e| e.to_string()))
+        report(call(&Request::Cancel { id: self.id }))
     }
 }

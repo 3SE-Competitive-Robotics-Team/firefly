@@ -90,7 +90,7 @@ impl Report {
 /// Evaluate recorded measurements in their original time order.
 #[must_use]
 pub fn evaluate(data: &Evidence, transport: Option<&str>) -> Value {
-    run::evaluate(data, transport).unwrap_or_else(|e| invalid(&e))
+    run::evaluate(data, transport).unwrap_or_else(|e| invalid(&e.to_string()))
 }
 fn invalid(message: &str) -> Value {
     json!({"passed":false,"failures":[format!("invalid recording: {message}")],"metrics":{}})
@@ -100,6 +100,6 @@ fn invalid(message: &str) -> Value {
 pub fn verify(path: &Path, transport: Option<&str>) -> Value {
     match recording::read(path) {
         Ok(d) => evaluate(&d, transport),
-        Err(e) => invalid(&e.to_string()),
+        Err(e) => invalid(&e.with_context("input", path.display()).to_string()),
     }
 }

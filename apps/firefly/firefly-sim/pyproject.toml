@@ -24,7 +24,7 @@ requires = ["uv_build>=0.13.9,<0.14"]
 build-backend = "uv_build"
 
 [project.scripts]
-firefly-sim = "firefly_sim.main:main"
+firefly-sim = "firefly_sim.main:cli"
 
 [project.optional-dependencies]
 test = [

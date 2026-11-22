@@ -42,7 +42,11 @@ struct Arguments {
     export_asset_contract: Option<std::path::PathBuf>,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
+    firefly_error::report("render", run_app())
+}
+
+fn run_app() -> firefly_error::Result<()> {
     let args = Arguments::parse();
     let path = args
         .config
@@ -60,12 +64,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     if let Some(path) = args.export_asset_contract {
         std::fs::write(
-            path,
-            toml::to_string_pretty(&render_config.asset_contract())?,
-        )?;
+            &path,
+            toml::to_string_pretty(&render_config.asset_contract()).map_err(|e| {
+                firefly_error::Error::caused_by(
+                    firefly_error::ErrorKind::Internal,
+                    "serialize asset contract",
+                    e,
+                )
+            })?,
+        )
+        .map_err(|e| {
+            firefly_error::Error::from(e)
+                .with_operation("write asset contract")
+                .with_context("path", path.display())
+        })?;
         return Ok(());
     }
-    let spec = scene::selected();
+    let spec = scene::selected()?;
 
     log::info!(
         "场景 {}：asset root {}，视觉 {}，起点 {:?}",
@@ -74,10 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         spec.asset_path(),
         spec.start
     );
-    let ports = open_ports(offline).unwrap_or_else(|e| {
-        log::error!("IPC 端口打开失败：{e:?}");
-        std::process::exit(1);
-    });
+    let ports = open_ports(offline)?;
     let log_ipc = firefly_observability::init_ipc(&ports.node, "render");
     log_ipc.event(
         "render",
@@ -87,12 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             spec.name, render_config.capture.down_hz
         ),
     );
-    build_app(spec, &render_config, ports, log_ipc, offline)
-        .unwrap_or_else(|error| {
-            log::error!("render 初始化失败: {error}");
-            std::process::exit(1);
-        })
-        .run();
+    build_app(spec, &render_config, ports, log_ipc, offline)?.run();
     Ok(())
 }
 
