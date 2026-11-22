@@ -21,6 +21,7 @@ name = "firefly-basalt-tools"
 path = "src/bin/firefly-basalt-tools.rs"
 
 [dependencies]
+usage-rs.workspace = true
 firefly-base.workspace = true
 signal-hook.workspace = true
 firefly-basalt.workspace = true

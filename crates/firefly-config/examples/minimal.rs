@@ -25,22 +25,21 @@ impl Options {
     }
 }
 
+use std::path::PathBuf;
+
+/// 加载配置并启动示例应用
+#[derive(usage_rs::Cli)]
+#[usage(bin = "minimal")]
+struct Arguments {
+    /// 应用配置文件
+    #[usage(long)]
+    config: Option<PathBuf>,
+}
+
 fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
-    let mut path = firefly_config::paths::config("minimal.toml")
-        .display()
-        .to_string();
-    while let Some(arg) = args.next() {
-        if arg != "--config" {
-            return Err(Error::new(
-                ErrorKind::InvalidArgument,
-                "usage: minimal [--config path]",
-            ));
-        }
-        path = args
-            .next()
-            .ok_or_else(|| Error::new(ErrorKind::InvalidArgument, "missing --config value"))?;
-    }
+    let path = Arguments::parse()
+        .config
+        .unwrap_or_else(|| firefly_config::paths::config("minimal.toml"));
     let options = firefly_config::startup(path, firefly_observability::init, Options::validate)?;
     run(&options);
     Ok(())

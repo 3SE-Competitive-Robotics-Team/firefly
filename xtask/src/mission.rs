@@ -243,23 +243,14 @@ fn program(path: impl AsRef<Path>, args: &[&str]) -> Command {
     cmd
 }
 
-pub fn run(hil: bool, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(hil: bool, paths: &[PathBuf], seed: u64) -> Result<(), Box<dyn std::error::Error>> {
     let root = super::target::workspace_root();
     std::env::set_current_dir(&root)?;
-    let mut args = args.iter();
-    let mut plans = Vec::new();
-    let mut seed = 42u64;
-    while let Some(arg) = args.next() {
-        if arg == "--seed" {
-            seed = args.next().ok_or("missing seed")?.parse()?;
-            continue;
-        }
-        let plan: Plan = toml::from_str(&fs::read_to_string(arg)?)?;
+    let mut plans = Vec::with_capacity(paths.len());
+    for path in paths {
+        let plan: Plan = toml::from_str(&fs::read_to_string(path)?)?;
         plan.validate()?;
         plans.push(plan);
-    }
-    if plans.is_empty() {
-        return Err("provide one or more mission plan files".into());
     }
     let release = root.join("target/release");
     let verifier = release.join("firefly-verify");

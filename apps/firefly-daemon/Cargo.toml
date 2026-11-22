@@ -10,6 +10,7 @@ keywords = ["robotics", "mission"]
 categories = ["embedded"]
 
 [dependencies]
+usage-rs.workspace = true
 firefly-flight.workspace = true
 nix.workspace = true
 signal-hook.workspace = true

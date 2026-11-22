@@ -17,6 +17,7 @@ toml.workspace = true
 log.workspace = true
 
 [dev-dependencies]
+usage-rs.workspace = true
 firefly-observability.workspace = true
 
 [lints]

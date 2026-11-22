@@ -5,6 +5,24 @@ use firefly_pubsub::odom::{ODOM_TOPIC, OdomMessage};
 use firefly_pubsub::viz::VOXELS_MAX;
 
 #[test]
+fn cli_coordinates_require_three_values_and_accept_negative_numbers() {
+    use std::ffi::OsStr;
+
+    let args = ["--start", "-1", "0", "2", "--goal", "3", "-4", "5"].map(OsStr::new);
+    let parsed = Arguments::parse_from(&args).unwrap();
+    assert_eq!(parsed.start.as_deref(), Some([-1., 0., 2.].as_slice()));
+    assert_eq!(parsed.goal.as_deref(), Some([3., -4., 5.].as_slice()));
+    for invalid in [
+        &["--start", "1", "2"][..],
+        &["--goal", "1", "2", "3", "4"],
+        &["--goal", "1", "nan?", "3"],
+    ] {
+        let args: Vec<_> = invalid.iter().map(OsStr::new).collect();
+        assert!(Arguments::parse_from(&args).is_err());
+    }
+}
+
+#[test]
 fn measured_start_uses_odometry_position_and_velocity_and_zero_acceleration() {
     let mut input = StateInput::default();
     let now = Instant::now();

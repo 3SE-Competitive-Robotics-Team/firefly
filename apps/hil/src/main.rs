@@ -7,6 +7,21 @@ use std::process::ExitCode;
 
 use config::Config;
 
+/// 运行 USB HIL 主机桥接
+#[derive(usage_rs::Cli)]
+#[usage(bin = "hil")]
+struct Arguments {
+    /// 应用配置文件
+    #[usage(long)]
+    config: Option<std::path::PathBuf>,
+    /// 枚举设备接口
+    #[usage(long, conflicts = "--check")]
+    probe: bool,
+    /// 打开接口并检查端点
+    #[usage(long)]
+    check: bool,
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -18,31 +33,16 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let mut path = config::default_config();
-    let mut probe = false;
-    let mut check = false;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--probe" => probe = true,
-            "--check" => check = true,
-            "--config" => {
-                path = args
-                    .next()
-                    .map(std::path::PathBuf::from)
-                    .ok_or("missing --config value")?;
-            }
-            other => return Err(format!("unknown argument {other}")),
-        }
-    }
+    let args = Arguments::parse();
+    let path = args.config.unwrap_or_else(config::default_config);
     let config = firefly_config::startup::<Config>(&path, firefly_observability::init, |config| {
         config.validate()
     })
     .map_err(|error| error.to_string())?;
-    if probe {
+    if args.probe {
         return host::probe(&config);
     }
-    if check {
+    if args.check {
         let link = host::HostLink::open(&config)?;
         println!(
             "HIL 接口就绪：interface={} out=0x{:02x} in=0x{:02x}",

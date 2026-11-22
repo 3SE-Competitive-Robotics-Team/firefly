@@ -103,8 +103,8 @@ def test_output_path_overrides_are_rejected(argument):
     import subprocess
     result = subprocess.run([str(ROOT / "target/release/mimir"), argument, "alternate.rrd"],
                             cwd=ROOT, capture_output=True, text=True)
-    assert result.returncode != 0
-    assert "unknown argument" in result.stderr
+    assert result.returncode == 2
+    assert argument in result.stderr
 
 
 def read(path):

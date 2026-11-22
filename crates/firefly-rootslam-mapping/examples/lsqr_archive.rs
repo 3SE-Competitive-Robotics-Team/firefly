@@ -389,29 +389,33 @@ fn float_trace(
     }
     json!({"first_converged_f32_check":first_float,"first_converged_f64_check":first_double,"final_step_difference_from_archive":(x.component_mul(&scaling)-archived).norm(),"history":history})
 }
+/// Analyze an archived LSQR system.
+#[derive(usage_rs::Cli)]
+#[usage(bin = "lsqr_archive")]
+struct Arguments {
+    input: std::path::PathBuf,
+    output: std::path::PathBuf,
+    #[usage(long, conflicts = "--matvec")]
+    full_reorthogonalization: bool,
+    #[usage(long)]
+    matvec: bool,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<_> = std::env::args().collect();
-    if args.len() != 3
-        && !(args.len() == 4 && (args[3] == "--full-reorthogonalization" || args[3] == "--matvec"))
-    {
-        return Err(
-            "usage: lsqr_archive INPUT.json OUTPUT.json [--full-reorthogonalization|--matvec]"
-                .into(),
-        );
-    }
-    let archive: Archive = serde_json::from_reader(BufReader::new(File::open(&args[1])?))?;
-    if args.get(3).is_some_and(|flag| flag == "--matvec") {
+    let args = Arguments::parse();
+    let archive: Archive = serde_json::from_reader(BufReader::new(File::open(&args.input)?))?;
+    if args.matvec {
         let output = json!({"rows":archive.blocks.iter().map(|block|block.rows).sum::<usize>()+archive.columns,
             "columns":archive.columns,"f32_f32":matvec_benchmark::<f32,f32>(&archive),
             "f32_f64":matvec_benchmark::<f32,f64>(&archive),"f64_f64":matvec_benchmark::<f64,f64>(&archive)});
-        serde_json::to_writer_pretty(File::create(&args[2])?, &output)?;
+        serde_json::to_writer_pretty(File::create(&args.output)?, &output)?;
         return Ok(());
     }
-    analyze_archive(&archive, &args[2], args.len() == 4)
+    analyze_archive(&archive, &args.output, args.full_reorthogonalization)
 }
 fn analyze_archive(
     archive: &Archive,
-    output_path: &str,
+    output_path: &std::path::Path,
     reorthogonalize: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if archive.scalar_bytes != 4 {

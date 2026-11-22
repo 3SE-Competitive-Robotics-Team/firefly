@@ -590,22 +590,17 @@ fn run_simulation(input: &SimulationInput) -> Result<()> {
     }
     writer.flush().map_err(io_error)
 }
+/// Run kitti-eval, time-align, vio-sim, mapper, mapper-sim, mapper-sim-naive, opt-flow or global-ba.
+#[derive(usage_rs::Cli)]
+#[usage(bin = "firefly-basalt-tools")]
+struct Arguments {
+    /// Task configuration file.
+    #[usage(long)]
+    config: PathBuf,
+}
+
 fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
-    let first = args.next();
-    if first.as_deref() == Some("--help") || first.as_deref() == Some("-h") {
-        writeln!(std::io::stdout(),"firefly-basalt-tools --config <path.toml>\nTasks: kitti-eval, time-align, vio-sim, mapper, mapper-sim, mapper-sim-naive, opt-flow, global-ba").map_err(io_error)?;
-        return Ok(());
-    }
-    if first.as_deref() != Some("--config") {
-        return Err(invalid("Usage: firefly-basalt-tools --config <path.toml>"));
-    }
-    let path = args
-        .next()
-        .ok_or_else(|| invalid("Missing configuration path"))?;
-    if args.next().is_some() {
-        return Err(invalid("Unexpected argument"));
-    }
+    let path = Arguments::parse().config;
     let options = firefly_config::startup(path, firefly_observability::init, Options::validate)?;
     let node = firefly_pubsub::node::create_node()?;
     let logs = firefly_observability::init_ipc(&node, "basalt-tools");

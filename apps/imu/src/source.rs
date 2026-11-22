@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::io;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -14,9 +14,6 @@ use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 use serde::Deserialize;
 use spidev::{SpiModeFlags, Spidev, SpidevOptions, SpidevTransfer};
 
-fn default_config() -> PathBuf {
-    firefly_config::paths::config("imu.toml")
-}
 /// 采样率上限（Hz）：再高只会重复读到同一输出数据率的结果。
 const MAX_RATE_HZ: f64 = 1_000.0;
 /// 日志与可视化的推进周期；高频采样下不必每拍都排空日志队列。
@@ -82,23 +79,6 @@ const fn default_gyro_range_dps() -> u32 {
     2_000
 }
 
-fn parse_config_path() -> Result<PathBuf, String> {
-    let mut it = std::env::args().skip(1);
-    let mut path = default_config();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--config" => {
-                path = PathBuf::from(
-                    it.next()
-                        .ok_or_else(|| "missing --config value".to_owned())?,
-                );
-            }
-            other => return Err(format!("unknown argument {other}")),
-        }
-    }
-    Ok(path)
-}
-
 fn validate(config: &Config) -> firefly_error::Result<()> {
     let invalid = |message: String| {
         Err(firefly_error::Error::new(
@@ -126,11 +106,9 @@ fn validate(config: &Config) -> firefly_error::Result<()> {
     Ok(())
 }
 
-pub fn run() -> Result<(), Box<dyn Error>> {
-    let config_path =
-        parse_config_path().map_err(|error| format!("{error}；用法：imu [--config <path>]"))?;
+pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     let config: Config =
-        firefly_config::startup(&config_path, firefly_observability::init, validate)?;
+        firefly_config::startup(config_path, firefly_observability::init, validate)?;
     let accel_range = bmi088::AccelRange::from_g(config.accel.range_g)?;
     let gyro_range = bmi088::GyroRange::from_dps(config.gyro.range_dps)?;
     let odr = bmi088::AccelOdr::at_least(config.rate_hz)?;

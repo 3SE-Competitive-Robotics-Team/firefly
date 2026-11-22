@@ -7,15 +7,13 @@ use std::time::{Duration, Instant};
 use crate::deploy;
 use crate::target;
 
-const DEFAULT_DEVICE: &str = "firefly-0001";
 /// 等待 HIL 设备枚举的上限。
 const ENUMERATION_TIMEOUT: Duration = Duration::from_secs(20);
 const MANIFEST: &str = "processes-hil.toml";
 
-pub fn run(args: &[String]) -> Result<(), String> {
-    let device = parse_arguments(args)?;
-    deploy::deploy(&device)?;
-    ensure_hil_processes(&device)?;
+pub fn run(device: &str) -> Result<(), String> {
+    deploy::deploy(device)?;
+    ensure_hil_processes(device)?;
     build_host_bridge()?;
     println!("切换 HIL gadget（adb 将临时消失）");
     let command = "rm -f /opt/firefly/logs/hil/up.pid; \
@@ -23,23 +21,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
          --pidfile /opt/firefly/logs/hil/up.pid \
          --startas /opt/firefly/bin/hil-gadget -- up";
     // 切换会杀掉 adbd，adb 的返回状态不可靠；以主机枚举为准。
-    let _ = deploy::shell(&device, command);
+    let _ = deploy::shell(device, command);
     wait_for_enumeration()
-}
-
-fn parse_arguments(args: &[String]) -> Result<String, String> {
-    let mut device = DEFAULT_DEVICE.to_owned();
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--device" => device.clone_from(
-                it.next()
-                    .ok_or_else(|| "missing --device value".to_owned())?,
-            ),
-            other => return Err(format!("unknown argument {other}")),
-        }
-    }
-    Ok(device)
 }
 
 /// `deploy` 会把 `configs/*.toml` 一起发布，这里只确认 HIL 清单确实在位。

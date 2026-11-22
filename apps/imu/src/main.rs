@@ -2,12 +2,26 @@
 mod source;
 
 #[cfg(target_os = "linux")]
+use source::run;
+
+/// 采集 IMU 数据
+#[derive(usage_rs::Cli)]
+#[usage(bin = "imu")]
+struct Arguments {
+    /// 应用配置文件
+    #[usage(long)]
+    config: Option<std::path::PathBuf>,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    source::run()
+    let args = Arguments::parse();
+    let config = args
+        .config
+        .unwrap_or_else(|| firefly_config::paths::config("imu.toml"));
+    run(&config)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn main() {
-    eprintln!("imu 依赖 Linux spidev，只在 Linux 上构建运行");
-    std::process::exit(1);
+fn run(_config: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    Err("imu 依赖 Linux spidev".into())
 }

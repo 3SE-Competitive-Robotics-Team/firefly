@@ -2511,6 +2511,7 @@ dependencies = [
  "serde",
  "serde_json",
  "toml 1.2.2+spec-1.1.0",
+ "usage-rs",
  "v4l",
 ]
 
@@ -3457,6 +3458,7 @@ dependencies = [
  "nalgebra",
  "serde",
  "toml 1.2.2+spec-1.1.0",
+ "usage-rs",
 ]
 
 [[package]]
@@ -3537,6 +3539,7 @@ dependencies = [
  "log",
  "serde",
  "toml 1.2.2+spec-1.1.0",
+ "usage-rs",
 ]
 
 [[package]]
@@ -3568,6 +3571,7 @@ dependencies = [
  "signal-hook",
  "sysctl 0.7.1",
  "tempfile",
+ "usage-rs",
  "xtask",
 ]
 
@@ -3782,6 +3786,7 @@ dependencies = [
  "serde_yaml_ng",
  "signal-hook",
  "toml 1.2.2+spec-1.1.0",
+ "usage-rs",
 ]
 
 [[package]]
@@ -3799,6 +3804,7 @@ dependencies = [
  "serde",
  "serde_json",
  "toml 1.2.2+spec-1.1.0",
+ "usage-rs",
 ]
 
 [[package]]
@@ -3833,6 +3839,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "usage-rs",
 ]
 
 [[package]]
@@ -4571,6 +4578,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook",
+ "usage-rs",
 ]
 
 [[package]]
@@ -4578,6 +4586,7 @@ name = "hil-gadget"
 version = "0.1.0"
 dependencies = [
  "firefly-hil",
+ "usage-rs",
 ]
 
 [[package]]
@@ -5182,6 +5191,7 @@ dependencies = [
  "serde",
  "spidev",
  "toml 1.2.2+spec-1.1.0",
+ "usage-rs",
 ]
 
 [[package]]
@@ -5747,6 +5757,7 @@ dependencies = [
  "log",
  "nalgebra",
  "toml 1.2.2+spec-1.1.0",
+ "usage-rs",
 ]
 
 [[package]]
@@ -6012,6 +6023,7 @@ dependencies = [
  "re_sdk_types",
  "serde",
  "signal-hook",
+ "usage-rs",
 ]
 
 [[package]]
@@ -6066,6 +6078,7 @@ dependencies = [
  "log",
  "serde",
  "toml 1.2.2+spec-1.1.0",
+ "usage-rs",
 ]
 
 [[package]]
@@ -7332,6 +7345,7 @@ dependencies = [
  "nalgebra",
  "serde",
  "toml 1.2.2+spec-1.1.0",
+ "usage-rs",
 ]
 
 [[package]]
@@ -9680,6 +9694,7 @@ dependencies = [
  "nalgebra",
  "serde",
  "toml 1.2.2+spec-1.1.0",
+ "usage-rs",
 ]
 
 [[package]]
@@ -11033,6 +11048,7 @@ dependencies = [
  "sysinfo 0.40.4",
  "tempfile",
  "toml 1.2.2+spec-1.1.0",
+ "usage-rs",
  "zstd",
 ]
 
