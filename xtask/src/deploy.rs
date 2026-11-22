@@ -9,7 +9,6 @@ use crate::archive::{self, Entry};
 use crate::release;
 use crate::target::{self, Target};
 
-const DEFAULT_DEVICE: &str = "firefly-0001";
 const DESTINATION: &str = "/opt/firefly";
 const PACKAGE: &str = "dist/firefly-aarch64.zst";
 const REMOTE_PACKAGE: &str = "/tmp/firefly-package.zst";
@@ -20,9 +19,8 @@ const BOARD_MODELS: &[&str] = &[
     "yolo26n-depth/yolo26n-depth-320-int8.nb",
 ];
 
-pub fn run(args: &[String]) -> Result<(), String> {
-    let device = parse_device(args)?;
-    deploy(&device)?;
+pub fn run(device: &str) -> Result<(), String> {
+    deploy(device)?;
     println!("部署完成");
     Ok(())
 }
@@ -43,21 +41,6 @@ pub(crate) fn shell(device: &str, command: &str) -> Result<(), String> {
 /// 捕获远端输出（板载 `adb shell` 不传递远端退出码）。
 pub(crate) fn adb_output(device: &str, args: &[&str]) -> Result<String, String> {
     adb_output_inner(device, args)
-}
-
-fn parse_device(args: &[String]) -> Result<String, String> {
-    let mut device = DEFAULT_DEVICE.to_owned();
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--device" => device.clone_from(
-                it.next()
-                    .ok_or_else(|| "missing --device value".to_owned())?,
-            ),
-            other => return Err(format!("unknown argument {other}")),
-        }
-    }
-    Ok(device)
 }
 
 fn package() -> Result<PathBuf, String> {

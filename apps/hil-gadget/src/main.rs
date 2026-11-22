@@ -6,54 +6,54 @@ mod transition;
 
 use std::process::ExitCode;
 
-const USAGE: &str = "\
-usage:
-  hil-gadget up
-  hil-gadget serve
-  hil-gadget down
-  hil-gadget watchdog
-  hil-gadget diag
-  hil-gadget status";
+/// 管理板端 USB HIL gadget
+#[derive(usage_rs::Cli)]
+#[usage(bin = "hil-gadget")]
+struct Arguments {
+    #[usage(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, usage_rs::Subcommands)]
+enum Command {
+    Up,
+    Serve,
+    Down,
+    Watchdog,
+    /// 检查 HIL USB 功能并恢复 ADB
+    Diag,
+    Status,
+}
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(command) = args.first() else {
-        eprintln!("missing command\n{USAGE}");
-        return ExitCode::FAILURE;
-    };
-    let takes_argument = command == "diag";
-    if args.len() > 2 || (args.len() == 2 && !takes_argument) {
-        eprintln!("unexpected argument\n{USAGE}");
-        return ExitCode::FAILURE;
-    }
-    match dispatch(command.as_str(), args.get(1).map_or("", String::as_str)) {
+    let command = Arguments::parse().command;
+    match dispatch(&command) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("hil-gadget {command}: {error}");
+            eprintln!("hil-gadget {command:?}: {error}");
             #[cfg(target_os = "linux")]
-            setup::note(&format!("{command} 失败：{error}"));
+            setup::note(&format!("{command:?} 失败：{error}"));
             ExitCode::FAILURE
         }
     }
 }
 
 #[cfg(target_os = "linux")]
-fn dispatch(command: &str, argument: &str) -> Result<(), String> {
+fn dispatch(command: &Command) -> Result<(), String> {
     match command {
-        "up" => setup::up(),
-        "serve" => setup::serve(),
-        "down" => setup::down(),
-        "watchdog" => setup::watchdog(),
-        "diag" => setup::diag(if argument.is_empty() { "hil" } else { argument }),
-        "status" => {
+        Command::Up => setup::up(),
+        Command::Serve => setup::serve(),
+        Command::Down => setup::down(),
+        Command::Watchdog => setup::watchdog(),
+        Command::Diag => setup::diag(),
+        Command::Status => {
             setup::status();
             Ok(())
         }
-        other => Err(format!("unknown command: {other}")),
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn dispatch(command: &str, _argument: &str) -> Result<(), String> {
-    Err(format!("{command} 依赖 Linux FunctionFS，只在板端构建运行"))
+fn dispatch(_command: &Command) -> Result<(), String> {
+    Err("HIL gadget 依赖 Linux FunctionFS，只在板端运行".into())
 }

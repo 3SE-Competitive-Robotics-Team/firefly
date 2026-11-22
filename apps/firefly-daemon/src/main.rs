@@ -339,7 +339,13 @@ fn client(stream: &UnixStream, tx: &SyncSender<Query>) -> io::Result<()> {
     write_frame(stream, &reply)
 }
 
+/// 管理机载任务服务
+#[derive(usage_rs::Cli)]
+#[usage(bin = "firefly-daemon")]
+struct Arguments {}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    Arguments::parse();
     iceoryx2::prelude::set_log_level(iceoryx2::prelude::LogLevel::Error);
     let dir = firefly_mission::runtime_dir();
     fs::create_dir_all(&dir)?;

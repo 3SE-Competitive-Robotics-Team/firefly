@@ -5,12 +5,24 @@ use firefly_planner::{ManagerOptions, Planner, PlannerConfig, PlannerManager, Re
 use nalgebra::{Point3, Vector3};
 use std::time::{Duration, Instant};
 
+/// 运行重规划 benchmark
+#[derive(usage_rs::Cli)]
+#[usage(bin = "replanning")]
+struct Arguments {
+    /// 由 cargo bench 启动测量
+    #[usage(long)]
+    bench: bool,
+    /// 在安全检查时更新占据地图
+    #[usage(long)]
+    updates: bool,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if !std::env::args().any(|arg| arg == "--bench") {
+    let args = Arguments::parse();
+    if !args.bench {
         return Ok(());
     }
     let node = firefly_pubsub::node::create_node()?;
-    let updates = std::env::args().any(|arg| arg == "--updates");
     firefly_observability::init();
     let ipc = firefly_observability::init_ipc(&node, "replanning-bench");
     common::host_snapshot("before");
@@ -22,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 [true, false]
             } {
-                run(deferred, obstacle, round, updates)?;
+                run(deferred, obstacle, round, args.updates)?;
                 firefly_observability::pump_log_ipc(&ipc);
             }
         }

@@ -2,7 +2,6 @@ mod config;
 mod depth_mapping;
 mod map_input;
 mod output;
-mod scene;
 #[cfg(test)]
 mod tests;
 mod voxel_display;
@@ -30,8 +29,6 @@ use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetRunResult;
 use nalgebra::Vector3;
 
-use crate::scene::parse_vec3;
-
 /// 主循环频率（官方 `exec_timer` 0.01s）。
 const LOOP_PERIOD: Duration = Duration::from_millis(10);
 /// 地图融合新鲜度阈值（秒），沿用官方 `grid_map/odom_depth_timeout`。
@@ -51,41 +48,22 @@ fn planning_state(sample: Snapshot) -> State {
     }
 }
 
-struct Args {
-    config: PathBuf,
-    start: [f64; 3],
-    goal: Option<[f64; 3]>,
-    /// 仅向 `Firefly/MandatoryStop` 发一条强制停止指令后退出。
+/// 运行轨迹规划或发送强制停止指令
+#[derive(usage_rs::Cli)]
+#[usage(bin = "planner")]
+struct Arguments {
+    /// 应用配置文件
+    #[usage(long)]
+    config: Option<PathBuf>,
+    /// 初始位置（米），默认位于原点
+    #[usage(long, num_args = 3, value_names = ["X", "Y", "Z"], allow_negative_numbers)]
+    start: Option<Vec<f64>>,
+    /// 初始目标（米），省略时等待动态目标
+    #[usage(long, num_args = 3, value_names = ["X", "Y", "Z"], allow_negative_numbers)]
+    goal: Option<Vec<f64>>,
+    /// 向 `Firefly/MandatoryStop` 发一条强制停止指令后退出
+    #[usage(long, exclusive)]
     mandatory_stop: bool,
-}
-
-fn parse_args() -> Result<Args> {
-    let mut it = std::env::args().skip(1);
-    let mut args = Args {
-        config: default_config(),
-        start: [0.0; 3],
-        goal: None,
-        mandatory_stop: false,
-    };
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--config" => {
-                args.config = PathBuf::from(it.next().ok_or_else(|| {
-                    Error::new(ErrorKind::InvalidArgument, "missing --config value")
-                })?);
-            }
-            "--start" => args.start = parse_vec3(&mut it, "--start")?,
-            "--goal" => args.goal = Some(parse_vec3(&mut it, "--goal")?),
-            "--mandatory-stop" => args.mandatory_stop = true,
-            other => {
-                return Err(Error::new(
-                    ErrorKind::InvalidArgument,
-                    format!("unknown argument {other}"),
-                ));
-            }
-        }
-    }
-    Ok(args)
 }
 
 /// 打开可选订阅器：失败降级为 `None` 并记录（辅助输入流可缺失，状态门控仍生效）。
@@ -837,14 +815,13 @@ fn log_slow_stage(stage: &str, started: Instant) {
 }
 
 fn main() {
-    let args = match parse_args() {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!(
-                "{e}\n用法：planner [--config configs/planner.toml] [--start x y z] [--goal x y z] [--mandatory-stop]\n\n--goal 可省略（悬停等待 `ffctl planner goal X Y Z` 动态目标）；--mandatory-stop 向 {MANDATORY_STOP_TOPIC} 发一条强制停止指令后退出"
-            );
-            std::process::exit(2);
-        }
+    let args = Arguments::parse();
+    let (Ok(start), Ok(goal)) = (
+        args.start.map(TryInto::try_into).transpose(),
+        args.goal.map(TryInto::try_into).transpose(),
+    ) else {
+        eprintln!("--start 和 --goal 各接受一组 X Y Z 坐标");
+        std::process::exit(2);
     };
     if args.mandatory_stop {
         init_observability();
@@ -858,7 +835,7 @@ fn main() {
         return;
     }
     let toml_cfg = match firefly_config::startup::<config::PlannerToml>(
-        &args.config,
+        args.config.unwrap_or_else(default_config),
         init_observability,
         |_| Ok(()),
     ) {
@@ -872,8 +849,8 @@ fn main() {
         toml_cfg.config,
         toml_cfg.mapping,
         toml_cfg.manager,
-        args.start,
-        args.goal,
+        start.unwrap_or([0.0; 3]),
+        goal,
     ) {
         Ok(mut app) => {
             if let Err(e) = app.run() {

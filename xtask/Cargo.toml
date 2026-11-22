@@ -9,6 +9,7 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
+usage-rs.workspace = true
 zstd.workspace = true
 firefly-mission.workspace = true
 nix.workspace = true

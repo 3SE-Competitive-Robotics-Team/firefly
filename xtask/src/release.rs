@@ -3,23 +3,6 @@ use std::process::Command;
 use crate::container;
 use crate::target::{self, Target};
 
-pub fn run(args: &[String]) -> Result<(), String> {
-    let mut target = Target::Desktop;
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--target" => {
-                let value = it
-                    .next()
-                    .ok_or_else(|| "missing --target value (host or board)".to_owned())?;
-                target = Target::parse(value)?;
-            }
-            other => return Err(format!("unknown argument {other}")),
-        }
-    }
-    build(target)
-}
-
 pub fn build(target: Target) -> Result<(), String> {
     match target {
         Target::Desktop => build_desktop(target),

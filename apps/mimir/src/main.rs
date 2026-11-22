@@ -4,24 +4,19 @@ use std::sync::{Arc, atomic::AtomicBool};
 use firefly_error::{Error, ErrorKind, Result};
 use mimir::{config::Options, ingress};
 
+/// 将运行数据录制为 RRD
+#[derive(usage_rs::Cli)]
+#[usage(bin = "mimir")]
+struct Arguments {
+    /// 应用配置文件
+    #[usage(long)]
+    config: Option<PathBuf>,
+}
+
 fn main() -> Result<()> {
-    let mut config = firefly_config::paths::config("mimir.toml");
-    let mut args = std::env::args_os().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.to_str() {
-            Some("--help" | "-h") => {
-                eprintln!("mimir [--config <mimir.toml>]");
-                return Ok(());
-            }
-            Some("--config") => {
-                config = PathBuf::from(
-                    args.next()
-                        .ok_or_else(|| invalid("missing --config path"))?,
-                );
-            }
-            _ => return Err(invalid("unknown argument; use --help")),
-        }
-    }
+    let config = Arguments::parse()
+        .config
+        .unwrap_or_else(|| firefly_config::paths::config("mimir.toml"));
     let options = firefly_config::startup(config, firefly_observability::init, Options::validate)?;
     let stop = Arc::new(AtomicBool::new(false));
     let mut registrations = Vec::new();
@@ -37,8 +32,4 @@ fn main() -> Result<()> {
         signal_hook::low_level::unregister(registration);
     }
     result
-}
-
-fn invalid(message: &str) -> Error {
-    Error::new(ErrorKind::InvalidArgument, message)
 }

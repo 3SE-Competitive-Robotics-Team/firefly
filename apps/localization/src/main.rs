@@ -32,38 +32,16 @@ const PENDING_VISUAL_CAP: usize = 8;
 const PENDING_VISUAL_TIMEOUT: f64 = 10.0;
 const ODOM_HIST_CAP: usize = 1000;
 
-struct Args {
-    config: PathBuf,
-    odom_topic: String,
-}
-
-fn parse_args() -> Result<Args> {
-    let mut it = std::env::args().skip(1);
-    let mut args = Args {
-        config: default_config(),
-        odom_topic: firefly_pubsub::odom::ODOM_TOPIC.to_string(),
-    };
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--odom-topic" => {
-                args.odom_topic = it.next().ok_or_else(|| {
-                    Error::new(ErrorKind::InvalidArgument, "missing --odom-topic value")
-                })?;
-            }
-            "--config" => {
-                args.config = PathBuf::from(it.next().ok_or_else(|| {
-                    Error::new(ErrorKind::InvalidArgument, "missing --config value")
-                })?);
-            }
-            other => {
-                return Err(Error::new(
-                    ErrorKind::InvalidArgument,
-                    format!("unknown argument {other}"),
-                ));
-            }
-        }
-    }
-    Ok(args)
+/// 发布校正后的里程计
+#[derive(usage_rs::Cli)]
+#[usage(bin = "localization")]
+struct Arguments {
+    /// 应用配置文件
+    #[usage(long)]
+    config: Option<PathBuf>,
+    /// 输入里程计 topic
+    #[usage(long)]
+    odom_topic: Option<String>,
 }
 
 fn interp_odom(
@@ -549,27 +527,25 @@ impl App {
 }
 
 fn main() {
-    let args = match parse_args() {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!(
-                "{e}\n用法：localization [--config configs/localization.toml] [--odom-topic Firefly/Odometry]"
-            );
-            std::process::exit(2);
-        }
-    };
+    let args = Arguments::parse();
+    let config = args.config.unwrap_or_else(default_config);
     let cfg = match firefly_config::startup::<LocalizationConfig>(
-        &args.config,
+        &config,
         init_observability,
         LocalizationConfig::validate,
     ) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("加载配置失败 {}：{e}", args.config.display());
+            eprintln!("加载配置失败 {}：{e}", config.display());
             std::process::exit(1);
         }
     };
-    let mut app = match App::new(cfg, &args.odom_topic) {
+    let mut app = match App::new(
+        cfg,
+        args.odom_topic
+            .as_deref()
+            .unwrap_or(firefly_pubsub::odom::ODOM_TOPIC),
+    ) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("初始化失败：{e}");

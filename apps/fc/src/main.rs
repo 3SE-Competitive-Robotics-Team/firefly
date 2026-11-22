@@ -51,21 +51,13 @@ const STATS_PERIOD: f64 = 1.0;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-fn parse_config_path() -> Result<PathBuf, String> {
-    let mut it = std::env::args().skip(1);
-    let mut path = default_config();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--config" => {
-                path = PathBuf::from(
-                    it.next()
-                        .ok_or_else(|| "missing --config value".to_owned())?,
-                );
-            }
-            other => return Err(format!("unknown argument {other}")),
-        }
-    }
-    Ok(path)
+/// 运行飞行控制循环
+#[derive(usage_rs::Cli)]
+#[usage(bin = "fc")]
+struct Arguments {
+    /// 应用配置文件
+    #[usage(long)]
+    config: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy)]
@@ -913,10 +905,7 @@ fn publish_scalars(viz: &VizPublisher, t: f64, entity: &str, values: &[f64]) {
 
 #[allow(clippy::too_many_lines)] // 进程生命周期与控制节拍编排
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = parse_config_path().map_err(|e| {
-        eprintln!("{e}\n用法：fc [--config configs/fc.toml]");
-        std::process::exit(2);
-    })?;
+    let config_path = Arguments::parse().config.unwrap_or_else(default_config);
     let cfg = firefly_config::startup::<config::FcConfig>(
         &config_path,
         firefly_observability::init,

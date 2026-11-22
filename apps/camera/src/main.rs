@@ -4,16 +4,35 @@ mod capture;
 mod hil;
 
 #[cfg(target_os = "linux")]
+use capture::run;
+
+/// 采集相机图像
+#[derive(usage_rs::Cli)]
+#[usage(bin = "camera")]
+struct Arguments {
+    /// 相机采集配置文件
+    #[usage(long)]
+    config: Option<std::path::PathBuf>,
+    /// 使用板端 HIL 接口
+    #[usage(long, conflicts = "--config")]
+    hil: bool,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::args().any(|arg| arg == "--hil") {
-        hil::run()
-    } else {
-        capture::run()
+    let args = Arguments::parse();
+    if args.hil {
+        #[cfg(target_os = "linux")]
+        return hil::run();
+        #[cfg(not(target_os = "linux"))]
+        return Err("HIL 接口需要 Linux".into());
     }
+    let config = args
+        .config
+        .unwrap_or_else(|| firefly_config::paths::config("camera.toml"));
+    run(&config)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn main() {
-    eprintln!("camera 依赖 V4L2，只在 Linux 上构建运行");
-    std::process::exit(1);
+fn run(_config: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    Err("camera 依赖 Linux V4L2".into())
 }

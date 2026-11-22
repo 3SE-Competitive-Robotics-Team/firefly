@@ -16,9 +16,6 @@ use iceoryx2_bb_posix::clock::{ClockType, Time};
 use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 use serde::Deserialize;
 
-fn default_config() -> PathBuf {
-    firefly_config::paths::config("motor.toml")
-}
 const PWM_CLASS: &str = "/sys/class/pwm";
 const MOTORS: usize = 4;
 /// 通道目录出现的最长等待；导出是异步的，刚写完 `export` 时目录还不存在。
@@ -99,23 +96,6 @@ const fn default_airframe_ms() -> u64 {
     1_000
 }
 
-fn parse_config_path() -> Result<PathBuf, String> {
-    let mut it = std::env::args().skip(1);
-    let mut path = default_config();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--config" => {
-                path = PathBuf::from(
-                    it.next()
-                        .ok_or_else(|| "missing --config value".to_owned())?,
-                );
-            }
-            other => return Err(format!("unknown argument {other}")),
-        }
-    }
-    Ok(path)
-}
-
 fn validate(config: &Config) -> firefly_error::Result<()> {
     let invalid = |message: String| {
         Err(firefly_error::Error::new(
@@ -172,11 +152,9 @@ fn validate(config: &Config) -> firefly_error::Result<()> {
     Ok(())
 }
 
-pub fn run() -> Result<(), Box<dyn Error>> {
-    let config_path =
-        parse_config_path().map_err(|error| format!("{error}；用法：motor [--config <path>]"))?;
+pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     let config: Config =
-        firefly_config::startup(&config_path, firefly_observability::init, validate)?;
+        firefly_config::startup(config_path, firefly_observability::init, validate)?;
     let mapping = ThrustToDuty::new(
         config.pwm.period_ns,
         config.pwm.min_duty_ns,

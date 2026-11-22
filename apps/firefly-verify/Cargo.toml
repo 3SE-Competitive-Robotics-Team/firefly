@@ -11,6 +11,7 @@ keywords = ["robotics", "telemetry"]
 categories = ["science::robotics"]
 
 [dependencies]
+usage-rs.workspace = true
 firefly-mission.workspace = true
 futures-lite = "2.6.1"
 nalgebra = { workspace = true, features = ["serde-serialize"] }

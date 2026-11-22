@@ -11,6 +11,7 @@ keywords = ["robotics", "trajectory", "navigation"]
 categories = ["science::robotics"]
 
 [dependencies]
+usage-rs.workspace = true
 firefly-config.workspace = true
 firefly-error.workspace = true
 firefly-observability.workspace = true

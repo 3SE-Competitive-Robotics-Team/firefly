@@ -89,10 +89,7 @@ pub fn serve() -> Result<(), String> {
     Ok(())
 }
 
-pub fn diag(mode: &str) -> Result<(), String> {
-    if mode != "hil" {
-        return Err(format!("diag 只支持 hil，实际 {mode}"));
-    }
+pub fn diag() -> Result<(), String> {
     let _transition = crate::transition::lock(Path::new(STATE_DIR))?;
     reset_log();
     note("diag：单个 hil 功能");

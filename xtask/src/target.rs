@@ -37,23 +37,16 @@ const BOARD_APPS: &[&str] = &[
 ];
 
 /// `--target` 的可选值。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, usage_rs::ValueEnum)]
 pub enum Target {
     /// 本机桌面构建；在 Apple Silicon 上产物是 arm64-apple-darwin。
+    #[usage(name = "host")]
     Desktop,
     /// 机载 aarch64 Linux；在 Apple container 的 Debian trixie 里原生构建。
     Board,
 }
 
 impl Target {
-    pub fn parse(value: &str) -> Result<Self, String> {
-        match value {
-            "host" => Ok(Self::Desktop),
-            "board" => Ok(Self::Board),
-            other => Err(format!("unknown target {other}: expected host or board")),
-        }
-    }
-
     pub fn name(self) -> &'static str {
         match self {
             Self::Desktop => "host",

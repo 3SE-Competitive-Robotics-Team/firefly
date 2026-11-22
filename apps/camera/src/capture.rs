@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use firefly_hal::pixel::{FrameFormat, gray_from_yuyv};
@@ -20,9 +20,6 @@ use v4l::prelude::MmapStream;
 use v4l::video::Capture;
 use v4l::{Format, FourCC};
 
-fn default_config() -> PathBuf {
-    firefly_config::paths::config("camera.toml")
-}
 /// 默认采集缓冲数；太少容易在调度抖动时丢帧。
 const DEFAULT_BUFFERS: u32 = 4;
 
@@ -224,23 +221,6 @@ const fn default_format() -> FrameFormat {
     FrameFormat::Grey
 }
 
-fn parse_config_path() -> Result<PathBuf, String> {
-    let mut it = std::env::args().skip(1);
-    let mut path = default_config();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--config" => {
-                path = PathBuf::from(
-                    it.next()
-                        .ok_or_else(|| "missing --config value".to_owned())?,
-                );
-            }
-            other => return Err(format!("unknown argument {other}")),
-        }
-    }
-    Ok(path)
-}
-
 fn validate(config: &Config) -> firefly_error::Result<()> {
     let invalid = |message: String| {
         Err(firefly_error::Error::new(
@@ -274,11 +254,9 @@ fn validate(config: &Config) -> firefly_error::Result<()> {
 }
 
 /// 采集主循环：左、右目各取一帧发布（下视由独立线程采集），直到收到 `SIGINT`/`SIGTERM`。
-pub fn run() -> Result<(), Box<dyn Error>> {
-    let config_path =
-        parse_config_path().map_err(|error| format!("{error}；用法：camera [--config <path>]"))?;
+pub fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     let config: Config =
-        firefly_config::startup(&config_path, firefly_observability::init, validate)?;
+        firefly_config::startup(config_path, firefly_observability::init, validate)?;
     let width = config.width as usize;
     let height = config.height as usize;
 

@@ -4,10 +4,28 @@ mod actuator;
 #[cfg(target_os = "linux")]
 mod hil;
 
+/// 输出电机控制信号
+#[derive(usage_rs::Cli)]
+#[usage(bin = "motor")]
+struct Arguments {
+    /// 电机驱动配置文件
+    #[usage(long)]
+    config: Option<std::path::PathBuf>,
+    /// 使用板端 HIL 接口
+    #[usage(long, conflicts = "--config")]
+    hil: bool,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(target_os = "linux")]
-    if std::env::args().any(|arg| arg == "--hil") {
+    let args = Arguments::parse();
+    if args.hil {
+        #[cfg(target_os = "linux")]
         return hil::run();
+        #[cfg(not(target_os = "linux"))]
+        return Err("HIL 接口需要 Linux".into());
     }
-    actuator::run()
+    let config = args
+        .config
+        .unwrap_or_else(|| firefly_config::paths::config("motor.toml"));
+    actuator::run(&config)
 }

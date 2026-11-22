@@ -3,42 +3,19 @@ mod output;
 
 use std::path::PathBuf;
 
-use firefly_error::{Error, ErrorKind, Result};
-
-fn parse_args() -> Result<Option<PathBuf>> {
-    let mut args = std::env::args().skip(1);
-    let mut path = firefly_config::paths::config("traj.toml");
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--help" | "-h" => return Ok(None),
-            "--config" => {
-                path = PathBuf::from(args.next().ok_or_else(|| {
-                    Error::new(ErrorKind::InvalidArgument, "missing --config value")
-                })?);
-            }
-            _ => {
-                return Err(Error::new(
-                    ErrorKind::InvalidArgument,
-                    format!("unknown argument {arg}"),
-                ));
-            }
-        }
-    }
-    Ok(Some(path))
+/// 执行轨迹输出
+#[derive(usage_rs::Cli)]
+#[usage(bin = "traj")]
+struct Arguments {
+    /// 应用配置文件
+    #[usage(long)]
+    config: Option<PathBuf>,
 }
 
 fn main() {
-    let path = match parse_args() {
-        Ok(Some(path)) => path,
-        Ok(None) => {
-            println!("用法：traj [--config configs/traj.toml]");
-            return;
-        }
-        Err(error) => {
-            eprintln!("{error}\n用法：traj [--config configs/traj.toml]");
-            std::process::exit(2);
-        }
-    };
+    let path = Arguments::parse()
+        .config
+        .unwrap_or_else(|| firefly_config::paths::config("traj.toml"));
     let options =
         match firefly_config::startup(path, firefly_observability::init, config::Options::validate)
         {
