@@ -23,7 +23,7 @@ impl Default for Options {
             queue_bytes: 8 * 1024 * 1024,
             batch_rows: 64,
             batch_bytes: 2 * 1024 * 1024,
-            flush_ms: 200,
+            flush_ms: 500,
             max_entities: 256,
             max_publishers: 64,
             max_voxels: 100_000,

@@ -51,8 +51,12 @@ enum Event {
     Navigation(Box<NavigationMessage>),
     Attitude(AttitudeMessage),
     Landing(LandingTargetMessage),
-    Image(Box<GrayImageMessage>),
-    Down(Box<DownImageMessage>),
+    Image {
+        camera: usize,
+        timestamp: f64,
+        resolution: [u32; 2],
+        pixels: Vec<u8>,
+    },
 }
 
 impl Event {
@@ -63,8 +67,7 @@ impl Event {
                 Self::Voxel(_) => size_of::<VoxelMessage>(),
                 Self::Log(_) => size_of::<LogMessage>(),
                 Self::Rig(_) => size_of::<CameraRig>(),
-                Self::Image(_) => size_of::<GrayImageMessage>(),
-                Self::Down(_) => size_of::<DownImageMessage>(),
+                Self::Image { pixels, .. } => pixels.capacity(),
                 Self::Navigation(_) => size_of::<NavigationMessage>(),
                 _ => 0,
             }
@@ -143,30 +146,12 @@ impl Event {
                 )
             }
             Self::Attitude(msg) => archive.scalar("vio/gyro_bias", msg.timestamp, &msg.gyro_bias),
-            Self::Down(msg) => {
-                if msg.width as usize != DOWN_WIDTH
-                    || msg.height as usize != DOWN_HEIGHT
-                    || msg.sensor_id != DOWN_SENSOR_ID
-                {
-                    return Err(invalid("down camera dimensions/id"));
-                }
-                archive.image(
-                    DOWN_SENSOR_ID as usize,
-                    msg.timestamp,
-                    &rr::Image::from_l8(msg.data.to_vec(), [msg.width, msg.height]),
-                )
-            }
-            Self::Image(msg) => {
-                if msg.width as usize != IMAGE_WIDTH || msg.height as usize != IMAGE_HEIGHT {
-                    return Err(invalid("camera dimensions"));
-                }
-                let camera = usize::try_from(msg.sensor_id).map_err(|_| invalid("camera id"))?;
-                archive.image(
-                    camera,
-                    msg.timestamp,
-                    &rr::Image::from_l8(msg.data.to_vec(), [msg.width, msg.height]),
-                )
-            }
+            Self::Image {
+                camera,
+                timestamp,
+                resolution,
+                pixels,
+            } => archive.image(camera, timestamp, &rr::Image::from_l8(pixels, resolution)),
         }
     }
 }
@@ -391,13 +376,32 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
         }
         for subscriber in &cameras {
             if let Some(sample) = subscriber.receive()? {
-                sender.send(Event::Image(Box::new(*sample)))?;
+                if sample.width as usize != IMAGE_WIDTH || sample.height as usize != IMAGE_HEIGHT {
+                    return Err(invalid("camera dimensions"));
+                }
+                sender.send(Event::Image {
+                    camera: usize::try_from(sample.sensor_id).map_err(|_| invalid("camera id"))?,
+                    timestamp: sample.timestamp,
+                    resolution: [sample.width, sample.height],
+                    pixels: sample.data.to_vec(),
+                })?;
             }
         }
         if let Some(subscriber) = &down
             && let Some(sample) = subscriber.receive()?
         {
-            sender.send(Event::Down(Box::new(*sample)))?;
+            if sample.width as usize != DOWN_WIDTH
+                || sample.height as usize != DOWN_HEIGHT
+                || sample.sensor_id != DOWN_SENSOR_ID
+            {
+                return Err(invalid("down camera dimensions/id"));
+            }
+            sender.send(Event::Image {
+                camera: DOWN_SENSOR_ID as usize,
+                timestamp: sample.timestamp,
+                resolution: [sample.width, sample.height],
+                pixels: sample.data.to_vec(),
+            })?;
         }
         if stopping && !received_diagnostics {
             break;
@@ -495,6 +499,19 @@ mod tests {
         state.observe(1, 101, 1).unwrap();
         assert!(state.observe(1, 103, 1).is_err());
         assert!(state.observe(2, 0, 1).is_err());
+    }
+
+    #[test]
+    fn image_queue_charge_includes_the_owned_pixel_buffer() {
+        let pixels = vec![0; DOWN_WIDTH * DOWN_HEIGHT];
+        let expected = size_of::<Event>() + pixels.capacity();
+        let event = Event::Image {
+            camera: DOWN_SENSOR_ID as usize,
+            timestamp: 1.,
+            resolution: [DOWN_WIDTH as u32, DOWN_HEIGHT as u32],
+            pixels,
+        };
+        assert_eq!(event.bytes(), expected);
     }
 
     #[test]
