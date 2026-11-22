@@ -10,7 +10,6 @@ use firefly_pubsub::camera::{
     DOWN_SIZE, DepthImageMessage, GrayImageMessage, IMAGE_HEIGHT, IMAGE_SIZE, IMAGE_WIDTH,
 };
 use firefly_pubsub::command::CommandMessage;
-use firefly_pubsub::control::ControlMessage;
 use firefly_pubsub::fc_status::FcStatusMessage;
 use firefly_pubsub::goal::GoalMessage;
 use firefly_pubsub::imu::ImuMessage;
@@ -20,6 +19,7 @@ use firefly_pubsub::navigation::NavigationMessage;
 use firefly_pubsub::odom::{OdomMessage, VioPrediction};
 use firefly_pubsub::plant::AirframeMessage;
 use firefly_pubsub::reference::ReferenceMessage;
+use firefly_pubsub::sticks::SticksMessage;
 use firefly_pubsub::trajectory::PlannerStatusMessage;
 use firefly_pubsub::viz::{
     ARROWS_MAX, BINS_MAX, ENTITY_MAX, POINTS_MAX, SCALARS_MAX, ScalarMessage, VOXELS_MAX,
@@ -28,7 +28,7 @@ use firefly_pubsub::viz::{
 
 pub const MAGIC: [u8; 4] = *b"FHL1";
 /// 当前协议版本；接收端拒绝版本不一致的帧，主机与板端同步部署。
-pub const VERSION: u16 = 12;
+pub const VERSION: u16 = 13;
 pub const HEADER_LEN: usize = 48;
 /// Maximum serialized JSON request or reply, excluding its 8-byte correlation ID.
 pub const MISSION_BODY_MAX: usize = 8192;
@@ -61,7 +61,7 @@ pub enum Kind {
     GrayRight = 5,
     Depth = 6,
     Airframe = 7,
-    Control = 8,
+    Sticks = 8,
     Odometry = 9,
     CorrectedOdometry = 10,
     VioAttitude = 11,
@@ -106,7 +106,7 @@ impl Kind {
             5 => Self::GrayRight,
             6 => Self::Depth,
             7 => Self::Airframe,
-            8 => Self::Control,
+            8 => Self::Sticks,
             9 => Self::Odometry,
             10 => Self::CorrectedOdometry,
             11 => Self::VioAttitude,
@@ -160,7 +160,7 @@ impl Kind {
             | Self::PlannerStatus
             | Self::FcStatus
             | Self::VioPrediction
-            | Self::Control
+            | Self::Sticks
             | Self::Odometry
             | Self::CorrectedOdometry
             | Self::VioAttitude
@@ -192,7 +192,7 @@ impl Kind {
             Self::Depth => "depth",
             Self::ImageChunk => "image_chunk",
             Self::Airframe => "airframe",
-            Self::Control => "control",
+            Self::Sticks => "sticks",
             Self::Odometry => "odometry",
             Self::CorrectedOdometry => "corrected_odometry",
             Self::VioAttitude => "vio_attitude",
@@ -332,7 +332,7 @@ pub enum Message {
     Depth(Box<DepthImageMessage>),
     ImageChunk(ImageChunk),
     Airframe(AirframeMessage),
-    Control(ControlMessage),
+    Sticks(SticksMessage),
     Odometry(OdomMessage),
     CorrectedOdometry(OdomMessage),
     VioAttitude(AttitudeMessage),
@@ -405,7 +405,7 @@ impl Message {
             Self::Depth(_) => Kind::Depth,
             Self::ImageChunk(_) => Kind::ImageChunk,
             Self::Airframe(_) => Kind::Airframe,
-            Self::Control(_) => Kind::Control,
+            Self::Sticks(_) => Kind::Sticks,
             Self::Odometry(_) => Kind::Odometry,
             Self::CorrectedOdometry(_) => Kind::CorrectedOdometry,
             Self::VioAttitude(_) => Kind::VioAttitude,
@@ -440,7 +440,7 @@ impl Message {
             Self::Depth(m) => m.timestamp,
             Self::ImageChunk(m) => m.header.timestamp,
             Self::Airframe(m) => m.timestamp,
-            Self::Control(m) => m.state_time,
+            Self::Sticks(m) => m.state_time,
             Self::Odometry(m) | Self::CorrectedOdometry(m) => m.timestamp,
             Self::VioAttitude(m) => m.timestamp,
             Self::Command(m) => m.timestamp,
@@ -542,11 +542,10 @@ impl Message {
                 put_f64(&mut out, message.max_thrust_per_motor);
                 put_f64(&mut out, message.torque_coefficient);
             }
-            Self::Control(message) => {
+            Self::Sticks(message) => {
                 put_f64(&mut out, message.state_time);
-                put_u64(&mut out, message.tick);
-                for value in message.thrust {
-                    put_f64(&mut out, value);
+                for value in message.channels {
+                    put_u16(&mut out, value);
                 }
             }
             Self::Odometry(message) | Self::CorrectedOdometry(message) => {
@@ -907,17 +906,12 @@ impl Message {
                     torque_coefficient: input.f64()?,
                 })
             }
-            Kind::Control => {
+            Kind::Sticks => {
                 let state_time = input.f64()?;
-                let tick = input.u64()?;
-                let mut thrust = [0.0; 4];
-                for value in &mut thrust {
-                    *value = input.f64()?;
-                }
-                Self::Control(ControlMessage {
+                let channels = [input.u16()?, input.u16()?, input.u16()?, input.u16()?];
+                Self::Sticks(SticksMessage {
                     state_time,
-                    thrust,
-                    tick,
+                    channels,
                 })
             }
             Kind::Odometry | Kind::CorrectedOdometry => {

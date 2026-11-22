@@ -5,6 +5,7 @@ const DESKTOP_APPS: &[&str] = &[
     "firefly-verify",
     "firefly-daemon",
     "fc",
+    "pilot",
     "ffctl",
     "firefly-rootslam",
     "hil",
@@ -22,10 +23,9 @@ const DESKTOP_APPS: &[&str] = &[
 const BOARD_APPS: &[&str] = &[
     "firefly-daemon",
     "camera",
-    "fc",
+    "pilot",
     "ffctl",
     "hil-gadget",
-    "imu",
     "firefly-rootslam",
     "localization",
     "landing",
@@ -83,6 +83,7 @@ mod tests {
     #[test]
     fn desktop_release_includes_vio_planning_and_hil() {
         let apps = Target::Desktop.apps();
+        assert!(apps.contains(&"fc") && apps.contains(&"pilot"));
         assert!(apps.contains(&"firefly-daemon"));
         assert!(apps.contains(&"firefly-rootslam"));
         assert!(apps.contains(&"planner"));
@@ -93,6 +94,8 @@ mod tests {
     #[test]
     fn board_release_includes_rootslam_and_the_gadget() {
         let apps = Target::Board.apps();
+        assert!(apps.contains(&"pilot"));
+        assert!(!apps.contains(&"fc") && !apps.contains(&"imu"));
         assert!(apps.contains(&"firefly-daemon"));
         assert!(apps.contains(&"firefly-rootslam"));
         assert!(apps.contains(&"hil-gadget"));

@@ -126,6 +126,7 @@ pub fn run_imu<A: ImuAdapter>(
     let mut adapter = build()?;
     let failure = RefCell::new(None);
     let mut last_time = None;
+    let mut admitted = 0u64;
     let mut published = 0u64;
     let result = (|| {
         let mut on_event = |_| {
@@ -146,6 +147,8 @@ pub fn run_imu<A: ImuAdapter>(
                     firefly_observability::set_sim_time(packet.timestamp);
                     last_time = Some(time);
                     adapter.enqueue(sample)?;
+                    admitted += 1;
+                    trace_accepted(admitted, packet.timestamp);
                     if log::log_enabled!(target: "vio-input", log::Level::Debug)
                         && let Some(viz) = publishers.viz()
                     {
@@ -198,6 +201,7 @@ pub fn run_imu<A: ImuAdapter>(
         }
         Ok(())
     })();
+    log::info!("IMU accepted={admitted} last={last_time:?}");
     firefly_observability::pump_log_ipc(&log_ipc);
     stop.store(true, Ordering::Release);
     let finished = adapter.finish();
@@ -243,4 +247,10 @@ pub fn sensor_time(seconds: f64) -> Result<Timestamp> {
 
 fn error(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::Internal, message).with_operation("vio.imu")
+}
+
+fn trace_accepted(admitted: u64, stamp: f64) {
+    if admitted.is_multiple_of(8192) {
+        log::debug!(target: "vio-receive", "IMU accepted={admitted} stamp={stamp:.6}");
+    }
 }

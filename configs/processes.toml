@@ -4,23 +4,13 @@ command = ["taskset", "-c", "1", "bin/camera"]
 autostart = false
 
 [[process]]
-name = "imu"
-command = ["taskset", "-c", "1", "bin/imu"]
-autostart = false
-
-[[process]]
-name = "motor"
-command = ["taskset", "-c", "1", "bin/motor"]
-autostart = false
-
-[[process]]
 name = "firefly-rootslam"
 command = ["taskset", "-c", "6,7", "env", "RAYON_NUM_THREADS=2", "bin/firefly-rootslam"]
 autostart = true
 
 [[process]]
-name = "fc"
-command = ["taskset", "-c", "5", "bin/fc"]
+name = "pilot"
+command = ["taskset", "-c", "1", "bin/pilot"]
 autostart = true
 
 [[process]]

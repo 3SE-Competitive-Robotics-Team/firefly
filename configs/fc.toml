@@ -1,7 +1,2 @@
-# firefly-fc 配置（缺键回落代码默认值：`apps/firefly/fc/src/config.rs` + `firefly-flight`）
-# 机体/执行器参数（质量、惯量、旋翼几何、单电机推力上限）不在这里：由被控对象经
-# `Firefly/Airframe` 发布，飞控运行时装配——改机体不动飞控。
-
-[control.position]
-# PX4 `MPC_*`：水平速度环比例增益覆盖。
-vel_p = [2.4, 2.4, 4.0]
+# Desktop simulated Matrix uses the default attitude, rate and allocation parameters.
+[control]

@@ -1,6 +1,6 @@
 """发布构建的传感器启动检查；运行记录仅写 logs/ 下的 rrd。
 
-需要 RMUC 资产、图形会话与 release 构建的 firefly-rootslam / fc / render / mimir / depth，且没有其他闭环进程。
+需要 RMUC 资产、图形会话与 release 构建的 firefly-rootslam / pilot / fc / render / mimir / depth，且没有其他闭环进程。
 GroundTruth 供 render 合成图像及 viz 对照记录；屏蔽 PlantState，算法只使用 IMU 与图像。
 """
 from __future__ import annotations
@@ -39,7 +39,7 @@ def _sensor_startup(*, fly: bool) -> None:
     mesh = scene.visual
     if not mesh.is_file():
         raise FileNotFoundError(f"RMUC 视觉资产缺失：{mesh}")
-    for name in ("firefly-rootslam", "fc", "render", "mimir", "depth"):
+    for name in ("firefly-rootslam", "pilot", "fc", "render", "mimir", "depth"):
         if not (ROOT / "target" / "release" / name).is_file():
             raise RuntimeError(f"missing release binary: {name}")
     output = None
@@ -63,6 +63,7 @@ def _sensor_startup(*, fly: bool) -> None:
         start("render", [str(ROOT / "target/release/render")])
         start("depth", [str(ROOT / "target/release/depth"), "--simulation"])
         start("firefly-rootslam", [str(ROOT / "target/release/firefly-rootslam")])
+        start("pilot", [str(ROOT / "target/release/pilot"), "--simulation"])
         start("fc", [str(ROOT / "target/release/fc")])
         iox2.set_log_level(iox2.LogLevel.Error)
         node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)

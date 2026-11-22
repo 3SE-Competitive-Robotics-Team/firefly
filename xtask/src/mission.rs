@@ -200,14 +200,24 @@ fn launch_stack(
     );
     stack.launch(program(python, &["-c", &sim]))?;
     stack.launch(program(release.join("render"), &[]))?;
+    stack.launch(program(
+        release.join("fc"),
+        if hil {
+            &["--config", "configs/fc-hil.toml"][..]
+        } else {
+            &[]
+        },
+    ))?;
     if hil {
         stack.launch(program(release.join("hil"), &[]))?;
     } else {
-        stack.launch(program(
+        let mut vio = program(
             release.join("firefly-rootslam"),
             &["--no-loop-closures", "--no-mapping"],
-        ))?;
-        stack.launch(program(release.join("fc"), &[]))?;
+        );
+        vio.env("RAYON_NUM_THREADS", "4");
+        stack.launch(vio)?;
+        stack.launch(program(release.join("pilot"), &["--simulation"]))?;
         stack.launch(program(release.join("depth"), &["--simulation"]))?;
         if plans.iter().any(|p| p.precision_land) {
             stack.launch(program(release.join("landing"), &["--simulation"]))?;

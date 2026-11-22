@@ -1,4 +1,4 @@
-# USB HIL：完整估计、规划与控制链路自启动，执行器推力回传主机仿真。
+# USB HIL：完整估计、规划与控制链路自启动，杆量回传主机模拟飞控。
 
 [[process]]
 name = "camera"
@@ -17,8 +17,8 @@ command = ["taskset", "-c", "6,7", "env", "RAYON_NUM_THREADS=2", "bin/firefly-ro
 autostart = true
 
 [[process]]
-name = "fc"
-command = ["taskset", "-c", "5", "bin/fc", "--config", "configs/fc-hil.toml"]
+name = "pilot"
+command = ["taskset", "-c", "5", "bin/pilot", "--simulation"]
 autostart = true
 
 [[process]]

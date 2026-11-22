@@ -47,6 +47,7 @@ pub fn active(root: &Path) -> io::Result<Vec<u32>> {
                         | "render"
                         | "mimir"
                         | "fc"
+                        | "pilot"
                         | "hil"
                         | "localization"
                         | "planner"

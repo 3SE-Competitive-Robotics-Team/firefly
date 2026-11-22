@@ -514,7 +514,7 @@ fn dispatch_uplink(
         *session = 1;
     }
     match &message {
-        Message::Control(control) => {
+        Message::Sticks(control) => {
             if stats.last_control_time > 0. {
                 stats.max_imu_gap = stats
                     .max_imu_gap

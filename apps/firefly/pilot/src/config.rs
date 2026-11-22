@@ -3,7 +3,9 @@ use serde::Deserialize;
 
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
-pub struct FcConfig {
+pub struct PilotConfig {
+    #[serde(default)]
+    pub device: std::path::PathBuf,
     /// 独立备用姿态估计器的噪声、静止窗口与创新门限。
     #[serde(default)]
     pub imu: firefly_imu::Options,
@@ -19,10 +21,10 @@ pub struct FcConfig {
 }
 
 fn d_rate_hz() -> f64 {
-    1000.0
+    50.0
 }
 
-impl FcConfig {
+impl PilotConfig {
     pub fn validate(&self) -> firefly_error::Result<()> {
         if !self.rate_hz.is_finite() || self.rate_hz <= 0. {
             return Err(firefly_error::Error::new(
@@ -42,8 +44,9 @@ mod tests {
 
     #[test]
     fn shipped_config_parses_and_keeps_product_envelope() {
-        let config: FcConfig = toml::from_str(include_str!("../../../../configs/fc.toml")).unwrap();
-        assert!((config.rate_hz - 1000.0).abs() < f64::EPSILON);
+        let config: PilotConfig =
+            toml::from_str(include_str!("../../../../configs/pilot.toml")).unwrap();
+        assert!((config.rate_hz - 50.0).abs() < f64::EPSILON);
         assert_eq!(config.control.allocation.airmode, 1);
         assert!((config.control.position.tilt_max_deg - 32.0).abs() < 1e-6);
         assert!((config.control.position.vel_max_horizontal - 3.0).abs() < 1e-6);
@@ -66,7 +69,7 @@ mod tests {
             "[fsm]\nreference_timout = 1",
             "[imu]\ngyro_densitty = 0.1",
         ] {
-            assert!(toml::from_str::<FcConfig>(source).is_err(), "{source}");
+            assert!(toml::from_str::<PilotConfig>(source).is_err(), "{source}");
         }
         for source in [
             "[control.allocation]\nairmode = 255",
@@ -75,14 +78,14 @@ mod tests {
             "[imu]\nmax_dt = nan",
         ] {
             assert!(
-                toml::from_str::<FcConfig>(source)
+                toml::from_str::<PilotConfig>(source)
                     .unwrap()
                     .validate()
                     .is_err(),
                 "{source}"
             );
         }
-        let zero_limits: FcConfig = toml::from_str(
+        let zero_limits: PilotConfig = toml::from_str(
             "[control.rate]\nmax_deg_s = [0, 0, 0]\n[control.position]\nvel_max_horizontal = 0\nvel_max_up = 0\nvel_max_down = 0\n[control.attitude]\nref_model_freq = 0",
         ).unwrap();
         zero_limits.validate().unwrap();
@@ -98,12 +101,13 @@ mod tests {
             "land_complete_hold",
         ] {
             for value in ["0", "-0.1", "nan", "inf"] {
-                let config: FcConfig = toml::from_str(&format!("[fsm]\n{name} = {value}")).unwrap();
+                let config: PilotConfig =
+                    toml::from_str(&format!("[fsm]\n{name} = {value}")).unwrap();
                 assert!(config.validate().is_err(), "{name}={value}");
             }
         }
         for value in ["-0.1", "nan", "inf"] {
-            let config: FcConfig =
+            let config: PilotConfig =
                 toml::from_str(&format!("[fsm]\non_ground_altitude = {value}")).unwrap();
             assert!(config.validate().is_err());
         }

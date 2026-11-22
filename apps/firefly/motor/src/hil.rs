@@ -70,7 +70,7 @@ fn forward(
             Err(e) => return Err(e.into()),
         }
         wrote |= ports.drain(None, |message| {
-            if matches!(message, Message::Control(_)) {
+            if matches!(message, Message::Sticks(_)) {
                 writer.write_message(&message)?;
                 stats.control_messages += 1;
             } else if matches!(message, Message::Log(_)) {
@@ -121,7 +121,7 @@ fn drain_control<W: Write>(
     ports: &Ports,
     stats: &mut Stats,
 ) -> std::io::Result<bool> {
-    ports.drain(Some(Kind::Control), |message| {
+    ports.drain(Some(Kind::Sticks), |message| {
         writer.write_message(&message)?;
         stats.control_messages += 1;
         Ok(())
@@ -133,13 +133,13 @@ mod tests {
     use super::*;
     use firefly_hil::frame::FrameReader;
     use firefly_hil::protocol::{HEADER_LEN, Kind, decode_header};
-    use firefly_pubsub::{control::CONTROL_BUFFER_SIZE, log::LogMessage, viz::ScalarMessage};
-    use firefly_pubsub::{control::ControlMessage, publish::Publisher};
+    use firefly_pubsub::{control::STICKS_BUFFER_SIZE, log::LogMessage, viz::ScalarMessage};
+    use firefly_pubsub::{control::SticksMessage, publish::Publisher};
 
     struct ControlDuringWrite {
         bytes: Vec<u8>,
         frame_start: usize,
-        control: Publisher<ControlMessage>,
+        control: Publisher<SticksMessage>,
         tick: u64,
     }
 
@@ -156,12 +156,12 @@ mod tests {
                     .unwrap(),
             )?;
             self.frame_start = self.bytes.len();
-            if header.kind != Kind::Control {
+            if header.kind != Kind::Sticks {
                 self.tick += 1;
                 assert_eq!(
                     self.control
-                        .publish_counted(ControlMessage {
-                            tick: self.tick,
+                        .publish_counted(SticksMessage {
+                            state_time: self.tick as f64,
                             ..Default::default()
                         })
                         .unwrap()
@@ -181,10 +181,10 @@ mod tests {
             .unwrap()
             .as_nanos();
         let prefix = format!("Test/HilControlPriority/{}/{unique}", std::process::id());
-        let topic = format!("{prefix}/Control");
+        let topic = format!("{prefix}/Sticks");
         let control = Ports::open(&node, &prefix).unwrap();
         let publisher =
-            Publisher::with_topic_and_buffer(&node, &topic, Some(CONTROL_BUFFER_SIZE)).unwrap();
+            Publisher::with_topic_and_buffer(&node, &topic, Some(STICKS_BUFFER_SIZE)).unwrap();
         let mut writer = FrameWriter::new(ControlDuringWrite {
             bytes: Vec::new(),
             frame_start: 0,
@@ -199,8 +199,8 @@ mod tests {
             let message = Message::Scalar(scalar);
             write_telemetry(&mut writer, &control, &message, &mut stats).unwrap();
             if sequence > 0 {
-                expected.push(Message::Control(ControlMessage {
-                    tick: sequence,
+                expected.push(Message::Sticks(SticksMessage {
+                    state_time: sequence as f64,
                     ..Default::default()
                 }));
             }
@@ -212,8 +212,8 @@ mod tests {
                 ..Default::default()
             });
             write_with_control_priority(&mut writer, &control, &message, &mut stats).unwrap();
-            expected.push(Message::Control(ControlMessage {
-                tick: sequence + 2,
+            expected.push(Message::Sticks(SticksMessage {
+                state_time: (sequence + 2) as f64,
                 ..Default::default()
             }));
             expected.push(message);
@@ -229,15 +229,15 @@ mod tests {
         assert_eq!(stats.telemetry_messages, 2);
         let mut pending = Vec::new();
         control
-            .drain(Some(Kind::Control), |message| {
+            .drain(Some(Kind::Sticks), |message| {
                 pending.push(message);
                 Ok(())
             })
             .unwrap();
         assert_eq!(
             pending,
-            [Message::Control(ControlMessage {
-                tick: 4,
+            [Message::Sticks(SticksMessage {
+                state_time: 4.,
                 ..Default::default()
             })]
         );

@@ -23,10 +23,10 @@ flowchart TB
 | 业务域 | 状态归属与决策 | 主要实现 |
 |---|---|---|
 | 任务管理 | 接受计划、记录起飞锚点、分配架次号、推进阶段和航点、持久化回执。模式是否生效以 FC 回报为准。 | [任务协议](../crates/firefly-mission/src/lib.rs)、[daemon](../apps/firefly/firefly-daemon/src/flight.rs)、[消息端口](../apps/firefly/firefly-daemon/src/bus.rs) |
-| 设备接入与执行 | 为图像和惯性测量保留采集时间。普通板端 motor 发布机体参数，把四路推力换算到 PWM；仿真端由物理模型响应推力。 | [camera](../apps/firefly/camera/src/capture.rs)、[imu](../apps/firefly/imu/src/source.rs)、[motor](../apps/firefly/motor/src/actuator.rs) |
+| 设备接入与执行 | camera 采集图像，pilot 独占 Matrix USB，将 BMI270 样本映射到板端单调时钟并发布 IMU，同时接收四通道杆量。 | [camera](../apps/firefly/camera/src/capture.rs)、[pilot](../apps/firefly/pilot/src/usb.rs) |
 | 状态估计与环境感知 | RootSLAM 拥有本次运行的局部位姿与速度；depth 拥有单帧深度预测；landing 拥有精降目标的几何估计、跟踪与有效性。 | [RootSLAM](../apps/firefly/rootslam/src/online.rs)、[depth](../apps/firefly/depth/src/main.rs)、[landing](../apps/firefly/landing/src/tracking.rs) |
 | 局部建图与运动规划 | planner 拥有局部占据图、碰撞快照、规划状态和获采纳的轨迹，判定途经点通过并回报目标身份。 | [深度融合](../apps/firefly/planner/src/depth_mapping.rs)、[规划入口](../apps/firefly/planner/src/main.rs)、[位置与航向协调](../crates/firefly-planner/src/motion.rs) |
-| 轨迹执行与飞行控制 | traj 在测量时钟上采样已提交的曲线；FC 裁决解锁、跟踪、降落和失效处置，计算四路电机推力。 | [采样器](../crates/firefly-planner/src/traj_server.rs)、[FC](../apps/firefly/fc/src/main.rs)、[飞行模式](../crates/firefly-flight/src/fsm.rs) |
+| 轨迹执行与飞行控制 | traj 在测量时钟上采样已提交的曲线；仿真 pilot 处理任务与位置参考并产生杆量，Mac fc 负责自稳和推力分配。实机由 Matrix 执行 Betaflight 自稳控制。 | [采样器](../crates/firefly-planner/src/traj_server.rs)、[FC](../apps/firefly/fc/src/main.rs)、[飞行模式](../crates/firefly-flight/src/fsm.rs) |
 | 运行支撑与验证 | systemd 和 ffctl 管理进程；xtask 编排试验；Mimir 归档观测；verify 独立判断任务和飞行质量。 | [部署](../xtask/src/deploy.rs)、[试验编排](../xtask/src/mission.rs)、[Mimir](../apps/firefly/mimir/README.md)、[评分器](../apps/firefly/firefly-verify/src/lib.rs) |
 
 ## 机载数据流
@@ -44,14 +44,16 @@ flowchart TB
     depth -->|Depth| planner
     planner -->|Trajectory、PlannerHeartbeat、TrajectoryControl| traj["traj"]
     vio -->|Odometry 时钟| traj
-    traj -->|Reference| fc["fc"]
+    traj -->|Reference| fc["pilot 仿真任务模式"]
     vio -->|Odometry、VioAttitude| fc
     imu --> fc
     landing -->|LandingTarget| fc
-    fc -->|Control| motor["motor / 仿真机体"]
+    fc -->|Sticks| simfc["Mac fc"] -->|Control| motor["仿真机体"]
+    companion["Orange Pi pilot"] -->|四通道杆量| matrix["Matrix"]
+    matrix -->|BMI270 样本| companion -->|Imu| vio
 ```
 
-任务与飞控各自维护状态机。daemon 同时读取机体参数、估计会话、FC 模式、规划心跳、规划状态、轨迹参考和降落目标。以下反馈解释了“已发送指令”和“已执行阶段”在接口上的区别。[daemon 消息端口](../apps/firefly/firefly-daemon/src/bus.rs) · [topic 目录](observability.md#ipc-topic-catalog)
+SIL 和 HIL 的任务服务与 pilot 各自维护状态机。实机 USB 当前回传 IMU，实体遥控器授权控制，任务服务等待真实飞控状态。daemon 同时读取机体参数、估计会话、FC 模式、规划心跳、规划状态、轨迹参考和降落目标。以下反馈解释了“已发送指令”和“已执行阶段”在接口上的区别。[daemon 消息端口](../apps/firefly/firefly-daemon/src/bus.rs) · [topic 目录](observability.md#ipc-topic-catalog)
 
 ```mermaid
 flowchart LR
@@ -59,7 +61,7 @@ flowchart LR
     task -->|Goal| planner["planner"]
     planner -->|PlannerStatus 与心跳| task
     traj["traj"] -->|Reference 与目标身份| task
-    task -->|Command| fc["fc"]
+    task -->|Command| fc["pilot 仿真任务模式"]
     fc -->|FcStatus 与解锁检查结果| task
     task -->|Activity 推理租约| landing["landing"]
     landing -->|LandingTarget| task
@@ -109,11 +111,11 @@ flowchart TB
     recorder --> mimir["Mimir"]
 ```
 
-进程清单决定应用及其 CPU 亲和性。A733 的 CPU 6、7 分给 RootSLAM，CPU 5 分给 FC，CPU 2、4 承担规划与建图，CPU 3 运行深度进程；CPU 4 同时承载采样与精降。不同模式的设备入口由各自清单选定。[普通进程清单](../configs/processes.toml) · [HIL 进程清单](../configs/processes-hil.toml) · [任务服务单元](../configs/firefly-daemon.service)
+进程清单决定应用及其 CPU 亲和性。A733 的 CPU 6、7 分给 RootSLAM，实机 pilot 使用 CPU 1，HIL pilot 使用 CPU 5，CPU 2、4 承担规划与建图，CPU 3 运行深度进程；CPU 4 同时承载采样与精降。不同模式的设备入口由各自清单选定。[普通进程清单](../configs/processes.toml) · [HIL 进程清单](../configs/processes-hil.toml) · [任务服务单元](../configs/firefly-daemon.service)
 
 一个相近的产品例子是 NetworkManager。连接和设备状态由常驻进程维护，命令行工具和桌面程序通过同一控制接口操作它。Firefly 沿用这种控制关系，板上其他应用与 `ffctl` 可以独立连接和退出。[NetworkManager 服务](https://networkmanager.dev/docs/api/latest/NetworkManager.html) · [nmcli 客户端](https://networkmanager.dev/docs/api/latest/nmcli.html)
 
-Orange Pi 的 BSP 启用 `firefly.service`。其主进程 `ffctl process supervise` 管理设备、FC 和 VIO。部署时默认关闭板端 `firefly-mimir.service` 自启动。普通板端运行可手动启动该服务录制，USB HIL 由宿主机 Mimir 同步录制板端遥测和仿真真值。`cargo xtask deploy` 安装并启用独立的 `firefly-daemon.service`，跟随整组服务启停。daemon 打开 IPC、完成任务恢复并监听客户端后发送 READY。传感器就绪与允许起飞由任务接口单独报告。`WatchdogSec=4s` 是初始故障检测预算。daemon 每完成一轮工作检查单调时钟，按 systemd 下发超时的一半发送 WATCHDOG。卡在 IPC、主线程被停止或运行循环失去进展都会中断通知。systemd 按 `Restart=on-failure` 单独拉起任务服务，FC、VIO 和录制保持运行。该超时针对服务活性，20 ms 调度周期的超期需要单独测量。[systemd.service](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html) · [sd_event_set_watchdog](https://www.freedesktop.org/software/systemd/man/latest/sd_event_set_watchdog.html)
+Orange Pi 的 BSP 启用 `firefly.service`。其主进程 `ffctl process supervise` 管理设备、pilot 和 VIO。部署时默认关闭板端 `firefly-mimir.service` 自启动。普通板端运行可手动启动该服务录制，USB HIL 由宿主机 Mimir 同步录制板端遥测和仿真真值。`cargo xtask deploy` 安装并启用独立的 `firefly-daemon.service`，跟随整组服务启停。daemon 打开 IPC、完成任务恢复并监听客户端后发送 READY。传感器就绪与允许起飞由任务接口单独报告。`WatchdogSec=4s` 是初始故障检测预算。daemon 每完成一轮工作检查单调时钟，按 systemd 下发超时的一半发送 WATCHDOG。卡在 IPC、主线程被停止或运行循环失去进展都会中断通知。systemd 按 `Restart=on-failure` 单独拉起任务服务，FC、VIO 和录制保持运行。该超时针对服务活性，20 ms 调度周期的超期需要单独测量。[systemd.service](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html) · [sd_event_set_watchdog](https://www.freedesktop.org/software/systemd/man/latest/sd_event_set_watchdog.html)
 
 `crates/firefly-mission` 定义计划与请求。`ffctl mission` 在板上通过仅服务用户可访问的 `/run/firefly/mission.sock` 发送一行 JSON 并读取一行回执。状态查询在传感器上线前即可使用。首次提交要有新鲜的里程计、姿态与飞控上锁状态。一架飞机一次执行一项任务，忙时立即答复。任务执行中的人工取消进入收尾，地面已解锁时请求上锁，空中请求普通降落，飞控已在降落或失效保护模式时等待飞控处理。
 
@@ -158,9 +160,9 @@ flowchart LR
 
 | 模式 | 测量与执行 | 任务和在线算法 | 证据 |
 |---|---|---|---|
-| 普通板端 | Linux camera 采集图像，imu 读 BMI088，motor 接收推力并输出 PWM。设备进程按装配启用。 | 板上 daemon 和算法进程。可选 localization 需配置原点并指定导航发布者。 | 按需开启板端 Mimir。board 评分检查任务生命周期、FC 模式、会话及架次间上锁。 |
+| 普通板端 | pilot 使用同一个 USB CDC 接收 Matrix IMU 并下发杆量，Matrix 驱动电机。Linux camera 按装配启用。 | 板上 daemon 和算法进程。可选 localization 需配置原点并指定导航发布者。 | 按需开启板端 Mimir。board 评分检查任务生命周期、FC 模式、会话及架次间上锁。 |
 | 软件在环（SIL） | 主机 MuJoCo 生成运动、IMU 和机体参数，render 生成图像，动力学接收 FC 推力。 | 主机运行同一套任务、估计与控制程序；xtask 按计划启用精降、航点规划与采样，模型走仿真后端。 | 主机 Mimir 记录业务观测与独立真值；SIL 评分包含物理航线。 |
-| USB 硬件在环（HIL） | 物理与成像仿真在主机，USB 下发测量，板上 camera 的 HIL 入口发布图像、IMU 等输入，motor 的 HIL 入口回传推力。 | 任务服务、RootSLAM、depth、landing、planner、traj 与 FC 在 A733 上运行。宿主机用任务代理查询同一个板端 daemon。 | 主机 Mimir 合并真值与板端遥测，录制关闭后运行 HIL 评分。 |
+| USB 硬件在环（HIL） | 物理与成像仿真在主机，USB 下发测量，板上 camera 的 HIL 入口发布图像、IMU 等输入，motor 的 HIL 入口回传杆量供主机 fc 解算电机推力。 | 任务服务、RootSLAM、depth、landing、planner、traj 与 pilot 在 A733 上运行。宿主机用任务代理查询同一个板端 daemon。 | 主机 Mimir 合并真值与板端遥测，录制关闭后运行 HIL 评分。 |
 
 ```mermaid
 flowchart TB

@@ -333,7 +333,7 @@ fn decode_error(kind: Kind, error: &io::Error) -> io::Error {
 mod tests {
     use super::*;
     use firefly_pubsub::camera::{GrayImageMessage, IMAGE_SIZE};
-    use firefly_pubsub::control::ControlMessage;
+    use firefly_pubsub::sticks::SticksMessage;
 
     fn roundtrip(message: &Message, session: u64) -> Message {
         let mut bytes = Vec::new();
@@ -349,10 +349,9 @@ mod tests {
 
     #[test]
     fn control_roundtrip() {
-        let message = Message::Control(ControlMessage {
+        let message = Message::Sticks(SticksMessage {
             state_time: 12.5,
-            thrust: [1.0, 2.0, 3.0, 4.0],
-            tick: 7,
+            channels: [1000, 1500, 1750, 2000],
         });
         roundtrip(&message, 42);
     }
@@ -587,12 +586,12 @@ mod tests {
         let mut writer = FrameWriter::new(&mut bytes);
         writer.set_session(1);
         writer
-            .write_message(&Message::Control(ControlMessage::default()))
+            .write_message(&Message::Sticks(SticksMessage::default()))
             .unwrap();
 
         let mut reader = FrameReader::new(bytes.as_slice());
         let frame = reader.read_frame().unwrap();
-        assert!(matches!(frame.message, Message::Control(_)));
+        assert!(matches!(frame.message, Message::Sticks(_)));
         assert_eq!(reader.dropped(), 1);
     }
 

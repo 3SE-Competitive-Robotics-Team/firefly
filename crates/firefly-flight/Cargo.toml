@@ -10,7 +10,11 @@ license.workspace = true
 repository.workspace = true
 readme.workspace = true
 
+[features]
+ipc = ["dep:firefly-pubsub"]
+
 [dependencies]
+firefly-pubsub = { workspace = true, optional = true }
 firefly-error.workspace = true
 nalgebra.workspace = true
 serde = { workspace = true }

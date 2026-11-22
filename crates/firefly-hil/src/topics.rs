@@ -4,7 +4,6 @@ use firefly_pubsub::{
     attitude::AttitudeMessage,
     camera::{DownImageMessage, GrayImageMessage},
     command::CommandMessage,
-    control::{CONTROL_BUFFER_SIZE, ControlMessage},
     event::TopicNotifier,
     fc_status::{FC_STATUS_BUFFER_SIZE, FC_STATUS_TOPIC, FcStatusMessage},
     goal::GoalMessage,
@@ -18,6 +17,7 @@ use firefly_pubsub::{
     publish::Publisher,
     reference::ReferenceMessage,
     request::{MissionRequest, REQUEST_MAX_PUBLISHERS},
+    sticks::{STICKS_BUFFER_SIZE, SticksMessage},
     subscriber::{Subscriber, SubscriberOptions},
     trajectory::PlannerStatusMessage,
     viz::{
@@ -154,7 +154,7 @@ routes! { RequestsSubscribers, RequestsPublishers;
 routes! { TelemetrySubscribers, TelemetryPublishers;
     fc_status: FcStatusMessage => FcStatus (FC_STATUS_TOPIC, FC_STATUS_BUFFER_SIZE, 1),
     prediction: VioPrediction => VioPrediction (VIO_PREDICTION_TOPIC, VIO_PREDICTION_BUFFER_SIZE, 1),
-    control: ControlMessage => Control (firefly_pubsub::control::CONTROL_TOPIC, CONTROL_BUFFER_SIZE, 2),
+    sticks: SticksMessage => Sticks (firefly_pubsub::sticks::STICKS_TOPIC, STICKS_BUFFER_SIZE, 2),
     odom: OdomMessage => Odometry (firefly_pubsub::odom::ODOM_TOPIC, 2, 2),
     corrected: OdomMessage => CorrectedOdometry (firefly_pubsub::odom::CORRECTED_ODOM_TOPIC, 2, 2),
     attitude: AttitudeMessage => VioAttitude (firefly_pubsub::attitude::ATTITUDE_TOPIC, 2, 2),

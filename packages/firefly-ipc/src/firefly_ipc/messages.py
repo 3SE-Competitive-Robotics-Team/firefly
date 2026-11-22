@@ -370,6 +370,20 @@ class AirframeMessage(ctypes.Structure):
         return "FireflyAirframeMessage"
 
 
+class SticksMessage(ctypes.Structure):
+    """Matrix roll, pitch, yaw and throttle in microseconds at state_time."""
+
+    _fields_ = [("state_time", ctypes.c_double), ("channels", ctypes.c_uint16 * 4)]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflySticksMessage"
+
+
+STICKS_TOPIC = "Firefly/Sticks"
+STICKS_BUFFER_SIZE = 2
+
+
 class ControlMessage(ctypes.Structure):
     """飞控指令（1kHz，plant 取最新）：与 Rust `ControlMessage`（`FireflyControlMessage`）一致。
 
@@ -446,6 +460,7 @@ def _self_check() -> None:
     assert ctypes.sizeof(LogMessage) == 640, ctypes.sizeof(LogMessage)
     assert ctypes.sizeof(PlantStateMessage) == 112, ctypes.sizeof(PlantStateMessage)
     assert ctypes.sizeof(AirframeMessage) == 200, ctypes.sizeof(AirframeMessage)
+    assert ctypes.sizeof(SticksMessage) == 16
     assert ctypes.sizeof(ControlMessage) == 48, ctypes.sizeof(ControlMessage)
 
 
@@ -473,7 +488,7 @@ BINS_MAX = 64
 SCALARS_MAX = 4
 #: 1kHz IMU 双标量与相机诊断突发的接收容量，与 Rust SCALAR_BUFFER_SIZE 一致。
 SCALAR_BUFFER_SIZE = 1024
-VIZ_MAX_PUBLISHERS = 9
+VIZ_MAX_PUBLISHERS = 10
 
 
 class AttitudeMessage(ctypes.Structure):

@@ -43,6 +43,8 @@ Numeric state codes remain available for scoring; labels and enum meanings come 
 in `firefly-flight`. Mimir records states in the numeric observation stream.
 Ground truth, local odometry and map odometry retain their original frames. Offline comparisons state their frame alignment explicitly.
 
+RootSLAM logs its accepted IMU count on shutdown. With `vio-receive=debug` it also reports the counter every 8192 samples.
+
 ## IPC topic catalog
 
 Rust layouts and capacities live in [firefly-pubsub](../crates/firefly-pubsub/src/lib.rs).
@@ -51,13 +53,13 @@ This catalog covers all production topic constants; test topics use isolated nam
 
 | Topic | Producers → consumers; purpose | Recording policy |
 |---|---|---|
-| `Firefly/VizScalars` | FC, VIO, render, depth, localization, planner, traj and HIL → mimir | Nine publisher slots. Every registered numeric row; publisher sequence checked |
+| `Firefly/VizScalars` | FC, VIO, render, depth, localization, planner, traj and HIL → mimir | Ten publisher slots, including the simulated FC and pilot. Every registered numeric row; publisher sequence checked |
 | `Firefly/Viz` | VIO, render, planner, localization → mimir | Registered spatial observations; sequence checked |
 | `Firefly/VizVoxels` | planner → mimir | Complete ordered map updates; missing chunks fail |
 | `Firefly/Log` | Rust applications, sim, flight scripts → mimir | Sequence and producer loss count checked |
 | `Firefly/GroundTruth` | sim → render, mimir, tools | Pose and trajectory; independent scoring samples |
 | `Firefly/CameraRig` | Render → Mimir on the host | One retained 288-byte snapshot per Render start. Left, right and down each carry resolution, pixel-center intrinsics and the body←RDF transform. Late subscribers receive the current rig. Offline Render uses `Firefly/Offline/CameraRig` alongside its offline images. Mimir stores one static baseline per camera per segment and rejects changes during a recording. |
-| `Firefly/VioPrediction` | VIO → Mimir, directly or via HIL | With VIO diagnostics enabled, at most 50 samples per measurement second. Each 136-byte sample carries the measured pose and velocity, plus angular velocity and posterior age when attitude is available. One publisher, 16 receive slots, sequence checked. HIL v12 carries 129 payload bytes per sample. |
+| `Firefly/VioPrediction` | VIO → Mimir, directly or via HIL | With VIO diagnostics enabled, at most 50 samples per measurement second. Each 136-byte sample carries the measured pose and velocity, plus angular velocity and posterior age when attitude is available. One publisher, 16 receive slots, sequence checked. HIL v13 carries 129 payload bytes per sample. |
 | `Firefly/CorrectedOdometry` | VIO/localization → mimir, tools | Map-frame pose and trajectory |
 | `Firefly/VioAttitude` | VIO prediction → FC, mimir | Bias summary; control consumers remain independent |
 | `Firefly/CameraLeft`, `Firefly/CameraRight` | render/camera → VIO, depth (left), mimir | Lossless grayscale samples when images are enabled |
@@ -66,14 +68,15 @@ This catalog covers all production topic constants; test topics use isolated nam
 | `Firefly/LandingTarget` | landing → FC, mimir, HIL uplink; odom-frame body contact position | Latest-value 64-byte message; capture time, VIO session, team and validity; recorded as `landing/target` and `landing/quality` |
 | `Firefly/CameraPair` | render → image consumers | Pair notification; image topics carry the recording |
 | `Firefly/Depth` | YOLO depth → planner-owned EGO mapper | Latest 320×240 float32 axial metres in the left camera frame, with its capture timestamp. HIL computes on board. Offline dataset labels use a separate namespace. |
-| `Firefly/Imu` | sim/sensors → VIO, FC | Optional replay observations use the registered `vio/input/*` diagnostic gate |
+| `Firefly/Imu` | Matrix pilot or sim → RootSLAM, simulation controllers | Optional replay observations use the registered `vio/input/*` diagnostic gate |
 | `Firefly/Odometry` | VIO → control, planning, flight scripts and Mimir | Mimir samples initialized local odometry at up to 10 Hz on the measurement clock for `vio/odom` and its display trail |
 | `Firefly/Navigation` | VIO/localization → optional consumers, mimir | Atomic map←odom relation; mimir records changes only and uses bounded startup matching, with poses supplied by their existing observation streams |
-| `Firefly/Reference` | traj → FC, flight scripts | Flight scripts observe reference goal identity |
-| `Firefly/Control` | FC → actuators/sim | Motor evidence and FC summaries |
+| `Firefly/Reference` | traj → simulation pilot, flight scripts | Flight scripts observe reference goal identity |
+| `Firefly/Sticks` | Stick source → Orange Pi pilot over local IPC, or simulation pilot → Mac fc via IPC/HIL | 16 bytes, queue depth 2, up to 50 Hz over USB. Four primary channels in µs, measurement time in seconds. HIL v13 carries the same 16 bytes, little-endian. Commands expire after 100 ms. |
+| `Firefly/Control` | Mac fc → simulated plant | Motor evidence and FC summaries |
 | `Firefly/PlantState`, `Firefly/Airframe` | sim/airframe → FC, system consumers | Optional physical-state evidence; VIO uses camera and IMU observations |
-| `Firefly/Command` | daemon, ffctl, HIL relay → FC | Three publisher slots. FC consumes the latest request, the HIL bridge buffers up to eight. Results and rejection reasons in event logs. |
-| `Firefly/FcStatus` | FC → daemon, USB HIL and Mimir; `mode` is the native state code, `can_arm` is the FC's latest pre-arm decision (0/1). | V2 IPC type, 24 bytes at up to 10 Hz, one publisher and 16 slots. Mimir records mode and verifies sequence continuity; the existing `fc/arming/failed` observation retains the reason. HIL carries 18 payload bytes. Update all peers together. |
+| `Firefly/Command` | daemon, ffctl, HIL relay → simulation pilot | Three publisher slots. FC consumes the latest request, the HIL bridge buffers up to eight. Results and rejection reasons in event logs. |
+| `Firefly/FcStatus` | Simulation pilot → daemon, USB HIL and Mimir; `mode` is the native state code, `can_arm` is the FC's latest pre-arm decision (0/1). | V2 IPC type, 24 bytes at up to 10 Hz, one publisher and 16 slots. Mimir records mode and verifies sequence continuity; the existing `fc/arming/failed` observation retains the reason. HIL carries 18 payload bytes. Update all peers together. |
 | `Firefly/Goal` | daemon, ffctl, HIL relay → planner | Three publisher slots. The planner consumes the latest request, the HIL bridge buffers up to four. 80-byte waypoint in local odom coordinates. STOP (0) supports optional terminal yaw in radians (CLI degrees). PASS (1) carries the next xyz position. One sample per task command. |
 | `Firefly/MandatoryStop` | external tools → planner | Stop command; outcome in planner state and logs |
 | `Firefly/Trajectory`, `Firefly/PlannerHeartbeat`, `Firefly/TrajectoryControl`, `Firefly/PlannerStatus` | planner → traj (trajectory, heartbeat, control), flight scripts (status) | Atomic xyz/yaw polynomials with shared piece times and a stationary endpoint; heartbeat loss finishes the committed stop; 32-byte status identifies the command and reports scheduled completion plus latched measured passage |
@@ -99,7 +102,7 @@ of subsequent business events. Known loss makes the recording fail.
 |---|---|
 | `fc/debug/*`, `fc/imu/*`, `fc/arming/*`, `fc/failsafe/*` | FC position, attitude, control, freshness and safety summaries; producer-defined cadence |
 | `fc/standby_eskf/*` | Standby health, bias and variance in its documented local gravity frame |
-| `fc/loop/*` | Per-control-tick timing, angular rate and allocation; only `fc::diagnostics=debug` |
+| `fc/loop/*` | Mac FC per-tick timing (tick, stick age, IMU arrival age, wall period), angular rate and allocation; only `fc::diagnostics=debug` |
 | `vio/posterior/*` | Each VIO posterior pose, world velocity and IMU biases |
 | `vio/prediction/*` | One VioPrediction sample supplies the pose, velocity and optional attitude diagnostics at its original measurement time |
 | `vio/diagnostics/*` | Per-frame identity counts, stereo ratio, pixel residuals and optimization deltas |

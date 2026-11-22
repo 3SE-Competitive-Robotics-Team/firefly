@@ -19,19 +19,12 @@ usage-rs.workspace = true
 firefly-config.workspace = true
 firefly-imu.workspace = true
 nalgebra.workspace = true
-firefly-base.workspace = true
-fastrace = { workspace = true }
-firefly-error = { workspace = true }
-firefly-flight = { workspace = true }
+firefly-flight = { workspace = true, features = ["ipc"] }
 firefly-observability = { workspace = true }
 firefly-pubsub = { workspace = true }
-iceoryx2 = { workspace = true }
 iceoryx2-bb-posix = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
-
-[dev-dependencies]
-toml.workspace = true
 
 [lints]
 workspace = true

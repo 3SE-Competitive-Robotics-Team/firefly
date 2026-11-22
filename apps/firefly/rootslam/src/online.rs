@@ -29,7 +29,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
         mpsc,
     },
     time::Duration,
@@ -172,6 +172,7 @@ struct LiveSession {
     stats_directory: Option<PathBuf>,
     pairing: Pairing,
     imu_watermark: ImuWatermark,
+    first_image: Arc<AtomicI64>,
     startup: Startup,
     frame_started: imu::FrameStarts,
 }
@@ -243,8 +244,10 @@ impl LiveSession {
         let flow_tx = flow.input_queue().clone();
         let frame_started = Arc::new(Mutex::new(BTreeMap::new()));
         let imu_watermark = ImuWatermark::default();
+        let first_image = Arc::new(AtomicI64::new(i64::MIN));
         let (gravity_tx, gravity_rx) = mpsc::sync_channel(1);
         let imu_inputs = Some(imu::Inputs {
+            first_image: first_image.clone(),
             external_localization: options.external_localization,
             imu: imu_tx,
             posteriors: states_rx,
@@ -272,6 +275,7 @@ impl LiveSession {
             stats_directory: options.stats_directory.clone(),
             pairing: Pairing::default(),
             imu_watermark,
+            first_image,
             startup: Startup::WaitingGravity,
             frame_started,
         })
@@ -285,7 +289,10 @@ impl LiveSession {
         let process_result = std::thread::scope(|scope| {
             let worker = std::thread::Builder::new()
                 .name("rootslam-imu".into())
-                .spawn_scoped(scope, move || imu::run(inputs, stop))
+                .spawn_scoped(scope, move || {
+                    let _stopping = StopOnDrop(stop);
+                    imu::run(inputs, stop)
+                })
                 .map_err(|e| error("Cannot start rootslam-imu").with_source(e))?;
             let process = {
                 let _stopping = StopOnDrop(stop);
@@ -347,6 +354,14 @@ impl LiveSession {
                 .next(i64::try_from(self.imu_watermark.load()?.as_nanosecond()).ok()?)
         }) {
             if let Startup::WaitingStereo(estimate) = self.startup {
+                if self
+                    .imu_watermark
+                    .load()
+                    .is_some_and(|last| last.as_nanosecond() - i128::from(t_ns) > 1_000_000_000)
+                {
+                    continue;
+                }
+                self.first_image.store(t_ns, Ordering::Release);
                 let rotation = estimate
                     .rotation_body_to_world()
                     .ok_or_else(|| error("stationary gravity estimate is invalid"))?;

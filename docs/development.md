@@ -28,9 +28,17 @@ cargo xtask release --target board
 
 Matrix BMI270 飞控固件使用单独的 `linux/amd64` 容器构建。编译命令和 HEX 路径见 [Matrix 固件构建说明](../apps/third-party/README.md#编译-matrix-bmi270-固件)。
 
+### Matrix USB 与仿真杆量
+
+普通板端由 `pilot` 独占 `configs/pilot.toml` 所指定的 USB 设备。它将 Matrix 的 BMI270 样本按 SI 单位发布到 `Firefly/Imu`，RootSLAM 使用飞控采样时间映射到的板端单调时钟。要连接 Configurator，在板上运行 `ffctl process stop pilot`，等一秒多再连接。结束配置后用 `ffctl process start pilot` 恢复采集。
+
+板端控制输入为 `Firefly/Sticks`。发布者使用板端 CLOCK_MONOTONIC 秒填入 `state_time`，按横滚、俯仰、偏航、油门顺序填写四个通道。pilot 在每个约 20 ms 的发送周期取最新鲜的有效命令，静默时只发心跳。实机开关应同时启用 ANGLE 与 FIREFLY CONTROL，ARM 由遥控器单独操作。协议和授权条件见 [Matrix 固件说明](../apps/third-party/betaflight/docs/firefly_serial_protocol.md)。
+
+仿真使用 `pilot --simulation` 将位置参考转换为相同的四通道杆量。Mac 上的 `fc` 用仿真 IMU 和机体参数计算推力，SIL 直接订阅杆量，HIL 由板端通过 USB 桥回传。SIL 启动器为 RootSLAM 分配 4 个 Rayon 工作线程，让视觉估计与模拟飞控共享主机 CPU。
+
 ### 板上任务服务
 
-安装包含 `firefly-daemon` 和 `ffctl` 的 board release。Orange Pi BSP 随开机启动 `firefly.service` 并读取 `/opt/firefly/configs/processes.toml`。整机装配时核对相机设备、IMU 和 PWM 通道，在板上用 `ffctl process enable camera imu motor` 为已装配的设备保存开机配置。部署会更新进程清单，现场交付时需核对设备启用项与实测机体参数。
+安装包含 `firefly-daemon` 和 `ffctl` 的 board release。Orange Pi BSP 随开机启动 `firefly.service` 并读取 `/opt/firefly/configs/processes.toml`。普通进程清单自动启动 pilot 和 RootSLAM。将 Matrix 接入 Orange Pi USB Host，核对 `configs/pilot.toml` 中的设备路径。相机装好后可用 `ffctl process enable camera` 启用。部署会更新进程清单，现场交付时需核对设备启用项与实测机体参数。
 
 ```bash
 cd /opt/firefly
@@ -38,6 +46,8 @@ ffctl mission status
 ffctl mission submit inspection-001 configs/mission-square.toml
 ffctl mission status inspection-001
 ```
+
+Matrix 固件当前只回传 IMU。上述任务提交需要支持飞控状态反馈的运行环境，例如 HIL。
 
 同 ID 重试会返回该任务的当前或最终回执。需要中断时使用 `ffctl mission cancel inspection-001`。任务进入 `complete` 或 `interrupted` 后，可查询运行就绪状态，再提交新的任务 ID。板上应用可直接使用 `firefly_mission::call`。当前 socket 允许服务所属用户访问。现场任务通过计划指定本架次的起飞高度、以起飞点为原点的三维航点、停留时间、返航偏移和精降方式。普通返航偏移默认为零。示例长方体上框高 3.3 米，SIL 配套场地的规划上界为 3.7 米。现场应根据实测空间配置规划边界。
 

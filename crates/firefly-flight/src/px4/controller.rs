@@ -48,11 +48,15 @@ impl Controller {
     /// A valid previous control output is required; hover alone never confirms contact.
     #[must_use]
     pub fn landing_thrust_low(&self) -> bool {
+        self.low_collective(self.allocated_control[3].abs())
+    }
+
+    /// Check collective thrust against the configured minimum-to-hover range.
+    #[must_use]
+    pub fn low_collective(&self, thrust: f32) -> bool {
         let minimum = self.params.position.thrust_min;
         let threshold = minimum + 0.3 * (self.hover_thrust - minimum);
-        self.airframe_signature.is_some()
-            && !self.input_invalid
-            && self.allocated_control[3].abs() <= threshold
+        self.airframe_signature.is_some() && !self.input_invalid && thrust <= threshold
     }
 
     #[must_use]
@@ -159,7 +163,18 @@ impl Controller {
         landed: bool,
     ) -> Option<[f32; 4]> {
         self.set_airframe(quad, airframe);
+        self.position_demand(state, setpoint, dt, landed);
+        self.run_inner_loop(state, airframe, dt, landed, false)
+    }
 
+    /// Position loop output before attitude control, rate control and allocation.
+    pub fn position_demand(
+        &mut self,
+        state: &QuadState,
+        setpoint: &PositionSetpoint,
+        dt: f32,
+        landed: bool,
+    ) -> VehicleAttitudeSetpoint {
         let q_frd_ned = attitude_to_frd_ned(state.attitude);
         self.position.set_state(&PositionControlStates {
             position: world_to_ned(state.position),
@@ -181,7 +196,7 @@ impl Controller {
         if !self.position.update(dt) {
             // 瞬时无效设定值不得切断推力：保留上一次有效姿态/推力，继续跑内环。
             self.input_invalid = true;
-            return self.run_inner_loop(state, airframe, dt, landed, false);
+            return self.attitude_setpoint;
         }
         self.input_invalid = false;
 
@@ -195,7 +210,7 @@ impl Controller {
                 yaw_sp_move_rate: 0.,
             };
         }
-        self.run_inner_loop(state, airframe, dt, landed, false)
+        self.attitude_setpoint
     }
 
     /// 手动姿态模式：给定产品系期望姿态、归一化集合推力与偏航角速度，走

@@ -15,6 +15,7 @@ pub mod plant;
 pub mod publish;
 pub mod reference;
 pub mod request;
+pub mod sticks;
 pub mod subscriber;
 pub mod trace;
 pub mod trajectory;

@@ -5,11 +5,14 @@
 mod airframe;
 mod control;
 mod fsm;
+#[cfg(feature = "ipc")]
+pub mod ipc;
 mod params;
 pub mod precision;
 pub mod px4;
 mod safety;
 mod state;
+pub mod sticks;
 
 pub use airframe::{Airframe, Rotor};
 pub use control::PositionSetpoint;

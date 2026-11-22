@@ -52,10 +52,10 @@
 | 机载电源 | 独立升压支路与电调共地，经 Type-C 输出 5 V / 3 A。输入 3.0 V、效率 90% 时约取 5.6 A，电池预算另计电机 |
 | 飞控固件 | [3SE 的 Betaflight fork](../../apps/third-party/betaflight) 以实板原厂版本 `2026.6.0-alpha`（`e92c10887`）和板级配置 `BETAFPVG473_V2`（`6703db5`）为基线。该批次使用 BMI270、内部时钟和 `align_board_yaw = -135`。[厂商 BMI270 固件说明](https://support.betafpv.com/hc/en-us/articles/54655791332761-Firmware-for-Matrix-1S-Brushless-Flight-Controller-5IN1-II) |
 | 主板通信 | Orange Pi 以 USB Host 连接 Matrix 的 USB 数据口。飞控默认提供 Betaflight 配置，处于上锁状态时可通过专用 MSPv2 请求切换当前 USB 会话 |
-| 串口协议 | Orange Pi 收到 ACK 后使用 [`firefly_serial_protocol`](../../apps/third-party/betaflight/docs/firefly_serial_protocol.md) 接收 IMU、发送控制帧或心跳。断开、重启或上行静默 1 秒后恢复配置模式。Orange Pi 应用接入和实板联调待完成 |
-| IMU | Matrix 随 BMI270 加速度计更新主动上报三轴加速度、三轴角速度和飞控读取快照的时间。任务标称 800 Hz，每帧 20 字节，实际到达率和抖动待板测 |
-| 电机控制 | Orange Pi 下发横滚、俯仰、偏航和油门指令。Betaflight 负责姿态控制、混控和板内 DShot 输出 |
-| 控制权 | ELRS 遥控器保留解锁和人工接管权。通道映射、人工接管和串口断线行为须通过拆桨验证 |
+| 串口协议 | Orange Pi 收到 ACK 后使用 [`firefly_serial_protocol`](../../apps/third-party/betaflight/docs/firefly_serial_protocol.md) 接收 IMU、发送控制帧或心跳。断开、重启或上行静默 1 秒后恢复配置模式。板端 pilot 独占 USB，RootSLAM 订阅 `Firefly/Imu` |
+| IMU | Matrix 随 BMI270 加速度计更新主动上报三轴加速度、三轴角速度和飞控读取快照的时间。任务标称 800 Hz，每帧 20 字节，本批次在 125 秒 USB 台架测试中由 RootSLAM 接收 99,810 个样本，约 798 Hz |
+| 电机控制 | Orange Pi 下发横滚、俯仰、偏航和油门指令。输入为四个 1000–2000 µs 杆量。ANGLE 下横滚和俯仰控制倾角，偏航控制转动快慢，油门控制推力。Betaflight 负责自稳、混控和 DShot 输出 |
+| 控制权 | ELRS 遥控器负责解锁。将 FIREFLY CONTROL 的开关区间同时分配给 ANGLE，或将其限制在已有 ANGLE 区间内。USB 下行只写四个主通道。通道映射、人工接管和串口断线行为须通过拆桨验证 |
 | 定型依据 | 实测 1207 桨的电流与静推力、整机悬停余量，以及低电量下四电机同时加速时的 5 V 电压 |
 
 ## 相机

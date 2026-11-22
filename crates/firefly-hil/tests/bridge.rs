@@ -9,7 +9,6 @@ use firefly_pubsub::{
     attitude::AttitudeMessage,
     camera::{DOWN_SIZE, DownImageMessage},
     command::CommandMessage,
-    control::ControlMessage,
     event::TopicListener,
     goal::GoalMessage,
     imu::ImuMessage,
@@ -21,6 +20,7 @@ use firefly_pubsub::{
     plant::AirframeMessage,
     reference::ReferenceMessage,
     request::MissionRequest,
+    sticks::SticksMessage,
     subscriber::{Subscriber, SubscriberOptions},
     trajectory::PlannerStatusMessage,
     viz::{self, ScalarMessage, VizMessage, VoxelMessage},
@@ -126,7 +126,7 @@ fn downlink_requests_use_the_same_native_ipc_contract() {
     );
     assert!(
         ingress
-            .accept_raw(firefly_hil::Kind::Control, vec![])
+            .accept_raw(firefly_hil::Kind::Sticks, vec![])
             .is_err()
     );
 }
@@ -286,7 +286,7 @@ fn every_uplink_route_roundtrips_through_ipc_and_wire() {
             posterior_age_s: 0.01,
             has_attitude: 1,
         }),
-        Message::Control(ControlMessage::default()),
+        Message::Sticks(SticksMessage::default()),
         Message::Odometry(OdomMessage::default()),
         Message::CorrectedOdometry(OdomMessage::default()),
         Message::VioAttitude(AttitudeMessage {

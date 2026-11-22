@@ -250,7 +250,11 @@ fn start(device: &str) -> Result<(), String> {
 /// 把已部署的二进制软链到 `/usr/local/bin`，让任意目录、非交互 shell 都能直接调用。
 /// 板上 `PATH` 默认包含该目录，因此不修改镜像的 shell 配置。
 fn link(device: &str) -> Result<(), String> {
-    let mut commands = Vec::with_capacity(Target::Board.apps().len());
+    let mut commands = vec![format!(
+        "for app in fc imu; do path=/usr/local/bin/\"$app\"; \
+         if [ -L \"$path\" ] && [ ! -e \"$path\" ] && \
+         [ \"$(readlink \"$path\")\" = \"{DESTINATION}/bin/$app\" ]; then rm \"$path\" || exit 1; fi; done"
+    )];
     for app in Target::Board.apps() {
         commands.push(format!(
             "ln -sf {DESTINATION}/bin/{app} /usr/local/bin/{app}"

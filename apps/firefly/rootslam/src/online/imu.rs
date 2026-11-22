@@ -10,13 +10,18 @@ use firefly_vio_runtime::{ImuAdapter, ImuWatermark, Publishers, Sample};
 use nalgebra::Vector3;
 use std::{
     collections::{BTreeMap, VecDeque},
-    sync::{Arc, Mutex, atomic::AtomicBool, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicI64, Ordering},
+        mpsc,
+    },
     time::Instant,
 };
 
 pub(super) type FrameStarts = Arc<Mutex<BTreeMap<i64, Instant>>>;
 
 pub(super) struct Inputs {
+    pub first_image: Arc<AtomicI64>,
     pub external_localization: bool,
     pub imu: mpsc::SyncSender<Option<Arc<ImuData<f64>>>>,
     pub posteriors: mpsc::Receiver<Option<Arc<PoseVelBiasState<f64>>>>,
@@ -38,6 +43,7 @@ pub(super) fn run(inputs: Inputs, stop: &AtomicBool) -> Result<()> {
         Ok(Adapter {
             inputs,
             pending: VecDeque::new(),
+            flushing: false,
             sampler: Some(StationaryGravitySampler::new()),
             predictor: Predictor::new(5., Vector3::new(0., 0., -9.81)),
             session: (std::time::SystemTime::now()
@@ -56,6 +62,7 @@ pub(super) fn run(inputs: Inputs, stop: &AtomicBool) -> Result<()> {
 }
 
 struct Adapter {
+    flushing: bool,
     inputs: Inputs,
     // Basalt starts consuming IMU only after the first initialized image. Preserve
     // that startup backlog without blocking the event thread on its 300-entry queue.
@@ -69,6 +76,17 @@ struct Adapter {
 
 impl Adapter {
     fn flush(&mut self) -> Result<()> {
+        if !self.flushing {
+            let first = self.inputs.first_image.load(Ordering::Acquire);
+            if first == i64::MIN {
+                return Ok(());
+            }
+            // Retain the sample bracketing the first image for preintegration.
+            while self.pending.get(1).is_some_and(|s| s.t_ns <= first) {
+                self.pending.pop_front();
+            }
+            self.flushing = true;
+        }
         while let Some(data) = self.pending.front() {
             match self.inputs.imu.try_send(Some(Arc::clone(data))) {
                 Ok(()) => {
@@ -182,6 +200,15 @@ impl ImuAdapter for Adapter {
                 estimate.sample_count,
                 (estimate.end_ns - estimate.start_ns) as f64 * 1e-9
             );
+        }
+        if !self.flushing {
+            while self
+                .pending
+                .get(1)
+                .is_some_and(|s| sample.timestamp_ns - i128::from(s.t_ns) > 2_000_000_000)
+            {
+                self.pending.pop_front();
+            }
         }
         if self.pending.len() >= 10_000 {
             return Err(error("VIO IMU backlog exceeded 10 seconds"));
