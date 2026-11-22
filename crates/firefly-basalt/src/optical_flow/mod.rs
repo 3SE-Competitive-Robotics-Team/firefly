@@ -9,5 +9,10 @@ pub use types::{
     OpticalFlowResult,
 };
 pub mod patterns;
+
+struct TrackedFrame {
+    pyramid: Vec<crate::image::image_pyr::ManagedImagePyr<u16>>,
+    flow: std::sync::Arc<OpticalFlowResult>,
+}
 #[cfg(test)]
 mod reference_tests;

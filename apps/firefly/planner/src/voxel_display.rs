@@ -19,21 +19,20 @@ pub(super) struct Request {
     pub force_full: bool,
 }
 
-#[derive(Default)]
-struct Shared {
-    pending: Option<Request>,
-    stopped: bool,
-    error: Option<String>,
+enum Mailbox {
+    Open(Box<Option<Request>>),
+    Stopped,
+    Failed(String),
 }
 
 pub(super) struct DisplayWorker {
-    shared: Arc<(Mutex<Shared>, Condvar)>,
+    shared: Arc<(Mutex<Mailbox>, Condvar)>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl DisplayWorker {
     pub fn start() -> Result<Self> {
-        let shared = Arc::new((Mutex::new(Shared::default()), Condvar::new()));
+        let shared = Arc::new((Mutex::new(Mailbox::Open(Box::default())), Condvar::new()));
         let state = Arc::clone(&shared);
         let (ready, startup) = std::sync::mpsc::sync_channel(1);
         let thread = std::thread::Builder::new()
@@ -49,32 +48,38 @@ impl DisplayWorker {
                             let mut shared = mutex
                                 .lock()
                                 .map_err(|_| internal("display state poisoned"))?;
-                            while shared.pending.is_none() && !shared.stopped {
+                            loop {
+                                match &mut *shared {
+                                    Mailbox::Open(pending) => {
+                                        if let Some(request) = pending.take() {
+                                            break request;
+                                        }
+                                    }
+                                    Mailbox::Stopped | Mailbox::Failed(_) => return Ok(()),
+                                }
                                 shared = wake
                                     .wait_timeout(shared, Duration::from_millis(100))
                                     .map_err(|_| internal("display state poisoned"))?
                                     .0;
                                 if node.wait(Duration::ZERO).is_err() {
-                                    shared.stopped = true;
+                                    *shared = Mailbox::Stopped;
                                 }
                             }
-                            if shared.stopped {
-                                break;
-                            }
-                            shared.pending.take().expect("pending display request")
                         };
                         let started = std::time::Instant::now();
                         renderer.render(&request)?;
                         super::log_slow_stage("display", started);
                     }
-                    Ok(())
                 })();
                 if let Ok(mut shared) = state.0.lock() {
-                    shared.stopped = true;
-                    if let Err(error) = result {
-                        shared.error = Some(error.to_string());
-                        let _ = ready.send(Err(error.to_string()));
-                    }
+                    *shared = match result {
+                        Ok(()) => Mailbox::Stopped,
+                        Err(error) => {
+                            let reason = error.to_string();
+                            let _ = ready.send(Err(reason.clone()));
+                            Mailbox::Failed(reason)
+                        }
+                    };
                 }
             })
             .map_err(|e| internal(e.to_string()))?;
@@ -96,16 +101,18 @@ impl DisplayWorker {
             .0
             .lock()
             .map_err(|_| internal("display state poisoned"))?;
-        if let Some(error) = &shared.error {
-            return Err(internal(error.clone()));
-        }
-        if shared.stopped || self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
+        let pending = match &mut *shared {
+            Mailbox::Failed(error) => return Err(internal(error.clone())),
+            Mailbox::Stopped => return Err(internal("display worker stopped")),
+            Mailbox::Open(pending) => pending.as_mut(),
+        };
+        if self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
             return Err(internal("display worker stopped"));
         }
-        if let Some(previous) = &shared.pending {
+        if let Some(previous) = pending {
             request.force_full |= previous.force_full;
         }
-        shared.pending = Some(request);
+        *pending = Some(request);
         self.shared.1.notify_one();
         Ok(())
     }
@@ -114,7 +121,7 @@ impl DisplayWorker {
 impl Drop for DisplayWorker {
     fn drop(&mut self) {
         if let Ok(mut shared) = self.shared.0.lock() {
-            shared.stopped = true;
+            *shared = Mailbox::Stopped;
         }
         self.shared.1.notify_one();
         if let Some(thread) = self.thread.take()

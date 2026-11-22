@@ -28,8 +28,8 @@ use std::{
     collections::BTreeMap,
     path::PathBuf,
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
         mpsc,
     },
     time::Duration,
@@ -172,7 +172,7 @@ struct LiveSession {
     stats_directory: Option<PathBuf>,
     pairing: Pairing,
     imu_watermark: ImuWatermark,
-    first_image: Arc<AtomicI64>,
+    first_image: Arc<OnceLock<i64>>,
     startup: Startup,
     frame_started: imu::FrameStarts,
 }
@@ -244,7 +244,7 @@ impl LiveSession {
         let flow_tx = flow.input_queue().clone();
         let frame_started = Arc::new(Mutex::new(BTreeMap::new()));
         let imu_watermark = ImuWatermark::default();
-        let first_image = Arc::new(AtomicI64::new(i64::MIN));
+        let first_image = Arc::new(OnceLock::new());
         let (gravity_tx, gravity_rx) = mpsc::sync_channel(1);
         let imu_inputs = Some(imu::Inputs {
             first_image: first_image.clone(),
@@ -361,7 +361,7 @@ impl LiveSession {
                 {
                     continue;
                 }
-                self.first_image.store(t_ns, Ordering::Release);
+                self.first_image.get_or_init(|| t_ns);
                 let rotation = estimate
                     .rotation_body_to_world()
                     .ok_or_else(|| error("stationary gravity estimate is invalid"))?;

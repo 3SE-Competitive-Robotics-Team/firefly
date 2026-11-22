@@ -307,7 +307,7 @@ fn localization_correction_invalidates_trajectory_preserving_goal_and_stop() {
     manager
         .invalidate_localization(2., state_at(Vector3::new(2., 1., 1.)))
         .unwrap();
-    assert!(manager.fsm.mandatory_stop);
+    assert!(manager.fsm.is_mandatory_stopped());
 }
 
 #[test]
@@ -753,7 +753,11 @@ fn depth_timeout_keeps_upstream_collision_replanning_order() {
     let report = m.fsm.safety_tick(0.5, None);
     assert!(report.collision && report.replanned);
     assert_eq!(m.fsm.state(), ExecState::ExecTraj);
-    assert!(!m.fsm.failsafe_enabled);
+    m.fsm.request_emergency();
+    for _ in 0..2 {
+        let _ = m.fsm.exec_tick(0.6, Some(state_at(obstacle)));
+        assert!(m.fsm.is_emergency());
+    }
 }
 
 #[test]

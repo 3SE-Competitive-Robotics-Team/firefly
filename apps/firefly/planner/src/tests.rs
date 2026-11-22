@@ -122,7 +122,7 @@ fn local_depth_source_reaches_planner_without_an_occupancy_publisher() {
             std::thread::sleep(Duration::from_millis(20));
             app.poll_sensors().unwrap();
             if let Some(nav) = app.state_input.odometry()
-                && app.synchronize_map(&nav).unwrap()
+                && app.synchronize_map(&nav).unwrap() == MapStatus::Ready
                 && app
                     .fsm
                     .manager()
@@ -148,9 +148,10 @@ fn local_depth_source_reaches_planner_without_an_occupancy_publisher() {
         std::thread::sleep(Duration::from_millis(20));
         app.poll_odometry().unwrap();
         let nav = app.state_input.odometry().unwrap();
-        if !app
+        if app
             .map_input
-            .ready(&nav, Instant::now(), Duration::from_secs(1))
+            .status(&nav, Instant::now(), Duration::from_secs(1))
+            != MapStatus::Ready
         {
             break;
         }

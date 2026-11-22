@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fastrace::prelude::*;
 use firefly_base::{FrameId, RigidTransform};
@@ -111,6 +111,12 @@ enum AlignmentState {
     Reset,
 }
 
+#[derive(Clone, Copy)]
+struct CommittedAlignment {
+    transform: RigidTransform,
+    revision: u64,
+}
+
 struct App {
     fusion: FusionFilter,
     quality: Quality,
@@ -119,20 +125,18 @@ struct App {
     alignment: AlignmentState,
     navigation_pub: Publisher<NavigationMessage>,
     /// 最近一次提交坐标系时的对齐；修订号只随超过门限的修正递增。
-    revision_alignment: Option<RigidTransform>,
+    committed: Option<CommittedAlignment>,
     correction: CorrectionOptions,
-    alignment_revision: u64,
     odom_sub: Subscriber<OdomMessage>,
     corrected_pub: Publisher<OdomMessage>,
     viz_pub: Option<VizPublisher>,
     corr_prev: Option<[f64; 3]>,
-    latest_odom: Option<OdomMessage>,
+    latest_odom: Option<(OdomMessage, Instant)>,
     visual_obs: Subscriber<PoseObservation>,
     odom_hist: std::collections::VecDeque<(f64, OdomMessage)>,
     pending_visual: std::collections::VecDeque<PoseObservation>,
-    last_odom_recv: std::time::Instant,
-    last_published: f64,
-    last_visual: f64,
+    last_published: Option<f64>,
+    last_visual: Option<f64>,
     innov_limit_visual: f64,
     t_sim: f64,
     log_ipc: firefly_observability::LogIpc,
@@ -176,9 +180,8 @@ impl App {
             origin,
             alignment: AlignmentState::Waiting,
             navigation_pub: Publisher::with_topic(&node, NAVIGATION_TOPIC)?,
-            revision_alignment: None,
+            committed: None,
             correction: cfg.correction,
-            alignment_revision: 0,
             odom_sub,
             visual_obs,
             corrected_pub,
@@ -187,9 +190,8 @@ impl App {
             latest_odom: None,
             odom_hist: std::collections::VecDeque::with_capacity(ODOM_HIST_CAP),
             pending_visual: std::collections::VecDeque::with_capacity(PENDING_VISUAL_CAP),
-            last_odom_recv: std::time::Instant::now(),
-            last_published: f64::NEG_INFINITY,
-            last_visual: f64::NEG_INFINITY,
+            last_published: None,
+            last_visual: None,
             innov_limit_visual,
             t_sim: 0.0,
             log_ipc,
@@ -216,7 +218,7 @@ impl App {
                     || self
                         .latest_odom
                         .as_ref()
-                        .is_some_and(|last| m.timestamp <= last.timestamp)
+                        .is_some_and(|(last, _)| m.timestamp <= last.timestamp)
                 {
                     continue;
                 }
@@ -232,10 +234,9 @@ impl App {
                     log::info!("启动坐标系与静止 VIO 对齐，地图里程计就绪");
                 }
                 self.t_sim = self.t_sim.max(m.timestamp);
-                self.last_odom_recv = std::time::Instant::now();
+                self.latest_odom = Some((m, Instant::now()));
                 let t_vio = pose.matrix();
                 self.fusion.predict(&t_vio);
-                self.latest_odom = Some(m);
                 self.odom_hist.push_back((m.timestamp, m));
                 while self.odom_hist.len() > ODOM_HIST_CAP {
                     self.odom_hist.pop_front();
@@ -260,7 +261,7 @@ impl App {
     fn enqueue_visual(&mut self, obs: &PoseObservation) {
         if !obs.timestamp.is_finite()
             || obs.timestamp < 0.
-            || obs.timestamp <= self.last_visual
+            || self.last_visual.is_some_and(|last| obs.timestamp <= last)
             || obs.source != firefly_pubsub::vision::OBS_SOURCE_VISUAL
             || self
                 .pending_visual
@@ -284,7 +285,7 @@ impl App {
     /// 队首仍超前（odom 未追上）即停——等下次 odom 到达再排，不丢弃。
     fn drain_pending_visual(&mut self) {
         while let Some(ts) = self.pending_visual.front().map(|o| o.timestamp) {
-            if ts <= self.last_visual
+            if self.last_visual.is_some_and(|last| ts <= last)
                 || self.odom_hist.front().is_some_and(|o| ts < o.0)
                 || self.t_sim - ts > PENDING_VISUAL_TIMEOUT
             {
@@ -304,7 +305,7 @@ impl App {
                 obs.timestamp,
                 self.t_sim - obs.timestamp
             );
-            self.last_visual = ts;
+            self.last_visual = Some(ts);
             self.fuse_visual(&obs);
         }
     }
@@ -352,31 +353,45 @@ impl App {
         }
     }
 
-    /// 新对齐是否要提交坐标系：`None` 表示首次建立，`Some(true)` 表示超过门限。
-    /// 首次只记录，不递增修订号；未超过门限时下游复用局部地图与在途参考。
-    fn commit_alignment(
+    fn next_alignment(
         &self,
-        alignment: &RigidTransform,
+        transform: RigidTransform,
         odom: &OdomMessage,
-    ) -> Result<Option<bool>> {
-        let Some(committed) = self.revision_alignment else {
-            return Ok(None);
+    ) -> Result<CommittedAlignment> {
+        let Some(previous) = self.committed else {
+            return Ok(CommittedAlignment {
+                transform,
+                revision: 0,
+            });
         };
         let body = odom.body_pose(FrameId::ODOM)?;
-        let now = alignment.compose(&body)?;
-        let before = committed.compose(&body)?;
-        Ok(Some(self.correction.committed(&now, &before)))
+        if !self.correction.committed(
+            &transform.compose(&body)?,
+            &previous.transform.compose(&body)?,
+        ) {
+            return Ok(previous);
+        }
+        let revision = previous
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| Error::new(ErrorKind::Internal, "alignment revision exhausted"))?;
+        Ok(CommittedAlignment {
+            transform,
+            revision,
+        })
     }
 
     fn publish_corrected(&mut self) -> Result<()> {
         if self.alignment != AlignmentState::Ready {
             return Ok(());
         }
-        let Some(odom) = &self.latest_odom else {
+        let Some((odom, received)) = &self.latest_odom else {
             return Ok(());
         };
-        if self.last_odom_recv.elapsed().as_secs_f64() >= ODOM_FRESH_TIMEOUT
-            || odom.timestamp <= self.last_published
+        if received.elapsed().as_secs_f64() >= ODOM_FRESH_TIMEOUT
+            || self
+                .last_published
+                .is_some_and(|last| odom.timestamp <= last)
         {
             return Ok(());
         }
@@ -398,26 +413,14 @@ impl App {
             let _ = viz.publish(metric);
         }
         // 同一修订必须发布同一变换；融合候选累计超过门限后再提交。
-        match self.commit_alignment(&alignment, odom)? {
-            None => self.revision_alignment = Some(alignment),
-            Some(true) => {
-                self.alignment_revision =
-                    self.alignment_revision.checked_add(1).ok_or_else(|| {
-                        Error::new(ErrorKind::Internal, "alignment revision exhausted")
-                    })?;
-                self.revision_alignment = Some(alignment);
-            }
-            Some(false) => {}
-        }
-        let alignment = self
-            .revision_alignment
-            .expect("alignment is committed above");
-        let msg = corrected_odom(odom, &alignment)?;
-        let mut navigation = NavigationMessage::new(msg, &alignment, self.alignment_revision);
+        let committed = self.next_alignment(alignment, odom)?;
+        self.committed = Some(committed);
+        let msg = corrected_odom(odom, &committed.transform)?;
+        let mut navigation = NavigationMessage::new(msg, &committed.transform, committed.revision);
         navigation.external_map = 1;
         self.navigation_pub.publish(navigation)?;
         self.corrected_pub.publish(msg)?;
-        self.last_published = msg.timestamp;
+        self.last_published = Some(msg.timestamp);
         self.log_corrected_viz(&msg);
         Ok(())
     }
@@ -601,24 +604,22 @@ mod tests {
                 };
                 let base = shifted(0.);
                 app.alignment = AlignmentState::Ready;
-                app.revision_alignment = Some(base);
                 app.fusion.set_alignment(base).unwrap();
                 let mut sample = OdomMessage {
                     timestamp: 3.,
                     is_initialized: true,
                     ..Default::default()
                 };
-                app.latest_odom = Some(sample);
+                app.latest_odom = Some((sample, Instant::now()));
                 app.publish_corrected().unwrap();
-                assert_eq!(app.alignment_revision, 0);
                 let initial = *navigation.receive().unwrap().unwrap();
+                assert_eq!(initial.revision, 0);
                 assert_eq!(initial.translation, [0.; 3]);
                 assert_eq!(corrected.receive().unwrap().unwrap().position_x, 0.);
                 app.fusion.set_alignment(shifted(0.09)).unwrap();
                 sample.timestamp = 4.;
-                app.latest_odom = Some(sample);
+                app.latest_odom = Some((sample, Instant::now()));
                 app.publish_corrected().unwrap();
-                assert_eq!(app.alignment_revision, 0);
                 let small = *navigation.receive().unwrap().unwrap();
                 assert_eq!(small.revision, initial.revision);
                 assert_eq!(small.translation, initial.translation);
@@ -627,9 +628,8 @@ mod tests {
                 assert_eq!(corrected.receive().unwrap().unwrap().position_x, 0.);
                 app.fusion.set_alignment(shifted(0.11)).unwrap();
                 sample.timestamp = 5.;
-                app.latest_odom = Some(sample);
+                app.latest_odom = Some((sample, Instant::now()));
                 app.publish_corrected().unwrap();
-                assert_eq!(app.alignment_revision, 1);
                 let committed = *navigation.receive().unwrap().unwrap();
                 assert_eq!(committed.revision, 1);
                 assert_eq!(committed.translation[0], 0.11);
@@ -662,11 +662,11 @@ mod tests {
         raw.publish(sample).unwrap();
         app.step().unwrap();
         assert!((corrected.receive().unwrap().unwrap().position_x - 2.0).abs() < 1e-12);
-        app.last_odom_recv = std::time::Instant::now()
+        let stale = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(2))
             .unwrap();
         sample.timestamp = 3.1;
-        app.latest_odom = Some(sample);
+        app.latest_odom = Some((sample, stale));
         app.publish_corrected().unwrap();
         assert!(corrected.receive().unwrap().is_none());
         sample.timestamp = 4.0;

@@ -94,6 +94,17 @@ struct Eviction {
     last_ms: u64,
 }
 
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RunState {
+    Active,
+    Idle,
+    Closed,
+    Interrupted,
+    #[serde(untagged)]
+    Other(String),
+}
+
 #[derive(Serialize, Deserialize)]
 struct Manifest {
     format: u8,
@@ -102,7 +113,7 @@ struct Manifest {
     boot_id: Option<String>,
     started_ms: u64,
     ended_ms: Option<u64>,
-    state: String,
+    state: RunState,
     rrd_last: u64,
     gaps: BTreeMap<String, Event>,
     evicted: BTreeMap<String, Eviction>,
@@ -197,11 +208,10 @@ impl Inner {
         if storage::exclusive(&self.active)? {
             let mut manifest = Manifest::read(&self.path)?;
             manifest.state = if manifest.boot_id.is_some() {
-                "idle"
+                RunState::Idle
             } else {
-                "closed"
-            }
-            .into();
+                RunState::Closed
+            };
             manifest.ended_ms = Some(now());
             manifest.save(&self.path)?;
         }
@@ -272,16 +282,19 @@ impl Run {
         let _guard = global(&runs)?;
         let candidates = storage::managed(&runs)?;
         for (manifest, path) in &candidates {
-            if manifest.state == "idle" && boot.is_some() && manifest.boot_id.as_deref() != boot {
+            if manifest.state == RunState::Idle
+                && boot.is_some()
+                && manifest.boot_id.as_deref() != boot
+            {
                 let mut previous = Manifest::read(path)?;
-                "closed".clone_into(&mut previous.state);
+                previous.state = RunState::Closed;
                 previous.save(path)?;
             }
-            if manifest.state == "active" {
+            if manifest.state == RunState::Active {
                 let lease = File::open(path.join(".active.lock"))?;
                 if storage::exclusive(&lease)? {
                     let mut interrupted = Manifest::read(path)?;
-                    "interrupted".clone_into(&mut interrupted.state);
+                    interrupted.state = RunState::Interrupted;
                     interrupted.ended_ms = None;
                     interrupted.save(path)?;
                 }
@@ -307,8 +320,8 @@ impl Run {
                 return Err(error);
             }
             let mut manifest = Manifest::read(&path)?;
-            if manifest.state != "active" {
-                manifest.state = "active".into();
+            if manifest.state != RunState::Active {
+                manifest.state = RunState::Active;
                 manifest.ended_ms = None;
                 manifest.save(&path)?;
             }
@@ -334,7 +347,7 @@ impl Run {
                 boot_id: boot.map(str::to_owned),
                 started_ms: now(),
                 ended_ms: None,
-                state: "active".into(),
+                state: RunState::Active,
                 rrd_last: 0,
                 gaps: BTreeMap::new(),
                 evicted: BTreeMap::new(),
@@ -455,6 +468,24 @@ mod tests {
     }
 
     #[test]
+    fn manifest_state_strings_round_trip_across_versions() {
+        for (wire, state) in [
+            ("active", RunState::Active),
+            ("idle", RunState::Idle),
+            ("closed", RunState::Closed),
+            ("interrupted", RunState::Interrupted),
+            ("future", RunState::Other("future".into())),
+        ] {
+            let json = serde_json::Value::from(wire);
+            assert_eq!(
+                serde_json::from_value::<RunState>(json.clone()).unwrap(),
+                state
+            );
+            assert_eq!(serde_json::to_value(state).unwrap(), json);
+        }
+    }
+
+    #[test]
     fn boot_identity_and_last_producer_lease_define_lifecycle() {
         let root = Workspace::new("");
         let a = Run::open(&root.0, "board", Some("boot-a"), None).unwrap();
@@ -464,7 +495,7 @@ mod tests {
         assert!(path.join("manifest.json").is_file());
         assert_eq!(path, b.path());
         drop(a);
-        assert_eq!(Manifest::read(&path).unwrap().state, "active");
+        assert_eq!(Manifest::read(&path).unwrap().state, RunState::Active);
         drop(b);
         assert!(Manifest::read(&path).unwrap().ended_ms.is_some());
         let c = Run::open(&root.0, "board", Some("boot-b"), None).unwrap();

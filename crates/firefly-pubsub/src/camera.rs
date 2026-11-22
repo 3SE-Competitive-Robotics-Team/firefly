@@ -156,7 +156,11 @@ mod tests {
 /// 采集时间域的节拍；容纳 1ms 测量时钟量化，保留相位并跳过停顿后的积压拍。
 #[derive(Default)]
 pub struct FrameCadence {
-    last: Option<f64>,
+    schedule: Option<FrameSchedule>,
+}
+
+struct FrameSchedule {
+    last: f64,
     next: f64,
     rate: u32,
 }
@@ -167,22 +171,29 @@ impl FrameCadence {
             return false;
         }
         let period = 1. / f64::from(rate);
-        if self.rate != rate {
-            self.next = self.last.map_or(timestamp, |last| last + period);
-            self.rate = rate;
+        let Some(schedule) = &mut self.schedule else {
+            self.schedule = Some(FrameSchedule {
+                last: timestamp,
+                next: timestamp + period,
+                rate,
+            });
+            return true;
+        };
+        if schedule.rate != rate {
+            schedule.next = schedule.last + period;
+            schedule.rate = rate;
         }
         let quantum = 0.001 + 1e-9;
-        if timestamp + quantum < self.next
-            || self
-                .last
-                .is_some_and(|last| timestamp <= last || timestamp - last + quantum < period)
+        if timestamp + quantum < schedule.next
+            || timestamp <= schedule.last
+            || timestamp - schedule.last + quantum < period
         {
             return false;
         }
-        self.last = Some(timestamp);
-        self.next += period;
-        if self.next <= timestamp {
-            self.next = timestamp + period;
+        schedule.last = timestamp;
+        schedule.next += period;
+        if schedule.next <= timestamp {
+            schedule.next = timestamp + period;
         }
         true
     }
@@ -203,6 +214,17 @@ mod cadence_tests {
         assert!(!cadence.admit(0., 15));
         assert!(cadence.admit(100., 15));
         assert!(!cadence.admit(100., 15));
+    }
+
+    #[test]
+    fn rate_change_reschedules_from_last_admitted_frame() {
+        let mut cadence = FrameCadence::default();
+        assert!(!cadence.admit(f64::NAN, 30));
+        assert!(!cadence.admit(0., 0));
+        assert!(cadence.admit(1., 30));
+        assert!(!cadence.admit(1.04, 10));
+        assert!(cadence.admit(1.1, 10));
+        assert!(cadence.admit(1.15, 20));
     }
 
     #[test]

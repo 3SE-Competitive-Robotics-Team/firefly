@@ -118,6 +118,12 @@ impl Active {
         Ok(())
     }
 
+    fn append(&mut self, msg: &LogMsg) -> io::Result<()> {
+        self.bytes += self.encoder.append(msg).map_err(encoding_error)?;
+        self.payload_chunks += 1;
+        Ok(())
+    }
+
     fn seal(mut self) -> io::Result<()> {
         self.closing.store(true, Ordering::Relaxed);
         self.encoder.finish().map_err(encoding_error)?;
@@ -137,13 +143,27 @@ fn encoding_error(error: EncodeError) -> io::Error {
     }
 }
 
+enum SegmentState {
+    Empty,
+    Recording(Box<Active>),
+    DiskFull { retry_at: Instant },
+}
+
+impl SegmentState {
+    fn take_recording(&mut self) -> Option<Box<Active>> {
+        match std::mem::replace(self, Self::Empty) {
+            Self::Recording(active) => Some(active),
+            Self::DiskFull { .. } | Self::Empty => None,
+        }
+    }
+}
+
 pub(crate) struct Segments {
     run: Run,
     _recorder: File,
     store: StoreId,
-    active: Option<Active>,
+    state: SegmentState,
     baselines: Baselines,
-    retry_at: Option<Instant>,
     lost_chunks: u64,
 }
 
@@ -165,9 +185,8 @@ impl Segments {
             run,
             _recorder: recorder,
             store: StoreId::random(StoreKind::Recording, "firefly"),
-            active: None,
+            state: SegmentState::Empty,
             baselines: BTreeMap::new(),
-            retry_at: None,
             lost_chunks: 0,
         })
     }
@@ -211,15 +230,28 @@ impl Segments {
                 .to_arrow_msg()
                 .map_err(|e| failure("serialize chunk", e))?,
         );
-        if self.retry_at.is_none_or(|retry| Instant::now() >= retry) {
+        let retry_at = match self.state {
+            SegmentState::DiskFull { retry_at } => Some(retry_at),
+            SegmentState::Empty | SegmentState::Recording(_) => None,
+        };
+        if retry_at.is_none_or(|retry| Instant::now() >= retry) {
             match self.write(&msg, allow_rotation) {
-                Ok(()) => self.retry_at = None,
+                Ok(()) => {
+                    if retry_at.is_some() {
+                        self.gap(&format!(
+                            "RRD writes resumed; {} chunks missed in this recording",
+                            self.lost_chunks
+                        ));
+                    }
+                }
                 Err(error) if error.kind() == io::ErrorKind::StorageFull => {
-                    if self.retry_at.is_none() {
+                    if retry_at.is_none() {
                         self.gap("RRD writes suspended: disk capacity exhausted");
                     }
-                    self.retry_at = Some(Instant::now() + RETRY_PERIOD);
-                    if let Some(active) = self.active.take()
+                    let retry_at = Instant::now() + RETRY_PERIOD;
+                    let active = self.state.take_recording();
+                    self.state = SegmentState::DiskFull { retry_at };
+                    if let Some(active) = active
                         && let Err(error) = active.seal()
                     {
                         self.gap(&format!("RRD segment interrupted: {error}"));
@@ -231,7 +263,7 @@ impl Segments {
                 }
             }
         }
-        if self.retry_at.is_some() {
+        if matches!(self.state, SegmentState::DiskFull { .. }) {
             self.lost_chunks += 1;
         }
         if let Some(name) = baseline {
@@ -245,28 +277,22 @@ impl Segments {
 
     fn write(&mut self, msg: &LogMsg, allow_rotation: bool) -> io::Result<()> {
         if allow_rotation
-            && self.active.as_ref().is_some_and(|active| {
-                active.payload_chunks > 0
+            && matches!(&self.state, SegmentState::Recording(active) if active.payload_chunks > 0
                     && (active.bytes >= self.run.rrd_target()
-                        || active.payload_chunks >= MAX_CHUNKS)
-            })
-            && let Some(active) = self.active.take()
+                        || active.payload_chunks >= MAX_CHUNKS))
+            && let Some(active) = self.state.take_recording()
         {
             active.seal()?;
         }
-        let active = match &mut self.active {
-            Some(active) => active,
-            slot @ None => slot.insert(Active::open(&self.run, &self.store, &self.baselines)?),
-        };
-        active.bytes += active.encoder.append(msg).map_err(encoding_error)?;
-        active.payload_chunks += 1;
-        if self.retry_at.is_some() {
-            self.gap(&format!(
-                "RRD writes resumed; {} chunks missed in this recording",
-                self.lost_chunks
-            ));
+        match &mut self.state {
+            SegmentState::Recording(active) => active.append(msg),
+            slot @ (SegmentState::Empty | SegmentState::DiskFull { .. }) => {
+                let mut active = Box::new(Active::open(&self.run, &self.store, &self.baselines)?);
+                let result = active.append(msg);
+                *slot = SegmentState::Recording(active);
+                result
+            }
         }
-        Ok(())
     }
 
     pub fn gap(&self, detail: &str) {
@@ -277,7 +303,7 @@ impl Segments {
     }
 
     pub fn flush(&mut self) -> Result<()> {
-        if let Some(active) = &mut self.active {
+        if let SegmentState::Recording(active) = &mut self.state {
             active
                 .encoder
                 .flush_blocking()
@@ -287,7 +313,7 @@ impl Segments {
     }
 
     pub fn finish(mut self) -> Result<()> {
-        if let Some(active) = self.active.take() {
+        if let Some(active) = self.state.take_recording() {
             active
                 .seal()
                 .inspect_err(|error| self.gap(&format!("RRD seal failed: {error}")))

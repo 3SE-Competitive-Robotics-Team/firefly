@@ -251,7 +251,10 @@ fn full_depth_to_collision_path_preserves_native_inflation_and_clears_obstacles(
     let nav = odometry(1.3, 0.);
     input.observe_local(snapshot).unwrap();
     input.prepare_region(&mut collision, &nav, true);
-    assert!(input.ready(&nav, now, Duration::from_secs(1)));
+    assert_eq!(
+        input.status(&nav, now, Duration::from_secs(1)),
+        crate::map_input::MapStatus::Ready
+    );
     input.apply(&mut collision, &nav, true).unwrap();
     assert!(collision.is_occupied_inflated(Vector3::new(0.125, 0.125, 0.625)));
     for x in 0..collision.dims()[0] {
@@ -309,11 +312,14 @@ fn empty_images_and_fading_cannot_refresh_map_age() {
     input.observe_local(snapshot).unwrap();
     let nav = odometry(1.2, 0.);
     input.prepare_region(&mut collision, &nav, true);
-    assert!(!input.ready(
-        &nav,
-        now + Duration::from_millis(1001),
-        Duration::from_secs(1)
-    ));
+    assert_eq!(
+        input.status(
+            &nav,
+            now + Duration::from_millis(1001),
+            Duration::from_secs(1)
+        ),
+        crate::map_input::MapStatus::Unavailable
+    );
 }
 
 #[test]
@@ -403,7 +409,10 @@ fn local_map_requires_exact_coverage() {
     let mut collision = collision_grid(&source()).unwrap();
     input.observe_local(snapshot).unwrap();
     input.prepare_region(&mut collision, &nav, true);
-    assert!(!input.ready(&nav, now, Duration::from_secs(1)));
+    assert_ne!(
+        input.status(&nav, now, Duration::from_secs(1)),
+        crate::map_input::MapStatus::Ready
+    );
 }
 
 #[test]

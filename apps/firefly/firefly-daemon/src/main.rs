@@ -27,7 +27,7 @@ use std::{
     thread,
     time::Duration,
 };
-use store::{Commit, Store};
+use store::{Commit, CommitState, Store};
 
 type Reply = Result<Value, String>;
 type Query = (Request, SyncSender<Reply>);
@@ -35,6 +35,10 @@ type Query = (Request, SyncSender<Reply>);
 fn overview(r: &Mission, phase: Phase) -> Value {
     json!({"run":r.run,"id":r.id,"phase":phase,"session":r.session,"waypoint":r.waypoint,
         "home":r.home,"flight_number":r.flight_number,"reason":r.reason,"attention":r.attention})
+}
+
+struct RunAnnouncement {
+    recovered: Option<Receipt>,
 }
 
 struct Daemon {
@@ -233,38 +237,42 @@ impl Daemon {
         #[cfg(target_os = "linux")]
         let mut watchdog = watchdog::Watchdog::ready()?;
         let mut pending_reply: Option<(SyncSender<Reply>, Reply)> = None;
-        let mut recovery = self.flight.as_ref().map(Flight::receipt);
-        let mut announce_run = true;
+        let mut announcement = Some(RunAnnouncement {
+            recovered: self.flight.as_ref().map(Flight::receipt),
+        });
         while !stopping.load(Ordering::Relaxed) {
             self.bus.pump()?;
-            if announce_run && self.bus.odom.last_stamp() >= 0.0 {
+            if self.bus.odom.last_stamp() >= 0.0
+                && let Some(start) = announcement.take()
+            {
                 let event = json!({"kind":"system_run","run":self.run});
                 self.bus.log.event(
                     "flight",
                     self.bus.odom.last_stamp(),
                     &format!("mission {event}"),
                 );
-                if let Some(receipt) = recovery.take() {
+                if let Some(receipt) = start.recovered {
                     events::phase(&self.bus, &receipt, self.bus.odom.last_stamp());
                 }
-                announce_run = false;
             }
-            if self.collect_commits()?
+            let mut commits = self.collect_commits()?;
+            if commits == CommitState::Idle
                 && let Some((reply, value)) = pending_reply.take()
             {
                 let _ = reply.send(value);
             }
-            if !self.journal.pending()
+            if commits == CommitState::Idle
                 && let Ok((request, reply)) = requests.try_recv()
             {
                 let value = self.request(request)?;
-                if self.journal.pending() {
-                    pending_reply = Some((reply, value));
-                } else {
+                commits = self.journal.state();
+                if commits == CommitState::Idle {
                     let _ = reply.send(value);
+                } else {
+                    pending_reply = Some((reply, value));
                 }
             }
-            if pending_reply.is_none() && !self.journal.identity_pending() {
+            if pending_reply.is_none() && commits != CommitState::WritingIdentity {
                 self.tick()?;
             }
             #[cfg(target_os = "linux")]
@@ -276,7 +284,7 @@ impl Daemon {
         self.stop()
     }
 
-    fn collect_commits(&mut self) -> io::Result<bool> {
+    fn collect_commits(&mut self) -> io::Result<CommitState> {
         while let Some((receipt, commit)) = self.journal.poll()? {
             match commit {
                 Commit::Accepted(stamp) => events::start(&self.bus, &receipt, self.team, stamp),
@@ -290,7 +298,7 @@ impl Daemon {
             }
             self.receipts.insert(receipt.mission.id.clone(), receipt);
         }
-        Ok(!self.journal.pending())
+        Ok(self.journal.state())
     }
 
     fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -318,7 +326,7 @@ impl Daemon {
                 thread::sleep(Duration::from_millis(20));
             }
         }
-        while !self.collect_commits()? {
+        while self.collect_commits()? != CommitState::Idle {
             thread::sleep(Duration::from_millis(5));
         }
         Ok(())
