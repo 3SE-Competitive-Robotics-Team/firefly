@@ -22,6 +22,7 @@ firefly-sim = { workspace = true }
 members = ["packages/*", "apps/firefly/firefly-sim"]
 
 [dependency-groups]
+docs = ["zensical==0.1.3"]
 dev = [
     "pytest>=9.2.0",
     "psutil>=7.2.2,<8",

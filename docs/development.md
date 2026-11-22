@@ -17,13 +17,13 @@ container system start
 cargo xtask release --target board
 ```
 
-Matrix BMI270 固件使用单独的 `linux/amd64` 镜像。容器构建说明给出了镜像、可刷写 HEX 的位置和协议测试入口。[Matrix 固件构建](../apps/third-party/README.md#编译-matrix-bmi270-固件)
+Matrix BMI270 固件使用单独的 `linux/amd64` 镜像。容器构建说明给出了镜像、可刷写 HEX 的位置和协议测试入口。[Matrix 固件构建](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/apps/third-party/README.md#编译-matrix-bmi270-固件)
 
 ## 运行
 
 ### Mac 软件在环（SIL）
 
-准备 GPU 图形会话、[场地资产](../packages/firefly-cad/README.md)和任务所需模型。从一次悬停任务开始。
+准备 GPU 图形会话、[场地资产](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/packages/firefly-cad/README.md)和任务所需模型。从一次悬停任务开始。
 
 ```bash
 cargo xtask sil configs/mission-hover.toml
@@ -44,7 +44,7 @@ SIL 和 HIL 都在录制结束后逐架次评分。要重新评分，向 `target
 
 ### 板上任务服务
 
-用 `adb devices` 核对 Orange Pi 的设备号。在仓库的 `models/` 下备齐精降的 `h-marker.nb`、`viplite.json` 和深度模型 `yolo26n-depth-320-int8.nb` 后部署。部署会停止服务，更新 `/opt/firefly` 的程序、配置和模型，再启动服务。[打包文件清单](../xtask/src/deploy.rs) · [板端模型准备](#板端模型)
+用 `adb devices` 核对 Orange Pi 的设备号。在仓库的 `models/` 下备齐精降的 `h-marker.nb`、`viplite.json` 和深度模型 `yolo26n-depth-320-int8.nb` 后部署。部署会停止服务，更新 `/opt/firefly` 的程序、配置和模型，再启动服务。[打包文件清单](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/xtask/src/deploy.rs) · [板端模型准备](#板端模型)
 
 ```bash
 container system start
@@ -54,9 +54,9 @@ adb -s firefly-0001 shell
 
 在 Orange Pi 上运行 `ffctl process status` 检查 `pilot` 和 `firefly-rootslam`，用 `ffctl mission status` 查询任务服务。实机尚缺任务所需的机体参数和飞控解锁状态反馈。HIL 提供这些反馈，可以用 `ffctl mission submit inspection-001 configs/mission-square.toml` 提交计划，再用 `ffctl mission status inspection-001` 查询回执。相同 ID 和计划可重试，取消用 `ffctl mission cancel inspection-001`。[任务阶段和回执](architecture.md#系统运行架次和任务)
 
-进程启用项、命令和 CPU 亲和性以[实机清单](../configs/processes.toml)和 [HIL 清单](../configs/processes-hil.toml)为准。装好相机后用 `ffctl process enable camera` 启用。板端需要 RRD 时手动启动 `firefly-mimir.service`，HIL 由 Mac 录制。
+进程启用项、命令和 CPU 亲和性以[实机清单](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/configs/processes.toml)和 [HIL 清单](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/configs/processes-hil.toml)为准。装好相机后用 `ffctl process enable camera` 启用。板端需要 RRD 时手动启动 `firefly-mimir.service`，HIL 由 Mac 录制。
 
-每份计划最多 16 个航点，起飞和返航高度为 0.5–2 米。航点水平半径最多 10 米，首点距起飞点的水平距离至少 1 米。每段三维距离为 0.5–10 米，航点高度为 0.5–3.3 米。停留时间大于 0 秒且不超过 600 秒，返航平面偏移不超过 0.3 米。[计划校验](../crates/firefly-mission/src/lib.rs)
+每份计划最多 16 个航点，起飞和返航高度为 0.5–2 米。航点水平半径最多 10 米，首点距起飞点的水平距离至少 1 米。每段三维距离为 0.5–10 米，航点高度为 0.5–3.3 米。停留时间大于 0 秒且不超过 600 秒，返航平面偏移不超过 0.3 米。[计划校验](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-mission/src/lib.rs)
 
 ### 验证 Matrix IMU
 
@@ -138,10 +138,26 @@ uv run --all-packages --extra test pytest tests/system/test_flight_mission.py te
 | `fixed_input_patch_intermediates` | `datasets/basalt-reference/optical_flow_patch_trace.json`，由 C++ 光流探针读取 TUM VI room1 双目数据和对应配置生成。Mapper 与光流探针源码见本仓库提交 `7ffdb4d` 的 `crates/firefly-basalt/tests/reference/{mapper,optical_flow_patch_trace}.cpp`。 |
 | `frozen_single_precision_system_meets_unchanged_gradient_criterion` | `datasets/rootslam-reference/linear_system.json`，使用单精度 LSQR 求解失败时由 `linear_system_archive` 导出的原始矩阵和残差。 |
 
+## 预览和构建文档站
+
+安装 [uv](https://docs.astral.sh/uv/getting-started/installation/) 后，在干净检出中运行以下命令。uv 会按锁文件安装文档工具，Zensical 会在终端打印本地预览地址。修改 `docs/` 下的 Markdown 即可查看更新。
+
+```bash
+uv run --locked --only-group docs zensical serve
+```
+
+按 Ctrl+C 结束预览。运行与 CI 相同的严格构建，静态站点会写入 `site/`。
+
+```bash
+uv run --locked --only-group docs zensical build --clean --strict
+```
+
+新增页面时在 `zensical.toml` 的 `nav` 中登记。站内页面使用相对链接，指向源码或模块 README 的链接使用 GitHub 文件地址。文档 PR 会自动构建，合入 `main` 后发布到 GitHub Pages。首次发布时，在仓库 **Settings → Pages → Source** 选择 **GitHub Actions**。
+
 ## Rust 命令行
 
 所有 Rust 应用、`xtask`、示例和自定义基准程序都用 `usage-rs` 解析命令行参数。在所属 crate 的 `[dependencies]` 中写入 `usage-rs.workspace = true`。如果只有示例或基准程序需要解析参数，将这行放在 `[dev-dependencies]`。
 
-在参数结构体上派生 `usage_rs::Cli`，有子命令时在枚举上派生 `usage_rs::Subcommands`。在 `main` 中先调用 `Arguments::parse()`，再读取配置、连接 IPC 或打开设备。这样用户运行 `--help` 时就能直接看到用法。文件路径用 `PathBuf`，默认配置路径用 `firefly_config::paths::config` 取得。可参考[最小示例](../crates/firefly-config/examples/minimal.rs)和 [xtask 的子命令](../xtask/src/main.rs)。
+在参数结构体上派生 `usage_rs::Cli`，有子命令时在枚举上派生 `usage_rs::Subcommands`。在 `main` 中先调用 `Arguments::parse()`，再读取配置、连接 IPC 或打开设备。这样用户运行 `--help` 时就能直接看到用法。文件路径用 `PathBuf`，默认配置路径用 `firefly_config::paths::config` 取得。可参考[最小示例](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-config/examples/minimal.rs)和 [xtask 的子命令](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/xtask/src/main.rs)。
 
 修改 CLI 后，运行对应命令的 `--help` 核对用法，用 `__usage_spec__` 查看参数声明。测试中调用 `parse_from`，检查必填参数、互斥选项和每个选项接受几个值。声明语法见 [usage-rs 参数指南](https://usage.jdx.dev/rust/args-and-flags)。

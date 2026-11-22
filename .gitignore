@@ -16,6 +16,7 @@ wheels/
 .DS_Store
 
 # 文档与地图资源
+/site/
 docs/papers/
 docs/reference/
 apps/firefly/planner/maps/*.ffmap

@@ -42,7 +42,7 @@ target/release/firefly-verify --transport board "$run"
 
 ## 容量与恢复
 
-固定安装配置为 [configs/archive.toml](../configs/archive.toml)，所有容量单位为字节。
+固定安装配置为 [configs/archive.toml](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/configs/archive.toml)，所有容量单位为字节。
 
 | 配置 | 默认值 |
 |---|---:|

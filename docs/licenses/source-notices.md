@@ -9,208 +9,208 @@
 
 | 文件 | 声明编号 |
 |---|---|
-| [apps/firefly/rootslam/src/dataset_output.rs](../../apps/firefly/rootslam/src/dataset_output.rs) | 49 |
-| [apps/firefly/rootslam/src/dataset.rs](../../apps/firefly/rootslam/src/dataset.rs) | 1, 48 |
-| [apps/firefly/rootslam/src/simulation.rs](../../apps/firefly/rootslam/src/simulation.rs) | 50 |
-| [crates/firefly-basalt/src/hash_bow/hash_bow.rs](../../crates/firefly-basalt/src/hash_bow/hash_bow.rs) | 2 |
-| [crates/firefly-basalt/src/image/image_pyr.rs](../../crates/firefly-basalt/src/image/image_pyr.rs) | 3, 51 |
-| [crates/firefly-basalt/src/imu/imu_types.rs](../../crates/firefly-basalt/src/imu/imu_types.rs) | 3, 52 |
-| [crates/firefly-basalt/src/imu/preintegration.rs](../../crates/firefly-basalt/src/imu/preintegration.rs) | 4, 5, 53 |
-| [crates/firefly-basalt/src/io/dataset_archive.rs](../../crates/firefly-basalt/src/io/dataset_archive.rs) | 1 |
-| [crates/firefly-basalt/src/io/dataset_io_euroc.rs](../../crates/firefly-basalt/src/io/dataset_io_euroc.rs) | 1, 55 |
-| [crates/firefly-basalt/src/io/dataset_io_kitti.rs](../../crates/firefly-basalt/src/io/dataset_io_kitti.rs) | 1, 56 |
-| [crates/firefly-basalt/src/io/dataset_io_uzh.rs](../../crates/firefly-basalt/src/io/dataset_io_uzh.rs) | 1, 57 |
-| [crates/firefly-basalt/src/io/dataset_io.rs](../../crates/firefly-basalt/src/io/dataset_io.rs) | 6, 54 |
-| [crates/firefly-basalt/src/io/marg_data_io.rs](../../crates/firefly-basalt/src/io/marg_data_io.rs) | 7, 58 |
-| [crates/firefly-basalt/src/kitti_eval.rs](../../crates/firefly-basalt/src/kitti_eval.rs) | 8, 9, 59 |
-| [crates/firefly-basalt/src/linearization/block_diagonal.rs](../../crates/firefly-basalt/src/linearization/block_diagonal.rs) | 1, 60 |
-| [crates/firefly-basalt/src/linearization/imu_block.rs](../../crates/firefly-basalt/src/linearization/imu_block.rs) | 10 |
-| [crates/firefly-basalt/src/linearization/landmark_block_abs_dynamic.rs](../../crates/firefly-basalt/src/linearization/landmark_block_abs_dynamic.rs) | 8, 62, 132 |
-| [crates/firefly-basalt/src/linearization/landmark_block.rs](../../crates/firefly-basalt/src/linearization/landmark_block.rs) | 1, 61 |
-| [crates/firefly-basalt/src/linearization/linearization_abs_qr.rs](../../crates/firefly-basalt/src/linearization/linearization_abs_qr.rs) | 1, 63 |
-| [crates/firefly-basalt/src/linearization/linearization_abs_sc.rs](../../crates/firefly-basalt/src/linearization/linearization_abs_sc.rs) | 1, 64 |
-| [crates/firefly-basalt/src/linearization/linearization_base.rs](../../crates/firefly-basalt/src/linearization/linearization_base.rs) | 1, 65 |
-| [crates/firefly-basalt/src/linearization/linearization_rel_sc.rs](../../crates/firefly-basalt/src/linearization/linearization_rel_sc.rs) | 1, 66 |
-| [crates/firefly-basalt/src/linearization/mod.rs](../../crates/firefly-basalt/src/linearization/mod.rs) | 67 |
-| [crates/firefly-basalt/src/mapper_sim_naive.rs](../../crates/firefly-basalt/src/mapper_sim_naive.rs) | 1, 70 |
-| [crates/firefly-basalt/src/mapper_sim.rs](../../crates/firefly-basalt/src/mapper_sim.rs) | 1, 69 |
-| [crates/firefly-basalt/src/mapper.rs](../../crates/firefly-basalt/src/mapper.rs) | 1, 68 |
-| [crates/firefly-basalt/src/opt_flow.rs](../../crates/firefly-basalt/src/opt_flow.rs) | 1, 71 |
-| [crates/firefly-basalt/src/optical_flow/frame_to_frame_optical_flow.rs](../../crates/firefly-basalt/src/optical_flow/frame_to_frame_optical_flow.rs) | 6, 11, 72 |
-| [crates/firefly-basalt/src/optical_flow/multiscale_frame_to_frame_optical_flow.rs](../../crates/firefly-basalt/src/optical_flow/multiscale_frame_to_frame_optical_flow.rs) | 6, 73, 131 |
-| [crates/firefly-basalt/src/optical_flow/optical_flow.rs](../../crates/firefly-basalt/src/optical_flow/optical_flow.rs) | 6, 74 |
-| [crates/firefly-basalt/src/optical_flow/patch_optical_flow.rs](../../crates/firefly-basalt/src/optical_flow/patch_optical_flow.rs) | 6, 76 |
-| [crates/firefly-basalt/src/optical_flow/patch.rs](../../crates/firefly-basalt/src/optical_flow/patch.rs) | 12, 13, 75 |
-| [crates/firefly-basalt/src/optical_flow/patterns.rs](../../crates/firefly-basalt/src/optical_flow/patterns.rs) | 12, 77 |
-| [crates/firefly-basalt/src/optimization/accumulator.rs](../../crates/firefly-basalt/src/optimization/accumulator.rs) | 7, 134 |
-| [crates/firefly-basalt/src/optimization/mod.rs](../../crates/firefly-basalt/src/optimization/mod.rs) | 78 |
-| [crates/firefly-basalt/src/serialization/eigen_io.rs](../../crates/firefly-basalt/src/serialization/eigen_io.rs) | 3, 79 |
-| [crates/firefly-basalt/src/spline/ceres_spline_helper.rs](../../crates/firefly-basalt/src/spline/ceres_spline_helper.rs) | 14, 80 |
-| [crates/firefly-basalt/src/spline/se3_spline.rs](../../crates/firefly-basalt/src/spline/se3_spline.rs) | 1, 81 |
-| [crates/firefly-basalt/src/spline/so3_spline.rs](../../crates/firefly-basalt/src/spline/so3_spline.rs) | 1, 82 |
-| [crates/firefly-basalt/src/time_alignment.rs](../../crates/firefly-basalt/src/time_alignment.rs) | 15, 16, 83 |
-| [crates/firefly-basalt/src/utils/amd.rs](../../crates/firefly-basalt/src/utils/amd.rs) | 17, 84 |
-| [crates/firefly-basalt/src/utils/ba_utils.rs](../../crates/firefly-basalt/src/utils/ba_utils.rs) | 1, 85 |
-| [crates/firefly-basalt/src/utils/common_types.rs](../../crates/firefly-basalt/src/utils/common_types.rs) | 18 |
-| [crates/firefly-basalt/src/utils/complete_orthogonal_decomposition.rs](../../crates/firefly-basalt/src/utils/complete_orthogonal_decomposition.rs) | 19 |
-| [crates/firefly-basalt/src/utils/full_piv_householder_qr.rs](../../crates/firefly-basalt/src/utils/full_piv_householder_qr.rs) | 20 |
-| [crates/firefly-basalt/src/utils/imu_types_archive.rs](../../crates/firefly-basalt/src/utils/imu_types_archive.rs) | 21 |
-| [crates/firefly-basalt/src/utils/imu_types.rs](../../crates/firefly-basalt/src/utils/imu_types.rs) | 7, 86 |
-| [crates/firefly-basalt/src/utils/keypoints.rs](../../crates/firefly-basalt/src/utils/keypoints.rs) | 12, 87 |
-| [crates/firefly-basalt/src/utils/ldlt.rs](../../crates/firefly-basalt/src/utils/ldlt.rs) | 22 |
-| [crates/firefly-basalt/src/utils/nfr.rs](../../crates/firefly-basalt/src/utils/nfr.rs) | 3, 135 |
-| [crates/firefly-basalt/src/utils/sim_utils.rs](../../crates/firefly-basalt/src/utils/sim_utils.rs) | 1, 88 |
-| [crates/firefly-basalt/src/utils/sophus_utils.rs](../../crates/firefly-basalt/src/utils/sophus_utils.rs) | 23, 24, 137 |
-| [crates/firefly-basalt/src/utils/sparse_ldlt.rs](../../crates/firefly-basalt/src/utils/sparse_ldlt.rs) | 25 |
-| [crates/firefly-basalt/src/utils/system_utils.rs](../../crates/firefly-basalt/src/utils/system_utils.rs) | 26, 89 |
-| [crates/firefly-basalt/src/utils/test_utils.rs](../../crates/firefly-basalt/src/utils/test_utils.rs) | 1, 90 |
-| [crates/firefly-basalt/src/utils/time_utils.rs](../../crates/firefly-basalt/src/utils/time_utils.rs) | 27, 91 |
-| [crates/firefly-basalt/src/utils/tracks.rs](../../crates/firefly-basalt/src/utils/tracks.rs) | 28 |
-| [crates/firefly-basalt/src/utils/union_find.rs](../../crates/firefly-basalt/src/utils/union_find.rs) | 29 |
-| [crates/firefly-basalt/src/utils/vio_config.rs](../../crates/firefly-basalt/src/utils/vio_config.rs) | 30 |
-| [crates/firefly-basalt/src/utils/vis_utils.rs](../../crates/firefly-basalt/src/utils/vis_utils.rs) | 1, 92 |
-| [crates/firefly-basalt/src/vi_estimator/ba_base.rs](../../crates/firefly-basalt/src/vi_estimator/ba_base.rs) | 7, 31, 93 |
-| [crates/firefly-basalt/src/vi_estimator/landmark_database.rs](../../crates/firefly-basalt/src/vi_estimator/landmark_database.rs) | 7, 136 |
-| [crates/firefly-basalt/src/vi_estimator/marg_helper.rs](../../crates/firefly-basalt/src/vi_estimator/marg_helper.rs) | 1, 94 |
-| [crates/firefly-basalt/src/vi_estimator/mod.rs](../../crates/firefly-basalt/src/vi_estimator/mod.rs) | 95 |
-| [crates/firefly-basalt/src/vi_estimator/nfr_mapper.rs](../../crates/firefly-basalt/src/vi_estimator/nfr_mapper.rs) | 3, 96 |
-| [crates/firefly-basalt/src/vi_estimator/sc_ba_base.rs](../../crates/firefly-basalt/src/vi_estimator/sc_ba_base.rs) | 1, 97 |
-| [crates/firefly-basalt/src/vi_estimator/sqrt_ba_base.rs](../../crates/firefly-basalt/src/vi_estimator/sqrt_ba_base.rs) | 1, 98 |
-| [crates/firefly-basalt/src/vi_estimator/sqrt_keypoint_vio.rs](../../crates/firefly-basalt/src/vi_estimator/sqrt_keypoint_vio.rs) | 1, 32, 99 |
-| [crates/firefly-basalt/src/vi_estimator/sqrt_keypoint_vo.rs](../../crates/firefly-basalt/src/vi_estimator/sqrt_keypoint_vo.rs) | 1 |
-| [crates/firefly-basalt/src/vi_estimator/vio_estimator.rs](../../crates/firefly-basalt/src/vi_estimator/vio_estimator.rs) | 1, 100 |
-| [crates/firefly-basalt/src/vio_sim.rs](../../crates/firefly-basalt/src/vio_sim.rs) | 8, 33, 101 |
-| [crates/firefly-calibration/src/calibration/calib_bias.rs](../../crates/firefly-calibration/src/calibration/calib_bias.rs) | 34, 102 |
-| [crates/firefly-calibration/src/calibration/calibration.rs](../../crates/firefly-calibration/src/calibration/calibration.rs) | 35, 103 |
-| [crates/firefly-calibration/src/calibration/serialization.rs](../../crates/firefly-calibration/src/calibration/serialization.rs) | 1, 104 |
-| [crates/firefly-calibration/src/camera/bal_camera.rs](../../crates/firefly-calibration/src/camera/bal_camera.rs) | 1, 105 |
-| [crates/firefly-calibration/src/camera/double_sphere_camera.rs](../../crates/firefly-calibration/src/camera/double_sphere_camera.rs) | 1, 106 |
-| [crates/firefly-calibration/src/camera/extended_camera.rs](../../crates/firefly-calibration/src/camera/extended_camera.rs) | 1, 107 |
-| [crates/firefly-calibration/src/camera/fov_camera.rs](../../crates/firefly-calibration/src/camera/fov_camera.rs) | 1, 108 |
-| [crates/firefly-calibration/src/camera/generic_camera.rs](../../crates/firefly-calibration/src/camera/generic_camera.rs) | 1, 109 |
-| [crates/firefly-calibration/src/camera/kannala_brandt_camera4.rs](../../crates/firefly-calibration/src/camera/kannala_brandt_camera4.rs) | 1, 110 |
-| [crates/firefly-calibration/src/camera/pinhole_camera.rs](../../crates/firefly-calibration/src/camera/pinhole_camera.rs) | 3, 111 |
-| [crates/firefly-calibration/src/camera/pinhole_radtan8_camera.rs](../../crates/firefly-calibration/src/camera/pinhole_radtan8_camera.rs) | 36, 112 |
-| [crates/firefly-calibration/src/camera/stereographic_param.rs](../../crates/firefly-calibration/src/camera/stereographic_param.rs) | 3, 113 |
-| [crates/firefly-calibration/src/camera/unified_camera.rs](../../crates/firefly-calibration/src/camera/unified_camera.rs) | 1, 114 |
-| [crates/firefly-calibration/src/image/image.rs](../../crates/firefly-calibration/src/image/image.rs) | 37 |
-| [crates/firefly-calibration/src/observation.rs](../../crates/firefly-calibration/src/observation.rs) | 38 |
-| [crates/firefly-calibration/src/spline/rd_bezier.rs](../../crates/firefly-calibration/src/spline/rd_bezier.rs) | 1, 115 |
-| [crates/firefly-calibration/src/spline/rd_spline.rs](../../crates/firefly-calibration/src/spline/rd_spline.rs) | 1, 116 |
-| [crates/firefly-calibration/src/spline/spline_common.rs](../../crates/firefly-calibration/src/spline/spline_common.rs) | 1, 117 |
-| [crates/firefly-cost/src/integrated.rs](../../crates/firefly-cost/src/integrated.rs) | 138 |
-| [crates/firefly-ego-map/src/config.rs](../../crates/firefly-ego-map/src/config.rs) | 39 |
-| [crates/firefly-ego-map/src/grid.rs](../../crates/firefly-ego-map/src/grid.rs) | 39 |
-| [crates/firefly-ego-map/src/grid/window.rs](../../crates/firefly-ego-map/src/grid/window.rs) | 39 |
-| [crates/firefly-ego-map/src/lib.rs](../../crates/firefly-ego-map/src/lib.rs) | 39, 118, 119 |
-| [crates/firefly-ego-map/src/raycast.rs](../../crates/firefly-ego-map/src/raycast.rs) | 39 |
-| [crates/firefly-ego-map/tests/reference/harness.cpp](../../crates/firefly-ego-map/tests/reference/harness.cpp) | 40 |
-| [crates/firefly-flight/src/lib.rs](../../crates/firefly-flight/src/lib.rs) | 120 |
-| [crates/firefly-flight/src/px4/allocation.rs](../../crates/firefly-flight/src/px4/allocation.rs) | 121 |
-| [crates/firefly-flight/src/px4/attitude_control_math.rs](../../crates/firefly-flight/src/px4/attitude_control_math.rs) | 123 |
-| [crates/firefly-flight/src/px4/attitude_control.rs](../../crates/firefly-flight/src/px4/attitude_control.rs) | 122 |
-| [crates/firefly-flight/src/px4/control_math.rs](../../crates/firefly-flight/src/px4/control_math.rs) | 124 |
-| [crates/firefly-flight/src/px4/mod.rs](../../crates/firefly-flight/src/px4/mod.rs) | 125 |
-| [crates/firefly-flight/src/px4/position_control.rs](../../crates/firefly-flight/src/px4/position_control.rs) | 126 |
-| [crates/firefly-flight/src/px4/rate_control.rs](../../crates/firefly-flight/src/px4/rate_control.rs) | 127 |
-| [crates/firefly-flight/src/px4/types.rs](../../crates/firefly-flight/src/px4/types.rs) | 128 |
-| [crates/firefly-imu-propagation/src/lib.rs](../../crates/firefly-imu-propagation/src/lib.rs) | 129 |
-| [crates/firefly-opengv/src/absolute_pose/absolute_adapter_base.rs](../../crates/firefly-opengv/src/absolute_pose/absolute_adapter_base.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/absolute_multi_adapter_base.rs](../../crates/firefly-opengv/src/absolute_pose/absolute_multi_adapter_base.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/central_absolute_adapter.rs](../../crates/firefly-opengv/src/absolute_pose/central_absolute_adapter.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/ma_central_absolute.rs](../../crates/firefly-opengv/src/absolute_pose/ma_central_absolute.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/ma_noncentral_absolute.rs](../../crates/firefly-opengv/src/absolute_pose/ma_noncentral_absolute.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/methods.rs](../../crates/firefly-opengv/src/absolute_pose/methods.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/epnp.rs](../../crates/firefly-opengv/src/absolute_pose/modules/epnp.rs) | 41、141 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gp3p/code.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gp3p/code.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gp3p/init.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gp3p/init.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gp3p/reductors.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gp3p/reductors.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gp3p/spolynomials.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gp3p/spolynomials.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp1/code.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp1/code.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp1/init.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp1/init.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp1/reductors.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp1/reductors.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp1/spolynomials.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp1/spolynomials.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp2/code.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp2/code.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp2/init.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp2/init.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp2/reductors.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp2/reductors.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp2/spolynomials.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp2/spolynomials.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp3/code.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp3/code.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp3/init.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp3/init.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp3/reductors.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp3/reductors.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp3/spolynomials.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp3/spolynomials.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp4/code.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp4/code.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp4/init.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp4/init.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp4/reductors.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp4/reductors.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp4/spolynomials.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp4/spolynomials.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp5/code.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp5/code.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp5/init.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp5/init.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp5/reductors.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp5/reductors.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/gpnp5/spolynomials.rs](../../crates/firefly-opengv/src/absolute_pose/modules/gpnp5/spolynomials.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/main.rs](../../crates/firefly-opengv/src/absolute_pose/modules/main.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/upnp2.rs](../../crates/firefly-opengv/src/absolute_pose/modules/upnp2.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/modules/upnp4.rs](../../crates/firefly-opengv/src/absolute_pose/modules/upnp4.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/noncentral_absolute_adapter.rs](../../crates/firefly-opengv/src/absolute_pose/noncentral_absolute_adapter.rs) | 41 |
-| [crates/firefly-opengv/src/absolute_pose/noncentral_absolute_multi_adapter.rs](../../crates/firefly-opengv/src/absolute_pose/noncentral_absolute_multi_adapter.rs) | 41 |
-| [crates/firefly-opengv/src/indices.rs](../../crates/firefly-opengv/src/indices.rs) | 41 |
-| [crates/firefly-opengv/src/lib.rs](../../crates/firefly-opengv/src/lib.rs) | 42 |
-| [crates/firefly-opengv/src/math/arun.rs](../../crates/firefly-opengv/src/math/arun.rs) | 41 |
-| [crates/firefly-opengv/src/math/cayley.rs](../../crates/firefly-opengv/src/math/cayley.rs) | 41 |
-| [crates/firefly-opengv/src/math/gauss_jordan.rs](../../crates/firefly-opengv/src/math/gauss_jordan.rs) | 41 |
-| [crates/firefly-opengv/src/math/quaternion.rs](../../crates/firefly-opengv/src/math/quaternion.rs) | 41 |
-| [crates/firefly-opengv/src/math/roots.rs](../../crates/firefly-opengv/src/math/roots.rs) | 41 |
-| [crates/firefly-opengv/src/math/sturm.rs](../../crates/firefly-opengv/src/math/sturm.rs) | 41 |
-| [crates/firefly-opengv/src/optimization_functor.rs](../../crates/firefly-opengv/src/optimization_functor.rs) | 41 |
-| [crates/firefly-opengv/src/optimization_functor/minpack_lm.rs](../../crates/firefly-opengv/src/optimization_functor/minpack_lm.rs) | 43 |
-| [crates/firefly-opengv/src/point_cloud/ma_point_cloud.rs](../../crates/firefly-opengv/src/point_cloud/ma_point_cloud.rs) | 41 |
-| [crates/firefly-opengv/src/point_cloud/methods.rs](../../crates/firefly-opengv/src/point_cloud/methods.rs) | 41 |
-| [crates/firefly-opengv/src/point_cloud/point_cloud_adapter_base.rs](../../crates/firefly-opengv/src/point_cloud/point_cloud_adapter_base.rs) | 41 |
-| [crates/firefly-opengv/src/point_cloud/point_cloud_adapter.rs](../../crates/firefly-opengv/src/point_cloud/point_cloud_adapter.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/central_relative_adapter.rs](../../crates/firefly-opengv/src/relative_pose/central_relative_adapter.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/central_relative_multi_adapter.rs](../../crates/firefly-opengv/src/relative_pose/central_relative_multi_adapter.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/central_relative_weighting_adapter.rs](../../crates/firefly-opengv/src/relative_pose/central_relative_weighting_adapter.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/ma_central_relative.rs](../../crates/firefly-opengv/src/relative_pose/ma_central_relative.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/ma_noncentral_relative_multi.rs](../../crates/firefly-opengv/src/relative_pose/ma_noncentral_relative_multi.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/ma_noncentral_relative.rs](../../crates/firefly-opengv/src/relative_pose/ma_noncentral_relative.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/methods.rs](../../crates/firefly-opengv/src/relative_pose/methods.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/modules/eigensolver/modules.rs](../../crates/firefly-opengv/src/relative_pose/modules/eigensolver/modules.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/modules/fivept_kneip/code.rs](../../crates/firefly-opengv/src/relative_pose/modules/fivept_kneip/code.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/modules/fivept_kneip/init.rs](../../crates/firefly-opengv/src/relative_pose/modules/fivept_kneip/init.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/modules/fivept_kneip/reductors.rs](../../crates/firefly-opengv/src/relative_pose/modules/fivept_kneip/reductors.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/modules/fivept_kneip/spolynomials.rs](../../crates/firefly-opengv/src/relative_pose/modules/fivept_kneip/spolynomials.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/modules/fivept_nister/modules.rs](../../crates/firefly-opengv/src/relative_pose/modules/fivept_nister/modules.rs) | 44 |
-| [crates/firefly-opengv/src/relative_pose/modules/fivept_stewenius/modules.rs](../../crates/firefly-opengv/src/relative_pose/modules/fivept_stewenius/modules.rs) | 44 |
-| [crates/firefly-opengv/src/relative_pose/modules/ge/modules.rs](../../crates/firefly-opengv/src/relative_pose/modules/ge/modules.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/modules/main.rs](../../crates/firefly-opengv/src/relative_pose/modules/main.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/modules/sixpt/modules2.rs](../../crates/firefly-opengv/src/relative_pose/modules/sixpt/modules2.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/noncentral_relative_adapter.rs](../../crates/firefly-opengv/src/relative_pose/noncentral_relative_adapter.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/noncentral_relative_multi_adapter.rs](../../crates/firefly-opengv/src/relative_pose/noncentral_relative_multi_adapter.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/relative_adapter_base.rs](../../crates/firefly-opengv/src/relative_pose/relative_adapter_base.rs) | 41 |
-| [crates/firefly-opengv/src/relative_pose/relative_multi_adapter_base.rs](../../crates/firefly-opengv/src/relative_pose/relative_multi_adapter_base.rs) | 41 |
-| [crates/firefly-opengv/src/sac_problems/absolute_pose/absolute_pose_sac_problem.rs](../../crates/firefly-opengv/src/sac_problems/absolute_pose/absolute_pose_sac_problem.rs) | 41 |
-| [crates/firefly-opengv/src/sac_problems/absolute_pose/multi_noncentral_absolute_pose_sac_problem.rs](../../crates/firefly-opengv/src/sac_problems/absolute_pose/multi_noncentral_absolute_pose_sac_problem.rs) | 41 |
-| [crates/firefly-opengv/src/sac_problems/point_cloud/point_cloud_sac_problem.rs](../../crates/firefly-opengv/src/sac_problems/point_cloud/point_cloud_sac_problem.rs) | 41 |
-| [crates/firefly-opengv/src/sac_problems/relative_pose/central_relative_pose_sac_problem.rs](../../crates/firefly-opengv/src/sac_problems/relative_pose/central_relative_pose_sac_problem.rs) | 41 |
-| [crates/firefly-opengv/src/sac_problems/relative_pose/eigensolver_sac_problem.rs](../../crates/firefly-opengv/src/sac_problems/relative_pose/eigensolver_sac_problem.rs) | 41 |
-| [crates/firefly-opengv/src/sac_problems/relative_pose/multi_central_relative_pose_sac_problem.rs](../../crates/firefly-opengv/src/sac_problems/relative_pose/multi_central_relative_pose_sac_problem.rs) | 41 |
-| [crates/firefly-opengv/src/sac_problems/relative_pose/multi_noncentral_relative_pose_sac_problem.rs](../../crates/firefly-opengv/src/sac_problems/relative_pose/multi_noncentral_relative_pose_sac_problem.rs) | 41 |
-| [crates/firefly-opengv/src/sac_problems/relative_pose/noncentral_relative_pose_sac_problem.rs](../../crates/firefly-opengv/src/sac_problems/relative_pose/noncentral_relative_pose_sac_problem.rs) | 41 |
-| [crates/firefly-opengv/src/sac_problems/relative_pose/rotation_only_sac_problem.rs](../../crates/firefly-opengv/src/sac_problems/relative_pose/rotation_only_sac_problem.rs) | 41 |
-| [crates/firefly-opengv/src/sac_problems/relative_pose/translation_only_sac_problem.rs](../../crates/firefly-opengv/src/sac_problems/relative_pose/translation_only_sac_problem.rs) | 41 |
-| [crates/firefly-opengv/src/sac/lmeds.rs](../../crates/firefly-opengv/src/sac/lmeds.rs) | 45 |
-| [crates/firefly-opengv/src/sac/multi_ransac.rs](../../crates/firefly-opengv/src/sac/multi_ransac.rs) | 46 |
-| [crates/firefly-opengv/src/sac/multi_sample_consensus_problem.rs](../../crates/firefly-opengv/src/sac/multi_sample_consensus_problem.rs) | 46 |
-| [crates/firefly-opengv/src/sac/multi_sample_consensus.rs](../../crates/firefly-opengv/src/sac/multi_sample_consensus.rs) | 46 |
-| [crates/firefly-opengv/src/sac/ransac.rs](../../crates/firefly-opengv/src/sac/ransac.rs) | 46 |
-| [crates/firefly-opengv/src/sac/sample_consensus_problem.rs](../../crates/firefly-opengv/src/sac/sample_consensus_problem.rs) | 46 |
-| [crates/firefly-opengv/src/sac/sample_consensus.rs](../../crates/firefly-opengv/src/sac/sample_consensus.rs) | 46 |
-| [crates/firefly-opengv/src/triangulation/methods.rs](../../crates/firefly-opengv/src/triangulation/methods.rs) | 41 |
-| [crates/firefly-opengv/src/types.rs](../../crates/firefly-opengv/src/types.rs) | 41 |
-| [crates/firefly-opengv/tests/frontend_geometry_contracts.rs](../../crates/firefly-opengv/tests/frontend_geometry_contracts.rs) | 42 |
-| [crates/firefly-opengv/tests/geometry_contracts.rs](../../crates/firefly-opengv/tests/geometry_contracts.rs) | 42 |
-| [crates/firefly-rootslam-mapping/src/global_optimization/rootba.rs](../../crates/firefly-rootslam-mapping/src/global_optimization/rootba.rs) | 47, 133 |
-| [crates/firefly-rootslam-mapping/src/pose_graph.rs](../../crates/firefly-rootslam-mapping/src/pose_graph.rs) | 130 |
-| [crates/firefly-vio-runtime/src/publish.rs](../../crates/firefly-vio-runtime/src/publish.rs) | 42 |
-| [scripts/fetch_drone_model.py](../../scripts/fetch_drone_model.py) | 139, 140 |
+| [apps/firefly/rootslam/src/dataset_output.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/apps/firefly/rootslam/src/dataset_output.rs) | 49 |
+| [apps/firefly/rootslam/src/dataset.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/apps/firefly/rootslam/src/dataset.rs) | 1, 48 |
+| [apps/firefly/rootslam/src/simulation.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/apps/firefly/rootslam/src/simulation.rs) | 50 |
+| [crates/firefly-basalt/src/hash_bow/hash_bow.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/hash_bow/hash_bow.rs) | 2 |
+| [crates/firefly-basalt/src/image/image_pyr.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/image/image_pyr.rs) | 3, 51 |
+| [crates/firefly-basalt/src/imu/imu_types.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/imu/imu_types.rs) | 3, 52 |
+| [crates/firefly-basalt/src/imu/preintegration.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/imu/preintegration.rs) | 4, 5, 53 |
+| [crates/firefly-basalt/src/io/dataset_archive.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/io/dataset_archive.rs) | 1 |
+| [crates/firefly-basalt/src/io/dataset_io_euroc.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/io/dataset_io_euroc.rs) | 1, 55 |
+| [crates/firefly-basalt/src/io/dataset_io_kitti.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/io/dataset_io_kitti.rs) | 1, 56 |
+| [crates/firefly-basalt/src/io/dataset_io_uzh.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/io/dataset_io_uzh.rs) | 1, 57 |
+| [crates/firefly-basalt/src/io/dataset_io.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/io/dataset_io.rs) | 6, 54 |
+| [crates/firefly-basalt/src/io/marg_data_io.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/io/marg_data_io.rs) | 7, 58 |
+| [crates/firefly-basalt/src/kitti_eval.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/kitti_eval.rs) | 8, 9, 59 |
+| [crates/firefly-basalt/src/linearization/block_diagonal.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/linearization/block_diagonal.rs) | 1, 60 |
+| [crates/firefly-basalt/src/linearization/imu_block.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/linearization/imu_block.rs) | 10 |
+| [crates/firefly-basalt/src/linearization/landmark_block_abs_dynamic.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/linearization/landmark_block_abs_dynamic.rs) | 8, 62, 132 |
+| [crates/firefly-basalt/src/linearization/landmark_block.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/linearization/landmark_block.rs) | 1, 61 |
+| [crates/firefly-basalt/src/linearization/linearization_abs_qr.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/linearization/linearization_abs_qr.rs) | 1, 63 |
+| [crates/firefly-basalt/src/linearization/linearization_abs_sc.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/linearization/linearization_abs_sc.rs) | 1, 64 |
+| [crates/firefly-basalt/src/linearization/linearization_base.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/linearization/linearization_base.rs) | 1, 65 |
+| [crates/firefly-basalt/src/linearization/linearization_rel_sc.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/linearization/linearization_rel_sc.rs) | 1, 66 |
+| [crates/firefly-basalt/src/linearization/mod.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/linearization/mod.rs) | 67 |
+| [crates/firefly-basalt/src/mapper_sim_naive.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/mapper_sim_naive.rs) | 1, 70 |
+| [crates/firefly-basalt/src/mapper_sim.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/mapper_sim.rs) | 1, 69 |
+| [crates/firefly-basalt/src/mapper.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/mapper.rs) | 1, 68 |
+| [crates/firefly-basalt/src/opt_flow.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/opt_flow.rs) | 1, 71 |
+| [crates/firefly-basalt/src/optical_flow/frame_to_frame_optical_flow.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/optical_flow/frame_to_frame_optical_flow.rs) | 6, 11, 72 |
+| [crates/firefly-basalt/src/optical_flow/multiscale_frame_to_frame_optical_flow.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/optical_flow/multiscale_frame_to_frame_optical_flow.rs) | 6, 73, 131 |
+| [crates/firefly-basalt/src/optical_flow/optical_flow.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/optical_flow/optical_flow.rs) | 6, 74 |
+| [crates/firefly-basalt/src/optical_flow/patch_optical_flow.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/optical_flow/patch_optical_flow.rs) | 6, 76 |
+| [crates/firefly-basalt/src/optical_flow/patch.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/optical_flow/patch.rs) | 12, 13, 75 |
+| [crates/firefly-basalt/src/optical_flow/patterns.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/optical_flow/patterns.rs) | 12, 77 |
+| [crates/firefly-basalt/src/optimization/accumulator.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/optimization/accumulator.rs) | 7, 134 |
+| [crates/firefly-basalt/src/optimization/mod.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/optimization/mod.rs) | 78 |
+| [crates/firefly-basalt/src/serialization/eigen_io.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/serialization/eigen_io.rs) | 3, 79 |
+| [crates/firefly-basalt/src/spline/ceres_spline_helper.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/spline/ceres_spline_helper.rs) | 14, 80 |
+| [crates/firefly-basalt/src/spline/se3_spline.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/spline/se3_spline.rs) | 1, 81 |
+| [crates/firefly-basalt/src/spline/so3_spline.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/spline/so3_spline.rs) | 1, 82 |
+| [crates/firefly-basalt/src/time_alignment.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/time_alignment.rs) | 15, 16, 83 |
+| [crates/firefly-basalt/src/utils/amd.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/amd.rs) | 17, 84 |
+| [crates/firefly-basalt/src/utils/ba_utils.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/ba_utils.rs) | 1, 85 |
+| [crates/firefly-basalt/src/utils/common_types.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/common_types.rs) | 18 |
+| [crates/firefly-basalt/src/utils/complete_orthogonal_decomposition.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/complete_orthogonal_decomposition.rs) | 19 |
+| [crates/firefly-basalt/src/utils/full_piv_householder_qr.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/full_piv_householder_qr.rs) | 20 |
+| [crates/firefly-basalt/src/utils/imu_types_archive.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/imu_types_archive.rs) | 21 |
+| [crates/firefly-basalt/src/utils/imu_types.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/imu_types.rs) | 7, 86 |
+| [crates/firefly-basalt/src/utils/keypoints.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/keypoints.rs) | 12, 87 |
+| [crates/firefly-basalt/src/utils/ldlt.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/ldlt.rs) | 22 |
+| [crates/firefly-basalt/src/utils/nfr.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/nfr.rs) | 3, 135 |
+| [crates/firefly-basalt/src/utils/sim_utils.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/sim_utils.rs) | 1, 88 |
+| [crates/firefly-basalt/src/utils/sophus_utils.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/sophus_utils.rs) | 23, 24, 137 |
+| [crates/firefly-basalt/src/utils/sparse_ldlt.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/sparse_ldlt.rs) | 25 |
+| [crates/firefly-basalt/src/utils/system_utils.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/system_utils.rs) | 26, 89 |
+| [crates/firefly-basalt/src/utils/test_utils.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/test_utils.rs) | 1, 90 |
+| [crates/firefly-basalt/src/utils/time_utils.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/time_utils.rs) | 27, 91 |
+| [crates/firefly-basalt/src/utils/tracks.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/tracks.rs) | 28 |
+| [crates/firefly-basalt/src/utils/union_find.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/union_find.rs) | 29 |
+| [crates/firefly-basalt/src/utils/vio_config.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/vio_config.rs) | 30 |
+| [crates/firefly-basalt/src/utils/vis_utils.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/utils/vis_utils.rs) | 1, 92 |
+| [crates/firefly-basalt/src/vi_estimator/ba_base.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/vi_estimator/ba_base.rs) | 7, 31, 93 |
+| [crates/firefly-basalt/src/vi_estimator/landmark_database.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/vi_estimator/landmark_database.rs) | 7, 136 |
+| [crates/firefly-basalt/src/vi_estimator/marg_helper.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/vi_estimator/marg_helper.rs) | 1, 94 |
+| [crates/firefly-basalt/src/vi_estimator/mod.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/vi_estimator/mod.rs) | 95 |
+| [crates/firefly-basalt/src/vi_estimator/nfr_mapper.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/vi_estimator/nfr_mapper.rs) | 3, 96 |
+| [crates/firefly-basalt/src/vi_estimator/sc_ba_base.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/vi_estimator/sc_ba_base.rs) | 1, 97 |
+| [crates/firefly-basalt/src/vi_estimator/sqrt_ba_base.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/vi_estimator/sqrt_ba_base.rs) | 1, 98 |
+| [crates/firefly-basalt/src/vi_estimator/sqrt_keypoint_vio.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/vi_estimator/sqrt_keypoint_vio.rs) | 1, 32, 99 |
+| [crates/firefly-basalt/src/vi_estimator/sqrt_keypoint_vo.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/vi_estimator/sqrt_keypoint_vo.rs) | 1 |
+| [crates/firefly-basalt/src/vi_estimator/vio_estimator.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/vi_estimator/vio_estimator.rs) | 1, 100 |
+| [crates/firefly-basalt/src/vio_sim.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-basalt/src/vio_sim.rs) | 8, 33, 101 |
+| [crates/firefly-calibration/src/calibration/calib_bias.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/calibration/calib_bias.rs) | 34, 102 |
+| [crates/firefly-calibration/src/calibration/calibration.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/calibration/calibration.rs) | 35, 103 |
+| [crates/firefly-calibration/src/calibration/serialization.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/calibration/serialization.rs) | 1, 104 |
+| [crates/firefly-calibration/src/camera/bal_camera.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/camera/bal_camera.rs) | 1, 105 |
+| [crates/firefly-calibration/src/camera/double_sphere_camera.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/camera/double_sphere_camera.rs) | 1, 106 |
+| [crates/firefly-calibration/src/camera/extended_camera.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/camera/extended_camera.rs) | 1, 107 |
+| [crates/firefly-calibration/src/camera/fov_camera.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/camera/fov_camera.rs) | 1, 108 |
+| [crates/firefly-calibration/src/camera/generic_camera.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/camera/generic_camera.rs) | 1, 109 |
+| [crates/firefly-calibration/src/camera/kannala_brandt_camera4.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/camera/kannala_brandt_camera4.rs) | 1, 110 |
+| [crates/firefly-calibration/src/camera/pinhole_camera.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/camera/pinhole_camera.rs) | 3, 111 |
+| [crates/firefly-calibration/src/camera/pinhole_radtan8_camera.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/camera/pinhole_radtan8_camera.rs) | 36, 112 |
+| [crates/firefly-calibration/src/camera/stereographic_param.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/camera/stereographic_param.rs) | 3, 113 |
+| [crates/firefly-calibration/src/camera/unified_camera.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/camera/unified_camera.rs) | 1, 114 |
+| [crates/firefly-calibration/src/image/image.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/image/image.rs) | 37 |
+| [crates/firefly-calibration/src/observation.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/observation.rs) | 38 |
+| [crates/firefly-calibration/src/spline/rd_bezier.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/spline/rd_bezier.rs) | 1, 115 |
+| [crates/firefly-calibration/src/spline/rd_spline.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/spline/rd_spline.rs) | 1, 116 |
+| [crates/firefly-calibration/src/spline/spline_common.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/spline/spline_common.rs) | 1, 117 |
+| [crates/firefly-cost/src/integrated.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-cost/src/integrated.rs) | 138 |
+| [crates/firefly-ego-map/src/config.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-ego-map/src/config.rs) | 39 |
+| [crates/firefly-ego-map/src/grid.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-ego-map/src/grid.rs) | 39 |
+| [crates/firefly-ego-map/src/grid/window.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-ego-map/src/grid/window.rs) | 39 |
+| [crates/firefly-ego-map/src/lib.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-ego-map/src/lib.rs) | 39, 118, 119 |
+| [crates/firefly-ego-map/src/raycast.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-ego-map/src/raycast.rs) | 39 |
+| [crates/firefly-ego-map/tests/reference/harness.cpp](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-ego-map/tests/reference/harness.cpp) | 40 |
+| [crates/firefly-flight/src/lib.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-flight/src/lib.rs) | 120 |
+| [crates/firefly-flight/src/px4/allocation.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-flight/src/px4/allocation.rs) | 121 |
+| [crates/firefly-flight/src/px4/attitude_control_math.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-flight/src/px4/attitude_control_math.rs) | 123 |
+| [crates/firefly-flight/src/px4/attitude_control.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-flight/src/px4/attitude_control.rs) | 122 |
+| [crates/firefly-flight/src/px4/control_math.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-flight/src/px4/control_math.rs) | 124 |
+| [crates/firefly-flight/src/px4/mod.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-flight/src/px4/mod.rs) | 125 |
+| [crates/firefly-flight/src/px4/position_control.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-flight/src/px4/position_control.rs) | 126 |
+| [crates/firefly-flight/src/px4/rate_control.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-flight/src/px4/rate_control.rs) | 127 |
+| [crates/firefly-flight/src/px4/types.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-flight/src/px4/types.rs) | 128 |
+| [crates/firefly-imu-propagation/src/lib.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-imu-propagation/src/lib.rs) | 129 |
+| [crates/firefly-opengv/src/absolute_pose/absolute_adapter_base.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/absolute_adapter_base.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/absolute_multi_adapter_base.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/absolute_multi_adapter_base.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/central_absolute_adapter.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/central_absolute_adapter.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/ma_central_absolute.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/ma_central_absolute.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/ma_noncentral_absolute.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/ma_noncentral_absolute.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/methods.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/methods.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/epnp.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/epnp.rs) | 41、141 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gp3p/code.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gp3p/code.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gp3p/init.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gp3p/init.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gp3p/reductors.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gp3p/reductors.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gp3p/spolynomials.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gp3p/spolynomials.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp1/code.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp1/code.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp1/init.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp1/init.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp1/reductors.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp1/reductors.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp1/spolynomials.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp1/spolynomials.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp2/code.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp2/code.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp2/init.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp2/init.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp2/reductors.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp2/reductors.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp2/spolynomials.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp2/spolynomials.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp3/code.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp3/code.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp3/init.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp3/init.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp3/reductors.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp3/reductors.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp3/spolynomials.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp3/spolynomials.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp4/code.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp4/code.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp4/init.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp4/init.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp4/reductors.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp4/reductors.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp4/spolynomials.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp4/spolynomials.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp5/code.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp5/code.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp5/init.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp5/init.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp5/reductors.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp5/reductors.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/gpnp5/spolynomials.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/gpnp5/spolynomials.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/main.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/main.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/upnp2.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/upnp2.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/modules/upnp4.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/modules/upnp4.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/noncentral_absolute_adapter.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/noncentral_absolute_adapter.rs) | 41 |
+| [crates/firefly-opengv/src/absolute_pose/noncentral_absolute_multi_adapter.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/absolute_pose/noncentral_absolute_multi_adapter.rs) | 41 |
+| [crates/firefly-opengv/src/indices.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/indices.rs) | 41 |
+| [crates/firefly-opengv/src/lib.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/lib.rs) | 42 |
+| [crates/firefly-opengv/src/math/arun.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/math/arun.rs) | 41 |
+| [crates/firefly-opengv/src/math/cayley.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/math/cayley.rs) | 41 |
+| [crates/firefly-opengv/src/math/gauss_jordan.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/math/gauss_jordan.rs) | 41 |
+| [crates/firefly-opengv/src/math/quaternion.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/math/quaternion.rs) | 41 |
+| [crates/firefly-opengv/src/math/roots.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/math/roots.rs) | 41 |
+| [crates/firefly-opengv/src/math/sturm.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/math/sturm.rs) | 41 |
+| [crates/firefly-opengv/src/optimization_functor.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/optimization_functor.rs) | 41 |
+| [crates/firefly-opengv/src/optimization_functor/minpack_lm.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/optimization_functor/minpack_lm.rs) | 43 |
+| [crates/firefly-opengv/src/point_cloud/ma_point_cloud.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/point_cloud/ma_point_cloud.rs) | 41 |
+| [crates/firefly-opengv/src/point_cloud/methods.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/point_cloud/methods.rs) | 41 |
+| [crates/firefly-opengv/src/point_cloud/point_cloud_adapter_base.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/point_cloud/point_cloud_adapter_base.rs) | 41 |
+| [crates/firefly-opengv/src/point_cloud/point_cloud_adapter.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/point_cloud/point_cloud_adapter.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/central_relative_adapter.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/central_relative_adapter.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/central_relative_multi_adapter.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/central_relative_multi_adapter.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/central_relative_weighting_adapter.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/central_relative_weighting_adapter.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/ma_central_relative.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/ma_central_relative.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/ma_noncentral_relative_multi.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/ma_noncentral_relative_multi.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/ma_noncentral_relative.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/ma_noncentral_relative.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/methods.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/methods.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/modules/eigensolver/modules.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/modules/eigensolver/modules.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/modules/fivept_kneip/code.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/modules/fivept_kneip/code.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/modules/fivept_kneip/init.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/modules/fivept_kneip/init.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/modules/fivept_kneip/reductors.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/modules/fivept_kneip/reductors.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/modules/fivept_kneip/spolynomials.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/modules/fivept_kneip/spolynomials.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/modules/fivept_nister/modules.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/modules/fivept_nister/modules.rs) | 44 |
+| [crates/firefly-opengv/src/relative_pose/modules/fivept_stewenius/modules.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/modules/fivept_stewenius/modules.rs) | 44 |
+| [crates/firefly-opengv/src/relative_pose/modules/ge/modules.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/modules/ge/modules.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/modules/main.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/modules/main.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/modules/sixpt/modules2.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/modules/sixpt/modules2.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/noncentral_relative_adapter.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/noncentral_relative_adapter.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/noncentral_relative_multi_adapter.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/noncentral_relative_multi_adapter.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/relative_adapter_base.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/relative_adapter_base.rs) | 41 |
+| [crates/firefly-opengv/src/relative_pose/relative_multi_adapter_base.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/relative_pose/relative_multi_adapter_base.rs) | 41 |
+| [crates/firefly-opengv/src/sac_problems/absolute_pose/absolute_pose_sac_problem.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/sac_problems/absolute_pose/absolute_pose_sac_problem.rs) | 41 |
+| [crates/firefly-opengv/src/sac_problems/absolute_pose/multi_noncentral_absolute_pose_sac_problem.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/sac_problems/absolute_pose/multi_noncentral_absolute_pose_sac_problem.rs) | 41 |
+| [crates/firefly-opengv/src/sac_problems/point_cloud/point_cloud_sac_problem.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/sac_problems/point_cloud/point_cloud_sac_problem.rs) | 41 |
+| [crates/firefly-opengv/src/sac_problems/relative_pose/central_relative_pose_sac_problem.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/sac_problems/relative_pose/central_relative_pose_sac_problem.rs) | 41 |
+| [crates/firefly-opengv/src/sac_problems/relative_pose/eigensolver_sac_problem.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/sac_problems/relative_pose/eigensolver_sac_problem.rs) | 41 |
+| [crates/firefly-opengv/src/sac_problems/relative_pose/multi_central_relative_pose_sac_problem.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/sac_problems/relative_pose/multi_central_relative_pose_sac_problem.rs) | 41 |
+| [crates/firefly-opengv/src/sac_problems/relative_pose/multi_noncentral_relative_pose_sac_problem.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/sac_problems/relative_pose/multi_noncentral_relative_pose_sac_problem.rs) | 41 |
+| [crates/firefly-opengv/src/sac_problems/relative_pose/noncentral_relative_pose_sac_problem.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/sac_problems/relative_pose/noncentral_relative_pose_sac_problem.rs) | 41 |
+| [crates/firefly-opengv/src/sac_problems/relative_pose/rotation_only_sac_problem.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/sac_problems/relative_pose/rotation_only_sac_problem.rs) | 41 |
+| [crates/firefly-opengv/src/sac_problems/relative_pose/translation_only_sac_problem.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/sac_problems/relative_pose/translation_only_sac_problem.rs) | 41 |
+| [crates/firefly-opengv/src/sac/lmeds.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/sac/lmeds.rs) | 45 |
+| [crates/firefly-opengv/src/sac/multi_ransac.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/sac/multi_ransac.rs) | 46 |
+| [crates/firefly-opengv/src/sac/multi_sample_consensus_problem.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/sac/multi_sample_consensus_problem.rs) | 46 |
+| [crates/firefly-opengv/src/sac/multi_sample_consensus.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/sac/multi_sample_consensus.rs) | 46 |
+| [crates/firefly-opengv/src/sac/ransac.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/sac/ransac.rs) | 46 |
+| [crates/firefly-opengv/src/sac/sample_consensus_problem.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/sac/sample_consensus_problem.rs) | 46 |
+| [crates/firefly-opengv/src/sac/sample_consensus.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/sac/sample_consensus.rs) | 46 |
+| [crates/firefly-opengv/src/triangulation/methods.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/triangulation/methods.rs) | 41 |
+| [crates/firefly-opengv/src/types.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/src/types.rs) | 41 |
+| [crates/firefly-opengv/tests/frontend_geometry_contracts.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/tests/frontend_geometry_contracts.rs) | 42 |
+| [crates/firefly-opengv/tests/geometry_contracts.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-opengv/tests/geometry_contracts.rs) | 42 |
+| [crates/firefly-rootslam-mapping/src/global_optimization/rootba.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-rootslam-mapping/src/global_optimization/rootba.rs) | 47, 133 |
+| [crates/firefly-rootslam-mapping/src/pose_graph.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-rootslam-mapping/src/pose_graph.rs) | 130 |
+| [crates/firefly-vio-runtime/src/publish.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-vio-runtime/src/publish.rs) | 42 |
+| [scripts/fetch_drone_model.py](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/scripts/fetch_drone_model.py) | 139, 140 |
 
 ## 声明索引
 

@@ -13,7 +13,7 @@ Every observation change must include these steps in the same review:
 2. Use business topics for business data, `Firefly/VizScalars` for numeric diagnostics,
    `Firefly/Viz` for spatial diagnostics, `Firefly/VizVoxels` for maps, and `Firefly/Log` for human-readable events.
    Structured observations carry per-point data; TextLog carries bounded events. Business payloads describe their consumers' data needs.
-3. Register numeric fields, order and units in [mimir/schema.rs](../apps/firefly/mimir/src/schema.rs).
+3. Register numeric fields, order and units in [mimir/schema.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/apps/firefly/mimir/src/schema.rs).
    Register spatial paths and allowed payload kinds there too. Unknown paths, kinds and widths fail recording.
    Dynamic paths use bounded syntax; frame and landmark identities belong in component fields.
 4. Update the topic and observation-group catalog below with owner, consumer, clock, frame and enabling condition.
@@ -47,8 +47,8 @@ RootSLAM logs its accepted IMU count on shutdown. With `vio-receive=debug` it al
 
 ## IPC topic catalog
 
-Rust layouts and capacities live in [firefly-pubsub](../crates/firefly-pubsub/src/lib.rs).
-Python wire mirrors live in [firefly-ipc/messages.py](../packages/firefly-ipc/src/firefly_ipc/messages.py).
+Rust layouts and capacities live in [firefly-pubsub](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-pubsub/src/lib.rs).
+Python wire mirrors live in [firefly-ipc/messages.py](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/packages/firefly-ipc/src/firefly_ipc/messages.py).
 This catalog covers all production topic constants; test topics use isolated names.
 
 | Topic | Producers → consumers; purpose | Recording policy |
@@ -344,7 +344,7 @@ then releases the loan. A single writer groups scalar and typed observation rows
 columnar Rerun chunks. Typed rows use Rerun's `PendingRow::many_into_chunks` to group images, poses,
 trajectories and metric cards.
 Count, byte, entity, publisher and voxel budgets are bounded in
-[Options](../apps/firefly/mimir/src/config.rs); [mimir.toml](../configs/mimir.toml) contains overrides.
+[Options](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/apps/firefly/mimir/src/config.rs); [mimir.toml](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/configs/mimir.toml) contains overrides.
 All batches flush at the row limit or the configured deadline (500 ms in the installed configuration). Typed rows also share the `batch_bytes` memory
 budget; reaching it flushes pending rows synchronously. A single oversized row is written directly
 after flushing and releases its temporary storage immediately. Static metadata is written directly.
@@ -365,13 +365,13 @@ with the standard Rerun viewer.
 
 ### Default viewer layout
 
-Open a run with `cargo xtask view "$run"`. Mimir embeds the [shared blueprint](../configs/firefly.rbl) in each new segment. If Rerun opens a cached layout, select **Reset to default blueprint** or load the RBL explicitly.
+Open a run with `cargo xtask view "$run"`. Mimir embeds the [shared blueprint](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/configs/firefly.rbl) in each new segment. If Rerun opens a cached layout, select **Reset to default blueprint** or load the RBL explicitly.
 
 The map shows ground truth in blue, local odometry in yellow, map-frame navigation in purple, the guide path in green and the local plan in coral. The Down and Stereo views show images at capture time. Landing, Planner and Traj plots use the same measurement timeline. Controller tracking error compares the target to the estimated position. Ground-truth drift requires frame alignment.
 
 Numeric cards show the latest value at the cursor. Missing, nonfinite or more-than-two-second-old measurements display `—`. Camera FPS uses strictly increasing `render/capture/publish_s` timestamps over at least one second. The counter ignores repeated or out-of-order timestamps and restarts after a two-second gap. Publication latency comes from `publish_s.total_s` and the landmark count from `vio/diagnostics/tracks.landmark_ids`. The cards add at most twelve document rows per measurement second after initialization.
 
-To change the shared layout, edit the [blueprint generator](../scripts/build_blueprint.py), run `uv run python scripts/build_blueprint.py` and rebuild Mimir. Check the selected entities against the registry and inspect a real recording. For older recordings without `mimir/status/*`, the viewer can use a derived display layer while preserving the source.
+To change the shared layout, edit the [blueprint generator](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/scripts/build_blueprint.py), run `uv run python scripts/build_blueprint.py` and rebuild Mimir. Check the selected entities against the registry and inspect a real recording. For older recordings without `mimir/status/*`, the viewer can use a derived display layer while preserving the source.
 
 ### Recorder shutdown
 
