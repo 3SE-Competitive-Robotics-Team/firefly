@@ -1,0 +1,40 @@
+[project]
+site_name = "Firefly 文档"
+site_url = "https://3se-competitive-robotics-team.github.io/firefly/"
+repo_url = "https://github.com/3SE-Competitive-Robotics-Team/firefly"
+edit_uri = "edit/main/docs/"
+exclude_docs = """
+/papers/
+/reference/
+"""
+nav = [
+  { "首页" = "index.md" },
+  { "开发与设计" = [
+    { "开发指南" = "development.md" },
+    { "系统架构" = "architecture.md" },
+    { "硬件规格" = "hw/spec.md" },
+  ] },
+  { "运行与测评" = [
+    { "可观测性" = "observability.md" },
+    { "Mimir 录制规则" = "mimir.md" },
+    { "RootSLAM 公开数据集测评" = "https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/apps/firefly/rootslam/README.md#public-dataset-evaluation" },
+  ] },
+  { "许可证" = [
+    { "许可证索引" = "licenses/README.md" },
+    { "文件级声明" = "licenses/source-notices.md" },
+    { "第三方声明" = "licenses/third-party-notices.md" },
+  ] },
+]
+
+[project.theme]
+language = "zh"
+features = ["navigation.sections", "content.action.edit", "content.code.copy", "search.highlight"]
+
+[project.markdown_extensions]
+tables = {}
+toc.permalink = true
+toc.slugify = { object = "pymdownx.slugs.slugify", kwds = { case = "lower" } }
+pymdownx.highlight = {}
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]

@@ -2,6 +2,8 @@
 
 Firefly 是 RoboMaster 四旋翼的视觉定位、规划与控制软件。在实机上，Orange Pi 的 `pilot` 通过 USB 接收 Matrix 的 BMI270 样本，RootSLAM 用这些样本和双目图像估计运动。Matrix 负责自稳和电机输出。Mac 仿真用 `fc` 接收相同的四通道杆量，可在 MuJoCo 中验收完整任务。
 
+[浏览或搜索 Firefly 中文文档站](https://3se-competitive-robotics-team.github.io/firefly/)。
+
 ## 从哪里开始
 
 | 要做的事 | 入口 |
