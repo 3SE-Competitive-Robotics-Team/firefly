@@ -8,7 +8,7 @@ mod release;
 mod session_logs;
 mod target;
 
-use firefly_error::{Error, IoResultExt, Result};
+use firefly_error::{IoResultExt, Result};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -73,12 +73,15 @@ fn main() -> ExitCode {
 
 fn run(command: Command) -> Result<()> {
     match command {
-        Command::View { recording } => session_logs::view(&recording).map_err(Error::from),
+        Command::View { recording } => {
+            session_logs::view(&recording).at_path("view recording", &recording)
+        }
         Command::ArchiveSession { workspace } => {
-            session_logs::serve(&workspace).map_err(Error::from)
+            session_logs::serve(&workspace).at_path("archive session", &workspace)
         }
         Command::Processes { workspace } => {
-            let ids = xtask::processes::active(&workspace)?;
+            let ids = xtask::processes::active(&workspace)
+                .at_path("list active processes", &workspace)?;
             println!("{}", serde_json::json!(ids));
             Ok(())
         }
