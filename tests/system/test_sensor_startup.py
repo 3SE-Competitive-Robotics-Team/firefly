@@ -146,13 +146,12 @@ main(["--no-trace"], publish_plant_state=False)
 
 def _verify_recording(path: Path) -> None:
     from collections import Counter
-    from rerun.chunk import RrdReader
+    from firefly_workspace.recording import recording_chunks
 
-    reader = RrdReader(path)
     counts = Counter()
     image_times = {camera: set() for camera in ("left", "right")}
     point_times = {camera: set() for camera in ("left", "right")}
-    for chunk in reader.store(store=reader.recordings()[0]).stream():
+    for chunk in recording_chunks(path):
         if chunk.is_static:
             continue
         name = chunk.entity_path

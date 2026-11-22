@@ -89,7 +89,7 @@ The startup checks resolve path aliases and validate output ownership; writers
 create new files. Existing runs remain available for comparison.
 
 Start Mimir in one terminal. It prints the recording path, following the
-[shared local-time naming contract](../../docs/mimir.md):
+[shared archive naming contract](../../docs/mimir.md):
 
 ```bash
 ./target/release/mimir
@@ -106,8 +106,8 @@ recording. Check the exit status, RRD integrity, trajectory coverage and optimiz
 result together; substitute the directory returned by Mimir:
 
 ```bash
-uv run rerun rrd verify 'logs/<yyyymmdd_hhmmss>/log.rrd'
-uv run rerun 'logs/<yyyymmdd_hhmmss>/log.rrd' configs/firefly.rbl
+uv run rerun rrd verify "$run"/rrd/*.rrd
+cargo xtask view "$run"
 ```
 
 The dataset pipeline feeds image and IMU producers, collects posterior states,

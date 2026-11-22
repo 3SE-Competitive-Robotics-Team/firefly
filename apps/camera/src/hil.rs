@@ -39,11 +39,28 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let replies = std::os::unix::net::UnixDatagram::unbound()?;
     let destination = firefly_mission::runtime_dir().join("hil-replies.sock");
     std::thread::spawn(move || {
+        let mut archive = None;
         for (id, bytes) in jobs {
-            let reply = serde_json::from_slice(&bytes)
-                .map_err(|e| e.to_string())
-                .and_then(|request| firefly_mission::call(&request).map_err(|e| e.to_string()));
-            if let Ok(body) = serde_json::to_vec(&reply) {
+            let reply = if let Ok(query) =
+                serde_json::from_slice::<firefly_archive::transfer::Query>(&bytes)
+            {
+                let result = (|| -> std::io::Result<_> {
+                    let run = match &archive {
+                        Some(run) => run,
+                        None => archive.insert(firefly_archive::Run::board()?),
+                    };
+                    firefly_archive::transfer::reply(run, query)
+                })();
+                result.map_err(|e| e.to_string())
+            } else {
+                serde_json::from_slice(&bytes)
+                    .map_err(|e| e.to_string())
+                    .and_then(|request| firefly_mission::call(&request).map_err(|e| e.to_string()))
+            };
+            if let Ok(mut body) = serde_json::to_vec(&reply) {
+                if body.len() > firefly_hil::protocol::MISSION_BODY_MAX {
+                    body = br#"{"Err":"HIL reply exceeds frame budget"}"#.to_vec();
+                }
                 let mut packet = id.to_le_bytes().to_vec();
                 packet.extend(body);
                 if let Err(e) = replies.send_to(&packet, &destination) {

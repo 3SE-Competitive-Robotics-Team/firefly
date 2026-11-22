@@ -1,3 +1,5 @@
+mod standalone;
+
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
 
@@ -17,6 +19,16 @@ fn main() -> Result<()> {
     let config = Arguments::parse()
         .config
         .unwrap_or_else(|| firefly_config::paths::config("mimir.toml"));
+    let run = firefly_archive::Run::recorder()?;
+    let record = || record(config, &run);
+    if std::env::var_os("FIREFLY_RUN_DIR").is_some() {
+        record()
+    } else {
+        standalone::capture(&run, record)
+    }
+}
+
+fn record(config: PathBuf, run: &firefly_archive::Run) -> Result<()> {
     let options = firefly_config::startup(config, firefly_observability::init, Options::validate)?;
     let stop = Arc::new(AtomicBool::new(false));
     let mut registrations = Vec::new();
@@ -27,7 +39,7 @@ fn main() -> Result<()> {
             })?,
         );
     }
-    let result = ingress::run(&options, &stop);
+    let result = ingress::run(&options, &stop, run.clone());
     for registration in registrations {
         signal_hook::low_level::unregister(registration);
     }

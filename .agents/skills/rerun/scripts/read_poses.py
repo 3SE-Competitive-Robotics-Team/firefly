@@ -16,14 +16,14 @@
 import sys
 
 import pyarrow as pa
-from rerun.chunk import RrdReader
+from firefly_workspace.recording import recording_chunks
 
 DEFAULT_ENTITIES = ("gt/pose", "vio/odom")
 
 
-def read_pose(reader, store, entity):
+def read_pose(path, entity):
     rows = []
-    for chunk in reader.stream(store=store):
+    for chunk in recording_chunks(path, content=f"/{entity}", complete=False):
         if chunk.entity_path.lstrip("/") != entity:
             continue
         tb = chunk.to_record_batch()
@@ -41,10 +41,8 @@ def main() -> None:
     path = sys.argv[1]
     entities = sys.argv[2:] or list(DEFAULT_ENTITIES)
 
-    reader = RrdReader(path)
-    store = reader.recordings()[0]
     for entity in entities:
-        rows = read_pose(reader, store, entity)
+        rows = read_pose(path, entity)
         if not rows:
             print(f"== {entity}: 无数据", file=sys.stderr)
             continue

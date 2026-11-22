@@ -4,7 +4,7 @@ use std::{path::PathBuf, process::ExitCode};
 #[derive(usage_rs::Cli)]
 #[usage(bin = "firefly-verify")]
 struct Arguments {
-    /// Recording to verify.
+    /// Run directory or RRD file to verify.
     recording: PathBuf,
     #[usage(long, choices("sil", "hil", "board"))]
     transport: Option<String>,

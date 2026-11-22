@@ -1,16 +1,12 @@
 //! Synchronous RRD encoding with direct disk backpressure.
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{File, OpenOptions};
-use std::io::BufWriter;
 
+use firefly_archive::Run;
 use firefly_error::Result;
 use firefly_pubsub::viz::{ScalarMessage, VizMessage, VoxelMessage, kind};
 use firefly_pubsub::{navigation::NavigationMessage, odom::OdomMessage};
 use re_byte_size::SizeBytes as _;
-use re_chunk::{Chunk, PendingRow, RowId, TimeColumn, TimePoint, Timeline};
-use re_log_encoding::{DecoderApp, Encoder, EncodingOptions};
-use re_log_msg::{LogMsg, SetStoreInfo, StoreInfo, StoreSource};
-use re_log_types::{StoreId, StoreKind};
+use re_chunk::{Chunk, PendingRow, TimeColumn, TimePoint, Timeline};
 use re_sdk_types::{AsComponents, archetypes as rr, datatypes::Quaternion};
 
 use crate::{
@@ -18,6 +14,7 @@ use crate::{
     failure,
     frames::{Anchor, Frames},
     invalid, schema,
+    segments::Segments,
     status::Status,
 };
 
@@ -70,8 +67,7 @@ impl PendingVoxels {
 }
 
 pub struct Archive {
-    encoder: Encoder<BufWriter<File>>,
-    store: StoreId,
+    segments: Segments,
     options: Options,
     scalars: BTreeMap<String, Scalars>,
     rows: BTreeMap<String, Rows>,
@@ -88,58 +84,13 @@ pub struct Archive {
 }
 
 impl Archive {
-    /// Create `logs/<local YYYYMMDD_HHMMSS>/log.rrd` under the installation root.
+    /// Open the recording writer in a leased run archive.
     /// # Errors
     /// Invalid budgets or directory/encoder/file initialization failure.
-    pub fn create(options: Options) -> Result<Self> {
+    pub fn in_run(options: Options, run: Run) -> Result<Self> {
         options.validate()?;
-        let logs = firefly_config::paths::root().join("logs");
-        std::fs::create_dir_all(&logs).map_err(|e| failure("create logs directory", e))?;
-        let directory = loop {
-            let directory = logs.join(recording_stamp(&jiff::ZonedDateTime::now()));
-            match std::fs::create_dir(&directory) {
-                Ok(()) => break directory,
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                Err(error) => return Err(failure("create recording directory", error)),
-            }
-        };
-        let path = directory.join("log.rrd");
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|e| failure("create recording", e))?;
-        let mut encoder = Encoder::new_eager(
-            re_build_info::CrateVersion::LOCAL,
-            EncodingOptions::PROTOBUF_COMPRESSED,
-            BufWriter::new(file),
-        )
-        .map_err(|e| failure("initialize RRD", e))?;
-        let store = StoreId::random(StoreKind::Recording, "firefly");
-        for message in
-            DecoderApp::decode_lazy(include_bytes!("../../../configs/firefly.rbl").as_slice())
-        {
-            let mut message = message.map_err(|e| failure("decode default blueprint", e))?;
-            if let LogMsg::BlueprintActivationCommand(command) = &mut message {
-                // Saved user layouts remain selectable; reset restores this recording's default.
-                command.make_active = false;
-                command.make_default = true;
-            }
-            encoder
-                .append(&message)
-                .map_err(|e| failure("write default blueprint", e))?;
-        }
-        encoder
-            .append(&LogMsg::SetStoreInfo(SetStoreInfo {
-                row_id: *RowId::new(),
-                info: StoreInfo::new(store.clone(), StoreSource::Unknown),
-            }))
-            .map_err(|e| failure("write store info", e))?;
         let mut archive = Self {
-            encoder,
-            store,
+            segments: Segments::new(run)?,
             options,
             scalars: BTreeMap::new(),
             rows: BTreeMap::new(),
@@ -167,7 +118,7 @@ impl Archive {
             None,
             &rr::TextDocument::new(format!("{:?}", archive.options)),
         )?;
-        println!("recording: {}", path.display());
+        println!("recording: {}", archive.segments.run().path().display());
         Ok(archive)
     }
 
@@ -182,12 +133,7 @@ impl Archive {
     }
 
     fn append(&mut self, chunk: &Chunk) -> Result<()> {
-        let msg = chunk
-            .to_arrow_msg()
-            .map_err(|e| failure("serialize chunk", e))?;
-        self.encoder
-            .append(&LogMsg::ArrowMsg(self.store.clone(), msg))
-            .map_err(|e| failure("write RRD", e))?;
+        self.segments.append(chunk, None)?;
         self.chunks += 1;
         Ok(())
     }
@@ -211,12 +157,17 @@ impl Archive {
         };
         let row = PendingRow::from_iter(time, value.as_serialized_batches());
         let bytes = row.total_size_bytes();
-        if stamp.is_none() || bytes >= self.options.batch_bytes as u64 {
-            self.flush_rows()?;
+        let baseline = stamp.is_none() || name == "frames/odom" || self.voxels.contains_key(name);
+        if baseline || bytes >= self.options.batch_bytes as u64 {
+            if stamp.is_none() || !baseline {
+                self.flush_rows()?;
+            }
             let chunk = row
                 .into_chunk(name.into())
                 .map_err(|e| failure("build chunk", e))?;
-            return self.append(&chunk);
+            self.segments.append(&chunk, baseline.then_some(name))?;
+            self.chunks += 1;
+            return Ok(());
         }
         if self.row_bytes + bytes > self.options.batch_bytes as u64 {
             self.flush_rows()?;
@@ -387,9 +338,7 @@ impl Archive {
             self.flush_scalar(&name)?;
         }
         self.flush_rows()?;
-        self.encoder
-            .flush_blocking()
-            .map_err(|e| failure("flush RRD", e))
+        self.segments.flush()
     }
 
     /// Store an error or lifecycle event, including before the simulation clock starts.
@@ -522,6 +471,7 @@ impl Archive {
             ),
             kind::CLEAR => {
                 self.flush()?;
+                self.segments.clear(name);
                 self.voxels
                     .retain(|key, _| key != name && !key.starts_with(&format!("{name}/")));
                 self.previous_positions
@@ -710,11 +660,20 @@ impl Archive {
             self.log("mimir", -1., wall_time_ns(),
                 "world display frame is disconnected: no exact-time stationary session-start pair; inspect truth in a world-frame view", "WARN")?;
         }
-        let incomplete = error.or_else(|| {
-            self.pending_voxels
-                .is_some()
-                .then_some("incomplete voxel update")
-        });
+        let incomplete = error
+            .or_else(|| {
+                self.pending_voxels
+                    .is_some()
+                    .then_some("incomplete voxel update")
+            })
+            .or_else(|| {
+                self.segments
+                    .lost_data()
+                    .then_some("disk pressure interrupted recording")
+            });
+        if let Some(detail) = incomplete {
+            self.segments.gap(detail);
+        }
         self.log(
             "mimir",
             -1.,
@@ -726,28 +685,12 @@ impl Archive {
                 "INFO"
             },
         )?;
-        self.encoder
-            .finish()
-            .map_err(|e| failure("finish RRD footer", e))?;
-        self.encoder
-            .flush_blocking()
-            .map_err(|e| failure("flush RRD footer", e))?;
-        let file = self
-            .encoder
-            .into_inner()
-            .map_err(|e| failure("close RRD", e))?;
-        file.get_ref()
-            .sync_all()
-            .map_err(|e| failure("sync RRD", e))?;
+        self.segments.finish()?;
         if self.pending_voxels.is_some() {
             return Err(invalid("incomplete voxel update"));
         }
         Ok(())
     }
-}
-
-fn recording_stamp(now: &jiff::ZonedDateTime) -> String {
-    now.strftime("%Y%m%d_%H%M%S").to_string()
 }
 
 fn transform(xyz: [f64; 3], quat: [f64; 4]) -> Result<rr::Transform3D> {
@@ -771,16 +714,159 @@ pub(crate) fn wall_time_ns() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs,
+        io::BufReader,
+        path::{Path, PathBuf},
+    };
+
+    use re_log_encoding::{DecoderApp, read_rrd_footer};
+    use re_log_msg::LogMsg;
+
+    fn test_run(config: &str) -> (PathBuf, Run) {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/mimir-tests")
+            .join(format!("{}-{}", std::process::id(), wall_time_ns()));
+        fs::create_dir_all(root.join("configs")).unwrap();
+        fs::write(root.join("configs/archive.toml"), config).unwrap();
+        let run = Run::create_at(&root, "test").unwrap();
+        (root, run)
+    }
 
     #[test]
-    fn recording_stamp_uses_local_date_and_seconds() {
-        let instant: jiff::Timestamp = "2026-11-14T16:05:06Z".parse().unwrap();
-        let local = instant.in_tz("Asia/Shanghai").unwrap();
-        assert_eq!(recording_stamp(&local), "20261115_000506");
-        assert_eq!(
-            recording_stamp(&instant.in_tz("America/New_York").unwrap()),
-            "20261114_110506"
+    fn disk_pressure_resumes_with_a_new_indexed_segment_and_fails_completeness() {
+        let (root, run) =
+            test_run("keep_free_bytes = 0\nmax_bytes = 16777216\ncleanup_bytes = 12582912\n");
+        let mut competing = run.rrd_segment().unwrap();
+        competing.reserve(16 * 1024 * 1024 - 384 * 1024).unwrap();
+        let path = run.path().to_owned();
+        let mut archive = Archive::in_run(Options::default(), run).unwrap();
+        assert!(archive.segments.lost_data());
+        competing.discard().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1050));
+        archive
+            .log("test", 7., wall_time_ns(), "recovered", "INFO")
+            .unwrap();
+        assert!(archive.finish(None).is_err());
+        let files = fs::read_dir(path.join("rrd"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 1);
+        let file = fs::File::open(&files[0]).unwrap();
+        assert!(
+            futures_lite::future::block_on(read_rrd_footer(&file))
+                .unwrap()
+                .is_some()
         );
+        let entities: BTreeSet<_> = DecoderApp::decode_lazy(BufReader::new(file))
+            .filter_map(|msg| match msg.unwrap() {
+                LogMsg::ArrowMsg(store, msg) if store.is_recording() => {
+                    Some(msg.batch.entity_path().to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(entities.contains("/mimir/config") && entities.contains("/logs/test"));
+        assert!(
+            fs::read_to_string(path.join("manifest.json"))
+                .unwrap()
+                .contains("RRD chunks lost")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rotation_keeps_standalone_baselines_and_exact_measurements() {
+        let (root, run) = test_run("keep_free_bytes = 0\nrrd_segment_bytes = 720000\n");
+        let directory = run.path().join("rrd");
+        let mut archive = Archive::in_run(
+            Options {
+                batch_rows: 1,
+                ..Options::default()
+            },
+            run.clone(),
+        )
+        .unwrap();
+        assert!(Archive::in_run(Options::default(), run).is_err());
+        archive
+            .navigation(NavigationMessage {
+                odom: OdomMessage {
+                    timestamp: 1.,
+                    is_initialized: true,
+                    ..Default::default()
+                },
+                rotation: [0., 0., 0., 1.],
+                ..Default::default()
+            })
+            .unwrap();
+        let mut map = VoxelMessage::base(kind::VOXELS, 1., "plan/collision");
+        map.voxel_size = [0.1; 3];
+        map.voxel_count = 1;
+        map.voxels[0] = [2, 3, 5];
+        archive.voxel(&map).unwrap();
+        let mut noise = 1_u32;
+        for stamp in 0..20 {
+            let pixels: Vec<u8> = (0..256 * 256)
+                .map(|_| {
+                    noise ^= noise << 13;
+                    noise ^= noise >> 17;
+                    noise ^= noise << 5;
+                    noise as u8
+                })
+                .collect();
+            archive
+                .image(3, f64::from(stamp), &rr::Image::from_l8(pixels, [256, 256]))
+                .unwrap();
+        }
+        archive.finish(None).unwrap();
+        let mut files: Vec<_> = fs::read_dir(directory)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        files.retain(|p| p.extension().is_some_and(|s| s == "rrd"));
+        files.sort();
+        assert!(files.len() > 1);
+        let mut images = BTreeSet::new();
+        let mut baseline_ids = BTreeMap::new();
+        let mut recording_ids = BTreeSet::new();
+        for path in files {
+            let file = fs::File::open(path).unwrap();
+            let footer = futures_lite::future::block_on(read_rrd_footer(&file))
+                .unwrap()
+                .unwrap();
+            assert!(
+                footer
+                    .manifests
+                    .keys()
+                    .any(re_log_types::StoreId::is_blueprint)
+            );
+            let mut baselines = BTreeMap::new();
+            for msg in DecoderApp::decode_lazy(BufReader::new(file)) {
+                if let LogMsg::ArrowMsg(store, msg) = msg.unwrap()
+                    && store.is_recording()
+                {
+                    recording_ids.insert(store);
+                    let name = msg.batch.entity_path().to_string();
+                    let id = msg.batch.chunk_id();
+                    match name.as_str() {
+                        "/frames/odom" | "/plan/collision" | "/mimir/config" => {
+                            baselines.insert(name, id);
+                        }
+                        "/cameras/down/image" => assert!(images.insert(id)),
+                        _ => (),
+                    }
+                }
+            }
+            assert_eq!(baselines.len(), 3);
+            if !baseline_ids.is_empty() {
+                assert_eq!(baseline_ids, baselines);
+            }
+            baseline_ids = baselines;
+        }
+        assert_eq!(images.len(), 20);
+        assert_eq!(recording_ids.len(), 1);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -5,8 +5,8 @@ import os
 import signal
 import threading
 import time
-from datetime import datetime
-from zoneinfo import ZoneInfo
+import json
+import re
 
 import iceoryx2 as iox2
 import psutil
@@ -14,6 +14,7 @@ import pytest
 from rerun.chunk import RrdReader
 
 from firefly_workspace.process import ManagedProcess, isolated_run
+from firefly_workspace.recording import recording_chunks, recording_files
 from firefly_ipc.messages import (
     FC_STATUS_BUFFER_SIZE, FC_STATUS_TOPIC, FcStatusMessage,
     SCALAR_BUFFER_SIZE, VIZ_MAX_PUBLISHERS, DownImageMessage, GrayImageMessage,
@@ -67,19 +68,19 @@ def recording(*, env=None):
 
 
 @pytest.mark.parametrize("zone", ["Asia/Shanghai", "America/New_York"])
-def test_recording_path_uses_local_time_and_only_writes_log_rrd(zone):
+def test_numbered_archive_seals_one_segment_in_any_timezone(zone):
     with isolated_run(ROOT):
-        start = datetime.now(ZoneInfo(zone)).strftime("%Y%m%d_%H%M%S")
+        start = time.time_ns() // 1_000_000
         process, path = recording(env={"TZ": zone})
         try:
-            end = datetime.now(ZoneInfo(zone)).strftime("%Y%m%d_%H%M%S")
-            assert path.parent.parent == ROOT / "logs"
-            assert start <= path.parent.name <= end
-            assert len(path.parent.name) == 15
-            assert path.name == "log.rrd"
+            assert path.parent == ROOT / "logs/runs"
+            assert re.fullmatch(r"log_[0-9]{4}", path.name) and path.name != "log_0000"
+            manifest = json.loads((path / "manifest.json").read_text())
+            assert start <= manifest["started_ms"] <= time.time_ns() // 1_000_000
         finally:
             assert process.stop() == 0, list(process.tail)
-        assert list(path.parent.iterdir()) == [path]
+        with recording_files(path) as files:
+            assert files == [path / "rrd/000001.rrd"]
         _, logs = read(path)
         assert "recording complete" in logs
 
@@ -88,11 +89,14 @@ def test_consecutive_recordings_preserve_existing_files():
     with isolated_run(ROOT):
         process, first = recording()
         assert process.stop() == 0
-        fingerprint = digest(first)
+        with recording_files(first) as files:
+            fingerprint = [digest(file) for file in files]
+    with isolated_run(ROOT):
         process, second = recording()
         assert process.stop() == 0
         assert second != first
-        assert digest(first) == fingerprint
+        with recording_files(first) as files:
+            assert [digest(file) for file in files] == fingerprint
         for path in (first, second):
             _, logs = read(path)
             assert "recording complete" in logs
@@ -107,14 +111,15 @@ def test_output_path_overrides_are_rejected(argument):
     assert argument in result.stderr
 
 
-def read(path):
-    reader = RrdReader(path)
-    assert len(reader.blueprints()) == 1
-    assert reader.blueprints()[0].application_id == "firefly"
-    # Indexed access requires the completed footer, independently of sequential decoding.
-    assert reader.store(store=reader.recordings()[0]).schema() is not None
+def read(path, *, complete=True):
+    with recording_files(path, complete=complete) as files:
+        for file in files:
+            reader = RrdReader(file)
+            [blueprint] = reader.blueprints()
+            assert blueprint.application_id == "firefly"
+            assert reader.store(store=reader.recordings()[0]).schema() is not None
     result, logs = {}, []
-    for chunk in reader.stream():
+    for chunk in recording_chunks(path, complete=complete):
         if chunk.is_static:
             continue
         batch = chunk.to_record_batch()
@@ -206,7 +211,7 @@ def test_incomplete_recording_is_an_error(fault):
             assert process.process.wait(timeout=10.) != 0
         finally:
             assert process.stop() != 0
-        _, logs = read(path)
+        _, logs = read(path, complete=False)
         assert "recording complete" not in logs
         assert any(("sequence gap" in entry or "lost 1 log" in entry or "unregistered" in entry) for entry in logs)
 
@@ -254,7 +259,7 @@ def test_shutdown_drains_delivered_backlog(stream):
             ]
         else:
             recorded = []
-            for chunk in RrdReader(path).stream():
+            for chunk in recording_chunks(path):
                 if chunk.entity_path == "/logs/test-mimir":
                     recorded.extend(text for row in chunk.to_record_batch().column("TextLog:text").to_pylist()
                                     for text in row)
@@ -297,7 +302,7 @@ def test_stereo_images_and_keypoint_ids_survive_recording():
         assert actual["landing/quality"]==[(2_000_000_000,[42.,1.,.7,.91])]
         assert "recording complete" in logs
         found_images, found_points = set(), set()
-        for chunk in RrdReader(path).stream():
+        for chunk in recording_chunks(path):
             batch = chunk.to_record_batch()
             if chunk.entity_path=="/cameras/down/image":
                 assert batch.column("sim_time").cast("int64").to_pylist()==[2_000_000_000]
@@ -337,7 +342,7 @@ def test_spatial_batches_retain_repeated_and_out_of_order_times():
             assert process.stop() == 0, list(process.tail)
         _, logs = read(path)
         assert "recording complete" in logs
-        chunks = list(RrdReader(path).stream().filter(content="/vio/odom"))
+        chunks = list(recording_chunks(path, content="/vio/odom"))
         actual = []
         for chunk in chunks:
             batch = chunk.to_record_batch()
@@ -406,7 +411,7 @@ def test_spatial_frames_preserve_raw_poses_and_follow_navigation():
         _, logs = read(path)
         assert "recording complete" in logs
         components = {}
-        for chunk in RrdReader(path).stream():
+        for chunk in recording_chunks(path):
             batch = chunk.to_record_batch()
             for name in batch.schema.names:
                 if name.startswith(("Transform3D:", "CoordinateFrame:", "Pinhole:")):
@@ -472,7 +477,7 @@ def test_metric_cards_use_measurement_time_and_preserve_sources():
         for name, rows in expected.items():
             assert actual[name] == rows
         texts = {}
-        for chunk in RrdReader(path).stream().filter(content="/mimir/status/**"):
+        for chunk in recording_chunks(path, content="/mimir/status/**"):
             batch = chunk.to_record_batch()
             texts.setdefault(chunk.entity_path.removeprefix("/mimir/status/"), []).extend(
                 zip(batch["sim_time"].cast("int64").to_pylist(),

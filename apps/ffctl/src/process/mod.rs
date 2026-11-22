@@ -1,5 +1,6 @@
 pub(crate) mod client;
 pub(crate) mod config;
+mod journal;
 pub(crate) mod metrics;
 pub(crate) mod protocol;
 pub(crate) mod supervisor;

@@ -3,6 +3,7 @@ pub mod config;
 mod frames;
 pub mod ingress;
 mod schema;
+mod segments;
 mod status;
 
 use firefly_error::{Error, ErrorKind};

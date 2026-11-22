@@ -96,7 +96,7 @@ python scripts/depth_image.py models/yolo26n-depth/yolo26n-depth.ort input.jpg d
 
 SIL 和 USB HIL 使用同一份任务计划和 Rust daemon。启动前，xtask 取得运行锁并检查当前工作区是否有占用 IPC 的飞行进程。`cargo xtask processes .` 可以查看匹配的 PID。SIL 在本机启动隔离的任务服务，HIL 通过 USB 请求板上正在运行的 daemon。MuJoCo 物理进程使用 Python。
 
-xtask 顺序提交计划，录制关闭后调用 Rust 评分器逐架次验收。HIL 使用主机 Mimir，将板端遥测和仿真真值写入同一份 RRD。桌面 release 包含独立的 `firefly-verify`，可复制到相同平台的机器上使用。它将 JSON 报告写入标准输出，验收通过时返回 0，验收失败或录制无效时返回 1。
+xtask 顺序提交计划，录制结束后逐架次评分。HIL 使用主机 Mimir，将板端遥测和仿真真值写入同一运行目录下的 RRD 分段。桌面 release 包含独立的 `firefly-verify`，可复制到相同平台的机器上使用。评分器将 JSON 报告写入标准输出，验收通过时返回 0，验收失败或录制无效时返回 1。
 
 ```bash
 cargo xtask sil configs/mission-hover.toml

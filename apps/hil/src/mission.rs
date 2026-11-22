@@ -1,3 +1,4 @@
+use firefly_archive::transfer::Query;
 use firefly_hil::protocol::Message;
 use firefly_mission::{Request, read_frame, write_frame};
 use std::fs::{File, Permissions};
@@ -35,7 +36,13 @@ pub fn serve(requests: SyncSender<Message>, replies: Receiver<(u64, Vec<u8>)>) -
                 continue;
             }
             let reply = (|| -> Result<serde_json::Value, String> {
-                let request: Request = read_frame(&stream).map_err(|e| e.to_string())?;
+                #[derive(serde::Deserialize, serde::Serialize)]
+                #[serde(untagged)]
+                enum Rpc {
+                    Archive(Query),
+                    Mission(Request),
+                }
+                let request: Rpc = read_frame(&stream).map_err(|e| e.to_string())?;
                 let body = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
                 if body.len() > firefly_hil::protocol::MISSION_BODY_MAX {
                     return Err("oversize HIL mission request".into());

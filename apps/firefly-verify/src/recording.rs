@@ -42,28 +42,42 @@ fn vector<const N: usize>(a: &dyn Array) -> Result<[f64; N]> {
 }
 
 pub(super) fn read(path: &Path) -> Result<Evidence> {
-    let file = File::open(path)?;
-    let footer = futures_lite::future::block_on(read_rrd_footer(&file))?
-        .ok_or("missing recording footer")?;
-    let mut recordings = footer
-        .manifests
-        .into_keys()
-        .filter(re_log_types::StoreId::is_recording);
-    let recording = recordings.next().ok_or("missing recording manifest")?;
-    if recordings.next().is_some() {
-        return Err("expected one recording".into());
+    let run = path
+        .parent()
+        .filter(|dir| dir.ends_with("rrd"))
+        .and_then(Path::parent)
+        .filter(|dir| firefly_archive::manifest_path(dir).is_file());
+    let files = firefly_archive::reader::RecordingFiles::open(run.unwrap_or(path))?;
+    if run.is_some() && !files.paths().iter().any(|file| file == path) {
+        return Err("requested file is not a sealed recording segment".into());
     }
     let mut data = Evidence::default();
-    // Decode the full stream so damaged chunks also fail integrity verification.
-    for msg in DecoderApp::decode_eager(BufReader::new(file))? {
-        let msg = msg?;
-        if msg.store_id().is_recording() && msg.store_id() != &recording {
-            return Err("recording identity differs from the manifest".into());
+    let mut seen = std::collections::HashSet::new();
+    for path in files.paths() {
+        data.recording_complete = false;
+        let file = File::open(path)?;
+        let footer = futures_lite::future::block_on(read_rrd_footer(&file))?
+            .ok_or("missing recording footer")?;
+        let mut recordings = footer
+            .manifests
+            .into_keys()
+            .filter(re_log_types::StoreId::is_recording);
+        let recording = recordings.next().ok_or("missing recording manifest")?;
+        if recordings.next().is_some() {
+            return Err("expected one recording".into());
         }
-        if let LogMsg::ArrowMsg(id, msg) = msg
-            && id == recording
-        {
-            collect(&mut data, &msg.batch.entity_path().to_string(), &msg.batch)?;
+        // Decode the full stream so damaged chunks also fail integrity verification.
+        for msg in DecoderApp::decode_eager(BufReader::new(file))? {
+            let msg = msg?;
+            if msg.store_id().is_recording() && msg.store_id() != &recording {
+                return Err("recording identity differs from the manifest".into());
+            }
+            if let LogMsg::ArrowMsg(id, msg) = msg
+                && id == recording
+                && seen.insert(msg.batch.chunk_id())
+            {
+                collect(&mut data, &msg.batch.entity_path().to_string(), &msg.batch)?;
+            }
         }
     }
     data.events.sort_by(|a, b| a.0.total_cmp(&b.0));
