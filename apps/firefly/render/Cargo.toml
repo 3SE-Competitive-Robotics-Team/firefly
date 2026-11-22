@@ -26,7 +26,6 @@ firefly-observability = { workspace = true }
 firefly-pubsub = { workspace = true }
 firefly-render = { workspace = true }
 log = { workspace = true }
-rand = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 

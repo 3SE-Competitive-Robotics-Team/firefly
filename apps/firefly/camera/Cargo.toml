@@ -18,22 +18,22 @@ path = "src/main.rs"
 usage-rs.workspace = true
 firefly-config.workspace = true
 firefly-error.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+firefly-archive.workspace = true
 firefly-hal.workspace = true
+firefly-hil.workspace = true
+firefly-mission.workspace = true
 firefly-observability.workspace = true
 firefly-pubsub.workspace = true
 iceoryx2-bb-posix.workspace = true
 log.workspace = true
-serde.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
-firefly-archive.workspace = true
-firefly-hil.workspace = true
-firefly-mission.workspace = true
-serde_json.workspace = true
 nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 v4l.workspace = true
 
-[dev-dependencies]
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 toml.workspace = true
 
 [lints]

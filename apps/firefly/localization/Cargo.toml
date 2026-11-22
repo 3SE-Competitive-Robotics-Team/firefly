@@ -26,6 +26,8 @@ firefly-pubsub = { workspace = true }
 iceoryx2 = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }
+
+[dev-dependencies]
 toml = { workspace = true }
 
 [lints]

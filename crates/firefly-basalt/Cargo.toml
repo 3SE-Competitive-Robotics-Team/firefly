@@ -22,6 +22,8 @@ serde_json = { workspace = true, features = ["float_roundtrip"] }
 rayon.workspace = true
 rand.workspace = true
 log.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
 nix = { workspace = true, features = ["resource"] }
 
 [dev-dependencies]
