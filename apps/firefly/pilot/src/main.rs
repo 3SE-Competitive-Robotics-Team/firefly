@@ -92,7 +92,18 @@ struct Inputs {
     primary: attitude::Input,
     /// 参考（位置/速度/偏航/偏航角速度）与到达墙钟时刻（判新鲜）。
     reference: Option<(ReferenceMessage, Instant)>,
-    command: Option<CommandMessage>,
+    command: Option<ReceivedCommand>,
+}
+
+impl Inputs {
+    fn receive_command(&mut self, message: &CommandMessage) {
+        if self
+            .command
+            .is_none_or(|cur| message.sequence > cur.sequence)
+        {
+            self.command = Some(ReceivedCommand::from(message));
+        }
+    }
 }
 
 struct Ports {
@@ -223,12 +234,7 @@ impl Ports {
             }
         }
         while let Some(sample) = self.command.receive()? {
-            if inputs
-                .command
-                .is_none_or(|cur| sample.sequence > cur.sequence)
-            {
-                inputs.command = Some(*sample);
-            }
+            inputs.receive_command(&sample);
         }
         Ok(())
     }
@@ -293,19 +299,31 @@ fn fresh_reference(inputs: &Inputs) -> Option<PositionSetpoint> {
         .reference(&msg, Instant::now(), ODOM_STALE_LIMIT, dt)
 }
 
-/// 线上指令 → 状态机指令（`None` = 未知编码，忽略）。
-fn command_of(msg: &CommandMessage) -> Option<Command> {
-    match msg.kind {
-        command_kind::ARM => Some(Command::Arm),
-        command_kind::DISARM => Some(Command::Disarm),
-        command_kind::TAKEOFF => Some(Command::Takeoff {
-            altitude: msg.altitude as f32,
-        }),
-        command_kind::HOLD => Some(Command::Hold),
-        command_kind::TRACK => Some(Command::Track),
-        command_kind::LAND => Some(Command::Land),
-        command_kind::PRECISION_LAND => Some(Command::PrecisionLand),
-        _ => None,
+#[derive(Clone, Copy)]
+struct ReceivedCommand {
+    sequence: u64,
+    /// 未知编码也参与序号去重，消费时报告一次。
+    command: Result<Command, u8>,
+}
+
+impl From<&CommandMessage> for ReceivedCommand {
+    fn from(msg: &CommandMessage) -> Self {
+        let command = match msg.kind {
+            command_kind::ARM => Ok(Command::Arm),
+            command_kind::DISARM => Ok(Command::Disarm),
+            command_kind::TAKEOFF => Ok(Command::Takeoff {
+                altitude: msg.altitude as f32,
+            }),
+            command_kind::HOLD => Ok(Command::Hold),
+            command_kind::TRACK => Ok(Command::Track),
+            command_kind::LAND => Ok(Command::Land),
+            command_kind::PRECISION_LAND => Ok(Command::PrecisionLand),
+            unknown => Err(unknown),
+        };
+        Self {
+            sequence: msg.sequence,
+            command,
+        }
     }
 }
 
@@ -403,7 +421,7 @@ impl Controller {
             && health.odometry_alive
             && inputs.command.is_some_and(|m| {
                 self.commands.is_new(m.sequence)
-                    && matches!(m.kind, command_kind::HOLD | command_kind::LAND)
+                    && matches!(m.command, Ok(Command::Hold | Command::Land))
             });
         let standby = !health.estimator_ready
             || !health.odometry_alive
@@ -433,12 +451,14 @@ impl Controller {
                 .err()
                 .map_or(0, ArmingCheck::bit)
         };
-        let mut command_health = health;
-        if inputs.command.is_some_and(|m| m.kind == command_kind::ARM) {
-            command_health.estimator_ready &= inputs
-                .attitude
-                .is_some_and(|s| s.ready && s.received.elapsed() <= IMU_STALE_LIMIT);
-        }
+        let command_health = if inputs
+            .command
+            .is_some_and(|m| matches!(m.command, Ok(Command::Arm)))
+        {
+            arm_health
+        } else {
+            health
+        };
         self.observe_landing(inputs);
         self.apply_command(inputs.command, command_health, &state);
         let reference = fresh_reference(inputs);
@@ -561,14 +581,17 @@ impl Controller {
 
     /// 执行最新指令一次：按序号去重（一次性 CLI 为打通信道会重复投递），
     /// 未知编码忽略，拒绝原因逐项记日志（进 rrd `logs/fc`）。
-    fn apply_command(&mut self, msg: Option<CommandMessage>, health: Health, state: &QuadState) {
+    fn apply_command(&mut self, msg: Option<ReceivedCommand>, health: Health, state: &QuadState) {
         let Some(msg) = msg else { return };
         if !self.commands.consume(msg.sequence) {
             return;
         }
-        let Some(cmd) = command_of(&msg) else {
-            log::warn!("未知指令编码 {}（已忽略）", msg.kind);
-            return;
+        let cmd = match msg.command {
+            Ok(cmd) => cmd,
+            Err(kind) => {
+                log::warn!("未知指令编码 {kind}（已忽略）");
+                return;
+            }
         };
         match self.fsm.command(cmd, health, state) {
             Ok(event) => {
@@ -926,6 +949,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn received_commands_decode_their_payloads() {
+        for (kind, expected) in [
+            (command_kind::ARM, Ok(Command::Arm)),
+            (command_kind::DISARM, Ok(Command::Disarm)),
+            (
+                command_kind::TAKEOFF,
+                Ok(Command::Takeoff { altitude: 1.75 }),
+            ),
+            (command_kind::HOLD, Ok(Command::Hold)),
+            (command_kind::TRACK, Ok(Command::Track)),
+            (command_kind::LAND, Ok(Command::Land)),
+            (command_kind::PRECISION_LAND, Ok(Command::PrecisionLand)),
+            (255, Err(255)),
+        ] {
+            let received = ReceivedCommand::from(&CommandMessage {
+                kind,
+                sequence: 42,
+                altitude: 1.75,
+                ..Default::default()
+            });
+            assert_eq!(received.sequence, 42);
+            assert_eq!(received.command, expected);
+        }
+    }
+
+    #[test]
+    fn newest_unknown_command_supersedes_pending_and_replayed_commands() {
+        let mut controller = Controller::new(FsmParams::default(), Px4Params::default());
+        let mut inputs = sensor_inputs();
+        for (sequence, kind) in [
+            (1, command_kind::ARM),
+            (2, 255),
+            (1, command_kind::ARM),
+            (2, command_kind::ARM),
+        ] {
+            inputs.receive_command(&CommandMessage {
+                sequence,
+                kind,
+                ..Default::default()
+            });
+        }
+        controller.demand(&inputs, 0.001);
+        assert_eq!(
+            controller.fsm.state(),
+            firefly_flight::FlightState::Disarmed
+        );
+        assert!(!controller.commands.is_new(2));
+        inputs.receive_command(&CommandMessage {
+            sequence: 3,
+            kind: command_kind::ARM,
+            ..Default::default()
+        });
+        controller.demand(&inputs, 0.001);
+        assert_eq!(
+            controller.fsm.state(),
+            firefly_flight::FlightState::ArmedGrounded
+        );
+    }
+
     #[test]
     fn command_sequences_are_consumed_once_even_at_the_limit() {
         let mut sequence = super::CommandSequence::default();
@@ -937,16 +1022,14 @@ mod tests {
         assert!(!sequence.consume(u64::MAX));
         assert!(!sequence.consume(1));
     }
-    use super::*;
 
     #[test]
     fn stale_grounded_estimator_cannot_start_hover_thrust() {
         let mut controller = Controller::new(FsmParams::default(), Px4Params::default());
         let mut inputs = sensor_inputs();
-        inputs.command = Some(CommandMessage {
-            kind: command_kind::ARM,
+        inputs.command = Some(ReceivedCommand {
+            command: Ok(Command::Arm),
             sequence: 1,
-            ..Default::default()
         });
         controller.demand(&inputs, 0.001);
         inputs.estimate.as_mut().unwrap().initialized = false;
@@ -1021,10 +1104,9 @@ mod tests {
         let inputs = Inputs {
             plant: Some((PlantStateMessage::default(), Instant::now())),
             vehicle: Some((QuadParams::default(), Airframe::default())),
-            command: Some(CommandMessage {
-                kind: command_kind::ARM,
+            command: Some(ReceivedCommand {
+                command: Ok(Command::Arm),
                 sequence: 1,
-                ..CommandMessage::default()
             }),
             ..Inputs::default()
         };
@@ -1046,12 +1128,10 @@ mod tests {
             a.demand(&inputs, 0.001);
             b.demand(&inputs, 0.001);
         }
-        for (kind, sequence) in [(command_kind::ARM, 1), (command_kind::TAKEOFF, 2)] {
-            inputs.command = Some(CommandMessage {
-                kind,
+        for (sequence, command) in [(1, Command::Arm), (2, Command::Takeoff { altitude: 1.0 })] {
+            inputs.command = Some(ReceivedCommand {
                 sequence,
-                altitude: 1.0,
-                ..CommandMessage::default()
+                command: Ok(command),
             });
             inputs.plant = None;
             let left = a.demand(&inputs, 0.001).and_then(AngleDemand::channels);
@@ -1082,12 +1162,10 @@ mod tests {
     }
     fn airborne(inputs: &mut Inputs) -> Controller {
         let mut controller = Controller::new(FsmParams::default(), Px4Params::default());
-        for (kind, sequence) in [(command_kind::ARM, 1), (command_kind::TAKEOFF, 2)] {
-            inputs.command = Some(CommandMessage {
-                kind,
+        for (sequence, command) in [(1, Command::Arm), (2, Command::Takeoff { altitude: 1.0 })] {
+            inputs.command = Some(ReceivedCommand {
                 sequence,
-                altitude: 1.,
-                ..Default::default()
+                command: Ok(command),
             });
             controller.demand(inputs, 0.001);
         }
@@ -1116,10 +1194,9 @@ mod tests {
         inputs.primary = sensor_inputs().primary;
         controller.demand(&inputs, 0.001);
         assert_eq!(controller.source, attitude::Source::Standby);
-        inputs.command = Some(CommandMessage {
-            kind: command_kind::HOLD,
+        inputs.command = Some(ReceivedCommand {
+            command: Ok(Command::Hold),
             sequence: 3,
-            ..Default::default()
         });
         controller.demand(&inputs, 0.001);
         assert_eq!(controller.source, attitude::Source::Vio);
@@ -1135,10 +1212,9 @@ mod tests {
         restarted.session += 1;
         restarted.timestamp += 0.01;
         inputs.primary.observe(restarted, Instant::now());
-        inputs.command = Some(CommandMessage {
-            kind: command_kind::HOLD,
+        inputs.command = Some(ReceivedCommand {
+            command: Ok(Command::Hold),
             sequence: 3,
-            ..Default::default()
         });
         controller.demand(&inputs, 0.001);
         assert_eq!(controller.source, attitude::Source::Standby);
@@ -1161,10 +1237,9 @@ mod tests {
     fn arm_requires_ready_standby_even_with_valid_vio() {
         let mut inputs = sensor_inputs();
         inputs.attitude.as_mut().unwrap().ready = false;
-        inputs.command = Some(CommandMessage {
-            kind: command_kind::ARM,
+        inputs.command = Some(ReceivedCommand {
+            command: Ok(Command::Arm),
             sequence: 1,
-            ..Default::default()
         });
         let mut controller = Controller::new(FsmParams::default(), Px4Params::default());
         assert_eq!(
