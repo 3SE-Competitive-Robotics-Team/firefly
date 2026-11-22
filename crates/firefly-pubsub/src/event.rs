@@ -13,8 +13,7 @@ use crate::node::IpcNode;
 /// 事件 id：「该话题有新样本」（当前唯一事件类型）。
 pub const EVENT_ID_SENT_SAMPLE: usize = 0;
 
-/// 相机对事件话题（左+右目成对发布完成后单次通知；仅 event 服务，无数据）。
-/// 成对通知避免半对唤醒——左右目时间戳配对失败会让消费端白醒一次。
+/// 左右目图像都发布后，生产者用此事件唤醒一次订阅者。图像由各自的数据话题传输。
 pub const CAMERA_PAIR_TOPIC: &str = "Firefly/CameraPair";
 
 fn open_event(
@@ -54,8 +53,7 @@ impl TopicNotifier {
         Ok(Self { notifier })
     }
 
-    /// 通知「有新样本」。无监听者时静默成功；失败仅记 debug 日志、不阻断
-    /// 数据路径——唤醒缺失最多退化为订阅端的兜底节拍。
+    /// 通知监听者读取已发布的样本。通知失败时记录 debug 日志，订阅者仍可轮询数据。
     pub fn notify_sent_sample(&self) {
         if let Err(e) = self
             .notifier

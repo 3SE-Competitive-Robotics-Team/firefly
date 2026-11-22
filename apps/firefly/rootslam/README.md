@@ -1,9 +1,9 @@
 # RootSLAM
 
-RootSLAM provides calibrated stereo/IMU odometry through one application:
-`firefly-rootslam --config <path>`. IPC sources serve the flight stack; recorded
-sources run public datasets through the same Basalt estimator. Persistent mapping,
-loop closure and final global BA are available for dataset evaluation.
+Run `firefly-rootslam --config <path>` to estimate odometry from calibrated stereo
+images and IMU samples. The flight stack reads live samples over IPC. Dataset runs
+feed recorded samples to the same Basalt estimator and can also run persistent
+mapping, loop closure, and final global bundle adjustment.
 
 For a connected Matrix, use the [two-minute IMU check](https://3se-competitive-robotics-team.github.io/firefly/development/#验证-matrix-imu). For stereo tracking and IPC configuration, see [online operation](#online-operation-and-validation).
 

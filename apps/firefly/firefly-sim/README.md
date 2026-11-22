@@ -1,10 +1,6 @@
 # firefly-sim
 
-RMUC MuJoCo 物理进程，由根 uv workspace 管理。
-
-物理与 IMU 各 1kHz，发布 IMU、仿真位姿、评测状态与机体参数；接收
-`Firefly/Control` 四电机推力，无有效控制指令时物理暂停。
-双目、深度与下视图像由独立的 Bevy `render` 进程生成。
+`firefly-sim` 在 MuJoCo 中默认以 1 kHz 推进物理仿真并生成 IMU 样本。它发布仿真位姿、评测状态和机体参数，从 `Firefly/Control` 接收四个电机的推力。控制指令过期时，仿真暂停。双目和下视图像由 `render` 进程生成，`depth` 用左目图像估计深度。
 
 必须提供 `configs/scene.toml` 所选场景的 `models/<赛季>/v<版本>/<赛季>_collision.json`。
 

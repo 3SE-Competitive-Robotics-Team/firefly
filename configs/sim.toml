@@ -1,7 +1,7 @@
 # firefly-sim 配置；默认值见 apps/firefly/firefly-sim/src/firefly_sim/main.py。
 
 # configs/game.toml 的 red/blue 选择己方 H 机库中心，场景提供支撑面 + PAD_CLEARANCE。
-# 起飞由飞控 Firefly/Command（ffctl fc takeoff）触发；临时改起点可加 start = [x,y,z]。
+# 要覆盖场景起点，在 [rates] 表之前设置 start = [x, y, z]。
 
 [rates]
 # 真值位姿发布频率（Hz）；render 的采集节拍由它驱动。

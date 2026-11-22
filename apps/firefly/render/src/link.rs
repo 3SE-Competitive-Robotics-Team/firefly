@@ -29,9 +29,7 @@ use crate::rig::{Eye, PoseState, apply_pose_to_eyes};
 
 /// 主线程订阅端口束（节点最后声明最后释放，对照 `firefly-pubsub/node` 的 Drop 纪律）。
 ///
-/// iceoryx2 端口是单线程的（`Rc` 内核，非 `Send/Sync`），只能以
-/// [`NonSend`] 资源持有——触碰端口的系统
-/// 自动约束到主线程，构造上不可能跨线程触碰。
+/// iceoryx2 端口使用 `Rc`。Bevy 通过 [`NonSend`] 将访问端口的系统调度到主线程。
 pub struct IpcPorts {
     offline: bool,
     pub pose_sub: Subscriber<OdomMessage>,

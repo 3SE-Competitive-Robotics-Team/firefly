@@ -281,8 +281,8 @@ impl App {
         }
     }
 
-    /// 排空待融合队列：`ts` 落入 `odom_hist` 内插范围即融合；超期即丢弃；
-    /// 队首仍超前（odom 未追上）即停——等下次 odom 到达再排，不丢弃。
+    /// 按时间顺序融合可插值的观测并丢弃过期样本。
+    /// 队首观测晚于最新里程计时，保留队列，等下一条里程计到达后继续。
     fn drain_pending_visual(&mut self) {
         while let Some(ts) = self.pending_visual.front().map(|o| o.timestamp) {
             if self.last_visual.is_some_and(|last| ts <= last)

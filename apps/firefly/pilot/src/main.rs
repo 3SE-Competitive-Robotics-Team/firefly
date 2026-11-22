@@ -281,8 +281,7 @@ fn health_of(inputs: &Inputs) -> Health {
 
 /// 参考外推上限（仿真秒）：超过就认为参考流本身有问题，不做外推。
 const REFERENCE_EXTRAPOLATE_LIMIT_S: f64 = 0.3;
-/// 参考流新鲜时转成位置模式参考；陈旧样本按不存在处理——断开时长由状态机计时
-/// （状态机只在 `Track` 下消它，其余模式自己生参考）。
+/// 为 `Track` 模式提供位置参考。样本过期时返回 `None`，由状态机计算失联时长。
 fn fresh_reference(inputs: &Inputs) -> Option<PositionSetpoint> {
     let (msg, at) = inputs.reference?;
     if at.elapsed() > REFERENCE_STALE_LIMIT {
@@ -579,8 +578,7 @@ impl Controller {
         Ok(())
     }
 
-    /// 执行最新指令一次：按序号去重（一次性 CLI 为打通信道会重复投递），
-    /// 未知编码忽略，拒绝原因逐项记日志（进 rrd `logs/fc`）。
+    /// 每个序号只处理一次。遇到未知编码或状态机拒绝指令时，记录原因。
     fn apply_command(&mut self, msg: Option<ReceivedCommand>, health: Health, state: &QuadState) {
         let Some(msg) = msg else { return };
         if !self.commands.consume(msg.sequence) {

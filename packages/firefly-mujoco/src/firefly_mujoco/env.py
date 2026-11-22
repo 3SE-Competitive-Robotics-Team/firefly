@@ -1,7 +1,7 @@
 """RMUC 无人机被控对象：MuJoCo 物理、IMU 与旋翼推力。
 
 IMU 输出机体系角速度（rad/s）与比力（m/s²，静止读 +9.81）。
-图像与深度由 Bevy render 提供，控制律由 firefly-flight 提供。
+`render` 生成相机图像，`depth` 用左目图像估计深度。飞行控制律位于 `firefly-flight`。
 """
 
 from __future__ import annotations

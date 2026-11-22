@@ -46,10 +46,9 @@ from firefly_ipc.messages import (
 
 from . import trace as ftrace
 
-#: 机体描述发布周期（秒）：1Hz 持续电平（iceoryx2 无 latch，靠重发保证晚订阅必收）。
+#: 定期重发机体描述，让稍后启动的订阅者也能收到。单位为秒。
 AIRFRAME_PERIOD = 1.0
-#: 飞控指令陈旧阈值（墙钟秒）：锁步下 sim 时间由指令推进，陈旧只能按墙钟判——
-#: 超过即物理不推进（等飞控），被控对象不自行供力。
+#: 距上次收到控制指令的最长时间（秒）。物理暂停时仿真时间冻结，因此用单调时钟计时。
 CONTROL_STALE = 0.05
 
 
@@ -101,7 +100,7 @@ _notify_failed = False
 
 
 def _notify(notifier) -> None:
-    """唤醒订阅端。失败不阻断物理循环（订阅端退化为兜底节拍轮询）。"""
+    """通知订阅端读取样本。通知失败时，订阅端仍可在下次轮询时读取。"""
     global _notify_failed
     try:
         notifier.notify_with_custom_event_id(iox2.EventId.new(EVENT_ID_SENT_SAMPLE))
@@ -126,7 +125,7 @@ def _publish_plant_state(
     pub, env: DroneEnv, t: float,
     *, out: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
 ) -> None:
-    """发布被控对象状态（真值，每个物理步；无 span——高频状态不进 trace 树）。"""
+    """发布带仿真时间戳的机体真值。高频真值样本省略 trace span。"""
     pos, vel, quat_xyzw, angvel = env.state(out=out)
     msg = PlantStateMessage()
     msg.timestamp = t
@@ -296,7 +295,7 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
                 _publish_airframe(airframe_pub, env, t)
                 next_airframe = t + AIRFRAME_PERIOD
 
-            # 位姿发布节拍开启 trace 周期，周期内所有发布共享同一 trace_id。
+            # 每次发布位姿前开始新的 trace 周期，供位姿和 IMU 共享。
             if t + 1e-12 >= next_pose:
                 if cycle is not None:
                     ftrace.end_cycle(cycle)
@@ -355,30 +354,19 @@ def _publish_gt(gt_pub, cycle, env: DroneEnv, t: float) -> None:
 
 
 def log(msg: str, level: int = LOG_LEVEL_INFO, sim_time: float = -1.0) -> None:
-    """双 sink 日志：stderr 打印 + `Firefly/Log` 聚合（rrd 持久可检索）。
-
-    存量调用点保持 `log(text)` 不变（INFO + 无 sim 时钟）；主循环内逐步
-    传入 `sim_time`（与位姿同轴对齐，可检索）。
-    """
+    """将消息写入标准输出，并通过已连接的 `Firefly/Log` 发布端发送给 Mimir。"""
     print(f"[firefly-sim] {msg}", flush=True)
     publish_log(level, msg, sim_time)
 
 
-#: 日志聚合发布端（`Firefly/Log` → `mimir`；stderr 双 sink 保留，
-#: 见 `firefly_observability::IpcAppend` 的双 sink 语义）。
+#: `Firefly/Log` 发布端。连接前，log() 只写标准输出。
 _log_pub = None
 _log_sequence = 0
 _log_dropped = 0
 
 
 def _init_log_ipc(node) -> None:
-    """挂载日志聚合（建端失败降级纯 stderr，不阻断物理循环）。
-
-    sim_time 由调用方每帧传入（`publish_log` 参数），此处只建端。
-    `max_publishers` 与 Rust `LOG_MAX_PUBLISHERS` 一致（10）：本进程常与
-    viz 同早启动，谁先创建服务谁定上限——必须显式调大，默认 2 只够
-    sim+viz，Rust 发布端随后 open 即 `DoesNotSupportRequestedAmountOfPublishers`。
-    """
+    """连接 `Firefly/Log`。先创建服务的进程决定容量，因此两端使用相同的发布者上限。"""
     global _log_pub, _log_sequence, _log_dropped
     _log_sequence = _log_dropped = 0
     try:
@@ -397,10 +385,9 @@ def _init_log_ipc(node) -> None:
 
 
 def publish_log(level: int, text: str, sim_time: float = -1.0) -> None:
-    """结构化日志发布（stderr + IPC 双 sink；调用点保持 `log()` 不变）。
+    """通过 IPC 发送日志，附上序号和累计丢失条数。
 
-    `sim_time < 0` 表示尚无 sim 时钟（聚合端回落墙钟轴，可检索）。
-    发布失败累计缺失数，下一条日志使录制明确失败；不阻断物理循环。
+    `sim_time < 0` 时，Mimir 按墙钟时间记录这条消息。
     """
     if _log_pub is None:
         return

@@ -1,7 +1,7 @@
 # firefly-calibration
 
-Shared primitives: camera models, image buffers, calibration data,
-frame/camera identifiers, and Euclidean splines.
+This crate provides camera models, image buffers, calibration data, frame and
+camera identifiers, and Euclidean splines.
 
 ## References
 

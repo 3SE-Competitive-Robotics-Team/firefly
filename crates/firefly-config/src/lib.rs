@@ -171,8 +171,7 @@ pub mod paths {
         exe.parent()?.parent()
     }
 
-    /// 去掉 `.`/`..` 的词法归一化：日志与报错里应给出干净路径。
-    /// 不访问文件系统，因此不解析符号链接——容器与软链布局下依然可用。
+    /// 按路径分量化简 `.` 和 `..`，供日志和报错使用。此操作无需访问文件系统。
     fn normalize(path: &Path) -> PathBuf {
         let mut out = PathBuf::new();
         for component in path.components() {

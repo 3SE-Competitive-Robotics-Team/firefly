@@ -1,8 +1,8 @@
 # Observability
 
-This is the single source of policy for observation registration, publishing, recording and validation.
-See [architecture](architecture.md) for the system data flow and
-[development](development.md) for build, run and test commands. Defaults and limits live in source and configuration.
+Register each observation here with its producer, consumer, clock, and recording budget.
+Source code and configuration define the defaults and limits. For system data flow, see
+[architecture](architecture.md). For build, run, and test commands, see [development](development.md).
 
 ## Registration and change process
 
@@ -18,7 +18,7 @@ Every observation change must include these steps in the same review:
    Dynamic paths use bounded syntax; frame and landmark identities belong in component fields.
 4. Update the topic and observation-group catalog below with owner, consumer, clock, frame and enabling condition.
    Wire-layout changes require synchronized Rust and Python mirrors and actual IPC interoperability tests.
-   Each message has one canonical schema; rebuild and restart all peers together when its wire layout changes.
+   Each message has one wire schema. Rebuild and restart all peers together when its layout changes.
 5. Gate optional work at the producer, before expensive computation or payload construction.
    All logging dispatches must honor the same `RUST_LOG` filter so `log_enabled!` is a reliable gate.
    Enable specific targets instead of global debug for hover runs.
@@ -26,7 +26,7 @@ Every observation change must include these steps in the same review:
    Queues absorb bounded bursts. Resolve sustained overload by correcting production and serialization costs
    while preserving registered observations and queue budgets.
 7. Test names, layouts, units, disabled gates, exact timestamps and values, loss detection and shutdown.
-   Write and read a real RRD. Report passed, skipped and failed tests separately; startup and flight each have their own acceptance checks.
+   Write and read a real RRD. Report passed, skipped, and failed tests separately. Run the startup and flight acceptance checks separately.
 
 ## Data contract
 

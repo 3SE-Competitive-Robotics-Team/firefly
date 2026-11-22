@@ -1,7 +1,7 @@
-"""发布构建的传感器启动检查；运行记录仅写 logs/ 下的 rrd。
+"""用 release 程序检查传感器启动，读取本次运行归档中的 RRD 分段验证结果。
 
-需要 RMUC 资产、图形会话与 release 构建的 firefly-rootslam / pilot / fc / render / mimir / depth，且没有其他闭环进程。
-GroundTruth 供 render 合成图像及 viz 对照记录；屏蔽 PlantState，算法只使用 IMU 与图像。
+运行前准备 RMUC 资产和图形会话，并退出其他闭环进程。render 用 GroundTruth
+生成图像，Mimir 记录真值供对照。模拟器关闭 PlantState，定位使用 IMU 和图像。
 """
 from __future__ import annotations
 

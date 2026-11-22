@@ -1,12 +1,12 @@
 # firefly-basalt
 
-Rust translation of the original Basalt estimator, IMU, optical-flow, mapping,
-and serialization modules. Shared camera and calibration
-primitives live in `firefly-calibration`.
+This crate implements the Basalt estimator, IMU, optical flow, mapping, and
+serialization modules in Rust. It uses the camera models and calibration data
+from `firefly-calibration`.
 
 The source baseline is Basalt commit
-`0f3b2b52c807f70ff4e2973ce253c73329eea7bc`. Numerical fixtures verify individual
-contracts; [dataset evaluation](../../apps/firefly/rootslam/README.md) measures application behavior.
+`0f3b2b52c807f70ff4e2973ce253c73329eea7bc`. Numerical tests check individual algorithms against reference results. To measure
+trajectory accuracy, run the [RootSLAM dataset evaluation](../../apps/firefly/rootslam/README.md).
 
 ## References
 
