@@ -3,6 +3,7 @@ site_name = "Firefly 文档"
 site_url = "https://3se-competitive-robotics-team.github.io/firefly/"
 repo_url = "https://github.com/3SE-Competitive-Robotics-Team/firefly"
 edit_uri = "edit/main/docs/"
+watch = ["apps/firefly/rootslam/README.md"]
 exclude_docs = """
 /papers/
 /reference/
@@ -17,7 +18,7 @@ nav = [
   { "运行与测评" = [
     { "可观测性" = "observability.md" },
     { "Mimir 录制规则" = "mimir.md" },
-    { "RootSLAM 公开数据集测评" = "https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/apps/firefly/rootslam/README.md#public-dataset-evaluation" },
+    { "RootSLAM 公开数据集测评" = "rootslam.md" },
   ] },
   { "许可证" = [
     { "许可证索引" = "licenses/README.md" },
@@ -32,6 +33,7 @@ features = ["navigation.sections", "content.action.edit", "content.code.copy", "
 
 [project.markdown_extensions]
 tables = {}
+pymdownx.snippets = { base_path = ["apps/firefly"], check_paths = true }
 toc.permalink = true
 toc.slugify = { object = "pymdownx.slugs.slugify", kwds = { case = "lower" } }
 pymdownx.highlight = {}

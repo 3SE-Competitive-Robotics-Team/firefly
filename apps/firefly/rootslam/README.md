@@ -5,7 +5,7 @@ RootSLAM provides calibrated stereo/IMU odometry through one application:
 sources run public datasets through the same Basalt estimator. Persistent mapping,
 loop closure and final global BA are available for dataset evaluation.
 
-For a connected Matrix, use the [two-minute IMU check](../../../docs/development.md#验证-matrix-imu). For stereo tracking and IPC configuration, see [online operation](#online-operation-and-validation).
+For a connected Matrix, use the [two-minute IMU check](https://3se-competitive-robotics-team.github.io/firefly/development/#验证-matrix-imu). For stereo tracking and IPC configuration, see [online operation](#online-operation-and-validation).
 
 ## Public-dataset evaluation
 
@@ -23,10 +23,10 @@ mkdir -p logs/tumvi_room2/float64
 
 | Dataset | Input layout | Calibration | Example |
 |---|---|---|---|
-| [LaMAria](https://lamaria.inf.ethz.ch/slam_datasets) | ASL sequence containing `aria/` | Matching `pinhole_calibrations/<sequence>.json` | [LaMAria config](../../../configs/firefly-rootslam-dataset.toml) |
-| [UZH FPV](https://fpv.ifi.uzh.ch/datasets/) | Snapdragon archive with `left_images.txt`, `right_images.txt`, `imu.txt` | Matching Kalibr directory or Basalt JSON | [UZH config](../../../configs/firefly-rootslam-uzh.toml) |
-| [EuRoC](https://projects.asl.ethz.ch/datasets/doku.php?id=kmavvisualinertialdatasets) | Sequence containing `mav0/` | Basalt `euroc_ds_calib.json` | [EuRoC config](../../../configs/firefly-rootslam-euroc.toml) |
-| [TUM-VI](https://cvg.cit.tum.de/data/datasets/visual-inertial-dataset) | Calibrated 512×512, 16-bit EuRoC export | Basalt `tumvi_512_eucm_calib.json` | [TUM-VI config](../../../configs/firefly-rootslam-tumvi.toml) |
+| [LaMAria](https://lamaria.inf.ethz.ch/slam_datasets) | ASL sequence containing `aria/` | Matching `pinhole_calibrations/<sequence>.json` | [LaMAria config](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/configs/firefly-rootslam-dataset.toml) |
+| [UZH FPV](https://fpv.ifi.uzh.ch/datasets/) | Snapdragon archive with `left_images.txt`, `right_images.txt`, `imu.txt` | Matching Kalibr directory or Basalt JSON | [UZH config](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/configs/firefly-rootslam-uzh.toml) |
+| [EuRoC](https://projects.asl.ethz.ch/datasets/doku.php?id=kmavvisualinertialdatasets) | Sequence containing `mav0/` | Basalt `euroc_ds_calib.json` | [EuRoC config](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/configs/firefly-rootslam-euroc.toml) |
+| [TUM-VI](https://cvg.cit.tum.de/data/datasets/visual-inertial-dataset) | Calibrated 512×512, 16-bit EuRoC export | Basalt `tumvi_512_eucm_calib.json` | [TUM-VI config](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/configs/firefly-rootslam-tumvi.toml) |
 | KITTI | Native sequence accepted by the Basalt KITTI reader | Matching Basalt cereal JSON | Select `input.format = "kitti"` |
 
 The Basalt calibration reference is commit
@@ -91,7 +91,7 @@ The startup checks resolve path aliases and validate output ownership; writers
 create new files. Existing runs remain available for comparison.
 
 Start Mimir in one terminal. It prints the recording path, following the
-[shared archive naming contract](../../../docs/mimir.md):
+[shared archive naming contract](https://3se-competitive-robotics-team.github.io/firefly/mimir/):
 
 ```bash
 ./target/release/mimir
@@ -197,7 +197,7 @@ uses high-rate IMU prediction.
 loop closure follows `vio.loops`, and final optimization follows
 `dataset.global_optimization` when mapping is enabled. `dataset.loop_options`
 and `dataset.map_policy` configure those modules. The global solver controls and
-factor contracts are described in the [mapping crate](../../../crates/firefly-rootslam-mapping/README.md).
+factor contracts are described in the [mapping crate](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-rootslam-mapping/README.md).
 
 Optional Basalt-compatible exports are `marg_data` (binary marginalization records
 and `gt.cereal`), `debug_directory` (statistics), `result_path` (local alignment
@@ -245,7 +245,7 @@ matching policy. Archives that omit it use Basalt's temporal right-eye tracking.
 Optional sparse mapping maintains its own posterior map; planner owns dense depth
 fusion. `--external-localization` assigns corrected-odometry and navigation
 publication to the localization process. The online data flow is shown in
-[architecture](../../../docs/architecture.md).
+[architecture](https://3se-competitive-robotics-team.github.io/firefly/architecture/).
 
 ```bash
 cargo test -p firefly-calibration -p firefly-basalt -p firefly-rootslam-mapping -p firefly-rootslam --all-targets
@@ -254,5 +254,5 @@ uv run python -B -m unittest discover -s apps/firefly/rootslam/tests -p test_exp
 ```
 
 Full-workspace checks are in the
-[development guide](../../../docs/development.md#测试). Observation ownership and recorder
-budgets are described in [observability](../../../docs/observability.md).
+[development guide](https://3se-competitive-robotics-team.github.io/firefly/development/#测试). Observation ownership and recorder
+budgets are described in [observability](https://3se-competitive-robotics-team.github.io/firefly/observability/).

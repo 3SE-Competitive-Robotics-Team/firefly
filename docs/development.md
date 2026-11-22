@@ -152,7 +152,7 @@ uv run --locked --only-group docs zensical serve
 uv run --locked --only-group docs zensical build --clean --strict
 ```
 
-新增页面时在 `zensical.toml` 的 `nav` 中登记。站内页面使用相对链接，指向源码或模块 README 的链接使用 GitHub 文件地址。文档 PR 会自动构建，合入 `main` 后发布到 GitHub Pages。首次发布时，在仓库 **Settings → Pages → Source** 选择 **GitHub Actions**。
+新增页面时在 `zensical.toml` 的 `nav` 中登记。站内页面使用相对链接，RootSLAM 测评页在构建时读取 `apps/firefly/rootslam/README.md`，更新正文时编辑这份 README。源码链接使用 GitHub 文件地址。文档 PR 会自动构建，合入 `main` 后发布到 GitHub Pages。首次发布时，在仓库 **Settings → Pages → Source** 选择 **GitHub Actions**。
 
 ## Rust 命令行
 

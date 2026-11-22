@@ -12,7 +12,7 @@ Firefly 是 RoboMaster 四旋翼自主飞行系统。开发者可以在 MuJoCo �
 
 - [可观测性](observability.md)列出 IPC topic、观测字段和采集预算。
 - [Mimir 录制规则](mimir.md)说明如何找到一次运行的日志、读取 RRD 分段和核对归档容量。
-- [RootSLAM 公开数据集测评](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/apps/firefly/rootslam/README.md#public-dataset-evaluation)给出数据集准备、标定、运行与评分步骤。
+- [RootSLAM 公开数据集测评](rootslam.md#public-dataset-evaluation)给出数据集准备、标定、运行与评分步骤。
 
 ## 模块文档
 
