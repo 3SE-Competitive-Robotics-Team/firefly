@@ -133,8 +133,8 @@ mod tests {
     use super::*;
     use firefly_hil::frame::FrameReader;
     use firefly_hil::protocol::{HEADER_LEN, Kind, decode_header};
-    use firefly_pubsub::{control::STICKS_BUFFER_SIZE, log::LogMessage, viz::ScalarMessage};
-    use firefly_pubsub::{control::SticksMessage, publish::Publisher};
+    use firefly_pubsub::sticks::{STICKS_BUFFER_SIZE, SticksMessage};
+    use firefly_pubsub::{log::LogMessage, publish::Publisher, viz::ScalarMessage};
 
     struct ControlDuringWrite {
         bytes: Vec<u8>,
