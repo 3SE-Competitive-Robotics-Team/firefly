@@ -40,6 +40,13 @@ pub struct LocalSnapshot {
     pub fused_at: Instant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapStatus {
+    Waiting,
+    Ready,
+    Unavailable,
+}
+
 #[derive(Default)]
 pub struct MapInput {
     required: Option<Bounds>,
@@ -69,23 +76,26 @@ impl MapInput {
         self.snapshot = Some(snapshot);
         Ok(())
     }
-    pub fn ready(&self, odometry: &OdomMessage, now: Instant, timeout: Duration) -> bool {
-        !self.expired(odometry, now, timeout)
-            && self.snapshot.as_ref().is_some_and(|snapshot| {
-                self.required
-                    .is_some_and(|required| snapshot.bounds.contains(&required))
-                    && snapshot.timestamp <= odometry.timestamp
-            })
-    }
-
-    /// Coverage gaps can wait for the next fused snapshot.
-    /// Only actual age expiry or a latched input fault disables recovery.
-    pub fn expired(&self, odometry: &OdomMessage, now: Instant, timeout: Duration) -> bool {
-        self.fault.is_some()
-            || self.snapshot.as_ref().is_some_and(|snapshot| {
-                odometry.timestamp - snapshot.timestamp > timeout.as_secs_f64()
-                    || now.saturating_duration_since(snapshot.fused_at) > timeout
-            })
+    pub fn status(&self, odometry: &OdomMessage, now: Instant, timeout: Duration) -> MapStatus {
+        if self.fault.is_some() {
+            return MapStatus::Unavailable;
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return MapStatus::Waiting;
+        };
+        if odometry.timestamp - snapshot.timestamp > timeout.as_secs_f64()
+            || now.saturating_duration_since(snapshot.fused_at) > timeout
+        {
+            MapStatus::Unavailable
+        } else if self
+            .required
+            .is_some_and(|required| snapshot.bounds.contains(&required))
+            && snapshot.timestamp <= odometry.timestamp
+        {
+            MapStatus::Ready
+        } else {
+            MapStatus::Waiting
+        }
     }
 
     /// Move the planning window before checking depth-map coverage.
@@ -211,8 +221,10 @@ mod tests {
         let mut away = nav;
         away.position_x = 6.;
         input.prepare_region(&mut map, &away, true);
-        assert!(!input.ready(&away, Instant::now(), Duration::from_secs(1)));
-        assert!(!input.expired(&away, Instant::now(), Duration::from_secs(1)));
+        assert_eq!(
+            input.status(&away, Instant::now(), Duration::from_secs(1)),
+            MapStatus::Waiting
+        );
         input.prepare_region(&mut map, &nav, true);
         assert!(map.is_occupied_inflated(point));
         input.apply(&mut map, &nav, true).unwrap();
@@ -258,14 +270,22 @@ mod tests {
         input.observe_local(stale).unwrap();
         input.prepare_region(&mut map, &nav, true);
         input.observe_local(snapshot(1, vec![])).unwrap();
-        assert!(!input.ready(&nav, Instant::now(), Duration::from_secs(1)));
-        assert!(input.expired(&nav, Instant::now(), Duration::from_secs(1)));
+        assert_eq!(
+            input.status(&nav, Instant::now(), Duration::from_secs(1)),
+            MapStatus::Unavailable
+        );
         input.observe_local(snapshot(2, vec![])).unwrap();
-        assert!(input.ready(&nav, Instant::now(), Duration::from_secs(1)));
+        assert_eq!(
+            input.status(&nav, Instant::now(), Duration::from_secs(1)),
+            MapStatus::Ready
+        );
         let mut invalid = snapshot(3, vec![]);
         invalid.bounds.min[0] = f64::NAN;
         assert!(input.observe_local(invalid).is_err());
         input.observe_local(snapshot(4, vec![])).unwrap();
-        assert!(!input.ready(&nav, Instant::now(), Duration::from_secs(1)));
+        assert_eq!(
+            input.status(&nav, Instant::now(), Duration::from_secs(1)),
+            MapStatus::Unavailable
+        );
     }
 }

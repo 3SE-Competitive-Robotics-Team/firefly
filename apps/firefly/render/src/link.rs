@@ -127,9 +127,14 @@ pub struct SensorCapture {
     /// 下一个允许触发的 sim 时刻（秒）。
     next_stamp: f64,
     /// 当前出图窗口对应的请求序号（渲染世界取走它即收起相机）。
-    requested_seq: Option<u64>,
-    requested_down: bool,
+    request: Option<CameraExposure>,
     down_cadence: FrameCadence,
+}
+
+#[derive(Clone, Copy)]
+struct CameraExposure {
+    seq: u64,
+    down: bool,
 }
 
 #[derive(Resource)]
@@ -241,15 +246,15 @@ pub fn poll_pose(
     }
 
     if capture
-        .requested_seq
-        .is_some_and(|seq| hub.taken_seq() >= seq)
+        .request
+        .is_some_and(|request| hub.taken_seq() >= request.seq)
     {
-        capture.requested_seq = None;
+        capture.request = None;
     }
 
     // 按仿真时间以配置节拍触发采集；回读双缓冲，
     // 只要还有空闲组就可发起（上一拍在途不阻塞下一拍）。
-    if capture.requested_seq.is_none()
+    if capture.request.is_none()
         && hub.can_issue()
         && !hub.has_pending()
         && pose.has_pose
@@ -271,19 +276,17 @@ pub fn poll_pose(
             labels: ports.offline,
             down: down.then(|| targets.down.id()),
         });
-        capture.requested_seq = Some(seq);
-        capture.requested_down = down;
+        capture.request = Some(CameraExposure { seq, down });
         // sim 时间戳有浮点抖动，按 10% 周期容差比较，避免漏拍。
         capture.next_stamp = pose.stamp + period - period * 0.1;
         log::debug!("pose t={:.3} 回读 seq={seq}", pose.stamp);
     }
 
     apply_pose_to_eyes(&pose, &mut eyes);
-    let active = capture.requested_seq.is_some();
     for (eye, mut camera) in &mut cameras {
-        let enabled = active
-            && (*eye != Eye::Depth || ports.offline)
-            && (*eye != Eye::Down || capture.requested_down);
+        let enabled = capture.request.is_some_and(|request| {
+            (*eye != Eye::Depth || ports.offline) && (*eye != Eye::Down || request.down)
+        });
         if camera.is_active != enabled {
             camera.is_active = enabled;
         }

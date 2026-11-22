@@ -10,18 +10,14 @@ use firefly_vio_runtime::{ImuAdapter, ImuWatermark, Publishers, Sample};
 use nalgebra::Vector3;
 use std::{
     collections::{BTreeMap, VecDeque},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicI64, Ordering},
-        mpsc,
-    },
+    sync::{Arc, Mutex, OnceLock, atomic::AtomicBool, mpsc},
     time::Instant,
 };
 
 pub(super) type FrameStarts = Arc<Mutex<BTreeMap<i64, Instant>>>;
 
 pub(super) struct Inputs {
-    pub first_image: Arc<AtomicI64>,
+    pub first_image: Arc<OnceLock<i64>>,
     pub external_localization: bool,
     pub imu: mpsc::SyncSender<Option<Arc<ImuData<f64>>>>,
     pub posteriors: mpsc::Receiver<Option<Arc<PoseVelBiasState<f64>>>>,
@@ -43,7 +39,7 @@ pub(super) fn run(inputs: Inputs, stop: &AtomicBool) -> Result<()> {
         Ok(Adapter {
             inputs,
             pending: VecDeque::new(),
-            flushing: false,
+            delivery: ImuDelivery::BeforeFirstImage,
             sampler: Some(StationaryGravitySampler::new()),
             predictor: Predictor::new(5., Vector3::new(0., 0., -9.81)),
             session: (std::time::SystemTime::now()
@@ -61,8 +57,13 @@ pub(super) fn run(inputs: Inputs, stop: &AtomicBool) -> Result<()> {
     })
 }
 
+enum ImuDelivery {
+    BeforeFirstImage,
+    Streaming,
+}
+
 struct Adapter {
-    flushing: bool,
+    delivery: ImuDelivery,
     inputs: Inputs,
     // Basalt starts consuming IMU only after the first initialized image. Preserve
     // that startup backlog without blocking the event thread on its 300-entry queue.
@@ -76,16 +77,15 @@ struct Adapter {
 
 impl Adapter {
     fn flush(&mut self) -> Result<()> {
-        if !self.flushing {
-            let first = self.inputs.first_image.load(Ordering::Acquire);
-            if first == i64::MIN {
+        if matches!(self.delivery, ImuDelivery::BeforeFirstImage) {
+            let Some(&first) = self.inputs.first_image.get() else {
                 return Ok(());
-            }
+            };
             // Retain the sample bracketing the first image for preintegration.
             while self.pending.get(1).is_some_and(|s| s.t_ns <= first) {
                 self.pending.pop_front();
             }
-            self.flushing = true;
+            self.delivery = ImuDelivery::Streaming;
         }
         while let Some(data) = self.pending.front() {
             match self.inputs.imu.try_send(Some(Arc::clone(data))) {
@@ -201,7 +201,7 @@ impl ImuAdapter for Adapter {
                 (estimate.end_ns - estimate.start_ns) as f64 * 1e-9
             );
         }
-        if !self.flushing {
+        if matches!(self.delivery, ImuDelivery::BeforeFirstImage) {
             while self
                 .pending
                 .get(1)

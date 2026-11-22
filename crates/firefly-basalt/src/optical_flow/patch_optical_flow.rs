@@ -20,14 +20,12 @@ use std::{collections::BTreeMap, marker::PhantomData, sync::Arc};
 
 /// Tracks against patches retained from each feature's initial frame.
 pub struct PatchOpticalFlow<P: Pattern<f32, N>, const N: usize> {
-    t_ns: i64,
     frame_counter: usize,
     last_keypoint_id: KeypointId,
     config: VioConfig,
     calib: Calibration<f64>,
     patches: BTreeMap<KeypointId, Vec<OpticalFlowPatch<f32, P, N>>>,
-    transforms: Option<Arc<OpticalFlowResult>>,
-    pyramid: Vec<ManagedImagePyr<u16>>,
+    previous: Option<super::TrackedFrame>,
     essential: Matrix4<f64>,
     pattern: PhantomData<P>,
 }
@@ -61,14 +59,12 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> PatchOpticalFlow<P, N> {
             Matrix4::zeros()
         };
         Ok(Self {
-            t_ns: -1,
             frame_counter: 0,
             last_keypoint_id: 0,
             config,
             calib: calib.clone(),
             patches: BTreeMap::new(),
-            transforms: None,
-            pyramid: Vec::new(),
+            previous: None,
             essential,
             pattern: PhantomData,
         })
@@ -104,19 +100,22 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> PatchOpticalFlow<P, N> {
             input_images: Some(input),
             ..OpticalFlowResult::default()
         };
-        if self.t_ns >= 0 {
-            let previous = self.transforms.as_ref().unwrap();
+        if let Some(previous) = self.previous.as_ref() {
             for (i, observations) in next.observations.iter_mut().enumerate() {
-                *observations =
-                    self.track_points(&self.pyramid[i], &pyramid[i], &previous.observations[i]);
+                *observations = self.track_points(
+                    &previous.pyramid[i],
+                    &pyramid[i],
+                    &previous.flow.observations[i],
+                );
             }
         }
-        self.t_ns = next.t_ns;
-        self.pyramid = pyramid;
-        self.add_points(&mut next)?;
+        self.add_points(&mut next, &pyramid)?;
         self.filter_points(&mut next);
         let next = Arc::new(next);
-        self.transforms = Some(Arc::clone(&next));
+        self.previous = (next.t_ns >= 0).then(|| super::TrackedFrame {
+            pyramid,
+            flow: Arc::clone(&next),
+        });
         let publish = self
             .frame_counter
             .is_multiple_of(usize::try_from(self.config.optical_flow_skip_frames).unwrap());
@@ -204,14 +203,18 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> PatchOpticalFlow<P, N> {
         valid
     }
 
-    fn add_points(&mut self, result: &mut OpticalFlowResult) -> Result<()> {
+    fn add_points(
+        &mut self,
+        result: &mut OpticalFlowResult,
+        pyramid: &[ManagedImagePyr<u16>],
+    ) -> Result<()> {
         let existing: Vec<Vector2<f64>> = result.observations[0]
             .values()
             .map(|t| t.translation.map(f64::from))
             .collect();
         let mut keypoints = KeypointsData::default();
         detect_keypoints(
-            &self.pyramid[0].lvl(0),
+            &pyramid[0].lvl(0),
             &mut keypoints,
             usize::try_from(self.config.optical_flow_detection_grid_size).unwrap(),
             1,
@@ -225,7 +228,7 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> PatchOpticalFlow<P, N> {
                 (0..=self.config.optical_flow_levels)
                     .map(|level| {
                         OpticalFlowPatch::<f32, P, N>::new(
-                            &self.pyramid[0].lvl(level as usize),
+                            &pyramid[0].lvl(level as usize),
                             &(position / ((1_i32 << level) as f32)),
                         )
                     })
@@ -240,7 +243,7 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> PatchOpticalFlow<P, N> {
             self.last_keypoint_id += 1;
         }
         if self.calib.intrinsics.len() > 1 {
-            let stereo = self.track_points(&self.pyramid[0], &self.pyramid[1], &new_points);
+            let stereo = self.track_points(&pyramid[0], &pyramid[1], &new_points);
             for (id, transform) in stereo {
                 result.observations[1].entry(id).or_insert(transform);
             }

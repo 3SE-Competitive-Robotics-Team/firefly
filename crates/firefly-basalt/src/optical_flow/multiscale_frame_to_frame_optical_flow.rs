@@ -20,13 +20,11 @@ use std::{collections::BTreeMap, marker::PhantomData, sync::Arc};
 
 /// Frame-to-frame tracking with feature creation at multiple pyramid levels.
 pub struct MultiscaleFrameToFrameOpticalFlow<P: Pattern<f32, N>, const N: usize> {
-    t_ns: i64,
     frame_counter: usize,
     last_keypoint_id: KeypointId,
     config: VioConfig,
     calib: Calibration<f32>,
-    transforms: Option<Arc<OpticalFlowResult>>,
-    pyramid: Vec<ManagedImagePyr<u16>>,
+    previous: Option<super::TrackedFrame>,
     essential: Matrix4<f32>,
     pattern: PhantomData<P>,
 }
@@ -60,13 +58,11 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> MultiscaleFrameToFrameOpticalFlo
             Matrix4::zeros()
         };
         Ok(Self {
-            t_ns: -1,
             frame_counter: 0,
             last_keypoint_id: 0,
             config,
             calib: calib.cast(),
-            transforms: None,
-            pyramid: Vec::new(),
+            previous: None,
             essential,
             pattern: PhantomData,
         })
@@ -102,25 +98,25 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> MultiscaleFrameToFrameOpticalFlo
             pyramid_levels: vec![BTreeMap::new(); self.calib.intrinsics.len()],
             input_images: Some(input),
         };
-        if self.t_ns >= 0 {
-            let previous = self.transforms.as_ref().unwrap();
+        if let Some(previous) = self.previous.as_ref() {
             for (i, observations) in next.observations.iter_mut().enumerate() {
                 let (tracked, levels) = self.track_points(
-                    &self.pyramid[i],
+                    &previous.pyramid[i],
                     &pyramid[i],
-                    &previous.observations[i],
-                    &previous.pyramid_levels[i],
+                    &previous.flow.observations[i],
+                    &previous.flow.pyramid_levels[i],
                 );
                 *observations = tracked;
                 next.pyramid_levels[i] = levels;
             }
         }
-        self.t_ns = next.t_ns;
-        self.pyramid = pyramid;
-        self.add_points(&mut next)?;
+        self.add_points(&mut next, &pyramid)?;
         self.filter_points(&mut next);
         let next = Arc::new(next);
-        self.transforms = Some(Arc::clone(&next));
+        self.previous = (next.t_ns >= 0).then(|| super::TrackedFrame {
+            pyramid,
+            flow: Arc::clone(&next),
+        });
         let publish = self
             .frame_counter
             .is_multiple_of(usize::try_from(self.config.optical_flow_skip_frames).unwrap());
@@ -229,7 +225,11 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> MultiscaleFrameToFrameOpticalFlo
         valid
     }
 
-    fn add_points(&mut self, result: &mut OpticalFlowResult) -> Result<()> {
+    fn add_points(
+        &mut self,
+        result: &mut OpticalFlowResult,
+        pyramid: &[ManagedImagePyr<u16>],
+    ) -> Result<()> {
         let mut keypoints = KeypointsData::default();
         let mut new_points = BTreeMap::new();
         let mut new_levels = BTreeMap::new();
@@ -243,7 +243,7 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> MultiscaleFrameToFrameOpticalFlo
                 }
             }
             detect_keypoints(
-                &self.pyramid[0].lvl(level as usize),
+                &pyramid[0].lvl(level as usize),
                 &mut keypoints,
                 self.config.optical_flow_detection_grid_size as usize,
                 1,
@@ -262,7 +262,7 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> MultiscaleFrameToFrameOpticalFlo
                 self.last_keypoint_id += 1;
             }
             let (stereo, levels) =
-                self.track_points(&self.pyramid[0], &self.pyramid[1], &new_points, &new_levels);
+                self.track_points(&pyramid[0], &pyramid[1], &new_points, &new_levels);
             for (id, transform) in stereo {
                 result.observations[1].entry(id).or_insert(transform);
                 result.pyramid_levels[1].insert(id, levels[&id]);

@@ -67,14 +67,24 @@ pub enum PrecisionStage {
 }
 
 #[derive(Clone, Copy, Debug)]
+enum Progress {
+    Align {
+        held: f32,
+    },
+    Descend,
+    Final {
+        elapsed: f32,
+        contact_candidate: bool,
+    },
+    Reacquire,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct PrecisionLanding {
     params: PrecisionParams,
     target: Vector3<f32>,
-    stage: PrecisionStage,
+    progress: Progress,
     age: f32,
-    aligned: f32,
-    final_elapsed: f32,
-    contact_candidate: bool,
     horizontal: [VelocitySmoothing; 2],
 }
 impl PrecisionLanding {
@@ -91,11 +101,8 @@ impl PrecisionLanding {
         Self {
             params,
             target,
-            stage: PrecisionStage::Align,
+            progress: Progress::Align { held: 0. },
             age: 0.,
-            aligned: 0.,
-            final_elapsed: 0.,
-            contact_candidate: false,
             horizontal,
         }
     }
@@ -106,16 +113,21 @@ impl PrecisionLanding {
 
     #[must_use]
     pub const fn stage(&self) -> PrecisionStage {
-        self.stage
+        match self.progress {
+            Progress::Align { .. } => PrecisionStage::Align,
+            Progress::Descend => PrecisionStage::Descend,
+            Progress::Final { .. } => PrecisionStage::Final,
+            Progress::Reacquire => PrecisionStage::Reacquire,
+        }
     }
 
     pub fn observe(&mut self, target: Vector3<f32>) {
-        if self.stage != PrecisionStage::Final && (target - self.target).norm() <= 0.15 {
+        if !matches!(self.progress, Progress::Final { .. }) && (target - self.target).norm() <= 0.15
+        {
             self.target = target;
             self.age = 0.;
-            if self.stage == PrecisionStage::Reacquire {
-                self.stage = PrecisionStage::Align;
-                self.aligned = 0.;
+            if matches!(self.progress, Progress::Reacquire) {
+                self.progress = Progress::Align { held: 0. };
             }
         }
     }
@@ -124,11 +136,15 @@ impl PrecisionLanding {
     pub fn advance(&mut self, dt: f32, state: &QuadState, near_contact: bool) -> bool {
         self.age += dt;
         let error = (self.target - state.position).xy().norm();
-        if self.stage == PrecisionStage::Final {
-            self.final_elapsed += dt;
-            self.contact_candidate |= near_contact && error <= 2. * self.params.align_radius;
-            if self.final_elapsed > self.params.final_timeout
-                || (!self.contact_candidate && error > 2. * self.params.align_radius)
+        if let Progress::Final {
+            elapsed,
+            contact_candidate,
+        } = &mut self.progress
+        {
+            *elapsed += dt;
+            *contact_candidate |= near_contact && error <= 2. * self.params.align_radius;
+            if *elapsed > self.params.final_timeout
+                || (!*contact_candidate && error > 2. * self.params.align_radius)
             {
                 return false;
             }
@@ -137,23 +153,27 @@ impl PrecisionLanding {
                 if self.age > self.params.target_timeout + self.params.reacquire_timeout {
                     return false;
                 }
-                self.stage = PrecisionStage::Reacquire;
-                self.aligned = 0.;
+                self.progress = Progress::Reacquire;
                 for axis in &mut self.horizontal {
                     axis.update(dt, 0.);
                 }
                 return true;
             }
             let aligned = error <= self.params.align_radius && state.velocity.xy().norm() <= 0.08;
-            self.aligned = if aligned { self.aligned + dt } else { 0. };
-            if self.stage == PrecisionStage::Align && self.aligned >= self.params.align_hold {
-                self.stage = PrecisionStage::Descend;
+            if let Progress::Align { held } = &mut self.progress {
+                *held = if aligned { *held + dt } else { 0. };
+                if *held >= self.params.align_hold {
+                    self.progress = Progress::Descend;
+                }
             }
-            if self.stage == PrecisionStage::Descend
+            if matches!(self.progress, Progress::Descend)
                 && aligned
                 && state.position.z - self.target.z <= self.params.final_height
             {
-                self.stage = PrecisionStage::Final;
+                self.progress = Progress::Final {
+                    elapsed: 0.,
+                    contact_candidate: false,
+                };
             }
         }
         for i in 0..2 {
@@ -165,13 +185,19 @@ impl PrecisionLanding {
     }
     #[must_use]
     pub fn contact_candidate(&self) -> bool {
-        self.contact_candidate
+        matches!(
+            self.progress,
+            Progress::Final {
+                contact_candidate: true,
+                ..
+            }
+        )
     }
 
     #[must_use]
     pub fn may_descend(&self, state: &QuadState) -> bool {
-        self.stage == PrecisionStage::Final
-            || (self.stage == PrecisionStage::Descend
+        matches!(self.progress, Progress::Final { .. })
+            || (matches!(self.progress, Progress::Descend)
                 && (self.target - state.position).xy().norm() <= self.params.align_radius)
     }
     #[must_use]
@@ -207,7 +233,7 @@ mod tests {
         assert!(landing.may_descend(&state));
         state.position.z = 0.1;
         landing.advance(0.01, &state, false);
-        assert_eq!(landing.stage, PrecisionStage::Final);
+        assert_eq!(landing.stage(), PrecisionStage::Final);
         assert!(landing.advance(0.5, &state, false));
         assert!(!landing.advance(8., &state, false));
     }
@@ -219,7 +245,11 @@ mod tests {
         };
         let mut landing =
             PrecisionLanding::new(PrecisionParams::default(), Vector3::zeros(), &state);
-        landing.stage = PrecisionStage::Final;
+        for _ in 0..2 {
+            landing.observe(Vector3::zeros());
+            assert!(landing.advance(0.25, &state, false));
+        }
+        assert_eq!(landing.stage(), PrecisionStage::Final);
         let mut drifting = state;
         drifting.position.x = 0.08;
         assert!(!landing.advance(0.01, &drifting, false));

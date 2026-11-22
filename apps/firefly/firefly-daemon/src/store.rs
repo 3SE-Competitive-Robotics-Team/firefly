@@ -81,6 +81,13 @@ pub enum Commit {
     PhaseChanged(f64),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitState {
+    Idle,
+    WritingPhase,
+    WritingIdentity,
+}
+
 /// One FIFO writer preserves transition order. The oldest outstanding commit bounds I/O latency.
 pub struct Journal {
     tx: SyncSender<Receipt>,
@@ -117,13 +124,18 @@ impl Journal {
         self.pending.push_back((Instant::now(), commit));
         Ok(())
     }
-    pub fn pending(&self) -> bool {
-        !self.pending.is_empty()
-    }
-    pub fn identity_pending(&self) -> bool {
-        self.pending
+    pub fn state(&self) -> CommitState {
+        if self.pending.is_empty() {
+            CommitState::Idle
+        } else if self
+            .pending
             .iter()
-            .any(|(_, c)| matches!(c, Commit::Accepted(_) | Commit::Airborne(_)))
+            .any(|(_, commit)| matches!(commit, Commit::Accepted(_) | Commit::Airborne(_)))
+        {
+            CommitState::WritingIdentity
+        } else {
+            CommitState::WritingPhase
+        }
     }
     pub fn poll(&mut self) -> io::Result<Option<(Receipt, Commit)>> {
         let Some(&(started, commit)) = self.pending.front() else {
@@ -191,7 +203,7 @@ mod tests {
         }
         assert!(journal.submit(receipt, Commit::PhaseChanged(9.)).is_err());
         let mut observed = Vec::new();
-        while journal.pending() {
+        while journal.state() != CommitState::Idle {
             if let Some((committed, reason)) = journal.poll().unwrap() {
                 let index = committed.mission.waypoint;
                 assert_eq!(
@@ -202,7 +214,7 @@ mod tests {
                         Commit::PhaseChanged(index as f64)
                     }
                 );
-                assert_eq!(journal.identity_pending(), index < 3);
+                assert_eq!(journal.state() == CommitState::WritingIdentity, index < 3);
                 observed.push(index);
             } else {
                 std::thread::sleep(Duration::from_millis(1));

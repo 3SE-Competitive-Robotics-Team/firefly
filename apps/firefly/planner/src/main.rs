@@ -29,6 +29,8 @@ use iceoryx2::prelude::*;
 use iceoryx2::waitset::WaitSetRunResult;
 use nalgebra::Vector3;
 
+use map_input::MapStatus;
+
 /// 主循环频率（官方 `exec_timer` 0.01s）。
 const LOOP_PERIOD: Duration = Duration::from_millis(10);
 /// 地图融合新鲜度阈值（秒），沿用官方 `grid_map/odom_depth_timeout`。
@@ -85,7 +87,14 @@ fn log_subscription<T: std::fmt::Debug + ZeroCopySend + 'static>(
     }
 }
 
-/// 各布尔标志相互独立（传感器/停止/完成），非状态机编码。
+enum Passage {
+    Inactive,
+    Approaching {
+        point: Vector3<f64>,
+        successor: Vector3<f64>,
+    },
+    Passed,
+}
 #[allow(clippy::struct_excessive_bools)]
 struct App {
     fsm: ReplanFsm,
@@ -123,12 +132,11 @@ struct App {
     /// 收到的最近目标（本 tick 处理一次，处理完清空；快速连续发布取最新）。
     pending_goal: Option<GoalMessage>,
     /// Current pass point and its successor, both in the local odometry frame.
-    passage: Option<(Vector3<f64>, Vector3<f64>)>,
+    passage: Passage,
     /// 强制停止待处理标记（poll 置位，step 消费后清零）。
     pending_mandatory_stop: bool,
     /// 最新 odom 携带的 trace 上下文 `(trace_id, span_id, sampled)`（续接用）。
     odom_trace: Option<(u128, u64, bool)>,
-    finished: bool,
     loop_rate: Rate,
     fsm_rate: Rate,
     submitted_rate: Rate,
@@ -226,10 +234,9 @@ impl App {
             goal_sub,
             stop_sub,
             pending_goal: None,
-            passage: None,
+            passage: Passage::Inactive,
             pending_mandatory_stop: false,
             odom_trace: None,
-            finished: false,
             loop_rate: Rate::default(),
             fsm_rate: Rate::default(),
             submitted_rate: Rate::default(),
@@ -304,6 +311,7 @@ impl App {
                 self.fsm.is_finished()
                     && !self.fsm.is_emergency()
                     && !self.fsm.is_mandatory_stopped(),
+                matches!(self.passage, Passage::Passed),
             )?;
         }
         self.publish_performance(before, started, interval);
@@ -401,7 +409,7 @@ impl App {
             log::info!("局部状态就绪，规划从实测位置开始");
         }
         let odometry = self.state_input.odometry().unwrap();
-        if !self.synchronize_map(&odometry)? {
+        if self.synchronize_map(&odometry)? != MapStatus::Ready {
             self.solver.cancel();
             self.output.control(false)?;
             return Ok(());
@@ -429,8 +437,14 @@ impl App {
                         .set_goal_yaw((goal.has_yaw == 1).then_some(goal.yaw));
                     if !self.fsm.is_mandatory_stopped() {
                         self.output.goal_timestamp = goal.timestamp;
-                        self.output.passed = false;
-                        self.passage = (goal.arrival == PASS).then_some((target, next));
+                        self.passage = if goal.arrival == PASS {
+                            Passage::Approaching {
+                                point: target,
+                                successor: next,
+                            }
+                        } else {
+                            Passage::Inactive
+                        };
                         self.republish_trajectory = repeated && !heading_changed;
                     }
                     log::info!(
@@ -443,14 +457,14 @@ impl App {
                 Err(e) => log::warn!("目标 ({target:?}) 不可达，忽略：{e}"),
             }
         }
-        if let Some((point, next)) = self.passage
+        if let Passage::Approaching { point, successor } = self.passage
             && !self.fsm.is_mandatory_stopped()
             && !self.fsm.is_emergency()
             && (point - snapshot.position.coords).norm() <= 0.35
         {
-            self.passage = None;
-            match self.fsm.set_goal(now, measured, next) {
-                Ok(()) => self.output.passed = true,
+            self.passage = Passage::Inactive;
+            match self.fsm.set_goal(now, measured, successor) {
+                Ok(()) => self.passage = Passage::Passed,
                 Err(error) => log::warn!("途经点的后继目标不可达：{error}"),
             }
         }
@@ -489,9 +503,6 @@ impl App {
             [q.i, q.j, q.k, q.w],
             now,
         );
-        if report.finished {
-            self.finished = true;
-        }
         Ok(())
     }
 
@@ -502,7 +513,8 @@ impl App {
                 && !self.depth.terminated()
                 && self
                     .map_input
-                    .ready(&nav, Instant::now(), Duration::from_secs_f64(MAP_TIMEOUT))
+                    .status(&nav, Instant::now(), Duration::from_secs_f64(MAP_TIMEOUT))
+                    == MapStatus::Ready
         }) {
             self.solver.cancel();
             self.output.control(false)?;
@@ -527,23 +539,28 @@ impl App {
     }
 
     /// Execution and safety callbacks must query the same accepted map snapshot.
-    fn synchronize_map(&mut self, odometry: &firefly_pubsub::odom::OdomMessage) -> Result<bool> {
+    fn synchronize_map(
+        &mut self,
+        odometry: &firefly_pubsub::odom::OdomMessage,
+    ) -> Result<MapStatus> {
         let started = Instant::now();
         self.map_input
             .prepare_region(self.fsm.manager_mut().map_mut(), odometry, true);
-        if self.depth.terminated()
-            || !self.map_input.ready(
-                odometry,
-                Instant::now(),
-                Duration::from_secs_f64(MAP_TIMEOUT),
-            )
-        {
-            return Ok(false);
+        if self.depth.terminated() {
+            return Ok(MapStatus::Unavailable);
+        }
+        let status = self.map_input.status(
+            odometry,
+            Instant::now(),
+            Duration::from_secs_f64(MAP_TIMEOUT),
+        );
+        if status != MapStatus::Ready {
+            return Ok(status);
         }
         self.map_input
             .apply(self.fsm.manager_mut().map_mut(), odometry, true)?;
         log_slow_stage("map", started);
-        Ok(true)
+        Ok(MapStatus::Ready)
     }
 
     /// 独立安全定时回调，与执行状态机共用单线程事件队列。
@@ -562,14 +579,10 @@ impl App {
         let now = self.t_sim;
         let measured = Some(planning_state(snapshot));
         let odometry = self.state_input.odometry().unwrap();
-        if !self.synchronize_map(&odometry)? {
+        let status = self.synchronize_map(&odometry)?;
+        if status != MapStatus::Ready {
             self.solver.cancel();
-            if (self.depth.terminated()
-                || self.map_input.expired(
-                    &odometry,
-                    Instant::now(),
-                    Duration::from_secs_f64(MAP_TIMEOUT),
-                ))
+            if status == MapStatus::Unavailable
                 && self.fsm.manager().local().is_some()
                 && !self.fsm.is_finished()
             {

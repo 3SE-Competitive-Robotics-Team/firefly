@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Sequence
+from enum import Enum, auto
 from functools import partial
 from typing import Protocol
 
@@ -49,6 +50,11 @@ AIRFRAME_PERIOD = 1.0
 #: 飞控指令陈旧阈值（墙钟秒）：锁步下 sim 时间由指令推进，陈旧只能按墙钟判——
 #: 超过即物理不推进（等飞控），被控对象不自行供力。
 CONTROL_STALE = 0.05
+
+
+class NoControl(Enum):
+    STARTING = auto()
+    PAUSED = auto()
 
 
 def _publisher(node, topic: str, payload_cls, subscriber_max: int | None = None):
@@ -230,8 +236,7 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
     motor_thrusts = np.empty(4)
     state_out = (np.empty(3), np.empty(3), np.empty(4), np.empty(3))
     imu_out = (np.empty(3), np.empty(3))
-    control_rx_wall = None
-    physics_paused = False
+    control_rx_wall: float | NoControl = NoControl.STARTING
 
     cycle = None
     next_imu = imu_period
@@ -240,6 +245,7 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
     t_start = time.perf_counter()
     try:
         while True:
+            was_paused = control_rx_wall is NoControl.PAUSED
             while (sample := control_sub.receive()) is not None:
                 m = sample.payload().contents
                 # 样本释放前复制到自有缓冲，后续物理步只读取该副本。
@@ -247,18 +253,17 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
                 control_rx_wall = time.monotonic()
 
             if (
-                control_rx_wall is not None
+                not isinstance(control_rx_wall, NoControl)
                 and time.monotonic() - control_rx_wall <= CONTROL_STALE
             ):
-                if physics_paused:
-                    physics_paused = False
+                if was_paused:
                     log("飞控指令恢复，物理继续推进")
                 env.apply_motor_thrusts(motor_thrusts)
                 env.step()
             else:
                 # 暂停期间仿真时间和传感器节拍冻结，恢复后从当前步继续。
-                if not physics_paused:
-                    physics_paused = True
+                control_rx_wall = NoControl.PAUSED
+                if not was_paused:
                     log(
                         "无有效飞控指令（飞控未启动或已停发），物理不推进",
                         LOG_LEVEL_ERROR,

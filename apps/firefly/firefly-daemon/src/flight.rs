@@ -10,6 +10,13 @@ use firefly_pubsub::{
 };
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum RecoveryCommand {
+    Disarm = kind::DISARM,
+    Land = kind::LAND,
+}
+
 #[derive(Clone, Copy)]
 enum Step {
     SendArm,
@@ -23,7 +30,7 @@ enum Step {
     RequestLanding,
     AwaitDisarm,
     Ground,
-    Recover { command: Option<u8> },
+    Recover { command: Option<RecoveryCommand> },
     NeedsOperator,
     Complete,
     Interrupted,
@@ -269,15 +276,15 @@ impl Flight {
         if let Some(fc) = bus.fc.fresh() {
             let command = match mode {
                 _ if matches!(self.step, Step::NeedsOperator) => None,
-                Some(Mode::ArmedGrounded) => Some(kind::DISARM),
-                Some(Mode::Takeoff | Mode::Hold | Mode::Track) => Some(kind::LAND),
+                Some(Mode::ArmedGrounded) => Some(RecoveryCommand::Disarm),
+                Some(Mode::Takeoff | Mode::Hold | Mode::Track) => Some(RecoveryCommand::Land),
                 _ => None,
             };
             if let Some(kind) = command {
                 if matches!(self.step, Step::Recover { command: last } if last != command) {
                     self.sequence = nanos().max(self.sequence + 1);
                 }
-                bus.command(kind, 0., self.sequence)?;
+                bus.command(kind as u8, 0., self.sequence)?;
             }
             if let Step::Recover { command: last } = &mut self.step {
                 *last = command;

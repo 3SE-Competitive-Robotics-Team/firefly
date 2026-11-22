@@ -24,13 +24,11 @@ mod tests;
 
 /// Stateful, frame-to-frame tracking core, separated from queue ownership.
 pub struct FrameToFrameOpticalFlow<P: Pattern<f32, N>, const N: usize> {
-    t_ns: i64,
     frame_counter: usize,
     last_keypoint_id: KeypointId,
     config: VioConfig,
     calib: Calibration<f32>,
-    transforms: Option<Arc<OpticalFlowResult>>,
-    pyramid: Vec<ManagedImagePyr<u16>>,
+    previous: Option<super::TrackedFrame>,
     essential: Matrix4<f32>,
     pattern: PhantomData<P>,
 }
@@ -64,13 +62,11 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> FrameToFrameOpticalFlow<P, N> {
             Matrix4::zeros()
         };
         Ok(Self {
-            t_ns: -1,
             frame_counter: 0,
             last_keypoint_id: 0,
             config,
             calib: calib.cast(),
-            transforms: None,
-            pyramid: Vec::new(),
+            previous: None,
             essential,
             pattern: PhantomData,
         })
@@ -108,25 +104,28 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> FrameToFrameOpticalFlow<P, N> {
             input_images: Some(input),
             ..OpticalFlowResult::default()
         };
-        if self.t_ns >= 0 {
-            let previous = self.transforms.as_ref().unwrap();
+        if let Some(previous) = self.previous.as_ref() {
             for (i, observations) in next.observations.iter_mut().enumerate() {
                 if i == 1 && self.config.optical_flow_rematch_stereo {
                     continue;
                 }
-                *observations =
-                    self.track_points(&self.pyramid[i], &pyramid[i], &previous.observations[i]);
+                *observations = self.track_points(
+                    &previous.pyramid[i],
+                    &pyramid[i],
+                    &previous.flow.observations[i],
+                );
             }
         }
-        self.t_ns = next.t_ns;
-        self.pyramid = pyramid;
         let temporal_end = profile_stage(next.t_ns, "temporal_track", pyramid_end);
-        self.add_points(&mut next)?;
+        self.add_points(&mut next, &pyramid)?;
         let add_end = profile_stage(next.t_ns, "add_points", temporal_end);
         self.filter_points(&mut next);
         profile_stage(next.t_ns, "epipolar_filter", add_end);
         let next = Arc::new(next);
-        self.transforms = Some(Arc::clone(&next));
+        self.previous = (next.t_ns >= 0).then(|| super::TrackedFrame {
+            pyramid,
+            flow: Arc::clone(&next),
+        });
         let publish = self
             .frame_counter
             .is_multiple_of(usize::try_from(self.config.optical_flow_skip_frames).unwrap());
@@ -220,7 +219,11 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> FrameToFrameOpticalFlow<P, N> {
         valid
     }
 
-    fn add_points(&mut self, result: &mut OpticalFlowResult) -> Result<()> {
+    fn add_points(
+        &mut self,
+        result: &mut OpticalFlowResult,
+        pyramid: &[ManagedImagePyr<u16>],
+    ) -> Result<()> {
         let begin = profile_clock_ns();
         let existing: Vec<Vector2<f64>> = result.observations[0]
             .values()
@@ -228,7 +231,7 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> FrameToFrameOpticalFlow<P, N> {
             .collect();
         let mut keypoints = KeypointsData::default();
         detect_keypoints(
-            &self.pyramid[0].lvl(0),
+            &pyramid[0].lvl(0),
             &mut keypoints,
             usize::try_from(self.config.optical_flow_detection_grid_size).unwrap(),
             1,
@@ -253,7 +256,7 @@ impl<P: Pattern<f32, N> + Sync, const N: usize> FrameToFrameOpticalFlow<P, N> {
             } else {
                 &new_points
             };
-            let stereo = self.track_points(&self.pyramid[0], &self.pyramid[1], sources);
+            let stereo = self.track_points(&pyramid[0], &pyramid[1], sources);
             result.observations[1].extend(stereo);
         }
         profile_stage(result.t_ns, "stereo_new", detection_end);

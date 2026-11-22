@@ -23,18 +23,35 @@ pub struct TickReport {
     pub ground_height: Option<f64>,
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GoalProgress {
+    Waiting,
+    Active,
+    Finished,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Attempt {
+    First,
+    Retry,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StopPolicy {
+    Recoverable,
+    Latched,
+    Mandatory,
+}
+
 pub struct ReplanFsm {
     pub(crate) generation: u64,
     pub(crate) manager: PlannerManager,
     state: ExecState,
-    state_calls: usize,
-    have_target: bool,
+    attempt: Attempt,
+    goal: GoalProgress,
     have_new_target: bool,
-    pub(crate) failsafe_enabled: bool,
-    pub(crate) mandatory_stop: bool,
+    stop_policy: StopPolicy,
     escape_emergency: bool,
-    pub(crate) finished: bool,
 }
 
 impl ReplanFsm {
@@ -44,13 +61,11 @@ impl ReplanFsm {
             generation: 0,
             manager,
             state: ExecState::Init,
-            state_calls: 1,
-            have_target: false,
+            attempt: Attempt::First,
+            goal: GoalProgress::Waiting,
             have_new_target: false,
-            failsafe_enabled: true,
-            mandatory_stop: false,
+            stop_policy: StopPolicy::Recoverable,
             escape_emergency: true,
-            finished: false,
         }
     }
     #[must_use]
@@ -66,25 +81,25 @@ impl ReplanFsm {
     }
     #[must_use]
     pub const fn has_target(&self) -> bool {
-        self.have_target
+        matches!(self.goal, GoalProgress::Active)
     }
     #[must_use]
     pub const fn is_finished(&self) -> bool {
-        self.finished
+        matches!(self.goal, GoalProgress::Finished)
     }
     #[must_use]
     pub const fn is_mandatory_stopped(&self) -> bool {
-        self.mandatory_stop
+        matches!(self.stop_policy, StopPolicy::Mandatory)
     }
     #[must_use]
     pub const fn is_emergency(&self) -> bool {
         matches!(self.state, ExecState::EmergencyStop)
     }
     fn change_state(&mut self, state: ExecState) {
-        self.state_calls = if self.state == state {
-            self.state_calls + 1
+        self.attempt = if self.state == state {
+            Attempt::Retry
         } else {
-            1
+            Attempt::First
         };
         self.state = state;
     }
@@ -97,7 +112,7 @@ impl ReplanFsm {
         measured: Option<State>,
         goal: Vector3<f64>,
     ) -> Result<()> {
-        if self.mandatory_stop {
+        if self.is_mandatory_stopped() {
             return Ok(());
         }
         let changed = (goal - self.manager.goal().coords).norm() >= 1e-6;
@@ -105,9 +120,8 @@ impl ReplanFsm {
         if changed {
             self.generation = self.generation.wrapping_add(1);
         }
-        self.have_target = true;
+        self.goal = GoalProgress::Active;
         self.have_new_target |= changed;
-        self.finished = false;
         if changed && matches!(self.state, ExecState::ExecTraj) {
             self.change_state(ExecState::ReplanTraj);
         }
@@ -116,12 +130,11 @@ impl ReplanFsm {
 
     /// A heading-only retarget is a new solve even when the position is unchanged.
     pub fn set_goal_yaw(&mut self, yaw: Option<f64>) -> bool {
-        if self.mandatory_stop || !self.manager.set_goal_yaw(yaw) {
+        if self.is_mandatory_stopped() || !self.manager.set_goal_yaw(yaw) {
             return false;
         }
         self.generation = self.generation.wrapping_add(1);
-        self.have_target = true;
-        self.finished = false;
+        self.goal = GoalProgress::Active;
         self.have_new_target = true;
         if matches!(self.state, ExecState::ExecTraj | ExecState::WaitTarget) {
             self.change_state(ExecState::GenNewTraj);
@@ -133,7 +146,7 @@ impl ReplanFsm {
     pub fn invalidate_localization(&mut self, now: f64, measured: State) -> Result<()> {
         self.generation = self.generation.wrapping_add(1);
         self.manager.invalidate_localization(now, measured)?;
-        if !self.mandatory_stop
+        if !self.is_mandatory_stopped()
             && matches!(
                 self.state,
                 ExecState::ExecTraj | ExecState::ReplanTraj | ExecState::GenNewTraj
@@ -148,12 +161,13 @@ impl ReplanFsm {
         self.change_state(ExecState::EmergencyStop);
     }
     pub fn mandatory_stop(&mut self) {
-        self.mandatory_stop = true;
-        self.failsafe_enabled = false;
+        self.stop_policy = StopPolicy::Mandatory;
         self.request_emergency();
     }
     pub fn trigger_emergency_stop_disable_failsafe(&mut self) {
-        self.failsafe_enabled = false;
+        if !self.is_mandatory_stopped() {
+            self.stop_policy = StopPolicy::Latched;
+        }
         self.request_emergency();
     }
     /// 对照 execFSMCallback：一次回调只执行当前状态的分支。
@@ -177,7 +191,7 @@ impl ReplanFsm {
                 }
             }
             ExecState::WaitTarget => {
-                if self.have_target {
+                if self.has_target() {
                     self.change_state(ExecState::SequentialStart);
                 }
             }
@@ -188,10 +202,12 @@ impl ReplanFsm {
                 if (self.state == ExecState::GenNewTraj || self.manager.sequential_start_ready())
                     && let Some(measured) = measured
                 {
-                    if self
-                        .manager
-                        .plan_from_global_traj(now, measured, 10, self.state_calls != 1)
-                    {
+                    if self.manager.plan_from_global_traj(
+                        now,
+                        measured,
+                        10,
+                        self.attempt == Attempt::Retry,
+                    ) {
                         self.have_new_target = false;
                         report.replanned = true;
                         self.escape_emergency = true;
@@ -221,8 +237,7 @@ impl ReplanFsm {
                 } else if let Some(local) = self.manager.local() {
                     let elapsed = (now - local.start_time).min(local.traj.duration());
                     if elapsed > local.traj.duration() - 1e-2 && self.manager.touch_goal {
-                        self.have_target = false;
-                        self.finished = true;
+                        self.goal = GoalProgress::Finished;
                         report.finished = true;
                         self.change_state(ExecState::WaitTarget);
                     } else if elapsed > self.manager.options.replan_thresh
@@ -238,7 +253,7 @@ impl ReplanFsm {
                         self.manager.emergency_stop(now, measured);
                         report.replanned = true;
                     }
-                } else if self.failsafe_enabled
+                } else if self.stop_policy == StopPolicy::Recoverable
                     && measured.is_some_and(|s| {
                         s.velocity.norm() < self.manager.options.emergency_recover_speed
                     })
@@ -315,7 +330,7 @@ impl ReplanFsm {
             ExecState::SequentialStart | ExecState::GenNewTraj
                 if self.state == ExecState::GenNewTraj || self.manager.sequential_start_ready() =>
             {
-                measured.map(|state| SolveKind::Global(state, self.state_calls != 1))
+                measured.map(|state| SolveKind::Global(state, self.attempt == Attempt::Retry))
             }
             ExecState::ReplanTraj => Some(SolveKind::Local(self.have_new_target)),
             _ => None,
@@ -392,7 +407,7 @@ mod tests {
         assert!(!fsm.exec_tick(0.03, Some(measured())).replanned);
         assert!(!fsm.has_target());
         assert!(fsm.manager().local().is_none());
-        fsm.finished = true;
+        fsm.goal = GoalProgress::Finished;
         fsm.invalidate_localization(0.04, measured()).unwrap();
         assert!(fsm.is_finished());
         fsm.trigger_emergency_stop_disable_failsafe();

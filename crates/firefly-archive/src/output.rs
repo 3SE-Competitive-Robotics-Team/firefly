@@ -145,14 +145,14 @@ fn write_stream(
     dropped: &AtomicU64,
 ) -> io::Result<()> {
     let mut stream = None;
-    let mut retry = Instant::now();
+    let mut retry_at = None;
     let mut total_lost = 0_u64;
     let mut reported = 0_u64;
     let mut next_report = Instant::now();
-    let mut failing = false;
+
     for row in receiver {
         total_lost += dropped.swap(0, Ordering::Relaxed);
-        if Instant::now() < retry {
+        if retry_at.is_some_and(|at| Instant::now() < at) {
             total_lost += 1;
             continue;
         }
@@ -169,7 +169,7 @@ fn write_stream(
         })();
         match written {
             Ok(()) if reported < total_lost && Instant::now() >= next_report => {
-                failing = false;
+                retry_at = None;
                 let detail = format!("text archive dropped {total_lost} records");
                 eprintln!("{source}: {detail}");
                 if let Some(run) = &run {
@@ -180,16 +180,15 @@ fn write_stream(
                 }
                 next_report = Instant::now() + Duration::from_secs(1);
             }
-            Ok(()) => failing = false,
+            Ok(()) => retry_at = None,
             Err(error) => {
-                if !failing {
+                if retry_at.is_none() {
                     eprintln!("text archive {source}: {error}");
                 }
-                failing = true;
                 if error.kind() != io::ErrorKind::StorageFull {
                     stream = None;
                 }
-                retry = Instant::now() + Duration::from_secs(1);
+                retry_at = Some(Instant::now() + Duration::from_secs(1));
                 total_lost += 1;
             }
         }

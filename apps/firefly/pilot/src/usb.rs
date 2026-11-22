@@ -16,6 +16,21 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
 
+enum ImuStream {
+    Waiting { since: Instant },
+    Receiving { last_frame: Instant },
+}
+
+impl ImuStream {
+    fn stalled(&self) -> bool {
+        let since = match self {
+            Self::Waiting { since } => since,
+            Self::Receiving { last_frame } => last_frame,
+        };
+        since.elapsed() > Duration::from_secs(2)
+    }
+}
+
 fn session(
     device: &Path,
     sticks: &Subscriber<SticksMessage>,
@@ -50,11 +65,12 @@ fn session(
     }
     let mut clock = matrix::SampleClock::default();
     let mut samples = Vec::with_capacity(scratch.len() / 20 + 1);
-    let mut last_frame = Instant::now();
+    let mut imu = ImuStream::Waiting {
+        since: Instant::now(),
+    };
     let mut heartbeat = Instant::now();
     let session_start = monotonic_seconds()?;
     let mut last_sent = session_start;
-    let mut received_imu = false;
     let mut next_command = Instant::now();
     let mut commands = 0u64;
     log::info!("Matrix USB session ready");
@@ -71,7 +87,7 @@ fn session(
                 }
             }
             if let Some(value) = command
-                && received_imu
+                && matches!(imu, ImuStream::Receiving { .. })
                 && (0.0..0.1).contains(&(monotonic_seconds()? - value.state_time))
             {
                 port.write_all(&matrix::control(value.channels))?;
@@ -88,10 +104,11 @@ fn session(
                 let age = f64::from(tick.wrapping_sub(sample.tick)) * 1e-6;
                 publish(sample.message(clock.align(sample.tick, arrival - age)?))?;
             }
-            received_imu = true;
-            last_frame = Instant::now();
+            imu = ImuStream::Receiving {
+                last_frame: Instant::now(),
+            };
         }
-        if last_frame.elapsed() > Duration::from_secs(2) {
+        if imu.stalled() {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "Matrix IMU stream stalled",
