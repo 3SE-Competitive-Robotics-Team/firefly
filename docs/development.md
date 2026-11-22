@@ -2,13 +2,13 @@
 
 以下命令从仓库根目录执行。
 
-## Rust 命令行接口
+## Rust 命令行统一使用 usage-rs
 
-仓库内的 Rust 应用、xtask、示例和自定义 benchmark 统一使用工作区的 `usage-rs`。应用在 `[dependencies]` 中声明 `usage-rs.workspace = true`。只有示例或 benchmark 使用时，将依赖放在 `[dev-dependencies]`。
+所有 Rust 应用、`xtask`、示例和自定义基准程序都用 `usage-rs` 解析命令行参数。在所属 crate 的 `[dependencies]` 中写入 `usage-rs.workspace = true`。如果只有示例或基准程序需要解析参数，将这行放在 `[dev-dependencies]`。
 
-用 `#[derive(usage_rs::Cli)]` 声明入口，用 `#[derive(usage_rs::Subcommands)]` 声明子命令。在打开设备、连接 IPC 或读取配置前调用 `Arguments::parse()`。路径用 `PathBuf`，配置文件的默认路径沿用 `firefly_config::paths::config`。
+在参数结构体上派生 `usage_rs::Cli`，有子命令时在枚举上派生 `usage_rs::Subcommands`。在 `main` 中先调用 `Arguments::parse()`，再读取配置、连接 IPC 或打开设备。这样用户运行 `--help` 时就能直接看到用法。文件路径用 `PathBuf`，默认配置路径用 `firefly_config::paths::config` 取得。可参考[最小示例](../crates/firefly-config/examples/minimal.rs)和 [xtask 的子命令](../xtask/src/main.rs)。
 
-评审时运行 `--help` 核对命令和参数，用 `__usage_spec__` 检查导出的接口。用 `parse_from` 测试必填参数、互斥选项和取值个数。参数声明见 [usage-rs 官方指南](https://usage.jdx.dev/rust/args-and-flags)。仓库示例见[单命令示例](../crates/firefly-config/examples/minimal.rs)和[带子命令的 xtask](../xtask/src/main.rs)。
+修改 CLI 后，运行对应命令的 `--help` 核对用法，用 `__usage_spec__` 查看参数声明。测试中调用 `parse_from`，检查必填参数、互斥选项和每个选项接受几个值。声明语法见 [usage-rs 参数指南](https://usage.jdx.dev/rust/args-and-flags)。
 
 ## 构建
 
