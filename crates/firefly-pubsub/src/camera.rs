@@ -3,6 +3,28 @@
 
 use iceoryx2::prelude::*;
 
+pub const CAMERA_RIG_TOPIC: &str = "Firefly/CameraRig";
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, ZeroCopySend)]
+pub struct CameraCalibration {
+    pub resolution: [u32; 2],
+    /// fx, fy, cx, cy in pixel-center coordinates.
+    pub intrinsics: [f64; 4],
+    pub translation: [f64; 3],
+    /// RDF optical frame to body.
+    pub rotation_xyzw: [f64; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, ZeroCopySend)]
+#[type_name("FireflyCameraRig")]
+pub struct CameraRig {
+    pub left: CameraCalibration,
+    pub right: CameraCalibration,
+    pub down: CameraCalibration,
+}
+
 pub const IMAGE_WIDTH: usize = 320;
 pub const IMAGE_HEIGHT: usize = 240;
 pub const IMAGE_SIZE: usize = IMAGE_WIDTH * IMAGE_HEIGHT;

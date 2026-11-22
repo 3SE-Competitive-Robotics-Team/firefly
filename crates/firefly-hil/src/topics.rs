@@ -13,7 +13,7 @@ use firefly_pubsub::{
     log::{LOG_BUFFER_SIZE, LOG_MAX_PUBLISHERS, LogMessage},
     navigation::NavigationMessage,
     node::IpcNode,
-    odom::OdomMessage,
+    odom::{OdomMessage, VIO_PREDICTION_BUFFER_SIZE, VIO_PREDICTION_TOPIC, VioPrediction},
     plant::AirframeMessage,
     publish::Publisher,
     reference::ReferenceMessage,
@@ -42,6 +42,7 @@ struct Sequences {
 
 fn sequence(message: &mut Message) -> Option<&mut u64> {
     match message {
+        Message::VioPrediction(value) => Some(&mut value.sequence),
         Message::FcStatus(value) => Some(&mut value.sequence),
         Message::Scalar(value) => Some(&mut value.sequence),
         Message::Log(value) => Some(&mut value.sequence),
@@ -152,6 +153,7 @@ routes! { RequestsSubscribers, RequestsPublishers;
 
 routes! { TelemetrySubscribers, TelemetryPublishers;
     fc_status: FcStatusMessage => FcStatus (FC_STATUS_TOPIC, FC_STATUS_BUFFER_SIZE, 1),
+    prediction: VioPrediction => VioPrediction (VIO_PREDICTION_TOPIC, VIO_PREDICTION_BUFFER_SIZE, 1),
     control: ControlMessage => Control (firefly_pubsub::control::CONTROL_TOPIC, CONTROL_BUFFER_SIZE, 2),
     odom: OdomMessage => Odometry (firefly_pubsub::odom::ODOM_TOPIC, 2, 2),
     corrected: OdomMessage => CorrectedOdometry (firefly_pubsub::odom::CORRECTED_ODOM_TOPIC, 2, 2),

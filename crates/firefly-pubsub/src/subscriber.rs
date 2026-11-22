@@ -61,6 +61,31 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
         topic: &str,
         options: SubscriberOptions,
     ) -> Result<Self, firefly_error::Error> {
+        Self::open(node, topic, options, None)
+    }
+
+    /// Subscribe to a static snapshot, including the current publisher's last value.
+    /// # Errors
+    /// Returns service or subscriber creation errors.
+    pub fn retained(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
+        Self::open(
+            node,
+            topic,
+            SubscriberOptions {
+                buffer_size: 1,
+                service_max_buffer_size: Some(1),
+                max_publishers: Some(1),
+            },
+            Some(1),
+        )
+    }
+
+    fn open(
+        node: &IpcNode,
+        topic: &str,
+        options: SubscriberOptions,
+        history: Option<usize>,
+    ) -> Result<Self, firefly_error::Error> {
         let SubscriberOptions {
             buffer_size,
             service_max_buffer_size,
@@ -81,6 +106,9 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
             })?)
             .publish_subscribe::<T>()
             .user_header::<TraceContext>();
+        if let Some(size) = history {
+            builder = builder.history_size(size);
+        }
         if let Some(max) =
             service_max_buffer_size.or_else(|| (buffer_size > 1).then_some(buffer_size))
         {

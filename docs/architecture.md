@@ -79,6 +79,8 @@ RootSLAM 的可选稀疏地标地图服务于定位；planner 的局部占据图
 
 ### 图像进入闭环后的处理
 
+Mimir 从业务里程计按测量时间采样，最多以 10 Hz 记录显示轨迹。启用预测诊断时，RootSLAM 以独立的 `Firefly/VioPrediction` 同步发布位姿、速度和可用的姿态诊断，最高 50 Hz。Render 启动时发布一次三台相机的标定，Mimir 把这份静态数据写入每个录制分段。
+
 `planner`、`traj` 和 `landing` 各自在进程内通过 `firefly-odometry` 接收并校验里程计。
 `landing` 按图像时间查询历史样本，`traj` 按样本时间采样轨迹，`planner` 将实测位置和速度转换为规划初态，并为这个起点指定零加速度。
 

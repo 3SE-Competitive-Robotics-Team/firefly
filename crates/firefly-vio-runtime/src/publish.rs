@@ -2,7 +2,7 @@ use firefly_error::Result;
 use firefly_pubsub::{
     attitude::AttitudeMessage,
     navigation::NavigationMessage,
-    odom::OdomMessage,
+    odom::{OdomMessage, VIO_PREDICTION_BUFFER_SIZE, VIO_PREDICTION_TOPIC, VioPrediction},
     publish::Publisher,
     viz::{ScalarMessage, VizMessage, VizPublisher, kind},
 };
@@ -19,7 +19,8 @@ pub struct Publishers {
     navigation: Publisher<NavigationMessage>,
     attitude: Publisher<AttitudeMessage>,
     viz: Option<VizPublisher>,
-    last_viz: f64,
+    prediction: Option<Publisher<VioPrediction>>,
+    prediction_sequence: u64,
     last_diagnostic: f64,
     external_localization: bool,
     imu_latency_entity: &'static str,
@@ -49,7 +50,18 @@ impl Publishers {
             navigation,
             attitude,
             viz,
-            last_viz: -1.0,
+            prediction: options
+                .diagnostics
+                .then(|| {
+                    Publisher::with_topic_buffer_publishers(
+                        node,
+                        VIO_PREDICTION_TOPIC,
+                        Some(VIO_PREDICTION_BUFFER_SIZE),
+                        Some(1),
+                    )
+                })
+                .transpose()?,
+            prediction_sequence: 0,
             last_diagnostic: -1.0,
             external_localization: options.external_localization,
             imu_latency_entity: options.imu_latency_entity,
@@ -75,68 +87,27 @@ impl Publishers {
         if let Some(message) = sample.attitude {
             self.attitude.publish(message)?;
         }
-        if stamp - self.last_diagnostic >= 0.02 {
-            if let Some(viz) = &self.viz {
-                publish_pose_diagnostic(
-                    viz,
-                    stamp,
-                    "vio/prediction/pose_body_odom",
-                    [
-                        sample.odom.position_x,
-                        sample.odom.position_y,
-                        sample.odom.position_z,
-                    ],
-                    [
-                        sample.odom.quat_x,
-                        sample.odom.quat_y,
-                        sample.odom.quat_z,
-                        sample.odom.quat_w,
-                    ],
-                );
-                publish_scalar_diagnostic(
-                    viz,
-                    stamp,
-                    "vio/prediction/velocity_body_odom",
-                    [
-                        sample.odom.velocity_x,
-                        sample.odom.velocity_y,
-                        sample.odom.velocity_z,
-                    ],
-                );
-                if let Some(attitude) = sample.attitude {
-                    publish_scalar_diagnostic(
-                        viz,
-                        stamp,
-                        "vio/prediction/angular_velocity_body",
-                        attitude.angular_velocity,
-                    );
-                    publish_scalar_diagnostic(
-                        viz,
-                        stamp,
-                        "vio/prediction/posterior_age_s",
-                        [attitude.timestamp - attitude.posterior_time],
-                    );
-                }
+        if stamp - self.last_diagnostic >= 0.02
+            && let Some(port) = &self.prediction
+        {
+            let odom = &sample.odom;
+            let message = VioPrediction {
+                timestamp: stamp,
+                sequence: self.prediction_sequence,
+                position: [odom.position_x, odom.position_y, odom.position_z],
+                quat_xyzw: [odom.quat_x, odom.quat_y, odom.quat_z, odom.quat_w],
+                velocity: [odom.velocity_x, odom.velocity_y, odom.velocity_z],
+                has_attitude: u8::from(sample.attitude.is_some()),
+                angular_velocity: sample.attitude.map_or([0.; 3], |a| a.angular_velocity),
+                posterior_age_s: sample
+                    .attitude
+                    .map_or(0., |a| a.timestamp - a.posterior_time),
+            };
+            self.prediction_sequence = self.prediction_sequence.wrapping_add(1);
+            if let Err(error) = port.publish(message) {
+                log::warn!("VIO prediction observation: {error}");
             }
             self.last_diagnostic = stamp;
-        }
-        if stamp - self.last_viz >= 0.1 {
-            let mut message = VizMessage::base(kind::POSE, stamp, "vio/odom");
-            message.xyz = [
-                sample.odom.position_x,
-                sample.odom.position_y,
-                sample.odom.position_z,
-            ];
-            message.quat_xyzw = [
-                sample.odom.quat_x,
-                sample.odom.quat_y,
-                sample.odom.quat_z,
-                sample.odom.quat_w,
-            ];
-            if let Some(viz) = &self.viz {
-                viz.publish(message)?;
-            }
-            self.last_viz = stamp;
         }
         Ok(())
     }

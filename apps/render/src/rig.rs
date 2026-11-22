@@ -232,53 +232,43 @@ pub fn spawn_rig(
     ));
 }
 
-/// 从传感器几何生成左右目可视化标定；相机光学轴采用 RDF。
+/// Fixed simulated camera rig, with RDF optical axes and pixel-center intrinsics.
 #[must_use]
-pub fn camera_calibrations(stamp: f64) -> [firefly_pubsub::viz::VizMessage; 3] {
-    use firefly_pubsub::viz::{VizMessage, kind};
-    let focal =
-        (IMAGE_HEIGHT as f64 / 2.0) / (firefly_base::rig::FOV_Y_DEG.to_radians() / 2.0).tan();
-    let [cx, cy] = firefly_base::rig::principal_point(IMAGE_WIDTH, IMAGE_HEIGHT);
-    let rotation = cam_mount() * Quat::from_rotation_x(std::f32::consts::PI);
-    [
-        ("cameras/left", LEFT_OFFSET),
-        ("cameras/right", RIGHT_OFFSET),
-        ("cameras/down", body_vec(firefly_base::rig::DOWN_IN_BODY)),
-    ]
-    .map(|(name, offset)| {
-        let mut msg = VizMessage::base(kind::CAMERA, stamp, name);
-        msg.xyz = offset.to_array().map(f64::from);
-        msg.quat_xyzw = rotation.to_array().map(f64::from);
-        if name == "cameras/down" {
-            let axes = firefly_base::rig::down_axes_in_body() * firefly_base::rig::CV_FROM_RENDER;
-            let column = |c: usize| {
-                Vec3::new(
-                    axes[(0, c)] as f32,
-                    axes[(1, c)] as f32,
-                    axes[(2, c)] as f32,
-                )
-            };
-            msg.quat_xyzw = Quat::from_mat3(&Mat3::from_cols(column(0), column(1), column(2)))
-                .to_array()
-                .map(f64::from);
+pub fn camera_calibrations() -> firefly_pubsub::camera::CameraRig {
+    use firefly_base::rig;
+    use firefly_pubsub::camera::{CameraCalibration, CameraRig};
+
+    let camera = |width, height, offset, axes| {
+        let focal = height as f64 * 0.5 / (rig::FOV_Y_DEG.to_radians() * 0.5).tan();
+        let [cx, cy] = rig::principal_point(width, height);
+        let rotation = nalgebra::UnitQuaternion::from_matrix(&(axes * rig::CV_FROM_RENDER));
+        CameraCalibration {
+            resolution: [width as u32, height as u32],
+            intrinsics: [focal, focal, cx, cy],
+            translation: offset,
+            rotation_xyzw: rotation.into_inner().coords.into(),
         }
-        msg.scalars = [focal, focal, cx, cy];
-        msg.scalar_count = 4;
-        msg.points[0] = [IMAGE_WIDTH as f64, IMAGE_HEIGHT as f64, 0.];
-        msg.point_count = 1;
-        if name == "cameras/down" {
-            let focal =
-                (DOWN_HEIGHT as f64 / 2.) / (firefly_base::rig::FOV_Y_DEG.to_radians() / 2.).tan();
-            msg.scalars = [
-                focal,
-                focal,
-                (DOWN_WIDTH as f64 - 1.) / 2.,
-                (DOWN_HEIGHT as f64 - 1.) / 2.,
-            ];
-            msg.points[0] = [DOWN_WIDTH as f64, DOWN_HEIGHT as f64, 0.];
-        }
-        msg
-    })
+    };
+    CameraRig {
+        left: camera(
+            IMAGE_WIDTH,
+            IMAGE_HEIGHT,
+            rig::LEFT_IN_BODY,
+            rig::cam_axes_in_body(),
+        ),
+        right: camera(
+            IMAGE_WIDTH,
+            IMAGE_HEIGHT,
+            rig::RIGHT_IN_BODY,
+            rig::cam_axes_in_body(),
+        ),
+        down: camera(
+            DOWN_WIDTH,
+            DOWN_HEIGHT,
+            rig::DOWN_IN_BODY,
+            rig::down_axes_in_body(),
+        ),
+    }
 }
 
 /// rig 相机摆位（纯函数：`poll_pose` 在同系统内调用，保证渲染用新变换出图）。
@@ -307,24 +297,23 @@ mod tests {
     #[test]
     #[allow(clippy::float_cmp)] // IPC 标定的直接字段拷贝要求精确相等。
     fn rerun_calibration_uses_cv_axes_and_shared_intrinsics() {
-        let [left, right, down] = camera_calibrations(1.5);
-        assert_eq!(down.points[0], [352., 288., 0.]);
-        let assert_camera = |message: &firefly_pubsub::viz::VizMessage, offset: Vec3| {
-            assert_eq!(message.xyz, offset.to_array().map(f64::from));
+        let firefly_pubsub::camera::CameraRig { left, right, down } = camera_calibrations();
+        assert_eq!(down.resolution, [352, 288]);
+        let assert_camera = |message: &firefly_pubsub::camera::CameraCalibration,
+                             offset: [f64; 3]| {
+            assert_eq!(message.translation, offset);
             assert_eq!(
-                message.points[0],
-                [IMAGE_WIDTH as f64, IMAGE_HEIGHT as f64, 0.]
+                message.resolution,
+                [IMAGE_WIDTH as u32, IMAGE_HEIGHT as u32]
             );
-            let rotation = Quat::from_array(message.quat_xyzw.map(|v| v as f32));
+            let rotation = Quat::from_array(message.rotation_xyzw.map(|v| v as f32));
             let cv_point = Vec3::new(0.2, 0.3, 2.0);
             let bevy_point = Vec3::new(cv_point.x, -cv_point.y, -cv_point.z);
             assert!((rotation * cv_point - cam_mount() * bevy_point).length() < 1e-5);
-            assert_eq!(message.scalars[2..], [159.5, 119.5]);
+            assert_eq!(message.intrinsics[2..], [159.5, 119.5]);
         };
-        assert_camera(&left, LEFT_OFFSET);
-        assert_camera(&right, RIGHT_OFFSET);
-        assert_eq!(left.entity(), "cameras/left");
-        assert_eq!(right.entity(), "cameras/right");
+        assert_camera(&left, firefly_base::rig::LEFT_IN_BODY);
+        assert_camera(&right, firefly_base::rig::RIGHT_IN_BODY);
     }
 
     #[test]

@@ -13,13 +13,11 @@ pub(crate) const STATUS_ENTITIES: [&str; 6] = [
 ];
 
 const SPATIAL: &[(&str, &[u32])] = &[
-    ("vio/odom", &[kind::POSE]),
     ("vio/map/pose", &[kind::POSE]),
     ("gt/pose", &[kind::POSE]),
     ("corr/odom", &[kind::POSE]),
     ("plan/drone", &[kind::POSE]),
     ("vio/posterior/pose_imu_world", &[kind::POSE]),
-    ("vio/prediction/pose_body_odom", &[kind::POSE]),
     ("vio/traj", &[kind::LINE_STRIP]),
     ("vio/map/traj", &[kind::LINE_STRIP]),
     ("gt/traj", &[kind::LINE_STRIP]),
@@ -38,9 +36,6 @@ const SPATIAL: &[(&str, &[u32])] = &[
         "vio/diagnostics/keypoints/active_left",
         &[kind::KEYPOINTS_2D],
     ),
-    ("cameras/left", &[kind::CAMERA]),
-    ("cameras/right", &[kind::CAMERA]),
-    ("cameras/down", &[kind::CAMERA]),
 ];
 
 /// Parent frame for registered 3D observations; pixel overlays keep camera coordinates.
@@ -65,12 +60,22 @@ pub(crate) fn frame(name: &str) -> Option<&'static str> {
     }
 }
 
+pub(crate) fn viz_scalar_allowed(name: &str) -> bool {
+    !matches!(
+        name,
+        "fc/debug/state"
+            | "vio/prediction/velocity_body_odom"
+            | "vio/prediction/angular_velocity_body"
+            | "vio/prediction/posterior_age_s"
+    )
+}
+
 /// Validate the registered entity and payload before serialization.
 /// # Errors
 /// Unknown path or unsupported payload kind.
 pub fn spatial(name: &str, payload: u32) -> Result<()> {
     let accepted = if payload == kind::SCALARS {
-        fields(name).is_ok()
+        viz_scalar_allowed(name) && fields(name).is_ok()
     } else if payload == kind::CLEAR {
         matches!(name, "gt" | "corr" | "plan" | "vio")
             || SPATIAL.iter().any(|(path, _)| *path == name)
@@ -277,7 +282,7 @@ mod tests {
             if kinds.iter().any(|kind| {
                 matches!(
                     *kind,
-                    kind::POSE | kind::LINE_STRIP | kind::ARROWS | kind::VOXELS | kind::CAMERA
+                    kind::POSE | kind::LINE_STRIP | kind::ARROWS | kind::VOXELS
                 )
             }) {
                 assert!(frame(name).is_some(), "{name}");
@@ -290,7 +295,7 @@ mod tests {
     #[test]
     fn unknown_entities_and_wrong_payloads_fail_closed() {
         assert!(fields("unregistered/value").is_err());
-        assert!(spatial("vio/prediction/pose_body_odom", kind::POSE).is_ok());
+        assert!(spatial("vio/prediction/pose_body_odom", kind::POSE).is_err());
         assert!(spatial("vio/prediction/pose_body_odom", kind::ARROWS).is_err());
         assert!(spatial("unknown", kind::CLEAR).is_err());
         assert!(spatial("plan", kind::CLEAR).is_ok());

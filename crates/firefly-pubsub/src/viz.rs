@@ -24,8 +24,6 @@ pub mod kind {
     /// 图像像素坐标点集：`points = [u, v, track_id]`；`scalars = [宽, 高, 总点数]`。
     /// `point_count` 为实际携带点数，允许小于总数；空点集清除该帧标记。
     pub const KEYPOINTS_2D: u32 = 10;
-    /// 固定相机标定：`scalars=[fx,fy,cx,cy]`，`points[0]=[width,height,0]`，pose 为 body←CV camera。
-    pub const CAMERA: u32 = 12;
 }
 
 /// VIO 左/右相机当前关键点；时间戳为原始相机时钟。

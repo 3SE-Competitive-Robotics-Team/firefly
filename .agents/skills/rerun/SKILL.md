@@ -49,7 +49,7 @@ description: Rerun 基础认知与 .rrd 录制文件的阅读方法。当需要�
 
 ## 7. 示例：读取 odom 与 GT 原始数据（本项目）
 
-记录进程从 sim 的 `Firefly/GroundTruth` 写 `gt/pose` + `gt/traj`（蓝），从 VIO 位姿诊断写 `vio/odom` + `vio/traj`（橙），统一 `sim_time`。
+记录进程从 sim 的 `Firefly/GroundTruth` 写 `gt/pose` + `gt/traj`（蓝），从业务里程计 `Firefly/Odometry` 按测量时间以最高 10 Hz 写 `vio/odom` + `vio/traj`（橙），统一 `sim_time`。
 
 1. 录制：按[运行说明](../../../docs/development.md#运行)启动仿真，按 [Mimir 规则](../../../docs/mimir.md) 找到本次录制。
 2. 看：`cargo xtask view "$run"`；单段数值快查 `uv run rerun rrd print --entity gt/pose --entity vio/odom -vvv "$run/rrd/000001.rrd"`。

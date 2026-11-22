@@ -12,15 +12,19 @@ use firefly_error::{Error, ErrorKind, Result};
 use firefly_pubsub::{
     attitude::{ATTITUDE_TOPIC, AttitudeMessage},
     camera::{
-        CAMERA_DOWN_TOPIC, CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DOWN_HEIGHT, DOWN_SENSOR_ID,
-        DOWN_WIDTH, DownImageMessage, GrayImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH,
+        CAMERA_DOWN_TOPIC, CAMERA_LEFT_TOPIC, CAMERA_RIG_TOPIC, CAMERA_RIGHT_TOPIC, CameraRig,
+        DOWN_HEIGHT, DOWN_SENSOR_ID, DOWN_WIDTH, DownImageMessage, GrayImageMessage, IMAGE_HEIGHT,
+        IMAGE_WIDTH,
     },
     fc_status::{FC_STATUS_BUFFER_SIZE, FC_STATUS_TOPIC, FcStatusMessage},
     landing::{LANDING_TARGET_TOPIC, LandingTargetMessage},
     log::{LOG_BUFFER_SIZE, LOG_MAX_PUBLISHERS, LOG_TOPIC, LogMessage},
     navigation::{NAVIGATION_TOPIC, NavigationMessage},
     node::{IpcNode, create_node},
-    odom::{CORRECTED_ODOM_TOPIC, GROUND_TRUTH_TOPIC, OdomMessage},
+    odom::{
+        CORRECTED_ODOM_TOPIC, GROUND_TRUTH_TOPIC, ODOM_TOPIC, OdomMessage,
+        VIO_PREDICTION_BUFFER_SIZE, VIO_PREDICTION_TOPIC, VioPrediction,
+    },
     subscriber::{Subscriber, SubscriberOptions},
     viz::{
         SCALAR_BUFFER_SIZE, SCALAR_TOPIC, ScalarMessage, VIZ_BUFFER_SIZE, VIZ_MAX_PUBLISHERS,
@@ -37,6 +41,8 @@ use crate::{
 
 enum Event {
     FcStatus(FcStatusMessage),
+    Prediction(VioPrediction),
+    Rig(Box<CameraRig>),
     Scalar(ScalarMessage),
     Geometry(Box<VizMessage>),
     Voxel(Box<VoxelMessage>),
@@ -56,6 +62,7 @@ impl Event {
                 Self::Geometry(_) => size_of::<VizMessage>(),
                 Self::Voxel(_) => size_of::<VoxelMessage>(),
                 Self::Log(_) => size_of::<LogMessage>(),
+                Self::Rig(_) => size_of::<CameraRig>(),
                 Self::Image(_) => size_of::<GrayImageMessage>(),
                 Self::Down(_) => size_of::<DownImageMessage>(),
                 Self::Navigation(_) => size_of::<NavigationMessage>(),
@@ -68,6 +75,8 @@ impl Event {
             Self::FcStatus(msg) => {
                 archive.scalar("fc/debug/state", msg.timestamp, &[f64::from(msg.mode)])
             }
+            Self::Rig(rig) => archive.camera_rig(&rig),
+            Self::Prediction(msg) => archive.prediction(&msg),
             Self::Scalar(msg) => archive.viz_scalar(&msg),
             Self::Geometry(msg) => archive.geometry(&msg),
             Self::Voxel(msg) => archive.voxel(&msg),
@@ -237,6 +246,11 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
     let geometry = buffered::<VizMessage>(&node, VIZ_TOPIC, VIZ_BUFFER_SIZE, VIZ_MAX_PUBLISHERS)?;
     let voxels = buffered::<VoxelMessage>(&node, VOXEL_TOPIC, VOXEL_BUFFER_SIZE, 1)?;
     let logs = buffered::<LogMessage>(&node, LOG_TOPIC, LOG_BUFFER_SIZE, LOG_MAX_PUBLISHERS)?;
+    let rig = Subscriber::<CameraRig>::retained(&node, CAMERA_RIG_TOPIC)?;
+    let prediction =
+        buffered::<VioPrediction>(&node, VIO_PREDICTION_TOPIC, VIO_PREDICTION_BUFFER_SIZE, 1)?;
+    let odom = Subscriber::<OdomMessage>::with_topic(&node, ODOM_TOPIC)?;
+    let mut last_display = None;
     let gt = Subscriber::<OdomMessage>::with_topic(&node, GROUND_TRUTH_TOPIC)?;
     let map = Subscriber::<OdomMessage>::with_topic(&node, CORRECTED_ODOM_TOPIC)?;
     let navigation = Subscriber::<NavigationMessage>::with_topic(&node, NAVIGATION_TOPIC)?;
@@ -267,6 +281,31 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
         // Producers stop first. Repeat bounded sweeps until all diagnostic subscriptions
         // are empty, including buffers belonging to multiple or disconnected publishers.
         let mut received_diagnostics = false;
+        if let Some(sample) = rig.receive()? {
+            received_diagnostics = true;
+            sender.send(Event::Rig(Box::new(*sample)))?;
+        }
+        for _ in 0..VIO_PREDICTION_BUFFER_SIZE {
+            let Some(sample) = prediction.receive()? else {
+                break;
+            };
+            received_diagnostics = true;
+            continuity.observe(
+                sample.header().publisher_id().value(),
+                sample.sequence,
+                options.max_publishers,
+            )?;
+            sender.send(Event::Prediction(*sample))?;
+        }
+        if let Some(sample) = odom.receive()?
+            && sample.is_initialized
+        {
+            let time = schema::timestamp(sample.timestamp)?;
+            if last_display.is_none_or(|last| time < last || time - last >= 100_000_000) {
+                sender.send(Event::Odom("vio/odom", *sample))?;
+                last_display = Some(time);
+            }
+        }
         for _ in 0..FC_STATUS_BUFFER_SIZE {
             let Some(sample) = fc_status.receive()? else {
                 break;

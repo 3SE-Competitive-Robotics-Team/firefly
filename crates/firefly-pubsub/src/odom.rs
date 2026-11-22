@@ -2,6 +2,25 @@ use iceoryx2::prelude::*;
 
 pub const ODOM_TOPIC: &str = "Firefly/Odometry";
 
+pub const VIO_PREDICTION_TOPIC: &str = "Firefly/VioPrediction";
+pub const VIO_PREDICTION_BUFFER_SIZE: usize = 16;
+
+/// One recorder observation on the VIO measurement clock. Attitude fields are
+/// present when `has_attitude` is 1.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, ZeroCopySend)]
+#[type_name("FireflyVioPrediction")]
+pub struct VioPrediction {
+    pub timestamp: f64,
+    pub sequence: u64,
+    pub position: [f64; 3],
+    pub quat_xyzw: [f64; 4],
+    pub velocity: [f64; 3],
+    pub angular_velocity: [f64; 3],
+    pub posterior_age_s: f64,
+    pub has_attitude: u8,
+}
+
 /// 地图系里程计：RootSLAM 默认发布，外部地图模式由 localization 独占发布。
 pub const CORRECTED_ODOM_TOPIC: &str = "Firefly/CorrectedOdometry";
 

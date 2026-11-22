@@ -17,7 +17,7 @@ use firefly_pubsub::imu::ImuMessage;
 use firefly_pubsub::landing::LandingTargetMessage;
 use firefly_pubsub::log::{LogMessage, TAG_MAX, TEXT_MAX};
 use firefly_pubsub::navigation::NavigationMessage;
-use firefly_pubsub::odom::OdomMessage;
+use firefly_pubsub::odom::{OdomMessage, VioPrediction};
 use firefly_pubsub::plant::AirframeMessage;
 use firefly_pubsub::reference::ReferenceMessage;
 use firefly_pubsub::trajectory::PlannerStatusMessage;
@@ -28,7 +28,7 @@ use firefly_pubsub::viz::{
 
 pub const MAGIC: [u8; 4] = *b"FHL1";
 /// 当前协议版本；接收端拒绝版本不一致的帧，主机与板端同步部署。
-pub const VERSION: u16 = 11;
+pub const VERSION: u16 = 12;
 pub const HEADER_LEN: usize = 48;
 /// Maximum serialized JSON request or reply, excluding its 8-byte correlation ID.
 pub const MISSION_BODY_MAX: usize = 8192;
@@ -86,6 +86,7 @@ pub enum Kind {
     FcStatus = 28,
     MissionRequest = 29,
     MissionReply = 30,
+    VioPrediction = 31,
 }
 
 impl Kind {
@@ -128,6 +129,7 @@ impl Kind {
             28 => Self::FcStatus,
             29 => Self::MissionRequest,
             30 => Self::MissionReply,
+            31 => Self::VioPrediction,
             _ => return None,
         })
     }
@@ -157,6 +159,7 @@ impl Kind {
             | Self::Reference
             | Self::PlannerStatus
             | Self::FcStatus
+            | Self::VioPrediction
             | Self::Control
             | Self::Odometry
             | Self::CorrectedOdometry
@@ -177,6 +180,7 @@ impl Kind {
             Self::Reference => "reference",
             Self::PlannerStatus => "planner_status",
             Self::FcStatus => "fc_status",
+            Self::VioPrediction => "vio_prediction",
             Self::MissionRequest => "mission_request",
             Self::MissionReply => "mission_reply",
             Self::Navigation => "navigation",
@@ -337,6 +341,7 @@ pub enum Message {
     Reference(ReferenceMessage),
     PlannerStatus(PlannerStatusMessage),
     FcStatus(FcStatusMessage),
+    VioPrediction(VioPrediction),
     MissionRequest(u64, Vec<u8>),
     MissionReply(u64, Vec<u8>),
     Navigation(NavigationMessage),
@@ -409,6 +414,7 @@ impl Message {
             Self::Reference(_) => Kind::Reference,
             Self::PlannerStatus(_) => Kind::PlannerStatus,
             Self::FcStatus(_) => Kind::FcStatus,
+            Self::VioPrediction(_) => Kind::VioPrediction,
             Self::MissionRequest(..) => Kind::MissionRequest,
             Self::MissionReply(..) => Kind::MissionReply,
             Self::Navigation(_) => Kind::Navigation,
@@ -442,6 +448,7 @@ impl Message {
             Self::Reference(m) => m.timestamp,
             Self::PlannerStatus(m) => m.timestamp,
             Self::FcStatus(m) => m.timestamp,
+            Self::VioPrediction(m) => m.timestamp,
             Self::Navigation(m) => m.odom.timestamp,
             Self::Viz(m) => m.timestamp,
             Self::Voxels(m) => m.timestamp,
@@ -616,6 +623,16 @@ impl Message {
                 }
                 put_u64(&mut out, message.has_alignment);
                 put_f64(&mut out, message.goal_timestamp);
+            }
+            Self::VioPrediction(m) => {
+                put_f64(&mut out, m.timestamp);
+                put_u64(&mut out, m.sequence);
+                put_f64s(&mut out, &m.position);
+                put_f64s(&mut out, &m.quat_xyzw);
+                put_f64s(&mut out, &m.velocity);
+                put_f64s(&mut out, &m.angular_velocity);
+                put_f64(&mut out, m.posterior_age_s);
+                out.push(m.has_attitude);
             }
             Self::FcStatus(message) => {
                 put_f64(&mut out, message.timestamp);
@@ -975,6 +992,16 @@ impl Message {
                 alignment_rotation: [input.f64()?, input.f64()?, input.f64()?, input.f64()?],
                 has_alignment: input.u64()?,
                 goal_timestamp: input.f64()?,
+            }),
+            Kind::VioPrediction => Self::VioPrediction(VioPrediction {
+                timestamp: input.f64()?,
+                sequence: input.u64()?,
+                position: input.f64s()?,
+                quat_xyzw: input.f64s()?,
+                velocity: input.f64s()?,
+                angular_velocity: input.f64s()?,
+                posterior_age_s: input.f64()?,
+                has_attitude: input.u8()?,
             }),
             Kind::FcStatus => Self::FcStatus(FcStatusMessage {
                 timestamp: input.f64()?,
@@ -1438,12 +1465,10 @@ mod visualization_tests {
             viz_kind::LINE_STRIP,
             viz_kind::ARROWS,
             viz_kind::KEYPOINTS_2D,
-            viz_kind::CAMERA,
             viz_kind::BAR_CHART,
             viz_kind::CLEAR,
         ] {
-            let mut message =
-                Box::new(VizMessage::base(kind, 3.5, "vio/prediction/pose_body_odom"));
+            let mut message = Box::new(VizMessage::base(kind, 3.5, "plan/drone"));
             message.sequence = 923;
             message.color = [19, 83, 254];
             message.xyz = [1., 2., 3.];

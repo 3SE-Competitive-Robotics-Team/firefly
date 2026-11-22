@@ -50,6 +50,39 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
         subscriber_max_buffer_size: Option<usize>,
         max_publishers: Option<usize>,
     ) -> Result<Self, firefly_error::Error> {
+        Self::open(
+            node,
+            topic,
+            subscriber_max_buffer_size,
+            max_publishers,
+            None,
+        )
+    }
+
+    /// Publish a static snapshot that late subscribers can request.
+    /// # Errors
+    /// Returns service or publisher creation errors.
+    pub fn retained(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
+        Self::open(node, topic, Some(1), Some(1), Some(1))
+    }
+
+    /// Deliver retained history to newly connected subscribers while the source is idle.
+    /// # Errors
+    /// Returns an error when a connection cannot be established.
+    pub fn update_connections(&self) -> Result<(), firefly_error::Error> {
+        use iceoryx2::port::update_connections::UpdateConnections;
+        self.publisher.update_connections().map_err(|error| {
+            firefly_error::Error::new(firefly_error::ErrorKind::Internal, error.to_string())
+        })
+    }
+
+    fn open(
+        node: &IpcNode,
+        topic: &str,
+        subscriber_max_buffer_size: Option<usize>,
+        max_publishers: Option<usize>,
+        history: Option<usize>,
+    ) -> Result<Self, firefly_error::Error> {
         let mut builder = node
             .service_builder(&topic.try_into().map_err(|e| {
                 firefly_error::Error::new(
@@ -59,6 +92,9 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
             })?)
             .publish_subscribe::<T>()
             .user_header::<TraceContext>();
+        if let Some(size) = history {
+            builder = builder.history_size(size);
+        }
         if let Some(size) = subscriber_max_buffer_size {
             builder = builder.subscriber_max_buffer_size(size);
         }

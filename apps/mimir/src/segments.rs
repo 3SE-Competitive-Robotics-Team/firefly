@@ -188,6 +188,23 @@ impl Segments {
     }
 
     pub fn append(&mut self, chunk: &Chunk, baseline: Option<&str>) -> Result<()> {
+        self.append_chunk(chunk, baseline, true)
+    }
+
+    /// Keep the baseline chunks from one static snapshot in the same segment.
+    pub fn append_snapshot(&mut self, chunks: &[(&str, Chunk)]) -> Result<()> {
+        for (index, (name, chunk)) in chunks.iter().enumerate() {
+            self.append_chunk(chunk, Some(name), index == 0)?;
+        }
+        Ok(())
+    }
+
+    fn append_chunk(
+        &mut self,
+        chunk: &Chunk,
+        baseline: Option<&str>,
+        allow_rotation: bool,
+    ) -> Result<()> {
         let msg = LogMsg::ArrowMsg(
             self.store.clone(),
             chunk
@@ -195,7 +212,7 @@ impl Segments {
                 .map_err(|e| failure("serialize chunk", e))?,
         );
         if self.retry_at.is_none_or(|retry| Instant::now() >= retry) {
-            match self.write(&msg) {
+            match self.write(&msg, allow_rotation) {
                 Ok(()) => self.retry_at = None,
                 Err(error) if error.kind() == io::ErrorKind::StorageFull => {
                     if self.retry_at.is_none() {
@@ -226,11 +243,14 @@ impl Segments {
         Ok(())
     }
 
-    fn write(&mut self, msg: &LogMsg) -> io::Result<()> {
-        if self.active.as_ref().is_some_and(|active| {
-            active.payload_chunks > 0
-                && (active.bytes >= self.run.rrd_target() || active.payload_chunks >= MAX_CHUNKS)
-        }) && let Some(active) = self.active.take()
+    fn write(&mut self, msg: &LogMsg, allow_rotation: bool) -> io::Result<()> {
+        if allow_rotation
+            && self.active.as_ref().is_some_and(|active| {
+                active.payload_chunks > 0
+                    && (active.bytes >= self.run.rrd_target()
+                        || active.payload_chunks >= MAX_CHUNKS)
+            })
+            && let Some(active) = self.active.take()
         {
             active.seal()?;
         }

@@ -16,6 +16,7 @@ from rerun.chunk import RrdReader
 from firefly_workspace.process import ManagedProcess, isolated_run
 from firefly_workspace.recording import recording_chunks, recording_files
 from firefly_ipc.messages import (
+    CAMERA_RIG_TOPIC, CameraRig, VIO_PREDICTION_TOPIC, VIO_PREDICTION_BUFFER_SIZE, VioPrediction,
     FC_STATUS_BUFFER_SIZE, FC_STATUS_TOPIC, FcStatusMessage,
     SCALAR_BUFFER_SIZE, VIZ_MAX_PUBLISHERS, DownImageMessage, GrayImageMessage,
     LandingTargetMessage, LogMessage, NavigationMessage, OdomMessage,
@@ -189,7 +190,7 @@ def test_ipc_recording_retains_every_sample(rate, repeat):
                "seconds": time.monotonic() - start, "statistics": logs, "rrd": str(path)})
 
 
-@pytest.mark.parametrize("fault", ["sequence", "producer_loss", "unknown_entity", "fc_status_gap"])
+@pytest.mark.parametrize("fault", ["sequence", "producer_loss", "unknown_entity", "fc_status_gap", "prediction_gap"])
 def test_incomplete_recording_is_an_error(fault):
     with isolated_run(ROOT):
         process, path = recording()
@@ -199,6 +200,12 @@ def test_incomplete_recording_is_an_error(fault):
                 port = publisher(node, "Firefly/Log", LogMessage, 256, 10)
                 message = LogMessage(dropped_records=1)
                 port.loan_uninit().write_payload(message).send()
+            elif fault == "prediction_gap":
+                port = publisher(node, VIO_PREDICTION_TOPIC, VioPrediction, VIO_PREDICTION_BUFFER_SIZE, 1)
+                for seq in (0, 2):
+                    row = VioPrediction(timestamp=1., sequence=seq)
+                    row.quat_xyzw[3] = 1.
+                    port.loan_uninit().write_payload(row).send()
             elif fault == "fc_status_gap":
                 port = publisher(node, FC_STATUS_TOPIC, FcStatusMessage, FC_STATUS_BUFFER_SIZE, 1)
                 for seq in (0, 2):
@@ -331,7 +338,7 @@ def test_spatial_batches_retain_repeated_and_out_of_order_times():
                 # Delayed measurements and equal timestamps remain separate observations.
                 stamp = (index // 2 if index < 96 else index - 96) / 1024
                 msg = VizMessage(kind=1, timestamp=stamp, sequence=index)
-                name = b"vio/odom"
+                name = b"plan/drone"
                 msg.entity_len, msg.entity[:len(name)] = len(name), name
                 msg.xyz[:], msg.quat_xyzw[:] = (float(index), 0., .25), (0., 0., 0., 1.)
                 geometry.loan_uninit().write_payload(msg).send()
@@ -342,7 +349,7 @@ def test_spatial_batches_retain_repeated_and_out_of_order_times():
             assert process.stop() == 0, list(process.tail)
         _, logs = read(path)
         assert "recording complete" in logs
-        chunks = list(recording_chunks(path, content="/vio/odom"))
+        chunks = list(recording_chunks(path, content="/plan/drone"))
         actual = []
         for chunk in chunks:
             batch = chunk.to_record_batch()
@@ -355,8 +362,30 @@ def test_spatial_batches_retain_repeated_and_out_of_order_times():
 
 def test_spatial_frames_preserve_raw_poses_and_follow_navigation():
     with isolated_run(ROOT):
-        process, path = recording()
         node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
+        service = (node.service_builder(iox2.ServiceName.new(CAMERA_RIG_TOPIC)).publish_subscribe(CameraRig)
+                   .user_header(TraceContext).history_size(1).subscriber_max_buffer_size(1).max_publishers(1)
+                   .open_or_create())
+        rig_port = service.publisher_builder().create()
+        rig = CameraRig()
+        for camera in (rig.left, rig.right, rig.down):
+            camera.resolution[:] = (320, 240)
+            camera.intrinsics[:] = (200., 200., 159.5, 119.5)
+            camera.translation[:] = (.1, .05, 0.)
+            camera.rotation_xyzw[:] = (0., 0., 0., 1.)
+        rig_port.loan_uninit().write_payload(rig).send()
+        process, path = recording()
+        rig_port.update_connections()
+        odom_port = publisher(node, "Firefly/Odometry", OdomMessage)
+        prediction_port = publisher(node, VIO_PREDICTION_TOPIC, VioPrediction, VIO_PREDICTION_BUFFER_SIZE, 1)
+
+        def send_pose(stamp, x, z, seq):
+            odom_port.loan_uninit().write_payload(OdomMessage(
+                timestamp=stamp, position_x=x, position_z=z, quat_w=1., is_initialized=True)).send()
+            pred = VioPrediction(timestamp=stamp, sequence=seq)
+            pred.position[:], pred.quat_xyzw[:] = (x, 0., z), (0., 0., 0., 1.)
+            prediction_port.loan_uninit().write_payload(pred).send()
+
         truth_port = publisher(node, "Firefly/GroundTruth", OdomMessage)
         navigation_port = publisher(node, "Firefly/Navigation", NavigationMessage)
         geometry = publisher(node, "Firefly/Viz", VizMessage, 256, 8)
@@ -383,13 +412,11 @@ def test_spatial_frames_preserve_raw_poses_and_follow_navigation():
             truth_port.loan_uninit().write_payload(truth).send()
             time.sleep(.03)
             navigation_port.loan_uninit().write_payload(navigation).send()
-            for name in ("vio/odom", "vio/prediction/pose_body_odom", "vio/posterior/pose_imu_world", "plan/drone"):
+            send_pose(1., 0., 0., 0)
+            for name in ("vio/posterior/pose_imu_world", "plan/drone"):
                 geometry.loan_uninit().write_payload(spatial(name, 1, 1.)).send()
-            camera = spatial("cameras/left", 12, 1., (.1, .05, 0.))
-            camera.scalar_count, camera.point_count = 4, 1
-            camera.scalars[:] = (200., 200., 159.5, 119.5)
-            camera.points[0][:] = (320., 240., 0.)
-            geometry.loan_uninit().write_payload(camera).send()
+            time.sleep(.03)
+            send_pose(1.02, .25, 0., 1)
             time.sleep(.03)
             # A map correction moves odom, while the startup truth anchor stays fixed.
             navigation.odom.timestamp = 2.
@@ -397,8 +424,7 @@ def test_spatial_frames_preserve_raw_poses_and_follow_navigation():
             navigation.rotation[:] = (0., 0., 2 ** -.5, 2 ** -.5)
             navigation.revision = 1
             navigation_port.loan_uninit().write_payload(navigation).send()
-            geometry.loan_uninit().write_payload(spatial("vio/odom", 1, 2., (1., 0., .026))).send()
-            geometry.loan_uninit().write_payload(spatial("vio/prediction/pose_body_odom", 1, 2., (1., 0., .026))).send()
+            send_pose(2., 1., .026, 2)
             geometry.loan_uninit().write_payload(spatial("plan", 7, 2.)).send()
             line = spatial("plan/local_traj", 2, 2.)
             line.point_count = 2
@@ -423,7 +449,9 @@ def test_spatial_frames_preserve_raw_poses_and_follow_navigation():
         assert component("/frames/odom", "Transform3D:translation") == [[[0., 0., 0.]], [[2., 3., 0.]]]
         assert component("/frames/odom", "Transform3D:quaternion")[1][0] == pytest.approx([0., 0., 2 ** -.5, 2 ** -.5])
         assert component("/vio/odom", "Transform3D:translation") == [[[0., 0., 0.]], [pytest.approx([1., 0., .026])]]
-        assert component("/vio/prediction/pose_body_odom", "Transform3D:translation") == component("/vio/odom", "Transform3D:translation")
+        assert component("/vio/prediction/pose_body_odom", "Transform3D:translation") == [
+            [[0., 0., 0.]], [[.25, 0., 0.]], [pytest.approx([1., 0., .026])],
+        ]
         assert component("/gt/pose", "Transform3D:translation") == [[pytest.approx([-13., 0., .4])]]
         assert component("/gt/pose", "Transform3D:parent_frame") == [["world"]]
         assert component("/vio/odom", "Transform3D:parent_frame") == [["odom"], ["odom"]]
@@ -465,8 +493,18 @@ def test_metric_cards_use_measurement_time_and_preserve_sources():
                        for frame in range(61))
         samples.sort(key=lambda sample: sample[1])
         try:
-            for seq, (name, stamp, values) in enumerate(samples):
-                port.loan_uninit().write_payload(scalar(name, stamp, seq, values)).send()
+            predictions = publisher(node, VIO_PREDICTION_TOPIC, VioPrediction, VIO_PREDICTION_BUFFER_SIZE, 1)
+            seq = 0
+            for name, stamp, values in samples:
+                if name == "vio/prediction/posterior_age_s":
+                    time.sleep(.03)
+                    pred = VioPrediction(timestamp=stamp, has_attitude=1, posterior_age_s=values[0])
+                    pred.quat_xyzw[3] = 1.
+                    predictions.loan_uninit().write_payload(pred).send()
+                    time.sleep(.03)
+                else:
+                    port.loan_uninit().write_payload(scalar(name, stamp, seq, values)).send()
+                    seq += 1
             time.sleep(.1)
         finally:
             assert process.stop() == 0, list(process.tail)

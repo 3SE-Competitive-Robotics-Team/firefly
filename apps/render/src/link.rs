@@ -35,6 +35,7 @@ use crate::rig::{Eye, PoseState, apply_pose_to_eyes};
 pub struct IpcPorts {
     offline: bool,
     pub pose_sub: Subscriber<OdomMessage>,
+    rig: Publisher<firefly_pubsub::camera::CameraRig>,
     /// 进程共享节点，必须在全部端口之后释放。
     pub node: IpcNode,
 }
@@ -52,9 +53,12 @@ pub fn open_ports(offline: bool) -> Result<IpcPorts, firefly_error::Error> {
     };
     let pose_sub = Subscriber::with_topic(&node, &topic(GROUND_TRUTH_TOPIC))?;
     log::info!("IPC 就绪：订阅位姿，offline={offline}");
+    let rig = Publisher::retained(&node, &topic(firefly_pubsub::camera::CAMERA_RIG_TOPIC))?;
+    rig.publish(crate::rig::camera_calibrations())?;
     Ok(IpcPorts {
         offline,
         pose_sub,
+        rig,
         node,
     })
 }
@@ -67,7 +71,6 @@ struct SensorPublishers {
     down_pub: Publisher<DownImageMessage>,
     pair_notify: TopicNotifier,
     viz_pub: VizPublisher,
-    calibration_stamp: std::cell::Cell<f64>,
     _node: IpcNode,
 }
 
@@ -90,7 +93,6 @@ impl SensorPublishers {
             down_pub: Publisher::with_topic(&node, &topic(CAMERA_DOWN_TOPIC))?,
             pair_notify: TopicNotifier::with_topic(&node, &topic(CAMERA_PAIR_TOPIC))?,
             viz_pub: VizPublisher::new(&node)?,
-            calibration_stamp: std::cell::Cell::new(f64::NEG_INFINITY),
             _node: node,
         })
     }
@@ -201,6 +203,9 @@ pub fn poll_pose(
     mut eyes: Query<(&Eye, &mut Transform)>,
     mut cameras: Query<(&Eye, &mut Camera)>,
 ) {
+    if let Err(error) = ports.rig.update_connections() {
+        log::warn!("camera calibration delivery: {error}");
+    }
     let period = config.capture.period_seconds();
     let mut newest: Option<(OdomMessage, TraceContext)> = None;
     loop {
@@ -391,12 +396,6 @@ fn publish(ports: &SensorPublishers, result: &ProcessedCapture) {
         .unwrap_or_else(|| Span::root("render-sensors", SpanContext::random().sampled(false)));
     let _guard = root.set_local_parent();
 
-    if result.stamp - ports.calibration_stamp.get() >= 1.0 {
-        for calibration in crate::rig::camera_calibrations(result.stamp) {
-            let _ = ports.viz_pub.publish(calibration);
-        }
-        ports.calibration_stamp.set(result.stamp);
-    }
     publish_gray(&ports.left_pub, &result.left_gray, result.stamp, 0);
     publish_gray(&ports.right_pub, &result.right_gray, result.stamp, 1);
     if let Some(labels) = &ports.depth_pub {

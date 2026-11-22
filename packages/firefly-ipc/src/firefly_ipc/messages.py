@@ -28,6 +28,41 @@ AIRFRAME_SERVICE_MAX = 4
 #: 飞控指令服务订阅端上限（与 Rust `control.rs: CONTROL_SERVICE_MAX` 同值）。
 CONTROL_SERVICE_MAX = 32
 
+CAMERA_RIG_TOPIC = "Firefly/CameraRig"
+VIO_PREDICTION_TOPIC = "Firefly/VioPrediction"
+VIO_PREDICTION_BUFFER_SIZE = 16
+
+
+class CameraCalibration(ctypes.Structure):
+    _fields_ = [
+        ("resolution", ctypes.c_uint32 * 2),
+        ("intrinsics", ctypes.c_double * 4),
+        ("translation", ctypes.c_double * 3),
+        ("rotation_xyzw", ctypes.c_double * 4),
+    ]
+
+
+class CameraRig(ctypes.Structure):
+    _fields_ = [("left", CameraCalibration), ("right", CameraCalibration), ("down", CameraCalibration)]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflyCameraRig"
+
+
+class VioPrediction(ctypes.Structure):
+    _fields_ = [
+        ("timestamp", ctypes.c_double), ("sequence", ctypes.c_uint64),
+        ("position", ctypes.c_double * 3), ("quat_xyzw", ctypes.c_double * 4),
+        ("velocity", ctypes.c_double * 3), ("angular_velocity", ctypes.c_double * 3),
+        ("posterior_age_s", ctypes.c_double), ("has_attitude", ctypes.c_uint8),
+    ]
+
+    @staticmethod
+    def type_name() -> str:
+        return "FireflyVioPrediction"
+
+
 FC_STATUS_TOPIC = "Firefly/FcStatus"
 FC_STATUS_BUFFER_SIZE = 16
 
@@ -428,7 +463,6 @@ VIZ_KIND_CLEAR = 7
 VIZ_KIND_VOXELS_ADD = 8
 VIZ_KIND_VOXELS_REMOVE = 9
 VIZ_KIND_KEYPOINTS_2D = 10
-VIZ_KIND_CAMERA = 12
 
 #: 定长数组上限（与 Rust `viz.rs` 常量一致）
 ENTITY_MAX = 64

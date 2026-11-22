@@ -78,6 +78,7 @@ pub struct Archive {
     previous_positions: BTreeMap<String, [f32; 3]>,
     point_times: BTreeMap<String, f64>,
     frames: Frames,
+    camera_rig: Option<firefly_pubsub::camera::CameraRig>,
     status: Status,
     pub samples: u64,
     pub chunks: u64,
@@ -101,6 +102,7 @@ impl Archive {
             previous_positions: BTreeMap::new(),
             point_times: BTreeMap::new(),
             frames: Frames::default(),
+            camera_rig: None,
             status: Status::default(),
             samples: 0,
             chunks: 0,
@@ -260,8 +262,8 @@ impl Archive {
     /// Invalid entity, payload width, source or archive write.
     pub fn viz_scalar(&mut self, msg: &ScalarMessage) -> Result<()> {
         let name = schema::entity(&msg.entity, msg.entity_len)?;
-        if name == "fc/debug/state" {
-            return Err(invalid("fc/debug/state is owned by Firefly/FcStatus"));
+        if !schema::viz_scalar_allowed(name) {
+            return Err(invalid(format!("entity owned by business topic: {name}")));
         }
         let values = msg
             .scalars
@@ -478,34 +480,81 @@ impl Archive {
                     .retain(|key, _| key != name && !key.starts_with(&format!("{name}/")));
                 self.write(name, stamp, &rr::Clear::recursive())
             }
-            kind::CAMERA => {
-                if msg.scalar_count != 4
-                    || msg.point_count != 1
-                    || msg.scalars[..2].iter().any(|v| !v.is_finite() || *v <= 0.)
-                {
-                    return Err(invalid("camera calibration"));
-                }
-                self.write(
-                    name,
-                    None,
-                    &rr::Pinhole::new([
-                        [msg.scalars[0] as f32, 0., 0.],
-                        [0., msg.scalars[1] as f32, 0.],
-                        [msg.scalars[2] as f32 + 0.5, msg.scalars[3] as f32 + 0.5, 1.],
-                    ])
-                    .with_resolution([msg.points[0][0] as f32, msg.points[0][1] as f32])
-                    .with_parent_frame(schema::frame(name).ok_or_else(|| invalid("camera frame"))?),
-                )?;
-                self.write(
-                    name,
-                    None,
-                    &transform(msg.xyz, msg.quat_xyzw)?.with_parent_frame(
-                        schema::frame(name).ok_or_else(|| invalid("camera frame"))?,
-                    ),
-                )
-            }
             _ => Err(invalid(format!("unsupported geometry kind {}", msg.kind))),
         }
+    }
+
+    pub(crate) fn camera_rig(&mut self, rig: &firefly_pubsub::camera::CameraRig) -> Result<()> {
+        if let Some(existing) = &self.camera_rig {
+            return if existing == rig {
+                Ok(())
+            } else {
+                Err(invalid("camera rig changed during recording"))
+            };
+        }
+        let mut chunks = Vec::with_capacity(3);
+        for (name, cam) in [
+            ("cameras/left", rig.left),
+            ("cameras/right", rig.right),
+            ("cameras/down", rig.down),
+        ] {
+            let [fx, fy, cx, cy] = cam.intrinsics.map(|v| v as f32);
+            if cam.resolution.contains(&0)
+                || ![fx, fy, cx, cy].iter().all(|v| v.is_finite())
+                || fx <= 0.
+                || fy <= 0.
+            {
+                return Err(invalid("camera calibration"));
+            }
+            let parent = schema::frame(name).ok_or_else(|| invalid("camera frame"))?;
+            let extrinsic =
+                transform(cam.translation, cam.rotation_xyzw)?.with_parent_frame(parent);
+            let pinhole = rr::Pinhole::new([[fx, 0., 0.], [0., fy, 0.], [cx + 0.5, cy + 0.5, 1.]])
+                .with_resolution(cam.resolution.map(|v| v as f32))
+                .with_parent_frame(parent);
+            let components: [&dyn AsComponents; 2] = [&pinhole, &extrinsic];
+            self.register(name)?;
+            let chunk =
+                PendingRow::from_iter(TimePoint::STATIC, components.as_serialized_batches())
+                    .into_chunk(name.into())
+                    .map_err(|e| failure("build camera calibration chunk", e))?;
+            chunks.push((name, chunk));
+        }
+        self.flush_rows()?;
+        self.segments.append_snapshot(&chunks)?;
+        self.chunks += chunks.len() as u64;
+        self.camera_rig = Some(*rig);
+        Ok(())
+    }
+
+    pub(crate) fn prediction(&mut self, msg: &firefly_pubsub::odom::VioPrediction) -> Result<()> {
+        if msg.has_attitude > 1 {
+            return Err(invalid("invalid prediction attitude flag"));
+        }
+        self.pose(
+            "vio/prediction/pose_body_odom",
+            msg.timestamp,
+            msg.position,
+            msg.quat_xyzw,
+        )?;
+        self.scalar(
+            "vio/prediction/velocity_body_odom",
+            msg.timestamp,
+            &msg.velocity,
+        )?;
+        if msg.has_attitude == 1 {
+            self.scalar(
+                "vio/prediction/angular_velocity_body",
+                msg.timestamp,
+                &msg.angular_velocity,
+            )?;
+            self.scalar(
+                "vio/prediction/posterior_age_s",
+                msg.timestamp,
+                &[msg.posterior_age_s],
+            )?;
+        }
+        Ok(())
     }
 
     /// Write a pose in its original coordinate frame.
@@ -776,6 +825,53 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    fn register_test_rig(archive: &mut Archive) {
+        let camera = firefly_pubsub::camera::CameraCalibration {
+            resolution: [320, 240],
+            intrinsics: [200., 200., 159.5, 119.5],
+            translation: [0.; 3],
+            rotation_xyzw: [0., 0., 0., 1.],
+        };
+        let rig = firefly_pubsub::camera::CameraRig {
+            left: camera,
+            right: camera,
+            down: camera,
+        };
+        archive.camera_rig(&rig).unwrap();
+        archive.camera_rig(&rig).unwrap();
+        let mut changed = rig;
+        changed.left.intrinsics[0] += 1.;
+        assert!(archive.camera_rig(&changed).is_err());
+    }
+
+    #[test]
+    fn segment_rotation_keeps_the_three_camera_calibrations_together() {
+        let (root, run) = test_run("keep_free_bytes = 0\nrrd_segment_bytes = 1\n");
+        let directory = run.path().join("rrd");
+        let mut archive = Archive::in_run(Options::default(), run).unwrap();
+        register_test_rig(&mut archive);
+        archive.finish(None).unwrap();
+        let mut camera_segments = 0;
+        for entry in fs::read_dir(directory).unwrap() {
+            let file = fs::File::open(entry.unwrap().path()).unwrap();
+            let cameras: BTreeSet<_> = DecoderApp::decode_lazy(BufReader::new(file))
+                .filter_map(|msg| match msg.unwrap() {
+                    LogMsg::ArrowMsg(store, msg) if store.is_recording() => {
+                        Some(msg.batch.entity_path().to_string())
+                    }
+                    _ => None,
+                })
+                .filter(|path| path.starts_with("/cameras/"))
+                .collect();
+            if !cameras.is_empty() {
+                assert_eq!(cameras.len(), 3);
+                camera_segments += 1;
+            }
+        }
+        assert!(camera_segments > 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn rotation_keeps_standalone_baselines_and_exact_measurements() {
         let (root, run) = test_run("keep_free_bytes = 0\nrrd_segment_bytes = 720000\n");
@@ -805,6 +901,7 @@ mod tests {
         map.voxel_count = 1;
         map.voxels[0] = [2, 3, 5];
         archive.voxel(&map).unwrap();
+        register_test_rig(&mut archive);
         let mut noise = 1_u32;
         for stamp in 0..20 {
             let pixels: Vec<u8> = (0..256 * 256)
@@ -850,15 +947,16 @@ mod tests {
                     let name = msg.batch.entity_path().to_string();
                     let id = msg.batch.chunk_id();
                     match name.as_str() {
-                        "/frames/odom" | "/plan/collision" | "/mimir/config" => {
-                            baselines.insert(name, id);
+                        "/frames/odom" | "/plan/collision" | "/mimir/config" | "/cameras/left"
+                        | "/cameras/right" | "/cameras/down" => {
+                            assert!(baselines.insert(name, id).is_none());
                         }
                         "/cameras/down/image" => assert!(images.insert(id)),
                         _ => (),
                     }
                 }
             }
-            assert_eq!(baselines.len(), 3);
+            assert_eq!(baselines.len(), 6);
             if !baseline_ids.is_empty() {
                 assert_eq!(baseline_ids, baselines);
             }

@@ -56,6 +56,8 @@ This catalog covers all production topic constants; test topics use isolated nam
 | `Firefly/VizVoxels` | planner → mimir | Complete ordered map updates; missing chunks fail |
 | `Firefly/Log` | Rust applications, sim, flight scripts → mimir | Sequence and producer loss count checked |
 | `Firefly/GroundTruth` | sim → render, mimir, tools | Pose and trajectory; independent scoring samples |
+| `Firefly/CameraRig` | Render → Mimir on the host | One retained 288-byte snapshot per Render start. Left, right and down each carry resolution, pixel-center intrinsics and the body←RDF transform. Late subscribers receive the current rig. Offline Render uses `Firefly/Offline/CameraRig` alongside its offline images. Mimir stores one static baseline per camera per segment and rejects changes during a recording. |
+| `Firefly/VioPrediction` | VIO → Mimir, directly or via HIL | With VIO diagnostics enabled, at most 50 samples per measurement second. Each 136-byte sample carries the measured pose and velocity, plus angular velocity and posterior age when attitude is available. One publisher, 16 receive slots, sequence checked. HIL v12 carries 129 payload bytes per sample. |
 | `Firefly/CorrectedOdometry` | VIO/localization → mimir, tools | Map-frame pose and trajectory |
 | `Firefly/VioAttitude` | VIO prediction → FC, mimir | Bias summary; control consumers remain independent |
 | `Firefly/CameraLeft`, `Firefly/CameraRight` | render/camera → VIO, depth (left), mimir | Lossless grayscale samples when images are enabled |
@@ -65,13 +67,13 @@ This catalog covers all production topic constants; test topics use isolated nam
 | `Firefly/CameraPair` | render → image consumers | Pair notification; image topics carry the recording |
 | `Firefly/Depth` | YOLO depth → planner-owned EGO mapper | Latest 320×240 float32 axial metres in the left camera frame, with its capture timestamp. HIL computes on board. Offline dataset labels use a separate namespace. |
 | `Firefly/Imu` | sim/sensors → VIO, FC | Optional replay observations use the registered `vio/input/*` diagnostic gate |
-| `Firefly/Odometry` | VIO → control, planning, flight scripts | Pose diagnostics; flight scripts subscribe to native state |
+| `Firefly/Odometry` | VIO → control, planning, flight scripts and Mimir | Mimir samples initialized local odometry at up to 10 Hz on the measurement clock for `vio/odom` and its display trail |
 | `Firefly/Navigation` | VIO/localization → optional consumers, mimir | Atomic map←odom relation; mimir records changes only and uses bounded startup matching, with poses supplied by their existing observation streams |
 | `Firefly/Reference` | traj → FC, flight scripts | Flight scripts observe reference goal identity |
 | `Firefly/Control` | FC → actuators/sim | Motor evidence and FC summaries |
 | `Firefly/PlantState`, `Firefly/Airframe` | sim/airframe → FC, system consumers | Optional physical-state evidence; VIO uses camera and IMU observations |
 | `Firefly/Command` | daemon, ffctl, HIL relay → FC | Three publisher slots. FC consumes the latest request, the HIL bridge buffers up to eight. Results and rejection reasons in event logs. |
-| `Firefly/FcStatus` | FC → daemon, USB HIL and Mimir; `mode` is the native state code, `can_arm` is the FC's latest pre-arm decision (0/1). | V2 IPC type, 24 bytes at up to 10 Hz, one publisher and 16 slots. Mimir records mode and verifies sequence continuity; the existing `fc/arming/failed` observation retains the reason. HIL v11 carries 18 payload bytes. Update all peers together. |
+| `Firefly/FcStatus` | FC → daemon, USB HIL and Mimir; `mode` is the native state code, `can_arm` is the FC's latest pre-arm decision (0/1). | V2 IPC type, 24 bytes at up to 10 Hz, one publisher and 16 slots. Mimir records mode and verifies sequence continuity; the existing `fc/arming/failed` observation retains the reason. HIL carries 18 payload bytes. Update all peers together. |
 | `Firefly/Goal` | daemon, ffctl, HIL relay → planner | Three publisher slots. The planner consumes the latest request, the HIL bridge buffers up to four. 80-byte waypoint in local odom coordinates. STOP (0) supports optional terminal yaw in radians (CLI degrees). PASS (1) carries the next xyz position. One sample per task command. |
 | `Firefly/MandatoryStop` | external tools → planner | Stop command; outcome in planner state and logs |
 | `Firefly/Trajectory`, `Firefly/PlannerHeartbeat`, `Firefly/TrajectoryControl`, `Firefly/PlannerStatus` | planner → traj (trajectory, heartbeat, control), flight scripts (status) | Atomic xyz/yaw polynomials with shared piece times and a stationary endpoint; heartbeat loss finishes the committed stop; 32-byte status identifies the command and reports scheduled completion plus latched measured passage |
@@ -99,7 +101,7 @@ of subsequent business events. Known loss makes the recording fail.
 | `fc/standby_eskf/*` | Standby health, bias and variance in its documented local gravity frame |
 | `fc/loop/*` | Per-control-tick timing, angular rate and allocation; only `fc::diagnostics=debug` |
 | `vio/posterior/*` | Each VIO posterior pose, world velocity and IMU biases |
-| `vio/prediction/*` | Shared IMU prediction pose, velocity, angular rate and posterior age |
+| `vio/prediction/*` | One VioPrediction sample supplies the pose, velocity and optional attitude diagnostics at its original measurement time |
 | `vio/diagnostics/*` | Per-frame identity counts, stereo ratio, pixel residuals and optimization deltas |
 | `vio/diagnostics/keypoints/{left,right}` | Camera overlays; one recorded point representation |
 | `vio/diagnostics/keypoints/active_left` | Additional associated-landmark overlay, only `vio-diagnostics=debug` |
@@ -132,7 +134,7 @@ of subsequent business events. Known loss makes the recording fail.
 
 Every native mission event contains the OS boot ID (`run`), caller's `mission_id` and nullable `flight_id`. Before measured liftoff, the flight ID is null. An `airborne` event binds the mission to a positive sortie number for that run. A cancelled ground attempt retains a null flight ID. Settings declare only the accepted plan. The home anchor records the VIO session. Acceptance, airborne assignment and phase changes are recorded after the corresponding receipt commits, using the timestamp captured at the transition. Phase names use the same serialized Rust enum as the durable receipt and CLI. The verifier checks the full phase sequence against the recorded plan before computing physical metrics. It groups events by run and mission, checks airborne assignments, disarmed intervals and shared odometry. Legacy Python recordings use their original planned-flight header. Native runs accept missions on demand. Expected mission IDs and SIL/HIL backend are checked independently by the test client.
 
-The daemon announces the boot ID on the first measured odometry after startup. Announcements from restarts of the same daemon carry the same boot ID. A recording can start after the announcement because each mission event carries the identity. An accepted 16-point plan emits 19 records at submission (settings, waypoints, home, arm). The existing Log buffer holds 256 records. USB HIL v11 adds correlated JSON mission requests and replies, with one active host request and an 8192-byte payload limit. The board daemon executes the request through the same local socket as ffctl.
+The daemon announces the boot ID on the first measured odometry after startup. Announcements from restarts of the same daemon carry the same boot ID. A recording can start after the announcement because each mission event carries the identity. An accepted 16-point plan emits 19 records at submission (settings, waypoints, home, arm). The existing Log buffer holds 256 records. USB HIL carries correlated JSON mission requests and replies, with one active host request and an 8192-byte payload limit. The board daemon executes the request through the same local socket as ffctl.
 
 The mission verifier derives takeoff displacement, actual yaw change and heading error from the existing GT poses and FC quaternion observations using a fixed initial frame alignment. The first flight defines the odometry-to-truth transform for every flight in a recording. FC attitude-source and health rows distinguish VIO participation from estimation drift; these checks add no producers or IPC traffic.
 
@@ -177,7 +179,7 @@ so the recorder applies the same frame construction as local simulation. Spatial
 retain their source entity, measurement timestamp, active array values and voxel chunk identity.
 Source production gates and cadences remain unchanged; wire encoding carries active elements only.
 The board uses the existing 256-message spatial and 32-message voxel IPC budgets, with at most
-8 spatial publishers and one voxel publisher. Control is drained before each diagnostic message;
+9 spatial publisher slots and one voxel publisher. Control is drained before each diagnostic message;
 a maximum-size voxel message occupies up to 196,732 payload bytes (13 USB fragments). The existing
 16 KiB fragment, 512 KiB message and bounded USB queue limits apply. Sequence validation covers
 each source publisher; the host assigns one continuous sequence per forwarded topic.

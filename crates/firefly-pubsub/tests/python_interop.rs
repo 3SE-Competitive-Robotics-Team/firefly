@@ -22,8 +22,12 @@ from firefly_ipc.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, 
 from firefly_ipc.messages import GoalMessage, PlannerStatusMessage, LandingTargetMessage, ActivityMessage
 from firefly_ipc.messages import LogMessage, NavigationMessage, VIZ_MAX_PUBLISHERS
 from firefly_ipc.messages import FC_STATUS_BUFFER_SIZE, FcStatusMessage
+from firefly_ipc.messages import CameraCalibration, CameraRig, VioPrediction
 from firefly_ipc.activity import LANDING
 for cls, fields in [
+    (CameraRig, ['right', 'down']),
+    (CameraCalibration, ['intrinsics', 'translation', 'rotation_xyzw']),
+    (VioPrediction, ['sequence', 'position', 'quat_xyzw', 'velocity', 'angular_velocity', 'posterior_age_s', 'has_attitude']),
     (FcStatusMessage, ['timestamp', 'sequence', 'mode', 'can_arm']),
     (ScalarMessage, ['timestamp', 'scalars', 'sequence']),
     (VizMessage, ['timestamp', 'points', 'sequence']),
@@ -53,25 +57,30 @@ fn viz_python_layout_matches_rust_offsets_and_sizes() {
     use firefly_pubsub::navigation::NavigationMessage;
     use firefly_pubsub::trajectory::PlannerStatusMessage;
     use firefly_pubsub::viz::{SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, VoxelMessage};
+    use firefly_pubsub::{
+        camera::{CameraCalibration, CameraRig},
+        odom::VioPrediction,
+    };
     use std::mem::{offset_of, size_of};
 
-    let output = workspace_python()
-        .args(["-c", LAYOUT_SCRIPT])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let actual: Vec<usize> = String::from_utf8(output.stdout)
-        .unwrap()
-        .split_whitespace()
-        .map(|word| word.parse().unwrap())
-        .collect();
     assert_eq!(
-        actual,
+        python_layout(),
         vec![
+            size_of::<CameraRig>(),
+            offset_of!(CameraRig, right),
+            offset_of!(CameraRig, down),
+            size_of::<CameraCalibration>(),
+            offset_of!(CameraCalibration, intrinsics),
+            offset_of!(CameraCalibration, translation),
+            offset_of!(CameraCalibration, rotation_xyzw),
+            size_of::<VioPrediction>(),
+            offset_of!(VioPrediction, sequence),
+            offset_of!(VioPrediction, position),
+            offset_of!(VioPrediction, quat_xyzw),
+            offset_of!(VioPrediction, velocity),
+            offset_of!(VioPrediction, angular_velocity),
+            offset_of!(VioPrediction, posterior_age_s),
+            offset_of!(VioPrediction, has_attitude),
             size_of::<FcStatusMessage>(),
             offset_of!(FcStatusMessage, timestamp),
             offset_of!(FcStatusMessage, sequence),
@@ -128,6 +137,23 @@ fn viz_python_layout_matches_rust_offsets_and_sizes() {
             firefly_pubsub::activity::LANDING as usize,
         ]
     );
+}
+
+fn python_layout() -> Vec<usize> {
+    let output = workspace_python()
+        .args(["-c", LAYOUT_SCRIPT])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .split_whitespace()
+        .map(|word| word.parse().unwrap())
+        .collect()
 }
 
 const PEER: &str = r"
