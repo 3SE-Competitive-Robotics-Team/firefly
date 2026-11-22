@@ -51,8 +51,8 @@
 | 飞控电调板 | BETAFPV Matrix 1S 5IN1 II 免焊版（Solder-free，`01040020_1`），电池直供，四个 JST 1.25 mm 三针电机座。[厂商规格](https://betafpv.com/products/matrix-1s-5in1-ii-brushless-flight-controller) |
 | 机载电源 | 独立升压支路与电调共地，经 Type-C 输出 5 V / 3 A。输入 3.0 V、效率 90% 时约取 5.6 A，电池预算另计电机 |
 | 飞控固件 | [3SE 的 Betaflight fork](../../apps/third-party/betaflight) 以实板原厂版本 `2026.6.0-alpha`（`e92c10887`）和板级配置 `BETAFPVG473_V2`（`6703db5`）为基线。该批次使用 BMI270、内部时钟和 `align_board_yaw = -135`。[厂商 BMI270 固件说明](https://support.betafpv.com/hc/en-us/articles/54655791332761-Firmware-for-Matrix-1S-Brushless-Flight-Controller-5IN1-II) |
-| 主板通信 | 拟用 Matrix 的 UART1 与 Orange Pi 双向传输。TX1 接 Orange Pi 的 RX，RX1 接 TX，两板共地。接线前核对焊盘、逻辑电平和端口占用 |
-| 串口协议 | 自研 [`firefly_serial_protocol`](../../apps/third-party/betaflight/docs/firefly_serial_protocol.md)。第一版通过 UART1 以 460800 baud、8N1 传输 IMU 样本和遥控通道指令。Orange Pi 端接入和实板联调待完成 |
+| 主板通信 | Orange Pi 以 USB Host 连接 Matrix 的 USB 数据口。飞控默认提供 Betaflight 配置，处于上锁状态时可通过专用 MSPv2 请求切换当前 USB 会话 |
+| 串口协议 | Orange Pi 收到 ACK 后使用 [`firefly_serial_protocol`](../../apps/third-party/betaflight/docs/firefly_serial_protocol.md) 接收 IMU、发送控制帧或心跳。断开、重启或上行静默 1 秒后恢复配置模式。Orange Pi 应用接入和实板联调待完成 |
 | IMU | Matrix 随 BMI270 加速度计更新主动上报三轴加速度、三轴角速度和飞控读取快照的时间。任务标称 800 Hz，每帧 20 字节，实际到达率和抖动待板测 |
 | 电机控制 | Orange Pi 下发横滚、俯仰、偏航和油门指令。Betaflight 负责姿态控制、混控和板内 DShot 输出 |
 | 控制权 | ELRS 遥控器保留解锁和人工接管权。通道映射、人工接管和串口断线行为须通过拆桨验证 |

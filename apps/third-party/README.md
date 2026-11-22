@@ -23,3 +23,9 @@ container run --rm --platform linux/amd64 -u "$(id -u):$(id -g)" -v "$PWD:/src" 
 make -C apps/third-party/betaflight/src/test -f ../../../betaflight-build/tests.mk \
     CC=/usr/bin/clang CXX=/usr/bin/clang++ test
 ```
+
+在 Orange Pi 上将已上锁的 Matrix 接到 USB Host，使用 Python 3 读取 IMU。将设备路径换成实际枚举出的 CDC 设备。工具负责握手并每 250 ms 发送心跳，每秒显示一个样本。按 Ctrl-C 退出，等待一秒多后即可使用 Configurator。
+
+```sh
+python3 apps/third-party/betaflight-build/read_imu.py /dev/ttyACM0
+```

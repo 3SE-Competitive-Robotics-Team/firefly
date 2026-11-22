@@ -181,7 +181,7 @@ flowchart TB
     bridge -->|Control| sim
 ```
 
-`hil-gadget` 管理板端 USB 功能的建立和模式切换。传感器、任务请求与回执经主机桥和板端端点传输。HIL 的板端推理走 VIPLite，SIL 的模型走 ONNX。普通 motor 的 PWM 实现和硬件规格中的 Matrix/MSP 方案对应不同的执行接口；后者仍需适配和台架验证。[试验启动入口](../xtask/src/mission.rs) · [普通板端清单](../configs/processes.toml) · [USB 配置](../configs/processes-hil.toml) · [硬件设计规格](hw/spec.md)
+`hil-gadget` 管理板端 USB 功能的建立和模式切换。传感器、任务请求与回执经主机桥和板端端点传输。HIL 的板端推理走 VIPLite，SIL 的模型走 ONNX。普通 motor 使用 PWM。Matrix 的执行接口使用 USB，Orange Pi 通过 MSPv2 建立 Firefly 会话。板端应用接入和台架验证待完成。[试验启动入口](../xtask/src/mission.rs) · [普通板端清单](../configs/processes.toml) · [USB 配置](../configs/processes-hil.toml) · [硬件设计规格](hw/spec.md)
 
 ### 从一次运行到验收结果
 
